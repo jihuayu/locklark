@@ -9,6 +9,7 @@ require (
 	github.com/tobischo/argon2 v0.2.0
 	go.etcd.io/bbolt v1.5.0
 	golang.org/x/crypto v0.58.0
+	golang.org/x/term v0.47.0
 	golang.org/x/text v0.43.0
 )
 

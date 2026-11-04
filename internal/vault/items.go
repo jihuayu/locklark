@@ -13,9 +13,9 @@ import (
 
 // Item is the first native schema: login and document values have one owner.
 type Item struct {
-	ID, Kind, Title, Password, OTP, Filename string
-	Attachment                               []byte
-	AttachmentProtected                      bool
+	ID, Kind, Title, Username, Password, OTP, Filename string
+	Attachment                                         []byte
+	AttachmentProtected                                bool
 }
 
 const itemGroup = "Locklark items v1"
@@ -36,7 +36,7 @@ func xmlText(s string) bool {
 	return true
 }
 func validItems(items []Item, size int) bool {
-	if len(items) == 0 || len(items) > 256 {
+	if items == nil || len(items) > 256 {
 		return false
 	}
 	seen := map[string]bool{}
@@ -45,7 +45,7 @@ func validItems(items []Item, size int) bool {
 			return false
 		}
 		seen[it.ID] = true
-		for _, s := range []string{it.ID, it.Kind, it.Title, it.Password, it.OTP, it.Filename} {
+		for _, s := range []string{it.ID, it.Kind, it.Title, it.Username, it.Password, it.OTP, it.Filename} {
 			if len(s) > MaxPayload-size || !xmlText(s) {
 				return false
 			}
@@ -61,7 +61,7 @@ func validItems(items []Item, size int) bool {
 				return false
 			}
 		case "document":
-			if it.Password != "" || it.OTP != "" || it.Filename == "" || it.Filename == "." || it.Filename == ".." || strings.ContainsAny(it.Filename, "/\\") {
+			if it.Username != "" || it.Password != "" || it.OTP != "" || it.Filename == "" || it.Filename == "." || it.Filename == ".." || strings.ContainsAny(it.Filename, "/\\") {
 				return false
 			}
 		default:
@@ -97,6 +97,9 @@ func writeItems(db *kdbx.Database, metadata []byte, items []Item) error {
 		e.Values = []kdbx.ValueData{slot("Title", it.Title, false), slot("Locklark.ID", it.ID, false), slot("Locklark.Kind", it.Kind, false)}
 		if it.Kind == "login" {
 			e.Values = append(e.Values, slot("Password", it.Password, true), slot("otp", it.OTP, true))
+			if it.Username != "" {
+				e.Values = append(e.Values, slot("UserName", it.Username, true))
+			}
 		} else {
 			k := binaryKey{sha256.Sum256(it.Attachment), it.AttachmentProtected}
 			ref, ok := refs[k]
@@ -132,11 +135,11 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 	if !supportedGroup(g) || len(db.Content.Root.DeletedObjects) != 0 {
 		return nil, nil, ErrSnapshot
 	}
-	if len(g.Groups) != 0 || len(g.Entries) < 2 || len(g.Entries) > 257 || db.Content.InnerHeader == nil {
+	if len(g.Groups) != 0 || len(g.Entries) < 1 || len(g.Entries) > 257 || db.Content.InnerHeader == nil {
 		return nil, nil, ErrSnapshot
 	}
 	var metadata []byte
-	var items []Item
+	items := make([]Item, 0, len(g.Entries)-1)
 	foundMeta := false
 	used := map[int]bool{}
 	for _, e := range g.Entries {
@@ -145,7 +148,7 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 			if _, ok := fields[v.Key]; ok {
 				return nil, nil, ErrSnapshot
 			}
-			protected := v.Key == "Notes" || v.Key == "Password" || v.Key == "otp"
+			protected := v.Key == "UserName" || v.Key == "Notes" || v.Key == "Password" || v.Key == "otp"
 			if v.Value.Protected.Bool != protected {
 				return nil, nil, ErrSnapshot
 			}
@@ -172,7 +175,12 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 		}
 		switch it.Kind {
 		case "login":
-			if len(fields) != 5 || !fields["Password"].Protected.Bool || !fields["otp"].Protected.Bool || len(e.Binaries) != 0 {
+			expected := 5
+			if v, ok := fields["UserName"]; ok {
+				it.Username = v.Content
+				expected++
+			}
+			if len(fields) != expected || !fields["Password"].Protected.Bool || !fields["otp"].Protected.Bool || len(e.Binaries) != 0 {
 				return nil, nil, ErrSnapshot
 			}
 			it.Password, it.OTP = fields["Password"].Content, fields["otp"].Content

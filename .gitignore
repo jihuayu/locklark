@@ -21,4 +21,7 @@ fixture.secret
 .pending-*
 .env
 .env.*
+*.ll
+.locklark-personal-*
+__pycache__/
 

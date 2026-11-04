@@ -1,4 +1,4 @@
-// Command locklark runs the offline, synthetic-only M0 preview.
+// Command locklark runs the personal offline CLI and synthetic gateway preview.
 package main
 
 import (
@@ -12,7 +12,9 @@ import (
 	"github.com/jihuayu/locklark/internal/preview"
 )
 
-const usage = `Locklark · offline preview (synthetic data only)
+const usage = `Locklark · offline personal and synthetic gateway preview
+
+  personal <init|add-login|list|audit> --file PATH  (interactive local-owner terminal)
 
   demo     --out NEW_DIR --session ID --reason TEXT
   inspect  --bundle EPOCH_DIR --device CLIENT_DIR --epoch N
@@ -52,6 +54,8 @@ func run(args []string, out, errOut io.Writer) error {
 	}
 	command := args[0]
 	switch command {
+	case "personal":
+		return runPersonal(args[1:],out)
 	case "mcp-stdio", "bridge-profile", "status-answer", "status-serve":
 		return runBridge(args, out, errOut)
 	case "pull-enroll", "pull-request":

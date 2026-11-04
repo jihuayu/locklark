@@ -36,6 +36,16 @@ jobs:
         run: |
           go build -o "$RUNNER_TEMP/locklark" ./cmd/locklark
           python3 scripts/mcp_acceptance.py "$RUNNER_TEMP/locklark"
+          python3 scripts/personal_acceptance.py "$RUNNER_TEMP/locklark"
       - if: runner.os == 'Windows'
         shell: pwsh
-        run: ./scripts/acceptance.ps1
+        run: |
+          ./scripts/acceptance.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $python = Join-Path $env:RUNNER_TEMP 'locklark-kdbx-peer/Scripts/python.exe'
+          & $python -m pip install 'pywinpty==3.1.2'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $binary = Join-Path $env:RUNNER_TEMP 'personal-cli.exe'
+          go build -o $binary ./cmd/locklark
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $python scripts/personal_acceptance.py $binary

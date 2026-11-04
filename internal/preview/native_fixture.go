@@ -226,7 +226,7 @@ func nativeArchive(l *nativeLayout, items []vault.Item) ([]byte, error) {
 			return nil, errFixture
 		}
 	}
-	if login == nil || doc == nil || doc.Filename == "" || strings.ContainsAny(doc.Filename, "/\\") {
+	if login == nil || doc == nil || login.Username != "" || doc.Filename == "" || strings.ContainsAny(doc.Filename, "/\\") {
 		return nil, errFixture
 	}
 	values := map[string]any{"login.title": login.Title, "login.password": login.Password, "login.ops.otp-demo": login.OTP, "document.title": doc.Title, "document.filename": doc.Filename, "document.size": len(doc.Attachment)}

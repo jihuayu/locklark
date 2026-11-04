@@ -1,4 +1,4 @@
-// Package account is a synthetic-only Locklark 2SKD profile. The device slot
+// Package account implements the local preview's Locklark 2SKD profile. The device slot
 // is never part of a shared snapshot. It is not a 1Password wire format.
 package account
 
