@@ -108,9 +108,15 @@ func unwrap(envelope []byte, id *age.X25519Identity) ([]byte, error) {
 	return k, nil
 }
 
-func Open(s Snapshot, id *age.X25519Identity, authority ed25519.PublicKey, expectedEpoch uint64) ([]byte, error) {
+func VerifySnapshot(s Snapshot, authority ed25519.PublicKey, expectedEpoch uint64) error {
 	if expectedEpoch == 0 || expectedEpoch != s.Epoch || len(authority) != ed25519.PublicKeySize || len(s.Database) > 8<<20 || len(s.Envelope) > 128<<10 || !ed25519.Verify(authority, s.signed(), s.Signature) {
-		return nil, ErrSnapshot
+		return ErrSnapshot
+	}
+	return nil
+}
+func Open(s Snapshot, id *age.X25519Identity, authority ed25519.PublicKey, expectedEpoch uint64) ([]byte, error) {
+	if err := VerifySnapshot(s, authority, expectedEpoch); err != nil {
+		return nil, err
 	}
 	key, err := unwrap(s.Envelope, id)
 	if err != nil {

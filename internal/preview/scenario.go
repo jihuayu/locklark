@@ -5,6 +5,7 @@ package preview
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,6 +38,7 @@ type Event struct {
 	Result   string `json:"result"`
 }
 type payload struct {
+	pin     string
 	Proofs  [][]byte `json:"audit_proofs,omitempty"`
 	Archive []byte   `json:"archive"`
 	Events  []Event  `json:"events"`
@@ -237,8 +239,14 @@ func Create(out, session, reason string) error {
 	return saveWitness(p, "epoch-3.json")
 }
 
-func readPayload(bundle, device string, expected uint64) (payload, error) {
-	var p payload
+type encryptedSnapshot struct {
+	snapshot  vault.Snapshot
+	authority ed25519.PublicKey
+}
+
+func (c encryptedSnapshot) pin() string { return hex.EncodeToString(c.snapshot.Signature) }
+func readEncrypted(bundle, device string, expected uint64) (encryptedSnapshot, error) {
+	var p encryptedSnapshot
 	mdata, err := read(bundle, "manifest.json", 2048)
 	if err != nil {
 		return p, err
@@ -251,6 +259,27 @@ func readPayload(bundle, device string, expected uint64) (payload, error) {
 	if err != nil {
 		return p, err
 	}
+	s := vault.Snapshot{Epoch: m.Epoch, Signature: m.Signature}
+	if s.Database, err = read(bundle, "vault.kdbx", 8<<20); err != nil {
+		return p, err
+	}
+	if s.Envelope, err = read(bundle, "keys.age", 128<<10); err != nil {
+		return p, err
+	}
+	if err = vault.VerifySnapshot(s, pub, expected); err != nil {
+		return p, err
+	}
+	return encryptedSnapshot{s, pub}, nil
+}
+func readPayload(bundle, device string, expected uint64) (payload, error) {
+	c, err := readEncrypted(bundle, device, expected)
+	if err != nil {
+		return payload{}, err
+	}
+	return c.unlock(device)
+}
+func (c encryptedSnapshot) unlock(device string) (payload, error) {
+	var p payload
 	slotData, err := read(device, "device.slot", 4096)
 	if err != nil {
 		return p, err
@@ -273,14 +302,7 @@ func readPayload(bundle, device string, expected uint64) (payload, error) {
 	if err != nil {
 		return p, errors.New("invalid local fixture identity")
 	}
-	s := vault.Snapshot{Epoch: m.Epoch, Signature: m.Signature}
-	if s.Database, err = read(bundle, "vault.kdbx", 8<<20); err != nil {
-		return p, err
-	}
-	if s.Envelope, err = read(bundle, "keys.age", 128<<10); err != nil {
-		return p, err
-	}
-	plain, err := vault.Open(s, id, pub, expected)
+	plain, err := vault.Open(c.snapshot, id, c.authority, c.snapshot.Epoch)
 	if err != nil {
 		return p, fmt.Errorf("cannot unlock this snapshot with the supplied fixture device: %w", err)
 	}
@@ -291,6 +313,7 @@ func readPayload(bundle, device string, expected uint64) (payload, error) {
 	if err = verifyLocalStream(p, device); err != nil {
 		return payload{}, err
 	}
+	p.pin = c.pin()
 	return p, nil
 }
 func Inspect(bundle, device string, expected uint64) (Summary, error) {

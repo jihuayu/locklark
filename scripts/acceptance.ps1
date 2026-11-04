@@ -42,6 +42,32 @@ try {
     $decision = Invoke-Ok @("decide","--device",$b,"--bundle",(Join-Path $out "share/epoch-3"),"--inbox",$spool,"--id",$receipt.id,"--review",$mail.requests[0].review,"--choice","approve","--reason","verified synthetic metadata")
     $history = Invoke-Ok @("decisions","--device",$b,"--session","offline-1")
     if ($decision.result -ne "approved" -or -not $decision.expires -or $history.request.id -ne $receipt.id -or $history.reason -ne "verified synthetic metadata") {throw "Persistent decision mismatch"}
+    $attempt = Join-Path $work "client-attempt"
+    $ticket = Join-Path $attempt "invocation.age"
+    $hostPublic = Join-Path $out "agent/host-sign.pub"
+    $null = Invoke-Ok @("invoke-prepare","--session-key",$sessionKey,"--recipient",$pub,"--host-sign-key",$hostPublic,"--session","offline-1","--id",$receipt.id,"--review",$receipt.review,"--attempt",$attempt)
+    $workers = @(foreach ($index in 1..2) {
+        $start = [Diagnostics.ProcessStartInfo]::new($exe)
+        $start.UseShellExecute = $false
+        $start.CreateNoWindow = $true
+        $start.RedirectStandardOutput = $true
+        $start.RedirectStandardError = $true
+        foreach ($argument in @("invoke-run","--device",$b,"--bundle",(Join-Path $out "share/epoch-3"),"--ticket",$ticket,"--out",(Join-Path $work "worker-$index.age"))) { $start.ArgumentList.Add($argument) }
+        [Diagnostics.Process]::Start($start)
+    })
+    $ok = 0
+    foreach ($worker in $workers) {
+        if (-not $worker.WaitForExit(30000)) { throw "Redemption timed out" }
+        if ($worker.ExitCode -eq 0) { $ok++ }
+        $worker.Dispose()
+    }
+    if ($ok -ne 1) {throw "Expected exactly one successful execution"}
+    $cached = Join-Path $work "recovered.age"
+    $null = Invoke-Ok @("invoke-receipt","--device",$b,"--ticket",$ticket,"--out",$cached)
+    $value = Invoke-Ok @("invoke-result","--attempt",$attempt,"--reply",$cached)
+    if ($value.field -ne "otp-demo" -or $value.kind -ne "totp" -or $value.epoch -ne 3) {throw "Scoped metadata reply mismatch"}
+    $uses = Invoke-Ok @("executions","--device",$b,"--session","offline-1")
+    if ($uses.state -ne "succeeded") {throw "Execution outcome missing"}
     $null = Invoke-Ok @("session-revoke","--device",$b,"--session","offline-1","--reason","runner finished")
     $closed = Invoke-Ok @("inbox","--inbox",$spool,"--device",$b,"--session","offline-1")
     if ($closed.requests[0].sender_status -ne "revoked" -or $closed.requests[0].state -eq "approved") {throw "Session revocation not effective"}

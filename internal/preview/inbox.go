@@ -63,12 +63,34 @@ func setupInbox(out string, secret, id []byte) error {
 	if err = setupDecisions(filepath.Join(out, "clients", "B"), secret, id); err != nil {
 		return err
 	}
+	host, err := read(filepath.Join(out, "clients", "B"), "decision.pub", 32)
+	if err != nil {
+		return err
+	}
+	if err = write(filepath.Join(out, "agent"), "host-sign.pub", host); err != nil {
+		return err
+	}
 	return write(filepath.Join(out, "agent"), "approval.pub", []byte(identity.Recipient().String()))
 }
 func Submit(inbox, recipientFile, session, reason, ref string) (string, error) {
 	return SubmitSigned(inbox, recipientFile, session, reason, ref, "")
 }
 func SubmitSigned(inbox, recipientFile, session, reason, ref, keyfile string) (string, error) {
+	return submit(inbox, recipientFile, session, reason, ref, keyfile, nil)
+}
+
+type Submitted struct {
+	ID     string `json:"id"`
+	Review string `json:"review"`
+	State  string `json:"state"`
+}
+
+func SubmitReceipt(inbox, recipientFile, session, reason, ref, keyfile string) (Submitted, error) {
+	var receipt Submitted
+	_, err := submit(inbox, recipientFile, session, reason, ref, keyfile, &receipt)
+	return receipt, err
+}
+func submit(inbox, recipientFile, session, reason, ref, keyfile string, receipt *Submitted) (string, error) {
 	if !validRequest(session, reason, ref) {
 		return "", errors.New("invalid synthetic request, reason, session or reference")
 	}
@@ -125,6 +147,9 @@ func SubmitSigned(inbox, recipientFile, session, reason, ref, keyfile string) (s
 	}
 	if err = os.Link(tmp.Name(), filepath.Join(inbox, request.ID+".request.age")); err != nil {
 		return "", err
+	}
+	if receipt != nil {
+		*receipt = Submitted{request.ID, requestDigest(request), "pending"}
 	}
 	return request.ID, nil
 }

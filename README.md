@@ -51,7 +51,7 @@ go build -o locklark.exe ./cmd/locklark
 
 第一条返回随机请求 ID 和 `pending`。第二条解密并按 session 查回 ID、引用和原因，不解析或返回字段值。它用独立的收件密钥；每页最多检查 128 封密文，损坏的计入 `unreadable`。响应有 `next` 时，带上 `--after <next>` 继续；新投递从第一页重新查。这是本地文件投递，要求文件系统支持硬链接（Windows NTFS / Linux 本地文件系统）；还没有远程中继或推送。公开收件密钥须由可信客户端单独交付，不能相信待办目录自报的公钥。
 
-拥有收件公钥就能投递匿名请求，但仅凭它不能让请求获批；只有登记过的会话签名有效时，`sender_status` 才会显示 `verified`。签名证明持有该会话的私钥，不能证明它声称的用途属实。控制目录者仍能删除来信。`audit` 读取的则是建库演练时保存在签名快照中的事件，包括一次固定的拒绝。两者都不能证明某人批准过使用密钥。新版演练的事件另有审计签名；下节的本机决定单独入账，一次性兑现尚未实现。
+拥有收件公钥就能投递匿名请求，但仅凭它不能让请求获批；只有登记过的会话签名有效时，`sender_status` 才会显示 `verified`。签名证明持有该会话的私钥，不能证明它声称的用途属实。控制目录者仍能删除来信。`audit` 读取的则是建库演练时保存在签名快照中的事件，包括一次固定的拒绝。两者都不能证明某人批准过使用密钥。新版演练的事件另有审计签名；下节的本机决定和单次执行意图另有事务账本。
 
 ## 登记 Agent 会话
 
@@ -77,9 +77,31 @@ Agent 在自己的私有目录生成一次性会话密钥，把显示的公钥�
 .\locklark.exe decisions --device demo-out/clients/B --session deploy-17
 ```
 
-拒绝用 `--choice deny`，无需打开金库。批准只适用于已核实的第 3 代内置合成目标；匿名、未登记、已撤销或目标未核实的来信只能拒绝。请求自报时间不能在未来或早于 24 小时前，批准有效期最多 2 分钟，且不能超过会话或请求的到期时间。`decisions` 是历史记录，过期不会改写历史；`inbox` 显示当前状态。没有执行接口、可兑凭证或原值交付。
+拒绝用 `--choice deny`，无需打开金库。批准只适用于已核实的第 3 代内置合成目标；匿名、未登记、已撤销或目标未核实的来信只能拒绝。请求自报时间不能在未来或早于 24 小时前，批准有效期最多 2 分钟，且不能超过会话或请求的到期时间。`decisions` 是历史记录，过期不会改写历史；`inbox` 显示当前状态。仅下节固定元数据动作有执行接口，无原值交付。
 
 B 的本地事务库把签名决定与单独审计流的事件一起加密提交；查询会校验两种签名和前序摘要。并发相反决定只提交一个；原来信仍可读、批准目标仍可核验且会话仍有效时，相同决定和理由的重试返回原记录。会话撤销或失效后，即便是相同的批准请求也会失败；已签决定只作为历史用 `decisions` 查询。同一 ID 换了请求内容会显示冲突，删掉中继来信也不能删除本机决定。新功能需要新生成的演练客户端；旧演练仍能查看原待办。这个本机账本与快照里的演练审计是两条独立的流；此版还不能发现整个本机事务库被回滚，有效期依据本机时钟，尚无抗时钟回拨的独立时间基准，不能用于生产授权。
+
+## 一次性兑现（合成字段元数据）
+
+用新生成的演练客户端和新签发的批准。Agent 使用 `request` 回执里的 `id`、`review`，无需读取主人目录。以下文件可在 Agent 与持库端之间离线转交。Agent 必须通过可信配置取得收件公钥 `approval.pub` 和结果签名公钥 `host-sign.pub`。
+
+```powershell
+# Agent：创建新的私有目录；只把 invocation.age 转交给 B。
+.\locklark.exe invoke-prepare --session-key runner.sessionkey --recipient demo-out/agent/approval.pub --host-sign-key demo-out/agent/host-sign.pub --session deploy-17 --id ID --review DIGEST --attempt private-attempt
+
+# 持库端 B：核对会话、批准和已签的密文快照，先入账，再解锁并执行。
+.\locklark.exe invoke-run --device demo-out/clients/B --bundle demo-out/share/epoch-3 --ticket private-attempt/invocation.age --out reply.age
+.\locklark.exe executions --device demo-out/clients/B --session deploy-17
+
+# Agent：用本次尝试独有的私钥解回执并验签。attempt.private 不得随票据分发。
+.\locklark.exe invoke-result --attempt private-attempt --reply reply.age
+```
+
+返回值仅含目标代次、字段 ID 和类型（例如 `{"epoch":3,"field":"otp-demo","kind":"totp"}`）。不会返回 OTP、URI、附件或其他条目的信息。请求票据由登记会话签署，绑定设备、批准摘要、随机 nonce 和结果收件公钥。并发提交同一份批准只有一个执行者；换新票据不能重复使用批准。
+
+意图和占用在一个事务内提交。若进程中断且没有结局记录，`executions` 显示 `unknown`，不自动重试；有明确的动作错误才记为 `failed`。若结果已记录为 `succeeded`、但文件传输失败，持库端可用原票据执行 `invoke-receipt --device ... --ticket ... --out new-reply.age` 取回同一份密文，不再执行；领取要求会话仍有效。结果只能由原尝试接收，已交付的数据不能通过撤销收回。
+
+早期演练缺少执行账本头或批准时的快照指纹，可以查历史但不能直接兑现，须新建演练。当前头与账本同机，不能防止二者同时回滚；尚未提供生产级防重放、可信时钟或远程执行服务。上游 API 副作用、插件注入和机器 token 不属于这个动作。
 
 ## 核对审计与历史回滚
 

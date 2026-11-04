@@ -49,6 +49,7 @@ func Decide(inbox, device, bundle, id, review, choice, reason string) (Decision,
 			return Decision{}, errChanged
 		}
 		h := sha256.Sum256(p.Archive)
+		d.Snapshot = p.pin
 		d.Target = hex.EncodeToString(h[:])
 		d.Result = "approved"
 	}
@@ -176,6 +177,9 @@ func overlayDecisions(rows []Request, device string, id *age.X25519Identity) err
 			}
 			if d, ok := byID[q.ID]; ok {
 				rows[i].State = stateAt(q, d, now)
+				if u, used := h.uses[q.ID]; used && u.Review == q.Review {
+					rows[i].State = "consumed-" + u.State
+				}
 				if rows[i].State == "approved" && rows[i].SenderStatus != "verified" {
 					rows[i].State = "approval-inactive"
 				}

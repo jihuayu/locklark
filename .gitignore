@@ -9,6 +9,7 @@
 *.age
 *.agekey
 *.sessionkey
+attempt.private
 *.slot
 fixture.secret
 **/clients/A/

@@ -25,18 +25,20 @@ var journal = []byte("signed-decisions-v1")
 const decisionDomain = "locklark/local-decision/v1\x00"
 
 type Decision struct {
-	Request Request    `json:"request"`
-	Result  string     `json:"result"`
-	Reason  string     `json:"reason"`
-	At      time.Time  `json:"at"`
-	Expires *time.Time `json:"expires,omitempty"`
-	Target  string     `json:"target_digest,omitempty"`
+	Snapshot string     `json:"snapshot_pin,omitempty"`
+	Request  Request    `json:"request"`
+	Result   string     `json:"result"`
+	Reason   string     `json:"reason"`
+	At       time.Time  `json:"at"`
+	Expires  *time.Time `json:"expires,omitempty"`
+	Target   string     `json:"target_digest,omitempty"`
 }
 type entry struct {
-	Decision  Decision `json:"decision"`
-	Signature []byte   `json:"signature"`
-	Event     Event    `json:"event"`
-	Proof     []byte   `json:"proof"`
+	Use       *useRecord `json:"use,omitempty"`
+	Decision  Decision   `json:"decision"`
+	Signature []byte     `json:"signature"`
+	Event     Event      `json:"event"`
+	Proof     []byte     `json:"proof"`
 }
 
 func requestDigest(q Request) string {
@@ -87,12 +89,16 @@ func mailIdentity(device string) (*age.X25519Identity, error) {
 	return id, nil
 }
 func setupDecisions(dir string, secret, id []byte) error {
+	var initial []byte
 	for _, name := range []string{"decision", "journal"} {
 		pub, priv, err := ed25519.GenerateKey(rand.Reader)
 		if err != nil {
 			return err
 		}
 		defer clear(priv)
+		if name == "journal" {
+			initial = signTip(0, [32]byte{}, priv)
+		}
 		slot, err := account.Wrap(fixturePassword, secret, id, priv)
 		if err != nil {
 			return err
@@ -108,7 +114,16 @@ func setupDecisions(dir string, secret, id []byte) error {
 	if err != nil {
 		return err
 	}
-	err = db.Update(func(tx *bolt.Tx) error { _, err := tx.CreateBucket(journal); return err })
+	err = db.Update(func(tx *bolt.Tx) error {
+		if _, err := tx.CreateBucket(journal); err != nil {
+			return err
+		}
+		b, err := tx.CreateBucket(useAnchor)
+		if err != nil {
+			return err
+		}
+		return b.Put(tipKey, initial)
+	})
 	closeErr := db.Close()
 	if err != nil {
 		return err
@@ -117,18 +132,19 @@ func setupDecisions(dir string, secret, id []byte) error {
 }
 
 type history struct {
+	uses      map[string]useRecord
 	decisions []Decision
 	chain     payload
 }
 
 func loadHistory(b *bolt.Bucket, id *age.X25519Identity, pub, auditPub []byte) (history, error) {
-	var h history
+	h := history{uses: map[string]useRecord{}}
 	seen := map[string]bool{}
 	if b == nil || len(pub) != 32 || len(auditPub) != 32 {
 		return h, errDecision
 	}
 	err := b.ForEach(func(k, v []byte) error {
-		if len(k) != 8 || binary.BigEndian.Uint64(k) != uint64(len(h.decisions)+1) || len(v) > 16384 {
+		if len(k) != 8 || binary.BigEndian.Uint64(k) != uint64(len(h.chain.Events)+1) || len(v) > 16384 {
 			return errDecision
 		}
 		r, err := age.Decrypt(bytes.NewReader(v), id)
@@ -143,12 +159,18 @@ func loadHistory(b *bolt.Bucket, id *age.X25519Identity, pub, auditPub []byte) (
 		if json.Unmarshal(raw, &e) != nil {
 			return errDecision
 		}
-		d := e.Decision
-		if !ed25519.Verify(pub, decisionBytes(d), e.Signature) || !validID(d.Request.ID) || seen[d.Request.ID] || d.Request.Review != requestDigest(d.Request) || e.Event.Action != auditAction(d) || e.Event.Session != d.Request.Session || e.Event.Result != d.Result || e.Event.Reason != d.Reason {
-			return errDecision
+		if e.Use != nil {
+			if err := ingestUse(&h, e, pub); err != nil {
+				return err
+			}
+		} else {
+			d := e.Decision
+			if !ed25519.Verify(pub, decisionBytes(d), e.Signature) || !validID(d.Request.ID) || seen[d.Request.ID] || d.Request.Review != requestDigest(d.Request) || e.Event.Action != auditAction(d) || e.Event.Session != d.Request.Session || e.Event.Result != d.Result || e.Event.Reason != d.Reason {
+				return errDecision
+			}
+			seen[d.Request.ID] = true
+			h.decisions = append(h.decisions, d)
 		}
-		seen[d.Request.ID] = true
-		h.decisions = append(h.decisions, d)
 		h.chain.Events = append(h.chain.Events, e.Event)
 		h.chain.Proofs = append(h.chain.Proofs, e.Proof)
 		return nil
@@ -156,10 +178,13 @@ func loadHistory(b *bolt.Bucket, id *age.X25519Identity, pub, auditPub []byte) (
 	if err != nil {
 		return history{}, err
 	}
-	if len(h.decisions) > 0 {
+	if len(h.chain.Events) > 0 {
 		if _, err = checkChain(h.chain, auditPub, nil); err != nil {
 			return history{}, err
 		}
+	}
+	if err = verifyTip(b.Tx(), h, auditPub); err != nil {
+		return history{}, err
 	}
 	return h, nil
 }
@@ -201,7 +226,7 @@ func withHistory(device string, id *age.X25519Identity, update bool, fn func(*bo
 func appendDecision(b *bolt.Bucket, h history, d Decision, priv, auditKey ed25519.PrivateKey, id *age.X25519Identity) error {
 	h.chain.signedRecord(auditKey, d.Request.Session, "owner", auditAction(d), d.Reason, d.Result)
 	i := len(h.chain.Events) - 1
-	e := entry{d, ed25519.Sign(priv, decisionBytes(d)), h.chain.Events[i], h.chain.Proofs[i]}
+	e := entry{Decision: d, Signature: ed25519.Sign(priv, decisionBytes(d)), Event: h.chain.Events[i], Proof: h.chain.Proofs[i]}
 	var out bytes.Buffer
 	w, err := age.Encrypt(&out, id.Recipient())
 	if err != nil {
@@ -213,5 +238,8 @@ func appendDecision(b *bolt.Bucket, h history, d Decision, priv, auditKey ed2551
 	if err = w.Close(); err != nil {
 		return err
 	}
-	return b.Put(binary.BigEndian.AppendUint64(nil, uint64(i+1)), out.Bytes())
+	if err = b.Put(binary.BigEndian.AppendUint64(nil, uint64(i+1)), out.Bytes()); err != nil {
+		return err
+	}
+	return updateTip(b.Tx(), h.chain, auditKey)
 }
