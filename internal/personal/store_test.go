@@ -98,6 +98,14 @@ func TestSavedLoginDataAndSeparateJournal(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
+	items := readStoredItems(t, path, "fixture", key)
+	if len(items) != 1 || items[0].ID != id || items[0].Username != "user-example" || items[0].Password != "test-value" {
+		t.Fatal("saved login mismatch")
+	}
+}
+func readStoredItems(t *testing.T, path, pw string, key []byte) []vault.Item {
+	t.Helper()
+	var got []vault.Item
 	db, e := existing(path)
 	if e != nil {
 		t.Fatal(e)
@@ -110,7 +118,7 @@ func TestSavedLoginDataAndSeparateJournal(t *testing.T) {
 		if json.Unmarshal(b.Get(slotKey), &slot) != nil || json.Unmarshal(b.Get(snapshotKey), &s) != nil {
 			return invalid
 		}
-		p, e := account.Unwrap("fixture", key, slot)
+		p, e := account.Unwrap(pw, key, slot)
 		if e != nil {
 			return e
 		}
@@ -126,8 +134,9 @@ func TestSavedLoginDataAndSeparateJournal(t *testing.T) {
 		}
 		priv := ed25519.NewKeyFromSeed(i.Signing)
 		defer clear(priv)
-		meta, items, e := vault.OpenItems(s, dev, priv.Public().(ed25519.PublicKey), 2)
-		if e != nil || string(meta) != schema || len(items) != 1 || items[0].ID != id || items[0].Username != "user-example" || items[0].Password != "test-value" {
+		meta, items, e := vault.OpenItems(s, dev, priv.Public().(ed25519.PublicKey), s.Epoch)
+		got = items
+		if e != nil || string(meta) != schema {
 			return invalid
 		}
 		return nil
@@ -135,6 +144,7 @@ func TestSavedLoginDataAndSeparateJournal(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
+	return got
 }
 func TestPublishDoesNotClobberConcurrentCreator(t *testing.T) {
 	dir := t.TempDir()

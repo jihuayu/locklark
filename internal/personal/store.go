@@ -30,8 +30,9 @@ type identity struct {
 func (i *identity) clear() { clear(i.Signing); clear(i.Audit); clear(i.AuditEncryption) }
 
 type Row struct {
-	ID    string `json:"id"`
-	Title string `json:"title"`
+	ID       string `json:"id"`
+	Title    string `json:"title"`
+	Revision string `json:"revision"`
 }
 
 var b32 = base32.StdEncoding.WithPadding(base32.NoPadding)
@@ -139,7 +140,7 @@ func Create(path, pw string, key []byte) error {
 		if e != nil {
 			return e
 		}
-		_, e = appendEvent(b, i, auditTip{}, s, "vault.create", "")
+		_, e = appendEvent(b, i, auditTip{}, s, "vault.create", "", "succeeded", "")
 		return e
 	})
 	if e != nil {
@@ -166,18 +167,20 @@ func existing(path string) (*bolt.DB, error) {
 }
 
 type result struct {
-	rows   []Row
-	events []Event
-	id     string
+	rows     []Row
+	events   []Event
+	id       string
+	revision string
 }
 
-func command(path, pw string, key []byte, action string, add vault.Item) (result, error) {
+func command(path, pw string, key []byte, action string, add vault.Item, edit *Edit) (result, error) {
 	db, e := existing(path)
 	if e != nil {
 		return result{}, e
 	}
 	defer db.Close()
 	var out result
+	var refusal error
 	e = db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucket)
 		if b == nil {
@@ -212,7 +215,8 @@ func command(path, pw string, key []byte, action string, add vault.Item) (result
 		if vault.VerifySnapshot(s, signer.Public().(ed25519.PublicKey), s.Epoch) != nil {
 			return invalid
 		}
-		tip, rows, e := history(b, i, s, action == "audit.list")
+		revisions := make(map[string]string)
+		tip, rows, e := history(b, i, s, action == "audit.list", revisions)
 		if e != nil {
 			return e
 		}
@@ -224,7 +228,47 @@ func command(path, pw string, key []byte, action string, add vault.Item) (result
 				return invalid
 			}
 		}
+		if action != "audit.list" {
+			if len(items) != len(revisions) {
+				return invalid
+			}
+			for _, it := range items {
+				if revisions[it.ID] == "" {
+					return invalid
+				}
+			}
+		}
+		outcome := "succeeded"
 		switch action {
+		case "item.edit.title", "item.edit.username", "item.edit.password":
+			if edit == nil {
+				return invalid
+			}
+			out.id = edit.ID
+			switch rev := revisions[edit.ID]; {
+			case rev == "":
+				outcome, refusal = "not-found", ErrNotFound
+				out.id = "" // never journal an unverified caller-supplied ID
+			case rev != edit.Revision:
+				outcome, refusal = "conflict", ErrConflict
+			default:
+				for i := range items {
+					if items[i].ID == edit.ID {
+						if items[i].Kind != "login" {
+							return invalid
+						}
+						switch edit.Field {
+						case "title":
+							items[i].Title = edit.Value
+						case "username":
+							items[i].Username = edit.Value
+						case "password":
+							items[i].Password = edit.Value
+						}
+						break
+					}
+				}
+			}
 		case "item.add":
 			if strings.TrimSpace(add.Title) == "" || add.Password == "" {
 				return errors.New("a title and password are required")
@@ -238,41 +282,43 @@ func command(path, pw string, key []byte, action string, add vault.Item) (result
 		case "item.list":
 			out.rows = make([]Row, 0, len(items))
 			for _, it := range items {
-				out.rows = append(out.rows, Row{it.ID, it.Title})
+				out.rows = append(out.rows, Row{ID: it.ID, Title: it.Title, Revision: revisions[it.ID]})
 			}
 		case "audit.list":
 		default:
 			return invalid
 		}
-		if action == "item.add" {
+		if action == "item.add" || (editAction(action) && refusal == nil) {
 			s, e = seal(b, i, s.Epoch+1, items)
 			if e != nil {
 				return e
 			}
 		}
-		ev, e := appendEvent(b, i, tip, s, action, out.id)
+		ev, e := appendEvent(b, i, tip, s, action, out.id, outcome, revisions[out.id])
 		if e != nil {
 			return e
 		}
 		if action == "audit.list" {
 			out.events = append(rows, ev)
+		} else if editAction(action) && refusal == nil {
+			out.revision = ev.hash()
 		}
 		return nil
 	})
 	if e != nil {
 		return result{}, e
 	}
-	return out, nil
+	return out, refusal
 }
 func AddLogin(path, pw string, key []byte, title, user, value string) (string, error) {
-	r, e := command(path, pw, key, "item.add", vault.Item{Kind: "login", Title: title, Username: user, Password: value})
+	r, e := command(path, pw, key, "item.add", vault.Item{Kind: "login", Title: title, Username: user, Password: value}, nil)
 	return r.id, e
 }
 func List(path, pw string, key []byte) ([]Row, error) {
-	r, e := command(path, pw, key, "item.list", vault.Item{})
+	r, e := command(path, pw, key, "item.list", vault.Item{}, nil)
 	return r.rows, e
 }
 func Audit(path, pw string, key []byte) ([]Event, error) {
-	r, e := command(path, pw, key, "audit.list", vault.Item{})
+	r, e := command(path, pw, key, "audit.list", vault.Item{}, nil)
 	return r.events, e
 }

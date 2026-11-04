@@ -6,9 +6,9 @@ import time
 from winpty import PTY
 
 
-def invoke(binary, action, path, answers, *, ok, issue):
+def invoke(binary, action, path, answers, *, ok, issue, options, barrier):
     terminal = PTY(2000, 40, backend=0)
-    terminal.spawn(binary, " " + subprocess.list2cmdline(["personal", action, "--file", path]))
+    terminal.spawn(binary, " " + subprocess.list2cmdline(["personal", action, "--file", path, *options]))
     view = ""
     issued = None
     offset = 0
@@ -21,7 +21,7 @@ def invoke(binary, action, path, answers, *, ok, issue):
         except EOFError:
             pass
         time.sleep(0.01)
-    for prompt, value in answers:
+    for index,(prompt, value) in enumerate(answers):
         marker = prompt + ":"
         deadline = time.monotonic() + 15
         while marker not in ansi.sub("", view)[offset:]:
@@ -35,6 +35,8 @@ def invoke(binary, action, path, answers, *, ok, issue):
             if not issue or match is None:
                 raise RuntimeError("Secret Key not displayed at initialization")
             issued = value = match.group()
+        if barrier is not None and index == len(answers)-1:
+            barrier.wait(timeout=15)
         terminal.write(value + "\r")
     deadline = time.monotonic() + 18
     while terminal.isalive():
@@ -42,6 +44,10 @@ def invoke(binary, action, path, answers, *, ok, issue):
         if time.monotonic() > deadline:
             raise RuntimeError(f"{action}: command did not finish")
     pump()
+    if ok is None:
+        ok = terminal.get_exitstatus() == 0
+        if not ok and "login changed;" not in ansi.sub("", view):
+            raise RuntimeError("expected a revision conflict")
     if (terminal.get_exitstatus() == 0) != ok:
         raise RuntimeError(f"{action}: unexpected exit")
     screen = ansi.sub("",view)

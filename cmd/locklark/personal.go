@@ -17,7 +17,7 @@ import (
 	"unicode/utf8"
 )
 
-var personalUsage = errors.New("usage: locklark personal <init|add-login|list|audit> --file PATH")
+var personalUsage = errors.New("usage: locklark personal <init|add-login|list|audit> --file PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password")
 
 // One terminal mode covers the entire interaction; no prompt or inter-field
 // gap is visible while echo is enabled.
@@ -58,12 +58,32 @@ func (c *console) field(prompt string) ([]byte, error) {
 	}
 }
 func runPersonal(args []string, out io.Writer) (retErr error) {
-	if len(args) != 3 || args[1] != "--file" || args[2] == "" {
+	if len(args) < 3 || len(args)%2 != 1 {
 		return personalUsage
 	}
-	action, path := args[0], args[2]
+	action := args[0]
+	opts := map[string]string{}
+	for i := 1; i < len(args); i += 2 {
+		if args[i+1] == "" || opts[args[i]] != "" {
+			return personalUsage
+		}
+		opts[args[i]] = args[i+1]
+	}
+	path := opts["--file"]
+	if path == "" {
+		return personalUsage
+	}
+	var edit personal.Edit
 	switch action {
-	case "init", "add-login", "list", "audit":
+	case "edit-login":
+		edit = personal.Edit{ID: opts["--id"], Revision: opts["--revision"], Field: opts["--field"]}
+		if len(opts) != 4 || !personal.ValidEditTarget(edit.ID, edit.Revision, edit.Field) {
+			return personalUsage
+		}
+	case "init", "add-login", "audit", "list":
+		if len(opts) != 1 {
+			return personalUsage
+		}
 	default:
 		return personalUsage
 	}
@@ -178,6 +198,19 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 				return e
 			}
 			response = map[string]string{"id": id}
+		case "edit-login":
+			prompt := map[string]string{"title": "新标题", "username": "新用户名（可留空）", "password": "新登录密码"}[edit.Field]
+			value, e := consoleField(prompt)
+			if e != nil {
+				return e
+			}
+			defer clear(value)
+			edit.Value = string(value)
+			revision, e := personal.EditLogin(path, string(pw), key, edit)
+			if e != nil {
+				return e
+			}
+			response = map[string]string{"id": edit.ID, "revision": revision}
 		case "list":
 			response, err = personal.List(path, string(pw), key)
 		case "audit":

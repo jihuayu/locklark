@@ -20,6 +20,16 @@ go build -o locklark.exe ./cmd/locklark
 
 `add-login` 在关闭回显的终端中收集标题、用户名和密码，返回稳定条目 ID；`list` 只列 ID 和标题。每次成功操作记录人类会话、动作、条目 ID（如适用）、结果和 UTC 时间；不记录标题、用户名或密码。未解锁的失败不能写入已认证的账本。事件单独加密、逐条签名，添加登录和审计写入同一事务。查询会写审计事件，但不改 KDBX 密文。当前每次操作都校验完整本地日志；整份文件被回滚仍需外部见证才能发现。个人文件包含设备专属加密槽，**不要当作可上传给同步服务器的格式**；此入口尚未接入团队、设备撤销或 Gateway。
 
+要修改登录，先运行 `personal list`，取目标条目的 `id` 和 `revision`。例如，在 PowerShell 中将它们放入 `$itemID` 和 `$revision` 后执行：
+
+```powershell
+.\locklark.exe personal edit-login --file owner.ll --id $itemID --revision $revision --field password
+```
+
+可编辑 `title`、`username` 或 `password`；新值只在不回显的终端提示中输入。用户名可以清空。每次成功编辑返回同一个 ID 和新版本；版本来自该条目最后一次成功操作的签名事件，不是密码摘要。遇到版本冲突时不写条目，应重新列出并核对后再编辑。其他条目的修改以及审计查询不改变此条目的版本。成功、冲突和找不到目标都会写审计；只记录被编辑的字段名及已核验的 ID 和基准版本，不保存调用者提交的未知 ID、版本串或字段值。
+
+新版可在原个人库上直接编辑。写入首条编辑操作审计后，`d294bb4` 的旧 CLI 会拒绝不认识的事件，不能用旧版继续打开该库。升级验收：`python scripts/personal_acceptance.py <新版程序> <旧版程序>`。
+
 个人库的跨进程验收可用 `python scripts/personal_acceptance.py <本机编译的 locklark>` 复跑。脚本只用临时目录和随机测试凭据；Windows 测试环境另需 `pywinpty==3.1.2`，产品本身无需 Python。
 
 ## 五分钟复跑

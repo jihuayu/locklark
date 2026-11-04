@@ -15,12 +15,12 @@ else:
 import time
 
 
-def invoke(binary, action, path, answers, *, ok=True, issue=False, paste=False):
+def invoke(binary, action, path, answers, *, ok=True, issue=False, paste=False, options=(), barrier=None):
     if os.name == "nt":
-        return windows_invoke(binary, action, path, answers, ok=ok, issue=issue)
+        return windows_invoke(binary, action, path, answers, ok=ok, issue=issue, options=options, barrier=barrier)
     master, slave = pty.openpty()
     try:
-        proc = subprocess.Popen([binary, "personal", action, "--file", path],
+        proc = subprocess.Popen([binary, "personal", action, "--file", path, *options],
                                 stdin=slave, stdout=subprocess.PIPE, stderr=slave, start_new_session=True)
         transcript = bytearray()
         offset = 0
@@ -43,6 +43,8 @@ def invoke(binary, action, path, answers, *, ok=True, issue=False, paste=False):
                     value = issued
                 if termios.tcgetattr(slave)[3] & termios.ECHO:
                     raise RuntimeError("prompt appeared before echo was disabled")
+                if barrier is not None and index == len(answers)-1:
+                    barrier.wait(timeout=15)
                 if paste and index == 0:
                     os.write(master, ("\n".join(x for _, x in answers) + "\n").encode())
                 elif not paste:
@@ -52,6 +54,10 @@ def invoke(binary, action, path, answers, *, ok=True, issue=False, paste=False):
                 transcript.extend(os.read(master, 4096))
             if not termios.tcgetattr(slave)[3] & termios.ECHO:
                 raise RuntimeError("terminal echo was not restored on exit")
+            if ok is None:
+                ok = proc.returncode == 0
+                if not ok and b"login changed;" not in transcript:
+                    raise RuntimeError("expected a revision conflict")
             if (proc.returncode == 0) != ok or (not ok and data):
                 raise RuntimeError(f"{action}: unexpected exit or output")
             if issued and issued.encode() in data:
@@ -69,29 +75,43 @@ def invoke(binary, action, path, answers, *, ok=True, issue=False, paste=False):
         os.close(slave)
 
 
-def check(binary):
+def check(binary, legacy=None):
+    creator = legacy or binary
     with tempfile.TemporaryDirectory() as tmp:
         path = str(pathlib.Path(tmp) / "owner.ll")
         pw = "synthetic-master-" + os.urandom(8).hex()
         login = "synthetic-login-" + os.urandom(8).hex()
-        result, key = invoke(binary, "init", path, [("主密码", pw), ("再次输入主密码", pw),
+        result, key = invoke(creator, "init", path, [("主密码", pw), ("再次输入主密码", pw),
                              ("重新输入刚保存的 Secret Key", None)], issue=True)
         assert result["status"] == "created"
         if os.name != "nt":
             invoke(binary, "list", path, [("主密码", "\x03")], ok=False)
         factors = [("主密码", pw), ("Secret Key", key)]
         assert invoke(binary, "list", path, factors)[0] == []
-        added, _ = invoke(binary, "add-login", path, factors + [
+        added, _ = invoke(creator, "add-login", path, factors + [
             ("登录标题", "开发账号"), ("用户名（可留空）", "local-fixture-user"), ("登录密码", login)], paste=os.name != "nt")
         for creds in ([("主密码", pw + "x"), factors[1]],
                       [factors[0], ("Secret Key", "LL1-" + "A" * 26)]):
             invoke(binary, "list", path, creds, ok=False)
         rows, _ = invoke(binary, "list", path, factors)
-        assert rows == [{"id": added["id"], "title": "开发账号"}]
+        assert len(rows)==1 and rows[0]["id"]==added["id"] and rows[0]["title"]=="开发账号"
+        options = ("--id",added["id"],"--revision", rows[0]["revision"],"--field","password")
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+        barrier=Barrier(2)
+        def rotate(value):
+            return invoke(binary,"edit-login",path,factors+[("新登录密码",value)],options=options,ok=None,barrier=barrier)[0]
+        with ThreadPoolExecutor(2) as pool:
+            attempts=list(pool.map(rotate,["rotated-private-fixture","stale-private-fixture"]))
+        winners=[result for result in attempts if result is not None]
+        assert len(winners)==1 and winners[0]["id"]==added["id"] and winners[0]["revision"]!=rows[0]["revision"]
+        if legacy:
+            invoke(legacy, "list", path, factors, ok=False)
         events, _ = invoke(binary, "audit", path, factors)
-        assert [e["action"] for e in events] == ["vault.create","item.list","item.add","item.list","audit.list"]
+        assert [e["action"] for e in events] == ["vault.create","item.list","item.add","item.list","item.edit.password","item.edit.password","audit.list"]
+        assert [e["result"] for e in events[-3:-1]]==["succeeded","conflict"]
         assert events[2]["item_id"] == added["id"]
-        assert all(s not in json.dumps(events) for s in (key, pw, login, "local-fixture-user"))
+        assert all(s not in json.dumps(events) for s in (key, pw, login, "local-fixture-user","rotated-private-fixture","stale-private-fixture"))
         denied = subprocess.run([binary, "personal", "list", "--file", path], input=b"",
                                 capture_output=True, timeout=10)
         assert denied.returncode and not denied.stdout
@@ -99,4 +119,4 @@ def check(binary):
 
 
 if __name__ == "__main__":
-    check(str(pathlib.Path(sys.argv[1]).resolve(strict=True)))
+    check(*(str(pathlib.Path(p).resolve(strict=True)) for p in sys.argv[1:]))

@@ -19,15 +19,16 @@ import (
 var invalid = errors.New("invalid personal vault, unlock factors or journal")
 
 type Event struct {
-	Sequence  uint64 `json:"sequence"`
-	UTC       string `json:"utc"`
-	Session   string `json:"session"`
-	Actor     string `json:"actor"`
-	Action    string `json:"action"`
-	Item      string `json:"item_id,omitempty"`
-	Result    string `json:"result"`
-	Previous  string `json:"previous"`
-	Signature []byte `json:"signature"`
+	BaseRevision string `json:"base_revision,omitempty"`
+	Sequence     uint64 `json:"sequence"`
+	UTC          string `json:"utc"`
+	Session      string `json:"session"`
+	Actor        string `json:"actor"`
+	Action       string `json:"action"`
+	Item         string `json:"item_id,omitempty"`
+	Result       string `json:"result"`
+	Previous     string `json:"previous"`
+	Signature    []byte `json:"signature"`
 }
 type auditTip struct {
 	Count, Epoch   uint64
@@ -68,10 +69,20 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 	if _, err := time.Parse(time.RFC3339Nano, e.UTC); err != nil {
 		return invalid
 	}
-	if e.Sequence != n || e.Previous != prev || !idOK(e.Session) || e.Actor != "local-owner" || e.Result != "succeeded" || !ed25519.Verify(pub, e.proof(), e.Signature) {
+	if e.Sequence != n || e.Previous != prev || !idOK(e.Session) || e.Actor != "local-owner" || !ed25519.Verify(pub, e.proof(), e.Signature) {
+		return invalid
+	}
+	if !editAction(e.Action) && (e.Result != "succeeded" || e.BaseRevision != "") {
 		return invalid
 	}
 	switch e.Action {
+	case "item.edit.title", "item.edit.username", "item.edit.password":
+		if e.Result == "not-found" && e.Item == "" && e.BaseRevision == "" && n > 1 {
+			break
+		}
+		if n <= 1 || !idOK(e.Item) || len(e.BaseRevision) != 64 || (e.Result != "succeeded" && e.Result != "conflict") {
+			return invalid
+		}
 	case "vault.create":
 		if n != 1 || e.Item != "" {
 			return invalid
@@ -112,7 +123,7 @@ func readSealed(a cipher.AEAD, label, raw []byte, v any) error {
 	return nil
 }
 func eventLabel(seq []byte) []byte { return append([]byte("locklark/personal/event/v1\x00"), seq...) }
-func history(b *bolt.Bucket, i identity, s vault.Snapshot, want bool) (auditTip, []Event, error) {
+func history(b *bolt.Bucket, i identity, s vault.Snapshot, want bool, revisions map[string]string) (auditTip, []Event, error) {
 	var tip auditTip
 	var rows []Event
 	a, e := auditCipher(i)
@@ -141,6 +152,20 @@ func history(b *bolt.Bucket, i identity, s vault.Snapshot, want bool) (auditTip,
 			return invalid
 		}
 		prev = ev.hash()
+		if ev.Action == "item.add" {
+			if revisions[ev.Item] != "" {
+				return invalid
+			}
+			revisions[ev.Item] = prev
+		} else if editAction(ev.Action) {
+			found := revisions[ev.Item] != ""
+			if (ev.Result == "not-found") == found || ev.BaseRevision != revisions[ev.Item] {
+				return invalid
+			}
+			if ev.Result == "succeeded" {
+				revisions[ev.Item] = prev
+			}
+		}
 		if want {
 			rows = append(rows, ev)
 		}
@@ -151,13 +176,13 @@ func history(b *bolt.Bucket, i identity, s vault.Snapshot, want bool) (auditTip,
 	}
 	return tip, rows, nil
 }
-func appendEvent(b *bolt.Bucket, i identity, tip auditTip, s vault.Snapshot, action, item string) (Event, error) {
+func appendEvent(b *bolt.Bucket, i identity, tip auditTip, s vault.Snapshot, action, item, outcome, base string) (Event, error) {
 	var ev Event
 	session, e := randomID()
 	if e != nil {
 		return ev, e
 	}
-	ev = Event{Sequence: tip.Count + 1, UTC: time.Now().UTC().Format(time.RFC3339Nano), Session: session, Actor: "local-owner", Action: action, Item: item, Result: "succeeded", Previous: tip.Last}
+	ev = Event{Sequence: tip.Count + 1, UTC: time.Now().UTC().Format(time.RFC3339Nano), Session: session, Actor: "local-owner", Action: action, Item: item, BaseRevision: base, Result: outcome, Previous: tip.Last}
 	priv := ed25519.NewKeyFromSeed(i.Audit)
 	defer clear(priv)
 	ev.Signature = ed25519.Sign(priv, ev.proof())
