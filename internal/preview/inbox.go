@@ -216,7 +216,6 @@ func openRequest(dir, name string, id *age.X25519Identity) (Request, bool) {
 		return q, false
 	}
 	_, err = time.Parse(time.RFC3339Nano, q.Created)
-	_, idErr := hex.DecodeString(q.ID)
 	q.Review = requestDigest(q)
-	return q, (q.Action == "" && q.Epoch == 0 || q.Action == FixtureAction && q.Epoch == 3) && err == nil && idErr == nil && len(q.ID) == 32 && name == q.ID+".request.age" && q.State == "pending" && validRequest(q.Session, q.Reason, q.Ref)
+	return q, (q.Action == "" && q.Epoch == 0 || q.Action == FixtureAction && q.Epoch == 3) && err == nil && validID(q.ID) && name == q.ID+".request.age" && q.State == "pending" && validRequest(q.Session, q.Reason, q.Ref)
 }

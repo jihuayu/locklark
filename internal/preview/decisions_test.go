@@ -4,12 +4,111 @@ import (
 	"bytes"
 	"encoding/json"
 	"filippo.io/age"
+	bolt "go.etcd.io/bbolt"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 )
 
+func TestClockRollbackCannotShowActiveApproval(t *testing.T) {
+	now := time.Now().UTC()
+	end := now.Add(time.Minute)
+	q := Request{Review: "same"}
+	d := Decision{Request: q, At: now, Expires: &end, Result: "approved"}
+	if stateAt(q, d, now.Add(-time.Second)) == "approved" || stateAt(q, d, now) != "approved" || stateAt(q, d, end) == "approved" {
+		t.Fatal("displayed approval outside signed interval")
+	}
+}
+func TestDecisionTimePolicyAndTamper(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "case")
+	if err := Create(root, "initial", "sample"); err != nil {
+		t.Fatal(err)
+	}
+	inbox, b, bundle := filepath.Join(root, "inbox"), filepath.Join(root, "clients", "B"), filepath.Join(root, "share", "epoch-3")
+	pubBytes, err := os.ReadFile(filepath.Join(root, "agent", "approval.pub"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, err := age.ParseX25519Recipient(string(pubBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := "00000000000000000000000000000001"
+	q := Request{ID: id, Session: "timer", Reason: "time test", Ref: FixtureRef, Action: FixtureAction, Epoch: 3, State: "pending"}
+	send := func(when time.Time) {
+		q.Created = when.UTC().Format(time.RFC3339Nano)
+		var buf bytes.Buffer
+		w, e := age.Encrypt(&buf, pub)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if e = json.NewEncoder(w).Encode(q); e != nil {
+			t.Fatal(e)
+		}
+		if e = w.Close(); e != nil {
+			t.Fatal(e)
+		}
+		if e = os.WriteFile(filepath.Join(inbox, id+".request.age"), buf.Bytes(), 0600); e != nil {
+			t.Fatal(e)
+		}
+	}
+	for _, when := range []time.Time{time.Now().Add(-25 * time.Hour), time.Now().Add(time.Hour)} {
+		send(when)
+		if _, err = Decide(inbox, b, bundle, id, requestDigest(q), "approve", "OK"); err == nil {
+			t.Fatal("approved expired or future request")
+		}
+	}
+	send(time.Now().Add(time.Hour))
+	mail, err := Inbox(inbox, b, "timer")
+	if err != nil || len(mail.Requests) != 1 || mail.Requests[0].State != "not-yet-valid" {
+		t.Fatal("future request misleadingly shown as actionable", err)
+	}
+	q.ID = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	id = q.ID
+	send(time.Now().UTC())
+	mail, err = Inbox(inbox, b, "timer")
+	if err != nil || mail.Unreadable != 1 {
+		t.Fatal("noncanonical request shown as actionable", err)
+	}
+	id = "00000000000000000000000000000001"
+	q.ID = id
+	send(time.Now().Add(-24*time.Hour + time.Minute))
+	review := requestDigest(q)
+	d, err := Decide(inbox, b, bundle, id, review, "approve", "bounded approval")
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, _ := time.Parse(time.RFC3339Nano, q.Created)
+	if d.Expires == nil || d.Expires.After(created.Add(24*time.Hour)) {
+		t.Fatal("approval outlived original request")
+	}
+	retry, err := Decide(inbox, b, bundle, id, review, "approve", "bounded approval")
+	if err != nil || !retry.At.Equal(d.At) {
+		t.Fatal("retry regenerated approval", err)
+	}
+	db, err := bolt.Open(filepath.Join(b, "decisions.db"), 0600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(journal)
+		k, v := bucket.Cursor().First()
+		copyValue := append([]byte(nil), v...)
+		copyValue[len(copyValue)-1] ^= 1
+		return bucket.Put(k, copyValue)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if rows, err := Decisions(b, "timer"); err == nil || len(rows) != 0 {
+		t.Fatal("displayed corrupted decision history")
+	}
+}
 func TestDecisionsSurviveRestartAndDoNotTransfer(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "case")
 	if err := Create(root, "init", "build fixture"); err != nil {

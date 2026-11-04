@@ -141,20 +141,28 @@ func overlayDecisions(rows []Request, device string, id *age.X25519Identity) err
 		now := time.Now().UTC()
 		for i, q := range rows {
 			created, err := time.Parse(time.RFC3339Nano, q.Created)
+			if created.After(now) {
+				rows[i].State = "not-yet-valid"
+			}
 			if err != nil || !now.Before(created.Add(24*time.Hour)) {
 				rows[i].State = "expired"
 			}
 			if d, ok := byID[q.ID]; ok {
-				switch {
-				case d.Request.Review != q.Review:
-					rows[i].State = "conflict"
-				case d.Expires != nil && !now.Before(*d.Expires):
-					rows[i].State = "expired"
-				default:
-					rows[i].State = d.Result
-				}
+				rows[i].State = stateAt(q, d, now)
 			}
 		}
 		return nil
 	})
+}
+func stateAt(q Request, d Decision, now time.Time) string {
+	switch {
+	case q.Review != d.Request.Review:
+		return "conflict"
+	case d.Result == "approved" && now.Before(d.At):
+		return "not-yet-valid"
+	case d.Expires != nil && !now.Before(*d.Expires):
+		return "expired"
+	default:
+		return d.Result
+	}
 }
