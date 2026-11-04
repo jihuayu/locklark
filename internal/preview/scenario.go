@@ -197,7 +197,19 @@ func Create(out, session, reason string) error {
 	p.record(systemSession, "owner", "device.remove", "exclude fixture device A", "excluded")
 	// All demo requests to disclose a raw value are refused. No field is ever resolved.
 	p.record(session, "fixture-agent", "field.read", reason, "denied")
-	return saveEpoch(filepath.Join(share, "epoch-2"), p, 2, []*age.X25519Recipient{b.Recipient()}, signer)
+	if err = saveEpoch(filepath.Join(share, "epoch-2"), p, 2, []*age.X25519Recipient{b.Recipient()}, signer); err != nil {
+		return err
+	}
+	p, err = readPayload(filepath.Join(share, "epoch-2"), filepath.Join(clients, "B"), 2)
+	if err != nil {
+		return err
+	}
+	p.Archive, err = editedFixture(p.Archive)
+	if err != nil {
+		return err
+	}
+	p.record(systemSession, "owner", "fixture.edit", "rename login and rotate synthetic TOTP", "edited")
+	return saveEpoch(filepath.Join(share, "epoch-3"), p, 3, []*age.X25519Recipient{b.Recipient()}, signer)
 }
 
 func readPayload(bundle, device string, expected uint64) (payload, error) {

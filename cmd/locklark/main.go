@@ -16,6 +16,7 @@ const usage = `Locklark · offline preview (synthetic data only)
 
   demo     --out NEW_DIR --session ID --reason TEXT
   inspect  --bundle EPOCH_DIR --device CLIENT_DIR --epoch N
+  fixture-export --bundle EPOCH_DIR --device CLIENT_DIR --epoch N --out NEW_FILE.1pux
   audit    --bundle EPOCH_DIR --device CLIENT_DIR --epoch N --session ID
   request  --inbox DIR --recipient PUBLIC_KEY_FILE --session ID --reason TEXT --ref REF
   inbox    --inbox DIR --device CLIENT_B_DIR --session ID [--after CURSOR]
@@ -37,7 +38,7 @@ func run(args []string, out, errOut io.Writer) error {
 	switch command {
 	case "demo":
 		f.StringVar(&dir, "out", "", "new fixture directory")
-	case "inspect", "audit":
+	case "inspect", "audit", "fixture-export":
 		f.StringVar(&bundle, "bundle", "", "shared epoch directory")
 		f.Uint64Var(&epoch, "epoch", 0, "expected epoch, pinned independently")
 	case "request", "inbox":
@@ -45,13 +46,16 @@ func run(args []string, out, errOut io.Writer) error {
 	default:
 		return errors.New("unknown command; see locklark help")
 	}
+	if command == "fixture-export" {
+		f.StringVar(&dir, "out", "", "new plaintext synthetic .1pux file")
+	}
 	if command == "inbox" {
 		f.StringVar(&after, "after", "", "cursor from the previous page")
 	}
-	if command == "inspect" || command == "audit" || command == "inbox" {
+	if command == "inspect" || command == "audit" || command == "inbox" || command == "fixture-export" {
 		f.StringVar(&device, "device", "", "private fixture client directory")
 	}
-	if command != "inspect" {
+	if command != "inspect" && command != "fixture-export" {
 		f.StringVar(&session, "session", "", "agent session identifier")
 	}
 	if command == "demo" || command == "request" {
@@ -72,12 +76,15 @@ func run(args []string, out, errOut io.Writer) error {
 	switch command {
 	case "demo":
 		err = preview.Create(dir, session, reason)
-		result = map[string]any{"synthetic": true, "epochs": []int{1, 2}, "out": dir}
-	case "inspect", "audit":
+		result = map[string]any{"synthetic": true, "epochs": []int{1, 2, 3}, "out": dir}
+	case "inspect", "audit", "fixture-export":
 		if bundle == "" || device == "" || epoch == 0 {
 			return errors.New("--bundle, --device and --epoch are required")
 		}
-		if command == "inspect" {
+		if command == "fixture-export" {
+			err = preview.ExportFixture(bundle, device, epoch, dir)
+			result = map[string]any{"synthetic": true, "exported": dir, "epoch": epoch}
+		} else if command == "inspect" {
 			result, err = preview.Inspect(bundle, device, epoch)
 		} else {
 			result, err = preview.Audit(bundle, device, epoch, session)

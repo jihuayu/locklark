@@ -15,7 +15,8 @@ var exportData []byte
 
 const attachmentPath = "files/doc-sample___样本.bin"
 
-func fixtureArchive() ([]byte, error) {
+func fixtureArchive() ([]byte, error) { return packFixture(exportData) }
+func packFixture(data []byte) ([]byte, error) {
 	var out bytes.Buffer
 	w := zip.NewWriter(&out)
 	for _, f := range []struct {
@@ -23,7 +24,7 @@ func fixtureArchive() ([]byte, error) {
 		data []byte
 	}{
 		{"export.attributes", []byte(`{"version":3,"description":"1Password Unencrypted Export","createdAt":0}`)},
-		{"export.data", exportData}, {attachmentPath, []byte{0, 1, 2, 255}},
+		{"export.data", data}, {attachmentPath, []byte{0, 1, 2, 255}},
 	} {
 		z, err := w.Create(f.name)
 		if err != nil {
