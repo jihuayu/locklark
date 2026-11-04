@@ -146,7 +146,7 @@ go test -count=1 ./internal/gateway
 .\locklark.exe mcp-stdio --profile bridge.profile --session-key runner.sessionkey --recipient demo-out/agent/approval.pub --host-sign-key demo-out/agent/host-sign.pub --inbox demo-out/inbox --exchange status-exchange --private private-state --bun ABSOLUTE_BUN_PATH
 ```
 
-- `github_pulls_get` 接受 `repo`（登记的数字 ID 字符串）、`number`、`reason` 和 `request_key`（每次新申请生成 32 位小写十六进制随机值）。同键同参数的并发调用或重连重试返回同一个 ID 和摘要。私有发件箱保留原始密文以便补投；同一键更换目标或理由会失败。
+- `github_pulls_get` 接受 `repo`（登记的数字 ID 字符串）、`number`、`reason` 和 `request_key`（每次新申请生成 32 位小写十六进制随机值）。同键同参数的并发调用或重连重试返回同一个 ID 和摘要。私有发件箱保留原始密文以便补投；同一键更换目标或理由会失败。 重试返回的是原投递回执，当前状态另用只读查询确认。若私有发件箱丢失而中继仍保留原密文，重试会报告冲突；同一会话和请求键不会因此生成第二个请求 ID。
 - `locklark_resume` 接受 `request_id` 和 `review`。首次产生新的只读挑战，返回 `awaiting-holder` 和 `poll_id`；将该 `poll_id` 传回来即可读取持库端签名的状态与观测时间。再次省略 `poll_id` 请求更新的观察。持库端离线、查询无法验证或会话已被撤销时，不能将等待误当作同意。已收到的旧观察不能证明此刻仍获批准。
 - 常驻端只答复查询，不批准、不执行。完成的动作可用原执行票据取回密文；本批 MCP 工具只提交申请和查状态。stdio 的短期配置到期后须重连，在线持库端为仍有效的登记自动续发；离线中继可能重放未到期配置，持库端仍逐次核验会话。没有远端自动配对、第三方插件沙箱或实时 GitHub 凭据。
 

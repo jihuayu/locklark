@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -54,7 +55,11 @@ func SubmitBridgePull(c PollConfig, inbox string, p BridgeProfile, requestKey, r
 		}
 		// This directory is private and holds only the one signed, encrypted request.
 		defer os.Remove(tmp)
-		rec, e := SubmitPullReceipt(tmp, c.Recipient, c.Session, reason, c.Key, p.Scope.Repo, n, plan)
+		// Preserve the ID even if the private reservation is lost. A surviving
+		// relay or holder record must conflict instead of permitting two grants.
+		sum := mac(seed, struct{ Purpose, Session, Audience, Key string }{"request-id/v1", c.Session, p.Audience, requestKey})
+		var rec Submitted
+		_, e = submitWithID(tmp, c.Recipient, c.Session, reason, gateway.PullSlot, c.Key, &rec, &target, hex.EncodeToString(sum[:16]))
 		if e != nil {
 			return Submitted{}, errSession
 		}

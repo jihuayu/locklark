@@ -12,13 +12,16 @@ import (
 	"time"
 )
 
-type output struct{ bytes.Buffer }
+type output struct{ buf bytes.Buffer }
+
+func (w *output) Len() int      { return w.buf.Len() }
+func (w *output) Bytes() []byte { return w.buf.Bytes() }
 
 func (w *output) Write(p []byte) (int, error) {
 	if w.Len()+len(p) > 4096 {
 		return 0, io.ErrShortBuffer
 	}
-	return w.Buffer.Write(p)
+	return w.buf.Write(p)
 }
 func Propose(ctx context.Context, bun, repo string, number int) ([]byte, error) {
 	bad := errors.New("built-in proposal unavailable")

@@ -48,6 +48,18 @@ func TestOutboxCoalescesConcurrentCallsAndRestoresLostPublication(t *testing.T) 
 	if e != nil || !bytes.Equal(orig, got) {
 		t.Fatal("lost stable ciphertext", e)
 	}
+	// If local state rolls back while a delivered envelope survives, refusing
+	// the retry is preferable to submitting another independently approvable ID.
+	if e = os.Remove(filepath.Join(c.Private, key+".outbox")); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = SubmitBridgePull(c, dir, p, key, "check merge", 7, plan); e == nil {
+		t.Fatal("second request published after local reservation loss")
+	}
+	files, e := os.ReadDir(dir)
+	if e != nil || len(files) != 1 {
+		t.Fatal("duplicate relay request after rollback", e)
+	}
 	if e = os.WriteFile(path, []byte("foreign"), 0600); e != nil {
 		t.Fatal(e)
 	}

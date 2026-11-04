@@ -93,6 +93,9 @@ func SubmitReceipt(inbox, recipientFile, session, reason, ref, keyfile string) (
 	return receipt, err
 }
 func submit(inbox, recipientFile, session, reason, ref, keyfile string, receipt *Submitted, pull *gateway.PullIntent) (string, error) {
+	return submitWithID(inbox, recipientFile, session, reason, ref, keyfile, receipt, pull, "")
+}
+func submitWithID(inbox, recipientFile, session, reason, ref, keyfile string, receipt *Submitted, pull *gateway.PullIntent, requestID string) (string, error) {
 	if !(pull == nil && validRequest(session, reason, ref) || pull != nil && keyfile != "" && validPullInput(session, reason, ref, pull)) {
 		return "", errors.New("invalid synthetic request, reason, session or reference")
 	}
@@ -104,11 +107,16 @@ func submit(inbox, recipientFile, session, reason, ref, keyfile string, receipt 
 	if err != nil {
 		return "", errors.New("invalid pinned approval recipient")
 	}
-	var id [16]byte
-	if _, err = rand.Read(id[:]); err != nil {
-		return "", err
+	if requestID == "" {
+		var id [16]byte
+		if _, err = rand.Read(id[:]); err != nil {
+			return "", err
+		}
+		requestID = hex.EncodeToString(id[:])
+	} else if !validID(requestID) {
+		return "", errInvoke
 	}
-	request := Request{ID: hex.EncodeToString(id[:]), Session: session, Reason: strings.TrimSpace(reason), Ref: ref, State: "pending", Created: time.Now().UTC().Format(time.RFC3339Nano), Action: FixtureAction, Epoch: 3}
+	request := Request{ID: requestID, Session: session, Reason: strings.TrimSpace(reason), Ref: ref, State: "pending", Created: time.Now().UTC().Format(time.RFC3339Nano), Action: FixtureAction, Epoch: 3}
 	if pull != nil {
 		request.Pull = pull
 		request.Action = gateway.PullAction
