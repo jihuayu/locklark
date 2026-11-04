@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/subtle"
 	"encoding/json"
@@ -10,23 +11,53 @@ import (
 	"golang.org/x/term"
 	"io"
 	"os"
+	"os/signal"
+	"sync"
+	"syscall"
+	"unicode/utf8"
 )
 
 var personalUsage = errors.New("usage: locklark personal <init|add-login|list|audit> --file PATH")
 
-func consoleField(prompt string) ([]byte, error) {
+// One terminal mode covers the entire interaction; no prompt or inter-field
+// gap is visible while echo is enabled.
+type console struct {
+	reader *bufio.Reader
+	skipLF bool
+}
+
+func (c *console) field(prompt string) ([]byte, error) {
 	if _, err := fmt.Fprint(os.Stderr, prompt+": "); err != nil {
 		return nil, err
 	}
-	input, err := term.ReadPassword(int(os.Stdin.Fd()))
-	fmt.Fprintln(os.Stderr)
-	if err != nil {
-		clear(input)
-		return nil, errors.New("terminal input cancelled")
+	var value []byte
+	for {
+		b, err := c.reader.ReadByte()
+		if err != nil || b == 3 || b == 4 || b == 27 || len(value) > 64<<10 {
+			clear(value)
+			return nil, errors.New("terminal input cancelled or too long")
+		}
+		if c.skipLF {
+			c.skipLF = false
+			if b == '\n' {
+				continue
+			}
+		}
+		switch b {
+		case '\r', '\n':
+			c.skipLF = b == '\r'
+			fmt.Fprint(os.Stderr, "\r\n")
+			return value, nil
+		case 8, 127:
+			_, n := utf8.DecodeLastRune(value)
+			clear(value[len(value)-n:])
+			value = value[:len(value)-n]
+		default:
+			value = append(value, b)
+		}
 	}
-	return input, nil
 }
-func runPersonal(args []string, out io.Writer) error {
+func runPersonal(args []string, out io.Writer) (retErr error) {
 	if len(args) != 3 || args[1] != "--file" || args[2] == "" {
 		return personalUsage
 	}
@@ -46,6 +77,35 @@ func runPersonal(args []string, out io.Writer) error {
 			return e
 		}
 	}
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(signals)
+	fd := int(os.Stdin.Fd())
+	state, err := term.MakeRaw(fd)
+	if err != nil {
+		return errors.New("cannot disable terminal echo")
+	}
+	var once sync.Once
+	var resetErr error
+	restore := func() { once.Do(func() { resetErr = term.Restore(fd, state) }) }
+	done := make(chan struct{})
+	defer func() {
+		close(done)
+		restore()
+		if retErr == nil && resetErr != nil {
+			retErr = resetErr
+		}
+	}()
+	go func() {
+		select {
+		case <-signals:
+			restore()
+			os.Exit(130)
+		case <-done:
+		}
+	}()
+	c := console{reader: bufio.NewReader(os.Stdin)}
+	consoleField := c.field
 	pw, err := consoleField("主密码")
 	if err != nil {
 		return err
@@ -67,7 +127,7 @@ func runPersonal(args []string, out io.Writer) error {
 			return e
 		}
 		defer clear(key)
-		if _, e = fmt.Fprintln(os.Stderr, "请离线保存 Secret Key；丢失它将无法打开此库。", personal.FormatSecret(key)); e != nil {
+		if _, e = fmt.Fprintf(os.Stderr, "请离线保存 Secret Key；丢失它将无法打开此库。 %s\r\n", personal.FormatSecret(key)); e != nil {
 			return e
 		}
 		typed, e := consoleField("重新输入刚保存的 Secret Key")

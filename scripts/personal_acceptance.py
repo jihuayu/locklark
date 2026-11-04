@@ -15,7 +15,7 @@ else:
 import time
 
 
-def invoke(binary, action, path, answers, *, ok=True, issue=False):
+def invoke(binary, action, path, answers, *, ok=True, issue=False, paste=False):
     if os.name == "nt":
         return windows_invoke(binary, action, path, answers, ok=ok, issue=issue)
     master, slave = pty.openpty()
@@ -26,7 +26,7 @@ def invoke(binary, action, path, answers, *, ok=True, issue=False):
         offset = 0
         issued = None
         try:
-            for prompt, value in answers:
+            for index, (prompt, value) in enumerate(answers):
                 deadline = time.monotonic() + 12
                 marker = (prompt + ": ").encode()
                 while marker not in transcript[offset:]:
@@ -41,14 +41,17 @@ def invoke(binary, action, path, answers, *, ok=True, issue=False):
                         raise RuntimeError("no new Secret Key issued to terminal")
                     issued = match.group().decode()
                     value = issued
-                while termios.tcgetattr(slave)[3] & termios.ECHO:
-                    if time.monotonic() >= deadline:
-                        raise RuntimeError("terminal echo was not disabled")
-                    time.sleep(0.005)
-                os.write(master, value.encode() + b"\n")
+                if termios.tcgetattr(slave)[3] & termios.ECHO:
+                    raise RuntimeError("prompt appeared before echo was disabled")
+                if paste and index == 0:
+                    os.write(master, ("\n".join(x for _, x in answers) + "\n").encode())
+                elif not paste:
+                    os.write(master, value.encode() + b"\n")
             data, _ = proc.communicate(timeout=15)
             while select.select([master], [], [], 0)[0]:
                 transcript.extend(os.read(master, 4096))
+            if not termios.tcgetattr(slave)[3] & termios.ECHO:
+                raise RuntimeError("terminal echo was not restored on exit")
             if (proc.returncode == 0) != ok or (not ok and data):
                 raise RuntimeError(f"{action}: unexpected exit or output")
             if issued and issued.encode() in data:
@@ -74,10 +77,12 @@ def check(binary):
         result, key = invoke(binary, "init", path, [("主密码", pw), ("再次输入主密码", pw),
                              ("重新输入刚保存的 Secret Key", None)], issue=True)
         assert result["status"] == "created"
+        if os.name != "nt":
+            invoke(binary, "list", path, [("主密码", "\x03")], ok=False)
         factors = [("主密码", pw), ("Secret Key", key)]
         assert invoke(binary, "list", path, factors)[0] == []
         added, _ = invoke(binary, "add-login", path, factors + [
-            ("登录标题", "开发账号"), ("用户名（可留空）", "local-fixture-user"), ("登录密码", login)])
+            ("登录标题", "开发账号"), ("用户名（可留空）", "local-fixture-user"), ("登录密码", login)], paste=os.name != "nt")
         for creds in ([("主密码", pw + "x"), factors[1]],
                       [factors[0], ("Secret Key", "LL1-" + "A" * 26)]):
             invoke(binary, "list", path, creds, ok=False)

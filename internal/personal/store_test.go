@@ -136,6 +136,24 @@ func TestSavedLoginDataAndSeparateJournal(t *testing.T) {
 		t.Fatal(e)
 	}
 }
+func TestPublishDoesNotClobberConcurrentCreator(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "owner.ll")
+	tmp := filepath.Join(dir, "source")
+	if err := os.WriteFile(tmp, []byte("new"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("existing"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := publish(tmp, target); err == nil {
+		t.Fatal("clobbered a competing creator")
+	}
+	data, err := os.ReadFile(target)
+	if err != nil || string(data) != "existing" {
+		t.Fatal("destination changed")
+	}
+}
 func TestPersonalVaultLifecycle(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "local.ll")
 	key := bytes.Repeat([]byte{0x27}, 16)

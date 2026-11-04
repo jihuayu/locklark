@@ -148,7 +148,7 @@ func Create(path, pw string, key []byte) error {
 	if e = db.Close(); e != nil {
 		return e
 	}
-	return os.Link(tmp, path)
+	return publish(tmp, path)
 }
 func existing(path string) (*bolt.DB, error) {
 	return bolt.Open(path, 0600, &bolt.Options{Timeout: 10 * time.Second, OpenFile: func(name string, flags int, mode os.FileMode) (*os.File, error) {
