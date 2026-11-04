@@ -30,3 +30,5 @@ KDBX 互操作已在 Windows 和 WSL Linux 使用 PyKeePass 4.2.0 验收。上�
 当前交付为离线个人库预览与合成网关演练。正式使用仍需要独立安全评审、干净机器恢复、移动真机与逐平台 1Password 行为对照。
 
 Cloud 恢复安全修复已提交为 `43c6732`，在 PR #1 的原 `codex/first-preview` 分支接续；main 核对为 `3901bc8d8c91c8da039fa02d83e1521746c3c5aa`。恢复验证及目标预检先于新 Secret Key，发布仍原子拒绝覆盖；LLR2 独立离线材料固定整份签名备份检查点，旧 LLR1/版本 1 明确拒绝。Linux 真实 PTY 的错误恢复码、损坏备份、已有目标、旧格式及迟到目标负测通过，完整重签历史负测通过，容量与历史段数错误已区分。实跑检查、失败测试及复核/CI 门槛详见 [recovery-validation.md](recovery-validation.md)。尚未合并，不能把本地结果计为 GitHub 通过；后续从更新 main 实现受控人工单字段披露。
+
+恢复来源复查在 `7054bf5` 上复现 FIFO 与 FIFO 符号链接打开时阻塞，`888944e` 改为 Unix 非阻塞打开并在读前核验句柄，非普通文件明确拒绝。Linux 单测、全量 Go、个人库竞态、真实 PTY、MCP/Bun 及 Windows/macOS 交叉编译通过；正常备份文件符号链接的恢复审计正例通过。原生 Windows/macOS 特殊文件行为及独立复核仍未完成，PR #1 合并门槛继续保留。main 仍为 `3901bc8d8c91c8da039fa02d83e1521746c3c5aa`；本轮命令、失败证据和后续工作见 [recovery-file-source-validation.md](recovery-file-source-validation.md)。
