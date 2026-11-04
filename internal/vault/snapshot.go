@@ -57,8 +57,10 @@ func Seal(payload []byte, epoch uint64, recipients []*age.X25519Recipient, signe
 	}
 	defer clear(key)
 	db := kdbx.NewDatabase(kdbx.WithDatabaseKDBXVersion41())
-	// The pinned library encodes Argon2d, not the planned Argon2id. This is
-	// deliberately limited to synthetic fixtures encrypted with random keys.
+	// This transforms a random per-epoch file key, not an account password.
+	db.Header.FileHeaders.KdfParameters.UUID = kdbx.KdfArgon2id
+	db.Header.FileHeaders.KdfParameters.Memory = 16 << 20
+	db.Header.FileHeaders.KdfParameters.Iterations = 3
 	var err error
 	db.Credentials, err = kdbx.NewKeyDataCredentials(key)
 	if err != nil {
@@ -117,6 +119,12 @@ func VerifySnapshot(s Snapshot, authority ed25519.PublicKey, expectedEpoch uint6
 func Open(s Snapshot, id *age.X25519Identity, authority ed25519.PublicKey, expectedEpoch uint64) ([]byte, error) {
 	if err := VerifySnapshot(s, authority, expectedEpoch); err != nil {
 		return nil, err
+	}
+	// Older previews and new snapshots are both KDBX 4.1. Do not dispatch
+	// a signed but unsupported header into an unbounded legacy KDF path.
+	var format kdbx.Signature
+	if err := binary.Read(bytes.NewReader(s.Database), binary.LittleEndian, &format); err != nil || format != kdbx.DefaultKDBX41Sig {
+		return nil, ErrSnapshot
 	}
 	key, err := unwrap(s.Envelope, id)
 	if err != nil {

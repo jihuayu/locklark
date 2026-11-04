@@ -2,6 +2,9 @@ module github.com/jihuayu/locklark
 
 go 1.26.8
 
+// Pinned v3.7.1 with the bounded KDBX4 Argon2id adapter documented in third_party.
+replace github.com/tobischo/gokeepasslib/v3 => ./third_party/gokeepasslib
+
 require (
 	filippo.io/age v1.3.2
 	filippo.io/edwards25519 v1.2.0

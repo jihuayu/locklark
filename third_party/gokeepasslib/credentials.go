@@ -1,6 +1,7 @@
 package gokeepasslib
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/sha256"
 	"crypto/sha512"
@@ -11,10 +12,10 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"reflect"
 	"regexp"
 
 	"github.com/tobischo/argon2"
+	xargon2 "golang.org/x/crypto/argon2"
 )
 
 var (
@@ -58,45 +59,22 @@ func (c *DBCredentials) buildTransformedKey(db *Database) ([]byte, error) {
 	}
 
 	if db.Header.IsKdbx4() {
-		if db.Header.FileHeaders.KdfParameters == nil {
-			return nil, fmt.Errorf("%w: kdf parameters are missing", ErrCorruptedDatabase)
+		p := db.Header.FileHeaders.KdfParameters
+		if p == nil || (!bytes.Equal(p.UUID, KdfArgon2) && !bytes.Equal(p.UUID, KdfArgon2id)) {
+			return nil, fmt.Errorf("%w: unsupported snapshot KDF", ErrCorruptedDatabase)
 		}
-
-		if reflect.DeepEqual(db.Header.FileHeaders.KdfParameters.UUID, KdfArgon2) {
-			iterations := uint32(db.Header.FileHeaders.KdfParameters.Iterations)
-			parallelism := uint8(db.Header.FileHeaders.KdfParameters.Parallelism)
-
-			// Argon 2 panics on these values instead of returning an error
-			if iterations < 1 || parallelism < 1 {
-				return nil, fmt.Errorf(
-					"%w: invalid argon2 iterations %d or parallelism %d",
-					ErrCorruptedDatabase,
-					db.Header.FileHeaders.KdfParameters.Iterations,
-					db.Header.FileHeaders.KdfParameters.Parallelism,
-				)
-			}
-
-			// Argon 2
-			transformedKey = argon2.DKey(
-				transformedKey, // Master key
-				db.Header.FileHeaders.KdfParameters.Salt[:], // Salt
-				iterations, // Time cost
-				uint32(db.Header.FileHeaders.KdfParameters.Memory)/1024, // Memory cost
-				parallelism, // Parallelism
-				32,          // Hash length
-			)
-		} else {
-			// AES
-			key, err := cryptAESKey(
-				transformedKey,
-				db.Header.FileHeaders.KdfParameters.Salt[:],
-				db.Header.FileHeaders.KdfParameters.Rounds,
-			)
-			if err != nil {
-				return nil, err
-			}
-			transformedKey = key[:]
+		// Validate full-width wire parameters before conversion, dispatch or allocation.
+		if p.Version != 0x13 || p.Iterations < 1 || p.Iterations > 10 ||
+			p.Parallelism < 1 || p.Parallelism > 8 || p.Memory > 128<<20 ||
+			p.Memory < uint64(p.Parallelism)*8*1024 || p.Memory%1024 != 0 ||
+			len(p.SecretKey) != 0 || len(p.AssocData) != 0 {
+			return nil, fmt.Errorf("%w: unsupported snapshot Argon2 parameters", ErrCorruptedDatabase)
 		}
+		derive := argon2.DKey
+		if bytes.Equal(p.UUID, KdfArgon2id) {
+			derive = xargon2.IDKey
+		}
+		return derive(transformedKey, p.Salt[:], uint32(p.Iterations), uint32(p.Memory/1024), uint8(p.Parallelism), 32), nil
 	} else {
 		// AES
 		key, err := cryptAESKey(

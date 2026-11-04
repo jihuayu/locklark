@@ -179,6 +179,18 @@ go test -count=1 ./internal/gateway
 
 **信任边界：** 整个 `demo-out` 是生成器的实验台，包含两台客户端，不能交给服务器或 Agent。模拟服务器只复制 `share/`；模拟被吊销者只给 `clients/A/` 和目标快照。演练用固定公开口令，把随机 Secret Key 存在客户端文件中，未接操作系统钥匙串。没有权限隔离的同用户进程可直接读取 B 的材料；不能以这个演练替代系统隔离。签名锚来自受信的客户端，快照签发私钥只在生成时使用，不随演练资料分发。B 客户端保留加密的决定及本机审计签名槽，以便后续登记会话和签署决定。
 
-KDBX 4.1 候选库当前写入 **Argon2d**，与设计要求的 Argon2id 有差距；KDBX 输入为随机文件密钥，账户口令走独立的双密钥派生。引入真实资料之前，须补齐文件格式互操作、独立密码评审、操作系统密钥存储与在干净机器上的恢复验收。
+新签名快照写 **KDBX 4.1 / Argon2id**（16 MiB、3 次、2 路）；旧预览的 Argon2d 快照仍可读。输入是每代独立的随机文件密钥，账户口令继续走独立的双密钥派生。用 [PyKeePass](https://github.com/libkeepass/pykeepass) 实测了独立读取、修改受保护的合成载荷、另存及 Go 回读。外部修改使原快照签名失效；只有测试签发者重新签名后才可采用。该结果不证明所有 1Password 条目、附件或桌面客户端互操作。
+
+Windows 可用一次性 Python 环境复跑，Linux 则使用虚拟环境中的 `bin/python`。产品程序无需 Python：
+
+```powershell
+$peerEnv = Join-Path ([IO.Path]::GetTempPath()) ("locklark-peer-" + [guid]::NewGuid())
+python -m venv $peerEnv
+$env:LOCKLARK_TEST_PYKEEPASS = Join-Path $peerEnv 'Scripts/python.exe'
+& $env:LOCKLARK_TEST_PYKEEPASS -m pip install 'pykeepass==4.2.0'
+go test -count=1 ./internal/vault -run 'TestKDBXIndependentPeer|TestOfflineRevocation'
+```
+
+引入真实资料之前，仍须独立密码评审、操作系统密钥存储、原生字段映射和干净机器恢复验收。
 
 接下来的 M0：将逐字段编辑和迁出对账扩展到更多条目类型、成员/多设备换代与故障恢复、MyGo 常驻桌面原型。Next.js 团队 Web、iOS/Android、受隔离的 Bun MCP Gateway、AI 否决，以及独立部署的 invoke / deliver 两种 server token 均已在[设计稿](docs/design.md)中界定，尚未交付。
