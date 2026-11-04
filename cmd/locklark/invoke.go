@@ -4,15 +4,24 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
-	"github.com/jihuayu/locklark/internal/preview"
+	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+
+	"github.com/jihuayu/locklark/internal/preview"
 )
 
 func runInvoke(args []string, out, diag io.Writer) error {
 	cmd := args[0]
 	f := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	f.SetOutput(diag)
-	var device, bundle, ticket, path, dir, session, id, review, key, pub, host string
+	var device, bundle, ticket, path, dir, session, id, review, key, pub, host, reason string
+	if cmd == "approval-revoke" {
+		f.StringVar(&id, "id", "", "approval request ID")
+		f.StringVar(&review, "review", "", "review digest")
+		f.StringVar(&reason, "reason", "", "reason to revoke")
+	}
 	if cmd == "invoke-prepare" {
 		f.StringVar(&key, "session-key", "", "agent session key")
 		f.StringVar(&pub, "recipient", "", "pinned host inbox public key")
@@ -47,6 +56,11 @@ func runInvoke(args []string, out, diag io.Writer) error {
 	var result any
 	var err error
 	switch cmd {
+	case "approval-revoke":
+		if device == "" {
+			return errors.New("device required")
+		}
+		result, err = preview.RevokeApproval(device, id, review, reason)
 	case "invoke-prepare":
 		if dir == "" || key == "" || pub == "" || host == "" {
 			return errors.New("attempt directory and pinned key files required")
@@ -57,6 +71,18 @@ func runInvoke(args []string, out, diag io.Writer) error {
 		if device == "" || path == "" || ticket == "" || (cmd == "invoke-run" && bundle == "") {
 			return errors.New("device, ticket, output and (for execution) bundle required")
 		}
+		if _, stat := os.Lstat(path); stat == nil {
+			return errors.New("output already exists; choose a new path")
+		} else if !errors.Is(stat, os.ErrNotExist) {
+			return stat
+		}
+		parent, stat := os.Stat(filepath.Dir(path))
+		if stat != nil {
+			return stat
+		}
+		if !parent.IsDir() {
+			return errors.New("output parent must be a directory")
+		}
 		var ciphertext []byte
 		if cmd == "invoke-run" {
 			ciphertext, err = preview.Invoke(device, bundle, ticket)
@@ -64,7 +90,9 @@ func runInvoke(args []string, out, diag io.Writer) error {
 			ciphertext, err = preview.InvocationReceipt(device, ticket)
 		}
 		if err == nil {
-			err = preview.WriteReply(path, ciphertext)
+			if err = preview.WriteReply(path, ciphertext); err != nil {
+				return fmt.Errorf("encrypted result is recorded; use invoke-receipt with the same ticket and a new --out path: %w", err)
+			}
 		}
 		result = map[string]string{"state": "sealed"}
 	case "invoke-result":

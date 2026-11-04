@@ -51,6 +51,7 @@ func updateTip(tx *bolt.Tx, p payload, key ed25519.PrivateKey) error {
 }
 
 type UseReport struct {
+	Reason  string `json:"reason,omitempty"`
 	ID      string `json:"id"`
 	Session string `json:"session"`
 	Review  string `json:"review"`
@@ -69,7 +70,7 @@ func useAction(u useRecord) string {
 }
 func ingestUse(h *history, e entry, key ed25519.PublicKey) error {
 	u := *e.Use
-	if !validID(u.ID) || !hexSize(u.Attempt, 32) || !ed25519.Verify(key, useBytes(u), e.Signature) || e.Event.Action != useAction(u) || e.Event.Session != u.Session || e.Event.Result != u.State {
+	if !validID(u.ID) || (u.State != "revoked" && !hexSize(u.Attempt, 32)) || !ed25519.Verify(key, useBytes(u), e.Signature) || e.Event.Action != useAction(u) || e.Event.Session != u.Session || e.Event.Result != u.State {
 		return errInvoke
 	}
 	var found bool
@@ -84,6 +85,10 @@ func ingestUse(h *history, e entry, key ed25519.PublicKey) error {
 	}
 	old, ok := h.uses[u.ID]
 	switch u.State {
+	case "revoked":
+		if ok || u.Attempt != "" || len(u.Reply) != 0 || !validReason(u.Reason) || e.Event.Actor != "owner" || e.Event.Reason != u.Reason {
+			return errInvoke
+		}
 	case "unknown":
 		if ok || len(u.Reply) != 0 {
 			return errInvoke
@@ -102,7 +107,12 @@ func appendUse(b *bolt.Bucket, h history, u useRecord, owner, auditKey ed25519.P
 	if b.Tx().Bucket(useAnchor) == nil {
 		return errInvoke
 	}
-	h.chain.signedRecord(auditKey, u.Session, "executor", useAction(u), "signed fixture metadata invocation", u.State)
+	actor, reason := "executor", "signed fixture metadata invocation"
+	if u.State == "revoked" {
+		actor = "owner"
+		reason = u.Reason
+	}
+	h.chain.signedRecord(auditKey, u.Session, actor, useAction(u), reason, u.State)
 	i := len(h.chain.Events) - 1
 	e := entry{Use: &u, Signature: ed25519.Sign(owner, useBytes(u)), Event: h.chain.Events[i], Proof: h.chain.Proofs[i]}
 	if err := ingestUse(&h, e, owner.Public().(ed25519.PublicKey)); err != nil {

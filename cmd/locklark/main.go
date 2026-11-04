@@ -22,6 +22,7 @@ const usage = `Locklark · offline preview (synthetic data only)
   request  --inbox DIR --recipient PUBLIC_KEY_FILE --session ID --reason TEXT --ref REF [--session-key FILE]
   inbox    --inbox DIR --device CLIENT_B_DIR --session ID [--after CURSOR]
 
+  approval-revoke --device CLIENT_B_DIR --id ID --review DIGEST --reason TEXT
   invoke-prepare --session-key FILE --recipient FILE --host-sign-key FILE --session ID --id ID --review DIGEST --attempt NEW_DIR
   invoke-run     --device CLIENT_B_DIR --bundle EPOCH_3_DIR --ticket FILE --out NEW_REPLY
   invoke-receipt --device CLIENT_B_DIR --ticket FILE --out NEW_REPLY
@@ -45,7 +46,7 @@ func run(args []string, out, errOut io.Writer) error {
 	}
 	command := args[0]
 	switch command {
-	case "invoke-prepare", "invoke-run", "invoke-receipt", "invoke-result", "executions":
+	case "invoke-prepare", "invoke-run", "invoke-receipt", "invoke-result", "executions", "approval-revoke":
 		return runInvoke(args, out, errOut)
 	case "session-keygen", "session-enroll", "session-revoke", "session-history":
 		return runSession(args, out, errOut)

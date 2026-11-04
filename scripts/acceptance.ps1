@@ -1,3 +1,4 @@
+#requires -Version 7.0
 # Windows CLI acceptance. Only synthetic data; leaves a fresh temporary directory for inspection.
 $ErrorActionPreference = "Stop"
 $repo = Split-Path $PSScriptRoot -Parent
@@ -46,6 +47,10 @@ try {
     $ticket = Join-Path $attempt "invocation.age"
     $hostPublic = Join-Path $out "agent/host-sign.pub"
     $null = Invoke-Ok @("invoke-prepare","--session-key",$sessionKey,"--recipient",$pub,"--host-sign-key",$hostPublic,"--session","offline-1","--id",$receipt.id,"--review",$receipt.review,"--attempt",$attempt)
+    $occupied = Join-Path $work "occupied.age"
+    [IO.File]::WriteAllText($occupied,"keep")
+    $problem = & $exe invoke-run --device $b --bundle (Join-Path $out "share/epoch-3") --ticket $ticket --out $occupied 2>&1
+    if ($LASTEXITCODE -eq 0 -or "$problem" -notmatch "output already exists" -or [IO.File]::ReadAllText($occupied) -ne "keep") {throw "Output preflight did not preserve existing file"}
     $workers = @(foreach ($index in 1..2) {
         $start = [Diagnostics.ProcessStartInfo]::new($exe)
         $start.UseShellExecute = $false
@@ -71,5 +76,5 @@ try {
     $null = Invoke-Ok @("session-revoke","--device",$b,"--session","offline-1","--reason","runner finished")
     $closed = Invoke-Ok @("inbox","--inbox",$spool,"--device",$b,"--session","offline-1")
     if ($closed.requests[0].sender_status -ne "revoked" -or $closed.requests[0].state -eq "approved") {throw "Session revocation not effective"}
-    "PASS: session binding, signed request, session revocation, device revocation, snapshot audit, offline inbox, and durable signed approval verified. Synthetic files: $work"
+    "PASS: session binding and revocation, device revocation, snapshot audit, offline approval, two-process single execution and signed reply recovery. Synthetic files: $work"
 } finally { Pop-Location }

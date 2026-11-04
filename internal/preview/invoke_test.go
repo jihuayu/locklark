@@ -2,14 +2,17 @@ package preview
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
-	"filippo.io/age"
 	"os"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"filippo.io/age"
+	bolt "go.etcd.io/bbolt"
 )
 
 type inviteFixture struct{ b, bundle, key, inbox, pub, host, id, review string }
@@ -100,6 +103,9 @@ func TestRedemptionRunsOnlyOnce(t *testing.T) {
 	if successes != 1 || calls.Load() != 1 {
 		t.Fatalf("commits %d executions %d", successes, calls.Load())
 	}
+	if _, err := RevokeApproval(f.b, f.id, f.review, "too late"); err == nil {
+		t.Fatal("cancelled already consumed approval")
+	}
 	reply, err := InvocationReceipt(f.b, ticket)
 	if err != nil {
 		t.Fatal(err)
@@ -144,6 +150,66 @@ func TestRedemptionRunsOnlyOnce(t *testing.T) {
 		t.Fatal("fresh attempt reused approval")
 	}
 }
+func TestLowOrderRecipientCannotConsume(t *testing.T) {
+	f := approvedCall(t)
+	dir := f.call(t)
+	id, err := mailIdentity(f.b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ticket, err := readTicket(filepath.Join(dir, "invocation.age"), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ticket.Reply = "age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq5cu47z"
+	if _, err := age.ParseX25519Recipient(ticket.Reply); err != nil {
+		t.Fatal("invalid test vector", err)
+	}
+	seed, err := os.ReadFile(f.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ticket.Signature = ed25519.Sign(ed25519.NewKeyFromSeed(seed), ticket.proof())
+	b, err := sealJSON(id.Recipient(), ticket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "low-order.age")
+	if err = os.WriteFile(path, b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runInvocation(f.b, f.bundle, path, func([]byte) (FieldMetadata, error) {
+		t.Fatal("executed with unusable reply key")
+		return FieldMetadata{}, nil
+	}); err == nil {
+		t.Fatal("accepted low order recipient")
+	}
+	uses, err := Executions(f.b, "job")
+	if err != nil || len(uses) != 0 {
+		t.Fatal("consumed", uses, err)
+	}
+}
+func TestExpiryAtCommitRollsBackClaim(t *testing.T) {
+	f := approvedCall(t)
+	ticket := filepath.Join(f.call(t), "invocation.age")
+	now := time.Now()
+	samples := 0
+	_, err := runInvocationAt(f.b, f.bundle, ticket, func([]byte) (FieldMetadata, error) { t.Fatal("expired callback"); return FieldMetadata{}, nil }, func() time.Time {
+		samples++
+		if samples >= 3 {
+			return now.Add(3 * time.Minute)
+		}
+		return now
+	})
+	if err == nil {
+		t.Fatal("expiry at commit accepted")
+	}
+	uses, err := Executions(f.b, "job")
+	if err != nil || len(uses) != 0 {
+		t.Fatal(uses, err)
+	}
+}
+
 func TestExpiredApprovalCannotReserve(t *testing.T) {
 	f := approvedCall(t)
 	ticket := filepath.Join(f.call(t), "invocation.age")
@@ -156,6 +222,81 @@ func TestExpiredApprovalCannotReserve(t *testing.T) {
 		t.Fatal(rows, err)
 	}
 }
+func TestOwnerCanRevokeOneApprovalWithoutEndingSession(t *testing.T) {
+	f := approvedCall(t)
+	ticket := filepath.Join(f.call(t), "invocation.age")
+	if _, err := RevokeApproval(f.b, f.id, f.review, "release cancelled"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RevokeApproval(f.b, f.id, f.review, "release cancelled"); err != nil {
+		t.Fatal("same revocation was not idempotent", err)
+	}
+	if _, err := Invoke(f.b, f.bundle, ticket); err == nil {
+		t.Fatal("executed revoked approval")
+	}
+	mail, err := Inbox(f.inbox, f.b, "job")
+	if err != nil || len(mail.Requests) != 1 || mail.Requests[0].State != "approval-revoked" || mail.Requests[0].SenderStatus != "verified" {
+		t.Fatal("per-approval cancellation changed session or lost state", err)
+	}
+	rows, err := Executions(f.b, "job")
+	if err != nil || len(rows) != 1 || rows[0].Reason != "release cancelled" {
+		t.Fatal("revocation missing reason", err)
+	}
+}
+func TestExecutionJournalRequiresIntactSuffixAndSignedTip(t *testing.T) {
+	f := approvedCall(t)
+	dbPath := filepath.Join(f.b, "decisions.db")
+	ticket := filepath.Join(f.call(t), "invocation.age")
+	original, err := os.ReadFile(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	change := func(fn func(*bolt.Tx) error) {
+		t.Helper()
+		db, e := bolt.Open(dbPath, 0600, nil)
+		if e != nil {
+			t.Fatal(e)
+		}
+		e = db.Update(fn)
+		closed := db.Close()
+		if e != nil || closed != nil {
+			t.Fatal(e, closed)
+		}
+	}
+	change(func(tx *bolt.Tx) error { return tx.DeleteBucket(useAnchor) })
+	if _, err := Invoke(f.b, f.bundle, ticket); err == nil {
+		t.Fatal("legacy journal without signed head consumed approval")
+	}
+	if err := os.WriteFile(dbPath, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Invoke(f.b, f.bundle, ticket); err != nil {
+		t.Fatal(err)
+	}
+	used, err := os.ReadFile(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, changeFn := range map[string]func(*bolt.Tx) error{
+		"truncated suffix": func(tx *bolt.Tx) error { b := tx.Bucket(journal); k, _ := b.Cursor().Last(); return b.Delete(k) },
+		"missing tip":      func(tx *bolt.Tx) error { return tx.DeleteBucket(useAnchor) },
+		"forged tip":       func(tx *bolt.Tx) error { return tx.Bucket(useAnchor).Put(tipKey, make([]byte, 64)) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := os.WriteFile(dbPath, used, 0600); err != nil {
+				t.Fatal(err)
+			}
+			change(changeFn)
+			if _, err := InvocationReceipt(f.b, ticket); err == nil {
+				t.Fatal("released receipt from damaged journal")
+			}
+			if _, err := Executions(f.b, "job"); err == nil {
+				t.Fatal("reported damaged journal as valid")
+			}
+		})
+	}
+}
+
 func TestIntentIsDurableBeforeFieldUnlock(t *testing.T) {
 	f := approvedCall(t)
 	ticket := filepath.Join(f.call(t), "invocation.age")

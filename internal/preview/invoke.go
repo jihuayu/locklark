@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"os"
 	"path/filepath"
 	"sort"
 	"time"
@@ -26,11 +27,7 @@ func authorization(h history, t invocation) (Decision, error) {
 	}
 	return Decision{}, errInvoke
 }
-func currentSession(tx *bolt.Tx, id *age.X25519Identity, owner []byte, d Decision, now time.Time) error {
-	reg, err := readRegistry(tx, id, owner)
-	if err != nil {
-		return err
-	}
+func activeSession(reg sessionRegistry, id *age.X25519Identity, d Decision, now time.Time) error {
 	if sessionStatus(d.Request, reg, id.Recipient().String(), now) != "verified" {
 		return errInvoke
 	}
@@ -75,7 +72,18 @@ func runInvocationAt(device, bundle, path string, execute func([]byte) (FieldMet
 		if _, used := h.uses[t.ID]; used {
 			return errInvoke
 		}
-		if err = currentSession(b.Tx(), id, owner.Public().(ed25519.PublicKey), d, clock().UTC()); err != nil {
+		reg, err := readRegistry(b.Tx(), id, owner.Public().(ed25519.PublicKey))
+		if err != nil {
+			return err
+		}
+		check := func() error {
+			now := clock().UTC()
+			if now.Before(d.At) || !now.Before(*d.Expires) {
+				return errInvoke
+			}
+			return activeSession(reg, id, d, now)
+		}
+		if err = check(); err != nil {
 			return err
 		}
 		sealed, err := readEncrypted(bundle, device, d.Request.Epoch)
@@ -85,16 +93,16 @@ func runInvocationAt(device, bundle, path string, execute func([]byte) (FieldMet
 		if d.Snapshot == "" || sealed.pin() != d.Snapshot {
 			return errInvoke
 		}
-		now := clock().UTC()
-		if now.Before(d.At) || !now.Before(*d.Expires) {
-			return errInvoke
-		}
-		if err = currentSession(b.Tx(), id, owner.Public().(ed25519.PublicKey), d, now); err != nil {
+		if err = check(); err != nil {
 			return err
 		}
 		target = sealed
 		expectedArchive = d.Target
-		return appendUse(b, h, record, owner, auditKey, id)
+		if err := appendUse(b, h, record, owner, auditKey, id); err != nil {
+			return err
+		}
+		// No second registry scan: a late expiration rolls back this entire intent.
+		return check()
 	})
 	if err != nil {
 		return nil, err
@@ -157,7 +165,11 @@ func receiptForTicket(device string, id *age.X25519Identity, t invocation) ([]by
 		if err != nil {
 			return err
 		}
-		if err = currentSession(b.Tx(), id, pub, d, time.Now().UTC()); err != nil {
+		reg, err := readRegistry(b.Tx(), id, pub)
+		if err != nil {
+			return err
+		}
+		if err = activeSession(reg, id, d, time.Now().UTC()); err != nil {
 			return err
 		}
 		u, ok := h.uses[t.ID]
@@ -196,5 +208,20 @@ func Executions(device, session string) ([]UseReport, error) {
 	return rows, nil
 }
 func WriteReply(path string, b []byte) error {
-	return write(filepath.Dir(path), filepath.Base(path), b)
+	f, err := os.CreateTemp(filepath.Dir(path), ".locklark-reply-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if _, err = f.Write(b); err == nil {
+		err = f.Sync()
+	}
+	closeErr := f.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return os.Link(f.Name(), path)
 }

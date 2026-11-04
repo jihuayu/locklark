@@ -142,6 +142,10 @@ func readTicket(path string, id *age.X25519Identity) (invocation, error) {
 	if err != nil || r.String() != t.Reply || !ed25519.Verify(pub, t.proof(), t.Signature) {
 		return invocation{}, errInvoke
 	}
+	// Parsing an age recipient checks its encoding, but not low-order points.
+	if _, err := r.Wrap(make([]byte, 16)); err != nil {
+		return invocation{}, errInvoke
+	}
 	return t, nil
 }
 

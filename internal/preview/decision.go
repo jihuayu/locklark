@@ -179,6 +179,9 @@ func overlayDecisions(rows []Request, device string, id *age.X25519Identity) err
 				rows[i].State = stateAt(q, d, now)
 				if u, used := h.uses[q.ID]; used && u.Review == q.Review {
 					rows[i].State = "consumed-" + u.State
+					if u.State == "revoked" {
+						rows[i].State = "approval-revoked"
+					}
 				}
 				if rows[i].State == "approved" && rows[i].SenderStatus != "verified" {
 					rows[i].State = "approval-inactive"
