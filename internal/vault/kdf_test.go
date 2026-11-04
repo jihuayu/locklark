@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"filippo.io/age"
-	kdbx "github.com/tobischo/gokeepasslib/v3"
+	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
 )
 
 func TestSnapshotKDF(t *testing.T) {

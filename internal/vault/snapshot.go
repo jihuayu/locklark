@@ -13,8 +13,8 @@ import (
 	"io"
 
 	"filippo.io/age"
-	kdbx "github.com/tobischo/gokeepasslib/v3"
-	"github.com/tobischo/gokeepasslib/v3/wrappers"
+	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
+	"github.com/jihuayu/locklark/third_party/gokeepasslib/wrappers"
 )
 
 type Snapshot struct {

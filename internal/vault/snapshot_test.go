@@ -5,7 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"filippo.io/age"
-	kdbx "github.com/tobischo/gokeepasslib/v3"
+	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
 	"testing"
 )
 

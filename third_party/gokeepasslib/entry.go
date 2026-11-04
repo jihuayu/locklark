@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"io"
 
-	w "github.com/tobischo/gokeepasslib/v3/wrappers"
+	w "github.com/jihuayu/locklark/third_party/gokeepasslib/wrappers"
 )
 
 type EntryOption func(*Entry)

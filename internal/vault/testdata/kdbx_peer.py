@@ -26,8 +26,15 @@ if db.version != (4, 1) or params['$UUID'].value != kdf_uuids['argon2id']:
 entry, = db.entries
 if entry.title != "Preview" or base64.b64decode(entry.notes, validate=True) != b"original fixture":
     raise ValueError("Go payload did not survive independent read")
+if not entry._is_property_protected("Notes"):
+    raise ValueError("Go Notes were not marked protected")
 entry.notes = base64.b64encode(b"edited by independent peer").decode("ascii")
 db.save(current)
 # Write a distinct legacy Argon2d copy for the backwards-read check.
 db.kdbx.header.value.dynamic_header.kdf_parameters.data.dict['$UUID'].value = kdf_uuids['argon2']
 db.save(legacy)
+for path, algorithm in ((current, "argon2id"), (legacy, "argon2")):
+    saved = PyKeePass(path, keyfile=io.BytesIO(key))
+    params = saved.kdbx.header.value.dynamic_header.kdf_parameters.data.dict
+    if params['$UUID'].value != kdf_uuids[algorithm] or not saved.entries[0]._is_property_protected("Notes"):
+        raise ValueError("peer save changed the expected KDF or protection flag")
