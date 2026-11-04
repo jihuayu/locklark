@@ -193,6 +193,6 @@ go test -count=1 ./internal/vault -run 'TestKDBXIndependentPeer|TestIndependentN
 
 引入真实资料之前，仍须独立密码评审、操作系统密钥存储、原生字段映射和干净机器恢复验收。
 
-新版 CLI 可读旧版单载荷快照；旧版 CLI 不能读取新原生条目布局。PyKeePass 可按 UUID 修改登录、密码、TOTP 和附件；采用外部改动仍须可信签名。普通 CLI 只允许迁出明确支持的合成内容，未提供任意明文导出或真实库导入。
+新版 CLI 可读旧版单载荷快照；旧版 CLI 不能读取新原生条目布局。PyKeePass 可按 UUID 修改登录、密码、TOTP 和附件；采用外部改动仍须可信签名。普通 CLI 只允许迁出明确支持的合成内容，未提供任意明文导出或真实库导入。 当前布局只承载上述条目数据，重写时重新生成访问等时间戳；条目到期、覆盖 URL、自动输入规则、组备注等未支持的设置会被拒绝。文档附件的 KDBX 内存保护位连同字节一起保留；不据此宣称进程内存已被操作系统锁定。
 
 接下来的 M0：将逐字段编辑和迁出对账扩展到更多条目类型、成员/多设备换代与故障恢复、MyGo 常驻桌面原型。Next.js 团队 Web、iOS/Android、受隔离的 Bun MCP Gateway、AI 否决，以及独立部署的 invoke / deliver 两种 server token 均已在[设计稿](docs/design.md)中界定，尚未交付。

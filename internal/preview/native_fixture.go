@@ -122,7 +122,7 @@ func projectFixture(p *payload) error {
 	p.layout = layout
 	p.items = []vault.Item{
 		{ID: "login-sample", Kind: "login", Title: values["login.title"], Password: values["login.password"], OTP: values["login.ops.otp-demo"]},
-		{ID: "document-sample", Kind: "document", Title: values["document.title"], Filename: values["document.filename"], Attachment: attachment},
+		{ID: "document-sample", Kind: "document", Title: values["document.title"], Filename: values["document.filename"], Attachment: attachment, AttachmentProtected: true},
 	}
 	roundtrip, err := nativeArchive(layout, p.items)
 	if err != nil || !bytes.Equal(roundtrip, p.Archive) {

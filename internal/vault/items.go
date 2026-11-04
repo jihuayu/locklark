@@ -15,6 +15,7 @@ import (
 type Item struct {
 	ID, Kind, Title, Password, OTP, Filename string
 	Attachment                               []byte
+	AttachmentProtected                      bool
 }
 
 const itemGroup = "Locklark items v1"
@@ -56,7 +57,7 @@ func validItems(items []Item, size int) bool {
 		size += len(it.Attachment)
 		switch it.Kind {
 		case "login":
-			if it.Filename != "" || it.Attachment != nil {
+			if it.Filename != "" || it.Attachment != nil || it.AttachmentProtected {
 				return false
 			}
 		case "document":
@@ -85,6 +86,11 @@ func writeItems(db *kdbx.Database, metadata []byte, items []Item) error {
 	m.UUID = itemUUID("")
 	m.Values = []kdbx.ValueData{slot("Title", "Locklark metadata v1", false), slot("Notes", base64.StdEncoding.EncodeToString(metadata), true)}
 	g.Entries = []kdbx.Entry{m}
+	type binaryKey struct {
+		hash      [32]byte
+		protected bool
+	}
+	refs := map[binaryKey]int{}
 	for _, it := range items {
 		e := kdbx.NewEntry()
 		e.UUID = itemUUID(it.ID)
@@ -92,15 +98,40 @@ func writeItems(db *kdbx.Database, metadata []byte, items []Item) error {
 		if it.Kind == "login" {
 			e.Values = append(e.Values, slot("Password", it.Password, true), slot("otp", it.OTP, true))
 		} else {
-			ref := db.AddBinary(it.Attachment).CreateReference(it.Filename)
-			e.Binaries = []kdbx.BinaryReference{ref}
+			k := binaryKey{sha256.Sum256(it.Attachment), it.AttachmentProtected}
+			ref, ok := refs[k]
+			if !ok {
+				ref = len(db.Content.InnerHeader.Binaries)
+				b := kdbx.Binary{ID: ref, Content: it.Attachment}
+				if it.AttachmentProtected {
+					b.MemoryProtection = 1
+				}
+				db.Content.InnerHeader.Binaries = append(db.Content.InnerHeader.Binaries, b)
+				refs[k] = ref
+			}
+			e.Binaries = []kdbx.BinaryReference{kdbx.NewBinaryReference(it.Filename, ref)}
 		}
 		g.Entries = append(g.Entries, e)
 	}
 	db.Content.Root.Groups = []kdbx.Group{g}
 	return nil
 }
+func supportedTimes(t kdbx.TimeData) bool {
+	// These snapshots generate new creation/access timestamps on reseal. An
+	// expiration or usage counter is meaningful state we cannot drop.
+	return !t.Expires.Bool && t.ExpiryTime == nil && t.UsageCount == 0
+}
+func supportedGroup(g kdbx.Group) bool {
+	return supportedTimes(g.Times) && g.Notes == "" && g.Tags == "" && len(g.CustomData) == 0 && g.IconID == 0 && g.CustomIconUUID.IsZero() && g.PreviousParentGroup == nil && g.DefaultAutoTypeSequence == "" && g.EnableAutoType == wrappers.NewNullableBoolWrapper(true) && g.EnableSearching == wrappers.NewNullableBoolWrapper(true)
+}
+func supportedEntry(e kdbx.Entry) bool {
+	a := e.AutoType
+	return supportedTimes(e.Times) && len(e.Histories) == 0 && len(e.CustomData) == 0 && e.Tags == "" && e.OverrideURL == "" && e.IconID == 0 && e.CustomIconUUID.IsZero() && e.ForegroundColor == "" && e.BackgroundColor == "" && e.PreviousParentGroup == nil && e.QualityCheck == nil && !a.Enabled.Bool && a.DataTransferObfuscation == 0 && a.DefaultSequence == "" && len(a.Associations) == 0
+}
 func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
+	if !supportedGroup(g) || len(db.Content.Root.DeletedObjects) != 0 {
+		return nil, nil, ErrSnapshot
+	}
 	if len(g.Groups) != 0 || len(g.Entries) < 2 || len(g.Entries) > 257 || db.Content.InnerHeader == nil {
 		return nil, nil, ErrSnapshot
 	}
@@ -120,7 +151,7 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 			}
 			fields[v.Key] = v.Value
 		}
-		if len(e.Histories) > 0 || len(e.CustomData) > 0 || e.Tags != "" {
+		if !supportedEntry(e) {
 			return nil, nil, ErrSnapshot
 		}
 		if e.UUID == itemUUID("") {
@@ -151,11 +182,12 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 			}
 			ref := e.Binaries[0]
 			b := db.FindBinary(ref.Value.ID)
-			if b == nil || len(b.Content) > MaxPayload {
+			if b == nil || b.MemoryProtection > 1 || len(b.Content) > MaxPayload {
 				return nil, nil, ErrSnapshot
 			}
 			// KDBX 4 inner-header binaries are raw octets, even when their
 			// content happens to be valid base64 text.
+			it.AttachmentProtected = b.MemoryProtection == 1
 			it.Attachment = b.Content
 			it.Filename = ref.Name
 			used[ref.Value.ID] = true

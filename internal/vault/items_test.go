@@ -64,11 +64,31 @@ func TestIndependentNativeEditor(t *testing.T) {
 	if found["login"].Title != "renamed via independent editor" || found["login"].Password != "changed fixture" || found["login"].OTP != "otpauth://totp/edited?secret=BBBB" || found["doc"].Title != "same" || found["doc"].Filename != "edited.bin" || string(found["doc"].Attachment) != "RUZH" {
 		t.Fatal("peer changes lost or applied to the wrong item")
 	}
+	s2, err := SealItems(meta, got, 2, []*age.X25519Recipient{device.Recipient()}, signer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key2, err := unwrap(s2.Envelope, device)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(key2)
+	if err = os.WriteFile(src, s2.Database, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd = exec.Command(python, "-I", "testdata/item_peer.py", src)
+	cmd.Stdin = bytes.NewReader(key2)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("peer read after reseal: %v: %s", err, out)
+	}
 }
 
 func TestNativeRejectsLossyReads(t *testing.T) {
 	for name, alter := range map[string]func(*kdbx.Entry){
-		"password no longer protected":              func(e *kdbx.Entry) { e.Values[3].Value.Protected.Bool = false },
+		"expiration":                   func(e *kdbx.Entry) { e.Times.Expires.Bool = true },
+		"override URL":                 func(e *kdbx.Entry) { e.OverrideURL = "https://example.test" },
+		"auto-type":                    func(e *kdbx.Entry) { e.AutoType.DefaultSequence = "{PASSWORD}" },
+		"password no longer protected": func(e *kdbx.Entry) { e.Values[3].Value.Protected.Bool = false },
 		"protected title would lose its protection": func(e *kdbx.Entry) { e.Values[0].Value.Protected.Bool = true },
 		"extra field would be lost":                 func(e *kdbx.Entry) { e.Values = append(e.Values, slot("Custom", "data", true)) },
 		"duplicate field":                           func(e *kdbx.Entry) { e.Values = append(e.Values, e.Values[3]) },
@@ -88,6 +108,40 @@ func TestNativeRejectsLossyReads(t *testing.T) {
 	}
 }
 
+func TestNativeRejectsGroupNotes(t *testing.T) {
+	db := kdbx.NewDatabase(kdbx.WithDatabaseKDBXVersion41())
+	if err := writeItems(db, nil, []Item{{ID: "login", Kind: "login"}}); err != nil {
+		t.Fatal(err)
+	}
+	g := db.Content.Root.Groups[0]
+	g.Notes = "group notes from peer"
+	if _, _, err := readItems(db, g); err == nil {
+		t.Fatal("silently lost group notes")
+	}
+}
+
+func TestDocumentProtectionIndependentOfContent(t *testing.T) {
+	db := kdbx.NewDatabase(kdbx.WithDatabaseKDBXVersion41())
+	var items []Item
+	for _, id := range []string{"clear-flag", "protected-flag", "same-protected"} {
+		items = append(items, Item{ID: id, Kind: "document", Filename: "sample.bin", Attachment: []byte("QUJD"), AttachmentProtected: id != "clear-flag"})
+	}
+	if err := writeItems(db, nil, items); err != nil {
+		t.Fatal(err)
+	}
+	if len(db.Content.InnerHeader.Binaries) != 2 {
+		t.Fatal("incorrect attachment identity")
+	}
+	_, got, err := readItems(db, db.Content.Root.Groups[0])
+	if err != nil || len(got) != 3 {
+		t.Fatal(err)
+	}
+	for i, it := range got {
+		if string(it.Attachment) != "QUJD" || it.AttachmentProtected != items[i].AttachmentProtected {
+			t.Fatal("attachment flags or bytes changed")
+		}
+	}
+}
 func TestNativeItemsRoundTrip(t *testing.T) {
 	pub, signer, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
