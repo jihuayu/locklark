@@ -53,8 +53,6 @@ func renewProfile(device, session, path string) error {
 	return os.Rename(fresh, path)
 }
 
-// The courier answers signed read-only queries; it never issues decisions or
-// runs an approved action. Bound work per tick; one-shot handles one full pass.
 // The filename is not an authority: confirm the ID inside the signed ticket.
 func forwardReceipt(id *age.X25519Identity, device, exchange, request, out string) error {
 	ticket, e := readTicket(filepath.Join(exchange, request+".invoke.age"), id)
@@ -68,6 +66,8 @@ func forwardReceipt(id *age.X25519Identity, device, exchange, request, out strin
 	return WriteReply(out, sealed)
 }
 
+// ServeStatus answers read-only queries and forwards stored receipts. It does
+// not issue decisions or run actions. One-shot mode handles one full pass.
 func ServeStatus(ctx context.Context, device, inbox, exchange, session, profile string, once bool) error {
 	if device == "" || inbox == "" || exchange == "" || (session == "") != (profile == "") {
 		return errSession

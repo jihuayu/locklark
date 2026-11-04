@@ -74,6 +74,24 @@ func loadResultAttempt(c PollConfig, p BridgeProfile, id, review string, newTarg
 	name := id + ".replykey"
 	raw, e := read(c.Private, name, 16384)
 	if errors.Is(e, os.ErrNotExist) && newTarget != nil {
+		// Publication follows private reservation. If a public artifact exists,
+		// a competing submit may just have reserved the identity; reload it.
+		// Never replace a lost receiver with one that cannot open its receipt.
+		for _, suffix := range []string{".invoke.age", ".result.age"} {
+			_, markerErr := os.Lstat(filepath.Join(c.Exchange, id+suffix))
+			if markerErr == nil {
+				raw, e = read(c.Private, name, 16384)
+				if e != nil {
+					return saved, errInvoke
+				}
+				break
+			}
+			if !errors.Is(markerErr, os.ErrNotExist) {
+				return saved, errInvoke
+			}
+		}
+	}
+	if errors.Is(e, os.ErrNotExist) && newTarget != nil {
 		if !newTarget.Valid() || newTarget.PullScope != p.Scope {
 			return saved, errInvoke
 		}

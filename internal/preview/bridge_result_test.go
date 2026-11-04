@@ -108,6 +108,22 @@ func TestBridgeCollectRequiresOriginalRecipient(t *testing.T) {
 	if _, err = os.Stat(sealedPath); !os.IsNotExist(err) {
 		t.Fatal("collect wrote identity file")
 	}
+	for _, remove := range []string{out, ticket} {
+		if err = os.Remove(remove); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = SubmitBridgeAction(c, f.inbox, p, strings.Repeat("ab", 16), "review pull", 7, plan); err == nil {
+			t.Fatal("retry reported success despite missing receiver", remove)
+		}
+		if _, err = os.Lstat(sealedPath); !os.IsNotExist(err) {
+			t.Fatal("retry replaced original receiver", remove)
+		}
+		if remove == out {
+			if err = WriteReply(out, encrypted); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 }
 func TestRetiredModuleProfileStillPermitsReceiptRecovery(t *testing.T) {
 	f := approvedCall(t)
