@@ -22,15 +22,17 @@ const FixtureAction = "fixture.inspect-metadata"
 const FixtureRef = "op://synthetic-vault/login-sample/ops/otp-demo"
 
 type Request struct {
-	Action  string `json:"action,omitempty"`
-	Epoch   uint64 `json:"epoch,omitempty"`
-	Review  string `json:"review,omitempty"`
-	ID      string `json:"id"`
-	Session string `json:"session"`
-	Reason  string `json:"reason"`
-	Ref     string `json:"ref"`
-	State   string `json:"state"`
-	Created string `json:"claimed_time"`
+	Auth         *SessionProof `json:"auth,omitempty"`
+	SenderStatus string        `json:"sender_status,omitempty"`
+	Action       string        `json:"action,omitempty"`
+	Epoch        uint64        `json:"epoch,omitempty"`
+	Review       string        `json:"review,omitempty"`
+	ID           string        `json:"id"`
+	Session      string        `json:"session"`
+	Reason       string        `json:"reason"`
+	Ref          string        `json:"ref"`
+	State        string        `json:"state"`
+	Created      string        `json:"claimed_time"`
 }
 type InboxReport struct {
 	Next       string    `json:"next,omitempty"`
@@ -64,6 +66,9 @@ func setupInbox(out string, secret, id []byte) error {
 	return write(filepath.Join(out, "agent"), "approval.pub", []byte(identity.Recipient().String()))
 }
 func Submit(inbox, recipientFile, session, reason, ref string) (string, error) {
+	return SubmitSigned(inbox, recipientFile, session, reason, ref, "")
+}
+func SubmitSigned(inbox, recipientFile, session, reason, ref, keyfile string) (string, error) {
 	if !validRequest(session, reason, ref) {
 		return "", errors.New("invalid synthetic request, reason, session or reference")
 	}
@@ -80,6 +85,16 @@ func Submit(inbox, recipientFile, session, reason, ref string) (string, error) {
 		return "", err
 	}
 	request := Request{ID: hex.EncodeToString(id[:]), Session: session, Reason: strings.TrimSpace(reason), Ref: ref, State: "pending", Created: time.Now().UTC().Format(time.RFC3339Nano), Action: FixtureAction, Epoch: 3}
+	if keyfile != "" {
+		seed, err := read(filepath.Dir(keyfile), filepath.Base(keyfile), 32)
+		if err != nil {
+			return "", err
+		}
+		defer clear(seed)
+		if err = signRequest(&request, seed, r.String()); err != nil {
+			return "", err
+		}
+	}
 	var out bytes.Buffer
 	w, err := age.Encrypt(&out, r)
 	if err != nil {
@@ -216,6 +231,10 @@ func openRequest(dir, name string, id *age.X25519Identity) (Request, bool) {
 		return q, false
 	}
 	_, err = time.Parse(time.RFC3339Nano, q.Created)
+	q.SenderStatus = ""
+	if q.Auth != nil && !q.Auth.wellFormed() {
+		return Request{}, false
+	}
 	q.Review = requestDigest(q)
 	return q, (q.Action == "" && q.Epoch == 0 || q.Action == FixtureAction && q.Epoch == 3) && err == nil && validID(q.ID) && name == q.ID+".request.age" && q.State == "pending" && validRequest(q.Session, q.Reason, q.Ref)
 }

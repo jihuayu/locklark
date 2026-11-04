@@ -51,7 +51,22 @@ go build -o locklark.exe ./cmd/locklark
 
 第一条返回随机请求 ID 和 `pending`。第二条解密并按 session 查回 ID、引用和原因，不解析或返回字段值。它用独立的收件密钥；每页最多检查 128 封密文，损坏的计入 `unreadable`。响应有 `next` 时，带上 `--after <next>` 继续；新投递从第一页重新查。这是本地文件投递，要求文件系统支持硬链接（Windows NTFS / Linux 本地文件系统）；还没有远程中继或推送。公开收件密钥须由可信客户端单独交付，不能相信待办目录自报的公钥。
 
-`inbox` 中的请求来自未经认证的提交方，session、原因和时间都是自报；拥有收件公钥就能投递，控制目录者也能删信。`audit` 读取的则是建库演练时保存在签名快照中的事件，包括一次固定的拒绝。两者都不能证明某人批准过使用密钥。新版演练的事件另有审计签名；下节的本机决定单独入账，一次性兑现尚未实现。
+拥有收件公钥就能投递匿名请求，但仅凭它不能让请求获批；只有登记过的会话签名有效时，`sender_status` 才会显示 `verified`。签名证明持有该会话的私钥，不能证明它声称的用途属实。控制目录者仍能删除来信。`audit` 读取的则是建库演练时保存在签名快照中的事件，包括一次固定的拒绝。两者都不能证明某人批准过使用密钥。新版演练的事件另有审计签名；下节的本机决定单独入账，一次性兑现尚未实现。
+
+## 登记 Agent 会话
+
+Agent 在自己的私有目录生成一次性会话密钥，把显示的公钥交给主人通过独立渠道核对。主人只登记公钥。以下是两边手工演练的命令；真实隔离需要不同 OS 用户或独立远端 runner，不能把持库客户端目录交给 Agent：
+
+```powershell
+# Agent：记下输出中的 public，私钥只保存在 Agent 自己的目录。
+.\locklark.exe session-keygen --out runner.sessionkey
+# 主人：把 PUBLIC_HEX 替换为独立核对过的完整公钥。
+.\locklark.exe session-enroll --device demo-out/clients/B --session deploy-17 --public PUBLIC_HEX --reason "核对发布任务的 runner"
+# Agent：使用通过可信途径拿到的收件公钥文件，签名后投递。
+.\locklark.exe request --inbox demo-out/inbox --recipient demo-out/agent/approval.pub --session deploy-17 --session-key runner.sessionkey --reason "检查演练发布" --ref "op://synthetic-vault/login-sample/ops/otp-demo"
+```
+
+每次登记最长 24 小时，限定本机收件身份和固定合成动作。session 名称和公钥都不能在此设备重新登记，续期用新名称和新密钥。主人可运行 `session-revoke --device demo-out/clients/B --session deploy-17 --reason "任务结束"`；`session-history --device demo-out/clients/B --session deploy-17` 可查签名登记及撤销记录。动作、字段、代次、理由、时间和请求 ID 均绑定签名。未签名来信仍可查看和拒绝；撤销和批准共用事务，撤销之后不能发出新的批准。私钥文件受所在目录及 OS 权限保护，尚未对接系统钥匙串。
 
 ## 对离线请求作出决定
 
@@ -62,7 +77,7 @@ go build -o locklark.exe ./cmd/locklark
 .\locklark.exe decisions --device demo-out/clients/B --session deploy-17
 ```
 
-拒绝用 `--choice deny`，无需打开金库。批准只适用于已核实的第 3 代内置合成目标；旧版无动作信息的来信只能拒绝。请求自报时间不能在未来或早于 24 小时前，批准有效期最多 2 分钟。`decisions` 是历史记录，过期不会改写历史；`inbox` 显示当前状态。没有执行接口、可兑凭证或原值交付。
+拒绝用 `--choice deny`，无需打开金库。批准只适用于已核实的第 3 代内置合成目标；匿名、未登记、已撤销或目标未核实的来信只能拒绝。请求自报时间不能在未来或早于 24 小时前，批准有效期最多 2 分钟，且不能超过会话或请求的到期时间。`decisions` 是历史记录，过期不会改写历史；`inbox` 显示当前状态。没有执行接口、可兑凭证或原值交付。
 
 B 的本地事务库把签名决定与单独审计流的事件一起加密提交；查询会校验两种签名和前序摘要。并发相反决定只提交一个；原来信仍可读、批准目标仍可核验时，相同决定和理由的重试返回原记录。同一 ID 换了请求内容会显示冲突，删掉中继来信也不能删除本机决定。新功能需要新生成的演练客户端；旧演练仍能查看原待办。这个本机账本与快照里的演练审计是两条独立的流；此版还不能发现整个本机事务库被回滚，有效期依据本机时钟，尚无抗时钟回拨的独立时间基准，不能用于生产授权。
 

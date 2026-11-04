@@ -8,6 +8,7 @@
 *.1pux
 *.age
 *.agekey
+*.sessionkey
 *.slot
 fixture.secret
 **/clients/A/

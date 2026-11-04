@@ -21,7 +21,13 @@ func TestCLIReviewDecideAndReadJournal(t *testing.T) {
 	}
 	call("demo", "--out", root, "--session", "init", "--reason", "run fixture")
 	inbox, b := filepath.Join(root, "inbox"), filepath.Join(root, "clients", "B")
-	call("request", "--inbox", inbox, "--recipient", filepath.Join(root, "agent", "approval.pub"), "--session", "release", "--reason", "inspect sample", "--ref", preview.FixtureRef)
+	key := filepath.Join(t.TempDir(), "release.sessionkey")
+	var identity struct{ Public string }
+	if json.Unmarshal(call("session-keygen", "--out", key), &identity) != nil || identity.Public == "" {
+		t.Fatal("missing public key")
+	}
+	call("session-enroll", "--device", b, "--session", "release", "--public", identity.Public, "--reason", "runner setup")
+	call("request", "--inbox", inbox, "--recipient", filepath.Join(root, "agent", "approval.pub"), "--session", "release", "--reason", "inspect sample", "--ref", preview.FixtureRef, "--session-key", key)
 	var report preview.InboxReport
 	if json.Unmarshal(call("inbox", "--inbox", inbox, "--device", b, "--session", "release"), &report) != nil || len(report.Requests) != 1 {
 		t.Fatal("missing request")

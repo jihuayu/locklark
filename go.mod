@@ -4,6 +4,7 @@ go 1.26.8
 
 require (
 	filippo.io/age v1.3.2
+	filippo.io/edwards25519 v1.2.0
 	github.com/tobischo/gokeepasslib/v3 v3.7.1
 	go.etcd.io/bbolt v1.5.0
 	golang.org/x/text v0.43.0

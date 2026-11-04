@@ -19,9 +19,13 @@ const usage = `Locklark · offline preview (synthetic data only)
   fixture-export --bundle EPOCH_DIR --device CLIENT_DIR --epoch N --out NEW_FILE.1pux
   audit    --bundle EPOCH_DIR --device CLIENT_DIR --epoch N --session ID [--checkpoint FILE]
   audit-verify --bundle EPOCH_DIR --device CLIENT_DIR --epoch N --checkpoint FILE
-  request  --inbox DIR --recipient PUBLIC_KEY_FILE --session ID --reason TEXT --ref REF
+  request  --inbox DIR --recipient PUBLIC_KEY_FILE --session ID --reason TEXT --ref REF [--session-key FILE]
   inbox    --inbox DIR --device CLIENT_B_DIR --session ID [--after CURSOR]
 
+  session-keygen --out NEW_FILE.sessionkey
+  session-enroll --device CLIENT_B_DIR --session ID --public PUBLIC_HEX --reason TEXT
+  session-revoke --device CLIENT_B_DIR --session ID --reason TEXT
+  session-history --device CLIENT_B_DIR --session ID
   decide   --inbox DIR --device CLIENT_B_DIR --id ID --review DIGEST --choice approve|deny --reason TEXT [--bundle EPOCH_3_DIR]
   decisions --device CLIENT_B_DIR --session ID
 
@@ -35,9 +39,13 @@ func run(args []string, out, errOut io.Writer) error {
 		return err
 	}
 	command := args[0]
+	switch command {
+	case "session-keygen", "session-enroll", "session-revoke", "session-history":
+		return runSession(args, out, errOut)
+	}
 	f := flag.NewFlagSet(command, flag.ContinueOnError)
 	f.SetOutput(errOut)
-	var dir, bundle, device, session, reason, recipient, ref, after, checkpoint, id, review, choice string
+	var dir, bundle, device, session, reason, recipient, ref, after, checkpoint, id, review, choice, sessionKey string
 	var epoch uint64
 	switch command {
 	case "demo":
@@ -76,6 +84,7 @@ func run(args []string, out, errOut io.Writer) error {
 		f.StringVar(&reason, "reason", "", "synthetic business reason; never include a credential")
 	}
 	if command == "request" {
+		f.StringVar(&sessionKey, "session-key", "", "agent-owned signing seed file")
 		f.StringVar(&recipient, "recipient", "", "trusted file containing only the owner's public inbox key")
 		f.StringVar(&ref, "ref", "", "synthetic field reference")
 	}
@@ -83,11 +92,18 @@ func run(args []string, out, errOut io.Writer) error {
 		return err
 	}
 	requestedWitness := false
+	requestedKey := false
 	f.Visit(func(opt *flag.Flag) {
+		if opt.Name == "session-key" {
+			requestedKey = true
+		}
 		if opt.Name == "checkpoint" {
 			requestedWitness = true
 		}
 	})
+	if requestedKey && sessionKey == "" {
+		return errors.New("--session-key requires a file")
+	}
 	if requestedWitness && checkpoint == "" {
 		return errors.New("--checkpoint requires a trusted checkpoint file")
 	}
@@ -133,7 +149,7 @@ func run(args []string, out, errOut io.Writer) error {
 			return errors.New("--inbox and --recipient are required")
 		}
 		var id string
-		id, err = preview.Submit(dir, recipient, session, reason, ref)
+		id, err = preview.SubmitSigned(dir, recipient, session, reason, ref, sessionKey)
 		result = map[string]string{"id": id, "state": "pending"}
 	case "inbox":
 		if dir == "" || device == "" {

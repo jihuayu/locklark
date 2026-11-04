@@ -40,6 +40,7 @@ type entry struct {
 }
 
 func requestDigest(q Request) string {
+	q.SenderStatus = ""
 	q.Review = ""
 	raw, _ := json.Marshal(q)
 	h := sha256.Sum256(append([]byte("locklark/local-review/v1\x00"), raw...))

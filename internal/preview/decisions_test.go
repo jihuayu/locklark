@@ -37,8 +37,24 @@ func TestDecisionTimePolicyAndTamper(t *testing.T) {
 	}
 	id := "00000000000000000000000000000001"
 	q := Request{ID: id, Session: "timer", Reason: "time test", Ref: FixtureRef, Action: FixtureAction, Epoch: 3, State: "pending"}
+	keyPath := filepath.Join(t.TempDir(), "timer.sessionkey")
+	public, err := NewSessionKey(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registration, err := changeSession(b, "timer", public, "enroll timer", false, func() time.Time { return time.Now().Add(-24*time.Hour + 30*time.Second) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	send := func(when time.Time) {
 		q.Created = when.UTC().Format(time.RFC3339Nano)
+		if err := signRequest(&q, seed, pub.String()); err != nil {
+			t.Fatal(err)
+		}
 		var buf bytes.Buffer
 		w, e := age.Encrypt(&buf, pub)
 		if e != nil {
@@ -81,7 +97,7 @@ func TestDecisionTimePolicyAndTamper(t *testing.T) {
 		t.Fatal(err)
 	}
 	created, _ := time.Parse(time.RFC3339Nano, q.Created)
-	if d.Expires == nil || d.Expires.After(created.Add(24*time.Hour)) {
+	if d.Expires == nil || d.Expires.After(created.Add(24*time.Hour)) || d.Expires.After(registration.Expires) {
 		t.Fatal("approval outlived original request")
 	}
 	retry, err := Decide(inbox, b, bundle, id, review, "approve", "bounded approval")
@@ -115,7 +131,15 @@ func TestDecisionsSurviveRestartAndDoNotTransfer(t *testing.T) {
 		t.Fatal(err)
 	}
 	inbox, b, bundle, pub := filepath.Join(root, "inbox"), filepath.Join(root, "clients", "B"), filepath.Join(root, "share", "epoch-3"), filepath.Join(root, "agent", "approval.pub")
-	id, err := Submit(inbox, pub, "job", "review job", FixtureRef)
+	keyPath := filepath.Join(t.TempDir(), "job.sessionkey")
+	public, err := NewSessionKey(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = EnrollSession(b, "job", public, "trusted runner"); err != nil {
+		t.Fatal(err)
+	}
+	id, err := SubmitSigned(inbox, pub, "job", "review job", FixtureRef, keyPath)
 	if err != nil {
 		t.Fatal(err)
 	}

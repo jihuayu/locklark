@@ -63,6 +63,15 @@ func Decide(inbox, device, bundle, id, review, choice, reason string) (Decision,
 	}
 	defer clear(auditSigner)
 	err = withHistory(device, actor, true, func(b *bolt.Bucket, h history) error {
+		now := time.Now().UTC()
+		reg, err := readRegistry(b.Tx(), actor, signer.Public().(ed25519.PublicKey))
+		if err != nil {
+			return err
+		}
+		d.Request.SenderStatus = sessionStatus(q, reg, actor.Recipient().String(), now)
+		if choice == "approve" && d.Request.SenderStatus != "verified" {
+			return errSession
+		}
 		for _, old := range h.decisions {
 			if old.Request.ID == id {
 				if old.Request.Review == review && old.Result == d.Result && old.Reason == d.Reason {
@@ -72,7 +81,7 @@ func Decide(inbox, device, bundle, id, review, choice, reason string) (Decision,
 				return errChanged
 			}
 		}
-		d.At = time.Now().UTC()
+		d.At = now
 		if choice == "approve" {
 			created, err := time.Parse(time.RFC3339Nano, q.Created)
 			deadline := created.Add(24 * time.Hour)
@@ -80,6 +89,9 @@ func Decide(inbox, device, bundle, id, review, choice, reason string) (Decision,
 				return errChanged
 			}
 			until := d.At.Add(2 * time.Minute)
+			if x := reg.latest[q.Session].Expires; x.Before(deadline) {
+				deadline = x
+			}
 			if until.After(deadline) {
 				until = deadline
 			}
@@ -129,17 +141,32 @@ func Decisions(device, session string) ([]Decision, error) {
 func overlayDecisions(rows []Request, device string, id *age.X25519Identity) error {
 	if _, err := os.Stat(filepath.Join(device, "decision.pub")); errors.Is(err, os.ErrNotExist) {
 		if _, dbErr := os.Stat(filepath.Join(device, "decisions.db")); errors.Is(dbErr, os.ErrNotExist) {
+			for i := range rows {
+				rows[i].SenderStatus = "unsigned"
+				if rows[i].Auth != nil {
+					rows[i].SenderStatus = "unregistered"
+				}
+			}
 			return nil
 		} // older fixture without a journal
 		return errDecision
 	}
-	return withHistory(device, id, false, func(_ *bolt.Bucket, h history) error {
+	authority, err := read(device, "decision.pub", 32)
+	if err != nil || len(authority) != 32 {
+		return errSession
+	}
+	return withHistory(device, id, false, func(b *bolt.Bucket, h history) error {
+		reg, err := readRegistry(b.Tx(), id, authority)
+		if err != nil {
+			return err
+		}
 		byID := make(map[string]Decision, len(h.decisions))
 		for _, d := range h.decisions {
 			byID[d.Request.ID] = d
 		}
 		now := time.Now().UTC()
 		for i, q := range rows {
+			rows[i].SenderStatus = sessionStatus(q, reg, id.Recipient().String(), now)
 			created, err := time.Parse(time.RFC3339Nano, q.Created)
 			if created.After(now) {
 				rows[i].State = "not-yet-valid"
@@ -149,6 +176,9 @@ func overlayDecisions(rows []Request, device string, id *age.X25519Identity) err
 			}
 			if d, ok := byID[q.ID]; ok {
 				rows[i].State = stateAt(q, d, now)
+				if rows[i].State == "approved" && rows[i].SenderStatus != "verified" {
+					rows[i].State = "approval-inactive"
+				}
 			}
 		}
 		return nil
