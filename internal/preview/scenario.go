@@ -72,7 +72,13 @@ func writeJSON(dir, name string, v any) error {
 	return write(dir, name, b)
 }
 func read(dir, name string, limit int64) ([]byte, error) {
-	f, err := os.OpenInRoot(dir, name)
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	// With an adversarial directory the entry can change between stat and open.
+	f, err := root.OpenFile(name, os.O_RDONLY|readFlags, 0)
 	if err != nil {
 		return nil, err
 	}

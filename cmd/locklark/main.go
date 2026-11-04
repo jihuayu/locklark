@@ -18,7 +18,7 @@ const usage = `Locklark · offline preview (synthetic data only)
   inspect  --bundle EPOCH_DIR --device CLIENT_DIR --epoch N
   audit    --bundle EPOCH_DIR --device CLIENT_DIR --epoch N --session ID
   request  --inbox DIR --recipient PUBLIC_KEY_FILE --session ID --reason TEXT --ref REF
-  inbox    --inbox DIR --device CLIENT_B_DIR --session ID
+  inbox    --inbox DIR --device CLIENT_B_DIR --session ID [--after CURSOR]
 
 The only allowed request reference is ` + preview.FixtureRef + `.
 request records a pending request. It cannot release any credential.
@@ -32,7 +32,7 @@ func run(args []string, out, errOut io.Writer) error {
 	command := args[0]
 	f := flag.NewFlagSet(command, flag.ContinueOnError)
 	f.SetOutput(errOut)
-	var dir, bundle, device, session, reason, recipient, ref string
+	var dir, bundle, device, session, reason, recipient, ref, after string
 	var epoch uint64
 	switch command {
 	case "demo":
@@ -44,6 +44,9 @@ func run(args []string, out, errOut io.Writer) error {
 		f.StringVar(&dir, "inbox", "", "local request spool")
 	default:
 		return errors.New("unknown command; see locklark help")
+	}
+	if command == "inbox" {
+		f.StringVar(&after, "after", "", "cursor from the previous page")
 	}
 	if command == "inspect" || command == "audit" || command == "inbox" {
 		f.StringVar(&device, "device", "", "private fixture client directory")
@@ -90,7 +93,7 @@ func run(args []string, out, errOut io.Writer) error {
 		if dir == "" || device == "" {
 			return errors.New("--inbox and --device are required")
 		}
-		result, err = preview.Inbox(dir, device, session)
+		result, err = preview.InboxPage(dir, device, session, after)
 	}
 	if err != nil {
 		return err

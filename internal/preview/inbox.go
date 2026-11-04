@@ -31,6 +31,7 @@ type Request struct {
 	Created string `json:"claimed_time"`
 }
 type InboxReport struct {
+	Next       string    `json:"next,omitempty"`
 	Requests   []Request `json:"requests"`
 	Unreadable int       `json:"unreadable"`
 }
@@ -108,6 +109,9 @@ func Submit(inbox, recipientFile, session, reason, ref string) (string, error) {
 	return request.ID, nil
 }
 func Inbox(dir, device, session string) (InboxReport, error) {
+	return InboxPage(dir, device, session, "")
+}
+func InboxPage(dir, device, session, cursor string) (InboxReport, error) {
 	report := InboxReport{Requests: []Request{}}
 	if !sessionID.MatchString(session) {
 		return report, errInput
@@ -139,13 +143,11 @@ func Inbox(dir, device, session string) (InboxReport, error) {
 		return report, err
 	}
 	defer d.Close()
-	entries, err := d.ReadDir(4097)
-	if err != nil && err != io.EOF {
+	entries, next, err := pageEntries(d, cursor)
+	if err != nil {
 		return report, err
 	}
-	if len(entries) > 4096 {
-		return report, errors.New("fixture inbox exceeds 4096 directory entries")
-	}
+	report.Next = next
 	for _, f := range entries {
 		if !strings.HasSuffix(f.Name(), ".request.age") {
 			continue
@@ -172,6 +174,42 @@ func Inbox(dir, device, session string) (InboxReport, error) {
 		return a.Created < b.Created
 	})
 	return report, nil
+}
+
+// Bound memory and decryption work per page. Irrelevant directory entries
+// never consume message capacity. Cursor is an opaque filename position.
+func pageEntries(dir *os.File, cursor string) ([]os.DirEntry, string, error) {
+	const size = 128
+	if len(cursor) > 1024 {
+		return nil, "", errors.New("invalid inbox cursor")
+	}
+	after, err := hex.DecodeString(cursor)
+	if err != nil {
+		return nil, "", errors.New("invalid inbox cursor")
+	}
+	page := make([]os.DirEntry, 0, size*3+1)
+	for {
+		batch, err := dir.ReadDir(size * 2)
+		for _, entry := range batch {
+			if strings.HasSuffix(entry.Name(), ".request.age") && entry.Name() > string(after) {
+				page = append(page, entry)
+			}
+		}
+		sort.Slice(page, func(i, j int) bool { return page[i].Name() < page[j].Name() })
+		if len(page) > size+1 {
+			page = page[:size+1]
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, "", err
+		}
+	}
+	if len(page) > size {
+		return page[:size], hex.EncodeToString([]byte(page[size-1].Name())), nil
+	}
+	return page, "", nil
 }
 func openRequest(dir, name string, id *age.X25519Identity) (Request, bool) {
 	var q Request

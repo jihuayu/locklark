@@ -37,7 +37,7 @@ go build -o locklark.exe ./cmd/locklark
 .\locklark.exe inbox --inbox demo-out/inbox --device demo-out/clients/B --session deploy-17
 ```
 
-第一条返回随机请求 ID 和 `pending`。第二条解密并按 session 查回 ID、引用和原因，不解析或返回字段值。它用独立的收件密钥；损坏的请求计入 `unreadable`。这是本地文件投递，要求文件系统支持硬链接（Windows NTFS / Linux 本地文件系统）；还没有远程中继或推送。公开收件密钥须由可信客户端单独交付，不能相信待办目录自报的公钥。
+第一条返回随机请求 ID 和 `pending`。第二条解密并按 session 查回 ID、引用和原因，不解析或返回字段值。它用独立的收件密钥；每页最多检查 128 封密文，损坏的计入 `unreadable`。响应有 `next` 时，带上 `--after <next>` 继续；新投递从第一页重新查。这是本地文件投递，要求文件系统支持硬链接（Windows NTFS / Linux 本地文件系统）；还没有远程中继或推送。公开收件密钥须由可信客户端单独交付，不能相信待办目录自报的公钥。
 
 `inbox` 中的请求来自未经认证的提交方，session、原因和时间都是自报；拥有收件公钥就能投递，控制目录者也能删信。`audit` 读取的则是建库演练时保存在签名快照中的事件，包括一次固定的拒绝。两者都不能证明某人批准过使用密钥。独立审计密钥、追加式事件链、外部检查点、批准和一次性兑现是下一阶段工作。
 
