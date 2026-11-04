@@ -162,6 +162,7 @@ func TestProjectionTracksRealPersonalAuditRevision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var previous reference.Target
 	project := func(file string, secret []byte) reference.Target {
 		t.Helper()
 		rows, e := List(file, pw, secret)
@@ -172,7 +173,8 @@ func TestProjectionTracksRealPersonalAuditRevision(t *testing.T) {
 		for _, row := range rows {
 			revs[row.ID] = row.Revision
 		}
-		catalog, e := ProjectReferenceMetadata([]byte(schema), "personal-vault", "Work", readStoredItems(t, file, pw, secret), revs)
+		items := readStoredItems(t, file, pw, secret)
+		catalog, e := ProjectReferenceMetadata([]byte(schema), "personal-vault", "Work", items, revs)
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -180,6 +182,16 @@ func TestProjectionTracksRealPersonalAuditRevision(t *testing.T) {
 		if e != nil {
 			t.Fatal(e)
 		}
+		bound, e := BindReferenceMetadata([]byte(schema), "personal-vault", "Work", items, revs, target)
+		if e != nil || bound.Target != target || bound.Slot != reference.SlotPassword || bound.Type != reference.TypePassword {
+			t.Fatal("signed journal target did not bind to password slot", e)
+		}
+		if previous.FieldID != "" {
+			if stale, e := BindReferenceMetadata([]byte(schema), "personal-vault", "Work", items, revs, previous); !errors.Is(e, reference.ErrStale) || stale != (reference.Binding{}) {
+				t.Fatal("old journal target rebound after rename or restore", e)
+			}
+		}
+		previous = target
 		return target
 	}
 	before := project(path, key)

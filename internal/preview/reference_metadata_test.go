@@ -237,6 +237,15 @@ func TestFixtureReferenceBindsVerifiedSnapshotAndAudit(t *testing.T) {
 		if target.Revision != fixtureReferenceRevision+p.pin {
 			t.Fatal("reference did not bind the authenticated snapshot signature")
 		}
+		bound, err := BindFixtureReferenceMetadata(nativeReferenceJSON(t, m), p.items, p.pin, target)
+		if err != nil || bound.Target != target || bound.Slot != reference.SlotOTP || bound.Type != reference.TypeOTP {
+			t.Fatal("verified source target did not bind to stored OTP configuration", err)
+		}
+		if previous.FieldID != "" {
+			if stale, e := BindFixtureReferenceMetadata(nativeReferenceJSON(t, m), p.items, p.pin, previous); !errors.Is(e, reference.ErrStale) || stale != (reference.Binding{}) {
+				t.Fatal("old snapshot target rebound after rename/OTP rotation", e)
+			}
+		}
 		if previous.FieldID != "" && (target.ItemID != previous.ItemID || target.SectionID != previous.SectionID || target.FieldID != previous.FieldID || target.Revision == previous.Revision) {
 			t.Fatal("source identity or snapshot version lost across rename")
 		}
