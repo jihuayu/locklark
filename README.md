@@ -51,7 +51,20 @@ go build -o locklark.exe ./cmd/locklark
 
 第一条返回随机请求 ID 和 `pending`。第二条解密并按 session 查回 ID、引用和原因，不解析或返回字段值。它用独立的收件密钥；每页最多检查 128 封密文，损坏的计入 `unreadable`。响应有 `next` 时，带上 `--after <next>` 继续；新投递从第一页重新查。这是本地文件投递，要求文件系统支持硬链接（Windows NTFS / Linux 本地文件系统）；还没有远程中继或推送。公开收件密钥须由可信客户端单独交付，不能相信待办目录自报的公钥。
 
-`inbox` 中的请求来自未经认证的提交方，session、原因和时间都是自报；拥有收件公钥就能投递，控制目录者也能删信。`audit` 读取的则是建库演练时保存在签名快照中的事件，包括一次固定的拒绝。两者都不能证明某人批准过使用密钥。独立审计密钥、追加式事件链、外部检查点、批准和一次性兑现是下一阶段工作。
+`inbox` 中的请求来自未经认证的提交方，session、原因和时间都是自报；拥有收件公钥就能投递，控制目录者也能删信。`audit` 读取的则是建库演练时保存在签名快照中的事件，包括一次固定的拒绝。两者都不能证明某人批准过使用密钥。新版演练的事件另有审计签名；批准与一次性兑现仍未实现。
+
+## 核对审计与历史回滚
+
+新版 `demo` 使用与快照签发者不同的 Ed25519 审计密钥；每个事件签名绑定事件正文、序号及上一条签名的 SHA-256 摘要。事件和签名都在加密快照内。客户端独立保存 `audit.pub`；审计流按签名密钥区分。旧版演练没有审计签名，仍可普通查询，但不能通过检查点验证。
+
+从可信设备把 `witness/epoch-3.json` 复制到另一个可信位置（下例为 `backup/`），随后可离线运行：
+
+```powershell
+.\locklark.exe audit-verify --bundle demo-out/share/epoch-3 --device demo-out/clients/B --epoch 3 --checkpoint backup/epoch-3.json
+.\locklark.exe audit --bundle demo-out/share/epoch-3 --device demo-out/clients/B --epoch 3 --session build-42 --checkpoint backup/epoch-3.json
+```
+
+第 3 代对第 3 代检查点返回 `{"events":4,"witnessed":4}`。对第 2 代检查点则是 4 条、见证 3 条；用第 3 代检查点验证第 2 代会拒绝。修改单条事件或拿另一演练的检查点也会失败。若快照和检查点一起回退，则仅凭二者无法发现回退；`witness/` 在同一实验目录，不等于已有异地备份。本批只实现单签发设备、内存产生的审计私钥；独立审计加密/恢复、持久写入、跨设备见证与故障处理待开发。
 
 ## 已验证的边界
 

@@ -17,7 +17,8 @@ const usage = `Locklark · offline preview (synthetic data only)
   demo     --out NEW_DIR --session ID --reason TEXT
   inspect  --bundle EPOCH_DIR --device CLIENT_DIR --epoch N
   fixture-export --bundle EPOCH_DIR --device CLIENT_DIR --epoch N --out NEW_FILE.1pux
-  audit    --bundle EPOCH_DIR --device CLIENT_DIR --epoch N --session ID
+  audit    --bundle EPOCH_DIR --device CLIENT_DIR --epoch N --session ID [--checkpoint FILE]
+  audit-verify --bundle EPOCH_DIR --device CLIENT_DIR --epoch N --checkpoint FILE
   request  --inbox DIR --recipient PUBLIC_KEY_FILE --session ID --reason TEXT --ref REF
   inbox    --inbox DIR --device CLIENT_B_DIR --session ID [--after CURSOR]
 
@@ -33,12 +34,12 @@ func run(args []string, out, errOut io.Writer) error {
 	command := args[0]
 	f := flag.NewFlagSet(command, flag.ContinueOnError)
 	f.SetOutput(errOut)
-	var dir, bundle, device, session, reason, recipient, ref, after string
+	var dir, bundle, device, session, reason, recipient, ref, after, checkpoint string
 	var epoch uint64
 	switch command {
 	case "demo":
 		f.StringVar(&dir, "out", "", "new fixture directory")
-	case "inspect", "audit", "fixture-export":
+	case "inspect", "audit", "audit-verify", "fixture-export":
 		f.StringVar(&bundle, "bundle", "", "shared epoch directory")
 		f.Uint64Var(&epoch, "epoch", 0, "expected epoch, pinned independently")
 	case "request", "inbox":
@@ -46,16 +47,19 @@ func run(args []string, out, errOut io.Writer) error {
 	default:
 		return errors.New("unknown command; see locklark help")
 	}
+	if command == "audit" || command == "audit-verify" {
+		f.StringVar(&checkpoint, "checkpoint", "", "checkpoint from an independent trusted location")
+	}
 	if command == "fixture-export" {
 		f.StringVar(&dir, "out", "", "new plaintext synthetic .1pux file")
 	}
 	if command == "inbox" {
 		f.StringVar(&after, "after", "", "cursor from the previous page")
 	}
-	if command == "inspect" || command == "audit" || command == "inbox" || command == "fixture-export" {
+	if command == "inspect" || command == "audit" || command == "inbox" || command == "fixture-export" || command == "audit-verify" {
 		f.StringVar(&device, "device", "", "private fixture client directory")
 	}
-	if command != "inspect" && command != "fixture-export" {
+	if command != "inspect" && command != "fixture-export" && command != "audit-verify" {
 		f.StringVar(&session, "session", "", "agent session identifier")
 	}
 	if command == "demo" || command == "request" {
@@ -68,6 +72,15 @@ func run(args []string, out, errOut io.Writer) error {
 	if err := f.Parse(args[1:]); err != nil {
 		return err
 	}
+	requestedWitness := false
+	f.Visit(func(opt *flag.Flag) {
+		if opt.Name == "checkpoint" {
+			requestedWitness = true
+		}
+	})
+	if requestedWitness && checkpoint == "" {
+		return errors.New("--checkpoint requires a trusted checkpoint file")
+	}
 	if f.NArg() != 0 {
 		return errors.New("unexpected positional argument")
 	}
@@ -77,7 +90,7 @@ func run(args []string, out, errOut io.Writer) error {
 	case "demo":
 		err = preview.Create(dir, session, reason)
 		result = map[string]any{"synthetic": true, "epochs": []int{1, 2, 3}, "out": dir}
-	case "inspect", "audit", "fixture-export":
+	case "inspect", "audit", "audit-verify", "fixture-export":
 		if bundle == "" || device == "" || epoch == 0 {
 			return errors.New("--bundle, --device and --epoch are required")
 		}
@@ -87,7 +100,11 @@ func run(args []string, out, errOut io.Writer) error {
 		} else if command == "inspect" {
 			result, err = preview.Inspect(bundle, device, epoch)
 		} else {
-			result, err = preview.Audit(bundle, device, epoch, session)
+			if command == "audit-verify" {
+				result, err = preview.VerifyAudit(bundle, device, epoch, checkpoint)
+			} else {
+				result, err = preview.AuditWithCheckpoint(bundle, device, epoch, session, checkpoint)
+			}
 		}
 	case "request":
 		if dir == "" || recipient == "" {

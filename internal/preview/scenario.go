@@ -37,8 +37,9 @@ type Event struct {
 	Result   string `json:"result"`
 }
 type payload struct {
-	Archive []byte  `json:"archive"`
-	Events  []Event `json:"events"`
+	Proofs  [][]byte `json:"audit_proofs,omitempty"`
+	Archive []byte   `json:"archive"`
+	Events  []Event  `json:"events"`
 }
 
 func (p *payload) record(session, actor, action, reason, result string) {
@@ -179,6 +180,27 @@ func Create(out, session, reason string) error {
 		return err
 	}
 
+	auditPub, auditKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return err
+	}
+	defer clear(auditKey)
+	for _, name := range []string{"A", "B"} {
+		if err := write(filepath.Join(clients, name), "audit.pub", auditPub); err != nil {
+			return err
+		}
+	}
+	witnessDir := filepath.Join(out, "witness")
+	if err := os.Mkdir(witnessDir, 0700); err != nil {
+		return err
+	}
+	saveWitness := func(p payload, name string) error {
+		cp, err := makeCheckpoint(p, auditKey)
+		if err != nil {
+			return err
+		}
+		return writeJSON(witnessDir, name, cp)
+	}
 	archive, err := fixtureArchive()
 	if err != nil {
 		return err
@@ -187,14 +209,17 @@ func Create(out, session, reason string) error {
 		return err
 	}
 	p := payload{Archive: archive}
-	p.record(systemSession, "owner", "fixture.import", "load bundled synthetic archive", "imported")
+	p.signedRecord(auditKey, systemSession, "owner", "fixture.import", "load bundled synthetic archive", "imported")
 	if err = saveEpoch(filepath.Join(share, "epoch-1"), p, 1, []*age.X25519Recipient{a.Recipient(), b.Recipient()}, signer); err != nil {
 		return err
 	}
-	p.record(systemSession, "owner", "device.remove", "exclude fixture device A", "excluded")
+	p.signedRecord(auditKey, systemSession, "owner", "device.remove", "exclude fixture device A", "excluded")
 	// All demo requests to disclose a raw value are refused. No field is ever resolved.
-	p.record(session, "fixture-agent", "field.read", strings.TrimSpace(reason), "denied")
+	p.signedRecord(auditKey, session, "fixture-agent", "field.read", strings.TrimSpace(reason), "denied")
 	if err = saveEpoch(filepath.Join(share, "epoch-2"), p, 2, []*age.X25519Recipient{b.Recipient()}, signer); err != nil {
+		return err
+	}
+	if err = saveWitness(p, "epoch-2.json"); err != nil {
 		return err
 	}
 	p, err = readPayload(filepath.Join(share, "epoch-2"), filepath.Join(clients, "B"), 2)
@@ -205,8 +230,11 @@ func Create(out, session, reason string) error {
 	if err != nil {
 		return err
 	}
-	p.record(systemSession, "owner", "fixture.edit", "rename login and rotate synthetic TOTP", "edited")
-	return saveEpoch(filepath.Join(share, "epoch-3"), p, 3, []*age.X25519Recipient{b.Recipient()}, signer)
+	p.signedRecord(auditKey, systemSession, "owner", "fixture.edit", "rename login and rotate synthetic TOTP", "edited")
+	if err = saveEpoch(filepath.Join(share, "epoch-3"), p, 3, []*age.X25519Recipient{b.Recipient()}, signer); err != nil {
+		return err
+	}
+	return saveWitness(p, "epoch-3.json")
 }
 
 func readPayload(bundle, device string, expected uint64) (payload, error) {
@@ -260,6 +288,9 @@ func readPayload(bundle, device string, expected uint64) (payload, error) {
 	if json.Unmarshal(plain, &p) != nil {
 		return payload{}, errors.New("invalid fixture payload")
 	}
+	if err = verifyLocalStream(p, device); err != nil {
+		return payload{}, err
+	}
 	return p, nil
 }
 func Inspect(bundle, device string, expected uint64) (Summary, error) {
@@ -270,12 +301,20 @@ func Inspect(bundle, device string, expected uint64) (Summary, error) {
 	return summarize(p.Archive, expected)
 }
 func Audit(bundle, device string, expected uint64, session string) ([]Event, error) {
+	return AuditWithCheckpoint(bundle, device, expected, session, "")
+}
+func AuditWithCheckpoint(bundle, device string, expected uint64, session, path string) ([]Event, error) {
 	if !validSession(session) {
 		return nil, errInput
 	}
 	p, err := readPayload(bundle, device, expected)
 	if err != nil {
 		return nil, err
+	}
+	if path != "" {
+		if _, err = verifyWitness(p, device, path); err != nil {
+			return nil, err
+		}
 	}
 	found := []Event{}
 	for _, e := range p.Events {
