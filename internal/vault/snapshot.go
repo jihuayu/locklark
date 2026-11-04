@@ -39,6 +39,10 @@ func (s Snapshot) signed() []byte {
 }
 
 func Seal(payload []byte, epoch uint64, recipients []*age.X25519Recipient, signer ed25519.PrivateKey) (Snapshot, error) {
+	return seal(payload, nil, epoch, recipients, signer)
+}
+
+func seal(payload []byte, items []Item, epoch uint64, recipients []*age.X25519Recipient, signer ed25519.PrivateKey) (Snapshot, error) {
 	if epoch == 0 || len(recipients) == 0 || len(recipients) > 64 || len(payload) > MaxPayload || len(signer) != ed25519.PrivateKeySize {
 		return Snapshot{}, ErrSnapshot
 	}
@@ -66,18 +70,25 @@ func Seal(payload []byte, epoch uint64, recipients []*age.X25519Recipient, signe
 	if err != nil {
 		return Snapshot{}, err
 	}
-	group := kdbx.NewGroup()
-	group.Name = "Locklark"
-	e := kdbx.NewEntry()
-	e.Values = []kdbx.ValueData{{Key: "Title", Value: kdbx.V{Content: "Preview"}}, {Key: "Notes", Value: kdbx.V{Content: base64.StdEncoding.EncodeToString(payload), Protected: wrappers.NewBoolWrapper(true)}}}
-	group.Entries = []kdbx.Entry{e}
-	db.Content.Root.Groups = []kdbx.Group{group}
+	if items == nil {
+		group := kdbx.NewGroup()
+		group.Name = "Locklark"
+		e := kdbx.NewEntry()
+		e.Values = []kdbx.ValueData{{Key: "Title", Value: kdbx.V{Content: "Preview"}}, {Key: "Notes", Value: kdbx.V{Content: base64.StdEncoding.EncodeToString(payload), Protected: wrappers.NewBoolWrapper(true)}}}
+		group.Entries = []kdbx.Entry{e}
+		db.Content.Root.Groups = []kdbx.Group{group}
+	} else if err := writeItems(db, payload, items); err != nil {
+		return Snapshot{}, err
+	}
 	if err := db.LockProtectedEntries(); err != nil {
 		return Snapshot{}, err
 	}
 	var data, env bytes.Buffer
 	if err := kdbx.NewEncoder(&data).Encode(db); err != nil {
 		return Snapshot{}, err
+	}
+	if data.Len() > 8<<20 {
+		return Snapshot{}, ErrSnapshot
 	}
 	w, err := age.Encrypt(&env, allowed...)
 	if err != nil {
@@ -117,33 +128,54 @@ func VerifySnapshot(s Snapshot, authority ed25519.PublicKey, expectedEpoch uint6
 	return nil
 }
 func Open(s Snapshot, id *age.X25519Identity, authority ed25519.PublicKey, expectedEpoch uint64) ([]byte, error) {
+	data, items, err := OpenItems(s, id, authority, expectedEpoch)
+	if err == nil && items != nil {
+		clear(data)
+		return nil, ErrSnapshot
+	}
+	return data, err
+}
+
+// OpenItems returns nil items only for the previous single-payload preview format.
+func OpenItems(s Snapshot, id *age.X25519Identity, authority ed25519.PublicKey, expectedEpoch uint64) ([]byte, []Item, error) {
 	if err := VerifySnapshot(s, authority, expectedEpoch); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// Older previews and new snapshots are both KDBX 4.1. Do not dispatch
 	// a signed but unsupported header into an unbounded legacy KDF path.
 	var format kdbx.Signature
 	if err := binary.Read(bytes.NewReader(s.Database), binary.LittleEndian, &format); err != nil || format != kdbx.DefaultKDBX41Sig {
-		return nil, ErrSnapshot
+		return nil, nil, ErrSnapshot
 	}
 	key, err := unwrap(s.Envelope, id)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer clear(key)
 	db := kdbx.NewDatabase()
 	db.Credentials, err = kdbx.NewKeyDataCredentials(key)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := kdbx.NewDecoder(bytes.NewReader(s.Database)).Decode(db); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := db.UnlockProtectedEntries(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if db.Content == nil || db.Content.Root == nil || len(db.Content.Root.Groups) != 1 || len(db.Content.Root.Groups[0].Entries) != 1 {
-		return nil, ErrSnapshot
+	if db.Content == nil || db.Content.Root == nil || len(db.Content.Root.Groups) != 1 {
+		return nil, nil, ErrSnapshot
 	}
-	return base64.StdEncoding.DecodeString(db.Content.Root.Groups[0].Entries[0].GetContent("Notes"))
+	g := db.Content.Root.Groups[0]
+	if g.Name == itemGroup {
+		return readItems(db, g)
+	}
+	if g.Name != "Locklark" || len(g.Entries) != 1 || g.Entries[0].GetContent("Title") != "Preview" {
+		return nil, nil, ErrSnapshot
+	}
+	data, err := base64.StdEncoding.DecodeString(g.Entries[0].GetContent("Notes"))
+	if err != nil || len(data) > MaxPayload {
+		return nil, nil, ErrSnapshot
+	}
+	return data, nil, nil
 }

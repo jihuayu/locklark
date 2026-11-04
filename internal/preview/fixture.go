@@ -35,6 +35,12 @@ func knownOriginal(archive []byte) (bool, error) {
 	return false, nil
 }
 func packFixture(data []byte) ([]byte, error) {
+	return packFixtureAttachment(data, []byte{0, 1, 2, 255})
+}
+func packFixtureAttachment(data, attachment []byte) ([]byte, error) {
+	return packFixtureDocument(data, attachmentPath, attachment)
+}
+func packFixtureDocument(data []byte, name string, attachment []byte) ([]byte, error) {
 	var out bytes.Buffer
 	w := zip.NewWriter(&out)
 	for _, f := range []struct {
@@ -42,7 +48,7 @@ func packFixture(data []byte) ([]byte, error) {
 		data []byte
 	}{
 		{"export.attributes", []byte(`{"version":3,"description":"1Password Unencrypted Export","createdAt":0}`)},
-		{"export.data", data}, {attachmentPath, []byte{0, 1, 2, 255}},
+		{"export.data", data}, {name, attachment},
 	} {
 		z, err := w.Create(f.name)
 		if err != nil {

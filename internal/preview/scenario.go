@@ -38,6 +38,8 @@ type Event struct {
 	Result   string `json:"result"`
 }
 type payload struct {
+	layout  *nativeLayout
+	items   []vault.Item
 	pin     string
 	Proofs  [][]byte `json:"audit_proofs,omitempty"`
 	Archive []byte   `json:"archive"`
@@ -112,12 +114,22 @@ func saveDevice(dir string, id *age.X25519Identity, pub ed25519.PublicKey, secre
 	return write(dir, "authority.pub", pub)
 }
 func saveEpoch(dir string, p payload, n uint64, ids []*age.X25519Recipient, signer ed25519.PrivateKey) error {
-	data, err := json.Marshal(p)
-	if err != nil {
-		return err
+	var data []byte
+	var s vault.Snapshot
+	var err error
+	if p.layout != nil {
+		data, err = json.Marshal(nativeMeta{1, p.layout, p.Events, p.Proofs})
+		if err == nil {
+			s, err = vault.SealItems(data, p.items, n, ids, signer)
+		}
+	} else {
+		// Previous single-payload format, used by legacy fixture tests.
+		data, err = json.Marshal(p)
+		if err == nil {
+			s, err = vault.Seal(data, n, ids, signer)
+		}
 	}
 	defer clear(data)
-	s, err := vault.Seal(data, n, ids, signer)
 	if err != nil {
 		return err
 	}
@@ -211,6 +223,9 @@ func Create(out, session, reason string) error {
 		return err
 	}
 	p := payload{Archive: archive}
+	if err = projectFixture(&p); err != nil {
+		return err
+	}
 	p.signedRecord(auditKey, systemSession, "owner", "fixture.import", "load bundled synthetic archive", "imported")
 	if err = saveEpoch(filepath.Join(share, "epoch-1"), p, 1, []*age.X25519Recipient{a.Recipient(), b.Recipient()}, signer); err != nil {
 		return err
@@ -228,7 +243,7 @@ func Create(out, session, reason string) error {
 	if err != nil {
 		return err
 	}
-	p.Archive, err = editedFixture(p.Archive)
+	err = editNativeFixture(&p)
 	if err != nil {
 		return err
 	}
@@ -305,12 +320,22 @@ func (c encryptedSnapshot) unlock(device string) (payload, error) {
 	if err != nil {
 		return p, errors.New("invalid local fixture identity")
 	}
-	plain, err := vault.Open(c.snapshot, id, c.authority, c.snapshot.Epoch)
+	plain, items, err := vault.OpenItems(c.snapshot, id, c.authority, c.snapshot.Epoch)
 	if err != nil {
 		return p, fmt.Errorf("cannot unlock this snapshot with the supplied fixture device: %w", err)
 	}
 	defer clear(plain)
-	if json.Unmarshal(plain, &p) != nil {
+	if items != nil {
+		var m nativeMeta
+		if json.Unmarshal(plain, &m) != nil || m.Version != 1 {
+			return payload{}, errFixture
+		}
+		p.layout, p.items, p.Events, p.Proofs = m.Layout, items, m.Events, m.Proofs
+		p.Archive, err = nativeArchive(p.layout, p.items)
+		if err != nil {
+			return payload{}, err
+		}
+	} else if json.Unmarshal(plain, &p) != nil {
 		return payload{}, errors.New("invalid fixture payload")
 	}
 	if err = verifyLocalStream(p, device); err != nil {

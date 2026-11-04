@@ -175,7 +175,7 @@ go test -count=1 ./internal/gateway
 | 服务器只拿到 `share/` | 仅三个代次的 KDBX、age 信封及签名清单；没有 Secret Key、设备私钥或可解库的账户副本。这里没有运行同步服务。 |
 | 同账号的设备 A 被移除 | A、B 共用账户双因子，各有独立设备私钥。每代随机产生 256 位文件密钥并重写整个 KDBX。离线测试直接拿旧设备私钥解新信封，又拿旧库钥调 KDBX 解码器，均失败；B 能解开。 |
 | 账户双密钥 | 主密码与本机随机 128 位 Secret Key 参与派生，借鉴 1Password 2SKD：NFKD 规范化、650,000 轮 PBKDF2-HMAC-SHA256、独立 HKDF 分支、异或组合。Locklark 使用自己的标签与账号标识，无 1Password 协议互操作声明。Go 结果与[独立 Python 向量](internal/account/vector.py)一致；任一因子错误不能解开设备密钥槽。 |
-| 合成 1PUX | 内置两个重名条目、Unicode 区段、TOTP 和一个二进制附件。原归档整个装入 KDBX 的受保护字段，再打开后逐字节相同。第 3 代按稳定 ID 改名并轮换合成 TOTP。迁出后逐字段核对 JSON，其他文件逐字节相同；这仍不是通用 1PUX 导入或原生 KDBX 字段映射。 |
+| 合成 1PUX | 登录和文档各自是原生 KDBX 条目，源 ID 决定稳定 UUID，同名也可区分。密码和 `otp` 只在对应受保护字段里；文档字节只在原生附件里。迁出从条目和保留的 JSON 片段重建归档。第 3 代按稳定 ID 修改标题和 TOTP，重新核对字段和附件；仅支持内置样例。 |
 
 **信任边界：** 整个 `demo-out` 是生成器的实验台，包含两台客户端，不能交给服务器或 Agent。模拟服务器只复制 `share/`；模拟被吊销者只给 `clients/A/` 和目标快照。演练用固定公开口令，把随机 Secret Key 存在客户端文件中，未接操作系统钥匙串。没有权限隔离的同用户进程可直接读取 B 的材料；不能以这个演练替代系统隔离。签名锚来自受信的客户端，快照签发私钥只在生成时使用，不随演练资料分发。B 客户端保留加密的决定及本机审计签名槽，以便后续登记会话和签署决定。
 
@@ -188,9 +188,11 @@ $peerEnv = Join-Path ([IO.Path]::GetTempPath()) ("locklark-peer-" + [guid]::NewG
 python -m venv $peerEnv
 $env:LOCKLARK_TEST_PYKEEPASS = Join-Path $peerEnv 'Scripts/python.exe'
 & $env:LOCKLARK_TEST_PYKEEPASS -m pip install 'pykeepass==4.2.0'
-go test -count=1 ./internal/vault -run 'TestKDBXIndependentPeer|TestOfflineRevocation'
+go test -count=1 ./internal/vault -run 'TestKDBXIndependentPeer|TestIndependentNativeEditor|TestOfflineRevocation'
 ```
 
 引入真实资料之前，仍须独立密码评审、操作系统密钥存储、原生字段映射和干净机器恢复验收。
+
+新版 CLI 可读旧版单载荷快照；旧版 CLI 不能读取新原生条目布局。PyKeePass 可按 UUID 修改登录、密码、TOTP 和附件；采用外部改动仍须可信签名。普通 CLI 只允许迁出明确支持的合成内容，未提供任意明文导出或真实库导入。
 
 接下来的 M0：将逐字段编辑和迁出对账扩展到更多条目类型、成员/多设备换代与故障恢复、MyGo 常驻桌面原型。Next.js 团队 Web、iOS/Android、受隔离的 Bun MCP Gateway、AI 否决，以及独立部署的 invoke / deliver 两种 server token 均已在[设计稿](docs/design.md)中界定，尚未交付。
