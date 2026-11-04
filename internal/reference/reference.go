@@ -98,7 +98,7 @@ func Resolve(raw string, vaults []Vault) (Target, error) {
 	if err != nil {
 		return Target{}, err
 	}
-	if err = validate(vaults); err != nil {
+	if err = Validate(vaults); err != nil {
 		return Target{}, err
 	}
 	v, err := choose(vaults, r.Vault, func(v Vault) (string, string) { return v.ID, v.Name })
@@ -163,7 +163,9 @@ func choose[T any](all []T, s string, names func(T) (string, string)) (T, error)
 	return out, nil
 }
 
-func validate(vaults []Vault) error {
+// Validate checks only schema, capacity and identity uniqueness. It does not
+// authenticate the metadata, establish freshness or grant authority.
+func Validate(vaults []Vault) error {
 	objects, text := 0, 0
 	consume := func(n int) error {
 		if n > MaxObjects-objects {
