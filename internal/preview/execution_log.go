@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 
 	"filippo.io/age"
+	"github.com/jihuayu/locklark/internal/gateway"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -51,12 +52,13 @@ func updateTip(tx *bolt.Tx, p payload, key ed25519.PrivateKey) error {
 }
 
 type UseReport struct {
-	Reason  string `json:"reason,omitempty"`
-	ID      string `json:"id"`
-	Session string `json:"session"`
-	Review  string `json:"review"`
-	Attempt string `json:"attempt"`
-	State   string `json:"state"`
+	Pull    *gateway.PullIntent `json:"pull,omitempty"`
+	Reason  string              `json:"reason,omitempty"`
+	ID      string              `json:"id"`
+	Session string              `json:"session"`
+	Review  string              `json:"review"`
+	Attempt string              `json:"attempt"`
+	State   string              `json:"state"`
 }
 type useRecord struct {
 	UseReport
@@ -76,6 +78,9 @@ func ingestUse(h *history, e entry, key ed25519.PublicKey) error {
 	var found bool
 	for _, d := range h.decisions {
 		if d.Request.ID == u.ID && d.Result == "approved" && d.Request.Review == u.Review && d.Request.Session == u.Session {
+			if (u.Pull == nil) != (d.Request.Pull == nil) || (u.Pull != nil && *d.Request.Pull != *u.Pull) {
+				return errInvoke
+			}
 			found = true
 			break
 		}
@@ -108,6 +113,9 @@ func appendUse(b *bolt.Bucket, h history, u useRecord, owner, auditKey ed25519.P
 		return errInvoke
 	}
 	actor, reason := "executor", "signed fixture metadata invocation"
+	if u.Pull != nil {
+		reason = "signed recorded GitHub PR invocation"
+	}
 	if u.State == "revoked" {
 		actor = "owner"
 		reason = u.Reason

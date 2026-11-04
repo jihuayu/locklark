@@ -41,7 +41,9 @@ func runInvoke(args []string, out, diag io.Writer) error {
 		f.StringVar(&ticket, "ticket", "", "encrypted invocation")
 		f.StringVar(&path, "out", "", "new encrypted reply file")
 	}
+	var recording string
 	if cmd == "invoke-run" {
+		f.StringVar(&recording, "recorded-response", "", "local synthetic upstream JSON; never contacts GitHub")
 		f.StringVar(&bundle, "bundle", "", "verified local snapshot")
 	}
 	if cmd == "invoke-result" {
@@ -84,7 +86,9 @@ func runInvoke(args []string, out, diag io.Writer) error {
 			return errors.New("output parent must be a directory")
 		}
 		var ciphertext []byte
-		if cmd == "invoke-run" {
+		if cmd == "invoke-run" && recording != "" {
+			ciphertext, err = preview.InvokeRecordedPull(device, bundle, ticket, recording)
+		} else if cmd == "invoke-run" {
 			ciphertext, err = preview.Invoke(device, bundle, ticket)
 		} else {
 			ciphertext, err = preview.InvocationReceipt(device, ticket)
@@ -99,7 +103,7 @@ func runInvoke(args []string, out, diag io.Writer) error {
 		if dir == "" || path == "" {
 			return errors.New("attempt directory and reply required")
 		}
-		result, err = preview.OpenInvocationResult(dir, path)
+		result, err = preview.InvocationResult(dir, path)
 	case "executions":
 		if device == "" {
 			return errors.New("device required")

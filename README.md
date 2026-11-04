@@ -117,7 +117,19 @@ bun test ./plugins/github-pull-reader
 go test -count=1 ./internal/gateway
 ```
 
-这是可由 Go 执行器调用的适配器，尚未连接签名审批、MCP 工具发现或真实 GitHub 账户；没有向 Agent 暴露真实凭据调用入口。GitHub 的 GET 路径按 owner/name 定位，稳定仓库 ID 在收到响应后核验。若原仓库改名且原名被复用，请求可能已发给 GitHub 读取另一仓库；宿主会拒绝返回该结果。上线前须让上游凭据本身也只对指定仓库有效，不能把响应后的 ID 检查当成发出请求前的权限限制。两个进程之间不传原值，不代表插件已被 OS 沙箱隔离。目前不加载第三方插件。
+签名审批现在支持**本地录制响应**。主人用 `pull-enroll` 登记会话、仓库稳定 ID 和 owner/name；Agent 用 `pull-request` 提交 Bun 提案、PR 编号和理由。待办显示插件身份、版本、内置模块 SHA-256、固定字段和执行方式 `recorded-response/v1`。主人只对所见请求摘要批准；一张票据只能消费一次。模块摘要标识这个二进制认可的提案代码，不证明 Agent 一定运行过该代码；宿主独立验证参数。
+
+例如，先为 `example/tools`（演练 ID `123`）登记一个新 session，然后申请查看 PR #7：
+
+```powershell
+.\locklark.exe pull-enroll --device demo-out/clients/B --session pr-run --public PUBLIC_HEX --reason "核对 PR" --repo example/tools --repo-id 123
+'{"repo":"123","number":7}' | bun run ./plugins/github-pull-reader/index.ts | Set-Content proposal.json -Encoding utf8NoBOM
+.\locklark.exe pull-request --inbox demo-out/inbox --recipient demo-out/agent/approval.pub --session-key runner.sessionkey --session pr-run --reason "核对合并状态" --repo example/tools --repo-id 123 --pr 7 --proposal proposal.json
+```
+
+后续沿用 `inbox → decide → invoke-prepare`。持库端运行 `invoke-run` 时加 `--recorded-response PATH` 选择本地合成 JSON；离线演练只接受该文件，绝不向 GitHub 发请求。结果明确标为录制数据，`executions --session pr-run` 保留实际消费的目标。旧元数据授权与 PR 授权不可互换。完整的双端命令由 `scripts/acceptance.ps1` 复跑。
+
+在线适配器没有向 Agent 暴露真实凭据调用入口。GitHub 的 GET 路径按 owner/name 定位，响应后才能核对稳定 ID；若旧名被复用，不能仅靠响应校验限制请求发向哪个仓库。上线前须让上游凭据本身也只对指定仓库有效。MCP 工具发现、签名安装和第三方插件 OS 沙箱尚未接入。
 
 ## 核对审计与历史回滚
 

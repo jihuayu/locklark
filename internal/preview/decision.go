@@ -33,13 +33,14 @@ func Decide(inbox, device, bundle, id, review, choice, reason string) (Decision,
 	}
 	d := Decision{Request: q, Reason: strings.TrimSpace(reason), Result: "denied"}
 	if choice == "approve" {
-		if q.Action != FixtureAction || q.Epoch != 3 || bundle == "" {
+		if !supportedAction(q) || bundle == "" {
 			return Decision{}, errChanged
 		}
 		p, err := readPayload(bundle, device, q.Epoch)
 		if err != nil {
 			return Decision{}, err
 		}
+		defer clear(p.Archive)
 		base, err := fixtureArchive()
 		if err != nil {
 			return Decision{}, err
@@ -47,6 +48,13 @@ func Decide(inbox, device, bundle, id, review, choice, reason string) (Decision,
 		expected, err := editedFixture(base)
 		if err != nil || !bytes.Equal(p.Archive, expected) {
 			return Decision{}, errChanged
+		}
+		if q.Pull != nil {
+			value, e := fixturePasswordField(p.Archive)
+			if e != nil {
+				return Decision{}, errChanged
+			}
+			clear(value)
 		}
 		h := sha256.Sum256(p.Archive)
 		d.Snapshot = p.pin

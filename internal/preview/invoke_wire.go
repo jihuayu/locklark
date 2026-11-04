@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 
 	"filippo.io/age"
+	"github.com/jihuayu/locklark/internal/gateway"
 )
 
 var errInvoke = errors.New("invocation invalid, not authorized, already used, or result unavailable")
@@ -212,7 +213,12 @@ func inspectMetadata(raw []byte) (FieldMetadata, error) {
 	return FieldMetadata{}, errInvoke
 }
 
+type RecordedResult struct {
+	Source string             `json:"source"`
+	Pull   gateway.PullResult `json:"pull"`
+}
 type signedReply struct {
+	Pull     *RecordedResult `json:"pull,omitempty"`
 	Ticket   string
 	Metadata FieldMetadata
 	Sig      []byte
@@ -220,25 +226,45 @@ type signedReply struct {
 
 func (r signedReply) proof() []byte { r.Sig = nil; return message(replyDomain, r) }
 func OpenInvocationResult(dir, path string) (FieldMetadata, error) {
+	r, e := openReply(dir, path)
+	if e != nil {
+		return FieldMetadata{}, e
+	}
+	if r.Pull != nil {
+		return FieldMetadata{}, errInvoke
+	}
+	return r.Metadata, nil
+}
+func InvocationResult(dir, path string) (any, error) {
+	r, e := openReply(dir, path)
+	if e != nil {
+		return nil, e
+	}
+	if r.Pull != nil {
+		return *r.Pull, nil
+	}
+	return r.Metadata, nil
+}
+func openReply(dir, path string) (signedReply, error) {
 	local, err := read(dir, "attempt.private", 8192)
 	if err != nil {
-		return FieldMetadata{}, err
+		return signedReply{}, err
 	}
 	var state localAttempt
 	if json.Unmarshal(local, &state) != nil || len(state.Host) != 32 {
-		return FieldMetadata{}, errInvoke
+		return signedReply{}, errInvoke
 	}
 	id, err := age.ParseX25519Identity(state.Key)
 	if err != nil || id.Recipient().String() != state.Ticket.Reply {
-		return FieldMetadata{}, errInvoke
+		return signedReply{}, errInvoke
 	}
 	ciphertext, err := readPath(path, 8192)
 	if err != nil {
-		return FieldMetadata{}, err
+		return signedReply{}, err
 	}
 	var reply signedReply
 	if unsealJSON(id, ciphertext, 4096, &reply) != nil || reply.Ticket != state.Ticket.digest() || !ed25519.Verify(state.Host, reply.proof(), reply.Sig) {
-		return FieldMetadata{}, errInvoke
+		return signedReply{}, errInvoke
 	}
-	return reply.Metadata, nil
+	return reply, nil
 }

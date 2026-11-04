@@ -24,7 +24,9 @@ const usage = `Locklark · offline preview (synthetic data only)
 
   approval-revoke --device CLIENT_B_DIR --id ID --review DIGEST --reason TEXT
   invoke-prepare --session-key FILE --recipient FILE --host-sign-key FILE --session ID --id ID --review DIGEST --attempt NEW_DIR
-  invoke-run     --device CLIENT_B_DIR --bundle EPOCH_3_DIR --ticket FILE --out NEW_REPLY
+  pull-enroll --device CLIENT_B_DIR --session ID --public PUBLIC_HEX --repo OWNER/NAME --repo-id ID --reason TEXT
+  pull-request --inbox DIR --recipient FILE --session-key FILE --session ID --reason TEXT --repo OWNER/NAME --repo-id ID --pr NUMBER --proposal FILE
+  invoke-run     --device CLIENT_B_DIR --bundle EPOCH_3_DIR --ticket FILE --out NEW_REPLY [--recorded-response JSON]
   invoke-receipt --device CLIENT_B_DIR --ticket FILE --out NEW_REPLY
   invoke-result  --attempt DIR --reply FILE
   executions     --device CLIENT_B_DIR --session ID
@@ -46,6 +48,8 @@ func run(args []string, out, errOut io.Writer) error {
 	}
 	command := args[0]
 	switch command {
+	case "pull-enroll", "pull-request":
+		return runPull(args, out, errOut)
 	case "invoke-prepare", "invoke-run", "invoke-receipt", "invoke-result", "executions", "approval-revoke":
 		return runInvoke(args, out, errOut)
 	case "session-keygen", "session-enroll", "session-revoke", "session-history":

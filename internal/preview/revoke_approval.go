@@ -37,7 +37,7 @@ func RevokeApproval(device, request, review, reason string) (UseReport, error) {
 		}
 		for _, d := range h.decisions {
 			if d.Request.ID == request && d.Request.Review == review && d.Result == "approved" {
-				report = UseReport{ID: request, Session: d.Request.Session, Review: review, State: "revoked", Reason: strings.TrimSpace(reason)}
+				report = UseReport{Pull: d.Request.Pull, ID: request, Session: d.Request.Session, Review: review, State: "revoked", Reason: strings.TrimSpace(reason)}
 				return appendUse(b, h, useRecord{UseReport: report}, key, audit, id)
 			}
 		}

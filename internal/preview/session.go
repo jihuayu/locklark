@@ -15,6 +15,7 @@ import (
 
 	"filippo.io/age"
 	"filippo.io/edwards25519"
+	"github.com/jihuayu/locklark/internal/gateway"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -98,17 +99,18 @@ func signRequest(q *Request, seed []byte, audience string) error {
 }
 
 type SessionChange struct {
-	ScopeAction string    `json:"scope_action"`
-	ScopeRef    string    `json:"scope_ref"`
-	ScopeEpoch  uint64    `json:"scope_epoch"`
-	Sequence    uint64    `json:"sequence"`
-	Session     string    `json:"session"`
-	Public      string    `json:"public"`
-	Audience    string    `json:"audience"`
-	Action      string    `json:"action"`
-	Reason      string    `json:"reason"`
-	At          time.Time `json:"at"`
-	Expires     time.Time `json:"expires"`
+	PullScope   *gateway.PullScope `json:"pull_scope,omitempty"`
+	ScopeAction string             `json:"scope_action"`
+	ScopeRef    string             `json:"scope_ref"`
+	ScopeEpoch  uint64             `json:"scope_epoch"`
+	Sequence    uint64             `json:"sequence"`
+	Session     string             `json:"session"`
+	Public      string             `json:"public"`
+	Audience    string             `json:"audience"`
+	Action      string             `json:"action"`
+	Reason      string             `json:"reason"`
+	At          time.Time          `json:"at"`
+	Expires     time.Time          `json:"expires"`
 }
 type sessionEntry struct {
 	Change SessionChange `json:"change"`
@@ -181,6 +183,9 @@ func RevokeSession(device, session, reason string) (SessionChange, error) {
 	return changeSession(device, session, "", reason, true, time.Now)
 }
 func changeSession(device, session, public, reason string, revoke bool, clock func() time.Time) (SessionChange, error) {
+	return changeScopedSession(device, session, public, reason, revoke, clock, nil)
+}
+func changeScopedSession(device, session, public, reason string, revoke bool, clock func() time.Time, scope *gateway.PullScope) (SessionChange, error) {
 	if !validSession(session) || session == systemSession || !validReason(reason) || (!revoke && !validPublic(public)) {
 		return SessionChange{}, errSession
 	}
@@ -223,6 +228,11 @@ func changeSession(device, session, public, reason string, revoke bool, clock fu
 				}
 			}
 			c = SessionChange{ScopeAction: FixtureAction, ScopeRef: FixtureRef, ScopeEpoch: 3, Session: session, Public: public, Audience: id.Recipient().String(), Action: "enrolled", Reason: reason, At: now, Expires: now.Add(24 * time.Hour)}
+			if scope != nil {
+				c.PullScope = scope
+				c.ScopeAction = gateway.PullAction
+				c.ScopeRef = gateway.PullSlot
+			}
 		}
 		c.Sequence = reg.seq + 1
 		e := sessionEntry{c, ed25519.Sign(signer, registryMessage(c, reg.head))}
@@ -276,6 +286,9 @@ func sessionStatus(q Request, reg sessionRegistry, audience string, now time.Tim
 	c, ok := reg.latest[q.Session]
 	if !ok || c.Public != p.Public {
 		return "unregistered"
+	}
+	if (c.PullScope == nil) != (q.Pull == nil) || (q.Pull != nil && *c.PullScope != q.Pull.PullScope) {
+		return "out-of-scope"
 	}
 	if c.ScopeAction != q.Action || c.ScopeRef != q.Ref || c.ScopeEpoch != q.Epoch {
 		return "out-of-scope"

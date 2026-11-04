@@ -76,5 +76,24 @@ try {
     $null = Invoke-Ok @("session-revoke","--device",$b,"--session","offline-1","--reason","runner finished")
     $closed = Invoke-Ok @("inbox","--inbox",$spool,"--device",$b,"--session","offline-1")
     if ($closed.requests[0].sender_status -ne "revoked" -or $closed.requests[0].state -eq "approved") {throw "Session revocation not effective"}
-    "PASS: session binding and revocation, device revocation, snapshot audit, offline approval, two-process single execution and signed reply recovery. Synthetic files: $work"
+    $prKey = Join-Path $work "pull.sessionkey"
+    $prIdentity = Invoke-Ok @("session-keygen","--out",$prKey)
+    $null = Invoke-Ok @("pull-enroll","--device",$b,"--session","pull-1","--public",$prIdentity.public,"--reason","check pull status","--repo","example/tools","--repo-id","123")
+    $plan = Join-Path $work "proposal.json"
+    '{"repo":"123","number":7}' | bun run ./plugins/github-pull-reader/index.ts | Set-Content -LiteralPath $plan -Encoding utf8NoBOM
+    if ($LASTEXITCODE -ne 0) {throw "Bun proposal failed"}
+    $pr = Invoke-Ok @("pull-request","--session-key",$prKey,"--inbox",$spool,"--recipient",$pub,"--session","pull-1","--reason","check merge","--repo","example/tools","--repo-id","123","--pr","7","--proposal",$plan)
+    $seen = Invoke-Ok @("inbox","--inbox",$spool,"--device",$b,"--session","pull-1")
+    if ($seen.requests[0].sender_status -ne "verified" -or $seen.requests[0].pull.number -ne 7) {throw "Owner cannot verify target"}
+    $null = Invoke-Ok @("decide","--device",$b,"--bundle",(Join-Path $out "share/epoch-3"),"--inbox",$spool,"--id",$pr.id,"--review",$seen.requests[0].review,"--choice","approve","--reason","only this pull")
+    $prAttempt=Join-Path $work "pr-attempt"
+    $null = Invoke-Ok @("invoke-prepare","--session-key",$prKey,"--recipient",$pub,"--host-sign-key",$hostPublic,"--session","pull-1","--id",$pr.id,"--review",$pr.review,"--attempt",$prAttempt)
+    $prReply=Join-Path $work "pr-reply.age"
+    $recording=Join-Path $work "recording.json"
+    '{"number":7,"state":"open","merged_at":null,"base":{"repo":{"id":123}},"body":"not for the agent"}' | Set-Content -LiteralPath $recording -Encoding utf8NoBOM
+    $null = Invoke-Ok @("invoke-run","--device",$b,"--bundle",(Join-Path $out "share/epoch-3"),"--ticket",(Join-Path $prAttempt "invocation.age"),"--out",$prReply,"--recorded-response",$recording)
+    $result = Invoke-Ok @("invoke-result","--attempt",$prAttempt,"--reply",$prReply)
+    $log = Invoke-Ok @("executions","--device",$b,"--session","pull-1")
+    if($result.source -ne "recorded-response/v1" -or $result.pull.number -ne 7 -or $result.pull.state -ne "open" -or $log.pull.number -ne 7 -or $log.pull.backend -ne $result.source){throw "Recorded PR receipt and audit disagree"}
+    "PASS: session and device revocation, offline approval, two-process single execution, signed reply recovery and scoped recorded PR. Synthetic files: $work"
 } finally { Pop-Location }

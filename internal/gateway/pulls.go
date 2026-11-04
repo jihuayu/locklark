@@ -25,7 +25,11 @@ const action = "github.pulls.get"
 const apiHost = "api.github.com"
 
 // Repository is an owner-configured binding; ID is the stable numeric GitHub ID.
-type Repository struct{ ID, Owner, Name string }
+type Repository struct {
+	ID    string `json:"id"`
+	Owner string `json:"owner"`
+	Name  string `json:"name"`
+}
 type Target struct {
 	Repo   string
 	Number int

@@ -20,7 +20,7 @@ func authorization(h history, t invocation) (Decision, error) {
 		if t.ID != q.ID {
 			continue
 		}
-		if d.Result != "approved" || d.Expires == nil || q.Review != t.Review || q.Session != t.Session || q.Auth == nil || q.Auth.Public != t.Public || q.Auth.Audience != t.Audience || q.SenderStatus != "verified" || q.Action != FixtureAction || q.Epoch != 3 || q.Ref != FixtureRef {
+		if d.Result != "approved" || d.Expires == nil || q.Review != t.Review || q.Session != t.Session || q.Auth == nil || q.Auth.Public != t.Public || q.Auth.Audience != t.Audience || q.SenderStatus != "verified" || !supportedAction(q) {
 			return Decision{}, errInvoke
 		}
 		return d, nil
@@ -40,6 +40,10 @@ func runInvocation(device, bundle, path string, execute func([]byte) (FieldMetad
 	return runInvocationAt(device, bundle, path, execute, time.Now)
 }
 func runInvocationAt(device, bundle, path string, execute func([]byte) (FieldMetadata, error), clock func() time.Time) ([]byte, error) {
+	return runBoundAction(device, bundle, path, FixtureAction, func(_ Request, b []byte) (signedReply, error) { m, e := execute(b); return signedReply{Metadata: m}, e }, clock)
+}
+
+func runBoundAction(device, bundle, path, action string, execute func(Request, []byte) (signedReply, error), clock func() time.Time) ([]byte, error) {
 	id, err := mailIdentity(device)
 	if err != nil {
 		return nil, err
@@ -60,6 +64,7 @@ func runInvocationAt(device, bundle, path string, execute func([]byte) (FieldMet
 	defer clear(auditKey)
 	var target encryptedSnapshot
 	var expectedArchive string
+	var request Request
 	record := useRecord{UseReport: UseReport{ID: t.ID, Session: t.Session, Review: t.Review, Attempt: t.digest(), State: "unknown"}}
 	err = withHistory(device, id, true, func(b *bolt.Bucket, h history) error {
 		if b.Tx().Bucket(useAnchor) == nil {
@@ -69,6 +74,11 @@ func runInvocationAt(device, bundle, path string, execute func([]byte) (FieldMet
 		if err != nil {
 			return err
 		}
+		if d.Request.Action != action {
+			return errInvoke
+		}
+		request = d.Request
+		record.Pull = request.Pull
 		if _, used := h.uses[t.ID]; used {
 			return errInvoke
 		}
@@ -109,7 +119,7 @@ func runInvocationAt(device, bundle, path string, execute func([]byte) (FieldMet
 	}
 	// No callback runs until bbolt has committed and closed the intent transaction.
 	// A crash or lost result leaves "unknown"; there is deliberately no retry path.
-	var metadata FieldMetadata
+	var reply signedReply
 	p, actionErr := target.unlock(device)
 	if actionErr == nil {
 		defer clear(p.Archive)
@@ -117,12 +127,12 @@ func runInvocationAt(device, bundle, path string, execute func([]byte) (FieldMet
 		if hex.EncodeToString(sum[:]) != expectedArchive {
 			actionErr = errInvoke
 		} else {
-			metadata, actionErr = execute(p.Archive)
+			reply, actionErr = execute(request, p.Archive)
 		}
 	}
 	record.State = "failed"
 	if actionErr == nil {
-		reply := signedReply{Ticket: t.digest(), Metadata: metadata}
+		reply.Ticket = t.digest()
 		reply.Sig = ed25519.Sign(owner, reply.proof())
 		recipient, err := age.ParseX25519Recipient(t.Reply)
 		if err != nil {
@@ -139,7 +149,7 @@ func runInvocationAt(device, bundle, path string, execute func([]byte) (FieldMet
 		return nil, err
 	}
 	if actionErr != nil {
-		return nil, errors.New("metadata action failed; approval already consumed")
+		return nil, errors.New("action failed; approval already consumed")
 	}
 	return receiptForTicket(device, id, t)
 }

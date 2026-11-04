@@ -8,6 +8,7 @@ import (
 	"errors"
 	"filippo.io/age"
 	"github.com/jihuayu/locklark/internal/account"
+	"github.com/jihuayu/locklark/internal/gateway"
 	"io"
 	"os"
 	"path/filepath"
@@ -22,17 +23,18 @@ const FixtureAction = "fixture.inspect-metadata"
 const FixtureRef = "op://synthetic-vault/login-sample/ops/otp-demo"
 
 type Request struct {
-	Auth         *SessionProof `json:"auth,omitempty"`
-	SenderStatus string        `json:"sender_status,omitempty"`
-	Action       string        `json:"action,omitempty"`
-	Epoch        uint64        `json:"epoch,omitempty"`
-	Review       string        `json:"review,omitempty"`
-	ID           string        `json:"id"`
-	Session      string        `json:"session"`
-	Reason       string        `json:"reason"`
-	Ref          string        `json:"ref"`
-	State        string        `json:"state"`
-	Created      string        `json:"claimed_time"`
+	Pull         *gateway.PullIntent `json:"pull,omitempty"`
+	Auth         *SessionProof       `json:"auth,omitempty"`
+	SenderStatus string              `json:"sender_status,omitempty"`
+	Action       string              `json:"action,omitempty"`
+	Epoch        uint64              `json:"epoch,omitempty"`
+	Review       string              `json:"review,omitempty"`
+	ID           string              `json:"id"`
+	Session      string              `json:"session"`
+	Reason       string              `json:"reason"`
+	Ref          string              `json:"ref"`
+	State        string              `json:"state"`
+	Created      string              `json:"claimed_time"`
 }
 type InboxReport struct {
 	Next       string    `json:"next,omitempty"`
@@ -76,7 +78,7 @@ func Submit(inbox, recipientFile, session, reason, ref string) (string, error) {
 	return SubmitSigned(inbox, recipientFile, session, reason, ref, "")
 }
 func SubmitSigned(inbox, recipientFile, session, reason, ref, keyfile string) (string, error) {
-	return submit(inbox, recipientFile, session, reason, ref, keyfile, nil)
+	return submit(inbox, recipientFile, session, reason, ref, keyfile, nil, nil)
 }
 
 type Submitted struct {
@@ -87,11 +89,11 @@ type Submitted struct {
 
 func SubmitReceipt(inbox, recipientFile, session, reason, ref, keyfile string) (Submitted, error) {
 	var receipt Submitted
-	_, err := submit(inbox, recipientFile, session, reason, ref, keyfile, &receipt)
+	_, err := submit(inbox, recipientFile, session, reason, ref, keyfile, &receipt, nil)
 	return receipt, err
 }
-func submit(inbox, recipientFile, session, reason, ref, keyfile string, receipt *Submitted) (string, error) {
-	if !validRequest(session, reason, ref) {
+func submit(inbox, recipientFile, session, reason, ref, keyfile string, receipt *Submitted, pull *gateway.PullIntent) (string, error) {
+	if !(pull == nil && validRequest(session, reason, ref) || pull != nil && keyfile != "" && validPullInput(session, reason, ref, pull)) {
 		return "", errors.New("invalid synthetic request, reason, session or reference")
 	}
 	pub, err := read(filepath.Dir(recipientFile), filepath.Base(recipientFile), 256)
@@ -107,6 +109,10 @@ func submit(inbox, recipientFile, session, reason, ref, keyfile string, receipt 
 		return "", err
 	}
 	request := Request{ID: hex.EncodeToString(id[:]), Session: session, Reason: strings.TrimSpace(reason), Ref: ref, State: "pending", Created: time.Now().UTC().Format(time.RFC3339Nano), Action: FixtureAction, Epoch: 3}
+	if pull != nil {
+		request.Pull = pull
+		request.Action = gateway.PullAction
+	}
 	if keyfile != "" {
 		seed, err := read(filepath.Dir(keyfile), filepath.Base(keyfile), 32)
 		if err != nil {
@@ -261,5 +267,5 @@ func openRequest(dir, name string, id *age.X25519Identity) (Request, bool) {
 		return Request{}, false
 	}
 	q.Review = requestDigest(q)
-	return q, (q.Action == "" && q.Epoch == 0 || q.Action == FixtureAction && q.Epoch == 3) && err == nil && validID(q.ID) && name == q.ID+".request.age" && q.State == "pending" && validRequest(q.Session, q.Reason, q.Ref)
+	return q, err == nil && validID(q.ID) && name == q.ID+".request.age" && q.State == "pending" && (q.Pull == nil && (q.Action == "" && q.Epoch == 0 || q.Action == FixtureAction && q.Epoch == 3) && validRequest(q.Session, q.Reason, q.Ref) || q.Action == gateway.PullAction && q.Epoch == 3 && q.Auth != nil && validPullInput(q.Session, q.Reason, q.Ref, q.Pull))
 }
