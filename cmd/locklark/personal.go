@@ -17,7 +17,7 @@ import (
 	"unicode/utf8"
 )
 
-var personalUsage = errors.New("usage: locklark personal <init|add-login|list|audit> --file PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password")
+var personalUsage = errors.New("usage: locklark personal <init|add-login|list|audit|archived-audit> --file PATH, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password")
 
 // One terminal mode covers the entire interaction; no prompt or inter-field
 // gap is visible while echo is enabled.
@@ -57,6 +57,20 @@ func (c *console) field(prompt string) ([]byte, error) {
 		}
 	}
 }
+func confirmIssued(c *console, label, value, prompt string) error {
+	if _, err := fmt.Fprintf(os.Stderr, "%s： %s\r\n", label, value); err != nil {
+		return err
+	}
+	typed, err := c.field(prompt)
+	defer clear(typed)
+	if err != nil {
+		return err
+	}
+	if subtle.ConstantTimeCompare(typed, []byte(value)) != 1 {
+		return errors.New("confirmation mismatch; no file created")
+	}
+	return nil
+}
 func runPersonal(args []string, out io.Writer) (retErr error) {
 	if len(args) < 3 || len(args)%2 != 1 {
 		return personalUsage
@@ -80,7 +94,11 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 		if len(opts) != 4 || !personal.ValidEditTarget(edit.ID, edit.Revision, edit.Field) {
 			return personalUsage
 		}
-	case "init", "add-login", "audit", "list":
+	case "backup", "restore":
+		if len(opts) != 2 || opts["--out"] == "" {
+			return personalUsage
+		}
+	case "init", "add-login", "audit", "list", "archived-audit":
 		if len(opts) != 1 {
 			return personalUsage
 		}
@@ -177,6 +195,34 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 		}
 		defer clear(key)
 		switch action {
+		case "backup":
+			kit, e := personal.NewRecovery()
+			if e != nil {
+				return e
+			}
+			if e = confirmIssued(&c, "请单独离线保存这份备份的恢复码", kit, "重新输入恢复码"); e != nil {
+				return e
+			}
+			err = personal.Backup(path, opts["--out"], string(pw), key, kit)
+			response = map[string]string{"status": "backed-up"}
+		case "restore":
+			kit, e := consoleField("此备份的恢复码")
+			if e != nil {
+				return e
+			}
+			defer clear(kit)
+			fresh, e := personal.NewSecret()
+			if e != nil {
+				return e
+			}
+			defer clear(fresh)
+			if e = confirmIssued(&c, "恢复库沿用主密码，请离线保存新的 Secret Key", personal.FormatSecret(fresh), "重新输入新 Secret Key"); e != nil {
+				return e
+			}
+			err = personal.Restore(path, opts["--out"], string(pw), key, string(kit), fresh)
+			response = map[string]string{"status": "restored"}
+		case "archived-audit":
+			response, err = personal.ArchivedAudit(path, string(pw), key)
 		case "add-login":
 			title, e := consoleField("登录标题")
 			if e != nil {

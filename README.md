@@ -16,7 +16,7 @@ go build -o locklark.exe ./cmd/locklark
 .\locklark.exe personal audit --file owner.ll
 ```
 
-建库时输入并确认主密码。终端显示一次随机的 `LL1-…` Secret Key；离线另存并重新输入后才会建库。它不会写入库文件、参数或 JSON 输出。关闭进程后仍需主密码和这把 Secret Key；单独拥有库文件或任一因子不能打开登录内容。两项都不能代替库文件或已登记设备的加密槽。当前没有重设或换机恢复流程。
+建库时输入并确认主密码。终端显示一次随机的 `LL1-…` Secret Key；离线另存并重新输入后才会建库。它不会写入库文件、参数或 JSON 输出。关闭进程后仍需主密码和这把 Secret Key；单独拥有库文件或任一因子不能打开登录内容。两项都不能代替库文件或已登记设备的加密槽。忘记任一账户因子不能重设；提前生成独立备份后才可以离线恢复到新设备。
 
 `add-login` 在关闭回显的终端中收集标题、用户名和密码，返回稳定条目 ID；`list` 只列 ID、标题和条目版本。每次成功操作记录人类会话、动作、条目 ID（如适用）、结果和 UTC 时间；不记录标题、用户名或密码。未解锁的失败不能写入已认证的账本。事件单独加密、逐条签名，添加登录和审计写入同一事务。查询会写审计事件，但不改 KDBX 密文。当前每次操作都校验完整本地日志；整份文件被回滚仍需外部见证才能发现。个人文件包含设备专属加密槽，**不要当作可上传给同步服务器的格式**；此入口尚未接入团队、设备撤销或 Gateway。
 
@@ -31,6 +31,18 @@ go build -o locklark.exe ./cmd/locklark
 新版可在原个人库上直接编辑。写入首条编辑操作审计后，`d294bb4` 的旧 CLI 会拒绝不认识的事件，不能用旧版继续打开该库。升级验收：`python scripts/personal_acceptance.py <新版程序> <旧版程序>`。
 
 个人库的跨进程验收可用 `python scripts/personal_acceptance.py <本机编译的 locklark>` 复跑。脚本只用临时目录和随机测试凭据；Windows 测试环境另需 `pywinpty==3.1.2`，产品本身无需 Python。
+
+## 个人库离线备份与恢复
+
+```powershell
+.\locklark.exe personal backup --file owner.ll --out owner.llb
+.\locklark.exe personal restore --file owner.llb --out recovered.ll
+.\locklark.exe personal archived-audit --file recovered.ll
+```
+
+备份时，把终端显示的 `LLR1-…` 恢复码与备份文件分开保存。每份备份各有一个码。恢复需要原主密码、原 Secret Key 和该码，不需要旧设备或服务器。新库保留条目 ID 和原值，沿用主密码，生成新的 Secret Key、设备密钥、审计密钥和快照代次；原设备私钥、会话和可执行授权不会被复制。已有目标路径不会被覆盖。
+
+`audit` 查看新设备的账本；`archived-audit` 查看备份时已有的历史事件、原签名和验签公钥。再次备份会携带这些历史。原库的 `backup.prepare` 表示已准备好密文，不证明备份文件最终写完或已异地保存；以命令成功退出并在独立目录试恢复为准。旧设备仍能访问自身曾持有的旧库。当前只验证单人库、独立新目录，没有跨设备外部见证；预览限制为 32 段历史、备份明文上限 16 MiB。新事件不被旧 CLI 识别。
 
 ## 五分钟复跑
 

@@ -31,7 +31,7 @@ def invoke(binary, action, path, answers, *, ok, issue, options, barrier):
         screen = ansi.sub("", view)
         offset = screen.index(marker, offset) + len(marker)
         if value is None:
-            match = re.search(r"LL1-[A-Z2-7]{26}", screen)
+            match = re.search(r"(?:LL1-[A-Z2-7]{26}|LLR1-[A-Z2-7]{52})", screen)
             if not issue or match is None:
                 raise RuntimeError("Secret Key not displayed at initialization")
             issued = value = match.group()

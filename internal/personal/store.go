@@ -78,6 +78,9 @@ func seal(b *bolt.Bucket, i identity, epoch uint64, items []vault.Item) (vault.S
 
 // Build and fsync a complete database before publishing a new, non-overwriting name.
 func Create(path, pw string, key []byte) error {
+	return create(path, pw, key, nil)
+}
+func create(path, pw string, key []byte, recovered *payload) error {
 	if path == "" || len(key) != 16 {
 		return invalid
 	}
@@ -136,6 +139,9 @@ func Create(path, pw string, key []byte) error {
 		if _, e = b.CreateBucket(eventsKey); e != nil {
 			return e
 		}
+		if recovered != nil {
+			return initializeRecovered(b, i, recovered)
+		}
 		s, e := seal(b, i, 1, []vault.Item{})
 		if e != nil {
 			return e
@@ -171,9 +177,11 @@ type result struct {
 	events   []Event
 	id       string
 	revision string
+	chains   []Chain
+	archive  []byte
 }
 
-func command(path, pw string, key []byte, action string, add vault.Item, edit *Edit) (result, error) {
+func command(path, pw string, key []byte, action string, add vault.Item, edit *Edit, backup ...string) (result, error) {
 	db, e := existing(path)
 	if e != nil {
 		return result{}, e
@@ -216,7 +224,11 @@ func command(path, pw string, key []byte, action string, add vault.Item, edit *E
 			return invalid
 		}
 		revisions := make(map[string]string)
-		tip, rows, e := history(b, i, s, action == "audit.list", revisions)
+		tip, rows, e := history(b, i, s, action == "audit.list" || action == "backup.prepare", revisions)
+		if e != nil {
+			return e
+		}
+		chains, e := loadChains(b, i, tip.Origin)
 		if e != nil {
 			return e
 		}
@@ -240,6 +252,12 @@ func command(path, pw string, key []byte, action string, add vault.Item, edit *E
 		}
 		outcome := "succeeded"
 		switch action {
+		case "audit.archived":
+			out.chains = chains
+		case "backup.prepare":
+			if len(backup) != 1 {
+				return invalid
+			}
 		case "item.edit.title", "item.edit.username", "item.edit.password":
 			if edit == nil {
 				return invalid
@@ -294,8 +312,28 @@ func command(path, pw string, key []byte, action string, add vault.Item, edit *E
 				return e
 			}
 		}
-		ev, e := appendEvent(b, i, tip, s, action, out.id, outcome, revisions[out.id])
+		var link string
+		if action == "backup.prepare" {
+			link, e = generation(backup[0])
+			if e != nil {
+				return e
+			}
+			for _, old := range rows {
+				if old.Action == action && old.Link == link {
+					return invalid
+				}
+			}
+		}
+		ev, e := appendLinked(b, i, tip, s, action, out.id, outcome, revisions[out.id], link)
 		if e != nil {
+			return e
+		}
+		if action == "backup.prepare" {
+			auditPriv := ed25519.NewKeyFromSeed(i.Audit)
+			defer clear(auditPriv)
+			chains = append(chains, Chain{auditPriv.Public().(ed25519.PublicKey), append(rows, ev)})
+			p := payload{Generation: link, Epoch: s.Epoch, Items: items, Chains: chains}
+			out.archive, e = encodeArchive(p, pw, key, slot.Account, backup[0], auditPriv)
 			return e
 		}
 		if action == "audit.list" {

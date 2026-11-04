@@ -36,7 +36,7 @@ def invoke(binary, action, path, answers, *, ok=True, issue=False, paste=False, 
                         transcript.extend(os.read(master, 4096))
                 offset = transcript.index(marker, offset) + len(marker)
                 if value is None:
-                    match = re.search(rb"LL1-[A-Z2-7]{26}", transcript[:offset])
+                    match = re.search(rb"(?:LL1-[A-Z2-7]{26}|LLR1-[A-Z2-7]{52})", transcript[:offset])
                     if not issue or match is None:
                         raise RuntimeError("no new Secret Key issued to terminal")
                     issued = match.group().decode()
@@ -112,6 +112,18 @@ def check(binary, legacy=None):
         assert [e["result"] for e in events[-3:-1]]==["succeeded","conflict"]
         assert events[2]["item_id"] == added["id"]
         assert all(s not in json.dumps(events) for s in (key, pw, login, "local-fixture-user","rotated-private-fixture","stale-private-fixture"))
+        archive = os.path.join(tmp, "standalone.llb")
+        backup, kit = invoke(binary, "backup", path, factors+[("重新输入恢复码",None)], issue=True, options=("--out",archive))
+        assert backup["status"]=="backed-up" and kit.startswith("LLR1-")
+        os.rename(path,path+".offline")
+        restored = os.path.join(tmp, "new-directory", "restored.ll")
+        os.mkdir(os.path.dirname(restored))
+        result,fresh = invoke(binary,"restore",archive,factors+[("此备份的恢复码",kit),("重新输入新 Secret Key",None)],issue=True,options=("--out",restored))
+        assert result["status"]=="restored" and fresh!=key
+        new_factors = [("主密码",pw),("Secret Key",fresh)]
+        assert invoke(binary,"list",restored,new_factors)[0][0]["id"]==added["id"]
+        archived,_=invoke(binary,"archived-audit",restored,new_factors)
+        assert archived[0]["events"][:-1]==events and archived[0]["events"][-1]["action"]=="backup.prepare"
         denied = subprocess.run([binary, "personal", "list", "--file", path], input=b"",
                                 capture_output=True, timeout=10)
         assert denied.returncode and not denied.stdout
