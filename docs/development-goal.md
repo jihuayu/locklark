@@ -41,7 +41,7 @@
 
 ## 下一项候选
 
-外部合并条件阻塞期间，已开发纯 Go 字段引用元数据核心、两种既有布局投影/绑定、TOTP、密码生成和 1PUX v3 只读清点核心。验收与限制见 [reference-validation.md](reference-validation.md)、[personal-reference-metadata-validation.md](personal-reference-metadata-validation.md)、[fixture-reference-metadata-validation.md](fixture-reference-metadata-validation.md)、[reference-binding-validation.md](reference-binding-validation.md)、[totp-validation.md](totp-validation.md)、[password-generation-validation.md](password-generation-validation.md) 和 [onepux-preflight-validation.md](onepux-preflight-validation.md)。后续可做 1PUX 附件关联及缺失/未引用文件核对：只采用已确认的显式源关联与合成向量，不猜测文件命名规则，不能据此声称完整条目已可迁移。通用导入写入仍待开发。这些基础工作不等于已接通产品预检/生成器、人工取值、可信事务审计或授权，不关闭其验收项。
+外部合并条件阻塞期间，已开发纯 Go 字段引用元数据核心、两种既有布局投影/绑定、TOTP、密码生成、1PUX v3 只读清点及显式文件关联核对。验收与限制见 [reference-validation.md](reference-validation.md)、[personal-reference-metadata-validation.md](personal-reference-metadata-validation.md)、[fixture-reference-metadata-validation.md](fixture-reference-metadata-validation.md)、[reference-binding-validation.md](reference-binding-validation.md)、[totp-validation.md](totp-validation.md)、[password-generation-validation.md](password-generation-validation.md)、[onepux-preflight-validation.md](onepux-preflight-validation.md) 和 [onepux-file-references-validation.md](onepux-file-references-validation.md)。后续可做 1PUX 区段/字段值类型与重复标识清点：保留源区段作用域，不把重复字段 ID 强行唯一化或把值统一降成字符串，未知语义明确待核对。其他附件布局、完整条目映射和通用写入仍待开发。这些基础工作不等于已接通产品预检/生成器、人工取值、可信事务审计或授权，不关闭其验收项。
 
 恢复修复通过独立复核、远端检查并合并后，从最新 main 开 `codex/` 分支做个人 CLI 的受控单字段披露：显式人工入口、稳定 ID 和版本、披露意图先记审计、记录本机会话但不记录原值、拒绝非交互式 Agent 路径；用合成数据覆盖错误因素、未知 ID/版本、账本写入失败和输出失败。该切片不授予 MCP 或 invoke 原值读取能力。
 
