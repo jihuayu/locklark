@@ -105,6 +105,20 @@ B 的本地事务库把签名决定与单独审计流的事件一起加密提交
 
 早期演练缺少执行账本头或批准时的快照指纹，可以查历史但不能直接兑现，须新建演练。单次执行仅对同一份持续保存的本机账本成立；同时还原旧账本与匹配的头，或把设备私钥和未消费账本复制到两个独立目录，可能重复执行。尚未提供跨设备防重放、可信时钟或远程执行服务。上游 API 副作用、插件注入和机器 token 不属于这个动作。
 
+## 网关：GitHub PR 读取适配器
+
+内置 Bun 插件只读仓库 ID 和 PR 编号，产生 `github.pulls.get` 操作提案。Go 宿主把提案与调用方提供的已批准目标逐项比较，一致后才读凭据；它只向固定 GitHub HTTPS 域名和拥有者配置的 IPv4 地址发送 GET。返回值限 PR 编号、状态、合并时间，并核对上游返回的仓库 ID。上游接口见 [GitHub REST 文档](https://docs.github.com/en/rest/pulls/pulls#get-a-pull-request)。
+
+用以下命令在 PowerShell 7 复跑（Go 1.26.8、Bun 1.4.4）。测试启动独立 Bun 进程，并用本机合成 HTTPS 服务测证书拒绝、凭据注入与结果过滤；不需要 GitHub 令牌。
+
+```powershell
+$env:LOCKLARK_TEST_BUN = (Get-Command bun -CommandType Application | Select-Object -First 1).Source
+bun test ./plugins/github-pull-reader
+go test -count=1 ./internal/gateway
+```
+
+这是可由 Go 执行器调用的适配器，尚未连接签名审批、MCP 工具发现或真实 GitHub 账户；没有向 Agent 暴露真实凭据调用入口。两个进程之间不传原值，不代表插件已被 OS 沙箱隔离。目前不加载第三方插件。
+
 ## 核对审计与历史回滚
 
 新版 `demo` 使用与快照签发者不同的 Ed25519 审计密钥；每个事件签名绑定事件正文、序号及上一条签名的 SHA-256 摘要。事件和签名都在加密快照内。客户端独立保存 `audit.pub`；审计流按签名密钥区分。旧版演练没有审计签名，仍可普通查询，但不能通过检查点验证。
