@@ -1,0 +1,10 @@
+/.ryugi/
+/bin/
+/out/
+/demo-out/
+*.kdbx
+*.1pux
+*.age
+.env
+.env.*
+
