@@ -23,6 +23,7 @@ const invokeDomain = "locklark/invoke-ticket/v1\x00"
 const replyDomain = "locklark/invoke-reply/v1\x00"
 
 type invocation struct {
+	Purpose                                             string `json:"purpose,omitempty"`
 	ID, Review, Session, Public, Audience, Reply, Nonce string
 	Signature                                           []byte
 }
@@ -31,9 +32,15 @@ func message(domain string, v any) []byte {
 	b, _ := json.Marshal(v)
 	return append([]byte(domain), b...)
 }
-func (t invocation) proof() []byte { t.Signature = nil; return message(invokeDomain, t) }
+func (t invocation) domain() string {
+	if t.Purpose == statusPurpose {
+		return "locklark/status-ticket/v1\x00"
+	}
+	return invokeDomain
+}
+func (t invocation) proof() []byte { t.Signature = nil; return message(t.domain(), t) }
 func (t invocation) digest() string {
-	h := sha256.Sum256(message(invokeDomain, t))
+	h := sha256.Sum256(message(t.domain(), t))
 	return hex.EncodeToString(h[:])
 }
 func hexSize(s string, n int) bool {
@@ -79,6 +86,9 @@ type localAttempt struct {
 }
 
 func PrepareInvocation(dir, keyFile, recipientFile, hostKeyFile, session, id, review string) error {
+	return prepareEnvelope(dir, keyFile, recipientFile, hostKeyFile, session, id, review, "", "")
+}
+func prepareEnvelope(dir, keyFile, recipientFile, hostKeyFile, session, id, review, purpose, challenge string) error {
 	if !validSession(session) || !validID(id) || !hexSize(review, 32) {
 		return errInvoke
 	}
@@ -116,6 +126,10 @@ func PrepareInvocation(dir, keyFile, recipientFile, hostKeyFile, session, id, re
 		return err
 	}
 	t := invocation{ID: id, Review: review, Session: session, Public: hex.EncodeToString(signer[32:]), Audience: recipient.String(), Reply: reply.Recipient().String(), Nonce: hex.EncodeToString(nonce[:])}
+	if purpose == statusPurpose {
+		t.Purpose = purpose
+		t.Nonce = challenge
+	}
 	t.Signature = ed25519.Sign(signer, t.proof())
 	encrypted, err := sealJSON(recipient, t)
 	if err != nil {
@@ -127,9 +141,15 @@ func PrepareInvocation(dir, keyFile, recipientFile, hostKeyFile, session, id, re
 	if err = writeJSON(dir, "attempt.private", localAttempt{reply.String(), t, host}); err != nil {
 		return err
 	}
+	if purpose == statusPurpose {
+		return write(dir, "query.age", encrypted)
+	}
 	return write(dir, "invocation.age", encrypted)
 }
 func readTicket(path string, id *age.X25519Identity) (invocation, error) {
+	return readEnvelope(path, id, "")
+}
+func readEnvelope(path string, id *age.X25519Identity, purpose string) (invocation, error) {
 	var t invocation
 	b, err := readPath(path, 8192)
 	if err != nil {
@@ -140,7 +160,7 @@ func readTicket(path string, id *age.X25519Identity) (invocation, error) {
 	}
 	r, err := age.ParseX25519Recipient(t.Reply)
 	pub, _ := hex.DecodeString(t.Public)
-	if err != nil || r.String() != t.Reply || !ed25519.Verify(pub, t.proof(), t.Signature) {
+	if err != nil || r.String() != t.Reply || t.Purpose != purpose || !ed25519.Verify(pub, t.proof(), t.Signature) {
 		return invocation{}, errInvoke
 	}
 	// Parsing an age recipient checks its encoding, but not low-order points.
