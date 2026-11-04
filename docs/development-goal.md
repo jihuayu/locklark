@@ -41,7 +41,7 @@
 
 ## 下一项候选
 
-外部合并条件阻塞期间，已独立开发不依赖持库格式或未合并 main 的纯 Go 字段引用元数据核心，验收与限制见 [reference-validation.md](reference-validation.md)。后续可做原生字段元数据投影及对照向量；这些基础工作不等于已接通 CLI、人工取值、可信审计或授权，不关闭其验收项。
+外部合并条件阻塞期间，已开发纯 Go 字段引用元数据核心及个人 v1 原生字段投影，验收与限制见 [reference-validation.md](reference-validation.md) 和 [personal-reference-metadata-validation.md](personal-reference-metadata-validation.md)。后续可做导入布局的源区段/字段 ID 投影及对照向量；这些基础工作不等于已接通 CLI、人工取值、可信事务审计或授权，不关闭其验收项。
 
 恢复修复通过独立复核、远端检查并合并后，从最新 main 开 `codex/` 分支做个人 CLI 的受控单字段披露：显式人工入口、稳定 ID 和版本、披露意图先记审计、记录本机会话但不记录原值、拒绝非交互式 Agent 路径；用合成数据覆盖错误因素、未知 ID/版本、账本写入失败和输出失败。该切片不授予 MCP 或 invoke 原值读取能力。
 
