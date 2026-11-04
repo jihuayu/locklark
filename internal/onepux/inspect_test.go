@@ -45,7 +45,7 @@ func TestInventoryCountsAndPrivacy(t *testing.T) {
 	raw := pack(t, attributes, inventoryData, entry{"files/", ""}, entry{"files/private-file-marker", "\x00\x01\x02\xff"})
 	before := append([]byte(nil), raw...)
 	report, err := Inspect(raw)
-	want := Report{Version: 3, Accounts: 1, Vaults: 1, Items: 3, Active: 1, Archived: 1, OtherStates: 1, Files: 1, FileBytes: 4, Categories: []Category{{"001", 1}, {"114", 1}, {"777", 1}}, UnmappedItems: 3, ReviewReasons: []string{"file-linkage-unverified", "mapping-not-implemented", "password-history-unmapped", "sections-unmapped", "unknown-category", "unknown-state"}}
+	want := Report{Version: 3, Accounts: 1, Vaults: 1, Items: 3, Active: 1, Archived: 1, OtherStates: 1, Files: 1, FileBytes: 4, FileReferences: FileReferenceReport{FilesWithoutExplicitLinks: 1, ItemsWithoutExplicitPath: 1}, Categories: []Category{{"001", 1}, {"114", 1}, {"777", 1}}, UnmappedItems: 3, ReviewReasons: []string{"file-linkage-unverified", "file-path-not-provided", "files-without-explicit-links", "mapping-not-implemented", "password-history-unmapped", "sections-unmapped", "unknown-category", "unknown-state"}}
 	if err != nil || !reflect.DeepEqual(report, want) {
 		t.Fatal("inventory counts or unverified mapping changed", report, err)
 	}
@@ -267,6 +267,7 @@ func TestDirectoryBudgetMatchesLastEOCD(t *testing.T) {
 func FuzzInventory(f *testing.F) {
 	f.Add(pack(f, attributes, inventoryData, entry{"files/blob", "private-bytes"}))
 	f.Add(pack(f, attributes, `{"accounts":[]}`))
+	f.Add(pack(f, attributes, fileData(f, fileItem("i", "files/private-target", 4)), entry{"files/private-target", "data"}))
 	f.Add([]byte("not a zip"))
 	f.Fuzz(checkInventory)
 }
@@ -277,11 +278,13 @@ func FuzzInventoryJSON(f *testing.F) {
 	f.Add([]byte(inventoryData))
 	f.Add([]byte(`{"accounts":[]}`))
 	f.Add([]byte(`{"accounts":[],"accounts":null}`))
+	f.Add([]byte(fileData(f, fileItem("i", "files/private-target", 4))))
+	f.Add([]byte(fileData(f, fileItem("i", "files/private-missing", 0))))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		if len(data) > MaxJSON {
 			return
 		}
-		checkInventory(t, pack(t, attributes, string(data)))
+		checkInventory(t, pack(t, attributes, string(data), entry{"files/private-target", "data"}))
 	})
 }
 
@@ -306,5 +309,9 @@ func checkInventory(t *testing.T, data []byte) {
 	}
 	if count != report.Items || report.FileBytes > MaxExpanded {
 		t.Fatal("inventory category or attachment accounting inconsistent")
+	}
+	refs := report.FileReferences
+	if refs.Explicit != refs.Matched+refs.Missing || refs.LinkedFiles+refs.FilesWithoutExplicitLinks != report.Files || refs.LinkedFiles > refs.Matched || refs.Repeated > refs.Explicit || refs.SizeMismatches > refs.Matched || refs.Explicit+refs.ItemsWithoutExplicitPath > report.Items {
+		t.Fatal("file reference accounting inconsistent")
 	}
 }

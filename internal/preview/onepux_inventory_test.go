@@ -27,6 +27,11 @@ func TestOnepuxInventoryFromVerifiedFixture(t *testing.T) {
 	if err != nil || report.Accounts != 1 || report.Vaults != 1 || report.Items != 2 || report.Files != 1 || report.UnmappedItems != 2 || report.MappingVerified {
 		t.Fatal("verified fixture inventory changed or claimed migration", err)
 	}
+	// The built-in fixture supplies document attributes but no explicit path.
+	// Its apparent filename pattern must not be promoted to a verified link.
+	if report.FileReferences.Explicit != 0 || report.FileReferences.ItemsWithoutExplicitPath != 1 || report.FileReferences.FilesWithoutExplicitLinks != 1 {
+		t.Fatal("verified source history was confused with verified file linkage")
+	}
 	raw, err := json.Marshal([]any{p.Events, proof, report})
 	if err != nil {
 		t.Fatal(err)

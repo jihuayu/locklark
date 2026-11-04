@@ -35,7 +35,8 @@ func identity(object map[string]any, seen map[string]bool) bool {
 	return true
 }
 
-func inventory(root map[string]any, r *Report, reasons map[string]bool) error {
+func inventory(root map[string]any, r *Report, reasons map[string]bool, files map[string]uint64) error {
+	links := fileInventory{files: files, targets: map[string]bool{}, linked: map[string]bool{}}
 	mark := func(object map[string]any, allowed ...string) {
 		if extra(object, allowed...) {
 			reasons["additional-metadata"] = true
@@ -143,8 +144,15 @@ func inventory(root map[string]any, r *Report, reasons map[string]bool) error {
 				if _, exists := item["file"]; exists {
 					reasons["file-linkage-unverified"] = true
 				}
+				if err := links.item(item, &r.FileReferences, reasons); err != nil {
+					return err
+				}
 			}
 		}
+	}
+	r.FileReferences.FilesWithoutExplicitLinks = r.Files - len(links.linked)
+	if r.FileReferences.FilesWithoutExplicitLinks > 0 {
+		reasons["files-without-explicit-links"] = true
 	}
 	for code, count := range counts {
 		r.Categories = append(r.Categories, Category{code, count})

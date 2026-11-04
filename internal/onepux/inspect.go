@@ -37,24 +37,39 @@ type Category struct {
 	Items int    `json:"items"`
 }
 
+// FileReferenceReport describes only literal item.file.path references. Files
+// without these links may be icons or use other unimplemented link layouts;
+// they are not proven orphans and must never be deleted based on this report.
+type FileReferenceReport struct {
+	Explicit                  int `json:"explicit"`
+	Matched                   int `json:"matched"`
+	Missing                   int `json:"missing"`
+	Repeated                  int `json:"repeated"`
+	LinkedFiles               int `json:"linked_files"`
+	FilesWithoutExplicitLinks int `json:"files_without_explicit_links"`
+	ItemsWithoutExplicitPath  int `json:"items_without_explicit_path"`
+	SizeMismatches            int `json:"size_mismatches"`
+}
+
 // Report contains counts and fixed reason codes, not names, IDs, paths or
 // values. Category codes are restricted to three ASCII decimal digits.
 // Successful inventory always leaves MappingVerified false: no general
 // importer has proved a lossless mapping for any item in this archive.
 type Report struct {
-	Version         int        `json:"version"`
-	Accounts        int        `json:"accounts"`
-	Vaults          int        `json:"vaults"`
-	Items           int        `json:"items"`
-	Active          int        `json:"active"`
-	Archived        int        `json:"archived"`
-	OtherStates     int        `json:"other_states"`
-	Files           int        `json:"files"`
-	FileBytes       uint64     `json:"file_bytes"`
-	Categories      []Category `json:"categories"`
-	UnmappedItems   int        `json:"unmapped_items"`
-	MappingVerified bool       `json:"mapping_verified"`
-	ReviewReasons   []string   `json:"review_reasons"`
+	Version         int                 `json:"version"`
+	Accounts        int                 `json:"accounts"`
+	Vaults          int                 `json:"vaults"`
+	Items           int                 `json:"items"`
+	Active          int                 `json:"active"`
+	Archived        int                 `json:"archived"`
+	OtherStates     int                 `json:"other_states"`
+	Files           int                 `json:"files"`
+	FileBytes       uint64              `json:"file_bytes"`
+	FileReferences  FileReferenceReport `json:"file_references"`
+	Categories      []Category          `json:"categories"`
+	UnmappedItems   int                 `json:"unmapped_items"`
+	MappingVerified bool                `json:"mapping_verified"`
+	ReviewReasons   []string            `json:"review_reasons"`
 }
 
 // Inspect accepts an immutable byte snapshot owned by the caller, not a path.
@@ -112,6 +127,7 @@ func Inspect(archive []byte) (Report, error) {
 		expanded += f.UncompressedSize64
 	}
 	var report Report
+	files := map[string]uint64{}
 	var attributes, data map[string]any
 	for _, f := range z.File {
 		if f.Mode().IsDir() {
@@ -129,6 +145,7 @@ func Inspect(archive []byte) (Report, error) {
 		if !keep {
 			report.Files++
 			report.FileBytes += uint64(n)
+			files[f.Name] = uint64(n)
 			continue
 		}
 		object, err := decodeObject(raw)
@@ -164,7 +181,7 @@ func Inspect(archive []byte) (Report, error) {
 	if extra(attributes, "version", "description", "createdAt") {
 		reasons["additional-metadata"] = true
 	}
-	if err = inventory(data, &report, reasons); err != nil {
+	if err = inventory(data, &report, reasons, files); err != nil {
 		return Report{}, err
 	}
 	report.Version, report.UnmappedItems = 3, report.Items
