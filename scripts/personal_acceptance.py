@@ -140,19 +140,29 @@ def check(binary, legacy=None):
         existing = restored + ".exists"
         sentinel = b"existing synthetic target"
         pathlib.Path(existing).write_bytes(sentinel)
-        for source, target, recovery, error in (
+        rejected_sources = [
             (archive, restored, kit[:5] + ("A" if kit[5] != "A" else "B") + kit[6:], "invalid"),
             (corrupt, restored, kit, "invalid"),
             (archive, existing, kit, "exist"),
             (archive, restored, "LLR1-"+kit[5:57], "legacy recovery format"),
             (legacy_archive, restored, kit, "legacy recovery format"),
-        ):
+        ]
+        if os.name != "nt":
+            fifo = archive + ".fifo"
+            os.mkfifo(fifo, 0o600)
+            fifo_link = fifo + ".link"
+            os.symlink(fifo, fifo_link)
+            rejected_sources.extend((source, restored, kit, "backup source must be a regular file")
+                                    for source in (fifo, fifo_link, os.path.dirname(restored), "/dev/null"))
+        for source, target, recovery, error in rejected_sources:
             invoke(binary, "restore", source, factors+[("此备份的恢复码", recovery)],
                    options=("--out", target), ok=False, deny_issue=True, expect_error=error)
             assert not os.path.lexists(restored)
             assert pathlib.Path(existing).read_bytes() == sentinel
             assert sorted(os.listdir(os.path.dirname(restored))) == [os.path.basename(existing)]
         print("PASS: PTY wrong recovery material, damaged backup and existing target issue no key and leave no vault")
+        if os.name != "nt":
+            print("PASS: PTY idle FIFO, FIFO symlink, directory and device rejected before key issuance")
         # The destination can change while the user saves the issued key.
         # Publication must still preserve that concurrent writer's file.
         class LateWriter:

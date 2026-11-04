@@ -28,6 +28,7 @@ var ErrArchiveLimit = errors.New("backup exceeds capacity limit (16 MiB plaintex
 var ErrHistoryLimit = errors.New("backup exceeds history limit (32 segments)")
 var ErrLegacyRecovery = errors.New("legacy recovery format has no independent history checkpoint; create a new backup from a trusted source vault")
 var ErrRecoverySource = errors.New("backup does not match the independently saved recovery checkpoint")
+var ErrArchiveType = errors.New("backup source must be a regular file")
 
 // Chain is verification material only. Signatures are kept byte-for-byte.
 type Chain struct {
@@ -205,7 +206,7 @@ func encodeArchive(p payload, pw string, key, accountID []byte, kit string, priv
 	return json.Marshal(envelope{2, p.Generation, slot, a.Seal(nil, nil, raw, []byte(backupDomain+"/"+p.Generation))})
 }
 func decodeArchive(path, pw string, key []byte, kit string) (*payload, error) {
-	f, e := os.Open(path)
+	f, e := openArchive(path)
 	if e != nil {
 		return nil, e
 	}
@@ -218,7 +219,7 @@ func decodeArchive(path, pw string, key []byte, kit string) (*payload, error) {
 		return nil, ErrArchiveLimit
 	}
 	if !st.Mode().IsRegular() {
-		return nil, invalid
+		return nil, ErrArchiveType
 	}
 	b, e := io.ReadAll(io.LimitReader(f, maxArchive+1))
 	if e != nil {

@@ -106,6 +106,20 @@ func TestRecoveryLimitsAreNotCredentialErrors(t *testing.T) {
 	}
 }
 
+func TestRestoreRejectsDirectoryBeforeCreatingDestination(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(t.TempDir(), "restored")
+	if r, err := PrepareRestore(dir, dest, "synthetic", make([]byte, 16), "synthetic-material"); !errors.Is(err, ErrArchiveType) {
+		if r != nil {
+			r.Close()
+		}
+		t.Fatal("nonregular backup was not rejected explicitly", err)
+	}
+	if _, err := os.Lstat(dest); !os.IsNotExist(err) {
+		t.Fatal("rejected directory left a restored vault")
+	}
+}
+
 func recoveryFixture(t *testing.T) (string, string, []byte, string) {
 	t.Helper()
 	dir := t.TempDir()
