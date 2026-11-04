@@ -36,5 +36,8 @@ try {
     $receipt = Invoke-Ok @("request","--inbox",$spool,"--recipient",$pub,"--session","offline-1","--reason","synthetic offline request","--ref","op://synthetic-vault/login-sample/ops/otp-demo")
     $mail = Invoke-Ok @("inbox","--inbox",$spool,"--device",$b,"--session","offline-1")
     if ($receipt.state -ne "pending" -or $mail.requests.Length -ne 1 -or $mail.requests[0].id -ne $receipt.id -or $mail.unreadable -ne 0) { throw "Offline inbox mismatch" }
-    "PASS: old A opens v1; isolated A fails v2; B opens v2; signed denial and pending request verified. Synthetic files: $work"
+    $decision = Invoke-Ok @("decide","--device",$b,"--bundle",(Join-Path $out "share/epoch-3"),"--inbox",$spool,"--id",$receipt.id,"--review",$mail.requests[0].review,"--choice","approve","--reason","verified synthetic metadata")
+    $history = Invoke-Ok @("decisions","--device",$b,"--session","offline-1")
+    if ($decision.result -ne "approved" -or -not $decision.expires -or $history.request.id -ne $receipt.id -or $history.reason -ne "verified synthetic metadata") {throw "Persistent decision mismatch"}
+    "PASS: device revocation, snapshot audit, offline inbox, and durable signed approval verified. Synthetic files: $work"
 } finally { Pop-Location }

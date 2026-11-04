@@ -22,6 +22,9 @@ const usage = `Locklark · offline preview (synthetic data only)
   request  --inbox DIR --recipient PUBLIC_KEY_FILE --session ID --reason TEXT --ref REF
   inbox    --inbox DIR --device CLIENT_B_DIR --session ID [--after CURSOR]
 
+  decide   --inbox DIR --device CLIENT_B_DIR --id ID --review DIGEST --choice approve|deny --reason TEXT [--bundle EPOCH_3_DIR]
+  decisions --device CLIENT_B_DIR --session ID
+
 The only allowed request reference is ` + preview.FixtureRef + `.
 request records a pending request. It cannot release any credential.
 `
@@ -34,7 +37,7 @@ func run(args []string, out, errOut io.Writer) error {
 	command := args[0]
 	f := flag.NewFlagSet(command, flag.ContinueOnError)
 	f.SetOutput(errOut)
-	var dir, bundle, device, session, reason, recipient, ref, after, checkpoint string
+	var dir, bundle, device, session, reason, recipient, ref, after, checkpoint, id, review, choice string
 	var epoch uint64
 	switch command {
 	case "demo":
@@ -42,6 +45,13 @@ func run(args []string, out, errOut io.Writer) error {
 	case "inspect", "audit", "audit-verify", "fixture-export":
 		f.StringVar(&bundle, "bundle", "", "shared epoch directory")
 		f.Uint64Var(&epoch, "epoch", 0, "expected epoch, pinned independently")
+	case "decide":
+		f.StringVar(&dir, "inbox", "", "request spool")
+		f.StringVar(&bundle, "bundle", "", "required to approve the verified fixture target")
+		f.StringVar(&id, "id", "", "reviewed request ID")
+		f.StringVar(&review, "review", "", "digest shown during inbox review")
+		f.StringVar(&choice, "choice", "", "approve or deny")
+	case "decisions": // session-filtered local journal
 	case "request", "inbox":
 		f.StringVar(&dir, "inbox", "", "local request spool")
 	default:
@@ -56,13 +66,13 @@ func run(args []string, out, errOut io.Writer) error {
 	if command == "inbox" {
 		f.StringVar(&after, "after", "", "cursor from the previous page")
 	}
-	if command == "inspect" || command == "audit" || command == "inbox" || command == "fixture-export" || command == "audit-verify" {
+	if command == "inspect" || command == "audit" || command == "inbox" || command == "fixture-export" || command == "audit-verify" || command == "decide" || command == "decisions" {
 		f.StringVar(&device, "device", "", "private fixture client directory")
 	}
-	if command != "inspect" && command != "fixture-export" && command != "audit-verify" {
+	if command != "inspect" && command != "fixture-export" && command != "audit-verify" && command != "decide" {
 		f.StringVar(&session, "session", "", "agent session identifier")
 	}
-	if command == "demo" || command == "request" {
+	if command == "demo" || command == "request" || command == "decide" {
 		f.StringVar(&reason, "reason", "", "synthetic business reason; never include a credential")
 	}
 	if command == "request" {
@@ -108,6 +118,16 @@ func run(args []string, out, errOut io.Writer) error {
 				result, err = preview.Audit(bundle, device, epoch, session)
 			}
 		}
+	case "decide":
+		if dir == "" || device == "" {
+			return errors.New("--inbox and --device are required")
+		}
+		result, err = preview.Decide(dir, device, bundle, id, review, choice, reason)
+	case "decisions":
+		if device == "" {
+			return errors.New("--device is required")
+		}
+		result, err = preview.Decisions(device, session)
 	case "request":
 		if dir == "" || recipient == "" {
 			return errors.New("--inbox and --recipient are required")

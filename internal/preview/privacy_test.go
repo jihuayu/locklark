@@ -109,7 +109,7 @@ func TestRejectedSecretsNeverReachNewArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	forged := Request{forgedID, "release", "Authorization: Bearer synthetic-forged", FixtureRef, "pending", time.Now().UTC().Format(time.RFC3339Nano)}
+	forged := Request{ID: forgedID, Session: "release", Reason: "Authorization: Bearer synthetic-forged", Ref: FixtureRef, State: "pending", Created: time.Now().UTC().Format(time.RFC3339Nano)}
 	if err = json.NewEncoder(w).Encode(forged); err != nil {
 		t.Fatal(err)
 	}

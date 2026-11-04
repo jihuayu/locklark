@@ -18,9 +18,13 @@ import (
 
 // The only permitted reference resolves to a synthetic fixture. Submission
 // deliberately performs no resolution. The mailbox key is independent of all vault keys.
+const FixtureAction = "fixture.inspect-metadata"
 const FixtureRef = "op://synthetic-vault/login-sample/ops/otp-demo"
 
 type Request struct {
+	Action  string `json:"action,omitempty"`
+	Epoch   uint64 `json:"epoch,omitempty"`
+	Review  string `json:"review,omitempty"`
 	ID      string `json:"id"`
 	Session string `json:"session"`
 	Reason  string `json:"reason"`
@@ -54,6 +58,9 @@ func setupInbox(out string, secret, id []byte) error {
 	if err = writeJSON(filepath.Join(out, "clients", "B"), "approval.slot", s); err != nil {
 		return err
 	}
+	if err = setupDecisions(filepath.Join(out, "clients", "B"), secret, id); err != nil {
+		return err
+	}
 	return write(filepath.Join(out, "agent"), "approval.pub", []byte(identity.Recipient().String()))
 }
 func Submit(inbox, recipientFile, session, reason, ref string) (string, error) {
@@ -72,7 +79,7 @@ func Submit(inbox, recipientFile, session, reason, ref string) (string, error) {
 	if _, err = rand.Read(id[:]); err != nil {
 		return "", err
 	}
-	request := Request{hex.EncodeToString(id[:]), session, strings.TrimSpace(reason), ref, "pending", time.Now().UTC().Format(time.RFC3339Nano)}
+	request := Request{ID: hex.EncodeToString(id[:]), Session: session, Reason: strings.TrimSpace(reason), Ref: ref, State: "pending", Created: time.Now().UTC().Format(time.RFC3339Nano), Action: FixtureAction, Epoch: 3}
 	var out bytes.Buffer
 	w, err := age.Encrypt(&out, r)
 	if err != nil {
@@ -114,27 +121,9 @@ func InboxPage(dir, device, session, cursor string) (InboxReport, error) {
 	if !validSession(session) {
 		return report, errInput
 	}
-	data, err := read(device, "approval.slot", 4096)
+	id, err := mailIdentity(device)
 	if err != nil {
 		return report, err
-	}
-	secret, err := read(device, "fixture.secret", 16)
-	if err != nil {
-		return report, err
-	}
-	defer clear(secret)
-	var slot account.Slot
-	if err = json.Unmarshal(data, &slot); err != nil {
-		return report, err
-	}
-	key, err := account.Unwrap(fixturePassword, secret, slot)
-	if err != nil {
-		return report, err
-	}
-	defer clear(key)
-	id, err := age.ParseX25519Identity(string(key))
-	if err != nil {
-		return report, errors.New("invalid approval identity")
 	}
 	d, err := os.Open(dir)
 	if err != nil {
@@ -163,6 +152,9 @@ func InboxPage(dir, device, session, cursor string) (InboxReport, error) {
 		if q.Session == session {
 			report.Requests = append(report.Requests, q)
 		}
+	}
+	if err = overlayDecisions(report.Requests, device, id); err != nil {
+		return InboxReport{}, err
 	}
 	sort.Slice(report.Requests, func(i, j int) bool {
 		a, b := report.Requests[i], report.Requests[j]
@@ -225,5 +217,6 @@ func openRequest(dir, name string, id *age.X25519Identity) (Request, bool) {
 	}
 	_, err = time.Parse(time.RFC3339Nano, q.Created)
 	_, idErr := hex.DecodeString(q.ID)
-	return q, err == nil && idErr == nil && len(q.ID) == 32 && name == q.ID+".request.age" && q.State == "pending" && validRequest(q.Session, q.Reason, q.Ref)
+	q.Review = requestDigest(q)
+	return q, (q.Action == "" && q.Epoch == 0 || q.Action == FixtureAction && q.Epoch == 3) && err == nil && idErr == nil && len(q.ID) == 32 && name == q.ID+".request.age" && q.State == "pending" && validRequest(q.Session, q.Reason, q.Ref)
 }
