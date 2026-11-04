@@ -40,13 +40,15 @@ Go 测试补查：原检查点拒绝攻击者重签的完整替代历史；替�
 | 补充独立实现 | 设置上述 `LOCKLARK_TEST_PYKEEPASS` 后运行 `go test -v -count=1 ./internal/vault -run TestKDBXIndependentPeer`，实际 PASS；一次未设变量的补查为 SKIP，未将其算作通过 |
 | 补丁检查 | `git diff --check` 通过 |
 
-竞态检查 `go test -race -count=1 ./internal/personal ./internal/preview` 中个人库已通过；预览包仍在执行，最终状态须补录。没有把未完成命令标为通过。
+竞态检查 `go test -race -count=1 ./internal/personal ./internal/preview` 中个人库通过（157.664 秒）；扩大到未修改的预览包时触发默认整包 10 分钟超时，不能标为全包竞态通过。超时栈在 `TestSignedPullApprovalToSingleRecordedReply` 的 PBKDF2 计算中，未报告数据竞争。随后实际运行 `go test -race -count=1 -timeout=5m ./internal/preview -run '^TestSignedPullApprovalToSingleRecordedReply$'` 通过（44.164 秒）；这不能替代预览全包竞态验收，不修改或降低密码派生参数来加快测试。全量非竞态测试已通过（预览包 104.337 秒）。
 
 ## 合并门槛与下一项
 
 尚未完成本切片的独立代码复核；已询问采用单独审查 agent 或由用户安排外部审查，等待选择。自己的复查、负测和 PyKeePass 互操作都不等于独立代码/密码评审。已有 `4932c8d..a0d8ab1` 复核欠项也继续保留。
 
 接手时 GitHub [run 41847695945](https://github.com/jihuayu/locklark/actions/runs/41847695945) 未启动测试，check annotation 原文为：`The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section in your settings`。main 保护规则 API 返回 403（`Resource not accessible by integration`），rulesets 返回空列表；不能据此认定 main 不受保护。推送后须核对新 head 的实际检查；有阻塞就保留 PR，不尝试绕过、管理员合并或直接推 main。
+
+修复和目标文档已快进推送至 `dd1df67fa54ad2f61baac658169b226339a2cd50`。本次新 [run 41851825922](https://github.com/jihuayu/locklark/actions/runs/41851825922) 仍未启动测试；已读取 check `126649857083` 的 annotation，原因为同一付款/额度限制。PR 保持开放；main 未修改。
 
 Cloud 本次未运行 Windows ConPTY/macOS、iOS/Android 真机、物理新机/硬件断电、真实 1Password 对照、真实 GitHub 上游委托，也没有外部密码评审。这些保持未验证。
 
