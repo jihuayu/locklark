@@ -42,6 +42,8 @@ PTY 使用合成因素与真实终端，对无人写入 FIFO、FIFO 符号链接
 
 接手 head `7054bf5` 的 [run 41852815563](https://github.com/jihuayu/locklark/actions/runs/41852815563) 仍未启动，已重读 check `126653360462` 的 annotation，仍为账户付款/额度限制。此既有阻塞不当作新进展通知；推送后另核对新 head，不把本地检查计作远端通过，也不尝试合并或绕过保护。
 
+实现及验收文档已快进推送至 `f3e1db22fb52f600063927491b56bc456347c186`。其 [run 41861329568](https://github.com/jihuayu/locklark/actions/runs/41861329568) 仍未启动测试；已读取 check `126683596848` 的 annotation，确认为同一付款/额度限制。PR #1 保持开放、未合并；代码主分支仍为上述 `3901bc8`。本段仅补录远端结果，最终文档 head 的检查状态仍以 PR 为准。
+
 本轮未运行 Windows ConPTY/命名管道、macOS 终端、iOS/Android 真机、物理新机或硬件断电；未做真实 1Password 对照或外部密码评审。预览包全量竞态检查先前超时的限制仍见 recovery-validation，本轮未重跑，不能写为已通过。
 
 下一项：完成已有恢复切片的独立复核及 Windows 原生文件来源验收；合并门槛满足后才 squash PR #1，再从更新后的 main 开 `codex/` 分支做受控人工单字段披露。仍无 Agent 原值读取接口。
