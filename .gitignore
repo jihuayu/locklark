@@ -9,6 +9,8 @@
 *.age
 *.agekey
 *.sessionkey
+*.outbox
+*.profile
 attempt.private
 *.slot
 fixture.secret

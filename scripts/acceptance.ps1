@@ -95,5 +95,7 @@ try {
     $result = Invoke-Ok @("invoke-result","--attempt",$prAttempt,"--reply",$prReply)
     $log = Invoke-Ok @("executions","--device",$b,"--session","pull-1")
     if($result.source -ne "recorded-response/v1" -or $result.pull.number -ne 7 -or $result.pull.state -ne "open" -or $log.pull.number -ne 7 -or $log.pull.backend -ne $result.source){throw "Recorded PR receipt and audit disagree"}
+    python (Join-Path $PSScriptRoot "mcp_acceptance.py") $exe
+    if ($LASTEXITCODE -ne 0) {throw "MCP stdio acceptance failed"}
     "PASS: session and device revocation, offline approval, two-process single execution, signed reply recovery and scoped recorded PR. Synthetic files: $work"
 } finally { Pop-Location }

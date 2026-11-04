@@ -30,6 +30,10 @@ const usage = `Locklark · offline preview (synthetic data only)
   invoke-receipt --device CLIENT_B_DIR --ticket FILE --out NEW_REPLY
   invoke-result  --attempt DIR --reply FILE
   executions     --device CLIENT_B_DIR --session ID
+  bridge-profile --device CLIENT_B_DIR --session ID --out NEW_PROFILE
+  mcp-stdio --profile FILE --session-key FILE --recipient FILE --host-sign-key FILE --inbox DIR --exchange DIR --private DIR --bun ABSOLUTE_PATH
+  status-serve --device CLIENT_B_DIR --inbox DIR --exchange DIR [--once] [--session ID --profile MANAGED_FILE]
+  status-answer --device CLIENT_B_DIR --inbox DIR --exchange DIR --poll QUERY_ID
   session-keygen --out NEW_FILE.sessionkey
   session-enroll --device CLIENT_B_DIR --session ID --public PUBLIC_HEX --reason TEXT
   session-revoke --device CLIENT_B_DIR --session ID --reason TEXT
@@ -48,6 +52,8 @@ func run(args []string, out, errOut io.Writer) error {
 	}
 	command := args[0]
 	switch command {
+	case "mcp-stdio", "bridge-profile", "status-answer", "status-serve":
+		return runBridge(args, out, errOut)
 	case "pull-enroll", "pull-request":
 		return runPull(args, out, errOut)
 	case "invoke-prepare", "invoke-run", "invoke-receipt", "invoke-result", "executions", "approval-revoke":

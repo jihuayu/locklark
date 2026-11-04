@@ -26,6 +26,10 @@ jobs:
         run: |
           $env:LOCKLARK_TEST_BUN = (Get-Command bun -CommandType Application | Select-Object -First 1).Source
           go test -count=1 ./...
+      - if: runner.os == 'Linux'
+        run: |
+          go build -o "$RUNNER_TEMP/locklark" ./cmd/locklark
+          python3 scripts/mcp_acceptance.py "$RUNNER_TEMP/locklark"
       - if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/acceptance.ps1
