@@ -1,10 +1,19 @@
 /.ryugi/
 /bin/
+/locklark.exe
+/locklark
 /out/
 /demo-out/
 *.kdbx
 *.1pux
 *.age
+*.agekey
+*.slot
+fixture.secret
+**/clients/A/
+**/clients/B/
+**/share/epoch-*/
+.pending-*
 .env
 .env.*
 

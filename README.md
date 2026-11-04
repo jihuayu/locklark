@@ -1,2 +1,57 @@
-# locklark
-Locklark — local-first credential management for people, teams, and agents.
+# Locklark
+
+**Keep the keys. Grant the action.** 面向个人和小团队的本地密码管理器。目标是替换 1Password 8 的日常体验，并让 Agent 申请具体操作、说明原因、关联会话。
+
+当前交付是 **M0 合成数据 CLI 预览**。可以验证设备吊销、加密收件箱和按会话查询记录。它不能保存你的真实密码、批准真实请求或代替 1Password。完整产品与威胁模型见[设计稿](docs/design.md)。
+
+## 五分钟复跑
+
+需要 Go 1.26.8；可用仓库的 `mise.toml` 选择工具链。Windows PowerShell 下，在仓库根目录运行：
+
+```powershell
+go test ./...
+./scripts/acceptance.ps1
+```
+
+脚本在系统临时目录创建全新的合成资料，分别启动 CLI 验证：A 能读旧库；复制给 A 的新版打不开；B 能打开新版；演练的拒绝记录可以按会话找回；另一进程可以读到主人离线时提交的待办。脚本打印目录位置，便于自行复核。
+
+也可以手动操作，先选择一个**尚不存在**的目录；同名目录绝不覆盖。写入失败留下的残缺目录不能视为成品，重试请用新目录。以下命令不联网：
+
+```powershell
+go build -o locklark.exe ./cmd/locklark
+.\locklark.exe demo --out demo-out --session build-42 --reason "核对演练条目"
+.\locklark.exe inspect --bundle demo-out/share/epoch-1 --device demo-out/clients/A --epoch 1
+.\locklark.exe inspect --bundle demo-out/share/epoch-2 --device demo-out/clients/A --epoch 2
+.\locklark.exe inspect --bundle demo-out/share/epoch-2 --device demo-out/clients/B --epoch 2
+.\locklark.exe audit --bundle demo-out/share/epoch-2 --device demo-out/clients/B --epoch 2 --session build-42
+```
+
+第二次 `inspect`（A 尝试开第 2 代）应失败并返回非零状态码。B 将得到 `{"epoch":2,"items":2,"attachments":1}`。旧版仍然能读；如旧凭据已经泄露，须到真实上游轮换。代次来自独立可信状态，演练由调用者通过 `--epoch` 明确提供；还没有分布式防回滚或防分叉协议。
+
+## 错过通知也能找回请求
+
+以下两条命令可以相隔数小时。提交方只需要待办目录和独立交付的公开收件密钥；不用给它任何客户端目录。唯一可用的 `op://` 引用指向合成条目。原因使用演练文本；CLI 参数可能留在 shell 历史中。
+
+```powershell
+.\locklark.exe request --inbox demo-out/inbox --recipient demo-out/agent/approval.pub --session deploy-17 --reason "检查演练发布" --ref "op://synthetic-vault/login-sample/ops/otp-demo"
+.\locklark.exe inbox --inbox demo-out/inbox --device demo-out/clients/B --session deploy-17
+```
+
+第一条返回随机请求 ID 和 `pending`。第二条解密并按 session 查回 ID、引用和原因，不解析或返回字段值。它用独立的收件密钥；损坏的请求计入 `unreadable`。这是本地文件投递，要求文件系统支持硬链接（Windows NTFS / Linux 本地文件系统）；还没有远程中继或推送。公开收件密钥须由可信客户端单独交付，不能相信待办目录自报的公钥。
+
+`inbox` 中的请求来自未经认证的提交方，session、原因和时间都是自报；拥有收件公钥就能投递，控制目录者也能删信。`audit` 读取的则是建库演练时保存在签名快照中的事件，包括一次固定的拒绝。两者都不能证明某人批准过使用密钥。独立审计密钥、追加式事件链、外部检查点、批准和一次性兑现是下一阶段工作。
+
+## 已验证的边界
+
+| 场景 | 当前行为 |
+| --- | --- |
+| 服务器只拿到 `share/` | 仅两个代次的 KDBX、age 信封及签名清单；没有 Secret Key、设备私钥或可解库的账户副本。这里没有运行同步服务。 |
+| 同账号的设备 A 被移除 | A、B 共用账户双因子，各有独立设备私钥。每代随机产生 256 位文件密钥并重写整个 KDBX。离线测试直接拿旧设备私钥解新信封，又拿旧库钥调 KDBX 解码器，均失败；B 能解开。 |
+| 账户双密钥 | 主密码与本机随机 128 位 Secret Key 参与派生，借鉴 1Password 2SKD：NFKD 规范化、650,000 轮 PBKDF2-HMAC-SHA256、独立 HKDF 分支、异或组合。Locklark 使用自己的标签与账号标识，无 1Password 协议互操作声明。Go 结果与[独立 Python 向量](internal/account/vector.py)一致；任一因子错误不能解开设备密钥槽。 |
+| 合成 1PUX | 内置两个重名条目、Unicode 区段、TOTP 和一个二进制附件。原归档整个装入 KDBX 的受保护字段，再打开后逐字节相同。当前只能统计条目与附件，不能据此宣称真实导入、原生字段映射或 1:1 迁移已完成。 |
+
+**信任边界：** 整个 `demo-out` 是生成器的实验台，包含两台客户端，不能交给服务器或 Agent。模拟服务器只复制 `share/`；模拟被吊销者只给 `clients/A/` 和目标快照。演练用固定公开口令，把随机 Secret Key 存在客户端文件中，未接操作系统钥匙串。没有权限隔离的同用户进程可直接读取 B 的材料；不能以这个演练替代系统隔离。签名锚来自受信的客户端，签发私钥在生成时使用，不随演练资料分发。
+
+KDBX 4.1 候选库当前写入 **Argon2d**，与设计要求的 Argon2id 有差距；KDBX 输入为随机文件密钥，账户口令走独立的双密钥派生。引入真实资料之前，须补齐文件格式互操作、独立密码评审、操作系统密钥存储与在干净机器上的恢复验收。
+
+接下来的 M0：逐字段编辑和迁出对账、成员/多设备换代与故障恢复、MyGo 常驻桌面原型。Next.js 团队 Web、iOS/Android、受隔离的 Bun MCP Gateway、AI 否决，以及独立部署的 invoke / deliver 两种 server token 均已在[设计稿](docs/design.md)中界定，尚未交付。

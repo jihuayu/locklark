@@ -5,6 +5,7 @@ go 1.26.8
 require (
 	filippo.io/age v1.3.2
 	github.com/tobischo/gokeepasslib/v3 v3.7.1
+	golang.org/x/text v0.43.0
 )
 
 require (
