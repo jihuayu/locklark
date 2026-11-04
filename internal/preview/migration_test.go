@@ -11,6 +11,29 @@ import (
 	"testing"
 )
 
+func TestKnownFixtureLineEndings(t *testing.T) {
+	lf := bytes.ReplaceAll(exportData, []byte("\r\n"), []byte("\n"))
+	canonical, err := packFixture(lf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	crlf, err := packFixture(bytes.ReplaceAll(lf, []byte("\n"), []byte("\r\n")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	newArchive, err := fixtureArchive()
+	if err != nil || !bytes.Equal(newArchive, canonical) {
+		t.Fatal("new fixture ZIP depends on checkout line endings")
+	}
+	a, err := editedFixture(canonical)
+	if err != nil {
+		t.Fatal("LF fixture rejected", err)
+	}
+	b, err := editedFixture(crlf)
+	if err != nil || !bytes.Equal(a, b) {
+		t.Fatal("legacy Windows fixture rejected or edited differently", err)
+	}
+}
 func TestEditedFixtureExport(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "case")
 	if err := Create(root, "example", "exercise"); err != nil {
@@ -33,7 +56,7 @@ func TestEditedFixtureExport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer z.Close()
+	t.Cleanup(func() { _ = z.Close() })
 	wantJSON := bytes.Replace(exportData, []byte("同名示例"), []byte("轮换后的演练登录"), 1)
 	wantJSON = bytes.Replace(wantJSON, []byte("secret=MZXW6"), []byte("secret=MZXW6YTBOI"), 1)
 	orig, err := fixtureArchive()
@@ -72,8 +95,23 @@ func TestEditedFixtureExport(t *testing.T) {
 			t.Fatal("unexpected field changes")
 		}
 	}
+	before, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := z.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if err := ExportFixture(filepath.Join(root, "share", "epoch-2"), b, 2, out); err == nil {
 		t.Fatal("replaced existing output")
+	}
+	after, err := os.ReadFile(out)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("failed export modified existing output")
+	}
+	files, err := os.ReadDir(dir)
+	if err != nil || len(files) != 1 {
+		t.Fatal("failed export left a temporary file")
 	}
 	p, err := readPayload(filepath.Join(root, "share", "epoch-2"), b, 2)
 	if err != nil || !bytes.Equal(p.Archive, orig) {

@@ -15,7 +15,25 @@ var exportData []byte
 
 const attachmentPath = "files/doc-sample___样本.bin"
 
-func fixtureArchive() ([]byte, error) { return packFixture(exportData) }
+func fixtureArchive() ([]byte, error) {
+	return packFixture(bytes.ReplaceAll(exportData, []byte("\r\n"), []byte("\n")))
+}
+
+// Older binaries embedded export.data with the checkout's line endings. Match
+// only the two complete known ZIPs; never normalize an incoming archive.
+func knownOriginal(archive []byte) (bool, error) {
+	lf := bytes.ReplaceAll(exportData, []byte("\r\n"), []byte("\n"))
+	for _, data := range [][]byte{lf, bytes.ReplaceAll(lf, []byte("\n"), []byte("\r\n"))} {
+		expected, err := packFixture(data)
+		if err != nil {
+			return false, err
+		}
+		if bytes.Equal(expected, archive) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
 func packFixture(data []byte) ([]byte, error) {
 	var out bytes.Buffer
 	w := zip.NewWriter(&out)

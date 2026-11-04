@@ -64,4 +64,4 @@ go build -o locklark.exe ./cmd/locklark
 
 KDBX 4.1 候选库当前写入 **Argon2d**，与设计要求的 Argon2id 有差距；KDBX 输入为随机文件密钥，账户口令走独立的双密钥派生。引入真实资料之前，须补齐文件格式互操作、独立密码评审、操作系统密钥存储与在干净机器上的恢复验收。
 
-接下来的 M0：逐字段编辑和迁出对账、成员/多设备换代与故障恢复、MyGo 常驻桌面原型。Next.js 团队 Web、iOS/Android、受隔离的 Bun MCP Gateway、AI 否决，以及独立部署的 invoke / deliver 两种 server token 均已在[设计稿](docs/design.md)中界定，尚未交付。
+接下来的 M0：将逐字段编辑和迁出对账扩展到更多条目类型、成员/多设备换代与故障恢复、MyGo 常驻桌面原型。Next.js 团队 Web、iOS/Android、受隔离的 Bun MCP Gateway、AI 否决，以及独立部署的 invoke / deliver 两种 server token 均已在[设计稿](docs/design.md)中界定，尚未交付。

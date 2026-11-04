@@ -13,11 +13,11 @@ import (
 
 // All edits are fixed fixture operations, never an arbitrary raw-value interface.
 func editedFixture(archive []byte) ([]byte, error) {
-	original, err := fixtureArchive()
+	ok, err := knownOriginal(archive)
 	if err != nil {
 		return nil, err
 	}
-	if !bytes.Equal(archive, original) {
+	if !ok {
 		return nil, errFixture
 	}
 	z, err := zip.NewReader(bytes.NewReader(archive), int64(len(archive)))
@@ -106,11 +106,15 @@ func ExportFixture(bundle, device string, epoch uint64, out string) error {
 	if err != nil {
 		return err
 	}
-	raw, err := fixtureArchive()
+	ok, err := knownOriginal(p.Archive)
 	if err != nil {
 		return err
 	}
-	if !bytes.Equal(raw, p.Archive) {
+	if !ok {
+		raw, err := fixtureArchive()
+		if err != nil {
+			return err
+		}
 		edit, err := editedFixture(raw)
 		if err != nil {
 			return err
