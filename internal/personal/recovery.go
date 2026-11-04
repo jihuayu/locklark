@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"github.com/jihuayu/locklark/internal/account"
 	"github.com/jihuayu/locklark/internal/vault"
 	bolt "go.etcd.io/bbolt"
@@ -19,9 +20,14 @@ import (
 	"strings"
 )
 
-const backupDomain = "locklark/personal/backup/v1"
+const backupDomain = "locklark/personal/backup/v2"
 const maxArchive = 32 << 20
 const maxChains = 32
+
+var ErrArchiveLimit = errors.New("backup exceeds capacity limit (16 MiB plaintext or 32 MiB file)")
+var ErrHistoryLimit = errors.New("backup exceeds history limit (32 segments)")
+var ErrLegacyRecovery = errors.New("legacy recovery format has no independent history checkpoint; create a new backup from a trusted source vault")
+var ErrRecoverySource = errors.New("backup does not match the independently saved recovery checkpoint")
 
 // Chain is verification material only. Signatures are kept byte-for-byte.
 type Chain struct {
@@ -45,21 +51,43 @@ type envelope struct {
 	Data       []byte
 }
 
-func NewRecovery() (string, error) {
+func newRecovery() (string, error) {
 	var raw [32]byte
 	if _, err := rand.Read(raw[:]); err != nil {
 		return "", err
 	}
 	defer clear(raw[:])
-	return "LLR1-" + b32.EncodeToString(raw[:]), nil
+	return "LLR2-" + b32.EncodeToString(raw[:]), nil
 }
 func kitBytes(kit string) ([]byte, error) {
-	if len(kit) != 57 || !strings.HasPrefix(kit, "LLR1-") {
+	// A seed is only used while preparing a backup. Only the complete
+	// 110-character seed + checkpoint material is accepted for restoration.
+	if strings.HasPrefix(kit, "LLR1-") {
+		return nil, ErrLegacyRecovery
+	}
+	if len(kit) == 110 && kit[57] == '-' {
+		kit = kit[:57]
+	}
+	if len(kit) != 57 || !strings.HasPrefix(kit, "LLR2-") {
 		return nil, invalid
 	}
 	raw, err := b32.DecodeString(kit[5:])
 	if err != nil || len(raw) != 32 || b32.EncodeToString(raw) != kit[5:] {
 		clear(raw)
+		return nil, invalid
+	}
+	return raw, nil
+}
+
+func recoveryCheckpoint(kit string) ([]byte, error) {
+	if strings.HasPrefix(kit, "LLR1-") {
+		return nil, ErrLegacyRecovery
+	}
+	if len(kit) != 110 || kit[57] != '-' {
+		return nil, invalid
+	}
+	raw, e := b32.DecodeString(kit[58:])
+	if e != nil || len(raw) != sha256.Size || b32.EncodeToString(raw) != kit[58:] {
 		return nil, invalid
 	}
 	return raw, nil
@@ -109,7 +137,10 @@ func payloadProof(p payload) ([]byte, error) {
 	return []byte(backupDomain + "/manifest/" + d), e
 }
 func verifyChains(chains []Chain) error {
-	if len(chains) == 0 || len(chains) > maxChains {
+	if len(chains) > maxChains {
+		return ErrHistoryLimit
+	}
+	if len(chains) == 0 {
 		return invalid
 	}
 	seen := map[string]bool{}
@@ -143,8 +174,8 @@ func verifyChains(chains []Chain) error {
 	return nil
 }
 func encodeArchive(p payload, pw string, key, accountID []byte, kit string, priv ed25519.PrivateKey) ([]byte, error) {
-	if verifyChains(p.Chains) != nil {
-		return nil, invalid
+	if e := verifyChains(p.Chains); e != nil {
+		return nil, e
 	}
 	proof, err := payloadProof(p)
 	if err != nil {
@@ -156,7 +187,7 @@ func encodeArchive(p payload, pw string, key, accountID []byte, kit string, priv
 	}
 	defer clear(raw)
 	if len(raw) > maxArchive/2 {
-		return nil, invalid
+		return nil, ErrArchiveLimit
 	}
 	share := make([]byte, 32)
 	defer clear(share)
@@ -171,7 +202,7 @@ func encodeArchive(p payload, pw string, key, accountID []byte, kit string, priv
 	if err != nil {
 		return nil, err
 	}
-	return json.Marshal(envelope{1, p.Generation, slot, a.Seal(nil, nil, raw, []byte(backupDomain+"/"+p.Generation))})
+	return json.Marshal(envelope{2, p.Generation, slot, a.Seal(nil, nil, raw, []byte(backupDomain+"/"+p.Generation))})
 }
 func decodeArchive(path, pw string, key []byte, kit string) (*payload, error) {
 	f, e := os.Open(path)
@@ -180,20 +211,43 @@ func decodeArchive(path, pw string, key []byte, kit string) (*payload, error) {
 	}
 	defer f.Close()
 	st, e := f.Stat()
-	if e != nil || !st.Mode().IsRegular() || st.Size() > maxArchive {
+	if e != nil {
+		return nil, e
+	}
+	if st.Size() > maxArchive {
+		return nil, ErrArchiveLimit
+	}
+	if !st.Mode().IsRegular() {
 		return nil, invalid
 	}
 	b, e := io.ReadAll(io.LimitReader(f, maxArchive+1))
-	if e != nil || len(b) > maxArchive {
-		return nil, invalid
+	if e != nil {
+		return nil, e
+	}
+	if len(b) > maxArchive {
+		return nil, ErrArchiveLimit
 	}
 	var env envelope
-	if json.Unmarshal(b, &env) != nil || env.Version != 1 {
+	if json.Unmarshal(b, &env) != nil {
 		return nil, invalid
+	}
+	if env.Version == 1 {
+		return nil, ErrLegacyRecovery
+	}
+	if env.Version != 2 {
+		return nil, invalid
+	}
+	checkpoint, e := recoveryCheckpoint(kit)
+	if e != nil {
+		return nil, e
 	}
 	g, e := generation(kit)
 	if e != nil || g != env.Generation {
 		return nil, invalid
+	}
+	h := sha256.Sum256(b)
+	if !bytes.Equal(h[:], checkpoint) {
+		return nil, ErrRecoverySource
 	}
 	share, e := account.Unwrap(pw, key, env.Share)
 	if e != nil {
@@ -209,13 +263,27 @@ func decodeArchive(path, pw string, key []byte, kit string) (*payload, error) {
 		return nil, invalid
 	}
 	defer clear(plain)
+	if len(plain) > maxArchive/2 {
+		return nil, ErrArchiveLimit
+	}
 	var body signedBackup
 	if json.Unmarshal(plain, &body) != nil {
 		return nil, invalid
 	}
 	p := &body.Body
-	if p.Generation != g || p.Items == nil || p.Epoch == 0 || p.Epoch == ^uint64(0) || verifyChains(p.Chains) != nil {
+	if p.Generation != g || p.Items == nil || p.Epoch == 0 || p.Epoch == ^uint64(0) {
 		return nil, invalid
+	}
+	if e = verifyChains(p.Chains); e != nil {
+		return nil, e
+	}
+	if vault.ValidateItems([]byte(schema), p.Items) != nil {
+		return nil, invalid
+	}
+	for _, item := range p.Items {
+		if !idOK(item.ID) {
+			return nil, invalid
+		}
 	}
 	last := p.Chains[len(p.Chains)-1]
 	proof, e := payloadProof(*p)
@@ -235,7 +303,10 @@ func loadChains(b *bolt.Bucket, i identity, anchor string) ([]Chain, error) {
 		}
 		return nil, nil
 	}
-	if !digestOK(anchor) || len(raw) > maxArchive {
+	if len(raw) > maxArchive {
+		return nil, ErrArchiveLimit
+	}
+	if !digestOK(anchor) {
 		return nil, invalid
 	}
 	a, e := auditCipher(i)
@@ -252,8 +323,11 @@ func loadChains(b *bolt.Bucket, i identity, anchor string) ([]Chain, error) {
 		return nil, invalid
 	}
 	d, e := digest(chains)
-	if e != nil || d != anchor || verifyChains(chains) != nil {
+	if e != nil || d != anchor {
 		return nil, invalid
+	}
+	if e = verifyChains(chains); e != nil {
+		return nil, e
 	}
 	return chains, nil
 }
@@ -294,45 +368,122 @@ func initializeRecovered(b *bolt.Bucket, i identity, p *payload) error {
 	}
 	return nil
 }
-func Backup(src, dest, pw string, key []byte, kit string) error {
-	if _, e := generation(kit); e != nil {
-		return e
-	}
+
+// BackupPreparation contains a complete fsynced archive and its independent
+// checkpoint. The CLI confirms saving Material before Publish exposes the file.
+type BackupPreparation struct {
+	dest, temp, material string
+}
+
+func (b *BackupPreparation) Material() string { return b.material }
+func (b *BackupPreparation) Publish() error   { return publish(b.temp, b.dest) }
+func (b *BackupPreparation) Close()           { os.Remove(b.temp) }
+
+func PrepareBackup(src, dest, pw string, key []byte) (*BackupPreparation, error) {
 	if _, e := os.Lstat(dest); e == nil {
-		return os.ErrExist
+		return nil, os.ErrExist
 	} else if !os.IsNotExist(e) {
-		return e
+		return nil, e
 	}
 	f, e := os.CreateTemp(filepath.Dir(dest), ".locklark-backup-*")
 	if e != nil {
-		return e
+		return nil, e
 	}
-	defer os.Remove(f.Name())
+	keep := false
+	defer func() {
+		if !keep {
+			os.Remove(f.Name())
+		}
+	}()
 	defer f.Close()
+	kit, e := newRecovery()
+	if e != nil {
+		return nil, e
+	}
 	r, e := command(src, pw, key, "backup.prepare", vault.Item{}, nil, kit)
 	if e != nil {
-		return e
+		return nil, e
 	}
 	if _, e = f.Write(r.archive); e != nil {
-		return e
+		return nil, e
 	}
 	if e = f.Sync(); e != nil {
-		return e
+		return nil, e
 	}
 	if e = f.Close(); e != nil {
-		return e
+		return nil, e
 	}
-	return publish(f.Name(), dest)
+	checkpoint := sha256.Sum256(r.archive)
+	keep = true
+	return &BackupPreparation{dest, f.Name(), kit + "-" + b32.EncodeToString(checkpoint[:])}, nil
+}
+
+func Backup(src, dest, pw string, key []byte) (string, error) {
+	b, e := PrepareBackup(src, dest, pw, key)
+	if e != nil {
+		return "", e
+	}
+	defer b.Close()
+	if e = b.Publish(); e != nil {
+		return "", e
+	}
+	return b.Material(), nil
 }
 func Restore(src, dest, pw string, oldKey []byte, kit string, newKey []byte) error {
-	if len(newKey) != 16 || bytes.Equal(oldKey, newKey) {
-		return invalid
-	}
-	p, e := decodeArchive(src, pw, oldKey, kit)
+	r, e := PrepareRestore(src, dest, pw, oldKey, kit)
 	if e != nil {
 		return e
 	}
-	return create(dest, pw, newKey, p)
+	defer r.Close()
+	return r.Publish(newKey)
+}
+
+// Restoration holds the verified payload so publication never reopens an
+// untrusted source after the user saves the new key.
+type Restoration struct {
+	dest, pw string
+	oldKey   []byte
+	p        *payload
+}
+
+// PrepareRestore validates all old factors and probes the destination before
+// the CLI issues a new key. The final publication still refuses replacement
+// atomically: this probe cannot reserve a name against concurrent writers.
+func PrepareRestore(src, dest, pw string, oldKey []byte, kit string) (*Restoration, error) {
+	p, e := decodeArchive(src, pw, oldKey, kit)
+	if e != nil {
+		return nil, e
+	}
+	if _, e = os.Lstat(dest); e == nil {
+		return nil, os.ErrExist
+	} else if !os.IsNotExist(e) {
+		return nil, e
+	}
+	f, e := os.CreateTemp(filepath.Dir(dest), ".locklark-preflight-*")
+	if e != nil {
+		return nil, e
+	}
+	closeErr := f.Close()
+	removeErr := os.Remove(f.Name())
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	if removeErr != nil {
+		return nil, removeErr
+	}
+	return &Restoration{dest, pw, bytes.Clone(oldKey), p}, nil
+}
+
+func (r *Restoration) Publish(newKey []byte) error {
+	if r.p == nil || len(newKey) != 16 || bytes.Equal(r.oldKey, newKey) {
+		return invalid
+	}
+	return create(r.dest, r.pw, newKey, r.p)
+}
+
+func (r *Restoration) Close() {
+	clear(r.oldKey)
+	r.oldKey, r.p, r.pw = nil, nil, ""
 }
 func ArchivedAudit(path, pw string, key []byte) ([]Chain, error) {
 	r, e := command(path, pw, key, "audit.archived", vault.Item{}, nil)

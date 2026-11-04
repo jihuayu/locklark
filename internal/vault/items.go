@@ -71,10 +71,19 @@ func validItems(items []Item, size int) bool {
 	return true
 }
 func SealItems(metadata []byte, items []Item, epoch uint64, recipients []*age.X25519Recipient, signer ed25519.PrivateKey) (Snapshot, error) {
-	if !validItems(items, len(metadata)) {
-		return Snapshot{}, ErrSnapshot
+	if err := ValidateItems(metadata, items); err != nil {
+		return Snapshot{}, err
 	}
 	return seal(metadata, items, epoch, recipients, signer)
+}
+
+// ValidateItems checks the same bounds and schema used by SealItems without
+// generating keys or writing a snapshot.
+func ValidateItems(metadata []byte, items []Item) error {
+	if !validItems(items, len(metadata)) {
+		return ErrSnapshot
+	}
+	return nil
 }
 func slot(key, value string, protected bool) kdbx.ValueData {
 	return kdbx.ValueData{Key: key, Value: kdbx.V{Content: value, Protected: wrappers.NewBoolWrapper(protected)}}

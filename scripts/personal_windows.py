@@ -6,7 +6,7 @@ import time
 from winpty import PTY
 
 
-def invoke(binary, action, path, answers, *, ok, issue, options, barrier):
+def invoke(binary, action, path, answers, *, ok, issue, options, barrier, deny_issue=False, expect_error=None):
     terminal = PTY(2000, 40, backend=0)
     terminal.spawn(binary, " " + subprocess.list2cmdline(["personal", action, "--file", path, *options]))
     view = ""
@@ -31,7 +31,7 @@ def invoke(binary, action, path, answers, *, ok, issue, options, barrier):
         screen = ansi.sub("", view)
         offset = screen.index(marker, offset) + len(marker)
         if value is None:
-            match = re.search(r"(?:LL1-[A-Z2-7]{26}|LLR1-[A-Z2-7]{52})", screen)
+            match = re.search(r"(?:LL1-[A-Z2-7]{26}|LLR2-[A-Z2-7]{52}-[A-Z2-7]{52}|LLR1-[A-Z2-7]{52})", screen)
             if not issue or match is None:
                 raise RuntimeError("Secret Key not displayed at initialization")
             issued = value = match.group()
@@ -51,6 +51,10 @@ def invoke(binary, action, path, answers, *, ok, issue, options, barrier):
     if (terminal.get_exitstatus() == 0) != ok:
         raise RuntimeError(f"{action}: unexpected exit")
     screen = ansi.sub("",view)
+    if deny_issue and re.search(r"LL1-[A-Z2-7]{26}|重新输入新 Secret Key", screen):
+        raise RuntimeError("failed restore issued a new Secret Key")
+    if expect_error and expect_error not in screen:
+        raise RuntimeError(f"{action}: expected error category missing")
     for _,value in answers:
         if value and len(value)>5 and value in screen:
             raise RuntimeError("hidden terminal input echoed")

@@ -196,14 +196,15 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 		defer clear(key)
 		switch action {
 		case "backup":
-			kit, e := personal.NewRecovery()
+			prepared, e := personal.PrepareBackup(path, opts["--out"], string(pw), key)
 			if e != nil {
 				return e
 			}
-			if e = confirmIssued(&c, "请单独离线保存这份备份的恢复码", kit, "重新输入恢复码"); e != nil {
+			defer prepared.Close()
+			if e = confirmIssued(&c, "请单独离线保存这份备份的恢复码（含可信检查点）", prepared.Material(), "重新输入恢复码"); e != nil {
 				return e
 			}
-			err = personal.Backup(path, opts["--out"], string(pw), key, kit)
+			err = prepared.Publish()
 			response = map[string]string{"status": "backed-up"}
 		case "restore":
 			kit, e := consoleField("此备份的恢复码")
@@ -211,6 +212,11 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 				return e
 			}
 			defer clear(kit)
+			prepared, e := personal.PrepareRestore(path, opts["--out"], string(pw), key, string(kit))
+			if e != nil {
+				return e
+			}
+			defer prepared.Close()
 			fresh, e := personal.NewSecret()
 			if e != nil {
 				return e
@@ -219,7 +225,7 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 			if e = confirmIssued(&c, "恢复库沿用主密码，请离线保存新的 Secret Key", personal.FormatSecret(fresh), "重新输入新 Secret Key"); e != nil {
 				return e
 			}
-			err = personal.Restore(path, opts["--out"], string(pw), key, string(kit), fresh)
+			err = prepared.Publish(fresh)
 			response = map[string]string{"status": "restored"}
 		case "archived-audit":
 			response, err = personal.ArchivedAudit(path, string(pw), key)

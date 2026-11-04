@@ -15,9 +15,9 @@ else:
 import time
 
 
-def invoke(binary, action, path, answers, *, ok=True, issue=False, paste=False, options=(), barrier=None):
+def invoke(binary, action, path, answers, *, ok=True, issue=False, paste=False, options=(), barrier=None, deny_issue=False, expect_error=None):
     if os.name == "nt":
-        return windows_invoke(binary, action, path, answers, ok=ok, issue=issue, options=options, barrier=barrier)
+        return windows_invoke(binary, action, path, answers, ok=ok, issue=issue, options=options, barrier=barrier, deny_issue=deny_issue, expect_error=expect_error)
     master, slave = pty.openpty()
     try:
         proc = subprocess.Popen([binary, "personal", action, "--file", path, *options],
@@ -36,7 +36,7 @@ def invoke(binary, action, path, answers, *, ok=True, issue=False, paste=False, 
                         transcript.extend(os.read(master, 4096))
                 offset = transcript.index(marker, offset) + len(marker)
                 if value is None:
-                    match = re.search(rb"(?:LL1-[A-Z2-7]{26}|LLR1-[A-Z2-7]{52})", transcript[:offset])
+                    match = re.search(rb"(?:LL1-[A-Z2-7]{26}|LLR2-[A-Z2-7]{52}-[A-Z2-7]{52}|LLR1-[A-Z2-7]{52})", transcript[:offset])
                     if not issue or match is None:
                         raise RuntimeError("no new Secret Key issued to terminal")
                     issued = match.group().decode()
@@ -49,6 +49,15 @@ def invoke(binary, action, path, answers, *, ok=True, issue=False, paste=False, 
                     os.write(master, ("\n".join(x for _, x in answers) + "\n").encode())
                 elif not paste:
                     os.write(master, value.encode() + b"\n")
+            if deny_issue:
+                deadline = time.monotonic() + 15
+                while proc.poll() is None:
+                    if select.select([master], [], [], 0.1)[0]:
+                        transcript.extend(os.read(master, 4096))
+                    if re.search(rb"LL1-[A-Z2-7]{26}", transcript):
+                        raise RuntimeError("failed restore issued a new Secret Key")
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError("failed restore did not exit before issuing a key")
             data, _ = proc.communicate(timeout=15)
             while select.select([master], [], [], 0)[0]:
                 transcript.extend(os.read(master, 4096))
@@ -60,6 +69,10 @@ def invoke(binary, action, path, answers, *, ok=True, issue=False, paste=False, 
                     raise RuntimeError("expected a revision conflict")
             if (proc.returncode == 0) != ok or (not ok and data):
                 raise RuntimeError(f"{action}: unexpected exit or output")
+            if deny_issue and (re.search(rb"LL1-[A-Z2-7]{26}", transcript) or "重新输入新 Secret Key".encode() in transcript):
+                raise RuntimeError("failed restore issued a new Secret Key")
+            if expect_error and expect_error.encode() not in transcript:
+                raise RuntimeError(f"{action}: expected error category missing")
             if issued and issued.encode() in data:
                 raise RuntimeError("Secret Key leaked to ordinary output")
             for _, value in answers:
@@ -114,10 +127,43 @@ def check(binary, legacy=None):
         assert all(s not in json.dumps(events) for s in (key, pw, login, "local-fixture-user","rotated-private-fixture","stale-private-fixture"))
         archive = os.path.join(tmp, "standalone.llb")
         backup, kit = invoke(binary, "backup", path, factors+[("重新输入恢复码",None)], issue=True, options=("--out",archive))
-        assert backup["status"]=="backed-up" and kit.startswith("LLR1-")
+        assert backup["status"]=="backed-up" and kit.startswith("LLR2-") and len(kit)==110
         os.rename(path,path+".offline")
         restored = os.path.join(tmp, "new-directory", "restored.ll")
         os.mkdir(os.path.dirname(restored))
+        corrupt = archive + ".corrupt"
+        pathlib.Path(corrupt).write_bytes(b"damaged synthetic backup")
+        legacy_archive = archive + ".legacy"
+        legacy_envelope = json.loads(pathlib.Path(archive).read_bytes())
+        legacy_envelope["Version"] = 1
+        pathlib.Path(legacy_archive).write_text(json.dumps(legacy_envelope))
+        existing = restored + ".exists"
+        sentinel = b"existing synthetic target"
+        pathlib.Path(existing).write_bytes(sentinel)
+        for source, target, recovery, error in (
+            (archive, restored, kit[:5] + ("A" if kit[5] != "A" else "B") + kit[6:], "invalid"),
+            (corrupt, restored, kit, "invalid"),
+            (archive, existing, kit, "exist"),
+            (archive, restored, "LLR1-"+kit[5:57], "legacy recovery format"),
+            (legacy_archive, restored, kit, "legacy recovery format"),
+        ):
+            invoke(binary, "restore", source, factors+[("此备份的恢复码", recovery)],
+                   options=("--out", target), ok=False, deny_issue=True, expect_error=error)
+            assert not os.path.lexists(restored)
+            assert pathlib.Path(existing).read_bytes() == sentinel
+            assert sorted(os.listdir(os.path.dirname(restored))) == [os.path.basename(existing)]
+        print("PASS: PTY wrong recovery material, damaged backup and existing target issue no key and leave no vault")
+        # The destination can change while the user saves the issued key.
+        # Publication must still preserve that concurrent writer's file.
+        class LateWriter:
+            def wait(self, timeout):
+                pathlib.Path(restored).write_bytes(sentinel)
+        invoke(binary,"restore",archive,factors+[("此备份的恢复码",kit),("重新输入新 Secret Key",None)],
+               issue=True,options=("--out",restored),ok=False,barrier=LateWriter(),expect_error="exist")
+        assert pathlib.Path(restored).read_bytes() == sentinel
+        pathlib.Path(restored).unlink()
+        assert sorted(os.listdir(os.path.dirname(restored))) == [os.path.basename(existing)]
+        print("PASS: PTY explicitly rejects legacy recovery; concurrent target remains unchanged")
         result,fresh = invoke(binary,"restore",archive,factors+[("此备份的恢复码",kit),("重新输入新 Secret Key",None)],issue=True,options=("--out",restored))
         assert result["status"]=="restored" and fresh!=key
         new_factors = [("主密码",pw),("Secret Key",fresh)]

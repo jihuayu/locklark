@@ -22,8 +22,8 @@ func TestIndependentRecovery(t *testing.T) {
 	key := bytes.Repeat([]byte{2}, 16)
 	fresh := bytes.Repeat([]byte{3}, 16)
 	pw := "synthetic"
-	kit, _ := NewRecovery()
-	other, _ := NewRecovery()
+	otherSeed, _ := newRecovery()
+	other := otherSeed + "-" + b32.EncodeToString(make([]byte, 32))
 	must := func(err error) {
 		t.Helper()
 		if err != nil {
@@ -49,8 +49,9 @@ func TestIndependentRecovery(t *testing.T) {
 		return json.Unmarshal(p, &old)
 	}))
 	must(db.Close())
-	must(Backup(file, archive, pw, key, kit))
-	if Backup(file, archive, pw, key, other) == nil {
+	kit, err := Backup(file, archive, pw, key)
+	must(err)
+	if _, err = Backup(file, archive, pw, key); err == nil {
 		t.Fatal("overwrote archive")
 	}
 	logged, err := Audit(file, pw, key)
@@ -118,7 +119,8 @@ func TestIndependentRecovery(t *testing.T) {
 		t.Fatal("source signatures not preserved")
 	}
 	second := archive + ".2"
-	must(Backup(next, second, pw, fresh, other))
+	other, err = Backup(next, second, pw, fresh)
+	must(err)
 	twice := next + ".2"
 	must(Restore(second, twice, pw, fresh, other, key))
 	chains, err := ArchivedAudit(twice, pw, key)
