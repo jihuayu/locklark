@@ -25,6 +25,20 @@ const registryDomain = "locklark/agent-registration/v1\x00"
 
 var registryBucket = []byte("agent-sessions-v1")
 
+var headsBucket = []byte("agent-registry-head-v1")
+var headKey = []byte("active")
+
+type registryHead struct {
+	Sequence  uint64
+	Head      [32]byte
+	Signature []byte
+}
+
+func headMessage(n uint64, h [32]byte) []byte {
+	msg := binary.BigEndian.AppendUint64([]byte("locklark/agent-head/v1\x00"), n)
+	return append(msg, h[:]...)
+}
+
 type SessionProof struct {
 	Public    string `json:"public"`
 	Audience  string `json:"audience"`
@@ -114,8 +128,15 @@ func registryMessage(c SessionChange, prev [32]byte) []byte {
 func readRegistry(tx *bolt.Tx, id *age.X25519Identity, authority ed25519.PublicKey) (sessionRegistry, error) {
 	reg := sessionRegistry{latest: map[string]SessionChange{}}
 	b := tx.Bucket(registryBucket)
+	heads := tx.Bucket(headsBucket)
 	if b == nil {
+		if heads != nil {
+			return reg, errSession
+		}
 		return reg, nil
+	}
+	if heads == nil {
+		return reg, errSession
 	}
 	err := b.ForEach(func(k, v []byte) error {
 		if len(k) != 8 || len(v) > 8192 {
@@ -143,7 +164,15 @@ func readRegistry(tx *bolt.Tx, id *age.X25519Identity, authority ed25519.PublicK
 		reg.changes = append(reg.changes, c)
 		return nil
 	})
-	return reg, err
+	if err != nil {
+		return reg, err
+	}
+	raw := heads.Get(headKey)
+	var h registryHead
+	if len(raw) > 512 || json.Unmarshal(raw, &h) != nil || h.Sequence != reg.seq || h.Head != reg.head || !ed25519.Verify(authority, headMessage(h.Sequence, h.Head), h.Signature) {
+		return reg, errSession
+	}
+	return reg, nil
 }
 func EnrollSession(device, session, public, reason string) (SessionChange, error) {
 	return changeSession(device, session, public, reason, false, time.Now)
@@ -212,7 +241,20 @@ func changeSession(device, session, public, reason string, revoke bool, clock fu
 		if err != nil {
 			return err
 		}
-		return store.Put(binary.BigEndian.AppendUint64(nil, c.Sequence), buf.Bytes())
+		if err = store.Put(binary.BigEndian.AppendUint64(nil, c.Sequence), buf.Bytes()); err != nil {
+			return err
+		}
+		heads, err := b.Tx().CreateBucketIfNotExists(headsBucket)
+		if err != nil {
+			return err
+		}
+		head := registryHead{Sequence: c.Sequence, Head: sha256.Sum256(e.Sig)}
+		head.Signature = ed25519.Sign(signer, headMessage(head.Sequence, head.Head))
+		raw, err := json.Marshal(head)
+		if err != nil {
+			return err
+		}
+		return heads.Put(headKey, raw)
 	})
 	if err != nil {
 		return SessionChange{}, err
