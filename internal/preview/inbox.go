@@ -14,8 +14,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-	"unicode"
-	"unicode/utf8"
 )
 
 // The only permitted reference resolves to a synthetic fixture. Submission
@@ -37,7 +35,7 @@ type InboxReport struct {
 }
 
 func validRequest(session, reason, ref string) bool {
-	return sessionID.MatchString(session) && session != systemSession && ref == FixtureRef && utf8.ValidString(reason) && strings.TrimSpace(reason) != "" && utf8.RuneCountInString(reason) <= 240 && strings.IndexFunc(reason, unicode.IsControl) < 0
+	return validSession(session) && session != systemSession && ref == FixtureRef && validReason(reason)
 }
 func setupInbox(out string, secret, id []byte) error {
 	for _, name := range []string{"agent", "inbox"} {
@@ -113,7 +111,7 @@ func Inbox(dir, device, session string) (InboxReport, error) {
 }
 func InboxPage(dir, device, session, cursor string) (InboxReport, error) {
 	report := InboxReport{Requests: []Request{}}
-	if !sessionID.MatchString(session) {
+	if !validSession(session) {
 		return report, errInput
 	}
 	data, err := read(device, "approval.slot", 4096)

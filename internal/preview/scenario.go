@@ -14,8 +14,6 @@ import (
 	"regexp"
 	"strings"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"filippo.io/age"
 	"github.com/jihuayu/locklark/internal/account"
@@ -133,8 +131,7 @@ func saveEpoch(dir string, p payload, n uint64, ids []*age.X25519Recipient, sign
 }
 
 func Create(out, session, reason string) error {
-	reason = strings.TrimSpace(reason)
-	if strings.TrimSpace(out) == "" || !sessionID.MatchString(session) || session == systemSession || reason == "" || !utf8.ValidString(reason) || utf8.RuneCountInString(reason) > 240 || strings.IndexFunc(reason, unicode.IsControl) >= 0 {
+	if strings.TrimSpace(out) == "" || !validSession(session) || session == systemSession || !validReason(reason) {
 		return errInput
 	}
 	// Reserve the name exclusively. No overwrite, recursive delete, or replacement
@@ -196,7 +193,7 @@ func Create(out, session, reason string) error {
 	}
 	p.record(systemSession, "owner", "device.remove", "exclude fixture device A", "excluded")
 	// All demo requests to disclose a raw value are refused. No field is ever resolved.
-	p.record(session, "fixture-agent", "field.read", reason, "denied")
+	p.record(session, "fixture-agent", "field.read", strings.TrimSpace(reason), "denied")
 	if err = saveEpoch(filepath.Join(share, "epoch-2"), p, 2, []*age.X25519Recipient{b.Recipient()}, signer); err != nil {
 		return err
 	}
@@ -273,7 +270,7 @@ func Inspect(bundle, device string, expected uint64) (Summary, error) {
 	return summarize(p.Archive, expected)
 }
 func Audit(bundle, device string, expected uint64, session string) ([]Event, error) {
-	if !sessionID.MatchString(session) {
+	if !validSession(session) {
 		return nil, errInput
 	}
 	p, err := readPayload(bundle, device, expected)
@@ -283,7 +280,7 @@ func Audit(bundle, device string, expected uint64, session string) ([]Event, err
 	found := []Event{}
 	for _, e := range p.Events {
 		if e.Session == session {
-			found = append(found, e)
+			found = append(found, displayedEvent(e))
 		}
 	}
 	return found, nil
