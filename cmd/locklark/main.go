@@ -37,7 +37,7 @@ const usage = `Locklark · offline preview (synthetic data only)
   decide   --inbox DIR --device CLIENT_B_DIR --id ID --review DIGEST --choice approve|deny --reason TEXT [--bundle EPOCH_3_DIR]
   decisions --device CLIENT_B_DIR --session ID
 
-The only allowed request reference is ` + preview.FixtureRef + `.
+The metadata request command accepts only ` + preview.FixtureRef + `.
 request records a pending request. It cannot release any credential.
 `
 

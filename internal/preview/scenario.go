@@ -236,6 +236,9 @@ func Create(out, session, reason string) error {
 	if err = saveEpoch(filepath.Join(share, "epoch-3"), p, 3, []*age.X25519Recipient{b.Recipient()}, signer); err != nil {
 		return err
 	}
+	if err = issuePullTarget(filepath.Join(clients, "B"), filepath.Join(share, "epoch-3"), p.Archive, signer); err != nil {
+		return err
+	}
 	return saveWitness(p, "epoch-3.json")
 }
 

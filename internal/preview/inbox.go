@@ -17,7 +17,7 @@ import (
 	"time"
 )
 
-// The only permitted reference resolves to a synthetic fixture. Submission
+// The metadata command only resolves this synthetic reference. Submission
 // deliberately performs no resolution. The mailbox key is independent of all vault keys.
 const FixtureAction = "fixture.inspect-metadata"
 const FixtureRef = "op://synthetic-vault/login-sample/ops/otp-demo"

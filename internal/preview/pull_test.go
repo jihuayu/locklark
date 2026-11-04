@@ -7,7 +7,25 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+func TestHistoricalTicketMatchesDecisionAfterPluginUpgrade(t *testing.T) {
+	old, err := gateway.RecordedIntent(gateway.Repository{ID: "123", Owner: "example", Name: "tools"}, 7, []byte(`{"v":1,"action":"github.pulls.get","repo":"123","number":7}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	old.Digest = "removed-version"
+	now := time.Now()
+	q := Request{ID: "abc", Session: "job", Review: "signed-review", Action: gateway.PullAction, Ref: gateway.PullSlot, Epoch: 3, Pull: &old, Auth: &SessionProof{Public: "signer", Audience: "owner"}, SenderStatus: "verified"}
+	h := history{decisions: []Decision{{Request: q, Result: "approved", Expires: &now}}}
+	if supportedAction(q) {
+		t.Fatal("retired module remained executable")
+	}
+	if _, err := authorization(h, invocation{ID: q.ID, Session: q.Session, Review: q.Review, Public: "signer", Audience: "owner"}); err != nil {
+		t.Fatal("matching known historical approval rejected", err)
+	}
+}
 
 func TestSignedPullApprovalToSingleRecordedReply(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "demo")
@@ -49,7 +67,45 @@ func TestSignedPullApprovalToSingleRecordedReply(t *testing.T) {
 			t.Fatal("changed target preserved proof")
 		}
 	}
+	certPath := filepath.Join(device, "pull-target.age")
+	certBytes, err := os.ReadFile(certPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inboxKey, err := mailIdentity(device)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cert pullTarget
+	if err = unsealJSON(inboxKey, certBytes, 2048, &cert); err != nil {
+		t.Fatal(err)
+	}
+	cert.Archive = string(bytes.Repeat([]byte("0"), 64))
+	forged, err := sealJSON(inboxKey.Recipient(), cert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(certPath, forged, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Decide(inbox, device, bundle, s.ID, s.Review, "approve", "forged metadata"); err == nil {
+		t.Fatal("accepted forged slot descriptor")
+	}
+	if err = os.WriteFile(certPath, certBytes, 0600); err != nil {
+		t.Fatal(err)
+	}
+	slotPath := filepath.Join(device, "device.slot")
+	slotBytes, err := os.ReadFile(slotPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(slotPath, []byte("vault locked"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := Decide(inbox, device, bundle, s.ID, s.Review, "approve", "owner verified"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(slotPath, slotBytes, 0600); err != nil {
 		t.Fatal(err)
 	}
 	attempt := filepath.Join(t.TempDir(), "attempt")

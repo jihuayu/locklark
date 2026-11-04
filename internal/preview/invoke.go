@@ -20,7 +20,7 @@ func authorization(h history, t invocation) (Decision, error) {
 		if t.ID != q.ID {
 			continue
 		}
-		if d.Result != "approved" || d.Expires == nil || q.Review != t.Review || q.Session != t.Session || q.Auth == nil || q.Auth.Public != t.Public || q.Auth.Audience != t.Audience || q.SenderStatus != "verified" || !supportedAction(q) {
+		if d.Result != "approved" || d.Expires == nil || q.Review != t.Review || q.Session != t.Session || q.Auth == nil || q.Auth.Public != t.Public || q.Auth.Audience != t.Audience || q.SenderStatus != "verified" {
 			return Decision{}, errInvoke
 		}
 		return d, nil
@@ -74,7 +74,7 @@ func runBoundAction(device, bundle, path, action string, execute func(Request, [
 		if err != nil {
 			return err
 		}
-		if d.Request.Action != action {
+		if d.Request.Action != action || !supportedAction(d.Request) {
 			return errInvoke
 		}
 		request = d.Request

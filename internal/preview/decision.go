@@ -17,8 +17,8 @@ import (
 
 var errChanged = errors.New("request changed, missing, expired or already decided; review again")
 
-// Decide records a local disposition, not a redeemable grant. A synthetic
-// approve may only target the exact fixed, independently decrypted fixture.
+// Decide binds a short-lived, single-use approval to a reviewed request and
+// verified snapshot. Recorded PRs use the writer's authenticated slot descriptor.
 func Decide(inbox, device, bundle, id, review, choice, reason string) (Decision, error) {
 	if !validID(id) || len(review) != 64 || (choice != "approve" && choice != "deny") || !validReason(reason) {
 		return Decision{}, errDecision
@@ -32,10 +32,10 @@ func Decide(inbox, device, bundle, id, review, choice, reason string) (Decision,
 		return Decision{}, errChanged
 	}
 	d := Decision{Request: q, Reason: strings.TrimSpace(reason), Result: "denied"}
-	if choice == "approve" {
-		if !supportedAction(q) || bundle == "" {
-			return Decision{}, errChanged
-		}
+	if choice == "approve" && (!supportedAction(q) || bundle == "") {
+		return Decision{}, errChanged
+	}
+	if choice == "approve" && q.Pull == nil {
 		p, err := readPayload(bundle, device, q.Epoch)
 		if err != nil {
 			return Decision{}, err
@@ -48,13 +48,6 @@ func Decide(inbox, device, bundle, id, review, choice, reason string) (Decision,
 		expected, err := editedFixture(base)
 		if err != nil || !bytes.Equal(p.Archive, expected) {
 			return Decision{}, errChanged
-		}
-		if q.Pull != nil {
-			value, e := fixturePasswordField(p.Archive)
-			if e != nil {
-				return Decision{}, errChanged
-			}
-			clear(value)
 		}
 		h := sha256.Sum256(p.Archive)
 		d.Snapshot = p.pin
@@ -72,14 +65,25 @@ func Decide(inbox, device, bundle, id, review, choice, reason string) (Decision,
 	}
 	defer clear(auditSigner)
 	err = withHistory(device, actor, true, func(b *bolt.Bucket, h history) error {
-		now := time.Now().UTC()
 		reg, err := readRegistry(b.Tx(), actor, signer.Public().(ed25519.PublicKey))
 		if err != nil {
 			return err
 		}
+		now := time.Now().UTC()
 		d.Request.SenderStatus = sessionStatus(q, reg, actor.Recipient().String(), now)
 		if choice == "approve" && d.Request.SenderStatus != "verified" {
 			return errSession
+		}
+		if choice == "approve" && q.Pull != nil {
+			cert, e := verifyPullTarget(device, bundle, q, actor)
+			if e != nil {
+				return e
+			}
+			d.Snapshot, d.Target, d.Result = cert.Pin, cert.Archive, "approved"
+			now = time.Now().UTC()
+			if sessionStatus(q, reg, actor.Recipient().String(), now) != "verified" {
+				return errSession
+			}
 		}
 		for _, old := range h.decisions {
 			if old.Request.ID == id {
