@@ -41,7 +41,7 @@
 
 ## 下一项候选
 
-外部合并条件阻塞期间，已开发纯 Go 字段引用元数据核心、个人 v1 和内置合成导入投影，以及引用目标到固定字段槽/类型的绑定校验。验收与限制见 [reference-validation.md](reference-validation.md)、[personal-reference-metadata-validation.md](personal-reference-metadata-validation.md)、[fixture-reference-metadata-validation.md](fixture-reference-metadata-validation.md) 和 [reference-binding-validation.md](reference-binding-validation.md)。后续可做独立纯 Go OTP 配置校验与 RFC 6238 向量，明确存储配置、生成码、有效期和不支持参数；不得在错误或普通日志中回显种子，不接通 Agent 原值入口。通用 1PUX 导入仍待开发。这些基础工作不等于已接通 CLI、人工取值、可信事务审计或授权，不关闭其验收项。
+外部合并条件阻塞期间，已开发纯 Go 字段引用元数据核心、个人 v1 和内置合成导入投影、固定字段槽/类型绑定，以及独立 TOTP 配置/计算核心。验收与限制见 [reference-validation.md](reference-validation.md)、[personal-reference-metadata-validation.md](personal-reference-metadata-validation.md)、[fixture-reference-metadata-validation.md](fixture-reference-metadata-validation.md)、[reference-binding-validation.md](reference-binding-validation.md) 和 [totp-validation.md](totp-validation.md)。后续可做独立密码生成核心：crypto/rand、无模偏差、明确字符集/长度与熵约束、随机源失败时无部分结果和普通输出脱敏；不接通 Agent 或产品明文输出。通用 1PUX 导入仍待开发。这些基础工作不等于已接通 CLI、人工取值、可信事务审计或授权，不关闭其验收项。
 
 恢复修复通过独立复核、远端检查并合并后，从最新 main 开 `codex/` 分支做个人 CLI 的受控单字段披露：显式人工入口、稳定 ID 和版本、披露意图先记审计、记录本机会话但不记录原值、拒绝非交互式 Agent 路径；用合成数据覆盖错误因素、未知 ID/版本、账本写入失败和输出失败。该切片不授予 MCP 或 invoke 原值读取能力。
 
