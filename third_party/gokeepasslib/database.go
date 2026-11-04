@@ -1,0 +1,348 @@
+package gokeepasslib
+
+import (
+	"errors"
+	"fmt"
+)
+
+// ErrInvalidDatabaseOrCredentials is returned when the file cannot be read properly.
+var ErrInvalidDatabaseOrCredentials = errors.New(
+	"Cannot read database: Either credentials are invalid or the database file is corrupted",
+)
+
+// ErrCorruptedDatabase is returned when the database file is truncated or
+// corrupted, e.g. a content block is incomplete or its hash is mismatching.
+var ErrCorruptedDatabase = errors.New(
+	"gokeepasslib: database file is truncated or corrupted",
+)
+
+// Database stores all contents necessary for a keepass database file
+type Database struct {
+	Options     *DBOptions
+	Credentials *DBCredentials
+	Header      *DBHeader
+	Hashes      *DBHashes
+	Content     *DBContent
+}
+
+// DBOptions stores options for database decoding/encoding
+type DBOptions struct {
+	ValidateHashes bool // True to validate header hash
+}
+
+type DatabaseOption func(*Database)
+
+func WithDatabaseFormattedTime(formatted bool) DatabaseOption {
+	return func(db *Database) {
+		WithDBContentFormattedTime(formatted)(db.Content)
+	}
+}
+
+// WithDatabaseKDBXVersion3 initializes the database as a KDBX 3.1 file
+func WithDatabaseKDBXVersion3() DatabaseOption {
+	return func(db *Database) {
+		db.Header = NewKDBX3Header()
+	}
+}
+
+// WithDatabaseKDBXVersion40 initializes the database as a KDBX 4.0 file
+func WithDatabaseKDBXVersion40() DatabaseOption {
+	return func(db *Database) {
+		db.Header = NewKDBX40Header()
+		withDBContentKDBX4InnerHeader(db.Content)
+	}
+}
+
+// WithDatabaseKDBXVersion41 initializes the database as a KDBX 4.1 file
+func WithDatabaseKDBXVersion41() DatabaseOption {
+	return func(db *Database) {
+		db.Header = NewKDBX41Header()
+		withDBContentKDBX4InnerHeader(db.Content)
+	}
+}
+
+// WithDatabaseKDBXVersion4 initializes the database as a KDBX 4.0 file
+//
+// Deprecated: use WithDatabaseKDBXVersion40 instead
+func WithDatabaseKDBXVersion4() DatabaseOption {
+	return WithDatabaseKDBXVersion40()
+}
+
+// NewDatabase creates a new database with some sensable default settings in KDBX version 3.1.
+// To create a database with no settings pre-set, use gokeepasslib.Database{}
+func NewDatabase(options ...DatabaseOption) *Database {
+	db := &Database{
+		Options:     NewOptions(),
+		Credentials: new(DBCredentials),
+		Content:     NewContent(),
+	}
+
+	for _, option := range options {
+		option(db)
+	}
+
+	if db.Header == nil {
+		db.Header = NewHeader()
+	}
+
+	if db.Hashes == nil {
+		db.Hashes = NewHashes(db.Header)
+	}
+
+	return db
+}
+
+// NewOptions creates new options with default values
+func NewOptions() *DBOptions {
+	return &DBOptions{
+		ValidateHashes: true,
+	}
+}
+
+// ensureRequiredKdbxFormatVersion raises the file format version of the header
+// if the content of the database can not be represented in the current one.
+//
+// This follows KeePass, which writes a database with the lowest file format
+// version that is able to hold its content, and which never lowers the version
+// of an existing file.
+//
+// Upgrading from KDBX 4.0 to KDBX 4.1 only requires a different version in the
+// signature, since both share the same binary file format.
+// Upgrading a KDBX 3.1 file on the other hand would mean changing the structure
+// of the file itself, e.g. the key derivation function, the inner header and the
+// place where binaries are stored, which has to be requested explicitly instead
+// of happening as a side effect of encoding.
+func (db *Database) ensureRequiredKdbxFormatVersion() error {
+	field := db.Content.kdbx41Field()
+	if field == "" || db.Header.IsKdbx41() {
+		return nil
+	}
+
+	if !db.Header.IsKdbx4() {
+		return ErrKdbxVersionUpgradeRequired{
+			Field:           field,
+			CurrentVersion:  db.Header.formatVersion().String(),
+			RequiredVersion: formatVersion41.String(),
+		}
+	}
+
+	// Copy the signature before changing it, since it may be pointing at one of
+	// the package level default signatures
+	signature := *db.Header.Signature
+	signature.MinorVersion = 1
+	db.Header.Signature = &signature
+
+	return nil
+}
+
+func (db *Database) ensureKdbxFormatVersion() {
+	db.Content.setKdbxFormatVersion(
+		db.Header.formatVersion(),
+	)
+}
+
+// Names of the fields which can only be represented in KDBX 4.1 files.
+// They are reported by ErrKdbxVersionUpgradeRequired.
+const (
+	fieldGroupPreviousParentGroup       = "Group.PreviousParentGroup"
+	fieldGroupTags                      = "Group.Tags"
+	fieldEntryQualityCheck              = "Entry.QualityCheck"
+	fieldEntryPreviousParentGroup       = "Entry.PreviousParentGroup"
+	fieldCustomIconName                 = "CustomIcon.Name"
+	fieldCustomIconLastModificationTime = "CustomIcon.LastModificationTime"
+	fieldCustomDataLastModificationTime = "CustomData.LastModificationTime"
+)
+
+// ErrKdbxVersionUpgradeRequired is returned when encoding a database whose
+// content can not be represented in the file format version of its header,
+// and where upgrading it automatically would require changing the structure
+// of the file itself.
+type ErrKdbxVersionUpgradeRequired struct {
+	// Field is the name of a field which requires the higher version
+	Field string
+
+	// CurrentVersion is the file format version of the database header
+	CurrentVersion string
+
+	// RequiredVersion is the file format version required by the content
+	RequiredVersion string
+}
+
+func (e ErrKdbxVersionUpgradeRequired) Error() string {
+	return fmt.Sprintf(
+		"gokeepasslib: %s requires a KDBX %s file, but the database is a KDBX %s file. "+
+			"Create the database with WithDatabaseKDBXVersion41() to write it",
+		e.Field,
+		e.RequiredVersion,
+		e.CurrentVersion,
+	)
+}
+
+// getTransformedKey returns the transformed key Credentials
+func (db *Database) getTransformedKey() ([]byte, error) {
+	if db.Credentials == nil {
+		return nil, ErrRequiredAttributeMissing("Credentials")
+	}
+	return db.Credentials.buildTransformedKey(db)
+}
+
+// GetEncrypterManager returns an EncryptManager based on the master key and EncryptionIV,
+// or nil if the type is unsupported
+func (db *Database) GetEncrypterManager(transformedKey []byte) (*EncrypterManager, error) {
+	return NewEncrypterManager(
+		db.Header.FileHeaders.CipherID,
+		buildMasterKey(db, transformedKey),
+		db.Header.FileHeaders.EncryptionIV,
+	)
+}
+
+// GetStreamManager returns a StreamManager based on the db headers,
+// or nil if the type is unsupported
+// Can be used to lock only certain entries instead of calling
+func (db *Database) GetStreamManager() (*StreamManager, error) {
+	if db.Header != nil && db.Header.Signature != nil {
+		if db.Header.IsKdbx4() {
+			if db.Content == nil ||
+				db.Content.InnerHeader == nil ||
+				db.Content.InnerHeader.InnerRandomStreamKey == nil {
+				return nil, ErrInvalidDatabaseOrCredentials
+			}
+
+			return NewStreamManager(
+				db.Content.InnerHeader.InnerRandomStreamID,
+				db.Content.InnerHeader.InnerRandomStreamKey,
+			)
+		}
+
+		if db.Header.FileHeaders != nil &&
+			db.Header.FileHeaders.ProtectedStreamKey == nil {
+			return nil, ErrInvalidDatabaseOrCredentials
+		}
+
+		return NewStreamManager(
+			db.Header.FileHeaders.InnerRandomStreamID,
+			db.Header.FileHeaders.ProtectedStreamKey,
+		)
+	}
+	return nil, nil
+}
+
+// UnlockProtectedEntries goes through the entire database and encrypts
+// any Values in entries with protected=true set.
+// It also unlocks protected binaries in the KDBX v3.1 metadata section.
+// This should be called after decoding if you want to view plaintext password in an entry
+// Warning: If you call this when entry values are already unlocked,
+// it will cause them to be unreadable
+func (db *Database) UnlockProtectedEntries() error {
+	manager, err := db.GetStreamManager()
+	if err != nil {
+		return err
+	}
+	if manager == nil {
+		return ErrUnsupportedStreamType
+	}
+	if db.Content.Meta != nil {
+		if err := manager.unlockProtectedBinaries(db.Content.Meta.Binaries); err != nil {
+			return err
+		}
+	}
+	manager.UnlockProtectedGroups(db.Content.Root.Groups)
+	return nil
+}
+
+// LockProtectedEntries goes through the entire database and decrypts
+// any Values in entries with protected=true set.
+// It also locks protected binaries in the KDBX v3.1 metadata section.
+// Warning: Do not call this if entries are already locked
+// Warning: Encoding a database calls LockProtectedEntries automatically
+func (db *Database) LockProtectedEntries() error {
+	manager, err := db.GetStreamManager()
+	if err != nil {
+		return err
+	}
+	if db.Content.Meta != nil {
+		if err := manager.lockProtectedBinaries(db.Content.Meta.Binaries); err != nil {
+			return err
+		}
+	}
+	manager.LockProtectedGroups(db.Content.Root.Groups)
+	return nil
+}
+
+// AddBinary adds a binary to the database.
+// It takes care of adding it to the correct place based on the format version
+func (db *Database) AddBinary(binaryContent []byte) *Binary {
+	if db.Header.IsKdbx4() {
+		return db.getBinaries().Add(binaryContent, WithKDBXv4Binary)
+	}
+	return db.getBinaries().Add(binaryContent, WithKDBXv31Binary)
+}
+
+// FindBinary returns the binary with the given id if one could be found. It returns nil otherwise
+func (db *Database) FindBinary(id int) *Binary {
+	return db.getBinaries().Find(id)
+}
+
+// ErrRequiredAttributeMissing is returned if a required value is not given
+type ErrRequiredAttributeMissing string
+
+func (e ErrRequiredAttributeMissing) Error() string {
+	return "gokeepasslib: operation can not be performed if database does not have " + string(e)
+}
+
+type binariesUsages map[int][]*BinaryReference
+
+func (db *Database) getBinaries() *Binaries {
+	if db.Header.IsKdbx4() {
+		return &db.Content.InnerHeader.Binaries
+	}
+
+	return &db.Content.Meta.Binaries
+}
+
+func (db *Database) cleanupBinaries() {
+	usages := db.getBinariesUsages()
+	updated := Binaries{}
+	counter := 0
+
+	for _, binary := range *db.getBinaries() {
+		if refs, ok := usages[binary.ID]; ok {
+			for _, ref := range refs {
+				ref.Value.ID = counter
+			}
+			binary.ID = counter
+			updated = append(updated, binary)
+			counter++
+		}
+	}
+
+	*db.getBinaries() = updated
+}
+
+func addEntriesBinaries(result binariesUsages, entries []Entry) {
+	for _, entry := range entries {
+		for i, binary := range entry.Binaries {
+			id := binary.Value.ID
+			result[id] = append(result[id], &entry.Binaries[i])
+		}
+		for _, history := range entry.Histories {
+			addEntriesBinaries(result, history.Entries)
+		}
+	}
+}
+
+func addGroupBinaries(result binariesUsages, parent *Group) {
+	addEntriesBinaries(result, parent.Entries)
+	for _, group := range parent.Groups {
+		g := group
+
+		addGroupBinaries(result, &g)
+	}
+}
+
+func (db *Database) getBinariesUsages() binariesUsages {
+	result := binariesUsages{}
+
+	addGroupBinaries(result, &db.Content.Root.Groups[0])
+	return result
+}
