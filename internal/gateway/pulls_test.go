@@ -77,6 +77,17 @@ func TestRedirectErrorAndHostileResponseRevealNothing(t *testing.T) {
 		}
 	}
 }
+func TestRepositoryNamesCanStartWithDot(t *testing.T) {
+	for _, v := range []struct {
+		name  string
+		valid bool
+	}{{".github", true}, {".", false}, {"..", false}, {"../bad", false}} {
+		if got := (Repository{"123", "example", v.name}).valid(); got != v.valid {
+			t.Fatalf("repo %q got %v want %v", v.name, got, v.valid)
+		}
+	}
+}
+
 func TestTransportNeverUsesImplicitNetworkConfiguration(t *testing.T) {
 	for _, v := range []string{"127.0.0.1", "169.254.169.254", "10.0.0.1", "100.64.0.1", "::1", "224.0.0.1", "192.0.2.1"} {
 		if _, err := NewPullReader(bound, netip.MustParseAddr(v)); err == nil {

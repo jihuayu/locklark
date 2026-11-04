@@ -41,14 +41,14 @@ type pullReader struct {
 }
 
 var ownerName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9-]{0,38}$`)
-var repoName = regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9._-]{0,99}$`)
+var repoName = regexp.MustCompile(`^[a-zA-Z0-9._-]{1,100}$`)
 
 func validID(s string) bool {
 	n, err := strconv.ParseInt(s, 10, 64)
 	return err == nil && n > 0 && strconv.FormatInt(n, 10) == s
 }
 func (r Repository) valid() bool {
-	return validID(r.ID) && ownerName.MatchString(r.Owner) && repoName.MatchString(r.Name)
+	return validID(r.ID) && ownerName.MatchString(r.Owner) && repoName.MatchString(r.Name) && r.Name != "." && r.Name != ".."
 }
 
 // Conservative IPv4-only transport: owner pins the permitted address out of
@@ -169,25 +169,5 @@ func (h *pullReader) read(ctx context.Context, t Target, plan []byte, credential
 		return zero, errUpstream
 	}
 	defer clear(raw)
-	var wire struct {
-		Number int
-		State  string
-		Merged json.RawMessage `json:"merged_at"`
-		Base   struct{ Repo struct{ ID int64 } }
-	}
-	if json.Unmarshal(raw, &wire) != nil || wire.Number != t.Number || strconv.FormatInt(wire.Base.Repo.ID, 10) != t.Repo ||
-		(wire.State != "open" && wire.State != "closed") || len(wire.Merged) == 0 {
-		return zero, errUpstream
-	}
-	var merged *string
-	if json.Unmarshal(wire.Merged, &merged) != nil {
-		return zero, errUpstream
-	}
-	if merged != nil {
-		tm, err := time.Parse(time.RFC3339, *merged)
-		if err != nil || tm.UTC().Format("2006-01-02T15:04:05Z") != *merged || wire.State != "closed" {
-			return zero, errUpstream
-		}
-	}
-	return PullResult{t.Number, wire.State, merged}, nil
+	return project(raw, t, key)
 }
