@@ -102,8 +102,10 @@ func run(args []string, out, errOut io.Writer) error {
 		} else {
 			if command == "audit-verify" {
 				result, err = preview.VerifyAudit(bundle, device, epoch, checkpoint)
-			} else {
+			} else if checkpoint != "" {
 				result, err = preview.AuditWithCheckpoint(bundle, device, epoch, session, checkpoint)
+			} else {
+				result, err = preview.Audit(bundle, device, epoch, session)
 			}
 		}
 	case "request":

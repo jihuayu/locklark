@@ -301,26 +301,49 @@ func Inspect(bundle, device string, expected uint64) (Summary, error) {
 	return summarize(p.Archive, expected)
 }
 func Audit(bundle, device string, expected uint64, session string) ([]Event, error) {
-	return AuditWithCheckpoint(bundle, device, expected, session, "")
-}
-func AuditWithCheckpoint(bundle, device string, expected uint64, session, path string) ([]Event, error) {
-	if !validSession(session) {
-		return nil, errInput
-	}
-	p, err := readPayload(bundle, device, expected)
+	p, err := auditPayload(bundle, device, expected, session)
 	if err != nil {
 		return nil, err
 	}
-	if path != "" {
-		if _, err = verifyWitness(p, device, path); err != nil {
-			return nil, err
-		}
+	return filteredEvents(p, session), nil
+}
+func auditPayload(bundle, device string, expected uint64, session string) (payload, error) {
+	if !validSession(session) {
+		return payload{}, errInput
 	}
+	return readPayload(bundle, device, expected)
+}
+func filteredEvents(p payload, session string) []Event {
 	found := []Event{}
 	for _, e := range p.Events {
 		if e.Session == session {
 			found = append(found, displayedEvent(e))
 		}
 	}
-	return found, nil
+	return found
+}
+
+type WitnessedRow struct {
+	Event
+	Witnessed bool `json:"witnessed"`
+}
+type WitnessedQuery struct {
+	AuditReport
+	Rows []WitnessedRow `json:"rows"`
+}
+
+func AuditWithCheckpoint(bundle, device string, expected uint64, session, path string) (WitnessedQuery, error) {
+	p, err := auditPayload(bundle, device, expected, session)
+	if err != nil {
+		return WitnessedQuery{}, err
+	}
+	report, err := verifyWitness(p, device, path)
+	if err != nil {
+		return WitnessedQuery{}, err
+	}
+	q := WitnessedQuery{AuditReport: report, Rows: []WitnessedRow{}}
+	for _, e := range filteredEvents(p, session) {
+		q.Rows = append(q.Rows, WitnessedRow{e, e.Sequence <= report.Witnessed})
+	}
+	return q, nil
 }

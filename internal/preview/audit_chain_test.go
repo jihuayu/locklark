@@ -49,6 +49,43 @@ func TestAuditTamperAndPrefix(t *testing.T) {
 		t.Fatal("middle deletion accepted")
 	}
 }
+func TestPinnedStreamCannotFallBackToUnsignedOrAlternateHistory(t *testing.T) {
+	pub, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trusted := t.TempDir()
+	if err = os.WriteFile(filepath.Join(trusted, "audit.pub"), pub, 0600); err != nil {
+		t.Fatal(err)
+	}
+	var original, alternate payload
+	original.signedRecord(key, "job", "owner", "field.read", "alpha", "denied")
+	alternate.signedRecord(key, "job", "owner", "field.read", "beta", "denied")
+	cp, err := makeCheckpoint(original, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = checkChain(alternate, pub, &cp); err == nil {
+		t.Fatal("validly signed conflicting prefix accepted")
+	}
+	original.signedRecord(key, "job", "owner", "field.read", "same tail", "denied")
+	alternate.signedRecord(key, "job", "owner", "field.read", "same tail", "denied")
+	original.Proofs[1] = alternate.Proofs[1]
+	if _, err := checkChain(original, pub, nil); err == nil {
+		t.Fatal("valid tail from a different prefix spliced into stream")
+	}
+	unsigned := original
+	unsigned.Proofs = nil
+	if err = verifyLocalStream(unsigned, trusted); err == nil {
+		t.Fatal("pinned device accepted stripped stream")
+	}
+	if err = verifyLocalStream(original, t.TempDir()); err == nil {
+		t.Fatal("signed stream accepted without pin")
+	}
+	if err = verifyLocalStream(unsigned, t.TempDir()); err != nil {
+		t.Fatal("historical fixture cannot be queried", err)
+	}
+}
 func TestAuditWitnessAcrossSnapshots(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "case")
 	if err := Create(root, "goal", "exercise"); err != nil {

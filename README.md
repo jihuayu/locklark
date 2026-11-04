@@ -64,7 +64,7 @@ go build -o locklark.exe ./cmd/locklark
 .\locklark.exe audit --bundle demo-out/share/epoch-3 --device demo-out/clients/B --epoch 3 --session build-42 --checkpoint backup/epoch-3.json
 ```
 
-第 3 代对第 3 代检查点返回 `{"events":4,"witnessed":4}`。对第 2 代检查点则是 4 条、见证 3 条；用第 3 代检查点验证第 2 代会拒绝。修改单条事件或拿另一演练的检查点也会失败。若快照和检查点一起回退，则仅凭二者无法发现回退；`witness/` 在同一实验目录，不等于已有异地备份。本批只实现单签发设备、内存产生的审计私钥；独立审计加密/恢复、持久写入、跨设备见证与故障处理待开发。
+第 3 代对第 3 代检查点返回 `{"events":4,"witnessed":4}`。对第 2 代检查点则是 4 条、见证 3 条；用第 3 代检查点验证第 2 代会拒绝。带 `--checkpoint` 的 `audit` 返回整条流的计数和本 session 的 `rows`；每条的 `witnessed` 表示是否属于该检查点见证过的前缀。普通查询保留原列表格式。修改单条事件或拿另一演练的检查点也会失败。若快照和检查点一起回退，则仅凭二者无法发现回退；`witness/` 在同一实验目录，不等于已有异地备份。本批只实现单签发设备、内存产生的审计私钥；独立审计加密/恢复、持久写入、跨设备见证与故障处理待开发。
 
 ## 已验证的边界
 
