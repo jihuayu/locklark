@@ -275,5 +275,5 @@ func openRequest(dir, name string, id *age.X25519Identity) (Request, bool) {
 		return Request{}, false
 	}
 	q.Review = requestDigest(q)
-	return q, err == nil && validID(q.ID) && name == q.ID+".request.age" && q.State == "pending" && (q.Pull == nil && (q.Action == "" && q.Epoch == 0 || q.Action == FixtureAction && q.Epoch == 3) && validRequest(q.Session, q.Reason, q.Ref) || q.Action == gateway.PullAction && q.Epoch == 3 && q.Auth != nil && validPullInput(q.Session, q.Reason, q.Ref, q.Pull))
+	return q, err == nil && validID(q.ID) && name == q.ID+".request.age" && q.State == "pending" && (q.Pull == nil && (q.Action == "" && q.Epoch == 0 || q.Action == FixtureAction && q.Epoch == 3) && validRequest(q.Session, q.Reason, q.Ref) || q.Action == gateway.PullAction && q.Epoch == 3 && q.Auth != nil && knownPullInput(q.Session, q.Reason, q.Ref, q.Pull))
 }

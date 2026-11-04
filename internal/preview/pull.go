@@ -12,7 +12,10 @@ import (
 
 func safeRepo(r gateway.Repository) bool { return !looksSensitive(r.Owner) && !looksSensitive(r.Name) }
 func validPullInput(session, reason, ref string, p *gateway.PullIntent) bool {
-	return p != nil && p.Valid() && ref == p.Slot && safeRepo(p.Repo) && validReason(reason) && validSession(session) && session != systemSession
+	return p != nil && p.Valid() && knownPullInput(session, reason, ref, p)
+}
+func knownPullInput(session, reason, ref string, p *gateway.PullIntent) bool {
+	return p != nil && p.Known() && ref == p.Slot && safeRepo(p.Repo) && validReason(reason) && validSession(session) && session != systemSession
 }
 func supportedAction(q Request) bool {
 	return q.Epoch == 3 && (q.Action == FixtureAction && q.Ref == FixtureRef && q.Pull == nil || q.Action == gateway.PullAction && validPullInput(q.Session, q.Reason, q.Ref, q.Pull))

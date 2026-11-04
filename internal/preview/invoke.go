@@ -165,6 +165,9 @@ func InvocationReceipt(device, path string) ([]byte, error) {
 	return receiptForTicket(device, id, t)
 }
 func receiptForTicket(device string, id *age.X25519Identity, t invocation) ([]byte, error) {
+	return receiptForAction(device, id, t, "")
+}
+func receiptForAction(device string, id *age.X25519Identity, t invocation, expectedAction string) ([]byte, error) {
 	pub, err := read(device, "decision.pub", 32)
 	if err != nil || len(pub) != 32 {
 		return nil, errInvoke
@@ -174,6 +177,9 @@ func receiptForTicket(device string, id *age.X25519Identity, t invocation) ([]by
 		d, err := authorization(h, t)
 		if err != nil {
 			return err
+		}
+		if expectedAction != "" && d.Request.Action != expectedAction {
+			return errInvoke
 		}
 		reg, err := readRegistry(b.Tx(), id, pub)
 		if err != nil {

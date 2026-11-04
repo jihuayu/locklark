@@ -9,6 +9,7 @@
 *.age
 *.agekey
 *.sessionkey
+*.replykey
 *.outbox
 *.profile
 attempt.private

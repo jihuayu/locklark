@@ -89,41 +89,57 @@ func PrepareInvocation(dir, keyFile, recipientFile, hostKeyFile, session, id, re
 	return prepareEnvelope(dir, keyFile, recipientFile, hostKeyFile, session, id, review, "", "")
 }
 func prepareEnvelope(dir, keyFile, recipientFile, hostKeyFile, session, id, review, purpose, challenge string) error {
-	if !validSession(session) || !validID(id) || !hexSize(review, 32) {
-		return errInvoke
-	}
-	seed, err := readPath(keyFile, 32)
+	state, encrypted, err := newEnvelope(keyFile, recipientFile, hostKeyFile, session, id, review, purpose, challenge)
 	if err != nil {
 		return err
 	}
+	if err = os.Mkdir(dir, 0700); err != nil {
+		return err
+	}
+	if err = writeJSON(dir, "attempt.private", state); err != nil {
+		return err
+	}
+	if purpose == statusPurpose {
+		return write(dir, "query.age", encrypted)
+	}
+	return write(dir, "invocation.age", encrypted)
+}
+func newEnvelope(keyFile, recipientFile, hostKeyFile, session, id, review, purpose, challenge string) (localAttempt, []byte, error) {
+	if !validSession(session) || !validID(id) || !hexSize(review, 32) {
+		return localAttempt{}, nil, errInvoke
+	}
+	seed, err := readPath(keyFile, 32)
+	if err != nil {
+		return localAttempt{}, nil, err
+	}
 	defer clear(seed)
 	if len(seed) != 32 {
-		return errInvoke
+		return localAttempt{}, nil, errInvoke
 	}
 	signer := ed25519.NewKeyFromSeed(seed)
 	defer clear(signer)
 	pub, err := readPath(recipientFile, 256)
 	if err != nil {
-		return err
+		return localAttempt{}, nil, err
 	}
 	recipient, err := age.ParseX25519Recipient(string(bytes.TrimSpace(pub)))
 	if err != nil {
-		return errInvoke
+		return localAttempt{}, nil, errInvoke
 	}
 	host, err := readPath(hostKeyFile, 32)
 	if err != nil {
-		return err
+		return localAttempt{}, nil, err
 	}
 	if !validPublic(hex.EncodeToString(host)) {
-		return errInvoke
+		return localAttempt{}, nil, errInvoke
 	}
 	reply, err := age.GenerateX25519Identity()
 	if err != nil {
-		return err
+		return localAttempt{}, nil, err
 	}
 	var nonce [16]byte
 	if _, err = rand.Read(nonce[:]); err != nil {
-		return err
+		return localAttempt{}, nil, err
 	}
 	t := invocation{ID: id, Review: review, Session: session, Public: hex.EncodeToString(signer[32:]), Audience: recipient.String(), Reply: reply.Recipient().String(), Nonce: hex.EncodeToString(nonce[:])}
 	if purpose == statusPurpose {
@@ -133,18 +149,9 @@ func prepareEnvelope(dir, keyFile, recipientFile, hostKeyFile, session, id, revi
 	t.Signature = ed25519.Sign(signer, t.proof())
 	encrypted, err := sealJSON(recipient, t)
 	if err != nil {
-		return err
+		return localAttempt{}, nil, err
 	}
-	if err = os.Mkdir(dir, 0700); err != nil {
-		return err
-	}
-	if err = writeJSON(dir, "attempt.private", localAttempt{reply.String(), t, host}); err != nil {
-		return err
-	}
-	if purpose == statusPurpose {
-		return write(dir, "query.age", encrypted)
-	}
-	return write(dir, "invocation.age", encrypted)
+	return localAttempt{reply.String(), t, host}, encrypted, nil
 }
 func readTicket(path string, id *age.X25519Identity) (invocation, error) {
 	return readEnvelope(path, id, "")
@@ -274,13 +281,19 @@ func openReply(dir, path string) (signedReply, error) {
 	if json.Unmarshal(local, &state) != nil || len(state.Host) != 32 {
 		return signedReply{}, errInvoke
 	}
-	id, err := age.ParseX25519Identity(state.Key)
-	if err != nil || id.Recipient().String() != state.Ticket.Reply {
-		return signedReply{}, errInvoke
-	}
 	ciphertext, err := readPath(path, 8192)
 	if err != nil {
 		return signedReply{}, err
+	}
+	return decodeReply(state, ciphertext)
+}
+func decodeReply(state localAttempt, ciphertext []byte) (signedReply, error) {
+	if len(state.Host) != ed25519.PublicKeySize {
+		return signedReply{}, errInvoke
+	}
+	id, err := age.ParseX25519Identity(state.Key)
+	if err != nil || id.Recipient().String() != state.Ticket.Reply {
+		return signedReply{}, errInvoke
 	}
 	var reply signedReply
 	if unsealJSON(id, ciphertext, 4096, &reply) != nil || reply.Ticket != state.Ticket.digest() || !ed25519.Verify(state.Host, reply.proof(), reply.Sig) {

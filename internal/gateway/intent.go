@@ -3,6 +3,7 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"github.com/jihuayu/locklark/plugins/github-pull-reader"
@@ -34,6 +35,17 @@ func RecordedScope(r Repository) (PullScope, error) {
 		return PullScope{}, errRejected
 	}
 	return PullScope{r, "locklark.builtin/github-pull-reader", "1", pullreader.Digest(), PullSlot, "recorded-response/v1"}, nil
+}
+
+// Known identifies an enrollment understood for reading historical results.
+func (s PullScope) Known() bool {
+	cur, e := RecordedScope(s.Repo)
+	d, err := hex.DecodeString(s.Digest)
+	return e == nil && err == nil && len(d) == 32 && hex.EncodeToString(d) == s.Digest && validID(s.Version) && s.Plugin == cur.Plugin && s.Backend == cur.Backend && s.Slot == cur.Slot
+}
+func (s PullScope) Current() bool { cur, e := RecordedScope(s.Repo); return e == nil && s == cur }
+func (p PullIntent) Known() bool {
+	return p.PullScope.Known() && p.Number > 0 && int64(p.Number) <= 2147483647
 }
 func (p PullIntent) Valid() bool {
 	s, e := RecordedScope(p.Repo)

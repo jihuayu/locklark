@@ -157,6 +157,8 @@ func AnswerStatus(device, inbox, exchange, poll string) error {
 				state = "not-yet-valid"
 			} else if !now.Before(created.Add(24 * time.Hour)) {
 				state = "expired"
+			} else if q.Pull != nil && !q.Pull.Valid() {
+				state = "module-inactive"
 			}
 		} else {
 			state = stateAt(q, *d, now)

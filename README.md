@@ -131,7 +131,7 @@ go test -count=1 ./internal/gateway
 
 后续沿用 `inbox → decide → invoke-prepare`。持库端运行 `invoke-run` 时加 `--recorded-response PATH` 选择本地合成 JSON；离线演练只接受该文件，绝不向 GitHub 发请求。结果明确标为录制数据，`executions --session pr-run` 保留实际消费的目标。旧元数据授权与 PR 授权不可互换。完整的双端命令由 `scripts/acceptance.ps1` 复跑。
 
-在线适配器没有向 Agent 暴露真实凭据调用入口。GitHub 的 GET 路径按 owner/name 定位，响应后才能核对稳定 ID；若旧名被复用，不能仅靠响应校验限制请求发向哪个仓库。上线前须让上游凭据本身也只对指定仓库有效。MCP 工具发现、签名安装和第三方插件 OS 沙箱尚未接入。
+在线适配器没有向 Agent 暴露真实凭据调用入口。GitHub 的 GET 路径按 owner/name 定位，响应后才能核对稳定 ID；若旧名被复用，不能仅靠响应校验限制请求发向哪个仓库。上线前须让上游凭据本身也只对指定仓库有效。MCP 已可发现内置录制工具；签名安装和第三方插件 OS 沙箱尚未接入。
 
 ## 用 MCP 提交申请并在重启后查状态
 
@@ -148,7 +148,10 @@ go test -count=1 ./internal/gateway
 
 - `github_pulls_get` 接受 `repo`（登记的数字 ID 字符串）、`number`、`reason` 和 `request_key`（每次新申请生成 32 位小写十六进制随机值）。同键同参数的并发调用或重连重试返回同一个 ID 和摘要。私有发件箱保留原始密文以便补投；同一键更换目标或理由会失败。 重试返回的是原投递回执，当前状态另用只读查询确认。若私有发件箱丢失而中继仍保留原密文，重试会报告冲突；同一会话和请求键不会因此生成第二个请求 ID。
 - `locklark_resume` 接受 `request_id` 和 `review`。首次产生新的只读挑战，返回 `awaiting-holder` 和 `poll_id`；将该 `poll_id` 传回来即可读取持库端签名的状态与观测时间。再次省略 `poll_id` 请求更新的观察。持库端离线、查询无法验证或会话已被撤销时，不能将等待误当作同意。已收到的旧观察不能证明此刻仍获批准。
-- 常驻端只答复查询，不批准、不执行。完成的动作可用原执行票据取回密文；本批 MCP 工具只提交申请和查状态。stdio 的短期配置到期后须重连，在线持库端为仍有效的登记自动续发；离线中继可能重放未到期配置，持库端仍逐次核验会话。没有远端自动配对、第三方插件沙箱或实时 GitHub 凭据。
+- `locklark_collect` 接受原投递回执里的 `request_id` 和 `review`。没有可验证的业务回执时返回 `awaiting-receipt`；有回执时核验持库端签名、提交时的接收身份及 PR 编号，再返回 `succeeded` 和明确标注来源的录制结果。重复领取不会重新申请、批准或执行。
+- 常驻端只答复状态并转交已经入账的回执密文。持库端决定批准后，须另外显式执行，例如 `invoke-run --device CLIENT_B --bundle EPOCH_3 --ticket status-exchange/ID.invoke.age --recorded-response RECORDING.json --out NEW_FILE`。常驻端再次核验活跃会话才会从账本补投同一份密文。已交付的结果无法撤回。
+- 首次提交或重试会持久保存随机的回执接收身份；私有目录内的 `.replykey` 用会话种子派生的专用密钥加密。保留该文件和会话私钥；丢失原接收身份不会让新的身份获得已完成的回执。旧版桥提交的请求须在执行前用同一请求键重试以准备接收身份。
+- stdio 的短期配置到期后须重连，在线持库端为仍有效的登记自动续发。插件换版时，旧登记只列出状态与领取工具，不能发起新的操作。离线中继可能重放未到期配置，持库端仍逐次核验会话。没有远端自动配对、第三方插件沙箱或实时 GitHub 凭据。
 
 进程级验收：`python scripts/mcp_acceptance.py PATH_TO_LOCKLARK`（需要 Bun 1.4.4）；Windows 综合验收已包含这一步。实现基于[官方 Go SDK](https://github.com/modelcontextprotocol/go-sdk)，使用 [MCP stdio 协议](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)。
 

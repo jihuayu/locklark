@@ -2,6 +2,9 @@ package preview
 
 import (
 	"context"
+	"filippo.io/age"
+	"github.com/jihuayu/locklark/internal/gateway"
+
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
@@ -52,6 +55,19 @@ func renewProfile(device, session, path string) error {
 
 // The courier answers signed read-only queries; it never issues decisions or
 // runs an approved action. Bound work per tick; one-shot handles one full pass.
+// The filename is not an authority: confirm the ID inside the signed ticket.
+func forwardReceipt(id *age.X25519Identity, device, exchange, request, out string) error {
+	ticket, e := readTicket(filepath.Join(exchange, request+".invoke.age"), id)
+	if e != nil || ticket.ID != request {
+		return errInvoke
+	}
+	sealed, e := receiptForAction(device, id, ticket, gateway.PullAction)
+	if e != nil {
+		return errInvoke
+	}
+	return WriteReply(out, sealed)
+}
+
 func ServeStatus(ctx context.Context, device, inbox, exchange, session, profile string, once bool) error {
 	if device == "" || inbox == "" || exchange == "" || (session == "") != (profile == "") {
 		return errSession
@@ -87,6 +103,13 @@ func ServeStatus(ctx context.Context, device, inbox, exchange, session, profile 
 				return ctx.Err()
 			}
 			name := entry.Name()
+			if request, ok := strings.CutSuffix(name, ".invoke.age"); ok && validID(request) && entry.Type().IsRegular() {
+				out := filepath.Join(exchange, request+".result.age")
+				if _, e := os.Lstat(out); errors.Is(e, os.ErrNotExist) {
+					_ = forwardReceipt(verified, device, exchange, request, out)
+				}
+				continue
+			}
 			poll, ok := strings.CutSuffix(name, ".query.age")
 			if !ok || !validID(poll) || !entry.Type().IsRegular() {
 				continue

@@ -62,7 +62,7 @@ class Bridge:
 
 call={"repo":"123","number":7,"reason":"check merge","request_key":"0123456789abcdef0123456789abcdef"}
 with Bridge() as b:
-    assert {t["name"] for t in b.rpc("tools/list",{})["tools"]}=={"github_pulls_get","locklark_resume"}
+    assert {t["name"] for t in b.rpc("tools/list",{})["tools"]}=={"github_pulls_get","locklark_resume","locklark_collect"}
     first=b.tool("github_pulls_get",call)
 with Bridge() as b:
     retried=b.tool("github_pulls_get",call)
@@ -76,5 +76,33 @@ cli("status-serve","--once","--device",device,"--inbox",demo/"inbox","--exchange
 with Bridge() as b:
     observed=b.tool("locklark_resume",{**request,"poll_id":waiting["poll_id"]})
     assert observed["state"]=="pending" and observed["request_id"]==first["id"] and observed["observed_at"]
+    assert b.tool("locklark_collect",request)["state"]=="awaiting-receipt"
 assert not cli("executions","--device",device,"--session","job")
-print("PASS: MCP stdio handshake, scoped Bun request, retry after restart and authenticated read-only resume")
+cli("decide","--device",device,"--inbox",demo/"inbox","--bundle",demo/"share/epoch-3","--id",first["id"],"--review",first["review"],"--choice","approve","--reason","only this recorded pull")
+recording=root/"recorded.json"
+recording.write_text(json.dumps({"number":7,"state":"open","merged_at":None,"base":{"repo":{"id":123}},"body":"never deliver"}))
+ticket=root/"exchange"/(first["id"]+".invoke.age")
+original_ticket=ticket.read_bytes()
+with Bridge() as b:
+    assert b.tool("locklark_collect",request)["state"]=="awaiting-receipt"
+assert not cli("executions","--device",device,"--session","job")
+cli("invoke-run","--device",device,"--bundle",demo/"share/epoch-3","--ticket",ticket,"--recorded-response",recording,"--out",root/"holder-reply.age")
+cli("status-serve","--once","--device",device,"--inbox",demo/"inbox","--exchange",root/"exchange")
+assert (root/"exchange"/(first["id"]+".result.age")).read_bytes()==(root/"holder-reply.age").read_bytes()
+for _ in range(2):
+    with Bridge() as b:
+        got=b.tool("locklark_collect",request)
+        assert got=={"state":"succeeded","request_id":first["id"],"result":{"source":"recorded-response/v1","pull":{"number":7,"state":"open","merged_at":None}}}
+        assert b.tool("github_pulls_get",call)==first
+assert ticket.read_bytes()==original_ticket
+log=cli("executions","--device",device,"--session","job")
+assert len(log)==1 and log[0]["state"]=="succeeded"
+if len(sys.argv)>2:
+    # Same signed enrollment, directory and delivered receipt, but a binary
+    # shipping different plugin bytes: allow historical reads, not new calls.
+    args[0]=str(Path(sys.argv[2]).resolve())
+    with Bridge() as b:
+        assert {t["name"] for t in b.rpc("tools/list",{})["tools"]}=={"locklark_collect","locklark_resume"}
+        assert b.tool("locklark_collect",request)==got
+    print("PASS: upgraded bridge still reads old receipts without exposing the retired action")
+print("PASS: MCP reconnect, idempotent submission, read-only status and signed result collection without re-execution")

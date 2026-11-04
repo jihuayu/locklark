@@ -50,8 +50,8 @@ func ExportBridgeProfile(device, session, path string) error {
 		if !ok || c.Action != "enrolled" || c.PullScope == nil || now.Before(c.At) || !now.Before(c.Expires) {
 			return errSession
 		}
-		scope, e := gateway.RecordedScope(c.PullScope.Repo)
-		if e != nil || scope != *c.PullScope {
+		scope := *c.PullScope
+		if !scope.Known() || !safeRepo(scope.Repo) {
 			return errSession
 		}
 		until := now.Add(profileLife)
@@ -89,9 +89,8 @@ func LoadBridgeProfile(path string, c PollConfig) (BridgeProfile, error) {
 	defer clear(seed)
 	signer := ed25519.NewKeyFromSeed(seed)
 	defer clear(signer)
-	scope, e := gateway.RecordedScope(p.Scope.Repo)
 	now := time.Now().UTC()
-	if e != nil || scope != p.Scope || hex.EncodeToString(signer[32:]) != p.Public || !validSession(p.Session) || (c.Session != "" && c.Session != p.Session) || now.Before(p.Issued) || !now.Before(p.Expires) || p.Expires.Sub(p.Issued) > profileLife {
+	if !p.Scope.Known() || !safeRepo(p.Scope.Repo) || hex.EncodeToString(signer[32:]) != p.Public || !validSession(p.Session) || (c.Session != "" && c.Session != p.Session) || now.Before(p.Issued) || !now.Before(p.Expires) || p.Expires.Sub(p.Issued) > profileLife {
 		return BridgeProfile{}, errSession
 	}
 	return p, nil

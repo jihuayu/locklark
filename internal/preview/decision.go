@@ -180,6 +180,9 @@ func overlayDecisions(rows []Request, device string, id *age.X25519Identity) err
 		now := time.Now().UTC()
 		for i, q := range rows {
 			rows[i].SenderStatus = sessionStatus(q, reg, id.Recipient().String(), now)
+			if q.Pull != nil && !q.Pull.Valid() {
+				rows[i].State = "module-inactive"
+			}
 			created, err := time.Parse(time.RFC3339Nano, q.Created)
 			if created.After(now) {
 				rows[i].State = "not-yet-valid"
@@ -211,6 +214,8 @@ func stateAt(q Request, d Decision, now time.Time) string {
 		return "not-yet-valid"
 	case d.Expires != nil && !now.Before(*d.Expires):
 		return "expired"
+	case d.Result == "approved" && q.Pull != nil && !q.Pull.Valid():
+		return "module-inactive"
 	default:
 		return d.Result
 	}
