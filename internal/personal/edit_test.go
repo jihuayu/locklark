@@ -36,7 +36,11 @@ func TestEditTargetsObservedItem(t *testing.T) {
 	if _, e = EditLogin(path, pw, key, second); e != nil {
 		t.Fatal(e)
 	}
-	res := make(chan error, 2)
+	type attempt struct {
+		value, revision string
+		err             error
+	}
+	res := make(chan attempt, 2)
 	var wg sync.WaitGroup
 	for _, value := range []string{"sample-new-secret", "different-secret"} {
 		wg.Add(1)
@@ -44,16 +48,19 @@ func TestEditTargetsObservedItem(t *testing.T) {
 			defer wg.Done()
 			p := first
 			p.Value = v
-			_, err := EditLogin(path, pw, key, p)
-			res <- err
+			revision, err := EditLogin(path, pw, key, p)
+			res <- attempt{v, revision, err}
 		}(value)
 	}
 	wg.Wait()
 	close(res)
 	ok, conflict := 0, 0
-	for err := range res {
+	var winner attempt
+	for a := range res {
+		err := a.err
 		switch {
 		case err == nil:
+			winner = a
 			ok++
 		case errors.Is(err, ErrConflict):
 			conflict++
@@ -65,12 +72,19 @@ func TestEditTargetsObservedItem(t *testing.T) {
 		t.Fatal("both writes won or both failed")
 	}
 	rows, e = List(path, pw, key)
-	if e != nil || rows[0].Title != "same" || rows[1].Title != "renamed" || rows[0].Revision == first.Revision {
+	if e != nil || rows[0].Title != "same" || rows[1].Title != "renamed" || rows[0].Revision != winner.revision || rows[0].Revision == first.Revision {
 		t.Fatal("wrong row changed", e)
 	}
 	saved := readStoredItems(t, path, pw, key)
-	if len(saved) != 2 || saved[0].ID != a || saved[0].Username != "one" || (saved[0].Password != "sample-new-secret" && saved[0].Password != "different-secret") || saved[1].ID != b || saved[1].Username != "two" || saved[1].Password != "original-b" {
+	if len(saved) != 2 || saved[0].ID != a || saved[0].Username != "one" || saved[0].Password != winner.value || saved[1].ID != b || saved[1].Username != "two" || saved[1].Password != "original-b" {
 		t.Fatal("field edit corrupted stored login")
+	}
+	if _, e := EditLogin(path, pw, key, Edit{ID: a, Revision: winner.revision, Field: "username", Value: ""}); e != nil {
+		t.Fatal(e)
+	}
+	saved = readStoredItems(t, path, pw, key)
+	if saved[0].Username != "" || saved[0].Password != winner.value || saved[1].Username != "two" {
+		t.Fatal("username clear affected other fields")
 	}
 	unknown := first
 	unknown.ID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -85,13 +99,27 @@ func TestEditTargetsObservedItem(t *testing.T) {
 	for _, v := range ev {
 		if v.Action == "item.edit.password" {
 			counts[v.Result]++
+			switch v.Result {
+			case "succeeded":
+				if v.Item != a || v.BaseRevision != first.Revision || v.hash() != winner.revision {
+					t.Fatal("successful revision did not bind its observed base")
+				}
+			case "conflict":
+				if v.Item != a || v.BaseRevision != winner.revision {
+					t.Fatal("conflict did not bind actual current revision")
+				}
+			case "not-found":
+				if v.Item != "" || v.BaseRevision != "" {
+					t.Fatal("recorded an unverified target")
+				}
+			}
 		}
 	}
 	if counts["succeeded"] != 1 || counts["conflict"] != 1 || counts["not-found"] != 1 {
 		t.Fatal("incorrect edit outcomes", counts)
 	}
 	out, _ := json.Marshal(ev)
-	for _, v := range []string{"original-a", "sample-new-secret", "different-secret", "renamed"} {
+	for _, v := range []string{"original-a", "sample-new-secret", "different-secret", "renamed", unknown.ID} {
 		if bytes.Contains(out, []byte(v)) {
 			t.Fatal("audit leaked data")
 		}
