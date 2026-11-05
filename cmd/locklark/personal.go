@@ -22,7 +22,7 @@ import (
 	"unicode/utf8"
 )
 
-var personalUsage = errors.New("usage: locklark personal <init|add-login|list|audit|archived-audit|references|health> --file PATH, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password|otp|url, or reveal-login --file PATH --id ID --revision REV --field username|password, or generate-login --file PATH [--length N], or regenerate-password --file PATH --id ID --revision REV [--length N], or otp --file PATH --id ID --revision REV, or reveal-ref|otp-ref --file PATH --ref REF --revision REV, or inspect-1pux|plan-import-1pux --file PATH --source ARCHIVE, or import-1pux --file PATH --source ARCHIVE --digest PLAN_DIGEST, or export-kdbx --file PATH --out NEW_FILE.kdbx, or archive-login|unarchive-login --file PATH --id ID --revision REV, or list|search --file PATH [--state active|archived|trashed|all], or trash-login|restore-login --file PATH --id ID --revision REV, or match-logins --file PATH --origin HTTPS_ORIGIN --frame-origin HTTPS_ORIGIN, or inject-json --file PATH --id ID --revision REV --field username|password --name PROPERTY --out NEW.json, or github-pull --file PATH --id ID --revision REV --repository-id NUMERIC_ID --owner OWNER --repository NAME --number PR --api-ip PUBLIC_IPV4")
+var personalUsage = errors.New("usage: locklark personal run-env --file PATH --id ID --revision REV --field username|password --name ENV --cwd ABS_DIR --timeout SECONDS -- ABS_PROGRAM [ARG...], or <init|add-login|list|audit|archived-audit|references|health> --file PATH, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password|otp|url, or reveal-login --file PATH --id ID --revision REV --field username|password, or generate-login --file PATH [--length N], or regenerate-password --file PATH --id ID --revision REV [--length N], or otp --file PATH --id ID --revision REV, or reveal-ref|otp-ref --file PATH --ref REF --revision REV, or inspect-1pux|plan-import-1pux --file PATH --source ARCHIVE, or import-1pux --file PATH --source ARCHIVE --digest PLAN_DIGEST, or export-kdbx --file PATH --out NEW_FILE.kdbx, or archive-login|unarchive-login --file PATH --id ID --revision REV, or list|search --file PATH [--state active|archived|trashed|all], or trash-login|restore-login --file PATH --id ID --revision REV, or match-logins --file PATH --origin HTTPS_ORIGIN --frame-origin HTTPS_ORIGIN, or inject-json --file PATH --id ID --revision REV --field username|password --name PROPERTY --out NEW.json, or github-pull --file PATH --id ID --revision REV --repository-id NUMERIC_ID --owner OWNER --repository NAME --number PR --api-ip PUBLIC_IPV4")
 
 // One terminal mode covers the entire interaction; no prompt or inter-field
 // gap is visible while echo is enabled.
@@ -77,6 +77,19 @@ func confirmIssued(c *console, label, value, prompt string) error {
 	return nil
 }
 func runPersonal(args []string, out io.Writer) (retErr error) {
+	var processArgs []string
+	if len(args) > 0 && args[0] == "run-env" {
+		for i := 1; i < len(args); i++ {
+			if args[i] == "--" {
+				processArgs = append([]string{}, args[i+1:]...)
+				args = args[:i]
+				break
+			}
+		}
+		if len(processArgs) == 0 {
+			return personalUsage
+		}
+	}
 	if len(args) < 3 || len(args)%2 != 1 {
 		return personalUsage
 	}
@@ -95,8 +108,16 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 	var edit personal.Edit
 	var reveal personal.RevealTarget
 	var pull personal.LivePullRequest
+	var run personal.RunRequest
 	length := password.DefaultPolicy().Length
 	switch action {
+	case "run-env":
+		reveal = personal.RevealTarget{ID: opts["--id"], Revision: opts["--revision"], Field: opts["--field"]}
+		seconds, e := strconv.Atoi(opts["--timeout"])
+		run = personal.RunRequest{Program: processArgs[0], Args: processArgs[1:], Directory: opts["--cwd"], Name: opts["--name"], TimeoutSeconds: seconds}
+		if len(opts) != 7 || e != nil || strconv.Itoa(seconds) != opts["--timeout"] || !personal.ValidRevealTarget(reveal.ID, reveal.Revision, reveal.Field) || run.Validate() != nil {
+			return personalUsage
+		}
 	case "github-pull":
 		reveal = personal.RevealTarget{ID: opts["--id"], Revision: opts["--revision"], Field: "password"}
 		number, e := strconv.Atoi(opts["--number"])
@@ -289,6 +310,24 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 		}
 		defer clear(key)
 		switch action {
+		case "run-env":
+			if _, e = fmt.Fprintf(os.Stderr, "将条目 %s（修订 %s）的 %s 交给所选可信本地程序的环境变量 %s。\r\n这不是沙箱：程序可联网、写文件和向后代传递值；同用户或管理员也可能读取环境。\r\n参数会显示并出现在进程列表中，不要把秘密写入参数。标准输入/输出/错误接空设备；只返回退出码。\r\n超时仅终止直接子进程，后代可能继续运行；中断后结果可能未知。\r\n程序：%s\r\n目录：%s\r\n超时：%d 秒\r\n参数：\r\n", reveal.ID, reveal.Revision, reveal.Field, run.Name, strconv.QuoteToASCII(run.Program), strconv.QuoteToASCII(run.Directory), run.TimeoutSeconds); e != nil {
+				return e
+			}
+			for i, arg := range run.Args {
+				if _, e = fmt.Fprintf(os.Stderr, "  [%d] %s\r\n", i, strconv.QuoteToASCII(arg)); e != nil {
+					return e
+				}
+			}
+			consent, e := consoleField("输入 RUN 确认向本地程序披露字段")
+			defer clear(consent)
+			if e != nil {
+				return e
+			}
+			if string(consent) != "RUN" {
+				return errors.New("local process cancelled")
+			}
+			response, err = personal.RunEnv(context.Background(), path, string(pw), key, reveal, run)
 		case "search":
 			if _, e = fmt.Fprint(os.Stderr, "仅搜索当前登录标题，不搜索用户名、密码、验证码配置或导入来源旧值。\r\n"); e != nil {
 				return e
