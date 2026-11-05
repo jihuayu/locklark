@@ -27,6 +27,7 @@ type evolution struct {
 	members        map[string]bool
 	devices        map[string]locatedDevice
 	mode           string
+	roster         []Member
 }
 
 func newEvolution() *evolution {
@@ -58,6 +59,7 @@ func (e *evolution) advance(p Proposal) error {
 		}
 	}
 	e.members, e.devices, e.mode = nextMembers, nextDevices, p.Mode
+	e.roster = cloneMembers(p.Members)
 	return nil
 }
 func canonical(raw []byte, v any) bool {
@@ -85,7 +87,7 @@ func load(tx *bolt.Tx, c *Config, anchor Checkpoint) (View, *evolution, error) {
 			return ErrInvalid
 		}
 		var receipt Receipt
-		if !canonical(raw, &receipt) || c.verifyReceipt(receipt) != nil || receipt.Proposal.Parent != current || c.verifyNewDevices(e, receipt.Proposal) != nil || e.advance(receipt.Proposal) != nil {
+		if !canonical(raw, &receipt) || c.verifyReceipt(receipt) != nil || receipt.Proposal.Parent != current || c.verifyTransition(e, receipt.Proposal) != nil || e.advance(receipt.Proposal) != nil {
 			return ErrInvalid
 		}
 		current = receipt.Checkpoint()
@@ -104,6 +106,10 @@ func load(tx *bolt.Tx, c *Config, anchor Checkpoint) (View, *evolution, error) {
 			return View{}, nil, ErrInvalid
 		}
 	} else if raw != nil {
+		return View{}, nil, ErrInvalid
+	}
+	out.SnapshotSigner, err = c.snapshotSigner(out.Receipt.Proposal)
+	if err != nil {
 		return View{}, nil, ErrInvalid
 	}
 	return out, e, nil
@@ -218,7 +224,7 @@ func commitWithUpdate(update func(func(*bolt.Tx) error) error, c *Config, sequen
 		if p.Parent != current {
 			return ErrConflict
 		}
-		if c.verifyNewDevices(state, p) != nil || state.advance(p) != nil {
+		if c.verifyTransition(state, p) != nil || state.advance(p) != nil {
 			return ErrInvalid
 		}
 		out = Receipt{Proposal: p}
@@ -256,7 +262,7 @@ func commitWithUpdate(update func(func(*bolt.Tx) error) error, c *Config, sequen
 	return out, nil
 }
 
-// Read verifies the entire owner/sequencer chain and requires the independently
+// Read verifies the entire authorized-author/sequencer chain and requires the independently
 // retained anchor to be an ancestor (or the exact head). A genesis anchor has no
 // rollback protection. Read from the trusted sequencer's local storage only;
 // an untrusted relay can withhold a newer valid head.

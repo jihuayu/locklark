@@ -35,6 +35,7 @@ type Pins struct {
 	Sequencer, Publisher string
 }
 type Config struct {
+	writerACL            bool
 	requirePossession    bool
 	scope                string
 	owners               map[string]ed25519.PublicKey
@@ -56,8 +57,9 @@ type Device struct {
 	Signing    string `json:"signing"`
 }
 
-// Role is directory metadata, not an enforced operation ACL. Every registered
-// device receives the whole snapshot; publication still requires an owner.
+// Every registered device receives the whole snapshot. Role authorizes data-only
+// device publications only under NewConfigWithWriterACL; older policies require
+// an owner for every publication. Membership and role changes always need an owner.
 type Member struct {
 	ID      string   `json:"id"`
 	Role    string   `json:"role"`
@@ -73,6 +75,7 @@ type Proposal struct {
 	Owner          string      `json:"owner"`
 	Signature      []byte      `json:"signature"`
 	Admissions     []Admission `json:"admissions,omitempty"`
+	AuthorDevice   string      `json:"author_device,omitempty"`
 }
 type Receipt struct {
 	Proposal  Proposal `json:"proposal"`
@@ -81,6 +84,8 @@ type Receipt struct {
 type View struct {
 	Receipt  Receipt        `json:"receipt"`
 	Snapshot vault.Snapshot `json:"snapshot"`
+	// Set by Read only after history and head snapshot verification; nil if frozen.
+	SnapshotSigner ed25519.PublicKey `json:"snapshot_signer"`
 }
 
 func hexSize(raw string, n int) bool {
@@ -283,7 +288,7 @@ func Freeze(c *Config, owner ed25519.PrivateKey, parent Checkpoint) (Proposal, e
 	return p, nil
 }
 func (c *Config) verifyProposal(p Proposal) error {
-	if !c.valid() || p.Scope != c.scope || !c.validCheckpoint(p.Parent) || p.Epoch != p.Parent.Version+1 || p.Epoch > maxVersions || !hexSize(p.Owner, 32) || len(c.owners[p.Owner]) != ed25519.PublicKeySize || len(p.Signature) != ed25519.SignatureSize {
+	if !c.valid() || p.Scope != c.scope || !c.validCheckpoint(p.Parent) || p.Epoch != p.Parent.Version+1 || p.Epoch > maxVersions || len(p.Signature) != ed25519.SignatureSize || len(p.AuthorDevice) > 32 || len(p.Owner) > 64 {
 		return ErrInvalid
 	}
 	switch p.Mode {
@@ -304,7 +309,8 @@ func (c *Config) verifyProposal(p Proposal) error {
 	if c.verifyAdmissions(p) != nil {
 		return ErrInvalid
 	}
-	if !ed25519.Verify(c.owners[p.Owner], p.proof(), p.Signature) {
+	signer, err := c.proposalSigner(p)
+	if err != nil || !ed25519.Verify(signer, p.proof(), p.Signature) {
 		return ErrInvalid
 	}
 	return nil
@@ -316,7 +322,8 @@ func (c *Config) verifySnapshot(p Proposal, s vault.Snapshot) error {
 		}
 		return nil
 	}
-	if vault.VerifySnapshot(s, c.publisher, p.Epoch) != nil || snapshotDigest(s) != p.SnapshotDigest {
+	signer, err := c.snapshotSigner(p)
+	if err != nil || vault.VerifySnapshot(s, signer, p.Epoch) != nil || snapshotDigest(s) != p.SnapshotDigest {
 		return ErrInvalid
 	}
 	return nil
