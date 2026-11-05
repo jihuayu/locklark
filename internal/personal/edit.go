@@ -3,6 +3,7 @@ package personal
 import (
 	"encoding/hex"
 	"errors"
+	"github.com/jihuayu/locklark/internal/origin"
 	"github.com/jihuayu/locklark/internal/totp"
 	"github.com/jihuayu/locklark/internal/vault"
 	"strings"
@@ -15,7 +16,7 @@ type Edit struct{ ID, Revision, Field, Value string }
 
 func editAction(s string) bool {
 	switch s {
-	case "item.archive", "item.unarchive", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.regenerate.password":
+	case "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.regenerate.password":
 		return true
 	}
 	return false
@@ -36,6 +37,11 @@ func EditLogin(path, pw string, key []byte, edit Edit) (string, error) {
 	}
 	if edit.Field == "title" && strings.TrimSpace(edit.Value) == "" || edit.Field == "password" && edit.Value == "" {
 		return "", errors.New("title and password must not be empty")
+	}
+	if edit.Field == "url" && edit.Value != "" {
+		if _, err := origin.Website(edit.Value); err != nil {
+			return "", err
+		}
 	}
 	if edit.Field == "otp" && edit.Value != "" {
 		config, err := totp.Parse(edit.Value)

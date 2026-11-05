@@ -10,7 +10,7 @@ import (
 )
 
 func TestExportKDBXIndependentReader(t *testing.T) {
-	items := []Item{{ID: "login", Kind: "login", State: "archived", Title: "重复标题", Username: "synthetic-user", Password: "synthetic-password", OTP: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"}, {ID: "doc", Kind: "document", Title: "重复标题", Filename: "fixture.bin", Attachment: []byte{0, 255, 1}, AttachmentProtected: true}}
+	items := []Item{{ID: "login", Kind: "login", State: "archived", URL: "https://example.com/login", Title: "重复标题", Username: "synthetic-user", Password: "synthetic-password", OTP: "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"}, {ID: "doc", Kind: "document", Title: "重复标题", Filename: "fixture.bin", Attachment: []byte{0, 255, 1}, AttachmentProtected: true}}
 	items = append(items, Item{ID: "empty", Kind: "login", Title: "empty"}, Item{ID: "doc-unprotected", Kind: "document", Title: "duplicate bytes", Filename: "fixture.bin", Attachment: []byte{0, 255, 1}})
 	raw, err := ExportKDBX(items, "synthetic-export-password")
 	if err != nil {

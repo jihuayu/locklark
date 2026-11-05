@@ -77,7 +77,7 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 	if e.Sequence != n || e.Previous != prev || !idOK(e.Session) || e.Actor != "local-owner" || !ed25519.Verify(pub, e.proof(), e.Signature) {
 		return invalid
 	}
-	if !editAction(e.Action) && !revealAction(e.Action) && e.Action != otpDisclosureAction && e.Action != referenceRejectAction && e.Action != inspectionAction && e.Action != exportAction && (e.Result != "succeeded" || e.BaseRevision != "") {
+	if !editAction(e.Action) && !revealAction(e.Action) && e.Action != otpDisclosureAction && e.Action != referenceRejectAction && e.Action != inspectionAction && e.Action != exportAction && e.Action != matchAction && (e.Result != "succeeded" || e.BaseRevision != "") {
 		return invalid
 	}
 	if e.Action == inspectionAction && e.Result == "succeeded" {
@@ -98,6 +98,10 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 		return invalid
 	}
 	switch e.Action {
+	case matchAction:
+		if n <= 1 || e.Item != "" || e.BaseRevision != "" || e.Result != "succeeded" && e.Result != "cross-origin" {
+			return invalid
+		}
 	case exportAction:
 		if n <= 1 || e.Result != "intent" || e.Item != "" || e.BaseRevision != "" {
 			return invalid
@@ -128,7 +132,7 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 		if n != 1 || !digestOK(e.Link) || e.Item != "" {
 			return invalid
 		}
-	case "item.archive", "item.unarchive", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.regenerate.password", otpDisclosureAction:
+	case "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.regenerate.password", otpDisclosureAction:
 		if e.Result == "not-found" && e.Item == "" && e.BaseRevision == "" && n > 1 {
 			break
 		}

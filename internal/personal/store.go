@@ -193,6 +193,7 @@ type result struct {
 }
 
 type commandOption struct {
+	match      *matchRequest
 	export     *exportRequest
 	inspection *inspectionRequest
 	backup     string
@@ -242,6 +243,9 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		return result{}, invalid
 	}
 	if (action == inspectionAction) != (option.inspection != nil) || (option.inspection != nil && option.inspection.read == nil) {
+		return result{}, invalid
+	}
+	if (action == matchAction) != (option.match != nil) {
 		return result{}, invalid
 	}
 	if (action == exportAction) != (option.export != nil) {
@@ -332,6 +336,15 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			}
 		}
 		switch action {
+		case matchAction:
+			if option.match.top != option.match.frame {
+				outcome, refusal = "cross-origin", ErrCrossOrigin
+			} else {
+				out.rows, e = matchingRows(items, revisions, option.match.top)
+				if e != nil {
+					return e
+				}
+			}
 		case exportAction:
 			out.archive, e = vault.ExportKDBX(items, option.export.password)
 			if e != nil {
@@ -362,7 +375,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			if option.backup == "" {
 				return invalid
 			}
-		case "item.archive", "item.unarchive", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.regenerate.password", otpDisclosureAction:
+		case "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.regenerate.password", otpDisclosureAction:
 			if edit == nil {
 				return invalid
 			}
@@ -427,6 +440,8 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 							break
 						}
 						switch edit.Field {
+						case "url":
+							items[i].URL = edit.Value
 						case "title":
 							items[i].Title = edit.Value
 						case "username":

@@ -1,0 +1,227 @@
+[
+  {
+    "Input": "https://example.com",
+    "Website": "https://example.com",
+    "Origin": "https://example.com"
+  },
+  {
+    "Input": "https://EXAMPLE.com:443/",
+    "Website": "https://example.com",
+    "Origin": "https://example.com"
+  },
+  {
+    "Input": "https://example.com/login",
+    "Website": "https://example.com",
+    "Origin": ""
+  },
+  {
+    "Input": "https://example.com:8443/path",
+    "Website": "https://example.com:8443",
+    "Origin": ""
+  },
+  {
+    "Input": "https://example.com:1",
+    "Website": "https://example.com:1",
+    "Origin": "https://example.com:1"
+  },
+  {
+    "Input": "https://example.com:65535",
+    "Website": "https://example.com:65535",
+    "Origin": "https://example.com:65535"
+  },
+  {
+    "Input": "https://sub.example.com",
+    "Website": "https://sub.example.com",
+    "Origin": "https://sub.example.com"
+  },
+  {
+    "Input": "",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": "http://example.com",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": "https:example.com",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": "https://example.com:",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": "https://example.com:0",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": "https://example.com:0443",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": "https://example.com:65536",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": "https://example.com:+443",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": "https://user@example.com",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": "https://example.com?",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": "https://example.com#",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": "https://example.com/?q=x",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": "https://example.com/#x",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": "https://example.com.",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": "https://example.com\\@evil.test",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": "https://example.com\n",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": " https://example.com",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": "https://ex%61mple.com",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": "https://127.0.0.1",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": "https://127.1",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": "https://2130706433",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": "https://0177.0.0.1",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": "https://0x7f.1",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": "https://[::1]",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": "https://[fe80::1%25eth0]",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": "https://localhost",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": "https://a.local",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": "https://a.localhost",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": "https://a.internal",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": "https://a.home.arpa",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": "https://xn--bcher-kva.example",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": "https://bücher.example",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": "https://a..example",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": "https://-a.example",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": "https://a-.example",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": "https://example.123",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": "https://example.0xabc",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": "https://example.com//path",
+    "Website": "https://example.com",
+    "Origin": ""
+  }
+]

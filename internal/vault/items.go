@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"filippo.io/age"
+	"github.com/jihuayu/locklark/internal/origin"
 	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
 	"github.com/jihuayu/locklark/third_party/gokeepasslib/wrappers"
 	"strings"
@@ -17,6 +18,7 @@ type Item struct {
 	Attachment                                         []byte
 	AttachmentProtected                                bool
 	State                                              string `json:",omitempty"`
+	URL                                                string `json:",omitempty"`
 }
 
 const itemGroup = "Locklark items v1"
@@ -46,7 +48,7 @@ func validItems(items []Item, size int) bool {
 			return false
 		}
 		seen[it.ID] = true
-		for _, s := range []string{it.ID, it.Kind, it.Title, it.Username, it.Password, it.OTP, it.Filename, it.State} {
+		for _, s := range []string{it.ID, it.Kind, it.Title, it.Username, it.Password, it.OTP, it.Filename, it.State, it.URL} {
 			if len(s) > MaxPayload-size || !xmlText(s) {
 				return false
 			}
@@ -61,11 +63,16 @@ func validItems(items []Item, size int) bool {
 		}
 		switch it.Kind {
 		case "login":
+			if it.URL != "" {
+				if _, err := origin.Website(it.URL); err != nil {
+					return false
+				}
+			}
 			if it.Filename != "" || it.Attachment != nil || it.AttachmentProtected {
 				return false
 			}
 		case "document":
-			if it.Username != "" || it.Password != "" || it.OTP != "" || it.Filename == "" || it.Filename == "." || it.Filename == ".." || strings.ContainsAny(it.Filename, "/\\") {
+			if it.URL != "" || it.Username != "" || it.Password != "" || it.OTP != "" || it.Filename == "" || it.Filename == "." || it.Filename == ".." || strings.ContainsAny(it.Filename, "/\\") {
 				return false
 			}
 		default:
@@ -112,6 +119,9 @@ func writeItems(db *kdbx.Database, metadata []byte, items []Item) error {
 			e.Values = append(e.Values, slot("Locklark.State", it.State, false))
 		}
 		if it.Kind == "login" {
+			if it.URL != "" {
+				e.Values = append(e.Values, slot("URL", it.URL, true))
+			}
 			e.Values = append(e.Values, slot("Password", it.Password, true), slot("otp", it.OTP, true))
 			if it.Username != "" {
 				e.Values = append(e.Values, slot("UserName", it.Username, true))
@@ -164,7 +174,7 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 			if _, ok := fields[v.Key]; ok {
 				return nil, nil, ErrSnapshot
 			}
-			protected := v.Key == "UserName" || v.Key == "Notes" || v.Key == "Password" || v.Key == "otp"
+			protected := v.Key == "UserName" || v.Key == "Notes" || v.Key == "Password" || v.Key == "otp" || v.Key == "URL"
 			if v.Value.Protected.Bool != protected {
 				return nil, nil, ErrSnapshot
 			}
@@ -200,6 +210,13 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 		switch it.Kind {
 		case "login":
 			expected := 5 + extra
+			if v, ok := fields["URL"]; ok {
+				if v.Content == "" {
+					return nil, nil, ErrSnapshot
+				}
+				it.URL = v.Content
+				expected++
+			}
 			if v, ok := fields["UserName"]; ok {
 				it.Username = v.Content
 				expected++
