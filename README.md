@@ -16,7 +16,15 @@ Go TOTP 核心已通过 RFC 6238/4226 向量，支持有限的 Base32/otpauth �
 
 密码生成核心使用系统 CSPRNG 与标准库拒绝采样，默认 24 位字母数字；策略要求至少 128 位组合熵，拒绝字符集重复、弱策略及超限。个人 CLI 已接入生成并保存/替换的事务流程，普通输出不包含生成值；桌面生成入口仍未实现。核心证据见[密码生成验收](docs/password-generation-validation.md)，产品入口见[生成保存验收](docs/personal-generation-validation.md)。
 
-独立 1PUX v3 清点预检模块在内存中检查归档边界、CRC 和严格 JSON，输出受限计数，不输出标题、路径或字段值，也不落盘解压。显式 `file.path` 可精确核对匹配/缺失、重复引用和声明大小差异；没有当前子集显式引用的文件不能称为孤儿或据此删除。另有区段和登录字段结构清点，保留重复、缺失、未知 designation 和 JSON 值形状；`type`/`fieldType` 分开计数，不猜测语义，见[登录字段清点](docs/onepux-login-fields-validation.md)。密码历史另按原顺序清点值/时间形状、精确整数相邻关系和字面重复，不排序、不去重，见[历史清点](docs/onepux-password-history-validation.md)。全部条目映射仍未验证，未开放产品预检或通用写入入口；见[清点验收](docs/onepux-preflight-validation.md)与[显式文件关联验收](docs/onepux-file-references-validation.md)。
+独立 1PUX v3 清点预检模块在内存中检查归档边界、CRC 和严格 JSON，输出受限计数，不输出标题、路径或字段值，也不落盘解压。显式 `file.path` 可精确核对匹配/缺失、重复引用和声明大小差异；没有当前子集显式引用的文件不能称为孤儿或据此删除。另有区段和登录字段结构清点，保留重复、缺失、未知 designation 和 JSON 值形状；`type`/`fieldType` 分开计数，不猜测语义，见[登录字段清点](docs/onepux-login-fields-validation.md)。密码历史另按原顺序清点值/时间形状、精确整数相邻关系和字面重复，不排序、不去重，见[历史清点](docs/onepux-password-history-validation.md)。个人 CLI 已开放认证、审计的只读预检；全部条目映射仍未验证，未开放通用写入入口；见[清点验收](docs/onepux-preflight-validation.md)与[显式文件关联验收](docs/onepux-file-references-validation.md)。
+
+## 迁移前检查 1PUX
+
+```powershell
+.\locklark.exe personal inspect-1pux --file owner.ll --source export.1pux
+```
+
+在交互终端输入个人库双因素，并输入 `SCAN` 确认。命令只读检查不超过 8 MiB 的普通归档文件；输出条目/附件/登录字段/密码历史计数及固定待核对原因，不输出源标题或字段值，也不会导入数据。检查结果先记入个人库审计，提交后才输出报告和摘要回执。源 1PUX 仍是明文，命令不负责清除原文件；报告成功不表示可无损迁移。事务、恢复和平台边界见[个人预检验收](docs/personal-onepux-inspection-validation.md)。
 
 ## 按字段引用操作
 

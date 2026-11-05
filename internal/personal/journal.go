@@ -20,6 +20,7 @@ import (
 var invalid = errors.New("invalid personal vault, unlock factors or journal")
 
 type Event struct {
+	ReportDigest string            `json:"report_digest,omitempty"`
 	Generation   *password.Profile `json:"generation,omitempty"`
 	Link         string            `json:"link,omitempty"`
 	BaseRevision string            `json:"base_revision,omitempty"`
@@ -76,7 +77,14 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 	if e.Sequence != n || e.Previous != prev || !idOK(e.Session) || e.Actor != "local-owner" || !ed25519.Verify(pub, e.proof(), e.Signature) {
 		return invalid
 	}
-	if !editAction(e.Action) && !revealAction(e.Action) && e.Action != otpDisclosureAction && e.Action != referenceRejectAction && (e.Result != "succeeded" || e.BaseRevision != "") {
+	if !editAction(e.Action) && !revealAction(e.Action) && e.Action != otpDisclosureAction && e.Action != referenceRejectAction && e.Action != inspectionAction && (e.Result != "succeeded" || e.BaseRevision != "") {
+		return invalid
+	}
+	if e.Action == inspectionAction && e.Result == "succeeded" {
+		if !digestOK(e.ReportDigest) {
+			return invalid
+		}
+	} else if e.ReportDigest != "" {
 		return invalid
 	}
 	if e.Action != "backup.prepare" && e.Action != "vault.restore" && e.Link != "" {
@@ -90,6 +98,15 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 		return invalid
 	}
 	switch e.Action {
+	case inspectionAction:
+		if n <= 1 || e.Item != "" || e.BaseRevision != "" {
+			return invalid
+		}
+		switch e.Result {
+		case "succeeded", "invalid", "unsupported", "limit", "source-error":
+		default:
+			return invalid
+		}
 	case referenceRejectAction:
 		if n <= 1 || e.Item != "" || e.BaseRevision != "" {
 			return invalid
@@ -218,9 +235,15 @@ func history(b *bolt.Bucket, i identity, s vault.Snapshot, want bool, revisions 
 func appendEvent(b *bolt.Bucket, i identity, tip auditTip, s vault.Snapshot, action, item, outcome, base string) (Event, error) {
 	return appendLinked(b, i, tip, s, action, item, outcome, base, "")
 }
-func appendLinked(b *bolt.Bucket, i identity, tip auditTip, s vault.Snapshot, action, item, outcome, base, link string, profiles ...*password.Profile) (Event, error) {
+
+type eventDetails struct {
+	generation   *password.Profile
+	reportDigest string
+}
+
+func appendLinked(b *bolt.Bucket, i identity, tip auditTip, s vault.Snapshot, action, item, outcome, base, link string, details ...eventDetails) (Event, error) {
 	var ev Event
-	if len(profiles) > 1 {
+	if len(details) > 1 {
 		return ev, invalid
 	}
 	session, e := randomID()
@@ -228,8 +251,9 @@ func appendLinked(b *bolt.Bucket, i identity, tip auditTip, s vault.Snapshot, ac
 		return ev, e
 	}
 	ev = Event{Link: link, Sequence: tip.Count + 1, UTC: time.Now().UTC().Format(time.RFC3339Nano), Session: session, Actor: "local-owner", Action: action, Item: item, BaseRevision: base, Result: outcome, Previous: tip.Last}
-	if len(profiles) == 1 {
-		ev.Generation = profiles[0]
+	if len(details) == 1 {
+		ev.Generation = details[0].generation
+		ev.ReportDigest = details[0].reportDigest
 	}
 	priv := ed25519.NewKeyFromSeed(i.Audit)
 	defer clear(priv)

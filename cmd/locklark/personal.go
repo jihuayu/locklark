@@ -19,7 +19,7 @@ import (
 	"unicode/utf8"
 )
 
-var personalUsage = errors.New("usage: locklark personal <init|add-login|list|audit|archived-audit|references> --file PATH, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password|otp, or reveal-login --file PATH --id ID --revision REV --field username|password, or generate-login --file PATH [--length N], or regenerate-password --file PATH --id ID --revision REV [--length N], or otp --file PATH --id ID --revision REV, or reveal-ref|otp-ref --file PATH --ref REF --revision REV")
+var personalUsage = errors.New("usage: locklark personal <init|add-login|list|audit|archived-audit|references> --file PATH, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password|otp, or reveal-login --file PATH --id ID --revision REV --field username|password, or generate-login --file PATH [--length N], or regenerate-password --file PATH --id ID --revision REV [--length N], or otp --file PATH --id ID --revision REV, or reveal-ref|otp-ref --file PATH --ref REF --revision REV, or inspect-1pux --file PATH --source ARCHIVE")
 
 // One terminal mode covers the entire interaction; no prompt or inter-field
 // gap is visible while echo is enabled.
@@ -93,6 +93,10 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 	var reveal personal.RevealTarget
 	length := password.DefaultPolicy().Length
 	switch action {
+	case "inspect-1pux":
+		if len(opts) != 2 || opts["--source"] == "" {
+			return personalUsage
+		}
 	case "reveal-ref", "otp-ref":
 		if len(opts) != 3 {
 			return personalUsage
@@ -238,6 +242,19 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 		}
 		defer clear(key)
 		switch action {
+		case "inspect-1pux":
+			if _, e = fmt.Fprint(os.Stderr, "将只读检查明文 1PUX 归档并记录审计；不会导入条目，报告不包含字段值。\r\n"); e != nil {
+				return e
+			}
+			confirmation, e := consoleField("输入 SCAN 确认预检")
+			defer clear(confirmation)
+			if e != nil {
+				return e
+			}
+			if string(confirmation) != "SCAN" {
+				return errors.New("1PUX inspection cancelled")
+			}
+			response, err = personal.InspectOnepux(path, string(pw), key, opts["--source"])
 		case "references":
 			response, err = personal.References(path, string(pw), key)
 		case "reveal-ref", "otp-ref":
