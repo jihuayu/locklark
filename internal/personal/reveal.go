@@ -45,6 +45,13 @@ func revealLogin(target RevealTarget, terminal io.Writer, prepare func() (result
 	if !ValidRevealTarget(target.ID, target.Revision, target.Field) || terminal == nil {
 		return DisclosureReceipt{}, errors.New("invalid disclosure target or terminal")
 	}
+	return disclosePrepared(terminal, prepare)
+}
+
+func disclosePrepared(terminal io.Writer, prepare func() (result, error)) (DisclosureReceipt, error) {
+	if terminal == nil {
+		return DisclosureReceipt{}, errors.New("invalid disclosure terminal")
+	}
 	r, err := prepare()
 	defer clear(r.value)
 	if err != nil {

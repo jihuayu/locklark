@@ -19,7 +19,7 @@ import (
 	"unicode/utf8"
 )
 
-var personalUsage = errors.New("usage: locklark personal <init|add-login|list|audit|archived-audit> --file PATH, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password|otp, or reveal-login --file PATH --id ID --revision REV --field username|password, or generate-login --file PATH [--length N], or regenerate-password --file PATH --id ID --revision REV [--length N], or otp --file PATH --id ID --revision REV")
+var personalUsage = errors.New("usage: locklark personal <init|add-login|list|audit|archived-audit|references> --file PATH, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password|otp, or reveal-login --file PATH --id ID --revision REV --field username|password, or generate-login --file PATH [--length N], or regenerate-password --file PATH --id ID --revision REV [--length N], or otp --file PATH --id ID --revision REV, or reveal-ref|otp-ref --file PATH --ref REF --revision REV")
 
 // One terminal mode covers the entire interaction; no prompt or inter-field
 // gap is visible while echo is enabled.
@@ -93,6 +93,13 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 	var reveal personal.RevealTarget
 	length := password.DefaultPolicy().Length
 	switch action {
+	case "reveal-ref", "otp-ref":
+		if len(opts) != 3 {
+			return personalUsage
+		}
+		if err := personal.ValidateReferenceInput(opts["--ref"], opts["--revision"]); err != nil {
+			return err
+		}
 	case "otp":
 		edit = personal.Edit{ID: opts["--id"], Revision: opts["--revision"], Field: "otp"}
 		if len(opts) != 3 || !personal.ValidEditTarget(edit.ID, edit.Revision, edit.Field) {
@@ -134,7 +141,7 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 		if len(opts) != 2 || opts["--out"] == "" {
 			return personalUsage
 		}
-	case "init", "add-login", "audit", "list", "archived-audit":
+	case "init", "add-login", "audit", "list", "archived-audit", "references":
 		if len(opts) != 1 {
 			return personalUsage
 		}
@@ -231,6 +238,29 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 		}
 		defer clear(key)
 		switch action {
+		case "references":
+			response, err = personal.References(path, string(pw), key)
+		case "reveal-ref", "otp-ref":
+			kind := "字段值"
+			if action == "otp-ref" {
+				kind = "TOTP 验证码（请确保本机时间准确）"
+			}
+			if _, e = fmt.Fprintf(os.Stderr, "将在本终端显示引用 %s（修订 %s）的%s；终端历史可能保留显示值。\r\n", opts["--ref"], opts["--revision"], kind); e != nil {
+				return e
+			}
+			confirmation, e := consoleField("输入 SHOW 确认按引用显示")
+			defer clear(confirmation)
+			if e != nil {
+				return e
+			}
+			if string(confirmation) != "SHOW" {
+				return errors.New("reference disclosure cancelled")
+			}
+			if action == "otp-ref" {
+				response, err = personal.RevealOTPReference(path, string(pw), key, opts["--ref"], opts["--revision"], os.Stderr)
+			} else {
+				response, err = personal.RevealReference(path, string(pw), key, opts["--ref"], opts["--revision"], os.Stderr)
+			}
 		case "otp":
 			if _, e = fmt.Fprintf(os.Stderr, "将在本终端显示条目 %s（修订 %s）的 TOTP 验证码；请确保本机时间准确，终端历史可能保留验证码。\r\n", edit.ID, edit.Revision); e != nil {
 				return e

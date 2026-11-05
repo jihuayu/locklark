@@ -175,6 +175,7 @@ func existing(path string) (*bolt.DB, error) {
 }
 
 type result struct {
+	references      ReferenceIndex
 	otp             *totp.Config
 	profile         password.Profile
 	value           []byte
@@ -185,6 +186,12 @@ type result struct {
 	revision        string
 	chains          []Chain
 	archive         []byte
+}
+
+type commandOption struct {
+	backup     string
+	generation *generationRequest
+	reference  *referenceRequest
 }
 
 func command(path, pw string, key []byte, action string, add vault.Item, edit *Edit, options ...commandOption) (result, error) {
@@ -207,6 +214,9 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		option = options[0]
 	}
 	if generatedAction(action) != (option.generation != nil) {
+		return result{}, invalid
+	}
+	if (action == referenceDisclosureAction) != (option.reference != nil) {
 		return result{}, invalid
 	}
 	if option.generation != nil {
@@ -282,7 +292,25 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		}
 		outcome := "succeeded"
 		var profile *password.Profile
+		if action == referenceDisclosureAction {
+			action, edit, e = option.reference.bind(slot.Account, items, revisions)
+			if e != nil {
+				var known bool
+				outcome, known = referenceRejection(e)
+				if !known {
+					return e
+				}
+				action, refusal = referenceRejectAction, e
+			}
+		}
 		switch action {
+		case referenceRejectAction:
+			// Persist only the fixed category, never selectors or caller versions.
+		case "reference.list":
+			out.references, e = makeReferenceIndex(slot.Account, items, revisions)
+			if e != nil {
+				return e
+			}
 		case "audit.archived":
 			out.chains = chains
 		case "backup.prepare":

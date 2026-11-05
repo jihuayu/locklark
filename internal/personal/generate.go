@@ -18,11 +18,6 @@ type generationRequest struct {
 	generate func(password.Policy) (password.Secret, error)
 }
 
-type commandOption struct {
-	backup     string
-	generation *generationRequest
-}
-
 func generatedAction(action string) bool {
 	return action == "item.generate" || action == "item.regenerate.password"
 }
