@@ -1,0 +1,52 @@
+name: 检查
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  go:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.4
+      - run: bun test ./plugins/github-pull-reader
+      - run: python -m unittest discover -s scripts -p test_personal_windows.py
+      - run: go mod verify
+      - run: go vet ./...
+      - shell: pwsh
+        run: |
+          $peerEnv = Join-Path $env:RUNNER_TEMP 'locklark-kdbx-peer'
+          python -m venv $peerEnv
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:LOCKLARK_TEST_PYKEEPASS = Join-Path $peerEnv $(if ($IsWindows) { 'Scripts/python.exe' } else { 'bin/python' })
+          & $env:LOCKLARK_TEST_PYKEEPASS -m pip install 'pykeepass==4.2.0'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:LOCKLARK_TEST_BUN = (Get-Command bun -CommandType Application | Select-Object -First 1).Source
+          go test -count=1 ./...
+      - if: runner.os == 'Linux'
+        run: |
+          go build -o "$RUNNER_TEMP/locklark" ./cmd/locklark
+          python3 scripts/mcp_acceptance.py "$RUNNER_TEMP/locklark"
+          python3 scripts/personal_acceptance.py "$RUNNER_TEMP/locklark"
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./scripts/acceptance.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $python = Join-Path $env:RUNNER_TEMP 'locklark-kdbx-peer/Scripts/python.exe'
+          & $python -m pip install 'pywinpty==3.1.2'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $binary = Join-Path $env:RUNNER_TEMP 'personal-cli.exe'
+          go build -o $binary ./cmd/locklark
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $python scripts/personal_acceptance.py $binary

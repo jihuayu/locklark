@@ -1,0 +1,15 @@
+{
+  "accounts": [{
+    "attrs": {"uuid":"synthetic-account","name":"Locklark sample"},
+    "vaults": [{
+      "attrs": {"uuid":"synthetic-vault","name":"演练","type":"P"},
+      "items": [
+        {"uuid":"login-sample","categoryUuid":"001","state":"active","overview":{"title":"同名示例","tags":["演练"]},
+         "details":{"loginFields":[{"name":"password","designation":"password","fieldType":"P","value":"FIXTURE-VALUE-NOT-A-REAL-PASSWORD"}],
+         "sections":[{"name":"ops","title":"运维","fields":[{"id":"otp-demo","title":"TOTP","value":{"totp":"otpauth://totp/Synthetic?secret=MZXW6"}}]}]}},
+        {"uuid":"document-sample","categoryUuid":"114","state":"active","overview":{"title":"同名示例"},
+         "details":{"documentAttributes":{"documentId":"doc-sample","fileName":"样本.bin","decryptedSize":4}}}
+      ]
+    }]
+  }]
+}

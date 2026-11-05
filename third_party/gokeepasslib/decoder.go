@@ -1,0 +1,202 @@
+package gokeepasslib
+
+import (
+	"bytes"
+	"compress/gzip"
+	"encoding/xml"
+	"errors"
+	"fmt"
+	"io"
+)
+
+var (
+	errInvalidHMACKey          = errors.New("Wrong password? HMAC-SHA256 of header mismatching")
+	errDatabaseIntegrityFailed = errors.New("Wrong password? Database integrity check failed")
+)
+
+// Decoder stores a reader which is expected to be in kdbx format
+type Decoder struct {
+	r io.Reader
+}
+
+// NewDecoder creates a new decoder with reader r, identical to gokeepasslib.Decoder{r}
+func NewDecoder(r io.Reader) *Decoder {
+	return &Decoder{r: r}
+}
+
+// Decode populates given database with the data of Decoder reader
+func (d *Decoder) Decode(db *Database) error {
+	// Read header
+	db.Header = new(DBHeader)
+	if err := db.Header.readFrom(d.r); err != nil {
+		return err
+	}
+
+	// Read hashes and validate the header hash (Kdbx v4)
+	// The header is validated before calculating the transformed key, so the
+	// key derivation never runs on the parameters of a corrupted header
+	if db.Header.IsKdbx4() {
+		db.Hashes = new(DBHashes)
+		err := db.Hashes.readFrom(d.r)
+		if err != nil {
+			return err
+		}
+
+		if db.Options.ValidateHashes {
+			err = db.Header.ValidateSha256(db.Hashes.Sha256)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	// Calculate transformed key to decrypt and calculate HMAC
+	transformedKey, err := db.getTransformedKey()
+	if err != nil {
+		return err
+	}
+
+	// Validate the header HMAC (Kdbx v4)
+	if db.Header.IsKdbx4() {
+		if db.Options.ValidateHashes {
+			hmacKey := buildHmacKey(db, transformedKey)
+			err = db.Header.ValidateHmacSha256(hmacKey, db.Hashes.Hmac)
+			if err != nil {
+				return errInvalidHMACKey
+			}
+		}
+	}
+
+	// Decode raw content
+	rawContent, err := io.ReadAll(d.r)
+	if err != nil {
+		return err
+	}
+
+	if err := decodeRawContent(db, rawContent, transformedKey); err != nil {
+		return err
+	}
+
+	contentReader := bytes.NewReader(db.Content.RawData)
+
+	// Read InnerHeader (Kdbx v4)
+	if db.Header.IsKdbx4() {
+		db.Content.InnerHeader = new(InnerHeader)
+		err = db.Content.InnerHeader.readFrom(contentReader)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Decode xml
+	xmlDecoder := xml.NewDecoder(contentReader)
+	return xmlDecoder.Decode(db.Content)
+}
+
+// readBytes reads exactly length bytes from r.
+// Unlike allocating length bytes upfront, the result only grows with the data
+// actually read, so a damaged length cannot cause a huge allocation
+func readBytes(r io.Reader, length int64) ([]byte, error) {
+	if length < 0 {
+		return nil, fmt.Errorf("%w: negative length %d", ErrCorruptedDatabase, length)
+	}
+
+	data, err := io.ReadAll(io.LimitReader(r, length))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) != length {
+		return nil, io.ErrUnexpectedEOF
+	}
+	return data, nil
+}
+
+func decodeRawContent(db *Database, content []byte, transformedKey []byte) error {
+	var err error
+	// Initialize content
+	db.Content = new(DBContent)
+
+	if db.Header.IsKdbx4() {
+		// Decompose content blocks
+		// In Kdbx v4 you must parse blocks before decrypt
+		reader := bytes.NewReader(content)
+		content, err = decomposeContentBlocks4(reader, db.Header.FileHeaders.MasterSeed, transformedKey)
+		if err != nil {
+			return err
+		}
+	} else {
+		// In Kdbx v3.1 you must decrypt before parse blocks
+		reader := bytes.NewReader(content)
+		content, err = io.ReadAll(reader)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Decrypt content
+	encrypter, err := db.GetEncrypterManager(transformedKey)
+	if err != nil {
+		return err
+	}
+
+	// Block ciphers in CBC mode panic on an IV which is not a single block
+	// and can only decrypt whole blocks, which a truncated file lacks
+	blockSize := cipherBlockSize(db.Header.FileHeaders.CipherID)
+	if blockSize > 0 && len(db.Header.FileHeaders.EncryptionIV) != blockSize {
+		return fmt.Errorf(
+			"%w: encryption IV of %d bytes does not match the cipher block size",
+			ErrCorruptedDatabase,
+			len(db.Header.FileHeaders.EncryptionIV),
+		)
+	}
+	if blockSize > 0 && len(content)%blockSize != 0 {
+		return fmt.Errorf(
+			"%w: encrypted content of %d bytes is no multiple of the cipher block size",
+			ErrCorruptedDatabase,
+			len(content),
+		)
+	}
+	decryptedContent := encrypter.Decrypt(content)
+
+	// Check for StreamStartBytes (Kdbx v3.1)
+	if !db.Header.IsKdbx4() {
+		startBytes := db.Header.FileHeaders.StreamStartBytes
+		if !bytes.HasPrefix(decryptedContent, startBytes) {
+			return errDatabaseIntegrityFailed
+		}
+
+		decryptedContent = decryptedContent[len(startBytes):]
+	}
+
+	// Decompose content blocks and update reader
+	// Kdbx v3.1 content must be read after decryption
+	if !db.Header.IsKdbx4() {
+		reader := bytes.NewReader(decryptedContent)
+		decryptedContent, err = decomposeContentBlocks31(reader)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Decompress if the header compression flag is 1 (gzip)
+	if db.Header.FileHeaders.CompressionFlags == GzipCompressionFlag {
+		reader := bytes.NewReader(decryptedContent)
+		r, err := gzip.NewReader(reader)
+		if err != nil {
+			return err
+		}
+		defer r.Close()
+
+		// KeePass writes a single gzip stream. The content of a block cipher
+		// is followed by its padding, which must not be read as another stream
+		r.Multistream(false)
+
+		decryptedContent, err = io.ReadAll(r)
+		if err != nil {
+			return err
+		}
+	}
+
+	db.Content.RawData = decryptedContent
+	return nil
+}
