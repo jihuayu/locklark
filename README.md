@@ -324,3 +324,5 @@ go test -count=1 ./internal/vault -run 'TestKDBXIndependentPeer|TestIndependentN
 升级验收可以用 `python scripts/native_upgrade.py <旧版可执行文件> <新版可执行文件>` 复跑。旧版基准为 `c620f50`。脚本临时生成两套合成金库，比较第 1、3 代的迁出字节，检查被撤销设备与旧读取器被拒。
 
 接下来的 M0：将逐字段编辑和迁出对账扩展到更多条目类型、成员/多设备换代与故障恢复、MyGo 常驻桌面原型。Next.js 团队 Web、iOS/Android、受隔离的 Bun MCP Gateway、AI 否决，以及独立部署的 invoke / deliver 两种 server token 均已在[设计稿](docs/design.md)中界定，尚未交付。
+
+个人 CLI 支持 `archive-login` / `unarchive-login`（`--file`、`--id`、`--revision`，终端 SAVE 确认）。`list --state active|archived|all` 默认只列 active；归档条目仍可显式读取、取消归档及备份恢复。归档不会撤销字段权限，详见 [归档验收](docs/personal-archive-validation.md)。

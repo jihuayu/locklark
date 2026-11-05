@@ -33,6 +33,7 @@ type identity struct {
 func (i *identity) clear() { clear(i.Signing); clear(i.Audit); clear(i.AuditEncryption) }
 
 type Row struct {
+	State    string `json:"state"`
 	ID       string `json:"id"`
 	Title    string `json:"title"`
 	Revision string `json:"revision"`
@@ -361,7 +362,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			if option.backup == "" {
 				return invalid
 			}
-		case "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.regenerate.password", otpDisclosureAction:
+		case "item.archive", "item.unarchive", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.regenerate.password", otpDisclosureAction:
 			if edit == nil {
 				return invalid
 			}
@@ -377,6 +378,22 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 					if items[i].ID == edit.ID {
 						if items[i].Kind != "login" {
 							return invalid
+						}
+						if lifecycleAction(action) {
+							desired := ""
+							if action == "item.archive" {
+								desired = "archived"
+							}
+							if items[i].State == desired {
+								if desired == "archived" {
+									outcome, refusal = "already-archived", ErrAlreadyArchived
+								} else {
+									outcome, refusal = "already-active", ErrAlreadyActive
+								}
+							} else {
+								items[i].State = desired
+							}
+							break
 						}
 						if action == otpDisclosureAction {
 							if items[i].OTP == "" {
@@ -445,10 +462,17 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			}
 			items = append(items, add)
 			out.id = add.ID
-		case "item.list":
+		case "item.list", "item.list.archived", "item.list.all":
 			out.rows = make([]Row, 0, len(items))
 			for _, it := range items {
-				out.rows = append(out.rows, Row{ID: it.ID, Title: it.Title, Revision: revisions[it.ID]})
+				if action == "item.list" && it.State != "" || action == "item.list.archived" && it.State != "archived" {
+					continue
+				}
+				state := "active"
+				if it.State == "archived" {
+					state = "archived"
+				}
+				out.rows = append(out.rows, Row{ID: it.ID, Title: it.Title, Revision: revisions[it.ID], State: state})
 			}
 		case "audit.list":
 		default:

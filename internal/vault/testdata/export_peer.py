@@ -15,6 +15,7 @@ by_id = {e.get_custom_property("Locklark.ID"): e for e in db.entries}
 for item in expected:
     e = by_id[item["ID"]]
     assert e.title == item["Title"] and e.get_custom_property("Locklark.Kind") == item["Kind"]
+    assert (e.get_custom_property("Locklark.State") or "") == item.get("State", "")
     if item["Kind"] == "login":
         assert (e.username or "") == item["Username"] and (e.password or "") == item["Password"]
         assert (e.otp or "") == item["OTP"]
