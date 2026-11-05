@@ -1,5 +1,7 @@
 # Locklark 开发进度
 
+第六批个人 GitHub 实时查询 PR #19 已经 Luna/max 与 Ubuntu/Windows CI 合入 main `8659bb9`（run 41994363160，head `0fcf57d`）。继续第六条产品线的离线签名插件目录：独立公钥配置、包摘要确认、安装/升级/永久撤销、checkpoint 与原子事件，见[签名插件目录验收](signed-plugin-catalog-validation.md)。这批只管理静态签名数据，第三方执行仍关闭，操作系统沙箱和管理 UI 尚未完成。
+
 七条推进第五批 PR #18 已经 Luna/max 与 Ubuntu/Windows CI 合入 main `c8c38e4`（run 41991910945，head `33f56f0`）。第六批接个人 CLI 人工确认的真实 GitHub HTTPS 适配器入口，见[实时查询验收](personal-live-pull-validation.md)。真实网络代码已接入，测试仍区分个人事务/受控 TLS/终端拒绝；真实账号成功调用、远程审批与机器授权未完成，不能由本入口代替。
 
 七条推进第四批 PR #17 已经 Luna/max、全量 Go/竞态与 Ubuntu/Windows CI 合入 main `a4adaac`（run 41990092318，head `5450615`）。第五批实施团队 writer 数据写权限：独立策略 Scope、强制设备证明、事务内前态授权、历史重读复核和精确父 CAS；见[写权限验收](team-writer-acl-validation.md)。这是本地目录 API，完整团队产品和其他七条范围仍未完成。

@@ -14,6 +14,6 @@
 
 第一批先打通 `login-v1` 导入：单账户/单库、明确 designation 的用户名/密码、单 HTTPS URL、活动/归档状态；加密保留原始来源记录。不能表达的数据整批拒绝。此批不关闭完整迁移，后续扩展原生结构和映射。详细命令与证据见 [登录导入验收](personal-import-validation.md)。
 
-交付证据：第一批 [PR #14](https://github.com/jihuayu/locklark/pull/14) 基本登录导入合入 `e925eec`；第二批 [PR #15](https://github.com/jihuayu/locklark/pull/15) 本地密码体检合入 `a078a75`；第三批 [PR #16](https://github.com/jihuayu/locklark/pull/16) 单字段 JSON 注入合入 `19f6e5a`；第四批 [PR #17](https://github.com/jihuayu/locklark/pull/17) 设备双钥入网证明合入 `a4adaac`；第五批 [PR #18](https://github.com/jihuayu/locklark/pull/18) 团队写权限合入 `c8c38e4`。五批均经 Luna/max 与双平台 CI。第六批接[个人 GitHub 实时查询](personal-live-pull-validation.md)。上述七条的完整产品范围仍未全部完成，尤其浏览器/移动应用、远程服务和第三方插件隔离不能由这些基础模块代替。
+交付证据：第一批 [PR #14](https://github.com/jihuayu/locklark/pull/14) 基本登录导入合入 `e925eec`；第二批 [PR #15](https://github.com/jihuayu/locklark/pull/15) 本地密码体检合入 `a078a75`；第三批 [PR #16](https://github.com/jihuayu/locklark/pull/16) 单字段 JSON 注入合入 `19f6e5a`；第四批 [PR #17](https://github.com/jihuayu/locklark/pull/17) 设备双钥入网证明合入 `a4adaac`；第五批 [PR #18](https://github.com/jihuayu/locklark/pull/18) 团队写权限合入 `c8c38e4`。第六批 [PR #19](https://github.com/jihuayu/locklark/pull/19) 个人 GitHub 实时查询合入 `8659bb9`。六批均经 Luna/max 与双平台 CI。随后接[离线签名插件目录](signed-plugin-catalog-validation.md)，第三方执行继续关闭。上述七条的完整产品范围仍未全部完成，尤其浏览器/移动应用、远程服务和第三方插件隔离不能由这些基础模块代替。
 
 本环境目前为 Linux 云端，未配置外部服务身份或发布凭据。Windows 可经 CI 原生运行；系统生物识别、移动真机、真实第三方账号授权、签名发布和真实 1Password 对照必须保留独立验收记录，不能由 mock 或交叉编译替代。

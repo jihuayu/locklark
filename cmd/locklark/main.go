@@ -14,6 +14,13 @@ import (
 
 const usage = `Locklark · personal CLI, manual GitHub query and synthetic gateway preview
 
+  plugin init --file NEW_DB
+  plugin inspect --package FILE --id ID --publisher HEX_KEY
+  plugin install --file DB --parent CHECKPOINT --pins TRUSTED_JSON --package FILE --id ID --publisher HEX_KEY --digest PACKAGE_DIGEST
+  plugin list|audit --file DB --anchor CHECKPOINT --pins TRUSTED_JSON
+  plugin revoke --file DB --parent CHECKPOINT --pins TRUSTED_JSON --id ID
+  Third-party plugin execution is disabled.
+
   personal edit-login --file PATH --id ID --revision REV --field title|username|password|otp|url
   personal reveal-login --file PATH --id ID --revision REV --field username|password
   personal generate-login --file PATH [--length N]
@@ -74,6 +81,8 @@ func run(args []string, out, errOut io.Writer) error {
 	switch command {
 	case "personal":
 		return runPersonal(args[1:], out)
+	case "plugin":
+		return runPlugin(args[1:], out)
 	case "mcp-stdio", "bridge-profile", "status-answer", "status-serve":
 		return runBridge(args, out, errOut)
 	case "pull-enroll", "pull-request":

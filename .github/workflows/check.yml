@@ -51,6 +51,7 @@ jobs:
           "$RUNNER_TEMP/locklark-kdbx-peer/bin/python" scripts/trash_acceptance.py "$RUNNER_TEMP/locklark"
           "$RUNNER_TEMP/locklark-kdbx-peer/bin/python" scripts/import_acceptance.py "$RUNNER_TEMP/locklark"
           "$RUNNER_TEMP/locklark-kdbx-peer/bin/python" scripts/export_acceptance.py "$RUNNER_TEMP/locklark"
+          "$RUNNER_TEMP/locklark-kdbx-peer/bin/python" scripts/plugin_acceptance.py "$RUNNER_TEMP/locklark"
       - if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -89,3 +90,5 @@ jobs:
           & $python scripts/import_acceptance.py $binary
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $python scripts/export_acceptance.py $binary
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $python scripts/plugin_acceptance.py $binary
