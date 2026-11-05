@@ -337,17 +337,17 @@ go test -count=1 ./internal/vault -run 'TestKDBXIndependentPeer|TestIndependentN
 
 升级验收可以用 `python scripts/native_upgrade.py <旧版可执行文件> <新版可执行文件>` 复跑。旧版基准为 `c620f50`。脚本临时生成两套合成金库，比较第 1、3 代的迁出字节，检查被撤销设备与旧读取器被拒。
 
-接下来的 M0：将逐字段编辑和迁出对账扩展到更多条目类型、成员/多设备换代与故障恢复、MyGo 常驻桌面原型。Next.js 团队 Web、iOS/Android、受隔离的 Bun MCP Gateway、AI 否决，以及独立部署的 invoke / deliver 两种 server token 均已在[设计稿](docs/design.md)中界定，尚未交付。
+当前开发版已提供 MyGo 原生个人金库和 Next.js 本机只读团队管理。更多条目类型的迁移对账、完整团队邀请/同步、iOS/Android、受隔离的 Bun MCP Gateway、AI 否决，以及独立部署的 invoke / deliver 两种 server token 继续按[设计稿](docs/design.md)推进。
 
 个人 CLI 支持 `archive-login` / `unarchive-login`（`--file`、`--id`、`--revision`，终端 SAVE 确认）。`list --state active|archived|all` 默认只列 active；归档条目仍可显式读取、取消归档及备份恢复。归档不会撤销字段权限，详见 [归档验收](docs/personal-archive-validation.md)。
 
-用 `edit-login --field url` 保存一个 HTTPS 网站，用 `match-logins --file PATH --origin HTTPS_ORIGIN --frame-origin HTTPS_ORIGIN` 查找同源 active 登录候选（仅元数据）。当前只接受保守 ASCII URL / DNS HTTPS profile，不是已接通的浏览器自动填充；详见 [来源匹配验收与向量](docs/login-origin-matching-validation.md)。
+用 `edit-login --field url` 保存一个 HTTPS 网站，用 `match-logins --file PATH --origin HTTPS_ORIGIN --frame-origin HTTPS_ORIGIN` 查找同源 active 登录候选（仅元数据）。当前只接受保守 ASCII URL / DNS HTTPS profile。CLI 接口本身不证明浏览器来源；真实扩展通过下述原生确认流程填充，详见 [来源匹配验收与向量](docs/login-origin-matching-validation.md)。
 
-团队方向已有 `internal/directory` 持久化核心：固定 owner/排序端/发布者信任根、签名 roster、精确父版本提交、撤销身份墓碑、检查点核验和整库冻结。真实 age/KDBX 测试覆盖撤销设备无法解开新代。当前为 Go API，尚无团队 UI/网络同步；[协议、验收与限制](docs/team-directory-validation.md)。
+团队方向已有 `internal/directory` 持久化核心：固定 owner/排序端/发布者信任根、签名 roster、精确父版本提交、撤销身份墓碑、检查点核验和整库冻结。真实 age/KDBX 测试覆盖撤销设备无法解开新代。目录变更当前为 Go API，已有下述只读管理 UI，尚无完整团队变更界面/网络同步；[协议、验收与限制](docs/team-directory-validation.md)。
 
 新目录可用 `NewConfigWithPossession` 启用 scope 固定的强制设备双钥证明：owner 签名的 age 随机挑战、设备 Ed25519 响应、精确成员/设备/parent 绑定，并在持久提交和历史重读时强制检查新增设备证明。旧配置不能静默降级新目录；不证明物理设备唯一性，不替代邀请 UI、权限执行或同步。详见[设备证明验收](docs/team-device-possession-validation.md)。
 
-新目录另可用 `NewConfigWithWriterACL` 同时强制入网证明与数据写权限：`BuildUpdate` 允许当前 writer 设备发布新密文，reader 不可发布，成员/角色/冻结仍只由 owner 授权。事务提交和历史重读都依据之前的可信状态执行权限检查；`Read` 返回验证后的 `SnapshotSigner` 供解密使用。仍是本地 Go API，无网络同步或产品界面，见[团队写权限验收](docs/team-writer-acl-validation.md)。
+新目录另可用 `NewConfigWithWriterACL` 同时强制入网证明与数据写权限：`BuildUpdate` 允许当前 writer 设备发布新密文，reader 不可发布，成员/角色/冻结仍只由 owner 授权。事务提交和历史重读都依据之前的可信状态执行权限检查；`Read` 返回验证后的 `SnapshotSigner` 供解密使用。写入仍是本地 Go API，只读管理界面不授予写入权限，网络同步尚未交付，见[团队写权限验收](docs/team-writer-acl-validation.md)。
 
 个人 CLI 新增 `trash-login` / `restore-login`（`--file`、`--id`、`--revision`，SAVE 确认），以及 `list --state trashed`。回收站条目需先恢复才能读取或编辑，恢复时保留原活动/归档状态。备份和加密迁出仍包含回收站；不自动清空或永久擦除。详见 [回收站验收](docs/personal-trash-validation.md)。
 
@@ -357,6 +357,16 @@ go test -count=1 ./internal/vault -run 'TestKDBXIndependentPeer|TestIndependentN
 使用 Go 1.27.3 运行 `go run ./cmd/locklark-desktop`。界面由 MyGo 原生 UI 渲染，支持创建/解锁个人金库、标题搜索、逐字段显示/复制、编辑、归档/回收站、审计、体检和现有基本登录导入/加密导出。首次使用主密码与 Secret Key；解锁后在安全设置主动启用系统快捷解锁。Windows 使用 Passport KSP 的 Hello 私钥操作；macOS 构建需开启 CGO，使用本设备钥匙串及用户验证；Linux 使用 Secret Service。系统服务不可用时回到完整解锁，没有明文文件替代存储。
 
 系统快捷解锁默认 24 小时后要求完整解锁；这是本地系统时间策略，不能抵抗系统时钟回拨。开启快捷解锁会将金库身份材料交给对应 OS 的保护机制；不保存主密码或 Secret Key。Linux 系统钥匙串可能不逐次弹验证，且同一系统用户的其他程序可能有读取权限。屏幕锁定/睡眠通知能否到达取决于平台会话服务。Windows Hello/TPM、macOS Touch ID 的设备行为尚需真机验收，当前不能作为生产替换承诺。详见 [桌面验收](docs/desktop-validation.md)。
+
+### 浏览器登录（开发版）
+
+使用流程参考 1Password：在桌面金库保存登录及对应 HTTPS 网站，安装扩展和原生宿主后，从网站的扩展工具栏入口连接。Chromium 可用 `Ctrl+Shift+Y`（macOS 为 `Command+Shift+Y`）。
+
+1. 在原生窗口选择金库，使用主密码与 Secret Key 或已启用的系统快捷解锁，然后确认连接扩展。
+2. 在扩展弹窗读取当前网站的登录候选并选择条目。
+3. 在原生窗口核对精确网站、条目和版本，批准本次填充；扩展填入用户名和密码，由你自行提交表单。
+
+此宿主使用独立原生会话。页面跳转、锁库或断线会使旧请求失效；重新连接需要再次确认。构建、Chrome/Edge/Firefox 注册路径及平台限制见 [扩展安装与使用](browser-extension/README.md)，真实链路和负测见 [浏览器验收](docs/browser-native-validation.md)。保存新登录、更新密码、TOTP 和 Passkey 仍在后续范围中。
 
 ### Next.js 团队管理（本机开发版）
 

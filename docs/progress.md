@@ -1,5 +1,7 @@
 # Locklark 开发进度
 
+Next.js 本机只读管理 PR #25 已经 Luna/max 复审和精确 head `f67f34e` 四平台/浏览器 CI（run 42060380427）通过，squash 到 main `dcc52d0`。后续浏览器切片已同步此基线；按用户要求由主代理负责架构/验收，Sol xhigh 实现，Luna max 审阅。真实 Chromium 扩展 → MyGo 解锁/配对/批准 → HTTPS 登录填充及拒绝/导航/锁库流程已实跑；独立审阅修复与最终 CI 继续推进，见 [浏览器验收](browser-native-validation.md)。真实 Firefox 157 完整填充链路也已由主代理独立复跑；首轮 CI 发现的 Windows 测试路径与中文字体坐标问题已定位并修复，新增无障碍恢复与稳定的真实控件验收继续复审。保存/更新、Safari/移动、完整迁移和团队同步仍未完成。
+
 原生 MyGo 桌面与系统快捷解锁 [PR #23](https://github.com/jihuayu/locklark/pull/23) 经 Luna/max 最终复审及 Ubuntu/Windows/macOS CI（run 42044135997，head `bb59657`）合入 main `de7ba5a`。系统 Hello/Touch ID/Secret Service 真机行为继续单列。当前接 Next.js 本机只读团队管理和固定 Go 元数据接口，见 [Web 验收](nextjs-management-validation.md)；完整迁移、扩展、团队/同步和手机范围仍持续推进。
 
 个人开发者环境注入 [PR #22](https://github.com/jihuayu/locklark/pull/22) 已合入 `5b0ce38`，精确 head `40aba12` 的 Ubuntu/Windows CI（run 42009389353）通过。

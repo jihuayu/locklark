@@ -1,0 +1,82 @@
+// Creates disposable synthetic data for external browser/native UI acceptance.
+// This is test tooling, not a product unlock or approval bypass.
+package main
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"github.com/jihuayu/locklark/internal/origin"
+	"github.com/jihuayu/locklark/internal/personal"
+)
+
+type fixture struct {
+	Path, Password, Secret, Username, Value, Title, Origin string
+}
+
+func run() error {
+	out := flag.String("out", "", "new private directory containing synthetic data only")
+	site := flag.String("origin", "", "controlled HTTPS test origin")
+	flag.Parse()
+	canonical, err := origin.Parse(*site)
+	if err != nil || *out == "" || !filepath.IsAbs(*out) {
+		return fmt.Errorf("absolute output and supported HTTPS origin required")
+	}
+	if err = os.Mkdir(*out, 0700); err != nil {
+		return err
+	}
+	key, err := personal.NewSecret()
+	if err != nil {
+		return err
+	}
+	defer clear(key)
+	var entropy [24]byte
+	if _, err = rand.Read(entropy[:]); err != nil {
+		return err
+	}
+	f := fixture{
+		Path:     filepath.Join(*out, "synthetic.ll"),
+		Password: "Acceptance-" + hex.EncodeToString(entropy[:8]),
+		Secret:   personal.FormatSecret(key),
+		Username: "synthetic-browser-user",
+		Value:    "Synthetic-" + hex.EncodeToString(entropy[8:]),
+		Title:    "Browser acceptance login", Origin: canonical,
+	}
+	clear(entropy[:])
+	if err = personal.Create(f.Path, f.Password, key); err != nil {
+		return err
+	}
+	id, err := personal.AddLogin(f.Path, f.Password, key, f.Title, f.Username, f.Value)
+	if err != nil {
+		return err
+	}
+	rows, err := personal.List(f.Path, f.Password, key)
+	if err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if row.ID == id {
+			if _, err = personal.EditLogin(f.Path, f.Password, key, personal.Edit{ID: id, Revision: row.Revision, Field: "url", Value: canonical + "/login"}); err != nil {
+				return err
+			}
+		}
+	}
+	data, err := json.Marshal(f)
+	if err != nil {
+		return err
+	}
+	defer clear(data)
+	return os.WriteFile(filepath.Join(*out, "fixture.json"), data, 0600)
+}
+
+func main() {
+	if run() != nil {
+		fmt.Fprintln(os.Stderr, "Synthetic browser fixture could not be created")
+		os.Exit(1)
+	}
+}

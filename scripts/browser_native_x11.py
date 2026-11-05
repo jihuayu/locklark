@@ -1,0 +1,392 @@
+"""External XTest driver for synthetic native-window acceptance; no app hooks.
+
+Reads one JSON request from stdin. Values are never echoed. Requires DISPLAY,
+libX11 and libXtst. Native controls use their real AT-SPI labels, state and
+geometry. Legacy coordinates are relative to the requested real X window.
+"""
+import ctypes as C
+import json
+import os
+import sys
+import time
+
+
+CONTROL_LABELS = (
+    "金库文件", "主密码", "Secret Key", "解锁", "确认连接此扩展",
+    "拒绝连接", "批准本次填充", "拒绝本次填充", "立即锁定",
+)
+
+
+class NativeControls:
+    """Read public OS accessibility metadata only; never read field values."""
+
+    def __init__(self, title, pid=None):
+        self.title = title
+        self.pid = pid
+        self.at = C.CDLL("libatspi.so.0")
+        self.gl = C.CDLL("libglib-2.0.so.0")
+        self.go = C.CDLL("libgobject-2.0.so.0")
+        pointer, error = C.c_void_p, C.POINTER(C.c_void_p)
+
+        class Rect(C.Structure):
+            _fields_ = [(field, C.c_int) for field in ("x", "y", "width", "height")]
+
+        self.at.atspi_init.restype = C.c_int
+        self.at.atspi_set_timeout.argtypes = [C.c_int, C.c_int]
+        self.at.atspi_get_desktop.argtypes = [C.c_int]
+        self.at.atspi_get_desktop.restype = pointer
+        self.at.atspi_accessible_get_child_count.argtypes = [pointer, error]
+        self.at.atspi_accessible_get_child_count.restype = C.c_int
+        self.at.atspi_accessible_get_child_at_index.argtypes = [pointer, C.c_int, error]
+        self.at.atspi_accessible_get_child_at_index.restype = pointer
+        self.at.atspi_accessible_get_process_id.argtypes = [pointer, error]
+        self.at.atspi_accessible_get_process_id.restype = C.c_uint
+        for method in ("get_name", "get_role_name"):
+            function = getattr(self.at, "atspi_accessible_" + method)
+            function.argtypes, function.restype = [pointer, error], pointer
+        self.at.atspi_accessible_get_state_set.argtypes = [pointer]
+        self.at.atspi_accessible_get_state_set.restype = pointer
+        self.at.atspi_state_set_contains.argtypes = [pointer, C.c_int]
+        self.at.atspi_state_set_contains.restype = C.c_int
+        self.at.atspi_accessible_get_component_iface.argtypes = [pointer]
+        self.at.atspi_accessible_get_component_iface.restype = pointer
+        self.at.atspi_component_get_extents.argtypes = [pointer, C.c_int, error]
+        self.at.atspi_component_get_extents.restype = C.POINTER(Rect)
+        self.at.atspi_rect_free.argtypes = [C.POINTER(Rect)]
+        self.gl.g_free.argtypes = [pointer]
+        self.gl.g_error_free.argtypes = [pointer]
+        self.gl.g_main_context_iteration.argtypes = [pointer, C.c_int]
+        self.gl.g_main_context_iteration.restype = C.c_int
+        self.go.g_object_ref.argtypes = [pointer]
+        self.go.g_object_ref.restype = pointer
+        self.go.g_object_unref.argtypes = [pointer]
+        if self.at.atspi_init() != 0:
+            raise RuntimeError("Native accessibility unavailable")
+        self.at.atspi_set_timeout(300, 1000)
+        self.desktop = self.at.atspi_get_desktop(0)
+
+    def checked(self, function, *args):
+        error = C.c_void_p()
+        result = function(*args, C.byref(error))
+        if error:
+            self.gl.g_error_free(error)
+            raise RuntimeError("Native accessibility query failed")
+        return result
+
+    def string(self, function, node):
+        value = self.checked(function, node)
+        if not value:
+            return ""
+        try:
+            return C.string_at(value).decode("utf-8", errors="replace")
+        finally:
+            self.gl.g_free(value)
+
+    def walk(self, node, visit, depth=0, budget=None):
+        budget = [512] if budget is None else budget
+        if depth > 12 or budget[0] <= 0:
+            raise RuntimeError("Native accessibility tree limit")
+        budget[0] -= 1
+        if visit(node, depth) is False:
+            return
+        count = self.checked(self.at.atspi_accessible_get_child_count, node)
+        if count < 0 or count > 256:
+            raise RuntimeError("Native accessibility child limit")
+        for index in range(count):
+            child = self.checked(self.at.atspi_accessible_get_child_at_index, node, index)
+            if not child:
+                continue
+            try:
+                self.walk(child, visit, depth + 1, budget)
+            finally:
+                self.go.g_object_unref(child)
+
+    def snapshot(self):
+        for _ in range(100):
+            if not self.gl.g_main_context_iteration(None, 0):
+                break
+        windows = []
+
+        def window(node, depth):
+            if self.string(self.at.atspi_accessible_get_name, node) == self.title and (
+                self.pid is None or self.checked(self.at.atspi_accessible_get_process_id, node) == self.pid
+            ):
+                windows.append(self.go.g_object_ref(node))
+                return False
+            return depth < 2
+
+        self.walk(self.desktop, window)
+        if not windows:
+            return {}
+        if len(windows) != 1:
+            for node in windows:
+                self.go.g_object_unref(node)
+            raise RuntimeError("Native accessibility window must be unique")
+        controls = {}
+
+        def control(node, _depth):
+            label = self.string(self.at.atspi_accessible_get_name, node)
+            if label not in CONTROL_LABELS:
+                return True
+            role = self.string(self.at.atspi_accessible_get_role_name, node)
+            if role not in ("push button", "button", "text", "password text", "entry"):
+                return True
+            state = self.at.atspi_accessible_get_state_set(node)
+            if not state:
+                return True
+            try:
+                # Public AT-SPI state enum: ENABLED=8, SENSITIVE=24,
+                # SHOWING=25, VISIBLE=30. No editable-text/value API is used.
+                enabled = all(self.at.atspi_state_set_contains(state, n) for n in (8, 24))
+                showing = all(self.at.atspi_state_set_contains(state, n) for n in (25, 30))
+            finally:
+                self.go.g_object_unref(state)
+            component = self.at.atspi_accessible_get_component_iface(node)
+            if not component:
+                return True
+            try:
+                rect = self.checked(self.at.atspi_component_get_extents, component, 0)
+                if not rect:
+                    return True
+                try:
+                    bounds = {k: getattr(rect.contents, k) for k in ("x", "y", "width", "height")}
+                finally:
+                    self.at.atspi_rect_free(rect)
+            finally:
+                self.go.g_object_unref(component)
+            controls.setdefault(label, []).append({"enabled": bool(enabled), "showing": bool(showing), **bounds})
+            return True
+
+        try:
+            self.walk(windows[0], control)
+        finally:
+            self.go.g_object_unref(windows[0])
+        return controls
+
+    def ready(self, label):
+        if label not in CONTROL_LABELS:
+            raise RuntimeError("Native acceptance label is not allowlisted")
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            controls = self.snapshot().get(label, [])
+            if len(controls) > 1:
+                raise RuntimeError("Native acceptance control must be unique")
+            if controls:
+                control = controls[0]
+                if control["enabled"] and control["showing"] and control["width"] > 0 and control["height"] > 0:
+                    return control
+            time.sleep(0.05)
+        raise RuntimeError("Native acceptance control not ready")
+
+
+def main():
+    request = json.load(sys.stdin)
+    x = C.CDLL("libX11.so.6")
+    xt = C.CDLL("libXtst.so.6")
+    pointer, window = C.c_void_p, C.c_ulong
+
+    class XError(C.Structure):
+        _fields_ = [
+            ("type", C.c_int), ("display", pointer),
+            ("resource", C.c_ulong), ("serial", C.c_ulong),
+            ("code", C.c_ubyte), ("request", C.c_ubyte), ("minor", C.c_ubyte),
+        ]
+
+    errors = []
+    error_handler_type = C.CFUNCTYPE(C.c_int, pointer, C.POINTER(XError))
+
+    @error_handler_type
+    def error_handler(_display, event):
+        errors.append((event.contents.code, event.contents.resource))
+        return 0
+
+    x.XSetErrorHandler.argtypes = [error_handler_type]
+    x.XSetErrorHandler(error_handler)
+    x.XSync.argtypes = [pointer, C.c_int]
+    x.XOpenDisplay.argtypes = [C.c_char_p]
+    x.XOpenDisplay.restype = pointer
+    x.XDefaultRootWindow.argtypes = [pointer]
+    x.XDefaultRootWindow.restype = window
+    x.XQueryTree.argtypes = [pointer, window, C.POINTER(window), C.POINTER(window), C.POINTER(C.POINTER(window)), C.POINTER(C.c_uint)]
+    x.XFetchName.argtypes = [pointer, window, C.POINTER(C.c_char_p)]
+    x.XInternAtom.argtypes = [pointer, C.c_char_p, C.c_int]
+    x.XInternAtom.restype = C.c_ulong
+    x.XGetWindowProperty.argtypes = [pointer, window, C.c_ulong, C.c_long, C.c_long, C.c_int, C.c_ulong, C.POINTER(C.c_ulong), C.POINTER(C.c_int), C.POINTER(C.c_ulong), C.POINTER(C.c_ulong), C.POINTER(pointer)]
+    x.XFree.argtypes = [pointer]
+    x.XRaiseWindow.argtypes = [pointer, window]
+    x.XSetInputFocus.argtypes = [pointer, window, C.c_int, C.c_ulong]
+    x.XTranslateCoordinates.argtypes = [pointer, window, window, C.c_int, C.c_int, C.POINTER(C.c_int), C.POINTER(C.c_int), C.POINTER(window)]
+    x.XStringToKeysym.argtypes = [C.c_char_p]
+    x.XStringToKeysym.restype = C.c_ulong
+    x.XKeysymToKeycode.argtypes = [pointer, C.c_ulong]
+    x.XKeysymToKeycode.restype = C.c_uint
+    x.XKeycodeToKeysym.argtypes = [pointer, C.c_uint, C.c_int]
+    x.XKeycodeToKeysym.restype = C.c_ulong
+    x.XFlush.argtypes = [pointer]
+    x.XCloseDisplay.argtypes = [pointer]
+    xt.XTestFakeKeyEvent.argtypes = [pointer, C.c_uint, C.c_int, C.c_ulong]
+    xt.XTestFakeMotionEvent.argtypes = [pointer, C.c_int, C.c_int, C.c_int, C.c_ulong]
+    xt.XTestFakeButtonEvent.argtypes = [pointer, C.c_uint, C.c_int, C.c_ulong]
+    display = x.XOpenDisplay(os.environ.get("DISPLAY", "").encode())
+    if not display:
+        raise RuntimeError("X display unavailable")
+    root = x.XDefaultRootWindow(display)
+    name_atom = x.XInternAtom(display, b"_NET_WM_NAME", 0)
+    utf8_atom = x.XInternAtom(display, b"UTF8_STRING", 0)
+    pid_atom = x.XInternAtom(display, b"_NET_WM_PID", 0)
+
+    def window_pid(candidate):
+        actual, count, remaining = C.c_ulong(), C.c_ulong(), C.c_ulong()
+        fmt, data = C.c_int(), pointer()
+        status = x.XGetWindowProperty(display,candidate,pid_atom,0,1,0,6,C.byref(actual),C.byref(fmt),C.byref(count),C.byref(remaining),C.byref(data))
+        if status != 0 or not data:
+            return None
+        try:
+            if actual.value == 6 and fmt.value == 32 and count.value == 1:
+                return C.cast(data,C.POINTER(C.c_ulong))[0]
+        finally:
+            x.XFree(data)
+        return None
+
+    def expected_process(candidate):
+        if not request.get("executable"):
+            return True
+        pid=window_pid(candidate)
+        try:
+            return pid is not None and os.readlink("/proc/"+str(pid)+"/exe") == os.path.realpath(request["executable"])
+        except OSError:
+            return False
+
+    def window_title(candidate):
+        actual, count, remaining = C.c_ulong(), C.c_ulong(), C.c_ulong()
+        fmt, data = C.c_int(), pointer()
+        status = x.XGetWindowProperty(display, candidate, name_atom, 0, 1024, 0, utf8_atom, C.byref(actual), C.byref(fmt), C.byref(count), C.byref(remaining), C.byref(data))
+        if status == 0 and data:
+            try:
+                if actual.value == utf8_atom and fmt.value == 8:
+                    return C.string_at(data, count.value).decode("utf-8", errors="replace")
+            finally:
+                x.XFree(data)
+        name = C.c_char_p()
+        if x.XFetchName(display, candidate, C.byref(name)) and name.value:
+            title = name.value.decode("utf-8", errors="replace")
+            x.XFree(name)
+            return title
+        return ""
+
+    def children(parent):
+        root_return, parent_return, count = window(), window(), C.c_uint()
+        result = C.POINTER(window)()
+        if not x.XQueryTree(display, parent, C.byref(root_return), C.byref(parent_return), C.byref(result), C.byref(count)):
+            return []
+        found = [result[i] for i in range(count.value)]
+        if result:
+            x.XFree(result)
+        return found
+
+    def find(parent, depth=0):
+        if depth > 3:
+            return []
+        matches=[]
+        for candidate in children(parent):
+            title = window_title(candidate)
+            if (request.get("title") == title or (request.get("title_prefix") and title.startswith(request["title_prefix"]))) and expected_process(candidate):
+                matches.append(candidate)
+            matches.extend(find(candidate, depth+1))
+        return matches
+
+    target = None
+    for _ in range(100):
+        matches=find(root)
+        if len(matches)>1:
+            raise RuntimeError("Native acceptance window must be unique")
+        if matches:
+            target=matches[0]
+            break
+        time.sleep(0.05)
+    if not target:
+        raise RuntimeError("Native acceptance window unavailable")
+    x.XRaiseWindow(display, target)
+    x.XSetInputFocus(display, target, 1, 0)
+    px, py, child = C.c_int(), C.c_int(), window()
+    if not x.XTranslateCoordinates(display, target, root, 0, 0, C.byref(px), C.byref(py), C.byref(child)):
+        raise RuntimeError("Native acceptance window geometry unavailable")
+    x.XSync(display, 0)
+    # Popup destruction during read-only tree traversal is normal. Other X
+    # errors, or destruction of our selected target, must still fail closed.
+    if any(code != 3 or resource == target for code, resource in errors):
+        raise RuntimeError("Native acceptance X target unavailable")
+    errors.clear()
+
+    def key(code, down):
+        xt.XTestFakeKeyEvent(display, code, int(down), 0)
+
+    def named(name):
+        return x.XKeysymToKeycode(display, x.XStringToKeysym(name.encode("ascii")))
+
+    native = None
+    if request.get("inspect") or any("click_label" in a or "wait_label" in a for a in request.get("actions", [])):
+        native = NativeControls(request["title"],window_pid(target) if request.get("executable") else None)
+    for action in request.get("actions", []):
+        if "click_label" in action or "wait_label" in action:
+            control = native.ready(action.get("click_label", action.get("wait_label")))
+            if "click_label" in action:
+                xt.XTestFakeMotionEvent(display, -1, control["x"] + control["width"] // 2, control["y"] + control["height"] // 2, 0)
+                xt.XTestFakeButtonEvent(display, 1, 1, 0)
+                xt.XTestFakeButtonEvent(display, 1, 0, 0)
+        if "click" in action:
+            dx, dy = action["click"]
+            xt.XTestFakeMotionEvent(display, -1, px.value + dx, py.value + dy, 0)
+            xt.XTestFakeButtonEvent(display, 1, 1, 0)
+            xt.XTestFakeButtonEvent(display, 1, 0, 0)
+        if "text" in action:
+            shift = named("Shift_L")
+            for char in action["text"]:
+                symbol = ord(char)
+                if symbol < 32 or symbol > 126:
+                    raise RuntimeError("Acceptance input must be ASCII")
+                code = x.XKeysymToKeycode(display, symbol)
+                if not code:
+                    raise RuntimeError("Acceptance keyboard mapping unavailable")
+                shifted = x.XKeycodeToKeysym(display, code, 0) != symbol
+                if shifted:
+                    key(shift, True)
+                key(code, True)
+                key(code, False)
+                if shifted:
+                    key(shift, False)
+        if "key" in action:
+            parts = action["key"].split("+")
+            codes = [named(part) for part in parts]
+            if not all(codes):
+                raise RuntimeError("Acceptance shortcut unavailable")
+            for code in codes:
+                key(code, True)
+            for code in reversed(codes):
+                key(code, False)
+        x.XFlush(display)
+        time.sleep(0.15)
+        x.XSync(display, 0)
+        if errors:
+            raise RuntimeError("Native acceptance X input failed")
+    result = {"window": target, "x": px.value, "y": py.value}
+    if request.get("inspect"):
+        snapshot = native.snapshot()
+        result["controls"] = {
+            label: {
+                "present": len(snapshot.get(label, [])) == 1,
+                "enabled": len(snapshot.get(label, [])) == 1 and snapshot[label][0]["enabled"],
+                "showing": len(snapshot.get(label, [])) == 1 and snapshot[label][0]["showing"],
+            }
+            for label in CONTROL_LABELS
+        }
+    print(json.dumps(result))
+    x.XCloseDisplay(display)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        print("Native acceptance input failed", file=sys.stderr)
+        sys.exit(1)

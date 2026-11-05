@@ -13,6 +13,7 @@ import (
 	"filippo.io/age"
 	"github.com/jihuayu/locklark/internal/account"
 	"github.com/jihuayu/locklark/internal/onepux"
+	"github.com/jihuayu/locklark/internal/origin"
 	"github.com/jihuayu/locklark/internal/password"
 	"github.com/jihuayu/locklark/internal/totp"
 	"github.com/jihuayu/locklark/internal/vault"
@@ -180,6 +181,7 @@ func existing(path string) (*bolt.DB, error) {
 }
 
 type result struct {
+	browser           *NativeBrowserFill
 	material          []byte
 	slotDigest        [32]byte
 	destinationDigest string
@@ -201,6 +203,7 @@ type result struct {
 }
 
 type commandOption struct {
+	browser    *BrowserFillTarget
 	unlocked   *Session
 	run        *RunRequest
 	search     *searchRequest
@@ -228,6 +231,7 @@ var ErrCommandClose = errors.New("personal vault close failed; operation may be 
 func commandWithClose(run func() (result, error), closeDB func() error) (r result, err error) {
 	defer func() {
 		if closeErr := closeDB(); closeErr != nil && err == nil {
+			r.browser.clear()
 			clear(r.value)
 			clear(r.material)
 			clear(r.archive)
@@ -250,6 +254,12 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 	}
 	if len(options) == 1 {
 		option = options[0]
+	}
+	if (action == browserFillAction) != (option.browser != nil) || option.browser != nil && !option.browser.valid() {
+		return result{}, ErrBrowserFill
+	}
+	if option.browser != nil && (edit == nil || edit.ID != option.browser.ID || edit.Revision != option.browser.Revision) {
+		return result{}, ErrBrowserFill
 	}
 	if generatedAction(action) != (option.generation != nil) {
 		return result{}, invalid
@@ -473,7 +483,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			if option.backup == "" {
 				return invalid
 			}
-		case "item.desktop.show.username", "item.desktop.show.password", "item.desktop.copy.username", "item.desktop.copy.password", "item.run.username", "item.run.password", livePullAction, "item.inject.username", "item.inject.password", "item.trash", "item.untrash", "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.regenerate.password", otpDisclosureAction:
+		case browserFillAction, "item.desktop.show.username", "item.desktop.show.password", "item.desktop.copy.username", "item.desktop.copy.password", "item.run.username", "item.run.password", livePullAction, "item.inject.username", "item.inject.password", "item.trash", "item.untrash", "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.regenerate.password", otpDisclosureAction:
 			if edit == nil {
 				return invalid
 			}
@@ -489,6 +499,16 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 					if items[i].ID == edit.ID {
 						if items[i].Kind != "login" {
 							return invalid
+						}
+						if action == browserFillAction {
+							site, err := origin.Website(items[i].URL)
+							if items[i].State != "" || err != nil || site != option.browser.Context.Origin || len(items[i].Username) > maxBrowserField || len(items[i].Password) > maxBrowserField {
+								outcome, refusal = "browser-refused", ErrBrowserFill
+								break
+							}
+							out.browser = &NativeBrowserFill{username: []byte(items[i].Username), password: []byte(items[i].Password)}
+							outcome = "intent"
+							break
 						}
 						if trashAction(action) {
 							if action == "item.trash" {
@@ -626,6 +646,12 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			}
 		}
 		var link string
+		if action == browserFillAction && refusal == nil {
+			link, e = option.browser.binding(i.AuditEncryption)
+			if e != nil {
+				return e
+			}
+		}
 		if action == searchAction {
 			link, e = option.search.binding(i.AuditEncryption)
 			if e != nil {
@@ -688,6 +714,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		return nil
 	})
 	if e != nil {
+		out.browser.clear()
 		clear(out.archive)
 		clear(out.material)
 		clear(out.value)

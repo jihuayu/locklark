@@ -32,3 +32,4 @@ __pycache__/
 /web/.test-state/
 /web/test-results/
 /web/playwright-report/
+/browser-extension/dist/
