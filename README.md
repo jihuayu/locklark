@@ -4,19 +4,32 @@
 
 当前交付包括 **个人离线库 CLI 预览** 和独立的 **M0 合成网关演练**。个人库可以实际创建和保存登录记录，尚未完成独立密码评审、系统密钥存储和灾后恢复验收。请先用测试数据，不要停用已有密码管理器。设计与威胁模型见[设计稿](docs/design.md)。
 
-字段引用的元数据核心已实现有限的 `op://vault/item/[section/]field` 解析、名称/ID 唯一定位和修订号绑定；同名拒绝，未知属性不静默忽略。该核心尚未接入真实 CLI 取值、存储事务或授权，也未与固定 op 版本实际对照，不代表已兼容 `op read/run/inject`。当前子集与验收见[字段引用记录](docs/reference-validation.md)。
+字段引用的元数据核心已实现有限的 `op://vault/item/[section/]field` 解析、名称/ID 唯一定位和修订号绑定；同名拒绝，未知属性不静默忽略。个人 v1 登录布局已接入认证事务、人工字段披露和取码，其他布局仍只有元数据核心；尚未与固定 op 版本实际对照，不代表已兼容 `op read/run/inject`。当前子集与验收见[字段引用记录](docs/reference-validation.md)。
 
-个人 v1 原生条目现有元数据投影函数，固定登录字段身份并绑定提供的审计修订号；改名后 ID 保留，恢复后使用新账本修订。其他导入布局明确拒绝，文件附件取值仍未实现。该函数不认证输入或授权取值，生产同一事务接入尚待完成；证据与边界见[个人投影验收](docs/personal-reference-metadata-validation.md)。
+个人 v1 原生条目现有元数据投影函数，固定登录字段身份并绑定提供的审计修订号；改名后 ID 保留，恢复后使用新账本修订。其他导入布局明确拒绝，文件附件取值仍未实现。投影函数本身不认证输入或授权取值；个人 CLI 现由同一认证事务调用，证据与边界见[个人投影验收](docs/personal-reference-metadata-validation.md)。
 
 内置合成 1PUX 演练另有独立投影，保留源 `ops/otp-demo` 区段与字段身份，版本绑定调用者提供的整份快照签名。它只支持已有演练布局，不是通用 1PUX 导入，也不授予取值权限；范围与真实加密快照/审计验收见[合成导入投影](docs/fixture-reference-metadata-validation.md)。
 
-两个已有布局的引用现可校验为明确的原生槽位和字段类型，拒绝旧修订、区段错配、名称冒充 ID 和跨布局目标；OTP 类型指存储配置，不是生成码。结果只含元数据，不验输入真实性或授予权限，尚无 CLI 取值入口；见[字段绑定验收](docs/reference-binding-validation.md)。
+两个已有布局的引用现可校验为明确的原生槽位和字段类型，拒绝旧修订、区段错配、名称冒充 ID 和跨布局目标；OTP 类型指存储配置，不是生成码。绑定结果只含元数据，不自行验输入真实性或授予权限；个人 CLI 另在认证事务内使用绑定结果，见[字段绑定验收](docs/reference-binding-validation.md)。
 
 Go TOTP 核心已通过 RFC 6238/4226 向量，支持有限的 Base32/otpauth 配置、SHA1/256/512、6/8 位码和显式时间窗口。个人 CLI 已接入配置保存与先记意图的受控取码；短种子、不支持参数和非法时间明确拒绝，现有短种子演练数据不改写。不代表已兼容 op 的 OTP 行为；核心见[TOTP 验收](docs/totp-validation.md)，产品入口见[个人 TOTP 验收](docs/personal-totp-validation.md)。
 
 密码生成核心使用系统 CSPRNG 与标准库拒绝采样，默认 24 位字母数字；策略要求至少 128 位组合熵，拒绝字符集重复、弱策略及超限。个人 CLI 已接入生成并保存/替换的事务流程，普通输出不包含生成值；桌面生成入口仍未实现。核心证据见[密码生成验收](docs/password-generation-validation.md)，产品入口见[生成保存验收](docs/personal-generation-validation.md)。
 
 独立 1PUX v3 清点预检模块在内存中检查归档边界、CRC 和严格 JSON，输出受限计数，不输出标题、路径或字段值，也不落盘解压。显式 `file.path` 可精确核对匹配/缺失、重复引用和声明大小差异；没有当前子集显式引用的文件不能称为孤儿或据此删除。全部条目映射仍未验证，未开放产品预检或通用写入入口；见[清点验收](docs/onepux-preflight-validation.md)与[显式文件关联验收](docs/onepux-file-references-validation.md)。
+
+## 按字段引用操作
+
+`personal references --file owner.ll` 经双因素解锁后列出库 ID、固定别名 `Personal`、条目 ID/标题/修订及 username/password/otp 引用，不输出字段值。使用当前列表中的引用和修订：
+
+```powershell
+.\locklark.exe personal reveal-ref --file owner.ll --ref "op://VAULT_ID/ITEM_ID/password" --revision REVISION
+.\locklark.exe personal otp-ref --file owner.ll --ref "op://VAULT_ID/ITEM_ID/otp" --revision REVISION
+```
+
+两者均需交互终端、双因素和 `SHOW` 确认，先提交稳定条目/修订的披露意图，再向终端显示 JSON 字符串值或验证码；stdout 只有回执。`reveal-ref` 只接受用户名/密码，`otp-ref` 只生成码，不显示种子。名称/ID 不区分大小写且必须唯一；同名和名称冒充 ID 都拒绝。语法仅支持 ASCII 名称/ID（含空格、点、连字符和下划线），不解释查询参数或百分号编码；中文标题请用 ID。当前个人布局没有区段字段。
+
+引用不是权限，也不表示 OTP 已配置。恢复后库 ID 和修订更新，须重新取得引用。超长或含控制/Unicode 格式字符的标题会导致整个引用目录拒绝，可使用 `list` 与直接 ID 入口修正。此入口不增加 MCP 原值能力，未实现 run/inject、通用导入或完整 op 兼容；详细验证见[个人引用验收](docs/personal-references-validation.md)。
 
 ## 离线创建个人库
 

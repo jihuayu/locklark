@@ -41,6 +41,7 @@ jobs:
           python3 scripts/disclosure_acceptance.py "$RUNNER_TEMP/locklark"
           python3 scripts/generation_acceptance.py "$RUNNER_TEMP/locklark"
           python3 scripts/otp_acceptance.py "$RUNNER_TEMP/locklark"
+          python3 scripts/references_acceptance.py "$RUNNER_TEMP/locklark"
       - if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -59,3 +60,5 @@ jobs:
           & $python scripts/generation_acceptance.py $binary
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $python scripts/otp_acceptance.py $binary
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $python scripts/references_acceptance.py $binary

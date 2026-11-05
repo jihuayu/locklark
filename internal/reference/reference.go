@@ -179,7 +179,7 @@ func Validate(vaults []Vault) error {
 			return ErrCatalog
 		}
 		for _, r := range s {
-			if unicode.IsControl(r) {
+			if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
 				return ErrCatalog
 			}
 		}

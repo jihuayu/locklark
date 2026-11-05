@@ -76,7 +76,7 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 	if e.Sequence != n || e.Previous != prev || !idOK(e.Session) || e.Actor != "local-owner" || !ed25519.Verify(pub, e.proof(), e.Signature) {
 		return invalid
 	}
-	if !editAction(e.Action) && !revealAction(e.Action) && e.Action != otpDisclosureAction && (e.Result != "succeeded" || e.BaseRevision != "") {
+	if !editAction(e.Action) && !revealAction(e.Action) && e.Action != otpDisclosureAction && e.Action != referenceRejectAction && (e.Result != "succeeded" || e.BaseRevision != "") {
 		return invalid
 	}
 	if e.Action != "backup.prepare" && e.Action != "vault.restore" && e.Link != "" {
@@ -90,6 +90,15 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 		return invalid
 	}
 	switch e.Action {
+	case referenceRejectAction:
+		if n <= 1 || e.Item != "" || e.BaseRevision != "" {
+			return invalid
+		}
+		switch e.Result {
+		case "not-found", "ambiguous", "wrong-type", "stale":
+		default:
+			return invalid
+		}
 	case "backup.prepare":
 		if n <= 1 || !idOK(e.Link) || e.Item != "" {
 			return invalid
@@ -118,7 +127,7 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 		if n <= 1 || !idOK(e.Item) {
 			return invalid
 		}
-	case "item.list", "audit.list", "audit.archived":
+	case "item.list", "audit.list", "audit.archived", "reference.list":
 		if n <= 1 || e.Item != "" {
 			return invalid
 		}
