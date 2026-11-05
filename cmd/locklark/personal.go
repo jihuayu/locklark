@@ -283,7 +283,7 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 			if subtle.ConstantTimeCompare(password, confirmation) != 1 {
 				return errors.New("export passwords did not match")
 			}
-			if _, e = fmt.Fprint(os.Stderr, "导出包含当前条目的敏感值，以独立密码加密；不包含账户钥匙、审计或恢复材料。\r\n"); e != nil {
+			if _, e = fmt.Fprint(os.Stderr, "导出包含活动、归档和回收站条目的敏感值，以独立密码加密；不包含账户钥匙、审计或恢复材料。\r\n其他工具未必识别归档或回收站状态。\r\n"); e != nil {
 				return e
 			}
 			consent, e := consoleField("输入 SAVE 确认加密导出")

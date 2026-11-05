@@ -35,6 +35,25 @@ class TerminalDrainTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "hidden terminal input echoed"):
                 personal_windows.invoke("synthetic", "backup", "synthetic", [("secret", "private-input")], ok=True, issue=False, options=(), barrier=None)
 
+    def test_scope_notice_precedes_confirmation(self):
+        for prefix, valid in (("required scope\nconsent:", True), ("consent:", False), ("consent: required scope", False)):
+            with self.subTest(prefix=prefix):
+                writes = []
+                class ConsentTerminal(DelayedTerminal):
+                    def __init__(self, *args, **kwargs):
+                        self.chunks = iter([prefix, '{"ok":true}', None])
+                    def write(self, text): writes.append(text)
+                    def isalive(self): return not writes
+                with patch.object(personal_windows, "PTY", ConsentTerminal):
+                    def invoke():
+                        return personal_windows.invoke("synthetic", "export", "synthetic", [("consent", "SAVE")], ok=True, issue=False, options=(), barrier=None, required_before_last_prompt=("required scope",))
+                    if valid:
+                        self.assertEqual(invoke()[0], {"ok": True})
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, "scope notice missing before confirmation"):
+                            invoke()
+                        self.assertEqual(writes, [])
+
     def test_transport_stays_open_after_complete_response(self):
         class OpenTerminal(DelayedTerminal):
             def read(self, **kwargs):

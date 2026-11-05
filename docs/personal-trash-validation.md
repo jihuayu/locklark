@@ -17,3 +17,7 @@
 测试覆盖两种原状态、重复操作、全部敏感操作拒绝且零输出、无效输入优先级、无熵调用、审计结果白名单和字段泄露扫描、并发单赢家、提交回滚、引用歧义、备份恢复，以及原生字段和 PyKeePass 独立迁出核对。`scripts/trash_acceptance.py` 已在 Linux PTY 跑通；CI 在 Linux PTY/Windows ConPTY 执行。以 main `65b3f3d` 构建的旧 CLI 在 Linux 验证：旧备份→新版恢复成功，新回收站库/备份→旧版明确拒绝。未实测硬件掉电或 Windows 旧版二进制对照。
 
 实跑检查：定向及完整 Go 测试、定向 race、vet/模块校验、PTY + PyKeePass、旧版正反向兼容；最终 Luna/max 复核、具体 head 与双平台 CI 证据记录在本批 PR。
+
+交接 [PR #13](https://github.com/jihuayu/locklark/pull/13)：Luna/max 最终增量复核通过，无剩余阻塞项；独立执行了相关 Go 包测试/vet、PTY + PyKeePass/旧 CLI 验收及四项 Windows 驱动单测。主任务另执行完整 `go test -count=1 ./...` 与 `go test -race ./internal/personal -run TestTrash -count=1`，均通过；race 不计为审阅者独立执行。最终推送 head、双平台运行链接与合并 SHA 保存在 PR，下一项继续通用迁移映射/对账或团队设备持有证明。
+
+Luna/max 完整审阅发现导出说明尚未实际覆盖确认提示，已修正 stderr 文案及 README，并给 PTY/ConPTY 验收增加“范围说明必须在确认前出现”的断言；传输单测覆盖缺失/迟到说明不提交确认。回收站仍占用原生条目/载荷容量，状态变更若超限也回滚，不保证满容量时能继续增加状态元数据。

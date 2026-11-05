@@ -20,7 +20,7 @@ Go TOTP 核心已通过 RFC 6238/4226 向量，支持有限的 Base32/otpauth �
 
 ## 加密迁出
 
-`personal export-kdbx --file owner.ll --out NEW.kdbx` 经双因素和 `SAVE` 确认后，把当前原生条目导出为独立密码加密的 KDBX 4.1 文件。导出密码在隐藏终端输入两次，至少 12 字符；已存在目标不会被覆盖。可使用 KeePass 兼容工具打开，不包含账户钥匙、审计或恢复材料。互操作和故障边界见[加密迁出验收](docs/personal-kdbx-export-validation.md)。
+`personal export-kdbx --file owner.ll --out NEW.kdbx` 经双因素和 `SAVE` 确认后，把当前原生条目（包括归档和回收站）导出为独立密码加密的 KDBX 4.1 文件；其他工具未必识别归档/回收站状态。导出密码在隐藏终端输入两次，至少 12 字符；已存在目标不会被覆盖。可使用 KeePass 兼容工具打开，不包含账户钥匙、审计或恢复材料。互操作和故障边界见[加密迁出验收](docs/personal-kdbx-export-validation.md)。
 
 ## 迁移前检查 1PUX
 

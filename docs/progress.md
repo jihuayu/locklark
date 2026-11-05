@@ -1,6 +1,6 @@
 # Locklark 开发进度
 
-从 main `65b3f3d` 接续个人回收站/恢复：保留原活动或归档状态、版本冲突与固定拒绝审计、阻止回收站值披露/编辑/生成、备份及 KDBX 状态保留，见 [回收站验收](personal-trash-validation.md)。永久清空、保留期和安全擦除仍未实现；独立复核与最终 CI 以对应 PR 为准。
+从 main `65b3f3d` 接续个人回收站/恢复：保留原活动或归档状态、版本冲突与固定拒绝审计、阻止回收站值披露/编辑/生成、备份及 KDBX 状态保留，见 [回收站验收](personal-trash-validation.md)。Luna/max 最终复核、完整 Go 与定向 race 已通过；最终 head、双平台 CI 与合并状态见 [PR #13](https://github.com/jihuayu/locklark/pull/13)。永久清空、保留期和安全擦除仍未实现。
 
 2026-11-05（香港时区）四线交接：独立密码 KDBX 迁出 [PR #9](https://github.com/jihuayu/locklark/pull/9)、归档日常操作 [PR #10](https://github.com/jihuayu/locklark/pull/10)、HTTPS 来源候选与共享向量 [PR #11](https://github.com/jihuayu/locklark/pull/11)、签名团队目录/撤销/冻结核心 [PR #12](https://github.com/jihuayu/locklark/pull/12)。四批均有 Luna/max 独立复核、针对性失败/成功测试与双平台 CI 证据；最终 head/合并状态以对应 PR 为准。后两项是平台/团队基础核心，真实浏览器与手机接入、设备持有证明/权限执行及网络同步仍待完成。
 
