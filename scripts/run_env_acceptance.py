@@ -7,13 +7,14 @@ from personal_acceptance import invoke
 
 CHILD = '''import os, pathlib, sys, time
 secret = "synthetic-run-secret-密钥"
-print(secret, flush=True)
-print(secret, file=sys.stderr, flush=True)
-assert os.environ["TEST_TOKEN"] == secret
-assert "LOCKLARK_PARENT_ONLY" not in os.environ
-assert not (set(os.environ) - {"TEST_TOKEN", "SystemRoot", "SYSTEMROOT", "LC_CTYPE"})
-assert sys.stdin.read() == ""
-assert sys.argv[2:] == ["", "two words", "$(echo hidden)", "a;b"]
+# Emit bytes: Windows null-device stdout may use a legacy text encoding.
+os.write(1, secret.encode("utf-8"))
+os.write(2, secret.encode("utf-8"))
+if os.environ.get("TEST_TOKEN") != secret: sys.exit(81)
+if "LOCKLARK_PARENT_ONLY" in os.environ: sys.exit(82)
+if set(os.environ) - {"TEST_TOKEN", "SystemRoot", "SYSTEMROOT", "LC_CTYPE"}: sys.exit(83)
+if sys.stdin.read() != "": sys.exit(84)
+if sys.argv[2:] != ["", "two words", "$(echo hidden)", "a;b"]: sys.exit(85)
 mode = sys.argv[1]
 if mode == "sleep": time.sleep(10)
 pathlib.Path("child-proof").write_text("matched", encoding="utf-8")
@@ -41,7 +42,7 @@ def check(binary):
         assert not proof.exists()
         for mode, code in (("ok", 0), ("exit", 7)):
             receipt, _ = invoke(binary, "run-env", path, factors + [(prompt, "RUN")], options=options(mode), forbidden=(secret,), required_before_last_prompt=("这不是沙箱", "只返回退出码", "后代可能继续运行", "TEST_TOKEN", "$(echo hidden)"))
-            assert receipt["status"] == "process-exited" and receipt["exit_code"] == code
+            assert receipt["status"] == "process-exited" and receipt["exit_code"] == code, ("child-result", receipt["status"], receipt["exit_code"])
             assert proof.read_text() == "matched"
             proof.unlink()
         invoke(binary, "run-env", path, factors + [(prompt, "RUN")], options=options("sleep"), ok=False, expect_error="result unavailable", forbidden=(secret,))

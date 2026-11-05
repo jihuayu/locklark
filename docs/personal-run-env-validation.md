@@ -32,3 +32,5 @@ python3 scripts/run_env_acceptance.py /tmp/locklark-tools/locklark
 全量通过（personal 203.873s、preview 144.289s）；最终定向 race 通过（personal 77.492s、CLI 1.032s）；vet、diff-check、真实 PTY 及 Windows CLI/测试包交叉编译通过。日志为 `/tmp/locklark-validation/run-env-all.log`、`run-env-race-final.log`。首轮 race 在正常 helper 退出的 1 秒预算失败（Go race runtime 退出等待），已独立复现并只将正常用例预算改为 10 秒，超时负测仍为 1 秒；原失败日志保留为 `run-env-race.log`。交叉编译不代替 Windows 原生验收，最终独立复核及精确 head 的双平台 CI 见本批 PR。
 
 Luna/max 已独立复核完整实现、CLI 与文档，无阻塞发现；独立运行 personal/CLI 定向测试、vet、构建及真实 PTY 均通过。审阅指出确认提示使用 Go `QuoteToASCII` 而非严格 JSON，文档已明确；这是安全显示格式，参数执行仍直接使用原始字符串切片，不解析提示文本。
+
+首轮原生 CI [run 42008283072](https://github.com/jihuayu/locklark/actions/runs/42008283072) 的 head `0f873b0`：Ubuntu 全部通过 3m17s，Windows Go 全量通过，Python/ConPTY fixture 的预期退出码断言失败（Windows job 127180496516，日志 `/tmp/locklark-validation/run-env-windows-first.log`）。本地强制 cp1252 标准流编码复现了旧 fixture 在打印中文合成值时提前 UnicodeEncodeError；将 fixture 的秘密输出改成 UTF-8 字节 `os.write`，保持 stdout/stderr 泄露探测而不依赖空设备文本编码，新增只报告固定诊断退出码。强制 cp1252 与真实 Linux PTY 复测通过。生产 Go 代码未改；修复后的 Windows 原生结论须以最终 head CI 为准。
