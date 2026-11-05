@@ -83,7 +83,7 @@ go build -o locklark.exe ./cmd/locklark
 
 编辑时隐藏输入 Base32 种子或 `otpauth://totp/…` 配置，并输入 `SAVE` 确认；精确空输入表示清除本地配置。它不会改变网站的双因素设置。支持 16–64 字节种子、SHA1/256/512、6/8 位码、1–3600 秒周期；不接受空白变体、短种子、HOTP 或未知参数，也不会根据输入 URI 发起网络请求。
 
-`otp` 必须重新输入解锁因素并以 `SHOW` 确认。认证事务核验条目/修订和配置，提交签名加密的 `item.reveal.otp-code` 意图后才计算验证码；终端 stderr 显示 JSON 字符串，stdout 只返回会话、意图摘要及 Unix 秒半开有效区间 `valid_from` / `valid_until`。未配置、未知 ID 和旧修订会拒绝；普通 `reveal-login` 仍不能读取 OTP 种子或码。
+`otp` 必须重新输入解锁因素并以 `SHOW` 确认。认证事务核验条目/修订和配置，提交签名加密的 `item.reveal.otp-code` 意图后才计算验证码；终端 stderr 显示 JSON 字符串，stdout 只返回 `status: written-to-terminal`、会话、意图摘要及 Unix 秒半开有效区间 `valid_from` / `valid_until`。未配置、未知 ID 和旧修订会拒绝；普通 `reveal-login` 仍不能读取 OTP 种子或码。
 
 时间来自本机，须保持时钟准确；操作期间回拨或写入前已经过期时不输出码，需要本人明确重试。终端写入阻塞可能让显示到达时已经过期，成功写入也不能证明用户看到或网站接受；审计一直保留为 `intent`。输出错误不返回成功回执，部分写入无法撤回。新增动作写入后旧版 CLI 会拒绝此历史；包含配置编辑和取码意图的备份可由新版恢复。验收：`python scripts/otp_acceptance.py <新版程序> [升级前程序]`。
 

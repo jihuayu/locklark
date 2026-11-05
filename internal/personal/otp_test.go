@@ -179,7 +179,7 @@ func TestOTPConcurrentEditAndRecovery(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		revised, editErr = EditLogin(path, "fixture", key, Edit{ID: target.ID, Revision: target.Revision, Field: "otp", Value: otpFixtureSeed})
+		revised, editErr = EditLogin(path, "fixture", key, Edit{ID: target.ID, Revision: target.Revision, Field: "otp", Value: "MFRGGZDFMZTWQ2LKMFRGGZDFMZTWQ2LK"})
 	}()
 	wg.Wait()
 	if editErr != nil {
@@ -223,7 +223,8 @@ func TestOTPConcurrentEditAndRecovery(t *testing.T) {
 	_, err = revealOTP(&output, func() time.Time { return time.Unix(59, 0) }, func() (result, error) {
 		return command(restored, "fixture", fresh, otpDisclosureAction, vault.Item{}, &Edit{ID: target.ID, Revision: rows[0].Revision})
 	})
-	if err != nil || output.String() != "\"287082\"\r\n" {
+	// Independent Python HMAC-SHA1 for seed "abcdefghijabcdefghij", counter 1.
+	if err != nil || output.String() != "\"326399\"\r\n" {
 		t.Fatal("recovered OTP wrong", err)
 	}
 	chains, err := ArchivedAudit(restored, "fixture", fresh)

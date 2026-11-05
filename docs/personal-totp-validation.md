@@ -10,7 +10,7 @@
 
 计算使用本机时间；起始、提交后和写入前均采样墙钟，去除 Go 单调时钟成分后比较，检测同窗内亚秒回拨和提交期间回拨。计算后检查半开有效区间，精确到 `Until` 拒绝。长提交跨入下一窗时按提交后的时间生成，长输出阻塞可能令实际显示已经过期，不能保证用户看到时仍有效。系统绝对时间可信度与跨进程回拨检测未实现。
 
-stdout 只有 session、intent 与 `[valid_from, valid_until)`；stderr 只显式显示 JSON 字符串验证码。时间/写入失败保留已提交意图，不写已交付事实；短写可能已经暴露一部分，错误不携带 seed/code。临时 Config 在失败/成功返回时调用新增的 owner-only `Clear`；禁止与读取并发清除，不宣称 Go 字符串、旧副本或终端历史被可靠擦除。
+stdout 只有 `status: written-to-terminal`、session、intent 与 `[valid_from, valid_until)`；status 仅表明写入器接受完整行，不是人或网站收到的证明。stderr 只显式显示 JSON 字符串验证码。时间/写入失败保留已提交意图，不写已交付事实；短写可能已经暴露一部分，错误不携带 seed/code。临时 Config 在失败/成功返回时调用新增的 owner-only `Clear`；禁止与读取并发清除，不宣称 Go 字符串、旧副本或终端历史被可靠擦除。
 
 ## 失败先行和回归
 
@@ -27,5 +27,9 @@ stdout 只有 session、intent 与 `[valid_from, valid_until)`；stderr 只显�
 ## 验证与剩余范围
 
 本轮运行全仓 Go（含 Bun 和 PyKeePass）、OTP/披露定向 race、vet/模块校验、ConPTY 驱动单测、个人恢复/披露/生成/OTP/MCP 进程验收与 macOS arm64 交叉编译。最终结果、Luna/max 独立复核和双平台 CI 针对最终 PR head 核对，记录在 PR 正文。
+
+上述本地检查均通过；全仓个人包 73.806s，定向 race 个人包 279.701s / TOTP 1.066s / CLI 1.113s。PR 为 [#4](https://github.com/jihuayu/locklark/pull/4)，实现 head `f80dab40a0bd04edea7bd0a1ec96d7f0bb792d58`；最终测试/文档修正 head 与双平台链接见 PR 正文。
+
+Luna/max 独立复核未发现阻塞问题，独立 personal/TOTP/CLI 全包测试（58.389s / 0.016s / 8.646s）、构建、OTP PTY、vet 与 diff 检查通过。两项低优先级意见均关闭：文档明确通用回执 `status`；并发测试换成真实不同种子（独立 Python HMAC 计算恢复后的 6 位码为 `326399`），避免只验证格式差异。
 
 这里没有二维码、浏览器填充、手机审批、可信远程时间、通用引用 CLI、op 行为对照或 MCP 原值工具。真实网站登记、原生 macOS/移动端、硬件故障、外部密码评审和完整替换验收仍保留。后续可继续接通个人字段引用的认证事务与明确披露入口，或扩展迁移预检，不能将此功能称为完整 1Password 兼容。
