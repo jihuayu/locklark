@@ -25,3 +25,10 @@ fixture.secret
 .locklark-personal-*
 __pycache__/
 
+/web/node_modules/
+/web/.next/
+/web/next-env.d.ts
+/web/*.tsbuildinfo
+/web/.test-state/
+/web/test-results/
+/web/playwright-report/

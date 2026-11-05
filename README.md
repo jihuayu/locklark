@@ -357,3 +357,26 @@ go test -count=1 ./internal/vault -run 'TestKDBXIndependentPeer|TestIndependentN
 使用 Go 1.27.3 运行 `go run ./cmd/locklark-desktop`。界面由 MyGo 原生 UI 渲染，支持创建/解锁个人金库、标题搜索、逐字段显示/复制、编辑、归档/回收站、审计、体检和现有基本登录导入/加密导出。首次使用主密码与 Secret Key；解锁后在安全设置主动启用系统快捷解锁。Windows 使用 Passport KSP 的 Hello 私钥操作；macOS 构建需开启 CGO，使用本设备钥匙串及用户验证；Linux 使用 Secret Service。系统服务不可用时回到完整解锁，没有明文文件替代存储。
 
 系统快捷解锁默认 24 小时后要求完整解锁；这是本地系统时间策略，不能抵抗系统时钟回拨。开启快捷解锁会将金库身份材料交给对应 OS 的保护机制；不保存主密码或 Secret Key。Linux 系统钥匙串可能不逐次弹验证，且同一系统用户的其他程序可能有读取权限。屏幕锁定/睡眠通知能否到达取决于平台会话服务。Windows Hello/TPM、macOS Touch ID 的设备行为尚需真机验收，当前不能作为生产替换承诺。详见 [桌面验收](docs/desktop-validation.md)。
+
+### Next.js 团队管理（本机开发版）
+
+Web 界面使用 Next.js，只查看已验证的团队成员、设备和目录状态。Go 服务的 `--config` 必须是可信的 `{ "pins": ..., "anchor": ..., "policy": "writer-acl-v1" }` 配置；公钥与 checkpoint 必须来自可信原生端，不能直接信任从中继下载的文件。
+
+已有真实团队目录时，在本机运行：
+
+```sh
+go run ./cmd/locklark-management --directory /absolute/team.db --config /absolute/trusted/config.json --connection /absolute/private/connection.json
+```
+
+在第二个终端中（Node 24、Go 1.27.3）：
+
+```sh
+cd web
+npm ci
+npm run build
+LOCKLARK_MANAGEMENT_CONNECTION=/absolute/private/connection.json npm start
+```
+
+PowerShell 使用 `$env:LOCKLARK_MANAGEMENT_CONNECTION = 'C:\private\connection.json'`，再运行 `npm start`。启动器会调用 Go helper 检查连接文件与父目录权限；可通过 `LOCKLARK_MANAGEMENT_EXECUTABLE` 指定预编译 helper 的绝对路径。打开启动器打印的本机地址，输入同一窗口显示的一次性连接码。退出或连接码已用/过期后，重新启动 Web 界面可取得新码。不要将连接文件提交仓库或开放服务端口。
+
+尚无团队目录时，可用 `go run ./web/tests/fixture -out /absolute/private/demo-team` 创建明确的合成只读演示，再将上面的目录和配置路径指向其 `team.db` / `config.json`；演示生成器不保留管理私钥，不能用于实际团队。浏览器填充、团队变更与远端同步仍在后续交付范围，详见[Web 验收](docs/nextjs-management-validation.md)。
