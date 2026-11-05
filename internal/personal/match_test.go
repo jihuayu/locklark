@@ -113,3 +113,20 @@ func TestMatchRollback(t *testing.T) {
 		}
 	}
 }
+
+func TestMatchClearedWebsite(t *testing.T) {
+	path, key, target := revealFixture(t)
+	rev, err := EditLogin(path, "fixture", key, Edit{ID: target.ID, Revision: target.Revision, Field: "url", Value: "https://example.com/login"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = EditLogin(path, "fixture", key, Edit{ID: target.ID, Revision: rev, Field: "url", Value: ""}); err != nil {
+		t.Fatal(err)
+	}
+	if rows, err := MatchLogins(path, "fixture", key, "https://example.com", "https://example.com"); err != nil || len(rows) != 0 {
+		t.Fatal("cleared URL matched", err)
+	}
+	if items := readStoredItems(t, path, "fixture", key); items[0].URL != "" {
+		t.Fatal("URL not cleared")
+	}
+}

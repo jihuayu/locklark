@@ -223,5 +223,15 @@
     "Input": "https://example.com//path",
     "Website": "https://example.com",
     "Origin": ""
+  },
+  {
+    "Input": "https://example.com/登录",
+    "Website": "",
+    "Origin": ""
+  },
+  {
+    "Input": "https://example.com/%E7%99%BB%E5%BD%95",
+    "Website": "https://example.com",
+    "Origin": ""
   }
 ]

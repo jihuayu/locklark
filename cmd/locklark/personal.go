@@ -439,7 +439,7 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 			}
 			response = map[string]string{"id": id}
 		case "edit-login":
-			prompt := map[string]string{"url": "新网站 HTTPS URL（留空清除）", "title": "新标题", "username": "新用户名（可留空）", "password": "新登录密码", "otp": "新 TOTP 配置（Base32 或 otpauth URI，留空清除）"}[edit.Field]
+			prompt := map[string]string{"url": "新网站 HTTPS URL（ASCII，留空清除）", "title": "新标题", "username": "新用户名（可留空）", "password": "新登录密码", "otp": "新 TOTP 配置（Base32 或 otpauth URI，留空清除）"}[edit.Field]
 			value, e := consoleField(prompt)
 			if e != nil {
 				return e
@@ -486,6 +486,9 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 			}
 			response = map[string]string{"id": opts["--id"], "revision": revision}
 		case "match-logins":
+			if _, e := fmt.Fprint(os.Stderr, "按调用者提供的来源查询候选；未验证浏览器页面来源，不执行填充。\r\n"); e != nil {
+				return e
+			}
 			response, err = personal.MatchLogins(path, string(pw), key, opts["--origin"], opts["--frame-origin"])
 		case "list":
 			response, err = personal.ListState(path, string(pw), key, opts["--state"])

@@ -12,7 +12,7 @@ def check(binary):
         factors = [("主密码", pw), ("Secret Key", key)]
         invoke(binary, "add-login", path, factors + [("登录标题", "synthetic-title"), ("用户名（可留空）", "synthetic-user"), ("登录密码", "synthetic-secret")])
         row = invoke(binary, "list", path, factors)[0][0]
-        revision, _ = invoke(binary, "edit-login", path, factors + [("新网站 HTTPS URL（留空清除）", "https://EXAMPLE.com:443/login")], options=("--id", row["id"], "--revision", row["revision"], "--field", "url"))
+        revision, _ = invoke(binary, "edit-login", path, factors + [("新网站 HTTPS URL（ASCII，留空清除）", "https://EXAMPLE.com:443/login")], options=("--id", row["id"], "--revision", row["revision"], "--field", "url"))
         def match(top, frame, ok=True):
             return invoke(binary, "match-logins", path, factors, options=("--origin", top, "--frame-origin", frame), forbidden=("synthetic-secret", "synthetic-user"), ok=ok, expect_error=None if ok else "cross-origin")[0]
         rows = match("https://example.com", "https://example.com:443/")
