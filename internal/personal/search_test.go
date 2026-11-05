@@ -20,8 +20,8 @@ import (
 func TestTitleSearchProfileUnicodeVersion(t *testing.T) {
 	// Updating the tables changes matching/input semantics: revise the profile
 	// and its compatibility documentation instead of silently changing v1.
-	if cases.UnicodeVersion != "15.0.0" || norm.Version != "15.0.0" || unicode.Version != "15.0.0" {
-		t.Fatal("search profile v1 requires Unicode 15.0.0 tables")
+	if cases.UnicodeVersion != "17.0.0" || norm.Version != "17.0.0" || unicode.Version != "17.0.0" {
+		t.Fatal("search profile v2 requires Unicode 17.0.0 tables")
 	}
 }
 

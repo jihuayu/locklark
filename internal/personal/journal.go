@@ -77,7 +77,7 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 	if e.Sequence != n || e.Previous != prev || !idOK(e.Session) || e.Actor != "local-owner" || !ed25519.Verify(pub, e.proof(), e.Signature) {
 		return invalid
 	}
-	if !editAction(e.Action) && !readValueAction(e.Action) && e.Action != otpDisclosureAction && e.Action != referenceRejectAction && e.Action != inspectionAction && e.Action != exportAction && e.Action != matchAction && !migrationAction(e.Action) && (e.Result != "succeeded" || e.BaseRevision != "") {
+	if e.Action != "desktop.system.enable" && !editAction(e.Action) && !readValueAction(e.Action) && e.Action != otpDisclosureAction && e.Action != referenceRejectAction && e.Action != inspectionAction && e.Action != exportAction && e.Action != matchAction && !migrationAction(e.Action) && (e.Result != "succeeded" || e.BaseRevision != "") {
 		return invalid
 	}
 	if (e.Action == inspectionAction || migrationAction(e.Action) || e.Action == "item.import" || e.Action == healthAction) && e.Result == "succeeded" {
@@ -151,7 +151,7 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 		if n != 1 || !digestOK(e.Link) || e.Item != "" {
 			return invalid
 		}
-	case "item.run.username", "item.run.password", livePullAction, "item.inject.username", "item.inject.password", "item.trash", "item.untrash", "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.regenerate.password", otpDisclosureAction:
+	case "item.desktop.show.username", "item.desktop.show.password", "item.desktop.copy.username", "item.desktop.copy.password", "item.run.username", "item.run.password", livePullAction, "item.inject.username", "item.inject.password", "item.trash", "item.untrash", "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.regenerate.password", otpDisclosureAction:
 		if e.Result == "not-found" && e.Item == "" && e.BaseRevision == "" && n > 1 {
 			break
 		}
@@ -174,7 +174,11 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 		if n <= 1 || !idOK(e.Item) {
 			return invalid
 		}
-	case searchAction, "item.list", "item.list.archived", "item.list.trashed", "item.list.all", "audit.list", "audit.archived", "reference.list", healthAction:
+	case "desktop.system.enable":
+		if n <= 1 || e.Item != "" || e.BaseRevision != "" || e.Result != "intent" {
+			return invalid
+		}
+	case "desktop.unlock", "desktop.system.unlock", searchAction, "item.list", "item.list.archived", "item.list.trashed", "item.list.all", "audit.list", "audit.archived", "reference.list", healthAction:
 		if n <= 1 || e.Item != "" {
 			return invalid
 		}

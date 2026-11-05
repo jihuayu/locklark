@@ -23,6 +23,7 @@ jobs:
       - run: python -m unittest discover -s scripts -p test_personal_windows.py
       - run: go mod verify
       - run: go vet ./...
+      - run: go build ./cmd/locklark-desktop
       - shell: pwsh
         run: |
           $peerEnv = Join-Path $env:RUNNER_TEMP 'locklark-kdbx-peer'
@@ -98,3 +99,12 @@ jobs:
           & $python scripts/export_acceptance.py $binary
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $python scripts/plugin_acceptance.py $binary
+  desktop-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version-file: go.mod
+      - run: go build ./cmd/locklark-desktop
+      - run: go test ./internal/osunlock ./internal/desktop ./internal/personal -run 'TestNative|TestDesktopSession|TestSystemUnlock|TestLockDoesNotWait|TestCancelledSystemUnlock|TestLockDrops|TestClipboard' -count=1
