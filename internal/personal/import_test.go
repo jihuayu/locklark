@@ -3,6 +3,8 @@ package personal
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -55,6 +57,17 @@ func TestImportAtomicReceiptAndRecovery(t *testing.T) {
 	plan, e := PlanImportOnepux(path, "fixture", key, source)
 	if e != nil {
 		t.Fatal(e)
+	}
+	publicHash := sha256.Sum256(raw)
+	if plan.Report.SourceDigest == hex.EncodeToString(publicHash[:]) {
+		t.Fatal("plan exposes an unkeyed source fingerprint")
+	}
+	other := filepath.Join(t.TempDir(), "other.ll")
+	if e := Create(other, "fixture", key); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := ImportOnepux(other, "fixture", key, source, plan.Report.SourceDigest); !errors.Is(e, ErrImportChanged) {
+		t.Fatal("plan accepted by a different vault", e)
 	}
 	if items := readStoredItems(t, path, "fixture", key); len(items) != 0 {
 		t.Fatal("plan mutated items")
@@ -136,11 +149,14 @@ func TestImportAtomicReceiptAndRecovery(t *testing.T) {
 	if e != nil || len(recovered) != 2 || recovered[0].Revision == rows[0].Revision {
 		t.Fatal("recovery revision", e)
 	}
+	if _, e := ImportOnepux(dest, "fixture", fresh, source, plan.Report.SourceDigest); !errors.Is(e, ErrImportChanged) {
+		t.Fatal("pre-recovery plan survived key replacement", e)
+	}
 }
 
 func TestImportSourceBoundaryAndRollback(t *testing.T) {
 	path, key, source, raw := importFixture(t)
-	mapped, e := onepux.MapLogins(raw)
+	planned, e := PlanImportOnepux(path, "fixture", key, source)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -160,12 +176,16 @@ func TestImportSourceBoundaryAndRollback(t *testing.T) {
 				t.Fatal(e)
 			}
 		}
-		_, e = command(path, pw, key, importAction, vault.Item{}, nil, commandOption{migration: &importRequest{expected: mapped.Report.SourceDigest, read: func() ([]byte, error) { calls++; return bytes.Clone(raw), nil }}})
+		_, e = command(path, pw, key, importAction, vault.Item{}, nil, commandOption{migration: &importRequest{expected: planned.Report.SourceDigest, read: func() ([]byte, error) { calls++; return bytes.Clone(raw), nil }}})
 		if e == nil || calls != 0 {
 			t.Fatal("unauthenticated source read")
 		}
 	}
 	path, key, source, raw = importFixture(t)
+	planned, e = PlanImportOnepux(path, "fixture", key, source)
+	if e != nil {
+		t.Fatal(e)
+	}
 	if got, e := ImportOnepux(path, "fixture", key, source, strings.Repeat("0", 64)); !errors.Is(e, ErrImportChanged) || !reflect.DeepEqual(got, ImportReceipt{}) {
 		t.Fatal("changed source accepted", e)
 	}
@@ -181,7 +201,7 @@ func TestImportSourceBoundaryAndRollback(t *testing.T) {
 			}
 			return injected
 		})
-	}, "fixture", key, importAction, vault.Item{}, nil, commandOption{migration: &importRequest{expected: mapped.Report.SourceDigest, read: func() ([]byte, error) { return bytes.Clone(raw), nil }}})
+	}, "fixture", key, importAction, vault.Item{}, nil, commandOption{migration: &importRequest{expected: planned.Report.SourceDigest, read: func() ([]byte, error) { return bytes.Clone(raw), nil }}})
 	db.Close()
 	if !errors.Is(e, injected) || !reflect.DeepEqual(r, result{}) {
 		t.Fatal("rollback receipt", e)
@@ -204,7 +224,7 @@ func TestImportSourceBoundaryAndRollback(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := ImportOnepux(path, "fixture", key, source, mapped.Report.SourceDigest)
+			_, err := ImportOnepux(path, "fixture", key, source, planned.Report.SourceDigest)
 			errs <- err
 		}()
 	}

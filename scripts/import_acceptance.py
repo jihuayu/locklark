@@ -44,7 +44,8 @@ def check(binary):
         invoke(binary, "plan-import-1pux", path, [("主密码", pw + "wrong"), factors[1], (plan_prompt, "PLAN")],
                options=options, ok=False, expect_error="invalid personal vault", forbidden=private)
         plan, _ = invoke(binary, "plan-import-1pux", path, factors + [(plan_prompt, "PLAN")], options=options, forbidden=private)
-        assert plan["report"]["source_digest"] == hashlib.sha256(original).hexdigest()
+        assert len(plan["report"]["source_digest"]) == 64
+        assert plan["report"]["source_digest"] != hashlib.sha256(original).hexdigest()
         assert plan["report"]["items"] == 2 and plan["report"]["archived"] == 1
         assert invoke(binary, "list", path, factors)[0] == []
         apply_options = options + ("--digest", plan["report"]["source_digest"])

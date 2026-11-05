@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"strings"
+	"unicode"
 
 	"github.com/jihuayu/locklark/internal/vault"
 )
@@ -68,8 +69,7 @@ func MapLogins(raw []byte) (MappedLogins, error) {
 	if extra(root, "accounts") || extra(attrs, "version", "description", "createdAt") {
 		return MappedLogins{}, ErrUnsupported
 	}
-	sum := sha256.Sum256(raw)
-	out := MappedLogins{Report: MappingReport{Profile: "login-v1", SourceDigest: hex.EncodeToString(sum[:]), Items: inventory.Items, Archived: inventory.Archived}, Items: make([]vault.Item, 0, inventory.Items)}
+	out := MappedLogins{Report: MappingReport{Profile: "login-v1", Items: inventory.Items, Archived: inventory.Archived}, Items: make([]vault.Item, 0, inventory.Items)}
 	for _, a := range root["accounts"].([]any) {
 		account := a.(map[string]any)
 		accountAttrs := account["attrs"].(map[string]any)
@@ -123,6 +123,9 @@ func mapLogin(source map[string]any) (vault.Item, error) {
 	}
 	title, ok := overview["title"].(string)
 	if !ok || strings.TrimSpace(title) == "" {
+		return reject()
+	}
+	if strings.ContainsFunc(title, func(r rune) bool { return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) }) {
 		return reject()
 	}
 	if value, found := overview["tags"]; found {

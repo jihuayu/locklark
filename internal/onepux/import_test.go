@@ -40,7 +40,7 @@ func TestMapLoginsScopesAndSourceRetention(t *testing.T) {
 		}
 	}
 	report, _ := json.Marshal(mapped.Report)
-	if strings.Contains(string(report), "private-") || mapped.Report.Items != 2 || len(mapped.Report.SourceDigest) != 64 {
+	if strings.Contains(string(report), "private-") || mapped.Report.Items != 2 || mapped.Report.SourceDigest != "" {
 		t.Fatal("unsafe report")
 	}
 }
@@ -83,6 +83,10 @@ func TestMapLoginsRefusesPartialOrAmbiguousMapping(t *testing.T) {
 		{`"categoryUuid":`, `"favIndex":1,"categoryUuid":`},
 		{`"title":"private-title"`, `"title":"private-title","tags":["private-tag"]`},
 		{`https://example.test/login`, `http://example.test/login`},
+		{`private-title`, "private-\u202etitle"},
+		{`private-title`, "private-\u2066title"},
+		{`private-title`, "private-\u200dtitle"},
+		{`private-title`, "private-\u0085title"},
 	} {
 		t.Run(replacement.new, func(t *testing.T) {
 			item := strings.Replace(mappedLogin, replacement.old, replacement.new, 1)

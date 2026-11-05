@@ -346,7 +346,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		}
 		switch action {
 		case importPlanAction, importAction:
-			mapped, err := option.migration.mapSource()
+			mapped, err := option.migration.mapSource(i.AuditEncryption)
 			if err == nil {
 				for _, item := range mapped.Items {
 					if revisions[item.ID] != "" {

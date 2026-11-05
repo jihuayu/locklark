@@ -1,6 +1,8 @@
 package personal
 
 import (
+	"crypto/hkdf"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -30,19 +32,33 @@ type importRequest struct {
 func migrationAction(action string) bool { return action == importPlanAction || action == importAction }
 
 func ValidImportDigest(value string) bool { return digestOK(value) }
-func (r *importRequest) mapSource() (onepux.MappedLogins, error) {
+func (r *importRequest) mapSource(secret []byte) (onepux.MappedLogins, error) {
 	raw, err := r.read()
 	defer clear(raw)
 	if err != nil {
 		return onepux.MappedLogins{}, err
 	}
+	derived, err := hkdf.Key(sha256.New, secret, nil, "locklark/personal/import-plan/key/v1", 32)
+	if err != nil {
+		return onepux.MappedLogins{}, invalid
+	}
+	defer clear(derived)
+	mac := hmac.New(sha256.New, derived)
+	mac.Write([]byte("locklark/personal/import-plan/login-v1\x00"))
+	mac.Write(raw)
+	stamp := mac.Sum(nil)
 	if r.expected != "" {
-		h := sha256.Sum256(raw)
-		if hex.EncodeToString(h[:]) != r.expected {
+		expected, err := hex.DecodeString(r.expected)
+		if err != nil || !hmac.Equal(stamp, expected) {
 			return onepux.MappedLogins{}, ErrImportChanged
 		}
 	}
-	return onepux.MapLogins(raw)
+	mapped, err := onepux.MapLogins(raw)
+	if err != nil {
+		return onepux.MappedLogins{}, err
+	}
+	mapped.Report.SourceDigest = hex.EncodeToString(stamp)
+	return mapped, nil
 }
 func importFailure(err error) (string, error) {
 	if errors.Is(err, ErrImportChanged) {

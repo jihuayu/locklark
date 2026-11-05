@@ -22,7 +22,7 @@ const usage = `Locklark · offline personal and synthetic gateway preview
   personal references --file PATH
   personal inspect-1pux --file PATH --source ARCHIVE
   personal plan-import-1pux --file PATH --source ARCHIVE
-  personal import-1pux --file PATH --source ARCHIVE --digest SHA256
+  personal import-1pux --file PATH --source ARCHIVE --digest PLAN_DIGEST
   personal export-kdbx --file PATH --out NEW_FILE.kdbx
   personal trash-login|restore-login --file PATH --id ID --revision REV
   personal archive-login|unarchive-login --file PATH --id ID --revision REV
