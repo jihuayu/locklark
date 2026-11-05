@@ -20,7 +20,7 @@ Go TOTP 核心已通过 RFC 6238/4226 向量，支持有限的 Base32/otpauth �
 
 ## 加密迁出
 
-`personal export-kdbx --file owner.ll --out NEW.kdbx` 经双因素和 `SAVE` 确认后，把当前原生条目（包括归档和回收站）导出为独立密码加密的 KDBX 4.1 文件；其他工具未必识别归档/回收站状态。导出密码在隐藏终端输入两次，至少 12 字符；已存在目标不会被覆盖。可使用 KeePass 兼容工具打开，不包含账户钥匙、审计或恢复材料。互操作和故障边界见[加密迁出验收](docs/personal-kdbx-export-validation.md)。
+`personal export-kdbx --file owner.ll --out NEW.kdbx` 经双因素和 `SAVE` 确认后，把当前原生条目（包括归档和回收站）导出为独立密码加密的 KDBX 4.1 文件；其他工具未必识别归档/回收站状态。导入条目的原始来源记录也会导出，其中可能保留修改前的旧值。导出密码在隐藏终端输入两次，至少 12 字符；已存在目标不会被覆盖。可使用 KeePass 兼容工具打开，不包含账户钥匙、审计或恢复材料。互操作和故障边界见[加密迁出验收](docs/personal-kdbx-export-validation.md)。
 
 ## 迁移前检查 1PUX
 
@@ -31,6 +31,8 @@ Go TOTP 核心已通过 RFC 6238/4226 向量，支持有限的 Base32/otpauth �
 在交互终端输入个人库双因素，并输入 `SCAN` 确认。命令只读检查不超过 8 MiB 的普通归档文件；输出条目/附件/登录字段/密码历史计数及固定待核对原因，不输出源标题或字段值，也不会导入数据。检查结果先记入个人库审计，提交后才输出报告和摘要回执。源 1PUX 仍是明文，命令不负责清除原文件；报告成功不表示可无损迁移。事务、恢复和平台边界见[个人预检验收](docs/personal-onepux-inspection-validation.md)。
 
 ## 按字段引用操作
+
+支持范围明确的基本登录导入：先运行 `personal plan-import-1pux --file owner.ll --source source.1pux`，使用返回的 `report.source_digest` 运行 `personal import-1pux --file owner.ll --source source.1pux --digest PLAN_DIGEST`。两步都需要隐藏双因素和确认；源文件变化、同源重复、容量超限或未支持字段整批拒绝。当前只接单账户/单库、用户名/密码、单 HTTPS URL 和活动/归档状态；原始来源记录加密保留，编辑后可能仍含旧值。完整字段/类别/附件/历史迁移未完成，详见[登录导入验收](docs/personal-import-validation.md)和[七条交付范围](docs/seven-track-delivery.md)。
 
 `personal references --file owner.ll` 经双因素解锁后列出库 ID、固定别名 `Personal`、条目 ID/标题/修订及 username/password/otp 引用，不输出字段值。使用当前列表中的引用和修订：
 

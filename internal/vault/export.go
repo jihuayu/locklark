@@ -18,7 +18,8 @@ func ValidateExportPassword(password string) error {
 }
 
 // ExportKDBX creates a portable, password-encrypted KDBX 4.1 database. It
-// contains current native items only, not account keys, source audit or grants.
+// contains native items and their retained import provenance, not account keys,
+// source audit or grants. Provenance may contain values preceding later edits.
 func ExportKDBX(items []Item, password string) ([]byte, error) {
 	if err := ValidateExportPassword(password); err != nil {
 		return nil, err

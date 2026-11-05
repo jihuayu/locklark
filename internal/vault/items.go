@@ -20,6 +20,8 @@ type Item struct {
 	State                                              string `json:",omitempty"`
 	URL                                                string `json:",omitempty"`
 	PreviousState                                      string `json:",omitempty"`
+	// ImportSource is an encrypted provenance record, never executable metadata.
+	ImportSource []byte `json:",omitempty"`
 }
 
 const itemGroup = "Locklark items v1"
@@ -59,6 +61,10 @@ func validItems(items []Item, size int) bool {
 			return false
 		}
 		size += len(it.Attachment)
+		if len(it.ImportSource) > MaxPayload-size {
+			return false
+		}
+		size += len(it.ImportSource)
 		if it.State != "" && it.State != "archived" && it.State != "trashed" {
 			return false
 		}
@@ -119,6 +125,9 @@ func writeItems(db *kdbx.Database, metadata []byte, items []Item) error {
 		e := kdbx.NewEntry()
 		e.UUID = itemUUID(it.ID)
 		e.Values = []kdbx.ValueData{slot("Title", it.Title, false), slot("Locklark.ID", it.ID, false), slot("Locklark.Kind", it.Kind, false)}
+		if len(it.ImportSource) > 0 {
+			e.Values = append(e.Values, slot("Locklark.ImportSource", base64.StdEncoding.EncodeToString(it.ImportSource), true))
+		}
 		if it.State != "" {
 			e.Values = append(e.Values, slot("Locklark.State", it.State, false))
 		}
@@ -181,7 +190,7 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 			if _, ok := fields[v.Key]; ok {
 				return nil, nil, ErrSnapshot
 			}
-			protected := v.Key == "UserName" || v.Key == "Notes" || v.Key == "Password" || v.Key == "otp" || v.Key == "URL"
+			protected := v.Key == "UserName" || v.Key == "Notes" || v.Key == "Password" || v.Key == "otp" || v.Key == "URL" || v.Key == "Locklark.ImportSource"
 			if v.Value.Protected.Bool != protected {
 				return nil, nil, ErrSnapshot
 			}
@@ -207,6 +216,14 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 			return nil, nil, ErrSnapshot
 		}
 		extra := 0
+		if source, ok := fields["Locklark.ImportSource"]; ok {
+			var err error
+			it.ImportSource, err = base64.StdEncoding.Strict().DecodeString(source.Content)
+			if err != nil || len(it.ImportSource) == 0 || base64.StdEncoding.EncodeToString(it.ImportSource) != source.Content {
+				return nil, nil, ErrSnapshot
+			}
+			extra++
+		}
 		if state, ok := fields["Locklark.State"]; ok {
 			if state.Content != "archived" && state.Content != "trashed" {
 				return nil, nil, ErrSnapshot

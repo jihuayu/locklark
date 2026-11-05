@@ -178,6 +178,7 @@ func existing(path string) (*bolt.DB, error) {
 }
 
 type result struct {
+	migration       onepux.MappingReport
 	inspection      onepux.Report
 	reportDigest    string
 	references      ReferenceIndex
@@ -194,6 +195,7 @@ type result struct {
 }
 
 type commandOption struct {
+	migration  *importRequest
 	match      *matchRequest
 	export     *exportRequest
 	inspection *inspectionRequest
@@ -247,6 +249,12 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		return result{}, invalid
 	}
 	if (action == matchAction) != (option.match != nil) {
+		return result{}, invalid
+	}
+	if migrationAction(action) != (option.migration != nil) {
+		return result{}, invalid
+	}
+	if option.migration != nil && (option.migration.read == nil || action == importAction && !digestOK(option.migration.expected) || action == importPlanAction && option.migration.expected != "") {
 		return result{}, invalid
 	}
 	if (action == exportAction) != (option.export != nil) {
@@ -337,6 +345,41 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			}
 		}
 		switch action {
+		case importPlanAction, importAction:
+			mapped, err := option.migration.mapSource(i.AuditEncryption)
+			if err == nil {
+				for _, item := range mapped.Items {
+					if revisions[item.ID] != "" {
+						err = ErrImportDuplicate
+						break
+					}
+				}
+			}
+			if err == nil && vault.ValidateItems([]byte(schema), append(items, mapped.Items...)) != nil {
+				err = onepux.ErrLimit
+			}
+			if err != nil {
+				outcome, refusal = importFailure(err)
+				break
+			}
+			out.migration = mapped.Report
+			out.reportDigest, e = digest(mapped.Report)
+			if e != nil {
+				return e
+			}
+			if action == importAction {
+				s, e = seal(b, i, s.Epoch+1, append(items, mapped.Items...))
+				if e != nil {
+					return e
+				}
+				for _, item := range mapped.Items {
+					ev, err := appendLinked(b, i, tip, s, "item.import", item.ID, "succeeded", "", "", eventDetails{reportDigest: out.reportDigest})
+					if err != nil {
+						return err
+					}
+					tip = auditTip{Count: ev.Sequence, Last: ev.hash(), Origin: tip.Origin}
+				}
+			}
 		case matchAction:
 			if option.match.top != option.match.frame {
 				outcome, refusal = "cross-origin", ErrCrossOrigin
@@ -544,7 +587,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		if e != nil {
 			return e
 		}
-		if (revealAction(action) || action == otpDisclosureAction || action == inspectionAction || action == exportAction) && refusal == nil {
+		if (revealAction(action) || action == otpDisclosureAction || action == inspectionAction || action == exportAction || migrationAction(action)) && refusal == nil {
 			out.session, out.intent = ev.Session, ev.hash()
 		}
 		if action == "backup.prepare" {
