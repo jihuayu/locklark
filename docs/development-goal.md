@@ -2,6 +2,8 @@
 
 目标：完成 [design.md](design.md) 的全部产品、安全协议和验收范围。`main` 是长期基线；[progress.md](progress.md) 记录实际证据。本目标不把预览、合成演练或编译成功认定为已能替换 1Password。用户已要求先不依赖 Ryugi。
 
+用户已持续授权使用 `gpt-6-luna`、`max` 推理强度的独立审查子代理；已授权的复核、修复、测试、推送和满足门槛后的 squash 合并无需逐步确认。代码复核不替代 GitHub 要求的人工批准或外部密码认证。
+
 ## 每个切片的完成条件
 
 1. 从远端实际 main/PR/head 接续，先核对工作树与并发提交；保留已有实现，不覆盖后来工作。
@@ -41,7 +43,7 @@
 
 ## 下一项候选
 
-Windows ConPTY 验收失败已在 `dd68eef` 的双平台 CI 关闭；当前优先关闭独立复核缺口并核对最新 head 检查，见 [conpty-drain-validation.md](conpty-drain-validation.md)。Actions 已恢复实际运行，不应继续复述旧付款阻塞。PR 标题与正文统一英文；面向用户进度使用中文。
+Windows ConPTY 验收失败已在 `dd68eef` 的双平台 CI 关闭；三个 Luna/max 独立代码复核已完成，见 [pr1-independent-review.md](pr1-independent-review.md)；当前核对最新 head 检查并按门槛正常 squash 合并，见 [conpty-drain-validation.md](conpty-drain-validation.md)。Actions 已恢复实际运行，不应继续复述旧付款阻塞。PR 标题与正文统一英文；面向用户进度使用中文。
 
 外部合并条件阻塞期间，已开发纯 Go 字段引用元数据核心、两种既有布局投影/绑定、TOTP、密码生成、1PUX v3 只读清点及显式文件关联核对。验收与限制见 [reference-validation.md](reference-validation.md)、[personal-reference-metadata-validation.md](personal-reference-metadata-validation.md)、[fixture-reference-metadata-validation.md](fixture-reference-metadata-validation.md)、[reference-binding-validation.md](reference-binding-validation.md)、[totp-validation.md](totp-validation.md)、[password-generation-validation.md](password-generation-validation.md)、[onepux-preflight-validation.md](onepux-preflight-validation.md) 和 [onepux-file-references-validation.md](onepux-file-references-validation.md)。区段作用域、重复标识与 JSON 值形状清点已实现，见 [onepux-sections-validation.md](onepux-sections-validation.md)，字段语义仍未验证。后续可做 loginFields 的 designation/字段形状清点，保留未知与重复语义，不授予迁移许可。其他附件布局、完整条目映射和通用写入仍待开发。这些基础工作不等于已接通产品预检/生成器、人工取值、可信事务审计或授权，不关闭其验收项。
 

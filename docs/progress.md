@@ -55,3 +55,5 @@ TOTP 核心 `295e8c35601941ca02c13e4afd8c203ebbb5f0a7` 从实际 head `8d5d81d` 
 Windows CI 恢复实际运行后，`38b308d` 的 Ubuntu 成功，Windows 在个人 backup 的 ConPTY JSON 读取失败；不再沿用付款/额度阻塞结论。已用合成传输失败测试复现并在 `45f2e79` 修复子进程退出后的输出排空，`020622f` 将回归加入双平台 CI。Windows 原生运行又发现传输不发 EOF，`dd68eef` 改为完整响应加输出静默并保留截止时间；延迟输出、延迟秘密回显、不发 EOF 三项本地测试通过；原生结果与独立复核单独记录，main 未变，详见 [conpty-drain-validation.md](conpty-drain-validation.md)。
 
 ConPTY 修正版 `dd68eefdb0dc744436403299b382b3ebfbeb1fa5` 的 [run 41943464262](https://github.com/jihuayu/locklark/actions/runs/41943464262) Ubuntu/Windows 均成功，个人终端恢复、审计及 MCP 验收通过，关闭本批真实 CI 失败。该结果不是全平台产品验收；PR #1 独立复核仍待完成，未合并 main。
+
+PR #1 的 `f0c58e3` 已完成三个经用户授权的 Luna/max 独立代码复核：恢复与个人审计、MCP/Gateway执行回执、引用/生成/1PUX/ConPTY 基础模块，均未确认阻塞当前预览合并的可复现缺陷。审查者实跑定向单测、关键路径 race、PTY/MCP；完整 preview race 仍未完成。具体范围及命令见 [pr1-independent-review.md](pr1-independent-review.md)，本记录更新上述范围的历史“待独立复核”状态；不关闭外部密码评审、整库/决策库独立回滚见证、真实平台及全部设计验收。main 仍为 `3901bc8`，合并前须核对本交接提交的双平台检查。用户已持续授权 Luna/max 子代理复核及满足门槛后的正常 squash 合并，无需重复确认。
