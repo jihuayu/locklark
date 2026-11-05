@@ -155,11 +155,24 @@ func TestOTPRollbackAndOutputFailures(t *testing.T) {
 		t.Fatal("output failure lost intent")
 	}
 	// Simulate an authenticated legacy/private writer storing an unsupported seed.
-	r, err := command(path, "fixture", key, "item.edit.otp", vault.Item{}, &Edit{ID: target.ID, Revision: target.Revision, Field: "otp", Value: "MZXW6"})
+	r, err := command(path, "fixture", key, "item.add", vault.Item{Kind: "login", Title: "legacy OTP", Password: "synthetic-password", OTP: "MZXW6"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = RevealOTP(path, "fixture", key, target.ID, r.revision, &output); err == nil || output.Len() != 0 {
+	rows, err := List(path, "fixture", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision := ""
+	for _, row := range rows {
+		if row.ID == r.id {
+			revision = row.Revision
+		}
+	}
+	if !digestOK(revision) {
+		t.Fatal("missing legacy item revision")
+	}
+	if _, err = RevealOTP(path, "fixture", key, r.id, revision, &output); !errors.Is(err, totp.ErrInvalid) || output.Len() != 0 {
 		t.Fatal("invalid saved configuration disclosed")
 	}
 }

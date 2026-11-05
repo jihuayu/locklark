@@ -16,7 +16,7 @@ type Edit struct{ ID, Revision, Field, Value string }
 
 func editAction(s string) bool {
 	switch s {
-	case "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.regenerate.password":
+	case "item.trash", "item.untrash", "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.regenerate.password":
 		return true
 	}
 	return false
@@ -35,21 +35,26 @@ func EditLogin(path, pw string, key []byte, edit Edit) (string, error) {
 	if !ValidEditTarget(edit.ID, edit.Revision, edit.Field) {
 		return "", errors.New("invalid login ID, revision or field")
 	}
+	r, e := command(path, pw, key, "item.edit."+edit.Field, vault.Item{}, &edit)
+	return r.revision, e
+}
+
+// Values are checked only after authentication, revision and trash state.
+func validateEditValue(edit Edit) error {
 	if edit.Field == "title" && strings.TrimSpace(edit.Value) == "" || edit.Field == "password" && edit.Value == "" {
-		return "", errors.New("title and password must not be empty")
+		return errors.New("title and password must not be empty")
 	}
 	if edit.Field == "url" && edit.Value != "" {
 		if _, err := origin.Website(edit.Value); err != nil {
-			return "", err
+			return err
 		}
 	}
 	if edit.Field == "otp" && edit.Value != "" {
 		config, err := totp.Parse(edit.Value)
 		if err != nil {
-			return "", err
+			return err
 		}
 		config.Clear()
 	}
-	r, e := command(path, pw, key, "item.edit."+edit.Field, vault.Item{}, &edit)
-	return r.revision, e
+	return nil
 }
