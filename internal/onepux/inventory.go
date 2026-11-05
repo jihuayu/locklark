@@ -137,10 +137,13 @@ func inventory(root map[string]any, r *Report, reasons map[string]bool, files ma
 							}
 						}
 					}
-					if err := sectionInventory(object, &r.SectionInventory, r.LoginFieldInventory.Fields, reasons); err != nil {
+					if err := sectionInventory(object, &r.SectionInventory, r.LoginFieldInventory.Fields+r.PasswordHistory.Entries, reasons); err != nil {
 						return err
 					}
-					if err := loginFieldInventory(object, &r.LoginFieldInventory, r.SectionInventory.Sections+r.SectionInventory.Fields, reasons); err != nil {
+					if err := loginFieldInventory(object, &r.LoginFieldInventory, r.SectionInventory.Sections+r.SectionInventory.Fields+r.PasswordHistory.Entries, reasons); err != nil {
+						return err
+					}
+					if err := passwordHistoryInventory(object, &r.PasswordHistory, r.SectionInventory.Sections+r.SectionInventory.Fields+r.LoginFieldInventory.Fields, reasons); err != nil {
 						return err
 					}
 					if _, exists := object["documentAttributes"]; exists {
