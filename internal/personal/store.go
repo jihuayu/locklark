@@ -10,6 +10,7 @@ import (
 	"errors"
 	"filippo.io/age"
 	"github.com/jihuayu/locklark/internal/account"
+	"github.com/jihuayu/locklark/internal/onepux"
 	"github.com/jihuayu/locklark/internal/password"
 	"github.com/jihuayu/locklark/internal/totp"
 	"github.com/jihuayu/locklark/internal/vault"
@@ -175,6 +176,8 @@ func existing(path string) (*bolt.DB, error) {
 }
 
 type result struct {
+	inspection      onepux.Report
+	reportDigest    string
 	references      ReferenceIndex
 	otp             *totp.Config
 	profile         password.Profile
@@ -189,6 +192,7 @@ type result struct {
 }
 
 type commandOption struct {
+	inspection *inspectionRequest
 	backup     string
 	generation *generationRequest
 	reference  *referenceRequest
@@ -199,8 +203,24 @@ func command(path, pw string, key []byte, action string, add vault.Item, edit *E
 	if e != nil {
 		return result{}, e
 	}
-	defer db.Close()
-	return commandWithUpdate(db.Update, pw, key, action, add, edit, options...)
+	return commandWithClose(func() (result, error) { return commandWithUpdate(db.Update, pw, key, action, add, edit, options...) }, db.Close)
+}
+
+var ErrCommandClose = errors.New("personal vault close failed; operation may be committed")
+
+func commandWithClose(run func() (result, error), closeDB func() error) (r result, err error) {
+	defer func() {
+		if closeErr := closeDB(); closeErr != nil && err == nil {
+			clear(r.value)
+			clear(r.archive)
+			if r.otp != nil {
+				r.otp.Clear()
+			}
+			r = result{}
+			err = ErrCommandClose
+		}
+	}()
+	return run()
 }
 
 // The updater returns only after commit (including bbolt's default fsync).
@@ -217,6 +237,9 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		return result{}, invalid
 	}
 	if (action == referenceDisclosureAction) != (option.reference != nil) {
+		return result{}, invalid
+	}
+	if (action == inspectionAction) != (option.inspection != nil) || (option.inspection != nil && option.inspection.read == nil) {
 		return result{}, invalid
 	}
 	if option.generation != nil {
@@ -304,6 +327,17 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			}
 		}
 		switch action {
+		case inspectionAction:
+			out.inspection, e = option.inspection.inspect()
+			if e != nil {
+				out.inspection = onepux.Report{}
+				outcome, refusal = inspectionFailure(e)
+			} else {
+				out.reportDigest, e = digest(out.inspection)
+				if e != nil {
+					return e
+				}
+			}
 		case referenceRejectAction:
 			// Persist only the fixed category, never selectors or caller versions.
 		case "reference.list":
@@ -428,11 +462,11 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 				}
 			}
 		}
-		ev, e := appendLinked(b, i, tip, s, action, out.id, outcome, revisions[out.id], link, profile)
+		ev, e := appendLinked(b, i, tip, s, action, out.id, outcome, revisions[out.id], link, eventDetails{generation: profile, reportDigest: out.reportDigest})
 		if e != nil {
 			return e
 		}
-		if (revealAction(action) || action == otpDisclosureAction) && refusal == nil {
+		if (revealAction(action) || action == otpDisclosureAction || action == inspectionAction) && refusal == nil {
 			out.session, out.intent = ev.Session, ev.hash()
 		}
 		if action == "backup.prepare" {

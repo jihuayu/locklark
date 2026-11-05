@@ -20,6 +20,7 @@ const usage = `Locklark · offline personal and synthetic gateway preview
   personal regenerate-password --file PATH --id ID --revision REV [--length N]
   personal otp --file PATH --id ID --revision REV
   personal references --file PATH
+  personal inspect-1pux --file PATH --source ARCHIVE
   personal reveal-ref|otp-ref --file PATH --ref REF --revision REV
   personal <init|add-login|list|audit> --file PATH  (interactive local-owner terminal)
 
