@@ -1,5 +1,7 @@
 # Locklark 开发进度
 
+四线第 3 批 PR #11 已合并 main `c8bf4fd`，Luna/max 与双平台 CI 通过。第 4 批签名团队目录/可信本地排序、持久原子版本提交、撤销墓碑与冻结见 [团队核心验收](team-directory-validation.md)。本轮四条线均有代码/验收推进；平台应用和完整团队网络产品仍未完成。
+
 四线第 2 批 PR #10 已合并 main `33ede66`，Luna/max 与双平台 CI 通过。第 3 批网站 URL 与来源匹配核心、CLI 和平台共享向量见 [来源匹配验收](login-origin-matching-validation.md)；真实浏览器/移动系统集成仍保留。
 
 四线第 1 批已合并 PR #9 / main `1c58330`：独立密码 KDBX 迁出、Luna/max、Ubuntu/Windows CI 全通过。第 2 批归档/恢复状态、默认列表/引用过滤及 CAS 审计见 [归档验收](personal-archive-validation.md)。来源匹配和团队目录随后推进。
