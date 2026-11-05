@@ -14,4 +14,6 @@
 
 第一批先打通 `login-v1` 导入：单账户/单库、明确 designation 的用户名/密码、单 HTTPS URL、活动/归档状态；加密保留原始来源记录。不能表达的数据整批拒绝。此批不关闭完整迁移，后续扩展原生结构和映射。详细命令与证据见 [登录导入验收](personal-import-validation.md)。
 
+交付证据：第一批 [PR #14](https://github.com/jihuayu/locklark/pull/14) 已在 Luna/max 与双平台 CI 后合入 `e925eec`。第二批 [PR #15](https://github.com/jihuayu/locklark/pull/15) 接通本地密码体检，规则/范围见 [体检验收](personal-health-validation.md)，最终状态以 PR 为准。下一批接受控开发者用值入口；上述七条的完整产品范围仍未全部完成。
+
 本环境目前为 Linux 云端，未配置外部服务身份或发布凭据。Windows 可经 CI 原生运行；系统生物识别、移动真机、真实第三方账号授权、签名发布和真实 1Password 对照必须保留独立验收记录，不能由 mock 或交叉编译替代。

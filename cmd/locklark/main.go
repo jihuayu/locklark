@@ -20,6 +20,7 @@ const usage = `Locklark · offline personal and synthetic gateway preview
   personal regenerate-password --file PATH --id ID --revision REV [--length N]
   personal otp --file PATH --id ID --revision REV
   personal references --file PATH
+  personal health --file PATH
   personal inspect-1pux --file PATH --source ARCHIVE
   personal plan-import-1pux --file PATH --source ARCHIVE
   personal import-1pux --file PATH --source ARCHIVE --digest PLAN_DIGEST

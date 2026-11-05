@@ -80,7 +80,7 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 	if !editAction(e.Action) && !revealAction(e.Action) && e.Action != otpDisclosureAction && e.Action != referenceRejectAction && e.Action != inspectionAction && e.Action != exportAction && e.Action != matchAction && !migrationAction(e.Action) && (e.Result != "succeeded" || e.BaseRevision != "") {
 		return invalid
 	}
-	if (e.Action == inspectionAction || migrationAction(e.Action) || e.Action == "item.import") && e.Result == "succeeded" {
+	if (e.Action == inspectionAction || migrationAction(e.Action) || e.Action == "item.import" || e.Action == healthAction) && e.Result == "succeeded" {
 		if !digestOK(e.ReportDigest) {
 			return invalid
 		}
@@ -168,7 +168,7 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 		if n <= 1 || !idOK(e.Item) {
 			return invalid
 		}
-	case "item.list", "item.list.archived", "item.list.trashed", "item.list.all", "audit.list", "audit.archived", "reference.list":
+	case "item.list", "item.list.archived", "item.list.trashed", "item.list.all", "audit.list", "audit.archived", "reference.list", healthAction:
 		if n <= 1 || e.Item != "" {
 			return invalid
 		}
