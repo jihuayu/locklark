@@ -13,8 +13,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
-	"time"
 	"unicode/utf8"
 
 	"github.com/jihuayu/locklark/internal/personal"
@@ -34,6 +32,7 @@ const (
 )
 
 var ErrProtocol = errors.New("native messaging refused")
+var errDuplicateRequest = errors.New("native duplicate request ignored")
 var token = regexp.MustCompile(`^[a-f0-9]{32}$`)
 var revision = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
@@ -60,10 +59,14 @@ func (r Request) valid() bool {
 	if r.V != 1 || !token.MatchString(r.ID) {
 		return false
 	}
-	if r.Type != "save-new" && r.Type != "save-update" && r.Type != "commit-ready" && r.Type != "cancel-save" && (r.payload != nil || r.WindowID != 0 || r.RequestID != "" || r.Nonce != "") {
+	if r.Type != "save-new" && r.Type != "save-update" && r.Type != "commit-ready" && r.Type != "cancel-save" && r.Type != "otp" && r.Type != "otp-ack" && r.Type != "cancel-otp" && (r.payload != nil || r.WindowID != 0 || r.RequestID != "" || r.Nonce != "") {
 		return false
 	}
 	switch r.Type {
+	case "otp":
+		return token.MatchString(r.Capability) && r.OTPContext().Valid() && token.MatchString(r.ItemID) && revision.MatchString(r.Revision) && r.payload == nil && r.RequestID == "" && r.Nonce == ""
+	case "otp-ack", "cancel-otp":
+		return token.MatchString(r.Capability) && token.MatchString(r.RequestID) && r.payload == nil && r.Origin == "" && r.TabID == 0 && r.DocumentID == "" && r.WindowID == 0 && r.ItemID == "" && r.Revision == "" && (r.Type == "cancel-otp" && r.Nonce == "" || r.Type == "otp-ack" && revision.MatchString(r.Nonce))
 	case "save-new", "save-update":
 		if !token.MatchString(r.Capability) || !r.SaveContext().Valid() || r.RequestID != "" || r.Nonce != "" || r.payload == nil || !validPayload(r.payload) {
 			return false
@@ -84,6 +87,7 @@ func (r Request) valid() bool {
 }
 
 type Response struct {
+	Code       string         `json:"code,omitempty"`
 	Nonce      string         `json:"nonce,omitempty"`
 	ItemID     string         `json:"item_id,omitempty"`
 	Revision   string         `json:"revision,omitempty"`
@@ -101,6 +105,18 @@ type Response struct {
 // both fixed fields; other messages cannot accidentally serialize field values.
 func (r Response) MarshalJSON() ([]byte, error) {
 	type plain Response
+	if r.Type == "otp-fill" {
+		return nil, ErrProtocol
+	}
+	r.Code = ""
+	if r.Type == "otp-ready" {
+		return json.Marshal(struct {
+			V     int    `json:"v"`
+			ID    string `json:"id"`
+			Type  string `json:"type"`
+			Nonce string `json:"nonce"`
+		}{r.V, r.ID, r.Type, r.Nonce})
+	}
 	if r.Type != "fill" {
 		r.Username = ""
 		r.Password = ""
@@ -111,6 +127,12 @@ func (r Response) MarshalJSON() ([]byte, error) {
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}{plain: plain(r), Username: r.Username, Password: r.Password})
+}
+
+func (Response) String() string   { return "[native browser response]" }
+func (Response) GoString() string { return "[native browser response]" }
+func (r Request) OTPContext() personal.BrowserOTPContext {
+	return personal.BrowserOTPContext{BrowserContext: r.Context(), WindowID: r.WindowID}
 }
 
 type savePayload struct{ username, password []byte }
@@ -276,17 +298,20 @@ func ReadRequest(reader io.Reader) (Request, error) {
 	case "hello":
 	case "cancel":
 		expected = append(expected, "capability")
-	case "match", "fill", "save-new", "save-update":
+	case "match", "fill", "save-new", "save-update", "otp":
 		expected = append(expected, "capability", "origin", "tab_id", "document_id")
-		if r.Type == "fill" || r.Type == "save-update" {
+		if r.Type == "fill" || r.Type == "save-update" || r.Type == "otp" {
 			expected = append(expected, "item_id", "revision")
+		}
+		if r.Type == "otp" {
+			expected = append(expected, "window_id")
 		}
 		if r.Type == "save-new" || r.Type == "save-update" {
 			expected = append(expected, "window_id", "username", "password")
 		}
-	case "commit-ready", "cancel-save":
+	case "commit-ready", "cancel-save", "otp-ack", "cancel-otp":
 		expected = append(expected, "capability", "request_id")
-		if r.Type == "commit-ready" {
+		if r.Type == "commit-ready" || r.Type == "otp-ack" {
 			expected = append(expected, "nonce")
 		}
 	default:
@@ -309,59 +334,6 @@ func ReadRequest(reader io.Reader) (Request, error) {
 	}
 	return r, nil
 }
-
-// Writer closes the pipe at a finite deadline, releasing a blocked write. A
-// failed writer is terminal: retries could duplicate an unknown partial frame.
-type Writer struct {
-	mu      sync.Mutex
-	out     io.WriteCloser
-	timeout time.Duration
-	failed  bool
-}
-
-func NewWriter(w io.WriteCloser, timeout time.Duration) *Writer {
-	return &Writer{out: w, timeout: timeout}
-}
-func (w *Writer) Write(response Response) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.failed || w.timeout <= 0 || w.timeout > time.Second {
-		return ErrProtocol
-	}
-	raw, e := json.Marshal(response)
-	if e != nil || len(raw) > MaxOutput {
-		clear(raw)
-		return ErrProtocol
-	}
-	defer clear(raw)
-	data := binary.NativeEndian.AppendUint32(make([]byte, 0, len(raw)+4), uint32(len(raw)))
-	data = append(data, raw...)
-	defer clear(data)
-	expired := make(chan struct{})
-	timer := time.AfterFunc(w.timeout, func() { close(expired); w.out.Close() })
-	for len(data) > 0 {
-		n, err := w.out.Write(data)
-		if err != nil || n <= 0 || n > len(data) {
-			w.failed = true
-			timer.Stop()
-			w.out.Close()
-			return ErrProtocol
-		}
-		data = data[n:]
-	}
-	if !timer.Stop() {
-		w.failed = true
-		return ErrProtocol
-	}
-	select {
-	case <-expired:
-		w.failed = true
-		return ErrProtocol
-	default:
-	}
-	return nil
-}
-func (w *Writer) Close() error { return w.out.Close() }
 
 // These checks constrain normal browser launch; a same-user native process can
 // forge argv and is outside this authentication boundary.

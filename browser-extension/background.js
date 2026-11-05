@@ -10,8 +10,12 @@ if (typeof importScripts === "function") importScripts("core.js");
     rows = [],
     status = "未连接",
     pending = null,
+    pendingOTP = null,
+    otpCancellation = null,
+    otpUnknown = false,
     epoch = 0,
     unconfirmedSave = false;
+  const OTP_UNKNOWN = "验证码填充结果未确认，请核实页面";
   const SAVE_UNKNOWN = "结果未确认，请在金库核实，勿重复保存";
   const calls = new Map(),
     retired = new Set(),
@@ -51,10 +55,13 @@ if (typeof importScripts === "function") importScripts("core.js");
       .join("");
   }
   function clear() {
+    if (pendingOTP?.ackSent || pendingOTP?.injectionStarted) otpUnknown = true;
+    otpCancellation = null;
     capability = "";
     context = null;
     rows = [];
     pending = null;
+    pendingOTP = null;
     advanceEpoch();
     for (const [requestId, c] of calls) {
       retired.add(requestId);
@@ -71,7 +78,11 @@ if (typeof importScripts === "function") importScripts("core.js");
   }
   function disconnectWithStatus(message) {
     disconnect();
-    status = unconfirmedSave ? SAVE_UNKNOWN : message;
+    status = unconfirmedSave
+      ? SAVE_UNKNOWN
+      : otpUnknown
+        ? message + " · " + OTP_UNKNOWN
+        : message;
   }
   function startCall(type, requestId, timeout) {
     let resolve, reject;
@@ -172,11 +183,18 @@ if (typeof importScripts === "function") importScripts("core.js");
       status = uncertain
         ? "结果未确认，请在金库核实，勿重复保存"
         : "原生连接已断开，请重新连接";
+      if (otpUnknown) status += " · " + OTP_UNKNOWN;
       void api.runtime.lastError;
     });
     p.onMessage.addListener((message) => {
-      if (port !== p) return;
+      if (port !== p) {
+        if (message && typeof message === "object" && "code" in message)
+          message.code = "";
+        return;
+      }
       if (!core.validResponse(message)) {
+        if (message && typeof message === "object" && "code" in message)
+          message.code = "";
         disconnectWithStatus("原生协议错误，请重新连接");
         return;
       }
@@ -186,6 +204,7 @@ if (typeof importScripts === "function") importScripts("core.js");
         status = uncertain
           ? "原生金库已锁定 · 结果未确认，请在金库核实，勿重复保存"
           : "原生金库已锁定，请重新连接并配对";
+        if (otpUnknown) status += " · " + OTP_UNKNOWN;
         return;
       }
       if (message.type === "unpaired") {
@@ -194,12 +213,14 @@ if (typeof importScripts === "function") importScripts("core.js");
         status = uncertain
           ? "结果未确认，请在金库核实，勿重复保存"
           : "扩展连接已到期，请重新连接并配对";
+        if (otpUnknown) status += " · " + OTP_UNKNOWN;
         return;
       }
       if (!message || message.v !== 1 || typeof message.id !== "string")
         return disconnectWithStatus("原生协议错误，请重新连接");
       const call = calls.get(message.id);
       if (!call) {
+        if ("code" in message) message.code = "";
         if (retired.delete(message.id)) return;
         return disconnectWithStatus("原生协议错误，请重新连接");
       }
@@ -220,15 +241,19 @@ if (typeof importScripts === "function") importScripts("core.js");
         "save-new": "save-ready",
         "save-update": "save-ready",
         "commit-ready": "saved",
+        otp: "otp-ready",
+        "otp-ack": "otp-fill",
+        "cancel-otp": "cancelled",
       }[call.type];
       if (
         message.type === "unknown" &&
-        (call.type === "commit-ready" || call.type === "cancel-save")
+        ["commit-ready", "cancel-save", "cancel-otp"].includes(call.type)
       ) {
         call.resolve(message);
         return;
       }
       if (message.type !== expected) {
+        if ("code" in message) message.code = "";
         call.reject(Error("refused"));
         disconnectWithStatus("原生协议错误，请重新连接");
         return;
@@ -250,7 +275,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     }
   }
   async function match() {
-    if (!capability || pending) throw Error("refused");
+    if (!capability || pending || pendingOTP) throw Error("refused");
     rows = [];
     context = null;
     const generation = epoch,
@@ -288,7 +313,8 @@ if (typeof importScripts === "function") importScripts("core.js");
     const row = rows.find((r) => r.id === itemId && r.revision === revision),
       c = context,
       generation = epoch;
-    if (!capability || pending || !row || !c) throw Error("refused");
+    if (!capability || pending || pendingOTP || !row || !c)
+      throw Error("refused");
     const intent = { itemId, revision, tabId: c.tabId, windowId: c.windowId };
     pending = intent;
     status = "请在原生窗口核对来源、条目与修订并批准";
@@ -430,7 +456,8 @@ if (typeof importScripts === "function") importScripts("core.js");
   async function save(itemId, revision) {
     const generation = epoch,
       previous = context;
-    if (!capability || pending || unconfirmedSave) throw Error("refused");
+    if (!capability || pending || pendingOTP || unconfirmedSave)
+      throw Error("refused");
     if (itemId && !rows.some((r) => r.id === itemId && r.revision === revision))
       throw Error("refused");
     const intent = {
@@ -523,7 +550,223 @@ if (typeof importScripts === "function") importScripts("core.js");
       }
     }
   }
+  function validOTPProbe(value, c) {
+    return (
+      value &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      Object.keys(value).sort().join(",") ===
+        "now,origin,timeOrigin,top,wall" &&
+      value.top === true &&
+      value.origin === c.origin &&
+      Number.isFinite(value.timeOrigin) &&
+      value.timeOrigin > 0 &&
+      Number.isFinite(value.now) &&
+      value.now >= 0 &&
+      Number.isSafeInteger(value.wall) &&
+      value.wall > 0
+    );
+  }
+  async function otpProbe(c, generation, remaining = () => 1500) {
+    await bounded(current(c), generation, remaining());
+    const results = await bounded(
+      api.scripting.executeScript({
+        target: { tabId: c.tabId, documentIds: [c.documentId] },
+        func: core.otpDocument,
+        args: [c.origin, "probe"],
+      }),
+      generation,
+      remaining(),
+    );
+    if (
+      results.length !== 1 ||
+      results[0].frameId !== 0 ||
+      results[0].documentId !== c.documentId ||
+      !validOTPProbe(results[0].result, c)
+    )
+      throw Error("refused");
+    await bounded(current(c), generation, remaining());
+    return results[0].result;
+  }
+  function cancelOTP() {
+    const intent = pendingOTP;
+    if (!intent) return;
+    pendingOTP = null;
+    context = null;
+    rows = [];
+    advanceEpoch();
+    const cancelStatus = intent.sent ? OTP_UNKNOWN : "本次验证码填充已取消";
+    const cancellation = { generation: epoch, status: cancelStatus };
+    otpCancellation = cancellation;
+    otpUnknown = intent.sent;
+    status = cancelStatus;
+    const ownsCancellationView = () =>
+      !pending && !pendingOTP && !context && status === cancellation.status;
+    if (!intent.sent || !capability) return;
+    // Host cancellation cannot retract an injection already submitted to the
+    // browser, even if its executeScript promise has not settled yet.
+    void request("cancel-otp", {
+      capability,
+      request_id: intent.requestId,
+    }).then(
+      (result) => {
+        if (
+          otpCancellation !== cancellation ||
+          epoch !== cancellation.generation
+        )
+          return;
+        const confirmed =
+          result.type === "cancelled" && !intent.injectionStarted;
+        otpUnknown = !confirmed;
+        // A later ordinary fill/save/match owns its own status. The C result
+        // still resolves the historical OTP uncertainty without replacing it.
+        if (ownsCancellationView())
+          status = confirmed ? "本次验证码填充已取消" : OTP_UNKNOWN;
+      },
+      () => {
+        if (
+          otpCancellation === cancellation &&
+          epoch === cancellation.generation
+        ) {
+          otpUnknown = true;
+          if (ownsCancellationView()) status = OTP_UNKNOWN;
+        }
+      },
+    );
+  }
+  async function otp(itemId, revision) {
+    const row = rows.find((r) => r.id === itemId && r.revision === revision);
+    if (!row || !context || !capability || pending || pendingOTP)
+      throw Error("refused");
+    const c = context,
+      generation = epoch;
+    const intent = {
+      requestId: id(),
+      tabId: c.tabId,
+      windowId: c.windowId,
+      sent: false,
+      ackSent: false,
+      injectionStarted: false,
+    };
+    otpCancellation = null;
+    otpUnknown = false;
+    pendingOTP = intent;
+    status = "请在原生窗口批准本次验证码填充";
+    let response = null,
+      live = true;
+    try {
+      await otpProbe(c, generation);
+      if (generation !== epoch || pendingOTP !== intent) throw Error("refused");
+      intent.sent = true;
+      const challenge = await request(
+        "otp",
+        {
+          ...fields(c),
+          window_id: c.windowId,
+          item_id: itemId,
+          revision,
+        },
+        35000,
+        intent.requestId,
+      );
+      if (generation !== epoch || pendingOTP !== intent) throw Error("refused");
+      // This single background deadline starts BEFORE the final probe. The page
+      // carries its own clock sample; clocks from different worlds never mix.
+      const started = performance.now(),
+        wall = Date.now();
+      const remaining = () => {
+        const now = performance.now(),
+          elapsed = now - started,
+          wallNow = Date.now();
+        if (
+          !Number.isFinite(elapsed) ||
+          elapsed < 0 ||
+          elapsed >= 1500 ||
+          wallNow < wall ||
+          wallNow >= wall + 1500
+        )
+          throw Error("refused");
+        return Math.max(1, Math.min(1500 - elapsed, wall + 1500 - wallNow));
+      };
+      const timing = await otpProbe(c, generation, remaining);
+      if (generation !== epoch || pendingOTP !== intent) throw Error("refused");
+      const ackTimeout = remaining();
+      intent.ackSent = true;
+      const reply = request(
+        "otp-ack",
+        {
+          capability,
+          request_id: intent.requestId,
+          nonce: challenge.nonce,
+        },
+        ackTimeout,
+      );
+      challenge.nonce = "";
+      // A response which arrives after navigation/timeout is never retained.
+      reply.then(
+        (value) => {
+          if (!live || generation !== epoch || pendingOTP !== intent)
+            value.code = "";
+        },
+        (error) => {
+          intent.knownRefusal = error.knownRefusal === true;
+        },
+      );
+      response = await bounded(reply, generation, remaining());
+      if (generation !== epoch || pendingOTP !== intent) throw Error("refused");
+      await bounded(current(c), generation, remaining());
+      const args = [c.origin, "fill", response.code, timing];
+      response.code = "";
+      let injection;
+      try {
+        remaining();
+        intent.injectionStarted = true;
+        injection = api.scripting.executeScript({
+          target: { tabId: c.tabId, documentIds: [c.documentId] },
+          func: core.otpDocument,
+          args,
+        });
+      } finally {
+        args[2] = "";
+      }
+      const results = await bounded(injection, generation, remaining());
+      remaining();
+      if (
+        generation !== epoch ||
+        pendingOTP !== intent ||
+        results.length !== 1 ||
+        results[0].frameId !== 0 ||
+        results[0].documentId !== c.documentId ||
+        results[0].result !== true
+      )
+        throw Error("refused");
+      status = "本次已请求填充验证码；未自动提交";
+    } catch {
+      if (generation === epoch && pendingOTP === intent) {
+        otpUnknown =
+          intent.injectionStarted || (intent.ackSent && !intent.knownRefusal);
+        status = otpUnknown ? OTP_UNKNOWN : "本次验证码填充被拒绝或已过期";
+        if (capability)
+          void request("cancel-otp", {
+            capability,
+            request_id: intent.requestId,
+          }).catch(() => {});
+      }
+    } finally {
+      live = false;
+      if (response) response.code = "";
+      if (generation === epoch && pendingOTP === intent) {
+        pendingOTP = null;
+        rows = [];
+        context = null;
+      }
+    }
+  }
   function cancelContext() {
+    if (pendingOTP) {
+      cancelOTP();
+      return;
+    }
     if (!context && !pending) return;
     const intent = pending;
     context = null;
@@ -544,15 +787,21 @@ if (typeof importScripts === "function") importScripts("core.js");
   api.tabs.onActivated.addListener(cancelContext);
   api.tabs.onUpdated.addListener((tabId, change) => {
     if (
-      (context?.tabId === tabId || pending?.tabId === tabId) &&
+      (context?.tabId === tabId ||
+        pending?.tabId === tabId ||
+        pendingOTP?.tabId === tabId) &&
       ("url" in change || change.status === "loading")
     )
       cancelContext();
   });
   api.windows.onFocusChanged.addListener((windowId) => {
     if (windowId === api.windows.WINDOW_ID_NONE) return;
-    const bound = pending?.windowId ?? context?.windowId;
-    if ((pending || context) && (bound == null || bound !== windowId))
+    const bound =
+      pendingOTP?.windowId ?? pending?.windowId ?? context?.windowId;
+    if (
+      (pendingOTP || pending || context) &&
+      (bound == null || bound !== windowId)
+    )
       cancelContext();
   });
   api.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -589,6 +838,21 @@ if (typeof importScripts === "function") importScripts("core.js");
               status = unconfirmedSave ? SAVE_UNKNOWN : "未保存";
           });
           break;
+        case "otp":
+          if (
+            Object.keys(message).sort().join(",") !== "id,revision,type" ||
+            !/^[a-f0-9]{32}$/.test(message.id || "") ||
+            !/^[a-f0-9]{64}$/.test(message.revision || "")
+          )
+            throw Error("refused");
+          void otp(message.id, message.revision).catch(() => {
+            if (requestEpoch === epoch) status = "本次验证码填充被拒绝";
+          });
+          break;
+        case "cancel-otp":
+          if (Object.keys(message).join(",") !== "type") throw Error("refused");
+          cancelOTP();
+          break;
         case "fill":
           if (
             typeof message.id !== "string" ||
@@ -604,13 +868,17 @@ if (typeof importScripts === "function") importScripts("core.js");
       }
       return {
         connected: !!capability,
-        status,
+        status:
+          otpUnknown && !status.includes(OTP_UNKNOWN)
+            ? status + " · " + OTP_UNKNOWN
+            : status,
         candidates: rows.map((r) => ({
           id: r.id,
           title: r.title,
           revision: r.revision,
         })),
-        pending: !!pending,
+        pending: !!pending || !!pendingOTP,
+        otpPending: !!pendingOTP,
         saveBlocked: unconfirmedSave,
         origin: context?.origin || "",
       };
@@ -622,9 +890,13 @@ if (typeof importScripts === "function") importScripts("core.js");
           : "操作被拒绝；请确认原生连接和当前顶层 HTTPS 页面";
       sendResponse({
         connected: !!capability,
-        status,
+        status:
+          otpUnknown && !status.includes(OTP_UNKNOWN)
+            ? status + " · " + OTP_UNKNOWN
+            : status,
         candidates: [],
-        pending: !!pending,
+        pending: !!pending || !!pendingOTP,
+        otpPending: !!pendingOTP,
         saveBlocked: unconfirmedSave,
         origin: "",
       });

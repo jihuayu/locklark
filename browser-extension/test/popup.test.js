@@ -33,6 +33,7 @@ function harness() {
       "connect",
       "refresh",
       "save-new",
+      "cancel-otp",
       "disconnect",
       "candidates",
     ].map((id) => ["#" + id, element()]),
@@ -212,4 +213,34 @@ test("disconnect interrupts an action and its old completion cannot affect the n
     assert.equal(h.elements["#status"].textContent, "ready-b");
     assert.equal(h.elements["#refresh"].disabled, false);
   }
+});
+
+test("OTP action sends only candidate metadata and cancellation stays available while pending", async () => {
+  const h = harness();
+  h.take("state").resolve(state());
+  await flush();
+  const otp = h.row().children[2];
+  assert.equal(otp.dataset.action, "otp");
+  h.click(otp);
+  const request = h.take("otp");
+  assert.equal(
+    Object.keys(request.message).sort().join(","),
+    "id,revision,type",
+  );
+  assert.equal(h.row().children[2].disabled, true);
+  h.poll();
+  h.take("state").resolve(state("a", { pending: true, otpPending: true }));
+  await flush();
+  assert.equal(h.elements["#cancel-otp"].disabled, false);
+  h.click("#cancel-otp");
+  const cancel = h.take("cancel-otp");
+  assert.equal(Object.keys(cancel.message).join(","), "type");
+  cancel.resolve(state("a", { pending: false, otpPending: false }));
+  await flush();
+  h.take("state").resolve(state());
+  await flush();
+  assert.equal(h.elements["#cancel-otp"].disabled, true);
+  request.resolve(state("old", { pending: true, otpPending: true }));
+  await flush();
+  assert.equal(h.elements["#cancel-otp"].disabled, true);
 });

@@ -89,3 +89,30 @@ test("expired or unbounded injection approval is refused before DOM access", () 
     false,
   );
 });
+test("OTP response DTO isolates its challenge and ASCII code", () => {
+  const id = "a".repeat(32);
+  assert.equal(
+    core.validResponse({ v: 1, id, type: "otp-ready", nonce: "b".repeat(64) }),
+    true,
+  );
+  for (const code of ["012345", "01234567"])
+    assert.equal(
+      core.validResponse({ v: 1, id, type: "otp-fill", code }),
+      true,
+    );
+  for (const response of [
+    { v: 1, id, type: "otp-ready", nonce: "b".repeat(63) },
+    { v: 1, id, type: "otp-ready", nonce: "b".repeat(64), code: "012345" },
+    ...["12345", "1234567", "123456789", "１２３４５６", 123456].map(
+      (code) => ({ v: 1, id, type: "otp-fill", code }),
+    ),
+    { v: 1, id, type: "otp-fill", code: "012345", password: "forbidden" },
+    { v: 1, id, type: "fill", username: "", password: "", code: "012345" },
+    { v: 1, id, type: "cancelled", code: "012345" },
+  ])
+    assert.equal(core.validResponse(response), false);
+});
+test("static OTP injection is exported and fails closed outside its document", () => {
+  assert.equal(typeof core.otpDocument, "function");
+  assert.equal(core.otpDocument("https://example.test", "probe"), false);
+});

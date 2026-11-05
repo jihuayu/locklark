@@ -233,9 +233,10 @@ const path = require("node:path");
       }),
       "Iframe capture was not refused",
     );
+    await require("./browser_otp_dom.cjs")(page);
     console.log(
       browserName +
-        " DOM: fill and static capture; no writes/events/submission; Unicode/UTF-8/surrogate bounds; hidden/disabled/readonly/ambiguous/cross-action/base/iframe refusals passed",
+        " DOM: login fill, static capture and OTP probe/fill with fixed clocks; no writes/events/submission; Unicode/UTF-8/surrogate bounds; hidden/disabled/readonly/ambiguous/cross-action/base/iframe refusals passed",
     );
   } finally {
     await browser.close();

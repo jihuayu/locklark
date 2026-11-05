@@ -12,7 +12,7 @@ const desktopOTPShowAction = "item.desktop.show.otp-code"
 const desktopOTPCopyAction = "item.desktop.copy.otp-code"
 
 func otpAction(a string) bool {
-	return a == otpDisclosureAction || a == desktopOTPShowAction || a == desktopOTPCopyAction
+	return a == otpDisclosureAction || a == desktopOTPShowAction || a == desktopOTPCopyAction || a == browserOTPAction
 }
 
 type NativeOTPTarget struct{ ID, Revision string }
@@ -80,7 +80,7 @@ func (c *otpCap) cancel() {
 func (s *Session) registerOTPCap(c *otpCap) bool {
 	s.saveMu.Lock()
 	defer s.saveMu.Unlock()
-	if s.lockRequested.Load() {
+	if s.lockRequested.Load() || !s.otpCapacity() {
 		c.cancel()
 		return false
 	}
@@ -103,7 +103,11 @@ func (s *Session) otpNowTime() time.Time {
 	}
 	return time.Now()
 }
-func (s *Session) otpCapacity() bool { return len(s.otpPrepared)+len(s.otpDeliveries) < 8 }
+func (s *Session) otpCapacity() bool {
+	count := 0
+	s.otpCaps.Range(func(_, _ any) bool { count++; return count < 8 })
+	return count < 8
+}
 func (s *Session) PrepareOTP(target NativeOTPTarget, purpose string, g *MutationGate) (*NativeOTP, error) {
 	action := desktopOTPShowAction
 	if purpose == "copy" {

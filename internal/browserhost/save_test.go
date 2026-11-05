@@ -81,7 +81,7 @@ func TestSaveHandshakeDoesNotWriteBeforeFinalDocumentAcknowledgement(t *testing.
 		t.Fatal("saved receipt")
 	}
 	if c.Handle(commit) != nil {
-		t.Fatal("replay should be a fixed refusal")
+		t.Fatal("replay should be silently ignored")
 	}
 	rows, e = s.List("active")
 	if e != nil || len(rows) != 2 {

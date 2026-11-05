@@ -101,6 +101,35 @@ transaction that already won. Browser state and database commit are not one
 atomic operation. See [save validation](../docs/browser-save-validation.md) for
 the exact verification status and limitations.
 
+To fill a saved TOTP, configure the login's `otp` field in the native vault,
+read the current website's candidates, and choose **填充验证码** (Fill one-time
+code). Approve that exact website and item in MyGo. The extension rechecks the
+original document before requesting the code. It supports one visible, writable
+top-level `input[autocomplete=one-time-code]` in a same-origin form, with a
+6- or 8-digit code. Split fields, multiple targets, frames and cross-origin form
+actions or submitters are refused. It never calls submit or automatically obtains
+the next period's code. Seeds and codes do not appear in the popup, extension
+storage or Next.js management pages.
+
+**取消本次验证码** cancels the pending OTP operation. Confirmed cancellation is
+shown only when the host confirms cancellation and local injection has not
+started. **验证码填充结果未确认** means to inspect the page before deciding what
+to do; disconnecting or reconnecting does not erase this uncertainty. A fresh
+explicit request is allowed and requires fresh native approval. There is no
+automatic retry. An injection already submitted to the browser cannot be
+recalled by cancelling its pending promise.
+
+OTP has a separate intent action and single-use challenge, acknowledgement and
+output grant. The final document probe starts a 1500ms budget; page and worker
+monotonic clocks are checked within their own contexts, with wall-clock checks
+providing additional refusal. Receiving a reply cannot renew that budget or the
+original TOTP period. Only the dedicated writer path may serialize a granted
+code. Production native pipe writes have a fatal watchdog, including ordinary
+metadata replies, so a blocked inherited stdout cannot hold the connection
+indefinitely. See [OTP design](../docs/browser-otp-design.md) and
+[OTP validation](../docs/browser-otp-validation.md) for the exact evidence and
+remaining platform checks.
+
 The extension has only `activeTab`, `scripting`, and `nativeMessaging`. There is
 no persistent host permission, page-message bridge, value persistence, or
 localhost secret proxy. Origin, active tab, and document identity are obtained
@@ -117,6 +146,11 @@ written or fields already injected. Pipe failures remain delivery unknown; audit
 records contain committed intent and a purpose-separated binding digest, never
 the values or a claim that the website received them.
 
+Repeated message IDs are silently ignored without another terminal reply or
+side effect, even when reused with another message type. They still count toward
+the connection's 128-message budget. This prevents old cancellation or commit
+messages from disrupting a new operation.
+
 Native launch allowlists constrain normal browser invocation. An application
 running as the same OS user can forge process arguments or control that user's
 software; native messaging does not isolate that attacker. The host trusts the
@@ -132,7 +166,7 @@ LOCKLARK_TEST_PLAYWRIGHT=/absolute/path/to/playwright node scripts/browser_exten
 ```
 
 Node tests use a simulated browser API only for worker races and policy checks.
-The DOM script runs the actual static fill/capture function in Chromium and
+The DOM script runs the actual static fill/capture and OTP functions in Chromium and
 Firefox, including form/iframe refusals and Unicode bounds. These do not replace real extension/native/MyGo UI approval
 acceptance, independent review, or platform-specific hardware tests.
 
@@ -157,5 +191,8 @@ Firefox acceptance additionally needs Mozilla geckodriver 0.36.0 and
 Its native registration helper refuses an existing user manifest, and cleanup
 removes only the exact unmodified file created for that run. Private diagnostics
 capture the matched host window or the test popup, never the whole desktop.
+OTP stages disable diagnostic screenshots and scan controller output, native
+logs and persistent diagnostics for synthetic factors and window-specific codes;
+the separate OTP privacy wrapper also exercises a real driver argument failure.
 See [the validation record](../docs/browser-native-validation.md) and the script
 headers for dependencies and environment variables.

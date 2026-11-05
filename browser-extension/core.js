@@ -71,6 +71,8 @@ globalThis.LocklarkCore = (() => {
         error: ["v", "id", "type", "error"],
         cancelled: ["v", "id", "type"],
         "save-ready": ["v", "id", "type", "nonce"],
+        "otp-ready": ["v", "id", "type", "nonce"],
+        "otp-fill": ["v", "id", "type", "code"],
         saved: ["v", "id", "type", "item_id", "revision"],
         unknown: ["v", "id", "type"],
       },
@@ -79,7 +81,12 @@ globalThis.LocklarkCore = (() => {
     if (m.type === "locked") return true;
     if (m.type === "unpaired") return m.error === "expired";
     if (!/^[a-f0-9]{32}$/.test(m.id || "")) return false;
-    if (m.type === "save-ready") return /^[a-f0-9]{64}$/.test(m.nonce || "");
+    if (m.type === "save-ready" || m.type === "otp-ready")
+      return /^[a-f0-9]{64}$/.test(m.nonce || "");
+    if (m.type === "otp-fill")
+      return (
+        typeof m.code === "string" && /^(?:[0-9]{6}|[0-9]{8})$/.test(m.code)
+      );
     if (m.type === "saved")
       return (
         /^[a-f0-9]{32}$/.test(m.item_id || "") &&
@@ -248,6 +255,152 @@ globalThis.LocklarkCore = (() => {
       return false;
     }
   }
+  // Serialized into the original top-frame isolated world. Probe and fill use
+  // one policy; no selector, page bridge, or input values leave the probe.
+  function otpDocument(expected, mode, code, timing) {
+    "use strict";
+    try {
+      if (
+        window !== window.top ||
+        location.origin !== expected ||
+        !["probe", "fill"].includes(mode)
+      )
+        return false;
+      function clock() {
+        return {
+          timeOrigin: performance.timeOrigin,
+          now: performance.now(),
+          wall: Date.now(),
+        };
+      }
+      function alive(sample) {
+        return (
+          Number.isFinite(sample.timeOrigin) &&
+          sample.timeOrigin > 0 &&
+          Number.isFinite(sample.now) &&
+          sample.now >= 0 &&
+          Number.isSafeInteger(sample.wall) &&
+          sample.wall > 0
+        );
+      }
+      function inBudget() {
+        const current = clock();
+        return (
+          alive(current) &&
+          current.timeOrigin === timing.timeOrigin &&
+          current.now >= timing.now &&
+          current.now < timing.now + 1500 &&
+          current.wall >= timing.wall &&
+          current.wall < timing.wall + 1500
+        );
+      }
+      if (mode === "probe") {
+        if (code !== undefined || timing !== undefined) return false;
+      } else if (
+        typeof code !== "string" ||
+        !/^(?:[0-9]{6}|[0-9]{8})$/.test(code) ||
+        !timing ||
+        typeof timing !== "object" ||
+        Array.isArray(timing) ||
+        Object.keys(timing).sort().join(",") !==
+          "now,origin,timeOrigin,top,wall" ||
+        timing.top !== true ||
+        timing.origin !== expected ||
+        !alive(timing) ||
+        !inBudget()
+      )
+        return false;
+      function eligible(input) {
+        if (
+          !input ||
+          !input.isConnected ||
+          input.disabled ||
+          input.readOnly ||
+          !["text", "tel", "number", "password"].includes(input.type) ||
+          input.matches(":disabled") ||
+          input.closest('[hidden],[inert],[aria-hidden="true"]') ||
+          (input.maxLength >= 0 &&
+            input.maxLength < (mode === "fill" ? code.length : 6))
+        )
+          return false;
+        for (
+          let node = input;
+          node instanceof Element;
+          node = node.parentElement
+        ) {
+          const style = getComputedStyle(node);
+          if (
+            style.display === "none" ||
+            style.visibility !== "visible" ||
+            Number(style.opacity) === 0
+          )
+            return false;
+        }
+        const rect = input.getBoundingClientRect();
+        return (
+          input.getClientRects().length > 0 && rect.width > 0 && rect.height > 0
+        );
+      }
+      const inputs = [
+        ...document.querySelectorAll('input[autocomplete="one-time-code"]'),
+      ];
+      if (inputs.length !== 1) return false;
+      const input = inputs[0],
+        form = input.form;
+      function sameAction(raw) {
+        const url = new URL(raw || location.href, document.baseURI);
+        return (
+          url.protocol === "https:" &&
+          url.origin === expected &&
+          !url.username &&
+          !url.password
+        );
+      }
+      function validTarget() {
+        if (
+          window !== window.top ||
+          location.origin !== expected ||
+          !eligible(input) ||
+          !form ||
+          input.form !== form ||
+          !form.isConnected ||
+          form.ownerDocument !== document ||
+          !sameAction(form.getAttribute("action")) ||
+          document.querySelectorAll('input[autocomplete="one-time-code"]')
+            .length !== 1
+        )
+          return false;
+        for (const submitter of document.querySelectorAll(
+          "button[formaction],input[formaction]",
+        ))
+          if (
+            submitter.form === form &&
+            !sameAction(submitter.getAttribute("formaction"))
+          )
+            return false;
+        return true;
+      }
+      if (!validTarget()) return false;
+      if (mode === "probe") {
+        const sample = clock();
+        return alive(sample)
+          ? { origin: expected, top: true, ...sample }
+          : false;
+      }
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      ).set;
+      // No event or await separates the final checks and this sole write.
+      if (!validTarget() || !inBudget()) return false;
+      setter.call(input, code);
+      code = "";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      return true;
+    } catch {
+      return false;
+    }
+  }
   return {
     originFromURL,
     validSender,
@@ -255,6 +408,7 @@ globalThis.LocklarkCore = (() => {
     validResponse,
     probe,
     fillDocument,
+    otpDocument,
   };
 })();
 if (typeof module !== "undefined") module.exports = globalThis.LocklarkCore;

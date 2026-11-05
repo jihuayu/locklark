@@ -1,5 +1,7 @@
 # MyGo 日常密码生成与 TOTP 验收
 
+[PR #28](https://github.com/jihuayu/locklark/pull/28) 已于2026-11-05正常squash合入 main `4f37d8ccd9499b6a3e292709e7d567747a8ada7a`。最终精确head `85b400ff328525572fdc98d9855b011613b9b2bd` 的 [CI 42120014509](https://github.com/jihuayu/locklark/actions/runs/42120014509) 四项全部成功，Windows/macOS原生剪贴板smoke、Ubuntu CLI/Go及Web/两浏览器真实GUI均通过。主代理独立核对run/head/四job后按正常流程合并。以下保留此前红测及各轮历史记录，不把早期“等待CI”视作当前状态。
+
 基线 main `c9d4a5d284ddc15aa58953896e9b5773873bb1e6`，分支 `codex/desktop-daily-tools`。用户指定主代理架构与验收、Sol xhigh 实现、Luna max review；[架构约定](desktop-daily-design.md) 已根据Luna预审冻结。本批本地实现、失败先行、独立复核和最终GUI均已完成；精确head远端CI与合并仍待完成。以下保留各轮失败和修正，不能将候选或旧轮证据替代最终结果。
 
 前批浏览器保存/更新 [PR #27](https://github.com/jihuayu/locklark/pull/27) 精确head `8d63fd6bce7068e8a7ae8968eb48425613026345` 的四项 [CI 42089993817](https://github.com/jihuayu/locklark/actions/runs/42089993817) 全部通过并已合入该基线。
