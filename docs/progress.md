@@ -1,5 +1,7 @@
 # Locklark 开发进度
 
+第七批签名插件目录 [PR #20](https://github.com/jihuayu/locklark/pull/20) 已经 Luna/max、全量 Go/竞态和 Ubuntu/Windows CI 合入 main `1dfc8b0`（run 42001953615，head `6e5b315`）。第八批接个人 CLI 隐藏查询的标题搜索：Unicode 匹配、状态范围、同名保留、事务审计与无原始查询绑定，见[标题搜索验收](personal-title-search-validation.md)。桌面、浏览器/手机、远端同步及其他产品缺口仍按七条范围保留。
+
 第六批个人 GitHub 实时查询 PR #19 已经 Luna/max 与 Ubuntu/Windows CI 合入 main `8659bb9`（run 41994363160，head `0fcf57d`）。继续第六条产品线的离线签名插件目录：独立公钥配置、包摘要确认、安装/升级/永久撤销、checkpoint 与原子事件，见[签名插件目录验收](signed-plugin-catalog-validation.md)。这批只管理静态签名数据，第三方执行仍关闭，操作系统沙箱和管理 UI 尚未完成。
 
 七条推进第五批 PR #18 已经 Luna/max 与 Ubuntu/Windows CI 合入 main `c8c38e4`（run 41991910945，head `33f56f0`）。第六批接个人 CLI 人工确认的真实 GitHub HTTPS 适配器入口，见[实时查询验收](personal-live-pull-validation.md)。真实网络代码已接入，测试仍区分个人事务/受控 TLS/终端拒绝；真实账号成功调用、远程审批与机器授权未完成，不能由本入口代替。

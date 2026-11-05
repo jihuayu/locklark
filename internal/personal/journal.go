@@ -87,7 +87,10 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 	} else if e.ReportDigest != "" {
 		return invalid
 	}
-	if e.Action != "backup.prepare" && e.Action != "vault.restore" && !boundValueAction(e.Action) && e.Link != "" {
+	if e.Action != "backup.prepare" && e.Action != "vault.restore" && !boundValueAction(e.Action) && e.Action != searchAction && e.Link != "" {
+		return invalid
+	}
+	if e.Action == searchAction && !digestOK(e.Link) {
 		return invalid
 	}
 	if boundValueAction(e.Action) && (e.Result == "intent" && !digestOK(e.Link) || e.Result != "intent" && e.Link != "") {
@@ -171,7 +174,7 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 		if n <= 1 || !idOK(e.Item) {
 			return invalid
 		}
-	case "item.list", "item.list.archived", "item.list.trashed", "item.list.all", "audit.list", "audit.archived", "reference.list", healthAction:
+	case searchAction, "item.list", "item.list.archived", "item.list.trashed", "item.list.all", "audit.list", "audit.archived", "reference.list", healthAction:
 		if n <= 1 || e.Item != "" {
 			return invalid
 		}

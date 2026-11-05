@@ -22,7 +22,7 @@ import (
 	"unicode/utf8"
 )
 
-var personalUsage = errors.New("usage: locklark personal <init|add-login|list|audit|archived-audit|references|health> --file PATH, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password|otp|url, or reveal-login --file PATH --id ID --revision REV --field username|password, or generate-login --file PATH [--length N], or regenerate-password --file PATH --id ID --revision REV [--length N], or otp --file PATH --id ID --revision REV, or reveal-ref|otp-ref --file PATH --ref REF --revision REV, or inspect-1pux|plan-import-1pux --file PATH --source ARCHIVE, or import-1pux --file PATH --source ARCHIVE --digest PLAN_DIGEST, or export-kdbx --file PATH --out NEW_FILE.kdbx, or archive-login|unarchive-login --file PATH --id ID --revision REV, or list --file PATH [--state active|archived|trashed|all], or trash-login|restore-login --file PATH --id ID --revision REV, or match-logins --file PATH --origin HTTPS_ORIGIN --frame-origin HTTPS_ORIGIN, or inject-json --file PATH --id ID --revision REV --field username|password --name PROPERTY --out NEW.json, or github-pull --file PATH --id ID --revision REV --repository-id NUMERIC_ID --owner OWNER --repository NAME --number PR --api-ip PUBLIC_IPV4")
+var personalUsage = errors.New("usage: locklark personal <init|add-login|list|audit|archived-audit|references|health> --file PATH, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password|otp|url, or reveal-login --file PATH --id ID --revision REV --field username|password, or generate-login --file PATH [--length N], or regenerate-password --file PATH --id ID --revision REV [--length N], or otp --file PATH --id ID --revision REV, or reveal-ref|otp-ref --file PATH --ref REF --revision REV, or inspect-1pux|plan-import-1pux --file PATH --source ARCHIVE, or import-1pux --file PATH --source ARCHIVE --digest PLAN_DIGEST, or export-kdbx --file PATH --out NEW_FILE.kdbx, or archive-login|unarchive-login --file PATH --id ID --revision REV, or list|search --file PATH [--state active|archived|trashed|all], or trash-login|restore-login --file PATH --id ID --revision REV, or match-logins --file PATH --origin HTTPS_ORIGIN --frame-origin HTTPS_ORIGIN, or inject-json --file PATH --id ID --revision REV --field username|password --name PROPERTY --out NEW.json, or github-pull --file PATH --id ID --revision REV --repository-id NUMERIC_ID --owner OWNER --repository NAME --number PR --api-ip PUBLIC_IPV4")
 
 // One terminal mode covers the entire interaction; no prompt or inter-field
 // gap is visible while echo is enabled.
@@ -128,7 +128,7 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 		if len(opts) != 3 || !personal.ValidEditTarget(opts["--id"], opts["--revision"], "title") {
 			return personalUsage
 		}
-	case "list":
+	case "list", "search":
 		if len(opts) == 1 {
 			opts["--state"] = "active"
 		} else if len(opts) != 2 || !personal.ValidStateFilter(opts["--state"]) {
@@ -289,6 +289,16 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 		}
 		defer clear(key)
 		switch action {
+		case "search":
+			if _, e = fmt.Fprint(os.Stderr, "仅搜索当前登录标题，不搜索用户名、密码、验证码配置或导入来源旧值。\r\n"); e != nil {
+				return e
+			}
+			query, e := consoleField("搜索标题（隐藏输入）")
+			defer clear(query)
+			if e != nil {
+				return e
+			}
+			response, err = personal.Search(path, string(pw), key, string(query), opts["--state"])
 		case "github-pull":
 			if _, e = fmt.Fprintf(os.Stderr, "将条目 %s（修订 %s）的 password 作为 GitHub token，仅发送至 api.github.com。\r\n目标：%s/%s，固定仓库 ID %s，PR #%d；独立确认的 API IPv4：%s。\r\n只读查询状态，不返回 token；此次确认仅授权一次请求，失败或中断后结果可能未知。\r\n", reveal.ID, reveal.Revision, pull.Repository.Owner, pull.Repository.Name, pull.Repository.ID, pull.Number, pull.Address); e != nil {
 				return e

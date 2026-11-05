@@ -197,6 +197,7 @@ type result struct {
 }
 
 type commandOption struct {
+	search     *searchRequest
 	livePull   *LivePullRequest
 	injection  *injectionRequest
 	migration  *importRequest
@@ -254,6 +255,9 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 	}
 	if (action == matchAction) != (option.match != nil) {
 		return result{}, invalid
+	}
+	if (action == searchAction) != (option.search != nil) || option.search != nil && !option.search.valid() {
+		return result{}, ErrSearchQuery
 	}
 	if migrationAction(action) != (option.migration != nil) {
 		return result{}, invalid
@@ -355,6 +359,11 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			}
 		}
 		switch action {
+		case searchAction:
+			out.rows, e = searchRows(items, revisions, *option.search)
+			if e != nil {
+				return e
+			}
 		case healthAction:
 			out.health, e = localHealth(items, revisions)
 			if e != nil {
@@ -591,6 +600,13 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			}
 		}
 		var link string
+		if action == searchAction {
+			link, e = option.search.binding(i.AuditEncryption)
+			if e != nil {
+				return e
+			}
+			out.destinationDigest = link
+		}
 		if injectAction(action) && refusal == nil {
 			link, e = option.injection.binding(i.AuditEncryption)
 			if e != nil {
@@ -620,7 +636,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		if e != nil {
 			return e
 		}
-		if (readValueAction(action) || action == otpDisclosureAction || action == inspectionAction || action == exportAction || migrationAction(action) || action == healthAction) && refusal == nil {
+		if (readValueAction(action) || action == otpDisclosureAction || action == inspectionAction || action == exportAction || migrationAction(action) || action == healthAction || action == searchAction) && refusal == nil {
 			out.session, out.intent = ev.Session, ev.hash()
 		}
 		if action == "backup.prepare" {
