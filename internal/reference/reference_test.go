@@ -180,6 +180,19 @@ func TestResolveBoundsNestedCatalogAndText(t *testing.T) {
 	}
 }
 
+func TestRejectUnicodeFormatMetadata(t *testing.T) {
+	for _, control := range []string{"\u202e", "\u2066", "\u200d", "\U000e0001"} {
+		c := catalog()
+		c[0].Items[0].Name = "visible" + control + "tail"
+		if err := Validate(c); !errors.Is(err, ErrCatalog) {
+			t.Fatal("format control accepted")
+		}
+		if got, err := Resolve("op://vault-1/item-1/field-password", c); !errors.Is(err, ErrCatalog) || got != (Target{}) {
+			t.Fatal("format control catalog resolved")
+		}
+	}
+}
+
 func TestUnsupportedNamesUseIDsWithoutUnicodeFolding(t *testing.T) {
 	c := catalog()
 	c[0].Name = "工作"

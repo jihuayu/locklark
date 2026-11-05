@@ -72,6 +72,10 @@ def check(binary):
         assert "op://" not in json.dumps(events) and "private-missing" not in json.dumps(events)
         assert any(e["action"] == "item.reveal.password" and e["session"] == receipt["session"] for e in events)
         assert any(e["action"] == "item.reveal.otp-code" and e["session"] == otp_receipt["session"] for e in events)
+        invoke(binary, "edit-login", path, factors + [("新标题", "visible\u202etail")],
+               options=("--id", row["id"], "--revision", edited["revision"], "--field", "title"))
+        invoke(binary, "references", path, factors, ok=False,
+               expect_error="invalid field reference metadata", forbidden=("\u202e", seed, secret))
     print("PASS: authenticated index, reference disclosure, OTP HMAC, ambiguity, type/revision refusals and private audit")
 
 

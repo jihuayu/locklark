@@ -177,6 +177,25 @@ func TestReferenceAuthenticationRollbackAndCatalogFailure(t *testing.T) {
 	}
 }
 
+func TestReferenceIndexRejectsUnicodeFormatTitle(t *testing.T) {
+	path, key, target := revealFixture(t)
+	for _, control := range []string{"\u202e", "\u2066", "\u200d", "\U000e0001"} {
+		revision, err := EditLogin(path, "fixture", key, Edit{ID: target.ID, Revision: target.Revision, Field: "title", Value: "visible" + control + "tail"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		target.Revision = revision
+		got, err := References(path, "fixture", key)
+		if !errors.Is(err, reference.ErrCatalog) || got.Items != nil || got.VaultID != "" {
+			t.Fatal("format control title returned metadata", err)
+		}
+		var output bytes.Buffer
+		if _, err := RevealLogin(path, "fixture", key, target, &output); err != nil {
+			t.Fatal("format title broke direct ID disclosure", err)
+		}
+	}
+}
+
 func TestReferenceConcurrentEditAndRecovery(t *testing.T) {
 	path, key, target := revealFixture(t)
 	index, err := References(path, "fixture", key)
