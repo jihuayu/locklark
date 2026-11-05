@@ -32,6 +32,8 @@ Go TOTP 核心已通过 RFC 6238/4226 向量，支持有限的 Base32/otpauth �
 
 ## 按字段引用操作
 
+离线插件包可用 `plugin inspect/install/list/audit/revoke` 管理，安装要求独立核对的发布者公钥、可信 pins 文件、已检查包的 digest 和当前目录 checkpoint。升级必须数值版本递增，撤销 ID 在该目录永久禁用；所有状态仍为 `execution: disabled`。安装不运行脚本、不下载依赖、不授予工具能力，见[签名插件目录与命令](docs/signed-plugin-catalog-validation.md)。
+
 `personal github-pull --file owner.ll --id ID --revision REV --repository-id NUMERIC_ID --owner OWNER --repository NAME --number PR --api-ip PUBLIC_IPV4` 经隐藏双因素和 `CALL` 确认，把选定 password 字段作为 GitHub token 交给固定 HTTPS 查询器；审计意图提交后才发请求，只返回经校验的 PR 状态，不返回 token。目标地址需独立确认，TLS 始终验证 api.github.com。本入口联网，但不改变其他个人命令的离线行为；不是远程移动审批或机器授权，真实账号调用仍待验收，见[实时查询边界](docs/personal-live-pull-validation.md)。
 
 `personal inject-json --file owner.ll --id ID --revision REV --field username|password --name TOKEN --out NEW.json` 经双因素和 WRITE 确认，将一个指定字段写成新 JSON 配置文件，正确转义值，不覆盖已有目标。输出为明文，创建时采用当前账户的受限权限；stdout 只有审计回执。此入口不执行任意模板或子进程，也不向 MCP 增加原值工具。详见[JSON 注入验收](docs/personal-json-injection-validation.md)。
