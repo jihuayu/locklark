@@ -32,6 +32,8 @@ Go TOTP 核心已通过 RFC 6238/4226 向量，支持有限的 Base32/otpauth �
 
 ## 按字段引用操作
 
+`personal health --file owner.ll` 经双因素和 SCAN 确认后提供本地密码体检，仅输出活动登录的 ID/修订与固定问题码；检查空值、短值、低字符种类、示例常见值、重复使用和未保存 TOTP。不联网查询泄露库，不把未发现问题称为安全，也不推断网站的双因素状态。范围、规则与验收见[本地体检](docs/personal-health-validation.md)。
+
 支持范围明确的基本登录导入：先运行 `personal plan-import-1pux --file owner.ll --source source.1pux`，使用返回的 `report.source_digest` 运行 `personal import-1pux --file owner.ll --source source.1pux --digest PLAN_DIGEST`。两步都需要隐藏双因素和确认；源文件变化、同源重复、容量超限或未支持字段整批拒绝。当前只接单账户/单库、用户名/密码、单 HTTPS URL 和活动/归档状态；原始来源记录加密保留，编辑后可能仍含旧值。完整字段/类别/附件/历史迁移未完成，详见[登录导入验收](docs/personal-import-validation.md)和[七条交付范围](docs/seven-track-delivery.md)。
 
 `personal references --file owner.ll` 经双因素解锁后列出库 ID、固定别名 `Personal`、条目 ID/标题/修订及 username/password/otp 引用，不输出字段值。使用当前列表中的引用和修订：

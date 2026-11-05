@@ -178,6 +178,7 @@ func existing(path string) (*bolt.DB, error) {
 }
 
 type result struct {
+	health          HealthReport
 	migration       onepux.MappingReport
 	inspection      onepux.Report
 	reportDigest    string
@@ -345,6 +346,15 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			}
 		}
 		switch action {
+		case healthAction:
+			out.health, e = localHealth(items, revisions)
+			if e != nil {
+				return e
+			}
+			out.reportDigest, e = digest(out.health)
+			if e != nil {
+				return e
+			}
 		case importPlanAction, importAction:
 			mapped, err := option.migration.mapSource(i.AuditEncryption)
 			if err == nil {
@@ -587,7 +597,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		if e != nil {
 			return e
 		}
-		if (revealAction(action) || action == otpDisclosureAction || action == inspectionAction || action == exportAction || migrationAction(action)) && refusal == nil {
+		if (revealAction(action) || action == otpDisclosureAction || action == inspectionAction || action == exportAction || migrationAction(action) || action == healthAction) && refusal == nil {
 			out.session, out.intent = ev.Session, ev.hash()
 		}
 		if action == "backup.prepare" {

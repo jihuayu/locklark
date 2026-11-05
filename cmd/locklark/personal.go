@@ -20,7 +20,7 @@ import (
 	"unicode/utf8"
 )
 
-var personalUsage = errors.New("usage: locklark personal <init|add-login|list|audit|archived-audit|references> --file PATH, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password|otp|url, or reveal-login --file PATH --id ID --revision REV --field username|password, or generate-login --file PATH [--length N], or regenerate-password --file PATH --id ID --revision REV [--length N], or otp --file PATH --id ID --revision REV, or reveal-ref|otp-ref --file PATH --ref REF --revision REV, or inspect-1pux|plan-import-1pux --file PATH --source ARCHIVE, or import-1pux --file PATH --source ARCHIVE --digest PLAN_DIGEST, or export-kdbx --file PATH --out NEW_FILE.kdbx, or archive-login|unarchive-login --file PATH --id ID --revision REV, or list --file PATH [--state active|archived|trashed|all], or trash-login|restore-login --file PATH --id ID --revision REV, or match-logins --file PATH --origin HTTPS_ORIGIN --frame-origin HTTPS_ORIGIN")
+var personalUsage = errors.New("usage: locklark personal <init|add-login|list|audit|archived-audit|references|health> --file PATH, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password|otp|url, or reveal-login --file PATH --id ID --revision REV --field username|password, or generate-login --file PATH [--length N], or regenerate-password --file PATH --id ID --revision REV [--length N], or otp --file PATH --id ID --revision REV, or reveal-ref|otp-ref --file PATH --ref REF --revision REV, or inspect-1pux|plan-import-1pux --file PATH --source ARCHIVE, or import-1pux --file PATH --source ARCHIVE --digest PLAN_DIGEST, or export-kdbx --file PATH --out NEW_FILE.kdbx, or archive-login|unarchive-login --file PATH --id ID --revision REV, or list --file PATH [--state active|archived|trashed|all], or trash-login|restore-login --file PATH --id ID --revision REV, or match-logins --file PATH --origin HTTPS_ORIGIN --frame-origin HTTPS_ORIGIN")
 
 // One terminal mode covers the entire interaction; no prompt or inter-field
 // gap is visible while echo is enabled.
@@ -177,7 +177,7 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 		if len(opts) != 2 || opts["--out"] == "" {
 			return personalUsage
 		}
-	case "init", "add-login", "audit", "archived-audit", "references":
+	case "init", "add-login", "audit", "archived-audit", "references", "health":
 		if len(opts) != 1 {
 			return personalUsage
 		}
@@ -274,6 +274,19 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 		}
 		defer clear(key)
 		switch action {
+		case "health":
+			if _, e = fmt.Fprint(os.Stderr, "仅检查当前活动登录的本地规则，不检查归档、回收站或导入来源旧值。\r\n不会联网查询泄露数据；未发现问题不代表密码安全，未保存 TOTP 不代表网站未启用双因素。\r\n"); e != nil {
+				return e
+			}
+			consent, e := consoleField("输入 SCAN 确认本地体检")
+			defer clear(consent)
+			if e != nil {
+				return e
+			}
+			if string(consent) != "SCAN" {
+				return errors.New("local health check cancelled")
+			}
+			response, err = personal.Health(path, string(pw), key)
 		case "plan-import-1pux", "import-1pux":
 			if _, e = fmt.Fprint(os.Stderr, "仅支持单账户、单库的基本登录；未支持的类别、字段、历史和附件会整批拒绝。\r\n来源记录会加密保留，可能保留以后修改前的旧值；不会覆盖已有条目。\r\n"); e != nil {
 				return e

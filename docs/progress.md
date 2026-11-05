@@ -1,5 +1,7 @@
 # Locklark 开发进度
 
+七条推进第一批 PR #14 已经 Luna/max 及双平台 CI 合入 main `e925eec`：基本登录导入/对账、源计划私密绑定、来源记录保留。第二批接本地密码体检，见 [体检验收](personal-health-validation.md)。桌面/浏览器/手机/完整迁移等范围仍保留在七条清单中。
+
 用户要求完成七条产品线，持续范围见 [七条交付](seven-track-delivery.md)。从 main `d932f51` 接续第一批认证 1PUX 登录导入：摘要绑定计划、同事务整批写入/逐项审计、加密来源记录及独立导出对账；详细范围见 [导入验收](personal-import-validation.md)。完整迁移及其他六条仍按清单逐项推进，不能将本批窄 profile 计为全部完成。
 
 从 main `65b3f3d` 接续个人回收站/恢复：保留原活动或归档状态、版本冲突与固定拒绝审计、阻止回收站值披露/编辑/生成、备份及 KDBX 状态保留，见 [回收站验收](personal-trash-validation.md)。Luna/max 最终复核、完整 Go 与定向 race 已通过；最终 head、双平台 CI 与合并状态见 [PR #13](https://github.com/jihuayu/locklark/pull/13)。永久清空、保留期和安全擦除仍未实现。
