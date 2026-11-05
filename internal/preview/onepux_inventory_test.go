@@ -33,6 +33,9 @@ func TestOnepuxInventoryFromVerifiedFixture(t *testing.T) {
 		t.Fatal("verified source history was confused with verified file linkage")
 	}
 	login := report.LoginFieldInventory
+	if report.PasswordHistory != (onepux.PasswordHistoryReport{}) {
+		t.Fatal("inventory invented history absent from the verified source")
+	}
 	if login.Fields != 1 || login.PasswordDesignations != 1 || login.FieldTypeAttributes != 1 || login.TypeAttributes != 0 || login.StringValues != 1 {
 		t.Fatal("source login field was lost or normalized")
 	}

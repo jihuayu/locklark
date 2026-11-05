@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -46,6 +47,9 @@ func TestInventoryCountsAndPrivacy(t *testing.T) {
 	before := append([]byte(nil), raw...)
 	report, err := Inspect(raw)
 	want := Report{SectionInventory: SectionReport{Sections: 1, Fields: 2, RepeatedFieldIDs: 1, ObjectValues: 2}, Version: 3, Accounts: 1, Vaults: 1, Items: 3, Active: 1, Archived: 1, OtherStates: 1, Files: 1, FileBytes: 4, FileReferences: FileReferenceReport{FilesWithoutExplicitLinks: 1, ItemsWithoutExplicitPath: 1}, Categories: []Category{{"001", 1}, {"114", 1}, {"777", 1}}, UnmappedItems: 3, ReviewReasons: []string{"field-value-semantics-unverified", "file-linkage-unverified", "file-path-not-provided", "files-without-explicit-links", "mapping-not-implemented", "password-history-unmapped", "repeated-field-id", "sections-unmapped", "unknown-category", "unknown-state"}}
+	want.PasswordHistory = PasswordHistoryReport{Entries: 1, Values: ShapeReport{Strings: 1}, Times: ShapeReport{Missing: 1}}
+	want.ReviewReasons = append(want.ReviewReasons, "history-time-missing", "history-time-semantics-unverified")
+	sort.Strings(want.ReviewReasons)
 	if err != nil || !reflect.DeepEqual(report, want) {
 		t.Fatal("inventory counts or unverified mapping changed", report, err)
 	}

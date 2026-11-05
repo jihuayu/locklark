@@ -42,13 +42,13 @@ func sourceIdentifier(object map[string]any, key string, seen map[string]bool, r
 	seen[id] = true
 	return nil
 }
-func sectionInventory(details map[string]any, r *SectionReport, loginFields int, reasons map[string]bool) error {
+func sectionInventory(details map[string]any, r *SectionReport, otherObjects int, reasons map[string]bool) error {
 	sections, _ := details["sections"].([]any) // Outer container validated by inventory.
 	names := map[string]bool{}
 	for _, raw := range sections {
 		section := raw.(map[string]any)
 		r.Sections++
-		if r.Sections+r.Fields+loginFields > MaxObjects {
+		if r.Sections+r.Fields+otherObjects > MaxObjects {
 			return ErrLimit
 		}
 		if err := sourceIdentifier(section, "name", names, &r.RepeatedSectionNames, &r.UnidentifiedSections); err != nil {
@@ -78,7 +78,7 @@ func sectionInventory(details map[string]any, r *SectionReport, loginFields int,
 				return ErrInvalid
 			}
 			r.Fields++
-			if r.Sections+r.Fields+loginFields > MaxObjects {
+			if r.Sections+r.Fields+otherObjects > MaxObjects {
 				return ErrLimit
 			}
 			if err := sourceIdentifier(field, "id", ids, &r.RepeatedFieldIDs, &r.UnidentifiedFields); err != nil {
