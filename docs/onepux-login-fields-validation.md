@@ -8,9 +8,9 @@
 
 designation 分为缺失、精确空串、精确 `username`、精确 `password` 和其他非空字符串；非空 designation 的重复按同条目计，未知值也保留重复。未知和重复不是迁移许可，也不据此选择“正确”用户名/密码。原值、名称、ID、未知 designation 和类型字符串均不出现在报告或错误中。
 
-2026-11-05 核对的[公开格式说明](https://support.1password.com/1pux-format/)正文使用 `type`、示例使用 `fieldType`，并称所列 HTML 类型并非穷尽。两种属性分别计存在数，同时存在数和原始字符串不同数另计，不互相覆盖或规范化，不把未列举类型判为无效；即使两属性相同也未证明语义等价。缺少两者另计。报告的固定原因 `login-type-attributes-differ` 只说明字面差异。
+2026-11-05 核对的[公开格式说明](https://support.1password.com/1pux-format/)正文使用 `type`、示例使用 `fieldType`，并称所列 HTML 类型并非穷尽。两种属性分别计存在数，同时存在数和原始字符串不同数另计，不互相覆盖或规范化，不把未列举类型判为无效；即使两属性相同也未证明语义等价。缺少两者另计。报告以 `login-type-attributes-both` 标记同时存在，`login-type-attributes-differ` 只说明字面差异。
 
-value 按缺失、null、object、array、string、number、boolean 计数；大整数保持 json.Number，不取浮点值，不下探嵌套敏感对象。非 string 有固定原因，但清点仍接受并保持未映射。非空 loginFields 始终保留 `login-fields-unmapped` 与 `login-field-semantics-unverified`；所有条目计入 UnmappedItems，MappingVerified 始终 false。
+value 按缺失、null、object、array、string、number、boolean 计数；大整数保持 json.Number，不取浮点值，不下探嵌套敏感对象。缺失值记 `login-value-missing`；现存非 string 值记 `login-value-not-string`，两者不混同，但清点仍接受并保持未映射。非空 loginFields 始终保留 `login-fields-unmapped` 与 `login-field-semantics-unverified`；所有条目计入 UnmappedItems，MappingVerified 始终 false。
 
 ## 拒绝与容量
 

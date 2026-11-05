@@ -128,7 +128,9 @@ func loginFieldInventory(details map[string]any, r *LoginFieldReport, otherObjec
 		"login-identifiers-missing":        r.UnnamedFields+r.UnidentifiedFields > 0,
 		"login-type-attributes-differ":     r.DifferentTypeAttributes > 0,
 		"login-type-missing":               r.MissingTypes > 0,
-		"login-value-not-string":           r.Fields-r.StringValues > 0,
+		"login-type-attributes-both":       r.BothTypeAttributes > 0,
+		"login-value-missing":              r.MissingValues > 0,
+		"login-value-not-string":           r.NullValues+r.ObjectValues+r.ArrayValues+r.NumberValues+r.BooleanValues > 0,
 	} {
 		if present {
 			reasons[reason] = true

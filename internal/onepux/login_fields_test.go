@@ -70,6 +70,24 @@ func TestLoginFieldsLiteralMetadataAndEmptyLists(t *testing.T) {
 	if r.Fields != 8 || r.RepeatedNames != 1 || r.RepeatedIDs != 1 || r.UnknownDesignations != 4 || r.RepeatedDesignations != 2 || r.EmptyDesignations != 2 || r.MissingDesignations != 2 || r.UsernameDesignations != 0 || r.BothTypeAttributes != 3 || r.DifferentTypeAttributes != 1 || r.TypeAttributes != 4 || r.FieldTypeAttributes != 3 || r.MissingTypes != 4 {
 		t.Fatal("literal metadata was normalized or merged", r)
 	}
+	for _, test := range []struct {
+		field                               map[string]any
+		both, different, missing, nonstring bool
+	}{
+		{map[string]any{"type": "T", "fieldType": "T"}, true, false, true, false},
+		{map[string]any{"type": "T", "fieldType": "P", "value": nil}, true, true, false, true},
+		{map[string]any{"type": "T", "value": ""}, false, false, false, false},
+	} {
+		report, err := Inspect(pack(t, attributes, fileData(t, loginItem("i", []any{test.field}))))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for reason, want := range map[string]bool{"login-type-attributes-both": test.both, "login-type-attributes-differ": test.different, "login-value-missing": test.missing, "login-value-not-string": test.nonstring} {
+			if contains(report.ReviewReasons, reason) != want {
+				t.Fatal("reason conflated absent/present source values", reason)
+			}
+		}
+	}
 	for _, item := range []map[string]any{loginItem("i", []any{}), sectionItem("i", []any{})} {
 		report, err := Inspect(pack(t, attributes, fileData(t, item)))
 		if err != nil || report.LoginFieldInventory != (LoginFieldReport{}) || contains(report.ReviewReasons, "login-fields-unmapped") {
