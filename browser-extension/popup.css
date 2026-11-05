@@ -1,0 +1,53 @@
+body {
+  width: 360px;
+  margin: 0;
+  background: #fafaf7;
+  color: #163f36;
+  font:
+    14px system-ui,
+    sans-serif;
+}
+main {
+  padding: 20px;
+}
+h1 {
+  margin: 0;
+  font-size: 24px;
+}
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+button {
+  padding: 8px 10px;
+  border: 1px solid #acc9b8;
+  border-radius: 6px;
+  background: white;
+  color: #163f36;
+  cursor: pointer;
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+#status {
+  min-height: 36px;
+}
+#origin {
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+#candidates {
+  display: grid;
+  gap: 8px;
+}
+#candidates button {
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.note {
+  font-size: 12px;
+  line-height: 1.5;
+  color: #52645a;
+}

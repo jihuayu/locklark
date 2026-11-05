@@ -17,6 +17,7 @@ import (
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
+	"github.com/jihuayu/locklark/internal/browserhost"
 	"github.com/jihuayu/locklark/internal/osunlock"
 	"github.com/jihuayu/locklark/internal/personal"
 )
@@ -26,6 +27,8 @@ type outcome struct {
 	err         error
 }
 type App struct {
+	browser                                        *browserhost.Connection
+	browserLabel                                   string
 	cancel                                         context.CancelFunc
 	systemStore                                    osunlock.Store
 	win                                            *mygo.Window
@@ -125,6 +128,9 @@ func (a *App) clearClipboard() {
 	a.clipboardUntil = time.Time{}
 }
 func (a *App) Lock() {
+	if a.browser != nil {
+		a.browser.Invalidate()
+	}
 	a.generation++
 	if a.cancel != nil {
 		a.cancel()
@@ -351,6 +357,8 @@ func (a *App) View(c *ui.Context) {
 		})
 		if a.session == nil {
 			a.lockView(c)
+		} else if a.browser != nil {
+			a.browserView(c)
 		} else {
 			a.vaultView(c)
 		}

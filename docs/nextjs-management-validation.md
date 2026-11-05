@@ -32,4 +32,6 @@ PR #25 的 `4390f75` 已通过远端 Ubuntu、Windows 和 macOS 检查及 Luna/m
 
 ## 尚未完成
 
+最终交付：PR #25 的 `f67f34edf4e0a0b8bb745911ff9e565c1e4312d7` 已经 Luna/max 增量复审，并在 run [42060380427](https://github.com/jihuayu/locklark/actions/runs/42060380427) 通过 Ubuntu Go（3m22s）、Windows Go（7m21s）、macOS desktop（48s）和 Web（1m28s，含 Chromium/Firefox）四项检查；squash 提交 `dcc52d04cd8bcf5e17e8d9e2aedd98c92056bacb` 已在远端 main。上面的“尚待 CI”描述保留为网络安装故障时的历史阶段，最终结果以本段为准。
+
 公网多用户部署、团队创建/邀请/吊销的原生签署流程、远端密文同步与新鲜度、浏览器扩展配对/填充/保存/更新、Safari 实测及手机系统集成继续保留。这个本机只读浏览器界面不授予解锁、签署或字段读取权限。

@@ -24,6 +24,8 @@ jobs:
       - run: go mod verify
       - run: go vet ./...
       - run: go build ./cmd/locklark-desktop
+      - name: Build native browser hosts
+        run: go build ./cmd/locklark-browser-chromium ./cmd/locklark-browser-firefox ./cmd/locklark-browser-register
       - shell: pwsh
         run: |
           $peerEnv = Join-Path $env:RUNNER_TEMP 'locklark-kdbx-peer'
@@ -107,6 +109,8 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go build ./cmd/locklark-desktop
+      - name: Build native browser hosts
+        run: go build ./cmd/locklark-browser-chromium ./cmd/locklark-browser-firefox ./cmd/locklark-browser-register
       - run: go test ./internal/osunlock ./internal/desktop ./internal/personal -run 'TestNative|TestDesktopSession|TestSystemUnlock|TestLockDoesNotWait|TestCancelledSystemUnlock|TestLockDrops|TestClipboard' -count=1
   web:
     runs-on: ubuntu-latest
@@ -120,6 +124,9 @@ jobs:
           node-version: '24'
           cache: npm
           cache-dependency-path: web/package-lock.json
+      - name: Test browser extension
+        timeout-minutes: 10
+        run: node --test browser-extension/test/*.test.js
       - run: npm ci
         working-directory: web
       - run: npm test && npm run typecheck && npm run build
@@ -147,3 +154,21 @@ jobs:
         working-directory: web
         env:
           LOCKLARK_TEST_BROWSER: firefox
+      - name: Install native browser acceptance tools
+        timeout-minutes: 10
+        run: sudo apt-get install -y --no-install-recommends libxtst6 xvfb xauth imagemagick
+      - name: Build Chromium native host for browser acceptance
+        timeout-minutes: 10
+        run: go build -o "$RUNNER_TEMP/locklark-browser-chromium" ./cmd/locklark-browser-chromium
+      - name: Test browser extension DOM
+        timeout-minutes: 10
+        run: node scripts/browser_extension_dom.cjs
+        env:
+          LOCKLARK_TEST_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
+      - name: Test native browser approval and fill
+        timeout-minutes: 10
+        run: xvfb-run -a -s '-screen 0 1280x900x24' node scripts/browser_native_acceptance.mjs
+        env:
+          LOCKLARK_TEST_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
+          LOCKLARK_GO: go
+          LOCKLARK_BROWSER_HOST: ${{ runner.temp }}/locklark-browser-chromium

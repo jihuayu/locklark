@@ -1,0 +1,8 @@
+{
+  "name": "locklark-browser-extension",
+  "private": true,
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "build": "node build.js chromium && node build.js firefox"
+  }
+}

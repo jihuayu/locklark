@@ -18,15 +18,16 @@ var ErrDesktopDelivery = errors.New("native disclosure failed; intent recorded, 
 // Key. Operations are serialized and revalidate the slot, snapshot and history.
 // No exported method exposes arbitrary commands or key material to a renderer.
 type Session struct {
-	lockRequested atomic.Bool
-	mu            sync.Mutex
-	path          string
-	material      []byte
-	slotDigest    [32]byte
-	last          time.Time
-	idle          time.Duration
-	fullUnlock    time.Time
-	pending       map[*NativeField]bool
+	lockRequested  atomic.Bool
+	mu             sync.Mutex
+	path           string
+	material       []byte
+	slotDigest     [32]byte
+	last           time.Time
+	idle           time.Duration
+	fullUnlock     time.Time
+	pending        map[*NativeField]bool
+	browserPending map[*NativeBrowserFill]bool
 }
 
 // NativeField is a one-use native-only delivery. It cannot be JSON-serialized.
@@ -59,6 +60,10 @@ func UnlockSession(path string, password, key []byte, idle time.Duration) (*Sess
 	return &Session{path: path, material: r.material, slotDigest: r.slotDigest, last: time.Now(), fullUnlock: time.Now(), idle: idle, pending: make(map[*NativeField]bool)}, nil
 }
 func (s *Session) lock() {
+	for f := range s.browserPending {
+		f.clear()
+		delete(s.browserPending, f)
+	}
 	clear(s.material)
 	s.material = nil
 	for f := range s.pending {
@@ -73,6 +78,12 @@ func (s *Session) RequestLock() { s.lockRequested.Store(true) }
 func (s *Session) Lock()        { s.RequestLock(); s.mu.Lock(); defer s.mu.Unlock(); s.lock() }
 func (s *Session) active(touch bool) error {
 	now := time.Now()
+	for f := range s.browserPending {
+		if !now.Before(f.until) {
+			f.clear()
+			delete(s.browserPending, f)
+		}
+	}
 	if s.lockRequested.Load() || len(s.material) == 0 || now.Sub(s.last) >= s.idle {
 		s.lock()
 		return ErrSessionLocked
@@ -102,7 +113,10 @@ func (s *Session) Unlocked() bool {
 	return s.active(false) == nil
 }
 func (s *Session) execute(action string, add vault.Item, edit *Edit, option commandOption) (result, error) {
-	if e := s.active(true); e != nil {
+	return s.executeActive(action, add, edit, option, true)
+}
+func (s *Session) executeActive(action string, add vault.Item, edit *Edit, option commandOption, touch bool) (result, error) {
+	if e := s.active(touch); e != nil {
 		return result{}, e
 	}
 	option.unlocked = s
@@ -111,6 +125,7 @@ func (s *Session) execute(action string, add vault.Item, edit *Edit, option comm
 		s.lock()
 	}
 	if s.active(false) != nil {
+		r.browser.clear()
 		clear(r.material)
 		clear(r.value)
 		clear(r.archive)
