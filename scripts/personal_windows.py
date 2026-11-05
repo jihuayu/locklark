@@ -19,8 +19,9 @@ def invoke(binary, action, path, answers, *, ok, issue, options, barrier, deny_i
         try:
             view += terminal.read(blocking=False)
         except EOFError:
-            pass
+            return False
         time.sleep(0.01)
+        return True
     for index,(prompt, value) in enumerate(answers):
         marker = prompt + ":"
         deadline = time.monotonic() + 15
@@ -43,7 +44,12 @@ def invoke(binary, action, path, answers, *, ok, issue, options, barrier, deny_i
         pump()
         if time.monotonic() > deadline:
             raise RuntimeError(f"{action}: command did not finish")
-    pump()
+    # Process exit does not mean ConPTY has delivered its final output.
+    # Drain to transport EOF, with a deadline for a broken transport.
+    deadline = time.monotonic() + 5
+    while pump():
+        if time.monotonic() > deadline:
+            raise RuntimeError(f"{action}: ConPTY output did not close")
     if ok is None:
         ok = terminal.get_exitstatus() == 0
         if not ok and "login changed;" not in ansi.sub("", view):
