@@ -1,5 +1,7 @@
 # Locklark 开发进度
 
+七条推进第二批 PR #15 已经 Luna/max 与双平台 CI 合入 `a078a75`。第三批接受控单字段 JSON 配置注入：精确修订、目的绑定、审计先提交、私密文件创建和不覆盖发布，见 [注入验收](personal-json-injection-validation.md)。这不是完整 run/inject/SSH 或全部七条完成。
+
 七条推进第一批 PR #14 已经 Luna/max 及双平台 CI 合入 main `e925eec`：基本登录导入/对账、源计划私密绑定、来源记录保留。第二批接本地密码体检，见 [体检验收](personal-health-validation.md)。桌面/浏览器/手机/完整迁移等范围仍保留在七条清单中。
 
 用户要求完成七条产品线，持续范围见 [七条交付](seven-track-delivery.md)。从 main `d932f51` 接续第一批认证 1PUX 登录导入：摘要绑定计划、同事务整批写入/逐项审计、加密来源记录及独立导出对账；详细范围见 [导入验收](personal-import-validation.md)。完整迁移及其他六条仍按清单逐项推进，不能将本批窄 profile 计为全部完成。
