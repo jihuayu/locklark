@@ -1,5 +1,7 @@
 # Locklark 开发进度
 
+七条推进第五批 PR #18 已经 Luna/max 与 Ubuntu/Windows CI 合入 main `c8c38e4`（run 41991910945，head `33f56f0`）。第六批接个人 CLI 人工确认的真实 GitHub HTTPS 适配器入口，见[实时查询验收](personal-live-pull-validation.md)。真实网络代码已接入，测试仍区分个人事务/受控 TLS/终端拒绝；真实账号成功调用、远程审批与机器授权未完成，不能由本入口代替。
+
 七条推进第四批 PR #17 已经 Luna/max、全量 Go/竞态与 Ubuntu/Windows CI 合入 main `a4adaac`（run 41990092318，head `5450615`）。第五批实施团队 writer 数据写权限：独立策略 Scope、强制设备证明、事务内前态授权、历史重读复核和精确父 CAS；见[写权限验收](team-writer-acl-validation.md)。这是本地目录 API，完整团队产品和其他七条范围仍未完成。
 
 七条推进第三批 PR #16 已经 Luna/max、Linux/Windows CI（含原生 DACL 与 ConPTY）合入 main `19f6e5a`。第四批接团队设备双钥持有证明，见 [设备证明验收](team-device-possession-validation.md)；仍是目录协议/持久化核心，完整邀请、权限和远端同步继续保留。

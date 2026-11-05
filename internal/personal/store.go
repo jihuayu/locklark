@@ -197,6 +197,7 @@ type result struct {
 }
 
 type commandOption struct {
+	livePull   *LivePullRequest
 	injection  *injectionRequest
 	migration  *importRequest
 	match      *matchRequest
@@ -265,6 +266,9 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 	}
 	if injectAction(action) != (option.injection != nil) || option.injection != nil && !option.injection.valid() {
 		return result{}, ErrInjectionTarget
+	}
+	if (action == livePullAction) != (option.livePull != nil) || option.livePull != nil && option.livePull.Validate() != nil {
+		return result{}, ErrLivePullTarget
 	}
 	if option.generation != nil && action != "item.regenerate.password" {
 		if option.generation.policy.Alphabet != password.DefaultAlphabet {
@@ -434,7 +438,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			if option.backup == "" {
 				return invalid
 			}
-		case "item.inject.username", "item.inject.password", "item.trash", "item.untrash", "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.regenerate.password", otpDisclosureAction:
+		case livePullAction, "item.inject.username", "item.inject.password", "item.trash", "item.untrash", "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.regenerate.password", otpDisclosureAction:
 			if edit == nil {
 				return invalid
 			}
@@ -499,7 +503,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 						}
 						if readValueAction(action) {
 							value := items[i].Username
-							if action == "item.reveal.password" || action == "item.inject.password" {
+							if action == "item.reveal.password" || action == "item.inject.password" || action == livePullAction {
 								value = items[i].Password
 							}
 							out.value = []byte(value)
@@ -589,6 +593,13 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		var link string
 		if injectAction(action) && refusal == nil {
 			link, e = option.injection.binding(i.AuditEncryption)
+			if e != nil {
+				return e
+			}
+			out.destinationDigest = link
+		}
+		if action == livePullAction && refusal == nil {
+			link, e = option.livePull.binding(i.AuditEncryption)
 			if e != nil {
 				return e
 			}

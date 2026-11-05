@@ -3,10 +3,12 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/jihuayu/locklark/internal/gateway"
 	"github.com/jihuayu/locklark/internal/password"
 	"github.com/jihuayu/locklark/internal/personal"
 	"github.com/jihuayu/locklark/internal/vault"
@@ -20,7 +22,7 @@ import (
 	"unicode/utf8"
 )
 
-var personalUsage = errors.New("usage: locklark personal <init|add-login|list|audit|archived-audit|references|health> --file PATH, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password|otp|url, or reveal-login --file PATH --id ID --revision REV --field username|password, or generate-login --file PATH [--length N], or regenerate-password --file PATH --id ID --revision REV [--length N], or otp --file PATH --id ID --revision REV, or reveal-ref|otp-ref --file PATH --ref REF --revision REV, or inspect-1pux|plan-import-1pux --file PATH --source ARCHIVE, or import-1pux --file PATH --source ARCHIVE --digest PLAN_DIGEST, or export-kdbx --file PATH --out NEW_FILE.kdbx, or archive-login|unarchive-login --file PATH --id ID --revision REV, or list --file PATH [--state active|archived|trashed|all], or trash-login|restore-login --file PATH --id ID --revision REV, or match-logins --file PATH --origin HTTPS_ORIGIN --frame-origin HTTPS_ORIGIN, or inject-json --file PATH --id ID --revision REV --field username|password --name PROPERTY --out NEW.json")
+var personalUsage = errors.New("usage: locklark personal <init|add-login|list|audit|archived-audit|references|health> --file PATH, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password|otp|url, or reveal-login --file PATH --id ID --revision REV --field username|password, or generate-login --file PATH [--length N], or regenerate-password --file PATH --id ID --revision REV [--length N], or otp --file PATH --id ID --revision REV, or reveal-ref|otp-ref --file PATH --ref REF --revision REV, or inspect-1pux|plan-import-1pux --file PATH --source ARCHIVE, or import-1pux --file PATH --source ARCHIVE --digest PLAN_DIGEST, or export-kdbx --file PATH --out NEW_FILE.kdbx, or archive-login|unarchive-login --file PATH --id ID --revision REV, or list --file PATH [--state active|archived|trashed|all], or trash-login|restore-login --file PATH --id ID --revision REV, or match-logins --file PATH --origin HTTPS_ORIGIN --frame-origin HTTPS_ORIGIN, or inject-json --file PATH --id ID --revision REV --field username|password --name PROPERTY --out NEW.json, or github-pull --file PATH --id ID --revision REV --repository-id NUMERIC_ID --owner OWNER --repository NAME --number PR --api-ip PUBLIC_IPV4")
 
 // One terminal mode covers the entire interaction; no prompt or inter-field
 // gap is visible while echo is enabled.
@@ -92,8 +94,16 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 	}
 	var edit personal.Edit
 	var reveal personal.RevealTarget
+	var pull personal.LivePullRequest
 	length := password.DefaultPolicy().Length
 	switch action {
+	case "github-pull":
+		reveal = personal.RevealTarget{ID: opts["--id"], Revision: opts["--revision"], Field: "password"}
+		number, e := strconv.Atoi(opts["--number"])
+		pull = personal.LivePullRequest{Repository: gateway.Repository{ID: opts["--repository-id"], Owner: opts["--owner"], Name: opts["--repository"]}, Number: number, Address: opts["--api-ip"]}
+		if len(opts) != 8 || e != nil || strconv.Itoa(number) != opts["--number"] || !personal.ValidRevealTarget(reveal.ID, reveal.Revision, reveal.Field) || pull.Validate() != nil {
+			return personalUsage
+		}
 	case "inject-json":
 		reveal = personal.RevealTarget{ID: opts["--id"], Revision: opts["--revision"], Field: opts["--field"]}
 		if len(opts) != 6 || !personal.ValidRevealTarget(reveal.ID, reveal.Revision, reveal.Field) || !personal.ValidInjectionName(opts["--name"]) || opts["--out"] == "" {
@@ -279,6 +289,19 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 		}
 		defer clear(key)
 		switch action {
+		case "github-pull":
+			if _, e = fmt.Fprintf(os.Stderr, "将条目 %s（修订 %s）的 password 作为 GitHub token，仅发送至 api.github.com。\r\n目标：%s/%s，固定仓库 ID %s，PR #%d；独立确认的 API IPv4：%s。\r\n只读查询状态，不返回 token；此次确认仅授权一次请求，失败或中断后结果可能未知。\r\n", reveal.ID, reveal.Revision, pull.Repository.Owner, pull.Repository.Name, pull.Repository.ID, pull.Number, pull.Address); e != nil {
+				return e
+			}
+			consent, e := consoleField("输入 CALL 确认此次 GitHub 查询")
+			defer clear(consent)
+			if e != nil {
+				return e
+			}
+			if string(consent) != "CALL" {
+				return errors.New("GitHub query cancelled")
+			}
+			response, err = personal.LivePull(context.Background(), path, string(pw), key, reveal, pull)
 		case "inject-json":
 			if _, e = fmt.Fprintf(os.Stderr, "将条目 %s（修订 %s）的 %s 写入明文 JSON 属性 %s。\r\n目标文件不会覆盖，采用当前账户的受限文件权限；请妥善保管或删除明文文件。\r\n目标：", reveal.ID, reveal.Revision, reveal.Field, opts["--name"]); e != nil {
 				return e

@@ -29,7 +29,7 @@ type injectionRequest struct{ path, name string }
 func injectAction(action string) bool {
 	return action == "item.inject.username" || action == "item.inject.password"
 }
-func readValueAction(action string) bool { return revealAction(action) || injectAction(action) }
+func readValueAction(action string) bool { return revealAction(action) || boundValueAction(action) }
 func ValidInjectionName(name string) bool {
 	if len(name) == 0 || len(name) > 64 {
 		return false
