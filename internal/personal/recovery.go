@@ -401,7 +401,7 @@ func PrepareBackup(src, dest, pw string, key []byte) (*BackupPreparation, error)
 	if e != nil {
 		return nil, e
 	}
-	r, e := command(src, pw, key, "backup.prepare", vault.Item{}, nil, kit)
+	r, e := command(src, pw, key, "backup.prepare", vault.Item{}, nil, commandOption{backup: kit})
 	if e != nil {
 		return nil, e
 	}

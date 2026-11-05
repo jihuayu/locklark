@@ -14,7 +14,7 @@
 
 独立 Go TOTP 核心已通过 RFC 6238/4226 向量，支持有限的 Base32/otpauth 配置、SHA1/256/512、6/8 位码和显式时间窗口。短种子、不支持参数和非法时间明确拒绝，普通格式化与 JSON 隐藏种子和码值；现有短种子演练数据没有改写。尚未接入产品取码或授权/披露审计，不代表已兼容 op 的 OTP 行为；见[TOTP 验收](docs/totp-validation.md)。
 
-独立密码生成核心使用系统 CSPRNG 与标准库拒绝采样，默认 24 位字母数字；策略要求至少 128 位组合熵，拒绝字符集重复、弱策略及超限。随机源错误或读取预算耗尽时无部分结果，普通输出隐藏生成值；尚无 CLI/桌面生成入口。真实加密保存与签名审计回归及具体限制见[密码生成验收](docs/password-generation-validation.md)。
+密码生成核心使用系统 CSPRNG 与标准库拒绝采样，默认 24 位字母数字；策略要求至少 128 位组合熵，拒绝字符集重复、弱策略及超限。个人 CLI 已接入生成并保存/替换的事务流程，普通输出不包含生成值；桌面生成入口仍未实现。核心证据见[密码生成验收](docs/password-generation-validation.md)，产品入口见[生成保存验收](docs/personal-generation-validation.md)。
 
 独立 1PUX v3 清点预检模块在内存中检查归档边界、CRC 和严格 JSON，输出受限计数，不输出标题、路径或字段值，也不落盘解压。显式 `file.path` 可精确核对匹配/缺失、重复引用和声明大小差异；没有当前子集显式引用的文件不能称为孤儿或据此删除。全部条目映射仍未验证，未开放产品预检或通用写入入口；见[清点验收](docs/onepux-preflight-validation.md)与[显式文件关联验收](docs/onepux-file-references-validation.md)。
 
@@ -59,6 +59,19 @@ go build -o locklark.exe ./cmd/locklark
 取消、错误因素、未知 ID 或旧修订不会显示字段。已解锁的未知 ID 和版本冲突记录拒绝结果，不记录未经核验的 ID 或调用者版本。披露不修改条目修订；输出失败保留意图并报告交付未知，成功写入终端也不证明人已看到。终端历史或录屏可能保存显示值。stdin 与 stderr 必须是终端，普通管道调用拒绝；此检查不是针对同用户进程或伪终端自动化的 OS 隔离。
 
 写入首条披露事件后，较旧的 CLI 会拒绝不认识的审计事件；请保留升级版程序。新版仍可读取此前库与备份，也能备份/恢复包含披露意图的历史。该入口未接入 `op://`、OTP、MCP 或远程 Agent 取值。验收：`python scripts/disclosure_acceptance.py <本机编译的 locklark>`；证据与边界见[受控披露验收](docs/personal-disclosure-validation.md)。
+
+## 生成密码并直接保存
+
+```powershell
+.\locklark.exe personal generate-login --file owner.ll
+.\locklark.exe personal regenerate-password --file owner.ll --id $itemID --revision $revision --length 32
+```
+
+`generate-login` 隐藏输入解锁因素、标题和用户名；输入 `SAVE` 确认后，生成随机密码并加密保存新登录。默认 24 位字母数字（组合熵下界 142 位），可用 `--length` 指定 22–256 位；不接受弱长度或自定义字符集。`regenerate-password` 另要求从 `list` 得到的条目 ID/修订及明确确认，成功后只替换此条目的本地密码，返回新修订。**它不会修改网站或服务端密码**；需要保留旧值时先备份，再协调网站改密。
+
+生成器只在同一事务已经认证解锁因素、快照、审计及目标修订之后运行。生成保存与 `item.generate` / `item.regenerate.password` 签名加密审计一起提交，审计包含公开长度/字符集大小/组合熵下界；随机失败不修改库，旧修订竞争只能有一次成功。stdout 仅有 ID、修订和策略，终端不直接显示生成值；用 `reveal-login` 另行确认查看。回执丢失时先重新 `list` 和 `audit` 核对，不要把重试当成幂等创建。
+
+写入新生成事件后旧 CLI 会拒绝不认识的历史；新版仍可打开升级前的库，也支持生成历史的备份/恢复。验收：`python scripts/generation_acceptance.py <新版程序> [升级前程序]`。
 
 ## 个人库离线备份与恢复
 

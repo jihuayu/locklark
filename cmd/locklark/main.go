@@ -16,6 +16,8 @@ const usage = `Locklark · offline personal and synthetic gateway preview
 
   personal edit-login --file PATH --id ID --revision REV --field title|username|password
   personal reveal-login --file PATH --id ID --revision REV --field username|password
+  personal generate-login --file PATH [--length N]
+  personal regenerate-password --file PATH --id ID --revision REV [--length N]
   personal <init|add-login|list|audit> --file PATH  (interactive local-owner terminal)
 
   demo     --out NEW_DIR --session ID --reason TEXT

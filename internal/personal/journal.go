@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"github.com/jihuayu/locklark/internal/password"
 	"github.com/jihuayu/locklark/internal/vault"
 	bolt "go.etcd.io/bbolt"
 	"time"
@@ -19,17 +20,18 @@ import (
 var invalid = errors.New("invalid personal vault, unlock factors or journal")
 
 type Event struct {
-	Link         string `json:"link,omitempty"`
-	BaseRevision string `json:"base_revision,omitempty"`
-	Sequence     uint64 `json:"sequence"`
-	UTC          string `json:"utc"`
-	Session      string `json:"session"`
-	Actor        string `json:"actor"`
-	Action       string `json:"action"`
-	Item         string `json:"item_id,omitempty"`
-	Result       string `json:"result"`
-	Previous     string `json:"previous"`
-	Signature    []byte `json:"signature"`
+	Generation   *password.Profile `json:"generation,omitempty"`
+	Link         string            `json:"link,omitempty"`
+	BaseRevision string            `json:"base_revision,omitempty"`
+	Sequence     uint64            `json:"sequence"`
+	UTC          string            `json:"utc"`
+	Session      string            `json:"session"`
+	Actor        string            `json:"actor"`
+	Action       string            `json:"action"`
+	Item         string            `json:"item_id,omitempty"`
+	Result       string            `json:"result"`
+	Previous     string            `json:"previous"`
+	Signature    []byte            `json:"signature"`
 }
 type auditTip struct {
 	Count, Epoch   uint64
@@ -80,6 +82,13 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 	if e.Action != "backup.prepare" && e.Action != "vault.restore" && e.Link != "" {
 		return invalid
 	}
+	if generatedAction(e.Action) && e.Result == "succeeded" {
+		if e.Generation == nil || !validGenerationProfile(*e.Generation) {
+			return invalid
+		}
+	} else if e.Generation != nil {
+		return invalid
+	}
 	switch e.Action {
 	case "backup.prepare":
 		if n <= 1 || !idOK(e.Link) || e.Item != "" {
@@ -89,7 +98,7 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 		if n != 1 || !digestOK(e.Link) || e.Item != "" {
 			return invalid
 		}
-	case "item.edit.title", "item.edit.username", "item.edit.password", "item.reveal.username", "item.reveal.password":
+	case "item.edit.title", "item.edit.username", "item.edit.password", "item.reveal.username", "item.reveal.password", "item.regenerate.password":
 		if e.Result == "not-found" && e.Item == "" && e.BaseRevision == "" && n > 1 {
 			break
 		}
@@ -104,7 +113,7 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 		if n != 1 || e.Item != "" {
 			return invalid
 		}
-	case "item.add", "item.restore":
+	case "item.add", "item.restore", "item.generate":
 		if n <= 1 || !idOK(e.Item) {
 			return invalid
 		}
@@ -172,7 +181,7 @@ func history(b *bolt.Bucket, i identity, s vault.Snapshot, want bool, revisions 
 			return invalid
 		}
 		prev = ev.hash()
-		if ev.Action == "item.add" || ev.Action == "item.restore" {
+		if ev.Action == "item.add" || ev.Action == "item.restore" || ev.Action == "item.generate" {
 			if revisions[ev.Item] != "" {
 				return invalid
 			}
@@ -199,13 +208,19 @@ func history(b *bolt.Bucket, i identity, s vault.Snapshot, want bool, revisions 
 func appendEvent(b *bolt.Bucket, i identity, tip auditTip, s vault.Snapshot, action, item, outcome, base string) (Event, error) {
 	return appendLinked(b, i, tip, s, action, item, outcome, base, "")
 }
-func appendLinked(b *bolt.Bucket, i identity, tip auditTip, s vault.Snapshot, action, item, outcome, base, link string) (Event, error) {
+func appendLinked(b *bolt.Bucket, i identity, tip auditTip, s vault.Snapshot, action, item, outcome, base, link string, profiles ...*password.Profile) (Event, error) {
 	var ev Event
+	if len(profiles) > 1 {
+		return ev, invalid
+	}
 	session, e := randomID()
 	if e != nil {
 		return ev, e
 	}
 	ev = Event{Link: link, Sequence: tip.Count + 1, UTC: time.Now().UTC().Format(time.RFC3339Nano), Session: session, Actor: "local-owner", Action: action, Item: item, BaseRevision: base, Result: outcome, Previous: tip.Last}
+	if len(profiles) == 1 {
+		ev.Generation = profiles[0]
+	}
 	priv := ed25519.NewKeyFromSeed(i.Audit)
 	defer clear(priv)
 	ev.Signature = ed25519.Sign(priv, ev.proof())
