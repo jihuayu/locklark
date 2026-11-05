@@ -10,7 +10,9 @@ if (typeof importScripts === "function") importScripts("core.js");
     rows = [],
     status = "未连接",
     pending = null,
-    epoch = 0;
+    epoch = 0,
+    unconfirmedSave = false;
+  const SAVE_UNKNOWN = "结果未确认，请在金库核实，勿重复保存";
   const calls = new Map(),
     retired = new Set(),
     epochWaiters = new Set();
@@ -67,26 +69,50 @@ if (typeof importScripts === "function") importScripts("core.js");
     clear();
     if (p) p.disconnect();
   }
-  function request(type, fields = {}, timeout = 35000) {
-    if (!port) return Promise.reject(Error("refused"));
-    const requestId = id();
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        calls.delete(requestId);
-        reject(Error("refused"));
-        disconnect();
-        status = "连接或请求已过期，请重新连接";
-      }, timeout);
-      calls.set(requestId, { resolve, reject, timer, type });
-      port.postMessage({ v: 1, id: requestId, type, ...fields });
+  function disconnectWithStatus(message) {
+    disconnect();
+    status = unconfirmedSave ? SAVE_UNKNOWN : message;
+  }
+  function startCall(type, requestId, timeout) {
+    let resolve, reject;
+    const promise = new Promise((yes, no) => {
+      resolve = yes;
+      reject = no;
     });
+    const timer = setTimeout(() => {
+      calls.delete(requestId);
+      reject(Error("refused"));
+      disconnectWithStatus("连接或请求已过期，请重新连接");
+    }, timeout);
+    calls.set(requestId, { resolve, reject, timer, type });
+    return promise;
+  }
+  function request(type, fields = {}, timeout = 35000, requestId = id()) {
+    if (!port) return Promise.reject(Error("refused"));
+    const promise = startCall(type, requestId, timeout);
+    try {
+      port.postMessage({ v: 1, id: requestId, type, ...fields });
+    } catch {
+      const call = calls.get(requestId);
+      if (call) {
+        clearTimeout(call.timer);
+        calls.delete(requestId);
+        call.reject(Error("refused"));
+      }
+    } finally {
+      if (Object.hasOwn(fields, "username")) fields.username = "";
+      if (Object.hasOwn(fields, "password")) fields.password = "";
+    }
+    return promise;
   }
   async function capture() {
     const tabs = await api.tabs.query({ active: true, currentWindow: true });
     if (
       tabs.length !== 1 ||
       !Number.isSafeInteger(tabs[0].id) ||
-      tabs[0].id < 1
+      tabs[0].id < 1 ||
+      !Number.isSafeInteger(tabs[0].windowId) ||
+      tabs[0].windowId < 1
     )
       throw Error("refused");
     const tab = tabs[0],
@@ -108,10 +134,16 @@ if (typeof importScripts === "function") importScripts("core.js");
     if (
       again.length !== 1 ||
       again[0].id !== tab.id ||
+      again[0].windowId !== tab.windowId ||
       core.originFromURL(again[0].url) !== origin
     )
       throw Error("refused");
-    return { tabId: tab.id, origin, documentId: results[0].documentId };
+    return {
+      tabId: tab.id,
+      windowId: tab.windowId,
+      origin,
+      documentId: results[0].documentId,
+    };
   }
   function fields(c) {
     return {
@@ -127,6 +159,7 @@ if (typeof importScripts === "function") importScripts("core.js");
   }
   async function connect() {
     disconnect();
+    unconfirmedSave = false;
     retired.clear();
     status = "请在原生窗口解锁并确认连接";
     const p = api.runtime.connectNative("org.locklark.browser");
@@ -134,38 +167,48 @@ if (typeof importScripts === "function") importScripts("core.js");
     p.onDisconnect.addListener(() => {
       if (port !== p) return;
       port = null;
+      const uncertain = unconfirmedSave;
       clear();
-      status = "原生连接已断开，请重新连接";
+      status = uncertain
+        ? "结果未确认，请在金库核实，勿重复保存"
+        : "原生连接已断开，请重新连接";
       void api.runtime.lastError;
     });
     p.onMessage.addListener((message) => {
       if (port !== p) return;
       if (!core.validResponse(message)) {
-        disconnect();
-        status = "原生协议错误，请重新连接";
+        disconnectWithStatus("原生协议错误，请重新连接");
         return;
       }
       if (message?.type === "locked") {
+        const uncertain = unconfirmedSave;
         clear();
-        status = "原生金库已锁定，请重新连接并配对";
+        status = uncertain
+          ? "原生金库已锁定 · 结果未确认，请在金库核实，勿重复保存"
+          : "原生金库已锁定，请重新连接并配对";
         return;
       }
       if (message.type === "unpaired") {
+        const uncertain = unconfirmedSave;
         clear();
-        status = "扩展连接已到期，请重新连接并配对";
+        status = uncertain
+          ? "结果未确认，请在金库核实，勿重复保存"
+          : "扩展连接已到期，请重新连接并配对";
         return;
       }
       if (!message || message.v !== 1 || typeof message.id !== "string")
-        return disconnect();
+        return disconnectWithStatus("原生协议错误，请重新连接");
       const call = calls.get(message.id);
       if (!call) {
         if (retired.delete(message.id)) return;
-        return disconnect();
+        return disconnectWithStatus("原生协议错误，请重新连接");
       }
       calls.delete(message.id);
       clearTimeout(call.timer);
       if (message.type === "error") {
-        call.reject(Error("refused"));
+        const refusal = Error("refused");
+        refusal.knownRefusal = true;
+        call.reject(refusal);
         return;
       }
       const expected = {
@@ -173,10 +216,21 @@ if (typeof importScripts === "function") importScripts("core.js");
         match: "candidates",
         fill: "fill",
         cancel: "cancelled",
+        "cancel-save": "cancelled",
+        "save-new": "save-ready",
+        "save-update": "save-ready",
+        "commit-ready": "saved",
       }[call.type];
+      if (
+        message.type === "unknown" &&
+        (call.type === "commit-ready" || call.type === "cancel-save")
+      ) {
+        call.resolve(message);
+        return;
+      }
       if (message.type !== expected) {
         call.reject(Error("refused"));
-        disconnect();
+        disconnectWithStatus("原生协议错误，请重新连接");
         return;
       }
       call.resolve(message);
@@ -235,7 +289,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       c = context,
       generation = epoch;
     if (!capability || pending || !row || !c) throw Error("refused");
-    const intent = { itemId, revision, tabId: c.tabId };
+    const intent = { itemId, revision, tabId: c.tabId, windowId: c.windowId };
     pending = intent;
     status = "请在原生窗口核对来源、条目与修订并批准";
     let response;
@@ -295,14 +349,197 @@ if (typeof importScripts === "function") importScripts("core.js");
       }
     }
   }
+  function clearCapture(results) {
+    if (Array.isArray(results))
+      for (const row of results) {
+        if (row?.result && typeof row.result === "object") {
+          row.result.username = "";
+          row.result.password = "";
+        }
+      }
+  }
+  async function captureValues(c, generation) {
+    const promise = api.scripting.executeScript({
+      target: { tabId: c.tabId, documentIds: [c.documentId] },
+      func: core.fillDocument,
+      args: [c.origin, "", "", Date.now() + 1500, true],
+    });
+    let live = true;
+    promise.then(
+      (rows) => {
+        if (!live || generation !== epoch) clearCapture(rows);
+      },
+      () => {},
+    );
+    try {
+      const result = await bounded(promise, generation);
+      if (
+        result.length !== 1 ||
+        result[0].frameId !== 0 ||
+        result[0].documentId !== c.documentId ||
+        !result[0].result ||
+        typeof result[0].result !== "object"
+      ) {
+        clearCapture(result);
+        throw Error("refused");
+      }
+      return result;
+    } finally {
+      live = false;
+    }
+  }
+  async function verifySaveDocument(c, generation) {
+    const active = await bounded(
+      api.tabs.query({ active: true, currentWindow: true }),
+      generation,
+    );
+    if (
+      active.length !== 1 ||
+      active[0].id !== c.tabId ||
+      active[0].windowId !== c.windowId ||
+      core.originFromURL(active[0].url) !== c.origin
+    )
+      throw Error("refused");
+    const probe = await bounded(
+      api.scripting.executeScript({
+        target: { tabId: c.tabId, documentIds: [c.documentId] },
+        func: core.probe,
+      }),
+      generation,
+    );
+    if (
+      probe.length !== 1 ||
+      probe[0].frameId !== 0 ||
+      probe[0].documentId !== c.documentId ||
+      !probe[0].result?.top ||
+      probe[0].result.origin !== c.origin
+    )
+      throw Error("refused");
+    const final = await bounded(
+      api.tabs.query({ active: true, currentWindow: true }),
+      generation,
+    );
+    if (
+      final.length !== 1 ||
+      final[0].id !== c.tabId ||
+      final[0].windowId !== c.windowId ||
+      core.originFromURL(final[0].url) !== c.origin
+    )
+      throw Error("refused");
+  }
+  async function save(itemId, revision) {
+    const generation = epoch,
+      previous = context;
+    if (!capability || pending || unconfirmedSave) throw Error("refused");
+    if (itemId && !rows.some((r) => r.id === itemId && r.revision === revision))
+      throw Error("refused");
+    const intent = {
+      kind: "save",
+      requestId: id(),
+      tabId: null,
+      windowId: null,
+      commitStarted: false,
+    };
+    pending = intent;
+    status = "正在捕获当前登录";
+    let captured;
+    try {
+      const c = await bounded(capture(), generation);
+      intent.tabId = c.tabId;
+      intent.windowId = c.windowId;
+      if (itemId && !core.sameContext(c, previous)) throw Error("refused");
+      await verifySaveDocument(c, generation);
+      captured = await captureValues(c, generation);
+      await verifySaveDocument(c, generation);
+      if (generation !== epoch || pending !== intent) throw Error("refused");
+      const values = captured[0].result;
+      if (
+        typeof values.username !== "string" ||
+        typeof values.password !== "string" ||
+        values.password.length === 0 ||
+        !values.username.isWellFormed() ||
+        !values.password.isWellFormed() ||
+        new TextEncoder().encode(values.username).length > 16384 ||
+        new TextEncoder().encode(values.password).length > 16384
+      )
+        throw Error("refused");
+      const fieldsToSend = {
+        ...fields(c),
+        window_id: c.windowId,
+        username: values.username,
+        password: values.password,
+      };
+      if (itemId) {
+        fieldsToSend.item_id = itemId;
+        fieldsToSend.revision = revision;
+      }
+      const waiting = request(
+        itemId ? "save-update" : "save-new",
+        fieldsToSend,
+        35000,
+        intent.requestId,
+      );
+      clearCapture(captured);
+      captured = null;
+      status = "请在原生窗口核对并批准保存登录";
+      const ready = await waiting;
+      if (generation !== epoch || pending !== intent) throw Error("refused");
+      status = "已批准，正在核对当前页面";
+      await bounded(verifySaveDocument(c, generation), generation, 1500);
+      if (generation !== epoch || pending !== intent) throw Error("refused");
+      intent.commitStarted = true;
+      unconfirmedSave = true;
+      status = "正在保存";
+      const result = await request(
+        "commit-ready",
+        { capability, request_id: intent.requestId, nonce: ready.nonce },
+        15000,
+      );
+      if (generation !== epoch || pending !== intent) throw Error("refused");
+      if (result.type === "saved") unconfirmedSave = false;
+      status =
+        result.type === "saved"
+          ? "已保存"
+          : "结果未确认，请在金库核实，勿重复保存";
+    } catch (error) {
+      if (generation === epoch && pending === intent) {
+        if (error.knownRefusal) unconfirmedSave = false;
+        status =
+          intent.commitStarted && !error.knownRefusal
+            ? "结果未确认，请在金库核实，勿重复保存"
+            : "未保存";
+        if (capability)
+          void request("cancel-save", {
+            capability,
+            request_id: intent.requestId,
+          }).catch(() => {});
+      }
+    } finally {
+      clearCapture(captured);
+      if (generation === epoch && pending === intent) {
+        pending = null;
+        rows = [];
+        context = null;
+      }
+    }
+  }
   function cancelContext() {
     if (!context && !pending) return;
+    const intent = pending;
     context = null;
     rows = [];
     pending = null;
     advanceEpoch();
-    status = "页面或活动标签已变化，请重新读取候选";
-    if (capability) void request("cancel", { capability }).catch(() => {});
+    status = unconfirmedSave
+      ? "结果未确认，请在金库核实，勿重复保存"
+      : "页面或活动标签已变化，请重新读取候选";
+    if (capability)
+      void request(
+        intent?.kind === "save" ? "cancel-save" : "cancel",
+        intent?.kind === "save"
+          ? { capability, request_id: intent.requestId }
+          : { capability },
+      ).catch(() => {});
   }
   api.tabs.onActivated.addListener(cancelContext);
   api.tabs.onUpdated.addListener((tabId, change) => {
@@ -313,7 +550,10 @@ if (typeof importScripts === "function") importScripts("core.js");
       cancelContext();
   });
   api.windows.onFocusChanged.addListener((windowId) => {
-    if (windowId !== api.windows.WINDOW_ID_NONE && context) cancelContext();
+    if (windowId === api.windows.WINDOW_ID_NONE) return;
+    const bound = pending?.windowId ?? context?.windowId;
+    if ((pending || context) && (bound == null || bound !== windowId))
+      cancelContext();
   });
   api.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!core.validSender(sender, api.runtime)) return false;
@@ -327,11 +567,27 @@ if (typeof importScripts === "function") importScripts("core.js");
           void connect();
           break;
         case "disconnect":
-          disconnect();
-          status = "已断开";
+          disconnectWithStatus("已断开");
           break;
         case "match":
           await match();
+          break;
+        case "save-new":
+          void save().catch(() => {
+            if (requestEpoch === epoch)
+              status = unconfirmedSave ? SAVE_UNKNOWN : "未保存";
+          });
+          break;
+        case "save-update":
+          if (
+            typeof message.id !== "string" ||
+            typeof message.revision !== "string"
+          )
+            throw Error("refused");
+          void save(message.id, message.revision).catch(() => {
+            if (requestEpoch === epoch)
+              status = unconfirmedSave ? SAVE_UNKNOWN : "未保存";
+          });
           break;
         case "fill":
           if (
@@ -355,17 +611,21 @@ if (typeof importScripts === "function") importScripts("core.js");
           revision: r.revision,
         })),
         pending: !!pending,
+        saveBlocked: unconfirmedSave,
         origin: context?.origin || "",
       };
     };
     run().then(sendResponse, () => {
       if (requestEpoch === epoch)
-        status = "操作被拒绝；请确认原生连接和当前顶层 HTTPS 页面";
+        status = unconfirmedSave
+          ? SAVE_UNKNOWN
+          : "操作被拒绝；请确认原生连接和当前顶层 HTTPS 页面";
       sendResponse({
         connected: !!capability,
         status,
         candidates: [],
         pending: !!pending,
+        saveBlocked: unconfirmedSave,
         origin: "",
       });
     });

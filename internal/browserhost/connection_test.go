@@ -147,7 +147,7 @@ func TestConnectionNativePairFillRejectAndReplay(t *testing.T) {
 	if last.Type != "fill" || last.Username != "fixture-user" || last.Password != "fixture-password" {
 		t.Fatal("wrong fill response")
 	}
-	if c.ApproveFill(r.ID) == nil || c.Handle(r) == nil {
+	if c.ApproveFill(r.ID) == nil || c.Handle(r) != nil {
 		t.Fatal("fill replay")
 	}
 }
@@ -240,7 +240,7 @@ func TestWrongCapabilityAndReplayCannotCancelCurrentIntent(t *testing.T) {
 	if c.Handle(bad) != nil || c.cancelEpoch.Load() != before || c.Snapshot().Pending == nil {
 		t.Fatal("wrong cap cancelled current request")
 	}
-	if c.Handle(bad) == nil || c.cancelEpoch.Load() != before {
+	if c.Handle(bad) != nil || c.cancelEpoch.Load() != before {
 		t.Fatal("replayed cancel changed epoch")
 	}
 }

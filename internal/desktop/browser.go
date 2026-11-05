@@ -11,9 +11,12 @@ import (
 
 func (a *App) browserView(c *ui.Context) {
 	view := a.browser.Snapshot()
+	if view.SaveStatus != "" {
+		a.status = view.SaveStatus
+	}
 	ui.Text(c, "浏览器连接").FontSize(24).Bold()
 	ui.Text(c, "固定扩展身份："+a.browserLabel).FontSize(12)
-	ui.Text(c, "此窗口持有独立金库会话；请核对浏览器当前网站，再逐次确认填充。")
+	ui.Text(c, "此窗口持有独立金库会话；请核对浏览器当前网站，再确认本次操作。")
 	if view.Busy {
 		ui.Text(c, "正在核对请求…")
 		return
@@ -33,6 +36,10 @@ func (a *App) browserView(c *ui.Context) {
 		return
 	}
 	ui.Text(c, "已连接 · 连接最多 15 分钟；5 分钟未原生操作自动锁定。")
+	if view.Save != nil {
+		a.browserSaveView(c, *view.Save, view.SaveStatus)
+		return
+	}
 	if view.Pending == nil {
 		ui.Text(c, "在浏览器弹窗中选择当前网站的登录。此窗口不会自行请求或刷新候选。")
 		return
@@ -40,12 +47,64 @@ func (a *App) browserView(c *ui.Context) {
 	pending := *view.Pending
 	ui.Text(c, "确认本次登录填充").FontSize(22).Bold()
 	ui.Text(c, "HTTPS 来源："+pending.Origin).FontSize(20).Bold()
-	ui.Text(c, "条目："+visible(pending.Title))
+	ui.Text(c, "条目："+browserTitle(pending.Title))
 	ui.Text(c, "ID："+pending.ItemID).FontSize(12)
 	ui.Text(c, "精确修订："+pending.Revision).FontSize(12)
 	ui.Text(c, "仅交付用户名和密码；不会自动提交。请求 30 秒后失效。")
 	ui.PrimaryButton(c, "批准本次填充").Disabled(a.busy).OnClick(func() { a.run(func() outcome { return outcome{err: a.browser.ApproveFill(pending.ID)} }) })
 	ui.Button(c, "拒绝本次填充").Disabled(a.busy).OnClick(func() { a.run(func() outcome { return outcome{err: a.browser.Reject()} }) })
+}
+
+func (a *App) browserSaveView(c *ui.Context, p browserhost.SaveView, status string) {
+	if a.browserSaveID != p.ID {
+		a.browserSaveID = p.ID
+		a.browserSaveTitle = p.Title
+	}
+	heading, approve, reject := "新建登录", "批准保存登录", "拒绝保存登录"
+	if p.Mode == "update" {
+		heading, approve, reject = "更新登录", "批准更新登录", "拒绝更新登录"
+	}
+	ui.Text(c, heading).FontSize(22).Bold()
+	ui.Text(c, "HTTPS 来源："+p.Origin).FontSize(20).Bold()
+	if p.Mode == "new" {
+		ui.TextInput(c, &a.browserSaveTitle).Label("新登录标题").Disabled(a.busy || p.Stage != "pending")
+	} else {
+		ui.Text(c, "条目："+browserTitle(p.Title))
+		ui.Text(c, "ID："+p.ItemID).FontSize(12)
+		ui.Text(c, "精确修订："+p.Revision).FontSize(12)
+	}
+	ui.Text(c, "保存的是点击时捕获的用户名与密码；不会验证网站账号是否正确。")
+	if p.Mode == "update" {
+		ui.Text(c, "仅替换用户名和密码；保留标题、网址、OTP及来源记录。")
+	}
+	ui.Text(c, status)
+	if p.Stage != "pending" {
+		return
+	}
+	ui.PrimaryButton(c, approve).Disabled(a.busy).OnClick(func() {
+		id, title := p.ID, a.browserSaveTitle
+		a.browserSaveAction(id, func() error { return a.browser.ApproveSave(id, title) })
+	})
+	ui.Button(c, reject).Disabled(a.busy).OnClick(func() { a.browserSaveAction(p.ID, func() error { return a.browser.RejectSave(p.ID) }) })
+}
+func (a *App) browserSaveAction(id string, work func() error) {
+	a.run(func() outcome {
+		e := work()
+		return outcome{apply: func() {
+			v := a.browser.Snapshot()
+			a.status = v.SaveStatus
+			if v.SaveRequestID == id && e != nil && a.status == "" {
+				a.status = message(e)
+			}
+		}}
+	})
+}
+
+func browserTitle(title string) string {
+	if title == "" {
+		return "（无标题）"
+	}
+	return visible(title)
 }
 
 // RunBrowser is a separate native process and session for this pipe. It exports
@@ -78,7 +137,9 @@ func RunBrowser(browser browserhost.Browser, args []string) error {
 				if e != nil {
 					break
 				}
-				if e = a.browser.Handle(request); e != nil {
+				e = a.browser.Handle(request)
+				request.Clear()
+				if e != nil {
 					break
 				}
 			}

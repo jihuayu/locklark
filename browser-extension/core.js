@@ -48,6 +48,7 @@ globalThis.LocklarkCore = (() => {
       !!a &&
       !!b &&
       a.tabId === b.tabId &&
+      a.windowId === b.windowId &&
       a.documentId === b.documentId &&
       a.origin === b.origin
     );
@@ -69,12 +70,21 @@ globalThis.LocklarkCore = (() => {
         fill: ["v", "id", "type", "username", "password"],
         error: ["v", "id", "type", "error"],
         cancelled: ["v", "id", "type"],
+        "save-ready": ["v", "id", "type", "nonce"],
+        saved: ["v", "id", "type", "item_id", "revision"],
+        unknown: ["v", "id", "type"],
       },
       keys = shapes[m.type];
     if (!keys || Object.keys(m).some((k) => !keys.includes(k))) return false;
     if (m.type === "locked") return true;
     if (m.type === "unpaired") return m.error === "expired";
     if (!/^[a-f0-9]{32}$/.test(m.id || "")) return false;
+    if (m.type === "save-ready") return /^[a-f0-9]{64}$/.test(m.nonce || "");
+    if (m.type === "saved")
+      return (
+        /^[a-f0-9]{32}$/.test(m.item_id || "") &&
+        /^[a-f0-9]{64}$/.test(m.revision || "")
+      );
     if (m.type === "paired") return /^[a-f0-9]{32}$/.test(m.capability || "");
     if (m.type === "error") return m.error === "refused";
     if (m.type === "fill")
@@ -110,7 +120,7 @@ globalThis.LocklarkCore = (() => {
   function probe() {
     return { origin: location.origin, top: window === window.top };
   }
-  function fillDocument(expected, username, password, expiresAt) {
+  function fillDocument(expected, username, password, expiresAt, captureOnly) {
     "use strict";
     try {
       if (
@@ -196,6 +206,39 @@ globalThis.LocklarkCore = (() => {
         Date.now() >= expiresAt
       )
         return false;
+      if (captureOnly) {
+        const get = Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          "value",
+        ).get;
+        const username = get.call(user),
+          password = get.call(pass);
+        function valid(value) {
+          for (let n = 0; n < value.length; n++) {
+            const code = value.charCodeAt(n);
+            if (code >= 0xdc00 && code <= 0xdfff) return false;
+            if (code >= 0xd800 && code <= 0xdbff) {
+              const low = value.charCodeAt(++n);
+              if (!(low >= 0xdc00 && low <= 0xdfff)) return false;
+            }
+            if (
+              (code < 32 && ![9, 10, 13].includes(code)) ||
+              code === 0xfffe ||
+              code === 0xffff
+            )
+              return false;
+          }
+          return new TextEncoder().encode(value).length <= 16384;
+        }
+        if (
+          !valid(username) ||
+          !valid(password) ||
+          password.length === 0 ||
+          Date.now() >= expiresAt
+        )
+          return false;
+        return { username, password };
+      }
       set.call(user, username);
       set.call(pass, password);
       user.dispatchEvent(new Event("input", { bubbles: true }));

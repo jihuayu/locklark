@@ -127,6 +127,9 @@ jobs:
       - name: Test browser extension
         timeout-minutes: 10
         run: node --test browser-extension/test/*.test.js
+      - name: Test native browser readiness helper
+        timeout-minutes: 1
+        run: python3 -m unittest discover -s scripts -p test_browser_native_x11.py
       - run: npm ci
         working-directory: web
       - run: npm test && npm run typecheck && npm run build
@@ -174,14 +177,20 @@ jobs:
         run: node scripts/browser_extension_dom.cjs
         env:
           LOCKLARK_TEST_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
-      - name: Test native browser approval and fill
+      - name: Test Firefox browser extension DOM
+        timeout-minutes: 10
+        run: node scripts/browser_extension_dom.cjs
+        env:
+          LOCKLARK_TEST_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
+          LOCKLARK_TEST_BROWSER: firefox
+      - name: Test native browser approval, fill and save
         timeout-minutes: 10
         run: dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' node scripts/browser_native_acceptance.mjs
         env:
           LOCKLARK_TEST_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
           LOCKLARK_GO: go
           LOCKLARK_BROWSER_HOST: ${{ runner.temp }}/locklark-browser-chromium
-      - name: Test Firefox native browser approval and fill
+      - name: Test Firefox native browser approval, fill and save
         timeout-minutes: 10
         run: dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' node scripts/browser_firefox_native_acceptance.mjs
         env:

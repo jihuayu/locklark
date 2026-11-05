@@ -18,6 +18,8 @@ var ErrDesktopDelivery = errors.New("native disclosure failed; intent recorded, 
 // Key. Operations are serialized and revalidate the slot, snapshot and history.
 // No exported method exposes arbitrary commands or key material to a renderer.
 type Session struct {
+	saveMu         sync.Mutex
+	saveGate       *BrowserSaveGate
 	lockRequested  atomic.Bool
 	mu             sync.Mutex
 	path           string
@@ -60,6 +62,7 @@ func UnlockSession(path string, password, key []byte, idle time.Duration) (*Sess
 	return &Session{path: path, material: r.material, slotDigest: r.slotDigest, last: time.Now(), fullUnlock: time.Now(), idle: idle, pending: make(map[*NativeField]bool)}, nil
 }
 func (s *Session) lock() {
+	s.cancelBrowserSave()
 	for f := range s.browserPending {
 		f.clear()
 		delete(s.browserPending, f)
@@ -74,7 +77,7 @@ func (s *Session) lock() {
 }
 
 // RequestLock immediately prevents new operations without waiting for a transaction.
-func (s *Session) RequestLock() { s.lockRequested.Store(true) }
+func (s *Session) RequestLock() { s.cancelBrowserSave() }
 func (s *Session) Lock()        { s.RequestLock(); s.mu.Lock(); defer s.mu.Unlock(); s.lock() }
 func (s *Session) active(touch bool) error {
 	now := time.Now()

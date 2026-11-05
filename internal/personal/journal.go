@@ -77,7 +77,7 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 	if e.Sequence != n || e.Previous != prev || !idOK(e.Session) || e.Actor != "local-owner" || !ed25519.Verify(pub, e.proof(), e.Signature) {
 		return invalid
 	}
-	if e.Action != "desktop.system.enable" && !editAction(e.Action) && !readValueAction(e.Action) && e.Action != otpDisclosureAction && e.Action != referenceRejectAction && e.Action != inspectionAction && e.Action != exportAction && e.Action != matchAction && !migrationAction(e.Action) && (e.Result != "succeeded" || e.BaseRevision != "") {
+	if e.Action != "desktop.system.enable" && !browserSaveAction(e.Action) && !editAction(e.Action) && !readValueAction(e.Action) && e.Action != otpDisclosureAction && e.Action != referenceRejectAction && e.Action != inspectionAction && e.Action != exportAction && e.Action != matchAction && !migrationAction(e.Action) && (e.Result != "succeeded" || e.BaseRevision != "") {
 		return invalid
 	}
 	if (e.Action == inspectionAction || migrationAction(e.Action) || e.Action == "item.import" || e.Action == healthAction) && e.Result == "succeeded" {
@@ -87,7 +87,7 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 	} else if e.ReportDigest != "" {
 		return invalid
 	}
-	if e.Action != "backup.prepare" && e.Action != "vault.restore" && !boundValueAction(e.Action) && e.Action != searchAction && e.Link != "" {
+	if e.Action != "backup.prepare" && e.Action != "vault.restore" && !browserSaveAction(e.Action) && !boundValueAction(e.Action) && e.Action != searchAction && e.Link != "" {
 		return invalid
 	}
 	if e.Action == searchAction && !digestOK(e.Link) {
@@ -104,6 +104,21 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 		return invalid
 	}
 	switch e.Action {
+	case browserNewAction, browserUpdateAction:
+		if n <= 1 || !digestOK(e.Link) {
+			return invalid
+		}
+		if e.Action == browserNewAction {
+			if e.BaseRevision != "" || e.Result != "succeeded" && e.Result != "browser-refused" || e.Result == "succeeded" && !idOK(e.Item) || e.Result != "succeeded" && e.Item != "" {
+				return invalid
+			}
+		} else if e.Result == "not-found" {
+			if e.Item != "" || e.BaseRevision != "" {
+				return invalid
+			}
+		} else if !idOK(e.Item) || !digestOK(e.BaseRevision) || e.Result != "succeeded" && e.Result != "conflict" && e.Result != "browser-refused" {
+			return invalid
+		}
 	case importPlanAction, importAction:
 		if n <= 1 || e.Item != "" || e.BaseRevision != "" {
 			return invalid
@@ -243,12 +258,12 @@ func history(b *bolt.Bucket, i identity, s vault.Snapshot, want bool, revisions 
 			return invalid
 		}
 		prev = ev.hash()
-		if ev.Action == "item.add" || ev.Action == "item.restore" || ev.Action == "item.generate" || ev.Action == "item.import" {
+		if ev.Action == "item.add" || ev.Action == "item.restore" || ev.Action == "item.generate" || ev.Action == "item.import" || ev.Action == browserNewAction && ev.Result == "succeeded" {
 			if revisions[ev.Item] != "" {
 				return invalid
 			}
 			revisions[ev.Item] = prev
-		} else if editAction(ev.Action) || readValueAction(ev.Action) || ev.Action == otpDisclosureAction {
+		} else if editAction(ev.Action) || ev.Action == browserUpdateAction || readValueAction(ev.Action) || ev.Action == otpDisclosureAction {
 			found := revisions[ev.Item] != ""
 			if (ev.Result == "not-found") == found || ev.BaseRevision != revisions[ev.Item] {
 				return invalid

@@ -9,6 +9,7 @@
 // LOCKLARK_TEST_PLAYWRIGHT, LOCKLARK_GECKODRIVER (otherwise PATH), LOCKLARK_GO.
 // For an intentional privacy-check failure after real pairing, set the tool-only
 // LOCKLARK_TEST_FAILURE_STAGE=after-pair. It must exit 1 without echoing factors.
+// page-arguments exercises a real driver failure carrying synthetic parameters.
 import assert from "node:assert/strict";
 import { createServer } from "node:https";
 import { createServer as createPortServer, createConnection } from "node:net";
@@ -29,6 +30,12 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  acceptBrowserSave,
+  assertPrivateArtifacts,
+  fixtureCanaries,
+  vaultObserver,
+} from "./browser_save_acceptance.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(join(root, "web/package.json"));
@@ -46,7 +53,9 @@ assert(
 );
 assert(
   !process.env.LOCKLARK_TEST_FAILURE_STAGE ||
-    process.env.LOCKLARK_TEST_FAILURE_STAGE === "after-pair",
+    ["after-pair", "page-arguments"].includes(
+      process.env.LOCKLARK_TEST_FAILURE_STAGE,
+    ),
   "Unsupported acceptance failure stage",
 );
 const firefox =
@@ -58,6 +67,7 @@ const geckodriver = process.env.LOCKLARK_GECKODRIVER || "geckodriver";
 const host = resolve(process.env.LOCKLARK_BROWSER_HOST);
 const register = resolve(process.env.LOCKLARK_BROWSER_REGISTER);
 const state = mkdtempSync(join(tmpdir(), "locklark-firefox-native-"));
+const diagnostics = mkdtempSync(join(state, "diagnostics-"));
 const env = { ...process.env };
 const nativeManifest = join(
   homedir(),
@@ -80,6 +90,10 @@ let nativeManifestDigest = "",
   nativeManifestInode,
   nativeManifestDevice;
 let driver, server;
+let observedFixture = null,
+  successful = false,
+  driverLogClosed = Promise.resolve(),
+  driverLogFailed = false;
 let rdp, consoleActor;
 const rdpPending = new Map(),
   evaluations = new Map();
@@ -115,8 +129,16 @@ function startProcess(binary, args, name) {
     stdio: ["ignore", "pipe", "pipe"],
   });
   const stream = createWriteStream(join(state, name + ".log"));
-  child.stdout.pipe(stream);
-  child.stderr.pipe(stream);
+  driverLogClosed = new Promise((resolve) => {
+    stream.once("finish", resolve);
+    stream.once("error", () => {
+      driverLogFailed = true;
+      resolve();
+    });
+  });
+  child.stdout.pipe(stream, { end: false });
+  child.stderr.pipe(stream, { end: false });
+  child.once("close", () => stream.end());
   child.on("error", () => {});
   return child;
 }
@@ -189,6 +211,11 @@ function input(actions, native = true, options = {}) {
           "批准本次填充",
           "拒绝本次填充",
           "立即锁定",
+          "新登录标题",
+          "批准保存登录",
+          "拒绝保存登录",
+          "批准更新登录",
+          "拒绝更新登录",
         ];
         const controls = Object.fromEntries(
           labels.map((label) => {
@@ -230,7 +257,7 @@ function input(actions, native = true, options = {}) {
           console.error(
             "Native accessibility environment: " +
               JSON.stringify({
-                bridgeDisabled: environment.NO_AT_BRIDGE === "1",
+                initialBridgeDisabled: environment.NO_AT_BRIDGE === "1",
                 hasA11ySetting: !!environment.GTK_A11Y,
                 hasSessionBus: !!environment.DBUS_SESSION_BUS_ADDRESS,
                 displayMatches: environment.DISPLAY === env.DISPLAY,
@@ -368,7 +395,7 @@ async function popupEvaluate(source) {
 }
 async function popupState() {
   return popupEvaluate(
-    'return {status:document.querySelector("#status")?.textContent,origin:document.querySelector("#origin")?.textContent,refreshDisabled:document.querySelector("#refresh")?.disabled,candidates:document.querySelectorAll("#candidates button").length};',
+    'return {status:document.querySelector("#status")?.textContent,origin:document.querySelector("#origin")?.textContent,refreshDisabled:document.querySelector("#refresh")?.disabled,candidates:document.querySelectorAll("#candidates [data-action=fill]").length};',
   );
 }
 async function popupClick(selector) {
@@ -421,15 +448,21 @@ async function blank() {
 async function select() {
   await openPopup();
   await eventually(
-    async () => !(await popupState()).refreshDisabled,
+    async () => (await popupState()).refreshDisabled === false,
     "Paired Firefox popup not ready",
   );
   await popupClick("#refresh");
-  await eventually(
-    async () => (await popupState()).candidates === 1,
-    "Exact-origin Firefox candidate missing",
-  );
-  await popupClick("#candidates button");
+  await eventually(async () => {
+    const state = await popupState();
+    return (
+      state.candidates === 1 &&
+      state.refreshDisabled === false &&
+      (await popupEvaluate(
+        'return document.querySelector("#candidates [data-action=fill]")?.disabled === false;',
+      ))
+    );
+  }, "Exact-origin Firefox candidate missing");
+  await popupClick('#candidates [data-action="fill"]');
   await eventually(
     async () => (await popupState()).status?.includes("原生窗口核对"),
     "Firefox did not request native confirmation",
@@ -466,12 +499,13 @@ function cleanup() {
         process.kill(-driver.pid, "SIGTERM");
       } catch {}
     }
-    await pause(300);
+    await Promise.race([driverLogClosed, pause(3000)]);
     if (driver) {
       try {
         process.kill(-driver.pid, "SIGKILL");
       } catch {}
     }
+    await Promise.race([driverLogClosed, pause(3000)]);
     if (server) await new Promise((resolve) => server.close(resolve));
     try {
       safeRemoveManifest();
@@ -480,6 +514,17 @@ function cleanup() {
         "FAIL: Firefox native manifest cleanup (AcceptanceFailure)",
       );
       process.exitCode = 1;
+    }
+    if (observedFixture) {
+      try {
+        assert(!driverLogFailed, "Persistent driver logging failed");
+        assertPrivateArtifacts(state, observedFixture);
+      } catch {
+        console.error(
+          "FAIL: Firefox persistent diagnostics (AcceptanceFailure)",
+        );
+        process.exitCode = 1;
+      }
     }
   })();
   return cleanupPromise;
@@ -655,6 +700,7 @@ try {
     { cwd: root, env, stdio: ["ignore", "ignore", "pipe"], timeout: 60000 },
   );
   const fixture = JSON.parse(readFileSync(join(state, "vault/fixture.json")));
+  observedFixture = fixture;
   execFileSync(
     register,
     [
@@ -806,9 +852,15 @@ try {
   await blank();
   progress("open actual Firefox extension action");
   await openPopup();
+  progress("save-new control");
+  assert(
+    await popupEvaluate('return !!document.querySelector("#save-new");'),
+    "Explicit save-new action is required",
+  );
   {
-    progress("connect and unlock through real MyGo input");
+    progress("native-connect");
     await popupClick("#connect");
+    progress("native-unlock");
     input([
       { click_label: "金库文件" },
       { text: fixture.Path },
@@ -818,13 +870,21 @@ try {
       { text: fixture.Secret },
       { click_label: "解锁" },
     ]);
+    progress("native-pair");
     input([{ click_label: "确认连接此扩展" }]);
     await blank();
     progress("native approval and actual Firefox document-targeted fill");
     await select();
     await blank();
     if (process.env.LOCKLARK_TEST_FAILURE_STAGE === "after-pair")
-      throw Error([fixture.Password, fixture.Secret, fixture.Value].join("\n"));
+      throw Error(fixtureCanaries(fixture).join("\n"));
+    if (process.env.LOCKLARK_TEST_FAILURE_STAGE === "page-arguments") {
+      progress("driver-arguments-failure");
+      await pageEvaluate(
+        'document.querySelector("#username").value=arguments[0];document.querySelector("#password").value=arguments[1];throw Error("Controlled driver argument failure");',
+        [fixture.SaveUsername, fixture.SaveValue],
+      );
+    }
     const nativeWindow = input([], true, { inspect: true }).window;
     assert(
       Number.isSafeInteger(nativeWindow) && nativeWindow > 0,
@@ -835,7 +895,7 @@ try {
       [
         "-window",
         String(nativeWindow),
-        join(state, "firefox-native-confirm.png"),
+        join(diagnostics, "native-fill-confirm.png"),
       ],
       { env, stdio: "ignore" },
     );
@@ -885,15 +945,101 @@ try {
       locked.status.includes("锁定") || locked.status.includes("断开"),
       "Firefox lock status missing",
     );
+    await acceptBrowserSave({
+      fixture,
+      origin,
+      phase: progress,
+      input,
+      inspect: () => input([], true, { inspect: true }),
+      observe: vaultObserver({
+        go: process.env.LOCKLARK_GO || "go",
+        root,
+        env,
+        state,
+      }),
+      captureNative: (kind) => {
+        const window = input([], true, { inspect: true }).window;
+        assert(
+          Number.isSafeInteger(window) && window > 0,
+          "Strict native XID required",
+        );
+        execFileSync(
+          "import",
+          [
+            "-window",
+            String(window),
+            join(diagnostics, "native-save-" + kind + ".png"),
+          ],
+          { env, stdio: "ignore" },
+        );
+      },
+      openPopup: async () => {
+        await openPopup();
+        return {
+          click: popupClick,
+          count: (selector) =>
+            popupEvaluate(
+              "return document.querySelectorAll(" +
+                JSON.stringify(selector) +
+                ").length;",
+            ),
+          text: (selector) =>
+            popupEvaluate(
+              "return document.querySelector(" +
+                JSON.stringify(selector) +
+                ')?.textContent || "";',
+            ),
+          disabled: (selector) =>
+            popupEvaluate(
+              "return document.querySelector(" +
+                JSON.stringify(selector) +
+                ")?.disabled !== false;",
+            ),
+        };
+      },
+      setLogin: (username, password) =>
+        pageEvaluate(
+          'document.querySelector("#username").value=arguments[0];document.querySelector("#password").value=arguments[1];',
+          [username, password],
+        ),
+      loginEquals: (username, password) =>
+        pageEvaluate(
+          'return document.querySelector("#username").value===arguments[0]&&document.querySelector("#password").value===arguments[1]&&window.submits===0;',
+          [username, password],
+        ),
+      navigate: (url) =>
+        bidiCall("browsingContext.navigate", {
+          context: pageContext,
+          url,
+          wait: "complete",
+        }),
+      reconnect: async () => {
+        await openPopup();
+        await popupClick("#disconnect");
+        input([], true, { wait_absent: true });
+        await openPopup();
+        await popupClick("#connect");
+        progress("native-unlock");
+        input([
+          { click_label: "金库文件" },
+          { text: fixture.Path },
+          { click_label: "主密码" },
+          { text: fixture.Password },
+          { click_label: "Secret Key" },
+          { text: fixture.Secret },
+          { click_label: "解锁" },
+        ]);
+        progress("native-pair");
+        input([{ click_label: "确认连接此扩展" }]);
+      },
+    });
     assert(
-      !logs.some(
-        (line) =>
-          line.includes(fixture.Value) ||
-          line.includes(fixture.Password) ||
-          line.includes(fixture.Secret),
+      !logs.some((line) =>
+        fixtureCanaries(fixture).some((value) => line.includes(value)),
       ),
       "Synthetic factor or value found in browser logs",
     );
+    await openPopup();
     await popupClick("#disconnect");
     const summary = {
       passed: true,
@@ -911,19 +1057,27 @@ try {
       noPreapprovalValues: true,
       noAutomaticSubmit: true,
       noSyntheticSecretsInBrowserLogs: true,
+      saveNew: true,
+      saveUpdateSameID: true,
+      capturedClickTimeValues: true,
+      unicodeRoundTrip: true,
+      saveRejectionNavigationLock: true,
     };
     writeFileSync(
       join(state, "acceptance-report.json"),
       JSON.stringify(summary, null, 2) + "\n",
     );
-    console.log(
-      "PASS: real Firefox action → native messaging → MyGo unlock/pair/approve → HTTPS fill; rejection, same-origin navigation, native lock, no preapproval release or automatic submission",
-    );
-    console.log("Private synthetic artifacts: " + state);
+    successful = true;
   }
 } catch {
   reportFailure();
   process.exitCode = 1;
 } finally {
   await cleanup();
+}
+if (successful && !process.exitCode) {
+  console.log(
+    "PASS: real Firefox fill/save/update with native approval, cancellation, Unicode, and no synthetic secrets in console or persistent diagnostics",
+  );
+  console.log("Private synthetic artifacts: " + state);
 }

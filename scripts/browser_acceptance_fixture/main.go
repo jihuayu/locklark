@@ -17,12 +17,22 @@ import (
 
 type fixture struct {
 	Path, Password, Secret, Username, Value, Title, Origin string
+	SeedID                                                 string
+	SaveUsername, SaveValue, UpdateUsername, UpdateValue   string
+	RejectedUsername, RejectedValue                        string
 }
 
 func run() error {
 	out := flag.String("out", "", "new private directory containing synthetic data only")
 	site := flag.String("origin", "", "controlled HTTPS test origin")
+	observe := flag.String("observe", "", "read a generated private fixture and observe a consistent vault copy")
 	flag.Parse()
+	if *observe != "" {
+		if *out != "" || *site != "" || flag.NArg() != 0 {
+			return fmt.Errorf("one fixture operation required")
+		}
+		return observeFixture(*observe)
+	}
 	canonical, err := origin.Parse(*site)
 	if err != nil || *out == "" || !filepath.IsAbs(*out) {
 		return fmt.Errorf("absolute output and supported HTTPS origin required")
@@ -35,7 +45,7 @@ func run() error {
 		return err
 	}
 	defer clear(key)
-	var entropy [24]byte
+	var entropy [72]byte
 	if _, err = rand.Read(entropy[:]); err != nil {
 		return err
 	}
@@ -44,8 +54,11 @@ func run() error {
 		Password: "Acceptance-" + hex.EncodeToString(entropy[:8]),
 		Secret:   personal.FormatSecret(key),
 		Username: "synthetic-browser-user",
-		Value:    "Synthetic-" + hex.EncodeToString(entropy[8:]),
+		Value:    "Synthetic-" + hex.EncodeToString(entropy[8:24]),
 		Title:    "Browser acceptance login", Origin: canonical,
+		SaveUsername: "合成浏览器用户", SaveValue: "Synthetic-new-🔐-" + hex.EncodeToString(entropy[24:40]),
+		UpdateUsername: "synthetic-updated-browser-user", UpdateValue: "Synthetic-updated-" + hex.EncodeToString(entropy[40:56]),
+		RejectedUsername: "synthetic-rejected-browser-user", RejectedValue: "Synthetic-rejected-" + hex.EncodeToString(entropy[56:72]),
 	}
 	clear(entropy[:])
 	if err = personal.Create(f.Path, f.Password, key); err != nil {
@@ -55,6 +68,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	f.SeedID = id
 	rows, err := personal.List(f.Path, f.Password, key)
 	if err != nil {
 		return err
@@ -76,7 +90,7 @@ func run() error {
 
 func main() {
 	if run() != nil {
-		fmt.Fprintln(os.Stderr, "Synthetic browser fixture could not be created")
+		fmt.Fprintln(os.Stderr, "Synthetic browser fixture operation failed")
 		os.Exit(1)
 	}
 }
