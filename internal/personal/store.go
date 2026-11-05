@@ -192,6 +192,7 @@ type result struct {
 }
 
 type commandOption struct {
+	export     *exportRequest
 	inspection *inspectionRequest
 	backup     string
 	generation *generationRequest
@@ -240,6 +241,9 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		return result{}, invalid
 	}
 	if (action == inspectionAction) != (option.inspection != nil) || (option.inspection != nil && option.inspection.read == nil) {
+		return result{}, invalid
+	}
+	if (action == exportAction) != (option.export != nil) {
 		return result{}, invalid
 	}
 	if option.generation != nil {
@@ -327,6 +331,12 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			}
 		}
 		switch action {
+		case exportAction:
+			out.archive, e = vault.ExportKDBX(items, option.export.password)
+			if e != nil {
+				return e
+			}
+			outcome = "intent"
 		case inspectionAction:
 			out.inspection, e = option.inspection.inspect()
 			if e != nil {
@@ -466,7 +476,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		if e != nil {
 			return e
 		}
-		if (revealAction(action) || action == otpDisclosureAction || action == inspectionAction) && refusal == nil {
+		if (revealAction(action) || action == otpDisclosureAction || action == inspectionAction || action == exportAction) && refusal == nil {
 			out.session, out.intent = ev.Session, ev.hash()
 		}
 		if action == "backup.prepare" {
@@ -485,6 +495,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		return nil
 	})
 	if e != nil {
+		clear(out.archive)
 		clear(out.value)
 		if out.otp != nil {
 			out.otp.Clear()

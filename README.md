@@ -18,6 +18,10 @@ Go TOTP 核心已通过 RFC 6238/4226 向量，支持有限的 Base32/otpauth �
 
 独立 1PUX v3 清点预检模块在内存中检查归档边界、CRC 和严格 JSON，输出受限计数，不输出标题、路径或字段值，也不落盘解压。显式 `file.path` 可精确核对匹配/缺失、重复引用和声明大小差异；没有当前子集显式引用的文件不能称为孤儿或据此删除。另有区段和登录字段结构清点，保留重复、缺失、未知 designation 和 JSON 值形状；`type`/`fieldType` 分开计数，不猜测语义，见[登录字段清点](docs/onepux-login-fields-validation.md)。密码历史另按原顺序清点值/时间形状、精确整数相邻关系和字面重复，不排序、不去重，见[历史清点](docs/onepux-password-history-validation.md)。个人 CLI 已开放认证、审计的只读预检；全部条目映射仍未验证，未开放通用写入入口；见[清点验收](docs/onepux-preflight-validation.md)与[显式文件关联验收](docs/onepux-file-references-validation.md)。
 
+## 加密迁出
+
+`personal export-kdbx --file owner.ll --out NEW.kdbx` 经双因素和 `SAVE` 确认后，把当前原生条目导出为独立密码加密的 KDBX 4.1 文件。导出密码在隐藏终端输入两次，至少 12 字符；已存在目标不会被覆盖。可使用 KeePass 兼容工具打开，不包含账户钥匙、审计或恢复材料。互操作和故障边界见[加密迁出验收](docs/personal-kdbx-export-validation.md)。
+
 ## 迁移前检查 1PUX
 
 ```powershell
