@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"github.com/jihuayu/locklark/internal/password"
 	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/locklark/internal/vault"
 	"golang.org/x/term"
 	"io"
 	"os"
@@ -19,7 +20,7 @@ import (
 	"unicode/utf8"
 )
 
-var personalUsage = errors.New("usage: locklark personal <init|add-login|list|audit|archived-audit|references> --file PATH, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password|otp, or reveal-login --file PATH --id ID --revision REV --field username|password, or generate-login --file PATH [--length N], or regenerate-password --file PATH --id ID --revision REV [--length N], or otp --file PATH --id ID --revision REV, or reveal-ref|otp-ref --file PATH --ref REF --revision REV, or inspect-1pux --file PATH --source ARCHIVE")
+var personalUsage = errors.New("usage: locklark personal <init|add-login|list|audit|archived-audit|references> --file PATH, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password|otp, or reveal-login --file PATH --id ID --revision REV --field username|password, or generate-login --file PATH [--length N], or regenerate-password --file PATH --id ID --revision REV [--length N], or otp --file PATH --id ID --revision REV, or reveal-ref|otp-ref --file PATH --ref REF --revision REV, or inspect-1pux --file PATH --source ARCHIVE, or export-kdbx --file PATH --out NEW_FILE.kdbx")
 
 // One terminal mode covers the entire interaction; no prompt or inter-field
 // gap is visible while echo is enabled.
@@ -93,6 +94,10 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 	var reveal personal.RevealTarget
 	length := password.DefaultPolicy().Length
 	switch action {
+	case "export-kdbx":
+		if len(opts) != 2 || opts["--out"] == "" {
+			return personalUsage
+		}
 	case "inspect-1pux":
 		if len(opts) != 2 || opts["--source"] == "" {
 			return personalUsage
@@ -242,6 +247,35 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 		}
 		defer clear(key)
 		switch action {
+		case "export-kdbx":
+			password, e := consoleField("新导出密码（至少 12 字符）")
+			if e != nil {
+				return e
+			}
+			defer clear(password)
+			if e = vault.ValidateExportPassword(string(password)); e != nil {
+				return e
+			}
+			confirmation, e := consoleField("再次输入导出密码")
+			if e != nil {
+				return e
+			}
+			defer clear(confirmation)
+			if subtle.ConstantTimeCompare(password, confirmation) != 1 {
+				return errors.New("export passwords did not match")
+			}
+			if _, e = fmt.Fprint(os.Stderr, "导出包含当前条目的敏感值，以独立密码加密；不包含账户钥匙、审计或恢复材料。\r\n"); e != nil {
+				return e
+			}
+			consent, e := consoleField("输入 SAVE 确认加密导出")
+			if e != nil {
+				return e
+			}
+			defer clear(consent)
+			if string(consent) != "SAVE" {
+				return errors.New("encrypted export cancelled")
+			}
+			response, err = personal.ExportKDBX(path, string(pw), key, string(password), opts["--out"])
 		case "inspect-1pux":
 			if _, e = fmt.Fprint(os.Stderr, "将只读检查明文 1PUX 归档并记录审计；不会导入条目，报告不包含字段值。\r\n"); e != nil {
 				return e

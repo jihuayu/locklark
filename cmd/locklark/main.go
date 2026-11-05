@@ -21,6 +21,7 @@ const usage = `Locklark · offline personal and synthetic gateway preview
   personal otp --file PATH --id ID --revision REV
   personal references --file PATH
   personal inspect-1pux --file PATH --source ARCHIVE
+  personal export-kdbx --file PATH --out NEW_FILE.kdbx
   personal reveal-ref|otp-ref --file PATH --ref REF --revision REV
   personal <init|add-login|list|audit> --file PATH  (interactive local-owner terminal)
 

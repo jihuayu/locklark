@@ -18,6 +18,8 @@ PR #6 已经 Luna/max 复核及 Ubuntu/Windows CI，合入 `83ba767`。现从该
 
 PR #7 经 Luna/max 复核与 Ubuntu/Windows CI 合入 `cff9aaf`。随后接续个人 CLI 的认证 1PUX 预检：解锁并验证历史后才读取源文件，输出前提交成功报告摘要或固定拒绝类别；同时补齐共享命令的数据库关闭失败处理。范围和实跑证据见 [personal-onepux-inspection-validation.md](personal-onepux-inspection-validation.md)。
 
+四线推进（用户要求 1/2/3/4 都推进）：PR #8 已合入 `5c40f8a`，先接通个人加密 KDBX 迁出和独立互操作；随后依次推进归档、严格网站来源匹配、持久签名团队设备目录。每批仍单独复核、CI 和 PR 合并，不把核心模块或编译成功写成原生多端验收。迁出证据见 [personal-kdbx-export-validation.md](personal-kdbx-export-validation.md)。
+
 | 工作 | 已验证 | 下一项可开发、可验收的增量 |
 | --- | --- | --- |
 | 持库核心与兼容 | 双密钥、独立设备收钥、吊销后离线解密失败；Argon2id/旧 Argon2d 互操作；内置 1PUX 的原生登录/文档/附件与可逆迁出；TOTP 与密码生成核心验收；1PUX v3 只读清点及显式文件路径的匹配/缺失、共享与大小差异核对，来源审计回归通过 | 独立复核、区段/字段类型与重复标识预检、其他附件布局及完整条目/历史映射，以及真实迁移前的恢复演练 |
