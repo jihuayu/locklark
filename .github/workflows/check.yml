@@ -38,6 +38,7 @@ jobs:
           go build -o "$RUNNER_TEMP/locklark" ./cmd/locklark
           python3 scripts/mcp_acceptance.py "$RUNNER_TEMP/locklark"
           python3 scripts/personal_acceptance.py "$RUNNER_TEMP/locklark"
+          python3 scripts/disclosure_acceptance.py "$RUNNER_TEMP/locklark"
       - if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -50,3 +51,5 @@ jobs:
           go build -o $binary ./cmd/locklark
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $python scripts/personal_acceptance.py $binary
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $python scripts/disclosure_acceptance.py $binary

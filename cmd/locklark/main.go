@@ -15,6 +15,7 @@ import (
 const usage = `Locklark · offline personal and synthetic gateway preview
 
   personal edit-login --file PATH --id ID --revision REV --field title|username|password
+  personal reveal-login --file PATH --id ID --revision REV --field username|password
   personal <init|add-login|list|audit> --file PATH  (interactive local-owner terminal)
 
   demo     --out NEW_DIR --session ID --reason TEXT
@@ -56,7 +57,7 @@ func run(args []string, out, errOut io.Writer) error {
 	command := args[0]
 	switch command {
 	case "personal":
-		return runPersonal(args[1:],out)
+		return runPersonal(args[1:], out)
 	case "mcp-stdio", "bridge-profile", "status-answer", "status-serve":
 		return runBridge(args, out, errOut)
 	case "pull-enroll", "pull-request":

@@ -173,12 +173,14 @@ func existing(path string) (*bolt.DB, error) {
 }
 
 type result struct {
-	rows     []Row
-	events   []Event
-	id       string
-	revision string
-	chains   []Chain
-	archive  []byte
+	value           []byte
+	session, intent string
+	rows            []Row
+	events          []Event
+	id              string
+	revision        string
+	chains          []Chain
+	archive         []byte
 }
 
 func command(path, pw string, key []byte, action string, add vault.Item, edit *Edit, backup ...string) (result, error) {
@@ -187,9 +189,15 @@ func command(path, pw string, key []byte, action string, add vault.Item, edit *E
 		return result{}, e
 	}
 	defer db.Close()
+	return commandWithUpdate(db.Update, pw, key, action, add, edit, backup...)
+}
+
+// The updater returns only after commit (including bbolt's default fsync).
+// Keeping it explicit also permits rollback fault injection in tests.
+func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key []byte, action string, add vault.Item, edit *Edit, backup ...string) (result, error) {
 	var out result
 	var refusal error
-	e = db.Update(func(tx *bolt.Tx) error {
+	e := update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucket)
 		if b == nil {
 			return invalid
@@ -258,7 +266,7 @@ func command(path, pw string, key []byte, action string, add vault.Item, edit *E
 			if len(backup) != 1 {
 				return invalid
 			}
-		case "item.edit.title", "item.edit.username", "item.edit.password":
+		case "item.edit.title", "item.edit.username", "item.edit.password", "item.reveal.username", "item.reveal.password":
 			if edit == nil {
 				return invalid
 			}
@@ -274,6 +282,15 @@ func command(path, pw string, key []byte, action string, add vault.Item, edit *E
 					if items[i].ID == edit.ID {
 						if items[i].Kind != "login" {
 							return invalid
+						}
+						if revealAction(action) {
+							value := items[i].Username
+							if action == "item.reveal.password" {
+								value = items[i].Password
+							}
+							out.value = []byte(value)
+							outcome = "intent"
+							break
 						}
 						switch edit.Field {
 						case "title":
@@ -328,6 +345,9 @@ func command(path, pw string, key []byte, action string, add vault.Item, edit *E
 		if e != nil {
 			return e
 		}
+		if revealAction(action) && refusal == nil {
+			out.session, out.intent = ev.Session, ev.hash()
+		}
 		if action == "backup.prepare" {
 			auditPriv := ed25519.NewKeyFromSeed(i.Audit)
 			defer clear(auditPriv)
@@ -344,6 +364,7 @@ func command(path, pw string, key []byte, action string, add vault.Item, edit *E
 		return nil
 	})
 	if e != nil {
+		clear(out.value)
 		return result{}, e
 	}
 	return out, refusal
