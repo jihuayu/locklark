@@ -7,6 +7,7 @@ import (
 	bolt "go.etcd.io/bbolt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -38,6 +39,9 @@ func TestKDBXExportIntentBeforePublish(t *testing.T) {
 	if !bytes.Equal(raw, after) {
 		t.Fatal("existing file changed")
 	}
+	if _, err := ExportKDBX(path, "wrong", key, "synthetic-export-password", dest); err == nil || errors.Is(err, ErrExportOutput) {
+		t.Fatal("unauthenticated output probe", err)
+	}
 	bad := filepath.Join(t.TempDir(), "never.kdbx")
 	if _, err := ExportKDBX(path, "wrong", key, "synthetic-export-password", bad); err == nil {
 		t.Fatal("wrong factors accepted")
@@ -58,7 +62,7 @@ func TestKDBXExportIntentBeforePublish(t *testing.T) {
 			n++
 		}
 	}
-	if n != 2 {
+	if n != 3 {
 		t.Fatal("failed publication lost intent or bad factors added one", n)
 	}
 }
@@ -128,5 +132,56 @@ func TestKDBXExportRollbackAndRecovery(t *testing.T) {
 	}
 	if found != 1 {
 		t.Fatal("recovery lost export intent")
+	}
+}
+
+func TestKDBXExportConcurrentPublication(t *testing.T) {
+	dest := filepath.Join(t.TempDir(), "out.kdbx")
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	for _, raw := range [][]byte{[]byte("first"), []byte("second")} {
+		wg.Add(1)
+		go func(raw []byte) { defer wg.Done(); <-start; errs <- publishExport(raw, dest) }(raw)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	successes := 0
+	for err := range errs {
+		if err == nil {
+			successes++
+		}
+	}
+	raw, err := os.ReadFile(dest)
+	if successes != 1 || err != nil || (string(raw) != "first" && string(raw) != "second") {
+		t.Fatal("non-atomic publication", successes, err)
+	}
+	leftovers, _ := filepath.Glob(filepath.Join(filepath.Dir(dest), ".locklark-export-*"))
+	if len(leftovers) != 0 {
+		t.Fatal("temporary output retained")
+	}
+}
+
+func TestKDBXExportSymlinkRefusal(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	dest := filepath.Join(dir, "out.kdbx")
+	if err := os.WriteFile(target, []byte("original"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, dest); err != nil {
+		t.Skip("symlink creation unavailable", err)
+	}
+	if err := publishExport([]byte("replacement"), dest); err == nil {
+		t.Fatal("symlink replaced")
+	}
+	raw, err := os.ReadFile(target)
+	if err != nil || string(raw) != "original" {
+		t.Fatal("target modified", err)
+	}
+	info, err := os.Lstat(dest)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("symlink modified", err)
 	}
 }

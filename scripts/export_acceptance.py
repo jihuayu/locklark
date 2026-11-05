@@ -26,7 +26,7 @@ def check(binary):
         assert pathlib.Path(dest).read_bytes() == before
         events, _ = invoke(binary, "audit", path, factors, forbidden=("synthetic-secret", export_pw))
         exports = [e for e in events if e["action"] == "vault.export.kdbx"]
-        assert len(exports) == 1 and exports[0]["result"] == "intent" and exports[0]["session"] == receipt["session"]
+        assert len(exports) == 2 and exports[0]["result"] == "intent" and exports[0]["session"] == receipt["session"]
     print("PASS: consent, encrypted KDBX export, independent reopen, no overwrite and audit intent")
 
 if __name__ == "__main__":

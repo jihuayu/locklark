@@ -48,9 +48,6 @@ func exportKDBX(path, pw string, key []byte, password, dest string, publishFile 
 	if !strings.EqualFold(filepath.Ext(dest), ".kdbx") {
 		return ExportReceipt{}, errors.New("explicit .kdbx output required")
 	}
-	if _, err := os.Lstat(dest); !os.IsNotExist(err) {
-		return ExportReceipt{}, ErrExportOutput
-	}
 	r, err := command(path, pw, key, exportAction, vault.Item{}, nil, commandOption{export: &exportRequest{password: password}})
 	defer clear(r.archive)
 	if err != nil {
