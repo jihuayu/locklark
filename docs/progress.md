@@ -1,5 +1,9 @@
 # Locklark 开发进度
 
+原生 MyGo 桌面与系统快捷解锁 [PR #23](https://github.com/jihuayu/locklark/pull/23) 经 Luna/max 最终复审及 Ubuntu/Windows/macOS CI（run 42044135997，head `bb59657`）合入 main `de7ba5a`。系统 Hello/Touch ID/Secret Service 真机行为继续单列。当前接 Next.js 本机只读团队管理和固定 Go 元数据接口，见 [Web 验收](nextjs-management-validation.md)；完整迁移、扩展、团队/同步和手机范围仍持续推进。
+
+个人开发者环境注入 [PR #22](https://github.com/jihuayu/locklark/pull/22) 已合入 `5b0ce38`，精确 head `40aba12` 的 Ubuntu/Windows CI（run 42009389353）通过。
+
 第八批标题搜索 [PR #21](https://github.com/jihuayu/locklark/pull/21) 已经 Luna/max 与 Ubuntu/Windows CI 合入 main `b9edaa8`（run 42004280736，head `5dd722c`）。第九批接个人开发者 `run-env`：固定条目/修订/字段、人工确认、意图先提交、最小子环境和无子进程文本回流，见[环境注入验收](personal-run-env-validation.md)。这是向本地可信程序披露，不能代替 invoke 机器授权或第三方沙箱；SSH 与 op 对照仍待完成。
 
 第七批签名插件目录 [PR #20](https://github.com/jihuayu/locklark/pull/20) 已经 Luna/max、全量 Go/竞态和 Ubuntu/Windows CI 合入 main `1dfc8b0`（run 42001953615，head `6e5b315`）。第八批接个人 CLI 隐藏查询的标题搜索：Unicode 匹配、状态范围、同名保留、事务审计与无原始查询绑定，见[标题搜索验收](personal-title-search-validation.md)。桌面、浏览器/手机、远端同步及其他产品缺口仍按七条范围保留。

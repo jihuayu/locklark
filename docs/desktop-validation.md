@@ -24,9 +24,9 @@ Session 只保留已解开的身份材料，不保留主密码/Secret Key或条�
 
 工具链由 Go 1.26.8 升到 MyGo 所需 1.27.3；搜索 Unicode 数据随之升到 17，审计绑定 profile 更新为 `title-nfc-fold-substring-u17-v2`，不能将新结果称为原 Unicode 15 profile。
 
-Luna/max 首轮复核发现锁清理时序、系统认证持锁、CNG 指针存活、OS 写入前成功审计问题；已加入取消/锁竞争测试并修复，复审与最终精确提交 CI 证据待补。
+Luna/max 首轮复核发现锁清理时序、系统认证持锁、CNG 指针存活、OS 写入前成功审计问题；已加入取消/锁竞争测试并修复，Luna/max 最终复审通过，无可复现阻断。最终 head `bb5965751250cf957e8fe629588a8db7e0a6f3a8` 的 [CI 42044135997](https://github.com/jihuayu/locklark/actions/runs/42044135997) 全部通过：Ubuntu 3m4s、Windows 7m38s、macOS 33s；PR #23 已合入 main `de7ba5a`。
 
-本地完整 `go test -count=1 ./...`（独立 PyKeePass 与 Bun 环境）通过；`go vet ./...` 通过。桌面/会话定向 race、系统提示取消 race、真实金库 UI 工作流 race 通过；标题搜索 PTY 验收通过。已创建 [PR #23](https://github.com/jihuayu/locklark/pull/23)，三平台 CI 运行中。新增选择上下文检查：切换条目/页面后，已准备字段被销毁，不能迟到显示在另一条目下。
+本地完整 `go test -count=1 ./...`（独立 PyKeePass 与 Bun 环境）通过；`go vet ./...` 通过。桌面/会话定向 race、系统提示取消 race、真实金库 UI 工作流 race 通过；标题搜索 PTY 验收通过。已创建 [PR #23](https://github.com/jihuayu/locklark/pull/23)，三平台 CI 已通过并合并。新增选择上下文检查：切换条目/页面后，已准备字段被销毁，不能迟到显示在另一条目下。
 
 ## 尚待真实平台验收
 
