@@ -339,4 +339,6 @@ go test -count=1 ./internal/vault -run 'TestKDBXIndependentPeer|TestIndependentN
 
 新目录可用 `NewConfigWithPossession` 启用 scope 固定的强制设备双钥证明：owner 签名的 age 随机挑战、设备 Ed25519 响应、精确成员/设备/parent 绑定，并在持久提交和历史重读时强制检查新增设备证明。旧配置不能静默降级新目录；不证明物理设备唯一性，不替代邀请 UI、权限执行或同步。详见[设备证明验收](docs/team-device-possession-validation.md)。
 
+新目录另可用 `NewConfigWithWriterACL` 同时强制入网证明与数据写权限：`BuildUpdate` 允许当前 writer 设备发布新密文，reader 不可发布，成员/角色/冻结仍只由 owner 授权。事务提交和历史重读都依据之前的可信状态执行权限检查；`Read` 返回验证后的 `SnapshotSigner` 供解密使用。仍是本地 Go API，无网络同步或产品界面，见[团队写权限验收](docs/team-writer-acl-validation.md)。
+
 个人 CLI 新增 `trash-login` / `restore-login`（`--file`、`--id`、`--revision`，SAVE 确认），以及 `list --state trashed`。回收站条目需先恢复才能读取或编辑，恢复时保留原活动/归档状态。备份和加密迁出仍包含回收站；不自动清空或永久擦除。详见 [回收站验收](docs/personal-trash-validation.md)。
