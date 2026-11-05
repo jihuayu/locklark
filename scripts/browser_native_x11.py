@@ -7,6 +7,7 @@ geometry. Legacy coordinates are relative to the requested real X window.
 import ctypes as C
 import json
 import os
+import re
 import sys
 import time
 
@@ -15,9 +16,18 @@ CONTROL_LABELS = (
     "金库文件", "主密码", "Secret Key", "解锁", "确认连接此扩展",
     "拒绝连接", "批准本次填充", "拒绝本次填充", "立即锁定",
     "新登录标题", "批准保存登录", "拒绝保存登录", "批准更新登录", "拒绝更新登录",
+    "搜索标题", "搜索 / 刷新", "新建登录", "登录标题", "新登录用户名", "新登录密码", "保存登录",
+    "网站（可选）", "密码长度（22–256）", "生成强密码并保存",
+    "重新生成本地密码", "确认生成并替换", "取消重新生成",
+    "显示密码", "复制密码", "立即隐藏", "显示验证码", "复制验证码", "隐藏验证码",
+    "金库", "安全设置", "归档", "回收站", "全部",
+    "Daily generated login · active", "Daily manual login · active",
+    "Daily OTP login · active", "Daily other login · active",
+    "Daily provider login · active", "停用系统快捷解锁",
+    "Daily archived login · archived", "Daily trashed login · trashed",
 )
 
-FAILURE_CONTEXT = {"action": "setup", "index": -1}
+FAILURE_CONTEXT = {"action": "setup", "index": -1, "x_codes":[]}
 FAILURE_REASONS = {
     "Native accessibility unavailable": "a11y-unavailable",
     "Native accessibility query failed": "a11y-query",
@@ -33,6 +43,8 @@ FAILURE_REASONS = {
     "Previous native acceptance window did not close": "window-close-timeout",
     "Native acceptance window must be unique": "window-ambiguous",
     "Native acceptance window unavailable": "window-timeout",
+    "Native acceptance window not viewable": "window-viewable-timeout",
+    "Native acceptance window attributes unavailable": "window-attributes",
     "Native acceptance window geometry unavailable": "window-geometry",
     "Native acceptance X target unavailable": "x-target",
     "Acceptance input must be ASCII": "input-charset",
@@ -54,6 +66,52 @@ def failure_reason(error):
     if type(error) is RuntimeError and len(error.args) == 1 and type(error.args[0]) is str:
         return FAILURE_REASONS.get(error.args[0], "unexpected")
     return "unexpected"
+
+
+def safe_click_record(value):
+    """Only public labels, geometry, XIDs and input acknowledgement flags."""
+    if not isinstance(value, dict):
+        return {}
+    result = {"label":value.get("label") if value.get("label") in CONTROL_LABELS else "pointer"}
+    for key in ("target",):
+        if type(value.get(key)) is str and re.fullmatch(r"0x[0-9a-f]+",value[key]):
+            result[key] = value[key]
+    for key in ("x","y"):
+        if type(value.get(key)) is int:
+            result[key] = value[key]
+    for phase in ("before","after"):
+        state = value.get(phase)
+        if not isinstance(state,dict):
+            continue
+        result[phase] = {key:state[key] for key in ("x","y","button_mask") if type(state.get(key)) is int}
+        if type(state.get("focus")) is str and re.fullmatch(r"0x[0-9a-f]+",state["focus"]):
+            result[phase]["focus"] = state["focus"]
+        result[phase]["pointer_available"] = state.get("pointer_available") is True
+    if isinstance(value.get("x_test"),dict):
+        result["x_test"] = {key:value["x_test"].get(key) is True for key in ("motion","down","up")}
+    return result
+
+
+def wait_window_viewable(read_map_state, deadline):
+    """Observe one already selected XID within the original find deadline."""
+    while time.monotonic() < deadline:
+        state = read_map_state()
+        now = time.monotonic()
+        if now >= deadline:
+            break
+        if state is None:
+            raise RuntimeError("Native acceptance window attributes unavailable")
+        if state == 2:  # Xlib IsViewable, not merely an existing/unmapped XID.
+            return
+        remaining = deadline-now
+        if remaining > 0:
+            time.sleep(min(0.05,remaining))
+    raise RuntimeError("Native acceptance window not viewable")
+
+
+def check_x_target_errors(errors,target):
+    if any(code != 3 or resource == target for code,resource in errors):
+        raise RuntimeError("Native acceptance X target unavailable")
 
 
 class NativeControls:
@@ -124,13 +182,17 @@ class NativeControls:
     def walk(self, node, visit, depth=0, budget=None):
         budget = [512] if budget is None else budget
         if depth > 12 or budget[0] <= 0:
-            raise RuntimeError("Native accessibility tree limit")
+            error = RuntimeError("Native accessibility tree limit")
+            error.native_guard = {"depth":depth, "visited":512-budget[0], "remaining":budget[0]}
+            raise error
         budget[0] -= 1
         if visit(node, depth) is False:
             return
         count = self.checked(self.at.atspi_accessible_get_child_count, node)
         if count < 0 or count > 256:
-            raise RuntimeError("Native accessibility child limit")
+            error = RuntimeError("Native accessibility child limit")
+            error.native_guard = {"depth":depth, "visited":512-budget[0], "remaining":budget[0], "children":count}
+            raise error
         for index in range(count):
             child = self.checked(self.at.atspi_accessible_get_child_at_index, node, index)
             if not child:
@@ -154,7 +216,14 @@ class NativeControls:
                 return False
             return depth < 2
 
-        self.walk(self.desktop, window)
+        try:
+            self.walk(self.desktop, window)
+        except BaseException:
+            # Window discovery can retain references before a later child
+            # query fails. Release those references on every exceptional exit.
+            for node in windows:
+                self.go.g_object_unref(node)
+            raise
         if not windows:
             return {}
         if len(windows) != 1:
@@ -237,12 +306,23 @@ def main():
             ("code", C.c_ubyte), ("request", C.c_ubyte), ("minor", C.c_ubyte),
         ]
 
+    class Attributes(C.Structure):
+        _fields_ = [(name,C.c_int) for name in ("x","y","width","height","border_width","depth")]+[
+            ("visual",pointer),("root",window),("class",C.c_int),("bit_gravity",C.c_int),
+            ("win_gravity",C.c_int),("backing_store",C.c_int),("backing_planes",C.c_ulong),
+            ("backing_pixel",C.c_ulong),("save_under",C.c_int),("colormap",C.c_ulong),
+            ("map_installed",C.c_int),("map_state",C.c_int),("all_event_masks",C.c_long),
+            ("your_event_mask",C.c_long),("do_not_propagate_mask",C.c_long),
+            ("override_redirect",C.c_int),("screen",pointer)]
+
     errors = []
     error_handler_type = C.CFUNCTYPE(C.c_int, pointer, C.POINTER(XError))
 
     @error_handler_type
     def error_handler(_display, event):
         errors.append((event.contents.code, event.contents.resource))
+        if event.contents.code not in FAILURE_CONTEXT["x_codes"]:
+            FAILURE_CONTEXT["x_codes"].append(int(event.contents.code))
         return 0
 
     x.XSetErrorHandler.argtypes = [error_handler_type]
@@ -260,6 +340,10 @@ def main():
     x.XFree.argtypes = [pointer]
     x.XRaiseWindow.argtypes = [pointer, window]
     x.XSetInputFocus.argtypes = [pointer, window, C.c_int, C.c_ulong]
+    x.XGetWindowAttributes.argtypes = [pointer,window,C.POINTER(Attributes)]
+    x.XGetWindowAttributes.restype = C.c_int
+    x.XGetInputFocus.argtypes = [pointer, C.POINTER(window), C.POINTER(C.c_int)]
+    x.XQueryPointer.argtypes = [pointer, window, C.POINTER(window), C.POINTER(window), C.POINTER(C.c_int), C.POINTER(C.c_int), C.POINTER(C.c_int), C.POINTER(C.c_int), C.POINTER(C.c_uint)]
     x.XTranslateCoordinates.argtypes = [pointer, window, window, C.c_int, C.c_int, C.POINTER(C.c_int), C.POINTER(C.c_int), C.POINTER(window)]
     x.XStringToKeysym.argtypes = [C.c_char_p]
     x.XStringToKeysym.restype = C.c_ulong
@@ -272,6 +356,8 @@ def main():
     xt.XTestFakeKeyEvent.argtypes = [pointer, C.c_uint, C.c_int, C.c_ulong]
     xt.XTestFakeMotionEvent.argtypes = [pointer, C.c_int, C.c_int, C.c_int, C.c_ulong]
     xt.XTestFakeButtonEvent.argtypes = [pointer, C.c_uint, C.c_int, C.c_ulong]
+    xt.XTestFakeMotionEvent.restype = C.c_int
+    xt.XTestFakeButtonEvent.restype = C.c_int
     display = x.XOpenDisplay(os.environ.get("DISPLAY", "").encode())
     if not display:
         raise RuntimeError("X display unavailable")
@@ -355,7 +441,8 @@ def main():
         raise RuntimeError("Previous native acceptance window did not close")
 
     target = None
-    for _ in range(100):
+    discovery_deadline = time.monotonic()+5
+    while time.monotonic() < discovery_deadline:
         matches=find(root)
         if len(matches)>1:
             raise RuntimeError("Native acceptance window must be unique")
@@ -365,6 +452,14 @@ def main():
         time.sleep(0.05)
     if not target:
         raise RuntimeError("Native acceptance window unavailable")
+
+    def selected_map_state():
+        attributes = Attributes()
+        if not x.XGetWindowAttributes(display,target,C.byref(attributes)):
+            return None
+        return attributes.map_state
+
+    wait_window_viewable(selected_map_state,discovery_deadline)
     x.XRaiseWindow(display, target)
     x.XSetInputFocus(display, target, 1, 0)
     px, py, child = C.c_int(), C.c_int(), window()
@@ -373,8 +468,7 @@ def main():
     x.XSync(display, 0)
     # Popup destruction during read-only tree traversal is normal. Other X
     # errors, or destruction of our selected target, must still fail closed.
-    if any(code != 3 or resource == target for code, resource in errors):
-        raise RuntimeError("Native acceptance X target unavailable")
+    check_x_target_errors(errors,target)
     errors.clear()
 
     def key(code, down):
@@ -383,10 +477,30 @@ def main():
     def named(name):
         return x.XKeysymToKeycode(display, x.XStringToKeysym(name.encode("ascii")))
 
+    def input_state():
+        focus, revert = window(), C.c_int()
+        x.XGetInputFocus(display,C.byref(focus),C.byref(revert))
+        qr,qc,rx,ry,wx,wy,mask = window(),window(),C.c_int(),C.c_int(),C.c_int(),C.c_int(),C.c_uint()
+        available = x.XQueryPointer(display,root,C.byref(qr),C.byref(qc),C.byref(rx),C.byref(ry),C.byref(wx),C.byref(wy),C.byref(mask))
+        return {"focus":hex(focus.value),"x":rx.value,"y":ry.value,"button_mask":mask.value,"pointer_available":bool(available)}
+
+    clicks = []
+
+    def click(cx,cy,label):
+        before = input_state()
+        # Preserve the existing single motion/down/up batch and zero duration.
+        # These are acknowledgements, not evidence of an App handler result.
+        motion = xt.XTestFakeMotionEvent(display,-1,cx,cy,0)
+        down = xt.XTestFakeButtonEvent(display,1,1,0)
+        up = xt.XTestFakeButtonEvent(display,1,0,0)
+        clicks.append({"target":hex(target),"label":label,"x":cx,"y":cy,"before":before,
+                       "x_test":{"motion":bool(motion),"down":bool(down),"up":bool(up)}})
+
     native = None
     if request.get("inspect") or any("click_label" in a or "wait_label" in a for a in request.get("actions", [])):
         native = NativeControls(request["title"],window_pid(target) if request.get("executable") else None)
     for index, action in enumerate(request.get("actions", [])):
+        previous_clicks = len(clicks)
         FAILURE_CONTEXT["index"] = index
         FAILURE_CONTEXT["action"] = (
             "label-click" if "click_label" in action else
@@ -397,14 +511,10 @@ def main():
         if "click_label" in action or "wait_label" in action:
             control = native.ready(action.get("click_label", action.get("wait_label")))
             if "click_label" in action:
-                xt.XTestFakeMotionEvent(display, -1, control["x"] + control["width"] // 2, control["y"] + control["height"] // 2, 0)
-                xt.XTestFakeButtonEvent(display, 1, 1, 0)
-                xt.XTestFakeButtonEvent(display, 1, 0, 0)
+                click(control["x"] + control["width"] // 2,control["y"] + control["height"] // 2,action["click_label"])
         if "click" in action:
             dx, dy = action["click"]
-            xt.XTestFakeMotionEvent(display, -1, px.value + dx, py.value + dy, 0)
-            xt.XTestFakeButtonEvent(display, 1, 1, 0)
-            xt.XTestFakeButtonEvent(display, 1, 0, 0)
+            click(px.value+dx,py.value+dy,"pointer")
         if "text" in action:
             shift = named("Shift_L")
             for char in action["text"]:
@@ -435,7 +545,9 @@ def main():
         x.XSync(display, 0)
         if errors:
             raise RuntimeError("Native acceptance X input failed")
-    result = {"window": target, "x": px.value, "y": py.value}
+        for emitted in clicks[previous_clicks:]:
+            emitted["after"] = input_state()
+    result = {"window": target, "x": px.value, "y": py.value,"clicks":[safe_click_record(click) for click in clicks]}
     if request.get("inspect"):
         FAILURE_CONTEXT["action"] = "snapshot"
         snapshot = native.snapshot()
@@ -457,5 +569,6 @@ if __name__ == "__main__":
     except Exception as error:
         print("Native acceptance input failed [" + failure_reason(error) +
               " action=" + FAILURE_CONTEXT["action"] +
-              " index=" + str(FAILURE_CONTEXT["index"]) + "]", file=sys.stderr)
+              " index=" + str(FAILURE_CONTEXT["index"]) + "]"+
+              (" x_codes="+",".join(map(str,FAILURE_CONTEXT["x_codes"])) if FAILURE_CONTEXT["x_codes"] else ""), file=sys.stderr)
         sys.exit(1)

@@ -5,6 +5,7 @@ go 1.27.3
 require (
 	filippo.io/age v1.3.2
 	filippo.io/edwards25519 v1.2.0
+	github.com/ebitengine/purego v0.11.1
 	github.com/egoist/mygo v0.7.4
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/tobischo/argon2 v0.2.0
@@ -17,7 +18,6 @@ require (
 
 require (
 	filippo.io/hpke v0.4.0 // indirect
-	github.com/ebitengine/purego v0.11.1 // indirect
 	github.com/go-text/typesetting v0.3.5 // indirect
 	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/segmentio/asm v1.1.3 // indirect
