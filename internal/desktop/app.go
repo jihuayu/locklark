@@ -4,7 +4,6 @@ package desktop
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"crypto/subtle"
 	"errors"
 	"fmt"
@@ -18,6 +17,7 @@ import (
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 	"github.com/jihuayu/locklark/internal/browserhost"
+	"github.com/jihuayu/locklark/internal/nativeclipboard"
 	"github.com/jihuayu/locklark/internal/osunlock"
 	"github.com/jihuayu/locklark/internal/personal"
 )
@@ -27,6 +27,16 @@ type outcome struct {
 	err         error
 }
 type App struct {
+	operation                                              *nativeOperation
+	mutationUnknown                                        bool
+	website, generationLength                              string
+	regenerate                                             *personal.NativeLoginView
+	exposureGeneration, displaySequence, clipboardSequence uint64
+	otpDisplay                                             string
+	otpDisplayBounds, otpClipboard                         *personal.OTPBounds
+	otpDisplayTarget, otpClipboardTarget                   personal.NativeOTPTarget
+	otpDisplayTimer, otpClipboardTimer                     *time.Timer
+
 	browserSaveID, browserSaveTitle                string
 	browser                                        *browserhost.Connection
 	browserLabel                                   string
@@ -46,18 +56,19 @@ type App struct {
 	title, username, value, editField              string
 	display                                        string
 	displayUntil                                   time.Time
-	clipboardHash                                  [32]byte
 	clipboardUntil                                 time.Time
-	clipboardRead                                  func() string
-	clipboardWrite                                 func(string)
-	clipboardClear                                 func()
+	clipboardLease, clipboardPending               *nativeclipboard.Lease
+	clipboardRetry                                 *time.Timer
+	clipboardWarning                               bool
+	clipboardWrite                                 func([]byte) (*nativeclipboard.Lease, error)
+	clipboardClear                                 func(*nativeclipboard.Lease) nativeclipboard.Result
 	audit                                          []personal.Event
 	report                                         string
 	source, planDigest, exportPath, exportPassword string
 }
 
 func New() *App {
-	return &App{systemStore: osunlock.New(), scope: "active", page: "vault", editField: "password", dispatch: func(fn func()) { fn() }, launch: func(fn func()) { go fn() }}
+	return &App{generationLength: "24", systemStore: osunlock.New(), scope: "active", page: "vault", editField: "password", dispatch: func(fn func()) { fn() }, launch: func(fn func()) { go fn() }}
 }
 func (a *App) run(work func() outcome) { a.runContext(func(context.Context) outcome { return work() }) }
 func (a *App) runContext(work func(context.Context) outcome) {
@@ -96,6 +107,24 @@ func (a *App) runContext(work func(context.Context) outcome) {
 }
 func message(e error) string {
 	switch {
+	case errors.Is(e, personal.ErrMutationUnknown):
+		return mutationUnknownStatus
+	case errors.Is(e, personal.ErrMutationCancelled):
+		return "操作已取消，未开始写入"
+	case errors.Is(e, personal.ErrMutationRefused):
+		return "输入不符合保存要求；未保存"
+	case errors.Is(e, personal.ErrOTPNotConfigured):
+		return "此登录未配置验证码"
+	case errors.Is(e, personal.ErrOTPTime):
+		return "验证码已失效或时钟变化；本次未交付，请明确重新获取"
+	case errors.Is(e, nativeclipboard.ErrUnsupported):
+		return "此环境暂不支持安全复制；可使用按次显示"
+	case errors.Is(e, nativeclipboard.ErrUnavailable):
+		return "系统剪贴板暂不可用；本次未确认复制，不会自动重试"
+	case errors.Is(e, nativeclipboard.ErrWrite):
+		return "复制结果未确认，请检查系统剪贴板；不会自动重试"
+	case errors.Is(e, personal.ErrDesktopDelivery):
+		return "本次原生交付未完成；不会自动重试"
 	case errors.Is(e, personal.ErrConflict):
 		return "条目已在其他操作中变更，请刷新后重试"
 	case errors.Is(e, personal.ErrTrashed):
@@ -117,31 +146,29 @@ func visible(s string) string {
 	}
 	return out.String()
 }
-func (a *App) clearClipboard() {
-	if !a.clipboardUntil.IsZero() && a.clipboardRead != nil && a.clipboardClear != nil {
-		value := []byte(a.clipboardRead())
-		if sha256.Sum256(value) == a.clipboardHash {
-			a.clipboardClear()
-		}
-		clear(value)
-	}
-	a.clipboardHash = [32]byte{}
-	a.clipboardUntil = time.Time{}
-}
 func (a *App) Lock() {
+	if a.operation != nil {
+		a.operation.gate.Cancel()
+		if a.operation.gate.CommitWon() {
+			a.mutationUnknown = true
+		}
+	}
+	// Revoke all session/UI authority before native clipboard metadata calls.
+	a.generation++
+	s := a.session
+	a.session = nil
+	if s != nil {
+		s.RequestLock()
+		a.launch(s.Lock)
+	}
+	a.regenerate = nil
 	if a.browser != nil {
 		a.browser.Invalidate()
 	}
-	a.generation++
 	if a.cancel != nil {
 		a.cancel()
 		a.cancel = nil
 	}
-	if s := a.session; s != nil {
-		s.RequestLock()
-		a.launch(s.Lock)
-	}
-	a.session = nil
 	a.password = ""
 	a.secret = ""
 	a.confirmation = ""
@@ -159,10 +186,13 @@ func (a *App) Lock() {
 	a.query = ""
 	a.busy = false
 	a.status = "金库已锁定"
+	if a.mutationUnknown {
+		a.status += " · " + mutationUnknownStatus
+	}
 	if a.browser != nil && a.browser.SaveUnknown() {
 		a.status += " · 结果未确认，请在金库核实，勿重复保存"
 	}
-	a.clearClipboard()
+	a.clearDailyExposure()
 }
 func (a *App) unlock() {
 	path := a.path
@@ -235,6 +265,8 @@ func (a *App) createVault() {
 	})
 }
 func (a *App) refresh() {
+	a.clearDailyExposure()
+	a.regenerate = nil
 	s, query, scope := a.session, a.query, a.scope
 	if s == nil {
 		return
@@ -255,21 +287,9 @@ func (a *App) refresh() {
 		}}
 	})
 }
-func (a *App) add() {
-	s := a.session
-	title, user, value, scope := a.title, a.username, a.value, a.scope
-	a.value = ""
-	a.username = ""
-	a.run(func() outcome {
-		_, e := s.AddLogin(title, user, value)
-		if e != nil {
-			return outcome{err: e}
-		}
-		rows, e := s.List(scope)
-		return outcome{err: e, apply: func() { a.rows = rows; a.title = ""; a.status = "登录已保存" }}
-	})
-}
+func (a *App) add() { a.saveNative(false) }
 func (a *App) edit() {
+	a.clearDailyExposure()
 	if a.selected == nil {
 		return
 	}
@@ -288,6 +308,7 @@ func (a *App) edit() {
 	})
 }
 func (a *App) state(action string) {
+	a.clearDailyExposure()
 	if a.selected == nil {
 		return
 	}
@@ -304,27 +325,28 @@ func (a *App) state(action string) {
 	})
 }
 func (a *App) disclose(field, purpose string) {
-	if a.selected == nil {
+	if a.selected == nil || a.session == nil {
 		return
 	}
 	s := a.session
 	target := personal.RevealTarget{ID: a.selected.ID, Revision: a.selected.Revision, Field: field}
+	exposure, generation := a.exposureGeneration, a.generation
 	a.run(func() outcome {
 		f, e := s.PrepareField(target, purpose)
 		return outcome{err: e, drop: func() { s.Discard(f) }, apply: func() {
-			if a.page != "vault" || a.selected == nil || a.selected.ID != target.ID || a.selected.Revision != target.Revision {
+			if !a.exposureCurrent(s, personal.NativeOTPTarget{ID: target.ID, Revision: target.Revision}, generation, exposure) {
 				s.Discard(f)
 				return
 			}
+			valid := func() bool {
+				return a.exposureCurrent(s, personal.NativeOTPTarget{ID: target.ID, Revision: target.Revision}, generation, exposure)
+			}
 			e := s.Consume(f, func(value []byte) error {
 				if purpose == "copy" {
-					if a.clipboardWrite == nil {
-						return personal.ErrDesktopDelivery
+					if e := a.writeClipboard(value, time.Now().Add(30*time.Second), valid); e != nil {
+						return e
 					}
-					a.clipboardWrite(string(value))
-					a.clipboardHash = sha256.Sum256(value)
-					a.clipboardUntil = time.Now().Add(30 * time.Second)
-					a.status = "已请求写入系统剪贴板 · 30 秒后尝试清理"
+					a.status = "已复制到系统剪贴板 · 30 秒后尝试清理"
 				} else {
 					a.display = visible(string(value))
 					a.displayUntil = time.Now().Add(15 * time.Second)
@@ -332,14 +354,16 @@ func (a *App) disclose(field, purpose string) {
 				}
 				return nil
 			})
-			if e != nil {
+			if e != nil && valid() && !errors.Is(e, errClipboardSuperseded) {
 				a.status = message(e)
 			}
+
 		}}
 	})
 }
 func (a *App) View(c *ui.Context) {
 	now := time.Now()
+	a.checkOTPExposure(now)
 	if !a.displayUntil.IsZero() && !now.Before(a.displayUntil) {
 		a.display = ""
 		a.displayUntil = time.Time{}
@@ -365,6 +389,12 @@ func (a *App) View(c *ui.Context) {
 			a.browserView(c)
 		} else {
 			a.vaultView(c)
+		}
+		if a.mutationUnknown {
+			ui.Text(c, mutationUnknownStatus).Bold()
+		}
+		if a.clipboardWarning {
+			ui.Text(c, "系统剪贴板清理未确认；会仅对原所有权重试").Bold()
 		}
 		ui.Text(c, a.status).FontSize(13)
 	})
@@ -416,7 +446,7 @@ func (a *App) vaultView(c *ui.Context) {
 	ui.Row(c).Gap(8).Children(func() {
 		for _, tab := range []struct{ id, label string }{{"vault", "金库"}, {"activity", "活动"}, {"health", "体检"}, {"transfer", "导入与导出"}, {"security", "安全设置"}} {
 			tab := tab
-			ui.Button(c, tab.label).OnClick(func() { a.page = tab.id; a.display = "" })
+			ui.Button(c, tab.label).OnClick(func() { a.clearDailyExposure(); a.regenerate = nil; a.page = tab.id; a.display = "" })
 		}
 	})
 	switch a.page {
@@ -433,9 +463,14 @@ func (a *App) vaultView(c *ui.Context) {
 	}
 }
 func (a *App) itemsView(c *ui.Context) {
+	if a.regenerate != nil {
+		ui.Scroll(c).Fill().Children(func() { ui.Column(c).Gap(12).Children(func() { a.regenerationView(c) }) })
+		return
+	}
 	ui.Row(c).Gap(8).Children(func() {
 		ui.TextInput(c, &a.query).Label("搜索标题").Placeholder("搜索标题").Grow(1)
 		ui.Button(c, "搜索 / 刷新").Disabled(a.busy).OnClick(a.refresh)
+		ui.Button(c, "新建登录").Disabled(a.busy).OnClick(func() { a.clearDailyExposure(); a.selected = nil; a.regenerate = nil; a.value = ""; a.username = "" })
 	})
 	ui.Row(c).Gap(8).Children(func() {
 		for _, scope := range []struct{ id, label string }{{"active", "活动"}, {"archived", "归档"}, {"trashed", "回收站"}, {"all", "全部"}} {
@@ -451,7 +486,7 @@ func (a *App) itemsView(c *ui.Context) {
 				}
 				for _, row := range a.rows {
 					row := row
-					ui.Button(c.Key(row.ID), visible(row.Title)+" · "+row.State).FillWidth().Disabled(a.busy).OnClick(func() { a.selected = &row; a.display = ""; a.value = "" })
+					ui.Button(c.Key(row.ID), visible(row.Title)+" · "+row.State).FillWidth().Disabled(a.busy).OnClick(func() { a.clearDailyExposure(); a.regenerate = nil; a.selected = &row; a.display = ""; a.value = "" })
 				}
 			})
 		})
@@ -470,6 +505,12 @@ func (a *App) itemsView(c *ui.Context) {
 					return
 				}
 				ui.Text(c, "以下操作会记录审计。复制内容可能被系统剪贴板历史保留。")
+				ui.Button(c, "重新生成本地密码").Disabled(a.busy).OnClick(a.reviewRegeneration)
+				ui.Row(c).Gap(8).Children(func() {
+					ui.Button(c, "显示验证码").Disabled(a.busy).OnClick(func() { a.requestOTP("show") })
+					ui.Button(c, "复制验证码").Disabled(a.busy).OnClick(func() { a.requestOTP("copy") })
+				})
+				a.otpView(c)
 				ui.Row(c).Gap(8).Children(func() {
 					ui.Button(c, "显示用户名").Disabled(a.busy).OnClick(func() { a.disclose("username", "show") })
 					ui.Button(c, "显示密码").Disabled(a.busy).OnClick(func() { a.disclose("password", "show") })
@@ -479,8 +520,8 @@ func (a *App) itemsView(c *ui.Context) {
 					ui.Button(c, "复制密码").Disabled(a.busy).OnClick(func() { a.disclose("password", "copy") })
 				})
 				if a.display != "" {
-					ui.Text(c, a.display).Label("已授权显示的字段")
-					ui.Button(c, "立即隐藏").OnClick(func() { a.display = "" })
+					ui.Column(c).Role(ui.RoleGroup).Label("已授权显示的字段").Children(func() { ui.Text(c, a.display) })
+					ui.Button(c, "立即隐藏").OnClick(func() { a.exposureGeneration++; a.display = ""; a.displayUntil = time.Time{} })
 				}
 				ui.Text(c, "更新一个字段（原值不预填）：")
 				ui.Row(c).Gap(6).Children(func() {
@@ -500,7 +541,6 @@ func (a *App) itemsView(c *ui.Context) {
 					}
 					ui.Button(c, "移入回收站").Disabled(a.busy).OnClick(func() { a.state("item.trash") })
 				})
-				ui.Button(c, "新建登录").OnClick(func() { a.selected = nil; a.display = "" })
 			})
 		})
 	})
@@ -508,9 +548,12 @@ func (a *App) itemsView(c *ui.Context) {
 func (a *App) addView(c *ui.Context) {
 	ui.Text(c, "新建登录").FontSize(22).Bold()
 	ui.TextInput(c, &a.title).Label("登录标题").Placeholder("标题").Disabled(a.busy)
+	ui.TextInput(c, &a.website).Label("网站（可选）").Disabled(a.busy)
 	ui.TextInput(c, &a.username).Label("新登录用户名").Placeholder("用户名").Password().Disabled(a.busy)
 	ui.TextInput(c, &a.value).Label("新登录密码").Placeholder("密码").Password().Disabled(a.busy)
 	ui.PrimaryButton(c, "保存登录").Disabled(a.busy || strings.TrimSpace(a.title) == "").OnClick(a.add)
+	ui.TextInput(c, &a.generationLength).Label("密码长度（22–256）").Disabled(a.busy)
+	ui.Button(c, "生成强密码并保存").Disabled(a.busy || strings.TrimSpace(a.title) == "").OnClick(func() { a.saveNative(true) })
 }
 func (a *App) activityView(c *ui.Context) {
 	ui.Button(c, "刷新活动").Disabled(a.busy).OnClick(func() {
@@ -575,9 +618,8 @@ func Run() error {
 		a.win = mygo.NewWindow(mygo.WindowOptions{Title: "Locklark · 本地金库", Width: 1100, Height: 820, MinWidth: 900, MinHeight: 680, Content: ui.View(a.View)})
 		a.dispatch = a.win.Update
 		a.win.OnClose(func(*mygo.CloseEvent) { a.Lock() })
-		a.clipboardRead = mygo.Clipboard.ReadText
-		a.clipboardWrite = mygo.Clipboard.WriteText
-		a.clipboardClear = mygo.Clipboard.Clear
+		a.clipboardWrite = nativeclipboard.Write
+		a.clipboardClear = nativeclipboard.ClearOwned
 		mygo.Power.OnSuspend(a.Lock)
 		mygo.Power.OnLockScreen(a.Lock)
 		mygo.App.OnQuit(a.Lock)

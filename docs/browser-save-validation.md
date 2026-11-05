@@ -1,5 +1,7 @@
 # 浏览器保存与更新验收
 
+最终 [PR #27](https://github.com/jihuayu/locklark/pull/27) 已合入 main `c9d4a5d284ddc15aa58953896e9b5773873bb1e6`。精确head `8d63fd6bce7068e8a7ae8968eb48425613026345` 的 [CI 42089993817](https://github.com/jihuayu/locklark/actions/runs/42089993817) Ubuntu、Windows、macOS、Web四项全通过；Web包含两浏览器真实native保存链路。下文“待CI/待合并”为该批各阶段历史状态，已由本段关闭。
+
 基线 main `0f38177eb1059121d04e94fb96d264126688573f`，分支 `codex/browser-save-update`。此前浏览器配对/填充 PR #26 精确 head `6c649d9` 的四项 CI 与独立验收已通过并合入。本批沿用用户指定分工：主代理架构/功能设计与独立验收，Sol xhigh 实现，Luna max 独立 review。
 
 [架构及验收约定](browser-save-design.md) 已经 Luna/max 预审，最终实现及修复也完成独立增量 review。主代理最终 Chromium/Firefox 完整 GUI 验收通过；精确提交的远端 CI 和合并状态以 PR 为准。本切片不代表全部产品完成。

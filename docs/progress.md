@@ -1,5 +1,7 @@
 # Locklark 开发进度
 
+浏览器保存/更新 [PR #27](https://github.com/jihuayu/locklark/pull/27) 已经 Luna/max、主代理独立两浏览器完整验收及精确head `8d63fd6` 的四项CI（run `42089993817`）合入 main `c9d4a5d`。继续从该主线实施MyGo原生强密码生成和TOTP日常操作，见[桌面架构](desktop-daily-design.md)与[桌面验收](desktop-daily-validation.md)，仍由Sol xhigh实现、主代理设计验收、Luna max审阅。 桌面生成/OTP核心及竞态测试已通过；真实GUI发现锁定同步读取foreign剪贴板会阻塞，已改为系统ownership lease。最终v4已通过主代理独立完整GUI、故障隐私扫描、53项工具测试及Luna/max复审；锁定foreign-owner场景647ms发布界面、零读取请求。当前提交PR并等待Windows/macOS原生剪贴板及四项精确head CI，尚未合入。
+
 浏览器原生配对与登录填充 [PR #26](https://github.com/jihuayu/locklark/pull/26) 已经 Luna/max、主代理独立 Chromium/Firefox 完整 GUI 验收及精确 head `6c649d9` 的四项 CI（run `42073803355`）合入 main `0f38177`。当前从该主线开始显式保存新登录/更新已有登录，按 [保存架构约定](browser-save-design.md) 继续由 Sol xhigh 实现、主代理设计验收、Luna max review。
 
 显式保存/更新实现已完成 Luna/max 最终增量 review、全仓 Go/定向 race、35项扩展测试及主代理独立 Chromium/Firefox v4 完整 GUI 验收。独立验收发现并修复 popup 刷新旧候选操作窗口与外部 AT-SPI 瞬态查询失败，证据见 [保存与更新验收](browser-save-validation.md)。当前准备精确 head PR/CI，尚未据此标记合入；下一候选为 MyGo 日常生成密码和原生TOTP。

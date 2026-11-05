@@ -10,6 +10,11 @@ import (
 	"encoding/base32"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
 	"filippo.io/age"
 	"github.com/jihuayu/locklark/internal/account"
 	"github.com/jihuayu/locklark/internal/onepux"
@@ -18,10 +23,6 @@ import (
 	"github.com/jihuayu/locklark/internal/totp"
 	"github.com/jihuayu/locklark/internal/vault"
 	bolt "go.etcd.io/bbolt"
-	"os"
-	"path/filepath"
-	"strings"
-	"time"
 )
 
 var bucket = []byte("locklark.personal/v1")
@@ -166,7 +167,10 @@ func create(path, pw string, key []byte, recovered *payload) error {
 	return publish(tmp, path)
 }
 func existing(path string) (*bolt.DB, error) {
-	return bolt.Open(path, 0600, &bolt.Options{Timeout: 10 * time.Second, OpenFile: func(name string, flags int, mode os.FileMode) (*os.File, error) {
+	return existingWithReadOnly(path, false)
+}
+func existingWithReadOnly(path string, readOnly bool) (*bolt.DB, error) {
+	return bolt.Open(path, 0600, &bolt.Options{ReadOnly: readOnly, Timeout: 10 * time.Second, OpenFile: func(name string, flags int, mode os.FileMode) (*os.File, error) {
 		f, e := os.OpenFile(name, flags&^os.O_CREATE, mode)
 		if e != nil {
 			return nil, e
@@ -204,20 +208,21 @@ type result struct {
 }
 
 type commandOption struct {
-	browserSave *browserSaveRequest
-	browser     *BrowserFillTarget
-	unlocked    *Session
-	run         *RunRequest
-	search      *searchRequest
-	livePull    *LivePullRequest
-	injection   *injectionRequest
-	migration   *importRequest
-	match       *matchRequest
-	export      *exportRequest
-	inspection  *inspectionRequest
-	backup      string
-	generation  *generationRequest
-	reference   *referenceRequest
+	nativeMutation *nativeMutationRequest
+	browserSave    *browserSaveRequest
+	browser        *BrowserFillTarget
+	unlocked       *Session
+	run            *RunRequest
+	search         *searchRequest
+	livePull       *LivePullRequest
+	injection      *injectionRequest
+	migration      *importRequest
+	match          *matchRequest
+	export         *exportRequest
+	inspection     *inspectionRequest
+	backup         string
+	generation     *generationRequest
+	reference      *referenceRequest
 }
 
 func command(path, pw string, key []byte, action string, add vault.Item, edit *Edit, options ...commandOption) (result, error) {
@@ -247,6 +252,100 @@ func commandWithClose(run func() (result, error), closeDB func() error) (r resul
 	return run()
 }
 
+type authenticatedState struct {
+	slot      account.Slot
+	opened    []byte
+	identity  identity
+	snapshot  vault.Snapshot
+	tip       auditTip
+	rows      []Event
+	chains    []Chain
+	items     []vault.Item
+	revisions map[string]string
+}
+
+func (a *authenticatedState) clear() { clear(a.opened); a.identity.clear() }
+
+// Both write commands and native read-only revalidation use this complete
+// slot, signed snapshot, schema and full history authentication path.
+func authenticateState(tx *bolt.Tx, pw string, key []byte, action string, unlocked *Session) (out *authenticatedState, err error) {
+	var opened []byte
+	var i identity
+	defer func() {
+		if err != nil {
+			clear(opened)
+			i.clear()
+		}
+	}()
+	b := tx.Bucket(bucket)
+	if b == nil {
+		return nil, invalid
+	}
+	var slot account.Slot
+	raw := b.Get(slotKey)
+	if len(raw) > 8192 || json.Unmarshal(raw, &slot) != nil {
+		return nil, invalid
+	}
+	var e error
+	if unlocked != nil {
+		if action == "desktop.unlock" || action == "backup.prepare" || sha256.Sum256(raw) != unlocked.slotDigest {
+			return nil, invalid
+		}
+		opened = bytes.Clone(unlocked.material)
+	} else {
+		opened, e = account.Unwrap(pw, key, slot)
+		if e != nil {
+			return nil, invalid
+		}
+	}
+	if json.Unmarshal(opened, &i) != nil || len(i.Signing) != 32 || len(i.Audit) != 32 || len(i.AuditEncryption) != 32 {
+		return nil, invalid
+	}
+	device, e := age.ParseX25519Identity(i.Device)
+	if e != nil {
+		return nil, invalid
+	}
+	var s vault.Snapshot
+	raw = b.Get(snapshotKey)
+	if len(raw) > 12<<20 || json.Unmarshal(raw, &s) != nil {
+		return nil, invalid
+	}
+	signer := ed25519.NewKeyFromSeed(i.Signing)
+	defer clear(signer)
+	if vault.VerifySnapshot(s, signer.Public().(ed25519.PublicKey), s.Epoch) != nil {
+		return nil, invalid
+	}
+	revisions := make(map[string]string)
+	tip, rows, e := history(b, i, s, action == "audit.list" || action == "backup.prepare", revisions)
+	if e != nil {
+		return nil, e
+	}
+	chains, e := loadChains(b, i, tip.Origin)
+	if e != nil {
+		return nil, e
+	}
+	var items []vault.Item
+	if action != "audit.list" {
+		var meta []byte
+		meta, items, e = vault.OpenItems(s, device, signer.Public().(ed25519.PublicKey), tip.Epoch)
+		if e != nil || items == nil || string(meta) != schema {
+			return nil, invalid
+		}
+	}
+	if action != "audit.list" {
+		if len(items) != len(revisions) {
+			return nil, invalid
+		}
+		for _, it := range items {
+			if revisions[it.ID] == "" {
+				return nil, invalid
+			}
+		}
+	}
+
+	return &authenticatedState{slot, opened, i, s, tip, rows, chains, items, revisions}, nil
+}
+
 // The updater returns only after commit (including bbolt's default fsync).
 // Keeping it explicit also permits rollback fault injection in tests.
 func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key []byte, action string, add vault.Item, edit *Edit, options ...commandOption) (result, error) {
@@ -256,6 +355,9 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 	}
 	if len(options) == 1 {
 		option = options[0]
+	}
+	if option.nativeMutation != nil && (option.unlocked == nil || option.nativeMutation.gate == nil || !(action == "item.add" || generatedAction(action) || action == desktopOTPShowAction || action == desktopOTPCopyAction)) {
+		return result{}, invalid
 	}
 	if browserSaveAction(action) != (option.browserSave != nil) || option.browserSave != nil && (!option.browserSave.valid() || option.unlocked == nil || (action == browserNewAction) != (option.browserSave.target.ID == "")) {
 		return result{}, ErrBrowserSaveRefused
@@ -299,7 +401,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 	if (action == livePullAction) != (option.livePull != nil) || option.livePull != nil && option.livePull.Validate() != nil {
 		return result{}, ErrLivePullTarget
 	}
-	if option.generation != nil && action != "item.regenerate.password" {
+	if option.generation != nil && option.nativeMutation == nil && action != "item.regenerate.password" {
 		if option.generation.policy.Alphabet != password.DefaultAlphabet {
 			return result{}, password.ErrInvalid
 		}
@@ -310,75 +412,14 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 	var out result
 	var refusal error
 	e := update(func(tx *bolt.Tx) error {
+		auth, e := authenticateState(tx, pw, key, action, option.unlocked)
+		if e != nil {
+			return e
+		}
+		defer auth.clear()
 		b := tx.Bucket(bucket)
-		if b == nil {
-			return invalid
-		}
-		var slot account.Slot
-		raw := b.Get(slotKey)
-		if len(raw) > 8192 || json.Unmarshal(raw, &slot) != nil {
-			return invalid
-		}
-		var opened []byte
-		var e error
-		if option.unlocked != nil {
-			if action == "desktop.unlock" || action == "backup.prepare" || sha256.Sum256(raw) != option.unlocked.slotDigest {
-				return invalid
-			}
-			opened = bytes.Clone(option.unlocked.material)
-		} else {
-			opened, e = account.Unwrap(pw, key, slot)
-			if e != nil {
-				return invalid
-			}
-		}
-		defer clear(opened)
-		var i identity
-		if json.Unmarshal(opened, &i) != nil || len(i.Signing) != 32 || len(i.Audit) != 32 || len(i.AuditEncryption) != 32 {
-			return invalid
-		}
-		defer i.clear()
-		device, e := age.ParseX25519Identity(i.Device)
-		if e != nil {
-			return invalid
-		}
-		var s vault.Snapshot
-		raw = b.Get(snapshotKey)
-		if len(raw) > 12<<20 || json.Unmarshal(raw, &s) != nil {
-			return invalid
-		}
-		signer := ed25519.NewKeyFromSeed(i.Signing)
-		defer clear(signer)
-		if vault.VerifySnapshot(s, signer.Public().(ed25519.PublicKey), s.Epoch) != nil {
-			return invalid
-		}
-		revisions := make(map[string]string)
-		tip, rows, e := history(b, i, s, action == "audit.list" || action == "backup.prepare", revisions)
-		if e != nil {
-			return e
-		}
-		chains, e := loadChains(b, i, tip.Origin)
-		if e != nil {
-			return e
-		}
-		var items []vault.Item
-		if action != "audit.list" {
-			var meta []byte
-			meta, items, e = vault.OpenItems(s, device, signer.Public().(ed25519.PublicKey), tip.Epoch)
-			if e != nil || items == nil || string(meta) != schema {
-				return invalid
-			}
-		}
-		if action != "audit.list" {
-			if len(items) != len(revisions) {
-				return invalid
-			}
-			for _, it := range items {
-				if revisions[it.ID] == "" {
-					return invalid
-				}
-			}
-		}
+		slot, opened, i, s := auth.slot, auth.opened, auth.identity, auth.snapshot
+		tip, rows, chains, items, revisions := auth.tip, auth.rows, auth.chains, auth.items, auth.revisions
 		outcome := "succeeded"
 		var profile *password.Profile
 		if action == referenceDisclosureAction {
@@ -544,7 +585,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			if option.backup == "" {
 				return invalid
 			}
-		case browserFillAction, "item.desktop.show.username", "item.desktop.show.password", "item.desktop.copy.username", "item.desktop.copy.password", "item.run.username", "item.run.password", livePullAction, "item.inject.username", "item.inject.password", "item.trash", "item.untrash", "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.regenerate.password", otpDisclosureAction:
+		case browserFillAction, "item.desktop.show.username", "item.desktop.show.password", "item.desktop.copy.username", "item.desktop.copy.password", "item.run.username", "item.run.password", livePullAction, "item.inject.username", "item.inject.password", "item.trash", "item.untrash", "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.regenerate.password", otpDisclosureAction, desktopOTPShowAction, desktopOTPCopyAction:
 			if edit == nil {
 				return invalid
 			}
@@ -605,7 +646,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 							}
 							break
 						}
-						if action == otpDisclosureAction {
+						if otpAction(action) {
 							if items[i].OTP == "" {
 								outcome, refusal = "not-configured", ErrOTPNotConfigured
 								break
@@ -627,6 +668,18 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 							break
 						}
 						if action == "item.regenerate.password" {
+							if option.nativeMutation != nil {
+								if _, err := password.Validate(option.generation.policy); err != nil {
+									outcome, refusal = "native-refused", ErrMutationRefused
+									break
+								}
+								candidate := append([]vault.Item(nil), items...)
+								candidate[i].Password = strings.Repeat("X", option.generation.policy.Length)
+								if vault.ValidateItems([]byte(schema), candidate) != nil {
+									outcome, refusal = "native-refused", ErrMutationRefused
+									break
+								}
+							}
 							secret, err := option.generation.value()
 							if err != nil {
 								return err
@@ -656,11 +709,35 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 				}
 			}
 		case "item.add", "item.generate":
+			if option.nativeMutation != nil && action == "item.generate" {
+				if _, err := password.Validate(option.generation.policy); err != nil {
+					outcome, refusal = "native-refused", ErrMutationRefused
+					break
+				}
+			}
+			if option.nativeMutation != nil && (!validNativeNew(add) || action == "item.add" && (add.Password == "" || !validBrowserText([]byte(add.Password)))) {
+				outcome, refusal = "native-refused", ErrMutationRefused
+				break
+			}
 			if action == "item.generate" && strings.TrimSpace(add.Title) == "" {
 				return errors.New("a title is required")
 			}
 			if strings.TrimSpace(add.Title) == "" || (action == "item.add" && add.Password == "") {
 				return errors.New("a title and password are required")
+			}
+			if option.nativeMutation != nil {
+				probe := add
+				// Personal IDs are canonical lowercase hex; this equal-length
+				// validation placeholder cannot collide and is never persisted.
+				probe.ID = strings.Repeat("X", 32)
+				if action == "item.generate" {
+					probe.Password = strings.Repeat("X", option.generation.policy.Length)
+				}
+				if vault.ValidateItems([]byte(schema), append(append([]vault.Item(nil), items...), probe)) != nil {
+					out.id = ""
+					outcome, refusal = "native-refused", ErrMutationRefused
+					break
+				}
 			}
 			add.ID, e = randomID()
 			if e != nil {
@@ -700,7 +777,12 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		default:
 			return invalid
 		}
-		if action == "item.add" || action == "item.generate" || ((editAction(action) || browserSaveAction(action)) && refusal == nil) {
+		if option.nativeMutation != nil {
+			if option.unlocked == nil || !option.unlocked.winBrowserSave(option.nativeMutation.gate) {
+				return ErrMutationCancelled
+			}
+		}
+		if ((action == "item.add" || action == "item.generate") && refusal == nil) || ((editAction(action) || browserSaveAction(action)) && refusal == nil) {
 			s, e = seal(b, i, s.Epoch+1, items)
 			if e != nil {
 				return e
@@ -759,7 +841,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		if e != nil {
 			return e
 		}
-		if (readValueAction(action) || action == otpDisclosureAction || action == inspectionAction || action == exportAction || migrationAction(action) || action == healthAction || action == searchAction) && refusal == nil {
+		if (readValueAction(action) || otpAction(action) || action == inspectionAction || action == exportAction || migrationAction(action) || action == healthAction || action == searchAction) && refusal == nil {
 			out.session, out.intent = ev.Session, ev.hash()
 		}
 		if action == "backup.prepare" {
@@ -772,7 +854,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		}
 		if action == "audit.list" {
 			out.events = append(rows, ev)
-		} else if (editAction(action) || browserSaveAction(action) || action == "item.generate") && refusal == nil {
+		} else if (editAction(action) || browserSaveAction(action) || action == "item.generate" || action == "item.add") && refusal == nil {
 			out.revision = ev.hash()
 		}
 		return nil
@@ -787,7 +869,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		}
 		return result{}, e
 	}
-	if browserSaveAction(action) {
+	if browserSaveAction(action) || option.nativeMutation != nil {
 		out.savePersisted = true
 	}
 	return out, refusal

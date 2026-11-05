@@ -11,10 +11,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"time"
+
 	"github.com/jihuayu/locklark/internal/password"
 	"github.com/jihuayu/locklark/internal/vault"
 	bolt "go.etcd.io/bbolt"
-	"time"
 )
 
 var invalid = errors.New("invalid personal vault, unlock factors or journal")
@@ -77,7 +78,7 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 	if e.Sequence != n || e.Previous != prev || !idOK(e.Session) || e.Actor != "local-owner" || !ed25519.Verify(pub, e.proof(), e.Signature) {
 		return invalid
 	}
-	if e.Action != "desktop.system.enable" && !browserSaveAction(e.Action) && !editAction(e.Action) && !readValueAction(e.Action) && e.Action != otpDisclosureAction && e.Action != referenceRejectAction && e.Action != inspectionAction && e.Action != exportAction && e.Action != matchAction && !migrationAction(e.Action) && (e.Result != "succeeded" || e.BaseRevision != "") {
+	if e.Action != "desktop.system.enable" && !browserSaveAction(e.Action) && !editAction(e.Action) && !readValueAction(e.Action) && !otpAction(e.Action) && e.Action != referenceRejectAction && e.Action != inspectionAction && e.Action != exportAction && e.Action != matchAction && !migrationAction(e.Action) && !((e.Action == "item.add" || e.Action == "item.generate") && e.Result == "native-refused") && (e.Result != "succeeded" || e.BaseRevision != "") {
 		return invalid
 	}
 	if (e.Action == inspectionAction || migrationAction(e.Action) || e.Action == "item.import" || e.Action == healthAction) && e.Result == "succeeded" {
@@ -166,20 +167,21 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 		if n != 1 || !digestOK(e.Link) || e.Item != "" {
 			return invalid
 		}
-	case browserFillAction, "item.desktop.show.username", "item.desktop.show.password", "item.desktop.copy.username", "item.desktop.copy.password", "item.run.username", "item.run.password", livePullAction, "item.inject.username", "item.inject.password", "item.trash", "item.untrash", "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.regenerate.password", otpDisclosureAction:
+	case browserFillAction, "item.desktop.show.username", "item.desktop.show.password", "item.desktop.copy.username", "item.desktop.copy.password", "item.run.username", "item.run.password", livePullAction, "item.inject.username", "item.inject.password", "item.trash", "item.untrash", "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.regenerate.password", otpDisclosureAction, desktopOTPShowAction, desktopOTPCopyAction:
 		if e.Result == "not-found" && e.Item == "" && e.BaseRevision == "" && n > 1 {
 			break
 		}
 		accepted := "succeeded"
-		if readValueAction(e.Action) || e.Action == otpDisclosureAction {
+		if readValueAction(e.Action) || otpAction(e.Action) {
 			accepted = "intent"
 		}
 		already := e.Action == "item.archive" && e.Result == "already-archived" || e.Action == "item.unarchive" && e.Result == "already-active"
 		already = already || e.Action == "item.trash" && e.Result == "already-trashed" || e.Action == "item.untrash" && e.Result == "not-trashed"
 		blocked := !trashAction(e.Action) && e.Result == "trashed"
-		unconfigured := e.Action == otpDisclosureAction && e.Result == "not-configured"
+		unconfigured := otpAction(e.Action) && e.Result == "not-configured"
+		nativeRefused := e.Action == "item.regenerate.password" && e.Result == "native-refused"
 		browserRefused := e.Action == browserFillAction && e.Result == "browser-refused"
-		if n <= 1 || !idOK(e.Item) || !digestOK(e.BaseRevision) || (e.Result != accepted && e.Result != "conflict" && !unconfigured && !already && !blocked && !browserRefused) {
+		if n <= 1 || !idOK(e.Item) || !digestOK(e.BaseRevision) || (e.Result != accepted && e.Result != "conflict" && !unconfigured && !already && !blocked && !browserRefused && !nativeRefused) {
 			return invalid
 		}
 	case "vault.create":
@@ -187,6 +189,12 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 			return invalid
 		}
 	case "item.add", "item.restore", "item.generate", "item.import":
+		if (e.Action == "item.add" || e.Action == "item.generate") && e.Result == "native-refused" {
+			if n <= 1 || e.Item != "" || e.BaseRevision != "" {
+				return invalid
+			}
+			break
+		}
 		if n <= 1 || !idOK(e.Item) {
 			return invalid
 		}
@@ -258,12 +266,12 @@ func history(b *bolt.Bucket, i identity, s vault.Snapshot, want bool, revisions 
 			return invalid
 		}
 		prev = ev.hash()
-		if ev.Action == "item.add" || ev.Action == "item.restore" || ev.Action == "item.generate" || ev.Action == "item.import" || ev.Action == browserNewAction && ev.Result == "succeeded" {
+		if ((ev.Action == "item.add" || ev.Action == "item.generate") && ev.Result == "succeeded") || ev.Action == "item.restore" || ev.Action == "item.import" || ev.Action == browserNewAction && ev.Result == "succeeded" {
 			if revisions[ev.Item] != "" {
 				return invalid
 			}
 			revisions[ev.Item] = prev
-		} else if editAction(ev.Action) || ev.Action == browserUpdateAction || readValueAction(ev.Action) || ev.Action == otpDisclosureAction {
+		} else if editAction(ev.Action) || ev.Action == browserUpdateAction || readValueAction(ev.Action) || otpAction(ev.Action) {
 			found := revisions[ev.Item] != ""
 			if (ev.Result == "not-found") == found || ev.BaseRevision != revisions[ev.Item] {
 				return invalid

@@ -18,6 +18,10 @@ var ErrDesktopDelivery = errors.New("native disclosure failed; intent recorded, 
 // Key. Operations are serialized and revalidate the slot, snapshot and history.
 // No exported method exposes arbitrary commands or key material to a renderer.
 type Session struct {
+	otpPrepared    map[*NativeOTP]bool
+	otpDeliveries  map[*NativeOTPDelivery]bool
+	otpNow         func() time.Time
+	otpCaps        sync.Map
 	saveMu         sync.Mutex
 	saveGate       *BrowserSaveGate
 	lockRequested  atomic.Bool
@@ -62,6 +66,16 @@ func UnlockSession(path string, password, key []byte, idle time.Duration) (*Sess
 	return &Session{path: path, material: r.material, slotDigest: r.slotDigest, last: time.Now(), fullUnlock: time.Now(), idle: idle, pending: make(map[*NativeField]bool)}, nil
 }
 func (s *Session) lock() {
+	for p := range s.otpPrepared {
+		p.cap.clear()
+		s.otpCaps.Delete(p.cap)
+		delete(s.otpPrepared, p)
+	}
+	for p := range s.otpDeliveries {
+		p.cap.clear()
+		s.otpCaps.Delete(p.cap)
+		delete(s.otpDeliveries, p)
+	}
 	s.cancelBrowserSave()
 	for f := range s.browserPending {
 		f.clear()

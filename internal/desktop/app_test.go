@@ -1,12 +1,10 @@
 package desktop
 
 import (
-	"crypto/sha256"
 	"github.com/egoist/mygo/ui"
 	"github.com/jihuayu/locklark/internal/personal"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 func TestNativeUnlockFieldsAreMasked(t *testing.T) {
@@ -43,27 +41,6 @@ func TestLockDropsLateNativeResults(t *testing.T) {
 		t.Fatal("late result survived lock")
 	}
 }
-func TestClipboardExpiryPreservesExternalReplacement(t *testing.T) {
-	for _, replace := range []bool{false, true} {
-		a := New()
-		contents := "copied-secret"
-		cleared := false
-		a.clipboardRead = func() string { return contents }
-		a.clipboardClear = func() { contents = ""; cleared = true }
-		a.clipboardHash = sha256.Sum256([]byte(contents))
-		a.clipboardUntil = time.Now().Add(time.Second)
-		if replace {
-			contents = "user replacement"
-		}
-		a.Lock()
-		if cleared == replace {
-			t.Fatal("clipboard ownership check failed")
-		}
-		if replace && contents != "user replacement" {
-			t.Fatal("external clipboard erased")
-		}
-	}
-}
 
 func TestNativeVaultWorkflowAndChangedSelection(t *testing.T) {
 	a := New()
@@ -96,12 +73,9 @@ func TestNativeVaultWorkflowAndChangedSelection(t *testing.T) {
 	if a.display != "synthetic-secret" {
 		t.Fatal("native show failed", a.status)
 	}
-	clipboard := ""
-	a.clipboardRead = func() string { return clipboard }
-	a.clipboardWrite = func(s string) { clipboard = s }
-	a.clipboardClear = func() { clipboard = "" }
+	clip := attachFakeClipboard(a)
 	a.disclose("username", "copy")
-	if clipboard != "person@example.test" {
+	if clip.value != "person@example.test" {
 		t.Fatal("native copy failed")
 	}
 	a.editField = "password"
@@ -138,7 +112,7 @@ func TestNativeVaultWorkflowAndChangedSelection(t *testing.T) {
 		t.Fatal("restore failed")
 	}
 	a.Lock()
-	if clipboard != "" || len(a.rows) != 0 || a.session != nil {
+	if clip.value != "" || len(a.rows) != 0 || a.session != nil {
 		t.Fatal("lock retained native data")
 	}
 }

@@ -8,8 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -22,55 +20,6 @@ const browserUpdateAction = "item.browser.save.update"
 var ErrBrowserSaveRefused = errors.New("browser save refused")
 var ErrBrowserSaveCancelled = errors.New("browser save cancelled before persistence")
 var ErrBrowserSaveUnknown = errors.New("browser save result unknown; reopen the vault; do not retry automatically")
-
-// One gate arbitrates persistence of either a mutation or an authenticated
-// refusal audit. A commit-won gate never by itself means the data was saved.
-type BrowserSaveGate struct {
-	mu    sync.Mutex
-	state atomic.Uint32
-	until time.Time
-}
-
-func NewBrowserSaveGate(until time.Time) *BrowserSaveGate { return &BrowserSaveGate{until: until} }
-func (g *BrowserSaveGate) Cancel() bool {
-	if g == nil {
-		return false
-	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.state.CompareAndSwap(0, 2)
-}
-func (g *BrowserSaveGate) CommitWon() bool { return g != nil && g.state.Load() == 1 }
-func (g *BrowserSaveGate) Pending() bool {
-	if g == nil {
-		return false
-	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if !time.Now().Before(g.until) {
-		g.state.CompareAndSwap(0, 2)
-	}
-	return g.state.Load() == 0
-}
-func (g *BrowserSaveGate) Shorten(until time.Time) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if until.Before(g.until) {
-		g.until = until
-	}
-}
-func (g *BrowserSaveGate) win() bool {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if !time.Now().Before(g.until) {
-		g.state.CompareAndSwap(0, 2)
-		return false
-	}
-	return g.state.CompareAndSwap(0, 1)
-}
-func (*BrowserSaveGate) String() string               { return "[browser save gate]" }
-func (*BrowserSaveGate) GoString() string             { return "[browser save gate]" }
-func (*BrowserSaveGate) MarshalJSON() ([]byte, error) { return nil, ErrBrowserSaveRefused }
 
 type BrowserSaveContext struct {
 	BrowserContext
@@ -172,6 +121,7 @@ func (s *Session) cancelBrowserSave() {
 	s.saveMu.Lock()
 	defer s.saveMu.Unlock()
 	s.lockRequested.Store(true)
+	s.otpCaps.Range(func(key, value any) bool { key.(*otpCap).cancel(); return true })
 	if s.saveGate != nil {
 		s.saveGate.Cancel()
 	}
