@@ -20,7 +20,7 @@ import (
 	"unicode/utf8"
 )
 
-var personalUsage = errors.New("usage: locklark personal <init|add-login|list|audit|archived-audit|references> --file PATH, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password|otp|url, or reveal-login --file PATH --id ID --revision REV --field username|password, or generate-login --file PATH [--length N], or regenerate-password --file PATH --id ID --revision REV [--length N], or otp --file PATH --id ID --revision REV, or reveal-ref|otp-ref --file PATH --ref REF --revision REV, or inspect-1pux --file PATH --source ARCHIVE, or export-kdbx --file PATH --out NEW_FILE.kdbx, or archive-login|unarchive-login --file PATH --id ID --revision REV, or list --file PATH [--state active|archived|trashed|all], or trash-login|restore-login --file PATH --id ID --revision REV, or match-logins --file PATH --origin HTTPS_ORIGIN --frame-origin HTTPS_ORIGIN")
+var personalUsage = errors.New("usage: locklark personal <init|add-login|list|audit|archived-audit|references> --file PATH, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password|otp|url, or reveal-login --file PATH --id ID --revision REV --field username|password, or generate-login --file PATH [--length N], or regenerate-password --file PATH --id ID --revision REV [--length N], or otp --file PATH --id ID --revision REV, or reveal-ref|otp-ref --file PATH --ref REF --revision REV, or inspect-1pux|plan-import-1pux --file PATH --source ARCHIVE, or import-1pux --file PATH --source ARCHIVE --digest SHA256, or export-kdbx --file PATH --out NEW_FILE.kdbx, or archive-login|unarchive-login --file PATH --id ID --revision REV, or list --file PATH [--state active|archived|trashed|all], or trash-login|restore-login --file PATH --id ID --revision REV, or match-logins --file PATH --origin HTTPS_ORIGIN --frame-origin HTTPS_ORIGIN")
 
 // One terminal mode covers the entire interaction; no prompt or inter-field
 // gap is visible while echo is enabled.
@@ -94,6 +94,14 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 	var reveal personal.RevealTarget
 	length := password.DefaultPolicy().Length
 	switch action {
+	case "plan-import-1pux":
+		if len(opts) != 2 || opts["--source"] == "" {
+			return personalUsage
+		}
+	case "import-1pux":
+		if len(opts) != 3 || opts["--source"] == "" || !personal.ValidImportDigest(opts["--digest"]) {
+			return personalUsage
+		}
 	case "match-logins":
 		if len(opts) != 3 {
 			return personalUsage
@@ -266,6 +274,30 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 		}
 		defer clear(key)
 		switch action {
+		case "plan-import-1pux", "import-1pux":
+			if _, e = fmt.Fprint(os.Stderr, "仅支持单账户、单库的基本登录；未支持的类别、字段、历史和附件会整批拒绝。\r\n来源记录会加密保留，可能保留以后修改前的旧值；不会覆盖已有条目。\r\n"); e != nil {
+				return e
+			}
+			prompt, answer := "输入 PLAN 确认生成导入计划", "PLAN"
+			if action == "import-1pux" {
+				if _, e = fmt.Fprintf(os.Stderr, "确认导入计划的来源摘要：%s\r\n", opts["--digest"]); e != nil {
+					return e
+				}
+				prompt, answer = "输入 SAVE 确认整批导入", "SAVE"
+			}
+			consent, e := consoleField(prompt)
+			defer clear(consent)
+			if e != nil {
+				return e
+			}
+			if string(consent) != answer {
+				return errors.New("1PUX import cancelled")
+			}
+			if action == "plan-import-1pux" {
+				response, err = personal.PlanImportOnepux(path, string(pw), key, opts["--source"])
+			} else {
+				response, err = personal.ImportOnepux(path, string(pw), key, opts["--source"], opts["--digest"])
+			}
 		case "export-kdbx":
 			password, e := consoleField("新导出密码（至少 12 字符）")
 			if e != nil {
@@ -283,7 +315,7 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 			if subtle.ConstantTimeCompare(password, confirmation) != 1 {
 				return errors.New("export passwords did not match")
 			}
-			if _, e = fmt.Fprint(os.Stderr, "导出包含活动、归档和回收站条目的敏感值，以独立密码加密；不包含账户钥匙、审计或恢复材料。\r\n其他工具未必识别归档或回收站状态。\r\n"); e != nil {
+			if _, e = fmt.Fprint(os.Stderr, "导出包含活动、归档和回收站条目的敏感值，以独立密码加密；不包含账户钥匙、审计或恢复材料。\r\n包含导入来源记录，可能保留修改前的旧值。\r\n其他工具未必识别归档或回收站状态。\r\n"); e != nil {
 				return e
 			}
 			consent, e := consoleField("输入 SAVE 确认加密导出")

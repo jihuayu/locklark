@@ -77,10 +77,10 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 	if e.Sequence != n || e.Previous != prev || !idOK(e.Session) || e.Actor != "local-owner" || !ed25519.Verify(pub, e.proof(), e.Signature) {
 		return invalid
 	}
-	if !editAction(e.Action) && !revealAction(e.Action) && e.Action != otpDisclosureAction && e.Action != referenceRejectAction && e.Action != inspectionAction && e.Action != exportAction && e.Action != matchAction && (e.Result != "succeeded" || e.BaseRevision != "") {
+	if !editAction(e.Action) && !revealAction(e.Action) && e.Action != otpDisclosureAction && e.Action != referenceRejectAction && e.Action != inspectionAction && e.Action != exportAction && e.Action != matchAction && !migrationAction(e.Action) && (e.Result != "succeeded" || e.BaseRevision != "") {
 		return invalid
 	}
-	if e.Action == inspectionAction && e.Result == "succeeded" {
+	if (e.Action == inspectionAction || migrationAction(e.Action) || e.Action == "item.import") && e.Result == "succeeded" {
 		if !digestOK(e.ReportDigest) {
 			return invalid
 		}
@@ -98,6 +98,19 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 		return invalid
 	}
 	switch e.Action {
+	case importPlanAction, importAction:
+		if n <= 1 || e.Item != "" || e.BaseRevision != "" {
+			return invalid
+		}
+		switch e.Result {
+		case "succeeded", "invalid", "unsupported", "limit", "source-error", "duplicate":
+		case "source-changed":
+			if e.Action != importAction {
+				return invalid
+			}
+		default:
+			return invalid
+		}
 	case matchAction:
 		if n <= 1 || e.Item != "" || e.BaseRevision != "" || e.Result != "succeeded" && e.Result != "cross-origin" {
 			return invalid
@@ -151,7 +164,7 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 		if n != 1 || e.Item != "" {
 			return invalid
 		}
-	case "item.add", "item.restore", "item.generate":
+	case "item.add", "item.restore", "item.generate", "item.import":
 		if n <= 1 || !idOK(e.Item) {
 			return invalid
 		}
@@ -219,7 +232,7 @@ func history(b *bolt.Bucket, i identity, s vault.Snapshot, want bool, revisions 
 			return invalid
 		}
 		prev = ev.hash()
-		if ev.Action == "item.add" || ev.Action == "item.restore" || ev.Action == "item.generate" {
+		if ev.Action == "item.add" || ev.Action == "item.restore" || ev.Action == "item.generate" || ev.Action == "item.import" {
 			if revisions[ev.Item] != "" {
 				return invalid
 			}
