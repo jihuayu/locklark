@@ -8,7 +8,7 @@
 
 `Build(config, ownerPrivate, publisherPrivate, parent, members, completeItems)` 从完整规范 roster 内部推导设备 age 收件人，调用现有 `vault.SealItems` 生成全新随机密钥的下一代密文，再由 owner 签 proposal。绑定 Scope、精确 parent version/hash、epoch=parent+1、active/frozen 模式、完整成员/设备公钥、完整 snapshot 摘要和 owner 身份。Proposal、receipt、head digest 和 snapshot digest 使用各自的 v1 域。协议结构体有固定 JSON 字段顺序；存储读取要求规范重编码逐字节一致，拒绝未知/重复字段和非规范编码。
 
-roster 只包含稳定 ID、reader/writer 角色和设备公开收钥/签名钥匙，无姓名或条目值。成员/设备按 ID 严格排序，全局 ID/公钥唯一，最多 64 成员、总计 64 设备。每个 active 成员必须有设备。设备不能改挂成员或在原 ID 下换钥；换钥需新设备 ID。完整历史保留永久墓碑：被移出的成员/设备 ID、设备收钥及签名公钥不能复用，避免用新 ID 恢复旧钥。owner/publisher/sequencer 是独立外部角色，不由成员设备自助授予。
+roster 只包含稳定 ID、reader/writer 角色和设备公开收钥/签名钥匙，无姓名或条目值。成员/设备按 ID 严格排序，全局 ID/公钥唯一，最多 64 成员、总计 64 设备。每个 active 成员必须有设备。reader/writer 当前仅为目录元数据，不实施操作 ACL；每台 active 设备均可解密整个 snapshot，发布始终需要 owner 授权。Device.Signing 仅作身份登记和墓碑，本包不接收或验证设备签名，不提供私钥持有证明，也不证明收钥与签名公钥属于同一物理设备；实际邀请/指纹核对和 possession/key-pair binding 留给后续可信注册流程。设备不能改挂成员或在原 ID 下换钥；换钥需新设备 ID。完整历史保留永久墓碑：被移出的成员/设备 ID、设备收钥及签名公钥不能复用，避免用新 ID 恢复旧钥。owner/publisher/sequencer 是独立外部角色，不由成员设备自助授予。
 
 age 信封没有可公开核验的收件人清单：排序端只能验证 publisher 签名、epoch、owner 签署的 roster 和精确密文摘要，不能仅由这些证明加密者实际使用了哪些收件人。受信客户端必须使用 `Build` 的 roster 派生封装路径；已经掌握明文的恶意 owner/publisher 泄漏数据不在该证明之内。实际撤销验收通过用旧设备尝试解密新密文实现。
 
@@ -29,3 +29,5 @@ age 信封没有可公开核验的收件人清单：排序端只能验证 publis
 实跑命令：`go test ./internal/directory -count=1`、`go test -race ./internal/directory -count=1`、完整 `go test -count=1 ./...`、`go vet ./...`、`go mod verify`。最终 Luna/max 复核与 Ubuntu/Windows CI 结果见 PR。
 
 仍待：owner/publisher 轮换、真实邀请/指纹核对、设备本机保钥与签名操作、两人两个人库一团队库一机器联调、依赖资格的会话/机器委托级联撤销、可信远端新鲜度和中继分叉处理、离线草稿/同步冲突、团队恢复保管、网络服务和 UI。不能据此宣称完整团队同步/撤权产品已完成。
+
+Luna/max 预审反馈已处理：owner/device 签名公钥在 map lookup 前先限制长度，补超长输入负测；Go doc 和本文明确角色并非 ACL、无设备持有证明或双钥绑定。最终复核结论和双平台 CI 见 PR。

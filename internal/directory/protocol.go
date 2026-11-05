@@ -45,11 +45,17 @@ type Checkpoint struct {
 	Version uint64 `json:"version"`
 	Hash    string `json:"hash"`
 }
+
+// Device keys are owner assertions. This core does not verify possession or
+// cryptographically bind the encryption and signing keys to one physical device.
 type Device struct {
 	ID         string `json:"id"`
 	Encryption string `json:"encryption"`
 	Signing    string `json:"signing"`
 }
+
+// Role is directory metadata, not an enforced operation ACL. Every registered
+// device receives the whole snapshot; publication still requires an owner.
 type Member struct {
 	ID      string   `json:"id"`
 	Role    string   `json:"role"`
@@ -188,7 +194,7 @@ func (c *Config) roster(members []Member, empty bool) ([]*age.X25519Recipient, e
 		ids[m.ID] = true
 		deviceID := ""
 		for _, d := range m.Devices {
-			if len(d.Encryption) != 62 || !hexSize(d.ID, 16) || d.ID <= deviceID || ids[d.ID] || enc[d.Encryption] || sign[d.Signing] || c.reserved[d.Signing] {
+			if len(d.Signing) != 64 || len(d.Encryption) != 62 || !hexSize(d.ID, 16) || d.ID <= deviceID || ids[d.ID] || enc[d.Encryption] || sign[d.Signing] || c.reserved[d.Signing] {
 				return nil, ErrInvalid
 			}
 			if _, err := signingKey(d.Signing); err != nil {
@@ -261,7 +267,7 @@ func Freeze(c *Config, owner ed25519.PrivateKey, parent Checkpoint) (Proposal, e
 	return p, nil
 }
 func (c *Config) verifyProposal(p Proposal) error {
-	if !c.valid() || p.Scope != c.scope || !c.validCheckpoint(p.Parent) || p.Epoch != p.Parent.Version+1 || p.Epoch > maxVersions || len(c.owners[p.Owner]) != ed25519.PublicKeySize || len(p.Signature) != ed25519.SignatureSize {
+	if !c.valid() || p.Scope != c.scope || !c.validCheckpoint(p.Parent) || p.Epoch != p.Parent.Version+1 || p.Epoch > maxVersions || !hexSize(p.Owner, 32) || len(c.owners[p.Owner]) != ed25519.PublicKeySize || len(p.Signature) != ed25519.SignatureSize {
 		return ErrInvalid
 	}
 	switch p.Mode {

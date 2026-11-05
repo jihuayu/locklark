@@ -237,6 +237,9 @@ func TestTamperedEvidenceAndUnauthorizedOwners(t *testing.T) {
 		q := p
 		q.Members = cloneMembers(p.Members)
 		alter(&q)
+		if q.Owner == public(f.owner) {
+			q.Signature = ed25519.Sign(f.owner, q.proof())
+		}
 		if r, err := Commit(path, f.cfg, f.sequencer, q, s); err == nil || !reflect.DeepEqual(r, Receipt{}) {
 			t.Fatal("forged proposal")
 		}

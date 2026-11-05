@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"filippo.io/age"
@@ -121,5 +122,22 @@ func TestPinsRosterAndModeBounds(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "missing.db")
 	if _, err = Read(missing, f.cfg, f.cfg.Genesis()); err == nil {
 		t.Fatal("missing directory silently initialized")
+	}
+}
+
+func TestOversizedUntrustedKeys(t *testing.T) {
+	f := setup(t)
+	members := cloneMembers(f.members)
+	members[0].Devices[0].Signing = strings.Repeat("a", 1<<20)
+	if _, _, err := Build(f.cfg, f.owner, f.publisher, f.cfg.Genesis(), members, f.items); err != ErrInvalid {
+		t.Fatal("oversized device key", err)
+	}
+	p, _, err := Build(f.cfg, f.owner, f.publisher, f.cfg.Genesis(), f.members, f.items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Owner = strings.Repeat("a", 1<<20)
+	if err = f.cfg.verifyProposal(p); err != ErrInvalid {
+		t.Fatal("oversized owner key", err)
 	}
 }
