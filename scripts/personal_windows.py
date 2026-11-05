@@ -44,12 +44,30 @@ def invoke(binary, action, path, answers, *, ok, issue, options, barrier, deny_i
         pump()
         if time.monotonic() > deadline:
             raise RuntimeError(f"{action}: command did not finish")
-    # Process exit does not mean ConPTY has delivered its final output.
-    # Drain to transport EOF, with a deadline for a broken transport.
+    # ConPTY may keep its transport open after the child exits. Wait for a
+    # complete successful response and a quiet interval, rather than EOF alone.
     deadline = time.monotonic() + 5
-    while pump():
-        if time.monotonic() > deadline:
-            raise RuntimeError(f"{action}: ConPTY output did not close")
+    quiet_since = time.monotonic()
+    while True:
+        previous = len(view)
+        if not pump():
+            break
+        now = time.monotonic()
+        if len(view) != previous:
+            quiet_since = now
+        complete = terminal.get_exitstatus() != 0
+        tail = ansi.sub("", view)[offset:]
+        start = re.search(r"[\[{]", tail)
+        if start:
+            try:
+                json.JSONDecoder().raw_decode(tail[start.start():])
+                complete = True
+            except json.JSONDecodeError:
+                pass
+        if complete and now - quiet_since >= 0.5:
+            break
+        if now > deadline:
+            raise RuntimeError(f"{action}: incomplete ConPTY response")
     if ok is None:
         ok = terminal.get_exitstatus() == 0
         if not ok and "login changed;" not in ansi.sub("", view):
