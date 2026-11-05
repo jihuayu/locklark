@@ -328,3 +328,5 @@ go test -count=1 ./internal/vault -run 'TestKDBXIndependentPeer|TestIndependentN
 个人 CLI 支持 `archive-login` / `unarchive-login`（`--file`、`--id`、`--revision`，终端 SAVE 确认）。`list --state active|archived|all` 默认只列 active；归档条目仍可显式读取、取消归档及备份恢复。归档不会撤销字段权限，详见 [归档验收](docs/personal-archive-validation.md)。
 
 用 `edit-login --field url` 保存一个 HTTPS 网站，用 `match-logins --file PATH --origin HTTPS_ORIGIN --frame-origin HTTPS_ORIGIN` 查找同源 active 登录候选（仅元数据）。当前只接受保守 ASCII URL / DNS HTTPS profile，不是已接通的浏览器自动填充；详见 [来源匹配验收与向量](docs/login-origin-matching-validation.md)。
+
+团队方向已有 `internal/directory` 持久化核心：固定 owner/排序端/发布者信任根、签名 roster、精确父版本提交、撤销身份墓碑、检查点核验和整库冻结。真实 age/KDBX 测试覆盖撤销设备无法解开新代。当前为 Go API，尚无团队 UI/网络同步；[协议、验收与限制](docs/team-directory-validation.md)。

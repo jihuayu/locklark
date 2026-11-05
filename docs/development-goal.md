@@ -50,3 +50,5 @@ Windows ConPTY 验收失败已在 `dd68eef` 的双平台 CI 关闭；三个 Luna
 受控单字段披露、生成保存、TOTP 分别已在 PR #2、#3、#4 经 Luna/max 复核及双平台 CI 后合并。个人字段引用切片已在 PR #5 合入 main `85a3d6f`，保持同事务身份/快照/账本验证、精确修订与先记意图；验收见 [personal-references-validation.md](personal-references-validation.md)。该切片不授予 MCP 或 invoke 原值读取能力。loginFields 清点已在 PR #6 合入 `83ba767`。passwordHistory 清点已在 PR #7 合入 `cff9aaf`，保留顺序和重复，见 [onepux-password-history-validation.md](onepux-password-history-validation.md)。当前从该主线接通经过认证、提交审计后输出报告的个人 CLI 预检入口，见 [personal-onepux-inspection-validation.md](personal-onepux-inspection-validation.md)；随后完成类别/字段/历史/附件映射、可逆迁出及独立互操作。预检不能授予迁移许可。
 
 若 Actions 的账户付款/额度阻塞未解除，保留 PR 并记录精确检查链接；可完善未阻塞的验收材料，但不越过合并门槛启动依赖最新 main 的下一功能。Windows 运行、移动真机、硬件断电、真实 1Password 对照和外部密码评审始终单列，云端测试不能代验。
+
+四线最新交接见 progress：PR #9–#12 分别实现个人加密迁出、归档、HTTPS 来源候选/共享向量、签名团队目录与冻结核心，均保留完整产品未完成项。后续从实际 main 接续：通用迁移的类别/字段/历史/附件映射与对账，日常回收站/恢复，真实浏览器与移动系统适配，团队设备持有证明与权限执行/远端新鲜度。已实现的候选接口和本地目录核心不能替代这些验收。
