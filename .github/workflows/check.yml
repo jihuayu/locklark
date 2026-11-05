@@ -45,6 +45,7 @@ jobs:
           python3 scripts/matching_acceptance.py "$RUNNER_TEMP/locklark"
           python3 scripts/archive_acceptance.py "$RUNNER_TEMP/locklark"
           python3 scripts/health_acceptance.py "$RUNNER_TEMP/locklark"
+          python3 scripts/injection_acceptance.py "$RUNNER_TEMP/locklark"
           python3 scripts/inspection_acceptance.py "$RUNNER_TEMP/locklark"
           "$RUNNER_TEMP/locklark-kdbx-peer/bin/python" scripts/trash_acceptance.py "$RUNNER_TEMP/locklark"
           "$RUNNER_TEMP/locklark-kdbx-peer/bin/python" scripts/import_acceptance.py "$RUNNER_TEMP/locklark"
@@ -77,6 +78,8 @@ jobs:
           & $python scripts/archive_acceptance.py $binary
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $python scripts/health_acceptance.py $binary
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $python scripts/injection_acceptance.py $binary
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $python scripts/trash_acceptance.py $binary
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

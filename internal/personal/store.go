@@ -178,24 +178,26 @@ func existing(path string) (*bolt.DB, error) {
 }
 
 type result struct {
-	health          HealthReport
-	migration       onepux.MappingReport
-	inspection      onepux.Report
-	reportDigest    string
-	references      ReferenceIndex
-	otp             *totp.Config
-	profile         password.Profile
-	value           []byte
-	session, intent string
-	rows            []Row
-	events          []Event
-	id              string
-	revision        string
-	chains          []Chain
-	archive         []byte
+	destinationDigest string
+	health            HealthReport
+	migration         onepux.MappingReport
+	inspection        onepux.Report
+	reportDigest      string
+	references        ReferenceIndex
+	otp               *totp.Config
+	profile           password.Profile
+	value             []byte
+	session, intent   string
+	rows              []Row
+	events            []Event
+	id                string
+	revision          string
+	chains            []Chain
+	archive           []byte
 }
 
 type commandOption struct {
+	injection  *injectionRequest
 	migration  *importRequest
 	match      *matchRequest
 	export     *exportRequest
@@ -260,6 +262,9 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 	}
 	if (action == exportAction) != (option.export != nil) {
 		return result{}, invalid
+	}
+	if injectAction(action) != (option.injection != nil) || option.injection != nil && !option.injection.valid() {
+		return result{}, ErrInjectionTarget
 	}
 	if option.generation != nil && action != "item.regenerate.password" {
 		if option.generation.policy.Alphabet != password.DefaultAlphabet {
@@ -429,7 +434,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			if option.backup == "" {
 				return invalid
 			}
-		case "item.trash", "item.untrash", "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.regenerate.password", otpDisclosureAction:
+		case "item.inject.username", "item.inject.password", "item.trash", "item.untrash", "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.regenerate.password", otpDisclosureAction:
 			if edit == nil {
 				return invalid
 			}
@@ -492,9 +497,9 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 							outcome = "intent"
 							break
 						}
-						if revealAction(action) {
+						if readValueAction(action) {
 							value := items[i].Username
-							if action == "item.reveal.password" {
+							if action == "item.reveal.password" || action == "item.inject.password" {
 								value = items[i].Password
 							}
 							out.value = []byte(value)
@@ -582,6 +587,13 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			}
 		}
 		var link string
+		if injectAction(action) && refusal == nil {
+			link, e = option.injection.binding(i.AuditEncryption)
+			if e != nil {
+				return e
+			}
+			out.destinationDigest = link
+		}
 		if action == "backup.prepare" {
 			link, e = generation(option.backup)
 			if e != nil {
@@ -597,7 +609,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		if e != nil {
 			return e
 		}
-		if (revealAction(action) || action == otpDisclosureAction || action == inspectionAction || action == exportAction || migrationAction(action) || action == healthAction) && refusal == nil {
+		if (readValueAction(action) || action == otpDisclosureAction || action == inspectionAction || action == exportAction || migrationAction(action) || action == healthAction) && refusal == nil {
 			out.session, out.intent = ev.Session, ev.hash()
 		}
 		if action == "backup.prepare" {
