@@ -15,9 +15,9 @@ else:
 import time
 
 
-def invoke(binary, action, path, answers, *, ok=True, issue=False, paste=False, options=(), barrier=None, deny_issue=False, expect_error=None, disclosed=None, forbidden=()):
+def invoke(binary, action, path, answers, *, ok=True, issue=False, paste=False, options=(), barrier=None, deny_issue=False, expect_error=None, disclosed=None, forbidden=(), capture_disclosure=False):
     if os.name == "nt":
-        return windows_invoke(binary, action, path, answers, ok=ok, issue=issue, options=options, barrier=barrier, deny_issue=deny_issue, expect_error=expect_error, disclosed=disclosed, forbidden=forbidden)
+        return windows_invoke(binary, action, path, answers, ok=ok, issue=issue, options=options, barrier=barrier, deny_issue=deny_issue, expect_error=expect_error, disclosed=disclosed, forbidden=forbidden, capture_disclosure=capture_disclosure)
     master, slave = pty.openpty()
     try:
         proc = subprocess.Popen([binary, "personal", action, "--file", path, *options],
@@ -75,6 +75,16 @@ def invoke(binary, action, path, answers, *, ok=True, issue=False, paste=False, 
                 raise RuntimeError(f"{action}: expected error category missing")
             if issued and issued.encode() in data:
                 raise RuntimeError("Secret Key leaked to ordinary output")
+            if capture_disclosure:
+                if not ok or issue or disclosed is not None:
+                    raise RuntimeError("invalid disclosure capture request")
+                try:
+                    disclosed, _ = json.JSONDecoder().raw_decode(transcript[offset:].decode().lstrip())
+                except (ValueError, UnicodeError):
+                    raise RuntimeError("missing explicit disclosure") from None
+                if not isinstance(disclosed, str):
+                    raise RuntimeError("explicit disclosure was not a string")
+                issued = disclosed
             if disclosed is not None:
                 quoted = json.dumps(disclosed, ensure_ascii=False).encode()
                 if transcript.count(quoted) != 1 or disclosed.encode() in data or quoted in data:

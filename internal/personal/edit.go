@@ -14,7 +14,7 @@ type Edit struct{ ID, Revision, Field, Value string }
 
 func editAction(s string) bool {
 	switch s {
-	case "item.edit.title", "item.edit.username", "item.edit.password":
+	case "item.edit.title", "item.edit.username", "item.edit.password", "item.regenerate.password":
 		return true
 	}
 	return false

@@ -6,7 +6,7 @@ import time
 from winpty import PTY
 
 
-def invoke(binary, action, path, answers, *, ok, issue, options, barrier, deny_issue=False, expect_error=None, disclosed=None, forbidden=()):
+def invoke(binary, action, path, answers, *, ok, issue, options, barrier, deny_issue=False, expect_error=None, disclosed=None, forbidden=(), capture_disclosure=False):
     terminal = PTY(2000, 40, backend=0)
     terminal.spawn(binary, " " + subprocess.list2cmdline(["personal", action, "--file", path, *options]))
     view = ""
@@ -77,6 +77,16 @@ def invoke(binary, action, path, answers, *, ok, issue, options, barrier, deny_i
     if (terminal.get_exitstatus() == 0) != ok:
         raise RuntimeError(f"{action}: unexpected exit")
     screen = ansi.sub("",view)
+    if capture_disclosure:
+        if not ok or issue or disclosed is not None:
+            raise RuntimeError("invalid disclosure capture request")
+        try:
+            disclosed, _ = json.JSONDecoder().raw_decode(screen[offset:].lstrip())
+        except ValueError:
+            raise RuntimeError("missing explicit disclosure") from None
+        if not isinstance(disclosed, str):
+            raise RuntimeError("explicit disclosure was not a string")
+        issued = disclosed
     if disclosed is not None and screen.count(json.dumps(disclosed, ensure_ascii=False)) != 1:
         raise RuntimeError("disclosure missing or repeated")
     if any(value in screen for value in forbidden):

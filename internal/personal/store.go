@@ -10,6 +10,7 @@ import (
 	"errors"
 	"filippo.io/age"
 	"github.com/jihuayu/locklark/internal/account"
+	"github.com/jihuayu/locklark/internal/password"
 	"github.com/jihuayu/locklark/internal/vault"
 	bolt "go.etcd.io/bbolt"
 	"os"
@@ -173,6 +174,7 @@ func existing(path string) (*bolt.DB, error) {
 }
 
 type result struct {
+	profile         password.Profile
 	value           []byte
 	session, intent string
 	rows            []Row
@@ -183,18 +185,36 @@ type result struct {
 	archive         []byte
 }
 
-func command(path, pw string, key []byte, action string, add vault.Item, edit *Edit, backup ...string) (result, error) {
+func command(path, pw string, key []byte, action string, add vault.Item, edit *Edit, options ...commandOption) (result, error) {
 	db, e := existing(path)
 	if e != nil {
 		return result{}, e
 	}
 	defer db.Close()
-	return commandWithUpdate(db.Update, pw, key, action, add, edit, backup...)
+	return commandWithUpdate(db.Update, pw, key, action, add, edit, options...)
 }
 
 // The updater returns only after commit (including bbolt's default fsync).
 // Keeping it explicit also permits rollback fault injection in tests.
-func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key []byte, action string, add vault.Item, edit *Edit, backup ...string) (result, error) {
+func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key []byte, action string, add vault.Item, edit *Edit, options ...commandOption) (result, error) {
+	var option commandOption
+	if len(options) > 1 {
+		return result{}, invalid
+	}
+	if len(options) == 1 {
+		option = options[0]
+	}
+	if generatedAction(action) != (option.generation != nil) {
+		return result{}, invalid
+	}
+	if option.generation != nil {
+		if option.generation.policy.Alphabet != password.DefaultAlphabet {
+			return result{}, password.ErrInvalid
+		}
+		if _, err := password.Validate(option.generation.policy); err != nil {
+			return result{}, err
+		}
+	}
 	var out result
 	var refusal error
 	e := update(func(tx *bolt.Tx) error {
@@ -259,14 +279,15 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			}
 		}
 		outcome := "succeeded"
+		var profile *password.Profile
 		switch action {
 		case "audit.archived":
 			out.chains = chains
 		case "backup.prepare":
-			if len(backup) != 1 {
+			if option.backup == "" {
 				return invalid
 			}
-		case "item.edit.title", "item.edit.username", "item.edit.password", "item.reveal.username", "item.reveal.password":
+		case "item.edit.title", "item.edit.username", "item.edit.password", "item.reveal.username", "item.reveal.password", "item.regenerate.password":
 			if edit == nil {
 				return invalid
 			}
@@ -292,6 +313,16 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 							outcome = "intent"
 							break
 						}
+						if action == "item.regenerate.password" {
+							secret, err := option.generation.value()
+							if err != nil {
+								return err
+							}
+							items[i].Password = secret.Value()
+							out.profile = secret.Profile()
+							profile = &out.profile
+							break
+						}
 						switch edit.Field {
 						case "title":
 							items[i].Title = edit.Value
@@ -304,13 +335,25 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 					}
 				}
 			}
-		case "item.add":
-			if strings.TrimSpace(add.Title) == "" || add.Password == "" {
+		case "item.add", "item.generate":
+			if action == "item.generate" && strings.TrimSpace(add.Title) == "" {
+				return errors.New("a title is required")
+			}
+			if strings.TrimSpace(add.Title) == "" || (action == "item.add" && add.Password == "") {
 				return errors.New("a title and password are required")
 			}
 			add.ID, e = randomID()
 			if e != nil {
 				return e
+			}
+			if action == "item.generate" {
+				secret, err := option.generation.value()
+				if err != nil {
+					return err
+				}
+				add.Password = secret.Value()
+				out.profile = secret.Profile()
+				profile = &out.profile
 			}
 			items = append(items, add)
 			out.id = add.ID
@@ -323,7 +366,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		default:
 			return invalid
 		}
-		if action == "item.add" || (editAction(action) && refusal == nil) {
+		if action == "item.add" || action == "item.generate" || (editAction(action) && refusal == nil) {
 			s, e = seal(b, i, s.Epoch+1, items)
 			if e != nil {
 				return e
@@ -331,7 +374,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		}
 		var link string
 		if action == "backup.prepare" {
-			link, e = generation(backup[0])
+			link, e = generation(option.backup)
 			if e != nil {
 				return e
 			}
@@ -341,7 +384,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 				}
 			}
 		}
-		ev, e := appendLinked(b, i, tip, s, action, out.id, outcome, revisions[out.id], link)
+		ev, e := appendLinked(b, i, tip, s, action, out.id, outcome, revisions[out.id], link, profile)
 		if e != nil {
 			return e
 		}
@@ -353,12 +396,12 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			defer clear(auditPriv)
 			chains = append(chains, Chain{auditPriv.Public().(ed25519.PublicKey), append(rows, ev)})
 			p := payload{Generation: link, Epoch: s.Epoch, Items: items, Chains: chains}
-			out.archive, e = encodeArchive(p, pw, key, slot.Account, backup[0], auditPriv)
+			out.archive, e = encodeArchive(p, pw, key, slot.Account, option.backup, auditPriv)
 			return e
 		}
 		if action == "audit.list" {
 			out.events = append(rows, ev)
-		} else if editAction(action) && refusal == nil {
+		} else if (editAction(action) || action == "item.generate") && refusal == nil {
 			out.revision = ev.hash()
 		}
 		return nil

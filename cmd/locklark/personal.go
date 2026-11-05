@@ -7,17 +7,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/jihuayu/locklark/internal/password"
 	"github.com/jihuayu/locklark/internal/personal"
 	"golang.org/x/term"
 	"io"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 	"unicode/utf8"
 )
 
-var personalUsage = errors.New("usage: locklark personal <init|add-login|list|audit|archived-audit> --file PATH, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password, or reveal-login --file PATH --id ID --revision REV --field username|password")
+var personalUsage = errors.New("usage: locklark personal <init|add-login|list|audit|archived-audit> --file PATH, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password, or reveal-login --file PATH --id ID --revision REV --field username|password, or generate-login --file PATH [--length N], or regenerate-password --file PATH --id ID --revision REV [--length N]")
 
 // One terminal mode covers the entire interaction; no prompt or inter-field
 // gap is visible while echo is enabled.
@@ -89,7 +91,30 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 	}
 	var edit personal.Edit
 	var reveal personal.RevealTarget
+	length := password.DefaultPolicy().Length
 	switch action {
+	case "generate-login", "regenerate-password":
+		expected := 1
+		if action == "regenerate-password" {
+			expected = 3
+			if !personal.ValidEditTarget(opts["--id"], opts["--revision"], "password") {
+				return personalUsage
+			}
+		}
+		if value, found := opts["--length"]; found {
+			var err error
+			length, err = strconv.Atoi(value)
+			if err != nil || strconv.Itoa(length) != value {
+				return personalUsage
+			}
+			expected++
+		}
+		if len(opts) != expected {
+			return personalUsage
+		}
+		if _, err := password.Validate(password.Policy{Length: length, Alphabet: password.DefaultAlphabet}); err != nil {
+			return err
+		}
 	case "reveal-login":
 		reveal = personal.RevealTarget{ID: opts["--id"], Revision: opts["--revision"], Field: opts["--field"]}
 		if len(opts) != 4 || !personal.ValidRevealTarget(reveal.ID, reveal.Revision, reveal.Field) {
@@ -248,7 +273,20 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 			response = map[string]string{"status": "restored"}
 		case "archived-audit":
 			response, err = personal.ArchivedAudit(path, string(pw), key)
-		case "add-login":
+		case "regenerate-password":
+			if _, e = fmt.Fprintf(os.Stderr, "将为条目 %s（修订 %s）生成 %d 位字母数字密码并替换本地保存值。此操作不会修改网站密码；需要时请先备份。\r\n", opts["--id"], opts["--revision"], length); e != nil {
+				return e
+			}
+			confirmation, e := consoleField("输入 SAVE 确认替换本地密码")
+			defer clear(confirmation)
+			if e != nil {
+				return e
+			}
+			if string(confirmation) != "SAVE" {
+				return errors.New("password regeneration cancelled")
+			}
+			response, err = personal.RegeneratePassword(path, string(pw), key, opts["--id"], opts["--revision"], length)
+		case "add-login", "generate-login":
 			title, e := consoleField("登录标题")
 			if e != nil {
 				return e
@@ -259,6 +297,21 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 				return e
 			}
 			defer clear(username)
+			if action == "generate-login" {
+				if _, e = fmt.Fprintf(os.Stderr, "将生成并加密保存 %d 位字母数字密码；需要查看时另用 reveal-login。\r\n", length); e != nil {
+					return e
+				}
+				confirmation, e := consoleField("输入 SAVE 确认生成并保存")
+				defer clear(confirmation)
+				if e != nil {
+					return e
+				}
+				if string(confirmation) != "SAVE" {
+					return errors.New("password generation cancelled")
+				}
+				response, err = personal.GenerateLogin(path, string(pw), key, string(title), string(username), length)
+				break
+			}
 			value, e := consoleField("登录密码")
 			if e != nil {
 				return e
