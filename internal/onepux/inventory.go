@@ -137,6 +137,9 @@ func inventory(root map[string]any, r *Report, reasons map[string]bool, files ma
 							}
 						}
 					}
+					if err := sectionInventory(object, &r.SectionInventory, reasons); err != nil {
+						return err
+					}
 					if _, exists := object["documentAttributes"]; exists {
 						reasons["file-linkage-unverified"] = true
 					}

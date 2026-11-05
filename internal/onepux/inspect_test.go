@@ -45,7 +45,7 @@ func TestInventoryCountsAndPrivacy(t *testing.T) {
 	raw := pack(t, attributes, inventoryData, entry{"files/", ""}, entry{"files/private-file-marker", "\x00\x01\x02\xff"})
 	before := append([]byte(nil), raw...)
 	report, err := Inspect(raw)
-	want := Report{Version: 3, Accounts: 1, Vaults: 1, Items: 3, Active: 1, Archived: 1, OtherStates: 1, Files: 1, FileBytes: 4, FileReferences: FileReferenceReport{FilesWithoutExplicitLinks: 1, ItemsWithoutExplicitPath: 1}, Categories: []Category{{"001", 1}, {"114", 1}, {"777", 1}}, UnmappedItems: 3, ReviewReasons: []string{"file-linkage-unverified", "file-path-not-provided", "files-without-explicit-links", "mapping-not-implemented", "password-history-unmapped", "sections-unmapped", "unknown-category", "unknown-state"}}
+	want := Report{SectionInventory: SectionReport{Sections: 1, Fields: 2, RepeatedFieldIDs: 1, ObjectValues: 2}, Version: 3, Accounts: 1, Vaults: 1, Items: 3, Active: 1, Archived: 1, OtherStates: 1, Files: 1, FileBytes: 4, FileReferences: FileReferenceReport{FilesWithoutExplicitLinks: 1, ItemsWithoutExplicitPath: 1}, Categories: []Category{{"001", 1}, {"114", 1}, {"777", 1}}, UnmappedItems: 3, ReviewReasons: []string{"field-value-semantics-unverified", "file-linkage-unverified", "file-path-not-provided", "files-without-explicit-links", "mapping-not-implemented", "password-history-unmapped", "repeated-field-id", "sections-unmapped", "unknown-category", "unknown-state"}}
 	if err != nil || !reflect.DeepEqual(report, want) {
 		t.Fatal("inventory counts or unverified mapping changed", report, err)
 	}

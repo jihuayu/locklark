@@ -56,20 +56,21 @@ type FileReferenceReport struct {
 // Successful inventory always leaves MappingVerified false: no general
 // importer has proved a lossless mapping for any item in this archive.
 type Report struct {
-	Version         int                 `json:"version"`
-	Accounts        int                 `json:"accounts"`
-	Vaults          int                 `json:"vaults"`
-	Items           int                 `json:"items"`
-	Active          int                 `json:"active"`
-	Archived        int                 `json:"archived"`
-	OtherStates     int                 `json:"other_states"`
-	Files           int                 `json:"files"`
-	FileBytes       uint64              `json:"file_bytes"`
-	FileReferences  FileReferenceReport `json:"file_references"`
-	Categories      []Category          `json:"categories"`
-	UnmappedItems   int                 `json:"unmapped_items"`
-	MappingVerified bool                `json:"mapping_verified"`
-	ReviewReasons   []string            `json:"review_reasons"`
+	SectionInventory SectionReport       `json:"section_inventory"`
+	Version          int                 `json:"version"`
+	Accounts         int                 `json:"accounts"`
+	Vaults           int                 `json:"vaults"`
+	Items            int                 `json:"items"`
+	Active           int                 `json:"active"`
+	Archived         int                 `json:"archived"`
+	OtherStates      int                 `json:"other_states"`
+	Files            int                 `json:"files"`
+	FileBytes        uint64              `json:"file_bytes"`
+	FileReferences   FileReferenceReport `json:"file_references"`
+	Categories       []Category          `json:"categories"`
+	UnmappedItems    int                 `json:"unmapped_items"`
+	MappingVerified  bool                `json:"mapping_verified"`
+	ReviewReasons    []string            `json:"review_reasons"`
 }
 
 // Inspect accepts an immutable byte snapshot owned by the caller, not a path.
