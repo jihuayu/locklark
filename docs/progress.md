@@ -1,5 +1,7 @@
 # Locklark 开发进度
 
+2026-11-05（香港时区）四线交接：独立密码 KDBX 迁出 [PR #9](https://github.com/jihuayu/locklark/pull/9)、归档日常操作 [PR #10](https://github.com/jihuayu/locklark/pull/10)、HTTPS 来源候选与共享向量 [PR #11](https://github.com/jihuayu/locklark/pull/11)、签名团队目录/撤销/冻结核心 [PR #12](https://github.com/jihuayu/locklark/pull/12)。四批均有 Luna/max 独立复核、针对性失败/成功测试与双平台 CI 证据；最终 head/合并状态以对应 PR 为准。后两项是平台/团队基础核心，真实浏览器与手机接入、设备持有证明/权限执行及网络同步仍待完成。
+
 四线第 3 批 PR #11 已合并 main `c8bf4fd`，Luna/max 与双平台 CI 通过。第 4 批签名团队目录/可信本地排序、持久原子版本提交、撤销墓碑与冻结见 [团队核心验收](team-directory-validation.md)。本轮四条线均有代码/验收推进；平台应用和完整团队网络产品仍未完成。
 
 四线第 2 批 PR #10 已合并 main `33ede66`，Luna/max 与双平台 CI 通过。第 3 批网站 URL 与来源匹配核心、CLI 和平台共享向量见 [来源匹配验收](login-origin-matching-validation.md)；真实浏览器/移动系统集成仍保留。

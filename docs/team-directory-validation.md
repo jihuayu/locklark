@@ -16,7 +16,7 @@ age 信封没有可公开核验的收件人清单：排序端只能验证 publis
 
 `Create` 在同目录临时数据库完成事务和关闭后，以 Unix no-replace hard link + 目录 fsync / Windows no-replace write-through move 发布新文件。`Commit` 在一个 bbolt 默认同步事务中验整链、精确比较父检查点，持久化新签名 receipt 与对应当前密文。两位 owner 对同父提交，只有一个成功；另一个重新读取可信状态再提。失败/回滚/关闭失败均返回零回执，结果可能已经提交时可用旧检查点重新读取确认。现有目标不覆盖；极端掉电、文件系统持久化保证仍需硬件验收。Unix 文件 0600，Windows 继承目录 ACL，调用方须提供自己控制的目录。
 
-`Freeze(config, ownerPrivate, parent)` 退休**整个** roster（包括最后一个设备），签下一代 frozen 记录；同一事务删除当前 snapshot，并明确读出 frozen 模式。旧父提案不能再发布。frozen 必须严格空 roster/空 snapshot/空 digest；禁止 frozen genesis 和 frozen→frozen。恢复 active 必须新成员/设备 ID、新设备钥匙、下一代实际密文，并由 owner 提供独立保留或重建的完整条目；目录不恢复已丢失数据，不从旧 snapshot 隐式复用旧钥。固定 publisher 钥匙不可用时保持冻结，本批不轮换根钥匙。旧设备持有的历史密文、已复制数据和 bbolt 释放页不承诺擦除。
+`Freeze(config, ownerPrivate, parent)` 退休**整个** roster（包括最后一个设备），签下一代 frozen 记录；同一事务删除当前 snapshot，并明确读出 frozen 模式。旧父提案不能再发布。frozen 必须严格空 roster/空 snapshot/空 digest；禁止 frozen genesis 和 frozen→frozen。恢复 active 必须新成员/设备 ID、新设备钥匙、下一代实际密文，并由 owner 提供独立保留或重建的完整条目；目录不恢复已丢失数据，不从旧 snapshot 隐式复用旧钥。publisher 私钥丢失时仍可由 owner + sequencer 签署 Freeze；sequencer 私钥丢失时只能读取，无法再提交或发布冻结回执；所有 owner 授权私钥丢失时也无法授权任何后续更新。本批不支持这些固定角色根钥匙的轮换，须另行独立保管/恢复，或明确接受目录只读锁死。旧设备持有的历史密文、已复制数据和 bbolt 释放页不承诺擦除。
 
 `Read(path, config, independentlyRetainedCheckpoint)` 重新验证完整 owner/sequencer 链、当前 snapshot，以及检查点确为祖先；同版本不同 hash、落后于检查点和跨 Scope 均拒绝。Genesis 检查点只用于可信首次建立/未拿到首次回执的检查，没有回滚保护。检查点是下限，签名不是远端新鲜度证明；调用方必须保管独立检查点并直接访问可信本地排序库。不能把中继提供的旧签名文件认定为最新，排序端失陷或分叉需要后续外部见证/新鲜度协议。
 
@@ -31,3 +31,5 @@ age 信封没有可公开核验的收件人清单：排序端只能验证 publis
 仍待：owner/publisher 轮换、真实邀请/指纹核对、设备本机保钥与签名操作、两人两个人库一团队库一机器联调、依赖资格的会话/机器委托级联撤销、可信远端新鲜度和中继分叉处理、离线草稿/同步冲突、团队恢复保管、网络服务和 UI。不能据此宣称完整团队同步/撤权产品已完成。
 
 Luna/max 预审反馈已处理：owner/device 签名公钥在 map lookup 前先限制长度，补超长输入负测；Go doc 和本文明确角色并非 ACL、无设备持有证明或双钥绑定。最终复核结论和双平台 CI 见 PR。
+
+最终 Luna/max 对代码 head `934a5a1` 复核无阻塞发现，独立实跑 directory 普通/race 测试、包 vet 和 diff 检查通过；该 head 的 Ubuntu/Windows CI 均通过（run 41975171039）。后续文档增量只补固定根钥匙丢失说明与交接记录，最终检查/合并证据见 [PR #12](https://github.com/jihuayu/locklark/pull/12)。
