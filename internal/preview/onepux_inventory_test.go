@@ -32,6 +32,10 @@ func TestOnepuxInventoryFromVerifiedFixture(t *testing.T) {
 	if report.FileReferences.Explicit != 0 || report.FileReferences.ItemsWithoutExplicitPath != 1 || report.FileReferences.FilesWithoutExplicitLinks != 1 {
 		t.Fatal("verified source history was confused with verified file linkage")
 	}
+	login := report.LoginFieldInventory
+	if login.Fields != 1 || login.PasswordDesignations != 1 || login.FieldTypeAttributes != 1 || login.TypeAttributes != 0 || login.StringValues != 1 {
+		t.Fatal("source login field was lost or normalized")
+	}
 	raw, err := json.Marshal([]any{p.Events, proof, report})
 	if err != nil {
 		t.Fatal(err)
