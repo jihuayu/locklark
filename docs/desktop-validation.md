@@ -26,6 +26,8 @@ Session 只保留已解开的身份材料，不保留主密码/Secret Key或条�
 
 Luna/max 首轮复核发现锁清理时序、系统认证持锁、CNG 指针存活、OS 写入前成功审计问题；已加入取消/锁竞争测试并修复，复审与最终精确提交 CI 证据待补。
 
+本地完整 `go test -count=1 ./...`（独立 PyKeePass 与 Bun 环境）通过；`go vet ./...` 通过。桌面/会话定向 race、系统提示取消 race、真实金库 UI 工作流 race 通过；标题搜索 PTY 验收通过。已创建 [PR #23](https://github.com/jihuayu/locklark/pull/23)，三平台 CI 运行中。新增选择上下文检查：切换条目/页面后，已准备字段被销毁，不能迟到显示在另一条目下。
+
 ## 尚待真实平台验收
 
 Windows Hello 每次解密提示、拒绝/取消、TPM 清除/密钥失效、休眠锁屏、系统时间变化；macOS 原生编译及签名后的 Touch ID/密码提示、Keychain 权限变化；Linux Secret Service 锁定/取消与 GNOME/KDE 锁屏通知；三平台剪贴板管理器、窗口关闭/托盘与密码字符串残留边界。跨编译和 fake Store 测试不替代这些条目。完整产品和安全认证未完成。

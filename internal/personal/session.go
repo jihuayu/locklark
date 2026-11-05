@@ -248,3 +248,14 @@ func (s *Session) Export(password, dest string) error {
 	}
 	return nil
 }
+
+// Discard destroys a prepared value when its native view is no longer current.
+func (s *Session) Discard(field *NativeField) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if field != nil && s.pending[field] {
+		clear(field.value)
+		field.value = nil
+		delete(s.pending, field)
+	}
+}

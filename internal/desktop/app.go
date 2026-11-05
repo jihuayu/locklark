@@ -301,7 +301,11 @@ func (a *App) disclose(field, purpose string) {
 	target := personal.RevealTarget{ID: a.selected.ID, Revision: a.selected.Revision, Field: field}
 	a.run(func() outcome {
 		f, e := s.PrepareField(target, purpose)
-		return outcome{err: e, apply: func() {
+		return outcome{err: e, drop: func() { s.Discard(f) }, apply: func() {
+			if a.page != "vault" || a.selected == nil || a.selected.ID != target.ID || a.selected.Revision != target.Revision {
+				s.Discard(f)
+				return
+			}
 			e := s.Consume(f, func(value []byte) error {
 				if purpose == "copy" {
 					if a.clipboardWrite == nil {
@@ -435,7 +439,7 @@ func (a *App) itemsView(c *ui.Context) {
 				}
 				for _, row := range a.rows {
 					row := row
-					ui.Button(c.Key(row.ID), visible(row.Title)+" · "+row.State).FillWidth().OnClick(func() { a.selected = &row; a.display = ""; a.value = "" })
+					ui.Button(c.Key(row.ID), visible(row.Title)+" · "+row.State).FillWidth().Disabled(a.busy).OnClick(func() { a.selected = &row; a.display = ""; a.value = "" })
 				}
 			})
 		})
@@ -491,9 +495,9 @@ func (a *App) itemsView(c *ui.Context) {
 }
 func (a *App) addView(c *ui.Context) {
 	ui.Text(c, "新建登录").FontSize(22).Bold()
-	ui.TextInput(c, &a.title).Label("登录标题").Placeholder("标题")
-	ui.TextInput(c, &a.username).Label("新登录用户名").Placeholder("用户名").Password()
-	ui.TextInput(c, &a.value).Label("新登录密码").Placeholder("密码").Password()
+	ui.TextInput(c, &a.title).Label("登录标题").Placeholder("标题").Disabled(a.busy)
+	ui.TextInput(c, &a.username).Label("新登录用户名").Placeholder("用户名").Password().Disabled(a.busy)
+	ui.TextInput(c, &a.value).Label("新登录密码").Placeholder("密码").Password().Disabled(a.busy)
 	ui.PrimaryButton(c, "保存登录").Disabled(a.busy || strings.TrimSpace(a.title) == "").OnClick(a.add)
 }
 func (a *App) activityView(c *ui.Context) {

@@ -3,6 +3,8 @@ package desktop
 import (
 	"crypto/sha256"
 	"github.com/egoist/mygo/ui"
+	"github.com/jihuayu/locklark/internal/personal"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -60,5 +62,83 @@ func TestClipboardExpiryPreservesExternalReplacement(t *testing.T) {
 		if replace && contents != "user replacement" {
 			t.Fatal("external clipboard erased")
 		}
+	}
+}
+
+func TestNativeVaultWorkflowAndChangedSelection(t *testing.T) {
+	a := New()
+	a.launch = func(f func()) { f() }
+	a.path = filepath.Join(t.TempDir(), "desktop.ll")
+	key, e := personal.NewSecret()
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer clear(key)
+	if e = personal.Create(a.path, "fixture", key); e != nil {
+		t.Fatal(e)
+	}
+	a.password = "fixture"
+	a.secret = personal.FormatSecret(key)
+	a.unlock()
+	if a.session == nil {
+		t.Fatal("native unlock failed", a.status)
+	}
+	defer a.Lock()
+	a.title = "Account"
+	a.username = "person@example.test"
+	a.value = "synthetic-secret"
+	a.add()
+	if len(a.rows) != 1 {
+		t.Fatal("native add failed", a.status)
+	}
+	a.selected = &a.rows[0]
+	a.disclose("password", "show")
+	if a.display != "synthetic-secret" {
+		t.Fatal("native show failed", a.status)
+	}
+	clipboard := ""
+	a.clipboardRead = func() string { return clipboard }
+	a.clipboardWrite = func(s string) { clipboard = s }
+	a.clipboardClear = func() { clipboard = "" }
+	a.disclose("username", "copy")
+	if clipboard != "person@example.test" {
+		t.Fatal("native copy failed")
+	}
+	a.editField = "password"
+	a.value = "updated-secret"
+	a.edit()
+	if a.selected != nil || a.display != "" {
+		t.Fatal("edit retained old disclosure")
+	}
+	a.selected = &a.rows[0]
+	var complete func()
+	a.dispatch = func(f func()) { complete = f }
+	a.disclose("password", "show")
+	a.selected = nil
+	complete()
+	if a.display != "" {
+		t.Fatal("field delivered into changed selection")
+	}
+	a.dispatch = func(f func()) { f() }
+	a.selected = &a.rows[0]
+	a.state("item.trash")
+	if len(a.rows) != 0 {
+		t.Fatal("trashed item remained active")
+	}
+	a.scope = "trashed"
+	a.refresh()
+	if len(a.rows) != 1 {
+		t.Fatal("trash list missing item")
+	}
+	a.selected = &a.rows[0]
+	a.state("item.untrash")
+	a.scope = "active"
+	a.refresh()
+	if len(a.rows) != 1 {
+		t.Fatal("restore failed")
+	}
+	a.Lock()
+	if clipboard != "" || len(a.rows) != 0 || a.session != nil {
+		t.Fatal("lock retained native data")
 	}
 }
