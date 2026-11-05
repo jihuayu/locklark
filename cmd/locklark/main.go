@@ -28,6 +28,7 @@ const usage = `Locklark · personal CLI, manual GitHub query and synthetic gatew
   personal otp --file PATH --id ID --revision REV
   personal references --file PATH
   personal health --file PATH
+  personal search --file PATH [--state active|archived|trashed|all]  (query entered in hidden terminal)
   personal github-pull --file PATH --id ID --revision REV --repository-id NUMERIC_ID --owner OWNER --repository NAME --number PR --api-ip PUBLIC_IPV4
   personal inject-json --file PATH --id ID --revision REV --field username|password --name PROPERTY --out NEW.json
   personal inspect-1pux --file PATH --source ARCHIVE

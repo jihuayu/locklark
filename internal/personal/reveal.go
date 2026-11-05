@@ -77,6 +77,10 @@ func writeDisclosure(terminal io.Writer, quoted []byte, session, intent string) 
 func quoteDisclosure(value []byte) []byte {
 	quoted, _ := json.Marshal(string(value)) // A string is always JSON encodable.
 	defer clear(quoted)
+	return append(escapeJSONControls(quoted), '\r', '\n')
+}
+
+func escapeJSONControls(quoted []byte) []byte {
 	out := make([]byte, 0, len(quoted)+2)
 	for _, r := range string(quoted) {
 		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
@@ -90,5 +94,5 @@ func quoteDisclosure(value []byte) []byte {
 			out = utf8.AppendRune(out, r)
 		}
 	}
-	return append(out, '\r', '\n')
+	return out
 }
