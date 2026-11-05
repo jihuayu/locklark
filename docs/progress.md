@@ -1,5 +1,7 @@
 # Locklark 开发进度
 
+七条推进第三批 PR #16 已经 Luna/max、Linux/Windows CI（含原生 DACL 与 ConPTY）合入 main `19f6e5a`。第四批接团队设备双钥持有证明，见 [设备证明验收](team-device-possession-validation.md)；仍是目录协议/持久化核心，完整邀请、权限和远端同步继续保留。
+
 七条推进第二批 PR #15 已经 Luna/max 与双平台 CI 合入 `a078a75`。第三批接受控单字段 JSON 配置注入：精确修订、目的绑定、审计先提交、私密文件创建和不覆盖发布，见 [注入验收](personal-json-injection-validation.md)。这不是完整 run/inject/SSH 或全部七条完成。
 
 七条推进第一批 PR #14 已经 Luna/max 及双平台 CI 合入 main `e925eec`：基本登录导入/对账、源计划私密绑定、来源记录保留。第二批接本地密码体检，见 [体检验收](personal-health-validation.md)。桌面/浏览器/手机/完整迁移等范围仍保留在七条清单中。

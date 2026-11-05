@@ -85,7 +85,7 @@ func load(tx *bolt.Tx, c *Config, anchor Checkpoint) (View, *evolution, error) {
 			return ErrInvalid
 		}
 		var receipt Receipt
-		if !canonical(raw, &receipt) || c.verifyReceipt(receipt) != nil || receipt.Proposal.Parent != current || e.advance(receipt.Proposal) != nil {
+		if !canonical(raw, &receipt) || c.verifyReceipt(receipt) != nil || receipt.Proposal.Parent != current || c.verifyNewDevices(e, receipt.Proposal) != nil || e.advance(receipt.Proposal) != nil {
 			return ErrInvalid
 		}
 		current = receipt.Checkpoint()
@@ -183,6 +183,7 @@ func commitWithUpdate(update func(func(*bolt.Tx) error) error, c *Config, sequen
 	}
 	// Own the receipt's mutable slices independently of the caller's proposal.
 	p.Members = cloneMembers(p.Members)
+	p.Admissions = cloneAdmissions(p.Admissions)
 	p.Signature = bytes.Clone(p.Signature)
 	var out Receipt
 	err := update(func(tx *bolt.Tx) error {
@@ -217,7 +218,7 @@ func commitWithUpdate(update func(func(*bolt.Tx) error) error, c *Config, sequen
 		if p.Parent != current {
 			return ErrConflict
 		}
-		if state.advance(p) != nil {
+		if c.verifyNewDevices(state, p) != nil || state.advance(p) != nil {
 			return ErrInvalid
 		}
 		out = Receipt{Proposal: p}

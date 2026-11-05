@@ -337,4 +337,6 @@ go test -count=1 ./internal/vault -run 'TestKDBXIndependentPeer|TestIndependentN
 
 团队方向已有 `internal/directory` 持久化核心：固定 owner/排序端/发布者信任根、签名 roster、精确父版本提交、撤销身份墓碑、检查点核验和整库冻结。真实 age/KDBX 测试覆盖撤销设备无法解开新代。当前为 Go API，尚无团队 UI/网络同步；[协议、验收与限制](docs/team-directory-validation.md)。
 
+新目录可用 `NewConfigWithPossession` 启用 scope 固定的强制设备双钥证明：owner 签名的 age 随机挑战、设备 Ed25519 响应、精确成员/设备/parent 绑定，并在持久提交和历史重读时强制检查新增设备证明。旧配置不能静默降级新目录；不证明物理设备唯一性，不替代邀请 UI、权限执行或同步。详见[设备证明验收](docs/team-device-possession-validation.md)。
+
 个人 CLI 新增 `trash-login` / `restore-login`（`--file`、`--id`、`--revision`，SAVE 确认），以及 `list --state trashed`。回收站条目需先恢复才能读取或编辑，恢复时保留原活动/归档状态。备份和加密迁出仍包含回收站；不自动清空或永久擦除。详见 [回收站验收](docs/personal-trash-validation.md)。
