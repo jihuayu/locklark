@@ -126,7 +126,20 @@ jobs:
         working-directory: web
         env:
           NEXT_TELEMETRY_DISABLED: '1'
-      - run: npx playwright install --with-deps chromium firefox
+      - name: Configure Ubuntu package downloads
+        run: |
+          # GitHub's mirror lists can prefer the slow Azure HTTP mirror.
+          sources=(/etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources /etc/apt/apt-mirrors*.txt)
+          for source in "${sources[@]}"; do
+            if [[ -f "$source" ]]; then
+              sudo sed -i -E 's@http://azure\.archive\.ubuntu\.com/ubuntu([/[:space:]]|$)@https://archive.ubuntu.com/ubuntu\1@g' "$source"
+            fi
+          done
+          printf '%s\n' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' 'Acquire::Retries "2";' |
+            sudo tee /etc/apt/apt.conf.d/99locklark-playwright-network >/dev/null
+      - name: Install Playwright browsers and dependencies
+        timeout-minutes: 10
+        run: npx playwright install --with-deps chromium firefox
         working-directory: web
       - run: npm run test:e2e
         working-directory: web

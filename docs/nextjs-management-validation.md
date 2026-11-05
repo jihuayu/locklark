@@ -22,7 +22,11 @@ Go 仅监听 `127.0.0.1` 随机端口，独立 256-bit bearer，仅固定 `GET /
 
 本地通过：Go broker 单元/竞态、真实签名目录投影与 checkpoint 回滚拒绝；配置权限与连接文件不覆盖；TypeScript、8 项 Web 安全测试、生产 `next build`。使用真实合成签名目录及真实 Go broker → Next.js → 浏览器，Chrome for Testing 156（Playwright Chromium）和 Firefox 157 已跑通登录、一次码重放拒绝、成员/设备筛选、390px布局、目录损坏/恢复、断开服务端已撤销但响应丢失、cookie撤销、跨源/伪造Host/直接broker拒绝。不是 mock 数据源，也不是用户真实团队。
 
-截图在 `web/.test-state/`（忽略提交）：connect、overview、mobile-devices。自动扫描 SSR HTML、客户端 bundle、状态响应不含 runtime bearer/连接码/合成金库字段。增量修复后 Chromium 17.1s、Firefox 13.1s 的完整流程通过，包括真实 SIGTERM/SIGINT 清理和同路径重启。曾有一轮 Chromium 在 page fixture 冷启动阶段超时，测试上限改为 60 秒后重跑通过，没有更改请求/断言超时。完整 CI 与 Luna/max 最终复审证据待补。
+截图在 `web/.test-state/`（忽略提交）：connect、overview、mobile-devices。自动扫描 SSR HTML、客户端 bundle、状态响应不含 runtime bearer/连接码/合成金库字段。增量修复后 Chromium 17.1s、Firefox 13.1s 的完整流程通过，包括真实 SIGTERM/SIGINT 清理和同路径重启。曾有一轮 Chromium 在 page fixture 冷启动阶段超时，测试上限改为 60 秒后重跑通过，没有更改请求/断言超时。
+
+PR #25 的 `4390f75` 已通过远端 Ubuntu、Windows 和 macOS 检查及 Luna/max 复审。CI run `42055665540` 的 Web job 在 `npx playwright install --with-deps chromium firefox` 下载 APT 字体和 codec 依赖约 20 分钟后被人工取消；日志反复出现 `http://azure.archive.ubuntu.com/ubuntu` 下载 `Ign`，尚未进入浏览器断言，不属于产品断言失败。取消日志保存在 `/tmp/locklark-validation/management-ci-install.log`。
+
+为此仅在 Web job 的一次性 runner 上，将 APT 传统源、deb822 源及 mirror list 中的上述 Azure HTTP URI 换为官方 `https://archive.ubuntu.com/ubuntu`，保留其他源及 Ubuntu 签名校验；HTTP/HTTPS 下载超时设为 30 秒、重试 2 次，完整 Playwright 浏览器和系统依赖安装步骤上限为 10 分钟。Chromium 与 Firefox 的真实端到端步骤继续执行。此 CI 配置更改只完成本地静态、Shell 语法与精确替换验证，尚无更改后的远端 CI 通过结论。
 
 已按 React 检查技能核对：客户端只接收明确投影、无原始服务对象；鉴权先于数据访问；受控表单有标签、按钮可键盘操作、导航声明当前位置；派生列表在渲染计算，只有会话计时需要 effect；无跨会话结果缓存或外部字体/分析脚本。
 
