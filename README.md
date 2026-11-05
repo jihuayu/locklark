@@ -54,7 +54,7 @@ go build -o locklark.exe ./cmd/locklark
 .\locklark.exe personal reveal-login --file owner.ll --id $itemID --revision $revision --field password
 ```
 
-目前仅支持 `username` 和 `password`。输入主密码、Secret Key，并在列出 ID、修订和字段的提示下输入 `SHOW` 后，程序在同一写事务内认证快照与完整审计、校验目标版本，并提交加密签名的 `item.reveal.FIELD` / `intent` 事件。提交成功后才在交互终端 stderr 显示一个 JSON 字符串；换行、制表符和引号经过转义。stdout 仅返回不含字段值的 `status`、本次 `session` 和签名意图摘要 `intent`，可以单独保存回执。
+目前仅支持 `username` 和 `password`。输入主密码、Secret Key，并在列出 ID、修订和字段的提示下输入 `SHOW` 后，程序在同一写事务内认证快照与完整审计、校验目标版本，并提交加密签名的 `item.reveal.FIELD` / `intent` 事件。提交成功后才在交互终端 stderr 显示一个 JSON 字符串；换行、制表符、引号及 Unicode 控制/格式字符（包括方向控制字符）经过转义，普通中文和 emoji 保留。stdout 仅返回不含字段值的 `status`、本次 `session` 和签名意图摘要 `intent`，可以单独保存回执。
 
 取消、错误因素、未知 ID 或旧修订不会显示字段。已解锁的未知 ID 和版本冲突记录拒绝结果，不记录未经核验的 ID 或调用者版本。披露不修改条目修订；输出失败保留意图并报告交付未知，成功写入终端也不证明人已看到。终端历史或录屏可能保存显示值。stdin 与 stderr 必须是终端，普通管道调用拒绝；此检查不是针对同用户进程或伪终端自动化的 OS 隔离。
 

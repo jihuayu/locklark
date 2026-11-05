@@ -91,6 +91,32 @@ func TestRevealCorruptJournalNeverWrites(t *testing.T) {
 	}
 }
 
+func TestRevealEscapesUnicodeControls(t *testing.T) {
+	path, key, target := revealFixture(t)
+	value := "可见😀\u0085\u009b\u200b\u202e\u2066\U000e0001tail"
+	revision, err := EditLogin(path, "fixture", key, Edit{ID: target.ID, Revision: target.Revision, Field: "password", Value: value})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target.Revision = revision
+	var output bytes.Buffer
+	if _, err = RevealLogin(path, "fixture", key, target, &output); err != nil {
+		t.Fatal(err)
+	}
+	var decoded string
+	if json.Unmarshal(bytes.TrimSpace(output.Bytes()), &decoded) != nil || decoded != value {
+		t.Fatal("quoting changed the field value")
+	}
+	for _, control := range []string{"\u0085", "\u009b", "\u200b", "\u202e", "\u2066", "\U000e0001"} {
+		if strings.Contains(output.String(), control) {
+			t.Fatal("Unicode control reached terminal unescaped")
+		}
+	}
+	if !strings.Contains(output.String(), "可见😀") {
+		t.Fatal("ordinary Unicode unnecessarily changed")
+	}
+}
+
 func TestRevealConcurrentEditAndRecovery(t *testing.T) {
 	path, key, target := revealFixture(t)
 	var output bytes.Buffer
@@ -147,8 +173,20 @@ func TestRevealConcurrentEditAndRecovery(t *testing.T) {
 	if err = recovery.Publish(fresh); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = ArchivedAudit(restored, "fixture", fresh); err != nil {
+	chains, err := ArchivedAudit(restored, "fixture", fresh)
+	if err != nil {
 		t.Fatal("disclosure chain cannot recover", err)
+	}
+	intents := 0
+	for _, chain := range chains {
+		for _, event := range chain.Events {
+			if event.Action == "item.reveal.username" && event.Result == "intent" && event.Item == target.ID && event.BaseRevision == target.Revision {
+				intents++
+			}
+		}
+	}
+	if intents != 1 {
+		t.Fatal("recovery lost or duplicated disclosure intent")
 	}
 	output.Reset()
 	if _, err = RevealLogin(restored, "fixture", fresh, target, &output); !errors.Is(err, ErrConflict) || output.Len() != 0 {

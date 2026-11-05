@@ -23,7 +23,21 @@
 - 并发编辑/读取要么显示原指定修订，要么报冲突，不能显示新版本冒充旧版；包含披露意图的备份可恢复，恢复后旧修订拒绝、新修订可取值。
 - 真实 PTY 的确认、取消/中断、因素失败、目标失败、密码/用户名选择、普通 stdout 隔离及审计秘密扫描。Windows ConPTY 同一验收已接入 CI；是否实际通过以对应远端运行结果为准。
 
-本轮检查结果及独立复核在发布前补全。复核使用用户指定的 `gpt-6-luna` / `max`。
+## 实跑检查与独立复核
+
+实现提交 `adf810c76678e676c809bc0696731a0eaba643b2`，PR [#2](https://github.com/jihuayu/locklark/pull/2)。以下本地命令均通过：
+
+- Go 1.26.8，设置 `LOCKLARK_TEST_BUN=/tmp/locklark-tools/bun-linux-x64/bun`、`LOCKLARK_TEST_PYKEEPASS=/tmp/locklark-tools/python/bin/python` 后执行 `go test -count=1 ./...`（包括独立 PyKeePass 互操作与 Bun 插件）。
+- `go test -race -count=1 ./internal/personal ./cmd/locklark`，两个包分别 401.416s / 141.661s。
+- `go vet ./...`、`go mod verify`、`git diff --check`；`bun test ./plugins/github-pull-reader`；`python3 -m unittest discover -s scripts -p test_personal_windows.py`。
+- 构建实际二进制后运行 `scripts/personal_acceptance.py`、`scripts/mcp_acceptance.py` 和 `scripts/disclosure_acceptance.py`，均通过。
+- `GOOS=windows GOARCH=amd64 go build ./cmd/locklark` 与 `GOOS=darwin GOARCH=arm64 go build ./cmd/locklark`（仅交叉编译）。
+
+用户指定的 `gpt-6-luna` / `max` 独立审查了存储事务、事件验证、恢复兼容、CLI 终端边界和新增测试，独立实跑 personal/CLI 全包测试（71.531s / 13.451s）、构建、披露 PTY 和 diff 检查通过。未发现事务/认证主路径阻塞缺陷；提出 Unicode 格式控制字符显示风险、顶层 help 遗漏，以及恢复历史需要明确断言披露意图。
+
+三项均已补齐。Unicode 回归先运行失败，原因 `Unicode control reached terminal unescaped`，日志 `/tmp/locklark-validation/unicode-red.log`；随后新增 Cc/Cf 转义，补充 C1、双向文本、零宽和非 BMP 标签字符的实际加密库读取测试，要求 JSON 解码无损、终端不含原始控制字符且保留普通中文/emoji。恢复回归明确验证指定 ID/修订的 intent 恰好保留一次。
+
+远端运行 [41949948920](https://github.com/jihuayu/locklark/actions/runs/41949948920) 对应首个实现提交，Ubuntu/Windows 均成功，包括真实 Windows ConPTY 披露验收。最终修正提交的 SHA、复核结论和远端检查链接记录在 [PR #2](https://github.com/jihuayu/locklark/pull/2) 正文与 Checks；合并时须核对该 PR 最终 head，不用先前 head 的成功代替最终检查。Windows ConPTY 合并两条输出流；独立 stdout 零原值检查由 Linux PTY 场景覆盖。
 
 ## 保留边界
 

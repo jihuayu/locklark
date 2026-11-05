@@ -3,7 +3,11 @@ package personal
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"unicode"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/jihuayu/locklark/internal/vault"
 )
@@ -46,11 +50,7 @@ func revealLogin(target RevealTarget, terminal io.Writer, prepare func() (result
 	if err != nil {
 		return DisclosureReceipt{}, err
 	}
-	quoted, err := json.Marshal(string(r.value))
-	if err != nil {
-		return DisclosureReceipt{}, ErrDisclosureOutput
-	}
-	quoted = append(quoted, '\r', '\n')
+	quoted := quoteDisclosure(r.value)
 	defer clear(quoted)
 	n, err := terminal.Write(quoted)
 	if err != nil || n != len(quoted) {
@@ -58,4 +58,26 @@ func revealLogin(target RevealTarget, terminal io.Writer, prepare func() (result
 		return DisclosureReceipt{}, ErrDisclosureOutput
 	}
 	return DisclosureReceipt{Status: "written-to-terminal", Session: r.session, Intent: r.intent}, nil
+}
+
+// JSON's mandatory escaping leaves C1 and Unicode format controls intact.
+// Escape those too, including bidi overrides and supplementary-plane tags,
+// while retaining printable Unicode and a lossless JSON string representation.
+func quoteDisclosure(value []byte) []byte {
+	quoted, _ := json.Marshal(string(value)) // A string is always JSON encodable.
+	defer clear(quoted)
+	out := make([]byte, 0, len(quoted)+2)
+	for _, r := range string(quoted) {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			if r <= 0xffff {
+				out = fmt.Appendf(out, "\\u%04x", r)
+			} else {
+				high, low := utf16.EncodeRune(r)
+				out = fmt.Appendf(out, "\\u%04x\\u%04x", high, low)
+			}
+		} else {
+			out = utf8.AppendRune(out, r)
+		}
+	}
+	return append(out, '\r', '\n')
 }
