@@ -59,8 +59,8 @@ file and atomic publication/replacement; Windows creates protected DACLs before
 writing and also checks the HKCU registration key and its ancestors. Unsupported
 or insufficiently protected layouts fail closed.
 
-Visit a supported HTTPS page, open the extension action (Ctrl+Shift+Y, or
-Command+Shift+Y on macOS), then connect. In the native window select the vault,
+Visit a supported HTTPS page and open the extension action (Chrome/Edge:
+Ctrl+Shift+Y, or Command+Shift+Y on macOS; Firefox: toolbar), then connect. In the native window select the vault,
 unlock, and confirm the fixed extension connection. Read the current website's
 login candidates in the popup, choose a login, and approve its exact origin,
 item, and revision in the native window. The extension fills only one visible,
@@ -69,8 +69,13 @@ It refuses ambiguous forms, cross-origin actions, frames, IP/IDN/local hosts,
 and unsupported document identity APIs. Firefox requires version 153 or newer:
 its `documentId` and `documentIds` APIs were exercised in real Firefox 157,
 including rejection of an old document ID after navigation. Missing document
-identity fails closed. Full Firefox extension/native/MyGo fill acceptance and
-platform-specific OS validation remain separate from those API checks.
+identity fails closed. Real Linux Chromium and Firefox extension/native/MyGo
+fill flows have also passed; see the validation record for exact runs. Other
+platforms and system biometric hardware still require their own acceptance.
+
+Firefox opens this action from its toolbar. It has no default shortcut because
+Firefox reserves common browser shortcuts; users can choose one in Firefox's
+extension shortcut settings. Chrome/Edge keep the shortcut above.
 
 The extension has only `activeTab`, `scripting`, and `nativeMessaging`. There is
 no persistent host permission, page-message bridge, value persistence, or
@@ -113,3 +118,20 @@ response references in `finally`. An injection already dispatched to the browser
 cannot be recalled; a timeout leaves its result unknown and is never retried.
 Each dispatched function carries a 1500ms absolute expiry and checks it at entry
 and immediately before both writes, so a queued late-starting script refuses.
+
+
+Real Linux native acceptance uses the repository scripts
+`scripts/browser_native_acceptance.mjs` and
+`scripts/browser_firefox_native_acceptance.mjs` inside a private DBus session and
+an isolated Xvfb display. The scripts perform actual unlock, pairing and approval
+through AT-SPI control labels and XTest input, without product approval hooks.
+Linux native hosts restore the system accessibility bridge by dropping the
+browser-internal `NO_AT_BRIDGE` flag inherited from Chromium or Firefox.
+
+Firefox acceptance additionally needs Mozilla geckodriver 0.36.0 and
+`libnss3-tools`; it trusts only its temporary test CA in a fresh Firefox profile.
+Its native registration helper refuses an existing user manifest, and cleanup
+removes only the exact unmodified file created for that run. Private diagnostics
+capture the matched host window or the test popup, never the whole desktop.
+See [the validation record](../docs/browser-native-validation.md) and the script
+headers for dependencies and environment variables.

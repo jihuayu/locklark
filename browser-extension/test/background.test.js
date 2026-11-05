@@ -136,7 +136,7 @@ test("page sender cannot connect or choose a field", async () => {
   );
   assert.equal(h.sent.length, 0);
 });
-test("Firefox or API without document identity fails closed", async () => {
+test("missing document identity fails closed", async () => {
   const h = harness();
   h.setDoc(undefined);
   await h.send({ type: "connect" });

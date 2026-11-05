@@ -54,6 +54,9 @@ func RunBrowser(browser browserhost.Browser, args []string) error {
 	if browserhost.ValidateLaunch(browser, args) != nil {
 		return browserhost.ErrProtocol
 	}
+	if e := restoreBrowserAccessibility(browser); e != nil {
+		return e
+	}
 	a := New()
 	a.browserLabel = "chrome-extension://" + browserhost.ChromiumID + "/"
 	if browser == browserhost.Firefox {

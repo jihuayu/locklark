@@ -25,6 +25,9 @@ if (mode === "chromium") {
   manifest.key = key;
   manifest.background = { service_worker: "background.js" };
 } else {
+  // Firefox reserves Ctrl+Shift+Y for Library in real profiles. Keep the
+  // toolbar action and let users choose an extension shortcut explicitly.
+  delete manifest.commands._execute_action.suggested_key;
   manifest.background = { scripts: ["core.js", "background.js"] };
   manifest.browser_specific_settings = {
     gecko: {

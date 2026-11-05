@@ -1,7 +1,7 @@
 // External end-to-end acceptance: actual extension action, native messaging,
 // MyGo UI input, and a controlled HTTPS document. No product test bypasses.
 import { createRequire } from "node:module";
-import { readFileSync, mkdtempSync, mkdirSync } from "node:fs";
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:https";
 import { createHash, X509Certificate } from "node:crypto";
@@ -22,6 +22,14 @@ assert(
 );
 const state = mkdtempSync("/tmp/locklark-browser-acceptance-");
 const env = { ...process.env, GOTOOLCHAIN: "go1.27.3" };
+const diagnostics = mkdtempSync(join(state, "diagnostics-"));
+let stage = "fixture",
+  lastPopup = null,
+  nativeInput = null;
+function phase(value) {
+  stage = value;
+  console.log("Native browser stage: " + value);
+}
 const key = join(state, "tls.key"),
   cert = join(state, "tls.crt");
 execFileSync(
@@ -134,9 +142,14 @@ try {
       "chrome-extension://geldnhjapnackobgknocomedmjgphnpe/background.js",
     "Actual fixed extension identity required",
   );
-  function input(actions, native = true) {
+  function input(actions, native = true, inspect = false) {
     const request = native
-      ? { title: "Locklark · 浏览器原生确认", actions }
+      ? {
+          title: "Locklark · 浏览器原生确认",
+          executable: resolve(host),
+          actions,
+          inspect,
+        }
       : { title_prefix: "Locklark acceptance", actions };
     return JSON.parse(
       execFileSync("python3", [join(root, "scripts/browser_native_x11.py")], {
@@ -145,6 +158,7 @@ try {
       }).toString(),
     );
   }
+  nativeInput = input;
   // Chrome action popups are real page targets but are not always surfaced by
   // Playwright Context.pages(). Attach to that popup through local test CDP.
   async function attachPopup() {
@@ -220,6 +234,15 @@ try {
         evaluate(
           "document.querySelector(" + JSON.stringify(selector) + ")?.disabled",
         ),
+      screenshot: async (path) => {
+        const result = await call("Page.captureScreenshot", {
+          format: "png",
+          captureBeyondViewport: false,
+        });
+        writeFileSync(path, Buffer.from(result.data, "base64"), {
+          mode: 0o600,
+        });
+      },
       click: async (selector) => {
         const rect = await evaluate(
           "(()=>{const e=document.querySelector(" +
@@ -250,6 +273,7 @@ try {
       async () => !!(popup = await attachPopup()),
       "Action popup did not open",
     );
+    lastPopup = popup;
     return popup;
   }
   async function blank() {
@@ -266,7 +290,8 @@ try {
       "Automatic submission is forbidden",
     );
   }
-  async function select() {
+  async function select(scenario) {
+    phase(scenario + ":popup");
     const popup = await openPopup();
     await eventually(
       async () => !(await popup.disabled("#refresh")),
@@ -282,33 +307,40 @@ try {
       async () => (await popup.text("#status"))?.includes("原生窗口核对"),
       "Native confirmation was not requested",
     );
-    input([]);
+    input([{ wait_label: "批准本次填充" }]);
+    phase(scenario + ":native-confirmation");
     return popup;
   }
+  phase("native-connect");
   let popup = await openPopup();
   await popup.click("#connect");
-  await delay(800);
+  phase("native-unlock");
   input([
-    { click: [240, 184] },
+    { click_label: "金库文件" },
     { text: fixture.Path },
-    { click: [240, 278] },
+    { click_label: "主密码" },
     { text: fixture.Password },
-    { click: [240, 323] },
+    { click_label: "Secret Key" },
     { text: fixture.Secret },
-    { click: [240, 370] },
+    { click_label: "解锁" },
   ]);
-  await delay(800);
-  input([{ click: [200, 260] }]); // Actual native pairing confirmation.
+  phase("native-pair");
+  input([{ click_label: "确认连接此扩展" }]);
   await blank();
 
-  await select();
+  await select("approved-fill");
   await blank(); // No field is released before native approval.
   execFileSync(
     "import",
-    ["-window", "root", join(state, "native-confirm.png")],
+    [
+      "-window",
+      String(input([], true, true).window),
+      join(diagnostics, "native-confirm.png"),
+    ],
     { env },
   );
-  input([{ click: [200, 506] }]);
+  phase("approved-fill:approve");
+  input([{ click_label: "批准本次填充" }]);
   await eventually(
     async () =>
       (await page.locator("#password").inputValue()) === fixture.Value,
@@ -325,20 +357,21 @@ try {
 
   await page.locator("#username").fill("");
   await page.locator("#password").fill("");
-  await select();
-  input([{ click: [200, 556] }]); // Native rejection.
+  await select("rejected-fill");
+  input([{ click_label: "拒绝本次填充" }]); // One actual native rejection.
   await delay(500);
   await blank();
 
-  await select();
+  await select("navigated-fill");
   await page.goto(origin + "/different-document");
-  await delay(500);
-  input([{ click: [200, 506] }]); // Any former button must no longer approve.
-  await delay(300);
+  await eventually(async () => {
+    const control = input([], true, true).controls["批准本次填充"];
+    return !control.enabled && !control.showing;
+  }, "Navigated native intent remained available");
   await blank();
 
-  await select();
-  input([{ click: [935, 42] }]); // Native lock with approval pending.
+  await select("locked-fill");
+  input([{ click_label: "立即锁定" }, { wait_label: "解锁" }]); // One actual native lock with approval pending.
   await delay(300);
   await blank();
   popup = await openPopup();
@@ -364,7 +397,52 @@ try {
   console.log(
     "PASS: real Chromium action → native messaging → MyGo unlock/pair/approve → HTTPS fill; rejection, document navigation, native lock, no preapproval values, no autosubmit, no secret console output",
   );
-  console.log("Synthetic acceptance artifacts: " + state);
+  console.log("Synthetic acceptance diagnostics: " + diagnostics);
+} catch {
+  // Deliberately omit fixture files and exception/command bodies. The only
+  // inspection text is the trusted popup's bounded status; native metadata is
+  // a fixed control-name allowlist and never asks accessibility for values.
+  const report = {
+    stage,
+    popup: { available: false },
+    native: { available: false },
+  };
+  if (lastPopup) {
+    try {
+      report.popup = {
+        available: true,
+        status: String(await lastPopup.text("#status")).slice(0, 200),
+        refreshDisabled: await lastPopup.disabled("#refresh"),
+        candidates: await lastPopup.count("#candidates button"),
+      };
+    } catch {}
+  }
+  try {
+    if (lastPopup)
+      await lastPopup.screenshot(join(diagnostics, "failure-popup.png"));
+  } catch {}
+  if (nativeInput) {
+    try {
+      report.native = { available: true, ...nativeInput([], true, true) };
+      execFileSync(
+        "import",
+        [
+          "-window",
+          String(report.native.window),
+          join(diagnostics, "failure-native.png"),
+        ],
+        { env, stdio: "ignore" },
+      );
+    } catch {}
+  }
+  writeFileSync(
+    join(diagnostics, "failure.json"),
+    JSON.stringify(report, null, 2) + "\n",
+    { mode: 0o600 },
+  );
+  console.error("Native browser diagnostic: " + JSON.stringify(report));
+  console.error("Synthetic diagnostic directory: " + diagnostics);
+  throw Error("Native browser acceptance failed at " + stage);
 } finally {
   if (browser) await browser.close();
   await new Promise((r) => server.close(r));

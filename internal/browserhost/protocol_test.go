@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -37,8 +39,11 @@ func TestStartupIdentity(t *testing.T) {
 			t.Fatal("untrusted launch")
 		}
 	}
-	if ValidateLaunch(Firefox, []string{"/tmp/org.locklark.browser.json", FirefoxID}) != nil {
+	if ValidateLaunch(Firefox, []string{filepath.Join(t.TempDir(), HostName+".json"), FirefoxID}) != nil {
 		t.Fatal("Firefox")
+	}
+	if runtime.GOOS == "windows" && ValidateLaunch(Firefox, []string{`C:org.locklark.browser.json`, FirefoxID}) == nil {
+		t.Fatal("drive-relative Firefox manifest")
 	}
 }
 func TestWriterTimeoutAndBrokenPipe(t *testing.T) {
