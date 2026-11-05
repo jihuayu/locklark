@@ -2,7 +2,7 @@
 
 **Keep the keys. Grant the action.** 面向个人和小团队的本地密码管理器。目标是替换 1Password 8 的日常体验，并让 Agent 申请具体操作、说明原因、关联会话。
 
-当前交付包括 **个人离线库 CLI 预览** 和独立的 **M0 合成网关演练**。个人库可以实际创建和保存登录记录，尚未完成独立密码评审、系统密钥存储和灾后恢复验收。请先用测试数据，不要停用已有密码管理器。设计与威胁模型见[设计稿](docs/design.md)。
+当前交付包括 **个人库 CLI 预览** 和独立的 **M0 合成网关演练**。个人库日常操作可离线运行，另有每次人工确认的 GitHub HTTPS 查询入口。个人库可以实际创建和保存登录记录，尚未完成独立密码评审、系统密钥存储和灾后恢复验收。请先用测试数据，不要停用已有密码管理器。设计与威胁模型见[设计稿](docs/design.md)。
 
 字段引用的元数据核心已实现有限的 `op://vault/item/[section/]field` 解析、名称/ID 唯一定位和修订号绑定；同名拒绝，未知属性不静默忽略。个人 v1 登录布局已接入认证事务、人工字段披露和取码，其他布局仍只有元数据核心；尚未与固定 op 版本实际对照，不代表已兼容 `op read/run/inject`。当前子集与验收见[字段引用记录](docs/reference-validation.md)。
 
@@ -31,6 +31,8 @@ Go TOTP 核心已通过 RFC 6238/4226 向量，支持有限的 Base32/otpauth �
 在交互终端输入个人库双因素，并输入 `SCAN` 确认。命令只读检查不超过 8 MiB 的普通归档文件；输出条目/附件/登录字段/密码历史计数及固定待核对原因，不输出源标题或字段值，也不会导入数据。检查结果先记入个人库审计，提交后才输出报告和摘要回执。源 1PUX 仍是明文，命令不负责清除原文件；报告成功不表示可无损迁移。事务、恢复和平台边界见[个人预检验收](docs/personal-onepux-inspection-validation.md)。
 
 ## 按字段引用操作
+
+`personal github-pull --file owner.ll --id ID --revision REV --repository-id NUMERIC_ID --owner OWNER --repository NAME --number PR --api-ip PUBLIC_IPV4` 经隐藏双因素和 `CALL` 确认，把选定 password 字段作为 GitHub token 交给固定 HTTPS 查询器；审计意图提交后才发请求，只返回经校验的 PR 状态，不返回 token。目标地址需独立确认，TLS 始终验证 api.github.com。本入口联网，但不改变其他个人命令的离线行为；不是远程移动审批或机器授权，真实账号调用仍待验收，见[实时查询边界](docs/personal-live-pull-validation.md)。
 
 `personal inject-json --file owner.ll --id ID --revision REV --field username|password --name TOKEN --out NEW.json` 经双因素和 WRITE 确认，将一个指定字段写成新 JSON 配置文件，正确转义值，不覆盖已有目标。输出为明文，创建时采用当前账户的受限权限；stdout 只有审计回执。此入口不执行任意模板或子进程，也不向 MCP 增加原值工具。详见[JSON 注入验收](docs/personal-json-injection-validation.md)。
 

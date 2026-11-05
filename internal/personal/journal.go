@@ -87,10 +87,10 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 	} else if e.ReportDigest != "" {
 		return invalid
 	}
-	if e.Action != "backup.prepare" && e.Action != "vault.restore" && !injectAction(e.Action) && e.Link != "" {
+	if e.Action != "backup.prepare" && e.Action != "vault.restore" && !boundValueAction(e.Action) && e.Link != "" {
 		return invalid
 	}
-	if injectAction(e.Action) && (e.Result == "intent" && !digestOK(e.Link) || e.Result != "intent" && e.Link != "") {
+	if boundValueAction(e.Action) && (e.Result == "intent" && !digestOK(e.Link) || e.Result != "intent" && e.Link != "") {
 		return invalid
 	}
 	if generatedAction(e.Action) && e.Result == "succeeded" {
@@ -148,7 +148,7 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 		if n != 1 || !digestOK(e.Link) || e.Item != "" {
 			return invalid
 		}
-	case "item.inject.username", "item.inject.password", "item.trash", "item.untrash", "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.regenerate.password", otpDisclosureAction:
+	case livePullAction, "item.inject.username", "item.inject.password", "item.trash", "item.untrash", "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.regenerate.password", otpDisclosureAction:
 		if e.Result == "not-found" && e.Item == "" && e.BaseRevision == "" && n > 1 {
 			break
 		}

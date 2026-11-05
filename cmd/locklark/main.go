@@ -1,4 +1,4 @@
-// Command locklark runs the personal offline CLI and synthetic gateway preview.
+// Command locklark runs the personal CLI, a manual GitHub query and synthetic gateway preview.
 package main
 
 import (
@@ -12,7 +12,7 @@ import (
 	"github.com/jihuayu/locklark/internal/preview"
 )
 
-const usage = `Locklark · offline personal and synthetic gateway preview
+const usage = `Locklark · personal CLI, manual GitHub query and synthetic gateway preview
 
   personal edit-login --file PATH --id ID --revision REV --field title|username|password|otp|url
   personal reveal-login --file PATH --id ID --revision REV --field username|password
@@ -21,6 +21,7 @@ const usage = `Locklark · offline personal and synthetic gateway preview
   personal otp --file PATH --id ID --revision REV
   personal references --file PATH
   personal health --file PATH
+  personal github-pull --file PATH --id ID --revision REV --repository-id NUMERIC_ID --owner OWNER --repository NAME --number PR --api-ip PUBLIC_IPV4
   personal inject-json --file PATH --id ID --revision REV --field username|password --name PROPERTY --out NEW.json
   personal inspect-1pux --file PATH --source ARCHIVE
   personal plan-import-1pux --file PATH --source ARCHIVE
