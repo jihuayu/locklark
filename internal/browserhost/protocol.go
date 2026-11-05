@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jihuayu/locklark/internal/personal"
 )
@@ -22,7 +23,7 @@ import (
 const HostName = "org.locklark.browser"
 const ChromiumID = "geldnhjapnackobgknocomedmjgphnpe"
 const FirefoxID = "browser@locklark.local"
-const MaxInput = 16 << 10
+const MaxInput = 256 << 10
 const MaxOutput = 256 << 10
 
 type Browser string
@@ -37,6 +38,10 @@ var token = regexp.MustCompile(`^[a-f0-9]{32}$`)
 var revision = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
 type Request struct {
+	payload    *savePayload
+	WindowID   int64  `json:"window_id,omitempty"`
+	RequestID  string `json:"request_id,omitempty"`
+	Nonce      string `json:"nonce,omitempty"`
 	V          int    `json:"v"`
 	ID         string `json:"id"`
 	Type       string `json:"type"`
@@ -55,7 +60,17 @@ func (r Request) valid() bool {
 	if r.V != 1 || !token.MatchString(r.ID) {
 		return false
 	}
+	if r.Type != "save-new" && r.Type != "save-update" && r.Type != "commit-ready" && r.Type != "cancel-save" && (r.payload != nil || r.WindowID != 0 || r.RequestID != "" || r.Nonce != "") {
+		return false
+	}
 	switch r.Type {
+	case "save-new", "save-update":
+		if !token.MatchString(r.Capability) || !r.SaveContext().Valid() || r.RequestID != "" || r.Nonce != "" || r.payload == nil || !validPayload(r.payload) {
+			return false
+		}
+		return r.Type == "save-new" && r.ItemID == "" && r.Revision == "" || r.Type == "save-update" && token.MatchString(r.ItemID) && revision.MatchString(r.Revision)
+	case "commit-ready", "cancel-save":
+		return token.MatchString(r.Capability) && token.MatchString(r.RequestID) && r.payload == nil && r.Origin == "" && r.TabID == 0 && r.DocumentID == "" && r.WindowID == 0 && r.ItemID == "" && r.Revision == "" && (r.Type == "cancel-save" && r.Nonce == "" || r.Type == "commit-ready" && revision.MatchString(r.Nonce))
 	case "hello":
 		return r.Capability == "" && r.Origin == "" && r.TabID == 0 && r.DocumentID == "" && r.ItemID == "" && r.Revision == ""
 	case "cancel":
@@ -69,6 +84,9 @@ func (r Request) valid() bool {
 }
 
 type Response struct {
+	Nonce      string         `json:"nonce,omitempty"`
+	ItemID     string         `json:"item_id,omitempty"`
+	Revision   string         `json:"revision,omitempty"`
 	V          int            `json:"v"`
 	ID         string         `json:"id,omitempty"`
 	Type       string         `json:"type"`
@@ -95,58 +113,201 @@ func (r Response) MarshalJSON() ([]byte, error) {
 	}{plain: plain(r), Username: r.Username, Password: r.Password})
 }
 
-func ReadRequest(r io.Reader) (Request, error) {
-	var header [4]byte
-	if _, e := io.ReadFull(r, header[:]); e != nil {
+type savePayload struct{ username, password []byte }
+
+func (p *savePayload) clear() {
+	if p != nil {
+		clear(p.username)
+		clear(p.password)
+		p.username = nil
+		p.password = nil
+	}
+}
+func (p *savePayload) take() *savePayload {
+	v := &savePayload{p.username, p.password}
+	p.username = nil
+	p.password = nil
+	return v
+}
+func validPayload(p *savePayload) bool {
+	if !(p != nil && len(p.username) <= 16384 && len(p.password) > 0 && len(p.password) <= 16384 && utf8.Valid(p.username) && utf8.Valid(p.password)) {
+		return false
+	}
+	for _, value := range [][]byte{p.username, p.password} {
+		for _, r := range string(value) {
+			if r < 32 && r != '\t' && r != '\n' && r != '\r' || r == 0xfffe || r == 0xffff {
+				return false
+			}
+		}
+	}
+	return true
+}
+func (r Request) SaveContext() personal.BrowserSaveContext {
+	return personal.BrowserSaveContext{BrowserContext: r.Context(), WindowID: r.WindowID}
+}
+func (r *Request) Clear() {
+	if r != nil {
+		r.payload.clear()
+		r.payload = nil
+	}
+}
+func (Request) String() string                   { return "[native browser request]" }
+func (Request) GoString() string                 { return "[native browser request]" }
+func (Request) MarshalJSON() ([]byte, error)     { return nil, ErrProtocol }
+func (savePayload) String() string               { return "[private save payload]" }
+func (savePayload) GoString() string             { return "[private save payload]" }
+func (savePayload) MarshalJSON() ([]byte, error) { return nil, ErrProtocol }
+
+// encoding/json replaces malformed UTF-8/surrogates. Reject them before any
+// credential decoding, so the saved value is never silently normalized.
+func strictUnicode(raw []byte) bool {
+	if !utf8.Valid(raw) {
+		return false
+	}
+	for n := 0; n < len(raw); n++ {
+		if raw[n] != '"' {
+			continue
+		}
+		n++
+		for ; n < len(raw) && raw[n] != '"'; n++ {
+			if raw[n] != '\\' {
+				continue
+			}
+			n++
+			if n >= len(raw) {
+				return false
+			}
+			if raw[n] != 'u' {
+				continue
+			}
+			if n+4 >= len(raw) {
+				return false
+			}
+			v, e := strconv.ParseUint(string(raw[n+1:n+5]), 16, 16)
+			if e != nil {
+				return false
+			}
+			n += 4
+			if v >= 0xdc00 && v <= 0xdfff {
+				return false
+			}
+			if v >= 0xd800 && v <= 0xdbff {
+				if n+6 >= len(raw) || raw[n+1] != '\\' || raw[n+2] != 'u' {
+					return false
+				}
+				w, e := strconv.ParseUint(string(raw[n+3:n+7]), 16, 16)
+				if e != nil || w < 0xdc00 || w > 0xdfff {
+					return false
+				}
+				n += 6
+			}
+		}
+	}
+	return true
+}
+func ReadRequest(reader io.Reader) (Request, error) {
+	var h [4]byte
+	if _, e := io.ReadFull(reader, h[:]); e != nil {
 		return Request{}, e
 	}
-	n := binary.NativeEndian.Uint32(header[:])
+	n := binary.NativeEndian.Uint32(h[:])
 	if n == 0 || n > MaxInput {
 		return Request{}, ErrProtocol
 	}
 	raw := make([]byte, int(n))
 	defer clear(raw)
-	if _, e := io.ReadFull(r, raw); e != nil {
+	if _, e := io.ReadFull(reader, raw); e != nil || !strictUnicode(raw) {
 		return Request{}, ErrProtocol
 	}
-	// A single flat object is the entire input grammar. Detect duplicates before
-	// strict DTO decoding; encoding/json alone silently accepts duplicate keys.
 	dec := json.NewDecoder(bytes.NewReader(raw))
-	t, e := dec.Token()
-	if e != nil || t != json.Delim('{') {
+	first, e := dec.Token()
+	if e != nil || first != json.Delim('{') {
 		return Request{}, ErrProtocol
 	}
 	seen := map[string]bool{}
 	for dec.More() {
-		t, e = dec.Token()
-		key, ok := t.(string)
-		if e != nil || !ok || seen[key] || len(seen) >= 9 {
+		key, e := dec.Token()
+		name, ok := key.(string)
+		if e != nil || !ok || seen[name] || len(seen) >= 14 {
 			return Request{}, ErrProtocol
 		}
-		seen[key] = true
-		t, e = dec.Token()
-		if e != nil {
+		seen[name] = true
+		var value json.RawMessage
+		if dec.Decode(&value) != nil || len(value) == 0 || value[0] != '"' && (value[0] < '0' || value[0] > '9') && value[0] != '-' {
+			clear(value)
 			return Request{}, ErrProtocol
 		}
-		switch t.(type) {
-		case string, float64:
-		default:
-			return Request{}, ErrProtocol
-		}
+		clear(value)
 	}
-	if t, e = dec.Token(); e != nil || t != json.Delim('}') {
+	last, e := dec.Token()
+	if e != nil || last != json.Delim('}') {
 		return Request{}, ErrProtocol
 	}
 	if _, e = dec.Token(); e != io.EOF {
 		return Request{}, ErrProtocol
 	}
+	var wire struct {
+		V          int     `json:"v"`
+		ID         string  `json:"id"`
+		Type       string  `json:"type"`
+		Capability string  `json:"capability"`
+		Origin     string  `json:"origin"`
+		TabID      int64   `json:"tab_id"`
+		DocumentID string  `json:"document_id"`
+		WindowID   int64   `json:"window_id"`
+		ItemID     string  `json:"item_id"`
+		Revision   string  `json:"revision"`
+		RequestID  string  `json:"request_id"`
+		Nonce      string  `json:"nonce"`
+		Username   *string `json:"username"`
+		Password   *string `json:"password"`
+	}
 	dec = json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
-	var req Request
-	if dec.Decode(&req) != nil || !req.valid() {
+	if dec.Decode(&wire) != nil {
 		return Request{}, ErrProtocol
 	}
-	return req, nil
+	r := Request{V: wire.V, ID: wire.ID, Type: wire.Type, Capability: wire.Capability, Origin: wire.Origin, TabID: wire.TabID, DocumentID: wire.DocumentID, WindowID: wire.WindowID, ItemID: wire.ItemID, Revision: wire.Revision, RequestID: wire.RequestID, Nonce: wire.Nonce}
+	if wire.Username != nil && wire.Password != nil {
+		r.payload = &savePayload{[]byte(*wire.Username), []byte(*wire.Password)}
+	}
+	expected := []string{"v", "id", "type"}
+	switch r.Type {
+	case "hello":
+	case "cancel":
+		expected = append(expected, "capability")
+	case "match", "fill", "save-new", "save-update":
+		expected = append(expected, "capability", "origin", "tab_id", "document_id")
+		if r.Type == "fill" || r.Type == "save-update" {
+			expected = append(expected, "item_id", "revision")
+		}
+		if r.Type == "save-new" || r.Type == "save-update" {
+			expected = append(expected, "window_id", "username", "password")
+		}
+	case "commit-ready", "cancel-save":
+		expected = append(expected, "capability", "request_id")
+		if r.Type == "commit-ready" {
+			expected = append(expected, "nonce")
+		}
+	default:
+		r.Clear()
+		return Request{}, ErrProtocol
+	}
+	if len(seen) != len(expected) {
+		r.Clear()
+		return Request{}, ErrProtocol
+	}
+	for _, name := range expected {
+		if !seen[name] {
+			r.Clear()
+			return Request{}, ErrProtocol
+		}
+	}
+	if !r.valid() {
+		r.Clear()
+		return Request{}, ErrProtocol
+	}
+	return r, nil
 }
 
 // Writer closes the pipe at a finite deadline, releasing a blocked write. A

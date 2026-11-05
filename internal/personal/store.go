@@ -181,6 +181,7 @@ func existing(path string) (*bolt.DB, error) {
 }
 
 type result struct {
+	savePersisted     bool
 	browser           *NativeBrowserFill
 	material          []byte
 	slotDigest        [32]byte
@@ -203,19 +204,20 @@ type result struct {
 }
 
 type commandOption struct {
-	browser    *BrowserFillTarget
-	unlocked   *Session
-	run        *RunRequest
-	search     *searchRequest
-	livePull   *LivePullRequest
-	injection  *injectionRequest
-	migration  *importRequest
-	match      *matchRequest
-	export     *exportRequest
-	inspection *inspectionRequest
-	backup     string
-	generation *generationRequest
-	reference  *referenceRequest
+	browserSave *browserSaveRequest
+	browser     *BrowserFillTarget
+	unlocked    *Session
+	run         *RunRequest
+	search      *searchRequest
+	livePull    *LivePullRequest
+	injection   *injectionRequest
+	migration   *importRequest
+	match       *matchRequest
+	export      *exportRequest
+	inspection  *inspectionRequest
+	backup      string
+	generation  *generationRequest
+	reference   *referenceRequest
 }
 
 func command(path, pw string, key []byte, action string, add vault.Item, edit *Edit, options ...commandOption) (result, error) {
@@ -230,7 +232,7 @@ var ErrCommandClose = errors.New("personal vault close failed; operation may be 
 
 func commandWithClose(run func() (result, error), closeDB func() error) (r result, err error) {
 	defer func() {
-		if closeErr := closeDB(); closeErr != nil && err == nil {
+		if closeErr := closeDB(); closeErr != nil && (err == nil || r.savePersisted) {
 			r.browser.clear()
 			clear(r.value)
 			clear(r.material)
@@ -254,6 +256,9 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 	}
 	if len(options) == 1 {
 		option = options[0]
+	}
+	if browserSaveAction(action) != (option.browserSave != nil) || option.browserSave != nil && (!option.browserSave.valid() || option.unlocked == nil || (action == browserNewAction) != (option.browserSave.target.ID == "")) {
+		return result{}, ErrBrowserSaveRefused
 	}
 	if (action == browserFillAction) != (option.browser != nil) || option.browser != nil && !option.browser.valid() {
 		return result{}, ErrBrowserFill
@@ -388,6 +393,62 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			}
 		}
 		switch action {
+		case browserNewAction, browserUpdateAction:
+			rq := option.browserSave
+			index := -1
+			if action == browserUpdateAction {
+				for n := range items {
+					if items[n].ID == rq.target.ID {
+						index = n
+						break
+					}
+				}
+				if index < 0 {
+					outcome, refusal = "not-found", ErrNotFound
+				} else {
+					out.id = rq.target.ID
+					site, siteErr := origin.Website(items[index].URL)
+					if revisions[out.id] != rq.target.Revision {
+						outcome, refusal = "conflict", ErrConflict
+					} else if items[index].Kind != "login" || items[index].State != "" || siteErr != nil || site != rq.target.Context.Origin {
+						outcome, refusal = "browser-refused", ErrBrowserSaveRefused
+					}
+				}
+			}
+			preparedID := ""
+			if action == browserNewAction {
+				preparedID, e = randomID()
+				if e != nil {
+					return e
+				}
+			}
+			out.destinationDigest, e = rq.binding(i.AuditEncryption)
+			if e != nil {
+				return e
+			}
+			candidate := append([]vault.Item(nil), items...)
+			if refusal == nil {
+				if action == browserNewAction {
+					candidate = append(candidate, vault.Item{ID: preparedID, Kind: "login", Title: rq.target.Title, URL: rq.target.Context.Origin, Username: string(rq.username), Password: string(rq.password)})
+				} else {
+					candidate[index].Username = string(rq.username)
+					candidate[index].Password = string(rq.password)
+				}
+				if vault.ValidateItems([]byte(schema), candidate) != nil {
+					outcome, refusal = "browser-refused", ErrBrowserSaveRefused
+				}
+			}
+			// This is the persistence linearization point for success or a
+			// trusted refusal audit. All validation precedes the single CAS.
+			if !option.unlocked.winBrowserSave(rq.gate) {
+				return ErrBrowserSaveCancelled
+			}
+			if refusal == nil {
+				if action == browserNewAction {
+					out.id = preparedID
+				}
+				items = candidate
+			}
 		case "desktop.system.enable":
 			outcome = "intent"
 		case "desktop.system.unlock":
@@ -639,13 +700,16 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		default:
 			return invalid
 		}
-		if action == "item.add" || action == "item.generate" || (editAction(action) && refusal == nil) {
+		if action == "item.add" || action == "item.generate" || ((editAction(action) || browserSaveAction(action)) && refusal == nil) {
 			s, e = seal(b, i, s.Epoch+1, items)
 			if e != nil {
 				return e
 			}
 		}
 		var link string
+		if browserSaveAction(action) {
+			link = out.destinationDigest
+		}
 		if action == browserFillAction && refusal == nil {
 			link, e = option.browser.binding(i.AuditEncryption)
 			if e != nil {
@@ -708,7 +772,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		}
 		if action == "audit.list" {
 			out.events = append(rows, ev)
-		} else if (editAction(action) || action == "item.generate") && refusal == nil {
+		} else if (editAction(action) || browserSaveAction(action) || action == "item.generate") && refusal == nil {
 			out.revision = ev.hash()
 		}
 		return nil
@@ -722,6 +786,9 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			out.otp.Clear()
 		}
 		return result{}, e
+	}
+	if browserSaveAction(action) {
+		out.savePersisted = true
 	}
 	return out, refusal
 }

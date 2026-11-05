@@ -77,6 +77,30 @@ Firefox opens this action from its toolbar. It has no default shortcut because
 Firefox reserves common browser shortcuts; users can choose one in Firefox's
 extension shortcut settings. Chrome/Edge keep the shortcut above.
 
+To save credentials already entered on a supported page, choose **保存当前登录**
+(Save current login). In the native window verify the exact website, choose the
+new title, and approve. To update a saved login, first read the website's
+candidates, choose **更新此登录** (Update this login), and confirm the displayed
+item in the native window. Update replaces only the username/password pair;
+title, URL, OTP and other item metadata remain unchanged. New entries store the
+canonical HTTPS origin as their website.
+
+Save captures the field pair at the explicit click, not after native approval.
+Changing the page's values while approval is pending does not replace that
+snapshot. After approval the extension performs a short final check of the
+original active browser window, tab, document and origin before requesting the
+single vault transaction. It never automatically watches submissions, saves,
+or submits a form. The popup receives no captured values.
+
+**已批准** means approved and still checking; only **已保存** means saved with a
+confirmed receipt. **结果未确认** means the result is unknown: inspect the item
+in the desktop vault before deciding what to do, and do not blindly repeat the
+save. A cancellation that reaches the host before persistence wins prevents the
+write; a later navigation, lock, or broken connection cannot retract a
+transaction that already won. Browser state and database commit are not one
+atomic operation. See [save validation](../docs/browser-save-validation.md) for
+the exact verification status and limitations.
+
 The extension has only `activeTab`, `scripting`, and `nativeMessaging`. There is
 no persistent host permission, page-message bridge, value persistence, or
 localhost secret proxy. Origin, active tab, and document identity are obtained
@@ -108,8 +132,8 @@ LOCKLARK_TEST_PLAYWRIGHT=/absolute/path/to/playwright node scripts/browser_exten
 ```
 
 Node tests use a simulated browser API only for worker races and policy checks.
-The DOM script runs the actual static fill function in Chromium, including form
-and iframe refusals. These do not replace real extension/native/MyGo UI approval
+The DOM script runs the actual static fill/capture function in Chromium and
+Firefox, including form/iframe refusals and Unicode bounds. These do not replace real extension/native/MyGo UI approval
 acceptance, independent review, or platform-specific hardware tests.
 
 After receiving a field response, browser API verification and injection waits

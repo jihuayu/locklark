@@ -14,7 +14,46 @@ import time
 CONTROL_LABELS = (
     "金库文件", "主密码", "Secret Key", "解锁", "确认连接此扩展",
     "拒绝连接", "批准本次填充", "拒绝本次填充", "立即锁定",
+    "新登录标题", "批准保存登录", "拒绝保存登录", "批准更新登录", "拒绝更新登录",
 )
+
+FAILURE_CONTEXT = {"action": "setup", "index": -1}
+FAILURE_REASONS = {
+    "Native accessibility unavailable": "a11y-unavailable",
+    "Native accessibility query failed": "a11y-query",
+    "Native accessibility tree limit": "a11y-tree-limit",
+    "Native accessibility child limit": "a11y-child-limit",
+    "Native accessibility window must be unique": "a11y-window-ambiguous",
+    "Native acceptance label is not allowlisted": "label-not-allowed",
+    "Native acceptance control must be unique": "control-ambiguous",
+    "Native acceptance control not ready": "control-ready-timeout",
+    "X display unavailable": "x-display",
+    "Exact native-window absence request required": "absence-request",
+    "Native acceptance X query failed": "x-query",
+    "Previous native acceptance window did not close": "window-close-timeout",
+    "Native acceptance window must be unique": "window-ambiguous",
+    "Native acceptance window unavailable": "window-timeout",
+    "Native acceptance window geometry unavailable": "window-geometry",
+    "Native acceptance X target unavailable": "x-target",
+    "Acceptance input must be ASCII": "input-charset",
+    "Acceptance keyboard mapping unavailable": "keyboard-mapping",
+    "Acceptance shortcut unavailable": "shortcut-mapping",
+    "Native acceptance X input failed": "x-input",
+}
+
+
+class AccessibilityQueryUnavailable(RuntimeError):
+    """A read-only AT-SPI query could not inspect the current tree."""
+
+
+def failure_reason(error):
+    # Only compare our literal RuntimeError messages; never format an arbitrary
+    # exception, JSON input, command or editable control value.
+    if type(error) is AccessibilityQueryUnavailable:
+        return "a11y-query"
+    if type(error) is RuntimeError and len(error.args) == 1 and type(error.args[0]) is str:
+        return FAILURE_REASONS.get(error.args[0], "unexpected")
+    return "unexpected"
 
 
 class NativeControls:
@@ -70,7 +109,7 @@ class NativeControls:
         result = function(*args, C.byref(error))
         if error:
             self.gl.g_error_free(error)
-            raise RuntimeError("Native accessibility query failed")
+            raise AccessibilityQueryUnavailable("Native accessibility query failed")
         return result
 
     def string(self, function, node):
@@ -168,7 +207,13 @@ class NativeControls:
             raise RuntimeError("Native acceptance label is not allowlisted")
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
-            controls = self.snapshot().get(label, [])
+            try:
+                controls = self.snapshot().get(label, [])
+            except AccessibilityQueryUnavailable:
+                # No action has been emitted. Re-observe a transient tree
+                # transition only within the existing, unchanged deadline.
+                time.sleep(0.05)
+                continue
             if len(controls) > 1:
                 raise RuntimeError("Native acceptance control must be unique")
             if controls:
@@ -295,6 +340,20 @@ def main():
             matches.extend(find(candidate, depth+1))
         return matches
 
+    if request.get("wait_absent"):
+        if not request.get("title") or not request.get("executable") or request.get("actions"):
+            raise RuntimeError("Exact native-window absence request required")
+        for _ in range(200):
+            if not find(root):
+                x.XSync(display, 0)
+                if any(code != 3 for code, _resource in errors):
+                    raise RuntimeError("Native acceptance X query failed")
+                x.XCloseDisplay(display)
+                print(json.dumps({"absent": True}))
+                return
+            time.sleep(0.05)
+        raise RuntimeError("Previous native acceptance window did not close")
+
     target = None
     for _ in range(100):
         matches=find(root)
@@ -327,7 +386,14 @@ def main():
     native = None
     if request.get("inspect") or any("click_label" in a or "wait_label" in a for a in request.get("actions", [])):
         native = NativeControls(request["title"],window_pid(target) if request.get("executable") else None)
-    for action in request.get("actions", []):
+    for index, action in enumerate(request.get("actions", [])):
+        FAILURE_CONTEXT["index"] = index
+        FAILURE_CONTEXT["action"] = (
+            "label-click" if "click_label" in action else
+            "label-wait" if "wait_label" in action else
+            "text-entry" if "text" in action else
+            "key" if "key" in action else "pointer"
+        )
         if "click_label" in action or "wait_label" in action:
             control = native.ready(action.get("click_label", action.get("wait_label")))
             if "click_label" in action:
@@ -371,6 +437,7 @@ def main():
             raise RuntimeError("Native acceptance X input failed")
     result = {"window": target, "x": px.value, "y": py.value}
     if request.get("inspect"):
+        FAILURE_CONTEXT["action"] = "snapshot"
         snapshot = native.snapshot()
         result["controls"] = {
             label: {
@@ -387,6 +454,8 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except Exception:
-        print("Native acceptance input failed", file=sys.stderr)
+    except Exception as error:
+        print("Native acceptance input failed [" + failure_reason(error) +
+              " action=" + FAILURE_CONTEXT["action"] +
+              " index=" + str(FAILURE_CONTEXT["index"]) + "]", file=sys.stderr)
         sys.exit(1)

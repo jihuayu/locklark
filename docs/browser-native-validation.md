@@ -75,3 +75,8 @@ dbus-run-session -- node scripts/browser_firefox_native_acceptance.mjs
 ```
 
 临时 manifest 已确认清理，现有用户 manifest 若存在则脚本拒绝覆盖。实际 Firefox 无障碍标记失败时的直接工具输出曾记录该标记；该轮本地日志后被正常轮覆盖，故不将已覆盖日志列为保留证据。Go 环境先红后绿日志和最终真实 GUI 日志分别保留。
+
+
+## 合并结果
+
+[PR #26](https://github.com/jihuayu/locklark/pull/26) 最终 head `6c649d992f913c36a75a16f30e1320c4b008d085` 在 [run 42073803355](https://github.com/jihuayu/locklark/actions/runs/42073803355) 的 Ubuntu Go、Windows Go/终端验收、macOS 桌面、Web 四项全部通过。Web 日志分别确认真实 Chromium 和 Firefox 原生完整链路通过，保留原有 Next.js 两浏览器和 DOM 测试。经 Luna/max 复审与主代理验收后 squash 合入 main `0f38177eb1059121d04e94fb96d264126688573f`。下一切片是显式保存/更新，见 [架构约定](browser-save-design.md)。

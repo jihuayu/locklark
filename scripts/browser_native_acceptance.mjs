@@ -8,6 +8,12 @@ import { createHash, X509Certificate } from "node:crypto";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
+import {
+  acceptBrowserSave,
+  assertPrivateArtifacts,
+  fixtureCanaries,
+  vaultObserver,
+} from "./browser_save_acceptance.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(join(root, "web/package.json"));
@@ -20,12 +26,31 @@ assert(
   host && process.env.DISPLAY,
   "A built native host and real X display are required",
 );
+assert(
+  !process.env.LOCKLARK_TEST_FAILURE_STAGE ||
+    ["after-pair", "page-arguments"].includes(
+      process.env.LOCKLARK_TEST_FAILURE_STAGE,
+    ),
+  "Unsupported acceptance failure stage",
+);
 const state = mkdtempSync("/tmp/locklark-browser-acceptance-");
 const env = { ...process.env, GOTOOLCHAIN: "go1.27.3" };
 const diagnostics = mkdtempSync(join(state, "diagnostics-"));
 let stage = "fixture",
   lastPopup = null,
   nativeInput = null;
+let privacyValues = [];
+let observedFixture = null;
+function popupStatusKind(value) {
+  const text = String(value || "");
+  if (text.includes("已保存")) return "saved";
+  if (text.includes("结果未确认")) return "unknown";
+  if (text.includes("锁定")) return "locked";
+  if (text.includes("未连接") || text.includes("断开")) return "disconnected";
+  if (text.includes("原生") || text.includes("批准")) return "native-pending";
+  if (text.includes("拒绝")) return "refused";
+  return "other";
+}
 function phase(value) {
   stage = value;
   console.log("Native browser stage: " + value);
@@ -97,6 +122,8 @@ try {
     { cwd: root, env, stdio: "inherit" },
   );
   const fixture = JSON.parse(readFileSync(join(state, "vault/fixture.json")));
+  observedFixture = fixture;
+  privacyValues = fixtureCanaries(fixture);
   const profile = join(state, "profile");
   mkdirSync(join(profile, "NativeMessagingHosts"), { recursive: true });
   execFileSync(
@@ -143,12 +170,13 @@ try {
     "Actual fixed extension identity required",
   );
   function input(actions, native = true, inspect = false) {
+    const options = typeof inspect === "object" ? inspect : { inspect };
     const request = native
       ? {
           title: "Locklark · 浏览器原生确认",
           executable: resolve(host),
           actions,
-          inspect,
+          ...options,
         }
       : { title_prefix: "Locklark acceptance", actions };
     return JSON.parse(
@@ -267,7 +295,7 @@ try {
   }
   async function openPopup() {
     await page.bringToFront();
-    input([{ key: "Control_L+Shift_L+y" }], false);
+    input([{ key: "Escape" }, { key: "Control_L+Shift_L+y" }], false);
     let popup;
     await eventually(
       async () => !!(popup = await attachPopup()),
@@ -294,15 +322,18 @@ try {
     phase(scenario + ":popup");
     const popup = await openPopup();
     await eventually(
-      async () => !(await popup.disabled("#refresh")),
+      async () => (await popup.disabled("#refresh")) === false,
       "Paired popup not ready",
     );
     await popup.click("#refresh");
     await eventually(
-      async () => (await popup.count("#candidates button")) === 1,
+      async () =>
+        (await popup.count('#candidates [data-action="fill"]')) === 1 &&
+        (await popup.disabled('#candidates [data-action="fill"]')) === false &&
+        (await popup.disabled("#refresh")) === false,
       "Exact-origin candidate missing",
     );
-    await popup.click("#candidates button");
+    await popup.click('#candidates [data-action="fill"]');
     await eventually(
       async () => (await popup.text("#status"))?.includes("原生窗口核对"),
       "Native confirmation was not requested",
@@ -313,6 +344,8 @@ try {
   }
   phase("native-connect");
   let popup = await openPopup();
+  phase("save-new:control");
+  assert.equal(await popup.count("#save-new"), 1);
   await popup.click("#connect");
   phase("native-unlock");
   input([
@@ -330,6 +363,19 @@ try {
 
   await select("approved-fill");
   await blank(); // No field is released before native approval.
+  if (process.env.LOCKLARK_TEST_FAILURE_STAGE === "after-pair")
+    throw Error(fixtureCanaries(fixture).join("\n"));
+  if (process.env.LOCKLARK_TEST_FAILURE_STAGE === "page-arguments") {
+    phase("driver-arguments-failure");
+    await page.evaluate(
+      ([username, password]) => {
+        document.querySelector("#username").value = username;
+        document.querySelector("#password").value = password;
+        throw Error("Controlled driver argument failure");
+      },
+      [fixture.SaveUsername, fixture.SaveValue],
+    );
+  }
   execFileSync(
     "import",
     [
@@ -384,20 +430,74 @@ try {
       (await popup.text("#status"))?.includes("断开"),
     "Lock status missing",
   );
+  await acceptBrowserSave({
+    fixture,
+    origin,
+    phase,
+    input,
+    inspect: () => input([], true, true),
+    observe: vaultObserver({ go, root, env, state }),
+    captureNative: (kind) => {
+      const window = input([], true, true).window;
+      assert(
+        Number.isSafeInteger(window) && window > 0,
+        "Strict native XID required",
+      );
+      execFileSync(
+        "import",
+        [
+          "-window",
+          String(window),
+          join(diagnostics, "native-save-" + kind + ".png"),
+        ],
+        { env, stdio: "ignore" },
+      );
+    },
+    openPopup,
+    setLogin: async (username, password) => {
+      await page.evaluate(
+        ([username, password]) => {
+          document.querySelector("#username").value = username;
+          document.querySelector("#password").value = password;
+        },
+        [username, password],
+      );
+    },
+    loginEquals: async (username, password) =>
+      page.evaluate(
+        ([username, password]) =>
+          document.querySelector("#username").value === username &&
+          document.querySelector("#password").value === password &&
+          window.submits === 0,
+        [username, password],
+      ),
+    navigate: (url) => page.goto(url),
+    reconnect: async () => {
+      let popup = await openPopup();
+      await popup.click("#disconnect");
+      input([], true, { wait_absent: true });
+      popup = await openPopup();
+      await popup.click("#connect");
+      input([
+        { click_label: "金库文件" },
+        { text: fixture.Path },
+        { click_label: "主密码" },
+        { text: fixture.Password },
+        { click_label: "Secret Key" },
+        { text: fixture.Secret },
+        { click_label: "解锁" },
+      ]);
+      input([{ click_label: "确认连接此扩展" }]);
+    },
+  });
   assert(
-    !logs.some(
-      (s) =>
-        s.includes(fixture.Value) ||
-        s.includes(fixture.Password) ||
-        s.includes(fixture.Secret),
+    !logs.some((s) =>
+      fixtureCanaries(fixture).some((value) => s.includes(value)),
     ),
     "Synthetic secret found in browser console output",
   );
+  popup = await openPopup();
   await popup.click("#disconnect");
-  console.log(
-    "PASS: real Chromium action → native messaging → MyGo unlock/pair/approve → HTTPS fill; rejection, document navigation, native lock, no preapproval values, no autosubmit, no secret console output",
-  );
-  console.log("Synthetic acceptance diagnostics: " + diagnostics);
 } catch {
   // Deliberately omit fixture files and exception/command bodies. The only
   // inspection text is the trusted popup's bounded status; native metadata is
@@ -411,15 +511,18 @@ try {
     try {
       report.popup = {
         available: true,
-        status: String(await lastPopup.text("#status")).slice(0, 200),
+        status: popupStatusKind(await lastPopup.text("#status")),
         refreshDisabled: await lastPopup.disabled("#refresh"),
         candidates: await lastPopup.count("#candidates button"),
       };
     } catch {}
   }
   try {
-    if (lastPopup)
-      await lastPopup.screenshot(join(diagnostics, "failure-popup.png"));
+    if (lastPopup) {
+      const text = String((await lastPopup.text("body")) || "");
+      if (!privacyValues.some((value) => text.includes(value)))
+        await lastPopup.screenshot(join(diagnostics, "failure-popup.png"));
+    }
   } catch {}
   if (nativeInput) {
     try {
@@ -446,4 +549,9 @@ try {
 } finally {
   if (browser) await browser.close();
   await new Promise((r) => server.close(r));
+  if (observedFixture) assertPrivateArtifacts(state, observedFixture);
 }
+console.log(
+  "PASS: real Chromium fill/save/update with native approval, cancellation, Unicode, and no synthetic secrets in console or persistent diagnostics",
+);
+console.log("Private synthetic artifacts: " + state);

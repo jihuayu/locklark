@@ -27,6 +27,7 @@ type outcome struct {
 	err         error
 }
 type App struct {
+	browserSaveID, browserSaveTitle                string
 	browser                                        *browserhost.Connection
 	browserLabel                                   string
 	cancel                                         context.CancelFunc
@@ -158,6 +159,9 @@ func (a *App) Lock() {
 	a.query = ""
 	a.busy = false
 	a.status = "金库已锁定"
+	if a.browser != nil && a.browser.SaveUnknown() {
+		a.status += " · 结果未确认，请在金库核实，勿重复保存"
+	}
 	a.clearClipboard()
 }
 func (a *App) unlock() {

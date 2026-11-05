@@ -366,7 +366,9 @@ go test -count=1 ./internal/vault -run 'TestKDBXIndependentPeer|TestIndependentN
 2. 在扩展弹窗读取当前网站的登录候选并选择条目。
 3. 在原生窗口核对精确网站、条目和版本，批准本次填充；扩展填入用户名和密码，由你自行提交表单。
 
-此宿主使用独立原生会话。页面跳转、锁库或断线会使旧请求失效；重新连接需要再次确认。构建、Chrome/Edge/Firefox 注册路径及平台限制见 [扩展安装与使用](browser-extension/README.md)，真实链路和负测见 [浏览器验收](docs/browser-native-validation.md)。保存新登录、更新密码、TOTP 和 Passkey 仍在后续范围中。
+此宿主使用独立原生会话。页面跳转、锁库或断线会使旧请求失效；重新连接需要再次确认。构建、Chrome/Edge/Firefox 注册路径及平台限制见 [扩展安装与使用](browser-extension/README.md)，真实填充链路和负测见 [浏览器验收](docs/browser-native-validation.md)。
+
+要保存网页上已输入的登录，在扩展中选择“保存当前登录”，再在原生窗口核对网站并设置标题后批准。要替换已有登录的用户名和密码，先读取候选，选择该条目的“更新此登录”，再在原生窗口确认；标题、网站、OTP 和其他条目数据保持原样。保存的是点击时捕获的字段，不会自动检测提交或自动提交网页。原生批准后还会核对原浏览器文档；若显示“结果未确认”，请在桌面金库核实后再决定，不要盲目重复保存。具体实现/验收状态见 [保存与更新验收](docs/browser-save-validation.md)。TOTP 和 Passkey 的浏览器功能仍在后续范围中。
 
 ### Next.js 团队管理（本机开发版）
 

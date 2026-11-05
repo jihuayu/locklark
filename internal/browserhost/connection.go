@@ -15,13 +15,20 @@ type Pending struct {
 	Until                               time.Time
 }
 type View struct {
-	Pair    bool
-	Paired  bool
-	Closed  bool
-	Pending *Pending
-	Busy    bool
+	Save          *SaveView
+	SaveStatus    string
+	SaveRequestID string
+	Pair          bool
+	Paired        bool
+	Closed        bool
+	Pending       *Pending
+	Busy          bool
 }
 type Connection struct {
+	save           *pendingSave
+	saveAuth       *pendingSave
+	saveOutcome    atomic.Uint32
+	saveRequestID  string
 	generation     atomic.Uint64
 	cancelEpoch    atomic.Uint64
 	pendingEpoch   uint64
@@ -36,6 +43,7 @@ type Connection struct {
 	writer         *Writer
 	notify         func()
 	seen           map[string]bool
+	received       int
 	hello          string
 	pairUntil      time.Time
 	capability     string
@@ -70,6 +78,15 @@ func (c *Connection) refuse(id string) error {
 	return c.response(Response{ID: id, Type: "error", Error: "refused"})
 }
 func (c *Connection) invalidate() {
+	if c.save != nil {
+		if !c.save.gate.Cancel() && c.save.gate.CommitWon() {
+			c.save.uncertain.Store(true)
+			c.saveOutcome.Store(saveUnknown)
+		} else {
+			c.saveOutcome.Store(saveRefused)
+		}
+		c.clearSave(c.save)
+	}
 	c.authMu.Lock()
 	c.authCapability = ""
 	c.authMu.Unlock()
@@ -121,8 +138,12 @@ func (c *Connection) registerRequest(r Request) (bool, error) {
 	}
 	c.authMu.Lock()
 	defer c.authMu.Unlock()
-	if c.closed.Load() || c.seen[r.ID] || len(c.seen) >= 128 {
+	c.received++
+	if c.closed.Load() || c.received > 128 {
 		return false, ErrProtocol
+	}
+	if c.seen[r.ID] {
+		return false, nil
 	}
 	c.seen[r.ID] = true
 	if r.Type == "hello" {
@@ -132,9 +153,15 @@ func (c *Connection) registerRequest(r Request) (bool, error) {
 	if allowed && r.Type == "cancel" {
 		c.cancelEpoch.Add(1)
 	}
+	if allowed && r.Type == "cancel-save" && c.saveAuth != nil && c.saveAuth.request.ID == r.RequestID {
+		if !c.saveAuth.gate.Cancel() && c.saveAuth.gate.CommitWon() {
+			c.saveAuth.uncertain.Store(true)
+		}
+	}
 	return allowed, nil
 }
 func (c *Connection) Handle(r Request) error {
+	defer r.Clear()
 	allowed, err := c.registerRequest(r)
 	if err != nil {
 		return err
@@ -162,6 +189,9 @@ func (c *Connection) Handle(r Request) error {
 		return c.refuse(r.ID)
 	}
 	if r.Type == "cancel" {
+		if c.save != nil {
+			return c.refuse(r.ID)
+		}
 		if c.pending != nil {
 			if e := c.refuse(c.pending.ID); e != nil {
 				return e
@@ -172,7 +202,10 @@ func (c *Connection) Handle(r Request) error {
 		c.context = personal.BrowserContext{}
 		return c.response(Response{ID: r.ID, Type: "cancelled"})
 	}
-	if c.pending != nil {
+	if handled, e := c.saveMessage(r); handled {
+		return e
+	}
+	if c.pending != nil || c.save != nil {
 		return c.refuse(r.ID)
 	}
 	if r.Type == "match" {
@@ -289,6 +322,10 @@ func (c *Connection) Reject() error {
 	defer c.changed()
 	c.syncEpoch()
 	c.expire()
+	if c.save != nil {
+		return ErrProtocol
+	}
+
 	if c.pending != nil {
 		id := c.pending.ID
 		c.pending = nil
@@ -307,6 +344,14 @@ func (c *Connection) Reject() error {
 // immediately even while a bounded pipe write or a transaction is completing.
 func (c *Connection) Invalidate() {
 	c.generation.Add(1)
+	c.authMu.Lock()
+	if p := c.saveAuth; p != nil {
+		if !p.gate.Cancel() && p.gate.CommitWon() {
+			p.uncertain.Store(true)
+			c.saveOutcome.Store(saveUnknown)
+		}
+	}
+	c.authMu.Unlock()
 	if !c.closed.Load() {
 		go c.response(Response{Type: "locked"})
 	}
@@ -340,6 +385,8 @@ func (c *Connection) Snapshot() View {
 		c.invalidate()
 	}
 	v.Paired = c.capability != ""
+	v.Save, v.SaveStatus = c.saveSnapshot()
+	v.SaveRequestID = c.saveRequestID
 	if c.pending != nil {
 		r := c.pending
 		title := ""
