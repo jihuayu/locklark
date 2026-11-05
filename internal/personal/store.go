@@ -197,6 +197,7 @@ type result struct {
 }
 
 type commandOption struct {
+	run        *RunRequest
 	search     *searchRequest
 	livePull   *LivePullRequest
 	injection  *injectionRequest
@@ -270,6 +271,9 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 	}
 	if injectAction(action) != (option.injection != nil) || option.injection != nil && !option.injection.valid() {
 		return result{}, ErrInjectionTarget
+	}
+	if runAction(action) != (option.run != nil) || option.run != nil && option.run.Validate() != nil {
+		return result{}, ErrRunTarget
 	}
 	if (action == livePullAction) != (option.livePull != nil) || option.livePull != nil && option.livePull.Validate() != nil {
 		return result{}, ErrLivePullTarget
@@ -447,7 +451,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			if option.backup == "" {
 				return invalid
 			}
-		case livePullAction, "item.inject.username", "item.inject.password", "item.trash", "item.untrash", "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.regenerate.password", otpDisclosureAction:
+		case "item.run.username", "item.run.password", livePullAction, "item.inject.username", "item.inject.password", "item.trash", "item.untrash", "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.regenerate.password", otpDisclosureAction:
 			if edit == nil {
 				return invalid
 			}
@@ -512,7 +516,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 						}
 						if readValueAction(action) {
 							value := items[i].Username
-							if action == "item.reveal.password" || action == "item.inject.password" || action == livePullAction {
+							if action == "item.reveal.password" || action == "item.inject.password" || action == "item.run.password" || action == livePullAction {
 								value = items[i].Password
 							}
 							out.value = []byte(value)
@@ -602,6 +606,13 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		var link string
 		if action == searchAction {
 			link, e = option.search.binding(i.AuditEncryption)
+			if e != nil {
+				return e
+			}
+			out.destinationDigest = link
+		}
+		if runAction(action) && refusal == nil {
+			link, e = option.run.binding(i.AuditEncryption)
 			if e != nil {
 				return e
 			}

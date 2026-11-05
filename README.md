@@ -38,6 +38,8 @@ Go TOTP 核心已通过 RFC 6238/4226 向量，支持有限的 Base32/otpauth �
 
 `personal inject-json --file owner.ll --id ID --revision REV --field username|password --name TOKEN --out NEW.json` 经双因素和 WRITE 确认，将一个指定字段写成新 JSON 配置文件，正确转义值，不覆盖已有目标。输出为明文，创建时采用当前账户的受限权限；stdout 只有审计回执。此入口不执行任意模板或子进程，也不向 MCP 增加原值工具。详见[JSON 注入验收](docs/personal-json-injection-validation.md)。
 
+`personal run-env --file owner.ll --id ID --revision REV --field password --name TOKEN --cwd ABS_DIR --timeout 30 -- ABS_PROGRAM [ARG...]` 经双因素输入和 RUN 确认后，把单个字段交给可信本地程序的环境变量。审计意图提交后才启动，清空继承环境（Windows 仅额外设置系统目录），标准流接空设备，只返回退出码。它不是沙箱；程序能使用、保存或转交该值。见[环境注入验收](docs/personal-run-env-validation.md)。
+
 `personal search --file owner.ll [--state active|archived|trashed|all]` 在隐藏双因素后隐藏输入查询，按 Unicode 等价形式和大小写折叠搜索当前登录标题，返回稳定 ID/修订，默认仅活动项。搜索词不作为命令参数或单独输出字段，审计只保存库内 HMAC 绑定；标题控制字符可见转义。见[标题搜索](docs/personal-title-search-validation.md)。
 
 `personal health --file owner.ll` 经双因素和 SCAN 确认后提供本地密码体检，仅输出活动登录的 ID/修订与固定问题码；检查空值、短值、低字符种类、示例常见值、重复使用和未保存 TOTP。不联网查询泄露库，不把未发现问题称为安全，也不推断网站的双因素状态。范围、规则与验收见[本地体检](docs/personal-health-validation.md)。

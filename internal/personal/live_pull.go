@@ -110,4 +110,6 @@ func executeLivePull(ctx context.Context, r LivePullRequest, value []byte) (gate
 	return reader.ReadApproved(ctx, gateway.Target{Repo: r.Repository.ID, Number: r.Number}, plan, func() ([]byte, error) { return bytes.Clone(value), nil })
 }
 
-func boundValueAction(action string) bool { return injectAction(action) || action == livePullAction }
+func boundValueAction(action string) bool {
+	return injectAction(action) || runAction(action) || action == livePullAction
+}
