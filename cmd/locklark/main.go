@@ -14,7 +14,7 @@ import (
 
 const usage = `Locklark · offline personal and synthetic gateway preview
 
-  personal edit-login --file PATH --id ID --revision REV --field title|username|password|otp
+  personal edit-login --file PATH --id ID --revision REV --field title|username|password|otp|url
   personal reveal-login --file PATH --id ID --revision REV --field username|password
   personal generate-login --file PATH [--length N]
   personal regenerate-password --file PATH --id ID --revision REV [--length N]
@@ -24,6 +24,7 @@ const usage = `Locklark · offline personal and synthetic gateway preview
   personal export-kdbx --file PATH --out NEW_FILE.kdbx
   personal archive-login|unarchive-login --file PATH --id ID --revision REV
   personal list --file PATH [--state active|archived|all]
+  personal match-logins --file PATH --origin HTTPS_ORIGIN --frame-origin HTTPS_ORIGIN
   personal reveal-ref|otp-ref --file PATH --ref REF --revision REV
   personal <init|add-login|list|audit> --file PATH  (interactive local-owner terminal)
 

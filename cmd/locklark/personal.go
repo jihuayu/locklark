@@ -20,7 +20,7 @@ import (
 	"unicode/utf8"
 )
 
-var personalUsage = errors.New("usage: locklark personal <init|add-login|list|audit|archived-audit|references> --file PATH, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password|otp, or reveal-login --file PATH --id ID --revision REV --field username|password, or generate-login --file PATH [--length N], or regenerate-password --file PATH --id ID --revision REV [--length N], or otp --file PATH --id ID --revision REV, or reveal-ref|otp-ref --file PATH --ref REF --revision REV, or inspect-1pux --file PATH --source ARCHIVE, or export-kdbx --file PATH --out NEW_FILE.kdbx, or archive-login|unarchive-login --file PATH --id ID --revision REV, or list --file PATH [--state active|archived|all]")
+var personalUsage = errors.New("usage: locklark personal <init|add-login|list|audit|archived-audit|references> --file PATH, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password|otp|url, or reveal-login --file PATH --id ID --revision REV --field username|password, or generate-login --file PATH [--length N], or regenerate-password --file PATH --id ID --revision REV [--length N], or otp --file PATH --id ID --revision REV, or reveal-ref|otp-ref --file PATH --ref REF --revision REV, or inspect-1pux --file PATH --source ARCHIVE, or export-kdbx --file PATH --out NEW_FILE.kdbx, or archive-login|unarchive-login --file PATH --id ID --revision REV, or list --file PATH [--state active|archived|all], or match-logins --file PATH --origin HTTPS_ORIGIN --frame-origin HTTPS_ORIGIN")
 
 // One terminal mode covers the entire interaction; no prompt or inter-field
 // gap is visible while echo is enabled.
@@ -94,6 +94,13 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 	var reveal personal.RevealTarget
 	length := password.DefaultPolicy().Length
 	switch action {
+	case "match-logins":
+		if len(opts) != 3 {
+			return personalUsage
+		}
+		if err := personal.ValidateMatchOrigins(opts["--origin"], opts["--frame-origin"]); err != nil {
+			return err
+		}
 	case "archive-login", "unarchive-login":
 		if len(opts) != 3 || !personal.ValidEditTarget(opts["--id"], opts["--revision"], "title") {
 			return personalUsage
@@ -432,7 +439,7 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 			}
 			response = map[string]string{"id": id}
 		case "edit-login":
-			prompt := map[string]string{"title": "新标题", "username": "新用户名（可留空）", "password": "新登录密码", "otp": "新 TOTP 配置（Base32 或 otpauth URI，留空清除）"}[edit.Field]
+			prompt := map[string]string{"url": "新网站 HTTPS URL（ASCII，留空清除）", "title": "新标题", "username": "新用户名（可留空）", "password": "新登录密码", "otp": "新 TOTP 配置（Base32 或 otpauth URI，留空清除）"}[edit.Field]
 			value, e := consoleField(prompt)
 			if e != nil {
 				return e
@@ -478,6 +485,11 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 				return e
 			}
 			response = map[string]string{"id": opts["--id"], "revision": revision}
+		case "match-logins":
+			if _, e := fmt.Fprint(os.Stderr, "按调用者提供的来源查询候选；未验证浏览器页面来源，不执行填充。\r\n"); e != nil {
+				return e
+			}
+			response, err = personal.MatchLogins(path, string(pw), key, opts["--origin"], opts["--frame-origin"])
 		case "list":
 			response, err = personal.ListState(path, string(pw), key, opts["--state"])
 		case "audit":

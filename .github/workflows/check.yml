@@ -42,6 +42,7 @@ jobs:
           python3 scripts/generation_acceptance.py "$RUNNER_TEMP/locklark"
           python3 scripts/otp_acceptance.py "$RUNNER_TEMP/locklark"
           python3 scripts/references_acceptance.py "$RUNNER_TEMP/locklark"
+          python3 scripts/matching_acceptance.py "$RUNNER_TEMP/locklark"
           python3 scripts/archive_acceptance.py "$RUNNER_TEMP/locklark"
           python3 scripts/inspection_acceptance.py "$RUNNER_TEMP/locklark"
           "$RUNNER_TEMP/locklark-kdbx-peer/bin/python" scripts/export_acceptance.py "$RUNNER_TEMP/locklark"
@@ -67,6 +68,8 @@ jobs:
           & $python scripts/references_acceptance.py $binary
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $python scripts/inspection_acceptance.py $binary
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $python scripts/matching_acceptance.py $binary
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $python scripts/archive_acceptance.py $binary
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
