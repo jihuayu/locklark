@@ -66,7 +66,14 @@ func makeReferenceIndex(account []byte, items []vault.Item, revisions map[string
 	}
 	v := catalog[0]
 	index := ReferenceIndex{VaultID: v.ID, VaultName: v.Name, Items: make([]ReferenceRow, 0, len(v.Items))}
+	active := map[string]bool{}
+	for _, it := range items {
+		active[it.ID] = it.State == ""
+	}
 	for _, item := range v.Items {
+		if !active[item.ID] {
+			continue
+		}
 		row := ReferenceRow{ID: item.ID, Title: item.Name, Revision: item.Revision, References: map[string]string{}}
 		for _, field := range item.Fields {
 			row.References[field.ID] = "op://" + v.ID + "/" + item.ID + "/" + field.ID

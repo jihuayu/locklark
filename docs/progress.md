@@ -1,5 +1,7 @@
 # Locklark 开发进度
 
+四线第 1 批已合并 PR #9 / main `1c58330`：独立密码 KDBX 迁出、Luna/max、Ubuntu/Windows CI 全通过。第 2 批归档/恢复状态、默认列表/引用过滤及 CAS 审计见 [归档验收](personal-archive-validation.md)。来源匹配和团队目录随后推进。
+
 总规格与验收矩阵见 [design.md](design.md)。下表按依赖列出持续目标；只有实际跑过的范围才写为已验证。「待做」包括本机仍可开发的部分；只有需要外部条件的那条验收延后。
 
 全部开发范围与每切片完成门槛见 [development-goal.md](development-goal.md)。已配置按小时接续的持续推进任务；只有实际完成的功能及验收证据才能更新完成状态。

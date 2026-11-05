@@ -20,7 +20,7 @@ import (
 	"unicode/utf8"
 )
 
-var personalUsage = errors.New("usage: locklark personal <init|add-login|list|audit|archived-audit|references> --file PATH, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password|otp, or reveal-login --file PATH --id ID --revision REV --field username|password, or generate-login --file PATH [--length N], or regenerate-password --file PATH --id ID --revision REV [--length N], or otp --file PATH --id ID --revision REV, or reveal-ref|otp-ref --file PATH --ref REF --revision REV, or inspect-1pux --file PATH --source ARCHIVE, or export-kdbx --file PATH --out NEW_FILE.kdbx")
+var personalUsage = errors.New("usage: locklark personal <init|add-login|list|audit|archived-audit|references> --file PATH, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password|otp, or reveal-login --file PATH --id ID --revision REV --field username|password, or generate-login --file PATH [--length N], or regenerate-password --file PATH --id ID --revision REV [--length N], or otp --file PATH --id ID --revision REV, or reveal-ref|otp-ref --file PATH --ref REF --revision REV, or inspect-1pux --file PATH --source ARCHIVE, or export-kdbx --file PATH --out NEW_FILE.kdbx, or archive-login|unarchive-login --file PATH --id ID --revision REV, or list --file PATH [--state active|archived|all]")
 
 // One terminal mode covers the entire interaction; no prompt or inter-field
 // gap is visible while echo is enabled.
@@ -94,6 +94,16 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 	var reveal personal.RevealTarget
 	length := password.DefaultPolicy().Length
 	switch action {
+	case "archive-login", "unarchive-login":
+		if len(opts) != 3 || !personal.ValidEditTarget(opts["--id"], opts["--revision"], "title") {
+			return personalUsage
+		}
+	case "list":
+		if len(opts) == 1 {
+			opts["--state"] = "active"
+		} else if len(opts) != 2 || !personal.ValidStateFilter(opts["--state"]) {
+			return personalUsage
+		}
 	case "export-kdbx":
 		if len(opts) != 2 || opts["--out"] == "" {
 			return personalUsage
@@ -150,7 +160,7 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 		if len(opts) != 2 || opts["--out"] == "" {
 			return personalUsage
 		}
-	case "init", "add-login", "audit", "list", "archived-audit", "references":
+	case "init", "add-login", "audit", "archived-audit", "references":
 		if len(opts) != 1 {
 			return personalUsage
 		}
@@ -447,8 +457,22 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 				return e
 			}
 			response = map[string]string{"id": edit.ID, "revision": revision}
+		case "archive-login", "unarchive-login":
+			confirmation, e := consoleField("输入 SAVE 确认更改归档状态")
+			defer clear(confirmation)
+			if e != nil {
+				return e
+			}
+			if string(confirmation) != "SAVE" {
+				return errors.New("archive change cancelled")
+			}
+			revision, e := personal.SetArchived(path, string(pw), key, opts["--id"], opts["--revision"], action == "archive-login")
+			if e != nil {
+				return e
+			}
+			response = map[string]string{"id": opts["--id"], "revision": revision}
 		case "list":
-			response, err = personal.List(path, string(pw), key)
+			response, err = personal.ListState(path, string(pw), key, opts["--state"])
 		case "audit":
 			response, err = personal.Audit(path, string(pw), key)
 		}

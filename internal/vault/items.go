@@ -16,6 +16,7 @@ type Item struct {
 	ID, Kind, Title, Username, Password, OTP, Filename string
 	Attachment                                         []byte
 	AttachmentProtected                                bool
+	State                                              string `json:",omitempty"`
 }
 
 const itemGroup = "Locklark items v1"
@@ -45,7 +46,7 @@ func validItems(items []Item, size int) bool {
 			return false
 		}
 		seen[it.ID] = true
-		for _, s := range []string{it.ID, it.Kind, it.Title, it.Username, it.Password, it.OTP, it.Filename} {
+		for _, s := range []string{it.ID, it.Kind, it.Title, it.Username, it.Password, it.OTP, it.Filename, it.State} {
 			if len(s) > MaxPayload-size || !xmlText(s) {
 				return false
 			}
@@ -55,6 +56,9 @@ func validItems(items []Item, size int) bool {
 			return false
 		}
 		size += len(it.Attachment)
+		if it.State != "" && it.State != "archived" {
+			return false
+		}
 		switch it.Kind {
 		case "login":
 			if it.Filename != "" || it.Attachment != nil || it.AttachmentProtected {
@@ -104,6 +108,9 @@ func writeItems(db *kdbx.Database, metadata []byte, items []Item) error {
 		e := kdbx.NewEntry()
 		e.UUID = itemUUID(it.ID)
 		e.Values = []kdbx.ValueData{slot("Title", it.Title, false), slot("Locklark.ID", it.ID, false), slot("Locklark.Kind", it.Kind, false)}
+		if it.State != "" {
+			e.Values = append(e.Values, slot("Locklark.State", it.State, false))
+		}
 		if it.Kind == "login" {
 			e.Values = append(e.Values, slot("Password", it.Password, true), slot("otp", it.OTP, true))
 			if it.Username != "" {
@@ -182,9 +189,17 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 		if _, ok := fields["Title"]; !ok || e.UUID != itemUUID(it.ID) {
 			return nil, nil, ErrSnapshot
 		}
+		extra := 0
+		if state, ok := fields["Locklark.State"]; ok {
+			if state.Content != "archived" {
+				return nil, nil, ErrSnapshot
+			}
+			it.State = state.Content
+			extra++
+		}
 		switch it.Kind {
 		case "login":
-			expected := 5
+			expected := 5 + extra
 			if v, ok := fields["UserName"]; ok {
 				it.Username = v.Content
 				expected++
@@ -194,7 +209,7 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 			}
 			it.Password, it.OTP = fields["Password"].Content, fields["otp"].Content
 		case "document":
-			if len(fields) != 3 || len(e.Binaries) != 1 {
+			if len(fields) != 3+extra || len(e.Binaries) != 1 {
 				return nil, nil, ErrSnapshot
 			}
 			ref := e.Binaries[0]
