@@ -11,6 +11,7 @@ import (
 	"filippo.io/age"
 	"github.com/jihuayu/locklark/internal/account"
 	"github.com/jihuayu/locklark/internal/password"
+	"github.com/jihuayu/locklark/internal/totp"
 	"github.com/jihuayu/locklark/internal/vault"
 	bolt "go.etcd.io/bbolt"
 	"os"
@@ -174,6 +175,7 @@ func existing(path string) (*bolt.DB, error) {
 }
 
 type result struct {
+	otp             *totp.Config
 	profile         password.Profile
 	value           []byte
 	session, intent string
@@ -287,7 +289,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			if option.backup == "" {
 				return invalid
 			}
-		case "item.edit.title", "item.edit.username", "item.edit.password", "item.reveal.username", "item.reveal.password", "item.regenerate.password":
+		case "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.regenerate.password", otpDisclosureAction:
 			if edit == nil {
 				return invalid
 			}
@@ -303,6 +305,18 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 					if items[i].ID == edit.ID {
 						if items[i].Kind != "login" {
 							return invalid
+						}
+						if action == otpDisclosureAction {
+							if items[i].OTP == "" {
+								outcome, refusal = "not-configured", ErrOTPNotConfigured
+								break
+							}
+							out.otp, e = totp.Parse(items[i].OTP)
+							if e != nil {
+								return e
+							}
+							outcome = "intent"
+							break
 						}
 						if revealAction(action) {
 							value := items[i].Username
@@ -330,6 +344,8 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 							items[i].Username = edit.Value
 						case "password":
 							items[i].Password = edit.Value
+						case "otp":
+							items[i].OTP = edit.Value
 						}
 						break
 					}
@@ -388,7 +404,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		if e != nil {
 			return e
 		}
-		if revealAction(action) && refusal == nil {
+		if (revealAction(action) || action == otpDisclosureAction) && refusal == nil {
 			out.session, out.intent = ev.Session, ev.hash()
 		}
 		if action == "backup.prepare" {
@@ -408,6 +424,9 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 	})
 	if e != nil {
 		clear(out.value)
+		if out.otp != nil {
+			out.otp.Clear()
+		}
 		return result{}, e
 	}
 	return out, refusal

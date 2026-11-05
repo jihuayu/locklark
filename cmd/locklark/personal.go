@@ -19,7 +19,7 @@ import (
 	"unicode/utf8"
 )
 
-var personalUsage = errors.New("usage: locklark personal <init|add-login|list|audit|archived-audit> --file PATH, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password, or reveal-login --file PATH --id ID --revision REV --field username|password, or generate-login --file PATH [--length N], or regenerate-password --file PATH --id ID --revision REV [--length N]")
+var personalUsage = errors.New("usage: locklark personal <init|add-login|list|audit|archived-audit> --file PATH, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password|otp, or reveal-login --file PATH --id ID --revision REV --field username|password, or generate-login --file PATH [--length N], or regenerate-password --file PATH --id ID --revision REV [--length N], or otp --file PATH --id ID --revision REV")
 
 // One terminal mode covers the entire interaction; no prompt or inter-field
 // gap is visible while echo is enabled.
@@ -93,6 +93,11 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 	var reveal personal.RevealTarget
 	length := password.DefaultPolicy().Length
 	switch action {
+	case "otp":
+		edit = personal.Edit{ID: opts["--id"], Revision: opts["--revision"], Field: "otp"}
+		if len(opts) != 3 || !personal.ValidEditTarget(edit.ID, edit.Revision, edit.Field) {
+			return personalUsage
+		}
 	case "generate-login", "regenerate-password":
 		expected := 1
 		if action == "regenerate-password" {
@@ -226,6 +231,19 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 		}
 		defer clear(key)
 		switch action {
+		case "otp":
+			if _, e = fmt.Fprintf(os.Stderr, "将在本终端显示条目 %s（修订 %s）的 TOTP 验证码；请确保本机时间准确，终端历史可能保留验证码。\r\n", edit.ID, edit.Revision); e != nil {
+				return e
+			}
+			confirmation, e := consoleField("输入 SHOW 确认显示验证码")
+			defer clear(confirmation)
+			if e != nil {
+				return e
+			}
+			if string(confirmation) != "SHOW" {
+				return errors.New("OTP disclosure cancelled")
+			}
+			response, err = personal.RevealOTP(path, string(pw), key, edit.ID, edit.Revision, os.Stderr)
 		case "reveal-login":
 			if _, e = fmt.Fprintf(os.Stderr, "即将在本终端显示条目 %s（修订 %s）的 %s 字段（JSON 字符串）；终端历史可能保留原值。\r\n", reveal.ID, reveal.Revision, reveal.Field); e != nil {
 				return e
@@ -323,12 +341,25 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 			}
 			response = map[string]string{"id": id}
 		case "edit-login":
-			prompt := map[string]string{"title": "新标题", "username": "新用户名（可留空）", "password": "新登录密码"}[edit.Field]
+			prompt := map[string]string{"title": "新标题", "username": "新用户名（可留空）", "password": "新登录密码", "otp": "新 TOTP 配置（Base32 或 otpauth URI，留空清除）"}[edit.Field]
 			value, e := consoleField(prompt)
 			if e != nil {
 				return e
 			}
 			defer clear(value)
+			if edit.Field == "otp" {
+				if _, e = fmt.Fprint(os.Stderr, "此操作只更新本地保存的 TOTP 配置，不会开启或关闭网站的双因素认证。\r\n"); e != nil {
+					return e
+				}
+				confirmation, e := consoleField("输入 SAVE 确认更新 TOTP")
+				defer clear(confirmation)
+				if e != nil {
+					return e
+				}
+				if string(confirmation) != "SAVE" {
+					return errors.New("OTP update cancelled")
+				}
+			}
 			edit.Value = string(value)
 			revision, e := personal.EditLogin(path, string(pw), key, edit)
 			if e != nil {

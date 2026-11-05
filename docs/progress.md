@@ -8,6 +8,8 @@
 
 继续接续：PR #2 经 Luna/max 复核、修复和 Ubuntu/Windows CI 后已合入 `011814d`。本轮新增生成密码并创建/按修订替换个人登录的 CLI 事务入口；生成策略进入签名审计，原值仅加密保存，另用受控披露查看。范围、故障注入、旧版升级及检查证据见 [personal-generation-validation.md](personal-generation-validation.md)；生成不是上游网站改密。后续继续接通个人 TOTP 产品入口。
 
+PR #3 已完成 Luna/max 复核和 Ubuntu/Windows CI，合入 `c37e833`。随即接续 `codex/personal-totp`，实现个人 TOTP 配置保存/清除、先记意图再计算的受控取码、窗口过期/回拨拒绝及配置生命周期清除；独立 Python HMAC 校验实际终端码。范围与验收见 [personal-totp-validation.md](personal-totp-validation.md)，仍不提供 Agent 种子或验证码访问。
+
 | 工作 | 已验证 | 下一项可开发、可验收的增量 |
 | --- | --- | --- |
 | 持库核心与兼容 | 双密钥、独立设备收钥、吊销后离线解密失败；Argon2id/旧 Argon2d 互操作；内置 1PUX 的原生登录/文档/附件与可逆迁出；TOTP 与密码生成核心验收；1PUX v3 只读清点及显式文件路径的匹配/缺失、共享与大小差异核对，来源审计回归通过 | 独立复核、区段/字段类型与重复标识预检、其他附件布局及完整条目/历史映射，以及真实迁移前的恢复演练 |
