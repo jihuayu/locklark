@@ -3,8 +3,10 @@
 package personal
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base32"
 	"encoding/json"
 	"errors"
@@ -178,6 +180,8 @@ func existing(path string) (*bolt.DB, error) {
 }
 
 type result struct {
+	material          []byte
+	slotDigest        [32]byte
 	destinationDigest string
 	health            HealthReport
 	migration         onepux.MappingReport
@@ -197,6 +201,7 @@ type result struct {
 }
 
 type commandOption struct {
+	unlocked   *Session
 	run        *RunRequest
 	search     *searchRequest
 	livePull   *LivePullRequest
@@ -224,6 +229,7 @@ func commandWithClose(run func() (result, error), closeDB func() error) (r resul
 	defer func() {
 		if closeErr := closeDB(); closeErr != nil && err == nil {
 			clear(r.value)
+			clear(r.material)
 			clear(r.archive)
 			if r.otp != nil {
 				r.otp.Clear()
@@ -298,9 +304,18 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		if len(raw) > 8192 || json.Unmarshal(raw, &slot) != nil {
 			return invalid
 		}
-		opened, e := account.Unwrap(pw, key, slot)
-		if e != nil {
-			return invalid
+		var opened []byte
+		var e error
+		if option.unlocked != nil {
+			if action == "desktop.unlock" || action == "backup.prepare" || sha256.Sum256(raw) != option.unlocked.slotDigest {
+				return invalid
+			}
+			opened = bytes.Clone(option.unlocked.material)
+		} else {
+			opened, e = account.Unwrap(pw, key, slot)
+			if e != nil {
+				return invalid
+			}
 		}
 		defer clear(opened)
 		var i identity
@@ -363,6 +378,13 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			}
 		}
 		switch action {
+		case "desktop.system.enable":
+			outcome = "intent"
+		case "desktop.system.unlock":
+			// Native session authentication and history validation already succeeded.
+		case "desktop.unlock":
+			out.material = bytes.Clone(opened)
+			out.slotDigest = sha256.Sum256(b.Get(slotKey))
 		case searchAction:
 			out.rows, e = searchRows(items, revisions, *option.search)
 			if e != nil {
@@ -451,7 +473,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			if option.backup == "" {
 				return invalid
 			}
-		case "item.run.username", "item.run.password", livePullAction, "item.inject.username", "item.inject.password", "item.trash", "item.untrash", "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.regenerate.password", otpDisclosureAction:
+		case "item.desktop.show.username", "item.desktop.show.password", "item.desktop.copy.username", "item.desktop.copy.password", "item.run.username", "item.run.password", livePullAction, "item.inject.username", "item.inject.password", "item.trash", "item.untrash", "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.regenerate.password", otpDisclosureAction:
 			if edit == nil {
 				return invalid
 			}
@@ -516,7 +538,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 						}
 						if readValueAction(action) {
 							value := items[i].Username
-							if action == "item.reveal.password" || action == "item.inject.password" || action == "item.run.password" || action == livePullAction {
+							if action == "item.reveal.password" || action == "item.inject.password" || action == "item.run.password" || action == "item.desktop.show.password" || action == "item.desktop.copy.password" || action == livePullAction {
 								value = items[i].Password
 							}
 							out.value = []byte(value)
@@ -667,6 +689,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 	})
 	if e != nil {
 		clear(out.archive)
+		clear(out.material)
 		clear(out.value)
 		if out.otp != nil {
 			out.otp.Clear()

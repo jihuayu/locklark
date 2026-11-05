@@ -146,7 +146,7 @@ go build -o locklark.exe ./cmd/locklark
 
 ## 五分钟复跑
 
-需要 Go 1.26.8；可用仓库的 `mise.toml` 选择工具链。在 Windows 上用 PowerShell 7 从仓库根目录运行：
+需要 Go 1.27.3；可用仓库的 `mise.toml` 选择工具链。在 Windows 上用 PowerShell 7 从仓库根目录运行：
 
 ```powershell
 go test ./...
@@ -249,7 +249,7 @@ B 的本地事务库把签名决定与单独审计流的事件一起加密提交
 
 内置 Bun 插件只读仓库 ID 和 PR 编号，产生 `github.pulls.get` 操作提案。Go 宿主把提案与调用方提供的已批准目标逐项比较，一致后才读凭据；它只向固定 GitHub HTTPS 域名和拥有者配置的 IPv4 地址发送 GET。返回值限 PR 编号、状态、合并时间，并核对上游返回的仓库 ID。上游接口见 [GitHub REST 文档](https://docs.github.com/en/rest/pulls/pulls#get-a-pull-request)。
 
-用以下命令在 PowerShell 7 复跑（Go 1.26.8、Bun 1.4.4）。测试启动独立 Bun 进程，并用本机合成 HTTPS 服务测证书拒绝、凭据注入与结果过滤；不需要 GitHub 令牌。
+用以下命令在 PowerShell 7 复跑（Go 1.27.3、Bun 1.4.4）。测试启动独立 Bun 进程，并用本机合成 HTTPS 服务测证书拒绝、凭据注入与结果过滤；不需要 GitHub 令牌。
 
 ```powershell
 $env:LOCKLARK_TEST_BUN = (Get-Command bun -CommandType Application | Select-Object -First 1).Source
@@ -350,3 +350,10 @@ go test -count=1 ./internal/vault -run 'TestKDBXIndependentPeer|TestIndependentN
 新目录另可用 `NewConfigWithWriterACL` 同时强制入网证明与数据写权限：`BuildUpdate` 允许当前 writer 设备发布新密文，reader 不可发布，成员/角色/冻结仍只由 owner 授权。事务提交和历史重读都依据之前的可信状态执行权限检查；`Read` 返回验证后的 `SnapshotSigner` 供解密使用。仍是本地 Go API，无网络同步或产品界面，见[团队写权限验收](docs/team-writer-acl-validation.md)。
 
 个人 CLI 新增 `trash-login` / `restore-login`（`--file`、`--id`、`--revision`，SAVE 确认），以及 `list --state trashed`。回收站条目需先恢复才能读取或编辑，恢复时保留原活动/归档状态。备份和加密迁出仍包含回收站；不自动清空或永久擦除。详见 [回收站验收](docs/personal-trash-validation.md)。
+
+
+### 原生桌面（开发版）
+
+使用 Go 1.27.3 运行 `go run ./cmd/locklark-desktop`。界面由 MyGo 原生 UI 渲染，支持创建/解锁个人金库、标题搜索、逐字段显示/复制、编辑、归档/回收站、审计、体检和现有基本登录导入/加密导出。首次使用主密码与 Secret Key；解锁后在安全设置主动启用系统快捷解锁。Windows 使用 Passport KSP 的 Hello 私钥操作；macOS 构建需开启 CGO，使用本设备钥匙串及用户验证；Linux 使用 Secret Service。系统服务不可用时回到完整解锁，没有明文文件替代存储。
+
+系统快捷解锁默认 24 小时后要求完整解锁；这是本地系统时间策略，不能抵抗系统时钟回拨。开启快捷解锁会将金库身份材料交给对应 OS 的保护机制；不保存主密码或 Secret Key。Linux 系统钥匙串可能不逐次弹验证，且同一系统用户的其他程序可能有读取权限。屏幕锁定/睡眠通知能否到达取决于平台会话服务。Windows Hello/TPM、macOS Touch ID 的设备行为尚需真机验收，当前不能作为生产替换承诺。详见 [桌面验收](docs/desktop-validation.md)。

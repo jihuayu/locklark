@@ -18,7 +18,7 @@ import (
 )
 
 const searchAction = "item.search"
-const searchProfile = "title-nfc-fold-substring-v1"
+const searchProfile = "title-nfc-fold-substring-u17-v2"
 
 var ErrSearchQuery = errors.New("invalid title search query or state scope")
 
