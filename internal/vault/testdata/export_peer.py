@@ -4,7 +4,7 @@ import json
 import sys
 from pykeepass import PyKeePass
 
-expected = json.load(sys.stdin)
+expected = json.loads(sys.stdin.buffer.read().decode("utf-8"))
 db = PyKeePass(sys.argv[1], password="synthetic-export-password")
 params = db.kdbx.header.value.dynamic_header.kdf_parameters.data.dict
 assert params["M"].value == 64 << 20 and params["I"].value == 3 and params["P"].value >= 1

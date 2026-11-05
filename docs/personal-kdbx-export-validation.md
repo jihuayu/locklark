@@ -11,3 +11,5 @@
 失败先行日志 `/tmp/locklark-validation/export-red.log`：缺少 ExportKDBX/导出 API。合成测试覆盖错误因素、回滚零结果、已存在目标不覆盖、发布失败意图保留、备份恢复保留意图；独立 PyKeePass 验证精确 KDF 参数、密码-only 解锁及错误密码拒绝、Unicode/重复标题、空字段、OTP、原始附件及保护标记。真实 PTY/ConPTY 验证确认/取消、加密导出、独立重开和无值回执。全仓 Go、定向 race、vet/模块和最终双平台 CI、Luna/max 复核结果记录在 PR。
 
 Luna/max 发现并修正认证前目标存在性探测：移除 Lstat 预检，认证提交后由原子 no-replace 拒绝已有目标，因此此类发布拒绝也保留 intent。补充并发发布单赢家、符号链接保留和临时文件清理；Windows 无创建符号链接权限时仅该测试明确跳过。PR: https://github.com/jihuayu/locklark/pull/9 。
+
+首次 Windows CI 暴露独立读取测试的 stdin 默认编码问题（中文标题比较失败）；以 PYTHONIOENCODING=cp1252 复现，改用字节流显式 UTF-8 解码后通过。生产 KDBX 字节未改。Luna/max 对 bfa325c 实现独立复核并实跑 Go/PyKeePass、race、PTY 后无阻塞项；最终编码补丁与双平台检查结果见 PR。
