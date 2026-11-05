@@ -35,6 +35,7 @@ type Pins struct {
 	Sequencer, Publisher string
 }
 type Config struct {
+	requirePossession    bool
 	scope                string
 	owners               map[string]ed25519.PublicKey
 	sequencer, publisher ed25519.PublicKey
@@ -46,8 +47,9 @@ type Checkpoint struct {
 	Hash    string `json:"hash"`
 }
 
-// Device keys are owner assertions. This core does not verify possession or
-// cryptographically bind the encryption and signing keys to one physical device.
+// NewConfig stores owner assertions. NewConfigWithPossession additionally
+// requires a device admission proving both private keys; neither proves that
+// keys cannot be copied or that they belong to one physical machine.
 type Device struct {
 	ID         string `json:"id"`
 	Encryption string `json:"encryption"`
@@ -62,14 +64,15 @@ type Member struct {
 	Devices []Device `json:"devices"`
 }
 type Proposal struct {
-	Scope          string     `json:"scope"`
-	Parent         Checkpoint `json:"parent"`
-	Epoch          uint64     `json:"epoch"`
-	Mode           string     `json:"mode"`
-	Members        []Member   `json:"members"`
-	SnapshotDigest string     `json:"snapshot_digest"`
-	Owner          string     `json:"owner"`
-	Signature      []byte     `json:"signature"`
+	Scope          string      `json:"scope"`
+	Parent         Checkpoint  `json:"parent"`
+	Epoch          uint64      `json:"epoch"`
+	Mode           string      `json:"mode"`
+	Members        []Member    `json:"members"`
+	SnapshotDigest string      `json:"snapshot_digest"`
+	Owner          string      `json:"owner"`
+	Signature      []byte      `json:"signature"`
+	Admissions     []Admission `json:"admissions,omitempty"`
 }
 type Receipt struct {
 	Proposal  Proposal `json:"proposal"`
@@ -236,7 +239,7 @@ func (c *Config) owner(k ed25519.PrivateKey) (string, error) {
 // Build always creates fresh encryption material from the complete, independently
 // supplied items. It never recovers data or reuses a historical snapshot key.
 // Members must be in canonical ID order. Recipients cannot be supplied separately.
-func Build(c *Config, owner, publisher ed25519.PrivateKey, parent Checkpoint, members []Member, items []vault.Item) (Proposal, vault.Snapshot, error) {
+func Build(c *Config, owner, publisher ed25519.PrivateKey, parent Checkpoint, members []Member, items []vault.Item, admissions ...Admission) (Proposal, vault.Snapshot, error) {
 	who, err := c.owner(owner)
 	if err != nil || !c.validCheckpoint(parent) || parent.Version >= maxVersions || !validPrivate(publisher) || !bytes.Equal(publisher.Public().(ed25519.PublicKey), c.publisher) {
 		return Proposal{}, vault.Snapshot{}, ErrInvalid
@@ -246,11 +249,24 @@ func Build(c *Config, owner, publisher ed25519.PrivateKey, parent Checkpoint, me
 		return Proposal{}, vault.Snapshot{}, err
 	}
 	members = cloneMembers(members)
+	if len(admissions) > 64 {
+		return Proposal{}, vault.Snapshot{}, ErrInvalid
+	}
+	// Validate bounds before copying/sorting caller-owned proof buffers.
+	for _, proof := range admissions {
+		if VerifyAdmission(c, proof.Challenge.Enrollment, proof) != nil {
+			return Proposal{}, vault.Snapshot{}, ErrInvalid
+		}
+	}
+	proofs := orderedAdmissions(admissions)
+	if c.verifyAdmissions(Proposal{Parent: parent, Mode: "active", Members: members, Admissions: proofs}) != nil {
+		return Proposal{}, vault.Snapshot{}, ErrInvalid
+	}
 	s, err := vault.SealItems([]byte("locklark/team/items/v1/"+c.scope), items, parent.Version+1, recipients, publisher)
 	if err != nil {
 		return Proposal{}, vault.Snapshot{}, ErrInvalid
 	}
-	p := Proposal{Scope: c.scope, Parent: parent, Epoch: s.Epoch, Mode: "active", Members: members, SnapshotDigest: snapshotDigest(s), Owner: who}
+	p := Proposal{Scope: c.scope, Parent: parent, Epoch: s.Epoch, Mode: "active", Members: members, SnapshotDigest: snapshotDigest(s), Owner: who, Admissions: proofs}
 	p.Signature = ed25519.Sign(owner, p.proof())
 	return p, s, nil
 }
@@ -283,6 +299,9 @@ func (c *Config) verifyProposal(p Proposal) error {
 			return ErrInvalid
 		}
 	default:
+		return ErrInvalid
+	}
+	if c.verifyAdmissions(p) != nil {
 		return ErrInvalid
 	}
 	if !ed25519.Verify(c.owners[p.Owner], p.proof(), p.Signature) {
