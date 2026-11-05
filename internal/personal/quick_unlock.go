@@ -53,6 +53,9 @@ func (s *Session) EnableSystemUnlock(store SystemUnlockStore) error {
 		return e
 	}
 	defer clear(raw)
+	if s.lockRequested.Load() {
+		return ErrSessionLocked
+	}
 	if store.Store(id, raw) != nil {
 		return ErrSessionLocked
 	}

@@ -110,6 +110,15 @@ func (s *Session) execute(action string, add vault.Item, edit *Edit, option comm
 	if errors.Is(e, invalid) {
 		s.lock()
 	}
+	if s.active(false) != nil {
+		clear(r.material)
+		clear(r.value)
+		clear(r.archive)
+		if r.otp != nil {
+			r.otp.Clear()
+		}
+		return result{}, ErrSessionLocked
+	}
 	return r, e
 }
 func (s *Session) List(state string) ([]Row, error) {

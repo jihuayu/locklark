@@ -57,6 +57,7 @@ func setNumber(h uintptr, name string, n uint32) error {
 	prop := wide(name)
 	r, _, _ := nSet.Call(h, uintptr(unsafe.Pointer(prop)), uintptr(unsafe.Pointer(&n)), 4, 0)
 	runtime.KeepAlive(prop)
+	runtime.KeepAlive(&n)
 	if r != 0 {
 		return ErrUnavailable
 	}
@@ -67,6 +68,8 @@ func number(h uintptr, name string) (uint32, error) {
 	prop := wide(name)
 	r, _, _ := nGet.Call(h, uintptr(unsafe.Pointer(prop)), uintptr(unsafe.Pointer(&v)), 4, uintptr(unsafe.Pointer(&n)), 0)
 	runtime.KeepAlive(prop)
+	runtime.KeepAlive(&n)
+	runtime.KeepAlive(&v)
 	if r != 0 || n != 4 {
 		return 0, ErrUnavailable
 	}
