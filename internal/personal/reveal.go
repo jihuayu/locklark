@@ -52,12 +52,16 @@ func revealLogin(target RevealTarget, terminal io.Writer, prepare func() (result
 	}
 	quoted := quoteDisclosure(r.value)
 	defer clear(quoted)
+	return writeDisclosure(terminal, quoted, r.session, r.intent)
+}
+
+func writeDisclosure(terminal io.Writer, quoted []byte, session, intent string) (DisclosureReceipt, error) {
 	n, err := terminal.Write(quoted)
 	if err != nil || n != len(quoted) {
 		// A writer error may contain the secret. Never propagate its message.
 		return DisclosureReceipt{}, ErrDisclosureOutput
 	}
-	return DisclosureReceipt{Status: "written-to-terminal", Session: r.session, Intent: r.intent}, nil
+	return DisclosureReceipt{Status: "written-to-terminal", Session: session, Intent: intent}, nil
 }
 
 // JSON's mandatory escaping leaves C1 and Unicode format controls intact.

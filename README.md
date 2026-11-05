@@ -12,7 +12,7 @@
 
 两个已有布局的引用现可校验为明确的原生槽位和字段类型，拒绝旧修订、区段错配、名称冒充 ID 和跨布局目标；OTP 类型指存储配置，不是生成码。结果只含元数据，不验输入真实性或授予权限，尚无 CLI 取值入口；见[字段绑定验收](docs/reference-binding-validation.md)。
 
-独立 Go TOTP 核心已通过 RFC 6238/4226 向量，支持有限的 Base32/otpauth 配置、SHA1/256/512、6/8 位码和显式时间窗口。短种子、不支持参数和非法时间明确拒绝，普通格式化与 JSON 隐藏种子和码值；现有短种子演练数据没有改写。尚未接入产品取码或授权/披露审计，不代表已兼容 op 的 OTP 行为；见[TOTP 验收](docs/totp-validation.md)。
+Go TOTP 核心已通过 RFC 6238/4226 向量，支持有限的 Base32/otpauth 配置、SHA1/256/512、6/8 位码和显式时间窗口。个人 CLI 已接入配置保存与先记意图的受控取码；短种子、不支持参数和非法时间明确拒绝，现有短种子演练数据不改写。不代表已兼容 op 的 OTP 行为；核心见[TOTP 验收](docs/totp-validation.md)，产品入口见[个人 TOTP 验收](docs/personal-totp-validation.md)。
 
 密码生成核心使用系统 CSPRNG 与标准库拒绝采样，默认 24 位字母数字；策略要求至少 128 位组合熵，拒绝字符集重复、弱策略及超限。个人 CLI 已接入生成并保存/替换的事务流程，普通输出不包含生成值；桌面生成入口仍未实现。核心证据见[密码生成验收](docs/password-generation-validation.md)，产品入口见[生成保存验收](docs/personal-generation-validation.md)。
 
@@ -40,7 +40,7 @@ go build -o locklark.exe ./cmd/locklark
 .\locklark.exe personal edit-login --file owner.ll --id $itemID --revision $revision --field password
 ```
 
-可编辑 `title`、`username` 或 `password`；新值只在不回显的终端提示中输入。用户名可以清空。每次成功编辑返回同一个 ID 和新版本；版本来自该条目最后一次成功操作的签名事件，不是密码摘要。遇到版本冲突时不写条目，应重新列出并核对后再编辑。其他条目的修改以及审计查询不改变此条目的版本。成功、冲突和找不到目标都会写审计；只记录被编辑的字段名及已核验的 ID 和基准版本，不保存调用者提交的未知 ID、版本串或字段值。
+可编辑 `title`、`username`、`password` 或 `otp`；新值只在不回显的终端提示中输入。用户名可以清空；TOTP 配置另有确认，见下文。每次成功编辑返回同一个 ID 和新版本；版本来自该条目最后一次成功操作的签名事件，不是密码摘要。遇到版本冲突时不写条目，应重新列出并核对后再编辑。其他条目的修改以及审计查询不改变此条目的版本。成功、冲突和找不到目标都会写审计；只记录被编辑的字段名及已核验的 ID 和基准版本，不保存调用者提交的未知 ID、版本串或字段值。
 
 新版可在原个人库上直接编辑。写入首条编辑操作审计后，`d294bb4` 的旧 CLI 会拒绝不认识的事件，不能用旧版继续打开该库。升级验收：`python scripts/personal_acceptance.py <新版程序> <旧版程序>`。
 
@@ -72,6 +72,20 @@ go build -o locklark.exe ./cmd/locklark
 生成器只在同一事务已经认证解锁因素、快照、审计及目标修订之后运行。生成保存与 `item.generate` / `item.regenerate.password` 签名加密审计一起提交，审计包含公开长度/字符集大小/组合熵下界；随机失败不修改库，旧修订竞争只能有一次成功。stdout 仅有 ID、修订和策略，终端不直接显示生成值；用 `reveal-login` 另行确认查看。回执丢失时先重新 `list` 和 `audit` 核对，不要把重试当成幂等创建。
 
 写入新生成事件后旧 CLI 会拒绝不认识的历史；新版仍可打开升级前的库，也支持生成历史的备份/恢复。验收：`python scripts/generation_acceptance.py <新版程序> [升级前程序]`。
+
+## 保存 TOTP 并查看验证码
+
+```powershell
+.\locklark.exe personal edit-login --file owner.ll --id $itemID --revision $revision --field otp
+# 将返回的新修订保存到 $revision，再取码：
+.\locklark.exe personal otp --file owner.ll --id $itemID --revision $revision
+```
+
+编辑时隐藏输入 Base32 种子或 `otpauth://totp/…` 配置，并输入 `SAVE` 确认；精确空输入表示清除本地配置。它不会改变网站的双因素设置。支持 16–64 字节种子、SHA1/256/512、6/8 位码、1–3600 秒周期；不接受空白变体、短种子、HOTP 或未知参数，也不会根据输入 URI 发起网络请求。
+
+`otp` 必须重新输入解锁因素并以 `SHOW` 确认。认证事务核验条目/修订和配置，提交签名加密的 `item.reveal.otp-code` 意图后才计算验证码；终端 stderr 显示 JSON 字符串，stdout 只返回会话、意图摘要及 Unix 秒半开有效区间 `valid_from` / `valid_until`。未配置、未知 ID 和旧修订会拒绝；普通 `reveal-login` 仍不能读取 OTP 种子或码。
+
+时间来自本机，须保持时钟准确；操作期间回拨或写入前已经过期时不输出码，需要本人明确重试。终端写入阻塞可能让显示到达时已经过期，成功写入也不能证明用户看到或网站接受；审计一直保留为 `intent`。输出错误不返回成功回执，部分写入无法撤回。新增动作写入后旧版 CLI 会拒绝此历史；包含配置编辑和取码意图的备份可由新版恢复。验收：`python scripts/otp_acceptance.py <新版程序> [升级前程序]`。
 
 ## 个人库离线备份与恢复
 

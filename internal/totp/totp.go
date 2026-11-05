@@ -44,6 +44,17 @@ type Config struct {
 	params Parameters
 }
 
+// Clear erases this configuration instance and makes it unusable. Its owner
+// must not call Clear concurrently with readers or when another caller still
+// needs it. This does not erase prior copies or the original input string.
+func (c *Config) Clear() {
+	if c != nil {
+		clear(c.key[:])
+		c.size = 0
+		c.params = Parameters{}
+	}
+}
+
 // Window is a half-open interval of UTC Unix seconds: [From, Until).
 type Window struct{ From, Until int64 }
 
@@ -73,7 +84,7 @@ func (*Code) UnmarshalJSON([]byte) error   { return ErrUnsupported }
 
 // Parse accepts canonical base32 (ASCII case-insensitive, with or without
 // padding), or a strict otpauth://totp URI. It never returns an input-bearing
-// decoder error. The returned configuration is immutable and safe to share.
+// decoder error. Read-only use is safe to share until the owner calls Clear.
 func Parse(raw string) (*Config, error) {
 	if len(raw) > MaxInput {
 		return nil, ErrLimit
