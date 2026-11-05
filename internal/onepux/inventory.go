@@ -137,7 +137,10 @@ func inventory(root map[string]any, r *Report, reasons map[string]bool, files ma
 							}
 						}
 					}
-					if err := sectionInventory(object, &r.SectionInventory, reasons); err != nil {
+					if err := sectionInventory(object, &r.SectionInventory, r.LoginFieldInventory.Fields, reasons); err != nil {
+						return err
+					}
+					if err := loginFieldInventory(object, &r.LoginFieldInventory, r.SectionInventory.Sections+r.SectionInventory.Fields, reasons); err != nil {
 						return err
 					}
 					if _, exists := object["documentAttributes"]; exists {

@@ -12,6 +12,8 @@ PR #3 已完成 Luna/max 复核和 Ubuntu/Windows CI，合入 `c37e833`。随即
 
 PR #4 经 Luna/max 复核和 Ubuntu/Windows CI 合入 `55b3ae7`。继续从该基线开发 `codex/personal-references`：认证引用目录、按引用披露用户名/密码及生成验证码，在同一事务内解析、绑定、核对修订并提交意图；同名、类型串用和旧引用拒绝。验收与当前状态见 [personal-references-validation.md](personal-references-validation.md)。
 
+PR #5 已完成 Luna/max 复核（修复 Unicode 格式字符造成的终端显示欺骗）、全仓与定向 race，以及最终 Ubuntu/Windows CI，合入 `85a3d6f`。继续开发 `codex/onepux-login-fields`，扩展 1PUX 登录字段的字面清点、重复/未知 designation、独立 type/fieldType 属性和共享容量预算；不输出源值、不授予迁移许可。证据与下一项见 [onepux-login-fields-validation.md](onepux-login-fields-validation.md)。
+
 | 工作 | 已验证 | 下一项可开发、可验收的增量 |
 | --- | --- | --- |
 | 持库核心与兼容 | 双密钥、独立设备收钥、吊销后离线解密失败；Argon2id/旧 Argon2d 互操作；内置 1PUX 的原生登录/文档/附件与可逆迁出；TOTP 与密码生成核心验收；1PUX v3 只读清点及显式文件路径的匹配/缺失、共享与大小差异核对，来源审计回归通过 | 独立复核、区段/字段类型与重复标识预检、其他附件布局及完整条目/历史映射，以及真实迁移前的恢复演练 |
