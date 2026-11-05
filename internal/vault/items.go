@@ -19,6 +19,7 @@ type Item struct {
 	AttachmentProtected                                bool
 	State                                              string `json:",omitempty"`
 	URL                                                string `json:",omitempty"`
+	PreviousState                                      string `json:",omitempty"`
 }
 
 const itemGroup = "Locklark items v1"
@@ -48,7 +49,7 @@ func validItems(items []Item, size int) bool {
 			return false
 		}
 		seen[it.ID] = true
-		for _, s := range []string{it.ID, it.Kind, it.Title, it.Username, it.Password, it.OTP, it.Filename, it.State, it.URL} {
+		for _, s := range []string{it.ID, it.Kind, it.Title, it.Username, it.Password, it.OTP, it.Filename, it.State, it.URL, it.PreviousState} {
 			if len(s) > MaxPayload-size || !xmlText(s) {
 				return false
 			}
@@ -58,7 +59,10 @@ func validItems(items []Item, size int) bool {
 			return false
 		}
 		size += len(it.Attachment)
-		if it.State != "" && it.State != "archived" {
+		if it.State != "" && it.State != "archived" && it.State != "trashed" {
+			return false
+		}
+		if it.PreviousState != "" && (it.State != "trashed" || it.PreviousState != "archived") {
 			return false
 		}
 		switch it.Kind {
@@ -117,6 +121,9 @@ func writeItems(db *kdbx.Database, metadata []byte, items []Item) error {
 		e.Values = []kdbx.ValueData{slot("Title", it.Title, false), slot("Locklark.ID", it.ID, false), slot("Locklark.Kind", it.Kind, false)}
 		if it.State != "" {
 			e.Values = append(e.Values, slot("Locklark.State", it.State, false))
+		}
+		if it.PreviousState != "" {
+			e.Values = append(e.Values, slot("Locklark.PreviousState", it.PreviousState, false))
 		}
 		if it.Kind == "login" {
 			if it.URL != "" {
@@ -201,10 +208,17 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 		}
 		extra := 0
 		if state, ok := fields["Locklark.State"]; ok {
-			if state.Content != "archived" {
+			if state.Content != "archived" && state.Content != "trashed" {
 				return nil, nil, ErrSnapshot
 			}
 			it.State = state.Content
+			extra++
+		}
+		if previous, ok := fields["Locklark.PreviousState"]; ok {
+			if it.State != "trashed" || previous.Content != "archived" {
+				return nil, nil, ErrSnapshot
+			}
+			it.PreviousState = previous.Content
 			extra++
 		}
 		switch it.Kind {

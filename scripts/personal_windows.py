@@ -6,7 +6,7 @@ import time
 from winpty import PTY
 
 
-def invoke(binary, action, path, answers, *, ok, issue, options, barrier, deny_issue=False, expect_error=None, disclosed=None, forbidden=(), capture_disclosure=False):
+def invoke(binary, action, path, answers, *, ok, issue, options, barrier, deny_issue=False, expect_error=None, disclosed=None, forbidden=(), capture_disclosure=False, required_before_last_prompt=()):
     terminal = PTY(2000, 40, backend=0)
     terminal.spawn(binary, " " + subprocess.list2cmdline(["personal", action, "--file", path, *options]))
     view = ""
@@ -31,6 +31,8 @@ def invoke(binary, action, path, answers, *, ok, issue, options, barrier, deny_i
                 raise RuntimeError(f"{action}: missing ConPTY prompt")
         screen = ansi.sub("", view)
         offset = screen.index(marker, offset) + len(marker)
+        if index == len(answers)-1 and any(value not in screen[:offset] for value in required_before_last_prompt):
+            raise RuntimeError("required scope notice missing before confirmation")
         if value is None:
             match = re.search(r"(?:LL1-[A-Z2-7]{26}|LLR2-[A-Z2-7]{52}-[A-Z2-7]{52}|LLR1-[A-Z2-7]{52})", screen)
             if not issue or match is None:

@@ -16,6 +16,7 @@ for item in expected:
     e = by_id[item["ID"]]
     assert e.title == item["Title"] and e.get_custom_property("Locklark.Kind") == item["Kind"]
     assert (e.get_custom_property("Locklark.State") or "") == item.get("State", "")
+    assert (e.get_custom_property("Locklark.PreviousState") or "") == item.get("PreviousState", "")
     assert (e.url or "") == item.get("URL", "")
     if item["Kind"] == "login":
         assert (e.username or "") == item["Username"] and (e.password or "") == item["Password"]

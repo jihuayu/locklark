@@ -20,7 +20,7 @@ import (
 	"unicode/utf8"
 )
 
-var personalUsage = errors.New("usage: locklark personal <init|add-login|list|audit|archived-audit|references> --file PATH, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password|otp|url, or reveal-login --file PATH --id ID --revision REV --field username|password, or generate-login --file PATH [--length N], or regenerate-password --file PATH --id ID --revision REV [--length N], or otp --file PATH --id ID --revision REV, or reveal-ref|otp-ref --file PATH --ref REF --revision REV, or inspect-1pux --file PATH --source ARCHIVE, or export-kdbx --file PATH --out NEW_FILE.kdbx, or archive-login|unarchive-login --file PATH --id ID --revision REV, or list --file PATH [--state active|archived|all], or match-logins --file PATH --origin HTTPS_ORIGIN --frame-origin HTTPS_ORIGIN")
+var personalUsage = errors.New("usage: locklark personal <init|add-login|list|audit|archived-audit|references> --file PATH, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password|otp|url, or reveal-login --file PATH --id ID --revision REV --field username|password, or generate-login --file PATH [--length N], or regenerate-password --file PATH --id ID --revision REV [--length N], or otp --file PATH --id ID --revision REV, or reveal-ref|otp-ref --file PATH --ref REF --revision REV, or inspect-1pux --file PATH --source ARCHIVE, or export-kdbx --file PATH --out NEW_FILE.kdbx, or archive-login|unarchive-login --file PATH --id ID --revision REV, or list --file PATH [--state active|archived|trashed|all], or trash-login|restore-login --file PATH --id ID --revision REV, or match-logins --file PATH --origin HTTPS_ORIGIN --frame-origin HTTPS_ORIGIN")
 
 // One terminal mode covers the entire interaction; no prompt or inter-field
 // gap is visible while echo is enabled.
@@ -101,7 +101,7 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 		if err := personal.ValidateMatchOrigins(opts["--origin"], opts["--frame-origin"]); err != nil {
 			return err
 		}
-	case "archive-login", "unarchive-login":
+	case "archive-login", "unarchive-login", "trash-login", "restore-login":
 		if len(opts) != 3 || !personal.ValidEditTarget(opts["--id"], opts["--revision"], "title") {
 			return personalUsage
 		}
@@ -150,8 +150,10 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 		if len(opts) != expected {
 			return personalUsage
 		}
-		if _, err := password.Validate(password.Policy{Length: length, Alphabet: password.DefaultAlphabet}); err != nil {
-			return err
+		if action == "generate-login" {
+			if _, err := password.Validate(password.Policy{Length: length, Alphabet: password.DefaultAlphabet}); err != nil {
+				return err
+			}
 		}
 	case "reveal-login":
 		reveal = personal.RevealTarget{ID: opts["--id"], Revision: opts["--revision"], Field: opts["--field"]}
@@ -281,7 +283,7 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 			if subtle.ConstantTimeCompare(password, confirmation) != 1 {
 				return errors.New("export passwords did not match")
 			}
-			if _, e = fmt.Fprint(os.Stderr, "导出包含当前条目的敏感值，以独立密码加密；不包含账户钥匙、审计或恢复材料。\r\n"); e != nil {
+			if _, e = fmt.Fprint(os.Stderr, "导出包含活动、归档和回收站条目的敏感值，以独立密码加密；不包含账户钥匙、审计或恢复材料。\r\n其他工具未必识别归档或回收站状态。\r\n"); e != nil {
 				return e
 			}
 			consent, e := consoleField("输入 SAVE 确认加密导出")
@@ -464,6 +466,27 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 				return e
 			}
 			response = map[string]string{"id": edit.ID, "revision": revision}
+		case "trash-login", "restore-login":
+			verb := "移入回收站"
+			if action == "restore-login" {
+				verb = "从回收站恢复"
+			}
+			if _, e := fmt.Fprintf(os.Stderr, "将%s登录 %s（修订 %s）。恢复后回到原活动/归档状态；回收站不自动清空。\r\n", verb, opts["--id"], opts["--revision"]); e != nil {
+				return e
+			}
+			confirmation, e := consoleField("输入 SAVE 确认更改回收站状态")
+			defer clear(confirmation)
+			if e != nil {
+				return e
+			}
+			if string(confirmation) != "SAVE" {
+				return errors.New("trash change cancelled")
+			}
+			revision, e := personal.SetTrashed(path, string(pw), key, opts["--id"], opts["--revision"], action == "trash-login")
+			if e != nil {
+				return e
+			}
+			response = map[string]string{"id": opts["--id"], "revision": revision}
 		case "archive-login", "unarchive-login":
 			verb := "取消归档"
 			if action == "archive-login" {

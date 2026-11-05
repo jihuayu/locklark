@@ -39,6 +39,12 @@ func (request *generationRequest) value() (password.Secret, error) {
 	if request == nil || request.generate == nil {
 		return password.Secret{}, password.ErrRandom
 	}
+	if request.policy.Alphabet != password.DefaultAlphabet {
+		return password.Secret{}, password.ErrInvalid
+	}
+	if _, err := password.Validate(request.policy); err != nil {
+		return password.Secret{}, err
+	}
 	secret, err := request.generate(request.policy)
 	if err != nil {
 		return password.Secret{}, password.ErrRandom
@@ -66,10 +72,7 @@ func RegeneratePassword(path, pw string, key []byte, id, revision string, length
 	if !ValidEditTarget(id, revision, "password") {
 		return GenerationReceipt{}, errors.New("invalid login ID or revision")
 	}
-	option, err := generationOption(length)
-	if err != nil {
-		return GenerationReceipt{}, err
-	}
+	option := commandOption{generation: &generationRequest{policy: password.Policy{Length: length, Alphabet: password.DefaultAlphabet}, generate: password.Generate}}
 	r, err := command(path, pw, key, "item.regenerate.password", vault.Item{}, &Edit{ID: id, Revision: revision, Field: "password"}, option)
 	if err != nil {
 		return GenerationReceipt{}, err

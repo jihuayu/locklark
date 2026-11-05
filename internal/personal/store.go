@@ -33,10 +33,11 @@ type identity struct {
 func (i *identity) clear() { clear(i.Signing); clear(i.Audit); clear(i.AuditEncryption) }
 
 type Row struct {
-	State    string `json:"state"`
-	ID       string `json:"id"`
-	Title    string `json:"title"`
-	Revision string `json:"revision"`
+	RestoreState string `json:"restore_state,omitempty"`
+	State        string `json:"state"`
+	ID           string `json:"id"`
+	Title        string `json:"title"`
+	Revision     string `json:"revision"`
 }
 
 var b32 = base32.StdEncoding.WithPadding(base32.NoPadding)
@@ -251,7 +252,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 	if (action == exportAction) != (option.export != nil) {
 		return result{}, invalid
 	}
-	if option.generation != nil {
+	if option.generation != nil && action != "item.regenerate.password" {
 		if option.generation.policy.Alphabet != password.DefaultAlphabet {
 			return result{}, password.ErrInvalid
 		}
@@ -375,7 +376,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			if option.backup == "" {
 				return invalid
 			}
-		case "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.regenerate.password", otpDisclosureAction:
+		case "item.trash", "item.untrash", "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.regenerate.password", otpDisclosureAction:
 			if edit == nil {
 				return invalid
 			}
@@ -391,6 +392,24 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 					if items[i].ID == edit.ID {
 						if items[i].Kind != "login" {
 							return invalid
+						}
+						if trashAction(action) {
+							if action == "item.trash" {
+								if items[i].State == "trashed" {
+									outcome, refusal = "already-trashed", ErrAlreadyTrashed
+								} else {
+									items[i].PreviousState, items[i].State = items[i].State, "trashed"
+								}
+							} else if items[i].State != "trashed" {
+								outcome, refusal = "not-trashed", ErrNotTrashed
+							} else {
+								items[i].State, items[i].PreviousState = items[i].PreviousState, ""
+							}
+							break
+						}
+						if items[i].State == "trashed" {
+							outcome, refusal = "trashed", ErrTrashed
+							break
 						}
 						if lifecycleAction(action) {
 							desired := ""
@@ -439,6 +458,9 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 							profile = &out.profile
 							break
 						}
+						if err := validateEditValue(*edit); err != nil {
+							return err
+						}
 						switch edit.Field {
 						case "url":
 							items[i].URL = edit.Value
@@ -477,17 +499,24 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			}
 			items = append(items, add)
 			out.id = add.ID
-		case "item.list", "item.list.archived", "item.list.all":
+		case "item.list", "item.list.archived", "item.list.trashed", "item.list.all":
 			out.rows = make([]Row, 0, len(items))
 			for _, it := range items {
-				if action == "item.list" && it.State != "" || action == "item.list.archived" && it.State != "archived" {
+				if action == "item.list" && it.State != "" || action == "item.list.archived" && it.State != "archived" || action == "item.list.trashed" && it.State != "trashed" {
 					continue
 				}
 				state := "active"
-				if it.State == "archived" {
-					state = "archived"
+				if it.State != "" {
+					state = it.State
 				}
-				out.rows = append(out.rows, Row{ID: it.ID, Title: it.Title, Revision: revisions[it.ID], State: state})
+				restoreState := ""
+				if it.State == "trashed" {
+					restoreState = "active"
+					if it.PreviousState == "archived" {
+						restoreState = "archived"
+					}
+				}
+				out.rows = append(out.rows, Row{ID: it.ID, Title: it.Title, Revision: revisions[it.ID], State: state, RestoreState: restoreState})
 			}
 		case "audit.list":
 		default:

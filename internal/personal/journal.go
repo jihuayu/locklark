@@ -132,7 +132,7 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 		if n != 1 || !digestOK(e.Link) || e.Item != "" {
 			return invalid
 		}
-	case "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.regenerate.password", otpDisclosureAction:
+	case "item.trash", "item.untrash", "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.regenerate.password", otpDisclosureAction:
 		if e.Result == "not-found" && e.Item == "" && e.BaseRevision == "" && n > 1 {
 			break
 		}
@@ -141,8 +141,10 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 			accepted = "intent"
 		}
 		already := e.Action == "item.archive" && e.Result == "already-archived" || e.Action == "item.unarchive" && e.Result == "already-active"
+		already = already || e.Action == "item.trash" && e.Result == "already-trashed" || e.Action == "item.untrash" && e.Result == "not-trashed"
+		blocked := !trashAction(e.Action) && e.Result == "trashed"
 		unconfigured := e.Action == otpDisclosureAction && e.Result == "not-configured"
-		if n <= 1 || !idOK(e.Item) || !digestOK(e.BaseRevision) || (e.Result != accepted && e.Result != "conflict" && !unconfigured && !already) {
+		if n <= 1 || !idOK(e.Item) || !digestOK(e.BaseRevision) || (e.Result != accepted && e.Result != "conflict" && !unconfigured && !already && !blocked) {
 			return invalid
 		}
 	case "vault.create":
@@ -153,7 +155,7 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 		if n <= 1 || !idOK(e.Item) {
 			return invalid
 		}
-	case "item.list", "item.list.archived", "item.list.all", "audit.list", "audit.archived", "reference.list":
+	case "item.list", "item.list.archived", "item.list.trashed", "item.list.all", "audit.list", "audit.archived", "reference.list":
 		if n <= 1 || e.Item != "" {
 			return invalid
 		}

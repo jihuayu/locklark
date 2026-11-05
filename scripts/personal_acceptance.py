@@ -15,9 +15,9 @@ else:
 import time
 
 
-def invoke(binary, action, path, answers, *, ok=True, issue=False, paste=False, options=(), barrier=None, deny_issue=False, expect_error=None, disclosed=None, forbidden=(), capture_disclosure=False):
+def invoke(binary, action, path, answers, *, ok=True, issue=False, paste=False, options=(), barrier=None, deny_issue=False, expect_error=None, disclosed=None, forbidden=(), capture_disclosure=False, required_before_last_prompt=()):
     if os.name == "nt":
-        return windows_invoke(binary, action, path, answers, ok=ok, issue=issue, options=options, barrier=barrier, deny_issue=deny_issue, expect_error=expect_error, disclosed=disclosed, forbidden=forbidden, capture_disclosure=capture_disclosure)
+        return windows_invoke(binary, action, path, answers, ok=ok, issue=issue, options=options, barrier=barrier, deny_issue=deny_issue, expect_error=expect_error, disclosed=disclosed, forbidden=forbidden, capture_disclosure=capture_disclosure, required_before_last_prompt=required_before_last_prompt)
     master, slave = pty.openpty()
     try:
         proc = subprocess.Popen([binary, "personal", action, "--file", path, *options],
@@ -35,6 +35,8 @@ def invoke(binary, action, path, answers, *, ok=True, issue=False, paste=False, 
                     if select.select([master], [], [], 0.2)[0]:
                         transcript.extend(os.read(master, 4096))
                 offset = transcript.index(marker, offset) + len(marker)
+                if index == len(answers)-1 and any(value.encode() not in transcript[:offset] for value in required_before_last_prompt):
+                    raise RuntimeError("required scope notice missing before confirmation")
                 if value is None:
                     match = re.search(rb"(?:LL1-[A-Z2-7]{26}|LLR2-[A-Z2-7]{52}-[A-Z2-7]{52}|LLR1-[A-Z2-7]{52})", transcript[:offset])
                     if not issue or match is None:

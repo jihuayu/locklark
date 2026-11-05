@@ -13,12 +13,13 @@ func TestGenerationCLIArgumentsAndTerminal(t *testing.T) {
 			base = append(base, "--id", strings.Repeat("a", 32), "--revision", strings.Repeat("b", 64))
 		}
 		for _, test := range []struct {
-			options []string
-			valid   bool
+			options      []string
+			valid        bool
+			regeneration bool
 		}{
-			{nil, true}, {[]string{"--length", "22"}, true}, {[]string{"--length", "256"}, true},
-			{[]string{"--length", "21"}, false}, {[]string{"--length", "257"}, false}, {[]string{"--length", "+24"}, false}, {[]string{"--length", "024"}, false},
-			{[]string{"--length", "-1"}, false}, {[]string{"--alphabet", "a"}, false}, {[]string{"--length", "24", "--unknown", "x"}, false},
+			{nil, true, true}, {[]string{"--length", "22"}, true, true}, {[]string{"--length", "256"}, true, true},
+			{[]string{"--length", "21"}, false, true}, {[]string{"--length", "257"}, false, true}, {[]string{"--length", "+24"}, false, false}, {[]string{"--length", "024"}, false, false},
+			{[]string{"--length", "-1"}, false, true}, {[]string{"--alphabet", "a"}, false, false}, {[]string{"--length", "24", "--unknown", "x"}, false, false},
 		} {
 			args := append(append([]string(nil), base...), test.options...)
 			var out bytes.Buffer
@@ -26,7 +27,12 @@ func TestGenerationCLIArgumentsAndTerminal(t *testing.T) {
 			if err == nil || out.Len() != 0 {
 				t.Fatal("accepted noninteractive generation")
 			}
-			if strings.Contains(err.Error(), "interactive terminal") != test.valid {
+			wantTerminal := test.valid
+			// Regeneration policy is evaluated after authentication and target state.
+			if action == "regenerate-password" {
+				wantTerminal = test.regeneration
+			}
+			if strings.Contains(err.Error(), "interactive terminal") != wantTerminal {
 				t.Fatal("argument validation boundary", action, test.options, err)
 			}
 		}

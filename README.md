@@ -20,7 +20,7 @@ Go TOTP 核心已通过 RFC 6238/4226 向量，支持有限的 Base32/otpauth �
 
 ## 加密迁出
 
-`personal export-kdbx --file owner.ll --out NEW.kdbx` 经双因素和 `SAVE` 确认后，把当前原生条目导出为独立密码加密的 KDBX 4.1 文件。导出密码在隐藏终端输入两次，至少 12 字符；已存在目标不会被覆盖。可使用 KeePass 兼容工具打开，不包含账户钥匙、审计或恢复材料。互操作和故障边界见[加密迁出验收](docs/personal-kdbx-export-validation.md)。
+`personal export-kdbx --file owner.ll --out NEW.kdbx` 经双因素和 `SAVE` 确认后，把当前原生条目（包括归档和回收站）导出为独立密码加密的 KDBX 4.1 文件；其他工具未必识别归档/回收站状态。导出密码在隐藏终端输入两次，至少 12 字符；已存在目标不会被覆盖。可使用 KeePass 兼容工具打开，不包含账户钥匙、审计或恢复材料。互操作和故障边界见[加密迁出验收](docs/personal-kdbx-export-validation.md)。
 
 ## 迁移前检查 1PUX
 
@@ -330,3 +330,5 @@ go test -count=1 ./internal/vault -run 'TestKDBXIndependentPeer|TestIndependentN
 用 `edit-login --field url` 保存一个 HTTPS 网站，用 `match-logins --file PATH --origin HTTPS_ORIGIN --frame-origin HTTPS_ORIGIN` 查找同源 active 登录候选（仅元数据）。当前只接受保守 ASCII URL / DNS HTTPS profile，不是已接通的浏览器自动填充；详见 [来源匹配验收与向量](docs/login-origin-matching-validation.md)。
 
 团队方向已有 `internal/directory` 持久化核心：固定 owner/排序端/发布者信任根、签名 roster、精确父版本提交、撤销身份墓碑、检查点核验和整库冻结。真实 age/KDBX 测试覆盖撤销设备无法解开新代。当前为 Go API，尚无团队 UI/网络同步；[协议、验收与限制](docs/team-directory-validation.md)。
+
+个人 CLI 新增 `trash-login` / `restore-login`（`--file`、`--id`、`--revision`，SAVE 确认），以及 `list --state trashed`。回收站条目需先恢复才能读取或编辑，恢复时保留原活动/归档状态。备份和加密迁出仍包含回收站；不自动清空或永久擦除。详见 [回收站验收](docs/personal-trash-validation.md)。
