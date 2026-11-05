@@ -41,6 +41,8 @@
 
 ## 下一项候选
 
+Windows ConPTY 验收失败已在 `dd68eef` 的双平台 CI 关闭；当前优先关闭独立复核缺口并核对最新 head 检查，见 [conpty-drain-validation.md](conpty-drain-validation.md)。Actions 已恢复实际运行，不应继续复述旧付款阻塞。PR 标题与正文统一英文；面向用户进度使用中文。
+
 外部合并条件阻塞期间，已开发纯 Go 字段引用元数据核心、两种既有布局投影/绑定、TOTP、密码生成、1PUX v3 只读清点及显式文件关联核对。验收与限制见 [reference-validation.md](reference-validation.md)、[personal-reference-metadata-validation.md](personal-reference-metadata-validation.md)、[fixture-reference-metadata-validation.md](fixture-reference-metadata-validation.md)、[reference-binding-validation.md](reference-binding-validation.md)、[totp-validation.md](totp-validation.md)、[password-generation-validation.md](password-generation-validation.md)、[onepux-preflight-validation.md](onepux-preflight-validation.md) 和 [onepux-file-references-validation.md](onepux-file-references-validation.md)。区段作用域、重复标识与 JSON 值形状清点已实现，见 [onepux-sections-validation.md](onepux-sections-validation.md)，字段语义仍未验证。后续可做 loginFields 的 designation/字段形状清点，保留未知与重复语义，不授予迁移许可。其他附件布局、完整条目映射和通用写入仍待开发。这些基础工作不等于已接通产品预检/生成器、人工取值、可信事务审计或授权，不关闭其验收项。
 
 恢复修复通过独立复核、远端检查并合并后，从最新 main 开 `codex/` 分支做个人 CLI 的受控单字段披露：显式人工入口、稳定 ID 和版本、披露意图先记审计、记录本机会话但不记录原值、拒绝非交互式 Agent 路径；用合成数据覆盖错误因素、未知 ID/版本、账本写入失败和输出失败。该切片不授予 MCP 或 invoke 原值读取能力。

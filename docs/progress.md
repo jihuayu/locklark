@@ -51,3 +51,7 @@ TOTP 核心 `295e8c35601941ca02c13e4afd8c203ebbb5f0a7` 从实际 head `8d5d81d` 
 显式文件关联 `b2347ac8c0d637f653c271944232e433ce2f60f9` 从实际 head `1c191e7` 接续并推送原分支。只按 item.file.path 的归档相对路径与经 CRC/实际长度校验的文件精确匹配，不用 documentId/fileName 猜路径；报告匹配/缺失/重复引用、唯一已关联文件、未被当前显式引用覆盖的文件、缺少路径条目与大小差异。保留整体未映射状态，不据此删除文件；旧演练缺少显式路径仍未验证。全量 Go、定向 race、ZIP 650560 次/JSON 115570 次模糊执行、PTY、MCP/Bun、静态检查及 Windows/macOS 测试包交叉编译通过；来源审计/检查点与无私有值回显回归通过。main 保持 `3901bc8d8c91c8da039fa02d83e1521746c3c5aa`，工作分支为 `codex/first-preview`，PR #1 未合并；独立复核、其他附件布局、原生运行及真实导出对照未完成，详见 [onepux-file-references-validation.md](onepux-file-references-validation.md)。
 
 区段/字段结构清点 `63cb54fde5c72834baef0fd0fafe0360f9232d61` 已接续原分支：重复名称/字段 ID 按源作用域计数，不合并；值按 JSON 形状统计，语义与迁移仍未验证。合成失败测试、包内测试、定向 race、229677 次 fuzz、来源审计/报告隐私回归与 Windows/macOS 测试包交叉编译通过；独立复核和远端门槛未满足，main 仍为 `3901bc8`。实跑命令、限制与后续 loginFields 清点见 [onepux-sections-validation.md](onepux-sections-validation.md)。
+
+Windows CI 恢复实际运行后，`38b308d` 的 Ubuntu 成功，Windows 在个人 backup 的 ConPTY JSON 读取失败；不再沿用付款/额度阻塞结论。已用合成传输失败测试复现并在 `45f2e79` 修复子进程退出后的输出排空，`020622f` 将回归加入双平台 CI。Windows 原生运行又发现传输不发 EOF，`dd68eef` 改为完整响应加输出静默并保留截止时间；延迟输出、延迟秘密回显、不发 EOF 三项本地测试通过；原生结果与独立复核单独记录，main 未变，详见 [conpty-drain-validation.md](conpty-drain-validation.md)。
+
+ConPTY 修正版 `dd68eefdb0dc744436403299b382b3ebfbeb1fa5` 的 [run 41943464262](https://github.com/jihuayu/locklark/actions/runs/41943464262) Ubuntu/Windows 均成功，个人终端恢复、审计及 MCP 验收通过，关闭本批真实 CI 失败。该结果不是全平台产品验收；PR #1 独立复核仍待完成，未合并 main。
