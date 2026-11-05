@@ -6,7 +6,7 @@ import time
 from winpty import PTY
 
 
-def invoke(binary, action, path, answers, *, ok, issue, options, barrier, deny_issue=False, expect_error=None):
+def invoke(binary, action, path, answers, *, ok, issue, options, barrier, deny_issue=False, expect_error=None, disclosed=None, forbidden=()):
     terminal = PTY(2000, 40, backend=0)
     terminal.spawn(binary, " " + subprocess.list2cmdline(["personal", action, "--file", path, *options]))
     view = ""
@@ -57,6 +57,8 @@ def invoke(binary, action, path, answers, *, ok, issue, options, barrier, deny_i
             quiet_since = now
         complete = terminal.get_exitstatus() != 0
         tail = ansi.sub("", view)[offset:]
+        if disclosed is not None:
+            tail = tail.replace(json.dumps(disclosed, ensure_ascii=False), "", 1)
         start = re.search(r"[\[{]", tail)
         if start:
             try:
@@ -75,6 +77,10 @@ def invoke(binary, action, path, answers, *, ok, issue, options, barrier, deny_i
     if (terminal.get_exitstatus() == 0) != ok:
         raise RuntimeError(f"{action}: unexpected exit")
     screen = ansi.sub("",view)
+    if disclosed is not None and screen.count(json.dumps(disclosed, ensure_ascii=False)) != 1:
+        raise RuntimeError("disclosure missing or repeated")
+    if any(value in screen for value in forbidden):
+        raise RuntimeError("unselected or refused field disclosed")
     if deny_issue and re.search(r"LL1-[A-Z2-7]{26}|重新输入新 Secret Key", screen):
         raise RuntimeError("failed restore issued a new Secret Key")
     if expect_error and expect_error not in screen:
@@ -88,6 +94,8 @@ def invoke(binary, action, path, answers, *, ok, issue, options, barrier, deny_i
         return None, None
     # The JSON response follows the last hidden prompt; do not print the screen.
     tail = screen[offset:]
+    if disclosed is not None:
+        tail = tail.replace(json.dumps(disclosed, ensure_ascii=False), "", 1)
     start = re.search(r"[\[{]",tail)
     if not start:
         raise RuntimeError(f"{action}: missing JSON response")

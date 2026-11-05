@@ -17,7 +17,7 @@ import (
 	"unicode/utf8"
 )
 
-var personalUsage = errors.New("usage: locklark personal <init|add-login|list|audit|archived-audit> --file PATH, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password")
+var personalUsage = errors.New("usage: locklark personal <init|add-login|list|audit|archived-audit> --file PATH, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password, or reveal-login --file PATH --id ID --revision REV --field username|password")
 
 // One terminal mode covers the entire interaction; no prompt or inter-field
 // gap is visible while echo is enabled.
@@ -88,7 +88,13 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 		return personalUsage
 	}
 	var edit personal.Edit
+	var reveal personal.RevealTarget
 	switch action {
+	case "reveal-login":
+		reveal = personal.RevealTarget{ID: opts["--id"], Revision: opts["--revision"], Field: opts["--field"]}
+		if len(opts) != 4 || !personal.ValidRevealTarget(reveal.ID, reveal.Revision, reveal.Field) {
+			return personalUsage
+		}
 	case "edit-login":
 		edit = personal.Edit{ID: opts["--id"], Revision: opts["--revision"], Field: opts["--field"]}
 		if len(opts) != 4 || !personal.ValidEditTarget(edit.ID, edit.Revision, edit.Field) {
@@ -195,6 +201,19 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 		}
 		defer clear(key)
 		switch action {
+		case "reveal-login":
+			if _, e = fmt.Fprintf(os.Stderr, "即将在本终端显示条目 %s（修订 %s）的 %s 字段（JSON 字符串）；终端历史可能保留原值。\r\n", reveal.ID, reveal.Revision, reveal.Field); e != nil {
+				return e
+			}
+			confirmation, e := consoleField("输入 SHOW 确认显示")
+			defer clear(confirmation)
+			if e != nil {
+				return e
+			}
+			if string(confirmation) != "SHOW" {
+				return errors.New("disclosure cancelled")
+			}
+			response, err = personal.RevealLogin(path, string(pw), key, reveal, os.Stderr)
 		case "backup":
 			prepared, e := personal.PrepareBackup(path, opts["--out"], string(pw), key)
 			if e != nil {

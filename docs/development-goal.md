@@ -13,7 +13,7 @@
 5. 提交到 `codex/` 分支并更新 PR。所有要求满足后通过 PR squash 合入 main，再从更新后的 main 开下一批。禁止直接推送或强推 main，禁止绕过保护或把本地结果充作远端检查。
 6. 文档交接记录 main SHA、工作 head、PR、实跑命令、失败测试证据、复核范围、未验证项和下一项。外部条件阻塞须保留原验收项；不静默缩小目标。
 
-当前须先完成 PR #1 中两项恢复安全修复：验证及目标预检先于发新钥，独立离线材料固定备份来源检查点。PR #1 合并前不从只有 README 的 main 重做第一版。
+PR #1 的恢复安全修复及预览已合入 main `8c97e8537e1b5659a696339a02ff83122b6745b5`；必须从该主线接续，不从初始 README 重做第一版。受控单字段披露切片见 [personal-disclosure-validation.md](personal-disclosure-validation.md)。
 
 ## 全部开发范围与验收门槛
 
@@ -43,7 +43,7 @@
 
 ## 下一项候选
 
-Windows ConPTY 验收失败已在 `dd68eef` 的双平台 CI 关闭；三个 Luna/max 独立代码复核已完成，见 [pr1-independent-review.md](pr1-independent-review.md)；当前核对最新 head 检查并按门槛正常 squash 合并，见 [conpty-drain-validation.md](conpty-drain-validation.md)。Actions 已恢复实际运行，不应继续复述旧付款阻塞。PR 标题与正文统一英文；面向用户进度使用中文。
+Windows ConPTY 验收失败已在 `dd68eef` 的双平台 CI 关闭；三个 Luna/max 独立代码复核已完成，见 [pr1-independent-review.md](pr1-independent-review.md)，PR #1 已合并。Actions 已恢复实际运行，不应继续复述旧付款阻塞。PR 标题与正文统一英文；面向用户进度使用中文。
 
 外部合并条件阻塞期间，已开发纯 Go 字段引用元数据核心、两种既有布局投影/绑定、TOTP、密码生成、1PUX v3 只读清点及显式文件关联核对。验收与限制见 [reference-validation.md](reference-validation.md)、[personal-reference-metadata-validation.md](personal-reference-metadata-validation.md)、[fixture-reference-metadata-validation.md](fixture-reference-metadata-validation.md)、[reference-binding-validation.md](reference-binding-validation.md)、[totp-validation.md](totp-validation.md)、[password-generation-validation.md](password-generation-validation.md)、[onepux-preflight-validation.md](onepux-preflight-validation.md) 和 [onepux-file-references-validation.md](onepux-file-references-validation.md)。区段作用域、重复标识与 JSON 值形状清点已实现，见 [onepux-sections-validation.md](onepux-sections-validation.md)，字段语义仍未验证。后续可做 loginFields 的 designation/字段形状清点，保留未知与重复语义，不授予迁移许可。其他附件布局、完整条目映射和通用写入仍待开发。这些基础工作不等于已接通产品预检/生成器、人工取值、可信事务审计或授权，不关闭其验收项。
 

@@ -74,7 +74,7 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 	if e.Sequence != n || e.Previous != prev || !idOK(e.Session) || e.Actor != "local-owner" || !ed25519.Verify(pub, e.proof(), e.Signature) {
 		return invalid
 	}
-	if !editAction(e.Action) && (e.Result != "succeeded" || e.BaseRevision != "") {
+	if !editAction(e.Action) && !revealAction(e.Action) && (e.Result != "succeeded" || e.BaseRevision != "") {
 		return invalid
 	}
 	if e.Action != "backup.prepare" && e.Action != "vault.restore" && e.Link != "" {
@@ -89,11 +89,15 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 		if n != 1 || !digestOK(e.Link) || e.Item != "" {
 			return invalid
 		}
-	case "item.edit.title", "item.edit.username", "item.edit.password":
+	case "item.edit.title", "item.edit.username", "item.edit.password", "item.reveal.username", "item.reveal.password":
 		if e.Result == "not-found" && e.Item == "" && e.BaseRevision == "" && n > 1 {
 			break
 		}
-		if n <= 1 || !idOK(e.Item) || len(e.BaseRevision) != 64 || (e.Result != "succeeded" && e.Result != "conflict") {
+		accepted := "succeeded"
+		if revealAction(e.Action) {
+			accepted = "intent"
+		}
+		if n <= 1 || !idOK(e.Item) || !digestOK(e.BaseRevision) || (e.Result != accepted && e.Result != "conflict") {
 			return invalid
 		}
 	case "vault.create":
@@ -173,7 +177,7 @@ func history(b *bolt.Bucket, i identity, s vault.Snapshot, want bool, revisions 
 				return invalid
 			}
 			revisions[ev.Item] = prev
-		} else if editAction(ev.Action) {
+		} else if editAction(ev.Action) || revealAction(ev.Action) {
 			found := revisions[ev.Item] != ""
 			if (ev.Result == "not-found") == found || ev.BaseRevision != revisions[ev.Item] {
 				return invalid
