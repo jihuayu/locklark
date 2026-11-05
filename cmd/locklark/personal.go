@@ -458,6 +458,13 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 			}
 			response = map[string]string{"id": edit.ID, "revision": revision}
 		case "archive-login", "unarchive-login":
+			verb := "取消归档"
+			if action == "archive-login" {
+				verb = "归档"
+			}
+			if _, e := fmt.Fprintf(os.Stderr, "将%s登录 %s（修订 %s）；条目不会删除。\r\n", verb, opts["--id"], opts["--revision"]); e != nil {
+				return e
+			}
 			confirmation, e := consoleField("输入 SAVE 确认更改归档状态")
 			defer clear(confirmation)
 			if e != nil {

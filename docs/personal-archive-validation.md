@@ -12,3 +12,5 @@
 `python3 scripts/archive_acceptance.py /tmp/locklark-tools/locklark /tmp/locklark-tools/locklark-before-lifecycle` 已实跑：真实 PTY 确认/取消、状态列表、引用建议、冲突、恢复、审计；旧 CLI 由 main `5c40f8a` 构建，明确拒绝归档库读取及其备份恢复，不发新 Secret Key。CI 在 Linux PTY 和 Windows ConPTY 执行当前实现终端流程；旧二进制负测仅本地 Linux 实跑。
 
 不包含删除/回收站、收藏/标签、完整类别和跨库移动；这些仍保留在总体目标中。
+
+Luna/max 核心审阅无阻塞问题，反馈的顶层帮助与确认目标缺失已补齐：确认前显示归档/取消归档动作、稳定 ID 和修订，说明不删除条目。本地完整 Go、race、vet/模块及真实终端验收通过；最终独立复核和双平台检查链接见 PR #10。
