@@ -32,7 +32,6 @@ var (
 	clipClose            = clipUser.NewProc("CloseClipboard")
 	clipEmpty            = clipUser.NewProc("EmptyClipboard")
 	clipOwner            = clipUser.NewProc("GetClipboardOwner")
-	clipSequence         = clipUser.NewProc("GetClipboardSequenceNumber")
 	clipSet              = clipUser.NewProc("SetClipboardData")
 	clipGet              = clipUser.NewProc("GetClipboardData")
 	clipRegister         = clipUser.NewProc("RegisterClipboardFormatW")
@@ -46,18 +45,24 @@ var (
 	clipHWND, clipFormat uintptr
 )
 
-// A narrow call boundary also permits a native test to fail only the second
-// SetClipboardData call after the first eager value has genuinely reached OS.
+// Narrow native call boundaries preserve distinct failure handling, including
+// an uncertain close after eager text has already reached the clipboard.
 var setWinClipboard = func(format, data uintptr) uintptr {
 	result, _, _ := clipSet.Call(format, data)
 	return result
 }
+var closeWinClipboard = func() bool {
+	result, _, _ := clipClose.Call()
+	return result != 0
+}
+var emptyWinClipboard = func() bool {
+	result, _, _ := clipEmpty.Call()
+	return result != 0
+}
 
 type winLease struct {
-	window    uintptr
-	sequence  uint32
-	nonce     [16]byte
-	withNonce bool
+	window uintptr
+	nonce  [16]byte
 }
 
 func initWinClipboard() bool {
@@ -141,27 +146,29 @@ func write(value []byte) (lease *Lease, err error) {
 		return nil, ErrUnavailable
 	}
 	defer func() {
-		if closed, _, _ := clipClose.Call(); closed == 0 {
+		if !closeWinClipboard() {
 			err = ErrWrite
 		}
 	}()
-	if emptied, _, _ := clipEmpty.Call(); emptied == 0 {
+	if !emptyWinClipboard() {
 		return nil, ErrWrite
 	}
-	if setWinClipboard(13, text) == 0 {
-		return nil, ErrWrite
-	} // CF_UNICODETEXT
-	text = 0 // OS owns eager native memory after successful SetClipboardData.
-	lease = &Lease{native: p}
+	// Publish cleanup authority before any secret. A failure to publish our
+	// eager nonce must never leave text without a verifiable native identity.
 	if setWinClipboard(clipFormat, meta) == 0 {
-		seq, _, _ := clipSequence.Call()
-		p.sequence = uint32(seq)
-		return lease, ErrWrite
+		return nil, ErrWrite
 	}
 	meta = 0
-	p.withNonce = true
-	seq, _, _ := clipSequence.Call()
-	p.sequence = uint32(seq)
+	if setWinClipboard(13, text) == 0 { // CF_UNICODETEXT
+		// Only our nonce was published. Roll it back while the same clipboard
+		// lock excludes other owners. Keep its lease if rollback is unconfirmed.
+		if !emptyWinClipboard() {
+			return &Lease{native: p}, ErrWrite
+		}
+		return nil, ErrWrite
+	}
+	text = 0 // OS owns eager native memory after successful SetClipboardData.
+	lease = &Lease{native: p}
 	if !windowIsOurs(p.window) {
 		return lease, ErrWrite
 	}
@@ -189,7 +196,7 @@ func clearOwned(lease *Lease) (result Result) {
 	}
 	result = Superseded
 	defer func() {
-		if closed, _, _ := clipClose.Call(); closed == 0 {
+		if !closeWinClipboard() {
 			result = Unavailable
 		}
 	}()
@@ -197,38 +204,27 @@ func clearOwned(lease *Lease) (result Result) {
 	if owner != p.window || !windowIsOurs(p.window) {
 		return result
 	}
-	seq, _, _ := clipSequence.Call()
-	if !p.withNonce && p.sequence == 0 {
+	// Read only our eager fixed metadata, under the same OpenClipboard lock
+	// and after owner HWND/PID proof. Sequence changes are not ownership proof:
+	// closing a transaction or adding formats may advance that counter.
+	h, _, _ := clipGet.Call(clipFormat)
+	if h == 0 {
 		return Unavailable
 	}
-	if !p.withNonce && uint32(seq) != p.sequence {
-		// Same-owner format publication can advance the sequence while the
-		// partially written value remains. Without our nonce this is unknown,
-		// not proof of replacement, and cannot justify discarding cleanup.
+	n, _, _ := clipSize.Call(h)
+	if n < 16 || n > 4096 {
 		return Unavailable
 	}
-	if p.withNonce {
-		// Read only our eager fixed metadata, under the same OpenClipboard
-		// lock and after owner HWND/PID/sequence proof. Never read foreign text.
-		h, _, _ := clipGet.Call(clipFormat)
-		if h == 0 {
-			return Unavailable
-		}
-		n, _, _ := clipSize.Call(h)
-		if n < 16 || n > 4096 {
-			return Unavailable
-		}
-		data := nativeLock(h)
-		if data == nil {
-			return Unavailable
-		}
-		match := subtle.ConstantTimeCompare(unsafe.Slice((*byte)(data), 16), p.nonce[:]) == 1
-		clipUnlock.Call(h)
-		if !match {
-			return Superseded
-		}
+	data := nativeLock(h)
+	if data == nil {
+		return Unavailable
 	}
-	if emptied, _, _ := clipEmpty.Call(); emptied == 0 {
+	match := subtle.ConstantTimeCompare(unsafe.Slice((*byte)(data), 16), p.nonce[:]) == 1
+	clipUnlock.Call(h)
+	if !match {
+		return Superseded
+	}
+	if !emptyWinClipboard() {
 		return Unavailable
 	}
 	return Cleared

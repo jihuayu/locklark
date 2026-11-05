@@ -133,3 +133,13 @@ Luna/max最终产品增量复核无阻塞，独立Linux定向测试通过（nati
 主代理最终完整 `desktop-daily-v4-parent-readiness-final.log` 退出0，状态 `qymbm41y`，使用固定v4 SHA256 `0c098b...29228` 和readiness工具清单。完整生成/精确重新生成/状态/Unicode provider/TOTP显示与原窗口复制/改选/切页/修订/锁库场景均通过；三项foreign owner观察全部无预读、1250ms内及allow线性点累计请求0、owner保持，独立读取核对正确。最后锁定界面647ms发布；授权显示reader最大尝试数2，仍在既定只读查询预算内，没有重复点击或重新生成码。全日志及动态canary/token扫描通过。
 
 同一最终构建和readiness工具的故障隐私验收 `desktop-daily-v4-readiness-probe-failure.log` 再次通过，状态 `70keuamt`：真实生成后预期脚本退出1、wrapper退出0，完整重定向输出及3个状态日志/诊断文件扫描通过。旧故障及候选证据保留。53项工具测试、最终产品测试/race/vet及Luna复审均完成，准备PR；Windows/macOS原生剪贴板smoke及四项精确head CI仍待远端执行，硬件解锁仍单列。
+
+## PR #28 首轮真实平台CI
+
+[PR #28](https://github.com/jihuayu/locklark/pull/28) 首个精确head `cdd7e599a99a3713c45eb1ce2ee36e40f12712c2` 的 [run 42118122749](https://github.com/jihuayu/locklark/actions/runs/42118122749) 已执行。macOS job成功，包含显式启用的原生剪贴板smoke。Windows job `127563078621` 在 `TestNativeClipboardSmoke` 的固定 `partial native write cleanup failed` 断言失败（smoke_windows_test.go原第98行）：之前ErrWrite、lease非nil及实际Unicode内容读回均通过，说明文本已交OS但清理未确认。Ubuntu矩阵因fail-fast取消，不计为通过；Web最终成功，包含Linux原生桌面、管理两浏览器E2E、Chrome/Firefox DOM及两浏览器原生fill/save全部步骤。
+
+该Windows路径在文本已写入而nonce失败后依赖Close前采样的sequence；现有日志不能区分写Close、后续读取或合成格式是否推进了序号，不把推断写成已观测根因。架构改为同Open锁内nonce先于文本；凭证失败则不发布秘密，所有secret-bearing lease均可用nonce验证。Sol实施窄修、Luna增量复审，之后新head必须四项CI全部通过，不能用Linux GUI或macOS成功替代Windows失败。原始CI日志仅私下保存，普通输出只引用固定测试/阶段。
+
+Windows后续窄修只改 `clipboard_windows.go` 和 `smoke_windows_test.go`：nonce在同一Open锁内先发布，失败时文本Set调用为0；文本失败确认回滚后才返回nil，回滚未确认保留nonce lease；真实文本成功后Close结果未确认仍可凭nonce清理。旧sequence/无nonce授权分支已删除。原生smoke保留固定 `partial native write cleanup failed` 断言，新增真实nonce失败、文本失败/回滚、回滚故障、post-text未知结果检查，不能以删除失败场景换取通过。
+
+Luna/max增量复核无阻塞，独立Linux nativeclipboard测试及Windows amd64测试包交叉编译通过；Sol Windows amd64交叉编译与vet通过。本地无Windows运行时，原生green仍等待新head CI。Linux/macOS产品与已验收v4行为不变；本次不将跨编译充当Windows成功，也不因首轮Web/macOS成功忽略新head的四项完整门槛。
