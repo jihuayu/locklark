@@ -102,7 +102,7 @@ func ReadConnection(path string) (Connection, error) {
 		return Connection{}, ErrUnavailable
 	}
 	u, e := url.Parse(c.URL)
-	if e != nil || u.Scheme != "http" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" {
+	if e != nil || u.Scheme != "http" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" || c.URL != "http://"+u.Host {
 		return Connection{}, ErrUnavailable
 	}
 	host, port, e := net.SplitHostPort(u.Host)
