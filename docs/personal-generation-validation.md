@@ -28,6 +28,10 @@
 
 使用 Go 1.26.8、Bun 1.4.4、PyKeePass 4.2.0。实跑命令包括 `go test -count=1 ./...`（设置 Bun/PyKeePass 路径）、`go test -race -count=1 ./internal/personal ./cmd/locklark -run 'TestGenerateSaved|TestRegenerate|TestGeneration|TestReveal'`、`go vet ./...`、`go mod verify`、ConPTY 驱动单测和四项终端/进程验收（个人恢复、披露、生成、MCP）。每项最终结果、用户指定 Luna/max 独立复核及发现关闭情况记录在 PR 正文；远端双平台检查针对最终提交核对。
 
+上述本地检查全部通过，定向 race 用时 225.734s / 1.051s，全仓个人包 56.350s。以旧版实际二进制运行生成升级验收通过，macOS arm64 交叉构建通过。PR 为 [#3](https://github.com/jihuayu/locklark/pull/3)，首个实现 head `8458438b50b076c334ddee3982b456f2e1a0de66`；文案修正与交接 head 及最终检查链接以 PR 正文为准。
+
+Luna/max 独立复核未发现阻塞问题，实跑 personal/CLI 全包测试（42.893s / 8.518s）、构建、生成 PTY、定向 vet 和 diff 检查通过。唯一文案意见是生成登录标题为空时不应提示调用者提供密码，已改为只提示标题必填。此复核不替代外部密码评审。
+
 Windows 原生验证由 CI 完成，macOS 本轮仅可交叉编译；真实 1Password 对照、移动真机、系统钥匙串、外部密码评审与完整产品替换条件仍未完成。
 
 下一项从合并后的主线接通个人 TOTP 配置和受控取码，保持种子只存加密字段、取码意图先落盘、显式时间窗口与普通输出无种子/验证码。

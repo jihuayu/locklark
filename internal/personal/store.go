@@ -336,6 +336,9 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 				}
 			}
 		case "item.add", "item.generate":
+			if action == "item.generate" && strings.TrimSpace(add.Title) == "" {
+				return errors.New("a title is required")
+			}
 			if strings.TrimSpace(add.Title) == "" || (action == "item.add" && add.Password == "") {
 				return errors.New("a title and password are required")
 			}
