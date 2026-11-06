@@ -275,6 +275,7 @@ func (a *authenticatedState) clear() {
 	a.identity.clear()
 	for _, item := range a.items {
 		clear(item.SSHSeed)
+		clear(item.Passkey)
 	}
 }
 
@@ -290,6 +291,7 @@ func authenticateState(tx *bolt.Tx, pw string, key []byte, action string, unlock
 			i.clear()
 			for _, item := range items {
 				clear(item.SSHSeed)
+				clear(item.Passkey)
 			}
 		}
 	}()

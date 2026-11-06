@@ -60,18 +60,28 @@ writing and also checks the HKCU registration key and its ancestors. Unsupported
 or insufficiently protected layouts fail closed.
 
 Visit a supported HTTPS page and open the extension action (Chrome/Edge:
-Ctrl+Shift+Y, or Command+Shift+Y on macOS; Firefox: toolbar), then connect. In the native window select the vault,
-unlock, and confirm the fixed extension connection. Read the current website's
-login candidates in the popup, choose a login, and approve its exact origin,
-item, and revision in the native window. The extension fills only one visible,
-enabled, writable username/password pair in one form and never calls submit.
-It refuses ambiguous forms, cross-origin actions, frames, IP/IDN/local hosts,
-and unsupported document identity APIs. Firefox requires version 153 or newer:
-its `documentId` and `documentIds` APIs were exercised in real Firefox 157,
-including rejection of an old document ID after navigation. Missing document
-identity fails closed. Real Linux Chromium and Firefox extension/native/MyGo
-fill flows have also passed; see the validation record for exact runs. Other
-platforms and system biometric hardware still require their own acceptance.
+Ctrl+Shift+Y, or Command+Shift+Y on macOS). Connect, unlock the native vault,
+and choose **连接并启用快捷填充** to authorize explicit account selection,
+saving/updating and TOTP filling for this connection. **确认连接此扩展** retains
+per-operation native approval. Locking or disconnecting revokes either mode.
+
+Focus a login field to select a saved account in the page, or use the popup.
+The extension recognizes visible semantic username/current-password fields,
+including individual username/password steps. It refuses ambiguous targets,
+new-password forms, cross-origin actions, frames, IP/IDN/local hosts and missing
+document identity. Two-step pages currently require selection on each step.
+
+**选择账号后自动登录** is enabled by default. Each login also has an opt-out.
+Automatic submission requires a complete username/current-password pair, a POST
+form and exactly one visible same-origin submitter. Form actions are rechecked
+after input/change handlers. Signup/reset/destructive buttons are excluded.
+Other forms are filled without submission. This is not proof of successful login;
+check the website's result. OTP is never automatically submitted.
+
+Chromium requires version 120 or newer. Firefox retains its version 153 minimum;
+its earlier manual fill/save/OTP implementation was tested in real Firefox 157.
+The new inline/Passkey experience is prioritized and tested on Chromium; Edge,
+Firefox and other OS versions require their own acceptance.
 
 Firefox opens this action from its toolbar. It has no default shortcut because
 Firefox reserves common browser shortcuts; users can choose one in Firefox's
@@ -79,7 +89,7 @@ extension shortcut settings. Chrome/Edge keep the shortcut above.
 
 To save credentials already entered on a supported page, choose **保存当前登录**
 (Save current login). In the native window verify the exact website, choose the
-new title, and approve. To update a saved login, first read the website's
+new title, and approve (or use the explicitly authorized quick session). To update a saved login, first read the website's
 candidates, choose **更新此登录** (Update this login), and confirm the displayed
 item in the native window. Update replaces only the username/password pair;
 title, URL, OTP and other item metadata remain unchanged. New entries store the
@@ -89,8 +99,7 @@ Save captures the field pair at the explicit click, not after native approval.
 Changing the page's values while approval is pending does not replace that
 snapshot. After approval the extension performs a short final check of the
 original active browser window, tab, document and origin before requesting the
-single vault transaction. It never automatically watches submissions, saves,
-or submits a form. The popup receives no captured values.
+single vault transaction. It does not automatically watch submissions or save values. Password form submission is governed by the separate auto-login setting. The popup receives no captured values.
 
 **已批准** means approved and still checking; only **已保存** means saved with a
 confirmed receipt. **结果未确认** means the result is unknown: inspect the item
@@ -103,7 +112,7 @@ the exact verification status and limitations.
 
 To fill a saved TOTP, configure the login's `otp` field in the native vault,
 read the current website's candidates, and choose **填充验证码** (Fill one-time
-code). Approve that exact website and item in MyGo. The extension rechecks the
+code). Approve that exact website and item in MyGo, or select it in an authorized quick session. The extension rechecks the
 original document before requesting the code. It supports one visible, writable
 top-level `input[autocomplete=one-time-code]` in a same-origin form, with a
 6- or 8-digit code. Split fields, multiple targets, frames and cross-origin form
@@ -115,7 +124,7 @@ storage or Next.js management pages.
 shown only when the host confirms cancellation and local injection has not
 started. **验证码填充结果未确认** means to inspect the page before deciding what
 to do; disconnecting or reconnecting does not erase this uncertainty. A fresh
-explicit request is allowed and requires fresh native approval. There is no
+explicit request is allowed and follows the current pairing mode. There is no
 automatic retry. An injection already submitted to the browser cannot be
 recalled by cancelling its pending promise.
 
@@ -130,16 +139,43 @@ indefinitely. See [OTP design](../docs/browser-otp-design.md) and
 [OTP validation](../docs/browser-otp-validation.md) for the exact evidence and
 remaining platform checks.
 
-The extension has only `activeTab`, `scripting`, and `nativeMessaging`. There is
-no persistent host permission, page-message bridge, value persistence, or
-localhost secret proxy. Origin, active tab, and document identity are obtained
-from browser APIs and rechecked before matching, selecting, and injecting.
-The final injection explicitly targets the original document ID. An old response
-is never redirected to a newly navigated document.
+The extension requests `activeTab`, `scripting`, `nativeMessaging`, `storage`
+and persistent `https://*/*` access. HTTPS permission enables the in-page UI and
+document-start WebAuthn integration; the browser displays this access at install.
+Storage contains only preferences and per-item automatic-login overrides, never
+passwords, vault factors, private keys, or TOTP values. There is no localhost proxy.
+The worker authenticates content-script senders using extension ID, frame, active
+tab, document ID and browser-provided URL. Page-provided origin fields have no
+authority. Password injection targets the original document, and password values
+never pass through the MAIN-world message bridge.
+
+Passkey create/get calls offer Locklark or the browser's other authenticators.
+The native window shows the authoritative origin/RP ID and offers a new login,
+an eligible existing login, or a matching saved Passkey. It never silently
+replaces an existing Passkey. Requests requiring user verification need fresh
+master-password and Secret Key verification in the native window. The unlocked
+session or an OS Secret Service lookup alone does not set the WebAuthn UV flag.
+
+Each login can hold one ES256 discoverable credential in a protected KDBX field.
+Private keys stay in the encrypted vault; creation and assertion intent use
+signed, encrypted audit records. Backup/restore retains the credential. Standard
+responses include RP/challenge binding, `none` attestation, COSE public keys,
+UP/UV/BE flags and a zero multi-device signature counter. Requests validate
+public and private public-suffix boundaries, respect top-level Permissions Policy,
+and support `AbortSignal`. Native confirmation remains required for Passkeys in
+quick mode. Unsupported algorithms/extensions use the original browser flow.
+Separate popup settings disable offers to save/use Passkeys.
+
+Known Passkey gaps include PRF/largeBlob, related origins, iframe credentials,
+biometric verification in this new flow, immediate conditional account suggestions,
+credential management/signals, and removing a Passkey independently of its login.
+This is an initial implementation, not complete 1Password feature parity. The
+[coverage and validation record](../docs/browser-parity-validation.md) tracks the
+remaining work and the distinction between implemented and tested platforms.
 
 Connections have a fixed 15-minute lifetime, pairing requests expire after one
 minute, native fill requests after 30 seconds, and prepared field pairs after
-five seconds. Browser traffic does not renew the native session's idle timer.
+five seconds. Metadata polling does not renew idle time; explicit approved operations do. Passkey requests expire within two minutes or the shorter supplied timeout.
 Lock, disconnect, cancellation, and expiry revoke pending requests; unlocking
 again requires new pairing. A cancellation cannot recall bytes already being
 written or fields already injected. Pipe failures remain delivery unknown; audit
@@ -163,6 +199,8 @@ node --test browser-extension/test/*.test.js
 go test -race ./internal/browserhost
 go test ./internal/personal ./internal/desktop
 LOCKLARK_TEST_PLAYWRIGHT=/absolute/path/to/playwright node scripts/browser_extension_dom.cjs
+# Requires real DBus/X11, native host, and Playwright; no approval bypasses:
+LOCKLARK_TEST_BROWSER_PARITY=1 node scripts/browser_native_acceptance.mjs
 ```
 
 Node tests use a simulated browser API only for worker races and policy checks.

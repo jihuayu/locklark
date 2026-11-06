@@ -63,9 +63,10 @@ globalThis.LocklarkCore = (() => {
     )
       return false;
     const shapes = {
+        "passkey-result": ["v", "id", "type", "credential"],
         locked: ["v", "type"],
         unpaired: ["v", "type", "error"],
-        paired: ["v", "id", "type", "capability"],
+        paired: ["v", "id", "type", "capability", "quick_fill"],
         candidates: ["v", "id", "type", "candidates"],
         fill: ["v", "id", "type", "username", "password"],
         error: ["v", "id", "type", "error"],
@@ -81,6 +82,8 @@ globalThis.LocklarkCore = (() => {
     if (m.type === "locked") return true;
     if (m.type === "unpaired") return m.error === "expired";
     if (!/^[a-f0-9]{32}$/.test(m.id || "")) return false;
+    if (m.type === "passkey-result")
+      return typeof m.credential === "string" && m.credential.length <= 32768;
     if (m.type === "save-ready" || m.type === "otp-ready")
       return /^[a-f0-9]{64}$/.test(m.nonce || "");
     if (m.type === "otp-fill")
@@ -92,7 +95,11 @@ globalThis.LocklarkCore = (() => {
         /^[a-f0-9]{32}$/.test(m.item_id || "") &&
         /^[a-f0-9]{64}$/.test(m.revision || "")
       );
-    if (m.type === "paired") return /^[a-f0-9]{32}$/.test(m.capability || "");
+    if (m.type === "paired")
+      return (
+        /^[a-f0-9]{32}$/.test(m.capability || "") &&
+        (m.quick_fill === undefined || typeof m.quick_fill === "boolean")
+      );
     if (m.type === "error") return m.error === "refused";
     if (m.type === "fill")
       return (
@@ -127,7 +134,14 @@ globalThis.LocklarkCore = (() => {
   function probe() {
     return { origin: location.origin, top: window === window.top };
   }
-  function fillDocument(expected, username, password, expiresAt, captureOnly) {
+  function fillDocument(
+    expected,
+    username,
+    password,
+    expiresAt,
+    captureOnly,
+    autoLogin,
+  ) {
     "use strict";
     try {
       if (
@@ -164,24 +178,74 @@ globalThis.LocklarkCore = (() => {
         const r = el.getBoundingClientRect();
         return el.getClientRects().length > 0 && r.width > 0 && r.height > 0;
       }
-      const passwords = [
-        ...document.querySelectorAll('input[type="password"]'),
-      ];
-      const users = [...document.querySelectorAll("input")].filter(
-        (e) => e.type === "text" || e.type === "email",
-      );
-      if (passwords.length !== 1 || users.length !== 1) return false;
-      const pass = passwords[0],
-        user = users[0],
-        form = pass.form;
+      function hasAutocomplete(el, token) {
+        return (
+          (el.getAttribute && el.getAttribute("autocomplete")) ||
+          el.autocomplete ||
+          ""
+        )
+          .toLowerCase()
+          .split(/\s+/)
+          .includes(token);
+      }
+      const allInputs = [...document.querySelectorAll("input")];
+      const visible = allInputs.filter(eligible);
       if (
-        !eligible(pass) ||
-        !eligible(user) ||
-        !form ||
-        form !== user.form ||
-        form.ownerDocument !== document
+        captureOnly &&
+        (allInputs.filter((e) => e.type === "password").length !== 1 ||
+          allInputs.filter((e) => ["text", "email"].includes(e.type)).length !==
+            1)
       )
         return false;
+      const passwords = visible.filter((e) => e.type === "password");
+      // Never select a password from a signup/reset form or guess between forms.
+      if (
+        passwords.length > 1 ||
+        passwords.some((e) =>
+          hasAutocomplete(e, "new-password"),
+        )
+      )
+        return false;
+      let pass = passwords[0] || null;
+      let users = visible.filter(
+        (e) =>
+          ["text", "email"].includes(e.type) && (!pass || e.form === pass.form),
+      );
+      const semantic = users.filter(
+        (e) =>
+          hasAutocomplete(e, "username") ||
+          e.type === "email" ||
+          /^(user(name)?|login|email)$/i.test(e.name || e.id),
+      );
+      if (semantic.length === 1) users = semantic;
+      if (users.length > 1) return false;
+      const user = users[0] || null,
+        form = (pass || user)?.form;
+      if (
+        !form ||
+        form.ownerDocument !== document ||
+        (pass && user && pass.form !== user.form)
+      )
+        return false;
+      // Username-first flows must identify their field; a random text/search box
+      // is not a login. Capture still needs an actual password.
+      if (
+        !pass &&
+        (!user ||
+          semantic.length !== 1 ||
+          captureOnly ||
+          allInputs.some((e) => e.type === "password"))
+      )
+        return false;
+      if (
+        pass &&
+        !user &&
+        allInputs.some(
+          (e) => ["text", "email"].includes(e.type) && e.form === form,
+        )
+      )
+        return false;
+      if (pass && !user && captureOnly) return false;
       function sameAction(raw) {
         const u = new URL(raw || location.href, document.baseURI);
         return (
@@ -205,10 +269,8 @@ globalThis.LocklarkCore = (() => {
       // cannot navigate synchronously after the first write and redirect the second.
       if (
         location.origin !== expected ||
-        !eligible(user) ||
-        !eligible(pass) ||
-        user.form !== form ||
-        pass.form !== form ||
+        (user && (!eligible(user) || user.form !== form)) ||
+        (pass && (!eligible(pass) || pass.form !== form)) ||
         !sameAction(form.getAttribute("action")) ||
         Date.now() >= expiresAt
       )
@@ -246,10 +308,52 @@ globalThis.LocklarkCore = (() => {
           return false;
         return { username, password };
       }
-      set.call(user, username);
-      set.call(pass, password);
-      user.dispatchEvent(new Event("input", { bubbles: true }));
-      pass.dispatchEvent(new Event("input", { bubbles: true }));
+      if (user) set.call(user, username);
+      if (pass) set.call(pass, password);
+      for (const field of [user, pass].filter(Boolean)) {
+        field.dispatchEvent(new Event("input", { bubbles: true }));
+        field.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+      if (
+        autoLogin === true &&
+        pass &&
+        user &&
+        form.method.toLowerCase() === "post" &&
+        hasAutocomplete(pass, "current-password")
+      ) {
+        const submitters = [...form.elements].filter(
+          (e) =>
+            (e instanceof HTMLButtonElement || e instanceof HTMLInputElement) &&
+            e.type === "submit" &&
+            eligible(e),
+        );
+        // Page event handlers can replace fields or change formAction. Recheck
+        // after all input/change handlers; never invoke arbitrary button clicks.
+        const button = submitters.length === 1 ? submitters[0] : null;
+        if (
+          button &&
+          form.isConnected &&
+          eligible(user) &&
+          eligible(pass) &&
+          user.form === form &&
+          pass.form === form &&
+          location.origin === expected &&
+          Date.now() < expiresAt &&
+          sameAction(form.getAttribute("action")) &&
+          sameAction(
+            button.getAttribute("formaction") || form.getAttribute("action"),
+          ) &&
+          !/register|sign.?up|reset|change|delete|purchase|pay/i.test(
+            button.textContent +
+              " " +
+              button.value +
+              " " +
+              form.getAttribute("action"),
+          )
+        ) {
+          HTMLFormElement.prototype.requestSubmit.call(form, button);
+        }
+      }
       return true;
     } catch {
       return false;

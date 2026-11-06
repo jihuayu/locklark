@@ -114,13 +114,24 @@ func (w *Writer) writeFrame(raw []byte) error {
 	return nil
 }
 func (w *Writer) Write(response Response) error {
-	release, err := w.acquire(time.Now().Add(w.timeout), nil)
+	return w.WriteGranted(time.Now().Add(w.timeout), nil, func() (Response, error) { return response, nil })
+}
+
+// WriteGranted acquires the serializer before granting disclosure. The grant
+// must revalidate its authority; no secret response is retained while queued.
+func (w *Writer) WriteGranted(until time.Time, cancel <-chan struct{}, grant func() (Response, error)) error {
+	until = minTime(until, time.Now().Add(w.timeout))
+	release, err := w.acquire(until, cancel)
 	if err != nil {
 		return err
 	}
 	defer release()
-	watch := w.watch(time.Now().Add(w.timeout))
+	watch := w.watch(until)
 	defer watch.finish()
+	response, err := grant()
+	if err != nil {
+		return err
+	}
 	raw, err := json.Marshal(response)
 	if err != nil || len(raw) > MaxOutput {
 		clear(raw)

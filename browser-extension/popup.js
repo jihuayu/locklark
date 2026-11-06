@@ -13,6 +13,11 @@
   }
   function render(state) {
     lastState = state;
+    document.querySelector("#auto-login").checked = state.autoLogin !== false;
+    document.querySelector("#passkey-save").checked =
+      state.offerSavePasskeys !== false;
+    document.querySelector("#passkey-use").checked =
+      state.offerUsePasskeys !== false;
     text("#status", state.status);
     text("#origin", state.origin);
     text(
@@ -33,6 +38,7 @@
       pending: state.pending,
       busy,
       saveBlocked: !!state.saveBlocked,
+      loginOverrides: state.loginOverrides,
     });
     if (signature === renderedCandidates) return;
     renderedCandidates = signature;
@@ -70,7 +76,18 @@
         "click",
         () => void act({ type: "otp", id: row.id, revision: row.revision }),
       );
-      container.append(button, update, otp);
+      const label = document.createElement("label"),
+        toggle = document.createElement("input");
+      toggle.type = "checkbox";
+      toggle.disabled = state.pending || busy;
+      toggle.checked = state.loginOverrides?.[row.id] !== false;
+      toggle.addEventListener(
+        "change",
+        () =>
+          void act({ type: "settings", id: row.id, enabled: toggle.checked }),
+      );
+      label.append(toggle, document.createTextNode(" 此登录允许自动提交"));
+      container.append(button, update, otp, label);
       list.append(container);
     }
   }
@@ -129,6 +146,27 @@
   document
     .querySelector("#cancel-otp")
     .addEventListener("click", () => void act({ type: "cancel-otp" }));
+  document
+    .querySelector("#auto-login")
+    .addEventListener(
+      "change",
+      (event) =>
+        void act({ type: "settings", autoLogin: event.target.checked }),
+    );
+  document
+    .querySelector("#passkey-save")
+    .addEventListener(
+      "change",
+      (event) =>
+        void act({ type: "settings", offerSavePasskeys: event.target.checked }),
+    );
+  document
+    .querySelector("#passkey-use")
+    .addEventListener(
+      "change",
+      (event) =>
+        void act({ type: "settings", offerUsePasskeys: event.target.checked }),
+    );
   void send({ type: "state" });
   setInterval(() => void send({ type: "state" }), 500);
 })();
