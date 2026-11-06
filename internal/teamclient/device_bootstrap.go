@@ -116,6 +116,8 @@ func ConfirmInitial(ctx context.Context, path string, trusted directory.Pins, s 
 		for n := range items {
 			clear(items[n].Attachment)
 			clear(items[n].ImportSource)
+			clear(items[n].SSHSeed)
+			clear(items[n].Passkey)
 			items[n] = vault.Item{}
 		}
 	}()
