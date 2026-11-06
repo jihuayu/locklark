@@ -44,17 +44,35 @@
     renderedCandidates = signature;
     list.replaceChildren();
     for (const row of state.candidates) {
+      const category = row.category || "login";
       const container = document.createElement("div");
       container.dataset.itemId = row.id;
       container.dataset.itemRevision = row.revision;
+      container.dataset.itemCategory = category;
       const button = document.createElement("button");
       button.dataset.action = "fill";
-      button.textContent = row.title || "（无标题）";
+      button.textContent =
+        (category === "identity"
+          ? "身份 · "
+          : category === "credit_card"
+            ? "信用卡 · "
+            : "") +
+        (row.title || "（无标题）") +
+        (row.subtitle ? " · " + row.subtitle : "");
       button.disabled = state.pending || busy;
-      button.addEventListener(
-        "click",
-        () => void act({ type: "fill", id: row.id, revision: row.revision }),
+      button.addEventListener("click", () =>
+        void act({
+          type: "fill",
+          id: row.id,
+          revision: row.revision,
+          ...(category === "login" ? {} : { category }),
+        }),
       );
+      if (category !== "login") {
+        container.append(button);
+        list.append(container);
+        continue;
+      }
       const update = document.createElement("button");
       update.dataset.action = "update";
       update.textContent = "更新此登录";

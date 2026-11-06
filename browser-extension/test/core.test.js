@@ -231,17 +231,17 @@ test("serialized fillDocument uses autocomplete HTML attribute when IDL property
       attributes: { autocomplete: "current-password" },
     },
   });
-  assert.equal(
-    first.fillDocument(
-      "https://example.test",
-      "alice",
-      "secret",
-      Date.now() + 5000,
-      false,
-      true,
-    ),
+  const firstResult = first.fillDocument(
+    "https://example.test",
+    "alice",
+    "secret",
+    Date.now() + 5000,
+    false,
     true,
   );
+  assert.equal(firstResult.ok, true);
+  assert.equal(firstResult.step, "combined");
+  assert.equal(firstResult.submitted, true);
   assert.equal(first.user.value, "alice");
   assert.equal(first.pass.value, "secret");
   for (const field of [first.user, first.pass])
@@ -289,17 +289,17 @@ test("serialized fillDocument uses autocomplete HTML attribute when IDL property
     },
     pass: null,
   });
-  assert.equal(
-    third.fillDocument(
-      "https://example.test",
-      "alice",
-      "secret",
-      Date.now() + 5000,
-      false,
-      false,
-    ),
-    true,
+  const thirdResult = third.fillDocument(
+    "https://example.test",
+    "alice",
+    "secret",
+    Date.now() + 5000,
+    false,
+    false,
   );
+  assert.equal(thirdResult.ok, true);
+  assert.equal(thirdResult.step, "username-only");
+  assert.equal(thirdResult.submitted, false);
   assert.equal(third.user.value, "alice");
   assert.deepEqual(
     third.calls.events

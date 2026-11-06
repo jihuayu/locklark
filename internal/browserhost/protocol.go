@@ -51,6 +51,7 @@ type Request struct {
 	DocumentID string `json:"document_id,omitempty"`
 	ItemID     string `json:"item_id,omitempty"`
 	Revision   string `json:"revision,omitempty"`
+	Category   string `json:"category,omitempty"`
 }
 
 func (r Request) Context() personal.BrowserContext {
@@ -64,6 +65,12 @@ func (r Request) valid() bool {
 		return false
 	}
 	if r.Type != "passkey-create" && r.Type != "passkey-get" && r.Options != "" {
+		return false
+	}
+	if r.Category != "" && r.Type != "match" && r.Type != "fill" {
+		return false
+	}
+	if r.Category != "" && r.Category != "login" && r.Category != "identity" && r.Category != "credit_card" {
 		return false
 	}
 	switch r.Type {
@@ -93,24 +100,29 @@ func (r Request) valid() bool {
 }
 
 type Response struct {
-	Credential string         `json:"credential,omitempty"`
-	QuickFill  bool           `json:"quick_fill,omitempty"`
-	Code       string         `json:"code,omitempty"`
-	Nonce      string         `json:"nonce,omitempty"`
-	ItemID     string         `json:"item_id,omitempty"`
-	Revision   string         `json:"revision,omitempty"`
-	V          int            `json:"v"`
-	ID         string         `json:"id,omitempty"`
-	Type       string         `json:"type"`
-	Capability string         `json:"capability,omitempty"`
-	Candidates []personal.Row `json:"candidates,omitempty"`
-	Username   string         `json:"username,omitempty"`
-	Password   string         `json:"password,omitempty"`
-	Error      string         `json:"error,omitempty"`
+	Credential string            `json:"credential,omitempty"`
+	QuickFill  bool              `json:"quick_fill,omitempty"`
+	Code       string            `json:"code,omitempty"`
+	Nonce      string            `json:"nonce,omitempty"`
+	ItemID     string            `json:"item_id,omitempty"`
+	Revision   string            `json:"revision,omitempty"`
+	V          int               `json:"v"`
+	ID         string            `json:"id,omitempty"`
+	Type       string            `json:"type"`
+	Capability string            `json:"capability,omitempty"`
+	Candidates []personal.Row    `json:"candidates,omitempty"`
+	Identity   map[string]string `json:"identity,omitempty"`
+	Card       map[string]string `json:"card,omitempty"`
+	Category   string            `json:"category,omitempty"`
+	Username   string            `json:"username,omitempty"`
+	Password   string            `json:"password,omitempty"`
+	Error      string            `json:"error,omitempty"`
 }
 
 // A legitimate login may have an empty username. Fill responses always carry
-// both fixed fields; other messages cannot accidentally serialize field values.
+// both fixed fields; identity/card responses carry only their structured map.
+// Candidate rows keep the original four keys for logins and add optional
+// category/subtitle metadata for other vault item kinds.
 func (r Response) MarshalJSON() ([]byte, error) {
 	type plain Response
 	type candidate struct {
@@ -118,6 +130,8 @@ func (r Response) MarshalJSON() ([]byte, error) {
 		Revision string `json:"revision"`
 		Title    string `json:"title"`
 		State    string `json:"state"`
+		Category string `json:"category,omitempty"`
+		Subtitle string `json:"subtitle,omitempty"`
 	}
 	type wire struct {
 		plain
@@ -126,6 +140,9 @@ func (r Response) MarshalJSON() ([]byte, error) {
 	if r.Type == "otp-fill" {
 		return nil, ErrProtocol
 	}
+	// Map values are shared with the caller. Wipe them after this serialization
+	// whether it succeeds or fails, then drop the references.
+	defer r.Clear()
 	r.Code = ""
 	if r.Type != "passkey-result" {
 		r.Credential = ""
@@ -141,31 +158,131 @@ func (r Response) MarshalJSON() ([]byte, error) {
 			Nonce string `json:"nonce"`
 		}{r.V, r.ID, r.Type, r.Nonce})
 	}
-	if r.Type != "fill" {
+	filled := r.Type == "filled" || r.Type == "filled-identity" || r.Type == "filled-card"
+	structuredFill := r.Type == "fill" && (r.Category == "identity" || r.Category == "credit_card")
+	if r.Type != "candidates" && r.Type != "fill" && !filled {
+		r.Category = ""
+	}
+	if r.Category != "" && r.Category != "login" && r.Category != "identity" && r.Category != "credit_card" {
+		return nil, ErrProtocol
+	}
+	if !filled && !structuredFill {
+		r.Identity = nil
+		r.Card = nil
+	}
+	if filled || structuredFill {
+		switch {
+		case r.Category == "identity" || r.Type == "filled-identity":
+			if r.Card != nil || !validResponseFieldMap(r.Identity, identityResponseFields) {
+				return nil, ErrProtocol
+			}
+		case r.Category == "credit_card" || r.Type == "filled-card":
+			if r.Identity != nil || !validResponseFieldMap(r.Card, cardResponseFields) {
+				return nil, ErrProtocol
+			}
+		default:
+			// "filled" without an explicit category infers it from the map.
+			if (r.Identity == nil) == (r.Card == nil) {
+				return nil, ErrProtocol
+			}
+			if r.Identity != nil {
+				if !validResponseFieldMap(r.Identity, identityResponseFields) {
+					return nil, ErrProtocol
+				}
+				r.Category = "identity"
+			} else {
+				if !validResponseFieldMap(r.Card, cardResponseFields) {
+					return nil, ErrProtocol
+				}
+				r.Category = "credit_card"
+			}
+		}
+	}
+	if r.Type != "fill" || structuredFill {
 		r.Username = ""
 		r.Password = ""
 	}
-	// The general native Row may gain metadata such as Kind; the fixed browser
-	// protocol exposes exactly its original four candidate keys.
 	var candidates []candidate
 	if len(r.Candidates) > 0 {
 		candidates = make([]candidate, len(r.Candidates))
 	}
 	for n, row := range r.Candidates {
-		if row.Kind != "" && row.Kind != "login" {
+		if row.Kind != "" && row.Kind != "login" && row.Kind != "identity" && row.Kind != "credit_card" {
 			return nil, ErrProtocol
 		}
-		candidates[n] = candidate{row.ID, row.Revision, row.Title, row.State}
+		category := row.Category
+		if category == "" && row.Kind != "" && row.Kind != "login" {
+			category = row.Kind
+		}
+		if category != "" && category != "login" && category != "identity" && category != "credit_card" {
+			return nil, ErrProtocol
+		}
+		if category != "" && row.Kind != "" && row.Kind != "login" && row.Kind != category {
+			return nil, ErrProtocol
+		}
+		if len(row.Subtitle) > 1024 {
+			return nil, ErrProtocol
+		}
+		candidates[n] = candidate{row.ID, row.Revision, row.Title, row.State, category, row.Subtitle}
 	}
 	base := wire{plain(r), candidates}
-	if r.Type != "fill" {
-		return json.Marshal(base)
+	if r.Type == "fill" && !structuredFill {
+		return json.Marshal(struct {
+			wire
+			Username string `json:"username"`
+			Password string `json:"password"`
+		}{wire: base, Username: r.Username, Password: r.Password})
 	}
-	return json.Marshal(struct {
-		wire
-		Username string `json:"username"`
-		Password string `json:"password"`
-	}{wire: base, Username: r.Username, Password: r.Password})
+	return json.Marshal(base)
+}
+
+var identityResponseFields = map[string]bool{
+	"full_name": true, "first_name": true, "middle_name": true, "last_name": true,
+	"title": true, "suffix": true, "company": true, "job_title": true,
+	"street_address": true, "address_line1": true, "address_line2": true,
+	"address_line3": true, "city": true, "state": true, "district": true,
+	"postal_code": true, "country_code": true, "country_name": true,
+	"phone": true, "phone_country_code": true, "email": true,
+	"birth_date": true, "birth_year": true, "birth_month": true, "birth_day": true,
+}
+
+var cardResponseFields = map[string]bool{
+	"cardholder_name": true, "given_name": true, "additional_name": true,
+	"family_name": true, "number": true, "exp": true, "exp_month": true,
+	"exp_year": true, "cvv": true, "type": true,
+}
+
+func validResponseFieldMap(value map[string]string, allowed map[string]bool) bool {
+	if len(value) > 32 {
+		return false
+	}
+	for key, item := range value {
+		if !allowed[key] || len(item) > 16384 || !utf8.ValidString(item) {
+			return false
+		}
+	}
+	return true
+}
+
+// Clear wipes structured identity/card values and credential fields. The Writer
+// calls it after serialization so the caller's map backing arrays do not retain
+// secrets after a response is written.
+func (r *Response) Clear() {
+	if r == nil {
+		return
+	}
+	for key := range r.Identity {
+		r.Identity[key] = ""
+	}
+	for key := range r.Card {
+		r.Card[key] = ""
+	}
+	r.Identity = nil
+	r.Card = nil
+	r.Username = ""
+	r.Password = ""
+	r.Code = ""
+	r.Credential = ""
 }
 
 func (Response) String() string   { return "[native browser response]" }
@@ -289,7 +406,7 @@ func ReadRequest(reader io.Reader) (Request, error) {
 	for dec.More() {
 		key, e := dec.Token()
 		name, ok := key.(string)
-		if e != nil || !ok || seen[name] || len(seen) >= 14 {
+		if e != nil || !ok || seen[name] || len(seen) >= 15 {
 			return Request{}, ErrProtocol
 		}
 		seen[name] = true
@@ -321,6 +438,7 @@ func ReadRequest(reader io.Reader) (Request, error) {
 		Revision   string  `json:"revision"`
 		RequestID  string  `json:"request_id"`
 		Nonce      string  `json:"nonce"`
+		Category   string  `json:"category"`
 		Username   *string `json:"username"`
 		Password   *string `json:"password"`
 	}
@@ -329,7 +447,7 @@ func ReadRequest(reader io.Reader) (Request, error) {
 	if dec.Decode(&wire) != nil {
 		return Request{}, ErrProtocol
 	}
-	r := Request{Options: wire.Options, V: wire.V, ID: wire.ID, Type: wire.Type, Capability: wire.Capability, Origin: wire.Origin, TabID: wire.TabID, DocumentID: wire.DocumentID, WindowID: wire.WindowID, ItemID: wire.ItemID, Revision: wire.Revision, RequestID: wire.RequestID, Nonce: wire.Nonce}
+	r := Request{Options: wire.Options, V: wire.V, ID: wire.ID, Type: wire.Type, Capability: wire.Capability, Origin: wire.Origin, TabID: wire.TabID, DocumentID: wire.DocumentID, WindowID: wire.WindowID, ItemID: wire.ItemID, Revision: wire.Revision, RequestID: wire.RequestID, Nonce: wire.Nonce, Category: wire.Category}
 	if wire.Username != nil && wire.Password != nil {
 		r.payload = &savePayload{[]byte(*wire.Username), []byte(*wire.Password)}
 	}
@@ -342,6 +460,9 @@ func ReadRequest(reader io.Reader) (Request, error) {
 		expected = append(expected, "capability", "origin", "tab_id", "document_id", "options")
 	case "match", "fill", "save-new", "save-update", "otp":
 		expected = append(expected, "capability", "origin", "tab_id", "document_id")
+		if (r.Type == "match" || r.Type == "fill") && r.Category != "" {
+			expected = append(expected, "category")
+		}
 		if r.Type == "fill" || r.Type == "save-update" || r.Type == "otp" {
 			expected = append(expected, "item_id", "revision")
 		}
