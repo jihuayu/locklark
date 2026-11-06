@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/locklark/internal/watchtower"
 )
 
 const HostName = "org.locklark.browser"
@@ -37,20 +38,25 @@ var token = regexp.MustCompile(`^[a-f0-9]{32}$`)
 var revision = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
 type Request struct {
-	Options    string `json:"options,omitempty"`
-	payload    *savePayload
-	WindowID   int64  `json:"window_id,omitempty"`
-	RequestID  string `json:"request_id,omitempty"`
-	Nonce      string `json:"nonce,omitempty"`
-	V          int    `json:"v"`
-	ID         string `json:"id"`
-	Type       string `json:"type"`
-	Capability string `json:"capability,omitempty"`
-	Origin     string `json:"origin,omitempty"`
-	TabID      int64  `json:"tab_id,omitempty"`
-	DocumentID string `json:"document_id,omitempty"`
-	ItemID     string `json:"item_id,omitempty"`
-	Revision   string `json:"revision,omitempty"`
+	Options     string `json:"options,omitempty"`
+	payload     *savePayload
+	WindowID    int64  `json:"window_id,omitempty"`
+	RequestID   string `json:"request_id,omitempty"`
+	Nonce       string `json:"nonce,omitempty"`
+	V           int    `json:"v"`
+	ID          string `json:"id"`
+	Type        string `json:"type"`
+	Capability  string `json:"capability,omitempty"`
+	Origin      string `json:"origin,omitempty"`
+	TabID       int64  `json:"tab_id,omitempty"`
+	DocumentID  string `json:"document_id,omitempty"`
+	ItemID      string `json:"item_id,omitempty"`
+	Revision    string `json:"revision,omitempty"`
+	IncludeHIBP bool   `json:"include_hibp,omitempty"`
+
+	// includeHIBPSet distinguishes an explicit false from an omitted field.
+	// ReadRequest is the only production constructor.
+	includeHIBPSet bool
 }
 
 func (r Request) Context() personal.BrowserContext {
@@ -86,6 +92,8 @@ func (r Request) valid() bool {
 		return token.MatchString(r.Capability) && r.Origin == "" && r.TabID == 0 && r.DocumentID == "" && r.ItemID == "" && r.Revision == ""
 	case "match":
 		return token.MatchString(r.Capability) && r.Context().Valid() && r.ItemID == "" && r.Revision == ""
+	case "watchtower", "watchtower-summary":
+		return token.MatchString(r.Capability) && r.Context().Valid() && r.ItemID == "" && r.Revision == "" && r.includeHIBPSet
 	case "fill":
 		return token.MatchString(r.Capability) && r.Context().Valid() && token.MatchString(r.ItemID) && revision.MatchString(r.Revision)
 	}
@@ -93,20 +101,21 @@ func (r Request) valid() bool {
 }
 
 type Response struct {
-	Credential string         `json:"credential,omitempty"`
-	QuickFill  bool           `json:"quick_fill,omitempty"`
-	Code       string         `json:"code,omitempty"`
-	Nonce      string         `json:"nonce,omitempty"`
-	ItemID     string         `json:"item_id,omitempty"`
-	Revision   string         `json:"revision,omitempty"`
-	V          int            `json:"v"`
-	ID         string         `json:"id,omitempty"`
-	Type       string         `json:"type"`
-	Capability string         `json:"capability,omitempty"`
-	Candidates []personal.Row `json:"candidates,omitempty"`
-	Username   string         `json:"username,omitempty"`
-	Password   string         `json:"password,omitempty"`
-	Error      string         `json:"error,omitempty"`
+	Credential string             `json:"credential,omitempty"`
+	QuickFill  bool               `json:"quick_fill,omitempty"`
+	Code       string             `json:"code,omitempty"`
+	Nonce      string             `json:"nonce,omitempty"`
+	ItemID     string             `json:"item_id,omitempty"`
+	Revision   string             `json:"revision,omitempty"`
+	V          int                `json:"v"`
+	ID         string             `json:"id,omitempty"`
+	Type       string             `json:"type"`
+	Capability string             `json:"capability,omitempty"`
+	Candidates []personal.Row     `json:"candidates,omitempty"`
+	Watchtower *watchtower.Report `json:"watchtower,omitempty"`
+	Username   string             `json:"username,omitempty"`
+	Password   string             `json:"password,omitempty"`
+	Error      string             `json:"error,omitempty"`
 }
 
 // A legitimate login may have an empty username. Fill responses always carry
@@ -114,10 +123,15 @@ type Response struct {
 func (r Response) MarshalJSON() ([]byte, error) {
 	type plain Response
 	type candidate struct {
-		ID       string `json:"id"`
-		Revision string `json:"revision"`
-		Title    string `json:"title"`
-		State    string `json:"state"`
+		ID               string   `json:"id"`
+		Revision         string   `json:"revision"`
+		Title            string   `json:"title"`
+		State            string   `json:"state"`
+		WatchtowerFlags  []string `json:"watchtower_flags,omitempty"`
+		StrengthScore    *int     `json:"strength_score,omitempty"`
+		StrengthCategory string   `json:"strength_category,omitempty"`
+		ReuseCount       int      `json:"reuse_count,omitempty"`
+		BreachCount      int      `json:"breach_count,omitempty"`
 	}
 	type wire struct {
 		plain
@@ -155,7 +169,17 @@ func (r Response) MarshalJSON() ([]byte, error) {
 		if row.Kind != "" && row.Kind != "login" {
 			return nil, ErrProtocol
 		}
-		candidates[n] = candidate{row.ID, row.Revision, row.Title, row.State}
+		candidates[n] = candidate{
+			ID:               row.ID,
+			Revision:         row.Revision,
+			Title:            row.Title,
+			State:            row.State,
+			WatchtowerFlags:  row.WatchtowerFlags,
+			StrengthScore:    row.StrengthScore,
+			StrengthCategory: row.StrengthCategory,
+			ReuseCount:       row.ReuseCount,
+			BreachCount:      row.BreachCount,
+		}
 	}
 	base := wire{plain(r), candidates}
 	if r.Type != "fill" {
@@ -289,12 +313,12 @@ func ReadRequest(reader io.Reader) (Request, error) {
 	for dec.More() {
 		key, e := dec.Token()
 		name, ok := key.(string)
-		if e != nil || !ok || seen[name] || len(seen) >= 14 {
+		if e != nil || !ok || seen[name] || len(seen) >= 16 {
 			return Request{}, ErrProtocol
 		}
 		seen[name] = true
 		var value json.RawMessage
-		if dec.Decode(&value) != nil || len(value) == 0 || value[0] != '"' && (value[0] < '0' || value[0] > '9') && value[0] != '-' {
+		if dec.Decode(&value) != nil || len(value) == 0 || value[0] != '"' && (value[0] < '0' || value[0] > '9') && value[0] != '-' && value[0] != 't' && value[0] != 'f' {
 			clear(value)
 			return Request{}, ErrProtocol
 		}
@@ -308,21 +332,22 @@ func ReadRequest(reader io.Reader) (Request, error) {
 		return Request{}, ErrProtocol
 	}
 	var wire struct {
-		Options    string  `json:"options"`
-		V          int     `json:"v"`
-		ID         string  `json:"id"`
-		Type       string  `json:"type"`
-		Capability string  `json:"capability"`
-		Origin     string  `json:"origin"`
-		TabID      int64   `json:"tab_id"`
-		DocumentID string  `json:"document_id"`
-		WindowID   int64   `json:"window_id"`
-		ItemID     string  `json:"item_id"`
-		Revision   string  `json:"revision"`
-		RequestID  string  `json:"request_id"`
-		Nonce      string  `json:"nonce"`
-		Username   *string `json:"username"`
-		Password   *string `json:"password"`
+		Options     string  `json:"options"`
+		V           int     `json:"v"`
+		ID          string  `json:"id"`
+		Type        string  `json:"type"`
+		Capability  string  `json:"capability"`
+		Origin      string  `json:"origin"`
+		TabID       int64   `json:"tab_id"`
+		DocumentID  string  `json:"document_id"`
+		WindowID    int64   `json:"window_id"`
+		ItemID      string  `json:"item_id"`
+		Revision    string  `json:"revision"`
+		RequestID   string  `json:"request_id"`
+		IncludeHIBP *bool   `json:"include_hibp"`
+		Nonce       string  `json:"nonce"`
+		Username    *string `json:"username"`
+		Password    *string `json:"password"`
 	}
 	dec = json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
@@ -330,6 +355,10 @@ func ReadRequest(reader io.Reader) (Request, error) {
 		return Request{}, ErrProtocol
 	}
 	r := Request{Options: wire.Options, V: wire.V, ID: wire.ID, Type: wire.Type, Capability: wire.Capability, Origin: wire.Origin, TabID: wire.TabID, DocumentID: wire.DocumentID, WindowID: wire.WindowID, ItemID: wire.ItemID, Revision: wire.Revision, RequestID: wire.RequestID, Nonce: wire.Nonce}
+	if wire.IncludeHIBP != nil {
+		r.IncludeHIBP = *wire.IncludeHIBP
+		r.includeHIBPSet = true
+	}
 	if wire.Username != nil && wire.Password != nil {
 		r.payload = &savePayload{[]byte(*wire.Username), []byte(*wire.Password)}
 	}
@@ -340,6 +369,8 @@ func ReadRequest(reader io.Reader) (Request, error) {
 		expected = append(expected, "capability")
 	case "passkey-create", "passkey-get":
 		expected = append(expected, "capability", "origin", "tab_id", "document_id", "options")
+	case "watchtower", "watchtower-summary":
+		expected = append(expected, "capability", "origin", "tab_id", "document_id", "include_hibp")
 	case "match", "fill", "save-new", "save-update", "otp":
 		expected = append(expected, "capability", "origin", "tab_id", "document_id")
 		if r.Type == "fill" || r.Type == "save-update" || r.Type == "otp" {

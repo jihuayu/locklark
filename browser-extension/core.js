@@ -53,6 +53,287 @@ globalThis.LocklarkCore = (() => {
       a.origin === b.origin
     );
   }
+  const WATCHTOWER_FLAGS = Object.freeze([
+    "empty",
+    "common-pattern",
+    "short",
+    "low-variety",
+    "weak",
+    "reused",
+    "unsecured-http",
+    "totp-not-stored",
+    "passkey-not-stored",
+    "expiring-soon",
+    "expired",
+    "vulnerable",
+  ]);
+  const STRENGTH_CATEGORIES = Object.freeze([
+    "terrible",
+    "weak",
+    "fair",
+    "good",
+    "very-good",
+    "excellent",
+    "fantastic",
+  ]);
+  const WATCHTOWER_COUNTS = Object.freeze([
+    "vulnerable",
+    "reused",
+    "weak",
+    "unsecured_http",
+    "totp_not_stored",
+    "expiring",
+  ]);
+  const WATCHTOWER_OPTIONAL_COUNTS = Object.freeze(["passkey_not_stored"]);
+  const WATCHTOWER_REPORT_KEYS = Object.freeze([
+    "profile",
+    "hibp_checked",
+    "hibp_error",
+    "overall_score",
+    "checked",
+    "skipped",
+    "counts",
+    "site",
+    "site_findings",
+    "findings",
+  ]);
+  const WATCHTOWER_FINDING_KEYS = Object.freeze([
+    "id",
+    "revision",
+    "title",
+    "origin",
+    "flags",
+    "strength_score",
+    "strength_category",
+    "reuse_count",
+    "breach_count",
+  ]);
+  const CANDIDATE_KEYS = Object.freeze([
+    "id",
+    "revision",
+    "title",
+    "state",
+    "watchtower_flags",
+    "strength_score",
+    "strength_category",
+    "reuse_count",
+    "breach_count",
+  ]);
+  const MAX_WATCHTOWER_FINDINGS = 5000;
+  const MAX_WATCHTOWER_COUNT = 1000000;
+  function plainObject(value) {
+    return !!value && typeof value === "object" && !Array.isArray(value);
+  }
+  function boundedInteger(value, min, max) {
+    return (
+      Number.isSafeInteger(value) && value >= min && value <= max
+    );
+  }
+  function knownKeysOnly(value, allowed) {
+    return Object.keys(value).every((key) => allowed.includes(key));
+  }
+  function validOriginHost(host) {
+    if (!host || host.length > 253) return false;
+    if (host.startsWith("[") && host.endsWith("]"))
+      return /^\[[0-9a-f:.]+\]$/i.test(host);
+    return host.split(".").every(
+      (label) =>
+        label.length > 0 &&
+        label.length <= 63 &&
+        /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label),
+    );
+  }
+  // Canonical web origin only: scheme, host, optional port, no path/query/
+  // fragment/credentials. Findings may carry an http origin; opening tabs is
+  // restricted separately to https.
+  function validWebOrigin(raw) {
+    if (
+      typeof raw !== "string" ||
+      raw.length > 2048 ||
+      /[\\\x00-\x20\x7f-\uffff]/u.test(raw)
+    )
+      return false;
+    let u;
+    try {
+      u = new URL(raw);
+    } catch {
+      return false;
+    }
+    return (
+      (u.protocol === "https:" || u.protocol === "http:") &&
+      !u.username &&
+      !u.password &&
+      u.origin !== "null" &&
+      u.origin === raw &&
+      validOriginHost(u.hostname)
+    );
+  }
+  function validHTTPSOrigin(raw) {
+    return (
+      typeof raw === "string" &&
+      raw.startsWith("https://") &&
+      validWebOrigin(raw)
+    );
+  }
+  function siteFromURL(raw) {
+    if (
+      typeof raw !== "string" ||
+      raw.length > 8192 ||
+      /[\\\x00-\x20\x7f]/u.test(raw)
+    )
+      return null;
+    let u;
+    try {
+      u = new URL(raw);
+    } catch {
+      return null;
+    }
+    if (
+      (u.protocol !== "https:" && u.protocol !== "http:") ||
+      u.username ||
+      u.password ||
+      u.origin === "null" ||
+      !validOriginHost(u.hostname)
+    )
+      return null;
+    const host = u.hostname.toLowerCase();
+    // Match the native rule: plain-text HTTP is only tolerated on loopback.
+    const loopback =
+      host === "localhost" ||
+      host === "127.0.0.1" ||
+      host === "::1" ||
+      host === "[::1]";
+    return {
+      origin: u.origin,
+      unsecured: u.protocol === "http:" && !loopback,
+    };
+  }
+  function validWatchtowerFlags(flags, allowEmpty = true) {
+    if (!Array.isArray(flags) || flags.length > WATCHTOWER_FLAGS.length)
+      return false;
+    if (!allowEmpty && flags.length === 0) return false;
+    const seen = new Set();
+    for (const flag of flags) {
+      if (typeof flag !== "string" || !WATCHTOWER_FLAGS.includes(flag))
+        return false;
+      if (seen.has(flag)) return false;
+      seen.add(flag);
+    }
+    return true;
+  }
+  function validWatchtowerCounts(counts) {
+    if (!plainObject(counts)) return false;
+    if (
+      !knownKeysOnly(counts, [
+        ...WATCHTOWER_COUNTS,
+        ...WATCHTOWER_OPTIONAL_COUNTS,
+      ])
+    )
+      return false;
+    for (const key of WATCHTOWER_COUNTS)
+      if (!boundedInteger(counts[key], 0, MAX_WATCHTOWER_COUNT)) return false;
+    if (
+      Object.hasOwn(counts, "passkey_not_stored") &&
+      !boundedInteger(counts.passkey_not_stored, 0, MAX_WATCHTOWER_COUNT)
+    )
+      return false;
+    return true;
+  }
+  function validWatchtowerFinding(finding) {
+    if (!plainObject(finding)) return false;
+    if (!knownKeysOnly(finding, WATCHTOWER_FINDING_KEYS)) return false;
+    if (
+      !/^[a-f0-9]{32}$/.test(finding.id || "") ||
+      !/^[a-f0-9]{64}$/.test(finding.revision || "") ||
+      typeof finding.title !== "string" ||
+      finding.title.length > 1024 ||
+      !validWatchtowerFlags(finding.flags),
+      !boundedInteger(finding.strength_score, 0, 100) ||
+      !STRENGTH_CATEGORIES.includes(finding.strength_category) ||
+      !boundedInteger(finding.reuse_count, 0, MAX_WATCHTOWER_COUNT) ||
+      !boundedInteger(finding.breach_count, 0, MAX_WATCHTOWER_COUNT)
+    )
+      return false;
+    if (
+      Object.hasOwn(finding, "origin") &&
+      (typeof finding.origin !== "string" ||
+        !validWebOrigin(finding.origin))
+    )
+      return false;
+    return true;
+  }
+  function validWatchtower(report) {
+    if (!plainObject(report)) return false;
+    if (!knownKeysOnly(report, WATCHTOWER_REPORT_KEYS)) return false;
+    if (
+      report.profile !== "watchtower-v2" ||
+      typeof report.hibp_checked !== "boolean" ||
+      !boundedInteger(report.overall_score, 0, 100) ||
+      !boundedInteger(report.checked, 0, MAX_WATCHTOWER_COUNT) ||
+      (Object.hasOwn(report, "skipped") &&
+        !boundedInteger(report.skipped, 0, MAX_WATCHTOWER_COUNT)) ||
+      (Object.hasOwn(report, "hibp_error") &&
+        report.hibp_error !== "unavailable") ||
+      !validWatchtowerCounts(report.counts) ||
+      !plainObject(report.site) ||
+      !knownKeysOnly(report.site, ["origin", "unsecured_http"]) ||
+      typeof report.site.unsecured_http !== "boolean" ||
+      !Array.isArray(report.site_findings) ||
+      !Array.isArray(report.findings) ||
+      report.site_findings.length > MAX_WATCHTOWER_FINDINGS ||
+      report.findings.length > MAX_WATCHTOWER_FINDINGS
+    )
+      return false;
+    if (
+      Object.hasOwn(report.site, "origin") &&
+      !validHTTPSOrigin(report.site.origin)
+    )
+      return false;
+    return (
+      report.site_findings.every(validWatchtowerFinding) &&
+      report.findings.every(validWatchtowerFinding)
+    );
+  }
+  function validCandidate(row) {
+    if (!plainObject(row)) return false;
+    if (!knownKeysOnly(row, CANDIDATE_KEYS)) return false;
+    if (
+      !/^[a-f0-9]{32}$/.test(row.id || "") ||
+      !/^[a-f0-9]{64}$/.test(row.revision || "") ||
+      typeof row.title !== "string" ||
+      row.title.length > 1024 ||
+      row.state !== "active"
+    )
+      return false;
+    if (
+      Object.hasOwn(row, "watchtower_flags") &&
+      !validWatchtowerFlags(row.watchtower_flags)
+    )
+      return false;
+    if (
+      Object.hasOwn(row, "strength_score") &&
+      !boundedInteger(row.strength_score, 0, 100)
+    )
+      return false;
+    if (
+      Object.hasOwn(row, "strength_category") &&
+      !STRENGTH_CATEGORIES.includes(row.strength_category)
+    )
+      return false;
+    for (const key of ["reuse_count", "breach_count"])
+      if (
+        Object.hasOwn(row, key) &&
+        !boundedInteger(row[key], 0, MAX_WATCHTOWER_COUNT)
+      )
+        return false;
+    return true;
+  }
+  function watchtowerFlagsForRow(row) {
+    if (!plainObject(row) || !Array.isArray(row.watchtower_flags)) return [];
+    return WATCHTOWER_FLAGS.filter((flag) =>
+      row.watchtower_flags.includes(flag),
+    );
+  }
   function validResponse(m) {
     if (
       !m ||
@@ -75,6 +356,7 @@ globalThis.LocklarkCore = (() => {
         "otp-ready": ["v", "id", "type", "nonce"],
         "otp-fill": ["v", "id", "type", "code"],
         saved: ["v", "id", "type", "item_id", "revision"],
+        watchtower: ["v", "id", "type", "watchtower"],
         unknown: ["v", "id", "type"],
       },
       keys = shapes[m.type];
@@ -82,6 +364,7 @@ globalThis.LocklarkCore = (() => {
     if (m.type === "locked") return true;
     if (m.type === "unpaired") return m.error === "expired";
     if (!/^[a-f0-9]{32}$/.test(m.id || "")) return false;
+    if (m.type === "watchtower") return validWatchtower(m.watchtower);
     if (m.type === "passkey-result")
       return typeof m.credential === "string" && m.credential.length <= 32768;
     if (m.type === "save-ready" || m.type === "otp-ready")
@@ -113,20 +396,7 @@ globalThis.LocklarkCore = (() => {
         m.candidates === undefined ||
         (Array.isArray(m.candidates) &&
           m.candidates.length <= 100 &&
-          m.candidates.every(
-            (r) =>
-              r &&
-              typeof r === "object" &&
-              !Array.isArray(r) &&
-              Object.keys(r).every((k) =>
-                ["id", "revision", "title", "state"].includes(k),
-              ) &&
-              /^[a-f0-9]{32}$/.test(r.id || "") &&
-              /^[a-f0-9]{64}$/.test(r.revision || "") &&
-              typeof r.title === "string" &&
-              r.title.length <= 1024 &&
-              r.state === "active",
-          ))
+          m.candidates.every(validCandidate))
       );
     return true;
   }
@@ -510,6 +780,12 @@ globalThis.LocklarkCore = (() => {
     validSender,
     sameContext,
     validResponse,
+    validCandidate,
+    validWatchtower,
+    watchtowerFlagsForRow,
+    validWebOrigin,
+    validHTTPSOrigin,
+    siteFromURL,
     probe,
     fillDocument,
     otpDocument,

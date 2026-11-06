@@ -309,3 +309,252 @@ test("serialized fillDocument uses autocomplete HTML attribute when IDL property
   );
   assert.equal(third.calls.submits.length, 0);
 });
+
+function watchtowerFinding(overrides = {}) {
+  return {
+    id: "a".repeat(32),
+    revision: "b".repeat(64),
+    title: "Example",
+    origin: "https://example.test",
+    flags: ["weak", "reused"],
+    strength_score: 32,
+    strength_category: "weak",
+    reuse_count: 2,
+    breach_count: 0,
+    ...overrides,
+  };
+}
+function watchtowerReport(overrides = {}) {
+  return {
+    profile: "watchtower-v2",
+    hibp_checked: false,
+    overall_score: 78,
+    checked: 12,
+    skipped: 1,
+    counts: {
+      vulnerable: 0,
+      reused: 2,
+      weak: 1,
+      unsecured_http: 1,
+      totp_not_stored: 4,
+      expiring: 0,
+      passkey_not_stored: 4,
+    },
+    site: { origin: "https://example.test", unsecured_http: false },
+    site_findings: [watchtowerFinding()],
+    findings: [watchtowerFinding({ flags: ["weak"] })],
+    ...overrides,
+  };
+}
+test("watchtower report DTO accepts the native shape and rejects unknown or unbounded data", () => {
+  assert.equal(core.validWatchtower(watchtowerReport()), true);
+  const omittedOptional = watchtowerReport({
+    hibp_checked: true,
+    hibp_error: "unavailable",
+    counts: {
+      vulnerable: 0,
+      reused: 0,
+      weak: 0,
+      unsecured_http: 0,
+      totp_not_stored: 0,
+      expiring: 0,
+    },
+    site: { unsecured_http: false },
+    site_findings: [],
+    findings: [],
+  });
+  delete omittedOptional.skipped;
+  assert.equal(
+    core.validWatchtower(omittedOptional),
+    true,
+    "six counts and omitted optional fields stay valid",
+  );
+  const bad = [
+    watchtowerReport({ unknown: true }),
+    watchtowerReport({ profile: "watchtower-v1" }),
+    watchtowerReport({ hibp_checked: "false" }),
+    watchtowerReport({ hibp_error: "network" }),
+    watchtowerReport({ overall_score: 101 }),
+    watchtowerReport({ overall_score: -1 }),
+    watchtowerReport({ overall_score: 42.5 }),
+    watchtowerReport({ checked: -1 }),
+    watchtowerReport({ skipped: 1.5 }),
+    watchtowerReport({ counts: { ...watchtowerReport().counts, bogus: 1 } }),
+    watchtowerReport({
+      counts: { ...watchtowerReport().counts, vulnerable: -1 },
+    }),
+    watchtowerReport({
+      counts: { ...watchtowerReport().counts, reused: "2" },
+    }),
+    watchtowerReport({ site: { origin: "http://example.test", unsecured_http: false } }),
+    watchtowerReport({ site: { origin: "https://example.test/path", unsecured_http: false } }),
+    watchtowerReport({ site: { origin: "https://example.test", unsecured_http: "no" } }),
+    watchtowerReport({ site: { origin: "https://example.test", unsecured_http: false, extra: 1 } }),
+    watchtowerReport({ site_findings: "none" }),
+    watchtowerReport({ findings: {} }),
+    watchtowerReport({
+      findings: [{ ...watchtowerFinding(), extra: true }],
+    }),
+    watchtowerReport({
+      findings: [watchtowerFinding({ flags: ["not-a-flag"] })],
+    }),
+    watchtowerReport({
+      findings: [watchtowerFinding({ flags: ["weak", "weak"] })],
+    }),
+    watchtowerReport({
+      findings: [watchtowerFinding({ strength_score: 101 })],
+    }),
+    watchtowerReport({
+      findings: [watchtowerFinding({ strength_category: "strong" })],
+    }),
+    watchtowerReport({
+      findings: [watchtowerFinding({ strength_category: "Weak" })],
+    }),
+    watchtowerReport({
+      findings: [watchtowerFinding({ title: "x".repeat(1025) })],
+    }),
+    watchtowerReport({
+      findings: [watchtowerFinding({ id: "A".repeat(32) })],
+    }),
+    watchtowerReport({
+      findings: [watchtowerFinding({ revision: "b".repeat(63) })],
+    }),
+    watchtowerReport({
+      findings: [watchtowerFinding({ reuse_count: -1 })],
+    }),
+    watchtowerReport({
+      findings: [watchtowerFinding({ breach_count: 1.5 })],
+    }),
+    watchtowerReport({
+      findings: [watchtowerFinding({ origin: "https://example.test/" })],
+    }),
+  ];
+  bad.forEach((report, index) =>
+    assert.equal(core.validWatchtower(report), false, "bad report " + index),
+  );
+});
+test("watchtower native response is accepted only with a validated report", () => {
+  const id = "c".repeat(32);
+  assert.equal(
+    core.validResponse({
+      v: 1,
+      id,
+      type: "watchtower",
+      watchtower: watchtowerReport(),
+    }),
+    true,
+  );
+  for (const response of [
+    { v: 1, id, type: "watchtower" },
+    { v: 1, id, type: "watchtower", watchtower: null },
+    {
+      v: 1,
+      id,
+      type: "watchtower",
+      watchtower: watchtowerReport({ password: "secret" }),
+    },
+    {
+      v: 1,
+      id,
+      type: "watchtower",
+      watchtower: watchtowerReport(),
+      extra: true,
+    },
+  ])
+    assert.equal(core.validResponse(response), false);
+});
+test("candidate DTO keeps the historical shape and bounds optional health fields", () => {
+  const id = "1".repeat(32),
+    revision = "2".repeat(64);
+  const historical = {
+    id,
+    revision,
+    title: "GitHub",
+    state: "active",
+  };
+  assert.equal(core.validCandidate(historical), true);
+  assert.equal(
+    core.validResponse({
+      v: 1,
+      id: "c".repeat(32),
+      type: "candidates",
+      candidates: [historical],
+    }),
+    true,
+  );
+  const healthy = {
+    ...historical,
+    watchtower_flags: ["weak", "reused"],
+    strength_score: 32,
+    strength_category: "weak",
+    reuse_count: 2,
+    breach_count: 0,
+  };
+  assert.equal(core.validCandidate(healthy), true);
+  assert.equal(
+    core.validResponse({
+      v: 1,
+      id: "c".repeat(32),
+      type: "candidates",
+      candidates: [healthy],
+    }),
+    true,
+  );
+  for (const row of [
+    { ...healthy, watchtower_flags: ["not-a-flag"] },
+    { ...healthy, watchtower_flags: "weak" },
+    { ...healthy, watchtower_flags: ["weak", "weak"] },
+    { ...healthy, strength_score: 101 },
+    { ...healthy, strength_score: "32" },
+    { ...healthy, strength_category: "STRONG" },
+    { ...healthy, reuse_count: -1 },
+    { ...healthy, breach_count: 1.5 },
+    { ...healthy, password: "secret" },
+    { ...healthy, title: "x".repeat(1025) },
+    { ...healthy, id: "A".repeat(32) },
+    { ...healthy, state: "archived" },
+  ])
+    assert.equal(core.validCandidate(row), false);
+  assert.equal(
+    core.validResponse({
+      v: 1,
+      id: "c".repeat(32),
+      type: "candidates",
+      candidates: [healthy, { ...healthy, password: "secret" }],
+    }),
+    false,
+  );
+});
+test("watchtower flag helper filters unknown and duplicate values in stable order", () => {
+  assert.deepEqual(
+    core.watchtowerFlagsForRow({
+      watchtower_flags: ["vulnerable", "bogus", "weak", "vulnerable"],
+    }),
+    ["weak", "vulnerable"],
+  );
+  assert.deepEqual(core.watchtowerFlagsForRow({}), []);
+  assert.deepEqual(core.watchtowerFlagsForRow(null), []);
+  assert.equal(core.validWebOrigin("https://example.test"), true);
+  assert.equal(core.validWebOrigin("http://example.test:8080"), true);
+  assert.equal(core.validWebOrigin("https://example.test/path"), false);
+  assert.equal(core.validWebOrigin("https://user@example.test"), false);
+  assert.equal(core.validHTTPSOrigin("https://example.test"), true);
+  assert.equal(core.validHTTPSOrigin("http://example.test"), false);
+  assert.deepEqual(core.siteFromURL("https://example.test/login"), {
+    origin: "https://example.test",
+    unsecured: false,
+  });
+  assert.deepEqual(core.siteFromURL("http://example.test/login"), {
+    origin: "http://example.test",
+    unsecured: true,
+  });
+  assert.deepEqual(core.siteFromURL("http://localhost:3000/login"), {
+    origin: "http://localhost:3000",
+    unsecured: false,
+  });
+  assert.deepEqual(core.siteFromURL("http://127.0.0.1/login"), {
+    origin: "http://127.0.0.1",
+    unsecured: false,
+  });
+  assert.equal(core.siteFromURL("chrome://settings"), null);
+});

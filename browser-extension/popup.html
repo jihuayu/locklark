@@ -30,7 +30,90 @@
       <p id="status" role="status"></p>
       <p id="save-warning" class="note" role="alert"></p>
       <p id="origin"></p>
+      <section id="watchtower-site-banner" class="wt-banner" hidden>
+        <strong id="watchtower-site-badge"></strong>
+        <p id="watchtower-site-text"></p>
+        <button id="watchtower-site-action" type="button" hidden>
+          立即打开网站修改密码
+        </button>
+      </section>
       <div id="candidates"></div>
+      <details id="watchtower-panel">
+        <summary>Watchtower / 安全体检</summary>
+        <div class="wt-score">
+          <span>安全评分</span>
+          <div class="wt-score-track">
+            <div id="watchtower-score-bar" class="wt-score-fill"></div>
+          </div>
+          <strong id="watchtower-score">—</strong>
+        </div>
+        <p id="watchtower-summary" class="note"></p>
+        <p id="watchtower-empty" class="note"></p>
+        <div class="wt-actions">
+          <button id="watchtower-refresh" type="button">运行本地体检</button>
+        </div>
+        <label class="wt-optin"
+          ><input id="watchtower-hibp-optin" type="checkbox" />
+          使用 k-Anonymity 检查已泄露密码（HIBP，仅发送 SHA-1 前 5 位）</label
+        >
+        <div class="wt-actions">
+          <button id="watchtower-run-hibp" type="button">检查泄露库</button>
+        </div>
+        <p id="watchtower-hibp-note" class="note"></p>
+        <div id="watchtower-cards" class="wt-cards">
+          <button
+            id="watchtower-card-vulnerable"
+            class="wt-card"
+            type="button"
+            data-wt-category="vulnerable"
+          >
+            已泄露密码 <span id="watchtower-count-vulnerable">0</span>
+          </button>
+          <button
+            id="watchtower-card-reused"
+            class="wt-card"
+            type="button"
+            data-wt-category="reused"
+          >
+            重复密码 <span id="watchtower-count-reused">0</span>
+          </button>
+          <button
+            id="watchtower-card-weak"
+            class="wt-card"
+            type="button"
+            data-wt-category="weak"
+          >
+            弱密码 <span id="watchtower-count-weak">0</span>
+          </button>
+          <button
+            id="watchtower-card-unsecured_http"
+            class="wt-card"
+            type="button"
+            data-wt-category="unsecured_http"
+          >
+            不安全网站 <span id="watchtower-count-unsecured_http">0</span>
+          </button>
+          <button
+            id="watchtower-card-totp_not_stored"
+            class="wt-card"
+            type="button"
+            data-wt-category="totp_not_stored"
+          >
+            未启用两步验证
+            <span id="watchtower-count-totp_not_stored">0</span>
+          </button>
+          <button
+            id="watchtower-card-expiring"
+            class="wt-card"
+            type="button"
+            data-wt-category="expiring"
+          >
+            即将过期 / 已过期
+            <span id="watchtower-count-expiring">0</span>
+          </button>
+        </div>
+        <div id="watchtower-findings"></div>
+      </details>
       <p class="note">
         在原生窗口连接并启用快捷填充后，可直接在网页选择账号。自动登录只提交可明确识别的登录表单；Passkey
         需在原生窗口确认。

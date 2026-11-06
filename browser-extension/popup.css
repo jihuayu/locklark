@@ -68,3 +68,152 @@ details {
   border-top: 1px solid #dce5dd;
   padding-top: 8px;
 }
+#watchtower-site-banner {
+  margin: 10px 0;
+  padding: 10px;
+  border: 1px solid #d9a441;
+  border-left-width: 4px;
+  border-radius: 6px;
+  background: #fff8e6;
+}
+#watchtower-site-banner[data-level="critical"] {
+  border-color: #c0392b;
+  background: #fff0ee;
+}
+#watchtower-site-banner strong {
+  display: block;
+  margin-bottom: 4px;
+}
+#watchtower-site-banner p {
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+#watchtower-site-banner[data-level="critical"] strong {
+  color: #a02a1f;
+}
+.wt-badge {
+  display: inline-block;
+  margin: 2px 4px 2px 0;
+  padding: 1px 6px;
+  border-radius: 9px;
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+.wt-red {
+  background: #fbe3e1;
+  color: #9c2c22;
+}
+.wt-amber {
+  background: #fff0cd;
+  color: #79520a;
+}
+.wt-neutral {
+  background: #e8eeea;
+  color: #40564b;
+}
+#watchtower-panel {
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 1px solid #dce5dd;
+}
+#watchtower-panel summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.wt-score {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+  font-size: 12px;
+}
+.wt-score-track {
+  flex: 1;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 4px;
+  background: #e4e9e5;
+}
+.wt-score-fill {
+  width: 0;
+  height: 100%;
+  background: #7c8b83;
+}
+.wt-score-fill[data-level="green"] {
+  background: #2e8b57;
+}
+.wt-score-fill[data-level="amber"] {
+  background: #cf8e18;
+}
+.wt-score-fill[data-level="red"] {
+  background: #c0392b;
+}
+.wt-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 6px 0;
+}
+.wt-optin {
+  padding-top: 2px;
+  line-height: 1.5;
+}
+.wt-cards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin: 8px 0;
+}
+.wt-card {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 6px 8px;
+  font-size: 12px;
+  text-align: left;
+}
+.wt-card[data-active="true"] {
+  border-color: #2e6f57;
+  background: #e9f3ed;
+}
+#watchtower-findings {
+  display: grid;
+  gap: 8px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+.wt-finding {
+  padding-top: 8px;
+  border-top: 1px solid #dce5dd;
+}
+.wt-finding-title {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.wt-finding .wt-strength {
+  height: 5px;
+  margin: 4px 0;
+  overflow: hidden;
+  border-radius: 3px;
+  background: #e4e9e5;
+}
+.wt-finding .wt-strength > div {
+  height: 100%;
+  background: #2e8b57;
+}
+.wt-finding .wt-strength > div[data-level="amber"] {
+  background: #cf8e18;
+}
+.wt-finding .wt-strength > div[data-level="red"] {
+  background: #c0392b;
+}
+.wt-finding button {
+  margin-top: 4px;
+  padding: 5px 8px;
+  font-size: 12px;
+}
+.wt-open-error {
+  color: #9c2c22;
+}

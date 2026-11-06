@@ -10,6 +10,7 @@ import (
 
 	"github.com/jihuayu/locklark/internal/onepux"
 	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/locklark/internal/watchtower"
 )
 
 var ErrSessionLocked = errors.New("desktop vault is locked; unlock again")
@@ -40,6 +41,10 @@ type Session struct {
 	fullUnlock           time.Time
 	pending              map[*NativeField]bool
 	browserPending       map[*NativeBrowserFill]bool
+	// Watchtower state is in-memory only. The range client owns the prefix
+	// cache; dropping it on lock clears both the cache and its transport.
+	watchtowerKey []byte
+	hibp          watchtower.RangeLookup
 }
 
 // NativeField is a one-use native-only delivery. It cannot be JSON-serialized.
@@ -75,7 +80,7 @@ func UnlockSession(path string, password, key []byte, idle time.Duration) (*Sess
 		clear(r.material)
 		return nil, e
 	}
-	return &Session{path: path, material: r.material, slotDigest: r.slotDigest, last: time.Now(), fullUnlock: time.Now(), idle: idle, pending: make(map[*NativeField]bool)}, nil
+	return &Session{path: path, material: r.material, slotDigest: r.slotDigest, last: time.Now(), fullUnlock: time.Now(), idle: idle, pending: make(map[*NativeField]bool), hibp: watchtower.NewHIBPClient(watchtower.HIBPOptions{})}, nil
 }
 func (s *Session) lock() {
 	s.sshPending.Range(func(key, _ any) bool {
@@ -111,6 +116,9 @@ func (s *Session) lock() {
 		f.clear()
 		delete(s.browserPending, f)
 	}
+	s.hibp = nil
+	clear(s.watchtowerKey)
+	s.watchtowerKey = nil
 	clear(s.material)
 	s.material = nil
 	for f := range s.pending {
