@@ -71,7 +71,7 @@ def credential_marker(nodes, focused):
         try: center(node)
         except AcceptanceFailure: continue
         usable.append(node)
-    if any(node.get("resource-id", "").endswith(("/pinEntry", "/pin_entry", "/passwordEntry", "/password_entry")) for node in usable):
+    if any(node.get("resource-id", "").endswith(("/pinEntry", "/pin_entry", "/passwordEntry", "/password_entry", "/lockPassword")) for node in usable):
         return True
     keys = {digit for digit in "0123456789" if any(node.get("resource-id", "").endswith("/key" + digit) for node in usable)}
     if len(keys) == 10:
@@ -200,7 +200,7 @@ class DeviceCredentialAcceptance(AndroidAcceptance):
         else:
             entries = [node for node in nodes if node.get("package") == package and node.get("enabled") == "true" and
                        (node.get("class") == "android.widget.EditText" and node.get("password") == "true" or
-                        node.get("resource-id", "").endswith(("/pinEntry", "/pin_entry", "/passwordEntry", "/password_entry")))]
+                        node.get("resource-id", "").endswith(("/pinEntry", "/pin_entry", "/passwordEntry", "/password_entry", "/lockPassword")))]
             if not entries:
                 fallback = [node for node in nodes if node.get("package") == package and node.get("enabled") == "true" and
                             node.get("text", "") in {"Use PIN", "Use pin", "Use screen lock", "使用 PIN 码", "使用PIN码", "使用屏幕锁定"}]
@@ -208,7 +208,9 @@ class DeviceCredentialAcceptance(AndroidAcceptance):
                 require(self.focused_package(self.snapshot()) == package)
                 self.shell("input", "tap", *center(fallback[0]))
                 nodes, package = self.os_prompt()
-                entries = [node for node in nodes if node.get("package") == package and node.get("enabled") == "true" and node.get("password") == "true" and node.get("class") == "android.widget.EditText"]
+                entries = [node for node in nodes if node.get("package") == package and node.get("enabled") == "true" and
+                           (node.get("resource-id", "").endswith(("/pinEntry", "/pin_entry", "/passwordEntry", "/password_entry", "/lockPassword")) or
+                            node.get("password") == "true" and node.get("class") == "android.widget.EditText")]
             require(len(entries) == 1 and self.focused_package(self.snapshot()) == package)
             self.shell("input", "tap", *center(entries[0]))
             require(self.focused_package(self.snapshot()) == package)

@@ -24,6 +24,13 @@ class DeviceCredentialHarnessTests(unittest.TestCase):
         self.assertFalse(credential_marker([fallback],"com.android.systemui"))
         self.assertTrue(credential_marker([fallback,self.node(text="认证此设备以解封本地金库授权")],"com.android.systemui"))
 
+    def test_api35_lockPassword_marker_stays_bound_to_OS(self):
+        lock = self.node(**{"resource-id":"com.android.systemui:id/lockPassword","class":"com.android.internal.widget.ImeAwareEditText"})
+        self.assertTrue(credential_marker([lock],"com.android.systemui"))
+        self.assertFalse(credential_marker([{**lock,"package":"org.locklark.android"}],"org.locklark.android"))
+        self.assertFalse(credential_marker([self.node(**{"package":"com.android.settings","resource-id":"com.android.settings:id/wifi_password","class":"android.widget.EditText","password":"true"})],"com.android.settings"))
+        self.assertFalse(credential_marker([{**lock,"enabled":"false"}],"com.android.systemui"))
+
     def test_title_only_window_requires_system_uid_record(self):
         nodes=[self.node(**{"resource-id":"com.android.systemui:id/pinEntry"})]
         raw=b"mCurrentFocus=Window{abc u0 BiometricPrompt}\nWindow #0 Window{abc u0 BiometricPrompt}:\n mOwnerUid=1000\n"
