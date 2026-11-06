@@ -1813,7 +1813,9 @@ globalThis.LocklarkCore = (() => {
           e.type === "email" ||
           /^(user(name)?|login|email)$/i.test(e.name || e.id),
       );
-      if (semantic.length === 1) users = semantic;
+      // Capture persists page values, so an extra visible text field keeps it
+      // ambiguous; only fill narrows to the single semantic username field.
+      if (semantic.length === 1 && !captureOnly) users = semantic;
       if (users.length > 1) return false;
       const user = users[0] || null,
         form = logicalForm(pass || user);
@@ -3548,6 +3550,9 @@ globalThis.LocklarkCore = (() => {
         if (!target || !target.inputs.length || window !== window.top && false)
           return false;
         if (location.origin !== expected) return false;
+        // A formless single field has no verifiable submit target; refuse it.
+        // Split-box widgets are often formless and are gated by groupValid().
+        if (!target.form && target.kind !== "split") return false;
         if (target.form) {
           if (
             !target.form.isConnected ||

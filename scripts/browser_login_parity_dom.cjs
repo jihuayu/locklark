@@ -30,7 +30,7 @@ module.exports = async (page) => {
         auto,
       );
       return {
-        filled,
+        filled: filled === true || (!!filled && filled.ok === true),
         submissions,
         changes,
         values: [...document.querySelectorAll("input")].map((e) => e.value),
