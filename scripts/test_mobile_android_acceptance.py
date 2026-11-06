@@ -17,6 +17,71 @@ import mobile_android_acceptance as acceptance
 
 
 class SafetyTests(unittest.TestCase):
+    def test_original_command_failure_snapshot_survives_cleanup(self):
+        for cleanup_raises in (False, True):
+            with self.subTest(cleanup_raises=cleanup_raises):
+                saved = {}
+
+                class FailedController:
+                    stage = "create"
+                    root = pathlib.Path("/private/controller-evidence")
+                    checks = []
+
+                    def __init__(self, _):
+                        self.diagnosis = acceptance.safe_host_diagnosis({"operation": "keyboard-check", "target": "new-master",
+                            "step": "enter-master", "command": "ime", "command_exit": "nonzero", "exit_code": 1,
+                            "stderr_class": "service-missing", "reason": "command-failed"})
+
+                    def setup(self):
+                        raise acceptance.AcceptanceFailure()
+
+                    def record_failure(self, _):
+                        self.diagnosis["exception"] = "AcceptanceFailure"
+
+                    def capture_failure_diagnosis(self):
+                        self.diagnosis["control"] = "create-form"
+
+                    def close(self):
+                        self.diagnosis.update({"command": "ui-cleanup", "command_exit": "nonzero", "exit_code": 7})
+                        if cleanup_raises:
+                            raise OSError("PrivateCleanupMessageMustNotBePrinted")
+
+                    def scan(self):
+                        pass
+
+                    def write_private(self, name, value):
+                        saved[name] = value
+
+                with mock.patch.object(acceptance, "AndroidAcceptance", FailedController), contextlib.redirect_stdout(io.StringIO()) as output:
+                    code = acceptance.main(["--adb", "/unused", "--serial", "emulator-5556", "--apk", "/unused", "--reset-test-app"])
+                self.assertEqual(code, 1)
+                self.assertEqual(output.getvalue().splitlines()[0], "FAIL: Android host UI at create")
+                diagnosis = saved["result.json"]["diagnosis"]
+                self.assertEqual((diagnosis["command"], diagnosis["command_exit"], diagnosis["exit_code"]), ("ime", "nonzero", 1))
+                self.assertEqual(diagnosis["control"], "create-form")
+                self.assertEqual(diagnosis["stderr_class"], "service-missing")
+                self.assertEqual(saved["result.json"]["cleanup_ok"], not cleanup_raises)
+                self.assertTrue(saved["result.json"]["scan_ok"])
+                public = json.loads(output.getvalue().splitlines()[1].removeprefix("Fixed Android host diagnosis: "))
+                self.assertEqual(public, diagnosis)
+                self.assertNotIn("PrivateCleanupMessage", output.getvalue())
+
+    def test_command_failure_reports_only_fixed_stderr_class(self):
+        cases = ((b"error: device offline", "offline"), (b"adb: device 'emulator-1234' not found", "offline"), (b"Can't find service: input_method", "service-missing"),
+                 (b"Permission Denial: not allowed", "permission"), (b"", "empty"), (b"unexpected native error", "other"))
+        for raw, expected in cases:
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as root:
+                controller = acceptance.AndroidAcceptance(types.SimpleNamespace(adb="/unused", serial="emulator-5556", artifacts=root))
+                try:
+                    with mock.patch.object(acceptance.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, b"", raw)), self.assertRaises(acceptance.AcceptanceFailure):
+                        controller.shell("dumpsys", "input_method")
+                    safe = acceptance.safe_host_diagnosis(controller.diagnosis)
+                    self.assertEqual(safe.get("stderr_class"), expected)
+                    if raw:
+                        self.assertNotIn(raw.decode(), json.dumps(safe))
+                finally:
+                    controller.close()
+
     def test_manual_password_mode_is_enabled_before_keyboard_input(self):
         controller = mock.Mock(spec=acceptance.AndroidAcceptance)
         controller.locate.return_value = {"checked": "true"}
@@ -473,10 +538,13 @@ class ActionableControlTests(unittest.TestCase):
         controller = object.__new__(acceptance.AndroidAcceptance)
         controller.started, controller.args = True, types.SimpleNamespace(timeout=180)
         controller.diagnosis = acceptance.safe_host_diagnosis({"operation": "type-text", "target": "new-master", "command": "text",
-                                                             "command_exit": "nonzero", "exit_code": 1})
+                                                             "command_exit": "nonzero", "exit_code": 1, "stderr_class": "permission"})
         controller.observe_activity_state = mock.Mock(side_effect=acceptance.AcceptanceFailure)
         controller.snapshot = mock.Mock(side_effect=lambda _: controller.diagnosis.update({"control": "create-form", "create_form": True}))
-        controller.shell = mock.Mock(return_value=subprocess.CompletedProcess([], 0, b"mInputShown=true\n", b""))
+        def query_keyboard(*_, **__):
+            controller.diagnosis.update({"command": "ime", "command_exit": "ok", "exit_code": 0, "stderr_class": "empty"})
+            return subprocess.CompletedProcess([], 0, b"mInputShown=true\n", b"")
+        controller.shell = mock.Mock(side_effect=query_keyboard)
         controller.capture_failure_diagnosis()
         controller.snapshot.assert_called_once()
         controller.shell.assert_called_once()
@@ -484,6 +552,7 @@ class ActionableControlTests(unittest.TestCase):
         self.assertEqual(controller.diagnosis["control"], "create-form")
         self.assertEqual(controller.diagnosis["command"], "text")
         self.assertEqual(controller.diagnosis["exit_code"], 1)
+        self.assertEqual(controller.diagnosis["stderr_class"], "permission")
 
     def test_python_contract_exception_is_classified_without_error_arguments(self):
         secret = "PrivateExceptionArgumentFixture"

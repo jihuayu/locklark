@@ -4,6 +4,26 @@ from test_emulator import scan_output, complete_pass, RuntimeFailure, safe_diagn
 
 
 class RuntimeWrapperTests(unittest.TestCase):
+    def test_input_focus_context_is_fixed_and_survives_later_status(self):
+        raw = (b"INSTRUMENTATION_STATUS: locklark_stage=regenerate\n"
+               b"INSTRUMENTATION_STATUS: locklark_wait=native-input-focus\n"
+               b"INSTRUMENTATION_STATUS: locklark_control=regenerate-length\n"
+               b"INSTRUMENTATION_STATUS: locklark_control_phase=input-focus\n"
+               b"INSTRUMENTATION_STATUS: locklark_control_focused=true\n"
+               b"INSTRUMENTATION_STATUS: locklark_input_active=false\n"
+               b"INSTRUMENTATION_STATUS_CODE: -2\n"
+               b"INSTRUMENTATION_STATUS: locklark_control=private-input-text\n"
+               b"INSTRUMENTATION_STATUS: locklark_input_active=private-input-text\n")
+        result = safe_diagnostic(raw)
+        failure = result["failed_contexts"][0]
+        self.assertEqual((failure["step"], failure["wait"], failure["control"], failure["control_phase"]),
+                         ("regenerate", "native-input-focus", "regenerate-length", "input-focus"))
+        self.assertEqual((failure["control_focused"], failure["input_active"]), ("true", "false"))
+        self.assertNotIn("private-input-text", str(result))
+        invalid = safe_diagnostic(raw.replace(b"true", b"private-input-text").replace(b"false", b"private-input-text"))
+        self.assertEqual(invalid["failed_contexts"][0]["control_focused"], "unknown")
+        self.assertEqual(invalid["failed_contexts"][0]["input_active"], "unknown")
+
     def test_failure_or_partial_instrumentation_cannot_pass(self):
         passed = b"OK (2 tests)\nINSTRUMENTATION_CODE: -1\n"
         self.assertTrue(complete_pass(0, passed))

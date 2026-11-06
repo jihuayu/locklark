@@ -42,6 +42,7 @@ IDENTITY_STATES = {"unknown", "captured", "stopped-match", "resumed-match", "cha
 OPERATIONS = {"unknown", "wait", "locate", "tap", "type-text", "keyboard-check", "keyboard-dismiss"}
 COMMANDS = {"unknown", "properties", "display", "install", "app-reset", "private-dir", "launch", "force-stop", "ui-dump",
             "ui-read", "ui-cleanup", "tap", "text", "scroll", "key", "ime", "lifecycle", "db-copy"}
+STDERR_CLASSES = {"unknown", "empty", "offline", "service-missing", "permission", "timeout", "spawn-error", "other"}
 TARGETS = {"unknown", "row", "field-picker", "generate-key", "new-master", "repeat-master", "backup-ack", "create-vault",
            "new-login", "login-title", "username", "login-password", "generate-password", "save-login", "show-username",
            "show-password", "show-otp", "hide", "edit", "edit-value", "save-field", "field-password", "field-otp",
@@ -227,6 +228,7 @@ def safe_host_diagnosis(value):
                "control": CONTROL_STATES, "wait": WAIT_STATES, "identity": IDENTITY_STATES,
                "ime": {"unknown", "shown", "hidden"}, "operation": OPERATIONS, "target": TARGETS, "step": CREATE_STEPS,
                "command": COMMANDS, "command_exit": {"unknown", "pending", "ok", "nonzero", "timeout", "error"},
+               "stderr_class": STDERR_CLASSES,
                "bounds": {"unknown", "missing", "ready", "disabled", "hidden", "invalid-bounds", "offscreen"},
                "exception": EXCEPTIONS, "helper": HELPERS,
                "reason": {"unknown", "assertion", "python-contract", "xml", "deadline", "wait-expired", "control-not-actionable", "command-failed"}}
@@ -265,6 +267,20 @@ def command_category(arguments):
         ("shell", "dumpsys", "input_method"): "ime", ("shell", "dumpsys", "activity"): "lifecycle",
         ("exec-out", "run-as"): "db-copy"}
     return next((value for prefix, value in categories.items() if parts[:len(prefix)] == prefix), "unknown")
+
+
+def adb_stderr_class(raw):
+    """Reduce captured stderr to fixed categories; never return subprocess text."""
+    if not raw:
+        return "empty"
+    lowered = raw.lower()
+    if b"device offline" in lowered or b"no devices/emulators found" in lowered or re.search(rb"\bdevice\b[^\r\n]{0,192}\bnot found\b", lowered):
+        return "offline"
+    if b"can't find service" in lowered or b"cannot find service" in lowered or b"service not found" in lowered:
+        return "service-missing"
+    if b"permission denied" in lowered or b"permission denial" in lowered or b"securityexception" in lowered or b"device unauthorized" in lowered:
+        return "permission"
+    return "other"
 
 
 def verify_audit(events, disclosures, mutations, generated_id, *, expected_exports=0, expected_audits=1):
@@ -397,19 +413,20 @@ class AndroidAcceptance:
         # Never record argv: input text includes synthetic complete factors.
         self.counter += 1
         result = None
-        self.diagnosis.update({"command": command_category(arguments), "command_exit": "pending", "exit_code": None})
+        self.diagnosis.update({"command": command_category(arguments), "command_exit": "pending", "exit_code": None, "stderr_class": "unknown"})
         try:
             result = subprocess.run(self.adb + list(map(str, arguments)),
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
             stdout, stderr = result.stdout, result.stderr
         except subprocess.TimeoutExpired as error:
             stdout, stderr = error.stdout or b"", error.stderr or b""
-            self.diagnosis["command_exit"] = "timeout"
+            self.diagnosis.update({"command_exit": "timeout", "stderr_class": "timeout"})
         except OSError:
-            self.diagnosis["command_exit"] = "error"
+            self.diagnosis.update({"command_exit": "error", "stderr_class": "spawn-error"})
             raise
         if result is not None:
-            self.diagnosis.update({"command_exit": "ok" if result.returncode == 0 else "nonzero", "exit_code": result.returncode})
+            self.diagnosis.update({"command_exit": "ok" if result.returncode == 0 else "nonzero", "exit_code": result.returncode,
+                                   "stderr_class": adb_stderr_class(stderr)})
         if oracle:
             path = self.root / oracle
             path.write_bytes(stdout)
@@ -700,7 +717,7 @@ class AndroidAcceptance:
         if not self.started:
             return
         preserved = {key: self.diagnosis[key] for key in ("operation", "target", "step", "command", "command_exit", "exit_code",
-                     "bounds", "exception", "helper", "source_line", "reason")}
+                     "stderr_class", "bounds", "exception", "helper", "source_line", "reason")}
         deadline = time.monotonic() + min(10, self.args.timeout)
         try:
             try:
@@ -1115,6 +1132,8 @@ def main(argv=None):
     os.umask(0o077)
     acceptance = None
     success = False
+    failure_diagnosis = None
+    cleanup_ok, scan_ok = True, True
     stage = "prerequisites"
     try:
         validate_target(args.serial, args.reset_test_app, args.peer, args.cli)
@@ -1143,24 +1162,41 @@ def main(argv=None):
                     acceptance.capture_failure_diagnosis()
                 except Exception:
                     pass
+                # OS observation adds useful state, then freeze the original
+                # failure before close() issues force-stop/rm commands.
+                failure_diagnosis = safe_host_diagnosis(getattr(acceptance, "diagnosis", {}))
             try:
                 acceptance.close()
-            except Exception:
-                success = False
-                stage = "private-canary-scan"
+            except Exception as error:
+                cleanup_ok = False
+                if success:
+                    success = False
+                    stage = "private-canary-scan"
+                    try:
+                        acceptance.record_failure(error)
+                    except Exception:
+                        pass
+                    failure_diagnosis = safe_host_diagnosis(getattr(acceptance, "diagnosis", {}))
             try:
                 acceptance.scan()
             except Exception:
-                success = False
-                stage = "private-canary-scan"
+                scan_ok = False
+                if success:
+                    success = False
+                    stage = "private-canary-scan"
+                    failure_diagnosis = safe_host_diagnosis(getattr(acceptance, "diagnosis", {}))
             acceptance.write_private("result.json", {"success": success,
                 "stage": "complete" if success else stage, "checks": acceptance.checks,
                 "audit_checked": bool(success and args.cli), "kdbx_peer_checked": bool(success and args.peer),
-                "diagnosis": safe_host_diagnosis(getattr(acceptance, "diagnosis", {}))})
+                "cleanup_ok": cleanup_ok, "scan_ok": scan_ok,
+                "diagnosis": failure_diagnosis if failure_diagnosis is not None else safe_host_diagnosis(getattr(acceptance, "diagnosis", {}))})
         if not success:
             print("FAIL: Android host UI at " + stage)
             if acceptance:
-                print("Fixed Android host diagnosis: " + json.dumps(safe_host_diagnosis(getattr(acceptance, "diagnosis", {})), sort_keys=True))
+                diagnosis = failure_diagnosis if failure_diagnosis is not None else safe_host_diagnosis(getattr(acceptance, "diagnosis", {}))
+                print("Fixed Android host diagnosis: " + json.dumps(diagnosis, sort_keys=True))
+            if not scan_ok:
+                print("FAIL: Android artifact privacy scan")
         if acceptance:
             print("Private Android host UI evidence: " + str(acceptance.root))
     return 0 if success else 1

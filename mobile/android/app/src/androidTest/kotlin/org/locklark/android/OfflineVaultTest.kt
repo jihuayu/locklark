@@ -10,6 +10,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowManager
+import android.view.inputmethod.InputMethodManager
 import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.Spinner
@@ -69,6 +70,7 @@ class OfflineVaultTest {
             "Native control not visible" -> "native-visible"
             "Soft keyboard still visible" -> "ime-hidden"
             "Native input unavailable" -> "native-input"
+            "Native input focus unavailable" -> "native-input-focus"
             "Native input delivery incomplete" -> "native-input-exact"
             "Login metadata unavailable" -> "login-metadata"
             "Detail unavailable" -> "detail"
@@ -109,14 +111,13 @@ class OfflineVaultTest {
         val current = view(tag)
         return current?.isEnabled == true && current.isLaidOut && current.width > 0 && current.height > 0
     }
-    private fun click(tag: String) {
-        val deadline = SystemClock.elapsedRealtime() + 180_000
+    private fun click(tag: String, dismissKeyboard: Boolean = true, deadline: Long = SystemClock.elapsedRealtime() + 180_000) {
         currentControl = tag
         controlPhase = "ready"
         waitUntil("Native control unavailable", deadline) { ready(tag) }
         // A full Google APIs image has a real IME. Dismiss it only when the
         // OS reports it visible, once, before scrolling/tapping an action.
-        if (imeVisible()) {
+        if (dismissKeyboard && imeVisible()) {
             controlPhase = "ime-dismiss"
             reportControl()
             instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
@@ -163,7 +164,8 @@ class OfflineVaultTest {
         return visible
     }
     private fun reportControl() {
-        val known = setOf("generate-account-key", "backup-ack", "create-vault", "new-login", "generate-password", "save-login", "show-password", "hide-secret", "edit-login", "save-field", "show-notes", "show-username", "show-otp", "back-to-list", "search", "cancel-edit", "regenerate-password", "confirm-regenerate", "enable-quick-unlock", "lock", "unlock")
+        val known = setOf("generate-account-key", "backup-ack", "create-vault", "new-login", "generate-password", "save-login", "show-password", "hide-secret", "edit-login", "save-field", "show-notes", "show-username", "show-otp", "back-to-list", "search", "cancel-edit", "regenerate-password", "confirm-regenerate", "enable-quick-unlock", "lock", "unlock",
+            "new-master-password", "repeat-master-password", "login-title", "login-url", "login-username", "login-password", "edit-value", "query", "regenerate-length", "master-password", "secret-key")
         val tag = if (currentControl.startsWith("item-")) "login-row" else currentControl.takeIf { it in known } ?: "unknown"
         val diagnostic = android.os.Bundle().apply {
             putString("locklark_control", tag)
@@ -178,19 +180,45 @@ class OfflineVaultTest {
             diagnostic.putString("locklark_control_present", (target != null).toString())
             diagnostic.putString("locklark_control_enabled", (target?.isEnabled == true).toString())
             diagnostic.putString("locklark_control_visible", (target != null && target.getGlobalVisibleRect(bounds) && bounds.width() == target.width && bounds.height() == target.height).toString())
+            diagnostic.putString("locklark_control_focused", (target != null && activity.currentFocus === target && target.hasFocus()).toString())
+            diagnostic.putString("locklark_input_active", (target is EditText && activity.getSystemService(InputMethodManager::class.java)?.isActive(target) == true).toString())
         }
         instrumentation.sendStatus(0, diagnostic)
     }
     private fun enter(tag: String, value: String) {
-        waitFor("Native input unavailable", { ready(tag) })
-        scenario.onActivity { (it.window.decorView.findViewWithTag<View>(tag) as EditText).apply { requestFocus(); text.clear() } }
+        val deadline = SystemClock.elapsedRealtime() + 180_000
+        currentControl = tag
+        controlPhase = "input-ready"
+        waitUntil("Native input unavailable", deadline) { ready(tag) }
+        // One real tap establishes native focus. Main-queue idleness alone does
+        // not prove that the IME has switched its served InputConnection.
+        click(tag, dismissKeyboard = false, deadline = deadline)
+        controlPhase = "input-focus"
+        fun focused(): Boolean {
+            var focused = false
+            scenario.onActivity { activity ->
+                val target = activity.window.decorView.findViewWithTag<View>(tag)
+                focused = target is EditText && target.isEnabled && target.isAttachedToWindow &&
+                    activity.hasWindowFocus() && activity.currentFocus === target && target.hasFocus() &&
+                    activity.getSystemService(InputMethodManager::class.java)?.isActive(target) == true
+            }
+            return focused
+        }
+        waitUntil("Native input focus unavailable", deadline) { focused() }
+        scenario.onActivity { (it.window.decorView.findViewWithTag<View>(tag) as EditText).text.clear() }
+        instrumentation.waitForIdleSync()
+        waitUntil("Native input focus unavailable", deadline) { focused() }
+        controlPhase = "input-send"
+        reportControl()
         // Full factors go through native keyboard events. Unicode note input
         // uses the native Editable in the test APK, never a product endpoint.
-        if (value.isEmpty()) return
-        if (value.all { it.code in 32..126 }) instrumentation.sendStringSync(value)
-        else scenario.onActivity { (it.window.decorView.findViewWithTag<View>(tag) as EditText).setText(value) }
+        if (value.isNotEmpty()) {
+            if (value.all { it.code in 32..126 }) instrumentation.sendStringSync(value)
+            else scenario.onActivity { (it.window.decorView.findViewWithTag<View>(tag) as EditText).setText(value) }
+        }
         instrumentation.waitForIdleSync()
-        waitFor("Native input delivery incomplete") { text(tag) == value }
+        controlPhase = "input-exact"
+        waitUntil("Native input delivery incomplete", deadline) { text(tag) == value }
     }
     private fun select(title: String) {
         var tag = ""

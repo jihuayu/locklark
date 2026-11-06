@@ -56,13 +56,13 @@ def safe_diagnostic(raw):
         if name.encode() in raw: exception = name; break
     lines = re.findall(rb"(?:OfflineVaultTest|BoundOperationTest)\.kt:([0-9]{1,5})\)", raw)
     waits = re.findall(rb"INSTRUMENTATION_STATUS: locklark_wait=([a-z-]+)", raw)
-    allowed_waits = {"initial-create", "account-key", "new-vault-list", "native-control", "native-visible", "ime-hidden", "native-input", "native-input-exact", "login-metadata", "detail", "editor", "saved-list", "disclosure", "empty-username", "empty-notes", "platform-auth-refusal", "background-lock", "explicit-lock", "late-unlock", "other"}
+    allowed_waits = {"initial-create", "account-key", "new-vault-list", "native-control", "native-visible", "ime-hidden", "native-input", "native-input-focus", "native-input-exact", "login-metadata", "detail", "editor", "saved-list", "disclosure", "empty-username", "empty-notes", "platform-auth-refusal", "background-lock", "explicit-lock", "late-unlock", "other"}
     wait = waits[-1].decode() if waits and waits[-1].decode() in allowed_waits else "unknown"
     statuses = re.findall(rb"INSTRUMENTATION_STATUS: locklark_ui_status=([a-z-]+)", raw)
     allowed_status = {"operation-refused", "outcome-unknown", "backup-ack-required", "empty", "other"}
     status = statuses[-1].decode() if statuses and statuses[-1].decode() in allowed_status else "unknown"
     empty_context = {key:"unknown" for key in ("step", "wait", "ui_status", "core_phase", "core_error", "inputs_intact", "fs_owned", "fs_link", "fs_errno",
-                                              "control", "control_phase", "ime", "window_focus", "control_visible", "control_enabled", "control_present", "activity")}
+                                              "control", "control_phase", "ime", "window_focus", "control_visible", "control_enabled", "control_present", "control_focused", "input_active", "activity")}
     context = empty_context.copy()
     failures = []
     fields = ((b"INSTRUMENTATION_STATUS: locklark_stage=", "step", allowed_steps),
@@ -74,13 +74,15 @@ def safe_diagnostic(raw):
               (b"INSTRUMENTATION_STATUS: locklark_fs_owned=", "fs_owned", {"true", "false"}),
               (b"INSTRUMENTATION_STATUS: locklark_fs_link=", "fs_link", {"true", "false"}),
               (b"INSTRUMENTATION_STATUS: locklark_fs_errno=", "fs_errno", {str(value) for value in range(4096)}),
-              (b"INSTRUMENTATION_STATUS: locklark_control=", "control", {"generate-account-key", "backup-ack", "create-vault", "new-login", "generate-password", "save-login", "login-row", "show-password", "hide-secret", "edit-login", "save-field", "show-notes", "show-username", "show-otp", "back-to-list", "search", "cancel-edit", "regenerate-password", "confirm-regenerate", "enable-quick-unlock", "lock", "unlock"}),
-              (b"INSTRUMENTATION_STATUS: locklark_control_phase=", "control_phase", {"ready", "ime-dismiss", "scroll", "visibility", "press", "released"}),
+              (b"INSTRUMENTATION_STATUS: locklark_control=", "control", {"generate-account-key", "backup-ack", "create-vault", "new-login", "generate-password", "save-login", "login-row", "show-password", "hide-secret", "edit-login", "save-field", "show-notes", "show-username", "show-otp", "back-to-list", "search", "cancel-edit", "regenerate-password", "confirm-regenerate", "enable-quick-unlock", "lock", "unlock", "new-master-password", "repeat-master-password", "login-title", "login-url", "login-username", "login-password", "edit-value", "query", "regenerate-length", "master-password", "secret-key"}),
+              (b"INSTRUMENTATION_STATUS: locklark_control_phase=", "control_phase", {"ready", "ime-dismiss", "scroll", "visibility", "press", "released", "input-ready", "input-focus", "input-send", "input-exact"}),
               (b"INSTRUMENTATION_STATUS: locklark_ime=", "ime", {"true", "false"}),
               (b"INSTRUMENTATION_STATUS: locklark_window_focus=", "window_focus", {"true", "false"}),
               (b"INSTRUMENTATION_STATUS: locklark_control_visible=", "control_visible", {"true", "false"}),
               (b"INSTRUMENTATION_STATUS: locklark_control_enabled=", "control_enabled", {"true", "false"}),
               (b"INSTRUMENTATION_STATUS: locklark_control_present=", "control_present", {"true", "false"}),
+              (b"INSTRUMENTATION_STATUS: locklark_control_focused=", "control_focused", {"true", "false"}),
+              (b"INSTRUMENTATION_STATUS: locklark_input_active=", "input_active", {"true", "false"}),
               (b"INSTRUMENTATION_STATUS: locklark_activity=", "activity", {"DESTROYED", "INITIALIZED", "CREATED", "STARTED", "RESUMED"}))
     for line in raw.splitlines():
         for prefix, key, allowed in fields:
