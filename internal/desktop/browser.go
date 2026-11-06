@@ -7,6 +7,7 @@ import (
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 	"github.com/jihuayu/locklark/internal/browserhost"
+	"github.com/jihuayu/locklark/internal/personal"
 )
 
 func (a *App) browserView(c *ui.Context) {
@@ -29,7 +30,8 @@ func (a *App) browserView(c *ui.Context) {
 		return
 	}
 	if view.Pair {
-		ui.Text(c, "扩展请求连接此金库。确认后可读取当前网站的登录候选；每次填充仍须原生批准。")
+		ui.Text(c, "连接后可在浏览器选择账号填充、保存登录或使用验证码。快捷模式允许本次连接中的明确浏览器操作，无需反复切回此窗口；锁库或连接到期后失效。")
+		ui.PrimaryButton(c, "连接并启用快捷填充").Disabled(a.busy).OnClick(func() { s := a.session; a.run(func() outcome { return outcome{err: a.browser.ApproveQuickPair(s)} }) })
 		ui.PrimaryButton(c, "确认连接此扩展").Disabled(a.busy).OnClick(func() { s := a.session; a.run(func() outcome { return outcome{err: a.browser.ApprovePair(s)} }) })
 		ui.Button(c, "拒绝连接").Disabled(a.busy).OnClick(func() { a.run(func() outcome { return outcome{err: a.browser.Reject()} }) })
 		return
@@ -38,7 +40,17 @@ func (a *App) browserView(c *ui.Context) {
 		ui.Text(c, "等待扩展发起新连接；重新解锁后必须重新配对。")
 		return
 	}
-	ui.Text(c, "已连接 · 连接最多 15 分钟；5 分钟未原生操作自动锁定。")
+	ui.Text(c, "已连接 · 连接最多 15 分钟；5 分钟未明确操作自动锁定。")
+	if view.QuickFill {
+		ui.Text(c, "快捷填充已启用：在浏览器选择账号即可继续。自动登录设置由扩展管理。")
+	}
+	if view.Passkey == nil && view.PasskeyStatus != "" {
+		ui.Text(c, view.PasskeyStatus).FontSize(13)
+	}
+	if view.Passkey != nil {
+		a.browserPasskeyView(c, *view.Passkey, view.PasskeyStatus)
+		return
+	}
 	if view.OTP != nil {
 		a.browserOTPView(c, *view.OTP, view.OTPStatus)
 		return
@@ -57,7 +69,7 @@ func (a *App) browserView(c *ui.Context) {
 	ui.Text(c, "条目："+browserTitle(pending.Title))
 	ui.Text(c, "ID："+pending.ItemID).FontSize(12)
 	ui.Text(c, "精确修订："+pending.Revision).FontSize(12)
-	ui.Text(c, "仅交付用户名和密码；不会自动提交。请求 30 秒后失效。")
+	ui.Text(c, "仅交付用户名和密码；扩展可按自动登录设置提交。请求 30 秒后失效。")
 	ui.PrimaryButton(c, "批准本次填充").Disabled(a.busy).OnClick(func() { a.run(func() outcome { return outcome{err: a.browser.ApproveFill(pending.ID)} }) })
 	ui.Button(c, "拒绝本次填充").Disabled(a.busy).OnClick(func() { a.run(func() outcome { return outcome{err: a.browser.Reject()} }) })
 }
@@ -184,4 +196,69 @@ func RunBrowser(browser browserhost.Browser, args []string) error {
 		}()
 	})
 	return mygo.App.Run()
+}
+
+func (a *App) browserPasskeyView(c *ui.Context, p browserhost.PasskeyView, status string) {
+	if a.browserPasskeyID != p.ID {
+		a.browserPasskeyID = p.ID
+		a.password = ""
+		a.secret = ""
+	}
+	heading := "使用 Passkey 登录"
+	if p.Create {
+		heading = "保存 Passkey"
+	}
+	ui.Text(c, heading).FontSize(22).Bold()
+	ui.Text(c, "网站："+visible(p.Origin)).FontSize(20).Bold()
+	ui.Text(c, "Passkey 域名："+visible(p.RPID))
+	if p.Create {
+		ui.Text(c, "账号："+visible(p.Username))
+	}
+	ui.Text(c, status)
+	if p.Working {
+		return
+	}
+	ui.Text(c, "需要用户验证时，请在此重新输入主密码和 Secret Key。网站不会获得这些解锁因素。")
+	ui.TextInput(c, &a.password).Label("验证主密码").Password().Disabled(a.busy)
+	ui.TextInput(c, &a.secret).Label("验证 Secret Key").Password().Disabled(a.busy)
+	approve := func(item string) {
+		pw := []byte(a.password)
+		var key []byte
+		var err error
+		if a.secret != "" {
+			key, err = personal.ParseSecret(a.secret)
+		}
+		a.password = ""
+		a.secret = ""
+		if err != nil {
+			clear(pw)
+			a.status = "Secret Key 格式不正确"
+			return
+		}
+		a.run(func() outcome {
+			defer clear(pw)
+			defer clear(key)
+			return outcome{err: a.browser.ApprovePasskey(p.ID, item, pw, key)}
+		})
+	}
+	if p.VerificationRequired {
+		ui.Text(c, "此网站要求用户验证；必须填写两个解锁因素。").Bold()
+	}
+	factorsReady := a.password != "" && a.secret != "" || !p.VerificationRequired && a.password == "" && a.secret == ""
+	if p.Create {
+		ui.PrimaryButton(c, "创建新登录并保存 Passkey").Disabled(a.busy || !factorsReady).OnClick(func() { approve("") })
+	}
+	for _, choice := range p.Choices {
+		choice := choice
+		label := "登录：" + browserTitle(choice.Title) + " · " + visible(choice.Username)
+		if p.Create {
+			label = "保存到：" + browserTitle(choice.Title) + " · " + visible(choice.Username)
+		}
+		ui.Button(c, label).Disabled(a.busy || !factorsReady).OnClick(func() { approve(choice.ID) })
+	}
+	ui.Button(c, "取消 / 使用其他验证器").Disabled(a.busy).OnClick(func() {
+		a.password = ""
+		a.secret = ""
+		a.run(func() outcome { return outcome{err: a.browser.RejectPasskey(p.ID)} })
+	})
 }

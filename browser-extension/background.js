@@ -1,9 +1,38 @@
-/* No page/content-script listener exists. Only our exact popup may request work. */
+/* Native secrets stay in this worker; content scripts receive metadata only. */
 if (typeof importScripts === "function") importScripts("core.js");
 (() => {
   "use strict";
   const api = globalThis.browser || globalThis.chrome,
     core = globalThis.LocklarkCore;
+  let quickFill = false,
+    fillUnknown = false,
+    pendingPasskey = null,
+    passkeyUnknown = false,
+    autoLogin = false,
+    offerSavePasskeys = true,
+    offerUsePasskeys = true,
+    loginOverrides = {},
+    lastMatchAt = 0;
+  const settingsReady =
+    api.storage?.local
+      .get([
+        "autoLogin",
+        "loginOverrides",
+        "offerSavePasskeys",
+        "offerUsePasskeys",
+      ])
+      .then((value) => {
+        autoLogin = value.autoLogin !== false;
+        offerSavePasskeys = value.offerSavePasskeys !== false;
+        offerUsePasskeys = value.offerUsePasskeys !== false;
+        loginOverrides =
+          value.loginOverrides && typeof value.loginOverrides === "object"
+            ? value.loginOverrides
+            : {};
+      })
+      .catch(() => {}) || Promise.resolve();
+  const PASSKEY_UNKNOWN = "Passkey 创建结果未确认，请检查金库和网站后再试";
+  const FILL_UNKNOWN = "登录填充结果未确认，请核实页面；不会自动重试";
   let port = null,
     capability = "",
     context = null,
@@ -55,6 +84,10 @@ if (typeof importScripts === "function") importScripts("core.js");
       .join("");
   }
   function clear() {
+    if (pending?.injectionStarted) fillUnknown = true;
+    if (pendingPasskey?.create) passkeyUnknown = true;
+    pendingPasskey = null;
+    quickFill = false;
     if (pendingOTP?.ackSent || pendingOTP?.injectionStarted) otpUnknown = true;
     otpCancellation = null;
     capability = "";
@@ -244,10 +277,18 @@ if (typeof importScripts === "function") importScripts("core.js");
         otp: "otp-ready",
         "otp-ack": "otp-fill",
         "cancel-otp": "cancelled",
+        "passkey-create": "passkey-result",
+        "passkey-get": "passkey-result",
       }[call.type];
       if (
         message.type === "unknown" &&
-        ["commit-ready", "cancel-save", "cancel-otp"].includes(call.type)
+        [
+          "commit-ready",
+          "cancel-save",
+          "cancel-otp",
+          "passkey-create",
+          "passkey-get",
+        ].includes(call.type)
       ) {
         call.resolve(message);
         return;
@@ -266,6 +307,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       if (generation !== epoch) throw Error("refused");
       if (!/^[a-f0-9]{32}$/.test(response.capability)) throw Error("refused");
       capability = response.capability;
+      quickFill = response.quick_fill === true;
       status = "已连接，请读取当前网站候选";
     } catch {
       if (port === p && generation === epoch) {
@@ -275,7 +317,8 @@ if (typeof importScripts === "function") importScripts("core.js");
     }
   }
   async function match() {
-    if (!capability || pending || pendingOTP) throw Error("refused");
+    if (!capability || pending || pendingOTP || pendingPasskey)
+      throw Error("refused");
     rows = [];
     context = null;
     const generation = epoch,
@@ -313,11 +356,13 @@ if (typeof importScripts === "function") importScripts("core.js");
     const row = rows.find((r) => r.id === itemId && r.revision === revision),
       c = context,
       generation = epoch;
-    if (!capability || pending || pendingOTP || !row || !c)
+    if (!capability || pending || pendingOTP || pendingPasskey || !row || !c)
       throw Error("refused");
     const intent = { itemId, revision, tabId: c.tabId, windowId: c.windowId };
     pending = intent;
-    status = "请在原生窗口核对来源、条目与修订并批准";
+    status = quickFill
+      ? "正在填充所选账号"
+      : "请在原生窗口核对来源、条目与修订并批准";
     let response;
     try {
       await bounded(current(c), generation);
@@ -337,6 +382,10 @@ if (typeof importScripts === "function") importScripts("core.js");
         response.password.length > 16384
       )
         throw Error("refused");
+      await settingsReady;
+      await bounded(current(c), generation);
+      const submit = autoLogin && loginOverrides[itemId] !== false;
+      intent.injectionStarted = true;
       const results = await bounded(
         api.scripting.executeScript({
           target: { tabId: c.tabId, documentIds: [c.documentId] },
@@ -346,6 +395,8 @@ if (typeof importScripts === "function") importScripts("core.js");
             response.username,
             response.password,
             Date.now() + 1500,
+            false,
+            submit,
           ],
         }),
         generation,
@@ -359,10 +410,16 @@ if (typeof importScripts === "function") importScripts("core.js");
         throw Error("refused");
       await bounded(current(c), generation);
       if (generation !== epoch || pending !== intent) throw Error("refused");
-      status = "本次已请求填充；未自动提交";
+      intent.injectionStarted = false;
+      fillUnknown = false;
+      status = submit
+        ? "已请求填充及登录；请核实网站结果"
+        : "本次已请求填充；未自动提交";
     } catch {
-      if (generation === epoch && pending === intent)
-        status = "本次填充未完成；未自动重试";
+      if (generation === epoch && pending === intent) {
+        fillUnknown = intent.injectionStarted === true;
+        status = fillUnknown ? FILL_UNKNOWN : "本次填充未完成；未自动重试";
+      }
     } finally {
       if (response) {
         response.username = "";
@@ -456,7 +513,13 @@ if (typeof importScripts === "function") importScripts("core.js");
   async function save(itemId, revision) {
     const generation = epoch,
       previous = context;
-    if (!capability || pending || pendingOTP || unconfirmedSave)
+    if (
+      !capability ||
+      pending ||
+      pendingOTP ||
+      pendingPasskey ||
+      unconfirmedSave
+    )
       throw Error("refused");
     if (itemId && !rows.some((r) => r.id === itemId && r.revision === revision))
       throw Error("refused");
@@ -636,7 +699,14 @@ if (typeof importScripts === "function") importScripts("core.js");
   }
   async function otp(itemId, revision) {
     const row = rows.find((r) => r.id === itemId && r.revision === revision);
-    if (!row || !context || !capability || pending || pendingOTP)
+    if (
+      !row ||
+      !context ||
+      !capability ||
+      pending ||
+      pendingOTP ||
+      pendingPasskey
+    )
       throw Error("refused");
     const c = context,
       generation = epoch;
@@ -763,6 +833,16 @@ if (typeof importScripts === "function") importScripts("core.js");
     }
   }
   function cancelContext() {
+    if (pendingPasskey) {
+      if (pendingPasskey.create) passkeyUnknown = true;
+      pendingPasskey = null;
+      advanceEpoch();
+      rows = [];
+      context = null;
+      if (capability) void request("cancel", { capability }).catch(() => {});
+      return;
+    }
+    if (pending?.injectionStarted) fillUnknown = true;
     if (pendingOTP) {
       cancelOTP();
       return;
@@ -789,7 +869,8 @@ if (typeof importScripts === "function") importScripts("core.js");
     if (
       (context?.tabId === tabId ||
         pending?.tabId === tabId ||
-        pendingOTP?.tabId === tabId) &&
+        pendingOTP?.tabId === tabId ||
+        pendingPasskey?.tabId === tabId) &&
       ("url" in change || change.status === "loading")
     )
       cancelContext();
@@ -797,12 +878,153 @@ if (typeof importScripts === "function") importScripts("core.js");
   api.windows.onFocusChanged.addListener((windowId) => {
     if (windowId === api.windows.WINDOW_ID_NONE) return;
     const bound =
-      pendingOTP?.windowId ?? pending?.windowId ?? context?.windowId;
+      pendingPasskey?.windowId ??
+      pendingOTP?.windowId ??
+      pending?.windowId ??
+      context?.windowId;
     if (
-      (pendingOTP || pending || context) &&
+      (pendingPasskey || pendingOTP || pending || context) &&
       (bound == null || bound !== windowId)
     )
       cancelContext();
+  });
+  function contentSender(sender) {
+    try {
+      return (
+        sender?.id === api.runtime.id &&
+        sender.frameId === 0 &&
+        Number.isSafeInteger(sender.tab?.id) &&
+        typeof sender.documentId === "string" &&
+        sender.documentId.length > 0 &&
+        core.originFromURL(sender.url) === core.originFromURL(sender.tab.url)
+      );
+    } catch {
+      return false;
+    }
+  }
+  async function contentContext(sender) {
+    const c = await capture();
+    if (
+      c.tabId !== sender.tab.id ||
+      c.windowId !== sender.tab.windowId ||
+      c.documentId !== sender.documentId ||
+      c.origin !== core.originFromURL(sender.url)
+    )
+      throw Error("refused");
+    return c;
+  }
+  async function fromContent(message, sender) {
+    if (!message || typeof message !== "object") throw Error("refused");
+    // Cancellation authenticates the original document even after navigation.
+    if (message.type === "passkey-cancel") {
+      if (
+        pendingPasskey?.pageID === message.id &&
+        pendingPasskey.tabId === sender.tab.id &&
+        pendingPasskey.documentId === sender.documentId
+      )
+        cancelContext();
+      return {};
+    }
+    const c = await contentContext(sender);
+    await settingsReady;
+    if (message.type === "inline-state")
+      return { connected: !!capability, offerSavePasskeys, offerUsePasskeys };
+    if (message.type === "inline-connect") {
+      if (!capability) await connect();
+      await current(c);
+      return { connected: !!capability };
+    }
+    if (message.type === "inline-match") {
+      if (!capability || pending || pendingOTP || pendingPasskey)
+        return { connected: !!capability, candidates: [] };
+      if (!core.sameContext(c, context) || Date.now() - lastMatchAt > 3000) {
+        await match();
+        lastMatchAt = Date.now();
+      }
+      await current(c);
+      return {
+        connected: !!capability,
+        candidates: rows.map((r) => ({
+          id: r.id,
+          revision: r.revision,
+          title: r.title,
+        })),
+      };
+    }
+    if (
+      ["inline-fill", "inline-save", "inline-update", "inline-otp"].includes(
+        message.type,
+      )
+    ) {
+      if (!core.sameContext(context, c)) throw Error("refused");
+      if (message.type === "inline-fill")
+        await fill(message.id, message.revision);
+      else if (message.type === "inline-otp")
+        await otp(message.id, message.revision);
+      else if (message.type === "inline-update")
+        await save(message.id, message.revision);
+      else await save();
+      return { status };
+    }
+    if (
+      message.type !== "passkey" ||
+      !["create", "get"].includes(message.operation) ||
+      !/^[a-f0-9-]{36}$/.test(message.id || "") ||
+      typeof message.options !== "string" ||
+      message.options.length > 32768 ||
+      !capability ||
+      pending ||
+      pendingOTP ||
+      pendingPasskey
+    )
+      throw Error("refused");
+    if (message.operation === "create" ? !offerSavePasskeys : !offerUsePasskeys)
+      throw Error("refused");
+    const generation = epoch,
+      intent = {
+        ...c,
+        pageID: message.id,
+        create: message.operation === "create",
+      };
+    pendingPasskey = intent;
+    status = "请在原生窗口确认 Passkey 操作";
+    try {
+      const result = await request(
+        "passkey-" + message.operation,
+        { ...fields(c), options: message.options },
+        125000,
+      );
+      await current(c);
+      if (generation !== epoch || pendingPasskey !== intent)
+        throw Error("refused");
+      const credential = JSON.parse(result.credential);
+      if (intent.create) passkeyUnknown = false;
+      status = "Passkey 已交付；请核实网站结果";
+      return { credential };
+    } catch (error) {
+      if (intent.create && !error.knownRefusal) {
+        passkeyUnknown = true;
+        error.passkeyUnknown = true;
+      }
+      throw error;
+    } finally {
+      if (pendingPasskey === intent) {
+        pendingPasskey = null;
+        context = null;
+        rows = [];
+      }
+    }
+  }
+  api.runtime.onMessage.addListener((message, sender, respond) => {
+    if (!contentSender(sender)) return false;
+    fromContent(message, sender).then(respond, (error) =>
+      respond(
+        error.passkeyUnknown
+          ? { error: "NotAllowedError" }
+          : { fallback: true },
+      ),
+    );
+    return true;
   });
   api.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!core.validSender(sender, api.runtime)) return false;
@@ -811,7 +1033,32 @@ if (typeof importScripts === "function") importScripts("core.js");
       if (!message || typeof message !== "object") throw Error("refused");
       switch (message.type) {
         case "state":
+          await settingsReady;
           break;
+        case "settings": {
+          await settingsReady;
+          const next = {
+            autoLogin,
+            offerSavePasskeys,
+            offerUsePasskeys,
+            loginOverrides: { ...loginOverrides },
+          };
+          for (const key of [
+            "autoLogin",
+            "offerSavePasskeys",
+            "offerUsePasskeys",
+          ])
+            if (typeof message[key] === "boolean") next[key] = message[key];
+          if (
+            /^[a-f0-9]{32}$/.test(message.id || "") &&
+            typeof message.enabled === "boolean"
+          )
+            next.loginOverrides[message.id] = message.enabled;
+          await api.storage.local.set(next);
+          ({ autoLogin, offerSavePasskeys, offerUsePasskeys, loginOverrides } =
+            next);
+          break;
+        }
         case "connect":
           void connect();
           break;
@@ -868,16 +1115,28 @@ if (typeof importScripts === "function") importScripts("core.js");
       }
       return {
         connected: !!capability,
+        autoLogin,
+        quickFill,
+        loginOverrides,
+        offerSavePasskeys,
+        offerUsePasskeys,
         status:
-          otpUnknown && !status.includes(OTP_UNKNOWN)
-            ? status + " · " + OTP_UNKNOWN
-            : status,
+          status +
+          (otpUnknown && !status.includes(OTP_UNKNOWN)
+            ? " · " + OTP_UNKNOWN
+            : "") +
+          (fillUnknown && !status.includes(FILL_UNKNOWN)
+            ? " · " + FILL_UNKNOWN
+            : "") +
+          (passkeyUnknown && !status.includes(PASSKEY_UNKNOWN)
+            ? " · " + PASSKEY_UNKNOWN
+            : ""),
         candidates: rows.map((r) => ({
           id: r.id,
           title: r.title,
           revision: r.revision,
         })),
-        pending: !!pending || !!pendingOTP,
+        pending: !!pending || !!pendingOTP || !!pendingPasskey,
         otpPending: !!pendingOTP,
         saveBlocked: unconfirmedSave,
         origin: context?.origin || "",
@@ -891,11 +1150,18 @@ if (typeof importScripts === "function") importScripts("core.js");
       sendResponse({
         connected: !!capability,
         status:
-          otpUnknown && !status.includes(OTP_UNKNOWN)
-            ? status + " · " + OTP_UNKNOWN
-            : status,
+          status +
+          (otpUnknown && !status.includes(OTP_UNKNOWN)
+            ? " · " + OTP_UNKNOWN
+            : "") +
+          (fillUnknown && !status.includes(FILL_UNKNOWN)
+            ? " · " + FILL_UNKNOWN
+            : "") +
+          (passkeyUnknown && !status.includes(PASSKEY_UNKNOWN)
+            ? " · " + PASSKEY_UNKNOWN
+            : ""),
         candidates: [],
-        pending: !!pending || !!pendingOTP,
+        pending: !!pending || !!pendingOTP || !!pendingPasskey,
         otpPending: !!pendingOTP,
         saveBlocked: unconfirmedSave,
         origin: "",

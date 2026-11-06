@@ -52,6 +52,7 @@ type App struct {
 	otpDisplayTarget, otpClipboardTarget                   personal.NativeOTPTarget
 	otpDisplayTimer, otpClipboardTimer                     *time.Timer
 
+	browserPasskeyID                               string
 	browserSaveID, browserSaveTitle                string
 	browser                                        *browserhost.Connection
 	browserLabel                                   string

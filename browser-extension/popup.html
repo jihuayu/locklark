@@ -16,12 +16,24 @@
         ><button id="cancel-otp" disabled>取消本次验证码</button
         ><button id="disconnect">断开</button>
       </div>
+      <label
+        ><input id="auto-login" type="checkbox" /> 选择账号后自动登录</label
+      >
+      <details>
+        <summary>Passkey 设置</summary>
+        <label
+          ><input id="passkey-save" type="checkbox" /> 提供保存 Passkey</label
+        ><label
+          ><input id="passkey-use" type="checkbox" /> 提供 Passkey 登录</label
+        >
+      </details>
       <p id="status" role="status"></p>
       <p id="save-warning" class="note" role="alert"></p>
       <p id="origin"></p>
       <div id="candidates"></div>
       <p class="note">
-        在原生窗口解锁、配对并逐次批准。分别批准登录或验证码填充，不自动提交。
+        在原生窗口连接并启用快捷填充后，可直接在网页选择账号。自动登录只提交可明确识别的登录表单；Passkey
+        需在原生窗口确认。
       </p>
     </main>
     <script src="popup.js"></script>

@@ -6,11 +6,13 @@ const path = require("node:path");
 const { webcrypto } = require("node:crypto");
 const core = require("../core.js");
 const tick = () => new Promise((resolve) => setImmediate(resolve));
-function harness() {
+function harness(options = {}) {
   const timers = new Map();
   const listeners = {},
     sent = [],
     injected = [];
+  const messageListeners = [];
+  let fillWait = null;
   let messageListener,
     portMessage,
     portDisconnect,
@@ -101,11 +103,22 @@ function harness() {
     },
   };
   const api = {
+    storage: {
+      local: {
+        get: async () => {
+          if (options.readSettingsError) throw Error("storage unavailable");
+          return {};
+        },
+        set: async () => {
+          if (options.writeSettingsError) throw Error("storage unavailable");
+        },
+      },
+    },
     runtime: {
       id: "fixed",
       getURL: (p) => "chrome-extension://fixed/" + p,
       connectNative: () => port,
-      onMessage: { addListener: (f) => (messageListener = f) },
+      onMessage: { addListener: (f) => messageListeners.push(f) },
     },
     tabs: {
       query: async () => [
@@ -156,6 +169,8 @@ function harness() {
           return [{ frameId: 0, documentId: doc, result }];
         }
         injected.push(options);
+        if (options.func === core.fillDocument && fillWait)
+          return await fillWait;
         if (options.func === core.otpDocument && otpFillWait)
           return await otpFillWait;
         return [{ frameId: 0, documentId: doc, result: true }];
@@ -190,6 +205,7 @@ function harness() {
   const sender = { id: "fixed", url: "chrome-extension://fixed/popup.html" };
   return {
     sent,
+    holdFill: (promise) => (fillWait = promise),
     injected,
     listeners,
     hangProbe: () => (hangProbe = true),
@@ -235,8 +251,10 @@ function harness() {
     },
     send: (m, s = sender) =>
       new Promise((resolve) => {
-        const handled = messageListener(m, s, resolve);
-        if (handled === false) resolve(undefined);
+        let handled = false;
+        for (const listener of messageListeners)
+          if (listener(m, s, resolve) === true) handled = true;
+        if (!handled) resolve(undefined);
       }),
   };
 }
@@ -1024,4 +1042,121 @@ test("lost OTP C response preserves the later ordinary save status, then disconn
   } finally {
     await h.send({ type: "disconnect" });
   }
+});
+
+const contentSender = (doc = "doc-1", frame = 0) => ({
+  id: "fixed",
+  url: "https://example.test/login",
+  documentId: doc,
+  frameId: frame,
+  tab: { id: 1, windowId: 1, url: "https://example.test/login" },
+});
+test("inline channel is bound to browser sender document and cannot connect", async () => {
+  const h = harness();
+  await ready(h);
+  assert.equal(
+    (await h.send({ type: "inline-match" }, contentSender())).candidates.length,
+    1,
+  );
+  for (const sender of [contentSender("old-doc"), contentSender("doc-1", 2)]) {
+    const before = h.sent.length;
+    await h.send(
+      { type: "inline-fill", id: "b".repeat(32), revision: "c".repeat(64) },
+      sender,
+    );
+    assert.equal(h.sent.length, before);
+  }
+  const before = h.sent.length;
+  await h.send({ type: "connect" }, contentSender());
+  assert.equal(h.sent.length, before);
+});
+test("passkey uses authenticated sender origin and cancels on navigation", async () => {
+  const h = harness();
+  await ready(h);
+  const result = h.send(
+    {
+      type: "passkey",
+      id: "12345678-1234-1234-1234-123456789012",
+      operation: "create",
+      options: "{}",
+      origin: "https://evil.test",
+    },
+    contentSender(),
+  );
+  await tick();
+  const native = h.sent.find((r) => r.type === "passkey-create");
+  assert.equal(native.origin, "https://example.test");
+  assert.equal(native.document_id, "doc-1");
+  h.setDoc("doc-2");
+  h.listeners.updated(1, { status: "loading" });
+  h.deliver({
+    v: 1,
+    id: native.id,
+    type: "passkey-result",
+    credential: JSON.stringify({ id: "late" }),
+  });
+  assert.equal((await result).error, "NotAllowedError");
+  assert.match(
+    (await h.send({ type: "state" })).status,
+    /Passkey 创建结果未确认/,
+  );
+  assert(h.sent.some((r) => r.type === "cancel"));
+});
+test("password injection cancellation preserves unknown after disconnect and late completion", async () => {
+  const h = harness();
+  await ready(h);
+  let release;
+  h.holdFill(new Promise((resolve) => (release = resolve)));
+  await h.send({ type: "fill", id: "b".repeat(32), revision: "c".repeat(64) });
+  await tick();
+  const native = h.sent.find((r) => r.type === "fill");
+  h.deliver({
+    v: 1,
+    id: native.id,
+    type: "fill",
+    username: "fixture-user",
+    password: "fixture-password",
+  });
+  await tick();
+  assert.equal(h.injected.length, 1);
+  h.losePort();
+  let state = await h.send({ type: "state" });
+  assert.match(state.status, /登录填充结果未确认/);
+  release([{ frameId: 0, documentId: "doc-1", result: true }]);
+  await tick();
+  state = await h.send({ type: "state" });
+  assert.match(state.status, /登录填充结果未确认/);
+});
+
+test("automatic submission respects global/item opt-outs and fails closed on preference read failure", async () => {
+  for (const mode of ["global", "item", "storage"]) {
+    const h = harness({ readSettingsError: mode === "storage" });
+    await ready(h);
+    if (mode === "global") await h.send({ type: "settings", autoLogin: false });
+    if (mode === "item")
+      await h.send({ type: "settings", id: "b".repeat(32), enabled: false });
+    await h.send({
+      type: "fill",
+      id: "b".repeat(32),
+      revision: "c".repeat(64),
+    });
+    await tick();
+    const request = h.sent.find((m) => m.type === "fill");
+    h.deliver({
+      v: 1,
+      id: request.id,
+      type: "fill",
+      username: "user",
+      password: "password",
+    });
+    await tick();
+    assert.equal(h.injected.length, 1);
+    assert.equal(h.injected[0].args[5], false, mode);
+  }
+});
+test("failed preference persistence does not change the active setting", async () => {
+  const h = harness({ writeSettingsError: true });
+  await ready(h);
+  await h.send({ type: "settings", autoLogin: false });
+  assert.equal((await h.send({ type: "state" })).autoLogin, true);
 });

@@ -18,6 +18,7 @@ import {
   vaultObserver,
 } from "./browser_save_acceptance.mjs";
 
+import { acceptBrowserPasskey } from "./browser_passkey_acceptance.mjs";
 import { acceptBrowserOTP, otpHTML } from "./browser_otp_acceptance.mjs";
 
 const scanController = captureControllerOutput();
@@ -166,6 +167,7 @@ try {
     channel: "chromium",
     viewport: { width: 1100, height: 700 },
     args: [
+      "--no-sandbox",
       "--disable-extensions-except=" + extension,
       "--load-extension=" + extension,
       "--host-resolver-rules=MAP login.locklark.test 127.0.0.1",
@@ -300,6 +302,10 @@ try {
     return {
       targetId: target.id,
       close: () => ws.close(),
+      dismiss: async () => {
+        await call("Page.close").catch(() => {});
+        ws.close();
+      },
       ready: () =>
         evaluate(
           'document.readyState === "complete" && document.visibilityState === "visible" && document.hasFocus() && document.querySelector("#status")?.textContent.length > 0',
@@ -351,7 +357,7 @@ try {
     const previous = new Set((await popupTargets()).map((target) => target.id));
     if (lastPopup) {
       previous.add(lastPopup.targetId);
-      lastPopup.close();
+      await lastPopup.dismiss();
       lastPopup = null;
     }
     await page.bringToFront();
@@ -437,8 +443,13 @@ try {
   phase("native-pair");
   input([{ click_label: "确认连接此扩展" }]);
   await blank();
+  popup = await openPopup();
+  await popup.click("#auto-login"); // Existing manual-mode scenarios intentionally disable auto-submit.
 
-  if (process.env.LOCKLARK_TEST_FAILURE_STAGE !== "otp-page-arguments") {
+  if (
+    !process.env.LOCKLARK_TEST_BROWSER_PARITY &&
+    process.env.LOCKLARK_TEST_FAILURE_STAGE !== "otp-page-arguments"
+  ) {
     await select("approved-fill");
     await blank(); // No field is released before native approval.
     if (process.env.LOCKLARK_TEST_FAILURE_STAGE === "after-pair")
@@ -577,9 +588,21 @@ try {
     env,
     pageEval: (fn, arg) => page.evaluate(fn, arg),
   };
-  if (process.env.LOCKLARK_TEST_FAILURE_STAGE !== "otp-page-arguments")
-    await acceptBrowserSave(acceptanceDriver);
-  await acceptBrowserOTP(acceptanceDriver);
+  if (!process.env.LOCKLARK_TEST_BROWSER_PARITY) {
+    if (process.env.LOCKLARK_TEST_FAILURE_STAGE !== "otp-page-arguments")
+      await acceptBrowserSave(acceptanceDriver);
+    await acceptBrowserOTP(acceptanceDriver);
+  }
+  await acceptBrowserPasskey({
+    page,
+    browser,
+    origin,
+    input,
+    fixture,
+    openPopup,
+    eventually,
+    phase,
+  });
   assert(
     !logs.some((s) =>
       fixtureCanaries(fixture).some((value) => s.includes(value)),
@@ -589,11 +612,34 @@ try {
   for (const line of logs) assertPrivateText(line, fixture);
   popup = await openPopup();
   await popup.click("#disconnect");
-} catch {
+} catch (error) {
   // Deliberately omit fixture files and exception/command bodies. The only
   // inspection text is the trusted popup's bounded status; native metadata is
   // a fixed control-name allowlist and never asks accessibility for values.
+  const safeReasons = [
+    "Action popup did not open",
+    "Previous action popup did not close",
+    "Action popup is not visible and focused",
+    "AbortSignal not honored",
+    "Popup CDP failed",
+    "Popup CDP closed",
+    "Popup CDP timed out",
+    "Popup control must be available",
+    "Inline control unavailable",
+    "Synthetic secret found in browser console output",
+    "Popup inspection failed",
+    "Popup CDP connection failed",
+    "Popup CDP connection timed out",
+    "Action popup must be unique",
+  ];
   const report = {
+    reason: safeReasons.includes(error?.message)
+      ? error.message
+      : "unclassified acceptance failure",
+    frames:
+      typeof error?.stack === "string"
+        ? error.stack.match(/browser_native_acceptance\.mjs:[0-9]+:[0-9]+/g)
+        : [],
     stage,
     popup: { available: false },
     native: { available: false },
@@ -648,7 +694,9 @@ try {
   }
 }
 console.log(
-  "PASS: real Chromium fill/save/update/OTP with native approval, cancellation, Unicode, and no synthetic secrets in console or persistent diagnostics",
+  process.env.LOCKLARK_TEST_BROWSER_PARITY
+    ? "PASS: real Chromium quick pairing, inline fill, automatic sign-in, Passkey creation/assertion, relying-party signature verification and abort"
+    : "PASS: real Chromium fill/save/update/OTP and Passkey with native approval and private diagnostics",
 );
 console.log("Private synthetic artifacts: " + state);
 

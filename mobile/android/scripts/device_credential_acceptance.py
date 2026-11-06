@@ -552,6 +552,7 @@ class DeviceCredentialAcceptance(AndroidAcceptance):
         self.visible("打开本地金库", class_name="android.widget.Button")
         require(not any(self.matching(self.snapshot(), "新建登录", "android.widget.Button")))
         self.no_visible_secrets()
+        self.observe_lifecycle()
         self.done("OS_auth_cancellation_keeps_vault_locked_without_visible_values")
 
     def key_policy(self):
@@ -584,13 +585,16 @@ class DeviceCredentialAcceptance(AndroidAcceptance):
         self.command(["install", "-r",self.args.apk],timeout=180)
         self.load_trusted_window_uids()
         self.launch(); self.visible("生成新的 Secret Key",class_name="android.widget.Button")
+        self.observe_lifecycle()
         self.shell("am","force-stop",PACKAGE)
         self.set_stage("restore")
-        result = subprocess.run(self.adb + ["exec-out","run-as",PACKAGE,"tar","-C","no_backup","-xf","-"],
+        result = subprocess.run(self.adb + ["shell","run-as",PACKAGE,"tar","-C","no_backup","-xf","-"],
                                 input=archive,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=90)
         self.controller.write(result.stdout + result.stderr); self.controller.flush()
         require(result.returncode == 0)
+        self.shell("run-as",PACKAGE,"test","-s","no_backup/personal.ll","-a","-s","no_backup/device-unlock/installation")
         self.launch(); self.visible("打开本地金库",class_name="android.widget.Button")
+        self.observe_lifecycle()
         self.set_stage("copied-capsule-refusal")
         self.arm_auth_diagnostic()
         self.tap("使用此设备认证解锁",class_name="android.widget.Button")
