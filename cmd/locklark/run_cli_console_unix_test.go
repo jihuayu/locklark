@@ -10,3 +10,5 @@ import (
 func detachRunCLIConsole(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 }
+
+func prepareRunCLIConsoleProbe() (bool, error) { return false, nil }

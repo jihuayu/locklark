@@ -12,6 +12,19 @@ import run_cli_windows_acceptance as acceptance
 
 
 class WindowsCLIOracleTests(unittest.TestCase):
+    def test_no_console_requires_observed_absence_not_only_an_exit_code(self):
+        result={"exit_code":1,"timed_out":False,"parent_console_absent":True}
+        error=b"personal run-cli requires an interactive terminal with a controlling console for hidden input and prompts\n"
+        acceptance.verify_no_console(result,b"",error,False)
+        for key,value in (("parent_console_absent",False),("timed_out",True),("exit_code",0)):
+            with self.subTest(key=key),self.assertRaises(acceptance.AcceptanceFailure):
+                acceptance.verify_no_console({**result,key:value},b"",error,False)
+        with self.assertRaises(acceptance.AcceptanceFailure):
+            acceptance.verify_no_console(result,b"",error,True)
+        for prompt in ("主密码:","Secret Key:","输入 RUN 确认本次可信命令披露:"):
+            with self.subTest(prompt=prompt),self.assertRaises(acceptance.AcceptanceFailure):
+                acceptance.verify_no_console(result,b"",error+prompt.encode(),False)
+
     def test_full_pipe_exit_and_console_oracle_rejects_partial_results(self):
         result = {"exit_code":23,"timed_out":False,"console_available":True,"console_mode_before":7,"console_mode_after":7}
         child = {"token_matches":True,"stdin_matches":True,"stdio_are_pipes":True,"only_allowed_environment":True,"console_mode":7}

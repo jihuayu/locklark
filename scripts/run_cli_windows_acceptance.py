@@ -48,10 +48,19 @@ def verify_approved(result, child, stdout, stderr):
     require(stdout == b"owned Windows child stdout\n" and stderr == b"owned Windows child stderr\n")
 
 
+def verify_no_console(result, stdout, stderr, child_exists):
+    require(result.get("parent_console_absent") is True)
+    require(result.get("exit_code") == 1 and result.get("timed_out") is False)
+    require(not child_exists and not stdout)
+    prompts = ("主密码", "Secret Key:", "输入 RUN 确认本次可信命令披露:")
+    require(b"requires an interactive terminal with a controlling console" in stderr and
+            not any(prompt.encode() in stderr for prompt in prompts))
+
+
 def fixture_phase(raw):
     found = re.findall(rb"owned Windows CLI fixture failed at ([a-z-]+)", raw)
     allowed = {"entry", "artifact-security", "private-root", "vault-create", "vault-login", "owned-job",
-               "console-probe", "cli-start", "cli-wait", "pipe-capture", "child-console", "signed-audit"}
+               "console-probe", "console-detach", "cli-start", "cli-wait", "pipe-capture", "child-console", "signed-audit"}
     return found[-1].decode() if found and found[-1].decode() in allowed else "unknown"
 
 
@@ -180,13 +189,11 @@ class Acceptance:
         self.mark("explicit_denial_never_starts_child")
         self.stage = "no-controlling-console"
         self.wait = "no-console-oracle"
-        self.command(["launch", str(self.root), self.cli, "no-console"], "no-console", timeout=130)
+        self.command(["launch", str(self.root), self.cli, "no-console"], "no-console", timeout=25)
         result = self.read_json("no-console-result.json")
-        require(result.get("exit_code") == 1 and result.get("timed_out") is False)
-        require(not (self.root / "no-console-child.json").exists() and not (self.root / "no-console-stdout.log").read_bytes())
-        error = (self.root / "no-console-stderr.log").read_bytes()
-        require(b"requires an interactive terminal with a controlling console" in error and "主密码".encode() not in error)
-        self.mark("CREATE_NO_WINDOW_refuses_before_factors_or_child")
+        verify_no_console(result, (self.root / "no-console-stdout.log").read_bytes(),
+                          (self.root / "no-console-stderr.log").read_bytes(), (self.root / "no-console-child.json").exists())
+        self.mark("verified_detached_console_refuses_before_factors_or_child")
         self.stage = "signed-audit"
         self.command(["audit", str(self.root)], "audit")
         require(self.read_json("audit-result.json") == {"run_intents":1, "exact_target":True})

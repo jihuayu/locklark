@@ -106,7 +106,19 @@ func consoleMode() (uint32, error) {
 	return mode, err
 }
 func detachConsole(command *exec.Cmd) {
-	command.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
+	command.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.DETACHED_PROCESS}
+}
+func detachOwnConsole() error {
+	// Only the negative launcher calls this, never the ConPTY positive case.
+	_, _, _ = windows.NewLazySystemDLL("kernel32.dll").NewProc("FreeConsole").Call()
+	if !ownConsoleAbsent() {
+		return errors.New("owned fixture remains attached to a console")
+	}
+	return nil
+}
+func ownConsoleAbsent() bool {
+	codepage, _ := windows.GetConsoleCP()
+	return codepage == 0
 }
 func ownProcessTree() error {
 	job, err := windows.CreateJobObject(nil, nil)

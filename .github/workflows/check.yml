@@ -41,6 +41,15 @@ jobs:
         run: |
           $env:LOCKLARK_TEST_OPENSSH_BIN = if ($IsWindows) { Join-Path $env:WINDIR 'System32/OpenSSH/ssh-add.exe' } else { '/usr/bin/ssh-add' }
           if (-not (Test-Path -LiteralPath $env:LOCKLARK_TEST_OPENSSH_BIN -PathType Leaf)) { throw 'Native system OpenSSH client unavailable' }
+          if ($IsWindows) {
+            foreach ($name in @('ssh-add.exe', 'ssh.exe')) {
+              $nativeClient = Join-Path $env:WINDIR "System32/OpenSSH/$name"
+              $info = (Get-Item -LiteralPath $nativeClient).VersionInfo
+              $version = '{0}.{1}.{2}.{3}' -f $info.FileMajorPart, $info.FileMinorPart, $info.FileBuildPart, $info.FilePrivatePart
+              if ($version -notmatch '^[0-9]+(?:\.[0-9]+){3}$' -or $version -eq '0.0.0.0') { $version = 'unrecognized' }
+              Write-Output "Native Windows $name file version: $version"
+            }
+          }
           $peerEnv = Join-Path $env:RUNNER_TEMP 'locklark-kdbx-peer'
           python -m venv $peerEnv
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -117,13 +126,24 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $python scripts/plugin_acceptance.py $binary
       - name: Test native Windows RunCLI console and piped standard streams
-        if: runner.os == 'Windows'
+        if: always() && runner.os == 'Windows' && !cancelled()
         timeout-minutes: 10
         shell: pwsh
         run: |
-          $python = Join-Path $env:RUNNER_TEMP 'locklark-kdbx-peer/Scripts/python.exe'
+          $peerEnv = Join-Path $env:RUNNER_TEMP 'locklark-kdbx-peer'
+          $python = Join-Path $peerEnv 'Scripts/python.exe'
           $binary = Join-Path $env:RUNNER_TEMP 'personal-cli.exe'
           $fixture = Join-Path $env:RUNNER_TEMP 'run-cli-windows-fixture.exe'
+          if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
+            python -m venv $peerEnv
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          & $python -m pip install 'pywinpty==3.1.2'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
+            go build -o $binary ./cmd/locklark
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
           go build -o $fixture ./scripts/run_cli_windows_fixture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $python scripts/run_cli_windows_acceptance.py --cli $binary --fixture-bin $fixture

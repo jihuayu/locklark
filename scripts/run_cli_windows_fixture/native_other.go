@@ -11,4 +11,6 @@ func newPrivateRoot() (string, error) { return "", errors.New("Windows acceptanc
 func privateRoot(string) error        { return errors.New("Windows acceptance only") }
 func consoleMode() (uint32, error)    { return 0, errors.New("Windows acceptance only") }
 func detachConsole(*exec.Cmd)         { panic("Windows acceptance only") }
+func detachOwnConsole() error         { return errors.New("Windows acceptance only") }
+func ownConsoleAbsent() bool          { return false }
 func ownProcessTree() error           { return errors.New("Windows acceptance only") }

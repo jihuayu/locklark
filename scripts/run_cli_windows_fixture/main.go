@@ -92,15 +92,25 @@ func launch(root, cli, label string) {
 	f := readFixture(root)
 	executable, err := os.Executable()
 	check(err == nil && filepath.IsAbs(cli))
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	limit := 120 * time.Second
+	parentConsoleAbsent := false
+	if label == "no-console" {
+		fixturePhase = "console-detach"
+		check(detachOwnConsole() == nil)
+		parentConsoleAbsent = true
+		limit = 15 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), limit)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, cli, cliArgs(root, executable, label, f)...)
 	if label == "no-console" {
 		detachConsole(cmd)
 	}
 	fixturePhase = "console-probe"
-	before, consoleErr := consoleMode()
-	if label != "no-console" {
+	var before uint32
+	consoleErr := errors.New("fixture is detached")
+	if !parentConsoleAbsent {
+		before, consoleErr = consoleMode()
 		check(consoleErr == nil)
 	}
 	inR, inW, err := os.Pipe()
@@ -159,11 +169,18 @@ func launch(root, cli, label string) {
 	fixturePhase = "pipe-capture"
 	take(out, outR, label+"-stdout.log")
 	take(stderr, errR, label+"-stderr.log")
-	after, afterErr := consoleMode()
+	var after uint32
+	afterErr := consoleErr
+	if !parentConsoleAbsent {
+		after, afterErr = consoleMode()
+	} else {
+		check(ownConsoleAbsent())
+	}
 	writeJSON(filepath.Join(root, label+"-result.json"), map[string]any{
 		"exit_code": code, "timed_out": ctx.Err() != nil,
 		"console_available":   consoleErr == nil && afterErr == nil,
 		"console_mode_before": before, "console_mode_after": after,
+		"parent_console_absent": parentConsoleAbsent,
 	})
 	check(privateRoot(root) == nil)
 	fmt.Println("OWNED_WINDOWS_CLI_DONE")
