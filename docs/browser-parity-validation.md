@@ -61,7 +61,7 @@ Permissions Policy checks intentionally preserve the current boundary.
 - Native-host tests exercise actual vault persistence and native-only approval;
   personal/vault tests cover protected KDBX storage, stale revisions, cancellation,
   fresh-factor refusal, overwrite refusal, and backup/restore/sign-in.
-- Controlled Chromium DOM checks cover semantic and individual multi-step fields,
+- Controlled Chromium and Firefox DOM checks cover semantic and individual multi-step fields,
   input/change events, automatic submission and post-event action mutation.
 - Real Linux Chromium/native MyGo acceptance uses AT-SPI and XTest for unlock,
   quick pairing, inline account selection, automatic submission, Passkey

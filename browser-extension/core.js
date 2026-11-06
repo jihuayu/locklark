@@ -178,6 +178,16 @@ globalThis.LocklarkCore = (() => {
         const r = el.getBoundingClientRect();
         return el.getClientRects().length > 0 && r.width > 0 && r.height > 0;
       }
+      function hasAutocomplete(el, token) {
+        return (
+          (el.getAttribute && el.getAttribute("autocomplete")) ||
+          el.autocomplete ||
+          ""
+        )
+          .toLowerCase()
+          .split(/\s+/)
+          .includes(token);
+      }
       const allInputs = [...document.querySelectorAll("input")];
       const visible = allInputs.filter(eligible);
       if (
@@ -192,7 +202,7 @@ globalThis.LocklarkCore = (() => {
       if (
         passwords.length > 1 ||
         passwords.some((e) =>
-          e.autocomplete.split(" ").includes("new-password"),
+          hasAutocomplete(e, "new-password"),
         )
       )
         return false;
@@ -203,7 +213,7 @@ globalThis.LocklarkCore = (() => {
       );
       const semantic = users.filter(
         (e) =>
-          e.autocomplete.split(" ").includes("username") ||
+          hasAutocomplete(e, "username") ||
           e.type === "email" ||
           /^(user(name)?|login|email)$/i.test(e.name || e.id),
       );
@@ -309,7 +319,7 @@ globalThis.LocklarkCore = (() => {
         pass &&
         user &&
         form.method.toLowerCase() === "post" &&
-        pass.autocomplete.split(" ").includes("current-password")
+        hasAutocomplete(pass, "current-password")
       ) {
         const submitters = [...form.elements].filter(
           (e) =>

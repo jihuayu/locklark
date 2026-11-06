@@ -74,15 +74,25 @@
     p.textContent = text;
     box.append(p);
   }
+  function hasAutocomplete(el, token) {
+    return (
+      (el.getAttribute && el.getAttribute("autocomplete")) ||
+      el.autocomplete ||
+      ""
+    )
+      .toLowerCase()
+      .split(/\s+/)
+      .includes(token);
+  }
   function loginInput(el) {
     return (
       el instanceof HTMLInputElement &&
       !el.disabled &&
       !el.readOnly &&
-      (el.autocomplete.split(" ").includes("one-time-code") ||
+      (hasAutocomplete(el, "one-time-code") ||
         el.type === "password" ||
         el.type === "email" ||
-        el.autocomplete.split(" ").includes("username") ||
+        hasAutocomplete(el, "username") ||
         /user|login|email/i.test(el.name + " " + el.id))
     );
   }
@@ -112,7 +122,7 @@
         button(box, "关闭", dismiss);
         return;
       }
-      const otp = target.autocomplete.split(" ").includes("one-time-code");
+      const otp = hasAutocomplete(target, "one-time-code");
       for (const row of state.candidates || []) {
         button(
           box,
