@@ -8,6 +8,7 @@ permissions:
 jobs:
   go:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
@@ -199,7 +200,9 @@ jobs:
           LOCKLARK_TEST_BROWSER: firefox
       - name: Install native GUI acceptance tools
         timeout-minutes: 10
-        run: sudo apt-get install -y --no-install-recommends libxtst6 xvfb xauth imagemagick at-spi2-core libatspi2.0-0 libnss3-tools xfwm4
+        run: |
+          sudo apt-get install -y --no-install-recommends libxtst6 xvfb xauth imagemagick at-spi2-core libatspi2.0-0 libnss3-tools xfwm4 openssh-client openssh-server
+          sudo install -d -o root -g root -m 0755 /run/sshd
       - name: Install pinned geckodriver
         timeout-minutes: 10
         run: |
@@ -241,6 +244,14 @@ jobs:
           LOCKLARK_CLI_HOST: ${{ runner.temp }}/locklark
           LOCKLARK_DESKTOP_HOST: ${{ runner.temp }}/locklark-desktop
           LOCKLARK_TEST_PYKEEPASS: ${{ runner.temp }}/locklark-notes-peer/bin/python
+      - name: Test native SSH approvals, real OpenSSH forwarding and encrypted export
+        timeout-minutes: 10
+        run: |
+          python3 -m unittest discover -s scripts -p test_ssh_agent_acceptance.py
+          dbus-run-session -- xvfb-run -a -s '-screen 0 1920x2160x24 -nolisten tcp' python3 scripts/ssh_agent_acceptance.py \
+            --host "$RUNNER_TEMP/locklark-desktop" --cli "$RUNNER_TEMP/locklark" --go "$(command -v go)" \
+            --peer "$RUNNER_TEMP/locklark-notes-peer/bin/python" --window-manager /usr/bin/xfwm4 \
+            --artifacts "$RUNNER_TEMP/locklark-ssh-evidence"
       - name: Test browser extension DOM
         timeout-minutes: 10
         run: node scripts/browser_extension_dom.cjs

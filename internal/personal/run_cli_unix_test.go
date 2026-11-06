@@ -43,6 +43,15 @@ func TestRunCLIRefusesReplaceableTemporaryParents(t *testing.T) {
 
 func TestRunCLIUsesCanonicalPrivateTemporaryParent(t *testing.T) {
 	parent := t.TempDir()
+	// testing.TempDir creates its numbered child with 0777 filtered by the
+	// caller's umask. Establish the product's private-parent precondition
+	// explicitly instead of relying on a private shell umask.
+	if os.Chmod(parent, 0700) != nil {
+		t.Fatal("private parent fixture permissions unavailable")
+	}
+	if info, e := os.Stat(parent); e != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
+		t.Fatal("private parent fixture is not private")
+	}
 	canonical, e := filepath.EvalSymlinks(parent)
 	if e != nil {
 		t.Fatal("private parent unavailable")
@@ -63,7 +72,10 @@ func TestRunCLIUsesCanonicalPrivateTemporaryParent(t *testing.T) {
 		}
 		return result{value: []byte("private-cli-value")}, nil
 	}, func(context.Context, RunRequest, []byte) (int, error) { return 0, nil }, os.RemoveAll)
-	if e != nil || filepath.Dir(root) != canonical {
+	if e != nil {
+		t.Fatal("validated private temporary parent was refused")
+	}
+	if filepath.Dir(root) != canonical {
 		t.Fatal("execution did not use the validated canonical parent")
 	}
 	if _, e = os.Stat(root); !os.IsNotExist(e) {

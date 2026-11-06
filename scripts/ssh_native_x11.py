@@ -88,6 +88,28 @@ def approval(request):
 
 
 def picker_observation(request):
+    """Re-observe a disappearing GTK tree without repeating any input."""
+    deadline = request.get("observation_deadline")
+    if deadline is None:
+        return picker_observation_once(request)
+    if type(deadline) not in (int, float) or not time.monotonic() < deadline <= time.monotonic() + 10:
+        raise RuntimeError()
+    while True:
+        try:
+            result = picker_observation_once(request)
+            if time.monotonic() >= deadline:
+                raise RuntimeError()
+            return result
+        except native.AccessibilityQueryUnavailable:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            time.sleep(min(0.02, remaining))
+            if time.monotonic() >= deadline:
+                raise
+
+
+def picker_observation_once(request):
     if request.get("title") != "选择未加密 OpenSSH Ed25519 私钥":
         raise RuntimeError()
     reader = native.NativeControls(request["title"], request["pid"])

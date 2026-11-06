@@ -117,6 +117,38 @@ def verify_audit(events, approvals):
     require(len({view["请求 ID"] for view in approvals}) == len(approvals))
 
 
+def observe_absence_until_eof(connection, observe, deadline, *, clock=time.monotonic, readiness=select.select):
+    """Observe throughout one existing socket deadline; never emit UI input.
+
+    Each query gets at most one second. Missing/late observations fail closed,
+    so a thirty-second approval cannot appear and expire between samples.
+    The final absence sample must finish after EOF has actually been observed.
+    """
+    count, maximum_gap, previous_sample = 0, 0.0, clock()
+
+    def sample():
+        nonlocal count, maximum_gap, previous_sample
+        remaining = deadline - clock()
+        require(remaining > 0)
+        present = observe(min(1.0, remaining))
+        now = clock()
+        gap = now - previous_sample
+        require(type(present) is bool and not present and now < deadline and 0 <= gap <= 1.5)
+        count += 1
+        maximum_gap = max(maximum_gap, gap)
+        previous_sample = now
+
+    while True:
+        sample()
+        remaining = deadline - clock()
+        require(remaining > 0)
+        ready = readiness([connection], [], [], min(0.1, remaining))[0]
+        if ready:
+            require(connection.recv(1) == b"")
+            sample()
+            return {"observations": count, "maximum_gap_ms": round(maximum_gap * 1000), "eof": True}
+
+
 class AgentRelay:
     """Owned transparent transport observer; cannot create approval decisions."""
     def __init__(self, path, target, root):
@@ -220,20 +252,22 @@ class Acceptance:
             path.write_bytes(raw)
             self.cli.logs.append((path, set()))
         if result.returncode != expected:
-            match = re.fullmatch(rb"SSH native driver failed \[([a-z-]+)\]\n", result.stderr)
+            match = re.fullmatch(rb"SSH native driver failed \[([a-z0-9-]+)\]\n", result.stderr)
             self.reason = "native-" + match[1].decode() if match and match[1] in (b"control-ready-timeout", b"window-timeout", b"control-ambiguous", b"a11y-query") else "external-command"
         require(result.returncode == expected)
         return result.stdout
 
-    def native(self, actions=(), observe=None, title=TITLE, inspect=False, expected_path=None):
+    def native(self, actions=(), observe=None, title=TITLE, inspect=False, expected_path=None, observation_deadline=None, timeout=30):
         request = {"title": title, "executable": self.host, "pid": self.app.pid, "actions": actions}
         request["inspect"] = inspect
         if observe:
             request["observe"] = observe
         if expected_path is not None:
             request["expected_path"] = str(expected_path)
+        if observation_deadline is not None:
+            request["observation_deadline"] = observation_deadline
         return json.loads(self.command([sys.executable, str(ROOT / "scripts/ssh_native_x11.py")],
-                                      payload=json.dumps(request).encode(), timeout=30))
+                                      payload=json.dumps(request).encode(), timeout=timeout))
 
     def click(self, name):
         self.operation = name
@@ -249,6 +283,11 @@ class Acceptance:
 
     def clipboard(self):
         return self.native(observe="clipboard")["value"]
+
+    def approval_present(self, timeout):
+        result = self.native(observe="approval", timeout=timeout)
+        require(type(result.get("values")) is list)
+        return bool(result["values"])
 
     def connect(self, relay=True):
         connection = socket.socket(socket.AF_UNIX)
@@ -358,7 +397,8 @@ class Acceptance:
         self.native([{"key": "Return"}], title="选择未加密 OpenSSH Ed25519 私钥")
         deadline = time.monotonic() + 10
         while True:
-            picker = self.native(observe="picker", title="选择未加密 OpenSSH Ed25519 私钥", expected_path=keyfile)
+            picker = self.native(observe="picker", title="选择未加密 OpenSSH Ed25519 私钥", expected_path=keyfile,
+                                 observation_deadline=deadline)
             self.cli.write(self.root / "picker-observation-after-location.json", picker)
             if not picker["present"] or picker["selected_name_match"]:
                 break
@@ -524,9 +564,10 @@ class Acceptance:
         self.mark("original_human_deadline_expires_without_approval_or_signature")
         self.stage = "slow-frame"
         with self.connect() as connection:
-            connection.settimeout(38)
+            deadline = time.monotonic() + 38
             connection.sendall(b"\x00")
-            require(connection.recv(1) == b"")
+            evidence = observe_absence_until_eof(connection, self.approval_present, deadline)
+            self.cli.write(self.root / "slow-frame-absence.json", evidence)
         self.mark("partial_slow_frame_expires_without_native_prompt")
         self.stage = "lock"
         pending = self.request(self.import_public, os.urandom(50))
