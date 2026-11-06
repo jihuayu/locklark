@@ -22,7 +22,7 @@ import (
 	"unicode/utf8"
 )
 
-var personalUsage = errors.New("usage: locklark personal run-env --file PATH --id ID --revision REV --field username|password --name ENV --cwd ABS_DIR --timeout SECONDS -- ABS_PROGRAM [ARG...], or <init|add-login|list|audit|archived-audit|references|health> --file PATH, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password|otp|url, or reveal-login --file PATH --id ID --revision REV --field username|password, or generate-login --file PATH [--length N], or regenerate-password --file PATH --id ID --revision REV [--length N], or otp --file PATH --id ID --revision REV, or reveal-ref|otp-ref --file PATH --ref REF --revision REV, or inspect-1pux|plan-import-1pux --file PATH --source ARCHIVE, or import-1pux --file PATH --source ARCHIVE --digest PLAN_DIGEST, or export-kdbx --file PATH --out NEW_FILE.kdbx, or archive-login|unarchive-login --file PATH --id ID --revision REV, or list|search --file PATH [--state active|archived|trashed|all], or trash-login|restore-login --file PATH --id ID --revision REV, or match-logins --file PATH --origin HTTPS_ORIGIN --frame-origin HTTPS_ORIGIN, or inject-json --file PATH --id ID --revision REV --field username|password --name PROPERTY --out NEW.json, or github-pull --file PATH --id ID --revision REV --repository-id NUMERIC_ID --owner OWNER --repository NAME --number PR --api-ip PUBLIC_IPV4")
+var personalUsage = errors.New("usage: locklark personal run-env --file PATH --id ID --revision REV --field username|password --name ENV --cwd ABS_DIR --timeout SECONDS -- ABS_PROGRAM [ARG...], or <init|add-login|list|audit|archived-audit|references|health> --file PATH, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password|otp|url|notes (hidden single-line replacement; use native editor for multiline notes), or reveal-login --file PATH --id ID --revision REV --field username|password, or generate-login --file PATH [--length N], or regenerate-password --file PATH --id ID --revision REV [--length N], or otp --file PATH --id ID --revision REV, or reveal-ref|otp-ref --file PATH --ref REF --revision REV, or inspect-1pux|plan-import-1pux --file PATH --source ARCHIVE, or import-1pux --file PATH --source ARCHIVE --digest PLAN_DIGEST, or export-kdbx --file PATH --out NEW_FILE.kdbx, or archive-login|unarchive-login --file PATH --id ID --revision REV, or list|search --file PATH [--state active|archived|trashed|all], or trash-login|restore-login --file PATH --id ID --revision REV, or match-logins --file PATH --origin HTTPS_ORIGIN --frame-origin HTTPS_ORIGIN, or inject-json --file PATH --id ID --revision REV --field username|password --name PROPERTY --out NEW.json, or github-pull --file PATH --id ID --revision REV --repository-id NUMERIC_ID --owner OWNER --repository NAME --number PR --api-ip PUBLIC_IPV4")
 
 // One terminal mode covers the entire interaction; no prompt or inter-field
 // gap is visible while echo is enabled.
@@ -329,7 +329,7 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 			}
 			response, err = personal.RunEnv(context.Background(), path, string(pw), key, reveal, run)
 		case "search":
-			if _, e = fmt.Fprint(os.Stderr, "仅搜索当前登录标题，不搜索用户名、密码、验证码配置或导入来源旧值。\r\n"); e != nil {
+			if _, e = fmt.Fprint(os.Stderr, "仅搜索当前登录标题，不搜索用户名、密码、备注、验证码配置或导入来源旧值。\r\n"); e != nil {
 				return e
 			}
 			query, e := consoleField("搜索标题（隐藏输入）")
@@ -579,7 +579,7 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 			}
 			response = map[string]string{"id": id}
 		case "edit-login":
-			prompt := map[string]string{"url": "新网站 HTTPS URL（ASCII，留空清除）", "title": "新标题", "username": "新用户名（可留空）", "password": "新登录密码", "otp": "新 TOTP 配置（Base32 或 otpauth URI，留空清除）"}[edit.Field]
+			prompt := map[string]string{"url": "新网站 HTTPS URL（ASCII，留空清除）", "title": "新标题", "username": "新用户名（可留空）", "password": "新登录密码", "otp": "新 TOTP 配置（Base32 或 otpauth URI，留空清除）", "notes": "新备注（隐藏单行输入，留空清除；多行请用原生编辑器）"}[edit.Field]
 			value, e := consoleField(prompt)
 			if e != nil {
 				return e

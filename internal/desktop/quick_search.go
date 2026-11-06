@@ -190,6 +190,7 @@ func (a *App) chooseQuickResult(panel, sequence uint64, target personal.Row) {
 		return
 	}
 	a.page, a.scope, a.query, a.rows = "vault", "active", query, rows
+	a.clearNotesEditor()
 	a.selected = &target
 	a.title, a.website, a.username, a.value = "", "", "", ""
 	a.regenerate = nil

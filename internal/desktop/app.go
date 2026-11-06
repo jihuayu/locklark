@@ -27,6 +27,7 @@ type outcome struct {
 	err         error
 }
 type App struct {
+	notesEditor                                            *nativeNotesDraft
 	quick                                                  quickSearchPanel
 	quickShortcut                                          string
 	operationSequence                                      uint64
@@ -159,6 +160,7 @@ func (a *App) Lock() {
 	}
 	// Revoke all session/UI authority before native clipboard metadata calls.
 	a.generation++
+	a.clearNotesEditor()
 	a.closeQuickSearch()
 	s := a.session
 	a.session = nil
@@ -273,6 +275,7 @@ func (a *App) createVault() {
 	})
 }
 func (a *App) refresh() {
+	a.clearNotesEditor()
 	a.clearDailyExposure()
 	a.regenerate = nil
 	s, query, scope := a.session, a.query, a.scope
@@ -297,6 +300,7 @@ func (a *App) refresh() {
 }
 func (a *App) add() { a.saveNative(false) }
 func (a *App) edit() {
+	a.clearNotesEditor()
 	a.clearDailyExposure()
 	if a.selected == nil {
 		return
@@ -316,6 +320,7 @@ func (a *App) edit() {
 	})
 }
 func (a *App) state(action string) {
+	a.clearNotesEditor()
 	a.clearDailyExposure()
 	if a.selected == nil {
 		return
@@ -356,7 +361,11 @@ func (a *App) disclose(field, purpose string) {
 					}
 					a.status = "已复制到系统剪贴板 · 30 秒后尝试清理"
 				} else {
-					a.display = visible(string(value))
+					if field == "notes" {
+						a.display = visibleNotes(string(value))
+					} else {
+						a.display = visible(string(value))
+					}
 					a.displayUntil = time.Now().Add(15 * time.Second)
 					a.status = "字段显示 15 秒"
 				}
@@ -459,7 +468,13 @@ func (a *App) vaultView(c *ui.Context) {
 	ui.Row(c).Gap(8).Children(func() {
 		for _, tab := range []struct{ id, label string }{{"vault", "金库"}, {"activity", "活动"}, {"health", "体检"}, {"transfer", "导入与导出"}, {"security", "安全设置"}} {
 			tab := tab
-			ui.Button(c, tab.label).OnClick(func() { a.clearDailyExposure(); a.regenerate = nil; a.page = tab.id; a.display = "" })
+			ui.Button(c, tab.label).OnClick(func() {
+				a.clearNotesEditor()
+				a.clearDailyExposure()
+				a.regenerate = nil
+				a.page = tab.id
+				a.display = ""
+			})
 		}
 	})
 	switch a.page {
@@ -476,6 +491,10 @@ func (a *App) vaultView(c *ui.Context) {
 	}
 }
 func (a *App) itemsView(c *ui.Context) {
+	if a.notesEditor != nil {
+		a.notesEditorView(c)
+		return
+	}
 	if a.regenerate != nil {
 		ui.Scroll(c).Fill().Children(func() { ui.Column(c).Gap(12).Children(func() { a.regenerationView(c) }) })
 		return
@@ -483,7 +502,14 @@ func (a *App) itemsView(c *ui.Context) {
 	ui.Row(c).Gap(8).Children(func() {
 		ui.TextInput(c, &a.query).Label("搜索标题").Placeholder("搜索标题").Grow(1)
 		ui.Button(c, "搜索 / 刷新").Disabled(a.busy).OnClick(a.refresh)
-		ui.Button(c, "新建登录").Disabled(a.busy).OnClick(func() { a.clearDailyExposure(); a.selected = nil; a.regenerate = nil; a.value = ""; a.username = "" })
+		ui.Button(c, "新建登录").Disabled(a.busy).OnClick(func() {
+			a.clearNotesEditor()
+			a.clearDailyExposure()
+			a.selected = nil
+			a.regenerate = nil
+			a.value = ""
+			a.username = ""
+		})
 	})
 	ui.Row(c).Gap(8).Children(func() {
 		for _, scope := range []struct{ id, label string }{{"active", "活动"}, {"archived", "归档"}, {"trashed", "回收站"}, {"all", "全部"}} {
@@ -499,7 +525,14 @@ func (a *App) itemsView(c *ui.Context) {
 				}
 				for _, row := range a.rows {
 					row := row
-					ui.Button(c.Key(row.ID), visible(row.Title)+" · "+row.State).FillWidth().Disabled(a.busy).OnClick(func() { a.clearDailyExposure(); a.regenerate = nil; a.selected = &row; a.display = ""; a.value = "" })
+					ui.Button(c.Key(row.ID), visible(row.Title)+" · "+row.State).FillWidth().Disabled(a.busy).OnClick(func() {
+						a.clearNotesEditor()
+						a.clearDailyExposure()
+						a.regenerate = nil
+						a.selected = &row
+						a.display = ""
+						a.value = ""
+					})
 				}
 			})
 		})
@@ -518,6 +551,11 @@ func (a *App) itemsView(c *ui.Context) {
 					return
 				}
 				ui.Text(c, "以下操作会记录审计。复制内容可能被系统剪贴板历史保留。")
+				ui.Row(c).Gap(8).Children(func() {
+					ui.Button(c, "显示备注").Disabled(a.busy).OnClick(func() { a.disclose("notes", "show") })
+					ui.Button(c, "复制备注").Disabled(a.busy).OnClick(func() { a.disclose("notes", "copy") })
+					ui.Button(c, "编辑备注").Disabled(a.busy).OnClick(a.editNotes)
+				})
 				ui.Button(c, "重新生成本地密码").Disabled(a.busy).OnClick(a.reviewRegeneration)
 				ui.Row(c).Gap(8).Children(func() {
 					ui.Button(c, "显示验证码").Disabled(a.busy).OnClick(func() { a.requestOTP("show") })
@@ -593,7 +631,7 @@ func (a *App) healthView(c *ui.Context) {
 	ui.Text(c, a.report)
 }
 func (a *App) transferView(c *ui.Context) {
-	ui.Text(c, "1PUX 基本登录导入：不支持的数据整批拒绝；来源记录保留旧值。").Bold()
+	ui.Text(c, "1PUX 登录及纯文本备注导入：不支持的数据整批拒绝；来源记录保留旧值。").Bold()
 	ui.TextInput(c, &a.source).Label("1PUX 文件").Placeholder("1PUX 归档完整路径").Disabled(a.busy)
 	ui.Button(c, "生成导入计划").Disabled(a.busy).OnClick(func() {
 		s, source := a.session, a.source

@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jihuayu/locklark/internal/onepux"
 	"github.com/jihuayu/locklark/internal/vault"
 )
 
@@ -52,10 +53,16 @@ func (*Session) MarshalJSON() ([]byte, error)     { return nil, ErrSessionLocked
 func (*Session) String() string                   { return "[desktop session]" }
 func desktopFieldAction(action string) bool {
 	switch action {
-	case "item.desktop.show.username", "item.desktop.show.password", "item.desktop.copy.username", "item.desktop.copy.password":
+	case "item.desktop.show.username", "item.desktop.show.password", "item.desktop.copy.username", "item.desktop.copy.password", "item.desktop.show.notes", "item.desktop.copy.notes", "item.desktop.edit.notes":
 		return true
 	}
 	return false
+}
+
+// Native notes disclosure is deliberately independent of ValidRevealTarget,
+// which remains the narrower username/password capability for other channels.
+func validNativeFieldTarget(target RevealTarget, purpose string) bool {
+	return idOK(target.ID) && digestOK(target.Revision) && desktopFieldAction("item.desktop."+purpose+"."+target.Field)
 }
 func UnlockSession(path string, password, key []byte, idle time.Duration) (*Session, error) {
 	if idle < time.Second || idle > 15*time.Minute {
@@ -219,7 +226,7 @@ func (s *Session) PrepareField(target RevealTarget, purpose string) (*NativeFiel
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	action := "item.desktop." + purpose + "." + target.Field
-	if !ValidRevealTarget(target.ID, target.Revision, target.Field) || !desktopFieldAction(action) {
+	if !validNativeFieldTarget(target, purpose) {
 		return nil, invalid
 	}
 	if e := s.active(false); e != nil {
@@ -280,9 +287,9 @@ func (s *Session) importSource(source, expected, action string) (ImportReceipt, 
 	if e != nil {
 		return ImportReceipt{}, e
 	}
-	status := "planned-login-v1"
+	status := "planned-" + onepux.LoginProfile
 	if action == importAction {
-		status = "imported-login-v1"
+		status = "imported-" + onepux.LoginProfile
 	}
 	return ImportReceipt{Status: status, Session: r.session, Event: r.intent, ReportDigest: r.reportDigest, Report: r.migration}, nil
 }

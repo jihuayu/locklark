@@ -103,6 +103,24 @@ func (s *Session) RegenerateNativePassword(id, revision string, length int, g *M
 	}
 	return GenerationReceipt{r.id, r.revision, r.profile}, nil
 }
+
+// SaveNativeNotes takes ownership of value and clears it on every path. The
+// immutable Go string required by storage cannot be physically wiped.
+func (s *Session) SaveNativeNotes(id, revision string, value []byte, g *MutationGate) (string, error) {
+	defer clear(value)
+	if !ValidEditTarget(id, revision, "notes") {
+		if g != nil {
+			g.Cancel()
+			s.ReleaseMutation(g)
+		}
+		return "", ErrMutationRefused
+	}
+	r, e := s.nativeMutation("item.edit.notes", vault.Item{}, &Edit{ID: id, Revision: revision, Field: "notes", Value: string(value)}, commandOption{}, g)
+	if e != nil {
+		return "", e
+	}
+	return r.revision, nil
+}
 func (s *Session) ReviewNativeLogin(id, revision string) (NativeLoginView, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

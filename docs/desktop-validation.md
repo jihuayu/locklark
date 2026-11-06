@@ -1,5 +1,7 @@
 # MyGo 原生桌面与系统快捷解锁验收
 
+本文保留初始桌面批次的历史证据。后续当前行为：剪贴板改用系统 ownership lease，见[日常桌面验收](desktop-daily-validation.md)；全局快捷搜索见[快捷搜索验收](desktop-quick-search-validation.md)；导入 profile 已扩展为 `login-notes-v2`，原生备注与迁移见[登录备注验收](login-notes-validation.md)。下述 `login-v1` 和剪贴板比较内容的描述属于初始批次。
+
 基线 `5b0ce38`，分支 `codex/desktop-browser`；本批只关闭有证据的桌面基础能力，不关闭持续任务中的 Next.js、完整迁移、浏览器扩展、手机、团队同步或发布范围。
 
 ## 实现

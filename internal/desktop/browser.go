@@ -82,7 +82,7 @@ func (a *App) browserSaveView(c *ui.Context, p browserhost.SaveView, status stri
 	}
 	ui.Text(c, "保存的是点击时捕获的用户名与密码；不会验证网站账号是否正确。")
 	if p.Mode == "update" {
-		ui.Text(c, "仅替换用户名和密码；保留标题、网址、OTP及来源记录。")
+		ui.Text(c, "仅替换用户名和密码；保留标题、网址、OTP、备注及来源记录。")
 	}
 	ui.Text(c, status)
 	if p.Stage != "pending" {
