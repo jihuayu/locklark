@@ -2,6 +2,8 @@ package teamsync
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"time"
@@ -24,20 +26,71 @@ func validAnchor(cp directory.Checkpoint) bool {
 	return canonicalHex(cp.Scope, 32) && cp.Version <= 1024 && ((cp.Version == 0 && cp.Hash == "") || (cp.Version > 0 && canonicalHex(cp.Hash, 32)))
 }
 func CreateFileAnchorStore(path string, initial directory.Checkpoint) (*FileAnchorStore, error) {
+	return createFileAnchorStore(path, initial, initializeFileAnchor)
+}
+func createFileAnchorStore(path string, initial directory.Checkpoint, initialize func(string, directory.Checkpoint) error) (*FileAnchorStore, error) {
 	if !filepath.IsAbs(path) || !validAnchor(initial) || trustedAnchorParent(filepath.Dir(path)) != nil {
 		return nil, ErrAnchor
 	}
-	f, e := createAnchorFile(path)
+	// Even an empty or malformed final file is an existing anchor, never a
+	// placeholder that Create may adopt or repair. The publish also enforces
+	// no replacement if another creator wins after this check.
+	if _, e := os.Lstat(path); !os.IsNotExist(e) {
+		return nil, ErrAnchor
+	}
+	var random [16]byte
+	if _, e := rand.Read(random[:]); e != nil {
+		return nil, ErrAnchor
+	}
+	tmp := filepath.Join(filepath.Dir(path), ".locklark-anchor-"+hex.EncodeToString(random[:]))
+	f, e := createAnchorFile(tmp)
 	if e != nil {
 		return nil, ErrAnchor
 	}
+	owned, e := f.Stat()
+	if e != nil {
+		f.Close()
+		return nil, ErrAnchor
+	}
+	defer removeOwnedAnchorTemp(tmp, owned)
 	if f.Close() != nil {
 		return nil, ErrAnchor
 	}
+	if initialize(tmp, initial) != nil {
+		return nil, ErrAnchor
+	}
+	current, e := os.Lstat(tmp)
+	if e != nil || !os.SameFile(owned, current) {
+		return nil, ErrAnchor
+	}
+	staged, e := (&FileAnchorStore{path: tmp}).Load()
+	if e != nil || staged != initial || trustedAnchorParent(filepath.Dir(path)) != nil {
+		return nil, ErrAnchor
+	}
+	current, e = os.Lstat(tmp)
+	if e != nil || !os.SameFile(owned, current) {
+		return nil, ErrAnchor
+	}
+	if publishAnchorFile(tmp, path) != nil || removeOwnedAnchorTemp(tmp, owned) != nil {
+		return nil, ErrAnchor
+	}
+	return &FileAnchorStore{path: path}, nil
+}
+func removeOwnedAnchorTemp(path string, owned os.FileInfo) error {
+	current, e := os.Lstat(path)
+	if os.IsNotExist(e) {
+		return nil
+	}
+	if e != nil || !current.Mode().IsRegular() || !os.SameFile(owned, current) {
+		return ErrAnchor
+	}
+	return os.Remove(path)
+}
+func initializeFileAnchor(path string, initial directory.Checkpoint) error {
 	s := &FileAnchorStore{path: path}
 	db, e := s.open(false)
 	if e != nil {
-		return nil, ErrAnchor
+		return ErrAnchor
 	}
 	e = db.Update(func(tx *bolt.Tx) error {
 		b, e := tx.CreateBucket(anchorBucket)
@@ -46,11 +99,14 @@ func CreateFileAnchorStore(path string, initial directory.Checkpoint) (*FileAnch
 		}
 		return b.Put(anchorKey, encode(initial))
 	})
+	if e == nil {
+		e = db.Sync()
+	}
 	closed := db.Close()
 	if e != nil || closed != nil {
-		return nil, ErrAnchor
+		return ErrAnchor
 	}
-	return s, nil
+	return nil
 }
 func OpenFileAnchorStore(path string) (*FileAnchorStore, error) {
 	if !filepath.IsAbs(path) {
