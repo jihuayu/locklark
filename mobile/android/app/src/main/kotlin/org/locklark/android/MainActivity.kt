@@ -26,6 +26,7 @@ import org.locklark.android.security.NativeFailures
 import org.locklark.android.security.NativePhase
 import org.locklark.android.security.NativeFailureCode
 import org.locklark.android.security.NativeCallFailure
+import org.locklark.android.security.ReturnedSecretBuffers
 import org.locklark.android.security.CancellationSlot
 import org.locklark.android.security.SecretDeadline
 import org.locklark.android.security.Target
@@ -242,7 +243,7 @@ class MainActivity : Activity() {
             }) { showList() }
         }
         button("使用此设备认证解锁", "quick-unlock") {
-            work(task = { stamp, api -> api!!.unlockWithSystem(store(stamp)) }) { showList() }
+            work(task = { stamp, api -> withStore(stamp) { api!!.unlockWithSystem(it) } }) { showList() }
         }
     }
     private fun createPage(key: ByteArray) {
@@ -280,10 +281,10 @@ class MainActivity : Activity() {
         button("搜索", "search") { val text = search.text.toString(); gate.invalidate(); showList(text) }
         button("新建登录", "new-login") { gate.invalidate(); newLoginPage() }
         button("启用此设备认证", "enable-quick-unlock") {
-            work(task = { stamp, api -> api!!.enableSystemUnlock(store(stamp)) }) { status.text = "已启用；本次完整双因素解锁后的 24 小时内可用。" }
+            work(task = { stamp, api -> withStore(stamp) { api!!.enableSystemUnlock(it) } }) { status.text = "已启用；本次完整双因素解锁后的 24 小时内可用。" }
         }
         button("停用此设备认证", "disable-quick-unlock") {
-            work(task = { stamp, api -> api!!.disableSystemUnlock(store(stamp)) }) { status.text = "本设备授权已删除。" }
+            work(task = { stamp, api -> withStore(stamp) { api!!.disableSystemUnlock(it) } }) { status.text = "本设备授权已删除。" }
         }
         work(task = { _, api -> NativeFailures.call(NativePhase.REFRESH) { if (query == null) api!!.list("active") else api!!.search(query, "active") } }) { rows ->
             for (i in 0 until rows.count()) {
@@ -385,17 +386,28 @@ class MainActivity : Activity() {
         }
         button("取消重新生成", "cancel-regenerate") { gate.invalidate(); detailPage(row) }
     }
-    private fun store(stamp: WorkStamp): SystemUnlockStore {
+    private class StoreOperation(private val native: PlatformCapsuleStore) : SystemUnlockStore {
+        private val returned = ReturnedSecretBuffers()
+        override fun store(id: String, value: ByteArray) = native.store(id, value)
+        override fun load(id: String): ByteArray = returned.retain(native.load(id))
+        override fun delete(id: String) = native.delete(id)
+        fun release() = returned.clearAfterCall()
+    }
+    private fun <T> withStore(stamp: WorkStamp, action: (SystemUnlockStore) -> T): T {
         val current = { gate.accepts(stamp) }
         val prompt = NativeCryptoPrompt(this, current)
         if (!promptSlot.publish(prompt, current)) throw PlatformAuthenticationFailure()
-        val native = PlatformCapsuleStore(this, prompt, current)
-        return object : SystemUnlockStore {
-            override fun store(id: String, value: ByteArray) = native.store(id, value)
-            override fun load(id: String): ByteArray = native.load(id)
-            override fun delete(id: String) = native.delete(id)
+        var adapter: StoreOperation? = null
+        try {
+            adapter = StoreOperation(PlatformCapsuleStore(this, prompt, current))
+            return action(adapter)
+        } finally {
+            // Go has returned: its borrowed callback result is no longer live.
+            adapter?.release()
+            promptSlot.release(prompt)
         }
     }
+
     private fun visibleTitle(value: String): String = buildString {
         value.codePoints().limit(120).forEach { cp ->
             if (Character.isISOControl(cp) || Character.getType(cp) == Character.FORMAT.toInt()) append("\\u{%X}".format(cp))

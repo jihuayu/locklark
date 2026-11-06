@@ -143,7 +143,7 @@ def main():
     STAGE = "instrumentation"
     result = None
     try:
-        result = command(["shell", "am", "instrument", "-w", "-r", test_package + "/androidx.test.runner.AndroidJUnitRunner"], timeout=900, required=False)
+        result = command(["shell", "am", "instrument", "-w", "-r", "-e", "class", "org.locklark.android.BoundOperationTest,org.locklark.android.OfflineVaultTest", test_package + "/androidx.test.runner.AndroidJUnitRunner"], timeout=900, required=False)
     except subprocess.TimeoutExpired as error:
         for data in (error.stdout, error.stderr):
             if data: log.write(data)

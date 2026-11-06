@@ -7,6 +7,16 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class CancellationSlotTest {
+    @Test fun oldCompletionDoesNotCancelANewerPrompt() {
+        val first = Any(); val second = Any(); val cancelled = mutableListOf<Any>()
+        val slot = CancellationSlot<Any> { cancelled.add(it) }
+        assertTrue(slot.publish(first) { true }); assertTrue(slot.publish(second) { true })
+        slot.release(first)
+        assertEquals(1,cancelled.size)
+        slot.release(second)
+        assertEquals(2,cancelled.size)
+    }
+
     @Test fun promptCreatedAfterStopIsImmediatelyCancelled() {
         val gate = ForegroundGate(); gate.start(); val stamp = gate.begin()
         val cancelled = AtomicInteger()

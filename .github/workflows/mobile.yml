@@ -26,6 +26,7 @@ jobs:
           mobile/core/scripts/bind-android.sh
           mobile/android/scripts/build.sh
           python3 -m unittest discover -s mobile/android/scripts -p test_runtime_wrapper.py
+          python3 -m unittest discover -s mobile/android/scripts -p test_device_credential.py
           python3 -m unittest discover -s scripts -p test_mobile_android_acceptance.py
           go build -o "$RUNNER_TEMP/locklark-mobile-peer" ./cmd/locklark
           python3 -m venv "$RUNNER_TEMP/mobile-kdbx-peer"

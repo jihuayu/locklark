@@ -20,8 +20,24 @@ JAVA_HOME=/path/to/jdk21 ANDROID_HOME=/path/to/android-sdk \
 ```
 
 The default tasks run JVM policy tests and build the debug app and separate
-instrumentation APK. With an actual running emulator/device, run
-`mobile/android/scripts/build.sh :app:connectedDebugAndroidTest`.
+instrumentation APK. On a disposable, running emulator, the normal gate selects
+the two mandatory native UI/core tests and privately scans their logs:
+
+```sh
+ANDROID_HOME=/path/to/android-sdk ANDROID_SERIAL=emulator-5554 \
+  LOCKLARK_ANDROID_TEST_RESET=1 mobile/android/scripts/test-emulator.sh
+```
+
+After the independent host UI gate has produced exactly one completed private
+run, `scripts/test-device-credential.sh` performs a separate real device-PIN
+flow. It requires `--authorize-device-pin-setup` on a verified emulator, takes
+`--evidence-root` for that exact host run's parent directory, and removes only
+the PIN it established. It selects `DeviceKeyProtectionTest` only after actual
+opt-in/quick-unlock/cancellation, then checks nonexportability and per-operation
+OS policy. It also checks that restoring encrypted vault/capsule files after
+reinstall does not transfer the old OS key. A direct unfiltered
+`:app:connectedDebugAndroidTest` requires that same prepared OS-auth fixture;
+it is not a replacement for these ordered gates.
 A compiled APK or software emulator does not establish hardware-backed Keystore,
 real biometric sensor or real-device credential behavior.
 

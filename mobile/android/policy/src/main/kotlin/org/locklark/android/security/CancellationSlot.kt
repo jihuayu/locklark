@@ -16,6 +16,13 @@ class CancellationSlot<T>(private val cancelValue: (T) -> Unit) {
         return accepted
     }
 
+    fun release(expected: T) {
+        val owned = synchronized(lock) {
+            if (value === expected) { value = null; true } else false
+        }
+        if (owned) cancelValue(expected)
+    }
+
     fun cancel() {
         val previous = synchronized(lock) { value.also { value = null } }
         // Never invoke a platform callback while holding the publication lock.
