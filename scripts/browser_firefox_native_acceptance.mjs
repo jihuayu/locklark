@@ -574,12 +574,10 @@ try {
   );
   assert.deepEqual(
     [...manifest.permissions].sort(),
-    ["activeTab", "nativeMessaging", "scripting"].sort(),
+    ["activeTab", "nativeMessaging", "scripting", "storage"].sort(),
   );
-  assert(
-    !manifest.host_permissions && !manifest.content_scripts,
-    "Use the production extension without added test privileges",
-  );
+  assert.deepEqual(manifest.host_permissions, ["https://*/*"]);
+  assert.equal(manifest.content_scripts?.length, 2);
   const key = join(state, "tls.key"),
     certificate = join(state, "tls.crt");
   const caKey = join(state, "ca.key"),
