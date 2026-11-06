@@ -16,6 +16,7 @@ import (
 type testHandler struct {
 	signer    ssh.Signer
 	calls     atomic.Int32
+	lists     atomic.Int32
 	wait      bool
 	entered   chan struct{}
 	cancelled chan struct{}
@@ -34,6 +35,7 @@ func newTestHandler(t *testing.T) *testHandler {
 	return &testHandler{signer: signer, entered: make(chan struct{}, 1), cancelled: make(chan struct{}, 1)}
 }
 func (h *testHandler) Identities(context.Context, Peer) ([]Identity, error) {
+	h.lists.Add(1)
 	return []Identity{{h.signer.PublicKey().Marshal(), "Locklark fixture"}}, nil
 }
 func (h *testHandler) Sign(ctx context.Context, r SignRequest) ([]byte, error) {

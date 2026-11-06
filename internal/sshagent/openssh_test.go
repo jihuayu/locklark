@@ -8,6 +8,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -46,6 +47,16 @@ func TestNativeOpenSSHCustomEndpoint(t *testing.T) {
 		t.Fatal("native SSH agent endpoint unavailable")
 	}
 	defer service.Close()
+	clientState, clientExit := "NOT_RUN", 0
+	diagnostic := func() string {
+		service.mu.Lock()
+		accepted, refused := service.accepted, service.peerRefusal
+		service.mu.Unlock()
+		if refused == "" {
+			refused = "NONE"
+		}
+		return fmt.Sprintf("client=%s exit=%d accepted=%d peer=%s lists=%d", clientState, clientExit, accepted, refused, h.lists.Load())
+	}
 	runProgram := func(program string, args ...string) ([]byte, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -58,13 +69,14 @@ func TestNativeOpenSSHCustomEndpoint(t *testing.T) {
 		cmd.Stderr = &stderr
 		out, e := cmd.Output()
 		defer clear(stderr.Bytes())
+		clientState, clientExit = openSSHFailureCategory(e, stderr.Bytes())
 		return out, e
 	}
 	run := func(args ...string) ([]byte, error) { return runProgram(executable, args...) }
 	listing, e := run("-L")
 	defer clear(listing)
 	if e != nil {
-		t.Fatal("native OpenSSH could not enumerate the private custom endpoint")
+		t.Fatal("native OpenSSH could not enumerate the private custom endpoint: " + diagnostic())
 	}
 	public, comment, options, rest, e := ssh.ParseAuthorizedKey(listing)
 	if e != nil || len(options) != 0 || len(bytes.TrimSpace(rest)) != 0 || comment != "Locklark fixture" || !bytes.Equal(public.Marshal(), h.signer.PublicKey().Marshal()) {
@@ -77,7 +89,7 @@ func TestNativeOpenSSHCustomEndpoint(t *testing.T) {
 	output, e := run("-T", publicFile)
 	clear(output)
 	if e != nil || h.calls.Load() < 1 {
-		t.Fatal("native OpenSSH signature self-test failed")
+		t.Fatal("native OpenSSH signature self-test failed: " + diagnostic())
 	}
 	if strings.Contains(strings.ToLower(service.Endpoint()), "openssh-ssh-agent") {
 		t.Fatal("test took over the system agent endpoint")
@@ -86,10 +98,62 @@ func TestNativeOpenSSHCustomEndpoint(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		sshExecutable += ".exe"
 	}
-	testNativeSSHConnection(t, sshExecutable, publicFile, h, runProgram)
+	testNativeSSHConnection(t, sshExecutable, publicFile, h, runProgram, diagnostic)
 }
 
-func testNativeSSHConnection(t *testing.T, executable, publicFile string, h *testHandler, run func(string, ...string) ([]byte, error)) {
+// Never return child error text, executable paths, usernames, or arbitrary
+// stderr. Even test fixture data stays out of public CI failure reports.
+func openSSHFailureCategory(err error, stderr []byte) (string, int) {
+	if err == nil {
+		return "SUCCESS", 0
+	}
+	var child *exec.ExitError
+	if !errors.As(err, &child) {
+		if errors.Is(err, os.ErrNotExist) {
+			return "START_NOT_FOUND", -1
+		}
+		if errors.Is(err, os.ErrPermission) {
+			return "START_DENIED", -1
+		}
+		return "START_OTHER", -1
+	}
+	category := "PROCESS_EXIT"
+	for _, known := range []struct{ marker, category string }{
+		{"Error connecting to agent: No such file or directory", "NO_ENDPOINT"},
+		{"Error connecting to agent: Permission denied", "ACCESS_DENIED"},
+		{"Error connecting to agent: Invalid argument", "INVALID_ADDRESS"},
+		{"Could not open a connection to your authentication agent", "NO_AGENT"},
+		{"communication with agent failed", "WIRE_FAILURE"},
+		{"The agent has no identities", "NO_IDENTITIES"},
+	} {
+		if bytes.Contains(stderr, []byte(known.marker)) {
+			category = known.category
+			break
+		}
+	}
+	return category, child.ExitCode()
+}
+
+func TestOpenSSHDiagnosticsNeverExposeArbitraryErrorBodies(t *testing.T) {
+	private := "fixture-private-path-key-body"
+	category, exit := openSSHFailureCategory(errors.New(private), []byte(private))
+	if category != "START_OTHER" || exit != -1 {
+		t.Fatal("arbitrary process failure escaped fixed classification")
+	}
+	category, _ = openSSHFailureCategory(&exec.ExitError{}, []byte(private))
+	if category != "PROCESS_EXIT" {
+		t.Fatal("arbitrary stderr escaped fixed classification")
+	}
+	category, _ = openSSHFailureCategory(&exec.ExitError{}, []byte("Error connecting to agent: Permission denied: "+private))
+	if category != "ACCESS_DENIED" {
+		t.Fatal("known stderr did not use fixed classification")
+	}
+	if peerRefusalCategory(errors.New(private)) != "OTHER" || peerRefusalCategory(peerRefusal(private)) != "OTHER" {
+		t.Fatal("arbitrary peer error escaped fixed classification")
+	}
+}
+
+func testNativeSSHConnection(t *testing.T, executable, publicFile string, h *testHandler, run func(string, ...string) ([]byte, error), diagnostic func() string) {
 	t.Helper()
 	_, hostKey, e := ed25519.GenerateKey(rand.Reader)
 	if e != nil {
@@ -172,7 +236,7 @@ func testNativeSSHConnection(t *testing.T, executable, publicFile string, h *tes
 	output, e := run(executable, "-F", empty, "-T", "-a", "-x", "-p", port, "-oBatchMode=yes", "-oIdentitiesOnly=yes", "-oPreferredAuthentications=publickey", "-oPasswordAuthentication=no", "-oKbdInteractiveAuthentication=no", "-oStrictHostKeyChecking=yes", "-oConnectTimeout=5", "-oUserKnownHostsFile="+strconv.Quote(filepath.ToSlash(known)), "-oGlobalKnownHostsFile="+strconv.Quote(filepath.ToSlash(empty)), "-i", publicFile, "locklark-probe@127.0.0.1", "locklark-agent-probe")
 	defer clear(output)
 	if e != nil {
-		t.Fatal("actual native OpenSSH connection did not authenticate through the private custom agent")
+		t.Fatal("actual native OpenSSH connection did not authenticate through the private custom agent: " + diagnostic())
 	}
 	if string(output) != "local-agent-ok\n" {
 		t.Fatal("actual native OpenSSH command result did not match the controlled fixture")

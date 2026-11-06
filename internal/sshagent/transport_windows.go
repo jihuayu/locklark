@@ -21,7 +21,7 @@ func prepareConnection(c net.Conn) (Peer, []byte, error) {
 	// or native approval UI before authentication succeeds.
 	first, e := readFrame(c)
 	if e != nil {
-		return Peer{}, nil, ErrRefused
+		return Peer{}, nil, peerFrame
 	}
 	peer, e := authenticatedPeer(c)
 	if e != nil {
@@ -71,16 +71,16 @@ func listenLocal(path string) (net.Listener, error) {
 func authenticatedPeer(conn net.Conn) (Peer, error) {
 	fd, ok := conn.(interface{ Fd() uintptr })
 	if !ok {
-		return Peer{}, ErrRefused
+		return Peer{}, peerDescriptor
 	}
 	h := windows.Handle(fd.Fd())
 	var pid uint32
 	if windows.GetNamedPipeClientProcessId(h, &pid) != nil || pid == 0 {
-		return Peer{}, ErrRefused
+		return Peer{}, peerPID
 	}
 	owner, e := ownerSID()
 	if e != nil {
-		return Peer{}, ErrRefused
+		return Peer{}, peerOwner
 	}
 	// Authenticate this pipe's token, rather than inferring SID from a recyclable
 	// PID. On failed RevertToSelf this connection worker immediately returns
@@ -95,24 +95,33 @@ func authenticatedPeer(conn net.Conn) (Peer, error) {
 	okImpersonate, _, _ := impersonatePipe.Call(uintptr(h))
 	if okImpersonate == 0 {
 		reverted = true
-		return Peer{}, ErrRefused
+		return Peer{}, peerImpersonate
 	}
 	var token windows.Token
 	e = windows.OpenThreadToken(windows.CurrentThread(), windows.TOKEN_QUERY, true, &token)
 	client := ""
+	userFailed := false
 	if e == nil {
 		user, err := token.GetTokenUser()
 		if err == nil {
 			client = user.User.Sid.String()
+		} else {
+			userFailed = true
 		}
 		_ = token.Close()
 	}
 	if windows.RevertToSelf() != nil {
-		return Peer{}, ErrRefused
+		return Peer{}, peerRevert
 	}
 	reverted = true
-	if e != nil || client == "" || client != owner {
-		return Peer{}, ErrRefused
+	if e != nil {
+		return Peer{}, peerToken
+	}
+	if userFailed || client == "" {
+		return Peer{}, peerTokenUser
+	}
+	if client != owner {
+		return Peer{}, peerSID
 	}
 	process := "进程路径不可读取"
 	if p, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid); err == nil {

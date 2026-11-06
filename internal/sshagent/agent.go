@@ -36,6 +36,36 @@ const (
 var ErrUnavailable = errors.New("local SSH agent unavailable")
 var ErrRefused = errors.New("local SSH agent request refused")
 
+// Fixed internal refusal categories contain no OS error text or peer values.
+// They are retained as bounded scalar test evidence, never sent over the wire.
+type peerRefusal string
+
+const (
+	peerFrame       peerRefusal = "FRAME"
+	peerDescriptor  peerRefusal = "DESCRIPTOR"
+	peerPID         peerRefusal = "PID"
+	peerOwner       peerRefusal = "OWNER"
+	peerImpersonate peerRefusal = "IMPERSONATE"
+	peerToken       peerRefusal = "TOKEN"
+	peerTokenUser   peerRefusal = "TOKEN_USER"
+	peerSID         peerRefusal = "SID"
+	peerRevert      peerRefusal = "REVERT"
+)
+
+func (peerRefusal) Error() string { return "local SSH agent peer authentication refused" }
+func (peerRefusal) Unwrap() error { return ErrRefused }
+
+func peerRefusalCategory(err error) string {
+	var refusal peerRefusal
+	if errors.As(err, &refusal) {
+		switch refusal {
+		case peerFrame, peerDescriptor, peerPID, peerOwner, peerImpersonate, peerToken, peerTokenUser, peerSID, peerRevert:
+			return string(refusal)
+		}
+	}
+	return "OTHER"
+}
+
 type Peer struct {
 	User    string
 	PID     uint32
@@ -98,6 +128,8 @@ type Service struct {
 	ioStopped   chan struct{}
 	stop        sync.Once
 	stopError   error
+	accepted    uint64 // guarded by mu; fixed-size runtime-test evidence only
+	peerRefusal string // fixed category, never the underlying error body
 }
 
 // Start never replaces an existing endpoint or changes SSH_AUTH_SOCK itself.
@@ -168,6 +200,7 @@ func (s *Service) accept() {
 		}
 		s.mu.Lock()
 		s.connections[c] = true
+		s.accepted++
 		s.mu.Unlock()
 		s.wg.Add(1)
 		go func() {
@@ -179,6 +212,9 @@ func (s *Service) accept() {
 			defer stopClose()
 			peer, first, e := prepareConnection(c)
 			if e != nil {
+				s.mu.Lock()
+				s.peerRefusal = peerRefusalCategory(e)
+				s.mu.Unlock()
 				return
 			}
 			serveInitial(ctx, c, peer, s.handler, s.writers, first)
