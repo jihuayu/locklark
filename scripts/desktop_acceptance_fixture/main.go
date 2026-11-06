@@ -12,6 +12,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -246,14 +247,21 @@ func run() error {
 	input := flag.String("fixture", "", "private synthetic fixture file")
 	privatePipe := flag.Bool("private-pipe", false, "observe authenticated copy through private pipe only")
 	stale := flag.String("stale", "", "independent local-owner URL edit for exact-target conflict test")
+	hold := flag.Bool("hold-readonly", false, "hold a read-only original-file lock until private stdin closes")
 	flag.Parse()
 	if *out != "" {
-		if *input != "" || *privatePipe || *stale != "" || flag.NArg() != 0 {
+		if *input != "" || *privatePipe || *stale != "" || *hold || flag.NArg() != 0 {
 			return errors.New("one operation required")
 		}
 		return setup(*out)
 	}
-	if *input == "" || flag.NArg() != 0 || (*privatePipe == (*stale != "")) {
+	operations := 0
+	for _, enabled := range []bool{*privatePipe, *stale != "", *hold} {
+		if enabled {
+			operations++
+		}
+	}
+	if *input == "" || flag.NArg() != 0 || operations != 1 {
 		return errors.New("one operation required")
 	}
 	raw, err := os.ReadFile(*input)
@@ -264,6 +272,22 @@ func run() error {
 	var f fixture
 	if json.Unmarshal(raw, &f) != nil || f.Path != filepath.Join(filepath.Dir(*input), "synthetic.ll") {
 		return errors.New("invalid fixture path")
+	}
+	if *hold {
+		stat, err := os.Stdout.Stat()
+		if err != nil || stat.Mode()&os.ModeNamedPipe == 0 {
+			return errors.New("private control pipe required")
+		}
+		db, err := bolt.Open(f.Path, 0600, &bolt.Options{ReadOnly: true, Timeout: time.Second})
+		if err != nil {
+			return err
+		}
+		defer db.Close()
+		if _, err = fmt.Fprintln(os.Stdout, `{"ready":true}`); err != nil {
+			return err
+		}
+		_, err = io.Copy(io.Discard, os.Stdin)
+		return err
 	}
 	key, err := personal.ParseSecret(f.Secret)
 	if err != nil {

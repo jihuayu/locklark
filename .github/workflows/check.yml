@@ -117,7 +117,7 @@ jobs:
       - run: go build ./cmd/locklark-desktop
       - name: Build native browser hosts
         run: go build ./cmd/locklark-browser-chromium ./cmd/locklark-browser-firefox ./cmd/locklark-browser-register
-      - run: go test ./internal/osunlock ./internal/desktop ./internal/personal ./internal/browserhost -run 'TestNative|TestDesktopSession|TestSystemUnlock|TestLockDoesNotWait|TestCancelledSystemUnlock|TestLockDrops|TestClipboard|TestDaily|TestBrowserOTP|TestOTP' -count=1
+      - run: go test ./internal/osunlock ./internal/desktop ./internal/personal ./internal/browserhost -run 'TestNative|TestDesktopSession|TestSystemUnlock|TestLockDoesNotWait|TestCancelledSystemUnlock|TestLockDrops|TestClipboard|TestDaily|TestBrowserOTP|TestOTP|TestQuick' -count=1
       - name: Test native macOS clipboard ownership
         timeout-minutes: 3
         env:
@@ -170,7 +170,7 @@ jobs:
           LOCKLARK_TEST_BROWSER: firefox
       - name: Install native GUI acceptance tools
         timeout-minutes: 10
-        run: sudo apt-get install -y --no-install-recommends libxtst6 xvfb xauth imagemagick at-spi2-core libatspi2.0-0 libnss3-tools
+        run: sudo apt-get install -y --no-install-recommends libxtst6 xvfb xauth imagemagick at-spi2-core libatspi2.0-0 libnss3-tools xfwm4
       - name: Install pinned geckodriver
         timeout-minutes: 10
         run: |
@@ -187,6 +187,12 @@ jobs:
       - name: Test native desktop daily tools and clipboard ownership
         timeout-minutes: 10
         run: dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' python3 scripts/desktop_native_acceptance.py
+        env:
+          LOCKLARK_GO: go
+          LOCKLARK_DESKTOP_HOST: ${{ runner.temp }}/locklark-desktop
+      - name: Test native desktop global quick search
+        timeout-minutes: 10
+        run: dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' python3 scripts/desktop_quick_search_acceptance.py
         env:
           LOCKLARK_GO: go
           LOCKLARK_DESKTOP_HOST: ${{ runner.temp }}/locklark-desktop

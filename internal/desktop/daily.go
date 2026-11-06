@@ -33,6 +33,7 @@ func (a *App) runNative(work func(*personal.MutationGate) nativeResult, apply fu
 		a.status = message(e)
 		return false
 	}
+	a.beginOperation()
 	op := &nativeOperation{g, a.generation}
 	a.operation = op
 	a.busy = true
