@@ -36,6 +36,73 @@ AUTH_ERRORS = {"NONE", "HARDWARE_UNAVAILABLE", "UNABLE_TO_PROCESS", "TIMEOUT", "
 REFUSED_PREFIXES = ("操作未完成：", "解锁未完成：", "准备操作未完成：", "结果未确认", "准备设备认证未完成：", "检查设备认证未完成：",
                     "准备设备认证密钥未完成：", "准备设备加密未完成：", "设备认证未完成：", "等待设备认证未完成：",
                     "绑定设备授权未完成：", "处理设备授权未完成：", "读取设备授权未完成：", "保存设备授权未完成：")
+KEY_POLICY_STAGES = {"start", "instrument-command", "installation", "capsule-selection", "permissions", "envelope", "key-load",
+                     "nonexportable", "key-info", "auth-required", "auth-validity", "cipher-policy", "auth-types",
+                     "fresh-init", "fresh-aad", "fresh-finish", "fresh-rejection", "complete"}
+KEY_POLICY_ASSERTIONS = {"none", "installation-format", "one-capsule", "capsule-mode", "directory-mode", "envelope-size",
+                        "envelope-format", "nonexportable", "auth-required", "per-operation", "aes256-gcm", "exact-auth-types",
+                        "fresh-unauthenticated-rejected"}
+KEY_LEVELS = {"software", "tee", "strongbox", "unknown", "hardware-unspecified"}
+
+
+def key_policy_metadata(returncode, raw):
+    """Fixed instrumentation categories only; never retain an assertion body."""
+    def values(name):
+        return re.findall(rb"^INSTRUMENTATION_STATUS: " + name.encode() + rb"=([^\r\n]*)", raw, re.MULTILINE)
+    def scalar(name, allowed, default="unknown", last=False):
+        observed = values(name)
+        if not observed:
+            return default
+        if not last and len(set(observed)) != 1:
+            return "unknown"
+        value = observed[-1].decode("ascii", errors="replace")
+        return value if value in allowed else "unknown"
+    expected_class = b"org.locklark.android.DeviceKeyProtectionTest"
+    expected_test = b"realDeviceCapsuleUsesNonexportablePerOperationKey"
+    counts = re.findall(rb"OK \(([0-9]{1,3}) tests?\)", raw)
+    if not counts:
+        counts = re.findall(rb"Tests run: ([0-9]{1,3})", raw)
+    levels = values("locklark_key_level")
+    level = levels[0].decode("ascii", errors="replace") if len(levels) == 1 else "unknown"
+    validity_values = values("locklark_key_auth_validity")
+    validity = "unknown"
+    if validity_values and len(set(validity_values)) == 1:
+        value = validity_values[0]
+        if value == b"out-of-range":
+            validity = "out-of-range"
+        elif re.fullmatch(rb"-1|[0-9]{1,5}", value) and -1 <= int(value) <= 86400:
+            validity = str(int(value))
+    exceptions = {kind.lower() for kind in AUTH_EXCEPTIONS} | {"assertion"}
+    exception = scalar("locklark_key_exception", exceptions, default="none", last=True)
+    if exception == "none":
+        for marker, category in ((b"java.lang.AssertionError", "assertion"), (b"java.security.ProviderException", "provider"),
+                                 (b"java.security.InvalidKeyException", "invalid_key"), (b"java.lang.IllegalStateException", "illegal_state")):
+            if marker in raw:
+                exception = category; break
+    lines = values("locklark_key_source_line")
+    line = lines[-1] if lines else next(iter(re.findall(rb"DeviceKeyProtectionTest\.kt:([0-9]{1,5})\)", raw)), b"0")
+    return {"exit_code":returncode if isinstance(returncode, int) and -255 <= returncode <= 255 else "outside-range",
+            "complete_pass":complete_pass(returncode, raw, expected_tests=1),
+            "test_count":int(counts[0]) if len(counts) == 1 else "unknown",
+            "class_match":set(values("class")) == {expected_class}, "test_match":set(values("test")) == {expected_test},
+            "key_level_count":min(len(levels), 1000), "key_level":level if level in KEY_LEVELS else "unknown",
+            "stage":scalar("locklark_key_stage", KEY_POLICY_STAGES, last=True),
+            "assertion":scalar("locklark_key_assertion", KEY_POLICY_ASSERTIONS, last=True),
+            "exception":exception, "own_source_line":int(line) if re.fullmatch(rb"[0-9]{1,5}", line) else 0,
+            "auth_validity":validity,
+            "fresh_denial":scalar("locklark_key_fresh_denial", {"none", "user_not_authenticated", "keystore_authentication_required"}),
+            **{field:scalar(name, {"true", "false"}) for field, name in (
+                ("auth_required", "locklark_key_auth_required"), ("nonexportable", "locklark_key_nonexportable"),
+                ("cipher_exact", "locklark_key_cipher_exact"), ("auth_types_exact", "locklark_key_auth_types_exact"),
+                ("fresh_rejected", "locklark_key_fresh_rejected"))}}
+
+
+def key_policy_passed(metadata):
+    return (metadata["complete_pass"] and metadata["test_count"] == 1 and metadata["class_match"] and metadata["test_match"]
+            and metadata["key_level_count"] == 1 and metadata["stage"] == "complete" and metadata["assertion"] == "none"
+            and metadata["exception"] == "none" and metadata["auth_validity"] in {"-1", "0"}
+            and metadata["fresh_denial"] in {"user_not_authenticated", "keystore_authentication_required"}
+            and all(metadata[field] == "true" for field in ("auth_required", "nonexportable", "cipher_exact", "auth_types_exact", "fresh_rejected")))
 
 
 def auth_records(raw, pid):
@@ -234,6 +301,7 @@ class DeviceCredentialAcceptance(AndroidAcceptance):
         self.pin_attempted = False
         self.lifecycle = []
         self.key_level = "unknown"
+        self.key_policy_diagnostic = {}
         self.locksettings_diagnostic = {}
         self.secure_lock_screen = None
         self.auth_pid = None
@@ -309,7 +377,8 @@ class DeviceCredentialAcceptance(AndroidAcceptance):
         except Exception:
             pass
         return {"secure_lock_screen_feature":self.secure_lock_screen,
-                "locksettings":self.locksettings_diagnostic.copy(), "last_ui":self.last_observation.copy(), "native_auth":auth}
+                "locksettings":self.locksettings_diagnostic.copy(), "last_ui":self.last_observation.copy(), "native_auth":auth,
+                "key_policy":getattr(self, "key_policy_diagnostic", {}).copy()}
 
     def auth_log(self, pid):
         return self.shell("logcat", "-d", "-v", "raw", "--pid", str(pid), "-s", "LocklarkAuth:I", "*:S").stdout
@@ -486,19 +555,17 @@ class DeviceCredentialAcceptance(AndroidAcceptance):
 
     def key_policy(self):
         self.set_stage("key-policy")
+        self.key_policy_diagnostic = key_policy_metadata(-1, b"")
+        self.key_policy_diagnostic["stage"] = "instrument-command"
         result = self.command(["shell", "am", "instrument", "-w", "-r", "-e", "class",
                                "org.locklark.android.DeviceKeyProtectionTest",
-                               PACKAGE + ".test/androidx.test.runner.AndroidJUnitRunner"], timeout=180)
-        require(complete_pass(result.returncode,result.stdout,expected_tests=1))
-        expected_class = b"org.locklark.android.DeviceKeyProtectionTest"
-        expected_test = b"realDeviceCapsuleUsesNonexportablePerOperationKey"
-        require(set(re.findall(rb"INSTRUMENTATION_STATUS: class=([^\r\n]+)",result.stdout)) == {expected_class})
-        require(set(re.findall(rb"INSTRUMENTATION_STATUS: test=([^\r\n]+)",result.stdout)) == {expected_test})
-        levels = re.findall(rb"INSTRUMENTATION_STATUS: locklark_key_level=(software|tee|strongbox|unknown|hardware-unspecified)",result.stdout)
-        require(len(levels) == 1)
-        self.key_level = levels[0].decode()
-        self.write_private("key-policy-result.json", {"class":expected_class.decode(), "test":expected_test.decode(), "count":1,
+                               PACKAGE + ".test/androidx.test.runner.AndroidJUnitRunner"], timeout=180, required=False,
+                              oracle="key-policy-instrumentation.txt")
+        self.key_policy_diagnostic = key_policy_metadata(result.returncode, result.stdout)
+        self.key_level = self.key_policy_diagnostic["key_level"]
+        self.write_private("key-policy-result.json", {"diagnostic":self.key_policy_diagnostic,
             "reported_security_level":self.key_level, "physical_hardware_verified":False})
+        require(key_policy_passed(self.key_policy_diagnostic))
         self.done("actual_app_UID_key_is_nonexportable_per_operation_and_rejects_fresh_unauthenticated_cipher")
 
     def copy_and_reinstall(self):

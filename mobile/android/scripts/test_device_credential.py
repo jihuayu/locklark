@@ -9,6 +9,58 @@ from device_credential_acceptance import credential_marker, focused_identity, va
 
 
 class DeviceCredentialHarnessTests(unittest.TestCase):
+    def key_policy_output(self, validity="0"):
+        fields = {"class":"org.locklark.android.DeviceKeyProtectionTest", "test":"realDeviceCapsuleUsesNonexportablePerOperationKey",
+                  "locklark_key_stage":"complete", "locklark_key_assertion":"none", "locklark_key_level":"tee",
+                  "locklark_key_auth_required":"true", "locklark_key_auth_validity":validity, "locklark_key_nonexportable":"true",
+                  "locklark_key_cipher_exact":"true", "locklark_key_auth_types_exact":"true", "locklark_key_fresh_rejected":"true"}
+        fields["locklark_key_fresh_denial"] = "keystore_authentication_required"
+        return ("\n".join("INSTRUMENTATION_STATUS: " + name + "=" + value for name, value in fields.items()) +
+                "\nOK (1 test)\nINSTRUMENTATION_CODE: -1\n").encode()
+
+    def test_key_policy_accepts_only_documented_per_use_forms_with_all_strict_proofs(self):
+        for validity in ("-1", "0"):
+            self.assertTrue(auth.key_policy_passed(auth.key_policy_metadata(0, self.key_policy_output(validity))))
+        for validity in ("1", "30", "86400", "-2", "out-of-range", "12345678-private-body"):
+            self.assertFalse(auth.key_policy_passed(auth.key_policy_metadata(0, self.key_policy_output(validity))))
+        for field in ("auth_required", "nonexportable", "cipher_exact", "auth_types_exact", "fresh_rejected"):
+            raw = self.key_policy_output().replace(("locklark_key_" + field + "=true").encode(), ("locklark_key_" + field + "=false").encode())
+            self.assertFalse(auth.key_policy_passed(auth.key_policy_metadata(0, raw)))
+
+    def test_key_policy_diagnostic_keeps_fixed_failure_stage_and_no_private_body(self):
+        raw = self.key_policy_output().replace(b"locklark_key_stage=complete", b"locklark_key_stage=auth-validity").replace(
+            b"locklark_key_assertion=none", b"locklark_key_assertion=per-operation") + b"INSTRUMENTATION_STATUS: locklark_key_exception=assertion\nINSTRUMENTATION_STATUS: locklark_key_source_line=84\nFAILURES!!!\nprivate-alias-value-body\n"
+        metadata = auth.key_policy_metadata(0, raw)
+        self.assertFalse(auth.key_policy_passed(metadata))
+        self.assertEqual(metadata["stage"], "auth-validity")
+        self.assertEqual(metadata["assertion"], "per-operation")
+        self.assertEqual(metadata["own_source_line"], 84)
+        self.assertEqual(metadata["auth_validity"], "0")
+        self.assertNotIn("private-alias-value-body", json.dumps(metadata))
+
+    def test_key_policy_counts_identity_level_and_fresh_probe_are_required(self):
+        raw = self.key_policy_output()
+        bad = [raw.replace(b"OK (1 test)", b"OK (2 tests)"), raw.replace(b"DeviceKeyProtectionTest", b"private-class-body"),
+               raw.replace(b"realDeviceCapsuleUsesNonexportablePerOperationKey", b"private-test-body"),
+               raw + b"INSTRUMENTATION_STATUS: locklark_key_level=tee\n",
+               raw.replace(b"locklark_key_fresh_denial=keystore_authentication_required", b"locklark_key_fresh_denial=none"),
+               raw.replace(b"INSTRUMENTATION_STATUS: locklark_key_fresh_rejected=true\n", b"")]
+        for value in bad:
+            metadata = auth.key_policy_metadata(0, value)
+            self.assertFalse(auth.key_policy_passed(metadata))
+            self.assertNotIn("private-class-body", json.dumps(metadata))
+            self.assertNotIn("private-test-body", json.dumps(metadata))
+
+    def test_key_policy_unknown_exception_stage_and_oversized_metadata_are_sanitized(self):
+        raw = self.key_policy_output("99999999") + b"INSTRUMENTATION_STATUS: locklark_key_exception=private-body\nINSTRUMENTATION_STATUS: locklark_key_stage=private-stage\nINSTRUMENTATION_STATUS: locklark_key_source_line=private-path\n"
+        metadata = auth.key_policy_metadata(99999999, raw)
+        self.assertFalse(auth.key_policy_passed(metadata))
+        self.assertEqual(metadata["exit_code"], "outside-range")
+        self.assertEqual(metadata["stage"], "unknown")
+        self.assertEqual(metadata["exception"], "unknown")
+        self.assertEqual(metadata["own_source_line"], 0)
+        self.assertNotIn("private", json.dumps(metadata))
+
     def test_auth_diagnostic_requires_new_attempt_same_live_PID_and_fixed_enums(self):
         failed = b"event=failed stage=DEVICE_PROMPT code=UNAVAILABLE exception=NONE os=NO_DEVICE_CREDENTIAL\n"
         raw = b"attempt=3 pid=42 event=begin\n" + b"attempt=3 pid=42 " + failed
