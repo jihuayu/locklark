@@ -93,18 +93,22 @@ func (a *App) saveNotes(draft *nativeNotesDraft) {
 }
 
 func (a *App) saveNotesCaptured(s *personal.Session, target personal.RevealTarget, value []byte, scope string) {
+	if scope == "" {
+		scope = "active"
+	}
+	filter := listFilter{query: a.query, scope: scope, generation: a.queryGeneration}
 	started := a.runNative(func(g *personal.MutationGate) nativeResult {
 		defer clear(value)
 		revision, e := s.SaveNativeNotes(target.ID, target.Revision, value, g)
 		r := nativeResult{err: e, receipt: personal.GenerationReceipt{ID: target.ID, Revision: revision}}
 		if e == nil {
-			r.rows, r.refreshErr = s.List(scope)
+			r.rows, r.refreshErr = queryRows(s, filter)
 		}
 		return r
 	}, func(r nativeResult) {
-		a.rows, a.selected = r.rows, nil
+		ok := a.applyMutationRefresh(r, filter)
 		a.status = "备注已保存；需要查看时请重新明确读取。"
-		if r.refreshErr != nil {
+		if !ok {
 			a.status += "列表未刷新，请手动刷新。"
 		}
 	})

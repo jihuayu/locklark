@@ -307,6 +307,9 @@ func authenticateState(tx *bolt.Tx, pw string, key []byte, action string, unlock
 		if action == "desktop.unlock" || action == "backup.prepare" || sha256.Sum256(raw) != unlocked.slotDigest {
 			return nil, invalid
 		}
+		if unlocked.sessionLocked() {
+			return nil, ErrSessionLocked
+		}
 		opened = bytes.Clone(unlocked.material)
 	} else {
 		opened, e = account.Unwrap(pw, key, slot)
@@ -380,7 +383,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 	if action == "item.edit.notes" && (edit == nil || edit.Field != "notes" || !ValidEditTarget(edit.ID, edit.Revision, edit.Field)) {
 		return result{}, invalid
 	}
-	if option.nativeMutation != nil && (option.unlocked == nil || option.nativeMutation.gate == nil || !(option.sshState || action == sshGenerateAction || action == sshImportAction || action == sshSignAction || action == "item.add" || action == "item.edit.notes" || generatedAction(action) || action == desktopOTPShowAction || action == desktopOTPCopyAction || action == browserOTPAction)) {
+	if option.nativeMutation != nil && (option.unlocked == nil || option.nativeMutation.gate == nil || !(option.sshState || action == sshGenerateAction || action == sshImportAction || action == sshSignAction || action == "item.add" || nativeEditAction(action) || lifecycleAction(action) || trashAction(action) || generatedAction(action) || action == desktopOTPShowAction || action == desktopOTPCopyAction || action == browserOTPAction)) {
 		return result{}, invalid
 	}
 	if option.sshState && (option.unlocked == nil || option.nativeMutation == nil || !(lifecycleAction(action) || trashAction(action)) || edit == nil || edit.Field != "" || !idOK(edit.ID) || !digestOK(edit.Revision)) {
@@ -671,6 +674,9 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 						if option.sshState && items[i].Kind != "ssh-key" {
 							return ErrSSHKey
 						}
+						if !option.sshState && option.nativeMutation != nil && items[i].Kind != "login" {
+							return ErrMutationRefused
+						}
 						if items[i].Kind != "login" && !(items[i].Kind == "ssh-key" && (trashAction(action) || lifecycleAction(action))) {
 							return invalid
 						}
@@ -776,7 +782,28 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 								outcome, refusal = "native-refused", ErrMutationRefused
 								break
 							}
+							if option.nativeMutation != nil && nativeEditAction(action) {
+								return ErrMutationRefused
+							}
 							return err
+						}
+						if option.nativeMutation != nil && nativeEditAction(action) && action != "item.edit.notes" {
+							probe := append([]vault.Item(nil), items...)
+							switch edit.Field {
+							case "title":
+								probe[i].Title = edit.Value
+							case "url":
+								probe[i].URL = edit.Value
+							case "username":
+								probe[i].Username = edit.Value
+							case "password":
+								probe[i].Password = edit.Value
+							case "otp":
+								probe[i].OTP = edit.Value
+							}
+							if vault.ValidateItems([]byte(schema), probe) != nil {
+								return ErrMutationRefused
+							}
 						}
 						switch edit.Field {
 						case "notes":
@@ -881,6 +908,10 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		if option.nativeMutation != nil {
 			if option.unlocked == nil || !option.unlocked.winBrowserSave(option.nativeMutation.gate) {
 				return ErrMutationCancelled
+			}
+		} else if option.unlocked != nil && !browserSaveAction(action) {
+			if option.unlocked.sessionLocked() {
+				return ErrSessionLocked
 			}
 		}
 		if ((action == "item.add" || action == "item.generate" || action == sshGenerateAction || action == sshImportAction) && refusal == nil) || ((editAction(action) || browserSaveAction(action)) && refusal == nil) {

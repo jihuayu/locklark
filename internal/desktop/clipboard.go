@@ -15,6 +15,10 @@ func (a *App) detachClipboard() *nativeclipboard.Lease {
 	a.clipboardLease = nil
 	a.clipboardUntil = time.Time{}
 	a.otpClipboard = nil
+	if a.clipboardTimer != nil {
+		a.clipboardTimer.Stop()
+		a.clipboardTimer = nil
+	}
 	if a.otpClipboardTimer != nil {
 		a.otpClipboardTimer.Stop()
 		a.otpClipboardTimer = nil
@@ -73,6 +77,7 @@ func (a *App) cleanupClipboard(lease *nativeclipboard.Lease) {
 
 func (a *App) recordClipboardOwner(lease *nativeclipboard.Lease, until time.Time) uint64 {
 	a.clipboardSequence++
+	sequence := a.clipboardSequence
 	a.clipboardLease, a.clipboardUntil = lease, until
 	a.clipboardPending = nil
 	a.clipboardWarning = false
@@ -80,7 +85,20 @@ func (a *App) recordClipboardOwner(lease *nativeclipboard.Lease, until time.Time
 		a.clipboardRetry.Stop()
 		a.clipboardRetry = nil
 	}
-	return a.clipboardSequence
+	if a.clipboardTimer != nil {
+		a.clipboardTimer.Stop()
+		a.clipboardTimer = nil
+	}
+	if d := time.Until(until); !until.IsZero() && d > 0 {
+		a.clipboardTimer = time.AfterFunc(d, func() {
+			a.dispatch(func() {
+				if a.clipboardSequence == sequence && a.clipboardLease == lease {
+					a.clearClipboard()
+				}
+			})
+		})
+	}
+	return sequence
 }
 
 func (a *App) writeClipboard(value []byte, until time.Time, valid func() bool) error {

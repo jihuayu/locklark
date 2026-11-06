@@ -123,6 +123,30 @@ func (s *Session) lock() {
 // RequestLock immediately prevents new operations without waiting for a transaction.
 func (s *Session) RequestLock() { s.cancelBrowserSave() }
 func (s *Session) Lock()        { s.RequestLock(); s.mu.Lock(); defer s.mu.Unlock(); s.lock() }
+func (s *Session) sessionLocked() bool {
+	if s == nil {
+		return true
+	}
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+	return s.lockRequested.Load() || len(s.material) == 0 || time.Since(s.last) >= s.idle
+}
+
+// IdleDeadline reports when the session will expire from inactivity if no
+// further active operations occur, or false when the session is locked.
+func (s *Session) IdleDeadline() (time.Time, bool) {
+	if s == nil || s.lockRequested.Load() {
+		return time.Time{}, false
+	}
+	if !s.mu.TryLock() {
+		return time.Now().Add(time.Second), true
+	}
+	defer s.mu.Unlock()
+	if s.active(false) != nil {
+		return time.Time{}, false
+	}
+	return s.last.Add(s.idle), true
+}
 func (s *Session) active(touch bool) error {
 	now := time.Now()
 	for f := range s.browserPending {

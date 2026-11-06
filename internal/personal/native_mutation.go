@@ -28,6 +28,50 @@ func (s *Session) registeredMutation(g *MutationGate) bool {
 	defer s.saveMu.Unlock()
 	return g != nil && s.saveGate == g && g.Pending() && !s.lockRequested.Load()
 }
+
+func nativeEditAction(action string) bool {
+	switch action {
+	case "item.edit.title", "item.edit.url", "item.edit.username", "item.edit.password", "item.edit.otp", "item.edit.notes":
+		return true
+	}
+	return false
+}
+
+// EditNativeField consumes the mutable input and uses the same exact-revision,
+// final commit gate and signed audit path as other native mutations.
+func (s *Session) EditNativeField(id, revision, field string, value []byte, g *MutationGate) (string, error) {
+	defer clear(value)
+	edit := Edit{ID: id, Revision: revision, Field: field, Value: string(value)}
+	if !ValidEditTarget(id, revision, field) || !nativeEditAction("item.edit."+field) || (field != "notes" && validateEditValue(edit) != nil) {
+		if g != nil {
+			g.Cancel()
+			s.ReleaseMutation(g)
+		}
+		return "", ErrMutationRefused
+	}
+	r, e := s.nativeMutation("item.edit."+field, vault.Item{}, &edit, commandOption{}, g)
+	if e != nil {
+		return "", e
+	}
+	return r.revision, nil
+}
+
+// SetNativeState transitions a login's active/archive/trash state under the
+// session's final commit gate and signed audit path.
+func (s *Session) SetNativeState(id, revision, action string, g *MutationGate) (string, error) {
+	if !ValidEditTarget(id, revision, "title") || (!lifecycleAction(action) && !trashAction(action)) {
+		if g != nil {
+			g.Cancel()
+			s.ReleaseMutation(g)
+		}
+		return "", ErrMutationRefused
+	}
+	r, e := s.nativeMutation(action, vault.Item{}, &Edit{ID: id, Revision: revision}, commandOption{}, g)
+	if e != nil {
+		return "", e
+	}
+	return r.revision, nil
+}
 func (s *Session) nativeMutation(action string, add vault.Item, edit *Edit, option commandOption, g *MutationGate) (result, error) {
 	return s.nativeMutationWith(action, add, edit, option, g, nil)
 }
@@ -54,7 +98,7 @@ func (s *Session) nativeMutationWithTouch(action string, add vault.Item, edit *E
 	r, e := run(option)
 	// Revoke the old key's queued signatures before releasing Session.mu. A
 	// wrapper-side cancellation would leave a commit-to-output race window.
-	if option.sshState && edit != nil {
+	if (option.sshState || lifecycleAction(action) || trashAction(action)) && edit != nil {
 		s.cancelSSHTarget(edit.ID)
 	}
 	if errors.Is(e, invalid) {
