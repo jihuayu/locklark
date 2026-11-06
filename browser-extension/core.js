@@ -247,7 +247,7 @@ globalThis.LocklarkCore = (() => {
       !/^[a-f0-9]{64}$/.test(finding.revision || "") ||
       typeof finding.title !== "string" ||
       finding.title.length > 1024 ||
-      !validWatchtowerFlags(finding.flags),
+      !validWatchtowerFlags(finding.flags) ||
       !boundedInteger(finding.strength_score, 0, 100) ||
       !STRENGTH_CATEGORIES.includes(finding.strength_category) ||
       !boundedInteger(finding.reuse_count, 0, MAX_WATCHTOWER_COUNT) ||
