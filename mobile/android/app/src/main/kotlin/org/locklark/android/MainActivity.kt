@@ -21,6 +21,7 @@ import mobilecore.SecretValue
 import mobilecore.SystemUnlockStore
 import mobilecore.Vault
 import org.locklark.android.security.ForegroundGate
+import org.locklark.android.security.CancellationSlot
 import org.locklark.android.security.SecretDeadline
 import org.locklark.android.security.Target
 import org.locklark.android.security.WorkStamp
@@ -39,8 +40,9 @@ class MainActivity : Activity() {
     private var unlockedUi = false
     private var generatedKey: ByteArray? = null
     private var currentRow: Row? = null
-    private var activePrompt: NativeCryptoPrompt? = null
+    private val promptSlot = CancellationSlot<NativeCryptoPrompt> { it.cancel() }
     private var secretView: TextView? = null
+    private var backupKeyView: TextView? = null
     private var secretDeadline: SecretDeadline? = null
     private lateinit var body: LinearLayout
     private lateinit var status: TextView
@@ -85,7 +87,7 @@ class MainActivity : Activity() {
     override fun onStop() {
         gate.stop()
         vault?.requestLock()
-        activePrompt?.cancel()
+        promptSlot.cancel()
         clearInputs(); generatedKey?.fill(0); generatedKey = null
         clearDisplay(); currentRow = null; unlockedUi = false; busy = false
         page("Locklark 已锁定")
@@ -104,9 +106,10 @@ class MainActivity : Activity() {
     override fun onSaveInstanceState(outState: Bundle) { /* Never persist native input or disclosure. */ }
 
     private fun clearInputs() { inputs.forEach { it.text?.clear() } }
+    private fun clearBackupView() { backupKeyView?.text = ""; backupKeyView = null }
     private fun clearDisplay() { secretView?.text = ""; secretDeadline = null }
     private fun page(title: String) {
-        clearInputs(); clearDisplay(); secretView = null; inputs.clear(); buttons.clear()
+        clearInputs(); clearDisplay(); clearBackupView(); secretView = null; inputs.clear(); buttons.clear()
         val scroll = ScrollView(this).apply {
             isSaveEnabled = false
             setOnApplyWindowInsetsListener { view, insets ->
@@ -170,7 +173,7 @@ class MainActivity : Activity() {
         }
     }
     private fun lockNow() {
-        gate.invalidate(); vault?.requestLock(); activePrompt?.cancel()
+        gate.invalidate(); vault?.requestLock(); promptSlot.cancel()
         clearInputs(); generatedKey?.fill(0); generatedKey = null
         clearDisplay(); currentRow = null; unlockedUi = false; busy = false
         worker.execute { vault?.lock() }
@@ -207,7 +210,7 @@ class MainActivity : Activity() {
     private fun createPage(key: ByteArray) {
         page("创建本机金库")
         label("请在应用外安全备份这份 Secret Key。丢失两项完整因素后不能依靠设备快速解锁恢复。")
-        label(Mobilecore.formatSecretKey(key)).tag = "backup-secret-key"
+        backupKeyView = label(Mobilecore.formatSecretKey(key)).apply { tag = "backup-secret-key" }
         val acknowledgement = CheckBox(this).apply { text = "我已离线保存 Secret Key"; tag = "backup-ack"; isSaveEnabled = false }
         body.addView(acknowledgement)
         val password = input("新的主密码", "new-master-password", true)
@@ -220,7 +223,7 @@ class MainActivity : Activity() {
             val accountKey = key.copyOf()
             clearInputs(); generatedKey?.fill(0); generatedKey = null
             // Remove the displayed account key before any asynchronous work.
-            body.findViewWithTag<TextView>("backup-secret-key")?.text = ""
+            clearBackupView()
             work(task = {
                 val createPassword = pw.copyOf(); val createKey = accountKey.copyOf()
                 try { vault!!.create(createPassword, createKey); vault!!.unlock(pw, accountKey) }
@@ -342,7 +345,8 @@ class MainActivity : Activity() {
     }
     private fun store(stamp: WorkStamp): SystemUnlockStore {
         val current = { gate.accepts(stamp) }
-        val prompt = NativeCryptoPrompt(this, current).also { activePrompt = it }
+        val prompt = NativeCryptoPrompt(this, current)
+        if (!promptSlot.publish(prompt, current)) throw PlatformAuthenticationFailure()
         val native = PlatformCapsuleStore(this, prompt, current)
         return object : SystemUnlockStore {
             override fun store(id: String, value: ByteArray) = native.store(id, value)
