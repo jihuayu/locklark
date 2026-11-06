@@ -41,10 +41,12 @@ def scan(raw, values):
 
 
 def verify_approved(result, child, stdout, stderr):
+    require(all(type(value) is int for value in (result.get("exit_code"),result.get("console_mode_before"),
+                                                result.get("console_mode_after"),child.get("console_mode"))))
     require(result.get("exit_code") == 23 and result.get("timed_out") is False and result.get("console_available") is True)
-    require(isinstance(result.get("console_mode_before"), int) and
-            result.get("console_mode_before") == result.get("console_mode_after") == child.get("console_mode"))
-    require(all(child.get(key) is True for key in ("token_matches", "stdin_matches", "stdio_are_pipes", "only_allowed_environment")))
+    require(result.get("console_mode_before") == result.get("console_mode_after") == child.get("console_mode"))
+    require(all(child.get(key) is True for key in ("token_matches", "stdin_matches", "stdio_are_pipes", "only_allowed_environment",
+                                                  "stdin_pipe", "stdout_pipe", "stderr_pipe", "artifact_private_policy")))
     require(stdout == b"owned Windows child stdout\n" and stderr == b"owned Windows child stderr\n")
 
 
@@ -64,6 +66,32 @@ def fixture_phase(raw):
     return found[-1].decode() if found and found[-1].decode() in allowed else "unknown"
 
 
+def approved_diagnosis(result, child, stdout, stderr, record):
+    def boolean(value):
+        return value if type(value) is bool else None
+    code = result.get("exit_code")
+    before, after = result.get("console_mode_before"), result.get("console_mode_after")
+    child_mode = child.get("console_mode")
+    root_code = re.search(rb"LOCKLARK_WINDOWS_CHILD_ROOT=REFUSED code=([a-z-]+)",stderr)
+    allowed_root = {"known-folder","known-folder-parent","user-token","walk","reparse","path","attributes","descriptor","owner","dacl","root-protection"}
+    return {
+        "cli_exit_code":code if type(code) is int and -1 <= code < 2**32 else None,
+        "timed_out":boolean(result.get("timed_out")),
+        "console_available":boolean(result.get("console_available")),
+        "console_mode_restored":before == after if type(before) is int and type(after) is int else None,
+        "child_console_matches":before == child_mode if type(before) is int and type(child_mode) is int else None,
+        "child_record":record if record in {"present","missing","invalid"} else "invalid",
+        "child_marker":bool(child) or b"LOCKLARK_WINDOWS_CHILD_ROOT=REFUSED" in stderr or b"owned Windows CLI fixture failed at " in stderr,
+        "artifact_private_policy":False if b"LOCKLARK_WINDOWS_CHILD_ROOT=REFUSED" in stderr else boolean(child.get("artifact_private_policy")),
+        "artifact_policy_reason":root_code[1].decode() if root_code and root_code[1].decode() in allowed_root else "unknown",
+        "stdin_pipe":boolean(child.get("stdin_pipe")), "stdout_pipe":boolean(child.get("stdout_pipe")),
+        "stderr_pipe":boolean(child.get("stderr_pipe")), "stdin_matches":boolean(child.get("stdin_matches")),
+        "token_matches":boolean(child.get("token_matches")), "environment_exact":boolean(child.get("only_allowed_environment")),
+        "expected_stdout":stdout == b"owned Windows child stdout\n", "expected_stderr":stderr == b"owned Windows child stderr\n",
+        "fixture_phase":fixture_phase(stderr),
+    }
+
+
 class Acceptance:
     def __init__(self, args):
         self.args = args
@@ -72,6 +100,7 @@ class Acceptance:
         self.wait = "prerequisites"
         self.fixture_phase = "unknown"
         self.values, self.checks = [], []
+        self.approved = {}
         require(os.name == "nt")
         self.cli, self.fixture = str(Path(args.cli).resolve()), str(Path(args.fixture_bin).resolve())
         require(Path(self.cli).is_file() and Path(self.fixture).is_file())
@@ -173,9 +202,20 @@ class Acceptance:
         self.stage = "approved-console-and-pipes"
         self.conpty("approved", "RUN")
         self.wait = "approved-oracle"
-        child = self.read_json("approved-child.json")
-        verify_approved(self.read_json("approved-result.json"), child,
-                        (self.root / "approved-stdout.log").read_bytes(), (self.root / "approved-stderr.log").read_bytes())
+        result = self.read_json("approved-result.json")
+        stdout, stderr = (self.root / "approved-stdout.log").read_bytes(), (self.root / "approved-stderr.log").read_bytes()
+        child, record = {}, "missing"
+        if (self.root / "approved-child.json").exists():
+            try:
+                child, record = self.read_json("approved-child.json"), "present"
+                if not isinstance(child, dict):
+                    child, record = {}, "invalid"
+            except (ValueError, OSError):
+                record = "invalid"
+        self.approved = approved_diagnosis(result, child, stdout, stderr, record)
+        self.fixture_phase = self.approved["fixture_phase"]
+        require(record == "present")
+        verify_approved(result, child, stdout, stderr)
         require(isinstance(child.get("temporary_root"), str) and not Path(child["temporary_root"]).exists())
         self.scan()
         self.mark("native_CONIN_CONOUT_hidden_factors_explicit_RUN_exact_token_three_pipes_exit23_no_footer_and_cleanup")
@@ -231,7 +271,7 @@ def main(argv=None):
             except Exception:
                 success, acceptance.stage = False, "privacy"
             try:
-                (acceptance.root / "result.json").write_text(json.dumps({"success":success,"stage":acceptance.stage,"wait":acceptance.wait,"checks":acceptance.checks}))
+                (acceptance.root / "result.json").write_text(json.dumps({"success":success,"stage":acceptance.stage,"wait":acceptance.wait,"checks":acceptance.checks,"approved":acceptance.approved}))
             except Exception:
                 success, acceptance.stage = False, "private-evidence"
             print("Private Windows RunCLI evidence: "+str(acceptance.root))
@@ -240,6 +280,7 @@ def main(argv=None):
         if acceptance:
             print("Fixed Windows RunCLI wait: "+acceptance.wait)
             print("Fixed Windows fixture phase: "+acceptance.fixture_phase)
+            print("Fixed Windows approved checks: "+json.dumps(acceptance.approved,sort_keys=True))
     return 0 if success else 1
 
 

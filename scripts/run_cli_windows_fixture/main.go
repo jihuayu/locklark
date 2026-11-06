@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/jihuayu/locklark/internal/personal"
-	"golang.org/x/term"
 )
 
 type fixture struct {
@@ -186,6 +185,11 @@ func launch(root, cli, label string) {
 	fmt.Println("OWNED_WINDOWS_CLI_DONE")
 }
 func child(root, label string) {
+	fixturePhase = "artifact-security"
+	if err := privateRoot(root); err != nil {
+		fmt.Fprintln(os.Stderr, "LOCKLARK_WINDOWS_CHILD_ROOT=REFUSED code="+privateRootFailure(err))
+		panic("owned child artifact policy refused")
+	}
 	f := readFixture(root)
 	fixturePhase = "child-console"
 	mode, err := consoleMode()
@@ -204,9 +208,11 @@ func child(root, label string) {
 		}
 	}
 	writeJSON(filepath.Join(root, label+"-child.json"), map[string]any{
-		"token_matches":            os.Getenv("LOCKLARK_TEST_TOKEN") == f.Token,
-		"stdin_matches":            string(data) == "owned Windows stdin marker\n",
-		"stdio_are_pipes":          !term.IsTerminal(int(os.Stdin.Fd())) && !term.IsTerminal(int(os.Stdout.Fd())) && !term.IsTerminal(int(os.Stderr.Fd())),
+		"token_matches": os.Getenv("LOCKLARK_TEST_TOKEN") == f.Token,
+		"stdin_matches": string(data) == "owned Windows stdin marker\n",
+		"stdin_pipe":    isPipe(os.Stdin), "stdout_pipe": isPipe(os.Stdout), "stderr_pipe": isPipe(os.Stderr),
+		"stdio_are_pipes":          isPipe(os.Stdin) && isPipe(os.Stdout) && isPipe(os.Stderr),
+		"artifact_private_policy":  true,
 		"only_allowed_environment": environment, "console_mode": mode,
 		"temporary_root": filepath.Dir(os.Getenv("HOME")),
 	})

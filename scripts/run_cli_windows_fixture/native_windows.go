@@ -40,31 +40,49 @@ func newPrivateRoot() (string, error) {
 	attributes := windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: sd}
 	return path, windows.CreateDirectory(wide, &attributes)
 }
+
+type privatePolicyError string
+
+func (e privatePolicyError) Error() string { return "private acceptance policy: " + string(e) }
+func privateRootFailure(err error) string {
+	if value, ok := err.(privatePolicyError); ok {
+		return string(value)
+	}
+	return "unknown"
+}
 func privateRoot(root string) error {
-	bad := errors.New("private acceptance evidence unavailable")
 	parent, err := windows.KnownFolderPath(windows.FOLDERID_LocalAppData, 0)
-	if err != nil || filepath.Clean(filepath.Dir(root)) != filepath.Clean(parent) || !strings.HasPrefix(filepath.Base(root), "locklark-run-cli-acceptance-") {
-		return bad
+	if err != nil {
+		return privatePolicyError("known-folder")
+	}
+	if filepath.Clean(filepath.Dir(root)) != filepath.Clean(parent) || !strings.HasPrefix(filepath.Base(root), "locklark-run-cli-acceptance-") {
+		return privatePolicyError("known-folder-parent")
 	}
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
-		return bad
+		return privatePolicyError("user-token")
 	}
 	return filepath.Walk(root, func(path string, entry os.FileInfo, failure error) error {
-		if failure != nil || entry.Mode()&os.ModeSymlink != 0 {
-			return bad
+		if failure != nil {
+			return privatePolicyError("walk")
+		}
+		if entry.Mode()&os.ModeSymlink != 0 {
+			return privatePolicyError("reparse")
 		}
 		wide, err := windows.UTF16PtrFromString(path)
 		if err != nil {
-			return bad
+			return privatePolicyError("path")
 		}
 		attributes, err := windows.GetFileAttributes(wide)
-		if err != nil || attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-			return bad
+		if err != nil {
+			return privatePolicyError("attributes")
+		}
+		if attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+			return privatePolicyError("reparse")
 		}
 		sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 		if err != nil {
-			return bad
+			return privatePolicyError("descriptor")
 		}
 		owner, _, err := sd.Owner()
 		// Elevated Windows creators may assign Administrators as file owner.
@@ -72,20 +90,20 @@ func privateRoot(root string) error {
 		// still requires the exact current-user-only DACL checked below. The
 		// newly created root itself always has the explicit current-user owner.
 		if err != nil || owner == nil || !(owner.Equals(user.User.Sid) || path != root && owner.IsWellKnown(windows.WinBuiltinAdministratorsSid)) {
-			return bad
+			return privatePolicyError("owner")
 		}
 		acl, _, err := sd.DACL()
 		if err != nil || acl == nil || acl.AceCount != 1 {
-			return bad
+			return privatePolicyError("dacl")
 		}
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if windows.GetAce(acl, 0, &ace) != nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || !(*windows.SID)(unsafe.Pointer(&ace.SidStart)).Equals(user.User.Sid) {
-			return bad
+			return privatePolicyError("dacl")
 		}
 		if path == root {
 			control, _, err := sd.Control()
 			if err != nil || control&windows.SE_DACL_PROTECTED == 0 {
-				return bad
+				return privatePolicyError("root-protection")
 			}
 		}
 		return nil
@@ -119,6 +137,10 @@ func detachOwnConsole() error {
 func ownConsoleAbsent() bool {
 	codepage, _ := windows.GetConsoleCP()
 	return codepage == 0
+}
+func isPipe(file *os.File) bool {
+	kind, err := windows.GetFileType(windows.Handle(file.Fd()))
+	return err == nil && kind == windows.FILE_TYPE_PIPE
 }
 func ownProcessTree() error {
 	job, err := windows.CreateJobObject(nil, nil)
