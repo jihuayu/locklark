@@ -49,6 +49,12 @@ def validate_target(serial, reset, peer=None, cli=None):
     require(not peer or cli)
 
 
+def peer_executable(path):
+    # A venv's python is commonly a symlink. Resolving it selects the base
+    # interpreter and silently drops that venv's installed independent reader.
+    return os.path.abspath(path)
+
+
 def otp_code(seed, counter, digits=6):
     key = base64.b32decode(seed + "=" * (-len(seed) % 8), casefold=False)
     digest = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
@@ -671,7 +677,7 @@ else: raise AssertionError()
 print('PASS: independent KDBX exact fields and wrong-password refusal')
 """
         try:
-            result = subprocess.run([str(pathlib.Path(self.args.peer).resolve()), "-c", peer_code, str(destination)],
+            result = subprocess.run([peer_executable(self.args.peer), "-c", peer_code, str(destination)],
                                     input=json.dumps({"password": export_password, "items": expected}).encode(),
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
         except subprocess.TimeoutExpired as error:

@@ -1,6 +1,6 @@
 # Locklark 开发进度
 
-团队同步与移动端从 main `9d8d574` 接续，架构与验收约定见[团队与移动设计](team-mobile-design.md)。主代理设计和独立验收，Sol xhigh 子代理分别实现真实 HTTPS 团队同步、共享 Go 移动门面、Android Kotlin、iOS Swift及外部验收，Luna max审阅。当前为实现中，不能把协议核心、源码或构建成功当作完整手机/团队产品通过。
+团队同步与移动端从 main `9d8d574` 接续，架构与验收约定见[团队与移动设计](team-mobile-design.md)。主代理设计和独立验收，Sol xhigh 子代理分别实现真实 HTTPS 团队同步、共享 Go 移动门面、Android Kotlin、iOS Swift及外部验收，Luna max审阅。PR #37 当前仍为草稿：真实团队 TLS 与服务命令独立验收已通过；第五轮 Android 原生流程、外部界面和真实数据库签名审计通过，最后 KDBX 互通检查的工具问题正在修复；iOS 仍在诊断原生文件保护前置失败，系统认证验收继续。精确进展及失败证据见[团队与移动验收](team-mobile-validation.md)，不能把协议核心或构建成功当作完整手机/团队产品通过。
 
 登录备注 [PR #31](https://github.com/jihuayu/locklark/pull/31) 已在精确 head `9b11713` 的四项 CI（run `42146467829`）、Luna max产品/工具/测试复核及主代理独立 GUI/升级/对账验收后，正常 squash 合入 `9d8d574`。主代理核对完整远端日志中的八项真实 GUI/故障门槛；首轮 OTP 测试时钟失败已由仅测试修正关闭。
 

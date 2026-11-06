@@ -4,10 +4,12 @@ import base64
 import contextlib
 import io
 import pathlib
+import os
 import subprocess
 import tempfile
 import types
 import unittest
+import venv
 from unittest import mock
 
 import mobile_android_acceptance as acceptance
@@ -148,6 +150,26 @@ class SafetyTests(unittest.TestCase):
 
 
 class IndependentOracleTests(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "POSIX venv interpreter symlink regression")
+    def test_peer_uses_configured_virtualenv_instead_of_base_interpreter(self):
+        with tempfile.TemporaryDirectory() as root:
+            environment = pathlib.Path(root) / "peer-environment"
+            venv.EnvBuilder(with_pip=False, symlinks=True).create(environment)
+            python = environment / "bin/python"
+            self.assertTrue(python.is_symlink())
+            result = subprocess.run([str(python), "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+            self.assertTrue(result.returncode == 0)
+            site = pathlib.Path(result.stdout.decode().strip())
+            (site / "locklark_private_peer_probe.py").write_text("available = True\n")
+            code = "import locklark_private_peer_probe; assert locklark_private_peer_probe.available"
+            configured = subprocess.run([acceptance.peer_executable(python), "-c", code],
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+            bypassed = subprocess.run([str(python.resolve()), "-c", code],
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+            self.assertTrue(configured.returncode == 0)
+            self.assertTrue(bypassed.returncode != 0)
+
     def test_rfc6238_vector_and_incorrect_code_rejected(self):
         seed = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
         self.assertEqual(acceptance.otp_code(seed, 59 // 30, 8), "94287082")
