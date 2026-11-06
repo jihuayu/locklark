@@ -52,4 +52,6 @@ SSH_AUTH_SOCK='/界面复制的完整端点' /usr/bin/ssh-add -T /公钥文件�
 
 ## 平台验证状态
 
-Linux 已用本机 OpenSSH 验证自定义端点的 `ssh-add -L`、`ssh-add -T` 和实际 SSH 连接。Windows 使用独立用户管道，macOS 使用私有 Unix socket；两者的本机 OpenSSH CI 运行仍待完成，交叉编译不代表运行验收通过。Windows 命令与自定义管道寻址说明须等实际 Windows OpenSSH 验收后补充；不要替换系统 `openssh-ssh-agent` 管道。
+Linux 和 macOS 已在 `bef4c95` 的本机 CI 中验证自定义端点的 `ssh-add -L`、`ssh-add -T` 和实际 SSH 连接。Linux 另有主代理独立重建的 MyGo 16组验收通过，包含真实两跳 `ssh -A` 与每跳独立批准；同版 CI 的 MyGo 工具在导入/启动阶段失败；已独立复现其长临时路径会阻止 agent 启动，修复后的 CI 仍待重跑。macOS 的 OpenSSH 传输验证不能代替完整原生界面验证。
+
+Windows 使用独立用户管道，同用户身份和管道 ACL 测试已在原生 Windows CI 执行通过；实际 Windows OpenSSH 枚举自定义端点仍失败，尚未验收成功。Windows 命令与自定义管道寻址说明须等实际验收后补充；不要替换系统 `openssh-ssh-agent` 管道。交叉编译不代表运行验收通过。
