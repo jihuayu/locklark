@@ -32,6 +32,7 @@ type ReferenceIndex struct {
 type referenceRequest struct {
 	raw, revision string
 	otp           bool
+	target        reference.Target
 }
 
 func referenceOption(raw, revision string, otp bool) (commandOption, error) {
@@ -41,7 +42,7 @@ func referenceOption(raw, revision string, otp bool) (commandOption, error) {
 	if !digestOK(revision) {
 		return commandOption{}, errors.New("invalid reference revision")
 	}
-	return commandOption{reference: &referenceRequest{raw, revision, otp}}, nil
+	return commandOption{reference: &referenceRequest{raw: raw, revision: revision, otp: otp}}, nil
 }
 
 // ValidateReferenceInput validates syntax only, not a target or permission.
@@ -52,15 +53,15 @@ func ValidateReferenceInput(raw, revision string) error {
 
 // Account is authenticated by Unwrap before these helpers run. It is a local
 // vault identity for the personal profile; restoring creates a new account ID.
-func personalReferenceCatalog(account []byte, items []vault.Item, revisions map[string]string) ([]reference.Vault, error) {
+func personalReferenceCatalog(account []byte, vaults []vault.VaultMeta, items []vault.Item, revisions map[string]string) ([]reference.Vault, error) {
 	if len(account) != 16 {
 		return nil, ErrReferenceMetadata
 	}
-	return ProjectReferenceMetadata([]byte(schema), hex.EncodeToString(account), personalVaultName, items, revisions)
+	return ProjectReferenceMetadataV2([]byte(schema), hex.EncodeToString(account), personalVaultName, vaults, items, revisions)
 }
 
-func makeReferenceIndex(account []byte, items []vault.Item, revisions map[string]string) (ReferenceIndex, error) {
-	catalog, err := personalReferenceCatalog(account, items, revisions)
+func makeReferenceIndex(account []byte, vaults []vault.VaultMeta, items []vault.Item, revisions map[string]string) (ReferenceIndex, error) {
+	catalog, err := personalReferenceCatalog(account, vaults, items, revisions)
 	if err != nil {
 		return ReferenceIndex{}, err
 	}
@@ -78,13 +79,18 @@ func makeReferenceIndex(account []byte, items []vault.Item, revisions map[string
 		for _, field := range item.Fields {
 			row.References[field.ID] = "op://" + v.ID + "/" + item.ID + "/" + field.ID
 		}
+		for _, section := range item.Sections {
+			for _, field := range section.Fields {
+				row.References[section.ID+"/"+field.ID] = "op://" + v.ID + "/" + item.ID + "/" + section.ID + "/" + field.ID
+			}
+		}
 		index.Items = append(index.Items, row)
 	}
 	return index, nil
 }
 
-func (request *referenceRequest) bind(account []byte, items []vault.Item, revisions map[string]string) (string, *Edit, error) {
-	catalog, err := personalReferenceCatalog(account, items, revisions)
+func (request *referenceRequest) bind(account []byte, vaults []vault.VaultMeta, items []vault.Item, revisions map[string]string) (string, *Edit, error) {
+	catalog, err := personalReferenceCatalog(account, vaults, items, revisions)
 	if err != nil {
 		return "", nil, err
 	}
@@ -92,22 +98,34 @@ func (request *referenceRequest) bind(account []byte, items []vault.Item, revisi
 	if err != nil {
 		return "", nil, err
 	}
-	bound, err := BindReferenceMetadata([]byte(schema), catalog[0].ID, personalVaultName, items, revisions, target)
+	bound, err := BindReferenceMetadataV2([]byte(schema), catalog[0].ID, personalVaultName, vaults, items, revisions, target)
 	if err != nil {
 		return "", nil, err
 	}
+	request.target = target
 	var action string
 	if request.otp {
-		if bound.Type != reference.TypeOTP || bound.Slot != reference.SlotOTP {
+		switch {
+		case bound.Slot == reference.SlotOTP:
+			action = otpDisclosureAction
+		case bound.Type == reference.TypeOTP:
+			action = referenceOTPAction
+		default:
 			return "", nil, ErrReferenceType
 		}
-		action = otpDisclosureAction
 	} else {
-		switch {
-		case bound.Type == reference.TypeText && bound.Slot == reference.SlotUsername:
+		switch bound.Slot {
+		case reference.SlotUsername:
 			action = "item.reveal.username"
-		case bound.Type == reference.TypePassword && bound.Slot == reference.SlotPassword:
+		case reference.SlotPassword:
 			action = "item.reveal.password"
+		case reference.SlotNotes:
+			action = "item.reveal.notes"
+		case reference.SlotCustomField:
+			if bound.Type == reference.TypeOTP {
+				return "", nil, ErrReferenceType
+			}
+			action = referenceRevealAction
 		default:
 			return "", nil, ErrReferenceType
 		}

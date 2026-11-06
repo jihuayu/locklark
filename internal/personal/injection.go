@@ -30,7 +30,8 @@ func injectAction(action string) bool {
 	return action == "item.inject.username" || action == "item.inject.password"
 }
 func readValueAction(action string) bool {
-	return revealAction(action) || desktopFieldAction(action) || boundValueAction(action)
+	return revealAction(action) || desktopFieldAction(action) || boundValueAction(action) ||
+		action == v2AttachmentReadAction || action == "item.reveal.notes" || action == referenceRevealAction
 }
 func ValidInjectionName(name string) bool {
 	if len(name) == 0 || len(name) > 64 {

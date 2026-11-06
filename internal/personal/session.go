@@ -293,18 +293,33 @@ func (s *Session) Import(source, expected string) (ImportReceipt, error) {
 	return s.importSource(source, expected, importAction)
 }
 func (s *Session) importSource(source, expected, action string) (ImportReceipt, error) {
+	return s.importSourceProfile(source, expected, action, onepux.LoginProfile)
+}
+
+func (s *Session) importSourceProfile(source, expected, action, profile string) (ImportReceipt, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	r, e := s.execute(action, vault.Item{}, nil, commandOption{migration: &importRequest{read: func() ([]byte, error) { return readInspectionSource(source) }, expected: expected}})
+	r, e := s.execute(action, vault.Item{}, nil, commandOption{migration: &importRequest{read: func() ([]byte, error) { return readInspectionSource(source) }, expected: expected, profile: profile}})
 	if e != nil {
 		return ImportReceipt{}, e
 	}
-	status := "planned-" + onepux.LoginProfile
+	status := "planned-" + profile
 	if action == importAction {
-		status = "imported-" + onepux.LoginProfile
+		status = "imported-" + profile
 	}
 	return ImportReceipt{Status: status, Session: r.session, Event: r.intent, ReportDigest: r.reportDigest, Report: r.migration}, nil
 }
+func (s *Session) PlanImportV2(source string) (ImportReceipt, error) {
+	return s.importSourceProfile(source, "", importPlanAction, onepux.FullProfileV2)
+}
+
+func (s *Session) ImportV2(source, expected string) (ImportReceipt, error) {
+	if !digestOK(expected) {
+		return ImportReceipt{}, ErrImportChanged
+	}
+	return s.importSourceProfile(source, expected, importAction, onepux.FullProfileV2)
+}
+
 func (s *Session) Export(password, dest string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
