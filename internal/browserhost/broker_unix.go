@@ -15,17 +15,22 @@ import (
 	"github.com/jihuayu/locklark/internal/localpath"
 )
 
+// trustedBrokerParent is the localpath trust check. It is a variable so the
+// package's own tests can exercise the socket protocol on odd CI filesystems;
+// the shipped default is the strict localpath validator.
+var trustedBrokerParent = localpath.TrustedTemporaryParent
+
 func DefaultBrokerEndpoint() (string, error) {
 	if custom := os.Getenv("LOCKLARK_BROWSER_SOCKET"); custom != "" {
 		if !filepath.IsAbs(custom) || len(custom) > 100 {
 			return "", ErrBrokerUnavailable
 		}
-		if _, e := localpath.TrustedTemporaryParent(filepath.Dir(custom)); e != nil {
+		if _, e := trustedBrokerParent(filepath.Dir(custom)); e != nil {
 			return "", ErrBrokerUnavailable
 		}
 		return custom, nil
 	}
-	parent, e := localpath.TrustedTemporaryParent(os.TempDir())
+	parent, e := trustedBrokerParent(os.TempDir())
 	if e != nil {
 		return "", ErrBrokerUnavailable
 	}
@@ -64,8 +69,16 @@ func listenLocal(path string) (net.Listener, error) {
 		return nil, ErrBrokerUnavailable
 	}
 	dir := filepath.Dir(path)
-	if _, e := localpath.TrustedTemporaryParent(dir); e != nil {
-		return nil, ErrBrokerUnavailable
+	if _, e := trustedBrokerParent(dir); e != nil {
+		if _, parentErr := trustedBrokerParent(filepath.Dir(dir)); parentErr != nil {
+			return nil, ErrBrokerUnavailable
+		}
+		if os.Mkdir(dir, 0700) != nil {
+			return nil, ErrBrokerUnavailable
+		}
+		if _, e := trustedBrokerParent(dir); e != nil {
+			return nil, ErrBrokerUnavailable
+		}
 	}
 	info, e := os.Lstat(dir)
 	if e != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 {

@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"math/big"
 	"strings"
 
@@ -118,7 +119,8 @@ func (c *Connection) handleGenerate(r Request) error {
 		if dec.Decode(&opts) != nil {
 			return c.refuse(r.ID)
 		}
-		if dec.More() {
+		var extra any
+		if dec.Decode(&extra) != io.EOF {
 			return c.refuse(r.ID)
 		}
 	}
@@ -173,7 +175,7 @@ func (c *Connection) handleGenerate(r Request) error {
 			words[i] = w
 		}
 		value = strings.Join(words, separator)
-		if boolValue(opts.Digits, true) {
+		if opts.Digits != nil && *opts.Digits {
 			n, err := randIndex(10)
 			if err != nil {
 				return c.refuse(r.ID)

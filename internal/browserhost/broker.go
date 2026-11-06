@@ -8,7 +8,6 @@ import (
 	"errors"
 	"io"
 	"net"
-	"os"
 	"sort"
 	"sync"
 	"time"
@@ -293,7 +292,11 @@ func (b *Broker) serveCLIRun(conn net.Conn, peer Peer) {
 	if b.callbacks.HandleCLIRun != nil {
 		out, err := b.callbacks.HandleCLIRun(context.Background(), peer, req)
 		if err != nil {
-			resp.Error = err.Error()
+			if errors.Is(err, ErrBrokerUnavailable) {
+				resp.Error = "unavailable"
+			} else {
+				resp.Error = "refused"
+			}
 		} else {
 			resp.Values = out.Values
 		}
@@ -463,5 +466,3 @@ func RequestCLIRun(ctx context.Context, req CLIRunBrokerRequest) (CLIRunBrokerRe
 	}
 	return resp, nil
 }
-
-var _ = os.Geteuid

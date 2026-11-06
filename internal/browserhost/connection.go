@@ -187,9 +187,12 @@ func (c *Connection) invalidate() {
 	c.authMu.Lock()
 	c.authCapability = ""
 	c.authMu.Unlock()
-	c.seen = map[string]bool{}
-	c.seenOrder = nil
-	c.seenPos = 0
+	if c.desktopShared {
+		c.received = 0
+		c.seen = map[string]bool{}
+		c.seenOrder = nil
+		c.seenPos = 0
+	}
 	c.capability = ""
 	c.hello = ""
 	c.rows = nil
@@ -318,9 +321,6 @@ func (c *Connection) Handle(r Request) error {
 		return c.response(Response{ID: r.ID, Type: "status", DesktopConnected: c.desktopShared, Unlocked: c.unlocked(), VaultLocked: !c.unlocked(), Capabilities: c.capabilities()})
 	}
 	if r.Type == "lock" || r.Type == "vault-lock" {
-		if r.Capability != "" && r.Capability != c.capability {
-			return c.refuse(r.ID)
-		}
 		if c.broker != nil && c.broker.callbacks.RequestLock != nil {
 			c.broker.callbacks.RequestLock()
 		}
@@ -334,16 +334,19 @@ func (c *Connection) Handle(r Request) error {
 		return c.refuse(r.ID)
 	}
 	if r.Type == "hello" {
-		if c.hello != "" || c.capability != "" {
-			return c.refuse(r.ID)
-		}
 		if c.desktopShared {
 			if s := c.session.Load(); s != nil && s.Unlocked() {
-				return c.bindDesktopSession(s, c.sessionEpoch, c.quickFill, false)
+				if c.capability == "" {
+					return c.bindDesktopSession(s, c.sessionEpoch, c.quickFill, false)
+				}
+				return c.response(Response{ID: r.ID, Type: "paired", Capability: c.capability, QuickFill: c.quickFill, Capabilities: SupportedCapabilities()})
 			}
 			if c.broker != nil && c.broker.callbacks.RequestUnlockFocus != nil {
 				c.broker.callbacks.RequestUnlockFocus()
 			}
+		}
+		if c.hello != "" || c.capability != "" {
+			return c.refuse(r.ID)
 		}
 		c.hello = r.ID
 		c.pairUntil = c.now().Add(time.Minute)
@@ -408,6 +411,7 @@ func (c *Connection) Handle(r Request) error {
 			return c.refuse(r.ID)
 		}
 		c.context = r.Context()
+		c.profileContext = r.Context()
 		c.rows = rows
 		return c.response(Response{ID: r.ID, Type: "candidates", Candidates: rows})
 	}
@@ -637,9 +641,6 @@ func (c *Connection) capabilities() []string {
 }
 
 func (c *Connection) handleStatus(r Request) error {
-	if r.Capability != "" && r.Capability != c.capability {
-		return c.refuse(r.ID)
-	}
 	unlocked := c.unlocked()
 	resp := Response{ID: r.ID, Type: r.Type, DesktopConnected: c.desktopShared, Unlocked: unlocked, VaultLocked: !unlocked, Paired: c.capability != "", SessionEpoch: c.sessionEpoch, Capabilities: c.capabilities()}
 	if unlocked && c.capability != "" {

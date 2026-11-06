@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"sort"
 	"strconv"
 	"strings"
@@ -162,13 +163,11 @@ func (c *Connection) handleSearch(r Request) error {
 	if e != nil {
 		return c.refuse(r.ID)
 	}
-	watch, _ := s.WatchtowerSummary("")
+	watch, _ := s.WatchtowerSummaryLocal("")
 	watchByID := map[string]*personal.WatchtowerItemFinding{}
-	if watch.Findings != nil {
-		for i := range watch.Findings {
-			f := watch.Findings[i]
-			watchByID[f.ID] = &f
-		}
+	for i := range watch.Findings {
+		f := watch.Findings[i]
+		watchByID[f.ID] = &f
 	}
 	category := r.Category
 	if category == "all" {
@@ -245,6 +244,7 @@ func (c *Connection) handleSearch(r Request) error {
 		out = append(out, summaryFor(it, rev, meta, watchByID[it.ID]))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Title < out[j].Title })
+	vaultSet["personal"] = true
 	vaults := []BrowserVaultSummary{}
 	for id := range vaultSet {
 		name := "Personal"
@@ -287,7 +287,11 @@ func (c *Connection) handleItemGet(r Request) error {
 		return c.refuse(r.ID)
 	}
 	meta := s.Meta(it.ID)
-	detail := &BrowserItemDetail{ID: it.ID, Revision: rev, Category: categoryOf(meta), VaultID: vaultOf(meta), Title: it.Title, Username: it.Username, HasPassword: it.Password != "", HasOTP: it.OTP != "", HasNotes: it.Notes != "", HasPasskey: len(it.Passkey) != 0, URL: it.URL, State: stateName(it.State)}
+	category := categoryOf(meta)
+	detail := &BrowserItemDetail{ID: it.ID, Revision: rev, Category: category, VaultID: vaultOf(meta), Title: it.Title, Username: it.Username, HasPassword: it.Password != "" && (category == "login" || category == "password"), HasOTP: it.OTP != "", HasNotes: it.Notes != "", HasPasskey: len(it.Passkey) != 0, URL: it.URL, State: stateName(it.State)}
+	if meta == nil && it.URL != "" {
+		detail.URLs = []BrowserItemURL{{URL: it.URL, Primary: true, MatchMode: "origin"}}
+	}
 	if meta != nil {
 		detail.Favorite = meta.Favorite
 		detail.AutoSubmit = meta.AutoSubmit
@@ -296,6 +300,9 @@ func (c *Connection) handleItemGet(r Request) error {
 		detail.UpdatedAt = meta.UpdatedAt
 		for _, u := range meta.URLs {
 			detail.URLs = append(detail.URLs, BrowserItemURL{Label: u.Label, URL: u.URL, Primary: u.Primary, MatchMode: u.MatchMode})
+		}
+		if len(detail.URLs) == 0 && it.URL != "" {
+			detail.URLs = []BrowserItemURL{{URL: it.URL, Primary: true, MatchMode: "origin"}}
 		}
 		for _, sec := range meta.Sections {
 			section := BrowserItemSection{ID: sec.ID, Title: sec.Title}
@@ -317,7 +324,7 @@ func (c *Connection) handleItemGet(r Request) error {
 			detail.Identity = identitySummary(meta.Identity)
 		}
 	}
-	if w, e := s.WatchtowerSummary(""); e == nil {
+	if w, e := s.WatchtowerSummaryLocal(""); e == nil {
 		for _, f := range w.Findings {
 			if f.ID == it.ID {
 				detail.WatchtowerFlags = f.Flags
@@ -347,16 +354,20 @@ func (c *Connection) handleFieldValue(r Request) error {
 		return c.refuse(r.ID)
 	}
 	it, ok := c.findItem(items, r.ItemID)
-	if !ok || revisions[it.ID] != r.Revision {
+	if !ok || revisions[it.ID] != r.Revision || it.State == "trashed" {
 		return c.refuse(r.ID)
 	}
 	meta := s.Meta(it.ID)
 	value := ""
 	expires := 0
+	category := categoryOf(meta)
 	switch {
 	case r.Field == "username":
 		value = it.Username
 	case r.Field == "password":
+		if category != "login" && category != "password" {
+			return c.refuse(r.ID)
+		}
 		value = it.Password
 	case r.Field == "notes":
 		value = it.Notes
@@ -400,6 +411,7 @@ func (c *Connection) handleFieldValue(r Request) error {
 		if len(parts) != 3 || meta == nil {
 			return c.refuse(r.ID)
 		}
+		found := false
 		for _, sec := range meta.Sections {
 			if sec.ID != parts[1] {
 				continue
@@ -407,9 +419,13 @@ func (c *Connection) handleFieldValue(r Request) error {
 			for _, f := range sec.Fields {
 				if f.ID == parts[2] {
 					value = f.Value
+					found = true
 					break
 				}
 			}
+		}
+		if !found {
+			return c.refuse(r.ID)
 		}
 	default:
 		return c.refuse(r.ID)
@@ -421,6 +437,9 @@ func (c *Connection) handleFieldValue(r Request) error {
 		} else {
 			action = "copy"
 		}
+	}
+	if e := s.AuditV2Disclosure(it.ID, revisions[it.ID], r.Field); e != nil {
+		return c.refuse(r.ID)
 	}
 	if action == "copy" && expires == 0 {
 		expires = 30
@@ -442,7 +461,8 @@ func decodeMutation(raw string) (BrowserItemMutation, error) {
 	if e := dec.Decode(&m); e != nil {
 		return BrowserItemMutation{}, e
 	}
-	if dec.More() {
+	var extra any
+	if e := dec.Decode(&extra); e != io.EOF {
 		return BrowserItemMutation{}, ErrProtocol
 	}
 	if m.Category == "" {
@@ -500,6 +520,76 @@ func metaFromMutation(m BrowserItemMutation) personal.V2ItemMeta {
 		meta.Identity = &personal.V2Identity{Title: m.Identity.Title, FirstName: m.Identity.FirstName, MiddleName: m.Identity.MiddleName, LastName: m.Identity.LastName, BirthDate: m.Identity.BirthDate, Company: m.Identity.Company, Department: m.Identity.Department, JobTitle: m.Identity.JobTitle, Email: m.Identity.Email, Phone: m.Identity.Phone, AddressLine1: m.Identity.AddressLine1, AddressLine2: m.Identity.AddressLine2, City: m.Identity.City, State: m.Identity.State, PostalCode: m.Identity.PostalCode, Country: m.Identity.Country, Website: m.Identity.Website}
 	}
 	return meta
+}
+
+func mergeMeta(meta *personal.V2ItemMeta, m BrowserItemMutation) {
+	if m.Category != "" {
+		meta.Category = m.Category
+	}
+	if m.VaultID != "" {
+		meta.VaultID = m.VaultID
+	}
+	if m.Favorite != nil {
+		meta.Favorite = *m.Favorite
+	}
+	if m.AutoSubmit != nil {
+		v := *m.AutoSubmit
+		meta.AutoSubmit = &v
+	}
+	if m.Tags != nil {
+		meta.Tags = append([]string(nil), m.Tags...)
+	}
+	if m.URLs != nil {
+		meta.URLs = nil
+		for _, u := range m.URLs {
+			meta.URLs = append(meta.URLs, personal.V2ItemURL{Label: u.Label, URL: u.URL, Primary: u.Primary, MatchMode: u.MatchMode})
+		}
+	} else if m.URL != nil && *m.URL != "" {
+		meta.URLs = []personal.V2ItemURL{{URL: *m.URL, Primary: true, MatchMode: "origin"}}
+	}
+	if m.Sections != nil {
+		meta.Sections = nil
+		for _, sec := range m.Sections {
+			out := personal.V2Section{ID: sec.ID, Title: sec.Title}
+			for _, f := range sec.Fields {
+				out.Fields = append(out.Fields, personal.V2CustomField{ID: f.ID, Label: f.Label, Type: f.Type, Value: f.Value, Concealed: f.Concealed, Purpose: f.Purpose})
+			}
+			meta.Sections = append(meta.Sections, out)
+		}
+	}
+	if m.CreditCard != nil {
+		if meta.CreditCard == nil {
+			meta.CreditCard = &personal.V2CreditCard{}
+		}
+		card := meta.CreditCard
+		if m.CreditCard.CardholderName != "" {
+			card.CardholderName = m.CreditCard.CardholderName
+		}
+		if m.CreditCard.Type != "" {
+			card.Type = m.CreditCard.Type
+		}
+		if m.CreditCard.Number != nil {
+			card.Number = *m.CreditCard.Number
+		}
+		if m.CreditCard.Verification != nil {
+			card.Verification = *m.CreditCard.Verification
+		}
+		if m.CreditCard.ExpiryDate != "" {
+			card.ExpiryDate = m.CreditCard.ExpiryDate
+		}
+		if m.CreditCard.ValidFrom != "" {
+			card.ValidFrom = m.CreditCard.ValidFrom
+		}
+		if m.CreditCard.PIN != nil {
+			card.PIN = *m.CreditCard.PIN
+		}
+		if m.CreditCard.IssuingBank != "" {
+			card.IssuingBank = m.CreditCard.IssuingBank
+		}
+	}
+	if m.Identity != nil {
+		meta.Identity = &personal.V2Identity{Title: m.Identity.Title, FirstName: m.Identity.FirstName, MiddleName: m.Identity.MiddleName, LastName: m.Identity.LastName, BirthDate: m.Identity.BirthDate, Company: m.Identity.Company, Department: m.Identity.Department, JobTitle: m.Identity.JobTitle, Email: m.Identity.Email, Phone: m.Identity.Phone, AddressLine1: m.Identity.AddressLine1, AddressLine2: m.Identity.AddressLine2, City: m.Identity.City, State: m.Identity.State, PostalCode: m.Identity.PostalCode, Country: m.Identity.Country, Website: m.Identity.Website}
+	}
 }
 
 func derefString(v *string) string {
@@ -568,6 +658,9 @@ func (c *Connection) createV2Item(s *personal.Session, m BrowserItemMutation) (s
 		username = m.CreditCard.CardholderName
 	}
 	if password == "" {
+		if m.Category == "login" || m.Category == "password" {
+			return "", "", ErrProtocol
+		}
 		password = randomPlaceholder()
 	}
 	if website != "" {
@@ -676,9 +769,7 @@ func (c *Connection) editV2Item(s *personal.Session, id, revIn string, m Browser
 		}
 		rev = next
 	}
-	s.PatchMeta(id, func(meta *personal.V2ItemMeta) {
-		*meta = metaFromMutation(m)
-	})
+	s.PatchMeta(id, func(meta *personal.V2ItemMeta) { mergeMeta(meta, m) })
 	return id, rev, nil
 }
 
@@ -846,7 +937,7 @@ func addField(fields map[string]string, key, value string) {
 
 func expiryParts(expiry string) (month, year, short string) {
 	parts := strings.Split(expiry, "-")
-	if len(parts) != 2 || len(parts[0]) != 2 || len(parts[1]) != 4 {
+	if len(parts) != 2 || len(parts[0]) != 4 || len(parts[1]) != 2 {
 		return "", "", ""
 	}
 	if _, e := strconv.Atoi(parts[0]); e != nil {
@@ -855,7 +946,7 @@ func expiryParts(expiry string) (month, year, short string) {
 	if _, e := strconv.Atoi(parts[1]); e != nil {
 		return "", "", ""
 	}
-	return parts[0], parts[1], parts[1][2:]
+	return parts[1], parts[0], parts[0][2:]
 }
 
 func (c *Connection) handleWatchtower(r Request) error {

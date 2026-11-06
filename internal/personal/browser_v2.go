@@ -139,7 +139,7 @@ func v2SetMeta(path, id string, meta *V2ItemMeta) {
 		return
 	}
 	m := cloneMeta(meta)
-	now := time.Now().UnixMilli()
+	now := time.Now().Unix()
 	if m.CreatedAt == 0 {
 		m.CreatedAt = now
 	}
@@ -158,7 +158,7 @@ func v2PatchMeta(path, id string, patch func(*V2ItemMeta)) {
 		m = &V2ItemMeta{Category: "login", VaultID: "personal"}
 	}
 	patch(m)
-	now := time.Now().UnixMilli()
+	now := time.Now().Unix()
 	if m.CreatedAt == 0 {
 		m.CreatedAt = now
 	}
@@ -433,20 +433,39 @@ func insecureHTTP(raw string) bool {
 	return host != "localhost" && host != "127.0.0.1" && host != "::1"
 }
 
-// WatchtowerSummary computes local Watchtower findings over active logins.
+// WatchtowerSummary computes local Watchtower findings and records the
+// authenticated local health audit.
 func (s *Session) WatchtowerSummary(originFilter string) (WatchtowerSummaryResult, error) {
+	return s.watchtowerSummary(originFilter, true)
+}
+
+// WatchtowerSummaryLocal computes the same view without writing a health audit.
+// It is used for informational per-item badges during search/item-get.
+func (s *Session) WatchtowerSummaryLocal(originFilter string) (WatchtowerSummaryResult, error) {
+	return s.watchtowerSummary(originFilter, false)
+}
+
+func (s *Session) watchtowerSummary(originFilter string, audit bool) (WatchtowerSummaryResult, error) {
+	if audit {
+		if _, e := s.Health(); e != nil {
+			return WatchtowerSummaryResult{}, e
+		}
+	}
 	items, revisions, e := s.ReadAuthenticatedItems(true)
 	if e != nil {
 		return WatchtowerSummaryResult{}, e
 	}
-	v2Overlay.RLock()
 	counts := map[string]int{}
 	for _, it := range items {
-		if it.State == "" && it.Password != "" {
-			counts[it.Password]++
+		if it.State != "" || it.Password == "" {
+			continue
 		}
+		meta := v2Meta(s.path, it.ID)
+		if meta != nil && meta.Category != "" && meta.Category != "login" && meta.Category != "password" {
+			continue
+		}
+		counts[it.Password]++
 	}
-	v2Overlay.RUnlock()
 	now := time.Now()
 	result := WatchtowerSummaryResult{Counts: map[string]int{"vulnerable": 0, "reused": 0, "weak": 0, "unsecured_http": 0, "totp_not_stored": 0, "expiring": 0}}
 	total := 0
@@ -460,6 +479,9 @@ func (s *Session) WatchtowerSummary(originFilter string) (WatchtowerSummaryResul
 			return WatchtowerSummaryResult{}, invalid
 		}
 		meta := v2Meta(s.path, it.ID)
+		if meta != nil && meta.Category != "" && meta.Category != "login" && meta.Category != "password" {
+			continue
+		}
 		score, strengthFlags := passwordStrength(it.Password)
 		flags := make([]string, 0, 8)
 		weak := score <= 44
@@ -519,17 +541,7 @@ func (s *Session) WatchtowerSummary(originFilter string) (WatchtowerSummaryResul
 				result.SiteFindings = append(result.SiteFindings, f)
 			}
 		}
-		penalized := score
-		if reuse > 0 && penalized > 30 {
-			penalized = 30
-		}
-		if weak && penalized > 40 {
-			penalized = 40
-		}
-		if unsecured && penalized > 15 {
-			penalized -= 15
-		}
-		total += penalized
+		total += score
 		scored++
 	}
 	result.Checked = scored
@@ -622,17 +634,21 @@ func (s *Session) extractCLIBrokerTargetsLocked(targets []CLIBrokerTarget) (map[
 	if e := s.active(true); e != nil {
 		return nil, e
 	}
-	db, e := existingWithReadOnly(s.path, true)
+	db, e := existing(s.path)
 	if e != nil {
 		return nil, e
 	}
 	seen := map[string]bool{}
-	e = db.View(func(tx *bolt.Tx) error {
+	e = db.Update(func(tx *bolt.Tx) error {
 		a, e := authenticateState(tx, "", nil, "item.list", s)
 		if e != nil {
 			return e
 		}
 		defer a.clear()
+		b := tx.Bucket(bucket)
+		if b == nil {
+			return invalid
+		}
 		byID := map[string]vault.Item{}
 		for _, it := range a.items {
 			if it.Kind == "login" {
@@ -643,6 +659,10 @@ func (s *Session) extractCLIBrokerTargetsLocked(targets []CLIBrokerTarget) (map[
 			it, ok := byID[t.ID]
 			if !ok {
 				return ErrNotFound
+			}
+			meta := v2Meta(s.path, t.ID)
+			if t.Field == "password" && meta != nil && meta.Category != "" && meta.Category != "login" && meta.Category != "password" {
+				return ErrRunCredential
 			}
 			if it.State == "trashed" {
 				return ErrTrashed
@@ -670,6 +690,22 @@ func (s *Session) extractCLIBrokerTargetsLocked(targets []CLIBrokerTarget) (map[
 				values[t.Slot] = it.OTP
 			}
 		}
+		tip := a.tip
+		for _, t := range targets {
+			action := "item.desktop.show.username"
+			if t.Field == "password" {
+				action = "item.desktop.show.password"
+			} else if t.Field == "notes" {
+				action = "item.desktop.show.notes"
+			} else if t.Field == "otp" {
+				action = desktopOTPShowAction
+			}
+			ev, err := appendLinked(b, a.identity, tip, a.snapshot, action, t.ID, "intent", t.Revision, "", eventDetails{})
+			if err != nil {
+				return err
+			}
+			tip = auditTip{Count: ev.Sequence, Last: ev.hash(), Origin: tip.Origin}
+		}
 		return nil
 	})
 	if closeErr := db.Close(); closeErr != nil && e == nil {
@@ -696,26 +732,27 @@ func (s *Session) extractCLIBrokerTargetsLocked(targets []CLIBrokerTarget) (map[
 // SetV2State persists favorite metadata and maps lifecycle actions onto the
 // real v1 state machine. Favorites are overlay-only and keep the revision.
 func (s *Session) SetV2State(id, revision, action string) (string, string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if e := s.active(true); e != nil {
-		return "", "", e
-	}
 	switch action {
 	case "favorite", "unfavorite":
-		v2PatchMeta(s.path, id, func(m *V2ItemMeta) { m.Favorite = action == "favorite" })
-		return revision, "active", nil
-	case "archive", "unarchive", "trash", "untrash":
-		prefix := "item."
-		switch action {
-		case "unarchive":
-			prefix = "item.un"
-		case "trash":
-			prefix = "item."
-		case "untrash":
-			prefix = "item.un"
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if e := s.active(true); e != nil {
+			return "", "", e
 		}
-		rev, e := s.SetState(id, revision, prefix+map[string]string{"archive": "archive", "unarchive": "archive", "trash": "trash", "untrash": "trash"}[action])
+		state := "active"
+		if e := s.readNativeTarget(id, revision, func(item vault.Item) error {
+			if item.State != "" {
+				state = item.State
+			}
+			return nil
+		}); e != nil {
+			return "", "", e
+		}
+		v2PatchMeta(s.path, id, func(m *V2ItemMeta) { m.Favorite = action == "favorite" })
+		return revision, state, nil
+	case "archive", "unarchive", "trash", "untrash":
+		mapped := map[string]string{"archive": "item.archive", "unarchive": "item.unarchive", "trash": "item.trash", "untrash": "item.untrash"}[action]
+		rev, e := s.SetState(id, revision, mapped)
 		if e != nil {
 			return "", "", e
 		}
@@ -729,4 +766,79 @@ func (s *Session) SetV2State(id, revision, action string) (string, string, error
 		return rev, state, nil
 	}
 	return "", "", ErrMutationRefused
+}
+
+// ActiveItems returns cloned active login items and their signed revisions.
+func (s *Session) ActiveItems() ([]vault.Item, map[string]string, error) {
+	return s.AllItems("active")
+}
+
+// AllItems returns cloned login items filtered by state ("active", "archived",
+// "trashed", "all" or "").
+func (s *Session) AllItems(state string) ([]vault.Item, map[string]string, error) {
+	items, revisions, e := s.ReadAuthenticatedItems(true)
+	if e != nil {
+		return nil, nil, e
+	}
+	out := make([]vault.Item, 0, len(items))
+	for _, it := range items {
+		actual := it.State
+		if actual == "" {
+			actual = "active"
+		}
+		if state == "" || state == "all" || actual == state {
+			out = append(out, it)
+		}
+	}
+	return out, revisions, nil
+}
+
+// AuditV2Disclosure commits an authenticated intent event before a popup field
+// value is returned. The event uses the existing bounded disclosure actions so
+// the signed journal remains verifiable by older readers.
+func (s *Session) AuditV2Disclosure(id, revision, field string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e := s.active(false); e != nil {
+		return e
+	}
+	if !idOK(id) || !digestOK(revision) {
+		return invalid
+	}
+	action := "item.desktop.show.username"
+	switch {
+	case field == "password", field == "cc-number", field == "cc-csc", field == "cc-pin":
+		action = "item.desktop.show.password"
+	case field == "notes":
+		action = "item.desktop.show.notes"
+	case field == "otp":
+		action = desktopOTPShowAction
+	}
+	db, e := existing(s.path)
+	if e != nil {
+		return e
+	}
+	e = db.Update(func(tx *bolt.Tx) error {
+		a, e := authenticateState(tx, "", nil, "item.list", s)
+		if e != nil {
+			return e
+		}
+		defer a.clear()
+		b := tx.Bucket(bucket)
+		if b == nil {
+			return invalid
+		}
+		if a.revisions[id] != revision {
+			return ErrConflict
+		}
+		_, e = appendLinked(b, a.identity, a.tip, a.snapshot, action, id, "intent", revision, "", eventDetails{})
+		return e
+	})
+	if closeErr := db.Close(); closeErr != nil && e == nil {
+		e = ErrCommandClose
+	}
+	if errors.Is(e, invalid) {
+		s.lock()
+	}
+	return e
 }

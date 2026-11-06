@@ -140,9 +140,21 @@ func (r Request) valid() bool {
 		_, e := origin.Parse(r.Origin)
 		return e == nil
 	case "commit-staged-save":
-		return token.MatchString(r.Capability) && token.MatchString(r.StageID) && r.Context().Valid() && r.payload == nil && r.RequestID == "" && r.Nonce == ""
+		if !token.MatchString(r.Capability) || !token.MatchString(r.StageID) || !r.Context().Valid() || r.payload != nil || r.RequestID != "" || r.Nonce != "" {
+			return false
+		}
+		if r.ItemID == "" && r.Revision == "" {
+			return r.GenMode == "" || r.GenMode == "new" || r.GenMode == "update"
+		}
+		return token.MatchString(r.ItemID) && revision.MatchString(r.Revision) && (r.GenMode == "" || r.GenMode == "update")
 	case "dismiss-save":
-		return token.MatchString(r.Capability) && r.payload == nil && r.RequestID == "" && r.Nonce == "" && (r.Origin != "" || token.MatchString(r.StageID))
+		if !token.MatchString(r.Capability) || r.payload != nil || r.RequestID != "" || r.Nonce != "" {
+			return false
+		}
+		if r.StageID != "" && !token.MatchString(r.StageID) {
+			return false
+		}
+		return r.Origin != "" || r.StageID != ""
 	case "search", "list", "vault-search", "vault-list":
 		return token.MatchString(r.Capability) && r.payload == nil && r.RequestID == "" && r.Nonce == "" && r.ItemID == "" && r.Revision == ""
 	case "item-get":
@@ -266,6 +278,78 @@ func (r Response) MarshalJSON() ([]byte, error) {
 			QuickFill    bool     `json:"quick_fill,omitempty"`
 			Capabilities []string `json:"capabilities,omitempty"`
 		}{r.V, r.ID, r.Type, r.Capability, r.QuickFill, r.Capabilities}
+		return json.Marshal(out)
+	}
+	if r.Type == "items" {
+		items := r.Items
+		if items == nil {
+			items = []BrowserItemSummary{}
+		}
+		vaults := r.Vaults
+		if vaults == nil {
+			vaults = []BrowserVaultSummary{}
+		}
+		return json.Marshal(struct {
+			V      int                   `json:"v"`
+			ID     string                `json:"id,omitempty"`
+			Type   string                `json:"type"`
+			Items  []BrowserItemSummary  `json:"items"`
+			Vaults []BrowserVaultSummary `json:"vaults"`
+		}{r.V, r.ID, r.Type, items, vaults})
+	}
+	if r.Type == "profiles" {
+		profiles := r.Profiles
+		if profiles == nil {
+			profiles = []BrowserProfileSummary{}
+		}
+		return json.Marshal(struct {
+			V        int                     `json:"v"`
+			ID       string                  `json:"id,omitempty"`
+			Type     string                  `json:"type"`
+			Profiles []BrowserProfileSummary `json:"profiles"`
+		}{r.V, r.ID, r.Type, profiles})
+	}
+	if r.Type == "save-dismissed" {
+		never := r.NeverOrigins
+		if never == nil {
+			never = []string{}
+		}
+		return json.Marshal(struct {
+			V            int      `json:"v"`
+			ID           string   `json:"id,omitempty"`
+			Type         string   `json:"type"`
+			NeverOrigins []string `json:"never_origins"`
+		}{r.V, r.ID, r.Type, never})
+	}
+	if r.Type == "field-value" {
+		out := struct {
+			V                int    `json:"v"`
+			ID               string `json:"id,omitempty"`
+			Type             string `json:"type"`
+			ItemID           string `json:"item_id,omitempty"`
+			Revision         string `json:"revision,omitempty"`
+			Field            string `json:"field,omitempty"`
+			Value            string `json:"value"`
+			Copied           bool   `json:"copied"`
+			ExpiresInSeconds int    `json:"expires_in_seconds"`
+		}{r.V, r.ID, r.Type, r.ItemID, r.Revision, r.Field, r.FieldValue, r.Copied, r.ExpiresInSeconds}
+		return json.Marshal(out)
+	}
+	if r.Type == "status" || r.Type == "session-status" {
+		out := struct {
+			V                int      `json:"v"`
+			ID               string   `json:"id,omitempty"`
+			Type             string   `json:"type"`
+			DesktopConnected bool     `json:"desktop_connected"`
+			Unlocked         bool     `json:"unlocked"`
+			VaultLocked      bool     `json:"vault_locked"`
+			Paired           bool     `json:"paired,omitempty"`
+			Capability       string   `json:"capability,omitempty"`
+			QuickFill        bool     `json:"quick_fill,omitempty"`
+			SessionEpoch     uint64   `json:"session_epoch,omitempty"`
+			Capabilities     []string `json:"capabilities,omitempty"`
+			NeverOrigins     []string `json:"never_origins,omitempty"`
+		}{r.V, r.ID, r.Type, r.DesktopConnected, r.Unlocked, r.VaultLocked, r.Paired, r.Capability, r.QuickFill, r.SessionEpoch, r.Capabilities, r.NeverOrigins}
 		return json.Marshal(out)
 	}
 	if r.Type == "locked" {
