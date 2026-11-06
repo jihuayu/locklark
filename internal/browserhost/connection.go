@@ -65,11 +65,85 @@ type Connection struct {
 	pending                 *Request
 	pendingUntil            time.Time
 	now                     func() time.Time
+	desktopShared           bool
+	broker                  *Broker
+	seenOrder               []string
+	seenPos                 int
+	sessionEpoch            uint64
+	staged                  []*stagedSave
+	neverOrigins            map[string]bool
+	profileContext          personal.BrowserContext
+	matchedProfiles         map[string]string
 }
 
 func NewConnection(writer *Writer, notify func()) *Connection {
-	return &Connection{writer: writer, notify: notify, seen: map[string]bool{}, now: time.Now}
+	return &Connection{writer: writer, notify: notify, seen: map[string]bool{}, neverOrigins: map[string]bool{}, matchedProfiles: map[string]string{}, now: time.Now}
 }
+
+// NewDesktopConnection creates a connection in shared desktop mode. The
+// standalone message budget and manual pairing path remain untouched.
+func NewDesktopConnection(writer *Writer, notify func()) *Connection {
+	c := NewConnection(writer, notify)
+	c.desktopShared = true
+	return c
+}
+
+// SetBroker attaches the local IPC broker that owns desktop callbacks.
+func (c *Connection) SetBroker(b *Broker) { c.broker = b }
+
+// BindDesktopSession shares the desktop session with this extension connection.
+// A pending "hello" is answered immediately; otherwise an unsolicited
+// "unlocked" event is pushed.
+func (c *Connection) BindDesktopSession(s *personal.Session, epoch uint64, quickFill bool) error {
+	return c.bindDesktopSession(s, epoch, quickFill, true)
+}
+
+func (c *Connection) bindDesktopSession(s *personal.Session, epoch uint64, quickFill, announce bool) error {
+	if s == nil || !s.Unlocked() {
+		return ErrProtocol
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed.Load() {
+		return ErrProtocol
+	}
+	c.desktopShared = true
+	c.sessionEpoch = epoch
+	c.session.Store(s)
+	c.quickFill = quickFill
+	c.until = c.now().Add(15 * time.Minute)
+	if c.generation.Load() != c.epoch {
+		c.invalidate()
+		c.epoch = c.generation.Load()
+	}
+	var b [16]byte
+	if _, e := rand.Read(b[:]); e != nil {
+		return ErrProtocol
+	}
+	c.capability = hex.EncodeToString(b[:])
+	c.authMu.Lock()
+	c.authCapability = c.capability
+	c.authEpoch = c.epoch
+	c.authUntil = c.until
+	c.authMu.Unlock()
+	c.seen = map[string]bool{}
+	c.seenOrder = nil
+	c.seenPos = 0
+	if c.hello != "" {
+		id := c.hello
+		c.hello = ""
+		return c.response(Response{ID: id, Type: "paired", Capability: c.capability, QuickFill: quickFill, Capabilities: SupportedCapabilities()})
+	}
+	if !announce {
+		c.changed()
+		return nil
+	}
+	return c.response(Response{Type: "unlocked", Capability: c.capability, QuickFill: quickFill, DesktopConnected: true, Unlocked: true, SessionEpoch: epoch, Capabilities: SupportedCapabilities()})
+}
+
+// InvalidateDesktopLock revokes session authority and pushes "locked" without
+// closing the relay pipe.
+func (c *Connection) InvalidateDesktopLock() { c.Invalidate() }
 func (c *Connection) changed() {
 	if c.notify != nil {
 		c.notify()
@@ -91,6 +165,9 @@ func (c *Connection) refuse(id string) error {
 }
 func (c *Connection) invalidate() {
 	c.quickFill = false
+	c.clearStaged()
+	c.profileContext = personal.BrowserContext{}
+	c.matchedProfiles = map[string]string{}
 	if c.passkey != nil {
 		if c.passkey.gate.CommitWon() {
 			c.passkeyStatus = "Passkey 结果未确认；请核实网站与金库"
@@ -110,6 +187,9 @@ func (c *Connection) invalidate() {
 	c.authMu.Lock()
 	c.authCapability = ""
 	c.authMu.Unlock()
+	c.seen = map[string]bool{}
+	c.seenOrder = nil
+	c.seenPos = 0
 	c.capability = ""
 	c.hello = ""
 	c.rows = nil
@@ -172,15 +252,24 @@ func (c *Connection) registerRequest(r Request) (bool, error) {
 	c.authMu.Lock()
 	defer c.authMu.Unlock()
 	c.received++
-	if c.closed.Load() || c.received > 128 {
+	if c.closed.Load() || (!c.desktopShared && c.received > 128) || c.desktopShared && c.received > 4096 {
 		return false, ErrProtocol
 	}
-	if c.seen[r.ID] {
+	if c.desktopShared && len(c.seenOrder) >= 512 && !c.seen[r.ID] {
+		old := c.seenOrder[c.seenPos]
+		delete(c.seen, old)
+		c.seenOrder[c.seenPos] = r.ID
+		c.seenPos = (c.seenPos + 1) % 512
+		c.seen[r.ID] = true
+	} else if c.seen[r.ID] {
 		// Count the frame but ignore it without a second response, dispatch or
 		// cancellation. An old replay cannot revoke a newer legitimate request.
 		return false, errDuplicateRequest
 	}
 	c.seen[r.ID] = true
+	if c.desktopShared && len(c.seenOrder) < 512 && !containsID(c.seenOrder, r.ID) {
+		c.seenOrder = append(c.seenOrder, r.ID)
+	}
 	if r.Type == "hello" {
 		return true, nil
 	}
@@ -219,12 +308,42 @@ func (c *Connection) Handle(r Request) error {
 	defer c.changed()
 	c.syncEpoch()
 	c.expire()
+	if r.Type == "status" || r.Type == "session-status" {
+		return c.handleStatus(r)
+	}
+	if r.Type == "unlock-request" {
+		if c.broker != nil && c.broker.callbacks.RequestUnlockFocus != nil {
+			c.broker.callbacks.RequestUnlockFocus()
+		}
+		return c.response(Response{ID: r.ID, Type: "status", DesktopConnected: c.desktopShared, Unlocked: c.unlocked(), VaultLocked: !c.unlocked(), Capabilities: c.capabilities()})
+	}
+	if r.Type == "lock" || r.Type == "vault-lock" {
+		if r.Capability != "" && r.Capability != c.capability {
+			return c.refuse(r.ID)
+		}
+		if c.broker != nil && c.broker.callbacks.RequestLock != nil {
+			c.broker.callbacks.RequestLock()
+		}
+		if e := c.response(Response{ID: r.ID, Type: "locked"}); e != nil {
+			return e
+		}
+		c.Invalidate()
+		return nil
+	}
 	if !allowed {
 		return c.refuse(r.ID)
 	}
 	if r.Type == "hello" {
 		if c.hello != "" || c.capability != "" {
 			return c.refuse(r.ID)
+		}
+		if c.desktopShared {
+			if s := c.session.Load(); s != nil && s.Unlocked() {
+				return c.bindDesktopSession(s, c.sessionEpoch, c.quickFill, false)
+			}
+			if c.broker != nil && c.broker.callbacks.RequestUnlockFocus != nil {
+				c.broker.callbacks.RequestUnlockFocus()
+			}
 		}
 		c.hello = r.ID
 		c.pairUntil = c.now().Add(time.Minute)
@@ -263,6 +382,9 @@ func (c *Connection) Handle(r Request) error {
 	}
 	if r.Type == "passkey-create" || r.Type == "passkey-get" {
 		return c.startPasskey(r)
+	}
+	if isV2Operation(r.Type) {
+		return c.handleV2(r)
 	}
 	if handled, e := c.saveMessage(r); handled {
 		return e
@@ -491,4 +613,42 @@ func (c *Connection) Snapshot() View {
 	}
 
 	return v
+}
+
+func containsID(ids []string, id string) bool {
+	for _, v := range ids {
+		if v == id {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Connection) unlocked() bool {
+	s := c.session.Load()
+	return s != nil && s.Unlocked()
+}
+
+func (c *Connection) capabilities() []string {
+	if c.desktopShared {
+		return SupportedCapabilities()
+	}
+	return nil
+}
+
+func (c *Connection) handleStatus(r Request) error {
+	if r.Capability != "" && r.Capability != c.capability {
+		return c.refuse(r.ID)
+	}
+	unlocked := c.unlocked()
+	resp := Response{ID: r.ID, Type: r.Type, DesktopConnected: c.desktopShared, Unlocked: unlocked, VaultLocked: !unlocked, Paired: c.capability != "", SessionEpoch: c.sessionEpoch, Capabilities: c.capabilities()}
+	if unlocked && c.capability != "" {
+		resp.Capability = c.capability
+		resp.QuickFill = c.quickFill
+		c.until = c.now().Add(15 * time.Minute)
+	}
+	if c.broker != nil {
+		resp.NeverOrigins = c.broker.neverOrigins()
+	}
+	return c.response(resp)
 }

@@ -1,6 +1,7 @@
 package desktop
 
 import (
+	"errors"
 	"os"
 	"time"
 
@@ -160,6 +161,15 @@ func browserTitle(title string) string {
 func RunBrowser(browser browserhost.Browser, args []string) error {
 	if browserhost.ValidateLaunch(browser, args) != nil {
 		return browserhost.ErrProtocol
+	}
+	if os.Getenv("LOCKLARK_BROWSER_STANDALONE") != "1" {
+		err := browserhost.RelayStdio(browser, args, os.Stdin, os.Stdout)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, browserhost.ErrBrokerUnavailable) {
+			return err
+		}
 	}
 	if e := restoreBrowserAccessibility(browser); e != nil {
 		return e

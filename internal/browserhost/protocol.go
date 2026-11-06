@@ -15,6 +15,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/jihuayu/locklark/internal/origin"
 	"github.com/jihuayu/locklark/internal/personal"
 )
 
@@ -32,6 +33,7 @@ const (
 )
 
 var ErrProtocol = errors.New("native messaging refused")
+var ErrBrokerUnavailable = errors.New("desktop browser broker is unavailable")
 var errDuplicateRequest = errors.New("native duplicate request ignored")
 var token = regexp.MustCompile(`^[a-f0-9]{32}$`)
 var revision = regexp.MustCompile(`^[a-f0-9]{64}$`)
@@ -51,19 +53,47 @@ type Request struct {
 	DocumentID string `json:"document_id,omitempty"`
 	ItemID     string `json:"item_id,omitempty"`
 	Revision   string `json:"revision,omitempty"`
+
+	GenMode     string `json:"mode,omitempty"`
+	Length      int    `json:"length,omitempty"`
+	Digits      *bool  `json:"digits,omitempty"`
+	Symbols     *bool  `json:"symbols,omitempty"`
+	SaveHistory *bool  `json:"save_history,omitempty"`
+
+	StageID        string `json:"stage_id,omitempty"`
+	Title          string `json:"title,omitempty"`
+	NeverForOrigin *bool  `json:"never_for_origin,omitempty"`
+
+	Query         string `json:"query,omitempty"`
+	Category      string `json:"category,omitempty"`
+	VaultID       string `json:"vault_id,omitempty"`
+	Tag           string `json:"tag,omitempty"`
+	StateFilter   string `json:"state,omitempty"`
+	FavoritesOnly *bool  `json:"favorites_only,omitempty"`
+	Field         string `json:"field,omitempty"`
+	FieldAction   string `json:"action,omitempty"`
+	StateAction   string `json:"state_action,omitempty"`
+	ItemJSON      string `json:"item_json,omitempty"`
+
+	ProfileKind  string `json:"profile_kind,omitempty"`
+	IncludeHIBP  *bool  `json:"include_hibp,omitempty"`
+	desktopShare bool
 }
 
 func (r Request) Context() personal.BrowserContext {
 	return personal.BrowserContext{RequestID: r.ID, Origin: r.Origin, TabID: r.TabID, DocumentID: r.DocumentID}
 }
+
 func (r Request) valid() bool {
 	if r.V != 1 || !token.MatchString(r.ID) {
 		return false
 	}
-	if r.Type != "save-new" && r.Type != "save-update" && r.Type != "commit-ready" && r.Type != "cancel-save" && r.Type != "otp" && r.Type != "otp-ack" && r.Type != "cancel-otp" && (r.payload != nil || r.WindowID != 0 || r.RequestID != "" || r.Nonce != "") {
+	legacyValue := r.Type == "save-new" || r.Type == "save-update" || r.Type == "commit-ready" || r.Type == "cancel-save" || r.Type == "otp" || r.Type == "otp-ack" || r.Type == "cancel-otp"
+	v2Value := isV2ValueType(r.Type)
+	if !legacyValue && !v2Value && (r.payload != nil || r.WindowID != 0 || r.RequestID != "" || r.Nonce != "") {
 		return false
 	}
-	if r.Type != "passkey-create" && r.Type != "passkey-get" && r.Options != "" {
+	if r.Type != "passkey-create" && r.Type != "passkey-get" && r.Options != "" && r.Type != "generate" {
 		return false
 	}
 	switch r.Type {
@@ -88,6 +118,62 @@ func (r Request) valid() bool {
 		return token.MatchString(r.Capability) && r.Context().Valid() && r.ItemID == "" && r.Revision == ""
 	case "fill":
 		return token.MatchString(r.Capability) && r.Context().Valid() && token.MatchString(r.ItemID) && revision.MatchString(r.Revision)
+	case "status", "session-status", "lock", "vault-lock", "unlock-request", "watchtower", "watchtower-summary":
+		return (r.Capability == "" || token.MatchString(r.Capability)) && r.payload == nil && r.RequestID == "" && r.Nonce == ""
+	case "generate":
+		if !token.MatchString(r.Capability) || r.payload != nil || r.RequestID != "" || r.Nonce != "" {
+			return false
+		}
+		return r.Options != "" || r.GenMode != "" && r.Length > 0
+	case "stage-save":
+		if !token.MatchString(r.Capability) || r.payload == nil || !validPayload(r.payload) || !r.SaveContext().Valid() || r.RequestID != "" || r.Nonce != "" {
+			return false
+		}
+		if r.ItemID == "" && r.Revision == "" {
+			return r.GenMode == "" || r.GenMode == "new"
+		}
+		return token.MatchString(r.ItemID) && revision.MatchString(r.Revision) && (r.GenMode == "" || r.GenMode == "update")
+	case "pending-save":
+		if !token.MatchString(r.Capability) || r.payload != nil || r.RequestID != "" || r.Nonce != "" || r.WindowID < 0 || r.TabID < 1 || r.TabID > 9007199254740991 {
+			return false
+		}
+		_, e := origin.Parse(r.Origin)
+		return e == nil
+	case "commit-staged-save":
+		return token.MatchString(r.Capability) && token.MatchString(r.StageID) && r.Context().Valid() && r.payload == nil && r.RequestID == "" && r.Nonce == ""
+	case "dismiss-save":
+		return token.MatchString(r.Capability) && r.payload == nil && r.RequestID == "" && r.Nonce == "" && (r.Origin != "" || token.MatchString(r.StageID))
+	case "search", "list", "vault-search", "vault-list":
+		return token.MatchString(r.Capability) && r.payload == nil && r.RequestID == "" && r.Nonce == "" && r.ItemID == "" && r.Revision == ""
+	case "item-get":
+		return token.MatchString(r.Capability) && token.MatchString(r.ItemID) && (r.Revision == "" || revision.MatchString(r.Revision)) && r.payload == nil && r.RequestID == "" && r.Nonce == ""
+	case "item-copy-field", "item-reveal-field":
+		return token.MatchString(r.Capability) && token.MatchString(r.ItemID) && revision.MatchString(r.Revision) && r.Field != "" && (r.FieldAction == "" || r.FieldAction == "copy" || r.FieldAction == "reveal") && r.payload == nil && r.RequestID == "" && r.Nonce == ""
+	case "item-create", "item-edit", "item-save":
+		if !token.MatchString(r.Capability) || r.ItemJSON == "" || len(r.ItemJSON) > 64<<10 || !strictUnicode([]byte(r.ItemJSON)) || r.payload != nil || r.RequestID != "" || r.Nonce != "" {
+			return false
+		}
+		if r.Type == "item-edit" {
+			return token.MatchString(r.ItemID) && revision.MatchString(r.Revision)
+		}
+		if r.Type == "item-save" {
+			return r.ItemID == "" && r.Revision == "" || token.MatchString(r.ItemID) && revision.MatchString(r.Revision)
+		}
+		return r.ItemID == "" && r.Revision == ""
+	case "item-state":
+		return token.MatchString(r.Capability) && token.MatchString(r.ItemID) && revision.MatchString(r.Revision) && r.StateAction != "" && r.payload == nil && r.RequestID == "" && r.Nonce == ""
+	case "match-profiles":
+		return token.MatchString(r.Capability) && r.Context().Valid() && (r.ProfileKind == "" || r.ProfileKind == "all" || r.ProfileKind == "identity" || r.ProfileKind == "credit_card") && r.payload == nil && r.RequestID == "" && r.Nonce == ""
+	case "fill-profile":
+		return token.MatchString(r.Capability) && r.Context().Valid() && token.MatchString(r.ItemID) && revision.MatchString(r.Revision) && r.payload == nil && r.RequestID == "" && r.Nonce == ""
+	}
+	return false
+}
+
+func isV2ValueType(t string) bool {
+	switch t {
+	case "stage-save", "pending-save", "commit-staged-save", "dismiss-save":
+		return true
 	}
 	return false
 }
@@ -107,6 +193,36 @@ type Response struct {
 	Username   string         `json:"username,omitempty"`
 	Password   string         `json:"password,omitempty"`
 	Error      string         `json:"error,omitempty"`
+
+	DesktopConnected bool     `json:"desktop_connected,omitempty"`
+	Unlocked         bool     `json:"unlocked,omitempty"`
+	VaultLocked      bool     `json:"vault_locked,omitempty"`
+	Paired           bool     `json:"paired,omitempty"`
+	SessionEpoch     uint64   `json:"session_epoch,omitempty"`
+	Capabilities     []string `json:"capabilities,omitempty"`
+
+	GeneratedPassword string                  `json:"generated_password,omitempty"`
+	PasswordProfile   *BrowserPasswordProfile `json:"profile,omitempty"`
+	HistoryID         string                  `json:"history_id,omitempty"`
+
+	StagedSave   *BrowserStagedSave `json:"staged_save,omitempty"`
+	NeverOrigins []string           `json:"never_origins,omitempty"`
+
+	Items            []BrowserItemSummary  `json:"items,omitempty"`
+	Vaults           []BrowserVaultSummary `json:"vaults,omitempty"`
+	Item             *BrowserItemDetail    `json:"item,omitempty"`
+	ItemSummary      *BrowserItemSummary   `json:"item_summary,omitempty"`
+	Field            string                `json:"field,omitempty"`
+	FieldValue       string                `json:"value,omitempty"`
+	Copied           bool                  `json:"copied,omitempty"`
+	ExpiresInSeconds int                   `json:"expires_in_seconds,omitempty"`
+	State            string                `json:"state,omitempty"`
+	Favorite         bool                  `json:"favorite,omitempty"`
+
+	Profiles    []BrowserProfileSummary `json:"profiles,omitempty"`
+	ProfileFill *BrowserProfileFill     `json:"profile_fill,omitempty"`
+
+	Watchtower *BrowserWatchtowerSummary `json:"watchtower,omitempty"`
 }
 
 // A legitimate login may have an empty username. Fill responses always carry
@@ -130,7 +246,7 @@ func (r Response) MarshalJSON() ([]byte, error) {
 	if r.Type != "passkey-result" {
 		r.Credential = ""
 	}
-	if r.Type != "paired" {
+	if r.Type != "paired" && r.Type != "unlocked" && r.Type != "status" && r.Type != "session-status" {
 		r.QuickFill = false
 	}
 	if r.Type == "otp-ready" {
@@ -141,9 +257,40 @@ func (r Response) MarshalJSON() ([]byte, error) {
 			Nonce string `json:"nonce"`
 		}{r.V, r.ID, r.Type, r.Nonce})
 	}
+	if r.Type == "paired" {
+		out := struct {
+			V            int      `json:"v"`
+			ID           string   `json:"id,omitempty"`
+			Type         string   `json:"type"`
+			Capability   string   `json:"capability,omitempty"`
+			QuickFill    bool     `json:"quick_fill,omitempty"`
+			Capabilities []string `json:"capabilities,omitempty"`
+		}{r.V, r.ID, r.Type, r.Capability, r.QuickFill, r.Capabilities}
+		return json.Marshal(out)
+	}
+	if r.Type == "locked" {
+		out := struct {
+			V    int    `json:"v"`
+			ID   string `json:"id,omitempty"`
+			Type string `json:"type"`
+		}{r.V, r.ID, r.Type}
+		return json.Marshal(out)
+	}
 	if r.Type != "fill" {
 		r.Username = ""
 		r.Password = ""
+	}
+	if r.Type != "generated" {
+		r.GeneratedPassword = ""
+	}
+	if r.Type != "generated" {
+		r.PasswordProfile = nil
+	}
+	if r.Type != "field-value" {
+		r.FieldValue = ""
+	}
+	if r.Type != "profile-fill" {
+		r.ProfileFill = nil
 	}
 	// The general native Row may gain metadata such as Kind; the fixed browser
 	// protocol exposes exactly its original four candidate keys.
@@ -210,8 +357,10 @@ func (r *Request) Clear() {
 	if r != nil {
 		r.payload.clear()
 		r.payload = nil
+		r.ItemJSON = ""
 	}
 }
+
 func (Request) String() string                   { return "[native browser request]" }
 func (Request) GoString() string                 { return "[native browser request]" }
 func (Request) MarshalJSON() ([]byte, error)     { return nil, ErrProtocol }
@@ -289,12 +438,12 @@ func ReadRequest(reader io.Reader) (Request, error) {
 	for dec.More() {
 		key, e := dec.Token()
 		name, ok := key.(string)
-		if e != nil || !ok || seen[name] || len(seen) >= 14 {
+		if e != nil || !ok || seen[name] || len(seen) >= 24 {
 			return Request{}, ErrProtocol
 		}
 		seen[name] = true
 		var value json.RawMessage
-		if dec.Decode(&value) != nil || len(value) == 0 || value[0] != '"' && (value[0] < '0' || value[0] > '9') && value[0] != '-' {
+		if dec.Decode(&value) != nil || len(value) == 0 || value[0] != '"' && (value[0] < '0' || value[0] > '9') && value[0] != '-' && value[0] != 't' && value[0] != 'f' {
 			clear(value)
 			return Request{}, ErrProtocol
 		}
@@ -308,59 +457,53 @@ func ReadRequest(reader io.Reader) (Request, error) {
 		return Request{}, ErrProtocol
 	}
 	var wire struct {
-		Options    string  `json:"options"`
-		V          int     `json:"v"`
-		ID         string  `json:"id"`
-		Type       string  `json:"type"`
-		Capability string  `json:"capability"`
-		Origin     string  `json:"origin"`
-		TabID      int64   `json:"tab_id"`
-		DocumentID string  `json:"document_id"`
-		WindowID   int64   `json:"window_id"`
-		ItemID     string  `json:"item_id"`
-		Revision   string  `json:"revision"`
-		RequestID  string  `json:"request_id"`
-		Nonce      string  `json:"nonce"`
-		Username   *string `json:"username"`
-		Password   *string `json:"password"`
+		Options        string  `json:"options"`
+		V              int     `json:"v"`
+		ID             string  `json:"id"`
+		Type           string  `json:"type"`
+		Capability     string  `json:"capability"`
+		Origin         string  `json:"origin"`
+		TabID          int64   `json:"tab_id"`
+		DocumentID     string  `json:"document_id"`
+		WindowID       int64   `json:"window_id"`
+		ItemID         string  `json:"item_id"`
+		Revision       string  `json:"revision"`
+		RequestID      string  `json:"request_id"`
+		Nonce          string  `json:"nonce"`
+		Username       *string `json:"username"`
+		Password       *string `json:"password"`
+		Mode           string  `json:"mode"`
+		Length         int     `json:"length"`
+		Digits         *bool   `json:"digits"`
+		Symbols        *bool   `json:"symbols"`
+		SaveHistory    *bool   `json:"save_history"`
+		StageID        string  `json:"stage_id"`
+		Title          string  `json:"title"`
+		NeverForOrigin *bool   `json:"never_for_origin"`
+		Query          string  `json:"query"`
+		Category       string  `json:"category"`
+		VaultID        string  `json:"vault_id"`
+		Tag            string  `json:"tag"`
+		StateFilter    string  `json:"state"`
+		FavoritesOnly  *bool   `json:"favorites_only"`
+		Field          string  `json:"field"`
+		FieldAction    string  `json:"action"`
+		StateAction    string  `json:"state_action"`
+		ItemJSON       string  `json:"item_json"`
+		ProfileKind    string  `json:"profile_kind"`
+		IncludeHIBP    *bool   `json:"include_hibp"`
 	}
 	dec = json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if dec.Decode(&wire) != nil {
 		return Request{}, ErrProtocol
 	}
-	r := Request{Options: wire.Options, V: wire.V, ID: wire.ID, Type: wire.Type, Capability: wire.Capability, Origin: wire.Origin, TabID: wire.TabID, DocumentID: wire.DocumentID, WindowID: wire.WindowID, ItemID: wire.ItemID, Revision: wire.Revision, RequestID: wire.RequestID, Nonce: wire.Nonce}
+	r := Request{Options: wire.Options, V: wire.V, ID: wire.ID, Type: wire.Type, Capability: wire.Capability, Origin: wire.Origin, TabID: wire.TabID, DocumentID: wire.DocumentID, WindowID: wire.WindowID, ItemID: wire.ItemID, Revision: wire.Revision, RequestID: wire.RequestID, Nonce: wire.Nonce, GenMode: wire.Mode, Length: wire.Length, Digits: wire.Digits, Symbols: wire.Symbols, SaveHistory: wire.SaveHistory, StageID: wire.StageID, Title: wire.Title, NeverForOrigin: wire.NeverForOrigin, Query: wire.Query, Category: wire.Category, VaultID: wire.VaultID, Tag: wire.Tag, StateFilter: wire.StateFilter, FavoritesOnly: wire.FavoritesOnly, Field: wire.Field, FieldAction: wire.FieldAction, StateAction: wire.StateAction, ItemJSON: wire.ItemJSON, ProfileKind: wire.ProfileKind, IncludeHIBP: wire.IncludeHIBP}
 	if wire.Username != nil && wire.Password != nil {
 		r.payload = &savePayload{[]byte(*wire.Username), []byte(*wire.Password)}
 	}
-	expected := []string{"v", "id", "type"}
-	switch r.Type {
-	case "hello":
-	case "cancel":
-		expected = append(expected, "capability")
-	case "passkey-create", "passkey-get":
-		expected = append(expected, "capability", "origin", "tab_id", "document_id", "options")
-	case "match", "fill", "save-new", "save-update", "otp":
-		expected = append(expected, "capability", "origin", "tab_id", "document_id")
-		if r.Type == "fill" || r.Type == "save-update" || r.Type == "otp" {
-			expected = append(expected, "item_id", "revision")
-		}
-		if r.Type == "otp" {
-			expected = append(expected, "window_id")
-		}
-		if r.Type == "save-new" || r.Type == "save-update" {
-			expected = append(expected, "window_id", "username", "password")
-		}
-	case "commit-ready", "cancel-save", "otp-ack", "cancel-otp":
-		expected = append(expected, "capability", "request_id")
-		if r.Type == "commit-ready" || r.Type == "otp-ack" {
-			expected = append(expected, "nonce")
-		}
-	default:
-		r.Clear()
-		return Request{}, ErrProtocol
-	}
-	if len(seen) != len(expected) {
+	expected, optional, ok := requestKeys(r.Type)
+	if !ok {
 		r.Clear()
 		return Request{}, ErrProtocol
 	}
@@ -370,11 +513,117 @@ func ReadRequest(reader io.Reader) (Request, error) {
 			return Request{}, ErrProtocol
 		}
 	}
+	for name := range seen {
+		required := false
+		for _, want := range expected {
+			if name == want {
+				required = true
+				break
+			}
+		}
+		if required {
+			continue
+		}
+		allowed := false
+		for _, want := range optional {
+			if name == want {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			r.Clear()
+			return Request{}, ErrProtocol
+		}
+	}
+	if r.Type == "dismiss-save" {
+		if !seen["origin"] && !seen["stage_id"] {
+			r.Clear()
+			return Request{}, ErrProtocol
+		}
+	}
+	if r.Origin != "" {
+		if _, e := origin.Parse(r.Origin); e != nil {
+			r.Clear()
+			return Request{}, ErrProtocol
+		}
+	}
+	if r.Type == "generate" {
+		if r.Options == "" && (r.GenMode == "" || r.Length == 0) || r.Options != "" && len(r.Options) > 4096 || r.Options != "" && !strictUnicode([]byte(r.Options)) {
+			r.Clear()
+			return Request{}, ErrProtocol
+		}
+	}
 	if !r.valid() {
 		r.Clear()
 		return Request{}, ErrProtocol
 	}
 	return r, nil
+}
+
+func requestKeys(kind string) (required, optional []string, ok bool) {
+	base := []string{"v", "id", "type"}
+	switch kind {
+	case "hello":
+		return base, nil, true
+	case "cancel":
+		return append(base, "capability"), nil, true
+	case "passkey-create", "passkey-get":
+		return append(base, "capability", "origin", "tab_id", "document_id", "options"), nil, true
+	case "match", "fill", "save-new", "save-update", "otp":
+		required = append(base, "capability", "origin", "tab_id", "document_id")
+		if kind == "fill" || kind == "save-update" || kind == "otp" {
+			required = append(required, "item_id", "revision")
+		}
+		if kind == "otp" {
+			required = append(required, "window_id")
+		}
+		if kind == "save-new" || kind == "save-update" {
+			required = append(required, "window_id", "username", "password")
+		}
+		return required, nil, true
+	case "commit-ready", "cancel-save", "otp-ack", "cancel-otp":
+		required = append(base, "capability", "request_id")
+		if kind == "commit-ready" || kind == "otp-ack" {
+			required = append(required, "nonce")
+		}
+		return required, nil, true
+	case "status", "session-status":
+		return base, []string{"capability"}, true
+	case "lock", "vault-lock", "unlock-request":
+		return base, []string{"capability"}, true
+	case "generate":
+		return append(base, "capability"), []string{"options", "mode", "length", "digits", "symbols", "origin", "save_history"}, true
+	case "stage-save":
+		return append(base, "capability", "origin", "tab_id", "window_id", "document_id", "username", "password"), []string{"title", "mode", "item_id", "revision"}, true
+	case "pending-save":
+		return append(base, "capability", "origin", "tab_id"), []string{"window_id", "document_id"}, true
+	case "commit-staged-save":
+		return append(base, "capability", "stage_id", "origin", "tab_id", "window_id", "document_id"), []string{"title", "mode", "item_id", "revision"}, true
+	case "dismiss-save":
+		return append(base, "capability"), []string{"origin", "stage_id", "never_for_origin", "tab_id", "window_id", "document_id"}, true
+	case "search", "list", "vault-search", "vault-list":
+		return append(base, "capability"), []string{"query", "category", "vault_id", "state", "favorites_only", "origin", "tag"}, true
+	case "item-get":
+		return append(base, "capability", "item_id"), []string{"revision"}, true
+	case "item-copy-field", "item-reveal-field":
+		return append(base, "capability", "item_id", "revision", "field"), []string{"action"}, true
+	case "item-create":
+		return append(base, "capability", "item_json"), nil, true
+	case "item-edit":
+		return append(base, "capability", "item_id", "revision", "item_json"), nil, true
+	case "item-save":
+		return append(base, "capability", "item_json"), []string{"item_id", "revision"}, true
+	case "item-state":
+		return append(base, "capability", "item_id", "revision", "state_action"), nil, true
+	case "match-profiles":
+		return append(base, "capability", "origin", "tab_id", "document_id"), []string{"profile_kind"}, true
+	case "fill-profile":
+		return append(base, "capability", "origin", "tab_id", "document_id", "item_id", "revision"), nil, true
+	case "watchtower", "watchtower-summary":
+		return append(base, "capability"), []string{"origin", "include_hibp"}, true
+	}
+	return nil, nil, false
 }
 
 // These checks constrain normal browser launch; a same-user native process can

@@ -11,6 +11,7 @@ import (
 	"image/color"
 	"image/png"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -51,6 +52,12 @@ type App struct {
 	otpDisplayBounds, otpClipboard                         *personal.OTPBounds
 	otpDisplayTarget, otpClipboardTarget                   personal.NativeOTPTarget
 	otpDisplayTimer, otpClipboardTimer                     *time.Timer
+
+	brokerMu       sync.Mutex
+	broker         *browserhost.Broker
+	brokerEndpoint string
+	cliApprover    func(context.Context, browserhost.Peer, browserhost.BrokerCLIRequest) (bool, error)
+	cliPending     *cliRunPending
 
 	browserPasskeyID                               string
 	browserSaveID, browserSaveTitle                string
@@ -258,6 +265,8 @@ func (a *App) unlock() {
 			a.scope = "active"
 			a.page = "vault"
 			a.status = "已解锁 · 5 分钟未操作自动锁定"
+			a.startBrowserBroker()
+			a.notifyBrowserBrokerUnlocked()
 		}}
 	})
 }
@@ -292,6 +301,8 @@ func (a *App) createVault() {
 			a.rows = nil
 			a.create = false
 			a.status = "金库已创建，Secret Key 请继续离线保管"
+			a.startBrowserBroker()
+			a.notifyBrowserBrokerUnlocked()
 		}}
 	})
 }
@@ -413,6 +424,13 @@ func (a *App) View(c *ui.Context) {
 		a.Lock()
 	}
 	c.After(time.Second)
+	a.brokerMu.Lock()
+	cliPending := a.cliPending != nil
+	a.brokerMu.Unlock()
+	if cliPending {
+		ui.Column(c.Key(a.generation)).Fill().Padding(24).Gap(16).Children(func() { a.cliApprovalView(c) })
+		return
+	}
 	ui.Column(c.Key(a.generation)).Fill().Padding(24).Gap(16).Children(func() {
 		ui.Row(c).Gap(12).Children(func() {
 			ui.Text(c, "LOCKLARK").FontSize(24).Bold()
@@ -702,6 +720,7 @@ func Run() error {
 		mygo.Power.OnSuspend(a.Lock)
 		mygo.Power.OnLockScreen(a.Lock)
 		mygo.App.OnQuit(a.Lock)
+		a.startBrowserBroker()
 		a.registerQuickSearch(mygo.GlobalShortcut.Register)
 		icon := image.NewNRGBA(image.Rect(0, 0, 32, 32))
 		for y := 4; y < 28; y++ {
@@ -715,6 +734,7 @@ func Run() error {
 	})
 	err := mygo.App.Run()
 	a.Lock()
+	a.stopBrowserBroker()
 	if !a.waitSSHShutdown(5*time.Second) && err == nil {
 		return sshagent.ErrUnavailable
 	}
@@ -741,6 +761,8 @@ func (a *App) systemUnlock() {
 			a.scope = "active"
 			a.page = "vault"
 			a.status = "已通过系统解锁"
+			a.startBrowserBroker()
+			a.notifyBrowserBrokerUnlocked()
 		}}
 	})
 }
