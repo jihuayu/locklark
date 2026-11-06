@@ -56,12 +56,14 @@ def safe_diagnostic(raw):
         if name.encode() in raw: exception = name; break
     lines = re.findall(rb"(?:OfflineVaultTest|BoundOperationTest)\.kt:([0-9]{1,5})\)", raw)
     waits = re.findall(rb"INSTRUMENTATION_STATUS: locklark_wait=([a-z-]+)", raw)
-    allowed_waits = {"initial-create", "account-key", "new-vault-list", "native-control", "native-input", "native-input-exact", "login-metadata", "detail", "editor", "saved-list", "disclosure", "empty-username", "empty-notes", "platform-auth-refusal", "background-lock", "explicit-lock", "late-unlock", "other"}
+    allowed_waits = {"initial-create", "account-key", "new-vault-list", "native-control", "native-visible", "ime-hidden", "native-input", "native-input-exact", "login-metadata", "detail", "editor", "saved-list", "disclosure", "empty-username", "empty-notes", "platform-auth-refusal", "background-lock", "explicit-lock", "late-unlock", "other"}
     wait = waits[-1].decode() if waits and waits[-1].decode() in allowed_waits else "unknown"
     statuses = re.findall(rb"INSTRUMENTATION_STATUS: locklark_ui_status=([a-z-]+)", raw)
     allowed_status = {"operation-refused", "outcome-unknown", "backup-ack-required", "empty", "other"}
     status = statuses[-1].decode() if statuses and statuses[-1].decode() in allowed_status else "unknown"
-    context = {"step": "unknown", "wait": "unknown", "ui_status": "unknown", "core_phase": "unknown", "core_error": "unknown", "inputs_intact": "unknown", "fs_owned": "unknown", "fs_link": "unknown", "fs_errno": "unknown"}
+    empty_context = {key:"unknown" for key in ("step", "wait", "ui_status", "core_phase", "core_error", "inputs_intact", "fs_owned", "fs_link", "fs_errno",
+                                              "control", "control_phase", "ime", "window_focus", "control_visible", "control_enabled", "control_present", "activity")}
+    context = empty_context.copy()
     failures = []
     fields = ((b"INSTRUMENTATION_STATUS: locklark_stage=", "step", allowed_steps),
               (b"INSTRUMENTATION_STATUS: locklark_wait=", "wait", allowed_waits),
@@ -71,14 +73,22 @@ def safe_diagnostic(raw):
               (b"INSTRUMENTATION_STATUS: locklark_inputs_intact=", "inputs_intact", {"true", "false"}),
               (b"INSTRUMENTATION_STATUS: locklark_fs_owned=", "fs_owned", {"true", "false"}),
               (b"INSTRUMENTATION_STATUS: locklark_fs_link=", "fs_link", {"true", "false"}),
-              (b"INSTRUMENTATION_STATUS: locklark_fs_errno=", "fs_errno", {str(value) for value in range(4096)}))
+              (b"INSTRUMENTATION_STATUS: locklark_fs_errno=", "fs_errno", {str(value) for value in range(4096)}),
+              (b"INSTRUMENTATION_STATUS: locklark_control=", "control", {"generate-account-key", "backup-ack", "create-vault", "new-login", "generate-password", "save-login", "login-row", "show-password", "hide-secret", "edit-login", "save-field", "show-notes", "show-username", "show-otp", "back-to-list", "search", "cancel-edit", "regenerate-password", "confirm-regenerate", "enable-quick-unlock", "lock", "unlock"}),
+              (b"INSTRUMENTATION_STATUS: locklark_control_phase=", "control_phase", {"ready", "ime-dismiss", "scroll", "visibility", "press", "released"}),
+              (b"INSTRUMENTATION_STATUS: locklark_ime=", "ime", {"true", "false"}),
+              (b"INSTRUMENTATION_STATUS: locklark_window_focus=", "window_focus", {"true", "false"}),
+              (b"INSTRUMENTATION_STATUS: locklark_control_visible=", "control_visible", {"true", "false"}),
+              (b"INSTRUMENTATION_STATUS: locklark_control_enabled=", "control_enabled", {"true", "false"}),
+              (b"INSTRUMENTATION_STATUS: locklark_control_present=", "control_present", {"true", "false"}),
+              (b"INSTRUMENTATION_STATUS: locklark_activity=", "activity", {"DESTROYED", "INITIALIZED", "CREATED", "STARTED", "RESUMED"}))
     for line in raw.splitlines():
         for prefix, key, allowed in fields:
             if line.startswith(prefix):
                 value = line[len(prefix):].decode("ascii", errors="replace")
                 context[key] = value if value in allowed else "unknown"
         if line.strip() == b"INSTRUMENTATION_STATUS_CODE: 1":
-            context = {"step": "unknown", "wait": "unknown", "ui_status": "unknown", "core_phase": "unknown", "core_error": "unknown", "inputs_intact": "unknown", "fs_owned": "unknown", "fs_link": "unknown", "fs_errno": "unknown"}
+            context = empty_context.copy()
         elif line.strip() in (b"INSTRUMENTATION_STATUS_CODE: -1", b"INSTRUMENTATION_STATUS_CODE: -2"):
             failures.append(context.copy())
     if failures:

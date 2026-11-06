@@ -6,6 +6,8 @@ import importlib.util
 import io
 import json
 import pathlib
+import stat
+import subprocess
 import tempfile
 import types
 import unittest
@@ -70,7 +72,8 @@ class PrivacyTests(unittest.TestCase):
 
         with mock.patch.object(evidence, "EvidenceVerifier", FailedVerifier), \
              mock.patch.object(pathlib.Path, "write_text"), contextlib.redirect_stdout(io.StringIO()) as output:
-            result = evidence.main(["--simulator", "unused", "--runtime-log", "unused", "--xcresult", "unused", "--test-exit-code", "1"])
+            result = evidence.main(["--simulator", "12345678-1234-4234-8234-1234567890AB", "--owned-simulator",
+                                    "--runtime-log", "unused", "--xcresult", "unused", "--test-exit-code", "1"])
         self.assertEqual(result, 1)
         self.assertEqual(output.getvalue(), "FAIL: iOS UI evidence validation stage=manifest files=0 manifest_valid=false manifest_complete=false export_complete=false\nPrivate iOS UI evidence: /private/ios-evidence\n")
         self.assertNotIn(secret, output.getvalue())
@@ -157,6 +160,129 @@ class EvidenceIntegrityTests(unittest.TestCase):
                 verifier.export_xcresult()
             self.assertEqual(export.call_args_list, [mock.call("first"), mock.call("second")])
             self.assertFalse(verifier.export_complete)
+
+
+class PhysicalTransportTests(unittest.TestCase):
+    device = "00008110-0008040A0A11801E"
+    simulator = "12345678-1234-4234-8234-1234567890AB"
+    runner = "com.example.locklark.acceptance.uitests.xctrunner"
+
+    def arguments(self, root, **changes):
+        values = dict(artifacts=root, xcrun="/unused-xcrun", simulator=None, device=self.device,
+                      owned_simulator=False, runner_bundle=self.runner)
+        return types.SimpleNamespace(**{**values, **changes})
+
+    def test_physical_copy_uses_only_validated_test_runner_container(self):
+        with tempfile.TemporaryDirectory() as root:
+            verifier = evidence.EvidenceVerifier(self.arguments(root))
+            calls = []
+
+            def copied(command, **options):
+                calls.append(command)
+                destination = pathlib.Path(command[command.index("--destination") + 1])
+                destination.write_text(json.dumps(EvidenceIntegrityTests.manifest()))
+                destination.chmod(0o644)
+                options["stdout"].write(b"test runner manifest copied\n")
+                return subprocess.CompletedProcess(command, 0)
+
+            with mock.patch.object(evidence.subprocess, "run", side_effect=copied):
+                verifier.load_manifest()
+            destination = verifier.root / "runner-canaries-private.json"
+            self.assertEqual(calls, [["/unused-xcrun", "devicectl", "device", "copy", "from",
+                "--device", self.device, "--domain-type", "appDataContainer", "--domain-identifier", self.runner,
+                "--source", "Library/Application Support/LocklarkUITestEvidence/canaries.json",
+                "--destination", str(destination)]])
+            self.assertTrue(verifier.manifest_valid and verifier.manifest_complete)
+            self.assertEqual(stat.S_IMODE(destination.stat().st_mode), 0o600)
+            verifier.scan()
+
+    def test_failed_copy_retains_manifest_for_output_leak_scan(self):
+        with tempfile.TemporaryDirectory() as root:
+            verifier = evidence.EvidenceVerifier(self.arguments(root))
+            manifest = EvidenceIntegrityTests.manifest(False)
+
+            def copied(command, **options):
+                destination = pathlib.Path(command[command.index("--destination") + 1])
+                destination.write_text(json.dumps(manifest))
+                options["stderr"].write(manifest["canaries"][0].encode())
+                return subprocess.CompletedProcess(command, 1)
+
+            with mock.patch.object(evidence.subprocess, "run", side_effect=copied), self.assertRaises(evidence.EvidenceFailure):
+                verifier.load_manifest()
+            self.assertEqual(verifier.canaries, manifest["canaries"])
+            self.assertTrue(verifier.manifest_valid)
+            self.assertFalse(verifier.manifest_complete)
+            with self.assertRaises(evidence.EvidenceFailure) as failure:
+                verifier.scan()
+            self.assertEqual(str(failure.exception), "")
+
+    def test_physical_copy_cannot_bypass_complete_manifest_or_test_exit_gate(self):
+        for exit_code, complete in ((65, True), (0, False)):
+            with self.subTest(exit_code=exit_code, complete=complete), tempfile.TemporaryDirectory() as root:
+                runtime = pathlib.Path(root) / "runtime.log"
+                runtime.write_text("fixed runtime output\n")
+                args = self.arguments(root, runtime_log=str(runtime), test_exit_code=exit_code)
+                verifier = evidence.EvidenceVerifier(args)
+
+                def copied(command, **_):
+                    destination = pathlib.Path(command[command.index("--destination") + 1])
+                    destination.write_text(json.dumps(EvidenceIntegrityTests.manifest(complete)))
+                    return subprocess.CompletedProcess(command, 0)
+
+                def exported():
+                    verifier.export_complete = True
+
+                with mock.patch.object(evidence.subprocess, "run", side_effect=copied), \
+                     mock.patch.object(verifier, "export_xcresult", side_effect=exported):
+                    self.assertFalse(verifier.execute())
+                self.assertTrue(verifier.manifest_valid and verifier.export_complete)
+                self.assertEqual(verifier.stage, "test-outcome")
+
+    def test_ambiguous_modes_and_non_test_bundles_never_construct_subprocess(self):
+        with tempfile.TemporaryDirectory() as root:
+            changes = [dict(device=None), dict(simulator=self.simulator), dict(owned_simulator=True),
+                       dict(runner_bundle=None), dict(device="Personal iPhone"),
+                       dict(runner_bundle=evidence.RUNNER_BUNDLE),
+                       dict(runner_bundle="com.example.application.uitests.xctrunner"),
+                       dict(runner_bundle="com.locklark.acceptance.uitests.xctrunner"),
+                       dict(runner_bundle=self.runner + ".extra"),
+                       dict(device=None, simulator=self.simulator, owned_simulator=True, runner_bundle=self.runner)]
+            for change in changes:
+                with self.subTest(change=change), mock.patch.object(evidence.subprocess, "run") as run, \
+                     self.assertRaises((evidence.EvidenceFailure, ValueError)):
+                    evidence.EvidenceVerifier(self.arguments(root, **change)).load_manifest()
+                run.assert_not_called()
+
+    def test_existing_simulator_ownership_and_fixed_runner_contract_is_unchanged(self):
+        with tempfile.TemporaryDirectory() as root:
+            container = pathlib.Path(root) / "runner-container"
+            source = container / evidence.MANIFEST
+            source.parent.mkdir(parents=True)
+            source.write_text(json.dumps(EvidenceIntegrityTests.manifest()))
+            source.chmod(0o600)
+            inventory, path = pathlib.Path(root) / "devices.json", pathlib.Path(root) / "container.txt"
+            inventory.write_text(json.dumps({"devices": {"runtime": [{"udid": self.simulator, "name": "Locklark-CI-unit",
+                "state": "Booted", "isAvailable": True}]}}))
+            path.write_text(str(container) + "\n")
+            args = self.arguments(root, device=None, simulator=self.simulator, owned_simulator=True, runner_bundle=None)
+            verifier = evidence.EvidenceVerifier(args)
+            with mock.patch.object(verifier, "command", side_effect=[(True, inventory), (True, path)]) as command:
+                verifier.load_manifest()
+            self.assertEqual(command.call_args_list, [mock.call("devices", ["simctl", "list", "devices", "--json"]),
+                mock.call("runner-container", ["simctl", "get_app_container", self.simulator, evidence.RUNNER_BUNDLE, "data"])])
+            self.assertTrue(verifier.manifest_complete)
+
+    def test_invalid_physical_or_ambiguous_cli_has_only_fixed_public_failure(self):
+        secret = "PrivateBundleInjectionFixture"
+        arguments = ["--device", self.device, "--runner-bundle", secret,
+                     "--runtime-log", "unused", "--xcresult", "unused", "--test-exit-code", "1"]
+        for argv in (arguments, arguments + ["--simulator", self.simulator]):
+            with mock.patch.object(evidence.subprocess, "run") as run, contextlib.redirect_stdout(io.StringIO()) as output:
+                result = evidence.main(argv)
+            self.assertEqual(result, 1)
+            self.assertEqual(output.getvalue(), "FAIL: iOS UI evidence validation stage=prerequisites files=0 manifest_valid=false manifest_complete=false export_complete=false\n")
+            self.assertNotIn(secret, output.getvalue())
+            run.assert_not_called()
 
 
 if __name__ == "__main__":

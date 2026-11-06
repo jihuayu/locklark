@@ -24,6 +24,26 @@ class RuntimeWrapperTests(unittest.TestCase):
         self.assertEqual(safe_diagnostic(raw)["step"], "create")
         self.assertEqual(safe_diagnostic(raw)["wait"], "account-key")
 
+    def test_control_geometry_diagnostic_is_fixed_and_preserves_failed_context(self):
+        raw = (b"INSTRUMENTATION_STATUS: locklark_stage=add-login\n"
+               b"INSTRUMENTATION_STATUS: locklark_control=generate-password\n"
+               b"INSTRUMENTATION_STATUS: locklark_control_phase=visibility\n"
+               b"INSTRUMENTATION_STATUS: locklark_ime=true\n"
+               b"INSTRUMENTATION_STATUS: locklark_window_focus=true\n"
+               b"INSTRUMENTATION_STATUS: locklark_control_visible=false\n"
+               b"INSTRUMENTATION_STATUS: locklark_control_enabled=true\n"
+               b"INSTRUMENTATION_STATUS: locklark_control_present=true\n"
+               b"INSTRUMENTATION_STATUS: locklark_activity=RESUMED\n"
+               b"INSTRUMENTATION_STATUS_CODE: -2\n"
+               b"INSTRUMENTATION_STATUS: locklark_control=private-field-contents\n")
+        result = safe_diagnostic(raw)
+        self.assertEqual(result["failed_contexts"][0]["control"], "generate-password")
+        self.assertEqual(result["failed_contexts"][0]["control_phase"], "visibility")
+        self.assertEqual(result["failed_contexts"][0]["ime"], "true")
+        self.assertEqual(result["failed_contexts"][0]["control_visible"], "false")
+        self.assertEqual(result["failed_contexts"][0]["activity"], "RESUMED")
+        self.assertNotIn("private-field-contents", str(result))
+
     def test_even_failed_test_output_must_be_scanned(self):
         values = ["master-fixture", "account-fixture", "username-fixture", "password-fixture", "line one private\nline two private"]
         scan_output(b"fixed failure stage only", values)

@@ -44,6 +44,45 @@ The independent Foundation logic can also run on Linux with Swift 6:
 swift test --package-path mobile/ios/SecurityLogic
 ```
 
+## Signed physical-device acceptance
+
+The current hosted simulator reports a weaker protection class even after
+Apple's official complete-protection setter succeeds. The product refuses to
+operate in that environment. `ci.sh` then runs only a separate public-fixture
+capability-denial scheme to confirm native refusal, disabled creation and no
+personal database. It still exits with failure and prints full-positive NOT RUN.
+Negative evidence never substitutes for the original positive unit/UI suite.
+
+For the original positive suite, use a connected, trusted iPhone running iOS 17+
+with Developer Mode and a passcode enabled. The macOS host must already have
+Xcode signing credentials and development profiles for the app and test runner,
+including the complete data-protection entitlement. The script neither imports
+credentials nor requests automatic provisioning updates.
+
+Set `IOS_DEVICE_ID`, `IOS_DEVELOPMENT_TEAM` and `IOS_TEST_BUNDLE_BASE` locally,
+then run:
+
+```sh
+GO_BIN=go mobile/ios/scripts/device-ci.sh
+```
+
+The bundle base must be an explicit test namespace such as
+`com.example.locklark.acceptance`, with at least two reverse-DNS prefix components.
+App, unit-test and UI-runner identifiers derive from that one build setting;
+production identifiers are rejected. The script refuses an existing test app or
+runner instead of removing its container. Choose a fresh configured test bundle
+or explicitly manage old test apps yourself. It never resets or deletes the
+physical device and leaves installed test apps available for review.
+
+Each attempt keeps logs, app inventory, result bundle and canary exports in its
+own owner-only `Build/DeviceRuns/run.*` directory. The same complete runtime,
+result-object export, independent OTP HMAC and manifest integrity gates remain
+mandatory. Device transport copies only the explicitly named test runner's
+manifest through `devicectl`; it has no production-container fallback. This
+entry is prepared and host-tested, but no physical-device execution is claimed.
+Real OS prompt success, reboot, backup/restore and device-only non-migration
+remain separate hardware checks and are not inferred from a simulator result.
+
 ## Platform security and current verification limits
 
 The database directory and every existing database/sidecar are excluded from

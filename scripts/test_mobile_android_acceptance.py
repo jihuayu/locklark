@@ -83,6 +83,8 @@ class SafetyTests(unittest.TestCase):
             stage = "otp"
             root = pathlib.Path("/private/controller-evidence")
             checks = []
+            diagnosis = {"activity": secret, "foreground": "app", "control": secret,
+                         "wait": "background-stopped", "ime": "shown", "extra": secret}
 
             def __init__(self, _):
                 pass
@@ -103,7 +105,7 @@ class SafetyTests(unittest.TestCase):
             result = acceptance.main(["--adb", "/unused", "--serial", "emulator-5556", "--apk", "/unused", "--reset-test-app"])
         self.assertEqual(result, 1)
         self.assertNotIn(secret, output.getvalue())
-        self.assertEqual(output.getvalue(), "FAIL: Android host UI at otp\nPrivate Android host UI evidence: /private/controller-evidence\n")
+        self.assertEqual(output.getvalue(), "FAIL: Android host UI at otp\nFixed Android host diagnosis: {\"activity\": \"unknown\", \"control\": \"unknown\", \"foreground\": \"app\", \"identity\": \"unknown\", \"ime\": \"shown\", \"wait\": \"background-stopped\"}\nPrivate Android host UI evidence: /private/controller-evidence\n")
 
     def test_command_does_not_log_secret_argv_but_detects_echo(self):
         with tempfile.TemporaryDirectory() as root:
@@ -240,6 +242,191 @@ class IndependentOracleTests(unittest.TestCase):
         acceptance.scan_public(b"time 1234567890", ["123456"])
         with self.assertRaises(acceptance.AcceptanceFailure):
             acceptance.scan_public(b"OTP=123456\n", ["123456"])
+
+
+class BackgroundTransitionTests(unittest.TestCase):
+    @staticmethod
+    def activity_dump(state, foreground="com.google.android.apps.nexuslauncher/.NexusLauncherActivity"):
+        top_token, top_task = ("abc123", "4") if foreground == acceptance.COMPONENT else ("fed789", "1")
+        return ("ACTIVITY MANAGER ACTIVITIES\n"
+                " * Task{app-task}\n"
+                "   * Hist #0: ActivityRecord{abc123 u0 org.locklark.android/.MainActivity t4}\n"
+                "     packageName=org.locklark.android\n"
+                f"     state={state} stopped={'true' if state == 'STOPPED' else 'false'}\n"
+                f" topResumedActivity=ActivityRecord{{{top_token} u0 {foreground} t{top_task}}}\n").encode()
+
+    @staticmethod
+    def locked_nodes():
+        return [{"package": acceptance.PACKAGE, "class": kind, "text": "", "content-desc": label,
+                 "enabled": "true", "bounds": "[0,0][100,20]"}
+                for label, kind in (("打开本地金库", "android.widget.Button"), ("主密码", "android.widget.EditText"),
+                                    ("Secret Key", "android.widget.EditText"))]
+
+    def test_launcher_visibility_and_pause_do_not_count_as_actual_stop(self):
+        for state in ("PAUSED", "STOPPING", "STOPPED"):
+            parsed = acceptance.lifecycle_state(self.activity_dump(state))
+            self.assertEqual(parsed, {"activity": state.lower(), "foreground": "launcher"})
+            self.assertEqual(acceptance.background_is_stopped(parsed), state == "STOPPED")
+        for state in ({"activity": "stopped", "foreground": "app"},
+                      {"activity": "stopped", "foreground": "unknown"},
+                      {"activity": "destroyed", "foreground": "launcher"}):
+            self.assertFalse(acceptance.background_is_stopped(state))
+
+    def test_other_task_state_cannot_supply_missing_app_stopped_evidence(self):
+        raw = (b" * Hist #0: ActivityRecord{app u0 org.locklark.android/.MainActivity t4}\n"
+               b" * Task{other-task}\n state=STOPPED\n"
+               b" topResumedActivity=ActivityRecord{other u0 com.android.launcher3/.Launcher t1}\n")
+        parsed = acceptance.lifecycle_state(raw)
+        self.assertEqual(parsed, {"activity": "unknown", "foreground": "launcher"})
+        self.assertFalse(acceptance.background_is_stopped(parsed))
+
+    def test_single_home_waits_for_stop_before_single_relaunch_and_locked_form(self):
+        controller = object.__new__(acceptance.AndroidAcceptance)
+        controller.args = types.SimpleNamespace(timeout=10)
+        controller.diagnosis = acceptance.safe_host_diagnosis({})
+        controller.canaries = ["PrivateBackgroundFixture"]
+        controller.write_private = mock.Mock()
+        sequence = []
+        controller.shell = mock.Mock(side_effect=lambda *a, **k: sequence.append("home"))
+        states = iter([("original-resumed", {"activity": "resumed", "foreground": "app"}),
+                       ("paused", {"activity": "paused", "foreground": "launcher"}),
+                       ("stopped", {"activity": "stopped", "foreground": "launcher"}),
+                       ("returned-resumed", {"activity": "resumed", "foreground": "app"})])
+
+        def observe(_):
+            label, state = next(states)
+            controller.last_activity_records = [{"token": "abc123", "task": "4", "state": state["activity"]}]
+            controller.last_foreground_identity = ("abc123", "4") if state["foreground"] == "app" else None
+            sequence.append(label)
+            return state
+
+        def locked(predicate, *, deadline):
+            sequence.append("locked-form")
+            self.assertGreater(deadline, acceptance.time.monotonic())
+            nodes = self.locked_nodes()
+            self.assertIs(predicate(nodes), nodes)
+            self.assertIsNone(predicate(nodes[:-1]))
+            return nodes
+
+        controller.observe_activity_state = mock.Mock(side_effect=observe)
+        controller.launch = mock.Mock(side_effect=lambda **k: sequence.append("launch"))
+        controller.wait = mock.Mock(side_effect=locked)
+        with mock.patch.object(acceptance.time, "sleep"):
+            controller.background_and_relaunch()
+        self.assertEqual(sequence, ["original-resumed", "home", "paused", "stopped", "launch", "returned-resumed", "locked-form"])
+        self.assertEqual(controller.shell.call_count, 1)
+        self.assertEqual(controller.shell.call_args.args, ("input", "keyevent", "KEYCODE_HOME"))
+        controller.launch.assert_called_once()
+        self.assertLessEqual(controller.launch.call_args.kwargs["timeout"], controller.args.timeout)
+        self.assertTrue(controller.launch.call_args.kwargs["reuse_existing"])
+        self.assertEqual(controller.diagnosis["identity"], "resumed-match")
+
+    def test_timeout_does_not_retry_home_or_relaunch_without_stop_evidence(self):
+        controller = object.__new__(acceptance.AndroidAcceptance)
+        controller.args = types.SimpleNamespace(timeout=0.001)
+        controller.diagnosis = acceptance.safe_host_diagnosis({})
+        controller.write_private = mock.Mock()
+        controller.shell, controller.launch, controller.wait = mock.Mock(), mock.Mock(), mock.Mock()
+        def observe(_):
+            initial = controller.diagnosis["wait"] == "capture-original"
+            state = {"activity": "resumed" if initial else "paused", "foreground": "app" if initial else "launcher"}
+            controller.last_activity_records = [{"token": "abc123", "task": "4", "state": state["activity"]}]
+            controller.last_foreground_identity = ("abc123", "4") if initial else None
+            return state
+
+        controller.observe_activity_state = mock.Mock(side_effect=observe)
+        with mock.patch.object(acceptance.time, "sleep"), self.assertRaises(acceptance.AcceptanceFailure):
+            controller.background_and_relaunch()
+        self.assertEqual(controller.shell.call_count, 1)
+        controller.launch.assert_not_called()
+        controller.wait.assert_not_called()
+
+    def test_public_diagnosis_is_only_fixed_control_and_lifecycle_enums(self):
+        secret = "PrivateDiagnosticFixture"
+        value = acceptance.safe_host_diagnosis({"activity": secret, "foreground": "launcher", "control": secret,
+                                                "wait": "background-stopped", "ime": secret, "extra": secret})
+        self.assertEqual(value, {"activity": "unknown", "foreground": "launcher", "control": "unknown",
+                                 "wait": "background-stopped", "identity": "unknown", "ime": "unknown"})
+        self.assertNotIn(secret, str(value))
+        nodes = self.locked_nodes()
+        self.assertEqual(acceptance.ui_control_state(nodes), "unlock-ready")
+        nodes[0]["enabled"] = "false"
+        self.assertEqual(acceptance.ui_control_state(nodes), "unlock-busy")
+
+    def test_same_task_and_activity_token_are_parsed_without_public_identifier_output(self):
+        records = acceptance.app_activity_records(self.activity_dump("RESUMED", acceptance.COMPONENT))
+        self.assertEqual(records, [{"token": "abc123", "task": "4", "state": "resumed"}])
+        self.assertEqual(acceptance.top_activity_identity(self.activity_dump("RESUMED", acceptance.COMPONENT)), ("abc123", "4"))
+        safe = acceptance.safe_host_diagnosis({"identity": records[0]["token"], "task": records[0]["task"]})
+        self.assertEqual(safe["identity"], "unknown")
+        self.assertNotIn("abc123", str(safe))
+
+    def test_new_instance_or_task_cannot_substitute_for_original_after_home(self):
+        for token, task, destroyed in (("def456", "4", False), ("abc123", "5", False), ("def456", "4", True)):
+            with self.subTest(token=token, task=task, destroyed=destroyed):
+                controller = object.__new__(acceptance.AndroidAcceptance)
+                controller.args = types.SimpleNamespace(timeout=10)
+                controller.diagnosis = acceptance.safe_host_diagnosis({})
+                controller.shell, controller.launch, controller.wait, controller.write_private = mock.Mock(), mock.Mock(), mock.Mock(), mock.Mock()
+
+                def observe(_):
+                    phase = controller.diagnosis["wait"]
+                    if phase == "capture-original":
+                        controller.last_activity_records = [{"token": "abc123", "task": "4", "state": "resumed"}]
+                        controller.last_foreground_identity = ("abc123", "4")
+                        return {"activity": "resumed", "foreground": "app"}
+                    if phase == "background-stopped":
+                        controller.last_activity_records = [{"token": "abc123", "task": "4", "state": "stopped"}]
+                        controller.last_foreground_identity = None
+                        return {"activity": "stopped", "foreground": "launcher"}
+                    controller.last_activity_records = [{"token": "abc123", "task": "4", "state": "destroyed" if destroyed else "stopped"},
+                                                        {"token": token, "task": task, "state": "resumed"}]
+                    controller.last_foreground_identity = token, task
+                    return {"activity": "resumed", "foreground": "app"}
+
+                controller.observe_activity_state = mock.Mock(side_effect=observe)
+                with self.assertRaises(acceptance.AcceptanceFailure):
+                    controller.background_and_relaunch()
+                self.assertEqual(controller.shell.call_count, 1)
+                controller.launch.assert_called_once()
+                controller.wait.assert_not_called()
+                self.assertEqual(controller.diagnosis["identity"], "destroyed" if destroyed else "changed")
+
+    def test_relaunch_requests_existing_record_once_without_clear_or_stop(self):
+        controller = object.__new__(acceptance.AndroidAcceptance)
+        controller.shell = mock.Mock()
+        controller.launch(timeout=7, reuse_existing=True)
+        controller.shell.assert_called_once_with("am", "start", "-W", "--activity-reorder-to-front", "--activity-single-top",
+                                                 "-n", acceptance.COMPONENT, timeout=7)
+
+    def test_top_resumed_record_must_match_the_resumed_history_record(self):
+        controller = object.__new__(acceptance.AndroidAcceptance)
+        controller.diagnosis = acceptance.safe_host_diagnosis({})
+        controller.last_activity_records = [{"token": "abc123", "task": "4", "state": "resumed"}]
+        controller.last_foreground_identity = "def456", "4"
+        with self.assertRaises(acceptance.AcceptanceFailure):
+            controller.resumed_activity_identity()
+        self.assertEqual(controller.diagnosis["identity"], "changed")
+
+    def test_explicit_null_top_field_cannot_fall_back_to_stale_legacy_app(self):
+        history = self.activity_dump("RESUMED", acceptance.COMPONENT).split(b" topResumedActivity", 1)[0]
+        stale = b" mResumedActivity: ActivityRecord{abc123 u0 org.locklark.android/.MainActivity t4}\n"
+        for field in (b"mTopResumedActivity", b"topResumedActivity"):
+            with self.subTest(field=field):
+                raw = history + b" " + field + b"=null\n" + stale
+                self.assertEqual(acceptance.top_resumed_record(raw), (None, True))
+                self.assertIsNone(acceptance.top_activity_identity(raw))
+                self.assertEqual(acceptance.lifecycle_state(raw)["foreground"], "none")
+
+    def test_legacy_fallback_requires_absent_not_unknown_or_conflicting_top_field(self):
+        legacy = b" mResumedActivity: ActivityRecord{abc123 u0 org.locklark.android/.MainActivity t4}\n"
+        self.assertEqual(acceptance.top_activity_identity(legacy), ("abc123", "4"))
+        for top in (b" mTopResumedActivity=<unavailable>\n", b" topResumedActivity=\n",
+                    b" mTopResumedActivity=null\n topResumedActivity=ActivityRecord{abc123 u0 org.locklark.android/.MainActivity t4}\n"):
+            with self.subTest(top=top):
+                self.assertEqual(acceptance.top_resumed_record(top + legacy), (None, False))
+                self.assertIsNone(acceptance.top_activity_identity(top + legacy))
+                self.assertEqual(acceptance.lifecycle_state(top + legacy)["foreground"], "unknown")
 
 
 if __name__ == "__main__":

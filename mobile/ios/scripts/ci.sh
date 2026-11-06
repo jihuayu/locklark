@@ -30,6 +30,16 @@ python3 "$ios_dir/scripts/read-protection-probe.py" "$ios_dir/Build/protection-p
 if [[ "$preflight_exit" -ne 0 || "$metadata_exit" -ne 0 ]]; then
   echo "ios native protection preflight FAIL"
   python3 "$ios_dir/scripts/summarize-failure.py" "$ios_dir/Build/protection-preflight-private.log"
+  denial_bundle="$ios_dir/Build/CapabilityDenial-${GITHUB_RUN_ID:-local}-$(date +%s).xcresult"
+  denial_exit=0
+  xcodebuild test -project "$ios_dir/Locklark.xcodeproj" -scheme LocklarkCapabilityDenial -destination "platform=iOS Simulator,id=$simulator_id" -derivedDataPath "$ios_dir/Build/DerivedData" -resultBundlePath "$denial_bundle" CODE_SIGNING_ALLOWED=NO >"$ios_dir/Build/capability-denial-private.log" 2>&1 || denial_exit=$?
+  if [[ "$denial_exit" -eq 0 ]]; then
+    echo "ios simulator capability-denial tests PASS"
+  else
+    echo "ios simulator capability-denial tests FAIL"
+    python3 "$ios_dir/scripts/summarize-failure.py" "$ios_dir/Build/capability-denial-private.log"
+  fi
+  echo "ios full-positive NOT RUN; signed physical acceptance required"
   exit 1
 fi
 echo "ios native protection preflight PASS"

@@ -59,6 +59,12 @@ waitActionable(element, message: "prefix \(privateValue)")'''
         self.assertNotIn("private-fixture-canary", reasons)
         self.assertNotIn(r"prefix \(privateValue)", reasons)
 
+    def test_capability_denial_failures_keep_only_fixed_reasons(self):
+        text = "/private/fixture/ProtectionCapabilityDenialTests.swift:19: error: -[LocklarkCapabilityTests.ProtectionCapabilityDenialTests testUnavailableCompleteProtectionIsRefusedBeforeVaultCreation] : XCTAssertThrowsError failed - product must refuse unverifiable or weaker complete protection private-fixture-canary"
+        output = diagnostics.summary(text)
+        self.assertNotIn("private-fixture-canary", json.dumps(output))
+        self.assertEqual(output["runtime_diagnostics"][0]["reason"], "product must refuse unverifiable or weaker complete protection")
+
 
 if __name__ == "__main__":
     unittest.main()

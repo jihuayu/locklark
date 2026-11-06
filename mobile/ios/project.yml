@@ -10,6 +10,7 @@ settings:
     ENABLE_USER_SCRIPT_SANDBOXING: YES
     GENERATE_INFOPLIST_FILE: YES
     CODE_SIGN_STYLE: Automatic
+    LOCKLARK_BUNDLE_BASE: org.locklark.mobile.ios
 packages:
   LocklarkSecurityLogic:
     path: SecurityLogic
@@ -21,7 +22,7 @@ targets:
       - Locklark
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: org.locklark.mobile.ios
+        PRODUCT_BUNDLE_IDENTIFIER: $(LOCKLARK_BUNDLE_BASE)
         PRODUCT_NAME: Locklark
         TARGETED_DEVICE_FAMILY: "1,2"
         SWIFT_OBJC_BRIDGING_HEADER: Locklark/Locklark-Bridging-Header.h
@@ -42,7 +43,7 @@ targets:
     sources: [LocklarkTests]
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: org.locklark.mobile.ios.tests
+        PRODUCT_BUNDLE_IDENTIFIER: $(LOCKLARK_BUNDLE_BASE).tests
         SWIFT_OBJC_BRIDGING_HEADER: Locklark/Locklark-Bridging-Header.h
     dependencies:
       - target: Locklark
@@ -53,7 +54,27 @@ targets:
     sources: [LocklarkUITests]
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: org.locklark.mobile.ios.uitests
+        PRODUCT_BUNDLE_IDENTIFIER: $(LOCKLARK_BUNDLE_BASE).uitests
+    dependencies:
+      - target: Locklark
+  LocklarkCapabilityTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [LocklarkCapabilityTests]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(LOCKLARK_BUNDLE_BASE).capabilitytests
+        SWIFT_OBJC_BRIDGING_HEADER: Locklark/Locklark-Bridging-Header.h
+    dependencies:
+      - target: Locklark
+      - package: LocklarkSecurityLogic
+  LocklarkCapabilityUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [LocklarkCapabilityUITests]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(LOCKLARK_BUNDLE_BASE).capabilityuitests
     dependencies:
       - target: Locklark
 schemes:
@@ -63,4 +84,11 @@ schemes:
         Locklark: all
     test:
       targets: [LocklarkTests, LocklarkUITests]
+      gatherCoverageData: false
+  LocklarkCapabilityDenial:
+    build:
+      targets:
+        Locklark: all
+    test:
+      targets: [LocklarkCapabilityTests, LocklarkCapabilityUITests]
       gatherCoverageData: false

@@ -33,6 +33,12 @@ STAGES = {"prerequisites", "install", "create", "manual-login", "disclosure",
           "edit-password", "otp", "generated-login", "search", "background-lock",
           "wrong-factors", "full-unlock", "restart", "copy-vault", "audit",
           "kdbx-peer", "private-canary-scan", "complete"}
+ACTIVITY_STATES = {"unknown", "initializing", "started", "resumed", "paused", "stopping", "stopped", "destroyed", "mixed"}
+FOREGROUND_STATES = {"unknown", "none", "app", "launcher", "system", "other"}
+CONTROL_STATES = {"unknown", "no-app", "app-other", "unlock-ready", "unlock-busy", "lock-cleanup", "locked-cover",
+                  "opening", "list-ready", "list-busy", "detail-ready", "detail-busy", "create-ready", "create-busy"}
+WAIT_STATES = {"unknown", "capture-original", "background-stopped", "foreground-app", "locked-form"}
+IDENTITY_STATES = {"unknown", "captured", "stopped-match", "resumed-match", "changed", "missing", "ambiguous", "destroyed"}
 
 
 class AcceptanceFailure(Exception):
@@ -99,6 +105,115 @@ def is_unlock_refusal(nodes):
     return any(node.get("package") == PACKAGE and node.get("class") == "android.widget.TextView"
                and node.get("enabled") == "true" and node.get("text", "").startswith("解锁未完成：")
                for node in nodes)
+
+
+def app_activity_records(raw):
+    text = raw.decode("utf-8", errors="replace")
+    component = re.compile(r"\borg\.locklark\.android/(?:\.MainActivity|org\.locklark\.android\.MainActivity)\b")
+    headers = list(re.finditer(r"(?m)^[ \t]*\*[ \t]*Hist[ \t]+#\d+:[ \t]*ActivityRecord\{[^\n]*\}", text))
+    records = []
+    for index, header in enumerate(headers):
+        if component.search(header.group()):
+            end = headers[index + 1].start() if index + 1 < len(headers) else len(text)
+            body = text[header.end():end]
+            next_task = re.search(r"(?m)^[ \t]*\*[ \t]*Task\{", body)
+            body = body[:next_task.start()] if next_task else body
+            match = re.search(r"\b(?:mState|state)=([A-Z_]+)\b", body)
+            state = match.group(1).lower() if match else "unknown"
+            token = re.search(r"ActivityRecord\{([0-9a-fA-F]{1,16})[ \t]", header.group())
+            task = re.search(r"\bt([0-9]+)\b", header.group())
+            records.append({"token": token[1] if token else None, "task": task[1] if task else None,
+                            "state": state if state in ACTIVITY_STATES else "unknown"})
+    return records
+
+
+def top_resumed_record(raw):
+    text = raw.decode("utf-8", errors="replace")
+
+    def selected(values):
+        values = {value.strip() for value in values}
+        if len(values) != 1:
+            return None, False
+        value = next(iter(values))
+        if value == "null":
+            return None, True
+        return (value, False) if value.startswith("ActivityRecord{") else (None, False)
+
+    top = re.findall(r"(?m)^[ \t]*(?:mTopResumedActivity|topResumedActivity)[ \t]*[:=][ \t]*([^\n]*)", text)
+    if top:
+        # A reported top field is authoritative, including null/unknown or
+        # conflicting values. A stale legacy record must never override it.
+        return selected(top)
+    legacy = re.findall(r"(?m)^[ \t]*mResumedActivity[ \t]*[:=][ \t]*([^\n]*)", text)
+    return selected(legacy)
+
+
+def top_activity_identity(raw):
+    record, _ = top_resumed_record(raw)
+    if record is None or not re.search(r"\borg\.locklark\.android/(?:\.MainActivity|org\.locklark\.android\.MainActivity)\b", record):
+        return None
+    token = re.search(r"ActivityRecord\{([0-9a-fA-F]{1,16})[ \t]", record)
+    task = re.search(r"\bt([0-9]+)\b", record)
+    return (token[1], task[1]) if token and task else None
+
+
+def lifecycle_state(raw):
+    component = re.compile(r"\borg\.locklark\.android/(?:\.MainActivity|org\.locklark\.android\.MainActivity)\b")
+    states = [record["state"] for record in app_activity_records(raw)]
+    activity = "unknown"
+    if states and "stopped" in states and set(states) <= {"stopped", "destroyed"}:
+        activity = "stopped"
+    elif "resumed" in states:
+        activity = "resumed"
+    elif len(set(states)) == 1:
+        activity = states[0]
+    elif states:
+        activity = "mixed"
+    foreground = "unknown"
+    record, saw_null = top_resumed_record(raw)
+    if record:
+        if component.search(record):
+            foreground = "app"
+        elif re.search(r"\b(?:com\.android\.launcher3|com\.google\.android\.apps\.nexuslauncher)/", record):
+            foreground = "launcher"
+        elif re.search(r"\b(?:com\.android\.systemui|com\.google\.android\.setupwizard)/", record):
+            foreground = "system"
+        elif re.search(r"\bu\d+[ \t]+[A-Za-z][A-Za-z0-9_.]*/[A-Za-z0-9_.$]+", record):
+            foreground = "other"
+    if foreground == "unknown" and saw_null:
+        foreground = "none"
+    return {"activity": activity, "foreground": foreground}
+
+
+def background_is_stopped(state):
+    return state.get("activity") == "stopped" and state.get("foreground") in {"none", "launcher", "system", "other"}
+
+
+def ui_control_state(nodes):
+    own = [node for node in nodes if node.get("package") == PACKAGE]
+    texts = {node.get("text") for node in own}
+    for label, value in (("正在完成锁定…", "lock-cleanup"), ("Locklark 已锁定", "locked-cover"),
+                         ("正在打开此设备的本地金库…", "opening")):
+        if label in texts:
+            return value
+    for label, ready, busy in (("打开本地金库", "unlock-ready", "unlock-busy"),
+                              ("新建登录", "list-ready", "list-busy"),
+                              ("显示密码", "detail-ready", "detail-busy"),
+                              ("生成新的 Secret Key", "create-ready", "create-busy")):
+        control = next((node for node in own if node.get("class") == "android.widget.Button"
+                        and label in (node.get("text"), node.get("content-desc"))), None)
+        if control:
+            return ready if control.get("enabled") == "true" else busy
+    return "app-other" if own else "no-app"
+
+
+def safe_host_diagnosis(value):
+    value = value if isinstance(value, dict) else {}
+    choices = {"activity": ACTIVITY_STATES, "foreground": FOREGROUND_STATES,
+               "control": CONTROL_STATES, "wait": WAIT_STATES, "identity": IDENTITY_STATES,
+               "ime": {"unknown", "shown", "hidden"}}
+    return {key: value.get(key) if isinstance(value.get(key), str) and value[key] in allowed else "unknown"
+            for key, allowed in choices.items()}
 
 
 def verify_audit(events, disclosures, mutations, generated_id, *, expected_exports=0, expected_audits=1):
@@ -173,10 +288,15 @@ class AndroidAcceptance:
         self.started = False
         self.remote_owned = False
         self.private_values = {}
+        self.diagnosis = safe_host_diagnosis({})
+        self.activity_evidence = []
+        self.last_activity_records = []
+        self.last_foreground_identity = None
 
     def set_stage(self, stage):
         require(stage in STAGES)
         self.stage = stage
+        self.diagnosis["wait"] = "unknown"
 
     def record(self, value):
         require(isinstance(value, str) and value)
@@ -216,13 +336,22 @@ class AndroidAcceptance:
     def shell(self, *arguments, **kwargs):
         return self.command(["shell", *arguments], **kwargs)
 
-    def snapshot(self):
+    @staticmethod
+    def remaining(deadline, cap=None):
+        left = deadline - time.monotonic()
+        require(left > 0)
+        return min(left, cap) if cap else left
+
+    def snapshot(self, deadline=None):
         self.xml_counter += 1
         remote = self.remote + "/current.xml"
-        self.shell("uiautomator", "dump", "--compressed", remote, timeout=45)
-        result = self.command(["exec-out", "cat", remote], oracle=f"ui-{self.xml_counter:04d}.xml")
-        self.shell("rm", "-f", remote)
-        return parse_nodes(result.stdout)
+        self.shell("uiautomator", "dump", "--compressed", remote, timeout=self.remaining(deadline, 45) if deadline else 45)
+        result = self.command(["exec-out", "cat", remote], oracle=f"ui-{self.xml_counter:04d}.xml",
+                              timeout=self.remaining(deadline, 45) if deadline else 45)
+        self.shell("rm", "-f", remote, timeout=self.remaining(deadline, 45) if deadline else 45)
+        nodes = parse_nodes(result.stdout)
+        self.diagnosis["control"] = ui_control_state(nodes)
+        return nodes
 
     @staticmethod
     def matching(nodes, label=None, class_name=None, prefix=False):
@@ -240,10 +369,10 @@ class AndroidAcceptance:
                 continue
             yield node
 
-    def wait(self, predicate, timeout=None):
-        end = time.monotonic() + (timeout or self.args.timeout)
+    def wait(self, predicate, timeout=None, deadline=None):
+        end = deadline if deadline is not None else time.monotonic() + (timeout or self.args.timeout)
         while time.monotonic() < end:
-            nodes = self.snapshot()
+            nodes = self.snapshot(deadline=end)
             result = predicate(nodes)
             if result:
                 return result
@@ -360,8 +489,102 @@ class AndroidAcceptance:
         self.launch()
         self.started = True
 
-    def launch(self):
-        self.shell("am", "start", "-W", "-n", COMPONENT, timeout=90)
+    def launch(self, timeout=90, reuse_existing=False):
+        arguments = ["am", "start", "-W"]
+        if reuse_existing:
+            # Android's REORDER_TO_FRONT brings the existing record to the top
+            # of its task; SINGLE_TOP delivers to it instead of duplicating it.
+            arguments.extend(("--activity-reorder-to-front", "--activity-single-top"))
+        self.shell(*arguments, "-n", COMPONENT, timeout=timeout)
+
+    def observe_activity_state(self, deadline=None):
+        raw = self.shell("dumpsys", "activity", "activities", timeout=self.remaining(deadline, 45) if deadline else 45).stdout
+        state = lifecycle_state(raw)
+        self.diagnosis.update(state)
+        self.last_activity_records = app_activity_records(raw)
+        self.last_foreground_identity = top_activity_identity(raw)
+        self.activity_evidence.append({"phase": self.diagnosis["wait"], "state": state, "records": self.last_activity_records,
+                                       "foreground_identity": self.last_foreground_identity})
+        self.write_private("activity-records-private.json", self.activity_evidence)
+        return state
+
+    def resumed_activity_identity(self):
+        records = [record for record in self.last_activity_records if record["state"] == "resumed"]
+        if len(records) != 1:
+            self.diagnosis["identity"] = "ambiguous" if records else "missing"
+            raise AcceptanceFailure()
+        record = records[0]
+        if not record.get("token") or not record.get("task"):
+            self.diagnosis["identity"] = "missing"
+            raise AcceptanceFailure()
+        identity = record["token"], record["task"]
+        if self.last_foreground_identity != identity:
+            self.diagnosis["identity"] = "changed" if self.last_foreground_identity else "missing"
+            raise AcceptanceFailure()
+        return identity
+
+    def require_original_activity(self, original):
+        records = [record for record in self.last_activity_records if (record.get("token"), record.get("task")) == original]
+        if len(records) != 1:
+            self.diagnosis["identity"] = "ambiguous" if records else "changed" if self.last_activity_records else "missing"
+            raise AcceptanceFailure()
+        if records[0]["state"] == "destroyed":
+            self.diagnosis["identity"] = "destroyed"
+            raise AcceptanceFailure()
+        return records[0]
+
+    def background_and_relaunch(self):
+        deadline = time.monotonic() + self.args.timeout
+        self.diagnosis["wait"] = "capture-original"
+        state = self.observe_activity_state(deadline)
+        require(state["foreground"] == "app" and state["activity"] == "resumed")
+        original = self.resumed_activity_identity()
+        self.diagnosis["identity"] = "captured"
+        self.write_private("background-original-private.json", {"token": original[0], "task": original[1]})
+        self.diagnosis["wait"] = "background-stopped"
+        self.shell("input", "keyevent", "KEYCODE_HOME", timeout=self.remaining(deadline, 45))
+        while True:
+            state = self.observe_activity_state(deadline)
+            record = self.require_original_activity(original)
+            if background_is_stopped(state):
+                require(record["state"] == "stopped")
+                self.diagnosis["identity"] = "stopped-match"
+                break
+            self.remaining(deadline)
+            time.sleep(0.2)
+        self.diagnosis["wait"] = "foreground-app"
+        self.launch(timeout=self.remaining(deadline, 90), reuse_existing=True)
+        while True:
+            state = self.observe_activity_state(deadline)
+            self.require_original_activity(original)
+            if state["foreground"] == "app" and state["activity"] == "resumed":
+                resumed = self.resumed_activity_identity()
+                if resumed != original:
+                    self.diagnosis["identity"] = "changed"
+                    raise AcceptanceFailure()
+                self.diagnosis["identity"] = "resumed-match"
+                break
+            self.remaining(deadline)
+            time.sleep(0.2)
+        self.diagnosis["wait"] = "locked-form"
+
+        def locked(nodes):
+            controls = (("打开本地金库", "android.widget.Button"), ("主密码", "android.widget.EditText"),
+                        ("Secret Key", "android.widget.EditText"))
+            return nodes if all(any(self.matching(nodes, label, class_name)) for label, class_name in controls) else None
+
+        nodes = self.wait(locked, deadline=deadline)
+        self.no_visible_secrets(nodes)
+
+    def capture_failure_diagnosis(self):
+        if not self.started:
+            return
+        deadline = time.monotonic() + min(10, self.args.timeout)
+        self.observe_activity_state(deadline)
+        self.snapshot(deadline)
+        raw = self.shell("dumpsys", "input_method", timeout=self.remaining(deadline, 5)).stdout
+        match = re.search(rb"(?:mInputShown|mIsInputViewShown)=(true|false)", raw)
+        self.diagnosis["ime"] = "shown" if match and match[1] == b"true" else "hidden" if match else "unknown"
 
     def list_ready(self):
         self.visible("新建登录", class_name="android.widget.Button")
@@ -533,13 +756,7 @@ class AndroidAcceptance:
 
         self.set_stage("background-lock")
         self.reveal("显示密码", identity, edited, action="item.desktop.show.password")
-        self.shell("input", "keyevent", "KEYCODE_HOME")
-        time.sleep(0.5)
-        self.launch()
-        self.visible("打开本地金库", class_name="android.widget.Button")
-        self.locate("主密码", class_name="android.widget.EditText")
-        self.locate("Secret Key", class_name="android.widget.EditText")
-        self.no_visible_secrets()
+        self.background_and_relaunch()
         self.done("background_home_requires_both_full_unlock_factors")
 
         self.set_stage("wrong-factors")
@@ -758,6 +975,11 @@ def main(argv=None):
         stage = acceptance.stage if acceptance else "prerequisites"
     finally:
         if acceptance:
+            if not success:
+                try:
+                    acceptance.capture_failure_diagnosis()
+                except Exception:
+                    pass
             try:
                 acceptance.close()
             except Exception:
@@ -770,9 +992,12 @@ def main(argv=None):
                 stage = "private-canary-scan"
             acceptance.write_private("result.json", {"success": success,
                 "stage": "complete" if success else stage, "checks": acceptance.checks,
-                "audit_checked": bool(success and args.cli), "kdbx_peer_checked": bool(success and args.peer)})
+                "audit_checked": bool(success and args.cli), "kdbx_peer_checked": bool(success and args.peer),
+                "diagnosis": safe_host_diagnosis(getattr(acceptance, "diagnosis", {}))})
         if not success:
             print("FAIL: Android host UI at " + stage)
+            if acceptance:
+                print("Fixed Android host diagnosis: " + json.dumps(safe_host_diagnosis(getattr(acceptance, "diagnosis", {})), sort_keys=True))
         if acceptance:
             print("Private Android host UI evidence: " + str(acceptance.root))
     return 0 if success else 1

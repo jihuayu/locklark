@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Privately export and scan the complete iOS XCTest UI evidence.
 
-Call on xcodebuild success AND failure, before deleting the newly created
-Locklark-CI-* simulator. --owned-simulator is the caller's assertion that it
-created this simulator for this run. No app hook or secret launch argument is
-used: only the XCTest runner's private manifest is read through simctl.
+Call on xcodebuild success AND failure. Simulator mode requires a newly created
+Locklark-CI-* simulator and --owned-simulator. Physical mode requires --device
+and an explicit test-only --runner-bundle; it only copies the runner manifest
+through devicectl. It never resets, deletes, installs, or launches a device app.
+Both modes preserve the same complete-result and full-output canary gates.
 """
 
 import argparse
@@ -21,12 +22,13 @@ import tempfile
 import urllib.parse
 import uuid
 from collections import deque
+from device_policy import validate_device_id, validate_runner_bundle
 
 
 RUNNER_BUNDLE = "org.locklark.mobile.ios.uitests.xctrunner"
 MANIFEST = pathlib.Path("Library/Application Support/LocklarkUITestEvidence/canaries.json")
 TEST_NAME = "OfflineVaultFlowTests.testActualOfflineCreateUnlockEditRevealAndBackgroundLock"
-STAGES = {"prerequisites", "owned-simulator", "manifest", "xcresult-export", "canary-scan", "test-outcome", "complete"}
+STAGES = {"prerequisites", "owned-simulator", "device-manifest", "manifest", "xcresult-export", "canary-scan", "test-outcome", "complete"}
 
 
 class EvidenceFailure(Exception):
@@ -36,6 +38,24 @@ class EvidenceFailure(Exception):
 def require(condition):
     if not condition:
         raise EvidenceFailure()
+
+
+def manifest_transport(args):
+    simulator, device = getattr(args, "simulator", None), getattr(args, "device", None)
+    owned, runner = getattr(args, "owned_simulator", False), getattr(args, "runner_bundle", None)
+    require(bool(simulator) != bool(device))
+    if simulator:
+        require(owned is True and runner is None)
+        require(isinstance(simulator, str) and bool(re.fullmatch(r"[0-9A-Fa-f-]{36}", simulator)))
+        require(str(uuid.UUID(simulator)).upper() == simulator.upper())
+        return "simulator", simulator, RUNNER_BUNDLE
+    require(owned is False and isinstance(runner, str))
+    try:
+        device = validate_device_id(device)
+        validate_runner_bundle(runner)
+    except ValueError:
+        raise EvidenceFailure() from None
+    return "device", device, runner
 
 
 def patterns(values):
@@ -166,31 +186,45 @@ class EvidenceVerifier:
         return status == 0, output
 
     def load_manifest(self):
-        require(self.args.owned_simulator)
-        self.stage = "owned-simulator"
-        ok, output = self.command("devices", ["simctl", "list", "devices", "--json"])
-        require(ok)
-        owned_device(output.read_bytes(), self.args.simulator)
-        self.stage = "manifest"
-        ok, output = self.command("runner-container", ["simctl", "get_app_container", self.args.simulator, RUNNER_BUNDLE, "data"])
-        require(ok)
-        raw_path = output.read_text().strip()
-        require(raw_path and "\n" not in raw_path and "\r" not in raw_path)
-        container = pathlib.Path(raw_path).resolve(strict=True)
-        require(container.is_dir())
-        source = container / MANIFEST
-        require(source.is_file() and not source.is_symlink() and source.resolve().is_relative_to(container))
-        attributes = source.stat()
-        require(stat.S_ISREG(attributes.st_mode) and attributes.st_uid == os.geteuid()
-                and stat.S_IMODE(attributes.st_mode) & 0o077 == 0 and attributes.st_size <= 1 << 20)
-        raw = source.read_bytes()
+        mode, identifier, runner = manifest_transport(self.args)
         destination = self.root / "runner-canaries-private.json"
-        destination.write_bytes(raw)
+        copied = True
+        if mode == "device":
+            self.stage = "device-manifest"
+            copied, _ = self.command("device-manifest", ["devicectl", "device", "copy", "from",
+                "--device", identifier, "--domain-type", "appDataContainer", "--domain-identifier", runner,
+                "--source", MANIFEST.as_posix(), "--destination", str(destination)])
+            source = destination
+        else:
+            self.stage = "owned-simulator"
+            ok, output = self.command("devices", ["simctl", "list", "devices", "--json"])
+            require(ok)
+            owned_device(output.read_bytes(), identifier)
+            self.stage = "manifest"
+            ok, output = self.command("runner-container", ["simctl", "get_app_container", identifier, runner, "data"])
+            require(ok)
+            raw_path = output.read_text().strip()
+            require(raw_path and "\n" not in raw_path and "\r" not in raw_path)
+            container = pathlib.Path(raw_path).resolve(strict=True)
+            require(container.is_dir())
+            source = container / MANIFEST
+            require(source.resolve().is_relative_to(container))
+        require(source.is_file() and not source.is_symlink())
+        attributes = source.lstat()
+        require(stat.S_ISREG(attributes.st_mode) and attributes.st_uid == os.geteuid()
+                and attributes.st_size <= 1 << 20)
+        if mode == "device":
+            source.chmod(0o600)
+        else:
+            require(stat.S_IMODE(attributes.st_mode) & 0o077 == 0)
+        raw = source.read_bytes()
+        if source != destination:
+            destination.write_bytes(raw)
         destination.chmod(0o600)
         # Retain all available values even for an incomplete/invalid manifest,
         # so a failed UI case still gets the strongest scan possible.
         self.canaries, self.manifest_valid, self.manifest_complete = parse_canaries(raw)
-        require(self.manifest_valid)
+        require(self.manifest_valid and copied)
 
     def get_object(self, identifier=None):
         tail = ["--path", str(pathlib.Path(self.args.xcresult).resolve()), "--format", "json"]
@@ -279,10 +313,18 @@ class EvidenceVerifier:
         return not failures
 
 
+class FixedArgumentParser(argparse.ArgumentParser):
+    def error(self, _):
+        raise EvidenceFailure()
+
+
 def parser():
-    result = argparse.ArgumentParser(description=__doc__)
-    result.add_argument("--simulator", required=True)
+    result = FixedArgumentParser(description=__doc__)
+    target = result.add_mutually_exclusive_group(required=True)
+    target.add_argument("--simulator")
+    target.add_argument("--device")
     result.add_argument("--owned-simulator", action="store_true")
+    result.add_argument("--runner-bundle", help="physical-device runner under an explicit test-only .locklark.acceptance base")
     result.add_argument("--runtime-log", required=True)
     result.add_argument("--xcresult", required=True)
     result.add_argument("--test-exit-code", required=True, type=int)
@@ -302,7 +344,12 @@ def failure_summary(stage, files, manifest_valid, manifest_complete, export_comp
 
 
 def main(argv=None):
-    args = parser().parse_args(argv)
+    try:
+        args = parser().parse_args(argv)
+        manifest_transport(args)
+    except (EvidenceFailure, ValueError):
+        print(failure_summary("prerequisites", 0, False, False, False))
+        return 1
     os.umask(0o077)
     verifier = None
     success = False

@@ -4,9 +4,11 @@ import android.app.KeyguardManager
 import android.content.pm.ApplicationInfo
 import android.graphics.Rect
 import android.os.SystemClock
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
 import android.view.WindowManager
 import android.widget.CheckBox
 import android.widget.EditText
@@ -32,6 +34,8 @@ class OfflineVaultTest {
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
     private val canaries = mutableListOf<String>()
     private lateinit var scenario: ActivityScenario<MainActivity>
+    private var currentControl = "unknown"
+    private var controlPhase = "ready"
     private fun stage(value: String) { instrumentation.sendStatus(0, android.os.Bundle().apply { putString("locklark_stage", value) }) }
     private fun record(value: String): String {
         val fixture = File(instrumentation.targetContext.cacheDir, "instrumentation-canaries.json")
@@ -54,12 +58,16 @@ class OfflineVaultTest {
         scenario.onActivity { value = (it.window.decorView.findViewWithTag<View>(tag) as? TextView)?.text?.toString() ?: "" }
         return value
     }
-    private fun waitFor(message: String, test: () -> Boolean) {
+    private fun waitFor(message: String, test: () -> Boolean) =
+        waitUntil(message, SystemClock.elapsedRealtime() + 180_000, test)
+    private fun waitUntil(message: String, deadline: Long, test: () -> Boolean) {
         val wait = when (message) {
             "Initial create unavailable" -> "initial-create"
             "Account key unavailable" -> "account-key"
             "New vault list unavailable" -> "new-vault-list"
             "Native control unavailable" -> "native-control"
+            "Native control not visible" -> "native-visible"
+            "Soft keyboard still visible" -> "ime-hidden"
             "Native input unavailable" -> "native-input"
             "Native input delivery incomplete" -> "native-input-exact"
             "Login metadata unavailable" -> "login-metadata"
@@ -76,7 +84,6 @@ class OfflineVaultTest {
             else -> "other"
         }
         instrumentation.sendStatus(0, android.os.Bundle().apply { putString("locklark_wait", wait) })
-        val deadline = SystemClock.elapsedRealtime() + 180_000
         while (SystemClock.elapsedRealtime() < deadline) {
             if (test()) return
             SystemClock.sleep(100)
@@ -95,6 +102,7 @@ class OfflineVaultTest {
             putString("locklark_ui_status", uiStatus)
             putString("locklark_core_phase", phase); putString("locklark_core_error", error)
         })
+        reportControl()
         assertTrue(message, false)
     }
     private fun ready(tag: String): Boolean {
@@ -102,21 +110,76 @@ class OfflineVaultTest {
         return current?.isEnabled == true && current.isLaidOut && current.width > 0 && current.height > 0
     }
     private fun click(tag: String) {
-        waitFor("Native control unavailable", { ready(tag) })
+        val deadline = SystemClock.elapsedRealtime() + 180_000
+        currentControl = tag
+        controlPhase = "ready"
+        waitUntil("Native control unavailable", deadline) { ready(tag) }
+        // A full Google APIs image has a real IME. Dismiss it only when the
+        // OS reports it visible, once, before scrolling/tapping an action.
+        if (imeVisible()) {
+            controlPhase = "ime-dismiss"
+            reportControl()
+            instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
+            waitUntil("Soft keyboard still visible", deadline) { !imeVisible() }
+        }
+        controlPhase = "scroll"
         scenario.onActivity { activity ->
             val target = activity.window.decorView.findViewWithTag<View>(tag)
             target.requestRectangleOnScreen(Rect(0,0,target.width,target.height), true)
         }
         instrumentation.waitForIdleSync()
         val bounds = Rect()
-        scenario.onActivity { activity ->
-            assertTrue("Native control not visible", activity.window.decorView.findViewWithTag<View>(tag).getGlobalVisibleRect(bounds))
+        var previous = Rect()
+        controlPhase = "visibility"
+        // Insets/layout can finish after main-queue idleness. Read only until
+        // the exact control has complete, stable, actionable geometry.
+        waitUntil("Native control not visible", deadline) {
+            var visible = false
+            scenario.onActivity { activity ->
+                val target = activity.window.decorView.findViewWithTag<View>(tag)
+                visible = target != null && target.isEnabled && target.isShown && activity.hasWindowFocus() &&
+                    target.getGlobalVisibleRect(bounds) && bounds.width() == target.width && bounds.height() == target.height
+            }
+            val stable = visible && bounds == previous
+            previous = Rect(bounds)
+            stable
         }
+        controlPhase = "press"
+        reportControl()
         val now = SystemClock.uptimeMillis()
-        instrumentation.sendPointerSync(MotionEvent.obtain(now,now,MotionEvent.ACTION_DOWN,bounds.exactCenterX(),bounds.exactCenterY(),0))
+        MotionEvent.obtain(now,now,MotionEvent.ACTION_DOWN,bounds.exactCenterX(),bounds.exactCenterY(),0).also {
+            instrumentation.sendPointerSync(it); it.recycle()
+        }
         SystemClock.sleep(50)
-        instrumentation.sendPointerSync(MotionEvent.obtain(now,SystemClock.uptimeMillis(),MotionEvent.ACTION_UP,bounds.exactCenterX(),bounds.exactCenterY(),0))
+        MotionEvent.obtain(now,SystemClock.uptimeMillis(),MotionEvent.ACTION_UP,bounds.exactCenterX(),bounds.exactCenterY(),0).also {
+            instrumentation.sendPointerSync(it); it.recycle()
+        }
+        controlPhase = "released"
         instrumentation.waitForIdleSync()
+    }
+    private fun imeVisible(): Boolean {
+        var visible = false
+        scenario.onActivity { visible = it.window.decorView.rootWindowInsets?.isVisible(WindowInsets.Type.ime()) == true }
+        return visible
+    }
+    private fun reportControl() {
+        val known = setOf("generate-account-key", "backup-ack", "create-vault", "new-login", "generate-password", "save-login", "show-password", "hide-secret", "edit-login", "save-field", "show-notes", "show-username", "show-otp", "back-to-list", "search", "cancel-edit", "regenerate-password", "confirm-regenerate", "enable-quick-unlock", "lock", "unlock")
+        val tag = if (currentControl.startsWith("item-")) "login-row" else currentControl.takeIf { it in known } ?: "unknown"
+        val diagnostic = android.os.Bundle().apply {
+            putString("locklark_control", tag)
+            putString("locklark_control_phase", controlPhase)
+            putString("locklark_activity", scenario.state.name)
+        }
+        scenario.onActivity { activity ->
+            val target = activity.window.decorView.findViewWithTag<View>(currentControl)
+            val bounds = Rect()
+            diagnostic.putString("locklark_ime", (activity.window.decorView.rootWindowInsets?.isVisible(WindowInsets.Type.ime()) == true).toString())
+            diagnostic.putString("locklark_window_focus", activity.hasWindowFocus().toString())
+            diagnostic.putString("locklark_control_present", (target != null).toString())
+            diagnostic.putString("locklark_control_enabled", (target?.isEnabled == true).toString())
+            diagnostic.putString("locklark_control_visible", (target != null && target.getGlobalVisibleRect(bounds) && bounds.width() == target.width && bounds.height() == target.height).toString())
+        }
+        instrumentation.sendStatus(0, diagnostic)
     }
     private fun enter(tag: String, value: String) {
         waitFor("Native input unavailable", { ready(tag) })
