@@ -79,25 +79,22 @@ func load(tx *bolt.Tx, c *Config, anchor Checkpoint) (View, *evolution, error) {
 	if records == nil {
 		return out, nil, ErrInvalid
 	}
-	current := c.Genesis()
-	matched := anchor == current
-	e := newEvolution()
-	err := records.ForEach(func(k, raw []byte) error {
-		if len(k) != 8 || current.Version >= maxVersions || binary.BigEndian.Uint64(k) != current.Version+1 || len(raw) > maxRecord {
+	verifier, err := newHistoryVerifier(c, anchor)
+	if err != nil {
+		return View{}, nil, err
+	}
+	err = records.ForEach(func(k, raw []byte) error {
+		if len(k) != 8 || verifier.current.Version >= maxVersions || binary.BigEndian.Uint64(k) != verifier.current.Version+1 || len(raw) > maxRecord {
 			return ErrInvalid
 		}
 		var receipt Receipt
-		if !canonical(raw, &receipt) || c.verifyReceipt(receipt) != nil || receipt.Proposal.Parent != current || c.verifyTransition(e, receipt.Proposal) != nil || e.advance(receipt.Proposal) != nil {
+		if !canonical(raw, &receipt) || verifier.advance(receipt) != nil {
 			return ErrInvalid
-		}
-		current = receipt.Checkpoint()
-		if current == anchor {
-			matched = true
 		}
 		out.Receipt = receipt
 		return nil
 	})
-	if err != nil || current.Version == 0 || !matched {
+	if err != nil || verifier.current.Version == 0 || !verifier.matched {
 		return View{}, nil, ErrInvalid
 	}
 	raw := b.Get(snapshotKey)
@@ -108,11 +105,11 @@ func load(tx *bolt.Tx, c *Config, anchor Checkpoint) (View, *evolution, error) {
 	} else if raw != nil {
 		return View{}, nil, ErrInvalid
 	}
-	out.SnapshotSigner, err = c.snapshotSigner(out.Receipt.Proposal)
+	out, err = verifier.finish(out.Snapshot)
 	if err != nil {
 		return View{}, nil, ErrInvalid
 	}
-	return out, e, nil
+	return out, verifier.state, nil
 }
 func open(path string, readOnly, initial bool) (*bolt.DB, error) {
 	return bolt.Open(path, 0600, &bolt.Options{ReadOnly: readOnly, Timeout: 10 * time.Second, OpenFile: func(name string, flags int, mode os.FileMode) (*os.File, error) {

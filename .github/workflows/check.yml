@@ -60,6 +60,7 @@ jobs:
           go test -count=1 ./...
       - if: runner.os == 'Linux'
         run: |
+          python3 scripts/team_sync_acceptance.py --go "$(command -v go)"
           go build -o "$RUNNER_TEMP/locklark" ./cmd/locklark
           python3 scripts/mcp_acceptance.py "$RUNNER_TEMP/locklark"
           python3 scripts/personal_acceptance.py "$RUNNER_TEMP/locklark"

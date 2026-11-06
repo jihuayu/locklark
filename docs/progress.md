@@ -1,5 +1,9 @@
 # Locklark 开发进度
 
+团队同步与移动端从 main `9d8d574` 接续，架构与验收约定见[团队与移动设计](team-mobile-design.md)。主代理设计和独立验收，Sol xhigh 子代理分别实现真实 HTTPS 团队同步、共享 Go 移动门面、Android Kotlin、iOS Swift及外部验收，Luna max审阅。PR #37 当前仍为草稿：真实团队 TLS 与服务命令独立验收已通过；第七轮 Android 原生流程、独立外部界面、真实数据库签名审计及 KDBX 互通全部通过，新增系统认证验收发现 ATD 不提供安全锁屏，已切换完整 Google APIs 镜像继续；iOS 在官方 URL 接口实测后仍返回较弱保护，保持拒绝并准备真机验收。精确进展及失败证据见[团队与移动验收](team-mobile-validation.md)，不能把协议核心或构建成功当作完整手机/团队产品通过。
+
+登录备注 [PR #31](https://github.com/jihuayu/locklark/pull/31) 已在精确 head `9b11713` 的四项 CI（run `42146467829`）、Luna max产品/工具/测试复核及主代理独立 GUI/升级/对账验收后，正常 squash 合入 `9d8d574`。主代理核对完整远端日志中的八项真实 GUI/故障门槛；首轮 OTP 测试时钟失败已由仅测试修正关闭。
+
 MyGo 快捷搜索 [PR #30](https://github.com/jihuayu/locklark/pull/30) 已经 Sol xhigh 实现、Luna max 复审、主代理固定构建独立 GUI 与精确 head `e12cc9ab` 的四项 CI（run `42138473111`）合入 main `87fcd7c`。下一项为[登录备注](login-notes-design.md)：迁入、加密保存、原生明确查看/编辑和独立 KDBX 对账；Sol实现、Luna max产品及工具复审、主代理固定v1独立旧桌面回归与完整备注GUI、真实旧CLI升级及独立PyKeePass对账已通过；全Go/race/vet/交叉编译通过，主代理与Sol的最终故障隐私也已通过，[PR #31](https://github.com/jihuayu/locklark/pull/31) 首轮macOS/Web成功，Ubuntu旧OTP版本检查测试撞到真实到期；已由Sol仅修正测试时钟，重复/race及Luna复核通过。产品不变，更新提交的精确head CI和正常合并门槛仍待核验。
 
 浏览器逐次原生批准OTP [PR #29](https://github.com/jihuayu/locklark/pull/29) 已由Sol xhigh实现，Luna max复审、主代理固定构建的两浏览器完整GUI与故障隐私验收通过；精确head `ced61e5` 的四项CI（run `42133038819`）全部通过，合入 main `20e27aa`。继续从此主线实现[MyGo快捷搜索](desktop-quick-search-design.md)，同样保留Sol实现、Luna review及主代理设计/验收分工；固定v2已通过主代理完整日常回归与真实全局快捷搜索验收，精确head远端CI和合并门槛待完成。

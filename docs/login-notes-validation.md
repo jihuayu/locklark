@@ -55,3 +55,7 @@ Sol使用 `GOTOOLCHAIN=go1.27.3 /tmp/locklark-tools/go/bin/go test ./internal/pe
 ## 当前门槛
 
 本地实现、独立复核、主代理完整验收与故障隐私已通过；PR #31 首轮真实 CI 失败已定位并完成测试修正；更新提交的精确 head CI 与正常 PR 合并仍待核验。本切片不关闭完整类别/自定义字段/历史/附件迁移、平台真机或整体替换验收。
+
+## 最终远端与合并
+
+最终 head `9b11713ee3a215117be78ed1f54b167fec10c80f` 的 [CI 42146467829](https://github.com/jihuayu/locklark/actions/runs/42146467829) Ubuntu、Windows、macOS、Web 四项全部成功。主代理下载完整日志核对 Windows/Ubuntu 真实终端与独立 Notes KDBX 对账、macOS 原生剪贴板，以及 Web 中旧桌面日常、快捷搜索、备注正常/故障隐私、Chromium/Firefox 完整流程与两项 OTP 故障门槛各实际成功一次。PR #31 于北京时间2026-11-06 10:01:20经正常 squash 合入 `9d8d57475f3fb904fc9fe4bedc0c1e6b4ce07535`，无保护绕过；main 已快进同步。本段关闭前述最终 CI/合并待办，不关闭其余产品范围。
