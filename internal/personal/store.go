@@ -201,6 +201,7 @@ type result struct {
 	otp               *totp.Config
 	profile           password.Profile
 	value             []byte
+	values            map[string][]byte
 	session, intent   string
 	rows              []Row
 	events            []Event
@@ -226,6 +227,7 @@ type commandOption struct {
 	browser        *BrowserFillTarget
 	unlocked       *Session
 	run            *RunRequest
+	runBundle      *runBundleStoreRequest
 	search         *searchRequest
 	livePull       *LivePullRequest
 	injection      *injectionRequest
@@ -254,6 +256,7 @@ func commandWithClose(run func() (result, error), closeDB func() error) (r resul
 		if closeErr := closeDB(); closeErr != nil && (err == nil || r.savePersisted) {
 			r.browser.clear()
 			clear(r.value)
+			clearBundleValues(r.values)
 			clear(r.sshSeed)
 			clear(r.material)
 			clear(r.archive)
@@ -451,6 +454,9 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		return result{}, ErrInjectionTarget
 	}
 	if runAction(action) != (option.run != nil) || option.run != nil && option.run.Validate() != nil {
+		return result{}, ErrRunTarget
+	}
+	if (action == runBundleAction) != (option.runBundle != nil) || option.runBundle != nil && option.runBundle.validate() != nil {
 		return result{}, ErrRunTarget
 	}
 	if (action == livePullAction) != (option.livePull != nil) || option.livePull != nil && option.livePull.Validate() != nil {
@@ -691,10 +697,11 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 							return ErrSSHKey
 						}
 						v2Read := action == v2AttachmentReadAction || action == referenceRevealAction || action == referenceOTPAction || action == "item.reveal.notes"
-						if !option.sshState && option.nativeMutation != nil && items[i].Kind != "login" && !v2Read && !v2MutationAction(action) {
+						lifecycleTarget := (items[i].Kind == "ssh-key" || items[i].Kind == "document") && (trashAction(action) || lifecycleAction(action))
+						if !option.sshState && option.nativeMutation != nil && items[i].Kind != "login" && !v2Read && !v2MutationAction(action) && !lifecycleTarget {
 							return ErrMutationRefused
 						}
-						if items[i].Kind != "login" && !v2Read && !v2MutationAction(action) && !(items[i].Kind == "ssh-key" && (trashAction(action) || lifecycleAction(action))) {
+						if items[i].Kind != "login" && !v2Read && !v2MutationAction(action) && !lifecycleTarget {
 							return invalid
 						}
 						if action == browserOTPAction {
@@ -902,7 +909,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			if action == "item.generate" && strings.TrimSpace(add.Title) == "" {
 				return errors.New("a title is required")
 			}
-			if strings.TrimSpace(add.Title) == "" || (action == "item.add" && add.Password == "") {
+			if strings.TrimSpace(add.Title) == "" || (action == "item.add" && add.Kind != "document" && add.Password == "") || (action == "item.add" && add.Kind == "document" && (strings.TrimSpace(add.Filename) == "" || len(add.Attachment) == 0)) {
 				return errors.New("a title and password are required")
 			}
 			if option.nativeMutation != nil {
@@ -1401,6 +1408,11 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 					items[idx] = next
 				}
 			}
+		case runBundleAction:
+			out.id, out.values, outcome, refusal, e = option.runBundle.extract(items, revisions)
+			if e != nil {
+				return e
+			}
 		case "audit.list":
 		default:
 			return invalid
@@ -1459,6 +1471,13 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		}
 		if runAction(action) && refusal == nil {
 			link, e = option.run.binding(i.AuditEncryption)
+			if e != nil {
+				return e
+			}
+			out.destinationDigest = link
+		}
+		if action == runBundleAction && refusal == nil {
+			link, e = option.runBundle.binding(i.AuditEncryption)
 			if e != nil {
 				return e
 			}
@@ -1524,6 +1543,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		clear(out.archive)
 		clear(out.material)
 		clear(out.value)
+		clearBundleValues(out.values)
 		clear(out.sshSeed)
 		if out.otp != nil {
 			out.otp.Clear()
