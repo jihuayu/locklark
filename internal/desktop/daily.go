@@ -114,7 +114,7 @@ func (a *App) saveNativeCaptured(meta personal.NativeLoginMetadata, user, value 
 		}
 		return out
 	}, func(r nativeResult) {
-		a.rows = r.rows
+		a.rows = loginProjection(r.rows)
 		a.selected = nil
 		a.title = ""
 		a.website = ""
@@ -168,7 +168,7 @@ func (a *App) confirmRegeneration() {
 		return out
 	}, func(r nativeResult) {
 		a.regenerate = nil
-		a.rows = r.rows
+		a.rows = loginProjection(r.rows)
 		a.selected = nil
 		a.status = "本地密码已重新生成；网站密码尚未修改"
 		if r.refreshErr != nil {
