@@ -78,7 +78,7 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 	if e.Sequence != n || e.Previous != prev || !idOK(e.Session) || e.Actor != "local-owner" || !ed25519.Verify(pub, e.proof(), e.Signature) {
 		return invalid
 	}
-	if e.Action != passkeyCreateAction && e.Action != "desktop.system.enable" && !browserSaveAction(e.Action) && !editAction(e.Action) && !readValueAction(e.Action) && !otpAction(e.Action) && e.Action != referenceRejectAction && e.Action != inspectionAction && e.Action != exportAction && e.Action != matchAction && !migrationAction(e.Action) && !((e.Action == "item.add" || e.Action == "item.generate") && e.Result == "native-refused") && (e.Result != "succeeded" || e.BaseRevision != "") {
+	if e.Action != passkeyCreateAction && e.Action != "desktop.system.enable" && e.Action != sshSignAction && !browserSaveAction(e.Action) && !editAction(e.Action) && !readValueAction(e.Action) && !otpAction(e.Action) && e.Action != referenceRejectAction && e.Action != inspectionAction && e.Action != exportAction && e.Action != matchAction && !migrationAction(e.Action) && !((e.Action == sshGenerateAction || e.Action == sshImportAction || e.Action == "item.add" || e.Action == "item.generate") && e.Result == "native-refused") && (e.Result != "succeeded" || e.BaseRevision != "") {
 		return invalid
 	}
 	if (e.Action == inspectionAction || migrationAction(e.Action) || e.Action == "item.import" || e.Action == healthAction) && e.Result == "succeeded" {
@@ -88,7 +88,7 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 	} else if e.ReportDigest != "" {
 		return invalid
 	}
-	if e.Action != passkeyCreateAction && e.Action != "backup.prepare" && e.Action != "vault.restore" && !browserSaveAction(e.Action) && !boundValueAction(e.Action) && e.Action != searchAction && e.Link != "" {
+	if e.Action != passkeyCreateAction && e.Action != sshSignAction && e.Action != "backup.prepare" && e.Action != "vault.restore" && !browserSaveAction(e.Action) && !boundValueAction(e.Action) && e.Action != searchAction && e.Link != "" {
 		return invalid
 	}
 	if e.Action == searchAction && !digestOK(e.Link) {
@@ -105,6 +105,23 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 		return invalid
 	}
 	switch e.Action {
+	case sshSignAction:
+		if n <= 1 {
+			return invalid
+		}
+		if e.Result == "not-found" && e.Item == "" && e.BaseRevision == "" && e.Link == "" {
+			break
+		}
+		if !idOK(e.Item) || !digestOK(e.BaseRevision) {
+			return invalid
+		}
+		if e.Result == "intent" {
+			if !digestOK(e.Link) {
+				return invalid
+			}
+		} else if (e.Result != "conflict" && e.Result != "native-refused") || e.Link != "" {
+			return invalid
+		}
 	case passkeyCreateAction:
 		if n <= 1 || !idOK(e.Item) || e.Result != "succeeded" || !digestOK(e.Link) || e.BaseRevision != "" && !digestOK(e.BaseRevision) {
 			return invalid
@@ -196,8 +213,8 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 		if n != 1 || e.Item != "" {
 			return invalid
 		}
-	case "item.add", "item.restore", "item.generate", "item.import":
-		if (e.Action == "item.add" || e.Action == "item.generate") && e.Result == "native-refused" {
+	case sshGenerateAction, sshImportAction, "item.add", "item.restore", "item.generate", "item.import":
+		if (e.Action == sshGenerateAction || e.Action == sshImportAction || e.Action == "item.add" || e.Action == "item.generate") && e.Result == "native-refused" {
 			if n <= 1 || e.Item != "" || e.BaseRevision != "" {
 				return invalid
 			}
@@ -279,12 +296,12 @@ func history(b *bolt.Bucket, i identity, s vault.Snapshot, want bool, revisions 
 				return invalid
 			}
 			revisions[ev.Item] = prev
-		} else if ((ev.Action == "item.add" || ev.Action == "item.generate") && ev.Result == "succeeded") || ev.Action == "item.restore" || ev.Action == "item.import" || ev.Action == browserNewAction && ev.Result == "succeeded" {
+		} else if ((ev.Action == sshGenerateAction || ev.Action == sshImportAction || ev.Action == "item.add" || ev.Action == "item.generate") && ev.Result == "succeeded") || ev.Action == "item.restore" || ev.Action == "item.import" || ev.Action == browserNewAction && ev.Result == "succeeded" {
 			if revisions[ev.Item] != "" {
 				return invalid
 			}
 			revisions[ev.Item] = prev
-		} else if editAction(ev.Action) || ev.Action == browserUpdateAction || readValueAction(ev.Action) || otpAction(ev.Action) {
+		} else if ev.Action == sshSignAction || editAction(ev.Action) || ev.Action == browserUpdateAction || readValueAction(ev.Action) || otpAction(ev.Action) {
 			found := revisions[ev.Item] != ""
 			if (ev.Result == "not-found") == found || ev.BaseRevision != revisions[ev.Item] {
 				return invalid

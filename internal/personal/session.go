@@ -19,6 +19,8 @@ var ErrDesktopDelivery = errors.New("native disclosure failed; intent recorded, 
 // Key. Operations are serialized and revalidate the slot, snapshot and history.
 // No exported method exposes arbitrary commands or key material to a renderer.
 type Session struct {
+	sshPending           sync.Map
+	sshRows              map[string]SSHKeyRow
 	browserOTPControls   sync.Map
 	browserOTPPrepared   map[*BrowserOTP]bool
 	browserOTPDeliveries map[*BrowserOTPDelivery]bool
@@ -76,6 +78,14 @@ func UnlockSession(path string, password, key []byte, idle time.Duration) (*Sess
 	return &Session{path: path, material: r.material, slotDigest: r.slotDigest, last: time.Now(), fullUnlock: time.Now(), idle: idle, pending: make(map[*NativeField]bool)}, nil
 }
 func (s *Session) lock() {
+	s.sshPending.Range(func(key, _ any) bool {
+		x := key.(*sshSignState)
+		(&SSHSignIntent{x}).Cancel()
+		x.clear()
+		s.sshPending.Delete(x)
+		return true
+	})
+	s.sshRows = nil
 	for p := range s.browserOTPPrepared {
 		p.cap.clear()
 		s.otpCaps.Delete(p.cap)
@@ -165,6 +175,7 @@ func (s *Session) executeActive(action string, add vault.Item, edit *Edit, optio
 		r.browser.clear()
 		clear(r.material)
 		clear(r.value)
+		clear(r.sshSeed)
 		clear(r.archive)
 		if r.otp != nil {
 			r.otp.Clear()
@@ -219,6 +230,7 @@ func (s *Session) SetState(id, revision, action string) (string, error) {
 	if !ValidEditTarget(id, revision, "title") || (!lifecycleAction(action) && !trashAction(action)) {
 		return "", invalid
 	}
+	defer s.cancelSSHTarget(id)
 	r, e := s.execute(action, vault.Item{}, &Edit{ID: id, Revision: revision}, commandOption{})
 	return r.revision, e
 }

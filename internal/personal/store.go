@@ -37,6 +37,7 @@ type identity struct {
 func (i *identity) clear() { clear(i.Signing); clear(i.Audit); clear(i.AuditEncryption) }
 
 type Row struct {
+	Kind         string `json:"kind,omitempty"`
 	RestoreState string `json:"restore_state,omitempty"`
 	State        string `json:"state"`
 	ID           string `json:"id"`
@@ -185,6 +186,7 @@ func existingWithReadOnly(path string, readOnly bool) (*bolt.DB, error) {
 }
 
 type result struct {
+	sshSeed           []byte
 	savePersisted     bool
 	browser           *NativeBrowserFill
 	material          []byte
@@ -208,6 +210,8 @@ type result struct {
 }
 
 type commandOption struct {
+	sshState       bool
+	ssh            *sshStoreRequest
 	browserOTP     *BrowserOTPTarget
 	nativeMutation *nativeMutationRequest
 	browserSave    *browserSaveRequest
@@ -241,6 +245,7 @@ func commandWithClose(run func() (result, error), closeDB func() error) (r resul
 		if closeErr := closeDB(); closeErr != nil && (err == nil || r.savePersisted) {
 			r.browser.clear()
 			clear(r.value)
+			clear(r.sshSeed)
 			clear(r.material)
 			clear(r.archive)
 			if r.otp != nil {
@@ -265,17 +270,27 @@ type authenticatedState struct {
 	revisions map[string]string
 }
 
-func (a *authenticatedState) clear() { clear(a.opened); a.identity.clear() }
+func (a *authenticatedState) clear() {
+	clear(a.opened)
+	a.identity.clear()
+	for _, item := range a.items {
+		clear(item.SSHSeed)
+	}
+}
 
 // Both write commands and native read-only revalidation use this complete
 // slot, signed snapshot, schema and full history authentication path.
 func authenticateState(tx *bolt.Tx, pw string, key []byte, action string, unlocked *Session) (out *authenticatedState, err error) {
 	var opened []byte
 	var i identity
+	var items []vault.Item
 	defer func() {
 		if err != nil {
 			clear(opened)
 			i.clear()
+			for _, item := range items {
+				clear(item.SSHSeed)
+			}
 		}
 	}()
 	b := tx.Bucket(bucket)
@@ -325,7 +340,6 @@ func authenticateState(tx *bolt.Tx, pw string, key []byte, action string, unlock
 	if e != nil {
 		return nil, e
 	}
-	var items []vault.Item
 	if action != "audit.list" {
 		var meta []byte
 		meta, items, e = vault.OpenItems(s, device, signer.Public().(ed25519.PublicKey), tip.Epoch)
@@ -366,8 +380,17 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 	if action == "item.edit.notes" && (edit == nil || edit.Field != "notes" || !ValidEditTarget(edit.ID, edit.Revision, edit.Field)) {
 		return result{}, invalid
 	}
-	if option.nativeMutation != nil && (option.unlocked == nil || option.nativeMutation.gate == nil || !(action == "item.add" || action == "item.edit.notes" || generatedAction(action) || action == desktopOTPShowAction || action == desktopOTPCopyAction || action == browserOTPAction)) {
+	if option.nativeMutation != nil && (option.unlocked == nil || option.nativeMutation.gate == nil || !(option.sshState || action == sshGenerateAction || action == sshImportAction || action == sshSignAction || action == "item.add" || action == "item.edit.notes" || generatedAction(action) || action == desktopOTPShowAction || action == desktopOTPCopyAction || action == browserOTPAction)) {
 		return result{}, invalid
+	}
+	if option.sshState && (option.unlocked == nil || option.nativeMutation == nil || !(lifecycleAction(action) || trashAction(action)) || edit == nil || edit.Field != "" || !idOK(edit.ID) || !digestOK(edit.Revision)) {
+		return result{}, ErrSSHKey
+	}
+	if (action == sshGenerateAction || action == sshImportAction || action == sshSignAction) != (option.ssh != nil) || option.ssh != nil && (option.unlocked == nil || option.nativeMutation == nil || (action == sshSignAction) != (option.ssh.sign != nil)) {
+		return result{}, ErrSSHSign
+	}
+	if action == sshSignAction && (edit == nil || edit.Field != "" || option.ssh.target != (SSHKeyTarget{edit.ID, edit.Revision}) || !idOK(edit.ID) || !digestOK(edit.Revision) || !validSSHRequest(*option.ssh.sign)) {
+		return result{}, ErrSSHSign
 	}
 	if browserSaveAction(action) != (option.browserSave != nil) || option.browserSave != nil && (!option.browserSave.valid() || option.unlocked == nil || (action == browserNewAction) != (option.browserSave.target.ID == "")) {
 		return result{}, ErrBrowserSaveRefused
@@ -447,6 +470,39 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			}
 		}
 		switch action {
+		case sshGenerateAction, sshImportAction:
+			add.ID, e = randomID()
+			if e != nil {
+				return e
+			}
+			if add.Kind != "ssh-key" || len(add.Title) > 1024 || strings.TrimSpace(add.Title) == "" || vault.ValidateItems([]byte(schema), append(append([]vault.Item(nil), items...), add)) != nil {
+				outcome, refusal = "native-refused", ErrMutationRefused
+				break
+			}
+			items = append(items, add)
+			out.id = add.ID
+		case sshSignAction:
+			out.id = edit.ID
+			switch rev := revisions[edit.ID]; {
+			case rev == "":
+				out.id = ""
+				outcome, refusal = "not-found", ErrNotFound
+			case rev != edit.Revision:
+				outcome, refusal = "conflict", ErrConflict
+			default:
+				for _, item := range items {
+					if item.ID != edit.ID {
+						continue
+					}
+					if item.Kind != "ssh-key" || item.State != "" || !bytes.Equal(item.SSHPublicKey, option.ssh.sign.PublicKey) {
+						outcome, refusal = "native-refused", ErrMutationRefused
+						break
+					}
+					out.sshSeed = bytes.Clone(item.SSHSeed)
+					outcome = "intent"
+					break
+				}
+			}
 		case browserNewAction, browserUpdateAction:
 			rq := option.browserSave
 			index := -1
@@ -612,7 +668,10 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			default:
 				for i := range items {
 					if items[i].ID == edit.ID {
-						if items[i].Kind != "login" {
+						if option.sshState && items[i].Kind != "ssh-key" {
+							return ErrSSHKey
+						}
+						if items[i].Kind != "login" && !(items[i].Kind == "ssh-key" && (trashAction(action) || lifecycleAction(action))) {
 							return invalid
 						}
 						if action == browserOTPAction {
@@ -806,7 +865,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 						restoreState = "archived"
 					}
 				}
-				out.rows = append(out.rows, Row{ID: it.ID, Title: it.Title, Revision: revisions[it.ID], State: state, RestoreState: restoreState})
+				out.rows = append(out.rows, Row{Kind: it.Kind, ID: it.ID, Title: it.Title, Revision: revisions[it.ID], State: state, RestoreState: restoreState})
 			}
 		case "audit.list":
 		default:
@@ -824,13 +883,20 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 				return ErrMutationCancelled
 			}
 		}
-		if ((action == "item.add" || action == "item.generate") && refusal == nil) || ((editAction(action) || browserSaveAction(action)) && refusal == nil) {
+		if ((action == "item.add" || action == "item.generate" || action == sshGenerateAction || action == sshImportAction) && refusal == nil) || ((editAction(action) || browserSaveAction(action)) && refusal == nil) {
 			s, e = seal(b, i, s.Epoch+1, items)
 			if e != nil {
 				return e
 			}
 		}
 		var link string
+		if action == sshSignAction && refusal == nil {
+			link, e = option.ssh.binding(i.AuditEncryption)
+			if e != nil {
+				return e
+			}
+			out.destinationDigest = link
+		}
 		if action == browserOTPAction {
 			link = browserOTPLink
 		}
@@ -886,7 +952,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		if e != nil {
 			return e
 		}
-		if (readValueAction(action) || otpAction(action) || action == inspectionAction || action == exportAction || migrationAction(action) || action == healthAction || action == searchAction) && refusal == nil {
+		if (action == sshSignAction || readValueAction(action) || otpAction(action) || action == inspectionAction || action == exportAction || migrationAction(action) || action == healthAction || action == searchAction) && refusal == nil {
 			out.session, out.intent = ev.Session, ev.hash()
 		}
 		if action == "backup.prepare" {
@@ -899,7 +965,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		}
 		if action == "audit.list" {
 			out.events = append(rows, ev)
-		} else if (editAction(action) || browserSaveAction(action) || action == "item.generate" || action == "item.add") && refusal == nil {
+		} else if (editAction(action) || browserSaveAction(action) || action == "item.generate" || action == "item.add" || action == sshGenerateAction || action == sshImportAction) && refusal == nil {
 			out.revision = ev.hash()
 		}
 		return nil
@@ -909,6 +975,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		clear(out.archive)
 		clear(out.material)
 		clear(out.value)
+		clear(out.sshSeed)
 		if out.otp != nil {
 			out.otp.Clear()
 		}

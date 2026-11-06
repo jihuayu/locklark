@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -32,6 +33,20 @@ func TestBrowserOTPCapDeadlineClearsIndependentOfLongControl(t *testing.T) {
 }
 
 func TestBrowserOTPClockMarginAndFinalGrantBounds(t *testing.T) {
+	// Wall-clock margin/grant assertions must reach their intended boundary,
+	// rather than race a one-second control timer during authenticated disk I/O.
+	// Keep the production budgets and timers unchanged in one virtual-time bubble;
+	// separate tests below/alongside this one exercise real deadline cancellation.
+	synctest.Test(t, func(t *testing.T) {
+		started := time.Now()
+		testBrowserOTPClockMarginAndFinalGrantBounds(t)
+		if !time.Now().Equal(started) {
+			t.Fatal("clock semantic test unexpectedly advanced virtual time")
+		}
+	})
+}
+
+func testBrowserOTPClockMarginAndFinalGrantBounds(t *testing.T) {
 	s, target := browserOTPFixture(t)
 	base := time.Now()
 	samples := 0
