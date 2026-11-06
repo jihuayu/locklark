@@ -608,7 +608,7 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 		cat := it.EffectiveCategory()
 		switch {
 		case cat == CategorySSHKey && (it.Kind == "ssh-key" || len(fields["Locklark.SSHSeed"].Content) > 0):
-			if len(fields) != 6+extra {
+			if len(fields) != 6+extra || len(e.Binaries) != 0 {
 				return nil, nil, ErrSnapshot
 			}
 			var err error

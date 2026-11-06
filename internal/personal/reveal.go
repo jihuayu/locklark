@@ -25,7 +25,11 @@ type DisclosureReceipt struct {
 var ErrDisclosureOutput = errors.New("terminal disclosure incomplete; intent recorded, delivery unknown")
 
 func revealAction(action string) bool {
-	return action == "item.reveal.username" || action == "item.reveal.password"
+	switch action {
+	case "item.reveal.username", "item.reveal.password", "item.reveal.notes", "item.reveal.reference":
+		return true
+	}
+	return false
 }
 
 func ValidRevealTarget(id, revision, field string) bool {

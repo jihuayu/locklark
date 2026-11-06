@@ -726,7 +726,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 								if items[i].State == "trashed" {
 									outcome, refusal = "already-trashed", ErrAlreadyTrashed
 								} else {
-									now := time.Now()
+									now := time.Now().UTC()
 									items[i].PreviousState, items[i].State, items[i].TrashedAt = items[i].State, "trashed", &now
 								}
 							} else if items[i].State != "trashed" {

@@ -178,7 +178,7 @@ func projectReferenceFields(it vault.Item, cat vault.ItemCategory) (projectedFie
 			}
 		}
 	}
-	if vault.HasV2Extension(it) {
+	if it.Notes != "" || vault.HasV2Extension(it) {
 		if err := add("notes", "notes", reference.TypeText); err != nil {
 			return projectedFields{}, err
 		}
