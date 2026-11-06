@@ -31,7 +31,7 @@ type fixture struct {
 
 type item struct {
 	personal.Row
-	URL, Username, Password, OTP, ImportSource string
+	URL, Username, Password, OTP, Notes, ImportSource string
 }
 
 type observation struct {
@@ -219,7 +219,7 @@ func observe(f fixture, key []byte) error {
 			if !found {
 				return errors.New("exported item mismatch")
 			}
-			out.Items = append(out.Items, item{row, entry.GetContent("URL"), entry.GetContent("UserName"), entry.GetContent("Password"), entry.GetContent("otp"), entry.GetContent("Locklark.ImportSource")})
+			out.Items = append(out.Items, item{row, entry.GetContent("URL"), entry.GetContent("UserName"), entry.GetContent("Password"), entry.GetContent("otp"), entry.GetContent("Notes"), entry.GetContent("Locklark.ImportSource")})
 		}
 	}
 	if len(out.Items) != len(rows) {
@@ -232,7 +232,7 @@ func observe(f fixture, key []byte) error {
 	defer clear(public)
 	canaries := []string{f.Password, f.Secret, f.Username, f.Value, f.OTPSeed, f.OTPConfig, f.ProviderCanary, f.ProviderValue}
 	for _, it := range out.Items {
-		canaries = append(canaries, it.Password, it.Username, it.OTP)
+		canaries = append(canaries, it.Password, it.Username, it.OTP, it.Notes)
 	}
 	for _, value := range canaries {
 		if value != "" && bytes.Contains(public, []byte(value)) {

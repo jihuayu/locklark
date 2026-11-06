@@ -117,7 +117,7 @@ jobs:
       - run: go build ./cmd/locklark-desktop
       - name: Build native browser hosts
         run: go build ./cmd/locklark-browser-chromium ./cmd/locklark-browser-firefox ./cmd/locklark-browser-register
-      - run: go test ./internal/osunlock ./internal/desktop ./internal/personal ./internal/browserhost -run 'TestNative|TestDesktopSession|TestSystemUnlock|TestLockDoesNotWait|TestCancelledSystemUnlock|TestLockDrops|TestClipboard|TestDaily|TestBrowserOTP|TestOTP|TestQuick' -count=1
+      - run: go test ./internal/osunlock ./internal/desktop ./internal/personal ./internal/browserhost ./internal/vault ./internal/onepux -run 'TestNative|TestDesktopSession|TestSystemUnlock|TestLockDoesNotWait|TestCancelledSystemUnlock|TestLockDrops|TestClipboard|TestDaily|TestBrowserOTP|TestOTP|TestQuick|TestNotes|TestLoginNotes' -count=1
       - name: Test native macOS clipboard ownership
         timeout-minutes: 3
         env:
@@ -184,6 +184,7 @@ jobs:
           go build -o "$RUNNER_TEMP/locklark-browser-firefox" ./cmd/locklark-browser-firefox
           go build -o "$RUNNER_TEMP/locklark-browser-register" ./cmd/locklark-browser-register
           go build -o "$RUNNER_TEMP/locklark-desktop" ./cmd/locklark-desktop
+          go build -o "$RUNNER_TEMP/locklark" ./cmd/locklark
       - name: Test native desktop daily tools and clipboard ownership
         timeout-minutes: 10
         run: dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' python3 scripts/desktop_native_acceptance.py
@@ -196,6 +197,21 @@ jobs:
         env:
           LOCKLARK_GO: go
           LOCKLARK_DESKTOP_HOST: ${{ runner.temp }}/locklark-desktop
+      - name: Install independent notes KDBX reader
+        timeout-minutes: 3
+        run: |
+          python3 -m venv "$RUNNER_TEMP/locklark-notes-peer"
+          "$RUNNER_TEMP/locklark-notes-peer/bin/python" -m pip install 'pykeepass==4.2.0'
+      - name: Test native imported multiline login notes and failure privacy
+        timeout-minutes: 10
+        run: |
+          dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' python3 scripts/desktop_login_notes_acceptance.py
+          dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' python3 scripts/login_notes_privacy_acceptance.py
+        env:
+          LOCKLARK_GO: go
+          LOCKLARK_CLI_HOST: ${{ runner.temp }}/locklark
+          LOCKLARK_DESKTOP_HOST: ${{ runner.temp }}/locklark-desktop
+          LOCKLARK_TEST_PYKEEPASS: ${{ runner.temp }}/locklark-notes-peer/bin/python
       - name: Test browser extension DOM
         timeout-minutes: 10
         run: node scripts/browser_extension_dom.cjs

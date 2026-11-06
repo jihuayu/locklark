@@ -53,3 +53,7 @@ Sol95在工具draft2完整GUI通过（`desktop-quick-search-v2-tools-draft2-gui.
 CI新增xfwm4依赖与单独的真实quick GUI步骤（私有DBus/Xvfb、绑定已构建desktop）；Python discover覆盖新 `test_desktop_quick_native.py`，macOS筛选加入TestQuick，旧日常/浏览器/OTP/Next.js门槛全部保留。精确head远端CI仍须PR提交后核验，不能用本地成功代替。
 
 Luna对最终draft3工具/诊断/CI增量复核无阻塞，独立64/64 native工具测试、py_compile、diff检查及10项manifest核对通过；Luna未运行真实GUI，GUI的独立证据为上述父代理94。最终工具manifest本身SHA256 `8e50113fd839c9b8723cfbe50208f779bf443bf195d162ffe91a077b6a288310`。
+
+## 合并证据
+
+精确 head `e12cc9abd67fe050a36e1201071ac11fe7daaeea` 的 [CI 42138473111](https://github.com/jihuayu/locklark/actions/runs/42138473111) 四项全部通过。主代理核对完整日志中的快捷搜索、旧桌面日常、两浏览器完整链路及两项 OTP 故障隐私门槛，随后经正常 ready/squash 于 2026-11-06 00:57:37 UTC 合并 [PR #30](https://github.com/jihuayu/locklark/pull/30)，main 为 `87fcd7c4f26ba19277ca0fdc3c6341098e82a3da`。

@@ -1,5 +1,7 @@
 # 认证的 1PUX 登录导入
 
+本文记录最初 `login-v1` 批次。后续 `login-notes-v2` 新增登录纯文本备注并更新计划绑定域，保留原来源身份；当前范围与升级证据见[登录备注验收](login-notes-validation.md)。下述 v1 拒绝备注属于当时的历史行为。
+
 基线 main `d932f51`，分支 `codex/onepux-login-import`。本批是七条持续目标中的第一个导入闭环，尚不覆盖完整类别/字段/附件/历史迁移。
 
 先运行 `personal plan-import-1pux --file owner.ll --source source.1pux`，双因素和 PLAN 确认后获得 `report.source_digest`。再运行 `personal import-1pux --file owner.ll --source source.1pux --digest PLAN_DIGEST`，双因素和 SAVE 确认后原子写入。计划只写审计、不写条目。导入重新读取有界普通文件，在认证、历史和快照验证之后核对绑定源文件逐字节内容的 HMAC-SHA256 计划标记；摘要不同就拒绝，不能使用旧计划导入新文件。计划密钥从本库审计加密密钥经独立用途 HKDF 派生；不公开明文归档的无密钥摘要，标记不可跨库/恢复后串用。摘要只绑定来源字节，不认证 1Password 来源，也不证明本地整库没有被回滚。

@@ -2,7 +2,7 @@
 
 **Keep the keys. Grant the action.** 面向个人和小团队的本地密码管理器。目标是替换 1Password 8 的日常体验，并让 Agent 申请具体操作、说明原因、关联会话。
 
-当前交付包括 **个人库 CLI 预览** 和独立的 **M0 合成网关演练**。个人库日常操作可离线运行，另有每次人工确认的 GitHub HTTPS 查询入口。个人库可以实际创建和保存登录记录，尚未完成独立密码评审、系统密钥存储和灾后恢复验收。请先用测试数据，不要停用已有密码管理器。设计与威胁模型见[设计稿](docs/design.md)。
+当前交付包括 **个人库 CLI 预览** 和独立的 **M0 合成网关演练**。个人库日常操作可离线运行，另有每次人工确认的 GitHub HTTPS 查询入口。个人库可以实际创建和保存登录记录，系统密钥保护已有平台实现，独立密码评审、逐平台硬件与干净机器灾后恢复验收尚未完成。请先用测试数据，不要停用已有密码管理器。设计与威胁模型见[设计稿](docs/design.md)。
 
 字段引用的元数据核心已实现有限的 `op://vault/item/[section/]field` 解析、名称/ID 唯一定位和修订号绑定；同名拒绝，未知属性不静默忽略。个人 v1 登录布局已接入认证事务、人工字段披露和取码，其他布局仍只有元数据核心；尚未与固定 op 版本实际对照，不代表已兼容 `op read/run/inject`。当前子集与验收见[字段引用记录](docs/reference-validation.md)。
 
@@ -14,7 +14,7 @@
 
 Go TOTP 核心已通过 RFC 6238/4226 向量，支持有限的 Base32/otpauth 配置、SHA1/256/512、6/8 位码和显式时间窗口。个人 CLI 已接入配置保存与先记意图的受控取码；短种子、不支持参数和非法时间明确拒绝，现有短种子演练数据不改写。不代表已兼容 op 的 OTP 行为；核心见[TOTP 验收](docs/totp-validation.md)，产品入口见[个人 TOTP 验收](docs/personal-totp-validation.md)。
 
-密码生成核心使用系统 CSPRNG 与标准库拒绝采样，默认 24 位字母数字；策略要求至少 128 位组合熵，拒绝字符集重复、弱策略及超限。个人 CLI 已接入生成并保存/替换的事务流程，普通输出不包含生成值；桌面生成入口仍未实现。核心证据见[密码生成验收](docs/password-generation-validation.md)，产品入口见[生成保存验收](docs/personal-generation-validation.md)。
+密码生成核心使用系统 CSPRNG 与标准库拒绝采样，默认 24 位字母数字；策略要求至少 128 位组合熵，拒绝字符集重复、弱策略及超限。个人 CLI 和 MyGo 桌面已接入生成并保存/替换的事务流程，普通输出不包含生成值。核心证据见[密码生成验收](docs/password-generation-validation.md)，产品入口见[生成保存验收](docs/personal-generation-validation.md)。
 
 独立 1PUX v3 清点预检模块在内存中检查归档边界、CRC 和严格 JSON，输出受限计数，不输出标题、路径或字段值，也不落盘解压。显式 `file.path` 可精确核对匹配/缺失、重复引用和声明大小差异；没有当前子集显式引用的文件不能称为孤儿或据此删除。另有区段和登录字段结构清点，保留重复、缺失、未知 designation 和 JSON 值形状；`type`/`fieldType` 分开计数，不猜测语义，见[登录字段清点](docs/onepux-login-fields-validation.md)。密码历史另按原顺序清点值/时间形状、精确整数相邻关系和字面重复，不排序、不去重，见[历史清点](docs/onepux-password-history-validation.md)。个人 CLI 已开放认证、审计的只读预检；全部条目映射仍未验证，未开放通用写入入口；见[清点验收](docs/onepux-preflight-validation.md)与[显式文件关联验收](docs/onepux-file-references-validation.md)。
 
@@ -44,7 +44,7 @@ Go TOTP 核心已通过 RFC 6238/4226 向量，支持有限的 Base32/otpauth �
 
 `personal health --file owner.ll` 经双因素和 SCAN 确认后提供本地密码体检，仅输出活动登录的 ID/修订与固定问题码；检查空值、短值、低字符种类、示例常见值、重复使用和未保存 TOTP。不联网查询泄露库，不把未发现问题称为安全，也不推断网站的双因素状态。范围、规则与验收见[本地体检](docs/personal-health-validation.md)。
 
-支持范围明确的基本登录导入：先运行 `personal plan-import-1pux --file owner.ll --source source.1pux`，使用返回的 `report.source_digest` 运行 `personal import-1pux --file owner.ll --source source.1pux --digest PLAN_DIGEST`。两步都需要隐藏双因素和确认；源文件变化、同源重复、容量超限或未支持字段整批拒绝。当前只接单账户/单库、用户名/密码、单 HTTPS URL 和活动/归档状态；原始来源记录加密保留，编辑后可能仍含旧值。完整字段/类别/附件/历史迁移未完成，详见[登录导入验收](docs/personal-import-validation.md)和[七条交付范围](docs/seven-track-delivery.md)。
+支持范围明确的基本登录导入：先运行 `personal plan-import-1pux --file owner.ll --source source.1pux`，使用返回的 `report.source_digest` 运行 `personal import-1pux --file owner.ll --source source.1pux --digest PLAN_DIGEST`。两步都需要隐藏双因素和确认；源文件变化、同源重复、容量超限或未支持字段整批拒绝。当前 `login-notes-v2` 接受单账户/单库、用户名/密码、单 HTTPS URL、纯文本备注（最多 64 KiB）和活动/归档状态；旧 `login-v1` 计划需重新生成并确认，已导入同源条目仍会拒绝重复。原始来源记录加密保留，编辑后可能仍含旧值。完整字段/类别/附件/历史迁移未完成，详见[登录导入验收](docs/personal-import-validation.md)和[七条交付范围](docs/seven-track-delivery.md)。
 
 `personal references --file owner.ll` 经双因素解锁后列出库 ID、固定别名 `Personal`、条目 ID/标题/修订及 username/password/otp 引用，不输出字段值。使用当前列表中的引用和修订：
 
@@ -79,7 +79,7 @@ go build -o locklark.exe ./cmd/locklark
 .\locklark.exe personal edit-login --file owner.ll --id $itemID --revision $revision --field password
 ```
 
-可编辑 `title`、`username`、`password` 或 `otp`；新值只在不回显的终端提示中输入。用户名可以清空；TOTP 配置另有确认，见下文。每次成功编辑返回同一个 ID 和新版本；版本来自该条目最后一次成功操作的签名事件，不是密码摘要。遇到版本冲突时不写条目，应重新列出并核对后再编辑。其他条目的修改以及审计查询不改变此条目的版本。成功、冲突和找不到目标都会写审计；只记录被编辑的字段名及已核验的 ID 和基准版本，不保存调用者提交的未知 ID、版本串或字段值。
+可编辑 `title`、`username`、`password`、`otp`、`url` 或 `notes`；新值只在不回显的终端提示中输入。终端 `notes` 是单行替换，多行备注请在原生桌面编辑。用户名可以清空；TOTP 配置另有确认，见下文。每次成功编辑返回同一个 ID 和新版本；版本来自该条目最后一次成功操作的签名事件，不是密码摘要。遇到版本冲突时不写条目，应重新列出并核对后再编辑。其他条目的修改以及审计查询不改变此条目的版本。成功、冲突和找不到目标都会写审计；只记录被编辑的字段名及已核验的 ID 和基准版本，不保存调用者提交的未知 ID、版本串或字段值。
 
 新版可在原个人库上直接编辑。写入首条编辑操作审计后，`d294bb4` 的旧 CLI 会拒绝不认识的事件，不能用旧版继续打开该库。升级验收：`python scripts/personal_acceptance.py <新版程序> <旧版程序>`。
 
@@ -361,6 +361,8 @@ go test -count=1 ./internal/vault -run 'TestKDBXIndependentPeer|TestIndependentN
 日常新建从搜索栏的“新建登录”进入，可填写网站并手工保存，或选择“生成强密码并保存”。默认生成24位字母数字密码，可设22–256位；保存后再按需显示或复制。已有活动/归档登录可选择“重新生成本地密码”，核对网站和条目后确认；这只更新本地金库，不会修改网站账号的密码。若提示有操作结果未确认，先核实金库内容，勿重复生成。
 
 在条目的 `otp` 字段保存网站提供的TOTP密钥或 `otpauth://` 配置后，可按次“显示验证码”或“复制验证码”。显示最长15秒，复制最长30秒，且都受本期验证码的有效时间限制；到期后需明确重新获取。切换条目/页面或锁库会清理显示，并按系统所有权凭证清理本程序的剪贴板内容。Windows与Linux/X11会核对当前所有权，保留后来复制的内容；macOS的系统接口无法原子比较并清除，同时发生的新复制仍存在竞态。原生Wayland当前明确拒绝复制，可使用按次显示；系统剪贴板历史不受清理保证。实现和实际验证范围见 [日常桌面验收](docs/desktop-daily-validation.md)。
+
+登录详情可按次“显示备注”“复制备注”或“编辑备注”。多行编辑器会先记录读取意图再填入原文，保存绑定当前条目的修订号；取消不改内容，锁库或切换目标会清除草稿。备注按纯文本加密保存，最长 64 KiB；浏览器填充和 Next.js 管理不会收到正文。1PUX 备注迁入及 KDBX 迁出保留换行和空格；导入来源记录仍可能保留编辑前的旧备注。范围与验证见[登录备注验收](docs/login-notes-validation.md)。
 
 系统快捷解锁默认 24 小时后要求完整解锁；这是本地系统时间策略，不能抵抗系统时钟回拨。开启快捷解锁会将金库身份材料交给对应 OS 的保护机制；不保存主密码或 Secret Key。Linux 系统钥匙串可能不逐次弹验证，且同一系统用户的其他程序可能有读取权限。屏幕锁定/睡眠通知能否到达取决于平台会话服务。Windows Hello/TPM、macOS Touch ID 的设备行为尚需真机验收，当前不能作为生产替换承诺。详见 [桌面验收](docs/desktop-validation.md)。
 

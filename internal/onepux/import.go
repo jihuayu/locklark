@@ -25,6 +25,8 @@ type MappedLogins struct {
 	Items  []vault.Item
 }
 
+const LoginProfile = "login-notes-v2"
+
 // MapLogins maps a supported login profile and retains original attributes and
 // item JSON as protected provenance. Provenance is immutable source evidence;
 // subsequent edits affect the native fields, not the historical source record.
@@ -69,7 +71,7 @@ func MapLogins(raw []byte) (MappedLogins, error) {
 	if extra(root, "accounts") || extra(attrs, "version", "description", "createdAt") {
 		return MappedLogins{}, ErrUnsupported
 	}
-	out := MappedLogins{Report: MappingReport{Profile: "login-v1", Items: inventory.Items, Archived: inventory.Archived}, Items: make([]vault.Item, 0, inventory.Items)}
+	out := MappedLogins{Report: MappingReport{Profile: LoginProfile, Items: inventory.Items, Archived: inventory.Archived}, Items: make([]vault.Item, 0, inventory.Items)}
 	for _, a := range root["accounts"].([]any) {
 		account := a.(map[string]any)
 		accountAttrs := account["attrs"].(map[string]any)
@@ -159,8 +161,12 @@ func mapLogin(source map[string]any) (vault.Item, error) {
 	if !ok || extra(details, "loginFields", "notesPlain", "sections", "passwordHistory") {
 		return reject()
 	}
-	if value, found := details["notesPlain"]; found && value != "" {
-		return reject()
+	notes := ""
+	if value, found := details["notesPlain"]; found {
+		notes, ok = value.(string)
+		if !ok || !vault.ValidNotes(notes) {
+			return reject()
+		}
 	}
 	for _, key := range []string{"sections", "passwordHistory"} {
 		if value, found := details[key]; found {
@@ -174,7 +180,7 @@ func mapLogin(source map[string]any) (vault.Item, error) {
 	if !ok {
 		return reject()
 	}
-	item := vault.Item{Kind: "login", Title: title, URL: url}
+	item := vault.Item{Kind: "login", Title: title, URL: url, Notes: notes}
 	if state == "archived" {
 		item.State = state
 	}

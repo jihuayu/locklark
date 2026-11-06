@@ -357,7 +357,16 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 	if len(options) == 1 {
 		option = options[0]
 	}
-	if option.nativeMutation != nil && (option.unlocked == nil || option.nativeMutation.gate == nil || !(action == "item.add" || generatedAction(action) || action == desktopOTPShowAction || action == desktopOTPCopyAction || action == browserOTPAction)) {
+	if desktopFieldAction(action) {
+		purpose := strings.Split(action, ".")[2]
+		if edit == nil || action != "item.desktop."+purpose+"."+edit.Field || !validNativeFieldTarget(RevealTarget{ID: edit.ID, Revision: edit.Revision, Field: edit.Field}, purpose) {
+			return result{}, invalid
+		}
+	}
+	if action == "item.edit.notes" && (edit == nil || edit.Field != "notes" || !ValidEditTarget(edit.ID, edit.Revision, edit.Field)) {
+		return result{}, invalid
+	}
+	if option.nativeMutation != nil && (option.unlocked == nil || option.nativeMutation.gate == nil || !(action == "item.add" || action == "item.edit.notes" || generatedAction(action) || action == desktopOTPShowAction || action == desktopOTPCopyAction || action == browserOTPAction)) {
 		return result{}, invalid
 	}
 	if browserSaveAction(action) != (option.browserSave != nil) || option.browserSave != nil && (!option.browserSave.valid() || option.unlocked == nil || (action == browserNewAction) != (option.browserSave.target.ID == "")) {
@@ -589,7 +598,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			if option.backup == "" {
 				return invalid
 			}
-		case browserOTPAction, browserFillAction, "item.desktop.show.username", "item.desktop.show.password", "item.desktop.copy.username", "item.desktop.copy.password", "item.run.username", "item.run.password", livePullAction, "item.inject.username", "item.inject.password", "item.trash", "item.untrash", "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.regenerate.password", otpDisclosureAction, desktopOTPShowAction, desktopOTPCopyAction:
+		case browserOTPAction, browserFillAction, "item.desktop.show.username", "item.desktop.show.password", "item.desktop.copy.username", "item.desktop.copy.password", "item.desktop.show.notes", "item.desktop.copy.notes", "item.desktop.edit.notes", "item.edit.notes", "item.run.username", "item.run.password", livePullAction, "item.inject.username", "item.inject.password", "item.trash", "item.untrash", "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.regenerate.password", otpDisclosureAction, desktopOTPShowAction, desktopOTPCopyAction:
 			if edit == nil {
 				return invalid
 			}
@@ -671,7 +680,10 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 						}
 						if readValueAction(action) {
 							value := items[i].Username
-							if action == "item.reveal.password" || action == "item.inject.password" || action == "item.run.password" || action == "item.desktop.show.password" || action == "item.desktop.copy.password" || action == livePullAction {
+							switch action {
+							case "item.desktop.show.notes", "item.desktop.copy.notes", "item.desktop.edit.notes":
+								value = items[i].Notes
+							case "item.reveal.password", "item.inject.password", "item.run.password", "item.desktop.show.password", "item.desktop.copy.password", livePullAction:
 								value = items[i].Password
 							}
 							out.value = []byte(value)
@@ -701,9 +713,21 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 							break
 						}
 						if err := validateEditValue(*edit); err != nil {
+							if option.nativeMutation != nil && action == "item.edit.notes" {
+								outcome, refusal = "native-refused", ErrMutationRefused
+								break
+							}
 							return err
 						}
 						switch edit.Field {
+						case "notes":
+							probe := append([]vault.Item(nil), items...)
+							probe[i].Notes = edit.Value
+							if option.nativeMutation != nil && vault.ValidateItems([]byte(schema), probe) != nil {
+								outcome, refusal = "native-refused", ErrMutationRefused
+								break
+							}
+							items[i].Notes = edit.Value
 						case "url":
 							items[i].URL = edit.Value
 						case "title":

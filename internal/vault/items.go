@@ -22,7 +22,14 @@ type Item struct {
 	PreviousState                                      string `json:",omitempty"`
 	// ImportSource is an encrypted provenance record, never executable metadata.
 	ImportSource []byte `json:",omitempty"`
+	Notes        string `json:",omitempty"`
 }
+
+const MaxNotes = 64 << 10
+
+// ValidNotes accepts only lossless KDBX/XML plain text. It does not trim or
+// normalize Unicode, whitespace, or line endings.
+func ValidNotes(s string) bool { return len(s) <= MaxNotes && xmlText(s) }
 
 const itemGroup = "Locklark items v1"
 
@@ -51,7 +58,7 @@ func validItems(items []Item, size int) bool {
 			return false
 		}
 		seen[it.ID] = true
-		for _, s := range []string{it.ID, it.Kind, it.Title, it.Username, it.Password, it.OTP, it.Filename, it.State, it.URL, it.PreviousState} {
+		for _, s := range []string{it.ID, it.Kind, it.Title, it.Username, it.Password, it.OTP, it.Filename, it.State, it.URL, it.PreviousState, it.Notes} {
 			if len(s) > MaxPayload-size || !xmlText(s) {
 				return false
 			}
@@ -73,6 +80,9 @@ func validItems(items []Item, size int) bool {
 		}
 		switch it.Kind {
 		case "login":
+			if !ValidNotes(it.Notes) {
+				return false
+			}
 			if it.URL != "" {
 				if _, err := origin.Website(it.URL); err != nil {
 					return false
@@ -82,7 +92,7 @@ func validItems(items []Item, size int) bool {
 				return false
 			}
 		case "document":
-			if it.URL != "" || it.Username != "" || it.Password != "" || it.OTP != "" || it.Filename == "" || it.Filename == "." || it.Filename == ".." || strings.ContainsAny(it.Filename, "/\\") {
+			if it.Notes != "" || it.URL != "" || it.Username != "" || it.Password != "" || it.OTP != "" || it.Filename == "" || it.Filename == "." || it.Filename == ".." || strings.ContainsAny(it.Filename, "/\\") {
 				return false
 			}
 		default:
@@ -135,6 +145,9 @@ func writeItems(db *kdbx.Database, metadata []byte, items []Item) error {
 			e.Values = append(e.Values, slot("Locklark.PreviousState", it.PreviousState, false))
 		}
 		if it.Kind == "login" {
+			if it.Notes != "" {
+				e.Values = append(e.Values, slot("Notes", it.Notes, true))
+			}
 			if it.URL != "" {
 				e.Values = append(e.Values, slot("URL", it.URL, true))
 			}
@@ -241,6 +254,13 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 		switch it.Kind {
 		case "login":
 			expected := 5 + extra
+			if v, ok := fields["Notes"]; ok {
+				if v.Content == "" || !ValidNotes(v.Content) {
+					return nil, nil, ErrSnapshot
+				}
+				it.Notes = v.Content
+				expected++
+			}
 			if v, ok := fields["URL"]; ok {
 				if v.Content == "" {
 					return nil, nil, ErrSnapshot

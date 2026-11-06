@@ -83,7 +83,7 @@ func TestImportAtomicReceiptAndRecovery(t *testing.T) {
 	if got := readStoredItems(t, path, "fixture", key); !reflect.DeepEqual(got, want.Items) {
 		t.Fatal("not exact mapping")
 	}
-	if receipt.ReportDigest != plan.ReportDigest || receipt.Status != "imported-login-v1" {
+	if receipt.ReportDigest != plan.ReportDigest || receipt.Status != "imported-login-notes-v2" {
 		t.Fatal("receipt mismatch")
 	}
 	rows, e := ListState(path, "fixture", key, "all")

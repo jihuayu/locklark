@@ -24,6 +24,24 @@ func dailyGate(t *testing.T, s *Session) *MutationGate {
 	}
 	return g
 }
+
+// Revision/replay tests own their OTP clock and timers. They must reach the
+// authenticated reread rather than race the current TOTP window or a scheduler
+// pause. The dedicated expiry tests below retain their real timer coverage.
+func dailyOTPSemanticClock(s *Session) time.Time {
+	now := time.Now().Add(time.Minute).Truncate(30 * time.Second).Add(10 * time.Second)
+	s.otpNow = func() time.Time { return now }
+	return now
+}
+
+func stopDailyOTPSemanticTimer(t *testing.T, cap *otpCap) {
+	t.Helper()
+	cap.mu.Lock()
+	defer cap.mu.Unlock()
+	if cap.cancelled.Load() || cap.used || len(cap.code) == 0 || cap.timer == nil || !cap.timer.Stop() {
+		t.Fatal("OTP semantic test did not acquire its unexpired timer")
+	}
+}
 func TestDailyAtomicLoginGenerationAndRevision(t *testing.T) {
 	s, fill := browserFixture(t)
 	meta := NativeLoginMetadata{Title: "Generated", URL: "https://example.test/path"}
@@ -63,10 +81,12 @@ func TestDailyOTPRequiresDurableRevalidationAndSingleDelivery(t *testing.T) {
 		t.Fatal(e)
 	}
 	target := NativeOTPTarget{ID: fill.ID, Revision: rev}
+	now := dailyOTPSemanticClock(s)
 	p, e := s.PrepareOTP(target, "show", dailyGate(t, s))
 	if e != nil {
 		t.Fatal(e)
 	}
+	stopDailyOTPSemanticTimer(t, p.cap)
 	if strings.Contains(fmt.Sprintf("%#v", p), "JBSWY") {
 		t.Fatal("seed formatting")
 	}
@@ -94,17 +114,19 @@ func TestDailyOTPRequiresDurableRevalidationAndSingleDelivery(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
+	stopDailyOTPSemanticTimer(t, p.cap)
 	d, e := s.AuthorizeOTP(p)
 	if e != nil {
 		t.Fatal(e)
 	}
+	stopDailyOTPSemanticTimer(t, d.cap)
 	if _, e = s.AuthorizeOTP(p); e == nil {
 		t.Fatal("prepared replay")
 	}
 	delivered := false
 	if e = s.DeliverOTP(d, target, func(code []byte, b OTPBounds) error {
 		delivered = true
-		if len(code) != 6 || !b.Valid(time.Now()) {
+		if len(code) != 6 || !b.Valid(now) {
 			t.Fatal("code lease")
 		}
 		return nil
@@ -372,11 +394,15 @@ func TestDailyOTPSecondSessionChangesAreRejected(t *testing.T) {
 				t.Fatal(e)
 			}
 			target := NativeOTPTarget{fill.ID, rev}
+			dailyOTPSemanticClock(s)
 			p, e := s.PrepareOTP(target, "copy", dailyGate(t, s))
 			if e != nil {
 				t.Fatal(e)
 			}
+			stopDailyOTPSemanticTimer(t, p.cap)
+			p.cap.mu.Lock()
 			code := p.cap.code
+			p.cap.mu.Unlock()
 			other, e := UnlockSession(s.path, []byte("fixture"), bytes.Repeat([]byte{4}, 16), time.Minute)
 			if e != nil {
 				t.Fatal(e)
@@ -394,13 +420,54 @@ func TestDailyOTPSecondSessionChangesAreRejected(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
-			if d, e := s.AuthorizeOTP(p); e == nil || d != nil {
-				t.Fatal("changed persistent target authorized")
+			if d, e := s.AuthorizeOTP(p); !errors.Is(e, ErrConflict) || d != nil {
+				t.Fatal("changed persistent target did not reach revision rejection", e)
 			}
-			if !bytes.Equal(code, make([]byte, len(code))) {
+			p.cap.mu.Lock()
+			cleared := bytes.Equal(code, make([]byte, len(code)))
+			p.cap.mu.Unlock()
+			if !cleared {
 				t.Fatal("rejected cap retained code")
 			}
 		})
+	}
+}
+
+func TestDailyOTPExpiryPrecedesStaleRevalidation(t *testing.T) {
+	s, fill := browserFixture(t)
+	rev, e := s.Edit(Edit{ID: fill.ID, Revision: fill.Revision, Field: "otp", Value: "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"})
+	if e != nil {
+		t.Fatal(e)
+	}
+	now := dailyOTPSemanticClock(s)
+	target := NativeOTPTarget{fill.ID, rev}
+	p, e := s.PrepareOTP(target, "show", dailyGate(t, s))
+	if e != nil {
+		t.Fatal(e)
+	}
+	stopDailyOTPSemanticTimer(t, p.cap)
+	p.cap.mu.Lock()
+	code := p.cap.code
+	p.cap.mu.Unlock()
+	if _, e = s.Edit(Edit{ID: target.ID, Revision: target.Revision, Field: "password", Value: "changed"}); e != nil {
+		t.Fatal(e)
+	}
+	// Expire the original bounds without waiting on a wall-clock boundary.
+	// Even with a stale revision, expiry must reject before any disk reread.
+	s.otpNow = func() time.Time { return now.Add(30 * time.Second) }
+	verified := false
+	d, e := s.authorizeOTPWith(p, func(target NativeOTPTarget) error {
+		verified = true
+		return s.readNativeTarget(target.ID, target.Revision, func(vault.Item) error { return nil })
+	})
+	if !errors.Is(e, ErrOTPTime) || d != nil || verified {
+		t.Fatal("expired OTP reached stale revalidation or delivery", e)
+	}
+	p.cap.mu.Lock()
+	cleared := len(p.cap.code) == 0 && bytes.Equal(code, make([]byte, len(code)))
+	p.cap.mu.Unlock()
+	if !cleared {
+		t.Fatal("expired preparation retained code after rejecting stale verification")
 	}
 }
 func TestDailyOTPExpiryClearsCodeWithoutSessionOrViewPolling(t *testing.T) {

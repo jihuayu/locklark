@@ -75,7 +75,7 @@ func TestMapLoginsRefusesPartialOrAmbiguousMapping(t *testing.T) {
 		{`"fieldType":"P"`, `"fieldType":"T"`},
 		{`"designation":"username"`, `"designation":"password"`},
 		{`"private-pass"`, `null`},
-		{`"loginFields":[`, `"notesPlain":"private-notes","loginFields":[`},
+		{`"loginFields":[`, `"notesPlain":null,"loginFields":[`},
 		{`"loginFields":[`, `"sections":[{"fields":[]}],"loginFields":[`},
 		{`"loginFields":[`, `"passwordHistory":[{"value":"old"}],"loginFields":[`},
 		{`"title":"private-title"`, `"title":"private-title","urls":[{"url":"https://other.test"}]`},

@@ -44,7 +44,7 @@ func (r *importRequest) mapSource(secret []byte) (onepux.MappedLogins, error) {
 	}
 	defer clear(derived)
 	mac := hmac.New(sha256.New, derived)
-	mac.Write([]byte("locklark/personal/import-plan/login-v1\x00"))
+	mac.Write([]byte("locklark/personal/import-plan/" + onepux.LoginProfile + "\x00"))
 	mac.Write(raw)
 	stamp := mac.Sum(nil)
 	if r.expected != "" {
@@ -86,9 +86,9 @@ func importOnepux(path, pw string, key []byte, source, expected, action string) 
 	if err != nil {
 		return ImportReceipt{}, err
 	}
-	status := "planned-login-v1"
+	status := "planned-" + onepux.LoginProfile
 	if action == importAction {
-		status = "imported-login-v1"
+		status = "imported-" + onepux.LoginProfile
 	}
 	return ImportReceipt{Status: status, Session: r.session, Event: r.intent, ReportDigest: r.reportDigest, Report: r.migration}, nil
 }
