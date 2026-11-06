@@ -32,6 +32,9 @@ func (s *Session) nativeMutation(action string, add vault.Item, edit *Edit, opti
 	return s.nativeMutationWith(action, add, edit, option, g, nil)
 }
 func (s *Session) nativeMutationWith(action string, add vault.Item, edit *Edit, option commandOption, g *MutationGate, run func(commandOption) (result, error)) (result, error) {
+	return s.nativeMutationWithTouch(action, add, edit, option, g, run, true)
+}
+func (s *Session) nativeMutationWithTouch(action string, add vault.Item, edit *Edit, option commandOption, g *MutationGate, run func(commandOption) (result, error), touch bool) (result, error) {
 	defer func() {
 		if g != nil {
 			g.Cancel()
@@ -40,7 +43,7 @@ func (s *Session) nativeMutationWith(action string, add vault.Item, edit *Edit, 
 	}()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.registeredMutation(g) || s.active(true) != nil {
+	if !s.registeredMutation(g) || s.active(touch) != nil {
 		return result{}, ErrMutationCancelled
 	}
 	option.unlocked = s
@@ -53,7 +56,7 @@ func (s *Session) nativeMutationWith(action string, add vault.Item, edit *Edit, 
 		s.lock()
 	}
 	active := s.active(false) == nil
-	if g.CommitWon() && (!active || e != nil && !errors.Is(e, ErrConflict) && !errors.Is(e, ErrNotFound) && !errors.Is(e, ErrTrashed) && !errors.Is(e, ErrMutationRefused) && !errors.Is(e, ErrOTPNotConfigured)) {
+	if g.CommitWon() && (!active || e != nil && !errors.Is(e, ErrConflict) && !errors.Is(e, ErrNotFound) && !errors.Is(e, ErrTrashed) && !errors.Is(e, ErrMutationRefused) && !errors.Is(e, ErrOTPNotConfigured) && !errors.Is(e, ErrBrowserOTP)) {
 		if r.otp != nil {
 			r.otp.Clear()
 		}

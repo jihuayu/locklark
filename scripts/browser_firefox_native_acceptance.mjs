@@ -32,11 +32,15 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   acceptBrowserSave,
+  captureControllerOutput,
+  browserScreenshotsAllowed,
+  assertPrivateText,
   assertPrivateArtifacts,
   fixtureCanaries,
   vaultObserver,
 } from "./browser_save_acceptance.mjs";
 
+const scanController = captureControllerOutput();
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(join(root, "web/package.json"));
 assert(
@@ -53,11 +57,13 @@ assert(
 );
 assert(
   !process.env.LOCKLARK_TEST_FAILURE_STAGE ||
-    ["after-pair", "page-arguments"].includes(
+    ["after-pair", "page-arguments", "otp-page-arguments"].includes(
       process.env.LOCKLARK_TEST_FAILURE_STAGE,
     ),
   "Unsupported acceptance failure stage",
 );
+import { acceptBrowserOTP, otpHTML } from "./browser_otp_acceptance.mjs";
+
 const firefox =
   process.env.LOCKLARK_FIREFOX ||
   require(
@@ -210,6 +216,8 @@ function input(actions, native = true, options = {}) {
           "拒绝连接",
           "批准本次填充",
           "拒绝本次填充",
+          "批准填充验证码",
+          "拒绝填充验证码",
           "立即锁定",
           "新登录标题",
           "批准保存登录",
@@ -519,6 +527,7 @@ function cleanup() {
       try {
         assert(!driverLogFailed, "Persistent driver logging failed");
         assertPrivateArtifacts(state, observedFixture);
+        scanController(observedFixture);
       } catch {
         console.error(
           "FAIL: Firefox persistent diagnostics (AcceptanceFailure)",
@@ -679,9 +688,16 @@ try {
     '<!doctype html><html><head><title>Locklark Firefox acceptance</title></head><body><h1>Synthetic login</h1><form method="post"><label>User<input id="username" autocomplete="username"></label><label>Password<input id="password" type="password" autocomplete="current-password"></label><button>Submit</button></form><script>window.submits=0;document.querySelector("form").addEventListener("submit",event=>{event.preventDefault();window.submits++;});</script></body></html>';
   server = createServer(
     { key: readFileSync(key), cert: readFileSync(certificate) },
-    (_request, response) => {
+    (request, response) => {
       response.setHeader("Content-Type", "text/html");
-      response.end(html);
+      response.end(
+        request.url.startsWith("/otp")
+          ? otpHTML.replace(
+              "Locklark OTP acceptance",
+              "Locklark Firefox acceptance · OTP",
+            )
+          : html,
+      );
     },
   );
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -873,79 +889,81 @@ try {
     progress("native-pair");
     input([{ click_label: "确认连接此扩展" }]);
     await blank();
-    progress("native approval and actual Firefox document-targeted fill");
-    await select();
-    await blank();
-    if (process.env.LOCKLARK_TEST_FAILURE_STAGE === "after-pair")
-      throw Error(fixtureCanaries(fixture).join("\n"));
-    if (process.env.LOCKLARK_TEST_FAILURE_STAGE === "page-arguments") {
-      progress("driver-arguments-failure");
+    if (process.env.LOCKLARK_TEST_FAILURE_STAGE !== "otp-page-arguments") {
+      progress("native approval and actual Firefox document-targeted fill");
+      await select();
+      await blank();
+      if (process.env.LOCKLARK_TEST_FAILURE_STAGE === "after-pair")
+        throw Error(fixtureCanaries(fixture).join("\n"));
+      if (process.env.LOCKLARK_TEST_FAILURE_STAGE === "page-arguments") {
+        progress("driver-arguments-failure");
+        await pageEvaluate(
+          'document.querySelector("#username").value=arguments[0];document.querySelector("#password").value=arguments[1];throw Error("Controlled driver argument failure");',
+          [fixture.SaveUsername, fixture.SaveValue],
+        );
+      }
+      const nativeWindow = input([], true, { inspect: true }).window;
+      assert(
+        Number.isSafeInteger(nativeWindow) && nativeWindow > 0,
+        "Strictly matched native X window required",
+      );
+      execFileSync(
+        "import",
+        [
+          "-window",
+          String(nativeWindow),
+          join(diagnostics, "native-fill-confirm.png"),
+        ],
+        { env, stdio: "ignore" },
+      );
+      input([{ click_label: "批准本次填充" }]);
+      await eventually(
+        () =>
+          pageEvaluate(
+            'return document.querySelector("#username").value === arguments[0] && document.querySelector("#password").value === arguments[1] && window.submits === 0;',
+            [fixture.Username, fixture.Value],
+          ),
+        "Approved Firefox fill did not reach the original document",
+      );
       await pageEvaluate(
-        'document.querySelector("#username").value=arguments[0];document.querySelector("#password").value=arguments[1];throw Error("Controlled driver argument failure");',
-        [fixture.SaveUsername, fixture.SaveValue],
+        'document.querySelector("#username").value="";document.querySelector("#password").value="";',
+      );
+      progress("native rejection refuses field release");
+      await select();
+      input([{ click_label: "拒绝本次填充" }]);
+      await pause(500);
+      await blank();
+      progress("same-origin navigation rejects stale native approval");
+      await select();
+      await bidiCall("browsingContext.navigate", {
+        context: pageContext,
+        url: origin + "/different-document",
+        wait: "complete",
+      });
+      await eventually(() => {
+        const approval = input([], true, { inspect: true }).controls[
+          "批准本次填充"
+        ];
+        return !approval.present || !approval.enabled || !approval.showing;
+      }, "Navigation did not revoke the native approval control");
+      await blank();
+      progress("native lock revokes the pending Firefox request");
+      await select();
+      input([{ click_label: "立即锁定" }]);
+      await pause(300);
+      await blank();
+      await openPopup();
+      await eventually(
+        async () => (await popupState()).refreshDisabled,
+        "Locked native host still allowed Firefox matching",
+      );
+      const locked = await popupState();
+      assert(
+        locked.status.includes("锁定") || locked.status.includes("断开"),
+        "Firefox lock status missing",
       );
     }
-    const nativeWindow = input([], true, { inspect: true }).window;
-    assert(
-      Number.isSafeInteger(nativeWindow) && nativeWindow > 0,
-      "Strictly matched native X window required",
-    );
-    execFileSync(
-      "import",
-      [
-        "-window",
-        String(nativeWindow),
-        join(diagnostics, "native-fill-confirm.png"),
-      ],
-      { env, stdio: "ignore" },
-    );
-    input([{ click_label: "批准本次填充" }]);
-    await eventually(
-      () =>
-        pageEvaluate(
-          'return document.querySelector("#username").value === arguments[0] && document.querySelector("#password").value === arguments[1] && window.submits === 0;',
-          [fixture.Username, fixture.Value],
-        ),
-      "Approved Firefox fill did not reach the original document",
-    );
-    await pageEvaluate(
-      'document.querySelector("#username").value="";document.querySelector("#password").value="";',
-    );
-    progress("native rejection refuses field release");
-    await select();
-    input([{ click_label: "拒绝本次填充" }]);
-    await pause(500);
-    await blank();
-    progress("same-origin navigation rejects stale native approval");
-    await select();
-    await bidiCall("browsingContext.navigate", {
-      context: pageContext,
-      url: origin + "/different-document",
-      wait: "complete",
-    });
-    await eventually(() => {
-      const approval = input([], true, { inspect: true }).controls[
-        "批准本次填充"
-      ];
-      return !approval.present || !approval.enabled || !approval.showing;
-    }, "Navigation did not revoke the native approval control");
-    await blank();
-    progress("native lock revokes the pending Firefox request");
-    await select();
-    input([{ click_label: "立即锁定" }]);
-    await pause(300);
-    await blank();
-    await openPopup();
-    await eventually(
-      async () => (await popupState()).refreshDisabled,
-      "Locked native host still allowed Firefox matching",
-    );
-    const locked = await popupState();
-    assert(
-      locked.status.includes("锁定") || locked.status.includes("断开"),
-      "Firefox lock status missing",
-    );
-    await acceptBrowserSave({
+    const acceptanceDriver = {
       fixture,
       origin,
       phase: progress,
@@ -958,6 +976,10 @@ try {
         state,
       }),
       captureNative: (kind) => {
+        assert(
+          browserScreenshotsAllowed(stage),
+          "OTP stage forbids diagnostic screenshots",
+        );
         const window = input([], true, { inspect: true }).window;
         assert(
           Number.isSafeInteger(window) && window > 0,
@@ -1032,13 +1054,25 @@ try {
         progress("native-pair");
         input([{ click_label: "确认连接此扩展" }]);
       },
-    });
+      root,
+      state,
+      env,
+      pageEval: (fn, arg) =>
+        pageEvaluate(
+          "return (" + fn.toString() + ")(JSON.parse(arguments[0]));",
+          [JSON.stringify(arg ?? null)],
+        ),
+    };
+    if (process.env.LOCKLARK_TEST_FAILURE_STAGE !== "otp-page-arguments")
+      await acceptBrowserSave(acceptanceDriver);
+    await acceptBrowserOTP(acceptanceDriver);
     assert(
       !logs.some((line) =>
         fixtureCanaries(fixture).some((value) => line.includes(value)),
       ),
       "Synthetic factor or value found in browser logs",
     );
+    for (const line of logs) assertPrivateText(line, fixture);
     await openPopup();
     await popupClick("#disconnect");
     const summary = {
@@ -1057,6 +1091,8 @@ try {
       noPreapprovalValues: true,
       noAutomaticSubmit: true,
       noSyntheticSecretsInBrowserLogs: true,
+      otpNativeApprovalAndHMAC: true,
+      otpRefusalNavigationLockAndOriginalWindow: true,
       saveNew: true,
       saveUpdateSameID: true,
       capturedClickTimeValues: true,
@@ -1077,7 +1113,16 @@ try {
 }
 if (successful && !process.exitCode) {
   console.log(
-    "PASS: real Firefox fill/save/update with native approval, cancellation, Unicode, and no synthetic secrets in console or persistent diagnostics",
+    "PASS: real Firefox fill/save/update/OTP with native approval, cancellation, Unicode, and no synthetic secrets in console or persistent diagnostics",
   );
   console.log("Private synthetic artifacts: " + state);
+}
+
+if (observedFixture) {
+  try {
+    scanController(observedFixture);
+  } catch {
+    console.error("FAIL: Firefox controller privacy (AcceptanceFailure)");
+    process.exitCode = 1;
+  }
 }

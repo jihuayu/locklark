@@ -189,6 +189,9 @@ func (a *App) Lock() {
 	if a.mutationUnknown {
 		a.status += " · " + mutationUnknownStatus
 	}
+	if a.browser != nil && a.browser.OTPUnknown() {
+		a.status += " · 验证码交付结果未确认；不会自动重试"
+	}
 	if a.browser != nil && a.browser.SaveUnknown() {
 		a.status += " · 结果未确认，请在金库核实，勿重复保存"
 	}

@@ -15,44 +15,50 @@ type Pending struct {
 	Until                               time.Time
 }
 type View struct {
-	Save          *SaveView
-	SaveStatus    string
-	SaveRequestID string
-	Pair          bool
-	Paired        bool
-	Closed        bool
-	Pending       *Pending
-	Busy          bool
+	OTP                     *OTPView
+	OTPStatus, OTPRequestID string
+	Save                    *SaveView
+	SaveStatus              string
+	SaveRequestID           string
+	Pair                    bool
+	Paired                  bool
+	Closed                  bool
+	Pending                 *Pending
+	Busy                    bool
 }
 type Connection struct {
-	save           *pendingSave
-	saveAuth       *pendingSave
-	saveOutcome    atomic.Uint32
-	saveRequestID  string
-	generation     atomic.Uint64
-	cancelEpoch    atomic.Uint64
-	pendingEpoch   uint64
-	epoch          uint64
-	mu             sync.Mutex
-	authMu         sync.Mutex
-	authCapability string
-	authEpoch      uint64
-	authUntil      time.Time
-	closed         atomic.Bool
-	session        atomic.Pointer[personal.Session]
-	writer         *Writer
-	notify         func()
-	seen           map[string]bool
-	received       int
-	hello          string
-	pairUntil      time.Time
-	capability     string
-	until          time.Time
-	context        personal.BrowserContext
-	rows           []personal.Row
-	pending        *Request
-	pendingUntil   time.Time
-	now            func() time.Time
+	otp, otpAuth            *pendingOTP
+	otpRetired              map[string]otpRetired
+	otpStatus, otpRequestID string
+	otpUnknown              atomic.Bool
+	save                    *pendingSave
+	saveAuth                *pendingSave
+	saveOutcome             atomic.Uint32
+	saveRequestID           string
+	generation              atomic.Uint64
+	cancelEpoch             atomic.Uint64
+	pendingEpoch            uint64
+	epoch                   uint64
+	mu                      sync.Mutex
+	authMu                  sync.Mutex
+	authCapability          string
+	authEpoch               uint64
+	authUntil               time.Time
+	closed                  atomic.Bool
+	session                 atomic.Pointer[personal.Session]
+	writer                  *Writer
+	notify                  func()
+	seen                    map[string]bool
+	received                int
+	hello                   string
+	pairUntil               time.Time
+	capability              string
+	until                   time.Time
+	context                 personal.BrowserContext
+	rows                    []personal.Row
+	pending                 *Request
+	pendingUntil            time.Time
+	now                     func() time.Time
 }
 
 func NewConnection(writer *Writer, notify func()) *Connection {
@@ -78,6 +84,7 @@ func (c *Connection) refuse(id string) error {
 	return c.response(Response{ID: id, Type: "error", Error: "refused"})
 }
 func (c *Connection) invalidate() {
+	c.invalidateOTP()
 	if c.save != nil {
 		if !c.save.gate.Cancel() && c.save.gate.CommitWon() {
 			c.save.uncertain.Store(true)
@@ -101,6 +108,19 @@ func (c *Connection) expire() {
 	if c.capability != "" && !now.Before(c.until) {
 		c.invalidate()
 		go c.response(Response{Type: "unpaired", Error: "expired"})
+	}
+	if p := c.otp; p != nil && !now.Before(p.until) {
+		p.control.Cancel()
+		if p.control.Granted() {
+			c.otpUnknown.Store(true)
+			c.otpStatus = "验证码交付结果未确认；不会自动重试"
+		} else {
+			c.otpStatus = "验证码请求已失效；本次未交付"
+		}
+		responses := c.retireOTP(p, otpNatural)
+		if len(responses) != 0 {
+			go c.sendOTPResponses(responses)
+		}
 	}
 	if c.hello != "" && !now.Before(c.pairUntil) {
 		id := c.hello
@@ -143,7 +163,9 @@ func (c *Connection) registerRequest(r Request) (bool, error) {
 		return false, ErrProtocol
 	}
 	if c.seen[r.ID] {
-		return false, nil
+		// Count the frame but ignore it without a second response, dispatch or
+		// cancellation. An old replay cannot revoke a newer legitimate request.
+		return false, errDuplicateRequest
 	}
 	c.seen[r.ID] = true
 	if r.Type == "hello" {
@@ -158,13 +180,22 @@ func (c *Connection) registerRequest(r Request) (bool, error) {
 			c.saveAuth.uncertain.Store(true)
 		}
 	}
+	if allowed && r.Type == "cancel-otp" && c.otpAuth != nil && c.otpAuth.request.ID == r.RequestID {
+		c.otpAuth.requestCancel(c.now())
+	}
 	return allowed, nil
 }
 func (c *Connection) Handle(r Request) error {
 	defer r.Clear()
 	allowed, err := c.registerRequest(r)
+	if err == errDuplicateRequest {
+		return nil
+	}
 	if err != nil {
 		return err
+	}
+	if r.Type == "otp" || r.Type == "otp-ack" || r.Type == "cancel-otp" {
+		return c.handleOTP(r, allowed)
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -189,7 +220,7 @@ func (c *Connection) Handle(r Request) error {
 		return c.refuse(r.ID)
 	}
 	if r.Type == "cancel" {
-		if c.save != nil {
+		if c.save != nil || c.otp != nil {
 			return c.refuse(r.ID)
 		}
 		if c.pending != nil {
@@ -205,7 +236,7 @@ func (c *Connection) Handle(r Request) error {
 	if handled, e := c.saveMessage(r); handled {
 		return e
 	}
-	if c.pending != nil || c.save != nil {
+	if c.pending != nil || c.save != nil || c.otp != nil {
 		return c.refuse(r.ID)
 	}
 	if r.Type == "match" {
@@ -233,6 +264,7 @@ func (c *Connection) Handle(r Request) error {
 		}
 		for _, row := range c.rows {
 			if row.ID == r.ItemID && row.Revision == r.Revision {
+				c.otpStatus = ""
 				copy := r
 				c.pending = &copy
 				c.pendingEpoch = c.cancelEpoch.Load()
@@ -322,7 +354,7 @@ func (c *Connection) Reject() error {
 	defer c.changed()
 	c.syncEpoch()
 	c.expire()
-	if c.save != nil {
+	if c.save != nil || c.otp != nil {
 		return ErrProtocol
 	}
 
@@ -345,6 +377,9 @@ func (c *Connection) Reject() error {
 func (c *Connection) Invalidate() {
 	c.generation.Add(1)
 	c.authMu.Lock()
+	if p := c.otpAuth; p != nil {
+		p.control.Cancel()
+	}
 	if p := c.saveAuth; p != nil {
 		if !p.gate.Cancel() && p.gate.CommitWon() {
 			p.uncertain.Store(true)
@@ -387,6 +422,8 @@ func (c *Connection) Snapshot() View {
 	v.Paired = c.capability != ""
 	v.Save, v.SaveStatus = c.saveSnapshot()
 	v.SaveRequestID = c.saveRequestID
+	v.OTP, v.OTPStatus = c.otpSnapshot()
+	v.OTPRequestID = c.otpRequestID
 	if c.pending != nil {
 		r := c.pending
 		title := ""

@@ -26,6 +26,7 @@
       !state.connected || state.pending || busy;
     document.querySelector("#save-new").disabled =
       !state.connected || state.pending || state.saveBlocked || busy;
+    document.querySelector("#cancel-otp").disabled = !state.otpPending;
     const list = document.querySelector("#candidates");
     const signature = JSON.stringify({
       rows: state.candidates,
@@ -61,7 +62,15 @@
             revision: row.revision,
           }),
       );
-      container.append(button, update);
+      const otp = document.createElement("button");
+      otp.dataset.action = "otp";
+      otp.textContent = "填充验证码";
+      otp.disabled = state.pending || busy;
+      otp.addEventListener(
+        "click",
+        () => void act({ type: "otp", id: row.id, revision: row.revision }),
+      );
+      container.append(button, update, otp);
       list.append(container);
     }
   }
@@ -94,7 +103,7 @@
   async function act(message) {
     // Disconnect may interrupt a deferred action. Its generation also prevents
     // the old action's reply/finalizer from changing the next operation.
-    if (busy && message.type !== "disconnect") return;
+    if (busy && !["disconnect", "cancel-otp"].includes(message.type)) return;
     const generation = ++actionGeneration;
     busy = true;
     if (lastState) render(lastState);
@@ -117,6 +126,9 @@
   document
     .querySelector("#disconnect")
     .addEventListener("click", () => void act({ type: "disconnect" }));
+  document
+    .querySelector("#cancel-otp")
+    .addEventListener("click", () => void act({ type: "cancel-otp" }));
   void send({ type: "state" });
   setInterval(() => void send({ type: "state" }), 500);
 })();

@@ -1,6 +1,7 @@
 // Shared real-browser save/update scenarios. Adapters operate only visible
 // extension controls, the controlled page, and externally located native UI.
 import assert from "node:assert/strict";
+import { format } from "node:util";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { lstatSync, readFileSync, readdirSync } from "node:fs";
@@ -17,9 +18,41 @@ export function fixtureCanaries(fixture) {
     "UpdateValue",
     "RejectedUsername",
     "RejectedValue",
+    "OTPSeed",
+    "OTPURI",
   ]
     .map((key) => fixture[key])
     .filter((value) => typeof value === "string" && value.length > 0);
+}
+
+export function browserScreenshotsAllowed(stage) {
+  return typeof stage === "string" && !stage.startsWith("otp");
+}
+
+export function captureControllerOutput() {
+  const lines = [];
+  for (const method of ["log", "error"]) {
+    const original = console[method].bind(console);
+    console[method] = (...values) => {
+      lines.push(format(...values));
+      original(...values);
+    };
+  }
+  return (fixture) => assertPrivateText(lines.join("\n"), fixture);
+}
+
+export function assertPrivateText(text, fixture) {
+  assert(
+    !fixtureCanaries(fixture).some((value) => text.includes(value)),
+    "Synthetic factor or field leaked in output",
+  );
+  for (const code of fixture.OTPCodes || []) {
+    assert(/^(?:[0-9]{6}|[0-9]{8})$/.test(code), "Invalid private OTP canary");
+    assert(
+      !new RegExp("(^|[^A-Za-z0-9_])" + code + "($|[^A-Za-z0-9_])").test(text),
+      "Synthetic OTP token leaked in output",
+    );
+  }
 }
 
 export function assertPrivateArtifacts(state, fixture) {
@@ -73,6 +106,7 @@ export function assertPrivateArtifacts(state, fixture) {
         !patterns.some((value) => bytes.includes(value)),
         "Synthetic factor or field value persisted in diagnostics",
       );
+      assertPrivateText(bytes.toString("utf8"), fixture);
       scanned++;
     }
   };

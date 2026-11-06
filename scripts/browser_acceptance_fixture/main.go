@@ -4,6 +4,7 @@ package main
 
 import (
 	"crypto/rand"
+	"encoding/base32"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -18,6 +19,7 @@ import (
 type fixture struct {
 	Path, Password, Secret, Username, Value, Title, Origin string
 	SeedID                                                 string
+	OTPSeed, OTPURI                                        string
 	SaveUsername, SaveValue, UpdateUsername, UpdateValue   string
 	RejectedUsername, RejectedValue                        string
 }
@@ -26,7 +28,15 @@ func run() error {
 	out := flag.String("out", "", "new private directory containing synthetic data only")
 	site := flag.String("origin", "", "controlled HTTPS test origin")
 	observe := flag.String("observe", "", "read a generated private fixture and observe a consistent vault copy")
+	configure := flag.String("configure-otp", "", "configure the synthetic seed login through the authenticated Session API")
+	digits := flag.Int("digits", 6, "synthetic OTP digits: 0 clears, 6 or 8 configures")
 	flag.Parse()
+	if *configure != "" {
+		if *out != "" || *site != "" || *observe != "" || flag.NArg() != 0 {
+			return fmt.Errorf("one fixture operation required")
+		}
+		return configureOTP(*configure, *digits)
+	}
 	if *observe != "" {
 		if *out != "" || *site != "" || flag.NArg() != 0 {
 			return fmt.Errorf("one fixture operation required")
@@ -60,6 +70,8 @@ func run() error {
 		UpdateUsername: "synthetic-updated-browser-user", UpdateValue: "Synthetic-updated-" + hex.EncodeToString(entropy[40:56]),
 		RejectedUsername: "synthetic-rejected-browser-user", RejectedValue: "Synthetic-rejected-" + hex.EncodeToString(entropy[56:72]),
 	}
+	f.OTPSeed = base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(entropy[8:28])
+	f.OTPURI = "otpauth://totp/browser-synthetic?secret=" + f.OTPSeed + "&digits=6"
 	clear(entropy[:])
 	if err = personal.Create(f.Path, f.Password, key); err != nil {
 		return err
@@ -79,6 +91,9 @@ func run() error {
 				return err
 			}
 		}
+	}
+	if err = setOTP(f, 6); err != nil {
+		return err
 	}
 	data, err := json.Marshal(f)
 	if err != nil {

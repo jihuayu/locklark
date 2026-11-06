@@ -22,7 +22,12 @@ function harness() {
     captureWait = null,
     readyIds = new Set(),
     hangProbe = false,
-    autoCommit = true;
+    autoCommit = true,
+    otpClock = 0,
+    otpProbeWait = null,
+    otpFillWait = null,
+    otpCancelResult = "cancelled",
+    autoOTPCancel = true;
   const port = {
     onMessage: { addListener: (f) => (portMessage = f) },
     onDisconnect: { addListener: (f) => (portDisconnect = f) },
@@ -85,6 +90,10 @@ function harness() {
           portMessage({ v: 1, id: r.id, type: "cancelled" }),
         );
       }
+      if (r.type === "cancel-otp" && autoOTPCancel)
+        queueMicrotask(() =>
+          portMessage({ v: 1, id: r.id, type: otpCancelResult }),
+        );
       if (r.type === "cancel")
         queueMicrotask(() =>
           portMessage({ v: 1, id: r.id, type: "cancelled" }),
@@ -121,6 +130,22 @@ function harness() {
               result: { top: true, origin: "https://example.test" },
             },
           ];
+        if (options.func === core.otpDocument && options.args[1] === "probe") {
+          if (otpProbeWait) return await otpProbeWait;
+          return [
+            {
+              frameId: 0,
+              documentId: doc,
+              result: {
+                top: true,
+                origin: "https://example.test",
+                timeOrigin: 1000,
+                now: 50,
+                wall: Date.now(),
+              },
+            },
+          ];
+        }
         if (options.func === core.fillDocument && options.args[4] === true) {
           if (captureWait) return await captureWait;
           const result = {
@@ -131,6 +156,8 @@ function harness() {
           return [{ frameId: 0, documentId: doc, result }];
         }
         injected.push(options);
+        if (options.func === core.otpDocument && otpFillWait)
+          return await otpFillWait;
         return [{ frameId: 0, documentId: doc, result: true }];
       },
     },
@@ -153,6 +180,7 @@ function harness() {
     URL,
     Uint8Array,
     TextEncoder,
+    performance: { now: () => otpClock },
   };
   context.globalThis = context;
   vm.runInNewContext(
@@ -175,6 +203,27 @@ function harness() {
       found[1].fn();
     },
     captured,
+    expireOTPBounded: () => {
+      const found = [...timers]
+        .filter(([, t]) => t.ms > 0 && t.ms <= 1500)
+        .at(-1);
+      assert.ok(found);
+      clearTimeout(found[0]);
+      timers.delete(found[0]);
+      found[1].fn();
+    },
+    expireOTP: () => {
+      const found = [...timers].find(([, t]) => t.ms > 0 && t.ms <= 1500);
+      assert.ok(found);
+      clearTimeout(found[0]);
+      timers.delete(found[0]);
+      found[1].fn();
+    },
+    advanceOTPClock: (ms) => (otpClock += ms),
+    holdOTPFill: (promise) => (otpFillWait = promise),
+    holdOTPCancel: () => (autoOTPCancel = false),
+    otpCancelResult: (value) => (otpCancelResult = value),
+    holdOTPProbe: (promise) => (otpProbeWait = promise),
     setWindow: (x) => (windowId = x),
     setCapture: (x) => (captureValue = x),
     waitCapture: (promise) => (captureWait = promise),
@@ -574,4 +623,405 @@ test("confirmed transaction refusal clears uncertainty and reports unsaved", asy
   assert.equal(state.status, "未保存");
   assert.equal(state.saveBlocked, false);
   await h.send({ type: "disconnect" });
+});
+
+const otpChoice = { type: "otp", id: "b".repeat(32), revision: "c".repeat(64) };
+async function otpReady(h) {
+  await ready(h);
+  await h.send(otpChoice);
+  await tick();
+  await tick();
+  const original = h.sent.find((x) => x.type === "otp");
+  assert.ok(original, "OTP intent missing");
+  return original;
+}
+test("OTP has distinct O/A, metadata-only ready, fixed document and no popup code", async () => {
+  const h = harness();
+  try {
+    const original = await otpReady(h);
+    assert.equal(original.window_id, 1);
+    assert.equal(original.document_id, "doc-1");
+    assert.equal("nonce" in original || "request_id" in original, false);
+    await h.send(otpChoice);
+    await h.send({
+      type: "fill",
+      id: otpChoice.id,
+      revision: otpChoice.revision,
+    });
+    assert.equal(
+      h.sent.filter((x) => ["otp", "fill"].includes(x.type)).length,
+      1,
+    );
+    h.deliver({
+      v: 1,
+      id: original.id,
+      type: "otp-ready",
+      nonce: "d".repeat(64),
+    });
+    await tick();
+    await tick();
+    const ack = h.sent.find((x) => x.type === "otp-ack");
+    assert.ok(ack);
+    assert.notEqual(ack.id, original.id);
+    assert.equal(
+      Object.keys(ack).sort().join(","),
+      "capability,id,nonce,request_id,type,v",
+    );
+    assert.equal(ack.request_id, original.id);
+    const reply = { v: 1, id: ack.id, type: "otp-fill", code: "012345" };
+    h.deliver(reply);
+    await tick();
+    await tick();
+    const injected = h.injected.find((x) => x.func === core.otpDocument);
+    assert.ok(injected);
+    assert.equal(injected.target.documentIds[0], "doc-1");
+    assert.equal(injected.args[1], "fill");
+    assert.equal(reply.code, "");
+    assert.equal(
+      JSON.stringify(await h.send({ type: "state" })).includes("012345"),
+      false,
+    );
+  } finally {
+    await h.send({ type: "disconnect" });
+  }
+});
+test("OTP ready keeps O for targeted cancellation and rejects navigation before ack", async () => {
+  const h = harness();
+  try {
+    const original = await otpReady(h);
+    h.holdOTPProbe(new Promise(() => {}));
+    h.deliver({
+      v: 1,
+      id: original.id,
+      type: "otp-ready",
+      nonce: "d".repeat(64),
+    });
+    await tick();
+    h.listeners.updated(1, { status: "loading" });
+    await tick();
+    const cancel = h.sent.find((x) => x.type === "cancel-otp");
+    assert.ok(cancel);
+    assert.equal(cancel.request_id, original.id);
+    assert.notEqual(cancel.id, original.id);
+    assert.equal("nonce" in cancel, false);
+    assert.equal(
+      h.sent.some((x) => x.type === "otp-ack"),
+      false,
+    );
+    assert.equal(
+      h.injected.some((x) => x.func === core.otpDocument),
+      false,
+    );
+  } finally {
+    await h.send({ type: "disconnect" });
+  }
+});
+test("OTP original monotonic budget is not reopened on code reply", async () => {
+  const h = harness();
+  try {
+    const original = await otpReady(h);
+    h.deliver({
+      v: 1,
+      id: original.id,
+      type: "otp-ready",
+      nonce: "d".repeat(64),
+    });
+    await tick();
+    await tick();
+    const ack = h.sent.find((x) => x.type === "otp-ack");
+    assert.ok(ack);
+    h.advanceOTPClock(1501);
+    const reply = { v: 1, id: ack.id, type: "otp-fill", code: "01234567" };
+    h.deliver(reply);
+    await tick();
+    await tick();
+    assert.equal(
+      h.injected.some((x) => x.func === core.otpDocument),
+      false,
+    );
+    assert.equal(reply.code, "");
+  } finally {
+    await h.send({ type: "disconnect" });
+  }
+});
+test("OTP explicit cancel and lock never inject a late native code", async () => {
+  for (const stop of ["cancel-otp", "locked"]) {
+    const h = harness();
+    try {
+      const original = await otpReady(h);
+      h.deliver({
+        v: 1,
+        id: original.id,
+        type: "otp-ready",
+        nonce: "d".repeat(64),
+      });
+      await tick();
+      await tick();
+      const ack = h.sent.find((x) => x.type === "otp-ack");
+      assert.ok(ack);
+      if (stop === "locked") h.deliver({ v: 1, type: "locked" });
+      else await h.send({ type: "cancel-otp" });
+      const reply = { v: 1, id: ack.id, type: "otp-fill", code: "012345" };
+      h.deliver(reply);
+      await tick();
+      await tick();
+      assert.equal(
+        h.injected.some((x) => x.func === core.otpDocument),
+        false,
+      );
+      assert.equal(reply.code, "");
+    } finally {
+      await h.send({ type: "disconnect" });
+    }
+  }
+});
+
+test("cancel after injection starts cannot claim DOM cancellation even when C is cancelled", async () => {
+  const h = harness();
+  try {
+    const original = await otpReady(h);
+    h.deliver({
+      v: 1,
+      id: original.id,
+      type: "otp-ready",
+      nonce: "d".repeat(64),
+    });
+    await tick();
+    await tick();
+    const ack = h.sent.find((x) => x.type === "otp-ack");
+    h.holdOTPFill(new Promise(() => {}));
+    h.deliver({ v: 1, id: ack.id, type: "otp-fill", code: "012345" });
+    await tick();
+    await tick();
+    assert.equal(
+      h.injected.some((x) => x.func === core.otpDocument),
+      true,
+    );
+    await h.send({ type: "cancel-otp" });
+    await tick();
+    await tick();
+    assert.equal(
+      (await h.send({ type: "state" })).status.includes("未确认"),
+      true,
+    );
+  } finally {
+    await h.send({ type: "disconnect" });
+  }
+});
+test("C unknown cannot be represented as confirmed cancellation", async () => {
+  const h = harness();
+  try {
+    await otpReady(h);
+    h.otpCancelResult("unknown");
+    await h.send({ type: "cancel-otp" });
+    await tick();
+    await tick();
+    assert.equal(
+      (await h.send({ type: "state" })).status.includes("未确认"),
+      true,
+    );
+  } finally {
+    await h.send({ type: "disconnect" });
+  }
+});
+test("ACK uncertainty survives disconnect, timeout, lock and a new explicit OTP operation", async () => {
+  for (const stop of ["manual", "disconnect", "locked", "timeout"]) {
+    const h = harness();
+    try {
+      const original = await otpReady(h);
+      h.deliver({
+        v: 1,
+        id: original.id,
+        type: "otp-ready",
+        nonce: "d".repeat(64),
+      });
+      await tick();
+      await tick();
+      const ack = h.sent.find((x) => x.type === "otp-ack");
+      assert.ok(ack);
+      if (stop === "manual") await h.send({ type: "disconnect" });
+      else if (stop === "disconnect") h.losePort();
+      else if (stop === "locked") h.deliver({ v: 1, type: "locked" });
+      else h.expireOTP();
+      await tick();
+      await tick();
+      assert.equal(
+        (await h.send({ type: "state" })).status.includes("未确认"),
+        true,
+      );
+      const late = { v: 1, id: ack.id, type: "otp-fill", code: "012345" };
+      h.deliver(late);
+      await tick();
+      assert.equal(late.code, "");
+      assert.equal(
+        h.injected.some((x) => x.func === core.otpDocument),
+        false,
+      );
+      await ready(h);
+      await h.send(otpChoice);
+      await tick();
+      await tick();
+      assert.equal(h.sent.filter((x) => x.type === "otp").length, 2);
+      assert.equal((await h.send({ type: "state" })).otpPending, true);
+    } finally {
+      await h.send({ type: "disconnect" });
+    }
+  }
+});
+test("reconnection before an explicit new O preserves OTP uncertainty", async () => {
+  const h = harness();
+  try {
+    const original = await otpReady(h);
+    h.deliver({
+      v: 1,
+      id: original.id,
+      type: "otp-ready",
+      nonce: "d".repeat(64),
+    });
+    await tick();
+    await tick();
+    assert.ok(h.sent.find((x) => x.type === "otp-ack"));
+    h.losePort();
+    await tick();
+    await ready(h);
+    assert.equal(
+      (await h.send({ type: "state" })).status.includes("未确认"),
+      true,
+    );
+    await h.send(otpChoice);
+    await tick();
+    assert.equal(
+      (await h.send({ type: "state" })).status.includes("未确认"),
+      false,
+    );
+  } finally {
+    await h.send({ type: "disconnect" });
+  }
+});
+test("ACK local bounded timeout before RPC timeout stays unknown", async () => {
+  const h = harness();
+  try {
+    const original = await otpReady(h);
+    h.deliver({
+      v: 1,
+      id: original.id,
+      type: "otp-ready",
+      nonce: "d".repeat(64),
+    });
+    await tick();
+    await tick();
+    assert.ok(h.sent.find((x) => x.type === "otp-ack"));
+    h.expireOTPBounded();
+    await tick();
+    await tick();
+    assert.equal(
+      (await h.send({ type: "state" })).status.includes("未确认"),
+      true,
+    );
+    h.expireOTP();
+    await tick();
+    assert.equal(
+      (await h.send({ type: "state" })).status.includes("未确认"),
+      true,
+    );
+  } finally {
+    await h.send({ type: "disconnect" });
+  }
+});
+test("definite native ACK refusal remains a refusal without a code injection", async () => {
+  const h = harness();
+  try {
+    const original = await otpReady(h);
+    h.deliver({
+      v: 1,
+      id: original.id,
+      type: "otp-ready",
+      nonce: "d".repeat(64),
+    });
+    await tick();
+    await tick();
+    const ack = h.sent.find((x) => x.type === "otp-ack");
+    h.deliver({ v: 1, id: ack.id, type: "error", error: "refused" });
+    await tick();
+    await tick();
+    const state = await h.send({ type: "state" });
+    assert.equal(state.status.includes("拒绝"), true);
+    assert.equal(state.status.includes("未确认"), false);
+    assert.equal(
+      h.injected.some((x) => x.func === core.otpDocument),
+      false,
+    );
+  } finally {
+    await h.send({ type: "disconnect" });
+  }
+});
+
+async function beginAfterOTPCancel(h, kind) {
+  await otpReady(h);
+  h.holdOTPCancel();
+  await h.send({ type: "cancel-otp" });
+  await tick();
+  const cancel = h.sent.find((request) => request.type === "cancel-otp");
+  if (kind === "fill") {
+    await h.send({ type: "match" });
+    await h.send({
+      type: "fill",
+      id: otpChoice.id,
+      revision: otpChoice.revision,
+    });
+  } else await h.send({ type: "save-new" });
+  await tick();
+  await tick();
+  const before = await h.send({ type: "state" });
+  assert.equal(before.pending, true);
+  return { cancel, before };
+}
+test("late OTP C outcome updates its fact without replacing a new ordinary save or fill status", async () => {
+  for (const kind of ["save-new", "fill"])
+    for (const result of ["cancelled", "unknown", "error"]) {
+      const h = harness();
+      try {
+        const { cancel, before } = await beginAfterOTPCancel(h, kind);
+        h.deliver({
+          v: 1,
+          id: cancel.id,
+          type: result,
+          ...(result === "error" ? { error: "refused" } : {}),
+        });
+        await tick();
+        await tick();
+        const after = await h.send({ type: "state" });
+        assert.equal(after.pending, true);
+        assert.equal(after.status.includes("本次验证码填充已取消"), false);
+        assert.equal(
+          after.status.split(" · ")[0],
+          before.status.split(" · ")[0],
+        );
+        assert.equal(
+          after.status.includes("验证码填充结果未确认"),
+          result !== "cancelled",
+        );
+      } finally {
+        await h.send({ type: "disconnect" });
+      }
+    }
+});
+test("lost OTP C response preserves the later ordinary save status, then disconnect remains unknown", async () => {
+  const h = harness();
+  try {
+    const { before } = await beginAfterOTPCancel(h, "save-new");
+    await tick();
+    await tick();
+    const waiting = await h.send({ type: "state" });
+    assert.equal(waiting.status, before.status);
+    assert.equal(waiting.status.includes("验证码填充结果未确认"), true);
+    h.losePort();
+    await tick();
+    await tick();
+    const disconnected = await h.send({ type: "state" });
+    assert.equal(disconnected.status.includes("验证码填充结果未确认"), true);
+    assert.equal(disconnected.status.includes("本次验证码填充已取消"), false);
+  } finally {
+    await h.send({ type: "disconnect" });
+  }
 });

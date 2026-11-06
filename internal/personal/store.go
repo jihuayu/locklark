@@ -208,6 +208,7 @@ type result struct {
 }
 
 type commandOption struct {
+	browserOTP     *BrowserOTPTarget
 	nativeMutation *nativeMutationRequest
 	browserSave    *browserSaveRequest
 	browser        *BrowserFillTarget
@@ -356,7 +357,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 	if len(options) == 1 {
 		option = options[0]
 	}
-	if option.nativeMutation != nil && (option.unlocked == nil || option.nativeMutation.gate == nil || !(action == "item.add" || generatedAction(action) || action == desktopOTPShowAction || action == desktopOTPCopyAction)) {
+	if option.nativeMutation != nil && (option.unlocked == nil || option.nativeMutation.gate == nil || !(action == "item.add" || generatedAction(action) || action == desktopOTPShowAction || action == desktopOTPCopyAction || action == browserOTPAction)) {
 		return result{}, invalid
 	}
 	if browserSaveAction(action) != (option.browserSave != nil) || option.browserSave != nil && (!option.browserSave.valid() || option.unlocked == nil || (action == browserNewAction) != (option.browserSave.target.ID == "")) {
@@ -367,6 +368,9 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 	}
 	if option.browser != nil && (edit == nil || edit.ID != option.browser.ID || edit.Revision != option.browser.Revision) {
 		return result{}, ErrBrowserFill
+	}
+	if (action == browserOTPAction) != (option.browserOTP != nil) || option.browserOTP != nil && (!option.browserOTP.valid() || option.unlocked == nil || option.nativeMutation == nil || edit == nil || edit.ID != option.browserOTP.ID || edit.Revision != option.browserOTP.Revision) {
+		return result{}, ErrBrowserOTP
 	}
 	if generatedAction(action) != (option.generation != nil) {
 		return result{}, invalid
@@ -585,7 +589,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			if option.backup == "" {
 				return invalid
 			}
-		case browserFillAction, "item.desktop.show.username", "item.desktop.show.password", "item.desktop.copy.username", "item.desktop.copy.password", "item.run.username", "item.run.password", livePullAction, "item.inject.username", "item.inject.password", "item.trash", "item.untrash", "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.regenerate.password", otpDisclosureAction, desktopOTPShowAction, desktopOTPCopyAction:
+		case browserOTPAction, browserFillAction, "item.desktop.show.username", "item.desktop.show.password", "item.desktop.copy.username", "item.desktop.copy.password", "item.run.username", "item.run.password", livePullAction, "item.inject.username", "item.inject.password", "item.trash", "item.untrash", "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.regenerate.password", otpDisclosureAction, desktopOTPShowAction, desktopOTPCopyAction:
 			if edit == nil {
 				return invalid
 			}
@@ -601,6 +605,13 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 					if items[i].ID == edit.ID {
 						if items[i].Kind != "login" {
 							return invalid
+						}
+						if action == browserOTPAction {
+							site, err := origin.Website(items[i].URL)
+							if items[i].State != "" || err != nil || site != option.browserOTP.Context.Origin {
+								outcome, refusal = "browser-refused", ErrBrowserOTP
+								break
+							}
 						}
 						if action == browserFillAction {
 							site, err := origin.Website(items[i].URL)
@@ -777,6 +788,13 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		default:
 			return invalid
 		}
+		var browserOTPLink string
+		if action == browserOTPAction && refusal == nil {
+			browserOTPLink, e = option.browserOTP.binding(i.AuditEncryption)
+			if e != nil {
+				return e
+			}
+		}
 		if option.nativeMutation != nil {
 			if option.unlocked == nil || !option.unlocked.winBrowserSave(option.nativeMutation.gate) {
 				return ErrMutationCancelled
@@ -789,6 +807,9 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			}
 		}
 		var link string
+		if action == browserOTPAction {
+			link = browserOTPLink
+		}
 		if browserSaveAction(action) {
 			link = out.destinationDigest
 		}

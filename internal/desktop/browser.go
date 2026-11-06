@@ -14,6 +14,9 @@ func (a *App) browserView(c *ui.Context) {
 	if view.SaveStatus != "" {
 		a.status = view.SaveStatus
 	}
+	if view.OTPStatus != "" {
+		a.status = view.OTPStatus
+	}
 	ui.Text(c, "浏览器连接").FontSize(24).Bold()
 	ui.Text(c, "固定扩展身份："+a.browserLabel).FontSize(12)
 	ui.Text(c, "此窗口持有独立金库会话；请核对浏览器当前网站，再确认本次操作。")
@@ -36,6 +39,10 @@ func (a *App) browserView(c *ui.Context) {
 		return
 	}
 	ui.Text(c, "已连接 · 连接最多 15 分钟；5 分钟未原生操作自动锁定。")
+	if view.OTP != nil {
+		a.browserOTPView(c, *view.OTP, view.OTPStatus)
+		return
+	}
 	if view.Save != nil {
 		a.browserSaveView(c, *view.Save, view.SaveStatus)
 		return
@@ -100,6 +107,35 @@ func (a *App) browserSaveAction(id string, work func() error) {
 	})
 }
 
+func (a *App) browserOTPView(c *ui.Context, p browserhost.OTPView, status string) {
+	ui.Text(c, "确认本次验证码填充").FontSize(22).Bold()
+	ui.Text(c, "HTTPS 来源："+visible(p.Origin)).FontSize(20).Bold()
+	ui.Text(c, "条目："+browserTitle(p.Title))
+	ui.Text(c, "ID："+p.ItemID).FontSize(12)
+	ui.Text(c, "精确修订："+p.Revision).FontSize(12)
+	ui.Text(c, "仅填入当前页面的唯一标准验证码框；不会自动提交，也不会自动生成下一期。").Bold()
+	ui.Text(c, status)
+	if p.Stage != "pending" {
+		return
+	}
+	ui.PrimaryButton(c, "批准填充验证码").Disabled(a.busy).OnClick(func() { a.browserOTPAction(p.ID, func() error { return a.browser.ApproveOTP(p.ID) }) })
+	ui.Button(c, "拒绝填充验证码").Disabled(a.busy).OnClick(func() { a.browserOTPAction(p.ID, func() error { return a.browser.RejectOTP(p.ID) }) })
+}
+func (a *App) browserOTPAction(id string, work func() error) {
+	a.run(func() outcome {
+		err := work()
+		return outcome{apply: func() {
+			view := a.browser.Snapshot()
+			if view.OTPRequestID == id {
+				a.status = view.OTPStatus
+				if err != nil && a.status == "" {
+					a.status = message(err)
+				}
+			}
+		}}
+	})
+}
+
 func browserTitle(title string) string {
 	if title == "" {
 		return "（无标题）"
@@ -121,7 +157,7 @@ func RunBrowser(browser browserhost.Browser, args []string) error {
 	if browser == browserhost.Firefox {
 		a.browserLabel = browserhost.FirefoxID
 	}
-	writer := browserhost.NewWriter(os.Stdout, 250*time.Millisecond)
+	writer := browserhost.NewNativeWriter(os.Stdout, 250*time.Millisecond, func() { os.Exit(74) })
 	mygo.App.SetName("Locklark Browser")
 	mygo.App.WhenReady(func() {
 		a.win = mygo.NewWindow(mygo.WindowOptions{Title: "Locklark · 浏览器原生确认", Width: 1000, Height: 780, MinWidth: 900, MinHeight: 680, Content: ui.View(a.View)})

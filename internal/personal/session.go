@@ -18,22 +18,25 @@ var ErrDesktopDelivery = errors.New("native disclosure failed; intent recorded, 
 // Key. Operations are serialized and revalidate the slot, snapshot and history.
 // No exported method exposes arbitrary commands or key material to a renderer.
 type Session struct {
-	otpPrepared    map[*NativeOTP]bool
-	otpDeliveries  map[*NativeOTPDelivery]bool
-	otpNow         func() time.Time
-	otpCaps        sync.Map
-	saveMu         sync.Mutex
-	saveGate       *BrowserSaveGate
-	lockRequested  atomic.Bool
-	mu             sync.Mutex
-	path           string
-	material       []byte
-	slotDigest     [32]byte
-	last           time.Time
-	idle           time.Duration
-	fullUnlock     time.Time
-	pending        map[*NativeField]bool
-	browserPending map[*NativeBrowserFill]bool
+	browserOTPControls   sync.Map
+	browserOTPPrepared   map[*BrowserOTP]bool
+	browserOTPDeliveries map[*BrowserOTPDelivery]bool
+	otpPrepared          map[*NativeOTP]bool
+	otpDeliveries        map[*NativeOTPDelivery]bool
+	otpNow               func() time.Time
+	otpCaps              sync.Map
+	saveMu               sync.Mutex
+	saveGate             *BrowserSaveGate
+	lockRequested        atomic.Bool
+	mu                   sync.Mutex
+	path                 string
+	material             []byte
+	slotDigest           [32]byte
+	last                 time.Time
+	idle                 time.Duration
+	fullUnlock           time.Time
+	pending              map[*NativeField]bool
+	browserPending       map[*NativeBrowserFill]bool
 }
 
 // NativeField is a one-use native-only delivery. It cannot be JSON-serialized.
@@ -66,6 +69,16 @@ func UnlockSession(path string, password, key []byte, idle time.Duration) (*Sess
 	return &Session{path: path, material: r.material, slotDigest: r.slotDigest, last: time.Now(), fullUnlock: time.Now(), idle: idle, pending: make(map[*NativeField]bool)}, nil
 }
 func (s *Session) lock() {
+	for p := range s.browserOTPPrepared {
+		p.cap.clear()
+		s.otpCaps.Delete(p.cap)
+		delete(s.browserOTPPrepared, p)
+	}
+	for d := range s.browserOTPDeliveries {
+		d.cap.clear()
+		s.otpCaps.Delete(d.cap)
+		delete(s.browserOTPDeliveries, d)
+	}
 	for p := range s.otpPrepared {
 		p.cap.clear()
 		s.otpCaps.Delete(p.cap)

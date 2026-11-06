@@ -26,6 +26,7 @@ type observation struct {
 	SnapshotDigest string         `json:"snapshot_digest"`
 	Rows           []personal.Row `json:"rows"`
 	SaveEvents     []saveEvent    `json:"save_events"`
+	OTPEvents      []saveEvent    `json:"otp_events"`
 	AuditSafe      bool           `json:"audit_safe"`
 }
 
@@ -68,7 +69,7 @@ func consistentVaultCopy(source, destination string) (string, error) {
 }
 
 func containsCanary(raw []byte, f fixture, includeOrigin bool) bool {
-	values := []string{f.Password, f.Secret, f.Username, f.Value, f.SaveUsername, f.SaveValue, f.UpdateUsername, f.UpdateValue, f.RejectedUsername, f.RejectedValue}
+	values := []string{f.Password, f.Secret, f.Username, f.Value, f.SaveUsername, f.SaveValue, f.UpdateUsername, f.UpdateValue, f.RejectedUsername, f.RejectedValue, f.OTPSeed, f.OTPURI}
 	if includeOrigin {
 		values = append(values, f.Origin)
 	}
@@ -126,9 +127,9 @@ func observeFixture(input string) error {
 	if err != nil {
 		return err
 	}
-	out := observation{SnapshotDigest: digest, Rows: rows, SaveEvents: []saveEvent{}, AuditSafe: !containsCanary(auditJSON, f, true)}
+	out := observation{SnapshotDigest: digest, Rows: rows, SaveEvents: []saveEvent{}, OTPEvents: []saveEvent{}, AuditSafe: !containsCanary(auditJSON, f, true)}
 	for _, event := range events {
-		if event.Action != "item.browser.save.new" && event.Action != "item.browser.save.update" {
+		if event.Action != "item.browser.save.new" && event.Action != "item.browser.save.update" && event.Action != "item.browser.fill.otp-code" {
 			continue
 		}
 		encoded, err := json.Marshal(event)
@@ -136,7 +137,12 @@ func observeFixture(input string) error {
 			return err
 		}
 		hash := sha256.Sum256(encoded)
-		out.SaveEvents = append(out.SaveEvents, saveEvent{event.Action, event.Item, hex.EncodeToString(hash[:]), event.BaseRevision, event.Result})
+		entry := saveEvent{event.Action, event.Item, hex.EncodeToString(hash[:]), event.BaseRevision, event.Result}
+		if event.Action == "item.browser.fill.otp-code" {
+			out.OTPEvents = append(out.OTPEvents, entry)
+		} else {
+			out.SaveEvents = append(out.SaveEvents, entry)
+		}
 	}
 	return json.NewEncoder(os.Stdout).Encode(out)
 }
