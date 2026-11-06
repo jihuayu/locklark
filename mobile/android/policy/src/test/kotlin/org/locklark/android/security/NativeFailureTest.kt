@@ -17,4 +17,16 @@ class NativeFailureTest {
         assertEquals(NativeFailureCode.UNKNOWN, NativeFailures.classify(Exception("go error: operation result unknown; inspect the vault before retrying")))
         assertEquals(NativeFailureCode.CANCELLED, NativeFailures.classify(ObsoleteWork()))
     }
+
+    @Test fun deviceDiagnosticHasOnlyAllowlistedFieldsAndNoCause() {
+        val privateValue = "private-alias-path-factor-body"
+        val failure = NativeFailures.failure(NativePhase.DEVICE_CIPHER, IllegalStateException(privateValue))
+        assertEquals("stage=DEVICE_CIPHER code=OTHER exception=ILLEGAL_STATE os=NONE", NativeFailures.diagnostic(failure))
+        assertFalse(NativeFailures.diagnostic(failure).contains(privateValue))
+        assertNull(failure.cause)
+        assertEquals(NativeExceptionKind.OTHER, NativeFailures.exceptionKind(object : Exception(privateValue) {}))
+        assertEquals(NativeAuthError.OTHER, NativeFailures.authError(999999))
+        assertEquals(NativeAuthError.NO_DEVICE_CREDENTIAL, NativeFailures.authError(14))
+        assertSame(failure, NativeFailures.failure(NativePhase.OPERATION, failure))
+    }
 }

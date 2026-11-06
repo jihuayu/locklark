@@ -9,6 +9,23 @@ from device_credential_acceptance import credential_marker, focused_identity, va
 
 
 class DeviceCredentialHarnessTests(unittest.TestCase):
+    def test_auth_diagnostic_requires_new_attempt_same_live_PID_and_fixed_enums(self):
+        failed = b"event=failed stage=DEVICE_PROMPT code=UNAVAILABLE exception=NONE os=NO_DEVICE_CREDENTIAL\n"
+        raw = b"attempt=3 pid=42 event=begin\n" + b"attempt=3 pid=42 " + failed
+        self.assertEqual(auth.fresh_auth_failure(raw, 42, 2), {"phase":"DEVICE_PROMPT", "code":"UNAVAILABLE", "exception":"NONE", "os_error":"NO_DEVICE_CREDENTIAL"})
+        self.assertEqual(auth.fresh_auth_failure(raw, 42, 3), {})
+        self.assertEqual(auth.fresh_auth_failure(raw, 43, 0), {})
+        self.assertEqual(auth.fresh_auth_failure(b"attempt=4 pid=42 " + failed, 42, 3), {})
+        self.assertEqual(auth.fresh_auth_failure(raw + b"attempt=4 pid=42 event=begin\n", 42, 2), {})
+        for private in (b"stage=private-factor", b"exception=private-path", b"os=private-alias"):
+            poisoned = raw.replace({b"stage":b"stage=DEVICE_PROMPT", b"exception":b"exception=NONE", b"os":b"os=NO_DEVICE_CREDENTIAL"}[private.partition(b"=")[0]], private)
+            self.assertEqual(auth.fresh_auth_failure(poisoned, 42, 2), {})
+        self.assertNotIn("private", json.dumps(auth.fresh_auth_failure(raw + b"private-factor-body\n", 42, 2)))
+
+    def test_device_failure_ui_is_classified_without_exposing_text(self):
+        nodes = [self.node(package="org.locklark.android", text="准备设备加密未完成：固定类别", **{"class":"android.widget.TextView"})]
+        self.assertEqual(auth.native_ui_state(nodes), "refused")
+
     def node(self, **values):
         return {"package":"com.android.systemui","enabled":"true","bounds":"[0,0][100,100]",**values}
 

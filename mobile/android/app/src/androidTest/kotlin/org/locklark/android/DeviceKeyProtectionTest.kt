@@ -55,6 +55,7 @@ class DeviceKeyProtectionTest {
         try {
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.ENCRYPT_MODE,key)
+            cipher.updateAAD("public unauthenticated AAD probe".toByteArray())
             cipher.doFinal("public unauthenticated probe".toByteArray()).fill(0)
         } catch (_: GeneralSecurityException) { rejected = true }
         assertTrue("Unauthenticated device-key operation succeeded",rejected)

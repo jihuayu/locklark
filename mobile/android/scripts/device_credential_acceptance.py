@@ -25,6 +25,50 @@ OS_PACKAGES = {"com.android.systemui", "com.android.settings"}
 STAGES = {"prerequisites", "live-vault", "pin-capabilities", "pin-empty-precondition", "pin-set", "enable", "enable-prompt", "quick", "quick-prompt",
           "cancel", "cancel-prompt", "key-policy", "copy-encrypted-state", "reinstall", "restore",
           "copied-capsule-refusal", "full-factor-recovery", "pin-cleanup", "private-canary-scan", "complete"}
+AUTH_PHASES = {"OPERATION", "CAPTURE", "DEVICE_SETUP", "DEVICE_READY", "DEVICE_KEY", "DEVICE_CIPHER", "DEVICE_PROMPT",
+               "DEVICE_WAIT", "DEVICE_AAD", "DEVICE_CRYPTO", "DEVICE_READ", "DEVICE_WRITE"}
+AUTH_CODES = {"LOCKED", "CLOSED", "INVALID", "CONFLICT", "CANCELLED", "UNKNOWN", "EXPIRED", "UNAVAILABLE", "EXISTS", "CAPACITY", "OTHER"}
+AUTH_EXCEPTIONS = {"NONE", "USER_NOT_AUTHENTICATED", "KEY_INVALIDATED", "INVALID_KEY", "INVALID_PARAMETER", "KEYSTORE",
+                   "PROVIDER", "SECURITY", "IO", "ILLEGAL_ARGUMENT", "ILLEGAL_STATE", "TIMEOUT", "INTERRUPTED", "OTHER"}
+AUTH_ERRORS = {"NONE", "HARDWARE_UNAVAILABLE", "UNABLE_TO_PROCESS", "TIMEOUT", "NO_SPACE", "CANCELLED", "LOCKOUT", "VENDOR",
+               "PERMANENT_LOCKOUT", "USER_CANCELLED", "NO_BIOMETRICS", "NO_HARDWARE", "NEGATIVE_BUTTON", "NO_DEVICE_CREDENTIAL",
+               "SECURITY_UPDATE_REQUIRED", "OTHER"}
+REFUSED_PREFIXES = ("操作未完成：", "解锁未完成：", "准备操作未完成：", "结果未确认", "准备设备认证未完成：", "检查设备认证未完成：",
+                    "准备设备认证密钥未完成：", "准备设备加密未完成：", "设备认证未完成：", "等待设备认证未完成：",
+                    "绑定设备授权未完成：", "处理设备授权未完成：", "读取设备授权未完成：", "保存设备授权未完成：")
+
+
+def auth_records(raw, pid):
+    """Strict fixed-enum messages only; discard arbitrary log text and old PIDs."""
+    records = []
+    pattern = rb"attempt=([1-9][0-9]{0,18}) pid=([1-9][0-9]{0,9}) event=(begin|failed)(?: stage=([A-Z_]+) code=([A-Z_]+) exception=([A-Z_]+) os=([A-Z_]+))?"
+    for line in raw.splitlines():
+        match = re.fullmatch(pattern, line)
+        if not match or int(match[2]) != pid:
+            continue
+        attempt = int(match[1])
+        if match[3] == b"begin" and match[4] is None:
+            records.append((attempt, None))
+        elif match[3] == b"failed" and match[4] is not None:
+            fields = [match[i].decode("ascii") for i in range(4, 8)]
+            if all(field in allowed for field, allowed in zip(fields, (AUTH_PHASES, AUTH_CODES, AUTH_EXCEPTIONS, AUTH_ERRORS))):
+                records.append((attempt, dict(zip(("phase", "code", "exception", "os_error"), fields))))
+    return records
+
+
+def fresh_auth_failure(raw, pid, floor):
+    begun = set()
+    records = [(attempt, failure) for attempt, failure in auth_records(raw, pid) if attempt > floor]
+    newest = max((attempt for attempt, _ in records), default=0)
+    latest = {}
+    for attempt, failure in records:
+        if attempt != newest:
+            continue
+        if failure is None:
+            begun.add(attempt)
+        elif attempt in begun:
+            latest = failure
+    return latest
 
 
 def locksettings_status(result):
@@ -50,8 +94,7 @@ def locksettings_status(result):
 
 def native_ui_state(nodes):
     app = [node for node in nodes if node.get("package") == PACKAGE]
-    if any(node.get("class") == "android.widget.TextView" and node.get("text", "").startswith(
-            ("操作未完成：", "解锁未完成：", "准备操作未完成：", "结果未确认")) for node in app):
+    if any(node.get("class") == "android.widget.TextView" and node.get("text", "").startswith(REFUSED_PREFIXES) for node in app):
         return "refused"
     controls = [node for node in app if node.get("class") == "android.widget.Button"]
     if any(node.get("text") in {"打开本地金库", "使用此设备认证解锁", "启用此设备认证"} and node.get("enabled") == "false" for node in controls):
@@ -145,6 +188,8 @@ class DeviceCredentialAcceptance(AndroidAcceptance):
         self.key_level = "unknown"
         self.locksettings_diagnostic = {}
         self.secure_lock_screen = None
+        self.auth_pid = None
+        self.auth_floor = 0
         self.last_observation = {"phase":"prerequisites", "focused_package":"unknown", "main_state":"unknown",
                                  "native_ui_state":"unknown", "credential_marker":False}
 
@@ -180,8 +225,24 @@ class DeviceCredentialAcceptance(AndroidAcceptance):
                                  "credential_marker":credential_marker(nodes, focused)}
 
     def failure_metadata(self):
+        auth = {}
+        try:
+            if self.auth_pid is not None and self.shell("pidof", PACKAGE).stdout.strip() == str(self.auth_pid).encode():
+                auth = fresh_auth_failure(self.auth_log(self.auth_pid), self.auth_pid, self.auth_floor)
+        except Exception:
+            pass
         return {"secure_lock_screen_feature":self.secure_lock_screen,
-                "locksettings":self.locksettings_diagnostic.copy(), "last_ui":self.last_observation.copy()}
+                "locksettings":self.locksettings_diagnostic.copy(), "last_ui":self.last_observation.copy(), "native_auth":auth}
+
+    def auth_log(self, pid):
+        return self.shell("logcat", "-d", "-v", "raw", "--pid", str(pid), "-s", "LocklarkAuth:I", "*:S").stdout
+
+    def arm_auth_diagnostic(self):
+        raw = self.shell("pidof", PACKAGE).stdout.strip()
+        require(bool(re.fullmatch(rb"[1-9][0-9]{0,9}", raw)))
+        self.auth_pid = int(raw)
+        records = auth_records(self.auth_log(self.auth_pid), self.auth_pid)
+        self.auth_floor = max((attempt for attempt, _ in records), default=0)
 
     def locksettings(self, operation, *arguments, oracle):
         self.locksettings_diagnostic = {"operation":operation,"exit_code":None,"classification":"transport-or-capture-failed"}
@@ -250,7 +311,7 @@ class DeviceCredentialAcceptance(AndroidAcceptance):
                     time.sleep(.2)
                     continue
                 errors = [node.get("text", "") for node in nodes if node.get("package") == PACKAGE and node.get("class") == "android.widget.TextView"]
-                refused = any(text.startswith(("操作未完成：", "解锁未完成：", "准备操作未完成：", "结果未确认")) for text in errors)
+                refused = any(text.startswith(REFUSED_PREFIXES) for text in errors)
                 settled_locked = any(node.get("text") == "打开本地金库" and node.get("enabled") == "true" for node in controls)
                 if refused or settled_locked and (seen_busy or self.stage == "enable-prompt"):
                     self.observe_lifecycle(nodes, focused); raise AcceptanceFailure()
@@ -294,6 +355,7 @@ class DeviceCredentialAcceptance(AndroidAcceptance):
     def native_auth_flow(self):
         self.set_stage("enable")
         self.unlock(self.fixture["master"], self.fixture["key"])
+        self.arm_auth_diagnostic()
         self.tap("启用此设备认证", class_name="android.widget.Button")
         self.set_stage("enable-prompt"); self.authenticate_pin()
         self.wait(self.enabled)
@@ -301,6 +363,7 @@ class DeviceCredentialAcceptance(AndroidAcceptance):
         self.tap("立即锁定", class_name="android.widget.Button")
         self.visible("打开本地金库", class_name="android.widget.Button")
         self.set_stage("quick")
+        self.arm_auth_diagnostic()
         self.tap("使用此设备认证解锁", class_name="android.widget.Button")
         self.set_stage("quick-prompt"); self.authenticate_pin()
         self.list_ready()
@@ -312,6 +375,7 @@ class DeviceCredentialAcceptance(AndroidAcceptance):
         self.tap("立即锁定", class_name="android.widget.Button")
         self.visible("打开本地金库", class_name="android.widget.Button")
         self.set_stage("cancel")
+        self.arm_auth_diagnostic()
         self.tap("使用此设备认证解锁", class_name="android.widget.Button")
         self.set_stage("cancel-prompt"); self.os_prompt()
         self.shell("input", "keyevent", "KEYCODE_BACK")
@@ -359,9 +423,9 @@ class DeviceCredentialAcceptance(AndroidAcceptance):
         require(result.returncode == 0)
         self.launch(); self.visible("打开本地金库",class_name="android.widget.Button")
         self.set_stage("copied-capsule-refusal")
+        self.arm_auth_diagnostic()
         self.tap("使用此设备认证解锁",class_name="android.widget.Button")
-        self.wait(lambda nodes:any(node.get("package") == PACKAGE and node.get("class") == "android.widget.TextView" and
-                                  node.get("text", "").startswith("操作未完成：") for node in nodes))
+        self.wait(lambda nodes:native_ui_state(nodes) == "refused")
         self.visible("打开本地金库",class_name="android.widget.Button")
         require(not any(self.matching(self.snapshot(),"新建登录","android.widget.Button")))
         self.no_visible_secrets()

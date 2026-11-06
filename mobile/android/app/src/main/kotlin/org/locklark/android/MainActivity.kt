@@ -9,6 +9,8 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.os.Process
+import android.util.Log
 import android.text.InputType
 import android.view.View
 import android.view.WindowManager
@@ -33,12 +35,17 @@ import org.locklark.android.security.Target
 import org.locklark.android.security.WorkStamp
 import java.io.File
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 /** Native widgets only. No inbound data, web content, or secret-bearing IPC. */
 class MainActivity : Activity() {
     private val gate = ForegroundGate()
     private val worker = Executors.newSingleThreadExecutor()
-    companion object { private val cleanup = Executors.newSingleThreadExecutor() }
+    companion object {
+        private val cleanup = Executors.newSingleThreadExecutor()
+        private val authAttempts = AtomicLong()
+    }
     private val main = Handler(Looper.getMainLooper())
     @Volatile private var vault: Vault? = null
     private var opening = false
@@ -388,19 +395,33 @@ class MainActivity : Activity() {
     }
     private class StoreOperation(private val native: PlatformCapsuleStore) : SystemUnlockStore {
         private val returned = ReturnedSecretBuffers()
-        override fun store(id: String, value: ByteArray) = native.store(id, value)
-        override fun load(id: String): ByteArray = returned.retain(native.load(id))
-        override fun delete(id: String) = native.delete(id)
+        private val callbackFailure = AtomicReference<NativeCallFailure?>()
+        val failure: NativeCallFailure? get() = callbackFailure.get()
+        private fun <T> callback(action: () -> T): T = try { action() }
+            catch (error: PlatformAuthenticationFailure) { callbackFailure.compareAndSet(null, error.failure); throw error }
+        override fun store(id: String, value: ByteArray) = callback { native.store(id, value) }
+        override fun load(id: String): ByteArray = callback { returned.retain(native.load(id)) }
+        override fun delete(id: String) = callback { native.delete(id) }
         fun release() = returned.clearAfterCall()
     }
     private fun <T> withStore(stamp: WorkStamp, action: (SystemUnlockStore) -> T): T {
+        val attempt = authAttempts.incrementAndGet()
+        val prefix = "attempt=$attempt pid=${Process.myPid()}"
+        Log.i("LocklarkAuth", "$prefix event=begin")
         val current = { gate.accepts(stamp) }
         val prompt = NativeCryptoPrompt(this, current)
-        if (!promptSlot.publish(prompt, current)) throw PlatformAuthenticationFailure()
         var adapter: StoreOperation? = null
         try {
-            adapter = StoreOperation(PlatformCapsuleStore(this, prompt, current))
+            if (!promptSlot.publish(prompt, current)) throw PlatformAuthenticationFailure()
+            adapter = StoreOperation(NativeFailures.call(NativePhase.DEVICE_SETUP) { PlatformCapsuleStore(this, prompt, current) })
             return action(adapter)
+        } catch (error: Exception) {
+            // The Go boundary deliberately normalizes storage callback errors.
+            // Retain only this attempt's fixed Kotlin classification locally.
+            val failure = adapter?.failure ?: (error as? PlatformAuthenticationFailure)?.failure
+                ?: NativeFailures.failure(NativePhase.DEVICE_SETUP, error)
+            Log.i("LocklarkAuth", "$prefix event=failed ${NativeFailures.diagnostic(failure)}")
+            throw failure
         } finally {
             // Go has returned: its borrowed callback result is no longer live.
             adapter?.release()

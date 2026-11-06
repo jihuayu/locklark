@@ -25,8 +25,24 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+import org.locklark.android.security.NativeAuthError
+import org.locklark.android.security.NativeCallFailure
+import org.locklark.android.security.NativeFailureCode
+import org.locklark.android.security.NativeFailures
+import org.locklark.android.security.NativePhase
+import org.locklark.android.security.PerUseCrypto
+import org.locklark.android.security.PerUseCryptoOperation
 
-class PlatformAuthenticationFailure : Exception("Native authentication unavailable or cancelled")
+class PlatformAuthenticationFailure(val failure: NativeCallFailure = NativeCallFailure(NativePhase.DEVICE_READY, NativeFailureCode.UNAVAILABLE)) :
+    Exception("Native authentication unavailable or cancelled")
+
+private inline fun <T> deviceStage(phase: NativePhase, action: () -> T): T = try { action() }
+    catch (error: Exception) {
+        throw error as? PlatformAuthenticationFailure ?: PlatformAuthenticationFailure(
+            NativeCallFailure(phase, NativeFailureCode.UNAVAILABLE, NativeFailures.exceptionKind(error)))
+    }
+
+private fun cancelledPrompt() = PlatformAuthenticationFailure(NativeCallFailure(NativePhase.DEVICE_PROMPT, NativeFailureCode.CANCELLED))
 
 /** A single explicitly initiated OS-authenticated operation; no plaintext cache. */
 class NativeCryptoPrompt(private val activity: Activity, private val current: () -> Boolean) {
@@ -42,7 +58,7 @@ class NativeCryptoPrompt(private val activity: Activity, private val current: ()
         cancellation = signal
         main.post {
             if (!current() || result.isDone) {
-                result.completeExceptionally(PlatformAuthenticationFailure())
+                result.completeExceptionally(cancelledPrompt())
             } else {
                 try {
                     BiometricPrompt.Builder(activity)
@@ -53,24 +69,31 @@ class NativeCryptoPrompt(private val activity: Activity, private val current: ()
                             object : BiometricPrompt.AuthenticationCallback() {
                                 override fun onAuthenticationSucceeded(value: BiometricPrompt.AuthenticationResult) {
                                     val authorized = value.cryptoObject?.cipher
-                                    if (current() && authorized != null) result.complete(authorized)
-                                    else result.completeExceptionally(PlatformAuthenticationFailure())
+                                    if (current() && authorized === cipher) result.complete(authorized)
+                                    else result.completeExceptionally(cancelledPrompt())
                                 }
                                 override fun onAuthenticationError(code: Int, message: CharSequence?) {
-                                    result.completeExceptionally(PlatformAuthenticationFailure())
+                                    val category = NativeFailures.authError(code)
+                                    val refused = if (category in setOf(NativeAuthError.CANCELLED, NativeAuthError.USER_CANCELLED,
+                                            NativeAuthError.NEGATIVE_BUTTON)) NativeFailureCode.CANCELLED else NativeFailureCode.UNAVAILABLE
+                                    result.completeExceptionally(PlatformAuthenticationFailure(NativeCallFailure(
+                                        NativePhase.DEVICE_PROMPT, refused, authError = category)))
                                 }
                             })
-                } catch (_: Exception) {
-                    result.completeExceptionally(PlatformAuthenticationFailure())
+                } catch (error: Exception) {
+                    result.completeExceptionally(PlatformAuthenticationFailure(NativeCallFailure(
+                        NativePhase.DEVICE_PROMPT, NativeFailureCode.UNAVAILABLE, NativeFailures.exceptionKind(error))))
                 }
             }
         }
         try {
             val authorized = result.get(60, TimeUnit.SECONDS)
-            if (!current()) throw PlatformAuthenticationFailure()
+            if (!current()) throw cancelledPrompt()
             return authorized
-        } catch (_: Exception) {
-            throw PlatformAuthenticationFailure()
+        } catch (error: Exception) {
+            val original = if (error is java.util.concurrent.ExecutionException) error.cause else error
+            throw original as? PlatformAuthenticationFailure ?: PlatformAuthenticationFailure(NativeCallFailure(
+                NativePhase.DEVICE_WAIT, NativeFailureCode.UNAVAILABLE, NativeFailures.exceptionKind(error)))
         } finally {
             signal.cancel()
             if (completion === result) { completion = null; cancellation = null }
@@ -78,7 +101,7 @@ class NativeCryptoPrompt(private val activity: Activity, private val current: ()
     }
 
     fun cancel() {
-        completion?.completeExceptionally(PlatformAuthenticationFailure())
+        completion?.completeExceptionally(cancelledPrompt())
         cancellation?.cancel()
     }
 }
@@ -107,9 +130,9 @@ class PlatformCapsuleStore(context: Context, private val prompt: NativeCryptoPro
         if (!current() || !keyguard.isDeviceSecure) throw PlatformAuthenticationFailure()
     }
 
-    private fun key(id: String, create: Boolean): SecretKey {
+    private fun key(id: String, create: Boolean): SecretKey = deviceStage(NativePhase.DEVICE_KEY) {
         val existing = keys.getKey(alias(id), null)
-        if (existing is SecretKey) return existing
+        if (existing is SecretKey) return@deviceStage existing
         if (!create) throw PlatformAuthenticationFailure()
         val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
         generator.init(KeyGenParameterSpec.Builder(alias(id), KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
@@ -119,30 +142,37 @@ class PlatformCapsuleStore(context: Context, private val prompt: NativeCryptoPro
             .setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG or KeyProperties.AUTH_DEVICE_CREDENTIAL)
             .setInvalidatedByBiometricEnrollment(true)
             .build())
-        return generator.generateKey()
+        generator.generateKey()
     }
+
+    private fun authenticatedFinal(cipher: Cipher, id: String, value: ByteArray): ByteArray =
+        PerUseCrypto.finish(::ready, object : PerUseCryptoOperation {
+            private var authorized = cipher
+            override fun authenticate() { authorized = prompt.authenticate(cipher) }
+            override fun addAuthenticatedData() = deviceStage(NativePhase.DEVICE_AAD) { authorized.updateAAD(aad(id)) }
+            override fun finish(): ByteArray = deviceStage(NativePhase.DEVICE_CRYPTO) { authorized.doFinal(value) }
+        })
 
     fun store(id: String, value: ByteArray) {
         try {
             ready()
             if (value.isEmpty() || value.size > 1_048_576) throw PlatformAuthenticationFailure()
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.ENCRYPT_MODE, key(id, true))
-            cipher.updateAAD(aad(id))
-            val authenticated = prompt.authenticate(cipher)
-            ready()
-            val encrypted = authenticated.doFinal(value)
+            val cipher = deviceStage(NativePhase.DEVICE_CIPHER) {
+                Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, key(id, true)) }
+            }
+            val encrypted = authenticatedFinal(cipher, id, value)
             try {
-                val iv = authenticated.iv
+                val iv = cipher.iv
                 if (iv.size != 12) throw PlatformAuthenticationFailure()
                 val envelope = ByteBuffer.allocate(8 + iv.size + encrypted.size)
                     .putInt(1).putInt(iv.size).put(iv).put(encrypted).array()
-                try { ready(); atomicWrite(file(id), envelope); ready() } finally { envelope.fill(0) }
+                try { ready(); deviceStage(NativePhase.DEVICE_WRITE) { atomicWrite(file(id), envelope) }; ready() } finally { envelope.fill(0) }
             } finally { encrypted.fill(0) }
-        } catch (_: Exception) {
+        } catch (error: Exception) {
             // Failed writes cannot silently retain an earlier quick-unlock grant.
             runCatching { file(id).delete() }
-            throw PlatformAuthenticationFailure()
+            throw error as? PlatformAuthenticationFailure ?: PlatformAuthenticationFailure(NativeCallFailure(
+                NativePhase.DEVICE_WRITE, NativeFailureCode.UNAVAILABLE, NativeFailures.exceptionKind(error)))
         } finally { value.fill(0) }
     }
 
@@ -150,7 +180,7 @@ class PlatformCapsuleStore(context: Context, private val prompt: NativeCryptoPro
         var envelope = ByteArray(0)
         try {
             ready()
-            envelope = file(id).openRead().use { input ->
+            envelope = deviceStage(NativePhase.DEVICE_READ) { file(id).openRead().use { input ->
                 val output = ByteArrayOutputStream()
                 val buffer = ByteArray(4096)
                 while (true) {
@@ -161,24 +191,23 @@ class PlatformCapsuleStore(context: Context, private val prompt: NativeCryptoPro
                 }
                 buffer.fill(0)
                 output.toByteArray()
-            }
+            } }
             if (envelope.size < 36) throw PlatformAuthenticationFailure()
             val data = ByteBuffer.wrap(envelope)
             if (data.int != 1 || data.int != 12) throw PlatformAuthenticationFailure()
             val iv = ByteArray(12).also { data.get(it) }
             val ciphertext = ByteArray(data.remaining()).also { data.get(it) }
             try {
-                val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-                cipher.init(Cipher.DECRYPT_MODE, key(id, false), GCMParameterSpec(128, iv))
-                cipher.updateAAD(aad(id))
-                val authenticated = prompt.authenticate(cipher)
-                ready()
-                val plaintext = authenticated.doFinal(ciphertext)
+                val cipher = deviceStage(NativePhase.DEVICE_CIPHER) {
+                    Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.DECRYPT_MODE, key(id, false), GCMParameterSpec(128, iv)) }
+                }
+                val plaintext = authenticatedFinal(cipher, id, ciphertext)
                 if (!current()) { plaintext.fill(0); throw PlatformAuthenticationFailure() }
                 return plaintext
             } finally { iv.fill(0); ciphertext.fill(0) }
-        } catch (_: Exception) {
-            throw PlatformAuthenticationFailure()
+        } catch (error: Exception) {
+            throw error as? PlatformAuthenticationFailure ?: PlatformAuthenticationFailure(NativeCallFailure(
+                NativePhase.DEVICE_READ, NativeFailureCode.UNAVAILABLE, NativeFailures.exceptionKind(error)))
         } finally { envelope.fill(0) }
     }
 
