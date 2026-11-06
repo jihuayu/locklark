@@ -119,13 +119,15 @@ func matchingRows(items []vault.Item, revisions map[string]string, want string) 
 	}
 	mapped, err := watchtowerItems(items, revisions)
 	if err != nil {
-		return nil, err
+		// Badge metadata is advisory. A bounded-projection refusal must not turn
+		// an otherwise valid match into a vault error or lock the session.
+		return rows, nil
 	}
 	// Badge data is local-only: no HIBP client and no network is involved in a
 	// match, and reuse counts deliberately cover the whole active login set.
 	analysis, err := watchtower.Analyze(mapped, watchtower.Options{})
 	if err != nil {
-		return nil, invalid
+		return rows, nil
 	}
 	byID := make(map[string]watchtower.Finding, len(analysis.Report.Findings))
 	for _, finding := range analysis.Report.Findings {

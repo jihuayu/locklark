@@ -178,7 +178,10 @@ func projectReferenceFields(it vault.Item, cat vault.ItemCategory) (projectedFie
 			}
 		}
 	}
-	if it.Notes != "" || vault.HasV2Extension(it) {
+	// Shared reference catalogs keep legacy logins at their original three
+	// fields. Only explicitly v2 items may expose notes; notes on v1 items stay
+	// reachable solely through the native notes API.
+	if vault.HasV2Extension(it) {
 		if err := add("notes", "notes", reference.TypeText); err != nil {
 			return projectedFields{}, err
 		}

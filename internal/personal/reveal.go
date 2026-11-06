@@ -24,12 +24,11 @@ type DisclosureReceipt struct {
 
 var ErrDisclosureOutput = errors.New("terminal disclosure incomplete; intent recorded, delivery unknown")
 
+// revealAction is the shared terminal/CLI/injection disclosure scope. Notes
+// and reference values are disclosed only through their dedicated native and
+// reference APIs, which are audited separately.
 func revealAction(action string) bool {
-	switch action {
-	case "item.reveal.username", "item.reveal.password", "item.reveal.notes", "item.reveal.reference":
-		return true
-	}
-	return false
+	return action == "item.reveal.username" || action == "item.reveal.password"
 }
 
 func ValidRevealTarget(id, revision, field string) bool {

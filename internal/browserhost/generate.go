@@ -12,7 +12,7 @@ import (
 
 // supportedCapabilities is advertised during pairing so an extension can use
 // the additive v2 operations while older clients keep the v1 handshake.
-var supportedCapabilities = []string{"generate-v1", "stage-save-v1"}
+var supportedCapabilities = SupportedCapabilities()
 
 var ErrGenerate = errors.New("password generation refused")
 
@@ -352,4 +352,42 @@ func newHistoryID() string {
 		return ""
 	}
 	return hex.EncodeToString(value[:])
+}
+
+// handleGenerate serves both the JSON `options` form used by the extension and
+// the v2 field form used by desktop/broker clients. It always delegates policy
+// and entropy accounting to generatePassword so there is a single generator.
+func (c *Connection) handleGenerate(r Request) error {
+	raw := r.Options
+	if raw == "" {
+		mode := r.Mode
+		if mode == "" {
+			mode = "random"
+		}
+		length := r.Length
+		if length == 0 {
+			length = 24
+		}
+		options := map[string]any{"mode": mode, "length": length}
+		if r.Digits != nil {
+			options["digits"] = *r.Digits
+		}
+		if r.Symbols != nil {
+			options["symbols"] = *r.Symbols
+		}
+		encoded, err := json.Marshal(options)
+		if err != nil {
+			return c.refuse(r.ID)
+		}
+		raw = string(encoded)
+	}
+	password, profile, err := generatePassword(raw)
+	if err != nil {
+		return c.refuse(r.ID)
+	}
+	history := ""
+	if r.SaveHistory == nil || *r.SaveHistory {
+		history = newHistoryID()
+	}
+	return c.response(Response{ID: r.ID, Type: "generated", GeneratedPassword: password, Profile: &profile, PasswordProfile: (*BrowserPasswordProfile)(&profile), HistoryID: history})
 }

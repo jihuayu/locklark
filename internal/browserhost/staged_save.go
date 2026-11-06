@@ -7,6 +7,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/jihuayu/locklark/internal/origin"
 	"github.com/jihuayu/locklark/internal/personal"
 )
 
@@ -124,6 +125,9 @@ func (c *Connection) findStagedForTab(origin string, tabID int64) *stagedSave {
 	return newest
 }
 
+// stageMessage is the v2-broker name for the single staged-save dispatcher.
+func (c *Connection) stageMessage(r Request) (bool, error) { return c.stagedMessage(r) }
+
 func (c *Connection) stagedMessage(r Request) (bool, error) {
 	switch r.Type {
 	case "stage-save":
@@ -146,17 +150,74 @@ func (c *Connection) stageSave(r Request) error {
 	if session == nil || !session.Unlocked() {
 		return c.refuse(r.ID)
 	}
-	if c.neverOrigins[r.Origin] {
+	payload := r.payload.take()
+	if payload == nil {
 		return c.refuse(r.ID)
 	}
-	if r.Mode == "update" {
+	keep := false
+	defer func() {
+		if !keep {
+			payload.clear()
+		}
+	}()
+	if c.neverOrigins[r.Origin] {
+		// The v2 field form expects an explicit "never" marker; the v1 form
+		// sends a mode and treats refusal as "do not stage".
+		if r.Mode == "" {
+			keep = true
+			return c.response(Response{ID: r.ID, Type: "save-staged", Staged: &StagedSave{Origin: r.Origin, Mode: "never", Username: string(payload.username)}})
+		}
+		return c.refuse(r.ID)
+	}
+	mode := r.Mode
+	itemID, rev, title := r.ItemID, r.Revision, r.Title
+	if mode == "" {
+		// v2 clients omit mode. Derive the same new/update/unchanged decision the
+		// extension makes locally so both callers see identical staging metadata.
+		items, revisions, err := session.ReadAuthenticatedItems(true)
+		if err != nil {
+			return c.refuse(r.ID)
+		}
+		mode = "new"
+		var usernameMatch *string
+		usernameRev, usernameTitle := "", ""
+		for _, it := range items {
+			if it.State != "" || it.Kind != "login" || it.URL == "" {
+				continue
+			}
+			site, err := origin.Website(it.URL)
+			if err != nil || site != r.Origin {
+				continue
+			}
+			if it.Username == string(payload.username) && it.Password == string(payload.password) {
+				mode = "unchanged"
+				itemID, rev, title = it.ID, revisions[it.ID], it.Title
+				break
+			}
+			if r.ItemID != "" && it.ID == r.ItemID {
+				mode = "update"
+				itemID, rev, title = it.ID, revisions[it.ID], it.Title
+				break
+			}
+			if it.Username == string(payload.username) && usernameMatch == nil {
+				id, revision := it.ID, revisions[it.ID]
+				usernameMatch = &id
+				usernameRev, usernameTitle = revision, it.Title
+			}
+		}
+		if mode == "new" && usernameMatch != nil {
+			mode = "update"
+			itemID, rev, title = *usernameMatch, usernameRev, usernameTitle
+		}
+	}
+	if mode == "update" {
 		rows, err := session.BrowserMatch(r.Context())
 		if err != nil {
 			return c.refuse(r.ID)
 		}
 		found := false
 		for _, row := range rows {
-			if row.ID == r.ItemID && row.Revision == r.Revision {
+			if row.ID == itemID && row.Revision == rev {
 				found = true
 				break
 			}
@@ -196,28 +257,24 @@ func (c *Connection) stageSave(r Request) error {
 	if c.until.Before(until) {
 		until = c.until
 	}
-	title := r.Title
 	if title == "" {
 		title = r.Origin
 	}
-	// Take ownership of the mutable credential buffers. Request.Clear runs
-	// after this handler returns and must not zero the bytes retained for a
-	// later commit.
-	payload := r.payload.take()
 	staged := &stagedSave{
 		id:       id,
-		mode:     r.Mode,
+		mode:     mode,
 		title:    title,
 		origin:   r.Origin,
 		tabID:    r.TabID,
 		windowID: r.WindowID,
-		itemID:   r.ItemID,
-		revision: r.Revision,
+		itemID:   itemID,
+		revision: rev,
 		username: payload.username,
 		password: payload.password,
 		until:    until,
 	}
 	payload.username, payload.password = nil, nil
+	keep = true
 	c.staged[id] = staged
 	staged.timer = time.AfterFunc(time.Until(until), func() {
 		c.mu.Lock()
@@ -260,6 +317,16 @@ func (c *Connection) commitStagedSave(r Request) error {
 		return c.refuse(r.ID)
 	}
 	mode := r.Mode
+	if mode == "" {
+		mode = staged.mode
+	}
+	if mode == "" {
+		if staged.itemID != "" {
+			mode = "update"
+		} else {
+			mode = "new"
+		}
+	}
 	itemID, rev := r.ItemID, r.Revision
 	if itemID == "" && staged.itemID != "" {
 		itemID, rev = staged.itemID, staged.revision
@@ -313,6 +380,18 @@ func (c *Connection) commitStagedSave(r Request) error {
 	staged.username, staged.password = nil, nil
 	staged.clear()
 	delete(c.staged, staged.id)
+	if r.Mode == "" {
+		// The v2 field form is synchronous: its caller reads the reply from the
+		// same request round-trip. The extension path stays asynchronous so a
+		// slow vault transaction does not hold the connection lock.
+		receipt, err := session.SaveBrowser(target, username, password, gate)
+		clear(username)
+		clear(password)
+		if err != nil {
+			return c.refuse(r.ID)
+		}
+		return c.response(Response{ID: r.ID, Type: "saved", ItemID: receipt.ID, Revision: receipt.Revision})
+	}
 	c.stagedBusy = true
 	go c.commitStagedSaveWith(r.ID, session, target, username, password, gate)
 	return nil
@@ -348,6 +427,12 @@ func (c *Connection) dismissSave(r Request) error {
 		}
 		staged.clear()
 		delete(c.staged, staged.id)
+	}
+	if staged == nil && r.StageID == "" && r.NeverForOrigin && r.Origin != "" {
+		if c.neverOrigins == nil {
+			c.neverOrigins = map[string]bool{}
+		}
+		c.neverOrigins[r.Origin] = true
 	}
 	return c.response(Response{ID: r.ID, Type: "save-dismissed", NeverOrigins: c.neverOriginList()})
 }
