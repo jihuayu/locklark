@@ -447,6 +447,9 @@ func TestRunCLIBundleEndToEnd(t *testing.T) { testBundleEndToEnd(t) }
 func TestRunBundleEndToEnd(t *testing.T)    { testBundleEndToEnd(t) }
 
 func testBundleRefusesReplaceableTemporaryParents(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("production temporary selection uses KnownFolderPath rather than TMPDIR on Windows")
+	}
 	f := newBundleTestFixture(t)
 	targets := bundleTestTargets(f)
 	request := bundleTestRequest(t, f)
@@ -713,6 +716,10 @@ func testBundleValidationAndBinding(t *testing.T) {
 		func(s *runBundleStoreRequest) { s.request.Args = append(s.request.Args, "extra") },
 		func(s *runBundleStoreRequest) { s.request.TimeoutSeconds++ },
 		func(s *runBundleStoreRequest) { s.request.Spec.ID = "changed-spec" },
+		func(s *runBundleStoreRequest) {
+			s.request.Program = filepath.Join(filepath.Dir(s.request.Program), "other"+filepath.Ext(s.request.Program))
+		},
+		func(s *runBundleStoreRequest) { s.request.Directory += "-other" },
 	}
 	for i, change := range variations {
 		copy := &runBundleStoreRequest{targets: append([]BundleTarget(nil), store.targets...), request: cloneBundleRequest(store.request), root: store.root}

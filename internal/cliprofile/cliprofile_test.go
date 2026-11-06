@@ -511,13 +511,13 @@ func TestValidateArgs(t *testing.T) {
 		denied  [][]string
 		allowed [][]string
 	}{
-		{"gh", [][]string{{"auth", "login"}, {"auth", "setup-git"}, {"auth", "token"}, {"auth", "refresh"}, {"--hostname", "h", "auth", "login"}}, [][]string{{"api", "user"}, {"pr", "list"}, {"--help"}}},
+		{"gh", [][]string{{"auth", "login"}, {"auth", "setup-git"}, {"auth", "token"}, {"auth", "refresh"}, {"--hostname", "h", "auth", "login"}, {"auth", "--web", "login"}}, [][]string{{"api", "user"}, {"pr", "list"}, {"--help"}}},
 		{"aws", [][]string{{"configure"}, {"--region", "us-east-1", "configure"}, {"s3", "ls", "configure"}}, [][]string{{"s3", "ls"}, {"ec2", "describe-instances"}}},
 		{"kubectl", [][]string{{"config", "set-credentials", "x"}, {"config", "set-cluster", "x"}, {"config", "set-context", "x"}, {"--kubeconfig", "k", "config", "set-credentials", "x"}, {"config", "--kubeconfig=k", "set-context", "x"}}, [][]string{{"get", "pods"}, {"config", "view"}, {"config", "--local", "view"}}},
 		{"docker", [][]string{{"login"}, {"logout"}, {"build", "--tag", "login"}}, [][]string{{"run", "alpine"}, {"ps"}}},
 		{"npm", [][]string{{"login"}, {"adduser"}, {"logout"}}, [][]string{{"install", "express"}, {"run", "build"}}},
 		{"terraform", [][]string{{"login"}, {"logout"}}, [][]string{{"plan"}, {"apply", "-auto-approve"}}},
-		{"git", [][]string{{"config", "--global", "user.name", "x"}, {"-c", "x=y", "config", "--system", "user.name", "x"}, {"credential", "approve"}, {"credential", "reject"}, {"config", "--kubeconfig=x", "--global"}}, [][]string{{"config", "--local", "user.name", "x"}, {"push", "origin", "main"}, {"status"}}},
+		{"git", [][]string{{"config", "--global", "user.name", "x"}, {"-c", "x=y", "config", "--system", "user.name", "x"}, {"credential", "approve"}, {"credential", "reject"}, {"config", "--kubeconfig=x", "--global"}, {"config", "--global=true", "user.name", "x"}}, [][]string{{"config", "--local", "user.name", "x"}, {"push", "origin", "main"}, {"status"}}},
 		{"stripe", [][]string{{"login"}, {"logout"}}, [][]string{{"payment-links", "create"}}},
 		{"flyctl", [][]string{{"auth", "login"}, {"auth", "logout"}, {"auth", "token"}}, [][]string{{"deploy"}, {"status"}}},
 		{"vercel", [][]string{{"login"}, {"logout"}}, [][]string{{"deploy"}, {"ls"}}},

@@ -243,7 +243,7 @@ func deniedSequence(args, deny []string) bool {
 	}
 	j := 0
 	for i := start; i < len(args) && j < len(deny); i++ {
-		if args[i] == deny[j] {
+		if args[i] == deny[j] || strings.HasPrefix(deny[j], "-") && strings.HasPrefix(args[i], deny[j]+"=") {
 			j++
 			continue
 		}
@@ -255,8 +255,9 @@ func deniedSequence(args, deny []string) bool {
 		}
 		if strings.HasPrefix(args[i], "-") {
 			// Skip a flag and its immediate value, so a global option cannot
-			// hide the next command word.
-			if !strings.Contains(args[i], "=") && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+			// hide the next command word. A token that matches the expected
+			// command word is never treated as a flag value.
+			if !strings.Contains(args[i], "=") && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") && args[i+1] != deny[j] {
 				i++
 			}
 			continue

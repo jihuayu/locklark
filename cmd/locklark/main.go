@@ -44,6 +44,13 @@ const usage = `Locklark · personal CLI, manual GitHub query and synthetic gatew
   personal reveal-ref|otp-ref --file PATH --ref REF --revision REV
   personal <init|add-login|list|audit> --file PATH  (interactive local-owner terminal)
 
+  cli profiles
+  cli list [--binding PATH]
+  cli init|bind <tool> --file PATH --program ABS_PROGRAM [--binding PATH] [--id ID --revision REV] [--slot-<name> ID:REV] [--helper-path ABS_DIR_LIST] [--passthrough ENV_LIST] [--timeout SECONDS] [--name ENV]
+  cli show|remove <tool> [--binding PATH]
+  cli shell-init [bash|zsh|fish|powershell|pwsh] [--binding PATH]
+  cli run <tool> [--binding PATH] [--cwd ABS_DIR] [--timeout SECONDS] -- [ARG...]
+
   demo     --out NEW_DIR --session ID --reason TEXT
   inspect  --bundle EPOCH_DIR --device CLIENT_DIR --epoch N
   fixture-export --bundle EPOCH_DIR --device CLIENT_DIR --epoch N --out NEW_FILE.1pux
@@ -86,6 +93,8 @@ func run(args []string, out, errOut io.Writer) error {
 		return runPersonal(args[1:], out)
 	case "plugin":
 		return runPlugin(args[1:], out)
+	case "cli":
+		return runCLICommand(args[1:], out)
 	case "mcp-stdio", "bridge-profile", "status-answer", "status-serve":
 		return runBridge(args, out, errOut)
 	case "pull-enroll", "pull-request":
