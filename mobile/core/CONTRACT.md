@@ -9,6 +9,18 @@ an agent, or a remote renderer. Calls that access a vault or OS store run on a
 worker. Mutable secret input buffers are consumed and cleared by Go; native
 copies must also be cleared by the app.
 
+Open returns the controller Vault. For every queued native action, capture a
+Vault view synchronously on the UI thread with CaptureOperation BEFORE dispatch.
+Pass only that captured view to worker code; retain the controller for lifecycle
+calls. The view shares vault state but binds an immutable expected epoch. It
+rejects work after RequestLock even when the Go call itself starts only after
+native preflight passed and a new session has since unlocked. A stale view
+cannot refresh its epoch through CaptureOperation or report that new session
+unlocked. Never capture a fresh controller view from an old queued worker.
+Native preflight remains useful for avoiding stale prompts and must wipe inputs
+on every rejected path; it does not replace the captured Go view. A default
+binding-generated Vault constructor is inert; only Open creates a controller.
+
 ```go
 Open(path string) (*Vault, error) // absolute app-private database path
 GenerateSecretKey() ([]byte, error) // new random 16-byte account Secret Key
@@ -18,6 +30,7 @@ ParseSecretKey(text string) ([]byte, error)
 (*Vault).Create(password, secretKey []byte) error // creates locked vault
 (*Vault).Unlock(password, secretKey []byte) error // both factors; idle 300s
 (*Vault).IsUnlocked() bool
+(*Vault).CaptureOperation() (*Vault, error) // capture on native UI BEFORE worker queue
 (*Vault).RequestLock() // immediate invalidation/cancellation, no disk wait
 (*Vault).Lock()        // invalidate, then complete cleanup
 (*Vault).Close()       // permanently close wrapper and clear session
@@ -80,8 +93,11 @@ also invalidates operations already waiting for the Go worker mutex: they bind
 to their caller epoch before waiting and cannot adopt a freshly unlocked session.
 Native worker closures must separately check their captured UI token before
 calling Go, so a closure queued before background cannot start a new Go request
-after background. Blocking Lock invalidates again after taking the worker mutex
-and returns locked even if an explicit unlock overtook its mutex wait.
+after background. Blocking Lock invalidates an overtaking session/handles after
+taking the worker mutex and returns locked. If no session overtook cleanup, it
+preserves fresh views captured after its initial invalidation. Native UI should
+wait for the lifecycle Lock phase before accepting a fresh action; a view
+captured before that phase's initial RequestLock is intentionally invalidated.
 Cancellation that wins before the mutation commit gate rolls back the write. If persistence
 wins but its final result cannot be confirmed, the error says the outcome is
 unknown; inspect the vault before retrying. Creating a database may complete

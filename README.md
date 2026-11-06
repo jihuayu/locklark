@@ -2,7 +2,7 @@
 
 **Keep the keys. Grant the action.** 面向个人和小团队的本地密码管理器。目标是替换 1Password 8 的日常体验，并让 Agent 申请具体操作、说明原因、关联会话。
 
-当前交付包括 **个人库 CLI 预览** 和独立的 **M0 合成网关演练**。个人库日常操作可离线运行，另有每次人工确认的 GitHub HTTPS 查询入口。个人库可以实际创建和保存登录记录，系统密钥保护已有平台实现，独立密码评审、逐平台硬件与干净机器灾后恢复验收尚未完成。请先用测试数据，不要停用已有密码管理器。设计与威胁模型见[设计稿](docs/design.md)。
+当前是开发版，包括个人库 CLI、MyGo 桌面、浏览器扩展、Android/iOS 原生应用源码和团队 HTTPS 服务/Go 客户端库，另有独立的 **M0 合成网关演练**。移动应用目前操作个人离线库，团队服务尚无普通用户的邀请/配对界面。系统密钥保护已有平台实现，独立密码评审、逐平台硬件与干净机器灾后恢复验收尚未完成。请先用测试数据，不要停用已有密码管理器。设计与威胁模型见[设计稿](docs/design.md)。
 
 字段引用的元数据核心已实现有限的 `op://vault/item/[section/]field` 解析、名称/ID 唯一定位和修订号绑定；同名拒绝，未知属性不静默忽略。个人 v1 登录布局已接入认证事务、人工字段披露和取码，其他布局仍只有元数据核心；尚未与固定 op 版本实际对照，不代表已兼容 `op read/run/inject`。当前子集与验收见[字段引用记录](docs/reference-validation.md)。
 
@@ -337,17 +337,17 @@ go test -count=1 ./internal/vault -run 'TestKDBXIndependentPeer|TestIndependentN
 
 升级验收可以用 `python scripts/native_upgrade.py <旧版可执行文件> <新版可执行文件>` 复跑。旧版基准为 `c620f50`。脚本临时生成两套合成金库，比较第 1、3 代的迁出字节，检查被撤销设备与旧读取器被拒。
 
-当前开发版已提供 MyGo 原生个人金库和 Next.js 本机只读团队管理。更多条目类型的迁移对账、完整团队邀请/同步、iOS/Android、受隔离的 Bun MCP Gateway、AI 否决，以及独立部署的 invoke / deliver 两种 server token 继续按[设计稿](docs/design.md)推进。
+当前开发版已提供 MyGo 原生个人金库、Next.js 本机只读团队管理，以及下述移动应用和团队服务构建入口。完整团队邀请/配对和冲突界面、更多条目类型迁移、系统自动填充/Passkey、受隔离的 Bun MCP Gateway、AI 否决，以及独立部署的 invoke / deliver 两种 server token 继续按[设计稿](docs/design.md)推进。
 
 个人 CLI 支持 `archive-login` / `unarchive-login`（`--file`、`--id`、`--revision`，终端 SAVE 确认）。`list --state active|archived|all` 默认只列 active；归档条目仍可显式读取、取消归档及备份恢复。归档不会撤销字段权限，详见 [归档验收](docs/personal-archive-validation.md)。
 
 用 `edit-login --field url` 保存一个 HTTPS 网站，用 `match-logins --file PATH --origin HTTPS_ORIGIN --frame-origin HTTPS_ORIGIN` 查找同源 active 登录候选（仅元数据）。当前只接受保守 ASCII URL / DNS HTTPS profile。CLI 接口本身不证明浏览器来源；真实扩展通过下述原生确认流程填充，详见 [来源匹配验收与向量](docs/login-origin-matching-validation.md)。
 
-团队方向已有 `internal/directory` 持久化核心：固定 owner/排序端/发布者信任根、签名 roster、精确父版本提交、撤销身份墓碑、检查点核验和整库冻结。真实 age/KDBX 测试覆盖撤销设备无法解开新代。目录变更当前为 Go API，已有下述只读管理 UI，尚无完整团队变更界面/网络同步；[协议、验收与限制](docs/team-directory-validation.md)。
+团队方向已有 `internal/directory` 持久化核心：固定 owner/排序端/发布者信任根、签名 roster、精确父版本提交、撤销身份墓碑、检查点核验和整库冻结。真实 age/KDBX 测试覆盖撤销设备无法解开新代。目录变更仍由 Go API 集成，另有下述只读管理 UI 和 HTTPS 同步入口，尚无普通用户邀请/配对界面；[协议、验收与限制](docs/team-directory-validation.md)。
 
 新目录可用 `NewConfigWithPossession` 启用 scope 固定的强制设备双钥证明：owner 签名的 age 随机挑战、设备 Ed25519 响应、精确成员/设备/parent 绑定，并在持久提交和历史重读时强制检查新增设备证明。旧配置不能静默降级新目录；不证明物理设备唯一性，不替代邀请 UI、权限执行或同步。详见[设备证明验收](docs/team-device-possession-validation.md)。
 
-新目录另可用 `NewConfigWithWriterACL` 同时强制入网证明与数据写权限：`BuildUpdate` 允许当前 writer 设备发布新密文，reader 不可发布，成员/角色/冻结仍只由 owner 授权。事务提交和历史重读都依据之前的可信状态执行权限检查；`Read` 返回验证后的 `SnapshotSigner` 供解密使用。写入仍是本地 Go API，只读管理界面不授予写入权限，网络同步尚未交付，见[团队写权限验收](docs/team-writer-acl-validation.md)。
+新目录另可用 `NewConfigWithWriterACL` 同时强制入网证明与数据写权限：`BuildUpdate` 允许当前 writer 设备发布新密文，reader 不可发布，成员/角色/冻结仍只由 owner 授权。事务提交和历史重读都依据之前的可信状态执行权限检查；`Read` 返回验证后的 `SnapshotSigner` 供解密使用。HTTPS 同步仅接受这一策略，不隐式升级旧目录；只读管理界面不授予写入权限，见[团队写权限验收](docs/team-writer-acl-validation.md)。
 
 个人 CLI 新增 `trash-login` / `restore-login`（`--file`、`--id`、`--revision`，SAVE 确认），以及 `list --state trashed`。回收站条目需先恢复才能读取或编辑，恢复时保留原活动/归档状态。备份和加密迁出仍包含回收站；不自动清空或永久擦除。详见 [回收站验收](docs/personal-trash-validation.md)。
 
@@ -380,6 +380,46 @@ go test -count=1 ./internal/vault -run 'TestKDBXIndependentPeer|TestIndependentN
 
 在登录条目中配置TOTP后，可在网站的扩展候选中选择“填充验证码”，再在MyGo窗口批准本次操作。支持6位或8位验证码，页面须有唯一可见、可写的标准验证码输入框，并属于同源表单；分格、多框和iframe暂不支持。扩展复核当前页面后才请求本次码，不主动提交表单，不自动换取下一期。种子和码不会显示在扩展弹窗或Next.js管理页。取消后若显示“结果未确认”，先核实页面，再决定是否重新发起；新操作仍需原生批准。实现及当前实际验收状态见 [浏览器验证码验收](docs/browser-otp-validation.md)。Passkey仍在后续范围中。
 
+### 团队 HTTPS 服务（开发者/运维入口）
+
+先由可信管理端准备 WriterACL 目录、公开 pins、独立最小 checkpoint 和主机名匹配的 TLS 证书，再运行：
+
+```sh
+go build -o locklark-team-sync ./cmd/locklark-team-sync
+./locklark-team-sync init-anchor --config /absolute/private/server.json
+./locklark-team-sync serve --config /absolute/private/server.json
+```
+
+`init-anchor` 仅首次显式创建独立服务端检查点，不能用于覆盖或“修复”回滚错误；`serve` 在隐藏控制终端输入 sequencer seed 后启动，不接受 seed 参数、环境变量、stdin 或私钥文件。服务只处理签名历史和密文，客户端 `internal/teamsync` 受 Go `internal` 导入边界限制，仅供仓库内应用集成，未承诺外部稳定 SDK；没有 `team-sync read` 用户命令。配置信任根、权限、TLS、客户端 API、丢回执对账和重启恢复见[团队同步运维](docs/team-sync-operator.md)。
+
+### Android / iOS 原生个人库（开发版）
+
+两端调用真实 `mobile/core` Go 金库，当前为离线个人库流程，尚无团队配对/同步、系统自动填充或 Passkey 页面。构建产物和模拟器不代表硬件密钥、生物识别、备份恢复或真机安全已验收；最新平台状态见[团队与移动端验收](docs/team-mobile-validation.md)。Go 源变化后必须重建绑定，不能沿用旧 AAR/XCFramework。
+
+Android 需要 Go 1.27.3、JDK 21、Android SDK platform 36 / build-tools 36.0.0、NDK 27.2.12479018。先设置自己的 SDK/JDK 路径，再从仓库根目录运行：
+
+```sh
+export JAVA_HOME=/absolute/path/to/jdk21
+export ANDROID_HOME=/absolute/path/to/android-sdk
+export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
+mobile/core/scripts/bind-android.sh
+mobile/android/scripts/build.sh
+"$ANDROID_HOME/platform-tools/adb" install -r mobile/android/app/build/outputs/apk/debug/app-debug.apk
+"$ANDROID_HOME/platform-tools/adb" shell am start -n org.locklark.android/.MainActivity
+```
+
+最低 Android 11/API 30。选择自己的测试设备或模拟器；`adb install -r` 会替换同包应用，请先用测试资料。构建与本机验证说明见[Android README](mobile/android/README.md)。
+
+iOS 需要 macOS、Xcode/iOS 17+ SDK 和可用模拟器，以及 Go 1.27.3、Python 3、curl、unzip：
+
+```sh
+GO_BIN=go mobile/ios/scripts/build-core.sh
+mobile/ios/scripts/generate-project.sh
+open mobile/ios/Locklark.xcodeproj
+```
+
+在 Xcode 选择 `Locklark` scheme 和兼容模拟器后运行；安装真机需要自己的签名团队。`GO_BIN=go mobile/ios/scripts/ci.sh` 是创建新模拟器并执行合成 SDK/UI 验收的入口，不是日常启动命令。当前限制及私有运行材料说明见[iOS README](mobile/ios/README.md)。
+
 ### Next.js 团队管理（本机开发版）
 
 Web 界面使用 Next.js，只查看已验证的团队成员、设备和目录状态。Go 服务的 `--config` 必须是可信的 `{ "pins": ..., "anchor": ..., "policy": "writer-acl-v1" }` 配置；公钥与 checkpoint 必须来自可信原生端，不能直接信任从中继下载的文件。
@@ -401,4 +441,4 @@ LOCKLARK_MANAGEMENT_CONNECTION=/absolute/private/connection.json npm start
 
 PowerShell 使用 `$env:LOCKLARK_MANAGEMENT_CONNECTION = 'C:\private\connection.json'`，再运行 `npm start`。启动器会调用 Go helper 检查连接文件与父目录权限；可通过 `LOCKLARK_MANAGEMENT_EXECUTABLE` 指定预编译 helper 的绝对路径。打开启动器打印的本机地址，输入同一窗口显示的一次性连接码。退出或连接码已用/过期后，重新启动 Web 界面可取得新码。不要将连接文件提交仓库或开放服务端口。
 
-尚无团队目录时，可用 `go run ./web/tests/fixture -out /absolute/private/demo-team` 创建明确的合成只读演示，再将上面的目录和配置路径指向其 `team.db` / `config.json`；演示生成器不保留管理私钥，不能用于实际团队。浏览器填充、团队变更与远端同步仍在后续交付范围，详见[Web 验收](docs/nextjs-management-validation.md)。
+尚无团队目录时，可用 `go run ./web/tests/fixture -out /absolute/private/demo-team` 创建明确的合成只读演示，再将上面的目录和配置路径指向其 `team.db` / `config.json`；演示生成器不保留管理私钥，不能用于实际团队或生产同步初始化。Web 不处理浏览器填充或移动端秘密，团队变更仍需可信管理端，详见[Web 验收](docs/nextjs-management-validation.md)。

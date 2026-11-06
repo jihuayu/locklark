@@ -46,3 +46,15 @@ Luna 复核和确定性测试发现：OTP 原生交付后到门面最终授权�
 主代理对冻结的生产 `locklark-team-sync` 命令做独立 PTY+TLS 验收，完整通过：prompt 可见时 ECHO/ICANON 已关闭、立即粘贴合法 seed 无回显、服务就绪前恢复原终端状态、真实 pinned owner 通过生产 TLS 服务读取、错误 seed/短输入/Ctrl-C 拒绝、等待输入时 SIGTERM/SIGHUP 恢复终端、无控制终端与 argv seed 拒绝、完整输出私钥 canary 零命中。私有证据 `team-cli-parent-y52x80gm/result.json`，独立构建二进制 SHA256 `155d15a686f4c600e73d57db12f4e56a4ce0c6dafc116a000fdf834d63ddc3f4`；23项产品/依赖清单 `team-sync-cli-core-candidate1.sha256` 前后通过，清单 SHA256 `e557d5c03d6b8fafd72467cd26e2b3c747c61afd510ced69f1a1127c20df9b1e`。Luna 独立复核当前 CLI 无剩余阻塞，并重跑完整终端恢复测试通过。
 
 全仓正常回归使用 Go1.27.3、Bun1.4.4、PyKeePass4.2.0，`go test -p 1 -count=1 ./... -timeout=20m` 35个包状态通过，日志 `team-mobile-full-go.log`。该轮核心编译早于第二轮修复，不冒充最终冻结源码的全仓结果。草稿 PR [#37](https://github.com/jihuayu/locklark/pull/37) 在 `0094325` 的 Linux、Windows、macOS 桌面和 Web 四组 CI 通过；Android 构建通过但运行验收在 complete-test-count 失败，iOS 在模拟器选择失败。两项移动 CI 失败都须修复后在新精确提交重跑，未满足合并条件。
+
+## 原生排队调用与核心第三轮绑定
+
+主代理进一步指出“原生前置检查通过→切后台 RequestLock→旧闭包才调用 Go”的窗口。三项旧行为实际失败：后台创建仍生成数据库、旧解锁采用新代次、旧编辑使用新会话。`mobile-captured-view-red.log` 保留这些失败。核心现在由共享状态和不可续新的绑定视图组成：UI 入队前调用 CaptureOperation，工作闭包只用该视图；核心取得串行锁后仍检查绑定代次，旧视图不能重新捕获新代次。生命周期继续使用基础 Vault。界面还须等待排队锁清理完成，再接受新的用户操作，避免合法新请求被旧清理再次撤销。
+
+主代理独立运行9项 OTP/排队/绑定视图测试各两次，逐项 RUN 记录在 `mobile-core-parent-v3-focused.log`（9.534s），另对锁清理期间新视图测试两次（1.359s，`mobile-core-parent-v3-cleanup.log`）。Luna 最初两条带末尾 `$` 的表达式漏选了名称带后缀的新视图测试，已明确撤回该覆盖声明；随后使用正确前缀并逐项核对，5项 Capture/FreshCapture 及10项合并定向测试均通过。核心完整 normal 11.034s、完整 race 109.560s，通过；全仓 vet 与模块校验通过。
+
+第三轮固定 AAR 在 `/tmp/locklark-tools/mobile/core-final-v3/`，SHA256 `edc91ce26a07a83d381be8e2428a404bec1ce6224e8dca177324bae6ef859593`。清单 SHA256 `0c2eaffab9a9e12d1570613feec3acbe53f50fabd3a1322fc6c2aaa59976ca76`，88项传递输入及工具前后完全一致。第一轮和第二轮绑定及其日志保留为历史证据。
+
+PR #37 第二轮 `4f35ec5` 的四组既有 CI 再次通过；Android 实际运行在 create 阶段180秒条件等待失败（固定诊断 AssertionError，非进程崩溃）；iOS 真实应用 SDK 编译无报错、模拟器开始测试，但运行报告3条失败记录，旧安全摘要未提供用例标识，不能据此推断3个不同根因。后续迭代增加固定用例/源码行诊断；Android 两套独立流程即使一套失败也执行另一套，任一失败仍拒绝通过。
+
+Android 外部主机工具11项测试通过，Luna独立审阅并运行；实际 UI、签名审计和 PyKeePass 核对仍等待可运行模拟器。iOS UI 工具新增独立 HMAC-SHA1 OTP 比对、测试 runner 私有因素清单，以及在成功/失败两条路径扫描完整 runtime 和 xcresult 导出；主代理独立运行10项隐私/完整性测试与5项诊断隐私测试均通过，真实 SDK/工具兼容性仍待下一 CI。二进制附件只做字节扫描，不声称对截图像素 OCR；原始材料不上传。

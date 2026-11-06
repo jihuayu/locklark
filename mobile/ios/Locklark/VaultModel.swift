@@ -9,6 +9,7 @@ final class VaultModel: ObservableObject {
     @Published private(set) var unlocked = false
     @Published private(set) var covered = false
     @Published private(set) var busy = false
+    @Published private(set) var settlingLock = false
     @Published private(set) var rows: [LLRow] = []
     @Published private(set) var selected: LLRow?
     @Published private(set) var revealed = ""
@@ -35,6 +36,7 @@ final class VaultModel: ObservableObject {
     private var operation = OperationBoundary()
     private let cancellation = CancellationScope()
     private var preparingStorage = false
+    private var pendingLockCleanups = 0
     private var vault: LLVault?
     private var databaseURL: URL?
     private var disclosure: LLDisclosure?
@@ -42,6 +44,7 @@ final class VaultModel: ObservableObject {
     private var expiryTask: Task<Void, Never>?
     private var idleTask: Task<Void, Never>?
     var hasDisclosure: Bool { disclosure != nil }
+    var interactionBusy: Bool { busy || settlingLock }
 
     init() {
         initializeStorage()
@@ -97,11 +100,20 @@ final class VaultModel: ObservableObject {
     }
 
     private func performChecked<T>(_ action: @escaping (LLVault, WorkTicket) throws -> T, cleanup: @escaping () -> Void = {}, completion: @escaping (Result<T, Error>) -> Void) {
-        guard let vault else { cleanup(); status = "金库尚未准备好。"; return }
+        let captured: LLVault
+        do {
+            guard !settlingLock, boundary.isActive, let vault else { throw WorkCancelled() }
+            // This Go-issued immutable expected-epoch view is captured on the
+            // UI actor before queueing. Worker preflight alone has a gap.
+            captured = try vault.captureOperation()
+        } catch {
+            worker.async { cleanup(); DispatchQueue.main.async { completion(.failure(error)) } }
+            return
+        }
         let ticket = cancellation.ticket()
         worker.async {
             let result: Result<T, Error> = autoreleasepool {
-                Result { try ticket.run(cleanup: cleanup) { try action(vault, ticket) } }
+                Result { try ticket.run(cleanup: cleanup) { try action(captured, ticket) } }
             }
             DispatchQueue.main.async { completion(result) }
         }
@@ -115,13 +127,13 @@ final class VaultModel: ObservableObject {
         vault?.requestLock()
         activeAuthentication?.keychain.cancelAuthentication()
         activeAuthentication = nil
-        if let vault { worker.async { vault.lock() } }
+        scheduleLockCleanup()
     }
 
     func sceneActive() {
         boundary.becomeActive()
         covered = false
-        if vault == nil { initializeStorage() } else if !unlocked { refreshPresence() }
+        if vault == nil { initializeStorage() } else if !unlocked && !settlingLock { refreshPresence() }
         // Returning from a system prompt never automatically retries unlock.
     }
 
@@ -131,7 +143,22 @@ final class VaultModel: ObservableObject {
         vault?.requestLock()
         activeAuthentication?.keychain.cancelAuthentication()
         activeAuthentication = nil
-        if let vault { worker.async { vault.lock() } }
+        scheduleLockCleanup()
+    }
+
+    private func scheduleLockCleanup() {
+        guard let vault else { return }
+        pendingLockCleanups += 1
+        settlingLock = true
+        worker.async { [weak self] in
+            vault.lock()
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.pendingLockCleanups -= 1
+                self.settlingLock = self.pendingLockCleanups != 0
+                if !self.settlingLock, self.boundary.isActive, !self.unlocked { self.refreshPresence() }
+            }
+        }
     }
 
     private func invalidateUI() {
@@ -217,7 +244,7 @@ final class VaultModel: ObservableObject {
     }
 
     func generateAccountKey() {
-        guard ready, !busy, boundary.isActive else { return }
+        guard ready, !interactionBusy, boundary.isActive else { return }
         do {
             var key = try LLVault.generateSecretKey()
             defer { key.resetBytes(in: 0..<key.count) }
@@ -227,7 +254,7 @@ final class VaultModel: ObservableObject {
     }
 
     func createVault() {
-        guard !hasVault, !busy, backupAcknowledged, !generatedSecretKey.isEmpty,
+        guard !hasVault, !interactionBusy, backupAcknowledged, !generatedSecretKey.isEmpty,
               !password.isEmpty, password == confirmation,
               let attempt = boundary.beginUnlock(), let url = databaseURL else { return }
         do {
@@ -262,7 +289,7 @@ final class VaultModel: ObservableObject {
     }
 
     func unlockWithFactors() {
-        guard hasVault, !busy, !password.isEmpty, let attempt = boundary.beginUnlock() else { return }
+        guard hasVault, !interactionBusy, !password.isEmpty, let attempt = boundary.beginUnlock() else { return }
         do {
             let passwordData = NativeSecretBuffer(password)
             let key = NativeSecretBuffer(data: try LLVault.parseSecretKey(secretKey))
@@ -278,7 +305,7 @@ final class VaultModel: ObservableObject {
     }
 
     func unlockWithSystem() {
-        guard hasVault, !busy, let attempt = boundary.beginUnlock() else { return }
+        guard hasVault, !interactionBusy, let attempt = boundary.beginUnlock() else { return }
         let owner = beginOperation()
         let store = NativeSystemUnlockStore()
         activeAuthentication = store
@@ -309,7 +336,7 @@ final class VaultModel: ObservableObject {
     }
 
     func configureQuickUnlock(enable: Bool) {
-        guard let token = boundary.capture(), !busy else { return }
+        guard let token = boundary.capture(), !interactionBusy else { return }
         let owner = beginOperation()
         let store = NativeSystemUnlockStore()
         activeAuthentication = store
@@ -335,7 +362,7 @@ final class VaultModel: ObservableObject {
     }
 
     func refresh() {
-        guard let token = boundary.capture() else { return }
+        guard !settlingLock, let token = boundary.capture() else { return }
         let owner = beginOperation()
         let text = query
         perform({ try $0.rows(query: text) }, completion: { [weak self] result in
@@ -358,7 +385,7 @@ final class VaultModel: ObservableObject {
     }
 
     func reveal(field: String) {
-        guard let row = selected, !busy else { return }
+        guard let row = selected, !interactionBusy else { return }
         clearDisclosure()
         let target = VaultTarget(id: row.identifier, revision: row.revision, field: field)
         boundary.select(target)
@@ -434,7 +461,7 @@ final class VaultModel: ObservableObject {
     }
 
     func saveLogin() {
-        guard creatingLogin, !busy, let token = boundary.capture(), !titleDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard creatingLogin, !interactionBusy, let token = boundary.capture(), !titleDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         let title = titleDraft, url = urlDraft, generate = generatePassword
         let user = NativeSecretBuffer(usernameDraft), value = NativeSecretBuffer(passwordDraft)
         clearDrafts()
@@ -446,7 +473,7 @@ final class VaultModel: ObservableObject {
     }
 
     func saveEdit() {
-        guard let row = selected, let field = editingField, !busy, let token = boundary.capture() else { return }
+        guard let row = selected, let field = editingField, !interactionBusy, let token = boundary.capture() else { return }
         let value = NativeSecretBuffer(editDraft)
         clearDrafts()
         editingField = nil
@@ -456,7 +483,7 @@ final class VaultModel: ObservableObject {
     }
 
     func regenerate() {
-        guard let row = selected, !busy, let token = boundary.capture() else { return }
+        guard let row = selected, !interactionBusy, let token = boundary.capture() else { return }
         clearDisclosure()
         mutate(token: token) { try $0.regenerate(id: row.identifier, revision: row.revision, length: 24) }
     }

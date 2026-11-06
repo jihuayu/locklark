@@ -31,6 +31,12 @@ const idle = 300 * time.Second
 // Vault retains an unlocked identity, never the account unlock factors.
 // op serializes workers; mu protects only short in-memory state transitions.
 type Vault struct {
+	*vaultState
+	bound         bool
+	expectedEpoch uint64
+}
+
+type vaultState struct {
 	op              sync.Mutex
 	mu              sync.Mutex
 	path            string
@@ -49,8 +55,31 @@ func Open(path string) (*Vault, error) {
 	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return nil, errInvalid
 	}
-	return &Vault{path: path, handles: make(map[*SecretValue]bool)}, nil
+	return &Vault{vaultState: &vaultState{path: path, handles: make(map[*SecretValue]bool)}}, nil
 }
+
+// CaptureOperation is a short, memory-only native UI call. Capture before
+// dispatching work, then use only the returned view inside that worker. The
+// controller retains the base Vault for lifecycle operations.
+func (v *Vault) CaptureOperation() (*Vault, error) {
+	if !v.ready() {
+		return nil, errInvalid
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.closed {
+		return nil, errClosed
+	}
+	if v.bound && v.expectedEpoch != v.epoch {
+		return nil, errCancelled
+	}
+	epoch := v.epoch
+	if v.bound {
+		epoch = v.expectedEpoch
+	}
+	return &Vault{vaultState: v.vaultState, bound: true, expectedEpoch: epoch}, nil
+}
+func (v *Vault) ready() bool             { return v != nil && v.vaultState != nil }
 func GenerateSecretKey() ([]byte, error) { return personal.NewSecret() }
 func FormatSecretKey(key []byte) string  { return personal.FormatSecret(key) }
 func ParseSecretKey(text string) ([]byte, error) {
@@ -68,6 +97,9 @@ func (*Vault) MarshalJSON() ([]byte, error) { return nil, errLocked }
 // Session's request path shares its final commit/delivery arbitration; cleanup
 // runs separately and never delays lifecycle cancellation behind disk I/O.
 func (v *Vault) RequestLock() {
+	if !v.ready() {
+		return
+	}
 	v.mu.Lock()
 	v.epoch++
 	s := v.session
@@ -115,6 +147,9 @@ func (v *Vault) RequestLock() {
 	}
 }
 func (v *Vault) Lock() {
+	if !v.ready() {
+		return
+	}
 	v.RequestLock()
 	v.mu.Lock()
 	hook := v.lockWaiting
@@ -126,7 +161,14 @@ func (v *Vault) Lock() {
 	defer v.op.Unlock()
 	// An explicit unlock may overtake this mutex wait. Invalidate again while
 	// owning the worker gate so Lock cannot return with that session installed.
-	v.RequestLock()
+	// If nothing overtook cleanup, preserve fresh views captured after the
+	// initial invalidation instead of requiring another user unlock attempt.
+	v.mu.Lock()
+	overtaken := v.session != nil || len(v.handles) != 0
+	v.mu.Unlock()
+	if overtaken {
+		v.RequestLock()
+	}
 	v.mu.Lock()
 	cleanups := v.cleanups
 	v.cleanups = nil
@@ -135,13 +177,25 @@ func (v *Vault) Lock() {
 		<-done
 	}
 }
-func (v *Vault) Close() { v.mu.Lock(); v.closed = true; v.mu.Unlock(); v.Lock() }
+func (v *Vault) Close() {
+	if !v.ready() {
+		return
+	}
+	v.mu.Lock()
+	v.closed = true
+	v.mu.Unlock()
+	v.Lock()
+}
 func (v *Vault) IsUnlocked() bool {
+	if !v.ready() {
+		return false
+	}
 	v.mu.Lock()
 	s := v.session
 	closed := v.closed
+	stale := v.bound && v.expectedEpoch != v.epoch
 	v.mu.Unlock()
-	return !closed && s != nil && s.Unlocked()
+	return !closed && !stale && s != nil && s.Unlocked()
 }
 
 func sanitized(e error) error {
@@ -190,9 +244,12 @@ func (v *Vault) startLocked(expected uint64) (uint64, context.Context, error) {
 	return v.epoch, ctx, nil
 }
 func (v *Vault) current(s *personal.Session, epoch uint64) bool {
+	if !v.ready() {
+		return false
+	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	return !v.closed && v.epoch == epoch && v.session == s
+	return !v.closed && v.epoch == epoch && v.session == s && (!v.bound || v.expectedEpoch == epoch)
 }
 
 // grantDelivery is the delivery linearization point shared with RequestLock.
@@ -201,7 +258,7 @@ func (v *Vault) current(s *personal.Session, epoch uint64) bool {
 func (v *Vault) grantDelivery(secret *SecretValue, from, until int64) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if v.closed || v.epoch != secret.epoch || v.session != secret.session || secret.cancelled.Load() {
+	if v.closed || v.epoch != secret.epoch || v.session != secret.session || secret.cancelled.Load() || v.bound && v.expectedEpoch != secret.epoch {
 		return errLocked
 	}
 	sample := time.Now()
@@ -238,12 +295,22 @@ func (v *Vault) active() (*personal.Session, uint64, error) {
 }
 
 func (v *Vault) enterOperation() (uint64, error) {
+	if !v.ready() {
+		return 0, errInvalid
+	}
 	v.mu.Lock()
 	epoch, closed := v.epoch, v.closed
+	if v.bound {
+		epoch = v.expectedEpoch
+	}
+	stale := v.epoch != epoch
 	hook := v.operationQueued
 	v.mu.Unlock()
 	if closed {
 		return 0, errClosed
+	}
+	if stale {
+		return 0, errCancelled
 	}
 	if hook != nil {
 		hook()

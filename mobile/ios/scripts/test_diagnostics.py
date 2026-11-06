@@ -21,6 +21,25 @@ class DiagnosticPrivacyTests(unittest.TestCase):
     def test_arbitrary_filename_cannot_publish_a_secret(self):
         self.assertEqual(diagnostics.summary("/tmp/private-canary.swift:1:1: error: failure")["compile_diagnostics"], [])
 
+    def test_runtime_reports_only_owned_case_line_and_fixed_source_reason(self):
+        secret = "private-fixture-canary"
+        text = "/tmp/" + secret + "/OfflineVaultFlowTests.swift:17: error: -[LocklarkUITests.OfflineVaultFlowTests testActualOfflineCreateUnlockEditRevealAndBackgroundLock] : XCTAssertTrue failed: (\"" + secret + "\") - native input must exist\n"
+        output = diagnostics.summary(text)
+        self.assertNotIn(secret, json.dumps(output))
+        self.assertEqual(output["compile_diagnostics"], [])
+        self.assertEqual(output["runtime_diagnostics"], [{"file": "OfflineVaultFlowTests.swift", "line": 17, "case": "OfflineVaultFlowTests.testActualOfflineCreateUnlockEditRevealAndBackgroundLock", "reason": "native input must exist"}])
+
+    def test_unknown_runtime_case_and_interpolated_values_are_omitted(self):
+        text = "/tmp/CoreIntegrationTests.swift:5: error: -[Unknown privateValue] : private-fixture-canary\n"
+        self.assertEqual(diagnostics.summary(text)["runtime_diagnostics"], [])
+
+    def test_unexpected_thrown_error_uses_static_method_location_only(self):
+        text = "<unknown>:0: error: -[LocklarkTests.CoreIntegrationTests testActualGoCreateAndReopenKeepsDatabaseCompletelyProtected] : threw private-fixture-canary"
+        output = diagnostics.summary(text)
+        self.assertNotIn("private-fixture-canary", json.dumps(output))
+        self.assertEqual(output["runtime_diagnostics"][0]["location"], "method-declaration")
+        self.assertEqual(output["runtime_diagnostics"][0]["reason"], "unexpected-error")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -75,6 +75,13 @@
 + (NSData *)generateSecretKeyAndReturnError:(NSError **)error { return MobilecoreMobilecoreGenerateSecretKey(error); }
 + (NSString *)formatSecretKey:(NSData *)key { return MobilecoreMobilecoreFormatSecretKey(key); }
 + (NSData *)parseSecretKey:(NSString *)text error:(NSError **)error { return MobilecoreMobilecoreParseSecretKey(text, error); }
+- (LLVault *)captureOperationAndReturnError:(NSError **)error {
+    MobilecoreMobilecoreVault *captured = [_core captureOperation:error];
+    if (!captured) return nil;
+    LLVault *view = [LLVault new];
+    view.core = captured;
+    return view;
+}
 - (BOOL)createWithPassword:(NSData *)password secretKey:(NSData *)key error:(NSError **)error { return [_core create:password secretKey:key error:error]; }
 - (BOOL)unlockWithPassword:(NSData *)password secretKey:(NSData *)key error:(NSError **)error { return [_core unlock:password secretKey:key error:error]; }
 - (BOOL)isUnlocked { return [_core isUnlocked]; }

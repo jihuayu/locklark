@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -499,5 +500,121 @@ func TestMobileEmptyNativeFieldDisclosureIsSuccessfulAndSingleUse(t *testing.T) 
 		if _, e = secret.Take(); e == nil {
 			t.Fatal("empty field disclosure was reusable")
 		}
+	}
+}
+
+func TestMobileCapturedOperationRejectsCheckToCallCreateAfterLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "must-not-create.ll")
+	v, e := Open(path)
+	if e != nil {
+		t.Fatal("open captured create failed")
+	}
+	defer v.Close()
+	view, e := v.CaptureOperation()
+	if e != nil {
+		t.Fatal("capture create failed")
+	}
+	// Native preflight passed; lifecycle wins before actual Go entry.
+	v.RequestLock()
+	e = view.Create([]byte("mobile-fixture"), bytes.Repeat([]byte{47}, 16))
+	if e == nil {
+		t.Fatal("old native Create crossed check-to-call gap")
+	}
+	if _, e = os.Stat(path); !errors.Is(e, os.ErrNotExist) {
+		t.Fatal("stale captured Create persisted a vault")
+	}
+}
+
+func TestMobileCapturedOperationRejectsCheckToCallUnlockAfterLock(t *testing.T) {
+	v, _, key := mobileFixture(t)
+	v.Lock()
+	view, e := v.CaptureOperation()
+	if e != nil {
+		t.Fatal("capture unlock failed")
+	}
+	v.RequestLock()
+	e = view.Unlock([]byte("mobile-fixture"), bytes.Clone(key))
+	if e == nil || v.IsUnlocked() {
+		t.Fatal("old native Unlock crossed check-to-call gap")
+	}
+}
+
+func TestMobileCapturedOperationRejectsEditInNewSessionAfterLock(t *testing.T) {
+	v, _, key := mobileFixture(t)
+	r, e := v.CreateLogin("original", "", []byte("username"), []byte("password"))
+	if e != nil {
+		t.Fatal("captured edit fixture failed")
+	}
+	view, e := v.CaptureOperation()
+	if e != nil {
+		t.Fatal("capture edit failed")
+	}
+	v.RequestLock()
+	if e = v.Unlock([]byte("mobile-fixture"), bytes.Clone(key)); e != nil {
+		t.Fatal("captured edit fresh session failed")
+	}
+	if _, e = view.EditField(r.ID, r.Revision, "title", []byte("stale intent")); e == nil {
+		t.Fatal("old native Edit used a fresh session across check-to-call gap")
+	}
+	rows, e := v.List("active")
+	if e != nil || rows.Count() != 1 {
+		t.Fatal("captured edit persistent check failed")
+	}
+	row, e := rows.At(0)
+	if e != nil || row.Title != "original" || row.Revision != r.Revision {
+		t.Fatal("stale captured Edit changed persistent state")
+	}
+	if view.IsUnlocked() {
+		t.Fatal("stale view reported a new session unlocked")
+	}
+	if _, e = view.CaptureOperation(); e == nil {
+		t.Fatal("stale view refreshed its epoch by recapturing")
+	}
+}
+
+func TestMobileCapturedViewSharesLockAndDefaultViewFailsClosed(t *testing.T) {
+	v, _, _ := mobileFixture(t)
+	view, e := v.CaptureOperation()
+	if e != nil {
+		t.Fatal("capture shared state failed")
+	}
+	if !view.IsUnlocked() {
+		t.Fatal("valid view did not share current session")
+	}
+	view.RequestLock()
+	if v.IsUnlocked() {
+		t.Fatal("captured view lock did not invalidate base")
+	}
+	empty := new(Vault)
+	empty.RequestLock()
+	empty.Lock()
+	empty.Close()
+	if empty.IsUnlocked() {
+		t.Fatal("default binding constructor was unlocked")
+	}
+	if _, e = empty.CaptureOperation(); e == nil {
+		t.Fatal("default binding constructor minted operation view")
+	}
+	if e = empty.Unlock([]byte("mobile-fixture"), bytes.Repeat([]byte{47}, 16)); e == nil {
+		t.Fatal("default binding constructor accepted unlock")
+	}
+}
+
+func TestMobileFreshCaptureDuringPendingLockedCleanupRemainsUsable(t *testing.T) {
+	v, _, key := mobileFixture(t)
+	invalidated, release := make(chan struct{}), make(chan struct{})
+	v.lockWaiting = func() { close(invalidated); <-release }
+	done := make(chan struct{})
+	go func() { v.Lock(); close(done) }()
+	<-invalidated
+	view, e := v.CaptureOperation()
+	if e != nil {
+		t.Fatal("fresh capture after lock request failed")
+	}
+	close(release)
+	<-done
+	v.lockWaiting = nil
+	if e = view.Unlock([]byte("mobile-fixture"), bytes.Clone(key)); e != nil {
+		t.Fatal("cleanup with no overtaking session invalidated a fresh capture")
 	}
 }

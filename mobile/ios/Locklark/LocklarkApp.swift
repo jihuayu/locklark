@@ -63,21 +63,21 @@ private struct RootView: View {
                     SecureField("账户 Secret Key", text: $model.secretKey).textInputAutocapitalization(.never).autocorrectionDisabled()
                         .accessibilityIdentifier("unlock-secret-key")
                     Button("解锁金库") { model.unlockWithFactors() }.accessibilityIdentifier("unlock-vault")
-                        .disabled(!model.ready || model.busy || model.password.isEmpty || model.secretKey.isEmpty)
+                        .disabled(!model.ready || model.interactionBusy || model.password.isEmpty || model.secretKey.isEmpty)
                 }
                 Section {
                     Button("使用系统验证解锁") { model.unlockWithSystem() }.accessibilityIdentifier("system-unlock")
-                        .disabled(!model.ready || model.busy)
+                        .disabled(!model.ready || model.interactionBusy)
                     Text("仅在此前明确启用后可用。系统验证被中断时，使用完整因素解锁。")
                         .font(.footnote)
                 }
             } else {
                 Section {
                     Button("创建个人金库") { model.creatingVault = true }.accessibilityIdentifier("create-vault")
-                        .disabled(!model.ready || model.busy)
+                        .disabled(!model.ready || model.interactionBusy)
                 }
             }
-            if model.busy { ProgressView("正在验证") }
+            if model.interactionBusy { ProgressView("正在验证") }
         }
         .accessibilityIdentifier("locked-screen")
     }
@@ -90,7 +90,7 @@ private struct RootView: View {
             }
             Section("账户 Secret Key") {
                 Button("生成新的 Secret Key") { model.generateAccountKey() }.accessibilityIdentifier("generate-secret-key")
-                    .disabled(model.busy)
+                    .disabled(model.interactionBusy)
                 if !model.generatedSecretKey.isEmpty {
                     Text(verbatim: model.generatedSecretKey).font(.system(.body, design: .monospaced)).privacySensitive()
                         .accessibilityLabel("账户 Secret Key").accessibilityValue(model.generatedSecretKey)
@@ -100,7 +100,7 @@ private struct RootView: View {
                 }
             }
             Button("确认备份并创建") { model.createVault() }.accessibilityIdentifier("confirm-create")
-                .disabled(model.busy || model.password.isEmpty || model.password != model.confirmation || !model.backupAcknowledged)
+                .disabled(model.interactionBusy || model.password.isEmpty || model.password != model.confirmation || !model.backupAcknowledged)
             Button("取消", role: .cancel) { model.lock(); model.creatingVault = false }
         }
         .navigationTitle("创建金库")
@@ -114,7 +114,7 @@ private struct RootView: View {
                         .accessibilityIdentifier("title-search")
                     Button("搜索") { model.search() }.accessibilityIdentifier("search-submit")
                 }
-                Button("添加登录", systemImage: "plus") { model.beginAdd() }.accessibilityIdentifier("add-login").disabled(model.busy)
+                Button("添加登录", systemImage: "plus") { model.beginAdd() }.accessibilityIdentifier("add-login").disabled(model.interactionBusy)
             }
             if let selected = model.selected {
                 Section("已选登录") {
@@ -122,7 +122,7 @@ private struct RootView: View {
                     Text("固定条目 \(selected.identifier)").font(.caption).textSelection(.enabled)
                     Text("修订 \(selected.revision)").font(.caption2)
                     ForEach([("username", "显示用户名"), ("password", "显示密码"), ("notes", "显示备注"), ("otp-code", "显示验证码")], id: \.0) { field, title in
-                        Button(title) { model.reveal(field: field) }.accessibilityIdentifier("show-\(field)").disabled(model.busy)
+                        Button(title) { model.reveal(field: field) }.accessibilityIdentifier("show-\(field)").disabled(model.interactionBusy)
                     }
                     if model.hasDisclosure {
                         Text(verbatim: model.revealed.isEmpty ? "（空值）" : model.revealed).font(.system(.body, design: .monospaced)).privacySensitive()
@@ -133,9 +133,9 @@ private struct RootView: View {
                         ForEach([("title", "标题"), ("url", "网址"), ("username", "用户名"), ("password", "密码"), ("otp", "验证码配置"), ("notes", "备注")], id: \.0) { field, title in
                             Button(title) { model.beginEdit(field: field) }.accessibilityIdentifier("edit-\(field)")
                         }
-                    }.accessibilityIdentifier("edit-fields").disabled(model.busy)
-                    Button("重新生成 24 位密码") { model.regenerate() }.accessibilityIdentifier("regenerate-password").disabled(model.busy)
-                    Button("取消选择") { model.select(nil) }.disabled(model.busy)
+                    }.accessibilityIdentifier("edit-fields").disabled(model.interactionBusy)
+                    Button("重新生成 24 位密码") { model.regenerate() }.accessibilityIdentifier("regenerate-password").disabled(model.interactionBusy)
+                    Button("取消选择") { model.select(nil) }.disabled(model.interactionBusy)
                 }
             }
             Section("登录") {
@@ -145,8 +145,8 @@ private struct RootView: View {
                 }
             }
             Section("此设备") {
-                Button("启用本机快速解锁") { model.configureQuickUnlock(enable: true) }.accessibilityIdentifier("enable-system-unlock").disabled(model.busy)
-                Button("移除本机快速解锁") { model.configureQuickUnlock(enable: false) }.disabled(model.busy)
+                Button("启用本机快速解锁") { model.configureQuickUnlock(enable: true) }.accessibilityIdentifier("enable-system-unlock").disabled(model.interactionBusy)
+                Button("移除本机快速解锁") { model.configureQuickUnlock(enable: false) }.disabled(model.interactionBusy)
                 Text("默认关闭。密封身份只保存在需用户验证、不可迁移或云同步的系统钥匙串中。")
                     .font(.footnote)
             }
@@ -168,7 +168,7 @@ private struct RootView: View {
                 ToolbarItem(placement: .cancellationAction) { Button("取消") { model.cancelEditor() } }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("保存") { model.saveLogin() }.accessibilityIdentifier("save-login")
-                        .disabled(model.busy || model.titleDraft.isEmpty || (!model.generatePassword && model.passwordDraft.isEmpty))
+                        .disabled(model.interactionBusy || model.titleDraft.isEmpty || (!model.generatePassword && model.passwordDraft.isEmpty))
                 }
             }
         }

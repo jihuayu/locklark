@@ -3,6 +3,36 @@
 The core uses the actual encrypted personal vault and signed audit journal on
 disk. It has no synthetic repository, network backend, or team upload method.
 
+## Current v3 result
+
+CaptureOperation returns an immutable epoch-bound Vault view over shared state.
+Native UI captures that view before queueing work; the controller remains the
+lifecycle owner. Deterministic tests first reproduced stale Create, Unlock and
+Edit crossing the native preflight-to-Go-call gap, then passed with bound-view
+enforcement. Tests also cover stale-view recapture, bound IsUnlocked, shared
+RequestLock, inert default binding constructors, and a fresh capture surviving
+cleanup when no session overtook Lock. The latter cleanup test also failed
+before the conditional re-invalidation fix.
+
+The entire current core normal suite passed in 11.034s and its entire race
+suite passed in 109.560s (`GOMAXPROCS=2`, `-p 1`, `-count=1`, no test-name filter).
+The parent and independent reviewer reran the focused capture/queue/OTP tests
+with corrected regexes selecting the full names. Repo-wide vet passed again
+after v3, and module verification again reported `all modules verified`.
+
+The final v3 warm bind passed with matching before/after hashes for 88 exact
+transitive source/build inputs and the pinned binding-tool binaries. Current
+source re-verification found zero mismatches. Immutable local artifacts are
+under `/tmp/locklark-tools/mobile/core-final-v3`:
+
+- AAR SHA-256: `edc91ce26a07a83d381be8e2428a404bec1ce6224e8dca177324bae6ef859593`
+- Manifest SHA-256: `0c2eaffab9a9e12d1570613feec3acbe53f50fabd3a1322fc6c2aaa59976ca76`
+- Before-bind manifest SHA-256: `4f2ecde39c16a91c2431aae1eb264a4ebd2f8e81d9d0619b1c409601b26c36d0`
+
+The v1/v2 artifacts and all failed/green logs remain available as historical
+evidence. A final v3 repo-wide test run is delegated to final-head CI; the local
+35-package baseline run below is explicitly not claimed as a v3 tree run.
+
 ## Meaningful behavioral red / green evidence
 
 The initial missing-API compiler failure is an API red check, not behavioral

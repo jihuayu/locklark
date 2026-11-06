@@ -10,6 +10,7 @@ class ForegroundGate {
     private var epoch = 0L
     private var operation = 0L
 
+    @Synchronized fun isForeground(): Boolean = foreground
     @Synchronized fun start() { foreground = true; epoch++ }
     @Synchronized fun stop() { foreground = false; epoch++; operation++ }
     @Synchronized fun invalidate() { epoch++; operation++ }

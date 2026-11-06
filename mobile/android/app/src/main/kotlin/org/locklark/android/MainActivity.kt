@@ -37,6 +37,9 @@ class MainActivity : Activity() {
     private val main = Handler(Looper.getMainLooper())
     @Volatile private var vault: Vault? = null
     private var opening = false
+    private var cleanupPending = false
+    private var cleanupSerial = 0L
+    private var destroyed = false
     private var busy = false
     private var unlockedUi = false
     private var generatedKey: ByteArray? = null
@@ -78,13 +81,35 @@ class MainActivity : Activity() {
         super.onStart()
         gate.start()
         main.post(tick)
+        resumeLocked()
+    }
+    private fun resumeLocked() {
+        if (cleanupPending) { lockedPage(); setBusy(true); status.text = "正在完成锁定…"; return }
+        setBusy(false)
         if (vault == null) {
             opening = true
-            work(task = { Mobilecore.open(database.absolutePath) }, drop = { it.close() }, dropOnWorker = true) {
+            work(task = { _, _ -> Mobilecore.open(database.absolutePath) }, drop = { it.close() }, dropOnWorker = true) {
                 opening = false; vault = it; lockedPage()
             }
-        } else if (vault != null) lockedPage()
+        } else lockedPage()
     }
+    private fun enqueueLockCleanup() {
+        cleanupPending = true
+        val sequence = ++cleanupSerial
+        val base = vault
+        worker.execute {
+            try { base?.lock() }
+            finally {
+                main.post {
+                    if (sequence == cleanupSerial) {
+                        cleanupPending = false
+                        if (!destroyed && gate.isForeground()) resumeLocked()
+                    }
+                }
+            }
+        }
+    }
+
     override fun onStop() {
         gate.stop()
         vault?.requestLock()
@@ -92,11 +117,12 @@ class MainActivity : Activity() {
         clearInputs(); generatedKey?.fill(0); generatedKey = null
         clearDisplay(); currentRow = null; unlockedUi = false; busy = false
         page("Locklark 已锁定")
-        worker.execute { vault?.lock() }
+        enqueueLockCleanup()
         main.removeCallbacks(tick)
         super.onStop()
     }
     override fun onDestroy() {
+        destroyed = true
         unregisterReceiver(securityEvents)
         vault?.requestLock()
         val previous = vault
@@ -156,13 +182,15 @@ class MainActivity : Activity() {
         status.text = if (unknown) "结果未确认，请重新打开金库核实，勿重复提交。"
             else "操作未完成：认证被取消、金库已锁定或目标已变化。"
     }
-    private fun <T> work(target: Target? = null, task: (WorkStamp) -> T, drop: (T) -> Unit = {}, dropOnWorker: Boolean = false, releaseInputs: () -> Unit = {}, done: (T) -> Unit) {
+    private fun <T> work(target: Target? = null, task: (WorkStamp, Vault?) -> T, drop: (T) -> Unit = {}, dropOnWorker: Boolean = false, releaseInputs: () -> Unit = {}, done: (T) -> Unit) {
         if (busy) { releaseInputs(); return }
         val stamp = try { gate.begin(target) } catch (_: IllegalStateException) { releaseInputs(); return }
+        // Nonblocking core view capture is on the UI thread before queuing.
+        val capturedVault = try { vault?.captureOperation() } catch (_: Exception) { releaseInputs(); message(); return }
         setBusy(true)
         worker.execute {
             try {
-                val value = GuardedWork.run(gate, stamp, target, releaseInputs) { task(stamp) }
+                val value = GuardedWork.run(gate, stamp, target, releaseInputs) { task(stamp, capturedVault) }
                 main.post {
                     if (gate.accepts(stamp, target)) { setBusy(false); done(value) }
                     else { if (dropOnWorker) cleanup.execute { drop(value) } else drop(value); if (vault == null) opening = false }
@@ -177,8 +205,8 @@ class MainActivity : Activity() {
         gate.invalidate(); vault?.requestLock(); promptSlot.cancel()
         clearInputs(); generatedKey?.fill(0); generatedKey = null
         clearDisplay(); currentRow = null; unlockedUi = false; busy = false
-        worker.execute { vault?.lock() }
-        lockedPage()
+        enqueueLockCleanup()
+        lockedPage(); setBusy(true); status.text = "正在完成锁定…"
     }
 
     private fun lockedPage() {
@@ -186,7 +214,7 @@ class MainActivity : Activity() {
         if (!database.exists()) {
             label("此设备尚无金库。先生成并离线保存新的 Secret Key；它不是设备快速解锁密钥。")
             button("生成新的 Secret Key", "generate-account-key") {
-                work(task = { Mobilecore.generateSecretKey() }, drop = { it.fill(0) }) { value ->
+                work(task = { _, _ -> Mobilecore.generateSecretKey() }, drop = { it.fill(0) }) { value ->
                     generatedKey?.fill(0); generatedKey = value; createPage(value)
                 }
             }
@@ -198,14 +226,14 @@ class MainActivity : Activity() {
             val pw = password.text.toString().toByteArray()
             val encodedKey = key.text.toString().toByteArray()
             clearInputs()
-            work(releaseInputs = { pw.fill(0); encodedKey.fill(0) }, task = { stamp ->
+            work(releaseInputs = { pw.fill(0); encodedKey.fill(0) }, task = { stamp, api ->
                 var decoded = ByteArray(0)
-                try { decoded = Mobilecore.parseSecretKey(String(encodedKey, Charsets.UTF_8)); GuardedWork.ensureCurrent(gate, stamp); vault!!.unlock(pw, decoded) }
+                try { decoded = Mobilecore.parseSecretKey(String(encodedKey, Charsets.UTF_8)); GuardedWork.ensureCurrent(gate, stamp); api!!.unlock(pw, decoded) }
                 finally { pw.fill(0); decoded.fill(0) }
             }) { showList() }
         }
         button("使用此设备认证解锁", "quick-unlock") {
-            work(task = { stamp -> vault!!.unlockWithSystem(store(stamp)) }) { showList() }
+            work(task = { stamp, api -> api!!.unlockWithSystem(store(stamp)) }) { showList() }
         }
     }
     private fun createPage(key: ByteArray) {
@@ -227,9 +255,9 @@ class MainActivity : Activity() {
             clearInputs(); generatedKey?.fill(0); generatedKey = null
             // Remove the displayed account key before any asynchronous work.
             clearBackupView()
-            work(releaseInputs = { pw.fill(0); accountKey.fill(0) }, task = { stamp ->
+            work(releaseInputs = { pw.fill(0); accountKey.fill(0) }, task = { stamp, api ->
                 val createPassword = pw.copyOf(); val createKey = accountKey.copyOf()
-                try { vault!!.create(createPassword, createKey); GuardedWork.ensureCurrent(gate, stamp); vault!!.unlock(pw, accountKey) }
+                try { api!!.create(createPassword, createKey); GuardedWork.ensureCurrent(gate, stamp); api!!.unlock(pw, accountKey) }
                 finally { createPassword.fill(0); createKey.fill(0); pw.fill(0); accountKey.fill(0) }
             }) { showList() }
         }
@@ -243,12 +271,12 @@ class MainActivity : Activity() {
         button("搜索", "search") { val text = search.text.toString(); gate.invalidate(); showList(text) }
         button("新建登录", "new-login") { gate.invalidate(); newLoginPage() }
         button("启用此设备认证", "enable-quick-unlock") {
-            work(task = { stamp -> vault!!.enableSystemUnlock(store(stamp)) }) { status.text = "已启用；本次完整双因素解锁后的 24 小时内可用。" }
+            work(task = { stamp, api -> api!!.enableSystemUnlock(store(stamp)) }) { status.text = "已启用；本次完整双因素解锁后的 24 小时内可用。" }
         }
         button("停用此设备认证", "disable-quick-unlock") {
-            work(task = { stamp -> vault!!.disableSystemUnlock(store(stamp)) }) { status.text = "本设备授权已删除。" }
+            work(task = { stamp, api -> api!!.disableSystemUnlock(store(stamp)) }) { status.text = "本设备授权已删除。" }
         }
-        work(task = { if (query == null) vault!!.list("active") else vault!!.search(query, "active") }) { rows ->
+        work(task = { _, api -> if (query == null) api!!.list("active") else api!!.search(query, "active") }) { rows ->
             for (i in 0 until rows.count()) {
                 val row = rows.at(i)
                 label("ID: " + row.getID())
@@ -278,10 +306,10 @@ class MainActivity : Activity() {
         // Recreate the output widget after clearing its previous reference.
         if (secretView == null) secretView = label("").apply { tag = "secret-value" }
         val target = Target(row.getID(), row.getRevision(), field)
-        work(target, task = { stamp ->
+        work(target, task = { stamp, api ->
             var secret: SecretValue? = null
             try {
-                secret = if (field == "otp") vault!!.revealOTP(target.id, target.revision) else vault!!.revealField(target.id, target.revision, field)
+                secret = if (field == "otp") api!!.revealOTP(target.id, target.revision) else api!!.revealField(target.id, target.revision, field)
                 if (!gate.accepts(stamp, target)) throw PlatformAuthenticationFailure()
                 val bytes = secret.take() ?: byteArrayOf()
                 Delivery(bytes, secret.fromUnixMilli(), secret.untilUnixMilli())
@@ -313,8 +341,8 @@ class MainActivity : Activity() {
             val user = username.text.toString().toByteArray(); val pass = password.text.toString().toByteArray()
             val size = length.text.toString().toLongOrNull() ?: 0; val generated = generate.isChecked
             clearInputs()
-            work(releaseInputs = { user.fill(0); pass.fill(0) }, task = {
-                try { if (generated) vault!!.generateLogin(metadataTitle, metadataUrl, user, size) else vault!!.createLogin(metadataTitle, metadataUrl, user, pass) }
+            work(releaseInputs = { user.fill(0); pass.fill(0) }, task = { _, api ->
+                try { if (generated) api!!.generateLogin(metadataTitle, metadataUrl, user, size) else api!!.createLogin(metadataTitle, metadataUrl, user, pass) }
                 finally { user.fill(0); pass.fill(0) }
             }) { showList() }
         }
@@ -332,7 +360,7 @@ class MainActivity : Activity() {
             val selectedField = fields[field.selectedItemPosition]
             val bytes = value.text.toString().toByteArray(); clearInputs()
             val target = Target(row.getID(), row.getRevision(), selectedField)
-            work(target, releaseInputs = { bytes.fill(0) }, task = { try { vault!!.editField(target.id, target.revision, target.field, bytes) } finally { bytes.fill(0) } }) { showList() }
+            work(target, releaseInputs = { bytes.fill(0) }, task = { _, api -> try { api!!.editField(target.id, target.revision, target.field, bytes) } finally { bytes.fill(0) } }) { showList() }
         }
         button("取消编辑", "cancel-edit") { gate.invalidate(); detailPage(row) }
     }
@@ -344,7 +372,7 @@ class MainActivity : Activity() {
         button("确认生成并替换", "confirm-regenerate") {
             val size = length.text.toString().toLongOrNull() ?: 0
             val target = Target(row.getID(), row.getRevision(), "password")
-            work(target, task = { vault!!.regeneratePassword(target.id, target.revision, size) }) { showList() }
+            work(target, task = { _, api -> api!!.regeneratePassword(target.id, target.revision, size) }) { showList() }
         }
         button("取消重新生成", "cancel-regenerate") { gate.invalidate(); detailPage(row) }
     }

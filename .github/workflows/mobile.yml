@@ -40,9 +40,7 @@ jobs:
           arch: x86_64
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-snapshot
-          script: |
-            ANDROID_SERIAL=emulator-5554 LOCKLARK_ANDROID_TEST_RESET=1 mobile/android/scripts/test-emulator.sh
-            python3 scripts/mobile_android_acceptance.py --adb "$ANDROID_HOME/platform-tools/adb" --serial emulator-5554 --apk mobile/android/app/build/outputs/apk/debug/app-debug.apk --reset-test-app --cli "$RUNNER_TEMP/locklark-mobile-peer" --peer "$RUNNER_TEMP/mobile-kdbx-peer/bin/python"
+          script: bash .github/scripts/mobile-android-runtime.sh
   ios:
     runs-on: macos-latest
     timeout-minutes: 45

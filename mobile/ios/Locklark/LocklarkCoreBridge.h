@@ -37,6 +37,7 @@ NS_ASSUME_NONNULL_BEGIN
 + (nullable NSData *)generateSecretKeyAndReturnError:(NSError **)error NS_SWIFT_NAME(generateSecretKey());
 + (NSString *)formatSecretKey:(NSData *)key;
 + (nullable NSData *)parseSecretKey:(NSString *)text error:(NSError **)error NS_SWIFT_NAME(parseSecretKey(_:));
+- (nullable LLVault *)captureOperationAndReturnError:(NSError **)error NS_SWIFT_NAME(captureOperation());
 - (BOOL)createWithPassword:(NSData *)password secretKey:(NSData *)key error:(NSError **)error NS_SWIFT_NAME(create(password:secretKey:));
 - (BOOL)unlockWithPassword:(NSData *)password secretKey:(NSData *)key error:(NSError **)error NS_SWIFT_NAME(unlock(password:secretKey:));
 - (BOOL)isUnlocked NS_SWIFT_NAME(isUnlocked());

@@ -32,8 +32,13 @@ class OfflineVaultTest {
     private lateinit var scenario: ActivityScenario<MainActivity>
     private fun stage(value: String) { instrumentation.sendStatus(0, android.os.Bundle().apply { putString("locklark_stage", value) }) }
     private fun record(value: String): String {
+        val fixture = File(instrumentation.targetContext.cacheDir, "instrumentation-canaries.json")
+        if (canaries.isEmpty() && fixture.exists()) {
+            val existing = JSONArray(fixture.readText())
+            for (index in 0 until existing.length()) canaries.add(existing.getString(index))
+        }
         canaries.add(value)
-        File(instrumentation.targetContext.cacheDir, "instrumentation-canaries.json").writeText(JSONArray(canaries).toString())
+        fixture.writeText(JSONArray(canaries).toString())
         return value
     }
     private fun all(view: View): List<View> = listOf(view) + if (view is ViewGroup) (0 until view.childCount).flatMap { all(view.getChildAt(it)) } else emptyList()
@@ -48,11 +53,40 @@ class OfflineVaultTest {
         return value
     }
     private fun waitFor(message: String, test: () -> Boolean) {
+        val wait = when (message) {
+            "Initial create unavailable" -> "initial-create"
+            "Account key unavailable" -> "account-key"
+            "New vault list unavailable" -> "new-vault-list"
+            "Native control unavailable" -> "native-control"
+            "Native input unavailable" -> "native-input"
+            "Native input delivery incomplete" -> "native-input-exact"
+            "Login metadata unavailable" -> "login-metadata"
+            "Detail unavailable" -> "detail"
+            "Editor unavailable" -> "editor"
+            "Saved list unavailable" -> "saved-list"
+            "Explicit disclosure unavailable" -> "disclosure"
+            "Successful empty username must be explicit" -> "empty-username"
+            "Successful empty notes must be explicit" -> "empty-notes"
+            "Unsupported device auth did not refuse" -> "platform-auth-refusal"
+            "Background must lock" -> "background-lock"
+            "Explicit lock failed" -> "explicit-lock"
+            "Late unlock must not reopen backgrounded vault" -> "late-unlock"
+            else -> "other"
+        }
+        instrumentation.sendStatus(0, android.os.Bundle().apply { putString("locklark_wait", wait) })
         val deadline = SystemClock.elapsedRealtime() + 180_000
         while (SystemClock.elapsedRealtime() < deadline) {
             if (test()) return
             SystemClock.sleep(100)
         }
+        val uiStatus = when {
+            text("status").startsWith("操作未完成") -> "operation-refused"
+            text("status").startsWith("结果未确认") -> "outcome-unknown"
+            text("status").startsWith("请先确认备份") -> "backup-ack-required"
+            text("status").isEmpty() -> "empty"
+            else -> "other"
+        }
+        instrumentation.sendStatus(0, android.os.Bundle().apply { putString("locklark_ui_status", uiStatus) })
         assertTrue(message, false)
     }
     private fun ready(tag: String): Boolean {
@@ -85,6 +119,7 @@ class OfflineVaultTest {
         if (value.all { it.code in 32..126 }) instrumentation.sendStringSync(value)
         else scenario.onActivity { (it.window.decorView.findViewWithTag<View>(tag) as EditText).setText(value) }
         instrumentation.waitForIdleSync()
+        waitFor("Native input delivery incomplete") { text(tag) == value }
     }
     private fun select(title: String) {
         var tag = ""

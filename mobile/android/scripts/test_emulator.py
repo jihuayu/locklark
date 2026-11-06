@@ -40,7 +40,7 @@ def scan_output(raw, values):
                 raise RuntimeFailure()
 
 
-def complete_pass(returncode, raw, expected_tests=1):
+def complete_pass(returncode, raw, expected_tests=2):
     counts = re.findall(rb"OK \(([0-9]+) tests?\)", raw)
     return (returncode == 0 and counts == [str(expected_tests).encode()] and
             b"INSTRUMENTATION_CODE: -1" in raw and not any(marker in raw for marker in
@@ -48,15 +48,21 @@ def complete_pass(returncode, raw, expected_tests=1):
 
 
 def safe_diagnostic(raw):
-    allowed_steps = {"create", "add-login", "show-password", "edit-password", "edit-notes", "empty-fields", "edit-otp", "show-otp", "search", "cancel-edit", "generate-login", "regenerate", "exact-target", "platform-auth-refusal", "background-lock", "reopen", "late-unlock"}
+    allowed_steps = {"bound-operation", "create", "add-login", "show-password", "edit-password", "edit-notes", "empty-fields", "edit-otp", "show-otp", "search", "cancel-edit", "generate-login", "regenerate", "exact-target", "platform-auth-refusal", "background-lock", "reopen", "late-unlock"}
     steps = re.findall(rb"INSTRUMENTATION_STATUS: locklark_stage=([a-z-]+)", raw)
     step = steps[-1].decode("ascii") if steps and steps[-1].decode("ascii") in allowed_steps else "unknown"
     exception = "unknown"
     for name in ("java.lang.AssertionError", "junit.framework.AssertionFailedError", "java.lang.IllegalStateException", "java.lang.UnsatisfiedLinkError", "java.lang.NullPointerException", "android.os.DeadObjectException"):
         if name.encode() in raw: exception = name; break
-    lines = re.findall(rb"OfflineVaultTest\.kt:([0-9]{1,5})\)", raw)
+    lines = re.findall(rb"(?:OfflineVaultTest|BoundOperationTest)\.kt:([0-9]{1,5})\)", raw)
+    waits = re.findall(rb"INSTRUMENTATION_STATUS: locklark_wait=([a-z-]+)", raw)
+    allowed_waits = {"initial-create", "account-key", "new-vault-list", "native-control", "native-input", "native-input-exact", "login-metadata", "detail", "editor", "saved-list", "disclosure", "empty-username", "empty-notes", "platform-auth-refusal", "background-lock", "explicit-lock", "late-unlock", "other"}
+    wait = waits[-1].decode() if waits and waits[-1].decode() in allowed_waits else "unknown"
+    statuses = re.findall(rb"INSTRUMENTATION_STATUS: locklark_ui_status=([a-z-]+)", raw)
+    allowed_status = {"operation-refused", "outcome-unknown", "backup-ack-required", "empty", "other"}
+    status = statuses[-1].decode() if statuses and statuses[-1].decode() in allowed_status else "unknown"
     counts = re.findall(rb"(?:Tests run: |OK \()([0-9]{1,3})", raw)
-    return {"step": step, "exception": exception, "own_source_line": int(lines[0]) if lines else 0,
+    return {"step": step, "wait": wait, "ui_status": status, "exception": exception, "own_source_line": int(lines[0]) if lines else 0, "own_source_lines": [int(line) for line in lines[:20]],
             "tests_run": int(counts[-1]) if counts else 0,
             "process_crashed": b"Process crashed" in raw, "runner_aborted": b"INSTRUMENTATION_ABORTED" in raw}
 

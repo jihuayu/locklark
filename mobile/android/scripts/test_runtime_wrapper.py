@@ -5,9 +5,9 @@ from test_emulator import scan_output, complete_pass, RuntimeFailure, safe_diagn
 
 class RuntimeWrapperTests(unittest.TestCase):
     def test_failure_or_partial_instrumentation_cannot_pass(self):
-        passed = b"OK (1 test)\nINSTRUMENTATION_CODE: -1\n"
+        passed = b"OK (2 tests)\nINSTRUMENTATION_CODE: -1\n"
         self.assertTrue(complete_pass(0, passed))
-        for code, raw in ((1, passed), (0,b"INSTRUMENTATION_CODE: -1"), (0,passed+b"FAILURES!!!"), (0,passed.replace(b"1 test",b"0 tests")), (0,passed+b"Process crashed")):
+        for code, raw in ((1, passed), (0,b"INSTRUMENTATION_CODE: -1"), (0,passed+b"FAILURES!!!"), (0,passed.replace(b"2 tests",b"0 tests")), (0,passed+b"Process crashed")):
             self.assertFalse(complete_pass(code, raw))
 
     def test_diagnostic_returns_only_fixed_classes_steps_and_source_integers(self):

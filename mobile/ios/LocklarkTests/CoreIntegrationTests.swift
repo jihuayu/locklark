@@ -68,14 +68,15 @@ final class CoreIntegrationTests: XCTestCase {
             queue.async { entered.signal(); release.wait() }
             XCTAssertEqual(entered.wait(timeout: .now() + 5), .success)
             let scope = CancellationScope(), ticket = scope.ticket()
+            let captured = try vault.captureOperation()
             var calls = 0
             queue.async {
                 do {
                     try ticket.run(cleanup: { password.clear(); key.clear(); replacement.clear() }) {
                         calls += 1
-                        if kind == "create" { try vault.create(password: password.data, secretKey: key.data) }
-                        else if kind == "unlock" { try vault.unlock(password: password.data, secretKey: key.data) }
-                        else if let row { _ = try vault.edit(id: row.identifier, revision: row.revision, field: "password", value: replacement.data) }
+                        if kind == "create" { try captured.create(password: password.data, secretKey: key.data) }
+                        else if kind == "unlock" { try captured.unlock(password: password.data, secretKey: key.data) }
+                        else if let row { _ = try captured.edit(id: row.identifier, revision: row.revision, field: "password", value: replacement.data) }
                     }
                 } catch {}
                 done.signal()
@@ -90,5 +91,38 @@ final class CoreIntegrationTests: XCTestCase {
             else { XCTAssertFalse(FileManager.default.fileExists(atPath: url.path), "cancelled queued creation must leave no database") }
             XCTAssertFalse(vault.isUnlocked(), "cancelled queued unlock must remain locked")
         }
+    }
+
+    func testGoCapturedEpochClosesNativePreflightToCallGap() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let path = directory.appendingPathComponent("never-created.ll").path
+        let base = try LLVault.open(path: path)
+        defer { base.requestLock(); base.close() }
+        let view = try base.captureOperation()
+        let password = NativeSecretBuffer("gap-fixture-factor")
+        let key = NativeSecretBuffer(data: try LLVault.generateSecretKey())
+        let scope = CancellationScope(), ticket = scope.ticket()
+        let passedPreflight = DispatchSemaphore(value: 0), call = DispatchSemaphore(value: 0), done = DispatchSemaphore(value: 0)
+        var refused = false
+        DispatchQueue(label: "native-preflight-gap").async {
+            do {
+                try ticket.run(cleanup: { password.clear(); key.clear() }) {
+                    passedPreflight.signal()
+                    call.wait()
+                    try view.create(password: password.data, secretKey: key.data)
+                }
+            } catch { refused = true }
+            done.signal()
+        }
+        XCTAssertEqual(passedPreflight.wait(timeout: .now() + 5), .success)
+        scope.invalidate()
+        base.requestLock()
+        call.signal()
+        XCTAssertEqual(done.wait(timeout: .now() + 5), .success)
+        XCTAssertTrue(refused, "Go-issued expected epoch must reject a call after native preflight")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path), "preflight-to-call cancellation must leave no database")
+        XCTAssertTrue(password.data.allSatisfy { $0 == 0 } && key.data.allSatisfy { $0 == 0 }, "gap rejection must still wipe captured factors")
     }
 }
