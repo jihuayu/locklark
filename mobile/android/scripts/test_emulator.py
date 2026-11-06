@@ -16,6 +16,7 @@ class RuntimeFailure(Exception):
 
 STAGE = "prerequisites"
 STATE = None
+DIAGNOSTIC = {}
 
 
 def scan_output(raw, values):
@@ -46,8 +47,22 @@ def complete_pass(returncode, raw, expected_tests=1):
             (b"FAILURES!!!", b"INSTRUMENTATION_FAILED", b"Process crashed", b"INSTRUMENTATION_ABORTED")))
 
 
+def safe_diagnostic(raw):
+    allowed_steps = {"create", "add-login", "show-password", "edit-password", "edit-notes", "empty-fields", "edit-otp", "show-otp", "search", "cancel-edit", "generate-login", "regenerate", "exact-target", "platform-auth-refusal", "background-lock", "reopen", "late-unlock"}
+    steps = re.findall(rb"INSTRUMENTATION_STATUS: locklark_stage=([a-z-]+)", raw)
+    step = steps[-1].decode("ascii") if steps and steps[-1].decode("ascii") in allowed_steps else "unknown"
+    exception = "unknown"
+    for name in ("java.lang.AssertionError", "junit.framework.AssertionFailedError", "java.lang.IllegalStateException", "java.lang.UnsatisfiedLinkError", "java.lang.NullPointerException", "android.os.DeadObjectException"):
+        if name.encode() in raw: exception = name; break
+    lines = re.findall(rb"OfflineVaultTest\.kt:([0-9]{1,5})\)", raw)
+    counts = re.findall(rb"(?:Tests run: |OK \()([0-9]{1,3})", raw)
+    return {"step": step, "exception": exception, "own_source_line": int(lines[0]) if lines else 0,
+            "tests_run": int(counts[-1]) if counts else 0,
+            "process_crashed": b"Process crashed" in raw, "runner_aborted": b"INSTRUMENTATION_ABORTED" in raw}
+
+
 def main():
-    global STAGE, STATE
+    global STAGE, STATE, DIAGNOSTIC
     root = Path(__file__).resolve().parents[1]
     sdk = Path(os.environ["ANDROID_HOME"])
     serial = os.environ["ANDROID_SERIAL"]
@@ -66,10 +81,12 @@ def main():
         return result
     if command(["shell", "getprop", "ro.kernel.qemu"]).stdout.strip() != b"1" or command(["shell", "getprop", "sys.boot_completed"]).stdout.strip() != b"1":
         raise RuntimeFailure()
+    if command(["shell", "service", "check", "package"]).stdout.strip() != b"Service package: found":
+        raise RuntimeFailure()
     package, test_package = "org.locklark.android", "org.locklark.android.test"
     STAGE = "install"
     command(["install", "-r", str(root / "app/build/outputs/apk/debug/app-debug.apk")], timeout=120)
-    command(["install", "-r", str(root / "app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk")], timeout=120)
+    command(["install", "-t", "-r", str(root / "app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk")], timeout=120)
     if os.environ.get("LOCKLARK_ANDROID_TEST_RESET") != "1":
         raise RuntimeFailure()
     command(["shell", "pm", "clear", package]); command(["shell", "pm", "clear", test_package])
@@ -102,6 +119,7 @@ def main():
         try: logger.wait(timeout=5)
         except subprocess.TimeoutExpired: logger.kill(); logger.wait()
         thread.join(timeout=5); runtime.close(); log.close()
+    DIAGNOSTIC = safe_diagnostic(result.stdout if result is not None else b"")
     STAGE = "private-canary-scan"
     # The test APK alone writes this fixture in the target's private cache;
     # release app code has no fixture loader or secret-observation endpoint.
@@ -109,6 +127,8 @@ def main():
     if canary.returncode:
         raise RuntimeFailure()
     values = json.loads(canary.stdout)
+    with os.fdopen(os.open(state / "fixture.json", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600), "wb") as private_fixture:
+        private_fixture.write(canary.stdout)
     for path in (state / "controller.log", state / "runtime.log"):
         scan_output(path.read_bytes(), values)
     if log_failed.is_set() or thread.is_alive():
@@ -126,5 +146,6 @@ if __name__ == "__main__":
         main()
     except Exception:
         print("FAIL: Android native runtime validation at " + STAGE)
+        print("Fixed Android runtime diagnosis: " + json.dumps(DIAGNOSTIC, sort_keys=True))
         if STATE is not None: print("Private Android runtime evidence: " + str(STATE))
         raise SystemExit(1)

@@ -25,6 +25,8 @@ type SecretValue struct {
 	timer        *time.Timer
 	cancelled    atomic.Bool
 	clearOnce    sync.Once
+	otpBounds    *personal.OTPBounds
+	grantClock   func() time.Time // deterministic final-grant clock in tests
 }
 
 func (*SecretValue) String() string               { return "[native mobile disclosure]" }
@@ -96,6 +98,8 @@ func (s *SecretValue) takeWithGrantBarriers(beforeGrant, afterGrant func()) ([]b
 		defer s.session.DiscardOTPDelivery(delivery)
 		e = s.session.DeliverOTP(delivery, personal.NativeOTPTarget{ID: s.id, Revision: s.revision}, func(code []byte, bounds personal.OTPBounds) error {
 			value = append([]byte(nil), code...)
+			observed := bounds
+			s.otpBounds = &observed
 			s.from = bounds.From * 1000
 			s.until = bounds.Until * 1000
 			if deadline := bounds.Deadline.UnixMilli(); deadline < s.until {
@@ -127,9 +131,9 @@ func (s *SecretValue) takeWithGrantBarriers(beforeGrant, afterGrant func()) ([]b
 	if beforeGrant != nil {
 		beforeGrant()
 	}
-	if !s.vault.grantDelivery(s, s.from, s.until) {
+	if e := s.vault.grantDelivery(s, s.from, s.until); e != nil {
 		clear(value)
-		return nil, errLocked
+		return nil, e
 	}
 	if afterGrant != nil {
 		afterGrant()
@@ -159,7 +163,10 @@ func (v *Vault) RevealField(id, revision, field string) (*SecretValue, error) {
 	if field != "username" && field != "password" && field != "notes" {
 		return nil, errInvalid
 	}
-	v.op.Lock()
+	_, e := v.enterOperation()
+	if e != nil {
+		return nil, e
+	}
 	defer v.op.Unlock()
 	s, epoch, e := v.active()
 	if e != nil {

@@ -365,3 +365,139 @@ func TestMobileClearCancelsWithoutWaitingForTakeWorker(t *testing.T) {
 		t.Fatal("clear before final grant did not cancel delivery")
 	}
 }
+
+func mobileOTPForGrant(t *testing.T, v *Vault) *SecretValue {
+	t.Helper()
+	r, e := v.CreateLogin("clock target", "", []byte("username"), []byte("password"))
+	if e != nil {
+		t.Fatal("create clock target failed")
+	}
+	period := int64(3600)
+	for time.Now().Unix()%period < 5 {
+		period--
+	}
+	config := fmt.Sprintf("otpauth://totp/Mobile?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP&period=%d", period)
+	r, e = v.EditField(r.ID, r.Revision, "otp", []byte(config))
+	if e != nil {
+		t.Fatal("configure clock target failed")
+	}
+	secret, e := v.RevealOTP(r.ID, r.Revision)
+	if e != nil {
+		t.Fatal("prepare clock target failed")
+	}
+	return secret
+}
+
+func TestMobileOTPGrantRejectsRollbackWithinOriginalPeriod(t *testing.T) {
+	v, _, _ := mobileFixture(t)
+	secret := mobileOTPForGrant(t, v)
+	secret.grantClock = func() time.Time { return secret.otpBounds.WallSample.Add(-time.Millisecond) }
+	value, e := secret.Take()
+	defer clear(value)
+	if e == nil || len(value) != 0 {
+		t.Fatal("clock rolled backward before final grant but OTP escaped")
+	}
+}
+
+func TestMobileOTPFromIsLatestValidatedGrantSample(t *testing.T) {
+	v, _, _ := mobileFixture(t)
+	secret := mobileOTPForGrant(t, v)
+	var granted time.Time
+	secret.grantClock = func() time.Time { granted = time.Now(); return granted }
+	value, e := secret.Take()
+	defer clear(value)
+	if e != nil || len(value) != 6 {
+		t.Fatal("valid OTP grant failed")
+	}
+	if secret.FromUnixMilli() != granted.UnixMilli() {
+		t.Fatal("native lower bound was not the latest verified grant sample")
+	}
+}
+
+func TestMobileQueuedUnlockCannotAdoptEpochAfterRequestLock(t *testing.T) {
+	v, _, key := mobileFixture(t)
+	v.Lock()
+	entered, release := make(chan struct{}), make(chan struct{})
+	v.operationQueued = func() { close(entered); <-release }
+	result := make(chan error, 1)
+	go func() { result <- v.Unlock([]byte("mobile-fixture"), bytes.Clone(key)) }()
+	<-entered
+	v.RequestLock()
+	close(release)
+	e := <-result
+	v.operationQueued = nil
+	if e == nil || v.IsUnlocked() {
+		t.Fatal("queued old unlock adopted a fresh lifecycle epoch")
+	}
+}
+
+func TestMobileLockReturnsLockedAfterConcurrentUnlockOvertakes(t *testing.T) {
+	v, _, key := mobileFixture(t)
+	invalidated, release := make(chan struct{}), make(chan struct{})
+	v.lockWaiting = func() { close(invalidated); <-release }
+	done := make(chan struct{})
+	go func() { v.Lock(); close(done) }()
+	<-invalidated
+	if e := v.Unlock([]byte("mobile-fixture"), bytes.Clone(key)); e != nil {
+		t.Fatal("concurrent explicit unlock setup failed")
+	}
+	close(release)
+	<-done
+	v.lockWaiting = nil
+	if v.IsUnlocked() {
+		t.Fatal("Lock returned with an overtaking session still unlocked")
+	}
+}
+
+func TestMobileQueuedMutationCannotUseFreshSessionAfterLock(t *testing.T) {
+	v, _, key := mobileFixture(t)
+	r, e := v.CreateLogin("original", "", []byte("username"), []byte("password"))
+	if e != nil {
+		t.Fatal("queued mutation fixture failed")
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	v.operationQueued = func() {
+		select {
+		case <-entered:
+			return
+		default:
+			close(entered)
+			<-release
+		}
+	}
+	result := make(chan error, 1)
+	go func() { _, e := v.EditField(r.ID, r.Revision, "title", []byte("stale intent")); result <- e }()
+	<-entered
+	v.RequestLock()
+	if e = v.Unlock([]byte("mobile-fixture"), bytes.Clone(key)); e != nil {
+		t.Fatal("fresh unlock setup failed")
+	}
+	close(release)
+	e = <-result
+	v.operationQueued = nil
+	if e == nil {
+		t.Fatal("queued old mutation was authorized by a fresh session")
+	}
+}
+
+func TestMobileEmptyNativeFieldDisclosureIsSuccessfulAndSingleUse(t *testing.T) {
+	v, _, _ := mobileFixture(t)
+	r, e := v.CreateLogin("empty fields", "", nil, []byte("password"))
+	if e != nil {
+		t.Fatal("empty username fixture failed")
+	}
+	for _, field := range []string{"username", "notes"} {
+		secret, e := v.RevealField(r.ID, r.Revision, field)
+		if e != nil {
+			t.Fatal("prepare empty disclosure failed")
+		}
+		value, e := secret.Take()
+		clear(value)
+		if e != nil || len(value) != 0 {
+			t.Fatal("empty field was not a successful empty disclosure")
+		}
+		if _, e = secret.Take(); e == nil {
+			t.Fatal("empty field disclosure was reusable")
+		}
+	}
+}

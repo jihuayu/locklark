@@ -33,6 +33,62 @@ final class CoreIntegrationTests: XCTestCase {
         let rows = try vault.rows(query: "persisted")
         XCTAssertTrue(rows.count == 1 && rows[0].title == storedTitle, "authenticated storage must preserve the imported title bytes")
         XCTAssertTrue(VisibleText.title(rows[0].title) == "persisted\\u{202e}\\u{2066}\\u{200d}", "native title display must expose formatting controls")
+        let emptyNotes = try vault.reveal(id: rows[0].identifier, revision: rows[0].revision, field: "notes")
+        defer { emptyNotes.clear() }
+        let empty = try emptyNotes.take()
+        defer { empty.clear() }
+        XCTAssertTrue(empty.data.length == 0, "successful empty disclosure must survive the gomobile nil-data bridge")
         try VaultFiles.verifyProtection(directory: directory)
+    }
+
+    func testQueuedUnlockCreateAndEditAreCancelledBeforeActualGoEntry() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.protectionKey: FileProtectionType.complete])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let keyText = LLVault.formatSecretKey(try LLVault.generateSecretKey())
+        for kind in ["unlock", "create", "edit"] {
+            let url = directory.appendingPathComponent(kind + ".ll")
+            let vault = try LLVault.open(path: url.path)
+            defer { vault.requestLock(); vault.close() }
+            var row: LLRow?
+            if kind != "create" {
+                try vault.create(password: Data("queued-fixture-factor".utf8), secretKey: LLVault.parseSecretKey(keyText))
+                if kind == "edit" {
+                    try vault.unlock(password: Data("queued-fixture-factor".utf8), secretKey: LLVault.parseSecretKey(keyText))
+                    _ = try vault.createLogin(title: "Queued fixture", url: "", username: Data(), password: Data("before".utf8))
+                    row = try vault.rows(query: "").first
+                }
+            }
+            let before = kind == "create" ? nil : try Data(contentsOf: url)
+            let password = NativeSecretBuffer("queued-fixture-factor")
+            let key = NativeSecretBuffer(data: try LLVault.parseSecretKey(keyText))
+            let replacement = NativeSecretBuffer("after")
+            let queue = DispatchQueue(label: "queued-native-" + kind)
+            let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0), done = DispatchSemaphore(value: 0)
+            queue.async { entered.signal(); release.wait() }
+            XCTAssertEqual(entered.wait(timeout: .now() + 5), .success)
+            let scope = CancellationScope(), ticket = scope.ticket()
+            var calls = 0
+            queue.async {
+                do {
+                    try ticket.run(cleanup: { password.clear(); key.clear(); replacement.clear() }) {
+                        calls += 1
+                        if kind == "create" { try vault.create(password: password.data, secretKey: key.data) }
+                        else if kind == "unlock" { try vault.unlock(password: password.data, secretKey: key.data) }
+                        else if let row { _ = try vault.edit(id: row.identifier, revision: row.revision, field: "password", value: replacement.data) }
+                    }
+                } catch {}
+                done.signal()
+            }
+            scope.invalidate()
+            vault.requestLock()
+            release.signal()
+            XCTAssertEqual(done.wait(timeout: .now() + 5), .success)
+            XCTAssertTrue(calls == 0, "cancelled queued operation must not enter real Go code")
+            XCTAssertTrue(password.data.allSatisfy { $0 == 0 } && key.data.allSatisfy { $0 == 0 } && replacement.data.allSatisfy { $0 == 0 }, "cancelled captured factors must be cleared")
+            if let before { XCTAssertTrue(try Data(contentsOf: url) == before, "cancelled queued operation must not change the authenticated database") }
+            else { XCTAssertFalse(FileManager.default.fileExists(atPath: url.path), "cancelled queued creation must leave no database") }
+            XCTAssertFalse(vault.isUnlocked(), "cancelled queued unlock must remain locked")
+        }
     }
 }

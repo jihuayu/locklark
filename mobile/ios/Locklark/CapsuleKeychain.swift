@@ -66,9 +66,15 @@ final class CapsuleKeychain {
 
     func store(id: String, value: Data) throws {
         guard !value.isEmpty, value.count <= 65_536 else { throw PlatformProtectionError.invalidCapsule }
+        contextLock.lock()
+        let permitted = acceptingAuthentication
+        contextLock.unlock()
+        guard permitted else { throw PlatformProtectionError.authenticationCancelled }
         let control = try makeAccessControl(kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly, .userPresence)
         var attributes = try query(id: id)
-        let removed = client.delete(attributes)
+        var removal = attributes
+        removal[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
+        let removed = client.delete(removal)
         guard removed == errSecSuccess || removed == errSecItemNotFound else {
             throw PlatformProtectionError.storageDenied
         }
@@ -114,7 +120,9 @@ final class CapsuleKeychain {
     }
 
     func delete(id: String) throws {
-        let status = client.delete(try query(id: id))
+        var attributes = try query(id: id)
+        attributes[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
+        let status = client.delete(attributes)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw PlatformProtectionError.storageDenied
         }

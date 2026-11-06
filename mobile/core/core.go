@@ -31,16 +31,18 @@ const idle = 300 * time.Second
 // Vault retains an unlocked identity, never the account unlock factors.
 // op serializes workers; mu protects only short in-memory state transitions.
 type Vault struct {
-	op       sync.Mutex
-	mu       sync.Mutex
-	path     string
-	session  *personal.Session
-	epoch    uint64
-	closed   bool
-	cancel   context.CancelFunc
-	gate     *personal.MutationGate
-	handles  map[*SecretValue]bool
-	cleanups []<-chan struct{}
+	op              sync.Mutex
+	mu              sync.Mutex
+	path            string
+	session         *personal.Session
+	epoch           uint64
+	closed          bool
+	cancel          context.CancelFunc
+	gate            *personal.MutationGate
+	handles         map[*SecretValue]bool
+	cleanups        []<-chan struct{}
+	operationQueued func() // deterministic worker-queue barrier in tests
+	lockWaiting     func() // deterministic lock barrier in tests
 }
 
 func Open(path string) (*Vault, error) {
@@ -114,8 +116,17 @@ func (v *Vault) RequestLock() {
 }
 func (v *Vault) Lock() {
 	v.RequestLock()
+	v.mu.Lock()
+	hook := v.lockWaiting
+	v.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	v.op.Lock()
 	defer v.op.Unlock()
+	// An explicit unlock may overtake this mutex wait. Invalidate again while
+	// owning the worker gate so Lock cannot return with that session installed.
+	v.RequestLock()
 	v.mu.Lock()
 	cleanups := v.cleanups
 	v.cleanups = nil
@@ -162,11 +173,14 @@ func sanitized(e error) error {
 		return errUnavailable
 	}
 }
-func (v *Vault) startLocked() (uint64, context.Context, error) {
+func (v *Vault) startLocked(expected uint64) (uint64, context.Context, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if v.closed {
 		return 0, nil, errClosed
+	}
+	if v.epoch != expected {
+		return 0, nil, errCancelled
 	}
 	if v.session != nil {
 		return 0, nil, errInvalid
@@ -184,14 +198,32 @@ func (v *Vault) current(s *personal.Session, epoch uint64) bool {
 // grantDelivery is the delivery linearization point shared with RequestLock.
 // All authenticated disk work has completed before this short in-memory grant.
 // If this grant wins, a native UI must still reject any later stale generation.
-func (v *Vault) grantDelivery(secret *SecretValue, from, until int64) bool {
+func (v *Vault) grantDelivery(secret *SecretValue, from, until int64) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if v.closed || v.epoch != secret.epoch || v.session != secret.session || secret.cancelled.Load() {
-		return false
+		return errLocked
 	}
-	now := time.Now().UnixMilli()
-	return now >= from && now < until && secret.session.Unlocked()
+	sample := time.Now()
+	if secret.grantClock != nil {
+		sample = secret.grantClock()
+	}
+	now := sample.UnixMilli()
+	if now < from || now >= until {
+		return errExpired
+	}
+	if !secret.session.Unlocked() {
+		return errLocked
+	}
+	if secret.otpBounds != nil {
+		if !secret.otpBounds.Check(sample) {
+			return errExpired
+		}
+		// Native UI receives the last verified not-before sample, rather than
+		// the beginning of an OTP period that would permit a later rollback.
+		secret.from = secret.otpBounds.WallSample.UnixMilli()
+	}
+	return nil
 }
 func (v *Vault) active() (*personal.Session, uint64, error) {
 	v.mu.Lock()
@@ -204,12 +236,37 @@ func (v *Vault) active() (*personal.Session, uint64, error) {
 	}
 	return v.session, v.epoch, nil
 }
+
+func (v *Vault) enterOperation() (uint64, error) {
+	v.mu.Lock()
+	epoch, closed := v.epoch, v.closed
+	hook := v.operationQueued
+	v.mu.Unlock()
+	if closed {
+		return 0, errClosed
+	}
+	if hook != nil {
+		hook()
+	}
+	v.op.Lock()
+	v.mu.Lock()
+	cancelled := v.closed || v.epoch != epoch
+	v.mu.Unlock()
+	if cancelled {
+		v.op.Unlock()
+		return 0, errCancelled
+	}
+	return epoch, nil
+}
 func (v *Vault) Create(password, secretKey []byte) error {
 	defer clear(password)
 	defer clear(secretKey)
-	v.op.Lock()
+	epoch, e := v.enterOperation()
+	if e != nil {
+		return e
+	}
 	defer v.op.Unlock()
-	epoch, ctx, e := v.startLocked()
+	epoch, ctx, e := v.startLocked(epoch)
 	if e != nil {
 		return e
 	}
@@ -246,9 +303,12 @@ func (v *Vault) install(s *personal.Session, epoch uint64, ctx context.Context, 
 func (v *Vault) Unlock(password, secretKey []byte) error {
 	defer clear(password)
 	defer clear(secretKey)
-	v.op.Lock()
+	epoch, e := v.enterOperation()
+	if e != nil {
+		return e
+	}
 	defer v.op.Unlock()
-	epoch, ctx, e := v.startLocked()
+	epoch, ctx, e := v.startLocked(epoch)
 	if e != nil {
 		return e
 	}
@@ -268,7 +328,10 @@ type SystemUnlockStore interface {
 }
 
 func (v *Vault) EnableSystemUnlock(store SystemUnlockStore) error {
-	v.op.Lock()
+	_, e := v.enterOperation()
+	if e != nil {
+		return e
+	}
 	defer v.op.Unlock()
 	s, epoch, e := v.active()
 	if e != nil {
@@ -284,9 +347,12 @@ func (v *Vault) EnableSystemUnlock(store SystemUnlockStore) error {
 	return sanitized(e)
 }
 func (v *Vault) UnlockWithSystem(store SystemUnlockStore) error {
-	v.op.Lock()
+	epoch, e := v.enterOperation()
+	if e != nil {
+		return e
+	}
 	defer v.op.Unlock()
-	epoch, ctx, e := v.startLocked()
+	epoch, ctx, e := v.startLocked(epoch)
 	if e != nil {
 		return e
 	}
@@ -297,7 +363,10 @@ func (v *Vault) UnlockWithSystem(store SystemUnlockStore) error {
 	return v.install(s, epoch, ctx, e)
 }
 func (v *Vault) DisableSystemUnlock(store SystemUnlockStore) error {
-	v.op.Lock()
+	_, e := v.enterOperation()
+	if e != nil {
+		return e
+	}
 	defer v.op.Unlock()
 	v.mu.Lock()
 	closed := v.closed
@@ -335,7 +404,10 @@ func rowsResult(rows []personal.Row) *Rows {
 	return out
 }
 func (v *Vault) List(state string) (*Rows, error) {
-	v.op.Lock()
+	_, e := v.enterOperation()
+	if e != nil {
+		return nil, e
+	}
 	defer v.op.Unlock()
 	s, epoch, e := v.active()
 	if e != nil {
@@ -351,7 +423,10 @@ func (v *Vault) List(state string) (*Rows, error) {
 	return rowsResult(rows), nil
 }
 func (v *Vault) Search(query, state string) (*Rows, error) {
-	v.op.Lock()
+	_, e := v.enterOperation()
+	if e != nil {
+		return nil, e
+	}
 	defer v.op.Unlock()
 	s, epoch, e := v.active()
 	if e != nil {
@@ -376,7 +451,10 @@ func receipt(r personal.GenerationReceipt) *Receipt {
 	return &Receipt{r.ID, r.Revision, r.Profile.Length, r.Profile.EntropyBits}
 }
 func (v *Vault) mutation(work func(*personal.Session, *personal.MutationGate) (personal.GenerationReceipt, error)) (*Receipt, error) {
-	v.op.Lock()
+	_, e := v.enterOperation()
+	if e != nil {
+		return nil, e
+	}
 	defer v.op.Unlock()
 	s, epoch, e := v.active()
 	if e != nil {

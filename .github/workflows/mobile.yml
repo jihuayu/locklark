@@ -26,6 +26,10 @@ jobs:
           mobile/core/scripts/bind-android.sh
           mobile/android/scripts/build.sh
           python3 -m unittest discover -s mobile/android/scripts -p test_runtime_wrapper.py
+          python3 -m unittest discover -s scripts -p test_mobile_android_acceptance.py
+          go build -o "$RUNNER_TEMP/locklark-mobile-peer" ./cmd/locklark
+          python3 -m venv "$RUNNER_TEMP/mobile-kdbx-peer"
+          "$RUNNER_TEMP/mobile-kdbx-peer/bin/python" -m pip install 'pykeepass==4.2.0'
       - name: Enable emulator acceleration
         run: sudo chmod a+rw /dev/kvm
       - name: Run native Android application acceptance
@@ -36,7 +40,9 @@ jobs:
           arch: x86_64
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-snapshot
-          script: ANDROID_SERIAL=emulator-5554 LOCKLARK_ANDROID_TEST_RESET=1 mobile/android/scripts/test-emulator.sh
+          script: |
+            ANDROID_SERIAL=emulator-5554 LOCKLARK_ANDROID_TEST_RESET=1 mobile/android/scripts/test-emulator.sh
+            python3 scripts/mobile_android_acceptance.py --adb "$ANDROID_HOME/platform-tools/adb" --serial emulator-5554 --apk mobile/android/app/build/outputs/apk/debug/app-debug.apk --reset-test-app --cli "$RUNNER_TEMP/locklark-mobile-peer" --peer "$RUNNER_TEMP/mobile-kdbx-peer/bin/python"
   ios:
     runs-on: macos-latest
     timeout-minutes: 45

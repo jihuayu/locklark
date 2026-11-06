@@ -124,8 +124,8 @@ private struct RootView: View {
                     ForEach([("username", "显示用户名"), ("password", "显示密码"), ("notes", "显示备注"), ("otp-code", "显示验证码")], id: \.0) { field, title in
                         Button(title) { model.reveal(field: field) }.accessibilityIdentifier("show-\(field)").disabled(model.busy)
                     }
-                    if !model.revealed.isEmpty {
-                        Text(verbatim: model.revealed).font(.system(.body, design: .monospaced)).privacySensitive()
+                    if model.hasDisclosure {
+                        Text(verbatim: model.revealed.isEmpty ? "（空值）" : model.revealed).font(.system(.body, design: .monospaced)).privacySensitive()
                             .accessibilityLabel("本次显示值").accessibilityValue(model.revealed).accessibilityIdentifier("revealed-value")
                         Button("隐藏") { model.clearDisclosure() }.accessibilityIdentifier("hide-value")
                     }

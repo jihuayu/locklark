@@ -30,36 +30,21 @@ final class VaultModel: ObservableObject {
     @Published var generatePassword = false
 
     private let worker = DispatchQueue(label: "org.locklark.mobile.vault", qos: .userInitiated)
-    private let systemStore = NativeSystemUnlockStore()
     private var activeAuthentication: NativeSystemUnlockStore?
     private var boundary = SessionBoundary()
     private var operation = OperationBoundary()
+    private let cancellation = CancellationScope()
+    private var preparingStorage = false
     private var vault: LLVault?
     private var databaseURL: URL?
     private var disclosure: LLDisclosure?
-    private var budget: DisclosureBudget?
-    private var shownAt: ContinuousClock.Instant?
+    private var exposure = ExposureBoundary()
     private var expiryTask: Task<Void, Never>?
     private var idleTask: Task<Void, Never>?
+    var hasDisclosure: Bool { disclosure != nil }
 
     init() {
-        worker.async { [weak self] in
-            do {
-                let url = try VaultFiles.prepare()
-                let exists = FileManager.default.fileExists(atPath: url.path)
-                let handle = try LLVault.open(path: url.path)
-                DispatchQueue.main.async {
-                    guard let self else { return }
-                    self.databaseURL = url
-                    self.vault = handle
-                    self.hasVault = exists
-                    self.ready = true
-                    if !self.boundary.isActive { handle.requestLock() }
-                }
-            } catch {
-                DispatchQueue.main.async { self?.status = "无法启用本机受保护存储。" }
-            }
-        }
+        initializeStorage()
         idleTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1))
@@ -69,10 +54,55 @@ final class VaultModel: ObservableObject {
         }
     }
 
-    private func perform<T>(_ action: @escaping (LLVault) throws -> T, completion: @escaping (Result<T, Error>) -> Void) {
-        guard let vault else { status = "金库尚未准备好。"; return }
+    private func initializeStorage() {
+        guard !preparingStorage, vault == nil, boundary.isActive else { return }
+        preparingStorage = true
+        let ticket = cancellation.ticket()
+        worker.async { [weak self] in
+            do {
+                let (url, exists, handle) = try ticket.run {
+                    let url = try VaultFiles.prepare()
+                    try ticket.check()
+                    let exists = FileManager.default.fileExists(atPath: url.path)
+                    try ticket.check()
+                    let handle = try LLVault.open(path: url.path)
+                    return (url, exists, handle)
+                }
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    guard ticket.isCurrent, self.boundary.isActive else {
+                        handle.requestLock()
+                        self.worker.async { handle.close() }
+                        return
+                    }
+                    self.preparingStorage = false
+                    self.databaseURL = url
+                    self.vault = handle
+                    self.hasVault = exists
+                    self.ready = true
+                    if !self.boundary.isActive { handle.requestLock() }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    guard ticket.isCurrent, let self else { return }
+                    self.preparingStorage = false
+                    self.status = "无法启用本机受保护存储。"
+                }
+            }
+        }
+    }
+
+    private func perform<T>(_ action: @escaping (LLVault) throws -> T, cleanup: @escaping () -> Void = {}, completion: @escaping (Result<T, Error>) -> Void) {
+        performChecked({ vault, _ in try action(vault) }, cleanup: cleanup, completion: completion)
+    }
+
+    private func performChecked<T>(_ action: @escaping (LLVault, WorkTicket) throws -> T, cleanup: @escaping () -> Void = {}, completion: @escaping (Result<T, Error>) -> Void) {
+        guard let vault else { cleanup(); status = "金库尚未准备好。"; return }
+        let ticket = cancellation.ticket()
         worker.async {
-            let result: Result<T, Error> = autoreleasepool { Result { try action(vault) } }
+            let result: Result<T, Error> = autoreleasepool {
+                Result { try ticket.run(cleanup: cleanup) { try action(vault, ticket) } }
+            }
             DispatchQueue.main.async { completion(result) }
         }
     }
@@ -81,8 +111,8 @@ final class VaultModel: ObservableObject {
         covered = true
         boundary.resignActive()
         invalidateUI()
+        preparingStorage = false
         vault?.requestLock()
-        systemStore.keychain.cancelAuthentication()
         activeAuthentication?.keychain.cancelAuthentication()
         activeAuthentication = nil
         if let vault { worker.async { vault.lock() } }
@@ -91,6 +121,7 @@ final class VaultModel: ObservableObject {
     func sceneActive() {
         boundary.becomeActive()
         covered = false
+        if vault == nil { initializeStorage() } else if !unlocked { refreshPresence() }
         // Returning from a system prompt never automatically retries unlock.
     }
 
@@ -98,7 +129,6 @@ final class VaultModel: ObservableObject {
         boundary.lock()
         invalidateUI()
         vault?.requestLock()
-        systemStore.keychain.cancelAuthentication()
         activeAuthentication?.keychain.cancelAuthentication()
         activeAuthentication = nil
         if let vault { worker.async { vault.lock() } }
@@ -127,8 +157,7 @@ final class VaultModel: ObservableObject {
         expiryTask = nil
         disclosure?.clear() // Only a local NSMutableData buffer; no Go/disk call.
         disclosure = nil
-        budget = nil
-        shownAt = nil
+        exposure.cancel()
         revealed = ""
     }
 
@@ -155,8 +184,36 @@ final class VaultModel: ObservableObject {
     }
 
     private func cancelOperation() {
+        cancellation.invalidate()
         operation.cancel()
         busy = operation.isBusy
+    }
+
+    private func refreshPresence() {
+        guard let url = databaseURL else { return }
+        let ticket = cancellation.ticket()
+        worker.async { [weak self] in
+            do {
+                let exists = try ticket.run {
+                    let exists = FileManager.default.fileExists(atPath: url.path)
+                    if exists {
+                        try ticket.check()
+                        try VaultFiles.verifyProtection(directory: url.deletingLastPathComponent())
+                        try ticket.check()
+                        try VaultFiles.protect(directory: url.deletingLastPathComponent())
+                    }
+                    return exists
+                }
+                DispatchQueue.main.async { if ticket.isCurrent { self?.hasVault = exists } }
+            } catch {
+                DispatchQueue.main.async {
+                    guard ticket.isCurrent else { return }
+                    self?.lock()
+                    self?.ready = false
+                    self?.status = "本机文件保护检查失败。"
+                }
+            }
+        }
     }
 
     func generateAccountKey() {
@@ -174,28 +231,31 @@ final class VaultModel: ObservableObject {
               !password.isEmpty, password == confirmation,
               let attempt = boundary.beginUnlock(), let url = databaseURL else { return }
         do {
-            var passwordData = Data(password.utf8)
-            var key = try LLVault.parseSecretKey(generatedSecretKey)
+            let passwordData = NativeSecretBuffer(password)
+            let key = NativeSecretBuffer(data: try LLVault.parseSecretKey(generatedSecretKey))
             password = ""; confirmation = ""; generatedSecretKey = ""; backupAcknowledged = false
             let owner = beginOperation()
-            perform({ vault in
-                defer { passwordData.resetBytes(in: 0..<passwordData.count); key.resetBytes(in: 0..<key.count) }
-                try vault.create(password: passwordData, secretKey: key)
+            performChecked({ vault, ticket in
+                try vault.create(password: passwordData.data, secretKey: key.data)
+                try ticket.check()
                 try VaultFiles.verifyProtection(directory: url.deletingLastPathComponent())
+                try ticket.check()
                 try VaultFiles.protect(directory: url.deletingLastPathComponent())
-            }, completion: { [weak self] result in
+            }, cleanup: { passwordData.clear(); key.clear() }, completion: { [weak self] result in
                 guard let self else { return }
-                self.hasVault = FileManager.default.fileExists(atPath: url.path)
                 guard self.finishOperation(owner), self.boundary.finishUnlock(attempt) else { return }
                 self.boundary.lock()
                 self.unlocked = false
                 self.creatingVault = false
                 switch result {
-                case .success: self.status = "已创建加密金库。请使用两个完整因素解锁。"
+                case .success:
+                    self.hasVault = true
+                    self.status = "已创建加密金库。请使用两个完整因素解锁。"
                 case .failure(let error):
                     self.vault?.requestLock()
                     if error is PlatformProtectionError { self.ready = false }
                     self.status = "创建结果未确认，或本机文件保护检查失败；请检查金库后再操作。"
+                    if self.ready { self.refreshPresence() }
                 }
             })
         } catch { lock(); status = "Secret Key 格式无效。" }
@@ -204,16 +264,16 @@ final class VaultModel: ObservableObject {
     func unlockWithFactors() {
         guard hasVault, !busy, !password.isEmpty, let attempt = boundary.beginUnlock() else { return }
         do {
-            var passwordData = Data(password.utf8)
-            var key = try LLVault.parseSecretKey(secretKey)
+            let passwordData = NativeSecretBuffer(password)
+            let key = NativeSecretBuffer(data: try LLVault.parseSecretKey(secretKey))
             let directory = databaseURL?.deletingLastPathComponent()
             password = ""; secretKey = ""
             let owner = beginOperation()
-            perform({ vault in
-                defer { passwordData.resetBytes(in: 0..<passwordData.count); key.resetBytes(in: 0..<key.count) }
+            performChecked({ vault, ticket in
                 if let directory { try VaultFiles.verifyProtection(directory: directory) }
-                try vault.unlock(password: passwordData, secretKey: key)
-            }, completion: { [weak self] result in self?.finishUnlock(result, attempt: attempt, owner: owner) })
+                try ticket.check()
+                try vault.unlock(password: passwordData.data, secretKey: key.data)
+            }, cleanup: { passwordData.clear(); key.clear() }, completion: { [weak self] result in self?.finishUnlock(result, attempt: attempt, owner: owner) })
         } catch { lock(); status = "Secret Key 格式无效。" }
     }
 
@@ -223,8 +283,9 @@ final class VaultModel: ObservableObject {
         let store = NativeSystemUnlockStore()
         activeAuthentication = store
         let directory = databaseURL?.deletingLastPathComponent()
-        perform({ vault in
+        performChecked({ vault, ticket in
             if let directory { try VaultFiles.verifyProtection(directory: directory) }
+            try ticket.check()
             try vault.unlockWithSystem(store)
         }, completion: { [weak self] result in
             self?.finishUnlock(result, attempt: attempt, owner: owner)
@@ -250,11 +311,13 @@ final class VaultModel: ObservableObject {
     func configureQuickUnlock(enable: Bool) {
         guard let token = boundary.capture(), !busy else { return }
         let owner = beginOperation()
-        let store = systemStore
+        let store = NativeSystemUnlockStore()
+        activeAuthentication = store
         perform({ vault in
             if enable { try vault.enableSystemUnlock(store) } else { try vault.disableSystemUnlock(store) }
         }, completion: { [weak self] result in
             guard let self, self.finishOperation(owner), self.boundary.permits(token) else { return }
+            self.activeAuthentication = nil
             switch result {
             case .success: self.status = enable ? "已启用本机快速解锁，最多至本次完整解锁后 24 小时。" : "已移除本机快速解锁。"
             case .failure: self.status = "系统保护不可用或操作已取消；未使用较弱的存储方式。"
@@ -312,7 +375,7 @@ final class VaultModel: ObservableObject {
                     self.finishOperation(owner)
                     self.worker.async { handle.clear() }; return
                 }
-                self.perform({ _ in defer { handle.clear() }; return try handle.take() }, completion: { [weak self] taken in
+                self.perform({ _ in try handle.take() }, cleanup: { handle.clear() }, completion: { [weak self] taken in
                     guard let self else { return }
                     switch taken {
                     case .failure:
@@ -326,19 +389,20 @@ final class VaultModel: ObservableObject {
                         }
                         guard let text = String(data: value.data as Data, encoding: .utf8) else { value.clear(); return }
                         self.disclosure = value
-                        self.budget = budget
-                        self.shownAt = ContinuousClock.now
+                        let exposureOwner = self.exposure.begin()
+                        let started = ContinuousClock.now
                         self.revealed = VisibleText.secret(text)
                         self.status = "仅本次显示；验证码不会自动取下一期。"
                         self.expiryTask = Task { [weak self] in
                             while !Task.isCancelled {
-                                try? await Task.sleep(for: .milliseconds(100))
-                                guard let self, let started = self.shownAt, let budget = self.budget else { return }
+                                do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
+                                guard !Task.isCancelled, let self, self.exposure.owns(exposureOwner) else { return }
                                 let elapsed = started.duration(to: .now).components
                                 let milliseconds = elapsed.seconds * 1_000 + elapsed.attoseconds / 1_000_000_000_000_000
                                 if !self.boundary.permits(token) || self.vault?.isUnlocked() != true ||
                                     !budget.permits(wallNow: Self.wallNow(), elapsedMilliseconds: milliseconds) {
-                                    self.clearDisclosure(); return
+                                    if self.exposure.expire(exposureOwner) { self.clearDisclosure() }
+                                    return
                                 }
                             }
                         }
@@ -372,24 +436,22 @@ final class VaultModel: ObservableObject {
     func saveLogin() {
         guard creatingLogin, !busy, let token = boundary.capture(), !titleDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         let title = titleDraft, url = urlDraft, generate = generatePassword
-        var user = Data(usernameDraft.utf8), value = Data(passwordDraft.utf8)
+        let user = NativeSecretBuffer(usernameDraft), value = NativeSecretBuffer(passwordDraft)
         clearDrafts()
         creatingLogin = false
-        mutate(token: token) { vault in
-            defer { user.resetBytes(in: 0..<user.count); value.resetBytes(in: 0..<value.count) }
-            if generate { return try vault.generateLogin(title: title, url: url, username: user, length: 24) }
-            return try vault.createLogin(title: title, url: url, username: user, password: value)
+        mutate(token: token, cleanup: { user.clear(); value.clear() }) { vault in
+            if generate { return try vault.generateLogin(title: title, url: url, username: user.data, length: 24) }
+            return try vault.createLogin(title: title, url: url, username: user.data, password: value.data)
         }
     }
 
     func saveEdit() {
         guard let row = selected, let field = editingField, !busy, let token = boundary.capture() else { return }
-        var value = Data(editDraft.utf8)
+        let value = NativeSecretBuffer(editDraft)
         clearDrafts()
         editingField = nil
-        mutate(token: token) { vault in
-            defer { value.resetBytes(in: 0..<value.count) }
-            return try vault.edit(id: row.identifier, revision: row.revision, field: field, value: value)
+        mutate(token: token, cleanup: { value.clear() }) { vault in
+            return try vault.edit(id: row.identifier, revision: row.revision, field: field, value: value.data)
         }
     }
 
@@ -399,14 +461,19 @@ final class VaultModel: ObservableObject {
         mutate(token: token) { try $0.regenerate(id: row.identifier, revision: row.revision, length: 24) }
     }
 
-    private func mutate(token: ScreenToken, action: @escaping (LLVault) throws -> LLReceipt) {
+    private func mutate(token: ScreenToken, cleanup: @escaping () -> Void = {}, action: @escaping (LLVault) throws -> LLReceipt) {
         let owner = beginOperation()
         let directory = databaseURL?.deletingLastPathComponent()
-        perform({ vault in
+        performChecked({ vault, ticket in
             let receipt = try action(vault)
-            if let directory { try VaultFiles.verifyProtection(directory: directory); try VaultFiles.protect(directory: directory) }
+            if let directory {
+                try ticket.check()
+                try VaultFiles.verifyProtection(directory: directory)
+                try ticket.check()
+                try VaultFiles.protect(directory: directory)
+            }
             return receipt
-        }, completion: { [weak self] result in
+        }, cleanup: cleanup, completion: { [weak self] result in
             guard let self, self.finishOperation(owner), self.boundary.permits(token) else { return }
             switch result {
             case .success:

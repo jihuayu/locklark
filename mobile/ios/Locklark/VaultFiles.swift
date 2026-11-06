@@ -2,6 +2,22 @@ import Foundation
 
 enum VaultFiles {
     static func prepare(fileManager: FileManager = .default) throws -> URL {
+        try checked { try prepareUnchecked(fileManager: fileManager) }
+    }
+
+    static func protect(directory: URL, fileManager: FileManager = .default) throws {
+        try checked { try protectUnchecked(directory: directory, fileManager: fileManager) }
+    }
+
+    static func verifyProtection(directory: URL, fileManager: FileManager = .default) throws {
+        try checked { try verifyUnchecked(directory: directory, fileManager: fileManager) }
+    }
+
+    private static func checked<T>(_ action: () throws -> T) throws -> T {
+        do { return try action() } catch { throw PlatformProtectionError.storageDenied }
+    }
+
+    private static func prepareUnchecked(fileManager: FileManager) throws -> URL {
         let support = try fileManager.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
         let directory = support.appendingPathComponent("Locklark", isDirectory: true)
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.protectionKey: FileProtectionType.complete])
@@ -9,7 +25,7 @@ enum VaultFiles {
         return directory.appendingPathComponent("personal.ll", isDirectory: false)
     }
 
-    static func protect(directory: URL, fileManager: FileManager = .default) throws {
+    private static func protectUnchecked(directory: URL, fileManager: FileManager) throws {
         var urls = [directory]
         var enumerationFailed = false
         guard let enumerator = fileManager.enumerator(at: directory, includingPropertiesForKeys: [.isSymbolicLinkKey], options: [], errorHandler: { _, _ in enumerationFailed = true; return false }) else {
@@ -33,7 +49,7 @@ enum VaultFiles {
 
     // Called immediately after Go creates its database, before strengthening
     // existing attributes, to verify the actual native default on this OS.
-    static func verifyProtection(directory: URL, fileManager: FileManager = .default) throws {
+    private static func verifyUnchecked(directory: URL, fileManager: FileManager) throws {
         var enumerationFailed = false
         guard let enumerator = fileManager.enumerator(at: directory, includingPropertiesForKeys: [.isSymbolicLinkKey], errorHandler: { _, _ in enumerationFailed = true; return false }) else {
             throw PlatformProtectionError.storageDenied

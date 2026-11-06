@@ -63,6 +63,9 @@ final class PlatformProtectionTests: XCTestCase {
         store.cancelAuthentication()
         XCTAssertThrowsError(try store.load(id: "synthetic-capsule"))
         XCTAssertTrue(client.copied.isEmpty, "a cancelled native request must not open a new OS prompt")
+        XCTAssertThrowsError(try store.store(id: "synthetic-capsule", value: Data([1])))
+        XCTAssertTrue(client.added.isEmpty, "cancelled enrollment must not start OS storage")
+        XCTAssertNoThrow(try store.delete(id: "synthetic-capsule"), "stale enrollment cleanup must remain available")
     }
 
     func testVaultAndExistingSidecarsAreExcludedAndCompletelyProtected() throws {

@@ -25,6 +25,24 @@ their corresponding fixes:
   after an invalid password was refused. The signed event verifier had accepted
   `native-refused` only for notes and generation. It now accepts that result for
   the same six explicit native field actions allowed by the mutation gate.
+- A later concurrency review added two OTP grant regressions that failed:
+  rollback within the original period escaped the wrapper, and the exposed
+  native lower bound was the period start rather than the latest checked sample.
+  The final grant now rechecks the copied OTPBounds wall/monotonic observation
+  and exposes its last verified wall sample as FromUnixMilli.
+- Three queued lifecycle regressions failed: an old queued unlock adopted a new
+  epoch, an overtaking unlock remained installed when Lock returned, and an old
+  queued mutation used a freshly unlocked session. Operations now capture their
+  caller epoch before waiting for the worker mutex and recheck it afterwards;
+  Lock invalidates once more while it owns that mutex.
+
+Those five new review regressions passed together in 2.944s. The complete v2 core
+normal test suite passed in 10.212s and the complete v2 core race suite passed in
+88.963s (`GOMAXPROCS=2`, `-p 1`, `-count=1`). An independent reviewer repeated the
+five review regressions twice and cleared the updated concurrency design.
+Successful empty username/notes disclosures are covered;
+gomobile intentionally coalesces empty byte slices to native nil/null, so native
+adapters normalize that successful empty result without swallowing errors.
 
 The tests additionally cover both wrong unlock factors, encrypted offline
 persistence, stable IDs/revisions, stale mutations, Unicode title search,
@@ -50,11 +68,11 @@ the real API 30 AAR for arm64-v8a and x86_64. The local artifact and complete
 source hash manifest are ignored build outputs under `mobile/core/build`.
 The source manifest records its AAR SHA-256; APK acceptance must use that exact
 artifact or rebuild through the same pinned script.
-The final warm bind captured 88 transitive source/build inputs (83 platform
+The historical v1 warm bind captured 88 transitive source/build inputs (83 platform
 source files for each Android architecture), including go:embed payloads and
 binding script hashes. The tool verifies that source, module and installed
 binding-tool hashes match before and after binding; it excludes unrelated team
-sync code. Final AAR SHA-256:
+sync code. Historical v1 AAR SHA-256 (superseded by the v2 review fixes):
 `b1f336c36c25a839f40354327e60213ce48c6265c2a5a680e04ca0b5685dfefe`.
 
 The pinned `golang.org/x/mobile` version is
@@ -79,5 +97,14 @@ the production TTL nor existing browser tests were loosened for this increment.
 
 The complete personal normal regression passed separately with a 20-minute
 timeout (`go test ./internal/personal -timeout=20m -count=1`, 369.975s).
+The authorized repo-wide normal run also passed all 35 package statuses with
+`GOMAXPROCS=2 go test -p 1 -count=1 ./... -timeout=20m` and explicit Bun/PyKeePass
+paths (personal 275.009s, then-current core 7.087s). That run started before the
+later v2 review fixes; its core binary did not include the deliberately failing
+new regressions. It is baseline repo-wide evidence, not a final v2 tree run.
+After the v2 fixes, repo-wide `go vet -p 1 ./...` passed and `go mod verify`
+reported `all modules verified`. Full logs, genuine red logs, and the explicit
+baseline-versus-v2 coverage note are under `/tmp/locklark-validation` in the
+validation workspace; those private runtime artifacts are not repository files.
 Native system authentication, non-migrating Keychain/Keystore keys,
 backup exclusion and real-device install remain platform acceptance work.

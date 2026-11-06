@@ -2,3 +2,4 @@ Build/
 Locklark.xcodeproj/
 .DS_Store
 SecurityLogic/.build/
+__pycache__/

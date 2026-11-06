@@ -138,30 +138,92 @@ func readSequencer() (ed25519.PrivateKey, error) {
 		return nil, errCommand
 	}
 	defer console.Close()
+	output := io.Writer(console)
+	if runtime.GOOS == "windows" {
+		output = os.Stderr
+	}
+	return readSequencerTerminal(console, output)
+}
+
+func readSequencerTerminal(console *os.File, output io.Writer) (key ed25519.PrivateKey, err error) {
 	if !term.IsTerminal(int(console.Fd())) {
 		return nil, errCommand
 	}
-	if runtime.GOOS == "windows" {
-		fmt.Fprint(os.Stderr, "Sequencer signing seed (64 lowercase hex; hidden): ")
-	} else {
-		fmt.Fprint(console, "Sequencer signing seed (64 lowercase hex; hidden): ")
+	ctx, stop := signal.NotifyContext(context.Background(), terminalSignals()...)
+	defer stop()
+	// Hide input before emitting any visible readiness/prompt signal. ReadPassword
+	// would disable echo only after the prompt, exposing an immediate paste.
+	state, e := term.MakeRaw(int(console.Fd()))
+	if e != nil {
+		return nil, errCommand
 	}
-	raw, e := term.ReadPassword(int(console.Fd()))
+	var restoreInput func() error
+	defer func() {
+		failed := false
+		if restoreInput != nil && restoreInput() != nil {
+			failed = true
+		}
+		if term.Restore(int(console.Fd()), state) != nil {
+			failed = true
+			// A failed restore never permits startup. Retry on the original FD,
+			// then the same controlling terminal, without reading another secret.
+			_ = term.Restore(int(console.Fd()), state)
+			name := "/dev/tty"
+			if runtime.GOOS == "windows" {
+				name = "CONIN$"
+			}
+			if f, e := os.OpenFile(name, os.O_RDWR, 0); e == nil {
+				_ = term.Restore(int(f.Fd()), state)
+				_ = f.Close()
+			}
+		}
+		if failed {
+			clear(key)
+			key = nil
+			err = errCommand
+		}
+	}()
+	read, restore, e := prepareTerminalInput(console)
+	if e != nil {
+		return nil, errCommand
+	}
+	restoreInput = restore
+	if _, e = fmt.Fprint(output, "Sequencer signing seed (64 lowercase hex; hidden): "); e != nil {
+		return nil, errCommand
+	}
+	defer fmt.Fprint(output, "\r\n")
+	raw := make([]byte, 0, 64)
 	defer clear(raw)
-	if runtime.GOOS == "windows" {
-		fmt.Fprintln(os.Stderr)
-	} else {
-		fmt.Fprintln(console)
+	for {
+		ch, e := read(ctx)
+		if e != nil {
+			return nil, errCommand
+		}
+		switch ch {
+		case '\r', '\n':
+			if len(raw) != 64 {
+				return nil, errCommand
+			}
+			seed := make([]byte, 32)
+			defer clear(seed)
+			if _, e = hex.Decode(seed, raw); e != nil {
+				return nil, errCommand
+			}
+			return ed25519.NewKeyFromSeed(seed), nil
+		case 3, 4, 27:
+			return nil, errCommand
+		case 8, 127:
+			if len(raw) > 0 {
+				raw[len(raw)-1] = 0
+				raw = raw[:len(raw)-1]
+			}
+		default:
+			if len(raw) >= 64 || !(ch >= '0' && ch <= '9' || ch >= 'a' && ch <= 'f') {
+				return nil, errCommand
+			}
+			raw = append(raw, ch)
+		}
 	}
-	if e != nil || len(raw) != 64 {
-		return nil, errCommand
-	}
-	seed := make([]byte, 32)
-	defer clear(seed)
-	if _, e = hex.Decode(seed, raw); e != nil || hex.EncodeToString(seed) != string(raw) {
-		return nil, errCommand
-	}
-	return ed25519.NewKeyFromSeed(seed), nil
 }
 func run(args []string, out io.Writer) error {
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "help") {

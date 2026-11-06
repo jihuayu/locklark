@@ -1,6 +1,6 @@
 import base64
 import unittest
-from test_emulator import scan_output, complete_pass, RuntimeFailure
+from test_emulator import scan_output, complete_pass, RuntimeFailure, safe_diagnostic
 
 
 class RuntimeWrapperTests(unittest.TestCase):
@@ -9,6 +9,15 @@ class RuntimeWrapperTests(unittest.TestCase):
         self.assertTrue(complete_pass(0, passed))
         for code, raw in ((1, passed), (0,b"INSTRUMENTATION_CODE: -1"), (0,passed+b"FAILURES!!!"), (0,passed.replace(b"1 test",b"0 tests")), (0,passed+b"Process crashed")):
             self.assertFalse(complete_pass(code, raw))
+
+    def test_diagnostic_returns_only_fixed_classes_steps_and_source_integers(self):
+        raw = b"INSTRUMENTATION_STATUS: locklark_stage=create\njava.lang.AssertionError: private-field-contents\nat org.locklark.android.OfflineVaultTest.run(OfflineVaultTest.kt:123)\nTests run: 1"
+        result = safe_diagnostic(raw)
+        self.assertEqual(result["step"], "create")
+        self.assertEqual(result["own_source_line"], 123)
+        self.assertEqual(result["tests_run"], 1)
+        self.assertNotIn("private-field-contents", str(result))
+        self.assertEqual(safe_diagnostic(b"INSTRUMENTATION_STATUS: locklark_stage=private-field-contents")["step"], "unknown")
 
     def test_even_failed_test_output_must_be_scanned(self):
         values = ["master-fixture", "account-fixture", "username-fixture", "password-fixture", "line one private\nline two private"]

@@ -23,11 +23,11 @@ python3 scripts/team_sync_acceptance.py --fixture-bin /tmp/locklark-validation/t
 
 移动门面复用真实个人库，会话、双因素、生成、精确修订编辑和披露均不是 fake 仓库。最初 API 缺失导致编译失败，只算 compile red；后续实际行为失败包括锁定已胜出但旧最终检查仍交出复制值、字段 handle 在 Take 前预读并记秘密意图、Clear 等待阻塞的 Take，以及拒绝一般字段编辑后审计校验器不认识对应 native-refused。均保存具体失败并修复：最终短授权与 RequestLock 同锁仲裁，字段在 Take 内新事务读取，Clear 即时取消并异步清理，审计允许的动作仍是固定六种字段。
 
-Luna 独立运行移动字段延迟披露/另一会话旧修订拒绝、Clear 与交付竞争、锁定与交付先后、OTP 时限与审计等定向测试，5.406s通过；当前核心无剩余阻塞，原生 UI 的迟到回调仍必须核对自身前台/选择代次。Sol 的移动及新增原生编辑定向 race 通过（core69.996s、personal16.383s）。一次更宽的 mobile/core+整个personal race 因旧浏览器 OTP 1秒控制窗口与测试负载发生到期拒绝，并在默认10分钟时限内仍运行 PBKDF 而超时；该轮没有完成，不计为全包 race 成功。原完整输出在工具会话70635，私有文件 `personal-race-failure-excerpt.log` 只有明确标注的摘录，不能冒充完整日志。随后完整 personal normal 回归在20分钟时限内通过（369.975s，`personal-normal-final.log`），不能据此把失败的宽范围race补记为成功。
+Luna 独立运行移动字段延迟披露/另一会话旧修订拒绝、Clear 与交付竞争、锁定与交付先后、OTP 时限与审计等定向测试，5.406s通过；这是当时的定向结果，随后复核又发现 OTP 最终授权和排队操作的边界，见下文；原生 UI 迟到回调仍必须核对自身前台/选择代次。Sol 的移动及新增原生编辑定向 race 通过（core69.996s、personal16.383s）。一次更宽的 mobile/core+整个personal race 因旧浏览器 OTP 1秒控制窗口与测试负载发生到期拒绝，并在默认10分钟时限内仍运行 PBKDF 而超时；该轮没有完成，不计为全包 race 成功。原完整输出在工具会话70635，私有文件 `personal-race-failure-excerpt.log` 只有明确标注的摘录，不能冒充完整日志。随后完整 personal normal 回归在20分钟时限内通过（369.975s，`personal-normal-final.log`），不能据此把失败的宽范围race补记为成功。
 
-最终移动核心经Luna复核后冻结并重新绑定，AAR SHA256 `b1f336c36c25a839f40354327e60213ce48c6265c2a5a680e04ca0b5685dfefe`，88项实际平台传递源码/嵌入资源及构建工具清单在构建前后完全一致，产物保留 `/tmp/locklark-tools/mobile/core-final/`。
+第一轮移动核心冻结并绑定，AAR SHA256 `b1f336c36c25a839f40354327e60213ce48c6265c2a5a680e04ca0b5685dfefe`，88项实际平台传递源码/嵌入资源及构建工具清单在构建前后完全一致，产物保留 `/tmp/locklark-tools/mobile/core-final/`。
 
-Android 已安装固定 JDK/SDK/NDK 并以真实 AAR 编译原生应用；软件 TCG 模拟器无 KVM，启动及真实 UI 结果仍待核验。iOS 纯 Swift 逻辑从实际 runtime red 修复后通过，Swift/Objective-C 真实绑定、Keychain 和应用工程仍须 macOS SDK 编译及模拟器检查。所有 runtime 日志私有保存，CI 只输出固定分类，禁止上传含因素/正文的日志、截图或 xcresult。生成物的源码清单需包括实际平台传递依赖和 go:embed 输入，不能用整个仍在变化的工作树清单冒充冻结构建。
+Android 已安装固定 JDK/SDK/NDK 并以真实 AAR 编译原生应用。软件 TCG 模拟器虽后来报告 boot_completed=1，但安装时 package 服务不存在，未进入应用，不计 UI 通过。iOS 纯 Swift 逻辑从实际 runtime red 修复后通过；第一轮 macOS CI 的真实 XCFramework 绑定、XcodeGen 和纯逻辑均通过，随后模拟器型号与 runtime 不兼容，尚未进入应用 SDK 编译/XCTest。所有 runtime 日志私有保存，CI 只输出固定分类，禁止上传含因素/正文的日志、截图或 xcresult。生成物的源码清单需包括实际平台传递依赖和 go:embed 输入，不能用整个仍在变化的工作树清单冒充冻结构建。
 
 ## 尚未关闭
 
@@ -36,3 +36,13 @@ Android 已安装固定 JDK/SDK/NDK 并以真实 AAR 编译原生应用；软件
 ## 提前草稿 CI
 
 全仓编译探针 `go test ./... -run '^$' -timeout=5m` 通过（不计作测试运行），当前 main 核对仍为 `9d8d574`。准备草稿 PR 以获得 Linux 无法提供的真实 Apple SDK/模拟器，以及有硬件加速的 Android CI；这早于完整平台验收和最终审阅。所有待办在最终精确提交通过前均保留，不据草稿编译认定可合并。
+
+## 第二轮复核与独立服务命令验收
+
+Luna 复核和确定性测试发现：OTP 原生交付后到门面最终授权之间的同周期回拨未再次校验；外露 From 仍为周期起点；旧解锁/修改可在等待串行锁时越过 RequestLock 使用新会话；Lock 等待期间被另一解锁超越后可能返回未锁定。旧行为五项实际失败记录在 `mobile-otp-grant-red.log` 和 `mobile-queued-lifecycle-red.log`。修复为复制原 OTPBounds 并在最终短授权再次 Check、From 使用最新成功授权时间、进入队列前捕获会话代次并在获取工作锁后复核、Lock 持工作锁后二次失效。当前五项通过（2.944s），核心整包 normal 通过（10.212s），最终 race/绑定和两端运行仍待完成。第一轮 AAR 现在是历史候选，不能代表这些新增修复。
+
+两端工作队列还须在真正开始 Go/系统操作前检查线程安全的取消凭证，避免切后台之后才开始旧解锁；所有拒绝路径仍清理输入因素。Android 旧策略的阻塞工作队列测试实际失败，修复后 JVM 策略测试通过；两端集成和最终平台验收仍在继续。
+
+主代理对冻结的生产 `locklark-team-sync` 命令做独立 PTY+TLS 验收，完整通过：prompt 可见时 ECHO/ICANON 已关闭、立即粘贴合法 seed 无回显、服务就绪前恢复原终端状态、真实 pinned owner 通过生产 TLS 服务读取、错误 seed/短输入/Ctrl-C 拒绝、等待输入时 SIGTERM/SIGHUP 恢复终端、无控制终端与 argv seed 拒绝、完整输出私钥 canary 零命中。私有证据 `team-cli-parent-y52x80gm/result.json`，独立构建二进制 SHA256 `155d15a686f4c600e73d57db12f4e56a4ce0c6dafc116a000fdf834d63ddc3f4`；23项产品/依赖清单 `team-sync-cli-core-candidate1.sha256` 前后通过，清单 SHA256 `e557d5c03d6b8fafd72467cd26e2b3c747c61afd510ced69f1a1127c20df9b1e`。Luna 独立复核当前 CLI 无剩余阻塞，并重跑完整终端恢复测试通过。
+
+全仓正常回归使用 Go1.27.3、Bun1.4.4、PyKeePass4.2.0，`go test -p 1 -count=1 ./... -timeout=20m` 35个包状态通过，日志 `team-mobile-full-go.log`。该轮核心编译早于第二轮修复，不冒充最终冻结源码的全仓结果。草稿 PR [#37](https://github.com/jihuayu/locklark/pull/37) 在 `0094325` 的 Linux、Windows、macOS 桌面和 Web 四组 CI 通过；Android 构建通过但运行验收在 complete-test-count 失败，iOS 在模拟器选择失败。两项移动 CI 失败都须修复后在新精确提交重跑，未满足合并条件。

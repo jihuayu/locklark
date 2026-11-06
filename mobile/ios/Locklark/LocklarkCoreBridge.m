@@ -33,8 +33,11 @@
 @end
 @implementation LLSecretHandle
 - (LLDisclosure *)takeAndReturnError:(NSError **)error {
-    NSData *raw = [_core take:error];
-    if (!raw) return nil;
+    NSError *failure = nil;
+    NSData *raw = [_core take:&failure];
+    if (failure) { if (error) *error = failure; return nil; }
+    // gomobile maps successful zero-length Go slices to nil NSData.
+    if (!raw) raw = [NSData data];
     LLDisclosure *value = [LLDisclosure new];
     value.data = [raw mutableCopy];
     value.fromUnixMilli = [_core fromUnixMilli];

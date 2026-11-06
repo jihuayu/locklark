@@ -39,7 +39,7 @@ ParseSecretKey(text string) ([]byte, error)
 // Receipt exported metadata fields: ID, Revision, Length, EntropyBits.
 (*SecretValue).Take() ([]byte, error) // explicit, one-use disclosure
 (*SecretValue).UntilUnixMilli() int64 // display deadline; read AFTER Take
-(*SecretValue).FromUnixMilli() int64 // reject display if wall clock moves below it
+(*SecretValue).FromUnixMilli() int64 // latest verified grant wall sample, not OTP period start
 (*SecretValue).Clear()
 
 type SystemUnlockStore interface {
@@ -56,7 +56,11 @@ Revision checks are mandatory. Edit UI begins blank; disclosure is a separate
 explicit action. Native UI must match its own captured generation before calling
 Take, clear secret buffers and visible text on selection/background/lock, and
 honor UntilUnixMilli (at most 15 seconds after delivery; OTP clips to its actual
-window). Take rechecks vault generation and OTP validity/target revision. It may
+window). FromUnixMilli is the latest validated final-grant wall sample rather
+than the OTP period start. Render must refuse a wall clock below that sample,
+including rollback within the same OTP period. The final grant preserves and
+rechecks the core OTPBounds wall/monotonic checks. Take rechecks vault generation
+and OTP validity/target revision. It may
 perform authenticated disk work; do not block the UI waiting for its result.
 RevealField itself creates a metadata-only handle. Take obtains the value in a
 fresh exact-revision authenticated transaction and records its one disclosure
@@ -65,10 +69,20 @@ another independent process cannot retract a delivery that has already begun.
 After all blocking work, a short wrapper grant shares the RequestLock mutex.
 Lock before this grant refuses bytes; a grant before lock begins delivery and
 the native UI must discard its result if its captured generation is stale.
+An empty username or notes value is a successful empty disclosure. Pinned
+gomobile maps a zero-length Go byte slice to nil NSData/null Java byte[]. Native
+adapters normalize that value to empty bytes only when no NSError/exception was
+returned; they preserve all disclosure failures and one-use semantics.
 
 The app must call RequestLock immediately when inactive, before a queued worker
 can finish. A late unlock or OS callback cannot reopen the vault. Cancellation
-that wins before the mutation commit gate rolls back the write. If persistence
+also invalidates operations already waiting for the Go worker mutex: they bind
+to their caller epoch before waiting and cannot adopt a freshly unlocked session.
+Native worker closures must separately check their captured UI token before
+calling Go, so a closure queued before background cannot start a new Go request
+after background. Blocking Lock invalidates again after taking the worker mutex
+and returns locked even if an explicit unlock overtook its mutex wait.
+Cancellation that wins before the mutation commit gate rolls back the write. If persistence
 wins but its final result cannot be confirmed, the error says the outcome is
 unknown; inspect the vault before retrying. Creating a database may complete
 while cancellation occurs and then reports an unknown result, leaving it locked.
@@ -77,8 +91,11 @@ SystemUnlockStore is the trusted native Keychain/Keystore adapter. It protects
 the existing audited, path/slot-bound identity capsule with authenticated local
 OS access, never stores password/Secret Key, and never falls back to plaintext.
 The capsule expires 24 hours after the original complete two-factor unlock.
-The callback runs outside wrapper locks and must fail when native authentication
-is cancelled. Native storage excludes database, capsule, account Secret Key,
+Callbacks run outside the short wrapper state mutex; OS operations are serialized
+by the worker gate and the personal system-unlock gate. They must not reenter
+blocking Vault operations. RequestLock never waits for either worker/OS gate.
+Callbacks must fail when native authentication is cancelled.
+Native storage excludes database, capsule, account Secret Key,
 and device keys from cloud backup; local encryption keys cannot migrate devices.
 
 The wrapper is exclusively a personal offline vault. It has no network upload

@@ -30,6 +30,7 @@ class OfflineVaultTest {
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
     private val canaries = mutableListOf<String>()
     private lateinit var scenario: ActivityScenario<MainActivity>
+    private fun stage(value: String) { instrumentation.sendStatus(0, android.os.Bundle().apply { putString("locklark_stage", value) }) }
     private fun record(value: String): String {
         canaries.add(value)
         File(instrumentation.targetContext.cacheDir, "instrumentation-canaries.json").writeText(JSONArray(canaries).toString())
@@ -54,7 +55,10 @@ class OfflineVaultTest {
         }
         assertTrue(message, false)
     }
-    private fun ready(tag: String) = view(tag)?.isEnabled == true
+    private fun ready(tag: String): Boolean {
+        val current = view(tag)
+        return current?.isEnabled == true && current.isLaidOut && current.width > 0 && current.height > 0
+    }
     private fun click(tag: String) {
         waitFor("Native control unavailable", { ready(tag) })
         scenario.onActivity { activity ->
@@ -77,6 +81,7 @@ class OfflineVaultTest {
         scenario.onActivity { (it.window.decorView.findViewWithTag<View>(tag) as EditText).apply { requestFocus(); text.clear() } }
         // Full factors go through native keyboard events. Unicode note input
         // uses the native Editable in the test APK, never a product endpoint.
+        if (value.isEmpty()) return
         if (value.all { it.code in 32..126 }) instrumentation.sendStringSync(value)
         else scenario.onActivity { (it.window.decorView.findViewWithTag<View>(tag) as EditText).setText(value) }
         instrumentation.waitForIdleSync()
@@ -124,50 +129,59 @@ class OfflineVaultTest {
                 assertTrue("Secure window required", it.window.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE != 0)
                 assertTrue("Backup must be disabled", it.applicationInfo.flags and ApplicationInfo.FLAG_ALLOW_BACKUP == 0)
             }
-            click("generate-account-key")
+            stage("create"); click("generate-account-key")
             waitFor("Account key unavailable") { text("backup-secret-key").startsWith("LL") }
             val key = record(text("backup-secret-key"))
             enter("new-master-password",master); enter("repeat-master-password",master)
             click("backup-ack"); click("create-vault")
             waitFor("New vault list unavailable") { ready("new-login") }
-            click("new-login")
+            stage("add-login"); click("new-login")
             enter("login-title","Android first"); enter("login-url","https://android.locklark.test/login")
-            enter("login-username",username); enter("login-password",password)
-            click("generate-password"); click("save-login"); select("Android first")
-            assertTrue("Exact password mismatch", shown("show-password") == password)
+            enter("login-username",username); click("generate-password"); enter("login-password",password)
+            click("save-login"); select("Android first")
+            stage("show-password"); assertTrue("Exact password mismatch", shown("show-password") == password)
             click("hide-secret"); assertTrue("Explicit hide failed", text("secret-value").isEmpty())
-            edit(3,changed); select("Android first")
+            stage("edit-password"); edit(3,changed); select("Android first")
             assertTrue("Edited password mismatch", shown("show-password") == changed)
-            edit(5,notes); select("Android first")
+            stage("edit-notes"); edit(5,notes); select("Android first")
             assertTrue("Unicode notes mismatch", shown("show-notes") == notes)
-            edit(4,seed); select("Android first")
+            stage("empty-fields")
+            edit(2,""); select("Android first"); click("show-username")
+            waitFor("Successful empty username must be explicit") { text("status").startsWith("字段为空") }
+            assertTrue("Empty username rendered data", text("secret-value").isEmpty())
+            edit(2,username); select("Android first")
+            edit(5,""); select("Android first"); click("show-notes")
+            waitFor("Successful empty notes must be explicit") { text("status").startsWith("字段为空") }
+            assertTrue("Empty notes rendered data", text("secret-value").isEmpty())
+            edit(5,notes); select("Android first")
+            stage("edit-otp"); edit(4,seed); select("Android first")
             // An explicit OTP click begins well inside one original period.
             while (System.currentTimeMillis()/1000%30 > 8) SystemClock.sleep(200)
-            val before = System.currentTimeMillis()/30_000
+            stage("show-otp"); val before = System.currentTimeMillis()/30_000
             val code = record(shown("show-otp"))
             val after = System.currentTimeMillis()/30_000
             assertTrue("Independent HMAC mismatch", (before..after).any { code == hmacCode(it) })
-            click("back-to-list"); enter("query","Android first"); click("search"); select("Android first")
-            click("edit-login"); enter("edit-value","Uncommitted-$random"); click("cancel-edit")
+            stage("search"); click("back-to-list"); enter("query","Android first"); click("search"); select("Android first")
+            stage("cancel-edit"); click("edit-login"); enter("edit-value","Uncommitted-$random"); click("cancel-edit")
             assertTrue("Cancel changed password", shown("show-password") == changed)
-            click("back-to-list"); click("new-login")
+            stage("generate-login"); click("back-to-list"); click("new-login")
             enter("login-title","Android generated"); enter("login-username",username)
             click("save-login"); select("Android generated")
             val generated = record(shown("show-password"))
             assertTrue("Generated password shape", generated.matches(Regex("[A-Za-z0-9]{24}")))
-            click("regenerate-password"); enter("regenerate-length","22"); click("confirm-regenerate"); select("Android generated")
+            stage("regenerate"); click("regenerate-password"); enter("regenerate-length","22"); click("confirm-regenerate"); select("Android generated")
             val regenerated = record(shown("show-password"))
             assertTrue("Exact regeneration failed", regenerated.length == 22 && regenerated != generated)
             click("back-to-list"); select("Android first")
-            assertTrue("Regeneration changed wrong target", shown("show-password") == changed)
+            stage("exact-target"); assertTrue("Regeneration changed wrong target", shown("show-password") == changed)
             click("back-to-list")
             val context = instrumentation.targetContext
             if (!context.getSystemService(KeyguardManager::class.java).isDeviceSecure) {
-                click("enable-quick-unlock")
+                stage("platform-auth-refusal"); click("enable-quick-unlock")
                 waitFor("Unsupported device auth did not refuse") { text("status").startsWith("操作未完成") }
                 assertTrue("No plaintext fallback capsule", File(context.noBackupFilesDir,"device-unlock").listFiles()?.none { it.name.endsWith(".capsule") } != false)
             }
-            select("Android first"); shown("show-password")
+            stage("background-lock"); select("Android first"); shown("show-password")
             instrumentation.uiAutomation.executeShellCommand("input keyevent KEYCODE_HOME").close()
             SystemClock.sleep(500)
             scenario.close()
@@ -175,10 +189,10 @@ class OfflineVaultTest {
             waitFor("Background must lock", { ready("unlock") })
             assertTrue("Background retained secret", text("secret-value").isEmpty())
             enter("master-password",master); enter("secret-key",key); click("unlock"); select("Android first")
-            assertTrue("Disk reopen changed secret", shown("show-password") == changed)
+            stage("reopen"); assertTrue("Disk reopen changed secret", shown("show-password") == changed)
             click("lock"); waitFor("Explicit lock failed") { ready("unlock") }
             assertTrue("Lock retained disclosure", text("secret-value").isEmpty())
-            enter("master-password",master); enter("secret-key",key); click("unlock")
+            stage("late-unlock"); enter("master-password",master); enter("secret-key",key); click("unlock")
             instrumentation.uiAutomation.executeShellCommand("input keyevent KEYCODE_HOME").close()
             scenario.close()
             scenario = ActivityScenario.launch(MainActivity::class.java)
