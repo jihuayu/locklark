@@ -13,6 +13,8 @@ import time
 
 
 CONTROL_LABELS = (
+    "连接并启用快捷填充", "验证主密码", "验证 Secret Key", "创建新登录并保存 Passkey",
+    "取消 / 使用其他验证器", "登录：login.locklark.test · passkey-test · passkey-test",
     "金库文件", "主密码", "Secret Key", "解锁", "确认连接此扩展",
     "拒绝连接", "批准本次填充", "拒绝本次填充", "立即锁定",
     "批准填充验证码", "拒绝填充验证码",

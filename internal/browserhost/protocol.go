@@ -37,6 +37,7 @@ var token = regexp.MustCompile(`^[a-f0-9]{32}$`)
 var revision = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
 type Request struct {
+	Options    string `json:"options,omitempty"`
 	payload    *savePayload
 	WindowID   int64  `json:"window_id,omitempty"`
 	RequestID  string `json:"request_id,omitempty"`
@@ -62,7 +63,12 @@ func (r Request) valid() bool {
 	if r.Type != "save-new" && r.Type != "save-update" && r.Type != "commit-ready" && r.Type != "cancel-save" && r.Type != "otp" && r.Type != "otp-ack" && r.Type != "cancel-otp" && (r.payload != nil || r.WindowID != 0 || r.RequestID != "" || r.Nonce != "") {
 		return false
 	}
+	if r.Type != "passkey-create" && r.Type != "passkey-get" && r.Options != "" {
+		return false
+	}
 	switch r.Type {
+	case "passkey-create", "passkey-get":
+		return token.MatchString(r.Capability) && r.Context().Valid() && r.ItemID == "" && r.Revision == "" && len(r.Options) > 0 && len(r.Options) <= 32768 && strictUnicode([]byte(r.Options))
 	case "otp":
 		return token.MatchString(r.Capability) && r.OTPContext().Valid() && token.MatchString(r.ItemID) && revision.MatchString(r.Revision) && r.payload == nil && r.RequestID == "" && r.Nonce == ""
 	case "otp-ack", "cancel-otp":
@@ -87,6 +93,8 @@ func (r Request) valid() bool {
 }
 
 type Response struct {
+	Credential string         `json:"credential,omitempty"`
+	QuickFill  bool           `json:"quick_fill,omitempty"`
 	Code       string         `json:"code,omitempty"`
 	Nonce      string         `json:"nonce,omitempty"`
 	ItemID     string         `json:"item_id,omitempty"`
@@ -109,6 +117,12 @@ func (r Response) MarshalJSON() ([]byte, error) {
 		return nil, ErrProtocol
 	}
 	r.Code = ""
+	if r.Type != "passkey-result" {
+		r.Credential = ""
+	}
+	if r.Type != "paired" {
+		r.QuickFill = false
+	}
 	if r.Type == "otp-ready" {
 		return json.Marshal(struct {
 			V     int    `json:"v"`
@@ -269,6 +283,7 @@ func ReadRequest(reader io.Reader) (Request, error) {
 		return Request{}, ErrProtocol
 	}
 	var wire struct {
+		Options    string  `json:"options"`
 		V          int     `json:"v"`
 		ID         string  `json:"id"`
 		Type       string  `json:"type"`
@@ -289,7 +304,7 @@ func ReadRequest(reader io.Reader) (Request, error) {
 	if dec.Decode(&wire) != nil {
 		return Request{}, ErrProtocol
 	}
-	r := Request{V: wire.V, ID: wire.ID, Type: wire.Type, Capability: wire.Capability, Origin: wire.Origin, TabID: wire.TabID, DocumentID: wire.DocumentID, WindowID: wire.WindowID, ItemID: wire.ItemID, Revision: wire.Revision, RequestID: wire.RequestID, Nonce: wire.Nonce}
+	r := Request{Options: wire.Options, V: wire.V, ID: wire.ID, Type: wire.Type, Capability: wire.Capability, Origin: wire.Origin, TabID: wire.TabID, DocumentID: wire.DocumentID, WindowID: wire.WindowID, ItemID: wire.ItemID, Revision: wire.Revision, RequestID: wire.RequestID, Nonce: wire.Nonce}
 	if wire.Username != nil && wire.Password != nil {
 		r.payload = &savePayload{[]byte(*wire.Username), []byte(*wire.Password)}
 	}
@@ -298,6 +313,8 @@ func ReadRequest(reader io.Reader) (Request, error) {
 	case "hello":
 	case "cancel":
 		expected = append(expected, "capability")
+	case "passkey-create", "passkey-get":
+		expected = append(expected, "capability", "origin", "tab_id", "document_id", "options")
 	case "match", "fill", "save-new", "save-update", "otp":
 		expected = append(expected, "capability", "origin", "tab_id", "document_id")
 		if r.Type == "fill" || r.Type == "save-update" || r.Type == "otp" {

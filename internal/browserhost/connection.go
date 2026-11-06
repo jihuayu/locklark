@@ -15,6 +15,9 @@ type Pending struct {
 	Until                               time.Time
 }
 type View struct {
+	Passkey                 *PasskeyView
+	PasskeyStatus           string
+	QuickFill               bool
 	OTP                     *OTPView
 	OTPStatus, OTPRequestID string
 	Save                    *SaveView
@@ -27,6 +30,9 @@ type View struct {
 	Busy                    bool
 }
 type Connection struct {
+	passkey, passkeyAuth    *pendingPasskey
+	passkeyStatus           string
+	quickFill               bool // chosen in the native pairing UI, never by a web page
 	otp, otpAuth            *pendingOTP
 	otpRetired              map[string]otpRetired
 	otpStatus, otpRequestID string
@@ -84,6 +90,13 @@ func (c *Connection) refuse(id string) error {
 	return c.response(Response{ID: id, Type: "error", Error: "refused"})
 }
 func (c *Connection) invalidate() {
+	c.quickFill = false
+	if c.passkey != nil {
+		if c.passkey.gate.CommitWon() {
+			c.passkeyStatus = "Passkey 结果未确认；请核实网站与金库"
+		}
+		c.clearPasskey(c.passkey)
+	}
 	c.invalidateOTP()
 	if c.save != nil {
 		if !c.save.gate.Cancel() && c.save.gate.CommitWon() {
@@ -174,6 +187,10 @@ func (c *Connection) registerRequest(r Request) (bool, error) {
 	allowed := c.authCapability != "" && r.Capability == c.authCapability && c.authEpoch == c.generation.Load() && c.now().Before(c.authUntil)
 	if allowed && r.Type == "cancel" {
 		c.cancelEpoch.Add(1)
+		if c.passkeyAuth != nil {
+			c.passkeyAuth.cancelled.Store(true)
+			c.passkeyAuth.gate.Cancel()
+		}
 	}
 	if allowed && r.Type == "cancel-save" && c.saveAuth != nil && c.saveAuth.request.ID == r.RequestID {
 		if !c.saveAuth.gate.Cancel() && c.saveAuth.gate.CommitWon() {
@@ -220,6 +237,17 @@ func (c *Connection) Handle(r Request) error {
 		return c.refuse(r.ID)
 	}
 	if r.Type == "cancel" {
+		if p := c.passkey; p != nil {
+			p.cancelled.Store(true)
+			p.gate.Cancel()
+			if !p.working {
+				c.clearPasskey(p)
+				if e := c.refuse(p.request.ID); e != nil {
+					return e
+				}
+			}
+			return c.response(Response{ID: r.ID, Type: "cancelled"})
+		}
 		if c.save != nil || c.otp != nil {
 			return c.refuse(r.ID)
 		}
@@ -233,10 +261,13 @@ func (c *Connection) Handle(r Request) error {
 		c.context = personal.BrowserContext{}
 		return c.response(Response{ID: r.ID, Type: "cancelled"})
 	}
+	if r.Type == "passkey-create" || r.Type == "passkey-get" {
+		return c.startPasskey(r)
+	}
 	if handled, e := c.saveMessage(r); handled {
 		return e
 	}
-	if c.pending != nil || c.save != nil || c.otp != nil {
+	if c.pending != nil || c.save != nil || c.otp != nil || c.passkey != nil {
 		return c.refuse(r.ID)
 	}
 	if r.Type == "match" {
@@ -269,6 +300,9 @@ func (c *Connection) Handle(r Request) error {
 				c.pending = &copy
 				c.pendingEpoch = c.cancelEpoch.Load()
 				c.pendingUntil = c.now().Add(30 * time.Second)
+				if c.quickFill {
+					go func() { _ = c.ApproveFill(r.ID) }()
+				}
 				return nil
 			}
 		}
@@ -276,6 +310,15 @@ func (c *Connection) Handle(r Request) error {
 	return c.refuse(r.ID)
 }
 func (c *Connection) ApprovePair(s *personal.Session) error {
+	return c.approvePair(s, false)
+}
+
+// ApproveQuickPair is called only by the native pairing UI. Browser selection
+// becomes the user gesture for this bounded session; locking revokes it.
+func (c *Connection) ApproveQuickPair(s *personal.Session) error {
+	return c.approvePair(s, true)
+}
+func (c *Connection) approvePair(s *personal.Session, quick bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	defer c.changed()
@@ -292,6 +335,7 @@ func (c *Connection) ApprovePair(s *personal.Session) error {
 		return ErrProtocol
 	}
 	c.capability = hex.EncodeToString(b[:])
+	c.quickFill = quick
 	c.until = c.now().Add(15 * time.Minute)
 	c.session.Store(s)
 	c.authMu.Lock()
@@ -307,7 +351,7 @@ func (c *Connection) ApprovePair(s *personal.Session) error {
 	}
 	id := c.hello
 	c.hello = ""
-	return c.response(Response{ID: id, Type: "paired", Capability: c.capability})
+	return c.response(Response{ID: id, Type: "paired", Capability: c.capability, QuickFill: quick})
 }
 func (c *Connection) ApproveFill(id string) error {
 	c.mu.Lock()
@@ -335,13 +379,18 @@ func (c *Connection) ApproveFill(id string) error {
 		return e
 	}
 	defer s.DiscardBrowserFill(f)
-	consumeErr := s.ConsumeBrowserFill(f, func(user, pass []byte) error {
-		// This is the write linearization point. Cancellation cannot recall bytes
-		// already emitted; the extension must still enforce documentId on injection.
-		if c.pendingEpoch != c.cancelEpoch.Load() || epoch != c.generation.Load() || c.closed.Load() || !c.now().Before(c.until) || s == nil || !c.now().Before(c.pendingUntil) {
-			return ErrProtocol
-		}
-		return c.response(Response{ID: r.ID, Type: "fill", Username: string(user), Password: string(pass)})
+	consumeErr := c.writer.WriteGranted(minTime(c.until, c.pendingUntil), nil, func() (Response, error) {
+		var response Response
+		err := s.ConsumeBrowserFill(f, func(user, pass []byte) error {
+			// Grant only after owning the writer. A lock/cancel that wins while
+			// queued cannot disclose credentials. Already granted output is unknown.
+			if c.pendingEpoch != c.cancelEpoch.Load() || epoch != c.generation.Load() || c.closed.Load() || !c.now().Before(c.until) || !c.now().Before(c.pendingUntil) {
+				return ErrProtocol
+			}
+			response = Response{V: 1, ID: r.ID, Type: "fill", Username: string(user), Password: string(pass)}
+			return nil
+		})
+		return response, err
 	})
 	if consumeErr != nil && !c.closed.Load() {
 		_ = c.refuse(r.ID)
@@ -377,6 +426,10 @@ func (c *Connection) Reject() error {
 func (c *Connection) Invalidate() {
 	c.generation.Add(1)
 	c.authMu.Lock()
+	if p := c.passkeyAuth; p != nil {
+		p.cancelled.Store(true)
+		p.gate.Cancel()
+	}
 	if p := c.otpAuth; p != nil {
 		p.control.Cancel()
 	}
@@ -420,6 +473,8 @@ func (c *Connection) Snapshot() View {
 		c.invalidate()
 	}
 	v.Paired = c.capability != ""
+	v.QuickFill = c.quickFill
+	v.Passkey, v.PasskeyStatus = c.passkeySnapshot()
 	v.Save, v.SaveStatus = c.saveSnapshot()
 	v.SaveRequestID = c.saveRequestID
 	v.OTP, v.OTPStatus = c.otpSnapshot()
