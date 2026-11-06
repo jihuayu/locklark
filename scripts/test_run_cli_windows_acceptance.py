@@ -1,0 +1,60 @@
+"""Pure controller/oracle tests, not Windows console execution evidence."""
+import base64
+import contextlib
+import io
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+from unittest import mock
+
+import run_cli_windows_acceptance as acceptance
+
+
+class WindowsCLIOracleTests(unittest.TestCase):
+    def test_full_pipe_exit_and_console_oracle_rejects_partial_results(self):
+        result = {"exit_code":23,"timed_out":False,"console_available":True,"console_mode_before":7,"console_mode_after":7}
+        child = {"token_matches":True,"stdin_matches":True,"stdio_are_pipes":True,"only_allowed_environment":True,"console_mode":7}
+        out, err = b"owned Windows child stdout\n", b"owned Windows child stderr\n"
+        acceptance.verify_approved(result,child,out,err)
+        for field,value in (("exit_code",0),("timed_out",True),("console_available",False),("console_mode_after",6)):
+            with self.subTest(field=field), self.assertRaises(acceptance.AcceptanceFailure):
+                acceptance.verify_approved({**result,field:value},child,out,err)
+        for field in ("token_matches","stdin_matches","stdio_are_pipes","only_allowed_environment"):
+            with self.subTest(field=field), self.assertRaises(acceptance.AcceptanceFailure):
+                acceptance.verify_approved(result,{**child,field:False},out,err)
+        with self.assertRaises(acceptance.AcceptanceFailure):
+            acceptance.verify_approved(result,child,out+b'{"status":"process-exited"}',err)
+        with self.assertRaises(acceptance.AcceptanceFailure):
+            acceptance.verify_approved(result,child,out,err+b"approval prompt")
+
+    def test_raw_encoded_and_ANSI_interleaved_echoes_fail(self):
+        secret="OwnedSyntheticFactor556677"
+        for raw in (secret.encode(),base64.b64encode(secret.encode()),secret.encode().hex().encode(),
+                    (secret[:8]+"\x1b[31m"+secret[8:]).encode()):
+            with self.subTest(size=len(raw)), self.assertRaises(acceptance.AcceptanceFailure):
+                acceptance.scan(raw,[secret])
+        acceptance.scan(b"owned fixed markers only",[secret])
+        self.assertEqual(acceptance.fixture_phase(b"owned Windows CLI fixture failed at owned-job\n"),"owned-job")
+        self.assertEqual(acceptance.fixture_phase(b"owned Windows CLI fixture failed at PrivateSyntheticFactor"),"unknown")
+
+    def test_failed_command_preserves_partial_output_for_canary_scan(self):
+        secret="OwnedSyntheticFactor556677"
+        with tempfile.TemporaryDirectory() as root:
+            runner=acceptance.Acceptance.__new__(acceptance.Acceptance)
+            runner.fixture="owned-fixture.exe";runner.root=Path(root)
+            runner.values=[secret]
+            with mock.patch.object(acceptance.subprocess,"run",side_effect=subprocess.TimeoutExpired(
+                    ["private-argument"],1,output=secret.encode())), self.assertRaises(acceptance.AcceptanceFailure):
+                runner.command(["launch"],"failed")
+            with self.assertRaises(acceptance.AcceptanceFailure): runner.scan()
+
+    def test_invalid_target_is_a_fixed_failure_without_starting_any_child(self):
+        with mock.patch.object(acceptance.subprocess,"run") as command, contextlib.redirect_stdout(io.StringIO()) as output:
+            result=acceptance.main(["--cli","unused","--fixture-bin","unused"])
+        self.assertEqual(result,1)
+        command.assert_not_called()
+        self.assertEqual(output.getvalue(),"FAIL: Windows RunCLI acceptance at prerequisites\n")
+
+
+if __name__=="__main__": unittest.main()

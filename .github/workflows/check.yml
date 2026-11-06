@@ -21,6 +21,7 @@ jobs:
           bun-version: 1.4.4
       - run: bun test ./plugins/github-pull-reader
       - run: python -m unittest discover -s scripts -p test_personal_windows.py
+      - run: python -m unittest discover -s scripts -p test_run_cli_windows_acceptance.py
       - run: go mod verify
       - run: go vet ./...
       - run: go build ./cmd/locklark-desktop
@@ -32,8 +33,13 @@ jobs:
         env:
           LOCKLARK_TEST_NATIVE_CLIPBOARD: '1'
         run: go test ./internal/nativeclipboard -run TestNativeClipboardSmoke -count=1
-      - shell: pwsh
+      - name: Test Go packages and native OpenSSH transport
+        shell: pwsh
+        env:
+          LOCKLARK_TEST_OPENSSH: '1'
         run: |
+          $env:LOCKLARK_TEST_OPENSSH_BIN = if ($IsWindows) { Join-Path $env:WINDIR 'System32/OpenSSH/ssh-add.exe' } else { '/usr/bin/ssh-add' }
+          if (-not (Test-Path -LiteralPath $env:LOCKLARK_TEST_OPENSSH_BIN -PathType Leaf)) { throw 'Native system OpenSSH client unavailable' }
           $peerEnv = Join-Path $env:RUNNER_TEMP 'locklark-kdbx-peer'
           python -m venv $peerEnv
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -56,6 +62,8 @@ jobs:
           python3 scripts/health_acceptance.py "$RUNNER_TEMP/locklark"
           python3 scripts/search_acceptance.py "$RUNNER_TEMP/locklark"
           python3 scripts/run_env_acceptance.py "$RUNNER_TEMP/locklark"
+          python3 -m unittest discover -s scripts -p test_run_cli_acceptance.py
+          python3 scripts/run_cli_acceptance.py --cli "$RUNNER_TEMP/locklark" --go "$(command -v go)" --artifacts "$RUNNER_TEMP/locklark-run-cli-evidence"
           python3 scripts/injection_acceptance.py "$RUNNER_TEMP/locklark"
           python3 scripts/live_pull_acceptance.py "$RUNNER_TEMP/locklark"
           python3 scripts/inspection_acceptance.py "$RUNNER_TEMP/locklark"
@@ -107,6 +115,18 @@ jobs:
           & $python scripts/export_acceptance.py $binary
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $python scripts/plugin_acceptance.py $binary
+      - name: Test native Windows RunCLI console and piped standard streams
+        if: runner.os == 'Windows'
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          $python = Join-Path $env:RUNNER_TEMP 'locklark-kdbx-peer/Scripts/python.exe'
+          $binary = Join-Path $env:RUNNER_TEMP 'personal-cli.exe'
+          $fixture = Join-Path $env:RUNNER_TEMP 'run-cli-windows-fixture.exe'
+          go build -o $fixture ./scripts/run_cli_windows_fixture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $python scripts/run_cli_windows_acceptance.py --cli $binary --fixture-bin $fixture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   desktop-macos:
     runs-on: macos-latest
     steps:
@@ -123,6 +143,15 @@ jobs:
         env:
           LOCKLARK_TEST_NATIVE_CLIPBOARD: '1'
         run: go test ./internal/nativeclipboard -count=1
+      - name: Test native macOS SSH transport and RunCLI isolation
+        timeout-minutes: 5
+        env:
+          LOCKLARK_TEST_OPENSSH: '1'
+          LOCKLARK_TEST_OPENSSH_BIN: /usr/bin/ssh-add
+        run: |
+          test -x "$LOCKLARK_TEST_OPENSSH_BIN"
+          go test ./internal/sshagent ./internal/localpath -count=1
+          go test ./internal/personal ./cmd/locklark -run '^TestRunCLI' -count=1
   web:
     runs-on: ubuntu-latest
     steps:
