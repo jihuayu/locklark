@@ -411,7 +411,7 @@ async function popupClick(selector) {
   const rect = await popupEvaluate(
     "const e=document.querySelector(" +
       JSON.stringify(selector) +
-      ');if(!e||e.disabled)throw Error("Popup control unavailable");const r=e.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};',
+      ');if(!e||e.disabled)throw Error("Popup control unavailable");e.scrollIntoView({block:"center",inline:"nearest"});const r=e.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};',
   );
   const pointer =
     'import ctypes as C,os,sys\nx=C.CDLL("libX11.so.6");t=C.CDLL("libXtst.so.6");p=C.c_void_p\nx.XOpenDisplay.argtypes=[C.c_char_p];x.XOpenDisplay.restype=p;x.XFlush.argtypes=[p];x.XCloseDisplay.argtypes=[p]\nt.XTestFakeMotionEvent.argtypes=[p,C.c_int,C.c_int,C.c_int,C.c_ulong];t.XTestFakeButtonEvent.argtypes=[p,C.c_uint,C.c_int,C.c_ulong]\nd=x.XOpenDisplay(os.environ["DISPLAY"].encode());assert d\nt.XTestFakeMotionEvent(d,-1,int(sys.argv[1]),int(sys.argv[2]),0);t.XTestFakeButtonEvent(d,1,1,0);t.XTestFakeButtonEvent(d,1,0,0);x.XFlush(d);x.XCloseDisplay(d)';
