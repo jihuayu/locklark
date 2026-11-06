@@ -427,6 +427,7 @@ class DeviceCredentialAcceptance(AndroidAcceptance):
         self.shell("mkdir", "-m", "700", self.remote)
         self.remote_owned = True
         self.start_logcat()
+        self.shell("wm", "dismiss-keyguard", required=False)
         self.launch(); self.started = True
         self.set_stage("live-vault")
         self.unlock(self.fixture["master"], self.fixture["key"])
