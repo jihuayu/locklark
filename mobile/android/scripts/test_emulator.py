@@ -62,7 +62,7 @@ def safe_diagnostic(raw):
     allowed_status = {"operation-refused", "outcome-unknown", "backup-ack-required", "empty", "other"}
     status = statuses[-1].decode() if statuses and statuses[-1].decode() in allowed_status else "unknown"
     empty_context = {key:"unknown" for key in ("step", "wait", "ui_status", "core_phase", "core_error", "inputs_intact", "fs_owned", "fs_link", "fs_errno",
-                                              "control", "control_phase", "ime", "window_focus", "control_visible", "control_enabled", "control_present", "control_focused", "input_active", "activity")}
+                                              "control", "control_phase", "ime", "ime_hide_requested", "window_focus", "control_visible", "control_enabled", "control_present", "control_focused", "input_active", "activity")}
     context = empty_context.copy()
     failures = []
     fields = ((b"INSTRUMENTATION_STATUS: locklark_stage=", "step", allowed_steps),
@@ -75,8 +75,9 @@ def safe_diagnostic(raw):
               (b"INSTRUMENTATION_STATUS: locklark_fs_link=", "fs_link", {"true", "false"}),
               (b"INSTRUMENTATION_STATUS: locklark_fs_errno=", "fs_errno", {str(value) for value in range(4096)}),
               (b"INSTRUMENTATION_STATUS: locklark_control=", "control", {"generate-account-key", "backup-ack", "create-vault", "new-login", "generate-password", "save-login", "login-row", "show-password", "hide-secret", "edit-login", "save-field", "show-notes", "show-username", "show-otp", "back-to-list", "search", "cancel-edit", "regenerate-password", "confirm-regenerate", "enable-quick-unlock", "lock", "unlock", "new-master-password", "repeat-master-password", "login-title", "login-url", "login-username", "login-password", "edit-value", "query", "regenerate-length", "master-password", "secret-key"}),
-              (b"INSTRUMENTATION_STATUS: locklark_control_phase=", "control_phase", {"ready", "ime-dismiss", "scroll", "visibility", "press", "released", "input-ready", "input-focus", "input-send", "input-exact"}),
+              (b"INSTRUMENTATION_STATUS: locklark_control_phase=", "control_phase", {"ready", "ime-observe", "ime-dismiss", "ime-hidden", "ime-wait-hidden", "scroll", "visibility", "press", "released", "input-ready", "input-focus", "input-send", "input-exact"}),
               (b"INSTRUMENTATION_STATUS: locklark_ime=", "ime", {"true", "false"}),
+              (b"INSTRUMENTATION_STATUS: locklark_ime_hide_requested=", "ime_hide_requested", {"true", "false"}),
               (b"INSTRUMENTATION_STATUS: locklark_window_focus=", "window_focus", {"true", "false"}),
               (b"INSTRUMENTATION_STATUS: locklark_control_visible=", "control_visible", {"true", "false"}),
               (b"INSTRUMENTATION_STATUS: locklark_control_enabled=", "control_enabled", {"true", "false"}),

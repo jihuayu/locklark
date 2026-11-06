@@ -4,6 +4,36 @@ from test_emulator import scan_output, complete_pass, RuntimeFailure, safe_diagn
 
 
 class RuntimeWrapperTests(unittest.TestCase):
+    def test_unavailable_ime_observation_remains_unknown(self):
+        raw = (b"INSTRUMENTATION_STATUS: locklark_stage=edit-notes\n"
+               b"INSTRUMENTATION_STATUS: locklark_control=save-field\n"
+               b"INSTRUMENTATION_STATUS: locklark_control_phase=ime-observe\n"
+               b"INSTRUMENTATION_STATUS: locklark_ime=unknown\n"
+               b"INSTRUMENTATION_STATUS: locklark_ime_hide_requested=false\n"
+               b"INSTRUMENTATION_STATUS_CODE: -2\n")
+        failure = safe_diagnostic(raw)["failed_contexts"][0]
+        self.assertEqual(failure["control_phase"], "ime-observe")
+        self.assertEqual(failure["ime"], "unknown")
+        self.assertEqual(failure["ime_hide_requested"], "false")
+
+    def test_late_ime_hide_request_is_fixed_and_preserves_failure(self):
+        raw = (b"INSTRUMENTATION_STATUS: locklark_stage=edit-notes\n"
+               b"INSTRUMENTATION_STATUS: locklark_wait=native-visible\n"
+               b"INSTRUMENTATION_STATUS: locklark_control=save-field\n"
+               b"INSTRUMENTATION_STATUS: locklark_control_phase=ime-wait-hidden\n"
+               b"INSTRUMENTATION_STATUS: locklark_ime=true\n"
+               b"INSTRUMENTATION_STATUS: locklark_ime_hide_requested=true\n"
+               b"INSTRUMENTATION_STATUS_CODE: -2\n"
+               b"INSTRUMENTATION_STATUS: locklark_ime_hide_requested=false\n")
+        result = safe_diagnostic(raw)
+        failure = result["failed_contexts"][0]
+        self.assertEqual(failure["control_phase"], "ime-wait-hidden")
+        self.assertEqual(failure.get("ime_hide_requested"), "true")
+        self.assertEqual(failure["ime"], "true")
+        invalid = safe_diagnostic(raw.replace(b"hide_requested=true", b"hide_requested=private-field-contents"))
+        self.assertEqual(invalid["failed_contexts"][0].get("ime_hide_requested"), "unknown")
+        self.assertNotIn("private-field-contents", str(invalid))
+
     def test_input_focus_context_is_fixed_and_survives_later_status(self):
         raw = (b"INSTRUMENTATION_STATUS: locklark_stage=regenerate\n"
                b"INSTRUMENTATION_STATUS: locklark_wait=native-input-focus\n"

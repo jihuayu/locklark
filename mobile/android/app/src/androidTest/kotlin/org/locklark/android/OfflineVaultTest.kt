@@ -4,7 +4,6 @@ import android.app.KeyguardManager
 import android.content.pm.ApplicationInfo
 import android.graphics.Rect
 import android.os.SystemClock
-import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
@@ -37,6 +36,7 @@ class OfflineVaultTest {
     private lateinit var scenario: ActivityScenario<MainActivity>
     private var currentControl = "unknown"
     private var controlPhase = "ready"
+    private var imeHideRequested = false
     private fun stage(value: String) { instrumentation.sendStatus(0, android.os.Bundle().apply { putString("locklark_stage", value) }) }
     private fun record(value: String): String {
         val fixture = File(instrumentation.targetContext.cacheDir, "instrumentation-canaries.json")
@@ -87,9 +87,17 @@ class OfflineVaultTest {
         }
         instrumentation.sendStatus(0, android.os.Bundle().apply { putString("locklark_wait", wait) })
         while (SystemClock.elapsedRealtime() < deadline) {
-            if (test()) return
-            SystemClock.sleep(100)
+            val satisfied = test()
+            // A synchronous main-thread observation may finish after the
+            // absolute deadline. Its late true result is not permission to act.
+            val observedAt = SystemClock.elapsedRealtime()
+            if (observedAt >= deadline) break
+            if (satisfied) return
+            SystemClock.sleep(minOf(100L, deadline - observedAt))
         }
+        failWait(message)
+    }
+    private fun failWait(message: String): Nothing {
         val uiStatus = when {
             text("status").startsWith("操作未完成") -> "operation-refused"
             text("status").startsWith("结果未确认") -> "outcome-unknown"
@@ -105,7 +113,7 @@ class OfflineVaultTest {
             putString("locklark_core_phase", phase); putString("locklark_core_error", error)
         })
         reportControl()
-        assertTrue(message, false)
+        throw AssertionError(message)
     }
     private fun ready(tag: String): Boolean {
         val current = view(tag)
@@ -114,43 +122,90 @@ class OfflineVaultTest {
     private fun click(tag: String, dismissKeyboard: Boolean = true, deadline: Long = SystemClock.elapsedRealtime() + 180_000) {
         currentControl = tag
         controlPhase = "ready"
+        imeHideRequested = false
         waitUntil("Native control unavailable", deadline) { ready(tag) }
-        // A full Google APIs image has a real IME. Dismiss it only when the
-        // OS reports it visible, once, before scrolling/tapping an action.
-        if (dismissKeyboard && imeVisible()) {
-            controlPhase = "ime-dismiss"
-            reportControl()
-            instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
-            waitUntil("Soft keyboard still visible", deadline) { !imeVisible() }
-        }
-        controlPhase = "scroll"
-        scenario.onActivity { activity ->
-            val target = activity.window.decorView.findViewWithTag<View>(tag)
-            target.requestRectangleOnScreen(Rect(0,0,target.width,target.height), true)
-        }
-        instrumentation.waitForIdleSync()
         val bounds = Rect()
-        var previous = Rect()
-        controlPhase = "visibility"
-        // Insets/layout can finish after main-queue idleness. Read only until
-        // the exact control has complete, stable, actionable geometry.
+        val viewport = Rect()
+        var previousBounds = Rect()
+        var previousViewport = Rect()
+        var previousVisible = false
+        var scrolledViewport: Rect? = null
+        var needsScroll = true
+        // IME appearance and padding/layout can arrive after a prior idle
+        // observation. React to actual visibility while waiting, not only once
+        // at entry. Only the owned window receives one hide request; BACK could
+        // navigate if the keyboard disappeared between observation and delivery.
         waitUntil("Native control not visible", deadline) {
             var visible = false
+            var ime: Boolean? = null
+            var requestedNow = false
+            var scrolledNow = false
             scenario.onActivity { activity ->
+                if (SystemClock.elapsedRealtime() >= deadline) return@onActivity
                 val target = activity.window.decorView.findViewWithTag<View>(tag)
-                visible = target != null && target.isEnabled && target.isShown && activity.hasWindowFocus() &&
-                    target.getGlobalVisibleRect(bounds) && bounds.width() == target.width && bounds.height() == target.height
+                ime = activity.window.decorView.rootWindowInsets?.isVisible(WindowInsets.Type.ime())
+                if (ime == null) {
+                    needsScroll = true
+                    return@onActivity
+                }
+                if (dismissKeyboard && ime == true) {
+                    needsScroll = true
+                    if (!imeHideRequested && activity.hasWindowFocus() && SystemClock.elapsedRealtime() < deadline) {
+                        activity.window.insetsController?.let { controller ->
+                            imeHideRequested = true
+                            requestedNow = true
+                            controller.hide(WindowInsets.Type.ime())
+                        }
+                    }
+                } else if (target != null && target.isEnabled && target.isShown && activity.hasWindowFocus() && appViewport(activity, viewport)) {
+                    if ((needsScroll || scrolledViewport != viewport) && SystemClock.elapsedRealtime() < deadline) {
+                        target.requestRectangleOnScreen(Rect(0,0,target.width,target.height), true)
+                        scrolledViewport = Rect(viewport)
+                        needsScroll = false
+                        scrolledNow = true
+                    } else {
+                        visible = target.getGlobalVisibleRect(bounds) && bounds.width() == target.width &&
+                            bounds.height() == target.height && viewport.contains(bounds)
+                    }
+                }
             }
-            val stable = visible && bounds == previous
-            previous = Rect(bounds)
+            if (ime == null) {
+                previousBounds.setEmpty(); previousViewport.setEmpty()
+                previousVisible = false
+                controlPhase = "ime-observe"
+                return@waitUntil false
+            }
+            if (dismissKeyboard && ime == true) {
+                previousBounds.setEmpty(); previousViewport.setEmpty()
+                previousVisible = false
+                controlPhase = if (requestedNow) "ime-dismiss" else "ime-wait-hidden"
+                if (requestedNow) reportControl()
+                return@waitUntil false
+            }
+            if (scrolledNow) {
+                previousBounds.setEmpty(); previousViewport.setEmpty()
+                previousVisible = false
+                controlPhase = "scroll"
+                return@waitUntil false
+            }
+            controlPhase = "visibility"
+            val stable = visible && previousVisible && bounds == previousBounds && viewport == previousViewport
+            previousBounds = Rect(bounds)
+            previousViewport = Rect(viewport)
+            previousVisible = visible
             stable
         }
         controlPhase = "press"
         reportControl()
         val now = SystemClock.uptimeMillis()
         MotionEvent.obtain(now,now,MotionEvent.ACTION_DOWN,bounds.exactCenterX(),bounds.exactCenterY(),0).also {
-            instrumentation.sendPointerSync(it); it.recycle()
+            try {
+                if (SystemClock.elapsedRealtime() >= deadline) failWait("Native control not visible")
+                instrumentation.sendPointerSync(it)
+            } finally { it.recycle() }
         }
+        // Once DOWN has started, always send its release even if time passes
+        // during the physical press. No second business tap is attempted.
         SystemClock.sleep(50)
         MotionEvent.obtain(now,SystemClock.uptimeMillis(),MotionEvent.ACTION_UP,bounds.exactCenterX(),bounds.exactCenterY(),0).also {
             instrumentation.sendPointerSync(it); it.recycle()
@@ -158,10 +213,16 @@ class OfflineVaultTest {
         controlPhase = "released"
         instrumentation.waitForIdleSync()
     }
-    private fun imeVisible(): Boolean {
-        var visible = false
-        scenario.onActivity { visible = it.window.decorView.rootWindowInsets?.isVisible(WindowInsets.Type.ime()) == true }
-        return visible
+    private fun appViewport(activity: MainActivity, viewport: Rect): Boolean {
+        if (activity.window.decorView.rootWindowInsets == null) return false
+        activity.window.decorView.getWindowVisibleDisplayFrame(viewport)
+        val content = activity.findViewById<ViewGroup>(android.R.id.content)
+        val root = content?.getChildAt(0) ?: return false
+        val inner = Rect()
+        if (!root.getGlobalVisibleRect(inner)) return false
+        inner.set(inner.left + root.paddingLeft, inner.top + root.paddingTop,
+            inner.right - root.paddingRight, inner.bottom - root.paddingBottom)
+        return !inner.isEmpty && viewport.intersect(inner)
     }
     private fun reportControl() {
         val known = setOf("generate-account-key", "backup-ack", "create-vault", "new-login", "generate-password", "save-login", "show-password", "hide-secret", "edit-login", "save-field", "show-notes", "show-username", "show-otp", "back-to-list", "search", "cancel-edit", "regenerate-password", "confirm-regenerate", "enable-quick-unlock", "lock", "unlock",
@@ -171,15 +232,17 @@ class OfflineVaultTest {
             putString("locklark_control", tag)
             putString("locklark_control_phase", controlPhase)
             putString("locklark_activity", scenario.state.name)
+            putString("locklark_ime_hide_requested", imeHideRequested.toString())
         }
         scenario.onActivity { activity ->
             val target = activity.window.decorView.findViewWithTag<View>(currentControl)
             val bounds = Rect()
-            diagnostic.putString("locklark_ime", (activity.window.decorView.rootWindowInsets?.isVisible(WindowInsets.Type.ime()) == true).toString())
+            val viewport = Rect()
+            diagnostic.putString("locklark_ime", activity.window.decorView.rootWindowInsets?.isVisible(WindowInsets.Type.ime())?.toString() ?: "unknown")
             diagnostic.putString("locklark_window_focus", activity.hasWindowFocus().toString())
             diagnostic.putString("locklark_control_present", (target != null).toString())
             diagnostic.putString("locklark_control_enabled", (target?.isEnabled == true).toString())
-            diagnostic.putString("locklark_control_visible", (target != null && target.getGlobalVisibleRect(bounds) && bounds.width() == target.width && bounds.height() == target.height).toString())
+            diagnostic.putString("locklark_control_visible", (target != null && appViewport(activity, viewport) && target.getGlobalVisibleRect(bounds) && bounds.width() == target.width && bounds.height() == target.height && viewport.contains(bounds)).toString())
             diagnostic.putString("locklark_control_focused", (target != null && activity.currentFocus === target && target.hasFocus()).toString())
             diagnostic.putString("locklark_input_active", (target is EditText && activity.getSystemService(InputMethodManager::class.java)?.isActive(target) == true).toString())
         }
@@ -205,16 +268,17 @@ class OfflineVaultTest {
             return focused
         }
         waitUntil("Native input focus unavailable", deadline) { focused() }
-        scenario.onActivity { (it.window.decorView.findViewWithTag<View>(tag) as EditText).text.clear() }
+        scenario.onActivity { if (SystemClock.elapsedRealtime() < deadline) (it.window.decorView.findViewWithTag<View>(tag) as EditText).text.clear() }
         instrumentation.waitForIdleSync()
         waitUntil("Native input focus unavailable", deadline) { focused() }
         controlPhase = "input-send"
         reportControl()
+        if (SystemClock.elapsedRealtime() >= deadline) failWait("Native input delivery incomplete")
         // Full factors go through native keyboard events. Unicode note input
         // uses the native Editable in the test APK, never a product endpoint.
         if (value.isNotEmpty()) {
             if (value.all { it.code in 32..126 }) instrumentation.sendStringSync(value)
-            else scenario.onActivity { (it.window.decorView.findViewWithTag<View>(tag) as EditText).setText(value) }
+            else scenario.onActivity { if (SystemClock.elapsedRealtime() < deadline) (it.window.decorView.findViewWithTag<View>(tag) as EditText).setText(value) }
         }
         instrumentation.waitForIdleSync()
         controlPhase = "input-exact"
