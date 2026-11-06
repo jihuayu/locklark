@@ -464,9 +464,12 @@ func (r *Rows) At(index int) (*Row, error) {
 	return &row, nil
 }
 func rowsResult(rows []personal.Row) *Rows {
-	out := &Rows{rows: make([]Row, len(rows))}
-	for i, r := range rows {
-		out.rows[i] = Row{r.ID, r.Revision, r.Title, r.State}
+	out := &Rows{rows: make([]Row, 0, len(rows))}
+	for _, r := range rows {
+		if r.Kind == "ssh-key" {
+			continue
+		}
+		out.rows = append(out.rows, Row{r.ID, r.Revision, r.Title, r.State})
 	}
 	return out
 }
