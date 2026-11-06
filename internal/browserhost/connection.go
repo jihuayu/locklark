@@ -80,6 +80,7 @@ func (c *Connection) changed() {
 }
 func (c *Connection) response(r Response) error {
 	r.V = 1
+	defer r.Clear()
 	if e := c.writer.Write(r); e != nil {
 		c.closed.Store(true)
 		if s := c.session.Load(); s != nil {

@@ -26,6 +26,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       pinLength: 6,
     },
     lastMatchAt = 0,
+    matchCategory = "login",
     vaultItems = [],
     detailCache = new Map(),
     pendingOpenAndFill = null,
@@ -33,10 +34,12 @@ if (typeof importScripts === "function") importScripts("core.js");
     hostCapabilities = [];
   const STAGED_TTL = 5 * 60 * 1000,
     LAST_FILLED_TTL = 60 * 1000,
-    HISTORY_LIMIT = 20;
+    HISTORY_LIMIT = 20,
+    MULTI_STEP_TTL = 120000;
   const stagedSaves = new Map(),
     lastFilledCredentials = new Map(),
-    generatedHistory = [];
+    generatedHistory = [],
+    multiStepSessions = new Map();
   function applySettings(raw) {
     settings = core.normalizeSettings(raw);
     autoLogin = settings.autoLogin;
@@ -90,6 +93,8 @@ if (typeof importScripts === "function") importScripts("core.js");
     otpUnknown = false,
     epoch = 0,
     unconfirmedSave = false;
+  // Per-tab ephemeral login continuation state. Metadata only, never field
+  // values, and never persisted outside the service worker.
   const OTP_UNKNOWN = "验证码填充结果未确认，请核实页面";
   const SAVE_UNKNOWN = "结果未确认，请在金库核实，勿重复保存";
   const calls = new Map(),
@@ -361,7 +366,12 @@ if (typeof importScripts === "function") importScripts("core.js");
         id: r.id,
         title: r.title,
         revision: r.revision,
+        category: rowCategory(r),
+        ...(r.subtitle ? { subtitle: r.subtitle } : {}),
       })),
+      preferredItemId: multiStepFor(context?.tabId, context?.origin)?.itemId || "",
+      preferredTitle: multiStepFor(context?.tabId, context?.origin)?.title || "",
+      step: multiStepFor(context?.tabId, context?.origin)?.stepCompleted || "",
       vaultItems: vaultItems.map((item) => ({ ...item })),
       pending: !!pending || !!pendingOTP || !!pendingPasskey,
       otpPending: !!pendingOTP,
@@ -397,6 +407,65 @@ if (typeof importScripts === "function") importScripts("core.js");
     }
     setBadge("", "#0f766e", "Locklark — 已解锁");
   }
+  function validCategory(value) {
+    return ["login", "identity", "credit_card"].includes(value);
+  }
+  function rowCategory(row) {
+    return row?.category || "login";
+  }
+  function wipeMap(value) {
+    if (value && typeof value === "object")
+      for (const key of Object.keys(value)) value[key] = "";
+  }
+  function multiStepFor(tabId, origin) {
+    const session = multiStepSessions.get(tabId);
+    if (!session) return null;
+    if (Date.now() >= session.expiresAt) {
+      multiStepSessions.delete(tabId);
+      return null;
+    }
+    if (origin) {
+      try {
+        if (core.siteKey(origin) !== session.siteKey) {
+          multiStepSessions.delete(tabId);
+          return null;
+        }
+      } catch {
+        multiStepSessions.delete(tabId);
+        return null;
+      }
+    }
+    return session;
+  }
+  function rememberStep(c, itemId, revision, title, step) {
+    let site;
+    try {
+      site = core.siteKey(c.origin);
+    } catch {
+      return;
+    }
+    const previous = multiStepFor(c.tabId, c.origin);
+    const stepCompleted =
+      step === "username-only" ? "username" : "password";
+    if (
+      previous &&
+      previous.itemId === itemId &&
+      previous.stepCompleted === "password" &&
+      stepCompleted === "username"
+    )
+      return;
+    multiStepSessions.set(c.tabId, {
+      tabId: c.tabId,
+      windowId: c.windowId,
+      siteKey: site,
+      origin: c.origin,
+      itemId,
+      revision,
+      title,
+      stepCompleted,
+      expiresAt: Date.now() + MULTI_STEP_TTL,
+    });
+  }
   function clear() {
     if (pending?.injectionStarted) fillUnknown = true;
     if (pendingPasskey?.create) passkeyUnknown = true;
@@ -413,6 +482,8 @@ if (typeof importScripts === "function") importScripts("core.js");
     vaultItems = [];
     detailCache.clear();
     clearPendingOpenAndFill();
+    matchCategory = "login";
+    multiStepSessions.clear();
     advanceEpoch();
     for (const [requestId, c] of calls) {
       retired.add(requestId);
@@ -657,7 +728,8 @@ if (typeof importScripts === "function") importScripts("core.js");
     }
     return promise;
   }
-  async function capture() {
+  async function capture(frameId = 0) {
+    if (!Number.isSafeInteger(frameId) || frameId < 0) throw Error("refused");
     const tabs = await api.tabs.query({ active: true, currentWindow: true });
     if (
       tabs.length !== 1 ||
@@ -668,7 +740,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     )
       throw Error("refused");
     const tab = tabs[0],
-      origin = core.originFromURL(tab.url);
+      topOrigin = core.originFromURL(tab.url);
     const results = await api.scripting.executeScript({
       target: { tabId: tab.id, frameIds: [0] },
       func: core.probe,
@@ -679,22 +751,45 @@ if (typeof importScripts === "function") importScripts("core.js");
       typeof results[0].documentId !== "string" ||
       !/^[A-Za-z0-9_-]{1,128}$/.test(results[0].documentId) ||
       !results[0].result?.top ||
-      results[0].result.origin !== origin
+      results[0].result.origin !== topOrigin
     )
       throw Error("refused");
+    const topDocumentId = results[0].documentId;
+    let origin = topOrigin,
+      documentId = topDocumentId;
+    if (frameId > 0) {
+      const frames = await api.scripting.executeScript({
+        target: { tabId: tab.id, frameIds: [frameId] },
+        func: core.probe,
+      });
+      if (
+        frames.length !== 1 ||
+        frames[0].frameId !== frameId ||
+        typeof frames[0].documentId !== "string" ||
+        !/^[A-Za-z0-9_-]{1,128}$/.test(frames[0].documentId) ||
+        frames[0].result?.top !== false ||
+        core.originFromURL(frames[0].result?.origin) !== topOrigin
+      )
+        throw Error("refused");
+      origin = core.originFromURL(frames[0].result.origin);
+      documentId = frames[0].documentId;
+    }
     const again = await api.tabs.query({ active: true, currentWindow: true });
     if (
       again.length !== 1 ||
       again[0].id !== tab.id ||
       again[0].windowId !== tab.windowId ||
-      core.originFromURL(again[0].url) !== origin
+      core.originFromURL(again[0].url) !== topOrigin
     )
       throw Error("refused");
     return {
       tabId: tab.id,
       windowId: tab.windowId,
       origin,
-      documentId: results[0].documentId,
+      documentId,
+      frameId,
+      topDocumentId,
+      topOrigin,
     };
   }
   function fields(c) {
@@ -706,7 +801,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     };
   }
   async function current(expected) {
-    const now = await capture();
+    const now = await capture(expected.frameId || 0);
     if (!core.sameContext(expected, now)) throw Error("refused");
   }
   async function connect() {
@@ -816,7 +911,11 @@ if (typeof importScripts === "function") importScripts("core.js");
         call.resolve(message);
         return;
       }
-      if (message.type !== expected) {
+      const accepted =
+        call.type === "fill"
+          ? ["fill", "filled", "filled-identity", "filled-card"]
+          : [expected];
+      if (!accepted.includes(message.type)) {
         if ("code" in message) message.code = "";
         call.reject(Error("refused"));
         disconnectWithStatus("原生协议错误，请重新连接");
@@ -846,17 +945,22 @@ if (typeof importScripts === "function") importScripts("core.js");
       }
     }
   }
-  async function match() {
+  async function match(category = "login", frameId = 0) {
+    if (!validCategory(category)) throw Error("refused");
+    if (!Number.isSafeInteger(frameId) || frameId < 0) throw Error("refused");
     if (!capability || pending || pendingOTP || pendingPasskey)
       throw Error("refused");
     rows = [];
     context = null;
+    matchCategory = category;
     updateBadge();
     const generation = epoch,
-      c = await capture();
+      c = await capture(frameId);
     await current(c);
     if (generation !== epoch) throw Error("refused");
-    const response = await request("match", fields(c));
+    const fieldsToSend = fields(c);
+    if (category !== "login") fieldsToSend.category = category;
+    const response = await request("match", fieldsToSend);
     if (generation !== epoch) throw Error("refused");
     await current(c);
     if (generation !== epoch) throw Error("refused");
@@ -875,39 +979,114 @@ if (typeof importScripts === "function") importScripts("core.js");
           !/^[a-f0-9]{64}$/.test(r.revision) ||
           typeof r.title !== "string" ||
           r.title.length > 16384 ||
-          r.state !== "active",
+          r.state !== "active" ||
+          (r.category !== undefined && !validCategory(r.category)) ||
+          (r.subtitle !== undefined &&
+            (typeof r.subtitle !== "string" || r.subtitle.length > 1024)),
       )
     )
       throw Error("refused");
     context = c;
-    rows = next;
-    status = `${rows.length} 个当前网站登录`;
+    rows = next.map((row) => ({
+      ...row,
+      category: row.category || category,
+    }));
+    status = `${rows.length} 个当前网站${
+      category === "login" ? "登录" : category === "identity" ? "身份信息" : "信用卡"
+    }`;
     updateBadge();
     rebuildContextMenus();
   }
-  async function fill(itemId, revision) {
-    const row = rows.find((r) => r.id === itemId && r.revision === revision),
+  async function fill(itemId, revision, category = "login") {
+    if (!validCategory(category)) throw Error("refused");
+    const row = rows.find(
+        (r) =>
+          r.id === itemId &&
+          r.revision === revision &&
+          (category === "login"
+            ? rowCategory(r) === "login"
+            : rowCategory(r) === category),
+      ),
       c = context,
       generation = epoch;
     if (!capability || pending || pendingOTP || pendingPasskey || !row || !c)
       throw Error("refused");
-    const intent = { itemId, revision, tabId: c.tabId, windowId: c.windowId };
+    const intent = {
+      itemId,
+      revision,
+      category,
+      tabId: c.tabId,
+      windowId: c.windowId,
+    };
     pending = intent;
-    status = quickFill
-      ? "正在填充所选账号"
-      : "请在原生窗口核对来源、条目与修订并批准";
+    status =
+      category === "login"
+        ? quickFill
+          ? "正在填充所选账号"
+          : "请在原生窗口核对来源、条目与修订并批准"
+        : "请在原生窗口批准本次敏感字段填充";
     let response;
     try {
       await bounded(current(c), generation);
       if (generation !== epoch || pending !== intent) throw Error("refused");
-      response = await request("fill", {
-        ...fields(c),
-        item_id: itemId,
-        revision,
-      });
+      const fieldsToSend = { ...fields(c), item_id: itemId, revision };
+      if (category !== "login") fieldsToSend.category = category;
+      response = await request("fill", fieldsToSend);
       if (generation !== epoch) throw Error("refused");
       await bounded(current(c), generation);
       if (generation !== epoch) throw Error("refused");
+      if (category === "identity" || category === "credit_card") {
+        const data =
+          category === "identity" ? response.identity : response.card;
+        if (!data || typeof data !== "object" || Array.isArray(data))
+          throw Error("refused");
+        await bounded(current(c), generation);
+        intent.injectionStarted = true;
+        let results;
+        try {
+          results = await bounded(
+            api.scripting.executeScript({
+              target: {
+                tabId: c.tabId,
+                frameIds: [c.frameId || 0],
+                documentIds: [c.documentId],
+              },
+              func:
+                category === "identity"
+                  ? core.fillIdentityDocument
+                  : core.fillCardDocument,
+              args: [
+                c.origin,
+                data,
+                Date.now() + 1500,
+                (c.frameId || 0) > 0,
+                category,
+              ],
+            }),
+            generation,
+          );
+        } finally {
+          wipeMap(data);
+          if (category === "identity") wipeMap(response.identity);
+          else wipeMap(response.card);
+        }
+        if (
+          results.length !== 1 ||
+          results[0].frameId !== (c.frameId || 0) ||
+          results[0].documentId !== c.documentId ||
+          results[0].result !== true
+        )
+          throw Error("refused");
+        await bounded(current(c), generation);
+        if (generation !== epoch || pending !== intent) throw Error("refused");
+        intent.injectionStarted = false;
+        fillUnknown = false;
+        status =
+          category === "identity"
+            ? "本次已请求填充身份信息；请核实网站结果"
+            : "本次已请求填充信用卡；请核实网站结果";
+        return;
+      }
       if (
         typeof response.username !== "string" ||
         typeof response.password !== "string" ||
@@ -921,7 +1100,11 @@ if (typeof importScripts === "function") importScripts("core.js");
       intent.injectionStarted = true;
       const results = await bounded(
         api.scripting.executeScript({
-          target: { tabId: c.tabId, documentIds: [c.documentId] },
+          target: {
+            tabId: c.tabId,
+            frameIds: [c.frameId || 0],
+            documentIds: [c.documentId],
+          },
           func: core.fillDocument,
           args: [
             c.origin,
@@ -930,15 +1113,17 @@ if (typeof importScripts === "function") importScripts("core.js");
             Date.now() + 1500,
             false,
             submit,
+            (c.frameId || 0) > 0,
           ],
         }),
         generation,
       );
+      const filled = results[0]?.result;
       if (
         results.length !== 1 ||
-        results[0].frameId !== 0 ||
+        results[0].frameId !== (c.frameId || 0) ||
         results[0].documentId !== c.documentId ||
-        results[0].result !== true
+        !(filled === true || (filled && filled.ok === true))
       )
         throw Error("refused");
       await bounded(current(c), generation);
@@ -958,6 +1143,11 @@ if (typeof importScripts === "function") importScripts("core.js");
       });
       intent.injectionStarted = false;
       fillUnknown = false;
+      const step =
+        filled && typeof filled === "object" && typeof filled.step === "string"
+          ? filled.step
+          : "combined";
+      rememberStep(c, itemId, revision, row.title, step);
       status = submit
         ? "已请求填充及登录；请核实网站结果"
         : "本次已请求填充；未自动提交";
@@ -970,6 +1160,8 @@ if (typeof importScripts === "function") importScripts("core.js");
       if (response) {
         response.username = "";
         response.password = "";
+        wipeMap(response.identity);
+        wipeMap(response.card);
       }
       if (generation === epoch && pending === intent) {
         pending = null;
@@ -1660,7 +1852,12 @@ if (typeof importScripts === "function") importScripts("core.js");
         id: r.id,
         title: r.title,
         revision: r.revision,
+        category: rowCategory(r),
+        ...(r.subtitle ? { subtitle: r.subtitle } : {}),
       })),
+      preferredItemId: multiStepFor(context?.tabId, context?.origin)?.itemId || "",
+      preferredTitle: multiStepFor(context?.tabId, context?.origin)?.title || "",
+      step: multiStepFor(context?.tabId, context?.origin)?.stepCompleted || "",
       pending: !!pending || !!pendingOTP || !!pendingPasskey,
       otpPending: !!pendingOTP,
       saveBlocked: unconfirmedSave,
@@ -1676,7 +1873,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       !Array.isArray(value) &&
       Object.keys(value).sort().join(",") ===
         "now,origin,timeOrigin,top,wall" &&
-      value.top === true &&
+      value.top === ((c.frameId || 0) === 0) &&
       value.origin === c.origin &&
       Number.isFinite(value.timeOrigin) &&
       value.timeOrigin > 0 &&
@@ -1690,16 +1887,20 @@ if (typeof importScripts === "function") importScripts("core.js");
     await bounded(current(c), generation, remaining());
     const results = await bounded(
       api.scripting.executeScript({
-        target: { tabId: c.tabId, documentIds: [c.documentId] },
+        target: {
+          tabId: c.tabId,
+          frameIds: [c.frameId || 0],
+          documentIds: [c.documentId],
+        },
         func: core.otpDocument,
-        args: [c.origin, "probe"],
+        args: [c.origin, "probe", undefined, undefined, (c.frameId || 0) > 0],
       }),
       generation,
       remaining(),
     );
     if (
       results.length !== 1 ||
-      results[0].frameId !== 0 ||
+      results[0].frameId !== (c.frameId || 0) ||
       results[0].documentId !== c.documentId ||
       !validOTPProbe(results[0].result, c)
     )
@@ -1843,14 +2044,24 @@ if (typeof importScripts === "function") importScripts("core.js");
       response = await bounded(reply, generation, remaining());
       if (generation !== epoch || pendingOTP !== intent) throw Error("refused");
       await bounded(current(c), generation, remaining());
-      const args = [c.origin, "fill", response.code, timing];
+      const args = [
+        c.origin,
+        "fill",
+        response.code,
+        timing,
+        (c.frameId || 0) > 0,
+      ];
       response.code = "";
       let injection;
       try {
         remaining();
         intent.injectionStarted = true;
         injection = api.scripting.executeScript({
-          target: { tabId: c.tabId, documentIds: [c.documentId] },
+          target: {
+            tabId: c.tabId,
+            frameIds: [c.frameId || 0],
+            documentIds: [c.documentId],
+          },
           func: core.otpDocument,
           args,
         });
@@ -1863,11 +2074,12 @@ if (typeof importScripts === "function") importScripts("core.js");
         generation !== epoch ||
         pendingOTP !== intent ||
         results.length !== 1 ||
-        results[0].frameId !== 0 ||
+        results[0].frameId !== (c.frameId || 0) ||
         results[0].documentId !== c.documentId ||
         results[0].result !== true
       )
         throw Error("refused");
+      multiStepSessions.delete(c.tabId);
       status = "本次已请求填充验证码；未自动提交";
     } catch {
       if (generation === epoch && pendingOTP === intent) {
@@ -1938,6 +2150,16 @@ if (typeof importScripts === "function") importScripts("core.js");
     rebuildContextMenus();
   });
   api.tabs.onUpdated.addListener((tabId, change) => {
+    const session = multiStepSessions.get(tabId);
+    if (session && "url" in change) {
+      try {
+        const origin = core.originFromURL(change.url);
+        if (core.siteKey(origin) !== session.siteKey)
+          multiStepSessions.delete(tabId);
+      } catch {
+        multiStepSessions.delete(tabId);
+      }
+    }
     if (
       (context?.tabId === tabId ||
         pending?.tabId === tabId ||
@@ -1951,6 +2173,16 @@ if (typeof importScripts === "function") importScripts("core.js");
       rebuildContextMenus();
     }
     void processOpenAndFill(tabId, change);
+  });
+  api.tabs.onRemoved?.addListener((tabId) => {
+    multiStepSessions.delete(tabId);
+    if (
+      context?.tabId === tabId ||
+      pending?.tabId === tabId ||
+      pendingOTP?.tabId === tabId ||
+      pendingPasskey?.tabId === tabId
+    )
+      cancelContext();
   });
   api.windows.onFocusChanged.addListener((windowId) => {
     updateBadge();
@@ -2447,7 +2679,8 @@ if (typeof importScripts === "function") importScripts("core.js");
     try {
       return (
         sender?.id === api.runtime.id &&
-        sender.frameId === 0 &&
+        Number.isSafeInteger(sender.frameId) &&
+        sender.frameId >= 0 &&
         Number.isSafeInteger(sender.tab?.id) &&
         typeof sender.documentId === "string" &&
         sender.documentId.length > 0 &&
@@ -2458,10 +2691,11 @@ if (typeof importScripts === "function") importScripts("core.js");
     }
   }
   async function contentContext(sender) {
-    const c = await capture();
+    const c = await capture(sender.frameId);
     if (
       c.tabId !== sender.tab.id ||
       c.windowId !== sender.tab.windowId ||
+      c.frameId !== sender.frameId ||
       c.documentId !== sender.documentId ||
       c.origin !== core.originFromURL(sender.url)
     )
@@ -2570,37 +2804,73 @@ if (typeof importScripts === "function") importScripts("core.js");
       return { ...result, status };
     }
     if (message.type === "inline-match") {
+      const category = message.category ?? "login";
+      if (!validCategory(category)) throw Error("refused");
       if (!capability || pending || pendingOTP || pendingPasskey)
         return { connected: !!capability, candidates: [] };
-      if (!core.sameContext(c, context) || Date.now() - lastMatchAt > 3000) {
-        await match();
+      if (
+        !core.sameContext(c, context) ||
+        matchCategory !== category ||
+        Date.now() - lastMatchAt > 3000
+      ) {
+        await match(category, c.frameId);
         lastMatchAt = Date.now();
       }
       await current(c);
+      const session =
+        category === "login" ? multiStepFor(c.tabId, c.origin) : null;
+      let list = rows.map((r) => ({
+        id: r.id,
+        revision: r.revision,
+        title: r.title,
+        category: rowCategory(r),
+        ...(r.subtitle ? { subtitle: r.subtitle } : {}),
+      }));
+      if (session) {
+        const index = list.findIndex((row) => row.id === session.itemId);
+        if (index > 0) list.unshift(list.splice(index, 1)[0]);
+      }
       return {
         connected: !!capability,
         neverSaveForOrigin: neverSaveOrigins.includes(c.origin),
         suppressInline: neverSaveOrigins.includes(c.origin),
-        candidates: rows.map((r) => ({
-          id: r.id,
-          revision: r.revision,
-          title: r.title,
-        })),
+        preferredItemId: session?.itemId || "",
+        preferredTitle: session?.title || "",
+        step: session?.stepCompleted || "",
+        candidates: list,
       };
     }
     if (
-      ["inline-fill", "inline-save", "inline-update", "inline-otp"].includes(
-        message.type,
-      )
+      [
+        "inline-fill",
+        "inline-save",
+        "inline-update",
+        "inline-otp",
+        "inline-fill-identity",
+        "inline-fill-card",
+      ].includes(message.type)
     ) {
       if (!core.sameContext(context, c)) throw Error("refused");
-      if (message.type === "inline-fill")
-        await fill(message.id, message.revision);
-      else if (message.type === "inline-otp")
+      let category = "login";
+      if (message.type === "inline-fill-identity") category = "identity";
+      else if (message.type === "inline-fill-card") category = "credit_card";
+      else if (message.type === "inline-fill")
+        category = message.category ?? "login";
+      if (!validCategory(category)) throw Error("refused");
+      if (message.type === "inline-fill") {
+        await fill(message.id, message.revision, category);
+      } else if (message.type === "inline-fill-identity") {
+        await fill(message.id, message.revision, "identity");
+      } else if (message.type === "inline-fill-card") {
+        await fill(message.id, message.revision, "credit_card");
+      } else if (message.type === "inline-otp") {
         await otp(message.id, message.revision);
-      else if (message.type === "inline-update")
-        await save(message.id, message.revision);
-      else await save();
+      } else {
+        if ((c.frameId || 0) !== 0) throw Error("refused");
+        if (message.type === "inline-update")
+          await save(message.id, message.revision);
+        else await save();
+      }
       return { status };
     }
     if (
@@ -2745,9 +3015,6 @@ if (typeof importScripts === "function") importScripts("core.js");
         case "lock":
           lockVault();
           break;
-        case "match":
-          await match();
-          break;
         case "commit-staged-save": {
           if (!/^[a-f0-9]{32}$/.test(message.stageId || ""))
             throw Error("refused");
@@ -2889,6 +3156,12 @@ if (typeof importScripts === "function") importScripts("core.js");
               : status,
           };
         }
+        case "match": {
+          const category = message.category ?? "login";
+          if (!validCategory(category)) throw Error("refused");
+          await match(category);
+          break;
+        }
         case "save-new":
           void save().catch(() => {
             if (requestEpoch === epoch)
@@ -2921,17 +3194,20 @@ if (typeof importScripts === "function") importScripts("core.js");
           if (Object.keys(message).join(",") !== "type") throw Error("refused");
           cancelOTP();
           break;
-        case "fill":
+        case "fill": {
+          const category = message.category ?? "login";
           if (
             typeof message.id !== "string" ||
-            typeof message.revision !== "string"
+            typeof message.revision !== "string" ||
+            !validCategory(category)
           )
             throw Error("refused");
-          void fill(message.id, message.revision).catch(() => {
+          void fill(message.id, message.revision, category).catch(() => {
             if (requestEpoch === epoch) status = "本次请求被拒绝";
           });
           break;
-        case "vault-search":
+        }
+                case "vault-search":
         case "vault-list": {
           await settingsReady;
           const result = await vaultSearch(message.query, message.category);

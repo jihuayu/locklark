@@ -40,6 +40,8 @@ func (i *identity) clear() { clear(i.Signing); clear(i.Audit); clear(i.AuditEncr
 type Row struct {
 	Kind         string `json:"kind,omitempty"`
 	RestoreState string `json:"restore_state,omitempty"`
+	Category     string `json:"category,omitempty"`
+	Subtitle     string `json:"subtitle,omitempty"`
 	State        string `json:"state"`
 	ID           string `json:"id"`
 	Title        string `json:"title"`
