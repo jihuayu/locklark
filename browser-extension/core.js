@@ -810,11 +810,42 @@ globalThis.LocklarkCore = (() => {
         "save-staged": ["v", "id", "type", "staged_save"],
         "save-pending": ["v", "id", "type", "staged_save"],
         "save-dismissed": ["v", "id", "type", "never_origins"],
+        unlocked: [
+          "v",
+          "type",
+          "capability",
+          "quick_fill",
+          "desktop_connected",
+          "unlocked",
+          "session_epoch",
+          "capabilities",
+        ],
       },
       keys = shapes[m.type];
     if (!keys || !hasOnly(m, keys)) return false;
     if (m.type === "locked") return true;
     if (m.type === "unpaired") return m.error === "expired";
+    if (m.type === "unlocked")
+      return (
+        m.v === 1 &&
+        /^[a-f0-9]{32}$/.test(m.capability || "") &&
+        (m.quick_fill === undefined || typeof m.quick_fill === "boolean") &&
+        (m.desktop_connected === undefined ||
+          m.desktop_connected === true) &&
+        (m.unlocked === undefined || m.unlocked === true) &&
+        (m.session_epoch === undefined ||
+          (Number.isSafeInteger(m.session_epoch) && m.session_epoch >= 0)) &&
+        (m.capabilities === undefined ||
+          (Array.isArray(m.capabilities) &&
+            m.capabilities.length <= 32 &&
+            m.capabilities.every(
+              (c) =>
+                typeof c === "string" &&
+                c.length >= 1 &&
+                c.length <= 64 &&
+                /^[a-z0-9-]+$/.test(c),
+            )))
+      );
     if (!/^[a-f0-9]{32}$/.test(m.id || "")) return false;
     if (!validCategory(m.category)) return false;
     if (m.type === "watchtower") return validWatchtower(m.watchtower);

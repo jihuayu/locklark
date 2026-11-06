@@ -100,3 +100,30 @@ test("background only sends request types the host accepts", () => {
   assert.match(backgroundJS, /"fill-profile"/);
   assert.match(backgroundJS, /state_action: action/);
 });
+
+test("desktop broker unlocked push is accepted and strictly bounded", () => {
+  const cap = "0123456789abcdef0123456789abcdef";
+  const push = {
+    v: 1,
+    type: "unlocked",
+    capability: cap,
+    quick_fill: true,
+    desktop_connected: true,
+    unlocked: true,
+    session_epoch: 3,
+    capabilities: ["vault-v2", "fill-profile"],
+  };
+  assert.equal(core.validResponse(push), true);
+  assert.equal(core.validResponse({ v: 1, type: "unlocked", capability: cap }), true);
+  for (const bad of [
+    { ...push, capability: "short" },
+    { ...push, id },
+    { ...push, extra: 1 },
+    { ...push, unlocked: false },
+    { ...push, session_epoch: -1 },
+    { ...push, capabilities: ["UPPER"] },
+    { ...push, v: 2 },
+  ])
+    assert.equal(core.validResponse(bad), false, JSON.stringify(bad));
+  assert.match(backgroundJS, /message\.type === "unlocked"/);
+});

@@ -949,6 +949,26 @@ if (typeof importScripts === "function") importScripts("core.js");
         if (otpUnknown) status += " · " + OTP_UNKNOWN;
         return;
       }
+      if (message.type === "unlocked") {
+        // Desktop-shared broker re-unlocked: the host rotated the capability
+        // and invalidated every in-flight request, so mirror that locally.
+        const uncertain = unconfirmedSave;
+        clear();
+        clearPrivateSessions();
+        capability = message.capability;
+        message.capability = "";
+        quickFill = message.quick_fill === true;
+        hostCapabilities = Array.isArray(message.capabilities)
+          ? message.capabilities.slice()
+          : [];
+        status = uncertain
+          ? "桌面已解锁 · 结果未确认，请在金库核实，勿重复保存"
+          : "桌面已解锁，已连接，请读取当前网站候选";
+        if (otpUnknown) status += " · " + OTP_UNKNOWN;
+        updateBadge();
+        rebuildContextMenus();
+        return;
+      }
       if (!message || message.v !== 1 || typeof message.id !== "string")
         return disconnectWithStatus("原生协议错误，请重新连接");
       const call = calls.get(message.id);
