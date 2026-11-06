@@ -53,7 +53,7 @@ func minTime(a, b time.Time) time.Time {
 func (c *Connection) saveMessage(r Request) (bool, error) {
 	switch r.Type {
 	case "save-new", "save-update":
-		if c.pending != nil || c.save != nil || c.otp != nil || c.passkey != nil {
+		if c.pending != nil || c.save != nil || c.otp != nil || c.passkey != nil || c.stagedBusy {
 			return true, c.refuse(r.ID)
 		}
 		s := c.session.Load()

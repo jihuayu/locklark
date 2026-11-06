@@ -7,8 +7,29 @@ import (
 	"testing"
 )
 
-func TestManifestAllowlistAndNoOverwrite(t *testing.T) {
+// trustedTempDir returns a fresh temporary directory only when the same
+// ownership checks used by registration accept its ancestry. Some sandboxes
+// place /home and /tmp under a foreign uid; registration correctly refuses
+// every path there, so skip instead of weakening the production checks.
+func trustedTempDir(t *testing.T) string {
+	t.Helper()
 	dir := t.TempDir()
+	requireTrustedTempDir(t, dir)
+	return dir
+}
+
+// requireTrustedTempDir applies the same guard to an existing fixture
+// directory. Tests that can still exercise negative registration cases use
+// this after those assertions but before their success paths.
+func requireTrustedTempDir(t *testing.T, dir string) {
+	t.Helper()
+	if trustedRegistrationParent(dir) != nil {
+		t.Skip("temporary directory ancestry is not owner-controlled in this sandbox")
+	}
+}
+
+func TestManifestAllowlistAndNoOverwrite(t *testing.T) {
+	dir := trustedTempDir(t)
 	host := filepath.Join(dir, "native host")
 	if os.WriteFile(host, []byte("fixture"), 0700) != nil {
 		t.Fatal("host")

@@ -41,6 +41,9 @@ type Connection struct {
 	saveAuth                *pendingSave
 	saveOutcome             atomic.Uint32
 	saveRequestID           string
+	staged                  map[string]*stagedSave
+	stagedBusy              bool
+	neverOrigins            map[string]bool
 	generation              atomic.Uint64
 	cancelEpoch             atomic.Uint64
 	pendingEpoch            uint64
@@ -98,6 +101,8 @@ func (c *Connection) invalidate() {
 		c.clearPasskey(c.passkey)
 	}
 	c.invalidateOTP()
+	c.clearStaged()
+	c.neverOrigins = nil
 	if c.save != nil {
 		if !c.save.gate.Cancel() && c.save.gate.CommitWon() {
 			c.save.uncertain.Store(true)
@@ -147,6 +152,7 @@ func (c *Connection) expire() {
 		c.context = personal.BrowserContext{}
 		go c.refuse(id)
 	}
+	c.expireStaged()
 }
 func (c *Connection) syncEpoch() {
 	if g := c.generation.Load(); g != c.epoch {
@@ -264,10 +270,20 @@ func (c *Connection) Handle(r Request) error {
 	if r.Type == "passkey-create" || r.Type == "passkey-get" {
 		return c.startPasskey(r)
 	}
+	if r.Type == "generate" {
+		password, profile, err := generatePassword(r.Options)
+		if err != nil {
+			return c.refuse(r.ID)
+		}
+		return c.response(Response{ID: r.ID, Type: "generated", GeneratedPassword: password, Profile: &profile, HistoryID: newHistoryID()})
+	}
 	if handled, e := c.saveMessage(r); handled {
 		return e
 	}
-	if c.pending != nil || c.save != nil || c.otp != nil || c.passkey != nil {
+	if handled, e := c.stagedMessage(r); handled {
+		return e
+	}
+	if c.pending != nil || c.save != nil || c.otp != nil || c.passkey != nil || c.stagedBusy {
 		return c.refuse(r.ID)
 	}
 	if r.Type == "match" {
@@ -351,7 +367,7 @@ func (c *Connection) approvePair(s *personal.Session, quick bool) error {
 	}
 	id := c.hello
 	c.hello = ""
-	return c.response(Response{ID: id, Type: "paired", Capability: c.capability, QuickFill: quick})
+	return c.response(Response{ID: id, Type: "paired", Capability: c.capability, QuickFill: quick, Capabilities: supportedCapabilities})
 }
 func (c *Connection) ApproveFill(id string) error {
 	c.mu.Lock()

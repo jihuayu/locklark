@@ -37,33 +37,55 @@ var token = regexp.MustCompile(`^[a-f0-9]{32}$`)
 var revision = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
 type Request struct {
-	Options    string `json:"options,omitempty"`
-	payload    *savePayload
-	WindowID   int64  `json:"window_id,omitempty"`
-	RequestID  string `json:"request_id,omitempty"`
-	Nonce      string `json:"nonce,omitempty"`
-	V          int    `json:"v"`
-	ID         string `json:"id"`
-	Type       string `json:"type"`
-	Capability string `json:"capability,omitempty"`
-	Origin     string `json:"origin,omitempty"`
-	TabID      int64  `json:"tab_id,omitempty"`
-	DocumentID string `json:"document_id,omitempty"`
-	ItemID     string `json:"item_id,omitempty"`
-	Revision   string `json:"revision,omitempty"`
+	Options        string `json:"options,omitempty"`
+	Mode           string `json:"mode,omitempty"`
+	Title          string `json:"title,omitempty"`
+	StageID        string `json:"stage_id,omitempty"`
+	NeverForOrigin bool   `json:"never_for_origin,omitempty"`
+	payload        *savePayload
+	WindowID       int64  `json:"window_id,omitempty"`
+	V              int    `json:"v"`
+	ID             string `json:"id"`
+	Type           string `json:"type"`
+	Capability     string `json:"capability,omitempty"`
+	Origin         string `json:"origin,omitempty"`
+	TabID          int64  `json:"tab_id,omitempty"`
+	DocumentID     string `json:"document_id,omitempty"`
+	ItemID         string `json:"item_id,omitempty"`
+	Revision       string `json:"revision,omitempty"`
+	RequestID      string `json:"request_id,omitempty"`
+	Nonce          string `json:"nonce,omitempty"`
 }
 
 func (r Request) Context() personal.BrowserContext {
 	return personal.BrowserContext{RequestID: r.ID, Origin: r.Origin, TabID: r.TabID, DocumentID: r.DocumentID}
 }
+func validTitle(value string) bool {
+	if len(value) > 1024 || !utf8.ValidString(value) {
+		return false
+	}
+	for _, r := range value {
+		if r < 32 && r != '\t' && r != '\n' && r != '\r' || r == 0xfffe || r == 0xffff {
+			return false
+		}
+	}
+	return true
+}
 func (r Request) valid() bool {
 	if r.V != 1 || !token.MatchString(r.ID) {
 		return false
 	}
-	if r.Type != "save-new" && r.Type != "save-update" && r.Type != "commit-ready" && r.Type != "cancel-save" && r.Type != "otp" && r.Type != "otp-ack" && r.Type != "cancel-otp" && (r.payload != nil || r.WindowID != 0 || r.RequestID != "" || r.Nonce != "") {
+	switch r.Type {
+	case "save-new", "save-update", "commit-ready", "cancel-save", "otp", "otp-ack", "cancel-otp", "stage-save", "commit-staged-save", "dismiss-save":
+	default:
+		if r.payload != nil || r.WindowID != 0 || r.RequestID != "" || r.Nonce != "" || r.StageID != "" || r.Mode != "" || r.Title != "" || r.NeverForOrigin {
+			return false
+		}
+	}
+	if r.Type != "passkey-create" && r.Type != "passkey-get" && r.Type != "generate" && r.Options != "" {
 		return false
 	}
-	if r.Type != "passkey-create" && r.Type != "passkey-get" && r.Options != "" {
+	if r.Type != "stage-save" && r.Type != "commit-staged-save" && r.Type != "dismiss-save" && (r.StageID != "" || r.Mode != "" || r.Title != "" || r.NeverForOrigin) {
 		return false
 	}
 	switch r.Type {
@@ -79,7 +101,29 @@ func (r Request) valid() bool {
 		}
 		return r.Type == "save-new" && r.ItemID == "" && r.Revision == "" || r.Type == "save-update" && token.MatchString(r.ItemID) && revision.MatchString(r.Revision)
 	case "commit-ready", "cancel-save":
-		return token.MatchString(r.Capability) && token.MatchString(r.RequestID) && r.payload == nil && r.Origin == "" && r.TabID == 0 && r.DocumentID == "" && r.WindowID == 0 && r.ItemID == "" && r.Revision == "" && (r.Type == "cancel-save" && r.Nonce == "" || r.Type == "commit-ready" && revision.MatchString(r.Nonce))
+		return token.MatchString(r.Capability) && token.MatchString(r.RequestID) && r.payload == nil && r.Origin == "" && r.TabID == 0 && r.DocumentID == "" && r.WindowID == 0 && r.ItemID == "" && r.Revision == "" && r.StageID == "" && r.Mode == "" && r.Title == "" && (r.Type == "cancel-save" && r.Nonce == "" || r.Type == "commit-ready" && revision.MatchString(r.Nonce))
+	case "generate":
+		return token.MatchString(r.Capability) && len(r.Options) > 0 && len(r.Options) <= 4096 && strictUnicode([]byte(r.Options)) && r.Origin == "" && r.TabID == 0 && r.DocumentID == "" && r.WindowID == 0 && r.ItemID == "" && r.Revision == "" && r.RequestID == "" && r.Nonce == "" && r.StageID == "" && r.Mode == "" && r.Title == "" && r.payload == nil
+	case "stage-save":
+		if !token.MatchString(r.Capability) || !r.SaveContext().Valid() || r.payload == nil || !validPayload(r.payload) || !validTitle(r.Title) || r.RequestID != "" || r.Nonce != "" || r.StageID != "" || r.NeverForOrigin {
+			return false
+		}
+		if r.Mode == "new" {
+			return r.ItemID == "" && r.Revision == ""
+		}
+		return r.Mode == "update" && token.MatchString(r.ItemID) && revision.MatchString(r.Revision)
+	case "pending-save":
+		return token.MatchString(r.Capability) && r.Context().Valid() && r.payload == nil && r.WindowID == 0 && r.ItemID == "" && r.Revision == "" && r.RequestID == "" && r.Nonce == "" && r.StageID == "" && r.Mode == "" && r.Title == "" && !r.NeverForOrigin
+	case "commit-staged-save":
+		if !token.MatchString(r.Capability) || !token.MatchString(r.StageID) || !r.SaveContext().Valid() || !validTitle(r.Title) || r.payload != nil || r.RequestID != "" || r.Nonce != "" || r.NeverForOrigin {
+			return false
+		}
+		if r.Mode == "new" {
+			return r.ItemID == "" && r.Revision == ""
+		}
+		return r.Mode == "update" && token.MatchString(r.ItemID) && revision.MatchString(r.Revision)
+	case "dismiss-save":
+		return token.MatchString(r.Capability) && token.MatchString(r.StageID) && r.payload == nil && r.Origin == "" && r.TabID == 0 && r.DocumentID == "" && r.WindowID == 0 && r.ItemID == "" && r.Revision == "" && r.RequestID == "" && r.Nonce == "" && r.Mode == "" && r.Title == ""
 	case "hello":
 		return r.Capability == "" && r.Origin == "" && r.TabID == 0 && r.DocumentID == "" && r.ItemID == "" && r.Revision == ""
 	case "cancel":
@@ -92,21 +136,47 @@ func (r Request) valid() bool {
 	return false
 }
 
+// GeneratedProfile publishes only policy counts, never the generated secret.
+type GeneratedProfile struct {
+	Mode             string `json:"mode"`
+	Length           int    `json:"length"`
+	AlphabetSize     int    `json:"alphabet_size"`
+	EntropyBitsFloor int    `json:"entropy_bits_floor"`
+}
+
+// StagedSave is metadata only. The staged password never leaves private memory.
+type StagedSave struct {
+	StageID          string `json:"stage_id"`
+	Origin           string `json:"origin"`
+	Username         string `json:"username"`
+	Title            string `json:"title"`
+	Mode             string `json:"mode"`
+	ExistingItemID   string `json:"existing_item_id"`
+	ExistingRevision string `json:"existing_revision"`
+	ExpiresAt        int64  `json:"expires_at"`
+}
+
 type Response struct {
-	Credential string         `json:"credential,omitempty"`
-	QuickFill  bool           `json:"quick_fill,omitempty"`
-	Code       string         `json:"code,omitempty"`
-	Nonce      string         `json:"nonce,omitempty"`
-	ItemID     string         `json:"item_id,omitempty"`
-	Revision   string         `json:"revision,omitempty"`
-	V          int            `json:"v"`
-	ID         string         `json:"id,omitempty"`
-	Type       string         `json:"type"`
-	Capability string         `json:"capability,omitempty"`
-	Candidates []personal.Row `json:"candidates,omitempty"`
-	Username   string         `json:"username,omitempty"`
-	Password   string         `json:"password,omitempty"`
-	Error      string         `json:"error,omitempty"`
+	Credential        string            `json:"credential,omitempty"`
+	QuickFill         bool              `json:"quick_fill,omitempty"`
+	Code              string            `json:"code,omitempty"`
+	Nonce             string            `json:"nonce,omitempty"`
+	ItemID            string            `json:"item_id,omitempty"`
+	Revision          string            `json:"revision,omitempty"`
+	V                 int               `json:"v"`
+	ID                string            `json:"id,omitempty"`
+	Type              string            `json:"type"`
+	Capability        string            `json:"capability,omitempty"`
+	GeneratedPassword string            `json:"generated_password,omitempty"`
+	HistoryID         string            `json:"history_id,omitempty"`
+	Candidates        []personal.Row    `json:"candidates,omitempty"`
+	Capabilities      []string          `json:"capabilities,omitempty"`
+	NeverOrigins      []string          `json:"never_origins,omitempty"`
+	Profile           *GeneratedProfile `json:"profile,omitempty"`
+	Staged            *StagedSave       `json:"staged_save,omitempty"`
+	Username          string            `json:"username,omitempty"`
+	Password          string            `json:"password,omitempty"`
+	Error             string            `json:"error,omitempty"`
 }
 
 // A legitimate login may have an empty username. Fill responses always carry
@@ -132,6 +202,18 @@ func (r Response) MarshalJSON() ([]byte, error) {
 	}
 	if r.Type != "paired" {
 		r.QuickFill = false
+		r.Capabilities = nil
+	}
+	if r.Type != "generated" {
+		r.GeneratedPassword = ""
+		r.HistoryID = ""
+		r.Profile = nil
+	}
+	if r.Type != "save-staged" && r.Type != "save-pending" {
+		r.Staged = nil
+	}
+	if r.Type != "save-dismissed" {
+		r.NeverOrigins = nil
 	}
 	if r.Type == "otp-ready" {
 		return json.Marshal(struct {
@@ -289,12 +371,17 @@ func ReadRequest(reader io.Reader) (Request, error) {
 	for dec.More() {
 		key, e := dec.Token()
 		name, ok := key.(string)
-		if e != nil || !ok || seen[name] || len(seen) >= 14 {
+		if e != nil || !ok || seen[name] || len(seen) >= 20 {
 			return Request{}, ErrProtocol
 		}
 		seen[name] = true
 		var value json.RawMessage
-		if dec.Decode(&value) != nil || len(value) == 0 || value[0] != '"' && (value[0] < '0' || value[0] > '9') && value[0] != '-' {
+		if dec.Decode(&value) != nil || len(value) == 0 {
+			clear(value)
+			return Request{}, ErrProtocol
+		}
+		scalar := value[0] == '"' || value[0] == '-' || value[0] >= '0' && value[0] <= '9' || string(value) == "true" || string(value) == "false"
+		if !scalar {
 			clear(value)
 			return Request{}, ErrProtocol
 		}
@@ -308,28 +395,33 @@ func ReadRequest(reader io.Reader) (Request, error) {
 		return Request{}, ErrProtocol
 	}
 	var wire struct {
-		Options    string  `json:"options"`
-		V          int     `json:"v"`
-		ID         string  `json:"id"`
-		Type       string  `json:"type"`
-		Capability string  `json:"capability"`
-		Origin     string  `json:"origin"`
-		TabID      int64   `json:"tab_id"`
-		DocumentID string  `json:"document_id"`
-		WindowID   int64   `json:"window_id"`
-		ItemID     string  `json:"item_id"`
-		Revision   string  `json:"revision"`
-		RequestID  string  `json:"request_id"`
-		Nonce      string  `json:"nonce"`
-		Username   *string `json:"username"`
-		Password   *string `json:"password"`
+		Options        string  `json:"options"`
+		Mode           string  `json:"mode"`
+		Title          string  `json:"title"`
+		StageID        string  `json:"stage_id"`
+		NeverForOrigin *bool   `json:"never_for_origin"`
+		V              int     `json:"v"`
+		ID             string  `json:"id"`
+		Type           string  `json:"type"`
+		Capability     string  `json:"capability"`
+		Origin         string  `json:"origin"`
+		TabID          int64   `json:"tab_id"`
+		DocumentID     string  `json:"document_id"`
+		WindowID       int64   `json:"window_id"`
+		ItemID         string  `json:"item_id"`
+		Revision       string  `json:"revision"`
+		RequestID      string  `json:"request_id"`
+		Nonce          string  `json:"nonce"`
+		Username       *string `json:"username"`
+		Password       *string `json:"password"`
 	}
 	dec = json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if dec.Decode(&wire) != nil {
 		return Request{}, ErrProtocol
 	}
-	r := Request{Options: wire.Options, V: wire.V, ID: wire.ID, Type: wire.Type, Capability: wire.Capability, Origin: wire.Origin, TabID: wire.TabID, DocumentID: wire.DocumentID, WindowID: wire.WindowID, ItemID: wire.ItemID, Revision: wire.Revision, RequestID: wire.RequestID, Nonce: wire.Nonce}
+	r := Request{Options: wire.Options, Mode: wire.Mode, Title: wire.Title, StageID: wire.StageID, V: wire.V, ID: wire.ID, Type: wire.Type, Capability: wire.Capability, Origin: wire.Origin, TabID: wire.TabID, DocumentID: wire.DocumentID, WindowID: wire.WindowID, ItemID: wire.ItemID, Revision: wire.Revision, RequestID: wire.RequestID, Nonce: wire.Nonce}
+	r.NeverForOrigin = wire.NeverForOrigin != nil && *wire.NeverForOrigin
 	if wire.Username != nil && wire.Password != nil {
 		r.payload = &savePayload{[]byte(*wire.Username), []byte(*wire.Password)}
 	}
@@ -340,7 +432,9 @@ func ReadRequest(reader io.Reader) (Request, error) {
 		expected = append(expected, "capability")
 	case "passkey-create", "passkey-get":
 		expected = append(expected, "capability", "origin", "tab_id", "document_id", "options")
-	case "match", "fill", "save-new", "save-update", "otp":
+	case "generate":
+		expected = append(expected, "capability", "options")
+	case "match", "fill", "save-new", "save-update", "otp", "pending-save":
 		expected = append(expected, "capability", "origin", "tab_id", "document_id")
 		if r.Type == "fill" || r.Type == "save-update" || r.Type == "otp" {
 			expected = append(expected, "item_id", "revision")
@@ -351,6 +445,12 @@ func ReadRequest(reader io.Reader) (Request, error) {
 		if r.Type == "save-new" || r.Type == "save-update" {
 			expected = append(expected, "window_id", "username", "password")
 		}
+	case "stage-save":
+		expected = append(expected, "capability", "origin", "tab_id", "document_id", "window_id", "username", "password", "mode", "title", "item_id", "revision")
+	case "commit-staged-save":
+		expected = append(expected, "capability", "stage_id", "origin", "tab_id", "document_id", "window_id", "title", "mode", "item_id", "revision")
+	case "dismiss-save":
+		expected = append(expected, "capability", "stage_id", "never_for_origin")
 	case "commit-ready", "cancel-save", "otp-ack", "cancel-otp":
 		expected = append(expected, "capability", "request_id")
 		if r.Type == "commit-ready" || r.Type == "otp-ack" {
