@@ -52,7 +52,10 @@ const path = require("node:path");
       assert.equal(result.filled, allowed);
       assert.equal(result.submits, 0);
       if (allowed)
-        assert.deepEqual(result.values, ["fixture-user", "fixture-password"]);
+        assert.deepEqual(result.values.filter(Boolean), [
+          "fixture-user",
+          "fixture-password",
+        ]);
       else assert.ok(result.values.every((x) => x === ""));
     };
     await check(basic, true);
@@ -93,7 +96,7 @@ const path = require("node:path");
         '<input type="password"',
         '<input name="other"><input type="password"',
       ),
-      false,
+      true,
     );
     await check(basic + basic, false);
     await check("<div inert>" + basic + "</div>", false);
@@ -234,6 +237,7 @@ const path = require("node:path");
       "Iframe capture was not refused",
     );
     await require("./browser_otp_dom.cjs")(page);
+    await require("./browser_login_parity_dom.cjs")(page);
     console.log(
       browserName +
         " DOM: login fill, static capture and OTP probe/fill with fixed clocks; no writes/events/submission; Unicode/UTF-8/surrogate bounds; hidden/disabled/readonly/ambiguous/cross-action/base/iframe refusals passed",
@@ -241,7 +245,8 @@ const path = require("node:path");
   } finally {
     await browser.close();
   }
-})().catch(() => {
+})().catch((error) => {
+  console.error(error.message);
   console.error("Browser DOM acceptance failed");
   process.exitCode = 1;
 });

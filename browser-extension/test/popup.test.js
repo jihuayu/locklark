@@ -28,6 +28,9 @@ function harness() {
   const elements = Object.fromEntries(
     [
       "status",
+      "auto-login",
+      "passkey-save",
+      "passkey-use",
       "origin",
       "save-warning",
       "connect",
@@ -47,6 +50,7 @@ function harness() {
         return elements[selector];
       },
       createElement: element,
+      createTextNode: (text) => ({ textContent: text }),
     },
     chrome: {
       runtime: {
@@ -112,7 +116,12 @@ test("refresh disables existing actions before its deferred RPC completes", asyn
   h.take("match");
   for (const control of ["#refresh", "#save-new"])
     assert.equal(h.elements[control].disabled, true);
-  assert.ok(h.row().children.every((button) => button.disabled));
+  assert.ok(
+    h
+      .row()
+      .children.slice(0, 3)
+      .every((button) => button.disabled),
+  );
   // A queued click can retain an old listener even after nodes are disabled.
   oldFill.listeners.get("click")();
   oldUpdate.listeners.get("click")();

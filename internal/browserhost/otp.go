@@ -167,7 +167,7 @@ func (c *Connection) handleOTP(r Request, allowed bool) error {
 	}
 	switch r.Type {
 	case "otp":
-		if c.pending != nil || c.save != nil || c.otp != nil || c.context.Origin != r.Origin || c.context.TabID != r.TabID || c.context.DocumentID != r.DocumentID {
+		if c.pending != nil || c.save != nil || c.otp != nil || c.passkey != nil || c.context.Origin != r.Origin || c.context.TabID != r.TabID || c.context.DocumentID != r.DocumentID {
 			responses = append(responses, otpError(r.ID))
 			break
 		}
@@ -204,6 +204,9 @@ func (c *Connection) handleOTP(r Request, allowed bool) error {
 		c.otpAuth = p
 		c.authMu.Unlock()
 		p.timer = time.AfterFunc(time.Until(until), func() { c.expireOTP(p) })
+		if c.quickFill {
+			go func() { _ = c.ApproveOTP(r.ID) }()
+		}
 	case "otp-ack":
 		p := c.otp
 		if p == nil || p.request.ID != r.RequestID || !p.originalClaimed || p.ackID != "" || !p.control.Pending() {

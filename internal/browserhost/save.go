@@ -53,7 +53,7 @@ func minTime(a, b time.Time) time.Time {
 func (c *Connection) saveMessage(r Request) (bool, error) {
 	switch r.Type {
 	case "save-new", "save-update":
-		if c.pending != nil || c.save != nil || c.otp != nil {
+		if c.pending != nil || c.save != nil || c.otp != nil || c.passkey != nil {
 			return true, c.refuse(r.ID)
 		}
 		s := c.session.Load()
@@ -96,6 +96,9 @@ func (c *Connection) saveMessage(r Request) (bool, error) {
 		c.authMu.Unlock()
 		c.saveOutcome.Store(saveWaiting)
 		p.timer = time.AfterFunc(time.Until(until), func() { c.expireSave(p) })
+		if c.quickFill {
+			go func() { _ = c.ApproveSave(r.ID, title) }()
+		}
 		return true, nil
 	case "cancel-save":
 		p := c.save

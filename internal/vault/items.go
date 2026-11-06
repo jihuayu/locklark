@@ -10,6 +10,7 @@ import (
 
 	"filippo.io/age"
 	"github.com/jihuayu/locklark/internal/origin"
+	"github.com/jihuayu/locklark/internal/passkey"
 	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
 	"github.com/jihuayu/locklark/third_party/gokeepasslib/wrappers"
 	"golang.org/x/crypto/ssh"
@@ -29,6 +30,7 @@ type Item struct {
 	// SSH material is part of the encrypted internal model, never a public DTO.
 	SSHSeed      []byte `json:",omitempty"`
 	SSHPublicKey []byte `json:",omitempty"`
+	Passkey      []byte `json:",omitempty"`
 }
 
 const MaxNotes = 64 << 10
@@ -85,6 +87,13 @@ func validItems(items []Item, size int) bool {
 		if it.Kind != "ssh-key" && (it.SSHSeed != nil || it.SSHPublicKey != nil) {
 			return false
 		}
+		if len(it.Passkey) > MaxPayload-size || len(it.Passkey) > 0 && !passkey.ValidRecord(it.Passkey) {
+			return false
+		}
+		size += len(it.Passkey)
+		if it.Kind != "login" && it.Passkey != nil {
+			return false
+		}
 		if it.State != "" && it.State != "archived" && it.State != "trashed" {
 			return false
 		}
@@ -93,7 +102,7 @@ func validItems(items []Item, size int) bool {
 		}
 		switch it.Kind {
 		case "ssh-key":
-			if len(it.SSHSeed) != ed25519.SeedSize || it.Username != "" || it.Password != "" || it.OTP != "" || it.Filename != "" || it.Attachment != nil || it.AttachmentProtected || it.URL != "" || it.Notes != "" || it.ImportSource != nil {
+			if len(it.SSHSeed) != ed25519.SeedSize || it.Username != "" || it.Password != "" || it.OTP != "" || it.Filename != "" || it.Attachment != nil || it.AttachmentProtected || it.URL != "" || it.Notes != "" || it.ImportSource != nil || it.Passkey != nil {
 				return false
 			}
 			private := ed25519.NewKeyFromSeed(it.SSHSeed)
@@ -115,6 +124,9 @@ func validItems(items []Item, size int) bool {
 				return false
 			}
 		case "document":
+			if len(it.Passkey) != 0 {
+				return false
+			}
 			if it.Notes != "" || it.URL != "" || it.Username != "" || it.Password != "" || it.OTP != "" || it.Filename == "" || it.Filename == "." || it.Filename == ".." || strings.ContainsAny(it.Filename, "/\\") {
 				return false
 			}
@@ -168,6 +180,9 @@ func writeItems(db *kdbx.Database, metadata []byte, items []Item) error {
 			e.Values = append(e.Values, slot("Locklark.PreviousState", it.PreviousState, false))
 		}
 		if it.Kind == "login" {
+			if len(it.Passkey) != 0 {
+				e.Values = append(e.Values, slot("Locklark.Passkey", base64.StdEncoding.EncodeToString(it.Passkey), true))
+			}
 			if it.Notes != "" {
 				e.Values = append(e.Values, slot("Notes", it.Notes, true))
 			}
@@ -228,7 +243,7 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 			if _, ok := fields[v.Key]; ok {
 				return nil, nil, ErrSnapshot
 			}
-			protected := v.Key == "UserName" || v.Key == "Notes" || v.Key == "Password" || v.Key == "otp" || v.Key == "URL" || v.Key == "Locklark.ImportSource" || v.Key == "Locklark.SSHSeed"
+			protected := v.Key == "UserName" || v.Key == "Notes" || v.Key == "Password" || v.Key == "otp" || v.Key == "URL" || v.Key == "Locklark.ImportSource" || v.Key == "Locklark.SSHSeed" || v.Key == "Locklark.Passkey"
 			if v.Value.Protected.Bool != protected {
 				return nil, nil, ErrSnapshot
 			}
@@ -292,6 +307,14 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 			}
 		case "login":
 			expected := 5 + extra
+			if v, ok := fields["Locklark.Passkey"]; ok {
+				var err error
+				it.Passkey, err = base64.StdEncoding.Strict().DecodeString(v.Content)
+				if err != nil || len(it.Passkey) == 0 || base64.StdEncoding.EncodeToString(it.Passkey) != v.Content {
+					return nil, nil, ErrSnapshot
+				}
+				expected++
+			}
 			if v, ok := fields["Notes"]; ok {
 				if v.Content == "" || !ValidNotes(v.Content) {
 					return nil, nil, ErrSnapshot

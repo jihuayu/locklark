@@ -51,3 +51,20 @@ button:disabled {
   line-height: 1.5;
   color: #52645a;
 }
+
+label {
+  display: block;
+  font-size: 12px;
+  padding: 5px 0;
+}
+details {
+  margin-top: 8px;
+}
+#candidates {
+  max-height: 260px;
+  overflow-y: auto;
+}
+#candidates > div {
+  border-top: 1px solid #dce5dd;
+  padding-top: 8px;
+}

@@ -9,8 +9,25 @@ const manifest = {
   manifest_version: 3,
   name: "Locklark",
   version: "0.1.0",
-  description: "Explicit native pairing and one-use login fill",
-  permissions: ["activeTab", "scripting", "nativeMessaging"],
+  description:
+    "Passwords, automatic sign-in and passkeys with your native Locklark vault",
+  permissions: ["activeTab", "scripting", "nativeMessaging", "storage"],
+  host_permissions: ["https://*/*"],
+  content_scripts: [
+    {
+      matches: ["https://*/*"],
+      js: ["content.js"],
+      run_at: "document_start",
+      all_frames: false,
+    },
+    {
+      matches: ["https://*/*"],
+      js: ["webauthn.js"],
+      run_at: "document_start",
+      all_frames: false,
+      world: "MAIN",
+    },
+  ],
   action: { default_popup: "popup.html" },
   commands: {
     _execute_action: {
@@ -23,6 +40,7 @@ const manifest = {
 };
 if (mode === "chromium") {
   manifest.key = key;
+  manifest.minimum_chrome_version = "120";
   manifest.background = { service_worker: "background.js" };
 } else {
   // Firefox reserves Ctrl+Shift+Y for Library in real profiles. Keep the
@@ -41,6 +59,8 @@ const out = path.join(__dirname, "dist", mode);
 fs.mkdirSync(out, { recursive: true });
 for (const name of [
   "core.js",
+  "content.js",
+  "webauthn.js",
   "background.js",
   "popup.html",
   "popup.css",

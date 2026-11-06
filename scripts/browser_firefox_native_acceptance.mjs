@@ -574,12 +574,10 @@ try {
   );
   assert.deepEqual(
     [...manifest.permissions].sort(),
-    ["activeTab", "nativeMessaging", "scripting"].sort(),
+    ["activeTab", "nativeMessaging", "scripting", "storage"].sort(),
   );
-  assert(
-    !manifest.host_permissions && !manifest.content_scripts,
-    "Use the production extension without added test privileges",
-  );
+  assert.deepEqual(manifest.host_permissions, ["https://*/*"]);
+  assert.equal(manifest.content_scripts?.length, 2);
   const key = join(state, "tls.key"),
     certificate = join(state, "tls.crt");
   const caKey = join(state, "ca.key"),
@@ -889,6 +887,8 @@ try {
     progress("native-pair");
     input([{ click_label: "确认连接此扩展" }]);
     await blank();
+    await openPopup();
+    await popupClick("#auto-login"); // Legacy manual-mode acceptance disables auto-submit.
     if (process.env.LOCKLARK_TEST_FAILURE_STAGE !== "otp-page-arguments") {
       progress("native approval and actual Firefox document-targeted fill");
       await select();

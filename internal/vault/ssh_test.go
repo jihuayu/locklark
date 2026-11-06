@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"filippo.io/age"
+	"github.com/jihuayu/locklark/internal/passkey"
 	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
 	"golang.org/x/crypto/ssh"
 )
@@ -69,7 +70,16 @@ func TestSSHKeyRejectsHybridAndUnprotectedShapes(t *testing.T) {
 		t.Fatal("SSH fixture")
 	}
 	base := Item{ID: "ssh", Kind: "ssh-key", Title: "key", SSHSeed: seed, SSHPublicKey: public.Marshal()}
-	for _, change := range []func(*Item){func(i *Item) { i.Kind = "login" }, func(i *Item) { i.Kind = "document"; i.Filename = "file" }, func(i *Item) { i.Password = "not a key" }, func(i *Item) { i.Username = "user" }, func(i *Item) { i.Notes = "notes" }, func(i *Item) { i.OTP = "seed" }, func(i *Item) { i.URL = "https://example.test" }, func(i *Item) { i.Attachment = []byte{1} }, func(i *Item) { i.ImportSource = []byte("old") }, func(i *Item) { i.SSHSeed = make([]byte, 31) }, func(i *Item) { i.SSHPublicKey = bytes.Repeat([]byte{1}, 51) }} {
+	pkRequest, e := passkey.Parse("https://example.test", true, []byte(`{"challenge":"Y2hhbGxlbmdlLTAxMjM0NTY3ODk","rp":{"name":"Example"},"user":{"id":"dXNlcg","name":"user"},"pubKeyCredParams":[{"type":"public-key","alg":-7}]}`))
+	if e != nil {
+		t.Fatal("passkey fixture")
+	}
+	pkRaw, _, e := passkey.Create(pkRequest, false)
+	if e != nil {
+		t.Fatal("passkey fixture")
+	}
+	defer clear(pkRaw)
+	for _, change := range []func(*Item){func(i *Item) { i.Kind = "login" }, func(i *Item) { i.Kind = "document"; i.Filename = "file" }, func(i *Item) { i.Password = "not a key" }, func(i *Item) { i.Username = "user" }, func(i *Item) { i.Notes = "notes" }, func(i *Item) { i.OTP = "seed" }, func(i *Item) { i.URL = "https://example.test" }, func(i *Item) { i.Attachment = []byte{1} }, func(i *Item) { i.ImportSource = []byte("old") }, func(i *Item) { i.SSHSeed = make([]byte, 31) }, func(i *Item) { i.SSHPublicKey = bytes.Repeat([]byte{1}, 51) }, func(i *Item) { i.Passkey = pkRaw }, func(i *Item) { i.Kind = "login"; i.Passkey = pkRaw }} {
 		item := base
 		change(&item)
 		if ValidateItems(nil, []Item{item}) == nil {
