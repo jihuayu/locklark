@@ -631,7 +631,8 @@ func TestConfirmRunBundleDisclosure(t *testing.T) {
 		"kube/config", "NO_COLOR", filepath.Dir(program), "$(touch /tmp/pwned)",
 		"输入 RUN 确认本次可信命令披露",
 	} {
-		if !strings.Contains(text, needle) {
+		quoted := strings.Trim(strconv.Quote(needle), `"`)
+		if !strings.Contains(text, quoted) {
 			t.Fatalf("disclosure omits %q: %s", needle, text)
 		}
 	}

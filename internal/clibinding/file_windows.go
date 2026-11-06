@@ -46,6 +46,20 @@ func rejectReparse(path string) error {
 	return nil
 }
 
+// replaceableBindingTarget allows publishing over a missing or ordinary file
+// and refuses symlinks, reparse points and non-regular targets. It never holds
+// an open handle, so the subsequent MoveFileEx replacement is not blocked.
+func replaceableBindingTarget(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return ErrBinding
+	}
+	return rejectReparse(path)
+}
+
 func trustedBindingDirectoryDescriptor(sd *windows.SECURITY_DESCRIPTOR, user *windows.SID, immediate bool) error {
 	owner, _, err := sd.Owner()
 	if err != nil || !trustedWindowsSID(owner, user) {
@@ -139,7 +153,7 @@ func privateBindingFileDescriptor(sd *windows.SECURITY_DESCRIPTOR, user *windows
 			return ErrBinding
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
-		if !sid.Equals(user) && uint32(ace.Mask)&windowsFileAccessMask != 0 {
+		if !trustedWindowsSID(sid, user) && uint32(ace.Mask)&windowsFileAccessMask != 0 {
 			return ErrBinding
 		}
 	}
@@ -207,7 +221,7 @@ func writePrivateBindingFile(path string, data []byte) error {
 	if err := trustedBindingParent(dir); err != nil {
 		return ErrBinding
 	}
-	if _, _, err := validatePrivateBindingFile(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := replaceableBindingTarget(path); err != nil {
 		return ErrBinding
 	}
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()

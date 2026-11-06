@@ -44,7 +44,7 @@ const path = require("node:path");
           Date.now() + (expired ? -1 : 1500),
         );
         return {
-          filled,
+          filled: filled === true || (!!filled && filled.ok === true),
           submits,
           values: [...document.querySelectorAll("input")].map((e) => e.value),
         };
@@ -130,7 +130,13 @@ const path = require("node:path");
             refused: value === false,
             exact:
               !!value &&
-              Object.keys(value).sort().join(",") === "password,username" &&
+              Object.keys(value)
+                .filter((k) => k !== "isNewPassword" && k !== "isPasswordChange")
+                .sort()
+                .join(",") === "password,username" &&
+              ["isNewPassword", "isPasswordChange"].every(
+                (k) => value[k] === undefined || typeof value[k] === "boolean",
+              ) &&
               value.username === username &&
               value.password === password,
             unchanged: inputs.every(
