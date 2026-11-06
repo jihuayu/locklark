@@ -20,6 +20,7 @@ import (
 	"github.com/jihuayu/locklark/internal/nativeclipboard"
 	"github.com/jihuayu/locklark/internal/osunlock"
 	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/locklark/internal/sshagent"
 )
 
 type outcome struct {
@@ -27,6 +28,16 @@ type outcome struct {
 	err         error
 }
 type App struct {
+	sshHost                                                *sshNativeHost
+	sshService                                             *sshagent.Service
+	sshApproval                                            *sshNativeRequest
+	sshStarting, sshStopping                               bool
+	sshStopSequence                                        uint64
+	sshTitle, sshImportPath                                string
+	sshRows                                                []personal.SSHKeyRow
+	sshScope                                               string
+	sshSelected                                            *personal.SSHKeyRow
+	sshRetired                                             []*sshNativeHost
 	notesEditor                                            *nativeNotesDraft
 	quick                                                  quickSearchPanel
 	quickShortcut                                          string
@@ -72,7 +83,7 @@ type App struct {
 }
 
 func New() *App {
-	return &App{generationLength: "24", systemStore: osunlock.New(), scope: "active", page: "vault", editField: "password", dispatch: func(fn func()) { fn() }, launch: func(fn func()) { go fn() }}
+	return &App{generationLength: "24", systemStore: osunlock.New(), scope: "active", sshScope: "active", page: "vault", editField: "password", dispatch: func(fn func()) { fn() }, launch: func(fn func()) { go fn() }}
 }
 func (a *App) run(work func() outcome) { a.runContext(func(context.Context) outcome { return work() }) }
 func (a *App) runContext(work func(context.Context) outcome) {
@@ -112,6 +123,10 @@ func (a *App) runContext(work func(context.Context) outcome) {
 }
 func message(e error) string {
 	switch {
+	case errors.Is(e, personal.ErrSSHKey):
+		return "SSH 密钥不可用；仅支持有效的未加密 OpenSSH Ed25519 私钥"
+	case errors.Is(e, personal.ErrSSHSign):
+		return "本次 SSH 签名已拒绝、撤销或过期；不会自动重试"
 	case errors.Is(e, personal.ErrMutationUnknown):
 		return mutationUnknownStatus
 	case errors.Is(e, personal.ErrMutationCancelled):
@@ -152,6 +167,11 @@ func visible(s string) string {
 	return out.String()
 }
 func (a *App) Lock() {
+	a.stopSSHAgent()
+	a.sshRows = nil
+	a.sshSelected = nil
+	a.sshTitle = ""
+	a.sshImportPath = ""
 	if a.operation != nil {
 		a.operation.gate.Cancel()
 		if a.operation.gate.CommitWon() {
@@ -233,7 +253,7 @@ func (a *App) unlock() {
 		}
 		return outcome{drop: s.Lock, apply: func() {
 			a.session = s
-			a.rows = rows
+			a.rows = loginProjection(rows)
 			a.scope = "active"
 			a.page = "vault"
 			a.status = "已解锁 · 5 分钟未操作自动锁定"
@@ -291,10 +311,10 @@ func (a *App) refresh() {
 			rows, e = s.Search(query, scope)
 		}
 		return outcome{err: e, apply: func() {
-			a.rows = rows
+			a.rows = loginProjection(rows)
 			a.selected = nil
 			a.display = ""
-			a.status = fmt.Sprintf("%d 个条目", len(rows))
+			a.status = fmt.Sprintf("%d 个条目", len(a.rows))
 		}}
 	})
 }
@@ -316,7 +336,7 @@ func (a *App) edit() {
 			return outcome{err: e}
 		}
 		rows, e := s.List(scope)
-		return outcome{err: e, apply: func() { a.rows = rows; a.selected = nil; a.display = ""; a.status = "字段已更新" }}
+		return outcome{err: e, apply: func() { a.rows = loginProjection(rows); a.selected = nil; a.display = ""; a.status = "字段已更新" }}
 	})
 }
 func (a *App) state(action string) {
@@ -334,7 +354,7 @@ func (a *App) state(action string) {
 			return outcome{err: e}
 		}
 		rows, e := s.List(scope)
-		return outcome{err: e, apply: func() { a.rows = rows; a.selected = nil; a.display = "" }}
+		return outcome{err: e, apply: func() { a.rows = loginProjection(rows); a.selected = nil; a.display = "" }}
 	})
 }
 func (a *App) disclose(field, purpose string) {
@@ -405,6 +425,8 @@ func (a *App) View(c *ui.Context) {
 		})
 		if a.session == nil {
 			a.lockView(c)
+		} else if a.sshApproval != nil {
+			a.sshApprovalView(c)
 		} else if a.browser != nil {
 			a.browserView(c)
 		} else if a.quick.open {
@@ -466,7 +488,7 @@ func (a *App) lockView(c *ui.Context) {
 }
 func (a *App) vaultView(c *ui.Context) {
 	ui.Row(c).Gap(8).Children(func() {
-		for _, tab := range []struct{ id, label string }{{"vault", "金库"}, {"activity", "活动"}, {"health", "体检"}, {"transfer", "导入与导出"}, {"security", "安全设置"}} {
+		for _, tab := range []struct{ id, label string }{{"vault", "金库"}, {"ssh", "SSH 密钥"}, {"activity", "活动"}, {"health", "体检"}, {"transfer", "导入与导出"}, {"security", "安全设置"}} {
 			tab := tab
 			ui.Button(c, tab.label).OnClick(func() {
 				a.clearNotesEditor()
@@ -474,10 +496,15 @@ func (a *App) vaultView(c *ui.Context) {
 				a.regenerate = nil
 				a.page = tab.id
 				a.display = ""
+				if tab.id == "ssh" {
+					a.refreshSSHKeys()
+				}
 			})
 		}
 	})
 	switch a.page {
+	case "ssh":
+		a.sshKeysView(c)
 	case "security":
 		a.securityView(c)
 	case "activity":
@@ -685,7 +712,12 @@ func Run() error {
 		_ = png.Encode(&pngIcon, icon)
 		_, _ = mygo.NewTray(mygo.TrayOptions{ID: "locklark", Icon: pngIcon.Bytes(), ToolTip: "Locklark", Menu: mygo.NewMenu([]*mygo.MenuItem{{Label: "打开金库", Click: func(*mygo.MenuItem, *mygo.Window) { a.win.Show(); a.win.Focus() }}, {Label: "快捷搜索", Click: func(*mygo.MenuItem, *mygo.Window) { a.showQuickSearch() }}, {Label: "立即锁定", Click: func(*mygo.MenuItem, *mygo.Window) { a.Lock(); a.win.Invalidate() }}, {Label: "退出", Click: func(*mygo.MenuItem, *mygo.Window) { a.Lock(); mygo.App.Quit() }}})})
 	})
-	return mygo.App.Run()
+	err := mygo.App.Run()
+	a.Lock()
+	if !a.waitSSHShutdown(5*time.Second) && err == nil {
+		return sshagent.ErrUnavailable
+	}
+	return err
 }
 
 func (a *App) systemUnlock() {
@@ -704,7 +736,7 @@ func (a *App) systemUnlock() {
 		}
 		return outcome{drop: s.Lock, apply: func() {
 			a.session = s
-			a.rows = rows
+			a.rows = loginProjection(rows)
 			a.scope = "active"
 			a.page = "vault"
 			a.status = "已通过系统解锁"
