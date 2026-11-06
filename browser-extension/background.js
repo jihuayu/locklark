@@ -46,12 +46,9 @@ if (typeof importScripts === "function") importScripts("core.js");
     otpCancellation = null,
     otpUnknown = false,
     epoch = 0,
-    unconfirmedSave = false,
-    matchCategory = "login";
-  const MULTI_STEP_TTL = 120000;
+    unconfirmedSave = false;
   // Per-tab ephemeral login continuation state. Metadata only, never field
   // values, and never persisted outside the service worker.
-  const multiStepSessions = new Map();
   const OTP_UNKNOWN = "验证码填充结果未确认，请核实页面";
   const SAVE_UNKNOWN = "结果未确认，请在金库核实，勿重复保存";
   const calls = new Map(),
@@ -413,15 +410,16 @@ if (typeof importScripts === "function") importScripts("core.js");
       }
     }
   }
-  async function match(category = "login") {
+  async function match(category = "login", frameId = 0) {
     if (!validCategory(category)) throw Error("refused");
+    if (!Number.isSafeInteger(frameId) || frameId < 0) throw Error("refused");
     if (!capability || pending || pendingOTP || pendingPasskey)
       throw Error("refused");
     rows = [];
     context = null;
     matchCategory = category;
     const generation = epoch,
-      c = await capture();
+      c = await capture(frameId);
     await current(c);
     if (generation !== epoch) throw Error("refused");
     const fieldsToSend = fields(c);
@@ -1170,7 +1168,7 @@ if (typeof importScripts === "function") importScripts("core.js");
         matchCategory !== category ||
         Date.now() - lastMatchAt > 3000
       ) {
-        await match(category);
+        await match(category, c.frameId);
         lastMatchAt = Date.now();
       }
       await current(c);
