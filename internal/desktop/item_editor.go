@@ -294,6 +294,25 @@ func draftFromDetail(detail personal.ItemDetail) *ItemDraft {
 	if draft.VaultID == "" {
 		draft.VaultID = vault.DefaultVaultID
 	}
+	// Legacy card/identity items may carry their values only in section
+	// fields. The normalized view synthesizes the typed struct from section
+	// purposes; use it for anything the detail did not provide directly.
+	sectionsOnly := vault.Item{Category: draft.Category, Sections: draft.Sections}
+	if detail.CreditCard == nil {
+		if cc := sectionsOnly.NormalizedCreditCard(); cc != nil {
+			draft.CreditCard = *cc
+		}
+	}
+	if detail.Identity == nil {
+		if identity := sectionsOnly.NormalizedIdentity(); identity != nil {
+			draft.Identity = *identity
+		}
+	}
+	// Fill typed members still empty from their canonical section fields, then
+	// mirror the typed values back into the cloned template so the editor's
+	// hidden duplicates cannot diverge before the first save.
+	draft.canonicalFromSections()
+	draft.syncCanonicalSections(draft.Sections)
 	return draft
 }
 
@@ -331,7 +350,174 @@ func (d *ItemDraft) item() vault.Item {
 		id := d.Identity
 		item.Identity = &id
 	}
+	// The persisted default-section fields are duplicates of the typed
+	// struct; normalization and autofill prefer the typed struct, so mirror the
+	// typed values into the cloned sections to keep both representations equal.
+	d.syncCanonicalSections(item.Sections)
 	return item
+}
+
+// v2CanonicalField binds one typed credit-card or identity draft member to
+// the default template section/field that mirrors it. Editor inputs for these
+// fields write the typed struct (which normalization and autofill prefer)
+// instead of creating a second, divergent section value.
+type v2CanonicalField struct {
+	SectionID string
+	FieldID   string
+	Purpose   string
+	Label     string
+	Concealed bool
+	value     func(*ItemDraft) *string
+}
+
+func (b v2CanonicalField) resolve(d *ItemDraft) *string {
+	if d == nil || b.value == nil {
+		return nil
+	}
+	return b.value(d)
+}
+
+// v2DraftCanonicalFields returns the typed bindings for a draft category.
+func v2DraftCanonicalFields(category vault.ItemCategory) []v2CanonicalField {
+	switch category {
+	case vault.CategoryCreditCard:
+		return []v2CanonicalField{
+			{SectionID: "card", FieldID: "cardholder", Purpose: "cc-name", Label: "持卡人", value: func(d *ItemDraft) *string { return &d.CreditCard.CardholderName }},
+			{SectionID: "card", FieldID: "type", Purpose: "cc-type", Label: "卡类型", value: func(d *ItemDraft) *string { return &d.CreditCard.Type }},
+			{SectionID: "card", FieldID: "number", Purpose: "cc-number", Label: "卡号", Concealed: true, value: func(d *ItemDraft) *string { return &d.CreditCard.Number }},
+			{SectionID: "card", FieldID: "verification", Purpose: "cc-csc", Label: "安全码", Concealed: true, value: func(d *ItemDraft) *string { return &d.CreditCard.Verification }},
+			{SectionID: "card", FieldID: "expiry", Purpose: "cc-exp", Label: "有效期", value: func(d *ItemDraft) *string { return &d.CreditCard.ExpiryDate }},
+			{SectionID: "card", FieldID: "valid_from", Label: "生效日期", value: func(d *ItemDraft) *string { return &d.CreditCard.ValidFrom }},
+			{SectionID: "details", FieldID: "issuing_bank", Label: "发卡行", value: func(d *ItemDraft) *string { return &d.CreditCard.IssuingBank }},
+			{SectionID: "details", FieldID: "pin", Purpose: "cc-pin", Label: "PIN", Concealed: true, value: func(d *ItemDraft) *string { return &d.CreditCard.PIN }},
+		}
+	case vault.CategoryIdentity:
+		return []v2CanonicalField{
+			{SectionID: "identification", FieldID: "first_name", Purpose: "given-name", Label: "名", value: func(d *ItemDraft) *string { return &d.Identity.FirstName }},
+			{SectionID: "identification", FieldID: "middle_name", Purpose: "additional-name", Label: "中间名", value: func(d *ItemDraft) *string { return &d.Identity.MiddleName }},
+			{SectionID: "identification", FieldID: "last_name", Purpose: "family-name", Label: "姓", value: func(d *ItemDraft) *string { return &d.Identity.LastName }},
+			{SectionID: "identification", FieldID: "birth_date", Purpose: "bday", Label: "出生日期", value: func(d *ItemDraft) *string { return &d.Identity.BirthDate }},
+			{SectionID: "identification", FieldID: "company", Purpose: "organization", Label: "公司", value: func(d *ItemDraft) *string { return &d.Identity.Company }},
+			{SectionID: "identification", FieldID: "department", Purpose: "department", Label: "部门", value: func(d *ItemDraft) *string { return &d.Identity.Department }},
+			{SectionID: "identification", FieldID: "job_title", Purpose: "organization-title", Label: "职位", value: func(d *ItemDraft) *string { return &d.Identity.JobTitle }},
+			{SectionID: "contact", FieldID: "email", Purpose: "email", Label: "邮箱", value: func(d *ItemDraft) *string { return &d.Identity.Email }},
+			{SectionID: "contact", FieldID: "phone", Purpose: "tel", Label: "电话", value: func(d *ItemDraft) *string { return &d.Identity.Phone }},
+			{SectionID: "contact", FieldID: "address", Purpose: "street-address", Label: "地址", value: func(d *ItemDraft) *string { return &d.Identity.AddressLine1 }},
+			{SectionID: "contact", FieldID: "city", Purpose: "address-level2", Label: "城市", value: func(d *ItemDraft) *string { return &d.Identity.City }},
+			{SectionID: "contact", FieldID: "state", Purpose: "address-level1", Label: "省/州", value: func(d *ItemDraft) *string { return &d.Identity.State }},
+			{SectionID: "contact", FieldID: "postal_code", Purpose: "postal-code", Label: "邮编", value: func(d *ItemDraft) *string { return &d.Identity.PostalCode }},
+			{SectionID: "contact", FieldID: "country", Purpose: "country", Label: "国家", value: func(d *ItemDraft) *string { return &d.Identity.Country }},
+			{SectionID: "contact", FieldID: "website", Purpose: "url", Label: "网站", value: func(d *ItemDraft) *string { return &d.Identity.Website }},
+		}
+	}
+	return nil
+}
+
+// v2DraftCanonicalField reports whether a draft section field is the canonical
+// duplicate of a typed member, matching by id first and then by purpose.
+func v2DraftCanonicalField(d *ItemDraft, sectionID string, field vault.CustomField) (v2CanonicalField, bool) {
+	if d == nil {
+		return v2CanonicalField{}, false
+	}
+	bindings := v2DraftCanonicalFields(d.Category)
+	for _, b := range bindings {
+		if b.SectionID == sectionID && b.FieldID == field.ID {
+			return b, true
+		}
+	}
+	if field.Purpose == "" {
+		return v2CanonicalField{}, false
+	}
+	for _, b := range bindings {
+		if b.SectionID == sectionID && b.Purpose == field.Purpose {
+			return b, true
+		}
+	}
+	return v2CanonicalField{}, false
+}
+
+// v2DraftFieldValue returns the live draft member backing a canonical typed
+// field, or nil when the field is an ordinary custom field whose value lives
+// in Sections. Editor inputs bind directly to the returned pointer.
+func v2DraftFieldValue(d *ItemDraft, sectionID, fieldID string) *string {
+	if d == nil {
+		return nil
+	}
+	if b, ok := v2DraftCanonicalField(d, sectionID, vault.CustomField{ID: fieldID}); ok {
+		return b.resolve(d)
+	}
+	for i := range d.Sections {
+		if d.Sections[i].ID != sectionID {
+			continue
+		}
+		for j := range d.Sections[i].Fields {
+			if d.Sections[i].Fields[j].ID == fieldID {
+				return &d.Sections[i].Fields[j].Value
+			}
+		}
+	}
+	return nil
+}
+
+// v2CanonicalSectionValue reads the current template duplicate of a binding.
+func v2CanonicalSectionValue(sections []vault.ItemSection, b v2CanonicalField) (string, bool) {
+	for i := range sections {
+		if sections[i].ID != b.SectionID {
+			continue
+		}
+		for j := range sections[i].Fields {
+			f := sections[i].Fields[j]
+			if f.ID == b.FieldID || (b.Purpose != "" && f.Purpose == b.Purpose) {
+				return f.Value, true
+			}
+		}
+	}
+	return "", false
+}
+
+// canonicalFromSections fills typed members that are still empty from their
+// canonical section fields, so legacy section-only items are not blanked.
+func (d *ItemDraft) canonicalFromSections() {
+	for _, b := range v2DraftCanonicalFields(d.Category) {
+		ptr := b.resolve(d)
+		if ptr == nil || *ptr != "" {
+			continue
+		}
+		if value, ok := v2CanonicalSectionValue(d.Sections, b); ok && value != "" {
+			*ptr = value
+		}
+	}
+}
+
+// syncCanonicalSections mirrors the typed members into the given (cloned)
+// section list. Fields that do not exist in the section are left absent; the
+// typed struct alone then carries the value.
+func (d *ItemDraft) syncCanonicalSections(sections []vault.ItemSection) {
+	for _, b := range v2DraftCanonicalFields(d.Category) {
+		ptr := b.resolve(d)
+		if ptr == nil {
+			continue
+		}
+		v2SetCanonicalSectionValue(sections, b, *ptr)
+	}
+}
+
+func v2SetCanonicalSectionValue(sections []vault.ItemSection, b v2CanonicalField, value string) {
+	for i := range sections {
+		if sections[i].ID != b.SectionID {
+			continue
+		}
+		for j := range sections[i].Fields {
+			f := &sections[i].Fields[j]
+			if f.ID == b.FieldID || (b.Purpose != "" && f.Purpose == b.Purpose) {
+				f.Value = value
+				if b.Concealed {
+					f.Protected = true
+				}
+				return
+			}
+		}
+	}
 }
 
 // normalizeFieldType maps the display names used by the editor to the
@@ -451,6 +637,8 @@ func (a *App) cancelEdit() {
 	if a.v2.draft != nil {
 		a.v2.draft.Password = ""
 		a.v2.draft.OTP = ""
+		a.v2.draft.CreditCard = vault.CreditCardDetails{}
+		a.v2.draft.Identity = vault.IdentityDetails{}
 		for i := range a.v2.draft.Sections {
 			for j := range a.v2.draft.Sections[i].Fields {
 				if a.v2.draft.Sections[i].Fields[j].Protected {

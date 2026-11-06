@@ -51,6 +51,10 @@ type Spec struct {
 	PassthroughEnv  []string          `json:"passthrough_env,omitempty"`
 	MaxTimeout      int               `json:"max_timeout"`
 	DenyArgs        [][]string        `json:"deny_args,omitempty"`
+	// RequireExplicitProgram refuses automatic PATH lookup. Profiles used for
+	// interpreter harnesses must bind one absolute, pinned interpreter instead
+	// of silently selecting whichever executable happens to be on PATH.
+	RequireExplicitProgram bool `json:"require_explicit_program,omitempty"`
 }
 
 // Profile is one named CLI credential policy.

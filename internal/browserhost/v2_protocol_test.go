@@ -269,6 +269,8 @@ func TestPopupVaultCRUDAndProfileFill(t *testing.T) {
 	if fav[len(fav)-1].Type != "item-saved" || !fav[len(fav)-1].Favorite {
 		t.Fatalf("favorite: %#v", fav[len(fav)-1])
 	}
+	// Favorites are a durable whole-item mutation, so they advance the revision.
+	loginRev = fav[len(fav)-1].Revision
 	archived := v2Handle(t, c, out, map[string]any{"v": 1, "id": reqID(56), "type": "item-state", "capability": cap, "item_id": loginID, "revision": loginRev, "state_action": "archive"})
 	if archived.Type != "item-saved" || archived.State != "archived" {
 		t.Fatalf("archive: %#v", archived)

@@ -60,10 +60,16 @@ checked before any prompt or child start.
    `-h`, `--version`, `help`, `version`, `completion`, and similar
    informational invocations).
    - The pinned executable is started directly.
-   - It inherits the real standard streams.
-   - The environment starts from the parent environment plus
-     `LOCKLARK_CLI_ACTIVE=<tool>`.
-   - No vault is unlocked and no credential material is rendered.
+   - It inherits the real standard streams and the original child exit status.
+   - `personal.RunCLIInformational` creates the same trusted owner-only
+     temporary root as authenticated runs. The child receives isolated
+     `HOME`/`GH_CONFIG_DIR`/`XDG_*`/`TMPDIR` paths, the explicit helper `PATH`,
+     the recursion guard `LOCKLARK_CLI_ACTIVE=<tool>`, and only the profile's
+     explicitly bound non-secret passthrough variables. It receives no
+     ambient `GH_TOKEN`, `DEEPSEEK_API_KEY`, `DEEPSEEK_STATE_DIR`, proxy,
+     loader or user config environment, and no slot is rendered.
+   - No vault is unlocked, no authentication prompt is shown and no credential
+     material is rendered or written.
 4. **Authenticated path**
    - `personal.RunBundleRequest.Validate` runs before the controlling console
      is opened.
@@ -142,6 +148,7 @@ field:
 | --- | --- | --- | --- | --- | --- |
 | `gh` | `gh` | `token` = password (required) | `GH_TOKEN=slot:token` | 300 s | `auth login`, `auth setup-git`, `auth token`, `auth refresh` |
 | `aws` | `aws` | `access_key_id` = username (required)<br>`secret_access_key` = password (required)<br>`session_token` = password (optional) | `AWS_ACCESS_KEY_ID`<br>`AWS_SECRET_ACCESS_KEY`<br>`AWS_SESSION_TOKEN`<br>`AWS_CONFIG_FILE=file:aws/config`<br>`AWS_SHARED_CREDENTIALS_FILE=file:aws/credentials`<br>`AWS_PAGER=` (empty literal) | 3600 s | `configure` |
+| `deepseek` | — (absolute Python interpreter must be supplied with `--program`) | `token` = password (required) | `DEEPSEEK_API_KEY=slot:token` | 3600 s | `configure`, `spawn`, `--background` |
 | `kubectl` | `kubectl`, `helm` | `kubeconfig` = attachment (required document) | `KUBECONFIG=file:kube/config`<br>`KUBECACHEDIR=root:cache` | 28800 s | `config set-credentials`, `config set-cluster`, `config set-context` |
 | `docker` | `docker` | `username` = username (required)<br>`password` = password (required)<br>`registry` = url (optional) | `DOCKER_CONFIG=root:docker` | 28800 s | `login`, `logout` |
 | `npm` | `npm`, `pnpm`, `yarn` | `token` = password (required)<br>`registry` = url (optional) | `NPM_CONFIG_USERCONFIG=file:npm/npmrc`<br>`NPM_CONFIG_CACHE=root:cache` | 1800 s | `login`, `adduser`, `logout` |
@@ -165,6 +172,7 @@ unless a different mode is shown.
 | --- | --- | --- |
 | `gh` | — | `GH_HOST`, `NO_COLOR`, `CLICOLOR`, `CLICOLOR_FORCE`, `TERM` |
 | `aws` | `aws/config` (`0600`, empty)<br>`aws/credentials` (`0600`, empty) | `AWS_REGION`, `AWS_DEFAULT_REGION`, `AWS_DEFAULT_OUTPUT`, `AWS_CA_BUNDLE`, `NO_COLOR`, `TERM` |
+| `deepseek` | — (the token is environment-only; no credential file is ever created) | `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL`, `DEEPSEEK_STATE_DIR`, `TERM`, `NO_COLOR` |
 | `kubectl` | `kube/config` (`0600`, raw attachment) | `TERM`, `NO_COLOR`, `KUBE_EDITOR` |
 | `docker` | `docker/config.json` (`0600`, `auths` document) | `DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_TLS_VERIFY`, `DOCKER_CERT_PATH`, `DOCKER_BUILDKIT`, `TERM`, `NO_COLOR` |
 | `npm` | `npm/npmrc` (`0600`, `_authToken`) | `TERM`, `NO_COLOR` |
@@ -190,8 +198,9 @@ allow-list is necessary but not sufficient: these hard denials always win.
 `locklark cli init` can build targets in several ways:
 
 - `--id ID --revision REV` fills the single slot of one-slot profiles
-  (`gh`, `kubectl`, `openai`, `anthropic`, `stripe`, `flyctl`, `vercel`,
-  `token`).
+  (`gh`, `deepseek`, `kubectl`, `openai`, `anthropic`, `stripe`, `flyctl`,
+  `vercel`, `token`). `deepseek` additionally requires an explicit absolute
+  `--program`; it never auto-discovers a Python interpreter.
 - For multi-slot login profiles (`aws`, `docker`, `npm`, `git`, `netrc`,
   `psql`), the same pair fills every **required** `login` slot with the shared
   item ID/revision and each slot's own field (`username` or `password`).
@@ -208,6 +217,69 @@ allow-list is necessary but not sufficient: these hard denials always win.
 `--id` and `--revision` are indivisible: supplying only one is an argument
 error. Every ID must be 32 lowercase hex characters and every revision 64
 lowercase hex characters.
+
+### DeepSeek worker harness workflow
+
+The `deepseek` profile is a foreground-only, single-token wrapper for a
+locally trusted Python harness. It injects the vault password field as
+`DEEPSEEK_API_KEY`, permits only `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL`,
+`DEEPSEEK_STATE_DIR`, `TERM` and `NO_COLOR` as passthrough, and denies
+`configure`, `spawn` and `--background`. No credential file is created.
+
+Store the DeepSeek key with the existing hidden-input personal command. The
+key is typed at the controlling terminal, never on the command line:
+
+```sh
+locklark personal add-login --file "$VAULT"
+# 登录标题: DeepSeek worker key
+# 用户名（可留空）: (empty)
+# 登录密码: <paste the DeepSeek API key at the hidden prompt>
+
+# Read the returned id, then list to obtain the current immutable revision.
+locklark personal list --file "$VAULT" --state active
+# Use the row's "id" and "revision" below. Do not copy the secret value.
+```
+
+Bind the absolute Python interpreter and the single vault field. The default
+pin hashes the **Python binary**; the harness script itself is trusted
+separately and must be reviewed and pinned/checked by your own deployment:
+
+```sh
+VAULT=/home/alice/vaults/personal.ll
+ID=0123456789abcdef0123456789abcdef
+REV=abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789
+ABS_PYTHON=/usr/bin/python3
+ABS_HARNESS=/opt/deepseek-worker/harness.py
+PROJECT=/home/alice/project
+TASK=/home/alice/tasks/task.md
+STATE=/home/alice/.local/state/deepseek-worker
+
+locklark cli init deepseek-worker \
+  --profile deepseek \
+  --program "$ABS_PYTHON" \
+  --file "$VAULT" \
+  --id "$ID" --revision "$REV" \
+  --passthrough DEEPSEEK_BASE_URL,DEEPSEEK_MODEL,DEEPSEEK_STATE_DIR \
+  --timeout 3600
+```
+
+Run the harness in the foreground under Locklark's supervision. The vault key
+is delivered only through the child environment; it never appears in argv,
+the binding file or a persistent config file:
+
+```sh
+DEEPSEEK_STATE_DIR="$STATE" \
+  locklark cli run deepseek-worker -- "$ABS_HARNESS" run --root "$PROJECT" --task-file "$TASK"
+```
+
+`DEEPSEEK_STATE_DIR` is an explicit, non-secret allow-listed path and is the
+only place harness state should persist. If it is omitted, the isolated
+`HOME`/`TMPDIR` is deleted after the run. `DEEPSEEK_CONFIG_FILE` is not
+injected and cannot be passed through; the harness's embedded config fallback
+remains, but the injected `DEEPSEEK_API_KEY` takes priority over any file
+value. Do not use `--background`, `spawn` or `configure`; run the foreground
+command under a separate master supervision process if background execution is
+required by the caller. The child exit status is preserved.
 
 ## The `.locklark-cli.json` schema
 

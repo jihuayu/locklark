@@ -134,6 +134,7 @@ class EndToEndTests(unittest.TestCase):
             "shell_functions_not_bare_aliases",
             "needs_auth_false_fast_path_runs_without_prompt",
             "denied_arguments_refused_before_prompt_or_execution",
+            "deepseek_explicit_program_foreground_only_no_secret_files",
             "tampered_pinned_executable_refused",
             "public_streams_and_binding_are_canary_clean",
         ):
@@ -143,7 +144,7 @@ class EndToEndTests(unittest.TestCase):
         payload = json.loads(results[0].read_bytes())
         self.assertTrue(payload["success"])
         self.assertEqual(payload["stage"], "complete")
-        self.assertEqual(len(payload["checks"]), 9)
+        self.assertEqual(len(payload["checks"]), 10)
 
 
 if __name__ == "__main__":

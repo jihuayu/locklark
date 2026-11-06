@@ -10,7 +10,8 @@ function harness(options = {}) {
   const timers = new Map();
   const listeners = {},
     sent = [],
-    injected = [];
+    injected = [],
+    otpProbes = [];
   const messageListeners = [];
   let fillWait = null;
   let messageListener,
@@ -168,6 +169,10 @@ function harness(options = {}) {
             never_origins: [],
           }),
         );
+      if (typeof options.onRequest === "function") {
+        const reply = options.onRequest(r);
+        if (reply) queueMicrotask(() => portMessage(reply));
+      }
     },
   };
   const api = {
@@ -212,6 +217,7 @@ function harness(options = {}) {
             },
           ];
         if (options.func === core.otpDocument && options.args[1] === "probe") {
+          otpProbes.push([...options.args]);
           if (otpProbeWait) return await otpProbeWait;
           return [
             {
@@ -285,6 +291,7 @@ function harness(options = {}) {
     sent,
     holdFill: (promise) => (fillWait = promise),
     injected,
+    otpProbes,
     listeners,
     hangProbe: () => (hangProbe = true),
     holdCommits: () => (autoCommit = false),
@@ -732,6 +739,26 @@ async function otpReady(h) {
   assert.ok(original, "OTP intent missing");
   return original;
 }
+test("OTP probe scripting args reach the native request through the JSON transport", async () => {
+  const h = harness();
+  try {
+    const original = await otpReady(h);
+    assert.ok(original, "native OTP approval must be requested after a probe");
+    assert.ok(h.otpProbes.length >= 1);
+    for (const args of h.otpProbes) {
+      // Chrome serializes undefined array entries as null: no undefined may
+      // remain in the args the injected probe receives.
+      const transported = JSON.parse(JSON.stringify(args));
+      assert.deepEqual(transported.slice(0, 2), ["https://example.test", "probe"]);
+      assert.equal(transported[2], null);
+      assert.equal(transported[3], null);
+      assert.equal(transported[4], false);
+      assert.equal(JSON.stringify(args).includes("undefined"), false);
+    }
+  } finally {
+    await h.send({ type: "disconnect" });
+  }
+});
 test("OTP has distinct O/A, metadata-only ready, fixed document and no popup code", async () => {
   const h = harness();
   try {
@@ -1626,6 +1653,171 @@ test("popup generator commands fill the preview, stage history and manage never-
     await h.send({ type: "clear-never-save-origin" });
     state = await h.send({ type: "state" });
     assert.equal(state.neverSaveOrigins.includes("https://example.test"), false);
+  } finally {
+    await h.send({ type: "disconnect" });
+  }
+});
+
+test("native v2 detail projects has-value rows and URLs without secret values", async () => {
+  const id = "b".repeat(32), rev = "c".repeat(64);
+  const nativeDetail = {
+    id, revision: rev, category: "login", vault_id: "personal", title: "Example",
+    username: "ada", has_password: true, has_otp: true, has_notes: true,
+    url: "https://example.test/login",
+    urls: [
+      { url: "https://example.test/login", primary: true, match_mode: "origin" },
+      { url: "https://alt.example.test/login", label: "Alt" },
+    ],
+    state: "active",
+    sections: [{ id: "sec1", title: "Extra", fields: [
+      { id: "f1", label: "Recovery", type: "concealed", value: "••••••••", concealed: true },
+    ] }],
+  };
+  const h = harness({ onRequest: (r) => {
+    if (r.type === "item-get") return { v: 1, id: r.id, type: "item-detail", item: nativeDetail };
+    if (r.type === "item-save") return { v: 1, id: r.id, type: "item-saved", item_id: id, revision: rev };
+  } });
+  await ready(h);
+  const reply = await h.send({ type: "item-get", id, revision: rev });
+  const detail = reply.detail;
+  assert.ok(detail, "item-get failed: " + reply.status);
+  assert.deepEqual(Array.from(detail.urls), [
+    "https://example.test/login",
+    "https://alt.example.test/login",
+  ]);
+  assert.equal(detail.primary_url, "https://example.test/login");
+  assert.equal(detail.password, undefined);
+  assert.equal(detail.otp_secret, undefined);
+  const password = detail.fields.find((field) => field.id === "password");
+  assert.equal(password.has_value, true);
+  assert.equal(password.value, "");
+  assert.equal(password.concealed, true);
+  assert.ok(detail.fields.find((field) => field.id === "notes").has_value);
+  assert.ok(detail.fields.find((field) => field.id === "section:sec1:f1"));
+});
+
+test("native v2 save sends only whitelisted DTO keys and explicit reveal is audited", async () => {
+  const id = "b".repeat(32), rev = "c".repeat(64);
+  const reveals = [];
+  const h = harness({ onRequest: (r) => {
+    if (r.type === "item-get")
+      return { v: 1, id: r.id, type: "item-detail", item: {
+        id, revision: rev, category: "login", vault_id: "personal", title: "Example",
+        username: "ada", has_password: true, has_notes: true, has_otp: true, state: "active",
+        urls: [{ url: "https://example.test/login", primary: true, match_mode: "origin" }],
+      } };
+    if (r.type === "item-save")
+      return { v: 1, id: r.id, type: "item-saved", item_id: id, revision: rev };
+    if (r.type === "item-reveal-field" || r.type === "item-copy-field") {
+      reveals.push(r);
+      return {
+        v: 1, id: r.id, type: "field-value", item_id: id, revision: rev,
+        field: r.field, value: "native-secret-value",
+        copied: r.type === "item-copy-field",
+        expires_in_seconds: r.field === "otp" ? 7 : 0,
+      };
+    }
+  } });
+  await ready(h);
+  await h.send({ type: "item-save", mode: "create", item: {
+    category: "card", title: "Card", cardholder: "Ada", brand: "Visa",
+    card_number: "4111111111111111", expiry: "12/30", cvv: "123",
+    urls: ["https://example.test/login"],
+    fields: [], otp_secret: "", notes: "",
+  } });
+  await tick();
+  const save = h.sent.find((r) => r.type === "item-save");
+  const outgoing = JSON.parse(save.item_json);
+  assert.equal(outgoing.category, "credit_card");
+  assert.equal(outgoing.credit_card.number, "4111111111111111");
+  assert.deepEqual(Object.keys(outgoing.credit_card).sort(), [
+    "cardholder_name", "expiry_date", "number", "type", "verification",
+  ]);
+  assert.deepEqual(outgoing.urls[0], {
+    url: "https://example.test/login", primary: true, match_mode: "origin",
+  });
+  for (const forbidden of ["fields", "otp_secret", "card_number", "cardholder", "brand", "expiry", "cvv"])
+    assert.equal(Object.hasOwn(outgoing, forbidden), false, forbidden);
+  assert.equal(reveals.length, 0, "detail rendering must not auto-reveal");
+  const revealed = await h.send({ type: "reveal-field", id, revision: rev, field: "password" });
+  assert.ok(revealed.revealedField, "reveal failed: " + revealed.status);
+  assert.equal(revealed.revealedField.value, "native-secret-value");
+  assert.equal(revealed.revealedField.expires_in_seconds, 30);
+  assert.equal(reveals.length, 1);
+  assert.equal(reveals[0].action, "reveal");
+  assert.equal(Object.hasOwn(reveals[0], "field_action"), false);
+  const otpReveal = await h.send({ type: "reveal-field", id, revision: rev, field: "otp" });
+  assert.equal(otpReveal.revealedField.expires_in_seconds, 7, "OTP window must not be extended");
+  const denied = await h.send({ type: "reveal-field", id, revision: rev, field: "cc-csc" });
+  assert.equal(denied.revealedField, undefined);
+  assert.equal(reveals.length, 2, "unknown field must not reach the host");
+  const state = await h.send({ type: "state" });
+  assert.doesNotMatch(JSON.stringify(state), /native-secret-value/);
+});
+
+test("inline save during password injection cannot create a false staged banner", async () => {
+  const h = harness();
+  let release;
+  h.holdFill(new Promise((resolve) => (release = resolve)));
+  try {
+    await ready(h);
+    await h.send({ type: "fill", id: "b".repeat(32), revision: "c".repeat(64) });
+    await tick();
+    const native = h.sent.find((r) => r.type === "fill");
+    h.deliver({
+      v: 1, id: native.id, type: "fill",
+      username: "fixture-user", password: "fixture-password",
+    });
+    await tick();
+    const during = await h.send(
+      {
+        type: "inline-stage-save",
+        username: "fixture-user",
+        password: "fixture-password",
+        isNewPassword: false,
+        isPasswordChange: false,
+      },
+      contentSender(),
+    );
+    assert.equal(during.mode, "unchanged");
+    assert.equal(during.pendingSave, null);
+    release([{ frameId: 0, documentId: "doc-1", result: true }]);
+    for (let i = 0; i < 6; i++) await tick();
+    const state = await h.send({ type: "state" });
+    assert.equal(state.pendingSave, null);
+  } finally {
+    await h.send({ type: "disconnect" });
+  }
+});
+
+test("failed injection rolls back remembered credentials so a real submit still offers save", async () => {
+  const h = harness();
+  let release;
+  h.holdFill(new Promise((resolve) => (release = resolve)));
+  try {
+    await ready(h);
+    await h.send({ type: "fill", id: "b".repeat(32), revision: "c".repeat(64) });
+    await tick();
+    const native = h.sent.find((r) => r.type === "fill");
+    h.deliver({
+      v: 1, id: native.id, type: "fill",
+      username: "fixture-user", password: "fixture-password",
+    });
+    await tick();
+    release([{ frameId: 0, documentId: "doc-1", result: false }]);
+    for (let i = 0; i < 8; i++) await tick();
+    const staged = await h.send(
+      {
+        type: "inline-stage-save",
+        username: "fixture-user",
+        password: "fixture-password",
+        isNewPassword: false,
+        isPasswordChange: false,
+      },
+      contentSender(),
+    );
+    assert.equal(staged.mode, "new");
+    assert.match(staged.stageId, /^[a-f0-9]{32}$/);
   } finally {
     await h.send({ type: "disconnect" });
   }

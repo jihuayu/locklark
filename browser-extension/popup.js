@@ -833,7 +833,8 @@
     vaultBusy = false,
     vaultItems = [],
     lastDetail = null,
-    revealedFields = new Set(),
+    revealedSecrets = new Map(),
+    revealTimers = new Map(),
     editorMode = "",
     editorCategory = "",
     editorValues = null,
@@ -862,6 +863,7 @@
     }, 2500);
   }
   function showView(name) {
+    if (name !== "detail") clearRevealedSecrets();
     if (!els) return;
     els.vaultView.hidden = name !== "vault";
     els.detailView.hidden = name !== "detail";
@@ -880,7 +882,7 @@
       els.detailUnavailable.hidden = true;
     }
     lastDetail = null;
-    revealedFields.clear();
+    clearRevealedSecrets();
   }
   function wipeEditor() {
     for (const input of editorInputs) {
@@ -1065,7 +1067,7 @@
       if (typeof reply.connected === "boolean")
         lastState = { ...lastState, ...reply };
       lastDetail = reply.detail;
-      revealedFields.clear();
+      clearRevealedSecrets();
       renderDetail(reply.detail);
       showView("detail");
     } catch {
@@ -1084,17 +1086,22 @@
         value: detail.username,
         concealed: false,
       });
-    if (!fields.some((field) => field.id === "password") && detail.password)
+    if (
+      !fields.some((field) => field.id === "password") &&
+      (detail.has_password === true || detail.password)
+    )
       fields.push({
         id: "password",
         label: "密码",
-        type: "password",
-        value: detail.password,
+        type: "concealed",
+        value: detail.password || "",
         concealed: true,
+        has_value: true,
+        revealable: true,
       });
     if (
-      !fields.some((field) => field.type === "totp") &&
-      (detail.otp_code || detail.otp_secret)
+      !fields.some((field) => field.id === "otp") &&
+      (detail.has_otp === true || detail.otp_code || detail.otp_secret)
     )
       fields.push({
         id: "otp",
@@ -1102,6 +1109,8 @@
         type: "totp",
         value: detail.otp_code || "",
         concealed: false,
+        has_value: true,
+        revealable: true,
       });
     return fields;
   }
@@ -1137,8 +1146,16 @@
       const concealed = core
         ? core.concealedType(field.type, field.concealed)
         : ["password", "concealed", "cvv", "card_number"].includes(field.type);
-      const revealed = revealedFields.has(field.id || field.label);
-      value.textContent = concealed && !revealed ? "••••••••••••" : field.value;
+      const key = field.id || field.label;
+      const secret = activeRevealedSecret(key, detail.revision);
+      const revealed = !!secret;
+      value.textContent = concealed && !revealed
+        ? field.has_value || field.value
+          ? "••••••••••••"
+          : field.value
+        : revealed
+          ? secret.value
+          : field.value;
       if (concealed && revealed) value.classList.add("revealed");
       row.append(label, value);
       if (concealed) {
@@ -1148,9 +1165,12 @@
         toggle.textContent = revealed ? "隐藏" : "显示";
         toggle.addEventListener("click", () => {
           const key = field.id || field.label;
-          if (revealedFields.has(key)) revealedFields.delete(key);
-          else revealedFields.add(key);
-          renderDetail(lastDetail);
+          if (activeRevealedSecret(key, detail.revision)) {
+            hideRevealedSecret(key);
+            renderDetail(lastDetail);
+          } else {
+            void revealSecret(field, detail);
+          }
         });
         row.append(toggle);
       }
@@ -1158,9 +1178,10 @@
       copy.type = "button";
       copy.dataset.action = "copy-field";
       copy.textContent = "复制";
-      copy.addEventListener(
-        "click",
-        () => void copyValue(field.value, copy),
+      copy.addEventListener("click", () =>
+        concealed || field.revealable || field.has_value
+          ? void copySecret(field, detail, copy)
+          : void copyValue(field.value, copy),
       );
       row.append(copy);
       els.detailFields.append(row);
@@ -1200,8 +1221,84 @@
     els.detailOpenFill.disabled = !(detail.urls || []).length;
     els.detailEdit.disabled = !!detail.readOnly;
   }
-  async function copyValue(value, button) {
-    if (typeof value !== "string" || value.length === 0) return;
+  globalThis.addEventListener?.("pagehide", () => clearRevealedSecrets());
+  if (typeof document !== "undefined")
+    document.addEventListener?.("visibilitychange", () => {
+      if (document.visibilityState === "hidden") clearRevealedSecrets();
+    });
+  function clearRevealedSecrets() {
+    for (const timer of revealTimers.values()) clearTimeout(timer);
+    revealTimers.clear();
+    revealedSecrets.clear();
+  }
+  function hideRevealedSecret(key) {
+    const timer = revealTimers.get(key);
+    if (timer) clearTimeout(timer);
+    revealTimers.delete(key);
+    revealedSecrets.delete(key);
+  }
+  function activeRevealedSecret(key, revision) {
+    const secret = revealedSecrets.get(key);
+    if (!secret) return null;
+    if (secret.revision !== revision || secret.expiresAt <= Date.now()) {
+      hideRevealedSecret(key);
+      return null;
+    }
+    return secret;
+  }
+  async function revealSecret(field, detail) {
+    const key = field.id || field.label;
+    try {
+      const reply = await api.runtime.sendMessage({
+        type: "reveal-field",
+        id: detail.id,
+        revision: detail.revision,
+        field: key,
+      });
+      const result = reply?.revealedField;
+      if (!result || result.field !== key || typeof result.value !== "string")
+        throw Error("refused");
+      const seconds = Number.isSafeInteger(result.expires_in_seconds)
+        ? result.expires_in_seconds
+        : 30;
+      hideRevealedSecret(key);
+      if (seconds <= 0) throw Error("refused");
+      revealedSecrets.set(key, {
+        value: result.value,
+        revision: detail.revision,
+        expiresAt: Date.now() + seconds * 1000,
+      });
+      revealTimers.set(
+        key,
+        setTimeout(() => {
+          hideRevealedSecret(key);
+          if (lastDetail?.id === detail.id) renderDetail(lastDetail);
+        }, seconds * 1000),
+      );
+      if (lastDetail?.id === detail.id) renderDetail(lastDetail);
+    } catch {
+      toast("无法显示该字段");
+    }
+  }
+  async function copySecret(field, detail, button) {
+    const key = field.id || field.label;
+    try {
+      const reply = await api.runtime.sendMessage({
+        type: "copy-field",
+        id: detail.id,
+        revision: detail.revision,
+        field: key,
+      });
+      const result = reply?.copiedField;
+      if (!result || typeof result.value !== "string")
+        throw Error("refused");
+      await writeClipboard(result.value, button, result.clearAfterSeconds);
+    } catch {
+      toast("复制失败");
+    }
+  }
+  async function writeClipboard(value, button, clearAfterSeconds) {
+    if (typeof value !== "string") return;
     try {
       if (!globalThis.navigator?.clipboard?.writeText)
         throw Error("clipboard unavailable");
@@ -1217,9 +1314,11 @@
       feedbackTimer = null;
       if (button.isConnected !== false) button.textContent = original;
     }, 1500);
-    const seconds = Number.isSafeInteger(lastState?.clipboardClearSeconds)
-      ? lastState.clipboardClearSeconds
-      : 30;
+    const seconds = Number.isSafeInteger(clearAfterSeconds)
+      ? clearAfterSeconds
+      : Number.isSafeInteger(lastState?.clipboardClearSeconds)
+        ? lastState.clipboardClearSeconds
+        : 30;
     if (clipboardTimer) clearTimeout(clipboardTimer);
     clipboardTimer = setTimeout(() => {
       clipboardTimer = null;
@@ -1228,6 +1327,9 @@
       } catch {}
     }, seconds * 1000);
     toast(`已复制，${seconds} 秒后自动清除`);
+  }
+  async function copyValue(value, button) {
+    return writeClipboard(value, button, lastState?.clipboardClearSeconds);
   }
   async function openAndFill(detail, url) {
     if (!detail || !url) return;
@@ -1291,6 +1393,9 @@
     const row = document.createElement("div");
     row.className = "custom-field";
     row.dataset.customField = "1";
+    row.dataset.fieldId = typeof field.id === "string" ? field.id : "";
+    row.dataset.sectionId = typeof field.section_id === "string" ? field.section_id : "";
+    row.dataset.sectionTitle = typeof field.section_title === "string" ? field.section_title : "";
     const label = document.createElement("input");
     label.placeholder = "字段名称";
     label.value = field.label || "";
@@ -1339,8 +1444,27 @@
       item = categoryOrItem;
       category = core?.normalizeCategory(item.category) || "login";
       values = { ...item };
+      if (Array.isArray(item.sections))
+        values.sections = item.sections.map((section) => ({
+          ...section,
+          fields: (section.fields || []).map((field) => ({ ...field })),
+        }));
       if (Array.isArray(item.fields))
-        values.fields = item.fields.map((field) => ({ ...field }));
+        values.fields = item.fields
+          .filter(
+            (field) =>
+              ![
+                "username",
+                "password",
+                "notes",
+                "otp",
+                "cc-number",
+                "cc-csc",
+                "cc-pin",
+              ].includes(field.id) &&
+              !String(field.id || "").startsWith("identity:"),
+          )
+          .map((field) => ({ ...field }));
     } else {
       category = core?.normalizeCategory(categoryOrItem) || "login";
     }
@@ -1397,10 +1521,23 @@
         if (!label || !value) continue;
         const fieldLabel = String(label.value || "").trim();
         if (!fieldLabel) continue;
+        let id = row.dataset.fieldId || "";
+        let sectionID = row.dataset.sectionId || "";
+        if (id.startsWith("section:")) {
+          const parts = id.split(":");
+          if (parts.length === 3) {
+            sectionID = sectionID || parts[1];
+            id = parts[2];
+          }
+        }
         item.fields.push({
+          ...(id ? { id } : {}),
+          ...(sectionID ? { section_id: sectionID } : {}),
+          ...(row.dataset.sectionTitle ? { section_title: row.dataset.sectionTitle } : {}),
           label: fieldLabel,
           type: type?.value || "text",
           value: String(value.value || ""),
+          concealed: type?.value === "concealed",
         });
       }
     return item;

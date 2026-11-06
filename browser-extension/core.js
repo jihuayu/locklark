@@ -746,6 +746,221 @@ globalThis.LocklarkCore = (() => {
       row.watchtower_flags.includes(flag),
     );
   }
+  const NATIVE_CATEGORY_ALIASES = Object.freeze({
+    card: "credit_card",
+    credit_card: "credit_card",
+    "credit-card": "credit_card",
+    note: "secure_note",
+    secure_note: "secure_note",
+    "secure-note": "secure_note",
+    ssh: "ssh_key",
+    ssh_key: "ssh_key",
+    "ssh-key": "ssh_key",
+  });
+  function nativeCategory(raw) {
+    const normalized = normalizeCategory(raw);
+    if (!normalized) return "";
+    return NATIVE_CATEGORY_ALIASES[normalized] || normalized;
+  }
+  function nativeFieldType(type) {
+    const value = typeof type === "string" ? type.trim().toLowerCase() : "";
+    if (value === "password" || value === "cvv" || value === "card_number")
+      return "concealed";
+    if (value === "multiline") return "text";
+    return ["string", "text", "concealed", "email", "url", "otp", "totp", "date", "number", "phone"].includes(value)
+      ? value
+      : "text";
+  }
+  function nativeMatchMode(value) {
+    return ["origin", "host", "regex", "never"].includes(value)
+      ? value
+      : "origin";
+  }
+  function stableFieldID(seed, used) {
+    let hash = 2166136261;
+    const text = String(seed || "field");
+    for (let i = 0; i < text.length; i++) {
+      hash ^= text.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    const base = "f" + (hash >>> 0).toString(16).padStart(8, "0");
+    let id = base,
+      suffix = 2;
+    while (used.has(id)) id = base + "-" + suffix++;
+    used.add(id);
+    return id;
+  }
+  function nativeURLs(item) {
+    const source = Array.isArray(item?.urls) ? item.urls : [];
+    const urls = [];
+    for (const entry of source.slice(0, 20)) {
+      const raw = typeof entry === "string" ? entry : entry?.url;
+      if (typeof raw !== "string" || !raw.trim()) continue;
+      const value = raw.trim();
+      if (value.length > 8192) continue;
+      try {
+        originFromURL(value);
+      } catch {
+        continue;
+      }
+      const out = { url: value, match_mode: "origin" };
+      if (typeof entry === "object" && entry) {
+        if (typeof entry.label === "string" && entry.label.trim())
+          out.label = entry.label.trim().slice(0, 256);
+        out.primary = entry.primary === true;
+        out.match_mode = nativeMatchMode(entry.match_mode);
+      }
+      urls.push(out);
+    }
+    if (urls.length && !urls.some((url) => url.primary === true))
+      urls[0].primary = true;
+    return urls;
+  }
+  function nativeOriginalField(original, sectionID, fieldID) {
+    if (!Array.isArray(original?.sections)) return null;
+    for (const section of original.sections) {
+      if (section?.id !== sectionID || !Array.isArray(section.fields)) continue;
+      return section.fields.find((field) => field?.id === fieldID) || null;
+    }
+    return null;
+  }
+  function nativeSections(item, original) {
+    const incoming = Array.isArray(item?.sections) ? item.sections : [];
+    const sections = [];
+    const byID = new Map();
+    const used = new Set();
+    let preserveHidden = false;
+    const ensureSection = (id, title) => {
+      const clean = typeof id === "string" && id ? id.slice(0, 128) : "custom-fields";
+      let section = byID.get(clean);
+      if (!section) {
+        section = { id: clean, title: (title || "Custom fields").slice(0, 256), fields: [] };
+        byID.set(clean, section);
+        sections.push(section);
+      }
+      return section;
+    };
+    for (const section of incoming.slice(0, 20)) {
+      if (!section || typeof section !== "object") continue;
+      ensureSection(section.id, section.title);
+    }
+    const addField = (field, forcedSection) => {
+      if (!field || typeof field !== "object") return;
+      const sectionID =
+        forcedSection ||
+        (typeof field.section_id === "string" && field.section_id
+          ? field.section_id
+          : "custom-fields");
+      const section = ensureSection(
+        sectionID,
+        typeof field.section_title === "string" ? field.section_title : "Custom fields",
+      );
+      const label = String(field.label || "").trim().slice(0, 256);
+      const value = typeof field.value === "string" ? field.value.slice(0, 16384) : "";
+      const concealed = field.concealed === true || nativeFieldType(field.type) === "concealed";
+      const id =
+        typeof field.id === "string" && /^[A-Za-z0-9_.:-]{1,128}$/.test(field.id) && !field.id.startsWith("section:")
+          ? field.id
+          : stableFieldID(label || value, used);
+      if (!used.has(id)) used.add(id);
+      const old = nativeOriginalField(original, section.id, id);
+      const masked = /^•+$/.test(value) || value === "";
+      if (masked && (old?.concealed === true || old?.has_value === true || concealed))
+        preserveHidden = true;
+      const out = {
+        id,
+        label,
+        type: nativeFieldType(field.type),
+        value: /^•+$/.test(value) ? "" : value,
+      };
+      if (concealed) out.concealed = true;
+      if (typeof field.purpose === "string" && field.purpose)
+        out.purpose = field.purpose.slice(0, 128);
+      const index = section.fields.findIndex((entry) => entry.id === id);
+      if (index >= 0) section.fields[index] = out;
+      else section.fields.push(out);
+    };
+    for (const section of incoming.slice(0, 20)) {
+      if (!section || typeof section !== "object" || !Array.isArray(section.fields)) continue;
+      for (const field of section.fields.slice(0, 100)) addField(field, section.id);
+    }
+    if (Array.isArray(item?.fields)) for (const field of item.fields.slice(0, 100)) addField(field);
+    const result = sections.filter((section) => section.fields.length);
+    if (!result.length || preserveHidden) return undefined;
+    return result;
+  }
+  function nativeCreditCard(item) {
+    const source = item?.credit_card && typeof item.credit_card === "object" ? item.credit_card : item;
+    if (!source || typeof source !== "object") return undefined;
+    const card = {};
+    const text = (key) =>
+      typeof source[key] === "string" ? source[key].trim().slice(0, 256) : "";
+    const name = text("cardholder_name") || text("cardholder");
+    const brand = text("type") || text("brand");
+    const expiry = text("expiry_date") || text("expiry");
+    const validFrom = text("valid_from");
+    const bank = text("issuing_bank");
+    const number = typeof source.number === "string" ? source.number.trim() : typeof source.card_number === "string" ? source.card_number.trim() : "";
+    const verification = typeof source.verification === "string" ? source.verification.trim() : typeof source.cvv === "string" ? source.cvv.trim() : "";
+    const pin = typeof source.pin === "string" ? source.pin.trim() : "";
+    if (name) card.cardholder_name = name;
+    if (brand) card.type = brand;
+    if (number) card.number = number.slice(0, 64);
+    if (verification) card.verification = verification.slice(0, 32);
+    if (expiry) card.expiry_date = expiry.slice(0, 32);
+    if (validFrom) card.valid_from = validFrom.slice(0, 32);
+    if (pin) card.pin = pin.slice(0, 32);
+    if (bank) card.issuing_bank = bank.slice(0, 256);
+    return Object.keys(card).length ? card : undefined;
+  }
+  function nativeIdentity(item) {
+    const source = item?.identity && typeof item.identity === "object" ? item.identity : item;
+    if (!source || typeof source !== "object") return undefined;
+    const map = {
+      first_name: "first_name", middle_name: "middle_name", last_name: "last_name",
+      birth_date: "birth_date", company: "company", organization: "company",
+      department: "department", job_title: "job_title", email: "email", phone: "phone",
+      address1: "address_line1", address_line1: "address_line1", address2: "address_line2",
+      address_line2: "address_line2", city: "city", state: "state",
+      postal_code: "postal_code", country: "country", website: "website",
+    };
+    const out = {};
+    for (const [key, target] of Object.entries(map)) {
+      const value = source[key];
+      if (typeof value === "string" && value.trim() && !out[target])
+        out[target] = value.trim().slice(0, 1024);
+    }
+    return Object.keys(out).length ? out : undefined;
+  }
+  function itemToNativeMutation(item, options = {}) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+    const category = nativeCategory(item.category);
+    if (!category || typeof item.title !== "string" || !item.title.trim()) return null;
+    const out = { category, title: item.title.slice(0, 1024) };
+    const password = typeof item.password === "string" ? item.password : "";
+    const otp = typeof item.otp === "string" ? item.otp : typeof item.otp_secret === "string" ? item.otp_secret : "";
+    const notes = typeof item.notes === "string" ? item.notes : typeof item.content === "string" ? item.content : undefined;
+    if (typeof item.username === "string" && item.username) out.username = item.username.slice(0, 16384);
+    if (password) out.password = password.slice(0, 16384);
+    if (otp.trim()) out.otp = otp.trim().slice(0, 4096);
+    if (Array.isArray(item.urls)) out.urls = nativeURLs(item);
+    if (notes !== undefined) out.notes = notes.slice(0, 65536);
+    if (typeof item.favorite === "boolean") out.favorite = item.favorite;
+    if (typeof item.auto_submit === "boolean") out.auto_submit = item.auto_submit;
+    if (Array.isArray(item.tags))
+      out.tags = item.tags.filter((tag) => typeof tag === "string" && tag).slice(0, 50).map((tag) => tag.slice(0, 128));
+    const sections = nativeSections(item, options.original);
+    if (sections) out.sections = sections;
+    if (category === "credit_card") {
+      const card = nativeCreditCard(item);
+      if (card) out.credit_card = card;
+    }
+    if (category === "identity") {
+      const identity = nativeIdentity(item);
+      if (identity) out.identity = identity;
+    }
+    return out;
+  }
   function validResponse(m) {
     if (
       !m ||
@@ -795,6 +1010,17 @@ globalThis.LocklarkCore = (() => {
         ],
         "profile-fill": ["v", "id", "type", "profile_fill"],
         "item-detail": ["v", "id", "type", "item"],
+        "field-value": [
+          "v",
+          "id",
+          "type",
+          "item_id",
+          "revision",
+          "field",
+          "value",
+          "copied",
+          "expires_in_seconds",
+        ],
         "fill-fields": ["v", "id", "type", "fields"],
         watchtower: ["v", "id", "type", "watchtower"],
         unknown: ["v", "id", "type"],
@@ -899,6 +1125,19 @@ globalThis.LocklarkCore = (() => {
           (!!m.item_summary &&
             typeof m.item_summary === "object" &&
             !Array.isArray(m.item_summary)))
+      );
+    if (m.type === "field-value")
+      return (
+        /^[a-f0-9]{32}$/.test(m.item_id || "") &&
+        /^[a-f0-9]{64}$/.test(m.revision || "") &&
+        typeof m.field === "string" &&
+        /^(?:username|password|notes|url|otp|cc-number|cc-csc|cc-pin|section:[A-Za-z0-9_.-]{1,128}:[A-Za-z0-9_.-]{1,128})$/.test(m.field) &&
+        typeof m.value === "string" &&
+        m.value.length <= 16384 &&
+        typeof m.copied === "boolean" &&
+        Number.isSafeInteger(m.expires_in_seconds) &&
+        m.expires_in_seconds >= 0 &&
+        m.expires_in_seconds <= 3600
       );
     if (m.type === "profile-fill") {
       const fill = m.profile_fill;
@@ -3391,7 +3630,11 @@ globalThis.LocklarkCore = (() => {
         );
       }
       if (mode === "probe") {
-        if (code !== undefined || timing !== undefined) return false;
+        // Chrome's scripting JSON transport turns `undefined` array entries into
+        // `null`, so both spellings are the no-payload sentinel for a probe.
+        // Any real code/timing in probe mode is still refused outright.
+        const empty = (value) => value === undefined || value === null;
+        if (!empty(code) || !empty(timing)) return false;
       } else if (
         typeof code !== "string" ||
         !/^(?:[0-9]{6}|[0-9]{8})$/.test(code) ||
@@ -4234,6 +4477,14 @@ globalThis.LocklarkCore = (() => {
     itemSearchText,
     filterVaultItems,
     validItemForSave,
+    nativeCategory,
+    nativeFieldType,
+    stableFieldID,
+    nativeURLs,
+    nativeSections,
+    nativeCreditCard,
+    nativeIdentity,
+    itemToNativeMutation,
     itemURLAllowed,
     generatePasswordString,
   };

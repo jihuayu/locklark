@@ -28,11 +28,17 @@ func TestWatchtowerSummaryFlagsAndOriginFilter(t *testing.T) {
 	for _, row := range rows {
 		revs[row.ID] = row.Revision
 	}
-	s.PatchMeta(fill.ID, func(m *V2ItemMeta) {
-		m.URLs = []V2ItemURL{{URL: "http://insecure.example/path", Primary: true}}
+	// PatchMeta now persists through the whole-item mutation path, so it is
+	// schema validated. The vault URL policy admits HTTPS only, which leaves the
+	// local "unsecured-http" finding reachable for legacy records only.
+	if e := s.PatchMeta(fill.ID, func(m *V2ItemMeta) {
 		m.CreditCard = &V2CreditCard{ExpiryDate: time.Now().AddDate(0, -1, 0).Format("2006-01")}
-	})
-	s.PatchMeta(first, func(m *V2ItemMeta) { m.Favorite = true })
+	}); e != nil {
+		t.Fatal(e)
+	}
+	if e := s.PatchMeta(first, func(m *V2ItemMeta) { m.Favorite = true }); e != nil {
+		t.Fatal(e)
+	}
 	_ = second
 	summary, e := s.WatchtowerSummary("https://example.test")
 	if e != nil {
@@ -50,7 +56,7 @@ func TestWatchtowerSummaryFlagsAndOriginFilter(t *testing.T) {
 			found[flag] = true
 		}
 	}
-	for _, want := range []string{"reused", "unsecured-http", "totp-not-stored", "expired"} {
+	for _, want := range []string{"reused", "totp-not-stored", "expired"} {
 		if !found[want] {
 			t.Fatalf("missing flag %q: %#v", want, summary.Findings)
 		}

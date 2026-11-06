@@ -105,6 +105,9 @@ func desktopFixture(t *testing.T) (string, []byte, string, personal.Row) {
 func TestDesktopIPCBrokerUnlockLockAndCLIRun(t *testing.T) {
 	path, key, secret, row := desktopFixture(t)
 	a := New()
+	// This fixture runs its UI dispatcher synchronously on the test goroutine;
+	// only broker I/O runs concurrently, as in the real serialized UI loop.
+	a.launch = func(fn func()) { fn() }
 	a.path = path
 	a.secret = secret
 	a.password = "fixture"
@@ -120,18 +123,21 @@ func TestDesktopIPCBrokerUnlockLockAndCLIRun(t *testing.T) {
 	dir := t.TempDir()
 	if _, e := localpath.TrustedTemporaryParent(dir); e == nil {
 		t.Setenv("LOCKLARK_BROWSER_SOCKET", filepath.Join(dir, "b.sock"))
+		// The relay dials once; start its listener before launching the client.
+		a.startBrowserBroker()
+		if a.broker == nil {
+			t.Fatal("broker did not start")
+		}
 		inR, inW := io.Pipe()
 		outR, outW := io.Pipe()
 		go func() {
+			defer inR.Close()
+			defer outW.Close()
 			_ = browserhost.RelayStdio(browserhost.Chromium, []string{"chrome-extension://" + browserhost.ChromiumID + "/"}, inR, outW)
 		}()
 		defer inW.Close()
 		defer outR.Close()
 		client := &desktopRelay{in: inW, out: outR}
-		a.startBrowserBroker()
-		if a.broker == nil {
-			t.Fatal("broker did not start")
-		}
 		client.send(t, map[string]any{"v": 1, "id": reqIDDesktop(1), "type": "status"})
 		status := client.recvType(t, "status")
 		if status["desktop_connected"] != true || status["unlocked"] != false || status["vault_locked"] != true {
@@ -211,6 +217,7 @@ func TestDesktopIPCBrokerUnlockLockAndCLIRun(t *testing.T) {
 	defer s.Lock()
 	a.brokerMu.Lock()
 	a.session = s
+	a.brokerSession = s
 	a.brokerMu.Unlock()
 	req := browserhost.BrokerCLIRequest{V: 1, VaultPath: s.VaultPath(), Targets: []personal.CLIBrokerTarget{{Slot: "TOKEN", ID: row.ID, Revision: row.Revision, Field: "password"}}}
 	resp, e := a.handleCLIRun(context.Background(), browserhost.Peer{User: "fixture"}, req)
@@ -225,6 +232,7 @@ func TestDesktopIPCBrokerUnlockLockAndCLIRun(t *testing.T) {
 	}
 	a.brokerMu.Lock()
 	a.session = nil
+	a.brokerSession = nil
 	a.brokerMu.Unlock()
 	if _, e := a.handleCLIRun(context.Background(), browserhost.Peer{User: "fixture"}, req); !errors.Is(e, browserhost.ErrBrokerUnavailable) {
 		t.Fatalf("direct locked CLI: %v", e)

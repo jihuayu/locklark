@@ -1,8 +1,6 @@
 package browserhost
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"io"
 	"sort"
@@ -47,18 +45,25 @@ func (c *Connection) handleV2(r Request) error {
 	return c.refuse(r.ID)
 }
 
-func categoryOf(meta *personal.V2ItemMeta) string {
-	if meta != nil && meta.Category != "" {
-		return meta.Category
-	}
-	return "login"
-}
+// categoryOf / vaultOf read the durable item model directly; the browser view
+// never consults a separate metadata store.
+func categoryOf(it vault.Item) string { return string(it.EffectiveCategory()) }
 
-func vaultOf(meta *personal.V2ItemMeta) string {
-	if meta != nil && meta.VaultID != "" {
-		return meta.VaultID
+func vaultOf(it vault.Item) string { return it.EffectiveVaultID() }
+
+func primaryURLOf(it vault.Item) string {
+	if it.URL != "" {
+		return it.URL
 	}
-	return "personal"
+	for _, u := range it.URLs {
+		if u.Primary {
+			return u.URL
+		}
+	}
+	if len(it.URLs) > 0 {
+		return it.URLs[0].URL
+	}
+	return ""
 }
 
 func stateName(s string) string {
@@ -68,39 +73,21 @@ func stateName(s string) string {
 	return s
 }
 
-func summaryFor(it vault.Item, rev string, meta *personal.V2ItemMeta, watch *personal.WatchtowerItemFinding) BrowserItemSummary {
-	category := categoryOf(meta)
-	summary := BrowserItemSummary{ID: it.ID, Revision: rev, Category: category, VaultID: vaultOf(meta), Title: it.Title, State: stateName(it.State), HasOTP: it.OTP != "", HasPasskey: len(it.Passkey) != 0, PrimaryURL: it.URL}
-	if meta != nil {
-		summary.Favorite = meta.Favorite
-		summary.Tags = append([]string(nil), meta.Tags...)
-		summary.UpdatedAt = meta.UpdatedAt
-		if len(meta.URLs) > 0 {
-			for _, u := range meta.URLs {
-				if u.Primary {
-					summary.PrimaryURL = u.URL
-					break
-				}
-			}
-			if summary.PrimaryURL == "" {
-				summary.PrimaryURL = meta.URLs[0].URL
-			}
+func summaryFor(it vault.Item, rev string, watch *personal.WatchtowerItemFinding) BrowserItemSummary {
+	category := categoryOf(it)
+	summary := BrowserItemSummary{ID: it.ID, Revision: rev, Category: category, VaultID: vaultOf(it), Title: it.Title, State: stateName(it.State), Favorite: it.Favorite, HasOTP: it.OTP != "", HasPasskey: len(it.Passkey) != 0, PrimaryURL: primaryURLOf(it), UpdatedAt: it.UpdatedAt}
+	summary.Tags = append([]string(nil), it.Tags...)
+	switch category {
+	case "credit_card":
+		if card := it.NormalizedCreditCard(); card != nil {
+			summary.Subtitle = strings.TrimSpace(strings.Title(card.Type) + " " + last4(card.Number))
 		}
-		switch category {
-		case "credit_card":
-			if meta.CreditCard != nil {
-				last4 := last4(meta.CreditCard.Number)
-				summary.Subtitle = strings.TrimSpace(strings.Title(meta.CreditCard.Type) + " " + last4)
-			}
-		case "identity":
-			if meta.Identity != nil {
-				name := strings.TrimSpace(meta.Identity.FirstName + " " + meta.Identity.LastName)
-				summary.Subtitle = strings.TrimSpace(strings.TrimPrefix(name+" · "+meta.Identity.Email, " · "))
-			}
-		default:
-			summary.Subtitle = it.Username
+	case "identity":
+		if ident := it.NormalizedIdentity(); ident != nil {
+			name := strings.TrimSpace(ident.FirstName + " " + ident.LastName)
+			summary.Subtitle = strings.TrimSpace(strings.TrimPrefix(name+" · "+ident.Email, " · "))
 		}
-	} else {
+	default:
 		summary.Subtitle = it.Username
 	}
 	if watch != nil {
@@ -178,27 +165,24 @@ func (c *Connection) handleSearch(r Request) error {
 		if rev == "" {
 			continue
 		}
-		meta := s.Meta(it.ID)
 		if state != "all" && stateName(it.State) != state {
 			continue
 		}
-		if category != "" && categoryOf(meta) != category {
+		if category != "" && categoryOf(it) != category {
 			continue
 		}
-		if vaultFilter != "" && vaultOf(meta) != vaultFilter {
+		if vaultFilter != "" && vaultOf(it) != vaultFilter {
 			continue
 		}
-		if r.FavoritesOnly != nil && *r.FavoritesOnly && (meta == nil || !meta.Favorite) {
+		if r.FavoritesOnly != nil && *r.FavoritesOnly && !it.Favorite {
 			continue
 		}
 		if r.Tag != "" {
 			found := false
-			if meta != nil {
-				for _, tag := range meta.Tags {
-					if tag == r.Tag {
-						found = true
-						break
-					}
+			for _, tag := range it.Tags {
+				if tag == r.Tag {
+					found = true
+					break
 				}
 			}
 			if !found {
@@ -209,12 +193,10 @@ func (c *Connection) handleSearch(r Request) error {
 			site := siteOrEmpty(it.URL)
 			if site != r.Origin {
 				matched := false
-				if meta != nil {
-					for _, u := range meta.URLs {
-						if siteOrEmpty(u.URL) == r.Origin {
-							matched = true
-							break
-						}
+				for _, u := range it.URLs {
+					if siteOrEmpty(u.URL) == r.Origin {
+						matched = true
+						break
 					}
 				}
 				if !matched {
@@ -229,8 +211,8 @@ func (c *Connection) handleSearch(r Request) error {
 				continue
 			}
 		}
-		vaultSet[vaultOf(meta)] = true
-		out = append(out, summaryFor(it, rev, meta, watchByID[it.ID]))
+		vaultSet[vaultOf(it)] = true
+		out = append(out, summaryFor(it, rev, watchByID[it.ID]))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Title < out[j].Title })
 	vaultSet["personal"] = true
@@ -275,43 +257,32 @@ func (c *Connection) handleItemGet(r Request) error {
 	if r.Revision != "" && r.Revision != rev {
 		return c.refuse(r.ID)
 	}
-	meta := s.Meta(it.ID)
-	category := categoryOf(meta)
-	detail := &BrowserItemDetail{ID: it.ID, Revision: rev, Category: category, VaultID: vaultOf(meta), Title: it.Title, Username: it.Username, HasPassword: it.Password != "" && (category == "login" || category == "password"), HasOTP: it.OTP != "", HasNotes: it.Notes != "", HasPasskey: len(it.Passkey) != 0, URL: it.URL, State: stateName(it.State)}
-	if meta == nil && it.URL != "" {
+	category := categoryOf(it)
+	detail := &BrowserItemDetail{ID: it.ID, Revision: rev, Category: category, VaultID: vaultOf(it), Title: it.Title, Username: it.Username, HasPassword: it.Password != "" && (category == "login" || category == "password"), HasOTP: it.OTP != "", HasNotes: it.Notes != "", HasPasskey: len(it.Passkey) != 0, URL: it.URL, State: stateName(it.State), Favorite: it.Favorite, AutoSubmit: it.AutoSubmit, CreatedAt: it.CreatedAt, UpdatedAt: it.UpdatedAt}
+	detail.Tags = append([]string(nil), it.Tags...)
+	for _, u := range it.URLs {
+		detail.URLs = append(detail.URLs, BrowserItemURL{Label: u.Label, URL: u.URL, Primary: u.Primary, MatchMode: u.MatchMode})
+	}
+	if len(detail.URLs) == 0 && it.URL != "" {
 		detail.URLs = []BrowserItemURL{{URL: it.URL, Primary: true, MatchMode: "origin"}}
 	}
-	if meta != nil {
-		detail.Favorite = meta.Favorite
-		detail.AutoSubmit = meta.AutoSubmit
-		detail.Tags = append([]string(nil), meta.Tags...)
-		detail.CreatedAt = meta.CreatedAt
-		detail.UpdatedAt = meta.UpdatedAt
-		for _, u := range meta.URLs {
-			detail.URLs = append(detail.URLs, BrowserItemURL{Label: u.Label, URL: u.URL, Primary: u.Primary, MatchMode: u.MatchMode})
-		}
-		if len(detail.URLs) == 0 && it.URL != "" {
-			detail.URLs = []BrowserItemURL{{URL: it.URL, Primary: true, MatchMode: "origin"}}
-		}
-		for _, sec := range meta.Sections {
-			section := BrowserItemSection{ID: sec.ID, Title: sec.Title}
-			for _, f := range sec.Fields {
-				concealed := f.Concealed || f.Type == "concealed" || f.Type == "password"
-				value := f.Value
-				if concealed {
-					value = ""
-				}
-				section.Fields = append(section.Fields, BrowserCustomField{ID: f.ID, Label: f.Label, Type: f.Type, Value: value, Concealed: concealed, Purpose: f.Purpose})
+	for _, sec := range it.Sections {
+		section := BrowserItemSection{ID: sec.ID, Title: sec.Title}
+		for _, f := range sec.Fields {
+			concealed := f.Protected || f.Type == vault.FieldTypeConcealed || f.Type == vault.FieldTypeOTP || f.Type == vault.FieldTypeTOTP
+			value := f.Value
+			if concealed {
+				value = ""
 			}
-			detail.Sections = append(detail.Sections, section)
+			section.Fields = append(section.Fields, BrowserCustomField{ID: f.ID, Label: f.Label, Type: string(f.Type), Value: value, Concealed: concealed, Purpose: f.Purpose})
 		}
-		if meta.CreditCard != nil {
-			card := meta.CreditCard
-			detail.CreditCard = &BrowserCreditCardSummary{CardholderName: card.CardholderName, Type: card.Type, Last4: last4(card.Number), MaskedNumber: maskedCard(card.Number), ExpiryDate: card.ExpiryDate, ValidFrom: card.ValidFrom, IssuingBank: card.IssuingBank, HasCVV: card.Verification != "", HasPIN: card.PIN != ""}
-		}
-		if meta.Identity != nil {
-			detail.Identity = identitySummary(meta.Identity)
-		}
+		detail.Sections = append(detail.Sections, section)
+	}
+	if card := it.NormalizedCreditCard(); card != nil {
+		detail.CreditCard = &BrowserCreditCardSummary{CardholderName: card.CardholderName, Type: card.Type, Last4: last4(card.Number), MaskedNumber: maskedCard(card.Number), ExpiryDate: card.ExpiryDate, ValidFrom: card.ValidFrom, IssuingBank: card.IssuingBank, HasCVV: card.Verification != "", HasPIN: card.PIN != ""}
+	}
+	if ident := it.NormalizedIdentity(); ident != nil {
+		detail.Identity = identitySummary(ident)
 	}
 	if w, e := s.WatchtowerSummaryLocal(""); e == nil {
 		for _, f := range w.Findings {
@@ -326,7 +297,7 @@ func (c *Connection) handleItemGet(r Request) error {
 	return c.response(Response{ID: r.ID, Type: "item-detail", Item: detail})
 }
 
-func identitySummary(in *personal.V2Identity) *BrowserIdentitySummary {
+func identitySummary(in *vault.IdentityDetails) *BrowserIdentitySummary {
 	if in == nil {
 		return nil
 	}
@@ -346,10 +317,9 @@ func (c *Connection) handleFieldValue(r Request) error {
 	if !ok || revisions[it.ID] != r.Revision || it.State == "trashed" {
 		return c.refuse(r.ID)
 	}
-	meta := s.Meta(it.ID)
 	value := ""
 	expires := 0
-	category := categoryOf(meta)
+	category := categoryOf(it)
 	switch {
 	case r.Field == "username":
 		value = it.Username
@@ -380,28 +350,26 @@ func (c *Connection) handleFieldValue(r Request) error {
 		if expires < 0 {
 			expires = 0
 		}
-	case r.Field == "cc-number":
-		if meta == nil || meta.CreditCard == nil {
+	case r.Field == "cc-number", r.Field == "cc-csc", r.Field == "cc-pin":
+		card := it.NormalizedCreditCard()
+		if card == nil {
 			return c.refuse(r.ID)
 		}
-		value = meta.CreditCard.Number
-	case r.Field == "cc-csc":
-		if meta == nil || meta.CreditCard == nil {
-			return c.refuse(r.ID)
+		switch r.Field {
+		case "cc-number":
+			value = card.Number
+		case "cc-csc":
+			value = card.Verification
+		case "cc-pin":
+			value = card.PIN
 		}
-		value = meta.CreditCard.Verification
-	case r.Field == "cc-pin":
-		if meta == nil || meta.CreditCard == nil {
-			return c.refuse(r.ID)
-		}
-		value = meta.CreditCard.PIN
 	case strings.HasPrefix(r.Field, "section:"):
 		parts := strings.Split(r.Field, ":")
-		if len(parts) != 3 || meta == nil {
+		if len(parts) != 3 {
 			return c.refuse(r.ID)
 		}
 		found := false
-		for _, sec := range meta.Sections {
+		for _, sec := range it.Sections {
 			if sec.ID != parts[1] {
 				continue
 			}
@@ -457,58 +425,27 @@ func decodeMutation(raw string) (BrowserItemMutation, error) {
 	if m.Category == "" {
 		m.Category = "login"
 	}
+	// The extension form uses short aliases; store the canonical category.
+	switch m.Category {
+	case "card":
+		m.Category = "credit_card"
+	case "note":
+		m.Category = "secure_note"
+	case "ssh":
+		m.Category = "ssh_key"
+	}
 	if !allowedCategories[m.Category] {
+		return BrowserItemMutation{}, ErrProtocol
+	}
+	// This protocol has no attachment transport, so a document created here
+	// could not carry its file and would lose data on the next rewrite.
+	if m.Category == "document" {
 		return BrowserItemMutation{}, ErrProtocol
 	}
 	if strings.TrimSpace(m.Title) == "" || len(m.Title) > 1024 || !utf8.ValidString(m.Title) {
 		return BrowserItemMutation{}, ErrProtocol
 	}
 	return m, nil
-}
-
-func randomPlaceholder() string {
-	var b [24]byte
-	if _, e := rand.Read(b[:]); e != nil {
-		return "locklark-item-placeholder"
-	}
-	return hex.EncodeToString(b[:])
-}
-
-func metaFromMutation(m BrowserItemMutation) personal.V2ItemMeta {
-	meta := personal.V2ItemMeta{Category: m.Category, VaultID: m.VaultID, Favorite: m.Favorite != nil && *m.Favorite, AutoSubmit: m.AutoSubmit, Tags: append([]string(nil), m.Tags...)}
-	if meta.VaultID == "" {
-		meta.VaultID = "personal"
-	}
-	for _, u := range m.URLs {
-		meta.URLs = append(meta.URLs, personal.V2ItemURL{Label: u.Label, URL: u.URL, Primary: u.Primary, MatchMode: u.MatchMode})
-	}
-	if len(meta.URLs) == 0 && m.URL != nil && *m.URL != "" {
-		meta.URLs = []personal.V2ItemURL{{URL: *m.URL, Primary: true, MatchMode: "origin"}}
-	}
-	for _, sec := range m.Sections {
-		s := personal.V2Section{ID: sec.ID, Title: sec.Title}
-		for _, f := range sec.Fields {
-			s.Fields = append(s.Fields, personal.V2CustomField{ID: f.ID, Label: f.Label, Type: f.Type, Value: f.Value, Concealed: f.Concealed, Purpose: f.Purpose})
-		}
-		meta.Sections = append(meta.Sections, s)
-	}
-	if m.CreditCard != nil {
-		card := &personal.V2CreditCard{CardholderName: m.CreditCard.CardholderName, Type: m.CreditCard.Type, ExpiryDate: m.CreditCard.ExpiryDate, ValidFrom: m.CreditCard.ValidFrom, IssuingBank: m.CreditCard.IssuingBank}
-		if m.CreditCard.Number != nil {
-			card.Number = *m.CreditCard.Number
-		}
-		if m.CreditCard.Verification != nil {
-			card.Verification = *m.CreditCard.Verification
-		}
-		if m.CreditCard.PIN != nil {
-			card.PIN = *m.CreditCard.PIN
-		}
-		meta.CreditCard = card
-	}
-	if m.Identity != nil {
-		meta.Identity = &personal.V2Identity{Title: m.Identity.Title, FirstName: m.Identity.FirstName, MiddleName: m.Identity.MiddleName, LastName: m.Identity.LastName, BirthDate: m.Identity.BirthDate, Company: m.Identity.Company, Department: m.Identity.Department, JobTitle: m.Identity.JobTitle, Email: m.Identity.Email, Phone: m.Identity.Phone, AddressLine1: m.Identity.AddressLine1, AddressLine2: m.Identity.AddressLine2, City: m.Identity.City, State: m.Identity.State, PostalCode: m.Identity.PostalCode, Country: m.Identity.Country, Website: m.Identity.Website}
-	}
-	return meta
 }
 
 func mergeMeta(meta *personal.V2ItemMeta, m BrowserItemMutation) {
@@ -577,7 +514,18 @@ func mergeMeta(meta *personal.V2ItemMeta, m BrowserItemMutation) {
 		}
 	}
 	if m.Identity != nil {
-		meta.Identity = &personal.V2Identity{Title: m.Identity.Title, FirstName: m.Identity.FirstName, MiddleName: m.Identity.MiddleName, LastName: m.Identity.LastName, BirthDate: m.Identity.BirthDate, Company: m.Identity.Company, Department: m.Identity.Department, JobTitle: m.Identity.JobTitle, Email: m.Identity.Email, Phone: m.Identity.Phone, AddressLine1: m.Identity.AddressLine1, AddressLine2: m.Identity.AddressLine2, City: m.Identity.City, State: m.Identity.State, PostalCode: m.Identity.PostalCode, Country: m.Identity.Country, Website: m.Identity.Website}
+		ident := personal.V2Identity{}
+		if meta.Identity != nil {
+			// Preserve the protected identifiers this DTO cannot edit.
+			ident = *meta.Identity
+		}
+		ident.Title, ident.FirstName, ident.MiddleName, ident.LastName = m.Identity.Title, m.Identity.FirstName, m.Identity.MiddleName, m.Identity.LastName
+		ident.BirthDate, ident.Company, ident.Department, ident.JobTitle = m.Identity.BirthDate, m.Identity.Company, m.Identity.Department, m.Identity.JobTitle
+		ident.Email, ident.Phone = m.Identity.Email, m.Identity.Phone
+		ident.AddressLine1, ident.AddressLine2 = m.Identity.AddressLine1, m.Identity.AddressLine2
+		ident.City, ident.State, ident.PostalCode, ident.Country = m.Identity.City, m.Identity.State, m.Identity.PostalCode, m.Identity.Country
+		ident.Website = m.Identity.Website
+		meta.Identity = &ident
 	}
 }
 
@@ -623,143 +571,149 @@ func (c *Connection) handleItemSave(r Request) error {
 	if rev == "" {
 		rev = revisions[id]
 	}
-	meta := s.Meta(id)
-	summary := summaryFor(it, rev, meta, nil)
+	summary := summaryFor(it, rev, nil)
 	return c.response(Response{ID: r.ID, Type: "item-saved", ItemID: id, Revision: rev, ItemSummary: &summary})
 }
 
+// v2ItemFromMutation builds the complete durable item for one browser
+// mutation: the rich v2 model comes from the projected metadata DTO and only
+// the supplied scalar pointers are applied. Every field the browser did not
+// touch is carried over from base.
+func v2ItemFromMutation(base vault.Item, m BrowserItemMutation, create bool) (vault.Item, error) {
+	// decodeMutation already refused an empty or oversized title.
+	base.Title = m.Title
+	meta := personal.V2ItemMeta{}
+	if !create {
+		meta = *personal.V2MetaFromItem(base)
+	}
+	mergeMeta(&meta, m)
+	item, err := personal.V2ItemApplyMeta(base, &meta)
+	if err != nil {
+		return vault.Item{}, err
+	}
+	item.Title = m.Title
+	if m.Username != nil {
+		item.Username = *m.Username
+	}
+	if m.URL != nil {
+		item.URL = *m.URL
+	}
+	if m.Notes != nil {
+		item.Notes = *m.Notes
+	}
+	if m.OTP != nil {
+		// An explicit empty OTP clears the stored TOTP seed.
+		if *m.OTP == "" {
+			item.OTP = ""
+		} else {
+			config, err := totp.Parse(*m.OTP)
+			if err != nil {
+				return vault.Item{}, ErrProtocol
+			}
+			config.Clear()
+			item.OTP = *m.OTP
+		}
+	}
+	if m.Password != nil {
+		// An empty password keeps the previous semantics and never clears a
+		// stored secret through this channel.
+		if *m.Password != "" || create {
+			item.Password = *m.Password
+		}
+	}
+	if create && (item.EffectiveCategory() == vault.CategoryLogin || item.EffectiveCategory() == vault.CategoryPassword) && item.Password == "" {
+		return vault.Item{}, ErrProtocol
+	}
+	if item.EffectiveCategory() == vault.CategoryCreditCard {
+		if card := item.CreditCard; card != nil && card.Number != "" && last4(card.Number) == "" {
+			return vault.Item{}, ErrProtocol
+		}
+	}
+	if !vault.ValidNotes(item.Notes) {
+		return vault.Item{}, ErrProtocol
+	}
+	return item, nil
+}
+
 func (c *Connection) createV2Item(s *personal.Session, m BrowserItemMutation) (string, string, error) {
-	title := m.Title
-	username := derefString(m.Username)
-	website := derefString(m.URL)
-	notes := derefString(m.Notes)
-	otp := derefString(m.OTP)
-	password := derefString(m.Password)
-	if m.Identity != nil {
-		if username == "" {
-			username = m.Identity.Email
-		}
-		if m.Identity.Website != "" && website == "" {
-			website = m.Identity.Website
-		}
-	}
-	if m.CreditCard != nil && username == "" {
-		username = m.CreditCard.CardholderName
-	}
-	if password == "" {
-		if m.Category == "login" || m.Category == "password" {
-			return "", "", ErrProtocol
-		}
-		password = randomPlaceholder()
-	}
-	if website != "" {
-		if _, e := origin.Website(website); e != nil {
-			return "", "", ErrProtocol
-		}
-	}
-	if otp != "" {
-		config, e := totp.Parse(otp)
-		if e != nil {
-			return "", "", ErrProtocol
-		}
-		config.Clear()
-	}
-	if !vault.ValidNotes(notes) {
-		return "", "", ErrProtocol
-	}
-	until := minTime(c.until, c.now().Add(30*time.Second))
-	gate := personal.NewMutationGate(until)
-	if s.RegisterMutation(gate) != nil {
-		return "", "", personal.ErrMutationCancelled
-	}
-	receipt, e := s.SaveNativeLogin(personal.NativeLoginMetadata{Title: title, URL: website}, []byte(username), []byte(password), gate)
+	item, e := v2ItemFromMutation(vault.Item{}, m, true)
 	if e != nil {
 		return "", "", e
 	}
-	rev := receipt.Revision
-	for _, field := range []struct{ name, value string }{{"otp", otp}, {"notes", notes}} {
-		if field.value == "" {
-			continue
-		}
-		g := personal.NewMutationGate(until)
-		if s.RegisterMutation(g) != nil {
-			return "", "", personal.ErrMutationCancelled
-		}
-		next, e := s.EditNativeField(receipt.ID, rev, field.name, []byte(field.value), g)
-		if e != nil {
-			return "", "", e
-		}
-		rev = next
+	gate := personal.NewMutationGate(minTime(c.until, c.now().Add(30*time.Second)))
+	if s.RegisterMutation(gate) != nil {
+		return "", "", personal.ErrMutationCancelled
 	}
-	s.PatchMeta(receipt.ID, func(meta *personal.V2ItemMeta) {
-		*meta = metaFromMutation(m)
-	})
-	return receipt.ID, rev, nil
+	id, rev, e := s.AddItem(item, gate)
+	if e != nil {
+		return "", "", e
+	}
+	return id, rev, nil
 }
 
 func (c *Connection) editV2Item(s *personal.Session, id, revIn string, m BrowserItemMutation) (string, string, error) {
 	if !token.MatchString(id) || !revision.MatchString(revIn) {
 		return "", "", ErrProtocol
 	}
-	rev := revIn
-	fields := []struct {
-		name  string
-		value string
-		set   bool
-	}{
-		{"title", m.Title, true},
-		{"username", derefString(m.Username), m.Username != nil},
-		{"url", derefString(m.URL), m.URL != nil},
+	// Authenticated read of the current whole item; a stale revision is
+	// refused here before any mutation is attempted.
+	detail, e := s.GetItemDetail(id, revIn, true)
+	if e != nil {
+		return "", "", e
 	}
-	for _, field := range fields {
-		if !field.set {
-			continue
-		}
-		g := personal.NewMutationGate(minTime(c.until, c.now().Add(30*time.Second)))
-		if s.RegisterMutation(g) != nil {
-			return "", "", personal.ErrMutationCancelled
-		}
-		next, e := s.EditNativeField(id, rev, field.name, []byte(field.value), g)
-		if e != nil {
-			return "", "", e
-		}
-		rev = next
+	item, e := v2ItemFromMutation(itemFromDetail(detail), m, false)
+	if e != nil {
+		return "", "", e
 	}
-	if m.Password != nil && *m.Password != "" {
-		g := personal.NewMutationGate(minTime(c.until, c.now().Add(30*time.Second)))
-		if s.RegisterMutation(g) != nil {
-			return "", "", personal.ErrMutationCancelled
-		}
-		next, e := s.EditNativeField(id, rev, "password", []byte(*m.Password), g)
-		if e != nil {
-			return "", "", e
-		}
-		rev = next
+	gate := personal.NewMutationGate(minTime(c.until, c.now().Add(30*time.Second)))
+	if s.RegisterMutation(gate) != nil {
+		return "", "", personal.ErrMutationCancelled
 	}
-	if m.OTP != nil && *m.OTP != "" {
-		g := personal.NewMutationGate(minTime(c.until, c.now().Add(30*time.Second)))
-		if s.RegisterMutation(g) != nil {
-			return "", "", personal.ErrMutationCancelled
-		}
-		next, e := s.EditNativeField(id, rev, "otp", []byte(*m.OTP), g)
-		if e != nil {
-			return "", "", e
-		}
-		rev = next
+	rev, e := s.EditItem(id, revIn, item, gate)
+	if e != nil {
+		return "", "", e
 	}
-	if m.Notes != nil {
-		g := personal.NewMutationGate(minTime(c.until, c.now().Add(30*time.Second)))
-		if s.RegisterMutation(g) != nil {
-			return "", "", personal.ErrMutationCancelled
-		}
-		next, e := s.SaveNativeNotes(id, rev, []byte(*m.Notes), g)
-		if e != nil {
-			return "", "", e
-		}
-		rev = next
-	}
-	s.PatchMeta(id, func(meta *personal.V2ItemMeta) { mergeMeta(meta, m) })
 	return id, rev, nil
+}
+
+// itemFromDetail reconstructs the durable item shape from an authenticated
+// item detail. Opaque material the detail deliberately omits (attachments,
+// SSH seeds, passkey records, import provenance, state history) is re-attached
+// by the whole-item edit mutation itself.
+func itemFromDetail(d personal.ItemDetail) vault.Item {
+	item := vault.Item{
+		ID:         d.ID,
+		Kind:       d.Kind,
+		Category:   d.Category,
+		VaultID:    d.VaultID,
+		Title:      d.Title,
+		Username:   d.Username,
+		Password:   d.Password,
+		OTP:        d.OTP,
+		URL:        d.URL,
+		URLs:       append([]vault.ItemURL(nil), d.URLs...),
+		Notes:      d.Notes,
+		Favorite:   d.Favorite,
+		AutoSubmit: d.AutoSubmit,
+		Tags:       append([]string(nil), d.Tags...),
+		Sections:   vault.CloneSections(d.Sections),
+		History:    vault.CloneHistory(d.History),
+		TrashedAt:  d.TrashedAt,
+		CreatedAt:  d.CreatedAt,
+		UpdatedAt:  d.UpdatedAt,
+	}
+	if d.CreditCard != nil {
+		card := *d.CreditCard
+		item.CreditCard = &card
+	}
+	if d.Identity != nil {
+		ident := *d.Identity
+		item.Identity = &ident
+	}
+	if d.State == "archived" {
+		item.State = "archived"
+	}
+	return item
 }
 
 func (c *Connection) handleItemState(r Request) error {
@@ -806,8 +760,7 @@ func (c *Connection) handleMatchProfiles(r Request) error {
 		if it.State != "" {
 			continue
 		}
-		meta := s.Meta(it.ID)
-		category := categoryOf(meta)
+		category := categoryOf(it)
 		if category != "identity" && category != "credit_card" {
 			continue
 		}
@@ -815,21 +768,22 @@ func (c *Connection) handleMatchProfiles(r Request) error {
 			continue
 		}
 		p := BrowserProfileSummary{ID: it.ID, Revision: revisions[it.ID], Category: category, Title: it.Title}
-		if category == "credit_card" && meta != nil && meta.CreditCard != nil {
-			card := meta.CreditCard
-			p.CardBrand = card.Type
-			p.CardLast4 = last4(card.Number)
-			p.CardExp = card.ExpiryDate
-			brand := strings.Title(card.Type)
-			p.Subtitle = strings.TrimSpace(brand + " •••• " + p.CardLast4)
-		}
-		if category == "identity" && meta != nil && meta.Identity != nil {
-			ident := meta.Identity
-			name := strings.TrimSpace(ident.FirstName + " " + ident.LastName)
-			if name == "" {
-				name = ident.Title
+		if category == "credit_card" {
+			if card := it.NormalizedCreditCard(); card != nil {
+				p.CardBrand = card.Type
+				p.CardLast4 = last4(card.Number)
+				p.CardExp = card.ExpiryDate
+				p.Subtitle = strings.TrimSpace(strings.Title(card.Type) + " •••• " + p.CardLast4)
 			}
-			p.Subtitle = strings.TrimSpace(strings.TrimPrefix(name+" · "+ident.Email, " · "))
+		}
+		if category == "identity" {
+			if ident := it.NormalizedIdentity(); ident != nil {
+				name := strings.TrimSpace(ident.FirstName + " " + ident.LastName)
+				if name == "" {
+					name = ident.Title
+				}
+				p.Subtitle = strings.TrimSpace(strings.TrimPrefix(name+" · "+ident.Email, " · "))
+			}
 		}
 		if p.Revision == "" {
 			continue
@@ -861,17 +815,13 @@ func (c *Connection) handleFillProfile(r Request) error {
 	if !ok || revisions[it.ID] != r.Revision || it.State != "" {
 		return c.refuse(r.ID)
 	}
-	meta := s.Meta(it.ID)
-	if meta == nil {
-		return c.refuse(r.ID)
-	}
-	fill := &BrowserProfileFill{ItemID: it.ID, Revision: r.Revision, Category: categoryOf(meta), Fields: map[string]string{}}
-	switch categoryOf(meta) {
+	fill := &BrowserProfileFill{ItemID: it.ID, Revision: r.Revision, Category: categoryOf(it), Fields: map[string]string{}}
+	switch categoryOf(it) {
 	case "credit_card":
-		if meta.CreditCard == nil {
+		card := it.NormalizedCreditCard()
+		if card == nil {
 			return c.refuse(r.ID)
 		}
-		card := meta.CreditCard
 		month, year, short := expiryParts(card.ExpiryDate)
 		cc := &BrowserCreditCardFill{CardholderName: card.CardholderName, Type: card.Type, Number: card.Number, Verification: card.Verification, ExpiryDate: card.ExpiryDate, ExpMonth: month, ExpYear: year, ExpYearShort: short, PIN: card.PIN}
 		fill.CreditCard = cc
@@ -884,10 +834,10 @@ func (c *Connection) handleFillProfile(r Request) error {
 		addField(fill.Fields, "cc-csc", card.Verification)
 		addField(fill.Fields, "cc-type", card.Type)
 	case "identity":
-		if meta.Identity == nil {
+		ident := it.NormalizedIdentity()
+		if ident == nil {
 			return c.refuse(r.ID)
 		}
-		ident := meta.Identity
 		fill.Identity = identitySummary(ident)
 		addField(fill.Fields, "honorific-prefix", ident.Title)
 		addField(fill.Fields, "given-name", ident.FirstName)

@@ -259,11 +259,13 @@ if (typeof importScripts === "function") importScripts("core.js");
     )
       return null;
     const category = core.normalizeCategory(item.category) || "login";
-    const urls = Array.isArray(item.urls)
-      ? item.urls
-          .slice(0, 20)
-          .filter((url) => typeof url === "string" && url.length <= 8192)
-      : [];
+    const urlObjects = [];
+    for (const entry of Array.isArray(item.urls) ? item.urls.slice(0, 20) : []) {
+      const raw = typeof entry === "string" ? entry : entry?.url;
+      if (typeof raw !== "string" || !raw || raw.length > 8192) continue;
+      if (!urlObjects.some((url) => url.url === raw)) urlObjects.push({ url: raw });
+    }
+    const urls = urlObjects.map((url) => url.url);
     const tags = Array.isArray(item.tags)
       ? item.tags
           .slice(0, 50)
@@ -281,6 +283,11 @@ if (typeof importScripts === "function") importScripts("core.js");
             ? item.username.slice(0, 1024)
             : "",
       urls,
+      url_objects: urlObjects,
+      primary_url:
+        typeof item.primary_url === "string"
+          ? item.primary_url.slice(0, 8192)
+          : urls[0] || "",
       tags,
       favorite: item.favorite === true,
       state: ["active", "archived", "trashed"].includes(item.state)
@@ -300,32 +307,117 @@ if (typeof importScripts === "function") importScripts("core.js");
     if (!item || typeof item !== "object" || Array.isArray(item)) return null;
     const meta = publicItem(item);
     if (!meta) return null;
-    const fields = core.flattenItemFields(item);
-    const sections = Array.isArray(item.sections)
-      ? item.sections.slice(0, 20).map((section) => ({
-          title: boundedString(section?.title, 256),
-          fields: core
-            .flattenItemFields({ fields: section?.fields || [] })
-            .slice(0, 100),
-        }))
-      : [];
-    return {
-      ...meta,
-      notes: boundedString(item.notes, 65536),
-      username: boundedString(item.username),
-      password: boundedString(item.password),
-      otp_secret: boundedString(item.otp_secret),
-      otp_code: /^(?:[0-9]{6}|[0-9]{8})$/.test(item.otp_code || "")
-        ? item.otp_code
-        : "",
-      otp_remaining_ms:
-        Number.isSafeInteger(item.otp_remaining_ms) &&
-        item.otp_remaining_ms >= 0
-          ? Math.min(30000, item.otp_remaining_ms)
-          : 0,
-      fields,
-      sections,
+    const fields = [];
+    const seen = new Set();
+    const add = (field) => {
+      if (!field || typeof field !== "object" || !field.id || seen.has(field.id)) return;
+      seen.add(field.id);
+      fields.push(field);
     };
+    for (const field of core.flattenItemFields(item).slice(0, 200)) add(field);
+    const detail = { ...meta, notes: "", username: "", fields, sections: [], identity: null, credit_card: null };
+    detail.username = boundedString(item.username);
+    if (detail.username)
+      add({ id: "username", label: "用户名", type: "text", value: detail.username, concealed: false });
+    if (item.has_password === true || typeof item.password === "string" && item.password)
+      add({
+        id: "password",
+        label: "密码",
+        type: "concealed",
+        value: typeof item.password === "string" ? item.password : "",
+        concealed: true,
+        has_value: true,
+        revealable: true,
+      });
+    if (item.has_notes === true || typeof item.notes === "string" && item.notes) {
+      detail.notes = typeof item.notes === "string" ? boundedString(item.notes, 65536) : "";
+      add({
+        id: "notes",
+        label: "备注",
+        type: "concealed",
+        value: detail.notes,
+        concealed: true,
+        has_value: true,
+        revealable: true,
+      });
+    }
+    if (item.has_otp === true || item.otp_code || typeof item.otp_secret === "string" && item.otp_secret)
+      add({
+        id: "otp",
+        label: "一次性验证码",
+        type: "totp",
+        value: /^(?:[0-9]{6}|[0-9]{8})$/.test(item.otp_code || "") ? item.otp_code : "",
+        concealed: false,
+        has_value: true,
+        revealable: true,
+      });
+    if (item.credit_card && typeof item.credit_card === "object") {
+      const card = item.credit_card;
+      detail.credit_card = card;
+      if (card.cardholder_name) detail.cardholder = boundedString(card.cardholder_name, 256);
+      if (card.type) detail.brand = boundedString(card.type, 64);
+      if (card.expiry_date) detail.expiry = boundedString(card.expiry_date, 32);
+      if (card.masked_number || card.last4)
+        add({
+          id: "cc-number",
+          label: "卡号",
+          type: "concealed",
+          value: boundedString(card.masked_number || ("•••• " + card.last4), 64),
+          concealed: true,
+          has_value: true,
+          revealable: true,
+        });
+      if (card.has_cvv === true)
+        add({ id: "cc-csc", label: "安全码", type: "concealed", value: "", concealed: true, has_value: true, revealable: true });
+      if (card.has_pin === true)
+        add({ id: "cc-pin", label: "PIN", type: "concealed", value: "", concealed: true, has_value: true, revealable: true });
+    }
+    if (item.identity && typeof item.identity === "object") {
+      detail.identity = item.identity;
+      const map = {
+        first_name: "first_name", middle_name: "middle_name", last_name: "last_name",
+        birth_date: "birth_date", company: "company", title: "title", department: "department",
+        job_title: "job_title", email: "email", phone: "phone", address_line1: "address1",
+        address_line2: "address2", city: "city", state: "state", postal_code: "postal_code",
+        country: "country", website: "website",
+      };
+      for (const [key, target] of Object.entries(map)) {
+        if (typeof item.identity[key] !== "string" || !item.identity[key]) continue;
+        detail[target] = boundedString(item.identity[key], 1024);
+        add({ id: "identity:" + key, label: target, type: "text", value: detail[target], concealed: false });
+      }
+    }
+    if (Array.isArray(item.sections))
+      detail.sections = item.sections.slice(0, 20).map((section) => ({
+        id: boundedString(section?.id, 128),
+        title: boundedString(section?.title, 256),
+        fields: (Array.isArray(section?.fields) ? section.fields : []).slice(0, 100).map((field) => {
+          const concealed = field?.concealed === true || core.nativeFieldType(field?.type) === "concealed";
+          const fieldID = "section:" + boundedString(section?.id, 128) + ":" + boundedString(field?.id, 128);
+          add({
+            id: fieldID,
+            label: boundedString(field?.label, 256),
+            type: core.nativeFieldType(field?.type),
+            value: concealed ? "" : boundedString(field?.value),
+            concealed,
+            has_value: concealed && (field?.has_value === true || !!field?.value),
+            revealable: concealed,
+            section_id: boundedString(section?.id, 128),
+            section_title: boundedString(section?.title, 256),
+            purpose: boundedString(field?.purpose, 128),
+          });
+          return {
+            id: boundedString(field?.id, 128),
+            label: boundedString(field?.label, 256),
+            type: core.nativeFieldType(field?.type),
+            value: concealed ? "" : boundedString(field?.value),
+            concealed,
+            has_value: concealed && (field?.has_value === true || !!field?.value),
+            purpose: boundedString(field?.purpose, 128),
+          };
+        }),
+      }));
+    return detail;
   }
   function currentSiteFlags() {
     if (!context?.origin)
@@ -1007,6 +1099,8 @@ if (typeof importScripts === "function") importScripts("core.js");
         "vault-search": "vault-items",
         "vault-list": "vault-items",
         "item-get": "item-detail",
+        "item-reveal-field": "field-value",
+        "item-copy-field": "field-value",
         "item-save": "saved",
         "item-state": "saved",
         generate: "generated",
@@ -1207,49 +1301,67 @@ if (typeof importScripts === "function") importScripts("core.js");
       await settingsReady;
       await bounded(current(c), generation);
       const submit = autoLogin && loginOverrides[itemId] !== false;
-      intent.injectionStarted = true;
-      const results = await bounded(
-        api.scripting.executeScript({
-          target: {
-            tabId: c.tabId,
-            documentIds: [c.documentId],
-          },
-          func: core.fillDocument,
-          args: [
-            c.origin,
-            response.username,
-            response.password,
-            Date.now() + 1500,
-            false,
-            submit,
-            (c.frameId || 0) > 0,
-          ],
-        }),
+      // Record the exact credential before injection starts. fillDocument may
+      // auto-submit, and its inline-stage-save can arrive while executeScript
+      // is still unresolved; remembering only afterwards leaves a false save
+      // banner that steals the next Passkey click.
+      const previousFill = lastFilledCredentials.get(c.tabId);
+      if (previousFill) previousFill.password = "";
+      const recorded = {
+        origin: c.origin,
+        itemId,
+        revision,
+        username: response.username,
+        password: response.password,
+        documentId: c.documentId,
         generation,
-      );
+        filledAt: Date.now(),
+        expiresAt: Date.now() + LAST_FILLED_TTL,
+      };
+      lastFilledCredentials.set(c.tabId, recorded);
+      const rollback = () => {
+        if (lastFilledCredentials.get(c.tabId) !== recorded) return;
+        recorded.password = "";
+        lastFilledCredentials.delete(c.tabId);
+      };
+      intent.injectionStarted = true;
+      let results;
+      try {
+        results = await bounded(
+          api.scripting.executeScript({
+            target: {
+              tabId: c.tabId,
+              documentIds: [c.documentId],
+            },
+            func: core.fillDocument,
+            args: [
+              c.origin,
+              response.username,
+              response.password,
+              Date.now() + 1500,
+              false,
+              submit,
+              (c.frameId || 0) > 0,
+            ],
+          }),
+          generation,
+        );
+      } catch (error) {
+        rollback();
+        throw error;
+      }
       const filled = results[0]?.result;
       if (
         results.length !== 1 ||
         results[0].frameId !== (c.frameId || 0) ||
         results[0].documentId !== c.documentId ||
         !(filled === true || (filled && filled.ok === true))
-      )
+      ) {
+        rollback();
         throw Error("refused");
+      }
       await bounded(current(c), generation);
       if (generation !== epoch || pending !== intent) throw Error("refused");
-      // Remember the exact credential that was just injected so an unchanged
-      // sign-in does not trigger a save prompt after submission.
-      const previousFill = lastFilledCredentials.get(c.tabId);
-      if (previousFill) previousFill.password = "";
-      lastFilledCredentials.set(c.tabId, {
-        origin: c.origin,
-        itemId,
-        revision,
-        username: response.username,
-        password: response.password,
-        filledAt: Date.now(),
-        expiresAt: Date.now() + LAST_FILLED_TTL,
-      });
       intent.injectionStarted = false;
       fillUnknown = false;
       const step =
@@ -1579,6 +1691,8 @@ if (typeof importScripts === "function") importScripts("core.js");
       last &&
       Date.now() < last.expiresAt &&
       last.origin === c.origin &&
+      last.documentId === c.documentId &&
+      last.generation === epoch &&
       last.username === username &&
       last.password === values.password &&
       values.isPasswordChange !== true
@@ -1997,7 +2111,7 @@ if (typeof importScripts === "function") importScripts("core.js");
           documentIds: [c.documentId],
         },
         func: core.otpDocument,
-        args: [c.origin, "probe", undefined, undefined, (c.frameId || 0) > 0],
+        args: [c.origin, "probe", null, null, (c.frameId || 0) > 0],
       }),
       generation,
       remaining(),
@@ -2578,10 +2692,13 @@ if (typeof importScripts === "function") importScripts("core.js");
       throw Error("refused");
     let itemJSON;
     try {
-      itemJSON = JSON.stringify({
-        ...message.item,
-        category: core.normalizeCategory(message.item.category),
-      });
+      const original =
+        mode === "edit"
+          ? detailCache.get(message.id + ":" + message.revision) || null
+          : null;
+      const mutation = core.itemToNativeMutation(message.item, { original });
+      if (!mutation) throw Error("refused");
+      itemJSON = JSON.stringify(mutation);
     } catch {
       throw Error("refused");
     }
@@ -2695,18 +2812,62 @@ if (typeof importScripts === "function") importScripts("core.js");
     rebuildContextMenus();
     return { revision: response.revision };
   }
-  async function copyFieldValue(message) {
+  async function fieldValue(message, copy) {
+    if (
+      !capability ||
+      !/^[a-f0-9]{32}$/.test(message.id || "") ||
+      !/^[a-f0-9]{64}$/.test(message.revision || "")
+    )
+      throw Error("refused");
+    const field = message.field || message.field_id;
+    if (
+      typeof field !== "string" ||
+      !/^(?:username|password|notes|url|otp|cc-number|cc-csc|cc-pin|section:[A-Za-z0-9_.-]{1,128}:[A-Za-z0-9_.-]{1,128})$/.test(field)
+    )
+      throw Error("refused");
     const detail =
       detailCache.get(message.id + ":" + message.revision) ||
       (await getVaultItem(message.id, message.revision));
-    const field = core
-      .flattenItemFields(detail)
-      .find((entry) => entry.id === message.field_id);
-    if (!field) throw Error("refused");
+    if (!core.flattenItemFields(detail).some((entry) => entry.id === field))
+      throw Error("refused");
+    const response = await request(
+      copy ? "item-copy-field" : "item-reveal-field",
+      {
+        capability,
+        item_id: message.id,
+        revision: message.revision,
+        field,
+        action: copy ? "copy" : "reveal",
+      },
+      12000,
+    );
+    if (!core.validResponse(response) || response.type !== "field-value")
+      throw Error("refused");
+    const hostExpires = Number.isSafeInteger(response.expires_in_seconds)
+      ? Math.max(0, response.expires_in_seconds)
+      : 0;
+    // Non-OTP reveal has no host window. Use a bounded local 30s window,
+    // while OTP must never outlive the host-provided TOTP window.
+    const expires = copy
+      ? hostExpires > 0
+        ? Math.min(30, hostExpires)
+        : 30
+      : response.field === "otp"
+        ? hostExpires
+        : hostExpires > 0
+          ? Math.min(30, hostExpires)
+          : 30;
     return {
-      value: field.value,
-      clearAfterSeconds: settings.clipboardClearSeconds,
+      field: response.field,
+      value: response.value,
+      revision: response.revision,
+      expires_in_seconds: expires,
+      copied: response.copied,
+      clearAfterSeconds: expires,
     };
+  }
+  async function copyFieldValue(message) {
+    return fieldValue(message, true);
   }
   async function openAndFill(message) {
     if (
@@ -3410,14 +3571,10 @@ if (typeof importScripts === "function") importScripts("core.js");
           extra.itemState = await setItemState(message);
           break;
         case "copy-field":
-          if (
-            !/^[a-f0-9]{32}$/.test(message.id || "") ||
-            !/^[a-f0-9]{64}$/.test(message.revision || "") ||
-            typeof message.field_id !== "string" ||
-            message.field_id.length > 128
-          )
-            throw Error("refused");
           extra.copiedField = await copyFieldValue(message);
+          break;
+        case "reveal-field":
+          extra.revealedField = await fieldValue(message, false);
           break;
         case "open-and-fill":
           extra.openAndFill = await openAndFill(message);
@@ -3437,7 +3594,7 @@ if (typeof importScripts === "function") importScripts("core.js");
         default:
           throw Error("refused");
       }
-      return {};
+      return extra;
     };
     const respondState = async (extra = {}) => {
       let pendingSave = null;

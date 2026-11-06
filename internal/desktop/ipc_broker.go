@@ -44,10 +44,10 @@ func (a *App) startBrowserBroker() {
 		CurrentSession: func() (*personal.Session, uint64, bool) {
 			a.brokerMu.Lock()
 			defer a.brokerMu.Unlock()
-			if a.session == nil || !a.session.Unlocked() {
+			if a.brokerSession == nil || !a.brokerSession.Unlocked() {
 				return nil, 0, false
 			}
-			return a.session, a.generation, true
+			return a.brokerSession, a.brokerEpoch, true
 		},
 		RequestLock: func() {
 			a.dispatch(func() { a.Lock() })
@@ -80,20 +80,32 @@ func (a *App) startBrowserBroker() {
 }
 
 func (a *App) stopBrowserBroker() {
+	a.cancelPendingCLIRun()
 	a.brokerMu.Lock()
 	b := a.broker
 	a.broker = nil
 	a.brokerEndpoint = ""
+	a.brokerSession = nil
 	a.brokerMu.Unlock()
 	if b != nil {
 		_ = b.Close()
 	}
 }
 
+func (a *App) cancelPendingCLIRun() {
+	a.brokerMu.Lock()
+	p := a.cliPending
+	a.cliPending = nil
+	a.brokerMu.Unlock()
+	if p != nil {
+		p.choose(false)
+	}
+}
+
 func (a *App) notifyBrowserBrokerUnlocked() {
 	a.brokerMu.Lock()
-	b, s := a.broker, a.session
-	generation := a.generation
+	a.brokerSession, a.brokerEpoch = a.session, a.generation
+	b, s, generation := a.broker, a.brokerSession, a.brokerEpoch
 	a.brokerMu.Unlock()
 	if b != nil && s != nil {
 		b.NotifyUnlocked(s, generation, true)
@@ -102,6 +114,7 @@ func (a *App) notifyBrowserBrokerUnlocked() {
 
 func (a *App) notifyBrowserBrokerLocked() {
 	a.brokerMu.Lock()
+	a.brokerSession, a.brokerEpoch = nil, a.generation
 	b := a.broker
 	generation := a.generation
 	a.brokerMu.Unlock()
@@ -114,7 +127,8 @@ func (a *App) notifyBrowserBrokerLocked() {
 // extracts pinned targets in one authenticated view.
 func (a *App) handleCLIRun(ctx context.Context, peer browserhost.Peer, req browserhost.BrokerCLIRequest) (browserhost.BrokerCLIResponse, error) {
 	a.brokerMu.Lock()
-	s := a.session
+	s := a.brokerSession
+	epoch := a.brokerEpoch
 	path := ""
 	if s != nil {
 		path = s.VaultPath()
@@ -131,7 +145,7 @@ func (a *App) handleCLIRun(ctx context.Context, peer browserhost.Peer, req brows
 		}
 		approved = ok
 	} else {
-		ok, e := a.requestCLIRunApproval(ctx, peer, req)
+		ok, e := a.requestCLIRunApproval(ctx, peer, req, s, epoch)
 		if e != nil {
 			return browserhost.BrokerCLIResponse{}, errCLIRunRefused
 		}
@@ -147,7 +161,7 @@ func (a *App) handleCLIRun(ctx context.Context, peer browserhost.Peer, req brows
 	return browserhost.BrokerCLIResponse{V: 1, Values: values}, nil
 }
 
-func (a *App) requestCLIRunApproval(ctx context.Context, peer browserhost.Peer, req browserhost.BrokerCLIRequest) (bool, error) {
+func (a *App) requestCLIRunApproval(ctx context.Context, peer browserhost.Peer, req browserhost.BrokerCLIRequest, session *personal.Session, epoch uint64) (bool, error) {
 	p := &cliRunPending{peer: peer, request: req, decision: make(chan bool, 1)}
 	var b [16]byte
 	if _, e := rand.Read(b[:]); e != nil {
@@ -155,7 +169,7 @@ func (a *App) requestCLIRunApproval(ctx context.Context, peer browserhost.Peer, 
 	}
 	p.id = hex.EncodeToString(b[:])
 	a.brokerMu.Lock()
-	if a.cliPending != nil {
+	if a.cliPending != nil || a.brokerSession != session || a.brokerEpoch != epoch || session == nil || !session.Unlocked() {
 		a.brokerMu.Unlock()
 		return false, errCLIRunRefused
 	}

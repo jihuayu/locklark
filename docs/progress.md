@@ -1,5 +1,7 @@
 # Locklark 开发进度
 
+2026-11-07：从 main `eccd326` 接续唯一未合并的 [PR #43](https://github.com/jihuayu/locklark/pull/43)，完成集成缺陷修复并推进桌面、扩展与 CLI：共享持久化 v2 模型、原子浏览器编辑、真实 DTO 适配、OTP 序列化、锁库通知、受控 CLI 帮助路径与 DeepSeek profile。按本轮用户指令由主代理设计架构、DeepSeek 外部 worker 并行调研/实现。实际测试、独立复核范围、远端合并门槛与仍待 1:1 对照项见 [M6 集成验收](m6-integration-validation.md)；以下段落保留历史记录，不能覆盖此处较新的 PR 状态。
+
 团队同步与移动端从 main `9d8d574` 接续，架构与验收约定见[团队与移动设计](team-mobile-design.md)。主代理设计和独立验收，Sol xhigh 子代理分别实现真实 HTTPS 团队同步、共享 Go 移动门面、Android Kotlin、iOS Swift及外部验收，Luna max审阅。PR #37 当前仍为草稿：真实团队 TLS 与服务命令独立验收已通过；第七轮 Android 原生流程、独立外部界面、真实数据库签名审计及 KDBX 互通全部通过，新增系统认证验收发现 ATD 不提供安全锁屏，已切换完整 Google APIs 镜像继续；iOS 在官方 URL 接口实测后仍返回较弱保护，保持拒绝并准备真机验收。精确进展及失败证据见[团队与移动验收](team-mobile-validation.md)，不能把协议核心或构建成功当作完整手机/团队产品通过。
 
 登录备注 [PR #31](https://github.com/jihuayu/locklark/pull/31) 已在精确 head `9b11713` 的四项 CI（run `42146467829`）、Luna max产品/工具/测试复核及主代理独立 GUI/升级/对账验收后，正常 squash 合入 `9d8d574`。主代理核对完整远端日志中的八项真实 GUI/故障门槛；首轮 OTP 测试时钟失败已由仅测试修正关闭。

@@ -64,7 +64,7 @@ func TestCLIProfilesAndStoreLifecycle(t *testing.T) {
 	}
 	var profiles []cliProfileDescription
 	decodeCLIJSON(t, raw, &profiles)
-	wantNames := []string{"anthropic", "aws", "docker", "flyctl", "gh", "git", "kubectl", "netrc", "npm", "openai", "psql", "stripe", "terraform", "token", "vercel"}
+	wantNames := []string{"anthropic", "aws", "deepseek", "docker", "flyctl", "gh", "git", "kubectl", "netrc", "npm", "openai", "psql", "stripe", "terraform", "token", "vercel"}
 	if len(profiles) != len(wantNames) {
 		t.Fatalf("profile count = %d, want %d", len(profiles), len(wantNames))
 	}
@@ -74,8 +74,8 @@ func TestCLIProfilesAndStoreLifecycle(t *testing.T) {
 		}
 	}
 	for _, profile := range profiles {
-		if profile.Name == "token" && (profile.Executables == nil || len(profile.Executables) != 0) {
-			t.Fatal("token profile executables must be an empty array")
+		if (profile.Name == "token" || profile.Name == "deepseek") && (profile.Executables == nil || len(profile.Executables) != 0) {
+			t.Fatalf("%s profile executables must be an empty array", profile.Name)
 		}
 	}
 
@@ -391,6 +391,51 @@ func TestCLIProgramLookupDefaults(t *testing.T) {
 	}
 }
 
+func TestCLIDeepSeekProfileBinding(t *testing.T) {
+	dir := cliTestDir(t)
+	bindingPath := filepath.Join(dir, "bindings.json")
+	vaultPath := filepath.Join(dir, "owner.ll")
+	program := cliTestExecutable(t)
+	canary := "DeepSeekCanary" + strings.Repeat("x", 32)
+	t.Setenv("DEEPSEEK_API_KEY", canary)
+	base := []string{"init", "deepseek-worker", "--profile", "deepseek", "--file", vaultPath, "--binding", bindingPath,
+		"--id", cliTestID, "--revision", cliTestRevision}
+	if _, err := runCLIForTest(t, base...); !errors.Is(err, cliUsage) {
+		t.Fatal("deepseek accepted automatic program lookup")
+	}
+	if _, err := runCLIForTest(t, append(base, "--program", program, "--passthrough", "DEEPSEEK_API_KEY")...); err == nil {
+		t.Fatal("deepseek accepted secret passthrough")
+	}
+	args := append(base, "--program", program, "--timeout", "3600",
+		"--passthrough", "DEEPSEEK_BASE_URL,DEEPSEEK_MODEL,DEEPSEEK_STATE_DIR")
+	if _, err := runCLIForTest(t, args...); err != nil {
+		t.Fatal("deepseek init failed:", err)
+	}
+	raw, err := runCLIForTest(t, "show", "deepseek-worker", "--binding", bindingPath)
+	if err != nil {
+		t.Fatal("deepseek show failed:", err)
+	}
+	var binding clibinding.ToolBinding
+	decodeCLIJSON(t, raw, &binding)
+	if binding.Profile != "deepseek" || binding.Program != program || binding.TimeoutSeconds != 3600 ||
+		len(binding.Targets) != 1 || binding.Targets[0].Slot != "token" || binding.Targets[0].Field != "password" ||
+		reflect.DeepEqual(binding.PassthroughEnv, []string{"DEEPSEEK_BASE_URL", "DEEPSEEK_MODEL", "DEEPSEEK_STATE_DIR"}) == false {
+		t.Fatalf("deepseek binding metadata wrong: %+v", binding)
+	}
+	if binding.ProgramSHA256 == "" {
+		t.Fatal("deepseek interpreter was not pinned")
+	}
+	stored, err := os.ReadFile(bindingPath)
+	if err != nil || bytes.Contains(stored, []byte(canary)) {
+		t.Fatal("deepseek binding persisted a credential value")
+	}
+	for _, denied := range [][]string{{"configure"}, {"spawn"}, {"--background"}} {
+		if _, err := runCLIForTest(t, append([]string{"run", "deepseek-worker", "--binding", bindingPath, "--"}, denied...)...); !errors.Is(err, cliUsage) {
+			t.Fatalf("deepseek accepted denied args %v: %v", denied, err)
+		}
+	}
+}
+
 func TestCLIListShowMissingAndCorrupt(t *testing.T) {
 	dir := cliTestDir(t)
 	missing := filepath.Join(dir, "missing.json")
@@ -537,24 +582,41 @@ func TestCLIRunFastPathAndExitStatus(t *testing.T) {
 	bindingPath, _ := cliRunBinding(t, "fasttool", program, "token", "password", "token")
 	dir := cliTestDir(t)
 	marker := filepath.Join(dir, "marker")
+	parentHome := t.TempDir()
+	parentConfig := filepath.Join(parentHome, ".deepseek")
+	parentTmp := filepath.Join(parentHome, "tmp")
+	for _, directory := range []string{parentConfig, parentTmp} {
+		if err := os.Mkdir(directory, 0700); err != nil {
+			t.Fatal("parent fixture unavailable")
+		}
+	}
+	canary := "AmbientCanary" + strings.Repeat("z", 32)
+	t.Setenv("HOME", parentHome)
+	t.Setenv("XDG_CONFIG_HOME", parentConfig)
+	t.Setenv("TMPDIR", parentTmp)
+	t.Setenv("GH_TOKEN", canary)
+	t.Setenv("DEEPSEEK_API_KEY", canary)
+	t.Setenv("DEEPSEEK_STATE_DIR", filepath.Join(parentHome, "state"))
 	t.Setenv("LOCKLARK_TEST_CLI_MARKER", marker)
 	t.Setenv("LOCKLARK_TEST_CLI_EXIT", "")
 	t.Setenv("LOCKLARK_CLI_ACTIVE", "")
 
-	args := []string{"run", "fasttool", "--binding", bindingPath, "--", "-test.run=^TestCLIRunFastPathChild$", "help"}
+	args := []string{"run", "fasttool", "--binding", bindingPath, "--",
+		"-test.run=^TestCLIRunFastPathChild$", "help", marker, "", parentHome, parentConfig, parentTmp}
 	if out, err := runCLIForTest(t, args...); err != nil || len(out) != 0 {
 		t.Fatalf("fast path failed: %v %q", err, out)
 	}
 	raw, err := os.ReadFile(marker)
-	if err != nil || string(raw) != "started" {
-		t.Fatal("fast-path child did not run with the recursion guard")
+	if err != nil || string(raw) != "isolated" {
+		t.Fatal("fast-path child did not receive an isolated credential-free environment")
 	}
 
 	if err = os.Remove(marker); err != nil {
 		t.Fatal("marker cleanup failed")
 	}
-	t.Setenv("LOCKLARK_TEST_CLI_EXIT", "7")
-	if _, err = runCLIForTest(t, args...); err == nil {
+	exitArgs := append([]string(nil), args...)
+	exitArgs[len(exitArgs)-4] = "7"
+	if _, err = runCLIForTest(t, exitArgs...); err == nil {
 		t.Fatal("fast-path child error was not propagated")
 	} else {
 		var child *childExitStatus
@@ -562,28 +624,60 @@ func TestCLIRunFastPathAndExitStatus(t *testing.T) {
 			t.Fatalf("fast-path exit = %v, want status 7", err)
 		}
 	}
+	if raw, err = os.ReadFile(marker); err != nil || string(raw) != "isolated" {
+		t.Fatal("fast-path child did not run before propagating its exit status")
+	}
 }
 
 func TestCLIRunFastPathChild(t *testing.T) {
-	marker := os.Getenv("LOCKLARK_TEST_CLI_MARKER")
-	if marker == "" {
+	helpIndex := -1
+	for i, arg := range os.Args {
+		if arg == "help" {
+			helpIndex = i
+			break
+		}
+	}
+	if helpIndex < 0 || len(os.Args) < helpIndex+6 {
 		return
 	}
+	marker := os.Args[helpIndex+1]
+	exitRaw := os.Args[helpIndex+2]
+	parentHome := os.Args[helpIndex+3]
+	parentConfig := os.Args[helpIndex+4]
+	parentTmp := os.Args[helpIndex+5]
 	if os.Getenv("LOCKLARK_CLI_ACTIVE") != "fasttool" {
 		os.Exit(41)
 	}
-	if !strings.Contains(strings.Join(os.Args, "\x00"), "help") {
-		os.Exit(42)
+	for _, name := range []string{
+		"GH_TOKEN", "DEEPSEEK_API_KEY", "DEEPSEEK_STATE_DIR",
+		"LOCKLARK_TEST_CLI_MARKER", "LOCKLARK_TEST_CLI_EXIT", "AWS_SECRET_ACCESS_KEY",
+	} {
+		if os.Getenv(name) != "" {
+			os.Exit(42)
+		}
 	}
-	if raw := os.Getenv("LOCKLARK_TEST_CLI_EXIT"); raw != "" {
-		code, err := strconv.Atoi(raw)
+	home := os.Getenv("HOME")
+	if home == "" || home == parentHome {
+		os.Exit(43)
+	}
+	for name, parent := range map[string]string{"HOME": parentHome, "XDG_CONFIG_HOME": parentConfig, "TMPDIR": parentTmp} {
+		value := os.Getenv(name)
+		if value == "" || value == parent {
+			os.Exit(44)
+		}
+	}
+	if filepath.Dir(home) != filepath.Dir(os.Getenv("XDG_CONFIG_HOME")) || filepath.Dir(home) != filepath.Dir(os.Getenv("TMPDIR")) {
+		os.Exit(45)
+	}
+	if err := os.WriteFile(marker, []byte("isolated"), 0600); err != nil {
+		os.Exit(46)
+	}
+	if exitRaw != "" {
+		code, err := strconv.Atoi(exitRaw)
 		if err != nil {
-			os.Exit(43)
+			os.Exit(47)
 		}
 		os.Exit(code)
-	}
-	if err := os.WriteFile(marker, []byte("started"), 0600); err != nil {
-		os.Exit(44)
 	}
 	os.Exit(0)
 }

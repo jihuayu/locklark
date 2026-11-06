@@ -59,6 +59,24 @@ var builtinProfiles = map[string]Profile{
 			DenyArgs:       [][]string{{"configure"}},
 		},
 	},
+	"deepseek": staticProfile{
+		name:        "deepseek",
+		executables: []string{},
+		spec: Spec{
+			ID: "deepseek-harness-v1",
+			Slots: []Slot{
+				{Name: "token", Kind: "login", Field: FieldPassword, RequireNonBlank: true},
+			},
+			Env: map[string]string{"DEEPSEEK_API_KEY": "slot:token"},
+			PassthroughEnv: []string{
+				"DEEPSEEK_BASE_URL", "DEEPSEEK_MODEL", "DEEPSEEK_STATE_DIR",
+				"NO_COLOR", "TERM",
+			},
+			MaxTimeout:             3600,
+			DenyArgs:               [][]string{{"configure"}, {"spawn"}, {"--background"}},
+			RequireExplicitProgram: true,
+		},
+	},
 	"kubectl": staticProfile{
 		name:        "kubectl",
 		executables: []string{"kubectl", "helm"},

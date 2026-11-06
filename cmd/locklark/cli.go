@@ -17,7 +17,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
-	"time"
 	"unicode/utf8"
 
 	"github.com/jihuayu/locklark/internal/clibinding"
@@ -423,6 +422,9 @@ func resolveCLIProgram(tool string, prof cliprofile.Profile, explicit string) (s
 			return "", cliUsage
 		}
 		return explicit, nil
+	}
+	if prof.Spec().RequireExplicitProgram {
+		return "", cliUsage
 	}
 	candidates := []string{tool}
 	candidates = append(candidates, prof.Executables()...)
@@ -898,39 +900,41 @@ func runCLIRun(args []string) error {
 		return cliUsage
 	}
 	if !prof.NeedsAuth(childArgs) {
-		return executeCLIFastPath(tool, binding.Program, childArgs, cwd, timeout)
+		return executeCLIFastPath(tool, binding, spec, childArgs, cwd, timeout)
 	}
 	return executeCLIAuthenticated(tool, binding, spec, childArgs, cwd, timeout)
 }
 
-func cliChildEnvironment(tool string) []string {
-	environment := make([]string, 0, len(os.Environ())+1)
-	for _, entry := range os.Environ() {
-		name, _, _ := strings.Cut(entry, "=")
-		if name == "LOCKLARK_CLI_ACTIVE" {
-			continue
+func executeCLIFastPath(tool string, binding clibinding.ToolBinding, spec cliprofile.Spec, args []string, cwd string, timeout int) error {
+	passthrough := make(map[string]string)
+	for _, name := range binding.PassthroughEnv {
+		value, present := os.LookupEnv(name)
+		if present && cliprofile.ValidPassthroughName(spec, name, value) {
+			passthrough[name] = value
 		}
-		environment = append(environment, entry)
 	}
-	return append(environment, "LOCKLARK_CLI_ACTIVE="+tool)
-}
-
-func executeCLIFastPath(tool, program string, args []string, cwd string, timeout int) error {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, program, args...)
-	cmd.Dir = cwd
-	cmd.Env = cliChildEnvironment(tool)
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	err := cmd.Run()
-	if err == nil {
-		return nil
+	targets := make([]personal.BundleTarget, len(binding.Targets))
+	for i, target := range binding.Targets {
+		targets[i] = personal.BundleTarget{Slot: target.Slot, ID: target.ID, Revision: target.Revision, Field: target.Field}
 	}
-	var exited *exec.ExitError
-	if errors.As(err, &exited) && exited.ExitCode() >= 0 {
-		return &childExitStatus{code: exited.ExitCode()}
+	request := personal.RunBundleRequest{
+		Program:        binding.Program,
+		Args:           append([]string(nil), args...),
+		Directory:      cwd,
+		TimeoutSeconds: timeout,
+		HelperPath:     append([]string(nil), binding.HelperPath...),
+		Passthrough:    passthrough,
+		TokenEnvName:   binding.TokenEnvName,
+		Spec:           spec,
 	}
-	return errCLIChildFailed
+	code, err := personal.RunCLIInformational(context.Background(), request, targets, tool)
+	if err != nil {
+		return err
+	}
+	if code != 0 {
+		return &childExitStatus{code: code}
+	}
+	return nil
 }
 
 func executeCLIAuthenticated(tool string, binding clibinding.ToolBinding, spec cliprofile.Spec, childArgs []string, cwd string, timeout int) error {

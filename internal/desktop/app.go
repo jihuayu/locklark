@@ -62,6 +62,8 @@ type App struct {
 	brokerMu       sync.Mutex
 	broker         *browserhost.Broker
 	brokerEndpoint string
+	brokerSession  *personal.Session
+	brokerEpoch    uint64
 	cliApprover    func(context.Context, browserhost.Peer, browserhost.BrokerCLIRequest) (bool, error)
 	cliPending     *cliRunPending
 
@@ -328,6 +330,10 @@ func (a *App) Lock() {
 	a.session = nil
 	if s != nil {
 		s.RequestLock()
+	}
+	a.cancelPendingCLIRun()
+	a.notifyBrowserBrokerLocked()
+	if s != nil {
 		a.launch(s.Lock)
 	}
 	a.regenerate = nil

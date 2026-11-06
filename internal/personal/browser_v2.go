@@ -5,7 +5,6 @@ import (
 	"net/url"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -15,17 +14,18 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// v2 item metadata overlay
+// v2 item metadata DTO
 //
-// vault.Item on this branch models the v1 login schema. Rich v2 attributes are
-// kept in a process-local, thread-safe overlay keyed by vault path and item ID.
-// Every overlay mutation is paired with a real v1 item persistence operation
-// (SaveNativeLogin / EditNativeField / SaveNativeNotes / SetState) so IDs,
-// revisions, KDBX durability and the signed audit journal remain real.
+// vault.Item models every v2 attribute durably (see vault/items_v2.go), so
+// V2ItemMeta is only a DTO projection of authenticated item fields. There is no
+// process-local overlay and no memory-only fallback: reads project an already
+// authenticated item and writes go through the whole-item audited mutation
+// path (AddItem / EditItem / SetFavorite). See browser_v2_persistence.go.
 // ---------------------------------------------------------------------------
 
-// V2ItemMeta carries the v2 structured attributes that the v1 vault.Item does
-// not model directly.
+// V2ItemMeta is the v2 metadata DTO projected from persisted vault.Item
+// fields. It is always derived from an authenticated item, never merged back
+// from process memory.
 type V2ItemMeta struct {
 	Category   string        `json:"category,omitempty"`
 	VaultID    string        `json:"vault_id,omitempty"`
@@ -74,102 +74,26 @@ type V2CreditCard struct {
 }
 
 type V2Identity struct {
-	Title        string `json:"title,omitempty"`
-	FirstName    string `json:"first_name,omitempty"`
-	MiddleName   string `json:"middle_name,omitempty"`
-	LastName     string `json:"last_name,omitempty"`
-	BirthDate    string `json:"birth_date,omitempty"`
-	Company      string `json:"company,omitempty"`
-	Department   string `json:"department,omitempty"`
-	JobTitle     string `json:"job_title,omitempty"`
-	Email        string `json:"email,omitempty"`
-	Phone        string `json:"phone,omitempty"`
-	AddressLine1 string `json:"address_line1,omitempty"`
-	AddressLine2 string `json:"address_line2,omitempty"`
-	City         string `json:"city,omitempty"`
-	State        string `json:"state,omitempty"`
-	PostalCode   string `json:"postal_code,omitempty"`
-	Country      string `json:"country,omitempty"`
-	Website      string `json:"website,omitempty"`
-}
-
-type overlayKey struct{ path, id string }
-
-var v2Overlay = struct {
-	sync.RWMutex
-	items map[overlayKey]*V2ItemMeta
-}{items: map[overlayKey]*V2ItemMeta{}}
-
-func cloneMeta(in *V2ItemMeta) *V2ItemMeta {
-	if in == nil {
-		return nil
-	}
-	out := *in
-	out.Tags = append([]string(nil), in.Tags...)
-	out.URLs = append([]V2ItemURL(nil), in.URLs...)
-	out.Sections = nil
-	for _, section := range in.Sections {
-		c := section
-		c.Fields = append([]V2CustomField(nil), section.Fields...)
-		out.Sections = append(out.Sections, c)
-	}
-	if in.CreditCard != nil {
-		c := *in.CreditCard
-		out.CreditCard = &c
-	}
-	if in.Identity != nil {
-		c := *in.Identity
-		out.Identity = &c
-	}
-	if in.AutoSubmit != nil {
-		v := *in.AutoSubmit
-		out.AutoSubmit = &v
-	}
-	return &out
-}
-
-func v2Meta(path, id string) *V2ItemMeta {
-	v2Overlay.RLock()
-	defer v2Overlay.RUnlock()
-	return cloneMeta(v2Overlay.items[overlayKey{path, id}])
-}
-
-func v2SetMeta(path, id string, meta *V2ItemMeta) {
-	if meta == nil {
-		return
-	}
-	m := cloneMeta(meta)
-	now := time.Now().Unix()
-	if m.CreatedAt == 0 {
-		m.CreatedAt = now
-	}
-	m.UpdatedAt = now
-	v2Overlay.Lock()
-	v2Overlay.items[overlayKey{path, id}] = m
-	v2Overlay.Unlock()
-}
-
-func v2PatchMeta(path, id string, patch func(*V2ItemMeta)) {
-	v2Overlay.Lock()
-	defer v2Overlay.Unlock()
-	key := overlayKey{path, id}
-	m := cloneMeta(v2Overlay.items[key])
-	if m == nil {
-		m = &V2ItemMeta{Category: "login", VaultID: "personal"}
-	}
-	patch(m)
-	now := time.Now().Unix()
-	if m.CreatedAt == 0 {
-		m.CreatedAt = now
-	}
-	m.UpdatedAt = now
-	v2Overlay.items[key] = m
-}
-
-func v2DropMeta(path, id string) {
-	v2Overlay.Lock()
-	delete(v2Overlay.items, overlayKey{path, id})
-	v2Overlay.Unlock()
+	Title          string `json:"title,omitempty"`
+	FirstName      string `json:"first_name,omitempty"`
+	MiddleName     string `json:"middle_name,omitempty"`
+	LastName       string `json:"last_name,omitempty"`
+	BirthDate      string `json:"birth_date,omitempty"`
+	Company        string `json:"company,omitempty"`
+	Department     string `json:"department,omitempty"`
+	JobTitle       string `json:"job_title,omitempty"`
+	Email          string `json:"email,omitempty"`
+	Phone          string `json:"phone,omitempty"`
+	AddressLine1   string `json:"address_line1,omitempty"`
+	AddressLine2   string `json:"address_line2,omitempty"`
+	City           string `json:"city,omitempty"`
+	State          string `json:"state,omitempty"`
+	PostalCode     string `json:"postal_code,omitempty"`
+	Country        string `json:"country,omitempty"`
+	SSN            string `json:"ssn,omitempty"`
+	PassportNumber string `json:"passport_number,omitempty"`
+	LicenseNumber  string `json:"license_number,omitempty"`
+	Website        string `json:"website,omitempty"`
 }
 
 // VaultPath returns the authenticated vault path, or "" when locked.
@@ -182,29 +106,34 @@ func (s *Session) VaultPath() string {
 	return s.path
 }
 
-// Meta returns a copy of the v2 metadata for an item, if any.
+// Meta projects the v2 metadata of one item directly from the authenticated
+// durable record. It returns nil when the session is locked or the item does
+// not exist, and never exposes process-local state.
 func (s *Session) Meta(id string) *V2ItemMeta {
+	if s == nil || !idOK(id) {
+		return nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return v2Meta(s.path, id)
+	item, _, err := s.authenticatedItemLocked(id)
+	if err != nil {
+		return nil
+	}
+	return V2MetaFromItem(item)
 }
 
-// PatchMeta updates v2 metadata for an existing item.
-func (s *Session) PatchMeta(id string, patch func(*V2ItemMeta)) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	v2PatchMeta(s.path, id, patch)
-}
-
-// DropMeta removes overlay metadata for an item.
-func (s *Session) DropMeta(id string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	v2DropMeta(s.path, id)
+// PatchMeta applies patch to the authenticated projection and persists the
+// complete item through one exact-revision audited mutation. It returns an
+// error instead of falling back to memory-only metadata when the vault refuses
+// or the revision moved.
+func (s *Session) PatchMeta(id string, patch func(*V2ItemMeta)) error {
+	return s.persistMeta(id, patch)
 }
 
 // ReadAuthenticatedItems opens a single authenticated read-only view and
-// returns clones of the login items plus the signed revision map.
+// returns the authenticated items plus the signed revision map. Every supported
+// item kind is returned so browser search, detail, match and watchtower view
+// the same durable records the desktop vault owns.
 func (s *Session) ReadAuthenticatedItems(touch bool) ([]vault.Item, map[string]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -224,9 +153,6 @@ func (s *Session) ReadAuthenticatedItems(touch bool) ([]vault.Item, map[string]s
 		}
 		defer a.clear()
 		for _, it := range a.items {
-			if it.Kind != "login" {
-				continue
-			}
 			items = append(items, it)
 		}
 		for id, rev := range a.revisions {
@@ -409,11 +335,19 @@ type WatchtowerSummaryResult struct {
 	Findings     []WatchtowerItemFinding
 }
 
-func itemExpiry(card *V2CreditCard) (time.Time, bool) {
-	if card == nil || card.ExpiryDate == "" {
+func passwordCategory(it vault.Item) bool {
+	switch it.EffectiveCategory() {
+	case vault.CategoryLogin, vault.CategoryPassword:
+		return true
+	}
+	return false
+}
+
+func cardExpiry(expiryDate string) (time.Time, bool) {
+	if expiryDate == "" {
 		return time.Time{}, false
 	}
-	t, e := time.Parse("2006-01", card.ExpiryDate)
+	t, e := time.Parse("2006-01", expiryDate)
 	if e != nil {
 		return time.Time{}, false
 	}
@@ -457,11 +391,7 @@ func (s *Session) watchtowerSummary(originFilter string, audit bool) (Watchtower
 	}
 	counts := map[string]int{}
 	for _, it := range items {
-		if it.State != "" || it.Password == "" {
-			continue
-		}
-		meta := v2Meta(s.path, it.ID)
-		if meta != nil && meta.Category != "" && meta.Category != "login" && meta.Category != "password" {
+		if it.State != "" || it.Password == "" || !passwordCategory(it) {
 			continue
 		}
 		counts[it.Password]++
@@ -478,8 +408,7 @@ func (s *Session) watchtowerSummary(originFilter string, audit bool) (Watchtower
 		if !ok || !idOK(it.ID) || !digestOK(rev) {
 			return WatchtowerSummaryResult{}, invalid
 		}
-		meta := v2Meta(s.path, it.ID)
-		if meta != nil && meta.Category != "" && meta.Category != "login" && meta.Category != "password" {
+		if !passwordCategory(it) {
 			continue
 		}
 		score, strengthFlags := passwordStrength(it.Password)
@@ -495,8 +424,8 @@ func (s *Session) watchtowerSummary(originFilter string, audit bool) (Watchtower
 			flags = append(flags, "reused")
 		}
 		unsecured := insecureHTTP(it.URL)
-		if !unsecured && meta != nil {
-			for _, u := range meta.URLs {
+		if !unsecured {
+			for _, u := range it.URLs {
 				if insecureHTTP(u.URL) {
 					unsecured = true
 					break
@@ -509,8 +438,8 @@ func (s *Session) watchtowerSummary(originFilter string, audit bool) (Watchtower
 		if it.OTP == "" && len(it.Passkey) == 0 {
 			flags = append(flags, "totp-not-stored")
 		}
-		if meta != nil {
-			if expiry, ok := itemExpiry(meta.CreditCard); ok {
+		if card := it.NormalizedCreditCard(); card != nil {
+			if expiry, ok := cardExpiry(card.ExpiryDate); ok {
 				if !now.Before(expiry) {
 					flags = append(flags, "expired")
 				} else if !expiry.After(now.Add(30 * 24 * time.Hour)) {
@@ -651,17 +580,14 @@ func (s *Session) extractCLIBrokerTargetsLocked(targets []CLIBrokerTarget) (map[
 		}
 		byID := map[string]vault.Item{}
 		for _, it := range a.items {
-			if it.Kind == "login" {
-				byID[it.ID] = it
-			}
+			byID[it.ID] = it
 		}
 		for _, t := range targets {
 			it, ok := byID[t.ID]
 			if !ok {
 				return ErrNotFound
 			}
-			meta := v2Meta(s.path, t.ID)
-			if t.Field == "password" && meta != nil && meta.Category != "" && meta.Category != "login" && meta.Category != "password" {
+			if t.Field == "password" && !passwordCategory(it) {
 				return ErrRunCredential
 			}
 			if it.State == "trashed" {
@@ -729,27 +655,30 @@ func (s *Session) extractCLIBrokerTargetsLocked(targets []CLIBrokerTarget) (map[
 	return values, nil
 }
 
-// SetV2State persists favorite metadata and maps lifecycle actions onto the
-// real v1 state machine. Favorites are overlay-only and keep the revision.
+// SetV2State persists favorite through the durable whole-item favorite
+// mutation and maps lifecycle actions onto the real state machine. Every action
+// advances the signed revision and survives a reopen.
 func (s *Session) SetV2State(id, revision, action string) (string, string, error) {
 	switch action {
 	case "favorite", "unfavorite":
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		if e := s.active(true); e != nil {
+		if !idOK(id) || !digestOK(revision) {
+			return "", "", ErrMutationRefused
+		}
+		// Read the authenticated state first so a stale revision is refused
+		// before any mutation is attempted.
+		detail, e := s.GetItemDetail(id, revision, false)
+		if e != nil {
 			return "", "", e
 		}
-		state := "active"
-		if e := s.readNativeTarget(id, revision, func(item vault.Item) error {
-			if item.State != "" {
-				state = item.State
-			}
-			return nil
-		}); e != nil {
+		gate := NewMutationGate(time.Now().Add(30 * time.Second))
+		if e := s.RegisterMutation(gate); e != nil {
+			return "", "", ErrMutationCancelled
+		}
+		next, e := s.SetFavorite(id, revision, action == "favorite", gate)
+		if e != nil {
 			return "", "", e
 		}
-		v2PatchMeta(s.path, id, func(m *V2ItemMeta) { m.Favorite = action == "favorite" })
-		return revision, state, nil
+		return next, detail.State, nil
 	case "archive", "unarchive", "trash", "untrash":
 		mapped := map[string]string{"archive": "item.archive", "unarchive": "item.unarchive", "trash": "item.trash", "untrash": "item.untrash"}[action]
 		rev, e := s.SetState(id, revision, mapped)

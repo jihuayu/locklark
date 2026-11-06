@@ -60,6 +60,7 @@
     panelWidth = 320,
     pendingHost = null,
     pendingStageId = "",
+    pendingDismissedForPasskey = false,
     toastHost = null,
     toastTimer = null,
     pendingCheckInFlight = false,
@@ -1260,7 +1261,7 @@
     document.documentElement.append(pendingHost);
   }
   async function checkPendingSave() {
-    if (pendingCheckInFlight) return;
+    if (pendingCheckInFlight || request) return;
     pendingCheckInFlight = true;
     try {
       const result = await send({ type: "inline-pending-save" });
@@ -1472,16 +1473,25 @@
       !/^[a-f0-9-]{36}$/.test(m.id)
     )
       return;
-    const finish = (value) =>
+    const finish = (value) => {
       window.postMessage(
         { source: "locklark-result-v1", id: m.id, ...value },
         location.origin,
       );
+      if (pendingDismissedForPasskey) {
+        pendingDismissedForPasskey = false;
+        setTimeout(() => void checkPendingSave(), 0);
+      }
+    };
     if (m.type === "cancel") {
       if (request?.id === m.id) {
         void send({ type: "passkey-cancel", id: m.id });
         request = null;
         dismiss();
+        if (pendingDismissedForPasskey) {
+          pendingDismissedForPasskey = false;
+          setTimeout(() => void checkPendingSave(), 0);
+        }
       }
       return;
     }
@@ -1523,6 +1533,13 @@
       request = null;
       finish({ fallback: true });
       return;
+    }
+    // A stale login-save banner must never sit above the Passkey controls and
+    // absorb their click. Hide it for this flow; finish() restores it only if
+    // the host still reports a pending save afterwards.
+    if (pendingHost) {
+      dismissPending();
+      pendingDismissedForPasskey = true;
     }
     const box = panel(
       null,

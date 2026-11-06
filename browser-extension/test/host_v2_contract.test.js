@@ -127,3 +127,145 @@ test("desktop broker unlocked push is accepted and strictly bounded", () => {
     assert.equal(core.validResponse(bad), false, JSON.stringify(bad));
   assert.match(backgroundJS, /message\.type === "unlocked"/);
 });
+
+test("flat popup item maps to the exact v2 mutation whitelist", () => {
+  const item = {
+    category: "card",
+    title: "Card",
+    cardholder: "Ada Lovelace",
+    brand: "Visa",
+    card_number: "4111111111111111",
+    expiry: "12/30",
+    cvv: "123",
+    urls: ["https://example.test/login"],
+    fields: [],
+    otp_secret: "",
+    notes: "",
+  };
+  const mutation = core.itemToNativeMutation(item);
+  assert.deepEqual(Object.keys(mutation).sort(), [
+    "category",
+    "credit_card",
+    "notes",
+    "title",
+    "urls",
+  ]);
+  assert.equal(mutation.category, "credit_card");
+  assert.deepEqual(mutation.credit_card, {
+    cardholder_name: "Ada Lovelace",
+    type: "Visa",
+    number: "4111111111111111",
+    verification: "123",
+    expiry_date: "12/30",
+  });
+  assert.deepEqual(mutation.urls, [
+    { url: "https://example.test/login", primary: true, match_mode: "origin" },
+  ]);
+  for (const forbidden of ["fields", "otp_secret", "card_number", "cardholder", "brand", "expiry", "cvv"])
+    assert.equal(Object.hasOwn(mutation, forbidden), false, forbidden);
+});
+
+test("native aliases, stable section ids and omitted blank secrets are preserved", () => {
+  for (const [alias, canonical] of [
+    ["card", "credit_card"],
+    ["credit_card", "credit_card"],
+    ["note", "secure_note"],
+    ["secure_note", "secure_note"],
+    ["ssh", "ssh_key"],
+    ["ssh_key", "ssh_key"],
+  ])
+    assert.equal(core.itemToNativeMutation({ category: alias, title: "T" }).category, canonical);
+  const original = {
+    sections: [{
+      id: "sec1",
+      title: "Extra",
+      fields: [{ id: "f1", label: "Recovery", type: "concealed", value: "", concealed: true, has_value: true }],
+    }],
+  };
+  const edited = core.itemToNativeMutation({
+    category: "login",
+    title: "Login",
+    username: "ada",
+    password: "",
+    otp_secret: "",
+    notes: "changed notes",
+    urls: ["https://example.test/login"],
+    sections: original.sections,
+    fields: [{ id: "f1", label: "Recovery", type: "concealed", value: "" }],
+  }, { original });
+  assert.equal(Object.hasOwn(edited, "password"), false);
+  assert.equal(Object.hasOwn(edited, "otp"), false);
+  assert.equal(Object.hasOwn(edited, "sections"), false, "masked concealed values must not be rewritten");
+  assert.equal(edited.notes, "changed notes");
+  const first = core.itemToNativeMutation({
+    category: "note",
+    title: "Note",
+    content: "body",
+    fields: [{ label: "Recovery", type: "text", value: "one" }],
+  });
+  const second = core.itemToNativeMutation({
+    category: "note",
+    title: "Note",
+    content: "body",
+    fields: [{ label: "Recovery", type: "text", value: "two" }],
+  });
+  assert.equal(first.fields, undefined);
+  assert.equal(first.sections[0].id, "custom-fields");
+  assert.match(first.sections[0].fields[0].id, /^f[0-9a-f]{8}$/);
+  assert.equal(first.sections[0].fields[0].id, second.sections[0].fields[0].id);
+  assert.equal(first.sections[0].fields[0].type, "text");
+  assert.equal(first.sections[0].fields[0].value, "one");
+  assert.equal(first.notes, "body");
+});
+
+test("native field-value responses require the exact bounded shape", () => {
+  const frame = {
+    v: 1,
+    id,
+    type: "field-value",
+    item_id: id,
+    revision: rev,
+    field: "password",
+    value: "secret",
+    copied: false,
+    expires_in_seconds: 30,
+  };
+  assert.equal(core.validResponse(frame), true);
+  assert.equal(core.validResponse({ ...frame, field: "unknown" }), false);
+  assert.equal(core.validResponse({ ...frame, value: 7 }), false);
+  assert.equal(core.validResponse({ ...frame, field_value: "alias" }), false);
+  assert.equal(core.validResponse({ ...frame, expires_in_seconds: -1 }), false);
+  assert.equal(core.validResponse({ ...frame, extra: 1 }), false);
+  assert.equal(core.validResponse({ ...frame, field: "section:sec1:f1" }), true);
+});
+
+
+test("cross-language field-value wire fixture is exact and strictly consumed", () => {
+  const wire = JSON.parse(
+    fs.readFileSync(path.join(__dirname, "fixtures", "field-value-wire.json"), "utf8"),
+  );
+  assert.deepEqual(Object.keys(wire.requests).sort(), ["copy", "reveal", "reveal_otp"]);
+  assert.deepEqual(Object.keys(wire.responses).sort(), ["copy", "reveal", "reveal_otp"]);
+  assert.deepEqual(Object.keys(wire.requests.reveal).sort(), [
+    "action", "capability", "field", "id", "item_id", "revision", "type", "v",
+  ]);
+  assert.equal(wire.requests.reveal.action, "reveal");
+  assert.equal(wire.requests.copy.action, "copy");
+  assert.equal(Object.hasOwn(wire.requests.reveal, "field_action"), false);
+  for (const response of Object.values(wire.responses)) {
+    assert.deepEqual(Object.keys(response).sort(), [
+      "copied", "expires_in_seconds", "field", "id", "item_id", "revision", "type", "v", "value",
+    ]);
+    assert.equal(Object.hasOwn(response, "field_value"), false);
+    assert.equal(core.validResponse(response), true, response.field);
+  }
+  const reveal = wire.responses.reveal;
+  assert.equal(reveal.value, "Synthetic-Secret-1");
+  assert.equal(reveal.expires_in_seconds, 0);
+  assert.equal(wire.responses.copy.copied, true);
+  assert.equal(wire.responses.copy.expires_in_seconds, 30);
+  const alias = { ...reveal, field_value: reveal.value };
+  delete alias.value;
+  assert.equal(core.validResponse(alias), false);
+  assert.equal(core.validResponse({ ...reveal, extra: 1 }), false);
+});

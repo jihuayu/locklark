@@ -370,6 +370,7 @@ func (a *App) restoreHistory(index int) error {
 	s := a.session
 	id, revision := a.v2.detail.ID, a.v2.detail.Revision
 	filter := a.currentFilter()
+	query := a.currentV2Query()
 	var opErr error
 	var saved personal.ItemDetail
 	var snap v2Snapshot
@@ -385,9 +386,12 @@ func (a *App) restoreHistory(index int) error {
 			return nativeResult{err: err}
 		}
 		snap = a.captureV2(s, filter)
+		snap.query = query
 		return nativeResult{err: snap.err}
 	}, func(r nativeResult) {
-		a.applyV2Snapshot(snap, false)
+		if !a.applyV2Snapshot(snap, false) {
+			return
+		}
 		a.v2.detail = &saved
 		a.v2.selectedID, a.v2.selectedRevision = saved.ID, saved.Revision
 		a.v2.historyOpen = true

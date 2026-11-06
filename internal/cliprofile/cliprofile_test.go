@@ -47,7 +47,7 @@ func renderBuiltin(t *testing.T, name, tokenEnv string, slots map[string][]byte,
 }
 
 var expectedProfiles = []string{
-	"anthropic", "aws", "docker", "flyctl", "gh", "git", "kubectl", "netrc",
+	"anthropic", "aws", "deepseek", "docker", "flyctl", "gh", "git", "kubectl", "netrc",
 	"npm", "openai", "psql", "stripe", "terraform", "token", "vercel",
 }
 
@@ -69,6 +69,12 @@ func TestListLookupAndCloneSpec(t *testing.T) {
 	}
 	if len(Lookup0(t, "token").Executables()) != 0 {
 		t.Fatal("token profile has executables")
+	}
+	if len(Lookup0(t, "deepseek").Executables()) != 0 {
+		t.Fatal("deepseek profile must require an explicit interpreter")
+	}
+	if !Lookup0(t, "deepseek").Spec().RequireExplicitProgram {
+		t.Fatal("deepseek profile allows automatic program lookup")
 	}
 	executables := map[string][]string{
 		"gh":        {"gh"},
@@ -179,6 +185,53 @@ func TestRenderTokenProfiles(t *testing.T) {
 	}
 	if rendered := renderBuiltin(t, "gh", "", map[string][]byte{"token": []byte("x")}, map[string]string{"GH_HOST": "github.example.com"}); envLookup(rendered.Env)["GH_HOST"] != "github.example.com" {
 		t.Fatal("passthrough missing")
+	}
+}
+
+func TestRenderDeepSeek(t *testing.T) {
+	spec := Lookup0(t, "deepseek").Spec()
+	if spec.ID != "deepseek-harness-v1" || spec.MaxTimeout != 3600 || len(spec.Files) != 0 || len(spec.Dirs) != 0 {
+		t.Fatalf("deepseek policy is incomplete: %+v", spec)
+	}
+	if len(spec.Slots) != 1 || spec.Slots[0].Name != "token" || spec.Slots[0].Field != FieldPassword || !spec.Slots[0].RequireNonBlank {
+		t.Fatalf("deepseek token slot is wrong: %+v", spec.Slots)
+	}
+	if spec.Env["DEEPSEEK_API_KEY"] != "slot:token" {
+		t.Fatalf("deepseek API key binding is wrong: %v", spec.Env)
+	}
+	rendered := renderBuiltin(t, "deepseek", "", map[string][]byte{"token": []byte("sk-deepseek-test")}, map[string]string{
+		"DEEPSEEK_BASE_URL":  "https://api.deepseek.com",
+		"DEEPSEEK_MODEL":     "deepseek-chat",
+		"DEEPSEEK_STATE_DIR": "/home/alice/.local/state/deepseek-worker",
+		"TERM":               "xterm-256color",
+		"NO_COLOR":           "1",
+	})
+	env := envLookup(rendered.Env)
+	if env["DEEPSEEK_API_KEY"] != "sk-deepseek-test" || env["DEEPSEEK_BASE_URL"] != "https://api.deepseek.com" ||
+		env["DEEPSEEK_MODEL"] != "deepseek-chat" || env["DEEPSEEK_STATE_DIR"] != "/home/alice/.local/state/deepseek-worker" ||
+		env["TERM"] != "xterm-256color" || env["NO_COLOR"] != "1" {
+		t.Fatalf("deepseek environment %v", env)
+	}
+	if len(rendered.Files) != 0 {
+		t.Fatalf("deepseek emitted credential files: %v", rendered.Files)
+	}
+	for _, name := range []string{
+		"DEEPSEEK_API_KEY", "DEEPSEEK_TOKEN", "DEEPSEEK_SECRET", "DEEPSEEK_PASSWORD",
+		"DEEPSEEK_CONFIG_FILE", "GH_TOKEN", "AWS_SECRET_ACCESS_KEY",
+	} {
+		if ValidPassthroughName(spec, name, "probe") {
+			t.Fatalf("deepseek accepted secret or loader passthrough %q", name)
+		}
+	}
+	for _, args := range [][]string{{"configure"}, {"spawn"}, {"--background"}, {"run", "--background", "--root", "/tmp/p"}} {
+		if err := ValidateArgs(spec, args); !errors.Is(err, ErrDeniedArgs) {
+			t.Fatalf("deepseek accepted persistent or detached args %v: %v", args, err)
+		}
+	}
+	for _, args := range [][]string{{"run", "--root", "/tmp/project", "--task-file", "/tmp/task.md"}, {"--help"}} {
+		if err := ValidateArgs(spec, args); err != nil {
+			t.Fatalf("deepseek refused foreground args %v: %v", args, err)
+		}
 	}
 }
 
@@ -513,6 +566,7 @@ func TestValidateArgs(t *testing.T) {
 	}{
 		{"gh", [][]string{{"auth", "login"}, {"auth", "setup-git"}, {"auth", "token"}, {"auth", "refresh"}, {"--hostname", "h", "auth", "login"}, {"auth", "--web", "login"}}, [][]string{{"api", "user"}, {"pr", "list"}, {"--help"}}},
 		{"aws", [][]string{{"configure"}, {"--region", "us-east-1", "configure"}, {"s3", "ls", "configure"}}, [][]string{{"s3", "ls"}, {"ec2", "describe-instances"}}},
+		{"deepseek", [][]string{{"configure"}, {"spawn"}, {"--background"}, {"run", "--background"}, {"run", "configure"}}, [][]string{{"run", "--root", "/tmp/project", "--task-file", "/tmp/task.md"}, {"--help"}}},
 		{"kubectl", [][]string{{"config", "set-credentials", "x"}, {"config", "set-cluster", "x"}, {"config", "set-context", "x"}, {"--kubeconfig", "k", "config", "set-credentials", "x"}, {"config", "--kubeconfig=k", "set-context", "x"}}, [][]string{{"get", "pods"}, {"config", "view"}, {"config", "--local", "view"}}},
 		{"docker", [][]string{{"login"}, {"logout"}, {"build", "--tag", "login"}}, [][]string{{"run", "alpine"}, {"ps"}}},
 		{"npm", [][]string{{"login"}, {"adduser"}, {"logout"}}, [][]string{{"install", "express"}, {"run", "build"}}},

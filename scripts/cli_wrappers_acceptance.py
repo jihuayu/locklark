@@ -23,12 +23,12 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PROFILES = {
     "gh", "aws", "kubectl", "docker", "npm", "terraform", "git", "netrc",
-    "psql", "openai", "anthropic", "stripe", "flyctl", "vercel", "token",
+    "psql", "openai", "anthropic", "stripe", "flyctl", "vercel", "token", "deepseek",
 }
 DEFAULT_TOOLS = ["aws", "docker", "gh", "git", "kubectl", "npm", "psql", "terraform"]
 STAGES = {
     "prerequisites", "profiles", "binding", "list-show", "shell-init",
-    "run-help", "run-deny", "tamper", "privacy", "cleanup", "complete",
+    "run-help", "run-deny", "deepseek", "tamper", "privacy", "cleanup", "complete",
 }
 TEST_ID = "0123456789abcdef0123456789abcdef"
 TEST_REVISION = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -220,6 +220,44 @@ class Acceptance:
         require(len(payload["bindings"]["docker"]["targets"]) == 2)
         self.mark("owner_only_binding_pinned_program_and_zero_secret_values")
 
+    def deepseek(self):
+        self.stage = "deepseek"
+        self.command([
+            self.cli, "cli", "init", "deepseek-worker", "--profile", "deepseek",
+            "--file", self.vault, "--binding", self.binding,
+            "--id", TEST_ID, "--revision", TEST_REVISION,
+        ], expected=1)
+        self.command([
+            self.cli, "cli", "init", "deepseek-secret", "--profile", "deepseek",
+            "--file", self.vault, "--binding", self.binding, "--program", self.fixture,
+            "--id", TEST_ID, "--revision", TEST_REVISION,
+            "--passthrough", "DEEPSEEK_API_KEY",
+        ], expected=1)
+        self.init_tool("deepseek-worker", [
+            "--id", TEST_ID, "--revision", TEST_REVISION, "--timeout", "3600",
+            "--passthrough", "DEEPSEEK_BASE_URL,DEEPSEEK_MODEL,DEEPSEEK_STATE_DIR",
+        ], profile="deepseek")
+        payload, raw = self.read_binding()
+        binding = payload["bindings"]["deepseek-worker"]
+        require(binding["profile"] == "deepseek")
+        require(binding["timeout_seconds"] == 3600)
+        require(len(binding["targets"]) == 1)
+        require(binding["targets"][0]["slot"] == "token" and binding["targets"][0]["field"] == "password")
+        require(binding["passthrough_env"] == ["DEEPSEEK_BASE_URL", "DEEPSEEK_MODEL", "DEEPSEEK_STATE_DIR"])
+        require(b"DEEPSEEK_API_KEY" not in raw and b"sk-" not in raw)
+        result = self.command([
+            self.cli, "cli", "run", "deepseek-worker", "--binding", self.binding, "--", "--help",
+        ])
+        require(result.stdout == b"fixture help output\n")
+        for denied_arguments in (["configure"], ["spawn"], ["--background"]):
+            report = self.root / ("denied-deepseek-" + denied_arguments[0].lstrip("-") + ".json")
+            result = self.command([
+                self.cli, "cli", "run", "deepseek-worker", "--binding", self.binding, "--",
+                report, *denied_arguments,
+            ], expected=1)
+            require(not result.stdout and not report.exists())
+        self.mark("deepseek_explicit_program_foreground_only_no_secret_files")
+
     def list_show(self):
         self.stage = "list-show"
         payload, _ = self.read_binding()
@@ -312,6 +350,7 @@ class Acceptance:
         self.prepare()
         self.profiles()
         self.binding_flow()
+        self.deepseek()
         self.list_show()
         self.shell_init()
         self.run_help()

@@ -1,0 +1,69 @@
+{
+  "requests": {
+    "reveal": {
+      "v": 1,
+      "id": "1234567890abcdef1234567890abcdef",
+      "type": "item-reveal-field",
+      "capability": "0123456789abcdef0123456789abcdef",
+      "item_id": "fedcba9876543210fedcba9876543210",
+      "revision": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "field": "password",
+      "action": "reveal"
+    },
+    "copy": {
+      "v": 1,
+      "id": "2234567890abcdef1234567890abcdef",
+      "type": "item-copy-field",
+      "capability": "0123456789abcdef0123456789abcdef",
+      "item_id": "fedcba9876543210fedcba9876543210",
+      "revision": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "field": "password",
+      "action": "copy"
+    },
+    "reveal_otp": {
+      "v": 1,
+      "id": "3234567890abcdef1234567890abcdef",
+      "type": "item-reveal-field",
+      "capability": "0123456789abcdef0123456789abcdef",
+      "item_id": "fedcba9876543210fedcba9876543210",
+      "revision": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "field": "otp",
+      "action": "reveal"
+    }
+  },
+  "responses": {
+    "reveal": {
+      "v": 1,
+      "id": "1234567890abcdef1234567890abcdef",
+      "type": "field-value",
+      "item_id": "fedcba9876543210fedcba9876543210",
+      "revision": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "field": "password",
+      "value": "Synthetic-Secret-1",
+      "copied": false,
+      "expires_in_seconds": 0
+    },
+    "copy": {
+      "v": 1,
+      "id": "2234567890abcdef1234567890abcdef",
+      "type": "field-value",
+      "item_id": "fedcba9876543210fedcba9876543210",
+      "revision": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "field": "password",
+      "value": "Synthetic-Secret-1",
+      "copied": true,
+      "expires_in_seconds": 30
+    },
+    "reveal_otp": {
+      "v": 1,
+      "id": "3234567890abcdef1234567890abcdef",
+      "type": "field-value",
+      "item_id": "fedcba9876543210fedcba9876543210",
+      "revision": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "field": "otp",
+      "value": "123456",
+      "copied": false,
+      "expires_in_seconds": 7
+    }
+  }
+}

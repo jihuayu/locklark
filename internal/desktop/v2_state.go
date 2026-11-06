@@ -82,6 +82,13 @@ type v2State struct {
 	attachmentMsg string
 	editorError   string
 	searchError   string
+
+	// querySeq invalidates list snapshots whose filter was superseded while the
+	// UI was busy. pendingReload defers such a refresh instead of dropping it;
+	// the guard in applyV2Snapshot rejects the stale result.
+	querySeq      uint64
+	pendingReload bool
+	pendingKeep   bool
 }
 
 func newV2State() v2State {
@@ -158,6 +165,57 @@ func (a *App) currentFilter() personal.ItemFilter {
 	return filter
 }
 
+// v2Query is the comparable identity of a list query: every filter input that
+// can change the rows plus a monotonic sequence, so an A to B to A change is
+// still detected and a slow read cannot repopulate stale rows.
+type v2Query struct {
+	vaultID  string
+	state    string
+	category vault.ItemCategory
+	tag      string
+	query    string
+	sortBy   string
+	favorite bool
+	seq      uint64
+}
+
+func v2QueryFromFilter(filter personal.ItemFilter) v2Query {
+	q := v2Query{
+		vaultID:  filter.VaultID,
+		state:    filter.State,
+		category: filter.Category,
+		tag:      filter.Tag,
+		query:    filter.Query,
+		sortBy:   filter.SortBy,
+	}
+	if filter.Favorite != nil {
+		q.favorite = *filter.Favorite
+	}
+	return q
+}
+
+// touchV2Query records that the requested list changed.
+func (a *App) touchV2Query() { a.v2.querySeq++ }
+
+// currentV2Query captures the live query identity on the UI goroutine.
+func (a *App) currentV2Query() v2Query {
+	q := v2QueryFromFilter(a.currentFilter())
+	q.seq = a.v2.querySeq
+	return q
+}
+
+// v2QueryCurrent reports whether q still describes the requested list. A zero
+// sequence means the caller did not capture one (legacy capture paths); those
+// snapshots are still rejected when any filter value changed.
+func (a *App) v2QueryCurrent(q v2Query) bool {
+	cur := a.currentV2Query()
+	if q.seq != 0 && cur.seq != q.seq {
+		return false
+	}
+	q.seq, cur.seq = 0, 0
+	return q == cur
+}
+
 // legacyRow projects a v2 summary into the v1 row shape used by the legacy
 // views and by existing tests.
 func legacyRow(s personal.ItemSummary) personal.Row {
@@ -225,6 +283,7 @@ func (a *App) navigate(target string) {
 			return
 		}
 	}
+	a.touchV2Query()
 	a.touchActivity()
 	a.reloadV2(false)
 }
@@ -243,6 +302,7 @@ func (a *App) setCategoryFilter(category vault.ItemCategory) {
 	a.v2.nav = navCategory
 	a.v2.category = category
 	a.v2.tag = ""
+	a.touchV2Query()
 }
 
 func (a *App) FilterByCategory(category vault.ItemCategory) {
@@ -260,6 +320,7 @@ func (a *App) setTagFilter(tag string) {
 	a.v2.nav = navTag
 	a.v2.tag = tag
 	a.v2.category = ""
+	a.touchV2Query()
 }
 
 func (a *App) FilterByTag(tag string) {
@@ -286,12 +347,14 @@ func (a *App) SetSort(sortBy string) {
 		return
 	}
 	a.v2.sortBy = sortBy
+	a.touchV2Query()
 	a.touchActivity()
 	a.reloadV2(true)
 }
 
 func (a *App) SetSearchQuery(query string) {
 	a.query = query
+	a.touchV2Query()
 	a.v2.searchError = ""
 	if a.query != "" && !personal.ValidSearchQuery(a.query) {
 		a.v2.searchError = "搜索词须为有效文字，最多 256 字节，不能包含控制字符。"
@@ -317,31 +380,37 @@ type v2Snapshot struct {
 	rows   []personal.ItemSummary
 	all    []personal.ItemSummary
 	vaults []vault.VaultMeta
+	query  v2Query
 	err    error
 }
 
 // captureV2 collects every list needed by the three-pane layout in one
 // authenticated read pass. filter is captured on the UI goroutine.
 func (a *App) captureV2(s *personal.Session, filter personal.ItemFilter) v2Snapshot {
+	query := v2QueryFromFilter(filter)
 	if s == nil {
-		return v2Snapshot{err: personal.ErrSessionLocked}
+		return v2Snapshot{err: personal.ErrSessionLocked, query: query}
 	}
 	rows, err := s.ListByFilter(filter)
 	if err != nil {
-		return v2Snapshot{err: err}
+		return v2Snapshot{err: err, query: query}
 	}
 	all, err := s.ListByFilter(personal.ItemFilter{State: "all", VaultID: filter.VaultID, SortBy: "title"})
 	if err != nil {
-		return v2Snapshot{err: err}
+		return v2Snapshot{err: err, query: query}
 	}
 	vaults, err := s.ListVaults()
 	if err != nil {
-		return v2Snapshot{err: err}
+		return v2Snapshot{err: err, query: query}
 	}
-	return v2Snapshot{rows: rows, all: all, vaults: vaults}
+	return v2Snapshot{rows: rows, all: all, vaults: vaults, query: query}
 }
 
-func (a *App) applyV2Snapshot(snap v2Snapshot, keepSelection bool) {
+func (a *App) applyV2Snapshot(snap v2Snapshot, keepSelection bool) bool {
+	if !a.v2QueryCurrent(snap.query) {
+		a.dropStaleV2Snapshot()
+		return false
+	}
 	a.v2.rows = snap.rows
 	a.v2.all = snap.all
 	a.v2.vaults = snap.vaults
@@ -376,6 +445,25 @@ func (a *App) applyV2Snapshot(snap v2Snapshot, keepSelection bool) {
 		}
 	}
 	a.status = fmt.Sprintf("%d 个条目", len(snap.rows))
+	a.drainPendingV2Reload()
+	return true
+}
+
+// dropStaleV2Snapshot discards a list captured for a query that is no longer
+// requested, so a slow read cannot overwrite the newer search or filter.
+func (a *App) dropStaleV2Snapshot() {
+	a.v2.rows = nil
+	a.rows = nil
+	a.selected = nil
+	a.v2.detail = nil
+	a.v2.detailPlain = nil
+	a.v2.selectedID, a.v2.selectedRevision = "", ""
+	a.v2.historyOpen = false
+	if !a.v2.editing {
+		a.v2.draft = nil
+	}
+	a.status = "搜索条件已变更，请重新刷新"
+	a.drainPendingV2Reload()
 }
 
 func (a *App) rebuildSidebarCounts() {
@@ -420,13 +508,31 @@ func (a *App) reloadV2(keepSelection bool) {
 		return
 	}
 	if a.busy {
+		// Keep the request instead of dropping it; the in-flight snapshot is
+		// rejected by the query guard and replayed by drainPendingV2Reload.
+		a.v2.pendingReload = true
+		a.v2.pendingKeep = a.v2.pendingKeep || keepSelection
 		return
 	}
-	filter := a.currentFilter()
+	a.v2.pendingReload, a.v2.pendingKeep = false, false
+	filter, query := a.currentFilter(), a.currentV2Query()
 	a.run(func() outcome {
 		snap := a.captureV2(s, filter)
-		return outcome{err: snap.err, apply: func() { a.applyV2Snapshot(snap, keepSelection) }}
+		snap.query = query
+		return outcome{err: snap.err, apply: func() { _ = a.applyV2Snapshot(snap, keepSelection) }}
 	})
+}
+
+// drainPendingV2Reload replays a reload requested while a read was in flight.
+// It runs on the UI goroutine only, so pending state is never touched from a
+// background worker.
+func (a *App) drainPendingV2Reload() {
+	if !a.v2.pendingReload || a.busy {
+		return
+	}
+	keep := a.v2.pendingKeep
+	a.v2.pendingReload, a.v2.pendingKeep = false, false
+	a.reloadV2(keep)
 }
 
 // selectItem loads the masked detail for a list row.
@@ -483,6 +589,7 @@ func (a *App) selectVault(id string) {
 	if id == "all" {
 		a.v2.nav = navAllItems
 	}
+	a.touchV2Query()
 }
 
 func (a *App) SelectVault(id string) {
@@ -505,17 +612,22 @@ func (a *App) createVault(name, description, icon string) (vault.VaultMeta, erro
 	s := a.session
 	var created vault.VaultMeta
 	var snap v2Snapshot
+	filter, query := a.currentFilter(), a.currentV2Query()
 	ok := a.runNative(func(g *personal.MutationGate) nativeResult {
 		meta, err := s.CreateVault(name, description, icon, g)
 		if err != nil {
 			return nativeResult{err: err}
 		}
 		created = meta
-		snap = a.captureV2(s, a.currentFilter())
+		snap = a.captureV2(s, filter)
+		snap.query = query
 		return nativeResult{err: snap.err}
 	}, func(r nativeResult) {
-		a.applyV2Snapshot(snap, false)
-		a.v2.vaultID = created.ID
+		if !a.applyV2Snapshot(snap, false) {
+			return
+		}
+		a.selectVault(created.ID)
+		a.reloadV2(false)
 		a.v2.newVaultOpen = false
 		a.v2.newVaultName = ""
 		a.v2.newVaultDesc = ""
@@ -557,16 +669,20 @@ func (a *App) moveSelectedToVault(targetVaultID string, copyItem bool) (string, 
 	}
 	var newID, newRevision string
 	var snap v2Snapshot
+	filter, query := a.currentFilter(), a.currentV2Query()
 	ok := a.runNative(func(g *personal.MutationGate) nativeResult {
 		gotID, gotRevision, err := s.MoveItemVault(id, revision, targetVaultID, copyItem, g)
 		if err != nil {
 			return nativeResult{err: err}
 		}
 		newID, newRevision = gotID, gotRevision
-		snap = a.captureV2(s, a.currentFilter())
+		snap = a.captureV2(s, filter)
+		snap.query = query
 		return nativeResult{err: snap.err}
 	}, func(r nativeResult) {
-		a.applyV2Snapshot(snap, false)
+		if !a.applyV2Snapshot(snap, false) {
+			return
+		}
 		a.v2.selectedID, a.v2.selectedRevision = newID, newRevision
 		a.status = "条目已移动到金库"
 		if copyItem {
@@ -602,14 +718,18 @@ func (a *App) setItemState(action string) {
 		return
 	}
 	var snap v2Snapshot
+	filter, query := a.currentFilter(), a.currentV2Query()
 	a.runNative(func(g *personal.MutationGate) nativeResult {
 		if _, err := s.SetState(id, revision, action); err != nil {
 			return nativeResult{err: err}
 		}
-		snap = a.captureV2(s, a.currentFilter())
+		snap = a.captureV2(s, filter)
+		snap.query = query
 		return nativeResult{err: snap.err}
 	}, func(r nativeResult) {
-		a.applyV2Snapshot(snap, false)
+		if !a.applyV2Snapshot(snap, false) {
+			return
+		}
 		a.status = "条目状态已更新"
 	})
 }
@@ -633,15 +753,19 @@ func (a *App) purgeSelected() {
 		return
 	}
 	var snap v2Snapshot
+	filter, query := a.currentFilter(), a.currentV2Query()
 	a.runNative(func(g *personal.MutationGate) nativeResult {
 		if err := s.PurgeTrashed(id, revision, g); err != nil {
 			return nativeResult{err: err}
 		}
-		snap = a.captureV2(s, a.currentFilter())
+		snap = a.captureV2(s, filter)
+		snap.query = query
 		return nativeResult{err: snap.err}
 	}, func(r nativeResult) {
 		a.v2.confirmPurge = false
-		a.applyV2Snapshot(snap, false)
+		if !a.applyV2Snapshot(snap, false) {
+			return
+		}
 		a.status = "条目已永久删除"
 	})
 }
@@ -657,15 +781,19 @@ func (a *App) emptyTrash(olderThan *time.Duration) (int, error) {
 	s := a.session
 	purged, err := 0, error(nil)
 	var snap v2Snapshot
+	filter, query := a.currentFilter(), a.currentV2Query()
 	ok := a.runNative(func(g *personal.MutationGate) nativeResult {
 		purged, err = s.EmptyTrash(olderThan, g)
 		if err != nil {
 			return nativeResult{err: err}
 		}
-		snap = a.captureV2(s, a.currentFilter())
+		snap = a.captureV2(s, filter)
+		snap.query = query
 		return nativeResult{err: snap.err}
 	}, func(r nativeResult) {
-		a.applyV2Snapshot(snap, false)
+		if !a.applyV2Snapshot(snap, false) {
+			return
+		}
 		a.status = fmt.Sprintf("已永久删除 %d 个回收站条目", purged)
 	})
 	if !ok || err != nil {
