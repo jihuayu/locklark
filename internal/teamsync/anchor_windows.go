@@ -104,6 +104,18 @@ func createAnchorFile(path string) (*os.File, error) {
 	}
 	return os.NewFile(uintptr(h), path), nil
 }
+func publishAnchorFile(tmp, path string) error {
+	from, e := windows.UTF16PtrFromString(tmp)
+	if e != nil {
+		return e
+	}
+	to, e := windows.UTF16PtrFromString(path)
+	if e != nil {
+		return e
+	}
+	// No MOVEFILE_REPLACE_EXISTING: the final name must still be absent.
+	return windows.MoveFileEx(from, to, windows.MOVEFILE_WRITE_THROUGH)
+}
 func openAnchorFile(path string, flags int) (*os.File, error) {
 	before, e := os.Lstat(path)
 	if e != nil {

@@ -59,6 +59,22 @@ func trustedAnchorFile(path string) error {
 func createAnchorFile(path string) (*os.File, error) {
 	return os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
 }
+func publishAnchorFile(tmp, path string) error {
+	return publishAnchorFileWithSync(tmp, path, (*os.File).Sync)
+}
+func publishAnchorFileWithSync(tmp, path string, syncDir func(*os.File) error) error {
+	dir, e := os.Open(filepath.Dir(path))
+	if e != nil {
+		return e
+	}
+	defer dir.Close()
+	// A hard link cannot replace an existing name. On directory-sync failure
+	// the complete final file remains, but Create returns no store.
+	if e := os.Link(tmp, path); e != nil {
+		return e
+	}
+	return syncDir(dir)
+}
 func openAnchorFile(path string, flags int) (*os.File, error) {
 	before, e := os.Lstat(path)
 	if e != nil {

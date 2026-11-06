@@ -2,6 +2,7 @@ package teamsync
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/tls"
 	"encoding/hex"
@@ -9,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jihuayu/locklark/internal/directory"
@@ -16,6 +18,11 @@ import (
 
 type server struct {
 	mu      sync.Mutex // Local verification/commit/anchor only, never network writes.
+	keyMu   sync.Mutex // Short commit/sign/output grants only, never storage or network.
+	closed  atomic.Bool
+	ctx     context.Context
+	cancel  context.CancelFunc
+	hooks   *serverLifecycleHooks
 	path    string
 	config  *directory.Config
 	key     ed25519.PrivateKey
@@ -25,6 +32,12 @@ type server struct {
 }
 
 func NewHandler(path string, c *directory.Config, key ed25519.PrivateKey, minimum directory.Checkpoint, anchors AnchorStore) (http.Handler, error) {
+	return NewManagedHandler(path, c, key, minimum, anchors)
+}
+
+// NewManagedHandler verifies the trusted local history and owns a private copy
+// of the sequencer key. The caller must Close it when that authority ends.
+func NewManagedHandler(path string, c *directory.Config, key ed25519.PrivateKey, minimum directory.Checkpoint, anchors AnchorStore) (ManagedHandler, error) {
 	if !c.WriterACLPolicy() || !c.ValidCheckpoint(minimum) || !validPrivate(key) || !bytes.Equal(key.Public().(ed25519.PublicKey), c.SequencerSigningKey()) || anchors == nil {
 		return nil, ErrInvalid
 	}
@@ -38,7 +51,8 @@ func NewHandler(path string, c *directory.Config, key ed25519.PrivateKey, minimu
 	if _, e = directory.Read(path, c, minimum); e != nil {
 		return nil, ErrInvalid
 	}
-	return &server{path: path, config: c, key: bytes.Clone(key), minimum: minimum, anchors: anchors, slots: make(chan struct{}, 4)}, nil
+	ctx, cancel := context.WithCancel(context.Background())
+	return &server{path: path, config: c, key: bytes.Clone(key), minimum: minimum, anchors: anchors, slots: make(chan struct{}, 4), ctx: ctx, cancel: cancel}, nil
 }
 func mapDirectoryError(e error) error {
 	switch {
@@ -95,13 +109,28 @@ func refuseHTTP(w http.ResponseWriter, code int) {
 	_, _ = w.Write([]byte(`{"error":"refused"}`))
 }
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if s == nil || s.closed.Load() || r == nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(r.Context())
+	stop := context.AfterFunc(s.ctx, cancel)
+	defer stop()
+	defer cancel()
+	r = r.WithContext(ctx)
+	if !s.live(ctx) {
+		return
+	}
+	if r.Body != nil {
+		stopBody := context.AfterFunc(ctx, func() { _ = r.Body.Close() })
+		defer stopBody()
+	}
 	if r.TLS == nil || r.TLS.Version < tls.VersionTLS13 || r.Method != http.MethodPost || r.URL.RawQuery != "" || r.URL.ForceQuery || r.URL.RawPath != "" || r.URL.User != nil || r.URL.IsAbs() || r.Header.Get("Content-Type") != "application/json" {
-		refuseHTTP(w, http.StatusBadRequest)
+		s.refuse(ctx, w, http.StatusBadRequest)
 		return
 	}
 	control := http.NewResponseController(w)
 	if control.SetReadDeadline(time.Now().Add(5*time.Second)) != nil || control.SetWriteDeadline(time.Now().Add(15*time.Second)) != nil {
-		refuseHTTP(w, http.StatusServiceUnavailable)
+		s.refuse(ctx, w, http.StatusServiceUnavailable)
 		return
 	}
 	action, limit := "", int64(MaxReadBytes)
@@ -112,31 +141,44 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		action = "publish"
 		limit = MaxPublishBytes
 	default:
-		refuseHTTP(w, http.StatusNotFound)
+		s.refuse(ctx, w, http.StatusNotFound)
 		return
 	}
 	select {
 	case s.slots <- struct{}{}:
 		defer func() { <-s.slots }()
 	default:
-		refuseHTTP(w, http.StatusServiceUnavailable)
+		s.refuse(ctx, w, http.StatusServiceUnavailable)
 		return
 	}
 	if r.ContentLength > limit {
-		refuseHTTP(w, http.StatusRequestEntityTooLarge)
+		s.refuse(ctx, w, http.StatusRequestEntityTooLarge)
+		return
+	}
+	if !s.live(ctx) {
+		return
+	}
+	if r.Body == nil {
+		s.refuse(ctx, w, http.StatusBadRequest)
 		return
 	}
 	raw, e := io.ReadAll(io.LimitReader(r.Body, limit+1))
+	if !s.live(ctx) {
+		return
+	}
 	if e != nil || int64(len(raw)) > limit {
-		refuseHTTP(w, http.StatusBadRequest)
+		s.refuse(ctx, w, http.StatusBadRequest)
 		return
 	}
 	var q request
 	if decode(raw, &q) != nil || !q.valid(s.config, action) {
-		refuseHTTP(w, http.StatusBadRequest)
+		s.refuse(ctx, w, http.StatusBadRequest)
 		return
 	}
 	out := s.handle(r, q)
+	if !s.live(ctx) {
+		return
+	}
 	out.Protocol, out.RequestDigest, out.Nonce = protocol, digest("request", q), q.Proof.Nonce
 	if out.History != nil {
 		out.HistoryDigest = digest("history", out.History)
@@ -144,12 +186,19 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if out.Receipt != nil {
 		out.ReceiptDigest = digest("receipt", out.Receipt)
 	}
-	out.Signature = ed25519.Sign(s.key, out.signingBytes())
+	if !s.signResponse(ctx, &out) {
+		return
+	}
 	encoded := encode(out)
 	if len(encoded) > MaxResponseBytes {
 		out = response{Protocol: protocol, RequestDigest: out.RequestDigest, Nonce: out.Nonce, Status: "capacity"}
-		out.Signature = ed25519.Sign(s.key, out.signingBytes())
+		if !s.signResponse(ctx, &out) {
+			return
+		}
 		encoded = encode(out)
+	}
+	if !s.grantWrite(ctx) {
+		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
@@ -189,17 +238,32 @@ func authorize(c *directory.Config, q request, view directory.View) error {
 	return nil
 }
 func (s *server) handle(r *http.Request, q request) response {
+	if !s.live(r.Context()) {
+		return response{Status: errorStatus(ErrTransport)}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	fail := func(e error) response { return response{Status: errorStatus(e)} }
-	if r.Context().Err() != nil {
+	if !s.live(r.Context()) {
 		return fail(ErrTransport)
 	}
 	anchor, e := s.anchors.Load()
+	if !s.live(r.Context()) {
+		return fail(ErrTransport)
+	}
 	if e != nil || !s.config.ValidCheckpoint(anchor) {
 		return fail(ErrAnchor)
 	}
+	if s.hooks != nil && s.hooks.beforeRead != nil {
+		s.hooks.beforeRead()
+	}
+	if !s.live(r.Context()) {
+		return fail(ErrTransport)
+	}
 	view, e := directory.Read(s.path, s.config, anchor)
+	if !s.live(r.Context()) {
+		return fail(ErrTransport)
+	}
 	if e != nil {
 		return fail(mapDirectoryError(e))
 	}
@@ -207,6 +271,9 @@ func (s *server) handle(r *http.Request, q request) response {
 		return fail(e)
 	}
 	h, e := directory.ExportHistory(s.path, s.config, anchor)
+	if !s.live(r.Context()) {
+		return fail(ErrTransport)
+	}
 	if e != nil {
 		return fail(mapDirectoryError(e))
 	}
@@ -214,11 +281,20 @@ func (s *server) handle(r *http.Request, q request) response {
 	if e != nil {
 		return fail(ErrInvalid)
 	}
+	if !s.live(r.Context()) {
+		return fail(ErrTransport)
+	}
 	if _, e = directory.VerifyHistory(s.config, q.Proof.Anchor, h); e != nil {
 		return fail(ErrInvalid)
 	}
+	if !s.live(r.Context()) {
+		return fail(ErrTransport)
+	}
 	if e = authorize(s.config, q, view); e != nil {
 		return fail(e)
+	}
+	if !s.live(r.Context()) {
+		return fail(ErrTransport)
 	}
 	head := view.Receipt.Checkpoint()
 	if head != anchor {
@@ -227,6 +303,9 @@ func (s *server) handle(r *http.Request, q request) response {
 		}
 		anchor = head
 	}
+	if !s.live(r.Context()) {
+		return fail(ErrTransport)
+	}
 	if q.Proof.Action == "read" {
 		return response{Status: "current", Head: head, History: &h}
 	}
@@ -234,15 +313,25 @@ func (s *server) handle(r *http.Request, q request) response {
 	if p.Proposal.Parent != head {
 		return fail(ErrConflict)
 	}
-	if r.Context().Err() != nil {
+	key, granted := s.commitKey(r.Context())
+	if !granted {
 		return fail(ErrTransport)
 	}
-	receipt, e := directory.Commit(s.path, s.config, s.key, p.Proposal, p.Snapshot)
+	receipt, e := func() (directory.Receipt, error) {
+		defer clear(key)
+		if s.hooks != nil && s.hooks.afterCommitGrant != nil {
+			s.hooks.afterCommitGrant()
+		}
+		return directory.Commit(s.path, s.config, key, p.Proposal, p.Snapshot)
+	}()
 	if e != nil {
 		if errors.Is(e, directory.ErrStorage) {
 			return fail(ErrUnknown)
 		}
 		return fail(mapDirectoryError(e))
+	}
+	if !s.live(r.Context()) {
+		return fail(ErrUnknown)
 	}
 	if s.anchors.Advance(anchor, receipt.Checkpoint()) != nil {
 		return fail(ErrUnknown)
