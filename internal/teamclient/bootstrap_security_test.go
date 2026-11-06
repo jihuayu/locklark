@@ -35,7 +35,13 @@ func newBootstrapFixture(t *testing.T) *bootstrapFixture {
 }
 func prepareBootstrapFixture(t *testing.T, build bool) *bootstrapFixture {
 	t.Helper()
-	root := t.TempDir()
+	// canonicalProfilePath canonicalizes an existing file leaf, so resolve a
+	// prospective child and use its canonical parent as the fixture root.
+	root, e := canonicalProfilePath(filepath.Join(t.TempDir(), "root"))
+	if e != nil {
+		t.Fatal("tempdir")
+	}
+	root = filepath.Dir(root)
 	f := &bootstrapFixture{path: filepath.Join(root, "service.profile"), ownerPath: filepath.Join(root, "owner.profile"), store: newMemoryStore()}
 	p, e := PrepareSequencer(f.path)
 	if e != nil {
@@ -222,7 +228,10 @@ func TestBootstrapBoundPathsAndCopiedProfileCannotRebind(t *testing.T) {
 		t.Fatal("record")
 	}
 	l.close()
-	copied := filepath.Join(filepath.Dir(f.path), "copied.profile")
+	copied, e := canonicalProfilePath(filepath.Join(filepath.Dir(f.path), "copied.profile"))
+	if e != nil {
+		t.Fatal("copied profile path")
+	}
 	r.Path = copied
 	if createProfile(copied, r) != nil {
 		t.Fatal("copy public profile fixture")

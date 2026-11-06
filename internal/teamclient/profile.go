@@ -279,5 +279,8 @@ func createProfile(path string, r profileRecord) error {
 }
 func removeOwnedProfileTemporary(path string, owned os.FileInfo) bool {
 	current, e := os.Lstat(path)
-	return e == nil && owned != nil && current.Mode()&os.ModeSymlink == 0 && os.SameFile(owned, current) && os.Remove(path) == nil
+	if e != nil || owned == nil || current.Mode()&os.ModeSymlink != 0 {
+		return false
+	}
+	return os.SameFile(owned, current) && os.Remove(path) == nil
 }

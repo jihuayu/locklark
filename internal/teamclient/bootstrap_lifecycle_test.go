@@ -197,12 +197,21 @@ func TestBootstrapOwnedTemporaryCleanupPreservesReplacement(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			root := t.TempDir()
 			path := filepath.Join(root, "temporary")
-			if os.WriteFile(path, []byte("synthetic"), 0600) != nil {
+			f, e := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+			if e != nil {
 				t.Fatal("temp")
 			}
-			owned, e := os.Stat(path)
+			if _, e = f.Write([]byte("synthetic")); e != nil {
+				f.Close()
+				t.Fatal("write")
+			}
+			owned, e := f.Stat()
 			if e != nil {
+				f.Close()
 				t.Fatal("stat")
+			}
+			if e = f.Close(); e != nil {
+				t.Fatal("close")
 			}
 			if mode != "owned" {
 				if os.Rename(path, path+".original") != nil {
