@@ -1,9 +1,12 @@
+import io
 import json
 import os
 from pathlib import Path
+import tarfile
 import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 import device_credential_acceptance as auth
 from device_credential_acceptance import credential_marker, focused_identity, validated_evidence, AcceptanceFailure, DeviceCredentialAcceptance
 
@@ -421,6 +424,55 @@ class DeviceCredentialHarnessTests(unittest.TestCase):
         runner.shell=shell
         with self.assertRaises(AcceptanceFailure):runner.cleanup_pin()
         self.assertFalse(any(args[:2]==("locksettings","clear") for args in calls))
+
+    def test_copy_and_reinstall_restores_archive_over_adb_shell_stdin(self):
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w") as bundle:
+            for name, payload in (("personal.ll", b"private-vault"),
+                                  ("device-unlock/installation", b"private-installation"),
+                                  ("device-unlock/" + "a" * 64 + ".capsule", b"private-capsule")):
+                member = tarfile.TarInfo(name)
+                member.size = len(payload)
+                bundle.addfile(member, io.BytesIO(payload))
+        archive = buffer.getvalue()
+
+        runner = DeviceCredentialAcceptance.__new__(DeviceCredentialAcceptance)
+        runner.args = SimpleNamespace(apk="/tmp/locklark.apk")
+        runner.adb = ["adb", "-s", "emulator-5554"]
+        runner.fixture = {"master":"MasterFixture", "key":"LL1-" + "A" * 26,
+                          "items":[{"id":"a" * 32, "revision":"b" * 64, "title":"HostFirst", "password":"FirstPassword"}]}
+        runner.controller = mock.Mock()
+        runner.command = mock.Mock(return_value=SimpleNamespace(stdout=archive, stderr=b"", returncode=0))
+        shell_calls = []
+        def shell(*args, **kwargs):
+            shell_calls.append(args)
+            return SimpleNamespace(stdout=b"", stderr=b"", returncode=0)
+        runner.shell = shell
+        runner.observe_lifecycle = mock.Mock()
+        runner.load_trusted_window_uids = mock.Mock()
+        runner.launch = mock.Mock()
+        runner.visible = mock.Mock()
+        runner.arm_auth_diagnostic = mock.Mock()
+        runner.tap = mock.Mock()
+        runner.wait = mock.Mock()
+        runner.matching = mock.Mock(return_value=[])
+        runner.snapshot = mock.Mock(return_value=[])
+        runner.no_visible_secrets = mock.Mock()
+        runner.done = mock.Mock()
+        runner.unlock = mock.Mock()
+        runner.select_item = mock.Mock(return_value=("a" * 32, "b" * 64))
+
+        restore = SimpleNamespace(stdout=b"", stderr=b"", returncode=0)
+        with mock.patch.object(auth.subprocess, "run", return_value=restore) as run:
+            runner.copy_and_reinstall()
+
+        run.assert_called_once()
+        positional, keywords = run.call_args
+        self.assertEqual(positional[0], runner.adb + ["shell", "run-as", "org.locklark.android", "tar", "-C", "no_backup", "-xf", "-"])
+        self.assertEqual(keywords["input"], archive)
+        self.assertNotIn("exec-out", positional[0])
+        self.assertIn(("run-as", "org.locklark.android", "test", "-s", "no_backup/personal.ll",
+                       "-a", "-s", "no_backup/device-unlock/installation"), shell_calls)
 
     def fixture(self, root):
         run=root/"android-host-ui-owned";run.mkdir(mode=0o700)

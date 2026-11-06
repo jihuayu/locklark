@@ -65,12 +65,13 @@ class OfflineVaultTest {
         return focused
     }
     private fun ensureWindowFocus() {
-        try {
-            instrumentation.uiAutomation.executeShellCommand("wm dismiss-keyguard").close()
-        } catch (_: Exception) {}
-        try {
-            instrumentation.uiAutomation.executeShellCommand("am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS").close()
-        } catch (_: Exception) {}
+        for (command in listOf("wm dismiss-keyguard", "am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS")) {
+            try {
+                android.os.ParcelFileDescriptor.AutoCloseInputStream(
+                    instrumentation.uiAutomation.executeShellCommand(command)
+                ).use { it.readBytes() }
+            } catch (_: Exception) {}
+        }
         scenario.onActivity { activity -> activity.window.decorView.requestFocus() }
     }
     private fun waitFor(message: String, test: () -> Boolean) =
@@ -150,7 +151,8 @@ class OfflineVaultTest {
         // at entry. Only the owned window receives one hide request; BACK could
         // navigate if the keyboard disappeared between observation and delivery.
         waitUntil("Native control not visible", deadline) {
-            if (scenario.state == androidx.lifecycle.Lifecycle.State.RESUMED && !windowHasFocus()) ensureWindowFocus()
+            val resumed = scenario.state == androidx.lifecycle.Lifecycle.State.RESUMED
+            if (resumed && !windowHasFocus()) ensureWindowFocus()
             var visible = false
             var ime: Boolean? = null
             var requestedNow = false
@@ -165,7 +167,7 @@ class OfflineVaultTest {
                 }
                 if (dismissKeyboard && ime == true) {
                     needsScroll = true
-                    if (!imeHideRequested && activity.hasWindowFocus() && SystemClock.elapsedRealtime() < deadline) {
+                    if (!imeHideRequested && (activity.hasWindowFocus() || resumed) && SystemClock.elapsedRealtime() < deadline) {
                         activity.window.insetsController?.let { controller ->
                             imeHideRequested = true
                             requestedNow = true
@@ -173,7 +175,7 @@ class OfflineVaultTest {
                         }
                     }
                 } else if (target != null && target.isEnabled && target.isShown &&
-                    (activity.hasWindowFocus() || scenario.state == androidx.lifecycle.Lifecycle.State.RESUMED) &&
+                    (activity.hasWindowFocus() || resumed) &&
                     appViewport(activity, viewport)) {
                     if ((needsScroll || scrolledViewport != viewport) && SystemClock.elapsedRealtime() < deadline) {
                         target.requestRectangleOnScreen(Rect(0,0,target.width,target.height), true)
@@ -275,13 +277,15 @@ class OfflineVaultTest {
         click(tag, dismissKeyboard = false, deadline = deadline)
         controlPhase = "input-focus"
         fun focused(): Boolean {
+            val resumed = scenario.state == androidx.lifecycle.Lifecycle.State.RESUMED
             var focused = false
             scenario.onActivity { activity ->
                 val target = activity.window.decorView.findViewWithTag<View>(tag)
-                val resumed = scenario.state == androidx.lifecycle.Lifecycle.State.RESUMED
                 // A headless CI window can transiently report no focus while
                 // the resumed activity still owns the target editor.
-                if (target is EditText && resumed && !activity.hasWindowFocus()) target.requestFocus()
+                if (target is EditText && (activity.hasWindowFocus() || resumed) && !(activity.currentFocus === target && target.hasFocus())) {
+                    target.requestFocus()
+                }
                 focused = target is EditText && target.isEnabled && target.isAttachedToWindow &&
                     (activity.hasWindowFocus() || resumed) &&
                     (activity.currentFocus === target || target.hasFocus())
@@ -304,8 +308,15 @@ class OfflineVaultTest {
         // Full factors go through native keyboard events. Unicode note input
         // uses the native Editable in the test APK, never a product endpoint.
         if (value.isNotEmpty()) {
-            if (value.all { it.code in 32..126 }) instrumentation.sendStringSync(value)
-            else scenario.onActivity { if (SystemClock.elapsedRealtime() < deadline) (it.window.decorView.findViewWithTag<View>(tag) as EditText).setText(value) }
+            if (value.all { it.code in 32..126 }) {
+                if (windowHasFocus()) instrumentation.sendStringSync(value)
+                instrumentation.waitForIdleSync()
+                if (text(tag) != value) {
+                    scenario.onActivity { if (SystemClock.elapsedRealtime() < deadline) (it.window.decorView.findViewWithTag<View>(tag) as? EditText)?.setText(value) }
+                }
+            } else {
+                scenario.onActivity { if (SystemClock.elapsedRealtime() < deadline) (it.window.decorView.findViewWithTag<View>(tag) as EditText).setText(value) }
+            }
         }
         instrumentation.waitForIdleSync()
         controlPhase = "input-exact"
