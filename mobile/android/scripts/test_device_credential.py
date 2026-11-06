@@ -29,6 +29,149 @@ class DeviceCredentialHarnessTests(unittest.TestCase):
     def node(self, **values):
         return {"package":"com.android.systemui","enabled":"true","bounds":"[0,0][100,100]",**values}
 
+    def credential_runner(self, snapshots, tokens):
+        runner = DeviceCredentialAcceptance.__new__(DeviceCredentialAcceptance)
+        runner.args = SimpleNamespace(timeout=.01)
+        runner.pin = "12345678"
+        runner.size = (500, 500)
+        runner.stage = "enable-prompt"
+        runner.trusted_window_uids = {"com.android.systemui":10123}
+        runner.observe_lifecycle = lambda *args:None
+        frames, focus = list(snapshots), list(tokens)
+        runner.snapshot = lambda *args, **kwargs:frames.pop(0) if len(frames) > 1 else frames[0]
+        calls = []
+        def shell(*args, **kwargs):
+            if args == ("dumpsys", "window"):
+                token = focus.pop(0) if len(focus) > 1 else focus[0]
+                return SimpleNamespace(stdout=("mCurrentFocus=Window{" + token + " u0 BiometricPrompt}\nWindow #0 Window{" + token + " u0 BiometricPrompt}:\n mOwnerUid=10123 showForAllUsers=false package=com.android.systemui appop=NONE\n").encode())
+            calls.append(args)
+            return SimpleNamespace(stdout=b"")
+        runner.shell = shell
+        return runner, calls
+
+    def test_same_package_window_change_never_types_from_old_hierarchy(self):
+        entry = self.node(**{"resource-id":"com.android.systemui:id/pinEntry", "class":"android.widget.EditText", "password":"true", "focused":"true"})
+        unrelated = self.node(text="Notifications")
+        runner, calls = self.credential_runner([[entry], [unrelated]], ["abc", "def"])
+        try: runner.authenticate_pin()
+        except AcceptanceFailure: pass
+        self.assertFalse(any(call[:2] == ("input", "text") for call in calls))
+
+    def test_hidden_or_offscreen_credential_entry_never_receives_PIN(self):
+        for extra in ({"visible-to-user":"false"}, {"bounds":"[600,0][700,100]"}):
+            entry = self.node(**{"resource-id":"com.android.systemui:id/pinEntry", "class":"android.widget.EditText", "password":"true", "focused":"true", **extra})
+            runner, calls = self.credential_runner([[entry]], ["abc"])
+            try: runner.authenticate_pin()
+            except AcceptanceFailure: pass
+            self.assertFalse(any(call[:2] == ("input", "text") for call in calls))
+
+    def test_duplicate_credential_entries_never_receive_PIN(self):
+        entry = self.node(**{"resource-id":"com.android.systemui:id/pinEntry", "class":"android.widget.EditText", "password":"true", "focused":"true"})
+        runner, calls = self.credential_runner([[entry, dict(entry)]], ["abc"])
+        with self.assertRaises(AcceptanceFailure): runner.authenticate_pin()
+        self.assertFalse(any(call[:2] == ("input", "text") for call in calls))
+
+    def test_hidden_marker_is_never_a_real_credential_control(self):
+        node = self.node(**{"resource-id":"com.android.systemui:id/pinEntry", "visible-to-user":"false"})
+        self.assertFalse(credential_marker([node], "com.android.systemui"))
+
+    def test_stable_visible_entry_without_visibility_attribute_gets_one_PIN(self):
+        entry = self.node(**{"resource-id":"com.android.systemui:id/pinEntry", "class":"android.widget.EditText", "password":"true", "focused":"true"})
+        runner, calls = self.credential_runner([[entry]], ["abc"])
+        runner.args.timeout = 1
+        runner.authenticate_pin()
+        self.assertEqual(sum(call[:2] == ("input", "text") for call in calls), 1)
+        self.assertEqual(sum(call[:2] == ("input", "tap") for call in calls), 1)
+        self.assertEqual(sum(call[:2] == ("input", "keyevent") for call in calls), 1)
+
+    def test_window_change_after_entry_tap_does_not_send_PIN(self):
+        entry = self.node(**{"resource-id":"com.android.systemui:id/pinEntry", "class":"android.widget.EditText", "password":"true", "focused":"true"})
+        runner, calls = self.credential_runner([[entry]], ["abc", "abc", "abc", "abc", "def"])
+        runner.args.timeout = 1
+        with self.assertRaises(AcceptanceFailure): runner.authenticate_pin()
+        self.assertEqual(sum(call[:2] == ("input", "tap") for call in calls), 1)
+        self.assertFalse(any(call[:2] == ("input", "text") for call in calls))
+
+    def test_keypad_mode_does_not_send_Enter_to_fallback_or_entry_mode(self):
+        keys = [self.node(**{"resource-id":"com.android.systemui:id/key" + digit}) for digit in "0123456789"]
+        entry = [self.node(**{"resource-id":"com.android.systemui:id/pinEntry", "class":"android.widget.EditText", "focused":"true"})]
+        fallback = [self.node(text="认证此设备以解封本地金库授权"), self.node(text="Use PIN", **{
+            "resource-id":"com.android.systemui:id/button_use_credential", "class":"android.widget.Button"})]
+        for final in (entry, fallback):
+            runner, calls = self.credential_runner([keys] * 9 + [final], ["abc"])
+            runner.args.timeout = 1
+            runner.authenticate_pin()
+            self.assertEqual(sum(call[:2] == ("input", "tap") for call in calls), len(runner.pin))
+            self.assertFalse(any(call[:2] == ("input", "keyevent") for call in calls))
+
+    def test_duplicate_keypad_digit_not_used_by_PIN_still_refuses_all_input(self):
+        keys = [self.node(**{"resource-id":"com.android.systemui:id/key" + digit}) for digit in "0123456789"]
+        keys.append(dict(keys[9]))
+        runner, calls = self.credential_runner([keys], ["abc"])
+        runner.args.timeout = 1
+        with self.assertRaises(AcceptanceFailure): runner.authenticate_pin()
+        self.assertFalse(any(call[0] == "input" for call in calls))
+
+    def test_failed_focus_query_does_not_inject_or_retry_PIN(self):
+        entry = self.node(**{"resource-id":"com.android.systemui:id/pinEntry", "class":"android.widget.EditText", "password":"true", "focused":"true"})
+        runner, calls = self.credential_runner([[entry]], ["abc"])
+        original = runner.shell
+        queries = 0
+        def shell(*args, **kwargs):
+            nonlocal queries
+            if args == ("dumpsys", "window"):
+                queries += 1
+                if queries == 2: raise AcceptanceFailure()
+            return original(*args, **kwargs)
+        runner.shell = shell
+        with self.assertRaises(AcceptanceFailure): runner.authenticate_pin()
+        self.assertEqual(queries, 2)
+        self.assertFalse(any(call[0] == "input" for call in calls))
+
+    def test_keypad_uses_fresh_bound_control_positions_for_every_digit(self):
+        original = [self.node(**{"resource-id":"com.android.systemui:id/key" + digit,
+                    "bounds":f"[{i%3*100},{i//3*100}][{i%3*100+50},{i//3*100+50}]"}) for i, digit in enumerate("0123456789")]
+        moved = [self.node(**{"resource-id":"com.android.systemui:id/key" + digit,
+                 "bounds":f"[{i%3*100+150},{i//3*100}][{i%3*100+200},{i//3*100+50}]"}) for i, digit in enumerate("0123456789")]
+        runner, calls = self.credential_runner([original, moved], ["abc"])
+        runner.args.timeout = 1
+        runner.authenticate_pin()
+        taps = [call[2:] for call in calls if call[:2] == ("input", "tap")]
+        self.assertEqual(len(taps), len(runner.pin))
+        self.assertTrue(all(point in {auth.center(node) for node in moved} for point in taps))
+        self.assertFalse(any(call[:2] == ("input", "text") for call in calls))
+
+    def test_single_OS_fallback_transition_can_capture_new_credential_window(self):
+        fallback = [self.node(text="认证此设备以解封本地金库授权"), self.node(text="Use PIN", **{
+            "resource-id":"com.android.systemui:id/button_use_credential", "class":"android.widget.Button"})]
+        entry = self.node(**{"resource-id":"com.android.systemui:id/pinEntry", "class":"android.widget.EditText", "focused":"true"})
+        runner, calls = self.credential_runner([fallback, fallback, [entry]], ["abc", "abc", "abc", "abc", "def"])
+        runner.args.timeout = 1
+        runner.authenticate_pin()
+        self.assertEqual(sum(call[:2] == ("input", "text") for call in calls), 1)
+        self.assertEqual(sum(call[:2] == ("input", "tap") for call in calls), 2)
+
+    def test_OS_fallback_is_not_reissued_if_credential_control_never_appears(self):
+        fallback = [self.node(text="认证此设备以解封本地金库授权"), self.node(text="Use PIN", **{
+            "resource-id":"com.android.systemui:id/button_use_credential", "class":"android.widget.Button"})]
+        runner, calls = self.credential_runner([fallback], ["abc"])
+        runner.args.timeout = 1
+        with self.assertRaises(AcceptanceFailure): runner.authenticate_pin()
+        self.assertEqual(sum(call[:2] == ("input", "tap") for call in calls), 1)
+        self.assertFalse(any(call[:2] == ("input", "text") for call in calls))
+
+    def test_final_fallback_or_different_entry_never_receives_Enter(self):
+        entry = self.node(**{"resource-id":"com.android.systemui:id/pinEntry", "class":"android.widget.EditText", "focused":"true"})
+        fallback = [self.node(text="认证此设备以解封本地金库授权"), self.node(text="Use PIN", **{
+            "resource-id":"com.android.systemui:id/button_use_credential", "class":"android.widget.Button"})]
+        different_entry = [{**entry, "resource-id":"com.android.systemui:id/passwordEntry"}]
+        for final in (fallback, different_entry):
+            runner, calls = self.credential_runner([[entry], [entry], [entry], final], ["abc"])
+            runner.args.timeout = 1
+            runner.authenticate_pin()
+            self.assertEqual(sum(call[:2] == ("input", "text") for call in calls), 1)
+            self.assertFalse(any(call[:2] == ("input", "keyevent") for call in calls))
+
     def test_unrelated_os_window_is_not_an_auth_prompt(self):
         self.assertFalse(credential_marker([self.node(text="Notifications")],"com.android.systemui"))
         self.assertFalse(credential_marker([self.node(**{"class":"android.widget.EditText","password":"true","resource-id":"com.android.settings:id/wifi_password","package":"com.android.settings"})],"com.android.settings"))
@@ -38,9 +181,15 @@ class DeviceCredentialHarnessTests(unittest.TestCase):
         pin=self.node(**{"resource-id":"com.android.systemui:id/pinEntry"})
         self.assertTrue(credential_marker([pin],"com.android.systemui"))
         self.assertFalse(credential_marker([{**pin,"enabled":"false"}],"com.android.systemui"))
-        fallback=self.node(text="Use PIN")
+        fallback=self.node(text="Use PIN", **{"resource-id":"com.android.systemui:id/button_use_credential", "class":"android.widget.Button"})
         self.assertFalse(credential_marker([fallback],"com.android.systemui"))
         self.assertTrue(credential_marker([fallback,self.node(text="认证此设备以解封本地金库授权")],"com.android.systemui"))
+
+    def test_notification_text_and_foreign_resource_ids_are_not_credential_controls(self):
+        title = self.node(text="认证此设备以解封本地金库授权")
+        self.assertFalse(credential_marker([title, self.node(text="Use PIN")], "com.android.systemui"))
+        self.assertFalse(credential_marker([self.node(**{"resource-id":"untrusted.app:id/pinEntry"})], "com.android.systemui"))
+        self.assertFalse(credential_marker([title, self.node(text="Use PIN", **{"resource-id":"android:id/action0", "class":"android.widget.Button"})], "com.android.systemui"))
 
     def test_api35_lockPassword_marker_stays_bound_to_OS(self):
         lock = self.node(**{"resource-id":"com.android.systemui:id/lockPassword","class":"com.android.internal.widget.ImeAwareEditText"})
@@ -51,19 +200,84 @@ class DeviceCredentialHarnessTests(unittest.TestCase):
 
     def test_title_only_window_requires_system_uid_record(self):
         nodes=[self.node(**{"resource-id":"com.android.systemui:id/pinEntry"})]
-        raw=b"mCurrentFocus=Window{abc u0 BiometricPrompt}\nWindow #0 Window{abc u0 BiometricPrompt}:\n mOwnerUid=1000\n"
-        self.assertEqual(focused_identity(raw,nodes),"com.android.systemui")
-        self.assertEqual(focused_identity(raw.replace(b"1000",b"10123"),nodes),"unknown")
+        raw=b"mCurrentFocus=Window{abc u0 BiometricPrompt}\nWindow #0 Window{abc u0 BiometricPrompt}:\n mOwnerUid=1000 showForAllUsers=false package=com.android.systemui appop=NONE\n"
+        self.assertEqual(focused_identity(raw,nodes,{"com.android.systemui":1000}),"com.android.systemui")
+        self.assertEqual(focused_identity(raw.replace(b"1000",b"10123"),nodes,{"com.android.systemui":1000}),"unknown")
+        self.assertEqual(focused_identity(raw,nodes),"unknown")
+
+    def test_title_window_uses_verified_system_package_UID_not_hardcoded_1000(self):
+        nodes = [self.node(**{"resource-id":"com.android.systemui:id/pinEntry"})]
+        raw = b"mCurrentFocus=Window{abc u0 BiometricPrompt}\nWindow #0 Window{abc u0 BiometricPrompt}:\n mOwnerUid=10123 showForAllUsers=false package=com.android.systemui appop=NONE\n"
+        self.assertEqual(focused_identity(raw, nodes, {"com.android.systemui":10123}), "com.android.systemui")
+
+    def test_component_like_title_does_not_override_wrong_window_owner(self):
+        nodes = [self.node(**{"resource-id":"com.android.systemui:id/pinEntry"})]
+        raw = b"mCurrentFocus=Window{abc u0 com.android.systemui/Fake}\nWindow #0 Window{abc u0 com.android.systemui/Fake}:\n mOwnerUid=11234 showForAllUsers=false package=untrusted.app appop=NONE\n"
+        self.assertEqual(focused_identity(raw, nodes, {"com.android.systemui":10123}), "unknown")
+
+    def test_prompt_observer_requests_full_window_dump(self):
+        runner = DeviceCredentialAcceptance.__new__(DeviceCredentialAcceptance)
+        runner.trusted_window_uids = {"com.android.systemui":10123}
+        calls = []
+        runner.shell = lambda *args: calls.append(args) or SimpleNamespace(stdout=b"")
+        self.assertEqual(runner.focused_package([]), "unknown")
+        self.assertEqual(calls, [("dumpsys", "window")])
+
+    def test_system_package_UID_requires_exact_unique_record(self):
+        self.assertEqual(auth.exact_package_uid(b"package:com.android.systemui.plugin uid:10099\npackage:com.android.systemui uid:10123\n", "com.android.systemui"), 10123)
+        for raw in (b"", b"package:com.android.systemui.fake uid:10123\n",
+                    b"package:com.android.systemui uid:10123\npackage:com.android.systemui uid:10123\n",
+                    b"package:com.android.systemui uid:10123 private-body\n"):
+            with self.assertRaises(AcceptanceFailure): auth.exact_package_uid(raw, "com.android.systemui")
+
+    def test_UID_lookup_uses_system_package_filter_for_OS_identities(self):
+        runner = DeviceCredentialAcceptance.__new__(DeviceCredentialAcceptance)
+        calls = []
+        def shell(*args):
+            calls.append(args)
+            return SimpleNamespace(stdout=("package:" + args[-1] + " uid:10123\n").encode())
+        runner.shell = shell
+        runner.load_trusted_window_uids()
+        for package in auth.OS_PACKAGES:
+            self.assertIn(("pm", "list", "packages", "-s", "-U", package), calls)
+        self.assertIn(("pm", "list", "packages", "-U", "org.locklark.android"), calls)
+
+    def test_missing_or_ambiguous_window_authority_never_accepts_marker(self):
+        nodes = [self.node(**{"resource-id":"com.android.systemui:id/pinEntry"})]
+        mapping = {"com.android.systemui":10123}
+        focus = b"mCurrentFocus=Window{abc u0 private-title-body}\n"
+        window = b"Window #0 Window{abc u0 private-title-body}:\n mOwnerUid=10123 showForAllUsers=false package=com.android.systemui appop=NONE\n"
+        for raw in (window, focus, focus + window.replace(b"{abc", b"{def"),
+                    focus + b"mCurrentFocus=Window{def u0 other}\n" + window,
+                    focus + window.replace(b"package=com.android.systemui", b"package=untrusted.app")):
+            identity, evidence = auth.focus_evidence(raw, nodes, mapping)
+            self.assertEqual(identity, "unknown")
+            self.assertTrue(evidence["credential_resource_marker"])
+            self.assertNotIn("private-title-body", json.dumps(evidence))
+            self.assertNotIn("untrusted.app", json.dumps(evidence))
+
+    def test_verified_OS_window_without_actual_credential_controls_is_not_auth(self):
+        raw = b"mCurrentFocus=Window{abc u0 Notifications}\nWindow #0 Window{abc u0 Notifications}:\n mOwnerUid=10123 showForAllUsers=false package=com.android.systemui appop=NONE\n"
+        nodes = [self.node(text="Notifications")]
+        identity, evidence = auth.focus_evidence(raw, nodes, {"com.android.systemui":10123})
+        self.assertEqual(identity, "com.android.systemui")
+        self.assertFalse(credential_marker(nodes, identity))
+        self.assertFalse(evidence["credential_resource_marker"])
+        self.assertTrue(evidence["owner_package_verified"])
 
     def test_disabled_queued_lock_page_does_not_refuse_prompt(self):
         queued = [self.node(package="org.locklark.android",text="打开本地金库",**{"class":"android.widget.Button","enabled":"false"})]
         prompt = [self.node(**{"resource-id":"com.android.systemui:id/pinEntry"})]
         runner = DeviceCredentialAcceptance.__new__(DeviceCredentialAcceptance)
         runner.args = SimpleNamespace(timeout=1)
+        runner.size = (500, 500)
         runner.stage = "quick-prompt"
         frames = iter([queued,prompt])
-        runner.snapshot = lambda:next(frames)
-        runner.focused_package = lambda nodes: "org.locklark.android" if nodes is queued else "com.android.systemui"
+        def observation(deadline):
+            nodes = next(frames)
+            package = "org.locklark.android" if nodes is queued else "com.android.systemui"
+            return nodes, package, (b"abc", 10123, package)
+        runner.bound_snapshot = observation
         observed=[]
         runner.observe_lifecycle = lambda nodes,package:observed.append((nodes,package))
         self.assertEqual(runner.os_prompt()[1],"com.android.systemui")
