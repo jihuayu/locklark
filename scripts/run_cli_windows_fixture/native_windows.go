@@ -55,7 +55,10 @@ func privateRoot(root string) error {
 	if err != nil {
 		return privatePolicyError("known-folder")
 	}
-	if filepath.Clean(filepath.Dir(root)) != filepath.Clean(parent) || !strings.HasPrefix(filepath.Base(root), "locklark-run-cli-acceptance-") {
+	return privateRootAt(root, parent)
+}
+func privateRootAt(root, parent string) error {
+	if !filepath.IsAbs(root) || !filepath.IsAbs(parent) || filepath.Clean(root) != root || filepath.Clean(parent) != parent || filepath.Dir(root) != parent || !strings.HasPrefix(filepath.Base(root), "locklark-run-cli-acceptance-") {
 		return privatePolicyError("known-folder-parent")
 	}
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()

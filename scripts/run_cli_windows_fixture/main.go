@@ -44,6 +44,9 @@ func writeJSON(path string, value any) {
 func readFixture(root string) fixture {
 	fixturePhase = "artifact-security"
 	check(privateRoot(root) == nil)
+	return readValidatedFixture(root)
+}
+func readValidatedFixture(root string) fixture {
 	raw, err := os.ReadFile(filepath.Join(root, "fixture-private.json"))
 	check(err == nil)
 	defer clear(raw)
@@ -82,7 +85,7 @@ func setup() {
 func cliArgs(root, executable, label string, f fixture) []string {
 	return []string{"personal", "run-cli", "--file", filepath.Join(root, "vault.ll"), "--id", f.ID,
 		"--revision", f.Revision, "--profile", "token", "--name", "LOCKLARK_TEST_TOKEN", "--cwd", root,
-		"--timeout", "15", "--", executable, "child", root, label}
+		"--timeout", "15", "--", executable, "child", root, filepath.Dir(root), label}
 }
 func launch(root, cli, label string) {
 	check(label == "approved" || label == "denied" || label == "no-console")
@@ -184,13 +187,16 @@ func launch(root, cli, label string) {
 	check(privateRoot(root) == nil)
 	fmt.Println("OWNED_WINDOWS_CLI_DONE")
 }
-func child(root, label string) {
+func child(root, parent, label string) {
 	fixturePhase = "artifact-security"
-	if err := privateRoot(root); err != nil {
+	// The launcher validated this OS-known-folder parent before approval. The
+	// public parent argument is part of the exact approved command. RunCLI's
+	// isolated USERPROFILE/LOCALAPPDATA must not reinterpret that location.
+	if err := privateRootAt(root, parent); err != nil {
 		fmt.Fprintln(os.Stderr, "LOCKLARK_WINDOWS_CHILD_ROOT=REFUSED code="+privateRootFailure(err))
 		panic("owned child artifact policy refused")
 	}
-	f := readFixture(root)
+	f := readValidatedFixture(root)
 	fixturePhase = "child-console"
 	mode, err := consoleMode()
 	check(err == nil)
@@ -254,8 +260,8 @@ func main() {
 		check(len(os.Args) == 5)
 		launch(os.Args[2], os.Args[3], os.Args[4])
 	case "child":
-		check(len(os.Args) == 4)
-		child(os.Args[2], os.Args[3])
+		check(len(os.Args) == 5)
+		child(os.Args[2], os.Args[3], os.Args[4])
 	case "audit":
 		check(len(os.Args) == 3)
 		audit(os.Args[2])
