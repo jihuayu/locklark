@@ -29,9 +29,19 @@ const manifest = {
     },
   ],
   action: { default_popup: "popup.html" },
+  options_ui: { page: "options.html", open_in_tab: true },
   commands: {
     _execute_action: {
       suggested_key: { default: "Ctrl+Shift+Y", mac: "Command+Shift+Y" },
+      description: "打开 Locklark 弹窗",
+    },
+    autofill: {
+      suggested_key: { default: "Ctrl+Shift+L", mac: "Command+Shift+L" },
+      description: "填充当前页面登录或打开候选",
+    },
+    lock: {
+      suggested_key: { default: "Ctrl+Shift+U", mac: "Command+Shift+U" },
+      description: "立即锁定 Locklark",
     },
   },
   content_security_policy: {
@@ -41,6 +51,10 @@ const manifest = {
 if (mode === "chromium") {
   manifest.key = key;
   manifest.minimum_chrome_version = "120";
+  // Chromium needs this permission for the right-click vault menu. Firefox
+  // builds deliberately omit it to keep the native acceptance permission set
+  // at activeTab/nativeMessaging/scripting/storage.
+  manifest.permissions.push("contextMenus");
   manifest.background = { service_worker: "background.js" };
 } else {
   // Firefox reserves Ctrl+Shift+Y for Library in real profiles. Keep the
@@ -65,6 +79,9 @@ for (const name of [
   "popup.html",
   "popup.css",
   "popup.js",
+  "options.html",
+  "options.css",
+  "options.js",
 ])
   fs.copyFileSync(path.join(__dirname, name), path.join(out, name));
 fs.writeFileSync(
