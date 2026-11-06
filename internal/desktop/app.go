@@ -81,10 +81,26 @@ type App struct {
 	audit                                          []personal.Event
 	report                                         string
 	source, planDigest, exportPath, exportPassword string
+
+	// M2.4 desktop v2 state. It is reset on lock and never survives a
+	// session boundary; settings are non-secret and survive lock.
+	v2                    v2State
+	v2Mode                bool
+	settings              Settings
+	settingsPath          string
+	settingsLoaded        bool
+	lastActivity          time.Time
+	backgroundStop        chan struct{}
+	backgroundRunningFlag uint32
 }
 
 func New() *App {
-	return &App{generationLength: "24", systemStore: osunlock.New(), scope: "active", sshScope: "active", page: "vault", editField: "password", dispatch: func(fn func()) { fn() }, launch: func(fn func()) { go fn() }}
+	a := &App{generationLength: "24", systemStore: osunlock.New(), scope: "active", sshScope: "active", page: "vault", editField: "password", dispatch: func(fn func()) { fn() }, launch: func(fn func()) { go fn() }}
+	a.settings = DefaultSettings()
+	a.settingsPath = SettingsPath()
+	a.settingsLoaded = true
+	a.v2 = newV2State()
+	return a
 }
 func (a *App) run(work func() outcome) { a.runContext(func(context.Context) outcome { return work() }) }
 func (a *App) runContext(work func(context.Context) outcome) {
@@ -224,6 +240,9 @@ func (a *App) Lock() {
 		a.status += " · 结果未确认，请在金库核实，勿重复保存"
 	}
 	a.clearDailyExposure()
+	a.resetV2()
+	a.v2Mode = false
+	a.lastActivity = time.Time{}
 }
 func (a *App) unlock() {
 	path := a.path
@@ -257,11 +276,14 @@ func (a *App) unlock() {
 			a.rows = loginProjection(rows)
 			a.scope = "active"
 			a.page = "vault"
-			a.status = "已解锁 · 5 分钟未操作自动锁定"
+			a.v2Mode = true
+			a.touchActivity()
+			a.loadV2Metadata()
+			a.status = "已解锁 · " + idleLockLabel(a.settingsSnapshot().AutoLockDuration())
 		}}
 	})
 }
-func (a *App) createVault() {
+func (a *App) createVaultFile() {
 	if a.password == "" || a.password != a.confirmation || subtle.ConstantTimeCompare([]byte(a.issued), []byte(a.secret)) != 1 {
 		a.status = "请确认主密码，并重新输入离线保存的 Secret Key"
 		return
@@ -401,17 +423,7 @@ func (a *App) disclose(field, purpose string) {
 }
 func (a *App) View(c *ui.Context) {
 	now := time.Now()
-	a.checkOTPExposure(now)
-	if !a.displayUntil.IsZero() && !now.Before(a.displayUntil) {
-		a.display = ""
-		a.displayUntil = time.Time{}
-	}
-	if !a.clipboardUntil.IsZero() && !now.Before(a.clipboardUntil) {
-		a.clearClipboard()
-	}
-	if a.session != nil && !a.session.Unlocked() {
-		a.Lock()
-	}
+	a.backgroundTick(now)
 	c.After(time.Second)
 	ui.Column(c.Key(a.generation)).Fill().Padding(24).Gap(16).Children(func() {
 		ui.Row(c).Gap(12).Children(func() {
@@ -432,6 +444,8 @@ func (a *App) View(c *ui.Context) {
 			a.browserView(c)
 		} else if a.quick.open {
 			a.quickSearchView(c)
+		} else if a.v2Mode && a.page == "vault" {
+			a.v2View(c)
 		} else {
 			a.vaultView(c)
 		}
@@ -474,7 +488,7 @@ func (a *App) lockView(c *ui.Context) {
 		}
 		ui.TextInput(c, &a.secret).Label("Secret Key").Placeholder("LL1-…（创建时重新输入已保存密钥）").Password().Disabled(a.busy)
 		if a.create {
-			ui.PrimaryButton(c, "确认密钥已离线保存并创建").Disabled(a.busy || a.issued == "").OnClick(a.createVault)
+			ui.PrimaryButton(c, "确认密钥已离线保存并创建").Disabled(a.busy || a.issued == "").OnClick(a.createVaultFile)
 		} else {
 			ui.PrimaryButton(c, "解锁").Disabled(a.busy).OnClick(a.unlock)
 			ui.Button(c, "使用"+osunlock.Label()+"解锁").Disabled(a.busy || a.path == "").OnClick(a.systemUnlock)
@@ -692,6 +706,10 @@ func (a *App) transferView(c *ui.Context) {
 }
 func Run() error {
 	a := New()
+	if e := a.LoadSettings(); e != nil {
+		a.status = "安全设置文件无法读取；已使用默认值"
+	}
+	a.startBackgroundLoop()
 	mygo.App.SetName("Locklark")
 	mygo.App.WhenReady(func() {
 		a.win = mygo.NewWindow(mygo.WindowOptions{Title: "Locklark · 本地金库", Width: 1100, Height: 820, MinWidth: 900, MinHeight: 680, Content: ui.View(a.View)})
@@ -714,6 +732,7 @@ func Run() error {
 		_, _ = mygo.NewTray(mygo.TrayOptions{ID: "locklark", Icon: pngIcon.Bytes(), ToolTip: "Locklark", Menu: mygo.NewMenu([]*mygo.MenuItem{{Label: "打开金库", Click: func(*mygo.MenuItem, *mygo.Window) { a.win.Show(); a.win.Focus() }}, {Label: "快捷搜索", Click: func(*mygo.MenuItem, *mygo.Window) { a.showQuickSearch() }}, {Label: "立即锁定", Click: func(*mygo.MenuItem, *mygo.Window) { a.Lock(); a.win.Invalidate() }}, {Label: "退出", Click: func(*mygo.MenuItem, *mygo.Window) { a.Lock(); mygo.App.Quit() }}})})
 	})
 	err := mygo.App.Run()
+	a.stopBackgroundLoop()
 	a.Lock()
 	if !a.waitSSHShutdown(5*time.Second) && err == nil {
 		return sshagent.ErrUnavailable
