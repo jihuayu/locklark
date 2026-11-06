@@ -240,7 +240,7 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 		if n != 1 || !digestOK(e.Link) || e.Item != "" {
 			return invalid
 		}
-	case browserOTPAction, browserFillAction, v2AttachmentReadAction, "item.desktop.show.username", "item.desktop.show.password", "item.desktop.copy.username", "item.desktop.copy.password", "item.desktop.show.notes", "item.desktop.copy.notes", "item.desktop.edit.notes", "item.edit.notes", "item.run.username", "item.run.password", livePullAction, "item.inject.username", "item.inject.password", "item.trash", "item.untrash", "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.regenerate.password", otpDisclosureAction, desktopOTPShowAction, desktopOTPCopyAction:
+	case browserOTPAction, browserFillAction, v2AttachmentReadAction, "item.desktop.show.username", "item.desktop.show.password", "item.desktop.copy.username", "item.desktop.copy.password", "item.desktop.show.notes", "item.desktop.copy.notes", "item.desktop.edit.notes", "item.edit.notes", "item.run.username", "item.run.password", livePullAction, "item.inject.username", "item.inject.password", "item.trash", "item.untrash", "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.reveal.notes", referenceRevealAction, referenceOTPAction, "item.regenerate.password", otpDisclosureAction, desktopOTPShowAction, desktopOTPCopyAction:
 		if e.Result == "not-found" && e.Item == "" && e.BaseRevision == "" && n > 1 {
 			break
 		}
@@ -362,7 +362,12 @@ func history(b *bolt.Bucket, i identity, s vault.Snapshot, want bool, revisions 
 					delete(revisions, ev.Item)
 				}
 			}
-		} else if ev.Action == sshSignAction || editAction(ev.Action) || ev.Action == browserUpdateAction || readValueAction(ev.Action) || otpAction(ev.Action) || ev.Action == v2DetailViewAction || ev.Action == v2DetailInspectAction {
+		} else if ev.Action == v2DetailViewAction || ev.Action == v2DetailInspectAction {
+			found := revisions[ev.Item] != ""
+			if (ev.Result == "not-found") == found || ev.BaseRevision != revisions[ev.Item] {
+				return invalid
+			}
+		} else if ev.Action == sshSignAction || editAction(ev.Action) || ev.Action == browserUpdateAction || readValueAction(ev.Action) || otpAction(ev.Action) {
 			found := revisions[ev.Item] != ""
 			if (ev.Result == "not-found") == found || ev.BaseRevision != revisions[ev.Item] {
 				return invalid

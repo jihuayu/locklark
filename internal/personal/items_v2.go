@@ -641,6 +641,20 @@ func hasOTPField(it vault.Item) bool {
 }
 
 func itemSummary(it vault.Item, revision string) ItemSummary {
+	attachments := len(it.Attachments)
+	if it.Attachment != nil {
+		legacyDigest := vault.AttachmentSHA256(it.Attachment)
+		duplicate := false
+		for _, att := range it.Attachments {
+			if att.Size == int64(len(it.Attachment)) && att.SHA256 == legacyDigest {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			attachments++
+		}
+	}
 	return ItemSummary{
 		ID:           it.ID,
 		Revision:     revision,
@@ -656,7 +670,7 @@ func itemSummary(it vault.Item, revision string) ItemSummary {
 		Tags:         append([]string(nil), it.Tags...),
 		HasOTP:       hasOTPField(it),
 		HasPasskey:   len(it.Passkey) > 0,
-		Attachments:  len(it.Attachments),
+		Attachments:  attachments,
 		TrashedAt:    it.TrashedAt,
 		UpdatedAt:    it.UpdatedAt,
 	}
@@ -800,7 +814,7 @@ func itemMatchesQuery(it vault.Item, query string) bool {
 
 func listByFilter(items []vault.Item, revisions map[string]string, filter ItemFilter) ([]ItemSummary, error) {
 	if !validV2Filter(filter) {
-		return nil, invalid
+		return nil, ErrSearchQuery
 	}
 	state := filter.State
 	if state == "" {
