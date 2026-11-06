@@ -174,7 +174,18 @@ Counting rules: “protocol” means a cross-process or native-messaging boundar
 | Popup UI | `popup.html`, `popup.js`, `popup.css` | Minimal | No vault browse/detail/editor, no Watchtower dashboard |
 | Native host, vault, health | `internal/browserhost`, `internal/vault`, `internal/personal` | Login/SSH/Passkey v1 | No identity/card model, no shared session, no browser health API |
 
+**Coverage ledger by area:**
+
+| Area | Highest retained evidence | Coverage verdict | Why it is not closed | Next evidence |
+| --- | --- | --- | --- | --- |
+| Area 1 — inline menu, autofill, multi-step, split OTP, iframes | E4 on PR #40 for inline menu, fill, guarded auto-submit, single-field TOTP; E3 for DOM behavior | Partial | Multi-step session, split OTP, same-origin/same-site iframe fill, and open shadow DOM are absent; cross-site block is not yet a tiered policy | E2/E3 for B7, B12a.2, B12b.1–B12b.3; E4 on the merged head |
+| Area 2 — save/update prompt and inline generator | E0/E1 only; the current extension has manual save only | Not covered | No submission observer, staged save, post-submit banner, never-save list, generator, confirm fill, or history | E2 trigger/classification tests, then E3 DOM and E4 native commit |
+| Area 3 — popup vault, shortcuts, context menu, options, Watchtower | E1/E2 for the current candidate popup; no vault or Watchtower UI | Not covered | No search, browse, detail, editor, lock, badge, context menu, options page, health API, or HIBP client | E2 policy/UI tests, E3 fixture vault, E4 real vault |
+| Area 4 — identity/card, passkeys, shared session, IPC | E4 on PR #40 for ES256 passkey create/get and truthful UV; E1/E2 for identity/card and shared session | Partial | Identity/card item model and fill are absent; shared desktop session, biometric delegation, Edge, and Firefox passkey E4 are not complete | E2 token/state tests, E3 DOM, E4 with M2.3 and per-browser runs |
+
 ### 2.4 Area 1 obligation ledger
+
+The `A1-OBL-*` … `A4-OBL-*` identifiers are **checklist-local family IDs**, not raw REA `obl_*` IDs. They give each consolidated obligation family one owner and one closure gate; the raw per-file/per-call-path ledger remains external. A family can be partially closed when some of its parity rows are verified and others are not.
 
 | Family | Obligation family | Class | Parity rows | Reference evidence | Disposition | Closure / owner |
 | --- | --- | --- | --- | --- | --- | --- |
