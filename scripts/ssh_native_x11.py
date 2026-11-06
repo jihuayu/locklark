@@ -27,6 +27,25 @@ LABELS = (
 native.CONTROL_LABELS = (*native.CONTROL_LABELS, *LABELS)
 PUBLIC_PREFIXES = ("本机来源：", "密钥：", "密钥 ID：", "精确修订：", "公钥指纹：", "算法：",
                    "签名数据：", "载荷 SHA256：", "请求 ID：", "连接 ID：", "批准期限：")
+SAFE_TARGET = "none"
+
+
+class PickerWindowQueryUnavailable(RuntimeError):
+    pass
+
+
+def failure_diagnostic(error):
+    context = native.FAILURE_CONTEXT
+    action = context.get("action")
+    index = context.get("index")
+    result = {"target": SAFE_TARGET if SAFE_TARGET in ("app", "picker", "none") else "none",
+              "action": action if action in ("setup", "label-click", "label-wait", "text-entry", "key", "pointer", "snapshot") else "unknown",
+              "index": index if type(index) is int and -1 <= index <= 100 else -1, "guard": {}}
+    guard = getattr(error, "native_guard", None) if type(error) is RuntimeError else None
+    if type(guard) is dict:
+        result["guard"] = {key: value for key, value in guard.items() if key in ("depth", "visited", "remaining", "children")
+                           and type(value) is int and -(2**31) <= value < 2**31}
+    return result
 
 
 class PublicClipboard(Clipboard):
@@ -48,12 +67,15 @@ class PublicClipboard(Clipboard):
             request["result"] = {"error": "clipboard-response-invalid"}
 
 
-def approval(request):
+def approval(request, reader=None):
     pid = request["pid"]
     if (type(pid) is not int or pid <= 0
             or os.readlink("/proc/" + str(pid) + "/exe") != os.path.realpath(request["executable"])):
         raise RuntimeError()
-    reader = native.NativeControls(request["title"], pid)
+    reader = reader or native.NativeControls(request["title"], pid)
+    for _ in range(100):
+        if not reader.gl.g_main_context_iteration(None, 0):
+            break
     windows, values = [], []
 
     def window(node, depth):
@@ -88,28 +110,114 @@ def approval(request):
 
 
 def picker_observation(request):
-    """Re-observe a disappearing GTK tree without repeating any input."""
+    """Inspect the stable location entry before submitting it once."""
+    return picker_observation_once(request)
+
+
+def picker_window_present(request):
+    """Read only X11 window identity; never walk a closing AT-SPI tree."""
+    if (request.get("title") != "选择未加密 OpenSSH Ed25519 私钥" or type(request.get("pid")) is not int
+            or request["pid"] <= 0 or os.readlink("/proc/" + str(request["pid"]) + "/exe") != os.path.realpath(request["executable"])):
+        raise RuntimeError()
+    x = C.CDLL("libX11.so.6")
+    pointer, window = C.c_void_p, C.c_ulong
+    class XError(C.Structure):
+        _fields_ = [("type", C.c_int), ("display", pointer), ("resource", C.c_ulong), ("serial", C.c_ulong),
+                    ("code", C.c_ubyte), ("request", C.c_ubyte), ("minor", C.c_ubyte)]
+    handler_type = C.CFUNCTYPE(C.c_int, pointer, C.POINTER(XError))
+    errors = []
+    @handler_type
+    def error_handler(_display, event):
+        errors.append(int(event.contents.code))
+        return 0
+    x.XSetErrorHandler.argtypes, x.XSetErrorHandler.restype = [pointer], pointer
+    previous = x.XSetErrorHandler(C.cast(error_handler, pointer))
+    x.XOpenDisplay.argtypes, x.XOpenDisplay.restype = [C.c_char_p], pointer
+    x.XCloseDisplay.argtypes = [pointer]
+    x.XDefaultRootWindow.argtypes, x.XDefaultRootWindow.restype = [pointer], window
+    x.XInternAtom.argtypes, x.XInternAtom.restype = [pointer, C.c_char_p, C.c_int], C.c_ulong
+    x.XQueryTree.argtypes = [pointer, window, C.POINTER(window), C.POINTER(window), C.POINTER(C.POINTER(window)), C.POINTER(C.c_uint)]
+    x.XGetWindowProperty.argtypes = [pointer, window, C.c_ulong, C.c_long, C.c_long, C.c_int, C.c_ulong,
+                                   C.POINTER(C.c_ulong), C.POINTER(C.c_int), C.POINTER(C.c_ulong), C.POINTER(C.c_ulong), C.POINTER(pointer)]
+    x.XFree.argtypes, x.XSync.argtypes = [pointer], [pointer, C.c_int]
+    display = None
+    try:
+        display = x.XOpenDisplay(os.environ.get("DISPLAY", "").encode())
+        if not display:
+            raise PickerWindowQueryUnavailable()
+        pid_atom = x.XInternAtom(display, b"_NET_WM_PID", 0)
+        name_atom = x.XInternAtom(display, b"_NET_WM_NAME", 0)
+        utf8_atom = x.XInternAtom(display, b"UTF8_STRING", 0)
+        def property_value(candidate, atom, kind):
+            actual, count, remaining, fmt, data = C.c_ulong(), C.c_ulong(), C.c_ulong(), C.c_int(), pointer()
+            status = x.XGetWindowProperty(display, candidate, atom, 0, 512, 0, kind, C.byref(actual), C.byref(fmt),
+                                          C.byref(count), C.byref(remaining), C.byref(data))
+            try:
+                if status != 0:
+                    raise PickerWindowQueryUnavailable()
+                if not data or actual.value != kind:
+                    return None
+                if kind == 6 and fmt.value == 32 and count.value == 1:
+                    return C.cast(data, C.POINTER(C.c_ulong))[0]
+                if kind == utf8_atom and fmt.value == 8 and remaining.value == 0:
+                    return C.string_at(data, count.value).decode("utf-8")
+                return None
+            finally:
+                if data:
+                    x.XFree(data)
+        matches, visited = [], [0]
+        def walk(parent, depth):
+            if depth > 3:
+                return
+            root_out, parent_out, children, count = window(), window(), C.POINTER(window)(), C.c_uint()
+            if not x.XQueryTree(display, parent, C.byref(root_out), C.byref(parent_out), C.byref(children), C.byref(count)):
+                raise PickerWindowQueryUnavailable()
+            try:
+                if visited[0] + count.value > 4096:
+                    raise RuntimeError("Native acceptance X query failed")
+                candidates = [children[index] for index in range(count.value)]
+            finally:
+                if children:
+                    x.XFree(children)
+            visited[0] += len(candidates)
+            for candidate in candidates:
+                if property_value(candidate, pid_atom, 6) == request["pid"]:
+                    if property_value(candidate, name_atom, utf8_atom) == request["title"]:
+                        matches.append(candidate)
+                walk(candidate, depth + 1)
+        walk(x.XDefaultRootWindow(display), 0)
+        x.XSync(display, 0)
+        if errors:
+            raise PickerWindowQueryUnavailable()
+        if len(matches) > 1:
+            raise RuntimeError("Native acceptance window must be unique")
+        if os.readlink("/proc/" + str(request["pid"]) + "/exe") != os.path.realpath(request["executable"]):
+            raise RuntimeError()
+        return bool(matches)
+    finally:
+        if display:
+            x.XCloseDisplay(display)
+        x.XSetErrorHandler(previous)
+
+
+def wait_picker_closed(request):
     deadline = request.get("observation_deadline")
-    if deadline is None:
-        return picker_observation_once(request)
     if type(deadline) not in (int, float) or not time.monotonic() < deadline <= time.monotonic() + 10:
         raise RuntimeError()
     while True:
         try:
-            result = picker_observation_once(request)
-            if time.monotonic() >= deadline:
-                raise RuntimeError()
-            return result
-        except native.AccessibilityQueryUnavailable:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise
-            time.sleep(min(0.02, remaining))
-            if time.monotonic() >= deadline:
-                raise
+            present = picker_window_present(request)
+        except PickerWindowQueryUnavailable:
+            present = None  # An unsuccessful query is never evidence of absence.
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("Previous native acceptance window did not close")
+        if present is False:
+            return {"absent": True}
+        time.sleep(min(0.02, remaining))
 
 
-def picker_observation_once(request):
+def picker_reader(request):
     if request.get("title") != "选择未加密 OpenSSH Ed25519 私钥":
         raise RuntimeError()
     reader = native.NativeControls(request["title"], request["pid"])
@@ -119,7 +227,15 @@ def picker_observation_once(request):
     reader.at.atspi_accessible_get_text_iface.restype = C.c_void_p
     reader.at.atspi_text_get_text.argtypes = [C.c_void_p, C.c_int, C.c_int, C.POINTER(C.c_void_p)]
     reader.at.atspi_text_get_text.restype = C.c_void_p
-    windows, counts = [], {"present": False, "path_match": 0, "name_match": 0, "selected_name_match": 0, "entries": 0}
+    return reader
+
+
+def picker_observation_once(request, reader=None):
+    reader = reader or picker_reader(request)
+    for _ in range(100):
+        if not reader.gl.g_main_context_iteration(None, 0):
+            break
+    windows, counts = [], {"present": False, "path_match": 0, "entries": 0}
 
     def find(node, depth):
         if (reader.string(reader.at.atspi_accessible_get_name, node) == reader.title
@@ -130,15 +246,6 @@ def picker_observation_once(request):
 
     def observe(node, _depth):
         role = reader.string(reader.at.atspi_accessible_get_role_name, node)
-        name = reader.string(reader.at.atspi_accessible_get_name, node)
-        counts["name_match"] += name == pathlib_basename(request["expected_path"])
-        if name == pathlib_basename(request["expected_path"]):
-            state = reader.at.atspi_accessible_get_state_set(node)
-            if state:
-                try:
-                    counts["selected_name_match"] += bool(reader.at.atspi_state_set_contains(state, 23))
-                finally:
-                    reader.go.g_object_unref(state)
         if role in ("text", "entry"):
             counts["entries"] += 1
             interface = reader.at.atspi_accessible_get_text_iface(node)
@@ -168,20 +275,48 @@ def picker_observation_once(request):
             reader.go.g_object_unref(node)
 
 
-def pathlib_basename(path):
-    return os.path.basename(path)
+def approval_observer():
+    """One warm read-only AT-SPI connection; input protocol has no actions."""
+    global SAFE_TARGET
+    if not stat.S_ISFIFO(os.fstat(sys.stdout.fileno()).st_mode):
+        raise RuntimeError()
+    line = sys.stdin.readline(4097)
+    if len(line) > 4096:
+        raise RuntimeError()
+    request = json.loads(line)
+    if (set(request) != {"title", "pid", "executable"} or request["title"] != "Locklark · 本地金库"
+            or type(request["pid"]) is not int or request["pid"] <= 0
+            or os.readlink("/proc/" + str(request["pid"]) + "/exe") != os.path.realpath(request["executable"])):
+        raise RuntimeError()
+    SAFE_TARGET = "app"
+    reader = native.NativeControls(request["title"], request["pid"])
+    print('{"ready":true}', flush=True)
+    while True:
+        line = sys.stdin.readline(129)
+        if not line:
+            return
+        if line != "observe\n":
+            raise RuntimeError()
+        native.FAILURE_CONTEXT.update(action="snapshot", index=-1)
+        print(json.dumps({"present": bool(approval(request, reader)["values"])}), flush=True)
 
 
 def main():
+    global SAFE_TARGET
     if not stat.S_ISFIFO(os.fstat(sys.stdout.fileno()).st_mode):
         raise RuntimeError()
     request = json.load(sys.stdin)
+    SAFE_TARGET = "app" if request.get("title") == "Locklark · 本地金库" else "picker" if request.get("title") == "选择未加密 OpenSSH Ed25519 私钥" else "none"
+    if request.get("observe"):
+        native.FAILURE_CONTEXT.update(action="snapshot", index=-1)
     if request.get("observe") == "clipboard":
         print(json.dumps(PublicClipboard().compare([])))
     elif request.get("observe") == "approval":
         print(json.dumps(approval(request)))
     elif request.get("observe") == "picker":
         print(json.dumps(picker_observation(request)))
+    elif request.get("observe") == "picker-closed":
+        print(json.dumps(wait_picker_closed(request)))
     else:
         # Reuse only normal OS input; an in-memory stream avoids logging the
         # request or passing text-entry values as command arguments.
@@ -192,7 +327,14 @@ def main():
 
 if __name__ == "__main__":
     try:
-        main()
+        if sys.argv[1:] == ["--approval-observer"]:
+            approval_observer()
+        elif sys.argv[1:]:
+            raise RuntimeError()
+        else:
+            main()
     except Exception as error:
-        print("SSH native driver failed [" + native.failure_reason(error) + "]", file=sys.stderr)
+        reason = "x-query" if type(error) is PickerWindowQueryUnavailable else native.failure_reason(error)
+        print("SSH native driver failed [" + reason + "]", file=sys.stderr)
+        print("SSH_NATIVE_DIAGNOSTIC " + json.dumps(failure_diagnostic(error), sort_keys=True), file=sys.stderr)
         raise SystemExit(1)

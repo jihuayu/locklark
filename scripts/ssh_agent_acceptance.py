@@ -13,18 +13,21 @@ import pathlib
 import re
 import select
 import shlex
+import shutil
 import socket
+import stat
 import struct
 import subprocess
 import sys
 import threading
+import tempfile
 import time
 
 from run_cli_acceptance import Acceptance as CLIController, AcceptanceFailure, require, scan
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 TITLE = "Locklark · 本地金库"
-STAGES = {"prerequisites", "create", "unlock", "generate", "import", "servers", "identities", "approve", "deny",
+STAGES = {"prerequisites", "create", "unlock", "generate", "import", "agent-start", "servers", "identities", "approve", "deny",
           "malformed", "concurrency", "disconnect", "expired", "slow-frame", "openssh", "forwarding", "lock",
           "export", "audit", "privacy", "cleanup", "complete"}
 LABELS = {"vault": "金库文件", "master": "主密码", "key": "Secret Key", "unlock": "解锁", "locked": "立即锁定",
@@ -32,6 +35,106 @@ LABELS = {"vault": "金库文件", "master": "主密码", "key": "Secret Key", "
           "import-confirm": "确认导入未加密 Ed25519 私钥", "copy-key": "复制 SSH 公钥", "start": "开启本地 SSH agent",
           "copy-endpoint": "复制 SSH_AUTH_SOCK 端点", "stop": "停止本地 SSH agent", "approve": "仅批准本次 SSH 签名",
           "deny": "拒绝本次 SSH 签名", "generated": "选择 SSH 密钥：Owned generated SSH", "imported": "选择 SSH 密钥：Owned imported SSH"}
+STEPS = {"none", "key-fixture", "import-title", "picker-open", "picker-location-input", "picker-location-verify",
+         "picker-location-submit", "picker-close-observe",
+         "import-confirm", "import-result", "import-public-copy", "agent-start", "agent-ready", "agent-endpoint-copy",
+         "agent-endpoint-read", "agent-endpoint-verify", "relay-start"}
+COMMANDS = {"none", "external", "native-input", "native-observe", "native-inspect", "picker-absence"}
+NATIVE_REASONS = {"a11y-unavailable", "a11y-query", "a11y-tree-limit", "a11y-child-limit", "a11y-window-ambiguous",
+                  "label-not-allowed", "control-ambiguous", "control-ready-timeout", "x-display", "absence-request",
+                  "x-query", "window-close-timeout", "window-ambiguous", "window-timeout", "window-viewable-timeout",
+                  "window-attributes", "window-geometry", "x-target", "input-charset", "keyboard-mapping",
+                  "shortcut-mapping", "x-input", "unexpected"}
+ERROR_CLASSES = {"none", "assertion", "os", "timeout", "value", "type", "key", "json", "unexpected"}
+
+
+def owned_runtime():
+    # Socket addresses have a small OS/product bound. Artifact destinations
+    # such as GitHub RUNNER_TEMP may be arbitrarily long; keep only the owned
+    # runtime under a canonical short system temporary parent.
+    parent = pathlib.Path("/tmp").resolve(strict=True)
+    for ancestor in (parent, *parent.parents):
+        info = ancestor.lstat()
+        require(stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode) and info.st_uid in (0, os.geteuid()))
+        require(not info.st_mode & 0o022 or info.st_uid == 0 and info.st_mode & stat.S_ISVTX)
+    path = pathlib.Path(tempfile.mkdtemp(prefix="llssh-", dir=parent))
+    info = path.lstat()
+    require(path == path.resolve(strict=True) and stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid()
+            and info.st_mode & 0o077 == 0)
+    endpoint = path / ("locklark-ssh-" + str(os.geteuid())) / "agent.sock"
+    require(len(os.fsencode(endpoint)) <= 100)
+    return path, (info.st_dev, info.st_ino, info.st_uid)
+
+
+def remove_owned_runtime(path, identity):
+    info = path.lstat()
+    require((info.st_dev, info.st_ino, info.st_uid) == identity and info.st_uid == os.geteuid()
+            and stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode) and info.st_mode & 0o077 == 0
+            and path == path.resolve(strict=True))
+    shutil.rmtree(path)
+    require(not path.exists())
+
+
+def driver_failure(raw):
+    # Parse only the driver's fixed reason. Never forward its stderr body.
+    matches = [match for line in raw.splitlines() if (match := re.fullmatch(rb"SSH native driver failed \[([a-z0-9-]+)\]", line))]
+    reason = matches[0][1].decode("ascii") if len(matches) == 1 else "unexpected"
+    return reason if reason in NATIVE_REASONS else "unexpected"
+
+
+def safe_native_context(value):
+    value = value if type(value) is dict else {}
+    result = {"target": value.get("target") if value.get("target") in ("app", "picker", "none") else "unknown",
+              "action": value.get("action") if value.get("action") in ("setup", "label-click", "label-wait", "text-entry", "key", "pointer", "snapshot") else "unknown",
+              "index": value.get("index") if type(value.get("index")) is int and -1 <= value["index"] <= 100 else -1, "guard": {}}
+    guard = value.get("guard")
+    if type(guard) is dict:
+        result["guard"] = {key: count for key, count in guard.items() if key in ("depth", "visited", "remaining", "children")
+                           and type(count) is int and -(2**31) <= count < 2**31}
+    return result
+
+
+def driver_context(raw):
+    lines = [line[len(b"SSH_NATIVE_DIAGNOSTIC "):] for line in raw.splitlines() if line.startswith(b"SSH_NATIVE_DIAGNOSTIC ")]
+    try:
+        value = json.loads(lines[0]) if len(lines) == 1 and len(lines[0]) <= 2048 else {}
+    except (ValueError, UnicodeError):
+        value = {}
+    return safe_native_context(value)
+
+
+def public_diagnostic(acceptance):
+    def choice(value, allowed, fallback="unknown"):
+        return value if type(value) is str and value in allowed else fallback
+    def count(value, maximum=10000):
+        return value if type(value) is int and 0 <= value <= maximum else 0
+    result = {"stage": choice(acceptance.stage, STAGES), "step": choice(acceptance.step, STEPS),
+              "operation": choice(acceptance.operation, LABELS), "error_class": choice(acceptance.error_class, ERROR_CLASSES),
+              "source_line": count(acceptance.error_line),
+              "reason": choice(acceptance.reason, {"none", "external-command", "external-timeout", "external-launch"}
+                               | {"native-" + reason for reason in NATIVE_REASONS})}
+    command = acceptance.last_command if type(acceptance.last_command) is dict else {}
+    code = command.get("exit_code")
+    result["command"] = {"category": choice(command.get("category"), COMMANDS),
+                         "state": choice(command.get("state"), {"none", "completed", "timeout", "launch-error"}),
+                         "exit_code": code if type(code) is int and -255 <= code <= 255 else None,
+                         "elapsed_ms": count(command.get("elapsed_ms"), 600000)}
+    result["native"] = safe_native_context(command.get("native"))
+    result["runtime"] = {"endpoint_bytes": count(acceptance.runtime_endpoint_bytes, 4096),
+                         "owned": acceptance.runtime_owned is True, "cleaned": acceptance.runtime_cleaned is True}
+    result["controls"] = {}
+    controls = acceptance.control_diagnostic if type(acceptance.control_diagnostic) is dict else {}
+    aliases = {"title", "import-file", "import-confirm", "imported", "start", "copy-endpoint", "stop", "open-en", "open-zh"}
+    for page in ("app", "picker"):
+        raw = controls.get(page)
+        if type(raw) is not dict:
+            continue
+        result["controls"][page] = {"available": raw.get("available") is not False}
+        for alias in sorted(aliases):
+            state = raw.get(alias)
+            if type(state) is dict:
+                result["controls"][page][alias] = {key: state.get(key) is True for key in ("present", "enabled", "showing")}
+    return result
 
 
 def ssh_string(value):
@@ -220,6 +323,79 @@ class AgentRelay:
         self.path.unlink(missing_ok=True)
 
 
+class WarmApprovalObserver:
+    """Private controller pipe to an OS-only observer, never an input driver."""
+    def __init__(self, owner, timeout, arguments=None):
+        self.owner, self.buffer, self.process = owner, bytearray(), None
+        self.output_path, self.error_path = owner.root / "approval-observer.stdout", owner.root / "approval-observer.stderr"
+        self.output = self.output_path.open("wb")
+        self.error = self.error_path.open("wb")
+        owner.cli.logs.extend(((self.output_path, set()), (self.error_path, set())))
+        try:
+            self.process = subprocess.Popen(arguments or [sys.executable, str(ROOT / "scripts/ssh_native_x11.py"), "--approval-observer"],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.error, env=owner.env, cwd=owner.root, bufsize=0)
+            config = {"title": TITLE, "pid": owner.app.pid, "executable": owner.host}
+            self.process.stdin.write(json.dumps(config).encode() + b"\n")
+            require(self.read(timeout) == {"ready": True})
+        except Exception:
+            self.close()
+            raise
+
+    def read(self, timeout):
+        deadline = time.monotonic() + timeout
+        while b"\n" not in self.buffer:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([self.process.stdout], [], [], remaining)[0]:
+                raise subprocess.TimeoutExpired([], timeout)
+            chunk = os.read(self.process.stdout.fileno(), 256)
+            require(bool(chunk) and len(self.buffer) + len(chunk) <= 512)
+            self.output.write(chunk)
+            self.output.flush()
+            self.buffer.extend(chunk)
+        line, _, rest = self.buffer.partition(b"\n")
+        self.buffer[:] = rest
+        return json.loads(line)
+
+    def query(self, timeout):
+        started = time.monotonic()
+        self.owner.last_command = {"category": "native-observe", "state": "none", "exit_code": None}
+        try:
+            self.process.stdin.write(b"observe\n")
+            result = self.read(timeout)
+            require(type(result) is dict and set(result) == {"present"} and type(result["present"]) is bool)
+            self.owner.last_command.update(state="completed", exit_code=0)
+            return result["present"]
+        except subprocess.TimeoutExpired:
+            self.owner.last_command["state"], self.owner.reason = "timeout", "external-timeout"
+            raise
+        except Exception:
+            self.owner.last_command.update(state="completed", exit_code=self.process.poll())
+            self.error.flush()
+            raw = self.error_path.read_bytes()
+            self.owner.reason = "native-" + driver_failure(raw)
+            self.owner.last_command["native"] = driver_context(raw)
+            raise
+        finally:
+            self.owner.last_command["elapsed_ms"] = round((time.monotonic() - started) * 1000)
+
+    def close(self):
+        if self.process:
+            if self.process.poll() is None:
+                self.process.terminate()
+            try:
+                self.process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=2)
+            if self.process.stdout:
+                self.output.write(self.process.stdout.read())
+                self.process.stdout.close()
+            if self.process.stdin:
+                self.process.stdin.close()
+        self.output.close()
+        self.error.close()
+
+
 class Acceptance:
     def __init__(self, args):
         self.args, self.stage, self.operation = args, "prerequisites", "none"
@@ -227,8 +403,10 @@ class Acceptance:
         self.root = self.cli.root
         self.host = str(pathlib.Path(args.host).resolve(strict=True))
         self.env = {**os.environ, "HOME": str(self.cli.global_home), "NO_AT_BRIDGE": "0", "GTK_A11Y": "1"}
-        self.runtime = self.root / "desktop-runtime"
-        self.runtime.mkdir(mode=0o700)
+        self.runtime, self.runtime_identity = owned_runtime()
+        self.runtime_owned, self.runtime_cleaned = True, False
+        self.expected_endpoint = self.runtime / ("locklark-ssh-" + str(os.geteuid())) / "agent.sock"
+        self.runtime_endpoint_bytes = len(os.fsencode(self.expected_endpoint))
         self.env["TMPDIR"] = str(self.runtime)
         self.app, self.relay, self.servers, self.children, self.wm = None, None, [], [], None
         self.checks, self.approvals, self.key_rows = [], [], {}
@@ -238,22 +416,37 @@ class Acceptance:
         self.endpoint = None
         self.reason, self.control_diagnostic = "none", {}
         self.error_class, self.error_line = "none", 0
+        self.step, self.last_command = "none", {"category": "none", "state": "none", "exit_code": None, "elapsed_ms": 0}
 
     def mark(self, name):
         self.checks.append(name)
         print("PASS: SSH " + name, flush=True)
 
-    def command(self, arguments, timeout=30, payload=None, expected=0, env=None):
-        result = subprocess.run(arguments, input=payload, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                timeout=timeout, env=env or self.env, cwd=self.root)
+    def command(self, arguments, timeout=30, payload=None, expected=0, env=None, category="external"):
         self.cli.counter += 1
-        for suffix, raw in (("stdout", result.stdout), ("stderr", result.stderr)):
-            path = self.root / ("external-" + str(self.cli.counter) + "." + suffix)
-            path.write_bytes(raw)
-            self.cli.logs.append((path, set()))
+        started, stdout, stderr = time.monotonic(), b"", b""
+        self.last_command = {"category": category if category in COMMANDS else "external", "state": "none", "exit_code": None}
+        try:
+            result = subprocess.run(arguments, input=payload, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    timeout=timeout, env=env or self.env, cwd=self.root)
+            stdout, stderr = result.stdout, result.stderr
+            self.last_command.update(state="completed", exit_code=result.returncode)
+        except subprocess.TimeoutExpired as error:
+            stdout, stderr = error.stdout or b"", error.stderr or b""
+            self.last_command["state"], self.reason = "timeout", "external-timeout"
+            raise
+        except OSError:
+            self.last_command["state"], self.reason = "launch-error", "external-launch"
+            raise
+        finally:
+            self.last_command["elapsed_ms"] = round((time.monotonic() - started) * 1000)
+            for suffix, raw in (("stdout", stdout), ("stderr", stderr)):
+                path = self.root / ("external-" + str(self.cli.counter) + "." + suffix)
+                path.write_bytes(raw)
+                self.cli.logs.append((path, set()))
         if result.returncode != expected:
-            match = re.fullmatch(rb"SSH native driver failed \[([a-z0-9-]+)\]\n", result.stderr)
-            self.reason = "native-" + match[1].decode() if match and match[1] in (b"control-ready-timeout", b"window-timeout", b"control-ambiguous", b"a11y-query") else "external-command"
+            self.reason = "native-" + driver_failure(stderr) if category in {"native-input", "native-observe", "native-inspect", "picker-absence"} else "external-command"
+            self.last_command["native"] = driver_context(stderr)
         require(result.returncode == expected)
         return result.stdout
 
@@ -267,7 +460,8 @@ class Acceptance:
         if observation_deadline is not None:
             request["observation_deadline"] = observation_deadline
         return json.loads(self.command([sys.executable, str(ROOT / "scripts/ssh_native_x11.py")],
-                                      payload=json.dumps(request).encode(), timeout=timeout))
+                                      payload=json.dumps(request).encode(), timeout=timeout,
+                                      category="native-observe" if observe else "native-inspect" if inspect else "native-input"))
 
     def click(self, name):
         self.operation = name
@@ -380,48 +574,60 @@ class Acceptance:
         self.generated_public = base64.b64decode(generated.split()[1], validate=True)
         (self.root / "generated.pub").write_text(generated)
         self.stage = "import"
+        self.step = "key-fixture"
         keyfile = self.root / "known-import-key"
         self.command(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "owned-key-fixture", "-f", str(keyfile)])
         self.import_seed, self.import_public = imported_seed(keyfile.read_bytes())
         self.secret_bytes.append(self.import_seed)
         self.cli.values.extend((base64.b64encode(self.import_seed).decode(), self.import_seed.hex(),
                                 b"".join(keyfile.read_bytes().splitlines()[1:-1]).decode()))
+        self.step = "import-title"
         self.fill("title", "Owned imported SSH")
+        self.step = "picker-open"
         self.click("import-file")
-        # GTK's location entry may contain the current folder after Ctrl+L.
-        # Replace it explicitly, then activate the normal Open button once.
-        self.native([{"key": "Control_L+l"}, {"key": "Control_L+a"}, {"text": str(keyfile)}], title="选择未加密 OpenSSH Ed25519 私钥")
-        picker = self.native(observe="picker", title="选择未加密 OpenSSH Ed25519 私钥", expected_path=keyfile)
-        self.cli.write(self.root / "picker-observation.json", picker)
-        require(picker["path_match"] == 1)
-        self.native([{"key": "Return"}], title="选择未加密 OpenSSH Ed25519 私钥")
-        deadline = time.monotonic() + 10
-        while True:
-            picker = self.native(observe="picker", title="选择未加密 OpenSSH Ed25519 私钥", expected_path=keyfile,
-                                 observation_deadline=deadline)
-            self.cli.write(self.root / "picker-observation-after-location.json", picker)
-            if not picker["present"] or picker["selected_name_match"]:
-                break
-            require(time.monotonic() < deadline)
-            time.sleep(0.05)
-        if picker["present"]:
-            self.native([{"click_label": "Open"}], title="选择未加密 OpenSSH Ed25519 私钥")
-        request = {"title": "选择未加密 OpenSSH Ed25519 私钥", "executable": self.host, "actions": [], "wait_absent": True}
-        require(json.loads(self.command([sys.executable, str(ROOT / "scripts/ssh_native_x11.py")],
-                                       payload=json.dumps(request).encode()))["absent"] is True)
-        self.click("import-confirm")
-        self.wait("imported")
+        self.complete_import_selection(keyfile)
+        self.step = "import-public-copy"
         self.click("copy-key")
         imported = self.clipboard()
         require(base64.b64decode(imported.split()[1], validate=True) == self.import_public)
         (self.root / "imported.pub").write_text(imported)
+        self.stage, self.step = "agent-start", "agent-start"
         self.click("start")
+        self.step = "agent-ready"
         self.wait("copy-endpoint")
+        self.step = "agent-endpoint-copy"
         self.click("copy-endpoint")
+        self.step = "agent-endpoint-read"
         self.endpoint = self.clipboard()
-        require(stat_socket(self.endpoint))
-        self.relay = AgentRelay(self.root / "observed-agent.sock", self.endpoint, self.root)
+        self.step = "agent-endpoint-verify"
+        require(self.endpoint == str(self.expected_endpoint) and stat_socket(self.endpoint))
+        self.step = "relay-start"
+        self.relay = AgentRelay(self.runtime / "observed-agent.sock", self.endpoint, self.root)
+        self.step = "none"
         self.mark("native_generate_import_public_copy_and_explicit_start")
+
+    def complete_import_selection(self, keyfile):
+        # GTK's location entry may contain the current folder after Ctrl+L.
+        # Verify its exact replacement before one Return. After submission,
+        # observe only the owned top-level X11 window closing, not its dying
+        # AT-SPI children. Normal confirm readiness and exact seed checks follow.
+        self.step = "picker-location-input"
+        self.native([{"key": "Control_L+l"}, {"key": "Control_L+a"}, {"text": str(keyfile)}], title="选择未加密 OpenSSH Ed25519 私钥")
+        self.step = "picker-location-verify"
+        picker = self.native(observe="picker", title="选择未加密 OpenSSH Ed25519 私钥", expected_path=keyfile)
+        self.cli.write(self.root / "picker-observation.json", picker)
+        require(picker["path_match"] == 1)
+        self.step = "picker-location-submit"
+        self.native([{"key": "Return"}], title="选择未加密 OpenSSH Ed25519 私钥")
+        deadline = time.monotonic() + 10
+        self.step = "picker-close-observe"
+        closed = self.native(observe="picker-closed", title="选择未加密 OpenSSH Ed25519 私钥", observation_deadline=deadline,
+                             timeout=max(0.001, deadline - time.monotonic()))
+        require(time.monotonic() < deadline and closed.get("absent") is True)
+        self.step = "import-confirm"
+        self.click("import-confirm")
+        self.step = "import-result"
+        self.wait("imported")
 
     def core_protocol(self):
         self.stage = "identities"
@@ -563,11 +769,15 @@ class Acceptance:
         self.wait("copy-endpoint")
         self.mark("original_human_deadline_expires_without_approval_or_signature")
         self.stage = "slow-frame"
-        with self.connect() as connection:
-            deadline = time.monotonic() + 38
-            connection.sendall(b"\x00")
-            evidence = observe_absence_until_eof(connection, self.approval_present, deadline)
-            self.cli.write(self.root / "slow-frame-absence.json", evidence)
+        deadline = time.monotonic() + 38
+        observer = WarmApprovalObserver(self, min(1.0, deadline - time.monotonic()))
+        try:
+            with self.connect() as connection:
+                connection.sendall(b"\x00")
+                evidence = observe_absence_until_eof(connection, observer.query, deadline)
+                self.cli.write(self.root / "slow-frame-absence.json", evidence)
+        finally:
+            observer.close()
         self.mark("partial_slow_frame_expires_without_native_prompt")
         self.stage = "lock"
         pending = self.request(self.import_public, os.urandom(50))
@@ -693,6 +903,8 @@ class Acceptance:
         self.log.close()
         for log in self.worker_logs:
             log.close()
+        remove_owned_runtime(self.runtime, self.runtime_identity)
+        self.runtime_cleaned = True
 
 
 def stat_socket(path):
@@ -730,11 +942,13 @@ def main(argv=None):
                     acceptance.error_line = trace.tb_lineno
                 trace = trace.tb_next
             previous_reason = acceptance.reason
+            previous_command = dict(acceptance.last_command) if type(acceptance.last_command) is dict else {}
             try:
                 acceptance.diagnose()
             except Exception:
                 pass
             acceptance.reason = previous_reason
+            acceptance.last_command = previous_command
     finally:
         if acceptance:
             try:
@@ -748,11 +962,14 @@ def main(argv=None):
                 success, previous_stage = False, "privacy"
             acceptance.stage = "complete" if success else previous_stage
             stage = acceptance.stage if acceptance.stage in STAGES else "prerequisites"
+            diagnostic = public_diagnostic(acceptance)
             acceptance.cli.write(acceptance.root / "ssh-result.json", {"success": success, "stage": stage,
                 "operation": acceptance.operation if acceptance.operation in LABELS else "none", "reason": acceptance.reason,
                 "error_class": acceptance.error_class, "source_line": acceptance.error_line,
-                "controls": acceptance.control_diagnostic, "checks": acceptance.checks})
+                "controls": acceptance.control_diagnostic, "diagnostic": diagnostic, "checks": acceptance.checks})
             print(("PASS" if success else "FAIL") + ": SSH acceptance at " + stage)
+            if not success:
+                print("SSH_DIAGNOSTIC " + json.dumps(diagnostic, sort_keys=True))
             print("Private SSH evidence: " + str(acceptance.root))
         else:
             print("FAIL: SSH acceptance at prerequisites")
