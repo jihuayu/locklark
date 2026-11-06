@@ -10,9 +10,12 @@ import (
 	"os"
 
 	"github.com/jihuayu/locklark/internal/preview"
+	"github.com/jihuayu/locklark/internal/teambootstrapcli"
 )
 
 const usage = `Locklark · personal CLI, manual GitHub query and synthetic gateway preview
+
+  team create|export-initial|fetch-initial|status|reconcile-protection --profile ABS_PATH
 
   plugin init --file NEW_DB
   plugin inspect --package FILE --id ID --publisher HEX_KEY
@@ -82,6 +85,8 @@ func run(args []string, out, errOut io.Writer) error {
 	}
 	command := args[0]
 	switch command {
+	case "team":
+		return runTeam(args[1:], out)
 	case "personal":
 		return runPersonal(args[1:], out)
 	case "plugin":
@@ -222,6 +227,6 @@ func main() {
 			os.Exit(child.code)
 		}
 		fmt.Fprintln(os.Stderr, "locklark:", err)
-		os.Exit(1)
+		os.Exit(teambootstrapcli.ExitCode(err))
 	}
 }

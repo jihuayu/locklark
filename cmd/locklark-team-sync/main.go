@@ -25,6 +25,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/jihuayu/locklark/internal/directory"
+	"github.com/jihuayu/locklark/internal/teambootstrapcli"
 	"github.com/jihuayu/locklark/internal/teamsync"
 	"golang.org/x/term"
 )
@@ -45,6 +46,10 @@ type serverConfig struct {
 
 func main() {
 	if e := run(os.Args[1:], os.Stdout); e != nil {
+		if len(os.Args) > 1 && teambootstrapcli.IsServiceCommand(os.Args[1]) {
+			fmt.Fprintln(os.Stderr, e)
+			os.Exit(teambootstrapcli.ExitCode(e))
+		}
 		fmt.Fprintln(os.Stderr, errCommand)
 		os.Exit(1)
 	}
@@ -227,8 +232,11 @@ func readSequencerTerminal(console *os.File, output io.Writer) (key ed25519.Priv
 }
 func run(args []string, out io.Writer) error {
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "help") {
-		_, e := io.WriteString(out, usage)
+		_, e := io.WriteString(out, usage+teambootstrapcli.ServiceUsage)
 		return e
+	}
+	if len(args) > 0 && teambootstrapcli.IsServiceCommand(args[0]) {
+		return runBootstrap(args, out)
 	}
 	if len(args) < 1 || args[0] != "serve" && args[0] != "init-anchor" {
 		return errCommand
