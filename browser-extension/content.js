@@ -7,8 +7,33 @@
     root,
     target,
     request = null,
-    focusGeneration = 0;
+    focusGeneration = 0,
+    siteSettings = {
+      showInlineMenu: true,
+      showInlineGenerator: true,
+      disabledInlineMenuOrigins: [],
+    };
   const send = (message) => api.runtime.sendMessage(message);
+  const settingsReady = (async () => {
+    try {
+      const value = await api.storage?.local?.get?.([
+        "showInlineMenu",
+        "showInlineGenerator",
+        "disabledInlineMenuOrigins",
+      ]);
+      if (value && typeof value === "object") {
+        siteSettings.showInlineMenu = value.showInlineMenu !== false;
+        siteSettings.showInlineGenerator = value.showInlineGenerator !== false;
+        siteSettings.disabledInlineMenuOrigins = Array.isArray(
+          value.disabledInlineMenuOrigins,
+        )
+          ? value.disabledInlineMenuOrigins.filter(
+              (origin) => typeof origin === "string",
+            )
+          : [];
+      }
+    } catch {}
+  })();
   function dismiss() {
     host?.remove();
     host = null;
@@ -98,6 +123,17 @@
   }
   async function showLogins(input) {
     if (request || !loginInput(input)) return;
+    if (
+      input.closest?.("[data-locklark-ignore]") ||
+      input.getAttribute?.("data-locklark-ignore") !== null
+    )
+      return;
+    await settingsReady;
+    if (
+      siteSettings.showInlineMenu === false ||
+      siteSettings.disabledInlineMenuOrigins.includes(location.origin)
+    )
+      return;
     target = input;
     const generation = ++focusGeneration;
     try {
@@ -176,6 +212,75 @@
     if (request) void send({ type: "passkey-cancel", id: request.id });
     request = null;
   });
+  function fillFields(fields) {
+    if (!fields || typeof fields !== "object" || Array.isArray(fields))
+      return 0;
+    const inputs = [...document.querySelectorAll("input,textarea,select")];
+    let filled = 0;
+    for (const [key, value] of Object.entries(fields).slice(0, 100)) {
+      if (typeof value !== "string" || value.length > 16384) continue;
+      const normalized = key.toLowerCase().replace(/[_-]/g, "");
+      const input = inputs.find((element) => {
+        if (element.disabled || element.readOnly) return false;
+        const autocomplete = (
+          element.getAttribute?.("autocomplete") ||
+          element.autocomplete ||
+          ""
+        )
+          .toLowerCase()
+          .replace(/[_-]/g, "");
+        return (
+          autocomplete === normalized ||
+          String(element.name || "")
+            .toLowerCase()
+            .replace(/[_-]/g, "") === normalized ||
+          String(element.id || "")
+            .toLowerCase()
+            .replace(/[_-]/g, "") === normalized
+        );
+      });
+      if (!input) continue;
+      const prototype =
+        input instanceof HTMLTextAreaElement
+          ? HTMLTextAreaElement.prototype
+          : input instanceof HTMLSelectElement
+            ? HTMLSelectElement.prototype
+            : HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+      if (!setter) continue;
+      setter.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      filled++;
+    }
+    return filled;
+  }
+  try {
+    api.runtime.onMessage.addListener((message, sender, respond) => {
+      if (!sender || sender.id !== api.runtime.id) return false;
+      if (message?.type === "locklark:open-inline-menu") {
+        const active = document.activeElement;
+        const input =
+          loginInput(active) && !active.closest?.("[data-locklark-ignore]")
+            ? active
+            : document.querySelector(
+                'input[type="password"],input[autocomplete="username"],input[type="email"]',
+              );
+        if (input) void showLogins(input);
+        respond({ opened: !!input });
+        return true;
+      }
+      if (message?.type === "locklark:fill-fields") {
+        let filled = 0;
+        try {
+          filled = fillFields(message.fields);
+        } catch {}
+        respond({ filled });
+        return true;
+      }
+      return false;
+    });
+  } catch {}
   window.addEventListener("message", async (event) => {
     const m = event.data;
     if (

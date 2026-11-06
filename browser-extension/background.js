@@ -8,29 +8,47 @@ if (typeof importScripts === "function") importScripts("core.js");
     fillUnknown = false,
     pendingPasskey = null,
     passkeyUnknown = false,
-    autoLogin = false,
+    settings = core.normalizeSettings({}),
+    autoLogin = true,
     offerSavePasskeys = true,
     offerUsePasskeys = true,
     loginOverrides = {},
-    lastMatchAt = 0;
-  const settingsReady =
-    api.storage?.local
-      .get([
-        "autoLogin",
-        "loginOverrides",
-        "offerSavePasskeys",
-        "offerUsePasskeys",
-      ])
-      .then((value) => {
-        autoLogin = value.autoLogin !== false;
-        offerSavePasskeys = value.offerSavePasskeys !== false;
-        offerUsePasskeys = value.offerUsePasskeys !== false;
-        loginOverrides =
-          value.loginOverrides && typeof value.loginOverrides === "object"
-            ? value.loginOverrides
-            : {};
-      })
-      .catch(() => {}) || Promise.resolve();
+    lastMatchAt = 0,
+    vaultItems = [],
+    detailCache = new Map(),
+    pendingOpenAndFill = null,
+    openAndFillTimer = null;
+  function applySettings(raw) {
+    settings = core.normalizeSettings(raw);
+    autoLogin = settings.autoLogin;
+    offerSavePasskeys = settings.offerSavePasskeys;
+    offerUsePasskeys = settings.offerUsePasskeys;
+    loginOverrides = settings.loginOverrides;
+    return settings;
+  }
+  const settingsReady = (async () => {
+    try {
+      applySettings(await api.storage?.local?.get?.(null));
+    } catch {
+      // A failed preference read must fail closed for automatic submission.
+      autoLogin = false;
+    }
+  })();
+  // The options page writes storage directly (it is not a popup sender), so
+  // refresh the worker's in-memory copy when settings change there.
+  try {
+    api.storage?.onChanged?.addListener((changes, area) => {
+      if (area !== "local" || !changes || typeof changes !== "object") return;
+      const patch = {};
+      for (const [key, change] of Object.entries(changes))
+        if (change && typeof change === "object" && "newValue" in change)
+          patch[key] = change.newValue;
+      if (!Object.keys(patch).length) return;
+      applySettings({ ...settings, ...patch });
+      updateBadge();
+      rebuildContextMenus();
+    });
+  } catch {}
   const PASSKEY_UNKNOWN = "Passkey 创建结果未确认，请检查金库和网站后再试";
   const FILL_UNKNOWN = "登录填充结果未确认，请核实页面；不会自动重试";
   let port = null,
@@ -83,6 +101,167 @@ if (typeof importScripts === "function") importScripts("core.js");
       .map((b) => b.toString(16).padStart(2, "0"))
       .join("");
   }
+  function clearPendingOpenAndFill() {
+    pendingOpenAndFill = null;
+    if (openAndFillTimer) clearTimeout(openAndFillTimer);
+    openAndFillTimer = null;
+  }
+  function publicItem(item) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+    if (
+      !/^[a-f0-9]{32}$/.test(item.id || "") ||
+      !/^[a-f0-9]{64}$/.test(item.revision || "") ||
+      typeof item.title !== "string" ||
+      item.title.length > 1024
+    )
+      return null;
+    const category = core.normalizeCategory(item.category) || "login";
+    const urls = Array.isArray(item.urls)
+      ? item.urls
+          .slice(0, 20)
+          .filter((url) => typeof url === "string" && url.length <= 8192)
+      : [];
+    const tags = Array.isArray(item.tags)
+      ? item.tags
+          .slice(0, 50)
+          .filter((tag) => typeof tag === "string" && tag.length <= 128)
+      : [];
+    return {
+      id: item.id,
+      revision: item.revision,
+      category,
+      title: item.title,
+      subtitle:
+        typeof item.subtitle === "string"
+          ? item.subtitle.slice(0, 1024)
+          : typeof item.username === "string"
+            ? item.username.slice(0, 1024)
+            : "",
+      urls,
+      tags,
+      favorite: item.favorite === true,
+      state: ["active", "archived", "trashed"].includes(item.state)
+        ? item.state
+        : "active",
+      has_otp: item.has_otp === true,
+      updated_at:
+        typeof item.updated_at === "string"
+          ? item.updated_at.slice(0, 64)
+          : "",
+    };
+  }
+  function boundedString(value, length = 16384) {
+    return typeof value === "string" ? value.slice(0, length) : "";
+  }
+  function publicDetail(item) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+    const meta = publicItem(item);
+    if (!meta) return null;
+    const fields = core.flattenItemFields(item);
+    const sections = Array.isArray(item.sections)
+      ? item.sections.slice(0, 20).map((section) => ({
+          title: boundedString(section?.title, 256),
+          fields: core
+            .flattenItemFields({ fields: section?.fields || [] })
+            .slice(0, 100),
+        }))
+      : [];
+    return {
+      ...meta,
+      notes: boundedString(item.notes, 65536),
+      username: boundedString(item.username),
+      password: boundedString(item.password),
+      otp_secret: boundedString(item.otp_secret),
+      otp_code: /^(?:[0-9]{6}|[0-9]{8})$/.test(item.otp_code || "")
+        ? item.otp_code
+        : "",
+      otp_remaining_ms:
+        Number.isSafeInteger(item.otp_remaining_ms) &&
+        item.otp_remaining_ms >= 0
+          ? Math.min(30000, item.otp_remaining_ms)
+          : 0,
+      fields,
+      sections,
+    };
+  }
+  function currentSiteFlags() {
+    if (!context?.origin)
+      return { disabledInline: false, neverSave: false };
+    return {
+      disabledInline: settings.disabledInlineMenuOrigins.includes(
+        context.origin,
+      ),
+      neverSave: settings.neverSaveOrigins.includes(context.origin),
+    };
+  }
+  function snapshot() {
+    const site = currentSiteFlags();
+    return {
+      connected: !!capability,
+      locked: !capability,
+      autoLogin,
+      quickFill,
+      loginOverrides,
+      offerSavePasskeys,
+      offerUsePasskeys,
+      showInlineMenu: settings.showInlineMenu,
+      showToolbarBadgeCount: settings.showToolbarBadgeCount,
+      openAndFillAutoSubmit: settings.openAndFillAutoSubmit,
+      disabledInlineMenu: site.disabledInline,
+      neverSave: site.neverSave,
+      clipboardClearSeconds: settings.clipboardClearSeconds,
+      theme: settings.theme,
+      status:
+        status +
+        (otpUnknown && !status.includes(OTP_UNKNOWN)
+          ? " · " + OTP_UNKNOWN
+          : "") +
+        (fillUnknown && !status.includes(FILL_UNKNOWN)
+          ? " · " + FILL_UNKNOWN
+          : "") +
+        (passkeyUnknown && !status.includes(PASSKEY_UNKNOWN)
+          ? " · " + PASSKEY_UNKNOWN
+          : ""),
+      candidates: rows.map((r) => ({
+        id: r.id,
+        title: r.title,
+        revision: r.revision,
+      })),
+      vaultItems: vaultItems.map((item) => ({ ...item })),
+      pending: !!pending || !!pendingOTP || !!pendingPasskey,
+      otpPending: !!pendingOTP,
+      saveBlocked: unconfirmedSave,
+      origin: context?.origin || "",
+    };
+  }
+  function setBadge(text, color, title) {
+    try {
+      api.action?.setBadgeText?.({ text });
+      if (color) api.action?.setBadgeBackgroundColor?.({ color });
+      if (title) api.action?.setTitle?.({ title });
+    } catch {}
+  }
+  function updateBadge() {
+    if (!api.action) return;
+    if (unconfirmedSave || otpUnknown || fillUnknown || passkeyUnknown) {
+      setBadge("!", "#dc2626", "Locklark — 存在未确认操作");
+      return;
+    }
+    if (!capability) {
+      setBadge("L", "#d97706", "Locklark — 已锁定");
+      return;
+    }
+    if (
+      settings.showToolbarBadgeCount !== false &&
+      rows.length > 0 &&
+      context?.origin
+    ) {
+      const count = rows.length > 99 ? "99+" : String(rows.length);
+      setBadge(count, "#0f766e", `Locklark — ${rows.length} 个匹配登录`);
+      return;
+    }
+    setBadge("", "#0f766e", "Locklark — 已解锁");
+  }
   function clear() {
     if (pending?.injectionStarted) fillUnknown = true;
     if (pendingPasskey?.create) passkeyUnknown = true;
@@ -95,6 +274,9 @@ if (typeof importScripts === "function") importScripts("core.js");
     rows = [];
     pending = null;
     pendingOTP = null;
+    vaultItems = [];
+    detailCache.clear();
+    clearPendingOpenAndFill();
     advanceEpoch();
     for (const [requestId, c] of calls) {
       retired.add(requestId);
@@ -102,6 +284,8 @@ if (typeof importScripts === "function") importScripts("core.js");
       c.reject(Error("refused"));
     }
     calls.clear();
+    updateBadge();
+    rebuildContextMenus();
   }
   function disconnect() {
     const p = port;
@@ -117,6 +301,192 @@ if (typeof importScripts === "function") importScripts("core.js");
         ? message + " · " + OTP_UNKNOWN
         : message;
   }
+  function menuCreate(options) {
+    try {
+      api.contextMenus?.create?.(options);
+    } catch {}
+  }
+  function menuRemoveAll() {
+    try {
+      api.contextMenus?.removeAll?.();
+    } catch {}
+  }
+  function menuItems(category) {
+    return vaultItems
+      .filter((item) => item.category === category)
+      .slice(0, 10);
+  }
+  function rebuildContextMenus() {
+    if (!api.contextMenus || typeof api.contextMenus.create !== "function")
+      return;
+    menuRemoveAll();
+    menuCreate({
+      id: "locklark-root",
+      title: "Locklark",
+      contexts: ["page", "editable"],
+    });
+    if (!capability) {
+      menuCreate({
+        id: "locklark-connect",
+        parentId: "locklark-root",
+        title: "解锁 Locklark…",
+        contexts: ["page", "editable"],
+      });
+      menuCreate({
+        id: "locklark-options",
+        parentId: "locklark-root",
+        title: "扩展设置…",
+        contexts: ["page", "editable"],
+      });
+      return;
+    }
+    for (const [id, title, category] of [
+      ["fill-login", "填充登录", "login"],
+      ["fill-identity", "填充身份信息", "identity"],
+      ["fill-card", "填充银行卡", "card"],
+    ]) {
+      menuCreate({
+        id,
+        parentId: "locklark-root",
+        title,
+        contexts: ["page", "editable"],
+      });
+      const matches =
+        category === "login"
+          ? rows.slice(0, 10).map((row) => ({
+              id: row.id,
+              revision: row.revision,
+              title: row.title,
+            }))
+          : menuItems(category);
+      if (!matches.length)
+        menuCreate({
+          id: id + "-empty",
+          parentId: id,
+          title:
+            category === "login"
+              ? "（当前网站无匹配登录）"
+              : "（暂无可用条目）",
+          enabled: false,
+          contexts: ["page", "editable"],
+        });
+      for (const item of matches)
+        menuCreate({
+          id: `${id}:${item.id}:${item.revision}`,
+          parentId: id,
+          title: (item.title || "（无标题）").slice(0, 64),
+          contexts: ["page", "editable"],
+        });
+    }
+    menuCreate({
+      id: "generate-password",
+      parentId: "locklark-root",
+      title: "生成并填充新密码",
+      contexts: ["editable"],
+    });
+    menuCreate({
+      id: "save-login",
+      parentId: "locklark-root",
+      title: "保存当前页面登录",
+      contexts: ["page", "editable"],
+    });
+    menuCreate({
+      id: "context-separator-1",
+      parentId: "locklark-root",
+      type: "separator",
+      contexts: ["page", "editable"],
+    });
+    menuCreate({
+      id: "locklark-toggle-site-inline",
+      parentId: "locklark-root",
+      title: "在此网站禁用内联菜单",
+      type: "checkbox",
+      checked: currentSiteFlags().disabledInline,
+      contexts: ["page", "editable"],
+    });
+    menuCreate({
+      id: "lock-vault",
+      parentId: "locklark-root",
+      title: "立即锁定 Locklark",
+      contexts: ["all"],
+    });
+    menuCreate({
+      id: "locklark-options",
+      parentId: "locklark-root",
+      title: "扩展设置…",
+      contexts: ["all"],
+    });
+  }
+  function openOptions() {
+    try {
+      const result = api.runtime.openOptionsPage?.();
+      if (result && typeof result.catch === "function") result.catch(() => {});
+    } catch {}
+  }
+  function contextMenuClicked(info) {
+    const id = typeof info?.menuItemId === "string" ? info.menuItemId : "";
+    if (id === "locklark-connect") {
+      void connect();
+      return;
+    }
+    if (id === "locklark-options") {
+      openOptions();
+      return;
+    }
+    if (id === "lock-vault") {
+      void lockVault();
+      return;
+    }
+    if (id === "save-login") {
+      void save();
+      return;
+    }
+    if (id === "generate-password") {
+      void generateAndFill();
+      return;
+    }
+    if (id === "locklark-toggle-site-inline") {
+      void toggleSiteInline();
+      return;
+    }
+    const [kind, itemId, revision] = id.split(":");
+    if (!/^[a-f0-9]{32}$/.test(itemId || "")) return;
+    if (!/^[a-f0-9]{64}$/.test(revision || "")) return;
+    if (kind === "fill-login") {
+      const row = rows.find(
+        (candidate) =>
+          candidate.id === itemId && candidate.revision === revision,
+      );
+      if (row) void fill(itemId, revision);
+      return;
+    }
+    if (kind === "fill-identity") {
+      void fillItemCategory(itemId, revision, "identity");
+      return;
+    }
+    if (kind === "fill-card") {
+      void fillItemCategory(itemId, revision, "card");
+    }
+  }
+  function commandInvoked(command) {
+    if (command === "autofill" || command === "autofill-current-tab") {
+      void autofillActiveTab();
+      return;
+    }
+    if (command === "lock" || command === "lock-vault") lockVault();
+  }
+  try {
+    api.commands?.onCommand?.addListener(commandInvoked);
+  } catch {}
+  try {
+    api.contextMenus?.onClicked?.addListener(contextMenuClicked);
+  } catch {}
+  try {
+    api.runtime.onInstalled?.addListener(() => {
+      rebuildContextMenus();
+      updateBadge();
+    });
+  } catch {}
   function startCall(type, requestId, timeout) {
     let resolve, reject;
     const promise = new Promise((yes, no) => {
@@ -146,6 +516,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     } finally {
       if (Object.hasOwn(fields, "username")) fields.username = "";
       if (Object.hasOwn(fields, "password")) fields.password = "";
+      if (Object.hasOwn(fields, "item_json")) fields.item_json = "";
     }
     return promise;
   }
@@ -279,6 +650,13 @@ if (typeof importScripts === "function") importScripts("core.js");
         "cancel-otp": "cancelled",
         "passkey-create": "passkey-result",
         "passkey-get": "passkey-result",
+        "vault-search": "vault-items",
+        "vault-list": "vault-items",
+        "item-get": "item-detail",
+        "item-save": "saved",
+        "item-state": "saved",
+        generate: "generated",
+        "fill-item": "fill-fields",
       }[call.type];
       if (
         message.type === "unknown" &&
@@ -309,6 +687,8 @@ if (typeof importScripts === "function") importScripts("core.js");
       capability = response.capability;
       quickFill = response.quick_fill === true;
       status = "已连接，请读取当前网站候选";
+      updateBadge();
+      rebuildContextMenus();
     } catch {
       if (port === p && generation === epoch) {
         disconnect();
@@ -321,6 +701,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       throw Error("refused");
     rows = [];
     context = null;
+    updateBadge();
     const generation = epoch,
       c = await capture();
     await current(c);
@@ -351,6 +732,8 @@ if (typeof importScripts === "function") importScripts("core.js");
     context = c;
     rows = next;
     status = `${rows.length} 个当前网站登录`;
+    updateBadge();
+    rebuildContextMenus();
   }
   async function fill(itemId, revision) {
     const row = rows.find((r) => r.id === itemId && r.revision === revision),
@@ -430,6 +813,8 @@ if (typeof importScripts === "function") importScripts("core.js");
         rows = [];
         context = null;
       }
+      updateBadge();
+      rebuildContextMenus();
     }
   }
   function clearCapture(results) {
@@ -611,6 +996,8 @@ if (typeof importScripts === "function") importScripts("core.js");
         rows = [];
         context = null;
       }
+      updateBadge();
+      rebuildContextMenus();
     }
   }
   function validOTPProbe(value, c) {
@@ -665,6 +1052,8 @@ if (typeof importScripts === "function") importScripts("core.js");
     status = cancelStatus;
     const ownsCancellationView = () =>
       !pending && !pendingOTP && !context && status === cancellation.status;
+    updateBadge();
+    rebuildContextMenus();
     if (!intent.sent || !capability) return;
     // Host cancellation cannot retract an injection already submitted to the
     // browser, even if its executeScript promise has not settled yet.
@@ -830,6 +1219,8 @@ if (typeof importScripts === "function") importScripts("core.js");
         rows = [];
         context = null;
       }
+      updateBadge();
+      rebuildContextMenus();
     }
   }
   function cancelContext() {
@@ -840,6 +1231,8 @@ if (typeof importScripts === "function") importScripts("core.js");
       rows = [];
       context = null;
       if (capability) void request("cancel", { capability }).catch(() => {});
+      updateBadge();
+      rebuildContextMenus();
       return;
     }
     if (pending?.injectionStarted) fillUnknown = true;
@@ -847,7 +1240,11 @@ if (typeof importScripts === "function") importScripts("core.js");
       cancelOTP();
       return;
     }
-    if (!context && !pending) return;
+    if (!context && !pending) {
+      updateBadge();
+      rebuildContextMenus();
+      return;
+    }
     const intent = pending;
     context = null;
     rows = [];
@@ -863,8 +1260,14 @@ if (typeof importScripts === "function") importScripts("core.js");
           ? { capability, request_id: intent.requestId }
           : { capability },
       ).catch(() => {});
+    updateBadge();
+    rebuildContextMenus();
   }
-  api.tabs.onActivated.addListener(cancelContext);
+  api.tabs.onActivated.addListener(() => {
+    cancelContext();
+    updateBadge();
+    rebuildContextMenus();
+  });
   api.tabs.onUpdated.addListener((tabId, change) => {
     if (
       (context?.tabId === tabId ||
@@ -874,8 +1277,14 @@ if (typeof importScripts === "function") importScripts("core.js");
       ("url" in change || change.status === "loading")
     )
       cancelContext();
+    if ("url" in change || change.status === "complete") {
+      updateBadge();
+      rebuildContextMenus();
+    }
+    void processOpenAndFill(tabId, change);
   });
   api.windows.onFocusChanged.addListener((windowId) => {
+    updateBadge();
     if (windowId === api.windows.WINDOW_ID_NONE) return;
     const bound =
       pendingPasskey?.windowId ??
@@ -888,6 +1297,483 @@ if (typeof importScripts === "function") importScripts("core.js");
     )
       cancelContext();
   });
+  function lockVault() {
+    const p = port,
+      cap = capability;
+    if (p && cap) {
+      try {
+        p.postMessage({ v: 1, id: id(), type: "lock", capability: cap });
+      } catch {}
+    }
+    disconnectWithStatus("已锁定 Locklark");
+    updateBadge();
+    rebuildContextMenus();
+  }
+  async function setSiteSettings(disabledInline, neverSave) {
+    if (!context?.origin) throw Error("refused");
+    const origin = context.origin;
+    const next = core.normalizeSettings({
+      ...settings,
+      disabledInlineMenuOrigins:
+        typeof disabledInline === "boolean"
+          ? disabledInline
+            ? [...settings.disabledInlineMenuOrigins, origin]
+            : settings.disabledInlineMenuOrigins.filter(
+                (value) => value !== origin,
+              )
+          : settings.disabledInlineMenuOrigins,
+      neverSaveOrigins:
+        typeof neverSave === "boolean"
+          ? neverSave
+            ? [...settings.neverSaveOrigins, origin]
+            : settings.neverSaveOrigins.filter((value) => value !== origin)
+          : settings.neverSaveOrigins,
+    });
+    await api.storage.local.set({
+      disabledInlineMenuOrigins: next.disabledInlineMenuOrigins,
+      neverSaveOrigins: next.neverSaveOrigins,
+    });
+    settings = next;
+    status = "网站设置已更新";
+    updateBadge();
+    rebuildContextMenus();
+  }
+  async function toggleSiteInline() {
+    if (!context?.origin) {
+      status = "请先读取当前网站候选";
+      return;
+    }
+    try {
+      await setSiteSettings(!currentSiteFlags().disabledInline, undefined);
+    } catch {
+      status = "网站设置未保存";
+    }
+  }
+  async function autofillActiveTab() {
+    if (!capability) {
+      status = "请先解锁 Locklark";
+      updateBadge();
+      return;
+    }
+    try {
+      await match();
+      if (rows.length === 0) {
+        status = "当前网站无匹配登录";
+      } else if (rows.length === 1) {
+        await fill(rows[0].id, rows[0].revision);
+      } else {
+        const tabs = await api.tabs.query({
+          active: true,
+          currentWindow: true,
+        });
+        if (tabs.length === 1 && Number.isSafeInteger(tabs[0].id))
+          await api.tabs
+            .sendMessage?.(tabs[0].id, {
+              type: "locklark:open-inline-menu",
+            })
+            .catch(() => {});
+        status = `发现 ${rows.length} 个匹配登录，请在页面中选择`;
+      }
+    } catch {
+      status = "自动填充未完成；请确认原生连接和当前 HTTPS 页面";
+    }
+    updateBadge();
+    rebuildContextMenus();
+  }
+  async function generatePasswordValue(rawOptions) {
+    const options = core.normalizeGeneratorDefaults(rawOptions);
+    if (capability) {
+      try {
+        const response = await request(
+          "generate",
+          { capability, options: JSON.stringify(options) },
+          12000,
+        );
+        return response.password;
+      } catch {}
+    }
+    return core.generatePassword(options);
+  }
+  async function generateAndFill() {
+    if (!capability) {
+      status = "请先解锁 Locklark";
+      updateBadge();
+      return;
+    }
+    let password = "";
+    try {
+      const options = settings.generatorDefaults;
+      try {
+        const response = await request(
+          "generate",
+          { capability, options: JSON.stringify(options) },
+          12000,
+        );
+        password = response.password;
+      } catch {
+        password = core.generatePassword(options);
+      }
+      const c = await capture();
+      await current(c);
+      const results = await api.scripting.executeScript({
+        target: { tabId: c.tabId, documentIds: [c.documentId] },
+        func: core.fillGeneratedPasswordDocument,
+        args: [c.origin, password, Date.now() + 1500],
+      });
+      if (
+        results.length !== 1 ||
+        results[0].frameId !== 0 ||
+        results[0].documentId !== c.documentId ||
+        results[0].result !== true
+      )
+        throw Error("refused");
+      status = "已生成并填充新密码";
+    } catch {
+      status = "生成密码未完成；请确认当前密码输入框";
+    } finally {
+      password = "";
+      updateBadge();
+    }
+  }
+  async function fillItemCategory(itemId, revision, category) {
+    if (
+      !capability ||
+      !vaultItems.some(
+        (item) => item.id === itemId && item.revision === revision,
+      )
+    ) {
+      status = "条目已变化，请刷新后重试";
+      return;
+    }
+    try {
+      const c = await capture();
+      await current(c);
+      const response = await request(
+        "fill-item",
+        {
+          ...fields(c),
+          item_id: itemId,
+          revision,
+          category,
+        },
+        35000,
+      );
+      await current(c);
+      if (api.tabs?.sendMessage)
+        await api.tabs
+          .sendMessage(c.tabId, {
+            type: "locklark:fill-fields",
+            fields: response.fields,
+          })
+          .catch(() => {});
+      status = "已请求填充所选条目；请核实网站结果";
+    } catch {
+      status = "此原生宿主暂不支持填充该条目类别";
+    }
+    updateBadge();
+  }
+  function candidateItems() {
+    if (!context?.origin) return [];
+    return rows
+      .map((row) =>
+        publicItem({
+          ...row,
+          category: "login",
+          urls: [context.origin],
+          state: "active",
+        }),
+      )
+      .filter(Boolean);
+  }
+  async function vaultSearch(rawQuery, rawCategory) {
+    if (!capability) throw Error("refused");
+    const category = core.validCategory(rawCategory) ? rawCategory : "all";
+    const query =
+      typeof rawQuery === "string" ? rawQuery.slice(0, 500) : "";
+    const canonical = core.normalizeCategory(category);
+    try {
+      const response = await request(
+        "vault-search",
+        {
+          capability,
+          query,
+          category: canonical,
+          favorites_only: category === "favorites",
+        },
+        12000,
+      );
+      const items = [];
+      for (const item of response.items || []) {
+        const publicEntry = publicItem(item);
+        if (publicEntry) items.push(publicEntry);
+      }
+      vaultItems = items.slice(0, 500);
+      status = `金库中有 ${vaultItems.length} 个条目`;
+      return { items: vaultItems, source: "native", fallback: false };
+    } catch {
+      vaultItems = candidateItems();
+      status = vaultItems.length
+        ? "当前原生宿主仅提供当前网站候选"
+        : "当前原生宿主不支持浏览完整金库";
+      return {
+        items: vaultItems,
+        source: "candidates",
+        fallback: true,
+      };
+    }
+  }
+  async function getVaultItem(itemId, revision) {
+    if (
+      !capability ||
+      !/^[a-f0-9]{32}$/.test(itemId || "") ||
+      !/^[a-f0-9]{64}$/.test(revision || "")
+    )
+      throw Error("refused");
+    const key = itemId + ":" + revision;
+    try {
+      const response = await request(
+        "item-get",
+        { capability, item_id: itemId, revision },
+        12000,
+      );
+      const detail = publicDetail(response.item);
+      if (!detail) throw Error("refused");
+      detailCache.set(key, detail);
+      return detail;
+    } catch {
+      const row = rows.find(
+        (candidate) =>
+          candidate.id === itemId && candidate.revision === revision,
+      );
+      if (!row) throw Error("refused");
+      const detail = publicDetail({
+        ...row,
+        category: "login",
+        urls: context?.origin ? [context.origin] : [],
+        state: "active",
+        fields: [],
+      });
+      if (!detail) throw Error("refused");
+      detail.readOnly = true;
+      detail.unavailable = "当前原生宿主不提供条目详情";
+      detailCache.set(key, detail);
+      return detail;
+    }
+  }
+  async function saveVaultItem(message) {
+    if (!capability || !core.validItemForSave(message.item))
+      throw Error("refused");
+    const mode = message.mode === "edit" ? "edit" : "create";
+    if (
+      mode === "edit" &&
+      (!/^[a-f0-9]{32}$/.test(message.id || "") ||
+        !/^[a-f0-9]{64}$/.test(message.revision || ""))
+    )
+      throw Error("refused");
+    let itemJSON;
+    try {
+      itemJSON = JSON.stringify({
+        ...message.item,
+        category: core.normalizeCategory(message.item.category),
+      });
+    } catch {
+      throw Error("refused");
+    }
+    if (
+      typeof itemJSON !== "string" ||
+      new TextEncoder().encode(itemJSON).length > 65536
+    )
+      throw Error("refused");
+    let response;
+    try {
+      response = await request(
+        "item-save",
+        {
+          capability,
+          ...(mode === "edit"
+            ? { item_id: message.id, revision: message.revision }
+            : {}),
+          item_json: itemJSON,
+        },
+        20000,
+      );
+    } catch {
+      const error = Error("refused");
+      error.keepStatus = true;
+      status = "当前原生宿主不支持在扩展中保存条目";
+      throw error;
+    } finally {
+      itemJSON = "";
+    }
+    if (
+      !/^[a-f0-9]{32}$/.test(response.item_id || "") ||
+      !/^[a-f0-9]{64}$/.test(response.revision || "")
+    )
+      throw Error("refused");
+    status = "已保存";
+    vaultItems = [];
+    detailCache.clear();
+    updateBadge();
+    rebuildContextMenus();
+    return { item_id: response.item_id, revision: response.revision };
+  }
+  async function setItemState(message) {
+    if (
+      !capability ||
+      !/^[a-f0-9]{32}$/.test(message.id || "") ||
+      !/^[a-f0-9]{64}$/.test(message.revision || "")
+    )
+      throw Error("refused");
+    const state = ["active", "archived", "trashed"].includes(message.state)
+      ? message.state
+      : undefined;
+    const favorite =
+      typeof message.favorite === "boolean" ? message.favorite : undefined;
+    if (!state && favorite === undefined) throw Error("refused");
+    let response;
+    try {
+      response = await request(
+        "item-state",
+        {
+          capability,
+          item_id: message.id,
+          revision: message.revision,
+          ...(state ? { state } : {}),
+          ...(favorite === undefined ? {} : { favorite }),
+        },
+        15000,
+      );
+    } catch {
+      const error = Error("refused");
+      error.keepStatus = true;
+      status = "当前原生宿主不支持修改条目状态";
+      throw error;
+    }
+    if (response.type !== "saved") throw Error("refused");
+    status = state === "trashed" ? "条目已移至废纸篓" : "条目已更新";
+    vaultItems = vaultItems.map((item) =>
+      item.id === message.id
+        ? {
+            ...item,
+            revision: response.revision,
+            ...(state ? { state } : {}),
+            ...(favorite === undefined ? {} : { favorite }),
+          }
+        : item,
+    );
+    const cached = detailCache.get(message.id + ":" + message.revision);
+    if (cached)
+      detailCache.set(message.id + ":" + response.revision, {
+        ...cached,
+        revision: response.revision,
+        ...(state ? { state } : {}),
+        ...(favorite === undefined ? {} : { favorite }),
+      });
+    updateBadge();
+    rebuildContextMenus();
+    return { revision: response.revision };
+  }
+  async function copyFieldValue(message) {
+    const detail =
+      detailCache.get(message.id + ":" + message.revision) ||
+      (await getVaultItem(message.id, message.revision));
+    const field = core
+      .flattenItemFields(detail)
+      .find((entry) => entry.id === message.field_id);
+    if (!field) throw Error("refused");
+    return {
+      value: field.value,
+      clearAfterSeconds: settings.clipboardClearSeconds,
+    };
+  }
+  async function openAndFill(message) {
+    if (
+      !capability ||
+      !/^[a-f0-9]{32}$/.test(message.id || "") ||
+      !/^[a-f0-9]{64}$/.test(message.revision || "")
+    )
+      throw Error("refused");
+    const target = message.url;
+    const expectedOrigin = core.originFromURL(target);
+    let urls = Array.isArray(message.urls)
+      ? message.urls
+          .slice(0, 20)
+          .filter((url) => typeof url === "string")
+      : [];
+    if (!urls.length) {
+      const detail = await getVaultItem(message.id, message.revision);
+      urls = detail.urls;
+    }
+    if (!core.itemURLAllowed({ urls }, target)) throw Error("refused");
+    if (typeof api.tabs?.create !== "function") throw Error("refused");
+    const created = await api.tabs.create({ url: target, active: true });
+    if (!created || !Number.isSafeInteger(created.id) || created.id < 1)
+      throw Error("refused");
+    clearPendingOpenAndFill();
+    pendingOpenAndFill = {
+      tabId: created.id,
+      expectedOrigin,
+      itemId: message.id,
+      revision: message.revision,
+      expiresAt: Date.now() + 15000,
+    };
+    openAndFillTimer = setTimeout(() => {
+      if (!pendingOpenAndFill) return;
+      pendingOpenAndFill = null;
+      openAndFillTimer = null;
+      status = "打开并填充已超时；未执行填充";
+      updateBadge();
+    }, 15000);
+    status = "已打开页面，等待加载后填充";
+    return { tabId: created.id, origin: expectedOrigin };
+  }
+  async function processOpenAndFill(tabId, change) {
+    const pendingFill = pendingOpenAndFill;
+    if (!pendingFill || pendingFill.tabId !== tabId) return;
+    if (typeof change?.url === "string") {
+      let changedOrigin = "";
+      try {
+        changedOrigin = core.originFromURL(change.url);
+      } catch {}
+      if (changedOrigin && changedOrigin !== pendingFill.expectedOrigin) {
+        clearPendingOpenAndFill();
+        status = "打开并填充已取消：页面跳转到其他来源";
+        updateBadge();
+        return;
+      }
+    }
+    if (change?.status !== "complete") return;
+    if (Date.now() > pendingFill.expiresAt) {
+      clearPendingOpenAndFill();
+      status = "打开并填充已超时；未执行填充";
+      updateBadge();
+      return;
+    }
+    clearPendingOpenAndFill();
+    try {
+      const tabs = await api.tabs.query({
+        active: true,
+        currentWindow: true,
+      });
+      if (
+        tabs.length !== 1 ||
+        tabs[0].id !== tabId ||
+        core.originFromURL(tabs[0].url) !== pendingFill.expectedOrigin
+      )
+        throw Error("refused");
+      await match();
+      const row = rows.find(
+        (candidate) =>
+          candidate.id === pendingFill.itemId &&
+          candidate.revision === pendingFill.revision,
+      );
+      if (!row) throw Error("refused");
+      await fill(row.id, row.revision);
+    } catch {
+      status = "打开并填充未完成；请重新读取当前网站候选";
+      updateBadge();
+    }
+  }
   function contentSender(sender) {
     try {
       return (
@@ -1031,6 +1917,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     const requestEpoch = epoch;
     const run = async () => {
       if (!message || typeof message !== "object") throw Error("refused");
+      const extra = {};
       switch (message.type) {
         case "state":
           await settingsReady;
@@ -1038,15 +1925,27 @@ if (typeof importScripts === "function") importScripts("core.js");
         case "settings": {
           await settingsReady;
           const next = {
-            autoLogin,
-            offerSavePasskeys,
-            offerUsePasskeys,
-            loginOverrides: { ...loginOverrides },
+            ...settings,
+            generatorDefaults: { ...settings.generatorDefaults },
+            loginOverrides: { ...settings.loginOverrides },
+            disabledInlineMenuOrigins: [
+              ...settings.disabledInlineMenuOrigins,
+            ],
+            neverSaveOrigins: [...settings.neverSaveOrigins],
           };
           for (const key of [
             "autoLogin",
             "offerSavePasskeys",
             "offerUsePasskeys",
+            "sharedDesktopSession",
+            "allowBiometricUnlock",
+            "showToolbarBadgeCount",
+            "showInlineMenu",
+            "openAndFillAutoSubmit",
+            "offerFillIdentitiesAndCards",
+            "offerSaveLogins",
+            "showInlineGenerator",
+            "watchtowerLocalChecks",
           ])
             if (typeof message[key] === "boolean") next[key] = message[key];
           if (
@@ -1054,9 +1953,19 @@ if (typeof importScripts === "function") importScripts("core.js");
             typeof message.enabled === "boolean"
           )
             next.loginOverrides[message.id] = message.enabled;
-          await api.storage.local.set(next);
-          ({ autoLogin, offerSavePasskeys, offerUsePasskeys, loginOverrides } =
-            next);
+          if (["system", "light", "dark"].includes(message.theme))
+            next.theme = message.theme;
+          if (
+            Number.isSafeInteger(message.clipboardClearSeconds) &&
+            message.clipboardClearSeconds >= 5 &&
+            message.clipboardClearSeconds <= 300
+          )
+            next.clipboardClearSeconds = message.clipboardClearSeconds;
+          const normalized = core.normalizeSettings(next);
+          await api.storage.local.set(normalized);
+          applySettings(normalized);
+          updateBadge();
+          rebuildContextMenus();
           break;
         }
         case "connect":
@@ -1064,6 +1973,9 @@ if (typeof importScripts === "function") importScripts("core.js");
           break;
         case "disconnect":
           disconnectWithStatus("已断开");
+          break;
+        case "lock":
+          lockVault();
           break;
         case "match":
           await match();
@@ -1110,61 +2022,77 @@ if (typeof importScripts === "function") importScripts("core.js");
             if (requestEpoch === epoch) status = "本次请求被拒绝";
           });
           break;
+        case "vault-search":
+        case "vault-list": {
+          await settingsReady;
+          const result = await vaultSearch(message.query, message.category);
+          extra.vaultItems = result.items;
+          extra.vaultSource = result.source;
+          extra.vaultFallback = result.fallback;
+          break;
+        }
+        case "item-get":
+          if (
+            !/^[a-f0-9]{32}$/.test(message.id || "") ||
+            !/^[a-f0-9]{64}$/.test(message.revision || "")
+          )
+            throw Error("refused");
+          extra.detail = await getVaultItem(message.id, message.revision);
+          break;
+        case "item-save": {
+          await settingsReady;
+          const saved = await saveVaultItem(message);
+          extra.saved = saved;
+          break;
+        }
+        case "item-state":
+          extra.itemState = await setItemState(message);
+          break;
+        case "copy-field":
+          if (
+            !/^[a-f0-9]{32}$/.test(message.id || "") ||
+            !/^[a-f0-9]{64}$/.test(message.revision || "") ||
+            typeof message.field_id !== "string" ||
+            message.field_id.length > 128
+          )
+            throw Error("refused");
+          extra.copiedField = await copyFieldValue(message);
+          break;
+        case "open-and-fill":
+          extra.openAndFill = await openAndFill(message);
+          break;
+        case "generate":
+          extra.generatedPassword = await generatePasswordValue(
+            message.options,
+          );
+          break;
+        case "site-settings":
+          await setSiteSettings(
+            typeof message.disabledInline === "boolean"
+              ? message.disabledInline
+              : typeof message.disabledInlineMenu === "boolean"
+                ? message.disabledInlineMenu
+                : undefined,
+            typeof message.neverSave === "boolean"
+              ? message.neverSave
+              : undefined,
+          );
+          break;
         default:
           throw Error("refused");
       }
-      return {
-        connected: !!capability,
-        autoLogin,
-        quickFill,
-        loginOverrides,
-        offerSavePasskeys,
-        offerUsePasskeys,
-        status:
-          status +
-          (otpUnknown && !status.includes(OTP_UNKNOWN)
-            ? " · " + OTP_UNKNOWN
-            : "") +
-          (fillUnknown && !status.includes(FILL_UNKNOWN)
-            ? " · " + FILL_UNKNOWN
-            : "") +
-          (passkeyUnknown && !status.includes(PASSKEY_UNKNOWN)
-            ? " · " + PASSKEY_UNKNOWN
-            : ""),
-        candidates: rows.map((r) => ({
-          id: r.id,
-          title: r.title,
-          revision: r.revision,
-        })),
-        pending: !!pending || !!pendingOTP || !!pendingPasskey,
-        otpPending: !!pendingOTP,
-        saveBlocked: unconfirmedSave,
-        origin: context?.origin || "",
-      };
+      return { ...snapshot(), ...extra };
     };
-    run().then(sendResponse, () => {
-      if (requestEpoch === epoch)
+    run().then(sendResponse, (error) => {
+      if (requestEpoch === epoch && !error?.keepStatus)
         status = unconfirmedSave
           ? SAVE_UNKNOWN
           : "操作被拒绝；请确认原生连接和当前顶层 HTTPS 页面";
       sendResponse({
-        connected: !!capability,
-        status:
-          status +
-          (otpUnknown && !status.includes(OTP_UNKNOWN)
-            ? " · " + OTP_UNKNOWN
-            : "") +
-          (fillUnknown && !status.includes(FILL_UNKNOWN)
-            ? " · " + FILL_UNKNOWN
-            : "") +
-          (passkeyUnknown && !status.includes(PASSKEY_UNKNOWN)
-            ? " · " + PASSKEY_UNKNOWN
-            : ""),
+        ...snapshot(),
         candidates: [],
-        pending: !!pending || !!pendingOTP || !!pendingPasskey,
-        otpPending: !!pendingOTP,
-        saveBlocked: unconfirmedSave,
         origin: "",
+        ...(error?.keepStatus ? {} : { vaultItems: [] }),
       });
     });
     return true;
