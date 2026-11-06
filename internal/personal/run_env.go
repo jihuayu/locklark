@@ -30,6 +30,9 @@ type RunRequest struct {
 	Directory      string   `json:"directory"`
 	Name           string   `json:"name"`
 	TimeoutSeconds int      `json:"timeout_seconds"`
+	// Only RunCLI constructs this policy. A nil policy retains the original
+	// empty-environment/null-stream contract and its original binding.
+	cli *runCLIPolicy
 }
 type RunReceipt struct {
 	Status       string `json:"status"`
@@ -57,9 +60,15 @@ func (r RunRequest) Validate() error {
 			return ErrRunTarget
 		}
 	}
+	if r.cli != nil {
+		return r.cli.validate(r)
+	}
 	return nil
 }
 func (r RunRequest) binding(secret []byte) (string, error) {
+	if r.cli != nil {
+		return r.cli.binding(r, secret)
+	}
 	key, e := hkdf.Key(sha256.New, secret, nil, "locklark/personal/run-env/key/v1", 32)
 	if e != nil {
 		return "", invalid
@@ -82,6 +91,9 @@ func (r RunRequest) binding(secret []byte) (string, error) {
 // a sandbox or a machine grant. The caller must obtain local human consent.
 // No child output is returned; an exit code is only a locally observed outcome.
 func RunEnv(ctx context.Context, path, pw string, key []byte, target RevealTarget, request RunRequest) (RunReceipt, error) {
+	if request.cli != nil {
+		return RunReceipt{}, ErrRunTarget
+	}
 	return runEnv(ctx, target, request, func(r *RunRequest) (result, error) {
 		return command(path, pw, key, "item.run."+target.Field, vault.Item{}, &Edit{ID: target.ID, Revision: target.Revision, Field: target.Field}, commandOption{run: r})
 	}, executeRun)
@@ -107,7 +119,7 @@ func runEnv(ctx context.Context, target RevealTarget, request RunRequest, prepar
 	return RunReceipt{Status: "process-exited", Session: r.session, Intent: r.intent, TargetDigest: r.destinationDigest, ExitCode: code}, nil
 }
 func executeRun(ctx context.Context, r RunRequest, value []byte) (int, error) {
-	if ctx == nil || ctx.Err() != nil || r.Validate() != nil || !utf8.Valid(value) || strings.ContainsRune(string(value), 0) {
+	if ctx == nil || ctx.Err() != nil || r.cli != nil || r.Validate() != nil || !utf8.Valid(value) || strings.ContainsRune(string(value), 0) {
 		return 0, ErrRunResult
 	}
 	// An existing exact regular path prevents PATHEXT fallback on Windows.
