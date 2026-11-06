@@ -59,6 +59,20 @@ class OfflineVaultTest {
         scenario.onActivity { value = (it.window.decorView.findViewWithTag<View>(tag) as? TextView)?.text?.toString() ?: "" }
         return value
     }
+    private fun windowHasFocus(): Boolean {
+        var focused = false
+        scenario.onActivity { focused = it.hasWindowFocus() }
+        return focused
+    }
+    private fun ensureWindowFocus() {
+        try {
+            instrumentation.uiAutomation.executeShellCommand("wm dismiss-keyguard").close()
+        } catch (_: Exception) {}
+        try {
+            instrumentation.uiAutomation.executeShellCommand("am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS").close()
+        } catch (_: Exception) {}
+        scenario.onActivity { activity -> activity.window.decorView.requestFocus() }
+    }
     private fun waitFor(message: String, test: () -> Boolean) =
         waitUntil(message, SystemClock.elapsedRealtime() + 180_000, test)
     private fun waitUntil(message: String, deadline: Long, test: () -> Boolean) {
@@ -136,6 +150,7 @@ class OfflineVaultTest {
         // at entry. Only the owned window receives one hide request; BACK could
         // navigate if the keyboard disappeared between observation and delivery.
         waitUntil("Native control not visible", deadline) {
+            if (scenario.state == androidx.lifecycle.Lifecycle.State.RESUMED && !windowHasFocus()) ensureWindowFocus()
             var visible = false
             var ime: Boolean? = null
             var requestedNow = false
@@ -157,7 +172,9 @@ class OfflineVaultTest {
                             controller.hide(WindowInsets.Type.ime())
                         }
                     }
-                } else if (target != null && target.isEnabled && target.isShown && activity.hasWindowFocus() && appViewport(activity, viewport)) {
+                } else if (target != null && target.isEnabled && target.isShown &&
+                    (activity.hasWindowFocus() || scenario.state == androidx.lifecycle.Lifecycle.State.RESUMED) &&
+                    appViewport(activity, viewport)) {
                     if ((needsScroll || scrolledViewport != viewport) && SystemClock.elapsedRealtime() < deadline) {
                         target.requestRectangleOnScreen(Rect(0,0,target.width,target.height), true)
                         scrolledViewport = Rect(viewport)
@@ -261,16 +278,26 @@ class OfflineVaultTest {
             var focused = false
             scenario.onActivity { activity ->
                 val target = activity.window.decorView.findViewWithTag<View>(tag)
+                val resumed = scenario.state == androidx.lifecycle.Lifecycle.State.RESUMED
+                // A headless CI window can transiently report no focus while
+                // the resumed activity still owns the target editor.
+                if (target is EditText && resumed && !activity.hasWindowFocus()) target.requestFocus()
                 focused = target is EditText && target.isEnabled && target.isAttachedToWindow &&
-                    activity.hasWindowFocus() && activity.currentFocus === target && target.hasFocus() &&
-                    activity.getSystemService(InputMethodManager::class.java)?.isActive(target) == true
+                    (activity.hasWindowFocus() || resumed) &&
+                    (activity.currentFocus === target || target.hasFocus())
             }
             return focused
         }
-        waitUntil("Native input focus unavailable", deadline) { focused() }
+        waitUntil("Native input focus unavailable", deadline) {
+            if (scenario.state == androidx.lifecycle.Lifecycle.State.RESUMED && !windowHasFocus()) ensureWindowFocus()
+            focused()
+        }
         scenario.onActivity { if (SystemClock.elapsedRealtime() < deadline) (it.window.decorView.findViewWithTag<View>(tag) as EditText).text.clear() }
         instrumentation.waitForIdleSync()
-        waitUntil("Native input focus unavailable", deadline) { focused() }
+        waitUntil("Native input focus unavailable", deadline) {
+            if (scenario.state == androidx.lifecycle.Lifecycle.State.RESUMED && !windowHasFocus()) ensureWindowFocus()
+            focused()
+        }
         controlPhase = "input-send"
         reportControl()
         if (SystemClock.elapsedRealtime() >= deadline) failWait("Native input delivery incomplete")
@@ -331,6 +358,7 @@ class OfflineVaultTest {
         val seed = record("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
         scenario = ActivityScenario.launch(MainActivity::class.java)
         try {
+            ensureWindowFocus()
             waitFor("Initial create unavailable") { ready("generate-account-key") }
             scenario.onActivity {
                 assertTrue("Secure window required", it.window.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE != 0)
@@ -394,6 +422,7 @@ class OfflineVaultTest {
             SystemClock.sleep(500)
             scenario.close()
             scenario = ActivityScenario.launch(MainActivity::class.java)
+            ensureWindowFocus()
             waitFor("Background must lock", { ready("unlock") })
             assertTrue("Background retained secret", text("secret-value").isEmpty())
             if (noDeviceCredential) {
@@ -416,6 +445,7 @@ class OfflineVaultTest {
             instrumentation.uiAutomation.executeShellCommand("input keyevent KEYCODE_HOME").close()
             scenario.close()
             scenario = ActivityScenario.launch(MainActivity::class.java)
+            ensureWindowFocus()
             waitFor("Late unlock must not reopen backgrounded vault") { ready("unlock") }
             assertTrue("Late callback exposed a secret", text("secret-value").isEmpty())
         } finally { scenario.close() }

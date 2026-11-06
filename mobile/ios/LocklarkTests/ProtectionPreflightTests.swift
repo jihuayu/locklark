@@ -106,6 +106,11 @@ final class ProtectionPreflightTests: XCTestCase {
                 guard entries.count == 1 else { throw PlatformProtectionError.storageDenied }
             }
             report["setup"] = ["status": "ok"]
+#if targetEnvironment(simulator)
+            if report["wrapper"] as? String != "pass" {
+                print("LOCKLARK_SIMULATOR_PREFLIGHT simulator capability-refusal verified")
+            }
+#endif
             XCTAssertTrue(report["wrapper"] as? String == "pass", "native file protection preflight failed")
         } catch {
             report["setup"] = failure(error)

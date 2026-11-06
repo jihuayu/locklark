@@ -454,7 +454,24 @@ class AndroidAcceptance:
     def snapshot(self, deadline=None):
         self.xml_counter += 1
         remote = self.remote + "/current.xml"
-        self.shell("uiautomator", "dump", "--compressed", remote, timeout=self.remaining(deadline, 45) if deadline else 45)
+        timeout = self.remaining(deadline, 45) if deadline else 45
+        try:
+            dump = self.shell("uiautomator", "dump", "--compressed", remote, timeout=timeout, required=False)
+        except (AcceptanceFailure, subprocess.TimeoutExpired):
+            dump = None
+        if dump is None or dump.returncode != 0:
+            # A cold-boot emulator can briefly lose focus to the keyguard or a
+            # system dialog. Recover once, then require a usable hierarchy.
+            try:
+                self.shell("wm", "dismiss-keyguard", required=False)
+            except (AcceptanceFailure, subprocess.TimeoutExpired):
+                pass
+            try:
+                self.shell("input", "keyevent", "KEYCODE_WAKEUP", required=False)
+            except (AcceptanceFailure, subprocess.TimeoutExpired):
+                pass
+            self.shell("uiautomator", "dump", "--compressed", remote,
+                       timeout=self.remaining(deadline, 45) if deadline else 45)
         result = self.command(["exec-out", "cat", remote], oracle=f"ui-{self.xml_counter:04d}.xml",
                               timeout=self.remaining(deadline, 45) if deadline else 45)
         self.shell("rm", "-f", remote, timeout=self.remaining(deadline, 45) if deadline else 45)
