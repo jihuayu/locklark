@@ -49,8 +49,8 @@ operation 在 OS 调用前创建，允许 Close 同步撤销迟到输出。Load 
 
 ## 已完成的 Linux 系统服务验收
 
-实现代理和主代理分别构建夹具，并在各自新建的私有 D-Bus、HOME/XDG 目录和真实 GNOME Keyring Secret Service 中通过 13 组验收。使用的原生适配器是 `osunlock.New()`，包含跨进程 Store/Load/Delete、独立 `secret-tool` 核对、服务缺失时拒绝且没有文件回退、设备保护、全新进程双钥证明、错误目标消耗操作、服务停止后拒绝、重启后恢复原身份、所属进程清理及已知 canary 扫描。工具另有 8 组负测；核心单元测试、race 和 vet 通过。
+实现代理和主代理分别构建夹具，并在各自新建的私有 D-Bus、HOME/XDG 目录和真实 GNOME Keyring Secret Service 中通过 13 组验收。使用的原生适配器是 `osunlock.New()`，包含跨进程 Store/Load/Delete、独立 `secret-tool` 核对、服务缺失时拒绝且没有文件回退、设备保护、全新进程双钥证明、错误目标消耗操作、服务停止后拒绝、重启后恢复原身份、所属进程清理及已知 canary 扫描。工具另有 16 组负测；核心单元测试、race 和 vet 通过。
 
-复跑入口为 `scripts/team_identity_acceptance.py` 与 `scripts/team_identity_fixture`。工具先核验固定 Debian 包及解包内容，在独立总线中确认服务 PID，再运行实际系统调用。每次必须使用新的私有证据目录，不连接用户已有密钥库。
+复跑入口为 `scripts/team_identity_acceptance.py` 与 `scripts/team_identity_fixture`。工具要求调用方先从已审阅源码独立构建并固定夹具哈希，在执行前后核对传入的预期值；哈希本身不能证明任意程序的来源。主代理的最终复跑使用隔离的 `4f9a532` 源码提交和逐字匹配的已审夹具，单独保存构建记录。工具还核验输入路径的可信祖先、固定 Debian 包及解包内容，在独立总线中确认服务 PID，再运行实际系统调用。每次必须使用新的私有证据目录，不连接用户已有密钥库。
 
 这些结果证明 Linux 系统服务保护和双钥持有；不证明逐次系统提示、生物识别、Windows/macOS 成功路径或已获得团队成员资格。扫描覆盖夹具已知的合成秘密及运行文件，未导出内部随机设备私钥来伪造完整 canary 覆盖。公开 profile 的持久化和真实团队 bootstrap 仍须单独实现与验收。
