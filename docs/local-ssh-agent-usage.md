@@ -75,4 +75,4 @@ try {
 
 `436cfab` 的 Linux、macOS、Windows 本机 CI 都已通过真实 OpenSSH 的 `ssh-add -L`、`ssh-add -T` 和 SSH 连接；Windows 系统客户端文件版本为9.5.6.4，同用户身份和管道 ACL 检查也已实际执行。Linux 的完整 MyGo 16组验收在主代理独立重建、长临时目录和该版 Web CI 中全部通过，包含真实两跳 `ssh -A` 与每跳独立批准。
 
-macOS/Windows 的 OpenSSH 传输验证不能代替完整原生界面或系统生物识别真机验证。Windows RunCLI 的外部 ConPTY 验收仍在修正独立工具的目录验证；它不影响上述已通过的 SSH 传输结果。交叉编译不代表运行验收通过。
+macOS/Windows 的 OpenSSH 传输验证不能代替完整原生界面或系统生物识别真机验证。Windows RunCLI 的真实 ConPTY、独立标准流、退出码、拒绝、审计及清理/隐私验收也已在 `de61512` 的 CI 通过。交叉编译不代表运行验收通过。

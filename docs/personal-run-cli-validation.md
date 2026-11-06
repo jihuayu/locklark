@@ -21,8 +21,14 @@ CLI 在单独打开的控制终端隐藏输入完整因素（Unix `/dev/tty`；W
 
 实现定向 normal 已通过（personal 43.372s），RunCLI/旧 RunEnv 定向 race 通过（81.381s），最终无 PBKDF 的取消/进程/策略增量 race 通过（2.083s）；personal/CLI vet、实际 CLI 构建和 Windows personal/CLI 测试包交叉编译通过。私有证据分别为 `/tmp/locklark-validation/run-cli-targeted.log`、`run-cli-race.log`、`run-cli-final-policy-race.log`、`run-cli-vet.log`。真实 gh/TLS/PTY 的独立证据另列于下方；原生 Windows 结论不由这些实现检查推定。
 
-临时父路径漏洞的实际权限 red 为 `/tmp/locklark-validation/run-cli-temp-parent-red.log`，修复后的真实不安全父目录/祖先、规范别名和进程回归 race 为 `run-cli-temp-parent-green.log`。控制终端的 detached-session 拒绝与独立提示 writer 定向 race 为 `run-cli-control-console-tests.log`；POSIX 实际管道 stdin/stderr 的独立通过证据另列于下方，Windows ConPTY 仍待原生运行。
+临时父路径漏洞的实际权限 red 为 `/tmp/locklark-validation/run-cli-temp-parent-red.log`，修复后的真实不安全父目录/祖先、规范别名和进程回归 race 为 `run-cli-temp-parent-green.log`。控制终端的 detached-session 拒绝与独立提示 writer 定向 race 为 `run-cli-control-console-tests.log`；POSIX 实际管道 stdin/stderr 的独立通过证据另列于下方，Windows ConPTY 的原生通过证据见下方。
 
-独立 POSIX 实际 gh/TLS/PTY 验收已通过 11 组，私有证据 `/tmp/locklark-validation/run-cli-wohknwye`：真实 gh 成功/403 与原退出码、stdin 管道 JSON 原样到达受控 TLS 端点、stderr 管道仅含子进程输出、原 TTY 输入仍可用、无控制终端零启动、取消/旧修订/错误因素零启动，以及 timeout/SIGINT/SIGTERM 后的固定未知结果和临时目录清理。所选 token 仅由私有 TLS oracle 检验 Authorization，不进入公开证据；生产没有传输覆盖选项。Windows 目前只有 ACL/console 测试包交叉编译证据，原生 ConPTY/Windows gh 结论仍须单独记录。
+独立 POSIX 实际 gh/TLS/PTY 验收已通过 11 组，私有证据 `/tmp/locklark-validation/run-cli-wohknwye`：真实 gh 成功/403 与原退出码、stdin 管道 JSON 原样到达受控 TLS 端点、stderr 管道仅含子进程输出、原 TTY 输入仍可用、无控制终端零启动、取消/旧修订/错误因素零启动，以及 timeout/SIGINT/SIGTERM 后的固定未知结果和临时目录清理。所选 token 仅由私有 TLS oracle 检验 Authorization，不进入公开证据；生产没有传输覆盖选项。Windows 原生 ConPTY/ACL 的结果见下方；这里的真实 gh/TLS 11组属于 POSIX，不声称 Windows gh/TLS 同样已验收。
 
-父代理独立重建的候选二进制 SHA-256 为 `bc3433693d5bb04df4d4e08d5d6b2f28fda3d10214cebc70af875d192ab1e271`，再次完整运行 11 组真实 gh/TLS/控制终端/独立管道/信号场景全部通过；私有证据 `/tmp/locklark-validation/run-cli-ucygz35a` 与 `run-cli-parent-final.log`。9 项工具负测也通过。此证据证明当前 POSIX 候选的真实行为，不是 Windows/macOS 原生通过声明；Windows ConPTY/ACL/gh 和 macOS 平台结果必须来自对应原生运行。
+父代理独立重建的候选二进制 SHA-256 为 `bc3433693d5bb04df4d4e08d5d6b2f28fda3d10214cebc70af875d192ab1e271`，再次完整运行 11 组真实 gh/TLS/控制终端/独立管道/信号场景全部通过；私有证据 `/tmp/locklark-validation/run-cli-ucygz35a` 与 `run-cli-parent-final.log`。9 项工具负测也通过。此证据证明当前 POSIX 候选的真实行为，不是 Windows/macOS 原生通过声明；Windows ConPTY/ACL 和 macOS 对应平台测试结果另列如下；Windows gh/TLS 全流程未单独验收。
+
+精确提交 `de61512309094113a90e6fb72b84d66ae5945f1d` 的 [CI 42183790639](https://github.com/jihuayu/locklark/actions/runs/42183790639) 四组全部通过。Windows 实际运行普通 CLI，通过五组外部 ConPTY 验收：隐藏因素与明确 RUN、三个独立管道、原退出码23且无额外正文、临时目录清理；拒绝零子进程；真实无 console 在因素前拒绝；恰好一个精确目标的签名意图；完整私有 ACL 与输出 canary 核对。新的子进程目录策略用例也在 Windows 实际通过，不是交叉编译替代运行。
+
+Windows 工具先前错误地在隔离的子进程内重新查询宿主 LocalAppData。现在由正常宿主环境中的 launcher 先从 OS 获取并验证父目录，把该公开路径作为精确批准 argv 的一部分交给子进程；子进程仍核对根目录关系、owner/DACL 与整棵树无 reparse，父进程前后仍核对 OS KnownFolder。产品环境策略没有放宽。私有完整证据为 `ssh-pr41-fifth-windows-connector.log` 和 `ssh-pr41-de615123-ci-evidence.json`。
+
+同一精确提交的 macOS 平台检查与真实 OpenSSH 传输检查通过；Linux 的完整 Go/Web/MyGo 及真实 gh 验收通过。平台操作系统密钥保护、完整 GUI 和生物识别真机验收是不同范围，不从 CLI/SSH 传输结果推定。
