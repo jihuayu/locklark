@@ -106,10 +106,12 @@ final class PlatformProtectionTests: XCTestCase {
             XCTAssertTrue(FileManager.default.createFile(atPath: directory.appendingPathComponent(name).path, contents: Data([1])))
         }
         try VaultFiles.protect(directory: directory)
-        for url in [directory] + (try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) {
-            XCTAssertEqual(try url.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup, true)
-            let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
-            XCTAssertTrue(ProtectionAttribute.isComplete(attributes[.protectionKey]), "actual Foundation protection attribute must exactly equal complete")
+        for var url in [directory] + (try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) {
+            url.removeCachedResourceValue(forKey: .isExcludedFromBackupKey)
+            url.removeCachedResourceValue(forKey: .fileProtectionKey)
+            let actual = try url.resourceValues(forKeys: [.isExcludedFromBackupKey, .fileProtectionKey])
+            XCTAssertEqual(actual.isExcludedFromBackup, true)
+            XCTAssertTrue(actual.fileProtection == .complete, "independent authoritative URL protection must exactly equal complete")
         }
     }
 
@@ -126,5 +128,20 @@ final class PlatformProtectionTests: XCTestCase {
         XCTAssertTrue(ProtectionAttribute.isComplete(raw), "Foundation raw NSString must preserve exact complete-protection semantics")
         XCTAssertFalse(ProtectionAttribute.isComplete(FileProtectionType.completeUnlessOpen.rawValue))
         XCTAssertFalse(ProtectionAttribute.isComplete(nil))
+    }
+
+    func testActualWeakerSidecarIsRejectedAfterIndependentConfirmation() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.protectionKey: FileProtectionType.complete.rawValue])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var file = directory.appendingPathComponent("personal.ll-wal")
+        XCTAssertTrue(FileManager.default.createFile(atPath: file.path, contents: Data([1])))
+        try VaultFiles.protect(directory: directory)
+        file.removeCachedResourceValue(forKey: .fileProtectionKey)
+        XCTAssertTrue(try file.resourceValues(forKeys: [.fileProtectionKey]).fileProtection == .complete, "fixture must first have real complete protection")
+        try (file as NSURL).setResourceValue(URLFileProtection.completeUntilFirstUserAuthentication, forKey: .fileProtectionKey)
+        file.removeCachedResourceValue(forKey: .fileProtectionKey)
+        XCTAssertTrue(try file.resourceValues(forKeys: [.fileProtectionKey]).fileProtection == .completeUntilFirstUserAuthentication, "independent getter must confirm the actual weaker sidecar")
+        XCTAssertThrowsError(try VaultFiles.verifyProtection(directory: directory), "a real weaker sidecar must fail closed")
     }
 }

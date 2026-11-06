@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 DOMAINS = {"NSCocoaErrorDomain", "NSPOSIXErrorDomain", "NSOSStatusErrorDomain", "NSMachErrorDomain", "other"}
-CODES = {-50, 0, 1, 2, 5, 13, 22, 45, 95, 257, 260, 262, 512, 513, 516, 640, 642, "other"}
+CODES = {-50, -4, 0, 1, 2, 4, 5, 13, 22, 45, 95, 257, 260, 262, 512, 513, 516, 640, 642, 3328, 4097, 4099, "other"}
 
 
 def step(value, field=None, choices=()):
@@ -36,9 +36,9 @@ def sanitize(value):
         if not isinstance(node, dict) or node.get("role") not in {"directory", "file"} or node.get("setter") not in {"typed", "raw"}:
             continue
         clean = {"role": node["role"], "setter": node["setter"]}
-        for key in ["backup_write", "complete_write"]: clean[key] = step(node.get(key))
+        for key in ["backup_write", "complete_write", "url_write"]: clean[key] = step(node.get(key))
         for key in ["backup_cached", "backup_fresh", "symlink"]: clean[key] = step(node.get(key), "value", {"true", "false", "nil"})
-        for key in ["complete_before", "complete_after"]: clean[key] = protection(node.get(key))
+        for key in ["complete_before", "complete_after", "url_before", "url_after", "legacy_after_url"]: clean[key] = protection(node.get(key))
         output["nodes"].append(clean)
     return output
 

@@ -25,5 +25,11 @@ class ProtectionProbePrivacyTests(unittest.TestCase):
         self.assertEqual(output["nodes"], [])
         self.assertEqual(probe.protection({"status": "ok", "representation": "private-canary", "class": "private-canary"}), {"status": "ok", "representation": "other", "class": "unknown"})
 
+    def test_authoritative_url_api_results_use_the_same_strict_schema(self):
+        output = probe.sanitize({"version": 1, "nodes": [{"role": "directory", "setter": "typed", "url_write": {"status": "error", "domain": "NSOSStatusErrorDomain", "code": -4}, "url_after": {"status": "ok", "representation": "missing", "class": "unknown", "raw": "private-canary"}}]})
+        self.assertEqual(output["nodes"][0]["url_write"]["code"], -4)
+        self.assertEqual(output["nodes"][0]["url_after"], {"status": "ok", "representation": "missing", "class": "unknown"})
+        self.assertNotIn("private-canary", json.dumps(output))
+
 
 if __name__ == "__main__": unittest.main()

@@ -8,7 +8,7 @@
 
 Android 第四、第五轮均通过两项必须执行的真实应用 UID/JNI/原生界面测试。第五轮外部 ADB 主机流程通过建库、Secret Key 确认、手工和生成登录、精确修订编辑、独立 HMAC 的 TOTP 核对、搜索、后台与主动锁定、错误双因素拒绝、重开，以及从设备复制真实数据库后的 CLI 签名审计核对；最后 KDBX 互通阶段失败，完整流程尚未通过。根因已复现为验收工具解析虚拟环境 Python 符号链接后丢失 PyKeePass 安装环境。修复保留配置的解释器路径，真实 venv 回归通过；主代理独立复跑冻结工具的真实移动核心金库→PTY CLI 导出→PyKeePass 字段/TOTP 与错误密码检查，记录 `android-peer-repro-is7ld0mb/android-host-ui-hihtz2s_`。预期密码/OTP 篡改均拒绝，完整输出 canary 扫描通过；此本地复验没有 ADB，不代替待跑的完整设备链路。
 
-iOS 实际 Apple SDK 编译已通过，运行仍在 Go 建库之前的 VaultFiles.protect 失败，typed/raw 读取兼容修复不足以解决。`4fb702e` 加入无秘密的原生文件保护前置诊断：分别核对目录/文件保护类型和备份排除属性；失败保持拒绝，成功后仍须完整原生用例和 UI/输出隐私检查。主代理及 Luna 独立运行诊断隐私检查通过，系统实际结果待 CI。
+iOS 实际 Apple SDK 编译已通过，运行仍在 Go 建库之前的 VaultFiles.protect 失败，typed/raw 读取兼容修复不足以解决。`4fb702e` 的实际前置诊断确认：目录和文件、typed 和 raw 两种 FileManager 设置均返回成功，但保护属性前后都缺失；备份排除写入、刷新后回读和枚举正常。原始私有记录 `team-mobile-pr37-sixth-ios.log`，只发布固定元数据。正改用 Apple 推荐的 NSURL 文件保护接口并严格回读明确的 complete；不放宽 nil/弱保护拒绝，也不据模拟器设置成功宣称真机保护。完整原生用例和 UI/输出隐私检查仍待前置条件通过。
 
 Android 系统凭据认证的成功、取消与重装失效验收正在补齐；iOS 真实系统认证和两平台真机生物识别仍未验收。PR #37 保持草稿，当前未满足精确 head 全 CI、最终独立审阅与验收后的合并条件。后文保留各历史候选的失败与修复证据，不把早期通过结果自动延伸到后续代码。
 
@@ -75,7 +75,7 @@ Android 外部主机工具11项测试通过，Luna独立审阅并运行；实际
 
 Android 本地原生诊断确认 shell UID 的同目录硬链接返回 EACCES；同时核对 AOSP app_neverallows.te 明确禁止所有 untrusted app 建立硬链接。旧个人库发布使用 os.Link，与 Android 应用策略不兼容。修复仅更换 Android 路径为内核 renameat2(RENAME_NOREPLACE)：仍先 fsync/关闭完整临时文件、原子拒绝覆盖、再 fsync 目录，内核/文件系统不支持时失败，不使用覆盖式 rename 或空占位回退。四项回归覆盖已有目标不变、并发恰好一个完整赢家、目录同步失败保留完整结果、ENOSYS 无回退；同一 Go 测试二进制已在真实 Android 模拟器内核上以 shell UID 执行通过。主代理独立跑四项 race 各三次（1.071s），Luna独立测试及 Android 交叉编译通过。shell UID 结果不冒充应用 UID/JNI 或完整 UI 验收；旧 AAR 的实际应用 UID 失败验证与新绑定的应用流程仍在继续。app_process 诊断没有完成 JNI 阶段，不计成功。
 
-iOS Foundation 实际返回的保护值可为 NSString/String；直接 as? FileProtectionType 会拒绝同一 NSFileProtectionComplete 值。修复严格接受 typed complete 或完全相同的 rawValue，仍拒绝缺失、较弱类型和近似字符串，无模拟器豁免。Luna 使用已安装 Linux Swift6.4.2 独立跑30项纯逻辑测试通过，其中包含三项表示形式测试；Apple SDK/系统实际存储与 UI 验收仍依赖下一轮 macOS CI。
+iOS Foundation 保护值的公开接口允许 NSString/String；直接 as? FileProtectionType 不能覆盖该表示。初步兼容修复严格接受 typed complete 或完全相同的 rawValue，仍拒绝缺失、较弱类型和近似字符串，无模拟器豁免。Luna 使用已安装 Linux Swift6.4.2 独立跑30项纯逻辑测试通过，其中包含三项表示形式测试。此测试不证明实际失败由字符串表示造成；后续原生诊断实际读到属性缺失，见当前状态，不能把该兼容修复当作已关闭平台问题。
 
 主代理还发现 Android AtomicFile 首次 startWrite 写入的是 .new，而旧代码 chmod 最终路径会因不存在失败。现在先 fchmod 实际文件描述符至0600，写完后核对提交文件权限和大小；应用测试验证真实首次写入和复读。显示期限同时核对原墙钟范围与不延长的单调预算，系统时间变化广播保留为额外保护。Luna 独立运行10项 Android 策略测试通过；新平台组件运行证据仍待收齐。
 

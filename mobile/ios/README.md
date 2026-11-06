@@ -52,6 +52,11 @@ backup and receive complete file protection. A signed app also declares
 file protection is checked before post-create strengthening; failed protection
 locks the app and disables further use. Reopening checks the actual attributes.
 No account factor, local device key or capsule is put in a backup file.
+Protection writes use Apple's documented NSURL `fileProtectionKey` interface;
+the fresh authoritative URL getter must equal `URLFileProtection.complete`.
+Missing or weaker values are rejected, including on a simulator. Legacy
+FileManager attribute representations are diagnostic evidence, not substitutes
+for a positive authoritative protection result.
 
 Quick unlock defaults off. An explicit enable action after complete two-factor
 unlock stores only the core's audited 24-hour, original-path/slot-bound sealed

@@ -21,7 +21,7 @@ enum VaultFiles {
     private static func prepareUnchecked(fileManager: FileManager) throws -> URL {
         let support = try fileManager.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
         let directory = support.appendingPathComponent("Locklark", isDirectory: true)
-        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.protectionKey: FileProtectionType.complete])
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.protectionKey: FileProtectionType.complete.rawValue])
         try protect(directory: directory, fileManager: fileManager)
         return directory.appendingPathComponent("personal.ll", isDirectory: false)
     }
@@ -41,7 +41,7 @@ enum VaultFiles {
             resource.isExcludedFromBackup = true
             try url.setResourceValues(resource)
             url.removeCachedResourceValue(forKey: .isExcludedFromBackupKey)
-            try fileManager.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: url.path)
+            try (url as NSURL).setResourceValue(URLFileProtection.complete, forKey: .fileProtectionKey)
             guard try url.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == true else {
                 throw PlatformProtectionError.storageDenied
             }
@@ -61,9 +61,15 @@ enum VaultFiles {
         guard !enumerationFailed else { throw PlatformProtectionError.storageDenied }
         for url in urls {
             guard try url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink != true,
-                  ProtectionAttribute.isComplete(try fileManager.attributesOfItem(atPath: url.path)[.protectionKey]) else {
+                  try isCompletelyProtected(url) else {
                 throw PlatformProtectionError.storageDenied
             }
         }
+    }
+
+    private static func isCompletelyProtected(_ original: URL) throws -> Bool {
+        var fresh = original
+        fresh.removeCachedResourceValue(forKey: .fileProtectionKey)
+        return try fresh.resourceValues(forKeys: [.fileProtectionKey]).fileProtection == .complete
     }
 }

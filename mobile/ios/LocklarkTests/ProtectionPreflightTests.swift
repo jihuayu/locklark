@@ -9,7 +9,7 @@ final class ProtectionPreflightTests: XCTestCase {
     private func failure(_ error: Error) -> [String: Any] {
         let error = error as NSError
         let domains = [NSCocoaErrorDomain, NSPOSIXErrorDomain, NSOSStatusErrorDomain, NSMachErrorDomain]
-        let codes = [-50, 0, 1, 2, 5, 13, 22, 45, 95, 257, 260, 262, 512, 513, 516, 640, 642]
+        let codes = [-50, -4, 0, 1, 2, 4, 5, 13, 22, 45, 95, 257, 260, 262, 512, 513, 516, 640, 642, 3328, 4097, 4099]
         return ["status": "error", "domain": domains.contains(error.domain) ? error.domain : "other", "code": codes.contains(error.code) ? error.code as Any : "other"]
     }
 
@@ -37,6 +37,17 @@ final class ProtectionPreflightTests: XCTestCase {
         } catch { return failure(error) }
     }
 
+    private func urlProtection(_ original: URL) -> [String: Any] {
+        var fresh = original
+        fresh.removeCachedResourceValue(forKey: .fileProtectionKey)
+        do {
+            let value = try fresh.resourceValues(forKeys: [.fileProtectionKey]).fileProtection
+            let weaker: [URLFileProtection] = [.none, .completeUnlessOpen, .completeUntilFirstUserAuthentication]
+            let classification = value == .complete ? "complete" : (value.map { weaker.contains($0) } == true ? "weaker" : "unknown")
+            return ["status": "ok", "representation": value == nil ? "missing" : "typed", "class": classification]
+        } catch { return failure(error) }
+    }
+
     private func node(_ original: URL, role: String, rawSetter: Bool) -> [String: Any] {
         var url = original
         var output: [String: Any] = ["role": role, "setter": rawSetter ? "raw" : "typed", "complete_before": protection(url)]
@@ -56,6 +67,10 @@ final class ProtectionPreflightTests: XCTestCase {
             try FileManager.default.setAttributes([.protectionKey: value], ofItemAtPath: url.path)
         }
         output["complete_after"] = protection(url)
+        output["url_before"] = urlProtection(url)
+        output["url_write"] = attempt { try (url as NSURL).setResourceValue(URLFileProtection.complete, forKey: .fileProtectionKey) }
+        output["url_after"] = urlProtection(url)
+        output["legacy_after_url"] = protection(url)
         return output
     }
 
