@@ -14,6 +14,16 @@ import mobile_android_acceptance as acceptance
 
 
 class SafetyTests(unittest.TestCase):
+    def test_wrong_factor_requires_the_specific_public_unlock_refusal(self):
+        status = {"package": acceptance.PACKAGE, "class": "android.widget.TextView", "enabled": "true",
+                  "text": "解锁未完成：认证被取消或完整因素未通过验证。"}
+        self.assertTrue(acceptance.is_unlock_refusal([status]))
+        for text in ("操作未完成：认证失败", "保存未完成：目标已变化", "提示：解锁未完成：认证失败", ""):
+            with self.subTest(text=text):
+                self.assertFalse(acceptance.is_unlock_refusal([{**status, "text": text}]))
+        self.assertFalse(acceptance.is_unlock_refusal([{**status, "package": "other.app"}]))
+        self.assertFalse(acceptance.is_unlock_refusal([{**status, "class": "android.widget.EditText"}]))
+
     def test_explicit_emulator_reset_required_before_adb(self):
         for serial, reset in (("device-1234", True), ("emulator-5556", False), ("emulator-5556;reboot", True)):
             with self.subTest(serial=serial), self.assertRaises(acceptance.AcceptanceFailure):

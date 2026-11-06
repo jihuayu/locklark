@@ -89,6 +89,12 @@ def parse_nodes(raw):
     return [node.attrib for node in ET.fromstring(raw).iter("node")]
 
 
+def is_unlock_refusal(nodes):
+    return any(node.get("package") == PACKAGE and node.get("class") == "android.widget.TextView"
+               and node.get("enabled") == "true" and node.get("text", "").startswith("解锁未完成：")
+               for node in nodes)
+
+
 def verify_audit(events, disclosures, mutations, generated_id, *, expected_exports=0, expected_audits=1):
     """Require the exact fixture item effects, including no extra disclosures.
 
@@ -419,7 +425,7 @@ class AndroidAcceptance:
         self.enter("Secret Key", key)
         self.tap("打开本地金库", class_name="android.widget.Button")
         if refused:
-            self.visible("操作未完成：", prefix=True)
+            self.wait(is_unlock_refusal)
             self.visible("打开本地金库", class_name="android.widget.Button")
             self.no_visible_secrets()
             require(not any(self.matching(self.snapshot(), "新建登录", "android.widget.Button")))

@@ -58,3 +58,15 @@ Luna 复核和确定性测试发现：OTP 原生交付后到门面最终授权�
 PR #37 第二轮 `4f35ec5` 的四组既有 CI 再次通过；Android 实际运行在 create 阶段180秒条件等待失败（固定诊断 AssertionError，非进程崩溃）；iOS 真实应用 SDK 编译无报错、模拟器开始测试，但运行报告3条失败记录，旧安全摘要未提供用例标识，不能据此推断3个不同根因。后续迭代增加固定用例/源码行诊断；Android 两套独立流程即使一套失败也执行另一套，任一失败仍拒绝通过。
 
 Android 外部主机工具11项测试通过，Luna独立审阅并运行；实际 UI、签名审计和 PyKeePass 核对仍等待可运行模拟器。iOS UI 工具新增独立 HMAC-SHA1 OTP 比对、测试 runner 私有因素清单，以及在成功/失败两条路径扫描完整 runtime 和 xcresult 导出；主代理独立运行10项隐私/完整性测试与5项诊断隐私测试均通过，真实 SDK/工具兼容性仍待下一 CI。二进制附件只做字节扫描，不声称对截图像素 OCR；原始材料不上传。
+
+## 原生平台兼容性定位
+
+第三轮 `8c56540` 的四组既有 CI 全部通过。Android 两套独立实际 UI 流程都在创建阶段失败：准确因素输入已核对，应用报告操作拒绝而非点击不到或等待时间不足。iOS 的三条失败定位为两个 VaultFiles.protect 调用（均早于 Go 建库）和后续 UI 输入不可用。失败轮均不计为验收成功。
+
+Android 本地原生诊断确认 shell UID 的同目录硬链接返回 EACCES；同时核对 AOSP app_neverallows.te 明确禁止所有 untrusted app 建立硬链接。旧个人库发布使用 os.Link，与 Android 应用策略不兼容。修复仅更换 Android 路径为内核 renameat2(RENAME_NOREPLACE)：仍先 fsync/关闭完整临时文件、原子拒绝覆盖、再 fsync 目录，内核/文件系统不支持时失败，不使用覆盖式 rename 或空占位回退。四项回归覆盖已有目标不变、并发恰好一个完整赢家、目录同步失败保留完整结果、ENOSYS 无回退；同一 Go 测试二进制已在真实 Android 模拟器内核上以 shell UID 执行通过。主代理独立跑四项 race 各三次（1.071s），Luna独立测试及 Android 交叉编译通过。shell UID 结果不冒充应用 UID/JNI 或完整 UI 验收；旧 AAR 的实际应用 UID 失败验证与新绑定的应用流程仍在继续。app_process 诊断没有完成 JNI 阶段，不计成功。
+
+iOS Foundation 实际返回的保护值可为 NSString/String；直接 as? FileProtectionType 会拒绝同一 NSFileProtectionComplete 值。修复严格接受 typed complete 或完全相同的 rawValue，仍拒绝缺失、较弱类型和近似字符串，无模拟器豁免。Luna 使用已安装 Linux Swift6.4.2 独立跑30项纯逻辑测试通过，其中包含三项表示形式测试；Apple SDK/系统实际存储与 UI 验收仍依赖下一轮 macOS CI。
+
+主代理还发现 Android AtomicFile 首次 startWrite 写入的是 .new，而旧代码 chmod 最终路径会因不存在失败。现在先 fchmod 实际文件描述符至0600，写完后核对提交文件权限和大小；应用测试验证真实首次写入和复读。显示期限同时核对原墙钟范围与不延长的单调预算，系统时间变化广播保留为额外保护。Luna 独立运行10项 Android 策略测试通过；新平台组件运行证据仍待收齐。
+
+Android 发布兼容性修复后的第四轮 AAR：`f306122940008c1e81bc45f91112fff32771d036d5120328fd08cf7196a3cd8f`，保留于 `/tmp/locklark-tools/mobile/core-final-v4/`。清单 SHA256 `45556f2cfce45630a6e956c115a49e048424187c6e28af1d5ba01c4eb93b99a7`；主代理独立核对89项实际输入与产物散列，零不一致。该绑定包含 Android 专用发布路径；第三轮绑定继续保留，用于实际应用 UID 的旧行为对照。

@@ -40,6 +40,25 @@ class DiagnosticPrivacyTests(unittest.TestCase):
         self.assertEqual(output["runtime_diagnostics"][0]["location"], "method-declaration")
         self.assertEqual(output["runtime_diagnostics"][0]["reason"], "unexpected-error")
 
+    def test_fixed_phase_does_not_publish_original_error(self):
+        text = "/tmp/CoreIntegrationTests.swift:45: error: -[LocklarkTests.CoreIntegrationTests testActualGoCreateAndReopenKeepsDatabaseCompletelyProtected] : failed - core-phase-default-protection private-fixture-canary"
+        output = diagnostics.summary(text)
+        self.assertNotIn("private-fixture-canary", json.dumps(output))
+        self.assertEqual(output["runtime_diagnostics"][0]["reason"], "core-phase-default-protection")
+
+    def test_actionability_helper_literals_are_narrowly_allowlisted(self):
+        source = r'''let unrelated = "private-fixture-canary"
+waitActionable(element, timeout: 10, message: "native input must exist")
+tapActionable(element, message: "native selected control must open")
+other(element, message: "private-fixture-canary")
+waitActionable(element, message: "prefix \(privateValue)")'''
+        reasons = diagnostics.fixed_reasons(source)
+        self.assertIn("native input must exist", reasons)
+        self.assertIn("native selected control must open", reasons)
+        self.assertIn("native control must be actionable", reasons)
+        self.assertNotIn("private-fixture-canary", reasons)
+        self.assertNotIn(r"prefix \(privateValue)", reasons)
+
 
 if __name__ == "__main__":
     unittest.main()

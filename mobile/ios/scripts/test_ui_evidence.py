@@ -72,8 +72,16 @@ class PrivacyTests(unittest.TestCase):
              mock.patch.object(pathlib.Path, "write_text"), contextlib.redirect_stdout(io.StringIO()) as output:
             result = evidence.main(["--simulator", "unused", "--runtime-log", "unused", "--xcresult", "unused", "--test-exit-code", "1"])
         self.assertEqual(result, 1)
-        self.assertEqual(output.getvalue(), "FAIL: iOS UI evidence validation\nPrivate iOS UI evidence: /private/ios-evidence\n")
+        self.assertEqual(output.getvalue(), "FAIL: iOS UI evidence validation stage=manifest files=0 manifest_valid=false manifest_complete=false export_complete=false\nPrivate iOS UI evidence: /private/ios-evidence\n")
         self.assertNotIn(secret, output.getvalue())
+
+    def test_failure_summary_allows_only_fixed_stage_count_and_booleans(self):
+        secret = "PrivateDiagnosticInjectionFixture"
+        summary = evidence.failure_summary(secret, secret, secret, secret, secret)
+        self.assertEqual(summary, "FAIL: iOS UI evidence validation stage=prerequisites files=0 manifest_valid=false manifest_complete=false export_complete=false")
+        self.assertNotIn(secret, summary)
+        self.assertEqual(evidence.failure_summary("test-outcome", 42, True, False, True),
+                         "FAIL: iOS UI evidence validation stage=test-outcome files=42 manifest_valid=true manifest_complete=false export_complete=true")
 
 
 class EvidenceIntegrityTests(unittest.TestCase):

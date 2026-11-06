@@ -48,11 +48,11 @@ def complete_pass(returncode, raw, expected_tests=2):
 
 
 def safe_diagnostic(raw):
-    allowed_steps = {"bound-operation", "create", "add-login", "show-password", "edit-password", "edit-notes", "empty-fields", "edit-otp", "show-otp", "search", "cancel-edit", "generate-login", "regenerate", "exact-target", "platform-auth-refusal", "background-lock", "reopen", "late-unlock"}
+    allowed_steps = {"platform-fs", "binding-create", "binding-unlock", "capsule-storage", "bound-operation", "create", "add-login", "show-password", "edit-password", "edit-notes", "empty-fields", "edit-otp", "show-otp", "search", "cancel-edit", "generate-login", "regenerate", "exact-target", "platform-auth-refusal", "background-lock", "reopen", "late-unlock"}
     steps = re.findall(rb"INSTRUMENTATION_STATUS: locklark_stage=([a-z-]+)", raw)
     step = steps[-1].decode("ascii") if steps and steps[-1].decode("ascii") in allowed_steps else "unknown"
     exception = "unknown"
-    for name in ("java.lang.AssertionError", "junit.framework.AssertionFailedError", "java.lang.IllegalStateException", "java.lang.UnsatisfiedLinkError", "java.lang.NullPointerException", "android.os.DeadObjectException"):
+    for name in ("java.lang.AssertionError", "junit.framework.AssertionFailedError", "java.lang.IllegalStateException", "java.lang.UnsatisfiedLinkError", "java.lang.NullPointerException", "android.os.DeadObjectException", "android.system.ErrnoException"):
         if name.encode() in raw: exception = name; break
     lines = re.findall(rb"(?:OfflineVaultTest|BoundOperationTest)\.kt:([0-9]{1,5})\)", raw)
     waits = re.findall(rb"INSTRUMENTATION_STATUS: locklark_wait=([a-z-]+)", raw)
@@ -61,8 +61,36 @@ def safe_diagnostic(raw):
     statuses = re.findall(rb"INSTRUMENTATION_STATUS: locklark_ui_status=([a-z-]+)", raw)
     allowed_status = {"operation-refused", "outcome-unknown", "backup-ack-required", "empty", "other"}
     status = statuses[-1].decode() if statuses and statuses[-1].decode() in allowed_status else "unknown"
+    context = {"step": "unknown", "wait": "unknown", "ui_status": "unknown", "core_phase": "unknown", "core_error": "unknown", "inputs_intact": "unknown", "fs_owned": "unknown", "fs_link": "unknown", "fs_errno": "unknown"}
+    failures = []
+    fields = ((b"INSTRUMENTATION_STATUS: locklark_stage=", "step", allowed_steps),
+              (b"INSTRUMENTATION_STATUS: locklark_wait=", "wait", allowed_waits),
+              (b"INSTRUMENTATION_STATUS: locklark_ui_status=", "ui_status", allowed_status),
+              (b"INSTRUMENTATION_STATUS: locklark_core_phase=", "core_phase", {"operation", "capture", "create", "unlock", "refresh"}),
+              (b"INSTRUMENTATION_STATUS: locklark_core_error=", "core_error", {"locked", "closed", "invalid", "conflict", "cancelled", "unknown", "expired", "unavailable", "exists", "capacity", "other"}),
+              (b"INSTRUMENTATION_STATUS: locklark_inputs_intact=", "inputs_intact", {"true", "false"}),
+              (b"INSTRUMENTATION_STATUS: locklark_fs_owned=", "fs_owned", {"true", "false"}),
+              (b"INSTRUMENTATION_STATUS: locklark_fs_link=", "fs_link", {"true", "false"}),
+              (b"INSTRUMENTATION_STATUS: locklark_fs_errno=", "fs_errno", {str(value) for value in range(4096)}))
+    for line in raw.splitlines():
+        for prefix, key, allowed in fields:
+            if line.startswith(prefix):
+                value = line[len(prefix):].decode("ascii", errors="replace")
+                context[key] = value if value in allowed else "unknown"
+        if line.strip() == b"INSTRUMENTATION_STATUS_CODE: 1":
+            context = {"step": "unknown", "wait": "unknown", "ui_status": "unknown", "core_phase": "unknown", "core_error": "unknown", "inputs_intact": "unknown", "fs_owned": "unknown", "fs_link": "unknown", "fs_errno": "unknown"}
+        elif line.strip() in (b"INSTRUMENTATION_STATUS_CODE: -1", b"INSTRUMENTATION_STATUS_CODE: -2"):
+            failures.append(context.copy())
+    if failures:
+        step, wait, status = (failures[0][key] for key in ("step", "wait", "ui_status"))
     counts = re.findall(rb"(?:Tests run: |OK \()([0-9]{1,3})", raw)
-    return {"step": step, "wait": wait, "ui_status": status, "exception": exception, "own_source_line": int(lines[0]) if lines else 0, "own_source_lines": [int(line) for line in lines[:20]],
+    return {"step": step, "wait": wait, "ui_status": status, "exception": exception, "own_source_line": int(lines[0]) if lines else 0, "own_source_lines": [int(line) for line in lines[:20]], "failed_contexts": failures[:10],
+            "core_phase": failures[0]["core_phase"] if failures else context["core_phase"],
+            "core_error": failures[0]["core_error"] if failures else context["core_error"],
+            "inputs_intact": failures[0]["inputs_intact"] if failures else context["inputs_intact"],
+            "fs_owned": failures[0]["fs_owned"] if failures else context["fs_owned"],
+            "fs_link": failures[0]["fs_link"] if failures else context["fs_link"],
+            "fs_errno": failures[0]["fs_errno"] if failures else context["fs_errno"],
             "tests_run": int(counts[-1]) if counts else 0,
             "process_crashed": b"Process crashed" in raw, "runner_aborted": b"INSTRUMENTATION_ABORTED" in raw}
 

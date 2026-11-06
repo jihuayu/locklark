@@ -1,4 +1,5 @@
 import Foundation
+import LocklarkSecurityLogic
 
 enum VaultFiles {
     static func prepare(fileManager: FileManager = .default) throws -> URL {
@@ -39,6 +40,7 @@ enum VaultFiles {
             var resource = URLResourceValues()
             resource.isExcludedFromBackup = true
             try url.setResourceValues(resource)
+            url.removeCachedResourceValue(forKey: .isExcludedFromBackupKey)
             try fileManager.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: url.path)
             guard try url.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == true else {
                 throw PlatformProtectionError.storageDenied
@@ -59,7 +61,7 @@ enum VaultFiles {
         guard !enumerationFailed else { throw PlatformProtectionError.storageDenied }
         for url in urls {
             guard try url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink != true,
-                  try fileManager.attributesOfItem(atPath: url.path)[.protectionKey] as? FileProtectionType == .complete else {
+                  ProtectionAttribute.isComplete(try fileManager.attributesOfItem(atPath: url.path)[.protectionKey]) else {
                 throw PlatformProtectionError.storageDenied
             }
         }

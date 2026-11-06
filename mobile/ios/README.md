@@ -30,7 +30,10 @@ own development team. The generated project and build products are ignored.
 Runtime output, XCTest result bundles and screenshots under `Build/` are
 private synthetic-fixture evidence and may contain intentionally shown values.
 Do not upload those files or print the runtime log. The CI entry prints fixed
-PASS/FAIL labels. UI fixtures enter factors through the runner pasteboard and
+PASS/FAIL labels and allowlisted source locations/fixed failure reasons. The
+independent evidence verifier checks the complete runtime and exported result
+objects, including failed runs, against the private runner canary manifest.
+UI fixtures enter factors through the runner pasteboard and
 the system Paste action, clear it immediately, and use fixed boolean assertion
 messages instead of value diffs. There are no production test hooks or secret
 launch arguments.
@@ -57,13 +60,27 @@ non-synchronizing entries and no plaintext or weaker-accessibility fallback.
 This does not claim that the software age/Ed25519 keys are Secure Enclave keys.
 
 Every inactive/background transition immediately covers the UI, clears text
-and drafts, invalidates UI generations and requests the core lock. Blocking
+and drafts, invalidates ordinary UI work and requests the core lock. A Go-issued
+expected-epoch operation view is captured on the UI actor before queueing;
+worker cancellation tickets reject old queued work and clear captured buffers
+even when the operation never starts. New operations wait for lifecycle lock
+cleanup, so a late cleanup cannot revoke a newly captured unlock. Blocking
 cleanup and SecretValue.Clear run off the UI thread, including handle dealloc.
 Late results must match the operation owner, UI generation, exact selected
 ID/revision/field and unlocked core; disclosure also obeys both wall and
 monotonic budgets. Foregrounding never retries authentication automatically.
-If a system authentication prompt causes inactivity, this attempt fails closed
-and the user can use complete factors. No general inactivity exception exists.
+
+System unlock first checks capsule presence without reading its data or opening
+a prompt. An explicit OS preauthentication runs while the vault remains locked
+and covered. Only this separately owned, secret-free attempt can wait through
+its prompt's inactivity; actual backgrounding always cancels it. After success,
+the same attempt must be active, within its original ten-second monotonic
+authorization budget and past all lock cleanup before any core unlock starts.
+Keychain receives that single-use context with interaction disallowed, so its
+data load cannot start a second prompt. The covered phase retains an explicit
+cancel action through the core worker. No ordinary unlocked session survives
+inactivity, and complete factors remain available when system authentication
+is unavailable, cancelled or expired.
 
 Linux verification covers the pure state/deadline/control-character logic and
 source syntax only. Apple SDK compilation and actual simulator tests require

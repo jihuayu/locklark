@@ -68,8 +68,25 @@ final class OfflineVaultFlowTests: XCTestCase {
         return String(decoding: result, as: UTF8.self)
     }
 
+    @discardableResult private func waitActionable(_ element: XCUIElement, timeout: TimeInterval,
+                                                   message: String, ready: @escaping () -> Bool = { true }) -> Bool {
+        // Observe only control state. Never put a secret accessibility value in
+        // a predicate, activity name, assertion diff, or diagnostic description.
+        let predicate = NSPredicate { _, _ in element.exists && element.isEnabled && element.isHittable && ready() }
+        let expectation = XCTNSPredicateExpectation(predicate: predicate, object: nil)
+        let completed = XCTWaiter.wait(for: [expectation], timeout: timeout) == .completed
+        XCTAssertTrue(completed, message)
+        return completed
+    }
+
+    private func tapActionable(_ element: XCUIElement, timeout: TimeInterval = 10,
+                               message: String = "native control must be actionable") {
+        guard waitActionable(element, timeout: timeout, message: message) else { return }
+        element.tap() // One action after readiness; never retry a mutation.
+    }
+
     private func paste(_ text: String, into element: XCUIElement, app: XCUIApplication) {
-        XCTAssertTrue(element.waitForExistence(timeout: 10), "native input must exist")
+        guard waitActionable(element, timeout: 10, message: "native input must exist") else { return }
         UIPasteboard.general.setItems([[UTType.utf8PlainText.identifier: text]], options: [.localOnly: true, .expirationDate: Date().addingTimeInterval(30)])
         defer { UIPasteboard.general.items = [] }
         element.tap()
@@ -87,19 +104,23 @@ final class OfflineVaultFlowTests: XCTestCase {
     private func unlock(_ app: XCUIApplication, key: String) {
         paste(factor, into: app.secureTextFields["unlock-password"], app: app)
         paste(key, into: app.secureTextFields["unlock-secret-key"], app: app)
-        app.buttons["unlock-vault"].tap()
-        XCTAssertTrue(app.buttons["add-login"].waitForExistence(timeout: 30), "real vault list must open")
+        tapActionable(app.buttons["unlock-vault"])
+        waitActionable(app.buttons["add-login"], timeout: 30, message: "real vault list must open")
     }
 
     private func choose(_ app: XCUIApplication, title: String) {
         let row = app.buttons["row-title-" + title]
         if !row.isHittable { app.swipeUp() }
-        XCTAssertTrue(row.waitForExistence(timeout: 10), "saved metadata row must exist")
+        // Rows may remain visible/enabled during a mutation so users can cancel
+        // by selecting. Wait for the existing busy-sensitive list control too.
+        guard waitActionable(row, timeout: 10, message: "saved metadata row must exist", ready: {
+            app.buttons["add-login"].exists && app.buttons["add-login"].isEnabled
+        }) else { return }
         row.tap()
     }
 
     private func assertPassword(_ app: XCUIApplication, expected: String) {
-        app.buttons["show-password"].tap()
+        tapActionable(app.buttons["show-password"])
         let value = app.staticTexts["revealed-value"]
         XCTAssertTrue(value.waitForExistence(timeout: 15), "explicit disclosure must complete")
         XCTAssertTrue((value.value as? String) == expected, "explicit disclosure must contain the selected value")
@@ -110,8 +131,7 @@ final class OfflineVaultFlowTests: XCTestCase {
         let app = XCUIApplication()
         app.launch()
         let create = app.buttons["create-vault"]
-        XCTAssertTrue(create.waitForExistence(timeout: 15), "fresh sandbox must offer real vault creation")
-        create.tap()
+        tapActionable(create, timeout: 15, message: "fresh sandbox must offer real vault creation")
         paste(factor, into: app.secureTextFields["create-password"], app: app)
         paste(factor, into: app.secureTextFields["create-confirmation"], app: app)
         app.buttons["generate-secret-key"].tap()
@@ -122,8 +142,8 @@ final class OfflineVaultFlowTests: XCTestCase {
         let createButton = app.buttons["confirm-create"]
         XCTAssertFalse(createButton.isEnabled, "backup acknowledgement is mandatory")
         app.switches["backup-ack"].tap()
-        createButton.tap()
-        XCTAssertTrue(app.secureTextFields["unlock-password"].waitForExistence(timeout: 30), "creation must leave a locked actual database")
+        tapActionable(createButton)
+        waitActionable(app.secureTextFields["unlock-password"], timeout: 30, message: "creation must leave a locked actual database")
         unlock(app, key: key)
         app.buttons["add-login"].tap()
         app.textFields["login-title"].tap()
@@ -135,7 +155,7 @@ final class OfflineVaultFlowTests: XCTestCase {
         assertPassword(app, expected: firstPassword)
         XCUIDevice.shared.press(.home)
         app.activate()
-        XCTAssertTrue(app.secureTextFields["unlock-password"].waitForExistence(timeout: 10), "backgrounding must lock")
+        waitActionable(app.secureTextFields["unlock-password"], timeout: 10, message: "backgrounding must lock")
         XCTAssertFalse(app.staticTexts["revealed-value"].exists, "backgrounding must clear disclosed text")
         app.buttons["system-unlock"].tap()
         XCTAssertTrue(app.secureTextFields["unlock-password"].exists, "quick unlock must not auto-enable after full-factor unlock")
@@ -162,7 +182,7 @@ final class OfflineVaultFlowTests: XCTestCase {
         choose(app, title: "Offline fixture")
         while Int(Date().timeIntervalSince1970) % period > 8 { Thread.sleep(forTimeInterval: 0.2) }
         let before = Int(Date().timeIntervalSince1970)
-        app.buttons["show-otp-code"].tap()
+        tapActionable(app.buttons["show-otp-code"])
         let otp = app.staticTexts["revealed-value"]
         XCTAssertTrue(otp.waitForExistence(timeout: 15), "explicit OTP disclosure must complete")
         let code = record(otp.value as? String ?? "")
@@ -179,14 +199,14 @@ final class OfflineVaultFlowTests: XCTestCase {
         app.switches["login-generate"].tap()
         app.buttons["save-login"].tap()
         choose(app, title: "Generated fixture")
-        app.buttons["show-password"].tap()
+        tapActionable(app.buttons["show-password"])
         let generated = app.staticTexts["revealed-value"]
         XCTAssertTrue(generated.waitForExistence(timeout: 15), "generated password must require explicit display")
         let previous = record(generated.value as? String ?? "")
         XCTAssertTrue(previous.count == 24, "generated password must follow the requested length")
         app.buttons["regenerate-password"].tap()
         choose(app, title: "Generated fixture")
-        app.buttons["show-password"].tap()
+        tapActionable(app.buttons["show-password"])
         XCTAssertTrue(generated.waitForExistence(timeout: 15), "regenerated password must require explicit display")
         let changed = record(generated.value as? String ?? "")
         XCTAssertTrue(changed.count == 24 && changed != previous, "regeneration must persist a new value")
@@ -196,7 +216,7 @@ final class OfflineVaultFlowTests: XCTestCase {
         XCTAssertTrue(app.buttons["row-title-Offline fixture"].waitForExistence(timeout: 10), "title search must find the existing login")
         XCTAssertFalse(app.buttons["row-title-Generated fixture"].exists, "title search must filter unrelated metadata")
         app.buttons["lock-vault"].tap()
-        XCTAssertTrue(app.secureTextFields["unlock-password"].waitForExistence(timeout: 10), "manual lock must clear the session")
+        waitActionable(app.secureTextFields["unlock-password"], timeout: 10, message: "manual lock must clear the session")
         unlock(app, key: key)
         choose(app, title: "Offline fixture")
         assertPassword(app, expected: replacementPassword)

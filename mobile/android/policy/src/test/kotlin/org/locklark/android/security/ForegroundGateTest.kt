@@ -38,16 +38,27 @@ class ForegroundGateTest {
         assertTrue(gate.accepts(gate.begin(b), b))
     }
 
+    @Test fun rollbackWithinOriginalPeriodClearsDisplayImmediately() {
+        val lease = SecretDeadline.create(5_000, 30_000, 5_000, 1_000)!!
+        assertTrue(lease.validAt(1_010, 5_010))
+        assertFalse(lease.validAt(1_020, 4_999))
+    }
+
+    @Test fun wallJumpPastOriginalEndClearsWithoutWaitingForMonotonicCap() {
+        val lease = SecretDeadline.create(5_000, 30_000, 5_000, 1_000)!!
+        assertFalse(lease.validAt(1_010, 30_000))
+    }
+
     @Test fun leaseChecksStartAndEndAndUsesBoundedMonotonicDeadline() {
         assertNull(SecretDeadline.create(100, 200, 99, 1000))
         assertNull(SecretDeadline.create(100, 200, 200, 1000))
         assertNull(SecretDeadline.create(100, 99, 150, 1000))
         val clipped = SecretDeadline.create(100, 1_000_000, 150, 1000)!!
-        assertTrue(clipped.validAt(15_999))
-        assertFalse(clipped.validAt(16_000))
-        assertFalse(clipped.validAt(999))
+        assertTrue(clipped.validAt(15_999, 150))
+        assertFalse(clipped.validAt(16_000, 150))
+        assertFalse(clipped.validAt(999, 150))
         val otp = SecretDeadline.create(100, 200, 150, 1000)!!
-        assertTrue(otp.validAt(1049))
-        assertFalse(otp.validAt(1050))
+        assertTrue(otp.validAt(1049, 199))
+        assertFalse(otp.validAt(1050, 199))
     }
 }

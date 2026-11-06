@@ -22,6 +22,10 @@ import mobilecore.SystemUnlockStore
 import mobilecore.Vault
 import org.locklark.android.security.ForegroundGate
 import org.locklark.android.security.GuardedWork
+import org.locklark.android.security.NativeFailures
+import org.locklark.android.security.NativePhase
+import org.locklark.android.security.NativeFailureCode
+import org.locklark.android.security.NativeCallFailure
 import org.locklark.android.security.CancellationSlot
 import org.locklark.android.security.SecretDeadline
 import org.locklark.android.security.Target
@@ -58,7 +62,7 @@ class MainActivity : Activity() {
     }
     private val tick = object : Runnable {
         override fun run() {
-            if (secretDeadline?.validAt(SystemClock.elapsedRealtime()) == false) clearDisplay()
+            if (secretDeadline?.validAt(SystemClock.elapsedRealtime(), System.currentTimeMillis()) == false) clearDisplay()
             if (unlockedUi && vault?.isUnlocked() != true) lockNow()
             main.postDelayed(this, 100)
         }
@@ -110,6 +114,10 @@ class MainActivity : Activity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        if (secretDeadline?.validAt(SystemClock.elapsedRealtime(), System.currentTimeMillis()) == false) clearDisplay()
+    }
     override fun onStop() {
         gate.stop()
         vault?.requestLock()
@@ -178,15 +186,16 @@ class MainActivity : Activity() {
         buttons.forEach { it.isEnabled = !value || it.tag == "lock" }
         inputs.forEach { it.isEnabled = !value }
     }
-    private fun message(unknown: Boolean = false) {
-        status.text = if (unknown) "结果未确认，请重新打开金库核实，勿重复提交。"
-            else "操作未完成：认证被取消、金库已锁定或目标已变化。"
+    private fun message(failure: NativeCallFailure) {
+        status.text = if (failure.code == NativeFailureCode.UNKNOWN) "结果未确认，请重新打开金库核实，勿重复提交。"
+            else failure.phase.userText + "未完成：" + failure.code.userText
     }
+
     private fun <T> work(target: Target? = null, task: (WorkStamp, Vault?) -> T, drop: (T) -> Unit = {}, dropOnWorker: Boolean = false, releaseInputs: () -> Unit = {}, done: (T) -> Unit) {
         if (busy) { releaseInputs(); return }
         val stamp = try { gate.begin(target) } catch (_: IllegalStateException) { releaseInputs(); return }
         // Nonblocking core view capture is on the UI thread before queuing.
-        val capturedVault = try { vault?.captureOperation() } catch (_: Exception) { releaseInputs(); message(); return }
+        val capturedVault = try { vault?.captureOperation() } catch (error: Exception) { releaseInputs(); message(NativeCallFailure(NativePhase.CAPTURE, NativeFailures.classify(error))); return }
         setBusy(true)
         worker.execute {
             try {
@@ -196,8 +205,8 @@ class MainActivity : Activity() {
                     else { if (dropOnWorker) cleanup.execute { drop(value) } else drop(value); if (vault == null) opening = false }
                 }
             } catch (error: Exception) {
-                val unknown = error.message?.contains("unknown", ignoreCase = true) == true
-                main.post { if (gate.accepts(stamp, target)) { setBusy(false); opening = false; message(unknown) } }
+                val failure = error as? NativeCallFailure ?: NativeCallFailure(NativePhase.OPERATION, NativeFailures.classify(error))
+                main.post { if (gate.accepts(stamp, target)) { setBusy(false); opening = false; message(failure) } }
             }
         }
     }
@@ -228,7 +237,7 @@ class MainActivity : Activity() {
             clearInputs()
             work(releaseInputs = { pw.fill(0); encodedKey.fill(0) }, task = { stamp, api ->
                 var decoded = ByteArray(0)
-                try { decoded = Mobilecore.parseSecretKey(String(encodedKey, Charsets.UTF_8)); GuardedWork.ensureCurrent(gate, stamp); api!!.unlock(pw, decoded) }
+                try { decoded = Mobilecore.parseSecretKey(String(encodedKey, Charsets.UTF_8)); GuardedWork.ensureCurrent(gate, stamp); NativeFailures.call(NativePhase.UNLOCK) { api!!.unlock(pw, decoded) } }
                 finally { pw.fill(0); decoded.fill(0) }
             }) { showList() }
         }
@@ -257,7 +266,7 @@ class MainActivity : Activity() {
             clearBackupView()
             work(releaseInputs = { pw.fill(0); accountKey.fill(0) }, task = { stamp, api ->
                 val createPassword = pw.copyOf(); val createKey = accountKey.copyOf()
-                try { api!!.create(createPassword, createKey); GuardedWork.ensureCurrent(gate, stamp); api!!.unlock(pw, accountKey) }
+                try { NativeFailures.call(NativePhase.CREATE) { api!!.create(createPassword, createKey) }; GuardedWork.ensureCurrent(gate, stamp); NativeFailures.call(NativePhase.UNLOCK) { api!!.unlock(pw, accountKey) } }
                 finally { createPassword.fill(0); createKey.fill(0); pw.fill(0); accountKey.fill(0) }
             }) { showList() }
         }
@@ -276,7 +285,7 @@ class MainActivity : Activity() {
         button("停用此设备认证", "disable-quick-unlock") {
             work(task = { stamp, api -> api!!.disableSystemUnlock(store(stamp)) }) { status.text = "本设备授权已删除。" }
         }
-        work(task = { _, api -> if (query == null) api!!.list("active") else api!!.search(query, "active") }) { rows ->
+        work(task = { _, api -> NativeFailures.call(NativePhase.REFRESH) { if (query == null) api!!.list("active") else api!!.search(query, "active") } }) { rows ->
             for (i in 0 until rows.count()) {
                 val row = rows.at(i)
                 label("ID: " + row.getID())

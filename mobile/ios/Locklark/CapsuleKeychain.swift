@@ -35,13 +35,15 @@ final class CapsuleKeychain {
     private let service: String
     private let client: KeychainClient
     private let makeAccessControl: (CFString, SecAccessControlCreateFlags) throws -> SecAccessControl
+    private let authorization: SystemAuthenticationAuthorization?
     private let contextLock = NSLock()
     private var contexts: [UUID: LAContext] = [:]
     private var acceptingAuthentication = true
 
-    init(service: String = "org.locklark.mobile.ios.system-unlock", client: KeychainClient = SystemKeychainClient(), makeAccessControl: ((CFString, SecAccessControlCreateFlags) throws -> SecAccessControl)? = nil) {
+    init(service: String = "org.locklark.mobile.ios.system-unlock", client: KeychainClient = SystemKeychainClient(), authorization: SystemAuthenticationAuthorization? = nil, makeAccessControl: ((CFString, SecAccessControlCreateFlags) throws -> SecAccessControl)? = nil) {
         self.service = service
         self.client = client
+        self.authorization = authorization
         self.makeAccessControl = makeAccessControl ?? { accessibility, flags in
             var error: Unmanaged<CFError>?
             guard let control = SecAccessControlCreateWithFlags(nil, accessibility, flags, &error) else {
@@ -85,8 +87,9 @@ final class CapsuleKeychain {
 
     func load(id: String) throws -> Data {
         var attributes = try query(id: id)
-        let context = LAContext()
-        context.touchIDAuthenticationAllowableReuseDuration = 0
+        guard let authorization else { throw PlatformProtectionError.authenticationCancelled }
+        let context = try authorization.take()
+        defer { context.invalidate() }
         let token = UUID()
         contextLock.lock()
         guard acceptingAuthentication else {
@@ -102,7 +105,7 @@ final class CapsuleKeychain {
             context.invalidate()
         }
         attributes[kSecUseAuthenticationContext as String] = context
-        attributes[kSecUseOperationPrompt as String] = "解锁此设备上的 Locklark 金库"
+        attributes[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
         attributes[kSecReturnData as String] = true
         attributes[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: CFTypeRef?
@@ -128,6 +131,25 @@ final class CapsuleKeychain {
         }
     }
 
+    // Only attributes are queried. A disabled quick unlock should not launch
+    // an OS authentication prompt, and this never reads capsule plaintext.
+    func hasCapsule() throws -> Bool {
+        let attributes: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrSynchronizable as String: false,
+            kSecUseDataProtectionKeychain as String: true,
+            kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail,
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var result: CFTypeRef?
+        let status = client.copy(attributes, result: &result)
+        if status == errSecItemNotFound { return false }
+        if status == errSecSuccess || status == errSecInteractionNotAllowed { return true }
+        throw PlatformProtectionError.storageDenied
+    }
+
     // Never hold a lock across Security.framework or an authentication dialog.
     func cancelAuthentication() {
         contextLock.lock()
@@ -135,5 +157,6 @@ final class CapsuleKeychain {
         let pending = Array(contexts.values)
         contextLock.unlock()
         pending.forEach { $0.invalidate() }
+        authorization?.cancel()
     }
 }

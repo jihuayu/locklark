@@ -19,6 +19,11 @@ class RuntimeWrapperTests(unittest.TestCase):
         self.assertNotIn("private-field-contents", str(result))
         self.assertEqual(safe_diagnostic(b"INSTRUMENTATION_STATUS: locklark_stage=private-field-contents")["step"], "unknown")
 
+    def test_later_success_does_not_replace_failed_test_context(self):
+        raw = b"INSTRUMENTATION_STATUS: locklark_stage=create\nINSTRUMENTATION_STATUS: locklark_wait=account-key\nINSTRUMENTATION_STATUS_CODE: -2\nINSTRUMENTATION_STATUS: locklark_stage=bound-operation\nINSTRUMENTATION_STATUS_CODE: 0\n"
+        self.assertEqual(safe_diagnostic(raw)["step"], "create")
+        self.assertEqual(safe_diagnostic(raw)["wait"], "account-key")
+
     def test_even_failed_test_output_must_be_scanned(self):
         values = ["master-fixture", "account-fixture", "username-fixture", "password-fixture", "line one private\nline two private"]
         scan_output(b"fixed failure stage only", values)

@@ -18,6 +18,8 @@ import androidx.test.platform.app.InstrumentationRegistry
 import org.json.JSONArray
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.locklark.android.security.NativeFailureCode
+import org.locklark.android.security.NativePhase
 import org.junit.runner.RunWith
 import java.io.File
 import java.security.SecureRandom
@@ -86,7 +88,13 @@ class OfflineVaultTest {
             text("status").isEmpty() -> "empty"
             else -> "other"
         }
-        instrumentation.sendStatus(0, android.os.Bundle().apply { putString("locklark_ui_status", uiStatus) })
+        val status = text("status")
+        val phase = NativePhase.entries.firstOrNull { status.startsWith(it.userText + "未完成") }?.name?.lowercase() ?: "unknown"
+        val error = NativeFailureCode.entries.firstOrNull { status.endsWith(it.userText) }?.name?.lowercase() ?: "unknown"
+        instrumentation.sendStatus(0, android.os.Bundle().apply {
+            putString("locklark_ui_status", uiStatus)
+            putString("locklark_core_phase", phase); putString("locklark_core_error", error)
+        })
         assertTrue(message, false)
     }
     private fun ready(tag: String): Boolean {

@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import LocalAuthentication
 import LocklarkSecurityLogic
 
 @MainActor
@@ -10,6 +11,8 @@ final class VaultModel: ObservableObject {
     @Published private(set) var covered = false
     @Published private(set) var busy = false
     @Published private(set) var settlingLock = false
+    @Published private(set) var authenticating = false
+    @Published private(set) var systemUnlockPending = false
     @Published private(set) var rows: [LLRow] = []
     @Published private(set) var selected: LLRow?
     @Published private(set) var revealed = ""
@@ -36,15 +39,22 @@ final class VaultModel: ObservableObject {
     private var operation = OperationBoundary()
     private let cancellation = CancellationScope()
     private var preparingStorage = false
-    private var pendingLockCleanups = 0
+    private var lockCleanup = LockCleanupBoundary()
     private var vault: LLVault?
     private var databaseURL: URL?
     private var disclosure: LLDisclosure?
     private var exposure = ExposureBoundary()
     private var expiryTask: Task<Void, Never>?
     private var idleTask: Task<Void, Never>?
+    private var ownedAuthentication = OwnedAuthentication()
+    private var authenticationToken: AuthenticationToken?
+    private var authenticationContext: LAContext?
+    private var authenticationSucceededAt: ContinuousClock.Instant?
+    private var authenticationTimeout: Task<Void, Never>?
+    private let authenticationCancellation = CancellationScope()
+    private let authenticationClockOrigin = ContinuousClock.now
     var hasDisclosure: Bool { disclosure != nil }
-    var interactionBusy: Bool { busy || settlingLock }
+    var interactionBusy: Bool { busy || settlingLock || authenticating }
 
     init() {
         initializeStorage()
@@ -121,6 +131,7 @@ final class VaultModel: ObservableObject {
 
     func sceneInactive() {
         covered = true
+        if !authenticating { systemUnlockPending = false }
         boundary.resignActive()
         invalidateUI()
         preparingStorage = false
@@ -132,12 +143,17 @@ final class VaultModel: ObservableObject {
 
     func sceneActive() {
         boundary.becomeActive()
-        covered = false
+        covered = authenticating
+        if authenticating {
+            continueOwnedAuthenticationIfReady()
+            return
+        }
         if vault == nil { initializeStorage() } else if !unlocked && !settlingLock { refreshPresence() }
         // Returning from a system prompt never automatically retries unlock.
     }
 
     func lock() {
+        cancelOwnedAuthentication(message: nil)
         boundary.lock()
         invalidateUI()
         vault?.requestLock()
@@ -148,15 +164,18 @@ final class VaultModel: ObservableObject {
 
     private func scheduleLockCleanup() {
         guard let vault else { return }
-        pendingLockCleanups += 1
+        let owner = lockCleanup.begin()
         settlingLock = true
         worker.async { [weak self] in
             vault.lock()
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.pendingLockCleanups -= 1
-                self.settlingLock = self.pendingLockCleanups != 0
-                if !self.settlingLock, self.boundary.isActive, !self.unlocked { self.refreshPresence() }
+                guard self.lockCleanup.finish(owner) else { return }
+                self.settlingLock = self.lockCleanup.isPending
+                if !self.settlingLock, self.boundary.isActive {
+                    if self.authenticating { self.continueOwnedAuthenticationIfReady() }
+                    else if !self.unlocked { self.refreshPresence() }
+                }
             }
         }
     }
@@ -305,23 +324,127 @@ final class VaultModel: ObservableObject {
     }
 
     func unlockWithSystem() {
-        guard hasVault, !interactionBusy, let attempt = boundary.beginUnlock() else { return }
+        guard ready, hasVault, !interactionBusy, boundary.isActive else { return }
+        lock() // preauthentication starts with no open session or visible values
+        guard let token = ownedAuthentication.begin(vaultLocked: vault?.isUnlocked() != true, isActive: boundary.isActive, monotonicNow: authenticationMillis()) else { return }
+        let context = LAContext()
+        context.touchIDAuthenticationAllowableReuseDuration = 0
+        context.localizedCancelTitle = "取消"
+        authenticationContext = context
+        authenticationToken = token
+        authenticationSucceededAt = nil
+        authenticating = true
+        systemUnlockPending = true
+        covered = true
+        armAuthenticationTimeout(token, milliseconds: 60_000)
+        let ticket = authenticationCancellation.ticket()
+        worker.async { [weak self] in
+            do {
+                try ticket.run {
+                    guard try CapsuleKeychain().hasCapsule() else { throw PlatformProtectionError.unavailable }
+                    try ticket.check()
+                    var error: NSError?
+                    guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) else { throw PlatformProtectionError.unavailable }
+                    try ticket.check()
+                    context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "解锁此设备上已启用的 Locklark 金库") { success, _ in
+                        let completed = ContinuousClock.now
+                        DispatchQueue.main.async {
+                            self?.receivedSystemAuthentication(token, context: context, success: success, completed: completed)
+                        }
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    guard let self, self.ownedAuthentication.owns(token) else { context.invalidate(); return }
+                    self.cancelOwnedAuthentication(message: "本机快速解锁不可用或验证已取消；请使用完整因素。")
+                }
+            }
+        }
+    }
+
+    func sceneBackground() {
+        cancelOwnedAuthentication(message: nil)
+        sceneInactive()
+    }
+
+    func cancelSystemAuthentication() {
+        let pending = systemUnlockPending
+        cancelOwnedAuthentication(message: nil)
+        if pending { lock() }
+        status = "系统验证已取消。"
+    }
+
+    private func cancelOwnedAuthentication(message: String?) {
+        authenticationCancellation.invalidate()
+        ownedAuthentication.cancel()
+        authenticationToken = nil
+        authenticationSucceededAt = nil
+        authenticationTimeout?.cancel()
+        authenticationTimeout = nil
+        authenticationContext?.invalidate()
+        authenticationContext = nil
+        authenticating = false
+        systemUnlockPending = false
+        if boundary.isActive { covered = false }
+        if let message { status = message }
+    }
+
+    private func receivedSystemAuthentication(_ token: AuthenticationToken, context: LAContext, success: Bool, completed: ContinuousClock.Instant) {
+        guard ownedAuthentication.owns(token), authenticationContext === context else { context.invalidate(); return }
+        guard success, ownedAuthentication.systemSucceeded(token, monotonicNow: authenticationMillis(at: completed)) else {
+            cancelOwnedAuthentication(message: "系统验证未完成；请重新发起或使用完整因素。")
+            return
+        }
+        context.interactionNotAllowed = true
+        authenticationSucceededAt = completed
+        let remaining = 10_000 - (authenticationMillis() - authenticationMillis(at: completed))
+        guard remaining > 0 else { cancelOwnedAuthentication(message: "系统验证已过期。请重新发起。"); return }
+        armAuthenticationTimeout(token, milliseconds: remaining)
+        continueOwnedAuthenticationIfReady()
+    }
+
+    private func continueOwnedAuthenticationIfReady() {
+        guard authenticating, !settlingLock, boundary.isActive,
+              let token = authenticationToken, let context = authenticationContext,
+              let authenticatedAt = authenticationSucceededAt,
+              ownedAuthentication.consume(token, isActive: true, monotonicNow: authenticationMillis()) else { return }
+        authenticationTimeout?.cancel()
+        authenticationTimeout = nil
+        authenticationToken = nil
+        authenticationContext = nil
+        authenticationSucceededAt = nil
+        authenticating = false
+        guard let attempt = boundary.beginUnlock() else { context.invalidate(); return }
         let owner = beginOperation()
-        let store = NativeSystemUnlockStore()
+        let store = NativeSystemUnlockStore(authorization: SystemAuthenticationAuthorization(context: context, authenticatedAt: authenticatedAt))
         activeAuthentication = store
         let directory = databaseURL?.deletingLastPathComponent()
         performChecked({ vault, ticket in
             if let directory { try VaultFiles.verifyProtection(directory: directory) }
             try ticket.check()
             try vault.unlockWithSystem(store)
-        }, completion: { [weak self] result in
-            self?.finishUnlock(result, attempt: attempt, owner: owner)
-        })
+        }, completion: { [weak self] result in self?.finishUnlock(result, attempt: attempt, owner: owner) })
+    }
+
+    private func armAuthenticationTimeout(_ token: AuthenticationToken, milliseconds: Int64) {
+        authenticationTimeout?.cancel()
+        authenticationTimeout = Task { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(milliseconds)) } catch { return }
+            guard !Task.isCancelled, let self, self.ownedAuthentication.owns(token) else { return }
+            self.cancelOwnedAuthentication(message: "系统验证已过期。请重新发起。")
+        }
+    }
+
+    private func authenticationMillis(at instant: ContinuousClock.Instant = .now) -> Int64 {
+        let value = authenticationClockOrigin.duration(to: instant).components
+        return value.seconds * 1_000 + value.attoseconds / 1_000_000_000_000_000
     }
 
     private func finishUnlock(_ result: Result<Void, Error>, attempt: ScreenToken, owner: OperationToken) {
         guard finishOperation(owner), boundary.finishUnlock(attempt) else { return }
         activeAuthentication = nil
+        systemUnlockPending = false
+        covered = false
         switch result {
         case .success:
             guard vault?.isUnlocked() == true else { lock(); return }

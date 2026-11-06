@@ -190,9 +190,14 @@ class PlatformCapsuleStore(context: Context, private val prompt: NativeCryptoPro
     private fun atomicWrite(file: AtomicFile, value: ByteArray) {
         val output = file.startWrite()
         try {
-            Os.chmod(file.baseFile.path, 384)
+            Os.fchmod(output.fd, 384)
             output.write(value)
             file.finishWrite(output)
+            val committed = Os.stat(file.baseFile.path)
+            if (committed.st_mode and 511 != 384 || committed.st_size != value.size.toLong()) {
+                file.delete()
+                throw PlatformAuthenticationFailure()
+            }
         } catch (error: Exception) {
             file.failWrite(output)
             throw error

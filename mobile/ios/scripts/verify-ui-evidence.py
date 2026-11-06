@@ -291,11 +291,22 @@ def parser():
     return result
 
 
+def failure_summary(stage, files, manifest_valid, manifest_complete, export_complete):
+    stage = stage if isinstance(stage, str) and stage in STAGES else "prerequisites"
+    count = min(files, 99999) if type(files) is int and files >= 0 else 0
+    boolean = lambda value: "true" if value is True else "false"
+    return ("FAIL: iOS UI evidence validation stage=" + stage + " files=" + str(count)
+            + " manifest_valid=" + boolean(manifest_valid)
+            + " manifest_complete=" + boolean(manifest_complete)
+            + " export_complete=" + boolean(export_complete))
+
+
 def main(argv=None):
     args = parser().parse_args(argv)
     os.umask(0o077)
     verifier = None
     success = False
+    stage = "prerequisites"
     try:
         verifier = EvidenceVerifier(args)
         success = verifier.execute()
@@ -314,7 +325,12 @@ def main(argv=None):
                       "manifest_valid": verifier.manifest_valid, "manifest_complete": verifier.manifest_complete,
                       "xcresult_export_complete": verifier.export_complete, "files_scanned": len(verifier.files)}
             (verifier.root / "result.json").write_text(json.dumps(result) + "\n")
-        print("PASS: iOS UI evidence canary scan" if success else "FAIL: iOS UI evidence validation")
+        if success:
+            print("PASS: iOS UI evidence canary scan")
+        elif verifier:
+            print(failure_summary(stage, len(verifier.files), verifier.manifest_valid, verifier.manifest_complete, verifier.export_complete))
+        else:
+            print(failure_summary(stage, 0, False, False, False))
         if verifier:
             print("Private iOS UI evidence: " + str(verifier.root))
     return 0 if success else 1

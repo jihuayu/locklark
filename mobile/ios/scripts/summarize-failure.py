@@ -9,6 +9,19 @@ KNOWN_SOURCES = {p.name for p in Path(__file__).resolve().parents[1].rglob("*") 
 TESTS = {}
 DECLARATIONS = {}
 REASONS = set()
+
+
+def fixed_reasons(source):
+    reasons = {"native control must be actionable"}
+    literals = re.findall(r'XCT(?:Assert\w*|Fail)\([^\n]*"([^"\n]*)"\s*\)', source)
+    literals += re.findall(r'\b(?:waitActionable|tapActionable)\([^\n;]*\bmessage:\s*"([^"\n]*)"', source)
+    for reason in literals:
+        if "\\(" not in reason and 0 < len(reason) <= 180:
+            reasons.add(reason)
+    reasons.update(re.findall(r'case\s+\w+\s*=\s*"(core-phase-[a-z-]+)"', source))
+    return reasons
+
+
 for path in Path(__file__).resolve().parents[1].rglob("*.swift"):
     if "Build" in path.parts or "Tests" not in str(path.parent):
         continue
@@ -19,9 +32,7 @@ for path in Path(__file__).resolve().parents[1].rglob("*.swift"):
     for match in re.finditer(r"\bfunc\s+(test\w+)\s*\(", source):
         for name in classes:
             DECLARATIONS[(name, match[1])] = (path.name, source[:match.start()].count("\n") + 1)
-    for reason in re.findall(r'XCT(?:Assert\w*|Fail)\([^\n]*"([^"\n]*)"\s*\)', source):
-        if "\\(" not in reason and 0 < len(reason) <= 180:
-            REASONS.add(reason)
+    REASONS.update(fixed_reasons(source))
 
 
 def summary(text):

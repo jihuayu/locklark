@@ -14,12 +14,24 @@ struct LocklarkApp: App {
                 .overlay {
                     if model.covered {
                         Color(uiColor: .systemBackground).ignoresSafeArea()
-                            .overlay { Label("Locklark 已锁定", systemImage: "lock.fill").font(.title2) }
+                            .overlay {
+                                VStack(spacing: 24) {
+                                    Label("Locklark 已锁定", systemImage: "lock.fill").font(.title2)
+                                    if model.systemUnlockPending {
+                                        Button("取消系统验证") { model.cancelSystemAuthentication() }.accessibilityIdentifier("cancel-system-auth")
+                                    }
+                                }
+                            }
                             .accessibilityIdentifier("privacy-cover")
                     }
                 }
                 .onChange(of: scenePhase, initial: true) { _, phase in
-                    if phase == .active { model.sceneActive() } else { model.sceneInactive() }
+                    switch phase {
+                    case .active: model.sceneActive()
+                    case .inactive: model.sceneInactive()
+                    case .background: model.sceneBackground()
+                    @unknown default: model.sceneBackground()
+                    }
                 }
         }
     }

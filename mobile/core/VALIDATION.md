@@ -3,7 +3,48 @@
 The core uses the actual encrypted personal vault and signed audit journal on
 disk. It has no synthetic repository, network backend, or team upload method.
 
-## Current v3 result
+## Android publication correction after v3
+
+Actual Android acceptance refused vault creation. Android's AOSP policy
+`private/app_neverallows.te` explicitly forbids hard links for all untrusted
+applications, including their own files. The old personal publisher used
+`os.Link`; a real Android shell-UID filesystem probe also returned EACCES (13)
+for that operation. The official policy is available at
+<https://android.googlesource.com/platform/system/sepolicy/+/refs/heads/main/private/app_neverallows.te>.
+
+The v4 correction changes only Android publication to kernel-enforced
+`renameat2(RENAME_NOREPLACE)`. It preserves the complete-file fsync before
+publication and directory fsync afterwards. Existing destinations cannot be
+overwritten, concurrent creation has one complete winner, and directory-sync
+failure leaves the complete published file for inspection. An unsupported
+kernel/filesystem fails closed; there is no hard-link, replacing-rename or
+placeholder fallback. iOS retains its original publisher, and Linux desktop
+continues using its original publisher.
+
+The four publication regressions passed on the host (0.019s normal, 1.039s race).
+The exact same Go tests were crosscompiled for Android and executed on the
+owned API 35 emulator, where all four passed: existing target preservation,
+one complete concurrent winner, complete-file retention on directory-sync
+failure, and unsupported-kernel refusal. That execution was shell UID 2000,
+not the installed app's untrusted-app UID/SELinux domain. It proves the real
+Android kernel/Go atomic helper, while installed-app JNI and UI acceptance
+remain separate platform checks.
+
+A private app_process JNI harness reached its filesystem probe but exited
+before reporting the Go key/create phases. That harness is not recorded as a
+JNI or application success. The original failing CI application result and all
+private diagnostic artifacts are retained.
+
+The v4 AAR warm bind passed with 89 exact transitive inputs (84 platform files
+per Android ABI), before/after input equality and zero current mismatches.
+The immutable local artifact under `/tmp/locklark-tools/mobile/core-final-v4`
+has SHA-256 `f306122940008c1e81bc45f91112fff32771d036d5120328fd08cf7196a3cd8f`;
+its source manifest has SHA-256
+`45556f2cfce45630a6e956c115a49e048424187c6e28af1d5ba01c4eb93b99a7`.
+Installed-app JNI/UI proof must use this corrected artifact or a fresh binding
+from the same source, and is not implied by the shell-UID helper tests.
+
+## v3 security result retained by v4
 
 CaptureOperation returns an immutable epoch-bound Vault view over shared state.
 Native UI captures that view before queueing work; the controller remains the
