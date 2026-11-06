@@ -76,3 +76,7 @@ Firefox完整正常链路exit 0，日志 `browser-otp-candidate3-parent-firefox-
 Chromium最终完整正常链路exit 0，日志 `browser-otp-candidate3-parent-chromium-draft4.log`，私有state `QYOIAS`；覆盖与Firefox相同的既有fill/save/update及全部OTP正负场景。主代理另外对完整重定向输出独立派生所有相关时间窗口6/8位码及因素变体扫描，通过。产品和工具manifest再次全部匹配，31个变更Go文件gofmt检查无差异。精确head远端CI在PR创建后核验，不用本地成功替代。
 
 主代理独立Chromium最终故障复跑exit 0（`browser-otp-candidate3-parent-chromium-draft4-fault.log`，wrapper `9k4ns38l`）：真实原生批准并经独立HMAC核码之后，携码driver参数故障按预期使子进程exit 1；外层完整controller因素/相关窗口码扫描通过，OTP失败截图为零。Luna对Go候选3及扩展draft4均无阻塞结论；本地验收门槛关闭。
+
+## 合并结果
+
+[PR #29](https://github.com/jihuayu/locklark/pull/29) 的最终head `ced61e5391c19d761e3ded615d5afd4074b20906` 在 [run 42133038819](https://github.com/jihuayu/locklark/actions/runs/42133038819) 的Linux、Windows、macOS和Web四项检查全部通过。主代理另外核对CI完整日志中Chromium/Firefox正常链路及两种OTP参数故障均实际执行并通过。2026-11-06 00:04:59 UTC正常squash合入 main `20e27aa48b6ac855e027cc7abde64fc3c56591f7`。以上更新前文历史等待状态；物理系统解锁、Safari/手机/Passkey等持续范围未由本批关闭。下一批为[桌面快捷搜索](desktop-quick-search-design.md)。

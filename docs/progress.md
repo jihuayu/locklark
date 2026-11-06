@@ -1,5 +1,7 @@
 # Locklark 开发进度
 
+浏览器逐次原生批准OTP [PR #29](https://github.com/jihuayu/locklark/pull/29) 已由Sol xhigh实现，Luna max复审、主代理固定构建的两浏览器完整GUI与故障隐私验收通过；精确head `ced61e5` 的四项CI（run `42133038819`）全部通过，合入 main `20e27aa`。继续从此主线实现[MyGo快捷搜索](desktop-quick-search-design.md)，同样保留Sol实现、Luna review及主代理设计/验收分工；固定v2已通过主代理完整日常回归与真实全局快捷搜索验收，精确head远端CI和合并门槛待完成。
+
 桌面日常生成/TOTP与系统剪贴板所有权 [PR #28](https://github.com/jihuayu/locklark/pull/28) 已经Sol xhigh实现、Luna/max复审、主代理独立完整GUI与精确head `85b400ff` 的四项CI（run `42120014509`）合入 main `4f37d8c`。Windows部分写入失败通过先发布nonce再发布文本修复，Windows/macOS原生smoke均实际通过。继续从此主线实现浏览器逐次原生批准的验证码填充，见[浏览器OTP架构](browser-otp-design.md)与[验收](browser-otp-validation.md)；同样按主代理设计/验收、Sol xhigh实现、Luna max review分工；浏览器OTP已完成固定构建的两引擎真实GUI及本地回归，Luna无阻塞，PR与精确head CI合并门槛仍待完成。
 
 浏览器保存/更新 [PR #27](https://github.com/jihuayu/locklark/pull/27) 已经 Luna/max、主代理独立两浏览器完整验收及精确head `8d63fd6` 的四项CI（run `42089993817`）合入 main `c9d4a5d`。继续从该主线实施MyGo原生强密码生成和TOTP日常操作，见[桌面架构](desktop-daily-design.md)与[桌面验收](desktop-daily-validation.md)，仍由Sol xhigh实现、主代理设计验收、Luna max审阅。 桌面生成/OTP核心及竞态测试已通过；真实GUI发现锁定同步读取foreign剪贴板会阻塞，已改为系统ownership lease。最终v4已通过主代理独立完整GUI、故障隐私扫描、53项工具测试及Luna/max复审；锁定foreign-owner场景647ms发布界面、零读取请求。[PR #28](https://github.com/jihuayu/locklark/pull/28) 首轮CI已通过macOS原生剪贴板，Windows部分写入清理出现真实失败，已完成凭证先于文本发布的窄修并经Luna复核；新head须四项CI全部通过再合并。

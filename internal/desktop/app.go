@@ -27,6 +27,9 @@ type outcome struct {
 	err         error
 }
 type App struct {
+	quick                                                  quickSearchPanel
+	quickShortcut                                          string
+	operationSequence                                      uint64
 	operation                                              *nativeOperation
 	mutationUnknown                                        bool
 	website, generationLength                              string
@@ -75,6 +78,7 @@ func (a *App) runContext(work func(context.Context) outcome) {
 	if a.busy {
 		return
 	}
+	a.beginOperation()
 	a.busy = true
 	a.status = "处理中…"
 	generation := a.generation
@@ -155,6 +159,7 @@ func (a *App) Lock() {
 	}
 	// Revoke all session/UI authority before native clipboard metadata calls.
 	a.generation++
+	a.closeQuickSearch()
 	s := a.session
 	a.session = nil
 	if s != nil {
@@ -382,6 +387,9 @@ func (a *App) View(c *ui.Context) {
 		ui.Row(c).Gap(12).Children(func() {
 			ui.Text(c, "LOCKLARK").FontSize(24).Bold()
 			ui.Text(c, "本地金库").Grow(1)
+			if a.browser == nil {
+				ui.Button(c, "快捷搜索").OnClick(a.showQuickSearch)
+			}
 			if a.session != nil {
 				ui.Button(c, "立即锁定").OnClick(a.Lock)
 			}
@@ -390,6 +398,8 @@ func (a *App) View(c *ui.Context) {
 			a.lockView(c)
 		} else if a.browser != nil {
 			a.browserView(c)
+		} else if a.quick.open {
+			a.quickSearchView(c)
 		} else {
 			a.vaultView(c)
 		}
@@ -626,7 +636,7 @@ func Run() error {
 		mygo.Power.OnSuspend(a.Lock)
 		mygo.Power.OnLockScreen(a.Lock)
 		mygo.App.OnQuit(a.Lock)
-		_ = mygo.GlobalShortcut.Register("CmdOrCtrl+Shift+L", func() { a.win.Show(); a.win.Focus() })
+		a.registerQuickSearch(mygo.GlobalShortcut.Register)
 		icon := image.NewNRGBA(image.Rect(0, 0, 32, 32))
 		for y := 4; y < 28; y++ {
 			for x := 6; x < 26; x++ {
@@ -635,7 +645,7 @@ func Run() error {
 		}
 		var pngIcon bytes.Buffer
 		_ = png.Encode(&pngIcon, icon)
-		_, _ = mygo.NewTray(mygo.TrayOptions{ID: "locklark", Icon: pngIcon.Bytes(), ToolTip: "Locklark", Menu: mygo.NewMenu([]*mygo.MenuItem{{Label: "打开金库", Click: func(*mygo.MenuItem, *mygo.Window) { a.win.Show(); a.win.Focus() }}, {Label: "立即锁定", Click: func(*mygo.MenuItem, *mygo.Window) { a.Lock(); a.win.Invalidate() }}, {Label: "退出", Click: func(*mygo.MenuItem, *mygo.Window) { a.Lock(); mygo.App.Quit() }}})})
+		_, _ = mygo.NewTray(mygo.TrayOptions{ID: "locklark", Icon: pngIcon.Bytes(), ToolTip: "Locklark", Menu: mygo.NewMenu([]*mygo.MenuItem{{Label: "打开金库", Click: func(*mygo.MenuItem, *mygo.Window) { a.win.Show(); a.win.Focus() }}, {Label: "快捷搜索", Click: func(*mygo.MenuItem, *mygo.Window) { a.showQuickSearch() }}, {Label: "立即锁定", Click: func(*mygo.MenuItem, *mygo.Window) { a.Lock(); a.win.Invalidate() }}, {Label: "退出", Click: func(*mygo.MenuItem, *mygo.Window) { a.Lock(); mygo.App.Quit() }}})})
 	})
 	return mygo.App.Run()
 }
@@ -665,6 +675,12 @@ func (a *App) systemUnlock() {
 }
 func (a *App) securityView(c *ui.Context) {
 	ui.Text(c, "安全设置").FontSize(24).Bold()
+	ui.Text(c, "快捷搜索："+quickSearchAcceleratorLabel()).Bold()
+	shortcut := a.quickShortcut
+	if shortcut == "" {
+		shortcut = "全局快捷键尚未提交注册；可使用窗口的快捷搜索按钮。"
+	}
+	ui.Text(c, shortcut)
 	ui.Text(c, "快捷解锁："+osunlock.Label()).Bold()
 	ui.Text(c, osunlock.Description())
 	ui.Text(c, "首次或到期后使用主密码与 Secret Key 完整解锁，再主动启用。系统验证失败时保留完整解锁入口。")
