@@ -61,10 +61,7 @@ func TestNativeOpenSSHCustomEndpoint(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, program, args...)
-		cmd.Env = []string{"SSH_AUTH_SOCK=" + service.Endpoint(), "LC_ALL=C", "PATH=" + filepath.Dir(program)}
-		if runtime.GOOS == "windows" {
-			cmd.Env = append(cmd.Env, "SystemRoot="+os.Getenv("SystemRoot"), "WINDIR="+os.Getenv("WINDIR"))
-		}
+		cmd.Env = nativeOpenSSHEnvironment(runtime.GOOS, program, service.Endpoint(), os.Getenv)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		out, e := cmd.Output()
@@ -101,6 +98,44 @@ func TestNativeOpenSSHCustomEndpoint(t *testing.T) {
 	testNativeSSHConnection(t, sshExecutable, publicFile, h, runProgram, diagnostic)
 }
 
+func nativeOpenSSHEnvironment(goos, program, endpoint string, getenv func(string) string) []string {
+	env := []string{"SSH_AUTH_SOCK=" + endpoint, "LC_ALL=C", "PATH=" + filepath.Dir(program)}
+	if goos == "windows" {
+		// Microsoft v9.5.0.0 win32compat/w32fd.c init_prog_paths() fatals
+		// before any pipe connection if ProgramData is absent. The observed
+		// system clients report file version 9.5.6.4; keep the OS startup
+		// environment explicit instead of inheriting parent credentials.
+		// https://github.com/PowerShell/openssh-portable/blob/v9.5.0.0/contrib/win32/win32compat/w32fd.c
+		for _, name := range []string{"SystemRoot", "WINDIR", "ProgramData"} {
+			env = append(env, name+"="+getenv(name))
+		}
+	}
+	return env
+}
+
+func TestWindowsNativeOpenSSHStartupEnvironmentIsExplicit(t *testing.T) {
+	values := map[string]string{"SystemRoot": `C:\Windows`, "WINDIR": `C:\Windows`, "ProgramData": `C:\ProgramData`}
+	getenv := func(name string) string {
+		if value, ok := values[name]; ok {
+			return value
+		}
+		return "private-parent-token-not-for-child"
+	}
+	env := nativeOpenSSHEnvironment("windows", filepath.Join("native", "ssh-add.exe"), "private-custom-endpoint", getenv)
+	found := false
+	for _, entry := range env {
+		if entry == `ProgramData=C:\ProgramData` {
+			found = true
+		}
+		if strings.Contains(entry, "private-parent-token-not-for-child") {
+			t.Fatal("unreviewed parent environment inherited")
+		}
+	}
+	if !found {
+		t.Fatal("native Windows OpenSSH startup requires explicit ProgramData")
+	}
+}
+
 // Never return child error text, executable paths, usernames, or arbitrary
 // stderr. Even test fixture data stays out of public CI failure reports.
 func openSSHFailureCategory(err error, stderr []byte) (string, int) {
@@ -119,6 +154,7 @@ func openSSHFailureCategory(err error, stderr []byte) (string, int) {
 	}
 	category := "PROCESS_EXIT"
 	for _, known := range []struct{ marker, category string }{
+		{"couldn't find ProgramData environment variable", "MISSING_PROGRAMDATA"},
 		{"Error connecting to agent: No such file or directory", "NO_ENDPOINT"},
 		{"Error connecting to agent: Permission denied", "ACCESS_DENIED"},
 		{"Error connecting to agent: Invalid argument", "INVALID_ADDRESS"},
