@@ -42,7 +42,7 @@ func ProjectReferenceMetadata(metadata []byte, vaultID, name string, items []vau
 				{ID: "password", Name: "password"},
 				{ID: "otp", Name: "otp"},
 			}
-		case "document":
+		case "document", "ssh-key":
 			// Keep the identity for ambiguity checks. Attachments have no
 			// ordinary field reference in this profile.
 		default:

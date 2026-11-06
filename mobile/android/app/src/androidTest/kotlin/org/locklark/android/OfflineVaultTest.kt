@@ -98,16 +98,16 @@ class OfflineVaultTest {
         failWait(message)
     }
     private fun failWait(message: String): Nothing {
+        val status = text("status")
+        val phase = NativePhase.entries.firstOrNull { status.startsWith(it.userText + "未完成：") }?.name?.lowercase() ?: "unknown"
+        val error = NativeFailureCode.entries.firstOrNull { status.endsWith(it.userText) }?.name?.lowercase() ?: "unknown"
         val uiStatus = when {
-            text("status").startsWith("操作未完成") -> "operation-refused"
-            text("status").startsWith("结果未确认") -> "outcome-unknown"
-            text("status").startsWith("请先确认备份") -> "backup-ack-required"
-            text("status").isEmpty() -> "empty"
+            phase != "unknown" && error != "unknown" -> "operation-refused"
+            status.startsWith("结果未确认") -> "outcome-unknown"
+            status.startsWith("请先确认备份") -> "backup-ack-required"
+            status.isEmpty() -> "empty"
             else -> "other"
         }
-        val status = text("status")
-        val phase = NativePhase.entries.firstOrNull { status.startsWith(it.userText + "未完成") }?.name?.lowercase() ?: "unknown"
-        val error = NativeFailureCode.entries.firstOrNull { status.endsWith(it.userText) }?.name?.lowercase() ?: "unknown"
         instrumentation.sendStatus(0, android.os.Bundle().apply {
             putString("locklark_ui_status", uiStatus)
             putString("locklark_core_phase", phase); putString("locklark_core_error", error)
@@ -225,7 +225,7 @@ class OfflineVaultTest {
         return !inner.isEmpty && viewport.intersect(inner)
     }
     private fun reportControl() {
-        val known = setOf("generate-account-key", "backup-ack", "create-vault", "new-login", "generate-password", "save-login", "show-password", "hide-secret", "edit-login", "save-field", "show-notes", "show-username", "show-otp", "back-to-list", "search", "cancel-edit", "regenerate-password", "confirm-regenerate", "enable-quick-unlock", "lock", "unlock",
+        val known = setOf("generate-account-key", "backup-ack", "create-vault", "new-login", "generate-password", "save-login", "show-password", "hide-secret", "edit-login", "save-field", "show-notes", "show-username", "show-otp", "back-to-list", "search", "cancel-edit", "regenerate-password", "confirm-regenerate", "enable-quick-unlock", "quick-unlock", "lock", "unlock",
             "new-master-password", "repeat-master-password", "login-title", "login-url", "login-username", "login-password", "edit-value", "query", "regenerate-length", "master-password", "secret-key")
         val tag = if (currentControl.startsWith("item-")) "login-row" else currentControl.takeIf { it in known } ?: "unknown"
         val diagnostic = android.os.Bundle().apply {
@@ -303,6 +303,15 @@ class OfflineVaultTest {
         click(tag); waitFor("Explicit disclosure unavailable") { text("secret-value").isNotEmpty() }
         return text("secret-value")
     }
+
+    private fun deviceAuthenticationUnavailable(): Boolean = text("status") ==
+        NativePhase.DEVICE_READY.userText + "未完成：" + NativeFailureCode.UNAVAILABLE.userText
+
+    private fun assertNoDeviceCapsule(root: File) {
+        val files = if (root.exists()) root.listFiles() else emptyArray<File>()
+        assertTrue("Device authorization state not inspectable", files != null)
+        assertTrue("Refused device authentication persisted a capsule", files!!.none { it.name.contains(".capsule") })
+    }
     private fun hmacCode(counter: Long): String {
         val mac = Mac.getInstance("HmacSHA1")
         mac.init(SecretKeySpec("12345678901234567890".toByteArray(),"HmacSHA1"))
@@ -374,10 +383,11 @@ class OfflineVaultTest {
             stage("exact-target"); assertTrue("Regeneration changed wrong target", shown("show-password") == changed)
             click("back-to-list")
             val context = instrumentation.targetContext
-            if (!context.getSystemService(KeyguardManager::class.java).isDeviceSecure) {
+            val noDeviceCredential = !context.getSystemService(KeyguardManager::class.java).isDeviceSecure
+            if (noDeviceCredential) {
                 stage("platform-auth-refusal"); click("enable-quick-unlock")
-                waitFor("Unsupported device auth did not refuse") { text("status").startsWith("操作未完成") }
-                assertTrue("No plaintext fallback capsule", File(context.noBackupFilesDir,"device-unlock").listFiles()?.none { it.name.endsWith(".capsule") } != false)
+                waitFor("Unsupported device auth did not refuse") { deviceAuthenticationUnavailable() && ready("new-login") }
+                assertNoDeviceCapsule(File(context.noBackupFilesDir,"device-unlock"))
             }
             stage("background-lock"); select("Android first"); shown("show-password")
             instrumentation.uiAutomation.executeShellCommand("input keyevent KEYCODE_HOME").close()
@@ -386,6 +396,18 @@ class OfflineVaultTest {
             scenario = ActivityScenario.launch(MainActivity::class.java)
             waitFor("Background must lock", { ready("unlock") })
             assertTrue("Background retained secret", text("secret-value").isEmpty())
+            if (noDeviceCredential) {
+                // No factors are supplied for this distinct negative action.
+                // A refusal must leave the full-factor form locked and usable.
+                stage("platform-auth-refusal")
+                assertTrue("Locked factors unexpectedly prefilled", text("master-password").isEmpty() && text("secret-key").isEmpty())
+                click("quick-unlock")
+                waitFor("Unsupported device auth did not refuse") {
+                    deviceAuthenticationUnavailable() && ready("master-password") && ready("secret-key") && ready("unlock")
+                }
+                assertTrue("Unsupported device auth reopened the vault", view("new-login") == null && text("secret-value").isEmpty())
+                assertNoDeviceCapsule(File(context.noBackupFilesDir,"device-unlock"))
+            }
             enter("master-password",master); enter("secret-key",key); click("unlock"); select("Android first")
             stage("reopen"); assertTrue("Disk reopen changed secret", shown("show-password") == changed)
             click("lock"); waitFor("Explicit lock failed") { ready("unlock") }

@@ -34,6 +34,7 @@ const usage = `Locklark · personal CLI, manual GitHub query and synthetic gatew
   personal search --file PATH [--state active|archived|trashed|all]  (query entered in hidden terminal)
   personal github-pull --file PATH --id ID --revision REV --repository-id NUMERIC_ID --owner OWNER --repository NAME --number PR --api-ip PUBLIC_IPV4
   personal run-env --file PATH --id ID --revision REV --field username|password --name ENV --cwd ABS_DIR --timeout SECONDS -- ABS_PROGRAM [ARG...]
+  personal run-cli --file PATH --id ID --revision REV --profile token|gh --name ENV --cwd ABS_DIR --timeout SECONDS [--helper-path ABS_DIR_LIST] -- ABS_PROGRAM [ARG...]
   personal inject-json --file PATH --id ID --revision REV --field username|password --name PROPERTY --out NEW.json
   personal inspect-1pux --file PATH --source ARCHIVE
   personal plan-import-1pux --file PATH --source ARCHIVE
@@ -220,6 +221,10 @@ func main() {
 	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return
+		}
+		var child *childExitStatus
+		if errors.As(err, &child) {
+			os.Exit(child.code)
 		}
 		fmt.Fprintln(os.Stderr, "locklark:", err)
 		os.Exit(teambootstrapcli.ExitCode(err))

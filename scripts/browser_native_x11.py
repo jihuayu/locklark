@@ -195,6 +195,11 @@ class NativeControls:
         if visit(node, depth) is False:
             return
         count = self.checked(self.at.atspi_accessible_get_child_count, node)
+        # AT-SPI documents exactly -1 as an exception, not a child count.
+        # Abort this snapshot; callers may re-observe it within their existing
+        # read-only deadline. Never skip the node or return partial controls.
+        if count == -1:
+            raise AccessibilityQueryUnavailable("Native accessibility query failed")
         if count < 0 or count > 256:
             error = RuntimeError("Native accessibility child limit")
             error.native_guard = {"depth":depth, "visited":512-budget[0], "remaining":budget[0], "children":count}
@@ -287,15 +292,22 @@ class NativeControls:
             except AccessibilityQueryUnavailable:
                 # No action has been emitted. Re-observe a transient tree
                 # transition only within the existing, unchanged deadline.
-                time.sleep(0.05)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(0.05, remaining))
                 continue
+            if time.monotonic() >= deadline:
+                break
             if len(controls) > 1:
                 raise RuntimeError("Native acceptance control must be unique")
             if controls:
                 control = controls[0]
                 if control["enabled"] and control["showing"] and control["width"] > 0 and control["height"] > 0:
                     return control
-            time.sleep(0.05)
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(0.05, remaining))
         raise RuntimeError("Native acceptance control not ready")
 
 

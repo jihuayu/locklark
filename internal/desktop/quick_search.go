@@ -156,9 +156,9 @@ func (a *App) finishQuickSearch(r *quickSearchRequest, rows []personal.Row, e er
 		}
 		return
 	}
-	q.rows = rows
+	q.rows = loginProjection(rows)
 	q.status = "选择登录后，再明确显示或复制所需字段。"
-	if len(rows) == 0 {
+	if len(q.rows) == 0 {
 		q.status = "没有匹配的活动登录。"
 	}
 }
@@ -189,7 +189,7 @@ func (a *App) chooseQuickResult(panel, sequence uint64, target personal.Row) {
 	if a.session != session || a.generation != generation || a.operationSequence != operation || a.busy || !session.Unlocked() {
 		return
 	}
-	a.page, a.scope, a.query, a.rows = "vault", "active", query, rows
+	a.page, a.scope, a.query, a.rows = "vault", "active", query, loginProjection(rows)
 	a.clearNotesEditor()
 	a.selected = &target
 	a.title, a.website, a.username, a.value = "", "", "", ""

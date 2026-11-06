@@ -78,17 +78,24 @@ func (s *Session) nativeMutationWithTouch(action string, add vault.Item, edit *E
 		run = func(o commandOption) (result, error) { return command(s.path, "", nil, action, add, edit, o) }
 	}
 	r, e := run(option)
+	// Revoke the old key's queued signatures before releasing Session.mu. A
+	// wrapper-side cancellation would leave a commit-to-output race window.
+	if option.sshState && edit != nil {
+		s.cancelSSHTarget(edit.ID)
+	}
 	if errors.Is(e, invalid) {
 		s.lock()
 	}
 	active := s.active(false) == nil
-	if g.CommitWon() && (!active || e != nil && !errors.Is(e, ErrConflict) && !errors.Is(e, ErrNotFound) && !errors.Is(e, ErrTrashed) && !errors.Is(e, ErrMutationRefused) && !errors.Is(e, ErrOTPNotConfigured) && !errors.Is(e, ErrBrowserOTP)) {
+	if g.CommitWon() && (!active || e != nil && !errors.Is(e, ErrAlreadyArchived) && !errors.Is(e, ErrAlreadyActive) && !errors.Is(e, ErrAlreadyTrashed) && !errors.Is(e, ErrNotTrashed) && !errors.Is(e, ErrConflict) && !errors.Is(e, ErrNotFound) && !errors.Is(e, ErrTrashed) && !errors.Is(e, ErrMutationRefused) && !errors.Is(e, ErrOTPNotConfigured) && !errors.Is(e, ErrBrowserOTP)) {
+		clear(r.sshSeed)
 		if r.otp != nil {
 			r.otp.Clear()
 		}
 		return result{}, ErrMutationUnknown
 	}
 	if !active {
+		clear(r.sshSeed)
 		if r.otp != nil {
 			r.otp.Clear()
 		}

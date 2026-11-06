@@ -18,7 +18,7 @@ import tarfile
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts"))
-from mobile_android_acceptance import AndroidAcceptance, AcceptanceFailure, PACKAGE, center, require
+from mobile_android_acceptance import AndroidAcceptance, AcceptanceFailure, PACKAGE, actionable_bounds, center, require
 from test_emulator import complete_pass
 
 OS_PACKAGES = {"com.android.systemui", "com.android.settings"}
@@ -36,6 +36,73 @@ AUTH_ERRORS = {"NONE", "HARDWARE_UNAVAILABLE", "UNABLE_TO_PROCESS", "TIMEOUT", "
 REFUSED_PREFIXES = ("操作未完成：", "解锁未完成：", "准备操作未完成：", "结果未确认", "准备设备认证未完成：", "检查设备认证未完成：",
                     "准备设备认证密钥未完成：", "准备设备加密未完成：", "设备认证未完成：", "等待设备认证未完成：",
                     "绑定设备授权未完成：", "处理设备授权未完成：", "读取设备授权未完成：", "保存设备授权未完成：")
+KEY_POLICY_STAGES = {"start", "instrument-command", "installation", "capsule-selection", "permissions", "envelope", "key-load",
+                     "nonexportable", "key-info", "auth-required", "auth-validity", "cipher-policy", "auth-types",
+                     "fresh-init", "fresh-aad", "fresh-finish", "fresh-rejection", "complete"}
+KEY_POLICY_ASSERTIONS = {"none", "installation-format", "one-capsule", "capsule-mode", "directory-mode", "envelope-size",
+                        "envelope-format", "nonexportable", "auth-required", "per-operation", "aes256-gcm", "exact-auth-types",
+                        "fresh-unauthenticated-rejected"}
+KEY_LEVELS = {"software", "tee", "strongbox", "unknown", "hardware-unspecified"}
+
+
+def key_policy_metadata(returncode, raw):
+    """Fixed instrumentation categories only; never retain an assertion body."""
+    def values(name):
+        return re.findall(rb"^INSTRUMENTATION_STATUS: " + name.encode() + rb"=([^\r\n]*)", raw, re.MULTILINE)
+    def scalar(name, allowed, default="unknown", last=False):
+        observed = values(name)
+        if not observed:
+            return default
+        if not last and len(set(observed)) != 1:
+            return "unknown"
+        value = observed[-1].decode("ascii", errors="replace")
+        return value if value in allowed else "unknown"
+    expected_class = b"org.locklark.android.DeviceKeyProtectionTest"
+    expected_test = b"realDeviceCapsuleUsesNonexportablePerOperationKey"
+    counts = re.findall(rb"OK \(([0-9]{1,3}) tests?\)", raw)
+    if not counts:
+        counts = re.findall(rb"Tests run: ([0-9]{1,3})", raw)
+    levels = values("locklark_key_level")
+    level = levels[0].decode("ascii", errors="replace") if len(levels) == 1 else "unknown"
+    validity_values = values("locklark_key_auth_validity")
+    validity = "unknown"
+    if validity_values and len(set(validity_values)) == 1:
+        value = validity_values[0]
+        if value == b"out-of-range":
+            validity = "out-of-range"
+        elif re.fullmatch(rb"-1|[0-9]{1,5}", value) and -1 <= int(value) <= 86400:
+            validity = str(int(value))
+    exceptions = {kind.lower() for kind in AUTH_EXCEPTIONS} | {"assertion"}
+    exception = scalar("locklark_key_exception", exceptions, default="none", last=True)
+    if exception == "none":
+        for marker, category in ((b"java.lang.AssertionError", "assertion"), (b"java.security.ProviderException", "provider"),
+                                 (b"java.security.InvalidKeyException", "invalid_key"), (b"java.lang.IllegalStateException", "illegal_state")):
+            if marker in raw:
+                exception = category; break
+    lines = values("locklark_key_source_line")
+    line = lines[-1] if lines else next(iter(re.findall(rb"DeviceKeyProtectionTest\.kt:([0-9]{1,5})\)", raw)), b"0")
+    return {"exit_code":returncode if isinstance(returncode, int) and -255 <= returncode <= 255 else "outside-range",
+            "complete_pass":complete_pass(returncode, raw, expected_tests=1),
+            "test_count":int(counts[0]) if len(counts) == 1 else "unknown",
+            "class_match":set(values("class")) == {expected_class}, "test_match":set(values("test")) == {expected_test},
+            "key_level_count":min(len(levels), 1000), "key_level":level if level in KEY_LEVELS else "unknown",
+            "stage":scalar("locklark_key_stage", KEY_POLICY_STAGES, last=True),
+            "assertion":scalar("locklark_key_assertion", KEY_POLICY_ASSERTIONS, last=True),
+            "exception":exception, "own_source_line":int(line) if re.fullmatch(rb"[0-9]{1,5}", line) else 0,
+            "auth_validity":validity,
+            "fresh_denial":scalar("locklark_key_fresh_denial", {"none", "user_not_authenticated", "keystore_authentication_required"}),
+            **{field:scalar(name, {"true", "false"}) for field, name in (
+                ("auth_required", "locklark_key_auth_required"), ("nonexportable", "locklark_key_nonexportable"),
+                ("cipher_exact", "locklark_key_cipher_exact"), ("auth_types_exact", "locklark_key_auth_types_exact"),
+                ("fresh_rejected", "locklark_key_fresh_rejected"))}}
+
+
+def key_policy_passed(metadata):
+    return (metadata["complete_pass"] and metadata["test_count"] == 1 and metadata["class_match"] and metadata["test_match"]
+            and metadata["key_level_count"] == 1 and metadata["stage"] == "complete" and metadata["assertion"] == "none"
+            and metadata["exception"] == "none" and metadata["auth_validity"] in {"-1", "0"}
+            and metadata["fresh_denial"] in {"user_not_authenticated", "keystore_authentication_required"}
+            and all(metadata[field] == "true" for field in ("auth_required", "nonexportable", "cipher_exact", "auth_types_exact", "fresh_rejected")))
 
 
 def auth_records(raw, pid):
@@ -139,41 +206,89 @@ def validated_evidence(argument):
     return run, fixture, canaries, hashlib.sha256(raw).hexdigest()
 
 
-def credential_marker(nodes, focused):
+def visible_os_control(node, focused, size=None):
+    # The API 35 uiautomator dumper omits invisible children but does not emit
+    # a visible-to-user XML attribute. Explicit false/unknown is still refused.
+    if node.get("package") != focused or node.get("visible-to-user") not in (None, "true"):
+        return False
+    viewport = (0, 0, size[0], size[1]) if size else None
+    return actionable_bounds(node, viewport) == "ready"
+
+
+def credential_controls(nodes, focused, size=None):
+    require(focused in OS_PACKAGES)
+    usable = [node for node in nodes if visible_os_control(node, focused, size)]
+    prefix = focused + ":id/"
+    input_ids = {prefix + name for name in ("pinEntry", "pin_entry", "passwordEntry", "password_entry", "lockPassword")}
+    entries = [node for node in usable if node.get("resource-id") in input_ids]
+    keys = {digit:[node for node in usable if node.get("resource-id") == prefix + "key" + digit] for digit in "0123456789"}
+    fallback = [node for node in usable if node.get("resource-id") in {prefix + "button_use_credential", prefix + "button_negative"}
+                and node.get("class") == "android.widget.Button"
+                and node.get("text") in {"Use PIN", "Use pin", "Use screen lock", "使用 PIN 码", "使用PIN码", "使用屏幕锁定"}]
+    title = any(node.get("text") == "认证此设备以解封本地金库授权" for node in usable)
+    return entries, keys, fallback if title else []
+
+
+def credential_marker(nodes, focused, size=None):
     if focused not in OS_PACKAGES:
         return False
-    usable = []
-    for node in nodes:
-        if node.get("package") != focused or node.get("enabled") != "true":
-            continue
-        try: center(node)
-        except AcceptanceFailure: continue
-        usable.append(node)
-    if any(node.get("resource-id", "").endswith(("/pinEntry", "/pin_entry", "/passwordEntry", "/password_entry", "/lockPassword")) for node in usable):
-        return True
-    keys = {digit for digit in "0123456789" if any(node.get("resource-id", "").endswith("/key" + digit) for node in usable)}
-    if len(keys) == 10:
-        return True
-    title = any(node.get("text") == "认证此设备以解封本地金库授权" for node in usable)
-    fallback = any(node.get("text") in {"Use PIN", "Use pin", "Use screen lock", "使用 PIN 码", "使用PIN码", "使用屏幕锁定"} for node in usable)
-    return title and fallback
+    entries, keys, fallback = credential_controls(nodes, focused, size)
+    return len(entries) == 1 or all(len(values) == 1 for values in keys.values()) or len(fallback) == 1
 
 
-def focused_identity(raw, nodes):
-    match = re.search(rb"mCurrentFocus=Window\{([a-f0-9]+)[^\n]*", raw)
-    if not match:
-        return "unknown"
-    for package in OS_PACKAGES | {PACKAGE}:
-        if (package + "/").encode() in match[0]:
-            return package
-    # BiometricPrompt sometimes has a title instead of a component. Bind its
-    # WindowManager record to the system UID before considering OS nodes.
-    block = re.search(rb"Window #[0-9]+ Window\{" + match[1] + rb"[^\n]*\}:[\s\S]*?(?=\n\s*Window #[0-9]+ |\Z)", raw)
-    if block and re.search(rb"\bmOwnerUid=1000\b", block[0]):
-        candidates = [package for package in OS_PACKAGES if credential_marker(nodes, package)]
-        if len(candidates) == 1:
-            return candidates[0]
-    return "unknown"
+def exact_package_uid(raw, package):
+    require(package in OS_PACKAGES | {PACKAGE})
+    pattern = rb"package:" + re.escape(package.encode()) + rb" uid:([1-9][0-9]{0,9})"
+    matches = [re.fullmatch(pattern, line.strip()) for line in raw.splitlines()]
+    matches = [match for match in matches if match is not None]
+    require(len(matches) == 1)
+    value = int(matches[0][1])
+    require(value <= 2_147_483_647)
+    return value
+
+
+def focus_evidence(raw, nodes, trusted_uids, size=None):
+    candidates = sorted(package for package in OS_PACKAGES if credential_marker(nodes, package, size))
+    evidence = {"focus_record_present":False, "window_record_present":False,
+                "owner_package_verified":False, "system_window_known_uid":False,
+                "candidate_package":candidates[0] if len(candidates) == 1 else "multiple" if candidates else "none",
+                "credential_resource_marker":bool(candidates)}
+    # DisplayContent prints focus; the `windows` subcommand omits that section
+    # on API 35. A full dump supplies both focus tokens and WindowState owners.
+    tokens = set(re.findall(rb"\bmCurrentFocus=Window\{([a-f0-9]+)\b", raw))
+    evidence["focus_record_present"] = bool(tokens)
+    if len(tokens) != 1:
+        return "unknown", evidence
+    token = tokens.pop()
+    blocks = re.findall(rb"^\s*Window #[0-9]+ Window\{" + re.escape(token) +
+                        rb"\b[^\n]*\}:[\s\S]*?(?=\n\s*Window #[0-9]+ Window\{|\Z)", raw, re.MULTILINE)
+    evidence["window_record_present"] = bool(blocks)
+    if len(blocks) != 1:
+        return "unknown", evidence
+    owners = re.findall(rb"\bmOwnerUid=([0-9]+)[^\n]*\bpackage=([a-zA-Z0-9_.]+)\b", blocks[0])
+    if len(owners) != 1:
+        return "unknown", evidence
+    uid, owner = int(owners[0][0]), owners[0][1].decode("ascii")
+    evidence["system_window_known_uid"] = any(uid == trusted_uids.get(package) for package in OS_PACKAGES)
+    # Never infer ownership from the user-controlled window title/component.
+    if owner not in OS_PACKAGES | {PACKAGE} or trusted_uids.get(owner) != uid:
+        return "unknown", evidence
+    evidence["owner_package_verified"] = True
+    return owner, evidence
+
+
+def focused_identity(raw, nodes, trusted_uids=None):
+    return focus_evidence(raw, nodes, trusted_uids or {})[0]
+
+
+def focus_binding(raw, trusted_uids):
+    owner, _ = focus_evidence(raw, [], trusted_uids)
+    if owner == "unknown":
+        return None
+    # Validation above established exactly one token and an authoritative
+    # package/UID pair. This tuple stays private and never enters diagnostics.
+    token = next(iter(set(re.findall(rb"\bmCurrentFocus=Window\{([a-f0-9]+)\b", raw))))
+    return token, trusted_uids[owner], owner
 
 
 class DeviceCredentialAcceptance(AndroidAcceptance):
@@ -186,10 +301,13 @@ class DeviceCredentialAcceptance(AndroidAcceptance):
         self.pin_attempted = False
         self.lifecycle = []
         self.key_level = "unknown"
+        self.key_policy_diagnostic = {}
         self.locksettings_diagnostic = {}
         self.secure_lock_screen = None
         self.auth_pid = None
         self.auth_floor = 0
+        self.trusted_window_uids = {}
+        self.focus_diagnostic = focus_evidence(b"", [], {})[1]
         self.last_observation = {"phase":"prerequisites", "focused_package":"unknown", "main_state":"unknown",
                                  "native_ui_state":"unknown", "credential_marker":False}
 
@@ -202,8 +320,34 @@ class DeviceCredentialAcceptance(AndroidAcceptance):
         print("PASS: Android device credential " + name, flush=True)
 
     def focused_package(self, nodes=None):
-        raw = self.shell("dumpsys", "window", "windows").stdout
-        return focused_identity(raw, nodes or [])
+        raw = self.shell("dumpsys", "window").stdout
+        focused, self.focus_diagnostic = focus_evidence(raw, nodes or [], self.trusted_window_uids, getattr(self, "size", None))
+        return focused
+
+    def bound_snapshot(self, deadline, expected=None):
+        before = self.shell("dumpsys", "window", timeout=self.remaining(deadline, 45)).stdout
+        first = focus_binding(before, self.trusted_window_uids)
+        nodes = self.snapshot(deadline=deadline)
+        after = self.shell("dumpsys", "window", timeout=self.remaining(deadline, 45)).stdout
+        last = focus_binding(after, self.trusted_window_uids)
+        focused, self.focus_diagnostic = focus_evidence(after, nodes, self.trusted_window_uids, self.size)
+        stable = first is not None and first == last
+        self.focus_diagnostic["stable_window"] = stable
+        if expected is not None:
+            require(stable and last == expected)
+        self.remaining(deadline)
+        return nodes, focused if stable else "unknown", last if stable else None
+
+    def load_trusted_window_uids(self):
+        mapping = {}
+        for package in sorted(OS_PACKAGES | {PACKAGE}):
+            # OS identities must be installed SYSTEM packages, not a matching
+            # arbitrary app name or a guessed fixed UID. App APK is verified
+            # against the owned fixture before this method is called.
+            flags = ("-s", "-U") if package in OS_PACKAGES else ("-U",)
+            result = self.shell("pm", "list", "packages", *flags, package)
+            mapping[package] = exact_package_uid(result.stdout, package)
+        self.trusted_window_uids = mapping
 
     def observe_lifecycle(self, validated_nodes=None, validated_package=None):
         nodes = validated_nodes if validated_nodes is not None else self.snapshot()
@@ -222,7 +366,8 @@ class DeviceCredentialAcceptance(AndroidAcceptance):
     def record_observation(self, nodes, focused, state="unknown"):
         self.last_observation = {"phase":self.stage, "focused_package":focused if focused in OS_PACKAGES | {PACKAGE} else "unknown",
                                  "main_state":state, "native_ui_state":native_ui_state(nodes),
-                                 "credential_marker":credential_marker(nodes, focused)}
+                                 "credential_marker":credential_marker(nodes, focused, getattr(self, "size", None)),
+                                 "focus":getattr(self, "focus_diagnostic", focus_evidence(b"", [], {})[1]).copy()}
 
     def failure_metadata(self):
         auth = {}
@@ -232,7 +377,8 @@ class DeviceCredentialAcceptance(AndroidAcceptance):
         except Exception:
             pass
         return {"secure_lock_screen_feature":self.secure_lock_screen,
-                "locksettings":self.locksettings_diagnostic.copy(), "last_ui":self.last_observation.copy(), "native_auth":auth}
+                "locksettings":self.locksettings_diagnostic.copy(), "last_ui":self.last_observation.copy(), "native_auth":auth,
+                "key_policy":getattr(self, "key_policy_diagnostic", {}).copy()}
 
     def auth_log(self, pid):
         return self.shell("logcat", "-d", "-v", "raw", "--pid", str(pid), "-s", "LocklarkAuth:I", "*:S").stdout
@@ -276,6 +422,7 @@ class DeviceCredentialAcceptance(AndroidAcceptance):
         remote_apk = paths[0].removeprefix(b"package:").decode()
         actual = self.shell("sha256sum", remote_apk).stdout.split()[0].decode()
         require(actual == hashlib.sha256(Path(self.args.apk).read_bytes()).hexdigest())
+        self.load_trusted_window_uids()
         self.size = self.dimensions()
         self.shell("mkdir", "-m", "700", self.remote)
         self.remote_owned = True
@@ -293,16 +440,15 @@ class DeviceCredentialAcceptance(AndroidAcceptance):
         self.provision_pin()
         self.done("owned_emulator_and_exact_live_host_vault_verified_before_PIN_setup")
 
-    def os_prompt(self):
-        deadline = time.monotonic() + self.args.timeout
+    def os_prompt(self, deadline=None):
+        deadline = deadline if deadline is not None else time.monotonic() + self.args.timeout
         seen_busy = False
         while time.monotonic() < deadline:
-            nodes = self.snapshot()
-            focused = self.focused_package(nodes)
+            nodes, focused, binding = self.bound_snapshot(deadline)
             self.record_observation(nodes, focused)
-            if credential_marker(nodes, focused):
+            if credential_marker(nodes, focused, self.size):
                 self.observe_lifecycle(nodes, focused)
-                return nodes, focused
+                return nodes, focused, binding
             if focused == PACKAGE:
                 controls = [node for node in nodes if node.get("package") == PACKAGE and node.get("class") == "android.widget.Button" and
                             node.get("text") in {"打开本地金库", "使用此设备认证解锁", "启用此设备认证"}]
@@ -319,34 +465,57 @@ class DeviceCredentialAcceptance(AndroidAcceptance):
         self.observe_lifecycle(); raise AcceptanceFailure()
 
     def authenticate_pin(self):
-        nodes, package = self.os_prompt()
-        def candidates(current, digit):
-            return [node for node in current if node.get("package") == package and node.get("enabled") == "true" and node.get("resource-id", "").endswith("/key" + digit)]
-        keypad = {digit: candidates(nodes, digit) for digit in set(self.pin)}
-        if all(len(values) == 1 for values in keypad.values()):
+        deadline = time.monotonic() + self.args.timeout
+        nodes, package, binding = self.os_prompt(deadline)
+
+        def fresh():
+            current, owner, _ = self.bound_snapshot(deadline, binding)
+            require(owner == package and credential_marker(current, owner, self.size))
+            entries, keys, fallback = credential_controls(current, owner, self.size)
+            require(len(entries) <= 1 and all(len(values) <= 1 for values in keys.values()) and len(fallback) <= 1)
+            return entries, keys, fallback
+
+        entries, keypad, fallback = credential_controls(nodes, package, self.size)
+        require(len(entries) <= 1 and all(len(values) <= 1 for values in keypad.values()) and len(fallback) <= 1)
+        if not entries and not any(keypad.values()):
+            _, _, current_fallback = fresh()
+            require(len(current_fallback) == 1)
+            self.shell("input", "tap", *center(current_fallback[0]), timeout=self.remaining(deadline, 10))
+            # One explicit OS fallback transition may create a new window;
+            # observe it afresh without reissuing authentication or PIN.
+            nodes, package, binding = self.os_prompt(deadline)
+            entries, keypad, fallback = credential_controls(nodes, package, self.size)
+            require(len(entries) <= 1 and all(len(values) <= 1 for values in keypad.values()))
+            require(entries or any(keypad.values()))
+        if any(keypad.values()):
+            input_mode = "keypad"
+            require(all(len(values) == 1 for values in keypad.values()))
             for digit in self.pin:
-                require(self.focused_package(self.snapshot()) == package)
-                self.shell("input", "tap", *center(keypad[digit][0]))
+                _, current_keys, _ = fresh()
+                require(all(len(values) == 1 for values in current_keys.values()))
+                input_controls = {digit:(values[0].get("resource-id"), values[0].get("class")) for digit, values in current_keys.items()}
+                self.shell("input", "tap", *center(current_keys[digit][0]), timeout=self.remaining(deadline, 10))
         else:
-            entries = [node for node in nodes if node.get("package") == package and node.get("enabled") == "true" and
-                       (node.get("class") == "android.widget.EditText" and node.get("password") == "true" or
-                        node.get("resource-id", "").endswith(("/pinEntry", "/pin_entry", "/passwordEntry", "/password_entry", "/lockPassword")))]
-            if not entries:
-                fallback = [node for node in nodes if node.get("package") == package and node.get("enabled") == "true" and
-                            node.get("text", "") in {"Use PIN", "Use pin", "Use screen lock", "使用 PIN 码", "使用PIN码", "使用屏幕锁定"}]
-                require(len(fallback) == 1)
-                require(self.focused_package(self.snapshot()) == package)
-                self.shell("input", "tap", *center(fallback[0]))
-                nodes, package = self.os_prompt()
-                entries = [node for node in nodes if node.get("package") == package and node.get("enabled") == "true" and
-                           (node.get("resource-id", "").endswith(("/pinEntry", "/pin_entry", "/passwordEntry", "/password_entry", "/lockPassword")) or
-                            node.get("password") == "true" and node.get("class") == "android.widget.EditText")]
-            require(len(entries) == 1 and self.focused_package(self.snapshot()) == package)
-            self.shell("input", "tap", *center(entries[0]))
-            require(self.focused_package(self.snapshot()) == package)
-            self.shell("input", "text", self.pin)
-        if self.focused_package(self.snapshot()) in OS_PACKAGES:
-            self.shell("input", "keyevent", "KEYCODE_ENTER")
+            input_mode = "entry"
+            current_entries, _, _ = fresh()
+            require(len(current_entries) == 1)
+            self.shell("input", "tap", *center(current_entries[0]), timeout=self.remaining(deadline, 10))
+            current_entries, _, _ = fresh()
+            require(len(current_entries) == 1 and current_entries[0].get("focused") == "true")
+            input_controls = (current_entries[0].get("resource-id"), current_entries[0].get("class"))
+            self.shell("input", "text", self.pin, timeout=self.remaining(deadline, 10))
+        current, owner, final_binding = self.bound_snapshot(deadline)
+        if final_binding == binding and owner == package and credential_marker(current, owner, self.size):
+            entries, keys, _ = credential_controls(current, owner, self.size)
+            # A same-token window may have returned to fallback or changed its
+            # input mode. Do not send Enter to that different control; the
+            # subsequent native enabled/unlocked oracle decides the outcome.
+            same_input = (len(entries) == 1 and entries[0].get("focused") == "true"
+                          and (entries[0].get("resource-id"), entries[0].get("class")) == input_controls) if input_mode == "entry" else (
+                len(entries) <= 1 and all(len(values) == 1 for values in keys.values())
+                and {digit:(values[0].get("resource-id"), values[0].get("class")) for digit, values in keys.items()} == input_controls)
+            if same_input:
+                self.shell("input", "keyevent", "KEYCODE_ENTER", timeout=self.remaining(deadline, 10))
 
     def enabled(self, nodes):
         return any(node.get("package") == PACKAGE and node.get("class") == "android.widget.TextView" and
@@ -386,19 +555,17 @@ class DeviceCredentialAcceptance(AndroidAcceptance):
 
     def key_policy(self):
         self.set_stage("key-policy")
+        self.key_policy_diagnostic = key_policy_metadata(-1, b"")
+        self.key_policy_diagnostic["stage"] = "instrument-command"
         result = self.command(["shell", "am", "instrument", "-w", "-r", "-e", "class",
                                "org.locklark.android.DeviceKeyProtectionTest",
-                               PACKAGE + ".test/androidx.test.runner.AndroidJUnitRunner"], timeout=180)
-        require(complete_pass(result.returncode,result.stdout,expected_tests=1))
-        expected_class = b"org.locklark.android.DeviceKeyProtectionTest"
-        expected_test = b"realDeviceCapsuleUsesNonexportablePerOperationKey"
-        require(set(re.findall(rb"INSTRUMENTATION_STATUS: class=([^\r\n]+)",result.stdout)) == {expected_class})
-        require(set(re.findall(rb"INSTRUMENTATION_STATUS: test=([^\r\n]+)",result.stdout)) == {expected_test})
-        levels = re.findall(rb"INSTRUMENTATION_STATUS: locklark_key_level=(software|tee|strongbox|unknown|hardware-unspecified)",result.stdout)
-        require(len(levels) == 1)
-        self.key_level = levels[0].decode()
-        self.write_private("key-policy-result.json", {"class":expected_class.decode(), "test":expected_test.decode(), "count":1,
+                               PACKAGE + ".test/androidx.test.runner.AndroidJUnitRunner"], timeout=180, required=False,
+                              oracle="key-policy-instrumentation.txt")
+        self.key_policy_diagnostic = key_policy_metadata(result.returncode, result.stdout)
+        self.key_level = self.key_policy_diagnostic["key_level"]
+        self.write_private("key-policy-result.json", {"diagnostic":self.key_policy_diagnostic,
             "reported_security_level":self.key_level, "physical_hardware_verified":False})
+        require(key_policy_passed(self.key_policy_diagnostic))
         self.done("actual_app_UID_key_is_nonexportable_per_operation_and_rejects_fresh_unauthenticated_cipher")
 
     def copy_and_reinstall(self):
@@ -414,6 +581,7 @@ class DeviceCredentialAcceptance(AndroidAcceptance):
         self.set_stage("reinstall")
         self.command(["uninstall",PACKAGE],timeout=120)
         self.command(["install", "-r",self.args.apk],timeout=180)
+        self.load_trusted_window_uids()
         self.launch(); self.visible("生成新的 Secret Key",class_name="android.widget.Button")
         self.shell("am","force-stop",PACKAGE)
         self.set_stage("restore")

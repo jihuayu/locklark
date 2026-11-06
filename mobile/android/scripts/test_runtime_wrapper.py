@@ -4,6 +4,20 @@ from test_emulator import scan_output, complete_pass, RuntimeFailure, safe_diagn
 
 
 class RuntimeWrapperTests(unittest.TestCase):
+    def test_device_auth_failure_phases_remain_fixed_and_specific(self):
+        for phase in ("device_ready", "device_wait", "device_crypto"):
+            with self.subTest(phase=phase):
+                raw = (b"INSTRUMENTATION_STATUS: locklark_stage=platform-auth-refusal\n"
+                       b"INSTRUMENTATION_STATUS: locklark_core_phase=" + phase.encode() + b"\n"
+                       b"INSTRUMENTATION_STATUS: locklark_core_error=unavailable\n"
+                       b"INSTRUMENTATION_STATUS_CODE: -2\n")
+                result = safe_diagnostic(raw)
+                self.assertEqual(result["core_phase"], phase)
+                self.assertEqual(result["core_error"], "unavailable")
+                invalid = safe_diagnostic(raw.replace(phase.encode(), b"private-native-error-text"))
+                self.assertEqual(invalid["core_phase"], "unknown")
+                self.assertNotIn("private-native-error-text", str(invalid))
+
     def test_unavailable_ime_observation_remains_unknown(self):
         raw = (b"INSTRUMENTATION_STATUS: locklark_stage=edit-notes\n"
                b"INSTRUMENTATION_STATUS: locklark_control=save-field\n"

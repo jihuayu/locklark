@@ -19,6 +19,7 @@ require (
 
 require (
 	filippo.io/hpke v0.4.0 // indirect
+	github.com/Microsoft/go-winio v0.6.2
 	github.com/go-text/typesetting v0.3.5 // indirect
 	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/segmentio/asm v1.1.3 // indirect

@@ -1,18 +1,21 @@
 package vault
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
+	"strings"
+	"unicode/utf8"
+
 	"filippo.io/age"
 	"github.com/jihuayu/locklark/internal/origin"
 	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
 	"github.com/jihuayu/locklark/third_party/gokeepasslib/wrappers"
-	"strings"
-	"unicode/utf8"
+	"golang.org/x/crypto/ssh"
 )
 
-// Item is the first native schema: login and document values have one owner.
+// Item is the encrypted native schema for login, document and SSH key values.
 type Item struct {
 	ID, Kind, Title, Username, Password, OTP, Filename string
 	Attachment                                         []byte
@@ -23,6 +26,9 @@ type Item struct {
 	// ImportSource is an encrypted provenance record, never executable metadata.
 	ImportSource []byte `json:",omitempty"`
 	Notes        string `json:",omitempty"`
+	// SSH material is part of the encrypted internal model, never a public DTO.
+	SSHSeed      []byte `json:",omitempty"`
+	SSHPublicKey []byte `json:",omitempty"`
 }
 
 const MaxNotes = 64 << 10
@@ -72,6 +78,13 @@ func validItems(items []Item, size int) bool {
 			return false
 		}
 		size += len(it.ImportSource)
+		if len(it.SSHSeed)+len(it.SSHPublicKey) > MaxPayload-size {
+			return false
+		}
+		size += len(it.SSHSeed) + len(it.SSHPublicKey)
+		if it.Kind != "ssh-key" && (it.SSHSeed != nil || it.SSHPublicKey != nil) {
+			return false
+		}
 		if it.State != "" && it.State != "archived" && it.State != "trashed" {
 			return false
 		}
@@ -79,6 +92,16 @@ func validItems(items []Item, size int) bool {
 			return false
 		}
 		switch it.Kind {
+		case "ssh-key":
+			if len(it.SSHSeed) != ed25519.SeedSize || it.Username != "" || it.Password != "" || it.OTP != "" || it.Filename != "" || it.Attachment != nil || it.AttachmentProtected || it.URL != "" || it.Notes != "" || it.ImportSource != nil {
+				return false
+			}
+			private := ed25519.NewKeyFromSeed(it.SSHSeed)
+			public, err := ssh.NewPublicKey(private.Public())
+			clear(private)
+			if err != nil || !bytes.Equal(public.Marshal(), it.SSHPublicKey) {
+				return false
+			}
 		case "login":
 			if !ValidNotes(it.Notes) {
 				return false
@@ -155,6 +178,8 @@ func writeItems(db *kdbx.Database, metadata []byte, items []Item) error {
 			if it.Username != "" {
 				e.Values = append(e.Values, slot("UserName", it.Username, true))
 			}
+		} else if it.Kind == "ssh-key" {
+			e.Values = append(e.Values, slot("Locklark.SSHSeed", base64.StdEncoding.EncodeToString(it.SSHSeed), true), slot("Locklark.SSHPublicKey", base64.StdEncoding.EncodeToString(it.SSHPublicKey), false))
 		} else {
 			k := binaryKey{sha256.Sum256(it.Attachment), it.AttachmentProtected}
 			ref, ok := refs[k]
@@ -203,7 +228,7 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 			if _, ok := fields[v.Key]; ok {
 				return nil, nil, ErrSnapshot
 			}
-			protected := v.Key == "UserName" || v.Key == "Notes" || v.Key == "Password" || v.Key == "otp" || v.Key == "URL" || v.Key == "Locklark.ImportSource"
+			protected := v.Key == "UserName" || v.Key == "Notes" || v.Key == "Password" || v.Key == "otp" || v.Key == "URL" || v.Key == "Locklark.ImportSource" || v.Key == "Locklark.SSHSeed"
 			if v.Value.Protected.Bool != protected {
 				return nil, nil, ErrSnapshot
 			}
@@ -252,6 +277,19 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 			extra++
 		}
 		switch it.Kind {
+		case "ssh-key":
+			if len(fields) != 5+extra || len(e.Binaries) != 0 {
+				return nil, nil, ErrSnapshot
+			}
+			var err error
+			it.SSHSeed, err = base64.StdEncoding.Strict().DecodeString(fields["Locklark.SSHSeed"].Content)
+			if err != nil || base64.StdEncoding.EncodeToString(it.SSHSeed) != fields["Locklark.SSHSeed"].Content {
+				return nil, nil, ErrSnapshot
+			}
+			it.SSHPublicKey, err = base64.StdEncoding.Strict().DecodeString(fields["Locklark.SSHPublicKey"].Content)
+			if err != nil || base64.StdEncoding.EncodeToString(it.SSHPublicKey) != fields["Locklark.SSHPublicKey"].Content {
+				return nil, nil, ErrSnapshot
+			}
 		case "login":
 			expected := 5 + extra
 			if v, ok := fields["Notes"]; ok {

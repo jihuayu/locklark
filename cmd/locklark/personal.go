@@ -16,23 +16,43 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"unicode/utf8"
 )
 
-var personalUsage = errors.New("usage: locklark personal run-env --file PATH --id ID --revision REV --field username|password --name ENV --cwd ABS_DIR --timeout SECONDS -- ABS_PROGRAM [ARG...], or <init|add-login|list|audit|archived-audit|references|health> --file PATH, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password|otp|url|notes (hidden single-line replacement; use native editor for multiline notes), or reveal-login --file PATH --id ID --revision REV --field username|password, or generate-login --file PATH [--length N], or regenerate-password --file PATH --id ID --revision REV [--length N], or otp --file PATH --id ID --revision REV, or reveal-ref|otp-ref --file PATH --ref REF --revision REV, or inspect-1pux|plan-import-1pux --file PATH --source ARCHIVE, or import-1pux --file PATH --source ARCHIVE --digest PLAN_DIGEST, or export-kdbx --file PATH --out NEW_FILE.kdbx, or archive-login|unarchive-login --file PATH --id ID --revision REV, or list|search --file PATH [--state active|archived|trashed|all], or trash-login|restore-login --file PATH --id ID --revision REV, or match-logins --file PATH --origin HTTPS_ORIGIN --frame-origin HTTPS_ORIGIN, or inject-json --file PATH --id ID --revision REV --field username|password --name PROPERTY --out NEW.json, or github-pull --file PATH --id ID --revision REV --repository-id NUMERIC_ID --owner OWNER --repository NAME --number PR --api-ip PUBLIC_IPV4")
+var personalUsage = errors.New("usage: locklark personal run-cli --file PATH --id ID --revision REV --profile token|gh --name ENV --cwd ABS_DIR --timeout SECONDS [--helper-path ABS_DIR_LIST] -- ABS_PROGRAM [ARG...], or run-env --file PATH --id ID --revision REV --field username|password --name ENV --cwd ABS_DIR --timeout SECONDS -- ABS_PROGRAM [ARG...], or <init|add-login|list|audit|archived-audit|references|health> --file PATH, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password|otp|url|notes (hidden single-line replacement; use native editor for multiline notes), or reveal-login --file PATH --id ID --revision REV --field username|password, or generate-login --file PATH [--length N], or regenerate-password --file PATH --id ID --revision REV [--length N], or otp --file PATH --id ID --revision REV, or reveal-ref|otp-ref --file PATH --ref REF --revision REV, or inspect-1pux|plan-import-1pux --file PATH --source ARCHIVE, or import-1pux --file PATH --source ARCHIVE --digest PLAN_DIGEST, or export-kdbx --file PATH --out NEW_FILE.kdbx, or archive-login|unarchive-login --file PATH --id ID --revision REV, or list|search --file PATH [--state active|archived|trashed|all], or trash-login|restore-login --file PATH --id ID --revision REV, or match-logins --file PATH --origin HTTPS_ORIGIN --frame-origin HTTPS_ORIGIN, or inject-json --file PATH --id ID --revision REV --field username|password --name PROPERTY --out NEW.json, or github-pull --file PATH --id ID --revision REV --repository-id NUMERIC_ID --owner OWNER --repository NAME --number PR --api-ip PUBLIC_IPV4")
 
 // One terminal mode covers the entire interaction; no prompt or inter-field
 // gap is visible while echo is enabled.
 type console struct {
-	reader *bufio.Reader
+	reader io.ByteReader
+	writer io.Writer
 	skipLF bool
 }
 
+func (c *console) output() io.Writer {
+	if c.writer != nil {
+		return c.writer
+	}
+	return os.Stderr
+}
+
+// Interactive child input must remain in the terminal, rather than in a
+// prompt reader's read-ahead buffer when the terminal is restored.
+type consoleByteReader struct{ input *os.File }
+
+func (r consoleByteReader) ReadByte() (byte, error) {
+	var b [1]byte
+	_, e := io.ReadFull(r.input, b[:])
+	return b[0], e
+}
+
 func (c *console) field(prompt string) ([]byte, error) {
-	if _, err := fmt.Fprint(os.Stderr, prompt+": "); err != nil {
+	if _, err := fmt.Fprint(c.output(), prompt+": "); err != nil {
 		return nil, err
 	}
 	var value []byte
@@ -51,7 +71,7 @@ func (c *console) field(prompt string) ([]byte, error) {
 		switch b {
 		case '\r', '\n':
 			c.skipLF = b == '\r'
-			fmt.Fprint(os.Stderr, "\r\n")
+			fmt.Fprint(c.output(), "\r\n")
 			return value, nil
 		case 8, 127:
 			_, n := utf8.DecodeLastRune(value)
@@ -78,7 +98,7 @@ func confirmIssued(c *console, label, value, prompt string) error {
 }
 func runPersonal(args []string, out io.Writer) (retErr error) {
 	var processArgs []string
-	if len(args) > 0 && args[0] == "run-env" {
+	if len(args) > 0 && (args[0] == "run-env" || args[0] == "run-cli") {
 		for i := 1; i < len(args); i++ {
 			if args[i] == "--" {
 				processArgs = append([]string{}, args[i+1:]...)
@@ -109,8 +129,21 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 	var reveal personal.RevealTarget
 	var pull personal.LivePullRequest
 	var run personal.RunRequest
+	var runCLI personal.RunCLIRequest
 	length := password.DefaultPolicy().Length
 	switch action {
+	case "run-cli":
+		reveal = personal.RevealTarget{ID: opts["--id"], Revision: opts["--revision"], Field: "password"}
+		seconds, e := strconv.Atoi(opts["--timeout"])
+		runCLI = personal.RunCLIRequest{Program: processArgs[0], Args: processArgs[1:], Directory: opts["--cwd"], Name: opts["--name"], TimeoutSeconds: seconds, Profile: opts["--profile"]}
+		expected := 7
+		if helperPath, found := opts["--helper-path"]; found {
+			runCLI.HelperPath = filepath.SplitList(helperPath)
+			expected++
+		}
+		if len(opts) != expected || e != nil || strconv.Itoa(seconds) != opts["--timeout"] || !personal.ValidRevealTarget(reveal.ID, reveal.Revision, reveal.Field) || runCLI.Validate() != nil {
+			return personalUsage
+		}
 	case "run-env":
 		reveal = personal.RevealTarget{ID: opts["--id"], Revision: opts["--revision"], Field: opts["--field"]}
 		seconds, e := strconv.Atoi(opts["--timeout"])
@@ -220,7 +253,18 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 	default:
 		return personalUsage
 	}
-	if !term.IsTerminal(int(os.Stdin.Fd())) || !term.IsTerminal(int(os.Stderr.Fd())) {
+	controlInput, controlOutput := os.Stdin, os.Stderr
+	if action == "run-cli" {
+		var e error
+		controlInput, controlOutput, e = openRunCLIConsole()
+		if e != nil {
+			return errRunCLIConsole
+		}
+		defer controlInput.Close()
+		if controlOutput != controlInput {
+			defer controlOutput.Close()
+		}
+	} else if !term.IsTerminal(int(os.Stdin.Fd())) || !term.IsTerminal(int(os.Stderr.Fd())) {
 		return errors.New("personal commands require an interactive terminal for input and prompts")
 	}
 	if action == "init" {
@@ -233,12 +277,15 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(signals)
-	fd := int(os.Stdin.Fd())
+	fd := int(controlInput.Fd())
 	state, err := term.MakeRaw(fd)
 	if err != nil {
 		return errors.New("cannot disable terminal echo")
 	}
 	var once sync.Once
+	var cliRunning atomic.Bool
+	childContext, cancelChild := context.WithCancel(context.Background())
+	defer cancelChild()
 	var resetErr error
 	restore := func() { once.Do(func() { resetErr = term.Restore(fd, state) }) }
 	done := make(chan struct{})
@@ -253,11 +300,19 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 		select {
 		case <-signals:
 			restore()
+			if action == "run-cli" && cliRunning.Load() {
+				cancelChild()
+				return
+			}
 			os.Exit(130)
 		case <-done:
 		}
 	}()
 	c := console{reader: bufio.NewReader(os.Stdin)}
+	if action == "run-cli" {
+		c.reader = consoleByteReader{controlInput}
+		c.writer = controlOutput
+	}
 	consoleField := c.field
 	pw, err := consoleField("主密码")
 	if err != nil {
@@ -310,6 +365,26 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 		}
 		defer clear(key)
 		switch action {
+		case "run-cli":
+			if e = confirmRunCLI(&c, reveal, runCLI); e != nil {
+				return e
+			}
+			// The child sees the original terminal mode. Signals after this
+			// point cancel through RunCLI so its private directory is cleaned.
+			cliRunning.Store(true)
+			restore()
+			if resetErr != nil {
+				return errors.New("cannot restore terminal mode; process not started")
+			}
+			receipt, e := personal.RunCLI(childContext, path, string(pw), key, reveal, runCLI)
+			if e != nil {
+				return e
+			}
+			if receipt.ExitCode != 0 {
+				return &childExitStatus{code: receipt.ExitCode}
+			}
+			// No receipt is appended to the child's output stream.
+			return nil
 		case "run-env":
 			if _, e = fmt.Fprintf(os.Stderr, "将条目 %s（修订 %s）的 %s 交给所选可信本地程序的环境变量 %s。\r\n这不是沙箱：程序可联网、写文件和向后代传递值；同用户或管理员也可能读取环境。\r\n参数会显示并出现在进程列表中，不要把秘密写入参数。标准输入/输出/错误接空设备；只返回退出码。\r\n超时仅终止直接子进程，后代可能继续运行；中断后结果可能未知。\r\n程序：%s\r\n目录：%s\r\n超时：%d 秒\r\n参数：\r\n", reveal.ID, reveal.Revision, reveal.Field, run.Name, strconv.QuoteToASCII(run.Program), strconv.QuoteToASCII(run.Directory), run.TimeoutSeconds); e != nil {
 				return e

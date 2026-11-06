@@ -83,7 +83,7 @@ func searchRows(items []vault.Item, revisions map[string]string, r searchRequest
 				restore = "archived"
 			}
 		}
-		rows = append(rows, Row{ID: it.ID, Title: it.Title, Revision: revisions[it.ID], State: state, RestoreState: restore})
+		rows = append(rows, Row{Kind: it.Kind, ID: it.ID, Title: it.Title, Revision: revisions[it.ID], State: state, RestoreState: restore})
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
 	return rows, nil
