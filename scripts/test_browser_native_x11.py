@@ -1,6 +1,8 @@
 """Pure readiness tests; no X server, native values, or approval actions."""
 import unittest
 import json
+import ctypes
+import types
 from unittest.mock import Mock, patch
 
 import browser_native_x11 as native
@@ -18,22 +20,23 @@ class NativeReadinessTests(unittest.TestCase):
     def test_one_query_failure_then_ready(self):
         control = {"enabled": True, "showing": True, "width": 20, "height": 10}
         controls = self.controls([self.query_error(), {"确认连接此扩展": [control]}])
-        with patch.object(native.time, "monotonic", side_effect=[0, 0, 0.05]), patch.object(native.time, "sleep") as sleep:
+        with patch.object(native.time, "monotonic", side_effect=[0, 0, 0.01, 0.06, 0.06]), patch.object(native.time, "sleep") as sleep:
             self.assertIs(controls.ready("确认连接此扩展"), control)
         self.assertEqual(controls.snapshot.call_count, 2)
         sleep.assert_called_once_with(0.05)
 
     def test_permanent_query_failure_uses_original_deadline(self):
         controls = self.controls(self.query_error())
-        with patch.object(native.time, "monotonic", side_effect=[0, 0, 4, 9.99, 10]), patch.object(native.time, "sleep") as sleep:
+        with patch.object(native.time, "monotonic", side_effect=[0, 0, 0, 4, 4, 9.99, 9.99, 10]), patch.object(native.time, "sleep") as sleep:
             with self.assertRaisesRegex(RuntimeError, "Native acceptance control not ready"):
                 controls.ready("确认连接此扩展")
         self.assertEqual(controls.snapshot.call_count, 3)
         self.assertEqual(sleep.call_count, 3)
+        self.assertAlmostEqual(sleep.call_args.args[0], 0.01)
 
     def test_ambiguous_control_fails_immediately(self):
         controls = self.controls([{"确认连接此扩展": [{}, {}]}])
-        with patch.object(native.time, "monotonic", side_effect=[0, 0]), patch.object(native.time, "sleep") as sleep:
+        with patch.object(native.time, "monotonic", side_effect=[0, 0, 0]), patch.object(native.time, "sleep") as sleep:
             with self.assertRaisesRegex(RuntimeError, "Native acceptance control must be unique"):
                 controls.ready("确认连接此扩展")
         controls.snapshot.assert_called_once()
@@ -46,6 +49,73 @@ class NativeReadinessTests(unittest.TestCase):
                 controls.ready("确认连接此扩展")
         controls.snapshot.assert_called_once()
         sleep.assert_not_called()
+
+    def test_late_successful_snapshot_cannot_authorize_input(self):
+        control = {"enabled": True, "showing": True, "width": 20, "height": 10}
+        controls = self.controls([{ "确认连接此扩展": [control]}])
+        action = Mock()
+        with patch.object(native.time, "monotonic", side_effect=[0, 0, 10.01]), patch.object(native.time, "sleep") as sleep:
+            with self.assertRaisesRegex(RuntimeError, "Native acceptance control not ready"):
+                action(controls.ready("确认连接此扩展"))
+        controls.snapshot.assert_called_once()
+        action.assert_not_called()
+        sleep.assert_not_called()
+
+
+class NativeChildCountSentinelTests(unittest.TestCase):
+    def controls(self, counts):
+        controls = native.NativeControls.__new__(native.NativeControls)
+        returns, calls = iter(counts), []
+        callback_type = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p))
+        @callback_type
+        def child_count(node, error):
+            # Exercise the actual C ABI return path with a NULL GError, as in
+            # the observed stale accessible. No Python exception is injected.
+            calls.append(node)
+            return next(returns)
+        controls.at = types.SimpleNamespace(atspi_accessible_get_child_count=child_count,
+                                            atspi_accessible_get_child_at_index=Mock())
+        controls.gl, controls.go = Mock(), Mock()
+        return controls, calls
+
+    def test_exact_c_abi_minus_one_is_query_unavailable_not_structural_limit(self):
+        controls, calls = self.controls([-1])
+        with self.assertRaises(native.AccessibilityQueryUnavailable):
+            controls.walk(1, lambda *_: True)
+        self.assertEqual(len(calls), 1)
+        controls.at.atspi_accessible_get_child_at_index.assert_not_called()
+        controls.gl.g_error_free.assert_not_called()
+
+    def test_real_sentinel_aborts_snapshot_then_reobserves_before_one_action(self):
+        controls, calls = self.controls([-1, 0])
+        control = {"enabled": True, "showing": True, "width": 20, "height": 10}
+        def snapshot():
+            controls.walk(1, lambda *_: True)
+            return {"确认连接此扩展": [control]}
+        controls.snapshot = Mock(side_effect=snapshot)
+        action = Mock()
+        with patch.object(native.time, "monotonic", return_value=0), patch.object(native.time, "sleep"):
+            action(controls.ready("确认连接此扩展"))
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(controls.snapshot.call_count, 2)
+        action.assert_called_once_with(control)
+
+    def test_other_negative_or_oversized_c_abi_counts_stay_structural(self):
+        for count in (-2, 257, 1000):
+            with self.subTest(count=count):
+                controls, calls = self.controls([count])
+                with self.assertRaisesRegex(RuntimeError, "Native accessibility child limit") as error:
+                    controls.walk(1, lambda *_: True)
+                self.assertNotIsInstance(error.exception, native.AccessibilityQueryUnavailable)
+                self.assertEqual(error.exception.native_guard["children"], count)
+                self.assertEqual(len(calls), 1)
+                controls.at.atspi_accessible_get_child_at_index.assert_not_called()
+
+    def test_exhausted_node_budget_stays_fatal_before_child_query(self):
+        controls, calls = self.controls([-1])
+        with self.assertRaisesRegex(RuntimeError, "Native accessibility tree limit"):
+            controls.walk(1, lambda *_: True, budget=[0])
+        self.assertEqual(calls, [])
 
 
 class NativeSnapshotReferenceTests(unittest.TestCase):

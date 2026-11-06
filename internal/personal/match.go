@@ -49,7 +49,7 @@ func matchingRows(items []vault.Item, revisions map[string]string, want string) 
 			return nil, invalid
 		}
 		if site == want {
-			rows = append(rows, Row{ID: it.ID, Title: it.Title, Revision: revisions[it.ID], State: "active"})
+			rows = append(rows, Row{Kind: it.Kind, ID: it.ID, Title: it.Title, Revision: revisions[it.ID], State: "active"})
 		}
 	}
 	return rows, nil

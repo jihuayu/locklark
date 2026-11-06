@@ -104,7 +104,11 @@ func (s *Session) BrowserMatch(c BrowserContext) ([]Row, error) {
 // Budget actual JSON bytes, including HTML escaping, with space for the native
 // envelope. Oversized metadata is a business refusal, never a broken pipe.
 func browserCandidateBudget(rows []Row) bool {
-	raw, e := json.Marshal(rows)
+	projection := make([]Row, len(rows))
+	for n, row := range rows {
+		projection[n] = Row{ID: row.ID, Revision: row.Revision, Title: row.Title, State: row.State}
+	}
+	raw, e := json.Marshal(projection)
 	defer clear(raw)
 	return e == nil && len(raw) <= 192<<10
 }

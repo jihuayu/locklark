@@ -121,6 +121,7 @@ func (s *Session) cancelBrowserSave() {
 	s.saveMu.Lock()
 	defer s.saveMu.Unlock()
 	s.lockRequested.Store(true)
+	s.sshPending.Range(func(key, _ any) bool { (&SSHSignIntent{key.(*sshSignState)}).Cancel(); return true })
 	s.otpCaps.Range(func(key, value any) bool { key.(*otpCap).cancel(); return true })
 	s.browserOTPControls.Range(func(key, _ any) bool { (&BrowserOTPControl{inner: key.(*browserOTPState)}).Cancel(); return true })
 	if s.saveGate != nil {

@@ -105,6 +105,16 @@ type Response struct {
 // both fixed fields; other messages cannot accidentally serialize field values.
 func (r Response) MarshalJSON() ([]byte, error) {
 	type plain Response
+	type candidate struct {
+		ID       string `json:"id"`
+		Revision string `json:"revision"`
+		Title    string `json:"title"`
+		State    string `json:"state"`
+	}
+	type wire struct {
+		plain
+		Candidates []candidate `json:"candidates,omitempty"`
+	}
 	if r.Type == "otp-fill" {
 		return nil, ErrProtocol
 	}
@@ -120,13 +130,28 @@ func (r Response) MarshalJSON() ([]byte, error) {
 	if r.Type != "fill" {
 		r.Username = ""
 		r.Password = ""
-		return json.Marshal(plain(r))
+	}
+	// The general native Row may gain metadata such as Kind; the fixed browser
+	// protocol exposes exactly its original four candidate keys.
+	var candidates []candidate
+	if len(r.Candidates) > 0 {
+		candidates = make([]candidate, len(r.Candidates))
+	}
+	for n, row := range r.Candidates {
+		if row.Kind != "" && row.Kind != "login" {
+			return nil, ErrProtocol
+		}
+		candidates[n] = candidate{row.ID, row.Revision, row.Title, row.State}
+	}
+	base := wire{plain(r), candidates}
+	if r.Type != "fill" {
+		return json.Marshal(base)
 	}
 	return json.Marshal(struct {
-		plain
+		wire
 		Username string `json:"username"`
 		Password string `json:"password"`
-	}{plain: plain(r), Username: r.Username, Password: r.Password})
+	}{wire: base, Username: r.Username, Password: r.Password})
 }
 
 func (Response) String() string   { return "[native browser response]" }

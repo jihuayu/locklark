@@ -8,6 +8,7 @@ permissions:
 jobs:
   go:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
@@ -21,6 +22,7 @@ jobs:
           bun-version: 1.4.4
       - run: bun test ./plugins/github-pull-reader
       - run: python -m unittest discover -s scripts -p test_personal_windows.py
+      - run: python -m unittest discover -s scripts -p test_run_cli_windows_acceptance.py
       - run: go mod verify
       - run: go vet ./...
       - run: go build ./cmd/locklark-desktop
@@ -32,8 +34,22 @@ jobs:
         env:
           LOCKLARK_TEST_NATIVE_CLIPBOARD: '1'
         run: go test ./internal/nativeclipboard -run TestNativeClipboardSmoke -count=1
-      - shell: pwsh
+      - name: Test Go packages and native OpenSSH transport
+        shell: pwsh
+        env:
+          LOCKLARK_TEST_OPENSSH: '1'
         run: |
+          $env:LOCKLARK_TEST_OPENSSH_BIN = if ($IsWindows) { Join-Path $env:WINDIR 'System32/OpenSSH/ssh-add.exe' } else { '/usr/bin/ssh-add' }
+          if (-not (Test-Path -LiteralPath $env:LOCKLARK_TEST_OPENSSH_BIN -PathType Leaf)) { throw 'Native system OpenSSH client unavailable' }
+          if ($IsWindows) {
+            foreach ($name in @('ssh-add.exe', 'ssh.exe')) {
+              $nativeClient = Join-Path $env:WINDIR "System32/OpenSSH/$name"
+              $info = (Get-Item -LiteralPath $nativeClient).VersionInfo
+              $version = '{0}.{1}.{2}.{3}' -f $info.FileMajorPart, $info.FileMinorPart, $info.FileBuildPart, $info.FilePrivatePart
+              if ($version -notmatch '^[0-9]+(?:\.[0-9]+){3}$' -or $version -eq '0.0.0.0') { $version = 'unrecognized' }
+              Write-Output "Native Windows $name file version: $version"
+            }
+          }
           $peerEnv = Join-Path $env:RUNNER_TEMP 'locklark-kdbx-peer'
           python -m venv $peerEnv
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -57,6 +73,8 @@ jobs:
           python3 scripts/health_acceptance.py "$RUNNER_TEMP/locklark"
           python3 scripts/search_acceptance.py "$RUNNER_TEMP/locklark"
           python3 scripts/run_env_acceptance.py "$RUNNER_TEMP/locklark"
+          python3 -m unittest discover -s scripts -p test_run_cli_acceptance.py
+          python3 scripts/run_cli_acceptance.py --cli "$RUNNER_TEMP/locklark" --go "$(command -v go)" --artifacts "$RUNNER_TEMP/locklark-run-cli-evidence"
           python3 scripts/injection_acceptance.py "$RUNNER_TEMP/locklark"
           python3 scripts/live_pull_acceptance.py "$RUNNER_TEMP/locklark"
           python3 scripts/inspection_acceptance.py "$RUNNER_TEMP/locklark"
@@ -108,6 +126,29 @@ jobs:
           & $python scripts/export_acceptance.py $binary
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $python scripts/plugin_acceptance.py $binary
+      - name: Test native Windows RunCLI console and piped standard streams
+        if: always() && runner.os == 'Windows' && !cancelled()
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          $peerEnv = Join-Path $env:RUNNER_TEMP 'locklark-kdbx-peer'
+          $python = Join-Path $peerEnv 'Scripts/python.exe'
+          $binary = Join-Path $env:RUNNER_TEMP 'personal-cli.exe'
+          $fixture = Join-Path $env:RUNNER_TEMP 'run-cli-windows-fixture.exe'
+          if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
+            python -m venv $peerEnv
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          & $python -m pip install 'pywinpty==3.1.2'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
+            go build -o $binary ./cmd/locklark
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          go build -o $fixture ./scripts/run_cli_windows_fixture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $python scripts/run_cli_windows_acceptance.py --cli $binary --fixture-bin $fixture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   desktop-macos:
     runs-on: macos-latest
     steps:
@@ -124,6 +165,15 @@ jobs:
         env:
           LOCKLARK_TEST_NATIVE_CLIPBOARD: '1'
         run: go test ./internal/nativeclipboard -count=1
+      - name: Test native macOS SSH transport and RunCLI isolation
+        timeout-minutes: 5
+        env:
+          LOCKLARK_TEST_OPENSSH: '1'
+          LOCKLARK_TEST_OPENSSH_BIN: /usr/bin/ssh-add
+        run: |
+          test -x "$LOCKLARK_TEST_OPENSSH_BIN"
+          go test ./internal/sshagent ./internal/localpath -count=1
+          go test ./internal/personal ./cmd/locklark -run '^TestRunCLI' -count=1
   web:
     runs-on: ubuntu-latest
     steps:
@@ -171,7 +221,9 @@ jobs:
           LOCKLARK_TEST_BROWSER: firefox
       - name: Install native GUI acceptance tools
         timeout-minutes: 10
-        run: sudo apt-get install -y --no-install-recommends libxtst6 xvfb xauth imagemagick at-spi2-core libatspi2.0-0 libnss3-tools xfwm4
+        run: |
+          sudo apt-get install -y --no-install-recommends libxtst6 xvfb xauth imagemagick at-spi2-core libatspi2.0-0 libnss3-tools xfwm4 openssh-client openssh-server
+          sudo install -d -o root -g root -m 0755 /run/sshd
       - name: Install pinned geckodriver
         timeout-minutes: 10
         run: |
@@ -213,6 +265,14 @@ jobs:
           LOCKLARK_CLI_HOST: ${{ runner.temp }}/locklark
           LOCKLARK_DESKTOP_HOST: ${{ runner.temp }}/locklark-desktop
           LOCKLARK_TEST_PYKEEPASS: ${{ runner.temp }}/locklark-notes-peer/bin/python
+      - name: Test native SSH approvals, real OpenSSH forwarding and encrypted export
+        timeout-minutes: 10
+        run: |
+          python3 -m unittest discover -s scripts -p test_ssh_agent_acceptance.py
+          dbus-run-session -- xvfb-run -a -s '-screen 0 1920x2160x24 -nolisten tcp' python3 scripts/ssh_agent_acceptance.py \
+            --host "$RUNNER_TEMP/locklark-desktop" --cli "$RUNNER_TEMP/locklark" --go "$(command -v go)" \
+            --peer "$RUNNER_TEMP/locklark-notes-peer/bin/python" --window-manager /usr/bin/xfwm4 \
+            --artifacts "$RUNNER_TEMP/locklark-ssh-evidence"
       - name: Test browser extension DOM
         timeout-minutes: 10
         run: node scripts/browser_extension_dom.cjs
