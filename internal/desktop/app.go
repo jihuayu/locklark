@@ -406,7 +406,7 @@ func (a *App) unlock() {
 			a.rows = loginProjection(rows)
 			a.scope = "active"
 			a.page = "vault"
-			a.v2Mode = true
+			a.v2Mode = !classicLayoutRequested()
 			a.touchActivity()
 			a.loadV2Metadata()
 			a.status = "已解锁 · " + idleLockLabel(a.settingsSnapshot().AutoLockDuration())

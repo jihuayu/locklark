@@ -2,6 +2,7 @@ package desktop
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -100,6 +101,14 @@ func newV2State() v2State {
 // deliberately not part of v2State and therefore survive a lock.
 func (a *App) resetV2() {
 	a.v2 = newV2State()
+}
+
+// classicLayoutRequested reports whether the classic single-list layout was
+// requested via LOCKLARK_DESKTOP_LAYOUT=classic. The three-pane layout is the
+// default; the classic layout remains available for users and for the native
+// accessibility acceptance suites that drive its labels.
+func classicLayoutRequested() bool {
+	return os.Getenv("LOCKLARK_DESKTOP_LAYOUT") == "classic"
 }
 
 // EnableV2 enters the three-pane UI. It exists so tests and embedders that
