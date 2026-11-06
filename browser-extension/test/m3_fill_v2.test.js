@@ -926,6 +926,7 @@ function harness(options = {}) {
   let doc = options.doc || "doc-1";
   let frameOrigin = options.frameOrigin || core.originFromURL(tabURL);
   let frameDoc = options.frameDoc || "frame-doc-1";
+  let frameDocId = 1;
   let clock = options.clock || 1_700_000_000_000;
   let performanceNow = 0;
   let nextFillResult = {
@@ -1028,7 +1029,14 @@ function harness(options = {}) {
     },
     scripting: {
       executeScript: async (request) => {
-        const frameId = request.target.frameIds?.[0] ?? 0;
+        // Mirror Chrome: frameIds and documentIds are mutually exclusive.
+        if (request.target.frameIds && request.target.documentIds)
+          throw Error("Cannot specify both 'frameIds' and 'documentIds'.");
+        const frameId = request.target.documentIds
+          ? request.target.documentIds[0] === frameDoc
+            ? frameDocId
+            : 0
+          : (request.target.frameIds?.[0] ?? 0);
         const documentId = frameId ? frameDoc : doc;
         if (request.func === core.probe) {
           const origin = frameId
@@ -1160,13 +1168,16 @@ function harness(options = {}) {
       frame = 0,
       documentId = frame ? frameDoc : doc,
       url = core.originFromURL(tabURL) + "/login",
-    ) => ({
-      id: "fixed",
-      url,
-      documentId,
-      frameId: frame,
-      tab: { id: tabId, windowId, url: tabURL },
-    }),
+    ) => {
+      if (frame && documentId === frameDoc) frameDocId = frame;
+      return {
+        id: "fixed",
+        url,
+        documentId,
+        frameId: frame,
+        tab: { id: tabId, windowId, url: tabURL },
+      };
+    },
     state: () => h.send({ type: "state" }),
   };
   return h;
@@ -1397,7 +1408,7 @@ test("M3 background identity and card fills are category-bound and zeroed", asyn
           (entry) => entry.func === core[functionName],
         );
         assert.ok(injection, "structured fill was not injected");
-        assert.deepEqual(Array.from(injection.target.frameIds), [0]);
+        assert.equal(injection.target.frameIds, undefined);
         assert.equal(injection.target.documentIds[0], "doc-1");
         assert.equal(injection.args[3], false);
         assert.equal(injection.args[4], category);
@@ -1459,7 +1470,7 @@ test("M3 same-origin iframe fill carries frameId and allowSubframe; cross-origin
       (entry) => entry.func === core.fillIdentityDocument,
     );
     assert.ok(injection, "framed identity fill was not injected");
-    assert.deepEqual(Array.from(injection.target.frameIds), [2]);
+    assert.equal(injection.target.frameIds, undefined);
     assert.equal(injection.target.documentIds[0], "frame-doc-1");
     assert.equal(injection.args[3], true);
     assert.equal(injection.args[4], "identity");

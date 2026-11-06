@@ -1139,7 +1139,6 @@ if (typeof importScripts === "function") importScripts("core.js");
             api.scripting.executeScript({
               target: {
                 tabId: c.tabId,
-                frameIds: [c.frameId || 0],
                 documentIds: [c.documentId],
               },
               func:
@@ -1193,7 +1192,6 @@ if (typeof importScripts === "function") importScripts("core.js");
         api.scripting.executeScript({
           target: {
             tabId: c.tabId,
-            frameIds: [c.frameId || 0],
             documentIds: [c.documentId],
           },
           func: core.fillDocument,
@@ -1976,7 +1974,6 @@ if (typeof importScripts === "function") importScripts("core.js");
       api.scripting.executeScript({
         target: {
           tabId: c.tabId,
-          frameIds: [c.frameId || 0],
           documentIds: [c.documentId],
         },
         func: core.otpDocument,
@@ -2146,7 +2143,6 @@ if (typeof importScripts === "function") importScripts("core.js");
         injection = api.scripting.executeScript({
           target: {
             tabId: c.tabId,
-            frameIds: [c.frameId || 0],
             documentIds: [c.documentId],
           },
           func: core.otpDocument,

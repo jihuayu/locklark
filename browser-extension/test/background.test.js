@@ -199,6 +199,8 @@ function harness(options = {}) {
     },
     scripting: {
       executeScript: async (options) => {
+        if (options.target.frameIds && options.target.documentIds)
+          throw Error("Cannot specify both 'frameIds' and 'documentIds'.");
         if (options.func === core.probe && hangProbe)
           return new Promise(() => {});
         if (options.func === core.probe)
