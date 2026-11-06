@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/locklark/internal/watchtower"
 )
 
 const HostName = "org.locklark.browser"
@@ -43,6 +44,7 @@ type Request struct {
 	StageID        string `json:"stage_id,omitempty"`
 	NeverForOrigin bool   `json:"never_for_origin,omitempty"`
 	Category       string `json:"category,omitempty"`
+	IncludeHIBP    bool   `json:"include_hibp,omitempty"`
 	payload        *savePayload
 	WindowID       int64  `json:"window_id,omitempty"`
 	V              int    `json:"v"`
@@ -56,6 +58,10 @@ type Request struct {
 	Revision       string `json:"revision,omitempty"`
 	RequestID      string `json:"request_id,omitempty"`
 	Nonce          string `json:"nonce,omitempty"`
+
+	// includeHIBPSet distinguishes an explicit false from an omitted field.
+	// ReadRequest is the only production constructor.
+	includeHIBPSet bool
 }
 
 func (r Request) Context() personal.BrowserContext {
@@ -137,6 +143,8 @@ func (r Request) valid() bool {
 		return token.MatchString(r.Capability) && r.Origin == "" && r.TabID == 0 && r.DocumentID == "" && r.ItemID == "" && r.Revision == ""
 	case "match":
 		return token.MatchString(r.Capability) && r.Context().Valid() && r.ItemID == "" && r.Revision == ""
+	case "watchtower", "watchtower-summary":
+		return token.MatchString(r.Capability) && r.Context().Valid() && r.ItemID == "" && r.Revision == "" && r.includeHIBPSet
 	case "fill":
 		return token.MatchString(r.Capability) && r.Context().Valid() && token.MatchString(r.ItemID) && revision.MatchString(r.Revision)
 	}
@@ -164,29 +172,30 @@ type StagedSave struct {
 }
 
 type Response struct {
-	Credential        string            `json:"credential,omitempty"`
-	QuickFill         bool              `json:"quick_fill,omitempty"`
-	Code              string            `json:"code,omitempty"`
-	Nonce             string            `json:"nonce,omitempty"`
-	ItemID            string            `json:"item_id,omitempty"`
-	Revision          string            `json:"revision,omitempty"`
-	V                 int               `json:"v"`
-	ID                string            `json:"id,omitempty"`
-	Type              string            `json:"type"`
-	Capability        string            `json:"capability,omitempty"`
-	GeneratedPassword string            `json:"generated_password,omitempty"`
-	HistoryID         string            `json:"history_id,omitempty"`
-	Candidates        []personal.Row    `json:"candidates,omitempty"`
-	Capabilities      []string          `json:"capabilities,omitempty"`
-	NeverOrigins      []string          `json:"never_origins,omitempty"`
-	Identity          map[string]string `json:"identity,omitempty"`
-	Card              map[string]string `json:"card,omitempty"`
-	Category          string            `json:"category,omitempty"`
-	Profile           *GeneratedProfile `json:"profile,omitempty"`
-	Staged            *StagedSave       `json:"staged_save,omitempty"`
-	Username          string            `json:"username,omitempty"`
-	Password          string            `json:"password,omitempty"`
-	Error             string            `json:"error,omitempty"`
+	Credential        string             `json:"credential,omitempty"`
+	QuickFill         bool               `json:"quick_fill,omitempty"`
+	Code              string             `json:"code,omitempty"`
+	Nonce             string             `json:"nonce,omitempty"`
+	ItemID            string             `json:"item_id,omitempty"`
+	Revision          string             `json:"revision,omitempty"`
+	V                 int                `json:"v"`
+	ID                string             `json:"id,omitempty"`
+	Type              string             `json:"type"`
+	Capability        string             `json:"capability,omitempty"`
+	GeneratedPassword string             `json:"generated_password,omitempty"`
+	HistoryID         string             `json:"history_id,omitempty"`
+	Candidates        []personal.Row     `json:"candidates,omitempty"`
+	Capabilities      []string           `json:"capabilities,omitempty"`
+	NeverOrigins      []string           `json:"never_origins,omitempty"`
+	Identity          map[string]string  `json:"identity,omitempty"`
+	Card              map[string]string  `json:"card,omitempty"`
+	Category          string             `json:"category,omitempty"`
+	Profile           *GeneratedProfile  `json:"profile,omitempty"`
+	Staged            *StagedSave        `json:"staged_save,omitempty"`
+	Watchtower        *watchtower.Report `json:"watchtower,omitempty"`
+	Username          string             `json:"username,omitempty"`
+	Password          string             `json:"password,omitempty"`
+	Error             string             `json:"error,omitempty"`
 }
 
 // A legitimate login may have an empty username. Fill responses always carry
@@ -196,12 +205,17 @@ type Response struct {
 func (r Response) MarshalJSON() ([]byte, error) {
 	type plain Response
 	type candidate struct {
-		ID       string `json:"id"`
-		Revision string `json:"revision"`
-		Title    string `json:"title"`
-		State    string `json:"state"`
-		Category string `json:"category,omitempty"`
-		Subtitle string `json:"subtitle,omitempty"`
+		ID               string   `json:"id"`
+		Revision         string   `json:"revision"`
+		Title            string   `json:"title"`
+		State            string   `json:"state"`
+		Category         string   `json:"category,omitempty"`
+		Subtitle         string   `json:"subtitle,omitempty"`
+		WatchtowerFlags  []string `json:"watchtower_flags,omitempty"`
+		StrengthScore    *int     `json:"strength_score,omitempty"`
+		StrengthCategory string   `json:"strength_category,omitempty"`
+		ReuseCount       int      `json:"reuse_count,omitempty"`
+		BreachCount      int      `json:"breach_count,omitempty"`
 	}
 	type wire struct {
 		plain
@@ -305,7 +319,19 @@ func (r Response) MarshalJSON() ([]byte, error) {
 		if len(row.Subtitle) > 1024 {
 			return nil, ErrProtocol
 		}
-		candidates[n] = candidate{row.ID, row.Revision, row.Title, row.State, category, row.Subtitle}
+		candidates[n] = candidate{
+			ID:               row.ID,
+			Revision:         row.Revision,
+			Title:            row.Title,
+			State:            row.State,
+			Category:         category,
+			Subtitle:         row.Subtitle,
+			WatchtowerFlags:  row.WatchtowerFlags,
+			StrengthScore:    row.StrengthScore,
+			StrengthCategory: row.StrengthCategory,
+			ReuseCount:       row.ReuseCount,
+			BreachCount:      row.BreachCount,
+		}
 	}
 	base := wire{plain(r), candidates}
 	if r.Type == "fill" && !structuredFill {
@@ -518,6 +544,7 @@ func ReadRequest(reader io.Reader) (Request, error) {
 		StageID        string  `json:"stage_id"`
 		NeverForOrigin *bool   `json:"never_for_origin"`
 		Category       string  `json:"category"`
+		IncludeHIBP    *bool   `json:"include_hibp"`
 		V              int     `json:"v"`
 		ID             string  `json:"id"`
 		Type           string  `json:"type"`
@@ -540,6 +567,10 @@ func ReadRequest(reader io.Reader) (Request, error) {
 	}
 	r := Request{Options: wire.Options, Mode: wire.Mode, Title: wire.Title, StageID: wire.StageID, Category: wire.Category, V: wire.V, ID: wire.ID, Type: wire.Type, Capability: wire.Capability, Origin: wire.Origin, TabID: wire.TabID, DocumentID: wire.DocumentID, WindowID: wire.WindowID, ItemID: wire.ItemID, Revision: wire.Revision, RequestID: wire.RequestID, Nonce: wire.Nonce}
 	r.NeverForOrigin = wire.NeverForOrigin != nil && *wire.NeverForOrigin
+	if wire.IncludeHIBP != nil {
+		r.IncludeHIBP = *wire.IncludeHIBP
+		r.includeHIBPSet = true
+	}
 	if wire.Username != nil && wire.Password != nil {
 		r.payload = &savePayload{[]byte(*wire.Username), []byte(*wire.Password)}
 	}
@@ -552,6 +583,8 @@ func ReadRequest(reader io.Reader) (Request, error) {
 		expected = append(expected, "capability", "origin", "tab_id", "document_id", "options")
 	case "generate":
 		expected = append(expected, "capability", "options")
+	case "watchtower", "watchtower-summary":
+		expected = append(expected, "capability", "origin", "tab_id", "document_id", "include_hibp")
 	case "match", "fill", "save-new", "save-update", "otp", "pending-save":
 		expected = append(expected, "capability", "origin", "tab_id", "document_id")
 		if (r.Type == "match" || r.Type == "fill") && r.Category != "" {

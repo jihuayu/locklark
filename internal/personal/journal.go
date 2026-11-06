@@ -78,10 +78,10 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 	if e.Sequence != n || e.Previous != prev || !idOK(e.Session) || e.Actor != "local-owner" || !ed25519.Verify(pub, e.proof(), e.Signature) {
 		return invalid
 	}
-	if e.Action != passkeyCreateAction && e.Action != "desktop.system.enable" && e.Action != sshSignAction && !browserSaveAction(e.Action) && !editAction(e.Action) && !readValueAction(e.Action) && !otpAction(e.Action) && e.Action != referenceRejectAction && e.Action != inspectionAction && e.Action != exportAction && e.Action != matchAction && !migrationAction(e.Action) && e.Action != v2PurgeAction && e.Action != v2EmptyTrashAction && e.Action != v2CreateVaultAction && e.Action != v2ListVaultsAction && e.Action != v2DetailViewAction && e.Action != v2DetailInspectAction && e.Action != v2AttachmentReadAction && !((e.Action == sshGenerateAction || e.Action == sshImportAction || e.Action == "item.add" || e.Action == "item.generate") && e.Result == "native-refused") && (e.Result != "succeeded" || e.BaseRevision != "") {
+	if e.Action != passkeyCreateAction && e.Action != "desktop.system.enable" && e.Action != sshSignAction && !browserSaveAction(e.Action) && !editAction(e.Action) && !readValueAction(e.Action) && !otpAction(e.Action) && e.Action != referenceRejectAction && e.Action != inspectionAction && e.Action != exportAction && e.Action != matchAction && !migrationAction(e.Action) && e.Action != v2PurgeAction && e.Action != v2EmptyTrashAction && e.Action != v2CreateVaultAction && e.Action != v2ListVaultsAction && e.Action != v2DetailViewAction && e.Action != v2DetailInspectAction && e.Action != v2AttachmentReadAction && e.Action != watchtowerAction && e.Action != hibpAction && !((e.Action == sshGenerateAction || e.Action == sshImportAction || e.Action == "item.add" || e.Action == "item.generate") && e.Result == "native-refused") && (e.Result != "succeeded" || e.BaseRevision != "") {
 		return invalid
 	}
-	if (e.Action == inspectionAction || migrationAction(e.Action) || e.Action == "item.import" || e.Action == healthAction) && e.Result == "succeeded" {
+	if (e.Action == inspectionAction || migrationAction(e.Action) || e.Action == "item.import" || e.Action == healthAction || e.Action == watchtowerAction || e.Action == hibpAction) && e.Result == "succeeded" {
 		if !digestOK(e.ReportDigest) {
 			return invalid
 		}
@@ -255,6 +255,14 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 		nativeRefused := (e.Action == "item.regenerate.password" || nativeEditAction(e.Action)) && e.Result == "native-refused"
 		browserRefused := (e.Action == browserFillAction || e.Action == browserOTPAction) && e.Result == "browser-refused"
 		if n <= 1 || !idOK(e.Item) || !digestOK(e.BaseRevision) || (e.Result != accepted && e.Result != "conflict" && !unconfigured && !already && !blocked && !browserRefused && !nativeRefused) {
+			return invalid
+		}
+	case watchtowerAction:
+		if n <= 1 || e.Result != "succeeded" || e.Item != "" || e.BaseRevision != "" {
+			return invalid
+		}
+	case hibpAction:
+		if n <= 1 || e.Item != "" || e.BaseRevision != "" || (e.Result != "intent" && e.Result != "succeeded") {
 			return invalid
 		}
 	case "vault.create":

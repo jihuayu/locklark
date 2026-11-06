@@ -15,6 +15,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     offerSaveLogins = true,
     neverSaveOrigins = [],
     loginOverrides = {},
+    watchtowerHIBP = false,
     generatorDefaults = {
       mode: "random",
       length: 24,
@@ -47,6 +48,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     offerUsePasskeys = settings.offerUsePasskeys;
     offerSaveLogins = settings.offerSaveLogins;
     loginOverrides = settings.loginOverrides;
+    watchtowerHIBP = settings.watchtowerHIBP;
     neverSaveOrigins = [...settings.neverSaveOrigins];
     generatorDefaults = sanitizeGeneratorDefaults({
       ...settings.generatorDefaults,
@@ -92,7 +94,8 @@ if (typeof importScripts === "function") importScripts("core.js");
     otpCancellation = null,
     otpUnknown = false,
     epoch = 0,
-    unconfirmedSave = false;
+    unconfirmedSave = false,
+    watchtowerReport = null;
   // Per-tab ephemeral login continuation state. Metadata only, never field
   // values, and never persisted outside the service worker.
   const OTP_UNKNOWN = "验证码填充结果未确认，请核实页面";
@@ -351,6 +354,8 @@ if (typeof importScripts === "function") importScripts("core.js");
       neverSave: site.neverSave,
       clipboardClearSeconds: settings.clipboardClearSeconds,
       theme: settings.theme,
+      watchtowerHIBP,
+      watchtower: watchtowerReport,
       status:
         status +
         (otpUnknown && !status.includes(OTP_UNKNOWN)
@@ -362,13 +367,7 @@ if (typeof importScripts === "function") importScripts("core.js");
         (passkeyUnknown && !status.includes(PASSKEY_UNKNOWN)
           ? " · " + PASSKEY_UNKNOWN
           : ""),
-      candidates: rows.map((r) => ({
-        id: r.id,
-        title: r.title,
-        revision: r.revision,
-        category: rowCategory(r),
-        ...(r.subtitle ? { subtitle: r.subtitle } : {}),
-      })),
+      candidates: rows.map(candidateView),
       preferredItemId: multiStepFor(context?.tabId, context?.origin)?.itemId || "",
       preferredTitle: multiStepFor(context?.tabId, context?.origin)?.title || "",
       step: multiStepFor(context?.tabId, context?.origin)?.stepCompleted || "",
@@ -476,6 +475,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     capability = "";
     context = null;
     rows = [];
+    watchtowerReport = null;
     pending = null;
     pendingOTP = null;
     hostCapabilities = [];
@@ -792,6 +792,37 @@ if (typeof importScripts === "function") importScripts("core.js");
       topOrigin,
     };
   }
+  async function activeSite() {
+    try {
+      const tabs = await api.tabs.query({ active: true, currentWindow: true });
+      if (!Array.isArray(tabs) || tabs.length !== 1)
+        return { origin: "", unsecured: false };
+      return (
+        core.siteFromURL(tabs[0]?.url) || { origin: "", unsecured: false }
+      );
+    } catch {
+      return { origin: "", unsecured: false };
+    }
+  }
+  function candidateView(row) {
+    const view = {
+      id: row.id,
+      title: row.title,
+      revision: row.revision,
+      category: rowCategory(row),
+      ...(row.subtitle ? { subtitle: row.subtitle } : {}),
+    };
+    if (Array.isArray(row.watchtower_flags))
+      view.watchtower_flags = [...row.watchtower_flags];
+    for (const key of [
+      "strength_score",
+      "strength_category",
+      "reuse_count",
+      "breach_count",
+    ])
+      if (row[key] !== undefined) view[key] = row[key];
+    return view;
+  }
   function fields(c) {
     return {
       capability,
@@ -803,6 +834,69 @@ if (typeof importScripts === "function") importScripts("core.js");
   async function current(expected) {
     const now = await capture(expected.frameId || 0);
     if (!core.sameContext(expected, now)) throw Error("refused");
+  }
+  async function runWatchtower(message) {
+    await settingsReady;
+    if (!capability) {
+      status = "请先连接原生金库，再运行 Watchtower 安全体检";
+      return;
+    }
+    if (pending || pendingOTP || pendingPasskey) throw Error("refused");
+    const generation = epoch;
+    let c = context;
+    if (!c) {
+      try {
+        c = await capture();
+      } catch {
+        if (generation !== epoch) throw Error("refused");
+        const site = await activeSite();
+        status = site.unsecured
+          ? "当前网页使用不安全的 HTTP 连接，Watchtower 需要 HTTPS 页面；未发送 HIBP 查询"
+          : "无法读取当前网页，请打开 HTTPS 登录页后重试";
+        return;
+      }
+    }
+    if (generation !== epoch) throw Error("refused");
+    await current(c);
+    if (generation !== epoch) throw Error("refused");
+    const includeHibp = watchtowerHIBP === true && message.includeHibp === true;
+    status = includeHibp
+      ? "正在运行本地与 HIBP Watchtower 安全体检"
+      : "正在运行本地 Watchtower 安全体检";
+    const response = await request(
+      "watchtower",
+      { ...fields(c), include_hibp: includeHibp },
+      includeHibp ? 65000 : 35000,
+    );
+    if (generation !== epoch) throw Error("refused");
+    if (!response || !core.validWatchtower(response.watchtower))
+      throw Error("refused");
+    watchtowerReport = response.watchtower;
+    status =
+      includeHibp && watchtowerReport.hibp_error === "unavailable"
+        ? "HIBP 泄露库暂不可用，已显示本地体检结果"
+        : `Watchtower 体检完成 · 安全评分 ${watchtowerReport.overall_score}/100`;
+  }
+  async function openWatchtower(origin) {
+    if (!core.validHTTPSOrigin(origin)) throw Error("refused");
+    const site = await activeSite();
+    let allowed = false;
+    if (site.origin === origin || context?.origin === origin) allowed = true;
+    if (watchtowerReport) {
+      if (watchtowerReport.site?.origin === origin) allowed = true;
+      for (const finding of [
+        ...watchtowerReport.site_findings,
+        ...watchtowerReport.findings,
+      ])
+        if (finding.origin === origin) {
+          allowed = true;
+          break;
+        }
+    }
+    if (!allowed || typeof api.tabs.create !== "function")
+      throw Error("refused");
+    await api.tabs.create({ url: origin });
+    status = "已打开网站，请更新登录密码";
   }
   async function connect() {
     disconnect(true);
@@ -897,6 +991,7 @@ if (typeof importScripts === "function") importScripts("core.js");
         "item-state": "saved",
         generate: "generated",
         "fill-item": "fill-fields",
+        watchtower: "watchtower",
       }[call.type];
       if (
         message.type === "unknown" &&
@@ -971,19 +1066,9 @@ if (typeof importScripts === "function") importScripts("core.js");
       throw Error("refused");
     const next = response.candidates || [];
     if (
+      !Array.isArray(next) ||
       next.length > 100 ||
-      next.some(
-        (r) =>
-          !r ||
-          !/^[a-f0-9]{32}$/.test(r.id) ||
-          !/^[a-f0-9]{64}$/.test(r.revision) ||
-          typeof r.title !== "string" ||
-          r.title.length > 16384 ||
-          r.state !== "active" ||
-          (r.category !== undefined && !validCategory(r.category)) ||
-          (r.subtitle !== undefined &&
-            (typeof r.subtitle !== "string" || r.subtitle.length > 1024)),
-      )
+      next.some((r) => !core.validCandidate(r))
     )
       throw Error("refused");
     context = c;
@@ -1837,6 +1922,8 @@ if (typeof importScripts === "function") importScripts("core.js");
       neverSaveOrigins: [...neverSaveOrigins],
       generatorDefaults: { ...generatorDefaults },
       generatedHistory: generatedHistoryView(),
+      watchtowerHIBP,
+      watchtower: watchtowerReport,
       status:
         status +
         (otpUnknown && !status.includes(OTP_UNKNOWN)
@@ -1848,13 +1935,7 @@ if (typeof importScripts === "function") importScripts("core.js");
         (passkeyUnknown && !status.includes(PASSKEY_UNKNOWN)
           ? " · " + PASSKEY_UNKNOWN
           : ""),
-      candidates: rows.map((r) => ({
-        id: r.id,
-        title: r.title,
-        revision: r.revision,
-        category: rowCategory(r),
-        ...(r.subtitle ? { subtitle: r.subtitle } : {}),
-      })),
+      candidates: rows.map(candidateView),
       preferredItemId: multiStepFor(context?.tabId, context?.origin)?.itemId || "",
       preferredTitle: multiStepFor(context?.tabId, context?.origin)?.title || "",
       step: multiStepFor(context?.tabId, context?.origin)?.stepCompleted || "",
@@ -2922,6 +3003,40 @@ if (typeof importScripts === "function") importScripts("core.js");
       }
     }
   }
+  function composedStatus() {
+    return (
+      status +
+      (otpUnknown && !status.includes(OTP_UNKNOWN)
+        ? " · " + OTP_UNKNOWN
+        : "") +
+      (fillUnknown && !status.includes(FILL_UNKNOWN)
+        ? " · " + FILL_UNKNOWN
+        : "") +
+      (passkeyUnknown && !status.includes(PASSKEY_UNKNOWN)
+        ? " · " + PASSKEY_UNKNOWN
+        : "")
+    );
+  }
+  async function stateSnapshot() {
+    const site = await activeSite();
+    return {
+      connected: !!capability,
+      autoLogin,
+      quickFill,
+      loginOverrides,
+      offerSavePasskeys,
+      offerUsePasskeys,
+      watchtowerHIBP,
+      status: composedStatus(),
+      candidates: rows.map(candidateView),
+      pending: !!pending || !!pendingOTP || !!pendingPasskey,
+      otpPending: !!pendingOTP,
+      saveBlocked: unconfirmedSave,
+      origin: context?.origin || "",
+      site,
+      watchtower: watchtowerReport,
+    };
+  }
   api.runtime.onMessage.addListener((message, sender, respond) => {
     if (!contentSender(sender)) return false;
     fromContent(message, sender).then(respond, (error) =>
@@ -2967,6 +3082,7 @@ if (typeof importScripts === "function") importScripts("core.js");
             "offerSaveLogins",
             "showInlineGenerator",
             "watchtowerLocalChecks",
+            "watchtowerHIBP",
           ])
             if (typeof message[key] === "boolean") next[key] = message[key];
           if (
@@ -3014,6 +3130,26 @@ if (typeof importScripts === "function") importScripts("core.js");
           break;
         case "lock":
           lockVault();
+          break;
+        case "watchtower": {
+          const keys = Object.keys(message).sort().join(",");
+          if (keys !== "type" && keys !== "includeHibp,type")
+            throw Error("refused");
+          if (
+            message.includeHibp !== undefined &&
+            typeof message.includeHibp !== "boolean"
+          )
+            throw Error("refused");
+          await runWatchtower(message);
+          break;
+        }
+        case "watchtower-open":
+          if (
+            Object.keys(message).sort().join(",") !== "origin,type" ||
+            typeof message.origin !== "string"
+          )
+            throw Error("refused");
+          await openWatchtower(message.origin);
           break;
         case "commit-staged-save": {
           if (!/^[a-f0-9]{32}$/.test(message.stageId || ""))
@@ -3271,6 +3407,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       sendResponse({
         ...statePayload({ ...extra, pendingSave }),
         ...snapshot(),
+        ...(await stateSnapshot()),
         ...extra,
         pendingSave,
       });

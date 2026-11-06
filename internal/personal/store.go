@@ -23,6 +23,7 @@ import (
 	"github.com/jihuayu/locklark/internal/reference"
 	"github.com/jihuayu/locklark/internal/totp"
 	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/locklark/internal/watchtower"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -38,14 +39,19 @@ type identity struct {
 func (i *identity) clear() { clear(i.Signing); clear(i.Audit); clear(i.AuditEncryption) }
 
 type Row struct {
-	Kind         string `json:"kind,omitempty"`
-	RestoreState string `json:"restore_state,omitempty"`
-	Category     string `json:"category,omitempty"`
-	Subtitle     string `json:"subtitle,omitempty"`
-	State        string `json:"state"`
-	ID           string `json:"id"`
-	Title        string `json:"title"`
-	Revision     string `json:"revision"`
+	Kind             string   `json:"kind,omitempty"`
+	RestoreState     string   `json:"restore_state,omitempty"`
+	Category         string   `json:"category,omitempty"`
+	Subtitle         string   `json:"subtitle,omitempty"`
+	State            string   `json:"state"`
+	ID               string   `json:"id"`
+	Title            string   `json:"title"`
+	Revision         string   `json:"revision"`
+	WatchtowerFlags  []string `json:"watchtower_flags,omitempty"`
+	StrengthScore    *int     `json:"strength_score,omitempty"`
+	StrengthCategory string   `json:"strength_category,omitempty"`
+	ReuseCount       int      `json:"reuse_count,omitempty"`
+	BreachCount      int      `json:"breach_count,omitempty"`
 }
 
 var b32 = base32.StdEncoding.WithPadding(base32.NoPadding)
@@ -189,6 +195,8 @@ func existingWithReadOnly(path string, readOnly bool) (*bolt.DB, error) {
 }
 
 type result struct {
+	watchtowerReport  watchtower.Report
+	hibpCandidates    []watchtower.HIBPCandidate
 	sshSeed           []byte
 	savePersisted     bool
 	browser           *NativeBrowserFill
@@ -241,6 +249,8 @@ type commandOption struct {
 	generation     *generationRequest
 	reference      *referenceRequest
 	v2             *v2Request
+	watchtower     *watchtowerRequest
+	hibp           *hibpRequest
 }
 
 func command(path, pw string, key []byte, action string, add vault.Item, edit *Edit, options ...commandOption) (result, error) {
@@ -440,6 +450,18 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 	if (action == matchAction) != (option.match != nil) {
 		return result{}, invalid
 	}
+	if (action == watchtowerAction) != (option.watchtower != nil) {
+		return result{}, invalid
+	}
+	if (action == hibpAction) != (option.hibp != nil) {
+		return result{}, invalid
+	}
+	if option.watchtower != nil && !option.watchtower.valid() {
+		return result{}, invalid
+	}
+	if option.hibp != nil && !option.hibp.valid() {
+		return result{}, invalid
+	}
 	if (action == searchAction) != (option.search != nil) || option.search != nil && !option.search.valid() {
 		return result{}, ErrSearchQuery
 	}
@@ -595,6 +617,30 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			out.slotDigest = sha256.Sum256(b.Get(slotKey))
 		case searchAction:
 			out.rows, e = searchRows(items, revisions, *option.search)
+			if e != nil {
+				return e
+			}
+		case watchtowerAction:
+			analysis, err := analyzeWatchtower(items, revisions, *option.watchtower)
+			if err != nil {
+				return err
+			}
+			out.watchtowerReport = analysis.Report
+			out.hibpCandidates = analysis.HIBPCandidates
+			out.reportDigest, e = digest(analysis.Report)
+			if e != nil {
+				return e
+			}
+		case hibpAction:
+			if option.hibp.intent {
+				outcome = "intent"
+				break
+			}
+			out.watchtowerReport, e = analyzeHIBP(items, revisions, *option.hibp)
+			if e != nil {
+				return e
+			}
+			out.reportDigest, e = digest(out.watchtowerReport)
 			if e != nil {
 				return e
 			}

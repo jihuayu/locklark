@@ -7,6 +7,7 @@ import (
 
 	"github.com/jihuayu/locklark/internal/origin"
 	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/locklark/internal/watchtower"
 	"golang.org/x/net/publicsuffix"
 )
 
@@ -112,6 +113,35 @@ func matchingRows(items []vault.Item, revisions map[string]string, want string) 
 			return nil, invalid
 		}
 		rows = append(rows, Row{Kind: it.Kind, ID: it.ID, Title: it.Title, Revision: revisions[it.ID], State: "active"})
+	}
+	if len(rows) == 0 {
+		return rows, nil
+	}
+	mapped, err := watchtowerItems(items, revisions)
+	if err != nil {
+		return nil, err
+	}
+	// Badge data is local-only: no HIBP client and no network is involved in a
+	// match, and reuse counts deliberately cover the whole active login set.
+	analysis, err := watchtower.Analyze(mapped, watchtower.Options{})
+	if err != nil {
+		return nil, invalid
+	}
+	byID := make(map[string]watchtower.Finding, len(analysis.Report.Findings))
+	for _, finding := range analysis.Report.Findings {
+		byID[finding.ID] = finding
+	}
+	for i := range rows {
+		finding, ok := byID[rows[i].ID]
+		if !ok {
+			continue
+		}
+		score := finding.StrengthScore
+		rows[i].WatchtowerFlags = append([]string{}, finding.Flags...)
+		rows[i].StrengthScore = &score
+		rows[i].StrengthCategory = finding.StrengthCategory
+		rows[i].ReuseCount = finding.ReuseCount
+		rows[i].BreachCount = finding.BreachCount
 	}
 	return rows, nil
 }

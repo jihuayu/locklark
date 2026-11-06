@@ -287,6 +287,23 @@ func (c *Connection) Handle(r Request) error {
 	if c.pending != nil || c.save != nil || c.otp != nil || c.passkey != nil || c.stagedBusy {
 		return c.refuse(r.ID)
 	}
+	if r.Type == "watchtower" || r.Type == "watchtower-summary" {
+		s := c.session.Load()
+		if s == nil {
+			return c.refuse(r.ID)
+		}
+		epoch := c.epoch
+		report, e := s.Watchtower(r.Origin, r.IncludeHIBP)
+		if e != nil || epoch != c.generation.Load() || !s.Unlocked() {
+			if !s.Unlocked() {
+				c.invalidate()
+			}
+			return c.refuse(r.ID)
+		}
+		// The report is advisory metadata; a successful scan never discards
+		// existing match rows or their context.
+		return c.response(Response{ID: r.ID, Type: "watchtower", Watchtower: &report})
+	}
 	if r.Type == "match" {
 		c.rows = nil
 		c.context = personal.BrowserContext{}
