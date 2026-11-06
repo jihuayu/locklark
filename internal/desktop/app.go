@@ -51,6 +51,12 @@ type App struct {
 	otpDisplayBounds, otpClipboard                         *personal.OTPBounds
 	otpDisplayTarget, otpClipboardTarget                   personal.NativeOTPTarget
 	otpDisplayTimer, otpClipboardTimer                     *time.Timer
+	fieldDisplaySequence                                   uint64
+	displayTimer                                           *time.Timer
+	clipboardTimer                                         *time.Timer
+	idleSequence                                           uint64
+	idleTimer                                              *time.Timer
+	queryGeneration                                        uint64
 
 	browserPasskeyID                               string
 	browserSaveID, browserSaveTitle                string
@@ -112,12 +118,17 @@ func (a *App) runContext(work func(context.Context) outcome) {
 				a.status = message(r.err)
 				if a.session != nil && !a.session.Unlocked() {
 					a.Lock()
+				} else if a.session != nil && a.idleTimer != nil {
+					a.armIdleTimer()
 				}
 				return
 			}
 			a.status = "操作完成"
 			if r.apply != nil {
 				r.apply()
+			}
+			if a.session != nil && a.idleTimer != nil {
+				a.armIdleTimer()
 			}
 		})
 	})
@@ -167,6 +178,111 @@ func visible(s string) string {
 	}
 	return out.String()
 }
+
+type listFilter struct {
+	query      string
+	scope      string
+	generation uint64
+}
+
+func (a *App) captureFilter() listFilter {
+	scope := a.scope
+	if scope == "" {
+		scope = "active"
+	}
+	return listFilter{query: a.query, scope: scope, generation: a.queryGeneration}
+}
+
+func (a *App) filterCurrent(f listFilter) bool {
+	scope := a.scope
+	if scope == "" {
+		scope = "active"
+	}
+	return a.query == f.query && scope == f.scope && a.queryGeneration == f.generation
+}
+
+func queryRows(s *personal.Session, f listFilter) ([]personal.Row, error) {
+	if f.query == "" {
+		return s.List(f.scope)
+	}
+	return s.Search(f.query, f.scope)
+}
+
+func (a *App) applyMutationRefresh(r nativeResult, filter listFilter) bool {
+	a.selected = nil
+	a.hideDisplay()
+	if r.refreshErr != nil || !a.filterCurrent(filter) {
+		a.rows = nil
+		return false
+	}
+	a.rows = loginProjection(r.rows)
+	return true
+}
+
+func (a *App) hideDisplay() {
+	a.fieldDisplaySequence++
+	if a.displayTimer != nil {
+		a.displayTimer.Stop()
+		a.displayTimer = nil
+	}
+	a.display = ""
+	a.displayUntil = time.Time{}
+}
+
+func (a *App) showFieldDisplay(value string, until time.Time) {
+	a.hideDisplay()
+	a.display = value
+	a.displayUntil = until
+	sequence := a.fieldDisplaySequence
+	generation := a.generation
+	exposure := a.exposureGeneration
+	if d := time.Until(until); !until.IsZero() && d > 0 {
+		a.displayTimer = time.AfterFunc(d, func() {
+			a.dispatch(func() {
+				if a.generation == generation && a.exposureGeneration == exposure && a.fieldDisplaySequence == sequence {
+					a.hideDisplay()
+				}
+			})
+		})
+	}
+}
+
+func (a *App) stopIdleTimer() {
+	a.idleSequence++
+	if a.idleTimer != nil {
+		a.idleTimer.Stop()
+		a.idleTimer = nil
+	}
+}
+
+func (a *App) armIdleTimer() {
+	a.stopIdleTimer()
+	s := a.session
+	if s == nil {
+		return
+	}
+	deadline, ok := s.IdleDeadline()
+	if !ok {
+		a.Lock()
+		return
+	}
+	generation := a.generation
+	sequence := a.idleSequence
+	d := max(time.Until(deadline), time.Millisecond)
+	a.idleTimer = time.AfterFunc(d, func() {
+		a.dispatch(func() {
+			if a.session != s || a.generation != generation || a.idleSequence != sequence {
+				return
+			}
+			a.idleTimer = nil
+			if !s.Unlocked() {
+				a.Lock()
+				return
+			}
+			a.armIdleTimer()
+		})
+	})
+}
 func (a *App) Lock() {
 	a.stopSSHAgent()
 	a.sshRows = nil
@@ -179,8 +295,10 @@ func (a *App) Lock() {
 			a.mutationUnknown = true
 		}
 	}
+	a.operation = nil
 	// Revoke all session/UI authority before native clipboard metadata calls.
 	a.generation++
+	a.stopIdleTimer()
 	a.clearNotesEditor()
 	a.closeQuickSearch()
 	s := a.session
@@ -204,6 +322,7 @@ func (a *App) Lock() {
 	a.value = ""
 	a.username = ""
 	a.title = ""
+	a.website = ""
 	a.display = ""
 	a.exportPassword = ""
 	a.rows = nil
@@ -212,6 +331,9 @@ func (a *App) Lock() {
 	a.report = ""
 	a.planDigest = ""
 	a.query = ""
+	a.queryGeneration++
+	a.browserSaveID = ""
+	a.browserSaveTitle = ""
 	a.busy = false
 	a.status = "金库已锁定"
 	if a.mutationUnknown {
@@ -254,6 +376,7 @@ func (a *App) unlock() {
 		}
 		return outcome{drop: s.Lock, apply: func() {
 			a.session = s
+			a.armIdleTimer()
 			a.rows = loginProjection(rows)
 			a.scope = "active"
 			a.page = "vault"
@@ -289,6 +412,7 @@ func (a *App) createVault() {
 		}
 		return outcome{drop: s.Lock, apply: func() {
 			a.session = s
+			a.armIdleTimer()
 			a.rows = nil
 			a.create = false
 			a.status = "金库已创建，Secret Key 请继续离线保管"
@@ -299,63 +423,92 @@ func (a *App) refresh() {
 	a.clearNotesEditor()
 	a.clearDailyExposure()
 	a.regenerate = nil
-	s, query, scope := a.session, a.query, a.scope
+	s := a.session
 	if s == nil {
 		return
 	}
+	filter := a.captureFilter()
 	a.run(func() outcome {
-		var rows []personal.Row
-		var e error
-		if query == "" {
-			rows, e = s.List(scope)
-		} else {
-			rows, e = s.Search(query, scope)
-		}
+		rows, e := queryRows(s, filter)
 		return outcome{err: e, apply: func() {
+			if !a.filterCurrent(filter) {
+				a.rows = nil
+				a.selected = nil
+				a.hideDisplay()
+				a.status = "搜索条件已变更，请重新刷新"
+				return
+			}
 			a.rows = loginProjection(rows)
 			a.selected = nil
-			a.display = ""
+			a.hideDisplay()
 			a.status = fmt.Sprintf("%d 个条目", len(a.rows))
 		}}
 	})
 }
 func (a *App) add() { a.saveNative(false) }
 func (a *App) edit() {
-	a.clearNotesEditor()
-	a.clearDailyExposure()
-	if a.selected == nil {
+	if a.session == nil || a.selected == nil || a.busy {
 		return
 	}
 	s := a.session
 	target := *a.selected
-	field, value := a.editField, a.value
+	field, value := a.editField, []byte(a.value)
 	a.value = ""
-	scope := a.scope
-	a.run(func() outcome {
-		_, e := s.Edit(personal.Edit{ID: target.ID, Revision: target.Revision, Field: field, Value: value})
-		if e != nil {
-			return outcome{err: e}
+	filter := a.captureFilter()
+	generation := a.generation
+	exposure, operation := a.exposureGeneration, a.operationSequence
+	a.clearNotesEditor()
+	a.clearDailyExposure()
+	if a.session != s || a.generation != generation || a.exposureGeneration != exposure+1 || a.operationSequence != operation || a.selected == nil || a.selected.ID != target.ID || a.selected.Revision != target.Revision || a.busy {
+		clear(value)
+		return
+	}
+	started := a.runNative(func(g *personal.MutationGate) nativeResult {
+		defer clear(value)
+		rev, e := s.EditNativeField(target.ID, target.Revision, field, value, g)
+		out := nativeResult{receipt: personal.GenerationReceipt{ID: target.ID, Revision: rev}, err: e}
+		if e == nil {
+			out.rows, out.refreshErr = queryRows(s, filter)
 		}
-		rows, e := s.List(scope)
-		return outcome{err: e, apply: func() { a.rows = loginProjection(rows); a.selected = nil; a.display = ""; a.status = "字段已更新" }}
+		return out
+	}, func(r nativeResult) {
+		ok := a.applyMutationRefresh(r, filter)
+		a.status = "字段已更新"
+		if !ok {
+			a.status += "；列表未刷新，请手动刷新"
+		}
 	})
+	if !started {
+		clear(value)
+	}
 }
 func (a *App) state(action string) {
-	a.clearNotesEditor()
-	a.clearDailyExposure()
-	if a.selected == nil {
+	if a.session == nil || a.selected == nil || a.busy {
 		return
 	}
 	s := a.session
 	target := *a.selected
-	scope := a.scope
-	a.run(func() outcome {
-		_, e := s.SetState(target.ID, target.Revision, action)
-		if e != nil {
-			return outcome{err: e}
+	filter := a.captureFilter()
+	generation := a.generation
+	exposure, operation := a.exposureGeneration, a.operationSequence
+	a.clearNotesEditor()
+	a.clearDailyExposure()
+	if a.session != s || a.generation != generation || a.exposureGeneration != exposure+1 || a.operationSequence != operation || a.selected == nil || a.selected.ID != target.ID || a.selected.Revision != target.Revision || a.busy {
+		return
+	}
+	a.runNative(func(g *personal.MutationGate) nativeResult {
+		rev, e := s.SetNativeState(target.ID, target.Revision, action, g)
+		out := nativeResult{receipt: personal.GenerationReceipt{ID: target.ID, Revision: rev}, err: e}
+		if e == nil {
+			out.rows, out.refreshErr = queryRows(s, filter)
 		}
-		rows, e := s.List(scope)
-		return outcome{err: e, apply: func() { a.rows = loginProjection(rows); a.selected = nil; a.display = "" }}
+		return out
+	}, func(r nativeResult) {
+		ok := a.applyMutationRefresh(r, filter)
+		a.status = "操作完成"
+		if !ok {
+			a.status += "；列表未刷新，请手动刷新"
+		}
 	})
 }
 func (a *App) disclose(field, purpose string) {
@@ -382,12 +535,11 @@ func (a *App) disclose(field, purpose string) {
 					}
 					a.status = "已复制到系统剪贴板 · 30 秒后尝试清理"
 				} else {
+					shown := visible(string(value))
 					if field == "notes" {
-						a.display = visibleNotes(string(value))
-					} else {
-						a.display = visible(string(value))
+						shown = visibleNotes(string(value))
 					}
-					a.displayUntil = time.Now().Add(15 * time.Second)
+					a.showFieldDisplay(shown, time.Now().Add(15*time.Second))
 					a.status = "字段显示 15 秒"
 				}
 				return nil
@@ -403,14 +555,16 @@ func (a *App) View(c *ui.Context) {
 	now := time.Now()
 	a.checkOTPExposure(now)
 	if !a.displayUntil.IsZero() && !now.Before(a.displayUntil) {
-		a.display = ""
-		a.displayUntil = time.Time{}
+		a.hideDisplay()
 	}
 	if !a.clipboardUntil.IsZero() && !now.Before(a.clipboardUntil) {
 		a.clearClipboard()
 	}
 	if a.session != nil && !a.session.Unlocked() {
 		a.Lock()
+	}
+	if a.session != nil && a.idleTimer == nil {
+		a.armIdleTimer()
 	}
 	c.After(time.Second)
 	ui.Column(c.Key(a.generation)).Fill().Padding(24).Gap(16).Children(func() {
@@ -528,7 +682,10 @@ func (a *App) itemsView(c *ui.Context) {
 		return
 	}
 	ui.Row(c).Gap(8).Children(func() {
-		ui.TextInput(c, &a.query).Label("搜索标题").Placeholder("搜索标题").Grow(1)
+		input := ui.TextInput(c, &a.query).Label("搜索标题").Placeholder("搜索标题").Grow(1)
+		if input.Changed() {
+			a.queryGeneration++
+		}
 		ui.Button(c, "搜索 / 刷新").Disabled(a.busy).OnClick(a.refresh)
 		ui.Button(c, "新建登录").Disabled(a.busy).OnClick(func() {
 			a.clearNotesEditor()
@@ -537,12 +694,14 @@ func (a *App) itemsView(c *ui.Context) {
 			a.regenerate = nil
 			a.value = ""
 			a.username = ""
+			a.title = ""
+			a.website = ""
 		})
 	})
 	ui.Row(c).Gap(8).Children(func() {
 		for _, scope := range []struct{ id, label string }{{"active", "活动"}, {"archived", "归档"}, {"trashed", "回收站"}, {"all", "全部"}} {
 			scope := scope
-			ui.Button(c, scope.label).Disabled(a.busy).OnClick(func() { a.scope = scope.id; a.refresh() })
+			ui.Button(c, scope.label).Disabled(a.busy).OnClick(func() { a.scope = scope.id; a.queryGeneration++; a.refresh() })
 		}
 	})
 	ui.Row(c).Gap(24).Grow(1).Children(func() {
@@ -600,7 +759,7 @@ func (a *App) itemsView(c *ui.Context) {
 				})
 				if a.display != "" {
 					ui.Column(c).Role(ui.RoleGroup).Label("已授权显示的字段").Children(func() { ui.Text(c, a.display) })
-					ui.Button(c, "立即隐藏").OnClick(func() { a.exposureGeneration++; a.display = ""; a.displayUntil = time.Time{} })
+					ui.Button(c, "立即隐藏").OnClick(func() { a.exposureGeneration++; a.hideDisplay() })
 				}
 				ui.Text(c, "更新一个字段（原值不预填）：")
 				ui.Row(c).Gap(6).Children(func() {
@@ -737,6 +896,7 @@ func (a *App) systemUnlock() {
 		}
 		return outcome{drop: s.Lock, apply: func() {
 			a.session = s
+			a.armIdleTimer()
 			a.rows = loginProjection(rows)
 			a.scope = "active"
 			a.page = "vault"

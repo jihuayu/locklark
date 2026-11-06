@@ -16,6 +16,19 @@ type NativeLoginMetadata struct{ Title, URL string }
 type NativeLoginView struct{ ID, Revision, Title, URL, State string }
 type nativeMutationRequest struct{ gate *MutationGate }
 
+func (s *Session) RegisterMutation(g *MutationGate) error {
+	if e := s.RegisterBrowserSave(g); e != nil {
+		return ErrMutationCancelled
+	}
+	return nil
+}
+func (s *Session) ReleaseMutation(g *MutationGate) { s.ReleaseBrowserSave(g) }
+func (s *Session) registeredMutation(g *MutationGate) bool {
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+	return g != nil && s.saveGate == g && g.Pending() && !s.lockRequested.Load()
+}
+
 func nativeEditAction(action string) bool {
 	switch action {
 	case "item.edit.title", "item.edit.url", "item.edit.username", "item.edit.password", "item.edit.otp", "item.edit.notes":
@@ -28,6 +41,7 @@ func nativeEditAction(action string) bool {
 // final commit gate and signed audit path as other native mutations.
 func (s *Session) EditNativeField(id, revision, field string, value []byte, g *MutationGate) (string, error) {
 	defer clear(value)
+	edit := Edit{ID: id, Revision: revision, Field: field, Value: string(value)}
 	if !ValidEditTarget(id, revision, field) || !nativeEditAction("item.edit."+field) {
 		if g != nil {
 			g.Cancel()
@@ -35,24 +49,28 @@ func (s *Session) EditNativeField(id, revision, field string, value []byte, g *M
 		}
 		return "", ErrMutationRefused
 	}
-	r, e := s.nativeMutation("item.edit."+field, vault.Item{}, &Edit{ID: id, Revision: revision, Field: field, Value: string(value)}, commandOption{}, g)
+	r, e := s.nativeMutation("item.edit."+field, vault.Item{}, &edit, commandOption{}, g)
 	if e != nil {
 		return "", e
 	}
 	return r.revision, nil
 }
 
-func (s *Session) RegisterMutation(g *MutationGate) error {
-	if e := s.RegisterBrowserSave(g); e != nil {
-		return ErrMutationCancelled
+// SetNativeState transitions a login's active/archive/trash state under the
+// session's final commit gate and signed audit path.
+func (s *Session) SetNativeState(id, revision, action string, g *MutationGate) (string, error) {
+	if !ValidEditTarget(id, revision, "title") || (!lifecycleAction(action) && !trashAction(action)) {
+		if g != nil {
+			g.Cancel()
+			s.ReleaseMutation(g)
+		}
+		return "", ErrMutationRefused
 	}
-	return nil
-}
-func (s *Session) ReleaseMutation(g *MutationGate) { s.ReleaseBrowserSave(g) }
-func (s *Session) registeredMutation(g *MutationGate) bool {
-	s.saveMu.Lock()
-	defer s.saveMu.Unlock()
-	return g != nil && s.saveGate == g && g.Pending() && !s.lockRequested.Load()
+	r, e := s.nativeMutation(action, vault.Item{}, &Edit{ID: id, Revision: revision}, commandOption{}, g)
+	if e != nil {
+		return "", e
+	}
+	return r.revision, nil
 }
 func (s *Session) nativeMutation(action string, add vault.Item, edit *Edit, option commandOption, g *MutationGate) (result, error) {
 	return s.nativeMutationWith(action, add, edit, option, g, nil)
@@ -80,7 +98,7 @@ func (s *Session) nativeMutationWithTouch(action string, add vault.Item, edit *E
 	r, e := run(option)
 	// Revoke the old key's queued signatures before releasing Session.mu. A
 	// wrapper-side cancellation would leave a commit-to-output race window.
-	if option.sshState && edit != nil {
+	if (option.sshState || lifecycleAction(action) || trashAction(action)) && edit != nil {
 		s.cancelSSHTarget(edit.ID)
 	}
 	if errors.Is(e, invalid) {
