@@ -514,6 +514,11 @@ def main(argv=None):
             return worker(config, args.participant)
         require(args.artifacts and args.dependency_root and all(getattr(args, name) and getattr(args, name + "_sha256") for name in ["cli", "service", "fixture"]))
         return outer(args)
+    except SystemExit as error:
+        if error.code == 0:
+            return 0
+        print("FAIL: team bootstrap at prerequisites", flush=True)
+        return 1
     except BaseException:
         print("FAIL: team bootstrap at prerequisites", flush=True)
         return 1
