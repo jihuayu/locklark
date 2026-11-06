@@ -366,7 +366,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 	if action == "item.edit.notes" && (edit == nil || edit.Field != "notes" || !ValidEditTarget(edit.ID, edit.Revision, edit.Field)) {
 		return result{}, invalid
 	}
-	if option.nativeMutation != nil && (option.unlocked == nil || option.nativeMutation.gate == nil || !(action == "item.add" || action == "item.edit.notes" || generatedAction(action) || action == desktopOTPShowAction || action == desktopOTPCopyAction || action == browserOTPAction)) {
+	if option.nativeMutation != nil && (option.unlocked == nil || option.nativeMutation.gate == nil || !(action == "item.add" || nativeEditAction(action) || generatedAction(action) || action == desktopOTPShowAction || action == desktopOTPCopyAction || action == browserOTPAction)) {
 		return result{}, invalid
 	}
 	if browserSaveAction(action) != (option.browserSave != nil) || option.browserSave != nil && (!option.browserSave.valid() || option.unlocked == nil || (action == browserNewAction) != (option.browserSave.target.ID == "")) {
@@ -713,11 +713,32 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 							break
 						}
 						if err := validateEditValue(*edit); err != nil {
-							if option.nativeMutation != nil && action == "item.edit.notes" {
+							if option.nativeMutation != nil && nativeEditAction(action) {
 								outcome, refusal = "native-refused", ErrMutationRefused
 								break
 							}
 							return err
+						}
+						if option.nativeMutation != nil && nativeEditAction(action) {
+							probe := append([]vault.Item(nil), items...)
+							switch edit.Field {
+							case "title":
+								probe[i].Title = edit.Value
+							case "url":
+								probe[i].URL = edit.Value
+							case "username":
+								probe[i].Username = edit.Value
+							case "password":
+								probe[i].Password = edit.Value
+							case "otp":
+								probe[i].OTP = edit.Value
+							case "notes":
+								probe[i].Notes = edit.Value
+							}
+							if vault.ValidateItems([]byte(schema), probe) != nil {
+								outcome, refusal = "native-refused", ErrMutationRefused
+								break
+							}
 						}
 						switch edit.Field {
 						case "notes":

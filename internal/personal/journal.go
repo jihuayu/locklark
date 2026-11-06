@@ -179,7 +179,7 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 		already = already || e.Action == "item.trash" && e.Result == "already-trashed" || e.Action == "item.untrash" && e.Result == "not-trashed"
 		blocked := !trashAction(e.Action) && e.Result == "trashed"
 		unconfigured := otpAction(e.Action) && e.Result == "not-configured"
-		nativeRefused := (e.Action == "item.regenerate.password" || e.Action == "item.edit.notes") && e.Result == "native-refused"
+		nativeRefused := (e.Action == "item.regenerate.password" || nativeEditAction(e.Action)) && e.Result == "native-refused"
 		browserRefused := (e.Action == browserFillAction || e.Action == browserOTPAction) && e.Result == "browser-refused"
 		if n <= 1 || !idOK(e.Item) || !digestOK(e.BaseRevision) || (e.Result != accepted && e.Result != "conflict" && !unconfigured && !already && !blocked && !browserRefused && !nativeRefused) {
 			return invalid

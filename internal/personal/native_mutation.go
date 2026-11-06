@@ -16,6 +16,32 @@ type NativeLoginMetadata struct{ Title, URL string }
 type NativeLoginView struct{ ID, Revision, Title, URL, State string }
 type nativeMutationRequest struct{ gate *MutationGate }
 
+func nativeEditAction(action string) bool {
+	switch action {
+	case "item.edit.title", "item.edit.url", "item.edit.username", "item.edit.password", "item.edit.otp", "item.edit.notes":
+		return true
+	}
+	return false
+}
+
+// EditNativeField consumes the mutable input and uses the same exact-revision,
+// final commit gate and signed audit path as other native mutations.
+func (s *Session) EditNativeField(id, revision, field string, value []byte, g *MutationGate) (string, error) {
+	defer clear(value)
+	if !ValidEditTarget(id, revision, field) || !nativeEditAction("item.edit."+field) {
+		if g != nil {
+			g.Cancel()
+			s.ReleaseMutation(g)
+		}
+		return "", ErrMutationRefused
+	}
+	r, e := s.nativeMutation("item.edit."+field, vault.Item{}, &Edit{ID: id, Revision: revision, Field: field, Value: string(value)}, commandOption{}, g)
+	if e != nil {
+		return "", e
+	}
+	return r.revision, nil
+}
+
 func (s *Session) RegisterMutation(g *MutationGate) error {
 	if e := s.RegisterBrowserSave(g); e != nil {
 		return ErrMutationCancelled
