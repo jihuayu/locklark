@@ -7,9 +7,11 @@ var ErrStale = errors.New("field reference revision changed")
 type NativeSlot string
 
 const (
-	SlotUsername NativeSlot = "username"
-	SlotPassword NativeSlot = "password"
-	SlotOTP      NativeSlot = "otp"
+	SlotUsername    NativeSlot = "username"
+	SlotPassword    NativeSlot = "password"
+	SlotOTP         NativeSlot = "otp"
+	SlotNotes       NativeSlot = "notes"
+	SlotCustomField NativeSlot = "custom_field"
 )
 
 type ValueType string

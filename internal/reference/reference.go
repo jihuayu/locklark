@@ -20,7 +20,13 @@ var ErrCatalog = errors.New("invalid field reference metadata")
 var ErrLimit = errors.New("field reference capacity exceeded")
 
 type Reference struct{ Vault, Item, Section, Field string }
-type Field struct{ ID, Name string }
+
+// Field describes a selectable field identity. Type is a hint for binding and
+// never carries a value; an empty Type defaults to text.
+type Field struct {
+	ID, Name string
+	Type     ValueType
+}
 type Section struct {
 	ID, Name string
 	Fields   []Field
