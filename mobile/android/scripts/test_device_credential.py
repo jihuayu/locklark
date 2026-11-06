@@ -4,6 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from types import SimpleNamespace
+import device_credential_acceptance as auth
 from device_credential_acceptance import credential_marker, focused_identity, validated_evidence, AcceptanceFailure, DeviceCredentialAcceptance
 
 
@@ -59,6 +60,73 @@ class DeviceCredentialHarnessTests(unittest.TestCase):
         runner.cleanup_pin()
         self.assertIn(("locksettings","clear","--old","12345678"),calls)
         self.assertFalse(runner.pin_attempted)
+
+    def test_locksettings_classification_never_includes_remote_text(self):
+        cases = [
+            (b"The device does not support lock screen - ignoring the command.", b"", "unsupported-secure-lock-screen"),
+            (b"Old password 'synthetic-private-value' didn't match", b"", "credential-mismatch"),
+            (b"Request throttled", b"", "credential-throttled"),
+            (b"", b"java.lang.SecurityException: synthetic-private-value", "security-exception"),
+            (b"", b"java.lang.IllegalStateException: synthetic-private-value", "illegal-state"),
+            (b"synthetic-private-value", b"", "command-failed"),
+        ]
+        for stdout, stderr, expected in cases:
+            with self.subTest(expected=expected):
+                status = auth.locksettings_status(SimpleNamespace(returncode=255, stdout=stdout, stderr=stderr))
+                self.assertEqual(status, {"exit_code":255,"classification":expected})
+                self.assertNotIn("synthetic-private-value", json.dumps(status))
+        self.assertEqual(auth.locksettings_status(SimpleNamespace(returncode=0, stdout=b"", stderr=b"")),
+                         {"exit_code":0,"classification":"success"})
+
+    def pin_runner(self, results, feature=True):
+        runner = DeviceCredentialAcceptance.__new__(DeviceCredentialAcceptance)
+        runner.pin_attempted=False; runner.pin_owned=False; runner.pin="12345678"
+        runner.locksettings_diagnostic={}; runner.secure_lock_screen=None
+        calls=[]
+        def shell(*args,**kwargs):
+            calls.append((runner.stage,args,kwargs))
+            if args == ("pm","list","features"):
+                return SimpleNamespace(returncode=0,stdout=b"feature:android.software.secure_lock_screen\n" if feature else b"",stderr=b"")
+            return results.pop(0)
+        runner.shell=shell
+        return runner,calls
+
+    def test_PIN_precondition_has_no_empty_remote_argument_and_set_has_distinct_stage(self):
+        ok=SimpleNamespace(returncode=0,stdout=b"",stderr=b"")
+        runner,calls=self.pin_runner([ok,ok])
+        runner.provision_pin()
+        self.assertEqual([(stage,args) for stage,args,_ in calls], [
+            ("pin-capabilities",("pm","list","features")),
+            ("pin-empty-precondition",("locksettings","verify")),
+            ("pin-set",("locksettings","set-pin","12345678"))])
+        self.assertTrue(runner.pin_attempted and runner.pin_owned)
+
+    def test_unsupported_empty_precondition_never_attempts_PIN_change(self):
+        unsupported=SimpleNamespace(returncode=255,stdout=b"",stderr=b"The device does not support lock screen - ignoring the command.")
+        runner,calls=self.pin_runner([unsupported],feature=False)
+        with self.assertRaises(AcceptanceFailure): runner.provision_pin()
+        self.assertEqual(runner.stage,"pin-empty-precondition")
+        self.assertFalse(runner.pin_attempted or runner.pin_owned or runner.secure_lock_screen)
+        self.assertEqual(runner.locksettings_diagnostic,{"operation":"verify-empty","exit_code":255,"classification":"unsupported-secure-lock-screen"})
+        self.assertFalse(any(args[:2]==("locksettings","set-pin") for _,args,_ in calls))
+
+    def test_successful_verify_without_advertised_secure_lock_screen_never_mutates(self):
+        ok=SimpleNamespace(returncode=0,stdout=b"",stderr=b"")
+        runner,calls=self.pin_runner([ok,ok],feature=False)
+        with self.assertRaises(AcceptanceFailure): runner.provision_pin()
+        self.assertEqual(runner.stage,"pin-empty-precondition")
+        self.assertFalse(runner.pin_attempted or runner.pin_owned)
+        self.assertFalse(any(args[:2]==("locksettings","set-pin") for _,args,_ in calls))
+
+    def test_failed_PIN_set_stays_owned_attempt_for_exact_cleanup(self):
+        ok=SimpleNamespace(returncode=0,stdout=b"",stderr=b"")
+        failed=SimpleNamespace(returncode=255,stdout=b"",stderr=b"java.lang.SecurityException: synthetic-private-value")
+        runner,_=self.pin_runner([ok,failed])
+        with self.assertRaises(AcceptanceFailure): runner.provision_pin()
+        self.assertEqual(runner.stage,"pin-set")
+        self.assertTrue(runner.pin_attempted)
+        self.assertFalse(runner.pin_owned)
+        self.assertEqual(runner.locksettings_diagnostic["classification"],"security-exception")
 
     def test_unknown_credential_is_never_cleared(self):
         runner = DeviceCredentialAcceptance.__new__(DeviceCredentialAcceptance)

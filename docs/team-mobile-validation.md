@@ -2,15 +2,19 @@
 
 基线 main `9d8d57475f3fb904fc9fe4bedc0c1e6b4ce07535`，工作分支 `codex/team-mobile-sync`。主代理负责[架构](team-mobile-design.md)及独立验收，Sol xhigh 分工实现与工具，Luna max 独立审阅。以下只记录已实际完成的范围；平台和最终 CI 待办不计为成功。
 
-## 当前状态（第五轮 CI 后）
+## 当前状态（第七轮 Android CI 后）
 
 团队真实 TLS、多设备权限、撤销、并发、回滚与未知提交对账，以及生产服务命令的独立 PTY/TLS 验收已通过。`22204ec7e024b1a0686a5df2d901e99f24ca60af` 的 Linux、Windows、macOS 桌面和 Web 四组 CI 全部通过。Windows ACL 已在原生 Windows CI 执行，不能再仅称为交叉编译。
 
-Android 第四、第五轮均通过两项必须执行的真实应用 UID/JNI/原生界面测试。第五轮外部 ADB 主机流程通过建库、Secret Key 确认、手工和生成登录、精确修订编辑、独立 HMAC 的 TOTP 核对、搜索、后台与主动锁定、错误双因素拒绝、重开，以及从设备复制真实数据库后的 CLI 签名审计核对；最后 KDBX 互通阶段失败，完整流程尚未通过。根因已复现为验收工具解析虚拟环境 Python 符号链接后丢失 PyKeePass 安装环境。修复保留配置的解释器路径，真实 venv 回归通过；主代理独立复跑冻结工具的真实移动核心金库→PTY CLI 导出→PyKeePass 字段/TOTP 与错误密码检查，记录 `android-peer-repro-is7ld0mb/android-host-ui-hihtz2s_`。预期密码/OTP 篡改均拒绝，完整输出 canary 扫描通过；此本地复验没有 ADB，不代替待跑的完整设备链路。
+Android 在 `d6eec7d` 的第七轮 CI 中通过完整基础链路：两项必须执行的实际应用 UID/JNI/原生界面测试，以及独立 ADB 的建库、Secret Key 确认、手工和生成登录、精确修订编辑、独立 HMAC TOTP、搜索、后台及主动锁定、错误双因素拒绝、重开、设备数据库复制、CLI 精确签名审计、PyKeePass 字段核对/错误导出密码拒绝，和完整控制器/logcat canary 扫描。原始私有记录 `team-mobile-pr37-seventh-android.log`。
 
-iOS 实际 Apple SDK 编译已通过，运行仍在 Go 建库之前的 VaultFiles.protect 失败，typed/raw 读取兼容修复不足以解决。`4fb702e` 的实际前置诊断确认：目录和文件、typed 和 raw 两种 FileManager 设置均返回成功，但保护属性前后都缺失；备份排除写入、刷新后回读和枚举正常。原始私有记录 `team-mobile-pr37-sixth-ios.log`，只发布固定元数据。正改用 Apple 推荐的 NSURL 文件保护接口并严格回读明确的 complete；不放宽 nil/弱保护拒绝，也不据模拟器设置成功宣称真机保护。完整原生用例和 UI/输出隐私检查仍待前置条件通过。
+第五、六轮的 KDBX 阶段失败由工具解析虚拟环境 Python 符号链接造成。保留配置的解释器路径后，真实 venv 回归通过；主代理独立本地复跑移动核心金库→PTY CLI→PyKeePass，记录 `android-peer-repro-is7ld0mb/android-host-ui-hihtz2s_`，预期密码/OTP 篡改均拒绝。此本地复验没有 ADB；第七轮才是修正后的完整设备链路证据。
 
-Android 系统凭据认证的成功、取消与重装失效验收正在补齐；iOS 真实系统认证和两平台真机生物识别仍未验收。PR #37 保持草稿，当前未满足精确 head 全 CI、最终独立审阅与验收后的合并条件。后文保留各历史候选的失败与修复证据，不把早期通过结果自动延伸到后续代码。
+iOS 实际 Apple SDK 编译已通过，运行仍在 Go 建库之前的 VaultFiles.protect 失败，typed/raw 读取兼容修复不足以解决。`4fb702e` 的实际前置诊断确认：目录和文件、typed 和 raw 两种 FileManager 设置均返回成功，但保护属性前后都缺失；备份排除写入、刷新后回读和枚举正常。原始私有记录 `team-mobile-pr37-sixth-ios.log`，只发布固定元数据。`81970aa` 改用 Apple 推荐的 NSURL 文件保护接口，实际第八轮 CI 的设置仍返回成功，但刷新后的 URL 保护等级始终为较弱类型，原始私有记录 `team-mobile-pr37-eighth-ios.log`。这确认当前模拟器未提供所要求的完整保护；产品继续严格拒绝，不增加模拟器豁免。完整原生用例和 UI/输出隐私检查需要具备该能力的真机环境；已询问可用设备及签名环境，同时准备真机入口，尚未验收成功。
+
+Android 系统凭据认证工具已实现成功、取消、密钥属性和重装失效检查，Luna 复核、15项 JVM 与9项工具测试、APK 编译通过；首次实际系统认证轮停在模拟器 PIN 配置阶段，尚未进入应用认证，已定位 ATD 镜像缺少安全锁屏能力；iOS 真实系统认证和两平台真机生物识别仍未验收。PR #37 保持草稿，当前未满足精确 head 全 CI、最终独立审阅与验收后的合并条件。后文保留各历史候选的失败与修复证据，不把早期通过结果自动延伸到后续代码。
+
+所用 API35 google_atd 镜像的实际 vendor permissions XML 明确删除 `android.software.secure_lock_screen`；主代理独立解析44项 feature，确认该项缺失，提取文件 SHA256 `adf6e6a182c6552955a6cff6b3e7ec42333f6ccad2f02d0ab0c24887483f7d06`。Android 15 LockSettingsShellCommand 源码在此能力缺失时直接拒绝 verify/set-pin。CI 改用完整 google_apis 镜像，认证仍是必须通过的关卡；工具补充固定子阶段、能力布尔值和安全错误分类，14项认证工具及4项原生包装测试通过。此处是精确镜像和系统源码证据，完整镜像的实际认证结果仍待新 CI，不把旧基础 UI 通过算作系统认证通过。
 
 ## 团队同步的失败先行与独立验收
 

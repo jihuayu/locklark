@@ -22,9 +22,44 @@ from mobile_android_acceptance import AndroidAcceptance, AcceptanceFailure, PACK
 from test_emulator import complete_pass
 
 OS_PACKAGES = {"com.android.systemui", "com.android.settings"}
-STAGES = {"prerequisites", "live-vault", "pin-setup", "enable", "enable-prompt", "quick", "quick-prompt",
+STAGES = {"prerequisites", "live-vault", "pin-capabilities", "pin-empty-precondition", "pin-set", "enable", "enable-prompt", "quick", "quick-prompt",
           "cancel", "cancel-prompt", "key-policy", "copy-encrypted-state", "reinstall", "restore",
           "copied-capsule-refusal", "full-factor-recovery", "pin-cleanup", "private-canary-scan", "complete"}
+
+
+def locksettings_status(result):
+    """Only fixed AOSP status classes; never return exception text or a PIN."""
+    raw = result.stdout + result.stderr
+    classification = "success" if result.returncode == 0 else "command-failed"
+    if result.returncode != 0:
+        constants = (
+            (b"The device does not support lock screen - ignoring the command.", "unsupported-secure-lock-screen"),
+            (b"didn't match", "credential-mismatch"),
+            (b"Request throttled", "credential-throttled"),
+            (b"Profile uses unified challenge", "unified-profile-challenge"),
+            (b"Old password provided but user has no password", "unexpected-old-credential"),
+            (b"New credential doesn't satisfy admin policies", "credential-policy"),
+            (b"java.lang.SecurityException:", "security-exception"),
+            (b"java.lang.IllegalArgumentException:", "illegal-argument"),
+            (b"java.lang.IllegalStateException:", "illegal-state"),
+            (b"android.os.RemoteException:", "remote-exception"),
+        )
+        classification = next((label for text, label in constants if text in raw), classification)
+    return {"exit_code":result.returncode,"classification":classification}
+
+
+def native_ui_state(nodes):
+    app = [node for node in nodes if node.get("package") == PACKAGE]
+    if any(node.get("class") == "android.widget.TextView" and node.get("text", "").startswith(
+            ("操作未完成：", "解锁未完成：", "准备操作未完成：", "结果未确认")) for node in app):
+        return "refused"
+    controls = [node for node in app if node.get("class") == "android.widget.Button"]
+    if any(node.get("text") in {"打开本地金库", "使用此设备认证解锁", "启用此设备认证"} and node.get("enabled") == "false" for node in controls):
+        return "busy"
+    for label, state in (("新建登录", "unlocked"), ("打开本地金库", "locked"), ("生成新的 Secret Key", "setup")):
+        if any(node.get("text") == label and node.get("enabled") == "true" for node in controls):
+            return state
+    return "unknown"
 
 
 def private_file(path):
@@ -108,6 +143,10 @@ class DeviceCredentialAcceptance(AndroidAcceptance):
         self.pin_attempted = False
         self.lifecycle = []
         self.key_level = "unknown"
+        self.locksettings_diagnostic = {}
+        self.secure_lock_screen = None
+        self.last_observation = {"phase":"prerequisites", "focused_package":"unknown", "main_state":"unknown",
+                                 "native_ui_state":"unknown", "credential_marker":False}
 
     def set_stage(self, value):
         require(value in STAGES)
@@ -122,6 +161,8 @@ class DeviceCredentialAcceptance(AndroidAcceptance):
         return focused_identity(raw, nodes or [])
 
     def observe_lifecycle(self, validated_nodes=None, validated_package=None):
+        nodes = validated_nodes if validated_nodes is not None else self.snapshot()
+        focused = validated_package if validated_package in OS_PACKAGES | {PACKAGE} else self.focused_package(nodes)
         raw = self.shell("dumpsys", "activity", "activities").stdout
         state = "unknown"
         for block in re.split(rb"(?=ActivityRecord\{)", raw):
@@ -129,8 +170,38 @@ class DeviceCredentialAcceptance(AndroidAcceptance):
                 found = re.search(rb"(?:mState|state|State)=([A-Z]+)", block)
                 if found and found[1] in {b"RESUMED", b"PAUSED", b"STOPPED", b"STOPPING", b"PAUSING", b"INITIALIZING", b"DESTROYED"}:
                     state = found[1].decode()
-        self.lifecycle.append({"phase": self.stage, "focused_package": validated_package if validated_package in OS_PACKAGES | {PACKAGE} else self.focused_package(self.snapshot()), "main_state": state})
+        self.record_observation(nodes, focused, state)
+        self.lifecycle.append(self.last_observation.copy())
         self.write_private("lifecycle.json", self.lifecycle)
+
+    def record_observation(self, nodes, focused, state="unknown"):
+        self.last_observation = {"phase":self.stage, "focused_package":focused if focused in OS_PACKAGES | {PACKAGE} else "unknown",
+                                 "main_state":state, "native_ui_state":native_ui_state(nodes),
+                                 "credential_marker":credential_marker(nodes, focused)}
+
+    def failure_metadata(self):
+        return {"secure_lock_screen_feature":self.secure_lock_screen,
+                "locksettings":self.locksettings_diagnostic.copy(), "last_ui":self.last_observation.copy()}
+
+    def locksettings(self, operation, *arguments, oracle):
+        self.locksettings_diagnostic = {"operation":operation,"exit_code":None,"classification":"transport-or-capture-failed"}
+        result = self.shell("locksettings", *arguments, oracle=oracle, timeout=60, required=False)
+        self.locksettings_diagnostic = {"operation":operation, **locksettings_status(result)}
+        require(result.returncode == 0)
+
+    def provision_pin(self):
+        self.set_stage("pin-capabilities")
+        features = self.shell("pm", "list", "features").stdout.splitlines()
+        self.secure_lock_screen = any(line.partition(b"=")[0] == b"feature:android.software.secure_lock_screen" for line in features)
+        self.set_stage("pin-empty-precondition")
+        # AOSP defaults mOld to empty. ADB joins shell argv, so do not pass an
+        # empty --old argument. Missing capability is still a hard failure.
+        self.locksettings("verify-empty", "verify", oracle="pin-empty-precondition.txt")
+        require(self.secure_lock_screen)
+        self.set_stage("pin-set")
+        self.pin_attempted = True
+        self.locksettings("set-pin", "set-pin", self.pin, oracle="pin-setup.txt")
+        self.pin_owned = True
 
     def setup_owned_emulator(self):
         require(self.args.authorize_device_pin_setup and bool(re.fullmatch(r"emulator-[0-9]+", self.args.serial)))
@@ -155,13 +226,10 @@ class DeviceCredentialAcceptance(AndroidAcceptance):
         require(self.select_item(item["title"], item["id"]) == (item["id"], item["revision"]))
         self.tap("立即锁定", class_name="android.widget.Button")
         self.visible("打开本地金库", class_name="android.widget.Button")
-        self.set_stage("pin-setup")
+        self.observe_lifecycle()
         # This is explicitly provided setup material, like a fixture manifest;
         # locksettings may echo the new PIN to stdout, never ordinary logs.
-        self.shell("locksettings", "verify", oracle="pin-empty-precondition.txt", timeout=60)
-        self.pin_attempted = True
-        self.shell("locksettings", "set-pin", self.pin, oracle="pin-setup.txt", timeout=60)
-        self.pin_owned = True
+        self.provision_pin()
         self.done("owned_emulator_and_exact_live_host_vault_verified_before_PIN_setup")
 
     def os_prompt(self):
@@ -170,6 +238,7 @@ class DeviceCredentialAcceptance(AndroidAcceptance):
         while time.monotonic() < deadline:
             nodes = self.snapshot()
             focused = self.focused_package(nodes)
+            self.record_observation(nodes, focused)
             if credential_marker(nodes, focused):
                 self.observe_lifecycle(nodes, focused)
                 return nodes, focused
@@ -339,6 +408,7 @@ def main():
     acceptance = None
     success = False
     failure = "prerequisites"
+    diagnostic = {}
     try:
         require(args.authorize_device_pin_setup and bool(re.fullmatch(r"emulator-[0-9]+",args.serial)))
         require(10 <= args.timeout <= 180)
@@ -352,6 +422,8 @@ def main():
         success = True
     except (Exception,KeyboardInterrupt):
         failure = acceptance.stage if acceptance else "prerequisites"
+        if acceptance:
+            diagnostic = acceptance.failure_metadata()
     finally:
         if acceptance:
             try: acceptance.cleanup_pin()
@@ -360,9 +432,11 @@ def main():
             except Exception: success=False; failure="private-canary-scan"
             acceptance.write_private("result.json",{"success":success,"stage":"complete" if success else failure,
                 "checks":acceptance.checks,"reported_key_security_level":acceptance.key_level,
-                "physical_hardware_verified":False,"source_fixture_sha256":acceptance.source_hash})
+                "physical_hardware_verified":False,"source_fixture_sha256":acceptance.source_hash,"diagnostic":diagnostic})
             print("Private Android OS credential evidence: " + str(acceptance.root))
-    if not success: print("FAIL: Android OS credential acceptance at " + failure)
+    if not success:
+        print("FAIL: Android OS credential acceptance at " + failure)
+        print("Android OS credential diagnostic: " + json.dumps(diagnostic, sort_keys=True))
     else: print("PASS: native OS credential opt-in, quick unlock, cancellation and nontransferable device key; private canary scan")
     return 0 if success else 1
 
