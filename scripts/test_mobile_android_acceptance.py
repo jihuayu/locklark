@@ -3,6 +3,7 @@
 import base64
 import contextlib
 import io
+import json
 import pathlib
 import os
 import subprocess
@@ -105,7 +106,12 @@ class SafetyTests(unittest.TestCase):
             result = acceptance.main(["--adb", "/unused", "--serial", "emulator-5556", "--apk", "/unused", "--reset-test-app"])
         self.assertEqual(result, 1)
         self.assertNotIn(secret, output.getvalue())
-        self.assertEqual(output.getvalue(), "FAIL: Android host UI at otp\nFixed Android host diagnosis: {\"activity\": \"unknown\", \"control\": \"unknown\", \"foreground\": \"app\", \"identity\": \"unknown\", \"ime\": \"shown\", \"wait\": \"background-stopped\"}\nPrivate Android host UI evidence: /private/controller-evidence\n")
+        lines = output.getvalue().splitlines()
+        self.assertEqual(lines[0], "FAIL: Android host UI at otp")
+        self.assertEqual(lines[-1], "Private Android host UI evidence: /private/controller-evidence")
+        metadata = json.loads(lines[1].removeprefix("Fixed Android host diagnosis: "))
+        self.assertEqual({key: metadata[key] for key in ("activity", "control", "foreground", "identity", "ime", "wait")},
+                         {"activity": "unknown", "control": "unknown", "foreground": "app", "identity": "unknown", "ime": "shown", "wait": "background-stopped"})
 
     def test_command_does_not_log_secret_argv_but_detects_echo(self):
         with tempfile.TemporaryDirectory() as root:
@@ -345,8 +351,9 @@ class BackgroundTransitionTests(unittest.TestCase):
         secret = "PrivateDiagnosticFixture"
         value = acceptance.safe_host_diagnosis({"activity": secret, "foreground": "launcher", "control": secret,
                                                 "wait": "background-stopped", "ime": secret, "extra": secret})
-        self.assertEqual(value, {"activity": "unknown", "foreground": "launcher", "control": "unknown",
-                                 "wait": "background-stopped", "identity": "unknown", "ime": "unknown"})
+        self.assertEqual({key: value[key] for key in ("activity", "foreground", "control", "wait", "identity", "ime")},
+                         {"activity": "unknown", "foreground": "launcher", "control": "unknown",
+                          "wait": "background-stopped", "identity": "unknown", "ime": "unknown"})
         self.assertNotIn(secret, str(value))
         nodes = self.locked_nodes()
         self.assertEqual(acceptance.ui_control_state(nodes), "unlock-ready")
@@ -427,6 +434,78 @@ class BackgroundTransitionTests(unittest.TestCase):
                 self.assertEqual(acceptance.top_resumed_record(top + legacy), (None, False))
                 self.assertIsNone(acceptance.top_activity_identity(top + legacy))
                 self.assertEqual(acceptance.lifecycle_state(top + legacy)["foreground"], "unknown")
+
+
+class ActionableControlTests(unittest.TestCase):
+    @staticmethod
+    def node(bounds, **changes):
+        return {"package": acceptance.PACKAGE, "class": "android.widget.EditText", "content-desc": "新的主密码",
+                "text": "", "enabled": "true", "bounds": bounds, **changes}
+
+    def test_zero_hidden_disabled_and_offscreen_bounds_are_not_actionable(self):
+        cases = [(self.node("[0,0][0,0]"), "invalid-bounds"), (self.node("[10,700][200,760]"), "offscreen"),
+                 (self.node("[10,500][200,650]"), "offscreen"), (self.node("[10,10][200,50]", enabled="false"), "disabled"),
+                 (self.node("[10,10][200,50]", **{"visible-to-user": "false"}), "hidden")]
+        for node, reason in cases:
+            with self.subTest(reason=reason):
+                self.assertEqual(acceptance.actionable_bounds(node, (0, 0, 600, 600)), reason)
+                self.assertFalse(list(acceptance.AndroidAcceptance.matching([node], "新的主密码", "android.widget.EditText", viewport=(0, 0, 600, 600))))
+        node = self.node("[10,10][200,50]")
+        self.assertEqual(acceptance.actionable_bounds(node, (0, 0, 600, 600)), "ready")
+        self.assertEqual(list(acceptance.AndroidAcceptance.matching([node], "新的主密码", "android.widget.EditText", viewport=(0, 0, 600, 600))), [node])
+
+    def test_scroll_targets_app_viewport_and_taps_control_once_after_visible(self):
+        controller = object.__new__(acceptance.AndroidAcceptance)
+        controller.diagnosis = acceptance.safe_host_diagnosis({})
+        controller.size, controller.viewport = (600, 800), (0, 0, 600, 400)
+        first, ready = self.node("[10,500][200,550]"), self.node("[10,200][200,250]")
+        controller.snapshot = mock.Mock(side_effect=[[first], [ready]])
+        controller.shell = mock.Mock()
+        controller.tap("新的主密码", class_name="android.widget.EditText")
+        self.assertEqual(controller.shell.call_args_list, [mock.call("input", "swipe", 300, 112, 300, 312, 350),
+                                                        mock.call("input", "tap", 105, 225)])
+        self.assertEqual(controller.diagnosis["bounds"], "ready")
+        self.assertEqual(controller.diagnosis["target"], "new-master")
+        root = {"package": acceptance.PACKAGE, "class": "android.widget.ScrollView", "enabled": "true", "bounds": "[0,0][600,400]"}
+        self.assertEqual(acceptance.app_viewport([root], controller.size), (0, 0, 600, 400))
+
+    def test_failure_queries_are_independent_and_preserve_original_command_context(self):
+        controller = object.__new__(acceptance.AndroidAcceptance)
+        controller.started, controller.args = True, types.SimpleNamespace(timeout=180)
+        controller.diagnosis = acceptance.safe_host_diagnosis({"operation": "type-text", "target": "new-master", "command": "text",
+                                                             "command_exit": "nonzero", "exit_code": 1})
+        controller.observe_activity_state = mock.Mock(side_effect=acceptance.AcceptanceFailure)
+        controller.snapshot = mock.Mock(side_effect=lambda _: controller.diagnosis.update({"control": "create-form", "create_form": True}))
+        controller.shell = mock.Mock(return_value=subprocess.CompletedProcess([], 0, b"mInputShown=true\n", b""))
+        controller.capture_failure_diagnosis()
+        controller.snapshot.assert_called_once()
+        controller.shell.assert_called_once()
+        self.assertEqual(controller.diagnosis["ime"], "shown")
+        self.assertEqual(controller.diagnosis["control"], "create-form")
+        self.assertEqual(controller.diagnosis["command"], "text")
+        self.assertEqual(controller.diagnosis["exit_code"], 1)
+
+    def test_python_contract_exception_is_classified_without_error_arguments(self):
+        secret = "PrivateExceptionArgumentFixture"
+        with tempfile.TemporaryDirectory() as root:
+            args = types.SimpleNamespace(adb="/unused", serial="emulator-5556", artifacts=root)
+            controller = acceptance.AndroidAcceptance(args)
+            try:
+                with mock.patch.object(acceptance.subprocess, "run", side_effect=TypeError(secret)):
+                    try:
+                        controller.shell("input", "text", secret)
+                    except TypeError as error:
+                        controller.record_failure(error)
+                value = acceptance.safe_host_diagnosis(controller.diagnosis)
+                self.assertEqual(value["exception"], "TypeError")
+                self.assertEqual(value["helper"], "command")
+                self.assertEqual(value["reason"], "python-contract")
+                self.assertIsInstance(value["source_line"], int)
+                self.assertNotIn(secret, json.dumps(value))
+                self.assertEqual(acceptance.command_category(["shell", "input", "text", secret]), "text")
+                self.assertEqual(acceptance.target_alias("选择登录：" + secret), "row")
+            finally:
+                controller.close()
 
 
 if __name__ == "__main__":

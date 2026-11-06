@@ -35,10 +35,22 @@ STAGES = {"prerequisites", "install", "create", "manual-login", "disclosure",
           "kdbx-peer", "private-canary-scan", "complete"}
 ACTIVITY_STATES = {"unknown", "initializing", "started", "resumed", "paused", "stopping", "stopped", "destroyed", "mixed"}
 FOREGROUND_STATES = {"unknown", "none", "app", "launcher", "system", "other"}
-CONTROL_STATES = {"unknown", "no-app", "app-other", "unlock-ready", "unlock-busy", "lock-cleanup", "locked-cover",
+CONTROL_STATES = {"unknown", "no-app", "app-other", "create-form", "unlock-ready", "unlock-busy", "lock-cleanup", "locked-cover",
                   "opening", "list-ready", "list-busy", "detail-ready", "detail-busy", "create-ready", "create-busy"}
 WAIT_STATES = {"unknown", "capture-original", "background-stopped", "foreground-app", "locked-form"}
 IDENTITY_STATES = {"unknown", "captured", "stopped-match", "resumed-match", "changed", "missing", "ambiguous", "destroyed"}
+OPERATIONS = {"unknown", "wait", "locate", "tap", "type-text", "keyboard-check", "keyboard-dismiss"}
+COMMANDS = {"unknown", "properties", "display", "install", "app-reset", "private-dir", "launch", "force-stop", "ui-dump",
+            "ui-read", "ui-cleanup", "tap", "text", "scroll", "key", "ime", "lifecycle", "db-copy"}
+TARGETS = {"unknown", "row", "field-picker", "generate-key", "new-master", "repeat-master", "backup-ack", "create-vault",
+           "new-login", "login-title", "username", "login-password", "generate-password", "save-login", "show-username",
+           "show-password", "show-otp", "hide", "edit", "edit-value", "save-field", "field-password", "field-otp",
+           "back-list", "query", "search", "unlock", "master", "account-key", "lock"}
+CREATE_STEPS = {"unknown", "open-create", "read-account-key", "enter-master", "repeat-master", "ack-backup", "submit-create", "wait-created-list"}
+EXCEPTIONS = {"none", "AcceptanceFailure", "TimeoutExpired", "ParseError", "ValueError", "TypeError", "AttributeError",
+              "KeyError", "IndexError", "NameError", "OSError", "FileNotFoundError", "BrokenPipeError", "RuntimeError", "unexpected"}
+HELPERS = {"unknown", "remaining", "snapshot", "matching", "center", "locate", "locate_candidate", "tap", "enter", "dismiss_keyboard", "record",
+           "exercise", "command", "parse_nodes", "wait", "background_and_relaunch", "observe_activity_state"}
 
 
 class AcceptanceFailure(Exception):
@@ -204,6 +216,8 @@ def ui_control_state(nodes):
                         and label in (node.get("text"), node.get("content-desc"))), None)
         if control:
             return ready if control.get("enabled") == "true" else busy
+    if any(node.get("class") == "android.widget.Button" and "创建并解锁" in (node.get("text"), node.get("content-desc")) for node in own):
+        return "create-form"
     return "app-other" if own else "no-app"
 
 
@@ -211,9 +225,46 @@ def safe_host_diagnosis(value):
     value = value if isinstance(value, dict) else {}
     choices = {"activity": ACTIVITY_STATES, "foreground": FOREGROUND_STATES,
                "control": CONTROL_STATES, "wait": WAIT_STATES, "identity": IDENTITY_STATES,
-               "ime": {"unknown", "shown", "hidden"}}
-    return {key: value.get(key) if isinstance(value.get(key), str) and value[key] in allowed else "unknown"
-            for key, allowed in choices.items()}
+               "ime": {"unknown", "shown", "hidden"}, "operation": OPERATIONS, "target": TARGETS, "step": CREATE_STEPS,
+               "command": COMMANDS, "command_exit": {"unknown", "pending", "ok", "nonzero", "timeout", "error"},
+               "bounds": {"unknown", "missing", "ready", "disabled", "hidden", "invalid-bounds", "offscreen"},
+               "exception": EXCEPTIONS, "helper": HELPERS,
+               "reason": {"unknown", "assertion", "python-contract", "xml", "deadline", "wait-expired", "control-not-actionable", "command-failed"}}
+    result = {key: value.get(key) if isinstance(value.get(key), str) and value[key] in allowed else "unknown"
+              for key, allowed in choices.items()}
+    for key, lower, upper in (("exit_code", -255, 255), ("source_line", 1, 100000)):
+        number = value.get(key)
+        result[key] = number if type(number) is int and lower <= number <= upper else None
+    for key in ("create_form", "create_master_enabled", "create_repeat_enabled", "backup_acknowledged"):
+        result[key] = value.get(key) if type(value.get(key)) is bool else None
+    return result
+
+
+def target_alias(label, class_name=None):
+    labels = {"生成新的 Secret Key": "generate-key", "新的主密码": "new-master", "再次输入主密码": "repeat-master",
+        "我已离线保存 Secret Key": "backup-ack", "创建并解锁": "create-vault", "新建登录": "new-login",
+        "登录标题": "login-title", "用户名": "username", "登录密码": "login-password", "生成强密码": "generate-password",
+        "保存登录": "save-login", "显示用户名": "show-username", "显示密码": "show-password", "显示验证码": "show-otp",
+        "隐藏已显示字段": "hide", "编辑登录字段": "edit", "新值（原生可见多行正文）": "edit-value",
+        "保存字段": "save-field", "password": "field-password", "otp": "field-otp", "返回列表": "back-list",
+        "搜索标题": "query", "搜索": "search", "打开本地金库": "unlock", "主密码": "master", "Secret Key": "account-key", "立即锁定": "lock"}
+    if isinstance(label, str) and label.startswith("选择登录："):
+        return "row"
+    if label is not None and not isinstance(label, str):
+        return "unknown"
+    return labels.get(label, "field-picker" if label is None and class_name == "android.widget.Spinner" else "unknown")
+
+
+def command_category(arguments):
+    parts = tuple(map(str, arguments[:4]))
+    categories = {("shell", "getprop"): "properties", ("shell", "wm", "size"): "display", ("install",): "install",
+        ("shell", "pm", "clear"): "app-reset", ("shell", "mkdir"): "private-dir", ("shell", "am", "start"): "launch",
+        ("shell", "am", "force-stop"): "force-stop", ("shell", "uiautomator", "dump"): "ui-dump",
+        ("exec-out", "cat"): "ui-read", ("shell", "rm"): "ui-cleanup", ("shell", "input", "tap"): "tap",
+        ("shell", "input", "text"): "text", ("shell", "input", "swipe"): "scroll", ("shell", "input", "keyevent"): "key",
+        ("shell", "dumpsys", "input_method"): "ime", ("shell", "dumpsys", "activity"): "lifecycle",
+        ("exec-out", "run-as"): "db-copy"}
+    return next((value for prefix, value in categories.items() if parts[:len(prefix)] == prefix), "unknown")
 
 
 def verify_audit(events, disclosures, mutations, generated_id, *, expected_exports=0, expected_audits=1):
@@ -265,6 +316,37 @@ def center(node):
     return (left + right) // 2, (top + bottom) // 2
 
 
+def actionable_bounds(node, viewport=None):
+    if node.get("enabled") != "true":
+        return "disabled"
+    if node.get("visible-to-user") == "false":
+        return "hidden"
+    try:
+        center(node)
+    except AcceptanceFailure:
+        return "invalid-bounds"
+    if viewport:
+        left, top, right, bottom = map(int, re.findall(r"[0-9]+", node["bounds"]))
+        if left < viewport[0] or top < viewport[1] or right > viewport[2] or bottom > viewport[3]:
+            return "offscreen"
+    return "ready"
+
+
+def app_viewport(nodes, size):
+    screen = (0, 0, size[0], size[1])
+    for node in nodes:
+        if node.get("package") == PACKAGE and node.get("class") == "android.widget.ScrollView":
+            try:
+                center(node)
+            except AcceptanceFailure:
+                continue
+            left, top, right, bottom = map(int, re.findall(r"[0-9]+", node["bounds"]))
+            clipped = max(0, left), max(0, top), min(size[0], right), min(size[1], bottom)
+            if clipped[2] > clipped[0] and clipped[3] > clipped[1]:
+                return clipped
+    return screen
+
+
 class AndroidAcceptance:
     def __init__(self, args):
         self.args = args
@@ -297,6 +379,7 @@ class AndroidAcceptance:
         require(stage in STAGES)
         self.stage = stage
         self.diagnosis["wait"] = "unknown"
+        self.diagnosis["step"] = "unknown"
 
     def record(self, value):
         require(isinstance(value, str) and value)
@@ -314,12 +397,19 @@ class AndroidAcceptance:
         # Never record argv: input text includes synthetic complete factors.
         self.counter += 1
         result = None
+        self.diagnosis.update({"command": command_category(arguments), "command_exit": "pending", "exit_code": None})
         try:
             result = subprocess.run(self.adb + list(map(str, arguments)),
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
             stdout, stderr = result.stdout, result.stderr
         except subprocess.TimeoutExpired as error:
             stdout, stderr = error.stdout or b"", error.stderr or b""
+            self.diagnosis["command_exit"] = "timeout"
+        except OSError:
+            self.diagnosis["command_exit"] = "error"
+            raise
+        if result is not None:
+            self.diagnosis.update({"command_exit": "ok" if result.returncode == 0 else "nonzero", "exit_code": result.returncode})
         if oracle:
             path = self.root / oracle
             path.write_bytes(stdout)
@@ -328,6 +418,8 @@ class AndroidAcceptance:
             self.controller.write(f"command {self.counter} stdout\n".encode() + stdout + b"\n")
         self.controller.write(f"command {self.counter} stderr\n".encode() + stderr + b"\n")
         self.controller.flush()
+        if result is None or required and result.returncode != 0:
+            self.diagnosis["reason"] = "command-failed"
         require(result is not None)
         if required:
             require(result.returncode == 0)
@@ -351,10 +443,19 @@ class AndroidAcceptance:
         self.shell("rm", "-f", remote, timeout=self.remaining(deadline, 45) if deadline else 45)
         nodes = parse_nodes(result.stdout)
         self.diagnosis["control"] = ui_control_state(nodes)
+        self.viewport = app_viewport(nodes, self.size)
+        def field(label, class_name):
+            return next((node for node in nodes if node.get("package") == PACKAGE and node.get("class") == class_name
+                         and label in (node.get("text"), node.get("content-desc"))), None)
+        master, repeated, ack = field("新的主密码", "android.widget.EditText"), field("再次输入主密码", "android.widget.EditText"), field("我已离线保存 Secret Key", "android.widget.CheckBox")
+        self.diagnosis.update({"create_form": field("创建并解锁", "android.widget.Button") is not None,
+            "create_master_enabled": master is not None and master.get("enabled") == "true",
+            "create_repeat_enabled": repeated is not None and repeated.get("enabled") == "true",
+            "backup_acknowledged": ack is not None and ack.get("checked") == "true"})
         return nodes
 
     @staticmethod
-    def matching(nodes, label=None, class_name=None, prefix=False):
+    def matching(nodes, label=None, class_name=None, prefix=False, viewport=None):
         for node in nodes:
             if node.get("package") != PACKAGE or node.get("enabled") != "true":
                 continue
@@ -363,13 +464,12 @@ class AndroidAcceptance:
             texts = (node.get("text", ""), node.get("content-desc", ""))
             if label is not None and not any(text.startswith(label) if prefix else text == label for text in texts):
                 continue
-            try:
-                center(node)
-            except AcceptanceFailure:
+            if actionable_bounds(node, viewport) != "ready":
                 continue
             yield node
 
     def wait(self, predicate, timeout=None, deadline=None):
+        self.diagnosis["operation"] = "wait"
         end = deadline if deadline is not None else time.monotonic() + (timeout or self.args.timeout)
         while time.monotonic() < end:
             nodes = self.snapshot(deadline=end)
@@ -377,9 +477,11 @@ class AndroidAcceptance:
             if result:
                 return result
             time.sleep(0.2)
+        self.diagnosis["reason"] = "wait-expired"
         raise AcceptanceFailure()
 
     def visible(self, label, *, class_name=None, prefix=False):
+        self.diagnosis["target"] = target_alias(label, class_name)
         return self.wait(lambda nodes: next(self.matching(nodes, label, class_name, prefix), None))
 
     def dimensions(self):
@@ -389,13 +491,26 @@ class AndroidAcceptance:
         return tuple(map(int, sizes[-1]))
 
     def swipe(self, down=False):
-        width, height = self.size
+        left, top, right, bottom = getattr(self, "viewport", (0, 0, self.size[0], self.size[1]))
         start, end = (0.28, 0.78) if down else (0.78, 0.28)
-        self.shell("input", "swipe", width // 2, int(height * start), width // 2, int(height * end), 350)
+        self.shell("input", "swipe", (left + right) // 2, top + int((bottom - top) * start),
+                   (left + right) // 2, top + int((bottom - top) * end), 350)
+
+    def locate_candidate(self, nodes, label, class_name, prefix):
+        candidates = []
+        for node in nodes:
+            if node.get("package") != PACKAGE or class_name and node.get("class") != class_name:
+                continue
+            texts = (node.get("text", ""), node.get("content-desc", ""))
+            if label is None or any(text.startswith(label) if prefix else text == label for text in texts):
+                candidates.append(node)
+        self.diagnosis["bounds"] = actionable_bounds(candidates[0], self.viewport) if candidates else "missing"
+        return next(self.matching(nodes, label, class_name, prefix, viewport=self.viewport), None)
 
     def locate(self, label=None, *, class_name=None, prefix=False, scroll=True):
+        self.diagnosis.update({"operation": "locate", "target": target_alias(label, class_name)})
         nodes = self.snapshot()
-        candidate = next(self.matching(nodes, label, class_name, prefix), None)
+        candidate = self.locate_candidate(nodes, label, class_name, prefix)
         if candidate:
             return candidate
         if scroll:
@@ -407,7 +522,7 @@ class AndroidAcceptance:
                 for _ in range(12):
                     self.swipe(down)
                     nodes = self.snapshot()
-                    candidate = next(self.matching(nodes, label, class_name, prefix), None)
+                    candidate = self.locate_candidate(nodes, label, class_name, prefix)
                     if candidate:
                         return candidate
                     fingerprint = [(n.get("text"), n.get("content-desc"), n.get("bounds")) for n in nodes]
@@ -415,16 +530,20 @@ class AndroidAcceptance:
                     previous = fingerprint
                     if unchanged >= 2:
                         break
+        self.diagnosis["reason"] = "control-not-actionable"
         raise AcceptanceFailure()
 
     def tap(self, label=None, *, class_name=None, prefix=False):
         node = self.locate(label, class_name=class_name, prefix=prefix)
+        self.diagnosis["operation"] = "tap"
         x, y = center(node)
         self.shell("input", "tap", x, y)
 
     def dismiss_keyboard(self):
+        self.diagnosis["operation"] = "keyboard-check"
         raw = self.shell("dumpsys", "input_method").stdout
         if re.search(rb"(?:mInputShown|mIsInputViewShown)=true", raw):
+            self.diagnosis["operation"] = "keyboard-dismiss"
             self.shell("input", "keyevent", "KEYCODE_BACK")
 
     def enter(self, label, value):
@@ -432,6 +551,7 @@ class AndroidAcceptance:
         # percent escapes and whitespace never enter `adb shell input text`.
         require(bool(re.fullmatch(r"[A-Za-z0-9_-]+", value)))
         self.tap(label, class_name="android.widget.EditText")
+        self.diagnosis["operation"] = "type-text"
         self.shell("input", "text", value)
         self.dismiss_keyboard()
 
@@ -579,12 +699,43 @@ class AndroidAcceptance:
     def capture_failure_diagnosis(self):
         if not self.started:
             return
+        preserved = {key: self.diagnosis[key] for key in ("operation", "target", "step", "command", "command_exit", "exit_code",
+                     "bounds", "exception", "helper", "source_line", "reason")}
         deadline = time.monotonic() + min(10, self.args.timeout)
-        self.observe_activity_state(deadline)
-        self.snapshot(deadline)
-        raw = self.shell("dumpsys", "input_method", timeout=self.remaining(deadline, 5)).stdout
-        match = re.search(rb"(?:mInputShown|mIsInputViewShown)=(true|false)", raw)
-        self.diagnosis["ime"] = "shown" if match and match[1] == b"true" else "hidden" if match else "unknown"
+        try:
+            try:
+                self.observe_activity_state(min(deadline, time.monotonic() + 2))
+            except Exception:
+                pass
+            try:
+                self.snapshot(min(deadline, time.monotonic() + 6))
+            except Exception:
+                pass
+            try:
+                raw = self.shell("dumpsys", "input_method", timeout=self.remaining(deadline, 2)).stdout
+                match = re.search(rb"(?:mInputShown|mIsInputViewShown)=(true|false)", raw)
+                self.diagnosis["ime"] = "shown" if match and match[1] == b"true" else "hidden" if match else "unknown"
+            except Exception:
+                pass
+        finally:
+            self.diagnosis.update(preserved)
+
+    def record_failure(self, error):
+        name = type(error).__name__
+        self.diagnosis["exception"] = name if name in EXCEPTIONS else "unexpected"
+        own = []
+        trace = error.__traceback__
+        while trace:
+            frame = trace.tb_frame
+            if pathlib.Path(frame.f_code.co_filename).resolve() == pathlib.Path(__file__).resolve() and frame.f_code.co_name != "require":
+                own.append((frame.f_code.co_name, trace.tb_lineno))
+            trace = trace.tb_next
+        if own:
+            helper, line = own[-1]
+            self.diagnosis.update({"helper": helper if helper in HELPERS else "unknown", "source_line": line})
+        if self.diagnosis["reason"] == "unknown":
+            self.diagnosis["reason"] = ("deadline" if self.diagnosis["helper"] == "remaining" else "xml" if name == "ParseError"
+                else "python-contract" if name in {"TypeError", "AttributeError", "KeyError", "IndexError", "NameError"} else "assertion")
 
     def list_ready(self):
         self.visible("新建登录", class_name="android.widget.Button")
@@ -681,15 +832,22 @@ class AndroidAcceptance:
         seed = self.record(base64.b32encode(os.urandom(20)).decode().rstrip("="))
         title, generated_title = "HostFirst" + token[:8], "HostGenerated" + token[:8]
         self.set_stage("create")
+        self.diagnosis["step"] = "open-create"
         self.visible("生成新的 Secret Key", class_name="android.widget.Button")
         self.tap("生成新的 Secret Key", class_name="android.widget.Button")
+        self.diagnosis["step"] = "read-account-key"
         key = self.wait(lambda nodes: next((n.get("text") for n in nodes if re.fullmatch(r"LL1-[A-Z2-7]{26}", n.get("text", ""))), None))
         self.record(key)
         wrong_key = self.record("LL1-" + base64.b32encode(os.urandom(16)).decode().rstrip("="))
+        self.diagnosis["step"] = "enter-master"
         self.enter("新的主密码", master)
+        self.diagnosis["step"] = "repeat-master"
         self.enter("再次输入主密码", master)
+        self.diagnosis["step"] = "ack-backup"
         self.tap("我已离线保存 Secret Key", class_name="android.widget.CheckBox")
+        self.diagnosis["step"] = "submit-create"
         self.tap("创建并解锁", class_name="android.widget.Button")
+        self.diagnosis["step"] = "wait-created-list"
         self.list_ready()
         self.no_visible_secrets()
         self.done("fresh_creation_with_saved_account_key")
@@ -969,10 +1127,15 @@ def main(argv=None):
         acceptance.done("full_controller_and_logcat_outputs_contain_no_secret_canaries")
         acceptance.set_stage("complete")
         success = True
-    except (Exception, KeyboardInterrupt):
+    except (Exception, KeyboardInterrupt) as error:
         # Never interpolate exceptions, subprocess argv/stdout/stderr, XML nodes,
         # expected/actual field values or any other user/app data into output.
         stage = acceptance.stage if acceptance else "prerequisites"
+        if acceptance:
+            try:
+                acceptance.record_failure(error)
+            except Exception:
+                pass
     finally:
         if acceptance:
             if not success:
