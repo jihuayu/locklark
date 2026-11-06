@@ -243,12 +243,14 @@
           : "使用 Locklark 登录",
       async () => {
         dismiss();
+        let submitted = false;
         try {
           if (!state.connected) {
             const connected = await send({ type: "inline-connect" });
             if (!connected?.connected) throw Error("refused");
           }
           if (request !== own) return;
+          submitted = true;
           const result = await send({
             type: "passkey",
             id: m.id,
@@ -264,7 +266,12 @@
                 : { fallback: true },
           );
         } catch {
-          if (request === own) finish({ fallback: true });
+          if (request === own)
+            finish(
+              m.type === "create" && submitted
+                ? { error: "NotAllowedError" }
+                : { fallback: true },
+            );
         }
         if (request === own) request = null;
       },
