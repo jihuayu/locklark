@@ -36,6 +36,27 @@ Host my-server
 SSH_AUTH_SOCK='/界面复制的完整端点' /usr/bin/ssh-add -T /公钥文件路径
 ```
 
+## Windows 客户端配置
+
+Windows 使用单独的用户管道，界面复制的端点形如 `\\.\pipe\Locklark-SSH-agent-…`。用 Windows 自带 OpenSSH 时，可在 PowerShell 中临时设置端点，并在完成后恢复原值。下面的占位内容须整体替换为界面复制的完整端点：
+
+```powershell
+$previousAgent = $env:SSH_AUTH_SOCK
+try {
+    $env:SSH_AUTH_SOCK = '从界面复制的完整端点'
+    & "$env:WINDIR\System32\OpenSSH\ssh-add.exe" -L
+    & "$env:WINDIR\System32\OpenSSH\ssh.exe" user@example.com
+} finally {
+    if ($null -eq $previousAgent) {
+        Remove-Item Env:SSH_AUTH_SOCK -ErrorAction SilentlyContinue
+    } else {
+        $env:SSH_AUTH_SOCK = $previousAgent
+    }
+}
+```
+
+不要替换系统的 `openssh-ssh-agent` 管道。Git 或其他程序若使用自带的 SSH 实现，须确认它支持 Windows named pipe；本批实际验证的是 Windows 系统目录中的 OpenSSH。GitHub CLI 的 HTTP API 凭据使用独立的 `personal run-cli --profile gh`，SSH 签名不能代替 HTTP token。
+
 ## 逐次批准与转发
 
 签名窗口显示精确密钥及修订、指纹、系统取得的本机用户与连接建立时的 PID/进程信息、算法、flags、签名数据字节数和 SHA256 摘要、请求及连接编号、截止时间。只在你确实发起该次操作时点击“仅批准本次 SSH 签名”；否则拒绝或停止 agent。每个请求最长等待30秒，没有记住批准或整批批准。一次连接可能需要多次签名。
@@ -52,6 +73,6 @@ SSH_AUTH_SOCK='/界面复制的完整端点' /usr/bin/ssh-add -T /公钥文件�
 
 ## 平台验证状态
 
-Linux 和 macOS 已在 `bef4c95` 的本机 CI 中验证自定义端点的 `ssh-add -L`、`ssh-add -T` 和实际 SSH 连接。Linux 另有主代理独立重建的 MyGo 16组验收通过，包含真实两跳 `ssh -A` 与每跳独立批准；同版 CI 的 MyGo 工具在导入/启动阶段失败；已独立复现其长临时路径会阻止 agent 启动，修复后的 CI 仍待重跑。macOS 的 OpenSSH 传输验证不能代替完整原生界面验证。
+`436cfab` 的 Linux、macOS、Windows 本机 CI 都已通过真实 OpenSSH 的 `ssh-add -L`、`ssh-add -T` 和 SSH 连接；Windows 系统客户端文件版本为9.5.6.4，同用户身份和管道 ACL 检查也已实际执行。Linux 的完整 MyGo 16组验收在主代理独立重建、长临时目录和该版 Web CI 中全部通过，包含真实两跳 `ssh -A` 与每跳独立批准。
 
-Windows 使用独立用户管道，同用户身份和管道 ACL 测试已在原生 Windows CI 执行通过；实际 Windows OpenSSH 枚举自定义端点仍失败，尚未验收成功。Windows 命令与自定义管道寻址说明须等实际验收后补充；不要替换系统 `openssh-ssh-agent` 管道。交叉编译不代表运行验收通过。
+macOS/Windows 的 OpenSSH 传输验证不能代替完整原生界面或系统生物识别真机验证。Windows RunCLI 的外部 ConPTY 验收仍在修正独立工具的目录验证；它不影响上述已通过的 SSH 传输结果。交叉编译不代表运行验收通过。
