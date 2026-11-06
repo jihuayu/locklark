@@ -990,7 +990,7 @@ if (typeof importScripts === "function") importScripts("core.js");
         "item-save": "saved",
         "item-state": "saved",
         generate: "generated",
-        "fill-item": "fill-fields",
+        "fill-profile": "profile-fill",
         watchtower: "watchtower",
       }[call.type];
       if (
@@ -1009,7 +1009,13 @@ if (typeof importScripts === "function") importScripts("core.js");
       const accepted =
         call.type === "fill"
           ? ["fill", "filled", "filled-identity", "filled-card"]
-          : [expected];
+          : {
+              "vault-search": ["items", "vault-items"],
+              "vault-list": ["items", "vault-items"],
+              "item-save": ["item-saved", "saved"],
+              "item-state": ["item-saved", "saved"],
+              "fill-profile": ["profile-fill"],
+            }[call.type] || [expected];
       if (!accepted.includes(message.type)) {
         if ("code" in message) message.code = "";
         call.reject(Error("refused"));
@@ -2431,21 +2437,23 @@ if (typeof importScripts === "function") importScripts("core.js");
       const c = await capture();
       await current(c);
       const response = await request(
-        "fill-item",
+        "fill-profile",
         {
           ...fields(c),
           item_id: itemId,
           revision,
-          category,
         },
         35000,
       );
+      const fill = response.profile_fill;
+      if (!fill || fill.item_id !== itemId || fill.revision !== revision)
+        throw Error("refused");
       await current(c);
       if (api.tabs?.sendMessage)
         await api.tabs
           .sendMessage(c.tabId, {
             type: "locklark:fill-fields",
-            fields: response.fields,
+            fields: fill.fields,
           })
           .catch(() => {});
       status = "已请求填充所选条目；请核实网站结果";
@@ -2612,26 +2620,42 @@ if (typeof importScripts === "function") importScripts("core.js");
     const favorite =
       typeof message.favorite === "boolean" ? message.favorite : undefined;
     if (!state && favorite === undefined) throw Error("refused");
-    let response;
+    const known =
+      vaultItems.find((item) => item.id === message.id)?.state ||
+      detailCache.get(message.id + ":" + message.revision)?.state ||
+      "active";
+    const actions = [];
+    if (state && state !== known) {
+      if (state === "archived") actions.push("archive");
+      else if (state === "trashed") actions.push("trash");
+      else if (known === "archived") actions.push("unarchive");
+      else if (known === "trashed") actions.push("untrash");
+    }
+    if (favorite !== undefined)
+      actions.push(favorite ? "favorite" : "unfavorite");
+    if (!actions.length) throw Error("refused");
+    let response = { revision: message.revision };
     try {
-      response = await request(
-        "item-state",
-        {
-          capability,
-          item_id: message.id,
-          revision: message.revision,
-          ...(state ? { state } : {}),
-          ...(favorite === undefined ? {} : { favorite }),
-        },
-        15000,
-      );
+      for (const action of actions) {
+        response = await request(
+          "item-state",
+          {
+            capability,
+            item_id: message.id,
+            revision: response.revision,
+            state_action: action,
+          },
+          15000,
+        );
+        if (!["item-saved", "saved"].includes(response.type))
+          throw Error("refused");
+      }
     } catch {
       const error = Error("refused");
       error.keepStatus = true;
       status = "当前原生宿主不支持修改条目状态";
       throw error;
     }
-    if (response.type !== "saved") throw Error("refused");
     status = state === "trashed" ? "条目已移至废纸篓" : "条目已更新";
     vaultItems = vaultItems.map((item) =>
       item.id === message.id

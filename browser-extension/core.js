@@ -781,6 +781,19 @@ globalThis.LocklarkCore = (() => {
         "otp-fill": ["v", "id", "type", "code"],
         saved: ["v", "id", "type", "item_id", "revision"],
         "vault-items": ["v", "id", "type", "items"],
+        // Native host v2 vault protocol (internal/browserhost/vault_ops.go).
+        items: ["v", "id", "type", "items", "vaults"],
+        "item-saved": [
+          "v",
+          "id",
+          "type",
+          "item_id",
+          "revision",
+          "item_summary",
+          "state",
+          "favorite",
+        ],
+        "profile-fill": ["v", "id", "type", "profile_fill"],
         "item-detail": ["v", "id", "type", "item"],
         "fill-fields": ["v", "id", "type", "fields"],
         watchtower: ["v", "id", "type", "watchtower"],
@@ -818,10 +831,17 @@ globalThis.LocklarkCore = (() => {
         /^[a-f0-9]{32}$/.test(m.item_id || "") &&
         /^[a-f0-9]{64}$/.test(m.revision || "")
       );
-    if (m.type === "vault-items")
+    if (m.type === "vault-items" || m.type === "items")
       return (
         Array.isArray(m.items) &&
         m.items.length <= 500 &&
+        (m.vaults === undefined ||
+          (Array.isArray(m.vaults) &&
+            m.vaults.length <= 256 &&
+            m.vaults.every(
+              (vault) =>
+                vault && typeof vault === "object" && !Array.isArray(vault),
+            ))) &&
         m.items.every(
           (item) =>
             item &&
@@ -837,6 +857,40 @@ globalThis.LocklarkCore = (() => {
             item.category.length <= 64,
         )
       );
+    if (m.type === "item-saved")
+      return (
+        /^[a-f0-9]{32}$/.test(m.item_id || "") &&
+        /^[a-f0-9]{64}$/.test(m.revision || "") &&
+        (m.state === undefined ||
+          ["active", "archived", "trashed"].includes(m.state)) &&
+        (m.favorite === undefined || typeof m.favorite === "boolean") &&
+        (m.item_summary === undefined ||
+          (!!m.item_summary &&
+            typeof m.item_summary === "object" &&
+            !Array.isArray(m.item_summary)))
+      );
+    if (m.type === "profile-fill") {
+      const fill = m.profile_fill;
+      return (
+        !!fill &&
+        typeof fill === "object" &&
+        !Array.isArray(fill) &&
+        /^[a-f0-9]{32}$/.test(fill.item_id || "") &&
+        /^[a-f0-9]{64}$/.test(fill.revision || "") &&
+        typeof fill.category === "string" &&
+        fill.category.length <= 64 &&
+        !!fill.fields &&
+        typeof fill.fields === "object" &&
+        !Array.isArray(fill.fields) &&
+        Object.keys(fill.fields).length <= 100 &&
+        Object.entries(fill.fields).every(
+          ([key, value]) =>
+            /^[A-Za-z0-9_.-]{1,128}$/.test(key) &&
+            typeof value === "string" &&
+            value.length <= 16384,
+        )
+      );
+    }
     if (m.type === "item-detail")
       return (
         m.item &&
