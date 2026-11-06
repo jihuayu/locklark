@@ -14,6 +14,41 @@ import mobile_android_acceptance as acceptance
 
 
 class SafetyTests(unittest.TestCase):
+    def test_manual_password_mode_is_enabled_before_keyboard_input(self):
+        controller = mock.Mock(spec=acceptance.AndroidAcceptance)
+        controller.locate.return_value = {"checked": "true"}
+        generated_mode = True
+        sequence = []
+
+        def tap(label, *, class_name):
+            nonlocal generated_mode
+            self.assertTrue(label == "生成强密码" and class_name == "android.widget.CheckBox")
+            generated_mode = False
+            sequence.append("manual-mode")
+
+        def enter(label, value):
+            if generated_mode:
+                raise AssertionError("disabled password input must not receive keyboard input")
+            self.assertTrue(label == "登录密码" and value == "UnitSyntheticPassword")
+            sequence.append("password-input")
+
+        controller.tap.side_effect = tap
+        controller.enter.side_effect = enter
+        # Negative oracle: the original reversed order is refused.
+        with self.assertRaises(AssertionError):
+            enter("登录密码", "UnitSyntheticPassword")
+        acceptance.AndroidAcceptance.enter_manual_password(controller, "UnitSyntheticPassword")
+        self.assertEqual(sequence, ["manual-mode", "password-input"])
+        controller.locate.assert_called_once_with("生成强密码", class_name="android.widget.CheckBox")
+
+    def test_unexpected_manual_mode_default_is_not_blindly_toggled(self):
+        controller = mock.Mock(spec=acceptance.AndroidAcceptance)
+        controller.locate.return_value = {"checked": "false"}
+        with self.assertRaises(acceptance.AcceptanceFailure):
+            acceptance.AndroidAcceptance.enter_manual_password(controller, "UnitSyntheticPassword")
+        controller.tap.assert_not_called()
+        controller.enter.assert_not_called()
+
     def test_wrong_factor_requires_the_specific_public_unlock_refusal(self):
         status = {"package": acceptance.PACKAGE, "class": "android.widget.TextView", "enabled": "true",
                   "text": "解锁未完成：认证被取消或完整因素未通过验证。"}

@@ -300,6 +300,14 @@ class AndroidAcceptance:
         self.shell("input", "text", value)
         self.dismiss_keyboard()
 
+    def enter_manual_password(self, value):
+        generate = self.locate("生成强密码", class_name="android.widget.CheckBox")
+        require(generate.get("checked") == "true")
+        self.tap("生成强密码", class_name="android.widget.CheckBox")
+        # `enter` locates an enabled EditText; generated mode deliberately
+        # disables this native field until its checkbox is switched off.
+        self.enter("登录密码", value)
+
     def done(self, name):
         self.checks.append(name)
         print("PASS: Android host UI " + name, flush=True)
@@ -461,10 +469,7 @@ class AndroidAcceptance:
         self.tap("新建登录", class_name="android.widget.Button")
         self.enter("登录标题", title)
         self.enter("用户名", username)
-        self.enter("登录密码", password)
-        generate = self.locate("生成强密码", class_name="android.widget.CheckBox")
-        require(generate.get("checked") == "true")
-        self.tap("生成强密码", class_name="android.widget.CheckBox")
+        self.enter_manual_password(password)
         self.tap("保存登录", class_name="android.widget.Button")
         self.list_ready()
         identity = self.select_item(title)
