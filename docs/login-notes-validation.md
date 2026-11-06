@@ -44,6 +44,14 @@ Sol 完成一次 `GOTOOLCHAIN=go1.27.3 LOCKLARK_TEST_BUN=/tmp/locklark-tools/bun
 
 Sol95 与主代理94 分别在固定 v1/draft6 运行 `scripts/login_notes_privacy_acceptance.py`，均 exit0。主代理日志 `login-notes-v1-parent-draft6-fault.log`，wrapper私有目录 `tzr4j2fr`；Sol日志 `login-notes-v1-draft6-privacy.log`、wrapper `l4ben4nw`。内层真实明确显示 Notes 后故意提交携带全部私有 canary 的未知 probe 操作，必须固定阶段/原因 exit1；完整 controller stdout/stderr、native/probe 日志及 diagnostics JSON 扫描通过，无截图。主代理额外检查 wrapper 和最外层 D-Bus 重定向输出含 Base64 变体，零命中。最终两个 manifest 再核无变化。
 
+## PR 与首轮远端检查
+
+[PR #31](https://github.com/jihuayu/locklark/pull/31) 初始 head `3b50eca15213300768bd02d17332d972185ca620`，[CI 42144714585](https://github.com/jihuayu/locklark/actions/runs/42144714585) 的 macOS 与 Web 成功。父代理下载完整 Web 日志，逐一核对旧桌面日常、快捷搜索、Notes 正常/故障隐私、Chromium/Firefox 完整填充保存 OTP 及两项 OTP 故障门槛均实际 PASS，不能据此把整轮标绿。
+
+Ubuntu 全 Go 中旧 `TestDailyOTPRequiresDurableRevalidationAndSingleDelivery` 在 daily_test.go:82 预期 ErrConflict 却收到 ErrDesktopDelivery，日志 `login-notes-pr31-ubuntu-failed.log`；Windows 被矩阵 fail-fast 取消，非独立 Windows 产品失败（此前原生剪贴板 smoke 已通过）。该测试在真实 TOTP 窗口末端准备 holder，再进行另一会话的解锁和修改；到期 timer 可以先清值并删登记，合法的到期拒绝先于旧修订检查。Sol 的修正仅涉及 `daily_test.go`：版本/重放语义测试使用已有受控 OTP 时钟并独占本次 holder timer，必须实际走到精确 ErrConflict；同类跨会话测试同步强化，独立真实到期/回拨测试保留，新增到期先于只读检查的零调用/零交付/清零对照。产品 v1 源码和二进制不变；主代理重新核对148项产品源文件和15项最终工具manifest均一致。
+
+Sol使用 `GOTOOLCHAIN=go1.27.3 /tmp/locklark-tools/go/bin/go test ./internal/personal -run '^TestDailyOTP(RequiresDurableRevalidationAndSingleDelivery|SecondSessionChangesAreRejected|ExpiryPrecedesStaleRevalidation)$'`，定向重复 `-count=3 -timeout=180s`（53.026s）和定向 `-race -count=1 -timeout=240s`（79.895s）通过，日志 `login-notes-otp-ci-timing-repeat.log` / `login-notes-otp-ci-timing-race.log`。Luna max 对精确测试增量审阅无阻塞，独立运行 `go test ./internal/personal -run 'TestDailyOTPRequiresDurableRevalidationAndSingleDelivery|TestDailyOTPExpiryPrecedesStaleRevalidation|TestDailyOTPSecondSessionChangesAreRejected|TestDailyOTPFinalClockSampleRejectsRollbackAndExpiredWindow' -count=5` 通过（58.372s），以及 `go test -race ./internal/personal -run '^TestDailyOTPRequiresDurableRevalidationAndSingleDelivery$' -count=1` 通过（16.047s）。Luna另一次更宽的重复race被主动停止，不计通过。主代理独立阅读断言、错误优先级和timer所有权后接受这份仅测试的修正；新head完整CI仍须核验。
+
 ## 当前门槛
 
-本地实现、独立复核、主代理完整验收与故障隐私已通过；精确 head CI 与正常 PR 合并待提交后核验。本切片不关闭完整类别/自定义字段/历史/附件迁移、平台真机或整体替换验收。
+本地实现、独立复核、主代理完整验收与故障隐私已通过；PR #31 首轮真实 CI 失败已定位并完成测试修正；更新提交的精确 head CI 与正常 PR 合并仍待核验。本切片不关闭完整类别/自定义字段/历史/附件迁移、平台真机或整体替换验收。
