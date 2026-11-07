@@ -220,6 +220,7 @@ type result struct {
 	revision          string
 	chains            []Chain
 	archive           []byte
+	allSummaries      []ItemSummary
 	summaries         []ItemSummary
 	detail            ItemDetail
 	vaults            []vault.VaultMeta
@@ -1086,6 +1087,15 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			if e != nil {
 				return e
 			}
+			if option.v2.desktopSnapshot {
+				out.allSummaries, e = listByFilter(items, revisions, ItemFilter{
+					State: "all", VaultID: option.v2.filter.VaultID, SortBy: "title",
+				})
+				if e != nil {
+					return e
+				}
+				out.vaults = listVaultsMeta(vaults)
+			}
 			if option.v2.filter.Query != "" {
 				out.destinationDigest, e = (&searchRequest{query: option.v2.filter.Query, state: option.v2.filter.State}).binding(i.AuditEncryption)
 				if e != nil {
@@ -1637,6 +1647,16 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		ev, e := appendLinked(b, i, tip, s, journalAction, out.id, outcome, revisions[out.id], link, eventDetails{generation: profile, reportDigest: out.reportDigest})
 		if e != nil {
 			return e
+		}
+		if action == v2ListAction && option.v2 != nil && option.v2.desktopSnapshot {
+			// The projections share authentication and one transaction, but keep
+			// all three existing audit intents and their normal linked order.
+			for _, readAction := range []string{"item.list", v2ListVaultsAction} {
+				ev, e = appendLinked(b, i, auditTipAfter(ev, s, tip.Origin), s, readAction, "", "succeeded", "", "")
+				if e != nil {
+					return e
+				}
+			}
 		}
 		if (action == sshSignAction || readValueAction(action) || otpAction(action) || action == inspectionAction || action == exportAction || migrationAction(action) || action == healthAction || action == searchAction) && refusal == nil {
 			out.session, out.intent = ev.Session, ev.hash()

@@ -1,5 +1,7 @@
 # 未关闭 issues 的逐项完成记录
 
+2026-11-07 本轮补充：原八项关闭七项后，已将 #39 遗留范围及外部 worker/剪贴板问题拆成 #50–#59，每项附复现或验收标准。旧段落的“仅剩 #39”是拆分前状态；当前实现与安全边界见[专项验收](ui-performance-security-validation.md)。
+
 日期：2026-11-07。起点 `main` `41e31f77b18ad842db3be7c6c30f293329bcaf63`（[PR #45](https://github.com/jihuayu/locklark/pull/45)），最终开发 head `5e990dd` 六项 CI 均成功。起始有 8 个未关闭 issues，无未合并 PR。以实际实现和验收完成状态关闭 issue，史料中的旧提交复现不自动代表当前 main 仍有同一缺陷。
 
 ## 本批对账

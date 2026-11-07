@@ -105,21 +105,22 @@ type ItemFilter struct {
 }
 
 type v2Request struct {
-	filter        ItemFilter
-	item          *vault.Item
-	favorite      bool
-	tags          []string
-	historyIndex  int
-	attID         string
-	fileName      string
-	mimeType      string
-	content       []byte
-	olderThan     *time.Duration
-	vaultName     string
-	vaultDesc     string
-	vaultIcon     string
-	targetVaultID string
-	copyItem      bool
+	desktopSnapshot bool
+	filter          ItemFilter
+	item            *vault.Item
+	favorite        bool
+	tags            []string
+	historyIndex    int
+	attID           string
+	fileName        string
+	mimeType        string
+	content         []byte
+	olderThan       *time.Duration
+	vaultName       string
+	vaultDesc       string
+	vaultIcon       string
+	targetVaultID   string
+	copyItem        bool
 }
 
 func v2MutationAction(action string) bool {
@@ -166,6 +167,30 @@ func (s *Session) ListByFilter(filter ItemFilter) ([]ItemSummary, error) {
 	defer s.mu.Unlock()
 	r, e := s.execute(v2ListAction, vault.Item{}, nil, commandOption{v2: &v2Request{filter: filter}})
 	return r.summaries, e
+}
+
+// DesktopMetadataSnapshot contains only the metadata projections used by the
+// native list and sidebar, captured from one authenticated database state.
+type DesktopMetadataSnapshot struct {
+	Rows   []ItemSummary
+	All    []ItemSummary
+	Vaults []vault.VaultMeta
+}
+
+// ListDesktopSnapshot authenticates once and atomically records the same three
+// read intents as ListByFilter(filter), its all-state sidebar list, and ListVaults.
+func (s *Session) ListDesktopSnapshot(filter ItemFilter) (DesktopMetadataSnapshot, error) {
+	if s == nil {
+		return DesktopMetadataSnapshot{}, ErrSessionLocked
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, err := s.execute(v2ListAction, vault.Item{}, nil,
+		commandOption{v2: &v2Request{filter: filter, desktopSnapshot: true}})
+	if err != nil {
+		return DesktopMetadataSnapshot{}, err
+	}
+	return DesktopMetadataSnapshot{Rows: r.summaries, All: r.allSummaries, Vaults: r.vaults}, nil
 }
 
 func (s *Session) GetItemDetail(id, revision string, revealConcealed bool) (ItemDetail, error) {

@@ -505,6 +505,8 @@ try {
   }
   await blank();
   popup = await openPopup();
+  if (await popup.count(".site-preferences:not([open]) > summary"))
+    await popup.click(".site-preferences > summary");
   await popup.click("#auto-login"); // Existing manual-mode scenarios intentionally disable auto-submit.
 
   if (

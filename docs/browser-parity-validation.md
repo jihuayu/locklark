@@ -1,5 +1,7 @@
 # 浏览器插件当前验收状态
 
+本轮 UI/性能/安全的最新证据见[专项验收](ui-performance-security-validation.md)，本页下方较早 PR 数字为历史。真实平台、分发和独立复核现由 #50–#59 分项跟踪。
+
 更新：2026-11-07；本批已合并起点 main 9cbc34c（PR #48）。本页下列 PR #43 的数字为历史验收；最新条件式/管理、Signal/系统 UV 与发布准备的实际范围见[综合验收](browser-completion-validation.md)。此前基于 PR #40 的记录移至[历史快照](history/browser-parity-validation-2026-11-06.md)。
 
 ## 已有实现与实际验证

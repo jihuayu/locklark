@@ -391,19 +391,11 @@ func (a *App) captureV2(s *personal.Session, filter personal.ItemFilter) v2Snaps
 	if s == nil {
 		return v2Snapshot{err: personal.ErrSessionLocked, query: query}
 	}
-	rows, err := s.ListByFilter(filter)
+	snapshot, err := s.ListDesktopSnapshot(filter)
 	if err != nil {
 		return v2Snapshot{err: err, query: query}
 	}
-	all, err := s.ListByFilter(personal.ItemFilter{State: "all", VaultID: filter.VaultID, SortBy: "title"})
-	if err != nil {
-		return v2Snapshot{err: err, query: query}
-	}
-	vaults, err := s.ListVaults()
-	if err != nil {
-		return v2Snapshot{err: err, query: query}
-	}
-	return v2Snapshot{rows: rows, all: all, vaults: vaults, query: query}
+	return v2Snapshot{rows: snapshot.Rows, all: snapshot.All, vaults: snapshot.Vaults, query: query}
 }
 
 func (a *App) applyV2Snapshot(snap v2Snapshot, keepSelection bool) bool {
