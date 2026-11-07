@@ -20,6 +20,7 @@ import {
 
 import { acceptBrowserPasskey } from "./browser_passkey_acceptance.mjs";
 import { acceptBrowserOTP, otpHTML } from "./browser_otp_acceptance.mjs";
+import { acceptPopupVault } from "./browser_popup_vault_acceptance.mjs";
 
 const scanController = captureControllerOutput();
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -60,6 +61,11 @@ function popupStatusKind(value) {
   if (text.includes("未连接") || text.includes("断开")) return "disconnected";
   if (text.includes("原生") || text.includes("批准")) return "native-pending";
   if (text.includes("拒绝")) return "refused";
+  if (text.includes("正在填充")) return "quick-filling";
+  if (text.includes("个当前网站")) return "candidates-listed";
+  if (text.includes("金库中有")) return "vault-listed";
+  if (text.includes("Watchtower")) return "watchtower";
+  if (text.includes("已填充") || text.includes("填充完成")) return "filled";
   return "other";
 }
 function phase(value) {
@@ -300,6 +306,13 @@ try {
       return r.result.value;
     };
     return {
+      insertText: (text) => call("Input.insertText", { text }),
+      selectAll: async () => {
+        for (const type of ["keyDown", "keyUp"])
+          await call("Input.dispatchKeyEvent", {
+            type, key: "a", code: "KeyA", modifiers: 2, windowsVirtualKeyCode: 65,
+          });
+      },
       targetId: target.id,
       close: () => ws.close(),
       dismiss: async () => {
@@ -335,7 +348,7 @@ try {
         const rect = await evaluate(
           "(()=>{const e=document.querySelector(" +
             JSON.stringify(selector) +
-            ');if(!e||e.disabled||document.visibilityState!=="visible"||!document.hasFocus())return null;const r=e.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()',
+            ');if(!e||e.disabled||document.visibilityState!=="visible"||!document.hasFocus())return null;e.scrollIntoView({block:"center",inline:"nearest"});const r=e.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2,hit=document.elementFromPoint(x,y);if(!hit||(hit!==e&&!e.contains(hit)))return null;return {x,y};})()',
         );
         assert(rect, "Popup control must be available");
         await call("Input.dispatchMouseEvent", {
@@ -442,6 +455,12 @@ try {
   ]);
   phase("native-pair");
   input([{ click_label: "确认连接此扩展" }]);
+  if (process.env.LOCKLARK_TEST_POPUP_VAULT) {
+    await acceptPopupVault({
+      openPopup, fixture, phase, eventually,
+      observe: vaultObserver({ go, root, env, state }),
+    });
+  }
   await blank();
   popup = await openPopup();
   await popup.click("#auto-login"); // Existing manual-mode scenarios intentionally disable auto-submit.

@@ -11,6 +11,7 @@ import (
 	"image/color"
 	"image/png"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -51,6 +52,20 @@ type App struct {
 	otpDisplayBounds, otpClipboard                         *personal.OTPBounds
 	otpDisplayTarget, otpClipboardTarget                   personal.NativeOTPTarget
 	otpDisplayTimer, otpClipboardTimer                     *time.Timer
+	fieldDisplaySequence                                   uint64
+	displayTimer                                           *time.Timer
+	clipboardTimer                                         *time.Timer
+	idleSequence                                           uint64
+	idleTimer                                              *time.Timer
+	queryGeneration                                        uint64
+
+	brokerMu       sync.Mutex
+	broker         *browserhost.Broker
+	brokerEndpoint string
+	brokerSession  *personal.Session
+	brokerEpoch    uint64
+	cliApprover    func(context.Context, browserhost.Peer, browserhost.BrokerCLIRequest) (bool, error)
+	cliPending     *cliRunPending
 
 	browserPasskeyID                               string
 	browserSaveID, browserSaveTitle                string
@@ -81,10 +96,26 @@ type App struct {
 	audit                                          []personal.Event
 	report                                         string
 	source, planDigest, exportPath, exportPassword string
+
+	// M2.4 desktop v2 state. It is reset on lock and never survives a
+	// session boundary; settings are non-secret and survive lock.
+	v2                    v2State
+	v2Mode                bool
+	settings              Settings
+	settingsPath          string
+	settingsLoaded        bool
+	lastActivity          time.Time
+	backgroundStop        chan struct{}
+	backgroundRunningFlag uint32
 }
 
 func New() *App {
-	return &App{generationLength: "24", systemStore: osunlock.New(), scope: "active", sshScope: "active", page: "vault", editField: "password", dispatch: func(fn func()) { fn() }, launch: func(fn func()) { go fn() }}
+	a := &App{generationLength: "24", systemStore: osunlock.New(), scope: "active", sshScope: "active", page: "vault", editField: "password", dispatch: func(fn func()) { fn() }, launch: func(fn func()) { go fn() }}
+	a.settings = DefaultSettings()
+	a.settingsPath = SettingsPath()
+	a.settingsLoaded = true
+	a.v2 = newV2State()
+	return a
 }
 func (a *App) run(work func() outcome) { a.runContext(func(context.Context) outcome { return work() }) }
 func (a *App) runContext(work func(context.Context) outcome) {
@@ -112,12 +143,17 @@ func (a *App) runContext(work func(context.Context) outcome) {
 				a.status = message(r.err)
 				if a.session != nil && !a.session.Unlocked() {
 					a.Lock()
+				} else if a.session != nil && a.idleTimer != nil {
+					a.armIdleTimer()
 				}
 				return
 			}
 			a.status = "操作完成"
 			if r.apply != nil {
 				r.apply()
+			}
+			if a.session != nil && a.idleTimer != nil {
+				a.armIdleTimer()
 			}
 		})
 	})
@@ -167,6 +203,111 @@ func visible(s string) string {
 	}
 	return out.String()
 }
+
+type listFilter struct {
+	query      string
+	scope      string
+	generation uint64
+}
+
+func (a *App) captureFilter() listFilter {
+	scope := a.scope
+	if scope == "" {
+		scope = "active"
+	}
+	return listFilter{query: a.query, scope: scope, generation: a.queryGeneration}
+}
+
+func (a *App) filterCurrent(f listFilter) bool {
+	scope := a.scope
+	if scope == "" {
+		scope = "active"
+	}
+	return a.query == f.query && scope == f.scope && a.queryGeneration == f.generation
+}
+
+func queryRows(s *personal.Session, f listFilter) ([]personal.Row, error) {
+	if f.query == "" {
+		return s.List(f.scope)
+	}
+	return s.Search(f.query, f.scope)
+}
+
+func (a *App) applyMutationRefresh(r nativeResult, filter listFilter) bool {
+	a.selected = nil
+	a.hideDisplay()
+	if r.refreshErr != nil || !a.filterCurrent(filter) {
+		a.rows = nil
+		return false
+	}
+	a.rows = loginProjection(r.rows)
+	return true
+}
+
+func (a *App) hideDisplay() {
+	a.fieldDisplaySequence++
+	if a.displayTimer != nil {
+		a.displayTimer.Stop()
+		a.displayTimer = nil
+	}
+	a.display = ""
+	a.displayUntil = time.Time{}
+}
+
+func (a *App) showFieldDisplay(value string, until time.Time) {
+	a.hideDisplay()
+	a.display = value
+	a.displayUntil = until
+	sequence := a.fieldDisplaySequence
+	generation := a.generation
+	exposure := a.exposureGeneration
+	if d := time.Until(until); !until.IsZero() && d > 0 {
+		a.displayTimer = time.AfterFunc(d, func() {
+			a.dispatch(func() {
+				if a.generation == generation && a.exposureGeneration == exposure && a.fieldDisplaySequence == sequence {
+					a.hideDisplay()
+				}
+			})
+		})
+	}
+}
+
+func (a *App) stopIdleTimer() {
+	a.idleSequence++
+	if a.idleTimer != nil {
+		a.idleTimer.Stop()
+		a.idleTimer = nil
+	}
+}
+
+func (a *App) armIdleTimer() {
+	a.stopIdleTimer()
+	s := a.session
+	if s == nil {
+		return
+	}
+	deadline, ok := s.IdleDeadline()
+	if !ok {
+		a.Lock()
+		return
+	}
+	generation := a.generation
+	sequence := a.idleSequence
+	d := max(time.Until(deadline), time.Millisecond)
+	a.idleTimer = time.AfterFunc(d, func() {
+		a.dispatch(func() {
+			if a.session != s || a.generation != generation || a.idleSequence != sequence {
+				return
+			}
+			a.idleTimer = nil
+			if !s.Unlocked() {
+				a.Lock()
+				return
+			}
+			a.armIdleTimer()
+		})
+	})
+}
 func (a *App) Lock() {
 	a.stopSSHAgent()
 	a.sshRows = nil
@@ -179,14 +320,20 @@ func (a *App) Lock() {
 			a.mutationUnknown = true
 		}
 	}
+	a.operation = nil
 	// Revoke all session/UI authority before native clipboard metadata calls.
 	a.generation++
+	a.stopIdleTimer()
 	a.clearNotesEditor()
 	a.closeQuickSearch()
 	s := a.session
 	a.session = nil
 	if s != nil {
 		s.RequestLock()
+	}
+	a.cancelPendingCLIRun()
+	a.notifyBrowserBrokerLocked()
+	if s != nil {
 		a.launch(s.Lock)
 	}
 	a.regenerate = nil
@@ -204,6 +351,7 @@ func (a *App) Lock() {
 	a.value = ""
 	a.username = ""
 	a.title = ""
+	a.website = ""
 	a.display = ""
 	a.exportPassword = ""
 	a.rows = nil
@@ -212,6 +360,9 @@ func (a *App) Lock() {
 	a.report = ""
 	a.planDigest = ""
 	a.query = ""
+	a.queryGeneration++
+	a.browserSaveID = ""
+	a.browserSaveTitle = ""
 	a.busy = false
 	a.status = "金库已锁定"
 	if a.mutationUnknown {
@@ -224,6 +375,9 @@ func (a *App) Lock() {
 		a.status += " · 结果未确认，请在金库核实，勿重复保存"
 	}
 	a.clearDailyExposure()
+	a.resetV2()
+	a.v2Mode = false
+	a.lastActivity = time.Time{}
 }
 func (a *App) unlock() {
 	path := a.path
@@ -254,14 +408,20 @@ func (a *App) unlock() {
 		}
 		return outcome{drop: s.Lock, apply: func() {
 			a.session = s
+			a.armIdleTimer()
 			a.rows = loginProjection(rows)
 			a.scope = "active"
 			a.page = "vault"
-			a.status = "已解锁 · 5 分钟未操作自动锁定"
+			a.v2Mode = !classicLayoutRequested()
+			a.touchActivity()
+			a.loadV2Metadata()
+			a.status = "已解锁 · " + idleLockLabel(a.settingsSnapshot().AutoLockDuration())
+			a.startBrowserBroker()
+			a.notifyBrowserBrokerUnlocked()
 		}}
 	})
 }
-func (a *App) createVault() {
+func (a *App) createVaultFile() {
 	if a.password == "" || a.password != a.confirmation || subtle.ConstantTimeCompare([]byte(a.issued), []byte(a.secret)) != 1 {
 		a.status = "请确认主密码，并重新输入离线保存的 Secret Key"
 		return
@@ -289,9 +449,12 @@ func (a *App) createVault() {
 		}
 		return outcome{drop: s.Lock, apply: func() {
 			a.session = s
+			a.armIdleTimer()
 			a.rows = nil
 			a.create = false
 			a.status = "金库已创建，Secret Key 请继续离线保管"
+			a.startBrowserBroker()
+			a.notifyBrowserBrokerUnlocked()
 		}}
 	})
 }
@@ -299,63 +462,92 @@ func (a *App) refresh() {
 	a.clearNotesEditor()
 	a.clearDailyExposure()
 	a.regenerate = nil
-	s, query, scope := a.session, a.query, a.scope
+	s := a.session
 	if s == nil {
 		return
 	}
+	filter := a.captureFilter()
 	a.run(func() outcome {
-		var rows []personal.Row
-		var e error
-		if query == "" {
-			rows, e = s.List(scope)
-		} else {
-			rows, e = s.Search(query, scope)
-		}
+		rows, e := queryRows(s, filter)
 		return outcome{err: e, apply: func() {
+			if !a.filterCurrent(filter) {
+				a.rows = nil
+				a.selected = nil
+				a.hideDisplay()
+				a.status = "搜索条件已变更，请重新刷新"
+				return
+			}
 			a.rows = loginProjection(rows)
 			a.selected = nil
-			a.display = ""
+			a.hideDisplay()
 			a.status = fmt.Sprintf("%d 个条目", len(a.rows))
 		}}
 	})
 }
 func (a *App) add() { a.saveNative(false) }
 func (a *App) edit() {
-	a.clearNotesEditor()
-	a.clearDailyExposure()
-	if a.selected == nil {
+	if a.session == nil || a.selected == nil || a.busy {
 		return
 	}
 	s := a.session
 	target := *a.selected
-	field, value := a.editField, a.value
+	field, value := a.editField, []byte(a.value)
 	a.value = ""
-	scope := a.scope
-	a.run(func() outcome {
-		_, e := s.Edit(personal.Edit{ID: target.ID, Revision: target.Revision, Field: field, Value: value})
-		if e != nil {
-			return outcome{err: e}
+	filter := a.captureFilter()
+	generation := a.generation
+	exposure, operation := a.exposureGeneration, a.operationSequence
+	a.clearNotesEditor()
+	a.clearDailyExposure()
+	if a.session != s || a.generation != generation || a.exposureGeneration != exposure+1 || a.operationSequence != operation || a.selected == nil || a.selected.ID != target.ID || a.selected.Revision != target.Revision || a.busy {
+		clear(value)
+		return
+	}
+	started := a.runNative(func(g *personal.MutationGate) nativeResult {
+		defer clear(value)
+		rev, e := s.EditNativeField(target.ID, target.Revision, field, value, g)
+		out := nativeResult{receipt: personal.GenerationReceipt{ID: target.ID, Revision: rev}, err: e}
+		if e == nil {
+			out.rows, out.refreshErr = queryRows(s, filter)
 		}
-		rows, e := s.List(scope)
-		return outcome{err: e, apply: func() { a.rows = loginProjection(rows); a.selected = nil; a.display = ""; a.status = "字段已更新" }}
+		return out
+	}, func(r nativeResult) {
+		ok := a.applyMutationRefresh(r, filter)
+		a.status = "字段已更新"
+		if !ok {
+			a.status += "；列表未刷新，请手动刷新"
+		}
 	})
+	if !started {
+		clear(value)
+	}
 }
 func (a *App) state(action string) {
-	a.clearNotesEditor()
-	a.clearDailyExposure()
-	if a.selected == nil {
+	if a.session == nil || a.selected == nil || a.busy {
 		return
 	}
 	s := a.session
 	target := *a.selected
-	scope := a.scope
-	a.run(func() outcome {
-		_, e := s.SetState(target.ID, target.Revision, action)
-		if e != nil {
-			return outcome{err: e}
+	filter := a.captureFilter()
+	generation := a.generation
+	exposure, operation := a.exposureGeneration, a.operationSequence
+	a.clearNotesEditor()
+	a.clearDailyExposure()
+	if a.session != s || a.generation != generation || a.exposureGeneration != exposure+1 || a.operationSequence != operation || a.selected == nil || a.selected.ID != target.ID || a.selected.Revision != target.Revision || a.busy {
+		return
+	}
+	a.runNative(func(g *personal.MutationGate) nativeResult {
+		rev, e := s.SetNativeState(target.ID, target.Revision, action, g)
+		out := nativeResult{receipt: personal.GenerationReceipt{ID: target.ID, Revision: rev}, err: e}
+		if e == nil {
+			out.rows, out.refreshErr = queryRows(s, filter)
 		}
-		rows, e := s.List(scope)
-		return outcome{err: e, apply: func() { a.rows = loginProjection(rows); a.selected = nil; a.display = "" }}
+		return out
+	}, func(r nativeResult) {
+		ok := a.applyMutationRefresh(r, filter)
+		a.status = "操作完成"
+		if !ok {
+			a.status += "；列表未刷新，请手动刷新"
+		}
 	})
 }
 func (a *App) disclose(field, purpose string) {
@@ -382,12 +574,11 @@ func (a *App) disclose(field, purpose string) {
 					}
 					a.status = "已复制到系统剪贴板 · 30 秒后尝试清理"
 				} else {
+					shown := visible(string(value))
 					if field == "notes" {
-						a.display = visibleNotes(string(value))
-					} else {
-						a.display = visible(string(value))
+						shown = visibleNotes(string(value))
 					}
-					a.displayUntil = time.Now().Add(15 * time.Second)
+					a.showFieldDisplay(shown, time.Now().Add(15*time.Second))
 					a.status = "字段显示 15 秒"
 				}
 				return nil
@@ -403,8 +594,7 @@ func (a *App) View(c *ui.Context) {
 	now := time.Now()
 	a.checkOTPExposure(now)
 	if !a.displayUntil.IsZero() && !now.Before(a.displayUntil) {
-		a.display = ""
-		a.displayUntil = time.Time{}
+		a.hideDisplay()
 	}
 	if !a.clipboardUntil.IsZero() && !now.Before(a.clipboardUntil) {
 		a.clearClipboard()
@@ -412,7 +602,21 @@ func (a *App) View(c *ui.Context) {
 	if a.session != nil && !a.session.Unlocked() {
 		a.Lock()
 	}
+	// backgroundTick drives the v2 reveal/large-type timers and configurable
+	// idle lock without requiring a render; the legacy idle timer remains for
+	// the unconfigured/default path.
+	a.backgroundTick(now)
+	if a.session != nil && a.idleTimer == nil {
+		a.armIdleTimer()
+	}
 	c.After(time.Second)
+	a.brokerMu.Lock()
+	cliPending := a.cliPending != nil
+	a.brokerMu.Unlock()
+	if cliPending {
+		ui.Column(c.Key(a.generation)).Fill().Padding(24).Gap(16).Children(func() { a.cliApprovalView(c) })
+		return
+	}
 	ui.Column(c.Key(a.generation)).Fill().Padding(24).Gap(16).Children(func() {
 		ui.Row(c).Gap(12).Children(func() {
 			ui.Text(c, "LOCKLARK").FontSize(24).Bold()
@@ -432,6 +636,8 @@ func (a *App) View(c *ui.Context) {
 			a.browserView(c)
 		} else if a.quick.open {
 			a.quickSearchView(c)
+		} else if a.v2Mode && a.page == "vault" {
+			a.v2View(c)
 		} else {
 			a.vaultView(c)
 		}
@@ -474,7 +680,7 @@ func (a *App) lockView(c *ui.Context) {
 		}
 		ui.TextInput(c, &a.secret).Label("Secret Key").Placeholder("LL1-…（创建时重新输入已保存密钥）").Password().Disabled(a.busy)
 		if a.create {
-			ui.PrimaryButton(c, "确认密钥已离线保存并创建").Disabled(a.busy || a.issued == "").OnClick(a.createVault)
+			ui.PrimaryButton(c, "确认密钥已离线保存并创建").Disabled(a.busy || a.issued == "").OnClick(a.createVaultFile)
 		} else {
 			ui.PrimaryButton(c, "解锁").Disabled(a.busy).OnClick(a.unlock)
 			ui.Button(c, "使用"+osunlock.Label()+"解锁").Disabled(a.busy || a.path == "").OnClick(a.systemUnlock)
@@ -528,7 +734,10 @@ func (a *App) itemsView(c *ui.Context) {
 		return
 	}
 	ui.Row(c).Gap(8).Children(func() {
-		ui.TextInput(c, &a.query).Label("搜索标题").Placeholder("搜索标题").Grow(1)
+		input := ui.TextInput(c, &a.query).Label("搜索标题").Placeholder("搜索标题").Grow(1)
+		if input.Changed() {
+			a.queryGeneration++
+		}
 		ui.Button(c, "搜索 / 刷新").Disabled(a.busy).OnClick(a.refresh)
 		ui.Button(c, "新建登录").Disabled(a.busy).OnClick(func() {
 			a.clearNotesEditor()
@@ -537,12 +746,14 @@ func (a *App) itemsView(c *ui.Context) {
 			a.regenerate = nil
 			a.value = ""
 			a.username = ""
+			a.title = ""
+			a.website = ""
 		})
 	})
 	ui.Row(c).Gap(8).Children(func() {
 		for _, scope := range []struct{ id, label string }{{"active", "活动"}, {"archived", "归档"}, {"trashed", "回收站"}, {"all", "全部"}} {
 			scope := scope
-			ui.Button(c, scope.label).Disabled(a.busy).OnClick(func() { a.scope = scope.id; a.refresh() })
+			ui.Button(c, scope.label).Disabled(a.busy).OnClick(func() { a.scope = scope.id; a.queryGeneration++; a.refresh() })
 		}
 	})
 	ui.Row(c).Gap(24).Grow(1).Children(func() {
@@ -600,7 +811,7 @@ func (a *App) itemsView(c *ui.Context) {
 				})
 				if a.display != "" {
 					ui.Column(c).Role(ui.RoleGroup).Label("已授权显示的字段").Children(func() { ui.Text(c, a.display) })
-					ui.Button(c, "立即隐藏").OnClick(func() { a.exposureGeneration++; a.display = ""; a.displayUntil = time.Time{} })
+					ui.Button(c, "立即隐藏").OnClick(func() { a.exposureGeneration++; a.hideDisplay() })
 				}
 				ui.Text(c, "更新一个字段（原值不预填）：")
 				ui.Row(c).Gap(6).Children(func() {
@@ -692,6 +903,10 @@ func (a *App) transferView(c *ui.Context) {
 }
 func Run() error {
 	a := New()
+	if e := a.LoadSettings(); e != nil {
+		a.status = "安全设置文件无法读取；已使用默认值"
+	}
+	a.startBackgroundLoop()
 	mygo.App.SetName("Locklark")
 	mygo.App.WhenReady(func() {
 		a.win = mygo.NewWindow(mygo.WindowOptions{Title: "Locklark · 本地金库", Width: 1100, Height: 820, MinWidth: 900, MinHeight: 680, Content: ui.View(a.View)})
@@ -702,6 +917,7 @@ func Run() error {
 		mygo.Power.OnSuspend(a.Lock)
 		mygo.Power.OnLockScreen(a.Lock)
 		mygo.App.OnQuit(a.Lock)
+		a.startBrowserBroker()
 		a.registerQuickSearch(mygo.GlobalShortcut.Register)
 		icon := image.NewNRGBA(image.Rect(0, 0, 32, 32))
 		for y := 4; y < 28; y++ {
@@ -714,7 +930,9 @@ func Run() error {
 		_, _ = mygo.NewTray(mygo.TrayOptions{ID: "locklark", Icon: pngIcon.Bytes(), ToolTip: "Locklark", Menu: mygo.NewMenu([]*mygo.MenuItem{{Label: "打开金库", Click: func(*mygo.MenuItem, *mygo.Window) { a.win.Show(); a.win.Focus() }}, {Label: "快捷搜索", Click: func(*mygo.MenuItem, *mygo.Window) { a.showQuickSearch() }}, {Label: "立即锁定", Click: func(*mygo.MenuItem, *mygo.Window) { a.Lock(); a.win.Invalidate() }}, {Label: "退出", Click: func(*mygo.MenuItem, *mygo.Window) { a.Lock(); mygo.App.Quit() }}})})
 	})
 	err := mygo.App.Run()
+	a.stopBackgroundLoop()
 	a.Lock()
+	a.stopBrowserBroker()
 	if !a.waitSSHShutdown(5*time.Second) && err == nil {
 		return sshagent.ErrUnavailable
 	}
@@ -737,10 +955,13 @@ func (a *App) systemUnlock() {
 		}
 		return outcome{drop: s.Lock, apply: func() {
 			a.session = s
+			a.armIdleTimer()
 			a.rows = loginProjection(rows)
 			a.scope = "active"
 			a.page = "vault"
 			a.status = "已通过系统解锁"
+			a.startBrowserBroker()
+			a.notifyBrowserBrokerUnlocked()
 		}}
 	})
 }

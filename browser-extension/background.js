@@ -8,29 +8,80 @@ if (typeof importScripts === "function") importScripts("core.js");
     fillUnknown = false,
     pendingPasskey = null,
     passkeyUnknown = false,
-    autoLogin = false,
+    settings = core.normalizeSettings({}),
+    autoLogin = true,
     offerSavePasskeys = true,
     offerUsePasskeys = true,
+    offerSaveLogins = true,
+    neverSaveOrigins = [],
     loginOverrides = {},
-    lastMatchAt = 0;
-  const settingsReady =
-    api.storage?.local
-      .get([
-        "autoLogin",
-        "loginOverrides",
-        "offerSavePasskeys",
-        "offerUsePasskeys",
-      ])
-      .then((value) => {
-        autoLogin = value.autoLogin !== false;
-        offerSavePasskeys = value.offerSavePasskeys !== false;
-        offerUsePasskeys = value.offerUsePasskeys !== false;
-        loginOverrides =
-          value.loginOverrides && typeof value.loginOverrides === "object"
-            ? value.loginOverrides
-            : {};
-      })
-      .catch(() => {}) || Promise.resolve();
+    watchtowerHIBP = false,
+    generatorDefaults = {
+      mode: "random",
+      length: 24,
+      digits: true,
+      symbols: true,
+      wordCount: 4,
+      separator: "hyphens",
+      capitalize: true,
+      pinLength: 6,
+    },
+    lastMatchAt = 0,
+    matchCategory = "login",
+    vaultItems = [],
+    detailCache = new Map(),
+    pendingOpenAndFill = null,
+    openAndFillTimer = null,
+    hostCapabilities = [];
+  const STAGED_TTL = 5 * 60 * 1000,
+    LAST_FILLED_TTL = 60 * 1000,
+    HISTORY_LIMIT = 20,
+    MULTI_STEP_TTL = 120000;
+  const stagedSaves = new Map(),
+    lastFilledCredentials = new Map(),
+    generatedHistory = [],
+    multiStepSessions = new Map();
+  function applySettings(raw) {
+    settings = core.normalizeSettings(raw);
+    autoLogin = settings.autoLogin;
+    offerSavePasskeys = settings.offerSavePasskeys;
+    offerUsePasskeys = settings.offerUsePasskeys;
+    offerSaveLogins = settings.offerSaveLogins;
+    loginOverrides = settings.loginOverrides;
+    watchtowerHIBP = settings.watchtowerHIBP;
+    neverSaveOrigins = [...settings.neverSaveOrigins];
+    generatorDefaults = sanitizeGeneratorDefaults({
+      ...settings.generatorDefaults,
+      wordCount: generatorDefaults.wordCount,
+      separator: generatorDefaults.separator,
+      capitalize: generatorDefaults.capitalize,
+      pinLength: generatorDefaults.pinLength,
+    });
+    return settings;
+  }
+  const settingsReady = (async () => {
+    try {
+      applySettings(await api.storage?.local?.get?.(null));
+    } catch {
+      // A failed preference read must fail closed for automatic submission.
+      autoLogin = false;
+    }
+  })();
+  // The options page writes storage directly (it is not a popup sender), so
+  // refresh the worker's in-memory copy when settings change there.
+  try {
+    api.storage?.onChanged?.addListener((changes, area) => {
+      if (area !== "local" || !changes || typeof changes !== "object") return;
+      const patch = {};
+      for (const [key, change] of Object.entries(changes))
+        if (change && typeof change === "object" && "newValue" in change)
+          patch[key] = change.newValue;
+      if (!Object.keys(patch).length) return;
+      applySettings({ ...settings, ...patch });
+      updateBadge();
+      rebuildContextMenus();
+    });
+  } catch {}
   const PASSKEY_UNKNOWN = "Passkey 创建结果未确认，请检查金库和网站后再试";
   const FILL_UNKNOWN = "登录填充结果未确认，请核实页面；不会自动重试";
   let port = null,
@@ -43,7 +94,10 @@ if (typeof importScripts === "function") importScripts("core.js");
     otpCancellation = null,
     otpUnknown = false,
     epoch = 0,
-    unconfirmedSave = false;
+    unconfirmedSave = false,
+    watchtowerReport = null;
+  // Per-tab ephemeral login continuation state. Metadata only, never field
+  // values, and never persisted outside the service worker.
   const OTP_UNKNOWN = "验证码填充结果未确认，请核实页面";
   const SAVE_UNKNOWN = "结果未确认，请在金库核实，勿重复保存";
   const calls = new Map(),
@@ -83,6 +137,426 @@ if (typeof importScripts === "function") importScripts("core.js");
       .map((b) => b.toString(16).padStart(2, "0"))
       .join("");
   }
+  function sanitizeOrigins(value) {
+    if (!Array.isArray(value)) return [];
+    const out = [];
+    for (const origin of value.slice(0, 256)) {
+      try {
+        if (typeof origin === "string" && core.originFromURL(origin) === origin)
+          if (!out.includes(origin)) out.push(origin);
+      } catch {}
+    }
+    return out;
+  }
+  function sanitizeGeneratorDefaults(value) {
+    const source = value && typeof value === "object" ? value : {};
+    return {
+      mode: ["random", "memorable", "pin"].includes(source.mode)
+        ? source.mode
+        : "random",
+      length: Number.isSafeInteger(source.length) ? source.length : 24,
+      digits: source.digits !== false,
+      symbols: source.symbols !== false,
+      wordCount: Number.isSafeInteger(source.wordCount) ? source.wordCount : 4,
+      separator: typeof source.separator === "string" ? source.separator : "hyphens",
+      capitalize: source.capitalize !== false,
+      pinLength: Number.isSafeInteger(source.pinLength) ? source.pinLength : 6,
+    };
+  }
+  function validCredentialText(value, allowEmpty = false) {
+    return (
+      typeof value === "string" &&
+      (allowEmpty || value.length > 0) &&
+      value.length <= 16384 &&
+      value.isWellFormed()
+    );
+  }
+  function zeroStaged(record) {
+    if (!record) return;
+    if (record.timer) clearTimeout(record.timer);
+    record.timer = null;
+    record.password = "";
+  }
+  function removeStaged(stageId) {
+    const record = stagedSaves.get(stageId);
+    if (!record) return null;
+    zeroStaged(record);
+    stagedSaves.delete(stageId);
+    return record;
+  }
+  function clearStaged() {
+    for (const record of stagedSaves.values()) zeroStaged(record);
+    stagedSaves.clear();
+  }
+  function clearGeneratedHistory() {
+    for (const entry of generatedHistory) entry.password = "";
+    generatedHistory.length = 0;
+  }
+  function clearLastFilled() {
+    for (const entry of lastFilledCredentials.values()) entry.password = "";
+    lastFilledCredentials.clear();
+  }
+  function clearPrivateSessions() {
+    clearStaged();
+    clearGeneratedHistory();
+    clearLastFilled();
+  }
+  function pruneStaged() {
+    const now = Date.now();
+    for (const [stageId, record] of stagedSaves)
+      if (!(now < record.expiresAt)) removeStaged(stageId);
+    for (const [tabId, entry] of lastFilledCredentials)
+      if (!(now < entry.expiresAt)) {
+        entry.password = "";
+        lastFilledCredentials.delete(tabId);
+      }
+  }
+  function stagedForTab(tabId, origin) {
+    pruneStaged();
+    for (const record of stagedSaves.values())
+      if (
+        record.tabId === tabId &&
+        record.origin === origin &&
+        (record.mode === "new" || record.mode === "update")
+      )
+        return record;
+    return null;
+  }
+  function serializeStaged(record) {
+    if (!record) return null;
+    return {
+      stageId: record.stageId,
+      origin: record.origin,
+      username: record.username,
+      title: record.title,
+      mode: record.mode,
+      existingItemId: record.existingItemId,
+      existingRevision: record.existingRevision,
+      expiresAt: record.expiresAt,
+      connected: !!capability,
+      candidates: rows
+        .filter((row) => row.state === "active")
+        .map((row) => ({ id: row.id, revision: row.revision, title: row.title })),
+    };
+  }
+  function armStagedTimer(record) {
+    record.timer = setTimeout(() => {
+      if (stagedSaves.get(record.stageId) === record) removeStaged(record.stageId);
+    }, Math.max(1, record.expiresAt - Date.now()));
+  }
+  function clearPendingOpenAndFill() {
+    pendingOpenAndFill = null;
+    if (openAndFillTimer) clearTimeout(openAndFillTimer);
+    openAndFillTimer = null;
+  }
+  function publicItem(item) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+    if (
+      !/^[a-f0-9]{32}$/.test(item.id || "") ||
+      !/^[a-f0-9]{64}$/.test(item.revision || "") ||
+      typeof item.title !== "string" ||
+      item.title.length > 1024
+    )
+      return null;
+    const category = core.normalizeCategory(item.category) || "login";
+    const urlObjects = [];
+    for (const entry of Array.isArray(item.urls) ? item.urls.slice(0, 20) : []) {
+      const raw = typeof entry === "string" ? entry : entry?.url;
+      if (typeof raw !== "string" || !raw || raw.length > 8192) continue;
+      if (!urlObjects.some((url) => url.url === raw)) urlObjects.push({ url: raw });
+    }
+    const urls = urlObjects.map((url) => url.url);
+    const tags = Array.isArray(item.tags)
+      ? item.tags
+          .slice(0, 50)
+          .filter((tag) => typeof tag === "string" && tag.length <= 128)
+      : [];
+    return {
+      id: item.id,
+      revision: item.revision,
+      category,
+      title: item.title,
+      subtitle:
+        typeof item.subtitle === "string"
+          ? item.subtitle.slice(0, 1024)
+          : typeof item.username === "string"
+            ? item.username.slice(0, 1024)
+            : "",
+      urls,
+      url_objects: urlObjects,
+      primary_url:
+        typeof item.primary_url === "string"
+          ? item.primary_url.slice(0, 8192)
+          : urls[0] || "",
+      tags,
+      favorite: item.favorite === true,
+      state: ["active", "archived", "trashed"].includes(item.state)
+        ? item.state
+        : "active",
+      has_otp: item.has_otp === true,
+      updated_at:
+        typeof item.updated_at === "string"
+          ? item.updated_at.slice(0, 64)
+          : "",
+    };
+  }
+  function boundedString(value, length = 16384) {
+    return typeof value === "string" ? value.slice(0, length) : "";
+  }
+  function publicDetail(item) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+    const meta = publicItem(item);
+    if (!meta) return null;
+    const fields = [];
+    const seen = new Set();
+    const add = (field) => {
+      if (!field || typeof field !== "object" || !field.id || seen.has(field.id)) return;
+      seen.add(field.id);
+      fields.push(field);
+    };
+    for (const field of core.flattenItemFields({ ...item, sections: [] }).slice(0, 200)) add(field);
+    const detail = { ...meta, notes: "", username: "", fields, sections: [], identity: null, credit_card: null };
+    detail.username = boundedString(item.username);
+    if (detail.username)
+      add({ id: "username", label: "用户名", type: "text", value: detail.username, concealed: false });
+    if (item.has_password === true || typeof item.password === "string" && item.password)
+      add({
+        id: "password",
+        label: "密码",
+        type: "concealed",
+        value: typeof item.password === "string" ? item.password : "",
+        concealed: true,
+        has_value: true,
+        revealable: true,
+      });
+    if (item.has_notes === true || typeof item.notes === "string" && item.notes) {
+      detail.notes = typeof item.notes === "string" ? boundedString(item.notes, 65536) : "";
+      add({
+        id: "notes",
+        label: "备注",
+        type: "concealed",
+        value: detail.notes,
+        concealed: true,
+        has_value: true,
+        revealable: true,
+      });
+    }
+    if (item.has_otp === true || item.otp_code || typeof item.otp_secret === "string" && item.otp_secret)
+      add({
+        id: "otp",
+        label: "一次性验证码",
+        type: "totp",
+        value: /^(?:[0-9]{6}|[0-9]{8})$/.test(item.otp_code || "") ? item.otp_code : "",
+        concealed: false,
+        has_value: true,
+        revealable: true,
+      });
+    if (item.credit_card && typeof item.credit_card === "object") {
+      const card = item.credit_card;
+      detail.credit_card = card;
+      if (card.cardholder_name) detail.cardholder = boundedString(card.cardholder_name, 256);
+      if (card.type) detail.brand = boundedString(card.type, 64);
+      if (card.expiry_date) detail.expiry = boundedString(card.expiry_date, 32);
+      if (card.masked_number || card.last4)
+        add({
+          id: "cc-number",
+          label: "卡号",
+          type: "concealed",
+          value: boundedString(card.masked_number || ("•••• " + card.last4), 64),
+          concealed: true,
+          has_value: true,
+          revealable: true,
+        });
+      if (card.has_cvv === true)
+        add({ id: "cc-csc", label: "安全码", type: "concealed", value: "", concealed: true, has_value: true, revealable: true });
+      if (card.has_pin === true)
+        add({ id: "cc-pin", label: "PIN", type: "concealed", value: "", concealed: true, has_value: true, revealable: true });
+    }
+    if (item.identity && typeof item.identity === "object") {
+      detail.identity = item.identity;
+      const map = {
+        first_name: "first_name", middle_name: "middle_name", last_name: "last_name",
+        birth_date: "birth_date", company: "company", title: "title", department: "department",
+        job_title: "job_title", email: "email", phone: "phone", address_line1: "address1",
+        address_line2: "address2", city: "city", state: "state", postal_code: "postal_code",
+        country: "country", website: "website",
+      };
+      for (const [key, target] of Object.entries(map)) {
+        if (typeof item.identity[key] !== "string" || !item.identity[key]) continue;
+        detail[target] = boundedString(item.identity[key], 1024);
+        add({ id: "identity:" + key, label: target, type: "text", value: detail[target], concealed: false });
+      }
+    }
+    if (Array.isArray(item.sections))
+      detail.sections = item.sections.slice(0, 20).map((section) => ({
+        id: boundedString(section?.id, 128),
+        title: boundedString(section?.title, 256),
+        fields: (Array.isArray(section?.fields) ? section.fields : []).slice(0, 100).map((field) => {
+          const concealed = field?.concealed === true || core.nativeFieldType(field?.type) === "concealed";
+          const fieldID = "section:" + boundedString(section?.id, 128) + ":" + boundedString(field?.id, 128);
+          add({
+            id: fieldID,
+            label: boundedString(field?.label, 256),
+            type: core.nativeFieldType(field?.type),
+            value: concealed ? "" : boundedString(field?.value),
+            concealed,
+            has_value: concealed && (field?.has_value === true || !!field?.value),
+            revealable: concealed,
+            section_id: boundedString(section?.id, 128),
+            section_title: boundedString(section?.title, 256),
+            purpose: boundedString(field?.purpose, 128),
+          });
+          return {
+            id: boundedString(field?.id, 128),
+            label: boundedString(field?.label, 256),
+            type: core.nativeFieldType(field?.type),
+            value: concealed ? "" : boundedString(field?.value),
+            concealed,
+            has_value: concealed && (field?.has_value === true || !!field?.value),
+            purpose: boundedString(field?.purpose, 128),
+          };
+        }),
+      }));
+    return detail;
+  }
+  function currentSiteFlags() {
+    if (!context?.origin)
+      return { disabledInline: false, neverSave: false };
+    return {
+      disabledInline: settings.disabledInlineMenuOrigins.includes(
+        context.origin,
+      ),
+      neverSave: settings.neverSaveOrigins.includes(context.origin),
+    };
+  }
+  function snapshot() {
+    const site = currentSiteFlags();
+    return {
+      connected: !!capability,
+      locked: !capability,
+      autoLogin,
+      quickFill,
+      loginOverrides,
+      offerSavePasskeys,
+      offerUsePasskeys,
+      showInlineMenu: settings.showInlineMenu,
+      showToolbarBadgeCount: settings.showToolbarBadgeCount,
+      openAndFillAutoSubmit: settings.openAndFillAutoSubmit,
+      disabledInlineMenu: site.disabledInline,
+      neverSave: site.neverSave,
+      clipboardClearSeconds: settings.clipboardClearSeconds,
+      theme: settings.theme,
+      watchtowerHIBP,
+      watchtower: watchtowerReport,
+      status:
+        status +
+        (otpUnknown && !status.includes(OTP_UNKNOWN)
+          ? " · " + OTP_UNKNOWN
+          : "") +
+        (fillUnknown && !status.includes(FILL_UNKNOWN)
+          ? " · " + FILL_UNKNOWN
+          : "") +
+        (passkeyUnknown && !status.includes(PASSKEY_UNKNOWN)
+          ? " · " + PASSKEY_UNKNOWN
+          : ""),
+      candidates: rows.map(candidateView),
+      preferredItemId: multiStepFor(context?.tabId, context?.origin)?.itemId || "",
+      preferredTitle: multiStepFor(context?.tabId, context?.origin)?.title || "",
+      step: multiStepFor(context?.tabId, context?.origin)?.stepCompleted || "",
+      vaultItems: vaultItems.map((item) => ({ ...item })),
+      pending: !!pending || !!pendingOTP || !!pendingPasskey,
+      otpPending: !!pendingOTP,
+      saveBlocked: unconfirmedSave,
+      origin: context?.origin || "",
+    };
+  }
+  function setBadge(text, color, title) {
+    try {
+      api.action?.setBadgeText?.({ text });
+      if (color) api.action?.setBadgeBackgroundColor?.({ color });
+      if (title) api.action?.setTitle?.({ title });
+    } catch {}
+  }
+  function updateBadge() {
+    if (!api.action) return;
+    if (unconfirmedSave || otpUnknown || fillUnknown || passkeyUnknown) {
+      setBadge("!", "#dc2626", "Locklark — 存在未确认操作");
+      return;
+    }
+    if (!capability) {
+      setBadge("L", "#d97706", "Locklark — 已锁定");
+      return;
+    }
+    if (
+      settings.showToolbarBadgeCount !== false &&
+      rows.length > 0 &&
+      context?.origin
+    ) {
+      const count = rows.length > 99 ? "99+" : String(rows.length);
+      setBadge(count, "#0f766e", `Locklark — ${rows.length} 个匹配登录`);
+      return;
+    }
+    setBadge("", "#0f766e", "Locklark — 已解锁");
+  }
+  function validCategory(value) {
+    return ["login", "identity", "credit_card"].includes(value);
+  }
+  function rowCategory(row) {
+    return row?.category || "login";
+  }
+  function wipeMap(value) {
+    if (value && typeof value === "object")
+      for (const key of Object.keys(value)) value[key] = "";
+  }
+  function multiStepFor(tabId, origin) {
+    const session = multiStepSessions.get(tabId);
+    if (!session) return null;
+    if (Date.now() >= session.expiresAt) {
+      multiStepSessions.delete(tabId);
+      return null;
+    }
+    if (origin) {
+      try {
+        if (core.siteKey(origin) !== session.siteKey) {
+          multiStepSessions.delete(tabId);
+          return null;
+        }
+      } catch {
+        multiStepSessions.delete(tabId);
+        return null;
+      }
+    }
+    return session;
+  }
+  function rememberStep(c, itemId, revision, title, step) {
+    let site;
+    try {
+      site = core.siteKey(c.origin);
+    } catch {
+      return;
+    }
+    const previous = multiStepFor(c.tabId, c.origin);
+    const stepCompleted =
+      step === "username-only" ? "username" : "password";
+    if (
+      previous &&
+      previous.itemId === itemId &&
+      previous.stepCompleted === "password" &&
+      stepCompleted === "username"
+    )
+      return;
+    multiStepSessions.set(c.tabId, {
+      tabId: c.tabId,
+      windowId: c.windowId,
+      siteKey: site,
+      origin: c.origin,
+      itemId,
+      revision,
+      title,
+      stepCompleted,
+      expiresAt: Date.now() + MULTI_STEP_TTL,
+    });
+  }
   function clear() {
     if (pending?.injectionStarted) fillUnknown = true;
     if (pendingPasskey?.create) passkeyUnknown = true;
@@ -93,8 +567,15 @@ if (typeof importScripts === "function") importScripts("core.js");
     capability = "";
     context = null;
     rows = [];
+    watchtowerReport = null;
     pending = null;
     pendingOTP = null;
+    hostCapabilities = [];
+    vaultItems = [];
+    detailCache.clear();
+    clearPendingOpenAndFill();
+    matchCategory = "login";
+    multiStepSessions.clear();
     advanceEpoch();
     for (const [requestId, c] of calls) {
       retired.add(requestId);
@@ -102,11 +583,14 @@ if (typeof importScripts === "function") importScripts("core.js");
       c.reject(Error("refused"));
     }
     calls.clear();
+    updateBadge();
+    rebuildContextMenus();
   }
-  function disconnect() {
+  function disconnect(preservePrivateSessions = false) {
     const p = port;
     port = null;
     clear();
+    if (!preservePrivateSessions) clearPrivateSessions();
     if (p) p.disconnect();
   }
   function disconnectWithStatus(message) {
@@ -117,6 +601,192 @@ if (typeof importScripts === "function") importScripts("core.js");
         ? message + " · " + OTP_UNKNOWN
         : message;
   }
+  function menuCreate(options) {
+    try {
+      api.contextMenus?.create?.(options);
+    } catch {}
+  }
+  function menuRemoveAll() {
+    try {
+      api.contextMenus?.removeAll?.();
+    } catch {}
+  }
+  function menuItems(category) {
+    return vaultItems
+      .filter((item) => item.category === category)
+      .slice(0, 10);
+  }
+  function rebuildContextMenus() {
+    if (!api.contextMenus || typeof api.contextMenus.create !== "function")
+      return;
+    menuRemoveAll();
+    menuCreate({
+      id: "locklark-root",
+      title: "Locklark",
+      contexts: ["page", "editable"],
+    });
+    if (!capability) {
+      menuCreate({
+        id: "locklark-connect",
+        parentId: "locklark-root",
+        title: "解锁 Locklark…",
+        contexts: ["page", "editable"],
+      });
+      menuCreate({
+        id: "locklark-options",
+        parentId: "locklark-root",
+        title: "扩展设置…",
+        contexts: ["page", "editable"],
+      });
+      return;
+    }
+    for (const [id, title, category] of [
+      ["fill-login", "填充登录", "login"],
+      ["fill-identity", "填充身份信息", "identity"],
+      ["fill-card", "填充银行卡", "card"],
+    ]) {
+      menuCreate({
+        id,
+        parentId: "locklark-root",
+        title,
+        contexts: ["page", "editable"],
+      });
+      const matches =
+        category === "login"
+          ? rows.slice(0, 10).map((row) => ({
+              id: row.id,
+              revision: row.revision,
+              title: row.title,
+            }))
+          : menuItems(category);
+      if (!matches.length)
+        menuCreate({
+          id: id + "-empty",
+          parentId: id,
+          title:
+            category === "login"
+              ? "（当前网站无匹配登录）"
+              : "（暂无可用条目）",
+          enabled: false,
+          contexts: ["page", "editable"],
+        });
+      for (const item of matches)
+        menuCreate({
+          id: `${id}:${item.id}:${item.revision}`,
+          parentId: id,
+          title: (item.title || "（无标题）").slice(0, 64),
+          contexts: ["page", "editable"],
+        });
+    }
+    menuCreate({
+      id: "generate-password",
+      parentId: "locklark-root",
+      title: "生成并填充新密码",
+      contexts: ["editable"],
+    });
+    menuCreate({
+      id: "save-login",
+      parentId: "locklark-root",
+      title: "保存当前页面登录",
+      contexts: ["page", "editable"],
+    });
+    menuCreate({
+      id: "context-separator-1",
+      parentId: "locklark-root",
+      type: "separator",
+      contexts: ["page", "editable"],
+    });
+    menuCreate({
+      id: "locklark-toggle-site-inline",
+      parentId: "locklark-root",
+      title: "在此网站禁用内联菜单",
+      type: "checkbox",
+      checked: currentSiteFlags().disabledInline,
+      contexts: ["page", "editable"],
+    });
+    menuCreate({
+      id: "lock-vault",
+      parentId: "locklark-root",
+      title: "立即锁定 Locklark",
+      contexts: ["all"],
+    });
+    menuCreate({
+      id: "locklark-options",
+      parentId: "locklark-root",
+      title: "扩展设置…",
+      contexts: ["all"],
+    });
+  }
+  function openOptions() {
+    try {
+      const result = api.runtime.openOptionsPage?.();
+      if (result && typeof result.catch === "function") result.catch(() => {});
+    } catch {}
+  }
+  function contextMenuClicked(info) {
+    const id = typeof info?.menuItemId === "string" ? info.menuItemId : "";
+    if (id === "locklark-connect") {
+      void connect();
+      return;
+    }
+    if (id === "locklark-options") {
+      openOptions();
+      return;
+    }
+    if (id === "lock-vault") {
+      void lockVault();
+      return;
+    }
+    if (id === "save-login") {
+      void save();
+      return;
+    }
+    if (id === "generate-password") {
+      void generateAndFill();
+      return;
+    }
+    if (id === "locklark-toggle-site-inline") {
+      void toggleSiteInline();
+      return;
+    }
+    const [kind, itemId, revision] = id.split(":");
+    if (!/^[a-f0-9]{32}$/.test(itemId || "")) return;
+    if (!/^[a-f0-9]{64}$/.test(revision || "")) return;
+    if (kind === "fill-login") {
+      const row = rows.find(
+        (candidate) =>
+          candidate.id === itemId && candidate.revision === revision,
+      );
+      if (row) void fill(itemId, revision);
+      return;
+    }
+    if (kind === "fill-identity") {
+      void fillItemCategory(itemId, revision, "identity");
+      return;
+    }
+    if (kind === "fill-card") {
+      void fillItemCategory(itemId, revision, "card");
+    }
+  }
+  function commandInvoked(command) {
+    if (command === "autofill" || command === "autofill-current-tab") {
+      void autofillActiveTab();
+      return;
+    }
+    if (command === "lock" || command === "lock-vault") lockVault();
+  }
+  try {
+    api.commands?.onCommand?.addListener(commandInvoked);
+  } catch {}
+  try {
+    api.contextMenus?.onClicked?.addListener(contextMenuClicked);
+  } catch {}
+  try {
+    api.runtime.onInstalled?.addListener(() => {
+      rebuildContextMenus();
+      updateBadge();
+    });
+  } catch {}
   function startCall(type, requestId, timeout) {
     let resolve, reject;
     const promise = new Promise((yes, no) => {
@@ -146,10 +816,12 @@ if (typeof importScripts === "function") importScripts("core.js");
     } finally {
       if (Object.hasOwn(fields, "username")) fields.username = "";
       if (Object.hasOwn(fields, "password")) fields.password = "";
+      if (Object.hasOwn(fields, "item_json")) fields.item_json = "";
     }
     return promise;
   }
-  async function capture() {
+  async function capture(frameId = 0) {
+    if (!Number.isSafeInteger(frameId) || frameId < 0) throw Error("refused");
     const tabs = await api.tabs.query({ active: true, currentWindow: true });
     if (
       tabs.length !== 1 ||
@@ -160,7 +832,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     )
       throw Error("refused");
     const tab = tabs[0],
-      origin = core.originFromURL(tab.url);
+      topOrigin = core.originFromURL(tab.url);
     const results = await api.scripting.executeScript({
       target: { tabId: tab.id, frameIds: [0] },
       func: core.probe,
@@ -171,23 +843,77 @@ if (typeof importScripts === "function") importScripts("core.js");
       typeof results[0].documentId !== "string" ||
       !/^[A-Za-z0-9_-]{1,128}$/.test(results[0].documentId) ||
       !results[0].result?.top ||
-      results[0].result.origin !== origin
+      results[0].result.origin !== topOrigin
     )
       throw Error("refused");
+    const topDocumentId = results[0].documentId;
+    let origin = topOrigin,
+      documentId = topDocumentId;
+    if (frameId > 0) {
+      const frames = await api.scripting.executeScript({
+        target: { tabId: tab.id, frameIds: [frameId] },
+        func: core.probe,
+      });
+      if (
+        frames.length !== 1 ||
+        frames[0].frameId !== frameId ||
+        typeof frames[0].documentId !== "string" ||
+        !/^[A-Za-z0-9_-]{1,128}$/.test(frames[0].documentId) ||
+        frames[0].result?.top !== false ||
+        core.originFromURL(frames[0].result?.origin) !== topOrigin
+      )
+        throw Error("refused");
+      origin = core.originFromURL(frames[0].result.origin);
+      documentId = frames[0].documentId;
+    }
     const again = await api.tabs.query({ active: true, currentWindow: true });
     if (
       again.length !== 1 ||
       again[0].id !== tab.id ||
       again[0].windowId !== tab.windowId ||
-      core.originFromURL(again[0].url) !== origin
+      core.originFromURL(again[0].url) !== topOrigin
     )
       throw Error("refused");
     return {
       tabId: tab.id,
       windowId: tab.windowId,
       origin,
-      documentId: results[0].documentId,
+      documentId,
+      frameId,
+      topDocumentId,
+      topOrigin,
     };
+  }
+  async function activeSite() {
+    try {
+      const tabs = await api.tabs.query({ active: true, currentWindow: true });
+      if (!Array.isArray(tabs) || tabs.length !== 1)
+        return { origin: "", unsecured: false };
+      return (
+        core.siteFromURL(tabs[0]?.url) || { origin: "", unsecured: false }
+      );
+    } catch {
+      return { origin: "", unsecured: false };
+    }
+  }
+  function candidateView(row) {
+    const view = {
+      id: row.id,
+      title: row.title,
+      revision: row.revision,
+      category: rowCategory(row),
+      ...(row.subtitle ? { subtitle: row.subtitle } : {}),
+    };
+    if (Array.isArray(row.watchtower_flags))
+      view.watchtower_flags = [...row.watchtower_flags];
+    for (const key of [
+      "strength_score",
+      "strength_category",
+      "reuse_count",
+      "breach_count",
+    ])
+      if (row[key] !== undefined) view[key] = row[key];
+    return view;
   }
   function fields(c) {
     return {
@@ -198,11 +924,74 @@ if (typeof importScripts === "function") importScripts("core.js");
     };
   }
   async function current(expected) {
-    const now = await capture();
+    const now = await capture(expected.frameId || 0);
     if (!core.sameContext(expected, now)) throw Error("refused");
   }
+  async function runWatchtower(message) {
+    await settingsReady;
+    if (!capability) {
+      status = "请先连接原生金库，再运行 Watchtower 安全体检";
+      return;
+    }
+    if (pending || pendingOTP || pendingPasskey) throw Error("refused");
+    const generation = epoch;
+    let c = context;
+    if (!c) {
+      try {
+        c = await capture();
+      } catch {
+        if (generation !== epoch) throw Error("refused");
+        const site = await activeSite();
+        status = site.unsecured
+          ? "当前网页使用不安全的 HTTP 连接，Watchtower 需要 HTTPS 页面；未发送 HIBP 查询"
+          : "无法读取当前网页，请打开 HTTPS 登录页后重试";
+        return;
+      }
+    }
+    if (generation !== epoch) throw Error("refused");
+    await current(c);
+    if (generation !== epoch) throw Error("refused");
+    const includeHibp = watchtowerHIBP === true && message.includeHibp === true;
+    status = includeHibp
+      ? "正在运行本地与 HIBP Watchtower 安全体检"
+      : "正在运行本地 Watchtower 安全体检";
+    const response = await request(
+      "watchtower",
+      { ...fields(c), include_hibp: includeHibp },
+      includeHibp ? 65000 : 35000,
+    );
+    if (generation !== epoch) throw Error("refused");
+    if (!response || !core.validWatchtower(response.watchtower))
+      throw Error("refused");
+    watchtowerReport = response.watchtower;
+    status =
+      includeHibp && watchtowerReport.hibp_error === "unavailable"
+        ? "HIBP 泄露库暂不可用，已显示本地体检结果"
+        : `Watchtower 体检完成 · 安全评分 ${watchtowerReport.overall_score}/100`;
+  }
+  async function openWatchtower(origin) {
+    if (!core.validHTTPSOrigin(origin)) throw Error("refused");
+    const site = await activeSite();
+    let allowed = false;
+    if (site.origin === origin || context?.origin === origin) allowed = true;
+    if (watchtowerReport) {
+      if (watchtowerReport.site?.origin === origin) allowed = true;
+      for (const finding of [
+        ...watchtowerReport.site_findings,
+        ...watchtowerReport.findings,
+      ])
+        if (finding.origin === origin) {
+          allowed = true;
+          break;
+        }
+    }
+    if (!allowed || typeof api.tabs.create !== "function")
+      throw Error("refused");
+    await api.tabs.create({ url: origin });
+    status = "已打开网站，请更新登录密码";
+  }
   async function connect() {
-    disconnect();
+    disconnect(true);
     unconfirmedSave = false;
     retired.clear();
     status = "请在原生窗口解锁并确认连接";
@@ -213,6 +1002,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       port = null;
       const uncertain = unconfirmedSave;
       clear();
+      clearPrivateSessions();
       status = uncertain
         ? "结果未确认，请在金库核实，勿重复保存"
         : "原生连接已断开，请重新连接";
@@ -234,6 +1024,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       if (message?.type === "locked") {
         const uncertain = unconfirmedSave;
         clear();
+        clearPrivateSessions();
         status = uncertain
           ? "原生金库已锁定 · 结果未确认，请在金库核实，勿重复保存"
           : "原生金库已锁定，请重新连接并配对";
@@ -243,10 +1034,31 @@ if (typeof importScripts === "function") importScripts("core.js");
       if (message.type === "unpaired") {
         const uncertain = unconfirmedSave;
         clear();
+        clearPrivateSessions();
         status = uncertain
           ? "结果未确认，请在金库核实，勿重复保存"
           : "扩展连接已到期，请重新连接并配对";
         if (otpUnknown) status += " · " + OTP_UNKNOWN;
+        return;
+      }
+      if (message.type === "unlocked") {
+        // Desktop-shared broker re-unlocked: the host rotated the capability
+        // and invalidated every in-flight request, so mirror that locally.
+        const uncertain = unconfirmedSave;
+        clear();
+        clearPrivateSessions();
+        capability = message.capability;
+        message.capability = "";
+        quickFill = message.quick_fill === true;
+        hostCapabilities = Array.isArray(message.capabilities)
+          ? message.capabilities.slice()
+          : [];
+        status = uncertain
+          ? "桌面已解锁 · 结果未确认，请在金库核实，勿重复保存"
+          : "桌面已解锁，已连接，请读取当前网站候选";
+        if (otpUnknown) status += " · " + OTP_UNKNOWN;
+        updateBadge();
+        rebuildContextMenus();
         return;
       }
       if (!message || message.v !== 1 || typeof message.id !== "string")
@@ -274,11 +1086,26 @@ if (typeof importScripts === "function") importScripts("core.js");
         "save-new": "save-ready",
         "save-update": "save-ready",
         "commit-ready": "saved",
+        "stage-save": "save-staged",
+        "pending-save": "save-pending",
+        "commit-staged-save": "saved",
+        "dismiss-save": "save-dismissed",
+        generate: "generated",
         otp: "otp-ready",
         "otp-ack": "otp-fill",
         "cancel-otp": "cancelled",
         "passkey-create": "passkey-result",
         "passkey-get": "passkey-result",
+        "vault-search": "vault-items",
+        "vault-list": "vault-items",
+        "item-get": "item-detail",
+        "item-reveal-field": "field-value",
+        "item-copy-field": "field-value",
+        "item-save": "saved",
+        "item-state": "saved",
+        generate: "generated",
+        "fill-profile": "profile-fill",
+        watchtower: "watchtower",
       }[call.type];
       if (
         message.type === "unknown" &&
@@ -293,7 +1120,17 @@ if (typeof importScripts === "function") importScripts("core.js");
         call.resolve(message);
         return;
       }
-      if (message.type !== expected) {
+      const accepted =
+        call.type === "fill"
+          ? ["fill", "filled", "filled-identity", "filled-card"]
+          : {
+              "vault-search": ["items", "vault-items"],
+              "vault-list": ["items", "vault-items"],
+              "item-save": ["item-saved", "saved"],
+              "item-state": ["item-saved", "saved"],
+              "fill-profile": ["profile-fill"],
+            }[call.type] || [expected];
+      if (!accepted.includes(message.type)) {
         if ("code" in message) message.code = "";
         call.reject(Error("refused"));
         disconnectWithStatus("原生协议错误，请重新连接");
@@ -308,7 +1145,14 @@ if (typeof importScripts === "function") importScripts("core.js");
       if (!/^[a-f0-9]{32}$/.test(response.capability)) throw Error("refused");
       capability = response.capability;
       quickFill = response.quick_fill === true;
+      hostCapabilities = Array.isArray(response.capabilities)
+        ? response.capabilities.filter(
+            (value) => typeof value === "string" && value.length <= 64,
+          )
+        : [];
       status = "已连接，请读取当前网站候选";
+      updateBadge();
+      rebuildContextMenus();
     } catch {
       if (port === p && generation === epoch) {
         disconnect();
@@ -316,16 +1160,22 @@ if (typeof importScripts === "function") importScripts("core.js");
       }
     }
   }
-  async function match() {
+  async function match(category = "login", frameId = 0) {
+    if (!validCategory(category)) throw Error("refused");
+    if (!Number.isSafeInteger(frameId) || frameId < 0) throw Error("refused");
     if (!capability || pending || pendingOTP || pendingPasskey)
       throw Error("refused");
     rows = [];
     context = null;
+    matchCategory = category;
+    updateBadge();
     const generation = epoch,
-      c = await capture();
+      c = await capture(frameId);
     await current(c);
     if (generation !== epoch) throw Error("refused");
-    const response = await request("match", fields(c));
+    const fieldsToSend = fields(c);
+    if (category !== "login") fieldsToSend.category = category;
+    const response = await request("match", fieldsToSend);
     if (generation !== epoch) throw Error("refused");
     await current(c);
     if (generation !== epoch) throw Error("refused");
@@ -336,45 +1186,111 @@ if (typeof importScripts === "function") importScripts("core.js");
       throw Error("refused");
     const next = response.candidates || [];
     if (
+      !Array.isArray(next) ||
       next.length > 100 ||
-      next.some(
-        (r) =>
-          !r ||
-          !/^[a-f0-9]{32}$/.test(r.id) ||
-          !/^[a-f0-9]{64}$/.test(r.revision) ||
-          typeof r.title !== "string" ||
-          r.title.length > 16384 ||
-          r.state !== "active",
-      )
+      next.some((r) => !core.validCandidate(r))
     )
       throw Error("refused");
     context = c;
-    rows = next;
-    status = `${rows.length} 个当前网站登录`;
+    rows = next.map((row) => ({
+      ...row,
+      category: row.category || category,
+    }));
+    status = `${rows.length} 个当前网站${
+      category === "login" ? "登录" : category === "identity" ? "身份信息" : "信用卡"
+    }`;
+    updateBadge();
+    rebuildContextMenus();
   }
-  async function fill(itemId, revision) {
-    const row = rows.find((r) => r.id === itemId && r.revision === revision),
+  async function fill(itemId, revision, category = "login") {
+    if (!validCategory(category)) throw Error("refused");
+    const row = rows.find(
+        (r) =>
+          r.id === itemId &&
+          r.revision === revision &&
+          (category === "login"
+            ? rowCategory(r) === "login"
+            : rowCategory(r) === category),
+      ),
       c = context,
       generation = epoch;
     if (!capability || pending || pendingOTP || pendingPasskey || !row || !c)
       throw Error("refused");
-    const intent = { itemId, revision, tabId: c.tabId, windowId: c.windowId };
+    const intent = {
+      itemId,
+      revision,
+      category,
+      tabId: c.tabId,
+      windowId: c.windowId,
+    };
     pending = intent;
-    status = quickFill
-      ? "正在填充所选账号"
-      : "请在原生窗口核对来源、条目与修订并批准";
+    status =
+      category === "login"
+        ? quickFill
+          ? "正在填充所选账号"
+          : "请在原生窗口核对来源、条目与修订并批准"
+        : "请在原生窗口批准本次敏感字段填充";
     let response;
     try {
       await bounded(current(c), generation);
       if (generation !== epoch || pending !== intent) throw Error("refused");
-      response = await request("fill", {
-        ...fields(c),
-        item_id: itemId,
-        revision,
-      });
+      const fieldsToSend = { ...fields(c), item_id: itemId, revision };
+      if (category !== "login") fieldsToSend.category = category;
+      response = await request("fill", fieldsToSend);
       if (generation !== epoch) throw Error("refused");
       await bounded(current(c), generation);
       if (generation !== epoch) throw Error("refused");
+      if (category === "identity" || category === "credit_card") {
+        const data =
+          category === "identity" ? response.identity : response.card;
+        if (!data || typeof data !== "object" || Array.isArray(data))
+          throw Error("refused");
+        await bounded(current(c), generation);
+        intent.injectionStarted = true;
+        let results;
+        try {
+          results = await bounded(
+            api.scripting.executeScript({
+              target: {
+                tabId: c.tabId,
+                documentIds: [c.documentId],
+              },
+              func:
+                category === "identity"
+                  ? core.fillIdentityDocument
+                  : core.fillCardDocument,
+              args: [
+                c.origin,
+                data,
+                Date.now() + 1500,
+                (c.frameId || 0) > 0,
+                category,
+              ],
+            }),
+            generation,
+          );
+        } finally {
+          wipeMap(data);
+          if (category === "identity") wipeMap(response.identity);
+          else wipeMap(response.card);
+        }
+        if (
+          results.length !== 1 ||
+          results[0].frameId !== (c.frameId || 0) ||
+          results[0].documentId !== c.documentId ||
+          results[0].result !== true
+        )
+          throw Error("refused");
+        await bounded(current(c), generation);
+        if (generation !== epoch || pending !== intent) throw Error("refused");
+        intent.injectionStarted = false;
+        fillUnknown = false;
+        status =
+          category === "identity"
+            ? "本次已请求填充身份信息；请核实网站结果"
+            : "本次已请求填充信用卡；请核实网站结果";
+        return;
+      }
       if (
         typeof response.username !== "string" ||
         typeof response.password !== "string" ||
@@ -385,33 +1301,74 @@ if (typeof importScripts === "function") importScripts("core.js");
       await settingsReady;
       await bounded(current(c), generation);
       const submit = autoLogin && loginOverrides[itemId] !== false;
-      intent.injectionStarted = true;
-      const results = await bounded(
-        api.scripting.executeScript({
-          target: { tabId: c.tabId, documentIds: [c.documentId] },
-          func: core.fillDocument,
-          args: [
-            c.origin,
-            response.username,
-            response.password,
-            Date.now() + 1500,
-            false,
-            submit,
-          ],
-        }),
+      // Record the exact credential before injection starts. fillDocument may
+      // auto-submit, and its inline-stage-save can arrive while executeScript
+      // is still unresolved; remembering only afterwards leaves a false save
+      // banner that steals the next Passkey click.
+      const previousFill = lastFilledCredentials.get(c.tabId);
+      if (previousFill) previousFill.password = "";
+      const recorded = {
+        origin: c.origin,
+        itemId,
+        revision,
+        username: response.username,
+        password: response.password,
+        documentId: c.documentId,
         generation,
-      );
+        filledAt: Date.now(),
+        expiresAt: Date.now() + LAST_FILLED_TTL,
+      };
+      lastFilledCredentials.set(c.tabId, recorded);
+      const rollback = () => {
+        if (lastFilledCredentials.get(c.tabId) !== recorded) return;
+        recorded.password = "";
+        lastFilledCredentials.delete(c.tabId);
+      };
+      intent.injectionStarted = true;
+      let results;
+      try {
+        results = await bounded(
+          api.scripting.executeScript({
+            target: {
+              tabId: c.tabId,
+              documentIds: [c.documentId],
+            },
+            func: core.fillDocument,
+            args: [
+              c.origin,
+              response.username,
+              response.password,
+              Date.now() + 1500,
+              false,
+              submit,
+              (c.frameId || 0) > 0,
+            ],
+          }),
+          generation,
+        );
+      } catch (error) {
+        rollback();
+        throw error;
+      }
+      const filled = results[0]?.result;
       if (
         results.length !== 1 ||
-        results[0].frameId !== 0 ||
+        results[0].frameId !== (c.frameId || 0) ||
         results[0].documentId !== c.documentId ||
-        results[0].result !== true
-      )
+        !(filled === true || (filled && filled.ok === true))
+      ) {
+        rollback();
         throw Error("refused");
+      }
       await bounded(current(c), generation);
       if (generation !== epoch || pending !== intent) throw Error("refused");
       intent.injectionStarted = false;
       fillUnknown = false;
+      const step =
+        filled && typeof filled === "object" && typeof filled.step === "string"
+          ? filled.step
+          : "combined";
+      rememberStep(c, itemId, revision, row.title, step);
       status = submit
         ? "已请求填充及登录；请核实网站结果"
         : "本次已请求填充；未自动提交";
@@ -424,12 +1381,16 @@ if (typeof importScripts === "function") importScripts("core.js");
       if (response) {
         response.username = "";
         response.password = "";
+        wipeMap(response.identity);
+        wipeMap(response.card);
       }
       if (generation === epoch && pending === intent) {
         pending = null;
         rows = [];
         context = null;
       }
+      updateBadge();
+      rebuildContextMenus();
     }
   }
   function clearCapture(results) {
@@ -611,8 +1572,519 @@ if (typeof importScripts === "function") importScripts("core.js");
         rows = [];
         context = null;
       }
+      updateBadge();
+      rebuildContextMenus();
     }
   }
+  function generatorOptions(params = {}) {
+    const mode = ["random", "memorable", "pin"].includes(params.mode)
+      ? params.mode
+      : "random";
+    if (mode === "memorable") {
+      const length =
+        Number.isSafeInteger(params.length)
+          ? params.length
+          : params.wordCount ?? generatorDefaults.wordCount;
+      return {
+        mode,
+        length,
+        digits: typeof params.digits === "boolean" ? params.digits : false,
+        separator:
+          typeof params.separator === "string"
+            ? params.separator
+            : generatorDefaults.separator,
+        capitalize:
+          typeof params.capitalize === "boolean"
+            ? params.capitalize
+            : generatorDefaults.capitalize,
+      };
+    }
+    if (mode === "pin")
+      return {
+        mode,
+        length: Number.isSafeInteger(params.length)
+          ? params.length
+          : params.pinLength ?? generatorDefaults.pinLength,
+      };
+    return {
+      mode,
+      length: Number.isSafeInteger(params.length)
+        ? params.length
+        : generatorDefaults.length,
+      digits:
+        typeof params.digits === "boolean"
+          ? params.digits
+          : generatorDefaults.digits,
+      symbols:
+        typeof params.symbols === "boolean"
+          ? params.symbols
+          : generatorDefaults.symbols,
+    };
+  }
+  async function generateResult(params) {
+    const options = generatorOptions(params);
+    if (capability && hostCapabilities.includes("generate-v1")) {
+      try {
+        const response = await request("generate", {
+          capability,
+          options: JSON.stringify(options),
+        });
+        if (
+          response.type === "generated" &&
+          typeof response.generated_password === "string"
+        )
+          return {
+            password: response.generated_password,
+            profile: response.profile,
+            historyId: response.history_id || "",
+          };
+      } catch {}
+    }
+    return { ...core.generatePassword(options), historyId: "" };
+  }
+  function recordGenerated(origin, username, generated) {
+    const entry = {
+      id: id(),
+      origin,
+      username: typeof username === "string" ? username : "",
+      password: generated.password,
+      profile: generated.profile,
+      createdAt: Date.now(),
+    };
+    generatedHistory.unshift(entry);
+    while (generatedHistory.length > HISTORY_LIMIT) {
+      const removed = generatedHistory.pop();
+      if (removed) removed.password = "";
+    }
+    return entry.id;
+  }
+  function generatedHistoryView() {
+    return generatedHistory.map((entry) => ({
+      id: entry.id,
+      origin: entry.origin,
+      username: entry.username,
+      password: entry.password,
+      profile: entry.profile,
+      createdAt: entry.createdAt,
+    }));
+  }
+  function addNeverOrigin(origin) {
+    if (neverSaveOrigins.includes(origin)) return;
+    if (neverSaveOrigins.length >= 256) neverSaveOrigins.shift();
+    neverSaveOrigins.push(origin);
+  }
+  async function persistNeverOrigins() {
+    try {
+      await api.storage.local.set({ neverSaveOrigins: [...neverSaveOrigins] });
+    } catch {}
+  }
+  async function stageSave(values, c) {
+    pruneStaged();
+    if (!validCredentialText(values?.password)) return { mode: "never" };
+    const username =
+      typeof values.username === "string" ? values.username.slice(0, 16384) : "";
+    if (!validCredentialText(username, true)) return { mode: "never" };
+    if (!offerSaveLogins || neverSaveOrigins.includes(c.origin))
+      return { mode: "never" };
+    const last = lastFilledCredentials.get(c.tabId);
+    if (
+      last &&
+      Date.now() < last.expiresAt &&
+      last.origin === c.origin &&
+      last.documentId === c.documentId &&
+      last.generation === epoch &&
+      last.username === username &&
+      last.password === values.password &&
+      values.isPasswordChange !== true
+    )
+      return { mode: "unchanged" };
+    // Only one pending save is kept per tab and origin. A new submission replaces
+    // the previous proposal instead of leaking the older password for five minutes.
+    for (const [stageId, record] of stagedSaves)
+      if (record.tabId === c.tabId && record.origin === c.origin)
+        removeStaged(stageId);
+    let mode = values.isPasswordChange === true ? "update" : "new";
+    let matched = null;
+    if (capability) {
+      if (
+        (!context || context.origin !== c.origin || !rows.length) &&
+        !pending &&
+        !pendingOTP &&
+        !pendingPasskey
+      ) {
+        try {
+          await match();
+        } catch {}
+      }
+      if (values.isPasswordChange === true && rows.length >= 1)
+        matched = rows[0];
+      else if (
+        username &&
+        rows.find(
+          (row) =>
+            row.title &&
+            row.title.toLowerCase() === username.toLowerCase(),
+        )
+      )
+        matched =
+          rows.find(
+            (row) =>
+              row.title &&
+              row.title.toLowerCase() === username.toLowerCase(),
+          ) || null;
+      else if (
+        typeof values.itemId === "string" &&
+        rows.some(
+          (row) =>
+            row.id === values.itemId && row.revision === values.revision,
+        )
+      )
+        matched =
+          rows.find((row) => row.id === values.itemId) || null;
+      if (matched) mode = "update";
+    }
+    const title =
+      typeof values.title === "string" && values.title.trim()
+        ? values.title.trim().slice(0, 1024)
+        : new URL(c.origin).hostname;
+    const record = {
+      stageId: id(),
+      tabId: c.tabId,
+      windowId: c.windowId,
+      origin: c.origin,
+      username,
+      password: values.password,
+      title,
+      isNewPassword: values.isNewPassword === true,
+      isPasswordChange: values.isPasswordChange === true,
+      mode,
+      existingItemId: matched?.id || "",
+      existingRevision: matched?.revision || "",
+      createdAt: Date.now(),
+      expiresAt: Date.now() + STAGED_TTL,
+      native: false,
+      timer: null,
+    };
+    if (capability && hostCapabilities.includes("stage-save-v1")) {
+      try {
+        const response = await request("stage-save", {
+          capability,
+          origin: c.origin,
+          tab_id: c.tabId,
+          document_id: c.documentId,
+          window_id: c.windowId,
+          username,
+          password: values.password,
+          mode,
+          title,
+          item_id: record.existingItemId,
+          revision: record.existingRevision,
+        });
+        const staged = response.staged_save;
+        if (staged) {
+          record.stageId = staged.stage_id;
+          record.origin = staged.origin;
+          record.username = staged.username;
+          record.title = staged.title;
+          record.mode = staged.mode;
+          record.existingItemId = staged.existing_item_id || "";
+          record.existingRevision = staged.existing_revision || "";
+          if (Number.isSafeInteger(staged.expires_at))
+            record.expiresAt = Math.min(record.expiresAt, staged.expires_at);
+          record.native = true;
+        }
+      } catch {
+        record.native = false;
+      }
+    }
+    if (record.mode === "unchanged" || record.mode === "never")
+      return { mode: record.mode };
+    stagedSaves.set(record.stageId, record);
+    armStagedTimer(record);
+    return { mode: record.mode, stageId: record.stageId };
+  }
+  async function commitStagedSave(stageId, options, c) {
+    pruneStaged();
+    const record = stagedSaves.get(stageId);
+    if (
+      !record ||
+      record.origin !== c.origin ||
+      !(Date.now() < record.expiresAt) ||
+      record.committing
+    )
+      throw Error("refused");
+    record.committing = true;
+    // connect() advances the epoch, so only capture the generation after a
+    // possible lazy connection. The staged record itself survives the clear.
+    if (!capability) await connect();
+    const generation = epoch;
+    try {
+      await settingsReady;
+      if (!capability || generation !== epoch) throw Error("refused");
+      await current(c);
+      let mode = ["new", "update"].includes(options?.mode)
+        ? options.mode
+        : record.mode;
+      let itemId =
+        typeof options?.itemId === "string"
+          ? options.itemId
+          : record.existingItemId;
+      let revision =
+        typeof options?.revision === "string"
+          ? options.revision
+          : record.existingRevision;
+      if (!context || context.origin !== c.origin || !rows.length) {
+        try {
+          await match();
+        } catch {}
+      }
+      if (mode === "update") {
+        const matchRow = () =>
+          rows.find((row) => row.id === itemId) ||
+          rows.find((row) => row.title === record.title) ||
+          (rows.length === 1 ? rows[0] : null);
+        if (!itemId || !revision || !rows.some((row) => row.id === itemId)) {
+          const found = matchRow();
+          if (found) {
+            itemId = found.id;
+            revision = found.revision;
+          } else mode = "new";
+        }
+      }
+      if (mode === "update" && (!itemId || !revision)) mode = "new";
+      const title =
+        typeof options?.title === "string" && options.title.trim()
+          ? options.title.trim().slice(0, 1024)
+          : record.title;
+      let result;
+      if (hostCapabilities.includes("stage-save-v1")) {
+        result = await request("commit-staged-save", {
+          capability,
+          stage_id: stageId,
+          origin: c.origin,
+          tab_id: c.tabId,
+          document_id: c.documentId,
+          window_id: c.windowId,
+          title,
+          mode,
+          item_id: mode === "update" ? itemId : "",
+          revision: mode === "update" ? revision : "",
+        });
+        if (result.type !== "saved") throw Error("refused");
+      } else {
+        await verifySaveDocument(c, generation);
+        const fieldsToSend = {
+          ...fields(c),
+          window_id: c.windowId,
+          username: record.username,
+          password: record.password,
+        };
+        if (mode === "update") {
+          fieldsToSend.item_id = itemId;
+          fieldsToSend.revision = revision;
+        } else {
+          // A v1 save-update must not carry a title (the native host binds it to
+          // the existing row); save-new may use the user-edited title.
+          fieldsToSend.title = title;
+        }
+        const ready = await request(
+          mode === "update" ? "save-update" : "save-new",
+          fieldsToSend,
+          35000,
+        );
+        if (ready.type !== "save-ready") throw Error("refused");
+        await verifySaveDocument(c, generation);
+        if (generation !== epoch) throw Error("refused");
+        record.commitStarted = true;
+        unconfirmedSave = true;
+        result = await request("commit-ready", {
+          capability,
+          request_id: ready.id,
+          nonce: ready.nonce,
+        });
+        if (result.type === "saved") unconfirmedSave = false;
+        if (result.type !== "saved") throw Error("refused");
+      }
+      removeStaged(stageId);
+      status = "已保存";
+      return { saved: true, mode, title, status };
+    } catch (error) {
+      if (!record.commitStarted || !unconfirmedSave) status = "未保存";
+      throw error;
+    } finally {
+      record.committing = false;
+    }
+  }
+  async function dismissStaged(stageId, neverForOrigin, c, originOverride) {
+    pruneStaged();
+    const record = stageId ? stagedSaves.get(stageId) : null;
+    const origin = record?.origin || originOverride || c?.origin || "";
+    if (neverForOrigin) {
+      try {
+        if (core.originFromURL(origin) === origin) {
+          addNeverOrigin(origin);
+          await persistNeverOrigins();
+        }
+      } catch {}
+    }
+    if (
+      record &&
+      capability &&
+      hostCapabilities.includes("stage-save-v1") &&
+      record.native
+    ) {
+      try {
+        const response = await request("dismiss-save", {
+          capability,
+          stage_id: record.stageId,
+          never_for_origin: neverForOrigin === true,
+        });
+        if (Array.isArray(response.never_origins))
+          neverSaveOrigins = sanitizeOrigins(response.never_origins);
+      } catch {}
+    }
+    if (record) removeStaged(record.stageId);
+    return {
+      dismissed: true,
+      neverSaveOrigins: [...neverSaveOrigins],
+      pendingSave: serializeStaged(stagedForTab(c?.tabId, c?.origin)),
+    };
+  }
+  async function inlineGenerateFill(params, c, generation) {
+    const suppliedPassword =
+      typeof params?.password === "string" &&
+      params.password.length >= 4 &&
+      params.password.length <= 256 &&
+      params.password.isWellFormed()
+        ? params.password
+        : "";
+    let generated;
+    if (suppliedPassword) {
+      let profile = null;
+      if (
+        params.profile &&
+        typeof params.profile === "object" &&
+        !Array.isArray(params.profile) &&
+        ["random", "memorable", "pin"].includes(params.profile.mode) &&
+        Number.isSafeInteger(params.profile.length) &&
+        params.profile.length >= 1 &&
+        params.profile.length <= 256 &&
+        Number.isSafeInteger(params.profile.alphabet_size) &&
+        params.profile.alphabet_size >= 2 &&
+        params.profile.alphabet_size <= 1000000 &&
+        Number.isSafeInteger(params.profile.entropy_bits_floor) &&
+        params.profile.entropy_bits_floor >= 0
+      )
+        profile = {
+          mode: params.profile.mode,
+          length: params.profile.length,
+          alphabet_size: params.profile.alphabet_size,
+          entropy_bits_floor: params.profile.entropy_bits_floor,
+        };
+      if (!profile)
+        profile = core.generatePassword(generatorOptions(params)).profile;
+      generated = {
+        password: suppliedPassword,
+        profile,
+        historyId: "",
+      };
+    } else generated = await generateResult(params);
+    const historyId = recordGenerated(
+      c.origin,
+      typeof params.username === "string" ? params.username : "",
+      generated,
+    );
+    let fill = null;
+    try {
+      const results = await api.scripting.executeScript({
+        target: { tabId: c.tabId, documentIds: [c.documentId] },
+        func: core.fillGeneratedPassword,
+        args: [c.origin, generated.password, Date.now() + 1500],
+      });
+      if (
+        generation === epoch &&
+        results.length === 1 &&
+        results[0].frameId === 0 &&
+        results[0].documentId === c.documentId &&
+        results[0].result?.ok === true
+      )
+        fill = results[0].result;
+    } catch {}
+    const staged = await stageSave(
+      {
+        username: fill?.username || params.username || "",
+        password: generated.password,
+        isNewPassword: true,
+        isPasswordChange: fill?.isPasswordChange === true,
+      },
+      c,
+    );
+    return {
+      password: generated.password,
+      profile: generated.profile,
+      historyId,
+      filledCount: fill?.filledCount || 0,
+      stageId: staged.stageId || "",
+      mode: staged.mode || "",
+    };
+  }
+  async function activeTabInfo() {
+    try {
+      const tabs = await api.tabs.query({ active: true, currentWindow: true });
+      if (tabs.length !== 1) return null;
+      const tab = tabs[0];
+      if (!Number.isSafeInteger(tab.id) || !Number.isSafeInteger(tab.windowId))
+        return null;
+      return {
+        tabId: tab.id,
+        windowId: tab.windowId,
+        origin: core.originFromURL(tab.url),
+      };
+    } catch {
+      return null;
+    }
+  }
+  async function activePendingSave() {
+    const info = await activeTabInfo();
+    return info ? serializeStaged(stagedForTab(info.tabId, info.origin)) : null;
+  }
+  function statePayload(extra = {}) {
+    return {
+      connected: !!capability,
+      autoLogin,
+      quickFill,
+      loginOverrides,
+      offerSavePasskeys,
+      offerUsePasskeys,
+      offerSaveLogins,
+      neverSaveOrigins: [...neverSaveOrigins],
+      generatorDefaults: { ...generatorDefaults },
+      generatedHistory: generatedHistoryView(),
+      watchtowerHIBP,
+      watchtower: watchtowerReport,
+      status:
+        status +
+        (otpUnknown && !status.includes(OTP_UNKNOWN)
+          ? " · " + OTP_UNKNOWN
+          : "") +
+        (fillUnknown && !status.includes(FILL_UNKNOWN)
+          ? " · " + FILL_UNKNOWN
+          : "") +
+        (passkeyUnknown && !status.includes(PASSKEY_UNKNOWN)
+          ? " · " + PASSKEY_UNKNOWN
+          : ""),
+      candidates: rows.map(candidateView),
+      preferredItemId: multiStepFor(context?.tabId, context?.origin)?.itemId || "",
+      preferredTitle: multiStepFor(context?.tabId, context?.origin)?.title || "",
+      step: multiStepFor(context?.tabId, context?.origin)?.stepCompleted || "",
+      pending: !!pending || !!pendingOTP || !!pendingPasskey,
+      otpPending: !!pendingOTP,
+      saveBlocked: unconfirmedSave,
+      origin: context?.origin || "",
+      ...extra,
+    };
+  }
+
   function validOTPProbe(value, c) {
     return (
       value &&
@@ -620,7 +2092,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       !Array.isArray(value) &&
       Object.keys(value).sort().join(",") ===
         "now,origin,timeOrigin,top,wall" &&
-      value.top === true &&
+      value.top === ((c.frameId || 0) === 0) &&
       value.origin === c.origin &&
       Number.isFinite(value.timeOrigin) &&
       value.timeOrigin > 0 &&
@@ -634,16 +2106,19 @@ if (typeof importScripts === "function") importScripts("core.js");
     await bounded(current(c), generation, remaining());
     const results = await bounded(
       api.scripting.executeScript({
-        target: { tabId: c.tabId, documentIds: [c.documentId] },
+        target: {
+          tabId: c.tabId,
+          documentIds: [c.documentId],
+        },
         func: core.otpDocument,
-        args: [c.origin, "probe"],
+        args: [c.origin, "probe", null, null, (c.frameId || 0) > 0],
       }),
       generation,
       remaining(),
     );
     if (
       results.length !== 1 ||
-      results[0].frameId !== 0 ||
+      results[0].frameId !== (c.frameId || 0) ||
       results[0].documentId !== c.documentId ||
       !validOTPProbe(results[0].result, c)
     )
@@ -665,6 +2140,8 @@ if (typeof importScripts === "function") importScripts("core.js");
     status = cancelStatus;
     const ownsCancellationView = () =>
       !pending && !pendingOTP && !context && status === cancellation.status;
+    updateBadge();
+    rebuildContextMenus();
     if (!intent.sent || !capability) return;
     // Host cancellation cannot retract an injection already submitted to the
     // browser, even if its executeScript promise has not settled yet.
@@ -785,14 +2262,23 @@ if (typeof importScripts === "function") importScripts("core.js");
       response = await bounded(reply, generation, remaining());
       if (generation !== epoch || pendingOTP !== intent) throw Error("refused");
       await bounded(current(c), generation, remaining());
-      const args = [c.origin, "fill", response.code, timing];
+      const args = [
+        c.origin,
+        "fill",
+        response.code,
+        timing,
+        (c.frameId || 0) > 0,
+      ];
       response.code = "";
       let injection;
       try {
         remaining();
         intent.injectionStarted = true;
         injection = api.scripting.executeScript({
-          target: { tabId: c.tabId, documentIds: [c.documentId] },
+          target: {
+            tabId: c.tabId,
+            documentIds: [c.documentId],
+          },
           func: core.otpDocument,
           args,
         });
@@ -805,11 +2291,12 @@ if (typeof importScripts === "function") importScripts("core.js");
         generation !== epoch ||
         pendingOTP !== intent ||
         results.length !== 1 ||
-        results[0].frameId !== 0 ||
+        results[0].frameId !== (c.frameId || 0) ||
         results[0].documentId !== c.documentId ||
         results[0].result !== true
       )
         throw Error("refused");
+      multiStepSessions.delete(c.tabId);
       status = "本次已请求填充验证码；未自动提交";
     } catch {
       if (generation === epoch && pendingOTP === intent) {
@@ -830,6 +2317,8 @@ if (typeof importScripts === "function") importScripts("core.js");
         rows = [];
         context = null;
       }
+      updateBadge();
+      rebuildContextMenus();
     }
   }
   function cancelContext() {
@@ -840,6 +2329,8 @@ if (typeof importScripts === "function") importScripts("core.js");
       rows = [];
       context = null;
       if (capability) void request("cancel", { capability }).catch(() => {});
+      updateBadge();
+      rebuildContextMenus();
       return;
     }
     if (pending?.injectionStarted) fillUnknown = true;
@@ -847,7 +2338,11 @@ if (typeof importScripts === "function") importScripts("core.js");
       cancelOTP();
       return;
     }
-    if (!context && !pending) return;
+    if (!context && !pending) {
+      updateBadge();
+      rebuildContextMenus();
+      return;
+    }
     const intent = pending;
     context = null;
     rows = [];
@@ -863,9 +2358,25 @@ if (typeof importScripts === "function") importScripts("core.js");
           ? { capability, request_id: intent.requestId }
           : { capability },
       ).catch(() => {});
+    updateBadge();
+    rebuildContextMenus();
   }
-  api.tabs.onActivated.addListener(cancelContext);
+  api.tabs.onActivated.addListener(() => {
+    cancelContext();
+    updateBadge();
+    rebuildContextMenus();
+  });
   api.tabs.onUpdated.addListener((tabId, change) => {
+    const session = multiStepSessions.get(tabId);
+    if (session && "url" in change) {
+      try {
+        const origin = core.originFromURL(change.url);
+        if (core.siteKey(origin) !== session.siteKey)
+          multiStepSessions.delete(tabId);
+      } catch {
+        multiStepSessions.delete(tabId);
+      }
+    }
     if (
       (context?.tabId === tabId ||
         pending?.tabId === tabId ||
@@ -874,8 +2385,24 @@ if (typeof importScripts === "function") importScripts("core.js");
       ("url" in change || change.status === "loading")
     )
       cancelContext();
+    if ("url" in change || change.status === "complete") {
+      updateBadge();
+      rebuildContextMenus();
+    }
+    void processOpenAndFill(tabId, change);
+  });
+  api.tabs.onRemoved?.addListener((tabId) => {
+    multiStepSessions.delete(tabId);
+    if (
+      context?.tabId === tabId ||
+      pending?.tabId === tabId ||
+      pendingOTP?.tabId === tabId ||
+      pendingPasskey?.tabId === tabId
+    )
+      cancelContext();
   });
   api.windows.onFocusChanged.addListener((windowId) => {
+    updateBadge();
     if (windowId === api.windows.WINDOW_ID_NONE) return;
     const bound =
       pendingPasskey?.windowId ??
@@ -888,11 +2415,554 @@ if (typeof importScripts === "function") importScripts("core.js");
     )
       cancelContext();
   });
+  function lockVault() {
+    const p = port,
+      cap = capability;
+    if (p && cap) {
+      try {
+        p.postMessage({ v: 1, id: id(), type: "lock", capability: cap });
+      } catch {}
+    }
+    disconnectWithStatus("已锁定 Locklark");
+    updateBadge();
+    rebuildContextMenus();
+  }
+  async function setSiteSettings(disabledInline, neverSave) {
+    if (!context?.origin) throw Error("refused");
+    const origin = context.origin;
+    const next = core.normalizeSettings({
+      ...settings,
+      disabledInlineMenuOrigins:
+        typeof disabledInline === "boolean"
+          ? disabledInline
+            ? [...settings.disabledInlineMenuOrigins, origin]
+            : settings.disabledInlineMenuOrigins.filter(
+                (value) => value !== origin,
+              )
+          : settings.disabledInlineMenuOrigins,
+      neverSaveOrigins:
+        typeof neverSave === "boolean"
+          ? neverSave
+            ? [...settings.neverSaveOrigins, origin]
+            : settings.neverSaveOrigins.filter((value) => value !== origin)
+          : settings.neverSaveOrigins,
+    });
+    await api.storage.local.set({
+      disabledInlineMenuOrigins: next.disabledInlineMenuOrigins,
+      neverSaveOrigins: next.neverSaveOrigins,
+    });
+    settings = next;
+    status = "网站设置已更新";
+    updateBadge();
+    rebuildContextMenus();
+  }
+  async function toggleSiteInline() {
+    if (!context?.origin) {
+      status = "请先读取当前网站候选";
+      return;
+    }
+    try {
+      await setSiteSettings(!currentSiteFlags().disabledInline, undefined);
+    } catch {
+      status = "网站设置未保存";
+    }
+  }
+  async function autofillActiveTab() {
+    if (!capability) {
+      status = "请先解锁 Locklark";
+      updateBadge();
+      return;
+    }
+    try {
+      await match();
+      if (rows.length === 0) {
+        status = "当前网站无匹配登录";
+      } else if (rows.length === 1) {
+        await fill(rows[0].id, rows[0].revision);
+      } else {
+        const tabs = await api.tabs.query({
+          active: true,
+          currentWindow: true,
+        });
+        if (tabs.length === 1 && Number.isSafeInteger(tabs[0].id))
+          await api.tabs
+            .sendMessage?.(tabs[0].id, {
+              type: "locklark:open-inline-menu",
+            })
+            .catch(() => {});
+        status = `发现 ${rows.length} 个匹配登录，请在页面中选择`;
+      }
+    } catch {
+      status = "自动填充未完成；请确认原生连接和当前 HTTPS 页面";
+    }
+    updateBadge();
+    rebuildContextMenus();
+  }
+  async function generatePasswordValue(rawOptions) {
+    const options = core.normalizeGeneratorDefaults(rawOptions);
+    if (capability) {
+      try {
+        const response = await request(
+          "generate",
+          { capability, options: JSON.stringify(options) },
+          12000,
+        );
+        return response.password;
+      } catch {}
+    }
+    return core.generatePasswordString(options);
+  }
+  async function generateAndFill() {
+    if (!capability) {
+      status = "请先解锁 Locklark";
+      updateBadge();
+      return;
+    }
+    let password = "";
+    try {
+      const options = settings.generatorDefaults;
+      try {
+        const response = await request(
+          "generate",
+          { capability, options: JSON.stringify(options) },
+          12000,
+        );
+        password = response.password;
+      } catch {
+        password = core.generatePasswordString(options);
+      }
+      const c = await capture();
+      await current(c);
+      const results = await api.scripting.executeScript({
+        target: { tabId: c.tabId, documentIds: [c.documentId] },
+        func: core.fillGeneratedPasswordDocument,
+        args: [c.origin, password, Date.now() + 1500],
+      });
+      if (
+        results.length !== 1 ||
+        results[0].frameId !== 0 ||
+        results[0].documentId !== c.documentId ||
+        results[0].result !== true
+      )
+        throw Error("refused");
+      status = "已生成并填充新密码";
+    } catch {
+      status = "生成密码未完成；请确认当前密码输入框";
+    } finally {
+      password = "";
+      updateBadge();
+    }
+  }
+  async function fillItemCategory(itemId, revision, category) {
+    if (
+      !capability ||
+      !vaultItems.some(
+        (item) => item.id === itemId && item.revision === revision,
+      )
+    ) {
+      status = "条目已变化，请刷新后重试";
+      return;
+    }
+    try {
+      const c = await capture();
+      await current(c);
+      const response = await request(
+        "fill-profile",
+        {
+          ...fields(c),
+          item_id: itemId,
+          revision,
+        },
+        35000,
+      );
+      const fill = response.profile_fill;
+      if (!fill || fill.item_id !== itemId || fill.revision !== revision)
+        throw Error("refused");
+      await current(c);
+      if (api.tabs?.sendMessage)
+        await api.tabs
+          .sendMessage(c.tabId, {
+            type: "locklark:fill-fields",
+            fields: fill.fields,
+          })
+          .catch(() => {});
+      status = "已请求填充所选条目；请核实网站结果";
+    } catch {
+      status = "此原生宿主暂不支持填充该条目类别";
+    }
+    updateBadge();
+  }
+  function candidateItems() {
+    if (!context?.origin) return [];
+    return rows
+      .map((row) =>
+        publicItem({
+          ...row,
+          category: "login",
+          urls: [context.origin],
+          state: "active",
+        }),
+      )
+      .filter(Boolean);
+  }
+  async function vaultSearch(rawQuery, rawCategory) {
+    if (!capability) throw Error("refused");
+    const category = core.validCategory(rawCategory) ? rawCategory : "all";
+    const query =
+      typeof rawQuery === "string" ? rawQuery.slice(0, 500) : "";
+    const canonical = core.normalizeCategory(category);
+    try {
+      const response = await request(
+        "vault-search",
+        {
+          capability,
+          query,
+          category: canonical,
+          favorites_only: category === "favorites",
+        },
+        12000,
+      );
+      const items = [];
+      for (const item of response.items || []) {
+        const publicEntry = publicItem(item);
+        if (publicEntry) items.push(publicEntry);
+      }
+      vaultItems = items.slice(0, 500);
+      status = `金库中有 ${vaultItems.length} 个条目`;
+      return { items: vaultItems, source: "native", fallback: false };
+    } catch {
+      vaultItems = candidateItems();
+      status = vaultItems.length
+        ? "当前原生宿主仅提供当前网站候选"
+        : "当前原生宿主不支持浏览完整金库";
+      return {
+        items: vaultItems,
+        source: "candidates",
+        fallback: true,
+      };
+    }
+  }
+  async function getVaultItem(itemId, revision) {
+    if (
+      !capability ||
+      !/^[a-f0-9]{32}$/.test(itemId || "") ||
+      !/^[a-f0-9]{64}$/.test(revision || "")
+    )
+      throw Error("refused");
+    const key = itemId + ":" + revision;
+    try {
+      const response = await request(
+        "item-get",
+        { capability, item_id: itemId, revision },
+        12000,
+      );
+      const detail = publicDetail(response.item);
+      if (!detail) throw Error("refused");
+      detailCache.set(key, detail);
+      return detail;
+    } catch {
+      const row = rows.find(
+        (candidate) =>
+          candidate.id === itemId && candidate.revision === revision,
+      );
+      if (!row) throw Error("refused");
+      const detail = publicDetail({
+        ...row,
+        category: "login",
+        urls: context?.origin ? [context.origin] : [],
+        state: "active",
+        fields: [],
+      });
+      if (!detail) throw Error("refused");
+      detail.readOnly = true;
+      detail.unavailable = "当前原生宿主不提供条目详情";
+      detailCache.set(key, detail);
+      return detail;
+    }
+  }
+  async function saveVaultItem(message) {
+    if (!capability || !core.validItemForSave(message.item))
+      throw Error("refused");
+    const mode = message.mode === "edit" ? "edit" : "create";
+    if (
+      mode === "edit" &&
+      (!/^[a-f0-9]{32}$/.test(message.id || "") ||
+        !/^[a-f0-9]{64}$/.test(message.revision || ""))
+    )
+      throw Error("refused");
+    let itemJSON;
+    try {
+      const original =
+        mode === "edit"
+          ? detailCache.get(message.id + ":" + message.revision) || null
+          : null;
+      const mutation = core.itemToNativeMutation(message.item, { original });
+      if (!mutation) throw Error("refused");
+      itemJSON = JSON.stringify(mutation);
+    } catch {
+      throw Error("refused");
+    }
+    if (
+      typeof itemJSON !== "string" ||
+      new TextEncoder().encode(itemJSON).length > 65536
+    )
+      throw Error("refused");
+    let response;
+    try {
+      response = await request(
+        "item-save",
+        {
+          capability,
+          ...(mode === "edit"
+            ? { item_id: message.id, revision: message.revision }
+            : {}),
+          item_json: itemJSON,
+        },
+        20000,
+      );
+    } catch {
+      const error = Error("refused");
+      error.keepStatus = true;
+      status = "当前原生宿主不支持在扩展中保存条目";
+      throw error;
+    } finally {
+      itemJSON = "";
+    }
+    if (
+      !/^[a-f0-9]{32}$/.test(response.item_id || "") ||
+      !/^[a-f0-9]{64}$/.test(response.revision || "")
+    )
+      throw Error("refused");
+    status = "已保存";
+    vaultItems = [];
+    detailCache.clear();
+    updateBadge();
+    rebuildContextMenus();
+    return { item_id: response.item_id, revision: response.revision };
+  }
+  async function setItemState(message) {
+    if (
+      !capability ||
+      !/^[a-f0-9]{32}$/.test(message.id || "") ||
+      !/^[a-f0-9]{64}$/.test(message.revision || "")
+    )
+      throw Error("refused");
+    const state = ["active", "archived", "trashed"].includes(message.state)
+      ? message.state
+      : undefined;
+    const favorite =
+      typeof message.favorite === "boolean" ? message.favorite : undefined;
+    if (!state && favorite === undefined) throw Error("refused");
+    const known =
+      vaultItems.find((item) => item.id === message.id)?.state ||
+      detailCache.get(message.id + ":" + message.revision)?.state ||
+      "active";
+    const actions = [];
+    if (state && state !== known) {
+      if (state === "archived") actions.push("archive");
+      else if (state === "trashed") actions.push("trash");
+      else if (known === "archived") actions.push("unarchive");
+      else if (known === "trashed") actions.push("untrash");
+    }
+    if (favorite !== undefined)
+      actions.push(favorite ? "favorite" : "unfavorite");
+    if (!actions.length) throw Error("refused");
+    let response = { revision: message.revision };
+    try {
+      for (const action of actions) {
+        response = await request(
+          "item-state",
+          {
+            capability,
+            item_id: message.id,
+            revision: response.revision,
+            state_action: action,
+          },
+          15000,
+        );
+        if (!["item-saved", "saved"].includes(response.type))
+          throw Error("refused");
+      }
+    } catch {
+      const error = Error("refused");
+      error.keepStatus = true;
+      status = "当前原生宿主不支持修改条目状态";
+      throw error;
+    }
+    status = state === "trashed" ? "条目已移至废纸篓" : "条目已更新";
+    vaultItems = vaultItems.map((item) =>
+      item.id === message.id
+        ? {
+            ...item,
+            revision: response.revision,
+            ...(state ? { state } : {}),
+            ...(favorite === undefined ? {} : { favorite }),
+          }
+        : item,
+    );
+    const cached = detailCache.get(message.id + ":" + message.revision);
+    if (cached)
+      detailCache.set(message.id + ":" + response.revision, {
+        ...cached,
+        revision: response.revision,
+        ...(state ? { state } : {}),
+        ...(favorite === undefined ? {} : { favorite }),
+      });
+    updateBadge();
+    rebuildContextMenus();
+    return { revision: response.revision };
+  }
+  async function fieldValue(message, copy) {
+    if (
+      !capability ||
+      !/^[a-f0-9]{32}$/.test(message.id || "") ||
+      !/^[a-f0-9]{64}$/.test(message.revision || "")
+    )
+      throw Error("refused");
+    const field = message.field || message.field_id;
+    if (
+      typeof field !== "string" ||
+      !/^(?:username|password|notes|url|otp|cc-number|cc-csc|cc-pin|section:[A-Za-z0-9_.-]{1,128}:[A-Za-z0-9_.-]{1,128})$/.test(field)
+    )
+      throw Error("refused");
+    const detail =
+      detailCache.get(message.id + ":" + message.revision) ||
+      (await getVaultItem(message.id, message.revision));
+    if (!core.flattenItemFields(detail).some((entry) => entry.id === field))
+      throw Error("refused");
+    const response = await request(
+      copy ? "item-copy-field" : "item-reveal-field",
+      {
+        capability,
+        item_id: message.id,
+        revision: message.revision,
+        field,
+        action: copy ? "copy" : "reveal",
+      },
+      12000,
+    );
+    if (!core.validResponse(response) || response.type !== "field-value")
+      throw Error("refused");
+    const hostExpires = Number.isSafeInteger(response.expires_in_seconds)
+      ? Math.max(0, response.expires_in_seconds)
+      : 0;
+    // Non-OTP reveal has no host window. Use a bounded local 30s window,
+    // while OTP must never outlive the host-provided TOTP window.
+    const expires = copy
+      ? hostExpires > 0
+        ? Math.min(30, hostExpires)
+        : 30
+      : response.field === "otp"
+        ? hostExpires
+        : hostExpires > 0
+          ? Math.min(30, hostExpires)
+          : 30;
+    return {
+      field: response.field,
+      value: response.value,
+      revision: response.revision,
+      expires_in_seconds: expires,
+      copied: response.copied,
+      clearAfterSeconds: expires,
+    };
+  }
+  async function copyFieldValue(message) {
+    return fieldValue(message, true);
+  }
+  async function openAndFill(message) {
+    if (
+      !capability ||
+      !/^[a-f0-9]{32}$/.test(message.id || "") ||
+      !/^[a-f0-9]{64}$/.test(message.revision || "")
+    )
+      throw Error("refused");
+    const target = message.url;
+    const expectedOrigin = core.originFromURL(target);
+    let urls = Array.isArray(message.urls)
+      ? message.urls
+          .slice(0, 20)
+          .filter((url) => typeof url === "string")
+      : [];
+    if (!urls.length) {
+      const detail = await getVaultItem(message.id, message.revision);
+      urls = detail.urls;
+    }
+    if (!core.itemURLAllowed({ urls }, target)) throw Error("refused");
+    if (typeof api.tabs?.create !== "function") throw Error("refused");
+    const created = await api.tabs.create({ url: target, active: true });
+    if (!created || !Number.isSafeInteger(created.id) || created.id < 1)
+      throw Error("refused");
+    clearPendingOpenAndFill();
+    pendingOpenAndFill = {
+      tabId: created.id,
+      expectedOrigin,
+      itemId: message.id,
+      revision: message.revision,
+      expiresAt: Date.now() + 15000,
+    };
+    openAndFillTimer = setTimeout(() => {
+      if (!pendingOpenAndFill) return;
+      pendingOpenAndFill = null;
+      openAndFillTimer = null;
+      status = "打开并填充已超时；未执行填充";
+      updateBadge();
+    }, 15000);
+    status = "已打开页面，等待加载后填充";
+    return { tabId: created.id, origin: expectedOrigin };
+  }
+  async function processOpenAndFill(tabId, change) {
+    const pendingFill = pendingOpenAndFill;
+    if (!pendingFill || pendingFill.tabId !== tabId) return;
+    if (typeof change?.url === "string") {
+      let changedOrigin = "";
+      try {
+        changedOrigin = core.originFromURL(change.url);
+      } catch {}
+      if (changedOrigin && changedOrigin !== pendingFill.expectedOrigin) {
+        clearPendingOpenAndFill();
+        status = "打开并填充已取消：页面跳转到其他来源";
+        updateBadge();
+        return;
+      }
+    }
+    if (change?.status !== "complete") return;
+    if (Date.now() > pendingFill.expiresAt) {
+      clearPendingOpenAndFill();
+      status = "打开并填充已超时；未执行填充";
+      updateBadge();
+      return;
+    }
+    clearPendingOpenAndFill();
+    try {
+      const tabs = await api.tabs.query({
+        active: true,
+        currentWindow: true,
+      });
+      if (
+        tabs.length !== 1 ||
+        tabs[0].id !== tabId ||
+        core.originFromURL(tabs[0].url) !== pendingFill.expectedOrigin
+      )
+        throw Error("refused");
+      await match();
+      const row = rows.find(
+        (candidate) =>
+          candidate.id === pendingFill.itemId &&
+          candidate.revision === pendingFill.revision,
+      );
+      if (!row) throw Error("refused");
+      await fill(row.id, row.revision);
+    } catch {
+      status = "打开并填充未完成；请重新读取当前网站候选";
+      updateBadge();
+    }
+  }
   function contentSender(sender) {
     try {
       return (
         sender?.id === api.runtime.id &&
-        sender.frameId === 0 &&
+        Number.isSafeInteger(sender.frameId) &&
+        sender.frameId >= 0 &&
         Number.isSafeInteger(sender.tab?.id) &&
         typeof sender.documentId === "string" &&
         sender.documentId.length > 0 &&
@@ -903,10 +2973,11 @@ if (typeof importScripts === "function") importScripts("core.js");
     }
   }
   async function contentContext(sender) {
-    const c = await capture();
+    const c = await capture(sender.frameId);
     if (
       c.tabId !== sender.tab.id ||
       c.windowId !== sender.tab.windowId ||
+      c.frameId !== sender.frameId ||
       c.documentId !== sender.documentId ||
       c.origin !== core.originFromURL(sender.url)
     )
@@ -928,42 +2999,160 @@ if (typeof importScripts === "function") importScripts("core.js");
     const c = await contentContext(sender);
     await settingsReady;
     if (message.type === "inline-state")
-      return { connected: !!capability, offerSavePasskeys, offerUsePasskeys };
+      return {
+        connected: !!capability,
+        offerSavePasskeys,
+        offerUsePasskeys,
+        offerSaveLogins,
+        neverSaveForOrigin: neverSaveOrigins.includes(c.origin),
+        suppressInline: neverSaveOrigins.includes(c.origin),
+        generatorDefaults: { ...generatorDefaults },
+      };
     if (message.type === "inline-connect") {
       if (!capability) await connect();
       await current(c);
       return { connected: !!capability };
     }
+    if (message.type === "inline-pending-save")
+      return { pendingSave: serializeStaged(stagedForTab(c.tabId, c.origin)) };
+    if (message.type === "inline-stage-save") {
+      if (
+        !validCredentialText(message.password) ||
+        (message.username !== undefined &&
+          !validCredentialText(message.username, true))
+      )
+        throw Error("refused");
+      const staged = await stageSave(
+        {
+          username: message.username || "",
+          password: message.password,
+          isNewPassword: message.isNewPassword === true,
+          isPasswordChange: message.isPasswordChange === true,
+          title: message.title,
+          itemId: message.itemId,
+          revision: message.revision,
+        },
+        c,
+      );
+      return {
+        ...staged,
+        pendingSave:
+          staged.mode === "new" || staged.mode === "update"
+            ? serializeStaged(stagedForTab(c.tabId, c.origin))
+            : null,
+      };
+    }
+    if (message.type === "inline-commit-staged-save") {
+      if (typeof message.stageId !== "string" || !/^[a-f0-9]{32}$/.test(message.stageId))
+        throw Error("refused");
+      const result = await commitStagedSave(
+        message.stageId,
+        {
+          mode: message.mode,
+          itemId: message.itemId,
+          revision: message.revision,
+          title: message.title,
+        },
+        c,
+      );
+      return { ...result, pendingSave: null, status };
+    }
+    if (message.type === "inline-dismiss-save") {
+      const result = await dismissStaged(
+        typeof message.stageId === "string" ? message.stageId : "",
+        message.neverForOrigin === true,
+        c,
+      );
+      return { ...result, status };
+    }
+    if (message.type === "inline-generate") {
+      const generated = await generateResult(message);
+      const historyId =
+        message.recordHistory === true
+          ? recordGenerated(
+              c.origin,
+              typeof message.username === "string" ? message.username : "",
+              generated,
+            )
+          : generated.historyId || "";
+      return {
+        password: generated.password,
+        profile: generated.profile,
+        historyId,
+      };
+    }
+    if (message.type === "inline-generate-fill") {
+      const result = await inlineGenerateFill(message, c, epoch);
+      return { ...result, status };
+    }
     if (message.type === "inline-match") {
+      const category = message.category ?? "login";
+      if (!validCategory(category)) throw Error("refused");
       if (!capability || pending || pendingOTP || pendingPasskey)
         return { connected: !!capability, candidates: [] };
-      if (!core.sameContext(c, context) || Date.now() - lastMatchAt > 3000) {
-        await match();
+      if (
+        !core.sameContext(c, context) ||
+        matchCategory !== category ||
+        Date.now() - lastMatchAt > 3000
+      ) {
+        await match(category, c.frameId);
         lastMatchAt = Date.now();
       }
       await current(c);
+      const session =
+        category === "login" ? multiStepFor(c.tabId, c.origin) : null;
+      let list = rows.map((r) => ({
+        id: r.id,
+        revision: r.revision,
+        title: r.title,
+        category: rowCategory(r),
+        ...(r.subtitle ? { subtitle: r.subtitle } : {}),
+      }));
+      if (session) {
+        const index = list.findIndex((row) => row.id === session.itemId);
+        if (index > 0) list.unshift(list.splice(index, 1)[0]);
+      }
       return {
         connected: !!capability,
-        candidates: rows.map((r) => ({
-          id: r.id,
-          revision: r.revision,
-          title: r.title,
-        })),
+        neverSaveForOrigin: neverSaveOrigins.includes(c.origin),
+        suppressInline: neverSaveOrigins.includes(c.origin),
+        preferredItemId: session?.itemId || "",
+        preferredTitle: session?.title || "",
+        step: session?.stepCompleted || "",
+        candidates: list,
       };
     }
     if (
-      ["inline-fill", "inline-save", "inline-update", "inline-otp"].includes(
-        message.type,
-      )
+      [
+        "inline-fill",
+        "inline-save",
+        "inline-update",
+        "inline-otp",
+        "inline-fill-identity",
+        "inline-fill-card",
+      ].includes(message.type)
     ) {
       if (!core.sameContext(context, c)) throw Error("refused");
-      if (message.type === "inline-fill")
-        await fill(message.id, message.revision);
-      else if (message.type === "inline-otp")
+      let category = "login";
+      if (message.type === "inline-fill-identity") category = "identity";
+      else if (message.type === "inline-fill-card") category = "credit_card";
+      else if (message.type === "inline-fill")
+        category = message.category ?? "login";
+      if (!validCategory(category)) throw Error("refused");
+      if (message.type === "inline-fill") {
+        await fill(message.id, message.revision, category);
+      } else if (message.type === "inline-fill-identity") {
+        await fill(message.id, message.revision, "identity");
+      } else if (message.type === "inline-fill-card") {
+        await fill(message.id, message.revision, "credit_card");
+      } else if (message.type === "inline-otp") {
         await otp(message.id, message.revision);
-      else if (message.type === "inline-update")
-        await save(message.id, message.revision);
-      else await save();
+      } else {
+        if ((c.frameId || 0) !== 0) throw Error("refused");
+        if (message.type === "inline-update")
+          await save(message.id, message.revision);
+        else await save();
+      }
       return { status };
     }
     if (
@@ -1015,6 +3204,40 @@ if (typeof importScripts === "function") importScripts("core.js");
       }
     }
   }
+  function composedStatus() {
+    return (
+      status +
+      (otpUnknown && !status.includes(OTP_UNKNOWN)
+        ? " · " + OTP_UNKNOWN
+        : "") +
+      (fillUnknown && !status.includes(FILL_UNKNOWN)
+        ? " · " + FILL_UNKNOWN
+        : "") +
+      (passkeyUnknown && !status.includes(PASSKEY_UNKNOWN)
+        ? " · " + PASSKEY_UNKNOWN
+        : "")
+    );
+  }
+  async function stateSnapshot() {
+    const site = await activeSite();
+    return {
+      connected: !!capability,
+      autoLogin,
+      quickFill,
+      loginOverrides,
+      offerSavePasskeys,
+      offerUsePasskeys,
+      watchtowerHIBP,
+      status: composedStatus(),
+      candidates: rows.map(candidateView),
+      pending: !!pending || !!pendingOTP || !!pendingPasskey,
+      otpPending: !!pendingOTP,
+      saveBlocked: unconfirmedSave,
+      origin: context?.origin || "",
+      site,
+      watchtower: watchtowerReport,
+    };
+  }
   api.runtime.onMessage.addListener((message, sender, respond) => {
     if (!contentSender(sender)) return false;
     fromContent(message, sender).then(respond, (error) =>
@@ -1031,6 +3254,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     const requestEpoch = epoch;
     const run = async () => {
       if (!message || typeof message !== "object") throw Error("refused");
+      const extra = {};
       switch (message.type) {
         case "state":
           await settingsReady;
@@ -1038,25 +3262,65 @@ if (typeof importScripts === "function") importScripts("core.js");
         case "settings": {
           await settingsReady;
           const next = {
-            autoLogin,
-            offerSavePasskeys,
-            offerUsePasskeys,
-            loginOverrides: { ...loginOverrides },
+            ...settings,
+            generatorDefaults: { ...settings.generatorDefaults },
+            loginOverrides: { ...settings.loginOverrides },
+            disabledInlineMenuOrigins: [
+              ...settings.disabledInlineMenuOrigins,
+            ],
+            neverSaveOrigins: [...settings.neverSaveOrigins],
           };
           for (const key of [
             "autoLogin",
             "offerSavePasskeys",
             "offerUsePasskeys",
+            "sharedDesktopSession",
+            "allowBiometricUnlock",
+            "showToolbarBadgeCount",
+            "showInlineMenu",
+            "openAndFillAutoSubmit",
+            "offerFillIdentitiesAndCards",
+            "offerSaveLogins",
+            "showInlineGenerator",
+            "watchtowerLocalChecks",
+            "watchtowerHIBP",
           ])
             if (typeof message[key] === "boolean") next[key] = message[key];
+          if (
+            message.generatorDefaults &&
+            typeof message.generatorDefaults === "object" &&
+            !Array.isArray(message.generatorDefaults)
+          )
+            next.generatorDefaults = sanitizeGeneratorDefaults(
+              message.generatorDefaults,
+            );
           if (
             /^[a-f0-9]{32}$/.test(message.id || "") &&
             typeof message.enabled === "boolean"
           )
             next.loginOverrides[message.id] = message.enabled;
-          await api.storage.local.set(next);
-          ({ autoLogin, offerSavePasskeys, offerUsePasskeys, loginOverrides } =
-            next);
+          if (["system", "light", "dark"].includes(message.theme))
+            next.theme = message.theme;
+          if (
+            Number.isSafeInteger(message.clipboardClearSeconds) &&
+            message.clipboardClearSeconds >= 5 &&
+            message.clipboardClearSeconds <= 300
+          )
+            next.clipboardClearSeconds = message.clipboardClearSeconds;
+          const normalized = core.normalizeSettings(next);
+          await api.storage.local.set(normalized);
+          applySettings(normalized);
+          updateBadge();
+          rebuildContextMenus();
+          break;
+        }
+        case "clear-never-save-origin": {
+          const info = await activeTabInfo();
+          if (!info) throw Error("refused");
+          neverSaveOrigins = neverSaveOrigins.filter(
+            (origin) => origin !== info.origin,
+          );
+          await persistNeverOrigins();
           break;
         }
         case "connect":
@@ -1065,9 +3329,176 @@ if (typeof importScripts === "function") importScripts("core.js");
         case "disconnect":
           disconnectWithStatus("已断开");
           break;
-        case "match":
-          await match();
+        case "lock":
+          lockVault();
           break;
+        case "watchtower": {
+          const keys = Object.keys(message).sort().join(",");
+          if (keys !== "type" && keys !== "includeHibp,type")
+            throw Error("refused");
+          if (
+            message.includeHibp !== undefined &&
+            typeof message.includeHibp !== "boolean"
+          )
+            throw Error("refused");
+          await runWatchtower(message);
+          break;
+        }
+        case "watchtower-open":
+          if (
+            Object.keys(message).sort().join(",") !== "origin,type" ||
+            typeof message.origin !== "string"
+          )
+            throw Error("refused");
+          await openWatchtower(message.origin);
+          break;
+        case "commit-staged-save": {
+          if (!/^[a-f0-9]{32}$/.test(message.stageId || ""))
+            throw Error("refused");
+          const c = await capture();
+          const result = await commitStagedSave(
+            message.stageId,
+            {
+              mode: message.mode,
+              itemId: message.itemId,
+              revision: message.revision,
+              title: message.title,
+            },
+            c,
+          );
+          return { ...result };
+        }
+        case "dismiss-staged-save":
+        case "never-save-origin": {
+          const c = await capture();
+          const stageId = /^[a-f0-9]{32}$/.test(message.stageId || "")
+            ? message.stageId
+            : "";
+          const result = await dismissStaged(
+            stageId,
+            message.type === "never-save-origin" ||
+              message.neverForOrigin === true,
+            c,
+          );
+          return { ...result, status };
+        }
+        case "generate":
+        case "popup-generate": {
+          const generated = await generateResult(message);
+          let historyId = generated.historyId || "";
+          if (message.recordHistory === true) {
+            const info = await activeTabInfo();
+            historyId = recordGenerated(
+              info?.origin || "",
+              typeof message.username === "string" ? message.username : "",
+              generated,
+            );
+          }
+          return {
+            password: generated.password,
+            profile: generated.profile,
+            historyId,
+            generatedPassword: generated.password,
+          };
+        }
+        case "generator-fill": {
+          const c = await capture();
+          const result = await inlineGenerateFill(message, c, epoch);
+          return { ...result, status };
+        }
+        case "generator-history-fill": {
+          if (!/^[a-f0-9]{32}$/.test(message.historyId || ""))
+            throw Error("refused");
+          const c = await capture();
+          const entry = generatedHistory.find(
+            (item) => item.id === message.historyId,
+          );
+          if (
+            !entry ||
+            entry.origin !== c.origin ||
+            typeof entry.password !== "string" ||
+            entry.password.length < 4 ||
+            entry.password.length > 256 ||
+            !entry.password.isWellFormed()
+          )
+            throw Error("refused");
+          let fill = null;
+          try {
+            const results = await api.scripting.executeScript({
+              target: { tabId: c.tabId, documentIds: [c.documentId] },
+              func: core.fillGeneratedPassword,
+              args: [c.origin, entry.password, Date.now() + 1500],
+            });
+            if (
+              results.length === 1 &&
+              results[0].frameId === 0 &&
+              results[0].documentId === c.documentId &&
+              results[0].result?.ok === true
+            )
+              fill = results[0].result;
+          } catch {}
+          const staged = await stageSave(
+            {
+              username: fill?.username || entry.username || "",
+              password: entry.password,
+              isNewPassword: true,
+              isPasswordChange: fill?.isPasswordChange === true,
+            },
+            c,
+          );
+          return {
+            password: entry.password,
+            profile: entry.profile,
+            historyId: entry.id,
+            filledCount: fill?.filledCount || 0,
+            stageId: staged.stageId || "",
+            mode: staged.mode || "",
+            status,
+          };
+        }
+        case "generator-history-save": {
+          if (!/^[a-f0-9]{32}$/.test(message.historyId || ""))
+            throw Error("refused");
+          const c = await capture();
+          const entry = generatedHistory.find(
+            (item) => item.id === message.historyId,
+          );
+          if (
+            !entry ||
+            entry.origin !== c.origin ||
+            typeof entry.password !== "string" ||
+            entry.password.length < 4 ||
+            entry.password.length > 256 ||
+            !entry.password.isWellFormed()
+          )
+            throw Error("refused");
+          const staged = await stageSave(
+            {
+              username: entry.username || "",
+              password: entry.password,
+              isNewPassword: true,
+              isPasswordChange: false,
+            },
+            c,
+          );
+          return {
+            password: entry.password,
+            profile: entry.profile,
+            historyId: entry.id,
+            filledCount: 0,
+            stageId: staged.stageId || "",
+            mode: staged.mode || "",
+            status: staged.stageId
+              ? "已暂存生成密码，请确认保存"
+              : status,
+          };
+        }
+        case "match": {
+          const category = message.category ?? "login";
+          if (!validCategory(category)) throw Error("refused");
+          await match(category);
+          break;
+        }
         case "save-new":
           void save().catch(() => {
             if (requestEpoch === epoch)
@@ -1100,72 +3531,90 @@ if (typeof importScripts === "function") importScripts("core.js");
           if (Object.keys(message).join(",") !== "type") throw Error("refused");
           cancelOTP();
           break;
-        case "fill":
+        case "fill": {
+          const category = message.category ?? "login";
           if (
             typeof message.id !== "string" ||
-            typeof message.revision !== "string"
+            typeof message.revision !== "string" ||
+            !validCategory(category)
           )
             throw Error("refused");
-          void fill(message.id, message.revision).catch(() => {
+          void fill(message.id, message.revision, category).catch(() => {
             if (requestEpoch === epoch) status = "本次请求被拒绝";
           });
+          break;
+        }
+                case "vault-search":
+        case "vault-list": {
+          await settingsReady;
+          const result = await vaultSearch(message.query, message.category);
+          extra.vaultItems = result.items;
+          extra.vaultSource = result.source;
+          extra.vaultFallback = result.fallback;
+          break;
+        }
+        case "item-get":
+          if (
+            !/^[a-f0-9]{32}$/.test(message.id || "") ||
+            !/^[a-f0-9]{64}$/.test(message.revision || "")
+          )
+            throw Error("refused");
+          extra.detail = await getVaultItem(message.id, message.revision);
+          break;
+        case "item-save": {
+          await settingsReady;
+          const saved = await saveVaultItem(message);
+          extra.saved = saved;
+          break;
+        }
+        case "item-state":
+          extra.itemState = await setItemState(message);
+          break;
+        case "copy-field":
+          extra.copiedField = await copyFieldValue(message);
+          break;
+        case "reveal-field":
+          extra.revealedField = await fieldValue(message, false);
+          break;
+        case "open-and-fill":
+          extra.openAndFill = await openAndFill(message);
+          break;
+        case "site-settings":
+          await setSiteSettings(
+            typeof message.disabledInline === "boolean"
+              ? message.disabledInline
+              : typeof message.disabledInlineMenu === "boolean"
+                ? message.disabledInlineMenu
+                : undefined,
+            typeof message.neverSave === "boolean"
+              ? message.neverSave
+              : undefined,
+          );
           break;
         default:
           throw Error("refused");
       }
-      return {
-        connected: !!capability,
-        autoLogin,
-        quickFill,
-        loginOverrides,
-        offerSavePasskeys,
-        offerUsePasskeys,
-        status:
-          status +
-          (otpUnknown && !status.includes(OTP_UNKNOWN)
-            ? " · " + OTP_UNKNOWN
-            : "") +
-          (fillUnknown && !status.includes(FILL_UNKNOWN)
-            ? " · " + FILL_UNKNOWN
-            : "") +
-          (passkeyUnknown && !status.includes(PASSKEY_UNKNOWN)
-            ? " · " + PASSKEY_UNKNOWN
-            : ""),
-        candidates: rows.map((r) => ({
-          id: r.id,
-          title: r.title,
-          revision: r.revision,
-        })),
-        pending: !!pending || !!pendingOTP || !!pendingPasskey,
-        otpPending: !!pendingOTP,
-        saveBlocked: unconfirmedSave,
-        origin: context?.origin || "",
-      };
+      return extra;
     };
-    run().then(sendResponse, () => {
+    const respondState = async (extra = {}) => {
+      let pendingSave = null;
+      try {
+        pendingSave = await activePendingSave();
+      } catch {}
+      sendResponse({
+        ...statePayload({ ...extra, pendingSave }),
+        ...snapshot(),
+        ...(await stateSnapshot()),
+        ...extra,
+        pendingSave,
+      });
+    };
+    run().then(respondState, () => {
       if (requestEpoch === epoch)
         status = unconfirmedSave
           ? SAVE_UNKNOWN
           : "操作被拒绝；请确认原生连接和当前顶层 HTTPS 页面";
-      sendResponse({
-        connected: !!capability,
-        status:
-          status +
-          (otpUnknown && !status.includes(OTP_UNKNOWN)
-            ? " · " + OTP_UNKNOWN
-            : "") +
-          (fillUnknown && !status.includes(FILL_UNKNOWN)
-            ? " · " + FILL_UNKNOWN
-            : "") +
-          (passkeyUnknown && !status.includes(PASSKEY_UNKNOWN)
-            ? " · " + PASSKEY_UNKNOWN
-            : ""),
-        candidates: [],
-        pending: !!pending || !!pendingOTP || !!pendingPasskey,
-        otpPending: !!pendingOTP,
-        saveBlocked: unconfirmedSave,
-        origin: "",
-      });
+      return respondState();
     });
     return true;
   });

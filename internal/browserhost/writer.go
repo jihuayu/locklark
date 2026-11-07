@@ -133,6 +133,7 @@ func (w *Writer) WriteGranted(until time.Time, cancel <-chan struct{}, grant fun
 		return err
 	}
 	raw, err := json.Marshal(response)
+	response.Clear()
 	if err != nil || len(raw) > MaxOutput {
 		clear(raw)
 		return ErrProtocol

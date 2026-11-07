@@ -5,10 +5,38 @@
     content="width=device-width,initial-scale=1"
   /><title>Locklark</title
   ><link rel="stylesheet" href="popup.css" />
-  <body>
+  <body data-vault="1" data-view="locked">
     <main>
-      <h1>Locklark</h1>
-      <p>当前网站登录</p>
+      <div id="pending-save-banner" class="card pending" hidden>
+        <p id="pending-save-mode" class="card-title"></p>
+        <p id="pending-save-origin" class="note"></p>
+        <p id="pending-save-username" class="note mono"></p>
+        <label
+          >标题<input
+            id="pending-save-title"
+            type="text"
+            maxlength="1024"
+            autocomplete="off"
+        /></label>
+        <div class="actions">
+          <button id="commit-staged-save">保存登录</button
+          ><button id="dismiss-staged-save">忽略</button
+          ><button id="never-save-origin">此网站永不保存</button>
+        </div>
+      </div>
+      <header class="popup-header">
+        <div>
+          <h1>Locklark</h1>
+          <p class="subtitle">当前网站登录</p>
+        </div>
+        <div class="header-actions">
+          <button id="lock-btn" type="button" title="立即锁定 (Ctrl+Shift+L)">
+            锁定
+          </button>
+          <button id="options-btn" type="button">设置</button>
+        </div>
+      </header>
+
       <div class="actions">
         <button id="connect">连接原生金库</button
         ><button id="refresh">读取当前网站候选</button
@@ -19,6 +47,13 @@
       <label
         ><input id="auto-login" type="checkbox" /> 选择账号后自动登录</label
       >
+      <label
+        ><input id="offer-save-logins" type="checkbox" />
+        提交表单后提示保存/更新登录</label
+      >
+      <button id="clear-never-save" disabled hidden>
+        允许在此网站提示保存
+      </button>
       <details>
         <summary>Passkey 设置</summary>
         <label
@@ -27,15 +62,267 @@
           ><input id="passkey-use" type="checkbox" /> 提供 Passkey 登录</label
         >
       </details>
+      <section id="generator-section" class="card">
+        <h2>密码生成器</h2>
+        <label
+          >模式
+          <select id="gen-mode">
+            <option value="random">随机字符</option>
+            <option value="memorable">易记词组</option>
+            <option value="pin">PIN 码</option>
+          </select>
+        </label>
+        <label
+          >长度 <span id="gen-length-value">24</span>
+          <input
+            id="gen-length"
+            type="range"
+            min="16"
+            max="64"
+            value="24"
+          />
+        </label>
+        <div id="gen-random-options">
+          <label><input id="gen-digits" type="checkbox" /> 含数字</label>
+          <label><input id="gen-symbols" type="checkbox" /> 含符号</label>
+        </div>
+        <div id="gen-memorable-options" hidden>
+          <label
+            ><input id="gen-capitalize" type="checkbox" /> 首字母大写</label
+          >
+          <label
+            >分隔符
+            <select id="gen-separator">
+              <option value="hyphens">连字符 -</option>
+              <option value="spaces">空格</option>
+              <option value="periods">句点 .</option>
+              <option value="commas">逗号 ,</option>
+              <option value="underscores">下划线 _</option>
+              <option value="numbers">数字</option>
+              <option value="numbers-and-symbols">数字和符号</option>
+            </select>
+          </label>
+        </div>
+        <div class="preview">
+          <code id="gen-preview" class="mono"></code
+          ><span id="gen-entropy" class="badge"></span>
+        </div>
+        <div class="actions">
+          <button id="gen-regenerate">生成密码</button
+          ><button id="gen-fill" disabled>填充到当前页面</button
+          ><button id="gen-copy" disabled>复制</button>
+        </div>
+        <p id="gen-status" class="note" role="status"></p>
+        <details>
+          <summary>已生成的密码</summary>
+          <div id="gen-history"></div>
+        </details>
+      </section>
       <p id="status" role="status"></p>
       <p id="save-warning" class="note" role="alert"></p>
       <p id="origin"></p>
+      <section id="watchtower-site-banner" class="wt-banner" hidden>
+        <strong id="watchtower-site-badge"></strong>
+        <p id="watchtower-site-text"></p>
+        <button id="watchtower-site-action" type="button" hidden>
+          立即打开网站修改密码
+        </button>
+      </section>
       <div id="candidates"></div>
+
+      <section id="locked-view" class="locked-view" hidden>
+        <p class="note">解锁后可搜索、查看和编辑完整金库。</p>
+        <div class="actions">
+          <button id="unlock-connect" type="button">连接并解锁原生金库</button>
+          <button id="open-options" type="button">扩展设置</button>
+        </div>
+      </section>
+
+      <section id="vault-view" class="vault-view" hidden>
+        <div class="vault-toolbar">
+          <input
+            id="search-input"
+            type="search"
+            placeholder="搜索金库（标题、账号、网址、标签）…"
+            autocomplete="off"
+            spellcheck="false"
+            aria-label="搜索金库"
+          />
+          <button id="search-clear" type="button" title="清除搜索">
+            清除
+          </button>
+          <button id="new-item-btn" type="button" aria-expanded="false">
+            + 新建
+          </button>
+        </div>
+        <div id="new-item-menu" class="menu" hidden>
+          <button type="button" data-category="login">登录</button>
+          <button type="button" data-category="password">密码</button>
+          <button type="button" data-category="note">安全备注</button>
+          <button type="button" data-category="identity">身份信息</button>
+          <button type="button" data-category="card">银行卡</button>
+        </div>
+        <div id="filter-tabs" class="filter-tabs" role="tablist">
+          <button type="button" data-filter="suggested" role="tab">
+            当前网站
+          </button>
+          <button type="button" data-filter="all" role="tab">全部</button>
+          <button type="button" data-filter="favorites" role="tab">收藏</button>
+          <button type="button" data-filter="login" role="tab">登录</button>
+          <button type="button" data-filter="identity" role="tab">身份</button>
+          <button type="button" data-filter="credit_card" role="tab">
+            银行卡
+          </button>
+          <button type="button" data-filter="secure_note" role="tab">
+            安全备注
+          </button>
+        </div>
+        <p id="vault-count" class="vault-count"></p>
+        <div id="vault-list" class="vault-list"></div>
+        <p id="vault-empty" class="note" hidden>暂无条目</p>
+        <fieldset id="site-controls" class="site-controls">
+          <legend>此网站设置</legend>
+          <label
+            ><input id="site-disable-inline" type="checkbox" />
+            在此网站禁用内联菜单</label
+          >
+          <label
+            ><input id="site-never-save" type="checkbox" />
+            在此网站从不提示保存</label
+          >
+        </fieldset>
+      </section>
+
+      <section id="detail-view" class="detail-view" hidden>
+        <div class="pane-header">
+          <button id="detail-back" type="button">← 返回</button>
+          <span id="detail-category" class="badge"></span>
+          <button
+            id="detail-favorite"
+            type="button"
+            aria-pressed="false"
+            title="收藏"
+          >
+            ☆
+          </button>
+          <button id="detail-edit" type="button">编辑</button>
+        </div>
+        <h2 id="detail-title"></h2>
+        <p id="detail-unavailable" class="note" hidden></p>
+        <div class="detail-actions">
+          <button id="detail-fill" type="button">填充到此页面</button>
+          <button id="detail-otp" type="button">填充验证码</button>
+          <button id="detail-open-fill" type="button">打开并填充</button>
+          <button id="detail-trash" type="button">移至废纸篓</button>
+        </div>
+        <div id="detail-fields" class="detail-fields"></div>
+        <h3>网站</h3>
+        <div id="detail-urls" class="detail-urls"></div>
+        <h3>备注</h3>
+        <p id="detail-notes" class="detail-notes"></p>
+        <div id="detail-tags" class="tags"></div>
+        <p id="detail-updated" class="note"></p>
+      </section>
+
+      <section id="editor-view" class="editor-view" hidden>
+        <div class="pane-header">
+          <button id="editor-back" type="button">← 返回</button>
+          <h2 id="editor-heading">新建条目</h2>
+        </div>
+        <div id="editor-fields" class="editor-fields"></div>
+        <div id="editor-custom-fields" class="custom-fields"></div>
+        <button id="editor-add-custom" type="button">+ 自定义字段</button>
+        <div class="editor-actions">
+          <button id="editor-generate" type="button">生成密码</button>
+          <button id="editor-save" type="button">保存</button>
+          <button id="editor-cancel" type="button">取消</button>
+        </div>
+      </section>
+
+      <p id="toast" class="toast" role="status" aria-live="polite"></p>
+
+      <details id="watchtower-panel">
+        <summary>Watchtower / 安全体检</summary>
+        <div class="wt-score">
+          <span>安全评分</span>
+          <div class="wt-score-track">
+            <div id="watchtower-score-bar" class="wt-score-fill"></div>
+          </div>
+          <strong id="watchtower-score">—</strong>
+        </div>
+        <p id="watchtower-summary" class="note"></p>
+        <p id="watchtower-empty" class="note"></p>
+        <div class="wt-actions">
+          <button id="watchtower-refresh" type="button">运行本地体检</button>
+        </div>
+        <label class="wt-optin"
+          ><input id="watchtower-hibp-optin" type="checkbox" />
+          使用 k-Anonymity 检查已泄露密码（HIBP，仅发送 SHA-1 前 5 位）</label
+        >
+        <div class="wt-actions">
+          <button id="watchtower-run-hibp" type="button">检查泄露库</button>
+        </div>
+        <p id="watchtower-hibp-note" class="note"></p>
+        <div id="watchtower-cards" class="wt-cards">
+          <button
+            id="watchtower-card-vulnerable"
+            class="wt-card"
+            type="button"
+            data-wt-category="vulnerable"
+          >
+            已泄露密码 <span id="watchtower-count-vulnerable">0</span>
+          </button>
+          <button
+            id="watchtower-card-reused"
+            class="wt-card"
+            type="button"
+            data-wt-category="reused"
+          >
+            重复密码 <span id="watchtower-count-reused">0</span>
+          </button>
+          <button
+            id="watchtower-card-weak"
+            class="wt-card"
+            type="button"
+            data-wt-category="weak"
+          >
+            弱密码 <span id="watchtower-count-weak">0</span>
+          </button>
+          <button
+            id="watchtower-card-unsecured_http"
+            class="wt-card"
+            type="button"
+            data-wt-category="unsecured_http"
+          >
+            不安全网站 <span id="watchtower-count-unsecured_http">0</span>
+          </button>
+          <button
+            id="watchtower-card-totp_not_stored"
+            class="wt-card"
+            type="button"
+            data-wt-category="totp_not_stored"
+          >
+            未启用两步验证
+            <span id="watchtower-count-totp_not_stored">0</span>
+          </button>
+          <button
+            id="watchtower-card-expiring"
+            class="wt-card"
+            type="button"
+            data-wt-category="expiring"
+          >
+            即将过期 / 已过期
+            <span id="watchtower-count-expiring">0</span>
+          </button>
+        </div>
+        <div id="watchtower-findings"></div>
+      </details>
       <p class="note">
         在原生窗口连接并启用快捷填充后，可直接在网页选择账号。自动登录只提交可明确识别的登录表单；Passkey
         需在原生窗口确认。
       </p>
     </main>
+    <script src="core.js"></script>
     <script src="popup.js"></script>
   </body>
 </html>

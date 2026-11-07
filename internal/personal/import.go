@@ -27,6 +27,7 @@ type ImportReceipt struct {
 type importRequest struct {
 	read     func() ([]byte, error)
 	expected string
+	profile  string
 }
 
 func migrationAction(action string) bool { return action == importPlanAction || action == importAction }
@@ -43,8 +44,15 @@ func (r *importRequest) mapSource(secret []byte) (onepux.MappedLogins, error) {
 		return onepux.MappedLogins{}, invalid
 	}
 	defer clear(derived)
+	profile := r.profile
+	if profile == "" {
+		profile = onepux.LoginProfile
+	}
+	if profile != onepux.LoginProfile && profile != onepux.FullProfileV2 {
+		return onepux.MappedLogins{}, invalid
+	}
 	mac := hmac.New(sha256.New, derived)
-	mac.Write([]byte("locklark/personal/import-plan/" + onepux.LoginProfile + "\x00"))
+	mac.Write([]byte("locklark/personal/import-plan/" + profile + "\x00"))
 	mac.Write(raw)
 	stamp := mac.Sum(nil)
 	if r.expected != "" {
@@ -53,7 +61,12 @@ func (r *importRequest) mapSource(secret []byte) (onepux.MappedLogins, error) {
 			return onepux.MappedLogins{}, ErrImportChanged
 		}
 	}
-	mapped, err := onepux.MapLogins(raw)
+	var mapped onepux.MappedLogins
+	if profile == onepux.FullProfileV2 {
+		mapped, err = onepux.MapArchiveV2(raw)
+	} else {
+		mapped, err = onepux.MapLogins(raw)
+	}
 	if err != nil {
 		return onepux.MappedLogins{}, err
 	}
@@ -79,16 +92,34 @@ func ImportOnepux(path, pw string, key []byte, source, expected string) (ImportR
 	return importOnepux(path, pw, key, source, expected, importAction)
 }
 func importOnepux(path, pw string, key []byte, source, expected, action string) (ImportReceipt, error) {
+	return importOnepuxProfile(path, pw, key, source, expected, action, onepux.LoginProfile)
+}
+
+func importOnepuxProfile(path, pw string, key []byte, source, expected, action, profile string) (ImportReceipt, error) {
 	if source == "" {
 		return ImportReceipt{}, ErrInspectionSource
 	}
-	r, err := command(path, pw, key, action, vault.Item{}, nil, commandOption{migration: &importRequest{read: func() ([]byte, error) { return readInspectionSource(source) }, expected: expected}})
+	r, err := command(path, pw, key, action, vault.Item{}, nil, commandOption{migration: &importRequest{read: func() ([]byte, error) { return readInspectionSource(source) }, expected: expected, profile: profile}})
 	if err != nil {
 		return ImportReceipt{}, err
 	}
-	status := "planned-" + onepux.LoginProfile
+	status := "planned-" + profile
 	if action == importAction {
-		status = "imported-" + onepux.LoginProfile
+		status = "imported-" + profile
 	}
 	return ImportReceipt{Status: status, Session: r.session, Event: r.intent, ReportDigest: r.reportDigest, Report: r.migration}, nil
+}
+
+// PlanImportOnepuxV2 plans the full v2 category mapping. The source digest is
+// keyed with FullProfileV2 so a v2 plan cannot be replayed against the narrow
+// login profile (or vice versa).
+func PlanImportOnepuxV2(path, pw string, key []byte, source string) (ImportReceipt, error) {
+	return importOnepuxProfile(path, pw, key, source, "", importPlanAction, onepux.FullProfileV2)
+}
+
+func ImportOnepuxV2(path, pw string, key []byte, source, expected string) (ImportReceipt, error) {
+	if !digestOK(expected) {
+		return ImportReceipt{}, ErrImportChanged
+	}
+	return importOnepuxProfile(path, pw, key, source, expected, importAction, onepux.FullProfileV2)
 }

@@ -20,8 +20,10 @@ import (
 	"github.com/jihuayu/locklark/internal/onepux"
 	"github.com/jihuayu/locklark/internal/origin"
 	"github.com/jihuayu/locklark/internal/password"
+	"github.com/jihuayu/locklark/internal/reference"
 	"github.com/jihuayu/locklark/internal/totp"
 	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/locklark/internal/watchtower"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -37,12 +39,19 @@ type identity struct {
 func (i *identity) clear() { clear(i.Signing); clear(i.Audit); clear(i.AuditEncryption) }
 
 type Row struct {
-	Kind         string `json:"kind,omitempty"`
-	RestoreState string `json:"restore_state,omitempty"`
-	State        string `json:"state"`
-	ID           string `json:"id"`
-	Title        string `json:"title"`
-	Revision     string `json:"revision"`
+	Kind             string   `json:"kind,omitempty"`
+	RestoreState     string   `json:"restore_state,omitempty"`
+	Category         string   `json:"category,omitempty"`
+	Subtitle         string   `json:"subtitle,omitempty"`
+	State            string   `json:"state"`
+	ID               string   `json:"id"`
+	Title            string   `json:"title"`
+	Revision         string   `json:"revision"`
+	WatchtowerFlags  []string `json:"watchtower_flags,omitempty"`
+	StrengthScore    *int     `json:"strength_score,omitempty"`
+	StrengthCategory string   `json:"strength_category,omitempty"`
+	ReuseCount       int      `json:"reuse_count,omitempty"`
+	BreachCount      int      `json:"breach_count,omitempty"`
 }
 
 var b32 = base32.StdEncoding.WithPadding(base32.NoPadding)
@@ -186,6 +195,8 @@ func existingWithReadOnly(path string, readOnly bool) (*bolt.DB, error) {
 }
 
 type result struct {
+	watchtowerReport  watchtower.Report
+	hibpCandidates    []watchtower.HIBPCandidate
 	sshSeed           []byte
 	savePersisted     bool
 	browser           *NativeBrowserFill
@@ -200,6 +211,7 @@ type result struct {
 	otp               *totp.Config
 	profile           password.Profile
 	value             []byte
+	values            map[string][]byte
 	session, intent   string
 	rows              []Row
 	events            []Event
@@ -207,6 +219,13 @@ type result struct {
 	revision          string
 	chains            []Chain
 	archive           []byte
+	summaries         []ItemSummary
+	detail            ItemDetail
+	vaults            []vault.VaultMeta
+	vaultMeta         vault.VaultMeta
+	attachment        vault.AttachmentMeta
+	attachmentBytes   []byte
+	purged            int
 }
 
 type commandOption struct {
@@ -218,6 +237,7 @@ type commandOption struct {
 	browser        *BrowserFillTarget
 	unlocked       *Session
 	run            *RunRequest
+	runBundle      *runBundleStoreRequest
 	search         *searchRequest
 	livePull       *LivePullRequest
 	injection      *injectionRequest
@@ -228,6 +248,9 @@ type commandOption struct {
 	backup         string
 	generation     *generationRequest
 	reference      *referenceRequest
+	v2             *v2Request
+	watchtower     *watchtowerRequest
+	hibp           *hibpRequest
 }
 
 func command(path, pw string, key []byte, action string, add vault.Item, edit *Edit, options ...commandOption) (result, error) {
@@ -245,6 +268,7 @@ func commandWithClose(run func() (result, error), closeDB func() error) (r resul
 		if closeErr := closeDB(); closeErr != nil && (err == nil || r.savePersisted) {
 			r.browser.clear()
 			clear(r.value)
+			clearBundleValues(r.values)
 			clear(r.sshSeed)
 			clear(r.material)
 			clear(r.archive)
@@ -268,6 +292,7 @@ type authenticatedState struct {
 	chains    []Chain
 	items     []vault.Item
 	revisions map[string]string
+	vaults    []vault.VaultMeta
 }
 
 func (a *authenticatedState) clear() {
@@ -308,6 +333,9 @@ func authenticateState(tx *bolt.Tx, pw string, key []byte, action string, unlock
 	if unlocked != nil {
 		if action == "desktop.unlock" || action == "backup.prepare" || sha256.Sum256(raw) != unlocked.slotDigest {
 			return nil, invalid
+		}
+		if unlocked.sessionLocked() {
+			return nil, ErrSessionLocked
 		}
 		opened = bytes.Clone(unlocked.material)
 	} else {
@@ -360,7 +388,11 @@ func authenticateState(tx *bolt.Tx, pw string, key []byte, action string, unlock
 		}
 	}
 
-	return &authenticatedState{slot, opened, i, s, tip, rows, chains, items, revisions}, nil
+	vaults, e := loadVaults(b, i)
+	if e != nil {
+		return nil, e
+	}
+	return &authenticatedState{slot, opened, i, s, tip, rows, chains, items, revisions, vaults}, nil
 }
 
 // The updater returns only after commit (including bbolt's default fsync).
@@ -382,7 +414,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 	if action == "item.edit.notes" && (edit == nil || edit.Field != "notes" || !ValidEditTarget(edit.ID, edit.Revision, edit.Field)) {
 		return result{}, invalid
 	}
-	if option.nativeMutation != nil && (option.unlocked == nil || option.nativeMutation.gate == nil || !(option.sshState || action == sshGenerateAction || action == sshImportAction || action == sshSignAction || action == "item.add" || nativeEditAction(action) || generatedAction(action) || action == desktopOTPShowAction || action == desktopOTPCopyAction || action == browserOTPAction)) {
+	if option.nativeMutation != nil && (option.unlocked == nil || option.nativeMutation.gate == nil || !(option.sshState || action == sshGenerateAction || action == sshImportAction || action == sshSignAction || action == "item.add" || nativeEditAction(action) || lifecycleAction(action) || trashAction(action) || generatedAction(action) || action == desktopOTPShowAction || action == desktopOTPCopyAction || action == browserOTPAction || v2MutationAction(action))) {
 		return result{}, invalid
 	}
 	if option.sshState && (option.unlocked == nil || option.nativeMutation == nil || !(lifecycleAction(action) || trashAction(action)) || edit == nil || edit.Field != "" || !idOK(edit.ID) || !digestOK(edit.Revision)) {
@@ -418,6 +450,18 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 	if (action == matchAction) != (option.match != nil) {
 		return result{}, invalid
 	}
+	if (action == watchtowerAction) != (option.watchtower != nil) {
+		return result{}, invalid
+	}
+	if (action == hibpAction) != (option.hibp != nil) {
+		return result{}, invalid
+	}
+	if option.watchtower != nil && !option.watchtower.valid() {
+		return result{}, invalid
+	}
+	if option.hibp != nil && !option.hibp.valid() {
+		return result{}, invalid
+	}
 	if (action == searchAction) != (option.search != nil) || option.search != nil && !option.search.valid() {
 		return result{}, ErrSearchQuery
 	}
@@ -434,6 +478,9 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		return result{}, ErrInjectionTarget
 	}
 	if runAction(action) != (option.run != nil) || option.run != nil && option.run.Validate() != nil {
+		return result{}, ErrRunTarget
+	}
+	if (action == runBundleAction) != (option.runBundle != nil) || option.runBundle != nil && option.runBundle.validate() != nil {
 		return result{}, ErrRunTarget
 	}
 	if (action == livePullAction) != (option.livePull != nil) || option.livePull != nil && option.livePull.Validate() != nil {
@@ -457,11 +504,11 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		defer auth.clear()
 		b := tx.Bucket(bucket)
 		slot, opened, i, s := auth.slot, auth.opened, auth.identity, auth.snapshot
-		tip, rows, chains, items, revisions := auth.tip, auth.rows, auth.chains, auth.items, auth.revisions
+		tip, rows, chains, items, revisions, vaults := auth.tip, auth.rows, auth.chains, auth.items, auth.revisions, auth.vaults
 		outcome := "succeeded"
 		var profile *password.Profile
 		if action == referenceDisclosureAction {
-			action, edit, e = option.reference.bind(slot.Account, items, revisions)
+			action, edit, e = option.reference.bind(slot.Account, vaults, items, revisions)
 			if e != nil {
 				var known bool
 				outcome, known = referenceRejection(e)
@@ -573,6 +620,30 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			if e != nil {
 				return e
 			}
+		case watchtowerAction:
+			analysis, err := analyzeWatchtower(items, revisions, *option.watchtower)
+			if err != nil {
+				return err
+			}
+			out.watchtowerReport = analysis.Report
+			out.hibpCandidates = analysis.HIBPCandidates
+			out.reportDigest, e = digest(analysis.Report)
+			if e != nil {
+				return e
+			}
+		case hibpAction:
+			if option.hibp.intent {
+				outcome = "intent"
+				break
+			}
+			out.watchtowerReport, e = analyzeHIBP(items, revisions, *option.hibp)
+			if e != nil {
+				return e
+			}
+			out.reportDigest, e = digest(out.watchtowerReport)
+			if e != nil {
+				return e
+			}
 		case healthAction:
 			out.health, e = localHealth(items, revisions)
 			if e != nil {
@@ -646,7 +717,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		case referenceRejectAction:
 			// Persist only the fixed category, never selectors or caller versions.
 		case "reference.list":
-			out.references, e = makeReferenceIndex(slot.Account, items, revisions)
+			out.references, e = makeReferenceIndex(slot.Account, vaults, items, revisions)
 			if e != nil {
 				return e
 			}
@@ -656,7 +727,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			if option.backup == "" {
 				return invalid
 			}
-		case browserOTPAction, browserFillAction, "item.desktop.show.username", "item.desktop.show.password", "item.desktop.copy.username", "item.desktop.copy.password", "item.desktop.show.notes", "item.desktop.copy.notes", "item.desktop.edit.notes", "item.edit.notes", "item.run.username", "item.run.password", livePullAction, "item.inject.username", "item.inject.password", "item.trash", "item.untrash", "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.regenerate.password", otpDisclosureAction, desktopOTPShowAction, desktopOTPCopyAction:
+		case browserOTPAction, browserFillAction, v2AttachmentReadAction, "item.desktop.show.username", "item.desktop.show.password", "item.desktop.copy.username", "item.desktop.copy.password", "item.desktop.show.notes", "item.desktop.copy.notes", "item.desktop.edit.notes", "item.edit.notes", "item.run.username", "item.run.password", livePullAction, "item.inject.username", "item.inject.password", "item.trash", "item.untrash", "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.reveal.notes", referenceRevealAction, referenceOTPAction, "item.regenerate.password", otpDisclosureAction, desktopOTPShowAction, desktopOTPCopyAction:
 			if edit == nil {
 				return invalid
 			}
@@ -673,7 +744,12 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 						if option.sshState && items[i].Kind != "ssh-key" {
 							return ErrSSHKey
 						}
-						if items[i].Kind != "login" && !(items[i].Kind == "ssh-key" && (trashAction(action) || lifecycleAction(action))) {
+						v2Read := action == v2AttachmentReadAction || action == referenceRevealAction || action == referenceOTPAction || action == "item.reveal.notes"
+						lifecycleTarget := (items[i].Kind == "ssh-key" || items[i].Kind == "document") && (trashAction(action) || lifecycleAction(action))
+						if !option.sshState && option.nativeMutation != nil && items[i].Kind != "login" && !v2Read && !v2MutationAction(action) && !lifecycleTarget {
+							return ErrMutationRefused
+						}
+						if items[i].Kind != "login" && !v2Read && !v2MutationAction(action) && !lifecycleTarget {
 							return invalid
 						}
 						if action == browserOTPAction {
@@ -698,12 +774,13 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 								if items[i].State == "trashed" {
 									outcome, refusal = "already-trashed", ErrAlreadyTrashed
 								} else {
-									items[i].PreviousState, items[i].State = items[i].State, "trashed"
+									now := time.Now().UTC()
+									items[i].PreviousState, items[i].State, items[i].TrashedAt = items[i].State, "trashed", &now
 								}
 							} else if items[i].State != "trashed" {
 								outcome, refusal = "not-trashed", ErrNotTrashed
 							} else {
-								items[i].State, items[i].PreviousState = items[i].PreviousState, ""
+								items[i].State, items[i].PreviousState, items[i].TrashedAt = items[i].PreviousState, "", nil
 							}
 							break
 						}
@@ -727,12 +804,44 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 							}
 							break
 						}
+						if action == v2AttachmentReadAction {
+							if option.v2 == nil {
+								return invalid
+							}
+							found := false
+							for _, att := range items[i].Attachments {
+								if att.ID == option.v2.attID {
+									out.attachment = att
+									out.attachment.Content = nil
+									out.attachmentBytes = bytes.Clone(att.Content)
+									found = true
+									break
+								}
+							}
+							if !found {
+								return ErrNotFound
+							}
+							outcome = "intent"
+							break
+						}
 						if otpAction(action) {
-							if items[i].OTP == "" {
+							seed := items[i].OTP
+							if action == referenceOTPAction {
+								if option.reference == nil {
+									return invalid
+								}
+								resolved, typ, err := resolveReferenceField(items[i], option.reference.target.SectionID, option.reference.target.FieldID)
+								if err != nil || typ != reference.TypeOTP {
+									outcome, refusal = "not-configured", ErrOTPNotConfigured
+									break
+								}
+								seed = resolved
+							}
+							if seed == "" {
 								outcome, refusal = "not-configured", ErrOTPNotConfigured
 								break
 							}
-							out.otp, e = totp.Parse(items[i].OTP)
+							out.otp, e = totp.Parse(seed)
 							if e != nil {
 								return e
 							}
@@ -742,10 +851,19 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 						if readValueAction(action) {
 							value := items[i].Username
 							switch action {
-							case "item.desktop.show.notes", "item.desktop.copy.notes", "item.desktop.edit.notes":
+							case "item.desktop.show.notes", "item.desktop.copy.notes", "item.desktop.edit.notes", "item.reveal.notes":
 								value = items[i].Notes
 							case "item.reveal.password", "item.inject.password", "item.run.password", "item.desktop.show.password", "item.desktop.copy.password", livePullAction:
 								value = items[i].Password
+							case referenceRevealAction:
+								if option.reference == nil {
+									return invalid
+								}
+								resolved, _, err := resolveReferenceField(items[i], option.reference.target.SectionID, option.reference.target.FieldID)
+								if err != nil {
+									return err
+								}
+								value = resolved
 							}
 							out.value = []byte(value)
 							outcome = "intent"
@@ -832,14 +950,14 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 					break
 				}
 			}
-			if option.nativeMutation != nil && (!validNativeNew(add) || action == "item.add" && (add.Password == "" || !validBrowserText([]byte(add.Password)))) {
+			if option.nativeMutation != nil && action != v2AddAction && (!validNativeNew(add) || action == "item.add" && (add.Password == "" || !validBrowserText([]byte(add.Password)))) {
 				outcome, refusal = "native-refused", ErrMutationRefused
 				break
 			}
 			if action == "item.generate" && strings.TrimSpace(add.Title) == "" {
 				return errors.New("a title is required")
 			}
-			if strings.TrimSpace(add.Title) == "" || (action == "item.add" && add.Password == "") {
+			if strings.TrimSpace(add.Title) == "" || (action == "item.add" && add.Kind != "document" && add.Password == "") || (action == "item.add" && add.Kind == "document" && (strings.TrimSpace(add.Filename) == "" || len(add.Attachment) == 0)) {
 				return errors.New("a title and password are required")
 			}
 			if option.nativeMutation != nil {
@@ -890,6 +1008,459 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 				}
 				out.rows = append(out.rows, Row{Kind: it.Kind, ID: it.ID, Title: it.Title, Revision: revisions[it.ID], State: state, RestoreState: restoreState})
 			}
+		case v2ListAction:
+			if option.v2 == nil {
+				return invalid
+			}
+			out.summaries, e = listByFilter(items, revisions, option.v2.filter)
+			if e != nil {
+				return e
+			}
+			if option.v2.filter.Query != "" {
+				out.destinationDigest, e = (&searchRequest{query: option.v2.filter.Query, state: option.v2.filter.State}).binding(i.AuditEncryption)
+				if e != nil {
+					return e
+				}
+			}
+		case v2DetailViewAction, v2DetailInspectAction:
+			if edit == nil || !idOK(edit.ID) || !digestOK(edit.Revision) {
+				return invalid
+			}
+			out.id = edit.ID
+			switch rev := revisions[edit.ID]; {
+			case rev == "":
+				out.id = ""
+				outcome, refusal = "not-found", ErrNotFound
+			case rev != edit.Revision:
+				outcome, refusal = "conflict", ErrConflict
+			default:
+				idx := findItemIndex(items, edit.ID)
+				if idx < 0 {
+					out.id = ""
+					outcome, refusal = "not-found", ErrNotFound
+					break
+				}
+				out.detail = itemDetail(items[idx], rev, action == v2DetailInspectAction)
+				if action == v2DetailInspectAction {
+					outcome = "intent"
+				}
+			}
+		case v2AddAction:
+			if option.v2 != nil {
+				return invalid
+			}
+			add = vault.CloneItem(add)
+			add.ID, e = randomID()
+			if e != nil {
+				return e
+			}
+			now := time.Now().Unix()
+			add.CreatedAt, add.UpdatedAt = now, now
+			add, e = normalizeV2Item(add)
+			if e != nil {
+				return e
+			}
+			if !vaultExists(vaults, add.VaultID) {
+				return ErrMutationRefused
+			}
+			if vault.ValidateItems([]byte(schema), append(append([]vault.Item(nil), items...), add)) != nil {
+				return ErrMutationRefused
+			}
+			items = append(items, add)
+			out.id = add.ID
+		case v2EditAction:
+			if edit == nil || option.v2 == nil || option.v2.item == nil || !idOK(edit.ID) || !digestOK(edit.Revision) {
+				return invalid
+			}
+			out.id = edit.ID
+			switch rev := revisions[edit.ID]; {
+			case rev == "":
+				out.id = ""
+				outcome, refusal = "not-found", ErrNotFound
+			case rev != edit.Revision:
+				outcome, refusal = "conflict", ErrConflict
+			default:
+				idx := findItemIndex(items, edit.ID)
+				if idx < 0 {
+					out.id = ""
+					outcome, refusal = "not-found", ErrNotFound
+					break
+				}
+				if items[idx].State == "trashed" {
+					outcome, refusal = "trashed", ErrTrashed
+					break
+				}
+				next := vault.CloneItem(*option.v2.item)
+				next.ID = items[idx].ID
+				next.State, next.PreviousState, next.TrashedAt = items[idx].State, items[idx].PreviousState, items[idx].TrashedAt
+				next.CreatedAt = items[idx].CreatedAt
+				next.ImportSource = items[idx].ImportSource
+				next.SSHSeed = items[idx].SSHSeed
+				next.SSHPublicKey = items[idx].SSHPublicKey
+				next.Passkey = items[idx].Passkey
+				next.Attachments = items[idx].Attachments
+				if next.Filename == "" && next.Attachment == nil {
+					next.Filename, next.Attachment, next.AttachmentProtected = items[idx].Filename, items[idx].Attachment, items[idx].AttachmentProtected
+				}
+				if next.Category == "" && next.Kind == "" {
+					next.Category, next.Kind = items[idx].Category, items[idx].Kind
+				}
+				if next.VaultID == "" {
+					next.VaultID = items[idx].VaultID
+				}
+				next.History = autoHistory(items[idx], next)
+				next.UpdatedAt = time.Now().Unix()
+				next, e = normalizeV2Item(next)
+				if e != nil {
+					return e
+				}
+				if !vaultExists(vaults, next.VaultID) {
+					return ErrMutationRefused
+				}
+				candidate := append([]vault.Item(nil), items...)
+				candidate[idx] = next
+				if vault.ValidateItems([]byte(schema), candidate) != nil {
+					return ErrMutationRefused
+				}
+				items[idx] = next
+			}
+		case v2FavoriteAction, v2TagsAction:
+			if edit == nil || option.v2 == nil || !idOK(edit.ID) || !digestOK(edit.Revision) {
+				return invalid
+			}
+			out.id = edit.ID
+			switch rev := revisions[edit.ID]; {
+			case rev == "":
+				out.id = ""
+				outcome, refusal = "not-found", ErrNotFound
+			case rev != edit.Revision:
+				outcome, refusal = "conflict", ErrConflict
+			default:
+				idx := findItemIndex(items, edit.ID)
+				if idx < 0 {
+					out.id = ""
+					outcome, refusal = "not-found", ErrNotFound
+					break
+				}
+				if items[idx].State == "trashed" {
+					outcome, refusal = "trashed", ErrTrashed
+					break
+				}
+				next := vault.CloneItem(items[idx])
+				if action == v2FavoriteAction {
+					next.Favorite = option.v2.favorite
+				} else {
+					next.Tags, e = normalizeTags(option.v2.tags)
+					if e != nil {
+						return e
+					}
+				}
+				next.UpdatedAt = time.Now().Unix()
+				candidate := append([]vault.Item(nil), items...)
+				candidate[idx] = next
+				if vault.ValidateItems([]byte(schema), candidate) != nil {
+					return ErrMutationRefused
+				}
+				items[idx] = next
+			}
+		case v2HistoryRestoreAction:
+			if edit == nil || option.v2 == nil || !idOK(edit.ID) || !digestOK(edit.Revision) {
+				return invalid
+			}
+			out.id = edit.ID
+			switch rev := revisions[edit.ID]; {
+			case rev == "":
+				out.id = ""
+				outcome, refusal = "not-found", ErrNotFound
+			case rev != edit.Revision:
+				outcome, refusal = "conflict", ErrConflict
+			default:
+				idx := findItemIndex(items, edit.ID)
+				if idx < 0 {
+					out.id = ""
+					outcome, refusal = "not-found", ErrNotFound
+					break
+				}
+				if items[idx].State == "trashed" {
+					outcome, refusal = "trashed", ErrTrashed
+					break
+				}
+				history := vault.CloneHistory(items[idx].History)
+				if option.v2.historyIndex < 0 || option.v2.historyIndex >= len(history) {
+					return ErrMutationRefused
+				}
+				next := vault.CloneItem(items[idx])
+				entry := history[option.v2.historyIndex]
+				snapshot := vault.ItemHistoryEntry{Timestamp: time.Now().Unix(), Action: "restore", Password: next.Password, Title: next.Title, Username: next.Username, Notes: next.Notes, Sections: vault.CloneSections(next.Sections)}
+				history = append(history[:option.v2.historyIndex], history[option.v2.historyIndex+1:]...)
+				next.Password = entry.Password
+				if entry.Title != "" {
+					next.Title = entry.Title
+				}
+				if entry.Username != "" {
+					next.Username = entry.Username
+				}
+				if entry.Notes != "" {
+					next.Notes = entry.Notes
+				}
+				if entry.Sections != nil {
+					next.Sections = vault.CloneSections(entry.Sections)
+				}
+				next.History = appendHistory(history, snapshot)
+				next.UpdatedAt = time.Now().Unix()
+				candidate := append([]vault.Item(nil), items...)
+				candidate[idx] = next
+				if vault.ValidateItems([]byte(schema), candidate) != nil {
+					return ErrMutationRefused
+				}
+				items[idx] = next
+			}
+		case v2PurgeAction:
+			if edit == nil || !idOK(edit.ID) || !digestOK(edit.Revision) {
+				return invalid
+			}
+			out.id = edit.ID
+			switch rev := revisions[edit.ID]; {
+			case rev == "":
+				out.id = ""
+				outcome, refusal = "not-found", ErrNotFound
+			case rev != edit.Revision:
+				outcome, refusal = "conflict", ErrConflict
+			default:
+				idx := findItemIndex(items, edit.ID)
+				if idx < 0 {
+					out.id = ""
+					outcome, refusal = "not-found", ErrNotFound
+					break
+				}
+				if items[idx].State != "trashed" {
+					outcome, refusal = "not-trashed", ErrNotTrashed
+					break
+				}
+				items = append(items[:idx:idx], items[idx+1:]...)
+			}
+		case v2EmptyTrashAction:
+			if option.v2 == nil || option.v2.olderThan != nil && *option.v2.olderThan < 0 {
+				return invalid
+			}
+			now := time.Now()
+			purged := make([]struct{ id, revision string }, 0)
+			kept := make([]vault.Item, 0, len(items))
+			for _, it := range items {
+				eligible := it.State == "trashed"
+				if eligible && option.v2.olderThan != nil {
+					eligible = it.TrashedAt != nil && now.Sub(*it.TrashedAt) >= *option.v2.olderThan
+				}
+				if eligible {
+					purged = append(purged, struct{ id, revision string }{it.ID, revisions[it.ID]})
+					continue
+				}
+				kept = append(kept, it)
+			}
+			out.purged = len(purged)
+			if len(purged) == 0 {
+				ev, err := appendLinked(b, i, tip, s, v2EmptyTrashAction, "", "succeeded", "", "")
+				if err != nil {
+					return err
+				}
+				out.session, out.intent = ev.Session, ev.hash()
+				return nil
+			}
+			s, e = seal(b, i, s.Epoch+1, kept)
+			if e != nil {
+				return e
+			}
+			for _, p := range purged {
+				if !idOK(p.id) || !digestOK(p.revision) || revisions[p.id] != p.revision {
+					return invalid
+				}
+				ev, err := appendLinked(b, i, tip, s, v2PurgeAction, p.id, "succeeded", p.revision, "")
+				if err != nil {
+					return err
+				}
+				tip = auditTip{Count: ev.Sequence, Last: ev.hash(), Origin: tip.Origin}
+				out.session, out.intent = ev.Session, ev.hash()
+			}
+			return nil
+		case v2AttachmentAddAction:
+			if edit == nil || option.v2 == nil || !idOK(edit.ID) || !digestOK(edit.Revision) {
+				return invalid
+			}
+			out.id = edit.ID
+			switch rev := revisions[edit.ID]; {
+			case rev == "":
+				out.id = ""
+				outcome, refusal = "not-found", ErrNotFound
+			case rev != edit.Revision:
+				outcome, refusal = "conflict", ErrConflict
+			default:
+				idx := findItemIndex(items, edit.ID)
+				if idx < 0 {
+					out.id = ""
+					outcome, refusal = "not-found", ErrNotFound
+					break
+				}
+				if items[idx].State == "trashed" {
+					outcome, refusal = "trashed", ErrTrashed
+					break
+				}
+				if !validAttachmentFileName(option.v2.fileName) || len(option.v2.mimeType) > 256 || len(option.v2.content) > vault.MaxAttachmentSize {
+					return ErrMutationRefused
+				}
+				attID, err := randomID()
+				if err != nil {
+					return err
+				}
+				att := vault.AttachmentMeta{ID: attID, FileName: option.v2.fileName, MIMEType: option.v2.mimeType, Size: int64(len(option.v2.content)), SHA256: vault.AttachmentSHA256(option.v2.content), Content: append([]byte(nil), option.v2.content...)}
+				next := vault.CloneItem(items[idx])
+				next.Attachments = append(next.Attachments, att)
+				next.UpdatedAt = time.Now().Unix()
+				candidate := append([]vault.Item(nil), items...)
+				candidate[idx] = next
+				if vault.ValidateItems([]byte(schema), candidate) != nil {
+					return ErrMutationRefused
+				}
+				items[idx] = next
+				out.attachment = att
+				out.attachment.Content = nil
+			}
+		case v2AttachmentRemoveAct:
+			if edit == nil || option.v2 == nil || !idOK(edit.ID) || !digestOK(edit.Revision) {
+				return invalid
+			}
+			out.id = edit.ID
+			switch rev := revisions[edit.ID]; {
+			case rev == "":
+				out.id = ""
+				outcome, refusal = "not-found", ErrNotFound
+			case rev != edit.Revision:
+				outcome, refusal = "conflict", ErrConflict
+			default:
+				idx := findItemIndex(items, edit.ID)
+				if idx < 0 {
+					out.id = ""
+					outcome, refusal = "not-found", ErrNotFound
+					break
+				}
+				if items[idx].State == "trashed" {
+					outcome, refusal = "trashed", ErrTrashed
+					break
+				}
+				next := vault.CloneItem(items[idx])
+				found := false
+				kept := next.Attachments[:0]
+				for _, att := range next.Attachments {
+					if att.ID == option.v2.attID && !found {
+						found = true
+						continue
+					}
+					kept = append(kept, att)
+				}
+				if !found {
+					return ErrNotFound
+				}
+				next.Attachments = kept
+				next.UpdatedAt = time.Now().Unix()
+				candidate := append([]vault.Item(nil), items...)
+				candidate[idx] = next
+				if vault.ValidateItems([]byte(schema), candidate) != nil {
+					return ErrMutationRefused
+				}
+				items[idx] = next
+			}
+		case v2ListVaultsAction:
+			out.vaults = listVaultsMeta(vaults)
+		case v2CreateVaultAction:
+			if option.v2 == nil {
+				return invalid
+			}
+			meta := vault.VaultMeta{Name: strings.TrimSpace(option.v2.vaultName), Description: option.v2.vaultDesc, Icon: option.v2.vaultIcon}
+			meta.ID, e = randomID()
+			if e != nil {
+				return e
+			}
+			meta.CreatedAt = time.Now().Unix()
+			if !validVaultMeta(meta) {
+				return ErrMutationRefused
+			}
+			for _, v := range vaults {
+				if strings.EqualFold(v.Name, meta.Name) {
+					return ErrMutationRefused
+				}
+			}
+			vaults = append(vaults, meta)
+			if e = saveVaults(b, i, vaults); e != nil {
+				return e
+			}
+			out.vaultMeta = meta
+		case v2MoveVaultAction:
+			if edit == nil || option.v2 == nil || !idOK(edit.ID) || !digestOK(edit.Revision) {
+				return invalid
+			}
+			out.id = edit.ID
+			switch rev := revisions[edit.ID]; {
+			case rev == "":
+				out.id = ""
+				outcome, refusal = "not-found", ErrNotFound
+			case rev != edit.Revision:
+				outcome, refusal = "conflict", ErrConflict
+			default:
+				idx := findItemIndex(items, edit.ID)
+				if idx < 0 {
+					out.id = ""
+					outcome, refusal = "not-found", ErrNotFound
+					break
+				}
+				if items[idx].State == "trashed" {
+					outcome, refusal = "trashed", ErrTrashed
+					break
+				}
+				target := option.v2.targetVaultID
+				if target == "" {
+					target = vault.DefaultVaultID
+				}
+				if !vaultExists(vaults, target) {
+					return ErrMutationRefused
+				}
+				next := vault.CloneItem(items[idx])
+				next.VaultID = target
+				next.UpdatedAt = time.Now().Unix()
+				if option.v2.copyItem {
+					next.ID, e = randomID()
+					if e != nil {
+						return e
+					}
+					next.State, next.PreviousState, next.TrashedAt = "", "", nil
+					now := time.Now().Unix()
+					next.CreatedAt, next.UpdatedAt = now, now
+					next, e = normalizeV2Item(next)
+					if e != nil {
+						return e
+					}
+					candidate := append(append([]vault.Item(nil), items...), next)
+					if vault.ValidateItems([]byte(schema), candidate) != nil {
+						return ErrMutationRefused
+					}
+					items = append(items, next)
+					out.id = next.ID
+				} else {
+					next, e = normalizeV2Item(next)
+					if e != nil {
+						return e
+					}
+					candidate := append([]vault.Item(nil), items...)
+					candidate[idx] = next
+					if vault.ValidateItems([]byte(schema), candidate) != nil {
+						return ErrMutationRefused
+					}
+					items[idx] = next
+				}
+			}
+		case runBundleAction:
+			out.id, out.values, outcome, refusal, e = option.runBundle.extract(items, revisions)
+			if e != nil {
+				return e
+			}
 		case "audit.list":
 		default:
 			return invalid
@@ -905,8 +1476,12 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			if option.unlocked == nil || !option.unlocked.winBrowserSave(option.nativeMutation.gate) {
 				return ErrMutationCancelled
 			}
+		} else if option.unlocked != nil && !browserSaveAction(action) {
+			if option.unlocked.sessionLocked() {
+				return ErrSessionLocked
+			}
 		}
-		if ((action == "item.add" || action == "item.generate" || action == sshGenerateAction || action == sshImportAction) && refusal == nil) || ((editAction(action) || browserSaveAction(action)) && refusal == nil) {
+		if ((action == "item.add" || action == "item.generate" || action == sshGenerateAction || action == sshImportAction || action == v2AddAction) && refusal == nil) || ((editAction(action) || browserSaveAction(action) || action == v2PurgeAction) && refusal == nil) {
 			s, e = seal(b, i, s.Epoch+1, items)
 			if e != nil {
 				return e
@@ -939,8 +1514,18 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			}
 			out.destinationDigest = link
 		}
+		if action == v2ListAction && option.v2 != nil && option.v2.filter.Query != "" {
+			link = out.destinationDigest
+		}
 		if runAction(action) && refusal == nil {
 			link, e = option.run.binding(i.AuditEncryption)
+			if e != nil {
+				return e
+			}
+			out.destinationDigest = link
+		}
+		if action == runBundleAction && refusal == nil {
+			link, e = option.runBundle.binding(i.AuditEncryption)
 			if e != nil {
 				return e
 			}
@@ -971,7 +1556,15 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 				}
 			}
 		}
-		ev, e := appendLinked(b, i, tip, s, action, out.id, outcome, revisions[out.id], link, eventDetails{generation: profile, reportDigest: out.reportDigest})
+		journalAction := action
+		if action == v2AddAction {
+			// v2AddAction carries no v2 request, so map it explicitly to the
+			// stable journal action expected by Event.verify and history.
+			journalAction = "item.add"
+		} else if option.v2 != nil {
+			journalAction = option.v2.JournalAction(action)
+		}
+		ev, e := appendLinked(b, i, tip, s, journalAction, out.id, outcome, revisions[out.id], link, eventDetails{generation: profile, reportDigest: out.reportDigest})
 		if e != nil {
 			return e
 		}
@@ -988,7 +1581,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		}
 		if action == "audit.list" {
 			out.events = append(rows, ev)
-		} else if (editAction(action) || browserSaveAction(action) || action == "item.generate" || action == "item.add" || action == sshGenerateAction || action == sshImportAction) && refusal == nil {
+		} else if (editAction(action) || browserSaveAction(action) || action == "item.generate" || action == "item.add" || action == v2AddAction || action == sshGenerateAction || action == sshImportAction) && refusal == nil {
 			out.revision = ev.hash()
 		}
 		return nil
@@ -998,6 +1591,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		clear(out.archive)
 		clear(out.material)
 		clear(out.value)
+		clearBundleValues(out.values)
 		clear(out.sshSeed)
 		if out.otp != nil {
 			out.otp.Clear()

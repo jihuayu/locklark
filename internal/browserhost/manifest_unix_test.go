@@ -44,6 +44,9 @@ func TestRegistrationRejectsUnsafePathsAndReplacesAtomically(t *testing.T) {
 	if string(value) != "untouched" {
 		t.Fatal("overwrote symlink target")
 	}
+	// The checks above only need a temp path; the remaining success and atomic
+	// replacement assertions require an owner-controlled ancestry.
+	requireTrustedTempDir(t, dir)
 	os.Remove(output)
 	if Register("chrome", host, output, false) != nil {
 		t.Fatal("safe registration")

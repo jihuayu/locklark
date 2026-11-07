@@ -10,6 +10,7 @@ import (
 
 	"github.com/jihuayu/locklark/internal/onepux"
 	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/locklark/internal/watchtower"
 )
 
 var ErrSessionLocked = errors.New("desktop vault is locked; unlock again")
@@ -40,6 +41,10 @@ type Session struct {
 	fullUnlock           time.Time
 	pending              map[*NativeField]bool
 	browserPending       map[*NativeBrowserFill]bool
+	// Watchtower state is in-memory only. The range client owns the prefix
+	// cache; dropping it on lock clears both the cache and its transport.
+	watchtowerKey []byte
+	hibp          watchtower.RangeLookup
 }
 
 // NativeField is a one-use native-only delivery. It cannot be JSON-serialized.
@@ -75,7 +80,7 @@ func UnlockSession(path string, password, key []byte, idle time.Duration) (*Sess
 		clear(r.material)
 		return nil, e
 	}
-	return &Session{path: path, material: r.material, slotDigest: r.slotDigest, last: time.Now(), fullUnlock: time.Now(), idle: idle, pending: make(map[*NativeField]bool)}, nil
+	return &Session{path: path, material: r.material, slotDigest: r.slotDigest, last: time.Now(), fullUnlock: time.Now(), idle: idle, pending: make(map[*NativeField]bool), hibp: watchtower.NewHIBPClient(watchtower.HIBPOptions{})}, nil
 }
 func (s *Session) lock() {
 	s.sshPending.Range(func(key, _ any) bool {
@@ -111,6 +116,9 @@ func (s *Session) lock() {
 		f.clear()
 		delete(s.browserPending, f)
 	}
+	s.hibp = nil
+	clear(s.watchtowerKey)
+	s.watchtowerKey = nil
 	clear(s.material)
 	s.material = nil
 	for f := range s.pending {
@@ -123,6 +131,30 @@ func (s *Session) lock() {
 // RequestLock immediately prevents new operations without waiting for a transaction.
 func (s *Session) RequestLock() { s.cancelBrowserSave() }
 func (s *Session) Lock()        { s.RequestLock(); s.mu.Lock(); defer s.mu.Unlock(); s.lock() }
+func (s *Session) sessionLocked() bool {
+	if s == nil {
+		return true
+	}
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+	return s.lockRequested.Load() || len(s.material) == 0 || time.Since(s.last) >= s.idle
+}
+
+// IdleDeadline reports when the session will expire from inactivity if no
+// further active operations occur, or false when the session is locked.
+func (s *Session) IdleDeadline() (time.Time, bool) {
+	if s == nil || s.lockRequested.Load() {
+		return time.Time{}, false
+	}
+	if !s.mu.TryLock() {
+		return time.Now().Add(time.Second), true
+	}
+	defer s.mu.Unlock()
+	if s.active(false) != nil {
+		return time.Time{}, false
+	}
+	return s.last.Add(s.idle), true
+}
 func (s *Session) active(touch bool) error {
 	now := time.Now()
 	for f := range s.browserPending {
@@ -293,18 +325,33 @@ func (s *Session) Import(source, expected string) (ImportReceipt, error) {
 	return s.importSource(source, expected, importAction)
 }
 func (s *Session) importSource(source, expected, action string) (ImportReceipt, error) {
+	return s.importSourceProfile(source, expected, action, onepux.LoginProfile)
+}
+
+func (s *Session) importSourceProfile(source, expected, action, profile string) (ImportReceipt, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	r, e := s.execute(action, vault.Item{}, nil, commandOption{migration: &importRequest{read: func() ([]byte, error) { return readInspectionSource(source) }, expected: expected}})
+	r, e := s.execute(action, vault.Item{}, nil, commandOption{migration: &importRequest{read: func() ([]byte, error) { return readInspectionSource(source) }, expected: expected, profile: profile}})
 	if e != nil {
 		return ImportReceipt{}, e
 	}
-	status := "planned-" + onepux.LoginProfile
+	status := "planned-" + profile
 	if action == importAction {
-		status = "imported-" + onepux.LoginProfile
+		status = "imported-" + profile
 	}
 	return ImportReceipt{Status: status, Session: r.session, Event: r.intent, ReportDigest: r.reportDigest, Report: r.migration}, nil
 }
+func (s *Session) PlanImportV2(source string) (ImportReceipt, error) {
+	return s.importSourceProfile(source, "", importPlanAction, onepux.FullProfileV2)
+}
+
+func (s *Session) ImportV2(source, expected string) (ImportReceipt, error) {
+	if !digestOK(expected) {
+		return ImportReceipt{}, ErrImportChanged
+	}
+	return s.importSourceProfile(source, expected, importAction, onepux.FullProfileV2)
+}
+
 func (s *Session) Export(password, dest string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

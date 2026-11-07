@@ -61,10 +61,15 @@ func (a *App) runNative(work func(*personal.MutationGate) nativeResult, apply fu
 				a.status = message(r.err)
 				if !s.Unlocked() {
 					a.Lock()
+				} else if a.session != nil && a.idleTimer != nil {
+					a.armIdleTimer()
 				}
 				return
 			}
 			apply(r)
+			if a.session != nil && a.idleTimer != nil {
+				a.armIdleTimer()
+			}
 		})
 	})
 	return true
@@ -97,6 +102,10 @@ func (a *App) saveNative(generate bool) {
 	a.saveNativeCaptured(meta, user, value, scope, generate, length)
 }
 func (a *App) saveNativeCaptured(meta personal.NativeLoginMetadata, user, value []byte, scope string, generate bool, length int) {
+	if scope == "" {
+		scope = "active"
+	}
+	filter := listFilter{query: a.query, scope: scope, generation: a.queryGeneration}
 	s := a.session
 	started := a.runNative(func(g *personal.MutationGate) nativeResult {
 		defer clear(user)
@@ -110,19 +119,18 @@ func (a *App) saveNativeCaptured(meta personal.NativeLoginMetadata, user, value 
 		}
 		out := nativeResult{receipt: r, err: e}
 		if e == nil {
-			out.rows, out.refreshErr = s.List(scope)
+			out.rows, out.refreshErr = queryRows(s, filter)
 		}
 		return out
 	}, func(r nativeResult) {
-		a.rows = loginProjection(r.rows)
-		a.selected = nil
+		ok := a.applyMutationRefresh(r, filter)
 		a.title = ""
 		a.website = ""
 		a.status = "登录已保存"
 		if generate {
 			a.status = fmt.Sprintf("已生成并保存 · %d字符 · 策略熵至少%d位", r.receipt.Profile.Length, r.receipt.Profile.EntropyBits)
 		}
-		if r.refreshErr != nil {
+		if !ok {
 			a.status += "；列表未刷新，请手动刷新"
 		}
 	})
@@ -157,21 +165,21 @@ func (a *App) confirmRegeneration() {
 	if !ok {
 		return
 	}
-	s, target, scope := a.session, *a.regenerate, a.scope
+	s, target := a.session, *a.regenerate
+	filter := a.captureFilter()
 	a.clearDailyExposure()
 	a.runNative(func(g *personal.MutationGate) nativeResult {
 		r, e := s.RegenerateNativePassword(target.ID, target.Revision, length, g)
 		out := nativeResult{receipt: r, err: e}
 		if e == nil {
-			out.rows, out.refreshErr = s.List(scope)
+			out.rows, out.refreshErr = queryRows(s, filter)
 		}
 		return out
 	}, func(r nativeResult) {
 		a.regenerate = nil
-		a.rows = loginProjection(r.rows)
-		a.selected = nil
+		ok := a.applyMutationRefresh(r, filter)
 		a.status = "本地密码已重新生成；网站密码尚未修改"
-		if r.refreshErr != nil {
+		if !ok {
 			a.status += "；列表未刷新，请手动刷新"
 		}
 	})
@@ -265,8 +273,7 @@ func (a *App) hideOTP() {
 func (a *App) clearDailyExposure() {
 	a.exposureGeneration++
 	a.hideOTP()
-	a.display = ""
-	a.displayUntil = time.Time{}
+	a.hideDisplay()
 	a.clearClipboard()
 }
 func (a *App) checkOTPExposure(now time.Time) {

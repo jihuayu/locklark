@@ -12,7 +12,7 @@ const desktopOTPShowAction = "item.desktop.show.otp-code"
 const desktopOTPCopyAction = "item.desktop.copy.otp-code"
 
 func otpAction(a string) bool {
-	return a == otpDisclosureAction || a == desktopOTPShowAction || a == desktopOTPCopyAction || a == browserOTPAction
+	return a == otpDisclosureAction || a == referenceOTPAction || a == desktopOTPShowAction || a == desktopOTPCopyAction || a == browserOTPAction
 }
 
 type NativeOTPTarget struct{ ID, Revision string }

@@ -106,7 +106,17 @@ func (s *Session) BrowserMatch(c BrowserContext) ([]Row, error) {
 func browserCandidateBudget(rows []Row) bool {
 	projection := make([]Row, len(rows))
 	for n, row := range rows {
-		projection[n] = Row{ID: row.ID, Revision: row.Revision, Title: row.Title, State: row.State}
+		projection[n] = Row{
+			ID:               row.ID,
+			Revision:         row.Revision,
+			Title:            row.Title,
+			State:            row.State,
+			WatchtowerFlags:  row.WatchtowerFlags,
+			StrengthScore:    row.StrengthScore,
+			StrengthCategory: row.StrengthCategory,
+			ReuseCount:       row.ReuseCount,
+			BreachCount:      row.BreachCount,
+		}
 	}
 	raw, e := json.Marshal(projection)
 	defer clear(raw)

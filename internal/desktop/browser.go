@@ -1,6 +1,7 @@
 package desktop
 
 import (
+	"errors"
 	"os"
 	"time"
 
@@ -20,7 +21,7 @@ func (a *App) browserView(c *ui.Context) {
 	}
 	ui.Text(c, "浏览器连接").FontSize(24).Bold()
 	ui.Text(c, "固定扩展身份："+a.browserLabel).FontSize(12)
-	ui.Text(c, "此窗口持有独立金库会话；请核对浏览器当前网站，再确认本次操作。")
+	ui.Text(c, "此窗口与浏览器共享已解锁的金库会话；请核对浏览器当前网站，再确认本次操作。")
 	if view.Busy {
 		ui.Text(c, "正在核对请求…")
 		return
@@ -160,6 +161,15 @@ func browserTitle(title string) string {
 func RunBrowser(browser browserhost.Browser, args []string) error {
 	if browserhost.ValidateLaunch(browser, args) != nil {
 		return browserhost.ErrProtocol
+	}
+	if os.Getenv("LOCKLARK_BROWSER_STANDALONE") != "1" {
+		err := browserhost.RelayStdio(browser, args, os.Stdin, os.Stdout)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, browserhost.ErrBrokerUnavailable) {
+			return err
+		}
 	}
 	if e := restoreBrowserAccessibility(browser); e != nil {
 		return e

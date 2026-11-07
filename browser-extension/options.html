@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Locklark 设置</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <header class="page-header">
+      <h1>Locklark 设置</h1>
+      <p class="muted">
+        这些设置保存在本机浏览器扩展存储中。金库内容始终由原生 Locklark
+        服务解密，扩展不会缓存密码。
+      </p>
+      <p id="options-status" class="status" role="status" aria-live="polite"></p>
+    </header>
+
+    <main>
+      <section aria-labelledby="general-heading">
+        <h2 id="general-heading">桌面与应用集成</h2>
+        <label class="row">
+          <input id="opt-shared-session" type="checkbox" />
+          <span>与 Locklark 桌面端共享解锁与锁定状态</span>
+        </label>
+        <label class="row">
+          <input id="opt-biometric" type="checkbox" />
+          <span>允许通过桌面端使用系统生物识别/快速解锁</span>
+        </label>
+        <label class="row">
+          <input id="opt-badge-count" type="checkbox" />
+          <span>在工具栏图标显示当前网站匹配条目数量</span>
+        </label>
+        <p id="connection-status" class="muted">
+          设置存储：修改会立即写入本机扩展存储（storage.local），并自动应用到扩展。原生连接与解锁状态请打开
+          Locklark 弹窗查看。
+        </p>
+      </section>
+
+      <section aria-labelledby="autofill-heading">
+        <h2 id="autofill-heading">自动填充与登录</h2>
+        <label class="row">
+          <input id="opt-inline-menu" type="checkbox" />
+          <span>选中输入框时显示内联填充菜单</span>
+        </label>
+        <label class="row">
+          <input id="opt-auto-login" type="checkbox" />
+          <span>选择账号后自动提交登录表单</span>
+        </label>
+        <label class="row">
+          <input id="opt-open-fill-submit" type="checkbox" />
+          <span>通过「打开并填充」跳转后自动登录</span>
+        </label>
+        <label class="row">
+          <input id="opt-offer-identity-card" type="checkbox" />
+          <span>在内联菜单提供身份信息与银行卡填充</span>
+        </label>
+        <label class="row">
+          <input id="opt-offer-passkeys" type="checkbox" />
+          <span>提供使用 Locklark Passkey 登录</span>
+        </label>
+      </section>
+
+      <section aria-labelledby="saving-heading">
+        <h2 id="saving-heading">保存与密码生成</h2>
+        <label class="row">
+          <input id="opt-offer-save" type="checkbox" />
+          <span>提交表单后提示保存或更新登录</span>
+        </label>
+        <label class="row">
+          <input id="opt-offer-save-passkeys" type="checkbox" />
+          <span>提供使用 Locklark 保存新 Passkey</span>
+        </label>
+        <label class="row">
+          <input id="opt-inline-generator" type="checkbox" />
+          <span>在注册/改密密码框显示内联密码生成器</span>
+        </label>
+        <fieldset class="generator">
+          <legend>默认密码生成器</legend>
+          <label>
+            模式
+            <select id="opt-generator-mode">
+              <option value="random">随机密码</option>
+              <option value="memorable">易记密码</option>
+              <option value="pin">PIN</option>
+            </select>
+          </label>
+          <label>
+            长度
+            <input
+              id="opt-generator-length"
+              type="number"
+              min="8"
+              max="128"
+              step="1"
+              aria-describedby="generator-length-hint"
+            />
+          </label>
+          <p id="generator-length-hint" class="muted">
+            随机密码 8–128 位；易记密码 3–12 位；PIN 4–12 位。
+          </p>
+          <label class="row">
+            <input id="opt-generator-digits" type="checkbox" />
+            <span>包含数字</span>
+          </label>
+          <label class="row">
+            <input id="opt-generator-symbols" type="checkbox" />
+            <span>包含符号</span>
+          </label>
+        </fieldset>
+      </section>
+
+      <section aria-labelledby="sites-heading">
+        <h2 id="sites-heading">网站例外管理</h2>
+        <p id="origin-help" class="muted">
+          请输入完整的 HTTPS 网站地址（例如 https://example.com）。重复或无效地址不会添加，列表最多保存
+          100 个网站。
+        </p>
+        <h3 id="disabled-inline-heading">已禁用内联菜单的网站</h3>
+        <ul
+          id="disabled-inline-list"
+          class="origin-list"
+          aria-labelledby="disabled-inline-heading"
+        ></ul>
+        <label class="sr-only" for="disabled-inline-input">
+          要禁用内联菜单的网站地址（HTTPS）
+        </label>
+        <div class="add-row">
+          <input
+            id="disabled-inline-input"
+            type="url"
+            placeholder="https://example.com"
+            autocomplete="off"
+            autocapitalize="none"
+            spellcheck="false"
+            aria-describedby="origin-help"
+          />
+          <button
+            id="add-disabled-inline"
+            type="button"
+            aria-label="添加要禁用内联菜单的网站"
+          >
+            添加
+          </button>
+        </div>
+        <h3 id="never-save-heading">从不提示保存登录的网站</h3>
+        <ul
+          id="never-save-list"
+          class="origin-list"
+          aria-labelledby="never-save-heading"
+        ></ul>
+        <label class="sr-only" for="never-save-input">
+          从不提示保存登录的网站地址（HTTPS）
+        </label>
+        <div class="add-row">
+          <input
+            id="never-save-input"
+            type="url"
+            placeholder="https://example.com"
+            autocomplete="off"
+            autocapitalize="none"
+            spellcheck="false"
+            aria-describedby="origin-help"
+          />
+          <button
+            id="add-never-save"
+            type="button"
+            aria-label="添加从不提示保存登录的网站"
+          >
+            添加
+          </button>
+        </div>
+        <h3 id="login-overrides-heading">已禁用自动提交的特定登录条目</h3>
+        <p class="muted">
+          这些条目来自弹窗中的「不再为此登录自动提交」操作，可在此恢复。
+        </p>
+        <ul
+          id="login-overrides-list"
+          class="origin-list"
+          aria-labelledby="login-overrides-heading"
+        ></ul>
+      </section>
+
+      <section aria-labelledby="shortcuts-heading">
+        <h2 id="shortcuts-heading">快捷键与安全</h2>
+        <p class="muted">以下为浏览器当前绑定的扩展快捷键。</p>
+        <ul id="shortcuts" class="shortcuts" aria-label="浏览器扩展快捷键"></ul>
+        <p class="muted shortcut-note">
+          默认（Chromium）：打开弹窗 Ctrl+Shift+Y，填充登录 Ctrl+Shift+L，锁定
+          Locklark Ctrl+Shift+U；macOS 使用 Command。Firefox
+          中打开弹窗的快捷键默认未绑定，可在下方设置。
+        </p>
+        <button
+          id="open-shortcuts"
+          type="button"
+          title="打开浏览器的扩展快捷键设置"
+        >
+          打开浏览器快捷键设置
+        </button>
+        <label class="row">
+          <span>剪贴板自动清除时间（秒）</span>
+          <input
+            id="opt-clipboard-seconds"
+            type="number"
+            min="5"
+            max="300"
+            step="1"
+            aria-describedby="clipboard-seconds-hint"
+          />
+        </label>
+        <p id="clipboard-seconds-hint" class="muted">允许 5–300 秒。</p>
+        <label class="row">
+          <input id="opt-watchtower-local" type="checkbox" />
+          <span>启用本地安全检查（弱密码、复用密码、HTTP 登录）</span>
+        </label>
+        <label class="row">
+          <span>主题</span>
+          <select id="opt-theme">
+            <option value="system">跟随系统</option>
+            <option value="light">浅色</option>
+            <option value="dark">深色</option>
+          </select>
+        </label>
+      </section>
+
+      <section class="footer-actions">
+        <button id="reset-settings" type="button">恢复默认设置</button>
+      </section>
+    </main>
+    <script src="core.js"></script>
+    <script src="options.js"></script>
+  </body>
+</html>

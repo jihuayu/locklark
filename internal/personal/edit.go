@@ -16,7 +16,8 @@ type Edit struct{ ID, Revision, Field, Value string }
 
 func editAction(s string) bool {
 	switch s {
-	case "item.trash", "item.untrash", "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.edit.notes", "item.regenerate.password":
+	case "item.trash", "item.untrash", "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.edit.notes", "item.regenerate.password",
+		"item.edit.v2", "item.edit.favorite", "item.edit.tags", "item.edit.vault", "item.history.restore", "item.attachment.add", "item.attachment.remove":
 		return true
 	}
 	return false
