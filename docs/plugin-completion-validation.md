@@ -1,5 +1,7 @@
 # 插件功能收尾与进度对账
 
+后续更新：本记录对应 PR #44，已合并为 `main` `e2561be`，最终 head `faf4732` 六项 CI 成功。下文保留当批范围与历史排查；独立 Passkey 删除和跨条目多账号管理已在后续实现并完成本地三浏览器验收，最新边界与检查见 [Passkey 管理验收](passkey-management-validation.md)。
+
 日期：2026-11-07。起点 `main` `4abecb8e869a255920f0104ce69977d87150feef`；工作分支 `codex/plugin-completion`，[PR #44](https://github.com/jihuayu/locklark/pull/44)。本记录区分本地独立验收、组件契约、真实浏览器流程及最终远端 CI；合并回执以 [PR #44 的 Checks](https://github.com/jihuayu/locklark/pull/44/checks) 和 timeline 为准，旧 PR 的绿色检查不代替本次 head。
 
 ## 本批范围

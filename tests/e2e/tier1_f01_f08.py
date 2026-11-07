@@ -28,6 +28,7 @@ from .support import (
     f1_passkey_ready,
     f2_autologin_ready,
     f2_inline_ready,
+    f2_passkey_management_ready,
     f3_team_sync_ready,
     f4_team_cli_ready,
     f5_desktop_timer_ready,
@@ -36,6 +37,7 @@ from .support import (
     f8_desktop_v2_ready,
     f8_v2_editor_ready,
     gate,
+    go_package_test,
     health_report,
     list_rows,
     make_vault,
@@ -298,6 +300,25 @@ def t1_f2_06(ctx):
     gate(ctx, "F2", ready, "WebAuthn fallback bridge is absent from the built extension")
     webauthn = extension_text(ctx, "webauthn.js")
     assert any(token in webauthn for token in ("fallback", "native", "original"))
+
+
+@e2e_test(
+    "T1_F2_07", 1, ["F2"],
+    "Passkey list projects safe metadata and filters before the 500-item cap",
+    coverage_kind="component_contract",
+)
+def t1_f2_07(ctx):
+    gate(ctx, "F2", f2_passkey_management_ready(ctx), "Passkey management protocol is absent on the extension or native host")
+    go_package_test(
+        ctx, "./internal/browserhost",
+        r"^TestPasskey(ManagementMetadataSearchAndStrictWire|FilterRunsBeforeFiveHundredCap)$",
+        min_passed=2,
+    )
+    node_test_pattern(
+        ctx, "browser-extension/test/background.test.js",
+        r"passkey metadata is a safe DTO and searches forward the server filter",
+        min_passed=1,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -129,7 +129,8 @@ function detailDocument() {
 function harness() {
   const elements = new Map();
   const requests = [];
-  let pagehide = null;
+  let pagehide = null,
+    poll = null;
   const document = {
     body: { dataset: { vault: "1" } },
     visibilityState: "visible",
@@ -137,13 +138,16 @@ function harness() {
       if (!elements.has(selector)) elements.set(selector, element());
       return elements.get(selector);
     },
-    querySelectorAll() {
+    querySelectorAll(selector) {
+      if (selector === "#filter-tabs [data-filter]")
+        return [this.querySelector("#tab-passkeys")];
       return [];
     },
     createElement: element,
     createTextNode: (text) => ({ textContent: text }),
     addEventListener() {},
   };
+  document.querySelector("#tab-passkeys").dataset.filter = "passkeys";
   const context = {
     LocklarkCore: core,
     document,
@@ -163,7 +167,10 @@ function harness() {
     Uint8Array,
     setTimeout,
     clearTimeout,
-    setInterval: () => 0,
+    setInterval(callback) {
+      poll = callback;
+      return 0;
+    },
     clearInterval: () => {},
     addEventListener(type, callback) {
       if (type === "pagehide") pagehide = callback;
@@ -177,6 +184,7 @@ function harness() {
   return {
     requests,
     pagehide: () => pagehide?.(),
+    poll: () => poll?.(),
     el: (selector) => context.document.querySelector(selector),
     take(type) {
       const call = requests.find((r) => !r.taken && r.message.type === type);
@@ -390,7 +398,7 @@ function detailWithAttachments() {
   };
 }
 
-async function openDetail(h, detail) {
+async function openDetail(h, detail, options = {}) {
   h.take("state").resolve({
     connected: true,
     status: "ready",
@@ -409,10 +417,11 @@ async function openDetail(h, detail) {
     ],
     generatorDefaults: { mode: "random", length: 24 },
     attachmentsSupported: true,
+    ...(options.state || {}),
   });
   await settle();
   h.el("#vault-list").children[0].listeners.get("click")();
-  h.take("item-get").resolve({ detail, connected: true });
+  h.take("item-get").resolve({ detail, connected: true, ...(options.reply || {}) });
   await settle();
 }
 
@@ -814,4 +823,268 @@ test("unknown commit outcome is reported as unconfirmed, not unsaved", async () 
     "unknown commit outcome stays actionable",
   );
   assert.equal(controls(h).upload, false, "controls recover after the failure");
+});
+
+const PASSKEY_CRED = core.base64URLEncode(new Uint8Array(32).fill(3));
+function passkeyDetail(overrides = {}) {
+  return {
+    ...detailDocument(),
+    has_passkey: true,
+    passkey: {
+      credential_id: PASSKEY_CRED,
+      rp_id: "example.test",
+      user_name: "ada@example.test",
+      display_name: "Ada Lovelace",
+    },
+    ...overrides,
+  };
+}
+
+test("passkey detail shows safe metadata and cancel sends no removal RPC", async () => {
+  const h = harness();
+  await openDetail(h, passkeyDetail(), {
+    state: { passkeyManagementSupported: true },
+    reply: { passkeyManagementSupported: true },
+  });
+  assert.equal(h.el("#passkey-detail").hidden, false);
+  assert.equal(h.el("#passkey-rp").textContent, "example.test");
+  assert.equal(h.el("#passkey-username").textContent, "ada@example.test");
+  assert.equal(h.el("#passkey-display-name").textContent, "Ada Lovelace");
+  assert.equal(h.el("#passkey-remove").hidden, false);
+  assert.match(shown(h), /ada/);
+
+  h.el("#passkey-remove").listeners.get("click")();
+  assert.equal(h.el("#passkey-remove-confirm").hidden, false);
+  assert.equal(h.el("#passkey-remove-cancel").hidden, false);
+  assert.equal(h.el("#passkey-remove-warning").hidden, false);
+  assert.equal(
+    h.requests.some((request) => request.message.type === "passkey-remove"),
+    false,
+    "opening confirmation must not send an RPC",
+  );
+  h.el("#passkey-remove-cancel").listeners.get("click")();
+  assert.equal(h.el("#passkey-remove-confirm").hidden, true);
+  assert.equal(
+    h.requests.some((request) => request.message.type === "passkey-remove"),
+    false,
+    "explicit cancel must not send an RPC",
+  );
+});
+
+test("confirmed passkey removal sends exact selector and keeps the login", async () => {
+  const h = harness();
+  await openDetail(h, passkeyDetail(), {
+    state: { passkeyManagementSupported: true },
+    reply: { passkeyManagementSupported: true },
+  });
+  h.el("#passkey-remove").listeners.get("click")();
+  h.el("#passkey-remove-confirm").listeners.get("click")();
+  await settle();
+  const remove = h.take("passkey-remove");
+  assert.deepEqual(Object.keys(remove.message).sort(), [
+    "credential_id", "id", "revision", "type",
+  ]);
+  assert.equal(remove.message.id, ID);
+  assert.equal(remove.message.revision, REV);
+  assert.equal(remove.message.credential_id, PASSKEY_CRED);
+  remove.resolve({
+    connected: true,
+    passkeyManagementSupported: true,
+    passkeyRemoved: { item_id: ID, revision: NEXT, credential_id: PASSKEY_CRED },
+  });
+  await settle();
+  const list = h.take("vault-search");
+  assert.equal(list.message.passkeysOnly, false);
+  list.resolve({
+    connected: true,
+    passkeyManagementSupported: true,
+    vaultItems: [{
+      id: ID, revision: NEXT, category: "login", title: "Login",
+      urls: ["https://example.test/"], tags: [], favorite: false,
+    }],
+  });
+  await settle();
+  const refreshed = h.take("item-get");
+  assert.equal(refreshed.message.revision, NEXT);
+  refreshed.resolve({
+    connected: true,
+    passkeyManagementSupported: true,
+    detail: { ...detailDocument(), revision: NEXT, has_passkey: false },
+  });
+  await settle();
+  assert.equal(h.el("#passkey-detail").hidden, true);
+  assert.match(shown(h), /ada/, "login username/password fields remain after passkey removal");
+  assert.equal(h.el("#vault-list").children[0].dataset.itemId, ID);
+});
+
+test("old host shows explicit passkey upgrade notice without a remove control", async () => {
+  const h = harness();
+  await openDetail(h, { ...detailDocument(), has_passkey: true }, {
+    state: { passkeyManagementSupported: false },
+    reply: { passkeyManagementSupported: false },
+  });
+  assert.equal(h.el("#passkey-detail").hidden, false);
+  assert.match(h.el("#passkey-detail-unsupported").textContent, /升级原生宿主/);
+  assert.equal(h.el("#passkey-remove").hidden, true);
+  assert.equal(
+    h.requests.some((request) => request.message.type === "passkey-remove"),
+    false,
+  );
+});
+
+test("passkey filter is server-owned and a stale query cannot replace newer rows", async () => {
+  const h = harness();
+  const rowA = {
+    id: "1".repeat(32), revision: "2".repeat(64), category: "login",
+    title: "Old passkey", passkey: {
+      credential_id: PASSKEY_CRED, rp_id: "old.test", user_name: "old", display_name: "Old",
+    }, urls: [], tags: [], favorite: false,
+  };
+  const rowB = {
+    id: "3".repeat(32), revision: "4".repeat(64), category: "login",
+    title: "New passkey", passkey: {
+      credential_id: core.base64URLEncode(new Uint8Array(32).fill(4)),
+      rp_id: "new.test", user_name: "new", display_name: "New",
+    }, urls: [], tags: [], favorite: false,
+  };
+  h.take("state").resolve({
+    connected: true,
+    status: "ready",
+    origin: "https://example.test/",
+    candidates: [],
+    vaultItems: [rowA],
+    passkeyManagementSupported: true,
+    generatorDefaults: { mode: "random", length: 24 },
+  });
+  await settle();
+  h.el("#tab-passkeys").listeners.get("click")();
+  const first = h.take("vault-search");
+  assert.equal(first.message.passkeysOnly, true);
+  h.el("#search-input").value = "new";
+  h.el("#search-input").listeners.get("input")({
+    target: h.el("#search-input"),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 160));
+  const second = h.take("vault-search");
+  assert.equal(second.message.passkeysOnly, true);
+  assert.equal(second.message.query, "new");
+  second.resolve({
+    connected: true,
+    passkeyManagementSupported: true,
+    vaultItems: [rowB],
+  });
+  await settle();
+  assert.equal(h.el("#vault-list").children[0].dataset.itemId, rowB.id);
+  first.resolve({
+    connected: true,
+    passkeyManagementSupported: true,
+    vaultItems: [rowA],
+  });
+  await settle();
+  assert.equal(
+    h.el("#vault-list").children[0].dataset.itemId,
+    rowB.id,
+    "stale response must not overwrite the newer filter result",
+  );
+});
+
+test("late passkey removal cannot overwrite a new locked view", async () => {
+  const h = harness();
+  await openDetail(h, passkeyDetail(), {
+    state: { passkeyManagementSupported: true },
+    reply: { passkeyManagementSupported: true },
+  });
+  const itemGets = h.requests.filter((request) => request.message.type === "item-get").length;
+  h.el("#passkey-remove").listeners.get("click")();
+  h.el("#passkey-remove-confirm").listeners.get("click")();
+  await settle();
+  const remove = h.take("passkey-remove");
+  h.el("#lock-btn").listeners.get("click")();
+  const lock = h.take("lock");
+  lock.resolve({ connected: false, status: "已锁定", candidates: [] });
+  await settle();
+  remove.resolve({
+    connected: true,
+    passkeyManagementSupported: true,
+    passkeyRemoved: { item_id: ID, revision: NEXT, credential_id: PASSKEY_CRED },
+  });
+  await settle();
+  assert.equal(h.el("#passkey-detail").hidden, true);
+  assert.equal(
+    h.requests.filter((request) => request.message.type === "item-get").length,
+    itemGets,
+    "stale success must not refresh or reopen the detail view",
+  );
+});
+
+test("uncertain passkey removal suppresses retry until a fresh detail refresh", async () => {
+  const h = harness();
+  await openDetail(h, passkeyDetail(), {
+    state: { passkeyManagementSupported: true },
+    reply: { passkeyManagementSupported: true },
+  });
+  h.el("#passkey-remove").listeners.get("click")();
+  h.el("#passkey-remove-confirm").listeners.get("click")();
+  await settle();
+  const remove = h.take("passkey-remove");
+  remove.resolve({
+    connected: true,
+    passkeyManagementSupported: true,
+    status: "Passkey 删除结果未确认，请刷新核实",
+    passkeyRemoveError: "uncertain",
+  });
+  await settle();
+  assert.match(h.el("#passkey-status").textContent, /结果未确认/);
+  assert.equal(h.el("#passkey-remove").hidden, true);
+  assert.equal(h.el("#passkey-remove-confirm").hidden, true);
+
+  const before = h.requests.filter(
+    (request) => request.message.type === "passkey-remove",
+  ).length;
+  h.el("#passkey-remove").listeners.get("click")();
+  h.el("#passkey-remove-confirm").listeners.get("click")();
+  await settle();
+  assert.equal(
+    h.requests.filter((request) => request.message.type === "passkey-remove").length,
+    before,
+    "uncertain state must suppress repeated removal RPCs",
+  );
+
+  h.el("#detail-back").listeners.get("click")();
+  await settle();
+  h.el("#vault-list").children[0].listeners.get("click")();
+  const fresh = h.take("item-get");
+  fresh.resolve({
+    detail: passkeyDetail(),
+    connected: true,
+    passkeyManagementSupported: true,
+  });
+  await settle();
+  assert.equal(
+    h.el("#passkey-remove").hidden,
+    false,
+    "a fresh item-get with passkey metadata recovers the control",
+  );
+});
+
+test("capability state refresh hides a now-unsupported passkey delete button", async () => {
+  const h = harness();
+  await openDetail(h, passkeyDetail(), {
+    state: { passkeyManagementSupported: true },
+    reply: { passkeyManagementSupported: true },
+  });
+  assert.equal(h.el("#passkey-remove").hidden, false);
+  h.poll();
+  const state = h.take("state");
+  state.resolve({
+    connected: true,
+    status: "ready",
+    origin: "https://example.test/",
+    candidates: [],
+    vaultItems: [],
+    passkeyManagementSupported: false,
+  });
+  await settle();
+  assert.equal(h.el("#passkey-remove").hidden, true);
+  assert.match(h.el("#passkey-detail-unsupported").textContent, /升级原生宿主/);
 });

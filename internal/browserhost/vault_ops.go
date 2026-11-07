@@ -19,7 +19,7 @@ func isV2Operation(kind string) bool {
 	switch kind {
 	case "search", "list", "vault-search", "vault-list", "item-get",
 		"item-copy-field", "item-reveal-field", "item-create", "item-edit", "item-save",
-		"item-state", "match-profiles", "fill-profile":
+		"item-state", "match-profiles", "fill-profile", "passkey-remove":
 		return true
 	}
 	return false
@@ -41,6 +41,8 @@ func (c *Connection) handleV2(r Request) error {
 		return c.handleMatchProfiles(r)
 	case "fill-profile":
 		return c.handleFillProfile(r)
+	case "passkey-remove":
+		return c.passkeyRemove(r)
 	}
 	return c.refuse(r.ID)
 }
@@ -130,6 +132,11 @@ func maskedCard(number string) string {
 	return "•••• •••• •••• " + last
 }
 
+// searchResultLimit is the production truncation bound. Tests may shorten it
+// to prove filtering is applied before truncation; the vault schema itself is
+// capped at 256 items, so a real vault cannot otherwise exercise 500+ rows.
+var searchResultLimit = 500
+
 func (c *Connection) handleSearch(r Request) error {
 	s := c.session.Load()
 	if s == nil {
@@ -137,6 +144,10 @@ func (c *Connection) handleSearch(r Request) error {
 	}
 	items, revisions, e := s.ReadAuthenticatedItems(true)
 	if e != nil {
+		return c.refuse(r.ID)
+	}
+	passkeys, err := s.ReadPasskeyMetadata(false)
+	if err != nil {
 		return c.refuse(r.ID)
 	}
 	watch, _ := s.WatchtowerSummaryLocal("")
@@ -204,15 +215,27 @@ func (c *Connection) handleSearch(r Request) error {
 				}
 			}
 		}
+		passkeyMetadata, hasPasskey := passkeys[it.ID]
+		if r.PasskeysOnly != nil && *r.PasskeysOnly && !hasPasskey {
+			continue
+		}
 		if query != "" {
 			title := strings.ToLower(it.Title)
 			subtitle := strings.ToLower(it.Username)
-			if !strings.Contains(title, query) && !strings.Contains(subtitle, query) {
+			matched := strings.Contains(title, query) || strings.Contains(subtitle, query)
+			if !matched && r.PasskeysOnly != nil && *r.PasskeysOnly {
+				matched = passkeyMetadataMatches(passkeyMetadata, query)
+			}
+			if !matched {
 				continue
 			}
 		}
 		vaultSet[vaultOf(it)] = true
-		out = append(out, summaryFor(it, rev, watchByID[it.ID]))
+		summary := summaryFor(it, rev, watchByID[it.ID])
+		if hasPasskey {
+			summary.Passkey = browserPasskey(passkeyMetadata)
+		}
+		out = append(out, summary)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Title < out[j].Title })
 	vaultSet["personal"] = true
@@ -225,8 +248,8 @@ func (c *Connection) handleSearch(r Request) error {
 		vaults = append(vaults, BrowserVaultSummary{ID: id, Name: name})
 	}
 	sort.Slice(vaults, func(i, j int) bool { return vaults[i].ID < vaults[j].ID })
-	if len(out) > 500 {
-		out = out[:500]
+	if len(out) > searchResultLimit {
+		out = out[:searchResultLimit]
 	}
 	return c.response(Response{ID: r.ID, Type: "items", Items: out, Vaults: vaults})
 }
@@ -249,6 +272,10 @@ func (c *Connection) handleItemGet(r Request) error {
 	if e != nil {
 		return c.refuse(r.ID)
 	}
+	passkeys, e := s.ReadPasskeyMetadata(false)
+	if e != nil {
+		return c.refuse(r.ID)
+	}
 	it, ok := c.findItem(items, r.ItemID)
 	if !ok {
 		return c.refuse(r.ID)
@@ -259,6 +286,9 @@ func (c *Connection) handleItemGet(r Request) error {
 	}
 	category := categoryOf(it)
 	detail := &BrowserItemDetail{ID: it.ID, Revision: rev, Category: category, VaultID: vaultOf(it), Title: it.Title, Username: it.Username, HasPassword: it.Password != "" && (category == "login" || category == "password"), HasOTP: it.OTP != "", HasNotes: it.Notes != "", HasPasskey: len(it.Passkey) != 0, URL: it.URL, State: stateName(it.State), Favorite: it.Favorite, AutoSubmit: it.AutoSubmit, CreatedAt: it.CreatedAt, UpdatedAt: it.UpdatedAt}
+	if metadata, ok := passkeys[it.ID]; ok {
+		detail.Passkey = browserPasskey(metadata)
+	}
 	detail.Tags = append([]string(nil), it.Tags...)
 	for _, u := range it.URLs {
 		detail.URLs = append(detail.URLs, BrowserItemURL{Label: u.Label, URL: u.URL, Primary: u.Primary, MatchMode: u.MatchMode})

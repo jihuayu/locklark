@@ -29,6 +29,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     lastMatchAt = 0,
     matchCategory = "login",
     vaultItems = [],
+    vaultSearchGeneration = 0,
     detailCache = new Map(),
     pendingOpenAndFill = null,
     openAndFillTimer = null,
@@ -272,6 +273,7 @@ if (typeof importScripts === "function") importScripts("core.js");
           .slice(0, 50)
           .filter((tag) => typeof tag === "string" && tag.length <= 128)
       : [];
+    const passkey = publicPasskeyMetadata(item.passkey);
     return {
       id: item.id,
       revision: item.revision,
@@ -295,6 +297,8 @@ if (typeof importScripts === "function") importScripts("core.js");
         ? item.state
         : "active",
       has_otp: item.has_otp === true,
+      has_passkey: item.has_passkey === true,
+      ...(passkey ? { passkey } : {}),
       updated_at:
         typeof item.updated_at === "string"
           ? item.updated_at.slice(0, 64)
@@ -303,6 +307,15 @@ if (typeof importScripts === "function") importScripts("core.js");
   }
   function boundedString(value, length = 16384) {
     return typeof value === "string" ? value.slice(0, length) : "";
+  }
+  function publicPasskeyMetadata(raw) {
+    if (!core.validPasskeyMetadata(raw)) return null;
+    return {
+      credential_id: raw.credential_id,
+      rp_id: raw.rp_id,
+      user_name: raw.user_name,
+      display_name: raw.display_name,
+    };
   }
   function publicDetail(item) {
     if (!item || typeof item !== "object" || Array.isArray(item)) return null;
@@ -436,6 +449,8 @@ if (typeof importScripts === "function") importScripts("core.js");
         detail.attachments.push(view);
       }
     }
+    const passkey = publicPasskeyMetadata(item.passkey);
+    if (passkey) detail.passkey = passkey;
     return detail;
   }
   function currentSiteFlags() {
@@ -483,6 +498,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       preferredTitle: multiStepFor(context?.tabId, context?.origin)?.title || "",
       step: multiStepFor(context?.tabId, context?.origin)?.stepCompleted || "",
       attachmentsSupported: !!capability && core.attachmentCapability(hostCapabilities),
+      passkeyManagementSupported: passkeyManagementSupported(),
       vaultItems: vaultItems.map((item) => ({ ...item })),
       pending: !!pending || !!pendingOTP || !!pendingPasskey,
       otpPending: !!pendingOTP,
@@ -1132,6 +1148,7 @@ if (typeof importScripts === "function") importScripts("core.js");
         "attachment-cancel": "attachment-cancelled",
         "attachment-read": "attachment-data",
         "attachment-remove": "attachment-removed",
+        "passkey-remove": "passkey-removed",
         watchtower: "watchtower",
       }[call.type];
       if (
@@ -1142,6 +1159,7 @@ if (typeof importScripts === "function") importScripts("core.js");
           "cancel-otp",
           "passkey-create",
           "passkey-get",
+          "passkey-remove",
         ].includes(call.type)
       ) {
         call.resolve(message);
@@ -2632,8 +2650,29 @@ if (typeof importScripts === "function") importScripts("core.js");
       )
       .filter(Boolean);
   }
-  async function vaultSearch(rawQuery, rawCategory) {
+  async function vaultSearch(rawQuery, rawCategory, rawPasskeysOnly) {
     if (!capability) throw Error("refused");
+    const generation = ++vaultSearchGeneration,
+      requestEpoch = epoch,
+      requestCapability = capability;
+    const current = () =>
+      generation === vaultSearchGeneration &&
+      requestEpoch === epoch &&
+      requestCapability === capability;
+    const passkeysOnly = rawPasskeysOnly === true;
+    if (passkeysOnly && !passkeyManagementSupported()) {
+      if (!current())
+        return {
+          items: [],
+          source: "stale",
+          fallback: false,
+          unsupported: false,
+          stale: true,
+        };
+      vaultItems = [];
+      status = "当前原生宿主不支持 Passkey 管理，请升级原生宿主";
+      return { items: [], source: "unsupported", fallback: false, unsupported: true };
+    }
     const category = core.validCategory(rawCategory) ? rawCategory : "all";
     const query =
       typeof rawQuery === "string" ? rawQuery.slice(0, 500) : "";
@@ -2646,18 +2685,42 @@ if (typeof importScripts === "function") importScripts("core.js");
           query,
           category: canonical,
           favorites_only: category === "favorites",
+          ...(passkeysOnly ? { passkeys_only: true } : {}),
         },
         12000,
       );
+      if (!current())
+        return {
+          items: [],
+          source: "stale",
+          fallback: false,
+          unsupported: false,
+          stale: true,
+        };
       const items = [];
       for (const item of response.items || []) {
         const publicEntry = publicItem(item);
         if (publicEntry) items.push(publicEntry);
       }
       vaultItems = items.slice(0, 500);
-      status = `金库中有 ${vaultItems.length} 个条目`;
+      status = passkeysOnly
+        ? `金库中有 ${vaultItems.length} 个 Passkey`
+        : `金库中有 ${vaultItems.length} 个条目`;
       return { items: vaultItems, source: "native", fallback: false };
     } catch {
+      if (!current())
+        return {
+          items: [],
+          source: "stale",
+          fallback: false,
+          unsupported: false,
+          stale: true,
+        };
+      if (passkeysOnly) {
+        vaultItems = [];
+        status = "Passkey 列表读取失败，请重新连接后重试";
+        return { items: [], source: "native", fallback: false, unsupported: false };
+      }
       vaultItems = candidateItems();
       status = vaultItems.length
         ? "当前原生宿主仅提供当前网站候选"
@@ -2668,6 +2731,61 @@ if (typeof importScripts === "function") importScripts("core.js");
         fallback: true,
       };
     }
+  }
+  async function removePasskey(message) {
+    if (!passkeyManagementSupported()) {
+      status = "当前原生宿主不支持 Passkey 管理，请升级原生宿主";
+      const error = Error("refused");
+      error.knownRefusal = true;
+      error.keepStatus = true;
+      throw error;
+    }
+    let response;
+    try {
+      response = await request(
+        "passkey-remove",
+        {
+          capability,
+          item_id: message.id,
+          revision: message.revision,
+          credential_id: message.credential_id,
+        },
+        20000,
+      );
+    } catch (error) {
+      if (!error.knownRefusal) {
+        const uncertain = Error("unknown");
+        uncertain.uncertain = true;
+        throw uncertain;
+      }
+      throw error;
+    }
+    if (response?.type === "unknown") {
+      const uncertain = Error("unknown");
+      uncertain.uncertain = true;
+      throw uncertain;
+    }
+    if (
+      !core.validResponse(response) ||
+      response.type !== "passkey-removed" ||
+      response.item_id !== message.id ||
+      response.credential_id !== message.credential_id
+    ) {
+      const uncertain = Error("unknown");
+      uncertain.uncertain = true;
+      throw uncertain;
+    }
+    vaultSearchGeneration++;
+    vaultItems = [];
+    detailCache.clear();
+    status = "Passkey 已删除；登录和其他信息已保留";
+    updateBadge();
+    rebuildContextMenus();
+    return {
+      item_id: response.item_id,
+      revision: response.revision,
+      credential_id: response.credential_id,
+    };
   }
   async function getVaultItem(itemId, revision) {
     if (
@@ -2761,6 +2879,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     )
       throw Error("refused");
     status = "已保存";
+    vaultSearchGeneration++;
     vaultItems = [];
     detailCache.clear();
     updateBadge();
@@ -2817,6 +2936,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       throw error;
     }
     status = state === "trashed" ? "条目已移至废纸篓" : "条目已更新";
+    vaultSearchGeneration++;
     vaultItems = vaultItems.map((item) =>
       item.id === message.id
         ? {
@@ -3263,6 +3383,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       origin: context?.origin || "",
       site,
       attachmentsSupported: !!capability && core.attachmentCapability(hostCapabilities),
+      passkeyManagementSupported: passkeyManagementSupported(),
       watchtower: watchtowerReport,
     };
   }
@@ -3334,6 +3455,9 @@ if (typeof importScripts === "function") importScripts("core.js");
   }
   function attachmentsSupported() {
     return !!capability && core.attachmentCapability(hostCapabilities);
+  }
+  function passkeyManagementSupported() {
+    return !!capability && core.passkeyManagementCapability(hostCapabilities);
   }
   async function attachmentNative(type, fields) {
     if (!attachmentsSupported()) {
@@ -3472,6 +3596,7 @@ if (typeof importScripts === "function") importScripts("core.js");
           !/^[a-f0-9]{64}$/.test(response.revision || "")
         )
           throw attachmentRefusal();
+        vaultSearchGeneration++;
         detailCache.clear();
         vaultItems = [];
         status = "附件已保存";
@@ -3560,6 +3685,7 @@ if (typeof importScripts === "function") importScripts("core.js");
           !/^[a-f0-9]{64}$/.test(response.revision || "")
         )
           throw attachmentRefusal();
+        vaultSearchGeneration++;
         detailCache.clear();
         vaultItems = [];
         status = "附件已删除";
@@ -3891,13 +4017,41 @@ if (typeof importScripts === "function") importScripts("core.js");
           });
           break;
         }
-                case "vault-search":
+        case "vault-search":
         case "vault-list": {
           await settingsReady;
-          const result = await vaultSearch(message.query, message.category);
+          const result = await vaultSearch(
+            message.query,
+            message.category,
+            message.passkeysOnly === true,
+          );
           extra.vaultItems = result.items;
           extra.vaultSource = result.source;
           extra.vaultFallback = result.fallback;
+          extra.vaultStale = result.stale === true;
+          extra.passkeysUnsupported = result.unsupported === true;
+          break;
+        }
+        case "passkey-remove": {
+          if (
+            Object.keys(message).sort().join(",") !==
+              "credential_id,id,revision,type" ||
+            !/^[a-f0-9]{32}$/.test(message.id || "") ||
+            !/^[a-f0-9]{64}$/.test(message.revision || "") ||
+            !core.validCredentialID(message.credential_id)
+          )
+            throw Error("refused");
+          try {
+            extra.passkeyRemoved = await removePasskey(message);
+          } catch (error) {
+            if (requestEpoch === epoch)
+              status = error.uncertain
+                ? "Passkey 删除结果未确认，请刷新核实"
+                : error.keepStatus
+                  ? status
+                  : "Passkey 删除被拒绝";
+            extra.passkeyRemoveError = error.uncertain ? "uncertain" : "refused";
+          }
           break;
         }
         case "item-get":

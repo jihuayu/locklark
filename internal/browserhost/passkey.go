@@ -15,17 +15,18 @@ type PasskeyView struct {
 	Choices                               []personal.PasskeyChoice
 }
 type pendingPasskey struct {
-	request   Request
-	target    personal.PasskeyTarget
-	parsed    *passkey.Request
-	session   *personal.Session
-	gate      *personal.MutationGate
-	until     time.Time
-	epoch     uint64
-	cancelled atomic.Bool
-	working   bool
-	choices   []personal.PasskeyChoice
-	timer     *time.Timer
+	request      Request
+	target       personal.PasskeyTarget
+	parsed       *passkey.Request
+	session      *personal.Session
+	gate         *personal.MutationGate
+	until        time.Time
+	epoch        uint64
+	passkeyEpoch uint64
+	cancelled    atomic.Bool
+	working      bool
+	choices      []personal.PasskeyChoice
+	timer        *time.Timer
 }
 
 func (c *Connection) startPasskey(r Request) error {
@@ -48,7 +49,7 @@ func (c *Connection) startPasskey(r Request) error {
 	if s.RegisterMutation(gate) != nil {
 		return c.refuse(r.ID)
 	}
-	p := &pendingPasskey{request: r, parsed: parsed, session: s, gate: gate, until: until, epoch: c.epoch, target: personal.PasskeyTarget{Context: r.Context(), Create: parsed.Create, Options: []byte(r.Options)}, working: true}
+	p := &pendingPasskey{request: r, parsed: parsed, session: s, gate: gate, until: until, epoch: c.epoch, passkeyEpoch: s.PasskeyRevocationEpoch(), target: personal.PasskeyTarget{Context: r.Context(), Create: parsed.Create, Options: []byte(r.Options)}, working: true}
 	c.passkey = p
 	c.passkeyStatus = "正在读取 Passkey"
 	c.authMu.Lock()
@@ -89,7 +90,10 @@ func (c *Connection) startPasskey(r Request) error {
 	return nil
 }
 func (c *Connection) passkeyLive(p *pendingPasskey) bool {
-	return !p.cancelled.Load() && p.epoch == c.generation.Load() && c.valid(p.request.Capability) && c.now().Before(p.until)
+	if p == nil || p.session == nil || c.session.Load() != p.session {
+		return false
+	}
+	return !p.cancelled.Load() && p.epoch == c.generation.Load() && p.passkeyEpoch == p.session.PasskeyRevocationEpoch() && c.valid(p.request.Capability) && c.now().Before(p.until)
 }
 func (c *Connection) clearPasskey(p *pendingPasskey) {
 	p.cancelled.Store(true)
@@ -110,7 +114,35 @@ func (c *Connection) clearPasskey(p *pendingPasskey) {
 	}
 	c.authMu.Unlock()
 }
+
+// expireConcurrentPasskey revokes an approval surface whose owning Session has
+// advanced the passkey revocation epoch (for example a credential removal on
+// another shared connection after the mutation slot was released). A running
+// worker keeps ownership of its gate; its queued result is refused by
+// passkeyLive before delivery.
+func (c *Connection) expireConcurrentPasskey() (refuseID string, stale bool) {
+	p := c.passkey
+	if p == nil || p.session == nil || p.passkeyEpoch == p.session.PasskeyRevocationEpoch() {
+		return "", false
+	}
+	p.cancelled.Store(true)
+	p.gate.Cancel()
+	c.passkeyStatus = "Passkey 请求已因凭据删除而失效"
+	if p.working {
+		return "", true
+	}
+	refuseID = p.request.ID
+	c.clearPasskey(p)
+	return refuseID, true
+}
+
 func (c *Connection) passkeySnapshot() (*PasskeyView, string) {
+	if refuseID, stale := c.expireConcurrentPasskey(); stale {
+		if refuseID != "" {
+			go c.refuse(refuseID)
+		}
+		return nil, c.passkeyStatus
+	}
 	p := c.passkey
 	if p == nil {
 		return nil, c.passkeyStatus

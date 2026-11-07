@@ -1032,6 +1032,7 @@ globalThis.LocklarkCore = (() => {
     return out;
   }
   const ATTACHMENT_CAPABILITY = "attachments-v1";
+  const PASSKEY_MANAGEMENT_CAPABILITY = "passkey-management-v1";
   const ATTACHMENT_MAX_BYTES = 2097152;
   const ATTACHMENT_CHUNK_BYTES = 65536;
   const ATTACHMENT_MAX_COUNT = 16;
@@ -1044,6 +1045,12 @@ globalThis.LocklarkCore = (() => {
     return (
       Array.isArray(capabilities) &&
       capabilities.includes(ATTACHMENT_CAPABILITY)
+    );
+  }
+  function passkeyManagementCapability(capabilities) {
+    return (
+      Array.isArray(capabilities) &&
+      capabilities.includes(PASSKEY_MANAGEMENT_CAPABILITY)
     );
   }
   function validAttachmentID(value) {
@@ -1148,6 +1155,51 @@ globalThis.LocklarkCore = (() => {
       if (index < size) bytes[index++] = triple & 0xff;
     }
     return index === size ? bytes : null;
+  }
+  function base64URLEncode(bytes) {
+    return base64Encode(bytes).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  function base64URLDecode(text, maxBytes = ATTACHMENT_CHUNK_BYTES) {
+    if (typeof text !== "string" || !/^[A-Za-z0-9_-]*$/.test(text)) return null;
+    const padded =
+      text.replace(/-/g, "+").replace(/_/g, "/") +
+      "=".repeat((4 - (text.length % 4)) % 4);
+    return base64Decode(padded, maxBytes);
+  }
+  function validCredentialID(value) {
+    if (typeof value !== "string" || value.length < 1 || value.length > 1024)
+      return false;
+    const bytes = base64URLDecode(value, 1024);
+    return !!bytes && bytes.length === 32 && base64URLEncode(bytes) === value;
+  }
+  function validPasskeyMetadata(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    if (
+      !Object.keys(value).every((key) =>
+        ["credential_id", "rp_id", "user_name", "display_name"].includes(key),
+      )
+    )
+      return false;
+    if (!validCredentialID(value.credential_id)) return false;
+    if (
+      typeof value.rp_id !== "string" ||
+      value.rp_id.length < 1 ||
+      value.rp_id.length > 253 ||
+      value.rp_id !== value.rp_id.toLowerCase() ||
+      /[\x00-\x20\x7f]/.test(value.rp_id)
+    )
+      return false;
+    for (const key of ["user_name", "display_name"]) {
+      const text = value[key];
+      if (
+        typeof text !== "string" ||
+        text.length > 1024 ||
+        !text.isWellFormed() ||
+        /[\x00\r\n]/.test(text)
+      )
+        return false;
+    }
+    return true;
   }
   function attachmentStableKey(sectionID, fieldID) {
     if (
@@ -1269,6 +1321,14 @@ globalThis.LocklarkCore = (() => {
           "revision",
           "attachment_id",
         ],
+        "passkey-removed": [
+          "v",
+          "id",
+          "type",
+          "item_id",
+          "revision",
+          "credential_id",
+        ],
         watchtower: ["v", "id", "type", "watchtower"],
         unknown: ["v", "id", "type"],
         generated: [
@@ -1342,6 +1402,12 @@ globalThis.LocklarkCore = (() => {
         /^[a-f0-9]{32}$/.test(m.item_id || "") &&
         /^[a-f0-9]{64}$/.test(m.revision || "") &&
         validAttachmentID(m.attachment_id)
+      );
+    if (m.type === "passkey-removed")
+      return (
+        /^[a-f0-9]{32}$/.test(m.item_id || "") &&
+        /^[a-f0-9]{64}$/.test(m.revision || "") &&
+        validCredentialID(m.credential_id)
       );
     if (m.type === "attachment-data") {
       if (
@@ -4822,6 +4888,12 @@ globalThis.LocklarkCore = (() => {
     ATTACHMENT_MAX_COUNT,
     ATTACHMENT_TRANSFER_TTL_SECONDS,
     attachmentCapability,
+    PASSKEY_MANAGEMENT_CAPABILITY,
+    passkeyManagementCapability,
+    base64URLEncode,
+    base64URLDecode,
+    validCredentialID,
+    validPasskeyMetadata,
     validAttachmentID,
     validAttachmentMetadata,
     validAttachmentList,

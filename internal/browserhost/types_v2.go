@@ -8,6 +8,7 @@ func SupportedCapabilities() []string {
 		"shared-session-v1",
 		"quick-fill-v1",
 		"passkey-v1",
+		"passkey-management-v1",
 		"generate-v1",
 		"stage-save-v1",
 		"popup-vault-v1",
@@ -29,22 +30,23 @@ type BrowserVaultSummary struct {
 }
 
 type BrowserItemSummary struct {
-	ID               string   `json:"id"`
-	Revision         string   `json:"revision"`
-	Category         string   `json:"category"`
-	VaultID          string   `json:"vault_id"`
-	Title            string   `json:"title"`
-	Subtitle         string   `json:"subtitle,omitempty"`
-	PrimaryURL       string   `json:"primary_url,omitempty"`
-	State            string   `json:"state"`
-	Favorite         bool     `json:"favorite,omitempty"`
-	Tags             []string `json:"tags,omitempty"`
-	HasOTP           bool     `json:"has_otp,omitempty"`
-	HasPasskey       bool     `json:"has_passkey,omitempty"`
-	UpdatedAt        int64    `json:"updated_at,omitempty"`
-	WatchtowerFlags  []string `json:"watchtower_flags,omitempty"`
-	StrengthScore    int      `json:"strength_score,omitempty"`
-	StrengthCategory string   `json:"strength_category,omitempty"`
+	ID               string          `json:"id"`
+	Revision         string          `json:"revision"`
+	Category         string          `json:"category"`
+	VaultID          string          `json:"vault_id"`
+	Title            string          `json:"title"`
+	Subtitle         string          `json:"subtitle,omitempty"`
+	PrimaryURL       string          `json:"primary_url,omitempty"`
+	State            string          `json:"state"`
+	Favorite         bool            `json:"favorite,omitempty"`
+	Tags             []string        `json:"tags,omitempty"`
+	HasOTP           bool            `json:"has_otp,omitempty"`
+	HasPasskey       bool            `json:"has_passkey,omitempty"`
+	Passkey          *BrowserPasskey `json:"passkey,omitempty"`
+	UpdatedAt        int64           `json:"updated_at,omitempty"`
+	WatchtowerFlags  []string        `json:"watchtower_flags,omitempty"`
+	StrengthScore    int             `json:"strength_score,omitempty"`
+	StrengthCategory string          `json:"strength_category,omitempty"`
 }
 
 type BrowserCustomField struct {
@@ -154,6 +156,7 @@ type BrowserItemDetail struct {
 	HasOTP           bool                      `json:"has_otp,omitempty"`
 	HasNotes         bool                      `json:"has_notes,omitempty"`
 	HasPasskey       bool                      `json:"has_passkey,omitempty"`
+	Passkey          *BrowserPasskey           `json:"passkey,omitempty"`
 	URL              string                    `json:"url,omitempty"`
 	URLs             []BrowserItemURL          `json:"urls,omitempty"`
 	Favorite         bool                      `json:"favorite,omitempty"`

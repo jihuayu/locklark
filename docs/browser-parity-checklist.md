@@ -1,6 +1,6 @@
 # 浏览器插件当前功能与 1:1 对照清单
 
-更新：2026-11-07。产品基线为已合并的 `main` `4abecb8e869a255920f0104ce69977d87150feef`（[PR #43](https://github.com/jihuayu/locklark/pull/43)）。本轮附件与显式清空在后续验收记录中单独更新，不追溯冒充该提交已包含的功能。
+更新：2026-11-07。已合并产品基线为 `main` `e2561be1f8070f9539433412bc7ac635b965bd5f`（[PR #44](https://github.com/jihuayu/locklark/pull/44)），包含附件与显式清空。本轮 Passkey 管理在后续[验收记录](passkey-management-validation.md)单独列证；不追溯冒充该基线已包含的功能。
 
 旧清单基于 `8e61dc1` 和当时未合并的 PR #40；其中“39 项未实现”“没有 v2 协议/共享会话”等结论已过时。完整参考分析、65 项稳定 ID、行为约定和当时的结果保存在[历史快照](history/browser-parity-m3-baseline-2026-11-06.md)，不再作为当前缺口统计。
 
@@ -9,7 +9,7 @@
 “实现存在”“Locklark 实际跑通”“与参考产品对照完成”是不同结论。保留设计规定的五种状态：`未实现`、`已实现未对照`、`已实测`、`平台不适用`、`经用户确认的差异`。本表的状态指参考行为对照；以下真实 Locklark 测试通过，不自动关闭全部参考版本对照。
 
 - 参考行为基线仍为历史记录的 1Password `8.12.44.33`；当前没有新的参考截图/安装版逐任务对照。只按行为清单开发，不复制其代码、品牌或素材。
-- 最终开发 head `c3d505f` 的六项 CI 通过后 squash 合入上述 main。Web 日志保留 151 项扩展测试、Chromium 弹窗新建/保存/显示/编辑且密码备注保留、完整 Chromium/Firefox 填充/保存/更新/OTP，以及 Chromium Passkey 的独立签名验证。
+- PR #44 的最终开发 head `faf4732` 六项 CI 通过后 squash 合入上述 main；附件、显式清空、172 项扩展测试、206 项 E2E 以及真实 Chromium/Edge/Firefox 范围见[插件收尾验收](plugin-completion-validation.md)。以下 PR #43 的 run 保留为上一阶段证据。
 - [检查 run](https://github.com/jihuayu/locklark/actions/runs/42315487787)、[移动 run](https://github.com/jihuayu/locklark/actions/runs/42315487747)。iOS 通过的是保护能力不足时的拒绝路径，不能称完整真机成功。
 - 对应实现与测试：`content.js`、`core.js`、`background.js`、`popup.js`、`options.js`、`test/m3_fill_v2.test.js`、`test/host_v2_contract.test.js`，以及 `internal/browserhost` / `internal/personal`。具体实际命令与边界见 [M6 集成验收](m6-integration-validation.md)。
 
@@ -69,7 +69,7 @@
 | B3.5 | `excludeCredentials`/`allowCredentials` and overwrite prevention | 已实现未对照 | 当前代码已有对应实现；单测/DOM/原生验收见下方证据，尚无固定参考版本逐项对照结果。 |
 | B3.6 | Browser fallback and cancellation | 已实现未对照 | 当前代码已有对应实现；单测/DOM/原生验收见下方证据，尚无固定参考版本逐项对照结果。 |
 | B13.1 | Conditional UI | 已实现未对照 | 已有 conditional 请求传递/提示；能力接口与输入框条件式账号列表仍有缺口。 |
-| B13.2 | Passkey management and separate removal | 未实现 | 单独删除 Passkey、多凭据管理尚未形成完整入口。 |
+| B13.2 | Passkey management and separate removal | 已实现未对照 | 弹窗服务端筛选、RP/账号元数据、明确确认/取消和独立删除；Chromium/Edge/Firefox 真实双账号、其他字段保留、另一凭据签名及重连已通过。每条登录一个凭据，多账号分条目管理；同条目多凭据迁移未做，远端检查见本轮验收。 |
 | B13.3 | Advanced WebAuthn extensions, algorithms, related origins, signal APIs | 经用户确认的差异 | 沿用历史清单记录的 P2 差异：高级算法/扩展走原生认证器回退；决定与范围见历史快照 §6.3。 |
 | B14.1 | Truthful user verification | 已实现未对照 | 当前代码已有对应实现；单测/DOM/原生验收见下方证据，尚无固定参考版本逐项对照结果。 |
 | B14.2 | Windows Hello / Touch ID biometric prompt | 已实现未对照 | 系统解锁接口已有实现；真实 Hello/Touch ID 提示、拒绝及硬件失效尚待验收。 |
@@ -87,6 +87,6 @@
 
 附件上传/下载/删除、未读取备注及隐藏自定义字段的显式清空，在 [插件收尾验收](plugin-completion-validation.md) 记录实际结果。未运行的流程不能仅凭代码或新按钮记为通过。
 
-仍开放：Safari；各浏览器的 Windows/macOS 原生组合；完整条件式账号列表；Passkey 独立删除/多凭据管理；真实系统生物识别；更多站点和输入框兼容性；签名、商店分发与自动更新。已实现范围的完整参考对照仍需逐项关闭。
+仍开放：Safari；各浏览器的 Windows/macOS 原生组合；完整条件式账号列表；同一登录条目的多凭据管理；真实系统生物识别；更多站点和输入框兼容性；签名、商店分发与自动更新。已实现范围的完整参考对照仍需逐项关闭。
 
 新结果应更新本表相应行及精确提交/平台证据；旧版本计数、E2E 的能力探针通过和 CI 绿色均不能代替完整产品任务验收。

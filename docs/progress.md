@@ -1,6 +1,8 @@
 # Locklark 开发进度
 
-本轮起点 / 上批已合并基线：`4abecb8`（PR #43，2026-11-07 00:20:45 UTC）。该 PR 最终 head `c3d505f` 六项 CI 全部通过。以下旧段落中的“PR #37/#40 尚未合并”、初始浏览器缺口与旧 CI 待办只代表历史阶段；当前缺口以[浏览器清单](browser-parity-checklist.md)和[插件收尾验收](plugin-completion-validation.md)为准。
+本轮起点 / 上批已合并基线：`e2561be`（[PR #44](https://github.com/jihuayu/locklark/pull/44)）。该 PR 最终 head `faf4732` 六项 CI 全部通过。以下旧段落中的“PR #37/#40 尚未合并”、初始浏览器缺口与旧 CI 待办只代表历史阶段；当前缺口以[浏览器清单](browser-parity-checklist.md)和最新验收为准。
+
+2026-11-07 继续推进 Passkey 管理：弹窗筛选、RP/账号元数据、独立删除及并发撤销已实现；主代理独立 Chromium、Edge、Firefox 双账号旅程通过，删除后保留登录/密码/备注，另一账号重连后仍能签名。DeepSeek workers 完成实现并并行调研 CLI，主代理补审计动作回放并独立验收。完整测试与当前 PR/远端门槛见 [Passkey 管理验收](passkey-management-validation.md)；CLI broker 客户端/租约仍未闭环。
 
 2026-11-07 插件收尾（[PR #44](https://github.com/jihuayu/locklark/pull/44)）：附件上传/下载 SHA-256 校验/删除、备注及隐藏自定义字段显式清空、异步操作竞态修复已完成本地验收。扩展 172 项测试通过；更新后 E2E 为 206 项：170 通过、36 pending、0 失败，分开报告能力探测与组件契约。独立 Edge 与 Firefox Passkey 实测范围、剩余 CLI broker/旧文档兼容和远端回执见[本轮验收](plugin-completion-validation.md)。
 

@@ -757,6 +757,15 @@ def f1_autosubmit_ready(ctx: E2EContext) -> bool:
     return "autoLogin" in core and "requestSubmit" in core
 
 
+def f2_passkey_management_ready(ctx: E2EContext) -> bool:
+    """Both sides of the shipped management protocol must exist before testing it."""
+    return (
+        "passkey-management-v1" in extension_or_source_text(ctx, "core.js")
+        and "passkey-management-v1" in source_text(ctx, "internal/browserhost/types_v2.go")
+        and '"passkey-remove"' in source_text(ctx, "internal/browserhost/protocol.go")
+    )
+
+
 def f2_inline_ready(ctx: E2EContext) -> bool:
     content = extension_text(ctx, "content.js")
     return bool(content) and (
@@ -1261,6 +1270,7 @@ __all__ = [
     "extension_asset",
     "extension_text",
     "f1_passkey_ready",
+    "f2_passkey_management_ready",
     "f1_autosubmit_ready",
     "f2_inline_ready",
     "f2_autologin_ready",
