@@ -8,6 +8,7 @@ import { createHash, createPublicKey, verify } from "node:crypto";
 import { createRequire } from "node:module";
 import { fixtureCanaries } from "./browser_save_acceptance.mjs";
 import { acceptPasskeyManagement } from "./browser_passkey_management_acceptance.mjs";
+import { acceptConditionalPasskey } from "./browser_conditional_passkey_acceptance.mjs";
 
 export const PASSKEY_CONTRACT = Object.freeze({
   gate: "LOCKLARK_TEST_FIREFOX_PASSKEY=1",
@@ -702,6 +703,24 @@ export async function acceptFirefoxPasskey(driver) {
     fallback.state.startsWith("rejected:"),
     "Unexpected browser fallback outcome: " + fallback.state,
   );
+  if (process.env.LOCKLARK_TEST_PASSKEY_CONDITIONAL === "1") {
+    await acceptConditionalPasskey({
+      origin, fixture, first: created.result.json, pageEval, inlineClick: clickInline,
+      inlinePresent: async label => !(await inlineAbsent(label)),
+      clickDocument: async selector => {
+        input([], false);
+        const view = await viewportOrigin();
+        const point = await pageEval(selector => {
+          const rect = document.querySelector(selector)?.getBoundingClientRect();
+          return rect && { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+        }, selector);
+        assert(view?.found && point, "Conditional document input unavailable");
+        clickScreen(view.x + point.x, view.y + point.y);
+      },
+      focusPage: () => input([], false), navigate: driver.navigate,
+      eventually, input, observe: driver.observe, phase, openPopup: driver.openPopup, reconnect,
+    });
+  }
   if (process.env.LOCKLARK_TEST_PASSKEY_MANAGEMENT === "1") {
     await acceptPasskeyManagement({
       origin, fixture, first: created.result.json,

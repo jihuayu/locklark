@@ -228,6 +228,43 @@ def t2_f2_07(ctx):
     )
 
 
+@e2e_test(
+    "T2_F2_08", 2, ["F2"],
+    "Conditional Passkey metadata listing is read-only and selection pins the exact account",
+    coverage_kind="component_contract",
+)
+def t2_f2_08(ctx):
+    gate(ctx, "F2", f1_passkey_ready(ctx), "Native Passkey protocol is absent")
+    go_package_test(
+        ctx, "./internal/personal",
+        r"^Test(ConditionalPasskeyCandidates.*|ReviewPasskeyPinnedTargetIsExact)$",
+        min_passed=4,
+    )
+    go_package_test(
+        ctx, "./internal/browserhost",
+        r"^Test(PasskeyConditional.*|PasskeyCandidatesFrameBounds|PasskeySelectedTargetReviewAndNativeApproveGuard)$",
+        min_passed=5,
+    )
+
+
+@e2e_test(
+    "T2_F2_09", 2, ["F2"],
+    "Conditional Passkey bridges bind context and clean up aborted or invalidated requests",
+    coverage_kind="component_contract",
+)
+def t2_f2_09(ctx):
+    gate(ctx, "F2", f1_passkey_ready(ctx), "Native Passkey protocol is absent")
+    node_test_pattern(
+        ctx, "browser-extension/test/webauthn_conditional.test.js", r".", min_passed=15,
+    )
+    node_test_pattern(
+        ctx, "browser-extension/test/content_conditional.test.js", r".", min_passed=15,
+    )
+    node_test_pattern(
+        ctx, "browser-extension/test/background.test.js", r"conditional", min_passed=9,
+    )
+
+
 # ---------------------------------------------------------------------------
 # F3
 # ---------------------------------------------------------------------------

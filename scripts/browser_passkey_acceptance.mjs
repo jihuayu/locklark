@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { createHash, createPublicKey, verify } from "node:crypto";
 import { acceptPasskeyManagement } from "./browser_passkey_management_acceptance.mjs";
+import { acceptConditionalPasskey } from "./browser_conditional_passkey_acceptance.mjs";
 export async function acceptBrowserPasskey({
   page,
   browser,
@@ -38,6 +39,12 @@ export async function acceptBrowserPasskey({
   await page.bringToFront();
   await page.keyboard.press("Escape");
   const cdp = await browser.newCDPSession(page);
+  async function inlinePresent(label) {
+    const { root } = await cdp.send("DOM.getDocument", { depth: -1, pierce: true });
+    const walk = node => (node.nodeName === "BUTTON" && (node.children || []).some(c => c.nodeValue === label)) ||
+      [...(node.children || []), ...(node.shadowRoots || [])].some(walk);
+    return walk(root);
+  }
   async function inlineClick(label) {
     let node;
     await eventually(async () => {
@@ -301,6 +308,29 @@ export async function acceptBrowserPasskey({
     () => page.evaluate(() => window.abortResult === "AbortError"),
     "AbortSignal not honored",
   );
+  if (process.env.LOCKLARK_TEST_PASSKEY_CONDITIONAL === "1") {
+    await acceptConditionalPasskey({
+      origin, fixture, first: created.json, pageEval: (fn, arg) => page.evaluate(fn, arg),
+      clickDocument: async selector => { input([], false); await page.bringToFront(); await page.locator(selector).click(); },
+      inlineClick, inlinePresent,
+      inspectConditional: async () => {
+        const { root } = await cdp.send("DOM.getDocument", { depth: -1, pierce: true });
+        const state = { panels: 0, choices: 0, expectedLabel: false };
+        const visit = node => {
+          const attrs = node.attributes || [];
+          if (attrs.includes("data-locklark-conditional")) state.panels++;
+          if (attrs.includes("data-locklark-passkey-choice")) {
+            state.choices++;
+            if ((node.children || []).some(c => c.nodeValue === "Synthetic user · passkey-test")) state.expectedLabel = true;
+          }
+          for (const child of [...(node.children || []), ...(node.shadowRoots || [])]) visit(child);
+        };
+        visit(root); return state;
+      },
+      focusPage: () => page.bringToFront(), navigate: url => page.goto(url),
+      eventually, input, observe, phase, openPopup, reconnect,
+    });
+  }
   if (process.env.LOCKLARK_TEST_PASSKEY_MANAGEMENT === "1") {
     await acceptPasskeyManagement({
       origin, fixture, first: created.json, openPopup, observe, reconnect,

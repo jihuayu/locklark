@@ -326,7 +326,7 @@ async function bidiCall(method, params) {
 async function pageEvaluate(source, args = []) {
   const response = await bidiCall("script.callFunction", {
     functionDeclaration:
-      "function(){const value=(function(){" +
+      "async function(){const value=await(function(){" +
       source +
       "}).apply(null,arguments);return JSON.stringify(value===undefined?null:value);}",
     target: { context: pageContext },
@@ -1215,6 +1215,7 @@ try {
         reconnect: passkeyOnly ? passkeyPair : acceptanceDriver.reconnect,
         openPopup: acceptanceDriver.openPopup,
         observe: acceptanceDriver.observe,
+        navigate: acceptanceDriver.navigate,
         pause,
       });
     }
