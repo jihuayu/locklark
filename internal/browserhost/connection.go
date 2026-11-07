@@ -17,6 +17,8 @@ type Pending struct {
 type View struct {
 	Passkey                 *PasskeyView
 	PasskeyStatus           string
+	Signal                  *SignalView
+	SignalStatus            string
 	QuickFill               bool
 	OTP                     *OTPView
 	OTPStatus, OTPRequestID string
@@ -32,6 +34,8 @@ type View struct {
 type Connection struct {
 	passkey, passkeyAuth    *pendingPasskey
 	passkeyStatus           string
+	signal, signalAuth      *pendingSignal
+	signalStatus            string
 	quickFill               bool // chosen in the native pairing UI, never by a web page
 	otp, otpAuth            *pendingOTP
 	otpRetired              map[string]otpRetired
@@ -174,6 +178,9 @@ func (c *Connection) invalidate() {
 		}
 		c.clearPasskey(c.passkey)
 	}
+	if c.signal != nil {
+		c.clearSignal(c.signal)
+	}
 	c.invalidateOTP()
 	c.clearStaged()
 	c.clearUpload()
@@ -221,6 +228,14 @@ func (c *Connection) expire() {
 		responses := c.retireOTP(p, otpNatural)
 		if len(responses) != 0 {
 			go c.sendOTPResponses(responses)
+		}
+	}
+	if p := c.signal; p != nil && !now.Before(p.until) {
+		p.cancelled.Store(true)
+		p.cancelGate()
+		if !p.working {
+			c.clearSignal(p)
+			c.signalStatus = "网站 Passkey 信号已过期"
 		}
 	}
 	if c.hello != "" && !now.Before(c.pairUntil) {
@@ -395,6 +410,9 @@ func (c *Connection) Handle(r Request) error {
 		// even while another native operation is pending and never creates an
 		// approval surface of its own.
 		return c.listPasskeyCandidates(r)
+	}
+	if r.Type == "passkey-signal" {
+		return c.handlePasskeySignal(r)
 	}
 	if r.Type == "passkey-create" || r.Type == "passkey-get" {
 		return c.startPasskey(r)
@@ -604,6 +622,10 @@ func (c *Connection) Invalidate() {
 			c.saveOutcome.Store(saveUnknown)
 		}
 	}
+	if p := c.signalAuth; p != nil {
+		p.cancelled.Store(true)
+		p.cancelGate()
+	}
 	c.authMu.Unlock()
 	if !c.closed.Load() {
 		go c.response(Response{Type: "locked"})
@@ -640,6 +662,7 @@ func (c *Connection) Snapshot() View {
 	v.Paired = c.capability != ""
 	v.QuickFill = c.quickFill
 	v.Passkey, v.PasskeyStatus = c.passkeySnapshot()
+	v.Signal, v.SignalStatus = c.signalSnapshot()
 	v.Save, v.SaveStatus = c.saveSnapshot()
 	v.SaveRequestID = c.saveRequestID
 	v.OTP, v.OTPStatus = c.otpSnapshot()

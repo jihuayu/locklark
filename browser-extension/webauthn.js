@@ -392,4 +392,161 @@
         },
       );
   } catch {}
+  // W3C WebAuthn Level 3 Signal API hints. A hint is purely advisory: the
+  // native static method is called first with the page's own receiver and
+  // arguments, its exact return value is handed back untouched, and one
+  // bounded public RP hint is posted only after that promise fulfils. Nothing
+  // is awaited locally and a rejection never produces a hint.
+  const SIGNAL_SOURCE = "locklark-signal-v1";
+  const SIGNAL_MAX = 32768;
+  const SIGNAL_ACCEPTED_MAX = 64;
+  const SIGNAL_TEXT_MAX = 1024;
+  const SIGNAL_RPID_MAX = 253;
+  const SIGNAL_B64URL = /^[A-Za-z0-9_-]+$/;
+  const SIGNAL_RPID =
+    /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$/;
+  function signalBase64URL(value, max) {
+    if (typeof value !== "string" || value.length < 2) return false;
+    if (value.length > max * 2 || !SIGNAL_B64URL.test(value)) return false;
+    let bytes;
+    try {
+      bytes = Uint8Array.from(
+        atob(value.replace(/-/g, "+").replace(/_/g, "/")),
+        (c) => c.charCodeAt(0),
+      );
+    } catch {
+      return false;
+    }
+    if (bytes.length < 1 || bytes.length > max) return false;
+    let raw = "";
+    for (const byte of bytes) raw += String.fromCharCode(byte);
+    const canonical = btoa(raw)
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "");
+    return canonical === value;
+  }
+  function signalText(value) {
+    return (
+      typeof value === "string" &&
+      value.length <= SIGNAL_TEXT_MAX &&
+      (typeof value.isWellFormed !== "function" || value.isWellFormed()) &&
+      !/[\x00\r\n]/.test(value)
+    );
+  }
+  function signalRPID(value) {
+    return (
+      typeof value === "string" &&
+      value.length >= 1 &&
+      value.length <= SIGNAL_RPID_MAX &&
+      SIGNAL_RPID.test(value)
+    );
+  }
+  // Bounded allowlist snapshot of the page's own dictionary. Unreadable
+  // members, unknown kinds and out-of-bound values yield "" so the hint is
+  // simply not posted. The RP/origin policy stays native.
+  function signalSnapshot(kind, options) {
+    if (!options || typeof options !== "object") return "";
+    if (!signalRPID(options.rpId)) return "";
+    if (kind === "unknown") {
+      const credentialId = options.credentialId;
+      if (!signalBase64URL(credentialId, 1024)) return "";
+      return JSON.stringify({ kind, rpId: options.rpId, credentialId });
+    }
+    if (kind === "accepted") {
+      const userId = options.userId;
+      if (!signalBase64URL(userId, 64)) return "";
+      const list = options.allAcceptedCredentialIds;
+      if (!Array.isArray(list) || list.length > SIGNAL_ACCEPTED_MAX) return "";
+      const ids = [];
+      for (const id of list) {
+        if (!signalBase64URL(id, 1024)) return "";
+        ids.push(id);
+      }
+      return JSON.stringify({
+        kind,
+        rpId: options.rpId,
+        userId,
+        allAcceptedCredentialIds: ids,
+      });
+    }
+    if (kind === "user") {
+      const userId = options.userId;
+      if (!signalBase64URL(userId, 64)) return "";
+      const name = options.name;
+      const displayName = options.displayName;
+      if (!signalText(name) || !signalText(displayName)) return "";
+      return JSON.stringify({
+        kind,
+        rpId: options.rpId,
+        userId,
+        name,
+        displayName,
+      });
+    }
+    return "";
+  }
+  function postSignalHint(options) {
+    try {
+      window.postMessage(
+        { source: SIGNAL_SOURCE, id: crypto.randomUUID(), options },
+        location.origin,
+      );
+    } catch {}
+  }
+  // Observes fulfilment only. The rejection branch is handled (never an
+  // unhandled rejection) and posts nothing; every observer error is swallowed
+  // so the page's own outcome can never be disturbed.
+  function observeSignalHint(result, options) {
+    try {
+      if (
+        !result ||
+        (typeof result !== "object" && typeof result !== "function")
+      )
+        return;
+      if (typeof result.then !== "function") return;
+      Promise.resolve(result).then(
+        () => postSignalHint(options),
+        () => {},
+      );
+    } catch {}
+  }
+  function signalWrapper(kind, nativeSignal) {
+    return function (...args) {
+      // The native call always happens first and its exact result is returned:
+      // the receiver, the options identity and any synchronous throw are the
+      // page's own. The snapshot is taken immediately afterwards, in the same
+      // task, so a later page mutation cannot change what is reported.
+      const result = nativeSignal.apply(this, args);
+      let options = "";
+      try {
+        options = signalSnapshot(kind, args[0]);
+      } catch {
+        options = "";
+      }
+      if (options && options.length <= SIGNAL_MAX)
+        observeSignalHint(result, options);
+      return result;
+    };
+  }
+  for (const [kind, name] of [
+    ["unknown", "signalUnknownCredential"],
+    ["accepted", "signalAllAcceptedCredentials"],
+    ["user", "signalCurrentUserDetails"],
+  ]) {
+    try {
+      // Only an already implemented native static method is wrapped. A missing
+      // method stays missing: the extension never invents a platform surface
+      // or advertises one through getClientCapabilities.
+      const nativeSignal = PublicKeyCredential[name];
+      if (typeof nativeSignal !== "function") continue;
+      Object.defineProperty(PublicKeyCredential, name, {
+        configurable: true,
+        writable: true,
+        value: function (...args) {
+          return signalWrapper(kind, nativeSignal).apply(this, args);
+        },
+      });
+    } catch {}
+  }
 })();

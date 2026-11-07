@@ -1145,6 +1145,7 @@ if (typeof importScripts === "function") importScripts("core.js");
         "passkey-create": "passkey-result",
         "passkey-get": "passkey-result",
         "passkey-list": "passkey-candidates",
+        "passkey-signal": "passkey-signal-accepted",
         "vault-search": "vault-items",
         "vault-list": "vault-items",
         "item-get": "item-detail",
@@ -3149,6 +3150,51 @@ if (typeof importScripts === "function") importScripts("core.js");
       throw Error("refused");
     return c;
   }
+  // WebAuthn Signal API hints are advisory: the page's own static method has
+  // already settled, so nothing here can change a credential response, claim a
+  // fill/OTP/Passkey/conditional slot or prompt for a connection. The hint is
+  // only forwarded while the live capability, the native capability and the
+  // Passkey use setting all still hold.
+  function passkeySignalSupported() {
+    return (
+      !!capability &&
+      offerUsePasskeys === true &&
+      core.passkeySignalCapability(hostCapabilities)
+    );
+  }
+  async function passkeySignal(message, c) {
+    await settingsReady;
+    // Only the isolated content bridge may forward a hint, and only from the
+    // top frame; everything else is caller-supplied shape and is refused.
+    if (
+      Object.keys(message).length !== 2 ||
+      Object.keys(message).some((key) => key !== "type" && key !== "options") ||
+      c.frameId !== 0
+    )
+      throw Error("refused");
+    const options = core.passkeySignalOptions(message.options);
+    if (!options || !passkeySignalSupported()) throw Error("refused");
+    const generation = epoch;
+    await current(c);
+    // The probe yields control: the epoch, capability, native capabilities,
+    // settings and the actual tab/document/origin can all change. Re-check all
+    // of them in one step before the single wire send, using only the browser
+    // asserted context captured above.
+    if (generation !== epoch || !passkeySignalSupported()) throw Error("refused");
+    const requestId = id();
+    const response = await request(
+      "passkey-signal",
+      { ...fields(c), options },
+      8000,
+      requestId,
+    );
+    if (
+      generation !== epoch ||
+      !core.validPasskeySignalAck(response, requestId)
+    )
+      throw Error("refused");
+    return {};
+  }
   async function fromContent(message, sender) {
     if (!message || typeof message !== "object") throw Error("refused");
     // Cancellation authenticates the original document even after navigation.
@@ -3172,6 +3218,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     }
     const c = await contentContext(sender);
     await settingsReady;
+    if (message.type === "passkey-signal") return passkeySignal(message, c);
     if (message.type === "inline-state")
       return {
         connected: !!capability,

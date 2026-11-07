@@ -60,6 +60,13 @@ func (a *App) browserView(c *ui.Context) {
 		a.browserSaveView(c, *view.Save, view.SaveStatus)
 		return
 	}
+	if view.Signal != nil {
+		a.browserSignalView(c, *view.Signal, view.SignalStatus)
+		return
+	}
+	if view.SignalStatus != "" {
+		ui.Text(c, view.SignalStatus).FontSize(13)
+	}
 	if view.Pending == nil {
 		ui.Text(c, "在浏览器弹窗中选择当前网站的登录。此窗口不会自行请求或刷新候选。")
 		return
@@ -147,6 +154,88 @@ func (a *App) browserOTPAction(id string, work func() error) {
 			}
 		}}
 	})
+}
+
+// browserSignalView renders the owner review for one WebAuthn signal hint. The
+// page only ever receives the fixed acknowledgement; every change is shown
+// here with the exact origin, RP, current account and new names, and only an
+// explicit confirmation can reserve the mutation slot.
+func (a *App) browserSignalView(c *ui.Context, p browserhost.SignalView, status string) {
+	heading := "网站请求更新 Passkey 账号"
+	switch p.Kind {
+	case "unknown":
+		heading = "网站报告未知的 Passkey 凭据"
+	case "accepted":
+		heading = "网站请求清理不再接受的 Passkey"
+	case "user":
+		heading = "网站请求更新 Passkey 账号名称"
+	}
+	ui.Text(c, heading).FontSize(22).Bold()
+	ui.Text(c, "HTTPS 来源："+visible(p.Origin)).FontSize(20).Bold()
+	ui.Text(c, "Passkey 域名："+visible(p.RPID))
+	ui.Text(c, "仅处理下列已启用的登录 Passkey。网站不会获知本地是否存在凭据，也不会收到处理结果或数量。")
+	removals := 0
+	for _, change := range p.Changes {
+		if change.Action == "remove" {
+			removals++
+			ui.Text(c, "移除 Passkey："+browserTitle(change.Title)+" · "+visible(change.Username))
+			continue
+		}
+		ui.Text(c, "更新账号名称："+browserTitle(change.Title)+" · "+visible(change.Username))
+		ui.Text(c, "  新用户名："+visible(change.Name)).FontSize(13)
+		ui.Text(c, "  新显示名："+visible(change.DisplayName)).FontSize(13)
+	}
+	if removals > 0 {
+		ui.Text(c, "注意：移除操作会在本地不可撤销地清除这些 Passkey；登录名、密码、验证码、备注与附件都会保留。网站信号本身不代表用户验证。").Bold()
+	} else {
+		ui.Text(c, "仅修改 Passkey 记录中的用户名和显示名；凭据 ID、用户句柄、私钥及所有登录字段保持不变。")
+	}
+	ui.Text(c, status)
+	if p.Working {
+		ui.Button(c, "取消尚未提交的更新").OnClick(func() { a.browserSignalCancel(p.ID) })
+		return
+	}
+	ui.PrimaryButton(c, "确认应用这些更新").Disabled(a.busy || len(p.Changes) == 0).OnClick(func() {
+		a.browserSignalAction(p.ID, func() error { return a.browser.ApprovePasskeySignal(p.ID) })
+	})
+	ui.Button(c, "取消（不做任何更改）").Disabled(a.busy).OnClick(func() {
+		a.browserSignalAction(p.ID, func() error { return a.browser.RejectPasskeySignal(p.ID) })
+	})
+}
+
+func (a *App) browserSignalAction(id string, work func() error) {
+	a.run(func() outcome {
+		err := work()
+		return outcome{apply: func() {
+			view := a.browser.Snapshot()
+			if view.Signal == nil || view.Signal.ID == id {
+				if view.SignalStatus != "" {
+					a.status = view.SignalStatus
+				} else if err != nil {
+					a.status = message(err)
+				}
+			}
+		}}
+	})
+}
+
+// browserSignalCancel revokes a live signal gate directly on the native host.
+// It deliberately bypasses a.run/a.busy: an approval may already be waiting on
+// the database, and a cancel must still reach the host to cancel that gate.
+// RejectPasskeySignal takes only the short Connection lock and performs no
+// database work, so this click handler cannot block on the vault.
+func (a *App) browserSignalCancel(id string) {
+	a.status = "已请求取消；若已提交请核实金库"
+	err := a.browser.RejectPasskeySignal(id)
+	view := a.browser.Snapshot()
+	if view.Busy || (view.Signal != nil && view.Signal.ID == id) {
+		return
+	}
+	if view.SignalStatus != "" {
+		a.status = view.SignalStatus
+	} else if err != nil {
+		a.status = message(err)
+	}
 }
 
 func browserTitle(title string) string {

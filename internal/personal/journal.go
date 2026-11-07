@@ -78,7 +78,7 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 	if e.Sequence != n || e.Previous != prev || !idOK(e.Session) || e.Actor != "local-owner" || !ed25519.Verify(pub, e.proof(), e.Signature) {
 		return invalid
 	}
-	if e.Action != passkeyCreateAction && e.Action != "desktop.system.enable" && e.Action != sshSignAction && !browserSaveAction(e.Action) && !editAction(e.Action) && !readValueAction(e.Action) && !otpAction(e.Action) && e.Action != referenceRejectAction && e.Action != inspectionAction && e.Action != exportAction && e.Action != matchAction && !migrationAction(e.Action) && e.Action != v2PurgeAction && e.Action != v2EmptyTrashAction && e.Action != v2CreateVaultAction && e.Action != v2ListVaultsAction && e.Action != v2DetailViewAction && e.Action != v2DetailInspectAction && e.Action != v2AttachmentReadAction && e.Action != watchtowerAction && e.Action != hibpAction && !((e.Action == sshGenerateAction || e.Action == sshImportAction || e.Action == "item.add" || e.Action == "item.generate") && e.Result == "native-refused") && (e.Result != "succeeded" || e.BaseRevision != "") {
+	if e.Action != passkeyCreateAction && e.Action != passkeySignalAction && e.Action != "desktop.system.enable" && e.Action != sshSignAction && !browserSaveAction(e.Action) && !editAction(e.Action) && !readValueAction(e.Action) && !otpAction(e.Action) && e.Action != referenceRejectAction && e.Action != inspectionAction && e.Action != exportAction && e.Action != matchAction && !migrationAction(e.Action) && e.Action != v2PurgeAction && e.Action != v2EmptyTrashAction && e.Action != v2CreateVaultAction && e.Action != v2ListVaultsAction && e.Action != v2DetailViewAction && e.Action != v2DetailInspectAction && e.Action != v2AttachmentReadAction && e.Action != watchtowerAction && e.Action != hibpAction && !((e.Action == sshGenerateAction || e.Action == sshImportAction || e.Action == "item.add" || e.Action == "item.generate") && e.Result == "native-refused") && (e.Result != "succeeded" || e.BaseRevision != "") {
 		return invalid
 	}
 	if (e.Action == inspectionAction || migrationAction(e.Action) || e.Action == "item.import" || e.Action == healthAction || e.Action == watchtowerAction || e.Action == hibpAction) && e.Result == "succeeded" {
@@ -88,7 +88,10 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 	} else if e.ReportDigest != "" {
 		return invalid
 	}
-	if e.Action != passkeyCreateAction && e.Action != sshSignAction && e.Action != "backup.prepare" && e.Action != "vault.restore" && !browserSaveAction(e.Action) && !boundValueAction(e.Action) && e.Action != searchAction && e.Link != "" {
+	if e.Action != passkeyCreateAction && e.Action != passkeySignalAction && e.Action != sshSignAction && e.Action != "backup.prepare" && e.Action != "vault.restore" && !browserSaveAction(e.Action) && !boundValueAction(e.Action) && e.Action != searchAction && e.Link != "" {
+		return invalid
+	}
+	if e.Action == passkeySignalAction && !digestOK(e.Link) {
 		return invalid
 	}
 	if e.Action == searchAction && !digestOK(e.Link) {
@@ -128,6 +131,13 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 		}
 	case passkeyRemoveAction:
 		if n <= 1 || !idOK(e.Item) || e.Result != "succeeded" || !digestOK(e.BaseRevision) || e.Link != "" {
+			return invalid
+		}
+	case passkeySignalAction:
+		// One replayable single-item event per affected login. The keyed link
+		// digest binds the hint and the exact reviewed selectors without
+		// publishing any of them.
+		if n <= 1 || !idOK(e.Item) || e.Result != "succeeded" || !digestOK(e.BaseRevision) || !digestOK(e.Link) {
 			return invalid
 		}
 	case v2PurgeAction:
@@ -351,7 +361,7 @@ func applyAuditRevision(ev Event, hash string, revisions map[string]string) erro
 		if (ev.Result == "not-found") == found || ev.BaseRevision != revisions[ev.Item] {
 			return invalid
 		}
-	} else if ev.Action == sshSignAction || editAction(ev.Action) || ev.Action == browserUpdateAction || readValueAction(ev.Action) || otpAction(ev.Action) {
+	} else if ev.Action == sshSignAction || ev.Action == passkeySignalAction || editAction(ev.Action) || ev.Action == browserUpdateAction || readValueAction(ev.Action) || otpAction(ev.Action) {
 		found := revisions[ev.Item] != ""
 		if (ev.Result == "not-found") == found || ev.BaseRevision != revisions[ev.Item] {
 			return invalid

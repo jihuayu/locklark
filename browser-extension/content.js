@@ -359,6 +359,25 @@
       location.origin,
     );
   }
+  // WebAuthn Signal API hints are fire-and-forget: the isolated world forwards
+  // one bounded, well-formed public RP hint and never posts anything back to
+  // the page. A foreign source/origin, an unexpected key or an unbounded or
+  // malformed document is dropped without a trace.
+  function forwardSignalHint(data) {
+    if (!data || typeof data !== "object") return;
+    if (Object.keys(data).sort().join(",") !== "id,options,source") return;
+    if (data.source !== "locklark-signal-v1") return;
+    if (typeof data.id !== "string" || !/^[a-f0-9-]{36}$/.test(data.id)) return;
+    if (typeof data.options !== "string" || data.options.length > 32768) return;
+    const options = core?.passkeySignalOptions
+      ? core.passkeySignalOptions(data.options)
+      : "";
+    if (!options) return;
+    try {
+      const sent = send({ type: "passkey-signal", options });
+      if (sent && typeof sent.catch === "function") sent.catch(() => {});
+    } catch {}
+  }
   function finishConditional(call, result) {
     if (conditionalRequest !== call) return;
     clearConditional();
@@ -1716,6 +1735,13 @@
       return;
     }
     if (window !== window.top) return;
+    if (m?.source === "locklark-signal-v1") {
+      // Same top-frame, same-origin, visible-document policy as the credential
+      // bridge; a hint is never forwarded from a hidden page.
+      if (document.visibilityState !== "visible") return;
+      forwardSignalHint(m);
+      return;
+    }
     if (
       event.source !== window ||
       event.origin !== location.origin ||

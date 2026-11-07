@@ -1061,6 +1061,141 @@ globalThis.LocklarkCore = (() => {
       capabilities.includes(CONDITIONAL_PASSKEY_CAPABILITY)
     );
   }
+  // WebAuthn Signal API hints (W3C WebAuthn Level 3). The page supplies public
+  // RP metadata only; the native host re-validates the RP against the
+  // browser-asserted origin, so these bounds never replace that check.
+  const PASSKEY_SIGNAL_CAPABILITY = "passkey-signal-v1";
+  const PASSKEY_SIGNAL_OPTIONS_MAX = 32768;
+  const PASSKEY_SIGNAL_ACCEPTED_MAX = 64;
+  const PASSKEY_SIGNAL_CREDENTIAL_MAX = 1024;
+  const PASSKEY_SIGNAL_USER_ID_MAX = 64;
+  const PASSKEY_SIGNAL_TEXT_MAX = 1024;
+  const PASSKEY_SIGNAL_RPID_MAX = 253;
+  const SIGNAL_B64URL = /^[A-Za-z0-9_-]+$/;
+  const SIGNAL_RPID =
+    /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$/;
+  function passkeySignalCapability(capabilities) {
+    return (
+      Array.isArray(capabilities) &&
+      capabilities.includes(PASSKEY_SIGNAL_CAPABILITY)
+    );
+  }
+  // Canonical un-padded base64url for a 1..max byte value. A non-canonical
+  // spelling is refused so the native decoder sees exactly one encoding.
+  function signalBase64URL(value, max) {
+    if (typeof value !== "string" || value.length < 2) return false;
+    if (value.length > max * 2 || !SIGNAL_B64URL.test(value)) return false;
+    const bytes = base64URLDecode(value, max);
+    return (
+      !!bytes &&
+      bytes.length >= 1 &&
+      bytes.length <= max &&
+      base64URLEncode(bytes) === value
+    );
+  }
+  function signalText(value) {
+    return (
+      typeof value === "string" &&
+      value.length <= PASSKEY_SIGNAL_TEXT_MAX &&
+      (typeof value.isWellFormed !== "function" || value.isWellFormed()) &&
+      !/[\x00\r\n]/.test(value)
+    );
+  }
+  function signalRPID(value) {
+    return (
+      typeof value === "string" &&
+      value.length >= 1 &&
+      value.length <= PASSKEY_SIGNAL_RPID_MAX &&
+      SIGNAL_RPID.test(value)
+    );
+  }
+  // Strict re-walk of one signal options document: exact key set per kind,
+  // bounded canonical selectors and text, no unknown keys. Returns the
+  // normalised document the native parser accepts, or "" to ignore the hint.
+  // The RP/origin policy itself always stays native.
+  function passkeySignalOptions(raw) {
+    if (
+      typeof raw !== "string" ||
+      raw.length < 2 ||
+      raw.length > PASSKEY_SIGNAL_OPTIONS_MAX
+    )
+      return "";
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return "";
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      return "";
+    const keys = Object.keys(parsed);
+    const exact = (names) =>
+      keys.length === names.length && keys.every((key) => names.includes(key));
+    let normalized;
+    if (parsed.kind === "unknown") {
+      if (!exact(["kind", "rpId", "credentialId"])) return "";
+      if (!signalRPID(parsed.rpId)) return "";
+      if (!signalBase64URL(parsed.credentialId, PASSKEY_SIGNAL_CREDENTIAL_MAX))
+        return "";
+      normalized = {
+        kind: "unknown",
+        rpId: parsed.rpId,
+        credentialId: parsed.credentialId,
+      };
+    } else if (parsed.kind === "accepted") {
+      if (!exact(["kind", "rpId", "userId", "allAcceptedCredentialIds"]))
+        return "";
+      if (!signalRPID(parsed.rpId)) return "";
+      if (!signalBase64URL(parsed.userId, PASSKEY_SIGNAL_USER_ID_MAX)) return "";
+      const list = parsed.allAcceptedCredentialIds;
+      if (!Array.isArray(list) || list.length > PASSKEY_SIGNAL_ACCEPTED_MAX)
+        return "";
+      const ids = [];
+      for (const id of list) {
+        if (!signalBase64URL(id, PASSKEY_SIGNAL_CREDENTIAL_MAX)) return "";
+        ids.push(id);
+      }
+      normalized = {
+        kind: "accepted",
+        rpId: parsed.rpId,
+        userId: parsed.userId,
+        allAcceptedCredentialIds: ids,
+      };
+    } else if (parsed.kind === "user") {
+      if (!exact(["kind", "rpId", "userId", "name", "displayName"])) return "";
+      if (!signalRPID(parsed.rpId)) return "";
+      if (!signalBase64URL(parsed.userId, PASSKEY_SIGNAL_USER_ID_MAX)) return "";
+      if (!signalText(parsed.name) || !signalText(parsed.displayName)) return "";
+      normalized = {
+        kind: "user",
+        rpId: parsed.rpId,
+        userId: parsed.userId,
+        name: parsed.name,
+        displayName: parsed.displayName,
+      };
+    } else return "";
+    let out;
+    try {
+      out = JSON.stringify(normalized);
+    } catch {
+      return "";
+    }
+    return out.length <= PASSKEY_SIGNAL_OPTIONS_MAX ? out : "";
+  }
+  // The native acceptance frame is exactly {v,id,type}. Anything longer could
+  // only be local credential metadata, so it is refused as a protocol error.
+  function validPasskeySignalAck(value, requestId) {
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      return false;
+    const keys = Object.keys(value);
+    if (keys.length !== 3) return false;
+    if (!keys.every((key) => key === "v" || key === "id" || key === "type"))
+      return false;
+    if (value.v !== 1 || value.type !== "passkey-signal-accepted") return false;
+    if (typeof value.id !== "string" || !/^[a-f0-9]{32}$/.test(value.id))
+      return false;
+    return requestId === undefined || value.id === requestId;
+  }
   // Conditional (autofill) Passkey candidate list. Entries are public account
   // metadata only: no private key, user handle or raw credential bytes.
   function validConditionalPasskeyEntry(value) {
@@ -1291,6 +1426,8 @@ globalThis.LocklarkCore = (() => {
     const shapes = {
         "passkey-result": ["v", "id", "type", "credential"],
         "passkey-candidates": ["v", "id", "type", "passkeys", "truncated"],
+        // WebAuthn signal ACK: the exact fixed frame, never metadata.
+        "passkey-signal-accepted": ["v", "id", "type"],
         locked: ["v", "type"],
         unpaired: ["v", "type", "error"],
         paired: ["v", "id", "type", "capability", "quick_fill", "capabilities"],
@@ -4956,6 +5093,12 @@ globalThis.LocklarkCore = (() => {
     CONDITIONAL_PASSKEY_CAPABILITY,
     CONDITIONAL_PASSKEY_LIMIT,
     conditionalPasskeyCapability,
+    PASSKEY_SIGNAL_CAPABILITY,
+    PASSKEY_SIGNAL_OPTIONS_MAX,
+    PASSKEY_SIGNAL_ACCEPTED_MAX,
+    passkeySignalCapability,
+    passkeySignalOptions,
+    validPasskeySignalAck,
     validConditionalPasskeyEntry,
     validConditionalPasskeyList,
     base64URLEncode,
