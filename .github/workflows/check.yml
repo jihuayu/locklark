@@ -240,6 +240,20 @@ jobs:
           go build -o "$RUNNER_TEMP/locklark-browser-register" ./cmd/locklark-browser-register
           go build -o "$RUNNER_TEMP/locklark-desktop" ./cmd/locklark-desktop
           go build -o "$RUNNER_TEMP/locklark" ./cmd/locklark
+      - name: Test reconciled E2E gates and component contracts
+        timeout-minutes: 10
+        run: |
+          python3 -m unittest discover -s tests/scripts -p 'test_e2e*.py'
+          python3 -m unittest discover -s scripts -p test_browser_firefox_native_passkey.py
+          python3 scripts/e2e_runner.py --feature all --json-out "$RUNNER_TEMP/locklark-e2e-report.json"
+      - name: Preserve E2E report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: locklark-e2e-report
+          path: ${{ runner.temp }}/locklark-e2e-report.json
+          if-no-files-found: warn
+          retention-days: 14
       - name: Test native desktop daily tools and clipboard ownership
         timeout-minutes: 10
         run: dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' python3 scripts/desktop_native_acceptance.py
@@ -300,7 +314,7 @@ jobs:
           LOCKLARK_GO: go
           LOCKLARK_BROWSER_HOST: ${{ runner.temp }}/locklark-browser-chromium
           LOCKLARK_TEST_POPUP_VAULT: "1"
-      - name: Test Firefox native browser approval, fill, save and OTP
+      - name: Test Firefox native approval, fill, save, OTP and Passkey
         timeout-minutes: 10
         run: |
           dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' node scripts/browser_firefox_native_acceptance.mjs
@@ -311,3 +325,5 @@ jobs:
           LOCKLARK_BROWSER_HOST: ${{ runner.temp }}/locklark-browser-firefox
           LOCKLARK_BROWSER_REGISTER: ${{ runner.temp }}/locklark-browser-register
           LOCKLARK_GECKODRIVER: ${{ runner.temp }}/geckodriver
+          LOCKLARK_TEST_FIREFOX_PASSKEY: "1"
+          LOCKLARK_TEST_WEBAUTHN_SERVER: ${{ runner.temp }}/locklark-webauthn-peer/node_modules/@simplewebauthn/server

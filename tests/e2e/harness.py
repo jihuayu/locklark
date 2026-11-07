@@ -34,6 +34,10 @@ from typing import Any, Callable
 # ---------------------------------------------------------------------------
 
 VALID_TIERS = (1, 2, 3, 4)
+# "component_contract" records evidence from an executed component test
+# (browser-extension M3/core suites or an existing native package test)
+# rather than a whole-browser user journey.
+COVERAGE_KINDS = ("functional", "capability_probe", "component_contract")
 VALID_FEATURES = tuple(f"F{i}" for i in range(1, 18))
 CHROMIUM_EXT_ORIGIN = "chrome-extension://geldnhjapnackobgknocomedmjgphnpe/"
 FIREFOX_EXT_ID = "browser@locklark.local"
@@ -73,6 +77,7 @@ class TestCaseSpec:
     summary: str
     func: Callable[["E2EContext"], Any]
     module: str = ""
+    coverage_kind: str = "functional"
 
 
 REGISTRY: dict[str, TestCaseSpec] = {}
@@ -83,6 +88,7 @@ def register_test(
     tier: int,
     features: list[str] | tuple[str, ...] | str,
     summary: str = "",
+    coverage_kind: str | None = None,
 ) -> Callable:
     """Register a test function and return it unchanged.
 
@@ -101,6 +107,14 @@ def register_test(
         features_list = list(features)
     if not features_list:
         raise ValueError("at least one feature is required")
+    if coverage_kind is not None and coverage_kind not in COVERAGE_KINDS:
+        raise ValueError(f"invalid coverage_kind {coverage_kind!r}")
+    if coverage_kind is None:
+        coverage_kind = (
+            "capability_probe"
+            if tier in (3, 4) or summary.startswith("Capability probe")
+            else "functional"
+        )
     for feature in features_list:
         if feature not in VALID_FEATURES:
             raise ValueError(
@@ -120,6 +134,7 @@ def register_test(
             summary=summary,
             func=fn,
             module=getattr(fn, "__module__", ""),
+            coverage_kind=coverage_kind,
         )
         return fn
 
@@ -973,6 +988,7 @@ class E2EContext:
 
 __all__ = [
     "CHROMIUM_EXT_ORIGIN",
+    "COVERAGE_KINDS",
     "CLIResult",
     "E2EContext",
     "FIREFOX_EXT_ID",

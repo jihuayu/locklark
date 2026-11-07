@@ -216,6 +216,19 @@
           <button id="detail-trash" type="button">移至废纸篓</button>
         </div>
         <div id="detail-fields" class="detail-fields"></div>
+        <h3>附件</h3>
+        <div id="attachment-list" class="attachment-list"></div>
+        <p id="attachment-unsupported" class="note" hidden>
+          当前原生宿主不支持附件（需要 attachments-v1）
+        </p>
+        <div class="attachment-actions">
+          <input id="attachment-file" type="file" hidden />
+          <button id="attachment-upload" type="button">
+            选择文件并上传（≤ 2 MiB）
+          </button>
+          <button id="attachment-cancel" type="button" hidden>取消上传</button>
+        </div>
+        <p id="attachment-status" class="note" role="status"></p>
         <h3>网站</h3>
         <div id="detail-urls" class="detail-urls"></div>
         <h3>备注</h3>

@@ -195,7 +195,15 @@ test("native aliases, stable section ids and omitted blank secrets are preserved
   }, { original });
   assert.equal(Object.hasOwn(edited, "password"), false);
   assert.equal(Object.hasOwn(edited, "otp"), false);
-  assert.equal(Object.hasOwn(edited, "sections"), false, "masked concealed values must not be rewritten");
+  assert.equal(edited.sections.length, 1, "supplied sections keep one stable structure");
+  assert.equal(edited.sections[0].id, "sec1");
+  const maskedField = edited.sections[0].fields.find((field) => field.id === "f1");
+  assert.equal(maskedField.concealed, true);
+  assert.equal(
+    Object.hasOwn(maskedField, "value"),
+    false,
+    "masked concealed values must not be rewritten",
+  );
   assert.equal(edited.notes, "changed notes");
   const first = core.itemToNativeMutation({
     category: "note",

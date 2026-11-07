@@ -105,6 +105,18 @@ func V2ItemApplyMeta(base vault.Item, meta *V2ItemMeta) (vault.Item, error) {
 	if meta == nil {
 		return vault.Item{}, ErrMutationRefused
 	}
+	return v2ItemApplyMeta(base, meta, func(previous []vault.ItemSection) ([]vault.ItemSection, error) {
+		return v2SectionsFromMeta(previous, meta.Sections)
+	})
+}
+
+// v2ItemApplyMeta is the shared explicit application path. sectionsFrom owns
+// the section projection so the DTO round-trip and the mutation-specific
+// section inputs cannot drift apart.
+func v2ItemApplyMeta(base vault.Item, meta *V2ItemMeta, sectionsFrom func([]vault.ItemSection) ([]vault.ItemSection, error)) (vault.Item, error) {
+	if meta == nil {
+		return vault.Item{}, ErrMutationRefused
+	}
 	out := vault.CloneItem(base)
 	category := vault.ItemCategory(meta.Category)
 	if category == "" {
@@ -135,7 +147,7 @@ func V2ItemApplyMeta(base vault.Item, meta *V2ItemMeta) (vault.Item, error) {
 	for _, u := range meta.URLs {
 		out.URLs = append(out.URLs, vault.ItemURL{Label: u.Label, URL: u.URL, Primary: u.Primary, MatchMode: u.MatchMode})
 	}
-	sections, err := v2SectionsFromMeta(base.Sections, meta.Sections)
+	sections, err := sectionsFrom(base.Sections)
 	if err != nil {
 		return vault.Item{}, err
 	}

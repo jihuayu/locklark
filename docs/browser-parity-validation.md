@@ -1,93 +1,24 @@
-# Browser experience parity: Chrome / Edge first
+# 浏览器插件当前验收状态
 
-This development change adds inline password selection, opt-in quick native
-pairing, configurable automatic submission, and software Passkey creation and
-assertion. It is **not complete 1Password parity**. Chrome/Edge share the Chromium
-build; an actual Edge run is still required before claiming Edge validation. Remaining work is tracked in [issue #39](https://github.com/jihuayu/locklark/issues/39).
+更新：2026-11-07；已合并基线 `main` `4abecb8`，最终开发 head `c3d505f`，见 [PR #43](https://github.com/jihuayu/locklark/pull/43)。此前基于 PR #40 的记录移至[历史快照](history/browser-parity-validation-2026-11-06.md)。
 
-The behavior references are 1Password's public [save and fill](https://support.1password.com/save-fill-passwords/),
-[Passkey](https://support.1password.com/save-use-passkeys/), and
-[browser getting-started](https://support.1password.com/getting-started-browser/)
-guides. No proprietary source, branding, or assets are copied.
+## 已有实现与实际验证
 
-## Coverage
-
-| Capability | Current implementation | Remaining work |
+| 范围 | 当前证据 | 尚不能据此声称 |
 | --- | --- | --- |
-| Inline account selection | Closed-shadow UI, keyboard navigation, sender/document binding | More website fixtures; custom and shadow-DOM fields |
-| Unlock and pairing | Native unlock from popup/inline offer; bounded quick or per-operation mode | Share desktop unlock state; platform biometrics |
-| Password filling | Semantic visible username/password fields; individual two-step screens; framework input/change events | Continuous multi-step journeys, iframe policies, additional fields |
-| Automatic login | Explicit account selection; global and per-login opt-out; guarded POST submission | Broader compatibility, Open & Fill, successful-login detection |
-| Save/update | Explicit inline/popup action; capture/approval/commit handshake | Post-submit suggestions; signup/change-password forms and generated password recovery |
-| Password generation | Existing native generator | Inline configurable generator and generated-password history |
-| TOTP | Popup and inline standard single-field filling; quick mode or native approval | Split OTP fields and optional linked login flow |
-| Passkey registration | ES256, discoverable credential, create login or attach to existing; exclude list | Additional algorithms/extensions; separate credential removal |
-| Passkey sign-in | RP/allow-list matching, native account selection, standard credential response | Immediate conditional account list; related origins; iframe support |
-| User verification | Fresh native master-password + Secret Key verification; truthful UV flag | Windows Hello / Touch ID integration for this flow |
-| Passkey persistence | Protected encrypted KDBX field, atomic creation/audit, backup/restore | Cross-device sync validation, import/export interoperability beyond protected KDBX |
-| Browser fallback | Original `navigator.credentials` path; separate save/use offer settings | Full coexistence tests with other password managers; WebAuthn signal APIs |
-| Other browser features | Existing native search/notes/health tools | Extension vault editing/search, cards/identities, item sharing, Watchtower UI, privacy email/service integrations |
-| Release | Development build and existing native registration tools | Actual Edge/Firefox/macOS/Windows runs, store packages/signing/update distribution |
+| 原生连接、审批、填充、保存/更新、OTP | 完整 Linux Chromium / Firefox 原生流程通过；拒绝、取消、导航、锁库、旧修订等负测保留 | 全部网站、Safari 和所有系统平台均兼容 |
+| 自动登录与 Passkey | Chromium 与独立 Edge 的快捷配对、自动提交、创建/断言、独立依赖方签名验证及取消通过；Firefox 新增创建/断言/签名验证/取消/回退实跑通过 | 系统生物识别或多设备互操作全部通过 |
+| 弹窗金库 | 搜索/筛选/详情/编辑、typed 卡片与身份模型、分区字段、多网址、收藏及锁库入口已有；真实 Chromium 验证登录新建/保存/按次显示/仅改标题后密码备注保留 | 所有类别全部浏览器逐屏参考对照已经完成 |
+| 网站交互 | 连续多步、分格 OTP、开放 shadow DOM、同源 iframe 有实现与定向 DOM/策略测试 | 已支持任意跨源 frame 或全部复杂登录站点 |
+| 生成器、提交后保存、设置、快捷键、菜单与体检 | 已有扩展与宿主实现及相应 Node/Go 测试；可选 HIBP 的数据范围与同意边界单独控制 | 实际联网数据时点、商店分发或参考产品全部行为已经对照 |
+| 跨端数据 | 桌面与插件共同读写持久化 v2；重开、修订、收藏、隐藏字段保留与原子拒绝有回归 | 已可正式迁移全部真实资料并替换原密码管理器 |
 
-## Trust boundaries
+六项 CI 全部通过：[Go/桌面/Web](https://github.com/jihuayu/locklark/actions/runs/42315487787)、[移动端](https://github.com/jihuayu/locklark/actions/runs/42315487747)。Web 日志包含 151 项扩展测试、真实弹窗编辑和两引擎完整原生流程。iOS 是保护能力不足时正确拒绝的验收，不是完整成功路径。
 
-The MAIN-world wrapper only serializes WebAuthn buffers and reconstructs standard
-credential responses. The isolated script handles the visible choice and forwards
-a bounded request. The worker obtains origin, top frame, active tab/window and
-document identity from browser APIs. The native host independently validates RP
-ID boundaries using the public suffix list, including private suffixes.
+## 本轮收尾
 
-Native approval supplies user presence. Only fresh native factor verification
-supplies UV; pairing, unlocking earlier, and Secret Service retrieval do not.
-Older binaries that do not understand the optional Passkey field/audit actions will refuse a vault after it contains Passkeys; use a current binary and keep a pre-upgrade backup. Private keys never cross native messaging. Assertion signatures/client data do
-cross it, only for the approved request. Creation persists its key and dedicated
-audit event atomically. Lock/cancel/deadline revokes a registered mutation gate;
-output authority is rechecked after waiting for the writer slot. A transaction or
-injection already granted may have completed; cancellation cannot recall it.
+附件分块上传/下载/删除、备注和隐藏自定义字段显式清空、旧 E2E 探测修正及额外浏览器验收，见[插件收尾验收](plugin-completion-validation.md)。本轮行为与基线分开记录，最终远端 CI 和合并回执以本次关联 PR 为准。
 
-Extension storage contains preferences and per-login override IDs only. Broad
-HTTPS host permission is now necessary for document-start integration and inline
-UI. Passwords still travel directly from the worker's bounded response to an
-isolated script targeting the original document. Page messages cannot request
-password fields or choose their signing origin. Top-level-only support and
-Permissions Policy checks intentionally preserve the current boundary.
+## 持续缺口
 
-## Verification
-
-- Node worker/UI policy tests: sender forgery, document changes, cancellation,
-  late responses, settings and retained unknown password-fill outcomes.
-- Go crypto tests independently verify ES256 signatures, RP/challenge data,
-  flags, allow/exclude behavior and invalid/public-suffix RPs.
-- Native-host tests exercise actual vault persistence and native-only approval;
-  personal/vault tests cover protected KDBX storage, stale revisions, cancellation,
-  fresh-factor refusal, overwrite refusal, and backup/restore/sign-in.
-- Controlled Chromium and Firefox DOM checks cover semantic and individual multi-step fields,
-  input/change events, automatic submission and post-event action mutation.
-- Real Linux Chromium/native MyGo acceptance uses AT-SPI and XTest for unlock,
-  quick pairing, inline account selection, automatic submission, Passkey
-  creation, verified assertion and AbortSignal. The relying-party verifier uses
-  the returned public key to check the signature independently.
-
-The native UI script accepts `LOCKLARK_TEST_BROWSER_PARITY=1` to run this new
-journey independently of the longer legacy save/OTP scenarios. It still uses the
-actual product binary and native UI; there is no test approval flag. Optional
-`LOCKLARK_TEST_WEBAUTHN_SERVER` points to an installed `@simplewebauthn/server`
-package for independent CBOR/COSE and WebAuthn registration/assertion validation.
-Test dependencies and synthetic vaults belong in temporary private directories.
-
-No actual Edge run, new Firefox Passkey run, macOS/Windows biometric run, public
-website compatibility survey, store release or external security audit is claimed.
-
-## Recorded checks (2026-11-06)
-
-- `go test ./...`: passed.
-- `go vet ./...`: passed.
-- Focused `go test -race` for Passkey, quick pairing and queued-output cancellation: passed.
-- `node --test browser-extension/test/*.test.js`: 57 tests passed.
-- Chromium 143 (Playwright 1.57) real DOM and native Passkey/quick-login journey: passed.
-- `@simplewebauthn/server@14.0.3` independently accepted registration and authentication in that real native journey.
-- The longer legacy native UI suite encountered intermittent action-popup focus/readiness failures on Chromium 143. Re-running with the repository-pinned Playwright 1.64.1 / Chromium 156 passed the complete fill/save/update/OTP and new Passkey journey, including the independent WebAuthn verifier.
-
-The new native journey was exercised with real factor entry and native approvals,
-including UV-required creation and sign-in. Synthetic private factors were not
-printed in test output or copied into this repository.
+以[当前 65 项行为清单](browser-parity-checklist.md)为准：Safari、各浏览器的 Windows/macOS 原生组合、完整 conditional UI、Passkey 单独删除与多凭据管理、硬件生物识别、签名/商店发布及更多真实站点。当前测试不是固定参考版本的完整 1:1 对照。

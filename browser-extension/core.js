@@ -824,69 +824,119 @@ globalThis.LocklarkCore = (() => {
     }
     return null;
   }
-  function nativeSections(item, original) {
-    const incoming = Array.isArray(item?.sections) ? item.sections : [];
+  function nativeOriginalFieldAny(original, fieldID) {
+    if (!Array.isArray(original?.sections)) return null;
+    for (const section of original.sections) {
+      if (!Array.isArray(section?.fields)) continue;
+      const found = section.fields.find((field) => field?.id === fieldID);
+      if (found) return found;
+    }
+    return null;
+  }
+  function nativeSections(item, original, clearFields = new Set()) {
+    const incoming = Array.isArray(item?.sections) ? item.sections : null;
+    const legacyFields = Array.isArray(item?.fields) ? item.fields : [];
+    if (!incoming && !legacyFields.length) return undefined;
     const sections = [];
     const byID = new Map();
     const used = new Set();
-    let preserveHidden = false;
     const ensureSection = (id, title) => {
       const clean = typeof id === "string" && id ? id.slice(0, 128) : "custom-fields";
       let section = byID.get(clean);
       if (!section) {
-        section = { id: clean, title: (title || "Custom fields").slice(0, 256), fields: [] };
+        section = {
+          id: clean,
+          title: (title || "Custom fields").slice(0, 256),
+          fields: [],
+        };
         byID.set(clean, section);
         sections.push(section);
       }
       return section;
     };
-    for (const section of incoming.slice(0, 20)) {
-      if (!section || typeof section !== "object") continue;
-      ensureSection(section.id, section.title);
+    if (incoming) {
+      for (const section of incoming.slice(0, 20)) {
+        if (!section || typeof section !== "object") continue;
+        ensureSection(section.id, section.title);
+      }
     }
     const addField = (field, forcedSection) => {
       if (!field || typeof field !== "object") return;
-      const sectionID =
+      let sectionID =
         forcedSection ||
         (typeof field.section_id === "string" && field.section_id
           ? field.section_id
           : "custom-fields");
+      // A legacy flat field that already lives in a supplied section keeps its
+      // stable section instead of spawning a duplicate custom-fields entry.
+      if (!forcedSection && incoming && typeof field.id === "string" && field.id)
+        for (const candidate of sections)
+          if (candidate.fields.some((entry) => entry.id === field.id)) {
+            sectionID = candidate.id;
+            break;
+          }
       const section = ensureSection(
         sectionID,
         typeof field.section_title === "string" ? field.section_title : "Custom fields",
       );
       const label = String(field.label || "").trim().slice(0, 256);
-      const value = typeof field.value === "string" ? field.value.slice(0, 16384) : "";
-      const concealed = field.concealed === true || nativeFieldType(field.type) === "concealed";
+      const rawValue = typeof field.value === "string" ? field.value.slice(0, 16384) : "";
+      const declaredType = typeof field.type === "string" ? field.type.trim() : "";
       const id =
-        typeof field.id === "string" && /^[A-Za-z0-9_.:-]{1,128}$/.test(field.id) && !field.id.startsWith("section:")
+        typeof field.id === "string" &&
+        /^[A-Za-z0-9_.:-]{1,128}$/.test(field.id) &&
+        !field.id.startsWith("section:")
           ? field.id
-          : stableFieldID(label || value, used);
+          : stableFieldID(label || rawValue, used);
       if (!used.has(id)) used.add(id);
-      const old = nativeOriginalField(original, section.id, id);
-      const masked = /^•+$/.test(value) || value === "";
-      if (masked && (old?.concealed === true || old?.has_value === true || concealed))
-        preserveHidden = true;
+      const old =
+        nativeOriginalField(original, section.id, id) ||
+        nativeOriginalFieldAny(original, id);
+      const oldConcealed =
+        !!old &&
+        (old.concealed === true ||
+          old.has_value === true ||
+          nativeFieldType(old.type) === "concealed");
+      const concealed =
+        field.concealed === true ||
+        oldConcealed ||
+        nativeFieldType(declaredType || (old ? old.type : "text")) === "concealed";
+      const explicitClear = clearFields.has("section:" + section.id + ":" + id);
       const out = {
         id,
         label,
-        type: nativeFieldType(field.type),
-        value: /^•+$/.test(value) ? "" : value,
+        type: nativeFieldType(declaredType || (old ? old.type : "text")),
       };
       if (concealed) out.concealed = true;
-      if (typeof field.purpose === "string" && field.purpose)
-        out.purpose = field.purpose.slice(0, 128);
+      const purpose =
+        typeof field.purpose === "string" && field.purpose
+          ? field.purpose
+          : typeof old?.purpose === "string"
+            ? old.purpose
+            : "";
+      if (purpose) out.purpose = purpose.slice(0, 128);
+      // A masked placeholder is never a value. An untouched existing protected
+      // field omits `value` so the host keeps it; only an explicit clear (or a
+      // genuinely new value) replaces it.
+      let value;
+      if (explicitClear) value = "";
+      else if (/^•+$/.test(rawValue)) value = undefined;
+      else if (rawValue === "" && oldConcealed) value = undefined;
+      else value = rawValue;
+      if (value !== undefined) out.value = value;
       const index = section.fields.findIndex((entry) => entry.id === id);
       if (index >= 0) section.fields[index] = out;
       else section.fields.push(out);
     };
-    for (const section of incoming.slice(0, 20)) {
-      if (!section || typeof section !== "object" || !Array.isArray(section.fields)) continue;
-      for (const field of section.fields.slice(0, 100)) addField(field, section.id);
-    }
-    if (Array.isArray(item?.fields)) for (const field of item.fields.slice(0, 100)) addField(field);
+    if (incoming)
+      for (const section of incoming.slice(0, 20)) {
+        if (!section || typeof section !== "object" || !Array.isArray(section.fields))
+          continue;
+        for (const field of section.fields.slice(0, 100)) addField(field, section.id);
+      }
+    for (const field of legacyFields.slice(0, 100)) addField(field);
     const result = sections.filter((section) => section.fields.length);
-    if (!result.length || preserveHidden) return undefined;
+    if (!result.length && !incoming) return undefined;
     return result;
   }
   function nativeCreditCard(item) {
@@ -939,8 +989,14 @@ globalThis.LocklarkCore = (() => {
     const out = { category, title: item.title.slice(0, 1024) };
     const password = typeof item.password === "string" ? item.password : "";
     const otp = typeof item.otp === "string" ? item.otp : typeof item.otp_secret === "string" ? item.otp_secret : "";
+    const clearFields = validClearFields(item.clear_fields);
+    if (!clearFields) return null;
+    const clearSet = new Set(clearFields);
     let notes = typeof item.notes === "string" ? item.notes : typeof item.content === "string" ? item.content : undefined;
-    if (notes === "" && options.original) {
+    if (clearSet.has("notes")) {
+      if (typeof notes === "string" && notes !== "") return null;
+      notes = "";
+    } else if (notes === "" && options.original) {
       const originalNotes = Array.isArray(options.original.fields)
         ? options.original.fields.find((field) => field?.id === "notes")
         : null;
@@ -956,11 +1012,14 @@ globalThis.LocklarkCore = (() => {
     if (otp.trim()) out.otp = otp.trim().slice(0, 4096);
     if (Array.isArray(item.urls)) out.urls = nativeURLs(item);
     if (notes !== undefined) out.notes = notes.slice(0, 65536);
+    // Forward explicit clears so the host can audit and reject unknown or
+    // non-concealed targets; an empty list stays omitted.
+    if (clearFields.length) out.clear_fields = clearFields.slice(0, 100);
     if (typeof item.favorite === "boolean") out.favorite = item.favorite;
     if (typeof item.auto_submit === "boolean") out.auto_submit = item.auto_submit;
     if (Array.isArray(item.tags))
       out.tags = item.tags.filter((tag) => typeof tag === "string" && tag).slice(0, 50).map((tag) => tag.slice(0, 128));
-    const sections = nativeSections(item, options.original);
+    const sections = nativeSections(item, options.original, clearSet);
     if (sections) out.sections = sections;
     if (category === "credit_card") {
       const card = nativeCreditCard(item);
@@ -971,6 +1030,145 @@ globalThis.LocklarkCore = (() => {
       if (identity) out.identity = identity;
     }
     return out;
+  }
+  const ATTACHMENT_CAPABILITY = "attachments-v1";
+  const ATTACHMENT_MAX_BYTES = 2097152;
+  const ATTACHMENT_CHUNK_BYTES = 65536;
+  const ATTACHMENT_MAX_COUNT = 16;
+  const ATTACHMENT_TRANSFER_TTL_SECONDS = 120;
+  const B64_ALPHABET =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  const CLEAR_FIELD_PATTERN =
+    /^(?:notes|section:[A-Za-z0-9_.:-]{1,128}:[A-Za-z0-9_.:-]{1,128})$/;
+  function attachmentCapability(capabilities) {
+    return (
+      Array.isArray(capabilities) &&
+      capabilities.includes(ATTACHMENT_CAPABILITY)
+    );
+  }
+  function validAttachmentID(value) {
+    return typeof value === "string" && /^[A-Za-z0-9_.:-]{1,128}$/.test(value);
+  }
+  function safeFileName(raw) {
+    if (typeof raw !== "string") return "";
+    const value = raw.trim();
+    if (!value || value.length > 255) return "";
+    if (value === "." || value === "..") return "";
+    if (/[\u0000-\u001f\u007f/\\]/.test(value)) return "";
+    return value.isWellFormed() ? value : "";
+  }
+  function validMimeType(value) {
+    return (
+      typeof value === "string" &&
+      value.length >= 1 &&
+      value.length <= 255 &&
+      /^[\x20-\x7e]+$/.test(value)
+    );
+  }
+  function validAttachmentMetadata(meta) {
+    if (!meta || typeof meta !== "object" || Array.isArray(meta)) return false;
+    if (
+      !Object.keys(meta).every((key) =>
+        ["id", "file_name", "size", "mime_type", "sha256", "protected"].includes(
+          key,
+        ),
+      )
+    )
+      return false;
+    if (
+      !validAttachmentID(meta.id) ||
+      !safeFileName(meta.file_name) ||
+      meta.file_name !== String(meta.file_name || "").trim() ||
+      !Number.isSafeInteger(meta.size) ||
+      meta.size < 0 ||
+      meta.size > ATTACHMENT_MAX_BYTES ||
+      typeof meta.sha256 !== "string" ||
+      !/^[a-f0-9]{64}$/.test(meta.sha256)
+    )
+      return false;
+    if (meta.mime_type !== undefined && !validMimeType(meta.mime_type))
+      return false;
+    if (meta.protected !== undefined && typeof meta.protected !== "boolean")
+      return false;
+    return true;
+  }
+  function validAttachmentList(list) {
+    return (
+      Array.isArray(list) &&
+      list.length <= ATTACHMENT_MAX_COUNT &&
+      list.every(validAttachmentMetadata)
+    );
+  }
+  function base64Encode(bytes) {
+    if (!bytes || typeof bytes.length !== "number") return "";
+    const length = bytes.length;
+    if (!Number.isSafeInteger(length) || length < 0) return "";
+    if (length > ATTACHMENT_MAX_BYTES) return "";
+    let out = "";
+    for (let i = 0; i < length; i += 3) {
+      const a = bytes[i] & 0xff;
+      const b = i + 1 < length ? bytes[i + 1] & 0xff : 0;
+      const c = i + 2 < length ? bytes[i + 2] & 0xff : 0;
+      out += B64_ALPHABET[a >> 2];
+      out += B64_ALPHABET[((a & 3) << 4) | (b >> 4)];
+      out += i + 1 < length ? B64_ALPHABET[((b & 15) << 2) | (c >> 6)] : "=";
+      out += i + 2 < length ? B64_ALPHABET[c & 63] : "=";
+    }
+    return out;
+  }
+  function base64Decode(text, maxBytes = ATTACHMENT_CHUNK_BYTES) {
+    if (typeof text !== "string") return null;
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) return null;
+    if (maxBytes > ATTACHMENT_MAX_BYTES) return null;
+    const length = text.length;
+    if (length % 4 !== 0) return null;
+    if (length > Math.ceil(maxBytes / 3) * 4) return null;
+    if (length === 0) return new Uint8Array(0);
+    if (
+      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
+        text,
+      )
+    )
+      return null;
+    if (text.indexOf("=") !== -1 && text.indexOf("=") < length - 2) return null;
+    const padding = text.endsWith("==") ? 2 : text.endsWith("=") ? 1 : 0;
+    const size = (length / 4) * 3 - padding;
+    if (size > maxBytes) return null;
+    const bytes = new Uint8Array(size);
+    let index = 0;
+    for (let i = 0; i < length; i += 4) {
+      const a = B64_ALPHABET.indexOf(text[i]);
+      const b = B64_ALPHABET.indexOf(text[i + 1]);
+      const c = text[i + 2] === "=" ? 0 : B64_ALPHABET.indexOf(text[i + 2]);
+      const d = text[i + 3] === "=" ? 0 : B64_ALPHABET.indexOf(text[i + 3]);
+      if (a < 0 || b < 0 || c < 0 || d < 0) return null;
+      const triple = (a << 18) | (b << 12) | (c << 6) | d;
+      if (index < size) bytes[index++] = (triple >> 16) & 0xff;
+      if (index < size) bytes[index++] = (triple >> 8) & 0xff;
+      if (index < size) bytes[index++] = triple & 0xff;
+    }
+    return index === size ? bytes : null;
+  }
+  function attachmentStableKey(sectionID, fieldID) {
+    if (
+      typeof sectionID !== "string" ||
+      !/^[A-Za-z0-9_.:-]{1,128}$/.test(sectionID) ||
+      typeof fieldID !== "string" ||
+      !/^[A-Za-z0-9_.:-]{1,128}$/.test(fieldID)
+    )
+      return "";
+    return "section:" + sectionID + ":" + fieldID;
+  }
+  function validClearFields(value) {
+    if (value === undefined) return [];
+    if (!Array.isArray(value) || value.length > 100) return null;
+    const result = [];
+    for (const key of value) {
+      if (typeof key !== "string" || !CLEAR_FIELD_PATTERN.test(key)) return null;
+      if (result.includes(key)) return null;
+      result.push(key);
+    }
+    return result;
   }
   function validResponse(m) {
     if (
@@ -1033,6 +1231,44 @@ globalThis.LocklarkCore = (() => {
           "expires_in_seconds",
         ],
         "fill-fields": ["v", "id", "type", "fields"],
+        "attachment-transfer": [
+          "v",
+          "id",
+          "type",
+          "transfer_id",
+          "offset",
+          "size",
+          "expires_in_seconds",
+        ],
+        "attachment-saved": [
+          "v",
+          "id",
+          "type",
+          "item_id",
+          "revision",
+          "attachment",
+        ],
+        "attachment-cancelled": ["v", "id", "type", "transfer_id"],
+        "attachment-data": [
+          "v",
+          "id",
+          "type",
+          "item_id",
+          "revision",
+          "attachment",
+          "offset",
+          "next_offset",
+          "done",
+          "data",
+        ],
+        "attachment-removed": [
+          "v",
+          "id",
+          "type",
+          "item_id",
+          "revision",
+          "attachment_id",
+        ],
         watchtower: ["v", "id", "type", "watchtower"],
         unknown: ["v", "id", "type"],
         generated: [
@@ -1085,6 +1321,45 @@ globalThis.LocklarkCore = (() => {
       );
     if (!/^[a-f0-9]{32}$/.test(m.id || "")) return false;
     if (!validCategory(m.category)) return false;
+    if (m.type === "attachment-transfer")
+      return (
+        /^[a-f0-9]{32}$/.test(m.transfer_id || "") &&
+        boundedInteger(m.offset, 0, ATTACHMENT_MAX_BYTES) &&
+        boundedInteger(m.size, 0, ATTACHMENT_MAX_BYTES) &&
+        boundedInteger(m.expires_in_seconds, 1, 3600) &&
+        m.offset <= m.size
+      );
+    if (m.type === "attachment-saved")
+      return (
+        /^[a-f0-9]{32}$/.test(m.item_id || "") &&
+        /^[a-f0-9]{64}$/.test(m.revision || "") &&
+        validAttachmentMetadata(m.attachment)
+      );
+    if (m.type === "attachment-cancelled")
+      return /^[a-f0-9]{32}$/.test(m.transfer_id || "");
+    if (m.type === "attachment-removed")
+      return (
+        /^[a-f0-9]{32}$/.test(m.item_id || "") &&
+        /^[a-f0-9]{64}$/.test(m.revision || "") &&
+        validAttachmentID(m.attachment_id)
+      );
+    if (m.type === "attachment-data") {
+      if (
+        !/^[a-f0-9]{32}$/.test(m.item_id || "") ||
+        !/^[a-f0-9]{64}$/.test(m.revision || "") ||
+        !validAttachmentMetadata(m.attachment) ||
+        !boundedInteger(m.offset, 0, ATTACHMENT_MAX_BYTES) ||
+        !boundedInteger(m.next_offset, 0, ATTACHMENT_MAX_BYTES) ||
+        typeof m.done !== "boolean"
+      )
+        return false;
+      const bytes = base64Decode(m.data, ATTACHMENT_CHUNK_BYTES);
+      if (!bytes) return false;
+      if (m.offset > m.attachment.size) return false;
+      if (m.next_offset !== m.offset + bytes.length) return false;
+      if (m.next_offset > m.attachment.size) return false;
+      return m.done === (m.next_offset === m.attachment.size);
+    }
     if (m.type === "watchtower") return validWatchtower(m.watchtower);
     if (m.type === "passkey-result")
       return typeof m.credential === "string" && m.credential.length <= 32768;
@@ -1184,7 +1459,9 @@ globalThis.LocklarkCore = (() => {
         typeof m.item.title === "string" &&
         m.item.title.length <= 1024 &&
         typeof m.item.category === "string" &&
-        m.item.category.length <= 64
+        m.item.category.length <= 64 &&
+        (m.item.attachments === undefined ||
+          validAttachmentList(m.item.attachments))
       );
     if (m.type === "generated") {
       if (typeof m.password === "string")
@@ -4403,6 +4680,11 @@ globalThis.LocklarkCore = (() => {
         (typeof item[key] !== "string" || item[key].length > 16384)
       )
         return false;
+    if (item.clear_fields !== undefined && !validClearFields(item.clear_fields))
+      return false;
+    if (item.sections !== undefined) {
+      if (!Array.isArray(item.sections) || item.sections.length > 20) return false;
+    }
     if (item.fields !== undefined) {
       if (!Array.isArray(item.fields) || item.fields.length > 100) return false;
       for (const field of item.fields) {
@@ -4534,6 +4816,22 @@ globalThis.LocklarkCore = (() => {
     nativeIdentity,
     itemToNativeMutation,
     itemURLAllowed,
+    ATTACHMENT_CAPABILITY,
+    ATTACHMENT_MAX_BYTES,
+    ATTACHMENT_CHUNK_BYTES,
+    ATTACHMENT_MAX_COUNT,
+    ATTACHMENT_TRANSFER_TTL_SECONDS,
+    attachmentCapability,
+    validAttachmentID,
+    validAttachmentMetadata,
+    validAttachmentList,
+    safeFileName,
+    validMimeType,
+    base64Encode,
+    base64Decode,
+    attachmentStableKey,
+    validClearFields,
+    nativeOriginalFieldAny,
     generatePasswordString,
   };
 })();

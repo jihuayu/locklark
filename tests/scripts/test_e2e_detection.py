@@ -1,0 +1,500 @@
+"""Regression tests for stale/over-permissive E2E feature detection."""
+
+from __future__ import annotations
+
+import json
+import shutil
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from tests.e2e.harness import CLIResult, FeatureNotImplementedError  # noqa: E402
+from tests.e2e import harness, support  # noqa: E402
+
+
+class FakeContext:
+    def __init__(
+        self,
+        responses: dict[tuple[str, ...], tuple[int, str, str]],
+        repo_root: Path | None = None,
+        extension_dir: Path | None = None,
+        node_result: tuple[int, str, str] | None = None,
+        go_result: tuple[int, str, str] | None = None,
+    ):
+        self.responses = responses
+        self.calls: list[tuple[str, ...]] = []
+        self.repo_root = repo_root or Path(".")
+        self.extension_dir = extension_dir
+        self.node_result = node_result
+        self.go_result = go_result
+
+    def ensure_extension_built(self) -> tuple[Path, Path]:
+        if self.extension_dir is None:
+            raise AssertionError("this fake context ships no built extension")
+        return self.extension_dir, self.extension_dir
+
+    def run_cli(self, args, **_: object) -> CLIResult:
+        key = tuple(str(arg) for arg in args)
+        self.calls.append(key)
+        if key[0] == "--test" and self.node_result is not None:
+            rc, stdout, stderr = self.node_result
+            return CLIResult(rc, stdout, stderr, list(key))
+        if key[0] == "test" and self.go_result is not None:
+            rc, stdout, stderr = self.go_result
+            return CLIResult(rc, stdout, stderr, list(key))
+        rc, stdout, stderr = self.responses.get(
+            key, (1, "", "unknown command; see locklark help")
+        )
+        return CLIResult(rc, stdout, stderr, list(key))
+
+
+def _profiles_json() -> str:
+    entries = [
+        {
+            "name": name,
+            "id": profile_id,
+            "slots": (
+                [
+                    {"name": "access_key_id", "kind": "login", "field": "username"},
+                    {"name": "secret_access_key", "kind": "login", "field": "password"},
+                ]
+                if name == "aws"
+                else [{"name": "token", "kind": "login", "field": "password"}]
+            ),
+            "max_timeout": 300,
+        }
+        for name, profile_id in support.F14_REQUIRED_PROFILES.items()
+    ]
+    return json.dumps(entries)
+
+
+TOP_HELP = (
+    "  cli profiles\n"
+    "  cli list [--binding PATH]\n"
+    "  cli shell-init [bash|zsh|fish|powershell|pwsh] [--binding PATH]\n"
+    "  cli run <tool> [--binding PATH] [--cwd ABS_DIR] [--timeout SECONDS] -- [ARG...]\n"
+)
+RUN_HELP = (
+    "usage: locklark cli run <tool> [--binding PATH] [--cwd ABS_DIR] "
+    "[--timeout SECONDS] -- [ARG...]\n"
+)
+SHELL_SCRIPT = (
+    "# Locklark CLI wrappers (bash/zsh)\n"
+    'gh() {\n  command "/opt/locklark" cli run gh -- "$@"\n}\n'
+)
+
+
+class F14DetectionTests(unittest.TestCase):
+    def test_structured_profiles_detect_capability_with_empty_binding_store(self):
+        ctx = FakeContext(
+            {
+                ("help",): (0, TOP_HELP, ""),
+                ("cli", "profiles"): (0, _profiles_json(), ""),
+                ("cli", "list"): (0, '{"version":1,"bindings":{}}', ""),
+            }
+        )
+        self.assertTrue(support.f14_cli_profiles_ready(ctx))
+        self.assertNotIn(("cli", "list"), ctx.calls)
+
+    def test_malformed_profiles_are_a_failure_not_absence(self):
+        ctx = FakeContext(
+            {
+                ("help",): (0, TOP_HELP, ""),
+                ("cli", "profiles"): (0, '{"profiles":[]}', ""),
+            }
+        )
+        with self.assertRaisesRegex(AssertionError, "JSON list"):
+            support.f14_cli_profiles_ready(ctx)
+
+    def test_nonzero_advertised_profiles_is_a_failure_not_absence(self):
+        ctx = FakeContext(
+            {
+                ("help",): (0, TOP_HELP, ""),
+                ("cli", "profiles"): (1, "", "profile registry broken"),
+            }
+        )
+        with self.assertRaisesRegex(AssertionError, "advertised"):
+            support.f14_cli_profiles_ready(ctx)
+
+    def test_missing_profiles_command_is_real_absence(self):
+        ctx = FakeContext({("help",): (0, "locklark help\n", "")})
+        self.assertFalse(support.f14_cli_profiles_ready(ctx))
+        self.assertNotIn(("cli", "profiles"), ctx.calls)
+
+
+class F15DetectionTests(unittest.TestCase):
+    def test_public_run_contract_detected_without_internal_identifiers(self):
+        ctx = FakeContext(
+            {
+                ("help",): (0, TOP_HELP, ""),
+                ("cli", "profiles"): (0, _profiles_json(), ""),
+                ("cli", "run", "--help"): (0, RUN_HELP, ""),
+            }
+        )
+        self.assertTrue(support.f15_run_bundle_ready(ctx))
+        self.assertNotIn("RunBundle", RUN_HELP)
+
+    def test_broken_advertised_run_help_is_a_failure(self):
+        ctx = FakeContext(
+            {
+                ("help",): (0, TOP_HELP, ""),
+                ("cli", "profiles"): (0, _profiles_json(), ""),
+                ("cli", "run", "--help"): (0, "usage: unrelated\n", ""),
+            }
+        )
+        with self.assertRaisesRegex(AssertionError, "missing public options"):
+            support.f15_run_bundle_ready(ctx)
+
+    def test_missing_run_command_is_real_absence(self):
+        ctx = FakeContext({("help",): (0, "  cli profiles\n", "")})
+        self.assertFalse(support.f15_run_bundle_ready(ctx))
+
+
+class F16DetectionTests(unittest.TestCase):
+    def _ctx(self, shell: tuple[int, str, str]) -> FakeContext:
+        return FakeContext(
+            {
+                ("help",): (0, TOP_HELP, ""),
+                ("cli", "shell-init", "bash"): shell,
+            }
+        )
+
+    def test_function_and_forwarded_arguments_detect_shell_capability(self):
+        self.assertTrue(support.f16_cli_shell_ready(self._ctx((0, SHELL_SCRIPT, ""))))
+
+    def test_successful_but_malformed_shell_init_is_a_failure(self):
+        with self.assertRaisesRegex(AssertionError, "gh function"):
+            support.f16_cli_shell_ready(self._ctx((0, "# no functions\n", "")))
+
+    def test_nonzero_advertised_shell_init_is_a_failure(self):
+        with self.assertRaisesRegex(AssertionError, "advertised"):
+            support.f16_cli_shell_ready(self._ctx((1, "", "broken shell renderer")))
+
+    def test_missing_shell_init_is_real_absence(self):
+        ctx = FakeContext({("help",): (0, "  cli profiles\n", "")})
+        self.assertFalse(support.f16_cli_shell_ready(ctx))
+
+
+class F17DetectionTests(unittest.TestCase):
+    def _ctx(self, files: dict[str, str]) -> FakeContext:
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        for relative, text in files.items():
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        return FakeContext(
+            {
+                ("help",): (0, TOP_HELP, ""),
+                ("cli", "profiles"): (0, _profiles_json(), ""),
+            },
+            repo_root=root,
+        )
+
+    def test_desktop_broker_without_cli_client_stays_pending(self):
+        ctx = self._ctx(
+            {"internal/desktop/ipc_broker.go": "startBrowserBroker handleCLIRun"}
+        )
+        self.assertTrue(support.desktop_broker_implemented(ctx))
+        self.assertFalse(support.cli_broker_client_implemented(ctx))
+        self.assertFalse(support.f17_broker_ready(ctx))
+
+    def test_broker_and_cli_client_enable_capability(self):
+        ctx = self._ctx(
+            {
+                "internal/desktop/ipc_broker.go": "startBrowserBroker handleCLIRun",
+                "cmd/locklark/cli.go": "RequestCLIRun",
+            }
+        )
+        self.assertTrue(support.f17_broker_ready(ctx))
+
+
+class CoverageMetadataTests(unittest.TestCase):
+    def _register(self, test_id, tier, summary, **kwargs):
+        fn = lambda ctx: None
+        harness.register_test(test_id, tier, ["F1"], summary, **kwargs)(fn)
+        self.addCleanup(lambda: harness.REGISTRY.pop(test_id, None))
+        return harness.REGISTRY[test_id]
+
+    def test_tier3_and_tier4_default_to_capability_probe(self):
+        self.assertEqual(
+            self._register("UNIT_COV_T3", 3, "journey wording").coverage_kind,
+            "capability_probe",
+        )
+        self.assertEqual(
+            self._register("UNIT_COV_T4", 4, "journey wording").coverage_kind,
+            "capability_probe",
+        )
+
+    def test_capability_probe_summary_prefix_marks_source_only_case(self):
+        self.assertEqual(
+            self._register("UNIT_COV_PROBE", 1, "Capability probe: source contract").coverage_kind,
+            "capability_probe",
+        )
+        self.assertEqual(
+            self._register("UNIT_COV_FUNC", 1, "real user journey").coverage_kind,
+            "functional",
+        )
+
+    def test_component_contract_coverage_kind_is_accepted(self):
+        self.assertEqual(
+            self._register(
+                "UNIT_COV_COMPONENT", 1, "executed component test", coverage_kind="component_contract"
+            ).coverage_kind,
+            "component_contract",
+        )
+
+    def test_invalid_coverage_kind_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self._register("UNIT_COV_BAD", 1, "x", coverage_kind="claims")
+
+
+class AutoLoginDetectionTests(unittest.TestCase):
+    """F1/F2 auto-submit probes must use the shipped ``autoLogin`` contract."""
+
+    def _ctx(self, files: dict[str, str]) -> FakeContext:
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        extension = root / "browser-extension"
+        (extension / "test").mkdir(parents=True)
+        for name, body in files.items():
+            (extension / name).write_text(body, encoding="utf-8")
+        return FakeContext(
+            {("help",): (0, "locklark help\n", "")},
+            repo_root=root,
+            extension_dir=extension,
+        )
+
+    def test_real_auto_login_contract_is_detected(self):
+        ctx = self._ctx(
+            {
+                "background.js": "let autoLogin = true; const loginOverrides = {};",
+                "content.js": "",
+                "core.js": "if (autoLogin === true) form.requestSubmit();",
+                "popup.js": "state.autoLogin",
+                "options.js": '"opt-auto-login": "autoLogin"',
+            }
+        )
+        self.assertTrue(support.f2_autologin_ready(ctx))
+        self.assertTrue(support.f1_autosubmit_ready(ctx))
+
+    def test_stale_auto_submit_literal_is_not_evidence(self):
+        # A bundle carrying only the retired literal would make the old adapter
+        # pass; the real probe must report absence (a FAIL), never a scenario
+        # where a nonexistent identifier proves the feature shipped.
+        ctx = self._ctx(
+            {
+                "background.js": "// legacy autoSubmit comment only",
+                "content.js": "",
+                "core.js": "// autoSubmit was never a real identifier",
+                "popup.js": "",
+                "options.js": "",
+            }
+        )
+        self.assertFalse(support.f2_autologin_ready(ctx))
+        self.assertFalse(support.f1_autosubmit_ready(ctx))
+
+
+class F11FillContractDetectionTests(unittest.TestCase):
+    """F11 probes must execute the shipped fill contract, not the CLI surface."""
+
+    M3_TEST = "browser-extension/test/m3_fill_v2.test.js"
+
+    def _ctx(self, core: str, **kwargs: object) -> FakeContext:
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        extension = root / "browser-extension"
+        (extension / "test").mkdir(parents=True)
+        (extension / "test" / "m3_fill_v2.test.js").write_text(
+            "// M3 component contract\n", encoding="utf-8"
+        )
+        (extension / "core.js").write_text(core, encoding="utf-8")
+        (extension / "content.js").write_text(core, encoding="utf-8")
+        return FakeContext(
+            {("help",): (0, "locklark help\n", "")},
+            repo_root=root,
+            extension_dir=extension,
+            **kwargs,
+        )
+
+    def test_identity_and_card_fill_detected_while_cli_add_item_is_absent(self):
+        ctx = self._ctx(
+            "exports.fillIdentityDocument = autofillDocument;"
+            "exports.fillCardDocument = autofillDocument; // credit_card"
+        )
+        # The CLI command-surface gap is real...
+        self.assertFalse(support.f11_identity_ready(ctx))
+        # ...but it is not evidence that identity/card fill is missing.
+        self.assertTrue(support.f11_fill_contract_ready(ctx))
+
+    def test_missing_fill_entrypoints_are_real_absence(self):
+        ctx = self._ctx("// content script without any fill contract")
+        self.assertFalse(support.f11_fill_contract_ready(ctx))
+
+    def test_node_pattern_that_selects_no_tests_is_a_failure(self):
+        ctx = self._ctx(
+            "fillIdentityDocument fillCardDocument credit_card",
+            node_result=(
+                0,
+                "\u2139 tests 4\n\u2139 pass 0\n\u2139 fail 0\n\u2139 skipped 4\n",
+                "",
+            ),
+        )
+        with self.assertRaises(AssertionError) as caught:
+            support.node_test_pattern(ctx, self.M3_TEST, "M3 renamed test", min_passed=1)
+        self.assertIn("stale adapter", str(caught.exception))
+        self.assertNotIsInstance(caught.exception, FeatureNotImplementedError)
+
+    def test_failing_component_test_is_a_failure_not_a_missing_feature(self):
+        ctx = self._ctx(
+            "fillIdentityDocument fillCardDocument credit_card",
+            node_result=(
+                1,
+                "\u2716 M3 fillIdentityDocument fills identity inputs and selects\n"
+                "\u2139 tests 1\n\u2139 pass 0\n\u2139 fail 1\n",
+                "",
+            ),
+        )
+        with self.assertRaises(AssertionError) as caught:
+            support.node_test_pattern(ctx, self.M3_TEST, "M3 fillIdentityDocument", min_passed=1)
+        self.assertNotIsInstance(caught.exception, FeatureNotImplementedError)
+
+    def test_selected_component_tests_are_counted(self):
+        ctx = self._ctx(
+            "fillIdentityDocument fillCardDocument credit_card",
+            node_result=(
+                0,
+                "\u2139 tests 3\n\u2139 pass 2\n\u2139 fail 0\n\u2139 skipped 1\n",
+                "",
+            ),
+        )
+        counts = support.node_test_pattern(ctx, self.M3_TEST, "M3 fill", min_passed=2)
+        self.assertEqual(counts["pass"], 2)
+        self.assertEqual(ctx.calls[0][0], "--test")
+        self.assertTrue(ctx.calls[0][1].startswith("--test-name-pattern="))
+
+
+class F13HostWatchtowerDetectionTests(unittest.TestCase):
+    """F13 must separate CLI health flags from the shipped Watchtower service."""
+
+    def _ctx(self, files: dict[str, str], *, help_text: str = "locklark help\n") -> FakeContext:
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        for relative, body in files.items():
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(body, encoding="utf-8")
+        extension = root / "browser-extension"
+        extension.mkdir(parents=True, exist_ok=True)
+        return FakeContext(
+            {("help",): (0, help_text, "")}, repo_root=root, extension_dir=extension
+        )
+
+    def test_host_watchtower_detected_without_cli_health_flags(self):
+        ctx = self._ctx(
+            {
+                "internal/watchtower/watchtower.go": (
+                    'type Finding struct { UnsecuredHTTP bool `json:"unsecured_http"` }'
+                )
+            }
+        )
+        self.assertTrue(support.f13_watchtower_ready(ctx))
+        self.assertFalse(support.f13_cli_health_flags(ctx))
+
+    def test_help_flags_alone_do_not_prove_the_hibp_client(self):
+        ctx = self._ctx(
+            {},
+            help_text="locklark help\n  --check-breached\n  --hibp-endpoint URL\n",
+        )
+        self.assertTrue(support.f13_cli_health_flags(ctx))
+        self.assertFalse(support.f13_hibp_client_ready(ctx))
+        self.assertFalse(support.f13_watchtower_ready(ctx))
+
+    def test_hibp_client_contract_detected_in_host_sources(self):
+        ctx = self._ctx(
+            {
+                "internal/watchtower/hibp.go": (
+                    'DefaultHIBPEndpoint = "https://api.pwnedpasswords.com/range/"\n'
+                    "var hibpPrefix = regexp.MustCompile(...)\n"
+                    "func (c *HIBPClient) LookupCandidates(...)\n"
+                ),
+                "internal/browserhost/protocol.go": (
+                    'IncludeHIBP bool `json:"include_hibp"`'
+                ),
+            }
+        )
+        self.assertTrue(support.f13_hibp_client_ready(ctx))
+
+    def test_go_package_test_requires_executed_tests(self):
+        ctx = self._ctx({"go.mod": "module example.test\n"})
+        ctx.go_result = (0, "ok  example.test/internal/watchtower  0.01s\n", "")
+        with mock.patch.object(support, "go_tool", lambda: "/usr/bin/go"):
+            with self.assertRaises(AssertionError) as caught:
+                support.go_package_test(ctx, "./internal/watchtower", "TestRenamed")
+            self.assertIn("stale adapter", str(caught.exception))
+            self.assertNotIsInstance(caught.exception, FeatureNotImplementedError)
+            ctx.go_result = (
+                0,
+                "=== RUN   TestLookupCandidatesGroupsPrefixes\n"
+                "--- PASS: TestLookupCandidatesGroupsPrefixes (0.00s)\n"
+                "PASS\nok  example.test/internal/watchtower  0.01s\n",
+                "",
+            )
+            counts = support.go_package_test(
+                ctx, "./internal/watchtower", "TestLookupCandidatesGroupsPrefixes"
+            )
+        self.assertEqual(counts["pass"], 1)
+
+    def test_missing_go_toolchain_is_a_blocked_assertion(self):
+        ctx = self._ctx({"go.mod": "module example.test\n"})
+        with mock.patch.object(support, "go_tool", lambda: None):
+            with self.assertRaisesRegex(AssertionError, "validation blocked"):
+                support.go_package_test(ctx, "./internal/watchtower", "TestAnything")
+
+
+class F5RefreshDetectionTests(unittest.TestCase):
+    """F5 must probe the real captureFilter/filterCurrent contract."""
+
+    def _ctx(self, app_source: str) -> FakeContext:
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        desktop = root / "internal" / "desktop"
+        desktop.mkdir(parents=True)
+        (desktop / "app.go").write_text(app_source, encoding="utf-8")
+        return FakeContext({("help",): (0, "locklark help\n", "")}, repo_root=root)
+
+    MODERN = (
+        "func (a *App) refresh() {\n"
+        "\tfilter := a.captureFilter()\n"
+        "\ta.run(func() outcome {\n"
+        "\t\trows, e := queryRows(s, filter)\n"
+        "\t\tif !a.filterCurrent(filter) { return }\n"
+        "\t})\n"
+        "}\n"
+        "clipboardTimer = time.AfterFunc"
+    )
+
+    def test_query_and_scope_capture_contract_is_detected(self):
+        ctx = self._ctx(self.MODERN)
+        self.assertTrue(support.f5_desktop_timer_ready(ctx))
+        self.assertTrue(support.f5_filter_refresh_ready(ctx))
+
+    def test_old_refresh_regex_shape_is_not_accepted(self):
+        ctx = self._ctx(
+            "func (a *App) refresh() {\n"
+            "\t// a.query was only mentioned here in the retired shape\n"
+            "}\n"
+            "clipboardTimer = time.AfterFunc"
+        )
+        self.assertTrue(support.f5_desktop_timer_ready(ctx))
+        self.assertFalse(support.f5_filter_refresh_ready(ctx))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,5 +1,7 @@
 # 团队同步与原生移动端验收
 
+> 当前状态补记（2026-11-07）：PR #37 已合并，其后整合内容也随 PR #43 合入 `main` `4abecb8`。最终 head `c3d505f` 的 Android 与 iOS CI 均为 success；iOS 日志实际为保护预检失败后验证能力不足时明确拒绝，完整真机成功路径仍未关闭。以下“草稿 PR”“等待精确 head CI/合并”只表示历史阶段，不能继续作为当前阻塞。系统认证、真机和完整团队 UI 的剩余范围仍须各自证据。
+
 原始基线 main `9d8d57475f3fb904fc9fe4bedc0c1e6b4ce07535`，已合入 SSH 基线 `8e61dc1ea1dce0de5924776de09a7f2aed40e800`，工作分支 `codex/team-mobile-sync`。主代理负责[架构](team-mobile-design.md)及独立验收，Sol xhigh 分工实现与工具，Luna max 独立审阅。以下只记录已实际完成的范围；平台和最终 CI 待办不计为成功。
 
 ## 当前状态（第十五轮 Android CI 与 SSH 合并后）
