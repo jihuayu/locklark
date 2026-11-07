@@ -26,7 +26,7 @@
 | 未签名打包回归 | 8 项通过，0.285 秒 | browser-completion-package-frozen.log |
 | Chromium 完整原生组合 | 通过 | browser-completion-chromium-full.log；含 popup/附件/清空、填充/保存/更新/OTP、条件式、其他软件验证器、Signal、Passkey 管理/重连与独立 RP 验证 |
 | 独立 Edge 完整原生组合 | 通过 | browser-completion-edge-full.log；同上；软件 CTAP2/USB 共存不是硬件安全密钥 |
-| Firefox | 已通过本批公共站点组件，最终完整原生组合另记 PR 验收 | PR #48 的完整组合已通过，不能用它冒充本批结果 |
+| Firefox 完整原生组合 | 通过 | browser-completion-firefox-full.log；完整填充/保存/更新/OTP、Passkey 创建/签名/取消/回退、条件式和管理/重连；配置独立 RP verifier，缺失 Signal 方法不虚报支持 |
 
 脚本实际使用固定 native 构建和独立 @simplewebauthn/server 14.0.3。所有私有合成 fixture 与因素保留在私有运行目录，公共日志仅输出阶段和断言。首轮 Signal GUI、筛选适配器失败及修复见专项验收，没有删除失败证据或将旧 head CI 挪作最终结果。
 
