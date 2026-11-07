@@ -1,6 +1,6 @@
 # 插件功能收尾与进度对账
 
-日期：2026-11-07。起点 `main` `4abecb8e869a255920f0104ce69977d87150feef`；工作分支 `codex/plugin-completion`。本记录区分本地独立验收、组件契约、真实浏览器流程及最终远端 CI；合并回执以关联 PR 的 Checks 和 timeline 为准。
+日期：2026-11-07。起点 `main` `4abecb8e869a255920f0104ce69977d87150feef`；工作分支 `codex/plugin-completion`，[PR #44](https://github.com/jihuayu/locklark/pull/44)。本记录区分本地独立验收、组件契约、真实浏览器流程及最终远端 CI；合并回执以 [PR #44 的 Checks](https://github.com/jihuayu/locklark/pull/44/checks) 和 timeline 为准，旧 PR 的绿色检查不代替本次 head。
 
 ## 本批范围
 

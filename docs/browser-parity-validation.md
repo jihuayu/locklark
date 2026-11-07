@@ -17,7 +17,7 @@
 
 ## 本轮收尾
 
-附件分块上传/下载/删除、备注和隐藏自定义字段显式清空、旧 E2E 探测修正及额外浏览器验收，见[插件收尾验收](plugin-completion-validation.md)。本轮行为与基线分开记录，最终远端 CI 和合并回执以本次关联 PR 为准。
+附件分块上传/下载/删除、备注和隐藏自定义字段显式清空、旧 E2E 探测修正及额外浏览器验收，见[插件收尾验收](plugin-completion-validation.md)。本轮行为与基线分开记录，最终远端 CI 和合并回执见 [PR #44](https://github.com/jihuayu/locklark/pull/44)，不沿用上述基线检查。
 
 ## 持续缺口
 
