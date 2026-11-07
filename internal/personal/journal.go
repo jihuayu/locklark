@@ -319,6 +319,72 @@ func readSealed(a cipher.AEAD, label, raw []byte, v any) error {
 	return nil
 }
 func eventLabel(seq []byte) []byte { return append([]byte("locklark/personal/event/v1\x00"), seq...) }
+
+// applyAuditRevision is the single revision-replay switch shared by cold
+// history verification, warm tail verification and cache extension.
+func applyAuditRevision(ev Event, hash string, revisions map[string]string) error {
+	if ev.Action == passkeyCreateAction {
+		if ev.BaseRevision != revisions[ev.Item] {
+			return invalid
+		}
+		revisions[ev.Item] = hash
+	} else if ((ev.Action == sshGenerateAction || ev.Action == sshImportAction || ev.Action == "item.add" || ev.Action == "item.generate") && ev.Result == "succeeded") || ev.Action == "item.restore" || ev.Action == "item.import" || ev.Action == browserNewAction && ev.Result == "succeeded" {
+		if revisions[ev.Item] != "" {
+			return invalid
+		}
+		revisions[ev.Item] = hash
+	} else if ev.Action == v2PurgeAction {
+		if ev.Result == "not-found" {
+			if ev.Item != "" || ev.BaseRevision != "" {
+				return invalid
+			}
+		} else {
+			if revisions[ev.Item] != ev.BaseRevision {
+				return invalid
+			}
+			if ev.Result == "succeeded" {
+				delete(revisions, ev.Item)
+			}
+		}
+	} else if ev.Action == v2DetailViewAction || ev.Action == v2DetailInspectAction {
+		found := revisions[ev.Item] != ""
+		if (ev.Result == "not-found") == found || ev.BaseRevision != revisions[ev.Item] {
+			return invalid
+		}
+	} else if ev.Action == sshSignAction || editAction(ev.Action) || ev.Action == browserUpdateAction || readValueAction(ev.Action) || otpAction(ev.Action) {
+		found := revisions[ev.Item] != ""
+		if (ev.Result == "not-found") == found || ev.BaseRevision != revisions[ev.Item] {
+			return invalid
+		}
+		if ev.Result == "succeeded" {
+			revisions[ev.Item] = hash
+		}
+	}
+	return nil
+}
+
+func replayAuditEvent(ev Event, count uint64, prev, origin string, pub ed25519.PublicKey, revisions map[string]string) (string, error) {
+	if ev.verify(pub, count, prev) != nil {
+		return "", invalid
+	}
+	if count == 1 && ((ev.Action == "vault.restore" && ev.Link != origin) || (ev.Action != "vault.restore" && origin != "")) {
+		return "", invalid
+	}
+	hash := ev.hash()
+	if applyAuditRevision(ev, hash, revisions) != nil {
+		return "", invalid
+	}
+	return hash, nil
+}
+
+func auditTipAfter(ev Event, s vault.Snapshot, prevOrigin string) auditTip {
+	origin := prevOrigin
+	if ev.Action == "vault.restore" {
+		origin = ev.Link
+	}
+	return auditTip{ev.Sequence, s.Epoch, ev.hash(), hex.EncodeToString(s.Signature), origin}
+}
+
 func history(b *bolt.Bucket, i identity, s vault.Snapshot, want bool, revisions map[string]string) (auditTip, []Event, error) {
 	var tip auditTip
 	var rows []Event
@@ -344,50 +410,14 @@ func history(b *bolt.Bucket, i identity, s vault.Snapshot, want bool, revisions 
 			return invalid
 		}
 		var ev Event
-		if readSealed(a, eventLabel(k), raw, &ev) != nil || ev.verify(pub, count, prev) != nil {
+		if readSealed(a, eventLabel(k), raw, &ev) != nil {
 			return invalid
 		}
-		if count == 1 && ((ev.Action == "vault.restore" && ev.Link != tip.Origin) || (ev.Action != "vault.restore" && tip.Origin != "")) {
-			return invalid
+		next, err := replayAuditEvent(ev, count, prev, tip.Origin, pub, revisions)
+		if err != nil {
+			return err
 		}
-		prev = ev.hash()
-		if ev.Action == passkeyCreateAction {
-			if ev.BaseRevision != revisions[ev.Item] {
-				return invalid
-			}
-			revisions[ev.Item] = prev
-		} else if ((ev.Action == sshGenerateAction || ev.Action == sshImportAction || ev.Action == "item.add" || ev.Action == "item.generate") && ev.Result == "succeeded") || ev.Action == "item.restore" || ev.Action == "item.import" || ev.Action == browserNewAction && ev.Result == "succeeded" {
-			if revisions[ev.Item] != "" {
-				return invalid
-			}
-			revisions[ev.Item] = prev
-		} else if ev.Action == v2PurgeAction {
-			if ev.Result == "not-found" {
-				if ev.Item != "" || ev.BaseRevision != "" {
-					return invalid
-				}
-			} else {
-				if revisions[ev.Item] != ev.BaseRevision {
-					return invalid
-				}
-				if ev.Result == "succeeded" {
-					delete(revisions, ev.Item)
-				}
-			}
-		} else if ev.Action == v2DetailViewAction || ev.Action == v2DetailInspectAction {
-			found := revisions[ev.Item] != ""
-			if (ev.Result == "not-found") == found || ev.BaseRevision != revisions[ev.Item] {
-				return invalid
-			}
-		} else if ev.Action == sshSignAction || editAction(ev.Action) || ev.Action == browserUpdateAction || readValueAction(ev.Action) || otpAction(ev.Action) {
-			found := revisions[ev.Item] != ""
-			if (ev.Result == "not-found") == found || ev.BaseRevision != revisions[ev.Item] {
-				return invalid
-			}
-			if ev.Result == "succeeded" {
-				revisions[ev.Item] = prev
-			}
-		}
+		prev = next
 		if want {
 			rows = append(rows, ev)
 		}
@@ -440,11 +470,7 @@ func appendLinked(b *bolt.Bucket, i identity, tip auditTip, s vault.Snapshot, ac
 	if e = events.Put(bytes.Clone(k), raw); e != nil {
 		return ev, e
 	}
-	origin := tip.Origin
-	if action == "vault.restore" {
-		origin = link
-	}
-	tip = auditTip{ev.Sequence, s.Epoch, ev.hash(), hex.EncodeToString(s.Signature), origin}
+	tip = auditTipAfter(ev, s, tip.Origin)
 	raw, e = sealedJSON(a, tipKey, tip)
 	if e != nil {
 		return ev, e
