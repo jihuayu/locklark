@@ -99,7 +99,9 @@ func main() {
 		time.Sleep(time.Minute)
 		return
 	case "gh":
-		env := append(os.Environ(), "HTTPS_PROXY="+c.Proxy, "HTTP_PROXY="+c.Proxy, "NO_PROXY=", "SSL_CERT_FILE="+c.CA, "GH_NO_UPDATE_NOTIFIER=1", "GH_PROMPT_DISABLED=1")
+		// Owned test fixture disables optional background telemetry so only
+		// controlled oracle activity and cleanup remain deterministic.
+		env := append(os.Environ(), "HTTPS_PROXY="+c.Proxy, "HTTP_PROXY="+c.Proxy, "NO_PROXY=", "SSL_CERT_FILE="+c.CA, "GH_NO_UPDATE_NOTIFIER=1", "GH_PROMPT_DISABLED=1", "GH_TELEMETRY=false")
 		execGH(c.GH, append([]string{c.GH}, os.Args[2:]...), env)
 	default:
 		os.Exit(94)

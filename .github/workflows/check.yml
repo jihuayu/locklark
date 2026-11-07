@@ -74,6 +74,7 @@ jobs:
           python3 scripts/search_acceptance.py "$RUNNER_TEMP/locklark"
           python3 scripts/run_env_acceptance.py "$RUNNER_TEMP/locklark"
           python3 -m unittest discover -s scripts -p test_run_cli_acceptance.py
+          /usr/bin/gh --version
           python3 scripts/run_cli_acceptance.py --cli "$RUNNER_TEMP/locklark" --go "$(command -v go)" --artifacts "$RUNNER_TEMP/locklark-run-cli-evidence"
           python3 scripts/injection_acceptance.py "$RUNNER_TEMP/locklark"
           python3 scripts/live_pull_acceptance.py "$RUNNER_TEMP/locklark"

@@ -48,13 +48,17 @@
 
 复现：`python3 -m unittest discover -s tests/scripts -p 'test_e2e*.py'`、`python3 scripts/e2e_runner.py --feature all --json-out /tmp/locklark-e2e-report.json`；使用有效 Go、Node、Xvfb 工具链。本轮同样进入 Web CI。
 
-## 既有 CLI 外部验收的追加诊断
+## CLI 外部验收与后台遥测
 
-`0e13665` 的 Web、Windows、macOS、Android、iOS 均通过，Linux 首次在 `gh-pipes` 失败；原提交重跑通过该阶段，但随后在 `stale` 失败。不能将这种阶段变化直接断言为控制器竞态：独立只读复核未证明正常拒绝路径存在竞态，根因仍需具体失败断言。
+`0e13665` 的 Web、Windows、macOS、Android、iOS 均通过，Linux 首次在 `gh-pipes` 失败；原提交重跑通过该阶段，但随后在 `stale` 失败。固定诊断码使主代理随后在本地捕获到 `request-temporary-directory-not-clean`：旧修订请求正确退出 1、观察到全部 3 个提示、没有输出和 TLS 请求，残留却来自前一次 `gh` 的 `home/.local/state/gh/device-id`。
 
-主代理使用原 `gh 2.46.0`、经官方 SHA-256 校验的 `gh 2.103.3` 完整运行外部验收均通过；再将进程固定到 CPU 0 连续运行四轮，11 项验收阶段全部通过。DeepSeek worker 增加固定失败码、子阶段与受限元数据（退出码、布尔开关、观察到的提示数量、输出字节数及 TLS 请求数）；原有提示、ECHO、退出码、无子进程、管道及隐私断言保留。诊断不输出因子、token、参数、正文或异常文本；14 项控制器/隐私测试通过，worker 的完整真实 CLI 验收再次通过。
+官方 `gh 2.103.3` 的[遥测实现](https://github.com/cli/cli/blob/v2.103.3/internal/telemetry/telemetry.go)会启动 detached `send-telemetry` 子进程，并持久化 device ID；后台进程能在直接命令结束、清理后重建旧临时目录。这解释了检测失败可能落在后续不同阶段。正式 RunCLI 已明确只等待/终止直接子进程，不能撤销可信程序的后代，本批保留该约定。
 
-这部分首先补可诊断性，不宣称已经找出 CI 根因；最终提交的检查与任何后续修正见 [PR #44](https://github.com/jihuayu/locklark/pull/44)。未取得同一最终 head 的六项成功结果前不合并。
+修正仅在受控 `scripts/run_cli_fixture` 的 GH 模式附加官方支持的 `GH_TELEMETRY=false`，与原有禁用更新通知的测试配置一起隔离可选后台活动；先前的正式环境白名单、已选 token、TLS 1.3、真实 stdin/stdout/stderr、旧修订/拒绝/无子进程、严格临时目录清空和隐私断言均保留。生产环境和清理实现没有因此放宽。
+
+固定失败码及受限元数据不包含因子、token、参数、正文或异常文本；14 项控制器/隐私测试通过。修正后 worker 用新建 fixture 和官方 `gh 2.103.3` 完整运行四次（前两次固定 CPU 0）：每次退出 0、11 个阶段通过、临时目录和 device-id 残留均为 0。主代理独立重建 fixture 并再次完整通过，日志 `/workspace/plugin-cli-telemetry-independent.log`。修正前只读复核未证明控制器的正常拒绝路径存在竞态，四轮先前未复现的压力运行也未被当作根因证据。
+
+最终远端确认见 [PR #44](https://github.com/jihuayu/locklark/pull/44)；未取得同一最终 head 的六项成功结果前不合并。
 
 ## 已实现与真实剩余范围的区分
 
