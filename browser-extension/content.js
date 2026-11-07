@@ -54,6 +54,9 @@
     root,
     target,
     request = null,
+    conditionalRequest = null,
+    conditionalGeneration = 0,
+    capabilityProbe = { at: 0, supported: false, pending: null },
     focusGeneration = 0,
     panelAnchor = null,
     panelHasAnchor = false,
@@ -263,6 +266,204 @@
         return node;
     }
     return event.target;
+  }
+  // document.activeElement is retargeted to the host for controls inside a
+  // shadow root, so a focused shadow input never matches its own panel anchor.
+  // Descend only through open roots (shadowRoot.activeElement); a closed root
+  // exposes no shadowRoot and therefore stays opaque at its host.
+  function deepActiveElement() {
+    let active = document.activeElement || null;
+    for (let depth = 0; active && depth < 20; depth++) {
+      let inner = null;
+      try {
+        inner = active.shadowRoot?.activeElement || null;
+      } catch {
+        inner = null;
+      }
+      if (!inner || inner === active) break;
+      active = inner;
+    }
+    return active;
+  }
+  function autocompleteTokens(el) {
+    return String(
+      (el && el.getAttribute && el.getAttribute("autocomplete")) ||
+        el?.autocomplete ||
+        "",
+    )
+      .toLowerCase()
+      .split(/\s+/)
+      .filter(Boolean);
+  }
+  // Conditional Passkey UI is limited to a focused, visible, writable input
+  // whose autocomplete token list asks for WebAuthn.
+  function conditionalField(el) {
+    if (!(el instanceof HTMLInputElement) || !visibleField(el)) return false;
+    const type = String(el.type || "text").toLowerCase();
+    if (
+      [
+        "password",
+        "hidden",
+        "checkbox",
+        "radio",
+        "submit",
+        "button",
+        "reset",
+        "file",
+        "image",
+        "range",
+        "color",
+      ].includes(type)
+    )
+      return false;
+    return autocompleteTokens(el).includes("webauthn");
+  }
+  function conditionalChoiceLabel(entry) {
+    const display = typeof entry.display_name === "string" ? entry.display_name.trim() : "";
+    const user = typeof entry.user_name === "string" ? entry.user_name.trim() : "";
+    const title = typeof entry.title === "string" ? entry.title.trim() : "";
+    const account = display || user || title || "Passkey";
+    const secondary =
+      user && user !== account
+        ? user
+        : typeof entry.rp_id === "string"
+          ? entry.rp_id
+          : "";
+    return secondary ? account + " · " + secondary : account;
+  }
+  function clearConditional() {
+    conditionalRequest = null;
+    conditionalGeneration++;
+  }
+  async function conditionalCapabilitySupported() {
+    if (Date.now() - capabilityProbe.at < 2000) return capabilityProbe.supported;
+    if (!capabilityProbe.pending)
+      capabilityProbe.pending = (async () => {
+        let supported = false;
+        try {
+          const state = await send({ type: "inline-state" });
+          supported = state?.passkeyConditionalSupported === true;
+        } catch {}
+        capabilityProbe.at = Date.now();
+        capabilityProbe.supported = supported;
+        capabilityProbe.pending = null;
+        return supported;
+      })();
+    return capabilityProbe.pending;
+  }
+  async function replyConditionalCapability(id) {
+    const supported = (await conditionalCapabilitySupported()) === true;
+    // Only a boolean ever leaves the isolated world for the page bridge.
+    window.postMessage(
+      { source: "locklark-capability-v1", id, conditional: supported },
+      location.origin,
+    );
+  }
+  function finishConditional(call, result) {
+    if (conditionalRequest !== call) return;
+    clearConditional();
+    call.finish(
+      result?.credential
+        ? { credential: result.credential }
+        : result?.error
+          ? { error: result.error }
+          : { fallback: true },
+    );
+  }
+  function fallbackConditional(call) {
+    if (conditionalRequest !== call) return;
+    clearConditional();
+    dismiss();
+    try {
+      void send({ type: "passkey-cancel", id: call.id });
+    } catch {}
+    call.finish({ fallback: true });
+  }
+  async function sendConditionalSelection(message, call) {
+    let result;
+    try {
+      result = await send(message);
+    } catch {}
+    if (conditionalRequest !== call) return;
+    finishConditional(call, result);
+  }
+  async function showConditionalAccounts(anchor) {
+    const call = conditionalRequest;
+    if (!call || document.visibilityState !== "visible") return;
+    if (!conditionalField(anchor)) return;
+    // Focus guard: the anchor must still be the real focused control, which
+    // may live inside an open shadow root.
+    if (deepActiveElement() !== anchor || !anchor.isConnected) return;
+    const generation = ++conditionalGeneration;
+    let listed;
+    try {
+      listed = await send({
+        type: "passkey-conditional-open",
+        id: call.id,
+        options: call.options,
+      });
+    } catch {}
+    if (conditionalRequest !== call || generation !== conditionalGeneration)
+      return;
+    if (deepActiveElement() !== anchor || !anchor.isConnected) return;
+    if (document.visibilityState !== "visible") return;
+    if (!conditionalField(anchor)) return;
+    if (!listed || listed.fallback === true || !Array.isArray(listed.passkeys)) {
+      fallbackConditional(call);
+      return;
+    }
+    if (pendingHost) {
+      dismissPending();
+      pendingDismissedForPasskey = true;
+    }
+    const box = panel(anchor, "Passkey 账号");
+    box.setAttribute("data-locklark-conditional", "passkey");
+    note(box, location.hostname);
+    const entries = listed.passkeys.slice(0, 50);
+    for (const entry of entries) {
+      const choice = element("button", conditionalChoiceLabel(entry));
+      choice.type = "button";
+      choice.setAttribute(
+        "data-locklark-passkey-choice",
+        entry.item_id || entry.credential_id,
+      );
+      choice.setAttribute("data-locklark-passkey-credential", entry.credential_id);
+      choice.addEventListener("click", (event) => {
+        if (!event.isTrusted) return;
+        if (conditionalRequest !== call) return;
+        if (document.visibilityState !== "visible") return;
+        dismiss();
+        void sendConditionalSelection(
+          {
+            type: "passkey-conditional-select",
+            id: call.id,
+            item_id: entry.item_id,
+            revision: entry.revision,
+            credential_id: entry.credential_id,
+          },
+          call,
+        );
+      });
+      box.append(choice);
+    }
+    if (!entries.length) note(box, "当前网站暂无已保存的 Passkey");
+    if (listed.truncated === true) {
+      const native = element("button", "使用系统 Passkey 选择器");
+      native.type = "button";
+      native.setAttribute("data-locklark-passkey-native", "true");
+      native.addEventListener("click", (event) => {
+        if (!event.isTrusted) return;
+        if (conditionalRequest !== call) return;
+        if (document.visibilityState !== "visible") return;
+        dismiss();
+        void sendConditionalSelection(
+          { type: "passkey-conditional-select", id: call.id, native: true },
+          call,
+        );
+      });
+      box.append(native);
+    }
+    button(box, "使用其他验证器", () => fallbackConditional(call));
   }
   function loginInput(el) {
     return (
@@ -986,7 +1187,20 @@
   document.addEventListener("focusin", (event) => {
     if (!event.isTrusted) return;
     const input = eventInputTarget(event);
-    if (input) void showSuggestions(input);
+    if (!input) return;
+    if (
+      conditionalRequest &&
+      document.visibilityState === "visible" &&
+      conditionalField(input)
+    ) {
+      void showConditionalAccounts(input);
+      return;
+    }
+    void showSuggestions(input);
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") return;
+    if (conditionalRequest) dismiss();
   });
   document.addEventListener("keydown", (event) => {
     if (
@@ -1385,6 +1599,9 @@
     dismissPending();
     if (request) void send({ type: "passkey-cancel", id: request.id });
     request = null;
+    if (conditionalRequest)
+      void send({ type: "passkey-cancel", id: conditionalRequest.id });
+    clearConditional();
   });
   if (document.readyState === "loading")
     document.addEventListener("DOMContentLoaded", () => void checkPendingSave(), {
@@ -1439,6 +1656,29 @@
   try {
     api.runtime.onMessage.addListener((message, sender, respond) => {
       if (!sender || sender.id !== api.runtime.id) return false;
+      // The worker invalidates a waiting conditional intent with a bare id; the
+      // UI must not outlive a lock, disconnect, navigation or eviction.
+      if (message?.type === "locklark:conditional-passkey-cancel") {
+        const call = conditionalRequest;
+        if (
+          typeof message.id !== "string" ||
+          !/^[a-f0-9-]{36}$/.test(message.id) ||
+          !call ||
+          call.id !== message.id
+        ) {
+          respond({ cancelled: false });
+          return true;
+        }
+        clearConditional();
+        dismiss();
+        if (pendingDismissedForPasskey) {
+          pendingDismissedForPasskey = false;
+          setTimeout(() => void checkPendingSave(), 0);
+        }
+        call.finish({ error: "NotAllowedError" });
+        respond({ cancelled: true });
+        return true;
+      }
       if (message?.type === "locklark:open-inline-menu") {
         const active = document.activeElement;
         const input =
@@ -1463,8 +1703,19 @@
     });
   } catch {}
   window.addEventListener("message", async (event) => {
-    if (window !== window.top) return;
+    if (event.source !== window || event.origin !== location.origin) return;
     const m = event.data;
+    if (m?.source === "locklark-capability-v1") {
+      if (
+        typeof m.id !== "string" ||
+        !/^[a-f0-9-]{36}$/.test(m.id) ||
+        Object.keys(m).some((key) => key !== "source" && key !== "id")
+      )
+        return;
+      void replyConditionalCapability(m.id);
+      return;
+    }
+    if (window !== window.top) return;
     if (
       event.source !== window ||
       event.origin !== location.origin ||
@@ -1484,6 +1735,18 @@
       }
     };
     if (m.type === "cancel") {
+      if (conditionalRequest?.id === m.id) {
+        clearConditional();
+        dismiss();
+        try {
+          void send({ type: "passkey-cancel", id: m.id });
+        } catch {}
+        if (pendingDismissedForPasskey) {
+          pendingDismissedForPasskey = false;
+          setTimeout(() => void checkPendingSave(), 0);
+        }
+        return;
+      }
       if (request?.id === m.id) {
         void send({ type: "passkey-cancel", id: m.id });
         request = null;
@@ -1493,6 +1756,40 @@
           setTimeout(() => void checkPendingSave(), 0);
         }
       }
+      return;
+    }
+    if (m.type === "get" && m.conditional === true) {
+      if (
+        typeof m.options !== "string" ||
+        m.options.length > 32768 ||
+        conditionalRequest ||
+        request ||
+        document.visibilityState !== "visible"
+      ) {
+        finish({ fallback: true });
+        return;
+      }
+      // Register the pending conditional call but show no UI until the user
+      // focuses a WebAuthn autocomplete field.
+      const own = { id: m.id, options: m.options, finish };
+      conditionalRequest = own;
+      conditionalGeneration++;
+      let state;
+      try {
+        state = await send({ type: "inline-state" });
+      } catch {}
+      if (conditionalRequest !== own) return;
+      if (
+        !state ||
+        state.offerUsePasskeys === false ||
+        state.passkeyConditionalSupported !== true
+      ) {
+        clearConditional();
+        finish({ fallback: true });
+        return;
+      }
+      const active = deepActiveElement();
+      if (conditionalField(active)) void showConditionalAccounts(active);
       return;
     }
     if (

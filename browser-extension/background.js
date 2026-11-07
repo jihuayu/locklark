@@ -7,6 +7,7 @@ if (typeof importScripts === "function") importScripts("core.js");
   let quickFill = false,
     fillUnknown = false,
     pendingPasskey = null,
+    passkeyConditionalSupported = false,
     passkeyUnknown = false,
     settings = core.normalizeSettings({}),
     autoLogin = true,
@@ -39,7 +40,13 @@ if (typeof importScripts === "function") importScripts("core.js");
     LAST_FILLED_TTL = 60 * 1000,
     HISTORY_LIMIT = 20,
     MULTI_STEP_TTL = 120000;
-  const stagedSaves = new Map(),
+  const CONDITIONAL_INTENT_LIMIT = 64,
+    CONDITIONAL_OPTIONS_MAX = 32768;
+  // Conditional (autofill) Passkey intents are metadata-only and never set
+  // pendingPasskey: an unselected conditional request must not block ordinary
+  // fill, save or OTP operations.
+  const conditionalIntents = new Map(),
+    stagedSaves = new Map(),
     lastFilledCredentials = new Map(),
     generatedHistory = [],
     multiStepSessions = new Map();
@@ -59,6 +66,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       capitalize: generatorDefaults.capitalize,
       pinLength: generatorDefaults.pinLength,
     });
+    refreshPasskeyConditionalSupport();
     return settings;
   }
   const settingsReady = (async () => {
@@ -613,6 +621,8 @@ if (typeof importScripts === "function") importScripts("core.js");
     clearPendingOpenAndFill();
     matchCategory = "login";
     multiStepSessions.clear();
+    clearConditionalIntentsWithNotify();
+    refreshPasskeyConditionalSupport();
     advanceEpoch();
     for (const [requestId, c] of calls) {
       retired.add(requestId);
@@ -1090,6 +1100,7 @@ if (typeof importScripts === "function") importScripts("core.js");
         hostCapabilities = Array.isArray(message.capabilities)
           ? message.capabilities.slice()
           : [];
+        refreshPasskeyConditionalSupport();
         status = uncertain
           ? "桌面已解锁 · 结果未确认，请在金库核实，勿重复保存"
           : "桌面已解锁，已连接，请读取当前网站候选";
@@ -1133,6 +1144,7 @@ if (typeof importScripts === "function") importScripts("core.js");
         "cancel-otp": "cancelled",
         "passkey-create": "passkey-result",
         "passkey-get": "passkey-result",
+        "passkey-list": "passkey-candidates",
         "vault-search": "vault-items",
         "vault-list": "vault-items",
         "item-get": "item-detail",
@@ -1159,6 +1171,7 @@ if (typeof importScripts === "function") importScripts("core.js");
           "cancel-otp",
           "passkey-create",
           "passkey-get",
+          "passkey-list",
           "passkey-remove",
         ].includes(call.type)
       ) {
@@ -1195,6 +1208,7 @@ if (typeof importScripts === "function") importScripts("core.js");
             (value) => typeof value === "string" && value.length <= 64,
           )
         : [];
+      refreshPasskeyConditionalSupport();
       status = "已连接，请读取当前网站候选";
       updateBadge();
       rebuildContextMenus();
@@ -2367,6 +2381,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     }
   }
   function cancelContext() {
+    clearConditionalIntentsWithNotify();
     if (pendingPasskey) {
       if (pendingPasskey.create) passkeyUnknown = true;
       pendingPasskey = null;
@@ -2422,6 +2437,8 @@ if (typeof importScripts === "function") importScripts("core.js");
         multiStepSessions.delete(tabId);
       }
     }
+    if ("url" in change || change.status === "loading")
+      clearConditionalIntentsForTab(tabId);
     if (
       (context?.tabId === tabId ||
         pending?.tabId === tabId ||
@@ -2438,6 +2455,7 @@ if (typeof importScripts === "function") importScripts("core.js");
   });
   api.tabs.onRemoved?.addListener((tabId) => {
     multiStepSessions.delete(tabId);
+    clearConditionalIntentsForTab(tabId);
     if (
       context?.tabId === tabId ||
       pending?.tabId === tabId ||
@@ -3141,6 +3159,15 @@ if (typeof importScripts === "function") importScripts("core.js");
         pendingPasskey.documentId === sender.documentId
       )
         cancelContext();
+      const key = sender.tab.id + ":" + sender.documentId;
+      const intent = conditionalIntents.get(key);
+      if (
+        intent &&
+        intent.pageID === message.id &&
+        intent.tabId === sender.tab.id &&
+        intent.documentId === sender.documentId
+      )
+        conditionalIntents.delete(key);
       return {};
     }
     const c = await contentContext(sender);
@@ -3150,6 +3177,7 @@ if (typeof importScripts === "function") importScripts("core.js");
         connected: !!capability,
         offerSavePasskeys,
         offerUsePasskeys,
+        passkeyConditionalSupported: passkeyConditionalSupported === true,
         offerSaveLogins,
         neverSaveForOrigin: neverSaveOrigins.includes(c.origin),
         suppressInline: neverSaveOrigins.includes(c.origin),
@@ -3302,6 +3330,10 @@ if (typeof importScripts === "function") importScripts("core.js");
       }
       return { status };
     }
+    if (message.type === "passkey-conditional-open")
+      return conditionalOpen(message, c);
+    if (message.type === "passkey-conditional-select")
+      return conditionalSelect(message, c);
     if (
       message.type !== "passkey" ||
       !["create", "get"].includes(message.operation) ||
@@ -3384,6 +3416,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       site,
       attachmentsSupported: !!capability && core.attachmentCapability(hostCapabilities),
       passkeyManagementSupported: passkeyManagementSupported(),
+      passkeyConditionalSupported: passkeyConditionalSupported === true,
       watchtower: watchtowerReport,
     };
   }
@@ -3459,6 +3492,278 @@ if (typeof importScripts === "function") importScripts("core.js");
   function passkeyManagementSupported() {
     return !!capability && core.passkeyManagementCapability(hostCapabilities);
   }
+  function refreshPasskeyConditionalSupport() {
+    const previous = passkeyConditionalSupported;
+    passkeyConditionalSupported =
+      !!capability &&
+      offerUsePasskeys === true &&
+      core.conditionalPasskeyCapability(hostCapabilities);
+    if (previous === true && passkeyConditionalSupported !== true)
+      clearConditionalIntentsWithNotify();
+  }
+  function conditionalIntentKey(c) {
+    return c.tabId + ":" + c.documentId;
+  }
+  // Conditional account metadata only ever lives in this worker and in the
+  // isolated UI. When a waiting intent is invalidated we notify the owning
+  // document with a bare id so the panel cannot outlive the vault state.
+  function takeConditionalIntents(predicate) {
+    const taken = [];
+    for (const [key, intent] of conditionalIntents)
+      if (!predicate || predicate(intent)) {
+        taken.push(intent);
+        conditionalIntents.delete(key);
+      }
+    return taken;
+  }
+  function notifyConditionalCancelled(intents) {
+    if (!intents.length || typeof api.tabs?.sendMessage !== "function") return;
+    for (const intent of intents) {
+      if (!/^[a-f0-9-]{36}$/.test(intent.pageID || "")) continue;
+      if (!Number.isSafeInteger(intent.tabId) || intent.tabId < 1) continue;
+      const message = {
+        type: "locklark:conditional-passkey-cancel",
+        id: intent.pageID,
+      };
+      try {
+        const sent = api.tabs.sendMessage(intent.tabId, message, {
+          documentId: intent.documentId,
+        });
+        if (sent && typeof sent.catch === "function") sent.catch(() => {});
+      } catch {
+        try {
+          const sent = api.tabs.sendMessage(intent.tabId, message);
+          if (sent && typeof sent.catch === "function") sent.catch(() => {});
+        } catch {}
+      }
+    }
+  }
+  function clearConditionalIntentsWithNotify(predicate) {
+    notifyConditionalCancelled(takeConditionalIntents(predicate));
+  }
+  function clearConditionalIntentsForTab(tabId) {
+    clearConditionalIntentsWithNotify((intent) => intent.tabId === tabId);
+  }
+  function storeConditionalIntent(intent) {
+    const key = conditionalIntentKey(intent);
+    conditionalIntents.delete(key);
+    while (conditionalIntents.size >= CONDITIONAL_INTENT_LIMIT) {
+      const oldest = conditionalIntents.keys().next();
+      if (oldest.done) break;
+      const evicted = conditionalIntents.get(oldest.value);
+      conditionalIntents.delete(oldest.value);
+      notifyConditionalCancelled(evicted ? [evicted] : []);
+    }
+    conditionalIntents.set(key, intent);
+  }
+  function conditionalOptionsValid(raw) {
+    if (
+      typeof raw !== "string" ||
+      raw.length < 2 ||
+      raw.length > CONDITIONAL_OPTIONS_MAX
+    )
+      return false;
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return false;
+    }
+    return (
+      !!parsed &&
+      typeof parsed === "object" &&
+      !Array.isArray(parsed) &&
+      typeof parsed.challenge === "string" &&
+      parsed.challenge.length > 0 &&
+      parsed.challenge.length <= 1024
+    );
+  }
+  function conditionalRequestOptions(raw, credentialID) {
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw Error("refused");
+    }
+    if (!credentialID) return raw;
+    parsed.allowCredentials = [{ type: "public-key", id: credentialID }];
+    return JSON.stringify(parsed);
+  }
+  function conditionalCandidateView(entry) {
+    return {
+      item_id: entry.item_id,
+      revision: entry.revision,
+      title: entry.title,
+      credential_id: entry.credential_id,
+      rp_id: entry.rp_id,
+      user_name: entry.user_name,
+      display_name: entry.display_name,
+    };
+  }
+  async function conditionalOpen(message, c) {
+    await settingsReady;
+    refreshPasskeyConditionalSupport();
+    if (
+      Object.keys(message).some(
+        (key) => !["type", "id", "options"].includes(key),
+      ) ||
+      !/^[a-f0-9-]{36}$/.test(message.id || "") ||
+      !conditionalOptionsValid(message.options) ||
+      !passkeyConditionalSupported
+    )
+      throw Error("refused");
+    const generation = epoch,
+      intent = {
+        ...c,
+        pageID: message.id,
+        options: message.options,
+        capability,
+        epoch: generation,
+        credentials: [],
+        truncated: false,
+      };
+    storeConditionalIntent(intent);
+    let response;
+    try {
+      response = await request(
+        "passkey-list",
+        { ...fields(c), options: message.options },
+        8000,
+      );
+    } catch (error) {
+      if (conditionalIntents.get(conditionalIntentKey(c)) === intent)
+        conditionalIntents.delete(conditionalIntentKey(c));
+      throw error;
+    }
+    if (
+      generation !== epoch ||
+      !passkeyConditionalSupported ||
+      intent.capability !== capability ||
+      conditionalIntents.get(conditionalIntentKey(c)) !== intent ||
+      !response ||
+      response.type !== "passkey-candidates" ||
+      !core.validConditionalPasskeyList(response.passkeys)
+    )
+      throw Error("refused");
+    await current(c);
+    if (conditionalIntents.get(conditionalIntentKey(c)) !== intent)
+      throw Error("refused");
+    intent.credentials = response.passkeys.map((entry) => ({
+      item_id: entry.item_id,
+      revision: entry.revision,
+      credential_id: entry.credential_id,
+    }));
+    intent.truncated = response.truncated === true;
+    // Public, metadata-only projection: the isolated UI receives exactly these
+    // keys and nothing else from the native vault.
+    return {
+      passkeys: response.passkeys.map(conditionalCandidateView),
+      truncated: intent.truncated,
+    };
+  }
+  // A conditional intent only stays authoritative while this exact record is
+  // still the one stored for the sender document, under the same epoch,
+  // capability and advertised support. Every check is repeated after each
+  // await because all of them can change while a probe is in flight.
+  function conditionalSelectionBound(intent, message, c, key) {
+    return (
+      !!intent &&
+      conditionalIntents.get(key) === intent &&
+      intent.pageID === message.id &&
+      intent.epoch === epoch &&
+      intent.capability === capability &&
+      passkeyConditionalSupported === true &&
+      core.sameContext(intent, c)
+    );
+  }
+  async function conditionalSelect(message, c) {
+    await settingsReady;
+    refreshPasskeyConditionalSupport();
+    const key = conditionalIntentKey(c),
+      intent = conditionalIntents.get(key),
+      native = message.native === true,
+      allowed = native
+        ? ["type", "id", "native"]
+        : ["type", "id", "item_id", "revision", "credential_id"];
+    if (
+      Object.keys(message).length !== allowed.length ||
+      Object.keys(message).some((field) => !allowed.includes(field)) ||
+      !conditionalSelectionBound(intent, message, c, key) ||
+      // Listing candidates is read-only, but a selection claims the single
+      // native approval slot. It must never displace an ordinary fill, OTP or
+      // Passkey approval that is already in flight.
+      pending ||
+      pendingOTP ||
+      pendingPasskey
+    )
+      throw Error("refused");
+    if (native) {
+      if (intent.truncated !== true) throw Error("refused");
+    } else if (
+      !/^[a-f0-9]{32}$/.test(message.item_id || "") ||
+      !/^[a-f0-9]{64}$/.test(message.revision || "") ||
+      !core.validCredentialID(message.credential_id) ||
+      !intent.credentials.some(
+        (entry) =>
+          entry.item_id === message.item_id &&
+          entry.revision === message.revision &&
+          entry.credential_id === message.credential_id,
+      )
+    )
+      throw Error("refused");
+    await current(c);
+    // The probe yields control: this exact intent can be cancelled, replaced
+    // or rebound, and an ordinary approval can start, while it is in flight.
+    // Revalidate everything and claim the shared approval slot in one
+    // synchronous step so a canceled or superseded selection never sends a
+    // stale native get and never overwrites a newer intent.
+    if (
+      !conditionalSelectionBound(intent, message, c, key) ||
+      pending ||
+      pendingOTP ||
+      pendingPasskey
+    )
+      throw Error("refused");
+    conditionalIntents.delete(key);
+    const generation = epoch,
+      options = conditionalRequestOptions(
+        intent.options,
+        native ? "" : message.credential_id,
+      ),
+      approval = { ...intent, create: false };
+    pendingPasskey = approval;
+    status = "请在原生窗口确认 Passkey 操作";
+    try {
+      const result = await request(
+        "passkey-get",
+        {
+          ...fields(c),
+          options,
+          ...(native
+            ? {}
+            : { item_id: message.item_id, revision: message.revision }),
+        },
+        125000,
+      );
+      await current(c);
+      // A late native reply must not escape an invalidation that happened
+      // while the approval was pending: the approval slot, epoch, capability
+      // and advertised support all still have to describe this approval.
+      if (
+        generation !== epoch ||
+        pendingPasskey !== approval ||
+        intent.capability !== capability ||
+        passkeyConditionalSupported !== true
+      )
+        throw Error("refused");
+      const credential = JSON.parse(result.credential);
+      status = "Passkey 已交付；请核实网站结果";
+      return { credential };
+    } finally {
+      if (pendingPasskey === approval) pendingPasskey = null;
+    }
+  }
+
   async function attachmentNative(type, fields) {
     if (!attachmentsSupported()) {
       status = "当前原生宿主不支持附件";

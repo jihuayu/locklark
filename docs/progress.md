@@ -1,6 +1,8 @@
 # Locklark 开发进度
 
-本轮起点 / 上批已合并基线：`41e31f7`（[PR #45](https://github.com/jihuayu/locklark/pull/45)，2026-11-07 05:54:55 UTC）。该 PR 最终 head `5e990dd` 六项 CI 全部通过，合并后内容与验证提交一致。以下旧段落中的“PR #37/#40 尚未合并”、初始浏览器缺口与旧 CI 待办只代表历史阶段；当前缺口以[浏览器清单](browser-parity-checklist.md)和最新验收为准。
+当前已合并基线：main 2fc96e7（[PR #47](https://github.com/jihuayu/locklark/pull/47)，2026-11-07 08:51:33 UTC）。性能 PR 最终 head ab9aca6 的六项检查全部成功，合并树与验证树一致。PR #46 已关闭 #24/#32/#33/#34/#36/#38，PR #47 关闭 #35；当前仅 #39 浏览器体验 epic 开放。旧段落保留历史，不代表当前 PR 或缺口状态。
+
+2026-11-07 条件式 Passkey 与共存：metadata-only 原生账户列表、精确条目/修订选择、握手及页面生命周期清理、开放 Shadow DOM 焦点和并发槽位回归已完成；真实 Chromium/Edge/Firefox 组合旅程通过，Edge 另完成独立软件验证器的原生回退与签名核对。接新主线后扩展 250 项通过，真实 GUI、组件契约及最终 CI 分开记录，见[条件式验收](conditional-passkey-validation.md)。系统逐次 UV、Signal APIs 和发布准备仍为后续增量，不能据此关闭 #39。
 
 2026-11-07 全部 issues 接续：起始 8 项未关闭。#32/#33/#34/#36/#38 的主修复已在 PR #43 合并，正独立复核并补齐原始竞态回归；#35 历史验证性能与 #39 条件式 Passkey 在隔离工作区并行实现，#24 收录通知补 README 回链。逐项证据、关闭门槛和外部验收范围见 [issues 完成记录](issue-completion-validation.md)。
 

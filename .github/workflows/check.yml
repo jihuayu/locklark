@@ -322,6 +322,8 @@ jobs:
           LOCKLARK_BROWSER_HOST: ${{ runner.temp }}/locklark-browser-chromium
           LOCKLARK_TEST_POPUP_VAULT: "1"
           LOCKLARK_TEST_PASSKEY_MANAGEMENT: "1"
+          LOCKLARK_TEST_PASSKEY_CONDITIONAL: "1"
+          LOCKLARK_TEST_OTHER_PROVIDER: "1"
       - name: Test Firefox native approval, fill, save, OTP and Passkey
         timeout-minutes: 10
         run: |
@@ -335,4 +337,5 @@ jobs:
           LOCKLARK_GECKODRIVER: ${{ runner.temp }}/geckodriver
           LOCKLARK_TEST_FIREFOX_PASSKEY: "1"
           LOCKLARK_TEST_PASSKEY_MANAGEMENT: "1"
+          LOCKLARK_TEST_PASSKEY_CONDITIONAL: "1"
           LOCKLARK_TEST_WEBAUTHN_SERVER: ${{ runner.temp }}/locklark-webauthn-peer/node_modules/@simplewebauthn/server

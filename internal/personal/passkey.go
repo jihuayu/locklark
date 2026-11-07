@@ -40,8 +40,14 @@ func (t PasskeyTarget) parse() (*passkey.Request, error) {
 	return passkey.Parse(t.Context.Origin, t.Create, t.Options)
 }
 
+// pinned reports that the request selected one exact login. An assertion that
+// pinned a target may only ever be reviewed or answered for that item and
+// revision; anything else is refused instead of falling back to a list.
+func (t PasskeyTarget) pinned() bool { return !t.Create && t.ID != "" }
+
 // ReviewPasskey returns native-only choices, without revealing private keys.
-// Browser polling cannot renew idle time.
+// Browser polling cannot renew idle time. When the assertion pinned an exact
+// item/revision the review contains only that target, or fails.
 func (s *Session) ReviewPasskey(t PasskeyTarget) ([]PasskeyChoice, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -64,9 +70,19 @@ func (s *Session) ReviewPasskey(t PasskeyTarget) ([]PasskeyChoice, error) {
 			return e
 		}
 		defer auth.clear()
+		pinned := t.pinned()
+		found := false
 		for _, item := range auth.items {
 			if item.Kind != "login" || item.State != "" {
 				continue
+			}
+			if pinned {
+				// A stale or missing pinned target is refused; it must never
+				// widen into unrelated accounts.
+				if item.ID != t.ID || auth.revisions[item.ID] != t.Revision {
+					continue
+				}
+				found = true
 			}
 			if request.Create {
 				site, err := origin.Website(item.URL)
@@ -84,6 +100,9 @@ func (s *Session) ReviewPasskey(t PasskeyTarget) ([]PasskeyChoice, error) {
 			if matches {
 				choices = append(choices, PasskeyChoice{item.ID, auth.revisions[item.ID], item.Title, item.Username})
 			}
+		}
+		if pinned && !found {
+			return passkey.ErrRefused
 		}
 		return nil
 	})

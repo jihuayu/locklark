@@ -1033,6 +1033,8 @@ globalThis.LocklarkCore = (() => {
   }
   const ATTACHMENT_CAPABILITY = "attachments-v1";
   const PASSKEY_MANAGEMENT_CAPABILITY = "passkey-management-v1";
+  const CONDITIONAL_PASSKEY_CAPABILITY = "passkey-conditional-v1";
+  const CONDITIONAL_PASSKEY_LIMIT = 50;
   const ATTACHMENT_MAX_BYTES = 2097152;
   const ATTACHMENT_CHUNK_BYTES = 65536;
   const ATTACHMENT_MAX_COUNT = 16;
@@ -1052,6 +1054,61 @@ globalThis.LocklarkCore = (() => {
       Array.isArray(capabilities) &&
       capabilities.includes(PASSKEY_MANAGEMENT_CAPABILITY)
     );
+  }
+  function conditionalPasskeyCapability(capabilities) {
+    return (
+      Array.isArray(capabilities) &&
+      capabilities.includes(CONDITIONAL_PASSKEY_CAPABILITY)
+    );
+  }
+  // Conditional (autofill) Passkey candidate list. Entries are public account
+  // metadata only: no private key, user handle or raw credential bytes.
+  function validConditionalPasskeyEntry(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const keys = [
+      "item_id",
+      "revision",
+      "title",
+      "credential_id",
+      "rp_id",
+      "user_name",
+      "display_name",
+    ];
+    if (Object.keys(value).length !== keys.length) return false;
+    if (!Object.keys(value).every((key) => keys.includes(key))) return false;
+    if (!/^[a-f0-9]{32}$/.test(value.item_id || "")) return false;
+    if (!/^[a-f0-9]{64}$/.test(value.revision || "")) return false;
+    if (!validCredentialID(value.credential_id)) return false;
+    if (
+      typeof value.rp_id !== "string" ||
+      value.rp_id.length < 1 ||
+      value.rp_id.length > 253 ||
+      value.rp_id !== value.rp_id.toLowerCase() ||
+      /[\x00-\x20\x7f]/.test(value.rp_id)
+    )
+      return false;
+    for (const key of ["title", "user_name", "display_name"]) {
+      const text = value[key];
+      if (
+        typeof text !== "string" ||
+        text.length > 1024 ||
+        !text.isWellFormed() ||
+        /[\x00\r\n]/.test(text)
+      )
+        return false;
+    }
+    return true;
+  }
+  function validConditionalPasskeyList(value) {
+    if (!Array.isArray(value) || value.length > CONDITIONAL_PASSKEY_LIMIT)
+      return false;
+    if (!value.every(validConditionalPasskeyEntry)) return false;
+    const seen = new Set();
+    for (const entry of value) {
+      if (seen.has(entry.credential_id)) return false;
+      seen.add(entry.credential_id);
+    }
+    return true;
   }
   function validAttachmentID(value) {
     return typeof value === "string" && /^[A-Za-z0-9_.:-]{1,128}$/.test(value);
@@ -1233,6 +1290,7 @@ globalThis.LocklarkCore = (() => {
       return false;
     const shapes = {
         "passkey-result": ["v", "id", "type", "credential"],
+        "passkey-candidates": ["v", "id", "type", "passkeys", "truncated"],
         locked: ["v", "type"],
         unpaired: ["v", "type", "error"],
         paired: ["v", "id", "type", "capability", "quick_fill", "capabilities"],
@@ -1429,6 +1487,11 @@ globalThis.LocklarkCore = (() => {
     if (m.type === "watchtower") return validWatchtower(m.watchtower);
     if (m.type === "passkey-result")
       return typeof m.credential === "string" && m.credential.length <= 32768;
+    if (m.type === "passkey-candidates")
+      return (
+        typeof m.truncated === "boolean" &&
+        validConditionalPasskeyList(m.passkeys)
+      );
     if (m.type === "save-ready" || m.type === "otp-ready")
       return /^[a-f0-9]{64}$/.test(m.nonce || "");
     if (m.type === "otp-fill")
@@ -4890,6 +4953,11 @@ globalThis.LocklarkCore = (() => {
     attachmentCapability,
     PASSKEY_MANAGEMENT_CAPABILITY,
     passkeyManagementCapability,
+    CONDITIONAL_PASSKEY_CAPABILITY,
+    CONDITIONAL_PASSKEY_LIMIT,
+    conditionalPasskeyCapability,
+    validConditionalPasskeyEntry,
+    validConditionalPasskeyList,
     base64URLEncode,
     base64URLDecode,
     validCredentialID,

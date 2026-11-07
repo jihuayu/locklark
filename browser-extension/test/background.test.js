@@ -27,6 +27,9 @@ function harness(options = {}) {
     hangProbe = false,
     hangProbeAfterInjection = false,
     probeCount = 0,
+    probeGate = null,
+    probeBlocked = false,
+    probeWaiters = [],
     autoCommit = true,
     otpClock = 0,
     otpProbeWait = null,
@@ -44,6 +47,7 @@ function harness(options = {}) {
       username: "fill-user",
       isPasswordChange: false,
     };
+  const tabMessages = [];
   const port = {
     onMessage: { addListener: (f) => (portMessage = f) },
     onDisconnect: { addListener: (f) => (portDisconnect = f) },
@@ -179,6 +183,7 @@ function harness(options = {}) {
   };
   const api = {
     storage: {
+      onChanged: { addListener: (f) => (listeners.storage = f) },
       local: {
         get: async () => {
           if (options.readSettingsError) throw Error("storage unavailable");
@@ -197,8 +202,13 @@ function harness(options = {}) {
     },
     tabs: {
       query: async () => [{ id: tabId, url: tabUrl, windowId }],
+      sendMessage: (targetTab, message, sendOptions) => {
+        tabMessages.push({ tabId: targetTab, message, options: sendOptions });
+        return Promise.resolve();
+      },
       onActivated: { addListener: (f) => (listeners.active = f) },
       onUpdated: { addListener: (f) => (listeners.updated = f) },
+      onRemoved: { addListener: (f) => (listeners.removed = f) },
     },
     windows: {
       WINDOW_ID_NONE: -1,
@@ -214,14 +224,26 @@ function harness(options = {}) {
           (hangProbe || (hangProbeAfterInjection && injected.length > 0))
         )
           return new Promise(() => {});
-        if (options.func === core.probe)
-          return [
+        if (options.func === core.probe) {
+          const probe = [
             {
               frameId: 0,
               documentId: doc,
               result: { top: true, origin: "https://example.test" },
             },
           ];
+          if (probeGate) {
+            if (probeGate.remaining > 0) probeGate.remaining -= 1;
+            else {
+              const gate = probeGate;
+              probeGate = null;
+              probeBlocked = true;
+              for (const wake of probeWaiters.splice(0)) wake();
+              return gate.wait.then(() => probe);
+            }
+          }
+          return probe;
+        }
         if (options.func === core.otpDocument && options.args[1] === "probe") {
           otpProbes.push([...options.args]);
           if (otpProbeWait) return await otpProbeWait;
@@ -313,6 +335,23 @@ function harness(options = {}) {
         timer.fn();
       }
     },
+    // Defer the Nth probe so a context recheck can be held in flight while the
+    // page, vault or intent changes around it.  The deferred probe resolves
+    // with the document that was current when it started, like the real
+    // scripting call it models.
+    deferProbe: (after = 0) => {
+      let release;
+      const wait = new Promise((resolve) => (release = resolve));
+      probeGate = { remaining: after, wait };
+      return () => {
+        probeBlocked = false;
+        release();
+      };
+    },
+    waitProbe: () =>
+      probeBlocked
+        ? Promise.resolve()
+        : new Promise((resolve) => probeWaiters.push(resolve)),
     holdCommits: () => (autoCommit = false),
     losePort: () => portDisconnect?.(),
     expireCommit: () => {
@@ -349,6 +388,7 @@ function harness(options = {}) {
     setCapture: (x) => (captureValue = x),
     waitCapture: (promise) => (captureWait = promise),
     setDoc: (x) => (doc = x),
+    tabMessages,
     setTab: (x) => (tabId = x),
     deliver: (r) => {
       if (r.type === "save-ready") readyIds.add(r.id);
@@ -2221,4 +2261,764 @@ test("late completion of an older fill cannot overwrite a newer operation", asyn
   } finally {
     await h.send({ type: "disconnect" });
   }
+});
+// ---- Conditional (autofill) Passkey frontend ---------------------------------
+const CONDITIONAL_CAP = "passkey-conditional-v1";
+const conditionalID = (n = 1) =>
+  "12345678-1234-1234-1234-12345678901" + String(n % 10);
+const conditionalEntry = (n) => ({
+  item_id: n.toString(16).padStart(32, "0"),
+  revision: n.toString(16).padStart(64, "0"),
+  title: "Item " + n,
+  credential_id: core.base64URLEncode(new Uint8Array(32).fill(n % 250)),
+  rp_id: "example.test",
+  user_name: "user" + n + "@example.test",
+  display_name: "User " + n,
+});
+const conditionalOptions = (n = 1) =>
+  JSON.stringify({
+    challenge: core.base64URLEncode(new Uint8Array([n, n + 1, n + 2])),
+    rpId: "example.test",
+    allowCredentials: [
+      { type: "public-key", id: core.base64URLEncode(new Uint8Array(32).fill(9)) },
+    ],
+  });
+const conditionalHarness = (entries, options = {}) =>
+  harness({
+    capabilities: [CONDITIONAL_CAP],
+    ...options,
+    onRequest: (r) => {
+      if (options.onRequest) {
+        const reply = options.onRequest(r);
+        if (reply !== undefined) return reply;
+      }
+      if (r.type === "passkey-list" && options.holdList !== true)
+        return {
+          v: 1,
+          id: r.id,
+          type: "passkey-candidates",
+          passkeys: entries.map((entry) => ({ ...entry })),
+          truncated: options.truncated === true,
+        };
+      if (r.type === "passkey-get" && options.holdGet !== true)
+        return {
+          v: 1,
+          id: r.id,
+          type: "passkey-result",
+          credential: JSON.stringify({ id: "native-credential", rawId: "AQID" }),
+        };
+      if (r.type === "fill")
+        return {
+          v: 1,
+          id: r.id,
+          type: "fill",
+          username: "fill-user",
+          password: "fill-password",
+        };
+      return undefined;
+    },
+  });
+
+async function conditionalReady(entries, options) {
+  const h = conditionalHarness(entries, options);
+  await ready(h);
+  return h;
+}
+
+test("conditional list is public metadata only and never starts a native get", async () => {
+  const entries = [conditionalEntry(1), conditionalEntry(2)];
+  const h = await conditionalReady(entries);
+  const options = conditionalOptions(1);
+  const reply = await h.send(
+    { type: "passkey-conditional-open", id: conditionalID(1), options },
+    contentSender(),
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(reply)), {
+    passkeys: entries,
+    truncated: false,
+  });
+  const list = h.sent.filter((r) => r.type === "passkey-list");
+  assert.equal(list.length, 1);
+  assert.deepEqual(Object.keys(list[0]).sort(), [
+    "capability",
+    "document_id",
+    "id",
+    "options",
+    "origin",
+    "tab_id",
+    "type",
+    "v",
+  ]);
+  assert.equal(list[0].origin, "https://example.test");
+  assert.equal(list[0].tab_id, 1);
+  assert.equal(list[0].document_id, "doc-1");
+  assert.equal(list[0].options, options);
+  assert.equal(h.sent.some((r) => r.type === "passkey-get"), false);
+  const state = await h.send({ type: "state" });
+  assert.equal(state.passkeyConditionalSupported, true);
+  assert.equal(state.pending, false);
+});
+
+test("conditional request does not block ordinary match or fill state", async () => {
+  const h = await conditionalReady([conditionalEntry(1)]);
+  await h.send(
+    {
+      type: "passkey-conditional-open",
+      id: conditionalID(1),
+      options: conditionalOptions(1),
+    },
+    contentSender(),
+  );
+  const match = await h.send({ type: "inline-match" }, contentSender());
+  assert.equal(match.candidates.length, 1);
+  assert.equal((await h.send({ type: "state" })).pending, false);
+  await h.send(
+    { type: "inline-fill", id: "b".repeat(32), revision: "c".repeat(64) },
+    contentSender(),
+  );
+  assert.equal(h.sent.some((r) => r.type === "fill"), true);
+});
+
+test("conditional selection rebinds the original challenge, exact credential and sender context", async () => {
+  const entry = conditionalEntry(3);
+  const h = await conditionalReady([entry]);
+  const options = conditionalOptions(3);
+  const reply = await h.send(
+    { type: "passkey-conditional-open", id: conditionalID(1), options },
+    contentSender(),
+  );
+  assert.equal(reply.passkeys.length, 1);
+  const selected = await h.send(
+    {
+      type: "passkey-conditional-select",
+      id: conditionalID(1),
+      item_id: entry.item_id,
+      revision: entry.revision,
+      credential_id: entry.credential_id,
+    },
+    contentSender(),
+  );
+  assert.equal(selected.credential.id, "native-credential");
+  const gets = h.sent.filter((r) => r.type === "passkey-get");
+  assert.equal(gets.length, 1);
+  assert.deepEqual(Object.keys(gets[0]).sort(), [
+    "capability",
+    "document_id",
+    "id",
+    "item_id",
+    "options",
+    "origin",
+    "revision",
+    "tab_id",
+    "type",
+    "v",
+  ]);
+  assert.equal(gets[0].origin, "https://example.test");
+  assert.equal(gets[0].tab_id, 1);
+  assert.equal(gets[0].document_id, "doc-1");
+  assert.equal(gets[0].item_id, entry.item_id);
+  assert.equal(gets[0].revision, entry.revision);
+  const native = JSON.parse(gets[0].options);
+  assert.equal(native.challenge, JSON.parse(options).challenge);
+  assert.deepEqual(native.allowCredentials, [
+    { type: "public-key", id: entry.credential_id },
+  ]);
+  assert.notEqual(gets[0].options, options);
+});
+
+test("conditional selection refuses new options, foreign revisions and unknown keys", async () => {
+  const entry = conditionalEntry(4);
+  const h = await conditionalReady([entry]);
+  await h.send(
+    {
+      type: "passkey-conditional-open",
+      id: conditionalID(1),
+      options: conditionalOptions(4),
+    },
+    contentSender(),
+  );
+  const cases = [
+    {
+      item_id: entry.item_id,
+      revision: entry.revision,
+      credential_id: entry.credential_id,
+      options: JSON.stringify({ challenge: "evil" }),
+    },
+    {
+      item_id: entry.item_id,
+      revision: "d".repeat(64),
+      credential_id: entry.credential_id,
+    },
+    {
+      item_id: entry.item_id,
+      revision: entry.revision,
+      credential_id: core.base64URLEncode(new Uint8Array(32).fill(77)),
+    },
+    {
+      item_id: entry.item_id,
+      revision: entry.revision,
+      credential_id: entry.credential_id,
+      native: true,
+    },
+  ];
+  for (const selection of cases) {
+    const before = h.sent.filter((r) => r.type === "passkey-get").length;
+    const reply = await h.send(
+      {
+        type: "passkey-conditional-select",
+        id: conditionalID(1),
+        ...selection,
+      },
+      contentSender(),
+    );
+    assert.equal(reply.fallback, true);
+    assert.equal(h.sent.filter((r) => r.type === "passkey-get").length, before);
+  }
+  const accepted = await h.send(
+    {
+      type: "passkey-conditional-select",
+      id: conditionalID(1),
+      item_id: entry.item_id,
+      revision: entry.revision,
+      credential_id: entry.credential_id,
+    },
+    contentSender(),
+  );
+  assert.equal(accepted.credential.id, "native-credential");
+});
+
+test("a stale conditional list reply cannot revive a navigated document", async () => {
+  const entries = [conditionalEntry(5)];
+  const h = await conditionalReady(entries, { holdList: true });
+  const pending = h.send(
+    {
+      type: "passkey-conditional-open",
+      id: conditionalID(1),
+      options: conditionalOptions(5),
+    },
+    contentSender(),
+  );
+  await tick();
+  const list = h.sent.find((r) => r.type === "passkey-list");
+  assert.ok(list);
+  h.setDoc("doc-2");
+  h.listeners.updated(1, { status: "loading" });
+  h.deliver({
+    v: 1,
+    id: list.id,
+    type: "passkey-candidates",
+    passkeys: entries,
+    truncated: false,
+  });
+  const reply = await pending;
+  assert.equal(reply.fallback, true);
+  const after = await h.send(
+    {
+      type: "passkey-conditional-select",
+      id: conditionalID(1),
+      item_id: entries[0].item_id,
+      revision: entries[0].revision,
+      credential_id: entries[0].credential_id,
+    },
+    contentSender("doc-2"),
+  );
+  assert.equal(after.fallback, true);
+  assert.equal(h.sent.some((r) => r.type === "passkey-get"), false);
+});
+
+test("navigation, cancel and lock invalidate unused conditional intents", async () => {
+  const entry = conditionalEntry(6);
+  const h = await conditionalReady([entry]);
+  const open = () =>
+    h.send(
+      {
+        type: "passkey-conditional-open",
+        id: conditionalID(1),
+        options: conditionalOptions(6),
+      },
+      contentSender(),
+    );
+  await open();
+  await h.send({ type: "passkey-cancel", id: conditionalID(1) }, contentSender());
+  let reply = await h.send(
+    {
+      type: "passkey-conditional-select",
+      id: conditionalID(1),
+      item_id: entry.item_id,
+      revision: entry.revision,
+      credential_id: entry.credential_id,
+    },
+    contentSender(),
+  );
+  assert.equal(reply.fallback, true);
+  await open();
+  h.listeners.updated(1, { url: "https://example.test/other" });
+  reply = await h.send(
+    {
+      type: "passkey-conditional-select",
+      id: conditionalID(1),
+      item_id: entry.item_id,
+      revision: entry.revision,
+      credential_id: entry.credential_id,
+    },
+    contentSender(),
+  );
+  assert.equal(reply.fallback, true);
+  assert.equal(h.sent.some((r) => r.type === "passkey-get"), false);
+});
+
+test("old host and disabled settings expose no conditional wire", async () => {
+  for (const h of [
+    harness(),
+    await conditionalReady([conditionalEntry(7)], {
+      settings: { offerUsePasskeys: false },
+    }),
+  ]) {
+    if (!h.sent.some((r) => r.type === "hello")) await ready(h);
+    const before = h.sent.filter((r) => r.type === "passkey-list").length;
+    const reply = await h.send(
+      {
+        type: "passkey-conditional-open",
+        id: conditionalID(1),
+        options: conditionalOptions(7),
+      },
+      contentSender(),
+    );
+    assert.equal(reply.fallback, true);
+    assert.equal(h.sent.filter((r) => r.type === "passkey-list").length, before);
+    assert.equal((await h.send({ type: "state" })).passkeyConditionalSupported, false);
+    assert.equal((await h.send({ type: "inline-state" }, contentSender())).passkeyConditionalSupported, false);
+  }
+});
+
+test("conditional intents are one per document and bounded at 64 entries", async () => {
+  const entry = conditionalEntry(8);
+  const h = await conditionalReady([entry]);
+  const open = (doc, n) => {
+    h.setDoc(doc);
+    return h.send(
+      {
+        type: "passkey-conditional-open",
+        id: conditionalID(n),
+        options: conditionalOptions(8),
+      },
+      contentSender(doc),
+    );
+  };
+  const select = (doc, n) => {
+    h.setDoc(doc);
+    return h.send(
+      {
+        type: "passkey-conditional-select",
+        id: conditionalID(n),
+        item_id: entry.item_id,
+        revision: entry.revision,
+        credential_id: entry.credential_id,
+      },
+      contentSender(doc),
+    );
+  };
+  await open("doc-a", 1);
+  await open("doc-a", 2);
+  assert.equal((await select("doc-a", 1)).fallback, true);
+  assert.equal((await select("doc-a", 2)).credential.id, "native-credential");
+  for (let index = 0; index < 70; index++)
+    await open("bulk-" + index, index);
+  assert.equal((await select("bulk-0", 0)).fallback, true);
+  assert.equal(
+    (await select("bulk-69", 69)).credential.id,
+    "native-credential",
+  );
+});
+
+test("a truncated conditional list allows the native picker without selectors", async () => {
+  const entry = conditionalEntry(9);
+  const options = conditionalOptions(9);
+  const h = await conditionalReady([entry], { truncated: true });
+  const reply = await h.send(
+    { type: "passkey-conditional-open", id: conditionalID(1), options },
+    contentSender(),
+  );
+  assert.equal(reply.truncated, true);
+  const selected = await h.send(
+    { type: "passkey-conditional-select", id: conditionalID(1), native: true },
+    contentSender(),
+  );
+  assert.equal(selected.credential.id, "native-credential");
+  const get = h.sent.find((r) => r.type === "passkey-get");
+  assert.equal(get.item_id, undefined);
+  assert.equal(get.revision, undefined);
+  assert.equal(get.options, options);
+  const second = await h.send(
+    { type: "passkey-conditional-select", id: conditionalID(1), native: true },
+    contentSender(),
+  );
+  assert.equal(second.fallback, true);
+  const plain = await conditionalReady([entry], { truncated: false });
+  await plain.send(
+    { type: "passkey-conditional-open", id: conditionalID(1), options },
+    contentSender(),
+  );
+  assert.equal(
+    (
+      await plain.send(
+        {
+          type: "passkey-conditional-select",
+          id: conditionalID(1),
+          native: true,
+        },
+        contentSender(),
+      )
+    ).fallback,
+    true,
+  );
+});
+
+// ---- Conditional intent invalidation notifications ---------------------------
+const conditionalUUID = (n) =>
+  "aaaaaaaa-bbbb-cccc-dddd-" + String(n).padStart(12, "0");
+const conditionalCancels = (h) =>
+  h.tabMessages.filter(
+    (sent) => sent.message.type === "locklark:conditional-passkey-cancel",
+  );
+const openConditional = (h, n, doc = "doc-1") => {
+  h.setDoc(doc);
+  return h.send(
+    {
+      type: "passkey-conditional-open",
+      id: conditionalUUID(n),
+      options: conditionalOptions(1),
+    },
+    contentSender(doc),
+  );
+};
+
+test("lock and disconnect notify the exact waiting tab and document with a bare id", async () => {
+  const h = await conditionalReady([conditionalEntry(1)]);
+  await openConditional(h, 1);
+  await h.send({ type: "lock" });
+  let cancellations = conditionalCancels(h);
+  assert.equal(cancellations.length, 1);
+  assert.equal(cancellations[0].tabId, 1);
+  assert.equal(cancellations[0].options.documentId, "doc-1");
+  assert.deepEqual(Object.keys(cancellations[0].message).sort(), ["id", "type"]);
+  assert.equal(cancellations[0].message.id, conditionalUUID(1));
+  assert.equal(
+    JSON.stringify(cancellations[0].message).includes("Item 1"),
+    false,
+  );
+
+  const second = await conditionalReady([conditionalEntry(2)]);
+  await openConditional(second, 2);
+  second.losePort();
+  await tick();
+  await tick();
+  cancellations = conditionalCancels(second);
+  assert.equal(cancellations.length, 1);
+  assert.equal(cancellations[0].message.id, conditionalUUID(2));
+  assert.equal(cancellations[0].options.documentId, "doc-1");
+});
+
+test("navigation and tab removal notify the affected document only", async () => {
+  const h = await conditionalReady([conditionalEntry(3)]);
+  await openConditional(h, 3);
+  h.listeners.updated(1, { url: "https://example.test/other" });
+  let cancellations = conditionalCancels(h);
+  assert.equal(cancellations.length, 1);
+  assert.equal(cancellations[0].message.id, conditionalUUID(3));
+  assert.equal(cancellations[0].options.documentId, "doc-1");
+  await openConditional(h, 4);
+  h.listeners.removed(1);
+  cancellations = conditionalCancels(h);
+  assert.equal(cancellations.length, 2);
+  assert.equal(cancellations[1].message.id, conditionalUUID(4));
+  assert.deepEqual(Object.keys(cancellations[1].message).sort(), ["id", "type"]);
+});
+
+test("a successful selection never sends an invalidation notification", async () => {
+  const entry = conditionalEntry(5);
+  const h = await conditionalReady([entry]);
+  await openConditional(h, 5);
+  const selected = await h.send(
+    {
+      type: "passkey-conditional-select",
+      id: conditionalUUID(5),
+      item_id: entry.item_id,
+      revision: entry.revision,
+      credential_id: entry.credential_id,
+    },
+    contentSender(),
+  );
+  assert.equal(selected.credential.id, "native-credential");
+  assert.equal(h.sent.some((r) => r.type === "passkey-get"), true);
+  assert.equal(conditionalCancels(h).length, 0);
+});
+
+test("eviction notifies the dropped intent without changing status", async () => {
+  const h = await conditionalReady([conditionalEntry(6)]);
+  const before = (await h.send({ type: "state" })).status;
+  for (let index = 0; index < 65; index++)
+    await openConditional(h, index, "evict-" + index);
+  const cancellations = conditionalCancels(h);
+  assert.equal(cancellations.length, 1);
+  assert.equal(cancellations[0].message.id, conditionalUUID(0));
+  assert.equal(cancellations[0].options.documentId, "evict-0");
+  assert.equal((await h.send({ type: "state" })).status, before);
+});
+
+test("disabling Passkey settings notifies waiting intents and keeps status", async () => {
+  const h = await conditionalReady([conditionalEntry(7)]);
+  await openConditional(h, 7);
+  const before = (await h.send({ type: "state" })).status;
+  h.listeners.storage({ offerUsePasskeys: { newValue: false } }, "local");
+  await tick();
+  const cancellations = conditionalCancels(h);
+  assert.equal(cancellations.length, 1);
+  assert.equal(cancellations[0].message.id, conditionalUUID(7));
+  assert.equal((await h.send({ type: "state" })).status, before);
+  assert.equal((await h.send({ type: "state" })).passkeyConditionalSupported, false);
+});
+
+// ---- Conditional selection: one approval slot, atomic revalidation -----------
+const nextProbe = async (h) => {
+  let timer;
+  try {
+    await Promise.race([
+      h.waitProbe(),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(Error("probe was never deferred")), 2000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+};
+const settle = async (rounds = 10) => {
+  for (let index = 0; index < rounds; index++) await tick();
+};
+
+test("conditional selection preserves an ordinary pending approval and fill slot", async () => {
+  const entry = conditionalEntry(10);
+  const h = await conditionalReady([entry], { holdGet: true });
+  const open = (n) =>
+    h.send(
+      {
+        type: "passkey-conditional-open",
+        id: conditionalID(n),
+        options: conditionalOptions(10),
+      },
+      contentSender(),
+    );
+  const select = (n) =>
+    h.send(
+      {
+        type: "passkey-conditional-select",
+        id: conditionalID(n),
+        item_id: entry.item_id,
+        revision: entry.revision,
+        credential_id: entry.credential_id,
+      },
+      contentSender(),
+    );
+  const gets = () => h.sent.filter((r) => r.type === "passkey-get");
+  const deliver = (id) =>
+    h.deliver({
+      v: 1,
+      id: gets().at(-1).id,
+      type: "passkey-result",
+      credential: JSON.stringify({ id, rawId: "AQID" }),
+    });
+  const state = () => h.send({ type: "state" });
+
+  await open(1);
+  const ordinary = h.send(
+    {
+      type: "passkey",
+      operation: "get",
+      id: conditionalID(2),
+      options: conditionalOptions(10),
+    },
+    contentSender(),
+  );
+  await settle();
+  assert.equal(gets().length, 1);
+  assert.equal((await state()).pending, true);
+  assert.equal((await select(1)).fallback, true, "ordinary approval owns the slot");
+  assert.equal(gets().length, 1, "no second native get");
+  assert.equal((await state()).pending, true, "ordinary approval is untouched");
+  deliver("ordinary-credential");
+  assert.equal((await ordinary).credential.id, "ordinary-credential");
+  assert.equal((await state()).pending, false);
+  const accepted = select(1);
+  await settle();
+  assert.equal(gets().length, 2, "the refused selection never consumed the intent");
+  deliver("native-credential");
+  assert.equal((await accepted).credential.id, "native-credential");
+
+  await h.send({ type: "match" });
+  await open(3);
+  let releaseFill;
+  h.holdFill(new Promise((resolve) => (releaseFill = resolve)));
+  const filling = h.send({
+    type: "fill",
+    id: "b".repeat(32),
+    revision: "c".repeat(64),
+  });
+  await settle();
+  assert.equal((await state()).pending, true);
+  assert.equal((await select(3)).fallback, true, "ordinary fill owns the slot");
+  assert.equal(gets().length, 2, "no native get during an ordinary fill");
+  releaseFill();
+  await filling;
+
+  await h.send({ type: "disconnect" });
+});
+
+test("two racing conditional selections share one approval slot", async () => {
+  const entry = conditionalEntry(11);
+  const h = await conditionalReady([entry], { holdGet: true });
+  await h.send(
+    {
+      type: "passkey-conditional-open",
+      id: conditionalID(1),
+      options: conditionalOptions(11),
+    },
+    contentSender(),
+  );
+  const select = () =>
+    h.send(
+      {
+        type: "passkey-conditional-select",
+        id: conditionalID(1),
+        item_id: entry.item_id,
+        revision: entry.revision,
+        credential_id: entry.credential_id,
+      },
+      contentSender(),
+    );
+  const gets = () => h.sent.filter((r) => r.type === "passkey-get");
+  const first = select(),
+    second = select();
+  await settle();
+  assert.equal(gets().length, 1, "one shared native get");
+  assert.equal((await h.send({ type: "state" })).pending, true);
+  h.deliver({
+    v: 1,
+    id: gets()[0].id,
+    type: "passkey-result",
+    credential: JSON.stringify({ id: "native-credential", rawId: "AQID" }),
+  });
+  const replies = [await first, await second];
+  assert.equal(
+    replies.filter((reply) => reply.credential?.id === "native-credential").length,
+    1,
+    "exactly one selection wins the challenge",
+  );
+  assert.equal(replies.filter((reply) => reply.fallback === true).length, 1);
+  assert.equal(gets().length, 1, "the loser never asks the host again");
+  assert.equal((await h.send({ type: "state" })).pending, false);
+  assert.equal((await select()).fallback, true, "the intent was consumed once");
+});
+
+test("a deferred conditional context recheck cannot resurrect canceled, replaced or locked intents", async () => {
+  const entry = conditionalEntry(12);
+  for (const scenario of ["cancel", "replace", "navigate", "lock"]) {
+    const h = await conditionalReady([entry], { holdGet: true });
+    const open = (n) =>
+      h.send(
+        {
+          type: "passkey-conditional-open",
+          id: conditionalID(n),
+          options: conditionalOptions(12),
+        },
+        contentSender(),
+      );
+    const select = (n) =>
+      h.send(
+        {
+          type: "passkey-conditional-select",
+          id: conditionalID(n),
+          item_id: entry.item_id,
+          revision: entry.revision,
+          credential_id: entry.credential_id,
+        },
+        contentSender(),
+      );
+    const gets = () => h.sent.filter((r) => r.type === "passkey-get");
+    await open(1);
+    const release = h.deferProbe(1);
+    const selection = select(1);
+    await nextProbe(h);
+    if (scenario === "cancel")
+      await h.send({ type: "passkey-cancel", id: conditionalID(1) }, contentSender());
+    else if (scenario === "replace") await open(2);
+    else if (scenario === "navigate")
+      h.listeners.updated(1, { url: "https://example.test/other" });
+    else await h.send({ type: "lock" });
+    release();
+    await settle();
+    assert.equal(gets().length, 0, scenario + ": no stale native get");
+    assert.equal(
+      (await selection).fallback,
+      true,
+      scenario + ": the stale selection is refused",
+    );
+    assert.equal(gets().length, 0, scenario + ": still no stale native get");
+    if (scenario === "replace") {
+      const newer = select(2);
+      await settle();
+      assert.equal(gets().length, 1, "the newer intent survives the stale selection");
+      h.deliver({
+        v: 1,
+        id: gets()[0].id,
+        type: "passkey-result",
+        credential: JSON.stringify({ id: "native-credential", rawId: "AQID" }),
+      });
+      assert.equal((await newer).credential.id, "native-credential");
+    } else {
+      assert.equal((await select(1)).fallback, true, scenario + ": intent stays invalid");
+      assert.equal(gets().length, 0, scenario);
+    }
+  }
+});
+
+test("a late native reply cannot escape invalidation of its conditional approval", async () => {
+  const entry = conditionalEntry(13);
+  const h = await conditionalReady([entry], { holdGet: true });
+  await h.send(
+    {
+      type: "passkey-conditional-open",
+      id: conditionalID(1),
+      options: conditionalOptions(13),
+    },
+    contentSender(),
+  );
+  const selection = h.send(
+    {
+      type: "passkey-conditional-select",
+      id: conditionalID(1),
+      item_id: entry.item_id,
+      revision: entry.revision,
+      credential_id: entry.credential_id,
+    },
+    contentSender(),
+  );
+  await settle();
+  const get = h.sent.find((r) => r.type === "passkey-get");
+  assert.ok(get, "the approval is in flight");
+  assert.equal((await h.send({ type: "state" })).pending, true);
+  h.listeners.storage({ offerUsePasskeys: { newValue: false } }, "local");
+  await settle();
+  assert.equal((await h.send({ type: "state" })).passkeyConditionalSupported, false);
+  h.deliver({
+    v: 1,
+    id: get.id,
+    type: "passkey-result",
+    credential: JSON.stringify({ id: "late-credential", rawId: "AQID" }),
+  });
+  const reply = await selection;
+  assert.equal(reply.fallback, true, "a late credential is never delivered");
+  assert.equal(reply.credential, undefined);
+  assert.equal((await h.send({ type: "state" })).pending, false);
+  assert.doesNotMatch((await h.send({ type: "state" })).status, /\u5df2\u4ea4\u4ed8/);
 });

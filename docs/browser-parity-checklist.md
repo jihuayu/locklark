@@ -1,6 +1,6 @@
 # 浏览器插件当前功能与 1:1 对照清单
 
-更新：2026-11-07。已合并产品基线为 `main` `e2561be1f8070f9539433412bc7ac635b965bd5f`（[PR #44](https://github.com/jihuayu/locklark/pull/44)），包含附件与显式清空。本轮 Passkey 管理在后续[验收记录](passkey-management-validation.md)单独列证；不追溯冒充该基线已包含的功能。
+更新：2026-11-07。当前已合并基线 main 2fc96e7（[PR #47](https://github.com/jihuayu/locklark/pull/47)），包含 PR #44 附件/清空、PR #45 Passkey 独立管理、PR #46 issues 回归及 PR #47 审计历史性能。条件式/共存本批另列[验收](conditional-passkey-validation.md)，未取得参考版本逐项对照结果。
 
 旧清单基于 `8e61dc1` 和当时未合并的 PR #40；其中“39 项未实现”“没有 v2 协议/共享会话”等结论已过时。完整参考分析、65 项稳定 ID、行为约定和当时的结果保存在[历史快照](history/browser-parity-m3-baseline-2026-11-06.md)，不再作为当前缺口统计。
 
@@ -68,9 +68,9 @@
 | B3.4 | RP ID validation against the Public Suffix List | 已实现未对照 | 当前代码已有对应实现；单测/DOM/原生验收见下方证据，尚无固定参考版本逐项对照结果。 |
 | B3.5 | `excludeCredentials`/`allowCredentials` and overwrite prevention | 已实现未对照 | 当前代码已有对应实现；单测/DOM/原生验收见下方证据，尚无固定参考版本逐项对照结果。 |
 | B3.6 | Browser fallback and cancellation | 已实现未对照 | 当前代码已有对应实现；单测/DOM/原生验收见下方证据，尚无固定参考版本逐项对照结果。 |
-| B13.1 | Conditional UI | 已实现未对照 | 已有 conditional 请求传递/提示；能力接口与输入框条件式账号列表仍有缺口。 |
+| B13.1 | Conditional UI | 已实现未对照 | 本批新增 metadata-only 账户列表、能力接口、开放 Shadow DOM 焦点、无提前批准和期限/取消/断连清理；Chromium/Edge/Firefox 实际组合旅程通过。参考版本对照仍待完成，见条件式验收。 |
 | B13.2 | Passkey management and separate removal | 已实现未对照 | 弹窗服务端筛选、RP/账号元数据、明确确认/取消和独立删除；Chromium/Edge/Firefox 真实双账号、其他字段保留、另一凭据签名及重连已通过。每条登录一个凭据，多账号分条目管理；同条目多凭据迁移未做，远端检查见本轮验收。 |
-| B13.3 | Advanced WebAuthn extensions, algorithms, related origins, signal APIs | 经用户确认的差异 | 沿用历史清单记录的 P2 差异：高级算法/扩展走原生认证器回退；决定与范围见历史快照 §6.3。 |
+| B13.3 | Advanced WebAuthn extensions, algorithms, related origins, signal APIs | 经用户确认的差异 | 沿用历史清单记录的 P2 差异：高级算法/扩展走原生认证器回退；本批补 RS256/EdDSA-only、enterprise attestation 和超长算法列表的回退回归，Edge 其他软件验证器实际签名共存通过。Signal APIs 仍为后续增量；决定与范围见历史快照 §6.3。 |
 | B14.1 | Truthful user verification | 已实现未对照 | 当前代码已有对应实现；单测/DOM/原生验收见下方证据，尚无固定参考版本逐项对照结果。 |
 | B14.2 | Windows Hello / Touch ID biometric prompt | 已实现未对照 | 系统解锁接口已有实现；真实 Hello/Touch ID 提示、拒绝及硬件失效尚待验收。 |
 | B4.1 | Shared unlock state with desktop | 已实现未对照 | 共享会话/单独宿主路径已有；锁库撤销测试通过，跨平台完整交互仍待对照。 |

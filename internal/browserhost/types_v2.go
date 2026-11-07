@@ -9,6 +9,7 @@ func SupportedCapabilities() []string {
 		"quick-fill-v1",
 		"passkey-v1",
 		"passkey-management-v1",
+		"passkey-conditional-v1",
 		"generate-v1",
 		"stage-save-v1",
 		"popup-vault-v1",
@@ -17,6 +18,20 @@ func SupportedCapabilities() []string {
 		"attachments-v1",
 		"cli-broker-v1",
 	}
+}
+
+// BrowserPasskeyCandidate is the exact, metadata-only account list entry for a
+// conditional ("passkey-list") request. It deliberately carries no private key,
+// raw record, user handle or credential descriptor; the credential ID is the
+// public selector the page already supplied in allowCredentials (if any).
+type BrowserPasskeyCandidate struct {
+	ItemID       string `json:"item_id"`
+	Revision     string `json:"revision"`
+	Title        string `json:"title"`
+	CredentialID string `json:"credential_id"`
+	RPID         string `json:"rp_id"`
+	UserName     string `json:"user_name"`
+	DisplayName  string `json:"display_name"`
 }
 
 // BrowserPasswordProfile describes a generated password without exposing it.

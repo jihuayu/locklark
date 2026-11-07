@@ -98,6 +98,12 @@ type Request struct {
 func (r Request) Context() personal.BrowserContext {
 	return personal.BrowserContext{RequestID: r.ID, Origin: r.Origin, TabID: r.TabID, DocumentID: r.DocumentID}
 }
+
+// passkeyOptions bounds the WebAuthn options JSON before passkey.Parse adds its
+// own depth, duplicate-key and RP policy checks.
+func passkeyOptions(options string) bool {
+	return len(options) > 0 && len(options) <= 32768 && strictUnicode([]byte(options))
+}
 func validTitle(value string) bool {
 	if len(value) > 1024 || !utf8.ValidString(value) {
 		return false
@@ -120,7 +126,7 @@ func (r Request) valid() bool {
 			return false
 		}
 	}
-	if r.Type != "passkey-create" && r.Type != "passkey-get" && r.Options != "" && r.Type != "generate" {
+	if r.Type != "passkey-create" && r.Type != "passkey-get" && r.Type != "passkey-list" && r.Options != "" && r.Type != "generate" {
 		return false
 	}
 	if r.Type != "stage-save" && r.Type != "commit-staged-save" && r.Type != "dismiss-save" && r.Type != "generate" && (r.StageID != "" || r.Mode != "" || r.Title != "" || r.NeverForOrigin) {
@@ -142,8 +148,29 @@ func (r Request) valid() bool {
 		return false
 	}
 	switch r.Type {
-	case "passkey-create", "passkey-get":
-		return token.MatchString(r.Capability) && r.Context().Valid() && r.ItemID == "" && r.Revision == "" && len(r.Options) > 0 && len(r.Options) <= 32768 && strictUnicode([]byte(r.Options))
+	case "passkey-create":
+		// Creation never selects or pins an existing login through the browser.
+		return token.MatchString(r.Capability) && r.Context().Valid() && r.ItemID == "" && r.Revision == "" && passkeyOptions(r.Options)
+	case "passkey-get":
+		// An assertion may pin one exact login by the (item_id, revision) pair.
+		// Both halves are required together; legacy requests omit both.
+		if !token.MatchString(r.Capability) || !r.Context().Valid() || !passkeyOptions(r.Options) {
+			return false
+		}
+		if r.ItemID == "" && r.Revision == "" {
+			return true
+		}
+		return token.MatchString(r.ItemID) && revision.MatchString(r.Revision)
+	case "passkey-list":
+		// Conditional account listing is a read-only GET: no selector, no
+		// creation/user fields and no mutation keys are ever accepted.
+		return token.MatchString(r.Capability) && r.Context().Valid() && r.ItemID == "" && r.Revision == "" &&
+			passkeyOptions(r.Options) && r.payload == nil && r.RequestID == "" && r.Nonce == "" && r.WindowID == 0 &&
+			r.CredentialID == "" && r.Query == "" && r.VaultID == "" && r.Tag == "" && r.StateFilter == "" &&
+			r.FavoritesOnly == nil && r.PasskeysOnly == nil && r.Field == "" && r.FieldAction == "" && r.StateAction == "" &&
+			r.ItemJSON == "" && r.ProfileKind == "" && r.Category == "" && r.Length == 0 && r.Digits == nil && r.Symbols == nil && r.SaveHistory == nil &&
+			r.FileName == "" && r.Size == nil && r.SHA256 == "" && r.MimeType == "" && r.TransferID == "" && r.Offset == 0 && r.Data == "" && r.AttachmentID == "" &&
+			!r.IncludeHIBP
 	case "otp":
 		return token.MatchString(r.Capability) && r.OTPContext().Valid() && token.MatchString(r.ItemID) && revision.MatchString(r.Revision) && r.payload == nil && r.RequestID == "" && r.Nonce == ""
 	case "otp-ack", "cancel-otp":
@@ -360,6 +387,11 @@ type Response struct {
 	Profiles    []BrowserProfileSummary `json:"profiles,omitempty"`
 	ProfileFill *BrowserProfileFill     `json:"profile_fill,omitempty"`
 
+	// Conditional passkey account list (capability passkey-conditional-v1).
+	// Metadata only: no private key, raw record or user handle can be emitted.
+	Passkeys         []BrowserPasskeyCandidate `json:"passkeys,omitempty"`
+	PasskeyTruncated bool                      `json:"truncated,omitempty"`
+
 	// Attachment transport. Attachment metadata never carries the file body;
 	// Data holds at most one 64KiB decoded read chunk in base64.
 	Attachment   *BrowserAttachment `json:"attachment,omitempty"`
@@ -505,6 +537,19 @@ func (r Response) MarshalJSON() ([]byte, error) {
 			Capabilities []string `json:"capabilities,omitempty"`
 		}{r.V, r.ID, r.Type, r.Capability, r.QuickFill, r.Capabilities}
 		return json.Marshal(out)
+	}
+	if r.Type == "passkey-candidates" {
+		passkeys := r.Passkeys
+		if passkeys == nil {
+			passkeys = []BrowserPasskeyCandidate{}
+		}
+		return json.Marshal(struct {
+			V         int                       `json:"v"`
+			ID        string                    `json:"id,omitempty"`
+			Type      string                    `json:"type"`
+			Passkeys  []BrowserPasskeyCandidate `json:"passkeys"`
+			Truncated bool                      `json:"truncated"`
+		}{r.V, r.ID, r.Type, passkeys, r.PasskeyTruncated})
 	}
 	if r.Type == "items" {
 		items := r.Items
@@ -768,6 +813,8 @@ func (r *Response) Clear() {
 	r.Code = ""
 	r.Credential = ""
 	r.CredentialID = ""
+	r.Passkeys = nil
+	r.PasskeyTruncated = false
 }
 
 func (Response) String() string   { return "[native browser response]" }
@@ -1066,8 +1113,12 @@ func requestKeys(kind string) (required, optional []string, ok bool) {
 		return append(base, "capability", "item_id", "revision", "attachment_id"), nil, true
 	case "cancel":
 		return append(base, "capability"), nil, true
-	case "passkey-create", "passkey-get":
+	case "passkey-create", "passkey-list":
 		return append(base, "capability", "origin", "tab_id", "document_id", "options"), nil, true
+	case "passkey-get":
+		// The optional pair lets a conditional selection pin exactly one login.
+		// Both keys travel together or neither does; passkey-create never does.
+		return append(base, "capability", "origin", "tab_id", "document_id", "options"), []string{"item_id", "revision"}, true
 	case "match", "fill", "save-new", "save-update", "otp":
 		required = append(base, "capability", "origin", "tab_id", "document_id")
 		if kind == "fill" || kind == "save-update" || kind == "otp" {

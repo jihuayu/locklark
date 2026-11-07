@@ -390,6 +390,12 @@ func (c *Connection) Handle(r Request) error {
 		c.context = personal.BrowserContext{}
 		return c.response(Response{ID: r.ID, Type: "cancelled"})
 	}
+	if r.Type == "passkey-list" {
+		// Conditional account enumeration is a read-only query. It is answered
+		// even while another native operation is pending and never creates an
+		// approval surface of its own.
+		return c.listPasskeyCandidates(r)
+	}
 	if r.Type == "passkey-create" || r.Type == "passkey-get" {
 		return c.startPasskey(r)
 	}

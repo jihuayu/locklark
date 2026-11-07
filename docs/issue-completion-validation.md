@@ -35,3 +35,10 @@ node --test --test-name-pattern='password injection|post-injection|ordinary fill
 浏览器调研中“已立即触发原生审批”的初步推断，经主代理读取 `content.js` 撤回：当前桥接实际先等待用户点击。待补的是符合条件的输入框聚焦账号列表及条件式请求生命周期，不更改标准 WebAuthn 响应之外的网页披露边界。账号候选只留在扩展隔离的 closed-shadow UI。
 
 真实硬件、平台浏览器组合、签名分发与独立评审证据分别记录；无法取得的证据继续保持未完成，不用构建、模拟或其他平台绿色结果替代。
+
+
+## PR #47 已合并
+
+最终 head ab9aca635ef1db33e2e4be637f55c96e4253a73e 六项检查全部成功且 mergeStateStatus=CLEAN，正常 squash 合入 main 2fc96e7a89b9ad9b141fb09c9e9e3cecf59a6af5（2026-11-07 08:51:33 UTC），树与验证 head 完全一致。#35 已自动关闭，当前只剩 #39。检查 run 42356042635、移动 run 42356042631；精确回执 /workspace/issue-completion-tasks/pr47-ci-final.json 与 pr47-merged.json。期间两个测试 fixture 缺陷与逐次修复、未采用旧 head 绿色结果的过程见[性能验收](audit-history-performance-validation.md)。
+
+#39 的条件式/共存实现接入此基线；见[设计](conditional-passkey-design.md)和[真实验收](conditional-passkey-validation.md)。其开放状态保留直到各子项及真实平台条件分别核实。
