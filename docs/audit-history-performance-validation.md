@@ -33,3 +33,9 @@ worker 全矩阵见 `/tmp/audit-cache-bench.log`：一万事件下只读 662.837
 ## 集成门槛
 
 Linux CI 运行相同的全矩阵基准，其他平台继续正常功能测试。最终必须当前精确 head 的六项检查成功，再正常合并关闭 #35。基准改善不代替篡改、恢复、并发和原有浏览器/桌面/CLI 验收。
+
+## CI 中发现的独立测试缺陷
+
+首个 PR head `30d7768` 的 Linux/Windows 检查失败于 PR #46 新增的 `TestFillQueuedInvalidCancelCannotRevoke`：把随机 capability 首位替换为 `f`，有 1/16 概率仍等于真实 capability。认证逻辑正确地接受了真实 token；这是测试构造错误，不能靠重跑算通过。修复在处理请求前将 fixture 首位固定为 `f`，再分别翻转第 0、15、31 位的低 hex bit，显式断言每个无效 token 与真实 token 不同，保留 epoch、排队批准及结果断言，未修改生产认证。
+
+主代理独立重复该测试 32 次通过（15.143 秒），全部 queued-fill 测试 `-race` 通过（18.887 秒）；日志为 `/workspace/issue-completion-tasks/invalid-token-independent-32.log` 和 `invalid-token-independent-race.log`。最终合并仍要求修复后的同一个 head 六项 CI 全绿，旧 head 已失败/取消的检查不计入。
