@@ -48,6 +48,14 @@
 
 复现：`python3 -m unittest discover -s tests/scripts -p 'test_e2e*.py'`、`python3 scripts/e2e_runner.py --feature all --json-out /tmp/locklark-e2e-report.json`；使用有效 Go、Node、Xvfb 工具链。本轮同样进入 Web CI。
 
+## 既有 CLI 外部验收的追加诊断
+
+`0e13665` 的 Web、Windows、macOS、Android、iOS 均通过，Linux 首次在 `gh-pipes` 失败；原提交重跑通过该阶段，但随后在 `stale` 失败。不能将这种阶段变化直接断言为控制器竞态：独立只读复核未证明正常拒绝路径存在竞态，根因仍需具体失败断言。
+
+主代理使用原 `gh 2.46.0`、经官方 SHA-256 校验的 `gh 2.103.3` 完整运行外部验收均通过；再将进程固定到 CPU 0 连续运行四轮，11 项验收阶段全部通过。DeepSeek worker 增加固定失败码、子阶段与受限元数据（退出码、布尔开关、观察到的提示数量、输出字节数及 TLS 请求数）；原有提示、ECHO、退出码、无子进程、管道及隐私断言保留。诊断不输出因子、token、参数、正文或异常文本；14 项控制器/隐私测试通过，worker 的完整真实 CLI 验收再次通过。
+
+这部分首先补可诊断性，不宣称已经找出 CI 根因；最终提交的检查与任何后续修正见 [PR #44](https://github.com/jihuayu/locklark/pull/44)。未取得同一最终 head 的六项成功结果前不合并。
+
 ## 已实现与真实剩余范围的区分
 
 - 16 个 CLI profile 与直接金库解锁执行存在；桌面 broker 服务端虽有实现，`cli run` 的客户端接入尚未闭环，不能标 F17 完成。

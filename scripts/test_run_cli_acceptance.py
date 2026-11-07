@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import pathlib
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -100,6 +101,116 @@ class PrivacyTests(unittest.TestCase):
                 self.assertEqual(acceptance.main(["--cli", "/unused"]), 1)
             self.assertIn("at cleanup", out.getvalue())
             self.assertNotIn(secret, out.getvalue())
+
+
+class FixedFailureLabelTests(unittest.TestCase):
+    @staticmethod
+    def fake(root, stage, error=None):
+        fake = mock.Mock()
+        fake.root, fake.stage, fake.checks = root, stage, ["fixed-check"]
+        fake.logs, fake.values, fake.failure_metadata = [], [], {}
+        fake.run.side_effect = error or acceptance.AcceptanceFailure("gh-pipe-stderr-output-or-receipt-mismatch")
+        fake.write.side_effect = lambda path, value: path.write_text(json.dumps(value))
+        return fake
+
+    def test_failure_label_is_publicly_encoded_in_output_and_result(self):
+        code = "gh-pipe-stderr-output-or-receipt-mismatch"
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            fake = self.fake(root, "gh-pipes", acceptance.AcceptanceFailure(code))
+            fake.failure_metadata = {
+                "request_substage": "pipe-stderr", "expected_exit_code": 1, "actual_exit_code": 1,
+                "stdin_pipe": True, "stderr_pipe": True, "controlling": True,
+                "prompts_observed": 3, "stdout_length": 27, "stderr_length": 128,
+                "tls_request_count_delta": 1}
+            out = io.StringIO()
+            with mock.patch.object(acceptance, "Acceptance", return_value=fake), contextlib.redirect_stdout(out):
+                self.assertEqual(acceptance.main(["--cli", "/unused"]), 1)
+            public = out.getvalue()
+            self.assertIn("FAIL: RunCLI acceptance at gh-pipes [" + code + "]", public)
+            result_path = root / "result.json"
+            result = json.loads(result_path.read_text())
+            self.assertIs(result["success"], False)
+            self.assertEqual(result["stage"], "gh-pipes")
+            self.assertEqual(result["checks"], ["fixed-check"])
+            self.assertEqual(result["failure_code"], code)
+            self.assertEqual(result["failures"], [code])
+            self.assertEqual(result["failure_metadata"], fake.failure_metadata)
+            metadata_line = next(line for line in public.splitlines() if line.startswith("FAILURE_METADATA: "))
+            self.assertEqual(json.loads(metadata_line.split(": ", 1)[1]), fake.failure_metadata)
+
+    def test_malicious_exception_text_is_never_printed_or_persisted(self):
+        secret = "RuntimeSecret-" + "b" * 48
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            fake = self.fake(root, "gh-success", RuntimeError(secret))
+            fake.values = [secret]
+            out = io.StringIO()
+            with mock.patch.object(acceptance, "Acceptance", return_value=fake), contextlib.redirect_stdout(out):
+                self.assertEqual(acceptance.main(["--cli", "/unused"]), 1)
+            public = out.getvalue()
+            self.assertIn("at gh-success [unexpected]", public)
+            self.assertNotIn(secret, public)
+            result_text = (root / "result.json").read_text()
+            result = json.loads(result_text)
+            self.assertEqual(result["failure_code"], "unexpected")
+            self.assertEqual(result["failures"], ["unexpected"])
+            self.assertNotIn(secret, result_text)
+
+    def test_metadata_scrubber_drops_unrecognized_values_and_never_leaks(self):
+        secret = "MetadataSecret-" + "d" * 48
+        malicious = {"request_substage": secret, "expected_exit_code": secret,
+                     "actual_exit_code": True, "stdin_pipe": "true",
+                     "prompts_observed": -1, "stdout_length": secret,
+                     "stderr_length": 3.5, "tls_request_count_delta": -4,
+                     secret: secret}
+        self.assertEqual(acceptance.scrub_failure_metadata(malicious), {})
+        valid = {"request_substage": "pipe-stderr", "expected_exit_code": 1,
+                 "actual_exit_code": 1, "stdin_pipe": True, "stderr_pipe": True,
+                 "controlling": False, "prompts_observed": 3, "stdout_length": 12,
+                 "stderr_length": 34, "tls_request_count_delta": 1}
+        self.assertEqual(acceptance.scrub_failure_metadata(valid), valid)
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            fake = self.fake(root, "gh-pipes", RuntimeError(secret))
+            fake.values, fake.failure_metadata = [secret], malicious
+            out = io.StringIO()
+            with mock.patch.object(acceptance, "Acceptance", return_value=fake), contextlib.redirect_stdout(out):
+                self.assertEqual(acceptance.main(["--cli", "/unused"]), 1)
+            public = out.getvalue()
+            self.assertIn("FAILURE_METADATA: {}", public)
+            self.assertNotIn(secret, public)
+            result_text = (root / "result.json").read_text()
+            self.assertEqual(json.loads(result_text)["failure_metadata"], {})
+            self.assertNotIn(secret, result_text)
+
+    def test_unknown_failure_labels_are_rejected_without_leaking_them(self):
+        secret = "MaliciousLabel-" + "c" * 48
+        with self.assertRaises(ValueError) as raised:
+            acceptance.AcceptanceFailure(secret)
+        self.assertEqual(str(raised.exception), "unknown acceptance failure code")
+        self.assertNotIn(secret, str(raised.exception))
+        for condition in (False, True):
+            with self.subTest(condition=condition), self.assertRaises(ValueError) as raised:
+                acceptance.require(condition, secret)
+            self.assertNotIn(secret, str(raised.exception))
+
+    def test_fixed_invariant_and_builtin_classification_enum(self):
+        with self.assertRaises(acceptance.AcceptanceFailure) as raised:
+            acceptance.require(False)
+        self.assertEqual(raised.exception.code, "invariant")
+        self.assertEqual(raised.exception.args, ("invariant",))
+        self.assertEqual(acceptance.fixed_failure_code(raised.exception), "invariant")
+        self.assertEqual(acceptance.fixed_failure_code(acceptance.AcceptanceFailure("invoke-prompt-timeout")),
+                         "invoke-prompt-timeout")
+        cases = ((subprocess.TimeoutExpired("fixed", 1), "timeout"),
+                 (json.JSONDecodeError("fixed", "", 0), "json"),
+                 (OSError("unfixed detail"), "io"),
+                 (RuntimeError("unfixed detail"), "unexpected"))
+        for error, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertEqual(acceptance.fixed_failure_code(error), expected)
+                self.assertIn(expected, acceptance.UNEXPECTED_FAILURE_CODES)
 
 
 if __name__ == "__main__":
