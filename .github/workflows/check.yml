@@ -196,6 +196,19 @@ jobs:
       - name: Test browser extension
         timeout-minutes: 10
         run: node --test browser-extension/test/*.test.js
+      - name: Prepare reproducible unsigned extension packages
+        timeout-minutes: 2
+        run: |
+          python3 scripts/test_package_browser_extension.py
+          python3 scripts/package_browser_extension.py --product chromium --output "$RUNNER_TEMP/locklark-extension-unsigned"
+          python3 scripts/package_browser_extension.py --product firefox --output "$RUNNER_TEMP/locklark-extension-unsigned"
+      - name: Preserve unsigned extension preparation artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: locklark-extension-unsigned-preparation
+          path: ${{ runner.temp }}/locklark-extension-unsigned/
+          if-no-files-found: error
+          retention-days: 14
       - name: Test native acceptance readiness and reference cleanup
         timeout-minutes: 1
         run: python3 -m unittest discover -s scripts -p 'test_*native*.py'
