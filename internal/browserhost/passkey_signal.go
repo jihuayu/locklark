@@ -27,7 +27,13 @@ type SignalView struct {
 // invalidation (which only holds authMu) and the expiry/reject paths. Every
 // reader uses Load and every writer uses Store/CompareAndSwap so cancellation
 // can never race a plain field access.
+//
+// id is the immutable browser-asserted request id that authorizes this exact
+// hint. It is written once before the signal is published and is the only
+// selector the lock-free rejection path reads, so a stale native request can
+// never revoke a newer signal.
 type pendingSignal struct {
+	id        string
 	request   personal.PasskeySignalRequest
 	wire      Request
 	session   *personal.Session
@@ -69,11 +75,15 @@ func (c *Connection) handlePasskeySignal(r Request) error {
 	if err := c.response(Response{ID: r.ID, Type: "passkey-signal-accepted"}); err != nil {
 		return err
 	}
+	// A cancellation that could not take c.mu (RejectPasskeySignal must never
+	// wait for it) leaves the revoked surface behind only until the mutex is
+	// next available. Reap it before deciding whether a new hint is ignored.
+	c.reapCancelledSignal()
 	if c.pending != nil || c.save != nil || c.otp != nil || c.passkey != nil || c.signal != nil || c.stagedBusy || c.upload != nil {
 		return nil
 	}
 	until := minTime(c.until, c.now().Add(2*time.Minute))
-	p := &pendingSignal{request: request, wire: r, session: s, until: until, epoch: c.epoch, working: true}
+	p := &pendingSignal{id: r.ID, request: request, wire: r, session: s, until: until, epoch: c.epoch, working: true}
 	c.signal = p
 	c.signalStatus = "正在核对网站 Passkey 信号"
 	c.authMu.Lock()
@@ -153,13 +163,35 @@ func (c *Connection) clearSignal(p *pendingSignal) {
 	c.authMu.Unlock()
 }
 
+// reapCancelledSignal drops an idle signal whose authorization was revoked
+// while the connection mutex was unavailable. RejectPasskeySignal deliberately
+// does not wait for c.mu, so its presentation cleanup is deferred to the next
+// snapshot/hint that can take the mutex. The caller holds c.mu. A working
+// confirmation keeps ownership of its gate until its worker publishes the
+// durable outcome.
+func (c *Connection) reapCancelledSignal() {
+	p := c.signal
+	if p == nil || p.working || !p.cancelled.Load() {
+		return
+	}
+	c.clearSignal(p)
+	c.signalStatus = "已忽略网站 Passkey 信号"
+}
+
 func (c *Connection) signalSnapshot() (*SignalView, string) {
+	c.reapCancelledSignal()
 	p := c.signal
 	if p == nil {
 		return nil, c.signalStatus
 	}
+	if p.cancelled.Load() {
+		// A revoked working confirmation is never actionable again. Hide it from
+		// the owner surface while its worker finishes; the worker still publishes
+		// the durable outcome (UNKNOWN after a won commit) and clears the signal.
+		return nil, "网站 Passkey 信号已取消；等待当前操作结束"
+	}
 	return &SignalView{
-		ID:      p.wire.ID,
+		ID:      p.id,
 		Origin:  p.wire.Origin,
 		RPID:    p.request.RPID,
 		Kind:    p.request.Kind,
@@ -199,7 +231,7 @@ func signalResult(err error, gate *personal.MutationGate, live bool) (status str
 func (c *Connection) ApprovePasskeySignal(id string) error {
 	c.mu.Lock()
 	p := c.signal
-	if p == nil || p.wire.ID != id || p.working || len(p.proposal) == 0 || !c.signalLive(p) {
+	if p == nil || p.id != id || p.working || len(p.proposal) == 0 || !c.signalLive(p) {
 		c.mu.Unlock()
 		return ErrProtocol
 	}
@@ -256,23 +288,50 @@ func (c *Connection) ApprovePasskeySignal(id string) error {
 	return result
 }
 
-// RejectPasskeySignal is called only by the native owner UI. It cancels a live
-// approval gate immediately, including while the owner confirmation is waiting
-// on the database, so no later commit can win.
+// RejectPasskeySignal is called only by the native owner UI. Authorization is
+// revoked out of band: under authMu the exact current signalAuth and its
+// immutable request id are read, the cancellation flag is set and any published
+// gate is cancelled immediately, and authMu is released before c.mu is even
+// tried. Reject therefore returns promptly even when c.mu is held by a
+// read-only passkey list that is itself waiting for Session.mu while an owner
+// confirmation waits on the external database writer. authMu is never held
+// while waiting for c.mu, so the two locks cannot deadlock.
+//
+// Presentation cleanup is best-effort under c.mu.TryLock; a revoked idle
+// surface that cannot be cleared here is hidden/reaped by the next snapshot or
+// hint. A revoked working confirmation keeps its gate owned by the worker so the
+// durable outcome is still published, and a stale request id changes nothing.
 func (c *Connection) RejectPasskeySignal(id string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	defer c.changed()
-	p := c.signal
-	if p == nil || p.wire.ID != id {
+	if id == "" {
 		return ErrProtocol
 	}
+	c.authMu.Lock()
+	p := c.signalAuth
+	if p == nil || p.id != id {
+		c.authMu.Unlock()
+		return ErrProtocol
+	}
+	// Mark the authorization revoked before reading the gate: ApprovePasskeySignal
+	// publishes the gate under c.mu and rechecks cancelled both before and after
+	// registering the session slot, so either interleaving refuses the commit.
 	p.cancelled.Store(true)
 	p.cancelGate()
-	if p.working {
-		return nil
+	c.authMu.Unlock()
+
+	// Never block on c.mu here. The owner's cancel click must not wait for a
+	// read-only passkey list that holds c.mu while the blocked confirmation
+	// holds Session.mu.
+	if c.mu.TryLock() {
+		if c.signal == p {
+			if p.working {
+				c.signalStatus = "网站 Passkey 信号已取消；等待当前操作结束"
+			} else {
+				c.clearSignal(p)
+				c.signalStatus = "已忽略网站 Passkey 信号"
+			}
+		}
+		c.mu.Unlock()
 	}
-	c.clearSignal(p)
-	c.signalStatus = "已忽略网站 Passkey 信号"
+	c.changed()
 	return nil
 }

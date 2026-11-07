@@ -161,6 +161,12 @@ func (a *App) browserOTPAction(id string, work func() error) {
 // page only ever receives the fixed acknowledgement; every change is shown
 // here with the exact origin, RP, current account and new names, and only an
 // explicit confirmation can reserve the mutation slot.
+//
+// The review rows live in a bounded scroll region and the action row sits
+// outside it, so the confirmation controls stay visible for any number of
+// reviewed accounts (including 2 or 50 rows) instead of being pushed below the
+// viewport by unbounded text. The nested compact column keeps the fixed
+// chrome (heading, origin/RP, privacy copy, warning, status) tight.
 func (a *App) browserSignalView(c *ui.Context, p browserhost.SignalView, status string) {
 	heading := "网站请求更新 Passkey 账号"
 	switch p.Kind {
@@ -171,36 +177,56 @@ func (a *App) browserSignalView(c *ui.Context, p browserhost.SignalView, status 
 	case "user":
 		heading = "网站请求更新 Passkey 账号名称"
 	}
-	ui.Text(c, heading).FontSize(22).Bold()
-	ui.Text(c, "HTTPS 来源："+visible(p.Origin)).FontSize(20).Bold()
-	ui.Text(c, "Passkey 域名："+visible(p.RPID))
-	ui.Text(c, "仅处理下列已启用的登录 Passkey。网站不会获知本地是否存在凭据，也不会收到处理结果或数量。")
+	// Counted before the UI closure: the destructive warning never depends on
+	// what happens to be scrolled into view.
 	removals := 0
 	for _, change := range p.Changes {
 		if change.Action == "remove" {
 			removals++
-			ui.Text(c, "移除 Passkey："+browserTitle(change.Title)+" · "+visible(change.Username))
-			continue
 		}
-		ui.Text(c, "更新账号名称："+browserTitle(change.Title)+" · "+visible(change.Username))
-		ui.Text(c, "  新用户名："+visible(change.Name)).FontSize(13)
-		ui.Text(c, "  新显示名："+visible(change.DisplayName)).FontSize(13)
 	}
-	if removals > 0 {
-		ui.Text(c, "注意：移除操作会在本地不可撤销地清除这些 Passkey；登录名、密码、验证码、备注与附件都会保留。网站信号本身不代表用户验证。").Bold()
-	} else {
-		ui.Text(c, "仅修改 Passkey 记录中的用户名和显示名；凭据 ID、用户句柄、私钥及所有登录字段保持不变。")
-	}
-	ui.Text(c, status)
-	if p.Working {
-		ui.Button(c, "取消尚未提交的更新").OnClick(func() { a.browserSignalCancel(p.ID) })
-		return
-	}
-	ui.PrimaryButton(c, "确认应用这些更新").Disabled(a.busy || len(p.Changes) == 0).OnClick(func() {
-		a.browserSignalAction(p.ID, func() error { return a.browser.ApprovePasskeySignal(p.ID) })
-	})
-	ui.Button(c, "取消（不做任何更改）").Disabled(a.busy).OnClick(func() {
-		a.browserSignalAction(p.ID, func() error { return a.browser.RejectPasskeySignal(p.ID) })
+	ui.Column(c).Gap(6).Children(func() {
+		ui.Text(c, heading).FontSize(22).Bold()
+		ui.Text(c, "HTTPS 来源："+visible(p.Origin)).FontSize(20).Bold()
+		ui.Text(c, "Passkey 域名："+visible(p.RPID))
+		ui.Text(c, "仅处理下列已启用的登录 Passkey。网站不会获知本地是否存在凭据，也不会收到处理结果或数量。")
+		// Every reviewed account stays reachable by scrolling; nothing is
+		// truncated and no row is dropped.
+		ui.Scroll(c).Height(170).FillWidth().Children(func() {
+			ui.Column(c).Gap(4).Children(func() {
+				for _, change := range p.Changes {
+					if change.Action == "remove" {
+						ui.Text(c, "移除 Passkey："+browserTitle(change.Title)+" · "+visible(change.Username))
+						continue
+					}
+					ui.Text(c, "更新账号名称："+browserTitle(change.Title)+" · "+visible(change.Username))
+					ui.Text(c, "  新用户名："+visible(change.Name)).FontSize(13)
+					ui.Text(c, "  新显示名："+visible(change.DisplayName)).FontSize(13)
+				}
+			})
+		})
+		if removals > 0 {
+			ui.Text(c, "注意：移除操作会在本地不可撤销地清除这些 Passkey；登录名、密码、验证码、备注与附件都会保留。网站信号本身不代表用户验证。").Bold()
+		} else {
+			ui.Text(c, "仅修改 Passkey 记录中的用户名和显示名；凭据 ID、用户句柄、私钥及所有登录字段保持不变。")
+		}
+		ui.Text(c, status)
+		if p.Working {
+			// The cancel path stays busy-independent and outside the bounded
+			// list, so a pending approval can still be revoked.
+			ui.Button(c, "取消尚未提交的更新").OnClick(func() { a.browserSignalCancel(p.ID) })
+			return
+		}
+		// Fixed action area: rendered after the bounded rows, never after
+		// unbounded text.
+		ui.Row(c).Gap(8).Children(func() {
+			ui.PrimaryButton(c, "确认应用这些更新").Disabled(a.busy || len(p.Changes) == 0).OnClick(func() {
+				a.browserSignalAction(p.ID, func() error { return a.browser.ApprovePasskeySignal(p.ID) })
+			})
+			ui.Button(c, "取消（不做任何更改）").Disabled(a.busy).OnClick(func() {
+				a.browserSignalAction(p.ID, func() error { return a.browser.RejectPasskeySignal(p.ID) })
+			})
+		})
 	})
 }
 
