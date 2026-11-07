@@ -265,6 +265,55 @@ def t2_f2_09(ctx):
     )
 
 
+@e2e_test(
+    "T2_F2_10", 2, ["F2"],
+    "WebAuthn signals preserve native Promise outcomes and require atomic owner-confirmed changes",
+    coverage_kind="component_contract",
+)
+def t2_f2_10(ctx):
+    gate(ctx, "F2", f1_passkey_ready(ctx), "Native Passkey protocol is absent")
+    go_package_test(
+        ctx, "./internal/personal",
+        r"^Test(ParsePasskeySignal.*|ReviewPasskeySignal.*|Apply.*Signal.*)$",
+        min_passed=9,
+    )
+    go_package_test(
+        ctx, "./internal/browserhost", r"^TestPasskeySignal.*$", min_passed=13,
+    )
+    node_test_pattern(
+        ctx, "browser-extension/test/webauthn_signals.test.js", r".", min_passed=13,
+    )
+    node_test_pattern(
+        ctx, "browser-extension/test/content_signals.test.js", r".", min_passed=10,
+    )
+    node_test_pattern(
+        ctx, "browser-extension/test/background.test.js", r"^signal: ", min_passed=13,
+    )
+
+
+@e2e_test(
+    "T2_F2_11", 2, ["F2"],
+    "Native system Passkey verification is fresh per operation and rejects stale or canceled capsules",
+    coverage_kind="component_contract",
+)
+def t2_f2_11(ctx):
+    gate(ctx, "F2", f1_passkey_ready(ctx), "Native Passkey protocol is absent")
+    # Fake-adapter contracts and platform capability checks; no hardware claim.
+    go_package_test(
+        ctx, "./internal/personal", r"^TestSystemPasskey.*$", min_passed=4,
+    )
+    go_package_test(
+        ctx, "./internal/browserhost", r"^TestPasskeySystem.*$", min_passed=3,
+    )
+    go_package_test(
+        ctx, "./internal/osunlock", r"^TestSystemUnlock.*$", min_passed=3,
+    )
+    go_package_test(
+        ctx, "./internal/desktop",
+        r"^TestNativePasskeySystemFactorIsStructuralAndAsync$", min_passed=1,
+    )
+
+
 # ---------------------------------------------------------------------------
 # F3
 # ---------------------------------------------------------------------------

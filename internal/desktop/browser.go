@@ -8,6 +8,7 @@ import (
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 	"github.com/jihuayu/locklark/internal/browserhost"
+	"github.com/jihuayu/locklark/internal/osunlock"
 	"github.com/jihuayu/locklark/internal/personal"
 )
 
@@ -59,6 +60,13 @@ func (a *App) browserView(c *ui.Context) {
 	if view.Save != nil {
 		a.browserSaveView(c, *view.Save, view.SaveStatus)
 		return
+	}
+	if view.Signal != nil {
+		a.browserSignalView(c, *view.Signal, view.SignalStatus)
+		return
+	}
+	if view.SignalStatus != "" {
+		ui.Text(c, view.SignalStatus).FontSize(13)
 	}
 	if view.Pending == nil {
 		ui.Text(c, "在浏览器弹窗中选择当前网站的登录。此窗口不会自行请求或刷新候选。")
@@ -149,6 +157,114 @@ func (a *App) browserOTPAction(id string, work func() error) {
 	})
 }
 
+// browserSignalView renders the owner review for one WebAuthn signal hint. The
+// page only ever receives the fixed acknowledgement; every change is shown
+// here with the exact origin, RP, current account and new names, and only an
+// explicit confirmation can reserve the mutation slot.
+//
+// The review rows live in a bounded scroll region and the action row sits
+// outside it, so the confirmation controls stay visible for any number of
+// reviewed accounts (including 2 or 50 rows) instead of being pushed below the
+// viewport by unbounded text. The nested compact column keeps the fixed
+// chrome (heading, origin/RP, privacy copy, warning, status) tight.
+func (a *App) browserSignalView(c *ui.Context, p browserhost.SignalView, status string) {
+	heading := "网站请求更新 Passkey 账号"
+	switch p.Kind {
+	case "unknown":
+		heading = "网站报告未知的 Passkey 凭据"
+	case "accepted":
+		heading = "网站请求清理不再接受的 Passkey"
+	case "user":
+		heading = "网站请求更新 Passkey 账号名称"
+	}
+	// Counted before the UI closure: the destructive warning never depends on
+	// what happens to be scrolled into view.
+	removals := 0
+	for _, change := range p.Changes {
+		if change.Action == "remove" {
+			removals++
+		}
+	}
+	ui.Column(c).Gap(6).Children(func() {
+		ui.Text(c, heading).FontSize(22).Bold()
+		ui.Text(c, "HTTPS 来源："+visible(p.Origin)).FontSize(20).Bold()
+		ui.Text(c, "Passkey 域名："+visible(p.RPID))
+		ui.Text(c, "仅处理下列已启用的登录 Passkey。网站不会获知本地是否存在凭据，也不会收到处理结果或数量。")
+		// Every reviewed account stays reachable by scrolling; nothing is
+		// truncated and no row is dropped.
+		ui.Scroll(c).Height(170).FillWidth().Children(func() {
+			ui.Column(c).Gap(4).Children(func() {
+				for _, change := range p.Changes {
+					if change.Action == "remove" {
+						ui.Text(c, "移除 Passkey："+browserTitle(change.Title)+" · "+visible(change.Username))
+						continue
+					}
+					ui.Text(c, "更新账号名称："+browserTitle(change.Title)+" · "+visible(change.Username))
+					ui.Text(c, "  新用户名："+visible(change.Name)).FontSize(13)
+					ui.Text(c, "  新显示名："+visible(change.DisplayName)).FontSize(13)
+				}
+			})
+		})
+		if removals > 0 {
+			ui.Text(c, "注意：移除操作会在本地不可撤销地清除这些 Passkey；登录名、密码、验证码、备注与附件都会保留。网站信号本身不代表用户验证。").Bold()
+		} else {
+			ui.Text(c, "仅修改 Passkey 记录中的用户名和显示名；凭据 ID、用户句柄、私钥及所有登录字段保持不变。")
+		}
+		ui.Text(c, status)
+		if p.Working {
+			// The cancel path stays busy-independent and outside the bounded
+			// list, so a pending approval can still be revoked.
+			ui.Button(c, "取消尚未提交的更新").OnClick(func() { a.browserSignalCancel(p.ID) })
+			return
+		}
+		// Fixed action area: rendered after the bounded rows, never after
+		// unbounded text.
+		ui.Row(c).Gap(8).Children(func() {
+			ui.PrimaryButton(c, "确认应用这些更新").Disabled(a.busy || len(p.Changes) == 0).OnClick(func() {
+				a.browserSignalAction(p.ID, func() error { return a.browser.ApprovePasskeySignal(p.ID) })
+			})
+			ui.Button(c, "取消（不做任何更改）").Disabled(a.busy).OnClick(func() {
+				a.browserSignalAction(p.ID, func() error { return a.browser.RejectPasskeySignal(p.ID) })
+			})
+		})
+	})
+}
+
+func (a *App) browserSignalAction(id string, work func() error) {
+	a.run(func() outcome {
+		err := work()
+		return outcome{apply: func() {
+			view := a.browser.Snapshot()
+			if view.Signal == nil || view.Signal.ID == id {
+				if view.SignalStatus != "" {
+					a.status = view.SignalStatus
+				} else if err != nil {
+					a.status = message(err)
+				}
+			}
+		}}
+	})
+}
+
+// browserSignalCancel revokes a live signal gate directly on the native host.
+// It deliberately bypasses a.run/a.busy: an approval may already be waiting on
+// the database, and a cancel must still reach the host to cancel that gate.
+// RejectPasskeySignal takes only the short Connection lock and performs no
+// database work, so this click handler cannot block on the vault.
+func (a *App) browserSignalCancel(id string) {
+	a.status = "已请求取消；若已提交请核实金库"
+	err := a.browser.RejectPasskeySignal(id)
+	view := a.browser.Snapshot()
+	if view.Busy || (view.Signal != nil && view.Signal.ID == id) {
+		return
+	}
+	if view.SignalStatus != "" {
+		a.status = view.SignalStatus
+	} else if err != nil {
+		a.status = message(err)
+	}
+}
+
 func browserTitle(title string) string {
 	if title == "" {
 		return "（无标题）"
@@ -208,6 +324,18 @@ func RunBrowser(browser browserhost.Browser, args []string) error {
 	return mygo.App.Run()
 }
 
+// passkeySystemStore reports the trusted native OS adapter that can perform a
+// fresh per-operation user verification. It is a structural check only: the
+// Linux Secret Service adapter deliberately does not implement it, and no
+// renderer or protocol value can supply one.
+func (a *App) passkeySystemStore() (personal.SystemPasskeyVerificationStore, bool) {
+	store, ok := a.systemStore.(personal.SystemPasskeyVerificationStore)
+	if !ok || store == nil {
+		return nil, false
+	}
+	return store, true
+}
+
 func (a *App) browserPasskeyView(c *ui.Context, p browserhost.PasskeyView, status string) {
 	if a.browserPasskeyID != p.ID {
 		a.browserPasskeyID = p.ID
@@ -265,6 +393,40 @@ func (a *App) browserPasskeyView(c *ui.Context, p browserhost.PasskeyView, statu
 			label = "保存到：" + browserTitle(choice.Title) + " · " + visible(choice.Username)
 		}
 		ui.Button(c, label).Disabled(a.busy || !factorsReady).OnClick(func() { approve(choice.ID) })
+	}
+	// A per-account (or new-credential) system factor button appears only when
+	// the trusted native adapter can perform a fresh user verification. The
+	// adapter is never called while rendering, listing candidates or before a
+	// target is selected; each click asks the OS again and no earlier unlock
+	// result is reused. Enrollment in "安全设置" must already exist.
+	if store, ok := a.passkeySystemStore(); ok {
+		systemLabel := osunlock.Label()
+		approveSystem := func(item string) {
+			// Stale knowledge-factor inputs never travel with an OS approval.
+			a.password = ""
+			a.secret = ""
+			a.run(func() outcome {
+				e := a.browser.ApprovePasskeyWithSystem(p.ID, item, store)
+				return outcome{err: e, apply: func() {
+					if v := a.browser.Snapshot(); v.PasskeyStatus != "" {
+						a.status = v.PasskeyStatus
+					}
+				}}
+			})
+		}
+		ui.Text(c, "系统验证（"+systemLabel+"）：需先在“安全设置”启用系统快捷解锁；每次操作都会重新由系统验证，网站不会获得解锁因素。")
+		if p.Create {
+			ui.Button(c, "使用"+systemLabel+"创建并保存 Passkey").Disabled(a.busy).OnClick(func() { approveSystem("") })
+		}
+		for _, choice := range p.Choices {
+			choice := choice
+			label := "使用" + systemLabel + "登录：" + browserTitle(choice.Title) + " · " + visible(choice.Username)
+			if p.Create {
+				label = "使用" + systemLabel + "保存到：" + browserTitle(choice.Title) + " · " + visible(choice.Username)
+			}
+			ui.Button(c, label).Disabled(a.busy).OnClick(func() { approveSystem(choice.ID) })
+		}
+		ui.Text(c, "系统验证失败或被取消时，请继续使用主密码与 Secret Key。")
 	}
 	ui.Button(c, "取消 / 使用其他验证器").Disabled(a.busy).OnClick(func() {
 		a.password = ""

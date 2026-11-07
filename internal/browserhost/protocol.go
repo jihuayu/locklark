@@ -126,7 +126,7 @@ func (r Request) valid() bool {
 			return false
 		}
 	}
-	if r.Type != "passkey-create" && r.Type != "passkey-get" && r.Type != "passkey-list" && r.Options != "" && r.Type != "generate" {
+	if r.Type != "passkey-create" && r.Type != "passkey-get" && r.Type != "passkey-list" && r.Type != "passkey-signal" && r.Options != "" && r.Type != "generate" {
 		return false
 	}
 	if r.Type != "stage-save" && r.Type != "commit-staged-save" && r.Type != "dismiss-save" && r.Type != "generate" && (r.StageID != "" || r.Mode != "" || r.Title != "" || r.NeverForOrigin) {
@@ -161,6 +161,17 @@ func (r Request) valid() bool {
 			return true
 		}
 		return token.MatchString(r.ItemID) && revision.MatchString(r.Revision)
+	case "passkey-signal":
+		// A WebAuthn signal hint is a strict options document plus the exact
+		// browser context. It carries no item selector and no mutation keys;
+		// the native owner review is the only way anything is applied.
+		return token.MatchString(r.Capability) && r.Context().Valid() && passkeyOptions(r.Options) &&
+			r.ItemID == "" && r.Revision == "" && r.payload == nil && r.RequestID == "" && r.Nonce == "" && r.WindowID == 0 &&
+			r.CredentialID == "" && r.Query == "" && r.VaultID == "" && r.Tag == "" && r.StateFilter == "" &&
+			r.FavoritesOnly == nil && r.PasskeysOnly == nil && r.Field == "" && r.FieldAction == "" && r.StateAction == "" &&
+			r.ItemJSON == "" && r.ProfileKind == "" && r.Category == "" && r.Length == 0 && r.Digits == nil && r.Symbols == nil && r.SaveHistory == nil &&
+			r.FileName == "" && r.Size == nil && r.SHA256 == "" && r.MimeType == "" && r.TransferID == "" && r.Offset == 0 && r.Data == "" && r.AttachmentID == "" &&
+			r.StageID == "" && r.Mode == "" && r.Title == "" && !r.NeverForOrigin && !r.IncludeHIBP
 	case "passkey-list":
 		// Conditional account listing is a read-only GET: no selector, no
 		// creation/user fields and no mutation keys are ever accepted.
@@ -518,6 +529,16 @@ func (r Response) MarshalJSON() ([]byte, error) {
 	if r.Type != "paired" && r.Type != "unlocked" && r.Type != "status" && r.Type != "session-status" {
 		r.QuickFill = false
 		r.Capabilities = nil
+	}
+	if r.Type == "passkey-signal-accepted" {
+		// The acknowledgement is exactly {v,id,type}. It never carries a
+		// count, presence flag, matched item or outcome that a page could use
+		// as a local-credential oracle.
+		return json.Marshal(struct {
+			V    int    `json:"v"`
+			ID   string `json:"id"`
+			Type string `json:"type"`
+		}{r.V, r.ID, r.Type})
 	}
 	if r.Type == "otp-ready" {
 		return json.Marshal(struct {
@@ -1113,7 +1134,7 @@ func requestKeys(kind string) (required, optional []string, ok bool) {
 		return append(base, "capability", "item_id", "revision", "attachment_id"), nil, true
 	case "cancel":
 		return append(base, "capability"), nil, true
-	case "passkey-create", "passkey-list":
+	case "passkey-create", "passkey-list", "passkey-signal":
 		return append(base, "capability", "origin", "tab_id", "document_id", "options"), nil, true
 	case "passkey-get":
 		// The optional pair lets a conditional selection pin exactly one login.

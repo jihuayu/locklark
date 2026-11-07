@@ -10,6 +10,7 @@ func SupportedCapabilities() []string {
 		"passkey-v1",
 		"passkey-management-v1",
 		"passkey-conditional-v1",
+		"passkey-signal-v1",
 		"generate-v1",
 		"stage-save-v1",
 		"popup-vault-v1",

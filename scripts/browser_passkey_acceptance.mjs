@@ -5,6 +5,7 @@ import { createHash, createPublicKey, verify } from "node:crypto";
 import { acceptPasskeyManagement } from "./browser_passkey_management_acceptance.mjs";
 import { acceptConditionalPasskey } from "./browser_conditional_passkey_acceptance.mjs";
 import { acceptOtherProvider } from "./browser_other_provider_acceptance.mjs";
+import { acceptPasskeySignals } from "./browser_passkey_signal_acceptance.mjs";
 export async function acceptBrowserPasskey({
   page,
   browser,
@@ -338,6 +339,15 @@ export async function acceptBrowserPasskey({
     await acceptOtherProvider({
       page, cdp, origin, first: created.json, inlineClick,
       eventually, observe, phase,
+    });
+  }
+  if (process.env.LOCKLARK_TEST_PASSKEY_SIGNALS === "1") {
+    await acceptPasskeySignals({
+      origin, fixture, first: created.json,
+      pageEval: (fn, arg) => page.evaluate(fn, arg), inlineClick,
+      focusPage: async () => { input([], false); await page.bringToFront(); },
+      navigate: url => page.goto(url), openPopup, eventually, input, observe, phase,
+      dismissPopup: async () => { input([], false); await page.bringToFront(); await page.keyboard.press("Escape"); },
     });
   }
   if (process.env.LOCKLARK_TEST_PASSKEY_MANAGEMENT === "1") {

@@ -12,7 +12,7 @@
 | [#34](https://github.com/jihuayu/locklark/issues/34) | PR #43 已统一 query/state refresh，过滤条件与界面代次绑定，变更提交与刷新失败分开。 | 现有筛选保持、query ABA、scope 变化和迟到 mutation refresh 回归已重跑。 |
 | [#36](https://github.com/jihuayu/locklark/issues/36) | PR #43 的普通 fill 已在取得 writer slot 后才消费秘密，并检查 cancel epoch、会话与期限。 | 原队列锁库回归保留；新增认证取消、请求/配对到期、错误能力与重复取消不影响新操作。主代理独立定向 race 通过。 |
 | [#38](https://github.com/jihuayu/locklark/issues/38) | PR #43 已记录 `injectionStarted`，对派发后的未确认结果保留 `fillUnknown`。 | 新增丢失注入回执、成功注入后 probe 挂起、导航/锁库/断开、派发前明确拒绝及迟到操作不覆盖新操作；扩展全量测试通过。 |
-| [#35](https://github.com/jihuayu/locklark/issues/35) | 每次读取仍重复完整历史密码学验证，性能工作尚未关闭。 | 独立工作区实现会话内已验证前缀复用；仍逐字节检查完整历史/归档密文，缓存失配回到完整验证。基准与篡改回归另列。 |
+| [#35](https://github.com/jihuayu/locklark/issues/35) | PR #47 已合并并关闭；前缀复用、密文逐字节检查与完整回退均通过篡改回归。 | 10k 事件基准及最终精确六项 CI 见历史性能验收。 |
 | [#39](https://github.com/jihuayu/locklark/issues/39) | PR #43–45 已覆盖多步、保存/更新、生成器、附加类型、编辑、附件、Passkey 独立管理和三浏览器受控真实验收；整项仍有缺口。 | 条件式输入框账号列表、Signal APIs、系统 UV、平台与发布验收逐项推进；不以一个 Passkey 删除入口关闭整个 epic。 |
 
 主代理独立运行（起始代码）：
@@ -42,3 +42,10 @@ node --test --test-name-pattern='password injection|post-injection|ordinary fill
 最终 head ab9aca635ef1db33e2e4be637f55c96e4253a73e 六项检查全部成功且 mergeStateStatus=CLEAN，正常 squash 合入 main 2fc96e7a89b9ad9b141fb09c9e9e3cecf59a6af5（2026-11-07 08:51:33 UTC），树与验证 head 完全一致。#35 已自动关闭，当前只剩 #39。检查 run 42356042635、移动 run 42356042631；精确回执 /workspace/issue-completion-tasks/pr47-ci-final.json 与 pr47-merged.json。期间两个测试 fixture 缺陷与逐次修复、未采用旧 head 绿色结果的过程见[性能验收](audit-history-performance-validation.md)。
 
 #39 的条件式/共存实现接入此基线；见[设计](conditional-passkey-design.md)和[真实验收](conditional-passkey-validation.md)。其开放状态保留直到各子项及真实平台条件分别核实。
+
+
+## PR #48 已合并与本批 #39 增量
+
+最终 head b2905ffcbc3598eeb372b665bafd3e85b91a0d67 六项检查成功且 CLEAN，2026-11-07 09:16:47 UTC 正常 squash 到 main 9cbc34cfe487d9a226a12a63c1cd35ed707fa11c，树完全一致。检查 run 42357749369/42357749279；回执 pr48-ci-final.json、pr48-merged.json。条件式账户建议、生命周期/槽位竞态及软件验证器共存已完成，不能继续列作未开发。
+
+仅 #39 仍开放。本批实现 Signal APIs 原生确认、每次新鲜系统 UV 接口、相关来源回退、公共站点精简 fixture 及未签名发布准备；[综合验收](browser-completion-validation.md)记录 293 项扩展测试、212 项统一 E2E 的真实分类、实际浏览器和仍缺的硬件/平台/跨设备/分发条件。未签名 ZIP 或跨平台构建不等于整项完成。

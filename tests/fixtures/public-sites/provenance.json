@@ -1,0 +1,77 @@
+{
+  "issue": 39,
+  "kind": "representative public-site compatibility fixtures (minimal synthetic forms)",
+  "fetched_at_note": "URLs, HTTP status and fetch timestamp are as reported by parent research; this worker did not re-fetch or contact the sites.",
+  "sources": [
+    {
+      "url": "https://github.com/login",
+      "http_status": 200,
+      "fetched_at": "2026-11-07T09:31:07Z",
+      "observed": {
+        "username_input": {
+          "name": "login",
+          "type": "text",
+          "autocomplete": "username",
+          "id": "login_field"
+        },
+        "password_input": {
+          "name": "password",
+          "type": "password",
+          "autocomplete": "current-password",
+          "id": "password"
+        },
+        "submit_control": {
+          "name": "commit",
+          "type": "submit"
+        },
+        "extra_text_input": {
+          "name_prefix": "required_field_",
+          "role": "extra text input; production purpose and visibility were not inferred"
+        }
+      }
+    },
+    {
+      "url": "https://webauthn.io/",
+      "http_status": 200,
+      "fetched_at": "2026-11-07T09:31:07Z",
+      "observed": {
+        "username_input": {
+          "identifier": "input-email",
+          "type": "text",
+          "autocomplete": "username webauthn",
+          "id": "input-email"
+        },
+        "password_field": "none reported"
+      }
+    }
+  ],
+  "fixtures": {
+    "github-login.html": "https://github.com/login",
+    "webauthn-io.html": "https://webauthn.io/"
+  },
+  "normalization": {
+    "required_field_suffix": "random production suffix replaced by the fixed literal required_field_fixture; the original suffix was not retained",
+    "attributes": "only the reported input attributes are reproduced, and the reported element identifiers are used as id values",
+    "not_reproduced": [
+      "production form/action/method",
+      "submit wording",
+      "page markup, styles, scripts and assets",
+      "any field value, CSRF token or cookie"
+    ]
+  },
+  "synthetic": [
+    "Both fixtures are minimal synthetic forms, not clones of the production pages.",
+    "data-synthetic=container marks form/button containers absent from the research capture.",
+    "data-synthetic=negative-case-decoy marks the hidden required_field_fixture input as a synthetic negative case, not a production field.",
+    "Fixtures contain no external scripts, styles, images, fonts or requests."
+  ],
+  "scope": {
+    "tested": "DOM component compatibility of the shipped browser-extension core probe/capture/fill against representative forms",
+    "not_tested": [
+      "no account, cookie, credential or WebAuthn ceremony was used",
+      "no production login or submission was performed",
+      "not a browser->native, extension-privileged or end-to-end login test",
+      "the driver never contacts the live sites"
+    ]
+  }
+}

@@ -1,0 +1,27 @@
+<!doctype html>
+<!--
+  SYNTHETIC Issue 39 compatibility fixture for https://webauthn.io/
+  (HTTP 200, fetched 2026-11-07T09:31:07Z by parent research).
+  A minimal synthetic form, NOT a clone and not the production page: no brand
+  assets, no page copy, no scripts, no tokens and no captured values.
+  Reported input fact reproduced here: identifier "input-email", type="text",
+  autocomplete="username webauthn"; no password field was reported.
+  Anything marked data-synthetic was NOT observed in the source research.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>synthetic public-site compatibility fixture (username)</title>
+</head>
+<body>
+<main>
+<h1>Synthetic username fixture</h1>
+<!-- synthetic container: production page/form structure was not captured -->
+<form data-synthetic="container">
+<label for="input-email">Username</label>
+<input id="input-email" type="text" autocomplete="username webauthn">
+<button type="submit" data-synthetic="container">Continue</button>
+</form>
+</main>
+</body>
+</html>

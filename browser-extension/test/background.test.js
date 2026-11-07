@@ -3022,3 +3022,313 @@ test("a late native reply cannot escape invalidation of its conditional approval
   assert.equal((await h.send({ type: "state" })).pending, false);
   assert.doesNotMatch((await h.send({ type: "state" })).status, /\u5df2\u4ea4\u4ed8/);
 });
+
+// --- WebAuthn Signal API hints (issue39) -----------------------------------
+const SIGNAL_CAP = "passkey-signal-v1";
+const signalID = (n) => core.base64URLEncode(new Uint8Array(32).fill(n));
+const signalUserID = (n) => core.base64URLEncode(new Uint8Array(16).fill(n));
+const unknownSignalOptions = (extra = {}) =>
+  JSON.stringify({
+    kind: "unknown",
+    rpId: "example.test",
+    credentialId: signalID(1),
+    ...extra,
+  });
+const acceptedSignalOptions = () =>
+  JSON.stringify({
+    kind: "accepted",
+    rpId: "example.test",
+    userId: signalUserID(2),
+    allAcceptedCredentialIds: [signalID(3), signalID(4)],
+  });
+const userSignalOptions = () =>
+  JSON.stringify({
+    kind: "user",
+    rpId: "example.test",
+    userId: signalUserID(2),
+    name: "User Name",
+    displayName: "User Display",
+  });
+const signalHarness = (options = {}) =>
+  harness({
+    ...options,
+    capabilities: options.capabilities ?? [SIGNAL_CAP],
+    onRequest: (r) => {
+      const reply = options.onRequest ? options.onRequest(r) : undefined;
+      if (reply !== undefined) return reply;
+      if (r.type === "passkey-signal" && options.holdSignal !== true)
+        return { v: 1, id: r.id, type: "passkey-signal-accepted" };
+      if (r.type === "fill")
+        return {
+          v: 1,
+          id: r.id,
+          type: "fill",
+          username: "fill-user",
+          password: "fill-password",
+        };
+      return undefined;
+    },
+  });
+const signalWires = (h) => h.sent.filter((r) => r.type === "passkey-signal");
+
+test("signal: a content hint reaches the exact native frame and nothing else", async () => {
+  const h = signalHarness();
+  await ready(h);
+  const before = await h.send({ type: "state" });
+  const options = unknownSignalOptions();
+  const reply = await h.send(
+    { type: "passkey-signal", options },
+    contentSender(),
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(reply)), {});
+  const wires = signalWires(h);
+  assert.equal(wires.length, 1);
+  assert.deepEqual(Object.keys(wires[0]).sort(), [
+    "capability",
+    "document_id",
+    "id",
+    "options",
+    "origin",
+    "tab_id",
+    "type",
+    "v",
+  ]);
+  assert.equal(wires[0].v, 1);
+  assert.equal(wires[0].options, options, "the bounded hint is forwarded verbatim");
+  assert.equal(wires[0].origin, "https://example.test");
+  assert.equal(wires[0].tab_id, 1);
+  assert.equal(wires[0].document_id, "doc-1");
+  assert.equal(wires[0].capability, "a".repeat(32));
+  const after = await h.send({ type: "state" });
+  assert.equal(after.pending, false, "no approval slot is claimed");
+  assert.equal(after.status, before.status, "a hint changes no status");
+  assert.deepEqual(after.candidates, before.candidates);
+});
+
+test("signal: the three strict dictionaries reach the host unchanged and stay answerless", async () => {
+  const h = signalHarness();
+  await ready(h);
+  for (const options of [
+    unknownSignalOptions(),
+    acceptedSignalOptions(),
+    userSignalOptions(),
+  ]) {
+    const reply = await h.send(
+      { type: "passkey-signal", options },
+      contentSender(),
+    );
+    assert.deepEqual(JSON.parse(JSON.stringify(reply)), {});
+  }
+  assert.deepEqual(
+    signalWires(h).map((r) => JSON.parse(r.options).kind),
+    ["unknown", "accepted", "user"],
+  );
+  assert.equal(
+    h.sent.some((r) => r.type === "passkey-list" || r.type === "passkey-get"),
+    false,
+    "a hint never lists or asserts credentials",
+  );
+});
+
+test("signal: an acknowledgement with a private or unknown field is refused", async () => {
+  const h = signalHarness({
+    onRequest: (r) =>
+      r.type === "passkey-signal"
+        ? { v: 1, id: r.id, type: "passkey-signal-accepted", count: 1 }
+        : undefined,
+  });
+  await ready(h);
+  const reply = await h.send(
+    { type: "passkey-signal", options: unknownSignalOptions() },
+    contentSender(),
+  );
+  assert.equal(reply.fallback, true, "a malformed ack is never accepted");
+  assert.equal(reply.credential, undefined);
+  const state = await h.send({ type: "state" });
+  assert.equal(state.connected, false, "the protocol error is fail-closed");
+});
+
+test("signal: core accepts only the exact acceptance frame", () => {
+  const id = "a".repeat(32);
+  assert.equal(
+    core.validPasskeySignalAck({ v: 1, id, type: "passkey-signal-accepted" }, id),
+    true,
+  );
+  for (const value of [
+    { v: 1, type: "passkey-signal-accepted" },
+    { v: 1, id, type: "passkey-signal-accepted", count: 1 },
+    { v: 1, id, type: "passkey-signal-accepted", item_id: "b".repeat(32) },
+    { v: 1, id, type: "passkey-signal-accepted", credential_id: signalID(1) },
+    { v: 1, id, type: "passkey-signal-accepted", user_name: "u" },
+    { v: 2, id, type: "passkey-signal-accepted" },
+    { v: 1, id, type: "passkey-result" },
+  ])
+    assert.equal(core.validPasskeySignalAck(value, id), false, JSON.stringify(value));
+  assert.equal(
+    core.validPasskeySignalAck({ v: 1, id, type: "passkey-signal-accepted" }, "c".repeat(32)),
+    false,
+    "the ack must answer this exact request",
+  );
+  assert.equal(
+    core.validResponse({ v: 1, id, type: "passkey-signal-accepted" }),
+    true,
+  );
+  assert.equal(
+    core.validResponse({ v: 1, id, type: "passkey-signal-accepted", count: 1 }),
+    false,
+  );
+});
+
+test("signal: an old host without passkey-signal-v1 gets no wire and no prompt", async () => {
+  const h = signalHarness({ capabilities: [] });
+  await ready(h);
+  const reply = await h.send(
+    { type: "passkey-signal", options: unknownSignalOptions() },
+    contentSender(),
+  );
+  assert.equal(reply.fallback, true);
+  assert.equal(signalWires(h).length, 0);
+  const state = await h.send({ type: "state" });
+  assert.equal(state.connected, true, "the hint never disconnects the vault");
+});
+
+test("signal: a disconnected worker neither auto-connects nor sends a hint", async () => {
+  const h = signalHarness();
+  const reply = await h.send(
+    { type: "passkey-signal", options: unknownSignalOptions() },
+    contentSender(),
+  );
+  assert.equal(reply.fallback, true);
+  assert.deepEqual(h.sent, [], "no hello and no hint are sent");
+});
+
+test("signal: the Passkey use setting gates the hint without prompting", async () => {
+  const h = signalHarness({ settings: { offerUsePasskeys: false } });
+  await ready(h);
+  const reply = await h.send(
+    { type: "passkey-signal", options: unknownSignalOptions() },
+    contentSender(),
+  );
+  assert.equal(reply.fallback, true);
+  assert.equal(signalWires(h).length, 0);
+  assert.equal((await h.send({ type: "state" })).connected, true);
+});
+
+test("signal: only the actual content sender may forward a hint", async () => {
+  const h = signalHarness();
+  await ready(h);
+  const before = signalWires(h).length;
+  // Popup, options page, an extension page and a mismatched document are all
+  // refused without producing a wire frame.
+  await h.send({ type: "passkey-signal", options: unknownSignalOptions() });
+  const escapes = [
+    { id: "fixed", url: "chrome-extension://fixed/options.html" },
+    { id: "fixed", url: "https://example.test/login", tab: { id: 1 } },
+    contentSender("doc-other"),
+  ];
+  for (const sender of escapes)
+    await h.send({ type: "passkey-signal", options: unknownSignalOptions() }, sender);
+  assert.equal(signalWires(h).length, before);
+});
+
+test("signal: caller-supplied origin, selectors and page fields are refused", async () => {
+  const h = signalHarness();
+  await ready(h);
+  const options = unknownSignalOptions();
+  for (const extra of [
+    { origin: "https://evil.test" },
+    { tab_id: 9 },
+    { document_id: "doc-9" },
+    { capability: "f".repeat(32) },
+    { item_id: "b".repeat(32) },
+    { credential_id: signalID(1) },
+    { kind: "unknown" },
+    { count: 1 },
+  ]) {
+    const reply = await h.send(
+      { type: "passkey-signal", options, ...extra },
+      contentSender(),
+    );
+    assert.equal(reply.fallback, true, JSON.stringify(extra));
+  }
+  assert.equal(signalWires(h).length, 0);
+});
+
+test("signal: malformed, unknown-member, unbounded and oversize hints are refused", async () => {
+  const h = signalHarness();
+  await ready(h);
+  const cases = [
+    "",
+    "{",
+    "null",
+    "[]",
+    JSON.stringify({ kind: "other", rpId: "example.test" }),
+    JSON.stringify({ kind: "unknown", rpId: "example.test" }),
+    unknownSignalOptions({ credentialId: "AAAA=" }),
+    unknownSignalOptions({ rpId: "Example.test" }),
+    unknownSignalOptions({ extra: true }),
+    JSON.stringify({
+      kind: "accepted",
+      rpId: "example.test",
+      userId: signalUserID(2),
+      allAcceptedCredentialIds: Array.from({ length: 65 }, (_, i) =>
+        signalID(i + 1),
+      ),
+    }),
+    "x".repeat(32769),
+  ];
+  for (const options of cases) {
+    const reply = await h.send(
+      { type: "passkey-signal", options },
+      contentSender(),
+    );
+    assert.equal(reply.fallback, true, String(options).slice(0, 80));
+  }
+  assert.equal(signalWires(h).length, 0);
+});
+
+test("signal: a hint is dropped when settings change while the context recheck is in flight", async () => {
+  const h = signalHarness();
+  await ready(h);
+  const release = h.deferProbe(1);
+  const pending = h.send(
+    { type: "passkey-signal", options: unknownSignalOptions() },
+    contentSender(),
+  );
+  await h.waitProbe();
+  h.listeners.storage({ offerUsePasskeys: { newValue: false } }, "local");
+  release();
+  const reply = await pending;
+  assert.equal(reply.fallback, true);
+  assert.equal(signalWires(h).length, 0, "the stale hint is never wired");
+});
+
+test("signal: a hint is dropped when the connection is lost while the recheck is in flight", async () => {
+  const h = signalHarness();
+  await ready(h);
+  const release = h.deferProbe(1);
+  const pending = h.send(
+    { type: "passkey-signal", options: unknownSignalOptions() },
+    contentSender(),
+  );
+  await h.waitProbe();
+  h.losePort();
+  release();
+  const reply = await pending;
+  assert.equal(reply.fallback, true);
+  assert.equal(signalWires(h).length, 0);
+  assert.equal((await h.send({ type: "state" })).connected, false);
+});
+
+test("signal: a hint never occupies the ordinary fill slot", async () => {
+  const h = signalHarness();
+  await ready(h);
+  await h.send(
+    { type: "passkey-signal", options: userSignalOptions() },
+    contentSender(),
+  );
+  assert.equal(signalWires(h).length, 1);
+  const match = await h.send({ type: "inline-match" }, contentSender());
+  assert.equal(match.candidates.length, 1, "candidates still load");
+  assert.equal((await h.send({ type: "state" })).pending, false);
+});

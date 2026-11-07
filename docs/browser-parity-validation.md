@@ -1,6 +1,6 @@
 # 浏览器插件当前验收状态
 
-更新：2026-11-07；已合并基线 `main` `4abecb8`，最终开发 head `c3d505f`，见 [PR #43](https://github.com/jihuayu/locklark/pull/43)。此前基于 PR #40 的记录移至[历史快照](history/browser-parity-validation-2026-11-06.md)。
+更新：2026-11-07；本批已合并起点 main 9cbc34c（PR #48）。本页下列 PR #43 的数字为历史验收；最新条件式/管理、Signal/系统 UV 与发布准备的实际范围见[综合验收](browser-completion-validation.md)。此前基于 PR #40 的记录移至[历史快照](history/browser-parity-validation-2026-11-06.md)。
 
 ## 已有实现与实际验证
 
@@ -21,4 +21,6 @@
 
 ## 持续缺口
 
-以[当前 65 项行为清单](browser-parity-checklist.md)为准：Safari、各浏览器的 Windows/macOS 原生组合、完整 conditional UI、Passkey 单独删除与多凭据管理、硬件生物识别、签名/商店发布及更多真实站点。当前测试不是固定参考版本的完整 1:1 对照。
+以[当前 65 项行为清单](browser-parity-checklist.md)为准：Safari、各浏览器的 Windows/macOS 原生组合、同条目多凭据管理、真实平台条件式参考对照、硬件生物识别、签名/商店发布及更多真实站点。当前测试不是固定参考版本的完整 1:1 对照。
+
+条件式账户列表和 Passkey 独立管理已完成三浏览器受控原生验收；本批 Signal APIs、逐次系统验证入口和未签名准备不能以此自动关闭跨设备/硬件/分发要求。
