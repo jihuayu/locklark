@@ -20,6 +20,7 @@ from .support import (
     f10_popup_vault_ready,
     f11_identity_ready,
     f12_parity_doc,
+    f13_cli_health_flags,
     f13_watchtower_ready,
     f14_cli_profiles_ready,
     f15_run_bundle_ready,
@@ -28,6 +29,7 @@ from .support import (
     f1_passkey_ready,
     f2_inline_ready,
     f3_team_sync_ready,
+    f4_team_cli_ready,
     f5_desktop_timer_ready,
     f7_shared_ipc_ready,
     f8_desktop_v2_ready,
@@ -60,7 +62,14 @@ def t4_01(ctx):
     )
     health_report(ctx, vault)
     ready = plan.returncode == 0 and cli_supports(ctx, "add-item")
-    gate(ctx, "F6", ready, "multi-category 1PUX import is rejected on this branch")
+    gate(
+        ctx,
+        "F6",
+        ready,
+        "CLI plan-import-1pux rejects non-basic-login archives and the CLI has no "
+        "add-item surface; the v2 item model exists in the desktop/browser host, "
+        "so the whole migration journey is blocked on the CLI command surface",
+    )
     assert plan.json()["report"]["items"] >= 4
     _import_multi(ctx, vault, archive, plan.json()["report"]["source_digest"])
     assert f14_cli_profiles_ready(ctx)
@@ -99,7 +108,12 @@ def t4_02(ctx):
         and f8_desktop_v2_ready(ctx)
         and f17_broker_ready(ctx)
     )
-    gate(ctx, "F7", ready, "shared desktop IPC / v2 shell / CLI broker is absent")
+    gate(
+        ctx,
+        "F7",
+        ready,
+        "shared desktop IPC and the v2 shell exist; the CLI broker client is absent",
+    )
     assert list_rows(ctx, vault)
 
 
@@ -116,7 +130,14 @@ def t4_03(ctx):
         and f11_identity_ready(ctx)
         and f1_passkey_ready(ctx)
     )
-    gate(ctx, "F9", ready, "inline generator / multi-step login / passkey upgrade is absent")
+    gate(
+        ctx,
+        "F9",
+        ready,
+        "inline generator, multi-step login and passkey upgrade components exist, "
+        "but the onboarding journey cannot be driven end-to-end while the CLI "
+        "item-creation surface is absent",
+    )
     assert list_rows(ctx, vault)
 
 
@@ -129,7 +150,15 @@ def t4_03(ctx):
 def t4_04(ctx):
     vault = make_vault(ctx, ["Store"])
     ready = f11_identity_ready(ctx) and f10_popup_vault_ready(ctx)
-    gate(ctx, "F11", ready, "identity/card/same-site-iframe/split-OTP fill is absent")
+    gate(
+        ctx,
+        "F11",
+        ready,
+        "identity/card fill and split OTP exist (M3 component contracts) and only "
+        "same-origin subframes are supported, so same-site cross-origin card iframe "
+        "fill is genuinely unsupported and the checkout journey is additionally "
+        "blocked on the CLI item-creation surface",
+    )
     assert list_rows(ctx, vault)
 
 
@@ -155,7 +184,23 @@ def t4_05(ctx):
 def t4_06(ctx):
     vault = make_vault(ctx, ["GitHub"])
     ready = f13_watchtower_ready(ctx) and f9_save_generator_ready(ctx)
-    gate(ctx, "F13", ready, "HIBP/Watchtower breach detection is absent")
+    gate(
+        ctx,
+        "F13",
+        ready,
+        "host Watchtower service or inline generator remediation is absent",
+    )
+    # The breach-to-rotation journey needs an opt-in HIBP run.  The host range
+    # client exists, but CLI health exposes no opt-in HIBP flags and no live
+    # api.pwnedpasswords.com round trip is exercised offline, so this end-to-end
+    # validation stays blocked instead of claiming breach detection is absent.
+    gate(
+        ctx,
+        "F13",
+        f13_cli_health_flags(ctx),
+        "breach-to-rotation journey blocked: no opt-in HIBP flags on CLI health "
+        "and no live HIBP egress exercised offline (host HIBP client exists)",
+    )
     health_report(ctx, vault)
 
 
@@ -181,7 +226,14 @@ def t4_07(ctx):
 def t4_08(ctx):
     vault = make_vault(ctx, ["Defense"])
     ready = f2_inline_ready(ctx) and f11_identity_ready(ctx)
-    gate(ctx, "F2", ready, "inline autofill / identity fill / cross-origin defense is absent")
+    gate(
+        ctx,
+        "F2",
+        ready,
+        "inline autofill, identity/card fill and cross-origin iframe refusal "
+        "components exist (M3 component contracts); the malicious-site journey is "
+        "blocked on the absent CLI item-creation surface, not on those capabilities",
+    )
     assert audit_events(ctx, vault)
 
 
@@ -199,7 +251,13 @@ def t4_09(ctx):
         and f8_desktop_v2_ready(ctx)
         and f17_broker_ready(ctx)
     )
-    gate(ctx, "F5", ready, "independent desktop timers / shared IPC / CLI broker are absent")
+    gate(
+        ctx,
+        "F5",
+        ready,
+        "desktop timers and shared IPC exist; the CLI broker client (and its lease "
+        "revocation) is absent",
+    )
     assert desktop_sources(ctx)
 
 

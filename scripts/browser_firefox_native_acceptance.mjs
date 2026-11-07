@@ -62,7 +62,27 @@ assert(
     ),
   "Unsupported acceptance failure stage",
 );
+assert(
+  !process.env.LOCKLARK_TEST_FIREFOX_PASSKEY ||
+    process.env.LOCKLARK_TEST_FIREFOX_PASSKEY === "1",
+  "LOCKLARK_TEST_FIREFOX_PASSKEY only accepts 1",
+);
+assert(
+  !process.env.LOCKLARK_TEST_FIREFOX_PASSKEY_ONLY ||
+    process.env.LOCKLARK_TEST_FIREFOX_PASSKEY_ONLY === "1",
+  "LOCKLARK_TEST_FIREFOX_PASSKEY_ONLY only accepts 1",
+);
+assert(
+  process.env.LOCKLARK_TEST_FIREFOX_PASSKEY_ONLY !== "1" ||
+    process.env.LOCKLARK_TEST_FIREFOX_PASSKEY === "1",
+  "LOCKLARK_TEST_FIREFOX_PASSKEY_ONLY requires LOCKLARK_TEST_FIREFOX_PASSKEY=1",
+);
+const passkeyOnly = process.env.LOCKLARK_TEST_FIREFOX_PASSKEY_ONLY === "1";
 import { acceptBrowserOTP, otpHTML } from "./browser_otp_acceptance.mjs";
+import {
+  acceptFirefoxPasskey,
+  CHROME_VIEWPORT_SOURCE,
+} from "./browser_firefox_passkey_acceptance.mjs";
 
 const firefox =
   process.env.LOCKLARK_FIREFOX ||
@@ -97,6 +117,7 @@ let nativeManifestDigest = "",
   nativeManifestDevice;
 let driver, server;
 let observedFixture = null,
+  firefoxPasskey = null,
   successful = false,
   driverLogClosed = Promise.resolve(),
   driverLogFailed = false;
@@ -107,14 +128,26 @@ const debugTargets = new Map();
 const bidiCalls = new Map();
 let bidiSequence = 10;
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const SAFE_FAILURES = [
+  /^PasskeyFailure:[a-z-]+(:[^:]{0,40})?$/,
+  /^Firefox passkey (creation|assertion) did not complete$/,
+  /^Native acceptance [a-z -]{3,40}$/,
+];
+function safeFailureMessage(error) {
+  const text = String(error?.message || "");
+  for (const pattern of SAFE_FAILURES)
+    if (pattern.test(text)) return text.slice(0, 120);
+  return "unclassified";
+}
 function progress(value) {
   stage = value;
   console.log("Firefox acceptance: " + value);
 }
-function reportFailure() {
+function reportFailure(detail = "unclassified") {
   console.error(
     "FAIL: Firefox native acceptance at " + stage + " (AcceptanceFailure)",
   );
+  console.error("Failure class: " + detail);
   console.error("Private diagnostic files: " + state);
 }
 async function eventually(check, description, limit = 15000) {
@@ -425,6 +458,73 @@ async function popupClick(selector) {
     ],
     { env },
   );
+}
+function physicalClick(x, y) {
+  const pointer =
+    'import ctypes as C,os,sys\nx=C.CDLL("libX11.so.6");t=C.CDLL("libXtst.so.6");p=C.c_void_p\nx.XOpenDisplay.argtypes=[C.c_char_p];x.XOpenDisplay.restype=p;x.XFlush.argtypes=[p];x.XCloseDisplay.argtypes=[p]\nt.XTestFakeMotionEvent.argtypes=[p,C.c_int,C.c_int,C.c_int,C.c_ulong];t.XTestFakeButtonEvent.argtypes=[p,C.c_uint,C.c_int,C.c_ulong]\nd=x.XOpenDisplay(os.environ["DISPLAY"].encode());assert d\nt.XTestFakeMotionEvent(d,-1,int(sys.argv[1]),int(sys.argv[2]),0);t.XTestFakeButtonEvent(d,1,1,0);t.XTestFakeButtonEvent(d,1,0,0);x.XFlush(d);x.XCloseDisplay(d)';
+  execFileSync(
+    "python3",
+    ["-c", pointer, String(Math.round(x)), String(Math.round(y))],
+    { env },
+  );
+}
+// Read-only chrome-context inspection of the page; clicks stay physical.
+async function chromeEval(source, args = []) {
+  await context("chrome");
+  return evaluate(source, args);
+}
+async function pageViewportOrigin() {
+  return chromeEval(CHROME_VIEWPORT_SOURCE);
+}
+// BiDi locates nodes without touching the page realm; each node is measured
+// through its remote reference, so closed shadow roots stay readable even for
+// out-of-process tabs. Clicking still happens through physical XTest only.
+async function locatePageButtons(label) {
+  let nodes = [];
+  try {
+    const located = await bidiCall("browsingContext.locateNodes", {
+      context: pageContext,
+      locator: { type: "accessibility", value: { role: "button", name: label } },
+      maxNodeCount: 16,
+    });
+    nodes = located.nodes || [];
+  } catch {} // Older remote agents may not offer the accessibility locator.
+  if (!nodes.length) {
+    const located = await bidiCall("browsingContext.locateNodes", {
+      context: pageContext,
+      locator: { type: "css", value: "*" },
+      maxNodeCount: 256,
+      serializationOptions: { includeShadowTree: "all", maxDomDepth: 16 },
+    });
+    const seen = new Set();
+    const visit = (value) => {
+      if (!value || typeof value !== "object") return;
+      if (value.sharedId && value.value?.localName === "button" && !seen.has(value.sharedId)) {
+        seen.add(value.sharedId);
+        nodes.push(value);
+      }
+      for (const child of Object.values(value)) {
+        if (Array.isArray(child)) child.forEach(visit);
+        else if (child && typeof child === "object") visit(child);
+      }
+    };
+    (located.nodes || []).forEach(visit);
+  }
+  const buttons = [];
+  for (const node of nodes.slice(0, 32)) {
+    if (!node?.sharedId) continue;
+    const measured = await bidiCall("script.callFunction", {
+      functionDeclaration:
+        'function(button){const rect=button.getBoundingClientRect();return JSON.stringify({text:(button.textContent||" ").trim(),disabled:button.disabled===true,left:rect.left,top:rect.top,width:rect.width,height:rect.height});}',
+      target: { context: pageContext },
+      arguments: [{ sharedId: node.sharedId }],
+      awaitPromise: true,
+      resultOwnership: "none",
+    });
+    if (measured?.type !== "success" || measured.result?.type !== "string") continue;
+    buttons.push(JSON.parse(measured.result.value));
+  }
+  return buttons;
 }
 async function openPopup() {
   input([{ key: "Escape" }], false);
@@ -889,7 +989,7 @@ try {
     await blank();
     await openPopup();
     await popupClick("#auto-login"); // Legacy manual-mode acceptance disables auto-submit.
-    if (process.env.LOCKLARK_TEST_FAILURE_STAGE !== "otp-page-arguments") {
+    if (!passkeyOnly && process.env.LOCKLARK_TEST_FAILURE_STAGE !== "otp-page-arguments") {
       progress("native approval and actual Firefox document-targeted fill");
       await select();
       await blank();
@@ -1063,9 +1163,48 @@ try {
           [JSON.stringify(arg ?? null)],
         ),
     };
-    if (process.env.LOCKLARK_TEST_FAILURE_STAGE !== "otp-page-arguments")
-      await acceptBrowserSave(acceptanceDriver);
-    await acceptBrowserOTP(acceptanceDriver);
+    if (!passkeyOnly) {
+      if (process.env.LOCKLARK_TEST_FAILURE_STAGE !== "otp-page-arguments")
+        await acceptBrowserSave(acceptanceDriver);
+      await acceptBrowserOTP(acceptanceDriver);
+    }
+    async function passkeyPair() {
+      await openPopup();
+      await popupClick("#disconnect");
+      input([], true, { wait_absent: true });
+      await openPopup();
+      await popupClick("#connect");
+      progress("native-unlock");
+      input([
+        { click_label: "金库文件" },
+        { text: fixture.Path },
+        { click_label: "主密码" },
+        { text: fixture.Password },
+        { click_label: "Secret Key" },
+        { text: fixture.Secret },
+        { click_label: "解锁" },
+      ]);
+      progress("native-pair");
+      input([{ click_label: "确认连接此扩展" }]);
+    }
+    if (process.env.LOCKLARK_TEST_FIREFOX_PASSKEY === "1") {
+      progress("firefox-passkey");
+      firefoxPasskey = await acceptFirefoxPasskey({
+        origin,
+        fixture,
+        phase: progress,
+        eventually,
+        input,
+        pageEval: acceptanceDriver.pageEval,
+        chromeEval,
+        clickScreen: physicalClick,
+        locateButtons: locatePageButtons,
+        viewportOrigin: pageViewportOrigin,
+        dismissPopup: () => input([{ key: "Escape" }], false),
+        reconnect: passkeyOnly ? passkeyPair : acceptanceDriver.reconnect,
+        pause,
+      });
+    }
     assert(
       !logs.some((line) =>
         fixtureCanaries(fixture).some((value) => line.includes(value)),
@@ -1075,8 +1214,21 @@ try {
     for (const line of logs) assertPrivateText(line, fixture);
     await openPopup();
     await popupClick("#disconnect");
-    const summary = {
-      passed: true,
+    const summary = passkeyOnly
+      ? {
+          passed: true,
+          scope: "passkey-only",
+          legacyFillSaveOtp: "not-run",
+          firefoxNativePasskey: firefoxPasskey,
+          browserVersion: created.capabilities.browserVersion,
+          geckodriverVersion: driverVersion,
+          hostSha256: createHash("sha256").update(readFileSync(host)).digest("hex"),
+          certificateVerification: true,
+          productionExtension: "browser@locklark.local",
+          realAction: true,
+        }
+      : {
+          passed: true,
       browserVersion: created.capabilities.browserVersion,
       geckodriverVersion: driverVersion,
       hostSha256: createHash("sha256").update(readFileSync(host)).digest("hex"),
@@ -1098,6 +1250,7 @@ try {
       capturedClickTimeValues: true,
       unicodeRoundTrip: true,
       saveRejectionNavigationLock: true,
+      firefoxNativePasskey: firefoxPasskey,
     };
     writeFileSync(
       join(state, "acceptance-report.json"),
@@ -1105,15 +1258,20 @@ try {
     );
     successful = true;
   }
-} catch {
-  reportFailure();
+} catch (error) {
+  reportFailure(safeFailureMessage(error));
   process.exitCode = 1;
 } finally {
   await cleanup();
 }
 if (successful && !process.exitCode) {
   console.log(
-    "PASS: real Firefox fill/save/update/OTP with native approval, cancellation, Unicode, and no synthetic secrets in console or persistent diagnostics",
+    passkeyOnly
+      ? "PASS: real Firefox native Passkey-only acceptance (create/get/abort/browser-fallback) with native factor approval"
+      : "PASS: real Firefox fill/save/update/OTP with native approval, cancellation, Unicode, and no synthetic secrets in console or persistent diagnostics" +
+          (firefoxPasskey
+            ? " · native Passkey create/get/abort/browser-fallback verified"
+            : ""),
   );
   console.log("Private synthetic artifacts: " + state);
 }

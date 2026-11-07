@@ -30,6 +30,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tests.e2e.harness import (  # noqa: E402  (path setup must run first)
+    COVERAGE_KINDS,
     E2EContext,
     FIREFOX_EXT_ID,
     FeatureNotImplementedError,
@@ -233,6 +234,7 @@ def run_tests(specs: list[Any], bin_dir: Path, start_all: float) -> dict[str, An
     results: list[dict[str, Any]] = []
     by_tier = {str(tier): _empty_counts() for tier in VALID_TIERS}
     by_feature = {feature: _empty_counts() for feature in VALID_FEATURES}
+    by_coverage = {kind: _empty_counts() for kind in COVERAGE_KINDS}
 
     for spec in specs:
         start = time.monotonic()
@@ -260,6 +262,7 @@ def run_tests(specs: list[Any], bin_dir: Path, start_all: float) -> dict[str, An
             "tier": spec.tier,
             "features": list(spec.features),
             "summary": spec.summary,
+            "coverage_kind": spec.coverage_kind,
             "status": status,
             "duration_sec": round(duration, 6),
             "message": message,
@@ -268,10 +271,11 @@ def run_tests(specs: list[Any], bin_dir: Path, start_all: float) -> dict[str, An
         _count_status(by_tier[str(spec.tier)], status)
         for feature in spec.features:
             _count_status(by_feature[feature], status)
+        _count_status(by_coverage[spec.coverage_kind], status)
 
         print(
             f"[{status}] {spec.test_id} "
-            f"(Tier {spec.tier}, {', '.join(spec.features)}) "
+            f"(Tier {spec.tier}, {spec.coverage_kind}, {', '.join(spec.features)}) "
             f"[{int(duration * 1000)}ms]",
             flush=True,
         )
@@ -294,6 +298,7 @@ def run_tests(specs: list[Any], bin_dir: Path, start_all: float) -> dict[str, An
         },
         "by_tier": by_tier,
         "by_feature": by_feature,
+        "by_coverage": by_coverage,
         "results": results,
     }
 
@@ -321,6 +326,18 @@ def _print_summary(report: dict[str, Any], strict: bool) -> None:
             f"pending_feature={counts['pending_feature']} "
             f"fail={counts['fail']}"
         )
+    print()
+    print("By coverage kind:")
+    for kind in COVERAGE_KINDS:
+        counts = report["by_coverage"][kind]
+        print(
+            f"  {kind}: total={counts['total']} "
+            f"pass={counts['pass']} "
+            f"pending_feature={counts['pending_feature']} "
+            f"fail={counts['fail']}"
+        )
+    print("Note: capability_probe PASS means the declared capability surface was probed;")
+    print("it does not close the unverified end-to-end user journey.")
     print()
     print("By feature:")
     for feature in VALID_FEATURES:

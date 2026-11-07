@@ -19,16 +19,22 @@ from .support import (
     built_extension,
     cli_supports,
     desktop_binary_starts,
+    desktop_runtime_available,
     desktop_sources,
     extension_asset,
     extension_text,
+    extension_or_source_text,
+    f1_autosubmit_ready,
     f1_passkey_ready,
+    f2_autologin_ready,
     f2_inline_ready,
     f3_team_sync_ready,
     f4_team_cli_ready,
     f5_desktop_timer_ready,
+    f5_filter_refresh_ready,
     f7_shared_ipc_ready,
     f8_desktop_v2_ready,
+    f8_v2_editor_ready,
     gate,
     health_report,
     list_rows,
@@ -36,6 +42,7 @@ from .support import (
     multi_category_1pux,
     node_eval,
     node_test,
+    node_test_pattern,
     pty,
     require_hex32,
     require_hex64,
@@ -228,14 +235,34 @@ def t1_f2_01(ctx):
     node_test(ctx, "browser-extension/test/core.test.js")
 
 
-@e2e_test("T1_F2_02", 1, ["F2"], "Global and per-login auto-submit settings control form submission")
+@e2e_test(
+    "T1_F2_02",
+    1,
+    ["F2"],
+    "Global and per-login auto-submit settings control form submission",
+    coverage_kind="component_contract",
+)
 def t1_f2_02(ctx):
-    ready = f2_inline_ready(ctx) and "autoSubmit" in (
-        extension_text(ctx, "content.js") + extension_text(ctx, "popup.js")
+    # The shipped preference is `autoLogin` (global) plus per-item
+    # `loginOverrides`; the old `autoSubmit` literal never existed in the
+    # extension and turned a working path into a phantom pending result.
+    ready = f2_inline_ready(ctx) and f2_autologin_ready(ctx)
+    gate(
+        ctx,
+        "F2",
+        ready,
+        "autoLogin preference plumbing (global setting + per-item loginOverrides) is absent from the extension bundle",
     )
-    gate(ctx, "F2", ready, "autoSubmit preference plumbing is absent from the extension bundle")
-    popup = extension_text(ctx, "popup.js")
-    assert "autoSubmit" in popup or "auto-submit" in popup.lower()
+    popup = extension_or_source_text(ctx, "popup.js")
+    options = extension_or_source_text(ctx, "options.js")
+    assert "autoLogin" in popup or "opt-auto-login" in options
+    counts = node_test_pattern(
+        ctx,
+        "browser-extension/test/background.test.js",
+        r"automatic submission respects global/item opt-outs",
+        min_passed=1,
+    )
+    assert counts["pass"] >= 1, counts
 
 
 @e2e_test("T1_F2_03", 1, ["F2"], "Single-field step login fills username-only and password-only steps")
@@ -321,6 +348,7 @@ def t1_f3_05(ctx):
         binary=shutil.which("python3") or "python3",
         timeout=180,
         cwd=ctx.repo_root,
+        env={"PYTHONPATH": str(script.parent)},
     )
     assert result.returncode == 0, (result.stdout + result.stderr)[-2000:]
 
@@ -374,22 +402,31 @@ def t1_f4_05(ctx):
 # ---------------------------------------------------------------------------
 
 
-@e2e_test("T1_F5_01", 1, ["F5"], "Copied password clears on a timer while the window is minimized")
+@e2e_test("T1_F5_01", 1, ["F5"], "Capability probe: independent clipboard expiry timer")
 def t1_f5_01(ctx):
     ready = f5_desktop_timer_ready(ctx)
     gate(ctx, "F5", ready, "clipboard expiry is still render-loop driven; no independent timer")
+    if not desktop_runtime_available(ctx):
+        gate(ctx, "F5", False, "validation blocked: xvfb-run unavailable; desktop launch not exercised")
     vault = make_vault(ctx, ["Alpha"])
     assert desktop_binary_starts(ctx, vault["path"])
     text = desktop_sources(ctx)
-    assert re.search(r"AfterFunc\([^\n]*clipboardUntil", text) or "clipboardExpiry" in text
+    assert "clipboardTimer = time.AfterFunc" in text
+    assert "clipboardUntil" in text and "clipboardTimeout()" in text
 
 
-@e2e_test("T1_F5_02", 1, ["F5"], "Displayed plaintext and idle auto-lock fire while minimized")
+@e2e_test("T1_F5_02", 1, ["F5"], "Capability probe: display and idle deadlines are timer-driven")
 def t1_f5_02(ctx):
-    ready = f5_desktop_timer_ready(ctx) and "displayUntil" in desktop_sources(ctx)
+    text = desktop_sources(ctx)
+    ready = f5_desktop_timer_ready(ctx) and "displayUntil" in text
     gate(ctx, "F5", ready, "display/idle deadlines are not enforced without a rendered frame")
+    if not desktop_runtime_available(ctx):
+        gate(ctx, "F5", False, "validation blocked: xvfb-run unavailable; desktop launch not exercised")
     vault = make_vault(ctx, ["Alpha"])
     assert desktop_binary_starts(ctx, vault["path"])
+    assert "displayTimer = time.AfterFunc" in text
+    assert "idleTimer = time.AfterFunc" in text
+    vault = make_vault(ctx, ["Alpha"])
     audit = audit_events(ctx, vault)
     assert_audit_chain(audit)
 
@@ -411,13 +448,17 @@ def t1_f5_03(ctx):
 @e2e_test("T1_F5_04", 1, ["F5"], "Editing a non-title field preserves the active title filter")
 def t1_f5_04(ctx):
     text = desktop_sources(ctx)
-    ready = f5_desktop_timer_ready(ctx) and re.search(
-        r"refresh\(\)[\s\S]{0,400}?a\.query", text
+    ready = f5_desktop_timer_ready(ctx) and f5_filter_refresh_ready(ctx)
+    gate(
+        ctx,
+        "F5",
+        ready,
+        "refresh does not capture and re-apply the active query/scope (captureFilter/filterCurrent/queryRows)",
     )
-    gate(ctx, "F5", ready, "refresh does not capture and restore the active query/scope")
     vault = make_vault(ctx, ["Alpha", "Beta"])
     rows = list_rows(ctx, vault)
     assert {row["title"] for row in rows} == {"Alpha", "Beta"}
+    assert "func (a *App) refresh()" in text
 
 
 @e2e_test("T1_F5_05", 1, ["F5"], "Archive/trash/regenerate on a filtered item keeps query and scope")
@@ -442,7 +483,13 @@ def t1_f5_05(ctx):
 @e2e_test("T1_F6_01", 1, ["F6"], "Items persist across all v2 categories")
 def t1_f6_01(ctx):
     ready = cli_supports(ctx, "add-item")
-    gate(ctx, "F6", ready, "personal add-item / item model v2 categories are absent")
+    gate(
+        ctx,
+        "F6",
+        ready,
+        "CLI `personal add-item` command is absent (command-surface gap); the v2 item "
+        "model and category browser exist in the desktop/browser host",
+    )
     vault = make_vault(ctx)
     rows = list_rows(ctx, vault)
     assert rows and rows[0]["kind"] == "login"
@@ -452,7 +499,14 @@ def t1_f6_01(ctx):
 @e2e_test("T1_F6_02", 1, ["F6"], "Sections and typed custom fields resolve through op:// references")
 def t1_f6_02(ctx):
     ready = cli_supports(ctx, "add-item") and cli_supports(ctx, "references")
-    gate(ctx, "F6", ready, "section-qualified custom fields and op:// references are absent")
+    gate(
+        ctx,
+        "F6",
+        ready,
+        "CLI add-item/references command surface is absent; section-qualified custom "
+        "fields exist in the v2 host model, so op:// references cannot be created "
+        "through the CLI",
+    )
     vault = make_vault(ctx)
     result = pty(
         ctx,
@@ -468,7 +522,13 @@ def t1_f6_02(ctx):
 @e2e_test("T1_F6_03", 1, ["F6"], "Multiple URLs per login match across primary and secondary URLs")
 def t1_f6_03(ctx):
     ready = cli_supports(ctx, "add-item")
-    gate(ctx, "F6", ready, "multi-URL item fields are absent from the CLI item model")
+    gate(
+        ctx,
+        "F6",
+        ready,
+        "CLI add-item command is absent; multi-URL fields exist in the v2 host item "
+        "model but cannot be created through the CLI",
+    )
     vault = make_vault(ctx, ["Corp SSO"])
     from .support import edit_url, match_logins
 
@@ -482,7 +542,13 @@ def t1_f6_03(ctx):
 @e2e_test("T1_F6_04", 1, ["F6"], "Tags and favorite metadata survive KDBX save/reload and backup")
 def t1_f6_04(ctx):
     ready = cli_supports(ctx, "add-item")
-    gate(ctx, "F6", ready, "tags/favorite metadata are absent from the v1 item model")
+    gate(
+        ctx,
+        "F6",
+        ready,
+        "CLI add-item command is absent; tags/favorite metadata are part of the v2 "
+        "host item model, so the KDBX round trip cannot be driven from the CLI",
+    )
     vault = make_vault(ctx, ["GitHub"])
     backup = ctx.temp_dir / "tags-backup.ll"
     result = pty(
@@ -505,7 +571,8 @@ def t1_f6_05(ctx):
         ctx,
         "F6",
         ready,
-        "baseline plan-import-1pux rejects non-basic-login archives wholesale",
+        "CLI plan-import-1pux rejects non-basic-login archives wholesale "
+        "(command-surface gap); the v2 item model exists in the host",
     )
     payload = plan.json()
     assert payload["report"]["items"] >= 4, payload
@@ -538,13 +605,18 @@ def t1_f6_06(ctx):
 # ---------------------------------------------------------------------------
 
 
-@e2e_test("T1_F7_01", 1, ["F7"], "One desktop unlock makes the extension ready without a second window")
+@e2e_test("T1_F7_01", 1, ["F7"], "Capability probe: desktop and extension share one unlocked session")
 def t1_f7_01(ctx):
     ready = f7_shared_ipc_ready(ctx)
     gate(ctx, "F7", ready, "desktop shared-IPC broker is absent; a separate host window is still spawned")
+    if not desktop_runtime_available(ctx):
+        gate(ctx, "F7", False, "validation blocked: xvfb-run unavailable; desktop launch not exercised")
     vault = make_vault(ctx, ["Alpha"])
     assert desktop_binary_starts(ctx, vault["path"])
+    text = desktop_sources(ctx)
+    assert "此窗口与浏览器共享已解锁的金库会话" in text
     assert not sources_contain(ctx, "internal/desktop/*.go", "此窗口持有独立金库会话")
+    assert sources_contain(ctx, "internal/desktop/ipc_broker.go", "startBrowserBroker")
 
 
 @e2e_test("T1_F7_02", 1, ["F7"], "Desktop lock immediately invalidates extension capabilities")
@@ -582,22 +654,34 @@ def t1_f7_05(ctx):
 # ---------------------------------------------------------------------------
 
 
-@e2e_test("T1_F8_01", 1, ["F8"], "Sidebar filters, tags, favorites and multi-vault switching")
+@e2e_test("T1_F8_01", 1, ["F8"], "Capability probe: v2 navigation exposes favorites/all/trash")
 def t1_f8_01(ctx):
     ready = f8_desktop_v2_ready(ctx)
-    gate(ctx, "F8", ready, "v2 sidebar (收藏夹/所有条目/最近删除) is absent from the desktop source")
+    gate(ctx, "F8", ready, "v2 sidebar (favorites/all/recently-deleted) is absent from the desktop source")
+    if not desktop_runtime_available(ctx):
+        gate(ctx, "F8", False, "validation blocked: xvfb-run unavailable; desktop launch not exercised")
     vault = make_vault(ctx, ["Jira", "Runbook"])
     assert desktop_binary_starts(ctx, vault["path"])
     text = desktop_sources(ctx)
-    assert "收藏夹" in text
+    assert all(marker in text for marker in ("navFavorites", "navAllItems", "navRecentlyDelete"))
+    assert "收藏" in text and "最近删除" in text
 
 
 @e2e_test("T1_F8_02", 1, ["F8"], "Full item editor and random/memorable/PIN password generator")
 def t1_f8_02(ctx):
-    ready = f8_desktop_v2_ready(ctx) and cli_supports(ctx, "add-item")
-    gate(ctx, "F8", ready, "full v2 editor and generator panel are absent")
+    # The desktop v2 editor and generator ship in internal/desktop.  The CLI has
+    # no add-item command; that command-surface gap must never be read as
+    # "the native v2 editor/model is absent".
+    ready = f8_desktop_v2_ready(ctx) and f8_v2_editor_ready(ctx)
+    gate(
+        ctx,
+        "F8",
+        ready,
+        "desktop v2 item editor or random/memorable/PIN generator is absent (CLI add-item is a separate command-surface gap)",
+    )
     text = desktop_sources(ctx)
     assert "生成器" in text or "generator" in text.lower()
+    assert all(mode in text for mode in ("ModeRandom", "ModeMemorable", "ModePIN"))
 
 
 @e2e_test("T1_F8_03", 1, ["F8"], "Full-text search covers title, username, URL, notes and tags")

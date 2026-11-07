@@ -1,7 +1,7 @@
 // External end-to-end acceptance: actual extension action, native messaging,
 // MyGo UI input, and a controlled HTTPS document. No product test bypasses.
 import { createRequire } from "node:module";
-import { readFileSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:https";
 import { createHash, X509Certificate } from "node:crypto";
@@ -30,6 +30,10 @@ const { chromium } = process.env.LOCKLARK_TEST_PLAYWRIGHT
   : require("playwright");
 const go = process.env.LOCKLARK_GO || "go";
 const host = process.env.LOCKLARK_BROWSER_HOST;
+const browserName = process.env.LOCKLARK_TEST_BROWSER === "edge" ? "edge" : "chromium";
+const browserExecutable = process.env.LOCKLARK_TEST_BROWSER_EXECUTABLE;
+if (browserName === "edge")
+  assert(browserExecutable && browserExecutable.startsWith("/"), "Edge requires an explicit absolute executable path");
 assert(
   host && process.env.DISPLAY,
   "A built native host and real X display are required",
@@ -156,7 +160,7 @@ try {
       "run",
       "./cmd/locklark-browser-register",
       "--browser",
-      "chrome",
+      browserName === "edge" ? "edge" : "chrome",
       "--host",
       resolve(host),
       "--output",
@@ -170,7 +174,8 @@ try {
   const extension = join(root, "browser-extension/dist/chromium");
   browser = await chromium.launchPersistentContext(profile, {
     headless: false,
-    channel: "chromium",
+    channel: browserName === "edge" ? undefined : "chromium",
+    ...(browserExecutable ? { executablePath: browserExecutable } : {}),
     viewport: { width: 1100, height: 700 },
     args: [
       "--no-sandbox",
@@ -307,6 +312,19 @@ try {
     };
     return {
       insertText: (text) => call("Input.insertText", { text }),
+      attribute: (selector, name) => evaluate(
+        "document.querySelector(" + JSON.stringify(selector) + ")?.getAttribute(" + JSON.stringify(name) + ")",
+      ),
+      setFile: async (selector, path) => {
+        const { root } = await call("DOM.getDocument");
+        const { nodeId } = await call("DOM.querySelector", { nodeId: root.nodeId, selector });
+        assert(nodeId, "Attachment file control unavailable");
+        await call("DOM.setFileInputFiles", { nodeId, files: [path] });
+      },
+      pressKey: async (key, keyCode) => {
+        for (const type of ["keyDown", "keyUp"])
+          await call("Input.dispatchKeyEvent", { type, key, code: key, windowsVirtualKeyCode: keyCode });
+      },
       selectAll: async () => {
         for (const type of ["keyDown", "keyUp"])
           await call("Input.dispatchKeyEvent", {
@@ -456,10 +474,31 @@ try {
   phase("native-pair");
   input([{ click_label: "确认连接此扩展" }]);
   if (process.env.LOCKLARK_TEST_POPUP_VAULT) {
+    const downloadDirectory = join(state, "attachment-downloads");
+    mkdirSync(downloadDirectory, { recursive: true });
+    const fileName = "popup-attachment.bin";
+    const sourcePath = join(state, fileName);
+    const content = Buffer.alloc(2 << 20);
+    for (let index = 0; index < content.length; index++) content[index] = index % 251;
+    writeFileSync(sourcePath, content, { mode: 0o600 });
+    const digest = createHash("sha256").update(content).digest("hex");
+    content.fill(0);
+    const downloadSession = await browser.newCDPSession(page);
+    await downloadSession.send("Browser.setDownloadBehavior", {
+      behavior: "allow", downloadPath: downloadDirectory,
+    });
     await acceptPopupVault({
       openPopup, fixture, phase, eventually,
       observe: vaultObserver({ go, root, env, state }),
+      attachment: {
+        sourcePath, fileName,
+        downloaded: () => {
+          const path = join(downloadDirectory, fileName);
+          return existsSync(path) && createHash("sha256").update(readFileSync(path)).digest("hex") === digest;
+        },
+      },
     });
+    await downloadSession.detach();
   }
   await blank();
   popup = await openPopup();
@@ -714,8 +753,8 @@ try {
 }
 console.log(
   process.env.LOCKLARK_TEST_BROWSER_PARITY
-    ? "PASS: real Chromium quick pairing, inline fill, automatic sign-in, Passkey creation/assertion, relying-party signature verification and abort"
-    : "PASS: real Chromium fill/save/update/OTP and Passkey with native approval and private diagnostics",
+    ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} quick pairing, inline fill, automatic sign-in, Passkey creation/assertion, relying-party signature verification and abort`
+    : `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} fill/save/update/OTP and Passkey with native approval and private diagnostics`,
 );
 console.log("Private synthetic artifacts: " + state);
 

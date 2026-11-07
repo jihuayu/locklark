@@ -1,7 +1,8 @@
 // Real popup input and native vault round-trip; synthetic fixture values only.
 import assert from "node:assert/strict";
+import { acceptPopupCompletion } from "./browser_popup_completion_acceptance.mjs";
 
-export async function acceptPopupVault({ openPopup, fixture, phase, observe, eventually }) {
+export async function acceptPopupVault({ openPopup, fixture, phase, observe, eventually, attachment }) {
   const popup = await openPopup();
   const fill = async (name, value) => {
     phase("popup-vault:field-" + name);
@@ -72,11 +73,15 @@ export async function acceptPopupVault({ openPopup, fixture, phase, observe, eve
     await eventually(async () => await popup.text(notes + " .field-value") === fixture.SaveValue,
       "Editing metadata lost notes");
     await popup.click(notes + ' [data-action="toggle-reveal"]');
+    if (attachment) await acceptPopupCompletion({ popup, fixture, phase, eventually, attachment, itemID: row.id });
     phase("popup-vault:complete");
     console.log("PASS: real popup create, native masked detail, audited reveal, metadata edit and preserved password/notes");
   } catch (error) {
     const toast = await popup.text("#toast").catch(() => "");
+    const attachmentStatus = await popup.text("#attachment-status").catch(() => "");
     console.log("Popup vault diagnostic:", JSON.stringify({
+      attachmentRefused: attachmentStatus === "附件下载未完成",
+      attachmentDelivered: attachmentStatus === "附件已交给浏览器保存",
       saved: toast === "已保存",
       saveRefused: toast?.includes("保存未完成") === true,
       detailRefused: toast === "无法读取条目详情",

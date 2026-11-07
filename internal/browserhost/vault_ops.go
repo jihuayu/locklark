@@ -263,6 +263,13 @@ func (c *Connection) handleItemGet(r Request) error {
 	for _, u := range it.URLs {
 		detail.URLs = append(detail.URLs, BrowserItemURL{Label: u.Label, URL: u.URL, Primary: u.Primary, MatchMode: u.MatchMode})
 	}
+	// Attachment metadata only: the durable body never enters a detail frame.
+	for _, att := range it.Attachments {
+		if !attachmentSelector(att.ID) || !validAttachmentFileName(att.FileName) {
+			continue
+		}
+		detail.Attachments = append(detail.Attachments, *attachmentSummary(att))
+	}
 	if len(detail.URLs) == 0 && it.URL != "" {
 		detail.URLs = []BrowserItemURL{{URL: it.URL, Primary: true, MatchMode: "origin"}}
 	}
@@ -274,7 +281,7 @@ func (c *Connection) handleItemGet(r Request) error {
 			if concealed {
 				value = ""
 			}
-			section.Fields = append(section.Fields, BrowserCustomField{ID: f.ID, Label: f.Label, Type: string(f.Type), Value: value, Concealed: concealed, Purpose: f.Purpose})
+			section.Fields = append(section.Fields, BrowserCustomField{ID: f.ID, Label: f.Label, Type: string(f.Type), Value: value, Concealed: concealed, Purpose: f.Purpose, HasValue: f.Value != ""})
 		}
 		detail.Sections = append(detail.Sections, section)
 	}
@@ -437,10 +444,18 @@ func decodeMutation(raw string) (BrowserItemMutation, error) {
 	if !allowedCategories[m.Category] {
 		return BrowserItemMutation{}, ErrProtocol
 	}
-	// This protocol has no attachment transport, so a document created here
-	// could not carry its file and would lose data on the next rewrite.
-	if m.Category == "document" {
+	// Explicit clears are bounded, unique stable keys. Whether the target
+	// exists, is concealed and does not contradict a new value is checked
+	// against the authenticated merged item below.
+	if len(m.ClearFields) > 100 {
 		return BrowserItemMutation{}, ErrProtocol
+	}
+	seenClear := map[string]bool{}
+	for _, key := range m.ClearFields {
+		if seenClear[key] || !validClearKey(key) {
+			return BrowserItemMutation{}, ErrProtocol
+		}
+		seenClear[key] = true
 	}
 	if strings.TrimSpace(m.Title) == "" || len(m.Title) > 1024 || !utf8.ValidString(m.Title) {
 		return BrowserItemMutation{}, ErrProtocol
@@ -473,16 +488,8 @@ func mergeMeta(meta *personal.V2ItemMeta, m BrowserItemMutation) {
 	} else if m.URL != nil && *m.URL != "" {
 		meta.URLs = []personal.V2ItemURL{{URL: *m.URL, Primary: true, MatchMode: "origin"}}
 	}
-	if m.Sections != nil {
-		meta.Sections = nil
-		for _, sec := range m.Sections {
-			out := personal.V2Section{ID: sec.ID, Title: sec.Title}
-			for _, f := range sec.Fields {
-				out.Fields = append(out.Fields, personal.V2CustomField{ID: f.ID, Label: f.Label, Type: f.Type, Value: f.Value, Concealed: f.Concealed, Purpose: f.Purpose})
-			}
-			meta.Sections = append(meta.Sections, out)
-		}
-	}
+	// Sections are applied through the mutation-specific inputs so an omitted
+	// value preserves the durable value under the same stable field id.
 	if m.CreditCard != nil {
 		if meta.CreditCard == nil {
 			meta.CreditCard = &personal.V2CreditCard{}
@@ -587,7 +594,7 @@ func v2ItemFromMutation(base vault.Item, m BrowserItemMutation, create bool) (va
 		meta = *personal.V2MetaFromItem(base)
 	}
 	mergeMeta(&meta, m)
-	item, err := personal.V2ItemApplyMeta(base, &meta)
+	item, err := personal.V2ItemApplyMutation(base, &meta, mutationSections(m.Sections))
 	if err != nil {
 		return vault.Item{}, err
 	}
@@ -628,6 +635,15 @@ func v2ItemFromMutation(base vault.Item, m BrowserItemMutation, create bool) (va
 		if card := item.CreditCard; card != nil && card.Number != "" && last4(card.Number) == "" {
 			return vault.Item{}, ErrProtocol
 		}
+	}
+	if item.EffectiveCategory() == vault.CategoryDocument && (create || base.EffectiveCategory() != vault.CategoryDocument) {
+		// No atomic document+file creation exists on this channel, so an empty
+		// document is never created. Editing an existing document is allowed
+		// because the whole-item mutation retains its file and attachments.
+		return vault.Item{}, ErrProtocol
+	}
+	if err := applyClearFields(&item, m); err != nil {
+		return vault.Item{}, err
 	}
 	if !vault.ValidNotes(item.Notes) {
 		return vault.Item{}, ErrProtocol
@@ -886,4 +902,113 @@ func expiryParts(expiry string) (month, year, short string) {
 		return "", "", ""
 	}
 	return parts[1], parts[0], parts[0][2:]
+}
+
+// validClearKey accepts only the two stable explicit-clear key shapes:
+// "notes" and "section:<section id>:<field id>".
+func validClearKey(key string) bool {
+	if key == "notes" {
+		return true
+	}
+	if !strings.HasPrefix(key, "section:") || len(key) > 600 {
+		return false
+	}
+	parts := strings.Split(key, ":")
+	if len(parts) != 3 || parts[1] == "" || parts[2] == "" || len(parts[1]) > 256 || len(parts[2]) > 256 {
+		return false
+	}
+	for _, c := range []byte(parts[1] + parts[2]) {
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_' || c == '.' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// mutationSections converts the mutation-only inputs into the personal layer
+// projection. Nil input stays nil so omitted sections preserve everything.
+func mutationSections(in []BrowserItemMutationSection) []personal.V2SectionInput {
+	if in == nil {
+		return nil
+	}
+	out := make([]personal.V2SectionInput, 0, len(in))
+	for _, sec := range in {
+		section := personal.V2SectionInput{ID: sec.ID, Title: sec.Title}
+		for _, f := range sec.Fields {
+			var value *string
+			if f.Value != nil {
+				v := *f.Value
+				value = &v
+			}
+			section.Fields = append(section.Fields, personal.V2CustomFieldInput{ID: f.ID, Label: f.Label, Type: f.Type, Value: value, Concealed: f.Concealed, Purpose: f.Purpose})
+		}
+		out = append(out, section)
+	}
+	return out
+}
+
+func mutationFieldValue(in []BrowserItemMutationSection, sectionID, fieldID string) *string {
+	for _, sec := range in {
+		if !strings.EqualFold(sec.ID, sectionID) {
+			continue
+		}
+		for _, f := range sec.Fields {
+			if strings.EqualFold(f.ID, fieldID) {
+				return f.Value
+			}
+		}
+	}
+	return nil
+}
+
+func concealedVaultField(f vault.CustomField) bool {
+	return f.Protected || f.Type == vault.FieldTypeConcealed || f.Type == vault.FieldTypeOTP || f.Type == vault.FieldTypeTOTP
+}
+
+// clearSectionField empties one concealed custom field on the merged item.
+// Unknown and non-concealed targets are refused.
+func clearSectionField(item *vault.Item, sectionID, fieldID string) bool {
+	for s := range item.Sections {
+		if !strings.EqualFold(item.Sections[s].ID, sectionID) {
+			continue
+		}
+		for f := range item.Sections[s].Fields {
+			field := &item.Sections[s].Fields[f]
+			if !strings.EqualFold(field.ID, fieldID) {
+				continue
+			}
+			if !concealedVaultField(*field) {
+				return false
+			}
+			field.Value = ""
+			return true
+		}
+	}
+	return false
+}
+
+// applyClearFields performs the explicit clears after merge, so the clear lands
+// in the same whole-item transaction as the rest of the mutation.
+func applyClearFields(item *vault.Item, m BrowserItemMutation) error {
+	for _, key := range m.ClearFields {
+		if key == "notes" {
+			if m.Notes != nil && *m.Notes != "" {
+				return ErrProtocol
+			}
+			item.Notes = ""
+			continue
+		}
+		parts := strings.Split(key, ":")
+		if len(parts) != 3 {
+			return ErrProtocol
+		}
+		if v := mutationFieldValue(m.Sections, parts[1], parts[2]); v != nil && *v != "" {
+			return ErrProtocol
+		}
+		if !clearSectionField(item, parts[1], parts[2]) {
+			return ErrProtocol
+		}
+	}
+	return nil
 }

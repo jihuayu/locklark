@@ -60,6 +60,16 @@ type Request struct {
 	DocumentID     string `json:"document_id,omitempty"`
 	ItemID         string `json:"item_id,omitempty"`
 	Revision       string `json:"revision,omitempty"`
+	// Attachment transport (capability attachments-v1). Size is a pointer so a
+	// zero-length file is distinguishable from an omitted field.
+	FileName     string `json:"file_name,omitempty"`
+	Size         *int64 `json:"size,omitempty"`
+	SHA256       string `json:"sha256,omitempty"`
+	MimeType     string `json:"mime_type,omitempty"`
+	TransferID   string `json:"transfer_id,omitempty"`
+	Offset       int64  `json:"offset,omitempty"`
+	Data         string `json:"data,omitempty"`
+	AttachmentID string `json:"attachment_id,omitempty"`
 
 	Length      int   `json:"length,omitempty"`
 	Digits      *bool `json:"digits,omitempty"`
@@ -103,7 +113,7 @@ func (r Request) valid() bool {
 	switch r.Type {
 	case "save-new", "save-update", "commit-ready", "cancel-save", "otp", "otp-ack", "cancel-otp", "stage-save", "pending-save", "commit-staged-save", "dismiss-save", "generate":
 	default:
-		if r.payload != nil || r.WindowID != 0 || r.RequestID != "" || r.Nonce != "" || r.StageID != "" || r.Mode != "" || r.Title != "" || r.NeverForOrigin || r.Length != 0 || r.Digits != nil || r.Symbols != nil || r.SaveHistory != nil {
+		if r.payload != nil || r.WindowID != 0 || r.RequestID != "" || r.Nonce != "" || r.StageID != "" || r.Mode != "" || r.Title != "" || r.NeverForOrigin || r.Length != 0 && !attachmentReadType(r.Type) || r.Digits != nil || r.Symbols != nil || r.SaveHistory != nil {
 			return false
 		}
 	}
@@ -119,7 +129,7 @@ func (r Request) valid() bool {
 	if (r.Type == "match" || r.Type == "fill") && r.Category != "" && r.Category != "login" && r.Category != "identity" && r.Category != "credit_card" {
 		return false
 	}
-	if r.Type != "generate" && (r.Length != 0 || r.Digits != nil || r.Symbols != nil || r.SaveHistory != nil) {
+	if r.Type != "generate" && !attachmentReadType(r.Type) && (r.Length != 0 || r.Digits != nil || r.Symbols != nil || r.SaveHistory != nil) {
 		return false
 	}
 	switch r.Type {
@@ -187,6 +197,28 @@ func (r Request) valid() bool {
 		}
 		_, e := origin.Parse(r.Origin)
 		return e == nil
+	case "attachment-begin":
+		return token.MatchString(r.Capability) && token.MatchString(r.ItemID) && revision.MatchString(r.Revision) &&
+			validAttachmentFileName(r.FileName) && r.Size != nil && *r.Size >= 0 && *r.Size <= MaxAttachmentBytes &&
+			revision.MatchString(r.SHA256) && validAttachmentMime(r.MimeType) && r.AttachmentID == "" &&
+			r.Length == 0 && r.Origin == "" && r.TabID == 0 && r.DocumentID == "" &&
+			r.TransferID == "" && r.Offset == 0 && r.Data == ""
+	case "attachment-chunk":
+		return token.MatchString(r.Capability) && token.MatchString(r.TransferID) && r.Offset >= 0 && r.Data != "" &&
+			len(r.Data) <= maxAttachmentChunkEncoded && attachmentFrameIdle(r)
+	case "attachment-commit", "attachment-cancel":
+		return token.MatchString(r.Capability) && token.MatchString(r.TransferID) && attachmentFrameIdle(r) &&
+			r.Offset == 0 && r.Data == ""
+	case "attachment-read":
+		return token.MatchString(r.Capability) && token.MatchString(r.ItemID) && revision.MatchString(r.Revision) &&
+			attachmentSelector(r.AttachmentID) && r.Offset >= 0 && r.Length >= 1 && r.Length <= maxAttachmentChunk &&
+			r.TransferID == "" && r.Data == "" && r.FileName == "" && r.Size == nil && r.SHA256 == "" &&
+			r.MimeType == "" && r.Origin == "" && r.TabID == 0 && r.DocumentID == ""
+	case "attachment-remove":
+		return token.MatchString(r.Capability) && token.MatchString(r.ItemID) && revision.MatchString(r.Revision) &&
+			attachmentSelector(r.AttachmentID) && r.TransferID == "" && r.Data == "" && r.Offset == 0 && r.Length == 0 &&
+			r.FileName == "" && r.Size == nil && r.SHA256 == "" && r.MimeType == "" && r.Origin == "" &&
+			r.TabID == 0 && r.DocumentID == ""
 	case "hello":
 		return r.Capability == "" && r.Origin == "" && r.TabID == 0 && r.DocumentID == "" && r.ItemID == "" && r.Revision == ""
 	case "cancel":
@@ -313,6 +345,17 @@ type Response struct {
 
 	Profiles    []BrowserProfileSummary `json:"profiles,omitempty"`
 	ProfileFill *BrowserProfileFill     `json:"profile_fill,omitempty"`
+
+	// Attachment transport. Attachment metadata never carries the file body;
+	// Data holds at most one 64KiB decoded read chunk in base64.
+	Attachment   *BrowserAttachment `json:"attachment,omitempty"`
+	AttachmentID string             `json:"attachment_id,omitempty"`
+	TransferID   string             `json:"transfer_id,omitempty"`
+	Offset       int64              `json:"offset,omitempty"`
+	NextOffset   int64              `json:"next_offset,omitempty"`
+	Size         int64              `json:"size,omitempty"`
+	Done         bool               `json:"done,omitempty"`
+	Data         string             `json:"data,omitempty"`
 }
 
 // A legitimate login may have an empty username. Fill responses always carry
@@ -361,6 +404,58 @@ func (r Response) MarshalJSON() ([]byte, error) {
 	// Map values are shared with the caller. Wipe them after this serialization
 	// whether it succeeds or fails, then drop the references.
 	defer r.Clear()
+	// Attachment frames are fixed shapes. Metadata never serializes a file body
+	// and size/offset values are emitted even when they are zero.
+	switch r.Type {
+	case "attachment-transfer":
+		return json.Marshal(struct {
+			V                int    `json:"v"`
+			ID               string `json:"id,omitempty"`
+			Type             string `json:"type"`
+			TransferID       string `json:"transfer_id"`
+			Offset           int64  `json:"offset"`
+			Size             int64  `json:"size"`
+			ExpiresInSeconds int    `json:"expires_in_seconds"`
+		}{r.V, r.ID, r.Type, r.TransferID, r.Offset, r.Size, r.ExpiresInSeconds})
+	case "attachment-cancelled":
+		return json.Marshal(struct {
+			V          int    `json:"v"`
+			ID         string `json:"id,omitempty"`
+			Type       string `json:"type"`
+			TransferID string `json:"transfer_id"`
+		}{r.V, r.ID, r.Type, r.TransferID})
+	case "attachment-saved":
+		return json.Marshal(struct {
+			V          int                `json:"v"`
+			ID         string             `json:"id,omitempty"`
+			Type       string             `json:"type"`
+			ItemID     string             `json:"item_id"`
+			Revision   string             `json:"revision"`
+			Attachment *BrowserAttachment `json:"attachment"`
+		}{r.V, r.ID, r.Type, r.ItemID, r.Revision, r.Attachment})
+	case "attachment-data":
+		return json.Marshal(struct {
+			V          int                `json:"v"`
+			ID         string             `json:"id,omitempty"`
+			Type       string             `json:"type"`
+			ItemID     string             `json:"item_id"`
+			Revision   string             `json:"revision"`
+			Attachment *BrowserAttachment `json:"attachment"`
+			Offset     int64              `json:"offset"`
+			NextOffset int64              `json:"next_offset"`
+			Done       bool               `json:"done"`
+			Data       string             `json:"data"`
+		}{r.V, r.ID, r.Type, r.ItemID, r.Revision, r.Attachment, r.Offset, r.NextOffset, r.Done, r.Data})
+	case "attachment-removed":
+		return json.Marshal(struct {
+			V            int    `json:"v"`
+			ID           string `json:"id,omitempty"`
+			Type         string `json:"type"`
+			ItemID       string `json:"item_id"`
+			Revision     string `json:"revision"`
+			AttachmentID string `json:"attachment_id"`
+		}{r.V, r.ID, r.Type, r.ItemID, r.Revision, r.AttachmentID})
+	}
 	r.Code = ""
 	if r.Type != "passkey-result" {
 		r.Credential = ""
@@ -552,6 +647,10 @@ func (r Response) MarshalJSON() ([]byte, error) {
 	if r.Type != "profiles" {
 		r.Profiles = nil
 	}
+	if r.Attachment != nil || r.AttachmentID != "" || r.TransferID != "" || r.Size != 0 || r.Done || r.Data != "" || r.NextOffset != 0 {
+		r.Attachment, r.AttachmentID, r.TransferID = nil, "", ""
+		r.Offset, r.NextOffset, r.Size, r.Done, r.Data = 0, 0, 0, false, ""
+	}
 	var candidates []candidate
 	if len(r.Candidates) > 0 {
 		candidates = make([]candidate, len(r.Candidates))
@@ -690,6 +789,7 @@ func (r *Request) Clear() {
 		r.payload.clear()
 		r.payload = nil
 		r.ItemJSON = ""
+		r.Data = ""
 	}
 }
 
@@ -829,6 +929,14 @@ func ReadRequest(reader io.Reader) (Request, error) {
 		StateAction    string  `json:"state_action"`
 		ItemJSON       string  `json:"item_json"`
 		ProfileKind    string  `json:"profile_kind"`
+		FileName       string  `json:"file_name"`
+		Size           *int64  `json:"size"`
+		SHA256         string  `json:"sha256"`
+		MimeType       string  `json:"mime_type"`
+		TransferID     string  `json:"transfer_id"`
+		Offset         int64   `json:"offset"`
+		Data           string  `json:"data"`
+		AttachmentID   string  `json:"attachment_id"`
 	}
 	dec = json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
@@ -845,6 +953,8 @@ func ReadRequest(reader io.Reader) (Request, error) {
 		Query: wire.Query, VaultID: wire.VaultID, Tag: wire.Tag, StateFilter: wire.StateFilter,
 		FavoritesOnly: wire.FavoritesOnly, Field: wire.Field, FieldAction: wire.FieldAction,
 		StateAction: wire.StateAction, ItemJSON: wire.ItemJSON, ProfileKind: wire.ProfileKind,
+		FileName: wire.FileName, Size: wire.Size, SHA256: wire.SHA256, MimeType: wire.MimeType,
+		TransferID: wire.TransferID, Offset: wire.Offset, Data: wire.Data, AttachmentID: wire.AttachmentID,
 	}
 	r.NeverForOrigin = wire.NeverForOrigin != nil && *wire.NeverForOrigin
 	if wire.IncludeHIBP != nil {
@@ -917,6 +1027,16 @@ func requestKeys(kind string) (required, optional []string, ok bool) {
 	switch kind {
 	case "hello":
 		return base, nil, true
+	case "attachment-begin":
+		return append(base, "capability", "item_id", "revision", "file_name", "size", "sha256"), []string{"mime_type"}, true
+	case "attachment-chunk":
+		return append(base, "capability", "transfer_id", "offset", "data"), nil, true
+	case "attachment-commit", "attachment-cancel":
+		return append(base, "capability", "transfer_id"), nil, true
+	case "attachment-read":
+		return append(base, "capability", "item_id", "revision", "attachment_id", "offset", "length"), nil, true
+	case "attachment-remove":
+		return append(base, "capability", "item_id", "revision", "attachment_id"), nil, true
 	case "cancel":
 		return append(base, "capability"), nil, true
 	case "passkey-create", "passkey-get":

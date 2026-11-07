@@ -32,7 +32,8 @@ if (typeof importScripts === "function") importScripts("core.js");
     detailCache = new Map(),
     pendingOpenAndFill = null,
     openAndFillTimer = null,
-    hostCapabilities = [];
+    hostCapabilities = [],
+    attachmentUpload = null;
   const STAGED_TTL = 5 * 60 * 1000,
     LAST_FILLED_TTL = 60 * 1000,
     HISTORY_LIMIT = 20,
@@ -315,7 +316,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       fields.push(field);
     };
     for (const field of core.flattenItemFields({ ...item, sections: [] }).slice(0, 200)) add(field);
-    const detail = { ...meta, notes: "", username: "", fields, sections: [], identity: null, credit_card: null };
+    const detail = { ...meta, notes: "", username: "", fields, sections: [], attachments: [], identity: null, credit_card: null };
     detail.username = boundedString(item.username);
     if (detail.username)
       add({ id: "username", label: "用户名", type: "text", value: detail.username, concealed: false });
@@ -417,6 +418,24 @@ if (typeof importScripts === "function") importScripts("core.js");
           };
         }),
       }));
+    if (Array.isArray(item.attachments)) {
+      const seenAttachments = new Set();
+      for (const entry of item.attachments.slice(0, 32)) {
+        if (!core.validAttachmentMetadata(entry)) continue;
+        if (seenAttachments.has(entry.id)) continue;
+        seenAttachments.add(entry.id);
+        const view = {
+          id: entry.id,
+          file_name: core.safeFileName(entry.file_name),
+          size: entry.size,
+          sha256: entry.sha256,
+        };
+        if (typeof entry.mime_type === "string" && entry.mime_type)
+          view.mime_type = entry.mime_type;
+        if (typeof entry.protected === "boolean") view.protected = entry.protected;
+        detail.attachments.push(view);
+      }
+    }
     return detail;
   }
   function currentSiteFlags() {
@@ -463,6 +482,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       preferredItemId: multiStepFor(context?.tabId, context?.origin)?.itemId || "",
       preferredTitle: multiStepFor(context?.tabId, context?.origin)?.title || "",
       step: multiStepFor(context?.tabId, context?.origin)?.stepCompleted || "",
+      attachmentsSupported: !!capability && core.attachmentCapability(hostCapabilities),
       vaultItems: vaultItems.map((item) => ({ ...item })),
       pending: !!pending || !!pendingOTP || !!pendingPasskey,
       otpPending: !!pendingOTP,
@@ -573,6 +593,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     hostCapabilities = [];
     vaultItems = [];
     detailCache.clear();
+    attachmentUpload = null;
     clearPendingOpenAndFill();
     matchCategory = "login";
     multiStepSessions.clear();
@@ -1105,6 +1126,12 @@ if (typeof importScripts === "function") importScripts("core.js");
         "item-state": "saved",
         generate: "generated",
         "fill-profile": "profile-fill",
+        "attachment-begin": "attachment-transfer",
+        "attachment-chunk": "attachment-transfer",
+        "attachment-commit": "attachment-saved",
+        "attachment-cancel": "attachment-cancelled",
+        "attachment-read": "attachment-data",
+        "attachment-remove": "attachment-removed",
         watchtower: "watchtower",
       }[call.type];
       if (
@@ -3235,6 +3262,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       saveBlocked: unconfirmedSave,
       origin: context?.origin || "",
       site,
+      attachmentsSupported: !!capability && core.attachmentCapability(hostCapabilities),
       watchtower: watchtowerReport,
     };
   }
@@ -3249,8 +3277,327 @@ if (typeof importScripts === "function") importScripts("core.js");
     );
     return true;
   });
+  const ATTACHMENT_REQUESTS = new Set([
+    "attachment-begin",
+    "attachment-chunk",
+    "attachment-commit",
+    "attachment-cancel",
+    "attachment-read",
+    "attachment-remove",
+  ]);
+  const ATTACHMENT_RESPONSES = {
+    "attachment-begin": "attachment-transfer",
+    "attachment-chunk": "attachment-transfer",
+    "attachment-commit": "attachment-saved",
+    "attachment-cancel": "attachment-cancelled",
+    "attachment-read": "attachment-data",
+    "attachment-remove": "attachment-removed",
+  };
+  function attachmentRefusal() {
+    const error = Error("refused");
+    error.keepStatus = true;
+    return error;
+  }
+  function attachmentMetadataView(meta) {
+    const view = {
+      id: meta.id,
+      file_name: core.safeFileName(meta.file_name),
+      size: meta.size,
+      sha256: meta.sha256,
+    };
+    if (typeof meta.mime_type === "string" && meta.mime_type)
+      view.mime_type = meta.mime_type;
+    if (typeof meta.protected === "boolean") view.protected = meta.protected;
+    return view;
+  }
+  function attachmentTransferView(response) {
+    return {
+      transfer_id: response.transfer_id,
+      offset: response.offset,
+      size: response.size,
+      expires_in_seconds: response.expires_in_seconds,
+    };
+  }
+  function attachmentUploadExpiry(expiresInSeconds) {
+    const seconds = Number.isSafeInteger(expiresInSeconds) ? expiresInSeconds : 0;
+    return (
+      Date.now() +
+      Math.max(1, Math.min(seconds, core.ATTACHMENT_TRANSFER_TTL_SECONDS)) * 1000
+    );
+  }
+  // Upload metadata is bounded by the host TTL: an orphan left by a closed
+  // popup or a pending begin can never block uploads forever.
+  function liveAttachmentUpload() {
+    if (attachmentUpload && attachmentUpload.expiresAt <= Date.now())
+      attachmentUpload = null;
+    return attachmentUpload;
+  }
+  function attachmentsSupported() {
+    return !!capability && core.attachmentCapability(hostCapabilities);
+  }
+  async function attachmentNative(type, fields) {
+    if (!attachmentsSupported()) {
+      status = "当前原生宿主不支持附件";
+      throw attachmentRefusal();
+    }
+    const response = await request(type, { capability, ...fields }, 30000);
+    if (
+      !core.validResponse(response) ||
+      response.type !== ATTACHMENT_RESPONSES[type]
+    )
+      throw attachmentRefusal();
+    return response;
+  }
+  async function attachmentOperation(message) {
+    if (!attachmentsSupported()) {
+      status = "当前原生宿主不支持附件";
+      throw attachmentRefusal();
+    }
+    const itemID = /^[a-f0-9]{32}$/.test(message.id || "");
+    const revision = /^[a-f0-9]{64}$/.test(message.revision || "");
+    switch (message.type) {
+      case "attachment-begin": {
+        const fileName = core.safeFileName(message.file_name);
+        const size = message.size;
+        if (
+          !itemID ||
+          !revision ||
+          !fileName ||
+          !Number.isSafeInteger(size) ||
+          size < 0 ||
+          size > core.ATTACHMENT_MAX_BYTES ||
+          typeof message.sha256 !== "string" ||
+          !/^[a-f0-9]{64}$/.test(message.sha256) ||
+          (message.mime_type !== undefined && !core.validMimeType(message.mime_type))
+        )
+          throw attachmentRefusal();
+        // Exactly one in-memory upload token per connection.
+        if (liveAttachmentUpload()) throw attachmentRefusal();
+        const response = await attachmentNative("attachment-begin", {
+          item_id: message.id,
+          revision: message.revision,
+          file_name: fileName,
+          size,
+          sha256: message.sha256,
+          ...(typeof message.mime_type === "string" && message.mime_type
+            ? { mime_type: message.mime_type }
+            : {}),
+        });
+        if (response.offset !== 0 || response.size !== size)
+          throw attachmentRefusal();
+        // A newer upload (or a cancel) may have claimed the slot while the
+        // begin was in flight; never resurrect over it.
+        if (liveAttachmentUpload()) throw attachmentRefusal();
+        attachmentUpload = {
+          itemId: message.id,
+          revision: message.revision,
+          transferId: response.transfer_id,
+          offset: response.offset,
+          size: response.size,
+          expiresAt: attachmentUploadExpiry(response.expires_in_seconds),
+        };
+        return { attachmentTransfer: attachmentTransferView(response) };
+      }
+      case "attachment-chunk": {
+        const active = liveAttachmentUpload();
+        const bytes = core.base64Decode(message.data, core.ATTACHMENT_CHUNK_BYTES);
+        if (
+          !active ||
+          message.transfer_id !== active.transferId ||
+          !Number.isSafeInteger(message.offset) ||
+          message.offset !== active.offset ||
+          !bytes ||
+          bytes.length < 1 ||
+          bytes.length > core.ATTACHMENT_CHUNK_BYTES ||
+          active.offset + bytes.length > active.size
+        ) {
+          if (bytes) bytes.fill(0);
+          throw attachmentRefusal();
+        }
+        const length = bytes.length;
+        let response;
+        try {
+          response = await attachmentNative("attachment-chunk", {
+            transfer_id: active.transferId,
+            offset: active.offset,
+            data: message.data,
+          });
+        } catch (error) {
+          if (attachmentUpload === active) attachmentUpload = null;
+          throw error;
+        } finally {
+          bytes.fill(0);
+        }
+        // A cancel or a newer upload may have replaced the record while the
+        // chunk was in flight; a late reply must not resurrect it.
+        if (attachmentUpload !== active) throw attachmentRefusal();
+        if (
+          response.transfer_id !== active.transferId ||
+          response.size !== active.size ||
+          response.offset !== active.offset + length
+        ) {
+          attachmentUpload = null;
+          throw attachmentRefusal();
+        }
+        attachmentUpload = {
+          itemId: active.itemId,
+          revision: active.revision,
+          transferId: active.transferId,
+          offset: response.offset,
+          size: response.size,
+          expiresAt: attachmentUploadExpiry(response.expires_in_seconds),
+        };
+        return { attachmentTransfer: attachmentTransferView(response) };
+      }
+      case "attachment-commit": {
+        const active = liveAttachmentUpload();
+        if (
+          !active ||
+          message.transfer_id !== active.transferId ||
+          active.offset !== active.size
+        )
+          throw attachmentRefusal();
+        let response;
+        try {
+          response = await attachmentNative("attachment-commit", {
+            transfer_id: active.transferId,
+          });
+        } catch (error) {
+          if (attachmentUpload === active) attachmentUpload = null;
+          throw error;
+        }
+        if (attachmentUpload === active) attachmentUpload = null;
+        if (
+          response.item_id !== active.itemId ||
+          !/^[a-f0-9]{64}$/.test(response.revision || "")
+        )
+          throw attachmentRefusal();
+        detailCache.clear();
+        vaultItems = [];
+        status = "附件已保存";
+        return {
+          attachmentSaved: {
+            item_id: response.item_id,
+            revision: response.revision,
+            attachment: attachmentMetadataView(response.attachment),
+          },
+        };
+      }
+      case "attachment-cancel": {
+        if (!/^[a-f0-9]{32}$/.test(message.transfer_id || ""))
+          throw attachmentRefusal();
+        const active = liveAttachmentUpload();
+        if (active && active.transferId === message.transfer_id)
+          attachmentUpload = null;
+        if (!active || message.transfer_id !== active.transferId)
+          return { attachmentCancelled: { transfer_id: message.transfer_id } };
+        const response = await attachmentNative("attachment-cancel", {
+          transfer_id: active.transferId,
+        });
+        return { attachmentCancelled: { transfer_id: response.transfer_id } };
+      }
+      case "attachment-read": {
+        if (
+          !itemID ||
+          !revision ||
+          !core.validAttachmentID(message.attachment_id) ||
+          !Number.isSafeInteger(message.offset) ||
+          message.offset < 0 ||
+          message.offset > core.ATTACHMENT_MAX_BYTES ||
+          !Number.isSafeInteger(message.length) ||
+          message.length < 1 ||
+          message.length > core.ATTACHMENT_CHUNK_BYTES
+        )
+          throw attachmentRefusal();
+        const response = await attachmentNative("attachment-read", {
+          item_id: message.id,
+          revision: message.revision,
+          attachment_id: message.attachment_id,
+          offset: message.offset,
+          length: message.length,
+        });
+        if (
+          response.item_id !== message.id ||
+          response.revision !== message.revision ||
+          response.attachment.id !== message.attachment_id ||
+          response.offset !== message.offset
+        )
+          throw attachmentRefusal();
+        const bytes = core.base64Decode(response.data, core.ATTACHMENT_CHUNK_BYTES);
+        const length = bytes ? bytes.length : -1;
+        if (bytes) bytes.fill(0);
+        if (
+          length < 0 ||
+          length > message.length ||
+          response.next_offset !== message.offset + length
+        )
+          throw attachmentRefusal();
+        // The bytes go straight back to the popup; they never enter the
+        // snapshot, detail cache, storage or logs.
+        return {
+          attachmentData: {
+            item_id: response.item_id,
+            revision: response.revision,
+            attachment: attachmentMetadataView(response.attachment),
+            offset: response.offset,
+            next_offset: response.next_offset,
+            done: response.done,
+            data: response.data,
+          },
+        };
+      }
+      case "attachment-remove": {
+        if (!itemID || !revision || !core.validAttachmentID(message.attachment_id))
+          throw attachmentRefusal();
+        const response = await attachmentNative("attachment-remove", {
+          item_id: message.id,
+          revision: message.revision,
+          attachment_id: message.attachment_id,
+        });
+        if (
+          response.item_id !== message.id ||
+          response.attachment_id !== message.attachment_id ||
+          !/^[a-f0-9]{64}$/.test(response.revision || "")
+        )
+          throw attachmentRefusal();
+        detailCache.clear();
+        vaultItems = [];
+        status = "附件已删除";
+        return {
+          attachmentRemoved: {
+            item_id: response.item_id,
+            revision: response.revision,
+            attachment_id: response.attachment_id,
+          },
+        };
+      }
+      default:
+        throw attachmentRefusal();
+    }
+  }
   api.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!core.validSender(sender, api.runtime)) return false;
+    if (!message || typeof message !== "object" || !ATTACHMENT_REQUESTS.has(message.type))
+      return false;
+    const requestEpoch = epoch;
+    attachmentOperation(message).then(
+      (payload) => sendResponse(payload),
+      (error) => {
+        if (!error?.keepStatus && requestEpoch === epoch)
+          status = "附件操作被拒绝";
+        sendResponse({
+          error: "refused",
+          status,
+          attachmentsSupported: attachmentsSupported(),
+        });
+      },
+    );
+    return true;
+  });
+  api.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (!core.validSender(sender, api.runtime)) return false;
+    if (message && typeof message === "object" && ATTACHMENT_REQUESTS.has(message.type))
+      return false;
     const requestEpoch = epoch;
     const run = async () => {
       if (!message || typeof message !== "object") throw Error("refused");

@@ -576,7 +576,11 @@
     );
   }
   function render(state) {
-
+    if (
+      state.connected === false &&
+      (attachmentBusy || attachmentTransfer || blobURLs.size)
+    )
+      clearAttachmentBuffers();
     lastState = state;
     query("#auto-login").checked = state.autoLogin !== false;
     query("#passkey-save").checked = state.offerSavePasskeys !== false;
@@ -843,6 +847,14 @@
     toastTimer = null,
     clipboardTimer = null,
     feedbackTimer = null,
+    editorHadSections = false,
+    editorConflict = "",
+    attachmentGeneration = 0,
+    attachmentBusy = false,
+    attachmentTransfer = "",
+    attachmentCancelled = false,
+    attachmentCommitting = false,
+    blobURLs = new Set(),
     els = null;
 
   function q(selector) {
@@ -871,6 +883,7 @@
     document.body.dataset.view = name;
   }
   function wipeDetail() {
+    clearAttachmentBuffers();
     if (els?.detailFields) els.detailFields.replaceChildren();
     if (els) {
       els.detailTitle.textContent = "";
@@ -895,6 +908,8 @@
     editorValues = null;
     editorMode = "";
     editorCategory = "";
+    editorHadSections = false;
+    editorConflict = "";
   }
   function wipeSensitiveViews() {
     wipeDetail();
@@ -1220,6 +1235,7 @@
     els.detailOtp.hidden = !detail.has_otp && !detail.otp_code;
     els.detailOpenFill.disabled = !(detail.urls || []).length;
     els.detailEdit.disabled = !!detail.readOnly;
+    renderAttachments(detail);
   }
   globalThis.addEventListener?.("pagehide", () => clearRevealedSecrets());
   if (typeof document !== "undefined")
@@ -1350,6 +1366,388 @@
       toast("打开并填充未完成");
     }
   }
+  /* ---------------------------------------------------------------- *
+   * Attachments. Vault state carries metadata only; file bytes exist  *
+   * for at most one user-initiated upload or download inside this     *
+   * page and are wiped on pagehide, lock or navigation.               *
+   * ---------------------------------------------------------------- */
+  function attachmentsSupported() {
+    return lastState?.attachmentsSupported === true;
+  }
+  function attachmentStatus(value) {
+    if (els?.attachmentStatus) els.attachmentStatus.textContent = value;
+  }
+  function clearAttachmentBuffers() {
+    attachmentGeneration++;
+    attachmentCancelled = true;
+    attachmentBusy = false;
+    const token = attachmentTransfer;
+    attachmentTransfer = "";
+    if (token)
+      void Promise.resolve(
+        api.runtime.sendMessage({ type: "attachment-cancel", transfer_id: token }),
+      ).catch(() => {});
+    for (const url of blobURLs) {
+      try {
+        globalThis.URL?.revokeObjectURL?.(url);
+      } catch {}
+    }
+    blobURLs.clear();
+    if (els?.attachmentList) els.attachmentList.replaceChildren();
+    if (els?.attachmentStatus) els.attachmentStatus.textContent = "";
+    if (els?.attachmentCancel) els.attachmentCancel.hidden = true;
+  }
+  function attachmentSizeLabel(size) {
+    if (!Number.isSafeInteger(size) || size < 0) return "";
+    if (size < 1024) return size + " B";
+    if (size < 1024 * 1024) return (size / 1024).toFixed(1) + " KiB";
+    return (size / (1024 * 1024)).toFixed(2) + " MiB";
+  }
+  function renderAttachments(detail) {
+    if (!els?.attachmentList) return;
+    const supported = attachmentsSupported();
+    const locked = !supported || !!detail?.readOnly;
+    if (els.attachmentUnsupported) els.attachmentUnsupported.hidden = supported;
+    if (els.attachmentFile) els.attachmentFile.disabled = locked || attachmentBusy;
+    if (els.attachmentUpload)
+      els.attachmentUpload.disabled = locked || attachmentBusy;
+    if (els.attachmentCancel) els.attachmentCancel.hidden = !attachmentBusy;
+    els.attachmentList.replaceChildren();
+    const list = Array.isArray(detail?.attachments) ? detail.attachments : [];
+    for (const meta of list) {
+      if (!meta || typeof meta !== "object") continue;
+      const row = document.createElement("div");
+      row.className = "attachment-row";
+      row.dataset.attachmentId = meta.id;
+      const name = document.createElement("span");
+      name.className = "attachment-name";
+      name.textContent = meta.file_name || "";
+      name.title = meta.file_name || "";
+      const size = document.createElement("span");
+      size.className = "note";
+      size.textContent = attachmentSizeLabel(meta.size);
+      const download = document.createElement("button");
+      download.type = "button";
+      download.dataset.action = "download-attachment";
+      download.textContent = "下载";
+      download.disabled = attachmentBusy;
+      download.addEventListener("click", () => void downloadAttachment(meta, detail));
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.dataset.action = "remove-attachment";
+      remove.textContent = "删除";
+      remove.disabled = locked || attachmentBusy;
+      remove.addEventListener("click", () => void removeAttachment(meta, detail));
+      row.append(name, size, download, remove);
+      els.attachmentList.append(row);
+    }
+  }
+  async function sha256Hex(bytes) {
+    const subtle = globalThis.crypto?.subtle;
+    if (!subtle || typeof subtle.digest !== "function") throw Error("refused");
+    const digest = new Uint8Array(await subtle.digest("SHA-256", bytes));
+    let out = "";
+    for (const byte of digest) out += byte.toString(16).padStart(2, "0");
+    return out;
+  }
+  // Only the operation that owns the current generation may touch shared
+  // attachment state or re-enable controls; stale finalizers stay silent.
+  function finishAttachmentOperation(generation) {
+    if (generation !== attachmentGeneration) return;
+    attachmentBusy = false;
+    attachmentCancelled = false;
+    attachmentCommitting = false;
+    if (
+      lastDetail &&
+      document.body?.dataset?.view === "detail" &&
+      els?.attachmentList
+    )
+      renderAttachments(lastDetail);
+  }
+  function attachmentOperationAllowed(generation, id, revision) {
+    return (
+      generation === attachmentGeneration &&
+      !attachmentCancelled &&
+      !!lastDetail &&
+      lastDetail.id === id &&
+      lastDetail.revision === revision
+    );
+  }
+  async function uploadAttachment(file) {
+    if (!file || attachmentBusy || !lastDetail || !els) return;
+    if (!attachmentsSupported()) {
+      attachmentStatus("当前原生宿主不支持附件");
+      return;
+    }
+    const detail = lastDetail;
+    const id = detail.id;
+    const revision = detail.revision;
+    const generation = attachmentGeneration;
+    attachmentCancelled = false;
+    attachmentCommitting = false;
+    const fileName = core ? core.safeFileName(file.name) : "";
+    const size = file.size;
+    if (
+      !fileName ||
+      !Number.isSafeInteger(size) ||
+      size < 0 ||
+      size > 2097152 ||
+      typeof file.arrayBuffer !== "function"
+    ) {
+      attachmentStatus("仅支持 2 MiB 以内且名称安全的文件");
+      return;
+    }
+    attachmentBusy = true;
+    renderDetail(detail);
+    attachmentStatus("正在读取文件…");
+    let bytes = null;
+    let committed = null;
+    // The transfer token is operation-local: a late response may only cancel
+    // its own token, never the token of a newer upload.
+    let transferId = "";
+    let commitStarted = false;
+    try {
+      bytes = new Uint8Array(await file.arrayBuffer());
+      if (bytes.length !== size) throw Error("refused");
+      const sha256 = await sha256Hex(bytes);
+      if (!attachmentOperationAllowed(generation, id, revision))
+        throw Error("stale");
+      const mime =
+        typeof file.type === "string" && core?.validMimeType(file.type)
+          ? file.type
+          : "";
+      const begin = await api.runtime.sendMessage({
+        type: "attachment-begin",
+        id,
+        revision,
+        file_name: fileName,
+        size,
+        sha256,
+        ...(mime ? { mime_type: mime } : {}),
+      });
+      const transfer = begin?.attachmentTransfer;
+      if (!transfer || typeof transfer.transfer_id !== "string")
+        throw Error("refused");
+      transferId = transfer.transfer_id;
+      if (generation === attachmentGeneration) attachmentTransfer = transferId;
+      if (!attachmentOperationAllowed(generation, id, revision))
+        throw Error("stale");
+      attachmentStatus("正在上传附件…");
+      let offset = transfer.offset;
+      while (offset < bytes.length) {
+        if (!attachmentOperationAllowed(generation, id, revision))
+          throw Error("stale");
+        const chunk = bytes.subarray(
+          offset,
+          Math.min(offset + 65536, bytes.length),
+        );
+        const advanced = await api.runtime.sendMessage({
+          type: "attachment-chunk",
+          transfer_id: transferId,
+          offset,
+          data: core.base64Encode(chunk),
+        });
+        const next = advanced?.attachmentTransfer;
+        if (
+          !next ||
+          next.transfer_id !== transferId ||
+          next.offset !== offset + chunk.length
+        )
+          throw Error("refused");
+        offset = next.offset;
+      }
+      if (!attachmentOperationAllowed(generation, id, revision))
+        throw Error("stale");
+      attachmentStatus("正在保存附件…");
+      commitStarted = true;
+      attachmentCommitting = true;
+      const done = await api.runtime.sendMessage({
+        type: "attachment-commit",
+        transfer_id: transferId,
+      });
+      if (generation === attachmentGeneration && attachmentTransfer === transferId)
+        attachmentTransfer = "";
+      const saved = done?.attachmentSaved;
+      if (
+        !saved ||
+        saved.item_id !== id ||
+        !/^[a-f0-9]{64}$/.test(saved.revision || "")
+      )
+        throw Error("refused");
+      committed = { id: saved.item_id, revision: saved.revision };
+    } catch (error) {
+      const token = transferId;
+      if (token)
+        void Promise.resolve(
+          api.runtime.sendMessage({ type: "attachment-cancel", transfer_id: token }),
+        ).catch(() => {});
+      if (generation === attachmentGeneration && attachmentTransfer === token)
+        attachmentTransfer = "";
+      if (generation === attachmentGeneration && error?.message !== "stale")
+        attachmentStatus(
+          commitStarted
+            ? "附件保存结果未确认，请刷新核实"
+            : "附件上传未完成",
+        );
+    } finally {
+      if (bytes) bytes.fill(0);
+      finishAttachmentOperation(generation);
+    }
+    // A commit that lands after lock, navigation or pagehide is discarded.
+    if (!committed || !attachmentOperationAllowed(generation, id, revision)) {
+      if (generation === attachmentGeneration) attachmentCancelled = false;
+      return;
+    }
+    await openDetail(committed);
+    if (generation === attachmentGeneration) {
+      attachmentStatus("附件已添加");
+      toast("附件已添加");
+    }
+  }
+  async function downloadAttachment(meta, detail) {
+    if (!meta || attachmentBusy || !lastDetail || !els || !core) return;
+    if (!core.validAttachmentMetadata(meta)) {
+      toast("附件信息无效");
+      return;
+    }
+    const id = detail.id;
+    const revision = detail.revision;
+    const generation = attachmentGeneration;
+    attachmentCancelled = false;
+    attachmentBusy = true;
+    renderDetail(detail);
+    attachmentStatus("正在下载附件…");
+    const parts = [];
+    let offset = 0;
+    let total = 0;
+    try {
+      for (;;) {
+        if (!attachmentOperationAllowed(generation, id, revision))
+          throw Error("stale");
+        const length =
+          meta.size === 0 ? 1 : Math.min(65536, Math.max(1, meta.size - offset));
+        const reply = await api.runtime.sendMessage({
+          type: "attachment-read",
+          id,
+          revision,
+          attachment_id: meta.id,
+          offset,
+          length,
+        });
+        const data = reply?.attachmentData;
+        if (
+          !data ||
+          data.offset !== offset ||
+          !data.attachment ||
+          data.attachment.id !== meta.id
+        )
+          throw Error("refused");
+        const chunk = core.base64Decode(data.data, 65536);
+        if (!chunk) throw Error("refused");
+        if (data.next_offset !== offset + chunk.length) {
+          chunk.fill(0);
+          throw Error("refused");
+        }
+        total += chunk.length;
+        if (total > 2097152) {
+          chunk.fill(0);
+          throw Error("refused");
+        }
+        if (chunk.length) parts.push(chunk);
+        offset = data.next_offset;
+        if (data.done) {
+          if (offset !== meta.size) throw Error("refused");
+          break;
+        }
+        if (!chunk.length) throw Error("refused");
+      }
+      if (total !== meta.size) throw Error("refused");
+      const merged = new Uint8Array(total);
+      let at = 0;
+      for (const part of parts) {
+        merged.set(part, at);
+        at += part.length;
+      }
+      for (const part of parts) part.fill(0);
+      parts.length = 0;
+      const digest = await sha256Hex(merged);
+      if (digest !== meta.sha256) {
+        merged.fill(0);
+        throw Error("refused");
+      }
+      if (!attachmentOperationAllowed(generation, id, revision)) {
+        merged.fill(0);
+        throw Error("stale");
+      }
+      const blob = new Blob([merged], {
+        type: meta.mime_type || "application/octet-stream",
+      });
+      merged.fill(0);
+      const url = globalThis.URL.createObjectURL(blob);
+      blobURLs.add(url);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = core.safeFileName(meta.file_name) || "attachment";
+      anchor.rel = "noopener";
+      anchor.click();
+      setTimeout(() => {
+        try {
+          globalThis.URL.revokeObjectURL(url);
+        } catch {}
+        blobURLs.delete(url);
+      }, 2000);
+      attachmentStatus("附件已交给浏览器保存");
+    } catch (error) {
+      for (const part of parts) part.fill(0);
+      parts.length = 0;
+      if (generation === attachmentGeneration && error?.message !== "stale")
+        attachmentStatus("附件下载未完成");
+    } finally {
+      finishAttachmentOperation(generation);
+    }
+  }
+  async function removeAttachment(meta, detail) {
+    if (!meta || attachmentBusy || !lastDetail || !els) return;
+    const id = detail.id;
+    const revision = detail.revision;
+    const generation = attachmentGeneration;
+    attachmentCancelled = false;
+    attachmentBusy = true;
+    renderDetail(detail);
+    attachmentStatus("正在删除附件…");
+    let removed = null;
+    try {
+      const reply = await api.runtime.sendMessage({
+        type: "attachment-remove",
+        id,
+        revision,
+        attachment_id: meta.id,
+      });
+      const result = reply?.attachmentRemoved;
+      if (
+        !result ||
+        result.item_id !== id ||
+        result.attachment_id !== meta.id ||
+        !/^[a-f0-9]{64}$/.test(result.revision || "")
+      )
+        throw Error("refused");
+      removed = { id: result.item_id, revision: result.revision };
+    } catch (error) {
+      if (generation === attachmentGeneration && error?.message !== "stale")
+        attachmentStatus("附件删除未完成");
+    } finally {
+      finishAttachmentOperation(generation);
+    }
+    if (!removed || !attachmentOperationAllowed(generation, id, revision)) {
+      if (generation === attachmentGeneration) attachmentCancelled = false;
+      return;
+    }
+    await openDetail(removed);
+    if (generation === attachmentGeneration) {
+      attachmentStatus("附件已删除");
+      toast("附件已删除");
+    }
+  }
   function editorValue(name) {
     return editorValues && Object.hasOwn(editorValues, name)
       ? editorValues[name]
@@ -1392,6 +1790,35 @@
     els.editorFields.append(label);
     editorInputs.push({ descriptor, input });
   }
+  function maskedNotesExist(detail) {
+    if (!detail || detail.notes) return false;
+    if (detail.has_notes === true) return true;
+    const fields = Array.isArray(detail.fields) ? detail.fields : [];
+    const entry = fields.find((field) => field && field.id === "notes");
+    if (!entry) return false;
+    return (
+      entry.has_value === true ||
+      entry.concealed === true ||
+      entry.revealable === true
+    );
+  }
+  function addClearNotesControl() {
+    const label = document.createElement("label");
+    label.className = "editor-field editor-clear-notes";
+    label.dataset.field = "clear_notes";
+    const caption = document.createElement("span");
+    caption.textContent = "清空已保存备注";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = false;
+    input.dataset.clearField = "notes";
+    label.append(caption, input);
+    els.editorFields.append(label);
+    editorInputs.push({
+      descriptor: { name: "clear_notes", type: "checkbox" },
+      input,
+    });
+  }
   function addCustomField(field = {}) {
     const row = document.createElement("div");
     row.className = "custom-field";
@@ -1399,6 +1826,7 @@
     row.dataset.fieldId = typeof field.id === "string" ? field.id : "";
     row.dataset.sectionId = typeof field.section_id === "string" ? field.section_id : "";
     row.dataset.sectionTitle = typeof field.section_title === "string" ? field.section_title : "";
+    row.dataset.purpose = typeof field.purpose === "string" ? field.purpose : "";
     const label = document.createElement("input");
     label.placeholder = "字段名称";
     label.value = field.label || "";
@@ -1435,11 +1863,39 @@
     remove.textContent = "移除";
     remove.addEventListener("click", () => row.remove());
     row.append(label, type, value, remove);
+    // An existing protected field can only be emptied via this explicit
+    // checkbox; the form never renders the masked value itself.
+    if (
+      typeof field.id === "string" &&
+      field.id &&
+      typeof field.section_id === "string" &&
+      field.section_id &&
+      (field.concealed === true || type.value === "concealed")
+    ) {
+      const clearLabel = document.createElement("label");
+      clearLabel.className = "custom-clear";
+      const clear = document.createElement("input");
+      clear.type = "checkbox";
+      clear.checked = false;
+      clear.dataset.customClear = "1";
+      clear.dataset.clearField = core?.attachmentStableKey
+        ? core.attachmentStableKey(field.section_id, field.id)
+        : "";
+      clearLabel.append(clear, document.createTextNode(" 清空"));
+      row.append(clearLabel);
+    }
     els.customFields.append(row);
     editorInputs.push({ descriptor: { name: "custom" }, input: value });
   }
   function openEditor(mode, categoryOrItem) {
     if (!els) return;
+    // Entering the editor leaves the detail view: cancel any in-flight
+    // attachment transfer so late chunks/commit cannot reopen the detail over
+    // the editor, and re-render the masked detail so the hidden DOM no longer
+    // retains revealed values. `lastDetail` metadata is kept for edit/cancel.
+    clearAttachmentBuffers();
+    clearRevealedSecrets();
+    if (lastDetail) renderDetail(lastDetail);
     let category = "login",
       values = { title: "", urls: lastState?.origin ? [lastState.origin] : [] },
       item = null;
@@ -1480,8 +1936,39 @@
       (mode === "edit" ? "编辑" : "新建") + categoryLabel(category);
     for (const descriptor of EDITOR_TEMPLATES[category])
       addEditorInput(descriptor, editorValue(descriptor.name));
-    if (mode === "edit" && Array.isArray(values.fields))
-      for (const field of values.fields) addCustomField(field);
+    editorHadSections =
+      mode === "edit" &&
+      Array.isArray(values.sections) &&
+      values.sections.length > 0;
+    if (mode === "edit") {
+      // publicDetail also flattens section fields into `fields` using their
+      // qualified stable key; render each section field exactly once from
+      // `sections` and keep genuinely standalone custom fields.
+      const sectionKeys = new Set();
+      for (const section of Array.isArray(values.sections) ? values.sections : [])
+        for (const field of Array.isArray(section?.fields) ? section.fields : [])
+          if (typeof field?.id === "string" && field.id)
+            sectionKeys.add("section:" + section.id + ":" + field.id);
+      for (const field of Array.isArray(values.fields) ? values.fields : []) {
+        const key =
+          typeof field?.id === "string" && field.id.startsWith("section:")
+            ? field.id
+            : field?.section_id && field?.id
+              ? "section:" + field.section_id + ":" + field.id
+              : "";
+        if (key && sectionKeys.has(key)) continue;
+        addCustomField(field);
+      }
+      for (const section of Array.isArray(values.sections) ? values.sections : [])
+        for (const field of Array.isArray(section?.fields) ? section.fields : [])
+          addCustomField({
+            ...field,
+            section_id: section.id,
+            section_title: section.title,
+          });
+      if (maskedNotesExist(mode === "edit" ? categoryOrItem || values : values))
+        addClearNotesControl();
+    }
     els.editorGenerate.hidden = !EDITOR_TEMPLATES[category].some(
       (descriptor) => descriptor.generate,
     );
@@ -1516,6 +2003,10 @@
       else if (descriptor.name === "favorite") item.favorite = value === true;
       else item[descriptor.name] = value;
     }
+    editorConflict = "";
+    item.clear_fields = [];
+    const sections = [];
+    const sectionIndex = new Map();
     if (els?.customFields)
       for (const row of [...els.customFields.children]) {
         const label = row.querySelector?.('[data-custom-label="1"]');
@@ -1533,21 +2024,75 @@
             id = parts[2];
           }
         }
-        item.fields.push({
+        const rawValue = String(value.value || "");
+        const clearBox = row.querySelector?.('[data-custom-clear="1"]');
+        const explicitClear = clearBox?.checked === true;
+        const clearKey =
+          sectionID && id && core?.attachmentStableKey
+            ? core.attachmentStableKey(sectionID, id)
+            : "";
+        if (explicitClear) {
+          if (!clearKey) {
+            editorConflict = "只能清空已保存的隐藏自定义字段";
+            return null;
+          }
+          if (rawValue !== "") {
+            editorConflict = "清空自定义字段时请勿填写新值";
+            return null;
+          }
+          if (!item.clear_fields.includes(clearKey))
+            item.clear_fields.push(clearKey);
+        }
+        const entry = {
           ...(id ? { id } : {}),
           ...(sectionID ? { section_id: sectionID } : {}),
-          ...(row.dataset.sectionTitle ? { section_title: row.dataset.sectionTitle } : {}),
+          ...(row.dataset.sectionTitle
+            ? { section_title: row.dataset.sectionTitle }
+            : {}),
+          ...(row.dataset.purpose ? { purpose: row.dataset.purpose } : {}),
           label: fieldLabel,
           type: type?.value || "text",
-          value: String(value.value || ""),
+          value: explicitClear ? "" : rawValue,
           concealed: type?.value === "concealed",
-        });
+        };
+        if (sectionID) {
+          let section = sectionIndex.get(sectionID);
+          if (!section) {
+            section = {
+              id: sectionID,
+              title: row.dataset.sectionTitle || "自定义字段",
+              fields: [],
+            };
+            sectionIndex.set(sectionID, section);
+            sections.push(section);
+          }
+          section.fields.push(entry);
+        } else item.fields.push(entry);
       }
+    if (editorHadSections || sections.length) item.sections = sections;
+    const clearNotes = editorInputs.some(
+      (entry) =>
+        entry.descriptor?.name === "clear_notes" && entry.input.checked === true,
+    );
+    if (clearNotes) {
+      const existing = String(item.notes ?? item.content ?? "");
+      if (existing !== "") {
+        editorConflict = "清空备注时请勿填写新的备注内容";
+        return null;
+      }
+      if (!item.clear_fields.includes("notes")) item.clear_fields.push("notes");
+      if (Object.hasOwn(item, "notes")) item.notes = "";
+      else if (Object.hasOwn(item, "content")) item.content = "";
+    }
     return item;
   }
   async function saveEditor() {
     if (vaultBusy) return;
     const item = collectEditorItem();
+    if (!item) {
+      toast(editorConflict || "无法保存编辑内容");
+      return;
+    }
     if (!item.title || !item.title.trim()) {
       toast("请填写标题");
       return;
@@ -1556,6 +2101,9 @@
     els.editorSave.disabled = true;
     let saved = null,
       wasEdit = false;
+    const clearedKeys = Array.isArray(item.clear_fields)
+      ? [...item.clear_fields]
+      : [];
     try {
       const reply = await api.runtime.sendMessage({
         type: "item-save",
@@ -1581,8 +2129,11 @@
     // return early and leave an empty editor or a stale vault list.
     if (!saved) return;
     toast("已保存");
-    if (wasEdit)
+    if (wasEdit) {
       await openDetail({ id: saved.item_id, revision: saved.revision });
+      if (typeof clearUnsupportedNotice === "function")
+        clearUnsupportedNotice(lastDetail, clearedKeys);
+    }
     else {
       wipeDetail();
       showView("vault");
@@ -1611,6 +2162,27 @@
     } finally {
       vaultBusy = false;
     }
+  }
+  function clearTargetStillPresent(detail, key) {
+    if (!detail) return false;
+    const entry = (Array.isArray(detail.fields) ? detail.fields : []).find(
+      (field) => field && field.id === key,
+    );
+    if (!entry) return false;
+    if (entry.has_value === true) return true;
+    if (entry.concealed === true || entry.revealable === true) return true;
+    return typeof entry.value === "string" && entry.value !== "";
+  }
+  function clearUnsupportedNotice(detail, keys) {
+    if (!keys.length) return;
+    const still = keys.filter((key) => clearTargetStillPresent(detail, key));
+    if (!still.length) return;
+    if (els?.detailUnavailable) {
+      els.detailUnavailable.hidden = false;
+      els.detailUnavailable.textContent =
+        "当前原生宿主未确认清空字段，请升级原生宿主后重试";
+    }
+    toast("宿主未确认清空，请升级原生宿主");
   }
   function classifyDetailAction(message) {
     return api.runtime.sendMessage(message).then((reply) => {
@@ -1720,6 +2292,12 @@
       editorGenerate: q("#editor-generate"),
       editorSave: q("#editor-save"),
       editorCancel: q("#editor-cancel"),
+      attachmentList: q("#attachment-list"),
+      attachmentStatus: q("#attachment-status"),
+      attachmentFile: q("#attachment-file"),
+      attachmentUpload: q("#attachment-upload"),
+      attachmentCancel: q("#attachment-cancel"),
+      attachmentUnsupported: q("#attachment-unsupported"),
     };
     els.searchInput.addEventListener("input", (event) => {
       searchQuery = String(event.target.value || "");
@@ -1803,6 +2381,7 @@
     });
     els.lockButton.addEventListener("click", () => {
       if (vaultBusy) return;
+      clearAttachmentBuffers();
       vaultBusy = true;
       void api.runtime
         .sendMessage({ type: "lock" })
@@ -1874,6 +2453,27 @@
       void generateEditorPassword(),
     );
     els.editorSave.addEventListener("click", () => void saveEditor());
+    els.attachmentUpload.addEventListener("click", () => {
+      if (els.attachmentFile.disabled) return;
+      if (typeof els.attachmentFile.click === "function")
+        els.attachmentFile.click();
+    });
+    els.attachmentFile.addEventListener("change", (event) => {
+      const files = event?.target?.files;
+      const file = files && files.length ? files[0] : null;
+      if (!file) return;
+      if (event.target) event.target.value = "";
+      void uploadAttachment(file);
+    });
+    els.attachmentCancel.addEventListener("click", () => {
+      const committing = attachmentCommitting;
+      clearAttachmentBuffers();
+      attachmentStatus(
+        committing
+          ? "已停止等待 · 附件保存结果未确认，请刷新核实"
+          : "已取消上传",
+      );
+    });
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape") {
         if (document.body.dataset.view === "editor") {

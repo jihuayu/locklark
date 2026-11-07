@@ -1,5 +1,11 @@
 # Locklark 开发进度
 
+本轮起点 / 上批已合并基线：`4abecb8`（PR #43，2026-11-07 00:20:45 UTC）。该 PR 最终 head `c3d505f` 六项 CI 全部通过。以下旧段落中的“PR #37/#40 尚未合并”、初始浏览器缺口与旧 CI 待办只代表历史阶段；当前缺口以[浏览器清单](browser-parity-checklist.md)和[插件收尾验收](plugin-completion-validation.md)为准。
+
+2026-11-07 插件收尾（[PR #44](https://github.com/jihuayu/locklark/pull/44)）：附件上传/下载 SHA-256 校验/删除、备注及隐藏自定义字段显式清空、异步操作竞态修复已完成本地验收。扩展 172 项测试通过；更新后 E2E 为 206 项：170 通过、36 pending、0 失败，分开报告能力探测与组件契约。独立 Edge 与 Firefox Passkey 实测范围、剩余 CLI broker/旧文档兼容和远端回执见[本轮验收](plugin-completion-validation.md)。
+
+## 历史阶段记录
+
 2026-11-07：从 main `eccd326` 接续唯一未合并的 [PR #43](https://github.com/jihuayu/locklark/pull/43)，完成集成缺陷修复并推进桌面、扩展与 CLI：共享持久化 v2 模型、原子浏览器编辑、真实 DTO 适配、OTP 序列化、锁库通知、受控 CLI 帮助路径与 DeepSeek profile。按本轮用户指令由主代理设计架构、DeepSeek 外部 worker 并行调研/实现。实际测试、独立复核范围、远端合并门槛与仍待 1:1 对照项见 [M6 集成验收](m6-integration-validation.md)；以下段落保留历史记录，不能覆盖此处较新的 PR 状态。
 
 团队同步与移动端从 main `9d8d574` 接续，架构与验收约定见[团队与移动设计](team-mobile-design.md)。主代理设计和独立验收，Sol xhigh 子代理分别实现真实 HTTPS 团队同步、共享 Go 移动门面、Android Kotlin、iOS Swift及外部验收，Luna max审阅。PR #37 当前仍为草稿：真实团队 TLS 与服务命令独立验收已通过；第七轮 Android 原生流程、独立外部界面、真实数据库签名审计及 KDBX 互通全部通过，新增系统认证验收发现 ATD 不提供安全锁屏，已切换完整 Google APIs 镜像继续；iOS 在官方 URL 接口实测后仍返回较弱保护，保持拒绝并准备真机验收。精确进展及失败证据见[团队与移动验收](team-mobile-validation.md)，不能把协议核心或构建成功当作完整手机/团队产品通过。

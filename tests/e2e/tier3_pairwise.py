@@ -17,6 +17,7 @@ from .support import (
     cli_supports,
     desktop_sources,
     extension_asset,
+    extension_or_source_text,
     extension_text,
     f10_popup_vault_ready,
     f11_identity_ready,
@@ -63,7 +64,14 @@ def t3_02(ctx):
 def t3_03(ctx):
     vault = make_vault(ctx, ["auth.example.test"])
     ready = f1_passkey_ready(ctx) and f2_inline_ready(ctx) and f11_identity_ready(ctx)
-    gate(ctx, "F2", ready, "inline menu/passkey/multi-step continuation are not all present")
+    gate(
+        ctx,
+        "F2",
+        ready,
+        "inline menu, passkey fallback and multi-step continuation components exist "
+        "but the whole-browser three-step split-OTP journey is not executed by this "
+        "capability probe; blocked on the absent CLI item-creation surface",
+    )
     assert list_rows(ctx, vault)
 
 
@@ -86,7 +94,14 @@ def t3_05(ctx):
 def t3_06(ctx):
     vault = make_vault(ctx, ["Imported"])
     ready = cli_supports(ctx, "add-item") and f8_desktop_v2_ready(ctx)
-    gate(ctx, "F6", ready, "item model v2 import or desktop v2 category browser is absent")
+    gate(
+        ctx,
+        "F6",
+        ready,
+        "CLI item import/add-item command surface is absent (multi-category 1PUX is "
+        "rejected by plan-import); the desktop v2 browser/editor exists, so the "
+        "native v2 item model is not absent",
+    )
     assert list_rows(ctx, vault)
 
 
@@ -94,7 +109,13 @@ def t3_06(ctx):
 def t3_07(ctx):
     vault = make_vault(ctx, ["Portal"])
     ready = cli_supports(ctx, "add-item") and f10_popup_vault_ready(ctx)
-    gate(ctx, "F6", ready, "v2 item fields or popup vault UI is absent")
+    gate(
+        ctx,
+        "F6",
+        ready,
+        "CLI multi-URL/tags/favorites item creation surface is absent; the popup "
+        "vault UI exists, so the gap is the CLI command surface",
+    )
     assert list_rows(ctx, vault)
 
 
@@ -102,7 +123,14 @@ def t3_07(ctx):
 def t3_08(ctx):
     vault = make_vault(ctx, ["Ada"])
     ready = cli_supports(ctx, "add-item") and f11_identity_ready(ctx)
-    gate(ctx, "F6", ready, "v2 identity/card schema or autocomplete mapping is absent")
+    gate(
+        ctx,
+        "F6",
+        ready,
+        "CLI v2 identity/card item creation surface is absent; the extension "
+        "identity/card fill contract exists (see M3 component tests), so the "
+        "checkout journey is blocked on the CLI surface only",
+    )
     assert list_rows(ctx, vault)
 
 
@@ -110,7 +138,13 @@ def t3_08(ctx):
 def t3_09(ctx):
     vault = make_vault(ctx, ["Multi URL"])
     ready = cli_supports(ctx, "add-item") and f13_watchtower_ready(ctx)
-    gate(ctx, "F6", ready, "v2 multi-URL item or Watchtower URL checks are absent")
+    gate(
+        ctx,
+        "F6",
+        ready,
+        "CLI v2 multi-URL item creation surface is absent (so no multi-URL item can "
+        "be fed to Watchtower); the host Watchtower service exists",
+    )
     assert audit_events(ctx, vault)
 
 
@@ -118,7 +152,13 @@ def t3_09(ctx):
 def t3_10(ctx):
     vault = make_vault(ctx, ["AWS"])
     ready = cli_supports(ctx, "add-item") and f15_run_bundle_ready(ctx)
-    gate(ctx, "F6", ready, "v2 field/attachment model or RunBundle is absent")
+    gate(
+        ctx,
+        "F6",
+        ready,
+        "CLI v2 custom-field/attachment item surface is absent; RunBundle itself is "
+        "implemented",
+    )
     assert list_rows(ctx, vault)
 
 
@@ -142,7 +182,14 @@ def t3_12(ctx):
 def t3_13(ctx):
     vault = make_vault(ctx, ["Shop"])
     ready = f7_shared_ipc_ready(ctx) and f11_identity_ready(ctx)
-    gate(ctx, "F7", ready, "shared desktop approval or identity/card fill is absent")
+    gate(
+        ctx,
+        "F7",
+        ready,
+        "shared desktop IPC and identity/card fill components exist, but the "
+        "cross-surface approval journey is not executed and the CLI item-creation "
+        "surface is absent",
+    )
     assert list_rows(ctx, vault)
 
 
@@ -150,7 +197,13 @@ def t3_13(ctx):
 def t3_14(ctx):
     vault = make_vault(ctx, ["Alpha"])
     ready = f7_shared_ipc_ready(ctx) and f17_broker_ready(ctx)
-    gate(ctx, "F7", ready, "browser IPC and CLI broker shared session are absent")
+    gate(
+        ctx,
+        "F7",
+        ready,
+        "browser IPC exists; the CLI broker client and its shared terminal session are "
+        "absent",
+    )
     assert list_rows(ctx, vault)
 
 
@@ -159,6 +212,9 @@ def t3_15(ctx):
     vault = make_vault(ctx, ["Weak"])
     ready = f8_desktop_v2_ready(ctx) and f13_watchtower_ready(ctx)
     gate(ctx, "F8", ready, "desktop v2 Watchtower dashboard is absent")
+    text = desktop_sources(ctx)
+    assert "Watchtower" in text
+    assert "安全评分" in text or "watchtower.Report" in text
     assert list_rows(ctx, vault)
 
 
@@ -167,6 +223,10 @@ def t3_16(ctx):
     vault = make_vault(ctx, ["Account"])
     ready = f9_save_generator_ready(ctx) and f13_watchtower_ready(ctx)
     gate(ctx, "F9", ready, "inline generator or Watchtower breach alerts are absent")
+    content = extension_or_source_text(ctx, "content.js")
+    background = extension_or_source_text(ctx, "background.js")
+    assert "generator" in content.lower()
+    assert "watchtower" in (background + content).lower() or "breached" in background.lower()
     assert list_rows(ctx, vault)
 
 
@@ -174,7 +234,14 @@ def t3_16(ctx):
 def t3_17(ctx):
     vault = make_vault(ctx, ["SSO Corp"])
     ready = f10_popup_vault_ready(ctx) and f11_identity_ready(ctx)
-    gate(ctx, "F10", ready, "popup vault Open & Fill or multi-step continuation is absent")
+    gate(
+        ctx,
+        "F10",
+        ready,
+        "popup vault Open & Fill exists and multi-step continuation is covered by the "
+        "M3 component tests, but the whole-browser journey is not executed and the "
+        "CLI item-creation surface is absent",
+    )
     assert list_rows(ctx, vault)
 
 
@@ -195,5 +262,10 @@ def t3_19(ctx):
 @e2e_test("T3_20", 3, ["F16", "F17"], "Shell wrappers run through the desktop CLI broker with session leases")
 def t3_20(ctx):
     ready = f16_cli_shell_ready(ctx) and f17_broker_ready(ctx)
-    gate(ctx, "F16", ready, "cli shell-init or desktop CLI broker is absent")
+    gate(
+        ctx,
+        "F16",
+        ready,
+        "cli shell-init is implemented; the desktop CLI broker client is absent",
+    )
     assert f16_cli_shell_ready(ctx)

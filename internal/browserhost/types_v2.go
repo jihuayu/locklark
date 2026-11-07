@@ -13,6 +13,7 @@ func SupportedCapabilities() []string {
 		"popup-vault-v1",
 		"profile-fill-v1",
 		"watchtower-v1",
+		"attachments-v1",
 		"cli-broker-v1",
 	}
 }
@@ -53,12 +54,43 @@ type BrowserCustomField struct {
 	Value     string `json:"value"`
 	Concealed bool   `json:"concealed,omitempty"`
 	Purpose   string `json:"purpose,omitempty"`
+	// HasValue reports that a durable value exists even when it is masked.
+	HasValue bool `json:"has_value,omitempty"`
 }
 
 type BrowserItemSection struct {
 	ID     string               `json:"id"`
 	Title  string               `json:"title"`
 	Fields []BrowserCustomField `json:"fields,omitempty"`
+}
+
+// BrowserAttachment is safe attachment metadata. The durable body is never part
+// of a native response; bytes travel only through bounded attachment frames.
+type BrowserAttachment struct {
+	ID        string `json:"id"`
+	FileName  string `json:"file_name"`
+	Size      int64  `json:"size"`
+	MIMEType  string `json:"mime_type,omitempty"`
+	SHA256    string `json:"sha256"`
+	Protected bool   `json:"protected,omitempty"`
+}
+
+// BrowserItemMutationField is the mutation-only custom field input. Value is a
+// pointer: an omitted value preserves the existing durable value stored under
+// the stable field id, while an explicit value (even "") replaces it.
+type BrowserItemMutationField struct {
+	ID        string  `json:"id"`
+	Label     string  `json:"label"`
+	Type      string  `json:"type"`
+	Value     *string `json:"value,omitempty"`
+	Concealed bool    `json:"concealed,omitempty"`
+	Purpose   string  `json:"purpose,omitempty"`
+}
+
+type BrowserItemMutationSection struct {
+	ID     string                     `json:"id"`
+	Title  string                     `json:"title"`
+	Fields []BrowserItemMutationField `json:"fields,omitempty"`
 }
 
 type BrowserItemURL struct {
@@ -129,6 +161,7 @@ type BrowserItemDetail struct {
 	Tags             []string                  `json:"tags,omitempty"`
 	State            string                    `json:"state"`
 	Sections         []BrowserItemSection      `json:"sections,omitempty"`
+	Attachments      []BrowserAttachment       `json:"attachments,omitempty"`
 	CreditCard       *BrowserCreditCardSummary `json:"credit_card,omitempty"`
 	Identity         *BrowserIdentitySummary   `json:"identity,omitempty"`
 	WatchtowerFlags  []string                  `json:"watchtower_flags,omitempty"`
@@ -139,21 +172,24 @@ type BrowserItemDetail struct {
 }
 
 type BrowserItemMutation struct {
-	Category   string                  `json:"category"`
-	VaultID    string                  `json:"vault_id,omitempty"`
-	Title      string                  `json:"title"`
-	Username   *string                 `json:"username,omitempty"`
-	Password   *string                 `json:"password,omitempty"`
-	OTP        *string                 `json:"otp,omitempty"`
-	URL        *string                 `json:"url,omitempty"`
-	URLs       []BrowserItemURL        `json:"urls,omitempty"`
-	Notes      *string                 `json:"notes,omitempty"`
-	Favorite   *bool                   `json:"favorite,omitempty"`
-	AutoSubmit *bool                   `json:"auto_submit,omitempty"`
-	Tags       []string                `json:"tags,omitempty"`
-	Sections   []BrowserItemSection    `json:"sections,omitempty"`
-	CreditCard *BrowserCreditCardInput `json:"credit_card,omitempty"`
-	Identity   *BrowserIdentitySummary `json:"identity,omitempty"`
+	Category   string                       `json:"category"`
+	VaultID    string                       `json:"vault_id,omitempty"`
+	Title      string                       `json:"title"`
+	Username   *string                      `json:"username,omitempty"`
+	Password   *string                      `json:"password,omitempty"`
+	OTP        *string                      `json:"otp,omitempty"`
+	URL        *string                      `json:"url,omitempty"`
+	URLs       []BrowserItemURL             `json:"urls,omitempty"`
+	Notes      *string                      `json:"notes,omitempty"`
+	Favorite   *bool                        `json:"favorite,omitempty"`
+	AutoSubmit *bool                        `json:"auto_submit,omitempty"`
+	Tags       []string                     `json:"tags,omitempty"`
+	Sections   []BrowserItemMutationSection `json:"sections,omitempty"`
+	// ClearFields names the fields this mutation explicitly empties. Omitted
+	// means "no explicit clear"; an empty list is the same as omitted.
+	ClearFields []string                `json:"clear_fields,omitempty"`
+	CreditCard  *BrowserCreditCardInput `json:"credit_card,omitempty"`
+	Identity    *BrowserIdentitySummary `json:"identity,omitempty"`
 }
 
 // BrowserStagedSave is the v2 name for the shared staged-save DTO.

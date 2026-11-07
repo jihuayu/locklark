@@ -21,7 +21,13 @@ import zipfile
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from .harness import CLIResult, E2EContext, PTYResult
+from .harness import (
+    CLIResult,
+    E2EContext,
+    PTYResult,
+    owned_gui_command,
+    terminate_process_group,
+)
 
 HEX32_RE = re.compile(r"^[a-f0-9]{32}$")
 HEX64_RE = re.compile(r"^[a-f0-9]{64}$")
@@ -486,6 +492,17 @@ def source_text(ctx: E2EContext, relative: str) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
+def extension_or_source_text(ctx: E2EContext, name: str) -> str:
+    """Return a shipped bundle asset, falling back to its checked-in source.
+
+    Component contracts are asserted against the same code the browser runs
+    (``browser-extension/build.js`` output) but must not turn a not-yet-built
+    dist directory into a phantom feature absence.
+    """
+
+    return extension_text(ctx, name) or source_text(ctx, f"browser-extension/{name}")
+
+
 def sources_contain(ctx: E2EContext, relative_glob: str, needle: str) -> bool:
     for path in (ctx.repo_root).glob(relative_glob):
         if not path.is_file():
@@ -552,6 +569,111 @@ def node_test(ctx: E2EContext, relative: str, timeout: float = 90.0) -> subproce
     )
 
 
+NODE_SUMMARY_RE = re.compile(
+    r"(?:^|\s)(?:ℹ|#)\s+(tests|pass|fail|skipped)\s+(\d+)", re.MULTILINE
+)
+
+
+def _node_summary_counts(text: str) -> dict[str, int]:
+    counts = {"tests": 0, "pass": 0, "fail": 0, "skipped": 0}
+    for name, value in NODE_SUMMARY_RE.findall(text or ""):
+        counts[name] = max(counts[name], int(value))
+    return counts
+
+
+def node_test_pattern(
+    ctx: E2EContext,
+    relative: str,
+    pattern: str,
+    *,
+    min_passed: int = 1,
+    timeout: float = 120.0,
+) -> dict[str, int]:
+    """Run one existing component test file, selected by test-name pattern.
+
+    The pattern *is* the contract: a pattern that selects zero executed tests
+    is a stale adapter and raises AssertionError (a real failure), never a
+    ``FEATURE_NOT_YET_LANDED`` pending result.  ``min_passed`` guards against a
+    silently renamed test shrinking the selected set.
+    """
+
+    node = shutil.which("node")
+    if node is None:
+        raise AssertionError("node is required for extension component contracts")
+    args = [
+        "--test",
+        f"--test-name-pattern={pattern}",
+        str((ctx.repo_root / relative).resolve()),
+    ]
+    result = ctx.run_cli(args, binary=node, timeout=timeout, cwd=ctx.repo_root)
+    combined = (result.stdout or "") + (result.stderr or "")
+    counts = _node_summary_counts(combined)
+    label = f"node --test {relative} --test-name-pattern={pattern!r}"
+    if result.returncode != 0:
+        raise AssertionError(f"{label} failed (rc={result.returncode}):\n{combined[-2000:]}")
+    if counts["fail"]:
+        raise AssertionError(
+            f"{label} reported {counts['fail']} failing component tests:\n{combined[-2500:]}"
+        )
+    if counts["pass"] < min_passed:
+        raise AssertionError(
+            f"{label} selected {counts['pass']} passing tests, expected at least "
+            f"{min_passed}; the pattern no longer matches the component contract"
+            f" (stale adapter, not an absent feature):\n{combined[-2000:]}"
+        )
+    return counts
+
+
+def go_tool() -> str | None:
+    found = shutil.which("go")
+    if found:
+        return found
+    for candidate in (
+        os.environ.get("LOCKLARK_GO", ""),
+        "/workspace/toolchains/go/bin/go",
+    ):
+        if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def go_package_test(
+    ctx: E2EContext,
+    package: str,
+    run: str,
+    *,
+    min_passed: int = 1,
+    timeout: float = 180.0,
+) -> dict[str, int]:
+    """Execute existing Go package tests for a native service contract.
+
+    This is component-level evidence: it runs the shipped implementation with
+    its own tests, but never claims a live network round trip.  A package test
+    that fails is an implementation failure, not an absent feature.
+    """
+
+    go = go_tool()
+    if go is None:
+        raise AssertionError(
+            "validation blocked: go toolchain unavailable; native component tests not executed"
+        )
+    args = ["test", package, "-run", run, "-count=1", "-v"]
+    result = ctx.run_cli(args, binary=go, timeout=timeout, cwd=ctx.repo_root)
+    combined = (result.stdout or "") + (result.stderr or "")
+    passed = len(re.findall(r"^--- PASS: ", combined, re.MULTILINE))
+    if result.returncode != 0:
+        raise AssertionError(
+            f"go test {package} -run {run!r} failed (rc={result.returncode}):\n{combined[-2500:]}"
+        )
+    if passed < min_passed:
+        raise AssertionError(
+            f"go test {package} -run {run!r} executed {passed} tests, expected at least "
+            f"{min_passed}; the native contract is no longer covered"
+            f" (stale adapter, not an absent feature):\n{combined[-2000:]}"
+        )
+    return {"pass": passed}
+
+
 def node_eval(ctx: E2EContext, code: str, timeout: float = 30.0) -> str:
     result = ctx.run_node(code, timeout=timeout)
     if result.returncode != 0:
@@ -574,12 +696,22 @@ def native_probe(
     browser: str = "chromium",
     timeout: float = 8.0,
     launch_args: Sequence[Any] | None = None,
+    await_reply: bool = False,
 ) -> Any:
+    """Speak the native-messaging protocol to the real browser host.
+
+    ``await_reply=True`` is only for probes whose answer is produced by the
+    desktop broker round trip: it keeps the relay stdin open until one complete
+    framed reply arrives, mirroring a real browser.  Malformed/truncated-EOF
+    probes keep the default immediate-close behaviour.
+    """
+
     return ctx.probe_native_host_frame(
         frame,
         browser=browser,
         timeout=timeout,
         launch_args=launch_args,
+        await_reply=await_reply,
     )
 
 
@@ -613,11 +745,31 @@ def f1_passkey_ready(ctx: E2EContext) -> bool:
     )
 
 
+def f1_autosubmit_ready(ctx: E2EContext) -> bool:
+    """Firefox form auto-submit rides on the shipped ``autoLogin`` preference.
+
+    The extension never used an ``autoSubmit`` identifier; probing that literal
+    described a nonexistent artifact and turned a working path into a phantom
+    feature gap.
+    """
+
+    core = extension_or_source_text(ctx, "core.js")
+    return "autoLogin" in core and "requestSubmit" in core
+
+
 def f2_inline_ready(ctx: E2EContext) -> bool:
     content = extension_text(ctx, "content.js")
     return bool(content) and (
         "attachShadow" in content or "autoSubmit" in content or "autofill" in content
     )
+
+
+def f2_autologin_ready(ctx: E2EContext) -> bool:
+    """Global/per-login auto-login plumbing in the shipped extension bundle."""
+
+    names = ("background.js", "content.js", "core.js", "popup.js", "options.js")
+    text = "".join(extension_or_source_text(ctx, name) for name in names)
+    return "autoLogin" in text and "loginOverrides" in text
 
 
 def f3_team_sync_ready(ctx: E2EContext) -> bool:
@@ -649,6 +801,23 @@ def f5_desktop_timer_ready(ctx: E2EContext) -> bool:
     )
 
 
+def f5_filter_refresh_ready(ctx: E2EContext) -> bool:
+    """The desktop refresh path captures and re-applies query/scope.
+
+    The real contract is the ``captureFilter``/``filterCurrent``/``queryRows``
+    trio used by ``refresh()``; a regex over the shape of the function body only
+    matched an older spelling of the code.
+    """
+
+    text = desktop_sources(ctx)
+    return (
+        re.search(r"func \(a \*App\) refresh\(\)", text) is not None
+        and "filter := a.captureFilter()" in text
+        and "a.filterCurrent(filter)" in text
+        and "queryRows(s, filter)" in text
+    )
+
+
 def f7_shared_ipc_ready(ctx: E2EContext) -> bool:
     if source_files(ctx, "internal/desktop/ipc*.go"):
         return True
@@ -662,6 +831,20 @@ def f8_desktop_v2_ready(ctx: E2EContext) -> bool:
         marker in text
         for marker in ("收藏夹", "所有条目", "最近删除", "生成器", "item_editor")
     )
+
+
+def f8_v2_editor_ready(ctx: E2EContext) -> bool:
+    """Desktop v2 item editor plus the random/memorable/PIN generator."""
+
+    text = desktop_sources(ctx)
+    editor = any(
+        marker in text
+        for marker in ("item_editor", "editItem", "openEditor", "v2.editor")
+    )
+    generator = "generatorState" in text and all(
+        mode in text for mode in ("ModeRandom", "ModeMemorable", "ModePIN")
+    )
+    return editor and generator
 
 
 def f9_save_generator_ready(ctx: E2EContext) -> bool:
@@ -681,7 +864,29 @@ def f10_popup_vault_ready(ctx: E2EContext) -> bool:
 
 
 def f11_identity_ready(ctx: E2EContext) -> bool:
+    """CLI item-creation command surface (NOT identity/card fill existence).
+
+    ``personal add-item`` is a genuine command-surface gap; the identity and
+    credit-card fill contracts live in the browser extension and must be probed
+    with :func:`f11_fill_contract_ready`, never through this CLI probe.
+    """
+
     return cli_supports(ctx, "add-item") or cli_supports(ctx, "edit-item")
+
+
+def f11_fill_contract_ready(ctx: E2EContext) -> bool:
+    """Identity/credit-card fill entrypoints shipped by the extension."""
+
+    text = extension_or_source_text(ctx, "core.js") + extension_or_source_text(
+        ctx, "content.js"
+    )
+    test_file = ctx.repo_root / "browser-extension" / "test" / "m3_fill_v2.test.js"
+    return (
+        test_file.is_file()
+        and "fillIdentityDocument" in text
+        and "fillCardDocument" in text
+        and "credit_card" in text
+    )
 
 
 def f12_parity_doc(ctx: E2EContext) -> Path | None:
@@ -691,35 +896,220 @@ def f12_parity_doc(ctx: E2EContext) -> Path | None:
     return None
 
 
-def f13_watchtower_ready(ctx: E2EContext) -> bool:
+def f13_cli_health_flags(ctx: E2EContext) -> bool:
+    """Opt-in HIBP flags on the CLI ``health`` command (a separate surface)."""
+
     help_text = cli_help(ctx)
     return "--check-breached" in help_text or "--hibp-endpoint" in help_text
 
 
-def f14_cli_profiles_ready(ctx: E2EContext) -> bool:
-    result = ctx.run_cli(["cli", "list"])
-    return result.returncode == 0 and all(
-        profile in result.stdout
-        for profile in ("gh", "aws", "kubectl", "docker", "npm", "terraform", "git", "psql", "token")
+def f13_hibp_client_ready(ctx: E2EContext) -> bool:
+    """Host HIBP range client: https-only, five-hex prefix, cached lookups."""
+
+    hibp = source_text(ctx, "internal/watchtower/hibp.go")
+    host = source_text(ctx, "internal/browserhost/protocol.go")
+    return bool(
+        hibp
+        and "https://" in hibp
+        and "hibpPrefix" in hibp
+        and "LookupCandidates" in hibp
+        and "include_hibp" in host
     )
+
+
+def f13_watchtower_ready(ctx: E2EContext) -> bool:
+    """Host/browser Watchtower service, independent of CLI health flags.
+
+    Local health categories (weak/reused, unsecured HTTP, missing 2FA) ship in
+    ``internal/watchtower`` and are surfaced by the desktop dashboard and the
+    popup banner; the CLI ``health`` command has no opt-in HIBP flags.  Those
+    two facts must never be conflated into "Watchtower is absent".
+    """
+
+    watchtower = source_text(ctx, "internal/watchtower/watchtower.go")
+    host = bool(watchtower) and (
+        "UnsecuredHTTP" in watchtower or "unsecured-http" in watchtower
+    )
+    desktop = "watchtower" in desktop_sources(ctx).lower()
+    browser = any(
+        "watchtower" in extension_or_source_text(ctx, name).lower()
+        for name in ("background.js", "popup.js")
+    )
+    return bool(host or desktop or browser)
+
+
+F14_REQUIRED_PROFILES = {
+    "gh": "gh-v1",
+    "aws": "aws-env-v1",
+    "kubectl": "kubectl-kubeconfig-v1",
+    "docker": "docker-config-v1",
+    "npm": "npm-npmrc-v1",
+    "terraform": "terraform-v1",
+    "git": "git-askpass-v1",
+    "psql": "psql-pgpass-v1",
+    "token": "token-v1",
+}
+
+
+def cli_profiles(ctx: E2EContext) -> list[dict[str, Any]]:
+    """Return the validated structured profile registry, or [] if absent.
+
+    ``cli list`` shows bindings, not built-in profiles, so it must never be
+    used as a capability probe here.  A command that advertises profiles but
+    fails or emits a malformed contract is an implementation failure, not an
+    absent feature: those cases raise AssertionError.
+    """
+
+    help_result = ctx.run_cli(["help"])
+    if help_result.returncode != 0:
+        raise AssertionError(
+            f"locklark help probe failed (rc={help_result.returncode}): "
+            f"{help_result.stderr[-800:]}"
+        )
+    if "cli profiles" not in (help_result.stdout + help_result.stderr):
+        return []
+    result = ctx.run_cli(["cli", "profiles"])
+    if result.returncode != 0:
+        raise AssertionError(
+            f"advertised `cli profiles` failed (rc={result.returncode}): "
+            f"{result.stderr[-800:]}"
+        )
+    try:
+        payload = result.json()
+    except (TypeError, ValueError) as exc:
+        raise AssertionError(f"cli profiles returned invalid JSON: {exc}") from exc
+    if not isinstance(payload, list):
+        raise AssertionError(f"cli profiles did not return a JSON list: {payload!r}")
+    seen: set[str] = set()
+    for entry in payload:
+        if not isinstance(entry, dict):
+            raise AssertionError(f"cli profiles entry is not an object: {entry!r}")
+        name = entry.get("name")
+        profile_id = entry.get("id")
+        if not isinstance(name, str) or not name:
+            raise AssertionError(f"cli profiles entry lacks a name: {entry!r}")
+        if not isinstance(profile_id, str) or not profile_id:
+            raise AssertionError(f"cli profile {name!r} lacks an id: {entry!r}")
+        if name in seen:
+            raise AssertionError(f"cli profiles repeats {name!r}")
+        seen.add(name)
+        if not isinstance(entry.get("slots"), list) or not entry["slots"]:
+            raise AssertionError(f"cli profile {name!r} lacks slots: {entry!r}")
+        if not isinstance(entry.get("max_timeout"), int) or entry["max_timeout"] <= 0:
+            raise AssertionError(f"cli profile {name!r} has an invalid timeout: {entry!r}")
+    return payload
+
+
+def f14_cli_profiles_ready(ctx: E2EContext) -> bool:
+    payload = cli_profiles(ctx)
+    if not payload:
+        return False
+    by_name = {entry["name"]: entry["id"] for entry in payload}
+    return all(by_name.get(name) == profile_id for name, profile_id in F14_REQUIRED_PROFILES.items())
 
 
 def f15_run_bundle_ready(ctx: E2EContext) -> bool:
-    help_text = cli_help(ctx)
-    return "cli run" in help_text and (
-        "run-bundle" in help_text or "RunBundle" in help_text or "item.run.bundle" in help_text
+    """Probe the public multi-credential CLI runner contract.
+
+    Internal Go identifiers are deliberately ignored.  The current public
+    contract is ``cli run`` plus a multi-slot built-in profile; an advertised
+    command that fails or emits a malformed usage string is a failure.
+    """
+
+    top = ctx.run_cli(["help"])
+    if top.returncode != 0:
+        raise AssertionError(
+            f"locklark help probe failed (rc={top.returncode}): {top.stderr[-800:]}"
+        )
+    if "cli run" not in (top.stdout + top.stderr):
+        return False
+    profiles = cli_profiles(ctx)
+    if not profiles:
+        return False
+    run_help = ctx.run_cli(["cli", "run", "--help"])
+    if run_help.returncode != 0:
+        raise AssertionError(
+            f"advertised `cli run --help` failed (rc={run_help.returncode}): "
+            f"{run_help.stderr[-800:]}"
+        )
+    usage = run_help.stdout + run_help.stderr
+    required = (
+        "locklark cli run <tool>",
+        "--binding PATH",
+        "--cwd ABS_DIR",
+        "--timeout SECONDS",
+        "-- [ARG...]",
+    )
+    missing = [token for token in required if token not in usage]
+    if missing:
+        raise AssertionError(f"cli run help is missing public options: {missing}")
+    return any(
+        len(entry["slots"]) > 1
+        and any(not slot.get("optional", False) for slot in entry["slots"])
+        for entry in profiles
     )
 
 
+def shell_function_body(script: str, tool: str) -> str:
+    """Return a POSIX shell function body declared for *tool*, or ""."""
+
+    patterns = (
+        rf"(?ms)^{re.escape(tool)}\s*\(\)\s*\{{(.*?)^\}}",
+        rf"(?ms)^function\s+{re.escape(tool)}\b[^\n]*\{{(.*?)^\}}",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, script)
+        if match:
+            return match.group(1)
+    return ""
+
+
 def f16_cli_shell_ready(ctx: E2EContext) -> bool:
+    """Probe shell-init for a real function that forwards to ``cli run``."""
+
+    top = ctx.run_cli(["help"])
+    if top.returncode != 0:
+        raise AssertionError(
+            f"locklark help probe failed (rc={top.returncode}): {top.stderr[-800:]}"
+        )
+    if "cli shell-init" not in (top.stdout + top.stderr):
+        return False
     result = ctx.run_cli(["cli", "shell-init", "bash"])
-    return result.returncode == 0 and "locklark cli run" in result.stdout
+    if result.returncode != 0:
+        raise AssertionError(
+            f"advertised `cli shell-init bash` failed (rc={result.returncode}): "
+            f"{result.stderr[-800:]}"
+        )
+    body = shell_function_body(result.stdout, "gh")
+    if not body:
+        raise AssertionError("cli shell-init did not emit a gh function")
+    if not re.search(r"\bcli\s+run\s+gh\b", body):
+        raise AssertionError(f"gh wrapper does not call cli run: {body!r}")
+    if not re.search(r"(?:command|&)\s+\S*locklark\b", body):
+        raise AssertionError(f"gh wrapper does not invoke a locklark executable: {body!r}")
+    if '"$@"' not in body:
+        raise AssertionError(f"gh wrapper does not forward arguments: {body!r}")
+    return True
+
+
+def desktop_broker_implemented(ctx: E2EContext) -> bool:
+    source = source_text(ctx, "internal/desktop/ipc_broker.go")
+    return "startBrowserBroker" in source and "handleCLIRun" in source
+
+
+def cli_broker_client_implemented(ctx: E2EContext) -> bool:
+    return sources_contain(ctx, "cmd/locklark/*.go", "RequestCLIRun") or sources_contain(
+        ctx, "cmd/locklark/*.go", "BrokerCLI"
+    )
 
 
 def f17_broker_ready(ctx: E2EContext) -> bool:
-    return f14_cli_profiles_ready(ctx) and (
-        "broker" in desktop_sources(ctx).lower()
-        or bool(source_files(ctx, "internal/desktop/cli*.go"))
+    """F17 needs both the desktop broker and a CLI-side client path."""
+
+    return (
+        f14_cli_profiles_ready(ctx)
+        and desktop_broker_implemented(ctx)
+        and cli_broker_client_implemented(ctx)
     )
 
 
@@ -728,21 +1118,22 @@ def f17_broker_ready(ctx: E2EContext) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def desktop_runtime_available(ctx: E2EContext) -> bool:
+    """Whether this checkout can launch the desktop under Xvfb."""
+
+    return shutil.which("xvfb-run") is not None
+
+
 def desktop_binary_starts(ctx: E2EContext, vault: Path, seconds: float = 2.0) -> bool:
-    xvfb = shutil.which("xvfb-run")
-    if xvfb is None:
+    if shutil.which("xvfb-run") is None:
         return False
     env = dict(os.environ)
     env["TMPDIR"] = str(ctx.temp_dir)
-    command = [
-        xvfb,
-        "-a",
-        "-s",
-        "-screen 0 1280x900x24",
-        str(ctx.desktop_bin),
-        "--file",
-        str(vault),
-    ]
+    # Own a complete Linux GUI session: private D-Bus (unless the caller already
+    # supplied a usable bus) plus Xvfb, matching the native acceptance scripts.
+    command = owned_gui_command(
+        [str(ctx.desktop_bin), "--file", str(vault)], env=env, use_xvfb=True
+    )
     process = subprocess.Popen(
         command,
         cwd=str(ctx.temp_dir),
@@ -750,18 +1141,17 @@ def desktop_binary_starts(ctx: E2EContext, vault: Path, seconds: float = 2.0) ->
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        # xvfb-run, the GUI and any broker child share a private session so a
+        # bounded SIGTERM/SIGKILL of the group reaps all of them; terminating
+        # only the wrapper used to leave the desktop (and its broker socket)
+        # alive for later tests on slower/remote runners.
+        start_new_session=True,
     )
     try:
         time.sleep(seconds)
         return process.poll() is None
     finally:
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=3)
+        terminate_process_group(process, grace=3.0, owned_group=process.pid)
 
 
 def file_mode(path: Path) -> int:
@@ -845,6 +1235,8 @@ class TrapListener:
 
 __all__ = [
     "HEX32_RE",
+    "F14_REQUIRED_PROFILES",
+    "HEX32_RE",
     "HEX64_RE",
     "PARITY_STATUSES",
     "TrapListener",
@@ -854,32 +1246,47 @@ __all__ = [
     "audit_events",
     "built_extension",
     "checklist_rows",
+    "cli_broker_client_implemented",
     "cli_command",
     "cli_help",
+    "cli_profiles",
     "cli_supports",
     "command_known",
     "desktop_binary_starts",
+    "desktop_runtime_available",
+    "desktop_broker_implemented",
     "desktop_sources",
     "edit_url",
     "evidence_paths",
     "extension_asset",
     "extension_text",
     "f1_passkey_ready",
+    "f1_autosubmit_ready",
     "f2_inline_ready",
+    "f2_autologin_ready",
     "f3_team_sync_ready",
     "f4_team_cli_ready",
     "f5_desktop_timer_ready",
+    "f5_filter_refresh_ready",
     "f7_shared_ipc_ready",
     "f8_desktop_v2_ready",
+    "f8_v2_editor_ready",
     "f9_save_generator_ready",
     "f10_popup_vault_ready",
     "f11_identity_ready",
+    "f11_fill_contract_ready",
     "f12_parity_doc",
     "f13_watchtower_ready",
+    "f13_cli_health_flags",
+    "f13_hibp_client_ready",
     "f14_cli_profiles_ready",
     "f15_run_bundle_ready",
     "f16_cli_shell_ready",
     "f17_broker_ready",
+    "extension_or_source_text",
+    "go_package_test",
+    "go_tool",
+    "node_test_pattern",
     "file_mode",
     "flags_by_id",
     "gate",
@@ -901,6 +1308,7 @@ __all__ = [
     "require_hex64",
     "reveal_login",
     "sha256_file",
+    "shell_function_body",
     "simple_1pux",
     "source_files",
     "source_text",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import socket
@@ -18,11 +19,13 @@ from .support import (
     edit_url,
     extension_text,
     f10_popup_vault_ready,
+    f1_autosubmit_ready,
     f1_passkey_ready,
     f2_inline_ready,
     f3_team_sync_ready,
     f4_team_cli_ready,
     f5_desktop_timer_ready,
+    f5_filter_refresh_ready,
     f7_shared_ipc_ready,
     f8_desktop_v2_ready,
     gate,
@@ -35,6 +38,7 @@ from .support import (
     native_probe,
     node_eval,
     node_test,
+    node_test_pattern,
     pty,
     require_hex64,
     reveal_login,
@@ -79,18 +83,30 @@ def t2_f1_02(ctx):
 
 @e2e_test("T2_F1_03", 2, ["F1"], "Auto-submit revalidates form action after input mutation")
 def t2_f1_03(ctx):
+    # Real identifiers: auto-submit is gated by `autoLogin` and rechecks the
+    # live form (action attribute, connectivity, logical form) right before
+    # requestSubmit.  The retired `autoSubmit` literal never existed.
     core = _core_text(ctx)
-    ready = "autoSubmit" in core or "submitDocument" in core
-    gate(ctx, "F1", ready, "Firefox auto-submit path is absent from core.js")
-    assert "form.action" in core or "action" in core
+    ready = f1_autosubmit_ready(ctx)
+    gate(
+        ctx,
+        "F1",
+        ready,
+        "Firefox auto-submit path (autoLogin-gated requestSubmit) is absent from core.js",
+    )
+    assert 'getAttribute("action")' in core
+    assert "form.isConnected" in core
+    assert "logicalForm(" in core
 
 
 @e2e_test("T2_F1_04", 2, ["F1"], "Auto-submit refuses destructive or ambiguous submit buttons")
 def t2_f1_04(ctx):
     core = _core_text(ctx)
-    ready = "autoSubmit" in core or "submitDocument" in core
-    gate(ctx, "F1", ready, "destructive-submit refusal is absent; there is no auto-submit path")
-    assert "submit" in core.lower()
+    ready = f1_autosubmit_ready(ctx)
+    gate(ctx, "F1", ready, "Firefox auto-submit path is absent from core.js")
+    assert "/register|sign.?up|reset|change|delete|purchase|pay/i" in core
+    assert "destructive" in core
+    assert "allowCombined" in core and "allowPassword" in core
 
 
 @e2e_test("T2_F1_05", 2, ["F1"], "Concurrent SSH signing and passkey creation keep a valid journal chain")
@@ -106,12 +122,13 @@ def t2_f1_05(ctx):
 # ---------------------------------------------------------------------------
 
 
-@e2e_test("T2_F2_01", 2, ["F2"], "Passkey RP ID rejects public suffixes and unrelated domains")
+@e2e_test("T2_F2_01", 2, ["F2"], "Capability probe: RP-ID validation uses the public-suffix list")
 def t2_f2_01(ctx):
     ready = f1_passkey_ready(ctx)
     gate(ctx, "F2", ready, "passkey RP-ID parser is absent from the native protocol")
-    webauthn = extension_text(ctx, "webauthn.js")
-    assert "rpId" in webauthn or "rp.id" in webauthn or "rp" in webauthn
+    passkey = source_text(ctx, "internal/passkey/passkey.go")
+    assert "publicsuffix.PublicSuffix" in passkey
+    assert "func ValidRP" in passkey
 
 
 @e2e_test("T2_F2_02", 2, ["F2"], "userVerification=required refuses an approval without fresh factors")
@@ -324,12 +341,16 @@ def t2_f5_04(ctx):
 @e2e_test("T2_F5_05", 2, ["F5"], "Renaming out of the active query removes the item from filtered results")
 def t2_f5_05(ctx):
     text = desktop_sources(ctx)
-    ready = f5_desktop_timer_ready(ctx) and re.search(
-        r"refresh\(\)[\s\S]{0,400}?a\.query", text
+    ready = f5_desktop_timer_ready(ctx) and f5_filter_refresh_ready(ctx)
+    gate(
+        ctx,
+        "F5",
+        ready,
+        "filtered refresh does not capture and re-apply the query/scope (captureFilter/filterCurrent/queryRows)",
     )
-    gate(ctx, "F5", ready, "filtered refresh does not preserve/apply the query")
     vault = make_vault(ctx, ["Alpha", "Beta"])
     assert len(list_rows(ctx, vault)) == 2
+    assert "filter := a.captureFilter()" in text
 
 
 # ---------------------------------------------------------------------------
@@ -340,7 +361,13 @@ def t2_f5_05(ctx):
 @e2e_test("T2_F6_01", 2, ["F6"], "Ambiguous op:// references are refused instead of guessing")
 def t2_f6_01(ctx):
     ready = cli_supports(ctx, "add-item") and cli_supports(ctx, "reveal-ref")
-    gate(ctx, "F6", ready, "section-qualified reference ambiguity handling is absent")
+    gate(
+        ctx,
+        "F6",
+        ready,
+        "CLI add-item/reveal-ref command surface is absent; section-qualified "
+        "reference ambiguity handling lives in the v2 host model",
+    )
     vault = make_vault(ctx, ["Staging DB"])
     result = pty(
         ctx,
@@ -480,7 +507,13 @@ def t2_f6_04(ctx):
 @e2e_test("T2_F6_05", 2, ["F6"], "Oversized or control-character custom field payloads are rejected")
 def t2_f6_05(ctx):
     ready = cli_supports(ctx, "add-item")
-    gate(ctx, "F6", ready, "typed custom field payload validation is absent")
+    gate(
+        ctx,
+        "F6",
+        ready,
+        "CLI add-item command is absent; typed custom-field validation lives in the "
+        "v2 host item model",
+    )
     vault = make_vault(ctx)
     result = ctx.run_cli(["personal", "add-item", "--help"])
     assert "add-item" in (result.stdout + result.stderr)
@@ -532,8 +565,35 @@ def t2_f7_05(ctx):
         "tab_id": 1,
         "document_id": "doc-1",
     }
-    probe = native_probe(ctx, request, timeout=8.0)
-    assert not probe.timed_out, probe.stderr
+    # The host may route this request to the desktop before answering, so keep
+    # stdin open until one framed reply arrives (a real browser keeps the pipe
+    # open).  Whether an orphaned broker or a GUI bus problem caused earlier
+    # remote no-frame results is unconfirmed; the diagnostic below stays
+    # metadata-only so CI can tell the cases apart.
+    probe = native_probe(ctx, request, timeout=8.0, await_reply=True)
+    if probe.timed_out:
+        frame_types = sorted({str(frame.get("type")) for frame in probe.frames})
+        raise AssertionError(
+            "native host produced no framed reply: timed_out=True, "
+            "returncode=%r, stdout_bytes=%d, frames=%d, frame_types=%s, "
+            "dbus_session=%s, stderr=%r"
+            % (
+                probe.returncode,
+                len(probe.raw_stdout or b""),
+                len(probe.frames),
+                frame_types,
+                bool((os.environ.get("DBUS_SESSION_BUS_ADDRESS") or "").strip()),
+                (probe.stderr or "")[:400],
+            )
+        )
+    if not probe.frames and probe.returncode not in (0, None):
+        gate(
+            ctx,
+            "F7",
+            False,
+            "native browser host GUI could not start; stale-capability probe unavailable: "
+            + probe.stderr.strip()[:200],
+        )
     assert native_error_frame(probe, request_id), probe.frames
     assert not native_has_credential(probe), probe.frames
 

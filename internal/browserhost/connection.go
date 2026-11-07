@@ -42,6 +42,7 @@ type Connection struct {
 	saveOutcome             atomic.Uint32
 	saveRequestID           string
 	staged                  map[string]*stagedSave
+	upload                  *stagedAttachment
 	stagedBusy              bool
 	neverOrigins            map[string]bool
 	desktopShared           bool
@@ -175,6 +176,7 @@ func (c *Connection) invalidate() {
 	}
 	c.invalidateOTP()
 	c.clearStaged()
+	c.clearUpload()
 	c.neverOrigins = nil
 	c.profileContext = personal.BrowserContext{}
 	c.matchedProfiles = map[string]string{}
@@ -234,6 +236,7 @@ func (c *Connection) expire() {
 		go c.refuse(id)
 	}
 	c.expireStaged()
+	c.expireUpload()
 }
 func (c *Connection) syncEpoch() {
 	if g := c.generation.Load(); g != c.epoch {
@@ -397,6 +400,9 @@ func (c *Connection) Handle(r Request) error {
 		return e
 	}
 	if handled, e := c.stagedMessage(r); handled {
+		return e
+	}
+	if handled, e := c.attachmentMessage(r); handled {
 		return e
 	}
 	if isV2Operation(r.Type) {

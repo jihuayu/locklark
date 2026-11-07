@@ -19,9 +19,11 @@ import pty
 import re
 import secrets
 import select
+import signal
 import shutil
 import struct
 import subprocess
+import sys
 import termios
 import time
 import uuid
@@ -34,6 +36,10 @@ from typing import Any, Callable
 # ---------------------------------------------------------------------------
 
 VALID_TIERS = (1, 2, 3, 4)
+# "component_contract" records evidence from an executed component test
+# (browser-extension M3/core suites or an existing native package test)
+# rather than a whole-browser user journey.
+COVERAGE_KINDS = ("functional", "capability_probe", "component_contract")
 VALID_FEATURES = tuple(f"F{i}" for i in range(1, 18))
 CHROMIUM_EXT_ORIGIN = "chrome-extension://geldnhjapnackobgknocomedmjgphnpe/"
 FIREFOX_EXT_ID = "browser@locklark.local"
@@ -73,6 +79,7 @@ class TestCaseSpec:
     summary: str
     func: Callable[["E2EContext"], Any]
     module: str = ""
+    coverage_kind: str = "functional"
 
 
 REGISTRY: dict[str, TestCaseSpec] = {}
@@ -83,6 +90,7 @@ def register_test(
     tier: int,
     features: list[str] | tuple[str, ...] | str,
     summary: str = "",
+    coverage_kind: str | None = None,
 ) -> Callable:
     """Register a test function and return it unchanged.
 
@@ -101,6 +109,14 @@ def register_test(
         features_list = list(features)
     if not features_list:
         raise ValueError("at least one feature is required")
+    if coverage_kind is not None and coverage_kind not in COVERAGE_KINDS:
+        raise ValueError(f"invalid coverage_kind {coverage_kind!r}")
+    if coverage_kind is None:
+        coverage_kind = (
+            "capability_probe"
+            if tier in (3, 4) or summary.startswith("Capability probe")
+            else "functional"
+        )
     for feature in features_list:
         if feature not in VALID_FEATURES:
             raise ValueError(
@@ -120,6 +136,7 @@ def register_test(
             summary=summary,
             func=fn,
             module=getattr(fn, "__module__", ""),
+            coverage_kind=coverage_kind,
         )
         return fn
 
@@ -328,6 +345,274 @@ def _surface_text(value: Any) -> str:
         except (TypeError, ValueError):
             return repr(value)
     return str(value)
+
+
+XVFB_ARGS = ("-a", "-s", "-screen 0 1280x900x24")
+
+# Save the protocol pipe on fd 9; xvfb-run uses and closes fd 3 internally.
+# Launcher/service console output goes to stderr throughout the wrapper chain.
+OWNED_SESSION_WRAPPER = 'exec 9>&1; exec 1>&2; exec "$@"'
+# Only the host restores the protocol stdout. Arguments always arrive via argv.
+OWNED_TARGET_WRAPPER = 'exec "$@" 1>&9 9>&-'
+
+
+def effective_display(env: dict[str, str]) -> bool:
+    """An empty or whitespace-only DISPLAY counts as absent."""
+
+    return bool((env.get("DISPLAY") or "").strip())
+
+
+def session_bus_usable(env: dict[str, str]) -> bool:
+    """True when the supplied DBUS_SESSION_BUS_ADDRESS looks usable."""
+
+    value = (env.get("DBUS_SESSION_BUS_ADDRESS") or "").strip()
+    if not value:
+        return False
+    if value.startswith("unix:path="):
+        path = value.split("unix:path=", 1)[1].split(",", 1)[0]
+        if path and not Path(path).exists():
+            return False
+    return True
+
+
+def owned_gui_command(
+    command: list[str] | tuple[str, ...],
+    *,
+    env: dict[str, str],
+    use_xvfb: bool,
+) -> list[str]:
+    """Return a GUI invocation with a private session and exclusive host stdout.
+
+    Linux GTK/AT-SPI initialisation needs a session bus; CI images do not
+    provide one, so the real native acceptance scripts run
+    ``dbus-run-session -- xvfb-run ...``.  Their services log to the inherited
+    stdout, which corrupts the 4-byte length-prefixed native frames, so the
+    launch is wrapped in a fixed fd topology (no shell interpolation, every
+    argument supplied through argv):
+
+    ``sh -c OWNED_SESSION_WRAPPER locklark-session`` moves stdout to fd 9 and
+    redirects fd 1 to stderr, then runs ``dbus-run-session -- xvfb-run ...
+    sh -c OWNED_TARGET_WRAPPER locklark-native <target>`` so only the actual
+    host gets the original stdout pipe back.  A supplied usable
+    DBUS_SESSION_BUS_ADDRESS is preserved untouched (its services are already
+    externally owned), and an empty address is treated as absent.
+
+    Raises AssertionError (validation-blocked, never PASS/pending) when a
+    required wrapper is not installed.
+    """
+
+    target = [str(part) for part in command]
+    xvfb: str | None = None
+    if use_xvfb:
+        xvfb = shutil.which("xvfb-run")
+        if xvfb is None:
+            raise AssertionError(
+                "validation blocked: xvfb-run unavailable; GUI session cannot be created"
+            )
+    dbus: str | None = None
+    if sys.platform.startswith("linux") and not session_bus_usable(env):
+        dbus = shutil.which("dbus-run-session")
+        if dbus is None:
+            raise AssertionError(
+                "validation blocked: DBUS_SESSION_BUS_ADDRESS is unset and "
+                "dbus-run-session is unavailable; GTK/AT-SPI GUI session cannot be created"
+            )
+    if xvfb is None and dbus is None:
+        return target
+    chain = ["sh", "-c", OWNED_TARGET_WRAPPER, "locklark-native", *target]
+    if xvfb is not None:
+        chain = [xvfb, *XVFB_ARGS, *chain]
+    if dbus is not None:
+        chain = [dbus, "--", *chain]
+    return ["sh", "-c", OWNED_SESSION_WRAPPER, "locklark-session", *chain]
+
+
+def first_native_frame_end(data: bytes) -> int | None:
+    """Return the byte offset just past the first complete native frame."""
+
+    if len(data) < 4:
+        return None
+    (length,) = struct.unpack("=I", data[:4])
+    if length == 0 or length > _MAX_NATIVE_FRAME:
+        return None
+    end = 4 + length
+    if len(data) < end:
+        return None
+    return end
+
+
+def _group_has_members(group: int) -> bool:
+    try:
+        os.killpg(group, 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        return True
+    return True
+
+
+def terminate_process_group(
+    proc: subprocess.Popen,
+    *,
+    grace: float = 3.0,
+    owned_group: int | None = None,
+) -> int | None:
+    """Terminate the session/process group this harness launched.
+
+    Launches pass ``start_new_session=True``, so the wrapper, the GUI and any
+    broker child form one group whose id equals the wrapper pid.  Ownership is
+    verified: a group is signalled only when ``group == proc.pid`` (or an
+    explicit ``owned_group`` recorded at launch is supplied) and never when it
+    matches our own group, so unrelated user processes cannot be hit.
+
+    The wrapper may exit while descendants remain, and a descendant may ignore
+    SIGTERM, so the wait/escalation targets the *group*, not just the wrapper.
+    """
+
+    own_group = os.getpgid(0)
+    group = owned_group
+    if group is None:
+        try:
+            candidate = os.getpgid(proc.pid)
+        except (ProcessLookupError, PermissionError, OSError):
+            candidate = None
+        group = candidate if candidate == proc.pid else None
+    if group is not None and group == own_group:
+        group = None
+    if group is not None:
+        try:
+            os.killpg(group, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            group = None
+    if group is None:
+        if proc.poll() is None:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+        try:
+            proc.wait(timeout=grace)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=grace)
+            except subprocess.TimeoutExpired:
+                pass
+        return proc.poll()
+
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline:
+        if not _group_has_members(group):
+            break
+        time.sleep(0.05)
+    if _group_has_members(group):
+        try:
+            os.killpg(group, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        hard_deadline = time.monotonic() + 2.0
+        while time.monotonic() < hard_deadline and _group_has_members(group):
+            time.sleep(0.05)
+    try:
+        proc.wait(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        pass
+    return proc.poll()
+
+
+def relay_first_frame(
+    proc: subprocess.Popen,
+    raw_input: bytes,
+    *,
+    timeout: float,
+    grace: float = 3.0,
+) -> tuple[bytes, bytes, bool]:
+    """Keep the relay stdin open until one complete framed reply arrives.
+
+    A real browser keeps the native-messaging pipe open while the host waits
+    for the desktop broker, so closing stdin right after the request (what
+    ``communicate(input=...)`` does) can stop the host's relay before the reply
+    is forwarded.  This helper writes the request, waits for exactly one
+    complete length-prefixed frame on stdout, then closes stdin and tears down
+    the owned process group.  All reads are select-driven and bounded; EOF
+    streams are dropped from the select set, and the final drain never blocks
+    on a descendant that inherited the pipes.
+
+    Returns ``(stdout, stderr, timed_out)``; ``timed_out`` is True when no
+    complete frame arrived before the deadline.
+    """
+
+    buffers: dict[Any, bytearray] = {}
+    if proc.stdout is not None:
+        buffers[proc.stdout] = bytearray()
+    if proc.stderr is not None:
+        buffers[proc.stderr] = bytearray()
+    complete = False
+
+    def collect(until: float) -> None:
+        nonlocal complete
+        while True:
+            remaining = until - time.monotonic()
+            if remaining <= 0:
+                return
+            live = [stream for stream in buffers if not stream.closed]
+            if not live:
+                return
+            ready, _, _ = select.select(live, [], [], min(0.2, remaining))
+            if not ready:
+                if proc.poll() is not None and not any(
+                    not stream.closed for stream in buffers
+                ):
+                    return
+                continue
+            for stream in ready:
+                buffer = buffers[stream]
+                try:
+                    chunk = os.read(stream.fileno(), 65536)
+                except (OSError, ValueError):
+                    chunk = b""
+                if not chunk:
+                    try:
+                        stream.close()
+                    except (OSError, ValueError):
+                        pass
+                    continue
+                buffer.extend(chunk)
+                if stream is proc.stdout and first_native_frame_end(bytes(buffer)):
+                    complete = True
+            if complete:
+                return
+
+    deadline = time.monotonic() + timeout
+    try:
+        if raw_input:
+            try:
+                proc.stdin.write(raw_input)
+                proc.stdin.flush()
+            except (BrokenPipeError, OSError, ValueError):
+                pass
+        collect(deadline)
+    finally:
+        try:
+            proc.stdin.close()
+        except (OSError, ValueError):
+            pass
+        if not complete:
+            collect(time.monotonic() + 1.0)
+        # The relay always owns a start_new_session launch, so the group id is
+        # the wrapper pid even after the wrapper itself has exited.
+        terminate_process_group(proc, grace=grace, owned_group=proc.pid)
+        for stream in list(buffers):
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
+    stdout = bytes(buffers.get(proc.stdout, b""))
+    stderr = bytes(buffers.get(proc.stderr, b""))
+    return stdout, stderr, not complete
 
 
 class E2EContext:
@@ -757,6 +1042,7 @@ class E2EContext:
         timeout: float = 10.0,
         use_xvfb: bool | None = None,
         env: dict[str, str] | None = None,
+        await_reply: bool = False,
     ) -> NativeProbeResult:
         bin_path = (
             self.browser_chromium_bin
@@ -796,21 +1082,11 @@ class E2EContext:
         proc_env = dict(os.environ if env is None else env)
         proc_env["TMPDIR"] = str(self.temp_dir)
         if use_xvfb is None:
-            use_xvfb = (
-                "DISPLAY" not in proc_env and shutil.which("xvfb-run") is not None
-            )
+            use_xvfb = not effective_display(proc_env) and shutil.which("xvfb-run") is not None
         args = [str(arg) for arg in launch_args]
-        if use_xvfb and shutil.which("xvfb-run") is not None:
-            command = [
-                "xvfb-run",
-                "-a",
-                "-s",
-                "-screen 0 1280x900x24",
-                str(bin_path),
-                *args,
-            ]
-        else:
-            command = [str(bin_path), *args]
+        command = owned_gui_command(
+            [str(bin_path), *args], env=proc_env, use_xvfb=bool(use_xvfb)
+        )
 
         proc = subprocess.Popen(
             command,
@@ -819,43 +1095,40 @@ class E2EContext:
             stderr=subprocess.PIPE,
             cwd=str(self.temp_dir),
             env=proc_env,
+            start_new_session=True,
         )
         timed_out = False
         stdout_bytes = b""
         stderr_bytes = b""
-        first_timeout: subprocess.TimeoutExpired | None = None
-        try:
-            stdout_bytes, stderr_bytes = proc.communicate(
-                input=raw_input, timeout=timeout
+        if await_reply:
+            stdout_bytes, stderr_bytes, timed_out = relay_first_frame(
+                proc, raw_input, timeout=timeout
             )
-        except subprocess.TimeoutExpired as exc:
-            first_timeout = exc
-            timed_out = True
+        else:
+            first_timeout: subprocess.TimeoutExpired | None = None
             try:
-                proc.kill()
-            except OSError:
-                pass
-            # collect partial output, but keep the wait bounded even when the
-            # host left a grandchild holding the inherited pipes open.
-            try:
-                stdout_bytes, stderr_bytes = proc.communicate(timeout=2)
-            except subprocess.TimeoutExpired as second:
-                stdout_bytes = (first_timeout.output or b"") + (
-                    second.output or b""
+                stdout_bytes, stderr_bytes = proc.communicate(
+                    input=raw_input, timeout=timeout
                 )
-                stderr_bytes = (first_timeout.stderr or b"") + (
-                    second.stderr or b""
-                )
-        finally:
-            if proc.poll() is None:
+            except subprocess.TimeoutExpired as exc:
+                first_timeout = exc
+                timed_out = True
                 try:
                     proc.kill()
                 except OSError:
                     pass
+                # collect partial output, but keep the wait bounded even when
+                # the host left a grandchild holding the inherited pipes open.
                 try:
-                    proc.wait(timeout=5)
-                except Exception:
-                    pass
+                    stdout_bytes, stderr_bytes = proc.communicate(timeout=2)
+                except subprocess.TimeoutExpired as second:
+                    stdout_bytes = (first_timeout.output or b"") + (
+                        second.output or b""
+                    )
+                    stderr_bytes = (first_timeout.stderr or b"") + (
+                        second.stderr or b""
+                    )
+        terminate_process_group(proc, grace=5.0, owned_group=proc.pid)
 
         returncode: int | None = proc.returncode
         stdout_bytes = stdout_bytes or b""
@@ -973,12 +1246,22 @@ class E2EContext:
 
 __all__ = [
     "CHROMIUM_EXT_ORIGIN",
+    "COVERAGE_KINDS",
     "CLIResult",
     "E2EContext",
     "FIREFOX_EXT_ID",
     "FeatureNotImplementedError",
     "ISSUED_TOKEN_RE",
     "NativeProbeResult",
+    "OWNED_SESSION_WRAPPER",
+    "OWNED_TARGET_WRAPPER",
+    "XVFB_ARGS",
+    "effective_display",
+    "first_native_frame_end",
+    "owned_gui_command",
+    "session_bus_usable",
+    "relay_first_frame",
+    "terminate_process_group",
     "PTYResult",
     "RECOVERY_KIT_RE",
     "REGISTRY",

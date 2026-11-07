@@ -1,5 +1,7 @@
 # Locklark 持续开发目标
 
+> 当前已合并基线（2026-11-07）：`main` `4abecb8`，PR #43 最终六项 CI 全部通过。当前浏览器功能与仍需参考对照的范围见[浏览器清单](browser-parity-checklist.md)，进度/E2E 对账与插件收尾见[本轮验收](plugin-completion-validation.md)。下文“下一项候选”及旧 PR/CI 待办包含历史阶段，应由较新记录覆盖，不作为现有功能缺失的自动判据。
+
 目标：完成 [design.md](design.md) 的全部产品、安全协议和验收范围。`main` 是长期基线；[progress.md](progress.md) 记录实际证据。本目标不把预览、合成演练或编译成功认定为已能替换 1Password。用户已要求先不依赖 Ryugi。
 
 用户已持续授权使用 `gpt-6-luna`、`max` 推理强度的独立审查子代理；已授权的复核、修复、测试、推送和满足门槛后的 squash 合并无需逐步确认。代码复核不替代 GitHub 要求的人工批准或外部密码认证。
