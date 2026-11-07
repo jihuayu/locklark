@@ -25,3 +25,5 @@ background 从实际 runtime sender 取得 origin/tab/document，不信任页面
 Go 契约检查 metadata-only、真正只读、RP/状态/allowlist、排序、严格 DTO、整帧边界和固定账户批准；Node VM 检查 MAIN/isolated 生命周期、能力回声、可信选择及 background 上下文。它们是组件契约，不算真实浏览器旅程。
 
 真实 Chromium/Edge 与 Firefox 脚本调用标准网页 API，使用真实输入焦点/点击以及 native UI 因素输入；检查不提前批准、忽略 timeout、取消、closed-shadow/MAIN 隔离、原库快照不变、所选账户签名、导航和断连。Node crypto 验证 RP hash、origin/challenge、UP/UV 和签名；可选独立 @simplewebauthn/server 校验。自动脚本不向产品增加测试消息或绕过批准接口。每次实际运行的范围与失败修复均写入验收记录。
+
+其他提供者验收仅在 CDP 测试会话配置软件 CTAP2/USB 验证器，通过标准 cross-platform create 和真实“使用其他验证器”点击运行原生 get；不修改产品消息，不读取验证器私钥。RP 独立核对签名并检查本地库快照未变，finally 清除虚拟验证器。它提供共存与回退证据，不提供真实硬件或跨设备同步证据。

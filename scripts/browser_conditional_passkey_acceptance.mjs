@@ -62,11 +62,29 @@ export async function acceptConditionalPasskey({
     await pageEval(startConditional, { rp, challenge });
     return challenge;
   };
+  phase("passkey-conditional:controlled-document");
+  // The preceding full OTP journey leaves its own split-field document open.
+  // Navigate through the actual driver to the login fixture required here.
+  await navigate(origin + "/passkey?conditional-start=1");
   phase("passkey-conditional:capability");
   await focusPage();
-  assert.equal(await pageEval(async () => await PublicKeyCredential.isConditionalMediationAvailable()), true,
-    "Conditional availability missing");
   await pageEval(prepareFields);
+  const availability = [];
+  try {
+    await eventually(async () => {
+      const supported = await pageEval(async () => await PublicKeyCredential.isConditionalMediationAvailable());
+      availability.push(supported === true);
+      return supported === true;
+    }, "Conditional availability missing", 20000);
+  } catch (error) {
+    console.log("Conditional capability state: " + JSON.stringify(await pageEval(() => ({
+      visible: document.visibilityState === "visible", focused: document.hasFocus(),
+      method: typeof PublicKeyCredential.isConditionalMediationAvailable === "function",
+      bridge: window.conditionalBridgeFacts,
+    }))));
+    throw error;
+  }
+  console.log("Conditional capability attempts: " + JSON.stringify(availability));
   const before = observe();
   phase("passkey-conditional:no-prompt-before-focus");
   await start("abort");
