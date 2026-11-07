@@ -24,3 +24,5 @@
 4. 实际浏览器 RP 独立验证 origin/challenge/RP/账户/签名及真实 UP/UV；不记录因素、capsule、私钥或 OTP 种子。
 
 未取得这些证据前不勾选 #39 的“实际系统 UV 验收完成”，不称完整多端 1:1。
+
+整合到 main 9cbc34c 后，全仓 vet、293 项扩展测试及统一 E2E 的系统 UV 组件契约均通过，具体分类和最终精确 head 合并门槛见[综合验收](browser-completion-validation.md)。真实 Windows/macOS 硬件条件仍按上节保留。

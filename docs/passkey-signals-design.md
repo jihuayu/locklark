@@ -14,7 +14,7 @@ passkey-signal 的 options 是严格的 kind + 对应标准字段；最多 32 Ki
 
 先发送精确 passkey-signal-accepted {v,id,type}，再异步只读查库；已有原生操作时接受后忽略，不抢占。ACK 不等于本地已提交，也不返回存在性。审阅不追加审计、不改快照、不续 idle、不登记 MutationGate；每连接最多一个、期限不超过两分钟及现有 capability。超过 50 个受影响账户时整个建议忽略，不截断部分删除。
 
-只匹配 active login 的 RP/credential ID 或精确 RP/user ID。unknown 提议移除该 CID；accepted 仅提议移除该用户未在接受列表中的 CID；user 仅提议更新该用户已有凭据的 Name/DisplayName。stored userHandle、原记录、私钥不进入 DTO。native 显示网站/RP、账户及更名或移除影响，必须由用户确认；信号本身不授予 UV。技术修订/完整 ID 不占据普通确认界面。
+只匹配 active login 的 RP/credential ID 或精确 RP/user ID。unknown 提议移除该 CID；accepted 仅提议移除该用户未在接受列表中的 CID；user 仅提议更新该用户已有凭据的 Name/DisplayName。stored userHandle、原记录、私钥不进入 DTO。native 显示网站/RP、账户及更名或移除影响，必须由用户确认；信号本身不授予 UV。技术修订/完整 ID 不占据普通确认界面。受影响列表高度有界并可滚动，确认/取消固定在列表外，50 行时仍可操作。
 
 ## 原子修改与取消
 
@@ -22,7 +22,7 @@ passkey-signal 的 options 是严格的 kind + 对应标准字段；最多 32 Ki
 
 每个变更在同一事务内 seal/appendLinked，维护正确 tip/修订链，新的已知 action item.passkey.signal 支持完整历史和尾部回放；HMAC 绑定原信号/审阅 selectors，审计不存原参数。移除在 commit decision 赢后保守推进 session Passkey revocation epoch，使其他连接排队签名失效。
 
-gate 以 atomic.Pointer 发布，锁定/拒绝/期限可立即取消；登记前后均复查取消，数据库等待后取消先赢不得写。原生工作中也有不受 App.busy 准入阻拦的取消入口，不承诺追回已提交修改。提交先赢后撤销或关闭失败只在 native 呈现 UNKNOWN，网页永远不收到第二个结果帧。锁库/换 Session/关闭/期限清除过时 proposal。
+gate 以 atomic.Pointer 发布，锁定/拒绝/期限可立即取消；拒绝先在独立 authMu 下匹配不可变建议 ID 并发布取消，不等待 Connection.mu，随后 TryLock 或延后回收；旧 ID 不影响新建议。登记前后均复查取消，数据库等待后取消先赢不得写。原生工作中也有不受 App.busy 准入阻拦的取消入口，不承诺追回已提交修改。提交先赢后撤销或关闭失败只在 native 呈现 UNKNOWN，网页永远不收到第二个结果帧。锁库/换 Session/关闭/期限清除过时 proposal。
 
 ## 验证范围
 

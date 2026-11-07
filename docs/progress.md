@@ -1,8 +1,8 @@
 # Locklark 开发进度
 
-当前已合并基线：main 2fc96e7（[PR #47](https://github.com/jihuayu/locklark/pull/47)，2026-11-07 08:51:33 UTC）。性能 PR 最终 head ab9aca6 的六项检查全部成功，合并树与验证树一致。PR #46 已关闭 #24/#32/#33/#34/#36/#38，PR #47 关闭 #35；当前仅 #39 浏览器体验 epic 开放。旧段落保留历史，不代表当前 PR 或缺口状态。
+当前已合并基线：main 9cbc34c（[PR #48](https://github.com/jihuayu/locklark/pull/48)，2026-11-07 09:16:47 UTC），精确 head b2905ff 的六项 CI 全部成功，合并树与验证树一致。PR #46 已关闭 #24/#32/#33/#34/#36/#38，PR #47 关闭 #35；当前仅 #39 浏览器体验 epic 开放。旧段落为历史，不代表当前未合并 PR。
 
-2026-11-07 条件式 Passkey 与共存：metadata-only 原生账户列表、精确条目/修订选择、握手及页面生命周期清理、开放 Shadow DOM 焦点和并发槽位回归已完成；真实 Chromium/Edge/Firefox 组合旅程通过，Edge 另完成独立软件验证器的原生回退与签名核对。接新主线后扩展 250 项通过，真实 GUI、组件契约及最终 CI 分开记录，见[条件式验收](conditional-passkey-validation.md)。系统逐次 UV、Signal APIs 和发布准备仍为后续增量，不能据此关闭 #39。
+2026-11-07 浏览器继续完成：条件式账户建议和其他提供者回退已经 PR #48 合并；本批补齐 native owner 确认的 Signal APIs、逐次新鲜系统 UV 入口、相关来源请求回退、可重复未签名发布包和公共站点精简兼容 fixture。主代理设计/独立验收，外部 DeepSeek workers 实现/并行复核。扩展 293 项通过，统一 E2E 212 项（176 通过、36 pending、0 失败），探针和组件单独统计；实际 Chrome/Edge 完整原生交互及三浏览器公共站点组件通过。详见[本批综合验收](browser-completion-validation.md)及[条件式验收](conditional-passkey-validation.md)。真实 Hello/Touch ID、Windows/macOS 全链路、跨设备和签名商店分发仍未完成，不能关闭整个 #39。
 
 2026-11-07 全部 issues 接续：起始 8 项未关闭。#32/#33/#34/#36/#38 的主修复已在 PR #43 合并，正独立复核并补齐原始竞态回归；#35 历史验证性能与 #39 条件式 Passkey 在隔离工作区并行实现，#24 收录通知补 README 回链。逐项证据、关闭门槛和外部验收范围见 [issues 完成记录](issue-completion-validation.md)。
 
