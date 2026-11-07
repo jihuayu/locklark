@@ -39,3 +39,7 @@ Linux CI 运行相同的全矩阵基准，其他平台继续正常功能测试�
 首个 PR head `30d7768` 的 Linux/Windows 检查失败于 PR #46 新增的 `TestFillQueuedInvalidCancelCannotRevoke`：把随机 capability 首位替换为 `f`，有 1/16 概率仍等于真实 capability。认证逻辑正确地接受了真实 token；这是测试构造错误，不能靠重跑算通过。修复在处理请求前将 fixture 首位固定为 `f`，再分别翻转第 0、15、31 位的低 hex bit，显式断言每个无效 token 与真实 token 不同，保留 epoch、排队批准及结果断言，未修改生产认证。
 
 主代理独立重复该测试 32 次通过（15.143 秒），全部 queued-fill 测试 `-race` 通过（18.887 秒）；日志为 `/workspace/issue-completion-tasks/invalid-token-independent-32.log` 和 `invalid-token-independent-race.log`。最终合并仍要求修复后的同一个 head 六项 CI 全绿，旧 head 已失败/取消的检查不计入。
+
+修复上述 token fixture 后，head `8af2689` 的 Windows 全包运行在 `TestBrowserOTPReadonlyRevalidationRejectsSecondSessionRevision` 失败（用时 3.30 秒）；Linux、macOS 通过。该语义测试把 control 期限设为 1 秒，却先执行准备、另一 Session 的实际编辑和读盘。授权入口先检查 control.Pending，过期会返回 ErrBrowserOTP，早于应检查的 ErrConflict 路径。外部 worker 用临时诊断强制跨过期限，复现 ErrBrowserOTP（不是缓存绕过），随后删除诊断文件。原 Windows 日志未打印具体 error，新的失败诊断会保留真实错误类别。
+
+仅此测试改为有界 1 分钟 control 并 cleanup，调用授权前显式要求 Pending；仍严格要求 ErrConflict 和前后持久状态逐字节一致。生产 OTP 的 1.5 秒披露预算、cap bounds、时钟和专门的过期测试均未改变。worker 定向重复 16 次通过（其中多次超过旧 1 秒期限），7 类持久化/绑定/取消测试通过；主代理独立将此测试及另一 Session 审计尾部测试 `-race -count=3` 跑通（62.706 秒）。见 `/workspace/issue-completion-tasks/audit-otp-revision-independent-race.log`。再次要求最终新 head 的完整六检查；未将旧 head 的部分绿色结果拼接为最终证据。

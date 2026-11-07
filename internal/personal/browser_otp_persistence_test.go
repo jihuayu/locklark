@@ -132,7 +132,12 @@ func TestBrowserOTPHistorySurvivesBackupRestore(t *testing.T) {
 
 func TestBrowserOTPReadonlyRevalidationRejectsSecondSessionRevision(t *testing.T) {
 	s, target := browserOTPFixture(t)
-	control := NewBrowserOTPControl(time.Now().Add(time.Second))
+	// This test proves the readonly revision revalidation branch, not control
+	// expiry. The second-session edit performs real disk work and can outlast
+	// a one-second control under CI load, so this semantic test uses an ample
+	// but still bounded lifetime; expiry itself has dedicated tests.
+	control := NewBrowserOTPControl(time.Now().Add(time.Minute))
+	t.Cleanup(func() { control.Cancel() })
 	p, err := s.PrepareBrowserOTP(target, dailyGate(t, s), control)
 	if err != nil {
 		t.Fatal(err)
@@ -143,8 +148,13 @@ func TestBrowserOTPReadonlyRevalidationRejectsSecondSessionRevision(t *testing.T
 		t.Fatal(err)
 	}
 	before := dailyDiskState(t, s.path)
+	// Keep the control branch live so a rejection can only come from the
+	// readonly revision comparison rather than an expired pending control.
+	if !control.Pending() {
+		t.Fatal("control expired before readonly verification; revision branch is unreachable")
+	}
 	if _, err = s.AuthorizeBrowserOTP(p); !errors.Is(err, ErrConflict) {
-		t.Fatal("stale preparation passed readonly verification")
+		t.Fatalf("stale preparation passed readonly verification: %v", err)
 	}
 	if !bytes.Equal(before, dailyDiskState(t, s.path)) {
 		t.Fatal("readonly verification appended audit or changed snapshot")
