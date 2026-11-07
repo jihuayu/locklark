@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import socket
@@ -564,11 +565,27 @@ def t2_f7_05(ctx):
         "tab_id": 1,
         "document_id": "doc-1",
     }
-    # The refusal is produced by the shared desktop session and relayed back,
-    # so hold stdin open until one complete framed reply arrives (a real
-    # browser keeps the native-messaging pipe open).
+    # The host may route this request to the desktop before answering, so keep
+    # stdin open until one framed reply arrives (a real browser keeps the pipe
+    # open).  Whether an orphaned broker or a GUI bus problem caused earlier
+    # remote no-frame results is unconfirmed; the diagnostic below stays
+    # metadata-only so CI can tell the cases apart.
     probe = native_probe(ctx, request, timeout=8.0, await_reply=True)
-    assert not probe.timed_out, probe.stderr
+    if probe.timed_out:
+        frame_types = sorted({str(frame.get("type")) for frame in probe.frames})
+        raise AssertionError(
+            "native host produced no framed reply: timed_out=True, "
+            "returncode=%r, stdout_bytes=%d, frames=%d, frame_types=%s, "
+            "dbus_session=%s, stderr=%r"
+            % (
+                probe.returncode,
+                len(probe.raw_stdout or b""),
+                len(probe.frames),
+                frame_types,
+                bool((os.environ.get("DBUS_SESSION_BUS_ADDRESS") or "").strip()),
+                (probe.stderr or "")[:400],
+            )
+        )
     if not probe.frames and probe.returncode not in (0, None):
         gate(
             ctx,

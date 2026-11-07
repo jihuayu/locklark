@@ -680,5 +680,143 @@ class NativeRelayLifecycleTests(unittest.TestCase):
         self.assertFalse(recorded.get("await_reply"))
 
 
+class GuiSessionWrappingTests(unittest.TestCase):
+    """GUI launches own a private session and an exclusive host stdout pipe."""
+
+    def _which(self, mapping: dict[str, str]):
+        def fake(name: str):
+            return mapping.get(name)
+
+        return mock.patch.object(harness.shutil, "which", fake)
+
+    def _assert_wrapped(self, command, *, dbus: bool, xvfb: bool, target: list[str]) -> None:
+        self.assertEqual(command[0], "sh")
+        self.assertEqual(command[1], "-c")
+        self.assertEqual(command[2], harness.OWNED_SESSION_WRAPPER)
+        self.assertEqual(command[3], "locklark-session")
+        rest = command[4:]
+        if dbus:
+            self.assertEqual(rest[0], "/usr/bin/dbus-run-session")
+            self.assertEqual(rest[1], "--")
+            rest = rest[2:]
+        if xvfb:
+            self.assertEqual(rest[0], "/usr/bin/xvfb-run")
+            self.assertEqual(rest[1:4], list(harness.XVFB_ARGS))
+            rest = rest[4:]
+        self.assertEqual(rest[0], "sh")
+        self.assertEqual(rest[1], "-c")
+        self.assertEqual(rest[2], harness.OWNED_TARGET_WRAPPER)
+        self.assertEqual(rest[3], "locklark-native")
+        self.assertEqual(rest[4:], target)
+
+    def test_missing_bus_is_wrapped_with_owned_dbus_session(self):
+        env = {"DISPLAY": "", "PATH": "/usr/bin"}
+        target = ["/opt/locklark-browser-chromium", "origin"]
+        with self._which(
+            {"xvfb-run": "/usr/bin/xvfb-run", "dbus-run-session": "/usr/bin/dbus-run-session"}
+        ):
+            command = harness.owned_gui_command(target, env=env, use_xvfb=True)
+        self._assert_wrapped(command, dbus=True, xvfb=True, target=target)
+
+    def test_supplied_usable_bus_is_preserved(self):
+        socket = Path(tempfile.mkdtemp()) / "bus"
+        self.addCleanup(shutil.rmtree, socket.parent, ignore_errors=True)
+        socket.touch()
+        env = {
+            "DISPLAY": ":99",
+            "DBUS_SESSION_BUS_ADDRESS": f"unix:path={socket}",
+        }
+        self.assertTrue(harness.session_bus_usable(env))
+        with self._which(
+            {"xvfb-run": "/usr/bin/xvfb-run", "dbus-run-session": "/usr/bin/dbus-run-session"}
+        ):
+            command = harness.owned_gui_command(["host"], env=env, use_xvfb=False)
+        self.assertEqual(command, ["host"])
+
+    def test_empty_bus_and_whitespace_display_are_treated_as_absent(self):
+        self.assertFalse(harness.effective_display({"DISPLAY": "   "}))
+        self.assertTrue(harness.effective_display({"DISPLAY": ":1"}))
+        self.assertFalse(harness.session_bus_usable({"DBUS_SESSION_BUS_ADDRESS": "  "}))
+        self.assertFalse(
+            harness.session_bus_usable(
+                {"DBUS_SESSION_BUS_ADDRESS": "unix:path=/nonexistent/locklark-bus"}
+            )
+        )
+        with self._which(
+            {"xvfb-run": "/usr/bin/xvfb-run", "dbus-run-session": "/usr/bin/dbus-run-session"}
+        ):
+            command = harness.owned_gui_command(["host"], env={"DISPLAY": " "}, use_xvfb=True)
+        self._assert_wrapped(command, dbus=True, xvfb=True, target=["host"])
+
+    def test_missing_dbus_wrapper_is_a_validation_blocked_error(self):
+        with self._which({"xvfb-run": "/usr/bin/xvfb-run"}):
+            with self.assertRaisesRegex(AssertionError, "validation blocked"):
+                harness.owned_gui_command(["host"], env={"DISPLAY": ""}, use_xvfb=True)
+
+    def test_missing_xvfb_is_a_validation_blocked_error(self):
+        with self._which({"dbus-run-session": "/usr/bin/dbus-run-session"}):
+            with self.assertRaisesRegex(AssertionError, "validation blocked"):
+                harness.owned_gui_command(["host"], env={}, use_xvfb=True)
+
+    def test_service_stdout_noise_never_enters_the_native_frame_stream(self):
+        # Fake dbus-run-session prints the kind of AT-SPI banner seen on CI
+        # before exec'ing the rest of the chain: the frame stream must stay exact.
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        fake_dbus = root / "fake-dbus-run-session"
+        fake_dbus.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' 'AT-SPI: accessibility service banner'\n"
+            'if [ "$1" = -- ]; then shift; fi\n'
+            'exec "$@"\n',
+            encoding="utf-8",
+        )
+        fake_dbus.chmod(0o700)
+        fake_xvfb = root / "fake-xvfb-run"
+        fake_xvfb.write_text(
+            # Match xvfb-run's three configured arguments and fd-3 closure.
+            '#!/bin/sh\nshift 3\nexec "$@" 3>&-\n',
+            encoding="utf-8",
+        )
+        fake_xvfb.chmod(0o700)
+        host = root / "fake_host.py"
+        host.write_text(
+            "import json, struct, sys\n"
+            "header = sys.stdin.buffer.read(4)\n"
+            "length = struct.unpack('=I', header)[0]\n"
+            "sys.stdin.buffer.read(length)\n"
+            "body = json.dumps({'type': 'error', 'error': 'refused', 'id': '9' * 32}).encode()\n"
+            "sys.stdout.buffer.write(struct.pack('=I', len(body)) + body)\n"
+            "sys.stdout.buffer.flush()\n"
+            "sys.stdin.buffer.read()\n",
+            encoding="utf-8",
+        )
+        target = [sys.executable, str(host)]
+        with self._which(
+            {"xvfb-run": str(fake_xvfb), "dbus-run-session": str(fake_dbus)}
+        ):
+            command = harness.owned_gui_command(
+                target, env={"DISPLAY": ""}, use_xvfb=True
+            )
+        proc = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        self.addCleanup(harness.terminate_process_group, proc, owned_group=proc.pid)
+        raw = harness.encode_native_frame(
+            {"v": 1, "id": "9" * 32, "type": "match", "tab_id": 1}
+        )
+        stdout, stderr, timed_out = harness.relay_first_frame(proc, raw, timeout=10.0)
+        self.assertFalse(timed_out, stderr.decode("utf-8", "replace"))
+        body = json.dumps({"type": "error", "error": "refused", "id": "9" * 32}).encode()
+        expected = struct.pack("=I", len(body)) + body
+        self.assertEqual(stdout, expected)
+        self.assertNotIn(b"AT-SPI", stdout)
+        self.assertIn(b"AT-SPI", stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

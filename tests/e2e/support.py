@@ -21,7 +21,13 @@ import zipfile
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from .harness import CLIResult, E2EContext, PTYResult, terminate_process_group
+from .harness import (
+    CLIResult,
+    E2EContext,
+    PTYResult,
+    owned_gui_command,
+    terminate_process_group,
+)
 
 HEX32_RE = re.compile(r"^[a-f0-9]{32}$")
 HEX64_RE = re.compile(r"^[a-f0-9]{64}$")
@@ -1119,20 +1125,15 @@ def desktop_runtime_available(ctx: E2EContext) -> bool:
 
 
 def desktop_binary_starts(ctx: E2EContext, vault: Path, seconds: float = 2.0) -> bool:
-    xvfb = shutil.which("xvfb-run")
-    if xvfb is None:
+    if shutil.which("xvfb-run") is None:
         return False
     env = dict(os.environ)
     env["TMPDIR"] = str(ctx.temp_dir)
-    command = [
-        xvfb,
-        "-a",
-        "-s",
-        "-screen 0 1280x900x24",
-        str(ctx.desktop_bin),
-        "--file",
-        str(vault),
-    ]
+    # Own a complete Linux GUI session: private D-Bus (unless the caller already
+    # supplied a usable bus) plus Xvfb, matching the native acceptance scripts.
+    command = owned_gui_command(
+        [str(ctx.desktop_bin), "--file", str(vault)], env=env, use_xvfb=True
+    )
     process = subprocess.Popen(
         command,
         cwd=str(ctx.temp_dir),

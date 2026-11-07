@@ -22,7 +22,7 @@
 | 验证 | 已实际取得的结果 |
 | --- | --- |
 | 冻结旧 main 的全量 E2E | 206 项：123 通过、73 pending、10 失败，报告 `/workspace/plugin-completion-baseline-e2e.json`。失败包含旧检测假设/缺少导入等；本轮最终结果另列，不能挪用旧数字。 |
-| 更新后全量 E2E | 主代理重新构建后实跑：206 项，170 通过、36 pending、0 失败，76.349 秒；检测回归由 31 项扩展为 37 项，主代理独立运行全部通过（26.542 秒）。报告 `/workspace/plugin-e2e-final.json`，保留全部 206 个稳定 ID。 |
+| 更新后全量 E2E | 主代理重新构建后实跑：206 项，170 通过、36 pending、0 失败，76.349 秒；检测回归由 31 项扩展为 43 项，主代理独立运行全部通过（31.536 秒）。报告 `/workspace/plugin-e2e-final.json`，保留全部 206 个稳定 ID。 |
 | 扩展单测 | 主代理冻结实现独立运行 `node --test browser-extension/test/*.test.js`：172 项通过、0 失败、0 跳过。 |
 | Go 宿主整包 / personal 整包 | worker 实跑通过：browserhost 40.215 秒，personal 219.826 秒；包含原有测试。 |
 | 主代理独立竞态检查 | `go test -race ./internal/browserhost ./internal/personal -run 'TestAttachment|TestExplicitClear|TestV2SectionsFromInputKeepsSecretClassification' -count=1` 通过，分别 33.518 秒 / 1.032 秒。 |
@@ -44,7 +44,7 @@
 
 `functional` 包含 CLI/原生消息等入口测试，不等于每项都是完整浏览器旅程。12 项组件契约实际执行既有 Node/Go 测试；45 项能力探测只说明组成能力，不宣称完整用户任务。测试名称匹配为零、已实现组件失败均判 FAIL，不能转成 pending。36 项 pending 的实际范围：CLI 创建/导入命令面 13、CLI broker 客户端/租约 14、跨功能旅程 6（包括跨源卡片 iframe）、iframe/卡片用户激活 2、CLI HIBP/在线旅程 1。以 JSON 中每项原因优先，不能将这 36 项直接读成 36 个插件未实现功能。
 
-首轮远端 head `a80802b` 为 169 通过、36 pending、1 失败：T2_F7_05 没有收到拒绝响应。修正测试请求发出后立即关闭 stdin 的行为：有效请求明确等待完整回复，畸形/截断帧仍保留 EOF 检测；所有等待有截止时间，桌面及宿主探针清理自建进程组，避免包装进程退出后遗留子进程。新增回归覆盖迟到回复与 EOF 竞争、提前退出的包装进程、忽略 SIGTERM 的子进程、无权进程组保护。原拒绝断言保留，不把失败改为 pending。修正后主代理独立重跑 T2_F7_05 通过；worker 重跑全部 206 项仍为 170 通过、36 pending、0 失败（113.893 秒，复用冻结二进制，报告 `/workspace/plugin-completion-e2e-probes.json`）；最终远端结果以本 PR Checks 为准，不能沿用首轮其他平台的绿色结果。Web CI 同时保存 JSON 报告 artifact（14 天）。
+首轮远端 head `a80802b` 为 169 通过、36 pending、1 失败：T2_F7_05 没有收到拒绝响应。修正测试请求发出后立即关闭 stdin 的行为：有效请求明确等待完整回复，畸形/截断帧仍保留 EOF 检测；所有等待有截止时间，桌面及宿主探针清理自建进程组，避免包装进程退出后遗留子进程。新增回归覆盖迟到回复与 EOF 竞争、提前退出的包装进程、忽略 SIGTERM 的子进程、无权进程组保护。原拒绝断言保留，不把失败改为 pending。修正后主代理独立重跑 T2_F7_05 通过；worker 重跑全部 206 项仍为 170 通过、36 pending、0 失败（113.893 秒，复用冻结二进制，报告 `/workspace/plugin-completion-e2e-probes.json`）；最终远端结果以本 PR Checks 为准，不能沿用首轮其他平台的绿色结果。第二轮远端 `200658d` 同项仍然超时，因此 stdin 生命周期问题不能被视为已经证明的 CI 根因。进一步使 Linux GUI 探针自行创建 D-Bus/Xvfb 会话，并在 CI 清除前序步骤继承的 DISPLAY/Wayland/D-Bus 环境；保留显式提供且可用的用户会话。等待回复的截止时间和拒绝断言不放宽，缺少所需工具记 validation-blocked 失败，超时只输出退出码、字节数、帧类型和截断 stderr 等诊断。本地随后复现为 stdout 161 字节、0 个有效帧：服务控制台输出与 native stdout 混用，单纯补 D-Bus 不足以修复。通过固定 argv 和独立 fd 9 保留宿主协议管道，将启动器/辅助服务输出导向 stderr；fd 3 被真实 xvfb-run 占用并关闭，不能用于保留协议管道。未修改严格帧解析器；回归要求带公开服务横幅的启动器产生的 stdout 精确等于一个协议帧，横幅只在 stderr。主代理在自建 D-Bus/Xvfb 环境独立重跑 T2_F7_05 通过（12.166 秒），43 项检测回归全部通过（31.536 秒）。最终确认属于本 PR 最新 head 的 CI。Web CI 同时保存 JSON 报告 artifact（14 天）。
 
 复现：`python3 -m unittest discover -s tests/scripts -p 'test_e2e*.py'`、`python3 scripts/e2e_runner.py --feature all --json-out /tmp/locklark-e2e-report.json`；使用有效 Go、Node、Xvfb 工具链。本轮同样进入 Web CI。
 
