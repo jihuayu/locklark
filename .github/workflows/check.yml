@@ -127,6 +127,10 @@ jobs:
           & $python scripts/export_acceptance.py $binary
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $python scripts/plugin_acceptance.py $binary
+      - name: Benchmark authenticated audit history verification
+        if: runner.os == 'Linux'
+        timeout-minutes: 5
+        run: go test ./internal/personal -run '^$' -bench '^BenchmarkAuditCache' -benchmem -benchtime=3x -count=1
       - name: Test native Windows RunCLI console and piped standard streams
         if: always() && runner.os == 'Windows' && !cancelled()
         timeout-minutes: 10

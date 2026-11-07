@@ -132,7 +132,22 @@ func TestBrowserOTPHistorySurvivesBackupRestore(t *testing.T) {
 
 func TestBrowserOTPReadonlyRevalidationRejectsSecondSessionRevision(t *testing.T) {
 	s, target := browserOTPFixture(t)
-	control := NewBrowserOTPControl(time.Now().Add(time.Second))
+	// PrepareBrowserOTP shortens the control to the prepared capability's own
+	// deadline (otpNow()+BrowserOTPBudget, i.e. 1.5s) whenever that is earlier,
+	// so a longer wall-clock control lifetime alone does not survive a
+	// multi-second scheduling pause. This semantic test therefore owns the OTP
+	// clock: reconfigure the fixture OTP to the default 30s period, pin its
+	// window ~1 minute ahead (dailyOTPSemanticClock), and bound the control one
+	// minute beyond that synthetic instant. Dedicated expiry tests keep their
+	// real-clock timer coverage.
+	rev, err := s.Edit(Edit{ID: target.ID, Revision: target.Revision, Field: "otp", Value: "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target.Revision = rev
+	semantic := dailyOTPSemanticClock(s)
+	control := NewBrowserOTPControl(semantic.Add(time.Minute))
+	t.Cleanup(func() { control.Cancel() })
 	p, err := s.PrepareBrowserOTP(target, dailyGate(t, s), control)
 	if err != nil {
 		t.Fatal(err)
@@ -143,8 +158,22 @@ func TestBrowserOTPReadonlyRevalidationRejectsSecondSessionRevision(t *testing.T
 		t.Fatal(err)
 	}
 	before := dailyDiskState(t, s.path)
+	p.cap.mu.Lock()
+	capDeadline := p.cap.bounds.Deadline
+	p.cap.mu.Unlock()
+	// Neither the control nor the code budget may have pulled the deadline back
+	// onto the real clock, which is what made this branch unreachable after a
+	// long second-session edit.
+	if !capDeadline.Equal(semantic.Add(BrowserOTPBudget)) {
+		t.Fatalf("capability deadline left the semantic clock: %v", capDeadline)
+	}
+	// Keep the control branch live so a rejection can only come from the
+	// readonly revision comparison rather than an expired pending control.
+	if control.Deadline().Before(capDeadline) || !control.Pending() {
+		t.Fatal("control expired before readonly verification; revision branch is unreachable")
+	}
 	if _, err = s.AuthorizeBrowserOTP(p); !errors.Is(err, ErrConflict) {
-		t.Fatal("stale preparation passed readonly verification")
+		t.Fatalf("stale preparation passed readonly verification: %v", err)
 	}
 	if !bytes.Equal(before, dailyDiskState(t, s.path)) {
 		t.Fatal("readonly verification appended audit or changed snapshot")

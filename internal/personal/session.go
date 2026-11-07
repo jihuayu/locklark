@@ -33,6 +33,8 @@ type Session struct {
 	saveGate             *BrowserSaveGate
 	lockRequested        atomic.Bool
 	mu                   sync.Mutex
+	auditMu              sync.Mutex
+	audit                *auditCache
 	path                 string
 	material             []byte
 	slotDigest           [32]byte
@@ -118,6 +120,7 @@ func (s *Session) lock() {
 		delete(s.browserPending, f)
 	}
 	s.hibp = nil
+	s.clearAuditCache()
 	clear(s.watchtowerKey)
 	s.watchtowerKey = nil
 	clear(s.material)

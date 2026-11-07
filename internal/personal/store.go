@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base32"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -293,6 +294,11 @@ type authenticatedState struct {
 	items     []vault.Item
 	revisions map[string]string
 	vaults    []vault.VaultMeta
+	// nextCache is a private, session-bound candidate built only after the
+	// complete authentication path succeeded. Callers publish it only after a
+	// committed transaction; chains is nil on cached normal actions, while
+	// audit.list, audit.archived and backup.prepare always receive full chains.
+	nextCache *auditCache
 }
 
 func (a *authenticatedState) clear() {
@@ -329,6 +335,7 @@ func authenticateState(tx *bolt.Tx, pw string, key []byte, action string, unlock
 	if len(raw) > 8192 || json.Unmarshal(raw, &slot) != nil {
 		return nil, invalid
 	}
+	slotSum := sha256.Sum256(raw)
 	var e error
 	if unlocked != nil {
 		if action == "desktop.unlock" || action == "backup.prepare" || sha256.Sum256(raw) != unlocked.slotDigest {
@@ -362,13 +369,70 @@ func authenticateState(tx *bolt.Tx, pw string, key []byte, action string, unlock
 		return nil, invalid
 	}
 	revisions := make(map[string]string)
-	tip, rows, e := history(b, i, s, action == "audit.list" || action == "backup.prepare", revisions)
+	a, e := auditCipher(i)
 	if e != nil {
-		return nil, e
+		return nil, invalid
 	}
-	chains, e := loadChains(b, i, tip.Origin)
-	if e != nil {
-		return nil, e
+	priv := ed25519.NewKeyFromSeed(i.Audit)
+	defer clear(priv)
+	pub := priv.Public().(ed25519.PublicKey)
+	pubHash := sha256.Sum256(pub)
+	var cached *auditCache
+	if unlocked != nil {
+		cached = unlocked.getAuditCache(slotSum, pubHash)
+	}
+	var tip auditTip
+	if e = readSealed(a, tipKey, b.Get(tipKey), &tip); e != nil || tip.Count == 0 || tip.Epoch != s.Epoch || tip.Snapshot != hex.EncodeToString(s.Signature) {
+		return nil, invalid
+	}
+	events := b.Bucket(eventsKey)
+	if events == nil {
+		return nil, invalid
+	}
+	wantRows := action == "audit.list" || action == "backup.prepare"
+	forceCold := action == "audit.list" || action == "audit.archived" || action == "backup.prepare"
+	var rows []Event
+	var full [32]byte
+	var hashed uint64
+	warm := false
+	if !forceCold && cached != nil && cached.count > 0 && cached.count <= tip.Count && cached.origin == tip.Origin {
+		count, fullDigest, prefixDigest, hb, ferr := auditFingerprint(events, tip.Count, cached.count)
+		if ferr == nil && count == tip.Count && prefixDigest == cached.prefix {
+			revs := cloneRevisions(cached.revisions)
+			rcount, rlast, rrows, rerr := replayAuditTail(a, events, cached.count, cached.last, tip, pub, revs, wantRows)
+			if rerr == nil && rcount == count && rlast == tip.Last {
+				revisions, rows, full, hashed, warm = revs, rrows, fullDigest, hb, true
+			}
+		}
+	}
+	if !warm {
+		revisions = make(map[string]string)
+		got, coldRows, herr := history(b, i, s, wantRows, revisions)
+		if herr != nil || got != tip {
+			return nil, invalid
+		}
+		count, fullDigest, _, hb, ferr := auditFingerprint(events, tip.Count, 0)
+		if ferr != nil || count != tip.Count {
+			return nil, invalid
+		}
+		rows, full, hashed = coldRows, fullDigest, hb
+	}
+	rawArchive := b.Get(archiveKey)
+	archiveSum := archiveFingerprint(rawArchive)
+	chains := []Chain(nil)
+	if !forceCold && cached != nil && cached.archiveValid && cached.origin == tip.Origin && cached.archiveDigest == archiveSum {
+		// Exact archive ciphertext and its authenticated anchor were already fully
+		// loaded and verifyChains-checked in this session. Normal actions never
+		// surface archived rows.
+	} else {
+		chains, e = loadChains(b, i, tip.Origin)
+		if e != nil {
+			return nil, e
+		}
+	}
+	var nextCache *auditCache
+	if unlocked != nil {
+		nextCache = &auditCache{slotDigest: slotSum, auditPub: pubHash, count: tip.Count, last: tip.Last, origin: tip.Origin, prefix: full, revisions: cloneRevisions(revisions), archiveDigest: archiveSum, archiveValid: true, hashedBytes: hashed}
 	}
 	if action != "audit.list" {
 		var meta []byte
@@ -392,7 +456,7 @@ func authenticateState(tx *bolt.Tx, pw string, key []byte, action string, unlock
 	if e != nil {
 		return nil, e
 	}
-	return &authenticatedState{slot, opened, i, s, tip, rows, chains, items, revisions, vaults}, nil
+	return &authenticatedState{slot: slot, opened: opened, identity: i, snapshot: s, tip: tip, rows: rows, chains: chains, items: items, revisions: revisions, vaults: vaults, nextCache: nextCache}, nil
 }
 
 // The updater returns only after commit (including bbolt's default fsync).
@@ -496,7 +560,8 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 	}
 	var out result
 	var refusal error
-	e := update(func(tx *bolt.Tx) error {
+	var auditCandidate *auditCache
+	e := update(func(tx *bolt.Tx) (err error) {
 		auth, e := authenticateState(tx, pw, key, action, option.unlocked)
 		if e != nil {
 			return e
@@ -504,6 +569,11 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		defer auth.clear()
 		b := tx.Bucket(bucket)
 		slot, opened, i, s := auth.slot, auth.opened, auth.identity, auth.snapshot
+		defer func() {
+			if err == nil {
+				auditCandidate = auth.nextCache
+			}
+		}()
 		tip, rows, chains, items, revisions, vaults := auth.tip, auth.rows, auth.chains, auth.items, auth.revisions, auth.vaults
 		outcome := "succeeded"
 		var profile *password.Profile
@@ -1597,6 +1667,9 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			out.otp.Clear()
 		}
 		return result{}, e
+	}
+	if option.unlocked != nil {
+		option.unlocked.setAuditCache(auditCandidate)
 	}
 	if browserSaveAction(action) || option.nativeMutation != nil {
 		out.savePersisted = true

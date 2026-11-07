@@ -134,6 +134,9 @@ func (s *Session) PatchMeta(id string, patch func(*V2ItemMeta)) error {
 // returns the authenticated items plus the signed revision map. Every supported
 // item kind is returned so browser search, detail, match and watchtower view
 // the same durable records the desktop vault owns.
+// SSHSeed and Passkey backing bytes are cleared before return; their lengths
+// retain presence flags. Key operations and public passkey metadata use their
+// dedicated authenticated transaction paths rather than cloning secret records.
 func (s *Session) ReadAuthenticatedItems(touch bool) ([]vault.Item, map[string]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -145,6 +148,7 @@ func (s *Session) ReadAuthenticatedItems(touch bool) ([]vault.Item, map[string]s
 		return nil, nil, e
 	}
 	var items []vault.Item
+	var auditCandidate *auditCache
 	revisions := map[string]string{}
 	e = db.View(func(tx *bolt.Tx) error {
 		a, e := authenticateState(tx, "", nil, "item.list", s)
@@ -152,6 +156,7 @@ func (s *Session) ReadAuthenticatedItems(touch bool) ([]vault.Item, map[string]s
 			return e
 		}
 		defer a.clear()
+		auditCandidate = a.nextCache
 		for _, it := range a.items {
 			items = append(items, it)
 		}
@@ -172,6 +177,7 @@ func (s *Session) ReadAuthenticatedItems(touch bool) ([]vault.Item, map[string]s
 	if s.active(false) != nil {
 		return nil, nil, ErrSessionLocked
 	}
+	s.setAuditCache(auditCandidate)
 	return items, revisions, nil
 }
 

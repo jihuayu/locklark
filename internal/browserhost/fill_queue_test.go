@@ -197,9 +197,37 @@ func TestFillQueuedExpiryRevokesGrant(t *testing.T) {
 // neither revokes the queued approval nor touches the cancellation epoch.
 func TestFillQueuedInvalidCancelCannotRevoke(t *testing.T) {
 	c, _, out, r := paired(t)
+	// Pin the paired capability to a known "f" prefix before any request is
+	// handled. The historical invalid-capability construction copied the real
+	// capability and replaced only its first byte with "f", so it collapsed
+	// onto the genuine capability whenever the random fixture capability
+	// already began with "f" (1/16 of runs). With this prefix the collapse is
+	// unconditional, so a regression back to that construction fails here
+	// every time instead of intermittently in CI.
+	c.mu.Lock()
+	c.authMu.Lock()
+	r.Capability = "f" + r.Capability[1:]
+	c.capability = r.Capability
+	c.authCapability = r.Capability
+	c.authMu.Unlock()
+	c.mu.Unlock()
 	r = matchAndFill(t, c, out, r)
 	pendingEpoch := c.pendingEpoch
-	for i, capability := range []string{strings.Repeat("0", 32), strings.Repeat("a", 32), "f" + r.Capability[1:]} {
+	// Derive invalid capabilities from the real one by flipping a single low
+	// hex bit at distinct positions: each result stays a well-formed 32-hex
+	// token that differs from the paired capability by exactly one digit.
+	const hexDigits = "0123456789abcdef"
+	for i, position := range []int{0, 15, 31} {
+		digit := strings.IndexByte(hexDigits, r.Capability[position])
+		if digit < 0 {
+			t.Fatalf("paired capability has non-hex byte at position %d", position)
+		}
+		flipped := []byte(r.Capability)
+		flipped[position] = hexDigits[digit^1]
+		capability := string(flipped)
+		if capability == r.Capability {
+			t.Fatalf("capability with bit flipped at %d equals the paired capability", position)
+		}
 		allowed, err := c.registerRequest(Request{V: 1, ID: reqID(50 + i), Type: "cancel", Capability: capability})
 		if allowed || err != nil {
 			t.Fatalf("unauthenticated cancel allowed=%v err=%v", allowed, err)
