@@ -13,14 +13,20 @@
     requestSequence = 0,
     renderedSequence = 0,
     generatorInitialized = false,
+    connectionEpoch = 0,
+    popupInactive = false,
     generatedPassword = "",
     generatedProfile = null,
+    generatedDataWiped = false,
     generatorValues = { random: 24, memorable: 4, pin: 6 },
     watchtowerCategory = "",
     hibpOptIn = false,
     hibpOptInPending = false,
     hibpNotice = "";
   const query = (selector) => document.querySelector(selector);
+  // Only an explicit generate reply may repopulate the preview while a
+  // lock/hide-time wipe is still unconfirmed; generic state polls may not.
+  const TRUSTED_GENERATED_SOURCES = new Set(["generate", "popup-generate"]);
   const WT_FLAGS = [
     "empty",
     "common-pattern",
@@ -148,6 +154,31 @@
     query("#gen-preview").textContent = password;
     query("#gen-entropy").textContent =
       String(profile?.entropy_bits_floor ?? "?") + " bits";
+  }
+  function clearGeneratedData() {
+    // Single owner of "forget the generated password": drop the in-memory
+    // reference, the live DOM copy (preview, entropy, history rows) and the
+    // copy control, then scrub the cached state so a later render cannot
+    // rehydrate the cleared values. Generic settings are untouched.
+    generatedDataWiped = true;
+    generatedPassword = "";
+    generatedProfile = null;
+    renderedHistory = "";
+    const preview = query("#gen-preview");
+    if (preview) preview.textContent = "";
+    const entropy = query("#gen-entropy");
+    if (entropy) entropy.textContent = "";
+    const history = query("#gen-history");
+    if (history) history.replaceChildren();
+    const copy = query("#gen-copy");
+    if (copy) copy.disabled = true;
+    if (lastState && typeof lastState === "object")
+      lastState = {
+        ...lastState,
+        password: "",
+        profile: null,
+        generatedHistory: [],
+      };
   }
   function setGeneratorStatus(value) {
     const el = query("#gen-status");
@@ -575,12 +606,31 @@
             : defaultNote),
     );
   }
-  function render(state) {
+  function render(state, sourceType) {
     if (
       state.connected === false &&
       (attachmentBusy || attachmentTransfer || blobURLs.size)
     )
       clearAttachmentBuffers();
+    const transitionedDisconnected =
+      state.connected === false && lastState?.connected === true;
+    if (transitionedDisconnected || generatedDataWiped)
+      state = {
+        ...state,
+        // A trusted generate reply may keep only its own NEW password/profile;
+        // history cached in the background before the wipe must never come
+        // back, and a stale poll may not repopulate anything at all.
+        ...(transitionedDisconnected ||
+        !TRUSTED_GENERATED_SOURCES.has(sourceType)
+          ? { password: "", profile: null }
+          : {}),
+        generatedHistory: [],
+      };
+    if (transitionedDisconnected) {
+      connectionEpoch++;
+      clearGeneratedData();
+    }
+    if (state.connected === false) generatedDataWiped = false;
     lastState = state;
     if (
       vaultEnabled &&
@@ -610,6 +660,8 @@
     renderHistory(state);
     renderSiteBanner(state);
     renderWatchtowerPanel(state);
+    // Vault lifecycle must run even when website candidates are unchanged.
+    if (vaultEnabled) renderVault(state);
     const list = query("#candidates");
     const signature = JSON.stringify({
       rows: state.candidates || [],
@@ -690,23 +742,24 @@
         if (rowFlags.includes(flag)) container.append(flagBadge(flag));
       list.append(container);
     }
-    if (vaultEnabled) renderVault(state);
   }
   async function send(message, generation = actionGeneration) {
     const sequence = ++requestSequence;
+    const epoch = connectionEpoch;
     try {
       const state = await api.runtime.sendMessage(message);
       if (
         !state ||
+        popupInactive || epoch !== connectionEpoch ||
         generation !== actionGeneration ||
         sequence <= renderedSequence
       )
         return null;
       renderedSequence = sequence;
-      render(state);
+      render(state, message?.type);
       return state;
     } catch {
-      if (generation !== actionGeneration || sequence <= renderedSequence)
+      if (popupInactive || epoch !== connectionEpoch || generation !== actionGeneration || sequence <= renderedSequence)
         return null;
       renderedSequence = sequence;
       render({
@@ -724,7 +777,12 @@
     // Disconnect may interrupt a deferred action. Its generation also prevents
     // the old action's reply/finalizer from changing the next operation.
     if (busy && !["disconnect", "cancel-otp"].includes(message.type)) return;
-    if (["disconnect", "lock"].includes(message.type)) cancelPasskeyRemoval();
+    if (["disconnect", "lock"].includes(message.type)) {
+      cancelPasskeyRemoval();
+      // Clear before the host round trip: the lock reply may be deferred and a
+      // copyable cached password must not survive the intent to lock.
+      clearGeneratedData();
+    }
     const generation = ++actionGeneration;
     busy = true;
     if (lastState) render(lastState);
@@ -745,6 +803,9 @@
   }
   async function copyGenerated() {
     if (!generatedPassword) return;
+    // A hidden or restored popup must not write a clipboard value it no longer
+    // shows; offline generation stays allowed because it copies the preview.
+    if (popupInactive || document.visibilityState === "hidden") return;
     let copied = false;
     try {
       const clipboard = globalThis.navigator?.clipboard;
@@ -844,10 +905,15 @@
     activeFilter = "suggested",
     vaultLoaded = false,
     vaultBusy = false,
+    vaultOperation = 0,
     vaultItems = [],
+    renderedVault = "",
+    secretGeneration = 0,
+    editorGeneration = 0,
     lastDetail = null,
     revealedSecrets = new Map(),
     revealTimers = new Map(),
+    pendingReveals = new Map(),
     editorMode = "",
     editorCategory = "",
     editorValues = null,
@@ -860,6 +926,7 @@
     editorConflict = "",
     vaultQueryGeneration = 0,
     passkeyDetailGeneration = 0,
+    detailReadOperation = 0,
     passkeyRemoveGeneration = 0,
     passkeyConfirm = null,
     passkeyRemoving = false,
@@ -880,6 +947,15 @@
     return document.querySelectorAll
       ? [...document.querySelectorAll(selector)]
       : [];
+  }
+  function beginVaultOperation() {
+    vaultBusy = true;
+    return ++vaultOperation;
+  }
+  function finishVaultOperation(operation) {
+    if (operation !== vaultOperation) return false;
+    vaultBusy = false;
+    return true;
   }
   function toast(message) {
     if (!els?.toast) return;
@@ -918,6 +994,7 @@
     clearRevealedSecrets();
   }
   function wipeEditor() {
+    editorGeneration++;
     for (const input of editorInputs) {
       if ("value" in input) input.value = "";
       if (input.type === "checkbox") input.checked = false;
@@ -932,6 +1009,13 @@
     editorConflict = "";
   }
   function wipeSensitiveViews() {
+    vaultQueryGeneration++;
+    vaultOperation++;
+    vaultBusy = false;
+    // The invalidated query's finalizer skips re-enabling the box, so the
+    // owner that bumped the generation must restore it here.
+    if (els?.searchInput) els.searchInput.disabled = false;
+    if (els?.editorSave) els.editorSave.disabled = false;
     wipeDetail();
     wipeEditor();
     if (els) showView("vault");
@@ -975,7 +1059,7 @@
   function renderLockedView(state) {
     if (!els) return;
     els.lockedView.hidden = !!state.connected;
-    els.lockButton.disabled = !state.connected || vaultBusy;
+    els.lockButton.disabled = !state.connected;
     if (state.connected && document.body.dataset.view === "locked")
       showView("vault");
     els.vaultView.hidden =
@@ -992,8 +1076,27 @@
   }
   function renderVaultList() {
     if (!els) return;
-    const items = filteredItems();
     const list = els.vaultList;
+    const fieldLabels = fields => Array.isArray(fields) ? fields.slice(0, 100).map(
+      field => field && [field.id, field.label, field.type, field.section_id],
+    ) : [];
+    // Compare bounded public inputs before URL matching, search and sorting.
+    // Never retain item details, field values, or a decrypted snapshot.
+    const signature = JSON.stringify([activeFilter, searchQuery, lastState?.origin,
+      lastState?.passkeyManagementSupported, lastState?.passkeysUnsupported,
+      stateItems().slice(0, 500).map(item => [item.id, item.revision, item.category,
+        item.title, item.subtitle, item.username, item.favorite, item.tags, item.urls,
+        fieldLabels(item.fields), fieldLabels(item.custom_fields),
+        Array.isArray(item.sections) ? item.sections.slice(0, 20).map(section =>
+          section && [section.id, section.title, fieldLabels(section.fields)]) : [],
+        core?.validPasskeyMetadata?.(item.passkey) ? [
+          item.passkey.credential_id, item.passkey.rp_id,
+          item.passkey.user_name, item.passkey.display_name] : null])]);
+    if (signature === renderedVault) return;
+    renderedVault = signature;
+    const items = filteredItems();
+    const focusedID = document.activeElement?.dataset?.itemId;
+    const scrollTop = list.scrollTop;
     list.replaceChildren();
     for (const item of items) {
       const row = document.createElement("button");
@@ -1028,6 +1131,11 @@
       row.addEventListener("click", () => void openDetail(item));
       list.append(row);
     }
+    list.scrollTop = scrollTop;
+    if (focusedID) {
+      const retained = [...list.children].find(row => row.dataset.itemId === focusedID);
+      retained?.focus?.({ preventScroll: true });
+    }
     const passkeysUnsupported =
       activeFilter === "passkeys" &&
       (lastState?.passkeyManagementSupported === false ||
@@ -1053,6 +1161,7 @@
             ? "没有匹配的条目"
             : "金库中暂无条目";
     for (const tab of all("#filter-tabs [data-filter]")) {
+      tab.setAttribute("tabindex", tab.dataset.filter === activeFilter ? "0" : "-1");
       tab.setAttribute(
         "aria-selected",
         tab.dataset.filter === activeFilter ? "true" : "false",
@@ -1068,6 +1177,8 @@
     if (!state.connected) {
       vaultLoaded = false;
       vaultItems = [];
+      renderedVault = "";
+      els.vaultList.replaceChildren();
       wipeSensitiveViews();
     } else if (
       Array.isArray(state.vaultItems) &&
@@ -1106,6 +1217,7 @@
     const filters = vaultFilterState();
     if (els?.searchInput) els.searchInput.disabled = true;
     const isCurrent = () =>
+      !popupInactive && lastState?.connected === true &&
       generation === vaultQueryGeneration &&
       sameVaultFilter(filters, vaultFilterState());
     try {
@@ -1148,10 +1260,11 @@
     }, 120);
   }
   async function openDetail(item) {
-    if (!item || vaultBusy) return;
+    if (!item || vaultBusy || !lastState?.connected || popupInactive) return;
     const generation = ++passkeyDetailGeneration;
     cancelPasskeyRemoval({ clearUncertain: false });
-    vaultBusy = true;
+    const operation = beginVaultOperation();
+    detailReadOperation = operation;
     try {
       const reply = await api.runtime.sendMessage({
         type: "item-get",
@@ -1159,7 +1272,7 @@
         revision: item.revision,
       });
       if (!reply?.detail) throw Error("refused");
-      if (generation !== passkeyDetailGeneration) return;
+      if (generation !== passkeyDetailGeneration || !lastState?.connected || popupInactive) return;
       if (typeof reply.connected === "boolean")
         lastState = { ...lastState, ...reply };
       passkeyUncertain = null;
@@ -1170,7 +1283,8 @@
     } catch {
       toast("无法读取条目详情");
     } finally {
-      vaultBusy = false;
+      if (detailReadOperation === operation) detailReadOperation = 0;
+      finishVaultOperation(operation);
     }
   }
   function detailFields(detail) {
@@ -1544,17 +1658,59 @@
     els.detailEdit.disabled = !!detail.readOnly;
     renderAttachments(detail);
   }
-  globalThis.addEventListener?.("pagehide", () => clearRevealedSecrets());
+  globalThis.addEventListener?.("pagehide", () => {
+    popupInactive = true;
+    connectionEpoch++;
+    actionGeneration++;
+    // A pending act() may never resume on a hidden popup; release its main
+    // busy flag so a restored popup is not stuck. Its late replies are already
+    // generation-guarded, so they cannot touch the next operation.
+    busy = false;
+    vaultLoaded = false;
+    if (els?.searchInput) els.searchInput.disabled = false;
+    clearGeneratedData();
+    clearRevealedSecrets();
+  });
+  globalThis.addEventListener?.("pageshow", () => {
+    if (!popupInactive) return;
+    popupInactive = false;
+    // Force a fresh metadata read: the invalidated search query's finalizer
+    // never re-enables the box, so restoring must own a new read. render() may
+    // already start one (empty cache), and a user action may too, so only own
+    // the read when no query was created while this state was in flight.
+    const restoreEpoch = connectionEpoch;
+    const restoreQueryGeneration = vaultQueryGeneration;
+    vaultLoaded = false;
+    // An unrelated action may drop this state reply (send resolves null), so
+    // the follow-up read is decided from lastState and the query generation
+    // only: an unrelated Refresh must not cancel the restore's own read.
+    void send({ type: "state" }).then(() => {
+      if (popupInactive || restoreEpoch !== connectionEpoch) return;
+      if (lastState?.connected !== true) return;
+      // renderVault() may already own a read (empty cache auto-refresh), and a
+      // cached non-empty page must not suppress it; a user-started query owns
+      // a newer generation and must not be duplicated.
+      if (restoreQueryGeneration !== vaultQueryGeneration) return;
+      vaultLoaded = true;
+      void refreshVault(true);
+    });
+  });
   if (typeof document !== "undefined")
     document.addEventListener?.("visibilitychange", () => {
       if (document.visibilityState === "hidden") clearRevealedSecrets();
     });
   function clearRevealedSecrets() {
+    secretGeneration++;
+    const hadSecrets = revealedSecrets.size > 0;
     for (const timer of revealTimers.values()) clearTimeout(timer);
     revealTimers.clear();
     revealedSecrets.clear();
+    pendingReveals.clear();
+    // Clearing references alone leaves plaintext in the live DOM.
+    if (hadSecrets && lastDetail && els) renderDetail(lastDetail);
   }
   function hideRevealedSecret(key) {
+    pendingReveals.delete(key);
     const timer = revealTimers.get(key);
     if (timer) clearTimeout(timer);
     revealTimers.delete(key);
@@ -1569,8 +1725,17 @@
     }
     return secret;
   }
+  function detailLeaseLive(detail, generation) {
+    return generation === secretGeneration && !popupInactive &&
+      document.visibilityState !== "hidden" && lastState?.connected === true &&
+      document.body?.dataset?.view === "detail" && lastDetail === detail;
+  }
   async function revealSecret(field, detail) {
+    const generation = secretGeneration;
+    if (!detailLeaseLive(detail, generation)) return;
     const key = field.id || field.label;
+    const request = {};
+    pendingReveals.set(key, request);
     try {
       const reply = await api.runtime.sendMessage({
         type: "reveal-field",
@@ -1579,15 +1744,21 @@
         field: key,
       });
       const result = reply?.revealedField;
+      if (!detailLeaseLive(detail, generation) || pendingReveals.get(key) !== request) {
+        if (result) result.value = "";
+        return;
+      }
       if (!result || result.field !== key || typeof result.value !== "string")
         throw Error("refused");
       const seconds = Number.isSafeInteger(result.expires_in_seconds)
         ? result.expires_in_seconds
         : 30;
       hideRevealedSecret(key);
-      if (seconds <= 0) throw Error("refused");
+      if (seconds <= 0 || seconds > 30) throw Error("refused");
+      const value = result.value;
+      result.value = "";
       revealedSecrets.set(key, {
-        value: result.value,
+        value,
         revision: detail.revision,
         expiresAt: Date.now() + seconds * 1000,
       });
@@ -1604,6 +1775,8 @@
     }
   }
   async function copySecret(field, detail, button) {
+    const generation = secretGeneration;
+    if (!detailLeaseLive(detail, generation)) return;
     const key = field.id || field.label;
     try {
       const reply = await api.runtime.sendMessage({
@@ -1613,9 +1786,15 @@
         field: key,
       });
       const result = reply?.copiedField;
+      if (!detailLeaseLive(detail, generation)) {
+        if (result) result.value = "";
+        return;
+      }
       if (!result || typeof result.value !== "string")
         throw Error("refused");
-      await writeClipboard(result.value, button, result.clearAfterSeconds);
+      const value = result.value;
+      result.value = "";
+      await writeClipboard(value, button, result.clearAfterSeconds);
     } catch {
       toast("复制失败");
     }
@@ -2203,6 +2382,18 @@
     clearAttachmentBuffers();
     clearRevealedSecrets();
     cancelPasskeyRemoval();
+    // A pending detail read must not render over the editor the user just
+    // opened. Release its vault ownership so its finalizer cannot clear the
+    // busy state of the editor's own operation.
+    passkeyDetailGeneration++;
+    if (detailReadOperation) {
+      const staleRead = detailReadOperation;
+      detailReadOperation = 0;
+      if (staleRead === vaultOperation) {
+        vaultOperation++;
+        vaultBusy = false;
+      }
+    }
     if (lastDetail) renderDetail(lastDetail);
     let category = "login",
       values = { title: "", urls: lastState?.origin ? [lastState.origin] : [] },
@@ -2396,6 +2587,7 @@
   }
   async function saveEditor() {
     if (vaultBusy) return;
+    const generation = editorGeneration;
     const item = collectEditorItem();
     if (!item) {
       toast(editorConflict || "无法保存编辑内容");
@@ -2405,7 +2597,7 @@
       toast("请填写标题");
       return;
     }
-    vaultBusy = true;
+    const operation = beginVaultOperation();
     els.editorSave.disabled = true;
     let saved = null,
       wasEdit = false;
@@ -2420,6 +2612,7 @@
         revision: lastDetail?.revision,
         item,
       });
+      if (generation !== editorGeneration || !lastState?.connected || popupInactive) return;
       if (!reply || !reply.saved) throw Error("refused");
       lastState = { ...lastState, ...reply };
       saved = reply.saved;
@@ -2429,8 +2622,7 @@
     } catch {
       toast("保存未完成；请确认原生金库支持条目编辑");
     } finally {
-      vaultBusy = false;
-      if (els?.editorSave) els.editorSave.disabled = false;
+      if (finishVaultOperation(operation) && els?.editorSave) els.editorSave.disabled = false;
     }
     // The save transaction owns vaultBusy. Complete it before handing the
     // committed revision to the guarded detail/refresh helpers; otherwise they
@@ -2450,7 +2642,8 @@
   }
   async function generateEditorPassword() {
     if (vaultBusy) return;
-    vaultBusy = true;
+    const generation = editorGeneration;
+    const operation = beginVaultOperation();
     try {
       const reply = await api.runtime.sendMessage({
         type: "generate",
@@ -2459,6 +2652,7 @@
       if (!reply?.generatedPassword) throw Error("refused");
       const password = reply.generatedPassword;
       reply.generatedPassword = "";
+      if (generation !== editorGeneration || !lastState?.connected || popupInactive || document.body.dataset.view !== "editor") return;
       const target = editorInputs.find(
         (entry) =>
           entry.descriptor.name === "password" ||
@@ -2468,7 +2662,7 @@
     } catch {
       toast("无法生成密码");
     } finally {
-      vaultBusy = false;
+      finishVaultOperation(operation);
     }
   }
   function clearTargetStillPresent(detail, key) {
@@ -2493,7 +2687,11 @@
     toast("宿主未确认清空，请升级原生宿主");
   }
   function classifyDetailAction(message) {
+    const detail = lastDetail;
+    const generation = passkeyDetailGeneration;
     return api.runtime.sendMessage(message).then((reply) => {
+      if (generation !== passkeyDetailGeneration || detail !== lastDetail ||
+          !lastState?.connected || popupInactive) return null;
       if (reply && typeof reply === "object") {
         if (reply.status) lastState = { ...lastState, ...reply };
         if (reply.saved) {
@@ -2640,7 +2838,7 @@
         const first = els.vaultList.children[0];
         if (first) {
           event.preventDefault();
-          first.listeners?.get?.("click")?.();
+          first.click?.();
         }
       }
     });
@@ -2666,12 +2864,9 @@
       });
     for (const tab of all("#filter-tabs [data-filter]"))
       tab.addEventListener("click", () => {
-        activeFilter =
-          tab.dataset.filter === "passkeys"
-            ? "passkeys"
-            : core?.validCategory(tab.dataset.filter)
-              ? tab.dataset.filter
-              : "all";
+        activeFilter = Object.hasOwn(FILTER_LABELS, tab.dataset.filter)
+          ? tab.dataset.filter
+          : "all";
         if (searchTimer) clearTimeout(searchTimer);
         searchTimer = null;
         // A new server query owns the list; never client-filter the previous
@@ -2680,6 +2875,20 @@
         if (lastState) lastState = { ...lastState, vaultItems: [] };
         renderVaultList();
         void refreshVault(true);
+      });
+    for (const tab of all("#filter-tabs [data-filter]"))
+      tab.addEventListener("keydown", event => {
+        const tabs = all("#filter-tabs [data-filter]");
+        const at = tabs.indexOf(tab);
+        let next;
+        if (event.key === "ArrowRight") next = (at + 1) % tabs.length;
+        else if (event.key === "ArrowLeft") next = (at + tabs.length - 1) % tabs.length;
+        else if (event.key === "Home") next = 0;
+        else if (event.key === "End") next = tabs.length - 1;
+        else return;
+        event.preventDefault();
+        tabs[next].focus?.();
+        tabs[next].click?.();
       });
     els.siteDisableInline.addEventListener("change", (event) => {
       void api.runtime
@@ -2710,23 +2919,44 @@
         .catch(() => toast("网站设置未保存"));
     });
     els.lockButton.addEventListener("click", () => {
-      if (vaultBusy) return;
+      connectionEpoch++;
+      actionGeneration++;
+      const lockEpoch = connectionEpoch;
+      const lockAction = actionGeneration;
+      // Lock intent preempts any pending act(): clear generated data now and
+      // release the preempted action's busy flag so it cannot stick.
+      clearGeneratedData();
+      busy = false;
+      if (lastState) render(lastState);
+      wipeSensitiveViews();
       cancelPasskeyRemoval();
       clearAttachmentBuffers();
-      vaultBusy = true;
+      const operation = beginVaultOperation();
+      // A deferred lock acknowledgement only owns this popup while its epoch,
+      // action and vault operation are still current; a reconnect or newer
+      // lock must not be overwritten by an older reply.
+      const lockOwned = () =>
+        !popupInactive &&
+        lockEpoch === connectionEpoch &&
+        lockAction === actionGeneration &&
+        operation === vaultOperation;
       void api.runtime
         .sendMessage({ type: "lock" })
         .then((reply) => {
+          if (!lockOwned()) return;
           if (reply && typeof reply === "object") {
             lastState = reply;
             render(reply);
           }
           toast("已锁定");
         })
-        .catch(() => toast("锁定失败"))
+        .catch(() => {
+          if (lockOwned()) toast("锁定失败");
+        })
         .finally(() => {
-          vaultBusy = false;
-          if (els) els.lockButton.disabled = !lastState?.connected;
+          const owned = finishVaultOperation(operation);
+          if (owned && els && lockOwned())
+            els.lockButton.disabled = !lastState?.connected;
         });
     });
     els.optionsButton.addEventListener("click", openOptions);

@@ -784,3 +784,14 @@ def t2_f8_06(ctx):
     result = ctx.run_cli(["personal", "generate-login", "--file", str(ctx.temp_dir / "x.ll"), "--length", "8"])
     assert result.returncode != 0
     assert "entropy below required minimum" in result.stderr.lower()
+
+
+@e2e_test(
+    "T2_F8_07", 2, ["F8"],
+    "Desktop snapshot shares authentication while preserving three linked audit intents",
+    coverage_kind="component_contract",
+)
+def t2_f8_07(ctx):
+    go_package_test(
+        ctx, "./internal/personal", r"^TestDesktopSnapshot.*$", min_passed=2,
+    )

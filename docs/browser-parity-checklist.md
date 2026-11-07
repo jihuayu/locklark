@@ -1,6 +1,6 @@
 # 浏览器插件当前功能与 1:1 对照清单
 
-更新：2026-11-07。本批已合并起点 main 9cbc34c（[PR #48](https://github.com/jihuayu/locklark/pull/48)），含 PR #44–48。条件式/共存已合并，见[验收](conditional-passkey-validation.md)；下一批 Signal APIs、逐次系统 UV、公共站点组件和未签名发布准备见[综合验收](browser-completion-validation.md)。未取得固定参考版本逐项对照结果。
+更新：2026-11-07。本批已合并起点 main 9cbc34c（[PR #48](https://github.com/jihuayu/locklark/pull/48)），含 PR #44–48。条件式/共存已合并，见[验收](conditional-passkey-validation.md)；下一批 Signal APIs、逐次系统 UV、公共站点组件和未签名发布准备见[综合验收](browser-completion-validation.md)。未取得固定参考版本逐项对照结果。 本轮 UI、元数据刷新性能与安全修补从 main 38c8324 接续，见[专项验收](ui-performance-security-validation.md)；原未关闭范围已拆到 #50–#59，#39 仍开放。
 
 旧清单基于 `8e61dc1` 和当时未合并的 PR #40；其中“39 项未实现”“没有 v2 协议/共享会话”等结论已过时。完整参考分析、65 项稳定 ID、行为约定和当时的结果保存在[历史快照](history/browser-parity-m3-baseline-2026-11-06.md)，不再作为当前缺口统计。
 

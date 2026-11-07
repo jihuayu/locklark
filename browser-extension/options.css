@@ -293,3 +293,12 @@ button:active {
     transform: none;
   }
 }
+
+.row { min-height: 36px; }
+button, input[type="number"], select { min-height: 36px; }
+summary:focus-visible, a:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+@media (max-width: 480px) {
+  .page-header, main { padding-left: 16px; padding-right: 16px; }
+  section { padding: 16px; }
+  .row select, .row input[type="number"] { max-width: 100%; }
+}

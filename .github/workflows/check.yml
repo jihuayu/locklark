@@ -25,6 +25,18 @@ jobs:
       - run: python -m unittest discover -s scripts -p test_run_cli_windows_acceptance.py
       - run: go mod verify
       - run: go vet ./...
+      - name: Check reachable Go vulnerabilities
+        if: runner.os == 'Linux'
+        timeout-minutes: 5
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 -json ./... > "$RUNNER_TEMP/locklark-govulncheck.json"
+      - name: Preserve Go vulnerability scan
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: locklark-go-vulnerability-scan
+          path: ${{ runner.temp }}/locklark-govulncheck.json
+          if-no-files-found: error
+          retention-days: 14
       - run: go build ./cmd/locklark-desktop
       - name: Build native browser hosts
         run: go build ./cmd/locklark-browser-chromium ./cmd/locklark-browser-firefox ./cmd/locklark-browser-register
@@ -214,7 +226,7 @@ jobs:
         run: python3 -m unittest discover -s scripts -p 'test_*native*.py'
       - run: npm ci
         working-directory: web
-      - run: npm test && npm run typecheck && npm run build
+      - run: npm audit --audit-level=high && npm test && npm run typecheck && npm run build
         working-directory: web
         env:
           NEXT_TELEMETRY_DISABLED: '1'
@@ -314,16 +326,27 @@ jobs:
         run: |
           node scripts/browser_extension_dom.cjs
           node scripts/browser_public_site_compatibility.cjs
+          node scripts/browser_popup_ui_acceptance.cjs
         env:
+          LOCKLARK_TEST_UI_ARTIFACTS: ${{ runner.temp }}/locklark-ui-acceptance
           LOCKLARK_TEST_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
       - name: Test Firefox browser extension DOM
         timeout-minutes: 10
         run: |
           node scripts/browser_extension_dom.cjs
           node scripts/browser_public_site_compatibility.cjs
+          node scripts/browser_popup_ui_acceptance.cjs
         env:
+          LOCKLARK_TEST_UI_ARTIFACTS: ${{ runner.temp }}/locklark-ui-acceptance
           LOCKLARK_TEST_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
           LOCKLARK_TEST_BROWSER: firefox
+      - name: Preserve synthetic popup UI screenshots
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: locklark-synthetic-popup-ui
+          path: ${{ runner.temp }}/locklark-ui-acceptance/
+          if-no-files-found: error
+          retention-days: 14
       - name: Install independent WebAuthn verifier
         timeout-minutes: 3
         run: npm install --prefix "$RUNNER_TEMP/locklark-webauthn-peer" --ignore-scripts --no-audit --no-fund @simplewebauthn/server@14.0.3

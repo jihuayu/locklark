@@ -1076,6 +1076,8 @@ async function saveEditorHarness(mode) {
   const calls = [];
   const sandbox = {
     mode,
+    editorGeneration: 0,
+    popupInactive: false,
     vaultBusy: false,
     editorMode: mode === "edit" ? "edit" : "create",
     lastDetail: { id: "a".repeat(32), revision: "b".repeat(64) },
@@ -1091,6 +1093,8 @@ async function saveEditorHarness(mode) {
         },
       },
     },
+    beginVaultOperation: () => { sandbox.vaultBusy = true; return 1; },
+    finishVaultOperation: () => { sandbox.vaultBusy = false; return true; },
     collectEditorItem: () => ({ title: "Example" }),
     toast: (message) => calls.push(["toast", message]),
     wipeEditor: () => calls.push(["wipeEditor"]),

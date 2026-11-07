@@ -5,6 +5,7 @@ go 1.27.3
 require (
 	filippo.io/age v1.3.2
 	filippo.io/edwards25519 v1.2.0
+	github.com/Microsoft/go-winio v0.6.2
 	github.com/ebitengine/purego v0.11.1
 	github.com/egoist/mygo v0.7.4
 	github.com/modelcontextprotocol/go-sdk v1.8.0
@@ -12,7 +13,7 @@ require (
 	go.etcd.io/bbolt v1.5.0
 	golang.org/x/crypto v0.58.0
 	golang.org/x/mobile v0.0.0-20260908204917-8b95e45f8d3e
-	golang.org/x/net v0.60.0
+	golang.org/x/net v0.62.0
 	golang.org/x/sys v0.49.0
 	golang.org/x/term v0.47.0
 	golang.org/x/text v0.43.0
@@ -20,7 +21,6 @@ require (
 
 require (
 	filippo.io/hpke v0.4.0 // indirect
-	github.com/Microsoft/go-winio v0.6.2
 	github.com/go-text/typesetting v0.3.5 // indirect
 	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/segmentio/asm v1.1.3 // indirect

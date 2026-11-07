@@ -30,12 +30,18 @@
           <p class="subtitle">当前网站登录</p>
         </div>
         <div class="header-actions">
-          <button id="lock-btn" type="button" title="立即锁定 (Ctrl+Shift+L)">
+          <button id="lock-btn" type="button" title="立即锁定">
             锁定
           </button>
           <button id="options-btn" type="button">设置</button>
         </div>
       </header>
+
+      <div class="connection-status">
+      <p id="status" role="status"></p>
+      <p id="save-warning" class="note" role="alert"></p>
+      <p id="origin"></p>
+      </div>
 
       <div class="actions">
         <button id="connect">连接原生金库</button
@@ -44,83 +50,6 @@
         ><button id="cancel-otp" disabled>取消本次验证码</button
         ><button id="disconnect">断开</button>
       </div>
-      <label
-        ><input id="auto-login" type="checkbox" /> 选择账号后自动登录</label
-      >
-      <label
-        ><input id="offer-save-logins" type="checkbox" />
-        提交表单后提示保存/更新登录</label
-      >
-      <button id="clear-never-save" disabled hidden>
-        允许在此网站提示保存
-      </button>
-      <details>
-        <summary>Passkey 设置</summary>
-        <label
-          ><input id="passkey-save" type="checkbox" /> 提供保存 Passkey</label
-        ><label
-          ><input id="passkey-use" type="checkbox" /> 提供 Passkey 登录</label
-        >
-      </details>
-      <section id="generator-section" class="card">
-        <h2>密码生成器</h2>
-        <label
-          >模式
-          <select id="gen-mode">
-            <option value="random">随机字符</option>
-            <option value="memorable">易记词组</option>
-            <option value="pin">PIN 码</option>
-          </select>
-        </label>
-        <label
-          >长度 <span id="gen-length-value">24</span>
-          <input
-            id="gen-length"
-            type="range"
-            min="16"
-            max="64"
-            value="24"
-          />
-        </label>
-        <div id="gen-random-options">
-          <label><input id="gen-digits" type="checkbox" /> 含数字</label>
-          <label><input id="gen-symbols" type="checkbox" /> 含符号</label>
-        </div>
-        <div id="gen-memorable-options" hidden>
-          <label
-            ><input id="gen-capitalize" type="checkbox" /> 首字母大写</label
-          >
-          <label
-            >分隔符
-            <select id="gen-separator">
-              <option value="hyphens">连字符 -</option>
-              <option value="spaces">空格</option>
-              <option value="periods">句点 .</option>
-              <option value="commas">逗号 ,</option>
-              <option value="underscores">下划线 _</option>
-              <option value="numbers">数字</option>
-              <option value="numbers-and-symbols">数字和符号</option>
-            </select>
-          </label>
-        </div>
-        <div class="preview">
-          <code id="gen-preview" class="mono"></code
-          ><span id="gen-entropy" class="badge"></span>
-        </div>
-        <div class="actions">
-          <button id="gen-regenerate">生成密码</button
-          ><button id="gen-fill" disabled>填充到当前页面</button
-          ><button id="gen-copy" disabled>复制</button>
-        </div>
-        <p id="gen-status" class="note" role="status"></p>
-        <details>
-          <summary>已生成的密码</summary>
-          <div id="gen-history"></div>
-        </details>
-      </section>
-      <p id="status" role="status"></p>
-      <p id="save-warning" class="note" role="alert"></p>
-      <p id="origin"></p>
       <section id="watchtower-site-banner" class="wt-banner" hidden>
         <strong id="watchtower-site-badge"></strong>
         <p id="watchtower-site-text"></p>
@@ -162,7 +91,7 @@
           <button type="button" data-category="identity">身份信息</button>
           <button type="button" data-category="card">银行卡</button>
         </div>
-        <div id="filter-tabs" class="filter-tabs" role="tablist">
+        <div id="filter-tabs" class="filter-tabs" role="tablist" aria-label="金库分类">
           <button type="button" data-filter="suggested" role="tab">
             当前网站
           </button>
@@ -180,8 +109,8 @@
             安全备注
           </button>
         </div>
-        <p id="vault-count" class="vault-count"></p>
-        <div id="vault-list" class="vault-list"></div>
+        <p id="vault-count" class="vault-count" role="status"></p>
+        <div id="vault-list" class="vault-list" role="region" aria-label="金库搜索结果"></div>
         <p id="vault-empty" class="note" hidden>暂无条目</p>
         <p id="vault-passkey-unsupported" class="note" hidden>
           当前原生宿主不支持 Passkey 管理，请升级原生宿主后再试。
@@ -279,6 +208,84 @@
       </section>
 
       <p id="toast" class="toast" role="status" aria-live="polite"></p>
+
+      <details id="generator-section" class="card generator-tools">
+        <summary>密码生成器</summary>
+        <label
+          >模式
+          <select id="gen-mode">
+            <option value="random">随机字符</option>
+            <option value="memorable">易记词组</option>
+            <option value="pin">PIN 码</option>
+          </select>
+        </label>
+        <label
+          >长度 <span id="gen-length-value">24</span>
+          <input
+            id="gen-length"
+            type="range"
+            min="16"
+            max="64"
+            value="24"
+          />
+        </label>
+        <div id="gen-random-options">
+          <label><input id="gen-digits" type="checkbox" /> 含数字</label>
+          <label><input id="gen-symbols" type="checkbox" /> 含符号</label>
+        </div>
+        <div id="gen-memorable-options" hidden>
+          <label
+            ><input id="gen-capitalize" type="checkbox" /> 首字母大写</label
+          >
+          <label
+            >分隔符
+            <select id="gen-separator">
+              <option value="hyphens">连字符 -</option>
+              <option value="spaces">空格</option>
+              <option value="periods">句点 .</option>
+              <option value="commas">逗号 ,</option>
+              <option value="underscores">下划线 _</option>
+              <option value="numbers">数字</option>
+              <option value="numbers-and-symbols">数字和符号</option>
+            </select>
+          </label>
+        </div>
+        <div class="preview">
+          <code id="gen-preview" class="mono"></code
+          ><span id="gen-entropy" class="badge"></span>
+        </div>
+        <div class="actions">
+          <button id="gen-regenerate">生成密码</button
+          ><button id="gen-fill" disabled>填充到当前页面</button
+          ><button id="gen-copy" disabled>复制</button>
+        </div>
+        <p id="gen-status" class="note" role="status"></p>
+        <details>
+          <summary>已生成的密码</summary>
+          <div id="gen-history"></div>
+        </details>
+      </details>
+      <details class="card site-preferences">
+        <summary>网站与 Passkey 设置</summary>
+      <label
+        ><input id="auto-login" type="checkbox" /> 选择账号后自动登录</label
+      >
+      <label
+        ><input id="offer-save-logins" type="checkbox" />
+        提交表单后提示保存/更新登录</label
+      >
+      <button id="clear-never-save" disabled hidden>
+        允许在此网站提示保存
+      </button>
+      <details>
+        <summary>Passkey 设置</summary>
+        <label
+          ><input id="passkey-save" type="checkbox" /> 提供保存 Passkey</label
+        ><label
+          ><input id="passkey-use" type="checkbox" /> 提供 Passkey 登录</label
+        >
+      </details>
+      </details>
 
       <details id="watchtower-panel">
         <summary>Watchtower / 安全体检</summary>

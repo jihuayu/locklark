@@ -35,6 +35,8 @@ export async function acceptBrowserPasskey({
   ]);
   input([{ click_label: "连接并启用快捷填充" }]);
   popup = await openPopup();
+  if (await popup.count(".site-preferences:not([open]) > summary"))
+    await popup.click(".site-preferences > summary");
   await popup.click("#auto-login");
   // Dismiss the real extension popup and exercise the actual closed-shadow UI
   // with physical CDP pointer events, not dispatchEvent or privileged messages.
