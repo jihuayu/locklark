@@ -75,17 +75,45 @@ func number(h uintptr, name string) (uint32, error) {
 	}
 	return v, nil
 }
+
+// Passport KSP policy properties enforced before every CNG decrypt.
+const (
+	// NCRYPT_ALLOW_DECRYPT_FLAG. Exactly this flag: decrypt+sign (3) and
+	// decrypt+key-agreement (5) are refused even though they include decrypt.
+	helloKeyUsageDecrypt = 1
+	// NgcCacheType 1 requires the cached key to be released only after user
+	// authentication.
+	helloNgcCacheTypeAuthenticated = 1
+	// Export Policy 0 marks the key nonexportable.
+	helloExportPolicyNone = 0
+)
+
+// helloPolicy is the enforced key property tuple. It is a pure value so the
+// accepted and refused combinations are table-testable without the KSP.
+type helloPolicy struct {
+	usage  uint32
+	cache  uint32
+	export uint32
+}
+
+func (p helloPolicy) valid() bool {
+	return p.usage == helloKeyUsageDecrypt && p.cache == helloNgcCacheTypeAuthenticated && p.export == helloExportPolicyNone
+}
+
 func verify(h uintptr) error {
 	usage, e := number(h, "Key Usage")
-	if e != nil || usage&1 == 0 || usage&8 != 0 {
+	if e != nil {
 		return ErrUnavailable
 	}
-	policy, e := number(h, "NgcCacheType")
-	if e != nil || policy != 1 {
+	cache, e := number(h, "NgcCacheType")
+	if e != nil {
 		return ErrUnavailable
 	}
 	export, e := number(h, "Export Policy")
-	if e != nil || export != 0 {
+	if e != nil {
+		return ErrUnavailable
+	}
+	if !(helloPolicy{usage: usage, cache: cache, export: export}).valid() {
 		return ErrUnavailable
 	}
 	return nil

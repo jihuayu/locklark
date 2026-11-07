@@ -8,6 +8,7 @@ import (
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 	"github.com/jihuayu/locklark/internal/browserhost"
+	"github.com/jihuayu/locklark/internal/osunlock"
 	"github.com/jihuayu/locklark/internal/personal"
 )
 
@@ -297,6 +298,18 @@ func RunBrowser(browser browserhost.Browser, args []string) error {
 	return mygo.App.Run()
 }
 
+// passkeySystemStore reports the trusted native OS adapter that can perform a
+// fresh per-operation user verification. It is a structural check only: the
+// Linux Secret Service adapter deliberately does not implement it, and no
+// renderer or protocol value can supply one.
+func (a *App) passkeySystemStore() (personal.SystemPasskeyVerificationStore, bool) {
+	store, ok := a.systemStore.(personal.SystemPasskeyVerificationStore)
+	if !ok || store == nil {
+		return nil, false
+	}
+	return store, true
+}
+
 func (a *App) browserPasskeyView(c *ui.Context, p browserhost.PasskeyView, status string) {
 	if a.browserPasskeyID != p.ID {
 		a.browserPasskeyID = p.ID
@@ -354,6 +367,40 @@ func (a *App) browserPasskeyView(c *ui.Context, p browserhost.PasskeyView, statu
 			label = "保存到：" + browserTitle(choice.Title) + " · " + visible(choice.Username)
 		}
 		ui.Button(c, label).Disabled(a.busy || !factorsReady).OnClick(func() { approve(choice.ID) })
+	}
+	// A per-account (or new-credential) system factor button appears only when
+	// the trusted native adapter can perform a fresh user verification. The
+	// adapter is never called while rendering, listing candidates or before a
+	// target is selected; each click asks the OS again and no earlier unlock
+	// result is reused. Enrollment in "安全设置" must already exist.
+	if store, ok := a.passkeySystemStore(); ok {
+		systemLabel := osunlock.Label()
+		approveSystem := func(item string) {
+			// Stale knowledge-factor inputs never travel with an OS approval.
+			a.password = ""
+			a.secret = ""
+			a.run(func() outcome {
+				e := a.browser.ApprovePasskeyWithSystem(p.ID, item, store)
+				return outcome{err: e, apply: func() {
+					if v := a.browser.Snapshot(); v.PasskeyStatus != "" {
+						a.status = v.PasskeyStatus
+					}
+				}}
+			})
+		}
+		ui.Text(c, "系统验证（"+systemLabel+"）：需先在“安全设置”启用系统快捷解锁；每次操作都会重新由系统验证，网站不会获得解锁因素。")
+		if p.Create {
+			ui.Button(c, "使用"+systemLabel+"创建并保存 Passkey").Disabled(a.busy).OnClick(func() { approveSystem("") })
+		}
+		for _, choice := range p.Choices {
+			choice := choice
+			label := "使用" + systemLabel + "登录：" + browserTitle(choice.Title) + " · " + visible(choice.Username)
+			if p.Create {
+				label = "使用" + systemLabel + "保存到：" + browserTitle(choice.Title) + " · " + visible(choice.Username)
+			}
+			ui.Button(c, label).Disabled(a.busy).OnClick(func() { approveSystem(choice.ID) })
+		}
+		ui.Text(c, "系统验证失败或被取消时，请继续使用主密码与 Secret Key。")
 	}
 	ui.Button(c, "取消 / 使用其他验证器").Disabled(a.busy).OnClick(func() {
 		a.password = ""

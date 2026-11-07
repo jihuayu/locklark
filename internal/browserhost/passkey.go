@@ -156,16 +156,13 @@ func (c *Connection) passkeySnapshot() (*PasskeyView, string) {
 	return &PasskeyView{ID: p.request.ID, Origin: p.request.Origin, RPID: p.parsed.RPID, Username: p.parsed.Options.User.Name, Create: p.parsed.Create, VerificationRequired: p.parsed.RequiresVerification(), Working: p.working, Choices: append([]personal.PasskeyChoice(nil), p.choices...)}, c.passkeyStatus
 }
 
-// Called only from the native UI. An empty selection creates a new login. Fresh
-// factors are verified here; the browser can never assert user verification.
-func (c *Connection) ApprovePasskey(id, itemID string, password, secret []byte) error {
-	defer clear(password)
-	defer clear(secret)
-	c.mu.Lock()
+// resolvePasskeyApproval captures the exact pending request and selected
+// target under c.mu. A prepopulated (pinned) target is enforced exactly, and an
+// empty selection only ever means "create a new login".
+func (c *Connection) resolvePasskeyApproval(id, itemID string) (*pendingPasskey, personal.PasskeyTarget, error) {
 	p := c.passkey
 	if p == nil || p.request.ID != id || p.working || !c.passkeyLive(p) {
-		c.mu.Unlock()
-		return ErrProtocol
+		return nil, personal.PasskeyTarget{}, ErrProtocol
 	}
 	target := p.target
 	pinned := p.target.ID
@@ -182,33 +179,89 @@ func (c *Connection) ApprovePasskey(id, itemID string, password, secret []byte) 
 			}
 		}
 		if !matched || pinned != "" && (target.ID != pinned || target.Revision != p.target.Revision) {
-			c.mu.Unlock()
-			return ErrProtocol
+			return nil, personal.PasskeyTarget{}, ErrProtocol
 		}
 	} else {
 		// An empty selection only ever creates a new login; it is never an
 		// implicit choice of a pinned or merely pre-populated target.
 		if !target.Create || pinned != "" {
-			c.mu.Unlock()
-			return ErrProtocol
+			return nil, personal.PasskeyTarget{}, ErrProtocol
 		}
+	}
+	return p, target, nil
+}
+
+// ApprovePasskey is called only from the native UI. Fresh knowledge factors are
+// verified here; the browser can never assert user verification. An empty
+// selection creates a new login.
+func (c *Connection) ApprovePasskey(id, itemID string, password, secret []byte) error {
+	defer clear(password)
+	defer clear(secret)
+	return c.approvePasskey(id, itemID, func(p *pendingPasskey) (bool, error) {
+		verified := len(password) > 0 || len(secret) > 0
+		if !verified {
+			return false, nil
+		}
+		return true, p.session.VerifyPasskeyUser(password, secret)
+	})
+}
+
+// ApprovePasskeyWithSystem is called only from the native UI. Every approval
+// asks the trusted OS adapter again for fresh user verification; no earlier
+// system unlock, cached result or proof can satisfy it. The browser still never
+// asserts user verification, and no new private material crosses this API.
+// It fails closed when the adapter is absent or the capsule is not enrolled.
+func (c *Connection) ApprovePasskeyWithSystem(id, itemID string, store personal.SystemPasskeyVerificationStore) error {
+	if store == nil {
+		return ErrProtocol
+	}
+	return c.approvePasskey(id, itemID, func(p *pendingPasskey) (bool, error) {
+		if e := p.session.VerifyPasskeyUserWithSystem(store); e != nil {
+			return false, e
+		}
+		return true, nil
+	})
+}
+
+// approvePasskey is the single approval path for both knowledge factors and
+// the native OS user-verification adapter. It preserves the exact selector and
+// revision, the registered mutation gate, the pending request pointer, the
+// connection generation and passkey revocation epoch, the deadline and the
+// queued writer checks. Neither c.mu nor a Session lock is held while the
+// verification callback waits on the user.
+func (c *Connection) approvePasskey(id, itemID string, verify func(*pendingPasskey) (bool, error)) error {
+	c.mu.Lock()
+	p, target, e := c.resolvePasskeyApproval(id, itemID)
+	if e != nil {
+		c.mu.Unlock()
+		return e
 	}
 	p.working = true
 	c.mu.Unlock()
 	c.changed()
-	verified := len(password) > 0 || len(secret) > 0
-	var e error
-	if verified {
-		e = p.session.VerifyPasskeyUser(password, secret)
+	verified := false
+	if verify != nil {
+		verified, e = verify(p)
 	}
-	if p.parsed.RequiresVerification() && !verified {
+	if e == nil && p.parsed.RequiresVerification() && !verified {
 		e = passkey.ErrRefused
 	}
 	var credential passkey.Response
-	if e == nil {
-		credential, e = p.session.PerformPasskey(target, verified, p.gate)
-	} else {
+	if e != nil {
 		p.session.ReleaseMutation(p.gate)
+	} else {
+		// The user may have cancelled, locked, navigated or let the request
+		// expire while the factor or OS prompt was open. Revalidate the same
+		// pending request under a short c.mu hold before any commit.
+		c.mu.Lock()
+		live := c.passkey == p && c.passkeyLive(p)
+		c.mu.Unlock()
+		if live {
+			credential, e = p.session.PerformPasskey(target, verified, p.gate)
+		} else {
+			p.session.ReleaseMutation(p.gate)
+			e = passkey.ErrRefused
+		}
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
