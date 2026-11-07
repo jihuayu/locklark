@@ -22,14 +22,14 @@
 | 验证 | 已实际取得的结果 |
 | --- | --- |
 | 冻结旧 main 的全量 E2E | 206 项：123 通过、73 pending、10 失败，报告 `/workspace/plugin-completion-baseline-e2e.json`。失败包含旧检测假设/缺少导入等；本轮最终结果另列，不能挪用旧数字。 |
-| 更新后全量 E2E | 主代理重新构建后实跑：206 项，170 通过、36 pending、0 失败，76.349 秒；31 项检测回归通过。报告 `/workspace/plugin-e2e-final.json`，保留全部 206 个稳定 ID。 |
+| 更新后全量 E2E | 主代理重新构建后实跑：206 项，170 通过、36 pending、0 失败，76.349 秒；检测回归由 31 项扩展为 37 项，主代理独立运行全部通过（26.542 秒）。报告 `/workspace/plugin-e2e-final.json`，保留全部 206 个稳定 ID。 |
 | 扩展单测 | 主代理冻结实现独立运行 `node --test browser-extension/test/*.test.js`：172 项通过、0 失败、0 跳过。 |
 | Go 宿主整包 / personal 整包 | worker 实跑通过：browserhost 40.215 秒，personal 219.826 秒；包含原有测试。 |
 | 主代理独立竞态检查 | `go test -race ./internal/browserhost ./internal/personal -run 'TestAttachment|TestExplicitClear|TestV2SectionsFromInputKeepsSecretClassification' -count=1` 通过，分别 33.518 秒 / 1.032 秒。 |
 | 主代理全仓编译 / vet | `go test ./... -run '^$'` 与 `go vet ./...` 通过；编译探针不计作完整测试。 |
 | 真实 Chromium 插件收尾 | `/workspace/plugin-popup-native-5.log`：新建并编辑真实库；隐藏字段不预读；显式清空备注/一个隐藏字段后另一隐藏字段保持；删除字段、2 MiB 附件上传/下载 SHA-256/删除并重开确认，全部通过。同期自动登录、Passkey 注册/断言/签名核验/取消通过。 |
 | 独立 Edge | 官方 Edge Linux x64 `157.0.4341.42` 安装包经官方 SHA-256 校验；`/workspace/plugin-edge-native-1.log`：快捷配对、自动登录、Passkey 创建/断言、独立依赖方签名验证及取消通过。随后 `/workspace/plugin-edge-native-full-2.log` 完整通过：弹窗字段清空/附件、填充、保存、更新、OTP 的独立 HMAC 与负测、快捷配对/自动登录、Passkey 创建/断言/签名核验/取消。首次完整运行遇到辅助功能总线失联，第二次单独运行通过，不将失败记为成功。 |
-| Firefox | `/workspace/plugin-firefox-native-2.log` 完整填充/保存/更新/OTP 通过；独立新增 Passkey-only 运行 `/workspace/plugin-firefox-passkey-6.log` 的创建、断言、取消、浏览器回退通过，原生因子审批及依赖方签名核验均实际执行。7 项控制器/验证器测试通过。两次运行分别计范围，最终 CI 已启用合并流程及额外 `@simplewebauthn/server` 核验。 |
+| Firefox | `/workspace/plugin-firefox-native-2.log` 完整填充/保存/更新/OTP 通过；独立新增 Passkey-only 运行 `/workspace/plugin-firefox-passkey-6.log` 的创建、断言、取消、浏览器回退通过，原生因子审批及依赖方签名核验均实际执行。7 项控制器/验证器测试通过。随后 `/workspace/plugin-firefox-full-final.log` 的合并流程也完整通过；最终 CI 已启用该流程及额外 `@simplewebauthn/server` 核验。 |
 | 独立复核 | DeepSeek 只读复核附件操作、分区值保留及生产入口范围校验。最初提出的负数 size/length 风险在核对 `registerRequest -> Request.valid` 后撤回：入口已在分派前拒绝；未报告该范围内已证明的外部阻塞。另复核异步附件生命周期，发现并复查修复了取消后迟到 chunk 复活上传记录、删除后的迟到提示覆盖新界面两项竞态；172 项测试包含对应回归。该静态复核不代替实际测试或完整密码评审。 |
 
 真实验收发现并修复了仅靠简化 DOM/wire fixture 无法覆盖的问题：备注清空控件读取了已过滤的字段；宿主未返回隐藏自定义字段是否有值；分区字段同时以平铺和分区形式渲染导致重复；下载结束后按钮没有重新启用；旧操作 finalizer 可能修改新代次状态。还修复了旧上传误取消新上传、取消后 chunk 复活记录、孤立上传永久占用槽位、清空隐藏字段时被重新分类为明文的问题；对应控件、事务和生命周期回归保留。
@@ -43,6 +43,8 @@
 | component_contract | 12 | 12 | 0 | 0 |
 
 `functional` 包含 CLI/原生消息等入口测试，不等于每项都是完整浏览器旅程。12 项组件契约实际执行既有 Node/Go 测试；45 项能力探测只说明组成能力，不宣称完整用户任务。测试名称匹配为零、已实现组件失败均判 FAIL，不能转成 pending。36 项 pending 的实际范围：CLI 创建/导入命令面 13、CLI broker 客户端/租约 14、跨功能旅程 6（包括跨源卡片 iframe）、iframe/卡片用户激活 2、CLI HIBP/在线旅程 1。以 JSON 中每项原因优先，不能将这 36 项直接读成 36 个插件未实现功能。
+
+首轮远端 head `a80802b` 为 169 通过、36 pending、1 失败：T2_F7_05 没有收到拒绝响应。修正测试请求发出后立即关闭 stdin 的行为：有效请求明确等待完整回复，畸形/截断帧仍保留 EOF 检测；所有等待有截止时间，桌面及宿主探针清理自建进程组，避免包装进程退出后遗留子进程。新增回归覆盖迟到回复与 EOF 竞争、提前退出的包装进程、忽略 SIGTERM 的子进程、无权进程组保护。原拒绝断言保留，不把失败改为 pending。修正后主代理独立重跑 T2_F7_05 通过；worker 重跑全部 206 项仍为 170 通过、36 pending、0 失败（113.893 秒，复用冻结二进制，报告 `/workspace/plugin-completion-e2e-probes.json`）；最终远端结果以本 PR Checks 为准，不能沿用首轮其他平台的绿色结果。Web CI 同时保存 JSON 报告 artifact（14 天）。
 
 复现：`python3 -m unittest discover -s tests/scripts -p 'test_e2e*.py'`、`python3 scripts/e2e_runner.py --feature all --json-out /tmp/locklark-e2e-report.json`；使用有效 Go、Node、Xvfb 工具链。本轮同样进入 Web CI。
 

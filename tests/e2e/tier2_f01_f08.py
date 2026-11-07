@@ -564,7 +564,10 @@ def t2_f7_05(ctx):
         "tab_id": 1,
         "document_id": "doc-1",
     }
-    probe = native_probe(ctx, request, timeout=8.0)
+    # The refusal is produced by the shared desktop session and relayed back,
+    # so hold stdin open until one complete framed reply arrives (a real
+    # browser keeps the native-messaging pipe open).
+    probe = native_probe(ctx, request, timeout=8.0, await_reply=True)
     assert not probe.timed_out, probe.stderr
     if not probe.frames and probe.returncode not in (0, None):
         gate(

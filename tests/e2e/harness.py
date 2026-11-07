@@ -19,6 +19,7 @@ import pty
 import re
 import secrets
 import select
+import signal
 import shutil
 import struct
 import subprocess
@@ -343,6 +344,194 @@ def _surface_text(value: Any) -> str:
         except (TypeError, ValueError):
             return repr(value)
     return str(value)
+
+
+def first_native_frame_end(data: bytes) -> int | None:
+    """Return the byte offset just past the first complete native frame."""
+
+    if len(data) < 4:
+        return None
+    (length,) = struct.unpack("=I", data[:4])
+    if length == 0 or length > _MAX_NATIVE_FRAME:
+        return None
+    end = 4 + length
+    if len(data) < end:
+        return None
+    return end
+
+
+def _group_has_members(group: int) -> bool:
+    try:
+        os.killpg(group, 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError):
+        return True
+    return True
+
+
+def terminate_process_group(
+    proc: subprocess.Popen,
+    *,
+    grace: float = 3.0,
+    owned_group: int | None = None,
+) -> int | None:
+    """Terminate the session/process group this harness launched.
+
+    Launches pass ``start_new_session=True``, so the wrapper, the GUI and any
+    broker child form one group whose id equals the wrapper pid.  Ownership is
+    verified: a group is signalled only when ``group == proc.pid`` (or an
+    explicit ``owned_group`` recorded at launch is supplied) and never when it
+    matches our own group, so unrelated user processes cannot be hit.
+
+    The wrapper may exit while descendants remain, and a descendant may ignore
+    SIGTERM, so the wait/escalation targets the *group*, not just the wrapper.
+    """
+
+    own_group = os.getpgid(0)
+    group = owned_group
+    if group is None:
+        try:
+            candidate = os.getpgid(proc.pid)
+        except (ProcessLookupError, PermissionError, OSError):
+            candidate = None
+        group = candidate if candidate == proc.pid else None
+    if group is not None and group == own_group:
+        group = None
+    if group is not None:
+        try:
+            os.killpg(group, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            group = None
+    if group is None:
+        if proc.poll() is None:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+        try:
+            proc.wait(timeout=grace)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=grace)
+            except subprocess.TimeoutExpired:
+                pass
+        return proc.poll()
+
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline:
+        if not _group_has_members(group):
+            break
+        time.sleep(0.05)
+    if _group_has_members(group):
+        try:
+            os.killpg(group, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        hard_deadline = time.monotonic() + 2.0
+        while time.monotonic() < hard_deadline and _group_has_members(group):
+            time.sleep(0.05)
+    try:
+        proc.wait(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        pass
+    return proc.poll()
+
+
+def relay_first_frame(
+    proc: subprocess.Popen,
+    raw_input: bytes,
+    *,
+    timeout: float,
+    grace: float = 3.0,
+) -> tuple[bytes, bytes, bool]:
+    """Keep the relay stdin open until one complete framed reply arrives.
+
+    A real browser keeps the native-messaging pipe open while the host waits
+    for the desktop broker, so closing stdin right after the request (what
+    ``communicate(input=...)`` does) can stop the host's relay before the reply
+    is forwarded.  This helper writes the request, waits for exactly one
+    complete length-prefixed frame on stdout, then closes stdin and tears down
+    the owned process group.  All reads are select-driven and bounded; EOF
+    streams are dropped from the select set, and the final drain never blocks
+    on a descendant that inherited the pipes.
+
+    Returns ``(stdout, stderr, timed_out)``; ``timed_out`` is True when no
+    complete frame arrived before the deadline.
+    """
+
+    buffers: dict[Any, bytearray] = {}
+    if proc.stdout is not None:
+        buffers[proc.stdout] = bytearray()
+    if proc.stderr is not None:
+        buffers[proc.stderr] = bytearray()
+    complete = False
+
+    def collect(until: float) -> None:
+        nonlocal complete
+        while True:
+            remaining = until - time.monotonic()
+            if remaining <= 0:
+                return
+            live = [stream for stream in buffers if not stream.closed]
+            if not live:
+                return
+            ready, _, _ = select.select(live, [], [], min(0.2, remaining))
+            if not ready:
+                if proc.poll() is not None and not any(
+                    not stream.closed for stream in buffers
+                ):
+                    return
+                continue
+            for stream in ready:
+                buffer = buffers[stream]
+                try:
+                    chunk = os.read(stream.fileno(), 65536)
+                except (OSError, ValueError):
+                    chunk = b""
+                if not chunk:
+                    try:
+                        stream.close()
+                    except (OSError, ValueError):
+                        pass
+                    continue
+                buffer.extend(chunk)
+                if stream is proc.stdout and first_native_frame_end(bytes(buffer)):
+                    complete = True
+            if complete:
+                return
+
+    deadline = time.monotonic() + timeout
+    try:
+        if raw_input:
+            try:
+                proc.stdin.write(raw_input)
+                proc.stdin.flush()
+            except (BrokenPipeError, OSError, ValueError):
+                pass
+        collect(deadline)
+    finally:
+        try:
+            proc.stdin.close()
+        except (OSError, ValueError):
+            pass
+        if not complete:
+            collect(time.monotonic() + 1.0)
+        # The relay always owns a start_new_session launch, so the group id is
+        # the wrapper pid even after the wrapper itself has exited.
+        terminate_process_group(proc, grace=grace, owned_group=proc.pid)
+        for stream in list(buffers):
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
+    stdout = bytes(buffers.get(proc.stdout, b""))
+    stderr = bytes(buffers.get(proc.stderr, b""))
+    return stdout, stderr, not complete
 
 
 class E2EContext:
@@ -772,6 +961,7 @@ class E2EContext:
         timeout: float = 10.0,
         use_xvfb: bool | None = None,
         env: dict[str, str] | None = None,
+        await_reply: bool = False,
     ) -> NativeProbeResult:
         bin_path = (
             self.browser_chromium_bin
@@ -834,43 +1024,40 @@ class E2EContext:
             stderr=subprocess.PIPE,
             cwd=str(self.temp_dir),
             env=proc_env,
+            start_new_session=True,
         )
         timed_out = False
         stdout_bytes = b""
         stderr_bytes = b""
-        first_timeout: subprocess.TimeoutExpired | None = None
-        try:
-            stdout_bytes, stderr_bytes = proc.communicate(
-                input=raw_input, timeout=timeout
+        if await_reply:
+            stdout_bytes, stderr_bytes, timed_out = relay_first_frame(
+                proc, raw_input, timeout=timeout
             )
-        except subprocess.TimeoutExpired as exc:
-            first_timeout = exc
-            timed_out = True
+        else:
+            first_timeout: subprocess.TimeoutExpired | None = None
             try:
-                proc.kill()
-            except OSError:
-                pass
-            # collect partial output, but keep the wait bounded even when the
-            # host left a grandchild holding the inherited pipes open.
-            try:
-                stdout_bytes, stderr_bytes = proc.communicate(timeout=2)
-            except subprocess.TimeoutExpired as second:
-                stdout_bytes = (first_timeout.output or b"") + (
-                    second.output or b""
+                stdout_bytes, stderr_bytes = proc.communicate(
+                    input=raw_input, timeout=timeout
                 )
-                stderr_bytes = (first_timeout.stderr or b"") + (
-                    second.stderr or b""
-                )
-        finally:
-            if proc.poll() is None:
+            except subprocess.TimeoutExpired as exc:
+                first_timeout = exc
+                timed_out = True
                 try:
                     proc.kill()
                 except OSError:
                     pass
+                # collect partial output, but keep the wait bounded even when
+                # the host left a grandchild holding the inherited pipes open.
                 try:
-                    proc.wait(timeout=5)
-                except Exception:
-                    pass
+                    stdout_bytes, stderr_bytes = proc.communicate(timeout=2)
+                except subprocess.TimeoutExpired as second:
+                    stdout_bytes = (first_timeout.output or b"") + (
+                        second.output or b""
+                    )
+                    stderr_bytes = (first_timeout.stderr or b"") + (
+                        second.stderr or b""
+                    )
+        terminate_process_group(proc, grace=5.0, owned_group=proc.pid)
 
         returncode: int | None = proc.returncode
         stdout_bytes = stdout_bytes or b""
@@ -995,6 +1182,9 @@ __all__ = [
     "FeatureNotImplementedError",
     "ISSUED_TOKEN_RE",
     "NativeProbeResult",
+    "first_native_frame_end",
+    "relay_first_frame",
+    "terminate_process_group",
     "PTYResult",
     "RECOVERY_KIT_RE",
     "REGISTRY",

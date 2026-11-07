@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import struct
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -494,6 +498,186 @@ class F5RefreshDetectionTests(unittest.TestCase):
         )
         self.assertTrue(support.f5_desktop_timer_ready(ctx))
         self.assertFalse(support.f5_filter_refresh_ready(ctx))
+
+
+class NativeRelayLifecycleTests(unittest.TestCase):
+    """Native-host probes must mirror a real browser pipe and reap their group."""
+
+    def _script(self, body: str) -> Path:
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        path = root / "fake_host.py"
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    def _spawn(self, script: Path, *args: str, new_session: bool = True) -> subprocess.Popen:
+        proc = subprocess.Popen(
+            [sys.executable, str(script), *args],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=new_session,
+        )
+        if new_session:
+            self.addCleanup(harness.terminate_process_group, proc, owned_group=proc.pid)
+
+        def close_pipes() -> None:
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                try:
+                    if stream is not None:
+                        stream.close()
+                except (OSError, ValueError):
+                    pass
+
+        self.addCleanup(close_pipes)
+        return proc
+
+    def test_first_frame_detection_requires_a_complete_frame(self):
+        body = b'{"type":"error","error":"refused"}'
+        frame = struct.pack("=I", len(body)) + body
+        self.assertIsNone(harness.first_native_frame_end(b""))
+        self.assertIsNone(harness.first_native_frame_end(b"\x00\x00"))
+        self.assertIsNone(harness.first_native_frame_end(frame[:-1]))
+        self.assertEqual(harness.first_native_frame_end(frame), len(frame))
+        self.assertIsNone(harness.first_native_frame_end(b"\x00\x00\x00\x00"))
+
+    def test_reply_wait_keeps_stdin_open_until_the_framed_answer(self):
+        # Races the reply against an early stdin EOF: if the harness closed
+        # stdin immediately (communicate semantics), the host exits without a
+        # frame and this test fails.
+        script = self._script(
+            "import json, select, struct, sys, time\n"
+            "header = sys.stdin.buffer.read(4)\n"
+            "length = struct.unpack('=I', header)[0]\n"
+            "sys.stdin.buffer.read(length)\n"
+            "ready, _, _ = select.select([sys.stdin], [], [], 0.3)\n"
+            "if ready:\n"
+            "    sys.exit(0)\n"
+            "body = json.dumps({'type': 'error', 'error': 'refused', 'id': '9' * 32}).encode()\n"
+            "sys.stdout.buffer.write(struct.pack('=I', len(body)) + body)\n"
+            "sys.stdout.buffer.flush()\n"
+            "time.sleep(1.5)\n"
+            "sys.stdin.buffer.read()\n"
+        )
+        proc = self._spawn(script)
+        raw = harness.encode_native_frame(
+            {
+                "v": 1,
+                "id": "9" * 32,
+                "type": "match",
+                "capability": "a" * 32,
+                "origin": "https://login.example.test",
+                "tab_id": 1,
+                "document_id": "doc-1",
+            }
+        )
+        stdout, _stderr, timed_out = harness.relay_first_frame(proc, raw, timeout=10.0)
+        self.assertFalse(timed_out)
+        self.assertEqual(harness.first_native_frame_end(stdout), len(stdout))
+        self.assertIn(b'"refused"', stdout)
+        self.assertIsNotNone(proc.poll())
+
+    def test_early_wrapper_exit_with_sigterm_ignoring_descendant_stays_bounded(self):
+        script = self._script(
+            "import subprocess, sys, time\n"
+            "child = subprocess.Popen([sys.executable, '-c', "
+            "'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)'])\n"
+            "open(sys.argv[1], 'w').write(str(child.pid))\n"
+        )
+        pid_file = script.parent / "child.pid"
+        proc = self._spawn(script, str(pid_file))
+        for _ in range(100):
+            if pid_file.is_file() and pid_file.read_text().strip():
+                break
+            time.sleep(0.05)
+        child = int(pid_file.read_text().strip())
+        for _ in range(100):
+            if proc.poll() is not None:
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(proc.poll(), "wrapper should have exited")
+        raw = harness.encode_native_frame({"v": 1, "id": "8" * 32, "type": "match"})
+        started = time.monotonic()
+        _stdout, _stderr, timed_out = harness.relay_first_frame(
+            proc, raw, timeout=1.0, grace=2.0
+        )
+        self.assertLess(time.monotonic() - started, 8.0)
+        self.assertTrue(timed_out)
+        state = ""
+        for _ in range(100):
+            try:
+                state = Path(f"/proc/{child}/stat").read_text().split()[2]
+            except OSError:
+                state = "gone"
+                break
+            if state == "Z":
+                break
+            time.sleep(0.05)
+        self.assertIn(state, ("Z", "gone"), f"descendant {child} survived teardown")
+
+    def test_process_group_teardown_reaps_the_whole_session(self):
+        script = self._script(
+            "import subprocess, sys, time\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+            "open(sys.argv[1], 'w').write(str(child.pid))\n"
+            "time.sleep(60)\n"
+        )
+        pid_file = script.parent / "grandchild.pid"
+        proc = self._spawn(script, str(pid_file))
+        for _ in range(100):
+            if pid_file.is_file() and pid_file.read_text().strip():
+                break
+            time.sleep(0.05)
+        grandchild = int(pid_file.read_text().strip())
+        harness.terminate_process_group(proc, grace=3.0, owned_group=proc.pid)
+        self.assertIsNotNone(proc.poll())
+        state = ""
+        for _ in range(100):
+            try:
+                state = Path(f"/proc/{grandchild}/stat").read_text().split()[2]
+            except OSError:
+                state = "gone"
+                break
+            if state == "Z":
+                break
+            time.sleep(0.05)
+        self.assertIn(state, ("Z", "gone"), f"grandchild {grandchild} survived teardown")
+
+    def test_group_ownership_guard_never_signals_an_unowned_group(self):
+        # A sibling in our own group must survive: only a group whose id equals
+        # the launched pid (explicit start_new_session ownership) is signalled.
+        sibling_script = self._script("import time\ntime.sleep(60)\n")
+        sibling = subprocess.Popen(
+            [sys.executable, str(sibling_script)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(lambda: (sibling.poll() is None and sibling.kill(), sibling.wait()))
+        plain = self._spawn(self._script("import time\ntime.sleep(60)\n"), new_session=False)
+        self.assertNotEqual(os.getpgid(plain.pid), plain.pid)
+        harness.terminate_process_group(plain, grace=2.0)
+        self.assertIsNotNone(plain.poll())
+        self.assertIsNone(sibling.poll(), "unowned sibling process was signalled")
+
+    def test_native_probe_forwards_the_explicit_reply_wait(self):
+        recorded: dict[str, object] = {}
+
+        class ProbeContext:
+            def probe_native_host_frame(self, frame, **kwargs):
+                recorded.update(kwargs)
+                recorded["frame"] = frame
+                return "probe"
+
+        frame = {"v": 1, "id": "7" * 32, "type": "match"}
+        self.assertEqual(
+            support.native_probe(ProbeContext(), frame, timeout=4.0, await_reply=True),
+            "probe",
+        )
+        self.assertTrue(recorded.get("await_reply"))
+        self.assertEqual(recorded.get("timeout"), 4.0)
+        support.native_probe(ProbeContext(), frame, timeout=4.0)
+        self.assertFalse(recorded.get("await_reply"))
 
 
 if __name__ == "__main__":

@@ -21,7 +21,7 @@ import zipfile
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from .harness import CLIResult, E2EContext, PTYResult
+from .harness import CLIResult, E2EContext, PTYResult, terminate_process_group
 
 HEX32_RE = re.compile(r"^[a-f0-9]{32}$")
 HEX64_RE = re.compile(r"^[a-f0-9]{64}$")
@@ -690,12 +690,22 @@ def native_probe(
     browser: str = "chromium",
     timeout: float = 8.0,
     launch_args: Sequence[Any] | None = None,
+    await_reply: bool = False,
 ) -> Any:
+    """Speak the native-messaging protocol to the real browser host.
+
+    ``await_reply=True`` is only for probes whose answer is produced by the
+    desktop broker round trip: it keeps the relay stdin open until one complete
+    framed reply arrives, mirroring a real browser.  Malformed/truncated-EOF
+    probes keep the default immediate-close behaviour.
+    """
+
     return ctx.probe_native_host_frame(
         frame,
         browser=browser,
         timeout=timeout,
         launch_args=launch_args,
+        await_reply=await_reply,
     )
 
 
@@ -1130,18 +1140,17 @@ def desktop_binary_starts(ctx: E2EContext, vault: Path, seconds: float = 2.0) ->
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        # xvfb-run, the GUI and any broker child share a private session so a
+        # bounded SIGTERM/SIGKILL of the group reaps all of them; terminating
+        # only the wrapper used to leave the desktop (and its broker socket)
+        # alive for later tests on slower/remote runners.
+        start_new_session=True,
     )
     try:
         time.sleep(seconds)
         return process.poll() is None
     finally:
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=3)
+        terminate_process_group(process, grace=3.0, owned_group=process.pid)
 
 
 def file_mode(path: Path) -> int:
