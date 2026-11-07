@@ -28,7 +28,7 @@ export function fixtureCanaries(fixture) {
 export function browserScreenshotsAllowed(stage) {
   return typeof stage === "string" && !stage.startsWith("otp") &&
     !stage.startsWith("passkey-management") &&
-    !stage.startsWith("passkey-conditional");
+    !(stage.startsWith("passkey-conditional") || stage.startsWith("passkey-signal"));
 }
 
 export function captureControllerOutput() {
