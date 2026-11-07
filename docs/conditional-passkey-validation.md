@@ -16,7 +16,7 @@
 ## 已执行的组件契约
 
 - backend worker：browserhost 全包 47.896 秒，personal 全包 219.647 秒；主代理独立 focused 非 race 通过，独立 conditional/suggestion race：browserhost 11.785 秒、personal 27.625 秒。personal/vault 私钥不复制到候选 DTO。
-- 在起始 main 41e31f7 上，最终本地 Node 全量 243/243 通过、0 fail/skipped；主代理日志 /workspace/issue-completion-tasks/conditional-node-frozen-prebase.log。合入 PR #46 的 7 个 fill 回归后须重新报告最终数量，不能将这个起点数当新主线最终数。
+- 在起始 main 41e31f7 上，最终本地 Node 全量 243/243 通过、0 fail/skipped；主代理日志 /workspace/issue-completion-tasks/conditional-node-frozen-prebase.log。接入 main 2fc96e7 并保留 PR #46 的 7 个 fill 回归后，主代理全量 250/250 通过、0 fail/skipped（conditional-node-rebased.log）。
 - 主代理定向 E2E F2 Tier 2：9/9 通过，其中新增 T2_F2_08、T2_F2_09 实际执行 Go/Node 组件契约并要求非零且足够数量；日志 conditional-e2e-focused.log、JSON conditional-e2e-focused.json。组件契约没有冒充真实 browser→native 旅程。
 - go vet personal/browserhost/desktop、修改脚本 node --check、git diff --check 通过。
 
@@ -37,3 +37,9 @@
 Chromium、Firefox CI 都启用条件式和管理旅程；Chromium 还启用其他提供者的软件验证器旅程，配置已有独立 WebAuthn verifier。必须最终精确 head 的 android/ios/desktop-macos/web/Go Ubuntu/Go Windows 六项成功后正常合并。最终 head、run、合并收据和全量 E2E 数量在结果稳定后补录。
 
 #39 仍分别追踪实际 Windows/macOS 浏览器及 Hello/Touch ID 硬件行为、Signal APIs、其他提供者/跨设备、公开站点兼容 fixture 和分发验收。此批不关闭整个 epic，不把软件/模拟器或 Linux 运行写成真机 UV，也不把受控 RP 当实际生产网站登录。
+
+## 新主线最终本地收据
+
+接入 main 2fc96e7 后，扩展全量 250/250；统一 E2E 重新构建后为 210 项：174 PASS、36 PENDING_FEATURE、0 FAIL，用时 135.545 秒。分类为 functional 149/130/19、capability_probe 45/28/17、component_contract 16/16/0（依次 total/pass/pending），不把能力探测或 pending 写成完整场景。机器 JSON 为 /workspace/issue-completion-tasks/conditional-e2e-final.json。命令包含 /workspace/toolchains/x11/usr/bin 与正确 Go PATH，并清除外层 DISPLAY/WAYLAND_DISPLAY/DBUS_SESSION_BUS_ADDRESS，让 harness 为每个 GUI 探测创建自己的会话。
+
+本地首次统一运行漏带 X11 工具 PATH，得到 169 PASS、40 pending、1 FAIL；原生 host 无显示会话而无法启动。该失败保留在 conditional-e2e-without-x11.log/json，没有改测试断言或当成缺失产品功能。纠正环境后的上述完整运行才是本批证据。最终六项 CI 及合并收据见对应 PR；#39 仍开放。
