@@ -1,6 +1,8 @@
 # Locklark 开发进度
 
-本轮起点 / 上批已合并基线：`e2561be`（[PR #44](https://github.com/jihuayu/locklark/pull/44)）。该 PR 最终 head `faf4732` 六项 CI 全部通过。以下旧段落中的“PR #37/#40 尚未合并”、初始浏览器缺口与旧 CI 待办只代表历史阶段；当前缺口以[浏览器清单](browser-parity-checklist.md)和最新验收为准。
+本轮起点 / 上批已合并基线：`41e31f7`（[PR #45](https://github.com/jihuayu/locklark/pull/45)，2026-11-07 05:54:55 UTC）。该 PR 最终 head `5e990dd` 六项 CI 全部通过，合并后内容与验证提交一致。以下旧段落中的“PR #37/#40 尚未合并”、初始浏览器缺口与旧 CI 待办只代表历史阶段；当前缺口以[浏览器清单](browser-parity-checklist.md)和最新验收为准。
+
+2026-11-07 全部 issues 接续：起始 8 项未关闭。#32/#33/#34/#36/#38 的主修复已在 PR #43 合并，正独立复核并补齐原始竞态回归；#35 历史验证性能与 #39 条件式 Passkey 在隔离工作区并行实现，#24 收录通知补 README 回链。逐项证据、关闭门槛和外部验收范围见 [issues 完成记录](issue-completion-validation.md)。
 
 2026-11-07 继续推进 Passkey 管理：弹窗筛选、RP/账号元数据、独立删除及并发撤销已实现；主代理独立 Chromium、Edge、Firefox 双账号旅程通过，删除后保留登录/密码/备注，另一账号重连后仍能签名。DeepSeek workers 完成实现并并行调研 CLI，主代理补审计动作回放并独立验收。完整测试与当前 PR/远端门槛见 [Passkey 管理验收](passkey-management-validation.md)；CLI broker 客户端/租约仍未闭环。
 
