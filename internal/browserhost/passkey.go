@@ -49,7 +49,13 @@ func (c *Connection) startPasskey(r Request) error {
 	if s.RegisterMutation(gate) != nil {
 		return c.refuse(r.ID)
 	}
-	p := &pendingPasskey{request: r, parsed: parsed, session: s, gate: gate, until: until, epoch: c.epoch, passkeyEpoch: s.PasskeyRevocationEpoch(), target: personal.PasskeyTarget{Context: r.Context(), Create: parsed.Create, Options: []byte(r.Options)}, working: true}
+	// A conditional selection pins one exact login. Protocol validation allows
+	// the pair only for passkey-get, so creation can never attach by selector.
+	target := personal.PasskeyTarget{Context: r.Context(), Create: parsed.Create, Options: []byte(r.Options)}
+	if !parsed.Create && r.ItemID != "" && r.Revision != "" {
+		target.ID, target.Revision = r.ItemID, r.Revision
+	}
+	p := &pendingPasskey{request: r, parsed: parsed, session: s, gate: gate, until: until, epoch: c.epoch, passkeyEpoch: s.PasskeyRevocationEpoch(), target: target, working: true}
 	c.passkey = p
 	c.passkeyStatus = "正在读取 Passkey"
 	c.authMu.Lock()
@@ -162,21 +168,30 @@ func (c *Connection) ApprovePasskey(id, itemID string, password, secret []byte) 
 		return ErrProtocol
 	}
 	target := p.target
+	pinned := p.target.ID
 	if itemID != "" {
+		// The UI selection must match a reviewed choice exactly. A prepopulated
+		// (pinned) target never satisfies the check by itself, so another account
+		// cannot be promoted to the signed identity.
+		matched := false
+		target.ID, target.Revision = "", ""
 		for _, choice := range p.choices {
 			if choice.ID == itemID {
-				target.ID = choice.ID
-				target.Revision = choice.Revision
+				target.ID, target.Revision, matched = choice.ID, choice.Revision, true
 				break
 			}
 		}
-		if target.ID == "" {
+		if !matched || pinned != "" && (target.ID != pinned || target.Revision != p.target.Revision) {
 			c.mu.Unlock()
 			return ErrProtocol
 		}
-	} else if !target.Create {
-		c.mu.Unlock()
-		return ErrProtocol
+	} else {
+		// An empty selection only ever creates a new login; it is never an
+		// implicit choice of a pinned or merely pre-populated target.
+		if !target.Create || pinned != "" {
+			c.mu.Unlock()
+			return ErrProtocol
+		}
 	}
 	p.working = true
 	c.mu.Unlock()

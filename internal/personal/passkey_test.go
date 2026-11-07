@@ -232,6 +232,9 @@ func TestMixedSSHAndPasskeyVaultReplayAndBackupRestore(t *testing.T) {
 	if e = pub.Verify([]byte("exact SSH client message"), &sig); e != nil {
 		t.Fatal("restored SSH signature", e)
 	}
+	// A restore re-chains the journal hashes, so the pre-restore exact-revision
+	// pin is intentionally stale; re-review the restored vault, then re-pin.
+	get.ID, get.Revision = "", ""
 	choices, e = next.ReviewPasskey(get)
 	if e != nil || len(choices) != 1 {
 		t.Fatal("restored passkey review", e)
