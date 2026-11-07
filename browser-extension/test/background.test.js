@@ -25,6 +25,8 @@ function harness(options = {}) {
     captureWait = null,
     readyIds = new Set(),
     hangProbe = false,
+    hangProbeAfterInjection = false,
+    probeCount = 0,
     autoCommit = true,
     otpClock = 0,
     otpProbeWait = null,
@@ -206,7 +208,11 @@ function harness(options = {}) {
       executeScript: async (options) => {
         if (options.target.frameIds && options.target.documentIds)
           throw Error("Cannot specify both 'frameIds' and 'documentIds'.");
-        if (options.func === core.probe && hangProbe)
+        if (options.func === core.probe) probeCount++;
+        if (
+          options.func === core.probe &&
+          (hangProbe || (hangProbeAfterInjection && injected.length > 0))
+        )
           return new Promise(() => {});
         if (options.func === core.probe)
           return [
@@ -294,6 +300,19 @@ function harness(options = {}) {
     otpProbes,
     listeners,
     hangProbe: () => (hangProbe = true),
+    hangPostInjectionProbe: () => (hangProbeAfterInjection = true),
+    probeCount: () => probeCount,
+    expireFillBound: () => {
+      // Fire every still-pending bounded (1500ms) operation. Resolved calls
+      // clear their timer, so only the live injection/probe wait is left.
+      const found = [...timers].filter(([, t]) => t.ms === 1500);
+      assert.ok(found.length > 0, "missing bounded fill timer");
+      for (const [handle, timer] of found) {
+        clearTimeout(handle);
+        timers.delete(handle);
+        timer.fn();
+      }
+    },
     holdCommits: () => (autoCommit = false),
     losePort: () => portDisconnect?.(),
     expireCommit: () => {
@@ -2047,5 +2066,159 @@ test("late vault search after lock or passkey removal cannot revive old rows", a
     assert.deepEqual(Array.from(result.vaultItems), [], mode);
     const state = await h.send({ type: "state" });
     assert.deepEqual(Array.from(state.vaultItems), [], mode);
+  }
+});
+
+async function ticks(n) {
+  for (let i = 0; i < n; i++) await tick();
+}
+async function sendFill(h) {
+  await h.send({ type: "fill", id: "b".repeat(32), revision: "c".repeat(64) });
+  await tick();
+  const native = h.sent.filter((r) => r.type === "fill").at(-1);
+  assert.ok(native, "fill request not sent");
+  return native;
+}
+async function deliverFill(h, native) {
+  h.deliver({
+    v: 1,
+    id: native.id,
+    type: "fill",
+    username: "fixture-user",
+    password: "fixture-password",
+  });
+  for (let i = 0; i < 12 && h.injected.length === 0; i++) await tick();
+  assert.equal(h.injected.length, 1, "fill was not dispatched");
+}
+
+test("hung post-injection probe keeps a dispatched login fill unknown", async () => {
+  const h = harness();
+  try {
+    await ready(h);
+    h.hangPostInjectionProbe();
+    const probesBefore = h.probeCount();
+    const native = await sendFill(h);
+    await deliverFill(h, native);
+    for (let i = 0; i < 12 && h.probeCount() < probesBefore + 4; i++)
+      await tick();
+    assert.ok(
+      h.probeCount() >= probesBefore + 4,
+      "post-injection probe never started: " + (h.probeCount() - probesBefore),
+    );
+    h.expireFillBound();
+    await ticks(6);
+    const state = await h.send({ type: "state" });
+    assert.match(state.status, /登录填充结果未确认/);
+    assert.doesNotMatch(state.status, /本次填充未完成/);
+    assert.equal(state.pending, false);
+  } finally {
+    await h.send({ type: "disconnect" });
+  }
+});
+
+test("lost injection promise at its bounded timeout is unknown", async () => {
+  const h = harness();
+  try {
+    await ready(h);
+    h.holdFill(new Promise(() => {}));
+    const native = await sendFill(h);
+    await deliverFill(h, native);
+    h.expireFillBound();
+    await ticks(6);
+    const state = await h.send({ type: "state" });
+    assert.match(state.status, /登录填充结果未确认/);
+    assert.doesNotMatch(state.status, /本次填充未完成/);
+    assert.equal(state.pending, false);
+  } finally {
+    await h.send({ type: "disconnect" });
+  }
+});
+
+for (const reason of ["navigation", "lock", "disconnect"]) {
+  test(
+    "dispatched login fill stays unknown after " + reason,
+    async () => {
+      const h = harness();
+      let release;
+      await ready(h);
+      h.holdFill(new Promise((resolve) => (release = resolve)));
+      const native = await sendFill(h);
+      await deliverFill(h, native);
+      if (reason === "navigation") {
+        h.setDoc("doc-2");
+        h.listeners.updated(1, { status: "loading" });
+      }
+      if (reason === "lock") h.deliver({ v: 1, type: "locked" });
+      if (reason === "disconnect") h.losePort();
+      await ticks(4);
+      let state = await h.send({ type: "state" });
+      assert.match(state.status, /登录填充结果未确认/);
+      assert.doesNotMatch(state.status, /本次填充未完成/);
+      release([{ frameId: 0, documentId: "doc-1", result: true }]);
+      await ticks(6);
+      state = await h.send({ type: "state" });
+      assert.match(state.status, /登录填充结果未确认/);
+      assert.doesNotMatch(state.status, /本次填充未完成/);
+      assert.equal(h.injected.length, 1, "late fill repeated injection");
+    },
+  );
+}
+
+test("native refusal before dispatch is a definite failure with no injection", async () => {
+  const h = harness({
+    onRequest: (r) =>
+      r.type === "fill"
+        ? { v: 1, id: r.id, type: "error", error: "refused" }
+        : undefined,
+  });
+  try {
+    await ready(h);
+    await h.send({ type: "fill", id: "b".repeat(32), revision: "c".repeat(64) });
+    await ticks(4);
+    assert.equal(h.injected.length, 0, "refused fill was injected");
+    const state = await h.send({ type: "state" });
+    assert.equal(state.status, "本次填充未完成；未自动重试");
+    assert.doesNotMatch(state.status, /未确认/);
+    assert.equal(state.pending, false);
+  } finally {
+    await h.send({ type: "disconnect" });
+  }
+});
+
+test("late completion of an older fill cannot overwrite a newer operation", async () => {
+  const h = harness();
+  try {
+    await ready(h);
+    let release;
+    h.holdFill(new Promise((resolve) => (release = resolve)));
+    const native = await sendFill(h);
+    await deliverFill(h, native);
+    h.setDoc("doc-2");
+    h.listeners.updated(1, { status: "loading" });
+    await ticks(3);
+    assert.match(
+      (await h.send({ type: "state" })).status,
+      /登录填充结果未确认/,
+    );
+    await h.send({ type: "match" });
+    await ticks(2);
+    assert.equal((await h.send({ type: "state" })).candidates.length, 1);
+    await h.send({ type: "fill", id: "b".repeat(32), revision: "c".repeat(64) });
+    await ticks(2);
+    const newer = h.sent.filter((r) => r.type === "fill").at(-1);
+    assert.notEqual(newer.id, native.id, "newer fill request not sent");
+    const before = await h.send({ type: "state" });
+    assert.equal(before.pending, true);
+    assert.match(before.status, /请在原生窗口核对/);
+    release([{ frameId: 0, documentId: "doc-1", result: true }]);
+    await ticks(8);
+    const after = await h.send({ type: "state" });
+    assert.equal(after.pending, true, "late completion dropped the newer fill");
+    assert.equal(after.status, before.status);
+    assert.match(after.status, /请在原生窗口核对/);
+    assert.doesNotMatch(after.status, /本次填充未完成/);
+    assert.equal(h.injected.length, 1, "late fill repeated injection");
+  } finally {
+    await h.send({ type: "disconnect" });
   }
 });

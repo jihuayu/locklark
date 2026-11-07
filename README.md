@@ -1,5 +1,7 @@
 # Locklark
 
+[![Listed on Awesome MyGo](https://awesomemygo.dev/badge.svg)](https://awesomemygo.dev/apps/locklark)
+
 **Keep the keys. Grant the action.** 面向个人和小团队的本地密码管理器。目标是替换 1Password 8 的日常体验，并让 Agent 申请具体操作、说明原因、关联会话。
 
 当前是开发版，包括个人库 CLI、MyGo 桌面、浏览器扩展、Android/iOS 原生应用源码和团队 HTTPS 服务/Go 客户端库，另有独立的 **M0 合成网关演练**。移动应用目前操作个人离线库，团队服务尚无普通用户的邀请/配对界面。系统密钥保护已有平台实现，独立密码评审、逐平台硬件与干净机器灾后恢复验收尚未完成。请先用测试数据，不要停用已有密码管理器。设计与威胁模型见[设计稿](docs/design.md)。
