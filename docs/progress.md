@@ -1,8 +1,8 @@
 # Locklark 开发进度
 
-本轮优化起点：main 38c8324（PR #49），日期 2026-11-07（香港）。已实现首屏搜索/可展开工具/深色对比度/键盘筛选、弹窗迟到秘密回复及锁定抢占保护、一次认证三份桌面元数据快照（保留三条原审计）、x/net 安全更新与持续扫描。293 Node、两浏览器各 21 组 DOM/组件及快照 race 通过；E2E 213 项为 177 通过、36 pending、0 失败，完整原生和最终 CI 回执见本批 PR。详见[UI、性能与安全验收](ui-performance-security-validation.md)。
+本轮优化起点：main 38c8324（PR #49），日期 2026-11-07（香港）。已实现首屏搜索/可展开工具/深色对比度/键盘筛选、弹窗迟到秘密回复及锁定抢占保护、一次认证三份桌面元数据快照（保留三条原审计）、x/net 安全更新与持续扫描。301 Node、两浏览器各 32 组 DOM/组件及快照 race 通过；E2E 213 项为 177 通过、36 pending、0 失败，完整原生和最终 CI 回执见本批 PR。详见[UI、性能与安全验收](ui-performance-security-validation.md)。
 
-遗留范围现已拆成 [#50–#59](https://github.com/jihuayu/locklark/issues?q=is%3Aissue+is%3Aopen)，#39 继续作为总清单。DeepSeek 本轮第 0 轮即 HTTP 403，未执行实现/复核；主代理已明确接续，服务恢复见 #58。以下前轮“仅 #39 开放”的数字为历史，不再是当前 issue 总数。
+遗留范围现已拆成 [#50–#59](https://github.com/jihuayu/locklark/issues?q=is%3Aissue+is%3Aopen)，#39 继续作为总清单。DeepSeek 初始 HTTP 403，后续已实际恢复并完成 CSS/驱动/生命周期实现及定向静态检查；Luna max 复核，主代理设计并独立验收，恢复证据及凭据迁移/轮换遗留见 #58。以下前轮“仅 #39 开放”的数字为历史，不再是当前 issue 总数。
 
 ## 前轮交接记录
 

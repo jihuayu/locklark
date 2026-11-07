@@ -29,9 +29,14 @@
     --soft: #22362f;
   }
 }
+/* The extension panel must size itself intrinsically. Firefox measures the
+   popup with a 0-width viewport before the panel is laid out, so
+   max-width: 100vw made this circular: 100vw resolved to that 0 width and the
+   body collapsed to 0 (visible and focused, but zero width and scrolled).
+   Keep the width viewport-independent here and only follow the viewport in the
+   supported 320-389px band declared further down. */
 body {
   width: 390px;
-  max-width: 100vw;
   margin: 0;
   background: var(--bg);
   color: var(--ink);
@@ -639,6 +644,14 @@ textarea:focus-visible, summary:focus-visible {
   }
   .wt-banner { background: var(--soft); border-color: var(--line); }
   .wt-open-error { color: var(--danger); }
+}
+/* Supported narrow layout. The 320px lower bound is deliberate: the initial
+   intrinsic measurement of the panel may be 0 or smaller than any real
+   viewport, and that pass must keep the stable 390px intrinsic width. */
+@media (min-width: 320px) and (max-width: 389px) {
+  body {
+    width: 100%;
+  }
 }
 @media (max-width: 360px) {
   main { padding: 12px; }

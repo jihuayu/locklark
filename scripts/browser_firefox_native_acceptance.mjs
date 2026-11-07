@@ -135,6 +135,15 @@ const SAFE_FAILURES = [
 ];
 function safeFailureMessage(error) {
   const text = String(error?.message || "");
+  const fixed = new Map([
+    ["Paired Firefox popup not ready", "popup-not-ready"],
+    ["Exact-origin Firefox candidate missing", "candidate-missing"],
+    ["Firefox did not request native confirmation", "native-confirmation-missing"],
+    ["Unexpected field disclosure or automatic submission", "unexpected-disclosure-or-submit"],
+    ["Navigation did not revoke the native approval control", "navigation-revocation"],
+    ["Popup control unavailable", "popup-control-unavailable"],
+  ]);
+  if (fixed.has(text)) return fixed.get(text);
   for (const pattern of SAFE_FAILURES)
     if (pattern.test(text)) return text.slice(0, 120);
   return "unclassified";
@@ -420,18 +429,48 @@ async function rdpEvaluate(text) {
     throw Error("Firefox popup inspection returned no JSON");
   return JSON.parse(result.result);
 }
+// Two different execution contexts are involved and must stay separate:
+//  * rdpEvaluate runs in this add-on's background page: WebExtension APIs and
+//    the add-on's own view list exist there, but the chrome XUL popup elements
+//    do not;
+//  * evaluate(..., chrome) runs in the browser chrome window: XUL <browser>
+//    elements and currentURI exist there, but WebExtension APIs do not.
+// Both sides independently select exactly one visible popup pinned to the same
+// add-on popup URL; the background realm measures the pointer target inside
+// that view and the chrome realm measures the hosting panel's screen origin.
+let popupExpectedURL = "";
+async function popupURL() {
+  // Read-only metadata read in the add-on realm; never logged or reported.
+  if (!popupExpectedURL) {
+    const url = await rdpEvaluate(
+      'JSON.stringify(String(browser.runtime.getURL("popup.html")))',
+    );
+    if (!/^moz-extension:\/\/[^/]+\/popup\.html$/.test(String(url)))
+      throw Error("Popup URL unavailable");
+    popupExpectedURL = String(url);
+  }
+  return popupExpectedURL;
+}
 async function popupContext() {
+  // Chrome realm only: WebExtension APIs are not available here.
+  const expected = await popupURL();
   await context("chrome");
-  const popup = await evaluate(
-    'const b=document.querySelector("browser.webextension-popup-browser");if(!b)throw Error("Popup not present");const r=b.getBoundingClientRect();return {id:String(b.browsingContext.id),x:window.screenX+r.x,y:window.screenY+r.y};',
+  return evaluate(
+    'const expected=arguments[0],hosts=[...document.querySelectorAll("browser.webextension-popup-browser")].filter(b=>{try{const r=b.getBoundingClientRect();if(!(r.width>0&&r.height>0))return false;const s=getComputedStyle(b);if(s.display==="none"||s.visibility!=="visible")return false;const hidden=b.getAttribute("hidden"),collapsed=b.getAttribute("collapsed");if(hidden!==null&&hidden!=="false")return false;if(collapsed!==null&&collapsed!=="false")return false;return !!b.currentURI&&String(b.currentURI.spec)===expected}catch{return false}});if(hosts.length!==1)throw Error("Popup host not uniquely visible");const b=hosts[0],r=b.getBoundingClientRect();return {id:String(b.browsingContext.id),href:String(b.currentURI.spec),x:window.screenX+r.x,y:window.screenY+r.y};',
+    [expected],
   );
-  return popup;
 }
 async function popupEvaluate(source) {
+  // Add-on background realm only: the chrome XUL document is not available.
+  const expected = JSON.stringify(await popupURL());
   return rdpEvaluate(
-    'JSON.stringify((()=>{const window=browser.extension.getViews({type:"popup"})[0];if(!window)throw Error("Popup not present");const document=window.document;' +
+    "JSON.stringify((()=>{const expected=" + expected + ";" +
+      'const views=browser.extension.getViews({type:"popup"}).filter(w=>{try{return !!w&&w.closed!==true&&!!w.document&&w.document.visibilityState==="visible"&&w.document.hidden!==true&&w.innerWidth>0&&w.innerHeight>0&&String(w.location.href)===expected}catch{return false}});' +
+      'if(views.length!==1)throw Error("Popup view not uniquely visible");' +
+      "const popupWindow=views[0];" +
+      "return (function(window,document){" +
       source +
-      "})())",
+      "})(popupWindow,popupWindow.document);})())",
   );
 }
 async function popupState() {
@@ -440,12 +479,33 @@ async function popupState() {
   );
 }
 async function popupClick(selector) {
-  const popup = await popupContext();
-  const rect = await popupEvaluate(
-    "const e=document.querySelector(" +
-      JSON.stringify(selector) +
-      ');if(!e||e.disabled)throw Error("Popup control unavailable");e.scrollIntoView({block:"center",inline:"nearest"});const r=e.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};',
+  // Scrolling can resize/reposition Firefox's extension panel. Re-measure the
+  // view-local pointer target and the hosted panel origin after scrolling (each
+  // in its own realm) and require two stable samples with the same hosting
+  // browser before the one physical XTest click.
+  const control = JSON.stringify(selector);
+  await popupEvaluate(
+    "const e=document.querySelector(" + control +
+      ');if(!e||e.disabled)throw Error("Popup control unavailable");e.scrollIntoView({block:"center",inline:"nearest"});return true;',
   );
+  let popup, rect, previous;
+  await eventually(async () => {
+    const target = await popupEvaluate(
+      "const e=document.querySelector(" + control +
+        ');if(!e||e.disabled||document.visibilityState!=="visible")return null;const r=e.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2,hit=document.elementFromPoint(x,y);if(r.width<=0||r.height<=0||!hit||(hit!==e&&!e.contains(hit)))return null;return {x,y};',
+    );
+    if (!target) { previous = null; return false; }
+    const surface = await popupContext();
+    const point = { x: surface.x + target.x, y: surface.y + target.y };
+    const stable = previous && previous.id === surface.id &&
+      Math.abs(previous.x - point.x) < 1 && Math.abs(previous.y - point.y) < 1;
+    previous = { ...point, id: surface.id };
+    if (!stable) return false;
+    popup = surface;
+    rect = target;
+    return true;
+  }, "Native acceptance popup target not stable", 3000);
+
   const pointer =
     'import ctypes as C,os,sys\nx=C.CDLL("libX11.so.6");t=C.CDLL("libXtst.so.6");p=C.c_void_p\nx.XOpenDisplay.argtypes=[C.c_char_p];x.XOpenDisplay.restype=p;x.XFlush.argtypes=[p];x.XCloseDisplay.argtypes=[p]\nt.XTestFakeMotionEvent.argtypes=[p,C.c_int,C.c_int,C.c_int,C.c_ulong];t.XTestFakeButtonEvent.argtypes=[p,C.c_uint,C.c_int,C.c_ulong]\nd=x.XOpenDisplay(os.environ["DISPLAY"].encode());assert d\nt.XTestFakeMotionEvent(d,-1,int(sys.argv[1]),int(sys.argv[2]),0);t.XTestFakeButtonEvent(d,1,1,0);t.XTestFakeButtonEvent(d,1,0,0);x.XFlush(d);x.XCloseDisplay(d)';
   execFileSync(
@@ -560,11 +620,14 @@ async function blank() {
   );
 }
 async function select() {
+  const parent = stage;
+  progress(parent + ":popup-open");
   await openPopup();
   await eventually(
     async () => (await popupState()).refreshDisabled === false,
     "Paired Firefox popup not ready",
   );
+  progress(parent + ":refresh-click");
   await popupClick("#refresh");
   await eventually(async () => {
     const state = await popupState();
@@ -576,11 +639,13 @@ async function select() {
       ))
     );
   }, "Exact-origin Firefox candidate missing");
+  progress(parent + ":candidate-click");
   await popupClick('#candidates [data-action="fill"]');
   await eventually(
     async () => (await popupState()).status?.includes("原生窗口核对"),
     "Firefox did not request native confirmation",
   );
+  progress(parent + ":native-pending");
   input([{ wait_label: "批准本次填充" }]);
 }
 function safeRemoveManifest() {

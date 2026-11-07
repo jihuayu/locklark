@@ -17,12 +17,16 @@
     popupInactive = false,
     generatedPassword = "",
     generatedProfile = null,
+    generatedDataWiped = false,
     generatorValues = { random: 24, memorable: 4, pin: 6 },
     watchtowerCategory = "",
     hibpOptIn = false,
     hibpOptInPending = false,
     hibpNotice = "";
   const query = (selector) => document.querySelector(selector);
+  // Only an explicit generate reply may repopulate the preview while a
+  // lock/hide-time wipe is still unconfirmed; generic state polls may not.
+  const TRUSTED_GENERATED_SOURCES = new Set(["generate", "popup-generate"]);
   const WT_FLAGS = [
     "empty",
     "common-pattern",
@@ -150,6 +154,31 @@
     query("#gen-preview").textContent = password;
     query("#gen-entropy").textContent =
       String(profile?.entropy_bits_floor ?? "?") + " bits";
+  }
+  function clearGeneratedData() {
+    // Single owner of "forget the generated password": drop the in-memory
+    // reference, the live DOM copy (preview, entropy, history rows) and the
+    // copy control, then scrub the cached state so a later render cannot
+    // rehydrate the cleared values. Generic settings are untouched.
+    generatedDataWiped = true;
+    generatedPassword = "";
+    generatedProfile = null;
+    renderedHistory = "";
+    const preview = query("#gen-preview");
+    if (preview) preview.textContent = "";
+    const entropy = query("#gen-entropy");
+    if (entropy) entropy.textContent = "";
+    const history = query("#gen-history");
+    if (history) history.replaceChildren();
+    const copy = query("#gen-copy");
+    if (copy) copy.disabled = true;
+    if (lastState && typeof lastState === "object")
+      lastState = {
+        ...lastState,
+        password: "",
+        profile: null,
+        generatedHistory: [],
+      };
   }
   function setGeneratorStatus(value) {
     const el = query("#gen-status");
@@ -577,19 +606,31 @@
             : defaultNote),
     );
   }
-  function render(state) {
+  function render(state, sourceType) {
     if (
       state.connected === false &&
       (attachmentBusy || attachmentTransfer || blobURLs.size)
     )
       clearAttachmentBuffers();
-    if (state.connected === false && lastState?.connected === true) {
+    const transitionedDisconnected =
+      state.connected === false && lastState?.connected === true;
+    if (transitionedDisconnected || generatedDataWiped)
+      state = {
+        ...state,
+        // A trusted generate reply may keep only its own NEW password/profile;
+        // history cached in the background before the wipe must never come
+        // back, and a stale poll may not repopulate anything at all.
+        ...(transitionedDisconnected ||
+        !TRUSTED_GENERATED_SOURCES.has(sourceType)
+          ? { password: "", profile: null }
+          : {}),
+        generatedHistory: [],
+      };
+    if (transitionedDisconnected) {
       connectionEpoch++;
-      generatedPassword = "";
-      generatedProfile = null;
-      query("#gen-preview").textContent = "";
-      query("#gen-entropy").textContent = "";
+      clearGeneratedData();
     }
+    if (state.connected === false) generatedDataWiped = false;
     lastState = state;
     if (
       vaultEnabled &&
@@ -715,7 +756,7 @@
       )
         return null;
       renderedSequence = sequence;
-      render(state);
+      render(state, message?.type);
       return state;
     } catch {
       if (popupInactive || epoch !== connectionEpoch || generation !== actionGeneration || sequence <= renderedSequence)
@@ -736,7 +777,12 @@
     // Disconnect may interrupt a deferred action. Its generation also prevents
     // the old action's reply/finalizer from changing the next operation.
     if (busy && !["disconnect", "cancel-otp"].includes(message.type)) return;
-    if (["disconnect", "lock"].includes(message.type)) cancelPasskeyRemoval();
+    if (["disconnect", "lock"].includes(message.type)) {
+      cancelPasskeyRemoval();
+      // Clear before the host round trip: the lock reply may be deferred and a
+      // copyable cached password must not survive the intent to lock.
+      clearGeneratedData();
+    }
     const generation = ++actionGeneration;
     busy = true;
     if (lastState) render(lastState);
@@ -757,6 +803,9 @@
   }
   async function copyGenerated() {
     if (!generatedPassword) return;
+    // A hidden or restored popup must not write a clipboard value it no longer
+    // shows; offline generation stays allowed because it copies the preview.
+    if (popupInactive || document.visibilityState === "hidden") return;
     let copied = false;
     try {
       const clipboard = globalThis.navigator?.clipboard;
@@ -877,6 +926,7 @@
     editorConflict = "",
     vaultQueryGeneration = 0,
     passkeyDetailGeneration = 0,
+    detailReadOperation = 0,
     passkeyRemoveGeneration = 0,
     passkeyConfirm = null,
     passkeyRemoving = false,
@@ -962,6 +1012,9 @@
     vaultQueryGeneration++;
     vaultOperation++;
     vaultBusy = false;
+    // The invalidated query's finalizer skips re-enabling the box, so the
+    // owner that bumped the generation must restore it here.
+    if (els?.searchInput) els.searchInput.disabled = false;
     if (els?.editorSave) els.editorSave.disabled = false;
     wipeDetail();
     wipeEditor();
@@ -1211,6 +1264,7 @@
     const generation = ++passkeyDetailGeneration;
     cancelPasskeyRemoval({ clearUncertain: false });
     const operation = beginVaultOperation();
+    detailReadOperation = operation;
     try {
       const reply = await api.runtime.sendMessage({
         type: "item-get",
@@ -1229,6 +1283,7 @@
     } catch {
       toast("无法读取条目详情");
     } finally {
+      if (detailReadOperation === operation) detailReadOperation = 0;
       finishVaultOperation(operation);
     }
   }
@@ -1607,12 +1662,38 @@
     popupInactive = true;
     connectionEpoch++;
     actionGeneration++;
+    // A pending act() may never resume on a hidden popup; release its main
+    // busy flag so a restored popup is not stuck. Its late replies are already
+    // generation-guarded, so they cannot touch the next operation.
+    busy = false;
+    vaultLoaded = false;
+    if (els?.searchInput) els.searchInput.disabled = false;
+    clearGeneratedData();
     clearRevealedSecrets();
   });
   globalThis.addEventListener?.("pageshow", () => {
     if (!popupInactive) return;
     popupInactive = false;
-    void send({ type: "state" });
+    // Force a fresh metadata read: the invalidated search query's finalizer
+    // never re-enables the box, so restoring must own a new read. render() may
+    // already start one (empty cache), and a user action may too, so only own
+    // the read when no query was created while this state was in flight.
+    const restoreEpoch = connectionEpoch;
+    const restoreQueryGeneration = vaultQueryGeneration;
+    vaultLoaded = false;
+    // An unrelated action may drop this state reply (send resolves null), so
+    // the follow-up read is decided from lastState and the query generation
+    // only: an unrelated Refresh must not cancel the restore's own read.
+    void send({ type: "state" }).then(() => {
+      if (popupInactive || restoreEpoch !== connectionEpoch) return;
+      if (lastState?.connected !== true) return;
+      // renderVault() may already own a read (empty cache auto-refresh), and a
+      // cached non-empty page must not suppress it; a user-started query owns
+      // a newer generation and must not be duplicated.
+      if (restoreQueryGeneration !== vaultQueryGeneration) return;
+      vaultLoaded = true;
+      void refreshVault(true);
+    });
   });
   if (typeof document !== "undefined")
     document.addEventListener?.("visibilitychange", () => {
@@ -2301,6 +2382,18 @@
     clearAttachmentBuffers();
     clearRevealedSecrets();
     cancelPasskeyRemoval();
+    // A pending detail read must not render over the editor the user just
+    // opened. Release its vault ownership so its finalizer cannot clear the
+    // busy state of the editor's own operation.
+    passkeyDetailGeneration++;
+    if (detailReadOperation) {
+      const staleRead = detailReadOperation;
+      detailReadOperation = 0;
+      if (staleRead === vaultOperation) {
+        vaultOperation++;
+        vaultBusy = false;
+      }
+    }
     if (lastDetail) renderDetail(lastDetail);
     let category = "login",
       values = { title: "", urls: lastState?.origin ? [lastState.origin] : [] },
@@ -2828,22 +2921,41 @@
     els.lockButton.addEventListener("click", () => {
       connectionEpoch++;
       actionGeneration++;
+      const lockEpoch = connectionEpoch;
+      const lockAction = actionGeneration;
+      // Lock intent preempts any pending act(): clear generated data now and
+      // release the preempted action's busy flag so it cannot stick.
+      clearGeneratedData();
+      busy = false;
+      if (lastState) render(lastState);
       wipeSensitiveViews();
       cancelPasskeyRemoval();
       clearAttachmentBuffers();
       const operation = beginVaultOperation();
+      // A deferred lock acknowledgement only owns this popup while its epoch,
+      // action and vault operation are still current; a reconnect or newer
+      // lock must not be overwritten by an older reply.
+      const lockOwned = () =>
+        !popupInactive &&
+        lockEpoch === connectionEpoch &&
+        lockAction === actionGeneration &&
+        operation === vaultOperation;
       void api.runtime
         .sendMessage({ type: "lock" })
         .then((reply) => {
+          if (!lockOwned()) return;
           if (reply && typeof reply === "object") {
             lastState = reply;
             render(reply);
           }
           toast("已锁定");
         })
-        .catch(() => toast("锁定失败"))
+        .catch(() => {
+          if (lockOwned()) toast("锁定失败");
+        })
         .finally(() => {
-          if (finishVaultOperation(operation) && els)
+          const owned = finishVaultOperation(operation);
+          if (owned && els && lockOwned())
             els.lockButton.disabled = !lastState?.connected;
         });
     });
