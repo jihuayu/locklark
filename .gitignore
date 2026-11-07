@@ -1,4 +1,6 @@
 /.ryugi/
+/.codex-tmp/
+/artifacts/
 /bin/
 /locklark.exe
 /locklark
