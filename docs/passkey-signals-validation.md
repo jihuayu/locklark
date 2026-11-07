@@ -5,7 +5,7 @@
 ## 实际组件回归
 
 - 扩展全量 293/293 通过、0 失败或跳过。涵盖原生方法是否存在、原 this/参数/Promise 身份、同步异常与拒绝、调用后同步快照、防止后续参数修改、严格字段/大小、同窗口/来源/可见性、真实 sender、epoch 与槽位保护。日志 browser-completion-node-frozen.log。
-- 主代理独立 personal Signal race 通过（101.046 秒），包括真实有效的 50/51 条边界、只读快照与历史不变、全部行 CAS、伪造 accepted 保留项不得删除、备份/完整历史回放、名称修改后独立软件签名、无关字段保留。此记录在接入 PR #47/#48 前执行；整合后由统一 E2E 再跑相关 personal 契约。
+- 主代理独立 personal Signal race 通过（101.046 秒），包括真实有效的 50/51 条边界、只读快照与历史不变、全部行 CAS、伪造 accepted 保留项不得删除、重开/完整历史回放、名称修改后独立软件签名、无关字段保留。此记录在接入 PR #47/#48 前执行；整合后由统一 E2E 再跑相关 personal 契约。
 - 整合后的 browserhost Signal race 通过（46.567 秒），含连接互斥锁被其他只读操作占用时立即取消、旧 ID 不取消新建议、数据库阻塞时取消先赢不提交、锁库、迟到提交只在 native 报 UNKNOWN、精确 ACK 且无第二个页面结果。日志 passkey-signal-final-native-race.log。
 - 最终统一 E2E 的 T2_F2_10 实际执行 Go/Node 契约，要求非零匹配及足够数量；13 项 background 契约使用 signal: 前缀。第一轮适配器因名字筛选只选中 1/13 而失败，已修正并重跑整套；失败 browser-completion-f2-final.* 保留，最终以 browser-completion-e2e-final.* 为准。
 - 外部独立复核仅计静态证据，不称独立密码学审计。它的“标准字段应为 ArrayBuffer”与“快照晚于 Promise 完成”推断已核对标准和动态回归并撤回：标准信号 ID 为 Base64URLString；实现先调用原方法，再同步快照，fulfilled 后才发送。
