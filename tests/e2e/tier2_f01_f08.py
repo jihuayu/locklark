@@ -287,7 +287,7 @@ def t2_f2_10(ctx):
         ctx, "browser-extension/test/content_signals.test.js", r".", min_passed=10,
     )
     node_test_pattern(
-        ctx, "browser-extension/test/background.test.js", r"signal", min_passed=10,
+        ctx, "browser-extension/test/background.test.js", r"^signal: ", min_passed=13,
     )
 
 

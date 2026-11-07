@@ -3071,7 +3071,7 @@ const signalHarness = (options = {}) =>
   });
 const signalWires = (h) => h.sent.filter((r) => r.type === "passkey-signal");
 
-test("a content hint reaches the exact native frame and nothing else", async () => {
+test("signal: a content hint reaches the exact native frame and nothing else", async () => {
   const h = signalHarness();
   await ready(h);
   const before = await h.send({ type: "state" });
@@ -3105,7 +3105,7 @@ test("a content hint reaches the exact native frame and nothing else", async () 
   assert.deepEqual(after.candidates, before.candidates);
 });
 
-test("the three strict dictionaries reach the host unchanged and stay answerless", async () => {
+test("signal: the three strict dictionaries reach the host unchanged and stay answerless", async () => {
   const h = signalHarness();
   await ready(h);
   for (const options of [
@@ -3130,7 +3130,7 @@ test("the three strict dictionaries reach the host unchanged and stay answerless
   );
 });
 
-test("an acknowledgement with a private or unknown field is refused", async () => {
+test("signal: an acknowledgement with a private or unknown field is refused", async () => {
   const h = signalHarness({
     onRequest: (r) =>
       r.type === "passkey-signal"
@@ -3148,7 +3148,7 @@ test("an acknowledgement with a private or unknown field is refused", async () =
   assert.equal(state.connected, false, "the protocol error is fail-closed");
 });
 
-test("core accepts only the exact acceptance frame", () => {
+test("signal: core accepts only the exact acceptance frame", () => {
   const id = "a".repeat(32);
   assert.equal(
     core.validPasskeySignalAck({ v: 1, id, type: "passkey-signal-accepted" }, id),
@@ -3179,7 +3179,7 @@ test("core accepts only the exact acceptance frame", () => {
   );
 });
 
-test("an old host without passkey-signal-v1 gets no wire and no prompt", async () => {
+test("signal: an old host without passkey-signal-v1 gets no wire and no prompt", async () => {
   const h = signalHarness({ capabilities: [] });
   await ready(h);
   const reply = await h.send(
@@ -3192,7 +3192,7 @@ test("an old host without passkey-signal-v1 gets no wire and no prompt", async (
   assert.equal(state.connected, true, "the hint never disconnects the vault");
 });
 
-test("a disconnected worker neither auto-connects nor sends a hint", async () => {
+test("signal: a disconnected worker neither auto-connects nor sends a hint", async () => {
   const h = signalHarness();
   const reply = await h.send(
     { type: "passkey-signal", options: unknownSignalOptions() },
@@ -3202,7 +3202,7 @@ test("a disconnected worker neither auto-connects nor sends a hint", async () =>
   assert.deepEqual(h.sent, [], "no hello and no hint are sent");
 });
 
-test("the Passkey use setting gates the hint without prompting", async () => {
+test("signal: the Passkey use setting gates the hint without prompting", async () => {
   const h = signalHarness({ settings: { offerUsePasskeys: false } });
   await ready(h);
   const reply = await h.send(
@@ -3214,7 +3214,7 @@ test("the Passkey use setting gates the hint without prompting", async () => {
   assert.equal((await h.send({ type: "state" })).connected, true);
 });
 
-test("only the actual content sender may forward a hint", async () => {
+test("signal: only the actual content sender may forward a hint", async () => {
   const h = signalHarness();
   await ready(h);
   const before = signalWires(h).length;
@@ -3231,7 +3231,7 @@ test("only the actual content sender may forward a hint", async () => {
   assert.equal(signalWires(h).length, before);
 });
 
-test("caller-supplied origin, selectors and page fields are refused", async () => {
+test("signal: caller-supplied origin, selectors and page fields are refused", async () => {
   const h = signalHarness();
   await ready(h);
   const options = unknownSignalOptions();
@@ -3254,7 +3254,7 @@ test("caller-supplied origin, selectors and page fields are refused", async () =
   assert.equal(signalWires(h).length, 0);
 });
 
-test("malformed, unknown-member, unbounded and oversize hints are refused", async () => {
+test("signal: malformed, unknown-member, unbounded and oversize hints are refused", async () => {
   const h = signalHarness();
   await ready(h);
   const cases = [
@@ -3287,7 +3287,7 @@ test("malformed, unknown-member, unbounded and oversize hints are refused", asyn
   assert.equal(signalWires(h).length, 0);
 });
 
-test("a hint is dropped when settings change while the context recheck is in flight", async () => {
+test("signal: a hint is dropped when settings change while the context recheck is in flight", async () => {
   const h = signalHarness();
   await ready(h);
   const release = h.deferProbe(1);
@@ -3303,7 +3303,7 @@ test("a hint is dropped when settings change while the context recheck is in fli
   assert.equal(signalWires(h).length, 0, "the stale hint is never wired");
 });
 
-test("a hint is dropped when the connection is lost while the recheck is in flight", async () => {
+test("signal: a hint is dropped when the connection is lost while the recheck is in flight", async () => {
   const h = signalHarness();
   await ready(h);
   const release = h.deferProbe(1);
@@ -3320,7 +3320,7 @@ test("a hint is dropped when the connection is lost while the recheck is in flig
   assert.equal((await h.send({ type: "state" })).connected, false);
 });
 
-test("a hint never occupies the ordinary fill slot", async () => {
+test("signal: a hint never occupies the ordinary fill slot", async () => {
   const h = signalHarness();
   await ready(h);
   await h.send(

@@ -159,6 +159,38 @@
     const attestation = publicKey.attestation;
     return attestation === undefined || HOST_ATTESTATION.has(attestation);
   }
+  // Routing hint only, not related-origin support: a page-supplied rp.id/rpId
+  // that is this origin or a parent DNS suffix of it keeps the extension
+  // eligible. A plainly foreign hint, or one that is not already canonical
+  // (uppercase, Unicode, non-string), is handed back to the browser untouched:
+  // related-origin sets and the ".well-known" policy are enforced natively and
+  // this code never normalizes, resolves or caches them. An absent hint means
+  // the browser's default, the current host.
+  const RP_HINT =
+    /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$/;
+  function rpIdentifier(kind, publicKey) {
+    try {
+      if (kind === "create") {
+        const rp = publicKey.rp;
+        if (rp !== undefined && rp !== null && typeof rp !== "object")
+          return "";
+        const id = rp?.id;
+        return id === undefined ? location.hostname : id;
+      }
+      return publicKey.rpId === undefined
+        ? location.hostname
+        : publicKey.rpId;
+    } catch {
+      return "";
+    }
+  }
+  function localRP(kind, publicKey) {
+    const host = location.hostname;
+    const rp = rpIdentifier(kind, publicKey);
+    if (typeof host !== "string" || typeof rp !== "string") return false;
+    if (rp.length > 253 || !RP_HINT.test(rp)) return false;
+    return rp === host || host.endsWith("." + rp);
+  }
   function intercept(original, kind, options) {
     const conditional = kind === "get" && options?.mediation === "conditional";
     if (
@@ -167,6 +199,10 @@
       document.visibilityState !== "visible"
     )
       return original(options);
+    // A plainly foreign or non-canonical RP hint belongs to the browser: it
+    // owns related-origin and well-known resolution and reports its own error
+    // or result for this exact options object.
+    if (!localRP(kind, options.publicKey)) return original(options);
     const feature =
       kind === "create"
         ? "publickey-credentials-create"

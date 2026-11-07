@@ -56,6 +56,8 @@ function makeHarness(options = {}) {
   const nativeCreate = [];
   const nativeConditionalCalls = [];
   const extensionConditional = options.extensionConditional === true;
+  const nativeGetError = options.nativeGetError;
+  const nativeCreateError = options.nativeCreateError;
   const deferCapabilityReplies = options.deferCapabilityReplies === true;
   const heldCapabilityQueries = [];
   let replyCapability = options.replyCapability !== false;
@@ -115,22 +117,33 @@ function makeHarness(options = {}) {
     },
   };
   windowObject.top = windowObject;
-  windowObject.location = { origin: "https://example.test" };
+  windowObject.location = {
+    origin: "https://example.test",
+    hostname: options.hostname || "example.test",
+  };
   const context = {
     window: windowObject,
     top: windowObject,
     self: windowObject,
-    location: { origin: "https://example.test", protocol: "https:" },
+    location: {
+      origin: "https://example.test",
+      hostname: options.hostname || "example.test",
+      protocol: "https:",
+    },
     isSecureContext: true,
     navigator: {
       credentials: {
         create: (opts) => {
           nativeCreate.push(opts);
-          return Promise.resolve("native-create");
+          return nativeCreateError
+            ? Promise.reject(nativeCreateError)
+            : Promise.resolve("native-create");
         },
         get: (opts) => {
           nativeGet.push(opts);
-          return Promise.resolve("native-get");
+          return nativeGetError
+            ? Promise.reject(nativeGetError)
+            : Promise.resolve("native-get");
         },
       },
     },
@@ -775,4 +788,247 @@ test("unsupported create extensions and cross-platform selection still delegate 
   assert.equal(h.nativeCreate[1], crossPlatform);
   assert.equal(h.requests("create").length, 0);
   assert.equal(h.timers.size, 0);
+});
+
+// Issue 39 routing contract: the MAIN-world shim only routes. A page-supplied
+// RP hint that is plainly outside this document's host belongs to the browser,
+// which alone owns related-origin and ".well-known" resolution. Nothing local
+// normalizes hints, queries the network or claims related-origin support.
+const es256Create = (rp) =>
+  createOptions({
+    rp: { id: rp, name: "Example" },
+    pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+  });
+
+test("a plainly foreign rp.id delegates create to the original call once", async () => {
+  const h = makeHarness({ extensionConditional: true });
+  const options = es256Create("foreign.test");
+  assert.equal(await h.navigator.credentials.create(options), "native-create");
+  assert.equal(h.nativeCreate.length, 1, "the original call runs exactly once");
+  assert.equal(h.nativeCreate[0], options, "original options identity");
+  assert.equal(h.nativeCreate[0].publicKey.rp.id, "foreign.test");
+  assert.equal(h.requests("create").length, 0, "no bridge request");
+  assert.equal(h.messages.length, 0, "nothing posted to the page bridge");
+  assert.equal(h.timers.size, 0);
+  for (const rp of ["foreign.test", "example.test.evil", "notexample.test"]) {
+    const other = makeHarness({ extensionConditional: true });
+    const opts = es256Create(rp);
+    assert.equal(await other.navigator.credentials.create(opts), "native-create");
+    assert.equal(other.nativeCreate[0], opts);
+    assert.equal(other.requests("create").length, 0);
+  }
+});
+
+test("a plainly foreign rpId delegates get with no capability handshake", async () => {
+  const h = makeHarness({
+    extensionConditional: true,
+    deferCapabilityReplies: true,
+  });
+  const options = {
+    mediation: "conditional",
+    publicKey: {
+      challenge: Uint8Array.from([1, 2, 3, 4]),
+      rpId: "foreign.test",
+      timeout: 300000,
+    },
+  };
+  assert.equal(await h.navigator.credentials.get(options), "native-get");
+  assert.equal(h.nativeGet.length, 1);
+  assert.equal(h.nativeGet[0], options, "original options identity");
+  assert.equal(h.nativeGet[0].publicKey.rpId, "foreign.test");
+  assert.equal(h.nativeGet[0].mediation, "conditional");
+  assert.equal(h.nativeGet[0].publicKey.timeout, 300000, "no local rewrite");
+  assert.equal(h.capabilityQueries().length, 0);
+  assert.equal(h.requests("get").length, 0);
+  assert.equal(h.messages.length, 0);
+  assert.equal(h.listenerCount("pagehide"), 0);
+  assert.equal(h.timers.size, 0);
+});
+
+test("a foreign RP keeps the browser's own rejection untouched", async () => {
+  const message =
+    "The relying party ID is not a registrable domain suffix of, nor equal to, the current domain.";
+  const getError = new DOMException(message, "SecurityError");
+  const createError = new DOMException(message, "SecurityError");
+  const h = makeHarness({
+    extensionConditional: true,
+    nativeGetError: getError,
+    nativeCreateError: createError,
+  });
+  const getOptions = {
+    publicKey: {
+      challenge: Uint8Array.from([1]),
+      rpId: "foreign.test",
+      timeout: 9000,
+    },
+  };
+  await assert.rejects(
+    h.navigator.credentials.get(getOptions),
+    (error) => error === getError,
+  );
+  assert.equal(h.nativeGet.length, 1);
+  assert.equal(h.nativeGet[0], getOptions);
+  const created = es256Create("foreign.test");
+  await assert.rejects(
+    h.navigator.credentials.create(created),
+    (error) => error === createError,
+  );
+  assert.equal(h.nativeCreate.length, 1);
+  assert.equal(h.nativeCreate[0], created);
+  assert.equal(h.requests("get").length + h.requests("create").length, 0);
+  assert.equal(h.messages.length, 0);
+});
+
+test("non-canonical or non-string RP hints fall back instead of being normalized", async () => {
+  for (const rpId of [
+    "Example.test",
+    "exämple.test",
+    "example.test.",
+    "example.test/login",
+    42,
+    null,
+    { id: "example.test" },
+  ]) {
+    const h = makeHarness({ extensionConditional: true });
+    const options = {
+      mediation: "conditional",
+      publicKey: { challenge: Uint8Array.from([1]), rpId, timeout: 300000 },
+    };
+    assert.equal(
+      await h.navigator.credentials.get(options),
+      "native-get",
+      "rpId " + JSON.stringify(rpId) + " is not a canonical local hint",
+    );
+    assert.equal(h.nativeGet.length, 1);
+    assert.equal(h.nativeGet[0], options);
+    assert.equal(h.requests("get").length, 0);
+    assert.equal(h.messages.length, 0);
+    assert.equal(h.timers.size, 0);
+  }
+  for (const rp of [
+    { id: "Example.test" },
+    { id: "exämple.test" },
+    { id: 42 },
+    { id: null },
+    "example.test",
+    7,
+  ]) {
+    const h = makeHarness({ extensionConditional: true });
+    const options = createOptions({
+      rp,
+      pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+    });
+    assert.equal(
+      await h.navigator.credentials.create(options),
+      "native-create",
+      "rp " + JSON.stringify(rp) + " is not a canonical local hint",
+    );
+    assert.equal(h.nativeCreate.length, 1);
+    assert.equal(h.nativeCreate[0], options);
+    assert.equal(h.requests("create").length, 0);
+    assert.equal(h.messages.length, 0);
+    assert.equal(h.timers.size, 0);
+  }
+});
+
+test("an absent RP hint defaults to the current host and stays eligible", async () => {
+  const h = makeHarness({ extensionConditional: true });
+  const getOptions = {
+    publicKey: { challenge: Uint8Array.from([1, 2]), timeout: 5000 },
+  };
+  const pending = h.navigator.credentials.get(getOptions);
+  await flush();
+  const request = h.requests("get")[0];
+  assert.ok(request, "an absent rpId means this host, so it stays local");
+  assert.equal(JSON.parse(request.options).rpId, undefined);
+  h.deliver({ source: "locklark-result-v1", id: request.id, fallback: true });
+  assert.equal(await pending, "native-get");
+  assert.equal(h.nativeGet[0], getOptions);
+  const created = makeHarness({ extensionConditional: true });
+  const createOpts = createOptions({
+    rp: { name: "Example" },
+    pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+  });
+  const createPending = created.navigator.credentials.create(createOpts);
+  await flush();
+  const createRequest = created.requests("create")[0];
+  assert.ok(createRequest, "an absent rp.id means this host, so it stays local");
+  assert.deepEqual(JSON.parse(createRequest.options).rp, { name: "Example" });
+  created.deliver({
+    source: "locklark-result-v1",
+    id: createRequest.id,
+    fallback: true,
+  });
+  assert.equal(await createPending, "native-create");
+  assert.equal(created.nativeCreate[0], createOpts);
+});
+
+test("canonical exact and parent-suffix RP hints stay local and abort cleanly", async () => {
+  const suffix = makeHarness({
+    extensionConditional: true,
+    hostname: "app.example.test",
+  });
+  const controller = makeAbortSignal();
+  const options = {
+    mediation: "conditional",
+    publicKey: {
+      challenge: Uint8Array.from([1]),
+      rpId: "example.test",
+      timeout: 300000,
+    },
+    signal: controller.signal,
+  };
+  const promise = suffix.navigator.credentials.get(options);
+  await flush();
+  const request = suffix.requests("get")[0];
+  assert.ok(request, "app.example.test may use the example.test RP");
+  assert.equal(JSON.parse(request.options).rpId, "example.test");
+  assert.equal(controller.listenerCount, 1);
+  controller.abort();
+  await assert.rejects(promise, /aborted|Abort/i);
+  assert.equal(
+    suffix.messages.filter((m) => m.type === "cancel")[0].id,
+    request.id,
+  );
+  assert.equal(controller.listenerCount, 0, "abort listener released");
+  assert.equal(suffix.listenerCount("pagehide"), 0, "pagehide listener released");
+  assert.equal(suffix.timers.size, 0);
+  assert.equal(suffix.nativeGet.length, 0);
+  const exact = makeHarness({ extensionConditional: true });
+  const exactOptions = es256Create("example.test");
+  const pending = exact.navigator.credentials.create(exactOptions);
+  await flush();
+  const created = exact.requests("create")[0];
+  assert.ok(created, "the exact host stays interceptable");
+  exact.deliver({ source: "locklark-result-v1", id: created.id, fallback: true });
+  assert.equal(await pending, "native-create");
+  assert.equal(exact.nativeCreate[0], exactOptions);
+});
+
+test("foreign RP routing invents no related-origin capability or wire payload", async () => {
+  const h = makeHarness({
+    extensionConditional: true,
+    nativeCapabilities: { hybridTransport: true },
+  });
+  const options = {
+    publicKey: { challenge: Uint8Array.from([1]), rpId: "foreign.test" },
+  };
+  assert.equal(await h.navigator.credentials.get(options), "native-get");
+  assert.equal(h.nativeGet[0], options);
+  const capabilities = await h.PublicKeyCredential.getClientCapabilities();
+  assert.deepEqual(Object.keys(capabilities), [
+    "conditionalGet",
+    "hybridTransport",
+  ]);
+  assert.equal("relatedOrigins" in capabilities, false);
+  assert.equal(
+    h.messages.some((m) => JSON.stringify(m).includes("foreign.test")),
+    false,
+    "the page's RP hint never reaches the bridge",
+  );
+  assert.deepEqual(
+    [...new Set(h.messages.map((m) => m.source))],
+    ["locklark-capability-v1"],
+    "the only traffic is the capability handshake",
+  );
 });

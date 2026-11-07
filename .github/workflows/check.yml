@@ -337,6 +337,7 @@ jobs:
           LOCKLARK_TEST_PASSKEY_MANAGEMENT: "1"
           LOCKLARK_TEST_PASSKEY_CONDITIONAL: "1"
           LOCKLARK_TEST_OTHER_PROVIDER: "1"
+          LOCKLARK_TEST_PASSKEY_SIGNALS: "1"
       - name: Test Firefox native approval, fill, save, OTP and Passkey
         timeout-minutes: 10
         run: |
