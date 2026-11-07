@@ -26,7 +26,8 @@ export function fixtureCanaries(fixture) {
 }
 
 export function browserScreenshotsAllowed(stage) {
-  return typeof stage === "string" && !stage.startsWith("otp");
+  return typeof stage === "string" && !stage.startsWith("otp") &&
+    !stage.startsWith("passkey-management");
 }
 
 export function captureControllerOutput() {

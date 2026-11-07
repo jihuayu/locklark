@@ -211,7 +211,7 @@ function input(actions, native = true, options = {}) {
         actions,
         ...options,
       }
-    : { title_prefix: "Locklark Firefox acceptance", actions };
+    : { title_prefix: "Locklark Firefox acceptance", actions, ...options };
   try {
     return JSON.parse(
       execFileSync("python3", [join(root, "scripts/browser_native_x11.py")], {
@@ -458,6 +458,12 @@ async function popupClick(selector) {
     ],
     { env },
   );
+}
+async function popupKeyboard(actions) {
+  assert(await popupEvaluate(
+    'return document.hasFocus() && document.activeElement?.matches("input,textarea") === true;',
+  ), "Native acceptance popup focus unavailable");
+  return input(actions, false, { preserve_focus: true });
 }
 function physicalClick(x, y) {
   const pointer =
@@ -1099,6 +1105,11 @@ try {
         await openPopup();
         return {
           click: popupClick,
+          selectAll: () => popupKeyboard([{ key: "Control_L+a" }]),
+          insertText: (text) => popupKeyboard([{ text }]),
+          visible: (selector) => popupEvaluate(
+            "return !!document.querySelector(" + JSON.stringify(selector) + ")?.getClientRects().length;",
+          ),
           count: (selector) =>
             popupEvaluate(
               "return document.querySelectorAll(" +
@@ -1202,6 +1213,8 @@ try {
         viewportOrigin: pageViewportOrigin,
         dismissPopup: () => input([{ key: "Escape" }], false),
         reconnect: passkeyOnly ? passkeyPair : acceptanceDriver.reconnect,
+        openPopup: acceptanceDriver.openPopup,
+        observe: acceptanceDriver.observe,
         pause,
       });
     }

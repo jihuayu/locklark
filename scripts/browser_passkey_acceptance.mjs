@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { createHash, createPublicKey, verify } from "node:crypto";
+import { acceptPasskeyManagement } from "./browser_passkey_management_acceptance.mjs";
 export async function acceptBrowserPasskey({
   page,
   browser,
@@ -11,6 +12,8 @@ export async function acceptBrowserPasskey({
   openPopup,
   eventually,
   phase,
+  observe,
+  reconnect,
 }) {
   phase("quick-pair");
   let popup = await openPopup();
@@ -298,5 +301,14 @@ export async function acceptBrowserPasskey({
     () => page.evaluate(() => window.abortResult === "AbortError"),
     "AbortSignal not honored",
   );
+  if (process.env.LOCKLARK_TEST_PASSKEY_MANAGEMENT === "1") {
+    await acceptPasskeyManagement({
+      origin, fixture, first: created.json, openPopup, observe, reconnect,
+      pageEval: (fn, arg) => page.evaluate(fn, arg), inlineClick,
+      focusPage: () => page.bringToFront(),
+      dismissPopup: async () => { await page.bringToFront(); await page.keyboard.press("Escape"); },
+      eventually, input, phase,
+    });
+  }
   await cdp.detach();
 }

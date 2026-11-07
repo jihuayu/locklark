@@ -15,6 +15,7 @@ import time
 CONTROL_LABELS = (
     "连接并启用快捷填充", "验证主密码", "验证 Secret Key", "创建新登录并保存 Passkey",
     "取消 / 使用其他验证器", "登录：login.locklark.test · passkey-test · passkey-test",
+    "登录：login.locklark.test · passkey-other · passkey-other",
     "金库文件", "主密码", "Secret Key", "解锁", "确认连接此扩展",
     "拒绝连接", "批准本次填充", "拒绝本次填充", "立即锁定",
     "批准填充验证码", "拒绝填充验证码",
@@ -480,8 +481,12 @@ def main():
         return attributes.map_state
 
     wait_window_viewable(selected_map_state,discovery_deadline)
-    x.XRaiseWindow(display, target)
-    x.XSetInputFocus(display, target, 1, 0)
+    # An extension popup owns keyboard focus through its own transient window.
+    # Refocusing the browser's main X window closes that popup. The Firefox
+    # adapter checks the actual focused input before requesting this mode.
+    if request.get("preserve_focus") is not True or not request.get("title_prefix"):
+        x.XRaiseWindow(display, target)
+        x.XSetInputFocus(display, target, 1, 0)
     px, py, child = C.c_int(), C.c_int(), window()
     if not x.XTranslateCoordinates(display, target, root, 0, 0, C.byref(px), C.byref(py), C.byref(child)):
         raise RuntimeError("Native acceptance window geometry unavailable")

@@ -1824,3 +1824,228 @@ test("failed injection rolls back remembered credentials so a real submit still 
     await h.send({ type: "disconnect" });
   }
 });
+
+const PASSKEY_CAP = "passkey-management-v1";
+const PASSKEY_ID = "b".repeat(32);
+const PASSKEY_REV = "c".repeat(64);
+const PASSKEY_NEXT = "d".repeat(64);
+const PASSKEY_CRED = core.base64URLEncode(new Uint8Array(32).fill(7));
+
+function passkeyMeta(overrides = {}) {
+  return {
+    credential_id: PASSKEY_CRED,
+    rp_id: "example.test",
+    user_name: "ada",
+    display_name: "Ada Lovelace",
+    ...overrides,
+  };
+}
+
+test("passkey metadata is a safe DTO and searches forward the server filter", async () => {
+  const h = harness({
+    capabilities: [PASSKEY_CAP],
+    onRequest: (r) => {
+      if (r.type === "vault-search")
+        return {
+          v: 1, id: r.id, type: "vault-items",
+          items: [{
+            id: PASSKEY_ID, revision: PASSKEY_REV, category: "login",
+            title: "Example", passkey: passkeyMeta(), has_passkey: true,
+          }],
+        };
+      if (r.type === "item-get")
+        return {
+          v: 1, id: r.id, type: "item-detail",
+          item: {
+            id: PASSKEY_ID, revision: PASSKEY_REV, category: "login",
+            title: "Example", username: "ada", has_passkey: true,
+            passkey: passkeyMeta({ private_key: "secret", user_handle: "hidden" }),
+          },
+        };
+    },
+  });
+  await ready(h);
+  const search = await h.send({
+    type: "vault-search", query: "exa", category: "all", passkeysOnly: true,
+  });
+  const native = h.sent.find((r) => r.type === "vault-search");
+  assert.equal(native.passkeys_only, true);
+  assert.equal(native.query, "exa");
+  assert.equal(search.vaultItems[0].passkey.user_name, "ada");
+  assert.equal(search.passkeysUnsupported, false);
+  const detail = await h.send({ type: "item-get", id: PASSKEY_ID, revision: PASSKEY_REV });
+  assert.equal(detail.detail.has_passkey, true);
+  assert.equal(detail.detail.passkey, undefined, "extra host metadata must not be projected");
+  assert.equal(JSON.stringify(search).includes("secret"), false);
+  const state = await h.send({ type: "state" });
+  assert.equal(state.passkeyManagementSupported, true);
+  await h.send({ type: "disconnect" });
+});
+
+test("old host gets an explicit Passkey upgrade notice and no new wire fields", async () => {
+  const h = harness({ capabilities: [] });
+  await ready(h);
+  const sentBefore = h.sent.length;
+  const reply = await h.send({
+    type: "vault-search", query: "ada", category: "all", passkeysOnly: true,
+  });
+  assert.equal(h.sent.length, sentBefore, "must not call the native host");
+  assert.equal(reply.passkeysUnsupported, true);
+  assert.deepEqual(Array.from(reply.vaultItems), []);
+  assert.match(reply.status, /升级原生宿主/);
+  assert.equal(reply.passkeyManagementSupported, false);
+  const remove = await h.send({
+    type: "passkey-remove", id: PASSKEY_ID, revision: PASSKEY_REV,
+    credential_id: PASSKEY_CRED,
+  });
+  assert.equal(remove.passkeyRemoved, undefined);
+  assert.equal(remove.passkeyRemoveError, "refused");
+  assert.equal(h.sent.some((r) => r.type === "passkey-remove"), false);
+  await h.send({ type: "disconnect" });
+});
+
+test("passkey removal is popup-only and binds exact item, revision and credential", async () => {
+  const removals = [];
+  const h = harness({
+    capabilities: [PASSKEY_CAP],
+    onRequest: (r) => {
+      if (r.type === "passkey-remove") {
+        removals.push(r);
+        return {
+          v: 1, id: r.id, type: "passkey-removed", item_id: r.item_id,
+          revision: PASSKEY_NEXT, credential_id: r.credential_id,
+        };
+      }
+    },
+  });
+  await ready(h);
+  const reply = await h.send({
+    type: "passkey-remove", id: PASSKEY_ID, revision: PASSKEY_REV,
+    credential_id: PASSKEY_CRED,
+  });
+  assert.equal(removals.length, 1);
+  assert.equal(removals[0].item_id, PASSKEY_ID);
+  assert.equal(removals[0].revision, PASSKEY_REV);
+  assert.equal(removals[0].credential_id, PASSKEY_CRED);
+  assert.match(removals[0].capability, /^[a-f0-9]{32}$/);
+  assert.equal(Object.hasOwn(removals[0], "origin"), false);
+  assert.equal(reply.passkeyRemoved.item_id, PASSKEY_ID);
+  assert.equal(reply.passkeyRemoved.revision, PASSKEY_NEXT);
+  assert.equal(reply.passkeyRemoved.credential_id, PASSKEY_CRED);
+  assert.equal(Object.hasOwn(reply.passkeyRemoved, "user_handle"), false);
+
+  const contentAttempt = await h.send(
+    { type: "passkey-remove", id: PASSKEY_ID, revision: PASSKEY_REV, credential_id: PASSKEY_CRED },
+    contentSender(),
+  );
+  assert.equal(contentAttempt?.passkeyRemoved, undefined);
+  assert.equal(removals.length, 1, "web content cannot remove passkeys");
+
+  const extra = await h.send({
+    type: "passkey-remove", id: PASSKEY_ID, revision: PASSKEY_REV,
+    credential_id: PASSKEY_CRED, origin: "https://evil.test",
+  });
+  assert.equal(extra.passkeyRemoved, undefined);
+  assert.equal(removals.length, 1, "unknown fields must not reach the host");
+  await h.send({ type: "disconnect" });
+});
+
+test("unknown passkey commit outcome is reported as unconfirmed", async () => {
+  const h = harness({
+    capabilities: [PASSKEY_CAP],
+    onRequest: (r) =>
+      r.type === "passkey-remove"
+        ? { v: 1, id: r.id, type: "unknown" }
+        : undefined,
+  });
+  await ready(h);
+  const reply = await h.send({
+    type: "passkey-remove", id: PASSKEY_ID, revision: PASSKEY_REV,
+    credential_id: PASSKEY_CRED,
+  });
+  assert.equal(reply.passkeyRemoved, undefined);
+  assert.equal(reply.passkeyRemoveError, "uncertain");
+  assert.match(reply.status, /结果未确认/);
+  assert.doesNotMatch(reply.status, /未删除/);
+  await h.send({ type: "disconnect" });
+});
+
+test("reordered vault searches cannot poison the latest passkey snapshot", async () => {
+  const h = harness({ capabilities: [PASSKEY_CAP] });
+  await ready(h);
+  const oldSearch = h.send({
+    type: "vault-search", query: "all-items", category: "all",
+  });
+  await tick();
+  const oldRequest = h.sent.filter((r) => r.type === "vault-search").at(-1);
+  const newSearch = h.send({
+    type: "vault-search", query: "passkeys", category: "all", passkeysOnly: true,
+  });
+  await tick();
+  const newRequest = h.sent.filter((r) => r.type === "vault-search").at(-1);
+  assert.notEqual(oldRequest.id, newRequest.id);
+
+  h.deliver({
+    v: 1, id: newRequest.id, type: "vault-items",
+    items: [{
+      id: "1".repeat(32), revision: "2".repeat(64), category: "login",
+      title: "Passkey only", has_passkey: true, passkey: passkeyMeta(),
+    }],
+  });
+  const newest = await newSearch;
+  assert.equal(newest.vaultItems.length, 1);
+  assert.equal(newest.vaultItems[0].title, "Passkey only");
+
+  h.deliver({
+    v: 1, id: oldRequest.id, type: "vault-items",
+    items: [{
+      id: "3".repeat(32), revision: "4".repeat(64), category: "login",
+      title: "Ordinary login", has_passkey: false,
+    }],
+  });
+  const stale = await oldSearch;
+  assert.equal(stale.vaultStale, true);
+  assert.deepEqual(Array.from(stale.vaultItems), []);
+
+  const state = await h.send({ type: "state" });
+  assert.equal(state.vaultItems.length, 1);
+  assert.equal(state.vaultItems[0].title, "Passkey only");
+  assert.match(state.status, /Passkey/);
+  await h.send({ type: "disconnect" });
+});
+
+test("late vault search after lock or passkey removal cannot revive old rows", async () => {
+  for (const mode of ["lock", "remove"]) {
+    const h = harness({
+      capabilities: [PASSKEY_CAP],
+      onRequest: (r) =>
+        r.type === "passkey-remove"
+          ? {
+              v: 1, id: r.id, type: "passkey-removed", item_id: r.item_id,
+              revision: PASSKEY_NEXT, credential_id: r.credential_id,
+            }
+          : undefined,
+    });
+    await ready(h);
+    const search = h.send({ type: "vault-search", query: "queued", category: "all" });
+    await tick();
+    const request = h.sent.filter((r) => r.type === "vault-search").at(-1);
+    if (mode === "lock") await h.send({ type: "disconnect" });
+    else
+      await h.send({
+        type: "passkey-remove", id: PASSKEY_ID, revision: PASSKEY_REV,
+        credential_id: PASSKEY_CRED,
+      });
+    h.deliver({
+      v: 1, id: request.id, type: "vault-items",
+      items: [{
+        id: PASSKEY_ID, revision: PASSKEY_REV, category: "login",
+        title: "Deleted passkey", has_passkey: true, passkey: passkeyMeta(),
+      }],
+    });
+    const result = await search;
+    assert.deepEqual(Array.from(result.vaultItems), [], mode);
+    const state = await h.send({ type: "state" });
+    assert.deepEqual(Array.from(state.vaultItems), [], mode);
+  }
+});

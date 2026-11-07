@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { createHash, createPublicKey, verify } from "node:crypto";
 import { createRequire } from "node:module";
 import { fixtureCanaries } from "./browser_save_acceptance.mjs";
+import { acceptPasskeyManagement } from "./browser_passkey_management_acceptance.mjs";
 
 export const PASSKEY_CONTRACT = Object.freeze({
   gate: "LOCKLARK_TEST_FIREFOX_PASSKEY=1",
@@ -701,6 +702,14 @@ export async function acceptFirefoxPasskey(driver) {
     fallback.state.startsWith("rejected:"),
     "Unexpected browser fallback outcome: " + fallback.state,
   );
+  if (process.env.LOCKLARK_TEST_PASSKEY_MANAGEMENT === "1") {
+    await acceptPasskeyManagement({
+      origin, fixture, first: created.result.json,
+      openPopup: driver.openPopup, observe: driver.observe, reconnect,
+      pageEval, inlineClick: clickInline, focusPage: () => input([], false),
+      dismissPopup, eventually, input, phase,
+    });
+  }
   phase("firefox-passkey-complete");
   return {
     rp,

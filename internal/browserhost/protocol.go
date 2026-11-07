@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/jihuayu/locklark/internal/origin"
+	"github.com/jihuayu/locklark/internal/passkey"
 	"github.com/jihuayu/locklark/internal/personal"
 	"github.com/jihuayu/locklark/internal/watchtower"
 )
@@ -70,6 +71,7 @@ type Request struct {
 	Offset       int64  `json:"offset,omitempty"`
 	Data         string `json:"data,omitempty"`
 	AttachmentID string `json:"attachment_id,omitempty"`
+	CredentialID string `json:"credential_id,omitempty"`
 
 	Length      int   `json:"length,omitempty"`
 	Digits      *bool `json:"digits,omitempty"`
@@ -81,6 +83,7 @@ type Request struct {
 	Tag           string `json:"tag,omitempty"`
 	StateFilter   string `json:"state,omitempty"`
 	FavoritesOnly *bool  `json:"favorites_only,omitempty"`
+	PasskeysOnly  *bool  `json:"passkeys_only,omitempty"`
 	Field         string `json:"field,omitempty"`
 	FieldAction   string `json:"action,omitempty"`
 	StateAction   string `json:"state_action,omitempty"`
@@ -124,6 +127,12 @@ func (r Request) valid() bool {
 		return false
 	}
 	if r.Category != "" && r.Type != "match" && r.Type != "fill" && r.Type != "search" && r.Type != "list" && r.Type != "vault-search" && r.Type != "vault-list" {
+		return false
+	}
+	if r.PasskeysOnly != nil && r.Type != "search" && r.Type != "list" && r.Type != "vault-search" && r.Type != "vault-list" {
+		return false
+	}
+	if r.Type != "passkey-remove" && r.CredentialID != "" {
 		return false
 	}
 	if (r.Type == "match" || r.Type == "fill") && r.Category != "" && r.Category != "login" && r.Category != "identity" && r.Category != "credit_card" {
@@ -261,6 +270,10 @@ func (r Request) valid() bool {
 		return r.ItemID == "" && r.Revision == ""
 	case "item-state":
 		return token.MatchString(r.Capability) && token.MatchString(r.ItemID) && revision.MatchString(r.Revision) && r.StateAction != "" && r.payload == nil && r.RequestID == "" && r.Nonce == ""
+	case "passkey-remove":
+		return token.MatchString(r.Capability) && token.MatchString(r.ItemID) && revision.MatchString(r.Revision) && passkey.ValidCredentialID(r.CredentialID) &&
+			r.payload == nil && r.RequestID == "" && r.Nonce == "" && r.Origin == "" && r.TabID == 0 && r.DocumentID == "" &&
+			r.WindowID == 0 && r.Options == "" && r.ItemJSON == ""
 	case "match-profiles":
 		return token.MatchString(r.Capability) && r.Context().Valid() && (r.ProfileKind == "" || r.ProfileKind == "all" || r.ProfileKind == "identity" || r.ProfileKind == "credit_card") && r.payload == nil && r.RequestID == "" && r.Nonce == ""
 	case "fill-profile":
@@ -299,6 +312,7 @@ type StagedSave struct {
 
 type Response struct {
 	Credential        string             `json:"credential,omitempty"`
+	CredentialID      string             `json:"credential_id,omitempty"`
 	QuickFill         bool               `json:"quick_fill,omitempty"`
 	Code              string             `json:"code,omitempty"`
 	Nonce             string             `json:"nonce,omitempty"`
@@ -455,6 +469,15 @@ func (r Response) MarshalJSON() ([]byte, error) {
 			Revision     string `json:"revision"`
 			AttachmentID string `json:"attachment_id"`
 		}{r.V, r.ID, r.Type, r.ItemID, r.Revision, r.AttachmentID})
+	case "passkey-removed":
+		return json.Marshal(struct {
+			V            int    `json:"v"`
+			ID           string `json:"id,omitempty"`
+			Type         string `json:"type"`
+			ItemID       string `json:"item_id"`
+			Revision     string `json:"revision"`
+			CredentialID string `json:"credential_id"`
+		}{r.V, r.ID, r.Type, r.ItemID, r.Revision, r.CredentialID})
 	}
 	r.Code = ""
 	if r.Type != "passkey-result" {
@@ -744,6 +767,7 @@ func (r *Response) Clear() {
 	r.Password = ""
 	r.Code = ""
 	r.Credential = ""
+	r.CredentialID = ""
 }
 
 func (Response) String() string   { return "[native browser response]" }
@@ -924,6 +948,7 @@ func ReadRequest(reader io.Reader) (Request, error) {
 		Tag            string  `json:"tag"`
 		StateFilter    string  `json:"state"`
 		FavoritesOnly  *bool   `json:"favorites_only"`
+		PasskeysOnly   *bool   `json:"passkeys_only"`
 		Field          string  `json:"field"`
 		FieldAction    string  `json:"action"`
 		StateAction    string  `json:"state_action"`
@@ -937,6 +962,7 @@ func ReadRequest(reader io.Reader) (Request, error) {
 		Offset         int64   `json:"offset"`
 		Data           string  `json:"data"`
 		AttachmentID   string  `json:"attachment_id"`
+		CredentialID   string  `json:"credential_id"`
 	}
 	dec = json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
@@ -951,10 +977,11 @@ func ReadRequest(reader io.Reader) (Request, error) {
 		DocumentID: wire.DocumentID, WindowID: wire.WindowID, ItemID: wire.ItemID,
 		Revision: wire.Revision, RequestID: wire.RequestID, Nonce: wire.Nonce,
 		Query: wire.Query, VaultID: wire.VaultID, Tag: wire.Tag, StateFilter: wire.StateFilter,
-		FavoritesOnly: wire.FavoritesOnly, Field: wire.Field, FieldAction: wire.FieldAction,
+		FavoritesOnly: wire.FavoritesOnly, PasskeysOnly: wire.PasskeysOnly, Field: wire.Field, FieldAction: wire.FieldAction,
 		StateAction: wire.StateAction, ItemJSON: wire.ItemJSON, ProfileKind: wire.ProfileKind,
 		FileName: wire.FileName, Size: wire.Size, SHA256: wire.SHA256, MimeType: wire.MimeType,
 		TransferID: wire.TransferID, Offset: wire.Offset, Data: wire.Data, AttachmentID: wire.AttachmentID,
+		CredentialID: wire.CredentialID,
 	}
 	r.NeverForOrigin = wire.NeverForOrigin != nil && *wire.NeverForOrigin
 	if wire.IncludeHIBP != nil {
@@ -1077,9 +1104,11 @@ func requestKeys(kind string) (required, optional []string, ok bool) {
 	case "dismiss-save":
 		return append(base, "capability"), []string{"origin", "stage_id", "never_for_origin", "tab_id", "window_id", "document_id"}, true
 	case "search", "list", "vault-search", "vault-list":
-		return append(base, "capability"), []string{"query", "category", "vault_id", "state", "favorites_only", "origin", "tag"}, true
+		return append(base, "capability"), []string{"query", "category", "vault_id", "state", "favorites_only", "passkeys_only", "origin", "tag"}, true
 	case "item-get":
 		return append(base, "capability", "item_id"), []string{"revision"}, true
+	case "passkey-remove":
+		return append(base, "capability", "item_id", "revision", "credential_id"), nil, true
 	case "item-copy-field", "item-reveal-field":
 		return append(base, "capability", "item_id", "revision", "field"), []string{"action"}, true
 	case "item-create":

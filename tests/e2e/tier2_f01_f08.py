@@ -22,6 +22,7 @@ from .support import (
     f1_autosubmit_ready,
     f1_passkey_ready,
     f2_inline_ready,
+    f2_passkey_management_ready,
     f3_team_sync_ready,
     f4_team_cli_ready,
     f5_desktop_timer_ready,
@@ -29,6 +30,7 @@ from .support import (
     f7_shared_ipc_ready,
     f8_desktop_v2_ready,
     gate,
+    go_package_test,
     init_vault,
     list_rows,
     make_vault,
@@ -196,6 +198,34 @@ def t2_f2_06(ctx):
     assert not probe.timed_out, "oversized passkey options must be refused before GUI approval"
     assert not native_has_credential(probe), probe.frames
     assert not any(frame.get("type") == "passkey-result" for frame in probe.frames)
+
+
+@e2e_test(
+    "T2_F2_07", 2, ["F2"],
+    "Separate Passkey removal preserves the login and revokes queued responses",
+    coverage_kind="component_contract",
+)
+def t2_f2_07(ctx):
+    gate(ctx, "F2", f2_passkey_management_ready(ctx), "Passkey management protocol is absent on the extension or native host")
+    go_package_test(
+        ctx, "./internal/personal",
+        r"^TestRemovePasskeyAtomicPreservationAuditAndSelectorRefusals$",
+    )
+    go_package_test(
+        ctx, "./internal/browserhost",
+        r"^TestPasskey(PendingApprovalBlocksRemoval(SameConnection|AcrossConnections)|EpochSuppressesQueuedSignatureAcrossConnections)$",
+        min_passed=3,
+    )
+    node_test_pattern(
+        ctx, "browser-extension/test/popup_clear_controls.test.js",
+        r"passkey detail shows safe metadata and cancel|confirmed passkey removal|late passkey removal",
+        min_passed=3,
+    )
+    node_test_pattern(
+        ctx, "browser-extension/test/background.test.js",
+        r"passkey removal is popup-only|unknown passkey commit outcome",
+        min_passed=2,
+    )
 
 
 # ---------------------------------------------------------------------------

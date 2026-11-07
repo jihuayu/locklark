@@ -582,6 +582,12 @@
     )
       clearAttachmentBuffers();
     lastState = state;
+    if (
+      vaultEnabled &&
+      document.body?.dataset?.view === "detail" &&
+      lastDetail
+    )
+      renderPasskeyDetail(lastDetail);
     query("#auto-login").checked = state.autoLogin !== false;
     query("#passkey-save").checked = state.offerSavePasskeys !== false;
     query("#passkey-use").checked = state.offerUsePasskeys !== false;
@@ -607,6 +613,7 @@
     const list = query("#candidates");
     const signature = JSON.stringify({
       rows: state.candidates || [],
+      connected: state.connected,
       pending: state.pending,
       busy,
       saveBlocked: !!state.saveBlocked,
@@ -717,6 +724,7 @@
     // Disconnect may interrupt a deferred action. Its generation also prevents
     // the old action's reply/finalizer from changing the next operation.
     if (busy && !["disconnect", "cancel-otp"].includes(message.type)) return;
+    if (["disconnect", "lock"].includes(message.type)) cancelPasskeyRemoval();
     const generation = ++actionGeneration;
     busy = true;
     if (lastState) render(lastState);
@@ -767,6 +775,7 @@
     suggested: "当前网站",
     all: "全部",
     favorites: "收藏",
+    passkeys: "Passkey",
     login: "登录",
     identity: "身份",
     credit_card: "银行卡",
@@ -849,6 +858,13 @@
     feedbackTimer = null,
     editorHadSections = false,
     editorConflict = "",
+    vaultQueryGeneration = 0,
+    passkeyDetailGeneration = 0,
+    passkeyRemoveGeneration = 0,
+    passkeyConfirm = null,
+    passkeyRemoving = false,
+    passkeyUncertain = null,
+    passkeyStatusText = "",
     attachmentGeneration = 0,
     attachmentBusy = false,
     attachmentTransfer = "",
@@ -875,6 +891,7 @@
     }, 2500);
   }
   function showView(name) {
+    if (name !== "detail") cancelPasskeyRemoval();
     if (name !== "detail") clearRevealedSecrets();
     if (!els) return;
     els.vaultView.hidden = name !== "vault";
@@ -883,6 +900,9 @@
     document.body.dataset.view = name;
   }
   function wipeDetail() {
+    cancelPasskeyRemoval();
+    passkeyDetailGeneration++;
+    if (els?.passkeyDetail) els.passkeyDetail.hidden = true;
     clearAttachmentBuffers();
     if (els?.detailFields) els.detailFields.replaceChildren();
     if (els) {
@@ -920,6 +940,8 @@
     return CATEGORY_LABELS[category] || "条目";
   }
   function stateItems() {
+    if (activeFilter === "passkeys")
+      return Array.isArray(vaultItems) ? vaultItems : [];
     if (Array.isArray(lastState?.vaultItems) && lastState.vaultItems.length)
       return lastState.vaultItems;
     if (!Array.isArray(lastState?.candidates)) return [];
@@ -940,6 +962,9 @@
   }
   function filteredItems() {
     const items = stateItems();
+    // Passkey rows are already filtered by the native host before its 500-row
+    // cap; filtering this truncated page again would hide valid matches.
+    if (activeFilter === "passkeys") return items;
     if (!core) return items;
     return core.filterVaultItems(items, {
       query: searchQuery,
@@ -980,12 +1005,19 @@
       const title = document.createElement("span");
       title.className = "vault-item-title";
       title.textContent = item.title || "（无标题）";
+      const passkey = core?.validPasskeyMetadata?.(item.passkey)
+        ? item.passkey
+        : null;
       const subtitle = document.createElement("span");
       subtitle.className = "vault-item-subtitle";
-      subtitle.textContent = item.subtitle || item.username || "";
+      subtitle.textContent = passkey
+        ? passkey.user_name + " · " + passkey.rp_id
+        : item.subtitle || item.username || "";
       const badge = document.createElement("span");
       badge.className = "badge";
-      badge.textContent = categoryLabel(item.category);
+      badge.textContent = passkey
+        ? "Passkey · " + categoryLabel(item.category)
+        : categoryLabel(item.category);
       row.append(title, subtitle, badge);
       if (item.favorite === true) {
         const star = document.createElement("span");
@@ -996,12 +1028,24 @@
       row.addEventListener("click", () => void openDetail(item));
       list.append(row);
     }
-    els.vaultCount.textContent = `${items.length} 个条目 · ${
-      FILTER_LABELS[activeFilter] || "全部"
-    }`;
-    els.vaultEmpty.hidden = items.length !== 0;
+    const passkeysUnsupported =
+      activeFilter === "passkeys" &&
+      (lastState?.passkeyManagementSupported === false ||
+        lastState?.passkeysUnsupported === true);
+    if (els.passkeyUnsupported) {
+      els.passkeyUnsupported.hidden = !passkeysUnsupported;
+      els.passkeyUnsupported.textContent = passkeysUnsupported
+        ? "当前原生宿主不支持 Passkey 管理，请升级原生宿主后再试；未显示本地筛选的不完整结果。"
+        : "";
+    }
+    els.vaultCount.textContent = `${items.length} 个${
+      activeFilter === "passkeys" ? " Passkey" : "条目"
+    } · ${FILTER_LABELS[activeFilter] || "全部"}`;
+    els.vaultEmpty.hidden = items.length !== 0 || passkeysUnsupported;
     els.vaultEmpty.textContent =
-      activeFilter === "favorites"
+      activeFilter === "passkeys"
+        ? "没有找到 Passkey"
+        : activeFilter === "favorites"
         ? "暂无收藏条目"
         : activeFilter === "suggested"
           ? "当前网站无匹配条目"
@@ -1025,7 +1069,10 @@
       vaultLoaded = false;
       vaultItems = [];
       wipeSensitiveViews();
-    } else if (Array.isArray(state.vaultItems) && state.vaultItems.length) {
+    } else if (
+      Array.isArray(state.vaultItems) &&
+      (state.vaultItems.length || activeFilter === "passkeys")
+    ) {
       vaultItems = state.vaultItems;
       vaultLoaded = true;
     }
@@ -1037,29 +1084,60 @@
       void refreshVault(true);
     }
   }
+  function vaultFilterState() {
+    return {
+      query: searchQuery,
+      category: activeFilter,
+      passkeysOnly: activeFilter === "passkeys",
+    };
+  }
+  function sameVaultFilter(a, b) {
+    return (
+      !!a &&
+      !!b &&
+      a.query === b.query &&
+      a.category === b.category &&
+      a.passkeysOnly === b.passkeysOnly
+    );
+  }
   async function refreshVault(silent = false) {
-    if (!vaultEnabled || vaultBusy || !lastState?.connected) return;
-    vaultBusy = true;
+    if (!vaultEnabled || !lastState?.connected) return;
+    const generation = ++vaultQueryGeneration;
+    const filters = vaultFilterState();
     if (els?.searchInput) els.searchInput.disabled = true;
+    const isCurrent = () =>
+      generation === vaultQueryGeneration &&
+      sameVaultFilter(filters, vaultFilterState());
     try {
       const reply = await api.runtime.sendMessage({
         type: "vault-search",
-        query: searchQuery,
-        category: activeFilter,
+        query: filters.query,
+        category: filters.category,
+        passkeysOnly: filters.passkeysOnly,
       });
+      if (!isCurrent()) return;
       if (reply && typeof reply === "object") {
-        if (reply.status || typeof reply.connected === "boolean")
+        if (
+          reply.status ||
+          typeof reply.connected === "boolean" ||
+          typeof reply.passkeyManagementSupported === "boolean" ||
+          reply.vaultSource ||
+          reply.passkeysUnsupported !== undefined
+        )
           lastState = { ...lastState, ...reply };
         if (Array.isArray(reply.vaultItems)) vaultItems = reply.vaultItems;
+        if (reply.passkeysUnsupported === true) vaultItems = [];
         vaultLoaded = true;
         renderVaultList();
       }
     } catch {
+      if (!isCurrent()) return;
       if (!silent) toast("无法读取金库条目");
     } finally {
-      vaultBusy = false;
-      if (els?.searchInput) els.searchInput.disabled = false;
-      renderLockedView(lastState || {});
+      if (generation === vaultQueryGeneration) {
+        if (els?.searchInput) els.searchInput.disabled = false;
+        renderLockedView(lastState || {});
+      }
     }
   }
   function scheduleVaultSearch() {
@@ -1071,6 +1149,8 @@
   }
   async function openDetail(item) {
     if (!item || vaultBusy) return;
+    const generation = ++passkeyDetailGeneration;
+    cancelPasskeyRemoval({ clearUncertain: false });
     vaultBusy = true;
     try {
       const reply = await api.runtime.sendMessage({
@@ -1079,8 +1159,10 @@
         revision: item.revision,
       });
       if (!reply?.detail) throw Error("refused");
+      if (generation !== passkeyDetailGeneration) return;
       if (typeof reply.connected === "boolean")
         lastState = { ...lastState, ...reply };
+      passkeyUncertain = null;
       lastDetail = reply.detail;
       clearRevealedSecrets();
       renderDetail(reply.detail);
@@ -1128,6 +1210,230 @@
         revealable: true,
       });
     return fields;
+  }
+  function passkeyTargetFrom(detail) {
+    const passkey = detail?.passkey;
+    if (!detail || !core?.validPasskeyMetadata?.(passkey)) return null;
+    if (
+      !/^[a-f0-9]{32}$/.test(detail.id || "") ||
+      !/^[a-f0-9]{64}$/.test(detail.revision || "")
+    )
+      return null;
+    return {
+      itemId: detail.id,
+      revision: detail.revision,
+      credentialId: passkey.credential_id,
+      detailGeneration: passkeyDetailGeneration,
+    };
+  }
+  function samePasskeyTarget(a, b) {
+    return (
+      !!a &&
+      !!b &&
+      a.itemId === b.itemId &&
+      a.revision === b.revision &&
+      a.credentialId === b.credentialId
+    );
+  }
+  function cancelPasskeyRemoval(options = {}) {
+    passkeyRemoveGeneration++;
+    passkeyConfirm = null;
+    passkeyRemoving = false;
+    if (options.clearUncertain !== false) passkeyUncertain = null;
+    if (options.keepStatus !== true) passkeyStatusText = "";
+    if (!els) return;
+    if (els.passkeyRemoveConfirm) els.passkeyRemoveConfirm.hidden = true;
+    if (els.passkeyRemoveCancel) els.passkeyRemoveCancel.hidden = true;
+    if (els.passkeyRemoveWarning) els.passkeyRemoveWarning.hidden = true;
+    if (els.passkeyStatus) els.passkeyStatus.textContent = passkeyStatusText;
+  }
+  function renderPasskeyDetail(detail) {
+    if (!els?.passkeyDetail) return;
+    const passkey = core?.validPasskeyMetadata?.(detail?.passkey)
+      ? {
+          credential_id: detail.passkey.credential_id,
+          rp_id: detail.passkey.rp_id,
+          user_name: detail.passkey.user_name,
+          display_name: detail.passkey.display_name,
+        }
+      : null;
+    const shouldShow = !!passkey || detail?.has_passkey === true;
+    els.passkeyDetail.hidden = !shouldShow;
+    if (!shouldShow) {
+      if (passkeyConfirm) cancelPasskeyRemoval({ keepStatus: true });
+      for (const key of ["passkeyRp", "passkeyUsername", "passkeyDisplayName"])
+        if (els[key]) els[key].textContent = "";
+      if (els.passkeyDetailUnsupported) els.passkeyDetailUnsupported.hidden = true;
+      return;
+    }
+    const target = passkeyTargetFrom(detail);
+    const supported = lastState?.passkeyManagementSupported === true;
+    if (
+      passkeyConfirm &&
+      (!target || !samePasskeyTarget(passkeyConfirm, target) || !supported)
+    )
+      cancelPasskeyRemoval({ keepStatus: true });
+    const uncertain =
+      !!target &&
+      !!passkeyUncertain &&
+      samePasskeyTarget(passkeyUncertain, target) &&
+      passkeyUncertain.detailGeneration === passkeyDetailGeneration;
+    if (els.passkeyRp) els.passkeyRp.textContent = passkey?.rp_id || "-";
+    if (els.passkeyUsername)
+      els.passkeyUsername.textContent = passkey?.user_name || "-";
+    if (els.passkeyDisplayName)
+      els.passkeyDisplayName.textContent = passkey?.display_name || "-";
+    if (els.passkeyDetailUnsupported) {
+      els.passkeyDetailUnsupported.hidden = supported && !!passkey;
+      els.passkeyDetailUnsupported.textContent = !supported
+        ? "当前原生宿主不支持 Passkey 管理，请升级原生宿主后再试。"
+        : !passkey
+          ? "当前原生宿主未提供可安全显示的 Passkey 元数据，请刷新或升级原生宿主。"
+          : "";
+    }
+    const confirming = !!passkeyConfirm;
+    if (els.passkeyRemove) {
+      els.passkeyRemove.hidden =
+        !passkey || !supported || confirming || uncertain;
+      els.passkeyRemove.disabled =
+        passkeyRemoving || uncertain || detail.readOnly === true;
+    }
+    if (els.passkeyRemoveConfirm) els.passkeyRemoveConfirm.hidden = !confirming;
+    if (els.passkeyRemoveCancel) els.passkeyRemoveCancel.hidden = !confirming;
+    if (els.passkeyRemoveWarning) els.passkeyRemoveWarning.hidden = !confirming;
+    if (els.passkeyStatus)
+      els.passkeyStatus.textContent = passkeyRemoving
+        ? "正在删除 Passkey…"
+        : passkeyStatusText;
+  }
+  function requestPasskeyRemovalConfirmation() {
+    const target = passkeyTargetFrom(lastDetail);
+    if (!target) return;
+    if (
+      passkeyUncertain &&
+      samePasskeyTarget(passkeyUncertain, target) &&
+      passkeyUncertain.detailGeneration === passkeyDetailGeneration
+    ) {
+      passkeyStatusText = "Passkey 删除结果未确认，请刷新核实";
+      renderPasskeyDetail(lastDetail);
+      return;
+    }
+    if (lastState?.passkeyManagementSupported !== true) {
+      passkeyStatusText = "当前原生宿主不支持 Passkey 管理，请升级原生宿主";
+      renderPasskeyDetail(lastDetail);
+      return;
+    }
+    passkeyConfirm = target;
+    passkeyStatusText = "";
+    renderPasskeyDetail(lastDetail);
+  }
+  async function confirmPasskeyRemoval() {
+    const target = passkeyTargetFrom(lastDetail);
+    const confirmation = passkeyConfirm;
+    if (
+      !target ||
+      !confirmation ||
+      !samePasskeyTarget(target, confirmation) ||
+      confirmation.detailGeneration !== passkeyDetailGeneration ||
+      lastState?.passkeyManagementSupported !== true
+    ) {
+      cancelPasskeyRemoval();
+      renderPasskeyDetail(lastDetail);
+      toast("Passkey 删除确认已失效，请重新确认");
+      return;
+    }
+    if (
+      passkeyUncertain &&
+      samePasskeyTarget(passkeyUncertain, target) &&
+      passkeyUncertain.detailGeneration === passkeyDetailGeneration
+    ) {
+      passkeyStatusText = "Passkey 删除结果未确认，请刷新核实";
+      renderPasskeyDetail(lastDetail);
+      return;
+    }
+    if (passkeyRemoving) return;
+    const operation = ++passkeyRemoveGeneration;
+    const captured = { ...target };
+    passkeyConfirm = null;
+    passkeyRemoving = true;
+    passkeyStatusText = "正在删除 Passkey…";
+    renderPasskeyDetail(lastDetail);
+    let reply = null;
+    try {
+      reply = await api.runtime.sendMessage({
+        type: "passkey-remove",
+        id: captured.itemId,
+        revision: captured.revision,
+        credential_id: captured.credentialId,
+      });
+    } catch {}
+    if (operation !== passkeyRemoveGeneration) return;
+    passkeyRemoving = false;
+    if (
+      !reply ||
+      reply.passkeyRemoveError === "uncertain" ||
+      (!reply.passkeyRemoved && reply.passkeyRemoveError !== "refused")
+    ) {
+      passkeyUncertain = {
+        ...captured,
+        detailGeneration: passkeyDetailGeneration,
+      };
+      passkeyStatusText = "Passkey 删除结果未确认，请刷新核实";
+      renderPasskeyDetail(lastDetail);
+      toast("Passkey 删除结果未确认，请刷新核实");
+      return;
+    }
+    if (!reply.passkeyRemoved || reply.passkeyRemoveError === "refused") {
+      passkeyStatusText = "Passkey 删除被拒绝";
+      renderPasskeyDetail(lastDetail);
+      return;
+    }
+    const removed = reply.passkeyRemoved;
+    if (
+      removed.item_id !== captured.itemId ||
+      removed.credential_id !== captured.credentialId ||
+      !/^[a-f0-9]{64}$/.test(removed.revision || "")
+    ) {
+      passkeyUncertain = {
+        ...captured,
+        detailGeneration: passkeyDetailGeneration,
+      };
+      passkeyStatusText = "Passkey 删除结果未确认，请刷新核实";
+      renderPasskeyDetail(lastDetail);
+      toast("Passkey 删除结果未确认，请刷新核实");
+      return;
+    }
+    passkeyUncertain = null;
+    lastState = { ...lastState, ...reply };
+    vaultItems = [];
+    vaultLoaded = false;
+    if (lastDetail?.id === captured.itemId) {
+      const { passkey, ...rest } = lastDetail;
+      lastDetail = { ...rest, revision: removed.revision, has_passkey: false };
+    }
+    passkeyDetailGeneration++;
+    passkeyStatusText = "Passkey 已删除；此登录和其他信息仍保留";
+    renderPasskeyDetail(lastDetail);
+    await refreshVault(true);
+    if (operation !== passkeyRemoveGeneration) return;
+    try {
+      const refreshed = await api.runtime.sendMessage({
+        type: "item-get",
+        id: captured.itemId,
+        revision: removed.revision,
+      });
+      if (
+        operation !== passkeyRemoveGeneration ||
+        document.body?.dataset?.view !== "detail"
+      )
+        return;
+      if (refreshed?.detail) {
+        lastState = { ...lastState, ...refreshed };
+        lastDetail = refreshed.detail;
+        passkeyStatusText = "Passkey 已删除；此登录和其他信息仍保留";
+        renderDetail(lastDetail);
+      }
+    } catch {}
   }
   function renderDetail(detail) {
     if (!els || !detail) return;
@@ -1226,6 +1532,7 @@
       item.textContent = tag;
       els.detailTags.append(item);
     }
+    renderPasskeyDetail(detail);
     els.detailFill.disabled =
       !lastState?.connected ||
       !(lastState?.candidates || []).some(
@@ -1895,6 +2202,7 @@
     // retains revealed values. `lastDetail` metadata is kept for edit/cancel.
     clearAttachmentBuffers();
     clearRevealedSecrets();
+    cancelPasskeyRemoval();
     if (lastDetail) renderDetail(lastDetail);
     let category = "login",
       values = { title: "", urls: lastState?.origin ? [lastState.origin] : [] },
@@ -2284,6 +2592,18 @@
       detailNotes: q("#detail-notes"),
       detailTags: q("#detail-tags"),
       detailUpdated: q("#detail-updated"),
+      vaultPasskeyUnsupported: q("#vault-passkey-unsupported"),
+      passkeyUnsupported: q("#vault-passkey-unsupported"),
+      passkeyDetail: q("#passkey-detail"),
+      passkeyDetailUnsupported: q("#passkey-detail-unsupported"),
+      passkeyRp: q("#passkey-rp"),
+      passkeyUsername: q("#passkey-username"),
+      passkeyDisplayName: q("#passkey-display-name"),
+      passkeyRemove: q("#passkey-remove"),
+      passkeyRemoveConfirm: q("#passkey-remove-confirm"),
+      passkeyRemoveCancel: q("#passkey-remove-cancel"),
+      passkeyRemoveWarning: q("#passkey-remove-warning"),
+      passkeyStatus: q("#passkey-status"),
       editorBack: q("#editor-back"),
       editorHeading: q("#editor-heading"),
       editorFields: q("#editor-fields"),
@@ -2301,6 +2621,7 @@
     };
     els.searchInput.addEventListener("input", (event) => {
       searchQuery = String(event.target.value || "");
+      if (activeFilter === "passkeys") vaultItems = [];
       renderVaultList();
       scheduleVaultSearch();
     });
@@ -2309,6 +2630,7 @@
         event.preventDefault();
         searchQuery = "";
         els.searchInput.value = "";
+        if (activeFilter === "passkeys") vaultItems = [];
         renderVaultList();
         scheduleVaultSearch();
       } else if (event.key === "ArrowDown") {
@@ -2325,6 +2647,7 @@
     els.searchClear.addEventListener("click", () => {
       searchQuery = "";
       els.searchInput.value = "";
+      if (activeFilter === "passkeys") vaultItems = [];
       renderVaultList();
       void refreshVault(true);
     });
@@ -2343,11 +2666,18 @@
       });
     for (const tab of all("#filter-tabs [data-filter]"))
       tab.addEventListener("click", () => {
-        activeFilter = core?.validCategory(tab.dataset.filter)
-          ? tab.dataset.filter
-          : "all";
+        activeFilter =
+          tab.dataset.filter === "passkeys"
+            ? "passkeys"
+            : core?.validCategory(tab.dataset.filter)
+              ? tab.dataset.filter
+              : "all";
         if (searchTimer) clearTimeout(searchTimer);
         searchTimer = null;
+        // A new server query owns the list; never client-filter the previous
+        // truncated page while the host is still filtering.
+        vaultItems = [];
+        if (lastState) lastState = { ...lastState, vaultItems: [] };
         renderVaultList();
         void refreshVault(true);
       });
@@ -2381,6 +2711,7 @@
     });
     els.lockButton.addEventListener("click", () => {
       if (vaultBusy) return;
+      cancelPasskeyRemoval();
       clearAttachmentBuffers();
       vaultBusy = true;
       void api.runtime
@@ -2435,6 +2766,17 @@
         void openAndFill(lastDetail, lastDetail.urls[0]);
     });
     els.detailTrash.addEventListener("click", () => void detailTrash());
+    els.passkeyRemove.addEventListener("click", () =>
+      requestPasskeyRemovalConfirmation(),
+    );
+    els.passkeyRemoveConfirm.addEventListener("click", () =>
+      void confirmPasskeyRemoval(),
+    );
+    els.passkeyRemoveCancel.addEventListener("click", () => {
+      cancelPasskeyRemoval();
+      passkeyStatusText = "已取消删除";
+      renderPasskeyDetail(lastDetail);
+    });
     els.editorBack.addEventListener("click", () => {
       const editing = editorMode === "edit" && lastDetail;
       wipeEditor();

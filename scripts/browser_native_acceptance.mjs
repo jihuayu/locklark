@@ -353,6 +353,9 @@ try {
         evaluate(
           "document.querySelector(" + JSON.stringify(selector) + ")?.disabled",
         ),
+      visible: (selector) => evaluate(
+        "!!document.querySelector(" + JSON.stringify(selector) + ")?.getClientRects().length",
+      ),
       screenshot: async (path) => {
         const result = await call("Page.captureScreenshot", {
           format: "png",
@@ -660,6 +663,8 @@ try {
     openPopup,
     eventually,
     phase,
+    observe: acceptanceDriver.observe,
+    reconnect: acceptanceDriver.reconnect,
   });
   assert(
     !logs.some((s) =>

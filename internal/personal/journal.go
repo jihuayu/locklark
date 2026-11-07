@@ -126,6 +126,10 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 		if n <= 1 || !idOK(e.Item) || e.Result != "succeeded" || !digestOK(e.Link) || e.BaseRevision != "" && !digestOK(e.BaseRevision) {
 			return invalid
 		}
+	case passkeyRemoveAction:
+		if n <= 1 || !idOK(e.Item) || e.Result != "succeeded" || !digestOK(e.BaseRevision) || e.Link != "" {
+			return invalid
+		}
 	case v2PurgeAction:
 		if e.Result == "not-found" {
 			if e.Item != "" || e.BaseRevision != "" || n <= 1 {

@@ -411,3 +411,66 @@ test("generator defaults power popup and options without weakening bounds", () =
   );
   assert.equal(memorable.split("-").length, 3);
 });
+
+test("passkey management selectors and metadata stay out of save mutations", () => {
+  const found = ids(popupHTML);
+  for (const id of [
+    "tab-passkeys",
+    "vault-passkey-unsupported",
+    "passkey-detail",
+    "passkey-remove",
+    "passkey-remove-confirm",
+    "passkey-remove-cancel",
+    "passkey-rp",
+    "passkey-username",
+    "passkey-display-name",
+  ])
+    assert.ok(found.has(id), "missing passkey control #" + id);
+  assert.match(popupHTML, /id="tab-passkeys" data-filter="passkeys"/);
+  assert.match(popupJS, /type: "passkey-remove"/);
+  assert.match(popupJS, /passkeysOnly: activeFilter === "passkeys"/);
+  const credential = core.base64URLEncode(new Uint8Array(32).fill(5));
+  assert.equal(core.validCredentialID(credential), true);
+  const canonicalZero = core.base64URLEncode(new Uint8Array(32));
+  assert.equal(core.validCredentialID(canonicalZero), true);
+  assert.equal(
+    core.validCredentialID(canonicalZero.slice(0, -1) + "B"),
+    false,
+    "non-canonical id rejected",
+  );
+  assert.equal(
+    core.validPasskeyMetadata({
+      credential_id: credential,
+      rp_id: "example.test",
+      user_name: "ada",
+      display_name: "Ada",
+    }),
+    true,
+  );
+  assert.equal(
+    core.validPasskeyMetadata({
+      credential_id: credential,
+      rp_id: "example.test",
+      user_name: "ada",
+      display_name: "Ada",
+      user_handle: "private",
+    }),
+    false,
+    "extra record fields are never accepted as public metadata",
+  );
+  const mutation = core.itemToNativeMutation({
+    category: "login",
+    title: "Login",
+    username: "ada",
+    password: "secret",
+    passkey: {
+      credential_id: credential,
+      rp_id: "example.test",
+      user_name: "ada",
+      display_name: "Ada",
+    },
+    has_passkey: true,
+  });
+  assert.equal(Object.hasOwn(mutation, "passkey"), false);
+  assert.equal(Object.hasOwn(mutation, "has_passkey"), false);
+});

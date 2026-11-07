@@ -185,6 +185,31 @@ class F16DetectionTests(unittest.TestCase):
         self.assertFalse(support.f16_cli_shell_ready(ctx))
 
 
+class PasskeyManagementDetectionTests(unittest.TestCase):
+    def _ctx(self, extension: bool, native: bool) -> FakeContext:
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        files = {
+            "browser-extension/core.js": "passkey-management-v1" if extension else "passkey-v1",
+            "internal/browserhost/types_v2.go": "passkey-management-v1" if native else "passkey-v1",
+            "internal/browserhost/protocol.go": '"passkey-remove"' if native else '"passkey-get"',
+        }
+        for name, content in files.items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        return FakeContext({}, repo_root=root, extension_dir=root / "browser-extension")
+
+    def test_extension_without_native_management_is_absent(self):
+        self.assertFalse(support.f2_passkey_management_ready(self._ctx(True, False)))
+
+    def test_native_without_extension_management_is_absent(self):
+        self.assertFalse(support.f2_passkey_management_ready(self._ctx(False, True)))
+
+    def test_both_protocol_surfaces_enable_component_contracts(self):
+        self.assertTrue(support.f2_passkey_management_ready(self._ctx(True, True)))
+
+
 class F17DetectionTests(unittest.TestCase):
     def _ctx(self, files: dict[str, str]) -> FakeContext:
         root = Path(tempfile.mkdtemp())

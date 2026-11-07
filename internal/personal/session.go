@@ -41,6 +41,7 @@ type Session struct {
 	fullUnlock           time.Time
 	pending              map[*NativeField]bool
 	browserPending       map[*NativeBrowserFill]bool
+	passkeyEpoch         atomic.Uint64
 	// Watchtower state is in-memory only. The range client owns the prefix
 	// cache; dropping it on lock clears both the cache and its transport.
 	watchtowerKey []byte
