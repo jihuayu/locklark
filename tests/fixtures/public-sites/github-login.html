@@ -1,0 +1,35 @@
+<!doctype html>
+<!--
+  SYNTHETIC Issue 39 compatibility fixture for https://github.com/login
+  (HTTP 200, fetched 2026-11-07T09:31:07Z by parent research).
+  A minimal synthetic form, NOT a clone and not the production page: no brand
+  assets, no page copy, no CSRF/token values and no captured values.
+  Reported input facts reproduced here:
+    name="login" type="text" autocomplete="username"
+    name="password" type="password" autocomplete="current-password"
+    submit control name="commit"
+    one extra text input whose production name prefix is "required_field_"
+  Anything marked data-synthetic was NOT observed in the source research.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>synthetic public-site compatibility fixture (sign-in)</title>
+</head>
+<body>
+<main>
+<h1>Synthetic sign-in fixture</h1>
+<!-- synthetic container: production form/action/method were not captured -->
+<form data-synthetic="container">
+<label for="login_field">Username</label>
+<input id="login_field" name="login" type="text" autocomplete="username">
+<label for="password">Password</label>
+<input id="password" name="password" type="password" autocomplete="current-password">
+<!-- synthetic hidden decoy (negative case): the reported required_field_
+     random suffix is normalized to required_field_fixture; no value retained -->
+<input type="text" name="required_field_fixture" hidden data-synthetic="negative-case-decoy">
+<button type="submit" name="commit" value="Sign in">Sign in</button>
+</form>
+</main>
+</body>
+</html>

@@ -311,12 +311,16 @@ jobs:
             --artifacts "$RUNNER_TEMP/locklark-ssh-evidence"
       - name: Test browser extension DOM
         timeout-minutes: 10
-        run: node scripts/browser_extension_dom.cjs
+        run: |
+          node scripts/browser_extension_dom.cjs
+          node scripts/browser_public_site_compatibility.cjs
         env:
           LOCKLARK_TEST_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
       - name: Test Firefox browser extension DOM
         timeout-minutes: 10
-        run: node scripts/browser_extension_dom.cjs
+        run: |
+          node scripts/browser_extension_dom.cjs
+          node scripts/browser_public_site_compatibility.cjs
         env:
           LOCKLARK_TEST_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
           LOCKLARK_TEST_BROWSER: firefox
