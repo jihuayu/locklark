@@ -939,7 +939,18 @@ globalThis.LocklarkCore = (() => {
     const out = { category, title: item.title.slice(0, 1024) };
     const password = typeof item.password === "string" ? item.password : "";
     const otp = typeof item.otp === "string" ? item.otp : typeof item.otp_secret === "string" ? item.otp_secret : "";
-    const notes = typeof item.notes === "string" ? item.notes : typeof item.content === "string" ? item.content : undefined;
+    let notes = typeof item.notes === "string" ? item.notes : typeof item.content === "string" ? item.content : undefined;
+    if (notes === "" && options.original) {
+      const originalNotes = Array.isArray(options.original.fields)
+        ? options.original.fields.find((field) => field?.id === "notes")
+        : null;
+      const protectedMasked =
+        (originalNotes &&
+          (originalNotes.has_value === true || originalNotes.concealed === true) &&
+          !originalNotes.value) ||
+        (options.original.has_notes === true && !options.original.notes);
+      if (protectedMasked && !options.original.notes) notes = undefined;
+    }
     if (typeof item.username === "string" && item.username) out.username = item.username.slice(0, 16384);
     if (password) out.password = password.slice(0, 16384);
     if (otp.trim()) out.otp = otp.trim().slice(0, 4096);
@@ -4190,25 +4201,62 @@ globalThis.LocklarkCore = (() => {
   function flattenItemFields(item) {
     if (!item || typeof item !== "object") return [];
     const result = [];
-    const add = (field) => {
+    const seen = new Set();
+    const bounded = (value, length) =>
+      typeof value === "string" ? value.slice(0, length) : "";
+    const sectionFields = new Map();
+    if (Array.isArray(item.sections))
+      for (const section of item.sections.slice(0, 20))
+        if (
+          typeof section?.id === "string" &&
+          section.id &&
+          Array.isArray(section?.fields)
+        )
+          for (const field of section.fields.slice(0, 100))
+            if (typeof field?.id === "string" && field.id)
+              sectionFields.set(field.id, section);
+    const add = (field, section = null) => {
       if (!field || typeof field !== "object" || Array.isArray(field)) return;
       if (result.length >= 200) return;
-      result.push({
-        id: typeof field.id === "string" ? field.id.slice(0, 128) : "",
-        label:
-          typeof field.label === "string" ? field.label.slice(0, 256) : "",
-        type: FIELD_TYPES.includes(field.type) ? field.type : "text",
-        value: typeof field.value === "string" ? field.value.slice(0, 16384) : "",
+      const rawID = bounded(field.id, 128);
+      const sectionID = section
+        ? bounded(section.id, 128)
+        : bounded(field.section_id, 128);
+      const id =
+        section && sectionID && rawID
+          ? "section:" + sectionID + ":" + rawID
+          : rawID;
+      // A native section field is exposed only by its qualified stable key.
+      if (!section && rawID && sectionFields.has(rawID)) return;
+      const stableKey = id || bounded(field.label, 256) + ":" + nativeFieldType(field.type);
+      if (seen.has(stableKey)) return;
+      seen.add(stableKey);
+      const out = {
+        id,
+        label: bounded(field.label, 256),
+        type: FIELD_TYPES.includes(field.type) ? field.type : nativeFieldType(field.type),
+        value: bounded(field.value, 16384),
         concealed: field.concealed === true,
-      });
+      };
+      if (typeof field.has_value === "boolean") out.has_value = field.has_value;
+      if (typeof field.revealable === "boolean") out.revealable = field.revealable;
+      const outSectionID = section ? sectionID : bounded(field.section_id, 128);
+      const outSectionTitle = section
+        ? bounded(section.title, 256)
+        : bounded(field.section_title, 256);
+      if (outSectionID) out.section_id = outSectionID;
+      if (outSectionTitle) out.section_title = outSectionTitle;
+      if (typeof field.purpose === "string" && field.purpose)
+        out.purpose = bounded(field.purpose, 128);
+      result.push(out);
     };
-    if (Array.isArray(item.fields)) item.fields.slice(0, 100).forEach(add);
+    if (Array.isArray(item.fields)) item.fields.slice(0, 100).forEach((field) => add(field));
     if (Array.isArray(item.sections))
       for (const section of item.sections.slice(0, 20))
         if (Array.isArray(section?.fields))
-          section.fields.slice(0, 100).forEach(add);
+          section.fields.slice(0, 100).forEach((field) => add(field, section));
     if (Array.isArray(item.custom_fields))
-      item.custom_fields.slice(0, 100).forEach(add);
+      item.custom_fields.slice(0, 100).forEach((field) => add(field));
     return result;
   }
   function concealedType(type, concealed) {

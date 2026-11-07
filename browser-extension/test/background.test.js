@@ -1693,7 +1693,9 @@ test("native v2 detail projects has-value rows and URLs without secret values", 
   assert.equal(password.value, "");
   assert.equal(password.concealed, true);
   assert.ok(detail.fields.find((field) => field.id === "notes").has_value);
-  assert.ok(detail.fields.find((field) => field.id === "section:sec1:f1"));
+  assert.equal(detail.fields.filter((field) => field.id === "section:sec1:f1").length, 1);
+  assert.equal(detail.fields.some((field) => field.id === "f1"), false);
+  assert.equal(detail.fields.find((field) => field.id === "password").revealable, true);
 });
 
 test("native v2 save sends only whitelisted DTO keys and explicit reveal is audited", async () => {

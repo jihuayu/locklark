@@ -314,7 +314,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       seen.add(field.id);
       fields.push(field);
     };
-    for (const field of core.flattenItemFields(item).slice(0, 200)) add(field);
+    for (const field of core.flattenItemFields({ ...item, sections: [] }).slice(0, 200)) add(field);
     const detail = { ...meta, notes: "", username: "", fields, sections: [], identity: null, credit_card: null };
     detail.username = boundedString(item.username);
     if (detail.username)

@@ -1158,7 +1158,7 @@
           : field.value;
       if (concealed && revealed) value.classList.add("revealed");
       row.append(label, value);
-      if (concealed) {
+      if (concealed || field.revealable === true) {
         const toggle = document.createElement("button");
         toggle.type = "button";
         toggle.dataset.action = "toggle-reveal";
@@ -1369,15 +1369,18 @@
       input.type = "checkbox";
       input.checked = value === true;
     } else {
-      input.type =
-        descriptor.type === "password"
-          ? "password"
-          : descriptor.type === "email"
-            ? "email"
-            : descriptor.type === "tel"
-              ? "tel"
-              : "text";
+      // HTMLTextAreaElement.type is a getter-only property. Assigning it in
+      // strict mode throws and aborts openEditor before the view is shown.
       if (descriptor.type === "textarea") input.rows = 3;
+      else
+        input.type =
+          descriptor.type === "password"
+            ? "password"
+            : descriptor.type === "email"
+              ? "email"
+              : descriptor.type === "tel"
+                ? "tel"
+                : "text";
       input.value =
         Array.isArray(value) ? value.join("\n") : value == null ? "" : value;
     }
@@ -1551,6 +1554,8 @@
     }
     vaultBusy = true;
     els.editorSave.disabled = true;
+    let saved = null,
+      wasEdit = false;
     try {
       const reply = await api.runtime.sendMessage({
         type: "item-save",
@@ -1561,22 +1566,27 @@
       });
       if (!reply || !reply.saved) throw Error("refused");
       lastState = { ...lastState, ...reply };
-      const saved = reply.saved;
-      const wasEdit = editorMode === "edit";
+      saved = reply.saved;
+      wasEdit = editorMode === "edit";
       wipeEditor();
       vaultLoaded = false;
-      if (wasEdit) await openDetail({ id: saved.item_id, revision: saved.revision });
-      else {
-        wipeDetail();
-        showView("vault");
-        await refreshVault(true);
-      }
-      toast("已保存");
     } catch {
       toast("保存未完成；请确认原生金库支持条目编辑");
     } finally {
       vaultBusy = false;
       if (els?.editorSave) els.editorSave.disabled = false;
+    }
+    // The save transaction owns vaultBusy. Complete it before handing the
+    // committed revision to the guarded detail/refresh helpers; otherwise they
+    // return early and leave an empty editor or a stale vault list.
+    if (!saved) return;
+    toast("已保存");
+    if (wasEdit)
+      await openDetail({ id: saved.item_id, revision: saved.revision });
+    else {
+      wipeDetail();
+      showView("vault");
+      await refreshVault(true);
     }
   }
   async function generateEditorPassword() {

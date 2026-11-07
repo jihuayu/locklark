@@ -502,6 +502,42 @@ func TestCLIUsageErrors(t *testing.T) {
 	}
 }
 
+func TestCLISubcommandHelpAndShellDiagnostics(t *testing.T) {
+	dir := cliTestDir(t)
+	missing := filepath.Join(dir, "never-created.json")
+	t.Setenv("LOCKLARK_CLI_BINDING", missing)
+	top, err := runCLIForTest(t, "--help")
+	if err != nil || !strings.Contains(string(top), "usage: locklark cli") || !strings.Contains(string(top), "cli init|bind") {
+		t.Fatalf("top-level cli help failed: %v %q", err, top)
+	}
+	for _, command := range []string{"profiles", "list", "init", "bind", "show", "remove", "shell-init", "run"} {
+		raw, err := runCLIForTest(t, command, "--help")
+		helpName := command
+		if command == "bind" {
+			helpName = "init|bind"
+		}
+		if err != nil || !strings.Contains(string(raw), "usage: locklark cli "+helpName) {
+			t.Fatalf("%s help failed: %v %q", command, err, raw)
+		}
+		raw, err = runCLIForTest(t, command, "-h")
+		if err != nil || !strings.Contains(string(raw), "usage: locklark cli "+helpName) {
+			t.Fatalf("%s -h failed: %v %q", command, err, raw)
+		}
+	}
+	if _, err = os.Lstat(missing); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("subcommand help touched the binding path")
+	}
+	for _, args := range [][]string{{"unknown", "--help"}, {"init", "--help", "extra"}, {"--help", "extra"}} {
+		if _, err := runCLIForTest(t, args...); !errors.Is(err, cliUsage) {
+			t.Fatalf("invalid help invocation %v returned %v", args, err)
+		}
+	}
+	_, err = runCLIForTest(t, "shell-init", "tcsh")
+	if !errors.Is(err, cliUsage) || !strings.Contains(err.Error(), "bash, zsh, fish, powershell, pwsh") {
+		t.Fatalf("unsupported shell diagnostic = %v", err)
+	}
+}
+
 func writeCLIStoredBinding(t *testing.T, path, tool string, binding clibinding.ToolBinding) {
 	t.Helper()
 	store := clibinding.NewStore()

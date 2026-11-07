@@ -39,9 +39,45 @@ var (
 
 var cliCoreTools = []string{"aws", "docker", "gh", "git", "kubectl", "npm", "psql", "terraform"}
 
+var cliCommandHelp = map[string]string{
+	"profiles":   "usage: locklark cli profiles\n\nList the built-in CLI wrapper profiles as JSON. No binding or vault is read.\n",
+	"list":       "usage: locklark cli list [--binding PATH] [--config PATH]\n\nPrint the non-secret CLI binding store as JSON.\n",
+	"init":       "usage: locklark cli init|bind <tool> --file PATH --program ABS_PROGRAM [--profile PROFILE] [--binding PATH] [--id ID --revision REV] [--slot-<name> ID:REV] [--helper-path ABS_DIR_LIST] [--passthrough ENV_LIST] [--timeout SECONDS] [--name ENV] [--pin-sha256 true|false]\n\nBind a tool to one profile, one owner-only vault and one pinned executable.\n",
+	"bind":       "usage: locklark cli init|bind <tool> --file PATH --program ABS_PROGRAM [--profile PROFILE] [--binding PATH] [--id ID --revision REV] [--slot-<name> ID:REV] [--helper-path ABS_DIR_LIST] [--passthrough ENV_LIST] [--timeout SECONDS] [--name ENV] [--pin-sha256 true|false]\n\nBind a tool to one profile, one owner-only vault and one pinned executable.\n",
+	"show":       "usage: locklark cli show <tool> [--binding PATH] [--config PATH]\n\nPrint one non-secret CLI binding as JSON.\n",
+	"remove":     "usage: locklark cli remove <tool> [--binding PATH] [--config PATH]\n\nRemove one CLI binding from the store.\n",
+	"shell-init": "usage: locklark cli shell-init [bash|zsh|fish|powershell|pwsh] [--shell SHELL] [--binding PATH] [--tools TOOL_LIST]\n\nPrint shell functions that forward to locklark cli run.\n",
+	"run":        "usage: locklark cli run <tool> [--binding PATH] [--cwd ABS_DIR] [--timeout SECONDS] -- [ARG...]\n\nRun a bound tool in the foreground. Informational --help/--version commands use the credential-free fast path.\n",
+}
+
+var cliTopLevelHelp = `usage: locklark cli <command> [options]
+
+  cli profiles
+  cli list [--binding PATH]
+  cli init|bind <tool> --file PATH --program ABS_PROGRAM [options]
+  cli show|remove <tool> [--binding PATH]
+  cli shell-init [bash|zsh|fish|powershell|pwsh] [--binding PATH] [--tools TOOL_LIST]
+  cli run <tool> [--binding PATH] [--cwd ABS_DIR] [--timeout SECONDS] -- [ARG...]
+
+Use "locklark cli <command> --help" for command-specific usage.
+`
+
+func writeCLIHelp(out io.Writer, text string) error {
+	_, err := io.WriteString(out, text)
+	return err
+}
+
 func runCLICommand(args []string, out io.Writer) error {
 	if len(args) == 0 {
 		return cliUsage
+	}
+	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
+		return writeCLIHelp(out, cliTopLevelHelp)
+	}
+	if len(args) == 2 && (args[1] == "--help" || args[1] == "-h") {
+		if help, ok := cliCommandHelp[args[0]]; ok {
+			return writeCLIHelp(out, help)
+		}
 	}
 	switch args[0] {
 	case "profiles":
@@ -653,7 +689,7 @@ func runCLIShellInit(args []string, out io.Writer) error {
 		return cliUsage
 	}
 	if !isCLIShell(shell) {
-		return cliUsage
+		return fmt.Errorf("%w: unsupported shell %q; supported shells: bash, zsh, fish, powershell, pwsh", cliUsage, shell)
 	}
 	if _, provided := values["tools"]; provided && len(positionals) != 0 {
 		return cliUsage

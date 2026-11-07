@@ -269,3 +269,63 @@ test("cross-language field-value wire fixture is exact and strictly consumed", (
   assert.equal(core.validResponse(alias), false);
   assert.equal(core.validResponse({ ...reveal, extra: 1 }), false);
 });
+
+
+test("flatten preserves native metadata, qualifies section ids once, and keeps generic fields", () => {
+  const detail = {
+    id: "b".repeat(32),
+    revision: "c".repeat(64),
+    title: "Example",
+    category: "login",
+    fields: [
+      { id: "password", label: "密码", type: "concealed", value: "", concealed: true, has_value: true, revealable: true },
+      { id: "otp", label: "OTP", type: "totp", value: "", concealed: false, has_value: true, revealable: true },
+      { id: "section:sec1:f1", label: "Recovery", type: "concealed", value: "", concealed: true, has_value: true, section_id: "sec1", section_title: "Extra" },
+    ],
+    sections: [{ id: "sec1", title: "Extra", fields: [{ id: "f1", label: "Recovery", type: "concealed", value: "", concealed: true }] }],
+  };
+  const fields = core.flattenItemFields(detail);
+  const password = fields.find((field) => field.id === "password");
+  assert.equal(password.has_value, true);
+  assert.equal(password.revealable, true);
+  assert.equal(fields.find((field) => field.id === "otp").revealable, true);
+  assert.equal(fields.filter((field) => field.id === "section:sec1:f1").length, 1);
+  assert.equal(fields.some((field) => field.id === "f1"), false);
+  assert.equal(fields.find((field) => field.id === "section:sec1:f1").section_id, "sec1");
+  const generic = core.flattenItemFields({ fields: [{ id: "custom", label: "Custom", type: "text", value: "kept" }] });
+  assert.deepEqual(generic[0], { id: "custom", label: "Custom", type: "text", value: "kept", concealed: false });
+});
+
+
+test("metadata edit omits blank masked notes but sends explicit replacements", () => {
+  const original = {
+    id: "b".repeat(32),
+    revision: "c".repeat(64),
+    title: "Old title",
+    notes: "",
+    has_notes: true,
+    fields: [
+      { id: "notes", label: "备注", type: "concealed", value: "", concealed: true, has_value: true, revealable: true },
+    ],
+    sections: [{ id: "sec1", title: "Extra", fields: [{ id: "f1", label: "Recovery", type: "concealed", value: "", concealed: true, has_value: true }] }],
+  };
+  const metadataOnly = core.itemToNativeMutation(
+    { category: "login", title: "New title", notes: "" },
+    { original },
+  );
+  assert.equal(Object.hasOwn(metadataOnly, "notes"), false, "blank masked notes must be omitted");
+  assert.equal(Object.hasOwn(metadataOnly, "sections"), false);
+  const replaced = core.itemToNativeMutation(
+    { category: "login", title: "New title", notes: "replacement note" },
+    { original },
+  );
+  assert.equal(replaced.notes, "replacement note");
+  const created = core.itemToNativeMutation({ category: "login", title: "New", notes: "" });
+  assert.equal(created.notes, "");
+  const plaintextLoaded = { ...original, notes: "visible old" };
+  const cleared = core.itemToNativeMutation(
+    { category: "login", title: "New title", notes: "" },
+    { original: plaintextLoaded },
+  );
+  assert.equal(cleared.notes, "");
+});

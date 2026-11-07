@@ -20,6 +20,7 @@ import {
 
 import { acceptBrowserPasskey } from "./browser_passkey_acceptance.mjs";
 import { acceptBrowserOTP, otpHTML } from "./browser_otp_acceptance.mjs";
+import { acceptPopupVault } from "./browser_popup_vault_acceptance.mjs";
 
 const scanController = captureControllerOutput();
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -305,6 +306,13 @@ try {
       return r.result.value;
     };
     return {
+      insertText: (text) => call("Input.insertText", { text }),
+      selectAll: async () => {
+        for (const type of ["keyDown", "keyUp"])
+          await call("Input.dispatchKeyEvent", {
+            type, key: "a", code: "KeyA", modifiers: 2, windowsVirtualKeyCode: 65,
+          });
+      },
       targetId: target.id,
       close: () => ws.close(),
       dismiss: async () => {
@@ -447,6 +455,12 @@ try {
   ]);
   phase("native-pair");
   input([{ click_label: "确认连接此扩展" }]);
+  if (process.env.LOCKLARK_TEST_POPUP_VAULT) {
+    await acceptPopupVault({
+      openPopup, fixture, phase, eventually,
+      observe: vaultObserver({ go, root, env, state }),
+    });
+  }
   await blank();
   popup = await openPopup();
   await popup.click("#auto-login"); // Existing manual-mode scenarios intentionally disable auto-submit.

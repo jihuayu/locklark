@@ -1006,3 +1006,147 @@ test("open-and-change opens only validated HTTPS origins through the background"
   });
   assert.equal(findAction(h.findings()[0], "watchtower-open"), null);
 });
+
+
+test("editor textarea never assigns getter-only type in strict mode", () => {
+  const source = fs.readFileSync(path.join(__dirname, "../popup.js"), "utf8");
+  const match = source.match(
+    /  function addEditorInput\(descriptor, value\) \{[\s\S]*?\n  \}\n  function addCustomField/,
+  );
+  assert.ok(match, "addEditorInput source not found");
+  const functionSource = match[0].replace(/\n  function addCustomField[\s\S]*$/, "");
+  const editorFields = { children: [], append(child) { this.children.push(child); } };
+  const sandbox = {
+    document: {
+      createElement(tag) {
+        const node = {
+          className: "",
+          textContent: "",
+          dataset: {},
+          children: [],
+          append(...children) { this.children.push(...children); },
+        };
+        if (tag === "textarea") {
+          node.rows = 0;
+          node.value = "";
+          Object.defineProperty(node, "type", {
+            get() { return "textarea"; },
+          });
+        } else {
+          node.type = "";
+        }
+        return node;
+      },
+    },
+    els: { editorFields },
+    editorInputs: [],
+  };
+  vm.runInNewContext(
+    '"use strict";\n' + functionSource + "\nglobalThis.addEditorInput = addEditorInput;",
+    sandbox,
+  );
+  assert.doesNotThrow(() =>
+    sandbox.addEditorInput(
+      { name: "urls", label: "网站", type: "textarea" },
+      "https://example.test/login",
+    ),
+  );
+  assert.equal(sandbox.editorInputs.length, 1);
+  assert.equal(sandbox.editorInputs[0].input.type, "textarea");
+  assert.equal(sandbox.editorInputs[0].input.rows, 3);
+  assert.equal(sandbox.editorInputs[0].input.value, "https://example.test/login");
+});
+
+test("popup CSS always hides hidden menus despite display rules", () => {
+  const css = fs.readFileSync(path.join(__dirname, "../popup.css"), "utf8");
+  assert.match(css, /\[hidden\]\s*\{\s*display:\s*none\s*!important;?\s*\}/);
+});
+
+
+async function saveEditorHarness(mode) {
+  const source = fs.readFileSync(path.join(__dirname, "../popup.js"), "utf8");
+  const match = source.match(
+    /  async function saveEditor\(\) \{[\s\S]*?\n  \}\n  async function generateEditorPassword/,
+  );
+  assert.ok(match, "saveEditor source not found");
+  const functionSource = match[0].replace(
+    /\n  async function generateEditorPassword[\s\S]*$/,
+    "",
+  );
+  const calls = [];
+  const sandbox = {
+    mode,
+    vaultBusy: false,
+    editorMode: mode === "edit" ? "edit" : "create",
+    lastDetail: { id: "a".repeat(32), revision: "b".repeat(64) },
+    lastState: { connected: true },
+    vaultLoaded: true,
+    els: { editorSave: { disabled: false } },
+    api: {
+      runtime: {
+        async sendMessage(message) {
+          assert.equal(sandbox.vaultBusy, true, "busy held during save RPC");
+          calls.push(["save", message.mode]);
+          return { saved: { item_id: "c".repeat(32), revision: "d".repeat(64) } };
+        },
+      },
+    },
+    collectEditorItem: () => ({ title: "Example" }),
+    toast: (message) => calls.push(["toast", message]),
+    wipeEditor: () => calls.push(["wipeEditor"]),
+    wipeDetail: () => calls.push(["wipeDetail"]),
+    showView: (name) => calls.push(["showView", name]),
+    async openDetail(item) {
+      assert.equal(sandbox.vaultBusy, false, "openDetail must not see save busy");
+      calls.push(["openDetail", item]);
+    },
+    async refreshVault(silent) {
+      assert.equal(sandbox.vaultBusy, false, "refreshVault must not see save busy");
+      calls.push(["refreshVault", silent]);
+    },
+  };
+  vm.runInNewContext(
+    '"use strict";\n' + functionSource + "\nglobalThis.saveEditor = saveEditor;",
+    sandbox,
+  );
+  await sandbox.saveEditor();
+  return { sandbox, calls };
+}
+
+test("saveEditor releases its own busy before edit detail handoff", async () => {
+  const { sandbox, calls } = await saveEditorHarness("edit");
+  assert.equal(sandbox.vaultBusy, false);
+  assert.equal(sandbox.els.editorSave.disabled, false);
+  assert.deepEqual(calls.map((call) => call[0]), [
+    "save",
+    "wipeEditor",
+    "toast",
+    "openDetail",
+  ]);
+  const opened = calls.find((call) => call[0] === "openDetail")[1];
+  assert.equal(opened.id, "c".repeat(32));
+  assert.equal(opened.revision, "d".repeat(64));
+  assert.equal(calls.find((call) => call[0] === "toast")[1], "已保存");
+});
+
+test("saveEditor releases its own busy before create vault refresh", async () => {
+  const { sandbox, calls } = await saveEditorHarness("create");
+  assert.equal(sandbox.vaultBusy, false);
+  assert.equal(sandbox.els.editorSave.disabled, false);
+  assert.deepEqual(calls.map((call) => call[0]), [
+    "save",
+    "wipeEditor",
+    "toast",
+    "wipeDetail",
+    "showView",
+    "refreshVault",
+  ]);
+  assert.deepEqual(calls.find((call) => call[0] === "showView"), [
+    "showView",
+    "vault",
+  ]);
+  assert.deepEqual(calls.find((call) => call[0] === "refreshVault"), [
+    "refreshVault",
+    true,
+  ]);
+});
