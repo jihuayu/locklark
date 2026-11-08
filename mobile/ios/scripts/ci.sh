@@ -40,8 +40,7 @@ if [[ "$preflight_exit" -ne 0 || "$metadata_exit" -ne 0 ]]; then
     python3 "$ios_dir/scripts/summarize-failure.py" "$ios_dir/Build/capability-denial-private.log"
   fi
   if [[ "$preflight_exit" -ne 0 && "$metadata_exit" -eq 0 && "$denial_exit" -eq 0 ]]; then
-    echo "ios simulator capability-refusal verified; full-positive requires signed physical device"
-    exit 0
+    echo "ios simulator capability-refusal verified; positive protection preflight still FAIL"
   fi
   echo "ios full-positive NOT RUN; signed physical acceptance required"
   exit 1
