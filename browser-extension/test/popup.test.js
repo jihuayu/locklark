@@ -642,7 +642,10 @@ test("generator copy uses the clipboard without throwing", async () => {
   await flush();
   await flush();
   assert.deepEqual(h.clipboardWrites, ["Preview-123!"]);
-  assert.equal(h.elements["#gen-status"].textContent, "已复制");
+  assert.equal(
+    h.elements["#gen-status"].textContent,
+    "已复制；浏览器无法保证自动清除，请按需手动清理",
+  );
 });
 
 test("generated history skips malformed entries and fills the selected password", async () => {
