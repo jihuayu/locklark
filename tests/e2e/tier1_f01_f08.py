@@ -532,8 +532,9 @@ def t1_f5_05(ctx):
 # ---------------------------------------------------------------------------
 
 # The documented `personal add-item` category projection (docs/typed-personal-cli.md).
-# SSH keys, documents and raw attachment bodies are deliberately outside this
-# command and are covered by the explicit PENDING case below, never dropped.
+# Documents use explicit attachment files and ssh_key uses one explicit
+# owner-private Ed25519 key file; both are covered by dedicated PTY cases instead
+# of this inline category tuple. Raw key/attachment bodies stay outside.
 F6_ADD_ITEM_CATEGORIES = (
     "login",
     "password",
@@ -1145,18 +1146,94 @@ def t1_f6_07(ctx):
     "T1_F6_08",
     1,
     ["F6"],
-    "Raw SSH typed creation stays an explicit bounded refusal (pending)",
+    "Typed ssh_key creation from an explicit owner-private Ed25519 file",
 )
 def t1_f6_08(ctx):
+    import base64
+    import subprocess
+
     ready = _add_item_ready(ctx)
     gate(
         ctx,
         "F6",
         ready,
-        "CLI `personal add-item` command is absent; raw SSH refusal cannot be probed",
+        "CLI `personal add-item` command is absent; typed SSH private-file creation cannot run",
     )
     vault = make_vault(ctx)
     baseline = len(list_rows(ctx, vault, "all"))
+
+    key_dir = ctx.temp_dir / "typed-ssh-key"
+    key_dir.mkdir(mode=0o700, exist_ok=True)
+    key_path = key_dir / "id_ed25519"
+    generated = subprocess.run(
+        ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "e2e", "-f", str(key_path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert generated.returncode == 0, "ssh-keygen failed to create the private fixture"
+    key_path.chmod(0o600)
+    public_line = subprocess.run(
+        ["ssh-keygen", "-y", "-f", str(key_path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert public_line.returncode == 0, "ssh-keygen failed to derive the public fixture"
+    public_wire = base64.b64decode(public_line.stdout.split()[1])
+
+    title = "Typed SSH PTY private title"
+    document = {
+        "category": "ssh_key",
+        "title": title,
+        "ssh_private_key_file": str(key_path),
+        "tags": ["infra"],
+        "favorite": True,
+        "sections": [
+            {
+                "id": "ops",
+                "title": "Ops",
+                "fields": [{"id": "note", "label": "Note", "value": "owner-visible"}],
+            }
+        ],
+    }
+    created_input = write_typed_item(ctx, "ssh-key.json", document)
+    created = pty(
+        ctx,
+        ["personal", "add-item", "--file", str(vault["path"]), "--input", str(created_input)],
+        password=vault["password"],
+        secret=vault["secret"],
+        extra=[("输入 SAVE 确认新增条目", "SAVE")],
+    )
+    assert created.returncode == 0, created.transcript[-800:]
+    payload = created.json()
+    assert set(payload) == {"status", "id", "revision"}, payload
+    assert payload["status"] == "created"
+    assert len(payload["id"]) == 32 and len(payload["revision"]) == 64
+    for marker in (
+        str(created_input),
+        str(key_path),
+        "BEGIN OPENSSH PRIVATE KEY",
+        base64.b64encode(public_wire).decode("ascii"),
+        title,
+    ):
+        assert marker not in created.transcript, (
+            "receipt or prompt leaked protected SSH material"
+        )
+
+    metadata = item_metadata(ctx, vault, payload, verify_ssh_public=public_wire)
+    assert metadata["category"] == "ssh_key", metadata
+    assert metadata["tags"] == ["infra"], metadata
+    assert metadata["favorite"] is True, metadata
+    assert metadata["section_ids"] == ["ops"], metadata
+    assert metadata["section_field_counts"] == {"ops": 1}, metadata
+    assert metadata["ssh_pair_matches"] is True, metadata
+    assert len(list_rows(ctx, vault, "all")) == baseline + 1
+
+    malformed_path = ctx.temp_dir / "ssh-malformed-key"
+    malformed_path.write_text("not a private key\n", encoding="utf-8")
+    malformed_path.chmod(0o600)
+    unsafe_path = key_dir / "id_ed25519_world"
+    unsafe_path.write_bytes(key_path.read_bytes())
+    unsafe_path.chmod(0o644)
     raw_private_key = (
         "-----BEGIN OPENSSH PRIVATE KEY-----\n"
         "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAAB\n"
@@ -1187,36 +1264,68 @@ def t1_f6_08(ctx):
                 }
             ],
         },
+        "ssh-malformed.json": {
+            "category": "ssh_key",
+            "title": "Malformed key",
+            "ssh_private_key_file": str(malformed_path),
+        },
+        "ssh-unsafe.json": {
+            "category": "ssh_key",
+            "title": "Unsafe key",
+            "ssh_private_key_file": str(unsafe_path),
+        },
+        "ssh-wrong-category.json": {
+            "category": "login",
+            "title": "Wrong category",
+            "ssh_private_key_file": str(key_path),
+        },
     }
-    for name, document in documents.items():
-        path = write_typed_item(ctx, name, document)
+    for name, bad_document in documents.items():
+        path = write_typed_item(ctx, name, bad_document)
         refused = pty(
             ctx,
-            [
-                "personal",
-                "add-item",
-                "--file",
-                str(vault["path"]),
-                "--input",
-                str(path),
-            ],
+            ["personal", "add-item", "--file", str(vault["path"]), "--input", str(path)],
             password=vault["password"],
             secret=vault["secret"],
         )
         assert refused.returncode != 0, (name, refused.transcript[-800:])
         assert refused.stdout.strip() == "", (name, refused.stdout)
         assert "输入 SAVE" not in refused.transcript, (name, refused.transcript[-400:])
-        for marker in ("BEGIN OPENSSH PRIVATE KEY", raw_private_key.strip(), str(path)):
+        for marker in (
+            "BEGIN OPENSSH PRIVATE KEY",
+            raw_private_key.strip(),
+            str(path),
+            str(key_path),
+        ):
             assert marker not in refused.transcript, (name, marker)
-        assert len(list_rows(ctx, vault, "all")) == baseline, (
-            f"raw SSH refusal mutated the vault: {name}"
+        assert len(list_rows(ctx, vault, "all")) == baseline + 1, (
+            f"refused SSH document mutated the vault: {name}"
         )
+
+    wrong_input = write_typed_item(
+        ctx,
+        "ssh-wrong-save.json",
+        {
+            "category": "ssh_key",
+            "title": "Wrong SAVE",
+            "ssh_private_key_file": str(key_path),
+        },
+    )
+    wrong = pty(
+        ctx,
+        ["personal", "add-item", "--file", str(vault["path"]), "--input", str(wrong_input)],
+        password=vault["password"],
+        secret=vault["secret"],
+        extra=[("输入 SAVE 确认新增条目", "NOPE")],
+    )
+    assert wrong.returncode != 0, wrong.transcript[-800:]
+    assert "输入 SAVE" in wrong.transcript
+    assert len(list_rows(ctx, vault, "all")) == baseline + 1, "wrong SAVE mutated the vault"
     ctx.require_feature(
         "F6",
-        False,
-        "FEATURE_NOT_YET_LANDED: F6 - typed add-item still refuses ssh_key and every raw "
-        "private-key member, so explicit raw SSH creation remains separate pending work "
-        "and is not credited to this suite",
+        True,
+        "typed ssh_key creation from an explicit owner-private Ed25519 file verified "
+        "over the real PTY",
     )
 
 

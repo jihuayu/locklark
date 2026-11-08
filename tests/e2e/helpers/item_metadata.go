@@ -15,13 +15,17 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"os"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 
 	"github.com/jihuayu/locklark/internal/personal"
 )
@@ -46,6 +50,11 @@ type request struct {
 	// hash it.  It is optional, so an ordinary metadata request keeps the
 	// exact same stdin shape as before.
 	VerifyAttachments bool `json:"verify_attachments"`
+	// VerifySSHPublic is an optional base64 SSH wire public key.  The probe
+	// asks the dedicated native SSH signer for one synthetic-challenge
+	// signature and verifies it against this expected key; only the boolean is
+	// emitted, never a seed, signature or private byte.
+	VerifySSHPublic string `json:"verify_ssh_public"`
 }
 
 type urlMeta struct {
@@ -83,6 +92,7 @@ type metadata struct {
 	Attachments            []attachmentMeta `json:"attachments"`
 	AttachmentReadVerified bool             `json:"attachment_read_verified"`
 	AttachmentReads        []attachmentRead `json:"attachment_reads"`
+	SSHPairMatches         bool             `json:"ssh_pair_matches"`
 }
 
 // readRequest consumes exactly one bounded JSON object and nothing else.
@@ -165,6 +175,87 @@ func readAttachments(session *personal.Session, detail personal.ItemDetail) ([]a
 	return out, readErr
 }
 
+// probeID returns one random 128-bit hex identifier for the signing request.
+func probeID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", errMetadata
+	}
+	defer clear(b)
+	return hex.EncodeToString(b), nil
+}
+
+// verifySSHPair proves ownership of the stored Ed25519 key by signing a fresh
+// synthetic challenge through the dedicated native SSH signer and verifying the
+// signature against the expected wire public key.  The seed never leaves the
+// session; only a boolean is returned and every buffer owned here is cleared.
+func verifySSHPair(session *personal.Session, id, revision, encoded string) (bool, error) {
+	expected, err := base64.StdEncoding.Strict().DecodeString(encoded)
+	if err != nil || len(expected) == 0 {
+		return false, errMetadata
+	}
+	defer clear(expected)
+	rows, err := session.ListSSHKeys()
+	if err != nil {
+		return false, errMetadata
+	}
+	target := personal.SSHKeyTarget{}
+	found := false
+	for _, row := range rows {
+		if row.ID == id && row.Revision == revision {
+			target = personal.SSHKeyTarget{ID: row.ID, Revision: row.Revision}
+			found = true
+			break
+		}
+	}
+	if !found {
+		return false, nil
+	}
+	requestID, err := probeID()
+	if err != nil {
+		return false, errMetadata
+	}
+	connectionID, err := probeID()
+	if err != nil {
+		return false, errMetadata
+	}
+	challenge := []byte("locklark/e2e/ssh-pair-proof/v1")
+	defer clear(challenge)
+	request := personal.SSHSignRequest{
+		RequestID:    requestID,
+		ConnectionID: connectionID,
+		Peer:         "e2e-metadata-probe",
+		PublicKey:    bytes.Clone(expected),
+		Data:         bytes.Clone(challenge),
+	}
+	defer clear(request.PublicKey)
+	defer clear(request.Data)
+	intent, err := session.PrepareSSHSign(target, request, time.Now().Add(personal.SSHSignLifetime))
+	if err != nil {
+		return false, errMetadata
+	}
+	output, err := session.ApproveSSHSign(intent)
+	if err != nil {
+		session.DiscardSSHSign(intent)
+		return false, errMetadata
+	}
+	signature, err := session.ConsumeSSHSignature(output)
+	if err != nil {
+		session.DiscardSSHSignature(output)
+		return false, errMetadata
+	}
+	defer clear(signature)
+	var parsed ssh.Signature
+	if err := ssh.Unmarshal(signature, &parsed); err != nil {
+		return false, errMetadata
+	}
+	public, err := ssh.ParsePublicKey(expected)
+	if err != nil || public.Type() != ssh.KeyAlgoED25519 {
+		return false, errMetadata
+	}
+	return public.Verify(challenge, &parsed) == nil, nil
+}
+
 func quit(code int) {
 	os.Exit(code)
 }
@@ -209,6 +300,15 @@ func main() {
 		}
 		out.AttachmentReadVerified = true
 		out.AttachmentReads = reads
+	}
+	if req.VerifySSHPublic != "" {
+		matches, matchErr := verifySSHPair(session, req.ID, req.Revision, req.VerifySSHPublic)
+		if matchErr != nil {
+			session.Lock()
+			os.Stderr.WriteString("item_metadata: ssh pair unavailable\n")
+			quit(4)
+		}
+		out.SSHPairMatches = matches
 	}
 	session.Lock()
 	if err := json.NewEncoder(os.Stdout).Encode(out); err != nil {

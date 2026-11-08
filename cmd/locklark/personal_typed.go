@@ -64,10 +64,10 @@ const (
 	maxTypedAttachmentMIME = 256
 )
 
-// categoryKinds is the add-item category whitelist. SSH keys need raw private
-// key material that this command refuses. Documents are accepted only when at
-// least one explicit private attachment file is requested, because the native
-// document payload is the attachment itself.
+// categoryKinds is the add-item category whitelist. An ssh_key document names
+// exactly one explicit private key file and no inline key material. Documents
+// are accepted only when at least one explicit private attachment file is
+// requested, because the native document payload is the attachment itself.
 var categoryKinds = map[string]vault.ItemCategory{
 	string(vault.CategoryLogin):           vault.CategoryLogin,
 	string(vault.CategoryPassword):        vault.CategoryPassword,
@@ -83,6 +83,7 @@ var categoryKinds = map[string]vault.ItemCategory{
 	string(vault.CategoryMembership):      vault.CategoryMembership,
 	string(vault.CategoryCryptoWallet):    vault.CategoryCryptoWallet,
 	string(vault.CategoryMedicalRecord):   vault.CategoryMedicalRecord,
+	string(vault.CategorySSHKey):          vault.CategorySSHKey,
 	string(vault.CategoryDocument):        vault.CategoryDocument,
 }
 
@@ -124,6 +125,10 @@ type typedPersonalInput struct {
 	// attachment ID, a size/digest or provenance material is not part of the
 	// accepted schema and is refused as an unknown key.
 	Attachments []typedPersonalAttachment `json:"attachments"`
+	// SSHPrivateKeyFile names exactly one explicit private file holding an
+	// unencrypted Ed25519 key. Inline seed/public/private bytes are not part of
+	// the accepted schema and are refused as unknown keys.
+	SSHPrivateKeyFile string `json:"ssh_private_key_file"`
 }
 
 type typedPersonalSection struct {
@@ -155,6 +160,9 @@ type typedAttachmentRequest struct {
 	file     string
 	fileName string
 	mimeType string
+	// sshKey marks the single unresolved private-key file request of an
+	// ssh_key document; it is not an attachment.
+	sshKey bool
 }
 
 // decodeTypedPersonalInput parses one bounded typed item document into the
@@ -338,6 +346,21 @@ func (input typedPersonalInput) toVaultItem() (vault.Item, []typedAttachmentRequ
 	if !ok {
 		return vault.Item{}, nil, errTypedInputRefused
 	}
+	if input.SSHPrivateKeyFile != "" {
+		if category != vault.CategorySSHKey || !validTypedAttachmentPath(input.SSHPrivateKeyFile) {
+			return vault.Item{}, nil, errTypedInputRefused
+		}
+	}
+	if category == vault.CategorySSHKey {
+		// The native ssh_key layout stores only the Ed25519 seed/public pair
+		// and the v2 envelope (sections, tags, urls, favorite). Scalar
+		// credential fields and attachments have no ssh_key slot, so accepting
+		// them here would silently drop user data; they are refused instead.
+		// The explicit key file is the only accepted raw input.
+		if input.SSHPrivateKeyFile == "" || input.Username != "" || input.Password != "" || input.OTP != "" || input.Notes != "" || input.URL != "" || len(input.Attachments) != 0 {
+			return vault.Item{}, nil, errTypedInputRefused
+		}
+	}
 	if category == vault.CategoryDocument {
 		// A v2 document carries its payload in attachments and has no legacy
 		// Filename/Attachment bytes. The native document encoding has no slot
@@ -489,6 +512,9 @@ func (input typedPersonalInput) toVaultItem() (vault.Item, []typedAttachmentRequ
 	}
 	if category == vault.CategoryDocument && len(requests) == 0 {
 		return vault.Item{}, nil, errTypedInputRefused
+	}
+	if category == vault.CategorySSHKey {
+		requests = append(requests, typedAttachmentRequest{file: input.SSHPrivateKeyFile, sshKey: true})
 	}
 	return item, requests, nil
 }
