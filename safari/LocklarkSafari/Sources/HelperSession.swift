@@ -34,7 +34,14 @@ enum HelperLauncher {
         let process = Process()
         process.executableURL = try helperURL()
         process.arguments = fixedArguments
-        process.environment = nil
+        // The child gets only a fixed baseline: no ambient tokens, no DYLD_*
+        // injection, no proxy settings and no LOCKLARK_* overrides. HOME is
+        // the current user's home directory so the Go helper locates the
+        // existing Locklark runtime and config, never a different user's.
+        process.environment = HelperEnvironment.minimal(
+            home: FileManager.default.homeDirectoryForCurrentUser.path,
+            temporaryDirectory: FileManager.default.temporaryDirectory.path
+        )
         return process
     }
 }
