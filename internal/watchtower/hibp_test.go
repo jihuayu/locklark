@@ -207,3 +207,42 @@ func TestLookupCandidatesGroupsPrefixes(t *testing.T) {
 		t.Fatal("lookup error not fixed")
 	}
 }
+
+type cancelingLookup struct {
+	mu     sync.Mutex
+	prefix []string
+	cancel context.CancelFunc
+	result map[string]int
+}
+
+func (c *cancelingLookup) Lookup(_ context.Context, prefix string) (map[string]int, error) {
+	c.mu.Lock()
+	c.prefix = append(c.prefix, prefix)
+	c.mu.Unlock()
+	c.cancel() // deliberately ignores ctx cancellation ordering
+	return c.result, nil
+}
+
+func TestLookupCandidatesContextGuards(t *testing.T) {
+	lookup := &recordingLookup{results: map[string]map[string]int{"AAAAA": {"1": 10}}}
+	candidates := []HIBPCandidate{{ID: "id1", Prefix: "AAAAA", Suffix: "1"}}
+	if _, err := LookupCandidates(nil, lookup, candidates); !errors.Is(err, ErrHIBP) {
+		t.Fatal("nil context accepted")
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := LookupCandidates(canceled, lookup, candidates); !errors.Is(err, ErrHIBP) {
+		t.Fatal("pre-canceled context accepted")
+	}
+	if len(lookup.prefix) != 0 {
+		t.Fatalf("refused context queried: %v", lookup.prefix)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	canceling := &cancelingLookup{cancel: cancel, result: map[string]int{"1": 10}}
+	if _, err := LookupCandidates(ctx, canceling, candidates); !errors.Is(err, ErrHIBP) {
+		t.Fatal("cancellation after prefix returned a result")
+	}
+	if len(canceling.prefix) != 1 || canceling.prefix[0] != "AAAAA" {
+		t.Fatalf("canceling lookup=%v", canceling.prefix)
+	}
+}

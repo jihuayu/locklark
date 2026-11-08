@@ -24,7 +24,7 @@ import (
 	"unicode/utf8"
 )
 
-var personalUsage = errors.New("usage: locklark personal run-cli --file PATH --id ID --revision REV --profile token|gh --name ENV --cwd ABS_DIR --timeout SECONDS [--helper-path ABS_DIR_LIST] -- ABS_PROGRAM [ARG...], or run-env --file PATH --id ID --revision REV --field username|password --name ENV --cwd ABS_DIR --timeout SECONDS -- ABS_PROGRAM [ARG...], or <init|add-login|list|audit|archived-audit|references|health> --file PATH, or add-item --file PATH --input ITEM.json, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password|otp|url|notes (hidden single-line replacement; use native editor for multiline notes), or reveal-login --file PATH --id ID --revision REV --field username|password, or generate-login --file PATH [--length N], or regenerate-password --file PATH --id ID --revision REV [--length N], or otp --file PATH --id ID --revision REV, or reveal-ref|otp-ref --file PATH --ref REF --revision REV, or inspect-1pux --file PATH --source ARCHIVE, or plan-import-1pux --file PATH --source ARCHIVE [--model v2], or import-1pux --file PATH --source ARCHIVE --digest PLAN_DIGEST [--model v2], or export-kdbx --file PATH --out NEW_FILE.kdbx, or archive-login|unarchive-login --file PATH --id ID --revision REV, or list|search --file PATH [--state active|archived|trashed|all], or trash-login|restore-login --file PATH --id ID --revision REV, or match-logins --file PATH --origin HTTPS_ORIGIN --frame-origin HTTPS_ORIGIN, or inject-json --file PATH --id ID --revision REV --field username|password --name PROPERTY --out NEW.json, or github-pull --file PATH --id ID --revision REV --repository-id NUMERIC_ID --owner OWNER --repository NAME --number PR --api-ip PUBLIC_IPV4")
+var personalUsage = errors.New("usage: locklark personal run-cli --file PATH --id ID --revision REV --profile token|gh --name ENV --cwd ABS_DIR --timeout SECONDS [--helper-path ABS_DIR_LIST] -- ABS_PROGRAM [ARG...], or run-env --file PATH --id ID --revision REV --field username|password --name ENV --cwd ABS_DIR --timeout SECONDS -- ABS_PROGRAM [ARG...], or <init|add-login|list|audit|archived-audit|references> --file PATH, or health --file PATH [--hibp true], or add-item --file PATH --input ITEM.json, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password|otp|url|notes (hidden single-line replacement; use native editor for multiline notes), or reveal-login --file PATH --id ID --revision REV --field username|password, or generate-login --file PATH [--length N], or regenerate-password --file PATH --id ID --revision REV [--length N], or otp --file PATH --id ID --revision REV, or reveal-ref|otp-ref --file PATH --ref REF --revision REV, or inspect-1pux --file PATH --source ARCHIVE, or plan-import-1pux --file PATH --source ARCHIVE [--model v2], or import-1pux --file PATH --source ARCHIVE --digest PLAN_DIGEST [--model v2], or export-kdbx --file PATH --out NEW_FILE.kdbx, or archive-login|unarchive-login --file PATH --id ID --revision REV, or list|search --file PATH [--state active|archived|trashed|all], or trash-login|restore-login --file PATH --id ID --revision REV, or match-logins --file PATH --origin HTTPS_ORIGIN --frame-origin HTTPS_ORIGIN, or inject-json --file PATH --id ID --revision REV --field username|password --name PROPERTY --out NEW.json, or github-pull --file PATH --id ID --revision REV --repository-id NUMERIC_ID --owner OWNER --repository NAME --number PR --api-ip PUBLIC_IPV4")
 
 // One terminal mode covers the entire interaction; no prompt or inter-field
 // gap is visible while echo is enabled.
@@ -96,6 +96,7 @@ func confirmIssued(c *console, label, value, prompt string) error {
 	}
 	return nil
 }
+
 // personalImportNotice returns the fixed pre-consent warning for the import
 // profile. The full v2 mapping is opt-in only; both profiles still refuse every
 // unknown or unsupported record as a whole instead of writing partial items.
@@ -150,6 +151,7 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 	var runCLI personal.RunCLIRequest
 	length := password.DefaultPolicy().Length
 	var importV2 bool
+	var hibpOptIn bool
 	switch action {
 	case "run-cli":
 		reveal = personal.RevealTarget{ID: opts["--id"], Revision: opts["--revision"], Field: "password"}
@@ -285,8 +287,16 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 		if len(opts) != 2 || opts["--out"] == "" {
 			return personalUsage
 		}
-	case "init", "add-login", "audit", "archived-audit", "references", "health":
+	case "init", "add-login", "audit", "archived-audit", "references":
 		if len(opts) != 1 {
+			return personalUsage
+		}
+	case "health":
+		// The local HIBP opt-in is a strict literal: no implicit desktop or
+		// environment preference, and no free-form boolean parser.
+		if len(opts) == 2 && opts["--hibp"] == "true" {
+			hibpOptIn = true
+		} else if len(opts) != 1 {
 			return personalUsage
 		}
 	default:
@@ -484,6 +494,10 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 			}
 			response, err = personal.InjectJSON(path, string(pw), key, reveal, opts["--name"], opts["--out"])
 		case "health":
+			if hibpOptIn {
+				response, err = personalHealthHIBP(path, string(pw), key, consoleField, os.Stderr)
+				break
+			}
 			if _, e = fmt.Fprint(os.Stderr, "仅检查当前活动登录的本地规则，不检查归档、回收站或导入来源旧值。\r\n不会联网查询泄露数据；未发现问题不代表密码安全，未保存 TOTP 不代表网站未启用双因素。\r\n"); e != nil {
 				return e
 			}

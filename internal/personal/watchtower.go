@@ -3,6 +3,7 @@ package personal
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 
 	"github.com/jihuayu/locklark/internal/origin"
 	"github.com/jihuayu/locklark/internal/vault"
@@ -122,12 +123,33 @@ func (s *Session) watchtowerKeyLocked() ([]byte, error) {
 	return s.watchtowerKey, nil
 }
 
-// Watchtower runs the authenticated local scan. HIBP is strictly opt-in and is
-// split into three committed phases: local report, intent audit, then a final
-// authenticated report with precomputed ids. No write transaction spans the
-// network request. The local-only path performs exactly one read-only audit
-// transaction and never contacts a network client.
+// ErrWatchtowerContext is the fixed refusal for a nil, canceled or expired
+// check context. It never carries a prefix, provider error, URL or body.
+var ErrWatchtowerContext = errors.New("watchtower network check cancelled")
+
+// Watchtower keeps the original background-context API for the desktop and
+// browser callers. HIBP is strictly opt-in and is split into three committed
+// phases: local report, intent audit, then a final authenticated report with
+// precomputed ids. No write transaction spans the network request. The
+// local-only path performs exactly one read-only audit transaction and never
+// contacts a network client.
 func (s *Session) Watchtower(site string, includeHIBP bool) (watchtower.Report, error) {
+	return s.WatchtowerContext(context.Background(), site, includeHIBP)
+}
+
+// WatchtowerContext is Watchtower with a caller-owned cancellation bound. A nil
+// or already-canceled context is refused before any transaction or network
+// reach. The same context bounds every prefix lookup and is checked before the
+// intent audit, before the first outbound request, and after the lookup so a
+// canceled check can never produce a checked-clean final report. The existing
+// fully authenticated local/intent/final transactions are retained.
+func (s *Session) WatchtowerContext(ctx context.Context, site string, includeHIBP bool) (watchtower.Report, error) {
+	if s == nil {
+		return watchtower.Report{}, ErrSessionLocked
+	}
+	if ctx == nil || ctx.Err() != nil {
+		return watchtower.Report{}, ErrWatchtowerContext
+	}
 	if !validWatchtowerOrigin(site) {
 		return watchtower.Report{}, invalid
 	}
@@ -149,18 +171,33 @@ func (s *Session) Watchtower(site string, includeHIBP bool) (watchtower.Report, 
 	if !includeHIBP {
 		return local.watchtowerReport, nil
 	}
+	if ctx.Err() != nil {
+		return watchtower.Report{}, ErrWatchtowerContext
+	}
 	if _, err = s.executeActive(hibpAction, vault.Item{}, nil, commandOption{
 		hibp: &hibpRequest{intent: true},
 	}, false); err != nil {
 		return watchtower.Report{}, err
 	}
+	// The intent audit is committed before the first outbound request.
+	if ctx.Err() != nil {
+		return watchtower.Report{}, ErrWatchtowerContext
+	}
 	var results map[string]int
 	checked := false
 	if s.hibp != nil {
-		if got, lookupErr := watchtower.LookupCandidates(context.Background(), s.hibp, local.hibpCandidates); lookupErr == nil {
+		if got, lookupErr := watchtower.LookupCandidates(ctx, s.hibp, local.hibpCandidates); lookupErr == nil {
 			results = got
 			checked = got != nil
 		}
+	}
+	// A lock request or a canceled/deadline-expired context after the network
+	// phase must not commit a late checked-clean final report.
+	if ctx.Err() != nil {
+		return watchtower.Report{}, ErrWatchtowerContext
+	}
+	if s.lockRequested.Load() {
+		return watchtower.Report{}, ErrSessionLocked
 	}
 	final, err := s.executeActive(hibpAction, vault.Item{}, nil, commandOption{
 		hibp: &hibpRequest{origin: site, key: key, results: results, checked: checked},
