@@ -73,7 +73,16 @@ Safari extension runtime and the fixed native host. It is never listed in
 
 - The Safari extension handler reads `SFExtensionMessageKey` and, when
   available, `SFExtensionProfileKey`; it validates the envelope before
-  forwarding and never logs raw requests or errors.
+  forwarding and never logs raw requests or errors. Apple's example on the
+  page linked above passes `SFExtensionProfileKey` as a `UUID`, not a string,
+  so the value is decoded by `TrustedSafariProfile.identifier`: `nil` stays
+  `nil` (key absent, or macOS 13 where the key does not exist), a `UUID`
+  becomes its lowercase canonical `uuidString`, and any other present type
+  (`String`, `NSNull`, a number) cancels the request with the fixed
+  `RelayError.unavailable` before the relay runs. A wrong type is never
+  downgraded to `nil`, so a profiled session cannot be reached as an
+  unprofiled one. The profile is still never taken from JavaScript, and the
+  exact Optional profile check in `SessionProfileTable` is unchanged.
 - Two envelope parsers exist. The browser/JS parser accepts only
   `v`/`op`/`token`(/`frame`) and **refuses any `profile` field**, so page
   content can never choose or spoof a profile. The trusted parser for the

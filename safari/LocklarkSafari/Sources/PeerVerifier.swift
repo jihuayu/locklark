@@ -49,21 +49,29 @@ enum PeerVerifier {
                 [],
                 &requirement
             ) == errSecSuccess, let requirement {
+                // Dynamic validation of the running guest stays the gate.
                 signatureValid = SecCodeCheckValidity(code, [], requirement) ==
                     errSecSuccess
             }
         }
         var teamID: String?
         var bundleID: String?
-        var signingInfo: CFDictionary?
-        if SecCodeCopySigningInformation(
-            code,
-            SecCSFlags(rawValue: kSecCSSigningInformation),
-            &signingInfo
-        ) == errSecSuccess,
-           let info = signingInfo as? [String: Any] {
-            teamID = info[kSecCodeInfoTeamIdentifier as String] as? String
-            bundleID = info[kSecCodeInfoIdentifier as String] as? String
+        // SecCodeCopySigningInformation needs the static code, not the live
+        // SecCode. Derive the static code from the same guest; if that fails
+        // both IDs stay nil and PeerPolicy refuses the peer.
+        var staticCode: SecStaticCode?
+        if SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess,
+           let staticCode {
+            var signingInfo: CFDictionary?
+            if SecCodeCopySigningInformation(
+                staticCode,
+                SecCSFlags(rawValue: kSecCSSigningInformation),
+                &signingInfo
+            ) == errSecSuccess,
+               let info = signingInfo as? [String: Any] {
+                teamID = info[kSecCodeInfoTeamIdentifier as String] as? String
+                bundleID = info[kSecCodeInfoIdentifier as String] as? String
+            }
         }
         return PeerCredentials(
             pid: peer.pid,

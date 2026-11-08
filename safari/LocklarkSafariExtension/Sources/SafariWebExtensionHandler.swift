@@ -13,7 +13,19 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
         // JS-supplied profile is ever substituted.
         let profileKey: String?
         if #available(macOS 14.0, *) {
-            profileKey = item?.userInfo?[SFExtensionProfileKey] as? String
+            do {
+                // Apple's example supplies the profile as a UUID; the shared
+                // helper canonicalises it and refuses any other present type.
+                profileKey = try TrustedSafariProfile.identifier(
+                    item?.userInfo?[SFExtensionProfileKey]
+                )
+            } catch {
+                // A present but mistyped profile is a mistake, never "no
+                // profile": cancel before the relay sees the request so a
+                // profiled session cannot be reached as an unprofiled one.
+                context.cancelRequest(withError: RelayError.unavailable)
+                return
+            }
         } else {
             profileKey = nil
         }
