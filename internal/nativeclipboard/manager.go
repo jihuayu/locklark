@@ -77,19 +77,20 @@ func (j *copyJob) cancel() {
 // write, and one current lease. Native callbacks run only through dispatch.
 // dispatch must return false only when it has not executed/enqueued its work.
 type Manager struct {
-	mu         sync.Mutex
-	dispatch   func(func()) bool
-	write      func([]byte) (*Lease, error)
-	clearOwned func(*Lease) Result
-	closed     bool
-	offer      *copyOffer
-	job        *copyJob
-	lease      *Lease
-	leaseTimer *time.Timer
-	sequence   uint64
-	pending    *Lease
-	retryTimer *time.Timer
-	cleanupSeq uint64
+	mu           sync.Mutex
+	dispatch     func(func()) bool
+	write        func([]byte) (*Lease, error)
+	writeContext func([]byte, time.Time, func() bool) (*Lease, error)
+	clearOwned   func(*Lease) Result
+	closed       bool
+	offer        *copyOffer
+	job          *copyJob
+	lease        *Lease
+	leaseTimer   *time.Timer
+	sequence     uint64
+	pending      *Lease
+	retryTimer   *time.Timer
+	cleanupSeq   uint64
 }
 
 func (*Manager) String() string               { return "[clipboard manager]" }
@@ -104,6 +105,20 @@ func NewManager(dispatch func(func()) bool, write func([]byte) (*Lease, error), 
 		clearOwned = ClearOwned
 	}
 	return &Manager{dispatch: dispatch, write: write, clearOwned: clearOwned}
+}
+
+// NewManagerWithWriter builds a manager whose native acquisition receives the
+// offer's clear deadline and a non-blocking authority check. The writer must
+// call valid synchronously; valid must not reenter the Manager while it is
+// otherwise holding Manager.mu. run calls it without holding that lock.
+func NewManagerWithWriter(dispatch func(func()) bool, write func([]byte, time.Time, func() bool) (*Lease, error), clearOwned func(*Lease) Result) *Manager {
+	if write == nil {
+		write = func(value []byte, _ time.Time, _ func() bool) (*Lease, error) { return Write(value) }
+	}
+	if clearOwned == nil {
+		clearOwned = ClearOwned
+	}
+	return &Manager{dispatch: dispatch, writeContext: write, clearOwned: clearOwned}
 }
 
 // Prepare copies a value without acquiring the OS clipboard. valid must be a
@@ -235,7 +250,13 @@ func (m *Manager) run(j *copyJob) {
 		j.finish(Refused)
 		return
 	}
-	lease, err := m.write(j.offer.value)
+	var lease *Lease
+	var err error
+	if m.writeContext != nil {
+		lease, err = m.writeContext(j.offer.value, j.offer.clearUntil, func() bool { return m.live(j) })
+	} else {
+		lease, err = m.write(j.offer.value)
+	}
 	clear(j.offer.value)
 	j.offer.value = nil
 	if err != nil || lease == nil || !m.live(j) {

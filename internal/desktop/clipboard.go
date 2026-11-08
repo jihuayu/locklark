@@ -102,8 +102,17 @@ func (a *App) recordClipboardOwner(lease *nativeclipboard.Lease, until time.Time
 }
 
 func (a *App) writeClipboard(value []byte, until time.Time, valid func() bool) error {
+	_, err := a.writeClipboardOwned(value, until, valid)
+	return err
+}
+
+// writeClipboardOwned has the same control flow and cleanup as writeClipboard
+// but returns the exact new native lease, including on a partial failure. That
+// lease carries only owned cleanup authority; callers must never retry a write
+// whose error says the outcome is unknown.
+func (a *App) writeClipboardOwned(value []byte, until time.Time, valid func() bool) (*nativeclipboard.Lease, error) {
 	if a.clipboardWrite == nil || !valid() || !time.Now().Before(until) {
-		return personal.ErrDesktopDelivery
+		return nil, personal.ErrDesktopDelivery
 	}
 	sequence := a.clipboardSequence
 	old := a.clipboardLease
@@ -121,9 +130,9 @@ func (a *App) writeClipboard(value []byte, until time.Time, valid func() bool) e
 			a.cleanupClipboard(old)
 		}
 		if sequence != a.clipboardSequence || !valid() {
-			return errClipboardSuperseded
+			return lease, errClipboardSuperseded
 		}
-		return personal.ErrDesktopDelivery
+		return lease, personal.ErrDesktopDelivery
 	}
 	if lease == nil {
 		a.detachClipboard()
@@ -131,9 +140,9 @@ func (a *App) writeClipboard(value []byte, until time.Time, valid func() bool) e
 			a.cleanupClipboard(old)
 		}
 		if err != nil {
-			return err
+			return nil, err
 		}
-		return nativeclipboard.ErrWrite
+		return nil, nativeclipboard.ErrWrite
 	}
 	a.detachClipboard()
 	a.recordClipboardOwner(lease, until)
@@ -141,7 +150,69 @@ func (a *App) writeClipboard(value []byte, until time.Time, valid func() bool) e
 		// A partial native write retains only cleanup authority. Never keep the
 		// input or retry its write, and never report this as a confirmed copy.
 		a.clearClipboard()
-		return nativeclipboard.ErrWrite
+		return lease, nativeclipboard.ErrWrite
 	}
-	return nil
+	return lease, nil
+}
+
+// newBrowserClipboardManager builds one two-phase manager for a browser
+// connection. Native work is dispatched through the existing App dispatch
+// surface; accepted work is executed or enqueued, so true is truthful for the
+// Manager's dispatch contract. The shared App lease remains the single owner of
+// actual OS clipboard state.
+func (a *App) newBrowserClipboardManager() *nativeclipboard.Manager {
+	return nativeclipboard.NewManagerWithWriter(a.dispatchClipboard, a.writeClipboardContext, a.clearBrowserClipboardLease)
+}
+
+// dispatchClipboard reports false only when the App has no dispatch surface.
+// The existing dispatch contract executes or enqueues every accepted callback.
+func (a *App) dispatchClipboard(fn func()) bool {
+	if a.dispatch == nil || fn == nil {
+		return false
+	}
+	a.dispatch(fn)
+	return true
+}
+
+// writeClipboardContext translates the Manager's zero clear deadline into the
+// existing no-auto-clear representation. A non-zero deadline bounds the App
+// lease exactly as the Manager's offer does.
+func (a *App) writeClipboardContext(value []byte, clearUntil time.Time, valid func() bool) (*nativeclipboard.Lease, error) {
+	until := clearUntil
+	if until.IsZero() {
+		until = clipboardDeadline(0)
+	}
+	return a.writeClipboardOwned(value, until, valid)
+}
+
+// clearBrowserClipboardLease clears only the matching native owner and updates
+// App lease state only when this lease is still the current App owner. It never
+// clears a newer App copy or a foreign OS owner.
+func (a *App) clearBrowserClipboardLease(lease *nativeclipboard.Lease) nativeclipboard.Result {
+	if lease == nil {
+		return nativeclipboard.Superseded
+	}
+	result := nativeclipboard.Unavailable
+	if a.clipboardClear != nil {
+		result = a.clipboardClear(lease)
+	} else {
+		result = nativeclipboard.ClearOwned(lease)
+	}
+	if result == nativeclipboard.Unavailable {
+		return result
+	}
+	if a.clipboardLease == lease {
+		a.detachClipboard()
+	}
+	if a.clipboardPending == lease {
+		a.clipboardPending = nil
+	}
+	if a.clipboardPending == nil {
+		a.clipboardWarning = false
+		if a.clipboardRetry != nil {
+			a.clipboardRetry.Stop()
+			a.clipboardRetry = nil
+		}
+	}
+	return result
 }
