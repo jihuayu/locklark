@@ -18,7 +18,7 @@ final class AppGroupSocketClient {
         do {
             try SocketSupport.disableSigPipe(fd: fd)
         } catch {
-            close(fd)
+            Darwin.close(fd)
             throw RelayError.unavailable
         }
         var address = sockaddr_un()
@@ -26,7 +26,7 @@ final class AppGroupSocketClient {
         let pathBytes = Array(socketURL.path.utf8)
         let capacity = MemoryLayout.size(ofValue: address.sun_path)
         guard pathBytes.count + 1 <= capacity else {
-            close(fd)
+            Darwin.close(fd)
             throw RelayError.invalidConfiguration
         }
         withUnsafeMutableBytes(of: &address.sun_path) { raw in
@@ -39,7 +39,7 @@ final class AppGroupSocketClient {
             }
         }
         guard result == 0 else {
-            close(fd)
+            Darwin.close(fd)
             throw RelayError.unavailable
         }
         SocketSupport.applyTimeouts(fd: fd, seconds: RelayLimits.socketTimeout)

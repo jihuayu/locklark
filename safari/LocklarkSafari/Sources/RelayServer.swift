@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 /// App-owned Unix-domain socket listener. The listener exists only in the
 /// signed app-group container; each accepted peer is signature- and
