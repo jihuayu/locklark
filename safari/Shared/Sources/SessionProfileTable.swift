@@ -34,6 +34,13 @@ public struct SessionProfileTable<Session> {
         return entry.session
     }
 
+    /// True when *some* binding exists for the token. This answers "is this
+    /// token already taken?" only; it never resolves or reveals a session, so
+    /// it cannot be used to reach one with the wrong profile.
+    public func contains(token: String) -> Bool {
+        entries[token] != nil
+    }
+
     /// Stores the binding and returns a displaced session for the same token,
     /// if any, so the caller can close it.
     public mutating func bind(

@@ -48,7 +48,11 @@ type copyJob struct {
 	done      chan Outcome
 	finished  chan struct{}
 	once      sync.Once
-	timer     *time.Timer
+	timer     atomic.Pointer[time.Timer]
+	// onQueuedCancel releases the manager slot when cancellation wins before
+	// the dispatched run acquires the buffer. It is set before the deadline
+	// timer is armed so the timer can never observe a nil callback.
+	onQueuedCancel func(*copyJob)
 }
 
 func (j *copyJob) finish(result Outcome) {
@@ -63,13 +67,22 @@ func (j *copyJob) finish(result Outcome) {
 func (j *copyJob) cancel() {
 	j.state.CompareAndSwap(0, 2)
 	j.cancelled.Store(true)
+	wiped := false
 	if j.valueMu.TryLock() {
 		clear(j.offer.value)
 		j.offer.value = nil
-		if j.state.Load() == 2 {
-			j.finish(Refused)
-		}
+		wiped = true
 		j.valueMu.Unlock()
+	}
+	// The release runs after valueMu is unlocked so it never nests the buffer
+	// lock under m.mu. A failed TryLock means a dispatched run owns the buffer
+	// (or its write is in flight); that run keeps the slot occupied and its
+	// deferred release finishes the job, so state 1 never releases early.
+	if wiped && j.state.Load() == 2 {
+		if j.onQueuedCancel != nil {
+			j.onQueuedCancel(j)
+		}
+		j.finish(Refused)
 	}
 }
 
@@ -85,6 +98,7 @@ type Manager struct {
 	closed       bool
 	offer        *copyOffer
 	job          *copyJob
+	runner       bool // one queued/running UI callback, reused after queued cancellation
 	lease        *Lease
 	leaseTimer   *time.Timer
 	sequence     uint64
@@ -196,9 +210,13 @@ func (m *Manager) Commit(ctx context.Context, ticket string) <-chan Outcome {
 	}
 	m.offer = nil
 	o.timer.Stop()
-	j := &copyJob{offer: o, ctx: ctx, done: done, finished: make(chan struct{})}
+	j := &copyJob{offer: o, ctx: ctx, done: done, finished: make(chan struct{}), onQueuedCancel: m.releaseJob}
 	m.job = j
-	j.timer = time.AfterFunc(time.Until(o.deadline()), j.cancel)
+	queueRunner := !m.runner
+	if queueRunner {
+		m.runner = true
+	}
+	j.timer.Store(time.AfterFunc(time.Until(o.deadline()), j.cancel))
 	m.mu.Unlock()
 	go func() {
 		select {
@@ -207,11 +225,35 @@ func (m *Manager) Commit(ctx context.Context, ticket string) <-chan Outcome {
 		case <-j.finished:
 		}
 	}()
-	if !m.dispatch(func() { m.run(j) }) {
-		j.cancel()
-		m.releaseJob(j)
+	if queueRunner && !m.dispatch(m.drain) {
+		// No callback was queued. A cancellation may already have replaced the
+		// original job; refuse whichever job was relying on this runner.
+		m.mu.Lock()
+		m.runner = false
+		waiting := m.job
+		m.mu.Unlock()
+		if waiting != nil {
+			waiting.cancel()
+		}
 	}
 	return done
+}
+
+// drain captures no job or secret in the UI queue. A cancelled queued job can
+// release its slot while the one existing callback stays queued; a later,
+// explicitly committed job reuses that callback instead of growing the queue.
+func (m *Manager) drain() {
+	for {
+		m.mu.Lock()
+		j := m.job
+		if j == nil {
+			m.runner = false
+			m.mu.Unlock()
+			return
+		}
+		m.mu.Unlock()
+		m.run(j)
+	}
 }
 
 func (m *Manager) currentJob(j *copyJob) bool {
@@ -227,7 +269,9 @@ func (m *Manager) live(j *copyJob) bool {
 }
 
 func (m *Manager) releaseJob(j *copyJob) {
-	j.timer.Stop()
+	if timer := j.timer.Load(); timer != nil {
+		timer.Stop()
+	}
 	m.mu.Lock()
 	if m.job == j {
 		m.job = nil
@@ -236,20 +280,23 @@ func (m *Manager) releaseJob(j *copyJob) {
 }
 
 func (m *Manager) run(j *copyJob) {
+	outcome := Refused
+	// Publish only after the buffer and manager slot have been released, so a
+	// consumer of the receipt can immediately prepare its next explicit copy.
+	defer func() { j.finish(outcome) }()
 	j.valueMu.Lock()
 	defer j.valueMu.Unlock()
 	defer m.releaseJob(j)
 	defer func() { clear(j.offer.value); j.offer.value = nil }()
 	if !m.live(j) {
-		j.finish(Refused)
 		return
 	}
 	// This one-shot decision is the cancellation/write linearization point.
 	// Cancellation that wins first cannot be followed by a native acquisition.
 	if !j.state.CompareAndSwap(0, 1) {
-		j.finish(Refused)
 		return
 	}
+	outcome = Unknown
 	var lease *Lease
 	var err error
 	if m.writeContext != nil {
@@ -264,14 +311,12 @@ func (m *Manager) run(j *copyJob) {
 			m.detachSuperseded(j)
 		}
 		m.cleanup(lease)
-		j.finish(Unknown)
 		return
 	}
 	m.mu.Lock()
 	if m.closed || m.job != j {
 		m.mu.Unlock()
 		m.cleanup(lease)
-		j.finish(Unknown)
 		return
 	}
 	old := m.lease
@@ -296,10 +341,9 @@ func (m *Manager) run(j *copyJob) {
 	m.cleanup(old)
 	if !m.live(j) {
 		m.expire(lease, sequence)
-		j.finish(Unknown)
 		return
 	}
-	j.finish(Confirmed)
+	outcome = Confirmed
 }
 
 // detachSuperseded releases the previous logical lease after a new native

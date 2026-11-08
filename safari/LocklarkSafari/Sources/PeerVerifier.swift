@@ -4,39 +4,34 @@ import Security
 import Darwin
 #endif
 
-/// Production peer check. The UID is pinned to the current user, but UID alone
-/// is never accepted: SecCode must validate a fixed requirement naming the
-/// configured Team ID and the exact Safari web extension bundle identifier.
+/// Production peer check. The kernel UID is pinned to the current user, but UID
+/// alone is never accepted: SecCode must validate a fixed requirement naming
+/// the configured Team ID and the exact Safari web extension bundle identifier.
+///
+/// The guest is always looked up from the kernel *audit token* of the connected
+/// socket (`kSecGuestAttributeAudit`), never from a numeric PID. A PID can be
+/// re-resolved to a different process between the check and the lookup (the
+/// PID-reuse TOCTOU), while the audit token names one process instance: it
+/// carries the pidversion that the kernel bumps on every reuse.
 enum PeerVerifier {
     static func credentials(
         fd: Int32,
         identity: ConfiguredIdentity
     ) -> PeerCredentials? {
-        guard let peer = SocketSupport.peerProcess(fd: fd) else { return nil }
-        let currentUID = UInt32(getuid())
-        guard peer.uid == currentUID else {
-            return PeerCredentials(
-                pid: peer.pid,
-                uid: peer.uid,
-                teamID: nil,
-                bundleID: nil,
-                signatureValid: false
-            )
+        guard let peer = SocketSupport.peerAuditToken(fd: fd) else { return nil }
+        guard peer.uid == UInt32(getuid()) else {
+            return rejected(peer)
         }
         var code: SecCode?
+        // Opaque audit token only: no numeric PID fallback exists, so the
+        // SecCode lookup cannot be steered to another process.
         let attributes = [
-            kSecGuestAttributePid as String: NSNumber(value: peer.pid)
+            kSecGuestAttributeAudit as String: peer.token
         ] as CFDictionary
         guard SecCodeCopyGuestWithAttributes(nil, attributes, [], &code) == errSecSuccess,
               let code
         else {
-            return PeerCredentials(
-                pid: peer.pid,
-                uid: peer.uid,
-                teamID: nil,
-                bundleID: nil,
-                signatureValid: false
-            )
+            return rejected(peer)
         }
         var signatureValid = false
         if let requirementText = PeerPolicy.signingRequirement(
@@ -91,6 +86,18 @@ enum PeerVerifier {
             expectedUID: UInt32(getuid()),
             expectedTeamID: identity.teamID,
             expectedExtensionBundleID: identity.extensionBundleID
+        )
+    }
+
+    private static func rejected(
+        _ peer: SocketSupport.PeerAuditToken
+    ) -> PeerCredentials {
+        PeerCredentials(
+            pid: peer.pid,
+            uid: peer.uid,
+            teamID: nil,
+            bundleID: nil,
+            signatureValid: false
         )
     }
 }

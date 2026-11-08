@@ -4,10 +4,16 @@ import Darwin
 /// App-owned Unix-domain socket listener. The listener exists only in the
 /// signed app-group container; each accepted peer is signature- and
 /// bundle-verified before a single framed request is read.
+///
+/// Lifecycle: every `start()` installs a brand-new `SessionStore` under a new
+/// epoch through `stores`, and every accepted connection captures that
+/// store/epoch once. A connection accepted before a stop/start cycle is served
+/// by - and only by - the captured (already closed) store; it can never bind a
+/// helper against the store of a later generation.
 final class RelayServer {
     private let identity: ConfiguredIdentity
     private let container: URL
-    private let sessions: SessionStore
+    private let stores: StoreEpochTable<SessionStore>
     private let stateLock = NSLock()
     private let acceptQueue = DispatchQueue(
         label: "org.locklark.browser.safari.relay.accept",
@@ -31,7 +37,9 @@ final class RelayServer {
         self.container = try PathPolicy.appGroupContainer(
             appGroupID: identity.appGroupID
         )
-        self.sessions = SessionStore(identity: identity)
+        // Never used before the first successful start; it only establishes the
+        // epoch table. Each start installs a fresh store.
+        self.stores = StoreEpochTable(SessionStore(identity: identity))
     }
 
     func start() throws {
@@ -56,6 +64,13 @@ final class RelayServer {
         let fd = try SocketSupport.createListener(path: socketURL.path)
         listenFD = fd
         socketPath = socketURL.path
+
+        // A new generation for every start: the previous store (if any) is
+        // already closed, and no lease captured against it can become current
+        // again.
+        let store = SessionStore(identity: identity)
+        _ = stores.replace(with: store)
+
         let readSource = DispatchSource.makeReadSource(
             fileDescriptor: fd,
             queue: acceptQueue
@@ -68,13 +83,15 @@ final class RelayServer {
         }
         readSource.resume()
         source = readSource
-        let timer = DispatchSource.makeTimerSource(queue: maintenanceQueue)
-        timer.schedule(deadline: .now() + 60, repeating: 60)
-        timer.setEventHandler { [weak self] in
-            self?.sessions.sweepExpired()
+
+        let maintenance = DispatchSource.makeTimerSource(queue: maintenanceQueue)
+        maintenance.schedule(deadline: .now() + 60, repeating: 60)
+        // Bound to the store of *this* generation, never to a later one.
+        maintenance.setEventHandler {
+            store.sweepExpired()
         }
-        timer.resume()
-        self.timer = timer
+        maintenance.resume()
+        timer = maintenance
         running = true
         onStatusChange?("Safari relay listening")
     }
@@ -93,30 +110,47 @@ final class RelayServer {
         self.timer = nil
         socketPath = nil
         listenFD = -1
-        stateLock.unlock()
-        source?.cancel()
-        timer?.cancel()
-        sessions.closeAll()
+        // Unlink under the lock so a concurrent start cannot rebind this path
+        // only to have it removed here.
         if let path {
             _ = unlink(path)
         }
+        let lease = stores.capture()
+        stateLock.unlock()
+        source?.cancel()
+        timer?.cancel()
+        // Revokes every pending reservation and ready session and closes the
+        // store permanently: a worker accepted before this stop can never open
+        // a helper afterwards.
+        lease.store.closeAll()
         onStatusChange?("Safari relay stopped")
     }
 
-    private func isRunning() -> Bool {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        return running
-    }
-
     private func acceptPending() {
-        while isRunning() {
-            let client = accept(listenFD, nil, nil)
+        while true {
+            // Snapshot the listener *and* its store generation under one
+            // lock, before accept: the connection accepted next belongs to
+            // this listener generation, never to a store installed later.
+            stateLock.lock()
+            let listenerRunning = running
+            let listenerFD = listenFD
+            let lease = stores.capture()
+            stateLock.unlock()
+            guard listenerRunning, listenerFD >= 0 else { return }
+            let client = accept(listenerFD, nil, nil)
             if client < 0 { return }
             stateLock.lock()
-            let allowed = activeConnections < RelayLimits.maxConnections
+            let stillRunning = running &&
+                listenFD == listenerFD &&
+                stores.isCurrent(lease.epoch)
+            let allowed = stillRunning &&
+                activeConnections < RelayLimits.maxConnections
             if allowed { activeConnections += 1 }
             stateLock.unlock()
+            guard stillRunning else {
+                close(client)
+                return
+            }
             guard allowed else {
                 close(client)
                 continue
@@ -130,13 +164,18 @@ final class RelayServer {
                 stateLock.unlock()
                 continue
             }
+            // Serve with the lease captured before accept, so this peer is
+            // bound to the listener generation it actually connected to.
             Thread.detachNewThread { [weak self] in
-                self?.serve(client: client)
+                self?.serve(client: client, lease: lease)
             }
         }
     }
 
-    private func serve(client: Int32) {
+    private func serve(
+        client: Int32,
+        lease: StoreEpochTable<SessionStore>.Lease
+    ) {
         defer {
             close(client)
             stateLock.lock()
@@ -150,7 +189,7 @@ final class RelayServer {
         guard PeerVerifier.accepts(fd: client, identity: identity) else {
             return
         }
-        while isRunning() {
+        while stores.isCurrent(lease.epoch) {
             do {
                 let raw = try SocketSupport.readFrame(fd: client)
                 // Trusted hop: the peer was SecCode/Team/bundle/UID verified
@@ -163,7 +202,7 @@ final class RelayServer {
                     )
                     return
                 }
-                let reply = sessions.handle(request)
+                let reply = lease.store.handle(request)
                 try SocketSupport.writeFrame(fd: client, object: reply)
                 if request.operation == .close { return }
             } catch {

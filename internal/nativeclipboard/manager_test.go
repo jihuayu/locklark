@@ -448,8 +448,8 @@ func TestManagerQueuedContextCancelRefusesWithoutWrite(t *testing.T) {
 	if outcome := waitOutcome(t, done); outcome != Refused {
 		t.Fatalf("queued context cancel = %v, want Refused", outcome)
 	}
-	if _, err := m.Prepare([]byte("second canary"), time.Now().Add(10*time.Second), time.Time{}, func() bool { return true }); err == nil {
-		t.Fatal("slot was reusable before the queued callback drained")
+	if _, err := m.Prepare([]byte("second canary"), time.Now().Add(10*time.Second), time.Time{}, func() bool { return true }); err != nil {
+		t.Fatalf("cancelled queued job kept the slot: %v", err)
 	}
 	if ran := queue.drain(); ran != 1 {
 		t.Fatalf("drained callbacks = %d, want 1", ran)
@@ -784,5 +784,185 @@ func TestManagerZeroClearUntilArmsNoNativeClear(t *testing.T) {
 	queue.drain()
 	if _, current, cleared, _ := owner.state(); current != nil || cleared != 1 {
 		t.Fatalf("explicit clear left owner = %v cleared = %d", current, cleared)
+	}
+}
+
+// stalledQueue accepts dispatch work but never runs it until the test takes a
+// specific callback, modelling a UI queue that can stall indefinitely.
+type stalledQueue struct {
+	mu sync.Mutex
+	q  []func()
+}
+
+func (s *stalledQueue) dispatch(fn func()) bool {
+	s.mu.Lock()
+	s.q = append(s.q, fn)
+	s.mu.Unlock()
+	return true
+}
+
+func (s *stalledQueue) take(index int) func() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if index < 0 || index >= len(s.q) {
+		return nil
+	}
+	fn := s.q[index]
+	s.q = append(s.q[:index:index], s.q[index+1:]...)
+	return fn
+}
+
+func (s *stalledQueue) size() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.q)
+}
+
+// A queued commit whose deadline wins must report Refused, wipe the buffer and
+// free the slot even though the stalled UI callback never ran.
+func TestManagerQueuedDeadlineReleasesSlotWithoutDrain(t *testing.T) {
+	queue, owner := &stalledQueue{}, &fakeOwner{}
+	m := NewManager(queue.dispatch, owner.write, owner.clear)
+	defer m.Close()
+	ticket, err := m.Prepare([]byte("deadline canary"), time.Now().Add(120*time.Millisecond), time.Time{}, func() bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	buffer := m.offer.value
+	m.mu.Unlock()
+	done := m.Commit(context.Background(), ticket)
+	if outcome := waitOutcome(t, done); outcome != Refused {
+		t.Fatalf("queued deadline = %v, want Refused", outcome)
+	}
+	for i, b := range buffer {
+		if b != 0 {
+			t.Fatalf("deadline buffer byte %d was not cleared", i)
+		}
+	}
+	m.mu.Lock()
+	leaked := m.job
+	m.mu.Unlock()
+	if leaked != nil {
+		t.Fatal("queued job stayed occupied after its deadline")
+	}
+	if queue.size() != 1 {
+		t.Fatalf("stalled callbacks = %d, want 1", queue.size())
+	}
+	if _, err := m.Prepare([]byte("next canary"), time.Now().Add(10*time.Second), time.Time{}, func() bool { return true }); err != nil {
+		t.Fatalf("prepare refused after queued deadline: %v", err)
+	}
+	if writes, _, _, _ := owner.state(); writes != 0 {
+		t.Fatalf("deadline wrote %d times", writes)
+	}
+}
+
+// A cancelled job leaves one payload-free UI runner. Later explicit commits
+// reuse that runner, so a stalled UI cannot accumulate one callback per cancel.
+func TestManagerQueuedRunnerCoalescesAfterCancellation(t *testing.T) {
+	queue, owner := &stalledQueue{}, &fakeOwner{}
+	m := NewManager(queue.dispatch, owner.write, owner.clear)
+	defer m.Close()
+	for i := 0; i < 100; i++ {
+		ticket, err := m.Prepare([]byte("cancelled secret"), time.Now().Add(10*time.Second), time.Time{}, func() bool { return true })
+		if err != nil {
+			t.Fatalf("prepare %d: %v", i, err)
+		}
+		done := m.Commit(context.Background(), ticket)
+		m.CancelOffer(ticket)
+		if outcome := waitOutcome(t, done); outcome != Refused {
+			t.Fatalf("cancel %d: %v", i, outcome)
+		}
+		if queue.size() != 1 {
+			t.Fatalf("cancel %d queued %d runners", i, queue.size())
+		}
+	}
+	ticket, err := m.Prepare([]byte("new secret"), time.Now().Add(10*time.Second), time.Time{}, func() bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := m.Commit(context.Background(), ticket)
+	if queue.size() != 1 {
+		t.Fatalf("new commit queued %d runners", queue.size())
+	}
+	runner := queue.take(0)
+	if runner == nil {
+		t.Fatal("runner missing")
+	}
+	runner()
+	if outcome := waitOutcome(t, done); outcome != Confirmed {
+		t.Fatalf("new commit: %v", outcome)
+	}
+	writes, lease, _, written := owner.state()
+	if writes != 1 || lease == nil || string(written) != "new secret" {
+		t.Fatal("runner wrote a cancelled payload or lost the new commit")
+	}
+	if _, err := m.Prepare([]byte("third canary"), time.Now().Add(10*time.Second), time.Time{}, func() bool { return true }); err != nil {
+		t.Fatalf("slot stayed busy: %v", err)
+	}
+}
+
+// An explicit CancelOffer for a queued (never drained) commit must free the slot
+// immediately and keep the abandoned callback from writing.
+func TestManagerCancelOfferQueuedReleasesSlot(t *testing.T) {
+	queue, owner := &stalledQueue{}, &fakeOwner{}
+	m := NewManager(queue.dispatch, owner.write, owner.clear)
+	defer m.Close()
+	ticket, err := m.Prepare([]byte("cancel canary"), time.Now().Add(10*time.Second), time.Time{}, func() bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := m.Commit(context.Background(), ticket)
+	m.CancelOffer(ticket)
+	if outcome := waitOutcome(t, done); outcome != Refused {
+		t.Fatalf("cancel offer = %v, want Refused", outcome)
+	}
+	m.mu.Lock()
+	busy := m.job
+	m.mu.Unlock()
+	if busy != nil {
+		t.Fatal("cancel offer left the queued job occupied")
+	}
+	if _, err := m.Prepare([]byte("after cancel offer"), time.Now().Add(10*time.Second), time.Time{}, func() bool { return true }); err != nil {
+		t.Fatalf("prepare refused after cancel offer: %v", err)
+	}
+	if late := queue.take(0); late != nil {
+		late()
+	}
+	if writes, _, _, _ := owner.state(); writes != 0 {
+		t.Fatalf("cancelled queued commit wrote %d times", writes)
+	}
+}
+
+// Cancelling the commit context while the work is still queued releases the
+// slot without waiting for the stalled UI callback.
+func TestManagerQueuedContextCancelReleasesSlot(t *testing.T) {
+	queue, owner := &stalledQueue{}, &fakeOwner{}
+	m := NewManager(queue.dispatch, owner.write, owner.clear)
+	defer m.Close()
+	ticket, err := m.Prepare([]byte("context canary"), time.Now().Add(10*time.Second), time.Time{}, func() bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := m.Commit(ctx, ticket)
+	cancel()
+	if outcome := waitOutcome(t, done); outcome != Refused {
+		t.Fatalf("context cancel = %v, want Refused", outcome)
+	}
+	m.mu.Lock()
+	busy := m.job
+	m.mu.Unlock()
+	if busy != nil {
+		t.Fatal("context cancel left the queued job occupied")
+	}
+	if _, err := m.Prepare([]byte("after context cancel"), time.Now().Add(10*time.Second), time.Time{}, func() bool { return true }); err != nil {
+		t.Fatalf("prepare refused after context cancel: %v", err)
+	}
+	if late := queue.take(0); late != nil {
+		late()
+	}
+	if writes, _, _, _ := owner.state(); writes != 0 {
+		t.Fatalf("context-cancelled commit wrote %d times", writes)
 	}
 }

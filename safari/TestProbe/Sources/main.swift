@@ -262,7 +262,42 @@ do {
     _ = pthread_sigmask(SIG_SETMASK, &previous, nil)
 }
 
-// 8. The process is still alive after every closed-peer write above.
+// 8. Kernel peer audit token retrieval on an ordinary unsigned socketpair.
+//    No Team ID, entitlement or code signature is needed: this only checks
+//    that LOCAL_PEERTOKEN returns the exact expected token for *this* process
+//    and that every unsupported fd fails closed instead of inventing a peer.
+do {
+    var pair: [Int32] = [-1, -1]
+    check(
+        socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0,
+        "audit-token socketpair created"
+    )
+    let token = SocketSupport.peerAuditToken(fd: pair[0])
+    check(token != nil, "peer audit token retrieved")
+    check(
+        token?.token.count == SocketSupport.auditTokenLength,
+        "audit token has the exact expected byte count"
+    )
+    check(token?.pid == getpid(), "audit token names this process instance")
+    check(token?.uid == getuid(), "audit token uid matches this user")
+
+    var fds: [Int32] = [-1, -1]
+    check(pipe(&fds) == 0, "audit-token pipe created")
+    check(
+        SocketSupport.peerAuditToken(fd: fds[0]) == nil,
+        "non-socket fd has no peer audit token"
+    )
+    check(
+        SocketSupport.peerAuditToken(fd: -1) == nil,
+        "invalid fd has no peer audit token"
+    )
+    close(fds[0])
+    close(fds[1])
+    close(pair[0])
+    close(pair[1])
+}
+
+// 9. The process is still alive after every closed-peer write above.
 check(true, "probe process survived all closed-peer writes")
 
 if failures.isEmpty {

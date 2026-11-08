@@ -98,4 +98,18 @@ final class PeerPolicyTests: XCTestCase {
         XCTAssertTrue(requirement.contains(extensionID))
         XCTAssertTrue(requirement.contains("anchor apple generic"))
     }
+
+    /// A peer that merely *claims* the right Team ID and bundle identifier is
+    /// still refused when the dynamic SecCode validity check did not pass:
+    /// identity metadata alone is never treated as a verified signature.
+    func testClaimedIdentityWithoutValidSignatureIsRefused() {
+        XCTAssertFalse(
+            PeerPolicy.accepts(
+                peer: peer(signatureValid: false),
+                expectedUID: uid,
+                expectedTeamID: team,
+                expectedExtensionBundleID: extensionID
+            )
+        )
+    }
 }

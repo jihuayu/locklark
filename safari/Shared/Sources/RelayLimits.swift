@@ -10,10 +10,14 @@ public enum RelayLimits {
     public static let maxReplyBytes = 1024 * 1024
     public static let maxJSONDepth = 16
     public static let maxCollectionEntries = 1024
+    /// Upper bound on ready sessions **plus** in-flight opening reservations.
     public static let maxConnections = 8
     public static let maxQueuedFrames = 64
     public static let maxQueuedBytes = 2 * 1024 * 1024
     public static let sessionTTL: TimeInterval = 30 * 60
+    /// An opening reservation only covers a helper launch, so it is released
+    /// long before the session TTL. A completion after this is refused.
+    public static let openingReservationTTL: TimeInterval = 60
     public static let socketTimeout: TimeInterval = 5
     public static let tokenBytes = 16
     public static let tokenLength = 32

@@ -166,17 +166,64 @@ public enum SocketSupport {
         try writeAll(fd: fd, data: data)
     }
 
-    static func peerProcess(fd: Int32) -> (uid: UInt32, pid: Int32)? {
-        var uid: uid_t = 0
-        var gid: gid_t = 0
-        guard getpeereid(fd, &uid, &gid) == 0 else { return nil }
-        var pid: pid_t = 0
-        var length = socklen_t(MemoryLayout<pid_t>.size)
-        guard getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &length) == 0 else {
+    /// Expected byte image of a Darwin `audit_token_t`: eight host-order
+    /// 32-bit words (auid, euid, egid, ruid, rgid, pid, asid, pidversion).
+    public static let auditTokenLength = 8 * MemoryLayout<UInt32>.size
+
+    /// Kernel-supplied identity of the connected peer.
+    ///
+    /// `token` is the opaque `audit_token_t` image returned by
+    /// `getsockopt(SOL_LOCAL, LOCAL_PEERTOKEN)`. It is the only handle used to
+    /// look the peer up in SecCode (`kSecGuestAttributeAudit`), so it pins the
+    /// exact process instance and pidversion: a numeric PID would be
+    /// re-resolvable to a different process between check and use. `pid`,
+    /// `uid` and `pidVersion` are metadata decoded from the same token; they
+    /// are never used as a lookup key. The token bytes are never logged.
+    public struct PeerAuditToken {
+        public let token: Data
+        public let pid: Int32
+        public let uid: UInt32
+        public let pidVersion: UInt32
+    }
+
+    /// Fetches the peer audit token plus metadata. Every failure - no peer
+    /// credentials, an unsupported `LOCAL_PEERTOKEN`, a short or oversized
+    /// token, an implausible pid or an euid that disagrees with `getpeereid` -
+    /// returns nil so the caller fails closed.
+    public static func peerAuditToken(fd: Int32) -> PeerAuditToken? {
+        var peerUID: uid_t = 0
+        var peerGID: gid_t = 0
+        guard getpeereid(fd, &peerUID, &peerGID) == 0 else { return nil }
+        let wordCount = auditTokenLength / MemoryLayout<UInt32>.size
+        var words = [UInt32](repeating: 0, count: wordCount)
+        var length = socklen_t(auditTokenLength)
+        let result = words.withUnsafeMutableBytes { raw -> Int32 in
+            guard let base = raw.baseAddress else { return -1 }
+            return getsockopt(fd, SOL_LOCAL, LOCAL_PEERTOKEN, base, &length)
+        }
+        guard result == 0 else { return nil }
+        // Exact expected byte count only: a truncated or oversized token is
+        // refused instead of being partially trusted.
+        guard Int(length) == auditTokenLength, words.count == wordCount else {
             return nil
         }
-        guard pid > 0 else { return nil }
-        return (UInt32(uid), Int32(pid))
+        let tokenUID = words[1]
+        let tokenPID = Int32(bitPattern: words[5])
+        let pidVersion = words[7]
+        guard tokenPID > 0, tokenUID == UInt32(peerUID) else { return nil }
+        var token = Data()
+        words.withUnsafeBytes { raw in
+            if let base = raw.baseAddress {
+                token = Data(bytes: base, count: auditTokenLength)
+            }
+        }
+        guard token.count == auditTokenLength else { return nil }
+        return PeerAuditToken(
+            token: token,
+            pid: tokenPID,
+            uid: tokenUID,
+            pidVersion: pidVersion
+        )
     }
 
     static func createListener(path: String) throws -> Int32 {

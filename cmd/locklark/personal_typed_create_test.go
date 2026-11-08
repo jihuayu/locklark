@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -24,12 +23,7 @@ func typedCreateFixture(t *testing.T, document string) (vaultPath, inputPath str
 	if err := personal.Create(vaultPath, string(pw), key); err != nil {
 		t.Fatalf("create fixture vault: %v", err)
 	}
-	if err := os.WriteFile(inputPath, []byte(document), 0o600); err != nil {
-		t.Fatalf("write private input: %v", err)
-	}
-	if err := os.Chmod(inputPath, 0o600); err != nil {
-		t.Fatalf("private input mode: %v", err)
-	}
+	writePrivateTypedFixture(t, inputPath, []byte(document))
 	return vaultPath, inputPath, pw, key
 }
 
