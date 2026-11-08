@@ -5,14 +5,21 @@ import Darwin
 /// Fixed, payload-free I/O helpers for the Safari relay.
 ///
 /// SIGPIPE policy: this process never changes the process-wide disposition of
-/// SIGPIPE. Sockets get `SO_NOSIGPIPE` when they are created/accepted (checked;
-/// failure is a fixed `unavailable`), and *every* write additionally blocks
-/// SIGPIPE only for the calling thread, restores the caller's exact original
-/// pthread signal mask on every exit path, never consumes a SIGPIPE that was
-/// already pending before the write, and consumes only the thread-directed
-/// SIGPIPE the failed write itself raised (via `sigpending` + `sigwait`) while
-/// it is still blocked. A closed peer therefore turns into a fixed
-/// `RelayError.unavailable` instead of terminating the app or extension.
+/// SIGPIPE. Sockets get the `SO_NOSIGPIPE` socket option when they are
+/// created/accepted (checked; failure is a fixed `unavailable`). Pipes - which
+/// have no `SO_NOSIGPIPE` - get the per-descriptor `F_SETNOSIGPIPE` flag on
+/// entry to every pipe write API, read back with `F_GETNOSIGPIPE`; a host that
+/// does not support the flag, or drops it, is refused with the same fixed
+/// `unavailable` *before* the first byte is written and is never left to
+/// unprotected I/O. The thread-scoped guard is retained as defence in depth for
+/// every write: it blocks SIGPIPE only for the calling thread, restores the
+/// caller's exact original pthread signal mask on every exit path, never
+/// consumes a SIGPIPE that was already pending before the write, and consumes
+/// only the thread-directed SIGPIPE the failed write itself raised (via
+/// `sigpending` + `sigwait`) while it is still blocked. A closed peer therefore
+/// turns into a fixed `RelayError.unavailable` instead of terminating the app or
+/// extension - including inside the multithreaded XCTest host, where a
+/// thread-scoped mask alone cannot protect a write issued from another thread.
 public enum SocketSupport {
     /// Applies `SO_NOSIGPIPE` to a socket. Failure is refused, never ignored.
     public static func disableSigPipe(fd: Int32) throws {
@@ -21,6 +28,34 @@ public enum SocketSupport {
         guard setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &enabled, size) == 0 else {
             throw RelayError.unavailable
         }
+    }
+
+    /// Applies the per-descriptor `F_SETNOSIGPIPE` flag to a pipe and reads it
+    /// back. Darwin pipes have no `SO_NOSIGPIPE` socket option, so this
+    /// descriptor flag is the only kernel-level SIGPIPE opt-out for a pipe
+    /// write: with it set, a write to a pipe whose read end has closed fails
+    /// with `EPIPE` instead of raising a process-wide SIGPIPE.
+    ///
+    /// A descriptor that cannot take the flag (a non-pipe/non-socket fd, an
+    /// invalid fd) or one that does not report it back is a fixed
+    /// `RelayError.unavailable`. The failure is returned to the caller before
+    /// any byte is written; there is no unprotected fallback.
+    public static func disablePipeSigPipe(fd: Int32) throws {
+        guard fcntl(fd, F_SETNOSIGPIPE, 1) == 0 else {
+            throw RelayError.unavailable
+        }
+        guard fcntl(fd, F_GETNOSIGPIPE, 0) == 1 else {
+            throw RelayError.unavailable
+        }
+    }
+
+    /// Reads back the per-descriptor `F_SETNOSIGPIPE` flag. Nil means the flag
+    /// could not be read at all (an fd that cannot carry it); `false` means the
+    /// descriptor would currently write without it.
+    public static func pipeSigPipeDisabled(fd: Int32) -> Bool? {
+        let enabled = fcntl(fd, F_GETNOSIGPIPE, 0)
+        if enabled < 0 { return nil }
+        return enabled == 1
     }
 
     static func applyTimeouts(fd: Int32, seconds: TimeInterval) {
@@ -44,10 +79,16 @@ public enum SocketSupport {
         try writeAllGuarded(fd: fd, data: data, deadline: nil, isCancelled: { false })
     }
 
-    /// Pipe write (the helper's stdin). Pipes have no `SO_NOSIGPIPE`, so the
-    /// thread-local SIGPIPE guard is the only protection; a helper that already
-    /// exited turns the write into a fixed `RelayError.unavailable`.
+    /// Pipe write (the helper's stdin).
+    ///
+    /// The per-descriptor `F_SETNOSIGPIPE` flag is applied and verified before
+    /// the first byte; if this host cannot apply it the write fails with the
+    /// fixed `RelayError.unavailable` and never falls back to unprotected pipe
+    /// I/O. The thread-local guard in `writeAllGuarded` remains as defence in
+    /// depth, and a helper that already exited turns the write into a fixed
+    /// `RelayError.unavailable`.
     public static func writeAllPipe(fd: Int32, data: Data) throws {
+        try disablePipeSigPipe(fd: fd)
         try writeAllGuarded(fd: fd, data: data, deadline: nil, isCancelled: { false })
     }
 
@@ -74,6 +115,10 @@ public enum SocketSupport {
         deadline: DispatchTime,
         isCancelled: () -> Bool
     ) throws {
+        // The descriptor-level SIGPIPE opt-out comes first: a descriptor that
+        // cannot carry it is refused here, before any byte is written and
+        // before the deadline loop below could ever issue one.
+        try disablePipeSigPipe(fd: fd)
         // Contract check: a blocking descriptor would ignore the deadline and
         // could stall the caller for as long as the peer does not read.
         let flags = fcntl(fd, F_GETFL, 0)

@@ -12,8 +12,12 @@ import LocklarkSafariShared
 /// - a write to a socket whose peer closed, and a write to a pipe whose read
 ///   end closed, both return the fixed `RelayError.unavailable` and the process
 ///   survives under the default SIGPIPE action;
+/// - pipes carry the per-descriptor `F_SETNOSIGPIPE` flag, which every pipe
+///   write API applies and reads back before its first byte; a descriptor that
+///   cannot carry it is refused instead of being written unprotected;
 /// - the caller's exact thread signal mask is restored on success and failure;
-/// - a SIGPIPE that was already pending before the write is not consumed.
+/// - a SIGPIPE that was already pending before the write is not consumed, and
+///   the process-wide disposition is never changed.
 ///
 /// Exit status 0 means every check passed. This is a macOS-only, native
 /// executable; it is not a claim that the Linux worker ran it.
@@ -138,7 +142,86 @@ do {
     close(pair[1])
 }
 
-// 4. Pipe with the read end closed (helper stdin case).
+// 4. Per-descriptor F_SETNOSIGPIPE: the kernel-level opt-out for pipes, used
+//    instead of any change to the process-wide SIGPIPE disposition.
+do {
+    var fds: [Int32] = [-1, -1]
+    check(pipe(&fds) == 0, "opt-out pipe created")
+    check(
+        SocketSupport.pipeSigPipeDisabled(fd: fds[1]) == false,
+        "fresh pipe write end carries no per-descriptor SIGPIPE opt-out"
+    )
+    check(
+        (try? SocketSupport.disablePipeSigPipe(fd: fds[1])) != nil,
+        "F_SETNOSIGPIPE applied to a pipe"
+    )
+    check(
+        fcntl(fds[1], F_GETNOSIGPIPE, 0) == 1,
+        "F_GETNOSIGPIPE reports the flag on the pipe"
+    )
+    close(fds[0])
+    close(fds[1])
+
+    var pair: [Int32] = [-1, -1]
+    check(pipe(&pair) == 0, "writeAllPipe opt-out pipe created")
+    var writeSucceeded = true
+    do {
+        try SocketSupport.writeAllPipe(fd: pair[1], data: Data([0x4A]))
+    } catch {
+        writeSucceeded = false
+    }
+    check(writeSucceeded, "open pipe write succeeds")
+    check(
+        SocketSupport.pipeSigPipeDisabled(fd: pair[1]) == true,
+        "writeAllPipe itself applies the per-descriptor opt-out"
+    )
+    var byte = [UInt8](repeating: 0, count: 1)
+    check(read(pair[0], &byte, 1) == 1, "opt-out pipe byte arrived")
+    check(byte == [0x4A], "opt-out pipe carried the exact byte")
+    close(pair[0])
+    close(pair[1])
+
+    check(
+        (try? SocketSupport.disablePipeSigPipe(fd: -1)) == nil,
+        "invalid descriptor refused by disablePipeSigPipe"
+    )
+    check(
+        writeFailsUnavailable {
+            try SocketSupport.writeAllPipe(fd: -1, data: Data([0x4B]))
+        },
+        "writeAllPipe refuses a descriptor it cannot flag, before writing"
+    )
+
+    // A descriptor that cannot carry the flag is refused, never written
+    // unprotected; only assert the refusal where this host really refuses.
+    let vnode = open("/dev/null", O_WRONLY)
+    check(vnode >= 0, "non-pipe descriptor opened")
+    if vnode >= 0 {
+        if fcntl(vnode, F_GETNOSIGPIPE, 0) < 0 {
+            check(
+                writeFailsUnavailable {
+                    try SocketSupport.writeAllPipe(fd: vnode, data: Data([0x4C]))
+                },
+                "writeAllPipe refuses a descriptor without the opt-out"
+            )
+        } else {
+            check(true, "non-pipe descriptor reports no opt-out need")
+        }
+        close(vnode)
+    }
+
+    var disposition = sigaction()
+    if sigaction(SIGPIPE, nil, &disposition) == 0 {
+        check(
+            disposition.__sigaction_u.__sa_handler == nil,
+            "SIGPIPE disposition still SIG_DFL after the pipe opt-out checks"
+        )
+    } else {
+        check(false, "SIGPIPE disposition readable after the pipe opt-out checks")
+    }
+}
+
+// 5. Pipe with the read end closed (helper stdin case).
 do {
     var fds: [Int32] = [-1, -1]
     check(pipe(&fds) == 0, "pipe created")
@@ -162,7 +245,7 @@ do {
     }
 }
 
-// 5. A caller that already blocks SIGPIPE keeps it blocked afterwards.
+// 6. A caller that already blocks SIGPIPE keeps it blocked afterwards.
 do {
     var fds: [Int32] = [-1, -1]
     check(pipe(&fds) == 0, "pipe created for blocked-mask case")
@@ -196,7 +279,7 @@ do {
     close(fds[1])
 }
 
-// 6. A pre-existing pending SIGPIPE is never consumed by a successful write.
+// 7. A pre-existing pending SIGPIPE is never consumed by a successful write.
 do {
     var sigpipe = sigPipeSet()
     var previous = sigset_t()
@@ -229,7 +312,7 @@ do {
     _ = pthread_sigmask(SIG_SETMASK, &previous, nil)
 }
 
-// 7. A pre-existing pending SIGPIPE survives a *failing* write too: only the
+// 8. A pre-existing pending SIGPIPE survives a *failing* write too: only the
 //    signal raised by our own write may be consumed.
 do {
     var sigpipe = sigPipeSet()
@@ -262,7 +345,7 @@ do {
     _ = pthread_sigmask(SIG_SETMASK, &previous, nil)
 }
 
-// 8. Kernel peer audit token retrieval on an ordinary unsigned socketpair.
+// 9. Kernel peer audit token retrieval on an ordinary unsigned socketpair.
 //    No Team ID, entitlement or code signature is needed: this only checks
 //    that LOCAL_PEERTOKEN returns the exact expected token for *this* process
 //    and that every unsupported fd fails closed instead of inventing a peer.
@@ -297,7 +380,7 @@ do {
     close(pair[1])
 }
 
-// 9. Bounded (non-blocking, deadline) pipe write under SIG_DFL: a closed
+// 10. Bounded (non-blocking, deadline) pipe write under SIG_DFL: a closed
 //    helper, a helper that never reads and an already revoked session all end
 //    in the fixed failure without terminating the process.
 do {
@@ -360,8 +443,20 @@ do {
     close(fds[1])
 }
 
-// 10. The process is still alive after every closed-peer write above.
+// 11. The process is still alive after every closed-peer write above, and no
+//     check above changed the process-wide SIGPIPE disposition.
 check(true, "probe process survived all closed-peer writes")
+do {
+    var disposition = sigaction()
+    if sigaction(SIGPIPE, nil, &disposition) == 0 {
+        check(
+            disposition.__sigaction_u.__sa_handler == nil,
+            "SIGPIPE disposition still SIG_DFL after every write"
+        )
+    } else {
+        check(false, "SIGPIPE disposition readable after every write")
+    }
+}
 
 if failures.isEmpty {
     print("PASS safari SIGPIPE probe (\(#file))")
