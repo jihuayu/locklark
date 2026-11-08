@@ -7,7 +7,7 @@ import tempfile
 import textwrap
 import unittest
 import urllib.parse
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import desktop_native_acceptance as desktop
 from desktop_native_acceptance import Acceptance, AcceptanceFailure
@@ -213,6 +213,93 @@ class NativeStartupDiagnosticTests(unittest.TestCase):
                 acceptance.input([{"wait_label":"新建登录"}])
         self.assertEqual(acceptance.native_action,"window-ready")
         self.assertEqual(acceptance.native_x_error_codes,[8])
+
+
+class FakeClock:
+    def __init__(self, walls):
+        self._walls = walls
+        self._index = 0
+        self.mono = 0.0
+        self.sleeps = 0
+
+    def time(self):
+        if callable(self._walls):
+            return self._walls()
+        value = self._walls[min(self._index, len(self._walls) - 1)]
+        self._index += 1
+        return value
+
+    def monotonic(self):
+        self.mono += 1.0
+        return self.mono
+
+    def sleep(self, _seconds):
+        self.sleeps += 1
+
+
+class OtpWindowTests(unittest.TestCase):
+    def await_window(self, walls):
+        acceptance = Acceptance.__new__(Acceptance)
+        acceptance.reason = "acceptance"
+        clock = FakeClock(walls)
+        with (
+            patch.object(desktop.time, "time", clock.time),
+            patch.object(desktop.time, "monotonic", clock.monotonic),
+            patch.object(desktop.time, "sleep", clock.sleep),
+        ):
+            return acceptance, acceptance.await_new_otp_window(), clock
+
+    def test_prerollover_samples_are_ignored(self):
+        acceptance, sample, clock = self.await_window([100.5, 100.7, 100.9, 120.3])
+        self.assertEqual(sample, 120.3)
+        self.assertEqual(acceptance.otp_window(sample), 6)
+        self.assertGreaterEqual(acceptance.otp_remaining(sample), 18)
+        self.assertEqual(clock.sleeps, 2)
+
+    def test_new_window_requires_remaining_margin(self):
+        acceptance, sample, _ = self.await_window([100.5, 123.0, 140.5])
+        self.assertEqual(sample, 140.5)
+        self.assertEqual(acceptance.otp_window(sample), 7)
+        self.assertGreaterEqual(acceptance.otp_remaining(sample), 18)
+        # 123.0 is a new window but already leaves only 17s of preparation.
+        self.assertLess(acceptance.otp_remaining(123.0), 18)
+
+    def test_fixed_timeout_fails_closed(self):
+        acceptance = Acceptance.__new__(Acceptance)
+        acceptance.reason = "acceptance"
+        clock = FakeClock(lambda: 100.5)
+        with (
+            patch.object(desktop.time, "time", clock.time),
+            patch.object(desktop.time, "monotonic", clock.monotonic),
+            patch.object(desktop.time, "sleep", clock.sleep),
+        ):
+            with self.assertRaises(AcceptanceFailure):
+                acceptance.await_new_otp_window()
+        self.assertEqual(acceptance.reason, "otp-window-timeout")
+
+
+class ShowCopyOtpFlowTests(unittest.TestCase):
+    def test_exactly_one_show_and_one_hide_wait(self):
+        acceptance = Acceptance.__new__(Acceptance)
+        acceptance.reason = "acceptance"
+        acceptance.wait = Mock()
+        acceptance.align = Mock()
+        acceptance.await_new_otp_window = Mock(return_value=120.3)
+        acceptance.click = Mock()
+        acceptance.display = Mock(return_value={"matches": [True]})
+        acceptance.otp = Mock(return_value="12345678")
+        acceptance.eventually = Mock()
+        acceptance.clipboard = Mock(return_value={"matches": [True]})
+        acceptance.show_copy_otp()
+        self.assertEqual(acceptance.wait.call_args_list,
+                         [call("显示验证码"), call("隐藏验证码")])
+        self.assertEqual(acceptance.click.call_args_list,
+                         [call("显示验证码"), call("复制验证码")])
+        acceptance.await_new_otp_window.assert_called_once_with()
+        acceptance.otp.assert_called_once_with(120.3)
+        acceptance.display.assert_called_once()
+        acceptance.eventually.assert_called_once()
+        acceptance.align.assert_not_called()
 
 
 if __name__ == "__main__":

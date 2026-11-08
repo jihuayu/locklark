@@ -441,7 +441,7 @@ func (s *Session) watchtowerSummary(originFilter string, audit bool) (Watchtower
 		if unsecured {
 			flags = append(flags, "unsecured-http")
 		}
-		if it.OTP == "" && len(it.Passkey) == 0 {
+		if it.OTP == "" && len(it.PasskeyRecords()) == 0 {
 			flags = append(flags, "totp-not-stored")
 		}
 		if card := it.NormalizedCreditCard(); card != nil {

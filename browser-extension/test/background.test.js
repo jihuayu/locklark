@@ -2403,6 +2403,7 @@ test("conditional selection rebinds the original challenge, exact credential and
   assert.equal(gets.length, 1);
   assert.deepEqual(Object.keys(gets[0]).sort(), [
     "capability",
+    "credential_id",
     "document_id",
     "id",
     "item_id",
@@ -2413,6 +2414,8 @@ test("conditional selection rebinds the original challenge, exact credential and
     "type",
     "v",
   ]);
+  assert.equal(gets[0].credential_id, entry.credential_id);
+  assert.equal(Object.hasOwn(gets[0], "credential_revision"), false);
   assert.equal(gets[0].origin, "https://example.test");
   assert.equal(gets[0].tab_id, 1);
   assert.equal(gets[0].document_id, "doc-1");
@@ -3331,4 +3334,323 @@ test("signal: a hint never occupies the ordinary fill slot", async () => {
   const match = await h.send({ type: "inline-match" }, contentSender());
   assert.equal(match.candidates.length, 1, "candidates still load");
   assert.equal((await h.send({ type: "state" })).pending, false);
+});
+
+// ---- Multi-credential conditional selection (exact child revision) ----------
+const MULTI_ITEM = "a".repeat(32);
+const MULTI_PARENT = "b".repeat(64);
+const MULTI_CRED_A = core.base64URLEncode(new Uint8Array(32).fill(7));
+const MULTI_CRED_B = core.base64URLEncode(new Uint8Array(32).fill(8));
+const MULTI_CHILD_A = "1".repeat(64);
+const MULTI_CHILD_B = "2".repeat(64);
+const multiEntry = (credential, child) => ({
+  item_id: MULTI_ITEM,
+  revision: MULTI_PARENT,
+  title: "Multi",
+  credential_id: credential,
+  credential_revision: child,
+  rp_id: "example.test",
+  user_name: "multi@example.test",
+  display_name: "Multi User",
+});
+
+async function multiReady() {
+  const h = await conditionalReady([
+    multiEntry(MULTI_CRED_A, MULTI_CHILD_A),
+    multiEntry(MULTI_CRED_B, MULTI_CHILD_B),
+  ]);
+  const reply = await h.send(
+    { type: "passkey-conditional-open", id: conditionalID(1), options: conditionalOptions(7) },
+    contentSender(),
+  );
+  assert.equal(reply.passkeys.length, 2);
+  return h;
+}
+
+function multiSelect(extra = {}) {
+  return {
+    type: "passkey-conditional-select",
+    id: conditionalID(1),
+    item_id: MULTI_ITEM,
+    revision: MULTI_PARENT,
+    credential_id: MULTI_CRED_B,
+    credential_revision: MULTI_CHILD_B,
+    ...extra,
+  };
+}
+
+test("two siblings under one parent select the SECOND by its exact child revision", async () => {
+  const h = await multiReady();
+  const selected = await h.send(multiSelect(), contentSender());
+  assert.equal(selected.credential.id, "native-credential");
+  const gets = h.sent.filter((r) => r.type === "passkey-get");
+  assert.equal(gets.length, 1);
+  assert.deepEqual(Object.keys(gets[0]).sort(), [
+    "capability",
+    "credential_id",
+    "credential_revision",
+    "document_id",
+    "id",
+    "item_id",
+    "options",
+    "origin",
+    "revision",
+    "tab_id",
+    "type",
+    "v",
+  ]);
+  assert.equal(gets[0].item_id, MULTI_ITEM);
+  assert.equal(gets[0].revision, MULTI_PARENT);
+  assert.equal(gets[0].credential_id, MULTI_CRED_B);
+  assert.equal(gets[0].credential_revision, MULTI_CHILD_B);
+  assert.notEqual(gets[0].credential_id, MULTI_CRED_A);
+  const pinned = JSON.parse(gets[0].options);
+  assert.deepEqual(pinned.allowCredentials, [
+    { type: "public-key", id: MULTI_CRED_B },
+  ]);
+  assert.equal(h.sent.some((r) => r.raw_item_id || r.raw_record || r.private_key), false);
+});
+
+test("stale, missing or invented child selectors are refused without a first-credential fallback", async () => {
+  for (const extra of [
+    { credential_revision: MULTI_CHILD_A },
+    { credential_revision: "3".repeat(64) },
+    { credential_revision: MULTI_CHILD_B.slice(1) },
+  ]) {
+    const h = await multiReady();
+    const reply = await h.send(multiSelect(extra), contentSender());
+    assert.equal(reply.fallback, true, "stale child selector must refuse");
+    assert.equal(h.sent.some((r) => r.type === "passkey-get"), false);
+  }
+  const h = await multiReady();
+  const missing = multiSelect();
+  delete missing.credential_revision;
+  const reply = await h.send(missing, contentSender());
+  assert.equal(reply.fallback, true, "missing child selector must refuse");
+  assert.equal(h.sent.some((r) => r.type === "passkey-get"), false);
+  const extraField = await h.send(
+    multiSelect({ raw_record: "x" }),
+    contentSender(),
+  );
+  assert.equal(extraField.fallback, true, "unknown field must refuse");
+  assert.equal(h.sent.some((r) => r.type === "passkey-get"), false);
+});
+
+test("legacy seven-key candidates keep the singleton selector without a child revision", async () => {
+  const entry = conditionalEntry(2);
+  const h = await conditionalReady([entry]);
+  const opened = await h.send(
+    { type: "passkey-conditional-open", id: conditionalID(1), options: conditionalOptions(2) },
+    contentSender(),
+  );
+  assert.equal(Object.hasOwn(opened.passkeys[0], "credential_revision"), false);
+  const selected = await h.send(
+    {
+      type: "passkey-conditional-select",
+      id: conditionalID(1),
+      item_id: entry.item_id,
+      revision: entry.revision,
+      credential_id: entry.credential_id,
+    },
+    contentSender(),
+  );
+  assert.equal(selected.credential.id, "native-credential");
+  const get = h.sent.find((r) => r.type === "passkey-get");
+  assert.equal(get.credential_id, entry.credential_id);
+  assert.equal(Object.hasOwn(get, "credential_revision"), false);
+});
+
+const PASSKEY_CRED2 = core.base64URLEncode(new Uint8Array(32).fill(8));
+const PASSKEY_CHILD1 = "1".repeat(64);
+const PASSKEY_CHILD2 = "2".repeat(64);
+
+function managedPasskey(credentialId, revision, userName, displayName, extra = {}) {
+  return {
+    credential_id: credentialId,
+    credential_revision: revision,
+    rp_id: "example.test",
+    user_name: userName,
+    display_name: displayName,
+    ...extra,
+  };
+}
+
+function multiDetailItem(passkeys, overrides = {}) {
+  return {
+    id: PASSKEY_ID, revision: PASSKEY_REV, category: "login",
+    title: "Example", username: "ada", has_passkey: true,
+    passkey_count: passkeys.length,
+    passkeys,
+    ...overrides,
+  };
+}
+
+test("multi passkey detail projects bounded child revisions and list rows carry only count", async () => {
+  const h = harness({
+    capabilities: [PASSKEY_CAP],
+    onRequest: (r) => {
+      if (r.type === "item-get")
+        return {
+          v: 1, id: r.id, type: "item-detail",
+          item: multiDetailItem([
+            managedPasskey(PASSKEY_CRED, PASSKEY_CHILD1, "ada", "Ada", {
+              user_handle: "private-handle",
+            }),
+          ].map((entry) => {
+            const { user_handle, ...publicEntry } = entry;
+            return publicEntry;
+          }).concat([
+            managedPasskey(PASSKEY_CRED2, PASSKEY_CHILD2, "grace", "Grace"),
+          ])),
+        };
+      if (r.type === "vault-search")
+        return {
+          v: 1, id: r.id, type: "vault-items",
+          items: [{
+            id: PASSKEY_ID, revision: PASSKEY_REV, category: "login",
+            title: "Example", has_passkey: true, passkey_count: 2,
+          }],
+        };
+    },
+  });
+  await ready(h);
+  const detail = await h.send({ type: "item-get", id: PASSKEY_ID, revision: PASSKEY_REV });
+  assert.equal(detail.detail.passkey_count, 2);
+  assert.equal(detail.detail.has_passkey, true);
+  assert.equal(detail.detail.passkey, undefined, "multi detail has no legacy singleton");
+  assert.deepEqual(
+    detail.detail.passkeys.map((entry) => [
+      entry.credential_id, entry.credential_revision, entry.user_name,
+    ]),
+    [
+      [PASSKEY_CRED, PASSKEY_CHILD1, "ada"],
+      [PASSKEY_CRED2, PASSKEY_CHILD2, "grace"],
+    ],
+  );
+  assert.deepEqual(
+    Object.keys(detail.detail.passkeys[0]).sort(),
+    ["credential_id", "credential_revision", "display_name", "rp_id", "user_name"],
+  );
+  assert.equal(JSON.stringify(detail).includes("private-handle"), false);
+
+  const search = await h.send({ type: "vault-search", query: "", category: "all" });
+  assert.equal(search.vaultItems.length, 1);
+  assert.equal(search.vaultItems[0].passkey_count, 2);
+  assert.equal(search.vaultItems[0].has_passkey, true);
+  assert.equal(search.vaultItems[0].passkey, undefined);
+  assert.equal(Object.hasOwn(search.vaultItems[0], "passkeys"), false);
+  await h.send({ type: "disconnect" });
+});
+
+test("malformed, duplicated, private or excessive passkey arrays are refused not filtered", async () => {
+  const cases = [
+    [managedPasskey(PASSKEY_CRED, PASSKEY_CHILD1, "ada", "Ada")], // count says two
+    [
+      managedPasskey(PASSKEY_CRED, PASSKEY_CHILD1, "ada", "Ada"),
+      managedPasskey(PASSKEY_CRED, PASSKEY_CHILD2, "ada", "Ada"),
+    ],
+    [managedPasskey(PASSKEY_CRED, PASSKEY_CHILD1, "ada", "Ada", { user_handle: "secret" })],
+  ];
+  const missingRevision = managedPasskey(PASSKEY_CRED, PASSKEY_CHILD1, "ada", "Ada");
+  delete missingRevision.credential_revision;
+  cases.push([missingRevision], [
+    managedPasskey(PASSKEY_CRED, "short", "ada", "Ada"),
+  ]);
+  cases.push(
+    Array.from({ length: 17 }, (_, index) =>
+      managedPasskey(
+        core.base64URLEncode(new Uint8Array(32).fill(index)),
+        (index + 1).toString(16).padStart(2, "0").repeat(32),
+        "user" + index, "User " + index,
+      ),
+    ),
+  );
+  // The first case deliberately supplies two entries but a conflicting count.
+  cases[0] = [
+    managedPasskey(PASSKEY_CRED, PASSKEY_CHILD1, "ada", "Ada"),
+    managedPasskey(PASSKEY_CRED2, PASSKEY_CHILD2, "grace", "Grace"),
+  ];
+  for (const passkeys of cases) {
+    const h = harness({
+      capabilities: [PASSKEY_CAP],
+      onRequest: (r) =>
+        r.type === "item-get"
+          ? {
+              v: 1, id: r.id, type: "item-detail",
+              item: multiDetailItem(passkeys, { passkey_count: 1 }),
+            }
+          : undefined,
+    });
+    await ready(h);
+    const reply = await h.send({ type: "item-get", id: PASSKEY_ID, revision: PASSKEY_REV });
+    assert.equal(reply?.detail?.passkeys, undefined, "invalid array must never be filtered to a first entry");
+    assert.equal(reply?.detail?.has_passkey, false);
+    assert.equal(JSON.stringify(reply).includes(PASSKEY_CRED), false);
+    await h.send({ type: "disconnect" });
+  }
+
+  const list = harness({
+    capabilities: [PASSKEY_CAP],
+    onRequest: (r) =>
+      r.type === "vault-search"
+        ? {
+            v: 1, id: r.id, type: "vault-items",
+            items: [{
+              id: PASSKEY_ID, revision: PASSKEY_REV, category: "login",
+              title: "Example", has_passkey: true, passkey_count: 1,
+              passkeys: [managedPasskey(PASSKEY_CRED, PASSKEY_CHILD1, "ada", "Ada")],
+            }],
+          }
+        : undefined,
+  });
+  await ready(list);
+  const search = await list.send({ type: "vault-search", query: "", category: "all" });
+  assert.deepEqual(Array.from(search.vaultItems), [], "list rows never carry arrays");
+  await list.send({ type: "disconnect" });
+});
+
+test("legacy singleton detail is unchanged and an exact child revision is forwarded", async () => {
+  const removals = [];
+  const h = harness({
+    capabilities: [PASSKEY_CAP],
+    onRequest: (r) => {
+      if (r.type === "item-get")
+        return {
+          v: 1, id: r.id, type: "item-detail",
+          item: {
+            id: PASSKEY_ID, revision: PASSKEY_REV, category: "login",
+            title: "Example", username: "ada", has_passkey: true,
+            passkey: passkeyMeta(),
+          },
+        };
+      if (r.type === "passkey-remove") {
+        removals.push(r);
+        return {
+          v: 1, id: r.id, type: "passkey-removed", item_id: r.item_id,
+          revision: PASSKEY_NEXT, credential_id: r.credential_id,
+        };
+      }
+    },
+  });
+  await ready(h);
+  const detail = await h.send({ type: "item-get", id: PASSKEY_ID, revision: PASSKEY_REV });
+  assert.equal(detail.detail.has_passkey, true);
+  assert.equal(detail.detail.passkey.user_name, "ada");
+  assert.equal(detail.detail.passkey_count, undefined, "legacy frames keep their shape");
+  assert.equal(Object.hasOwn(detail.detail, "passkeys"), false);
+
+  const removed = await h.send({
+    type: "passkey-remove", id: PASSKEY_ID, revision: PASSKEY_REV,
+    credential_id: PASSKEY_CRED, credential_revision: PASSKEY_CHILD1,
+  });
+  assert.equal(removed.passkeyRemoved.credential_id, PASSKEY_CRED);
+  assert.equal(removals.length, 1);
+  assert.equal(removals[0].credential_revision, PASSKEY_CHILD1);
+  const refused = await h.send({
+    type: "passkey-remove", id: PASSKEY_ID, revision: PASSKEY_REV,
+    credential_id: PASSKEY_CRED, credential_revision: "short",
+  });
+  assert.equal(refused.passkeyRemoved, undefined);
+  assert.equal(removals.length, 1, "a malformed child revision never reaches the host");
+  await h.send({ type: "disconnect" });
 });

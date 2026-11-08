@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -253,9 +254,14 @@ func TestPasskeyConditionalListMetadataOnlyAndReadOnly(t *testing.T) {
 	credential := conditionalPasskey(t, s, login, "dXNlcjE", "fixture-user", "Fixture User")
 	epoch := s.PasskeyRevocationEpoch()
 	revision := revisionOf(t, s, login)
+	managed, err := s.ReadManagedPasskeysMetadata(false)
+	if err != nil || len(managed[login]) != 1 || managed[login][0].CredentialID != credential {
+		t.Fatalf("managed metadata: %v %#v", err, managed[login])
+	}
 	want := map[string]string{
 		"item_id": login, "revision": revision, "title": rows[0].Title,
-		"credential_id": credential, "rp_id": "example.test", "user_name": "fixture-user", "display_name": "Fixture User",
+		"credential_id": credential, "credential_revision": managed[login][0].Revision,
+		"rp_id": "example.test", "user_name": "fixture-user", "display_name": "Fixture User",
 	}
 	baseline := readVaultReceipt(t, s.VaultPath())
 	idle, _ := s.IdleDeadline()
@@ -277,7 +283,7 @@ func TestPasskeyConditionalListMetadataOnlyAndReadOnly(t *testing.T) {
 		t.Fatalf("unexpected candidates %v", frame["passkeys"])
 	}
 	entry := passkeys[0].(map[string]any)
-	if len(entry) != 7 {
+	if len(entry) != 8 {
 		t.Fatalf("candidate carried extra fields: %v", entry)
 	}
 	for key, value := range want {
@@ -447,9 +453,20 @@ func TestPasskeyConditionalListCrossSiteAllowlistAndState(t *testing.T) {
 	}
 }
 
+func candidateManaged(candidates []personal.PasskeyCandidate) map[string][]personal.ManagedPasskeyMetadata {
+	managed := map[string][]personal.ManagedPasskeyMetadata{}
+	for index, candidate := range candidates {
+		managed[candidate.ItemID] = append(managed[candidate.ItemID], personal.ManagedPasskeyMetadata{
+			CredentialID: candidate.CredentialID,
+			Revision:     fmt.Sprintf("%064x", index+1),
+		})
+	}
+	return managed
+}
+
 func TestPasskeyCandidatesFrameBounds(t *testing.T) {
 	id := reqID(60)
-	empty, e := passkeyCandidatesResponse(id, nil)
+	empty, e := passkeyCandidatesResponse(id, nil, nil)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -465,7 +482,7 @@ func TestPasskeyCandidatesFrameBounds(t *testing.T) {
 	for n := 0; n <= MaxPasskeyCandidates; n++ {
 		many = append(many, personal.PasskeyCandidate{ItemID: reqID(1000 + n), Revision: strings.Repeat("b", 64), Title: "t", CredentialID: strings.Repeat("A", 43), RPID: "example.test", UserName: "u", DisplayName: "d"})
 	}
-	capped, e := passkeyCandidatesResponse(id, many)
+	capped, e := passkeyCandidatesResponse(id, many, candidateManaged(many))
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -485,7 +502,7 @@ func TestPasskeyCandidatesFrameBounds(t *testing.T) {
 			DisplayName:  strings.Repeat(">", 200),
 		})
 	}
-	bounded, e := passkeyCandidatesResponse(id, huge)
+	bounded, e := passkeyCandidatesResponse(id, huge, candidateManaged(huge))
 	if e != nil {
 		t.Fatal(e)
 	}

@@ -5,11 +5,13 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"github.com/jihuayu/locklark/internal/passkey"
 	bolt "go.etcd.io/bbolt"
 	"golang.org/x/crypto/ssh"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -270,8 +272,47 @@ func TestPasskeyStaleCancellationUVAndNoOverwrite(t *testing.T) {
 		t.Fatal(e)
 	}
 	target.Revision = rows[0].Revision
-	if _, e = s.PerformPasskey(target, false, dailyGate(t, s)); e == nil {
-		t.Fatal("overwrote existing credential")
+	// The same login, RP and user handle may collect a second credential.
+	second, e := s.PerformPasskey(target, false, dailyGate(t, s))
+	if e != nil || second.ID == created.ID {
+		t.Fatalf("second same-identity credential: %v", e)
+	}
+	// The same login must not silently change its RP identity.
+	incompatible := target
+	incompatible.Revision = suggestionsRevision(t, s, target.ID)
+	incompatible.Options = []byte(`{"challenge":"Y2hhbGxlbmdlLTAxMjM0NTY3ODk","rp":{"id":"example.test","name":"Example"},"user":{"id":"dXNlcjI","name":"second-user","displayName":"Second"},"pubKeyCredParams":[{"type":"public-key","alg":-7}]}`)
+	// ReviewPasskey refuses an incompatible RP/user identity fail-closed, which
+	// happens before the transaction can report ErrExcluded. The documented
+	// refusal must still never accept the request nor touch the login or its
+	// existing sibling credentials.
+	beforeMetadata, e := s.ReadPasskeysMetadata(true)
+	if e != nil {
+		t.Fatal(e)
+	}
+	beforeRows, e := s.List("active")
+	if e != nil {
+		t.Fatal(e)
+	}
+	beforeEpoch := s.PasskeyRevocationEpoch()
+	if _, e = s.PerformPasskey(incompatible, false, dailyGate(t, s)); !errors.Is(e, passkey.ErrRefused) {
+		t.Fatalf("identity change on existing login: %v", e)
+	}
+	afterMetadata, e := s.ReadPasskeysMetadata(true)
+	if e != nil {
+		t.Fatal(e)
+	}
+	afterRows, e := s.List("active")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(afterMetadata[target.ID]) != 2 || !reflect.DeepEqual(beforeMetadata, afterMetadata) {
+		t.Fatalf("refused identity change altered sibling credentials: %v", afterMetadata[target.ID])
+	}
+	if !reflect.DeepEqual(beforeRows, afterRows) {
+		t.Fatal("refused identity change altered vault rows or revisions")
+	}
+	if s.PasskeyRevocationEpoch() != beforeEpoch {
+		t.Fatal("refused identity change moved the revocation epoch")
 	}
 	var options map[string]any
 	json.Unmarshal(target.Options, &options)

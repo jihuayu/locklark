@@ -345,10 +345,16 @@ async function scenario(hit) {
             "验证主密码",
             "验证 Secret Key",
             "创建新登录并保存 Passkey",
-            "登录：login.locklark.test · passkey-test · passkey-test",
         ):
             self.assertIn(label, labels, label)
             self.assertIn(label, passkey, label)
+        # Dynamic labels include the public credential ID hint and are matched
+        # by full equality in the driver; the grammar stays narrow.
+        self.assertIn("PASSKEY_CHOICE_LABEL", source)
+        self.assertIn("control_label_allowed", source)
+        self.assertIn("passkeyChoiceLabel", passkey)
+        self.assertIn("凭据 ", (SCRIPTS / "browser_passkey_management_acceptance.mjs").read_text(encoding="utf-8"))
+        self.assertNotIn('"登录：" + rp', passkey)
 
 
 class FirefoxPasskeyVerifier(unittest.TestCase):

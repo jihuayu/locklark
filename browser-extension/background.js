@@ -260,6 +260,9 @@ if (typeof importScripts === "function") importScripts("core.js");
     openAndFillTimer = null;
   }
   function publicItem(item) {
+    return publicItemProjection(item, false);
+  }
+  function publicItemProjection(item, detailFrame) {
     if (!item || typeof item !== "object" || Array.isArray(item)) return null;
     if (
       !/^[a-f0-9]{32}$/.test(item.id || "") ||
@@ -282,6 +285,46 @@ if (typeof importScripts === "function") importScripts("core.js");
           .filter((tag) => typeof tag === "string" && tag.length <= 128)
       : [];
     const passkey = publicPasskeyMetadata(item.passkey);
+    // Per-credential arrays are detail-only and strictly bounded: a malformed,
+    // duplicated or oversized list is refused instead of silently truncated to
+    // its first credential. Leftover list rows never carry such an array.
+    let passkeys = null;
+    if (item.passkeys !== undefined) {
+      if (!detailFrame) return null;
+      passkeys = publicPasskeyList(item.passkeys);
+      if (!passkeys) return null;
+      if (
+        passkey &&
+        (passkeys.length !== 1 ||
+          passkeys[0].credential_id !== passkey.credential_id)
+      )
+        return null;
+    }
+    let passkeyCount = passkeys
+      ? passkeys.length
+      : passkey
+        ? 1
+        : item.has_passkey === true
+          ? 1
+          : 0;
+    if (item.passkey_count !== undefined) {
+      if (
+        !Number.isInteger(item.passkey_count) ||
+        item.passkey_count < 0 ||
+        item.passkey_count > core.PASSKEY_METADATA_LIMIT
+      )
+        return null;
+      if (passkeys || passkey) {
+        if (item.passkey_count !== passkeyCount) return null;
+      } else {
+        passkeyCount = item.passkey_count;
+      }
+    }
+    const hasPasskey = passkeys
+      ? passkeyCount > 0
+      : passkeyCount > 0 || item.has_passkey === true;
+    if (item.has_passkey === true && passkeyCount === 0 && item.passkey_count !== undefined)
+      return null;
     return {
       id: item.id,
       revision: item.revision,
@@ -305,8 +348,12 @@ if (typeof importScripts === "function") importScripts("core.js");
         ? item.state
         : "active",
       has_otp: item.has_otp === true,
-      has_passkey: item.has_passkey === true,
+      has_passkey: hasPasskey,
+      ...(passkeys || item.passkey_count !== undefined
+        ? { passkey_count: passkeyCount }
+        : {}),
       ...(passkey ? { passkey } : {}),
+      ...(passkeys ? { passkeys } : {}),
       updated_at:
         typeof item.updated_at === "string"
           ? item.updated_at.slice(0, 64)
@@ -323,11 +370,18 @@ if (typeof importScripts === "function") importScripts("core.js");
       rp_id: raw.rp_id,
       user_name: raw.user_name,
       display_name: raw.display_name,
+      ...(raw.credential_revision !== undefined
+        ? { credential_revision: raw.credential_revision }
+        : {}),
     };
+  }
+  function publicPasskeyList(raw) {
+    if (!core.validPasskeyMetadataList(raw)) return null;
+    return raw.map((entry) => publicPasskeyMetadata(entry));
   }
   function publicDetail(item) {
     if (!item || typeof item !== "object" || Array.isArray(item)) return null;
-    const meta = publicItem(item);
+    const meta = publicItemProjection(item, true);
     if (!meta) return null;
     const fields = [];
     const seen = new Set();
@@ -2767,6 +2821,18 @@ if (typeof importScripts === "function") importScripts("core.js");
     }
   }
   async function removePasskey(message) {
+    if (
+      !/^[a-f0-9]{32}$/.test(message.id || "") ||
+      !/^[a-f0-9]{64}$/.test(message.revision || "") ||
+      !core.validCredentialID(message.credential_id) ||
+      (message.credential_revision !== undefined &&
+        !core.validCredentialRevision(message.credential_revision))
+    ) {
+      const refused = Error("refused");
+      refused.knownRefusal = true;
+      refused.keepStatus = true;
+      throw refused;
+    }
     if (!passkeyManagementSupported()) {
       status = "当前原生宿主不支持 Passkey 管理，请升级原生宿主";
       const error = Error("refused");
@@ -2783,6 +2849,9 @@ if (typeof importScripts === "function") importScripts("core.js");
           item_id: message.id,
           revision: message.revision,
           credential_id: message.credential_id,
+          ...(message.credential_revision
+            ? { credential_revision: message.credential_revision }
+            : {}),
         },
         20000,
       );
@@ -3657,6 +3726,9 @@ if (typeof importScripts === "function") importScripts("core.js");
       revision: entry.revision,
       title: entry.title,
       credential_id: entry.credential_id,
+      ...(core.validCredentialRevision(entry.credential_revision)
+        ? { credential_revision: entry.credential_revision }
+        : {}),
       rp_id: entry.rp_id,
       user_name: entry.user_name,
       display_name: entry.display_name,
@@ -3714,6 +3786,9 @@ if (typeof importScripts === "function") importScripts("core.js");
       item_id: entry.item_id,
       revision: entry.revision,
       credential_id: entry.credential_id,
+      ...(core.validCredentialRevision(entry.credential_revision)
+        ? { credential_revision: entry.credential_revision }
+        : {}),
     }));
     intent.truncated = response.truncated === true;
     // Public, metadata-only projection: the isolated UI receives exactly these
@@ -3746,9 +3821,19 @@ if (typeof importScripts === "function") importScripts("core.js");
       native = message.native === true,
       allowed = native
         ? ["type", "id", "native"]
+        : [
+            "type",
+            "id",
+            "item_id",
+            "revision",
+            "credential_id",
+            "credential_revision",
+          ],
+      required = native
+        ? ["type", "id", "native"]
         : ["type", "id", "item_id", "revision", "credential_id"];
     if (
-      Object.keys(message).length !== allowed.length ||
+      !required.every((field) => Object.hasOwn(message, field)) ||
       Object.keys(message).some((field) => !allowed.includes(field)) ||
       !conditionalSelectionBound(intent, message, c, key) ||
       // Listing candidates is read-only, but a selection claims the single
@@ -3759,20 +3844,46 @@ if (typeof importScripts === "function") importScripts("core.js");
       pendingPasskey
     )
       throw Error("refused");
+    let candidate = null;
     if (native) {
       if (intent.truncated !== true) throw Error("refused");
-    } else if (
-      !/^[a-f0-9]{32}$/.test(message.item_id || "") ||
-      !/^[a-f0-9]{64}$/.test(message.revision || "") ||
-      !core.validCredentialID(message.credential_id) ||
-      !intent.credentials.some(
-        (entry) =>
-          entry.item_id === message.item_id &&
-          entry.revision === message.revision &&
-          entry.credential_id === message.credential_id,
+    } else {
+      if (
+        !/^[a-f0-9]{32}$/.test(message.item_id || "") ||
+        !/^[a-f0-9]{64}$/.test(message.revision || "") ||
+        !core.validCredentialID(message.credential_id)
       )
-    )
-      throw Error("refused");
+        throw Error("refused");
+      // One stored candidate must match the full public selector exactly: item,
+      // parent revision, credential and (when the host supplies one) the exact
+      // child revision. A missing, stale or borrowed selector is refused; no
+      // first-parent or first-credential fallback exists.
+      candidate =
+        intent.credentials.find(
+          (entry) =>
+            entry.item_id === message.item_id &&
+            entry.revision === message.revision &&
+            entry.credential_id === message.credential_id,
+        ) || null;
+      if (!candidate) throw Error("refused");
+      const storedChild = core.validCredentialRevision(candidate.credential_revision)
+        ? candidate.credential_revision
+        : "";
+      if (storedChild) {
+        if (message.credential_revision !== storedChild)
+          throw Error("refused");
+      } else {
+        // Legacy host: no child revision exists, so it is only compatible
+        // with a singleton item and a selection that does not invent one.
+        if (Object.hasOwn(message, "credential_revision"))
+          throw Error("refused");
+        if (
+          intent.credentials.filter((entry) => entry.item_id === candidate.item_id)
+            .length !== 1
+        )
+          throw Error("refused");
+      }
+    }
     await current(c);
     // The probe yields control: this exact intent can be cancelled, replaced
     // or rebound, and an ordinary approval can start, while it is in flight.
@@ -3786,6 +3897,10 @@ if (typeof importScripts === "function") importScripts("core.js");
       pendingPasskey
     )
       throw Error("refused");
+    const childRevision =
+      candidate && core.validCredentialRevision(candidate.credential_revision)
+        ? candidate.credential_revision
+        : "";
     conditionalIntents.delete(key);
     const generation = epoch,
       options = conditionalRequestOptions(
@@ -3803,7 +3918,14 @@ if (typeof importScripts === "function") importScripts("core.js");
           options,
           ...(native
             ? {}
-            : { item_id: message.item_id, revision: message.revision }),
+            : {
+                item_id: candidate.item_id,
+                revision: candidate.revision,
+                credential_id: candidate.credential_id,
+                ...(childRevision
+                  ? { credential_revision: childRevision }
+                  : {}),
+              }),
         },
         125000,
       );
@@ -4400,12 +4522,16 @@ if (typeof importScripts === "function") importScripts("core.js");
           break;
         }
         case "passkey-remove": {
+          const removeFields = Object.keys(message).sort().join(",");
           if (
-            Object.keys(message).sort().join(",") !==
-              "credential_id,id,revision,type" ||
+            (removeFields !== "credential_id,id,revision,type" &&
+              removeFields !==
+                "credential_id,credential_revision,id,revision,type") ||
             !/^[a-f0-9]{32}$/.test(message.id || "") ||
             !/^[a-f0-9]{64}$/.test(message.revision || "") ||
-            !core.validCredentialID(message.credential_id)
+            !core.validCredentialID(message.credential_id) ||
+            (message.credential_revision !== undefined &&
+              !core.validCredentialRevision(message.credential_revision))
           )
             throw Error("refused");
           try {

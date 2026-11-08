@@ -13,6 +13,10 @@ type PasskeyView struct {
 	ID, Origin, RPID, Username            string
 	Create, VerificationRequired, Working bool
 	Choices                               []personal.PasskeyChoice
+	// ChoicePasskeys is aligned with Choices and reports how many durable
+	// credentials each creation target already owns. It is empty when unknown;
+	// the native UI always shows the format-upgrade warning for creation.
+	ChoicePasskeys []int
 }
 type pendingPasskey struct {
 	request      Request
@@ -26,6 +30,7 @@ type pendingPasskey struct {
 	cancelled    atomic.Bool
 	working      bool
 	choices      []personal.PasskeyChoice
+	choiceCounts []int
 	timer        *time.Timer
 }
 
@@ -53,7 +58,10 @@ func (c *Connection) startPasskey(r Request) error {
 	// the pair only for passkey-get, so creation can never attach by selector.
 	target := personal.PasskeyTarget{Context: r.Context(), Create: parsed.Create, Options: []byte(r.Options)}
 	if !parsed.Create && r.ItemID != "" && r.Revision != "" {
-		target.ID, target.Revision = r.ItemID, r.Revision
+		// The protocol only lets an assertion carry a credential selector
+		// together with this exact parent pair; carry it into the personal
+		// target so an exact credential, never a sibling, can be reviewed.
+		target.ID, target.Revision, target.CredentialID, target.CredentialRevision = r.ItemID, r.Revision, r.CredentialID, r.CredentialRevision
 	}
 	p := &pendingPasskey{request: r, parsed: parsed, session: s, gate: gate, until: until, epoch: c.epoch, passkeyEpoch: s.PasskeyRevocationEpoch(), target: target, working: true}
 	c.passkey = p
@@ -76,6 +84,18 @@ func (c *Connection) startPasskey(r Request) error {
 	})
 	go func() {
 		choices, err := s.ReviewPasskey(p.target)
+		var counts []int
+		if err == nil && parsed.Create && len(choices) > 0 {
+			// A creation choice reports its existing credential count so the
+			// native owner sees explicitly that appending a second credential
+			// upgrades the encrypted format (older clients refuse the vault).
+			if metadata, mErr := s.ReadPasskeysMetadata(false); mErr == nil {
+				counts = make([]int, len(choices))
+				for i, choice := range choices {
+					counts[i] = len(metadata[choice.ID])
+				}
+			}
+		}
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		defer c.changed()
@@ -90,7 +110,7 @@ func (c *Connection) startPasskey(r Request) error {
 			_ = c.refuse(r.ID)
 			return
 		}
-		p.choices = choices
+		p.choices, p.choiceCounts = choices, counts
 		c.passkeyStatus = "请核对网站并确认 Passkey 操作"
 	}()
 	return nil
@@ -153,13 +173,17 @@ func (c *Connection) passkeySnapshot() (*PasskeyView, string) {
 	if p == nil {
 		return nil, c.passkeyStatus
 	}
-	return &PasskeyView{ID: p.request.ID, Origin: p.request.Origin, RPID: p.parsed.RPID, Username: p.parsed.Options.User.Name, Create: p.parsed.Create, VerificationRequired: p.parsed.RequiresVerification(), Working: p.working, Choices: append([]personal.PasskeyChoice(nil), p.choices...)}, c.passkeyStatus
+	return &PasskeyView{ID: p.request.ID, Origin: p.request.Origin, RPID: p.parsed.RPID, Username: p.parsed.Options.User.Name, Create: p.parsed.Create, VerificationRequired: p.parsed.RequiresVerification(), Working: p.working, Choices: append([]personal.PasskeyChoice(nil), p.choices...), ChoicePasskeys: append([]int(nil), p.choiceCounts...)}, c.passkeyStatus
 }
 
 // resolvePasskeyApproval captures the exact pending request and selected
 // target under c.mu. A prepopulated (pinned) target is enforced exactly, and an
-// empty selection only ever means "create a new login".
-func (c *Connection) resolvePasskeyApproval(id, itemID string) (*pendingPasskey, personal.PasskeyTarget, error) {
+// empty selection only ever means "create a new login". The credential selector
+// binds the full reviewed choice: an explicit selector must match one exact
+// durable credential, while the legacy native API (empty selector) is accepted
+// only when the parent item has exactly one matching choice. There is never a
+// choose-the-first fallback.
+func (c *Connection) resolvePasskeyApproval(id, itemID, credentialID string) (*pendingPasskey, personal.PasskeyTarget, error) {
 	p := c.passkey
 	if p == nil || p.request.ID != id || p.working || !c.passkeyLive(p) {
 		return nil, personal.PasskeyTarget{}, ErrProtocol
@@ -170,34 +194,65 @@ func (c *Connection) resolvePasskeyApproval(id, itemID string) (*pendingPasskey,
 		// The UI selection must match a reviewed choice exactly. A prepopulated
 		// (pinned) target never satisfies the check by itself, so another account
 		// cannot be promoted to the signed identity.
-		matched := false
-		target.ID, target.Revision = "", ""
+		matches := 0
+		target.ID, target.Revision, target.CredentialID, target.CredentialRevision = "", "", "", ""
 		for _, choice := range p.choices {
-			if choice.ID == itemID {
-				target.ID, target.Revision, matched = choice.ID, choice.Revision, true
-				break
+			if choice.ID != itemID {
+				continue
 			}
+			// An explicit credential selector only ever matches that exact
+			// durable credential; an empty selector is the legacy native API
+			// and is accepted only when the parent is unambiguous.
+			if credentialID != "" && choice.CredentialID != credentialID {
+				continue
+			}
+			// A request that pinned a child content revision must match that
+			// exact reviewed revision. A stale child target is refused, never
+			// silently repaired to the current revision.
+			if p.target.CredentialRevision != "" && choice.CredentialRevision != p.target.CredentialRevision {
+				continue
+			}
+			matches++
+			target.ID, target.Revision, target.CredentialID, target.CredentialRevision = choice.ID, choice.Revision, choice.CredentialID, choice.CredentialRevision
 		}
-		if !matched || pinned != "" && (target.ID != pinned || target.Revision != p.target.Revision) {
+		if matches != 1 || pinned != "" && (target.ID != pinned || target.Revision != p.target.Revision) {
+			return nil, personal.PasskeyTarget{}, ErrProtocol
+		}
+		if p.target.CredentialID != "" && target.CredentialID != p.target.CredentialID {
+			return nil, personal.PasskeyTarget{}, ErrProtocol
+		}
+		if p.target.CredentialRevision != "" && target.CredentialRevision != p.target.CredentialRevision {
+			return nil, personal.PasskeyTarget{}, ErrProtocol
+		}
+		if !target.Create && (!passkey.ValidCredentialID(target.CredentialID) || !revision.MatchString(target.CredentialRevision)) {
 			return nil, personal.PasskeyTarget{}, ErrProtocol
 		}
 	} else {
 		// An empty selection only ever creates a new login; it is never an
 		// implicit choice of a pinned or merely pre-populated target.
-		if !target.Create || pinned != "" {
+		if credentialID != "" || !target.Create || pinned != "" || p.target.CredentialRevision != "" {
 			return nil, personal.PasskeyTarget{}, ErrProtocol
 		}
+		target.CredentialRevision = ""
 	}
 	return p, target, nil
 }
 
-// ApprovePasskey is called only from the native UI. Fresh knowledge factors are
-// verified here; the browser can never assert user verification. An empty
-// selection creates a new login.
+// ApprovePasskey is the legacy single-selector native API. It accepts a parent
+// item only when exactly one reviewed choice matches it; an ambiguous parent
+// with several credentials is refused instead of silently choosing the first.
+// An empty selection creates a new login.
 func (c *Connection) ApprovePasskey(id, itemID string, password, secret []byte) error {
+	return c.ApprovePasskeyCredential(id, itemID, "", password, secret)
+}
+
+// ApprovePasskeyCredential is the exact native selection API. The credential
+// selector must name one full reviewed choice; it is never inferred, and an
+// empty selector keeps the legacy unambiguous-only behaviour.
+func (c *Connection) ApprovePasskeyCredential(id, itemID, credentialID string, password, secret []byte) error {
 	defer clear(password)
 	defer clear(secret)
-	return c.approvePasskey(id, itemID, func(p *pendingPasskey) (bool, error) {
+	return c.approvePasskey(id, itemID, credentialID, func(p *pendingPasskey) (bool, error) {
 		verified := len(password) > 0 || len(secret) > 0
 		if !verified {
 			return false, nil
@@ -212,10 +267,16 @@ func (c *Connection) ApprovePasskey(id, itemID string, password, secret []byte) 
 // asserts user verification, and no new private material crosses this API.
 // It fails closed when the adapter is absent or the capsule is not enrolled.
 func (c *Connection) ApprovePasskeyWithSystem(id, itemID string, store personal.SystemPasskeyVerificationStore) error {
+	return c.ApprovePasskeyCredentialWithSystem(id, itemID, "", store)
+}
+
+// ApprovePasskeyCredentialWithSystem is the exact-selection system-factor
+// variant. It applies the same full-choice binding as the knowledge path.
+func (c *Connection) ApprovePasskeyCredentialWithSystem(id, itemID, credentialID string, store personal.SystemPasskeyVerificationStore) error {
 	if store == nil {
 		return ErrProtocol
 	}
-	return c.approvePasskey(id, itemID, func(p *pendingPasskey) (bool, error) {
+	return c.approvePasskey(id, itemID, credentialID, func(p *pendingPasskey) (bool, error) {
 		if e := p.session.VerifyPasskeyUserWithSystem(store); e != nil {
 			return false, e
 		}
@@ -229,9 +290,9 @@ func (c *Connection) ApprovePasskeyWithSystem(id, itemID string, store personal.
 // connection generation and passkey revocation epoch, the deadline and the
 // queued writer checks. Neither c.mu nor a Session lock is held while the
 // verification callback waits on the user.
-func (c *Connection) approvePasskey(id, itemID string, verify func(*pendingPasskey) (bool, error)) error {
+func (c *Connection) approvePasskey(id, itemID, credentialID string, verify func(*pendingPasskey) (bool, error)) error {
 	c.mu.Lock()
-	p, target, e := c.resolvePasskeyApproval(id, itemID)
+	p, target, e := c.resolvePasskeyApproval(id, itemID, credentialID)
 	if e != nil {
 		c.mu.Unlock()
 		return e

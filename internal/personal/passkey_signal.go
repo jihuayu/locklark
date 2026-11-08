@@ -388,7 +388,7 @@ func signalMatch(r PasskeySignalRequest, item vault.Item, revision string, recor
 }
 
 func passkeySignalEligible(item vault.Item) bool {
-	return item.Kind == "login" && item.State == "" && item.EffectiveCategory() == vault.CategoryLogin && len(item.Passkey) > 0
+	return item.Kind == "login" && item.State == "" && item.EffectiveCategory() == vault.CategoryLogin && len(item.PasskeyRecords()) > 0
 }
 
 // ReviewPasskeySignal enumerates the bounded owner-approval proposal for one
@@ -428,20 +428,24 @@ func (s *Session) ReviewPasskeySignal(r PasskeySignalRequest) (PasskeySignalProp
 			if revision == "" {
 				continue
 			}
-			record, err := passkey.Load(item.Passkey)
-			if err != nil {
-				continue
-			}
-			change, matched := signalMatch(r, item, revision, record)
-			record.Clear()
-			if !matched {
-				continue
-			}
-			changes = append(changes, change)
-			if len(changes) > MaxPasskeySignalChanges {
-				ignored = true
-				changes = nil
-				return nil
+			// Every durable credential of the login is considered, so one login
+			// with several credentials contributes one row per affected credential.
+			for _, raw := range item.PasskeyRecords() {
+				record, err := passkey.Load(raw)
+				if err != nil {
+					continue
+				}
+				change, matched := signalMatch(r, item, revision, record)
+				record.Clear()
+				if !matched {
+					continue
+				}
+				changes = append(changes, change)
+				if len(changes) > MaxPasskeySignalChanges {
+					ignored = true
+					changes = nil
+					return nil
+				}
 			}
 		}
 		return nil
@@ -459,7 +463,12 @@ func (s *Session) ReviewPasskeySignal(r PasskeySignalRequest) (PasskeySignalProp
 	if ignored {
 		return PasskeySignalProposal{Changes: []PasskeySignalChange{}}, nil
 	}
-	sort.SliceStable(changes, func(a, b int) bool { return changes[a].ItemID < changes[b].ItemID })
+	sort.SliceStable(changes, func(a, b int) bool {
+		if changes[a].ItemID != changes[b].ItemID {
+			return changes[a].ItemID < changes[b].ItemID
+		}
+		return changes[a].CredentialID < changes[b].CredentialID
+	})
 	return PasskeySignalProposal{Changes: changes}, nil
 }
 
@@ -467,12 +476,19 @@ func validPasskeySignalChanges(r PasskeySignalRequest, changes []PasskeySignalCh
 	if len(changes) == 0 || len(changes) > MaxPasskeySignalChanges {
 		return false
 	}
-	seen := map[string]bool{}
+	// One reviewed row names exactly one credential, so the uniqueness key is
+	// the (item, credential) pair: a login may legitimately contribute several
+	// rows, one per affected credential, but never the same credential twice.
+	seen := map[[2]string]bool{}
 	for _, change := range changes {
-		if !idOK(change.ItemID) || !digestOK(change.Revision) || !validSignalCredentialID(change.CredentialID) || seen[change.ItemID] {
+		if !idOK(change.ItemID) || !digestOK(change.Revision) || !validSignalCredentialID(change.CredentialID) {
 			return false
 		}
-		seen[change.ItemID] = true
+		pair := [2]string{change.ItemID, change.CredentialID}
+		if seen[pair] {
+			return false
+		}
+		seen[pair] = true
 		switch change.Action {
 		case "remove":
 			if r.Kind == PasskeySignalUser || change.Name != "" || change.DisplayName != "" {
@@ -522,14 +538,126 @@ func passkeySignalBinding(key []byte, r PasskeySignalRequest, changes []PasskeyS
 	return hex.EncodeToString(mac.Sum(nil)), nil
 }
 
-// ApplyPasskeySignal applies one owner-confirmed proposal. Every reviewed row
-// is revalidated (item id, revision, active login state, RP, credential id and
-// user id) inside one authenticated write transaction before the single commit
-// gate is won; any stale row refuses the whole batch without a write. Each
-// affected item gets its own sealed snapshot and linked audit event so history
-// replay stays single-item. Removals only clear the passkey field; updates only
-// rewrite Record.Name/DisplayName. The credential id, user id, private key and
-// every other login field are preserved.
+// signalChangePredicate rechecks one reviewed row against the durable record it
+// names: exact credential id, exact RP, exact WebAuthn user handle and the same
+// kind-specific membership or difference rule that made the review match it.
+// It is the only definition of "this row still affects this credential".
+func signalChangePredicate(r PasskeySignalRequest, change PasskeySignalChange, record *passkey.Record) bool {
+	if record == nil || record.ID != change.CredentialID || record.RPID != r.RPID {
+		return false
+	}
+	if r.Kind != PasskeySignalUnknown && record.UserID != r.UserID {
+		return false
+	}
+	if change.Action == "remove" {
+		if r.Kind == PasskeySignalUser {
+			return false
+		}
+		if r.Kind == PasskeySignalAccepted {
+			// The accepted dictionary is authoritative: the page has just
+			// asserted this exact credential still exists for this user, so a
+			// forged or stale proposal may never remove it.
+			for _, accepted := range r.Accepted {
+				if accepted == record.ID {
+					return false
+				}
+			}
+		}
+		return true
+	}
+	// An update renames the exact stored record only, and must still differ:
+	// identical names are a stale review, not a no-op write.
+	return change.Action == "update" && r.Kind == PasskeySignalUser && (record.Name != r.Name || record.DisplayName != r.DisplayName)
+}
+
+// applyPasskeySignalChange rewrites one owned item clone so exactly one
+// credential is removed or renamed. Every sibling record is retained byte for
+// byte; a login still stored in the legacy single-record form keeps that form
+// on update, and removing the last credential clears both persisted forms.
+func applyPasskeySignalChange(next *vault.Item, change PasskeySignalChange) error {
+	records := next.PasskeyRecords()
+	if len(records) == 0 {
+		return ErrMutationRefused
+	}
+	collection := len(next.Passkeys) > 0
+	remaining := make([][]byte, 0, len(records))
+	var encoded []byte
+	defer func() { clear(encoded) }()
+	matched := false
+	for _, raw := range records {
+		record, err := passkey.Load(raw)
+		if err != nil {
+			// An unreadable sibling can never be silently dropped or rewritten.
+			return ErrMutationRefused
+		}
+		hit := record.ID == change.CredentialID
+		if !hit {
+			record.Clear()
+			remaining = append(remaining, raw)
+			continue
+		}
+		if matched {
+			record.Clear()
+			return ErrMutationRefused
+		}
+		matched = true
+		if change.Action == "remove" {
+			record.Clear()
+			continue
+		}
+		updated := passkey.Record{
+			Version:     record.Version,
+			ID:          record.ID,
+			RPID:        record.RPID,
+			UserID:      record.UserID,
+			Name:        change.Name,
+			DisplayName: change.DisplayName,
+			PrivateKey:  append([]byte(nil), record.PrivateKey...),
+		}
+		record.Clear()
+		encoded, err = json.Marshal(updated)
+		clear(updated.PrivateKey)
+		if err != nil || !passkey.ValidRecord(encoded) {
+			clear(encoded)
+			return ErrMutationRefused
+		}
+		remaining = append(remaining, encoded)
+	}
+	if !matched {
+		return ErrMutationRefused
+	}
+	if len(remaining) == 0 {
+		// The last credential is gone: both persisted forms are cleared so the
+		// login cannot keep an empty-but-present passkey slot.
+		next.ClearPasskeys()
+		clear(encoded)
+		return nil
+	}
+	// The retain-form helpers clone before zeroing the borrowed durable bytes.
+	var err error
+	if collection {
+		err = next.SetPasskeyRecords(remaining)
+	} else {
+		err = next.SetLegacyPasskey(remaining[0])
+	}
+	clear(encoded)
+	return err
+}
+
+// ApplyPasskeySignal applies one owner-confirmed proposal. Every reviewed row is
+// revalidated inside one authenticated write transaction before the single
+// commit gate is won: item id, the original parent revision of that item, active
+// login state and the exact stored record named by the row, including RP, user
+// handle and the kind-specific predicate. Any stale or forged row refuses the
+// whole batch without a write.
+//
+// Each row then applies exactly one credential change to an owned item clone
+// (siblings are retained byte for byte) and seals its own intermediate snapshot
+// with one linked single-item audit event. Multiple rows of the same login share
+// the same parent revision only for the first event: the second event names the
+// first event's hash as its base revision, so cold journal replay folds a login's
+// events in exactly the order they were committed. Everything happens in one
+// Bolt transaction, so a failure never commits a partial batch.
 func (s *Session) ApplyPasskeySignal(r PasskeySignalRequest, changes []PasskeySignalChange, g *MutationGate) (string, error) {
 	if s == nil {
 		if g != nil {
@@ -561,57 +689,48 @@ func (s *Session) ApplyPasskeySignal(r PasskeySignalRequest, changes []PasskeySi
 			return err
 		}
 		defer auth.clear()
-		index := make(map[string]int, len(changes))
+		rows := make(map[string]int, len(changes))
 		for _, change := range changes {
-			row := -1
-			for k := range auth.items {
-				if auth.items[k].ID != change.ItemID {
-					continue
+			if _, resolved := rows[change.ItemID]; !resolved {
+				row := -1
+				for k := range auth.items {
+					if auth.items[k].ID != change.ItemID {
+						continue
+					}
+					if row >= 0 {
+						return invalid
+					}
+					row = k
 				}
-				if row >= 0 {
-					return invalid
+				if row < 0 {
+					return ErrNotFound
 				}
-				row = k
+				rows[change.ItemID] = row
 			}
-			if row < 0 {
-				return ErrNotFound
-			}
+			// The reviewed parent revision must still be the item's original
+			// revision: every row of one login was reviewed against it.
 			if auth.revisions[change.ItemID] != change.Revision {
 				return ErrConflict
 			}
-			current := auth.items[row]
+			current := auth.items[rows[change.ItemID]]
 			if current.State != "" || current.Kind != "login" || current.EffectiveCategory() != vault.CategoryLogin {
 				return ErrMutationRefused
 			}
-			record, err := passkey.Load(current.Passkey)
-			if err != nil {
-				return ErrMutationRefused
-			}
-			matched := record.RPID == r.RPID && record.ID == change.CredentialID
-			if r.Kind != PasskeySignalUnknown {
-				matched = matched && record.UserID == r.UserID
-			}
-			if r.Kind == PasskeySignalAccepted {
-				// The accepted dictionary is authoritative: the page has just
-				// asserted this exact credential still exists for this user, so a
-				// forged or stale proposal may never remove it, whatever the
-				// reviewed row claims.
-				for _, accepted := range r.Accepted {
-					if accepted == record.ID {
-						matched = false
-					}
+			matched := false
+			for _, raw := range current.PasskeyRecords() {
+				record, err := passkey.Load(raw)
+				if err != nil {
+					continue
+				}
+				hit := signalChangePredicate(r, change, record)
+				record.Clear()
+				if hit {
+					matched = true
 				}
 			}
-			if change.Action == "update" {
-				// The proposed new names must still differ from the stored ones:
-				// identical names are a stale review, not a no-op write.
-				matched = matched && r.Kind == PasskeySignalUser && (record.Name != r.Name || record.DisplayName != r.DisplayName)
-			}
-			record.Clear()
 			if !matched {
 				return ErrMutationRefused
 			}
-			index[change.ItemID] = row
 		}
 		// Every selector is now verified. Win the one-shot decision before any
 		// revocation or write; a win is not yet a persistence receipt.
@@ -632,49 +751,35 @@ func (s *Session) ApplyPasskeySignal(r PasskeySignalRequest, changes []PasskeySi
 		}
 		items := append([]vault.Item(nil), auth.items...)
 		tip, snapshot := auth.tip, auth.snapshot
+		// parent holds the revision each new event must name as its base. It
+		// starts as the original authenticated revisions and advances to the
+		// previous event of the same login, so a second row of one login never
+		// re-uses the reviewed revision and cold replay never breaks.
+		parent := make(map[string]string, len(auth.revisions))
+		for id, revision := range auth.revisions {
+			parent[id] = revision
+		}
+		// Every clone created below owns private passkey buffers that auth.clear
+		// does not know about. Zero them on success and on every error exit.
+		owned := make(map[string]*vault.Item, len(changes))
+		defer func() {
+			for _, item := range owned {
+				item.ClearPasskeys()
+			}
+		}()
 		for _, change := range changes {
-			row := index[change.ItemID]
-			next := vault.CloneItem(items[row])
-			// CloneItem deep-copies the item's private passkey bytes, and auth.clear()
-			// only owns the original auth.items slice. Zero the clone as soon as it is
-			// no longer needed so no stray plaintext credential survives.
-			if change.Action == "remove" {
-				clear(next.Passkey)
-				next.Passkey = nil
-			} else {
-				record, err := passkey.Load(next.Passkey)
-				clear(next.Passkey)
-				if err != nil {
-					return ErrMutationRefused
-				}
-				updated := passkey.Record{
-					Version:     record.Version,
-					ID:          record.ID,
-					RPID:        record.RPID,
-					UserID:      record.UserID,
-					Name:        change.Name,
-					DisplayName: change.DisplayName,
-					PrivateKey:  append([]byte(nil), record.PrivateKey...),
-				}
-				record.Clear()
-				if updated.ID != change.CredentialID {
-					clear(updated.PrivateKey)
-					return ErrMutationRefused
-				}
-				raw, err := json.Marshal(updated)
-				clear(updated.PrivateKey)
-				if err != nil || !passkey.ValidRecord(raw) {
-					clear(raw)
-					return ErrMutationRefused
-				}
-				// The new record embeds the private key and is therefore not owned by
-				// auth.clear() either: keep it until the last seal/audit inside this
-				// callback has consumed items, then zero it.
-				defer clear(raw)
-				next.Passkey = raw
+			row := rows[change.ItemID]
+			next, cloned := owned[change.ItemID]
+			if !cloned {
+				clone := vault.CloneItem(items[row])
+				next = &clone
+				owned[change.ItemID] = next
+			}
+			if err := applyPasskeySignalChange(next, change); err != nil {
+				return err
 			}
 			next.UpdatedAt = time.Now().Unix()
-			items[row] = next
+			items[row] = *next
 			if vault.ValidateItems([]byte(schema), items) != nil {
 				return ErrMutationRefused
 			}
@@ -682,11 +787,12 @@ func (s *Session) ApplyPasskeySignal(r PasskeySignalRequest, changes []PasskeySi
 			if err != nil {
 				return err
 			}
-			event, err := appendLinked(tx.Bucket(bucket), auth.identity, tip, snapshot, passkeySignalAction, change.ItemID, "succeeded", change.Revision, link, eventDetails{})
+			event, err := appendLinked(tx.Bucket(bucket), auth.identity, tip, snapshot, passkeySignalAction, change.ItemID, "succeeded", parent[change.ItemID], link, eventDetails{})
 			if err != nil {
 				return err
 			}
 			tip = auditTip{Count: event.Sequence, Epoch: snapshot.Epoch, Last: event.hash(), Snapshot: hex.EncodeToString(snapshot.Signature), Origin: auth.tip.Origin}
+			parent[change.ItemID] = event.hash()
 			nextRevision = event.hash()
 		}
 		return nil

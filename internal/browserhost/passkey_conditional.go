@@ -12,21 +12,42 @@ const MaxPasskeyCandidates = 50
 
 // passkeyCandidatesResponse builds the exact passkey-candidates frame. The
 // projection is metadata only and the encoded body is kept strictly below
-// MaxOutput, so a native frame is never split or partially written.
-func passkeyCandidatesResponse(id string, candidates []personal.PasskeyCandidate) (Response, error) {
+// MaxOutput, so a native frame is never split or partially written. The child
+// revision comes from the managed metadata projection keyed by
+// (item, credential); a candidate without one is never offered with a guessed
+// or borrowed revision.
+func passkeyCandidatesResponse(id string, candidates []personal.PasskeyCandidate, managed map[string][]personal.ManagedPasskeyMetadata) (Response, error) {
+	revisions := map[string]map[string]string{}
+	for itemID, values := range managed {
+		byCredential := map[string]string{}
+		for _, value := range values {
+			if value.CredentialID != "" && value.Revision != "" {
+				byCredential[value.CredentialID] = value.Revision
+			}
+		}
+		revisions[itemID] = byCredential
+	}
 	passkeys := make([]BrowserPasskeyCandidate, 0, len(candidates))
 	for _, candidate := range candidates {
 		if len(passkeys) == MaxPasskeyCandidates {
 			break
 		}
+		childRevision := revisions[candidate.ItemID][candidate.CredentialID]
+		if childRevision == "" {
+			// A candidate whose exact child revision is unavailable cannot be
+			// selected safely. Fail closed instead of dropping it silently or
+			// borrowing another credential's revision.
+			return Response{}, ErrProtocol
+		}
 		passkeys = append(passkeys, BrowserPasskeyCandidate{
-			ItemID:       candidate.ItemID,
-			Revision:     candidate.Revision,
-			Title:        candidate.Title,
-			CredentialID: candidate.CredentialID,
-			RPID:         candidate.RPID,
-			UserName:     candidate.UserName,
-			DisplayName:  candidate.DisplayName,
+			ItemID:             candidate.ItemID,
+			Revision:           candidate.Revision,
+			Title:              candidate.Title,
+			CredentialID:       candidate.CredentialID,
+			CredentialRevision: childRevision,
+			RPID:               candidate.RPID,
+			UserName:           candidate.UserName,
+			DisplayName:        candidate.DisplayName,
 		})
 	}
 	truncated := len(passkeys) < len(candidates)
@@ -69,7 +90,14 @@ func (c *Connection) listPasskeyCandidates(r Request) error {
 		}
 		return c.refuse(r.ID)
 	}
-	response, e := passkeyCandidatesResponse(r.ID, candidates)
+	managed, e := s.ReadManagedPasskeysMetadata(false)
+	if e != nil || epoch != c.generation.Load() || c.session.Load() != s || !s.Unlocked() {
+		if !s.Unlocked() {
+			c.invalidate()
+		}
+		return c.refuse(r.ID)
+	}
+	response, e := passkeyCandidatesResponse(r.ID, candidates, managed)
 	if e != nil {
 		return c.refuse(r.ID)
 	}

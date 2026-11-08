@@ -356,6 +356,40 @@ try {
       visible: (selector) => evaluate(
         "!!document.querySelector(" + JSON.stringify(selector) + ")?.getClientRects().length",
       ),
+      value: (selector) => evaluate(
+        "document.querySelector(" + JSON.stringify(selector) + ")?.value ?? null",
+      ),
+      selectOption: async (selector, value) => {
+        const options = await evaluate(
+          "Array.from(document.querySelector(" + JSON.stringify(selector) + ")?.options || []).map(option => option.value)",
+        );
+        const index = options.indexOf(value);
+        assert(index > 0, "Exact popup option unavailable");
+        const id = selector.startsWith("#") ? selector.slice(1) : "";
+        const labelSelector = id ? 'label[for="' + id + '"]' : selector;
+        const { root } = await call("DOM.getDocument");
+        const label = await call("DOM.querySelector", { nodeId: root.nodeId, selector: labelSelector });
+        const { nodeId } = label.nodeId ? label :
+          await call("DOM.querySelector", { nodeId: root.nodeId, selector });
+        assert(nodeId, "Popup select unavailable");
+        const { model } = await call("DOM.getBoxModel", { nodeId });
+        const x = (model.content[0] + model.content[4]) / 2;
+        const y = (model.content[1] + model.content[5]) / 2;
+        for (const type of ["mousePressed", "mouseReleased"])
+          await call("Input.dispatchMouseEvent", { type, x, y, button: "left", clickCount: 1 });
+        await eventually(async () =>
+          await evaluate("document.activeElement === document.querySelector(" + JSON.stringify(selector) + ")"),
+        "Popup select focus missing");
+        const key = async (name, code, keyCode) => {
+          for (const type of ["keyDown", "keyUp"])
+            await call("Input.dispatchKeyEvent", { type, key: name, code, windowsVirtualKeyCode: keyCode });
+        };
+        await key("Home", "Home", 36);
+        for (let step = 0; step < index; step++) await key("ArrowDown", "ArrowDown", 40);
+        await eventually(async () =>
+          (await evaluate("document.querySelector(" + JSON.stringify(selector) + ")?.value")) === value,
+        "Physical popup select did not apply the exact option");
+      },
       screenshot: async (path) => {
         const result = await call("Page.captureScreenshot", {
           format: "png",
@@ -703,7 +737,7 @@ try {
       : "unclassified acceptance failure",
     frames:
       typeof error?.stack === "string"
-        ? error.stack.match(/browser_native_acceptance\.mjs:[0-9]+:[0-9]+/g)
+        ? error.stack.match(/browser_(?:native|passkey_management|conditional_passkey|passkey)_acceptance\.mjs:[0-9]+:[0-9]+/g)
         : [],
     stage,
     popup: { available: false },

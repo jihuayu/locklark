@@ -331,6 +331,13 @@
           : "";
     return secondary ? account + " · " + secondary : account;
   }
+  // Public sibling hint: a short, non-secret slice of the credential ID so
+  // two accounts with identical display labels stay distinguishable.
+  function shortCredentialHint(credentialID) {
+    return typeof credentialID === "string" && credentialID.length > 12
+      ? credentialID.slice(0, 6) + "…" + credentialID.slice(-4)
+      : "";
+  }
   function clearConditional() {
     conditionalRequest = null;
     conditionalGeneration++;
@@ -439,14 +446,34 @@
     box.setAttribute("data-locklark-conditional", "passkey");
     note(box, location.hostname);
     const entries = listed.passkeys.slice(0, 50);
+    const labelCounts = new Map();
     for (const entry of entries) {
-      const choice = element("button", conditionalChoiceLabel(entry));
+      const label = conditionalChoiceLabel(entry);
+      labelCounts.set(label, (labelCounts.get(label) || 0) + 1);
+    }
+    for (const entry of entries) {
+      const label = conditionalChoiceLabel(entry);
+      const childRevision =
+        typeof entry.credential_revision === "string" &&
+        /^[a-f0-9]{64}$/.test(entry.credential_revision)
+          ? entry.credential_revision
+          : "";
+      const hint = (labelCounts.get(label) || 0) > 1
+        ? shortCredentialHint(entry.credential_id)
+        : "";
+      const choice = element("button", hint ? label + " · " + hint : label);
       choice.type = "button";
       choice.setAttribute(
         "data-locklark-passkey-choice",
         entry.item_id || entry.credential_id,
       );
       choice.setAttribute("data-locklark-passkey-credential", entry.credential_id);
+      choice.setAttribute("data-locklark-passkey-revision", entry.revision);
+      if (childRevision)
+        choice.setAttribute(
+          "data-locklark-passkey-credential-revision",
+          childRevision,
+        );
       choice.addEventListener("click", (event) => {
         if (!event.isTrusted) return;
         if (conditionalRequest !== call) return;
@@ -459,6 +486,7 @@
             item_id: entry.item_id,
             revision: entry.revision,
             credential_id: entry.credential_id,
+            ...(childRevision ? { credential_revision: childRevision } : {}),
           },
           call,
         );

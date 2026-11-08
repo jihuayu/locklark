@@ -2,6 +2,7 @@ package desktop
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"time"
 
@@ -339,101 +340,142 @@ func (a *App) passkeySystemStore() (personal.SystemPasskeyVerificationStore, boo
 	return store, true
 }
 
+// shortPasskeyCredential renders a safe, non-secret hint that distinguishes two
+// credentials of the same login in the native selector. The full selector is
+// still bound on click; this text is display only.
+func shortPasskeyCredential(id string) string {
+	if len(id) <= 8 {
+		return visible(id)
+	}
+	return visible(id[:8]) + "…"
+}
+
+// passkeyChoiceLabel keeps every reviewed choice distinguishable: the request
+// RP, the account and a short credential hint. Two credentials of one parent
+// must never render as two identical buttons.
+func passkeyChoiceLabel(p browserhost.PasskeyView, choice personal.PasskeyChoice, create bool, existing int) string {
+	prefix := "登录："
+	if create {
+		prefix = "保存到："
+	}
+	label := prefix + visible(p.RPID) + " · " + browserTitle(choice.Title) + " · " + visible(choice.Username)
+	if choice.CredentialID != "" {
+		label += " · 凭据 " + shortPasskeyCredential(choice.CredentialID)
+	}
+	if create {
+		label += fmt.Sprintf("（已有 %d 个 Passkey）", existing)
+		if existing > 0 {
+			label += " · 升级加密格式，旧客户端将拒绝该金库"
+		}
+	}
+	return label
+}
+
 func (a *App) browserPasskeyView(c *ui.Context, p browserhost.PasskeyView, status string) {
 	if a.browserPasskeyID != p.ID {
 		a.browserPasskeyID = p.ID
 		a.password = ""
 		a.secret = ""
 	}
-	heading := "使用 Passkey 登录"
-	if p.Create {
-		heading = "保存 Passkey"
-	}
-	ui.Text(c, heading).FontSize(22).Bold()
-	ui.Text(c, "网站："+visible(p.Origin)).FontSize(20).Bold()
-	ui.Text(c, "Passkey 域名："+visible(p.RPID))
-	if p.Create {
-		ui.Text(c, "账号："+visible(p.Username))
-	}
-	ui.Text(c, status)
-	if p.Working {
-		return
-	}
-	ui.Text(c, "需要用户验证时，请在此重新输入主密码和 Secret Key。网站不会获得这些解锁因素。")
-	ui.TextInput(c, &a.password).Label("验证主密码").Password().Disabled(a.busy)
-	ui.TextInput(c, &a.secret).Label("验证 Secret Key").Password().Disabled(a.busy)
-	approve := func(item string) {
-		pw := []byte(a.password)
-		var key []byte
-		var err error
-		if a.secret != "" {
-			key, err = personal.ParseSecret(a.secret)
+	ui.Column(c).Gap(6).Children(func() {
+		heading := "使用 Passkey 登录"
+		if p.Create {
+			heading = "保存 Passkey"
 		}
-		a.password = ""
-		a.secret = ""
-		if err != nil {
-			clear(pw)
-			a.status = "Secret Key 格式不正确"
+		ui.Text(c, heading).FontSize(18).Bold()
+		ui.Text(c, "网站："+visible(p.Origin)).FontSize(16).Bold()
+		ui.Text(c, "Passkey 域名："+visible(p.RPID))
+		if p.Create {
+			ui.Text(c, "账号："+visible(p.Username))
+		}
+		ui.Text(c, status)
+		if p.Working {
 			return
 		}
-		a.run(func() outcome {
-			defer clear(pw)
-			defer clear(key)
-			return outcome{err: a.browser.ApprovePasskey(p.ID, item, pw, key)}
-		})
-	}
-	if p.VerificationRequired {
-		ui.Text(c, "此网站要求用户验证；必须填写两个解锁因素。").Bold()
-	}
-	factorsReady := a.password != "" && a.secret != "" || !p.VerificationRequired && a.password == "" && a.secret == ""
-	if p.Create {
-		ui.PrimaryButton(c, "创建新登录并保存 Passkey").Disabled(a.busy || !factorsReady).OnClick(func() { approve("") })
-	}
-	for _, choice := range p.Choices {
-		choice := choice
-		label := "登录：" + browserTitle(choice.Title) + " · " + visible(choice.Username)
-		if p.Create {
-			label = "保存到：" + browserTitle(choice.Title) + " · " + visible(choice.Username)
-		}
-		ui.Button(c, label).Disabled(a.busy || !factorsReady).OnClick(func() { approve(choice.ID) })
-	}
-	// A per-account (or new-credential) system factor button appears only when
-	// the trusted native adapter can perform a fresh user verification. The
-	// adapter is never called while rendering, listing candidates or before a
-	// target is selected; each click asks the OS again and no earlier unlock
-	// result is reused. Enrollment in "安全设置" must already exist.
-	if store, ok := a.passkeySystemStore(); ok {
-		systemLabel := osunlock.Label()
-		approveSystem := func(item string) {
-			// Stale knowledge-factor inputs never travel with an OS approval.
+		ui.Text(c, "需要用户验证时，请在此重新输入主密码和 Secret Key。网站不会获得这些解锁因素。")
+		ui.TextInput(c, &a.password).Label("验证主密码").Password().Disabled(a.busy)
+		ui.TextInput(c, &a.secret).Label("验证 Secret Key").Password().Disabled(a.busy)
+		approve := func(item, credential string) {
+			pw := []byte(a.password)
+			var key []byte
+			var err error
+			if a.secret != "" {
+				key, err = personal.ParseSecret(a.secret)
+			}
 			a.password = ""
 			a.secret = ""
+			if err != nil {
+				clear(pw)
+				a.status = "Secret Key 格式不正确"
+				return
+			}
 			a.run(func() outcome {
-				e := a.browser.ApprovePasskeyWithSystem(p.ID, item, store)
-				return outcome{err: e, apply: func() {
-					if v := a.browser.Snapshot(); v.PasskeyStatus != "" {
-						a.status = v.PasskeyStatus
-					}
-				}}
+				defer clear(pw)
+				defer clear(key)
+				return outcome{err: a.browser.ApprovePasskeyCredential(p.ID, item, credential, pw, key)}
 			})
 		}
-		ui.Text(c, "系统验证（"+systemLabel+"）：需先在“安全设置”启用系统快捷解锁；每次操作都会重新由系统验证，网站不会获得解锁因素。")
+		if p.VerificationRequired {
+			ui.Text(c, "此网站要求用户验证；必须填写两个解锁因素。").Bold()
+		}
+		factorsReady := a.password != "" && a.secret != "" || !p.VerificationRequired && a.password == "" && a.secret == ""
+		// Keep reviewed choices reachable while factors and cancel remain visible.
 		if p.Create {
-			ui.Button(c, "使用"+systemLabel+"创建并保存 Passkey").Disabled(a.busy).OnClick(func() { approveSystem("") })
+			ui.Text(c, "添加第二个 Passkey 会升级该登录的加密格式；旧客户端将拒绝打开金库。请仅在核对账号后明确批准。").Bold()
+			ui.PrimaryButton(c, "创建新登录并保存 Passkey").Disabled(a.busy || !factorsReady).OnClick(func() { approve("", "") })
 		}
-		for _, choice := range p.Choices {
-			choice := choice
-			label := "使用" + systemLabel + "登录：" + browserTitle(choice.Title) + " · " + visible(choice.Username)
-			if p.Create {
-				label = "使用" + systemLabel + "保存到：" + browserTitle(choice.Title) + " · " + visible(choice.Username)
-			}
-			ui.Button(c, label).Disabled(a.busy).OnClick(func() { approveSystem(choice.ID) })
-		}
-		ui.Text(c, "系统验证失败或被取消时，请继续使用主密码与 Secret Key。")
-	}
-	ui.Button(c, "取消 / 使用其他验证器").Disabled(a.busy).OnClick(func() {
-		a.password = ""
-		a.secret = ""
-		a.run(func() outcome { return outcome{err: a.browser.RejectPasskey(p.ID)} })
+		ui.Scroll(c).Height(160).FillWidth().Children(func() {
+			ui.Column(c).Gap(4).Children(func() {
+				for index, choice := range p.Choices {
+					choice := choice
+					existing := 0
+					if index < len(p.ChoicePasskeys) {
+						existing = p.ChoicePasskeys[index]
+					}
+					label := passkeyChoiceLabel(p, choice, p.Create, existing)
+					ui.Button(c, label).Key("passkey-knowledge:" + choice.ID + ":" + choice.CredentialID).Disabled(a.busy || !factorsReady).OnClick(func() { approve(choice.ID, choice.CredentialID) })
+				}
+				// A per-account (or new-credential) system factor button appears only when
+				// the trusted native adapter can perform a fresh user verification. The
+				// adapter is never called while rendering, listing candidates or before a
+				// target is selected; each click asks the OS again and no earlier unlock
+				// result is reused. Enrollment in "安全设置" must already exist.
+				if store, ok := a.passkeySystemStore(); ok {
+					systemLabel := osunlock.Label()
+					approveSystem := func(item, credential string) {
+						// Stale knowledge-factor inputs never travel with an OS approval.
+						a.password = ""
+						a.secret = ""
+						a.run(func() outcome {
+							e := a.browser.ApprovePasskeyCredentialWithSystem(p.ID, item, credential, store)
+							return outcome{err: e, apply: func() {
+								if v := a.browser.Snapshot(); v.PasskeyStatus != "" {
+									a.status = v.PasskeyStatus
+								}
+							}}
+						})
+					}
+					ui.Text(c, "系统验证（"+systemLabel+"）：需先在“安全设置”启用系统快捷解锁；每次操作都会重新由系统验证，网站不会获得解锁因素。").FontSize(12)
+					if p.Create {
+						ui.Button(c, "使用"+systemLabel+"创建并保存 Passkey").Disabled(a.busy).OnClick(func() { approveSystem("", "") })
+					}
+					for index, choice := range p.Choices {
+						choice := choice
+						existing := 0
+						if index < len(p.ChoicePasskeys) {
+							existing = p.ChoicePasskeys[index]
+						}
+						label := "使用" + systemLabel + passkeyChoiceLabel(p, choice, p.Create, existing)
+						ui.Button(c, label).Key("passkey-system:" + choice.ID + ":" + choice.CredentialID).Disabled(a.busy).OnClick(func() { approveSystem(choice.ID, choice.CredentialID) })
+					}
+					ui.Text(c, "系统验证失败或被取消时，请继续使用主密码与 Secret Key。").FontSize(12)
+				}
+			})
+		})
+		ui.Button(c, "取消 / 使用其他验证器").Disabled(a.busy).OnClick(func() {
+			a.password = ""
+			a.secret = ""
+			a.run(func() outcome { return outcome{err: a.browser.RejectPasskey(p.ID)} })
+		})
 	})
 }

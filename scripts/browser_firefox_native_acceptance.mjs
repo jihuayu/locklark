@@ -142,6 +142,12 @@ function safeFailureMessage(error) {
     ["Unexpected field disclosure or automatic submission", "unexpected-disclosure-or-submit"],
     ["Navigation did not revoke the native approval control", "navigation-revocation"],
     ["Popup control unavailable", "popup-control-unavailable"],
+    ["Exact popup option unavailable", "popup-option-unavailable"],
+    ["Popup select focus missing", "popup-select-focus-missing"],
+    ["Popup select focus changed the placeholder option", "popup-select-placeholder-changed"],
+    ["Physical Home did not return to the placeholder option", "popup-select-home"],
+    ["Physical popup select missed an option step", "popup-select-step-missed"],
+    ["Physical popup select did not apply the exact option", "popup-select-mismatch"],
   ]);
   if (fixed.has(text)) return fixed.get(text);
   for (const pattern of SAFE_FAILURES)
@@ -152,11 +158,26 @@ function progress(value) {
   stage = value;
   console.log("Firefox acceptance: " + value);
 }
-function reportFailure(detail = "unclassified") {
+function classifyError(error) {
+  const frames =
+    typeof error?.stack === "string"
+      ? [
+          ...new Set(
+            error.stack.match(
+              /browser_[a-z0-9_]*acceptance\.mjs:[0-9]+:[0-9]+/g,
+            ) || [],
+          ),
+        ].slice(0, 12)
+      : [];
+  return { class: safeFailureMessage(error), frames };
+}
+function reportFailure(failure = { class: "unclassified", frames: [] }) {
   console.error(
     "FAIL: Firefox native acceptance at " + stage + " (AcceptanceFailure)",
   );
-  console.error("Failure class: " + detail);
+  console.error("Failure class: " + failure.class);
+  if (failure.frames.length)
+    console.error("Failure frames: " + failure.frames.join(", "));
   console.error("Private diagnostic files: " + state);
 }
 async function eventually(check, description, limit = 15000) {
@@ -521,7 +542,7 @@ async function popupClick(selector) {
 }
 async function popupKeyboard(actions) {
   assert(await popupEvaluate(
-    'return document.hasFocus() && document.activeElement?.matches("input,textarea") === true;',
+    'return document.hasFocus() && document.activeElement?.matches("input,textarea,select") === true;',
   ), "Native acceptance popup focus unavailable");
   return input(actions, false, { preserve_focus: true });
 }
@@ -718,8 +739,8 @@ for (const [signal, code] of [
   });
 }
 for (const event of ["uncaughtException", "unhandledRejection"]) {
-  process.once(event, () => {
-    reportFailure();
+  process.once(event, (error) => {
+    reportFailure(classifyError(error));
     void cleanup().finally(() => process.exit(1));
   });
 }
@@ -1195,6 +1216,71 @@ try {
                 JSON.stringify(selector) +
                 ")?.disabled !== false;",
             ),
+          value: (selector) =>
+            popupEvaluate(
+              "return document.querySelector(" +
+                JSON.stringify(selector) +
+                ")?.value ?? null;",
+            ),
+          selectOption: async (selector, value, onPhase = () => {}) => {
+            const control = JSON.stringify(selector);
+            const options = await popupEvaluate(
+              "return Array.from(document.querySelector(" +
+                control +
+                ")?.options || []).map(option => option.value);",
+            );
+            const index = options.indexOf(value);
+            assert(index > 0, "Exact popup option unavailable");
+            const id = selector.startsWith("#") ? selector.slice(1) : "";
+            onPhase("select-focus");
+            await popupClick(id ? 'label[for="' + id + '"]' : selector);
+            await eventually(
+              () =>
+                popupEvaluate(
+                  "return document.activeElement === document.querySelector(" +
+                    control +
+                    ");",
+                ),
+              "Popup select focus missing",
+            );
+            const selectedIndex = () =>
+              popupEvaluate(
+                "return document.querySelector(" +
+                  control +
+                  ")?.selectedIndex ?? null;",
+              );
+            assert.equal(
+              await selectedIndex(),
+              0,
+              "Popup select focus changed the placeholder option",
+            );
+            onPhase("key-selection");
+            // X11 keysyms are "Down", not the DOM key name "ArrowDown";
+            // XStringToKeysym("ArrowDown") is NoSymbol and sends no key.
+            await popupKeyboard([{ key: "Home" }]);
+            assert.equal(
+              await selectedIndex(),
+              0,
+              "Physical Home did not return to the placeholder option",
+            );
+            for (let step = 0; step < index; step++) {
+              await popupKeyboard([{ key: "Down" }]);
+              await eventually(
+                async () => (await selectedIndex()) === step + 1,
+                "Physical popup select missed an option step",
+                5000,
+              );
+            }
+            assert.equal(
+              await popupEvaluate(
+                "return document.querySelector(" +
+                  control +
+                  ")?.value ?? null;",
+              ),
+              value,
+              "Physical popup select did not apply the exact option",
+            );
+          },
         };
       },
       setLogin: (username, password) =>
@@ -1340,7 +1426,7 @@ try {
     successful = true;
   }
 } catch (error) {
-  reportFailure(safeFailureMessage(error));
+  reportFailure(classifyError(error));
   process.exitCode = 1;
 } finally {
   await cleanup();

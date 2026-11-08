@@ -39,6 +39,25 @@ CONTROL_LABELS = (
     "Daily archived login · archived", "Daily trashed login · trashed",
 )
 
+# Exact grammar of the reviewed multi-credential choice labels. The account
+# list is closed; the credential hint is eight public Base64URL characters and
+# an ellipsis. Labels are still matched by full equality, never by substring.
+PASSKEY_CHOICE_LABEL = re.compile(
+    r"^(?:登录|保存到)：login\.locklark\.test · login\.locklark\.test · "
+    r"(?:passkey-test|passkey-other|signal-one|signal-two) · "
+    r"(?:passkey-test|passkey-other|signal-one|signal-two)"
+    r"(?: · 凭据 [A-Za-z0-9_-]{8}…)?"
+    r"(?:（已有 [0-9]+ 个 Passkey）)?"
+    r"(?: · 升级加密格式，旧客户端将拒绝该金库)?$"
+)
+
+
+def control_label_allowed(label):
+    return label in CONTROL_LABELS or (
+        type(label) is str and PASSKEY_CHOICE_LABEL.fullmatch(label) is not None
+    )
+
+
 FAILURE_CONTEXT = {"action": "setup", "index": -1, "x_codes":[]}
 FAILURE_REASONS = {
     "Native accessibility unavailable": "a11y-unavailable",
@@ -84,7 +103,7 @@ def safe_click_record(value):
     """Only public labels, geometry, XIDs and input acknowledgement flags."""
     if not isinstance(value, dict):
         return {}
-    result = {"label":value.get("label") if value.get("label") in CONTROL_LABELS else "pointer"}
+    result = {"label":value.get("label") if control_label_allowed(value.get("label")) else "pointer"}
     for key in ("target",):
         if type(value.get(key)) is str and re.fullmatch(r"0x[0-9a-f]+",value[key]):
             result[key] = value[key]
@@ -251,7 +270,7 @@ class NativeControls:
 
         def control(node, _depth):
             label = self.string(self.at.atspi_accessible_get_name, node)
-            if label not in CONTROL_LABELS:
+            if not control_label_allowed(label):
                 return True
             role = self.string(self.at.atspi_accessible_get_role_name, node)
             if role not in ("push button", "button", "text", "password text", "entry"):
@@ -289,7 +308,7 @@ class NativeControls:
         return controls
 
     def ready(self, label):
-        if label not in CONTROL_LABELS:
+        if not control_label_allowed(label):
             raise RuntimeError("Native acceptance label is not allowlisted")
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
@@ -579,13 +598,15 @@ def main():
     if request.get("inspect"):
         FAILURE_CONTEXT["action"] = "snapshot"
         snapshot = native.snapshot()
+        inspected = set(CONTROL_LABELS)
+        inspected.update(label for label in snapshot if control_label_allowed(label))
         result["controls"] = {
             label: {
                 "present": len(snapshot.get(label, [])) == 1,
                 "enabled": len(snapshot.get(label, [])) == 1 and snapshot[label][0]["enabled"],
                 "showing": len(snapshot.get(label, [])) == 1 and snapshot[label][0]["showing"],
             }
-            for label in CONTROL_LABELS
+            for label in inspected
         }
     print(json.dumps(result))
     x.XCloseDisplay(display)

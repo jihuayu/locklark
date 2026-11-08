@@ -1209,8 +1209,20 @@ globalThis.LocklarkCore = (() => {
       "user_name",
       "display_name",
     ];
-    if (Object.keys(value).length !== keys.length) return false;
-    if (!Object.keys(value).every((key) => keys.includes(key))) return false;
+    // credential_revision is the exact per-credential (child) selector a new
+    // host supplies. A legacy candidate omits it entirely; no other public
+    // key and no guessed revision is ever accepted.
+    if (
+      !Object.keys(value).every(
+        (key) => keys.includes(key) || key === "credential_revision",
+      )
+    )
+      return false;
+    if (
+      value.credential_revision !== undefined &&
+      !validCredentialRevision(value.credential_revision)
+    )
+      return false;
     if (!/^[a-f0-9]{32}$/.test(value.item_id || "")) return false;
     if (!/^[a-f0-9]{64}$/.test(value.revision || "")) return false;
     if (!validCredentialID(value.credential_id)) return false;
@@ -1364,12 +1376,40 @@ globalThis.LocklarkCore = (() => {
     const bytes = base64URLDecode(value, 1024);
     return !!bytes && bytes.length === 32 && base64URLEncode(bytes) === value;
   }
+  // Opaque per-credential content revision: canonical lowercase 64 hex, the
+  // exact child selector that must travel with its credential ID.
+  function validCredentialRevision(value) {
+    return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+  }
+  // Detail-frame bound for per-credential metadata. A list row carries only
+  // passkey_count so a 256-row list can never approach the output budget.
+  const PASSKEY_METADATA_LIMIT = 16;
+  function validPasskeyMetadataList(value) {
+    if (!Array.isArray(value) || value.length > PASSKEY_METADATA_LIMIT)
+      return false;
+    const seen = new Set();
+    for (const entry of value) {
+      if (!validPasskeyMetadata(entry)) return false;
+      if (!validCredentialRevision(entry.credential_revision)) return false;
+      if (seen.has(entry.credential_id)) return false;
+      seen.add(entry.credential_id);
+    }
+    return true;
+  }
   function validPasskeyMetadata(value) {
     if (!value || typeof value !== "object" || Array.isArray(value)) return false;
     if (
       !Object.keys(value).every((key) =>
-        ["credential_id", "rp_id", "user_name", "display_name"].includes(key),
-      )
+        [
+          "credential_id",
+          "rp_id",
+          "user_name",
+          "display_name",
+          "credential_revision",
+        ].includes(key),
+      ) ||
+      (value.credential_revision !== undefined &&
+        !validCredentialRevision(value.credential_revision))
     )
       return false;
     if (!validCredentialID(value.credential_id)) return false;
@@ -5105,6 +5145,9 @@ globalThis.LocklarkCore = (() => {
     base64URLDecode,
     validCredentialID,
     validPasskeyMetadata,
+    validPasskeyMetadataList,
+    PASSKEY_METADATA_LIMIT,
+    validCredentialRevision,
     validAttachmentID,
     validAttachmentMetadata,
     validAttachmentList,

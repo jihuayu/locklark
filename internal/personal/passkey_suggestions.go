@@ -66,25 +66,29 @@ func (s *Session) ConditionalPasskeyCandidates(t PasskeyTarget) ([]PasskeyCandid
 		defer auth.clear()
 		for _, item := range auth.items {
 			// Active login items only: archived/trashed states are never offered.
-			if item.Kind != "login" || item.State != "" || len(item.Passkey) == 0 {
+			if item.Kind != "login" || item.State != "" || len(item.PasskeyRecords()) == 0 {
 				continue
 			}
 			revision := auth.revisions[item.ID]
 			if revision == "" {
 				continue
 			}
-			record, e := passkey.Load(item.Passkey)
-			if e != nil {
-				continue
-			}
-			matches := request.Matches(record)
-			var candidate PasskeyCandidate
-			if matches {
-				candidate = PasskeyCandidate{ItemID: item.ID, Revision: revision, Title: item.Title, CredentialID: record.ID, RPID: record.RPID, UserName: record.Name, DisplayName: record.DisplayName}
-			}
-			record.Clear()
-			if matches {
-				candidates = append(candidates, candidate)
+			// One candidate per durable credential: a login that owns several
+			// credentials contributes one row for each matching record.
+			for _, raw := range item.PasskeyRecords() {
+				record, e := passkey.Load(raw)
+				if e != nil {
+					continue
+				}
+				matches := request.Matches(record)
+				var candidate PasskeyCandidate
+				if matches {
+					candidate = PasskeyCandidate{ItemID: item.ID, Revision: revision, Title: item.Title, CredentialID: record.ID, RPID: record.RPID, UserName: record.Name, DisplayName: record.DisplayName}
+				}
+				record.Clear()
+				if matches {
+					candidates = append(candidates, candidate)
+				}
 			}
 		}
 		return nil
@@ -99,7 +103,9 @@ func (s *Session) ConditionalPasskeyCandidates(t PasskeyTarget) ([]PasskeyCandid
 	if s.active(false) != nil {
 		return nil, passkey.ErrRefused
 	}
-	// Stable presentation order: account name, then item title, then item ID.
+	// Stable presentation order: account name, then item title, then item ID,
+	// then the credential selector so two credentials of one login keep a
+	// deterministic order.
 	sort.SliceStable(candidates, func(a, b int) bool {
 		left, right := candidates[a], candidates[b]
 		if left.UserName != right.UserName {
@@ -108,7 +114,10 @@ func (s *Session) ConditionalPasskeyCandidates(t PasskeyTarget) ([]PasskeyCandid
 		if left.Title != right.Title {
 			return left.Title < right.Title
 		}
-		return left.ItemID < right.ItemID
+		if left.ItemID != right.ItemID {
+			return left.ItemID < right.ItemID
+		}
+		return left.CredentialID < right.CredentialID
 	})
 	return candidates, nil
 }

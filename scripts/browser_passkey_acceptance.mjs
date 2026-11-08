@@ -2,8 +2,8 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { createHash, createPublicKey, verify } from "node:crypto";
-import { acceptPasskeyManagement } from "./browser_passkey_management_acceptance.mjs";
-import { acceptConditionalPasskey } from "./browser_conditional_passkey_acceptance.mjs";
+import { acceptPasskeyManagement, passkeyChoiceLabel } from "./browser_passkey_management_acceptance.mjs";
+import { acceptConditionalPasskey, acceptConditionalSibling } from "./browser_conditional_passkey_acceptance.mjs";
 import { acceptOtherProvider } from "./browser_other_provider_acceptance.mjs";
 import { acceptPasskeySignals } from "./browser_passkey_signal_acceptance.mjs";
 export async function acceptBrowserPasskey({
@@ -232,7 +232,7 @@ export async function acceptBrowserPasskey({
     { text: fixture.Password },
     { click_label: "验证 Secret Key" },
     { text: fixture.Secret },
-    { click_label: "登录：" + rp + " · passkey-test · passkey-test" },
+    { click_label: passkeyChoiceLabel({ rp, title: rp + " · passkey-test", username: "passkey-test", credentialId: created.json.id }) },
   ]);
   await page.bringToFront();
   await eventually(
@@ -359,6 +359,19 @@ export async function acceptBrowserPasskey({
       focusPage: () => page.bringToFront(),
       dismissPopup: async () => { await page.bringToFront(); await page.keyboard.press("Escape"); },
       eventually, input, phase,
+      conditionalSibling: async ({ first, second }) => {
+        input([], false);
+        await page.bringToFront();
+        await acceptConditionalSibling({
+          origin, fixture, first, second, observe,
+          pageEval: (fn, arg) => page.evaluate(fn, arg),
+          clickDocument: async selector => { input([], false); await page.bringToFront(); await page.locator(selector).click(); },
+          inlineClick,
+          inlinePresent,
+          focusPage: async () => { input([], false); await page.bringToFront(); },
+          navigate: url => page.goto(url), eventually, input, phase,
+        });
+      },
     });
   }
   await cdp.detach();

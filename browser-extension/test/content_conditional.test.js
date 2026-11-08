@@ -1089,3 +1089,54 @@ test("a closed shadow root is opaque to the conditional focus walk", async () =>
     false,
   );
 });
+
+const sibling = (credentialSuffix, childRevision) => ({
+  ...entry(21),
+  credential_id: "credential-sibling-" + credentialSuffix,
+  credential_revision: childRevision,
+});
+
+test("sibling credentials under one parent are distinct options and forward the exact child revision", async () => {
+  const first = sibling("one", "1".repeat(64));
+  const second = sibling("two", "2".repeat(64));
+  const h = makeHarness({
+    list: { passkeys: [first, second], truncated: false },
+    select: { credential: { id: "signed-credential", rawId: "AQID" } },
+  });
+  const input = h.input({ autocomplete: "username webauthn" });
+  await h.postConditional();
+  h.focus(input);
+  await h.settle();
+  const choices = h.choices();
+  assert.equal(choices.length, 2, "both credentials stay separate choices");
+  assert.notEqual(choices[0].textContent, choices[1].textContent);
+  assert.equal(
+    choices[1].getAttribute("data-locklark-passkey-credential"),
+    second.credential_id,
+  );
+  assert.equal(
+    choices[1].getAttribute("data-locklark-passkey-credential-revision"),
+    second.credential_revision,
+  );
+  assert.equal(
+    choices[0].getAttribute("data-locklark-passkey-credential-revision"),
+    first.credential_revision,
+  );
+  await h.click(choices[1], true);
+  const select = h.sent.find(
+    (message) => message.type === "passkey-conditional-select",
+  );
+  assert.deepEqual(Object.keys(select).sort(), [
+    "credential_id",
+    "credential_revision",
+    "id",
+    "item_id",
+    "revision",
+    "type",
+  ]);
+  assert.equal(select.item_id, second.item_id);
+  assert.equal(select.revision, second.revision);
+  assert.equal(select.credential_id, second.credential_id);
+  assert.equal(select.credential_revision, second.credential_revision);
+  assert.notEqual(select.credential_id, first.credential_id);
+});

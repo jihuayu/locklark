@@ -11,6 +11,7 @@ func SupportedCapabilities() []string {
 		"passkey-management-v1",
 		"passkey-conditional-v1",
 		"passkey-signal-v1",
+		"multiple-passkeys-v1",
 		"generate-v1",
 		"stage-save-v1",
 		"popup-vault-v1",
@@ -30,9 +31,13 @@ type BrowserPasskeyCandidate struct {
 	Revision     string `json:"revision"`
 	Title        string `json:"title"`
 	CredentialID string `json:"credential_id"`
-	RPID         string `json:"rp_id"`
-	UserName     string `json:"user_name"`
-	DisplayName  string `json:"display_name"`
+	// CredentialRevision is the opaque per-credential content revision. It is
+	// the exact child selector a conditional selection must echo; it is not the
+	// parent item revision and never enables a first-record fallback.
+	CredentialRevision string `json:"credential_revision,omitempty"`
+	RPID               string `json:"rp_id"`
+	UserName           string `json:"user_name"`
+	DisplayName        string `json:"display_name"`
 }
 
 // BrowserPasswordProfile describes a generated password without exposing it.
@@ -46,18 +51,24 @@ type BrowserVaultSummary struct {
 }
 
 type BrowserItemSummary struct {
-	ID               string          `json:"id"`
-	Revision         string          `json:"revision"`
-	Category         string          `json:"category"`
-	VaultID          string          `json:"vault_id"`
-	Title            string          `json:"title"`
-	Subtitle         string          `json:"subtitle,omitempty"`
-	PrimaryURL       string          `json:"primary_url,omitempty"`
-	State            string          `json:"state"`
-	Favorite         bool            `json:"favorite,omitempty"`
-	Tags             []string        `json:"tags,omitempty"`
-	HasOTP           bool            `json:"has_otp,omitempty"`
-	HasPasskey       bool            `json:"has_passkey,omitempty"`
+	ID         string   `json:"id"`
+	Revision   string   `json:"revision"`
+	Category   string   `json:"category"`
+	VaultID    string   `json:"vault_id"`
+	Title      string   `json:"title"`
+	Subtitle   string   `json:"subtitle,omitempty"`
+	PrimaryURL string   `json:"primary_url,omitempty"`
+	State      string   `json:"state"`
+	Favorite   bool     `json:"favorite,omitempty"`
+	Tags       []string `json:"tags,omitempty"`
+	HasOTP     bool     `json:"has_otp,omitempty"`
+	HasPasskey bool     `json:"has_passkey,omitempty"`
+	// PasskeyCount is the number of durable credentials on this login. It is
+	// the only per-credential signal in a list projection: arrays are bounded
+	// to the detail frame so a 256-item list can never approach MaxOutput.
+	PasskeyCount int `json:"passkey_count,omitempty"`
+	// Passkey stays for old clients and only ever carries the unambiguous
+	// single-credential projection.
 	Passkey          *BrowserPasskey `json:"passkey,omitempty"`
 	UpdatedAt        int64           `json:"updated_at,omitempty"`
 	WatchtowerFlags  []string        `json:"watchtower_flags,omitempty"`
@@ -162,16 +173,20 @@ type BrowserIdentitySummary struct {
 }
 
 type BrowserItemDetail struct {
-	ID               string                    `json:"id"`
-	Revision         string                    `json:"revision"`
-	Category         string                    `json:"category"`
-	VaultID          string                    `json:"vault_id"`
-	Title            string                    `json:"title"`
-	Username         string                    `json:"username,omitempty"`
-	HasPassword      bool                      `json:"has_password,omitempty"`
-	HasOTP           bool                      `json:"has_otp,omitempty"`
-	HasNotes         bool                      `json:"has_notes,omitempty"`
-	HasPasskey       bool                      `json:"has_passkey,omitempty"`
+	ID          string `json:"id"`
+	Revision    string `json:"revision"`
+	Category    string `json:"category"`
+	VaultID     string `json:"vault_id"`
+	Title       string `json:"title"`
+	Username    string `json:"username,omitempty"`
+	HasPassword bool   `json:"has_password,omitempty"`
+	HasOTP      bool   `json:"has_otp,omitempty"`
+	HasNotes    bool   `json:"has_notes,omitempty"`
+	HasPasskey  bool   `json:"has_passkey,omitempty"`
+	// Passkeys is the bounded per-credential metadata list. Passkey remains the
+	// legacy single-credential field and is populated only when exactly one
+	// credential exists.
+	Passkeys         []BrowserPasskey          `json:"passkeys,omitempty"`
 	Passkey          *BrowserPasskey           `json:"passkey,omitempty"`
 	URL              string                    `json:"url,omitempty"`
 	URLs             []BrowserItemURL          `json:"urls,omitempty"`

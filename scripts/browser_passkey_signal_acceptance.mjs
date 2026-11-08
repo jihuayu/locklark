@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
+import { passkeyChoiceLabel } from "./browser_passkey_management_acceptance.mjs";
 import { verifyRegistrationResponse, verifyAuthenticationResponse } from "./browser_firefox_passkey_acceptance.mjs";
 
 function prepareSignalPage() {
@@ -86,7 +87,7 @@ export async function acceptPasskeySignals({
     const expectedChallenge = challenge();
     await pageEval(startSignalCredential, { create: false, rp, id: registration.id, challenge: expectedChallenge });
     await inlineClick("使用 Locklark 登录");
-    input([...factors, { click_label: "登录：" + rp + " · " + name + " · " + name }]);
+    input([...factors, { click_label: passkeyChoiceLabel({ rp, title: rp + " · " + name, username: name, credentialId: registration.id }) }]);
     await focusPage();
     const signed = await waitCredential();
     assert.equal(signed.id, registration.id, "Signal changed credential identity");
