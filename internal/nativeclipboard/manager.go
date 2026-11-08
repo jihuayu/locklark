@@ -272,10 +272,10 @@ func (m *Manager) run(j *copyJob) {
 }
 
 // detachSuperseded releases the previous logical lease after a new native
-// acquisition, even one whose write reported an error or went stale. A non-nil
-// lease proves native ownership moved, so clearing the old lease would blank
-// the new copy and its deadline must not fire; only the new lease keeps cleanup
-// authority (see cleanup). It does nothing once this job no longer owns state.
+// acquisition attempt, even one whose write reported an error or went stale.
+// A non-nil lease carries cleanup authority for that attempt; an older logical
+// lease must not prevent cleanup of the new partial write. Native ClearOwned
+// still checks ownership. It does nothing once this job no longer owns state.
 func (m *Manager) detachSuperseded(j *copyJob) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
