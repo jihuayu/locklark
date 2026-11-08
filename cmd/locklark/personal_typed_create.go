@@ -46,11 +46,33 @@ func createTypedPersonal(path, inputPath string, pw, key []byte, ask func(string
 	// claim to zero string backing arrays.
 	defer clearTypedItem(&item)
 
-	// Every attachment file is read and frozen before authentication, SAVE
-	// consent and the mutation, so a later path replacement cannot change what
-	// is stored. A refusal here happens before any prompt and clears every
-	// already-read body through the deferred item clear.
-	if err := resolveTypedAttachments(&item, requests, len(raw)); err != nil {
+	// The single ssh_key request is split from the attachment requests so each
+	// resolver only sees the files it owns.
+	sshFile := ""
+	attachments := make([]typedAttachmentRequest, 0, len(requests))
+	for _, request := range requests {
+		if !request.sshKey {
+			attachments = append(attachments, request)
+			continue
+		}
+		if sshFile != "" || item.Category != vault.CategorySSHKey {
+			return nil, errTypedInputRefused
+		}
+		sshFile = request.file
+	}
+	if item.Category == vault.CategorySSHKey && sshFile == "" {
+		return nil, errTypedInputRefused
+	}
+
+	// Every attachment and the private key file are read and frozen before
+	// authentication, SAVE consent and the mutation, so a later path
+	// replacement cannot change what is stored. A refusal here happens before
+	// any prompt and clears every already-read buffer through the deferred
+	// item clear and the resolver's own deferred clears.
+	if err := resolveTypedAttachments(&item, attachments, len(raw)); err != nil {
+		return nil, err
+	}
+	if err := resolveTypedSSHKey(&item, sshFile); err != nil {
 		return nil, err
 	}
 

@@ -8,6 +8,7 @@ package or inspects private in-memory state.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -224,6 +225,7 @@ ITEM_METADATA_FIELDS = frozenset(
         "attachments",
         "attachment_read_verified",
         "attachment_reads",
+        "ssh_pair_matches",
     }
 )
 
@@ -332,6 +334,8 @@ def _check_metadata_payload(payload: Any) -> dict[str, Any]:
     verified = payload["attachment_read_verified"]
     if not isinstance(verified, bool):
         raise AssertionError(f"metadata probe verified flag is not a bool: {payload!r}")
+    if not isinstance(payload["ssh_pair_matches"], bool):
+        raise AssertionError(f"metadata probe ssh pair flag is not a bool: {payload!r}")
     reads = payload["attachment_reads"]
     if not isinstance(reads, list):
         raise AssertionError(f"metadata probe attachment reads are not a list: {payload!r}")
@@ -355,6 +359,7 @@ def item_metadata(
     row: dict[str, Any],
     *,
     verify_attachments: bool = False,
+    verify_ssh_public: bytes | None = None,
 ) -> dict[str, Any]:
     """Read one item's category/tags/favorite/URLs/section/attachment shape.
 
@@ -375,6 +380,11 @@ def item_metadata(
         "id": row["id"],
         "revision": row["revision"],
         "verify_attachments": verify_attachments,
+        "verify_ssh_public": (
+            base64.b64encode(verify_ssh_public).decode("ascii")
+            if verify_ssh_public is not None
+            else ""
+        ),
     }
     proc = subprocess.run(
         [str(binary)],

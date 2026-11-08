@@ -26,15 +26,20 @@ escapes are refused before decoding.
 Refusals always return the same fixed error and never echo the document, a key,
 a path or a decoded value.
 
-The accepted projection covers the native item categories that do not need raw
-key material:
+The accepted projection covers the native item categories:
 
 - `category` (default `login`) from the supported vault categories;
 - `title` (required), `username`, `password`, `notes`, `otp`, `favorite`;
 - `url`, `urls`, `tags`;
 - `sections` with custom fields, using the native field types except `file`;
 - `credit_card` for `credit_card` items and `identity` for `identity` items;
-- `attachments` naming explicit private files (see below).
+- `attachments` naming explicit private files (see below);
+- `ssh_private_key_file` for `ssh_key` items (see below).
+
+`ssh_key` never carries a raw seed, private key, public key, passkey, import
+source or attachment through JSON, and it refuses `username`, `password`, `otp`,
+`notes` and the legacy `url` member because the native ssh_key layout has no
+slot for them; accepting them would silently drop user data.
 
 `document` items are accepted only when they request at least one attachment;
 their payload is carried by the v2 attachments instead of the legacy
@@ -77,17 +82,40 @@ any error or cancellation every already-read body is cleared best-effort.
 Native `Session.AddItem` validation remains the final authority.
 
 Raw attachment content/base64/body, attachment IDs, sizes, digests, provenance,
-passkeys, import sources and history are not accepted members. SSH keys remain
-unsupported because they would require raw private key material; the remaining
-raw SSH input path is separate work.
+passkeys, import sources and history are not accepted members.
+
+### SSH private key file
+
+An `ssh_key` document names exactly one explicit private key file:
+
+```json
+{"category":"ssh_key","title":"Deploy key","ssh_private_key_file":"/home/ada/.ssh/id_ed25519"}
+```
+
+- `ssh_private_key_file` is required for `ssh_key` and refused for every other
+  category. It must be an absolute path to an existing regular file with no
+  control characters.
+- The file is read with the same bounded owner-only descriptor/handle rules as
+  the JSON input and attachments: no final symlink, no FIFO, owner-only
+  permissions, at most 32 KiB. The bytes are not stored in the item.
+- Only an unencrypted Ed25519 private key is accepted. The 64-byte key must be
+  internally consistent with the seed half; the 32-byte seed and the SSH wire
+  public key derived from it are stored in the native encrypted item.
+- RSA, ECDSA, malformed files and an encrypted key are refused with a fixed
+  error. Passphrase input (argv, prompt or environment) is not part of this
+  command. File bytes and parsed key buffers are cleared best-effort.
+- The file is resolved before both factors, the SAVE prompt and the mutation, so
+  an unsafe or unsupported key never reaches consent. No error, prompt or
+  receipt contains the path, a key byte or a fingerprint.
 
 ### Consent and receipt
 
 After both the master password and Secret Key are entered, the command displays
 only the validated category and counts (sections, custom fields, URLs, tags and
 attachments with their total bytes). It never displays the title, a field value,
-an attachment name or an attachment path. The operator must type `SAVE`; any
-other answer cancels with a fixed error and leaves the vault unchanged.
+an attachment name, an attachment path, an SSH path or an SSH fingerprint. The
+operator must type `SAVE`; any other answer cancels with a fixed error and leaves
+the vault unchanged.
 
 The write is one authenticated `Session.AddItem` under an expiring
 `MutationGate`; there is no direct-persistence or ungated shortcut. The JSON
@@ -110,12 +138,17 @@ mutation for a wrong SAVE or bad factors. Attachment tests create a real
 two-file document with binary/NUL content, reopen the encrypted vault, and use
 `GetAttachment` to compare exact bytes and SHA-256; they also verify
 all-or-nothing refusal for a missing file, per-file oversize, aggregate oversize
-and wrong SAVE. Reader tests cover binary content, the 2 MiB file bound,
+and wrong SAVE. SSH tests generate a real Ed25519 OpenSSH key file, verify the
+copied seed/public pair, reopen the encrypted vault and read the persisted public
+key and fingerprint, and refuse an encrypted, ECDSA, malformed, group-readable
+or symlinked key before the consent prompt without mutating the vault. Reader tests cover binary content, the 2 MiB file bound,
 permissions, symlink and FIFO refusal; Windows fixture helpers create an
 owner-only DACL. The receipt and prompt contain no item value, attachment name
 or path. CLI tests cover argument validation and the interactive-terminal
-boundary. These tests do not simulate a real TTY; end-to-end TTY coverage is a
-separate exercise. Windows tests are cross-compiled only unless run on Windows.
+boundary. These tests do not simulate a real TTY. The F6_08 end-to-end case now drives
+typed ssh_key creation from a generated owner-private Ed25519 file over a real
+PTY and proves the seed/public pair through a metadata-only probe; its actual
+PTY execution and acceptance remain with the primary reviewer. Windows tests are cross-compiled only unless run on Windows.
 
 ## Explicit rich 1PUX profile
 
@@ -128,6 +161,9 @@ existing items are not overwritten. Imported source records remain encrypted
 and may retain old values after later edits.
 
 Omitting `--model v2` preserves the existing basic-login import behavior.
-Typed creation accepts explicit private attachment files but still refuses raw
-attachment bodies, private key records and other raw credential material through
-JSON; raw SSH input remains separate pending work.
+Typed creation accepts explicit private attachment and Ed25519 private-key
+files but still refuses raw attachment bodies, inline key material and other raw
+credential records through JSON.
+
+
+2026-11-09（香港）独立验收：八项 F6 真实终端用例全部通过，包含显式私有 SSH 文件创建、现有原生 SSH 签名接口的公钥验签、错误 SAVE、非法/公开权限文件的原子拒绝。全部 typed 解析/创建 Go 测试通过（8.639 秒）。原始密钥、文件路径和条目内容未进入创建回执；签名证明仅向 E2E 返回布尔值。整合套件此前 215 项的 183 PASS/32 PENDING/0 FAIL 为原始全量回执；本次另行补齐 T1_F6_08，未冒称已重跑全部 215 项。
