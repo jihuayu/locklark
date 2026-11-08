@@ -40,16 +40,6 @@ jobs:
       - run: go build ./cmd/locklark-desktop
       - name: Build native browser hosts
         run: go build ./cmd/locklark-browser-chromium ./cmd/locklark-browser-firefox ./cmd/locklark-browser-register
-      - name: Test Safari transport policy and compile the macOS app
-        timeout-minutes: 15
-        run: |
-          if ! command -v xcodegen >/dev/null 2>&1; then
-            brew install xcodegen
-          fi
-          swift test --package-path safari
-          go build -o "$RUNNER_TEMP/locklark-browser-safari" ./cmd/locklark-browser-safari
-          LOCKLARK_UNSIGNED_CI=1 LOCKLARK_SAFARI_HELPER="$RUNNER_TEMP/locklark-browser-safari" safari/scripts/build_safari.sh
-          echo 'Safari source compiled; signed installation and Safari runtime acceptance remain unverified.'
       - name: Test native Windows clipboard ownership
         if: runner.os == 'Windows'
         timeout-minutes: 3
@@ -186,6 +176,16 @@ jobs:
       - run: go build ./cmd/locklark-desktop
       - name: Build native browser hosts
         run: go build ./cmd/locklark-browser-chromium ./cmd/locklark-browser-firefox ./cmd/locklark-browser-register
+      - name: Test Safari transport policy and compile the macOS app
+        timeout-minutes: 15
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          swift test --package-path safari
+          go build -o "$RUNNER_TEMP/locklark-browser-safari" ./cmd/locklark-browser-safari
+          LOCKLARK_UNSIGNED_CI=1 LOCKLARK_SAFARI_HELPER="$RUNNER_TEMP/locklark-browser-safari" safari/scripts/build_safari.sh
+          echo 'Safari source compiled; signed installation and Safari runtime acceptance remain unverified.'
       - run: go test ./internal/osunlock ./internal/desktop ./internal/personal ./internal/browserhost ./internal/vault ./internal/onepux -run 'TestNative|TestDesktopSession|TestSystemUnlock|TestLockDoesNotWait|TestCancelledSystemUnlock|TestLockDrops|TestClipboard|TestDaily|TestBrowserOTP|TestOTP|TestQuick|TestNotes|TestLoginNotes' -count=1
       - name: Test native macOS clipboard ownership
         timeout-minutes: 3
