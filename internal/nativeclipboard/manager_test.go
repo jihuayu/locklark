@@ -46,6 +46,7 @@ type fakeOwner struct {
 	owner   *Lease
 	cleared []*Lease
 	err     error
+	hook    func(call int, value []byte) (*Lease, error)
 }
 
 func (o *fakeOwner) write(value []byte) (*Lease, error) {
@@ -53,6 +54,13 @@ func (o *fakeOwner) write(value []byte) (*Lease, error) {
 	defer o.mu.Unlock()
 	o.writes++
 	o.values = append(o.values, append([]byte(nil), value...))
+	if o.hook != nil {
+		lease, err := o.hook(o.writes, value)
+		if lease != nil {
+			o.owner = lease
+		}
+		return lease, err
+	}
 	if o.err != nil {
 		return &Lease{native: []byte("partial")}, o.err
 	}
@@ -78,6 +86,25 @@ func (o *fakeOwner) state() (writes int, owner *Lease, cleared int, value []byte
 		value = o.values[len(o.values)-1]
 	}
 	return o.writes, o.owner, len(o.cleared), value
+}
+
+func (o *fakeOwner) takeover(lease *Lease) {
+	o.mu.Lock()
+	o.owner = lease
+	o.mu.Unlock()
+}
+
+func (f *fakeQueue) step() bool {
+	f.mu.Lock()
+	if len(f.q) == 0 {
+		f.mu.Unlock()
+		return false
+	}
+	fn := f.q[0]
+	f.q = f.q[1:]
+	f.mu.Unlock()
+	fn()
+	return true
 }
 
 func waitOutcome(t *testing.T, ch <-chan Outcome) Outcome {
@@ -457,5 +484,145 @@ func TestManagerClearDeadlineRevokesOnlyItsOwnLease(t *testing.T) {
 	}
 	if writes, _, _, _ := owner.state(); writes != 1 {
 		t.Fatalf("deadline wrote again: %d", writes)
+	}
+}
+
+// Negative control: a partial second acquisition must not be shielded by the
+// previously confirmed lease sitting in m.lease, and the old clearUntil timer
+// must never turn into a cleanup of the new (partial) acquisition.
+func TestManagerPartialWriteAfterConfirmedLeaseKeepsCleanupAuthority(t *testing.T) {
+	queue, owner := &fakeQueue{}, &fakeOwner{}
+	partial := &Lease{native: []byte("partial new copy")}
+	owner.hook = func(call int, value []byte) (*Lease, error) {
+		if call == 1 {
+			return &Lease{native: []byte("confirmed old copy")}, nil
+		}
+		return partial, ErrWrite
+	}
+	m := NewManager(queue.dispatch, owner.write, owner.clear)
+	defer m.Close()
+	first, err := m.Prepare([]byte("old secret"), time.Now().Add(10*time.Second), time.Now().Add(120*time.Millisecond), func() bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstDone := m.Commit(context.Background(), first)
+	queue.drain()
+	if outcome := waitOutcome(t, firstDone); outcome != Confirmed {
+		t.Fatalf("first commit = %v", outcome)
+	}
+	_, oldLease, _, _ := owner.state()
+	second, err := m.Prepare([]byte("new secret"), time.Now().Add(10*time.Second), time.Time{}, func() bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondDone := m.Commit(context.Background(), second)
+	queue.drain()
+	if outcome := waitOutcome(t, secondDone); outcome != Unknown {
+		t.Fatalf("partial second write = %v, want Unknown", outcome)
+	}
+	time.Sleep(150 * time.Millisecond)
+	queue.drain()
+	writes, current, cleared, _ := owner.state()
+	if writes != 2 {
+		t.Fatalf("writes = %d, want 2 (no retry)", writes)
+	}
+	if cleared != 1 || len(owner.cleared) != 1 || owner.cleared[0] != partial {
+		t.Fatalf("cleanup attempts = %d, want exactly the new partial lease", cleared)
+	}
+	if current != nil {
+		t.Fatalf("partial acquisition was left owned (secret retained): %v", oldLease)
+	}
+	if oldLease == nil || owner.cleared[0] == oldLease {
+		t.Fatal("old confirmed lease was the cleanup target")
+	}
+}
+
+func TestManagerPartialWriteNeverBlanksForeignOwner(t *testing.T) {
+	queue, owner := &fakeQueue{}, &fakeOwner{}
+	partial := &Lease{native: []byte("partial copy")}
+	foreign := &Lease{native: []byte("foreign owner")}
+	owner.hook = func(call int, value []byte) (*Lease, error) {
+		if call == 1 {
+			return &Lease{native: []byte("old copy")}, nil
+		}
+		return partial, ErrWrite
+	}
+	m := NewManager(queue.dispatch, owner.write, owner.clear)
+	defer m.Close()
+	first, err := m.Prepare([]byte("old secret"), time.Now().Add(10*time.Second), time.Time{}, func() bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstDone := m.Commit(context.Background(), first)
+	queue.drain()
+	if outcome := waitOutcome(t, firstDone); outcome != Confirmed {
+		t.Fatalf("first commit = %v", outcome)
+	}
+	second, err := m.Prepare([]byte("new secret"), time.Now().Add(10*time.Second), time.Time{}, func() bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondDone := m.Commit(context.Background(), second)
+	if !queue.step() {
+		t.Fatal("queued write callback was missing")
+	}
+	if outcome := waitOutcome(t, secondDone); outcome != Unknown {
+		t.Fatalf("partial second write = %v, want Unknown", outcome)
+	}
+	owner.takeover(foreign)
+	queue.drain()
+	writes, current, cleared, _ := owner.state()
+	if writes != 2 || cleared != 1 || len(owner.cleared) != 1 || owner.cleared[0] != partial {
+		t.Fatalf("writes = %d cleared = %d, want cleanup of only the partial lease", writes, cleared)
+	}
+	if current != foreign {
+		t.Fatalf("foreign owner was blanked: %v", current)
+	}
+	waitFor(t, "pending cleanup resolution", func() bool { return !m.CleanupPending() })
+}
+
+func TestManagerClearDuringBlockedPartialWriteCleansNewLease(t *testing.T) {
+	queue, owner := &fakeQueue{}, &fakeOwner{}
+	partial := &Lease{native: []byte("blocked partial copy")}
+	entered, release := make(chan struct{}, 1), make(chan struct{})
+	owner.hook = func(call int, value []byte) (*Lease, error) {
+		if call == 1 {
+			return &Lease{native: []byte("old copy")}, nil
+		}
+		entered <- struct{}{}
+		<-release
+		return partial, ErrWrite
+	}
+	m := NewManager(queue.dispatch, owner.write, owner.clear)
+	defer m.Close()
+	first, err := m.Prepare([]byte("old secret"), time.Now().Add(10*time.Second), time.Time{}, func() bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstDone := m.Commit(context.Background(), first)
+	queue.drain()
+	if outcome := waitOutcome(t, firstDone); outcome != Confirmed {
+		t.Fatalf("first commit = %v", outcome)
+	}
+	second, err := m.Prepare([]byte("new secret"), time.Now().Add(10*time.Second), time.Time{}, func() bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondDone := m.Commit(context.Background(), second)
+	go queue.drain()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("partial write never started")
+	}
+	m.Clear()
+	close(release)
+	if outcome := waitOutcome(t, secondDone); outcome != Unknown {
+		t.Fatalf("cleared partial write = %v, want Unknown", outcome)
+	}
+	waitFor(t, "partial cleanup", func() bool { _, _, cleared, _ := owner.state(); return cleared == 1 })
+	writes, current, cleared, _ := owner.state()
+	if writes != 2 || cleared != 1 || owner.cleared[0] != partial || current != nil {
+		t.Fatalf("writes = %d cleared = %d current = %v", writes, cleared, current)
 	}
 }

@@ -229,6 +229,9 @@ func (m *Manager) run(j *copyJob) {
 	clear(j.offer.value)
 	j.offer.value = nil
 	if err != nil || lease == nil || !m.live(j) {
+		if lease != nil {
+			m.detachSuperseded(j)
+		}
 		m.cleanup(lease)
 		j.finish(Unknown)
 		return
@@ -266,6 +269,31 @@ func (m *Manager) run(j *copyJob) {
 		return
 	}
 	j.finish(Confirmed)
+}
+
+// detachSuperseded releases the previous logical lease after a new native
+// acquisition, even one whose write reported an error or went stale. A non-nil
+// lease proves native ownership moved, so clearing the old lease would blank
+// the new copy and its deadline must not fire; only the new lease keeps cleanup
+// authority (see cleanup). It does nothing once this job no longer owns state.
+func (m *Manager) detachSuperseded(j *copyJob) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.job != j || m.closed {
+		return
+	}
+	if m.leaseTimer != nil {
+		m.leaseTimer.Stop()
+		m.leaseTimer = nil
+	}
+	m.lease = nil
+	m.sequence++
+	m.pending = nil
+	m.cleanupSeq++
+	if m.retryTimer != nil {
+		m.retryTimer.Stop()
+		m.retryTimer = nil
+	}
 }
 
 func (m *Manager) expire(lease *Lease, sequence uint64) {
