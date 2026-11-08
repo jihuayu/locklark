@@ -13,8 +13,8 @@ platform CI proof and the real opt-in runs come later from the primary owner.
 | `scripts/browser_native_windows.py` | Windows adapter: ctypes Win32 + UI Automation (comtypes, lazy) + `SendInput` |
 | `scripts/browser_native_macos.py` | macOS adapter: ApplicationServices AX (PyObjC, lazy) + `CGEventPost` |
 | `scripts/native_acceptance_driver.py` | Platform dispatcher; Linux is replayed byte-for-byte into the existing X11 driver |
-| `scripts/test_native_acceptance_contract.py` | 31 pure contract tests |
-| `scripts/test_native_acceptance_platforms.py` | 30 adapter/dispatcher seam tests (fakes and spies) |
+| `scripts/test_native_acceptance_contract.py` | 38 pure contract tests |
+| `scripts/test_native_acceptance_platforms.py` | 81 adapter/dispatcher seam tests (fakes and spies) |
 
 The X11 driver (`scripts/browser_native_x11.py`) and the `.mjs` callers were
 **not** edited; switching the callers to the dispatcher is a later integration
@@ -77,9 +77,10 @@ Adapter protocol (implemented by both platform adapters):
 `activate(window)`, `click(x, y)`, `type_text(text)`, `press_chord(parts)`,
 plus the mandatory truthful `input_evidence` literal (`accepted` or `posted`)
 and `exact_focus`. An adapter without a valid literal, or one that reports
-`exact_focus` but only a PID, refuses before input. Optional `screen_bounds()`
-and `hit_test(window, x, y)` let a platform prove the click point is on screen
-and resolves to the selected window.
+`exact_focus` but only a PID, refuses before input. Optional `screen_bounds()`,
+`hit_test(window, x, y)` and `point_visible(window, x, y)` let a platform prove
+the click point is on screen, resolves to the selected window and lies on a
+visible display; a hook that answers anything other than `True` fails closed.
 
 ## Windows
 
@@ -87,10 +88,16 @@ and resolves to the selected window.
   `GetWindowRect`/`GetClientRect`/`ClientToScreen`, `GetWindowTextW`,
   `GetForegroundWindow`. Enumeration is exactly bounded: more than 512
   top-level windows refuses with `window-overrun` (never a truncated "unique"
-  answer, even if the target was in the first 512 handles).
+  answer, even if the target was in the first 512 handles). If `EnumWindows`
+  itself returns FALSE without that own overflow stop, the handle list is a
+  partial view: the whole query refuses with `window-query` and no partial list
+  is ever returned.
 * Process identity: read-only `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` +
   `QueryFullProcessImageNameW`, plus a same-user check via `OpenProcessToken` /
   `GetTokenInformation(TokenUser)` / `EqualSid`. No writable handle is opened.
+  The current-process pseudo handle comes from `kernel32.GetCurrentProcess`
+  (declared on kernel32 only — `user32` does not export it); a strict fake DLL
+  in the tests fails if `user32` is ever asked for that symbol.
 * UI Automation: `comtypes.client.GetModule("UIAutomationCore.dll")` and
   `CreateObject` for `IUIAutomation`, lazily imported; descendants are walked
   with a 4096-node cap, reading only `CurrentName`, `CurrentControlType`,
@@ -109,12 +116,18 @@ and resolves to the selected window.
 * Hit testing: `WindowFromPoint` + `GetAncestor(GA_ROOT)` must resolve the
   click point to the selected top-level HWND, and the point must lie inside
   its client rectangle.
-* Acknowledgement: a zero or partial `SendInput` return count refuses with
-  `input-failed` and is never retried.
+* Acknowledgement: a zero `SendInput` return count refuses with
+  `input-failed`. A short non-zero count means a *prefix* may already be in the
+  input queue: the batch is never resent and no repair key/button release is
+  injected, so the fixed `input-unknown` refusal is raised and the driver
+  stops. Which prefix the OS actually delivered is not observable from this
+  process.
 * Secure desktop: `OpenInputDesktop`/`GetUserObjectInformationW` reporting a
   non-`Default` desktop, or a window owned by `logonui.exe`, `consent.exe`,
   `credentialuibroker.exe` (or a credential-dialog window class), refuses with
-  `secure-desktop`. UAC consent and Windows Hello can never be approved by this
+  `secure-desktop`. If either call fails, the desktop identity is **unknown**:
+  that is the fixed `capability-unavailable` refusal (input never proceeds on a
+  desktop this process cannot name) — never a silent `False`/"not secure". UAC consent and Windows Hello can never be approved by this
   driver — the human must act.
 
 Known API limits: `SetForegroundWindow` is subject to Windows foreground-lock
@@ -125,6 +138,18 @@ cannot be opened read-only.
 
 ## macOS
 
+* Frameworks: every AX call and constant (`AXIsProcessTrusted`,
+  `AXUIElementCreateApplication`, `AXUIElementCopyAttributeValue`,
+  `AXUIElementCopyElementAtPosition`, `AXValueGetValue`, `kAXWindowsAttribute`,
+  `kAXValueCGPointType`/`kAXValueCGSizeType`) belongs to
+  ApplicationServices/HIServices (`self.ax`) and is imported separately
+  (`import ApplicationServices`), lazily. Only CoreGraphics window, display and
+  event work (`CGWindowListCopyWindowInfo`, `CGGetActiveDisplayList`,
+  `CGDisplayBounds`, `CGEventCreate*`, `CGEventPost`) uses `self.quartz`. There
+  is no runtime fallback from one framework to the other: a missing
+  ApplicationServices import fails closed instead of being answered by
+  CoreGraphics. The single exception is a caller-injected combined fake object
+  in the tests, which is reused for both roles explicitly.
 * Capability: `AXIsProcessTrusted()` is **queried only**. A `False` result is the
   fixed `capability-unavailable` refusal. No TCC prompt, no grant, no
   `AXIsProcessTrustedWithOptions` (a strict fake in the tests raises if it is
@@ -145,18 +170,33 @@ cannot be opened read-only.
   refuses `control-geometry`. `kAXValueAttribute`/`AXSelectedText` are never
   read.
 * Focus: `NSWorkspace.frontmostApplication().processIdentifier()` must equal the
-  target PID, and `AXFocusedWindow`/`AXMainWindow` (when exposed) must bind to
-  the exact selected window before input; otherwise input is refused. With
+  target PID and `AXFocusedWindow` must bind to the exact selected window
+  before input; a missing or differently bound focused window refuses even when
+  `AXMainWindow` matches. `AXMainWindow` is only an additional consistency
+  check when the OS exposes it, never a fallback. With
   `preserve_focus` the driver never activates anything — if the target is not
   frontmost it refuses with `preserve-focus-lost` instead of silently stealing
   focus.
-* Point check: the click point must lie inside the bound window and
+* Point check: the click point must lie inside the bound window,
   `AXUIElementCopyElementAtPosition` must resolve to an element inside that
-  same window.
+  same window, and `point_visible()` must prove the point is inside one active
+  display via `CGGetActiveDisplayList` + `CGDisplayBounds`. Membership is
+  tested display by display, so a gap between two display rectangles is not
+  screen. Neither call prompts for Screen Recording. An error, an empty list, a
+  count that is bool/non-integer/out of range or longer than the returned list,
+  non-finite or non-positive geometry, or any other query failure fails closed
+  with `control-offscreen`.
 * Input: `CGEventCreateMouseEvent` + `CGEventPost(kCGHIDEventTap)` for one
   move/down/up batch; keyboard chords via `CGEventCreateKeyboardEvent` with
-  `CGEventSetFlags`; ASCII text via `CGEventKeyboardSetUnicodeString`. Success
-  records `evidence: posted`, which proves posting only, not product effect.
+  `CGEventSetFlags`; ASCII text via `CGEventKeyboardSetUnicodeString`. Every
+  mouse, chord and text event (including its unicode string and flags) is
+  created and validated **before** the first `CGEventPost`, so a failed
+  creation posts nothing and can never leave an orphan key-down behind.
+  `CGEventPost` returns void: success records `evidence: posted`, which proves
+  posting only — never acceptance and never product effect. If a post raises
+  after an earlier event of the same batch was delivered, the batch is never
+  rebuilt or re-posted; the fixed `input-unknown` refusal reports delivery as
+  unprovable.
 
 Known API limits: `CGWindowName` is only populated when the process already has
 Screen Recording permission, so titles come from AX (Screen Recording is not
@@ -166,6 +206,11 @@ defensively and geometry failures fail closed as `control-geometry`; if
 stays untrusted (there is no `stat`-based owner fallback);
 `activateWithOptions_` is deprecated on recent macOS releases;
 `CGEventKeyboardSetUnicodeString` availability is verified only on a real run.
+A partially delivered batch (Windows short `SendInput` prefix, macOS partially
+posted `CGEventPost` batch) is reported as `input-unknown`; residual OS
+delivery cannot be inspected or undone from here, so a Linux mock cannot prove
+it. Hit identity against a sibling overlay window that sits above the target
+window is still open (pending the next phase) and is not claimed closed.
 
 ## Dispatcher
 
@@ -183,9 +228,11 @@ in argv.
 # Linux (existing driver): standard library + libX11/libXtst, nothing new.
 # Windows: real UI Automation via comtypes.
 py -3 -m pip install --disable-pip-version-check comtypes
-# macOS: real ApplicationServices/Quartz/AppKit bindings.
+# macOS: real ApplicationServices (AX/HIServices), Quartz (CoreGraphics) and
+# Cocoa (AppKit) bindings. ApplicationServices is a separate framework import,
+# not a Quartz re-export.
 python3 -m pip install --disable-pip-version-check \
-  pyobjc-framework-Quartz pyobjc-framework-Cocoa
+  pyobjc-framework-ApplicationServices pyobjc-framework-Quartz pyobjc-framework-Cocoa
 ```
 
 None of these are imported at module import time, so importing the adapters and
@@ -235,12 +282,18 @@ anything. Do not record these issues as validated from driver output alone.
 ## Verification performed here
 
 * `python3 -m unittest scripts/test_native_acceptance_contract.py
-  scripts/test_native_acceptance_platforms.py` → 61 tests, OK.
-* `python3 -m unittest discover -s scripts -p 'test_native_acceptance*.py'` → OK.
+  scripts/test_native_acceptance_platforms.py` → 119 tests, OK.
+* `python3 -m unittest discover -s scripts -p 'test_native_acceptance*.py'` →
+  119 tests, OK.
 * `python3 -m py_compile` on all six modules → OK.
 
 ## Remaining limitations
 
+* A partially delivered input batch is reported as `input-unknown`; the tests
+  prove only that nothing is retried and nothing is resent, never which events
+  the OS actually delivered.
+* Sibling overlay control hit identity (a control drawn by a window stacked
+  above the target) is not solved here and stays open for the next phase.
 * No Windows/macOS execution: `WindowsAdapter()`/`MacAdapter()` construction,
   the real UIA walk, real AX geometry, `SendInput`/`CGEventPost` delivery and
   foreground rules are unverified on hardware.

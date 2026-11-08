@@ -185,3 +185,100 @@ func TestDecodeTypedPersonalInputBounds(t *testing.T) {
 		t.Fatalf("title bound: %v", err)
 	}
 }
+
+func TestDecodeTypedPersonalInputRefusesASCIICaseAliasDuplicates(t *testing.T) {
+	// ASCII case aliases are the only fold class the duplicate walk has to cover
+	// itself; these must keep being refused after non-ASCII keys are banned.
+	for _, raw := range []string{
+		`{"title":"x","TAGS":["a"],"tags":["b"]}`,
+		`{"title":"x","Sections":[],"SECTIONS":[]}`,
+		`{"title":"x","sections":[{"id":"s","title":"S","fields":[{"id":"f","label":"L","VALUE":"v","value":"w"}]}]}`,
+		`{"Title":"x","tItLe":"y"}`,
+	} {
+		mustRefuse(t, raw)
+	}
+}
+
+func TestDecodeTypedPersonalInputRefusesNonASCIIObjectKeys(t *testing.T) {
+	// encoding/json matches struct fields with Unicode simple folding, while the
+	// duplicate walk only lowercases. A non-ASCII key such as "tag\u017f" folds
+	// onto the ASCII field "tags", so it could bind twice and the later value
+	// would win without ever looking like a duplicate. Every DTO member name is
+	// ASCII, so non-ASCII keys are refused at every depth; values stay free.
+	for _, raw := range []string{
+		`{"title":"x","tags":["a"],"tagſ":["b"]}`,
+		`{"title":"x","tags":["a"],"tag\u017f":["b"]}`,
+		`{"title":"x","ſections":[{"id":"s","title":"S"}]}`,
+		`{"title":"x","sections":[{"id":"s","title":"S","fıelds":[{"id":"f","label":"L","value":"v"}]}]}`,
+		`{"title":"x","urls":[{"url":"https://example.test","label":"L","prımary":true}]}`,
+		`{"title":"x","credit_card":{"number":"4111111111111111","numbér":"4111111111111112"}}`,
+		`{"title":"x","notes":"n","Nötes":"m"}`,
+		`{"title":"x","ｓections":[]}`,
+		`{"ŧitle":"x"}`,
+		`{"title":"x","sections":[{"İd":"s","title":"S"}]}`,
+	} {
+		mustRefuse(t, raw)
+	}
+}
+
+func TestDecodeTypedPersonalInputRefusesUnpairedSurrogateEscapes(t *testing.T) {
+	// utf8.Valid sees the ASCII escape and encoding/json rewrites an unpaired
+	// \uD800..\uDFFF escape to U+FFFD, so the loss has to be caught before decode.
+	for _, raw := range []string{
+		`{"title":"x\ud800"}`,
+		`{"title":"\ud800"}`,
+		`{"title":"\udc00"}`,
+		`{"title":"x\udfff"}`,
+		`{"title":"\ud800A"}`,
+		`{"title":"\ud800\u0041"}`,
+		`{"title":"\ud800\ud800"}`,
+		`{"title":"\udc00\udc00"}`,
+		`{"title":"\ud800\\"}`,
+		`{"title":"\ud800\n"}`,
+		`{"title":"\uD83D\ud800"}`,
+		`{"title":"x","notes":"\udc00 low first"}`,
+		`{"title":"x","username":"\ud800"}`,
+		`{"title":"x","sections":[{"id":"s","title":"S","fields":[{"id":"f","label":"L","value":"\ud800"}]}]}`,
+		`{"title":"x","urls":[{"url":"https://example.test","label":"\ud800"}]}`,
+		`{"title":"x","\ud800":"y"}`,
+	} {
+		mustRefuse(t, raw)
+	}
+}
+
+func TestDecodeTypedPersonalInputKeepsUnicodeValuesLossless(t *testing.T) {
+	for _, tc := range []struct{ raw, want string }{
+		{`{"title":"smile \ud83d\ude00"}`, "smile \U0001F600"},
+		{`{"title":"smile \uD83D\uDE00"}`, "smile \U0001F600"},
+		{`{"title":"smile 😀"}`, "smile 😀"},
+		{`{"title":"\ufffd"}`, "\uFFFD"},
+		{`{"title":"\uFFFD literal"}`, "\uFFFD literal"},
+		{`{"title":"\\ud800"}`, `\ud800`},
+		{`{"title":"\\\ud83d\ude00"}`, "\\\U0001F600"},
+		{`{"title":"\"ud800\""}`, `"ud800"`},
+		{`{"title":"plain \\\\ ok"}`, `plain \\ ok`},
+		{`{"title":"日本語テキスト"}`, "日本語テキスト"},
+	} {
+		item, err := decodeTypedPersonalInput([]byte(tc.raw))
+		if err != nil {
+			t.Fatalf("decode %s: %v", tc.raw, err)
+		}
+		if item.Title != tc.want {
+			t.Fatalf("title from %s: want %q got %q", tc.raw, tc.want, item.Title)
+		}
+	}
+	// Valid pairs and literal non-BMP runes stay byte-for-byte lossless at depth.
+	item, err := decodeTypedPersonalInput([]byte(`{"title":"x","notes":"\ud83d\ude00","tags":["😀","ſ"],"sections":[{"id":"s","title":"S","fields":[{"id":"f","label":"L","value":"\udbff\udfff"}]}]}`))
+	if err != nil {
+		t.Fatalf("nested unicode decode: %v", err)
+	}
+	if item.Notes != "\U0001F600" {
+		t.Fatalf("notes: %q", item.Notes)
+	}
+	if len(item.Tags) != 2 || item.Tags[0] != "😀" || item.Tags[1] != "ſ" {
+		t.Fatalf("tags: %q", item.Tags)
+	}
+	if len(item.Sections) != 1 || len(item.Sections[0].Fields) != 1 || item.Sections[0].Fields[0].Value != "\U0010FFFF" {
+		t.Fatalf("sections: %+v", item.Sections)
+	}
+}

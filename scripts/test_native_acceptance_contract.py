@@ -42,13 +42,14 @@ class SpyAdapter:
     input_evidence = "accepted"
 
     def __init__(self, windows=None, controls=None, focus=None, capabilities=None,
-                 focus_window=None, hit=True, screen=None):
+                 focus_window=None, hit=True, screen=None, visible=True):
         self.windows = [dict(WINDOW)] if windows is None else windows
         self.controls = [control(LABEL)] if controls is None else controls
         self.focus = WINDOW["pid"] if focus is None else focus
         self.focus_window = WINDOW["id"] if focus_window is None else focus_window
         self.hit = hit
         self.screen = screen
+        self.visible = visible
         self.calls = []
         self.activations = 0
         self._capabilities = capabilities or []
@@ -83,6 +84,10 @@ class SpyAdapter:
     def hit_test(self, window, x, y):
         self.calls.append("hit_test")
         return self.hit
+
+    def point_visible(self, window, x, y):
+        self.calls.append("point_visible")
+        return self.visible
 
     def activate(self, window):
         self.activations += 1
@@ -279,6 +284,11 @@ class ExecutionGuardTests(unittest.TestCase):
     def test_click_point_must_hit_the_selected_window(self):
         adapter = SpyAdapter(hit=False)
         self.assert_refused(adapter, "control-offscreen")
+
+    def test_click_point_must_be_on_a_visible_display(self):
+        for verdict in (False, None, "yes", 1):
+            with self.subTest(verdict=verdict):
+                self.assert_refused(SpyAdapter(visible=verdict), "control-offscreen")
 
     def test_click_point_outside_virtual_screen_refused(self):
         adapter = SpyAdapter(screen={"x": 0, "y": 0, "width": 100, "height": 100})

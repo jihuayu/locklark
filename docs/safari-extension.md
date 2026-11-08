@@ -174,21 +174,16 @@ requires that a closed-peer `socketpair` write and a closed-pipe write both
 return the fixed failure, that the process survives, and that the caller thread
 mask (including a SIGPIPE that was already pending) is preserved.
 
-The macOS GitHub job for source `27445a1` actually compiled the Swift package
-and passed 43 XCTest cases. It subsequently failed before the Xcode app build
-because the package script had not generated the Chromium comparison baseline;
-that build order is corrected in the current source. The job ran `swift test`
-directly, so its 43 passes do not establish execution of the standalone SIGPIPE
-probe. CI now invokes the complete script above, including that probe.
-
-Linux package tests and source review do not establish Xcode app compilation,
-Apple signing, installation or Safari runtime behavior. Record the final commit
-and actual macOS job result before crediting each of those checks.
+The macOS GitHub job `128775595563` for source
+`ec9e52e797bb8f3a707c0f290958b13ea0f360ad` completed successfully:
+47 XCTest cases passed, the independent default-SIGPIPE process probe passed,
+and Xcode built both the containing app and Safari extension with the actual
+Go helper. This is an unsigned CI build; it establishes compilation, not
+signed installation or Safari runtime acceptance. Final PR checks must still
+run against the final commit after subsequent integration.
 
 ## Integration still required
 
-- Complete a successful Xcode containing-app and extension build using the
-  actual Go helper. Unsigned compilation does not establish installation.
 - Signing/notarization with matching app, extension and app-group entitlements,
   and the Team ID used in `PeerVerifier`.
 - Real Safari installation and password/OTP/Passkey, lock, cancel, navigation,

@@ -139,8 +139,6 @@ class Win32Api:
         u, k, a = self.user32, self.kernel32, self.advapi32
         u.EnumWindows.argtypes = [ctypes.c_void_p, wt.LPARAM]
         u.EnumWindows.restype = wt.BOOL
-        u.GetCurrentProcess.argtypes = []
-        u.GetCurrentProcess.restype = wt.HANDLE
         u.WindowFromPoint.argtypes = [wt.POINT]
         u.WindowFromPoint.restype = wt.HWND
         u.GetAncestor.argtypes = [wt.HWND, wt.UINT]
@@ -165,6 +163,8 @@ class Win32Api:
         u.OpenInputDesktop.restype = wt.HANDLE
         u.GetUserObjectInformationW.argtypes = [wt.HANDLE, ctypes.c_int, ctypes.c_void_p, wt.DWORD, ctypes.POINTER(wt.DWORD)]
         u.CloseDesktop.argtypes = [wt.HANDLE]
+        k.GetCurrentProcess.argtypes = []
+        k.GetCurrentProcess.restype = wt.HANDLE
         k.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
         k.OpenProcess.restype = wt.HANDLE
         k.CloseHandle.argtypes = [wt.HANDLE]
@@ -193,7 +193,7 @@ class Win32Api:
             self.kernel32.CloseHandle(handle)
 
     def same_user(self, process_handle):
-        mine = self._sid_pair(self.user32.GetCurrentProcess())
+        mine = self._sid_pair(self.kernel32.GetCurrentProcess())
         theirs = self._sid_pair(process_handle)
         if not mine or not theirs or not mine[1] or not theirs[1]:
             return False
@@ -268,9 +268,13 @@ class Win32Api:
             handles.append(hwnd)
             return True
 
-        self.user32.EnumWindows(collect, 0)
+        enumerated = self.user32.EnumWindows(collect, 0)
         if overflow:
             raise contract.ContractError("window-overrun", {"windows": len(handles)})
+        if not enumerated:
+            # Enumeration stopped before the end without our own overflow stop:
+            # the handle list is a partial view and is never returned.
+            raise contract.ContractError("window-query", {"windows": len(handles)})
         windows = []
         for hwnd in handles:
             described = self._describe(hwnd)
@@ -279,15 +283,22 @@ class Win32Api:
         return windows
 
     def input_desktop_secure(self):
+        """True only when the input desktop is provably NOT the user default.
+
+        A failed ``OpenInputDesktop``/``GetUserObjectInformationW`` leaves the
+        desktop identity unknown; "could not ask" is never reported as "not
+        secure", because that would authorise input to an unnamed surface.  The
+        fixed ``capability-unavailable`` refusal is raised instead.
+        """
         desktop = self.user32.OpenInputDesktop(0, False, DESKTOP_READOBJECTS)
         if not desktop:
-            return False
+            raise contract.ContractError("capability-unavailable")
         try:
             buffer = ctypes.create_unicode_buffer(256)
             needed = wt.DWORD(0)
             if not self.user32.GetUserObjectInformationW(desktop, UOI_NAME, buffer,
                                                         ctypes.sizeof(buffer), ctypes.byref(needed)):
-                return False
+                raise contract.ContractError("capability-unavailable")
             return buffer.value != "Default"
         finally:
             self.user32.CloseDesktop(desktop)
@@ -331,13 +342,24 @@ class Win32Api:
         return bool(self.user32.SetForegroundWindow(hwnd))
 
     def _send(self, events):
-        """One batch; a zero/partial SendInput count refuses (never retried)."""
+        """One batch; anything short of the whole batch refuses, never retried.
+
+        SendInput reports how many of the LEADING events it inserted.  Zero
+        means nothing reached the queue (``input-failed``).  A short non-zero
+        count means a prefix may already be delivered: the whole batch cannot
+        be resent without duplicating that prefix, and no "repair" key/button
+        release is injected either, so the fixed ``input-unknown`` refusal is
+        raised and the driver stops with delivery unprovable.
+        """
         if not events:
             raise contract.ContractError("input-failed")
         array = (INPUT * len(events))(*events)
         sent = self.user32.SendInput(len(events), array, ctypes.sizeof(INPUT))
-        if type(sent) is not int or sent != len(events):
-            raise contract.ContractError("input-failed", {"sent": sent})
+        if type(sent) is not int or sent < 0 or sent > len(events):
+            raise contract.ContractError("input-unknown", {"sent": -1})
+        if sent != len(events):
+            raise contract.ContractError("input-unknown" if sent else "input-failed",
+                                         {"sent": sent})
         return {"move": True, "down": True, "up": True}
 
     def _mouse(self, flags, x=0, y=0):

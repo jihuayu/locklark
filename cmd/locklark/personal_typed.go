@@ -9,8 +9,12 @@ package main
 //
 // Rules:
 //   - one JSON object, strict UTF-8, at most 1 MiB;
-//   - duplicate keys are refused case-insensitively at any depth, as are
-//     unknown keys (json.DisallowUnknownFields) and trailing values;
+//   - duplicate keys are refused ASCII-case-insensitively at any depth, as are
+//     unknown keys (json.DisallowUnknownFields) and trailing values; object keys
+//     must be ASCII because Go binds struct fields with Unicode simple folding,
+//     while Unicode in values stays allowed untrimmed and unnormalised;
+//   - \uD800..\uDFFF escapes must form a valid high/low pair, so a decoded value
+//     is never silently rewritten to U+FFFD (literal non-BMP runes stay fine);
 //   - raw credential / identity / provenance / history / attachment members are
 //     not part of the accepted schema, so they are refused as unknown keys;
 //   - every refusal returns the same fixed error that never echoes input.
@@ -20,6 +24,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -126,7 +131,9 @@ func decodeTypedPersonalInput(raw []byte) (vault.Item, error) {
 	if len(raw) == 0 || len(raw) > maxTypedInputBytes || !utf8.Valid(raw) {
 		return vault.Item{}, errTypedInputRefused
 	}
-	if !strictTypedJSON(raw) {
+	// encoding/json silently rewrites an unpaired surrogate escape to U+FFFD, so
+	// the raw escapes are rejected before anything is decoded.
+	if !strictTypedUnicode(raw) || !strictTypedJSON(raw) {
 		return vault.Item{}, errTypedInputRefused
 	}
 	var input typedPersonalInput
@@ -141,8 +148,9 @@ func decodeTypedPersonalInput(raw []byte) (vault.Item, error) {
 	return input.toVaultItem()
 }
 
-// strictTypedJSON enforces shape limits, case-insensitive duplicate-key refusal
-// and a single trailing-free value without materialising the document first.
+// strictTypedJSON enforces shape limits, ASCII-only keys, ASCII-case-insensitive
+// duplicate-key refusal and a single trailing-free value without materialising
+// the document first.
 func strictTypedJSON(raw []byte) bool {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	nodes := 0
@@ -162,7 +170,7 @@ func strictTypedJSON(raw []byte) bool {
 			for decoder.More() {
 				key, err := decoder.Token()
 				name, ok := key.(string)
-				if err != nil || !ok {
+				if err != nil || !ok || !typedASCIIJSONKey(name) {
 					return false
 				}
 				name = strings.ToLower(name)
@@ -198,6 +206,73 @@ func strictTypedJSON(raw []byte) bool {
 	}
 	_, err := decoder.Token()
 	return err == io.EOF
+}
+
+// typedASCIIJSONKey reports whether an object key is pure ASCII. Go's decoder
+// binds struct fields with Unicode simple folding, so a key like "tag\u017f"
+// reaches Tags exactly as "tags" does, while the duplicate walk here only
+// lowercases. A non-ASCII key could therefore bind one field twice and let the
+// later value win unseen. Every member of the accepted schema is ASCII, so
+// non-ASCII keys are refused instead; only keys are affected, not values.
+func typedASCIIJSONKey(name string) bool {
+	for i := 0; i < len(name); i++ {
+		if name[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
+}
+
+// strictTypedUnicode rejects JSON strings whose \u escapes encode an unpaired
+// surrogate, which encoding/json replaces with U+FFFD instead of failing. The
+// scan works on the raw bytes and skips escaped backslashes and quotes, so only
+// real escapes are inspected: a high surrogate must be followed immediately by
+// a low surrogate. Valid pairs, literal non-BMP runes and literal U+FFFD values
+// pass through untouched and stay lossless.
+func strictTypedUnicode(raw []byte) bool {
+	if !utf8.Valid(raw) {
+		return false
+	}
+	for n := 0; n < len(raw); n++ {
+		if raw[n] != '"' {
+			continue
+		}
+		n++
+		for ; n < len(raw) && raw[n] != '"'; n++ {
+			if raw[n] != '\\' {
+				continue
+			}
+			n++
+			if n >= len(raw) {
+				return false
+			}
+			if raw[n] != 'u' {
+				continue
+			}
+			if n+4 >= len(raw) {
+				return false
+			}
+			v, err := strconv.ParseUint(string(raw[n+1:n+5]), 16, 16)
+			if err != nil {
+				return false
+			}
+			n += 4
+			if v >= 0xdc00 && v <= 0xdfff {
+				return false
+			}
+			if v >= 0xd800 && v <= 0xdbff {
+				if n+6 >= len(raw) || raw[n+1] != '\\' || raw[n+2] != 'u' {
+					return false
+				}
+				w, err := strconv.ParseUint(string(raw[n+3:n+7]), 16, 16)
+				if err != nil || w < 0xdc00 || w > 0xdfff {
+					return false
+				}
+				n += 6
+			}
+		}
+	}
+	return true
 }
 
 func (input typedPersonalInput) toVaultItem() (vault.Item, error) {

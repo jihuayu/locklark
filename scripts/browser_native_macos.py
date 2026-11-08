@@ -12,9 +12,16 @@ the fixed capability failure. Screen Recording is not requested: window titles
 come from AX once Accessibility is trusted (CGWindowName is only used when the
 OS already exposes it).
 
-PyObjC is imported lazily, so this module imports and unit-tests on Linux.
+Two PyObjC frameworks are imported separately and lazily: every AX
+(accessibility) call and constant belongs to ApplicationServices/HIServices
+(``self.ax``), and only CoreGraphics window/display/event work belongs to
+Quartz (``self.quartz``). CoreGraphics is never used as an AX stand-in at
+runtime, so a missing ApplicationServices import fails closed instead of
+silently reading the wrong framework. Everything imports and unit-tests on
+Linux.
 """
 import ctypes
+import math
 import os
 
 import native_acceptance_contract as contract
@@ -22,6 +29,7 @@ import native_acceptance_contract as contract
 PLATFORM = "macos"
 MAX_NODES = 4096
 MAX_DEPTH = 12
+MAX_DISPLAYS = 32
 
 ROLE_MAP = {"AXButton": "push button", "AXTextField": "entry",
             "AXTextArea": "entry"}
@@ -69,13 +77,32 @@ class AxValueUnavailable(Exception):
 
 
 class QuartzApi:
-    """Real ApplicationServices / CoreGraphics access; created only on macOS."""
+    """Real ApplicationServices (AX) + CoreGraphics (Quartz) access on macOS.
 
-    def __init__(self, quartz=None, appkit=None):
+    ``self.ax`` carries ApplicationServices/HIServices only: the AX trust
+    query, AX element creation/copy calls, AX attribute names and AXValue
+    types. ``self.quartz`` carries CoreGraphics only: window list, display
+    list, event creation/posting. A real run imports both frameworks
+    separately and never falls back from one to the other; the single
+    exception is an explicitly injected combined fake object, used for tests.
+    """
+
+    def __init__(self, quartz=None, appkit=None, ax=None):
+        injected = quartz is not None
         if quartz is None or appkit is None:
             import AppKit  # noqa: F401  (PyObjC, imported on demand)
             import Quartz
-            quartz, appkit = Quartz, AppKit
+            quartz = Quartz if quartz is None else quartz
+            appkit = AppKit if appkit is None else appkit
+        if ax is not None:
+            self.ax = ax
+        elif injected:
+            # Explicit fallback ONLY for a caller-injected (fake) object that
+            # stands in for both frameworks; a real run never takes this path.
+            self.ax = quartz
+        else:
+            import ApplicationServices  # noqa: F401  (PyObjC HIServices)
+            self.ax = ApplicationServices
         self.quartz, self.appkit = quartz, appkit
         self.libproc = ctypes.CDLL(None)
         self._declare_libproc()
@@ -99,12 +126,12 @@ class QuartzApi:
     # -- capability ---------------------------------------------------------
     def capability(self):
         """Query-only trust check. Never prompts, never grants, never retries."""
-        if not bool(self.quartz.AXIsProcessTrusted()):
+        if not bool(self.ax.AXIsProcessTrusted()):
             raise contract.ContractError("capability-unavailable")
 
     # -- read-only AX helpers ----------------------------------------------
     def attribute(self, element, name):
-        result = self.quartz.AXUIElementCopyAttributeValue(element, name, None)
+        result = self.ax.AXUIElementCopyAttributeValue(element, name, None)
         if isinstance(result, tuple) and len(result) == 2:
             code, value = result
         else:
@@ -118,7 +145,7 @@ class QuartzApi:
         if value is None:
             return None
         try:
-            result = self.quartz.AXValueGetValue(value, value_type, None)
+            result = self.ax.AXValueGetValue(value, value_type, None)
         except Exception:
             raise AxValueUnavailable()
         if not isinstance(result, tuple) or len(result) != 2 or not result[0]:
@@ -134,21 +161,21 @@ class QuartzApi:
 
     def frame(self, element):
         """AX frame in global display coordinates, or AxValueUnavailable."""
-        position = self._geometry(element, "AXPosition", self.quartz.kAXValueCGPointType, "x", "y")
-        size = self._geometry(element, "AXSize", self.quartz.kAXValueCGSizeType, "width", "height")
+        position = self._geometry(element, "AXPosition", self.ax.kAXValueCGPointType, "x", "y")
+        size = self._geometry(element, "AXSize", self.ax.kAXValueCGSizeType, "width", "height")
         if position is None or size is None:
             raise AxValueUnavailable()
         return {"x": int(position[0]), "y": int(position[1]),
                 "width": int(size[0]), "height": int(size[1])}
 
     def application(self, pid):
-        return self.quartz.AXUIElementCreateApplication(pid)
+        return self.ax.AXUIElementCreateApplication(pid)
 
     def windows(self, pid):
         element = self.application(pid)
         if element is None:
             return []
-        value = self.attribute(element, self.quartz.kAXWindowsAttribute)
+        value = self.attribute(element, self.ax.kAXWindowsAttribute)
         return list(value) if value else []
 
     def title(self, element):
@@ -299,6 +326,53 @@ class QuartzApi:
                 return title
         return ""
 
+    # -- display ------------------------------------------------------------
+    def point_visible(self, window, x, y):
+        """True only inside one real active display rectangle.
+
+        ``CGGetActiveDisplayList`` + ``CGDisplayBounds`` need no Screen
+        Recording permission and cannot prompt.  Membership is tested display by
+        display: the union of display rectangles is not the screen, so a gap
+        between two displays is not clickable.  An unreadable or empty display
+        list fails closed.
+        """
+        del window
+        quartz = self.quartz
+        try:
+            result = quartz.CGGetActiveDisplayList(MAX_DISPLAYS, None, None)
+        except Exception:
+            return False
+        if not isinstance(result, tuple) or len(result) != 3:
+            return False
+        error, displays, count = result
+        if error or displays is None:
+            return False
+        # A count that is bool, non-integer, out of range or longer than the
+        # returned list means the query result is not trustworthy.
+        if type(count) is not int or not 1 <= count <= MAX_DISPLAYS:
+            return False
+        try:
+            active = list(displays)
+        except Exception:
+            return False
+        if len(active) < count:
+            return False
+        for display in active[:count]:
+            try:
+                bounds = quartz.CGDisplayBounds(display)
+                origin, size = bounds[0], bounds[1]
+                left, top = float(origin[0]), float(origin[1])
+                width, height = float(size[0]), float(size[1])
+            except Exception:
+                return False
+            if not all(math.isfinite(value) for value in (left, top, width, height)):
+                return False
+            if width <= 0 or height <= 0:
+                continue
+            if left <= x < left + width and top <= y < top + height:
+                return True
+        return False
+
     # -- foreground / input -------------------------------------------------
     def foreground_pid(self):
         workspace = self.appkit.NSWorkspace.sharedWorkspace()
@@ -306,25 +380,22 @@ class QuartzApi:
         return int(front.processIdentifier()) if front is not None else None
 
     def focus_state(self, window=None):
-        """Frontmost PID is never enough: the AX focused/main window matters.
+        """AXFocusedWindow must bind to the exact window; AXMainWindow only adds.
 
-        Both AXFocusedWindow and AXMainWindow, when present, must bind to the
-        exact selected window; otherwise no window identity is reported and
-        the shared contract refuses input.
+        A frontmost PID is never enough and AXMainWindow is never a fallback:
+        when AXFocusedWindow is missing or binds to any other window, no window
+        identity is reported and the shared contract refuses input. When the OS
+        also exposes AXMainWindow it is only an additional consistency check.
         """
         front = self.foreground_pid()
         if window is None or type(front) is not int or front != window["pid"]:
             return {"pid": front, "window": None}
         application = self.application(window["pid"])
-        verified = 0
-        for name in ("AXFocusedWindow", "AXMainWindow"):
-            element = self.attribute(application, name)
-            if element is None:
-                continue
-            if not self._identity_matches(element, window):
-                return {"pid": front, "window": None}
-            verified += 1
-        if not verified:
+        focused = self.attribute(application, "AXFocusedWindow")
+        if focused is None or not self._identity_matches(focused, window):
+            return {"pid": front, "window": None}
+        main = self.attribute(application, "AXMainWindow")
+        if main is not None and not self._identity_matches(main, window):
             return {"pid": front, "window": None}
         return {"pid": front, "window": window["id"]}
 
@@ -333,7 +404,7 @@ class QuartzApi:
         application = self.application(window["pid"])
         if application is None:
             return False
-        result = self.quartz.AXUIElementCopyElementAtPosition(
+        result = self.ax.AXUIElementCopyElementAtPosition(
             application, float(x), float(y), None)
         if isinstance(result, tuple) and len(result) == 2:
             code, element = result
@@ -355,21 +426,37 @@ class QuartzApi:
             return False
         return bool(running.activateWithOptions_(1))
 
+    def _post(self, events):
+        """Post an already complete, already validated event list exactly once.
+
+        ``CGEventPost`` returns void: a returned call means POSTED, never
+        accepted, and nothing here can observe what the application did.  If a
+        post raises after an earlier event was delivered, the events are never
+        rebuilt or re-posted (that would duplicate a prefix); the fixed
+        ``input-unknown`` refusal reports delivery as unprovable instead.
+        """
+        for index, event in enumerate(events):
+            try:
+                self.quartz.CGEventPost(self.quartz.kCGHIDEventTap, event)
+            except Exception:
+                raise contract.ContractError("input-unknown", {"posted": index})
+        return {"move": True, "down": True, "up": True}
+
     def click(self, x, y):
+        """Build and validate move/down/up first; a failure posts nothing."""
         quartz, point = self.quartz, (float(x), float(y))
         events = [quartz.CGEventCreateMouseEvent(None, quartz.kCGEventMouseMoved, point, 0),
                   quartz.CGEventCreateMouseEvent(None, quartz.kCGEventLeftMouseDown, point, 0),
                   quartz.CGEventCreateMouseEvent(None, quartz.kCGEventLeftMouseUp, point, 0)]
-        for event in events:
-            if event is None:
-                raise contract.ContractError("input-failed")
-            quartz.CGEventPost(quartz.kCGHIDEventTap, event)
-        return {"move": True, "down": True, "up": True}
+        if any(event is None for event in events):
+            raise contract.ContractError("input-failed")
+        return self._post(events)
 
     def type_text(self, text):
+        """Build every unicode event first: no orphan key-down is ever posted."""
         if not text or len(text) > contract.MAX_TEXT or any(ord(c) < 32 or ord(c) > 126 for c in text):
             raise contract.ContractError("input-charset")
-        quartz = self.quartz
+        quartz, events = self.quartz, []
         for char in text:
             for down in (True, False):
                 event = quartz.CGEventCreateKeyboardEvent(None, 0, down)
@@ -379,10 +466,11 @@ class QuartzApi:
                     quartz.CGEventKeyboardSetUnicodeString(event, len(char), char)
                 except Exception:
                     raise contract.ContractError("input-unsupported")
-                quartz.CGEventPost(quartz.kCGHIDEventTap, event)
-        return {"move": True, "down": True, "up": True}
+                events.append(event)
+        return self._post(events)
 
     def press_chord(self, parts):
+        """Build the chord and set its flags before the first post."""
         quartz = self.quartz
         codes, flags = [], 0
         for part in parts:
@@ -393,13 +481,15 @@ class QuartzApi:
             flags |= FLAGS.get(part, 0)
         events = [quartz.CGEventCreateKeyboardEvent(None, code, True) for code in codes]
         events += [quartz.CGEventCreateKeyboardEvent(None, code, False) for code in reversed(codes)]
-        for event in events:
-            if event is None:
-                raise contract.ContractError("input-failed")
-            if flags:
-                quartz.CGEventSetFlags(event, flags)
-            quartz.CGEventPost(quartz.kCGHIDEventTap, event)
-        return {"move": True, "down": True, "up": True}
+        if any(event is None for event in events):
+            raise contract.ContractError("input-failed")
+        if flags:
+            try:
+                for event in events:
+                    quartz.CGEventSetFlags(event, flags)
+            except Exception:
+                raise contract.ContractError("input-unsupported")
+        return self._post(events)
 
 
 class MacAdapter:
@@ -455,6 +545,10 @@ class MacAdapter:
     def hit_test(self, window, x, y):
         """Topmost AX element at the point must be inside the selected window."""
         return self.api.root_at(window, x, y)
+
+    def point_visible(self, window, x, y):
+        """Point must lie inside one active display; unknown fails closed."""
+        return self.api.point_visible(window, x, y)
 
     def activate(self, window):
         if not self.api.activate(window["pid"]):

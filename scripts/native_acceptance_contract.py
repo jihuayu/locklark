@@ -86,6 +86,7 @@ ERROR_MESSAGES = {
     "focus-lost": "Native acceptance foreground focus not verified",
     "input-charset": "Acceptance input must be ASCII",
     "input-failed": "Native acceptance input failed",
+    "input-unknown": "Native acceptance input outcome unknown",
     "input-unsupported": "Acceptance shortcut unavailable",
     "label-not-allowed": "Native acceptance label is not allowlisted",
     "observe-overrun": "Native acceptance observation budget exceeded",
@@ -107,6 +108,7 @@ ERROR_MESSAGES = {
     "window-hidden": "Native acceptance window not viewable",
     "window-offscreen": "Native acceptance window is off screen",
     "window-overrun": "Native acceptance window budget exceeded",
+    "window-query": "Native window query failed",
     "window-timeout": "Native acceptance window unavailable",
 }
 ERROR_CODES = frozenset(ERROR_MESSAGES)
@@ -501,6 +503,11 @@ def check_point(adapter, window, x, y):
         raise ContractError("control-offscreen")
     hit = getattr(adapter, "hit_test", None)
     if hit is not None and hit(window, x, y) is not True:
+        raise ContractError("control-offscreen")
+    visible = getattr(adapter, "point_visible", None)
+    if visible is not None and visible(window, x, y) is not True:
+        # A hidden display, an unreadable display list or any non-True verdict
+        # fails closed: permission to inject is never inferred from silence.
         raise ContractError("control-offscreen")
     return x, y
 

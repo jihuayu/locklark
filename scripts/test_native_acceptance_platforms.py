@@ -325,16 +325,32 @@ class Win32InputBuildingTests(unittest.TestCase):
             self.assertEqual((up.union.ki.wScan, up.union.ki.dwFlags),
                              (ord(char), windows.KEYEVENTF_UNICODE | windows.KEYEVENTF_KEYUP))
 
-    def test_partial_sendinput_count_refused(self):
-        class ShortUser32(object):
+    def test_zero_sendinput_count_refused(self):
+        class EmptyUser32(object):
             def SendInput(self, count, array, size):
+                return 0
+
+        api = windows.Win32Api.__new__(windows.Win32Api)
+        api.user32 = EmptyUser32()
+        with self.assertRaises(contract.ContractError) as error:
+            api.type_text("a")
+        self.assertEqual(error.exception.code, "input-failed")
+
+    def test_partial_sendinput_prefix_is_unknown_and_never_resent(self):
+        class ShortUser32(object):
+            def __init__(self):
+                self.calls = 0
+
+            def SendInput(self, count, array, size):
+                self.calls += 1
                 return count - 1
 
         api = windows.Win32Api.__new__(windows.Win32Api)
         api.user32 = ShortUser32()
         with self.assertRaises(contract.ContractError) as error:
             api.type_text("a")
-        self.assertEqual(error.exception.code, "input-failed")
+        self.assertEqual(error.exception.code, "input-unknown")
+        self.assertEqual(api.user32.calls, 1)  # the whole batch is never resent
 
     def test_more_than_512_top_level_windows_refused(self):
         class User32(object):
@@ -365,6 +381,179 @@ class Win32InputBuildingTests(unittest.TestCase):
         self.assertEqual(api.user32.batches, [])
 
 
+class FakeDll:
+    """Fake Win32 DLL that refuses symbols which belong to another DLL."""
+
+    def __init__(self, forbidden=()):
+        object.__setattr__(self, "forbidden", frozenset(forbidden))
+        object.__setattr__(self, "declared", {})
+        object.__setattr__(self, "accessed", [])
+
+    def __getattr__(self, name):
+        if name in self.forbidden:
+            raise AssertionError("wrong DLL asked for symbol: " + name)
+        self.accessed.append(name)
+        return FakeFunction(self, name)
+
+
+class FakeFunction:
+    def __init__(self, owner, name):
+        object.__setattr__(self, "_owner", owner)
+        object.__setattr__(self, "_name", name)
+
+    def __setattr__(self, key, value):
+        if key in ("argtypes", "restype"):
+            self._owner.declared.setdefault(self._name, set()).add(key)
+        object.__setattr__(self, key, value)
+
+
+def bare_win32():
+    return windows.Win32Api.__new__(windows.Win32Api)
+
+
+def patched_winfunctype():
+    return patch.object(windows.ctypes, "WINFUNCTYPE", windows.ctypes.CFUNCTYPE, create=True)
+
+
+class Win32DllOwnershipTests(unittest.TestCase):
+    """GetCurrentProcess belongs to kernel32; user32 must never be asked for it."""
+
+    def test_signatures_declare_get_current_process_on_kernel32_only(self):
+        api = bare_win32()
+        api.user32 = FakeDll(forbidden=("GetCurrentProcess",))
+        api.kernel32, api.advapi32 = FakeDll(), FakeDll()
+        api._signatures()
+        self.assertEqual(api.kernel32.declared["GetCurrentProcess"], {"argtypes", "restype"})
+        self.assertNotIn("GetCurrentProcess", api.user32.declared)
+        self.assertNotIn("GetCurrentProcess", api.user32.accessed)
+
+    def test_same_user_reads_the_pseudo_handle_from_kernel32(self):
+        api = bare_win32()
+        api.user32 = FakeDll(forbidden=("GetCurrentProcess",))
+        api.kernel32 = types.SimpleNamespace(GetCurrentProcess=lambda: 0x1234)
+        api.advapi32 = types.SimpleNamespace(EqualSid=lambda left, right: True)
+        seen = []
+
+        def sid_pair(handle):
+            seen.append(handle)
+            return (b"token", handle)
+
+        api._sid_pair = sid_pair
+        self.assertTrue(api.same_user(0x9999))
+        self.assertEqual(seen, [0x1234, 0x9999])
+
+
+class FakeDesktopUser32:
+    """Fake OpenInputDesktop/GetUserObjectInformationW surface."""
+
+    def __init__(self, handle=0x44, info=True, name="Default"):
+        self.handle, self.info, self.name = handle, info, name
+        self.opened = self.closed = self.queried = 0
+
+    def OpenInputDesktop(self, flags, inherit, access):
+        self.opened += 1
+        return self.handle
+
+    def GetUserObjectInformationW(self, handle, index, buffer, size, needed):
+        self.queried += 1
+        if not self.info:
+            return 0
+        buffer.value = self.name
+        return 1
+
+    def CloseDesktop(self, handle):
+        self.closed += 1
+
+
+class Win32SecureDesktopTests(unittest.TestCase):
+    """An unknown input desktop fails closed; it never means "not secure"."""
+
+    def api(self, **options):
+        api = bare_win32()
+        api.user32 = FakeDesktopUser32(**options)
+        return api
+
+    def test_unknown_desktop_identity_is_the_fixed_capability_refusal(self):
+        for options in ({"handle": 0}, {"info": False}):
+            with self.subTest(options=options):
+                with self.assertRaises(contract.ContractError) as error:
+                    self.api(**options).input_desktop_secure()
+                self.assertEqual(error.exception.code, "capability-unavailable")
+
+    def test_open_failure_never_queries_and_never_reports_not_secure(self):
+        api = self.api(handle=0)
+        with self.assertRaises(contract.ContractError):
+            api.input_desktop_secure()
+        self.assertEqual((api.user32.queried, api.user32.closed), (0, 0))
+
+    def test_query_failure_still_closes_the_handle(self):
+        api = self.api(info=False)
+        with self.assertRaises(contract.ContractError):
+            api.input_desktop_secure()
+        self.assertEqual(api.user32.closed, 1)
+
+    def test_named_default_and_non_default_desktops(self):
+        self.assertFalse(self.api().input_desktop_secure())
+        self.assertTrue(self.api(name="Winlogon").input_desktop_secure())
+
+    def test_adapter_refuses_before_any_observation_when_the_desktop_is_unknown(self):
+        class UnknownDesktop(FakeWin32):
+            def input_desktop_secure(self):
+                raise contract.ContractError("capability-unavailable")
+
+        adapter = windows.WindowsAdapter(api=UnknownDesktop(), uia=FakeUia())
+        with self.assertRaises(contract.ContractError) as error:
+            adapter.check_capability()
+        self.assertEqual(error.exception.code, "capability-unavailable")
+
+
+class Win32EnumerationTests(unittest.TestCase):
+    """A failed EnumWindows is a refusal, never a short "unique" window list."""
+
+    def test_false_enumeration_is_a_window_query_refusal(self):
+        class User32(object):
+            def EnumWindows(self, callback, param):
+                for handle in (1, 2):
+                    if not callback(handle, 0):
+                        break
+                return 0  # FALSE without our own overflow stop
+
+        api = bare_win32()
+        api.user32 = User32()
+        api._describe = lambda hwnd: (_ for _ in ()).throw(AssertionError("partial list used"))
+        with patched_winfunctype():
+            with self.assertRaises(contract.ContractError) as error:
+                api.list_windows()
+        self.assertEqual(error.exception.code, "window-query")
+
+    def test_true_enumeration_returns_the_bounded_list(self):
+        class User32(object):
+            def EnumWindows(self, callback, param):
+                callback(7, 0)
+                return 1
+
+        api = bare_win32()
+        api.user32 = User32()
+        api._describe = lambda hwnd: {"id": hwnd}
+        with patched_winfunctype():
+            self.assertEqual(api.list_windows(), [{"id": 7}])
+
+    def test_overflow_keeps_its_own_window_overrun_refusal(self):
+        class User32(object):
+            def EnumWindows(self, callback, param):
+                for handle in range(1, contract.MAX_WINDOWS + 2):
+                    if not callback(handle, 0):
+                        break
+                return 1
+
+        api = bare_win32()
+        api.user32 = User32()
+        with patched_winfunctype():
+            with self.assertRaises(contract.ContractError) as error:
+                api.list_windows()
+        self.assertEqual(error.exception.code, "window-overrun")
+
+
 class StrictQuartz:
     """Only AXIsProcessTrusted exists; any other symbol is a hard failure."""
 
@@ -380,12 +569,13 @@ class StrictQuartz:
 
 class FakeMacApi:
     def __init__(self, windows_list=None, controls=None, focus=4242, trusted=True, secure=False,
-                 focus_window=None, root=True):
+                 focus_window=None, root=True, visible=True):
         self.windows_list = [dict(WINDOW_RAW, secure=secure)] if windows_list is None else windows_list
         self._controls = [dict(CONTROL)] if controls is None else controls
         self.focus = focus
         self.focus_window = WINDOW_RAW["id"] if focus_window is None else focus_window
         self.root = root
+        self.visible = visible
         self.trusted = trusted
         self.activations = 0
         self.clicks = []
@@ -410,6 +600,9 @@ class FakeMacApi:
 
     def root_at(self, window, x, y):
         return self.root
+
+    def point_visible(self, window, x, y):
+        return self.visible
 
     def activate(self, pid):
         self.activations += 1
@@ -541,7 +734,7 @@ class MacAxWalkTests(unittest.TestCase):
 
     def api(self, button=None, tree_windows=None):
         api = macos.QuartzApi.__new__(macos.QuartzApi)
-        api.quartz = types.SimpleNamespace(kAXWindowsAttribute="AXWindows")
+        api.ax = types.SimpleNamespace(kAXWindowsAttribute="AXWindows")
         names = []
         tree = {"title": TITLE, "frame": dict(WINDOW_RAW["bounds"]), "children": [
             self.button() if button is None else button,
@@ -667,6 +860,255 @@ class MacInputBuildingTests(unittest.TestCase):
             api.type_text("naïve")
         self.assertEqual(error.exception.code, "input-charset")
         self.assertEqual(api.quartz.posted, [])
+
+
+class MacFrameworkOwnershipTests(unittest.TestCase):
+    """AX belongs to ApplicationServices; Quartz is never an AX stand-in."""
+
+    def test_real_constructor_imports_application_services_separately(self):
+        ax = types.SimpleNamespace(AXIsProcessTrusted=lambda: True)
+        quartz = types.SimpleNamespace()
+        modules = {"ApplicationServices": ax, "AppKit": types.SimpleNamespace(),
+                   "Quartz": quartz}
+        with patch.dict(sys.modules, modules), \
+                patch.object(macos.ctypes, "CDLL", lambda name: types.SimpleNamespace()):
+            api = macos.QuartzApi()
+        self.assertIs(api.ax, ax)
+        self.assertIs(api.quartz, quartz)
+        self.assertIsNone(api.capability())
+
+    def test_missing_application_services_never_falls_back_to_quartz(self):
+        quartz = types.SimpleNamespace(AXIsProcessTrusted=lambda: True)
+        modules = {"AppKit": types.SimpleNamespace(), "Quartz": quartz}
+        with patch.dict(sys.modules, modules):
+            sys.modules.pop("ApplicationServices", None)
+            with patch.object(macos.ctypes, "CDLL", lambda name: types.SimpleNamespace()):
+                with self.assertRaises(ImportError):
+                    macos.QuartzApi()
+
+    def test_an_injected_combined_fake_is_the_only_fallback(self):
+        combined = types.SimpleNamespace(AXIsProcessTrusted=lambda: True)
+        api = macos.QuartzApi(quartz=combined, appkit=types.SimpleNamespace())
+        self.assertIs(api.ax, combined)
+        self.assertIs(api.quartz, combined)
+
+    def test_ax_calls_go_to_application_services_not_quartz(self):
+        calls = []
+        ax = types.SimpleNamespace(
+            AXUIElementCreateApplication=lambda pid: calls.append(pid) or {"pid": pid},
+            kAXWindowsAttribute="AXWindows",
+            AXUIElementCopyAttributeValue=lambda element, name, out: (0, ["window"]))
+        api = macos.QuartzApi(quartz=types.SimpleNamespace(),
+                              appkit=types.SimpleNamespace(), ax=ax)
+        self.assertEqual(api.windows(4242), ["window"])
+        self.assertEqual(calls, [4242])
+
+    def test_a_missing_ax_symbol_is_never_answered_by_quartz(self):
+        api = macos.QuartzApi(quartz=types.SimpleNamespace(AXIsProcessTrusted=lambda: True),
+                              appkit=types.SimpleNamespace(), ax=types.SimpleNamespace())
+        with self.assertRaises(AttributeError):
+            api.capability()
+
+
+class MacFocusIdentityTests(unittest.TestCase):
+    """AXFocusedWindow is mandatory; AXMainWindow only adds consistency."""
+
+    def api(self, focused="match", main="match"):
+        api = macos.QuartzApi.__new__(macos.QuartzApi)
+        api.foreground_pid = lambda: WINDOW_RAW["pid"]
+        api.application = lambda pid: "application"
+
+        def attribute(element, name):
+            value = {"AXFocusedWindow": focused, "AXMainWindow": main}.get(name)
+            return None if value is None else {"identity": value}
+
+        api.attribute = attribute
+        api._identity_matches = lambda element, window: element.get("identity") == "match"
+        return api
+
+    def focused(self, api):
+        adapter = types.SimpleNamespace(exact_focus=True, focus_state=api.focus_state)
+        return contract.focus_matches(adapter, dict(WINDOW_RAW), contract.Budget())
+
+    def test_focused_window_binds_the_exact_identity(self):
+        self.assertTrue(self.focused(self.api()))
+
+    def test_missing_focused_window_refused_even_when_main_window_matches(self):
+        self.assertFalse(self.focused(self.api(focused=None, main="match")))
+
+    def test_focused_window_bound_to_another_window_refused(self):
+        self.assertFalse(self.focused(self.api(focused="other", main="match")))
+
+    def test_matching_focused_with_conflicting_main_window_refused(self):
+        self.assertFalse(self.focused(self.api(focused="match", main="other")))
+
+    def test_matching_focused_without_main_window_is_enough(self):
+        self.assertTrue(self.focused(self.api(focused="match", main=None)))
+
+    def test_missing_focused_window_refuses_before_any_input(self):
+        api = self.api(focused=None, main="match")
+        adapter = types.SimpleNamespace(platform="macos", exact_focus=True,
+                                        supports_activation=True,
+                                        focus_state=api.focus_state,
+                                        activate=lambda window: None)
+        with self.assertRaises(contract.ContractError) as error:
+            contract.ensure_focus({"preserve_focus": False}, adapter, dict(WINDOW_RAW),
+                                  contract.Budget())
+        self.assertEqual(error.exception.code, "focus-lost")
+
+
+class FailingQuartzEvents(FakeQuartzEvents):
+    """CoreGraphics fake that fails creation, flag or post at chosen positions."""
+
+    def __init__(self, fail_create=(), fail_post=(), fail_unicode=False, fail_flags=False):
+        FakeQuartzEvents.__init__(self)
+        self.fail_create, self.fail_post = set(fail_create), set(fail_post)
+        self.fail_unicode, self.fail_flags = fail_unicode, fail_flags
+        self.post_attempts = []
+
+    def CGEventCreateMouseEvent(self, proxy, kind, point, button):
+        if len(self.created) in self.fail_create:
+            self.created.append({"kind": kind, "point": point, "dead": True})
+            return None
+        return FakeQuartzEvents.CGEventCreateMouseEvent(self, proxy, kind, point, button)
+
+    def CGEventCreateKeyboardEvent(self, proxy, code, down):
+        if len(self.created) in self.fail_create:
+            self.created.append({"kind": "key", "code": code, "down": down, "dead": True})
+            return None
+        return FakeQuartzEvents.CGEventCreateKeyboardEvent(self, proxy, code, down)
+
+    def CGEventKeyboardSetUnicodeString(self, event, length, text):
+        if self.fail_unicode:
+            raise RuntimeError("unicode string unavailable")
+        FakeQuartzEvents.CGEventKeyboardSetUnicodeString(self, event, length, text)
+
+    def CGEventSetFlags(self, event, flags):
+        if self.fail_flags:
+            raise RuntimeError("flags unavailable")
+        FakeQuartzEvents.CGEventSetFlags(self, event, flags)
+
+    def CGEventPost(self, tap, event):
+        self.post_attempts.append(event)
+        if len(self.post_attempts) in self.fail_post:
+            raise RuntimeError("post failed")
+        self.posted.append(event)
+
+
+class MacInputPreconstructionTests(unittest.TestCase):
+    """The whole batch is built before the first post; nothing is half posted."""
+
+    def api(self, **options):
+        api = macos.QuartzApi.__new__(macos.QuartzApi)
+        api.quartz = FailingQuartzEvents(**options)
+        return api
+
+    def refused(self, api, code, action):
+        with self.assertRaises(contract.ContractError) as error:
+            action(api)
+        self.assertEqual(error.exception.code, code)
+        self.assertEqual(api.quartz.posted, [])
+        self.assertEqual(api.quartz.post_attempts, [])
+
+    def test_mouse_creation_failure_posts_nothing(self):
+        self.refused(self.api(fail_create={1}), "input-failed",
+                     lambda api: api.click(500, 400))
+
+    def test_chord_creation_failure_leaves_no_orphan_key_down(self):
+        self.refused(self.api(fail_create={3}), "input-failed",
+                     lambda api: api.press_chord(("Control_L", "a")))
+
+    def test_unicode_creation_failure_posts_nothing(self):
+        self.refused(self.api(fail_create={2}), "input-failed",
+                     lambda api: api.type_text("hi"))
+
+    def test_unicode_string_failure_posts_nothing(self):
+        self.refused(self.api(fail_unicode=True), "input-unsupported",
+                     lambda api: api.type_text("hi"))
+
+    def test_flag_failure_posts_nothing(self):
+        self.refused(self.api(fail_flags=True), "input-unsupported",
+                     lambda api: api.press_chord(("Control_L", "a")))
+
+    def test_mid_batch_post_failure_is_unknown_and_never_retried(self):
+        api = self.api(fail_post={2})
+        with self.assertRaises(contract.ContractError) as error:
+            api.click(500, 400)
+        self.assertEqual(error.exception.code, "input-unknown")
+        self.assertEqual(len(api.quartz.created), 3)        # batch never rebuilt
+        self.assertEqual(len(api.quartz.post_attempts), 2)  # failed event not retried
+        self.assertEqual(len(api.quartz.posted), 1)
+
+
+class MacDisplayMembershipTests(unittest.TestCase):
+    """CGGetActiveDisplayList/CGDisplayBounds: per-display membership."""
+
+    def api(self, result=None, bounds=None):
+        api = macos.QuartzApi.__new__(macos.QuartzApi)
+
+        class Quartz(object):
+            def CGGetActiveDisplayList(self, maximum, displays, count):
+                if isinstance(result, Exception):
+                    raise result
+                return result
+
+            def CGDisplayBounds(self, display):
+                value = bounds[display] if isinstance(bounds, dict) else bounds
+                if isinstance(value, Exception):
+                    raise value
+                return value
+
+        api.quartz = Quartz()
+        return api
+
+    def test_count_consistent_valid_display_is_visible(self):
+        api = self.api((0, [1, 2, 3], 1), {1: ((0, 0), (1920, 1080)),
+                                           2: ((3000, 0), (1280, 1024)),
+                                           3: ((9000, 0), (1280, 1024))})
+        self.assertTrue(api.point_visible(None, 100, 100))
+        self.assertFalse(api.point_visible(None, 3100, 100))  # beyond reported count
+
+    def test_point_inside_one_display_is_visible(self):
+        api = self.api((0, [1, 2], 2), {1: ((0, 0), (1920, 1080)),
+                                        2: ((1920, 0), (1280, 1024))})
+        self.assertTrue(api.point_visible(None, 100, 100))
+        self.assertTrue(api.point_visible(None, 2000, 1000))
+
+    def test_gap_between_display_rectangles_is_not_screen(self):
+        api = self.api((0, [1, 2], 2), {1: ((0, 0), (1920, 1080)),
+                                        2: ((2000, 0), (1280, 1024))})
+        self.assertFalse(api.point_visible(None, 1950, 100))
+
+    def test_unknown_or_empty_display_list_fails_closed(self):
+        cases = ((1, [1], 1),          # CoreGraphics error
+                 (0, [], 0),           # no active display
+                 (0, None, 0),         # unreadable list
+                 "not-a-tuple",
+                 (0, [1], 2),          # count larger than the returned list
+                 (0, [1], True),       # a bool is never a display count
+                 (0, [1], "1"),        # non-integer count
+                 (0, [1], 0), (0, [1], 33))
+        for result in cases:
+            with self.subTest(result=result):
+                api = self.api(result, ((0, 0), (1920, 1080)))
+                self.assertFalse(api.point_visible(None, 100, 100))
+
+    def test_unreadable_display_bounds_fail_closed(self):
+        for bounds in (RuntimeError("no bounds"), ("x", "y"), ((0, 0), (0, 0)),
+                       ((0, 0), (float("nan"), 1080)),
+                       ((float("inf"), 0), (1920, 1080)), None):
+            with self.subTest(bounds=bounds):
+                api = self.api((0, [1], 1), {1: bounds})
+                self.assertFalse(api.point_visible(None, 100, 100))
+
+    def test_adapter_refuses_a_point_outside_every_display(self):
+        api = FakeMacApi()
+        api.point_visible = lambda window, x, y: False
+        adapter = macos.MacAdapter(api=api)
+        with self.assertRaises(contract.ContractError) as error:
+            execute(adapter, document())
+        self.assertEqual(error.exception.code, "control-offscreen")
+        self.assertEqual(api.clicks, [])
 
 
 class DispatcherTests(unittest.TestCase):
