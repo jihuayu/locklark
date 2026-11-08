@@ -24,6 +24,7 @@ import (
 const HostName = "org.locklark.browser"
 const ChromiumID = "geldnhjapnackobgknocomedmjgphnpe"
 const FirefoxID = "browser@locklark.local"
+const SafariID = "org.locklark.browser.safari.Extension"
 const MaxInput = 256 << 10
 const MaxOutput = 256 << 10
 
@@ -32,6 +33,7 @@ type Browser string
 const (
 	Chromium Browser = "chromium"
 	Firefox  Browser = "firefox"
+	Safari   Browser = "safari"
 )
 
 var ErrProtocol = errors.New("native messaging refused")
@@ -1204,12 +1206,28 @@ func requestKeys(kind string) (required, optional []string, ok bool) {
 // These checks constrain normal browser launch; a same-user native process can
 // forge argv and is outside this authentication boundary.
 func ValidateLaunch(browser Browser, args []string) error {
+	return validateLaunchForOS(browser, args, runtime.GOOS)
+}
+
+// validateSafariLaunchForOS is the whole Safari policy: no argv value, path or
+// environment can select browser mode, and the mode exists only on macOS.
+func validateSafariLaunchForOS(args []string, goos string) error {
+	if goos != "darwin" || len(args) != 1 || args[0] != "--safari-browser" {
+		return ErrProtocol
+	}
+	return nil
+}
+
+func validateLaunchForOS(browser Browser, args []string, goos string) error {
+	if browser == Safari {
+		return validateSafariLaunchForOS(args, goos)
+	}
 	if browser == Chromium {
 		if len(args) < 1 || len(args) > 2 || args[0] != "chrome-extension://"+ChromiumID+"/" {
 			return ErrProtocol
 		}
 		if len(args) == 2 {
-			if runtime.GOOS != "windows" || !strings.HasPrefix(args[1], "--parent-window=") {
+			if goos != "windows" || !strings.HasPrefix(args[1], "--parent-window=") {
 				return ErrProtocol
 			}
 			p := strings.TrimPrefix(args[1], "--parent-window=")

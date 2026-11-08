@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"runtime"
 	"sort"
 	"sync"
 	"time"
@@ -224,7 +225,23 @@ func (b *Broker) serve(conn net.Conn) {
 }
 
 func validHello(hello BrokerHello) bool {
-	if hello.V != 1 || hello.Browser != Chromium && hello.Browser != Firefox {
+	return validHelloForOS(hello, runtime.GOOS)
+}
+
+// validSafariHelloForOS pins the compiled Safari identity and refuses the mode
+// on every non-macOS host, so a forged local hello cannot select it elsewhere.
+func validSafariHelloForOS(hello BrokerHello, goos string) bool {
+	return goos == "darwin" && hello.Origin == SafariID
+}
+
+func validHelloForOS(hello BrokerHello, goos string) bool {
+	if hello.V != 1 {
+		return false
+	}
+	if hello.Browser == Safari {
+		return validSafariHelloForOS(hello, goos)
+	}
+	if hello.Browser != Chromium && hello.Browser != Firefox {
 		return false
 	}
 	if hello.Browser == Chromium && hello.Origin != "chrome-extension://"+ChromiumID+"/" {
@@ -372,6 +389,9 @@ func RelayStdio(browser Browser, args []string, stdin io.Reader, stdout io.Write
 	origin := "chrome-extension://" + ChromiumID + "/"
 	if browser == Firefox {
 		origin = FirefoxID
+	}
+	if browser == Safari {
+		origin = SafariID
 	}
 	hello, e := json.Marshal(BrokerHello{V: 1, Browser: browser, Origin: origin})
 	if e != nil {
