@@ -14,7 +14,7 @@ import (
 // single-record slot: KDBX readers that predate this slot reject unknown
 // protected fields, so a collection is never silently hidden inside the legacy
 // blob and never silently dropped by an older client.
-const itemPasskeysSlot = "Locklark.PasskeysKDBX"
+const itemPasskeysSlot = "Locklark.Passkeys"
 
 // passkeyCollectionVersion is the only accepted collection envelope version.
 const passkeyCollectionVersion = 1
@@ -62,6 +62,9 @@ func encodePasskeyCollection(records [][]byte) (string, error) {
 		return "", ErrSnapshot
 	}
 	raw, err := json.Marshal(itemPasskeyCollection{Version: passkeyCollectionVersion, Records: records})
+	if len(raw) > 0 {
+		defer clear(raw)
+	}
 	if err != nil || len(raw) == 0 || len(raw) > MaxPayload {
 		return "", ErrSnapshot
 	}
@@ -72,6 +75,9 @@ func encodePasskeyCollection(records [][]byte) (string, error) {
 // no unknown fields, no trailing data, exact version and exact record bounds.
 func decodePasskeyCollection(content string) ([][]byte, error) {
 	raw, err := base64.StdEncoding.Strict().DecodeString(content)
+	if len(raw) > 0 {
+		defer clear(raw)
+	}
 	if err != nil || len(raw) == 0 || len(raw) > MaxPayload || base64.StdEncoding.EncodeToString(raw) != content {
 		return nil, ErrSnapshot
 	}
@@ -79,12 +85,15 @@ func decodePasskeyCollection(content string) ([][]byte, error) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&env); err != nil {
+		clearPasskeyRecords(env.Records)
 		return nil, ErrSnapshot
 	}
 	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		clearPasskeyRecords(env.Records)
 		return nil, ErrSnapshot
 	}
 	if env.Version != passkeyCollectionVersion || !validPasskeyCollection(env.Records) {
+		clearPasskeyRecords(env.Records)
 		return nil, ErrSnapshot
 	}
 	return env.Records, nil
@@ -111,9 +120,12 @@ func (it *Item) SetPasskeyRecords(records [][]byte) error {
 	if !validPasskeyCollection(records) {
 		return ErrSnapshot
 	}
-	clearPasskeyRecords(it.Passkeys)
-	it.Passkeys = clonePasskeyRecords(records)
-	it.Passkey = nil
+	// Clone the accepted data before clearing either persisted form, so the
+	// input may alias the receiver's own records: the clear must never zero
+	// what was just validated and stored.
+	next := clonePasskeyRecords(records)
+	it.ClearPasskeys()
+	it.Passkeys = next
 	return nil
 }
 
@@ -123,9 +135,10 @@ func (it *Item) SetLegacyPasskey(raw []byte) error {
 	if len(raw) == 0 || !passkey.ValidRecord(raw) {
 		return ErrSnapshot
 	}
-	clearPasskeyRecords(it.Passkeys)
-	it.Passkeys = nil
-	it.Passkey = cloneBytes(raw)
+	// Clone before clearing: raw may alias the legacy field being replaced.
+	next := cloneBytes(raw)
+	it.ClearPasskeys()
+	it.Passkey = next
 	return nil
 }
 

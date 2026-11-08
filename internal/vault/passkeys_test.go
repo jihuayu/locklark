@@ -79,7 +79,7 @@ func TestPasskeyCollectionKDBXAndEncryptedRoundTrip(t *testing.T) {
 	if slotIdx < 0 {
 		t.Fatal("missing collection slot")
 	}
-	g.Entries[1].Values = append(g.Entries[1].Values, slot("Locklark.PasskeysNext", "x", true))
+	g.Entries[1].Values = append(g.Entries[1].Values, slot("Locklark.PasskeysUnknown", "x", true))
 	if _, _, err = readItems(db, g); err == nil {
 		t.Fatal("accepted unknown protected slot")
 	}
@@ -169,5 +169,46 @@ func TestPasskeyCollectionStrictValidationAndClone(t *testing.T) {
 	target.ClearPasskeys()
 	if target.Passkeys != nil || target.Passkey != nil || !bytes.Equal(buf, make([]byte, len(buf))) {
 		t.Fatal("clear left passkey bytes")
+	}
+}
+
+func TestPasskeySetterAliasingPreservesNewRecords(t *testing.T) {
+	a, b := testPasskeyRecord(t), testPasskeyRecord(t)
+	wantA, wantB := cloneBytes(a), cloneBytes(b)
+	it := Item{ID: "alias", Kind: "login", Passkeys: [][]byte{a, b}, Passkey: testPasskeyRecord(t)}
+	oldRecords := [][]byte{it.Passkeys[0], it.Passkeys[1]}
+	oldLegacy := it.Passkey
+	if err := it.SetPasskeyRecords(it.Passkeys); err != nil {
+		t.Fatal("self-alias setter", err)
+	}
+	if it.Passkey != nil || len(it.Passkeys) != 2 || !bytes.Equal(it.Passkeys[0], wantA) || !bytes.Equal(it.Passkeys[1], wantB) || !validPasskeyCollection(it.Passkeys) {
+		t.Fatal("self-alias setter corrupted stored records")
+	}
+	for _, buf := range oldRecords {
+		if !bytes.Equal(buf, make([]byte, len(buf))) {
+			t.Fatal("obsolete collection buffers not zeroed")
+		}
+	}
+	if !bytes.Equal(oldLegacy, make([]byte, len(oldLegacy))) {
+		t.Fatal("obsolete legacy bytes not zeroed")
+	}
+	legacy := Item{ID: "l2c", Kind: "login", Passkey: testPasskeyRecord(t)}
+	legacyBuf, legacyWant := legacy.Passkey, cloneBytes(legacy.Passkey)
+	if err := legacy.SetPasskeyRecords([][]byte{legacy.Passkey}); err != nil {
+		t.Fatal("legacy-to-collection alias", err)
+	}
+	if legacy.Passkey != nil || len(legacy.Passkeys) != 1 || !bytes.Equal(legacy.Passkeys[0], legacyWant) || !validPasskeyCollection(legacy.Passkeys) {
+		t.Fatal("legacy-to-collection alias lost data")
+	}
+	if !bytes.Equal(legacyBuf, make([]byte, len(legacyBuf))) {
+		t.Fatal("obsolete legacy bytes survived promotion")
+	}
+	sole := Item{ID: "l", Kind: "login", Passkey: testPasskeyRecord(t)}
+	soleBuf, soleWant := sole.Passkey, cloneBytes(sole.Passkey)
+	if err := sole.SetLegacyPasskey(sole.Passkey); err != nil {
+		t.Fatal("legacy self-alias", err)
+	}
+	if !bytes.Equal(sole.Passkey, soleWant) || !passkey.ValidRecord(sole.Passkey) || !bytes.Equal(soleBuf, make([]byte, len(soleBuf))) {
+		t.Fatal("legacy self-alias setter corrupted record")
 	}
 }
