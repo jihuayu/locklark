@@ -130,6 +130,61 @@ def add_login(
     return item_id, revision
 
 
+def write_typed_item(
+    ctx: E2EContext, name: str, document: dict[str, Any]
+) -> Path:
+    """Write an owner-only ``0600`` typed add-item document under the fixture root."""
+
+    path = ctx.temp_dir / name
+    path.write_text(json.dumps(document), encoding="utf-8")
+    path.chmod(0o600)
+    if file_mode(path) != 0o600:
+        raise AssertionError(f"typed input is not owner-only: mode {file_mode(path):o}")
+    return path
+
+
+def add_item(
+    ctx: E2EContext,
+    vault: dict[str, Any],
+    document: dict[str, Any],
+    *,
+    name: str = "item.json",
+    confirm: str = "SAVE",
+) -> dict[str, Any]:
+    """Create one typed item through the real PTY ``personal add-item`` flow."""
+
+    path = write_typed_item(ctx, name, document)
+    result = pty(
+        ctx,
+        [
+            "personal",
+            "add-item",
+            "--file",
+            str(vault["path"]),
+            "--input",
+            str(path),
+        ],
+        password=vault["password"],
+        secret=vault["secret"],
+        extra=[("输入 SAVE 确认新增条目", confirm)],
+    )
+    if result.returncode != 0:
+        raise AssertionError(
+            f"personal add-item failed (rc={result.returncode}): {result.transcript[-800:]}"
+        )
+    payload = result.json()
+    require_hex32(payload.get("id", ""))
+    require_hex64(payload.get("revision", ""))
+    vault["items"].append(
+        {
+            "id": payload["id"],
+            "revision": payload["revision"],
+            "title": document.get("title"),
+        }
+    )
+    return payload
+
+
 def make_vault(
     ctx: E2EContext, titles: Sequence[str] = ("Alpha",)
 ) -> dict[str, Any]:
@@ -154,6 +209,191 @@ def list_rows(
     if not isinstance(rows, list):
         raise AssertionError(f"personal list did not return a list: {rows!r}")
     return rows
+
+
+ITEM_METADATA_FIELDS = frozenset(
+    {
+        "id",
+        "revision",
+        "category",
+        "tags",
+        "favorite",
+        "urls",
+        "section_ids",
+        "section_field_counts",
+        "attachments",
+        "attachment_read_verified",
+        "attachment_reads",
+    }
+)
+
+ITEM_METADATA_URL_FIELDS = frozenset({"label", "url", "primary", "match_mode"})
+
+# Attachment projections carry public metadata only; a verified read carries
+# just the digest and byte count of the decrypted body.
+ITEM_METADATA_ATTACHMENT_FIELDS = frozenset(
+    {"id", "file_name", "mime_type", "size", "sha256"}
+)
+
+ITEM_METADATA_READ_FIELDS = frozenset({"sha256", "bytes"})
+
+
+def _item_metadata_bin(ctx: E2EContext) -> Path:
+    """Compile the private metadata probe once per test context.
+
+    The helper lives under the repository so it may import ``internal/``; it is
+    built into this context's own private bin directory (removed with the
+    temporary root) and is never installed, shipped or exposed as a product
+    command.
+    """
+
+    cached = getattr(ctx, "_item_metadata_bin", None)
+    if cached is not None and Path(cached).is_file():
+        return Path(cached)
+    go = go_tool()
+    if go is None:
+        raise AssertionError(
+            "validation blocked: go toolchain unavailable; metadata probe not built"
+        )
+    bin_dir = ctx.temp_dir / "probe-bin"
+    bin_dir.mkdir(mode=0o700, exist_ok=True)
+    binary = bin_dir / "item-metadata"
+    build = ctx.run_cli(
+        ["build", "-o", str(binary), "./tests/e2e/helpers"],
+        binary=go,
+        cwd=ctx.repo_root,
+        timeout=180.0,
+    )
+    if build.returncode != 0 or not binary.is_file():
+        raise AssertionError(
+            "metadata probe build failed (rc=%d): %s"
+            % (build.returncode, (build.stderr or build.stdout)[-1200:])
+        )
+    binary.chmod(0o700)
+    ctx._item_metadata_bin = binary
+    return binary
+
+
+def _check_metadata_payload(payload: Any) -> dict[str, Any]:
+    """Accept only the safe projection and refuse anything else."""
+
+    if not isinstance(payload, dict):
+        raise AssertionError(f"metadata probe did not return an object: {payload!r}")
+    extra = set(payload) - ITEM_METADATA_FIELDS
+    if extra:
+        raise AssertionError(f"metadata probe leaked unexpected fields: {sorted(extra)}")
+    missing = ITEM_METADATA_FIELDS - set(payload)
+    if missing:
+        raise AssertionError(f"metadata probe is missing fields: {sorted(missing)}")
+    require_hex32(payload["id"])
+    require_hex64(payload["revision"])
+    if not isinstance(payload["category"], str) or not payload["category"]:
+        raise AssertionError(f"metadata probe category is not a string: {payload!r}")
+    if not isinstance(payload["favorite"], bool):
+        raise AssertionError(f"metadata probe favorite is not a bool: {payload!r}")
+    if not isinstance(payload["tags"], list) or not all(
+        isinstance(tag, str) for tag in payload["tags"]
+    ):
+        raise AssertionError(f"metadata probe tags are not strings: {payload!r}")
+    if not isinstance(payload["urls"], list):
+        raise AssertionError(f"metadata probe urls are not a list: {payload!r}")
+    for entry in payload["urls"]:
+        if not isinstance(entry, dict) or set(entry) - ITEM_METADATA_URL_FIELDS:
+            raise AssertionError(f"metadata probe url entry is not safe: {entry!r}")
+        if not isinstance(entry.get("url"), str):
+            raise AssertionError(f"metadata probe url is not a string: {entry!r}")
+    if not isinstance(payload["section_ids"], list) or not all(
+        isinstance(section, str) for section in payload["section_ids"]
+    ):
+        raise AssertionError(f"metadata probe section ids are not strings: {payload!r}")
+    counts = payload["section_field_counts"]
+    if not isinstance(counts, dict) or not all(
+        isinstance(key, str) and isinstance(value, int) for key, value in counts.items()
+    ):
+        raise AssertionError(f"metadata probe field counts are invalid: {payload!r}")
+    attachments = payload["attachments"]
+    if not isinstance(attachments, list):
+        raise AssertionError(f"metadata probe attachments are not a list: {payload!r}")
+    for entry in attachments:
+        if not isinstance(entry, dict) or set(entry) != ITEM_METADATA_ATTACHMENT_FIELDS:
+            raise AssertionError(
+                f"metadata probe attachment entry is not safe metadata: {entry!r}"
+            )
+        if not isinstance(entry["id"], str) or not entry["id"]:
+            raise AssertionError(f"metadata probe attachment id is invalid: {entry!r}")
+        if not isinstance(entry["file_name"], str) or not entry["file_name"]:
+            raise AssertionError(f"metadata probe attachment name is invalid: {entry!r}")
+        if not isinstance(entry["mime_type"], str):
+            raise AssertionError(f"metadata probe attachment mime type is invalid: {entry!r}")
+        if not isinstance(entry["size"], int) or isinstance(entry["size"], bool):
+            raise AssertionError(f"metadata probe attachment size is invalid: {entry!r}")
+        if not HEX64_RE.fullmatch(entry["sha256"] or ""):
+            raise AssertionError(f"metadata probe attachment digest is invalid: {entry!r}")
+    verified = payload["attachment_read_verified"]
+    if not isinstance(verified, bool):
+        raise AssertionError(f"metadata probe verified flag is not a bool: {payload!r}")
+    reads = payload["attachment_reads"]
+    if not isinstance(reads, list):
+        raise AssertionError(f"metadata probe attachment reads are not a list: {payload!r}")
+    if not verified and reads:
+        raise AssertionError(f"metadata probe reported unrequested attachment reads: {payload!r}")
+    if verified and len(reads) != len(attachments):
+        raise AssertionError(f"metadata probe verified reads do not match attachments: {payload!r}")
+    for entry in reads:
+        if not isinstance(entry, dict) or set(entry) != ITEM_METADATA_READ_FIELDS:
+            raise AssertionError(f"metadata probe attachment read is unsafe: {entry!r}")
+        if not HEX64_RE.fullmatch(entry["sha256"] or ""):
+            raise AssertionError(f"metadata probe attachment read digest is invalid: {entry!r}")
+        if not isinstance(entry["bytes"], int) or isinstance(entry["bytes"], bool):
+            raise AssertionError(f"metadata probe attachment read size is invalid: {entry!r}")
+    return payload
+
+
+def item_metadata(
+    ctx: E2EContext,
+    vault: dict[str, Any],
+    row: dict[str, Any],
+    *,
+    verify_attachments: bool = False,
+) -> dict[str, Any]:
+    """Read one item's category/tags/favorite/URLs/section/attachment shape.
+
+    The request travels as bounded JSON on the probe's stdin and the reply is
+    restricted to the safe metadata projection; no credential, title, notes,
+    attachment body/path or key material crosses the boundary.  With
+    ``verify_attachments`` the probe additionally reads each attachment body
+    through the native session, hashes the exact bytes and reports only the
+    digest and byte count.  The probe binary is built into this context's
+    private temp root, so the fixture is cleared with the context.
+    """
+
+    binary = _item_metadata_bin(ctx)
+    request = {
+        "path": str(vault["path"]),
+        "password": vault["password"],
+        "secret_key": vault["secret"],
+        "id": row["id"],
+        "revision": row["revision"],
+        "verify_attachments": verify_attachments,
+    }
+    proc = subprocess.run(
+        [str(binary)],
+        input=json.dumps(request).encode("utf-8"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=str(ctx.temp_dir),
+        timeout=60.0,
+    )
+    if proc.returncode != 0:
+        raise AssertionError(
+            "metadata probe failed (rc=%d): %s"
+            % (proc.returncode, proc.stderr.decode("utf-8", "replace")[-600:])
+        )
+    try:
+        payload = json.loads(proc.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise AssertionError(f"metadata probe returned invalid JSON: {exc}") from exc
+    return _check_metadata_payload(payload)
 
 
 def audit_events(ctx: E2EContext, vault: dict[str, Any]) -> list[dict[str, Any]]:
@@ -335,6 +575,23 @@ def assert_private(ctx: E2EContext, canary: str, *texts: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
+def typed_field(field_id: str, title: str, value: Any) -> dict[str, Any]:
+    """One 1PUX v3 field: only ``id``/``title``/``value``.
+
+    ``value`` is a typed object such as ``{"concealed": ...}`` or
+    ``{"string": ...}``; the legacy ``designation``/``type``/``value`` spelling
+    is not part of the v3 schema and is refused by the real importer.
+    """
+
+    return {"id": field_id, "title": title, "value": value}
+
+
+def typed_section(name: str, title: str, *fields: dict[str, Any]) -> dict[str, Any]:
+    """One 1PUX v3 section: only ``name``/``title``/``fields``."""
+
+    return {"name": name, "title": title, "fields": list(fields)}
+
+
 def login_1pux_item(
     title: str, url: str, username: str, password: str, *, uuid: str | None = None
 ) -> dict[str, Any]:
@@ -380,7 +637,12 @@ def write_1pux(path: Path, items: Sequence[dict[str, Any]]) -> Path:
 
 
 def multi_category_1pux(ctx: E2EContext) -> Path:
-    """A rich archive that baseline locklark intentionally rejects wholesale."""
+    """A real 1PUX v3 archive with four categories and rich metadata.
+
+    It only carries the v3 shape the importer documents: tags live on
+    ``overview``, sections are ``{name,title,fields}`` and every field is
+    ``{id,title,value:{string|concealed|...}}``.
+    """
 
     login = login_1pux_item(
         "Corp SSO", "https://sso.corp.example.test/login", "alice", "P@ssw0rd-2026"
@@ -389,26 +651,33 @@ def multi_category_1pux(ctx: E2EContext) -> Path:
         {"label": "primary", "url": "https://sso.corp.example.test/login"},
         {"label": "portal", "url": "https://portal.corp.example.test/auth"},
     ]
+    login["overview"]["tags"] = ["imported", "sso"]
     login["details"]["sections"] = [
-        {
-            "title": "Recovery",
-            "fields": [
-                {
-                    "designation": "recovery_code",
-                    "type": "C",
-                    "value": "CANARY-1PUX-RECOVERY-9912",
-                }
-            ],
-        }
+        typed_section(
+            "recovery",
+            "Recovery",
+            typed_field(
+                "recovery_code",
+                "Recovery Code",
+                {"concealed": "CANARY-1PUX-RECOVERY-9912"},
+            ),
+        )
     ]
-    login["tags"] = ["imported"]
     login["favIndex"] = 1
     note = {
         "uuid": "secure-note-1",
         "categoryUuid": "003",
         "state": "active",
         "overview": {"title": "Runbook"},
-        "details": {"notesPlain": "restart the service"},
+        "details": {
+            "sections": [
+                typed_section(
+                    "notes",
+                    "Notes",
+                    typed_field("body", "Body", {"string": "restart the service"}),
+                )
+            ]
+        },
     }
     identity = {
         "uuid": "identity-1",
@@ -417,13 +686,12 @@ def multi_category_1pux(ctx: E2EContext) -> Path:
         "overview": {"title": "Ada Lovelace"},
         "details": {
             "sections": [
-                {
-                    "title": "Personal",
-                    "fields": [
-                        {"designation": "firstname", "type": "T", "value": "Ada"},
-                        {"designation": "lastname", "type": "T", "value": "Lovelace"},
-                    ],
-                }
+                typed_section(
+                    "identity",
+                    "Personal",
+                    typed_field("firstname", "First", {"string": "Ada"}),
+                    typed_field("lastname", "Last", {"string": "Lovelace"}),
+                )
             ]
         },
     }
@@ -434,17 +702,48 @@ def multi_category_1pux(ctx: E2EContext) -> Path:
         "overview": {"title": "Corp Visa"},
         "details": {
             "sections": [
-                {
-                    "title": "Card",
-                    "fields": [
-                        {"designation": "cardnumber", "type": "T", "value": "4111222233334444"},
-                        {"designation": "cvv", "type": "C", "value": "842"},
-                    ],
-                }
+                typed_section(
+                    "card",
+                    "Card",
+                    typed_field(
+                        "cardholder", "Cardholder", {"string": "Ada Lovelace"}
+                    ),
+                    typed_field(
+                        "ccnum", "Number", {"creditCardNumber": "4111222233334444"}
+                    ),
+                    typed_field("cvv", "CVV", {"concealed": "842"}),
+                    typed_field("expiry", "Expiry", {"monthYear": 203001}),
+                )
             ]
         },
     }
     return write_1pux(ctx.temp_dir / "multi-category.1pux", [login, note, identity, card])
+
+
+def legacy_rich_1pux(ctx: E2EContext) -> Path:
+    """The pre-v3 shape (root ``tags`` and legacy section fields).
+
+    This is a negative fixture only: both import profiles must keep refusing it
+    wholesale, so the production parser is never relaxed to accept it.
+    """
+
+    login = login_1pux_item(
+        "Legacy Rich", "https://legacy.corp.example.test/login", "alice", "legacy-secret-2026"
+    )
+    login["tags"] = ["imported"]
+    login["details"]["sections"] = [
+        {
+            "title": "Recovery",
+            "fields": [
+                {
+                    "designation": "recovery_code",
+                    "type": "C",
+                    "value": "CANARY-LEGACY-1PUX-3311",
+                }
+            ],
+        }
+    ]
+    return write_1pux(ctx.temp_dir / "legacy-rich.1pux", [login])
 
 
 def simple_1pux(ctx: E2EContext) -> Path:
@@ -625,14 +924,31 @@ def node_test_pattern(
 
 
 def go_tool() -> str | None:
-    found = shutil.which("go")
-    if found:
-        return found
-    for candidate in (
+    """Return a *working* go toolchain, verifying it answers ``go version``.
+
+    A stale or shadowed ``go`` on PATH that cannot run subcommands must not be
+    accepted: the previous check returned the first executable named ``go`` and
+    every build/test probe then failed with a toolchain error that looked like a
+    product failure.
+    """
+
+    candidates = [
+        shutil.which("go") or "",
         os.environ.get("LOCKLARK_GO", ""),
         "/workspace/toolchains/go/bin/go",
-    ):
-        if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
+    ]
+    for candidate in candidates:
+        if not candidate or not Path(candidate).is_file():
+            continue
+        if not os.access(candidate, os.X_OK):
+            continue
+        try:
+            probe = subprocess.run(
+                [candidate, "version"], capture_output=True, text=True, timeout=20
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if probe.returncode == 0 and "go version" in (probe.stdout or ""):
             return candidate
     return None
 
@@ -1249,6 +1565,7 @@ __all__ = [
     "HEX64_RE",
     "PARITY_STATUSES",
     "TrapListener",
+    "add_item",
     "add_login",
     "assert_audit_chain",
     "assert_private",
@@ -1301,7 +1618,9 @@ __all__ = [
     "flags_by_id",
     "gate",
     "health_report",
+    "legacy_rich_1pux",
     "init_vault",
+    "item_metadata",
     "list_rows",
     "login_1pux_item",
     "make_script",
@@ -1320,8 +1639,11 @@ __all__ = [
     "sha256_file",
     "shell_function_body",
     "simple_1pux",
+    "typed_field",
+    "typed_section",
     "source_files",
     "source_text",
     "sources_contain",
     "write_1pux",
+    "write_typed_item",
 ]

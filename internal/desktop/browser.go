@@ -295,6 +295,9 @@ func RunBrowser(browser browserhost.Browser, args []string) error {
 	if browser == browserhost.Firefox {
 		a.browserLabel = browserhost.FirefoxID
 	}
+	if browser == browserhost.Safari {
+		a.browserLabel = browserhost.SafariID
+	}
 	writer := browserhost.NewNativeWriter(os.Stdout, 250*time.Millisecond, func() { os.Exit(74) })
 	mygo.App.SetName("Locklark Browser")
 	mygo.App.WhenReady(func() {

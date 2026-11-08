@@ -328,6 +328,7 @@ func CloneItem(it Item) Item {
 	out.SSHSeed = cloneBytes(it.SSHSeed)
 	out.SSHPublicKey = cloneBytes(it.SSHPublicKey)
 	out.Passkey = cloneBytes(it.Passkey)
+	out.Passkeys = clonePasskeyRecords(it.Passkeys)
 	out.Attachment = cloneBytes(it.Attachment)
 	out.Tags = append([]string(nil), it.Tags...)
 	out.URLs = append([]ItemURL(nil), it.URLs...)

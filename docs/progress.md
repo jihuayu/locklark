@@ -1,3 +1,5 @@
+> 2026-11-09（香港）增量：PR #61 已合并；PR #62 仍在完成本轮精确提交的检查。严格 typed CLI 与私有文件附件已实现，七项 F6 真实终端流程通过；原始 SSH typed 创建仍 pending。Safari 的一版真实 macOS CI 已通过 59 项 Swift 测试及 Xcode 构建，后续管道/会话生命周期修补需重跑。多 Passkey、原生剪贴板弹窗接入、显式 HIBP CLI 及授权迁移在各自分支继续推进。逐项证据与未完成范围以[遗留 issues 实现台账](all-issues-implementation-ledger.md)为准；下文旧日期中的“仅剩一个 issue”或旧 E2E 总数不代表当前状态。
+
 # Locklark 开发进度
 
 2026-11-08（香港）：DeepSeek 已修复浏览器复制后的无条件清空定时器，避免覆盖后来复制的内容，并改为准确的手动清理提示；主代理独立复跑 304 项扩展测试通过。见[剪贴板归属验收](browser-clipboard-ownership-validation.md)。#59 的原生租约接入和实际 OS 验收仍在推进，其他 #50–#58 不因本补丁自动完成。

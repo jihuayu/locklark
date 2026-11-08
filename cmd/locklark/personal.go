@@ -24,7 +24,7 @@ import (
 	"unicode/utf8"
 )
 
-var personalUsage = errors.New("usage: locklark personal run-cli --file PATH --id ID --revision REV --profile token|gh --name ENV --cwd ABS_DIR --timeout SECONDS [--helper-path ABS_DIR_LIST] -- ABS_PROGRAM [ARG...], or run-env --file PATH --id ID --revision REV --field username|password --name ENV --cwd ABS_DIR --timeout SECONDS -- ABS_PROGRAM [ARG...], or <init|add-login|list|audit|archived-audit|references|health> --file PATH, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password|otp|url|notes (hidden single-line replacement; use native editor for multiline notes), or reveal-login --file PATH --id ID --revision REV --field username|password, or generate-login --file PATH [--length N], or regenerate-password --file PATH --id ID --revision REV [--length N], or otp --file PATH --id ID --revision REV, or reveal-ref|otp-ref --file PATH --ref REF --revision REV, or inspect-1pux|plan-import-1pux --file PATH --source ARCHIVE, or import-1pux --file PATH --source ARCHIVE --digest PLAN_DIGEST, or export-kdbx --file PATH --out NEW_FILE.kdbx, or archive-login|unarchive-login --file PATH --id ID --revision REV, or list|search --file PATH [--state active|archived|trashed|all], or trash-login|restore-login --file PATH --id ID --revision REV, or match-logins --file PATH --origin HTTPS_ORIGIN --frame-origin HTTPS_ORIGIN, or inject-json --file PATH --id ID --revision REV --field username|password --name PROPERTY --out NEW.json, or github-pull --file PATH --id ID --revision REV --repository-id NUMERIC_ID --owner OWNER --repository NAME --number PR --api-ip PUBLIC_IPV4")
+var personalUsage = errors.New("usage: locklark personal run-cli --file PATH --id ID --revision REV --profile token|gh --name ENV --cwd ABS_DIR --timeout SECONDS [--helper-path ABS_DIR_LIST] -- ABS_PROGRAM [ARG...], or run-env --file PATH --id ID --revision REV --field username|password --name ENV --cwd ABS_DIR --timeout SECONDS -- ABS_PROGRAM [ARG...], or <init|add-login|list|audit|archived-audit|references|health> --file PATH, or add-item --file PATH --input ITEM.json, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password|otp|url|notes (hidden single-line replacement; use native editor for multiline notes), or reveal-login --file PATH --id ID --revision REV --field username|password, or generate-login --file PATH [--length N], or regenerate-password --file PATH --id ID --revision REV [--length N], or otp --file PATH --id ID --revision REV, or reveal-ref|otp-ref --file PATH --ref REF --revision REV, or inspect-1pux --file PATH --source ARCHIVE, or plan-import-1pux --file PATH --source ARCHIVE [--model v2], or import-1pux --file PATH --source ARCHIVE --digest PLAN_DIGEST [--model v2], or export-kdbx --file PATH --out NEW_FILE.kdbx, or archive-login|unarchive-login --file PATH --id ID --revision REV, or list|search --file PATH [--state active|archived|trashed|all], or trash-login|restore-login --file PATH --id ID --revision REV, or match-logins --file PATH --origin HTTPS_ORIGIN --frame-origin HTTPS_ORIGIN, or inject-json --file PATH --id ID --revision REV --field username|password --name PROPERTY --out NEW.json, or github-pull --file PATH --id ID --revision REV --repository-id NUMERIC_ID --owner OWNER --repository NAME --number PR --api-ip PUBLIC_IPV4")
 
 // One terminal mode covers the entire interaction; no prompt or inter-field
 // gap is visible while echo is enabled.
@@ -96,6 +96,24 @@ func confirmIssued(c *console, label, value, prompt string) error {
 	}
 	return nil
 }
+// personalImportNotice returns the fixed pre-consent warning for the import
+// profile. The full v2 mapping is opt-in only; both profiles still refuse every
+// unknown or unsupported record as a whole instead of writing partial items.
+func personalImportNotice(v2 bool) string {
+	if v2 {
+		return "显式启用 v2 完整映射：支持受限的类别、分节字段、标签、收藏与附件。\r\n未知或不受支持的类别、字段、历史、标签或附件会整批原子拒绝，不写入部分条目，也不会覆盖已有条目。\r\n来源记录会加密保留，可能保留以后修改前的旧值。\r\n"
+	}
+	return "仅支持单账户、单库的基本登录；未支持的类别、字段、历史和附件会整批拒绝。\r\n来源记录会加密保留，可能保留以后修改前的旧值；不会覆盖已有条目。\r\n"
+}
+
+// personalImportConsent reports the confirmation phrase for the requested step.
+func personalImportConsent(action string) (string, string) {
+	if action == "import-1pux" {
+		return "输入 SAVE 确认整批导入", "SAVE"
+	}
+	return "输入 PLAN 确认生成导入计划", "PLAN"
+}
+
 func runPersonal(args []string, out io.Writer) (retErr error) {
 	var processArgs []string
 	if len(args) > 0 && (args[0] == "run-env" || args[0] == "run-cli") {
@@ -131,6 +149,7 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 	var run personal.RunRequest
 	var runCLI personal.RunCLIRequest
 	length := password.DefaultPolicy().Length
+	var importV2 bool
 	switch action {
 	case "run-cli":
 		reveal = personal.RevealTarget{ID: opts["--id"], Revision: opts["--revision"], Field: "password"}
@@ -163,12 +182,32 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 		if len(opts) != 6 || !personal.ValidRevealTarget(reveal.ID, reveal.Revision, reveal.Field) || !personal.ValidInjectionName(opts["--name"]) || opts["--out"] == "" {
 			return personalUsage
 		}
+	case "add-item":
+		if len(opts) != 2 || opts["--input"] == "" {
+			return personalUsage
+		}
 	case "plan-import-1pux":
-		if len(opts) != 2 || opts["--source"] == "" {
+		expected := 2
+		if model, found := opts["--model"]; found {
+			if model != "v2" {
+				return personalUsage
+			}
+			importV2 = true
+			expected++
+		}
+		if len(opts) != expected || opts["--source"] == "" {
 			return personalUsage
 		}
 	case "import-1pux":
-		if len(opts) != 3 || opts["--source"] == "" || !personal.ValidImportDigest(opts["--digest"]) {
+		expected := 3
+		if model, found := opts["--model"]; found {
+			if model != "v2" {
+				return personalUsage
+			}
+			importV2 = true
+			expected++
+		}
+		if len(opts) != expected || opts["--source"] == "" || !personal.ValidImportDigest(opts["--digest"]) {
 			return personalUsage
 		}
 	case "match-logins":
@@ -365,6 +404,8 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 		}
 		defer clear(key)
 		switch action {
+		case "add-item":
+			response, err = createTypedPersonal(path, opts["--input"], pw, key, consoleField, c.output())
 		case "run-cli":
 			if e = confirmRunCLI(&c, reveal, runCLI); e != nil {
 				return e
@@ -456,15 +497,14 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 			}
 			response, err = personal.Health(path, string(pw), key)
 		case "plan-import-1pux", "import-1pux":
-			if _, e = fmt.Fprint(os.Stderr, "仅支持单账户、单库的基本登录；未支持的类别、字段、历史和附件会整批拒绝。\r\n来源记录会加密保留，可能保留以后修改前的旧值；不会覆盖已有条目。\r\n"); e != nil {
+			if _, e = fmt.Fprint(os.Stderr, personalImportNotice(importV2)); e != nil {
 				return e
 			}
-			prompt, answer := "输入 PLAN 确认生成导入计划", "PLAN"
+			prompt, answer := personalImportConsent(action)
 			if action == "import-1pux" {
 				if _, e = fmt.Fprintf(os.Stderr, "确认导入计划的来源摘要：%s\r\n", opts["--digest"]); e != nil {
 					return e
 				}
-				prompt, answer = "输入 SAVE 确认整批导入", "SAVE"
 			}
 			consent, e := consoleField(prompt)
 			defer clear(consent)
@@ -475,7 +515,13 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 				return errors.New("1PUX import cancelled")
 			}
 			if action == "plan-import-1pux" {
-				response, err = personal.PlanImportOnepux(path, string(pw), key, opts["--source"])
+				if importV2 {
+					response, err = personal.PlanImportOnepuxV2(path, string(pw), key, opts["--source"])
+				} else {
+					response, err = personal.PlanImportOnepux(path, string(pw), key, opts["--source"])
+				}
+			} else if importV2 {
+				response, err = personal.ImportOnepuxV2(path, string(pw), key, opts["--source"], opts["--digest"])
 			} else {
 				response, err = personal.ImportOnepux(path, string(pw), key, opts["--source"], opts["--digest"])
 			}

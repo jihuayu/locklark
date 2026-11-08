@@ -3,6 +3,8 @@
   "private": true,
   "scripts": {
     "test": "node --test test/*.test.js",
-    "build": "node build.js chromium && node build.js firefox"
+    "build": "node build.js chromium && node build.js firefox",
+    "build:safari": "node build.js safari",
+    "test:safari": "node --test test/safari_native_port.test.js"
   }
 }

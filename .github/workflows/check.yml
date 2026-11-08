@@ -176,6 +176,16 @@ jobs:
       - run: go build ./cmd/locklark-desktop
       - name: Build native browser hosts
         run: go build ./cmd/locklark-browser-chromium ./cmd/locklark-browser-firefox ./cmd/locklark-browser-register
+      - name: Test Safari transport policy and compile the macOS app
+        timeout-minutes: 15
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          safari/scripts/test_safari_swift.sh
+          go build -o "$RUNNER_TEMP/locklark-browser-safari" ./cmd/locklark-browser-safari
+          LOCKLARK_UNSIGNED_CI=1 LOCKLARK_SAFARI_HELPER="$RUNNER_TEMP/locklark-browser-safari" safari/scripts/build_safari.sh
+          echo 'Safari source compiled; signed installation and Safari runtime acceptance remain unverified.'
       - run: go test ./internal/osunlock ./internal/desktop ./internal/personal ./internal/browserhost ./internal/vault ./internal/onepux -run 'TestNative|TestDesktopSession|TestSystemUnlock|TestLockDoesNotWait|TestCancelledSystemUnlock|TestLockDrops|TestClipboard|TestDaily|TestBrowserOTP|TestOTP|TestQuick|TestNotes|TestLoginNotes' -count=1
       - name: Test native macOS clipboard ownership
         timeout-minutes: 3
@@ -275,6 +285,7 @@ jobs:
         run: |
           python3 -m unittest discover -s tests/scripts -p 'test_e2e*.py'
           python3 -m unittest discover -s scripts -p test_browser_firefox_native_passkey.py
+          python3 -m unittest scripts/test_native_acceptance_contract.py scripts/test_native_acceptance_platforms.py scripts/test_safari_package.py
           # GUI probes create their own D-Bus/Xvfb session; avoid inherited
           # runner displays or buses from earlier browser steps.
           env -u DISPLAY -u WAYLAND_DISPLAY -u DBUS_SESSION_BUS_ADDRESS python3 scripts/e2e_runner.py --feature all --json-out "$RUNNER_TEMP/locklark-e2e-report.json"

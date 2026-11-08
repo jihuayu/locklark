@@ -48,14 +48,23 @@ from .support import (
     "T4_01",
     4,
     ["F2", "F6", "F8", "F10", "F13", "F14", "F15", "F16"],
-    "Full 1Password migration: 1PUX import -> health -> browser fill -> CLI wrappers",
+    "Capability probe (CLI segment only): 1PUX v2 import -> health -> CLI wrappers",
 )
 def t4_01(ctx):
     vault = make_vault(ctx, ["GitHub", "AWS"])
     archive = multi_category_1pux(ctx)
     plan = pty(
         ctx,
-        ["personal", "plan-import-1pux", "--file", str(vault["path"]), "--source", str(archive)],
+        [
+            "personal",
+            "plan-import-1pux",
+            "--file",
+            str(vault["path"]),
+            "--source",
+            str(archive),
+            "--model",
+            "v2",
+        ],
         password=vault["password"],
         secret=vault["secret"],
         extra=[("输入 PLAN 确认生成导入计划", "PLAN")],
@@ -73,6 +82,13 @@ def t4_01(ctx):
     assert plan.json()["report"]["items"] >= 4
     _import_multi(ctx, vault, archive, plan.json()["report"]["source_digest"])
     assert f14_cli_profiles_ready(ctx)
+    ctx.require_feature(
+        "F6",
+        False,
+        "FEATURE_NOT_YET_LANDED: F6 - coverage bound: this capability probe executes only "
+        "the CLI 1PUX/health segment; browser fill and the desktop GUI journey are not "
+        "executed here, so the whole migration is not credited as functional",
+    )
 
 
 def _import_multi(ctx, vault, archive, digest):
@@ -87,6 +103,8 @@ def _import_multi(ctx, vault, archive, digest):
             str(archive),
             "--digest",
             digest,
+            "--model",
+            "v2",
         ],
         password=vault["password"],
         secret=vault["secret"],
