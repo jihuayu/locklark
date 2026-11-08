@@ -81,8 +81,19 @@ func isPending(_ signalNumber: Int32) -> Bool? {
     return sigismember(&pending, signalNumber) == 1
 }
 
-// 1. Default SIGPIPE action in this standalone process.
-check(signal(SIGPIPE, SIG_DFL) != SIG_ERR, "SIGPIPE disposition is SIG_DFL")
+// 1. Default SIGPIPE action in this standalone process. `signal` returns a
+// function pointer, which is not Equatable in Swift, so the disposition is
+// installed through sigaction and checked by its Int32 return value.
+do {
+    var defaultAction = sigaction()
+    defaultAction.__sigaction_u.__sa_handler = SIG_DFL
+    _ = sigemptyset(&defaultAction.sa_mask)
+    defaultAction.sa_flags = 0
+    check(
+        sigaction(SIGPIPE, &defaultAction, nil) == 0,
+        "SIGPIPE disposition is SIG_DFL"
+    )
+}
 
 // 2. Socket with SO_NOSIGPIPE, peer already closed.
 do {
