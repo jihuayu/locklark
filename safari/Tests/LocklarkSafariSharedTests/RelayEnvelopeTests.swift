@@ -61,22 +61,91 @@ final class RelayEnvelopeTests: XCTestCase {
         ]))
     }
 
-    func testProfileOnlyAllowedOnOpenAndBounded() {
-        let open = RelayRequest.parse([
-            "v": 1, "op": "open", "token": token, "profile": "default-profile",
-        ])
-        XCTAssertEqual(open?.profileKey, "default-profile")
+    func testBrowserEnvelopeRefusesAnyProfileField() {
+        // JS/page content must never choose or spoof a profile binding.
+        for operation in ["open", "poll", "close"] {
+            XCTAssertNil(RelayRequest.parse([
+                "v": 1,
+                "op": operation,
+                "token": token,
+                "profile": "default-profile",
+            ]))
+        }
         XCTAssertNil(RelayRequest.parse([
             "v": 1, "op": "send", "token": token,
             "frame": ["v": 1], "profile": "x",
         ]))
         XCTAssertNil(RelayRequest.parse([
-            "v": 1, "op": "open", "token": token,
-            "profile": String(repeating: "p", count: 257),
+            "v": 1, "op": "open", "token": token, "profile": NSNull(),
         ]))
-        XCTAssertNil(RelayRequest.parse([
-            "v": 1, "op": "open", "token": token, "profile": "bad\nprofile",
+    }
+
+    func testNativeEnvelopeCarriesProfileOnEveryOperation() {
+        for operation in ["open", "poll", "close"] {
+            let request = RelayRequest.parseNative([
+                "v": 1,
+                "op": operation,
+                "token": token,
+                "profile": "Profile One",
+            ])
+            XCTAssertEqual(request?.operation.rawValue, operation)
+            XCTAssertEqual(request?.profileKey, "Profile One")
+        }
+        let send = RelayRequest.parseNative([
+            "v": 1, "op": "send", "token": token,
+            "frame": ["v": 1, "type": "hello"],
+            "profile": "Profile One",
+        ])
+        XCTAssertEqual(send?.frame?["type"] as? String, "hello")
+        XCTAssertEqual(send?.profileKey, "Profile One")
+        // Safari without profiles forwards no profile; it stays nil and is
+        // only ever compared against other nil profiles.
+        XCTAssertNil(RelayRequest.parseNative([
+            "v": 1, "op": "poll", "token": token,
+        ])?.profileKey)
+    }
+
+    func testNativeProfileBoundsAndUnknownKeysFailClosed() {
+        XCTAssertNil(RelayRequest.parseNative([
+            "v": 1, "op": "poll", "token": token,
+            "profile": String(
+                repeating: "p",
+                count: RelayLimits.maxProfileBytes + 1
+            ),
         ]))
+        XCTAssertNil(RelayRequest.parseNative([
+            "v": 1, "op": "poll", "token": token,
+            "profile": "bad\u{0}profile",
+        ]))
+        XCTAssertNil(RelayRequest.parseNative([
+            "v": 1, "op": "poll", "token": token, "profile": "",
+        ]))
+        XCTAssertNil(RelayRequest.parseNative([
+            "v": 1, "op": "poll", "token": token, "profile": 7,
+        ]))
+        XCTAssertNil(RelayRequest.parseNative([
+            "v": 1, "op": "poll", "token": token,
+            "profile": "p", "extra": 1,
+        ]))
+        XCTAssertNil(RelayRequest.parseNative([
+            "v": 1, "op": "send", "token": token, "profile": "p",
+        ]))
+    }
+
+    func testForwardingEnvelopeForwardsNativeProfileOnAllOperations() {
+        for operation in ["open", "send", "poll", "close"] {
+            let raw: [String: Any] = operation == "send"
+                ? ["v": 1, "op": operation, "token": token, "frame": ["v": 1]]
+                : ["v": 1, "op": operation, "token": token]
+            guard let request = RelayRequest.parse(raw) else {
+                return XCTFail("browser envelope must parse")
+            }
+            let forwarded = request.forwardingEnvelope(profileKey: "Profile One")
+            XCTAssertEqual(forwarded["profile"] as? String, "Profile One")
+            XCTAssertNotNil(RelayRequest.parseNative(forwarded))
+            // The browser parser still refuses the same envelope.
+            XCTAssertNil(RelayRequest.parse(forwarded))
+        }
     }
 
     func testForwardingEnvelopeDropsUnknownKeys() {
@@ -86,6 +155,11 @@ final class RelayEnvelopeTests: XCTestCase {
         let forwarded = request.forwardingEnvelope(profileKey: "Profile One")
         XCTAssertEqual(Set(forwarded.keys), Set(["v", "op", "token", "profile"]))
         XCTAssertEqual(forwarded["profile"] as? String, "Profile One")
+        // An invalid profile is never forwarded.
+        let dropped = request.forwardingEnvelope(
+            profileKey: String(repeating: "p", count: 4096)
+        )
+        XCTAssertNil(dropped["profile"])
     }
 
     func testReplySuccessAndFailureShapes() throws {

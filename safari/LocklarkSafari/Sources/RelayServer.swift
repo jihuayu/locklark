@@ -120,6 +120,15 @@ final class RelayServer {
                 close(client)
                 continue
             }
+            // A write to a peer that already went away must never raise
+            // SIGPIPE. Refuse the connection if the socket option fails.
+            guard (try? SocketSupport.disableSigPipe(fd: client)) != nil else {
+                close(client)
+                stateLock.lock()
+                activeConnections = max(0, activeConnections - 1)
+                stateLock.unlock()
+                continue
+            }
             Thread.detachNewThread { [weak self] in
                 self?.serve(client: client)
             }
@@ -143,7 +152,10 @@ final class RelayServer {
         while isRunning() {
             do {
                 let raw = try SocketSupport.readFrame(fd: client)
-                guard let request = RelayRequest.parse(raw) else {
+                // Trusted hop: the peer was SecCode/Team/bundle/UID verified
+                // above, so this parser (and only this) accepts the
+                // native-context profile on every operation.
+                guard let request = RelayRequest.parseNative(raw) else {
                     try? SocketSupport.writeFrame(
                         fd: client,
                         object: RelayReply.protocolFailure()

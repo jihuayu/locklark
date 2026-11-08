@@ -2,7 +2,27 @@
 import Foundation
 import Darwin
 
-enum SocketSupport {
+/// Fixed, payload-free I/O helpers for the Safari relay.
+///
+/// SIGPIPE policy: this process never changes the process-wide disposition of
+/// SIGPIPE. Sockets get `SO_NOSIGPIPE` when they are created/accepted (checked;
+/// failure is a fixed `unavailable`), and *every* write additionally blocks
+/// SIGPIPE only for the calling thread, restores the caller's exact original
+/// pthread signal mask on every exit path, never consumes a SIGPIPE that was
+/// already pending before the write, and consumes only the thread-directed
+/// SIGPIPE the failed write itself raised (via `sigpending` + `sigwait`) while
+/// it is still blocked. A closed peer therefore turns into a fixed
+/// `RelayError.unavailable` instead of terminating the app or extension.
+public enum SocketSupport {
+    /// Applies `SO_NOSIGPIPE` to a socket. Failure is refused, never ignored.
+    public static func disableSigPipe(fd: Int32) throws {
+        var enabled: Int32 = 1
+        let size = socklen_t(MemoryLayout<Int32>.size)
+        guard setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &enabled, size) == 0 else {
+            throw RelayError.unavailable
+        }
+    }
+
     static func applyTimeouts(fd: Int32, seconds: TimeInterval) {
         var timeout = timeval(
             tv_sec: Int(seconds),
@@ -17,7 +37,48 @@ enum SocketSupport {
         }
     }
 
-    static func writeAll(fd: Int32, data: Data) throws {
+    /// Socket write. The caller must have applied `disableSigPipe(fd:)` when
+    /// the socket was created/accepted; the thread guard below is defence in
+    /// depth so a missed `SO_NOSIGPIPE` still cannot kill the process.
+    public static func writeAll(fd: Int32, data: Data) throws {
+        try writeAllGuarded(fd: fd, data: data)
+    }
+
+    /// Pipe write (the helper's stdin). Pipes have no `SO_NOSIGPIPE`, so the
+    /// thread-local SIGPIPE guard is the only protection; a helper that already
+    /// exited turns the write into a fixed `RelayError.unavailable`.
+    public static func writeAllPipe(fd: Int32, data: Data) throws {
+        try writeAllGuarded(fd: fd, data: data)
+    }
+
+    /// Core write loop. Any write failure - `EPIPE`, `ECONNRESET`, a zero
+    /// length write or an unexpected errno - maps to the single fixed
+    /// `RelayError.unavailable`; no errno text, peer data or frame content is
+    /// ever surfaced or logged. A partially written frame is never retried:
+    /// the caller must drop the session instead.
+    private static func writeAllGuarded(fd: Int32, data: Data) throws {
+        var sigpipe = sigset_t()
+        _ = sigemptyset(&sigpipe)
+        _ = sigaddset(&sigpipe, SIGPIPE)
+
+        var originalMask = sigset_t()
+        _ = sigemptyset(&originalMask)
+        guard pthread_sigmask(SIG_BLOCK, &sigpipe, &originalMask) == 0 else {
+            throw RelayError.unavailable
+        }
+        defer {
+            // Always restore the caller's exact thread signal mask, including
+            // on every throw path below.
+            _ = pthread_sigmask(SIG_SETMASK, &originalMask, nil)
+        }
+
+        // A SIGPIPE that is already pending belongs to an earlier operation;
+        // it is left untouched and never consumed here.
+        guard let preexistingPending = isSigPipePending() else {
+            throw RelayError.unavailable
+        }
+
+        var failed = false
         var offset = 0
         while offset < data.count {
             let written = data.withUnsafeBytes { raw -> Int in
@@ -30,11 +91,36 @@ enum SocketSupport {
             }
             if written < 0 {
                 if errno == EINTR { continue }
-                throw RelayError.unavailable
+                failed = true
+                break
             }
-            if written == 0 { throw RelayError.closed }
+            if written == 0 {
+                failed = true
+                break
+            }
             offset += written
         }
+
+        if failed, !preexistingPending {
+            // Consume only the thread-directed SIGPIPE this write raised while
+            // it is still blocked, before the mask is restored.
+            consumeNewPendingSigPipe(sigpipe: &sigpipe)
+        }
+        if failed { throw RelayError.unavailable }
+    }
+
+    /// Nil means the pending set could not be read, which fails closed.
+    private static func isSigPipePending() -> Bool? {
+        var pending = sigset_t()
+        _ = sigemptyset(&pending)
+        guard sigpending(&pending) == 0 else { return nil }
+        return sigismember(&pending, SIGPIPE) == 1
+    }
+
+    private static func consumeNewPendingSigPipe(sigpipe: inout sigset_t) {
+        guard isSigPipePending() == true else { return }
+        var received: Int32 = 0
+        _ = sigwait(&sigpipe, &received)
     }
 
     static func readExactly(fd: Int32, count: Int) throws -> Data {
@@ -96,6 +182,12 @@ enum SocketSupport {
     static func createListener(path: String) throws -> Int32 {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw RelayError.unavailable }
+        do {
+            try disableSigPipe(fd: fd)
+        } catch {
+            close(fd)
+            throw RelayError.unavailable
+        }
         var address = sockaddr_un()
         address.sun_family = sa_family_t(AF_UNIX)
         let pathBytes = Array(path.utf8)

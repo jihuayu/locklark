@@ -73,6 +73,29 @@ the `MAIN` world.
 - The Safari extension handler reads `SFExtensionMessageKey` and, when
   available, `SFExtensionProfileKey`; it validates the envelope before
   forwarding and never logs raw requests or errors.
+- Two envelope parsers exist. The browser/JS parser accepts only
+  `v`/`op`/`token`(/`frame`) and **refuses any `profile` field**, so page
+  content can never choose or spoof a profile. The trusted parser for the
+  app-group hop is used only after the `SecCode`/Team/bundle/UID peer check and
+  accepts the bounded, NUL-free `profile` on *every* operation.
+- The profile a session is bound to comes only from the native handler context
+  (`SFExtensionProfileKey`) and is forwarded on open, send, poll and close. The
+  containing app requires *exact* Optional equality between the stored and
+  incoming profile for every operation: `nil` only reaches a `nil`-bound session
+  (Safari without profiles), a non-nil profile never reaches a `nil` session or
+  a different profile, and a mismatched `close` is refused without removing the
+  session. The token remains a random 128-bit bearer value; the profile binds
+  the session, it does not replace the token.
+- Every write follows one SIGPIPE policy, with no process-wide SIGPIPE ignore.
+  Sockets get `SO_NOSIGPIPE` at creation and accept (a failure is refused), and
+  each write blocks SIGPIPE for the calling thread only, restores the caller's
+  exact original pthread signal mask on every return path, never consumes a
+  SIGPIPE that was already pending, and consumes only the thread-directed
+  SIGPIPE its own failed write raised (checked with `sigpending`/`sigwait`
+  before the mask is restored). A closed-peer socket write or a write to an
+  exited helper's stdin returns the fixed `RelayError.unavailable` instead of
+  terminating the app or extension process, and a partially written frame is
+  never retried.
 - The app-group container path is resolved only through
   `FileManager.containerURL(forSecurityApplicationGroupIdentifier:)`. No
   JavaScript-supplied path, executable, argv or environment is accepted.
@@ -133,6 +156,13 @@ Swift foundation tests are checked in under `safari/Tests` and are run by:
 ```sh
 safari/scripts/test_safari_swift.sh
 ```
+
+That script also builds and runs the standalone native probe
+`safari/TestProbe/Sources/main.swift` (`LocklarkSafariSIGPipeProbe`), which sets
+SIGPIPE to `SIG_DFL` **in its own process** (never in the XCTest host) and
+requires that a closed-peer `socketpair` write and a closed-pipe write both
+return the fixed failure, that the process survives, and that the caller thread
+mask (including a SIGPIPE that was already pending) is preserved.
 
 On this worker no Swift toolchain, Xcode, `xcodegen`, code-signing identity,
 Safari browser or real Safari installation is available. The Swift sources

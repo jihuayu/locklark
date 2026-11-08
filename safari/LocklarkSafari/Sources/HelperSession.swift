@@ -103,7 +103,11 @@ final class HelperSession {
         let encoded = try FrameCodec.encodeJSONObject(frame)
         lock.unlock()
         try writeQueue.sync {
-            try SocketSupport.writeAll(
+            // Helper stdin is a pipe, so SO_NOSIGPIPE does not apply: the
+            // thread-local SIGPIPE guard in writeAllPipe turns a helper that
+            // already exited into a fixed RelayError.unavailable instead of
+            // terminating the app. A partial frame is never retried.
+            try SocketSupport.writeAllPipe(
                 fd: stdinPipe.fileHandleForWriting.fileDescriptor,
                 data: encoded
             )

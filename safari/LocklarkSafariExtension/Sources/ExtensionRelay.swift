@@ -4,6 +4,11 @@ import Foundation
 /// signed identity from Info.plist, and forwards only the fixed operation
 /// envelope over the app-group socket. It never launches processes, never
 /// fabricates a native reply and never logs request or error contents.
+///
+/// The profile is never taken from the JS message: `RelayRequest.parse` refuses
+/// any profile field from JS, and the only profile that is forwarded is the one
+/// the native handler context supplied (SFExtensionProfileKey). It is forwarded
+/// on every operation, so send/poll/close stay bound to the same profile.
 final class ExtensionRelay {
     private let lock = NSLock()
     private var connection: AppGroupSocketClient?
@@ -15,6 +20,8 @@ final class ExtensionRelay {
         guard let request = RelayRequest.parse(rawMessage) else {
             return RelayReply.protocolFailure()
         }
+        // Trusted native context only: an invalid, oversized or NUL-bearing
+        // profile fails closed instead of being dropped or reinterpreted.
         if let profileKey, !RelayEnvelope.isValidProfileKey(profileKey) {
             resetConnection()
             return RelayReply.failure(token: request.token)

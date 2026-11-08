@@ -15,8 +15,10 @@ public struct RelayRequest {
     public let operation: RelayOperation
     public let token: String
     public let frame: [String: Any]?
-    /// Opaque Safari profile identifier, only present on app-bound open
-    /// envelopes. It is never derived from a page or native frame.
+    /// Opaque Safari profile identifier. Only the trusted native-hop parser
+    /// fills it (from the native handler context) and it is then required on
+    /// every send/poll/close for the same session. It is never derived from a
+    /// page, a JS message field or a native frame.
     public let profileKey: String?
 
     public init(
@@ -31,7 +33,24 @@ public struct RelayRequest {
         self.profileKey = profileKey
     }
 
+    /// Strict browser-side parser. JavaScript/page content may only ever send
+    /// v/op/token(/frame); a `profile` field from JS is refused, never honoured.
     public static func parse(_ raw: Any) -> RelayRequest? {
+        parse(raw, allowNativeProfile: false)
+    }
+
+    /// Trusted parser for the app-group hop. Only the containing app calls it,
+    /// and only after the SecCode/Team/bundle/UID peer check passed. It accepts
+    /// the bounded `profile` field on *every* operation so send, poll and close
+    /// stay bound to the profile the session was opened with.
+    public static func parseNative(_ raw: Any) -> RelayRequest? {
+        parse(raw, allowNativeProfile: true)
+    }
+
+    private static func parse(
+        _ raw: Any,
+        allowNativeProfile: Bool
+    ) -> RelayRequest? {
         guard let object = RelayEnvelope.object(raw) else { return nil }
         guard let version = RelayEnvelope.integer(object["v"]),
               version == RelayLimits.protocolVersion
@@ -43,11 +62,25 @@ public struct RelayRequest {
               RelayEnvelope.isValidToken(token)
         else { return nil }
 
+        // JS must never supply a profile. Refuse it before any native-hop
+        // handling, and only accept it from the already peer-verified hop as a
+        // bounded, NUL-free value.
+        let carriesProfile = object.keys.contains("profile")
+        if carriesProfile, !allowNativeProfile { return nil }
+        var profileKey: String?
+        if carriesProfile {
+            guard let rawProfile = object["profile"] as? String,
+                  RelayEnvelope.isValidProfileKey(rawProfile)
+            else { return nil }
+            profileKey = rawProfile
+        }
+
         switch operation {
         case .send:
-            guard Set(object.keys) == Set(["v", "op", "token", "frame"]) else {
-                return nil
-            }
+            guard Set(object.keys) == Set(["v", "op", "token", "frame"]) ||
+                (allowNativeProfile && Set(object.keys) ==
+                    Set(["v", "op", "token", "frame", "profile"]))
+            else { return nil }
             guard let rawFrame = object["frame"],
                   let frame = RelayEnvelope.object(rawFrame),
                   RelayEnvelope.isValidFrame(frame)
@@ -55,39 +88,32 @@ public struct RelayRequest {
             guard RelayEnvelope.serializedSize(object) <=
                 RelayLimits.maxFrameBytes + 4096
             else { return nil }
-            return RelayRequest(operation: .send, token: token, frame: frame)
-        case .open:
-            let allowed: Set<String> = ["v", "op", "token", "profile"]
-            guard Set(object.keys).isSubset(of: allowed) else { return nil }
-            let profileKey: String?
-            if let rawProfile = object["profile"] {
-                guard let profile = rawProfile as? String,
-                      RelayEnvelope.isValidProfileKey(profile)
-                else { return nil }
-                profileKey = profile
-            } else {
-                profileKey = nil
-            }
+            return RelayRequest(
+                operation: .send,
+                token: token,
+                frame: frame,
+                profileKey: profileKey
+            )
+        case .open, .poll, .close:
+            let exact: Set<String> = ["v", "op", "token"]
+            let withProfile: Set<String> = ["v", "op", "token", "profile"]
+            guard Set(object.keys) == exact ||
+                (allowNativeProfile && Set(object.keys) == withProfile)
+            else { return nil }
             guard RelayEnvelope.serializedSize(object) <= 4096 else {
                 return nil
             }
             return RelayRequest(
-                operation: .open,
+                operation: operation,
                 token: token,
                 profileKey: profileKey
             )
-        case .poll, .close:
-            guard Set(object.keys) == Set(["v", "op", "token"]) else { return nil }
-            guard RelayEnvelope.serializedSize(object) <= 4096 else {
-                return nil
-            }
-            return RelayRequest(operation: operation, token: token)
         }
     }
 
     /// Rebuilds the app-bound envelope from validated fields. Unknown Safari
     /// message keys are never forwarded; only SFExtensionProfileKey can add
-    /// the bounded open-time profile field.
+    /// the bounded profile field, and it is forwarded on every operation.
     public func forwardingEnvelope(profileKey: String? = nil) -> [String: Any] {
         var object: [String: Any] = [
             "v": RelayLimits.protocolVersion,
@@ -96,7 +122,7 @@ public struct RelayRequest {
         ]
         if let frame { object["frame"] = frame }
         let effectiveProfile = profileKey ?? self.profileKey
-        if operation == .open, let effectiveProfile,
+        if let effectiveProfile,
            RelayEnvelope.isValidProfileKey(effectiveProfile) {
             object["profile"] = effectiveProfile
         }
@@ -147,12 +173,15 @@ public enum RelayEnvelope {
         return true
     }
 
+    /// Bounded opaque profile identifier: 1...maxProfileBytes UTF-8 bytes, no
+    /// embedded NUL and no control characters. Everything else fails closed.
     public static func isValidProfileKey(_ value: String) -> Bool {
-        guard value.utf8.count >= 1, value.utf8.count <= 256 else {
+        let bytes = Array(value.utf8)
+        guard bytes.count >= 1, bytes.count <= RelayLimits.maxProfileBytes else {
             return false
         }
-        for scalar in value.unicodeScalars {
-            if scalar.value < 0x20 || scalar.value == 0x7F { return false }
+        for byte in bytes {
+            if byte == 0x00 || byte < 0x20 || byte == 0x7F { return false }
         }
         return true
     }
@@ -238,7 +267,7 @@ public enum RelayReply {
         guard let version = RelayEnvelope.integer(object["v"]),
               version == RelayLimits.protocolVersion,
               object["token"] as? String == expectedToken,
-              let ok = boolean(object["ok"])
+              let ok = RelayEnvelope.boolean(object["ok"])
         else { return nil }
         if !ok {
             guard !object.keys.contains("frames") else { return nil }

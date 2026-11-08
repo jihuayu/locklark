@@ -15,6 +15,13 @@ let package = Package(
             name: "LocklarkSafariShared",
             path: "Shared/Sources"
         ),
+        // Standalone native probe: verifies the SIGPIPE policy under the
+        // default disposition in its own process, never in the XCTest host.
+        .executableTarget(
+            name: "LocklarkSafariSIGPipeProbe",
+            dependencies: ["LocklarkSafariShared"],
+            path: "TestProbe/Sources"
+        ),
         .testTarget(
             name: "LocklarkSafariSharedTests",
             dependencies: ["LocklarkSafariShared"],

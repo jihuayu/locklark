@@ -13,6 +13,14 @@ final class AppGroupSocketClient {
     init(socketURL: URL) throws {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw RelayError.unavailable }
+        // A containing app that quits mid-request must never SIGPIPE-kill the
+        // extension handler process. Refuse the socket if the option fails.
+        do {
+            try SocketSupport.disableSigPipe(fd: fd)
+        } catch {
+            close(fd)
+            throw RelayError.unavailable
+        }
         var address = sockaddr_un()
         address.sun_family = sa_family_t(AF_UNIX)
         let pathBytes = Array(socketURL.path.utf8)
