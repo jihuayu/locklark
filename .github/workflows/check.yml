@@ -182,7 +182,7 @@ jobs:
           if ! command -v xcodegen >/dev/null 2>&1; then
             brew install xcodegen
           fi
-          swift test --package-path safari
+          safari/scripts/test_safari_swift.sh
           go build -o "$RUNNER_TEMP/locklark-browser-safari" ./cmd/locklark-browser-safari
           LOCKLARK_UNSIGNED_CI=1 LOCKLARK_SAFARI_HELPER="$RUNNER_TEMP/locklark-browser-safari" safari/scripts/build_safari.sh
           echo 'Safari source compiled; signed installation and Safari runtime acceptance remain unverified.'

@@ -2,9 +2,9 @@
 
 This tree is the **build and transport foundation** for a macOS Safari web
 extension. It is not a claim that Safari has been run, that an app is signed,
-or that the native host supports Safari mode. The embedded helper needs the
-containing app/desktop owner to add a compiled `SafariBrowser` mode using the
-fixed extension identity described below.
+or that signed Safari installation and runtime flows have passed. The compiled
+`locklark-browser-safari` helper implements the fixed Darwin-only
+`--safari-browser` mode; other OSes and arbitrary launch arguments refuse it.
 
 Apple's transport reference:
 <https://developer.apple.com/documentation/safariservices/messaging-between-the-app-and-javascript-in-a-safari-web-extension>
@@ -41,7 +41,7 @@ the extension bundle ID must equal the app bundle ID plus `.Extension`.
 
 ```
 background.js
-  -> safari-native-port.js (install only in safari-web-extension://)
+  -> safari-native-port.js (explicit connector, safari-web-extension:// only)
        -> runtime.sendNativeMessage("org.locklark.browser", envelope)
             -> SafariWebExtensionHandler.beginRequest
                  -> app-group UNIX socket native/relay.sock
@@ -64,9 +64,10 @@ bytes, 8 app sessions and a 30-minute session TTL. Every native call failure,
 timeout, bad token, oversized/mistyped/unknown reply or ambiguous result closes
 the Port with a fixed safe reason. Mutating frames are never retried.
 
-The shim does not replace `globalThis.chrome`/`browser`, does not install on
-Chromium/Firefox-shaped runtimes and is never listed in `content_scripts` or
-the `MAIN` world.
+The shim exports an explicit connector and never patches `runtime.connectNative`
+or replaces `globalThis.chrome`/`browser`. The background selects it only for a
+Safari extension runtime and the fixed native host. It is never listed in
+`content_scripts` or the `MAIN` world.
 
 ## Security boundaries
 
@@ -164,22 +165,25 @@ requires that a closed-peer `socketpair` write and a closed-pipe write both
 return the fixed failure, that the process survives, and that the caller thread
 mask (including a SIGPIPE that was already pending) is preserved.
 
-On this worker no Swift toolchain, Xcode, `xcodegen`, code-signing identity,
-Safari browser or real Safari installation is available. The Swift sources
-have therefore **not** been compiled or executed here; the macOS CI step is the
-next action. Exact Apple API availability/signature requirements still need
-confirmation by that compile and by a signed run.
+The macOS GitHub job for source `27445a1` actually compiled the Swift package
+and passed 43 XCTest cases. It subsequently failed before the Xcode app build
+because the package script had not generated the Chromium comparison baseline;
+that build order is corrected in the current source. The job ran `swift test`
+directly, so its 43 passes do not establish execution of the standalone SIGPIPE
+probe. CI now invokes the complete script above, including that probe.
+
+Linux package tests and source review do not establish Xcode app compilation,
+Apple signing, installation or Safari runtime behavior. Record the final commit
+and actual macOS job result before crediting each of those checks.
 
 ## Integration still required
 
-- A compiled `locklark-browser-safari` helper that speaks the existing 4-byte
-  little-endian framed native protocol and a Safari/SafariBrowser mode using
-  the fixed extension identity. This worker does not add or modify the Go
-  host, so none of the Safari path is claimed operational yet.
-- Signing/notarization with matching app, extension and app-group
-  entitlements, and the Team ID used in `PeerVerifier`.
-- Real Safari packaging/installation/acceptance (only possible after the
-  above).
+- Complete a successful Xcode containing-app and extension build using the
+  actual Go helper. Unsigned compilation does not establish installation.
+- Signing/notarization with matching app, extension and app-group entitlements,
+  and the Team ID used in `PeerVerifier`.
+- Real Safari installation and password/OTP/Passkey, lock, cancel, navigation,
+  reconnect and update acceptance under the signed identity.
 
 ## Build order and baseline verification
 
@@ -187,7 +191,7 @@ confirmation by that compile and by a signed run.
 argument it produces only the `chromium` and `firefox` packages, whose manifest
 bytes are frozen by hashes in `scripts/test_safari_package.py`.
 
-`scripts/build_safari.sh` therefore builds the default baseline first and then
+`safari/scripts/build_safari.sh` therefore builds the default baseline first and then
 the Safari package:
 
 ```
