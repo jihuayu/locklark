@@ -42,10 +42,13 @@ def document(**overrides):
 class FakeWin32:
     """Records the platform calls a real Win32Api would make."""
 
-    def __init__(self, windows_list=None, focus=4242, secure=False):
+    def __init__(self, windows_list=None, focus=4242, secure=False,
+                 focus_window=None, root=True):
         self.windows_list = [dict(WINDOW_RAW)] if windows_list is None else windows_list
         self.focus = focus
+        self.focus_window = WINDOW_RAW["id"] if focus_window is None else focus_window
         self.secure = secure
+        self.root = root
         self.activations = 0
         self.clicks = []
         self.typed = []
@@ -59,6 +62,15 @@ class FakeWin32:
 
     def foreground_pid(self):
         return self.focus
+
+    def focus_state(self, window=None):
+        return {"pid": self.focus, "window": self.focus_window}
+
+    def screen_bounds(self):
+        return {"x": 0, "y": 0, "width": 1920, "height": 1080}
+
+    def root_at(self, identifier, x, y):
+        return self.root
 
     def activate(self, identifier):
         self.activations += 1
@@ -151,6 +163,29 @@ class WindowsAdapterTests(unittest.TestCase):
         self.assertEqual(api.chords, [("Control_L", "a")])
 
 
+    def test_same_pid_other_hwnd_refused(self):
+        api = FakeWin32(focus_window=0x200004)
+        adapter = windows.WindowsAdapter(api=api, uia=FakeUia())
+        with self.assertRaises(contract.ContractError) as error:
+            execute(adapter, document())
+        self.assertEqual(error.exception.code, "focus-lost")
+        self.assertEqual(api.activations, 1)
+        self.assertEqual(api.clicks, [])
+
+    def test_click_point_must_resolve_to_the_selected_hwnd(self):
+        api = FakeWin32(root=False)
+        adapter = windows.WindowsAdapter(api=api, uia=FakeUia())
+        with self.assertRaises(contract.ContractError) as error:
+            execute(adapter, document(actions=[{"click": [10, 20]}]))
+        self.assertEqual(error.exception.code, "control-offscreen")
+        self.assertEqual(api.clicks, [])
+
+    def test_success_click_is_accepted_evidence_without_title(self):
+        result = execute(windows.WindowsAdapter(api=FakeWin32(), uia=FakeUia()), document())
+        self.assertEqual(result["clicks"][0]["evidence"], "accepted")
+        self.assertNotIn("title", result)
+
+
 class StrictWidget:
     """Exposes only the five public UIA members; anything else is a failure."""
 
@@ -218,7 +253,9 @@ class UiaReaderTests(unittest.TestCase):
 class Win32InputBuildingTests(unittest.TestCase):
     """The real ctypes event builders, driven by a recording SendInput spy."""
 
-    def api(self, vk=0x41):
+    def api(self, vk=0x41, metrics=None):
+        metrics = {76: 0, 77: 0, 78: 1920, 79: 1080} if metrics is None else metrics
+
         class User32:
             def __init__(self):
                 self.batches = []
@@ -228,10 +265,10 @@ class Win32InputBuildingTests(unittest.TestCase):
                 return count
 
             def VkKeyScanW(self, code):
-                return vk if code < 128 else -1
+                return vk if isinstance(code, str) and len(code) == 1 and ord(code) < 128 else -1
 
             def GetSystemMetrics(self, name):
-                return {76: 0, 77: 0, 78: 1920, 79: 1080}[name]
+                return metrics[name]
 
         api = windows.Win32Api.__new__(windows.Win32Api)
         api.user32 = User32()
@@ -260,6 +297,61 @@ class Win32InputBuildingTests(unittest.TestCase):
         self.assertEqual(batch[1].union.mi.dwFlags, windows.MOUSEEVENTF_LEFTDOWN)
         self.assertEqual(batch[2].union.mi.dwFlags, windows.MOUSEEVENTF_LEFTUP)
 
+    def test_click_normalises_virtual_screen_origin_and_extent(self):
+        api = self.api(metrics={76: 100, 77: 200, 78: 1000, 79: 800})
+        api.click(350, 400)
+        move = api.user32.batches[0][0].union.mi
+        self.assertEqual((move.dx, move.dy), (16383, 16383))
+
+    def test_click_outside_virtual_screen_refused(self):
+        api = self.api()
+        for point in ((-1, 10), (1920, 10), (10, -1), (10, 1080)):
+            with self.subTest(point=point):
+                with self.assertRaises(contract.ContractError) as error:
+                    api.click(*point)
+                self.assertEqual(error.exception.code, "control-offscreen")
+        self.assertEqual(api.user32.batches, [])
+
+    def test_ascii_text_is_one_unicode_batch_of_two_events_per_char(self):
+        api = self.api()
+        api.type_text("Aa1!")
+        self.assertEqual(len(api.user32.batches), 1)
+        batch = api.user32.batches[0]
+        self.assertEqual(len(batch), 8)
+        for index, char in enumerate("Aa1!"):
+            down, up = batch[index * 2], batch[index * 2 + 1]
+            self.assertEqual((down.union.ki.wVk, down.union.ki.wScan, down.union.ki.dwFlags),
+                             (0, ord(char), windows.KEYEVENTF_UNICODE))
+            self.assertEqual((up.union.ki.wScan, up.union.ki.dwFlags),
+                             (ord(char), windows.KEYEVENTF_UNICODE | windows.KEYEVENTF_KEYUP))
+
+    def test_partial_sendinput_count_refused(self):
+        class ShortUser32(object):
+            def SendInput(self, count, array, size):
+                return count - 1
+
+        api = windows.Win32Api.__new__(windows.Win32Api)
+        api.user32 = ShortUser32()
+        with self.assertRaises(contract.ContractError) as error:
+            api.type_text("a")
+        self.assertEqual(error.exception.code, "input-failed")
+
+    def test_more_than_512_top_level_windows_refused(self):
+        class User32(object):
+            def EnumWindows(self, callback, param):
+                for handle in range(1, contract.MAX_WINDOWS + 2):
+                    if not callback(handle, 0):
+                        break
+                return 1
+
+        api = windows.Win32Api.__new__(windows.Win32Api)
+        api.user32 = User32()
+        callback_type = getattr(windows.ctypes, "WINFUNCTYPE", windows.ctypes.CFUNCTYPE)
+        with patch.object(windows.ctypes, "WINFUNCTYPE", callback_type, create=True):
+            with self.assertRaises(contract.ContractError) as error:
+                api.list_windows()
+        self.assertEqual(error.exception.code, "window-overrun")
+
     def test_unknown_key_and_non_ascii_text_refused(self):
         api = self.api()
         with self.assertRaises(contract.ContractError) as error:
@@ -287,10 +379,13 @@ class StrictQuartz:
 
 
 class FakeMacApi:
-    def __init__(self, windows_list=None, controls=None, focus=4242, trusted=True, secure=False):
+    def __init__(self, windows_list=None, controls=None, focus=4242, trusted=True, secure=False,
+                 focus_window=None, root=True):
         self.windows_list = [dict(WINDOW_RAW, secure=secure)] if windows_list is None else windows_list
         self._controls = [dict(CONTROL)] if controls is None else controls
         self.focus = focus
+        self.focus_window = WINDOW_RAW["id"] if focus_window is None else focus_window
+        self.root = root
         self.trusted = trusted
         self.activations = 0
         self.clicks = []
@@ -304,11 +399,17 @@ class FakeMacApi:
     def list_windows(self):
         return [dict(item) for item in self.windows_list]
 
-    def controls(self, pid, title):
+    def controls(self, window):
         return [dict(item) for item in self._controls]
 
     def foreground_pid(self):
         return self.focus
+
+    def focus_state(self, window=None):
+        return {"pid": self.focus, "window": self.focus_window}
+
+    def root_at(self, window, x, y):
+        return self.root
 
     def activate(self, pid):
         self.activations += 1
@@ -379,17 +480,77 @@ class MacAdapterTests(unittest.TestCase):
         self.assertEqual(error.exception.code, "a11y-query")
 
 
+    def test_same_pid_other_ax_window_refused(self):
+        api = FakeMacApi(focus_window=0x200004)
+        adapter = macos.MacAdapter(api=api)
+        with self.assertRaises(contract.ContractError) as error:
+            execute(adapter, document())
+        self.assertEqual(error.exception.code, "focus-lost")
+        self.assertEqual(api.activations, 1)
+        self.assertEqual(api.clicks, [])
+
+    def test_click_point_must_resolve_to_the_bound_ax_window(self):
+        api = FakeMacApi(root=False)
+        adapter = macos.MacAdapter(api=api)
+        with self.assertRaises(contract.ContractError) as error:
+            execute(adapter, document(actions=[{"click": [10, 20]}]))
+        self.assertEqual(error.exception.code, "control-offscreen")
+        self.assertEqual(api.clicks, [])
+
+    def test_success_click_is_posted_evidence_without_title(self):
+        result = execute(macos.MacAdapter(api=FakeMacApi()), document())
+        self.assertEqual(result["clicks"][0]["evidence"], "posted")
+        self.assertNotIn("title", result)
+
+
+class MacProcessIdentityTests(unittest.TestCase):
+    def api(self, pidinfo_result=0):
+        class LibProc(object):
+            def proc_pidpath(self, pid, buffer, size):
+                buffer.value = b"/opt/locklark/test-browser"
+                return len(buffer.value)
+
+            def proc_pidinfo(self, pid, flavor, argument, buffer, size):
+                return pidinfo_result
+
+        api = macos.QuartzApi.__new__(macos.QuartzApi)
+        api.libproc = LibProc()
+        return api
+
+    def test_unknown_process_uid_never_falls_back_to_the_file_owner(self):
+        api = self.api(pidinfo_result=0)
+        with patch.object(macos.os, "stat", side_effect=AssertionError("file owner used")):
+            path, trusted = api.process(4242)
+        self.assertEqual(path, "/opt/locklark/test-browser")
+        self.assertFalse(trusted)
+
+    def test_same_process_uid_is_trusted_without_any_stat(self):
+        api = self.api()
+        api.process_uid = lambda pid: os.getuid()
+        with patch.object(macos.os, "stat", side_effect=AssertionError("file owner used")):
+            path, trusted = api.process(4242)
+        self.assertTrue(trusted)
+
+
 class MacAxWalkTests(unittest.TestCase):
-    def api(self):
+    def button(self, **overrides):
+        value = {"role": "AXButton", "title": LABEL, "enabled": True, "hidden": False,
+                 "children": [], "frame": {"x": 200, "y": 300, "width": 80, "height": 30}}
+        value.update(overrides)
+        return value
+
+    def api(self, button=None, tree_windows=None):
         api = macos.QuartzApi.__new__(macos.QuartzApi)
         api.quartz = types.SimpleNamespace(kAXWindowsAttribute="AXWindows")
         names = []
-        tree = {"title": TITLE, "children": [
-            {"role": "AXButton", "title": LABEL, "enabled": True, "hidden": False, "children": [],
-             "frame": {"x": 200, "y": 300, "width": 80, "height": 30}},
+        tree = {"title": TITLE, "frame": dict(WINDOW_RAW["bounds"]), "children": [
+            self.button() if button is None else button,
             {"role": "AXTextField", "title": "unlisted private label", "enabled": True, "hidden": False,
              "children": [], "frame": {"x": 0, "y": 0, "width": 10, "height": 10}},
         ]}
+        api.tree = tree
+        if tree_windows is None:
+            tree_windows = [tree]
 
         def attribute(element, name):
             names.append(name)
@@ -401,19 +562,44 @@ class MacAxWalkTests(unittest.TestCase):
                     "AXChildren": element.get("children")}.get(name)
 
         api.attribute = attribute
-        api.windows = lambda pid: [tree]
+        api.windows = lambda pid: list(tree_windows)
         api.title = lambda element: element.get("title") or element.get("description") or ""
         api.frame = lambda element: element["frame"]
         return api, names
 
+    def refused(self, api, code):
+        with self.assertRaises(contract.ContractError) as error:
+            api.controls(dict(WINDOW_RAW))
+        self.assertEqual(error.exception.code, code)
+
     def test_walk_reads_only_public_metadata_and_drops_unknown_labels(self):
         api, names = self.api()
-        controls = api.controls(4242, TITLE)
+        controls = api.controls(dict(WINDOW_RAW))
         self.assertEqual(len(controls), 1)
         self.assertEqual(set(controls[0]), set(contract.WIDGET_FIELDS))
         self.assertEqual(controls[0]["role"], "push button")
         self.assertNotIn("AXValue", names)
         self.assertNotIn("AXSelectedText", names)
+
+    def test_walk_requires_an_exact_window_binding(self):
+        api, _ = self.api()
+        with self.assertRaises(contract.ContractError) as error:
+            api.controls(dict(WINDOW_RAW, title="another window"))
+        self.assertEqual(error.exception.code, "a11y-query")
+
+    def test_ambiguous_ax_window_binding_refused(self):
+        api, _ = self.api()
+        api.windows = lambda pid: [api.tree, api.tree]
+        self.refused(api, "window-ambiguous")
+
+    def test_unknown_enabled_or_hidden_state_refused(self):
+        for overrides in ({"enabled": None}, {"hidden": None}, {"enabled": 1}, {"hidden": "no"}):
+            with self.subTest(overrides=overrides):
+                self.refused(self.api(button=self.button(**overrides))[0], "a11y-unavailable")
+
+    def test_control_without_positive_bounds_refused(self):
+        button = self.button(frame={"x": 200, "y": 300, "width": 0, "height": 30})
+        self.refused(self.api(button=button)[0], "control-geometry")
 
 
 class FakeQuartzEvents:

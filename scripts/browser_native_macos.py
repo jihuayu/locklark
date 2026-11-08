@@ -24,7 +24,7 @@ MAX_NODES = 4096
 MAX_DEPTH = 12
 
 ROLE_MAP = {"AXButton": "push button", "AXTextField": "entry",
-            "AXTextArea": "entry", "AXStaticText": "text"}
+            "AXTextArea": "entry"}
 
 SECURE_PROCESSES = frozenset({"securityagent", "coreautha", "coreauthd", "loginwindow"})
 
@@ -49,13 +49,19 @@ PROC_PIDTBSDINFO = 3
 
 
 class BSDInfo(ctypes.Structure):
+    """Complete struct proc_bsdinfo: pbi_uid is the real process UID."""
+
     _fields_ = [("pbi_flags", ctypes.c_uint32), ("pbi_status", ctypes.c_uint32),
                 ("pbi_xstatus", ctypes.c_uint32), ("pbi_pid", ctypes.c_uint32),
                 ("pbi_ppid", ctypes.c_uint32), ("pbi_uid", ctypes.c_uint32),
                 ("pbi_gid", ctypes.c_uint32), ("pbi_ruid", ctypes.c_uint32),
                 ("pbi_rgid", ctypes.c_uint32), ("pbi_svuid", ctypes.c_uint32),
                 ("pbi_svgid", ctypes.c_uint32), ("rfu_1", ctypes.c_uint32),
-                ("pbi_comm", ctypes.c_char * 16), ("pbi_name", ctypes.c_char * 32)]
+                ("pbi_comm", ctypes.c_char * 16), ("pbi_name", ctypes.c_char * 32),
+                ("pbi_nfiles", ctypes.c_uint32), ("pbi_pgid", ctypes.c_uint32),
+                ("pbi_pjobc", ctypes.c_uint32), ("e_tdev", ctypes.c_uint32),
+                ("e_tpgid", ctypes.c_uint32), ("pbi_nice", ctypes.c_int32),
+                ("pbi_start_tvsec", ctypes.c_uint64), ("pbi_start_tvusec", ctypes.c_uint64)]
 
 
 class AxValueUnavailable(Exception):
@@ -72,6 +78,23 @@ class QuartzApi:
             quartz, appkit = Quartz, AppKit
         self.quartz, self.appkit = quartz, appkit
         self.libproc = ctypes.CDLL(None)
+        self._declare_libproc()
+
+    def _declare_libproc(self):
+        """Declare prototypes once; symbols absent off Darwin stay undeclared."""
+        declarations = (
+            ("proc_pidinfo", [ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
+                              ctypes.c_void_p, ctypes.c_int], ctypes.c_int),
+            ("proc_pidpath", [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32],
+             ctypes.c_int),
+        )
+        for name, argtypes, restype in declarations:
+            try:
+                function = getattr(self.libproc, name)
+            except (AttributeError, OSError):
+                continue
+            function.argtypes = argtypes
+            function.restype = restype
 
     # -- capability ---------------------------------------------------------
     def capability(self):
@@ -136,15 +159,48 @@ class QuartzApi:
         return ""
 
     # -- widget walk --------------------------------------------------------
-    def controls(self, pid, title):
-        """Bounded AX walk of the titled window; public fields only."""
-        target = None
-        for window in self.windows(pid):
-            if self.title(window) == title:
-                target = window
-                break
-        if target is None:
+    def _identity_matches(self, element, window):
+        if self.title(element) != window.get("title"):
+            return False
+        try:
+            frame = self.frame(element)
+        except AxValueUnavailable:
+            return False
+        bounds = window.get("bounds") or {}
+        return all(frame[key] == bounds.get(key) for key in ("x", "y", "width", "height"))
+
+    def window_element(self, window):
+        """Bind the UNIQUE AX window to this exact CGWindow identity.
+
+        Identity is exact title plus exact frame equality; zero or several
+        candidates refuse.  The first window sharing a title is never used.
+        """
+        candidates = [element for element in self.windows(window["pid"])
+                      if self._identity_matches(element, window)]
+        if len(candidates) > 1:
+            raise contract.ContractError("window-ambiguous", {"ax": len(candidates)})
+        if not candidates:
             raise contract.ContractError("a11y-query")
+        return candidates[0]
+
+    def _control(self, element, role, name):
+        """Public fields only; missing or non-boolean AX state fails closed."""
+        try:
+            bounds = self.frame(element)
+        except AxValueUnavailable:
+            raise contract.ContractError("control-geometry")
+        enabled = self.attribute(element, "AXEnabled")
+        hidden = self.attribute(element, "AXHidden")
+        if type(enabled) is not bool or type(hidden) is not bool:
+            raise contract.ContractError("a11y-unavailable", {"attribute": 1})
+        if not contract.rect_positive(bounds):
+            raise contract.ContractError("control-geometry")
+        return {"role": role, "name": name, "enabled": enabled,
+                "visible": not hidden, "bounds": bounds}
+
+    def controls(self, window):
+        """Bounded AX walk of the exactly bound target window; public fields."""
+        target = self.window_element(window)
         found, nodes = [], [0]
 
         def walk(element, depth):
@@ -157,17 +213,7 @@ class QuartzApi:
             if role is not None:
                 name = self.title(element)
                 if name in contract.KNOWN_SYNTHETIC_LABELS:
-                    try:
-                        bounds = self.frame(element)
-                    except AxValueUnavailable:
-                        bounds = None
-                    if bounds is not None:
-                        enabled = self.attribute(element, "AXEnabled")
-                        hidden = self.attribute(element, "AXHidden")
-                        found.append({"role": role, "name": name,
-                                      "enabled": enabled is not False,
-                                      "visible": hidden is not True,
-                                      "bounds": bounds})
+                    found.append(self._control(element, role, name))
             children = self.attribute(element, "AXChildren")
             for child in children or []:
                 walk(child, depth + 1)
@@ -177,16 +223,26 @@ class QuartzApi:
 
     # -- process identity ---------------------------------------------------
     def process_uid(self, pid):
+        """True process uid from proc_pidinfo(PROC_PIDTBSDINFO), else None."""
         info = BSDInfo()
         try:
             size = self.libproc.proc_pidinfo(int(pid), PROC_PIDTBSDINFO, 0,
                                              ctypes.byref(info), ctypes.sizeof(info))
         except Exception:
             return None
-        return int(info.pbi_uid) if size == ctypes.sizeof(info) else None
+        if size != ctypes.sizeof(info) or int(info.pbi_pid) != int(pid):
+            return None
+        if int(info.pbi_uid) < 0:
+            return None
+        return int(info.pbi_uid)
 
     def process(self, pid):
-        """Read-only pid -> executable path lookup; same-user trust only."""
+        """Read-only pid -> path plus SAME PROCESS uid; unknown uid is untrusted.
+
+        The executable file owner is never used as a process-identity guess:
+        when proc_pidinfo cannot prove the process uid, the window is untrusted
+        and every request against it is refused.
+        """
         buffer = ctypes.create_string_buffer(4096)
         try:
             length = self.libproc.proc_pidpath(int(pid), buffer, 4096)
@@ -195,13 +251,10 @@ class QuartzApi:
         if length <= 0:
             return "", False
         path = buffer.value.decode("utf-8", "replace")
-        try:
-            file_uid = os.stat(path).st_uid
-        except OSError:
-            return "", False
         uid = self.process_uid(pid)
-        trusted = uid == os.getuid() if uid is not None else file_uid == os.getuid()
-        return path, trusted
+        if uid is None or uid != os.getuid():
+            return path, False
+        return path, True
 
     # -- windows ------------------------------------------------------------
     def list_windows(self):
@@ -251,6 +304,50 @@ class QuartzApi:
         workspace = self.appkit.NSWorkspace.sharedWorkspace()
         front = workspace.frontmostApplication()
         return int(front.processIdentifier()) if front is not None else None
+
+    def focus_state(self, window=None):
+        """Frontmost PID is never enough: the AX focused/main window matters.
+
+        Both AXFocusedWindow and AXMainWindow, when present, must bind to the
+        exact selected window; otherwise no window identity is reported and
+        the shared contract refuses input.
+        """
+        front = self.foreground_pid()
+        if window is None or type(front) is not int or front != window["pid"]:
+            return {"pid": front, "window": None}
+        application = self.application(window["pid"])
+        verified = 0
+        for name in ("AXFocusedWindow", "AXMainWindow"):
+            element = self.attribute(application, name)
+            if element is None:
+                continue
+            if not self._identity_matches(element, window):
+                return {"pid": front, "window": None}
+            verified += 1
+        if not verified:
+            return {"pid": front, "window": None}
+        return {"pid": front, "window": window["id"]}
+
+    def root_at(self, window, x, y):
+        """The AX element under the point must belong to the bound window."""
+        application = self.application(window["pid"])
+        if application is None:
+            return False
+        result = self.quartz.AXUIElementCopyElementAtPosition(
+            application, float(x), float(y), None)
+        if isinstance(result, tuple) and len(result) == 2:
+            code, element = result
+        else:
+            code, element = 0, result
+        if code != 0 or element is None:
+            return False
+        for _ in range(MAX_DEPTH + 1):
+            if self.attribute(element, "AXRole") == "AXWindow":
+                return self._identity_matches(element, window)
+            element = self.attribute(element, "AXParent")
+            if element is None:
+                return False
+        return False
 
     def activate(self, pid):
         running = self.appkit.NSRunningApplication.runningApplicationWithProcessIdentifier_(int(pid))
@@ -310,6 +407,8 @@ class MacAdapter:
 
     platform = PLATFORM
     supports_activation = True
+    exact_focus = True
+    input_evidence = "posted"
 
     def __init__(self, api=None, uia=None):
         self.api = QuartzApi() if api is None else api
@@ -342,7 +441,7 @@ class MacAdapter:
         return None
 
     def read_controls(self, window):
-        controls = self.api.controls(window["pid"], window["title"])
+        controls = self.api.controls(window)
         if not isinstance(controls, list) or len(controls) > contract.MAX_CONTROLS:
             raise contract.ContractError("a11y-overrun")
         for control in controls:
@@ -350,8 +449,12 @@ class MacAdapter:
                 raise contract.ContractError("a11y-query")
         return controls
 
-    def focus_state(self):
-        return {"pid": self.api.foreground_pid()}
+    def focus_state(self, window=None):
+        return self.api.focus_state(window)
+
+    def hit_test(self, window, x, y):
+        """Topmost AX element at the point must be inside the selected window."""
+        return self.api.root_at(window, x, y)
 
     def activate(self, window):
         if not self.api.activate(window["pid"]):

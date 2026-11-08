@@ -272,6 +272,20 @@ monotonic = time.monotonic
 sleep = time.sleep
 
 ACK_KEYS = ("move", "down", "up")
+EVIDENCE_KINDS = ("accepted", "posted")
+
+
+def evidence_kind(adapter):
+    """Only two truthful input claims exist; neither proves product effect.
+
+    ``accepted`` = the Windows input API reported the whole batch queued.
+    ``posted`` = macOS created the event objects and the void post call
+    returned.  Product effect is verified separately by the real flow.
+    """
+    kind = getattr(adapter, "input_evidence", None)
+    if type(kind) is str and kind in EVIDENCE_KINDS:
+        return kind
+    raise ContractError("input-unsupported")
 PROVISIONAL = frozenset({"control-missing", "control-disabled", "control-hidden"})
 
 
@@ -443,12 +457,52 @@ def await_control(plan, adapter, window, label, budget):
 # ------------------------------------------------------------------- focus ----
 
 def focus_matches(adapter, window, budget):
+    """Foreground must be the EXACT selected window, never just its process.
+
+    Platforms that can name a foreground window (Windows HWND, macOS bound AX
+    window) set ``exact_focus = True`` and must report the same window id as
+    the selected top-level window.  A process-level pid match alone never
+    authorises input, so a second window of the same process is refused.
+    """
     budget.charge("observations")
-    state = adapter.focus_state()
+    exact = getattr(adapter, "exact_focus", False) is True
+    state = adapter.focus_state(window) if exact else adapter.focus_state()
     if type(state) is not dict:
         return False
     pid = state.get("pid")
-    return type(pid) is int and pid > 0 and pid == window["pid"]
+    if type(pid) is not int or pid <= 0 or pid != window["pid"]:
+        return False
+    if not exact:
+        return True
+    identifier = state.get("window")
+    return type(identifier) is int and identifier > 0 and identifier == window["id"]
+
+
+def screen_bounds(adapter):
+    """Observed virtual-screen rectangle, or None when the adapter has none."""
+    reader = getattr(adapter, "screen_bounds", None)
+    if reader is None:
+        return None
+    rect = reader()
+    return rect if rect_positive(rect) else None
+
+
+def check_point(adapter, window, x, y):
+    """Refuse any point outside the virtual screen or the selected window."""
+    screen = screen_bounds(adapter)
+    if screen is not None and not (screen["x"] <= x < screen["x"] + screen["width"] and
+                                   screen["y"] <= y < screen["y"] + screen["height"]):
+        raise ContractError("control-offscreen")
+    frame = window.get("client") if rect_positive(window.get("client")) else window.get("bounds")
+    if not rect_positive(frame):
+        raise ContractError("window-geometry")
+    if not (frame["x"] <= x < frame["x"] + frame["width"] and
+            frame["y"] <= y < frame["y"] + frame["height"]):
+        raise ContractError("control-offscreen")
+    hit = getattr(adapter, "hit_test", None)
+    if hit is not None and hit(window, x, y) is not True:
+        raise ContractError("control-offscreen")
+    return x, y
 
 
 def ensure_focus(plan, adapter, window, budget):
@@ -481,25 +535,31 @@ def authorize(plan, adapter, window, budget, label=None):
 # ------------------------------------------------------------------ results ---
 
 def _window_record(window, plan):
+    """Safe window evidence only: no request title, prefix or text."""
+    del plan
     identifier = window.get("id")
+    if type(identifier) is not int or identifier <= 0:
+        raise ContractError("window-changed")
     return {
-        "window": hex(identifier) if type(identifier) is int and identifier > 0 else "0x0",
+        "window": hex(identifier),
         "pid": window["pid"],
-        "title": plan["title"] if plan["title"] is not None else plan["title_prefix"],
         "x": window["bounds"]["x"],
         "y": window["bounds"]["y"],
+        "width": window["bounds"]["width"],
+        "height": window["bounds"]["height"],
     }
 
 
 
 
-def click_record(window, label, x, y, ack):
+def click_record(window, label, x, y, ack, kind="accepted"):
     return {
         "label": label if label in _LABELS else "pointer",
         "window": hex(window["id"]) if type(window.get("id")) is int else "0x0",
         "x": int(x),
         "y": int(y),
         "before": {"focus_matches_target": True},
+        "evidence": kind if kind in EVIDENCE_KINDS else "posted",
         "ack": {key: (type(ack) is dict and ack.get(key) is True) for key in ACK_KEYS},
     }
 
@@ -572,16 +632,20 @@ def execute(plan, adapter):
         if "click_label" in action:
             ensure_focus(plan, adapter, window, budget)
             fresh, rect = authorize(plan, adapter, window, budget, action["click_label"])
-            x, y = _center(rect)
+            x, y = check_point(adapter, fresh, *_center(rect))
+            kind = evidence_kind(adapter)
             ack = adapter.click(x, y)  # exactly one physical batch
-            clicks.append(click_record(fresh, action["click_label"], x, y, ack))
+            clicks.append(click_record(fresh, action["click_label"], x, y,
+                                       ack, kind))
             window = fresh
         elif "click" in action:
             ensure_focus(plan, adapter, window, budget)
             fresh, _ = authorize(plan, adapter, window, budget)
-            x, y = _offset_click(fresh, action["click"])
+            point = _offset_click(fresh, action["click"])
+            x, y = check_point(adapter, fresh, point[0], point[1])
+            kind = evidence_kind(adapter)
             ack = adapter.click(x, y)
-            clicks.append(click_record(fresh, "pointer", x, y, ack))
+            clicks.append(click_record(fresh, "pointer", x, y, ack, kind))
             window = fresh
         elif "wait_label" in action:
             await_control(plan, adapter, window, action["wait_label"], budget)

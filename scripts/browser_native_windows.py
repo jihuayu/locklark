@@ -46,6 +46,9 @@ MOUSEEVENTF_LEFTUP = 0x0004
 INPUT_MOUSE = 0
 INPUT_KEYBOARD = 1
 KEYEVENTF_KEYUP = 0x0002
+KEYEVENTF_UNICODE = 0x0004
+GA_ROOT = 2
+VK_SHIFT = 0x10
 SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN = 76, 77, 78, 79
 
 VK = {
@@ -135,6 +138,15 @@ class Win32Api:
     def _signatures(self):
         u, k, a = self.user32, self.kernel32, self.advapi32
         u.EnumWindows.argtypes = [ctypes.c_void_p, wt.LPARAM]
+        u.EnumWindows.restype = wt.BOOL
+        u.GetCurrentProcess.argtypes = []
+        u.GetCurrentProcess.restype = wt.HANDLE
+        u.WindowFromPoint.argtypes = [wt.POINT]
+        u.WindowFromPoint.restype = wt.HWND
+        u.GetAncestor.argtypes = [wt.HWND, wt.UINT]
+        u.GetAncestor.restype = wt.HWND
+        u.VkKeyScanW.argtypes = [ctypes.c_wchar]
+        u.VkKeyScanW.restype = ctypes.c_short
         u.GetWindowThreadProcessId.argtypes = [wt.HWND, ctypes.POINTER(wt.DWORD)]
         u.GetWindowThreadProcessId.restype = wt.DWORD
         u.GetWindowTextLengthW.argtypes = [wt.HWND]
@@ -147,6 +159,7 @@ class Win32Api:
         u.GetForegroundWindow.restype = wt.HWND
         u.SetForegroundWindow.argtypes = [wt.HWND]
         u.SendInput.argtypes = [wt.UINT, ctypes.POINTER(INPUT), ctypes.c_int]
+        u.SendInput.restype = wt.UINT
         u.GetSystemMetrics.argtypes = [ctypes.c_int]
         u.OpenInputDesktop.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
         u.OpenInputDesktop.restype = wt.HANDLE
@@ -238,16 +251,26 @@ class Win32Api:
         }
 
     def list_windows(self):
+        """Exactly bounded enumeration: >MAX_WINDOWS top-level windows refuses.
+
+        The overflow is recorded even when the matching target was already in
+        the first MAX_WINDOWS handles, so enumeration is never truncated into a
+        false "unique" answer.
+        """
         handles = []
+        overflow = []
 
         @ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
         def collect(hwnd, _param):
             if len(handles) >= contract.MAX_WINDOWS:
+                overflow.append(1)
                 return False
             handles.append(hwnd)
             return True
 
         self.user32.EnumWindows(collect, 0)
+        if overflow:
+            raise contract.ContractError("window-overrun", {"windows": len(handles)})
         windows = []
         for hwnd in handles:
             described = self._describe(hwnd)
@@ -277,16 +300,45 @@ class Win32Api:
         self.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
         return int(pid.value) or None
 
+    def focus_state(self, window=None):
+        """Foreground HWND and its PID; the contract compares the HWND itself."""
+        del window
+        hwnd = self.user32.GetForegroundWindow()
+        if not hwnd:
+            return {"pid": None, "window": None}
+        pid = wt.DWORD(0)
+        self.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        return {"pid": int(pid.value) or None, "window": int(hwnd)}
+
+    def root_at(self, identifier, x, y):
+        """Top-level window owning screen point (x, y), via WindowFromPoint."""
+        point = wt.POINT(int(x), int(y))
+        hwnd = self.user32.WindowFromPoint(point)
+        if not hwnd:
+            return False
+        root = self.user32.GetAncestor(hwnd, GA_ROOT) or hwnd
+        return int(root) == int(identifier)
+
+    def screen_bounds(self):
+        return {
+            "x": self.user32.GetSystemMetrics(SM_XVIRTUALSCREEN),
+            "y": self.user32.GetSystemMetrics(SM_YVIRTUALSCREEN),
+            "width": max(0, self.user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)),
+            "height": max(0, self.user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)),
+        }
+
     def activate(self, hwnd):
         return bool(self.user32.SetForegroundWindow(hwnd))
 
     def _send(self, events):
+        """One batch; a zero/partial SendInput count refuses (never retried)."""
         if not events:
-            return {"move": False, "down": False, "up": False}
+            raise contract.ContractError("input-failed")
         array = (INPUT * len(events))(*events)
         sent = self.user32.SendInput(len(events), array, ctypes.sizeof(INPUT))
-        ok = sent == len(events)
-        return {"move": ok, "down": ok, "up": ok}
+        if type(sent) is not int or sent != len(events):
+            raise contract.ContractError("input-failed", {"sent": sent})
+        return {"move": True, "down": True, "up": True}
 
     def _mouse(self, flags, x=0, y=0):
         event = INPUT(type=INPUT_MOUSE)
@@ -294,11 +346,15 @@ class Win32Api:
         return event
 
     def click(self, x, y):
-        screen = (self.user32.GetSystemMetrics(SM_XVIRTUALSCREEN), self.user32.GetSystemMetrics(SM_YVIRTUALSCREEN),
-                  max(1, self.user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)),
-                  max(1, self.user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)))
-        ax = int((x - screen[0]) * 65535 / screen[2])
-        ay = int((y - screen[1]) * 65535 / screen[3])
+        screen = self.screen_bounds()
+        if (screen["width"] <= 0 or screen["height"] <= 0 or
+                not (screen["x"] <= x < screen["x"] + screen["width"] and
+                     screen["y"] <= y < screen["y"] + screen["height"])):
+            raise contract.ContractError("control-offscreen")
+        ax = int((x - screen["x"]) * 65535 / screen["width"])
+        ay = int((y - screen["y"]) * 65535 / screen["height"])
+        if not (0 <= ax <= 65535 and 0 <= ay <= 65535):
+            raise contract.ContractError("control-offscreen")
         flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
         return self._send([self._mouse(flags, ax, ay), self._mouse(MOUSEEVENTF_LEFTDOWN),
                            self._mouse(MOUSEEVENTF_LEFTUP)])
@@ -309,32 +365,55 @@ class Win32Api:
         return event
 
     def _virtual_key(self, part):
+        """Map one chord part; Ctrl/Alt (AltGr) layout states are refused.
+
+        VkKeyScanW's high byte reports Shift/Ctrl/Alt state the character needs
+        on the active layout.  Shift is honoured explicitly; a character that
+        needs Ctrl, Alt or AltGr is refused as unsupported instead of being
+        typed as the wrong character.
+        """
         if len(part) == 1:
-            scan = self.user32.VkKeyScanW(ord(part))
-            if scan == -1:
+            scan = self.user32.VkKeyScanW(part)
+            if type(scan) is not int or scan == -1:
                 raise contract.ContractError("input-unsupported")
-            return scan & 0xFF, bool(scan >> 8 & 0x01)
+            modifiers = (scan >> 8) & 0xFF
+            if modifiers & 0x06:
+                raise contract.ContractError("input-unsupported")
+            return scan & 0xFF, bool(modifiers & 0x01)
         if part in VK:
             return VK[part], False
         raise contract.ContractError("input-unsupported")
 
+    def _unicode(self, code, down):
+        flags = KEYEVENTF_UNICODE | (0 if down else KEYEVENTF_KEYUP)
+        event = INPUT(type=INPUT_KEYBOARD)
+        event.union.ki = KEYBDINPUT(0, code, flags, 0, None)
+        return event
+
     def type_text(self, text):
-        if not text or len(text) > contract.MAX_TEXT or any(ord(c) < 32 or ord(c) > 126 for c in text):
+        """One physical UNICODE batch; layout and modifiers are irrelevant."""
+        if (type(text) is not str or not text or len(text) > contract.MAX_TEXT or
+                any(ord(c) < 32 or ord(c) > 126 for c in text)):
             raise contract.ContractError("input-charset")
-        press, shift = self._virtual_key("Shift_L")
+        events = []
         for char in text:
-            vk, needs_shift = self._virtual_key(char)
-            batch = [self._key(shift, True)] if needs_shift else []
-            batch += [self._key(vk, True), self._key(vk, False)]
-            if needs_shift:
-                batch.append(self._key(shift, False))
-            self._send(batch)
-        return {"move": True, "down": True, "up": True}
+            code = ord(char)
+            events.append(self._unicode(code, True))
+            events.append(self._unicode(code, False))
+        return self._send(events)
 
     def press_chord(self, parts):
-        codes = [self._virtual_key(part)[0] for part in parts]
-        events = [self._key(code, True) for code in codes]
+        codes, implicit_shift = [], False
+        for part in parts:
+            code, needs_shift = self._virtual_key(part)
+            codes.append(code)
+            implicit_shift = implicit_shift or needs_shift
+        shift = implicit_shift and "Shift_L" not in parts and "Shift_R" not in parts
+        events = [self._key(VK_SHIFT, True)] if shift else []
+        events += [self._key(code, True) for code in codes]
         events += [self._key(code, False) for code in reversed(codes)]
+        if shift:
+            events.append(self._key(VK_SHIFT, False))
         return self._send(events)
 
 
@@ -343,6 +422,8 @@ class WindowsAdapter:
 
     platform = PLATFORM
     supports_activation = True
+    exact_focus = True
+    input_evidence = "accepted"
 
     def __init__(self, api=None, uia=None):
         self.api = Win32Api() if api is None else api
@@ -400,8 +481,16 @@ class WindowsAdapter:
                 raise contract.ContractError("a11y-query")
         return controls
 
-    def focus_state(self):
-        return {"pid": self.api.foreground_pid()}
+    def focus_state(self, window=None):
+        """Exact foreground window only: same PID on another HWND never counts."""
+        return self.api.focus_state(window)
+
+    def screen_bounds(self):
+        return self.api.screen_bounds()
+
+    def hit_test(self, window, x, y):
+        """The click point must resolve to the selected top-level window root."""
+        return self.api.root_at(window["id"], x, y)
 
     def activate(self, window):
         self.api.activate(window["id"])

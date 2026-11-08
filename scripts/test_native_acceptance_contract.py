@@ -38,11 +38,17 @@ class SpyAdapter:
 
     platform = "linux"
     supports_activation = True
+    exact_focus = True
+    input_evidence = "accepted"
 
-    def __init__(self, windows=None, controls=None, focus=None, capabilities=None):
+    def __init__(self, windows=None, controls=None, focus=None, capabilities=None,
+                 focus_window=None, hit=True, screen=None):
         self.windows = [dict(WINDOW)] if windows is None else windows
         self.controls = [control(LABEL)] if controls is None else controls
         self.focus = WINDOW["pid"] if focus is None else focus
+        self.focus_window = WINDOW["id"] if focus_window is None else focus_window
+        self.hit = hit
+        self.screen = screen
         self.calls = []
         self.activations = 0
         self._capabilities = capabilities or []
@@ -67,9 +73,16 @@ class SpyAdapter:
         self.calls.append("read_controls")
         return [dict(item) for item in self.controls]
 
-    def focus_state(self):
+    def focus_state(self, window=None):
         self.calls.append("focus_state")
-        return {"pid": self.focus}
+        return {"pid": self.focus, "window": self.focus_window}
+
+    def screen_bounds(self):
+        return self.screen
+
+    def hit_test(self, window, x, y):
+        self.calls.append("hit_test")
+        return self.hit
 
     def activate(self, window):
         self.activations += 1
@@ -216,7 +229,8 @@ class ExecutionGuardTests(unittest.TestCase):
         self.assertEqual(result["clicks"][0]["y"], 315)
         self.assertEqual(result["clicks"][0]["label"], LABEL)
         self.assertEqual(result["clicks"][0]["ack"], {"move": True, "down": True, "up": True})
-        self.assertEqual(result["title"], TITLE)
+        self.assertEqual(result["clicks"][0]["evidence"], "accepted")
+        self.assertNotIn("title", result)
 
     def test_failed_ack_is_not_retried(self):
         adapter = SpyAdapter()
@@ -256,6 +270,30 @@ class ExecutionGuardTests(unittest.TestCase):
         adapter = SpyAdapter(focus=999)
         self.assert_refused(adapter, "focus-lost")
         self.assertEqual(adapter.activations, 1)
+
+    def test_same_pid_other_window_refused(self):
+        adapter = SpyAdapter(focus_window=0x200004)
+        self.assert_refused(adapter, "focus-lost")
+        self.assertEqual(adapter.activations, 1)
+
+    def test_click_point_must_hit_the_selected_window(self):
+        adapter = SpyAdapter(hit=False)
+        self.assert_refused(adapter, "control-offscreen")
+
+    def test_click_point_outside_virtual_screen_refused(self):
+        adapter = SpyAdapter(screen={"x": 0, "y": 0, "width": 100, "height": 100})
+        self.assert_refused(adapter, "control-offscreen")
+
+    def test_unknown_input_evidence_refused_before_input(self):
+        adapter = SpyAdapter()
+        adapter.input_evidence = "native"
+        self.assert_refused(adapter, "input-unsupported")
+
+    def test_posted_evidence_is_reported_for_post_only_platforms(self):
+        adapter = SpyAdapter()
+        adapter.input_evidence = "posted"
+        result = self.execute(adapter)
+        self.assertEqual(result["clicks"][0]["evidence"], "posted")
 
     def test_preserve_focus_never_steals_focus(self):
         adapter = SpyAdapter(windows=[dict(WINDOW, title="Locklark acceptance popup")], focus=999)
@@ -364,7 +402,18 @@ class OutputSafetyTests(unittest.TestCase):
         payload = json.loads(out)
         self.assertEqual(payload["window"], "0x200003")
         self.assertEqual(len(payload["clicks"]), 1)
+        self.assertNotIn("title", payload)
         self.assertNotIn(PRIVATE, out)
+
+    def test_success_output_contains_no_request_title_or_prefix(self):
+        adapter = SpyAdapter(windows=[dict(WINDOW, title="Locklark acceptance popup")])
+        with patch.object(contract, "monotonic", return_value=0), patch.object(contract, "sleep"):
+            status, out, err = self.run_driver(
+                adapter,
+                request(title=None, title_prefix="Locklark acceptance").encode())
+        self.assertEqual(status, 0, err)
+        self.assertNotIn("title", json.loads(out))
+        self.assertNotIn("Locklark acceptance", out)
 
     def test_unknown_platform_name_in_failure_line_is_neutralised(self):
         line = contract.failure_line(contract.ContractError("request-invalid"), PRIVATE, PRIVATE, PRIVATE)

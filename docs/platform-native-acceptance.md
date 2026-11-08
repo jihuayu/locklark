@@ -32,10 +32,13 @@ The drivers are ordinary external input agents, like a human with a mouse:
 2. Read **only** the five public widget fields `role`, `name`, `enabled`,
    `visible`, `bounds` from the platform accessibility tree. Value, text,
    clipboard and invoke/perform interfaces are neither read nor called.
-3. Re-observe the window, the control rectangle and the foreground owner
+3. Re-observe the window, the control rectangle and the exact foreground
+   window (never just its process)
    immediately before input.
 4. Emit **exactly one** physical input batch through the OS input queue
-   (`SendInput` / `CGEventPost`) and record only whether the OS accepted it.
+   (`SendInput` / `CGEventPost`) and record only what the OS actually proved:
+   `accepted` (the whole Windows batch was queued) or `posted` (macOS created
+   and posted the event objects). Neither claims the application acted.
 
 There is no product hook, no approval injection, no UIA `ValuePattern`,
 `TextPattern` or `InvokePattern`, no `SetText`, no AX action/`AXPress`, no
@@ -62,20 +65,29 @@ forbidden accessibility member is ever touched.
   is `Native acceptance input failed [code=<code> action=<action> index=<n>
   platform=<platform>]`. Request values, control values and raw exception text
   can never appear in stdout, stderr or argv.
-* Result JSON: `window` (hex id), `pid`, `title` (request title only), `x`, `y`,
-  `clicks` (label, centre, `before.focus_matches_target`, `ack.move/down/up`),
-  and, for `inspect`, `controls[label] = {present, enabled, showing}`.
+* Result JSON: `window` (hex id), `pid`, `x`, `y`, `width`, `height`, `clicks`
+  (label, centre, `before.focus_matches_target`, `evidence` = `accepted` or
+  `posted`, `ack.move/down/up`), and, for `inspect`,
+  `controls[label] = {present, enabled, showing}`. No request title, prefix or
+  control text is ever echoed in success output.
 
 Adapter protocol (implemented by both platform adapters):
 `platform`, `supports_activation`, `check_capability()`, `list_windows()`,
-`read_window(id)`, `read_controls(window)`, `focus_state()`, `activate(window)`,
-`click(x, y)`, `type_text(text)`, `press_chord(parts)`.
+`read_window(id)`, `read_controls(window)`, `focus_state(window)`,
+`activate(window)`, `click(x, y)`, `type_text(text)`, `press_chord(parts)`,
+plus the mandatory truthful `input_evidence` literal (`accepted` or `posted`)
+and `exact_focus`. An adapter without a valid literal, or one that reports
+`exact_focus` but only a PID, refuses before input. Optional `screen_bounds()`
+and `hit_test(window, x, y)` let a platform prove the click point is on screen
+and resolves to the selected window.
 
 ## Windows
 
 * Window discovery: `EnumWindows`, `GetWindowThreadProcessId`, `IsWindowVisible`,
   `GetWindowRect`/`GetClientRect`/`ClientToScreen`, `GetWindowTextW`,
-  `GetForegroundWindow`.
+  `GetForegroundWindow`. Enumeration is exactly bounded: more than 512
+  top-level windows refuses with `window-overrun` (never a truncated "unique"
+  answer, even if the target was in the first 512 handles).
 * Process identity: read-only `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` +
   `QueryFullProcessImageNameW`, plus a same-user check via `OpenProcessToken` /
   `GetTokenInformation(TokenUser)` / `EqualSid`. No writable handle is opened.
@@ -83,13 +95,22 @@ Adapter protocol (implemented by both platform adapters):
   `CreateObject` for `IUIAutomation`, lazily imported; descendants are walked
   with a 4096-node cap, reading only `CurrentName`, `CurrentControlType`,
   `CurrentIsEnabled`, `CurrentIsOffscreen`, `CurrentBoundingRectangle`.
-* Focus: the foreground window's PID must equal the target PID immediately
-  before input. If focus is elsewhere, exactly one `SetForegroundWindow`
-  attempt is made (never when `preserve_focus` is requested) and the result is
-  verified; failure refuses with `focus-lost`.
+* Focus: the foreground `HWND` (not merely its PID) must equal the selected
+  top-level window immediately before input, so a second window of the same
+  process is refused. If focus is elsewhere, exactly one `SetForegroundWindow`
+  attempt is made (never when `preserve_focus` is requested) and the exact
+  HWND is re-verified; failure refuses with `focus-lost`.
 * Input: one `SendInput` batch per action — absolute virtual-desktop move +
-  left down + left up, or a full key chord (modifiers first, released last),
-  or per-character ASCII `VkKeyScanW` typing.
+  left down + left up, a full key chord (modifiers first, released last), or a
+  single `KEYEVENTF_UNICODE` batch (two events per ASCII character, layout and
+  modifiers never assumed). Absolute coordinates are normalised over the
+  observed virtual-screen origin and extent; a point outside the virtual
+  screen or the selected window refuses with `control-offscreen`.
+* Hit testing: `WindowFromPoint` + `GetAncestor(GA_ROOT)` must resolve the
+  click point to the selected top-level HWND, and the point must lie inside
+  its client rectangle.
+* Acknowledgement: a zero or partial `SendInput` return count refuses with
+  `input-failed` and is never retried.
 * Secure desktop: `OpenInputDesktop`/`GetUserObjectInformationW` reporting a
   non-`Default` desktop, or a window owned by `logonui.exe`, `consent.exe`,
   `credentialuibroker.exe` (or a credential-dialog window class), refuses with
@@ -110,25 +131,40 @@ cannot be opened read-only.
   ever touched).
 * Windows: `CGWindowListCopyWindowInfo` (on-screen, layer 0) for id/PID/bounds,
   AX window titles; process path and ownership via `proc_pidpath` +
-  `proc_pidinfo(PROC_PIDTBSDINFO)` (uid), falling back to the executable file
-  owner.
+  `proc_pidinfo(PROC_PIDTBSDINFO)`. The executable file owner is never used as
+  a process-identity guess: an unknown process UID leaves the window untrusted
+  and every request against it refuses.
+* Window binding: the AX window must match the selected `CGWindow` by exact
+  title and exact frame; zero candidates refuses `a11y-query`, several refuse
+  `window-ambiguous`. The first AX window sharing a title is never used, and
+  `AXStaticText` is not treated as an editable/clickable control.
 * Widgets: bounded AX walk (4096 nodes, depth 12) reading `AXRole`,
   `AXTitle`/`AXDescription`, `AXEnabled`, `AXHidden`, `AXPosition`/`AXSize`.
-  `kAXValueAttribute`/`AXSelectedText` are never read.
+  `AXEnabled`/`AXHidden` must be real booleans; a missing or unknown value
+  refuses `a11y-unavailable`, and geometry that is unavailable or not positive
+  refuses `control-geometry`. `kAXValueAttribute`/`AXSelectedText` are never
+  read.
 * Focus: `NSWorkspace.frontmostApplication().processIdentifier()` must equal the
-  target PID immediately before input. With `preserve_focus` the driver never
-  activates anything — if the target is not frontmost it refuses with
-  `preserve-focus-lost` instead of silently stealing focus.
+  target PID, and `AXFocusedWindow`/`AXMainWindow` (when exposed) must bind to
+  the exact selected window before input; otherwise input is refused. With
+  `preserve_focus` the driver never activates anything — if the target is not
+  frontmost it refuses with `preserve-focus-lost` instead of silently stealing
+  focus.
+* Point check: the click point must lie inside the bound window and
+  `AXUIElementCopyElementAtPosition` must resolve to an element inside that
+  same window.
 * Input: `CGEventCreateMouseEvent` + `CGEventPost(kCGHIDEventTap)` for one
   move/down/up batch; keyboard chords via `CGEventCreateKeyboardEvent` with
-  `CGEventSetFlags`; ASCII text via `CGEventKeyboardSetUnicodeString`.
+  `CGEventSetFlags`; ASCII text via `CGEventKeyboardSetUnicodeString`. Success
+  records `evidence: posted`, which proves posting only, not product effect.
 
 Known API limits: `CGWindowName` is only populated when the process already has
 Screen Recording permission, so titles come from AX (Screen Recording is not
 requested); the exact PyObjC return shape of `AXValueGetValue` is handled
-defensively and geometry failures fail closed as `control-geometry`; the
-`proc_bsdinfo` layout is treated as best-effort with a `stat`-based owner
-fallback; `activateWithOptions_` is deprecated on recent macOS releases;
+defensively and geometry failures fail closed as `control-geometry`; if
+`proc_pidinfo` is unavailable or returns a partial `proc_bsdinfo`, the window
+stays untrusted (there is no `stat`-based owner fallback);
+`activateWithOptions_` is deprecated on recent macOS releases;
 `CGEventKeyboardSetUnicodeString` availability is verified only on a real run.
 
 ## Dispatcher
