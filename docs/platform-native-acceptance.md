@@ -13,8 +13,8 @@ platform CI proof and the real opt-in runs come later from the primary owner.
 | `scripts/browser_native_windows.py` | Windows adapter: ctypes Win32 + UI Automation (comtypes, lazy) + `SendInput` |
 | `scripts/browser_native_macos.py` | macOS adapter: ApplicationServices AX (PyObjC, lazy) + `CGEventPost` |
 | `scripts/native_acceptance_driver.py` | Platform dispatcher; Linux is replayed byte-for-byte into the existing X11 driver |
-| `scripts/test_native_acceptance_contract.py` | 38 pure contract tests |
-| `scripts/test_native_acceptance_platforms.py` | 81 adapter/dispatcher seam tests (fakes and spies) |
+| `scripts/test_native_acceptance_contract.py` | 47 pure contract tests |
+| `scripts/test_native_acceptance_platforms.py` | 96 adapter/dispatcher seam tests (fakes and spies) |
 
 The X11 driver (`scripts/browser_native_x11.py`) and the `.mjs` callers were
 **not** edited; switching the callers to the dispatcher is a later integration
@@ -63,7 +63,8 @@ forbidden accessibility member is ever touched.
   library (verified in a subprocess test that spies on `ctypes.CDLL`).
 * Every refusal carries one fixed code from `ERROR_MESSAGES`; the emitted line
   is `Native acceptance input failed [code=<code> action=<action> index=<n>
-  platform=<platform>]`. Request values, control values and raw exception text
+  platform=<platform>]`. `control-hit` is the click-target identity refusal
+  (below). Request values, control values and raw exception text
   can never appear in stdout, stderr or argv.
 * Result JSON: `window` (hex id), `pid`, `x`, `y`, `width`, `height`, `clicks`
   (label, centre, `before.focus_matches_target`, `evidence` = `accepted` or
@@ -81,6 +82,19 @@ and `exact_focus`. An adapter without a valid literal, or one that reports
 `hit_test(window, x, y)` and `point_visible(window, x, y)` let a platform prove
 the click point is on screen, resolves to the selected window and lies on a
 visible display; a hook that answers anything other than `True` fails closed.
+
+`hit_test_control(window, label, rect, x, y)` is the strict target-identity
+hook and is **required** for every `click_label` action. Once the ordinary
+point checks pass, the contract re-resolves the selected label inside the
+CURRENT bound window with the same role/name rules, requires the freshly
+observed rectangle to equal the authorising `rect` exactly, and then requires
+the element actually under the point to be that selected control or one of its
+descendants. Only the literal `True` authorises the single click; a missing
+hook, any other return value, an unknown label, a changed rectangle, a
+cycle/overrun or a failed accessibility query refuses with `control-hit`
+(or the more specific `control-ambiguous` / `control-missing` / `a11y-query`)
+and no input is emitted. Offset `click` actions keep the existing window-root
+`hit_test` only, because they deliberately name no selected control.
 
 ## Windows
 
@@ -113,9 +127,30 @@ visible display; a hook that answers anything other than `True` fails closed.
   modifiers never assumed). Absolute coordinates are normalised over the
   observed virtual-screen origin and extent; a point outside the virtual
   screen or the selected window refuses with `control-offscreen`.
-* Hit testing: `WindowFromPoint` + `GetAncestor(GA_ROOT)` must resolve the
-  click point to the selected top-level HWND, and the point must lie inside
-  its client rectangle.
+* Window hit testing: `WindowFromPoint` + `GetAncestor(GA_ROOT)` must resolve
+  the click point to the selected top-level HWND, and the point must lie inside
+  its client rectangle. A same-root sibling widget, a transparent overlay or a
+  window stacked above the target passes this check, so it is only the outer
+  bound.
+* Control hit identity (`click_label` only): the selected label is parsed again
+  from the current bound HWND (`FindAll` descendants, same 4096-node cap) and
+  must still be unique with a rectangle exactly equal to the authorising one.
+  `IUIAutomation.ElementFromPoint` then returns the element actually under the
+  point, and a `RawViewWalker.GetParentElement` walk bounded to
+  `MAX_HIT_ELEMENTS` (64 elements, at most 63 parent steps) must reach that
+  exact element; every comparison is `IUIAutomation.CompareElements`, never a
+  name, control type or rectangle comparison. A sibling, an overlay, a moved or
+  duplicated control, a cycle, a walk overrun or a failed COM query refuses
+  (`control-hit` / `control-ambiguous` / `control-missing` / `a11y-query`)
+  before any input.
+* COM call shapes: `ElementFromPoint` is passed the comtypes-generated
+  `tagPOINT` from `UIAutomationCore.dll`, and the structure is checked to be
+  exactly two 32-bit signed `x`/`y` members before the call; a module without
+  that generated type refuses `a11y-unavailable` instead of guessing a POINT
+  layout. `CompareElements` returns `BOOL *`, which comtypes surfaces as the
+  integer 1 for TRUE (it is not a `VARIANT_BOOL` and is never converted to a
+  Python bool here), so the reader accepts only the literal `True` or the
+  integer 1 as a match and treats 0, 2, -1 or any other value as no match.
 * Acknowledgement: a zero `SendInput` return count refuses with
   `input-failed`. A short non-zero count means a *prefix* may already be in the
   input queue: the batch is never resent and no repair key/button release is
@@ -186,6 +221,21 @@ cannot be opened read-only.
   count that is bool/non-integer/out of range or longer than the returned list,
   non-finite or non-positive geometry, or any other query failure fails closed
   with `control-offscreen`.
+* Control hit identity (`click_label` only): the selected label is re-resolved
+  in the CURRENT bound AX window with the same role/name rules, and its fresh
+  `AXPosition`/`AXSize` frame must equal the authorising rectangle exactly.
+  The native element returned by `AXUIElementCopyElementAtPosition` is then
+  walked up with `AXParent` for at most `MAX_HIT_PARENTS` (64) steps, and each
+  step is compared with `CFEqual` against the ACTUAL selected `AXUIElement` -
+  never by title, role or frame, and never by Python object identity. The first
+  `AXWindow` on the chain ends the walk without success, so a window ancestor is
+  never accepted as a substitute for the control. `CFEqual` is taken from an
+  injected object or imported lazily from CoreFoundation; if it is unavailable
+  the driver refuses (`a11y-unavailable`) instead of guessing equality. A
+  sibling or overlay element above the control, a moved or duplicated control,
+  a repeated element (cycle), an exhausted 64-step walk or a failed AX query
+  refuses (`control-hit` / `control-ambiguous` / `control-missing` /
+  `a11y-query`) before any input.
 * Input: `CGEventCreateMouseEvent` + `CGEventPost(kCGHIDEventTap)` for one
   move/down/up batch; keyboard chords via `CGEventCreateKeyboardEvent` with
   `CGEventSetFlags`; ASCII text via `CGEventKeyboardSetUnicodeString`. Every
@@ -282,9 +332,10 @@ anything. Do not record these issues as validated from driver output alone.
 ## Verification performed here
 
 * `python3 -m unittest scripts/test_native_acceptance_contract.py
-  scripts/test_native_acceptance_platforms.py` → 119 tests, OK.
+  scripts/test_native_acceptance_platforms.py` → 143 tests (47 contract + 96
+  platform seam), OK.
 * `python3 -m unittest discover -s scripts -p 'test_native_acceptance*.py'` →
-  119 tests, OK.
+  143 tests, OK.
 * `python3 -m py_compile` on all six modules → OK.
 
 ## Remaining limitations
@@ -292,8 +343,18 @@ anything. Do not record these issues as validated from driver output alone.
 * A partially delivered input batch is reported as `input-unknown`; the tests
   prove only that nothing is retried and nothing is resent, never which events
   the OS actually delivered.
-* Sibling overlay control hit identity (a control drawn by a window stacked
-  above the target) is not solved here and stays open for the next phase.
+* Control hit identity is now enforced by `hit_test_control` and covered by pure
+  mock tests (selected control and legitimate child accepted; same-root
+  sibling, transparent overlay, duplicate label, changed rectangle, cycle,
+  parent-limit overrun and failed/unknown queries refused before any input).
+  That is a mock-only proof: `ElementFromPoint`/`RawViewWalker`/`CompareElements`
+  on Windows and `AXUIElementCopyElementAtPosition`/`AXParent`/`CFEqual` on
+  macOS have **not** been executed against a real desktop, a real overlay window
+  or real DPI/scaling, so no OS behaviour is claimed for them.
+* `ElementFromPoint` interprets screen coordinates according to the calling
+  process's DPI awareness; if the driver and the acceptance browser ever run
+  with different per-monitor awareness the identity check refuses rather than
+  clicking, which is a fail-closed limitation, not a proven equivalence.
 * No Windows/macOS execution: `WindowsAdapter()`/`MacAdapter()` construction,
   the real UIA walk, real AX geometry, `SendInput`/`CGEventPost` delivery and
   foreground rules are unverified on hardware.

@@ -360,6 +360,140 @@ final class RelaySessionStoreTests: XCTestCase {
         XCTAssertEqual(first.totalCount, 0)
     }
 
+    // MARK: - Conditional (identity-guarded) discard
+
+    /// A helper failure carries the session it captured. If the token *and*
+    /// profile were closed and reopened in the meantime, the stale failure must
+    /// refuse to touch the replacement binding.
+    func testConditionalDiscardRefusesReplacementAfterCloseReopen() {
+        let factory = GatedFactory()
+        let store = makeStore(factory)
+        XCTAssertEqual(store.open(token: tokenA, profile: "Profile A"), .opened)
+        guard let stale = store.session(token: tokenA, profile: "Profile A") else {
+            return XCTFail("first session was not bound")
+        }
+        XCTAssertEqual(
+            store.close(token: tokenA, profile: "Profile A"),
+            .closedSession
+        )
+        XCTAssertEqual(stale.closes, 1)
+        // Same token and same profile: a new helper owns the slot now.
+        XCTAssertEqual(store.open(token: tokenA, profile: "Profile A"), .opened)
+        guard let replacement = store.session(
+            token: tokenA,
+            profile: "Profile A"
+        ) else { return XCTFail("replacement session was not bound") }
+        XCTAssertFalse(replacement === stale)
+
+        // The old helper reports unusable: only its own binding may go.
+        XCTAssertFalse(
+            store.discard(
+                token: tokenA,
+                profile: "Profile A",
+                matching: { $0 === stale }
+            )
+        )
+        XCTAssertTrue(
+            store.session(token: tokenA, profile: "Profile A") === replacement
+        )
+        XCTAssertEqual(replacement.closes, 0)
+        XCTAssertEqual(stale.closes, 1)
+        XCTAssertEqual(store.readyCount, 1)
+        XCTAssertEqual(store.totalCount, 1)
+    }
+
+    /// The dead helper's own binding is removed and closed exactly once, and
+    /// the capacity slot is free immediately instead of being held until the
+    /// session TTL would expire it.
+    func testConditionalDiscardFreesMatchingDeadBindingOnce() {
+        let factory = GatedFactory()
+        let store = makeStore(factory, capacity: 1)
+        XCTAssertEqual(store.open(token: tokenA, profile: nil), .opened)
+        guard let dead = store.session(token: tokenA, profile: nil) else {
+            return XCTFail("session was not bound")
+        }
+        // One slot, taken by the session that is about to die.
+        XCTAssertEqual(store.open(token: tokenB, profile: nil), .capacityExceeded)
+        XCTAssertTrue(
+            store.discard(token: tokenA, profile: nil, matching: { $0 === dead })
+        )
+        XCTAssertEqual(dead.closes, 1)
+        XCTAssertEqual(store.readyCount, 0)
+        XCTAssertEqual(store.totalCount, 0)
+        // The slot is available at once: no TTL sweep is needed.
+        XCTAssertEqual(store.open(token: tokenB, profile: nil), .opened)
+        XCTAssertEqual(store.totalCount, 1)
+        guard let live = store.session(token: tokenB, profile: nil) else {
+            return XCTFail("replacement session was not bound")
+        }
+        // A repeated failure report for the same dead session closes nothing.
+        XCTAssertFalse(
+            store.discard(token: tokenA, profile: nil, matching: { $0 === dead })
+        )
+        XCTAssertEqual(dead.closes, 1)
+        XCTAssertEqual(live.closes, 0)
+        XCTAssertEqual(store.readyCount, 1)
+        // The unconditional variant stays available and behaves as before.
+        XCTAssertTrue(store.discard(token: tokenB, profile: nil))
+        XCTAssertEqual(live.closes, 1)
+        XCTAssertEqual(store.readyCount, 0)
+    }
+
+    /// A profile mismatch never resolves a session, so the guard must not run,
+    /// remove or close anything even when it would accept the session.
+    func testConditionalDiscardWithMismatchedProfileClosesNothing() {
+        let factory = GatedFactory()
+        let store = makeStore(factory)
+        XCTAssertEqual(store.open(token: tokenA, profile: "Profile A"), .opened)
+        guard let session = store.session(
+            token: tokenA,
+            profile: "Profile A"
+        ) else { return XCTFail("session was not bound") }
+        XCTAssertFalse(
+            store.discard(token: tokenA, profile: "Profile B", matching: { _ in true })
+        )
+        XCTAssertFalse(
+            store.discard(token: tokenA, profile: nil, matching: { _ in true })
+        )
+        XCTAssertFalse(
+            store.discard(token: tokenB, profile: "Profile A", matching: { _ in true })
+        )
+        XCTAssertEqual(session.closes, 0)
+        XCTAssertEqual(store.readyCount, 1)
+        XCTAssertTrue(
+            store.session(token: tokenA, profile: "Profile A") === session
+        )
+        // The exact match still wins afterwards.
+        XCTAssertTrue(
+            store.discard(
+                token: tokenA,
+                profile: "Profile A",
+                matching: { $0 === session }
+            )
+        )
+        XCTAssertEqual(session.closes, 1)
+        XCTAssertEqual(store.readyCount, 0)
+    }
+
+    /// A request still in flight across teardown reports a failure afterwards:
+    /// the binding is already gone and closed once, so the guarded discard must
+    /// be refused instead of closing the session twice.
+    func testConditionalDiscardAfterTeardownClosesNothing() {
+        let factory = GatedFactory()
+        let store = makeStore(factory)
+        XCTAssertEqual(store.open(token: tokenA, profile: nil), .opened)
+        guard let session = store.session(token: tokenA, profile: nil) else {
+            return XCTFail("session was not bound")
+        }
+        store.closeAll()
+        XCTAssertEqual(session.closes, 1)
+        XCTAssertFalse(
+            store.discard(token: tokenA, profile: nil, matching: { $0 === session })
+        )
+        XCTAssertEqual(session.closes, 1)
+        XCTAssertEqual(store.readyCount, 0)
+    }
+
     func testSweepExpiresReadySessionsAndStaleOpenings() {
         let factory = GatedFactory()
         var clock = Date(timeIntervalSince1970: 1_000)

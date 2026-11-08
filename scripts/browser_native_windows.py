@@ -17,6 +17,7 @@ import native_acceptance_contract as contract
 
 PLATFORM = "windows"
 MAX_ELEMENTS = 4096
+MAX_HIT_ELEMENTS = 64
 
 # Control-type ids from the public UIA documentation, mapped onto the roles the
 # shared contract accepts. Anything else is ignored (never inspected further).
@@ -95,8 +96,8 @@ class UiaReader:
         self.module = module
         self.automation = automation
 
-    def controls(self, handle):
-        """Bounded walk returning public metadata for at most MAX_ELEMENTS nodes."""
+    def _descendants(self, handle):
+        """Bounded walk returning (native element, public record) rows."""
         element = self.automation.ElementFromHandle(handle)
         if element is None:
             raise contract.ContractError("a11y-unavailable")
@@ -105,7 +106,7 @@ class UiaReader:
         count = found.Length if found is not None else 0
         if count > MAX_ELEMENTS:
             raise contract.ContractError("a11y-overrun")
-        result = []
+        rows = []
         for index in range(count):
             node = found.GetElement(index)
             if node is None:
@@ -114,7 +115,7 @@ class UiaReader:
             if role is None:
                 continue
             rect = node.CurrentBoundingRectangle
-            result.append({
+            rows.append((node, {
                 "role": role,
                 "name": node.CurrentName,
                 "enabled": bool(node.CurrentIsEnabled),
@@ -122,8 +123,123 @@ class UiaReader:
                 "bounds": {"x": int(rect.left), "y": int(rect.top),
                            "width": int(rect.right - rect.left),
                            "height": int(rect.bottom - rect.top)},
-            })
-        return result
+            }))
+        return rows
+
+    def controls(self, handle):
+        """Bounded walk returning public metadata for at most MAX_ELEMENTS nodes."""
+        return [record for _, record in self._descendants(handle)]
+
+    def _selected(self, handle, label, rect):
+        """Re-parse the CURRENT bound window for the unique selected control.
+
+        The same role/name rule the contract used is applied to a fresh parse,
+        and the freshly observed rectangle must equal the authorising one
+        exactly: a control that moved or resized between the two reads is never
+        clicked.  Zero matches and several matches both refuse.
+        """
+        rows = [(node, record) for node, record in self._descendants(handle)
+                if record.get("name") == label and record.get("role") in contract.CONTROL_ROLES]
+        if len(rows) > 1:
+            raise contract.ContractError("control-ambiguous", {"matches": len(rows)})
+        if not rows:
+            raise contract.ContractError("control-missing")
+        node, record = rows[0]
+        bounds = record.get("bounds") or {}
+        if not contract.rect_positive(rect) or any(bounds.get(key) != rect.get(key)
+                                                   for key in ("x", "y", "width", "height")):
+            raise contract.ContractError("control-hit")
+        return node
+
+    def _point(self, x, y):
+        """Build the UIA ``POINT`` value from the generated COM structure.
+
+        ``IUIAutomation::ElementFromPoint`` takes the IDL ``POINT`` structure,
+        which comtypes generates from UIAutomationCore.dll.  Only a generated
+        structure whose layout is exactly two 32-bit signed members ``x``/``y``
+        is used; if the module exposes no such type the reader refuses instead
+        of guessing a call shape.
+        """
+        point_type = getattr(self.module, "tagPOINT", None)
+        if point_type is None:
+            point_type = getattr(self.module, "POINT", None)
+        fields = getattr(point_type, "_fields_", None)
+        if (not isinstance(point_type, type) or not issubclass(point_type, ctypes.Structure)
+                or not fields or [name for name, _ in fields] != ["x", "y"]
+                or any(ctypes.sizeof(field) != 4 for _, field in fields)):
+            raise contract.ContractError("a11y-unavailable")
+        return point_type(int(x), int(y))
+
+    def _element_at(self, x, y):
+        """ElementFromPoint at the click point; failures never look like a hit."""
+        point = self._point(x, y)
+        try:
+            return self.automation.ElementFromPoint(point)
+        except contract.ContractError:
+            raise
+        except Exception:
+            raise contract.ContractError("a11y-query")
+
+    def _same(self, left, right):
+        """``IUIAutomation.CompareElements``: the only native identity test.
+
+        The IDL return value is ``[out, retval] BOOL *``, so comtypes hands back
+        the plain C ``BOOL``: the Python integer 1 for TRUE and 0 for FALSE.  A
+        match is therefore only the literal ``True`` or the integer 1; every
+        other value (0, 2, -1, a truthy object) is not a proven match.  Element
+        names, control types and rectangles are never compared instead, and a
+        failing COM query refuses.
+        """
+        if left is None or right is None:
+            return False
+        try:
+            matched = self.automation.CompareElements(left, right)
+        except contract.ContractError:
+            raise
+        except Exception:
+            raise contract.ContractError("a11y-query")
+        return matched is True or (type(matched) is int and matched == 1)
+
+    def _hit_reaches(self, element, target):
+        """Walk parents from the hit element; True only for the selected one.
+
+        ``RawViewWalker.GetParentElement`` is bounded to MAX_HIT_ELEMENTS
+        elements (at most 63 parent steps).  A repeated element (cycle), an
+        exhausted chain, an overrun, a missing walker and any failed query
+        refuse or answer False; nothing is ever inferred from silence.
+        """
+        walker = getattr(self.automation, "RawViewWalker", None)
+        if walker is None:
+            raise contract.ContractError("a11y-unavailable")
+        node, seen = element, []
+        for _ in range(MAX_HIT_ELEMENTS):
+            if node is None:
+                return False
+            if any(self._same(node, prior) for prior in seen):
+                raise contract.ContractError("a11y-query")
+            seen.append(node)
+            if self._same(node, target):
+                return True
+            try:
+                node = walker.GetParentElement(node)
+            except contract.ContractError:
+                raise
+            except Exception:
+                raise contract.ContractError("a11y-query")
+        return False
+
+    def hit_test_control(self, handle, label, rect, x, y):
+        """True only when the element under the point IS the selected control.
+
+        The selected label is re-resolved in the CURRENT bound window (unique
+        role/name match, rectangle exactly equal to the authorising one), then
+        ``ElementFromPoint`` plus the bounded raw-view parent walk must reach
+        that exact element through ``CompareElements``.  A same-root sibling or
+        a transparent overlay covering the control never reaches it, so the
+        click is refused instead of being aimed at the overlay.
+        """
+        target = self._selected(handle, label, rect)
+        return self._hit_reaches(self._element_at(x, y), target)
 
 
 class Win32Api:
@@ -513,6 +629,10 @@ class WindowsAdapter:
     def hit_test(self, window, x, y):
         """The click point must resolve to the selected top-level window root."""
         return self.api.root_at(window["id"], x, y)
+
+    def hit_test_control(self, window, label, rect, x, y):
+        """Strict identity re-check for the uniquely selected UIA control."""
+        return self.uia.hit_test_control(window["id"], label, dict(rect), x, y) is True
 
     def activate(self, window):
         self.api.activate(window["id"])

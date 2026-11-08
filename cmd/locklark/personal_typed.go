@@ -24,8 +24,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/jihuayu/locklark/internal/origin"
@@ -52,10 +54,20 @@ const (
 	maxTypedTags         = 64
 	maxTypedSections     = 64
 	maxTypedSectionField = 256
+
+	// Attachments are named by an explicit path, a safe basename and a bounded
+	// MIME type. The count matches the native 16-attachment item limit; the
+	// per-file byte bound is enforced by the private binary reader.
+	maxTypedAttachments    = 16
+	maxTypedAttachmentPath = 4096
+	maxTypedAttachmentName = 255
+	maxTypedAttachmentMIME = 256
 )
 
-// categoryKinds is the add-item category whitelist. SSH keys and documents need
-// raw key/attachment material that this phase refuses, so they are excluded.
+// categoryKinds is the add-item category whitelist. SSH keys need raw private
+// key material that this command refuses. Documents are accepted only when at
+// least one explicit private attachment file is requested, because the native
+// document payload is the attachment itself.
 var categoryKinds = map[string]vault.ItemCategory{
 	string(vault.CategoryLogin):           vault.CategoryLogin,
 	string(vault.CategoryPassword):        vault.CategoryPassword,
@@ -71,6 +83,7 @@ var categoryKinds = map[string]vault.ItemCategory{
 	string(vault.CategoryMembership):      vault.CategoryMembership,
 	string(vault.CategoryCryptoWallet):    vault.CategoryCryptoWallet,
 	string(vault.CategoryMedicalRecord):   vault.CategoryMedicalRecord,
+	string(vault.CategoryDocument):        vault.CategoryDocument,
 }
 
 // fieldTypes is the native custom-field type whitelist. "file" is an attachment
@@ -107,6 +120,10 @@ type typedPersonalInput struct {
 	Sections   []typedPersonalSection   `json:"sections"`
 	CreditCard *vault.CreditCardDetails `json:"credit_card"`
 	Identity   *vault.IdentityDetails   `json:"identity"`
+	// Attachments name explicit private files. A raw/base64 body, an
+	// attachment ID, a size/digest or provenance material is not part of the
+	// accepted schema and is refused as an unknown key.
+	Attachments []typedPersonalAttachment `json:"attachments"`
 }
 
 type typedPersonalSection struct {
@@ -124,26 +141,63 @@ type typedPersonalField struct {
 	Purpose   string          `json:"purpose"`
 }
 
+// typedPersonalAttachment is one explicit private-file request.
+type typedPersonalAttachment struct {
+	File     string `json:"file"`
+	FileName string `json:"file_name"`
+	MIMEType string `json:"mime_type"`
+}
+
+// typedAttachmentRequest is the unresolved half of an attachment: the decoder
+// reports it separately so the item-only decode wrapper cannot return an item
+// whose attachment request was silently forgotten before file resolution.
+type typedAttachmentRequest struct {
+	file     string
+	fileName string
+	mimeType string
+}
+
 // decodeTypedPersonalInput parses one bounded typed item document into the
 // native vault item. It never assigns the item ID, state, timestamps or any raw
 // material; the authenticated session owns those.
+//
+// This item-only wrapper has no file resolver, so it refuses a document that
+// still requests explicit attachment files instead of returning an item whose
+// attachments were silently dropped. Callers that resolve files must use
+// decodeTypedPersonalDocument.
 func decodeTypedPersonalInput(raw []byte) (vault.Item, error) {
-	if len(raw) == 0 || len(raw) > maxTypedInputBytes || !utf8.Valid(raw) {
+	item, requests, err := decodeTypedPersonalDocument(raw)
+	if err != nil {
+		return vault.Item{}, err
+	}
+	if len(requests) != 0 {
 		return vault.Item{}, errTypedInputRefused
+	}
+	return item, nil
+}
+
+// decodeTypedPersonalDocument parses one bounded typed item document and
+// returns the native item plus every unresolved explicit attachment file
+// request in document order. item.Attachments carries only the requested
+// metadata (never content); the creator must resolve each request from a
+// private regular file before SAVE.
+func decodeTypedPersonalDocument(raw []byte) (vault.Item, []typedAttachmentRequest, error) {
+	if len(raw) == 0 || len(raw) > maxTypedInputBytes || !utf8.Valid(raw) {
+		return vault.Item{}, nil, errTypedInputRefused
 	}
 	// encoding/json silently rewrites an unpaired surrogate escape to U+FFFD, so
 	// the raw escapes are rejected before anything is decoded.
 	if !strictTypedUnicode(raw) || !strictTypedJSON(raw) {
-		return vault.Item{}, errTypedInputRefused
+		return vault.Item{}, nil, errTypedInputRefused
 	}
 	var input typedPersonalInput
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&input) != nil {
-		return vault.Item{}, errTypedInputRefused
+		return vault.Item{}, nil, errTypedInputRefused
 	}
 	if decoder.Decode(new(json.RawMessage)) != io.EOF {
-		return vault.Item{}, errTypedInputRefused
+		return vault.Item{}, nil, errTypedInputRefused
 	}
 	return input.toVaultItem()
 }
@@ -275,22 +329,31 @@ func strictTypedUnicode(raw []byte) bool {
 	return true
 }
 
-func (input typedPersonalInput) toVaultItem() (vault.Item, error) {
+func (input typedPersonalInput) toVaultItem() (vault.Item, []typedAttachmentRequest, error) {
 	categoryName := strings.TrimSpace(input.Category)
 	if categoryName == "" {
 		categoryName = string(vault.CategoryLogin)
 	}
 	category, ok := categoryKinds[categoryName]
 	if !ok {
-		return vault.Item{}, errTypedInputRefused
+		return vault.Item{}, nil, errTypedInputRefused
+	}
+	if category == vault.CategoryDocument {
+		// A v2 document carries its payload in attachments and has no legacy
+		// Filename/Attachment bytes. The native document encoding has no slot
+		// for these scalar fields, so accepting them would silently drop
+		// them; attachments and the v2 envelope keep the rest.
+		if input.Username != "" || input.Password != "" || input.OTP != "" || input.Notes != "" || input.URL != "" {
+			return vault.Item{}, nil, errTypedInputRefused
+		}
 	}
 	title := input.Title
 	if !validTypedText(title, maxTypedTitle) || strings.TrimSpace(title) == "" {
-		return vault.Item{}, errTypedInputRefused
+		return vault.Item{}, nil, errTypedInputRefused
 	}
 	for _, value := range []string{input.Username, input.Password, input.OTP, input.Notes} {
 		if !validTypedText(value, maxTypedText) {
-			return vault.Item{}, errTypedInputRefused
+			return vault.Item{}, nil, errTypedInputRefused
 		}
 	}
 	item := vault.Item{
@@ -306,41 +369,41 @@ func (input typedPersonalInput) toVaultItem() (vault.Item, error) {
 	}
 	if input.URL != "" {
 		if !validTypedURL(input.URL) {
-			return vault.Item{}, errTypedInputRefused
+			return vault.Item{}, nil, errTypedInputRefused
 		}
 		item.URL = input.URL
 	}
 	if len(input.URLs) > maxTypedURLs {
-		return vault.Item{}, errTypedInputRefused
+		return vault.Item{}, nil, errTypedInputRefused
 	}
 	primarySeen := false
 	seenURL := map[string]bool{}
 	for _, u := range input.URLs {
 		if !validTypedURL(u.URL) || !validTypedText(u.Label, maxTypedLabel) {
-			return vault.Item{}, errTypedInputRefused
+			return vault.Item{}, nil, errTypedInputRefused
 		}
 		switch u.MatchMode {
 		case "", vault.URLMatchOrigin, vault.URLMatchHost, vault.URLMatchDomain, vault.URLMatchExact, vault.URLMatchNever:
 		default:
-			return vault.Item{}, errTypedInputRefused
+			return vault.Item{}, nil, errTypedInputRefused
 		}
 		key := strings.ToLower(u.URL)
 		if seenURL[key] {
-			return vault.Item{}, errTypedInputRefused
+			return vault.Item{}, nil, errTypedInputRefused
 		}
 		seenURL[key] = true
 		if u.Primary {
 			// The legacy top-level url is already the implicit primary, so a
 			// duplicate entry may only mark that same URL primary.
 			if primarySeen || item.URL != "" && u.URL != item.URL {
-				return vault.Item{}, errTypedInputRefused
+				return vault.Item{}, nil, errTypedInputRefused
 			}
 			primarySeen = true
 		}
 		item.URLs = append(item.URLs, vault.ItemURL{Label: u.Label, URL: u.URL, Primary: u.Primary, MatchMode: u.MatchMode})
 	}
 	if len(input.Tags) > maxTypedTags {
-		return vault.Item{}, errTypedInputRefused
+		return vault.Item{}, nil, errTypedInputRefused
 	}
 	seenTag := map[string]bool{}
 	for _, tag := range input.Tags {
@@ -349,7 +412,7 @@ func (input typedPersonalInput) toVaultItem() (vault.Item, error) {
 			continue
 		}
 		if !validTypedText(tag, maxTypedTag) {
-			return vault.Item{}, errTypedInputRefused
+			return vault.Item{}, nil, errTypedInputRefused
 		}
 		key := strings.ToLower(tag)
 		if seenTag[key] {
@@ -359,30 +422,30 @@ func (input typedPersonalInput) toVaultItem() (vault.Item, error) {
 		item.Tags = append(item.Tags, tag)
 	}
 	if len(input.Sections) > maxTypedSections {
-		return vault.Item{}, errTypedInputRefused
+		return vault.Item{}, nil, errTypedInputRefused
 	}
 	seenSection := map[string]bool{}
 	seenField := map[string]bool{}
 	for _, section := range input.Sections {
 		if !validTypedSelector(section.ID) || !validTypedText(section.Title, maxTypedLabel) {
-			return vault.Item{}, errTypedInputRefused
+			return vault.Item{}, nil, errTypedInputRefused
 		}
 		key := strings.ToLower(section.ID)
 		if seenSection[key] {
-			return vault.Item{}, errTypedInputRefused
+			return vault.Item{}, nil, errTypedInputRefused
 		}
 		seenSection[key] = true
 		if len(section.Fields) > maxTypedSectionField {
-			return vault.Item{}, errTypedInputRefused
+			return vault.Item{}, nil, errTypedInputRefused
 		}
 		converted := vault.ItemSection{ID: section.ID, Title: section.Title}
 		for _, field := range section.Fields {
 			if !validTypedSelector(field.ID) || !validTypedText(field.Label, maxTypedLabel) || !validTypedText(field.Purpose, maxTypedPurpose) || !validTypedText(field.Value, maxTypedText) {
-				return vault.Item{}, errTypedInputRefused
+				return vault.Item{}, nil, errTypedInputRefused
 			}
 			fieldKey := strings.ToLower(field.ID)
 			if seenField[fieldKey] {
-				return vault.Item{}, errTypedInputRefused
+				return vault.Item{}, nil, errTypedInputRefused
 			}
 			seenField[fieldKey] = true
 			typ := field.Type
@@ -390,7 +453,7 @@ func (input typedPersonalInput) toVaultItem() (vault.Item, error) {
 				typ = vault.FieldTypeText
 			}
 			if !fieldTypes[typ] {
-				return vault.Item{}, errTypedInputRefused
+				return vault.Item{}, nil, errTypedInputRefused
 			}
 			protected := field.Protected || typ == vault.FieldTypeConcealed || typ == vault.FieldTypeOTP || typ == vault.FieldTypeTOTP
 			converted.Fields = append(converted.Fields, vault.CustomField{ID: field.ID, Label: field.Label, Type: typ, Value: field.Value, Protected: protected, Purpose: field.Purpose})
@@ -399,19 +462,35 @@ func (input typedPersonalInput) toVaultItem() (vault.Item, error) {
 	}
 	if input.CreditCard != nil {
 		if category != vault.CategoryCreditCard || !validTypedCreditCard(input.CreditCard) {
-			return vault.Item{}, errTypedInputRefused
+			return vault.Item{}, nil, errTypedInputRefused
 		}
 		card := *input.CreditCard
 		item.CreditCard = &card
 	}
 	if input.Identity != nil {
 		if category != vault.CategoryIdentity || !validTypedIdentity(input.Identity) {
-			return vault.Item{}, errTypedInputRefused
+			return vault.Item{}, nil, errTypedInputRefused
 		}
 		identity := *input.Identity
 		item.Identity = &identity
 	}
-	return item, nil
+	if len(input.Attachments) > maxTypedAttachments {
+		return vault.Item{}, nil, errTypedInputRefused
+	}
+	requests := make([]typedAttachmentRequest, 0, len(input.Attachments))
+	for _, attachment := range input.Attachments {
+		if !validTypedAttachmentPath(attachment.File) || !validTypedAttachmentName(attachment.FileName) || !validTypedAttachmentMIME(attachment.MIMEType) {
+			return vault.Item{}, nil, errTypedInputRefused
+		}
+		requests = append(requests, typedAttachmentRequest{file: attachment.File, fileName: attachment.FileName, mimeType: attachment.MIMEType})
+		// Content stays an owned empty slice until the creator resolves the
+		// request; Size/SHA/ID remain for native normalization to derive.
+		item.Attachments = append(item.Attachments, vault.AttachmentMeta{FileName: attachment.FileName, MIMEType: attachment.MIMEType, Content: []byte{}})
+	}
+	if category == vault.CategoryDocument && len(requests) == 0 {
+		return vault.Item{}, nil, errTypedInputRefused
+	}
+	return item, requests, nil
 }
 
 func validTypedCreditCard(card *vault.CreditCardDetails) bool {
@@ -465,6 +544,52 @@ func validTypedSelector(value string) bool {
 			continue
 		}
 		return false
+	}
+	return true
+}
+
+// validTypedAttachmentPath accepts only an explicit absolute path. Relative
+// paths are refused so no implicit working-directory file is ever read, and
+// control characters (including NUL) are refused so the descriptor is opened
+// on exactly the path that was validated. The bound covers the largest common
+// POSIX path; longer Windows paths stay refused rather than guessed at.
+func validTypedAttachmentPath(path string) bool {
+	if path == "" || len(path) > maxTypedAttachmentPath || !utf8.ValidString(path) || !filepath.IsAbs(path) {
+		return false
+	}
+	for _, r := range path {
+		if unicode.IsControl(r) || r == 0xfffe || r == 0xffff {
+			return false
+		}
+	}
+	return true
+}
+
+// validTypedAttachmentName keeps the stored name a safe basename: no path
+// separator, no dot entries, no control characters and the native 255-byte
+// bound.
+func validTypedAttachmentName(name string) bool {
+	if name == "" || len(name) > maxTypedAttachmentName || name == "." || name == ".." || strings.ContainsAny(name, "/\\") || !utf8.ValidString(name) {
+		return false
+	}
+	for _, r := range name {
+		if unicode.IsControl(r) || r == 0xfffe || r == 0xffff {
+			return false
+		}
+	}
+	return true
+}
+
+// validTypedAttachmentMIME bounds the native MIME slot and refuses control
+// characters; final native item validation remains authoritative for storage.
+func validTypedAttachmentMIME(value string) bool {
+	if len(value) > maxTypedAttachmentMIME || !utf8.ValidString(value) {
+		return false
+	}
+	for _, r := range value {
+		if unicode.IsControl(r) || r == 0xfffe || r == 0xffff {
+			return false
+		}
 	}
 	return true
 }

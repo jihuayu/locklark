@@ -42,12 +42,15 @@ class SpyAdapter:
     input_evidence = "accepted"
 
     def __init__(self, windows=None, controls=None, focus=None, capabilities=None,
-                 focus_window=None, hit=True, screen=None, visible=True):
+                 focus_window=None, hit=True, screen=None, visible=True,
+                 control_hit=True):
         self.windows = [dict(WINDOW)] if windows is None else windows
         self.controls = [control(LABEL)] if controls is None else controls
         self.focus = WINDOW["pid"] if focus is None else focus
         self.focus_window = WINDOW["id"] if focus_window is None else focus_window
         self.hit = hit
+        self.control_hit = control_hit
+        self.control_hits = []
         self.screen = screen
         self.visible = visible
         self.calls = []
@@ -84,6 +87,13 @@ class SpyAdapter:
     def hit_test(self, window, x, y):
         self.calls.append("hit_test")
         return self.hit
+
+    def hit_test_control(self, window, label, rect, x, y):
+        self.calls.append("hit_test_control")
+        self.control_hits.append((window["id"], label, dict(rect), x, y))
+        if isinstance(self.control_hit, Exception):
+            raise self.control_hit
+        return self.control_hit
 
     def point_visible(self, window, x, y):
         self.calls.append("point_visible")
@@ -372,6 +382,89 @@ class ExecutionGuardTests(unittest.TestCase):
         self.assertEqual(result["controls"][OTHER_LABEL],
                          {"present": True, "enabled": False, "showing": True})
         self.assertNotIn(PRIVATE, json.dumps(result))
+
+
+class _Hookless(SpyAdapter):
+    """An adapter that never implemented the strict control-hit hook."""
+
+    def __getattribute__(self, name):
+        if name == "hit_test_control":
+            raise AttributeError(name)
+        return super().__getattribute__(name)
+
+
+class ControlHitIdentityTests(unittest.TestCase):
+    """The point must resolve to the SELECTED control, not just its window."""
+
+    def execute(self, adapter, **overrides):
+        plan = contract.parse_request(request(**overrides))
+        with patch.object(contract, "monotonic", return_value=0), patch.object(contract, "sleep"):
+            return contract.execute(plan, adapter)
+
+    def clicks(self, adapter):
+        return [call for call in adapter.calls if isinstance(call, tuple)]
+
+    def refused(self, adapter, code, **overrides):
+        with self.assertRaises(contract.ContractError) as error:
+            self.execute(adapter, **overrides)
+        self.assertEqual(error.exception.code, code, error.exception.args)
+        self.assertEqual(self.clicks(adapter), [])
+        return error.exception
+
+    def test_selected_control_is_re_probed_between_point_check_and_click(self):
+        adapter = SpyAdapter()
+        result = self.execute(adapter)
+        self.assertEqual(adapter.calls.count("hit_test"), 1)
+        self.assertEqual(adapter.calls.count("hit_test_control"), 1)
+        self.assertLess(adapter.calls.index("hit_test"), adapter.calls.index("hit_test_control"))
+        self.assertLess(adapter.calls.index("hit_test_control"),
+                        adapter.calls.index(("click", 240, 315)))
+        self.assertEqual(result["clicks"][0]["x"], 240)
+
+    def test_probe_receives_the_authorising_control_rect_and_centre(self):
+        adapter = SpyAdapter()
+        self.execute(adapter)
+        self.assertEqual(adapter.control_hits, [
+            (WINDOW["id"], LABEL, control(LABEL)["bounds"], 240, 315)])
+
+    def test_sibling_or_transparent_overlay_at_the_centre_refuses(self):
+        adapter = SpyAdapter(control_hit=False)
+        self.refused(adapter, "control-hit")
+        self.assertEqual(len(adapter.control_hits), 1)
+
+    def test_only_the_literal_true_authorises_the_click(self):
+        for verdict in (False, None, 1, "yes", [], {"hit": True}):
+            with self.subTest(verdict=verdict):
+                self.refused(SpyAdapter(control_hit=verdict), "control-hit")
+        result = self.execute(SpyAdapter(control_hit=True))
+        self.assertEqual(len(result["clicks"]), 1)
+
+    def test_a_missing_hook_is_refused_not_trusted_by_omission(self):
+        self.refused(_Hookless(), "control-hit")
+
+    def test_a_failing_probe_refuses_without_any_click(self):
+        self.refused(SpyAdapter(control_hit=ValueError("boom")), "a11y-query")
+        self.refused(SpyAdapter(control_hit=contract.ContractError("control-missing")),
+                     "control-missing")
+
+    def test_ambiguous_control_is_refused_before_the_strict_probe(self):
+        adapter = SpyAdapter(controls=[control(LABEL), control(LABEL)])
+        self.refused(adapter, "control-ambiguous")
+        self.assertEqual(adapter.control_hits, [])
+
+    def test_pointer_offset_clicks_keep_the_window_root_check_only(self):
+        adapter = SpyAdapter()
+        result = self.execute(adapter, actions=[{"click": [10, 20]}])
+        self.assertEqual(result["clicks"][0]["label"], "pointer")
+        self.assertEqual(adapter.calls.count("hit_test"), 1)
+        self.assertEqual(adapter.control_hits, [])
+
+    def test_wait_text_and_key_actions_never_probe_a_control_hit(self):
+        for action in ({"wait_label": LABEL}, {"text": "ascii"}, {"key": "Tab"}):
+            with self.subTest(action=action):
+                adapter = SpyAdapter()
+                self.execute(adapter, actions=[action])
+                self.assertEqual(adapter.control_hits, [])
 
 
 class OutputSafetyTests(unittest.TestCase):

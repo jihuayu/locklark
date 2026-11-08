@@ -37,7 +37,7 @@ func createTypedPersonal(path, inputPath string, pw, key []byte, ask func(string
 	}
 	defer clear(raw)
 
-	item, err := decodeTypedPersonalInput(raw)
+	item, requests, err := decodeTypedPersonalDocument(raw)
 	if err != nil {
 		return nil, err
 	}
@@ -45,6 +45,14 @@ func createTypedPersonal(path, inputPath string, pw, key []byte, ask func(string
 	// references and clears the native byte slices best-effort. It does not
 	// claim to zero string backing arrays.
 	defer clearTypedItem(&item)
+
+	// Every attachment file is read and frozen before authentication, SAVE
+	// consent and the mutation, so a later path replacement cannot change what
+	// is stored. A refusal here happens before any prompt and clears every
+	// already-read body through the deferred item clear.
+	if err := resolveTypedAttachments(&item, requests, len(raw)); err != nil {
+		return nil, err
+	}
 
 	session, err := personal.UnlockSession(path, pw, key, time.Minute)
 	if err != nil {
@@ -56,7 +64,11 @@ func createTypedPersonal(path, inputPath string, pw, key []byte, ask func(string
 	for _, section := range item.Sections {
 		fieldCount += len(section.Fields)
 	}
-	if _, err := fmt.Fprintf(prompt, "将新增 %s 类别条目：%d 个分区，%d 个自定义字段，%d 个网址，%d 个标签。\r\n", item.Category, len(item.Sections), fieldCount, len(item.URLs), len(item.Tags)); err != nil {
+	totalAttachmentBytes := 0
+	for _, attachment := range item.Attachments {
+		totalAttachmentBytes += len(attachment.Content)
+	}
+	if _, err := fmt.Fprintf(prompt, "将新增 %s 类别条目：%d 个分区，%d 个自定义字段，%d 个网址，%d 个标签，%d 个附件共 %d 字节。\r\n", item.Category, len(item.Sections), fieldCount, len(item.URLs), len(item.Tags), len(item.Attachments), totalAttachmentBytes); err != nil {
 		return nil, err
 	}
 
@@ -78,6 +90,37 @@ func createTypedPersonal(path, inputPath string, pw, key []byte, ask func(string
 		return nil, err
 	}
 	return map[string]string{"status": "created", "id": id, "revision": revision}, nil
+}
+
+// typedAttachmentMetaOverhead conservatively charges fixed per-attachment
+// native metadata (generated ID, size, SHA-256 hex and envelope framing) against
+// the payload budget before the native AddItem validation runs.
+const typedAttachmentMetaOverhead = 128
+
+// resolveTypedAttachments reads every explicit private attachment file into the
+// decoded item and enforces the aggregate payload bound. All reads happen before
+// the SAVE prompt and the single mutation, so the bytes are frozen for the
+// mutation; rawJSONLen and native metadata are charged conservatively alongside
+// each body. On refusal the caller's deferred item clear releases every body
+// already read. The final native AddItem validation remains authoritative.
+func resolveTypedAttachments(item *vault.Item, requests []typedAttachmentRequest, rawJSONLen int) error {
+	if item == nil || len(requests) != len(item.Attachments) {
+		return errTypedInputRefused
+	}
+	aggregate := rawJSONLen
+	for i := range requests {
+		request := requests[i]
+		content, err := readTypedAttachmentFile(request.file)
+		if err != nil {
+			return err
+		}
+		item.Attachments[i].Content = content
+		aggregate += len(content) + len(request.fileName) + len(request.mimeType) + typedAttachmentMetaOverhead
+		if aggregate > vault.MaxPayload {
+			return errTypedInputRefused
+		}
+	}
+	return nil
 }
 
 // clearTypedItem releases the decoded item and best-effort clears native byte

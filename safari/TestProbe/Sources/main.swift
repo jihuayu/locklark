@@ -297,7 +297,70 @@ do {
     close(pair[1])
 }
 
-// 9. The process is still alive after every closed-peer write above.
+// 9. Bounded (non-blocking, deadline) pipe write under SIG_DFL: a closed
+//    helper, a helper that never reads and an already revoked session all end
+//    in the fixed failure without terminating the process.
+do {
+    var fds: [Int32] = [-1, -1]
+    check(pipe(&fds) == 0, "bounded pipe created")
+    check(
+        (try? SocketSupport.makeNonBlocking(fd: fds[1])) != nil,
+        "bounded pipe write end is non-blocking"
+    )
+    close(fds[0])
+    check(
+        writeFailsUnavailable {
+            try SocketSupport.writeAllPipeBounded(
+                fd: fds[1],
+                data: Data(repeating: 0x47, count: 32),
+                deadline: DispatchTime.now() + 1,
+                isCancelled: { false }
+            )
+        },
+        "closed-peer bounded pipe write -> RelayError.unavailable"
+    )
+    close(fds[1])
+}
+
+do {
+    var fds: [Int32] = [-1, -1]
+    check(pipe(&fds) == 0, "backpressure pipe created")
+    check(
+        (try? SocketSupport.makeNonBlocking(fd: fds[1])) != nil,
+        "backpressure write end is non-blocking"
+    )
+    let start = DispatchTime.now()
+    check(
+        writeFailsUnavailable {
+            try SocketSupport.writeAllPipeBounded(
+                fd: fds[1],
+                data: Data(repeating: 0x48, count: 4 * 1024 * 1024),
+                deadline: start + 0.3,
+                isCancelled: { false }
+            )
+        },
+        "unread bounded pipe write -> RelayError.unavailable at the deadline"
+    )
+    let elapsed = Double(
+        DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds
+    ) / 1e9
+    check(elapsed < 2, "bounded pipe write ended inside its deadline window")
+    check(
+        writeFailsUnavailable {
+            try SocketSupport.writeAllPipeBounded(
+                fd: fds[1],
+                data: Data(repeating: 0x49, count: 8),
+                deadline: DispatchTime.now() + 1,
+                isCancelled: { true }
+            )
+        },
+        "revoked bounded pipe write -> RelayError.unavailable"
+    )
+    close(fds[0])
+    close(fds[1])
+}
+
+// 10. The process is still alive after every closed-peer write above.
 check(true, "probe process survived all closed-peer writes")
 
 if failures.isEmpty {

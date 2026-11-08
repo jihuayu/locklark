@@ -190,11 +190,40 @@ public final class RelaySessionStore<Session> {
     /// Removes and closes a ready session after an exact profile match.
     @discardableResult
     public func discard(token: String, profile: String?) -> Bool {
+        discard(token: token, profile: profile, matching: { _ in true })
+    }
+
+    /// Removes and closes a ready session only when the exact profile matches
+    /// **and** `matching` accepts the session that is bound right now.
+    ///
+    /// The guard exists for callers that hold a session captured earlier: a
+    /// helper failure must drop the binding it owns and never a replacement
+    /// bound to the same token and profile after a concurrent close + reopen.
+    /// The predicate therefore runs while the store lock is held and against
+    /// the current entry (the app passes a referential compare, `{ $0 ===
+    /// captured }`), so it must be short and side-effect free. A refused match
+    /// removes and closes nothing, leaving the current binding untouched.
+    /// `closeSession` still runs outside the lock, exactly once.
+    @discardableResult
+    public func discard(
+        token: String,
+        profile: String?,
+        matching: (Session) -> Bool
+    ) -> Bool {
         lock.lock()
-        let entry = isClosed ? nil : ready.remove(token: token, profile: profile)
+        var removed: ReadyEntry?
+        // Lookup, identity guard and removal happen under one lock hold, so
+        // the decision cannot be made against a stale snapshot: nothing can
+        // rebind this token between the guard and the removal.
+        if !isClosed,
+           let current = ready.session(token: token, profile: profile),
+           matching(current.session)
+        {
+            removed = ready.remove(token: token, profile: profile)
+        }
         lock.unlock()
-        guard let entry else { return false }
-        closeSession(entry.session)
+        guard let removed else { return false }
+        closeSession(removed.session)
         return true
     }
 

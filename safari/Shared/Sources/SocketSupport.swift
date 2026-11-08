@@ -41,22 +41,66 @@ public enum SocketSupport {
     /// the socket was created/accepted; the thread guard below is defence in
     /// depth so a missed `SO_NOSIGPIPE` still cannot kill the process.
     public static func writeAll(fd: Int32, data: Data) throws {
-        try writeAllGuarded(fd: fd, data: data)
+        try writeAllGuarded(fd: fd, data: data, deadline: nil, isCancelled: { false })
     }
 
     /// Pipe write (the helper's stdin). Pipes have no `SO_NOSIGPIPE`, so the
     /// thread-local SIGPIPE guard is the only protection; a helper that already
     /// exited turns the write into a fixed `RelayError.unavailable`.
     public static func writeAllPipe(fd: Int32, data: Data) throws {
-        try writeAllGuarded(fd: fd, data: data)
+        try writeAllGuarded(fd: fd, data: data, deadline: nil, isCancelled: { false })
+    }
+
+    /// Switches a descriptor to non-blocking exactly once, before first use.
+    /// `writeAllPipeBounded` refuses to rely on a blocking pipe write.
+    public static func makeNonBlocking(fd: Int32) throws {
+        let flags = fcntl(fd, F_GETFL, 0)
+        guard flags >= 0, fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 else {
+            throw RelayError.unavailable
+        }
+    }
+
+    /// Bounded pipe write for the helper's stdin.
+    ///
+    /// `fd` must already be non-blocking (`makeNonBlocking`). Bytes are written
+    /// until the absolute monotonic `deadline`; a descriptor that cannot take
+    /// the remaining bytes in that window - because the helper is not reading,
+    /// or because `isCancelled` reports a revoked session - fails with the
+    /// fixed `RelayError.unavailable`. A partially written frame is never
+    /// retried here: the caller drops the session instead of replaying.
+    public static func writeAllPipeBounded(
+        fd: Int32,
+        data: Data,
+        deadline: DispatchTime,
+        isCancelled: () -> Bool
+    ) throws {
+        // Contract check: a blocking descriptor would ignore the deadline and
+        // could stall the caller for as long as the peer does not read.
+        let flags = fcntl(fd, F_GETFL, 0)
+        guard flags >= 0, (flags & O_NONBLOCK) != 0 else {
+            throw RelayError.unavailable
+        }
+        try writeAllGuarded(
+            fd: fd,
+            data: data,
+            deadline: deadline,
+            isCancelled: isCancelled
+        )
     }
 
     /// Core write loop. Any write failure - `EPIPE`, `ECONNRESET`, a zero
     /// length write or an unexpected errno - maps to the single fixed
     /// `RelayError.unavailable`; no errno text, peer data or frame content is
     /// ever surfaced or logged. A partially written frame is never retried:
-    /// the caller must drop the session instead.
-    private static func writeAllGuarded(fd: Int32, data: Data) throws {
+    /// the caller must drop the session instead. With a `deadline` an
+    /// `EAGAIN` from a non-blocking descriptor waits for writability in short
+    /// poll slices, re-checking deadline and cancellation each slice.
+    private static func writeAllGuarded(
+        fd: Int32,
+        data: Data,
+        deadline: DispatchTime?,
+        isCancelled: () -> Bool
+    ) throws {
         var sigpipe = sigset_t()
         _ = sigemptyset(&sigpipe)
         _ = sigaddset(&sigpipe, SIGPIPE)
@@ -79,8 +123,18 @@ public enum SocketSupport {
         }
 
         var failed = false
+        var raisedSigPipe = false
         var offset = 0
         while offset < data.count {
+            if let deadline {
+                // Absolute monotonic check before every attempt - first byte,
+                // EINTR retry and post-poll retry alike - so a revoked or
+                // expired write never issues even one further byte.
+                if isCancelled() || DispatchTime.now() >= deadline {
+                    failed = true
+                    break
+                }
+            }
             let written = data.withUnsafeBytes { raw -> Int in
                 guard let base = raw.baseAddress else { return -1 }
                 return Darwin.write(
@@ -91,22 +145,68 @@ public enum SocketSupport {
             }
             if written < 0 {
                 if errno == EINTR { continue }
+                if let deadline, errno == EAGAIN || errno == EWOULDBLOCK {
+                    if waitWritable(fd: fd, deadline: deadline, isCancelled: isCancelled) {
+                        continue
+                    }
+                    // Deadline expired or the session was revoked: fail closed
+                    // without retrying the partial frame. No write failed, so
+                    // this path raises no SIGPIPE.
+                    failed = true
+                    break
+                }
                 failed = true
+                raisedSigPipe = true
                 break
             }
             if written == 0 {
                 failed = true
+                raisedSigPipe = true
                 break
             }
             offset += written
         }
 
-        if failed, !preexistingPending {
+        if raisedSigPipe, !preexistingPending {
             // Consume only the thread-directed SIGPIPE this write raised while
             // it is still blocked, before the mask is restored.
             consumeNewPendingSigPipe(sigpipe: &sigpipe)
         }
         if failed { throw RelayError.unavailable }
+    }
+
+    /// One poll slice of a bounded pipe write: short enough that a stalled
+    /// helper or a revocation is observed promptly, never unboundedly.
+    static let pollIntervalMilliseconds = 20
+
+    /// Waits for writability of a non-blocking descriptor. `false` means the
+    /// caller must fail closed: the deadline expired, the pipe hung up or
+    /// errored, or the cancellation callback reported a revoked session.
+    private static func waitWritable(
+        fd: Int32,
+        deadline: DispatchTime,
+        isCancelled: () -> Bool
+    ) -> Bool {
+        while true {
+            if isCancelled() { return false }
+            let now = DispatchTime.now()
+            if now.uptimeNanoseconds >= deadline.uptimeNanoseconds { return false }
+            let remaining = deadline.uptimeNanoseconds - now.uptimeNanoseconds
+            let slice = min(
+                remaining,
+                UInt64(pollIntervalMilliseconds) * 1_000_000
+            )
+            let milliseconds = Int32(min(slice / 1_000_000 + 1, UInt64(Int32.max)))
+            var descriptor = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+            let ready = poll(&descriptor, 1, milliseconds)
+            if ready < 0 {
+                if errno == EINTR { continue }
+                return false
+            }
+            if ready == 0 { continue }
+            if descriptor.revents & Int16(POLLOUT) != 0 { return true }
+            return false
+        }
     }
 
     /// Nil means the pending set could not be read, which fails closed.

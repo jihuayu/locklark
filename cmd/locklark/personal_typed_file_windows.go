@@ -17,9 +17,25 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/jihuayu/locklark/internal/vault"
 )
 
+// readTypedPersonalFile bounds the JSON input document at the historic 1 MiB.
 func readTypedPersonalFile(path string) ([]byte, error) {
+	return readPrivateTypedFile(path, maxTypedInputBytes)
+}
+
+// readTypedAttachmentFile bounds one explicit attachment at the native
+// per-attachment limit. Binary bodies are not required to be UTF-8 and a
+// zero-length file is accepted.
+func readTypedAttachmentFile(path string) ([]byte, error) {
+	return readPrivateTypedFile(path, vault.MaxAttachmentSize)
+}
+
+// readPrivateTypedFile is the single owner-only handle reader shared by the
+// JSON document and binary attachment paths.
+func readPrivateTypedFile(path string, limit int64) ([]byte, error) {
 	name, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return nil, errTypedInputRefused
@@ -55,15 +71,15 @@ func readTypedPersonalFile(path string) ([]byte, error) {
 		return nil, errTypedInputRefused
 	}
 	size := int64(info.FileSizeHigh)<<32 | int64(info.FileSizeLow)
-	if size < 0 || size > maxTypedInputBytes {
+	if size < 0 || size > limit {
 		return nil, errTypedInputRefused
 	}
 	if !validPrivateTypedWindowsSecurity(handle) {
 		return nil, errTypedInputRefused
 	}
 
-	raw, err := io.ReadAll(io.LimitReader(file, int64(maxTypedInputBytes)+1))
-	if err != nil || len(raw) > maxTypedInputBytes {
+	raw, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil || int64(len(raw)) > limit {
 		clear(raw)
 		return nil, errTypedInputRefused
 	}

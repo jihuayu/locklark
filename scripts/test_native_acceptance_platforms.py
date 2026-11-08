@@ -4,6 +4,7 @@ They prove the adapters only read the five public widget fields, only emit one
 physical batch per action, verify foreground focus before input, refuse
 ambiguity/untrusted/secure surfaces, and never prompt for OS permission.
 """
+import ctypes
 import io
 import json
 import os
@@ -90,13 +91,19 @@ class FakeWin32:
 
 
 class FakeUia:
-    def __init__(self, controls=None):
+    def __init__(self, controls=None, control_hit=True):
         self._controls = [dict(CONTROL)] if controls is None else controls
+        self.control_hit = control_hit
+        self.hit_calls = []
         self.reads = 0
 
     def controls(self, handle):
         self.reads += 1
         return [dict(item) for item in self._controls]
+
+    def hit_test_control(self, handle, label, rect, x, y):
+        self.hit_calls.append((handle, label, dict(rect), x, y))
+        return self.control_hit
 
 
 def execute(adapter, payload):
@@ -185,6 +192,24 @@ class WindowsAdapterTests(unittest.TestCase):
         self.assertEqual(result["clicks"][0]["evidence"], "accepted")
         self.assertNotIn("title", result)
 
+    def test_overlay_at_the_control_centre_refuses_without_any_click(self):
+        api, uia = FakeWin32(root=True), FakeUia(control_hit=False)
+        adapter = windows.WindowsAdapter(api=api, uia=uia)
+        with self.assertRaises(contract.ContractError) as error:
+            execute(adapter, document())
+        self.assertEqual(error.exception.code, "control-hit")
+        self.assertEqual(api.clicks, [])
+        self.assertEqual(uia.hit_calls,
+                         [(WINDOW_RAW["id"], LABEL, dict(CONTROL["bounds"]), 240, 315)])
+
+    def test_adapter_hit_verdict_is_strictly_boolean(self):
+        for verdict, expected in ((True, True), (1, False), (-1, False), (None, False)):
+            with self.subTest(verdict=verdict):
+                adapter = windows.WindowsAdapter(api=FakeWin32(), uia=FakeUia(control_hit=verdict))
+                self.assertEqual(
+                    adapter.hit_test_control(dict(WINDOW_RAW), LABEL, dict(CONTROL["bounds"]), 240, 315),
+                    expected)
+
 
 class StrictWidget:
     """Exposes only the five public UIA members; anything else is a failure."""
@@ -248,6 +273,151 @@ class UiaReaderTests(unittest.TestCase):
         with self.assertRaises(contract.ContractError) as error:
             reader.controls(1)
         self.assertEqual(error.exception.code, "a11y-overrun")
+
+
+class _Point(ctypes.Structure):
+    """Stand-in for the comtypes-generated UIAutomation ``tagPOINT``."""
+
+    _fields_ = [("x", ctypes.c_int32), ("y", ctypes.c_int32)]
+
+
+def widget(name=LABEL, left=200, top=300, right=280, bottom=330):
+    node = StrictWidget(name=name)
+    node.CurrentBoundingRectangle = types.SimpleNamespace(left=left, top=top, right=right, bottom=bottom)
+    return node
+
+
+class Node(object):
+    """Opaque element in the fake tree: only its native identity matters."""
+
+
+class HitAutomation(FakeAutomation):
+    """Fake UIA tree: ElementFromPoint, CompareElements, raw-view parents."""
+
+    def __init__(self, nodes, hit=None, parents=None, compare=None):
+        FakeAutomation.__init__(self, nodes)
+        self.hit = hit
+        self.parents = {} if parents is None else parents
+        self.compare = compare
+        self.points = []
+
+    @property
+    def RawViewWalker(self):
+        return self
+
+    def ElementFromPoint(self, point):
+        self.points.append((point.x, point.y))
+        return self.hit
+
+    def CompareElements(self, left, right):
+        return left is right if self.compare is None else self.compare(left, right)
+
+    def GetParentElement(self, element):
+        return self.parents.get(element)
+
+
+class UiaControlIdentityTests(unittest.TestCase):
+    """UIA hit identity: the point must reach the ACTUAL selected element."""
+
+    MODULE = types.SimpleNamespace(TreeScope_Descendants=4, tagPOINT=_Point)
+    RECT = {"x": 200, "y": 300, "width": 80, "height": 30}
+
+    def reader(self, automation, module=None):
+        return windows.UiaReader(self.MODULE if module is None else module, automation)
+
+    def verdict(self, automation):
+        return self.reader(automation).hit_test_control(1, LABEL, self.RECT, 240, 315)
+
+    def refusal(self, automation, code, rect=None):
+        with self.assertRaises(contract.ContractError) as error:
+            self.reader(automation).hit_test_control(1, LABEL, self.RECT if rect is None else rect,
+                                                     240, 315)
+        self.assertEqual(error.exception.code, code)
+
+    def test_selected_control_and_a_legitimate_child_accept(self):
+        target, child = widget(), Node()
+        for hit, parents in ((target, {}), (child, {child: target})):
+            with self.subTest(hit=hit):
+                automation = HitAutomation([target], hit=hit, parents=parents)
+                self.assertTrue(self.verdict(automation))
+                self.assertEqual(automation.points, [(240, 315)])
+
+    def test_same_root_sibling_or_overlay_at_the_centre_refuses(self):
+        target, root = widget(), widget(name="window")
+        sibling, overlay = widget(name="解锁"), Node()
+        other_root = widget(name="overlay window")
+        cases = ((sibling, {sibling: root}), (overlay, {overlay: root}),
+                 (overlay, {}), (overlay, {overlay: other_root}))
+        for hit, parents in cases:
+            with self.subTest(parents=len(parents)):
+                self.assertFalse(self.verdict(HitAutomation([target], hit=hit, parents=parents)))
+
+    def test_rect_change_duplicate_and_unknown_label_refuse(self):
+        target = widget()
+        changed = {"x": 201, "y": 300, "width": 80, "height": 30}
+        self.refusal(HitAutomation([target], hit=target), "control-hit", changed)
+        self.refusal(HitAutomation([target], hit=target), "control-hit",
+                     {"x": 200, "y": 300, "width": 0, "height": 30})
+        self.refusal(HitAutomation([widget(), widget()], hit=target), "control-ambiguous")
+        self.refusal(HitAutomation([widget(name="解锁")], hit=target), "control-missing")
+
+    def test_cycle_parent_limit_and_query_failures_refuse(self):
+        target = widget()
+        first, second = widget(name="a"), widget(name="b")
+        self.refusal(HitAutomation([target], hit=first,
+                                   parents={first: second, second: first}), "a11y-query")
+
+        chain, parents = [Node() for _ in range(windows.MAX_HIT_ELEMENTS + 5)], {}
+        for index, node in enumerate(chain[:-1]):
+            parents[node] = chain[index + 1]
+        self.assertFalse(self.verdict(HitAutomation([target], hit=chain[0], parents=parents)))
+
+        class BrokenCompare(HitAutomation):
+            def CompareElements(self, left, right):
+                raise OSError("comparison query failed")
+
+        class BrokenWalker(HitAutomation):
+            def GetParentElement(self, element):
+                raise OSError("walker query failed")
+
+        class BrokenPoint(HitAutomation):
+            def ElementFromPoint(self, point):
+                raise OSError("point query failed")
+
+        class NoWalker(HitAutomation):
+            RawViewWalker = None
+
+        self.refusal(BrokenCompare([target], hit=target), "a11y-query")
+        self.refusal(BrokenWalker([target], hit=Node()), "a11y-query")
+        self.refusal(BrokenPoint([target], hit=target), "a11y-query")
+        self.refusal(NoWalker([target], hit=target), "a11y-unavailable")
+        self.assertFalse(self.verdict(HitAutomation([target], hit=None)))
+
+    def test_generated_point_schema_and_native_bool_truth_are_strict(self):
+        target = widget()
+
+        class Wide(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_int64), ("y", ctypes.c_int64)]
+
+        for module in (types.SimpleNamespace(TreeScope_Descendants=4),
+                       types.SimpleNamespace(TreeScope_Descendants=4, tagPOINT=types.SimpleNamespace),
+                       types.SimpleNamespace(TreeScope_Descendants=4, tagPOINT=Wide)):
+            with self.subTest(module=module):
+                with self.assertRaises(contract.ContractError) as error:
+                    self.reader(HitAutomation([target], hit=target), module).hit_test_control(
+                        1, LABEL, self.RECT, 240, 315)
+                self.assertEqual(error.exception.code, "a11y-unavailable")
+
+        # IUIAutomation.CompareElements returns BOOL*, which comtypes surfaces
+        # as the integer 1 for TRUE: that is a real match, nothing else is.
+        for verdict, accepted in ((True, True), (1, True), (0, False), (2, False),
+                                  (-1, False), ("yes", False)):
+            with self.subTest(verdict=verdict):
+                automation = HitAutomation([target], hit=target,
+                                           compare=lambda left, right, v=verdict: v)
+                self.assertEqual(
+                    self.reader(automation).hit_test_control(1, LABEL, self.RECT, 240, 315),
+                    accepted)
 
 
 class Win32InputBuildingTests(unittest.TestCase):
@@ -569,9 +739,11 @@ class StrictQuartz:
 
 class FakeMacApi:
     def __init__(self, windows_list=None, controls=None, focus=4242, trusted=True, secure=False,
-                 focus_window=None, root=True, visible=True):
+                 focus_window=None, root=True, visible=True, control_hit=True):
         self.windows_list = [dict(WINDOW_RAW, secure=secure)] if windows_list is None else windows_list
         self._controls = [dict(CONTROL)] if controls is None else controls
+        self.control_hit = control_hit
+        self.hit_calls = []
         self.focus = focus
         self.focus_window = WINDOW_RAW["id"] if focus_window is None else focus_window
         self.root = root
@@ -600,6 +772,10 @@ class FakeMacApi:
 
     def root_at(self, window, x, y):
         return self.root
+
+    def hit_test_control(self, window, label, rect, x, y):
+        self.hit_calls.append((window["id"], label, dict(rect), x, y))
+        return self.control_hit
 
     def point_visible(self, window, x, y):
         return self.visible
@@ -694,6 +870,23 @@ class MacAdapterTests(unittest.TestCase):
         result = execute(macos.MacAdapter(api=FakeMacApi()), document())
         self.assertEqual(result["clicks"][0]["evidence"], "posted")
         self.assertNotIn("title", result)
+
+    def test_overlay_at_the_control_centre_refuses_without_any_click(self):
+        api = FakeMacApi(root=True, control_hit=False)
+        with self.assertRaises(contract.ContractError) as error:
+            execute(macos.MacAdapter(api=api), document())
+        self.assertEqual(error.exception.code, "control-hit")
+        self.assertEqual(api.clicks, [])
+        self.assertEqual(api.hit_calls,
+                         [(WINDOW_RAW["id"], LABEL, dict(CONTROL["bounds"]), 240, 315)])
+
+    def test_adapter_hit_verdict_is_strictly_boolean(self):
+        rect = dict(CONTROL["bounds"])
+        for verdict, expected in ((True, True), (1, False), (-1, False), (None, False)):
+            with self.subTest(verdict=verdict):
+                adapter = macos.MacAdapter(api=FakeMacApi(control_hit=verdict))
+                self.assertEqual(adapter.hit_test_control(dict(WINDOW_RAW), LABEL, rect, 240, 315),
+                                 expected)
 
 
 class MacProcessIdentityTests(unittest.TestCase):
@@ -794,6 +987,135 @@ class MacAxWalkTests(unittest.TestCase):
         button = self.button(frame={"x": 200, "y": 300, "width": 0, "height": 30})
         self.refused(self.api(button=button)[0], "control-geometry")
 
+
+class MacControlIdentityTests(unittest.TestCase):
+    """AX hit identity: CFEqual against the ACTUAL selected AX element."""
+
+    RECT = {"x": 200, "y": 300, "width": 80, "height": 30}
+
+    def button(self, title=None, parent=None, role="AXButton", **frame):
+        bounds = {"x": 200, "y": 300, "width": 80, "height": 30}
+        bounds.update(frame)
+        return {"role": role, "title": LABEL if title is None else title, "enabled": True,
+                "hidden": False, "frame": bounds, "children": [], "parent": parent}
+
+    def api(self, hit=None, position=None, cf_equal=None, extra=None):
+        api = macos.QuartzApi.__new__(macos.QuartzApi)
+        tree = {"title": TITLE, "frame": dict(WINDOW_RAW["bounds"]), "role": "AXWindow",
+                "children": []}
+        target = self.button(parent=tree)
+        tree["children"] = [] if extra is None else list(extra)
+        tree["children"].insert(0, target)
+        api.ax = types.SimpleNamespace(
+            kAXWindowsAttribute="AXWindows",
+            AXUIElementCreateApplication=lambda pid: "application",
+            AXUIElementCopyElementAtPosition=lambda app, x, y, out: (0, hit) if position is None else position,
+            CFEqual=cf_equal if cf_equal is not None else (lambda left, right: left is right))
+        api.quartz = types.SimpleNamespace()
+        api.windows = lambda pid: [tree]
+        api.title = lambda element: element.get("title") or ""
+        api.frame = lambda element: element["frame"]
+        api.attribute = lambda element, name: {
+            "AXRole": element.get("role"), "AXTitle": element.get("title"),
+            "AXDescription": element.get("description"), "AXEnabled": element.get("enabled"),
+            "AXHidden": element.get("hidden"), "AXChildren": element.get("children"),
+            "AXParent": element.get("parent")}.get(name)
+        api.target = target
+        return api
+
+    def verdict(self, api):
+        return api.hit_test_control(dict(WINDOW_RAW), LABEL, self.RECT, 240, 315)
+
+    def refusal(self, api, code, label=None):
+        with self.assertRaises(contract.ContractError) as error:
+            api.hit_test_control(dict(WINDOW_RAW), LABEL if label is None else label,
+                                 self.RECT, 240, 315)
+        self.assertEqual(error.exception.code, code)
+
+    def test_selected_control_and_a_legitimate_child_accept(self):
+        api = self.api()
+        api.ax.AXUIElementCopyElementAtPosition = lambda app, x, y, out: (0, api.target)
+        self.assertTrue(self.verdict(api))
+        api = self.api()
+        child = {"role": "AXStaticText", "title": "", "parent": api.target}
+        api.ax.AXUIElementCopyElementAtPosition = lambda app, x, y, out: (0, child)
+        self.assertTrue(self.verdict(api))
+
+    def test_overlay_sibling_above_the_control_refuses(self):
+        overlay = self.button(title="解锁")
+        api = self.api(hit=overlay, extra=[overlay])
+        overlay["parent"] = api.windows(4242)[0]
+        self.assertFalse(self.verdict(api))
+        transparent = {"role": "AXGroup", "title": "", "parent": api.windows(4242)[0]}
+        self.assertFalse(self.verdict(self.api(hit=transparent)))
+        window = api.windows(4242)[0]
+        self.assertFalse(self.verdict(self.api(hit=window)))  # AXWindow is never the control
+
+    def test_rect_change_duplicate_and_unknown_label_refuse(self):
+        changed = self.api(hit=None)
+        changed.target["frame"] = {"x": 201, "y": 300, "width": 80, "height": 30}
+        self.refusal(changed, "control-hit")
+        duplicate = self.api()
+        extra = self.button(parent=duplicate.windows(4242)[0])
+        duplicate.windows(4242)[0]["children"].append(extra)
+        self.refusal(duplicate, "control-ambiguous")
+        self.refusal(self.api(), "control-missing", label="解锁")
+
+    def test_cycle_parent_limit_and_query_failures_refuse(self):
+        ring = {"role": "AXGroup", "title": ""}
+        ring["parent"] = ring
+        self.refusal(self.api(hit=ring), "a11y-query")
+
+        node, chain = {"role": "AXGroup", "title": "", "parent": None}, []
+        for _ in range(macos.MAX_HIT_PARENTS + 6):
+            node = {"role": "AXGroup", "title": "", "parent": node}
+            chain.append(node)
+        self.assertFalse(self.verdict(self.api(hit=chain[-1])))
+
+        self.refusal(self.api(position=(7, None)), "a11y-query")
+        failing = self.api(hit=None)
+
+        def raise_position(app, x, y, out):
+            raise OSError("AX position query failed")
+
+        failing.ax.AXUIElementCopyElementAtPosition = raise_position
+        self.refusal(failing, "a11y-query")
+
+        broken_parent = self.api(hit={"role": "AXGroup", "title": "", "parent": None})
+        read = broken_parent.attribute
+
+        def attribute(element, name):
+            if name == "AXParent":
+                raise OSError("AXParent query failed")
+            return read(element, name)
+
+        broken_parent.attribute = attribute
+        self.refusal(broken_parent, "a11y-query")
+        self.assertFalse(self.verdict(self.api(hit=None)))
+
+    def test_native_identity_is_cf_equal_not_value_equality(self):
+        twin = dict(self.api().target, children=[])
+        self.assertFalse(self.verdict(self.api(hit=twin)))
+
+        def hit_target(api):
+            api.ax.AXUIElementCopyElementAtPosition = lambda app, x, y, out: (0, api.target)
+            return api
+
+        self.assertFalse(self.verdict(hit_target(self.api(cf_equal=lambda left, right: False))))
+        for verdict, accepted in ((True, True), (1, True), (0, False), (None, False), ("yes", False)):
+            with self.subTest(verdict=verdict):
+                equal = lambda left, right, value=verdict: value
+                self.assertEqual(self.verdict(hit_target(self.api(cf_equal=equal))), accepted)
+
+    def test_cf_equal_is_required_and_never_guessed(self):
+        api = self.api()
+        del api.ax.CFEqual
+        api.ax.AXUIElementCopyElementAtPosition = lambda app, x, y, out: (0, api.target)
+        with patch.dict(sys.modules, {"CoreFoundation": None}):
+            self.refusal(api, "a11y-unavailable")
+        module = types.SimpleNamespace(CFEqual=lambda left, right: left is right)
+        with patch.dict(sys.modules, {"CoreFoundation": module}):
+            self.assertTrue(self.verdict(api))
 
 class FakeQuartzEvents:
     kCGHIDEventTap = 0

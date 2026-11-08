@@ -56,7 +56,9 @@ final class HelperSession {
     private let stdinPipe: Pipe
     private let stdoutPipe: Pipe
     private let lock = NSLock()
-    private let writeQueue = DispatchQueue(label: "org.locklark.browser.safari.helper.write")
+    /// Sole owner of the stdin descriptor: all access, the bounded write and
+    /// the pipe/process teardown are serialized by this gate.
+    private let stdinGate: SerializedPipeWriter
     private var decoder = FrameDecoder()
     private var pending: [[String: Any]] = []
     private var pendingBytes = 0
@@ -76,11 +78,39 @@ final class HelperSession {
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
         process.standardError = FileHandle.nullDevice
+        // stdin is non-blocking from the first use: the bounded write below
+        // relies on EAGAIN plus `poll` instead of a blocking pipe write that
+        // could pin the app behind a helper that never reads.
         do {
+            try SocketSupport.makeNonBlocking(
+                fd: stdinPipe.fileHandleForWriting.fileDescriptor
+            )
             try process.run()
         } catch {
+            try? stdinPipe.fileHandleForWriting.close()
+            try? stdoutPipe.fileHandleForReading.close()
             throw RelayError.unavailable
         }
+        self.stdinGate = SerializedPipeWriter(
+            fd: stdinPipe.fileHandleForWriting.fileDescriptor,
+            write: { fd, data, deadline, isCancelled in
+                try SocketSupport.writeAllPipeBounded(
+                    fd: fd,
+                    data: data,
+                    deadline: deadline,
+                    isCancelled: isCancelled
+                )
+            },
+            teardown: {
+                // Runs on the gate queue only, so it can never close the pipes
+                // or terminate the process underneath an in-flight write.
+                HelperSession.tearDown(
+                    process: process,
+                    stdinPipe: stdinPipe,
+                    stdoutPipe: stdoutPipe
+                )
+            }
+        )
         stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             if data.isEmpty {
@@ -102,22 +132,28 @@ final class HelperSession {
     }
 
     func write(_ frame: [String: Any]) throws {
-        lock.lock()
-        if closed || unavailable {
-            lock.unlock()
-            throw RelayError.unavailable
-        }
+        // Encoding happens before any lock is taken: a throwing encoder must
+        // never leave session state locked, and it has no side effect on the
+        // gate, so the next write or close still works.
         let encoded = try FrameCodec.encodeJSONObject(frame)
+        lock.lock()
+        let usable = !closed && !unavailable
         lock.unlock()
-        try writeQueue.sync {
+        guard usable else { throw RelayError.unavailable }
+        do {
             // Helper stdin is a pipe, so SO_NOSIGPIPE does not apply: the
-            // thread-local SIGPIPE guard in writeAllPipe turns a helper that
-            // already exited into a fixed RelayError.unavailable instead of
-            // terminating the app. A partial frame is never retried.
-            try SocketSupport.writeAllPipe(
-                fd: stdinPipe.fileHandleForWriting.fileDescriptor,
-                data: encoded
-            )
+            // thread-local SIGPIPE guard in the bounded write turns a helper
+            // that already exited into a fixed RelayError.unavailable instead
+            // of terminating the app. The gate re-checks revocation inside its
+            // queued operation and the bounded write observes it through its
+            // cancellation callback, so close can never pull stdin out from
+            // under this write. A partial frame is never retried.
+            try stdinGate.write(encoded)
+        } catch {
+            // Unknown number of bytes may have reached the helper: drop the
+            // session instead of replaying the frame.
+            markUnavailable()
+            throw RelayError.unavailable
         }
     }
 
@@ -156,7 +192,7 @@ final class HelperSession {
         } catch {
             unavailable = true
             lock.unlock()
-            closeProcess()
+            stdinGate.close()
             return
         }
         for frameData in decoded {
@@ -179,16 +215,23 @@ final class HelperSession {
         }
         let failed = unavailable
         lock.unlock()
-        if failed { closeProcess() }
+        if failed { stdinGate.close() }
     }
 
     private func markUnavailable() {
+        // Revoke first (short gate state lock, never the write queue) so a
+        // queued write refuses and an in-flight bounded write aborts on its
+        // next poll slice.
+        stdinGate.revoke()
         lock.lock()
         unavailable = true
         lock.unlock()
     }
 
     func close() {
+        // Refuse queued writes before touching session state: `revoke` only
+        // takes the gate's short state lock and never waits for the queue.
+        stdinGate.revoke()
         lock.lock()
         if closed {
             lock.unlock()
@@ -198,10 +241,18 @@ final class HelperSession {
         pending.removeAll()
         pendingBytes = 0
         lock.unlock()
-        closeProcess()
+        // No session lock is held here. The gate waits at most its bounded
+        // deadline for a current write and then tears down exactly once, on
+        // its own queue, before the pipes or process can be closed.
+        stdinGate.close()
     }
 
-    private func closeProcess() {
+    /// Single teardown body. Only the gate queue calls this.
+    private static func tearDown(
+        process: Process,
+        stdinPipe: Pipe,
+        stdoutPipe: Pipe
+    ) {
         stdoutPipe.fileHandleForReading.readabilityHandler = nil
         process.terminationHandler = nil
         if process.isRunning {

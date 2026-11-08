@@ -78,6 +78,7 @@ ERROR_MESSAGES = {
     "control-disabled": "Native acceptance control is disabled",
     "control-geometry": "Native acceptance control geometry unavailable",
     "control-hidden": "Native acceptance control is not visible",
+    "control-hit": "Native acceptance click target identity not confirmed",
     "control-missing": "Native acceptance control not ready",
     "control-offscreen": "Native acceptance control is off screen",
     "control-overrun": "Native accessibility control budget exceeded",
@@ -512,6 +513,35 @@ def check_point(adapter, window, x, y):
     return x, y
 
 
+def confirm_control_hit(adapter, window, label, rect, x, y):
+    """Refuse unless the point provably resolves to THIS selected control.
+
+    ``check_point`` only proves the point is inside the selected top-level
+    window, so a same-root sibling widget or a transparent overlay drawn above
+    the control still passes it.  The adapter's ``hit_test_control`` must
+    re-resolve the selected label inside the CURRENT bound window under the
+    same role/name rules, compare the current rectangle with the authorising
+    one and confirm that the element actually under the point is that control
+    or one of its descendants.
+
+    Only the literal ``True`` authorises the click.  An adapter that does not
+    implement the hook is refused rather than trusted by omission, and every
+    other verdict, exception or changed rectangle fails closed before input.
+    """
+    probe = getattr(adapter, "hit_test_control", None)
+    if probe is None:
+        raise ContractError("control-hit")
+    try:
+        verdict = probe(window, label, dict(rect), x, y)
+    except ContractError:
+        raise
+    except Exception:
+        raise ContractError("a11y-query")
+    if verdict is not True:
+        raise ContractError("control-hit")
+    return x, y
+
+
 def ensure_focus(plan, adapter, window, budget):
     """Single activation attempt, then re-observed foreground verification."""
     if focus_matches(adapter, window, budget):
@@ -640,6 +670,10 @@ def execute(plan, adapter):
             ensure_focus(plan, adapter, window, budget)
             fresh, rect = authorize(plan, adapter, window, budget, action["click_label"])
             x, y = check_point(adapter, fresh, *_center(rect))
+            # The window-root hit test above cannot see a sibling or
+            # transparent overlay: re-prove that the point resolves to the
+            # uniquely selected control itself before the single click.
+            confirm_control_hit(adapter, fresh, action["click_label"], rect, x, y)
             kind = evidence_kind(adapter)
             ack = adapter.click(x, y)  # exactly one physical batch
             clicks.append(click_record(fresh, action["click_label"], x, y,

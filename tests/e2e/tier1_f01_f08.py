@@ -7,12 +7,15 @@ probe first and then raise the progressive gate, so pre-merge runs report
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
+from pathlib import Path
 
 from .harness import e2e_test
 from .support import (
+    add_item,
     add_login,
     assert_audit_chain,
     audit_events,
@@ -39,6 +42,9 @@ from .support import (
     gate,
     go_package_test,
     health_report,
+    init_vault,
+    item_metadata,
+    legacy_rich_1pux,
     list_rows,
     make_vault,
     multi_category_1pux,
@@ -51,6 +57,7 @@ from .support import (
     reveal_login,
     source_text,
     sources_contain,
+    write_typed_item,
     f13_watchtower_ready,
 )
 
@@ -62,47 +69,71 @@ def _run_team_sync_help(ctx) -> str:
     return (result.stdout or "") + (result.stderr or "")
 
 
-def _import_multi_category(ctx, vault) -> tuple[dict, dict]:
-    archive = multi_category_1pux(ctx)
-    plan = pty(
+V2_MODEL = ("--model", "v2")
+
+
+def _plan_import(
+    ctx,
+    vault,
+    archive,
+    *,
+    v2: bool = True,
+    confirm: str = "PLAN",
+):
+    args = [
+        "personal",
+        "plan-import-1pux",
+        "--file",
+        str(vault["path"]),
+        "--source",
+        str(archive),
+    ]
+    if v2:
+        args.extend(V2_MODEL)
+    return pty(
         ctx,
-        ["personal", "plan-import-1pux", "--file", str(vault["path"]), "--source", str(archive)],
+        args,
         password=vault["password"],
         secret=vault["secret"],
-        extra=[("输入 PLAN 确认生成导入计划", "PLAN")],
+        extra=[("输入 PLAN 确认生成导入计划", confirm)],
     )
-    assert plan.returncode == 0, plan.transcript[-1200:]
-    payload = plan.json()
-    digest = payload["report"]["source_digest"]
-    apply = pty(
+
+
+def _import_archive(ctx, vault, archive, digest, *, v2: bool = True):
+    args = [
+        "personal",
+        "import-1pux",
+        "--file",
+        str(vault["path"]),
+        "--source",
+        str(archive),
+        "--digest",
+        digest,
+    ]
+    if v2:
+        args.extend(V2_MODEL)
+    return pty(
         ctx,
-        [
-            "personal",
-            "import-1pux",
-            "--file",
-            str(vault["path"]),
-            "--source",
-            str(archive),
-            "--digest",
-            digest,
-        ],
+        args,
         password=vault["password"],
         secret=vault["secret"],
         extra=[("输入 SAVE 确认整批导入", "SAVE")],
     )
+
+
+def _import_multi_category(ctx, vault) -> tuple[dict, dict]:
+    archive = multi_category_1pux(ctx)
+    plan = _plan_import(ctx, vault, archive)
+    assert plan.returncode == 0, plan.transcript[-1200:]
+    payload = plan.json()
+    digest = payload["report"]["source_digest"]
+    apply = _import_archive(ctx, vault, archive, digest)
     assert apply.returncode == 0, apply.transcript[-1200:]
     return payload, apply.json()
 
 
 def _plan_multi_category(ctx, vault):
-    archive = multi_category_1pux(ctx)
-    return pty(
-        ctx,
-        ["personal", "plan-import-1pux", "--file", str(vault["path"]), "--source", str(archive)],
-        password=vault["password"],
-        secret=vault["secret"],
-        extra=[("输入 PLAN 确认生成导入计划", "PLAN")],
-    )
+    return _plan_import(ctx, vault, multi_category_1pux(ctx))
 
 
 # ---------------------------------------------------------------------------
@@ -500,10 +531,99 @@ def t1_f5_05(ctx):
 # F6 - item model v2 and 1PUX mapping
 # ---------------------------------------------------------------------------
 
+# The documented `personal add-item` category projection (docs/typed-personal-cli.md).
+# SSH keys, documents and raw attachment bodies are deliberately outside this
+# command and are covered by the explicit PENDING case below, never dropped.
+F6_ADD_ITEM_CATEGORIES = (
+    "login",
+    "password",
+    "secure_note",
+    "credit_card",
+    "identity",
+    "api_credential",
+    "database",
+    "server",
+    "bank_account",
+    "wireless_router",
+    "software_license",
+    "membership",
+    "crypto_wallet",
+    "medical_record",
+)
 
-@e2e_test("T1_F6_01", 1, ["F6"], "Items persist across all v2 categories")
+F6_CONCEALED_CANARY = "CANARY-T1-F6-02-CONCEALED-7731"
+F6_AMBIGUOUS_CANARY = "CANARY-T1-F6-02-AMBIGUOUS-8822"
+F6_TAGS = ("F6Tag-Alpha-4417", "F6Tag-Beta-4417")
+F6_TAG_FIELD_CANARY = "CANARY-T1-F6-04-PIN-9933"
+
+
+def _terminal_command_ready(ctx, args):
+    """Probe a personal command without trusting the partial top-level help text.
+
+    A real command that reaches the interactive-terminal boundary exists; a
+    missing command falls through to the fixed ``usage:`` string instead.
+    """
+
+    result = ctx.run_cli(args)
+    text = (result.stdout or "") + (result.stderr or "")
+    return "interactive terminal" in text and "usage: locklark personal" not in text
+
+
+def _add_item_ready(ctx):
+    return _terminal_command_ready(
+        ctx, ["personal", "add-item", "--file", "unused.ll", "--input", "unused.json"]
+    )
+
+
+def _references_ready(ctx):
+    return _terminal_command_ready(ctx, ["personal", "references", "--file", "unused.ll"])
+
+
+def _row_by_id(rows, item_id):
+    row = next((entry for entry in rows if entry.get("id") == item_id), None)
+    assert row is not None, f"item {item_id} missing from personal list"
+    return row
+
+
+def _disclosed_value(result) -> object:
+    match = re.search(r'\r?\n("(?:[^"\\]|\\.)*")\s*$', result.transcript)
+    assert match, f"no JSON disclosure on the terminal: {result.transcript[-400:]!r}"
+    return json.loads(match.group(1))
+
+
+def _f6_document(category: str, index: int) -> dict:
+    document: dict = {
+        "category": category,
+        "title": f"Matrix {category}",
+        "tags": [f"matrix-{index}"],
+    }
+    if category == "login":
+        document["username"] = "matrix-user"
+        document["password"] = "matrix-pass-2026-Aa1!"
+        document["url"] = "https://matrix.example.test/login"
+    elif category == "password":
+        document["password"] = "matrix-password-2026"
+    elif category == "secure_note":
+        document["notes"] = "matrix secure note"
+    elif category == "credit_card":
+        document["credit_card"] = {
+            "cardholder_name": "Matrix Holder",
+            "number": "4111111111111111",
+            "expiry_date": "2030-01",
+        }
+    elif category == "identity":
+        document["identity"] = {"first_name": "Matrix", "last_name": "Identity"}
+    return document
+
+
+@e2e_test(
+    "T1_F6_01",
+    1,
+    ["F6"],
+    "Documented add-item category matrix persists in the encrypted vault",
+)
 def t1_f6_01(ctx):
-    ready = cli_supports(ctx, "add-item")
+    ready = _add_item_ready(ctx)
     gate(
         ctx,
         "F6",
@@ -512,14 +632,37 @@ def t1_f6_01(ctx):
         "model and category browser exist in the desktop/browser host",
     )
     vault = make_vault(ctx)
-    rows = list_rows(ctx, vault)
-    assert rows and rows[0]["kind"] == "login"
-    assert "add-item" in ctx.run_cli(["help"]).stdout
+    created = {}
+    for index, category in enumerate(F6_ADD_ITEM_CATEGORIES):
+        payload = add_item(
+            ctx,
+            vault,
+            _f6_document(category, index),
+            name=f"category-{index}.json",
+        )
+        created[category] = payload["id"]
+    rows = list_rows(ctx, vault, "all")
+    by_id = {row["id"]: row for row in rows}
+    categories = set()
+    for category, item_id in created.items():
+        row = by_id.get(item_id)
+        assert row is not None, f"{category} item missing from list"
+        require_hex64(row["revision"])
+        detail = item_metadata(ctx, vault, row)
+        assert detail["id"] == item_id, detail
+        assert detail["category"] == category, (category, detail)
+        categories.add(detail["category"])
+    assert categories >= set(F6_ADD_ITEM_CATEGORIES), categories
 
 
-@e2e_test("T1_F6_02", 1, ["F6"], "Sections and typed custom fields resolve through op:// references")
+@e2e_test(
+    "T1_F6_02",
+    1,
+    ["F6"],
+    "Created concealed section reference discloses by ref and refuses ambiguity",
+)
 def t1_f6_02(ctx):
-    ready = cli_supports(ctx, "add-item") and cli_supports(ctx, "references")
+    ready = _add_item_ready(ctx) and _references_ready(ctx)
     gate(
         ctx,
         "F6",
@@ -529,20 +672,127 @@ def t1_f6_02(ctx):
         "through the CLI",
     )
     vault = make_vault(ctx)
-    result = pty(
+    created = add_item(
+        ctx,
+        vault,
+        {
+            "category": "login",
+            "title": "Recovery Kit",
+            "username": "rec-user",
+            "password": "rec-pass-2026-Aa1!",
+            "sections": [
+                {
+                    "id": "recovery",
+                    "title": "Recovery",
+                    "fields": [
+                        {
+                            "id": "recovery_code",
+                            "label": "Recovery Code",
+                            "type": "concealed",
+                            "value": F6_CONCEALED_CANARY,
+                        }
+                    ],
+                }
+            ],
+        },
+        name="recovery-kit.json",
+    )
+    references = pty(
         ctx,
         ["personal", "references", "--file", str(vault["path"])],
         password=vault["password"],
         secret=vault["secret"],
     )
-    assert result.returncode == 0, result.transcript[-1000:]
-    references = result.json()
-    assert references["items"], references
+    assert references.returncode == 0, references.transcript[-1000:]
+    index = references.json()
+    row = next(
+        (entry for entry in index["items"] if entry["id"] == created["id"]), None
+    )
+    assert row is not None, index
+    ref = row["references"]["recovery/recovery_code"]
+    assert ref.startswith("op://"), ref
+    revealed = pty(
+        ctx,
+        [
+            "personal",
+            "reveal-ref",
+            "--file",
+            str(vault["path"]),
+            "--ref",
+            ref,
+            "--revision",
+            created["revision"],
+        ],
+        password=vault["password"],
+        secret=vault["secret"],
+        extra=[("输入 SHOW 确认按引用显示", "SHOW")],
+    )
+    assert revealed.returncode == 0, revealed.transcript[-1000:]
+    assert _disclosed_value(revealed) == F6_CONCEALED_CANARY
+
+    ambiguous = add_item(
+        ctx,
+        vault,
+        {
+            "category": "login",
+            "title": "Shared Field Kit",
+            "sections": [
+                {
+                    "id": "one",
+                    "title": "One",
+                    "fields": [
+                        {
+                            "id": "shared_one",
+                            "label": "Shared Code",
+                            "type": "concealed",
+                            "value": F6_AMBIGUOUS_CANARY,
+                        }
+                    ],
+                },
+                {
+                    "id": "two",
+                    "title": "Two",
+                    "fields": [
+                        {
+                            "id": "shared_two",
+                            "label": "Shared Code",
+                            "type": "concealed",
+                            "value": F6_AMBIGUOUS_CANARY,
+                        }
+                    ],
+                },
+            ],
+        },
+        name="shared-field-kit.json",
+    )
+    refused = pty(
+        ctx,
+        [
+            "personal",
+            "reveal-ref",
+            "--file",
+            str(vault["path"]),
+            "--ref",
+            f"op://Personal/{ambiguous['id']}/Shared Code",
+            "--revision",
+            ambiguous["revision"],
+        ],
+        password=vault["password"],
+        secret=vault["secret"],
+        extra=[("输入 SHOW 确认按引用显示", "SHOW")],
+    )
+    assert refused.returncode != 0, refused.transcript[-1000:]
+    ctx.assert_no_canary_leak(F6_AMBIGUOUS_CANARY, refused.stdout, refused.transcript)
 
 
-@e2e_test("T1_F6_03", 1, ["F6"], "Multiple URLs per login match across primary and secondary URLs")
+@e2e_test(
+    "T1_F6_03",
+    1,
+    ["F6"],
+    "Created multi-URL login matches primary and secondary but never a never-URL",
+)
 def t1_f6_03(ctx):
-    ready = cli_supports(ctx, "add-item")
+    ready = _add_item_ready(ctx)
     gate(
         ctx,
         "F6",
@@ -550,60 +800,206 @@ def t1_f6_03(ctx):
         "CLI add-item command is absent; multi-URL fields exist in the v2 host item "
         "model but cannot be created through the CLI",
     )
-    vault = make_vault(ctx, ["Corp SSO"])
-    from .support import edit_url, match_logins
+    vault = make_vault(ctx)
+    created = add_item(
+        ctx,
+        vault,
+        {
+            "category": "login",
+            "title": "Corp SSO",
+            "username": "alice",
+            "password": "multi-url-pass-2026",
+            "url": "https://sso.corp.example.test/login",
+            "urls": [
+                {
+                    "label": "primary",
+                    "url": "https://sso.corp.example.test/login",
+                    "primary": True,
+                },
+                {"label": "portal", "url": "https://portal.corp.example.test/auth"},
+                {
+                    "label": "blocked",
+                    "url": "https://blocked.corp.example.test/",
+                    "match_mode": "never",
+                },
+            ],
+        },
+        name="multi-url-login.json",
+    )
+    from .support import match_logins
 
-    item = vault["items"][0]
-    revision = edit_url(ctx, vault, item["id"], item["revision"], "https://portal.corp.example.com/auth")
-    rows = match_logins(ctx, vault, "https://portal.corp.example.com")
-    assert rows and rows[0]["id"] == item["id"], rows
-    assert revision != item["revision"]
+    primary = match_logins(ctx, vault, "https://sso.corp.example.test")
+    secondary = match_logins(ctx, vault, "https://portal.corp.example.test")
+    never = match_logins(ctx, vault, "https://blocked.corp.example.test")
+    for rows in (primary, secondary):
+        assert len(rows) == 1 and rows[0]["id"] == created["id"], rows
+    assert never == [], never
+    row = _row_by_id(list_rows(ctx, vault), created["id"])
+    detail = item_metadata(ctx, vault, row)
+    primary_urls = [entry for entry in detail["urls"] if entry.get("primary")]
+    assert len(primary_urls) == 1, detail
+    assert primary_urls[0]["url"] == "https://sso.corp.example.test/login", detail
+    by_url = {entry["url"]: entry.get("match_mode", "") for entry in detail["urls"]}
+    assert by_url == {
+        "https://sso.corp.example.test/login": "",
+        "https://portal.corp.example.test/auth": "",
+        "https://blocked.corp.example.test/": "never",
+    }, detail
 
 
-@e2e_test("T1_F6_04", 1, ["F6"], "Tags and favorite metadata survive KDBX save/reload and backup")
+@e2e_test(
+    "T1_F6_04",
+    1,
+    ["F6"],
+    "Created tags and favorite stay encrypted yet survive backup/restore",
+)
 def t1_f6_04(ctx):
-    ready = cli_supports(ctx, "add-item")
+    ready = _add_item_ready(ctx)
     gate(
         ctx,
         "F6",
         ready,
         "CLI add-item command is absent; tags/favorite metadata are part of the v2 "
-        "host item model, so the KDBX round trip cannot be driven from the CLI",
+        "host item model, so the encrypted round trip cannot be driven from the CLI",
     )
-    vault = make_vault(ctx, ["GitHub"])
+    vault = make_vault(ctx)
+    created = add_item(
+        ctx,
+        vault,
+        {
+            "category": "login",
+            "title": "Tagged GitHub",
+            "username": "alice",
+            "password": "tagged-pass-2026",
+            "favorite": True,
+            "tags": list(F6_TAGS),
+            "sections": [
+                {
+                    "id": "extras",
+                    "title": "Extras",
+                    "fields": [
+                        {
+                            "id": "support_pin",
+                            "label": "Support PIN",
+                            "type": "concealed",
+                            "value": F6_TAG_FIELD_CANARY,
+                        }
+                    ],
+                }
+            ],
+        },
+        name="tagged-github.json",
+    )
+    row = _row_by_id(list_rows(ctx, vault), created["id"])
+    detail = item_metadata(ctx, vault, row)
+    assert detail["favorite"] is True, detail
+    assert set(detail["tags"]) == set(F6_TAGS), detail
+    assert detail["section_ids"] == ["extras"], detail
+    assert detail["section_field_counts"] == {"extras": 1}, detail
+    vault_bytes = Path(vault["path"]).read_bytes()
+    for canary in (*F6_TAGS, F6_TAG_FIELD_CANARY):
+        ctx.assert_no_canary_leak(canary, vault_bytes)
+
     backup = ctx.temp_dir / "tags-backup.ll"
-    result = pty(
+    created_backup = pty(
         ctx,
         ["personal", "backup", "--file", str(vault["path"]), "--out", str(backup)],
         password=vault["password"],
         secret=vault["secret"],
         extra=[("重新输入恢复码", None)],
     )
-    assert result.returncode == 0, result.transcript[-1000:]
+    assert created_backup.returncode == 0, created_backup.transcript[-1000:]
     assert backup.is_file()
+    ctx.assert_no_canary_leak(F6_TAG_FIELD_CANARY, backup.read_bytes())
 
-
-@e2e_test("T1_F6_05", 1, ["F6"], "1PUX import maps multi-category items, sections, tags and favorites")
-def t1_f6_05(ctx):
-    vault = make_vault(ctx)
-    plan = _plan_multi_category(ctx, vault)
-    ready = plan.returncode == 0
-    gate(
+    restored = ctx.temp_dir / "tags-restored.ll"
+    restored_result = pty(
         ctx,
-        "F6",
-        ready,
-        "CLI plan-import-1pux rejects non-basic-login archives wholesale "
-        "(command-surface gap); the v2 item model exists in the host",
+        ["personal", "restore", "--file", str(backup), "--out", str(restored)],
+        password=vault["password"],
+        secret=vault["secret"],
+        extra=[("此备份的恢复码", created_backup.issued[0]), ("重新输入新 Secret Key", None)],
     )
+    assert restored_result.returncode == 0, restored_result.transcript[-1000:]
+    assert restored_result.issued
+    restored_rows = pty(
+        ctx,
+        ["personal", "list", "--file", str(restored)],
+        password=vault["password"],
+        secret=restored_result.issued[0],
+    )
+    assert restored_rows.returncode == 0, restored_rows.transcript[-800:]
+    restored_row = _row_by_id(restored_rows.json(), created["id"])
+    restored_vault = {
+        "path": restored,
+        "password": vault["password"],
+        "secret": restored_result.issued[0],
+    }
+    restored_detail = item_metadata(ctx, restored_vault, restored_row)
+    assert restored_detail["favorite"] is True, restored_detail
+    assert set(restored_detail["tags"]) == set(F6_TAGS), restored_detail
+    assert restored_detail["section_ids"] == ["extras"], restored_detail
+
+
+@e2e_test(
+    "T1_F6_05",
+    1,
+    ["F6"],
+    "Explicit v2 1PUX plan/import maps four categories; default and changed digest refuse",
+)
+def t1_f6_05(ctx):
+    vault = init_vault(ctx)
+    archive = multi_category_1pux(ctx)
+    default_plan = _plan_import(ctx, vault, archive, v2=False)
+    assert default_plan.returncode != 0, default_plan.transcript[-1200:]
+    assert "unsupported 1PUX archive feature" in default_plan.transcript, (
+        default_plan.transcript[-800:]
+    )
+    plan = _plan_import(ctx, vault, archive)
+    assert plan.returncode == 0, plan.transcript[-1200:]
     payload = plan.json()
-    assert payload["report"]["items"] >= 4, payload
-    _import_multi_category(ctx, vault)
+    assert payload["report"]["profile"] == "1pux-full-v2", payload
+    assert payload["report"]["items"] == 4, payload
+    digest = payload["report"]["source_digest"]
+
+    changed = _import_archive(ctx, vault, archive, "0" * 64)
+    assert changed.returncode != 0, changed.transcript[-1200:]
+    assert "1PUX source changed since the confirmed plan" in changed.transcript, (
+        changed.transcript[-1200:]
+    )
+    assert list_rows(ctx, vault) == [], "changed digest imported part of the batch"
+
+    apply = _import_archive(ctx, vault, archive, digest)
+    assert apply.returncode == 0, apply.transcript[-1200:]
     rows = list_rows(ctx, vault, "all")
-    titles = {row["title"] for row in rows}
-    assert {"Corp SSO", "Runbook", "Ada Lovelace", "Corp Visa"} <= titles, titles
+    titles = {row["title"]: row for row in rows}
+    assert {"Corp SSO", "Runbook", "Ada Lovelace", "Corp Visa"} <= set(titles), titles
+    sso = item_metadata(ctx, vault, titles["Corp SSO"])
+    assert sso["category"] == "login", sso
+    assert sso["favorite"] is True, sso
+    assert set(sso["tags"]) == {"imported", "sso"}, sso
+    assert {entry["url"] for entry in sso["urls"]} == {
+        "https://sso.corp.example.test/login",
+        "https://portal.corp.example.test/auth",
+    }, sso
+    assert [entry for entry in sso["urls"] if entry.get("primary")], sso
+    assert sso["section_ids"] == ["recovery"], sso
+
+    legacy = legacy_rich_1pux(ctx)
+    legacy_plan = _plan_import(ctx, vault, legacy)
+    assert legacy_plan.returncode != 0, legacy_plan.transcript[-1200:]
+    assert "unsupported 1PUX archive feature" in legacy_plan.transcript, (
+        legacy_plan.transcript[-1200:]
+    )
+    assert len(list_rows(ctx, vault, "all")) == 4, "legacy refusal mutated the vault"
 
 
-@e2e_test("T1_F6_06", 1, ["F6"], "Existing v1 login-notes vaults migrate without ID/revision churn")
+@e2e_test(
+    "T1_F6_06",
+    1,
+    ["F6"],
+    "Existing v1 login-notes vaults migrate without ID/revision churn",
+)
 def t1_f6_06(ctx):
     # This path is intentionally baseline-capable: the current CLI already
     # creates and reads login-notes-v2 vaults, which is the compatibility floor
@@ -619,6 +1015,209 @@ def t1_f6_06(ctx):
     assert_audit_chain(events)
     second = list_rows(ctx, vault)
     assert second[0]["id"] == item["id"]
+
+
+@e2e_test(
+    "T1_F6_07",
+    1,
+    ["F6"],
+    "Document creation with explicit private attachment files round-trips exact bytes",
+)
+def t1_f6_07(ctx):
+    ready = _add_item_ready(ctx)
+    gate(
+        ctx,
+        "F6",
+        ready,
+        "CLI `personal add-item` command is absent; attachment documents cannot be probed",
+    )
+    vault = make_vault(ctx)
+    bodies = [bytes([0, 1, 255, 254, 65, 0, 127, 128]), b"second\x00body\xff\n", b""]
+    attachments = []
+    for index, body in enumerate(bodies):
+        path = ctx.temp_dir / f"attachment-{index}.bin"
+        path.write_bytes(body)
+        path.chmod(0o600)
+        attachments.append(
+            {
+                "file": str(path),
+                "file_name": path.name,
+                "mime_type": "application/octet-stream",
+            }
+        )
+    total_bytes = sum(len(body) for body in bodies)
+    assert total_bytes == 21
+    document = {
+        "category": "document",
+        "title": "Synthetic binary document",
+        "attachments": attachments,
+    }
+    source = write_typed_item(ctx, "document-attachments.json", document)
+
+    def create(consent):
+        return pty(
+            ctx,
+            [
+                "personal",
+                "add-item",
+                "--file",
+                str(vault["path"]),
+                "--input",
+                str(source),
+            ],
+            password=vault["password"],
+            secret=vault["secret"],
+            extra=[] if consent is None else [("输入 SAVE 确认新增条目", consent)],
+        )
+
+    baseline = len(list_rows(ctx, vault, "all"))
+
+    saved = create("SAVE")
+    assert saved.returncode == 0, saved.transcript[-800:]
+    receipt = saved.json()
+    assert set(receipt) == {"status", "id", "revision"}, receipt
+    assert receipt["status"] == "created", receipt
+    require_hex32(receipt["id"])
+    require_hex64(receipt["revision"])
+    assert f"{len(attachments)} 个附件共 {total_bytes} 字节" in saved.transcript, (
+        saved.transcript[-400:]
+    )
+
+    # Neither the SAVE receipt, the consent prompt nor the transcript may echo
+    # the document title, an attachment path/name or any raw body bytes.
+    visible = saved.transcript + saved.stdout
+    for value in [document["title"], *[entry["file"] for entry in attachments],
+                  *[entry["file_name"] for entry in attachments]]:
+        assert value not in visible, value
+    for body in bodies:
+        if body:
+            assert body.hex() not in visible.lower()
+
+    rows = list_rows(ctx, vault, "all")
+    assert len(rows) == baseline + 1, "document creation did not add exactly one item"
+    row = next(entry for entry in rows if entry["id"] == receipt["id"])
+    assert row["revision"] == receipt["revision"], row
+    assert row["kind"] == "document", row
+
+    detail = item_metadata(ctx, vault, row, verify_attachments=True)
+    assert detail["id"] == receipt["id"], detail
+    assert detail["category"] == "document", detail
+    assert detail["attachment_read_verified"] is True, detail
+    assert len(detail["attachments"]) == len(attachments), detail["attachments"]
+    for expected, meta, read in zip(
+        attachments, detail["attachments"], detail["attachment_reads"]
+    ):
+        body = next(item for item in bodies if len(item) == meta["size"] and
+                    hashlib.sha256(item).hexdigest() == meta["sha256"])
+        digest = hashlib.sha256(body).hexdigest()
+        assert meta["file_name"] == expected["file_name"], meta
+        assert meta["mime_type"] == expected["mime_type"], meta
+        assert meta["size"] == len(body), meta
+        assert meta["sha256"] == digest, meta
+        assert read == {"sha256": digest, "bytes": len(body)}, read
+    projected = json.dumps(detail)
+    for body in bodies:
+        if body:
+            assert body.hex() not in projected.lower()
+
+    # A wrong consent word mutates nothing.
+    wrong = create("NOPE")
+    assert wrong.returncode != 0, wrong.transcript[-800:]
+    assert wrong.stdout.strip() == "", wrong.stdout
+    assert len(list_rows(ctx, vault, "all")) == baseline + 1, "wrong SAVE mutated the vault"
+
+    # One attachment that is no longer owner-only is refused before SAVE, and
+    # no path or body material crosses the refusal boundary.
+    unsafe = ctx.temp_dir / "attachment-1.bin"
+    unsafe.chmod(0o644)
+    refused = create(None)
+    unsafe.chmod(0o600)
+    assert refused.returncode != 0, refused.transcript[-800:]
+    assert "输入 SAVE" not in refused.transcript, refused.transcript[-400:]
+    for entry in attachments:
+        assert entry["file"] not in refused.transcript, entry["file"]
+    assert len(list_rows(ctx, vault, "all")) == baseline + 1, (
+        "unsafe attachment refusal mutated the vault"
+    )
+
+
+@e2e_test(
+    "T1_F6_08",
+    1,
+    ["F6"],
+    "Raw SSH typed creation stays an explicit bounded refusal (pending)",
+)
+def t1_f6_08(ctx):
+    ready = _add_item_ready(ctx)
+    gate(
+        ctx,
+        "F6",
+        ready,
+        "CLI `personal add-item` command is absent; raw SSH refusal cannot be probed",
+    )
+    vault = make_vault(ctx)
+    baseline = len(list_rows(ctx, vault, "all"))
+    raw_private_key = (
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+        "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAAB\n"
+        "-----END OPENSSH PRIVATE KEY-----\n"
+    )
+    documents = {
+        "ssh-bare.json": {"category": "ssh_key", "title": "Unsupported ssh_key"},
+        "ssh-private-key.json": {
+            "category": "ssh_key",
+            "title": "Raw private key",
+            "private_key": raw_private_key,
+        },
+        "ssh-key-field.json": {
+            "category": "ssh_key",
+            "title": "Key field",
+            "sections": [
+                {
+                    "id": "ssh",
+                    "title": "SSH",
+                    "fields": [
+                        {
+                            "id": "private_key",
+                            "label": "Private Key",
+                            "type": "concealed",
+                            "value": raw_private_key,
+                        }
+                    ],
+                }
+            ],
+        },
+    }
+    for name, document in documents.items():
+        path = write_typed_item(ctx, name, document)
+        refused = pty(
+            ctx,
+            [
+                "personal",
+                "add-item",
+                "--file",
+                str(vault["path"]),
+                "--input",
+                str(path),
+            ],
+            password=vault["password"],
+            secret=vault["secret"],
+        )
+        assert refused.returncode != 0, (name, refused.transcript[-800:])
+        assert refused.stdout.strip() == "", (name, refused.stdout)
+        assert "输入 SAVE" not in refused.transcript, (name, refused.transcript[-400:])
+        for marker in ("BEGIN OPENSSH PRIVATE KEY", raw_private_key.strip(), str(path)):
+            assert marker not in refused.transcript, (name, marker)
+        assert len(list_rows(ctx, vault, "all")) == baseline, (
+            f"raw SSH refusal mutated the vault: {name}"
+        )
+    ctx.require_feature(
+        "F6",
+        False,
+        "FEATURE_NOT_YET_LANDED: F6 - typed add-item still refuses ssh_key and every raw "
+        "private-key member, so explicit raw SSH creation remains separate pending work "
+        "and is not credited to this suite",
+    )
 
 
 # ---------------------------------------------------------------------------

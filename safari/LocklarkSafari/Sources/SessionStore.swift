@@ -42,24 +42,28 @@ final class SessionStore {
                     profile: request.profileKey
                   )
             else { return RelayReply.failure(token: request.token) }
+            // A helper that already died is unusable: release its binding (so
+            // the slot is reusable now, not after the session TTL) instead of
+            // replying from a dead session.
+            guard session.isUsable else {
+                discard(session, for: request)
+                return RelayReply.failure(token: request.token)
+            }
             do {
                 // A frame is written once. After a partial write the session
                 // is dropped instead of being retried.
                 try session.write(frame)
             } catch {
-                store.discard(
-                    token: request.token,
-                    profile: request.profileKey
-                )
+                discard(session, for: request)
                 return RelayReply.failure(token: request.token)
             }
-            return session.replyFrames(token: request.token)
+            return reply(from: session, for: request)
         case .poll:
             guard let session = store.session(
                 token: request.token,
                 profile: request.profileKey
             ) else { return RelayReply.failure(token: request.token) }
-            return session.replyFrames(token: request.token)
+            return reply(from: session, for: request)
         case .close:
             switch store.close(
                 token: request.token,
@@ -71,6 +75,43 @@ final class SessionStore {
                 return RelayReply.failure(token: request.token)
             }
         }
+    }
+
+    /// Replies from an already captured session, dropping its binding as soon
+    /// as the helper is unusable. A dead helper (stdout EOF, terminated
+    /// process, failed write or protocol error) must not keep consuming one of
+    /// the bounded helper slots until the session TTL expires: a poll that
+    /// cannot be served releases the exact binding it captured and answers
+    /// with the fixed failure reply.
+    private func reply(
+        from session: HelperSession,
+        for request: RelayRequest
+    ) -> [String: Any] {
+        guard session.isUsable else {
+            discard(session, for: request)
+            return RelayReply.failure(token: request.token)
+        }
+        let frames = session.replyFrames(token: request.token)
+        // The helper can die while the reply is assembled: check again and
+        // never treat a dead binding as servable.
+        guard session.isUsable else {
+            discard(session, for: request)
+            return RelayReply.failure(token: request.token)
+        }
+        return frames
+    }
+
+    /// Drops exactly the binding this request captured. The store compares
+    /// session identity under its own lock, so a failure from an old helper can
+    /// never revoke a replacement bound to the same token/profile by a
+    /// concurrent close + reopen. Closing happens in the store, outside its
+    /// lock, exactly as for every other removal.
+    private func discard(_ session: HelperSession, for request: RelayRequest) {
+        store.discard(
+            token: request.token,
+            profile: request.profileKey,
+            matching: { $0 === session }
+        )
     }
 
     /// TTL cleanup: ready sessions past the session TTL close, opening
