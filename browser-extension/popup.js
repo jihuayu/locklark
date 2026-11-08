@@ -814,7 +814,9 @@
       await clipboard.writeText(generatedPassword);
       copied = true;
     } catch {}
-    setGeneratorStatus(copied ? "已复制" : "复制失败");
+    setGeneratorStatus(
+      copied ? "已复制；浏览器无法保证自动清除，请按需手动清理" : "复制失败",
+    );
   }
 
   /* ------------------------------------------------------------------ *
@@ -920,7 +922,6 @@
     editorInputs = [],
     searchTimer = null,
     toastTimer = null,
-    clipboardTimer = null,
     feedbackTimer = null,
     editorHadSections = false,
     editorConflict = "",
@@ -1799,7 +1800,7 @@
       toast("复制失败");
     }
   }
-  async function writeClipboard(value, button, clearAfterSeconds) {
+  async function writeClipboard(value, button) {
     if (typeof value !== "string") return;
     try {
       if (!globalThis.navigator?.clipboard?.writeText)
@@ -1816,22 +1817,12 @@
       feedbackTimer = null;
       if (button.isConnected !== false) button.textContent = original;
     }, 1500);
-    const seconds = Number.isSafeInteger(clearAfterSeconds)
-      ? clearAfterSeconds
-      : Number.isSafeInteger(lastState?.clipboardClearSeconds)
-        ? lastState.clipboardClearSeconds
-        : 30;
-    if (clipboardTimer) clearTimeout(clipboardTimer);
-    clipboardTimer = setTimeout(() => {
-      clipboardTimer = null;
-      try {
-        void globalThis.navigator?.clipboard?.writeText?.("");
-      } catch {}
-    }, seconds * 1000);
-    toast(`已复制，${seconds} 秒后自动清除`);
+    // The browser does not expose a trustworthy native clipboard lease. Never
+    // schedule a blank write: a later foreign owner must not be overwritten.
+    toast("已复制；浏览器无法保证自动清除，请按需手动清理");
   }
   async function copyValue(value, button) {
-    return writeClipboard(value, button, lastState?.clipboardClearSeconds);
+    return writeClipboard(value, button);
   }
   async function openAndFill(detail, url) {
     if (!detail || !url) return;
