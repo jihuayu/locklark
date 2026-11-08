@@ -36,6 +36,9 @@ type Item struct {
 	SSHPublicKey []byte `json:",omitempty"`
 	// Passkey material from PR #40 (ES256 WebAuthn credential record).
 	Passkey []byte `json:",omitempty"`
+	// Passkeys is the versioned multi-credential collection. It is persisted in
+	// its own protected KDBX slot and never merged into the legacy blob above.
+	Passkeys [][]byte `json:",omitempty"`
 
 	// --- Item Model v2 Extensions ---
 	Category    ItemCategory       `json:"category,omitempty"`
@@ -109,6 +112,16 @@ func validItems(items []Item, size int) bool {
 			return false
 		}
 		if !charge(len(it.Passkey)) || len(it.Passkey) > 0 && !passkey.ValidRecord(it.Passkey) {
+			return false
+		}
+		for _, rec := range it.Passkeys {
+			if !charge(len(rec)) {
+				return false
+			}
+		}
+		// The legacy single record and the collection are mutually exclusive, and
+		// a present collection must be canonical, bounded and identifier-unique.
+		if len(it.Passkeys) > 0 && (len(it.Passkey) > 0 || !validPasskeyCollection(it.Passkeys)) {
 			return false
 		}
 		cat, ok := CategoryFromKind(it.Kind, it.Category)
@@ -228,7 +241,7 @@ func validItems(items []Item, size int) bool {
 		} else if cat != CategorySSHKey && (it.SSHSeed != nil || it.SSHPublicKey != nil) {
 			return false
 		}
-		if len(it.Passkey) > 0 && cat != CategoryLogin {
+		if (len(it.Passkey) > 0 || len(it.Passkeys) > 0) && cat != CategoryLogin {
 			return false
 		}
 		if cat == CategoryDocument {
@@ -239,7 +252,7 @@ func validItems(items []Item, size int) bool {
 				return false
 			}
 			if !hasV2Extension(it) {
-				if it.Filename == "" || it.Notes != "" || it.URL != "" || it.Username != "" || it.Password != "" || it.OTP != "" || it.Passkey != nil {
+				if it.Filename == "" || it.Notes != "" || it.URL != "" || it.Username != "" || it.Password != "" || it.OTP != "" || it.Passkey != nil || it.Passkeys != nil {
 					return false
 				}
 			}
@@ -247,7 +260,7 @@ func validItems(items []Item, size int) bool {
 			if it.Filename != "" || it.Attachment != nil || it.AttachmentProtected {
 				return false
 			}
-			if it.Kind == "ssh-key" && (it.Username != "" || it.Password != "" || it.OTP != "" || it.URL != "" || it.Notes != "" || it.ImportSource != nil || it.Passkey != nil) {
+			if it.Kind == "ssh-key" && (it.Username != "" || it.Password != "" || it.OTP != "" || it.URL != "" || it.Notes != "" || it.ImportSource != nil || it.Passkey != nil || it.Passkeys != nil) {
 				return false
 			}
 			if cat == CategorySSHKey && it.Kind == "ssh-key" && len(it.SSHSeed) != ed25519.SeedSize {
@@ -317,6 +330,15 @@ func writeItems(db *kdbx.Database, metadata []byte, items []Item) error {
 		}
 		if it.PreviousState != "" {
 			e.Values = append(e.Values, slot("Locklark.PreviousState", it.PreviousState, false))
+		}
+		if len(it.Passkeys) != 0 {
+			// The collection always lives in its own protected slot; it is never
+			// packed into the legacy single-record blob.
+			encoded, err := encodePasskeyCollection(it.Passkeys)
+			if err != nil {
+				return err
+			}
+			e.Values = append(e.Values, slot(itemPasskeysSlot, encoded, true))
 		}
 		if !hasV2Extension(it) {
 			// Legacy v1 layout, byte-for-byte compatible with the original
@@ -471,7 +493,7 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 			if _, ok := fields[v.Key]; ok {
 				return nil, nil, ErrSnapshot
 			}
-			protected := v.Key == "UserName" || v.Key == "Notes" || v.Key == "Password" || v.Key == "otp" || v.Key == "URL" || v.Key == "Locklark.ImportSource" || v.Key == "Locklark.SSHSeed" || v.Key == "Locklark.Passkey" || v.Key == itemV2Slot
+			protected := v.Key == "UserName" || v.Key == "Notes" || v.Key == "Password" || v.Key == "otp" || v.Key == "URL" || v.Key == "Locklark.ImportSource" || v.Key == "Locklark.SSHSeed" || v.Key == "Locklark.Passkey" || v.Key == itemPasskeysSlot || v.Key == itemV2Slot
 			if v.Value.Protected.Bool != protected {
 				return nil, nil, ErrSnapshot
 			}
@@ -554,6 +576,14 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 					}
 					expected++
 				}
+				if v, ok := fields[itemPasskeysSlot]; ok {
+					var err error
+					it.Passkeys, err = decodePasskeyCollection(v.Content)
+					if err != nil {
+						return nil, nil, ErrSnapshot
+					}
+					expected++
+				}
 				if v, ok := fields["Notes"]; ok {
 					if v.Content == "" || !ValidNotes(v.Content) {
 						return nil, nil, ErrSnapshot
@@ -630,6 +660,14 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 				var err error
 				it.Passkey, err = base64.StdEncoding.Strict().DecodeString(v.Content)
 				if err != nil || len(it.Passkey) == 0 || base64.StdEncoding.EncodeToString(it.Passkey) != v.Content {
+					return nil, nil, ErrSnapshot
+				}
+				expected++
+			}
+			if v, ok := fields[itemPasskeysSlot]; ok {
+				var err error
+				it.Passkeys, err = decodePasskeyCollection(v.Content)
+				if err != nil {
 					return nil, nil, ErrSnapshot
 				}
 				expected++
