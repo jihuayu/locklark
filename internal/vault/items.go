@@ -485,6 +485,24 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 	}
 	var metadata []byte
 	items := make([]Item, 0, len(g.Entries)-1)
+	// A decoded-but-unappended item (pending) and every already accumulated item
+	// own private passkey bytes. Zeroization is best effort and runs only on
+	// failure exits: the success return transfers ownership of the records to
+	// the caller and must never clear them.
+	success := false
+	var pending *Item
+	defer func() {
+		if success {
+			return
+		}
+		for i := range items {
+			items[i].ClearPasskeys()
+		}
+		if pending != nil {
+			pending.ClearPasskeys()
+		}
+		clear(metadata)
+	}()
 	foundMeta := false
 	used := map[int]bool{}
 	for _, e := range g.Entries {
@@ -515,6 +533,9 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 			continue
 		}
 		it := Item{ID: fields["Locklark.ID"].Content, Kind: fields["Locklark.Kind"].Content, Title: fields["Title"].Content}
+		// Track the item before any passkey decode so a later field/attachment/
+		// category/validation failure cannot leave decoded records uncleared.
+		pending = &it
 		if _, ok := fields["Title"]; !ok || e.UUID != itemUUID(it.ID) {
 			return nil, nil, ErrSnapshot
 		}
@@ -625,6 +646,7 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 				return nil, nil, ErrSnapshot
 			}
 			items = append(items, it)
+			pending = nil
 			continue
 		}
 
@@ -748,9 +770,11 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 			return nil, nil, ErrSnapshot
 		}
 		items = append(items, it)
+		pending = nil
 	}
 	if !foundMeta || len(used) != len(db.Content.InnerHeader.Binaries) || !validItems(items, len(metadata)) {
 		return nil, nil, ErrSnapshot
 	}
+	success = true
 	return metadata, items, nil
 }

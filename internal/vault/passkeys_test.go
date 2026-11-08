@@ -212,3 +212,53 @@ func TestPasskeySetterAliasingPreservesNewRecords(t *testing.T) {
 		t.Fatal("legacy self-alias setter corrupted record")
 	}
 }
+
+// TestReadItemsRejectsInvalidKDBXAfterCollectionDecode is a regression test for
+// failure-exit zeroization in readItems. The passkey collection slot is decoded
+// before later unprotected-field, field-count, attachment, category and final
+// validItems checks run, so those failures must not hand back partial items or
+// leave the decoded records reachable through a returned slice. This test only
+// observes the returned values (nil metadata, nil items, ErrSnapshot): heap
+// zeroization is not externally observable, so the actual ClearPasskeys cleanup
+// on failure exits is verified by static code review of readItems, not here.
+func TestReadItemsRejectsInvalidKDBXAfterCollectionDecode(t *testing.T) {
+	a, b := testPasskeyRecord(t), testPasskeyRecord(t)
+	first := Item{ID: "ok", Kind: "login", Title: "Valid", Passkeys: [][]byte{a}}
+	collected := Item{ID: "multi", Kind: "login", Title: "Multi", Passkeys: [][]byte{b}}
+
+	db := kdbx.NewDatabase(kdbx.WithDatabaseKDBXVersion41())
+	if err := writeItems(db, nil, []Item{first, collected}); err != nil {
+		t.Fatal(err)
+	}
+	g := db.Content.Root.Groups[0]
+	if _, items, err := readItems(db, g); err != nil || len(items) != 2 || len(items[1].Passkeys) != 1 || !bytes.Equal(items[1].Passkeys[0], b) {
+		t.Fatalf("control round trip: %v", err)
+	}
+	if len(g.Entries) != 3 {
+		t.Fatalf("unexpected entry count %d", len(g.Entries))
+	}
+
+	// An unknown UNPROTECTED field is rejected only after the collection slot of
+	// the second item has already been decoded successfully.
+	g.Entries[2].Values = append(g.Entries[2].Values, slot("Locklark.Extra", "x", false))
+	metadata, items, err := readItems(db, g)
+	if err != ErrSnapshot || metadata != nil || items != nil {
+		t.Fatalf("unknown unprotected field after decode returned partial data: %v, %d items", err, len(items))
+	}
+	g.Entries[2].Values = g.Entries[2].Values[:len(g.Entries[2].Values)-1]
+	if _, items, err := readItems(db, g); err != nil || len(items) != 2 {
+		t.Fatalf("restored control: %v", err)
+	}
+
+	// A secure_note entry carrying a decoded passkey collection only fails the
+	// final validItems category check, i.e. after every slot has been decoded and
+	// the item has been appended. writeItems serializes without validating.
+	bad := Item{ID: "note-with-passkey", Kind: "", Category: CategorySecureNote, Title: "Bad", Passkeys: [][]byte{b}}
+	db = kdbx.NewDatabase(kdbx.WithDatabaseKDBXVersion41())
+	if err := writeItems(db, nil, []Item{first, bad}); err != nil {
+		t.Fatal(err)
+	}
+	if metadata, items, err = readItems(db, db.Content.Root.Groups[0]); err != ErrSnapshot || metadata != nil || items != nil {
+		t.Fatalf("post-decode category failure returned partial data: %v, %d items", err, len(items))
+	}
+}
