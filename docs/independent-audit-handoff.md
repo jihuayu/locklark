@@ -21,7 +21,7 @@ hashes. A screenshot of approval is not evidence of cryptographic correctness.
 
 | Boundary | Source / required question |
 | --- | --- |
-| Page to isolated extension | `browser-extension/passkey-main.js`, `content.js`: source, document, frame, challenge and navigation binding; no page-created approval |
+| Page to isolated extension | `browser-extension/webauthn.js`, `content.js`: source, document, frame, challenge and navigation binding; no page-created approval |
 | Extension to background | `background.js`: browser-observed sender identity, capability, active-document and cancellation checks; no secret-bearing storage |
 | Background to native | `internal/browserhost`: strict bounded protocol, peer/registration identity, stale and replayed messages, queued writer authority |
 | Vault transaction | `internal/personal`, `internal/vault`: full authentication, exact revisions, single commit gate, atomic snapshot/audit, error cleanup and cold replay |
