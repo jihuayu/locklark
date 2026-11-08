@@ -54,6 +54,14 @@ def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def dist_snapshot(mode: str) -> dict[str, str]:
+    return {
+        entry.name: sha256(entry)
+        for entry in sorted((DIST / mode).iterdir())
+        if entry.is_file()
+    }
+
+
 def load_manifest(mode: str) -> dict:
     return json.loads((DIST / mode / "manifest.json").read_text("utf-8"))
 
@@ -156,7 +164,13 @@ def verify_safari_dist() -> None:
         if not (safari_dir / reference).is_file():
             raise AssertionError(f"manifest references missing resource: {reference}")
 
-    chromium = json.loads((DIST / "chromium" / "manifest.json").read_text("utf-8"))
+    baseline = DIST / "chromium" / "manifest.json"
+    if not baseline.is_file():
+        raise AssertionError(
+            "dist/chromium/manifest.json missing; build the default baseline "
+            "(node browser-extension/build.js) before verifying Safari"
+        )
+    chromium = json.loads(baseline.read_text("utf-8"))
     if manifest["content_scripts"] != chromium["content_scripts"]:
         raise AssertionError("Safari content-script policy drifted from Chromium")
     for key in ("action", "options_ui", "commands", "description", "name", "version"):
@@ -188,6 +202,32 @@ class SafariPackagingTests(unittest.TestCase):
 
     def test_safari_resource_whitelist_and_manifest(self) -> None:
         verify_safari_dist()
+
+    def test_clean_build_produces_all_three_manifests(self) -> None:
+        # Class setup starts from a removed dist: default baseline, then Safari.
+        for mode in ("chromium", "firefox", "safari"):
+            self.assertTrue(
+                (DIST / mode / "manifest.json").is_file(),
+                f"{mode}/manifest.json missing after a clean build",
+            )
+
+    def test_safari_build_leaves_baseline_bytes_untouched(self) -> None:
+        before = {mode: dist_snapshot(mode) for mode in ("chromium", "firefox")}
+        run(["safari"])
+        after = {mode: dist_snapshot(mode) for mode in ("chromium", "firefox")}
+        self.assertEqual(
+            after, before, "building Safari changed the Chromium/Firefox baseline"
+        )
+        for mode, expected in FROZEN_MANIFEST_SHA256.items():
+            self.assertEqual(after[mode]["manifest.json"], expected)
+
+    def test_build_script_builds_default_baseline_before_safari(self) -> None:
+        script = (SAFARI / "scripts/build_safari.sh").read_text("utf-8")
+        baseline = script.index('node "$ROOT/browser-extension/build.js"')
+        safari = script.index('node "$ROOT/browser-extension/build.js" safari')
+        verify = script.index("--verify-dist")
+        self.assertLess(baseline, safari, "default baseline must be built first")
+        self.assertLess(safari, verify, "Safari must be built before verification")
 
     def test_existing_chrome_and_firefox_manifests_are_byte_identical(self) -> None:
         for mode, expected in FROZEN_MANIFEST_SHA256.items():

@@ -180,3 +180,25 @@ confirmation by that compile and by a signed run.
   entitlements, and the Team ID used in `PeerVerifier`.
 - Real Safari packaging/installation/acceptance (only possible after the
   above).
+
+## Build order and baseline verification
+
+`browser-extension/build.js` treats Safari as an explicit opt-in mode: with no
+argument it produces only the `chromium` and `firefox` packages, whose manifest
+bytes are frozen by hashes in `scripts/test_safari_package.py`.
+
+`scripts/build_safari.sh` therefore builds the default baseline first and then
+the Safari package:
+
+```
+node browser-extension/build.js          # tracked Chromium + Firefox baseline
+node browser-extension/build.js safari   # opt-in Safari package
+python3 scripts/test_safari_package.py --verify-dist
+```
+
+A Safari-only build on a clean tree is still rejected by the verifier, because
+it holds the Safari manifest to the Chromium baseline's `content_scripts`,
+`action`, `options_ui`, `commands`, `name` and `version`; the failure now says
+the baseline is missing instead of raising a bare file error. Rebuilding Safari
+never changes the Chromium/Firefox bytes, and `--verify-dist` remains a strict
+comparison rather than a relaxed or skipped check.

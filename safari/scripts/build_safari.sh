@@ -42,6 +42,11 @@ fi
 command -v node >/dev/null 2>&1 || fail "node is required"
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 
+# The Safari verifier holds the Safari package to the tracked Chromium
+# baseline (content scripts, action, options_ui, commands, name, version),
+# so a clean tree must build the default Chromium + Firefox baseline
+# first. Safari stays an explicit opt-in mode and never replaces it.
+node "$ROOT/browser-extension/build.js"
 node "$ROOT/browser-extension/build.js" safari
 python3 "$ROOT/scripts/test_safari_package.py" --verify-dist
 
