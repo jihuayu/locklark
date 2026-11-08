@@ -186,7 +186,7 @@ func parseHIBP(body []byte) map[string]int {
 // a non-nil empty map so callers can distinguish "checked, nothing to query"
 // from a failed lookup.
 func LookupCandidates(ctx context.Context, lookup RangeLookup, candidates []HIBPCandidate) (map[string]int, error) {
-	if lookup == nil {
+	if ctx == nil || lookup == nil || ctx.Err() != nil {
 		return nil, ErrHIBP
 	}
 	prefixes := make(map[string][]HIBPCandidate)
@@ -204,8 +204,14 @@ func LookupCandidates(ctx context.Context, lookup RangeLookup, candidates []HIBP
 	sort.Strings(order)
 	results := make(map[string]int, len(candidates))
 	for _, prefix := range order {
+		// The range transport is allowed to ignore cancellation, so guard every
+		// prefix and the post-call result here. A canceled check must never yield a
+		// partial or apparently-clean count map.
+		if ctx.Err() != nil {
+			return nil, ErrHIBP
+		}
 		counts, err := lookup.Lookup(ctx, prefix)
-		if err != nil {
+		if err != nil || ctx.Err() != nil {
 			return nil, ErrHIBP
 		}
 		for _, candidate := range prefixes[prefix] {

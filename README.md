@@ -44,7 +44,7 @@ Go TOTP 核心已通过 RFC 6238/4226 向量，支持有限的 Base32/otpauth �
 
 `personal search --file owner.ll [--state active|archived|trashed|all]` 在隐藏双因素后隐藏输入查询，按 Unicode 等价形式和大小写折叠搜索当前登录标题，返回稳定 ID/修订，默认仅活动项。搜索词不作为命令参数或单独输出字段，审计只保存库内 HMAC 绑定；标题控制字符可见转义。见[标题搜索](docs/personal-title-search-validation.md)。
 
-`personal health --file owner.ll` 经双因素和 SCAN 确认后提供本地密码体检，仅输出活动登录的 ID/修订与固定问题码；检查空值、短值、低字符种类、示例常见值、重复使用和未保存 TOTP。不联网查询泄露库，不把未发现问题称为安全，也不推断网站的双因素状态。范围、规则与验收见[本地体检](docs/personal-health-validation.md)。
+`personal health --file owner.ll` 经双因素和 SCAN 确认后提供本地密码体检，仅输出活动登录的 ID/修订与固定问题码；检查空值、短值、低字符种类、示例常见值、重复使用和未保存 TOTP。默认完全离线：不联网查询泄露库，不把未发现问题称为安全，也不推断网站的双因素状态。范围、规则与验收见[本地体检](docs/personal-health-validation.md)。显式增加 `--hibp true` 时才在固定隐私提示后要求隐藏输入 `NETWORK`，仅把每个非空密码 SHA-1 的前 5 位十六进制前缀发送到固定 HIBP range 端点（`Add-Padding: true`，无明文/完整哈希/后缀）；前缀与 IP 仍会暴露。CLI 输出仅含状态、hibp_checked/hibp_error、检查/跳过计数和 ID/修订/问题码/泄露计数，不含标题、来源、密码或哈希。见[CLI HIBP 验收](docs/personal-health-hibp-cli-validation.md)。
 
 支持范围明确的基本登录导入：先运行 `personal plan-import-1pux --file owner.ll --source source.1pux`，使用返回的 `report.source_digest` 运行 `personal import-1pux --file owner.ll --source source.1pux --digest PLAN_DIGEST`。两步都需要隐藏双因素和确认；源文件变化、同源重复、容量超限或未支持字段整批拒绝。当前 `login-notes-v2` 接受单账户/单库、用户名/密码、单 HTTPS URL、纯文本备注（最多 64 KiB）和活动/归档状态；旧 `login-v1` 计划需重新生成并确认，已导入同源条目仍会拒绝重复。原始来源记录加密保留，编辑后可能仍含旧值。完整字段/类别/附件/历史迁移未完成，详见[登录导入验收](docs/personal-import-validation.md)和[七条交付范围](docs/seven-track-delivery.md)。
 
