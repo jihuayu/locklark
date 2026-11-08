@@ -9,8 +9,8 @@ const { webcrypto } = require("node:crypto");
 
 const shim = require("../safari-native-port.js");
 const {
+  connectNative,
   createPort,
-  install,
   isSafariRuntime,
   NATIVE_HOST_NAME,
   PROTOCOL_VERSION,
@@ -389,7 +389,7 @@ test("explicit token injection is validated", () => {
   );
 });
 
-test("install never patches non-Safari runtimes", () => {
+test("connectNative refuses non-Safari runtimes and leaves the API untouched", () => {
   for (const api of [
     safariApi({ getURL: () => "chrome-extension://abc/" }),
     safariApi({ getURL: () => "moz-extension://abc/" }),
@@ -406,35 +406,66 @@ test("install never patches non-Safari runtimes", () => {
     }),
   ]) {
     const original = api.runtime.connectNative;
+    const originalSend = api.runtime.sendNativeMessage;
+    const keys = Object.keys(api.runtime).sort();
     assert.equal(isSafariRuntime(api), false);
-    assert.equal(install(api), false);
+    assert.throws(() => connectNative(api, NATIVE_HOST_NAME));
     assert.equal(api.runtime.connectNative, original);
+    assert.equal(api.runtime.sendNativeMessage, originalSend);
+    assert.deepEqual(Object.keys(api.runtime).sort(), keys);
+    assert.equal(api.runtime.__locklarkSafariNativePort, undefined);
   }
-  assert.equal(
-    isSafariRuntime({
-      runtime: { getURL: () => "safari-web-extension://abc/" },
-    }),
-    false,
-  );
+  const partial = {
+    runtime: { getURL: () => "safari-web-extension://abc/" },
+  };
+  assert.equal(isSafariRuntime(partial), false);
+  assert.throws(() => connectNative(partial, NATIVE_HOST_NAME));
+  assert.deepEqual(Object.keys(partial.runtime), ["getURL"]);
 });
 
-test("install only replaces runtime.connectNative on Safari", async () => {
+test("connectNative builds an explicit Port on Safari without patching the API", async () => {
   const api = safariApi();
-  const originalGlobal = globalThis.chrome;
   const runtime = api.runtime;
-  const originalSend = runtime.sendNativeMessage;
+  const sent = [];
+  runtime.sendNativeMessage = (host, envelope) => {
+    sent.push({ host, envelope });
+    return Promise.resolve(success(envelope));
+  };
   const originalConnect = runtime.connectNative;
-  assert.equal(install(api), true);
-  assert.notEqual(runtime.connectNative, originalConnect);
-  assert.equal(runtime.sendNativeMessage, originalSend);
-  assert.equal(globalThis.chrome, originalGlobal);
-  assert.throws(() => runtime.connectNative("other.host"));
-  const port = runtime.connectNative(NATIVE_HOST_NAME);
+  const originalSend = runtime.sendNativeMessage;
+  const keys = Object.keys(runtime).sort();
+  assert.equal(isSafariRuntime(api), true);
+  assert.throws(() => connectNative(api, "other.host"));
+  assert.throws(() => connectNative(api, undefined));
+  const port = connectNative(api, NATIVE_HOST_NAME, {
+    pollIntervalMs: 60000,
+    callTimeoutMs: 500,
+  });
   assert.equal(typeof port.postMessage, "function");
   assert.equal(port.name, "locklark-native");
   await wait(5);
+  assert.ok(sent.length >= 1);
+  for (const call of sent) assert.equal(call.host, NATIVE_HOST_NAME);
+  assert.equal(sent[0].envelope.v, PROTOCOL_VERSION);
+  assert.equal(sent[0].envelope.op, "open");
+  assert.match(sent[0].envelope.token, /^[a-f0-9]{32}$/);
+  port.postMessage({ v: 1, id: "d".repeat(32), type: "hello" });
+  await wait(20);
+  const send = sent.find((call) => call.envelope.op === "send");
+  assert.ok(send);
+  assert.equal(send.envelope.frame.id, "d".repeat(32));
+  assert.deepEqual(Object.keys(send.envelope).sort(), [
+    "frame",
+    "op",
+    "token",
+    "v",
+  ]);
+  // The browser API is neither replaced nor extended.
+  assert.equal(runtime.connectNative, originalConnect);
+  assert.equal(runtime.sendNativeMessage, originalSend);
+  assert.deepEqual(Object.keys(runtime).sort(), keys);
+  assert.equal(runtime.__locklarkSafariNativePort, undefined);
   await closePort(port);
-  assert.equal(install(api), true);
 });
 
 test("module exports no mutation, process or file primitives", () => {
@@ -446,16 +477,24 @@ test("module exports no mutation, process or file primitives", () => {
     "MAX_REPLY_BYTES",
     "DEFAULT_POLL_INTERVAL_MS",
     "DEFAULT_CALL_TIMEOUT_MS",
+    "connectNative",
     "createPort",
-    "install",
     "isSafariRuntime",
   ];
   assert.deepEqual(Object.keys(shim).sort(), allowed.sort());
   for (const name of Object.keys(shim))
     assert.doesNotMatch(
       name,
-      /exec|spawn|launch|write|mutate|evaluate|scripting|process/i,
+      /exec|spawn|launch|write|mutate|install|patch|evaluate|scripting|process/i,
     );
+  const source = fs.readFileSync(
+    path.join(__dirname, "..", "safari-native-port.js"),
+    "utf8",
+  );
+  assert.doesNotMatch(source, /install\(/);
+  assert.doesNotMatch(source, /runtime\.connectNative\s*=/);
+  assert.doesNotMatch(source, /globalThis\.(chrome|browser)\s*=/);
+  assert.doesNotMatch(source, /Object\.defineProperty\(runtime/);
   assert.equal(globalThis.chrome, undefined);
   assert.equal(globalThis.browser, undefined);
 });
@@ -479,12 +518,15 @@ test("loading in a page-like VM creates only the namespace, no browser patch", (
   assert.equal(Object.keys(sandbox).includes("LocklarkSafariNativePort"), false);
 });
 
-test("VM auto-install happens only for a Safari-shaped runtime", async () => {
+test("a Safari-shaped VM exposes an explicit namespace only, and background.js uses it only there", async () => {
   const source = fs.readFileSync(
     path.join(__dirname, "..", "safari-native-port.js"),
     "utf8",
   );
   const safari = safariApi();
+  const runtime = safari.runtime;
+  const originalConnect = runtime.connectNative;
+  const keys = Object.keys(runtime).sort();
   const sandbox = {
     TextEncoder,
     crypto: webcrypto,
@@ -495,9 +537,38 @@ test("VM auto-install happens only for a Safari-shaped runtime", async () => {
   };
   vm.runInNewContext(source, sandbox);
   assert.equal(sandbox.browser, undefined);
-  assert.notEqual(safari.runtime.connectNative.toString().includes("original"), true);
-  const port = safari.runtime.connectNative(NATIVE_HOST_NAME);
+  // Auto-patching is gone: the runtime is untouched after load.
+  assert.equal(runtime.connectNative, originalConnect);
+  assert.deepEqual(Object.keys(runtime).sort(), keys);
+  assert.equal(runtime.__locklarkSafariNativePort, undefined);
+  const namespace = sandbox.LocklarkSafariNativePort;
+  assert.equal(namespace.isSafariRuntime({ runtime }), true);
+  let host = "";
+  runtime.sendNativeMessage = (name, envelope) => {
+    host = name;
+    return Promise.resolve(success(envelope));
+  };
+  const port = namespace.connectNative({ runtime }, NATIVE_HOST_NAME, {
+    pollIntervalMs: 60000,
+    callTimeoutMs: 500,
+  });
   await wait(5);
+  assert.equal(host, NATIVE_HOST_NAME);
+  assert.equal(runtime.connectNative, originalConnect);
   port.disconnect();
   assert.equal(port.closed, true);
+  // background.js: Safari detection gates the explicit connector; every other
+  // runtime keeps calling its own api.runtime.connectNative and no browser
+  // global is ever replaced.
+  const background = fs.readFileSync(
+    path.join(__dirname, "..", "background.js"),
+    "utf8",
+  );
+  assert.match(background, /globalThis\.LocklarkSafariNativePort/);
+  assert.match(
+    background,
+    /api\.runtime\.connectNative\("org\.locklark\.browser"\)/,
+  );
+  assert.doesNotMatch(background, /runtime\.connectNative\s*=/);
+  assert.doesNotMatch(background, /globalThis\.(chrome|browser)\s*=/);
 });

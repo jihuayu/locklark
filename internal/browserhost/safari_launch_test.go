@@ -26,7 +26,7 @@ func TestSafariLaunchPolicyDarwin(t *testing.T) {
 		{"chrome-extension://" + ChromiumID + "/"},
 		{FirefoxID},
 		{SafariID},
-		{filepath.Join(string(filepath.Separator), "tmp", HostName+".json"), FirefoxID},
+		{filepath.Join(t.TempDir(), HostName+".json"), FirefoxID},
 	} {
 		if err := validateSafariLaunchForOS(args, "darwin"); err == nil {
 			t.Fatalf("Safari launch must refuse args %q on darwin", args)
@@ -55,7 +55,7 @@ func TestSafariLaunchRefusedOnThisHost(t *testing.T) {
 		{"--safari-browser", ""},
 		{"--safari-browser", FirefoxID},
 		{"chrome-extension://" + ChromiumID + "/"},
-		{filepath.Join(string(filepath.Separator), "tmp", HostName+".json"), FirefoxID},
+		{filepath.Join(t.TempDir(), HostName+".json"), FirefoxID},
 	} {
 		if err := ValidateLaunch(Safari, args); err != ErrProtocol {
 			t.Fatalf("Safari must refuse args %q on %s, got %v", args, runtime.GOOS, err)
@@ -71,7 +71,10 @@ func TestExistingLaunchPolicyUnaffectedBySafari(t *testing.T) {
 	if err := validateLaunchForOS(Chromium, []string{"--safari-browser"}, "darwin"); err == nil {
 		t.Fatal("Chromium must not accept Safari argv")
 	}
-	manifest := filepath.Join(string(filepath.Separator), "tmp", HostName+".json")
+	manifest := filepath.Join(t.TempDir(), HostName+".json")
+	if !filepath.IsAbs(manifest) {
+		t.Fatalf("test manifest path must be absolute on this host: %s", manifest)
+	}
 	if err := validateLaunchForOS(Firefox, []string{manifest, FirefoxID}, "darwin"); err != nil {
 		t.Fatalf("Firefox launch policy changed: %v", err)
 	}

@@ -9,7 +9,8 @@
  *
  * Design constraints:
  *  - loaded only in the Safari background context, before background.js;
- *  - never replaces globalThis.chrome/browser and never installs outside a
+ *  - never replaces globalThis.chrome/browser and never patches the browser
+ *    API; the explicit connectNative export is used only for a
  *    safari-web-extension:// runtime;
  *  - exactly one sendNativeMessage envelope per postMessage, no retries;
  *  - at most one outstanding poll request and a bounded number of frames;
@@ -388,39 +389,19 @@
     return port;
   }
 
-  function install(api, options = {}) {
-    if (!isSafariRuntime(api)) return false;
+  /*
+   * Explicit connector. The caller (background.js) decides, from its own
+   * Safari runtime detection, whether to use this; nothing here mutates the
+   * browser API, replaces a global or patches runtime.connectNative. The host
+   * name is the only accepted one and every call is re-validated internally.
+   */
+  function connectNative(api, name, options = {}) {
+    if (!isSafariRuntime(api)) throw Error("not a safari runtime");
+    if (name !== NATIVE_HOST_NAME) throw Error("unknown native host");
     const runtime = api.runtime;
-    if (runtime.__locklarkSafariNativePort === true) return true;
-    const originalConnectNative = runtime.connectNative;
-    if (
-      typeof originalConnectNative !== "function" ||
-      typeof runtime.sendNativeMessage !== "function"
-    )
-      return false;
-    const bridge = (envelope) =>
-      runtime.sendNativeMessage(NATIVE_HOST_NAME, envelope);
-    const connectNative = function connectNative(name) {
-      if (name !== NATIVE_HOST_NAME) throw Error("unknown native host");
-      return createPort(bridge, options);
-    };
-    try {
-      Object.defineProperty(runtime, "connectNative", {
-        value: connectNative,
-        writable: true,
-        configurable: true,
-        enumerable: false,
-      });
-      Object.defineProperty(runtime, "__locklarkSafariNativePort", {
-        value: true,
-        writable: false,
-        configurable: true,
-        enumerable: false,
-      });
-    } catch {
-      return false;
-    }
-    return true;
+    const sendNativeMessage = runtime.sendNativeMessage.bind(runtime);
+    const bridge = (envelope) => sendNativeMessage(NATIVE_HOST_NAME, envelope);
+    return createPort(bridge, options);
   }
 
   const namespace = Object.freeze({
@@ -431,8 +412,8 @@
     MAX_REPLY_BYTES,
     DEFAULT_POLL_INTERVAL_MS,
     DEFAULT_CALL_TIMEOUT_MS,
+    connectNative,
     createPort,
-    install,
     isSafariRuntime,
   });
 
@@ -448,7 +429,5 @@
     } catch {
       // A frozen global scope leaves the CommonJS export in place.
     }
-    const api = root.browser || root.chrome;
-    if (api) install(api);
   }
 })(typeof globalThis !== "undefined" ? globalThis : undefined);

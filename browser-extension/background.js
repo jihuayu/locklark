@@ -1037,12 +1037,27 @@ if (typeof importScripts === "function") importScripts("core.js");
     await api.tabs.create({ url: origin });
     status = "已打开网站，请更新登录密码";
   }
+  // Safari's runtime.connectNative does not provide the duplex stdio Port, so
+  // the Safari build supplies an explicit connector in its background-only
+  // namespace script. Chromium and Firefox keep calling their own
+  // api.runtime.connectNative unchanged; nothing is patched globally.
+  function nativeConnect() {
+    const shim = globalThis.LocklarkSafariNativePort;
+    if (
+      shim &&
+      typeof shim.connectNative === "function" &&
+      typeof shim.isSafariRuntime === "function" &&
+      shim.isSafariRuntime(api)
+    )
+      return shim.connectNative(api, "org.locklark.browser");
+    return api.runtime.connectNative("org.locklark.browser");
+  }
   async function connect() {
     disconnect(true);
     unconfirmedSave = false;
     retired.clear();
     status = "请在原生窗口解锁并确认连接";
-    const p = api.runtime.connectNative("org.locklark.browser");
+    const p = nativeConnect();
     port = p;
     p.onDisconnect.addListener(() => {
       if (port !== p) return;
