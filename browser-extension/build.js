@@ -1,8 +1,10 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const requested = process.argv[2];
-if (requested && !["chromium", "firefox"].includes(requested))
-  throw Error("choose chromium or firefox");
+if (requested && !["chromium", "firefox", "safari"].includes(requested))
+  throw Error("choose chromium, firefox or safari");
+// Safari is an explicit opt-in build. The default remains the two existing
+// browser packages so their bytes and acceptance flows are unchanged.
 const modes = requested ? [requested] : ["chromium", "firefox"];
 const key =
   "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA1GcZFP4Yh8F3N5LELUw5UYy132r9ZQOdPGMR9yzJXc5KjBRCfPZm7ao/cAEkUeTcu3Pek/aBz+GCe0ntWBXIDlt7Z7q4rW7xtnIH7h01KVBoR5yh3sgF+89QEpF3KxOYMBIzh5fvpJ5KJzzDv4S/6jhYuernWOg7F6t38cZ1mT3+yvEecWa5z+Zuw3hDX8QWNdJGNp+809SOy+SiDYsv8kQ5ETf7cDrcREgzfFHj10J8AQlhE8yG5c89INXGy5HN45j2lwSdF+CoLf2l74Wm6QHDYQJCmgIrUZ9/wyMIIZdBwd+9c2MgsWV5YmHXRkje94JpCP/r9+ge6oLW93XnSwIDAQAB";
@@ -58,7 +60,7 @@ for (const mode of modes) {
     // at activeTab/nativeMessaging/scripting/storage.
     manifest.permissions.push("contextMenus");
     manifest.background = { service_worker: "background.js" };
-  } else {
+  } else if (mode === "firefox") {
     // Firefox reserves Ctrl+Shift+Y for Library in real profiles. Keep the
     // toolbar action and let users choose an extension shortcut explicitly.
     delete manifest.commands._execute_action.suggested_key;
@@ -70,10 +72,19 @@ for (const mode of modes) {
         data_collection_permissions: { required: ["none"] },
       },
     };
+  } else {
+    // Safari uses the containing app's NSExtensionRequestHandling boundary
+    // through runtime.sendNativeMessage. The shim is a background-only script
+    // and must load before background.js; it never runs in content/MAIN worlds.
+    // No Chromium key, no Gecko settings, no clipboard read permission and no
+    // externally_connectable surface are emitted for this package.
+    manifest.background = {
+      scripts: ["safari-native-port.js", "core.js", "background.js"],
+    };
   }
   const out = path.join(__dirname, "dist", mode);
   fs.mkdirSync(out, { recursive: true });
-  for (const name of [
+  const files = [
     "core.js",
     "content.js",
     "webauthn.js",
@@ -84,7 +95,9 @@ for (const mode of modes) {
     "options.html",
     "options.css",
     "options.js",
-  ])
+  ];
+  if (mode === "safari") files.push("safari-native-port.js");
+  for (const name of files)
     fs.copyFileSync(path.join(__dirname, name), path.join(out, name));
   fs.writeFileSync(
     path.join(out, "manifest.json"),
