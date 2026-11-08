@@ -29,6 +29,16 @@ type copyOffer struct {
 	timer             *time.Timer
 }
 
+// deadline is the single hard boundary for an offer: the earlier of until and
+// a nonzero clearUntil. Every timer and admission check uses it so plaintext is
+// never retained past the earliest deadline while a job is still queued.
+func (o *copyOffer) deadline() time.Time {
+	if o.clearUntil.IsZero() || !o.clearUntil.Before(o.until) {
+		return o.until
+	}
+	return o.clearUntil
+}
+
 type copyJob struct {
 	offer     *copyOffer
 	ctx       context.Context
@@ -118,7 +128,7 @@ func (m *Manager) Prepare(value []byte, until, clearUntil time.Time, valid func(
 	}
 	m.dropOfferLocked()
 	m.offer = &copyOffer{ticket: ticket, value: bytes.Clone(value), until: until, clearUntil: clearUntil, valid: valid}
-	m.offer.timer = time.AfterFunc(time.Until(until), func() { m.CancelOffer(ticket) })
+	m.offer.timer = time.AfterFunc(time.Until(m.offer.deadline()), func() { m.CancelOffer(ticket) })
 	return ticket, nil
 }
 
@@ -161,8 +171,8 @@ func (m *Manager) Commit(ctx context.Context, ticket string) <-chan Outcome {
 	m.mu.Lock()
 	o := m.offer
 	if ctx == nil || ctx.Err() != nil || m.closed || m.job != nil || o == nil ||
-		!ticketMatches(o.ticket, ticket) || !time.Now().Before(o.until) {
-		if o != nil && !time.Now().Before(o.until) {
+		!ticketMatches(o.ticket, ticket) || !time.Now().Before(o.deadline()) {
+		if o != nil && !time.Now().Before(o.deadline()) {
 			m.dropOfferLocked()
 		}
 		m.mu.Unlock()
@@ -173,7 +183,7 @@ func (m *Manager) Commit(ctx context.Context, ticket string) <-chan Outcome {
 	o.timer.Stop()
 	j := &copyJob{offer: o, ctx: ctx, done: done, finished: make(chan struct{})}
 	m.job = j
-	j.timer = time.AfterFunc(time.Until(o.until), j.cancel)
+	j.timer = time.AfterFunc(time.Until(o.deadline()), j.cancel)
 	m.mu.Unlock()
 	go func() {
 		select {
@@ -196,8 +206,8 @@ func (m *Manager) currentJob(j *copyJob) bool {
 }
 
 func (m *Manager) live(j *copyJob) bool {
-	return !j.cancelled.Load() && j.ctx.Err() == nil && time.Now().Before(j.offer.until) &&
-		(j.offer.clearUntil.IsZero() || time.Now().Before(j.offer.clearUntil)) &&
+	now := time.Now()
+	return !j.cancelled.Load() && j.ctx.Err() == nil && now.Before(j.offer.deadline()) &&
 		m.currentJob(j) && j.offer.valid()
 }
 
@@ -272,10 +282,12 @@ func (m *Manager) run(j *copyJob) {
 }
 
 // detachSuperseded releases the previous logical lease after a new native
-// acquisition attempt, even one whose write reported an error or went stale.
-// A non-nil lease carries cleanup authority for that attempt; an older logical
-// lease must not prevent cleanup of the new partial write. Native ClearOwned
-// still checks ownership. It does nothing once this job no longer owns state.
+// acquisition attempt, even one whose write reported an error or went stale. A
+// non-nil lease is only cleanup authority for that acquisition attempt; it does
+// not prove the write currently owns the clipboard (ClearOwned refuses to blank
+// a newer owner). Retiring the old lease here keeps its deadline from firing and
+// leaves this attempt's lease as the sole cleanup authority (see cleanup). It
+// does nothing once this job no longer owns state.
 func (m *Manager) detachSuperseded(j *copyJob) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

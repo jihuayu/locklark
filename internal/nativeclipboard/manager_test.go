@@ -626,3 +626,163 @@ func TestManagerClearDuringBlockedPartialWriteCleansNewLease(t *testing.T) {
 		t.Fatalf("writes = %d cleared = %d current = %v", writes, cleared, current)
 	}
 }
+
+// A nonzero clearUntil earlier than until is the hard boundary for a pending
+// offer: its plaintext buffer must be zeroed at that boundary, not at until,
+// and a commit attempted afterwards must refuse without writing.
+func TestManagerPendingOfferDeadlineUsesEarlierClearUntil(t *testing.T) {
+	queue, owner := &fakeQueue{}, &fakeOwner{}
+	m := NewManager(queue.dispatch, owner.write, owner.clear)
+	defer m.Close()
+	until := time.Now().Add(10 * time.Second)
+	clearUntil := time.Now().Add(150 * time.Millisecond)
+	ticket, err := m.Prepare([]byte("early offer canary"), until, clearUntil, func() bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	if m.offer == nil {
+		m.mu.Unlock()
+		t.Fatal("prepare published no offer")
+	}
+	buffer, boundary := m.offer.value, m.offer.deadline()
+	m.mu.Unlock()
+	if !boundary.Equal(clearUntil) {
+		t.Fatalf("offer boundary = %v, want earlier clearUntil %v", boundary, clearUntil)
+	}
+	waitFor(t, "offer expiry at the earlier clearUntil", func() bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return m.offer == nil
+	})
+	for i, b := range buffer {
+		if b != 0 {
+			t.Fatalf("pending offer byte %d survived the earlier deadline", i)
+		}
+	}
+	if writes, _, cleared, _ := owner.state(); writes != 0 || cleared != 0 {
+		t.Fatalf("offer expiry wrote %d times and cleared %d leases", writes, cleared)
+	}
+	if outcome := waitOutcome(t, m.Commit(context.Background(), ticket)); outcome != Refused {
+		t.Fatalf("commit after the earlier deadline = %v, want Refused", outcome)
+	}
+	queue.drain()
+	if writes, _, _, _ := owner.state(); writes != 0 {
+		t.Fatalf("refused late commit wrote %d times", writes)
+	}
+}
+
+// A queued job must be cancelled and its borrowed plaintext zeroed at the
+// earlier clearUntil, before the fake UI queue is drained.
+func TestManagerQueuedJobDeadlineUsesEarlierClearUntil(t *testing.T) {
+	queue, owner := &fakeQueue{}, &fakeOwner{}
+	m := NewManager(queue.dispatch, owner.write, owner.clear)
+	defer m.Close()
+	ticket, err := m.Prepare([]byte("queued canary"), time.Now().Add(10*time.Second), time.Now().Add(150*time.Millisecond), func() bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The job borrows the offer buffer, whose header cancel() guards with
+	// valueMu; take the header while it is still the pending offer and rely on
+	// the outcome channel to order the zero checks after the clear.
+	m.mu.Lock()
+	buffer := m.offer.value
+	m.mu.Unlock()
+	done := m.Commit(context.Background(), ticket)
+	m.mu.Lock()
+	queued := m.job != nil
+	m.mu.Unlock()
+	if !queued {
+		t.Fatal("commit queued no job")
+	}
+	if outcome := waitOutcome(t, done); outcome != Refused {
+		t.Fatalf("queued job at the earlier deadline = %v, want Refused", outcome)
+	}
+	if writes, _, _, _ := owner.state(); writes != 0 {
+		t.Fatalf("cancelled queued job wrote %d times before drain", writes)
+	}
+	for i, b := range buffer {
+		if b != 0 {
+			t.Fatalf("queued job buffer byte %d survived the earlier deadline", i)
+		}
+	}
+	if ran := queue.drain(); ran != 1 {
+		t.Fatalf("drained callbacks = %d, want 1", ran)
+	}
+	if writes, _, cleared, _ := owner.state(); writes != 0 || cleared != 0 {
+		t.Fatalf("stale callback wrote %d times and cleared %d leases", writes, cleared)
+	}
+	select {
+	case extra := <-done:
+		t.Fatalf("duplicate outcome %v", extra)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// The offer timer is stopped here so only Commit's own boundary recheck can
+// refuse: a commit after the earlier clearUntil must write nothing and must not
+// retain the pending plaintext.
+func TestManagerCommitAfterEarlierClearUntilRefusesWithoutWrite(t *testing.T) {
+	queue, owner := &fakeQueue{}, &fakeOwner{}
+	m := NewManager(queue.dispatch, owner.write, owner.clear)
+	defer m.Close()
+	clearUntil := time.Now().Add(120 * time.Millisecond)
+	ticket, err := m.Prepare([]byte("late commit canary"), time.Now().Add(10*time.Second), clearUntil, func() bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	m.offer.timer.Stop()
+	buffer := m.offer.value
+	m.mu.Unlock()
+	waitFor(t, "earlier clearUntil to pass", func() bool { return !time.Now().Before(clearUntil) })
+	if outcome := waitOutcome(t, m.Commit(context.Background(), ticket)); outcome != Refused {
+		t.Fatalf("late commit = %v, want Refused", outcome)
+	}
+	queue.drain()
+	if writes, _, cleared, _ := owner.state(); writes != 0 || cleared != 0 {
+		t.Fatalf("late commit wrote %d times and cleared %d leases", writes, cleared)
+	}
+	for i, b := range buffer {
+		if b != 0 {
+			t.Fatalf("refused commit left byte %d of the offer buffer", i)
+		}
+	}
+	m.mu.Lock()
+	offer := m.offer
+	m.mu.Unlock()
+	if offer != nil {
+		t.Fatal("refused late commit kept the offer slot")
+	}
+}
+
+// A zero clearUntil keeps native clearing off: no lease timer is armed and the
+// confirmed lease survives until an explicit Clear.
+func TestManagerZeroClearUntilArmsNoNativeClear(t *testing.T) {
+	queue, owner := &fakeQueue{}, &fakeOwner{}
+	m := NewManager(queue.dispatch, owner.write, owner.clear)
+	defer m.Close()
+	ticket, err := m.Prepare([]byte("zero canary"), time.Now().Add(10*time.Second), time.Time{}, func() bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := m.Commit(context.Background(), ticket)
+	queue.drain()
+	if outcome := waitOutcome(t, done); outcome != Confirmed {
+		t.Fatalf("commit = %v, want Confirmed", outcome)
+	}
+	m.mu.Lock()
+	armed := m.leaseTimer
+	m.mu.Unlock()
+	if armed != nil {
+		t.Fatal("zero clearUntil armed a native clear timer")
+	}
+	if _, current, _, _ := owner.state(); current == nil {
+		t.Fatal("confirmed lease disappeared without a native clear deadline")
+	}
+	m.Clear()
+	queue.drain()
+	if _, current, cleared, _ := owner.state(); current != nil || cleared != 1 {
+		t.Fatalf("explicit clear left owner = %v cleared = %d", current, cleared)
+	}
+}
