@@ -7,12 +7,15 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/jihuayu/locklark/internal/browserhost"
+	"github.com/jihuayu/locklark/internal/cliprofile"
 	"github.com/jihuayu/locklark/internal/localpath"
 	"github.com/jihuayu/locklark/internal/personal"
 )
@@ -102,6 +105,11 @@ func desktopFixture(t *testing.T) (string, []byte, string, personal.Row) {
 	return path, key, personal.FormatSecret(key), rows[0]
 }
 
+type desktopCLIRunV2Outcome struct {
+	result browserhost.CLIRunV2Result
+	err    error
+}
+
 func TestDesktopIPCBrokerUnlockLockAndCLIRun(t *testing.T) {
 	path, key, secret, row := desktopFixture(t)
 	a := New()
@@ -113,9 +121,11 @@ func TestDesktopIPCBrokerUnlockLockAndCLIRun(t *testing.T) {
 	a.password = "fixture"
 	var mu sync.Mutex
 	approved := true
+	hookCalls := 0
 	a.cliApprover = func(ctx context.Context, peer browserhost.Peer, req browserhost.BrokerCLIRequest) (bool, error) {
 		mu.Lock()
 		defer mu.Unlock()
+		hookCalls++
 		return approved, nil
 	}
 	defer a.stopBrowserBroker()
@@ -189,26 +199,142 @@ func TestDesktopIPCBrokerUnlockLockAndCLIRun(t *testing.T) {
 		if e != nil {
 			t.Fatal(e)
 		}
-		cliReq := browserhost.BrokerCLIRequest{V: 1, VaultPath: a.session.VaultPath(), Targets: []personal.CLIBrokerTarget{{Slot: "TOKEN", ID: rows[0].ID, Revision: rows[0].Revision, Field: "password"}}}
-		resp, e := browserhost.RequestCLIRun(context.Background(), cliReq)
-		if e != nil || resp.Values["TOKEN"] != "desktop-password" {
-			t.Fatalf("approved CLI: %v %#v", e, resp)
+
+		// The legacy per-field v1 cli-run product path is disabled: a v1
+		// request is refused by the broker before any approval callback, even
+		// when the historical test hook would approve it.
+		mu.Lock()
+		callsBefore := hookCalls
+		mu.Unlock()
+		legacyReq := browserhost.BrokerCLIRequest{V: 1, VaultPath: a.session.VaultPath(), Targets: []personal.CLIBrokerTarget{{Slot: "TOKEN", ID: rows[0].ID, Revision: rows[0].Revision, Field: "password"}}}
+		if _, e := browserhost.RequestCLIRun(context.Background(), legacyReq); !errors.Is(e, browserhost.ErrBrokerRefused) {
+			t.Fatalf("legacy v1 CLI run: %v", e)
 		}
 		mu.Lock()
-		approved = false
+		legacyHookCalls := hookCalls - callsBefore
 		mu.Unlock()
-		if _, e := browserhost.RequestCLIRun(context.Background(), cliReq); e == nil {
-			t.Fatal("rejected CLI disclosed a value")
+		if legacyHookCalls != 0 {
+			t.Fatal("legacy v1 hook decided a request the product refuses")
 		}
+
+		// The v2 path is the only product flow: one authenticated socket
+		// exchange, one real native pending approval decided through the
+		// product method, then the exact requested slot and canonical receipt.
+		profile, ok := cliprofile.Lookup("deepseek")
+		if !ok {
+			t.Fatal("missing deepseek profile")
+		}
+		params := browserhost.CLIRunV2Params{
+			VaultPath:      a.session.VaultPath(),
+			Root:           filepath.Join(t.TempDir(), "client-root"),
+			ProfileID:      "deepseek",
+			Program:        "/usr/bin/env",
+			Args:           []string{"deepseek", "run"},
+			Directory:      t.TempDir(),
+			TimeoutSeconds: 30,
+			HelperPath:     []string{"/usr/bin"},
+			Passthrough:    map[string]string{"DEEPSEEK_MODEL": "deepseek-chat", "NO_COLOR": "1"},
+			Targets:        []browserhost.CLIRunV2Target{{Slot: "token", ID: rows[0].ID, Revision: rows[0].Revision, Field: "password"}},
+		}
+		v2ctx, v2cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer v2cancel()
+		v2done := make(chan desktopCLIRunV2Outcome, 1)
+		go func() {
+			result, err := browserhost.RequestCLIRunV2(v2ctx, params)
+			v2done <- desktopCLIRunV2Outcome{result: result, err: err}
+		}()
+
+		pending := waitCLIRunV2Pending(t, a)
+		if pending.session != a.session {
+			t.Fatal("v2 pending approval is not bound to the unlocked desktop session")
+		}
+		scope := pending.scope
+		if scope.VaultPath != params.VaultPath || scope.Root != params.Root || scope.ProfileID != params.ProfileID || scope.SpecID != profile.Spec().ID {
+			t.Fatalf("v2 pending scope identity: %#v", scope)
+		}
+		if !cliV2TestHex(scope.SpecDigest, 32) || !cliV2TestHex(scope.ScopeDigest, 32) {
+			t.Fatalf("v2 pending scope digest: %#v", scope)
+		}
+		if scope.Request.Program != params.Program || scope.Request.Directory != params.Directory ||
+			scope.Request.TimeoutSeconds != params.TimeoutSeconds || len(scope.Request.Args) != len(params.Args) ||
+			scope.Request.Args[0] != params.Args[0] || scope.Request.Args[1] != params.Args[1] ||
+			len(scope.Request.HelperPath) != 1 || scope.Request.HelperPath[0] != params.HelperPath[0] ||
+			scope.Request.Passthrough["DEEPSEEK_MODEL"] != params.Passthrough["DEEPSEEK_MODEL"] ||
+			scope.Request.Passthrough["NO_COLOR"] != params.Passthrough["NO_COLOR"] {
+			t.Fatalf("v2 pending scope request: %#v", scope.Request)
+		}
+		if len(scope.Targets) != 1 || scope.Targets[0].Slot != params.Targets[0].Slot ||
+			scope.Targets[0].ID != params.Targets[0].ID || scope.Targets[0].Revision != params.Targets[0].Revision ||
+			scope.Targets[0].Field != params.Targets[0].Field {
+			t.Fatalf("v2 pending scope targets: %#v", scope.Targets)
+		}
+		if scope.Peer.PID == 0 || scope.Peer.User == "" || scope.Peer.Process == "" {
+			t.Fatalf("v2 pending scope has no authenticated OS peer: %#v", scope.Peer)
+		}
+		if runtime.GOOS == "linux" && scope.Peer.PID != uint32(os.Getpid()) {
+			t.Fatalf("v2 peer PID = %d, want the real client PID %d", scope.Peer.PID, os.Getpid())
+		}
+		if pendingDecided(a, pending) {
+			t.Fatal("v2 approval was decided without an owner action")
+		}
+		a.decideCLIRunV2(pending.id, true)
+
+		var v2 desktopCLIRunV2Outcome
+		select {
+		case v2 = <-v2done:
+		case <-time.After(20 * time.Second):
+			t.Fatal("v2 CLI run did not return")
+		}
+		if v2.err != nil {
+			t.Fatalf("approved v2 CLI: %v", v2.err)
+		}
+		if len(v2.result.Values) != 1 || string(v2.result.Values["token"]) != "desktop-password" {
+			t.Fatalf("v2 values: %#v", v2.result.Values)
+		}
+		if !cliV2TestHex(v2.result.Receipt.Session, 16) || !cliV2TestHex(v2.result.Receipt.Intent, 32) ||
+			!cliV2TestHex(v2.result.Receipt.TargetDigest, 32) || !cliV2TestHex(v2.result.ScopeDigest, 32) {
+			t.Fatalf("v2 receipt: %#v", v2.result)
+		}
+		if v2.result.Epoch != scope.Epoch {
+			t.Fatalf("v2 epoch = %d, want %d", v2.result.Epoch, scope.Epoch)
+		}
+		if currentCLIRunV2Pending(a) != nil {
+			t.Fatal("v2 pending approval survived the owner decision")
+		}
+
+		// A lock that lands while a real v2 approval is pending refuses that
+		// request, clears only the owned pending approval and still pushes
+		// "locked" to the paired browser connection.
+		lockCtx, lockCancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer lockCancel()
+		lockDone := make(chan desktopCLIRunV2Outcome, 1)
+		go func() {
+			result, err := browserhost.RequestCLIRunV2(lockCtx, params)
+			lockDone <- desktopCLIRunV2Outcome{result: result, err: err}
+		}()
+		lockPending := waitCLIRunV2Pending(t, a)
 		a.Lock()
-		if _, e := browserhost.RequestCLIRun(context.Background(), cliReq); !errors.Is(e, browserhost.ErrBrokerUnavailable) {
-			t.Fatalf("locked CLI: %v", e)
+		client.recvType(t, "locked")
+		if lockPending.id == pending.id {
+			t.Fatal("pending approval ids were reused")
+		}
+		if currentCLIRunV2Pending(a) != nil {
+			t.Fatal("lock left a pending v2 approval")
+		}
+		select {
+		case out := <-lockDone:
+			if !errors.Is(out.err, browserhost.ErrBrokerRefused) || len(out.result.Values) != 0 {
+				t.Fatalf("lock pending v2 CLI run: %v %#v", out.err, out.result.Values)
+			}
+		case <-time.After(20 * time.Second):
+			t.Fatal("lock pending v2 CLI run did not return")
 		}
 		return
 	}
 
 	// This environment lacks a trusted temporary ancestor (for example /home is
-	// owned by another UID). Exercise the same approval/disclosure path directly.
+	// owned by another UID). Exercise the historical v1 approval/disclosure path
+	// directly; the product no longer exports it to the broker.
 	t.Log("trusted temporary directory unavailable; exercising CLI approval without the socket relay")
 	s, e := personal.UnlockSession(path, []byte("fixture"), key, time.Minute)
 	if e != nil {

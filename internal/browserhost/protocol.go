@@ -38,6 +38,15 @@ const (
 
 var ErrProtocol = errors.New("native messaging refused")
 var ErrBrokerUnavailable = errors.New("desktop browser broker is unavailable")
+
+// ErrBrokerRefused is a fixed sentinel for requests this client or the broker
+// refused before disclosure. Callers must not fall back to another path.
+var ErrBrokerRefused = errors.New("desktop browser broker refused the request")
+
+// ErrBrokerUnknown is a fixed sentinel for an outcome that may already have
+// disclosed credentials, or that cannot be verified. Callers must not retry or
+// fall back automatically.
+var ErrBrokerUnknown = errors.New("desktop browser broker outcome is unknown")
 var errDuplicateRequest = errors.New("native duplicate request ignored")
 var token = regexp.MustCompile(`^[a-f0-9]{32}$`)
 var revision = regexp.MustCompile(`^[a-f0-9]{64}$`)
@@ -96,6 +105,10 @@ type Request struct {
 	StateAction   string `json:"state_action,omitempty"`
 	ItemJSON      string `json:"item_json,omitempty"`
 	ProfileKind   string `json:"profile_kind,omitempty"`
+	// Checkout is the optional nested cross-origin checkout proposal. Only
+	// match-profiles/fill-profile accept it and only for credit cards; the
+	// native policy in personal.BrowserCheckoutContext is authoritative.
+	Checkout *BrowserCheckout `json:"-"`
 
 	// includeHIBPSet records whether include_hibp was present. ReadRequest is
 	// the only production constructor.
@@ -352,9 +365,11 @@ func (r Request) valid() bool {
 			r.payload == nil && r.RequestID == "" && r.Nonce == "" && r.Origin == "" && r.TabID == 0 && r.DocumentID == "" &&
 			r.WindowID == 0 && r.Options == "" && r.ItemJSON == ""
 	case "match-profiles":
-		return token.MatchString(r.Capability) && r.Context().Valid() && (r.ProfileKind == "" || r.ProfileKind == "all" || r.ProfileKind == "identity" || r.ProfileKind == "credit_card") && r.payload == nil && r.RequestID == "" && r.Nonce == ""
+		// A checkout proposal is card-only; identity and login listings never
+		// carry one.
+		return token.MatchString(r.Capability) && r.Context().Valid() && (r.ProfileKind == "" || r.ProfileKind == "all" || r.ProfileKind == "identity" || r.ProfileKind == "credit_card") && r.payload == nil && r.RequestID == "" && r.Nonce == "" && (r.Checkout == nil || r.ProfileKind == "credit_card")
 	case "fill-profile":
-		return token.MatchString(r.Capability) && r.Context().Valid() && token.MatchString(r.ItemID) && revision.MatchString(r.Revision) && r.payload == nil && r.RequestID == "" && r.Nonce == ""
+		return token.MatchString(r.Capability) && r.Context().Valid() && token.MatchString(r.ItemID) && revision.MatchString(r.Revision) && r.payload == nil && r.RequestID == "" && r.Nonce == "" && checkoutFillOK(r)
 	}
 	return false
 }
@@ -909,6 +924,8 @@ func (r *Response) Clear() {
 	}
 	r.Identity = nil
 	r.Card = nil
+	r.ProfileFill.clear()
+	r.ProfileFill = nil
 	r.Username = ""
 	r.Password = ""
 	r.Code = ""
@@ -968,6 +985,7 @@ func (r *Request) Clear() {
 		r.CopyTicket = ""
 		r.CopyMode = ""
 		r.CleanupTTLSeconds = 0
+		r.Checkout = nil
 	}
 }
 
@@ -1045,6 +1063,7 @@ func ReadRequest(reader io.Reader) (Request, error) {
 		return Request{}, ErrProtocol
 	}
 	seen := map[string]bool{}
+	var checkout *BrowserCheckout
 	for dec.More() {
 		key, e := dec.Token()
 		name, ok := key.(string)
@@ -1056,6 +1075,17 @@ func ReadRequest(reader io.Reader) (Request, error) {
 		if dec.Decode(&value) != nil || len(value) == 0 {
 			clear(value)
 			return Request{}, ErrProtocol
+		}
+		if name == "checkout" {
+			// The only nested object on the wire. It is parsed strictly and
+			// its explicit presence is a proposal, never a permission.
+			parsed, perr := parseBrowserCheckout(value)
+			clear(value)
+			if perr != nil {
+				return Request{}, ErrProtocol
+			}
+			checkout = parsed
+			continue
 		}
 		scalar := value[0] == '"' || value[0] == '-' || value[0] >= '0' && value[0] <= '9' || string(value) == "true" || string(value) == "false"
 		if !scalar {
@@ -1072,55 +1102,56 @@ func ReadRequest(reader io.Reader) (Request, error) {
 		return Request{}, ErrProtocol
 	}
 	var wire struct {
-		Options            string  `json:"options"`
-		Mode               string  `json:"mode"`
-		Length             int     `json:"length"`
-		Digits             *bool   `json:"digits"`
-		Symbols            *bool   `json:"symbols"`
-		SaveHistory        *bool   `json:"save_history"`
-		StageID            string  `json:"stage_id"`
-		Title              string  `json:"title"`
-		NeverForOrigin     *bool   `json:"never_for_origin"`
-		Category           string  `json:"category"`
-		IncludeHIBP        *bool   `json:"include_hibp"`
-		V                  int     `json:"v"`
-		ID                 string  `json:"id"`
-		Type               string  `json:"type"`
-		Capability         string  `json:"capability"`
-		Origin             string  `json:"origin"`
-		TabID              int64   `json:"tab_id"`
-		DocumentID         string  `json:"document_id"`
-		WindowID           int64   `json:"window_id"`
-		ItemID             string  `json:"item_id"`
-		Revision           string  `json:"revision"`
-		RequestID          string  `json:"request_id"`
-		Nonce              string  `json:"nonce"`
-		Username           *string `json:"username"`
-		Password           *string `json:"password"`
-		Query              string  `json:"query"`
-		VaultID            string  `json:"vault_id"`
-		Tag                string  `json:"tag"`
-		StateFilter        string  `json:"state"`
-		FavoritesOnly      *bool   `json:"favorites_only"`
-		PasskeysOnly       *bool   `json:"passkeys_only"`
-		Field              string  `json:"field"`
-		FieldAction        string  `json:"action"`
-		StateAction        string  `json:"state_action"`
-		ItemJSON           string  `json:"item_json"`
-		ProfileKind        string  `json:"profile_kind"`
-		FileName           string  `json:"file_name"`
-		Size               *int64  `json:"size"`
-		SHA256             string  `json:"sha256"`
-		MimeType           string  `json:"mime_type"`
-		TransferID         string  `json:"transfer_id"`
-		Offset             int64   `json:"offset"`
-		Data               string  `json:"data"`
-		AttachmentID       string  `json:"attachment_id"`
-		CredentialID       string  `json:"credential_id"`
-		CopyTicket         string  `json:"copy_ticket"`
-		CopyMode           string  `json:"copy_mode"`
-		CleanupTTLSeconds  int     `json:"cleanup_ttl_seconds"`
-		CredentialRevision string  `json:"credential_revision"`
+		Options            string          `json:"options"`
+		Mode               string          `json:"mode"`
+		Length             int             `json:"length"`
+		Digits             *bool           `json:"digits"`
+		Symbols            *bool           `json:"symbols"`
+		SaveHistory        *bool           `json:"save_history"`
+		StageID            string          `json:"stage_id"`
+		Title              string          `json:"title"`
+		NeverForOrigin     *bool           `json:"never_for_origin"`
+		Category           string          `json:"category"`
+		IncludeHIBP        *bool           `json:"include_hibp"`
+		V                  int             `json:"v"`
+		ID                 string          `json:"id"`
+		Type               string          `json:"type"`
+		Capability         string          `json:"capability"`
+		Origin             string          `json:"origin"`
+		TabID              int64           `json:"tab_id"`
+		DocumentID         string          `json:"document_id"`
+		WindowID           int64           `json:"window_id"`
+		ItemID             string          `json:"item_id"`
+		Revision           string          `json:"revision"`
+		RequestID          string          `json:"request_id"`
+		Nonce              string          `json:"nonce"`
+		Username           *string         `json:"username"`
+		Password           *string         `json:"password"`
+		Query              string          `json:"query"`
+		VaultID            string          `json:"vault_id"`
+		Tag                string          `json:"tag"`
+		StateFilter        string          `json:"state"`
+		FavoritesOnly      *bool           `json:"favorites_only"`
+		PasskeysOnly       *bool           `json:"passkeys_only"`
+		Field              string          `json:"field"`
+		FieldAction        string          `json:"action"`
+		StateAction        string          `json:"state_action"`
+		ItemJSON           string          `json:"item_json"`
+		ProfileKind        string          `json:"profile_kind"`
+		FileName           string          `json:"file_name"`
+		Size               *int64          `json:"size"`
+		SHA256             string          `json:"sha256"`
+		MimeType           string          `json:"mime_type"`
+		TransferID         string          `json:"transfer_id"`
+		Offset             int64           `json:"offset"`
+		Data               string          `json:"data"`
+		AttachmentID       string          `json:"attachment_id"`
+		CredentialID       string          `json:"credential_id"`
+		CopyTicket         string          `json:"copy_ticket"`
+		CopyMode           string          `json:"copy_mode"`
+		CleanupTTLSeconds  int             `json:"cleanup_ttl_seconds"`
+		CredentialRevision string          `json:"credential_revision"`
+		Checkout           json.RawMessage `json:"checkout"`
 	}
 	dec = json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
@@ -1144,6 +1175,7 @@ func ReadRequest(reader io.Reader) (Request, error) {
 		CredentialRevision: wire.CredentialRevision,
 	}
 	r.NeverForOrigin = wire.NeverForOrigin != nil && *wire.NeverForOrigin
+	r.Checkout = checkout
 	if wire.IncludeHIBP != nil {
 		r.IncludeHIBP = *wire.IncludeHIBP
 		r.includeHIBPSet = true
@@ -1288,9 +1320,11 @@ func requestKeys(kind string) (required, optional []string, ok bool) {
 	case "item-state":
 		return append(base, "capability", "item_id", "revision", "state_action"), nil, true
 	case "match-profiles":
-		return append(base, "capability", "origin", "tab_id", "document_id"), []string{"profile_kind"}, true
+		// checkout-frames-v1: the checkout assertion is accepted on this
+		// operation only, and only the native policy decides what it means.
+		return append(base, "capability", "origin", "tab_id", "document_id"), []string{"profile_kind", "checkout"}, true
 	case "fill-profile":
-		return append(base, "capability", "origin", "tab_id", "document_id", "item_id", "revision"), nil, true
+		return append(base, "capability", "origin", "tab_id", "document_id", "item_id", "revision"), []string{"profile_kind", "checkout"}, true
 	case "watchtower", "watchtower-summary":
 		return append(base, "capability"), []string{"origin", "tab_id", "document_id", "include_hibp"}, true
 	}

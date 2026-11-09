@@ -6,27 +6,103 @@ import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { lstatSync, readFileSync, readdirSync } from "node:fs";
 
+const CANARY_KEYS = [
+  "Password",
+  "Secret",
+  "Username",
+  "Value",
+  "SaveUsername",
+  "SaveValue",
+  "UpdateUsername",
+  "UpdateValue",
+  "RejectedUsername",
+  "RejectedValue",
+  "OTPSeed",
+  "OTPURI",
+  "CardNumber",
+  "CardHolder",
+  "CardVerification",
+  "CardExpiry",
+  "CardPIN",
+];
+
+// Card verification codes and PINs are short numeric values. Unbounded
+// substring scans mistake them for fragments of unrelated hexadecimal IDs,
+// timestamps or profile metadata, so they are matched only as whole tokens.
+// Every other canary keeps the exact substring and encoding representations.
+const SHORT_NUMERIC_CARD_KEYS = ["CardVerification", "CardPIN"];
+const SHORT_NUMERIC_CARD_VALUE = /^[0-9]{3,8}$/;
+
 export function fixtureCanaries(fixture) {
-  return [
-    "Password",
-    "Secret",
-    "Username",
-    "Value",
-    "SaveUsername",
-    "SaveValue",
-    "UpdateUsername",
-    "UpdateValue",
-    "RejectedUsername",
-    "RejectedValue",
-    "OTPSeed",
-    "OTPURI",
-  ]
-    .map((key) => fixture[key])
-    .filter((value) => typeof value === "string" && value.length > 0);
+  return CANARY_KEYS.map((key) => fixture[key]).filter(
+    (value) => typeof value === "string" && value.length > 0,
+  );
+}
+
+function classifyFixtureCanaries(fixture) {
+  const exact = [];
+  const shortNumeric = [];
+  for (const key of CANARY_KEYS) {
+    const value = fixture[key];
+    if (typeof value !== "string" || value.length === 0) continue;
+    if (
+      SHORT_NUMERIC_CARD_KEYS.includes(key) &&
+      SHORT_NUMERIC_CARD_VALUE.test(value)
+    ) {
+      shortNumeric.push(value);
+    } else {
+      exact.push(value);
+    }
+  }
+  return { exact, shortNumeric };
+}
+
+function isWordCharacter(character) {
+  return typeof character === "string" && /[A-Za-z0-9_]/.test(character);
+}
+
+function containsShortNumericToken(text, value) {
+  for (
+    let index = text.indexOf(value);
+    index !== -1;
+    index = text.indexOf(value, index + 1)
+  ) {
+    const before = index > 0 ? text[index - 1] : undefined;
+    const after = text[index + value.length];
+    if (!isWordCharacter(before) && !isWordCharacter(after)) return true;
+  }
+  return false;
+}
+
+function isWordByte(byte) {
+  return (
+    typeof byte === "number" &&
+    ((byte >= 0x30 && byte <= 0x39) ||
+      (byte >= 0x41 && byte <= 0x5a) ||
+      (byte >= 0x61 && byte <= 0x7a) ||
+      byte === 0x5f)
+  );
+}
+
+function containsShortNumericBytes(bytes, value) {
+  const needle = Buffer.from(value, "utf8");
+  for (
+    let index = bytes.indexOf(needle);
+    index !== -1;
+    index = bytes.indexOf(needle, index + 1)
+  ) {
+    const before = index > 0 ? bytes[index - 1] : undefined;
+    const after =
+      index + needle.length < bytes.length
+        ? bytes[index + needle.length]
+        : undefined;
+    if (!isWordByte(before) && !isWordByte(after)) return true;
+  }
+  return false;
 }
 
 export function browserScreenshotsAllowed(stage) {
-  return typeof stage === "string" && !stage.startsWith("otp") &&
+  return typeof stage === "string" && !stage.startsWith("checkout") && !stage.startsWith("otp") &&
     !stage.startsWith("passkey-management") &&
     !(stage.startsWith("passkey-conditional") || stage.startsWith("passkey-signal"));
 }
@@ -44,10 +120,17 @@ export function captureControllerOutput() {
 }
 
 export function assertPrivateText(text, fixture) {
+  const { exact, shortNumeric } = classifyFixtureCanaries(fixture);
   assert(
-    !fixtureCanaries(fixture).some((value) => text.includes(value)),
+    !exact.some((value) => text.includes(value)),
     "Synthetic factor or field leaked in output",
   );
+  for (const value of shortNumeric) {
+    assert(
+      !containsShortNumericToken(text, value),
+      "Synthetic card verification or PIN token leaked in output",
+    );
+  }
   for (const code of fixture.OTPCodes || []) {
     assert(/^(?:[0-9]{6}|[0-9]{8})$/.test(code), "Invalid private OTP canary");
     assert(
@@ -58,7 +141,8 @@ export function assertPrivateText(text, fixture) {
 }
 
 export function assertPrivateArtifacts(state, fixture) {
-  const patterns = fixtureCanaries(fixture).flatMap((value) => {
+  const { exact, shortNumeric } = classifyFixtureCanaries(fixture);
+  const patterns = exact.flatMap((value) => {
     const escaped = value
       .split("")
       .map((character) =>
@@ -108,6 +192,12 @@ export function assertPrivateArtifacts(state, fixture) {
         !patterns.some((value) => bytes.includes(value)),
         "Synthetic factor or field value persisted in diagnostics",
       );
+      for (const value of shortNumeric) {
+        assert(
+          !containsShortNumericBytes(bytes, value),
+          "Synthetic card verification or PIN token persisted in diagnostics",
+        );
+      }
       assertPrivateText(bytes.toString("utf8"), fixture);
       scanned++;
     }

@@ -1475,6 +1475,86 @@ globalThis.LocklarkCore = (() => {
     }
     return result;
   }
+  // Strict metadata-only profile rows for the native `match-profiles` reply
+  // (internal/browserhost/vault_ops.go handleMatchProfiles ->
+  // types_v2.go BrowserProfileSummary). Every field the host marshals is
+  // listed here exactly; display hints are the only optional members.
+  // Card number, CVV/PIN, SSN, raw user ids and full records never fit this
+  // shape, so an unknown or oversized member is refused outright.
+  const MAX_PROFILE_METADATA = 100;
+  const PROFILE_METADATA_KEYS = Object.freeze([
+    "id",
+    "revision",
+    "category",
+    "title",
+    "subtitle",
+    "card_brand",
+    "card_last4",
+    "card_exp",
+  ]);
+  const CARD_ONLY_PROFILE_KEYS = Object.freeze([
+    "card_brand",
+    "card_last4",
+    "card_exp",
+  ]);
+  function validProfileText(value, maxLength) {
+    return (
+      typeof value === "string" &&
+      value.length <= maxLength &&
+      value.isWellFormed()
+    );
+  }
+  function validProfileMeta(value) {
+    if (!plainObject(value)) return false;
+    if (!knownKeysOnly(value, PROFILE_METADATA_KEYS)) return false;
+    if (typeof value.id !== "string" || !/^[a-f0-9]{32}$/.test(value.id))
+      return false;
+    if (
+      typeof value.revision !== "string" ||
+      !/^[a-f0-9]{64}$/.test(value.revision)
+    )
+      return false;
+    if (value.category !== "credit_card" && value.category !== "identity")
+      return false;
+    if (
+      !validProfileText(value.title, 1024) ||
+      (value.subtitle !== undefined && !validProfileText(value.subtitle, 1024))
+    )
+      return false;
+    if (
+      value.card_brand !== undefined &&
+      !validProfileText(value.card_brand, 64)
+    )
+      return false;
+    if (value.card_exp !== undefined && !validProfileText(value.card_exp, 32))
+      return false;
+    if (
+      value.card_last4 !== undefined &&
+      !(
+        typeof value.card_last4 === "string" &&
+        /^[0-9]{1,4}$/.test(value.card_last4)
+      )
+    )
+      return false;
+    if (
+      value.category === "identity" &&
+      CARD_ONLY_PROFILE_KEYS.some((key) => value[key] !== undefined)
+    )
+      return false;
+    return true;
+  }
+  function validProfileList(value) {
+    if (!Array.isArray(value) || value.length > MAX_PROFILE_METADATA)
+      return false;
+    const seen = new Set();
+    for (const row of value) {
+      if (!validProfileMeta(row)) return false;
+      // A duplicate metadata id would make the picker selection ambiguous.
+      if (seen.has(row.id)) return false;
+      seen.add(row.id);
+    }
+    return true;
+  }
   function validResponse(m) {
     if (
       !m ||
@@ -1515,6 +1595,8 @@ globalThis.LocklarkCore = (() => {
         "vault-items": ["v", "id", "type", "items"],
         // Native host v2 vault protocol (internal/browserhost/vault_ops.go).
         items: ["v", "id", "type", "items", "vaults"],
+        // match-profiles reply: exact {v, id, type, profiles} frame.
+        profiles: ["v", "id", "type", "profiles"],
         "item-saved": [
           "v",
           "id",
@@ -1785,6 +1867,7 @@ globalThis.LocklarkCore = (() => {
             item.category.length <= 64,
         )
       );
+    if (m.type === "profiles") return validProfileList(m.profiles);
     if (m.type === "item-saved")
       return (
         /^[a-f0-9]{32}$/.test(m.item_id || "") &&
@@ -2613,6 +2696,403 @@ globalThis.LocklarkCore = (() => {
   }
   function probe() {
     return { origin: location.origin, top: window === window.top };
+  }
+  // Self-contained checkout probe for api.scripting.executeScript({ func }).
+  // No closure helper is referenced: the browser serializes this function into
+  // the target isolated world. It reports only public booleans plus the
+  // browser-observed origin; the native host keeps frame/document identity and
+  // the registrable-domain check as the authority. A missing fence is never
+  // initialized here, it is simply reported as unsupported.
+  function checkoutProbe() {
+    "use strict";
+    let origin = "",
+      protocol = "",
+      href = "",
+      windowOrigin = "",
+      secure = false;
+    try {
+      origin = String(location.origin || "");
+    } catch {}
+    try {
+      protocol = String(location.protocol || "");
+    } catch {}
+    try {
+      href = String(location.href || "");
+    } catch {}
+    try {
+      windowOrigin = String(window.origin || "");
+    } catch {}
+    try {
+      secure = isSecureContext === true;
+    } catch {
+      secure = false;
+    }
+    if (
+      origin === "" ||
+      origin === "null" ||
+      origin.indexOf("https://") !== 0 ||
+      (protocol !== "" && protocol !== "https:") ||
+      (href !== "" && href.indexOf("https://") !== 0) ||
+      windowOrigin === "null"
+    ) {
+      origin = "";
+      secure = false;
+    }
+    let top = false;
+    try {
+      top = window === window.top;
+    } catch {
+      top = false;
+    }
+    let fencePresent = false,
+      documentStable = false,
+      sandboxEver = true;
+    try {
+      const fence = globalThis.LocklarkCheckoutFence;
+      if (typeof fence === "function") {
+        const snap = fence();
+        if (snap && typeof snap === "object") {
+          fencePresent = true;
+          documentStable = snap.document_stable === true;
+          sandboxEver = snap.sandbox_ever === true;
+        }
+      }
+    } catch {
+      fencePresent = false;
+      documentStable = false;
+      sandboxEver = true;
+    }
+    return {
+      origin,
+      top,
+      secure,
+      fence_present: fencePresent,
+      document_stable: documentStable,
+      sandbox_ever: sandboxEver,
+    };
+  }
+  // Self-contained exact-document card injection for executeScript({ func }).
+  // The native host already approved this exact frame document; this helper only
+  // re-validates the current isolated document, requires every candidate to be
+  // unique before the first write, and never submits, navigates, reads the
+  // clipboard or bridges to the page. It returns counts, never values. If the
+  // DOM changes after a partial write it reports `unknown` instead of retrying
+  // or claiming a rollback.
+  function fillCheckoutCardDocument(
+    expectedOrigin,
+    fields,
+    deadlineMs,
+    allowTop,
+  ) {
+    "use strict";
+    const MAX_FIELD_BYTES = 16384;
+    const MAX_TOTAL_BYTES = 32768;
+    const ALLOWED = {
+      "cc-name": true,
+      "cc-number": true,
+      "cc-exp": true,
+      "cc-exp-month": true,
+      "cc-exp-year": true,
+      "cc-exp-year-short": true,
+      "cc-csc": true,
+      "cc-type": true,
+    };
+    const refuse = () => ({ filled: false, count: 0 });
+    const nowMs = () => Date.now();
+    function utf8Length(value) {
+      try {
+        if (typeof TextEncoder === "function")
+          return new TextEncoder().encode(value).length;
+      } catch {}
+      return value.length;
+    }
+    function autocompleteTokens(el) {
+      let raw = "";
+      try {
+        raw =
+          el && typeof el.getAttribute === "function"
+            ? el.getAttribute("autocomplete")
+            : "";
+      } catch {
+        raw = "";
+      }
+      if ((raw === null || raw === undefined || raw === "") && el) {
+        try {
+          raw = typeof el.autocomplete === "string" ? el.autocomplete : "";
+        } catch {
+          raw = "";
+        }
+      }
+      return String(raw || "")
+        .toLowerCase()
+        .split(/\s+/)
+        .filter(Boolean);
+    }
+    function visible(el) {
+      if (!el || typeof el !== "object") return false;
+      try {
+        if (el.isConnected === false) return false;
+        if (el.disabled === true || el.readOnly === true) return false;
+        if (typeof el.matches === "function" && el.matches(":disabled"))
+          return false;
+        const tag = String(el.tagName || "").toUpperCase();
+        if (tag !== "INPUT" && tag !== "SELECT") return false;
+        if (
+          tag === "INPUT" &&
+          String(el.type || "").toLowerCase() === "hidden"
+        )
+          return false;
+        if (
+          typeof el.closest === "function" &&
+          el.closest("[hidden],[inert],[aria-hidden='true']")
+        )
+          return false;
+        for (let n = el; n && typeof n === "object"; n = n.parentElement) {
+          const style = getComputedStyle(n);
+          if (
+            !style ||
+            style.display === "none" ||
+            style.visibility === "hidden" ||
+            style.visibility === "collapse" ||
+            Number(style.opacity) === 0
+          )
+            return false;
+          if (!n.parentElement) break;
+        }
+        const rect =
+          typeof el.getBoundingClientRect === "function"
+            ? el.getBoundingClientRect()
+            : null;
+        return !!rect && rect.width > 0 && rect.height > 0;
+      } catch {
+        return false;
+      }
+    }
+    function valueSetter(el) {
+      try {
+        const tag = String(el.tagName || "").toUpperCase();
+        const proto =
+          tag === "SELECT"
+            ? typeof HTMLSelectElement !== "undefined"
+              ? HTMLSelectElement.prototype
+              : null
+            : typeof HTMLInputElement !== "undefined"
+              ? HTMLInputElement.prototype
+              : null;
+        if (!proto) return null;
+        const desc = Object.getOwnPropertyDescriptor(proto, "value");
+        return desc && typeof desc.set === "function" ? desc.set : null;
+      } catch {
+        return null;
+      }
+    }
+    function selectValue(el, value) {
+      let options = null;
+      try {
+        options = el.options || null;
+      } catch {
+        options = null;
+      }
+      if (!options) return null;
+      const target = String(value).trim();
+      if (target === "") return null;
+      const lower = target.toLowerCase();
+      const usable = [];
+      for (let i = 0; i < options.length; i++) {
+        const option = options[i];
+        if (!option || option.disabled) continue;
+        const optionValue = String(option.value == null ? "" : option.value);
+        if (optionValue === "") continue;
+        let text = "";
+        try {
+          text =
+            option.text != null
+              ? String(option.text)
+              : option.textContent != null
+                ? String(option.textContent)
+                : "";
+        } catch {
+          text = "";
+        }
+        usable.push({ value: optionValue, text });
+      }
+      for (const option of usable)
+        if (option.value === target || option.value.toLowerCase() === lower)
+          return option.value;
+      for (const option of usable)
+        if (option.text.trim().toLowerCase() === lower) return option.value;
+      const numeric = Number(target);
+      if (Number.isFinite(numeric))
+        for (const option of usable) {
+          const optionNumber = Number(option.value.trim());
+          if (Number.isFinite(optionNumber) && optionNumber === numeric)
+            return option.value;
+        }
+      return null;
+    }
+    // --- environment validation ------------------------------------------------
+    let origin = "",
+      protocol = "",
+      href = "",
+      windowOrigin = "";
+    try {
+      origin = String(location.origin || "");
+      protocol = String(location.protocol || "");
+      href = String(location.href || "");
+    } catch {
+      return refuse();
+    }
+    try {
+      windowOrigin = String(window.origin || "");
+    } catch {
+      windowOrigin = "";
+    }
+    if (
+      typeof expectedOrigin !== "string" ||
+      origin === "" ||
+      origin === "null" ||
+      origin !== expectedOrigin ||
+      origin.indexOf("https://") !== 0
+    )
+      return refuse();
+    if (protocol !== "" && protocol !== "https:") return refuse();
+    if (href !== "" && href.indexOf("https://") !== 0) return refuse();
+    if (windowOrigin === "null") return refuse();
+    try {
+      if (isSecureContext !== true) return refuse();
+    } catch {
+      return refuse();
+    }
+    const started = nowMs();
+    if (!Number.isSafeInteger(deadlineMs) || deadlineMs <= started)
+      return refuse();
+    if (deadlineMs - started > 1500) return refuse();
+    let isTop = false;
+    try {
+      isTop = window === window.top;
+    } catch {
+      isTop = false;
+    }
+    if (isTop !== (allowTop === true)) return refuse();
+    let fence = null;
+    try {
+      fence = globalThis.LocklarkCheckoutFence;
+    } catch {
+      fence = null;
+    }
+    if (typeof fence !== "function") return refuse();
+    let snap = null;
+    try {
+      snap = fence();
+    } catch {
+      return refuse();
+    }
+    if (!snap || snap.document_stable !== true || snap.sandbox_ever !== false)
+      return refuse();
+    // --- private field whitelist and bounds -----------------------------------
+    if (!fields || typeof fields !== "object" || Array.isArray(fields))
+      return refuse();
+    const entries = [];
+    let totalBytes = 0;
+    for (const key of Object.keys(fields)) {
+      if (!Object.prototype.hasOwnProperty.call(ALLOWED, key)) return refuse();
+      const value = fields[key];
+      if (
+        typeof value !== "string" ||
+        value.length === 0 ||
+        value.length > MAX_FIELD_BYTES
+      )
+        return refuse();
+      const bytes = utf8Length(value);
+      if (bytes > MAX_FIELD_BYTES) return refuse();
+      totalBytes += bytes;
+      if (totalBytes > MAX_TOTAL_BYTES) return refuse();
+      entries.push([key, value]);
+    }
+    if (entries.length === 0 || entries.length > 8) return refuse();
+    // --- preflight every candidate before the first write ---------------------
+    let pool = null;
+    let byKey = null;
+    const usedNodes = new Set();
+    const plan = [];
+    try {
+      try {
+        pool = document.querySelectorAll("input,select");
+      } catch {
+        return refuse();
+      }
+      byKey = new Map();
+      for (const el of pool || []) {
+        if (!visible(el)) continue;
+        const tokens = autocompleteTokens(el);
+        for (const [key] of entries) {
+          if (tokens.indexOf(key) === -1) continue;
+          const list = byKey.get(key) || [];
+          list.push(el);
+          byKey.set(key, list);
+        }
+      }
+      for (const [key, value] of entries) {
+        const list = byKey.get(key) || [];
+        if (list.length === 0) continue;
+        if (list.length > 1) return refuse(); // ambiguous autocomplete token
+        const node = list[0];
+        if (usedNodes.has(node)) return refuse(); // one node for two fields
+        let resolved = value;
+        if (String(node.tagName || "").toUpperCase() === "SELECT") {
+          // A visible intended select whose requested option is absent must
+          // refuse the entire fill before any write: never leave the select
+          // stale while other valid fields were already filled.
+          resolved = selectValue(node, value);
+          if (resolved === null) return refuse();
+        }
+        const setter = valueSetter(node);
+        if (typeof setter !== "function") continue;
+        usedNodes.add(node);
+        plan.push({ key, node, setter, resolved });
+      }
+      if (plan.length === 0) return refuse();
+      let root = null;
+      try {
+        root = document.documentElement || null;
+      } catch {
+        root = null;
+      }
+      const unchanged = (entry) => {
+        try {
+          if (nowMs() >= deadlineMs) return false;
+          if (String(location.origin || "") !== expectedOrigin) return false;
+          if ((document.documentElement || null) !== root) return false;
+          const node = entry.node;
+          if (!node || node.isConnected === false) return false;
+          if (!visible(node)) return false;
+          return autocompleteTokens(node).indexOf(entry.key) !== -1;
+        } catch {
+          return false;
+        }
+      };
+      let written = 0;
+      for (const entry of plan) {
+        if (!unchanged(entry)) {
+          return written > 0
+            ? { filled: false, count: written, unknown: true }
+            : refuse();
+        }
+        entry.setter.call(entry.node, entry.resolved);
+        try {
+          entry.node.dispatchEvent(new Event("input", { bubbles: true }));
+          entry.node.dispatchEvent(new Event("change", { bubbles: true }));
+        } catch {}
+        written++;
+      }
+      return { filled: written > 0, count: written };
+    } finally {
+      // Best-effort reference drop only; string contents are not claimed zeroable.
+      if (byKey) byKey.clear();
+      usedNodes.clear();
+      plan.length = 0;
+      pool = null;
+    }
   }
   function fillDocument(
     expected,
@@ -5160,6 +5640,8 @@ globalThis.LocklarkCore = (() => {
     probe,
     fillDocument,
     fillGeneratedPassword,
+    checkoutProbe,
+    fillCheckoutCardDocument,
     fillGeneratedPasswordDocument,
     classifyField,
     inspectAutofillFields,

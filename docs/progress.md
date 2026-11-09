@@ -1,4 +1,4 @@
-> 2026-11-09（香港）更新：PR #61、#62、#67、#68、#70 已合并，当前主线 `20f3f25`；#63 typed SSH 文件导入和 #66 显式 HIBP 已关闭。多 Passkey 的真实 Edge/Firefox 完整旅程通过，PR #71 正在新 head 重新检查；共享桌面原生剪贴板的真实 Edge/Firefox 完整旅程通过，正在提交独立 PR。iOS 曾将正向保护预检失败转换为绿色状态，此结果不代表正向验收；已合并的 PR #70 修正 CI，缺少保护能力的运行环境与真实设备证据由 #69 跟踪。整合 E2E 原报告仍是 215 项：183 PASS、32 PENDING、0 FAIL；八项 F6 真实终端增量证据单列，未冒充全量重跑。CLI broker、跨设备导入和结算框架填充仍在实现。详见[遗留 issues 台账](all-issues-implementation-ledger.md)。
+> 2026-11-09（北京时间）更新：主线 `42a2a7c` 已合并 PR #71 多通行密钥和 #72 剪贴板；#56、#63、#66 已关闭。迁移 #74、证据映射/无障碍 #75、结算 #76、CLI broker/lease #77 尚未合并。组合分支 438 项 Node 检查及真实 Linux CLI、共享 Edge 剪贴板和结算拒绝旅程通过；组合 Go race 与最终平台 CI 继续验证。iOS 正向文件保护失败仍由 #69 跟踪；真机、商店签名、固定参照与独立审计未宣称完成。历史完整 E2E 的 215 项计数不是本轮重跑；新增证据及未完成条件见[遗留 issues 台账](all-issues-implementation-ledger.md)。
 
 # Locklark 开发进度
 

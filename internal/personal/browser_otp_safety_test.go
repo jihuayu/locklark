@@ -42,14 +42,22 @@ func TestBrowserOTPSlowReadonlyVerificationIsImmediatelyCancellable(t *testing.T
 	for _, lock := range []bool{false, true} {
 		t.Run(fmt.Sprint(lock), func(t *testing.T) {
 			s, target := browserOTPFixture(t)
-			control := NewBrowserOTPControl(time.Now().Add(time.Second))
+			control, target := browserOTPAuthorizationControl(t, s, target)
 			p, err := s.PrepareBrowserOTP(target, dailyGate(t, s), control)
 			if err != nil {
 				t.Fatal(err)
 			}
+			// Only the explicit Cancel/RequestLock below may revoke this code: the
+			// preparation must still be pending, and this test owns the one wall-clock
+			// timer that could otherwise expire it first.
 			p.cap.mu.Lock()
 			canary := p.cap.code
+			ready := len(canary) != 0
 			p.cap.mu.Unlock()
+			if !ready || !control.Pending() {
+				t.Fatal("preparation expired before the explicit cancel boundary")
+			}
+			stopBrowserOTPAuthorizationTimer(t, control)
 			entered, resume, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
 			go func() {
 				_, e := s.authorizeBrowserOTPWith(p, func(BrowserOTPTarget) error { close(entered); <-resume; return nil })

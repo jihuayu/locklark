@@ -25,6 +25,9 @@ import {
   acceptSharedClipboard,
   prepareSharedEnvironment,
 } from "./browser_shared_clipboard_acceptance.mjs";
+import { acceptCheckoutFrames, checkoutTopHTML, checkoutCardHTML, checkoutRouteCase } from "./browser_checkout_acceptance.mjs";
+
+const checkoutFrames = process.env.LOCKLARK_TEST_CHECKOUT_FRAMES === "1";
 
 const scanController = captureControllerOutput();
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -105,7 +108,9 @@ execFileSync(
     "-subj",
     "/CN=login.locklark.test",
     "-addext",
-    "subjectAltName=DNS:login.locklark.test",
+    checkoutFrames
+      ? "subjectAltName=DNS:login.locklark.test,DNS:checkout.locklark.test,DNS:checkout.other.test"
+      : "subjectAltName=DNS:login.locklark.test",
   ],
   { stdio: "ignore" },
 );
@@ -123,6 +128,24 @@ const server = createServer(
   { key: readFileSync(key), cert: readFileSync(cert) },
   (req, res) => {
     res.setHeader("Content-Type", "text/html");
+    if (checkoutFrames) {
+      let route;
+      try {
+        route = checkoutRouteCase(req.url);
+      } catch {
+        res.statusCode = 404;
+        res.end();
+        return;
+      }
+      if (route.kind === "checkout") {
+        res.end(checkoutTopHTML(server.address().port, route.options));
+        return;
+      }
+      if (route.kind === "card") {
+        res.end(checkoutCardHTML());
+        return;
+      }
+    }
     res.end(
       req.url.startsWith("/otp")
         ? otpHTML.replace(
@@ -156,6 +179,7 @@ try {
       join(state, "vault"),
       "-origin",
       origin,
+      ...(checkoutFrames ? ["-checkout-card"] : []),
     ],
     { cwd: root, env, stdio: "inherit" },
   );
@@ -192,7 +216,9 @@ try {
       "--no-sandbox",
       "--disable-extensions-except=" + extension,
       "--load-extension=" + extension,
-      "--host-resolver-rules=MAP login.locklark.test 127.0.0.1",
+      checkoutFrames
+        ? "--host-resolver-rules=MAP login.locklark.test 127.0.0.1,MAP checkout.locklark.test 127.0.0.1,MAP checkout.other.test 127.0.0.1"
+        : "--host-resolver-rules=MAP login.locklark.test 127.0.0.1",
       "--no-proxy-server",
       "--ignore-certificate-errors-spki-list=" + spki,
       "--window-size=1200,850",
@@ -535,6 +561,12 @@ try {
   ]);
   phase("native-pair");
   input([{ click_label: "确认连接此扩展" }]);
+  if (checkoutFrames) {
+    await page.goto(origin + "/checkout");
+    await acceptCheckoutFrames({ page, origin, input, fixture, openPopup, phase, eventually });
+    popup = await openPopup();
+    await popup.click("#disconnect");
+  } else {
   if (process.env.LOCKLARK_TEST_POPUP_VAULT) {
     const downloadDirectory = join(state, "attachment-downloads");
     mkdirSync(downloadDirectory, { recursive: true });
@@ -737,6 +769,7 @@ try {
   popup = await openPopup();
   await popup.click("#disconnect");
   }
+  }
 } catch (error) {
   // Deliberately omit fixture files and exception/command bodies. The only
   // inspection text is the trusted popup's bounded status; native metadata is
@@ -761,6 +794,36 @@ try {
     "Shared desktop host must be an absolute executable path",
     "Synthetic fixture vault path is required",
     "Synthetic fixture password is required",
+    "Checkout card filter unavailable",
+    "Synthetic checkout card missing from the vault",
+    "Checkout card revision mismatch",
+    "Checkout card category mismatch",
+    "Synthetic checkout card detail did not open",
+    "Checkout form picker control unavailable",
+    "Checkout form picker label missing",
+    "Checkout origin picker missing",
+    "Checkout origin picker is incomplete",
+    "Expected exactly one explicit checkout child origin",
+    "Checkout popup is not connected",
+    "Checkout card frame did not load",
+    "Top checkout card fields must be visible",
+    "Checkout card frame fields must be visible",
+    "Approved checkout fill did not reach the child frame",
+    "Checkout picker cancel did not close",
+    "Checkout native approval must not be available",
+    "Cross-site checkout forms must stay blank",
+    "Cross-site checkout refusal did not finish",
+    "Cross-site checkout received a value without approval",
+    "Excluded checkout origin must not be auto-selected",
+    "Excluded cross-site checkout wrote a value",
+    "Checkout sandboxed child must be excluded from the picker",
+    "Sandboxed checkout picker request did not finish",
+    "Sandboxed checkout forms must stay blank",
+    "Sandboxed checkout received a value without approval",
+    "Checkout child document identity missing",
+    "Checkout child document was not replaced",
+    "Changed checkout document did not finish",
+    "Changed checkout document received a value",
   ];
   const report = {
     reason: safeReasons.includes(error?.message)
@@ -768,7 +831,7 @@ try {
       : "unclassified acceptance failure",
     frames:
       typeof error?.stack === "string"
-        ? error.stack.match(/browser_(?:native|passkey_management|conditional_passkey|passkey)_acceptance\.mjs:[0-9]+:[0-9]+/g)
+        ? error.stack.match(/browser_(?:native|checkout|passkey_management|conditional_passkey|passkey)_acceptance\.mjs:[0-9]+:[0-9]+/g)
         : [],
     stage,
     popup: { available: false },
@@ -826,6 +889,8 @@ try {
 console.log(
   process.env.LOCKLARK_TEST_SHARED_CLIPBOARD === "1"
     ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} extension shared Locklark desktop native clipboard lease, private OS reads, foreign-owner TTL preservation, lock clearing and hidden-popup prepare cancellation`
+    : checkoutFrames
+    ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} checkout approval/refusal, cross-site, opaque sandbox and changed-document rejection`
     : process.env.LOCKLARK_TEST_BROWSER_PARITY
     ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} quick pairing, inline fill, automatic sign-in, Passkey creation/assertion, relying-party signature verification and abort`
     : `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} fill/save/update/OTP and Passkey with native approval and private diagnostics`,

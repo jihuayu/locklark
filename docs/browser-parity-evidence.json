@@ -1,0 +1,1661 @@
+{
+  "schema": "locklark.browser-parity-evidence.v1",
+  "generated_at": "2026-11-09",
+  "head": "20f3f25fcc2749f0466e4f3b5cdaf0dcfad89dc9",
+  "source_checklist": "docs/browser-parity-checklist.md",
+  "stable_id_count": 65,
+  "claim_scope": "implementation-and-test-path-map-only",
+  "reference": {
+    "product": "1Password 8.12.44.33",
+    "status": "unverified",
+    "authorized_fixed_reference_install": false,
+    "note": "No authorized fixed reference installation or row-by-row comparison is available; no reference pass is claimed."
+  },
+  "status_vocabulary": [
+    "未实现",
+    "已实现未对照",
+    "已实测",
+    "平台不适用",
+    "经用户确认的差异"
+  ],
+  "accessibility": {
+    "automated_driver_status": "not-added-this-stage",
+    "real_screen_reader_status": "open",
+    "owner_issue": 57,
+    "note": "Automated browser accessibility driver and real NVDA/VoiceOver/JAWS/OS zoom/high-contrast runs remain open."
+  },
+  "rows": [
+    {
+      "id": "B1.1",
+      "behavior": "Closed-shadow inline menu on focus",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/content.js",
+        "browser-extension/core.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/content_conditional.test.js",
+        "scripts/browser_native_acceptance.mjs"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/content_conditional.test.js",
+        "node scripts/browser_native_acceptance.mjs"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Closed-shadow full menu and focus path are checked in; the ordinary native inline-menu journey remains unrun.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B1.2",
+      "behavior": "Keyboard navigation",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/content.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/content_conditional.test.js",
+        "scripts/browser_native_acceptance.mjs"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/content_conditional.test.js",
+        "node scripts/browser_native_acceptance.mjs"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Keyboard handling is implemented in the closed-shadow panel; no fresh native keyboard journey is claimed.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B1.3",
+      "behavior": "Reposition on scroll/resize; hide when anchor hides",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/content.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/content_conditional.test.js",
+        "scripts/browser_native_acceptance.mjs"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/content_conditional.test.js",
+        "node scripts/browser_native_acceptance.mjs"
+      ],
+      "evidence_level": "E3",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Scroll/resize reposition paths are checked in; the controlled native journey is not run for this mapping.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B1.4",
+      "behavior": "Ignore attribute and per-site suppression",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/content.js",
+        "browser-extension/options.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/content_conditional.test.js",
+        "browser-extension/test/popup_vault.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/content_conditional.test.js",
+        "node --test browser-extension/test/popup_vault.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "The ignore attribute and per-origin suppression settings have checked-in unit paths.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B1.5",
+      "behavior": "Origin/domain/port candidate filtering and sender verification",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/core.js",
+        "browser-extension/background.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/core.test.js",
+        "browser-extension/test/host_v2_contract.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/core.test.js",
+        "node --test browser-extension/test/host_v2_contract.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Origin matching, sender verification and bounded host DTOs have checked-in unit coverage.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B2.1",
+      "behavior": "Global and per-login auto-submit toggle",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/background.js",
+        "browser-extension/popup.js",
+        "browser-extension/options.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/background.test.js",
+        "browser-extension/test/popup_vault.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/background.test.js",
+        "node --test browser-extension/test/popup_vault.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Global and per-login auto-submit preferences are wired through background, popup and options.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B2.2",
+      "behavior": "Guarded POST `requestSubmit`",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/core.js",
+        "browser-extension/content.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/core.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/core.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Guarded POST requestSubmit and post-fill rechecks have checked-in unit coverage.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B7.1",
+      "behavior": "Username-only or password-only screen fill",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/core.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/core.test.js",
+        "browser-extension/test/m3_fill_v2.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/core.test.js",
+        "node --test browser-extension/test/m3_fill_v2.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Username-only and password-only fill paths are present in the checked-in document filler.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B7.2",
+      "behavior": "Continuous multi-step fill session",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/background.js",
+        "browser-extension/content.js",
+        "browser-extension/core.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/m3_fill_v2.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/m3_fill_v2.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Tab-bound multi-step sessions and invalidation are checked in with unit paths.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B7.3",
+      "behavior": "Multi-step auto-advance",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/background.js",
+        "browser-extension/core.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/m3_fill_v2.test.js",
+        "browser-extension/test/background.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/m3_fill_v2.test.js",
+        "node --test browser-extension/test/background.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Step-specific auto-advance paths are checked in; no fresh real-site journey is claimed.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B12a.1",
+      "behavior": "Single-field TOTP fill",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/core.js",
+        "browser-extension/content.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/core.test.js",
+        "browser-extension/test/otp_probe_serialization.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/core.test.js",
+        "node --test browser-extension/test/otp_probe_serialization.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Single-field OTP discovery and injection are checked in with bounded unit paths.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B12a.2",
+      "behavior": "Split OTP digit inputs",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/core.js",
+        "browser-extension/content.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/m3_fill_v2.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/m3_fill_v2.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Split OTP six/eight-box fill and refusal cases are checked in as unit tests.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B12b.1",
+      "behavior": "Same-origin and same-site iframe fill",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/content.js",
+        "browser-extension/core.js",
+        "browser-extension/background.js",
+        "browser-extension/build.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/m3_fill_v2.test.js",
+        "browser-extension/test/background.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/m3_fill_v2.test.js",
+        "node --test browser-extension/test/background.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Same-origin subframe fill and the all-frames manifest path exist; same-site scope remains narrower.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B12b.2",
+      "behavior": "Cross-origin iframe blocking and warning",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/background.js",
+        "browser-extension/core.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/m3_fill_v2.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/m3_fill_v2.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Cross-origin down-frame refusal paths are checked in; warning UX still needs browser evidence.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B12b.3",
+      "behavior": "Open shadow-DOM traversal",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/core.js",
+        "browser-extension/content.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/m3_fill_v2.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/m3_fill_v2.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Bounded open-shadow traversal is checked in; closed roots remain intentionally opaque.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B5.1",
+      "behavior": "Detect form submission",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/content.js",
+        "browser-extension/background.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/background.test.js",
+        "scripts/browser_native_acceptance.mjs"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/background.test.js",
+        "node scripts/browser_native_acceptance.mjs"
+      ],
+      "evidence_level": "E3",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Submission observers exist; unit coverage of every trigger remains partial and native journeys are unrun.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B5.2",
+      "behavior": "Stage pending save across navigation and show a post-submit banner",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/background.js",
+        "browser-extension/content.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/background.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/background.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Staged saves survive navigation in the checked-in unit path; the native commit journey is not run.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B5.3",
+      "behavior": "Classify new vs update vs unchanged",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/background.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/background.test.js",
+        "browser-extension/test/popup.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/background.test.js",
+        "node --test browser-extension/test/popup.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "New/update/unchanged/never classification and pending banner paths are checked in.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B5.4",
+      "behavior": "Capture multi-password signup/change forms",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/core.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/core.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/core.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Signup and change-password multi-password capture is checked in as unit coverage.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B5.5",
+      "behavior": "Never save for this site",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/background.js",
+        "browser-extension/options.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/popup.test.js",
+        "browser-extension/test/background.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/popup.test.js",
+        "node --test browser-extension/test/background.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Per-origin never-save storage and suppression paths are checked in.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B6.1",
+      "behavior": "Inline generator trigger on signup/change-password fields",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/content.js",
+        "browser-extension/core.js",
+        "browser-extension/background.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/background.test.js",
+        "browser-extension/test/popup.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/background.test.js",
+        "node --test browser-extension/test/popup.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Inline generator triggers and native/local dispatch paths are checked in.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B6.2",
+      "behavior": "Generator modes and controls",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/core.js",
+        "browser-extension/popup.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/core.test.js",
+        "browser-extension/test/popup.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/core.test.js",
+        "node --test browser-extension/test/popup.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Random, memorable and PIN generator modes and bounds have checked-in tests.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B6.3",
+      "behavior": "Fill new-password and confirm-password together",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/core.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/core.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/core.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "New-password plus confirm-password fill without touching current-password is checked in.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B6.4",
+      "behavior": "Generated-password history and staged recovery",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/background.js",
+        "browser-extension/popup.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/background.test.js",
+        "browser-extension/test/popup.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/background.test.js",
+        "node --test browser-extension/test/popup.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Bounded generated-password history and staged recovery paths are checked in.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B9.1",
+      "behavior": "Popup vault search bar",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/popup.js",
+        "browser-extension/popup.html"
+      ],
+      "test_paths": [
+        "browser-extension/test/popup_vault.test.js",
+        "browser-extension/test/popup_lifecycle.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/popup_vault.test.js",
+        "node --test browser-extension/test/popup_lifecycle.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Popup search and lifecycle paths are checked in; no fresh browser run is claimed.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B9.2",
+      "behavior": "Suggested / All Items / Favorites / Categories tabs",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/popup.js",
+        "browser-extension/popup.html"
+      ],
+      "test_paths": [
+        "browser-extension/test/popup_vault.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/popup_vault.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Suggested, all-items, favorites and category filters are checked in as unit paths.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B9.3",
+      "behavior": "Item detail view",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/popup.js",
+        "browser-extension/popup.html",
+        "browser-extension/background.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/popup_vault.test.js",
+        "browser-extension/test/popup_clear_controls.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/popup_vault.test.js",
+        "node --test browser-extension/test/popup_clear_controls.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Detail, reveal, copy and open-fill paths exist; PR #72 clipboard ownership still needs real Edge/Firefox checks.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B9.4",
+      "behavior": "Create and edit items in the popup",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/popup.js",
+        "browser-extension/popup.html",
+        "browser-extension/background.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/popup_clear_controls.test.js",
+        "browser-extension/test/popup_vault.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/popup_clear_controls.test.js",
+        "node --test browser-extension/test/popup_vault.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Create/edit/clear paths and mutation whitelists are checked in; no real-vault journey is claimed.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B9.5",
+      "behavior": "Popup header lock",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/popup.js",
+        "browser-extension/popup.html",
+        "browser-extension/background.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/popup.test.js",
+        "browser-extension/test/popup_lifecycle.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/popup.test.js",
+        "node --test browser-extension/test/popup_lifecycle.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Popup header lock and preview wipe paths are checked in as unit tests.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B10.1",
+      "behavior": "Open popup shortcut",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/build.js",
+        "browser-extension/background.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/popup_vault.test.js",
+        "browser-extension/test/background.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/popup_vault.test.js",
+        "node --test browser-extension/test/background.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "The action shortcut manifest entry and command listener are checked in.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B10.2",
+      "behavior": "Autofill and lock shortcuts",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/build.js",
+        "browser-extension/background.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/popup_vault.test.js",
+        "browser-extension/test/background.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/popup_vault.test.js",
+        "node --test browser-extension/test/background.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Autofill and lock command entries and handlers are checked in.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B10.3",
+      "behavior": "Right-click context menu",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/build.js",
+        "browser-extension/background.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/popup_vault.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/popup_vault.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "The Chromium build emits the contextMenus permission and menu paths; native UI is unrun.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B11.1",
+      "behavior": "Toolbar badge",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/background.js",
+        "browser-extension/popup.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/popup.test.js",
+        "browser-extension/test/popup_vault.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/popup.test.js",
+        "node --test browser-extension/test/popup_vault.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Toolbar badge state transitions are checked in; no fresh browser badge run is claimed.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B11.2",
+      "behavior": "Per-site controls",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/background.js",
+        "browser-extension/options.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/popup_vault.test.js",
+        "browser-extension/test/popup.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/popup_vault.test.js",
+        "node --test browser-extension/test/popup.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Per-site inline/never-save controls and option storage are checked in.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B11.3",
+      "behavior": "Dedicated options page",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/options.html",
+        "browser-extension/options.js",
+        "browser-extension/options.css",
+        "browser-extension/build.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/popup_vault.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/popup_vault.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "The dedicated options page is emitted and its settings schema is unit-mapped.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B15.1",
+      "behavior": "Weak password detection",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/background.js",
+        "browser-extension/popup.js",
+        "internal/watchtower/watchtower.go",
+        "internal/personal/health.go"
+      ],
+      "test_paths": [
+        "browser-extension/test/popup.test.js",
+        "internal/watchtower/watchtower_test.go",
+        "internal/personal/health_test.go"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/popup.test.js",
+        "go test ./internal/watchtower",
+        "go test ./internal/personal"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Weak-password flags and popup badges are checked in; real-site health evidence remains open.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B15.2",
+      "behavior": "Reused password detection",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/background.js",
+        "browser-extension/popup.js",
+        "internal/watchtower/watchtower.go",
+        "internal/personal/health.go"
+      ],
+      "test_paths": [
+        "browser-extension/test/popup.test.js",
+        "internal/watchtower/watchtower_test.go",
+        "internal/personal/health_test.go"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/popup.test.js",
+        "go test ./internal/watchtower",
+        "go test ./internal/personal"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Reused-password flags and popup badges are checked in; real-vault health evidence remains open.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B15.3",
+      "behavior": "Unsecured HTTP warning",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/background.js",
+        "browser-extension/popup.js",
+        "internal/watchtower/watchtower.go",
+        "internal/personal/health.go"
+      ],
+      "test_paths": [
+        "browser-extension/test/popup.test.js",
+        "internal/watchtower/watchtower_test.go",
+        "internal/personal/health_test.go"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/popup.test.js",
+        "go test ./internal/watchtower",
+        "go test ./internal/personal"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Unsecured-HTTP warnings and popup banner paths are checked in as unit paths.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B15.4",
+      "behavior": "Breached password via HIBP k-anonymity",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "internal/watchtower/hibp.go",
+        "browser-extension/background.js",
+        "browser-extension/popup.js"
+      ],
+      "test_paths": [
+        "internal/watchtower/hibp_test.go",
+        "browser-extension/test/popup.test.js"
+      ],
+      "test_commands": [
+        "go test ./internal/watchtower",
+        "node --test browser-extension/test/popup.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "HIBP is opt-in with k-anonymity code and tests; no live network or reference run is claimed.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B15.5",
+      "behavior": "Missing 2FA/passkey and expiring items",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/background.js",
+        "browser-extension/popup.js",
+        "internal/watchtower/watchtower.go",
+        "internal/personal/health.go"
+      ],
+      "test_paths": [
+        "browser-extension/test/popup.test.js",
+        "internal/personal/health_test.go"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/popup.test.js",
+        "go test ./internal/personal"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Missing-2FA/passkey and expiring-item categories are checked in with unit paths.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B15.6",
+      "behavior": "Current-site Watchtower banner and dashboard",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/popup.js",
+        "browser-extension/popup.html",
+        "browser-extension/background.js",
+        "internal/watchtower/watchtower.go"
+      ],
+      "test_paths": [
+        "browser-extension/test/popup.test.js",
+        "internal/watchtower/watchtower_test.go"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/popup.test.js",
+        "go test ./internal/watchtower"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Current-site Watchtower banner and dashboard paths are checked in; no fresh browser run is claimed.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B8.1",
+      "behavior": "Identity item category and field storage",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "internal/vault/items_v2.go",
+        "internal/browserhost/types_v2.go",
+        "browser-extension/core.js"
+      ],
+      "test_paths": [
+        "internal/vault/items_v2_test.go",
+        "browser-extension/test/core.test.js"
+      ],
+      "test_commands": [
+        "go test ./internal/vault",
+        "node --test browser-extension/test/core.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Identity storage and strict wire shapes are checked in; real-site fill remains open.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B8.2",
+      "behavior": "Identity field detection and multi-field fill",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/core.js",
+        "browser-extension/content.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/m3_fill_v2.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/m3_fill_v2.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Identity field classification and multi-field fill are checked in as unit paths.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B8.3",
+      "behavior": "Credit Card item category and field storage",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "internal/vault/items_v2.go",
+        "browser-extension/core.js"
+      ],
+      "test_paths": [
+        "internal/vault/items_v2_test.go",
+        "browser-extension/test/core.test.js"
+      ],
+      "test_commands": [
+        "go test ./internal/vault",
+        "node --test browser-extension/test/core.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Credit-card storage and strict wire shapes are checked in; real-site fill remains open.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B8.4",
+      "behavior": "Credit Card field detection and `<select>` fill",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/core.js",
+        "browser-extension/content.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/m3_fill_v2.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/m3_fill_v2.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Card field classification, expiry selects and CSC fill are checked in as unit paths.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B3.1",
+      "behavior": "MAIN-world WebAuthn create/get interception",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/webauthn.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/webauthn_conditional.test.js",
+        "browser-extension/test/background.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/webauthn_conditional.test.js",
+        "node --test browser-extension/test/background.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "MAIN-world create/get interception is checked in; no fresh native passkey journey is claimed.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B3.2",
+      "behavior": "Isolated-world passkey modal and settings",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/content.js",
+        "browser-extension/popup.js",
+        "browser-extension/popup.html",
+        "browser-extension/background.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/content_conditional.test.js",
+        "browser-extension/test/popup_clear_controls.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/content_conditional.test.js",
+        "node --test browser-extension/test/popup_clear_controls.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Isolated passkey modal/detail and settings paths are checked in as unit paths.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B3.3",
+      "behavior": "ES256 discoverable credential creation and assertion",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/webauthn.js",
+        "internal/passkey/passkey.go",
+        "internal/browserhost/passkey.go"
+      ],
+      "test_paths": [
+        "internal/browserhost/passkey_test.go",
+        "browser-extension/test/webauthn_conditional.test.js"
+      ],
+      "test_commands": [
+        "go test ./internal/browserhost",
+        "node --test browser-extension/test/webauthn_conditional.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "ES256 discoverable credential creation/assertion paths are checked in; hardware UV is separate.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B3.4",
+      "behavior": "RP ID validation against the Public Suffix List",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/webauthn.js",
+        "internal/passkey/passkey.go",
+        "internal/browserhost/passkey.go"
+      ],
+      "test_paths": [
+        "internal/passkey/passkey_test.go",
+        "internal/browserhost/passkey_test.go"
+      ],
+      "test_commands": [
+        "go test ./internal/passkey",
+        "go test ./internal/browserhost"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "RP ID validation paths are checked in; fixed-reference comparison is not performed.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B3.5",
+      "behavior": "`excludeCredentials`/`allowCredentials` and overwrite prevention",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/webauthn.js",
+        "internal/passkey/passkey.go"
+      ],
+      "test_paths": [
+        "internal/passkey/passkey_test.go",
+        "browser-extension/test/webauthn_conditional.test.js"
+      ],
+      "test_commands": [
+        "go test ./internal/passkey",
+        "node --test browser-extension/test/webauthn_conditional.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Exclude/allow credential and overwrite-prevention paths are checked in as unit paths.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B3.6",
+      "behavior": "Browser fallback and cancellation",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/webauthn.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/webauthn_conditional.test.js",
+        "browser-extension/test/background.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/webauthn_conditional.test.js",
+        "node --test browser-extension/test/background.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Browser fallback and cancellation paths are checked in; real-browser journey is unrun.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B13.1",
+      "behavior": "Conditional UI",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/content.js",
+        "browser-extension/background.js",
+        "browser-extension/webauthn.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/content_conditional.test.js",
+        "browser-extension/test/webauthn_conditional.test.js",
+        "internal/browserhost/passkey_conditional_test.go"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/content_conditional.test.js",
+        "node --test browser-extension/test/webauthn_conditional.test.js",
+        "go test ./internal/browserhost"
+      ],
+      "evidence_level": "E3",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Conditional metadata-only UI and controlled journeys are checked in; no fresh reference comparison.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B13.2",
+      "behavior": "Passkey management and separate removal",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/popup.js",
+        "browser-extension/popup.html",
+        "browser-extension/background.js",
+        "internal/browserhost/passkey_management.go"
+      ],
+      "test_paths": [
+        "browser-extension/test/popup_clear_controls.test.js",
+        "internal/browserhost/passkey_management_test.go"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/popup_clear_controls.test.js",
+        "go test ./internal/browserhost"
+      ],
+      "evidence_level": "E3",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "PR #71 multi-credential implementation/tests are checked in; real Edge/Firefox checks are pending CI.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B13.3",
+      "behavior": "Advanced WebAuthn extensions, algorithms, related origins, signal APIs",
+      "implementation_status": "经用户确认的差异",
+      "reference_status": "accepted_difference",
+      "implementation_paths": [
+        "browser-extension/webauthn.js",
+        "internal/browserhost/passkey_signal.go",
+        "internal/browserhost/passkey.go"
+      ],
+      "test_paths": [
+        "browser-extension/test/webauthn_signals.test.js",
+        "internal/browserhost/passkey_signal_test.go"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/webauthn_signals.test.js",
+        "go test ./internal/browserhost"
+      ],
+      "evidence_level": "E3",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "This is the prior approved P2 difference, not a fresh fixed-reference pass; signal paths are checked in.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ],
+      "decision_ref": "docs/history/browser-parity-m3-baseline-2026-11-06.md",
+      "decision_date": "2026-11-06"
+    },
+    {
+      "id": "B14.1",
+      "behavior": "Truthful user verification",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/webauthn.js",
+        "browser-extension/background.js",
+        "internal/passkey/passkey.go"
+      ],
+      "test_paths": [
+        "internal/browserhost/passkey_test.go",
+        "browser-extension/test/webauthn_conditional.test.js"
+      ],
+      "test_commands": [
+        "go test ./internal/browserhost",
+        "node --test browser-extension/test/webauthn_conditional.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Truthful user-verification flags have checked-in unit paths; no hardware prompt is claimed.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B14.2",
+      "behavior": "Windows Hello / Touch ID biometric prompt",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/background.js",
+        "internal/browserhost/passkey.go"
+      ],
+      "test_paths": [
+        "internal/browserhost/passkey_system_test.go"
+      ],
+      "test_commands": [
+        "go test ./internal/browserhost"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Only fake-adapter and race paths are checked in; real Hello/Touch ID prompts remain open.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B4.1",
+      "behavior": "Shared unlock state with desktop",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/background.js",
+        "internal/browserhost/connection.go"
+      ],
+      "test_paths": [
+        "browser-extension/test/background.test.js",
+        "browser-extension/test/host_v2_contract.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/background.test.js",
+        "node --test browser-extension/test/host_v2_contract.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Shared-session and standalone host paths are checked in; cross-platform interaction is unrun.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B4.2",
+      "behavior": "Bidirectional lock propagation",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/background.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/background.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/background.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Lock propagation and cleanup paths are checked in as unit tests.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B4.3",
+      "behavior": "Biometric/system unlock delegation",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/background.js",
+        "internal/browserhost/passkey.go"
+      ],
+      "test_paths": [
+        "internal/browserhost/passkey_system_test.go"
+      ],
+      "test_commands": [
+        "go test ./internal/browserhost"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "System-unlock delegation is checked in with fake adapters only; real biometrics remain open.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B4.4",
+      "behavior": "Standalone fallback when desktop is not running",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/background.js",
+        "internal/browserhost/broker.go",
+        "browser-extension/popup.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/background.test.js",
+        "internal/browserhost/broker_test.go"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/background.test.js",
+        "go test ./internal/browserhost"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Standalone fallback and broker paths are checked in; full desktop interaction is unrun.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B16.1",
+      "behavior": "Chromium/Edge MV3 manifest and native registration",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/build.js",
+        "browser-extension/background.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/popup_vault.test.js",
+        "internal/browserhost/manifest_test.go"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/popup_vault.test.js",
+        "go test ./internal/browserhost"
+      ],
+      "evidence_level": "E3",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Chromium/Edge MV3 manifest and registration paths are checked in; publish install remains unverified.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B16.2",
+      "behavior": "Firefox MV3 manifest and native acceptance",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/build.js",
+        "browser-extension/background.js",
+        "scripts/browser_firefox_native_acceptance.mjs"
+      ],
+      "test_paths": [
+        "browser-extension/test/popup_vault.test.js",
+        "scripts/browser_firefox_native_acceptance.mjs"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/popup_vault.test.js",
+        "node scripts/browser_firefox_native_acceptance.mjs"
+      ],
+      "evidence_level": "E3",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Firefox MV3 manifest and native acceptance paths are checked in; final CI/retained run is not claimed.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B16.3",
+      "behavior": "macOS Safari Web Extension",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/build.js",
+        "browser-extension/safari-native-port.js",
+        "safari/LocklarkSafariExtension/Sources/SafariWebExtensionHandler.swift",
+        "safari/scripts/test_safari_swift.sh"
+      ],
+      "test_paths": [
+        "browser-extension/test/safari_native_port.test.js",
+        "scripts/test_safari_package.py",
+        "safari/scripts/test_safari_swift.sh"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/safari_native_port.test.js",
+        "python3 -m pytest scripts/test_safari_package.py",
+        "bash safari/scripts/test_safari_swift.sh"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Implementation and real macOS 77-Swift-test/Xcode unsigned build evidence only; signed install/Safari lifecycle open.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B17.1",
+      "behavior": "Commands (`_execute_action`, autofill, lock)",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/build.js",
+        "browser-extension/background.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/popup_vault.test.js",
+        "browser-extension/test/background.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/popup_vault.test.js",
+        "node --test browser-extension/test/background.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Action, autofill and lock command manifest/handler paths are checked in.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    },
+    {
+      "id": "B17.2",
+      "behavior": "Connection status, pairing UX, onboarding",
+      "implementation_status": "已实现未对照",
+      "reference_status": "unverified",
+      "implementation_paths": [
+        "browser-extension/popup.js",
+        "browser-extension/popup.html",
+        "browser-extension/background.js"
+      ],
+      "test_paths": [
+        "browser-extension/test/popup_vault.test.js",
+        "browser-extension/test/background.test.js"
+      ],
+      "test_commands": [
+        "node --test browser-extension/test/popup_vault.test.js",
+        "node --test browser-extension/test/background.test.js"
+      ],
+      "evidence_level": "E2",
+      "evidence_state": "not-run-in-this-change",
+      "notes": "Connection status and onboarding paths are checked in; real cross-platform pairing is unrun.",
+      "limitations": [
+        "Fixed 1Password 8.12.44.33 installation and row-by-row comparison remain unauthorized and unverified.",
+        "Listed test commands are path evidence only and were not re-executed for this mapping change."
+      ]
+    }
+  ]
+}

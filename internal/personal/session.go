@@ -43,7 +43,14 @@ type Session struct {
 	fullUnlock           time.Time
 	pending              map[*NativeField]bool
 	browserPending       map[*NativeBrowserFill]bool
-	passkeyEpoch         atomic.Uint64
+	// runBundleGrants is the bounded owner registry for prepared run bundle
+	// grants. A state is registered only after its signed intent committed and
+	// its slots validated, and it is removed under mu by delivery, Clear's next
+	// Prepare prune, the owned deadline callback or Lock. Session state therefore
+	// never outlives Lock and never exceeds maxRunBundleGrants entries.
+	runBundleGrants map[*runBundleGrantState]bool
+	passkeyEpoch    atomic.Uint64
+	profilePending  map[*NativeBrowserProfile]bool
 	// Watchtower state is in-memory only. The range client owns the prefix
 	// cache; dropping it on lock clears both the cache and its transport.
 	watchtowerKey []byte
@@ -83,9 +90,12 @@ func UnlockSession(path string, password, key []byte, idle time.Duration) (*Sess
 		clear(r.material)
 		return nil, e
 	}
-	return &Session{path: path, material: r.material, slotDigest: r.slotDigest, last: time.Now(), fullUnlock: time.Now(), idle: idle, pending: make(map[*NativeField]bool), hibp: watchtower.NewHIBPClient(watchtower.HIBPOptions{})}, nil
+	return &Session{path: path, material: r.material, slotDigest: r.slotDigest, last: time.Now(), fullUnlock: time.Now(), idle: idle, pending: make(map[*NativeField]bool), runBundleGrants: make(map[*runBundleGrantState]bool, maxRunBundleGrants), hibp: watchtower.NewHIBPClient(watchtower.HIBPOptions{})}, nil
 }
 func (s *Session) lock() {
+	// Prepared run bundle grants are owned session state: stop every owned
+	// deadline timer and zero every undelivered slot before Lock returns.
+	s.clearRunBundleGrantsLocked()
 	s.sshPending.Range(func(key, _ any) bool {
 		x := key.(*sshSignState)
 		(&SSHSignIntent{x}).Cancel()
@@ -118,6 +128,10 @@ func (s *Session) lock() {
 	for f := range s.browserPending {
 		f.clear()
 		delete(s.browserPending, f)
+	}
+	for p := range s.profilePending {
+		p.clear()
+		delete(s.profilePending, p)
 	}
 	s.hibp = nil
 	s.clearAuditCache()
@@ -182,6 +196,12 @@ func (s *Session) active(touch bool) error {
 			delete(s.browserPending, f)
 		}
 	}
+	for p := range s.profilePending {
+		if !now.Before(p.until) {
+			p.clear()
+			delete(s.profilePending, p)
+		}
+	}
 	if s.lockRequested.Load() || len(s.material) == 0 || now.Sub(s.last) >= s.idle {
 		s.lock()
 		return ErrSessionLocked
@@ -224,6 +244,7 @@ func (s *Session) executeActive(action string, add vault.Item, edit *Edit, optio
 	}
 	if s.active(false) != nil {
 		r.browser.clear()
+		r.browserProfile.clear()
 		clear(r.material)
 		clear(r.value)
 		clear(r.sshSeed)

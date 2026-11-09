@@ -719,6 +719,7 @@ func testBundleValidationAndBinding(t *testing.T) {
 		func(s *runBundleStoreRequest) {
 			s.request.Program = filepath.Join(filepath.Dir(s.request.Program), "other"+filepath.Ext(s.request.Program))
 		},
+		func(s *runBundleStoreRequest) { s.request.ProgramSHA256 = strings.Repeat("ab", 32) },
 		func(s *runBundleStoreRequest) { s.request.Directory += "-other" },
 	}
 	for i, change := range variations {
@@ -744,6 +745,29 @@ func testBundleValidationAndBinding(t *testing.T) {
 	digestTwo, err := second.binding(secret)
 	if err != nil || digestTwo == digestOne {
 		t.Fatal("token environment name not bound")
+	}
+}
+
+// TestRunBundlePreservesProgramPinUnsupportedError proves the explicit
+// platform pin refusal is not collapsed into the generic result error, so a
+// non-Linux CLI can surface the real reason and never suggests a process ran.
+func TestRunBundlePreservesProgramPinUnsupportedError(t *testing.T) {
+	f := newBundleTestFixture(t)
+	targets := bundleTestTargets(f)
+	request := bundleTestRequest(t, f)
+	create, roots := testBundleTempCreatorTracked(t)
+	_, err := runBundle(context.Background(), targets, request, create, func(s *runBundleStoreRequest) (result, error) {
+		return command(f.path, "fixture", f.key, runBundleAction, vault.Item{}, nil, commandOption{runBundle: s})
+	}, func(context.Context, RunBundleRequest, string, cliprofile.RenderedBundle) (int, error) {
+		return 0, ErrRunProgramPinUnsupported
+	}, os.RemoveAll)
+	if !errors.Is(err, ErrRunProgramPinUnsupported) {
+		t.Fatalf("platform pin refusal collapsed to %v", err)
+	}
+	for _, root := range roots() {
+		if _, statErr := os.Stat(root); !os.IsNotExist(statErr) {
+			t.Fatal("refused pin left temporary state")
+		}
 	}
 }
 

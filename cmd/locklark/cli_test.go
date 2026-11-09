@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -16,6 +17,7 @@ import (
 	"github.com/jihuayu/locklark/internal/clibinding"
 	"github.com/jihuayu/locklark/internal/cliprofile"
 	"github.com/jihuayu/locklark/internal/personal"
+	"golang.org/x/term"
 )
 
 const (
@@ -818,5 +820,111 @@ func TestResolveCLIRunToolProfileFlag(t *testing.T) {
 	tool, profile, child, err = resolveCLIRunTool(values, []string{"pr"}, false)
 	if err != nil || tool != "gh" || profile != "gh" || !reflect.DeepEqual(child, []string{"pr"}) {
 		t.Fatalf("tool flag run resolution = %q %q %v %v", tool, profile, child, err)
+	}
+}
+
+// TestCLIRunPinnedShebangRefusedBeforeConsoleOrChild drives the common CLI
+// preflight: a pinned shebang script is refused before any console prompt,
+// desktop provider attempt or child start, for both the authenticated and the
+// informational fast path. Executing a sealed snapshot instead would rewrite
+// the script's $0 and change relative-asset/package semantics.
+func TestCLIRunPinnedShebangRefusedBeforeConsoleOrChild(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("pinned-shebang sealed-snapshot policy is Linux-specific")
+	}
+	t.Setenv("LOCKLARK_CLI_ACTIVE", "")
+	dir := cliTestDir(t)
+	program := filepath.Join(dir, "pinned-cli-script")
+	marker := filepath.Join(dir, "script-ran")
+	script := []byte("#!/bin/sh\nprintf ran > " + strconv.Quote(marker) + "\n")
+	if err := os.WriteFile(program, script, 0700); err != nil {
+		t.Fatal("pinned script fixture unavailable:", err)
+	}
+	bindingPath, _ := cliRunBinding(t, "gh", program, "gh", "password", "token")
+	originalOpen := openCLIConsole
+	originalProvider := runCLIBundleWithProvider
+	t.Cleanup(func() {
+		openCLIConsole = originalOpen
+		runCLIBundleWithProvider = originalProvider
+	})
+	opened, providerCalls := 0, 0
+	openCLIConsole = func() (*os.File, *os.File, error) {
+		opened++
+		return nil, nil, errors.New("must not open")
+	}
+	runCLIBundleWithProvider = func(context.Context, []personal.BundleTarget, personal.RunBundleRequest, personal.RunBundleProvider) (personal.RunReceipt, error) {
+		providerCalls++
+		return personal.RunReceipt{Status: "process-exited", ExitCode: 0}, nil
+	}
+	invocations := [][]string{
+		{"run", "gh", "--binding", bindingPath, "--", "api"},
+		{"run", "gh", "--binding", bindingPath, "--", "--help"},
+	}
+	for _, args := range invocations {
+		if _, err := runCLIForTest(t, args...); !errors.Is(err, personal.ErrRunProgramScriptPinUnsupported) {
+			t.Fatalf("pinned shebang invocation %v was not refused in common preflight: %v", args, err)
+		}
+	}
+	if opened != 0 || providerCalls != 0 {
+		t.Fatalf("pinned shebang reached console/provider: opened=%d provider=%d", opened, providerCalls)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("pinned shebang child ran or left an artifact: %v", err)
+	}
+}
+
+// TestCLIRunUnpinnedBindingSkipsDesktopAndRequiresFullFactors proves the
+// common CLI binding path for an explicit --pin-sha256 false binding never
+// reaches the desktop provider/seam and still requires the full local factor
+// step, so no session-native lease can be created and no fabricated
+// "unavailable" outcome is produced after broker contact.
+func TestCLIRunUnpinnedBindingSkipsDesktopAndRequiresFullFactors(t *testing.T) {
+	t.Setenv("LOCKLARK_CLI_ACTIVE", "")
+	program := cliTestExecutable(t)
+	bindingPath, binding := cliRunBinding(t, "gh", program, "gh", "password", "token")
+	binding.ProgramSHA256 = ""
+	if err := binding.Validate(); err != nil {
+		t.Fatal("unpinned binding fixture invalid:", err)
+	}
+	writeCLIStoredBinding(t, bindingPath, "gh", binding)
+	originalOpen := openCLIConsole
+	originalRaw := makeCLIConsoleRaw
+	originalProvider := runCLIBundleWithProvider
+	t.Cleanup(func() {
+		openCLIConsole = originalOpen
+		makeCLIConsoleRaw = originalRaw
+		runCLIBundleWithProvider = originalProvider
+	})
+	openCLIConsole = func() (*os.File, *os.File, error) {
+		in, err := os.CreateTemp(t.TempDir(), "console-in")
+		if err != nil {
+			return nil, nil, err
+		}
+		out, err := os.CreateTemp(t.TempDir(), "console-out")
+		if err != nil {
+			in.Close()
+			return nil, nil, err
+		}
+		return in, out, nil
+	}
+	makeRawCalls := 0
+	makeCLIConsoleRaw = func(int) (*term.State, error) {
+		makeRawCalls++
+		return nil, errors.New("local factors required")
+	}
+	providerCalls := 0
+	runCLIBundleWithProvider = func(context.Context, []personal.BundleTarget, personal.RunBundleRequest, personal.RunBundleProvider) (personal.RunReceipt, error) {
+		providerCalls++
+		return personal.RunReceipt{Status: "process-exited", ExitCode: 0}, nil
+	}
+	_, err := runCLIForTest(t, "run", "gh", "--binding", bindingPath, "--", "api")
+	if providerCalls != 0 {
+		t.Fatalf("unpinned binding called the shared desktop provider seam %d times", providerCalls)
+	}
+	if makeRawCalls != 1 {
+		t.Fatalf("unpinned binding full-factor step calls = %d, want exactly 1", makeRawCalls)
+	}
+	if err == nil || !strings.Contains(err.Error(), "cannot disable terminal echo") {
+		t.Fatalf("unpinned binding did not enter local full-factor flow: %v", err)
 	}
 }
