@@ -306,9 +306,12 @@ export async function acceptPasskeyManagement({
   await eventually(async () => await popup.visible("#passkey-detail"), "First Passkey detail unavailable");
   phase("passkey-management:preservation-edit");
   await popup.click("#detail-edit");
+  await eventually(async () => await popup.visible("#editor-view"), "Passkey login editor did not open");
   for (const [name, value] of [["password", fixture.Value], ["notes", fixture.UpdateValue]]) {
     phase("passkey-management:preservation-edit-" + name);
-    await popup.click('#editor-fields [data-field="' + name + '"]');
+    const selector = '#editor-fields ' + (name === "notes" ? "textarea" : "input") + '[data-field="' + name + '"]';
+    await eventually(async () => await popup.visible(selector), "Passkey login editor field unavailable");
+    await popup.click(selector);
     await popup.selectAll(); await popup.insertText(value);
   }
   phase("passkey-management:preservation-save");
