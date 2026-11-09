@@ -160,6 +160,27 @@ int ll_unlock_delete(const char *id) {
 	return status;
 }
 
+int ll_biometry_available(void) {
+	// canEvaluatePolicy is a capability query, not an authentication request;
+	// it neither prompts nor marks a context as authenticated. Each context is
+	// invalidated and released immediately.
+	LAContext *context = [[LAContext alloc] init];
+	if (!context) return 0;
+	NSError *error = nil;
+	BOOL touchID = [context canEvaluatePolicy:LAPolicyDeviceOwnerAuthenticationWithBiometrics error:&error];
+	[context invalidate];
+	LL_OBJC_RELEASE(context);
+	if (touchID) return 2;
+
+	context = [[LAContext alloc] init];
+	if (!context) return 0;
+	error = nil;
+	BOOL owner = [context canEvaluatePolicy:LAPolicyDeviceOwnerAuthentication error:&error];
+	[context invalidate];
+	LL_OBJC_RELEASE(context);
+	return owner ? 1 : 0;
+}
+
 void ll_unlock_clear_free(unsigned char *value, long n) {
 	if (!value) return;
 	volatile unsigned char *p = value;

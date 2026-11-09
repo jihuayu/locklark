@@ -30,6 +30,37 @@ export LOCKLARK_NOTARY_PROFILE="notary"   # xcrun notarytool store-credentials n
 
 不带签名环境变量时，`mygo build` 仍会生成 ad-hoc `.app`。它可以用于检查窗口、菜单栏/Dock 身份和打包布局，但 **Touch ID 仍不可用**；请使用主密码与 Secret Key。注意 MyGo 默认 `CGO_ENABLED=0`，会编译进“系统解锁不可用”的兜底实现；开发和验收时必须显式 `CGO_ENABLED=1`（`scripts/macos_release.sh` 已设置）。
 
+## 系统验证能力与错误码
+
+安全设置会显示 `osunlock.Biometry()` 的结果，不会触发验证提示：
+
+- `Touch ID`：当前 Mac 已启用 Touch ID，`UserPresence` 会优先弹 Touch ID，也可回退到系统密码。
+- `系统密码`：`canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics)` 当前不可用，但系统密码策略可用。
+- `不可用`：两者都不可用；系统快捷解锁不应启用，请使用完整解锁。
+
+Security.framework 的失败会映射为固定错误和固定 UI 文案，不把原生错误文本或密钥材料带到界面：
+
+| OSStatus | 含义 | 产品行为 |
+| --- | --- | --- |
+| `-34018` | `errSecMissingEntitlement` | 提示当前构建缺少签名权限；重新签名，不要重试到死循环 |
+| `-128` | `errSecUserCanceled` | 提示已取消，可继续用主密码与 Secret Key |
+| `-25293` | `errSecAuthFailed` | 提示系统验证未通过，可重试，不误报为钥匙串损坏 |
+| `-25308` / `-25315` | interaction not allowed / required | 提示当前无法显示系统验证（如锁屏），解锁 Mac 后重试 |
+| `-25291` / `-67585` | keychain/service not available | 提示钥匙串暂不可用，可稍后重试或重启 Mac |
+| `-25300` | `errSecItemNotFound` | 提示尚未启用，而不是“金库已锁定” |
+
+## 快速静态检查
+
+用 `scripts/macos_verify_touchid.sh` 先排除最常见的打包/签名错误：
+
+```bash
+./scripts/macos_verify_touchid.sh /Applications/Locklark.app
+```
+
+它检查 ad-hoc、TeamIdentifier、`keychain-access-groups`、`embedded.provisionprofile`、`codesign --verify`、Gatekeeper 和 stapling。静态检查通过后才进入 UI 验收。
+
+**自签名证书不能替代 Developer ID。** 本机实测：用自签名 code-signing 证书 `codesign --sign` 可以成功，但 `codesign -dv` 仍显示 `TeamIdentifier=not set`；带 `keychain-access-groups` 的进程会被 AMFI `SIGKILL`（exit 137），`security verify-cert` 也返回 `CSSMERR_TP_NOT_TRUSTED`。必须使用 Apple 签发的 Developer ID Application 身份和匹配的 provisioning profile。
+
 ## 验收
 
 ```bash
@@ -39,10 +70,11 @@ codesign --verify --deep --strict --verbose=2 /Applications/Locklark.app
 
 在签名版里：
 
-1. 完整解锁金库。
-2. 打开安全设置，点“启用系统快捷解锁”。
-3. 应出现 Touch ID / 系统密码提示；成功后锁定并点“使用 Touch ID / 系统密码解锁”。
-4. 再验证 Passkey 的系统验证按钮会为新操作重新提示。
+1. `./scripts/macos_verify_touchid.sh /Applications/Locklark.app` 全部 PASS。
+2. 完整解锁金库，打开安全设置；应显示“系统验证：Touch ID”或“系统验证：系统密码”。
+3. 点“启用系统快捷解锁”；应出现 Touch ID / 系统密码提示（或在 enrollment 后首次解锁时出现）。
+4. 成功后锁定，点“使用 Touch ID / 系统密码解锁”，确认无需主密码 + Secret Key 即可恢复会话。
+5. 再验证 Passkey 的系统验证按钮会为新操作重新提示；取消后应提示已取消，而不是“金库已锁定”。
 
 失败时不要用 `go run` 的结果判断功能：先确认运行的是签名 `.app`，并且 `codesign -d --entitlements` 中有 `keychain-access-groups`。
 

@@ -205,8 +205,12 @@ func message(e error) string {
 		return "系统钥匙串缺少签名权限；此构建无法使用 Touch ID，请使用主密码与 Secret Key"
 	case errors.Is(e, osunlock.ErrCancelled):
 		return "系统验证已取消；可继续使用主密码与 Secret Key"
+	case errors.Is(e, osunlock.ErrAuthFailed):
+		return "系统验证未通过；可重试，或使用主密码与 Secret Key"
+	case errors.Is(e, osunlock.ErrNotAvailable):
+		return "系统钥匙串暂不可用；请稍后重试，必要时重启 Mac，或使用主密码与 Secret Key"
 	case errors.Is(e, osunlock.ErrInteractionNotAllowed):
-		return "系统钥匙串当前不可用；解锁 Mac 后重试，或使用主密码与 Secret Key"
+		return "当前无法显示系统验证（如屏幕已锁定）；解锁 Mac 后重试，或使用主密码与 Secret Key"
 	case errors.Is(e, personal.ErrSystemUnlockUnavailable):
 		return "系统快捷解锁不可用；需要系统密钥服务与正确权限，请使用主密码与 Secret Key"
 	case errors.Is(e, personal.ErrSessionLocked):
@@ -1041,6 +1045,7 @@ func (a *App) securityView(c *ui.Context) {
 	}
 	ui.Text(c, shortcut)
 	ui.Text(c, "快捷解锁："+osunlock.Label()).Bold()
+	ui.Text(c, "系统验证："+osunlock.Biometry()).FontSize(12)
 	ui.Text(c, osunlock.Description())
 	ui.Text(c, osunlock.Requirement()).FontSize(12)
 	ui.Text(c, "首次或到期后使用主密码与 Secret Key 完整解锁，再主动启用。系统验证失败时保留完整解锁入口。")

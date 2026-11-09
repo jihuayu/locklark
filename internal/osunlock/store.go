@@ -16,6 +16,13 @@ var (
 	ErrMissingEntitlement = errors.New("system keychain entitlement is missing")
 	// ErrCancelled reports an OS user-presence prompt the user dismissed.
 	ErrCancelled = errors.New("system authentication was cancelled")
+	// ErrAuthFailed reports a completed user-presence check that did not
+	// authenticate: a failed Touch ID match or a wrong system password. It is
+	// retryable and does not mean the vault or keychain is unavailable.
+	ErrAuthFailed = errors.New("system authentication failed")
+	// ErrNotAvailable reports that the OS keychain service itself is not
+	// available, for example before first unlock or after a keychain restart.
+	ErrNotAvailable = errors.New("system keychain is not available")
 	// ErrInteractionNotAllowed reports a prompt that could not be shown, for
 	// example because the session is locked or the item is not available now.
 	ErrInteractionNotAllowed = errors.New("system keychain interaction is not allowed")

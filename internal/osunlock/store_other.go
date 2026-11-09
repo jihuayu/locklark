@@ -6,6 +6,9 @@ type unavailable struct{}
 
 func New() Store    { return unavailable{} }
 func Label() string { return "系统解锁不可用" }
+func Biometry() string {
+	return "不可用"
+}
 func Description() string {
 	return "此构建未提供系统密钥适配器，请使用完整解锁。"
 }

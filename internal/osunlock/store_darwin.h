@@ -18,6 +18,11 @@ int ll_unlock_load(const char *id, unsigned char **value, long *n);
 // ll_unlock_delete removes only the scoped record. A missing item is success.
 int ll_unlock_delete(const char *id);
 
+// ll_biometry_available returns 2 when Touch ID can evaluate the user-presence
+// policy, 1 when only the device-owner (system password) policy is available,
+// and 0 when neither is currently available. It never displays a prompt.
+int ll_biometry_available(void);
+
 // ll_unlock_clear_free zeroes the native buffer before freeing it.
 void ll_unlock_clear_free(unsigned char *value, long n);
 
