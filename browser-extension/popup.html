@@ -153,14 +153,19 @@
         <div id="detail-fields" class="detail-fields"></div>
         <section id="passkey-detail" class="passkey-detail" hidden>
           <h3>Passkey</h3>
+          <div id="passkey-select-row" class="passkey-select" hidden>
+            <label for="passkey-select">选择要管理的 Passkey</label>
+            <select id="passkey-select"></select>
+          </div>
           <p id="passkey-detail-unsupported" class="note" hidden></p>
           <dl class="passkey-meta">
             <div><dt>网站 (RP ID)</dt><dd id="passkey-rp"></dd></div>
             <div><dt>凭据账号</dt><dd id="passkey-username"></dd></div>
             <div><dt>显示名称</dt><dd id="passkey-display-name"></dd></div>
+            <div><dt>凭据</dt><dd id="passkey-credential-hint"></dd></div>
           </dl>
           <p id="passkey-remove-warning" class="note" hidden>
-            删除后，本扩展保存的此网站 Passkey 凭据将被移除；网站上的账号凭据不会自动撤销。请确保你仍有密码或其他登录方式，否则可能无法再登录该账号。
+            删除后，本扩展仅移除此条 Passkey 凭据；同一登录中的其他 Passkey 与登录信息会保留。网站上的账号凭据不会自动撤销，请确保你仍有密码或其他登录方式。
           </p>
           <div class="actions">
             <button id="passkey-remove" type="button">删除 Passkey</button>

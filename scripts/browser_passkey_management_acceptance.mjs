@@ -3,14 +3,34 @@ import assert from "node:assert/strict";
 import { createHash, createPublicKey, verify } from "node:crypto";
 import { createRequire } from "node:module";
 
-function startCredential({ create, rp, id, challenge, account, abortAfter }) {
+export function passkeyCredentialHint(credentialId) {
+  assert.equal(typeof credentialId, "string");
+  return credentialId.length <= 8 ? credentialId : credentialId.slice(0, 8) + "…";
+}
+export function passkeyPopupHint(credentialId) {
+  return typeof credentialId === "string" && credentialId.length >= 12
+    ? credentialId.slice(0, 6) + "…" + credentialId.slice(-6) : "";
+}
+// Mirrors internal/desktop/browser.go passkeyChoiceLabel exactly: the RP, the
+// stored title, the account and the public credential hint. No fuzzy matching.
+export function passkeyChoiceLabel({ create = false, rp, title, username, credentialId = "", existing = 0 }) {
+  let label = (create ? "保存到：" : "登录：") + rp + " · " + (title || "（无标题）") + " · " + (username || "");
+  if (!create && credentialId) label += " · 凭据 " + passkeyCredentialHint(credentialId);
+  if (create) {
+    label += "（已有 " + existing + " 个 Passkey）";
+    if (existing > 0) label += " · 升级加密格式，旧客户端将拒绝该金库";
+  }
+  return label;
+}
+
+function startCredential({ create, rp, id, challenge, account, userId = [4, 5, 6], displayName = "Other synthetic account", abortAfter }) {
   const decode = (s) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), c => c.charCodeAt(0));
   const controller = new AbortController();
   window.managementResult = null;
   window.managementError = null;
   const options = create ? {
     rp: { id: rp, name: "Synthetic management acceptance" },
-    user: { id: new Uint8Array([4, 5, 6]), name: account, displayName: "Other synthetic account" },
+    user: { id: new Uint8Array(userId), name: account, displayName },
     challenge: decode(challenge), pubKeyCredParams: [{ type: "public-key", alg: -7 }],
     authenticatorSelection: { residentKey: "required", userVerification: "required" },
     extensions: { credProps: true },
@@ -33,7 +53,7 @@ function credentialResult() { return { result: window.managementResult, error: w
 
 export async function acceptPasskeyManagement({
   origin, fixture, first, openPopup, pageEval, inlineClick, focusPage,
-  dismissPopup, reconnect, eventually, input, observe, phase,
+  dismissPopup, reconnect, eventually, input, observe, phase, conditionalSibling,
 }) {
   const rp = new URL(origin).hostname;
   assert.equal(rp, "login.locklark.test", "Allowlisted synthetic management RP required");
@@ -46,7 +66,7 @@ export async function acceptPasskeyManagement({
   ];
   const verifier = process.env.LOCKLARK_TEST_WEBAUTHN_SERVER
     ? createRequire(import.meta.url)(process.env.LOCKLARK_TEST_WEBAUTHN_SERVER) : null;
-  let secondRegistration;
+  const verified = new Map();
   const waitResult = async () => {
     await eventually(async () => {
       const state = await pageEval(credentialResult);
@@ -71,18 +91,19 @@ export async function acceptPasskeyManagement({
     const challenge = Buffer.from("synthetic-managed-get-" + name).toString("base64url");
     await pageEval(startCredential, { create: false, rp, id: registration.id, challenge });
     await inlineClick("使用 Locklark 登录");
-    input([...factors, { click_label: "登录：" + rp + " · " + name + " · " + name }]);
+    input([...factors, { click_label: passkeyChoiceLabel({ rp, title: rp + " · " + name, username: name, credentialId: registration.id }) }]);
     await focusPage();
     const state = await waitResult();
     assert(!state.error && state.result?.instance, "Managed credential assertion rejected");
     checkSignature(registration, state.result.json, challenge);
-    if (verifier && registration.id === second.id) {
+    const registrationInfo = verified.get(registration.id);
+    if (verifier && registrationInfo) {
       const checked = await verifier.verifyAuthenticationResponse({
         response: state.result.json, expectedChallenge: challenge, expectedOrigin: origin,
-        expectedRPID: rp, credential: secondRegistration.registrationInfo.credential,
+        expectedRPID: rp, credential: registrationInfo.registrationInfo.credential,
         requireUserVerification: true,
       });
-      assert.equal(checked.verified, true, "Independent verifier rejected remaining account");
+      assert.equal(checked.verified, true, "Independent verifier rejected managed credential");
     }
   };
 
@@ -103,11 +124,12 @@ export async function acceptPasskeyManagement({
   assert(second.response.publicKey && second.response.publicKeyAlgorithm === -7,
     "Public ES256 key metadata required");
   if (verifier) {
-    secondRegistration = await verifier.verifyRegistrationResponse({
+    const checked = await verifier.verifyRegistrationResponse({
       response: second, expectedChallenge: challenge, expectedOrigin: origin,
       expectedRPID: rp, requireUserVerification: true,
     });
-    assert.equal(secondRegistration.verified, true, "Independent verifier rejected second registration");
+    assert.equal(checked.verified, true, "Independent verifier rejected second registration");
+    verified.set(second.id, checked);
   }
   const itemID = title => {
     const rows = observe().rows.filter(row => row.title === title);
@@ -131,17 +153,165 @@ export async function acceptPasskeyManagement({
     assert(String(await popup.text("#passkey-detail")).includes(rp), "Stored RP metadata missing");
     return popup;
   };
+  let popup;
+  phase("passkey-management:add-same-login-credential");
+  const beforeSibling = observe();
+  await dismissPopup();
+  const siblingChallenge = Buffer.from("synthetic-managed-add-same-login").toString("base64url");
+  await pageEval(startCredential, {
+    create: true, rp, challenge: siblingChallenge, account: "passkey-test",
+    userId: [1, 2, 3], displayName: "Synthetic user",
+  });
+  await inlineClick("保存到 Locklark");
+  input([...factors, {
+    click_label: passkeyChoiceLabel({
+      create: true, rp, title: firstTitle, username: "passkey-test",
+      credentialId: first.id, existing: 1,
+    }),
+  }]);
+  await focusPage();
+  const siblingCreated = await waitResult();
+  assert(!siblingCreated.error && siblingCreated.result?.instance,
+    "Second credential for the existing login was rejected");
+  const sibling = siblingCreated.result.json;
+  assert.notEqual(sibling.id, first.id, "Sibling credential reused the first credential ID");
+  const siblingClient = JSON.parse(Buffer.from(sibling.response.clientDataJSON, "base64url"));
+  assert.equal(siblingClient.origin, origin);
+  assert.equal(siblingClient.challenge, siblingChallenge);
+  assert.equal(siblingClient.type, "webauthn.create");
+  assert.equal(sibling.response.publicKeyAlgorithm, -7, "Sibling must use ES256");
+  assert(sibling.response.publicKey, "Sibling public key metadata required");
+  if (verifier) {
+    const checked = await verifier.verifyRegistrationResponse({
+      response: sibling, expectedChallenge: siblingChallenge, expectedOrigin: origin,
+      expectedRPID: rp, requireUserVerification: true,
+    });
+    assert.equal(checked.verified, true, "Independent verifier rejected sibling registration");
+    verified.set(sibling.id, checked);
+  }
+  const siblingParents = observe().rows.filter(item => item.title === firstTitle);
+  assert.equal(siblingParents.length, 1, "Sibling registration created a second login record");
+  assert.equal(siblingParents[0].id, firstID, "Sibling registration changed the first parent ID");
+  assert.equal(beforeSibling.rows.filter(item => item.title === firstTitle).length, 1,
+    "First parent was not unique before sibling registration");
+  phase("passkey-management:select-second-sibling");
+  phase("passkey-management:select-second-sibling:before-preselection-placeholder");
+  popup = await openFirst();
+  await eventually(async () => await popup.count("#passkey-select option") === 3,
+    "Two sibling Passkeys must list a placeholder and both entries");
+  phase("passkey-management:select-second-sibling:preselection-placeholder");
+  assert.equal(await popup.value("#passkey-select"), "",
+    "Popup automatically selected the first sibling");
+  assert.equal(await popup.text("#passkey-rp"), "-", "Unselected RP metadata must stay blank");
+  assert.equal(await popup.text("#passkey-username"), "-",
+    "Unselected account metadata must stay blank");
+  assert.equal(await popup.text("#passkey-credential-hint"), "",
+    "Unselected credential hint must stay blank");
+  assert.equal(await popup.visible("#passkey-remove"), false,
+    "Removal control must stay hidden until an explicit sibling choice");
+  await popup.selectOption("#passkey-select", sibling.id, step =>
+    phase("passkey-management:select-second-sibling:" + step));
+  await eventually(async () => await popup.value("#passkey-select") === sibling.id,
+    "Physical popup selection did not choose the exact second sibling");
+  phase("passkey-management:select-second-sibling:post-selected-hint");
+  assert.equal(await popup.text("#passkey-credential-hint"), passkeyPopupHint(sibling.id),
+    "Popup showed the first sibling hint after selecting the second");
+  assert.equal(await popup.text("#passkey-rp"), rp, "Selected second sibling RP metadata mismatch");
+  assert.equal(await popup.text("#passkey-username"), "passkey-test",
+    "Selected second sibling account metadata mismatch");
+  phase("passkey-management:second-sibling-signature");
+  await dismissPopup();
+  const siblingGetChallenge = Buffer.from("synthetic-managed-sibling-get").toString("base64url");
+  await pageEval(startCredential, { create: false, rp, id: sibling.id, challenge: siblingGetChallenge });
+  await inlineClick("使用 Locklark 登录");
+  input([...factors, {
+    click_label: passkeyChoiceLabel({
+      rp, title: firstTitle, username: "passkey-test", credentialId: sibling.id,
+    }),
+  }]);
+  await focusPage();
+  const siblingSigned = await waitResult();
+  assert(!siblingSigned.error && siblingSigned.result?.instance,
+    "Second sibling assertion was rejected");
+  assert.equal(siblingSigned.result.json.id, sibling.id, "First sibling signed the request");
+  checkSignature(sibling, siblingSigned.result.json, siblingGetChallenge);
+  if (verifier && verified.has(sibling.id)) {
+    const checked = await verifier.verifyAuthenticationResponse({
+      response: siblingSigned.result.json, expectedChallenge: siblingGetChallenge,
+      expectedOrigin: origin, expectedRPID: rp,
+      credential: verified.get(sibling.id).registrationInfo.credential,
+      requireUserVerification: true,
+    });
+    assert.equal(checked.verified, true, "Independent verifier rejected second sibling");
+  }
+  if (conditionalSibling && process.env.LOCKLARK_TEST_PASSKEY_CONDITIONAL === "1") {
+    phase("passkey-management:conditional-two-siblings");
+    await conditionalSibling({ first, second: sibling });
+  }
+  phase("passkey-management:delete-second-sibling");
+  popup = await keys();
+  await eventually(async () => await popup.count(row(firstID)) === 1,
+    "First account missing before sibling removal");
+  await popup.click(row(firstID));
+  await eventually(async () => await popup.visible("#passkey-detail"),
+    "First Passkey detail unavailable before sibling removal");
+  await eventually(async () => await popup.count("#passkey-select option") === 3,
+    "Sibling selector missing before removal");
+  await popup.selectOption("#passkey-select", sibling.id);
+  await popup.click("#passkey-remove");
+  await eventually(async () => await popup.visible("#passkey-remove-confirm"),
+    "Sibling removal confirmation missing");
+  await popup.click("#passkey-remove-confirm");
+  await eventually(async () => await popup.visible("#passkey-detail") &&
+    await popup.count("#passkey-select option") === 0,
+    "Removing the second sibling did not leave exactly the first credential", 30000);
+  assert.equal(await popup.text("#passkey-credential-hint"), passkeyPopupHint(first.id),
+    "First credential hint did not remain after sibling removal");
+  phase("passkey-management:deleted-sibling-unavailable");
+  assert(observe().rows.some(item => item.id === secondID),
+    "Sibling removal deleted the other account");
+  await dismissPopup();
+  await pageEval(startCredential, { create: false, rp, id: sibling.id,
+    challenge: Buffer.from("synthetic-deleted-sibling-get").toString("base64url"), abortAfter: 2000 });
+  await inlineClick("使用 Locklark 登录");
+  const removedSibling = await waitResult();
+  assert(!removedSibling.result && removedSibling.error,
+    "Deleted sibling credential produced an assertion result");
+  const siblingControls = input([], true, { inspect: true }).controls || {};
+  assert(!siblingControls[passkeyChoiceLabel({
+    rp, title: firstTitle, username: "passkey-test", credentialId: sibling.id,
+  })]?.showing, "Deleted sibling remained an approvable native choice");
+  phase("passkey-management:first-after-sibling-removal");
+  await dismissPopup();
+  const firstAfterChallenge = Buffer.from("synthetic-managed-first-after-sibling").toString("base64url");
+  await pageEval(startCredential, { create: false, rp, id: first.id, challenge: firstAfterChallenge });
+  await inlineClick("使用 Locklark 登录");
+  input([...factors, {
+    click_label: passkeyChoiceLabel({
+      rp, title: firstTitle, username: "passkey-test", credentialId: first.id,
+    }),
+  }]);
+  await focusPage();
+  const firstAfter = await waitResult();
+  assert(!firstAfter.error && firstAfter.result?.instance,
+    "First credential assertion was rejected after sibling removal");
+  assert.equal(firstAfter.result.json.id, first.id, "Removed sibling signed instead of first credential");
+  checkSignature(first, firstAfter.result.json, firstAfterChallenge);
+  await get(second, account);
   phase("passkey-management:list-two-accounts");
-  let popup = await keys();
+  popup = await keys();
   await eventually(async () => await popup.count(row(firstID)) === 1 && await popup.count(row(secondID)) === 1,
     "Both accounts must appear in server-filtered Passkey list");
   await popup.click(row(firstID));
   await eventually(async () => await popup.visible("#passkey-detail"), "First Passkey detail unavailable");
   phase("passkey-management:preservation-edit");
   await popup.click("#detail-edit");
+  await eventually(async () => await popup.visible("#editor-view"), "Passkey login editor did not open");
   for (const [name, value] of [["password", fixture.Value], ["notes", fixture.UpdateValue]]) {
     phase("passkey-management:preservation-edit-" + name);
-    await popup.click('#editor-fields [data-field="' + name + '"]');
+    const selector = '#editor-fields ' + (name === "notes" ? "textarea" : "input") + '[data-field="' + name + '"]';
+    await eventually(async () => await popup.visible(selector), "Passkey login editor field unavailable");
+    await popup.click(selector);
     await popup.selectAll(); await popup.insertText(value);
   }
   phase("passkey-management:preservation-save");
@@ -176,7 +346,7 @@ export async function acceptPasskeyManagement({
   const removed = await waitResult();
   assert(!removed.result && removed.error, "Deleted credential produced a result");
   const controls = input([], true, { inspect: true }).controls || {};
-  assert(!controls["登录：" + rp + " · passkey-test · passkey-test"]?.showing,
+  assert(!controls[passkeyChoiceLabel({ rp, title: rp + " · passkey-test", username: "passkey-test", credentialId: first.id })]?.showing,
     "Deleted credential remained an approvable native choice");
   phase("passkey-management:other-account-signature");
   await get(second, account);

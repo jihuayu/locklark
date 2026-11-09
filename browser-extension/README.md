@@ -156,7 +156,9 @@ replaces an existing Passkey. Requests requiring user verification need fresh
 master-password and Secret Key verification in the native window. The unlocked
 session or an OS Secret Service lookup alone does not set the WebAuthn UV flag.
 
-Each login can hold one ES256 discoverable credential in a protected KDBX field.
+Each login can hold up to 16 ES256 discoverable credentials in a protected KDBX
+field, and every credential carries its own opaque content revision alongside the
+login revision.
 Private keys stay in the encrypted vault; creation and assertion intent use
 signed, encrypted audit records. Backup/restore retains the credential. Standard
 responses include RP/challenge binding, `none` attestation, COSE public keys,
@@ -166,9 +168,16 @@ and support `AbortSignal`. Native confirmation remains required for Passkeys in
 quick mode. Unsupported algorithms/extensions use the original browser flow.
 Separate popup settings disable offers to save/use Passkeys.
 
-Known Passkey gaps include PRF/largeBlob, related origins, iframe credentials,
-biometric verification in this new flow, immediate conditional account suggestions,
-credential management/signals, and removing a Passkey independently of its login.
+Conditional account buttons, popup credential views and removals bind the full
+public selector: login ID, parent revision, credential ID and the exact
+per-credential revision. A missing, stale or unknown selector is refused with no
+first-credential fallback, sibling credentials under one login stay distinct
+options, and the projection never carries a user handle, private key or raw
+record. The popup lists and removes each credential independently; removing the
+last one keeps the login and its other fields.
+
+Known Passkey gaps include PRF/largeBlob, related origins, iframe credentials and
+biometric verification in this new flow.
 This is an initial implementation, not complete 1Password feature parity. The
 [coverage and validation record](../docs/browser-parity-validation.md) tracks the
 remaining work and the distinction between implemented and tested platforms.

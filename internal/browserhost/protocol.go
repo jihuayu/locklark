@@ -74,6 +74,11 @@ type Request struct {
 	Data         string `json:"data,omitempty"`
 	AttachmentID string `json:"attachment_id,omitempty"`
 	CredentialID string `json:"credential_id,omitempty"`
+	// CredentialRevision is the optional opaque content revision of the exact
+	// selected credential. It is accepted only by passkey-get/passkey-remove and
+	// only together with credential_id and the exact parent item/revision pair.
+	// Creation and every other operation must leave it empty.
+	CredentialRevision string `json:"credential_revision,omitempty"`
 
 	Length      int   `json:"length,omitempty"`
 	Digits      *bool `json:"digits,omitempty"`
@@ -140,7 +145,15 @@ func (r Request) valid() bool {
 	if r.PasskeysOnly != nil && r.Type != "search" && r.Type != "list" && r.Type != "vault-search" && r.Type != "vault-list" {
 		return false
 	}
-	if r.Type != "passkey-remove" && r.CredentialID != "" {
+	// A credential selector is accepted only by explicit mutation requests and
+	// by a passkey assertion that also pins the exact parent item/revision pair
+	// (checked in the passkey-get case below). Creation can never carry one.
+	if r.Type != "passkey-remove" && r.Type != "passkey-get" && r.CredentialID != "" {
+		return false
+	}
+	// A child content revision only ever narrows an explicit credential of an
+	// assertion or removal; it never creates, lists or signals anything.
+	if r.Type != "passkey-remove" && r.Type != "passkey-get" && r.CredentialRevision != "" {
 		return false
 	}
 	if (r.Type == "match" || r.Type == "fill") && r.Category != "" && r.Category != "login" && r.Category != "identity" && r.Category != "credit_card" {
@@ -152,7 +165,7 @@ func (r Request) valid() bool {
 	switch r.Type {
 	case "passkey-create":
 		// Creation never selects or pins an existing login through the browser.
-		return token.MatchString(r.Capability) && r.Context().Valid() && r.ItemID == "" && r.Revision == "" && passkeyOptions(r.Options)
+		return token.MatchString(r.Capability) && r.Context().Valid() && r.ItemID == "" && r.Revision == "" && passkeyOptions(r.Options) && r.CredentialID == "" && r.CredentialRevision == ""
 	case "passkey-get":
 		// An assertion may pin one exact login by the (item_id, revision) pair.
 		// Both halves are required together; legacy requests omit both.
@@ -160,9 +173,23 @@ func (r Request) valid() bool {
 			return false
 		}
 		if r.ItemID == "" && r.Revision == "" {
-			return true
+			// A credential selector or child revision without the exact parent
+			// pair is ambiguous: several logins may share one RP. Refuse instead
+			// of searching.
+			return r.CredentialID == "" && r.CredentialRevision == ""
 		}
-		return token.MatchString(r.ItemID) && revision.MatchString(r.Revision)
+		if !token.MatchString(r.ItemID) || !revision.MatchString(r.Revision) {
+			return false
+		}
+		if r.CredentialID == "" {
+			return r.CredentialRevision == ""
+		}
+		if !passkey.ValidCredentialID(r.CredentialID) {
+			return false
+		}
+		// A pinned child revision requires the explicit credential selector and
+		// must itself be a canonical content revision.
+		return r.CredentialRevision == "" || revision.MatchString(r.CredentialRevision)
 	case "passkey-signal":
 		// A WebAuthn signal hint is a strict options document plus the exact
 		// browser context. It carries no item selector and no mutation keys;
@@ -179,7 +206,7 @@ func (r Request) valid() bool {
 		// creation/user fields and no mutation keys are ever accepted.
 		return token.MatchString(r.Capability) && r.Context().Valid() && r.ItemID == "" && r.Revision == "" &&
 			passkeyOptions(r.Options) && r.payload == nil && r.RequestID == "" && r.Nonce == "" && r.WindowID == 0 &&
-			r.CredentialID == "" && r.Query == "" && r.VaultID == "" && r.Tag == "" && r.StateFilter == "" &&
+			r.CredentialID == "" && r.CredentialRevision == "" && r.Query == "" && r.VaultID == "" && r.Tag == "" && r.StateFilter == "" &&
 			r.FavoritesOnly == nil && r.PasskeysOnly == nil && r.Field == "" && r.FieldAction == "" && r.StateAction == "" &&
 			r.ItemJSON == "" && r.ProfileKind == "" && r.Category == "" && r.Length == 0 && r.Digits == nil && r.Symbols == nil && r.SaveHistory == nil &&
 			r.FileName == "" && r.Size == nil && r.SHA256 == "" && r.MimeType == "" && r.TransferID == "" && r.Offset == 0 && r.Data == "" && r.AttachmentID == "" &&
@@ -312,6 +339,7 @@ func (r Request) valid() bool {
 		return token.MatchString(r.Capability) && token.MatchString(r.ItemID) && revision.MatchString(r.Revision) && r.StateAction != "" && r.payload == nil && r.RequestID == "" && r.Nonce == ""
 	case "passkey-remove":
 		return token.MatchString(r.Capability) && token.MatchString(r.ItemID) && revision.MatchString(r.Revision) && passkey.ValidCredentialID(r.CredentialID) &&
+			(r.CredentialRevision == "" || revision.MatchString(r.CredentialRevision)) &&
 			r.payload == nil && r.RequestID == "" && r.Nonce == "" && r.Origin == "" && r.TabID == 0 && r.DocumentID == "" &&
 			r.WindowID == 0 && r.Options == "" && r.ItemJSON == ""
 	case "match-profiles":
@@ -988,51 +1016,52 @@ func ReadRequest(reader io.Reader) (Request, error) {
 		return Request{}, ErrProtocol
 	}
 	var wire struct {
-		Options        string  `json:"options"`
-		Mode           string  `json:"mode"`
-		Length         int     `json:"length"`
-		Digits         *bool   `json:"digits"`
-		Symbols        *bool   `json:"symbols"`
-		SaveHistory    *bool   `json:"save_history"`
-		StageID        string  `json:"stage_id"`
-		Title          string  `json:"title"`
-		NeverForOrigin *bool   `json:"never_for_origin"`
-		Category       string  `json:"category"`
-		IncludeHIBP    *bool   `json:"include_hibp"`
-		V              int     `json:"v"`
-		ID             string  `json:"id"`
-		Type           string  `json:"type"`
-		Capability     string  `json:"capability"`
-		Origin         string  `json:"origin"`
-		TabID          int64   `json:"tab_id"`
-		DocumentID     string  `json:"document_id"`
-		WindowID       int64   `json:"window_id"`
-		ItemID         string  `json:"item_id"`
-		Revision       string  `json:"revision"`
-		RequestID      string  `json:"request_id"`
-		Nonce          string  `json:"nonce"`
-		Username       *string `json:"username"`
-		Password       *string `json:"password"`
-		Query          string  `json:"query"`
-		VaultID        string  `json:"vault_id"`
-		Tag            string  `json:"tag"`
-		StateFilter    string  `json:"state"`
-		FavoritesOnly  *bool   `json:"favorites_only"`
-		PasskeysOnly   *bool   `json:"passkeys_only"`
-		Field          string  `json:"field"`
-		FieldAction    string  `json:"action"`
-		StateAction    string  `json:"state_action"`
-		ItemJSON       string  `json:"item_json"`
-		ProfileKind    string  `json:"profile_kind"`
-		FileName       string  `json:"file_name"`
-		Size           *int64  `json:"size"`
-		SHA256         string  `json:"sha256"`
-		MimeType       string  `json:"mime_type"`
-		TransferID     string  `json:"transfer_id"`
-		Offset         int64   `json:"offset"`
-		Data           string  `json:"data"`
-		AttachmentID   string  `json:"attachment_id"`
-		CredentialID   string  `json:"credential_id"`
+		Options            string  `json:"options"`
+		Mode               string  `json:"mode"`
+		Length             int     `json:"length"`
+		Digits             *bool   `json:"digits"`
+		Symbols            *bool   `json:"symbols"`
+		SaveHistory        *bool   `json:"save_history"`
+		StageID            string  `json:"stage_id"`
+		Title              string  `json:"title"`
+		NeverForOrigin     *bool   `json:"never_for_origin"`
+		Category           string  `json:"category"`
+		IncludeHIBP        *bool   `json:"include_hibp"`
+		V                  int     `json:"v"`
+		ID                 string  `json:"id"`
+		Type               string  `json:"type"`
+		Capability         string  `json:"capability"`
+		Origin             string  `json:"origin"`
+		TabID              int64   `json:"tab_id"`
+		DocumentID         string  `json:"document_id"`
+		WindowID           int64   `json:"window_id"`
+		ItemID             string  `json:"item_id"`
+		Revision           string  `json:"revision"`
+		RequestID          string  `json:"request_id"`
+		Nonce              string  `json:"nonce"`
+		Username           *string `json:"username"`
+		Password           *string `json:"password"`
+		Query              string  `json:"query"`
+		VaultID            string  `json:"vault_id"`
+		Tag                string  `json:"tag"`
+		StateFilter        string  `json:"state"`
+		FavoritesOnly      *bool   `json:"favorites_only"`
+		PasskeysOnly       *bool   `json:"passkeys_only"`
+		Field              string  `json:"field"`
+		FieldAction        string  `json:"action"`
+		StateAction        string  `json:"state_action"`
+		ItemJSON           string  `json:"item_json"`
+		ProfileKind        string  `json:"profile_kind"`
+		FileName           string  `json:"file_name"`
+		Size               *int64  `json:"size"`
+		SHA256             string  `json:"sha256"`
+		MimeType           string  `json:"mime_type"`
+		TransferID         string  `json:"transfer_id"`
+		Offset             int64   `json:"offset"`
+		Data               string  `json:"data"`
+		AttachmentID       string  `json:"attachment_id"`
+		CredentialID       string  `json:"credential_id"`
+		CredentialRevision string  `json:"credential_revision"`
 	}
 	dec = json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
@@ -1051,7 +1080,7 @@ func ReadRequest(reader io.Reader) (Request, error) {
 		StateAction: wire.StateAction, ItemJSON: wire.ItemJSON, ProfileKind: wire.ProfileKind,
 		FileName: wire.FileName, Size: wire.Size, SHA256: wire.SHA256, MimeType: wire.MimeType,
 		TransferID: wire.TransferID, Offset: wire.Offset, Data: wire.Data, AttachmentID: wire.AttachmentID,
-		CredentialID: wire.CredentialID,
+		CredentialID: wire.CredentialID, CredentialRevision: wire.CredentialRevision,
 	}
 	r.NeverForOrigin = wire.NeverForOrigin != nil && *wire.NeverForOrigin
 	if wire.IncludeHIBP != nil {
@@ -1141,7 +1170,7 @@ func requestKeys(kind string) (required, optional []string, ok bool) {
 	case "passkey-get":
 		// The optional pair lets a conditional selection pin exactly one login.
 		// Both keys travel together or neither does; passkey-create never does.
-		return append(base, "capability", "origin", "tab_id", "document_id", "options"), []string{"item_id", "revision"}, true
+		return append(base, "capability", "origin", "tab_id", "document_id", "options"), []string{"item_id", "revision", "credential_id", "credential_revision"}, true
 	case "match", "fill", "save-new", "save-update", "otp":
 		required = append(base, "capability", "origin", "tab_id", "document_id")
 		if kind == "fill" || kind == "save-update" || kind == "otp" {
@@ -1182,7 +1211,7 @@ func requestKeys(kind string) (required, optional []string, ok bool) {
 	case "item-get":
 		return append(base, "capability", "item_id"), []string{"revision"}, true
 	case "passkey-remove":
-		return append(base, "capability", "item_id", "revision", "credential_id"), nil, true
+		return append(base, "capability", "item_id", "revision", "credential_id"), []string{"credential_revision"}, true
 	case "item-copy-field", "item-reveal-field":
 		return append(base, "capability", "item_id", "revision", "field"), []string{"action"}, true
 	case "item-create":

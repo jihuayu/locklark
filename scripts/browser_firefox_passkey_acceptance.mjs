@@ -7,8 +7,8 @@ import assert from "node:assert/strict";
 import { createHash, createPublicKey, verify } from "node:crypto";
 import { createRequire } from "node:module";
 import { fixtureCanaries } from "./browser_save_acceptance.mjs";
-import { acceptPasskeyManagement } from "./browser_passkey_management_acceptance.mjs";
-import { acceptConditionalPasskey } from "./browser_conditional_passkey_acceptance.mjs";
+import { acceptPasskeyManagement, passkeyChoiceLabel } from "./browser_passkey_management_acceptance.mjs";
+import { acceptConditionalPasskey, acceptConditionalSibling } from "./browser_conditional_passkey_acceptance.mjs";
 
 export const PASSKEY_CONTRACT = Object.freeze({
   gate: "LOCKLARK_TEST_FIREFOX_PASSKEY=1",
@@ -23,7 +23,6 @@ export const PASSKEY_CONTRACT = Object.freeze({
     verifyPassword: "验证主密码",
     verifySecret: "验证 Secret Key",
     create: "创建新登录并保存 Passkey",
-    get: "登录：login.locklark.test · passkey-test · passkey-test",
   }),
   driverHooks: Object.freeze([
     "origin",
@@ -457,6 +456,22 @@ export async function acceptFirefoxPasskey(driver) {
     return { found: false, strategies };
   };
   const inlinePoint = probeInline;
+  // The physical click is bare XTest and its point comes from page geometry, so
+  // a native window raised above the browser (for example by a native control
+  // snapshot) would receive the click instead of the inline control. Require the
+  // browser content to be the foreground document immediately before that one
+  // click; this gate never retries the click and never touches native approval.
+  const inlineForeground = async () => {
+    try {
+      return (
+        (await pageEval(
+          () => document.hasFocus() === true && document.visibilityState === "visible",
+        )) === true
+      );
+    } catch {
+      return false;
+    }
+  };
   const clickInline = async (label) => {
     let found;
     try {
@@ -482,6 +497,7 @@ export async function acceptFirefoxPasskey(driver) {
       found.width > 8 && found.height > 8 && found.x > 0 && found.y > 0,
       "PasskeyFailure:inline-geometry:" + label,
     );
+    assert(await inlineForeground(), "PasskeyFailure:inline-foreground:" + label);
     clickScreen(found.x, found.y);
     return found.strategy;
   };
@@ -496,7 +512,8 @@ export async function acceptFirefoxPasskey(driver) {
     { click_label: "验证 Secret Key" },
     { text: fixture.Secret },
   ];
-  const nativeLabel = (control) => {
+  const nativeLabel = (control, credentialId = "") => {
+    if (control === "get") return passkeyChoiceLabel({ rp: PASSKEY_CONTRACT.rpID, title: PASSKEY_CONTRACT.rpID + " · " + PASSKEY_CONTRACT.userName, username: PASSKEY_CONTRACT.userName, credentialId });
     assert(control in PASSKEY_CONTRACT.nativeControls, "Unknown native control");
     return PASSKEY_CONTRACT.nativeControls[control];
   };
@@ -582,11 +599,11 @@ export async function acceptFirefoxPasskey(driver) {
   });
   phase("firefox-passkey-get:inline");
   await clickInline("使用 Locklark 登录");
-  const loginLabel = nativeLabel("get");
+  const loginLabel = nativeLabel("get", created.result.json.id);
   assert.equal(
     loginLabel,
-    "登录：" + rp + " · " + PASSKEY_CONTRACT.userName + " · " + PASSKEY_CONTRACT.userName,
-    "Native login label must equal the allowlisted passkey label",
+    passkeyChoiceLabel({ rp, title: rp + " · " + PASSKEY_CONTRACT.userName, username: PASSKEY_CONTRACT.userName, credentialId: created.result.json.id }),
+    "Native login label must equal the exact passkey label",
   );
   phase("firefox-passkey-get:native-factors");
   input([...verifyFactors, { click_label: loginLabel }]);
@@ -656,7 +673,7 @@ export async function acceptFirefoxPasskey(driver) {
   await eventually(
     () => {
       const controls = input([], true, { inspect: true }).controls || {};
-      return [nativeLabel("create"), nativeLabel("get")].every(
+      return [nativeLabel("create"), nativeLabel("get", created.result.json.id)].every(
         (label) => !(controls[label]?.showing && controls[label]?.enabled),
       );
     },
@@ -727,6 +744,26 @@ export async function acceptFirefoxPasskey(driver) {
       openPopup: driver.openPopup, observe: driver.observe, reconnect,
       pageEval, inlineClick: clickInline, focusPage: () => input([], false),
       dismissPopup, eventually, input, phase,
+      conditionalSibling: async ({ first, second }) => {
+        input([], false);
+        await acceptConditionalSibling({
+          origin, fixture, first, second, pageEval, observe: driver.observe,
+          inlineClick: clickInline,
+          inlinePresent: async label => !(await inlineAbsent(label)),
+          clickDocument: async selector => {
+            input([], false);
+            const view = await viewportOrigin();
+            const point = await pageEval(selector => {
+              const rect = document.querySelector(selector)?.getBoundingClientRect();
+              return rect && { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+            }, selector);
+            assert(view?.found && point, "Conditional document input unavailable");
+            clickScreen(view.x + point.x, view.y + point.y);
+          },
+          focusPage: () => input([], false), navigate: driver.navigate,
+          eventually, input, phase,
+        });
+      },
     });
   }
   phase("firefox-passkey-complete");

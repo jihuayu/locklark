@@ -22,8 +22,24 @@ type PasskeyTarget struct {
 	Create       bool
 	Options      []byte
 	ID, Revision string
+	// CredentialID is the canonical credential selector of an assertion. It is
+	// never accepted for creation: a new credential can only be added to a
+	// login, never attached to an existing credential identity.
+	CredentialID string
+	// CredentialRevision is the optional opaque content revision of the exact
+	// selected credential. When present it must match the durable record inside
+	// the same parent-revision CAS transaction; it never replaces the parent CAS.
+	CredentialRevision string
 }
-type PasskeyChoice struct{ ID, Revision, Title, Username string }
+
+type PasskeyChoice struct {
+	ID                 string
+	Revision           string
+	Title              string
+	Username           string
+	CredentialID       string
+	CredentialRevision string
+}
 
 func (PasskeyTarget) String() string   { return "[passkey request]" }
 func (PasskeyTarget) GoString() string { return "[passkey request]" }
@@ -37,6 +53,17 @@ func (t PasskeyTarget) parse() (*passkey.Request, error) {
 	if t.ID == "" && t.Revision != "" {
 		return nil, passkey.ErrRefused
 	}
+	// A credential selector must be canonical and can only ever narrow an
+	// assertion. Creation is forbidden from carrying one, so a selector can
+	// never be used to replace an existing credential.
+	if t.CredentialID != "" && (t.Create || !passkey.ValidCredentialID(t.CredentialID)) {
+		return nil, passkey.ErrRefused
+	}
+	// A child revision only ever narrows an existing credential, and only when
+	// that exact credential is named. Creation can never carry one.
+	if t.CredentialRevision != "" && (t.Create || t.CredentialID == "" || !digestOK(t.CredentialRevision)) {
+		return nil, passkey.ErrRefused
+	}
 	return passkey.Parse(t.Context.Origin, t.Create, t.Options)
 }
 
@@ -45,9 +72,62 @@ func (t PasskeyTarget) parse() (*passkey.Request, error) {
 // revision; anything else is refused instead of falling back to a list.
 func (t PasskeyTarget) pinned() bool { return !t.Create && t.ID != "" }
 
+// createRecordsMatch reports whether every durable credential of an existing
+// login already carries exactly the identity (RP ID and user handle) this
+// creation request registers. Appending is only allowed for the same account;
+// a login never silently changes identity by collecting another credential.
+func createRecordsMatch(request *passkey.Request, records [][]byte) bool {
+	if len(records) == 0 {
+		return true
+	}
+	for _, raw := range records {
+		record, e := passkey.Load(raw)
+		if e != nil {
+			return false
+		}
+		matches := record.RPID == request.RPID && record.UserID == request.Options.User.ID
+		record.Clear()
+		if !matches {
+			return false
+		}
+	}
+	return true
+}
+
+// selectAssertionRecord resolves exactly one durable credential for an
+// assertion. A canonical selector pins one record and nothing else; without a
+// selector only a single-record login (legacy blob or singleton collection) can
+// answer. Multiple records are ambiguous and MUST be refused: there is never a
+// first-record fallback.
+func selectAssertionRecord(records [][]byte, credentialID string) (*passkey.Record, error) {
+	if credentialID == "" {
+		if len(records) != 1 {
+			return nil, passkey.ErrRefused
+		}
+		record, e := passkey.Load(records[0])
+		if e != nil {
+			return nil, passkey.ErrRefused
+		}
+		return record, nil
+	}
+	for _, raw := range records {
+		record, e := passkey.Load(raw)
+		if e != nil {
+			continue
+		}
+		if record.ID == credentialID {
+			return record, nil
+		}
+		record.Clear()
+	}
+	return nil, passkey.ErrRefused
+}
+
 // ReviewPasskey returns native-only choices, without revealing private keys.
-// Browser polling cannot renew idle time. When the assertion pinned an exact
-// item/revision the review contains only that target, or fails.
+// Browser polling cannot renew idle time. Choices are produced per durable
+// credential, so one login may appear once for each credential it owns. When
+// the assertion pinned an exact item/revision the review contains only that
+// target, or fails.
 func (s *Session) ReviewPasskey(t PasskeyTarget) ([]PasskeyChoice, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -70,38 +150,56 @@ func (s *Session) ReviewPasskey(t PasskeyTarget) ([]PasskeyChoice, error) {
 			return e
 		}
 		defer auth.clear()
-		pinned := t.pinned()
 		found := false
 		for _, item := range auth.items {
 			if item.Kind != "login" || item.State != "" {
 				continue
 			}
-			if pinned {
+			if t.ID != "" {
 				// A stale or missing pinned target is refused; it must never
-				// widen into unrelated accounts.
+				// widen into unrelated accounts. This applies to creation too:
+				// attaching to an exact login never reaches a sibling login.
 				if item.ID != t.ID || auth.revisions[item.ID] != t.Revision {
 					continue
 				}
 				found = true
 			}
+			revision := auth.revisions[item.ID]
 			if request.Create {
 				site, err := origin.Website(item.URL)
-				if err == nil && site == t.Context.Origin && len(item.Passkey) == 0 {
-					choices = append(choices, PasskeyChoice{item.ID, auth.revisions[item.ID], item.Title, item.Username})
+				if err != nil || site != t.Context.Origin {
+					continue
 				}
+				// Only a login that already belongs to this exact identity may
+				// collect another credential; every other login is untouched.
+				if !createRecordsMatch(request, item.PasskeyRecords()) {
+					continue
+				}
+				choices = append(choices, PasskeyChoice{ID: item.ID, Revision: revision, Title: item.Title, Username: item.Username})
 				continue
 			}
-			record, e := passkey.Load(item.Passkey)
-			if e != nil {
-				continue
-			}
-			matches := request.Matches(record)
-			record.Clear()
-			if matches {
-				choices = append(choices, PasskeyChoice{item.ID, auth.revisions[item.ID], item.Title, item.Username})
+			for _, raw := range item.PasskeyRecords() {
+				record, e := passkey.Load(raw)
+				if e != nil {
+					continue
+				}
+				matches := request.Matches(record)
+				credential := record.ID
+				childRevision := ""
+				if matches && (t.CredentialID == "" || t.CredentialID == credential) {
+					childRevision, _ = credentialRevisionFromRecord(auth.identity.AuditEncryption, item.ID, record)
+				}
+				record.Clear()
+				// An explicit selector selects only that exact record; it can
+				// never widen to another credential of the same login.
+				if !matches || t.CredentialID != "" && t.CredentialID != credential || childRevision == "" ||
+					t.CredentialRevision != "" && !hmac.Equal([]byte(t.CredentialRevision), []byte(childRevision)) {
+					continue
+				}
+				choices = append(choices, PasskeyChoice{ID: item.ID, Revision: revision, Title: item.Title, Username: item.Username, CredentialID: credential, CredentialRevision: childRevision})
 			}
 		}
-		if pinned && !found {
+		if t.ID != "" && !found {
 			return passkey.ErrRefused
 		}
 		return nil
@@ -196,9 +294,14 @@ func (s *Session) PerformPasskey(t PasskeyTarget, verified bool, g *MutationGate
 					return passkey.ErrRefused
 				}
 			}
+			// The exclusion policy applies to every credential of every item,
+			// not only to a legacy single record or the selected login.
 			for _, item := range items {
-				record, e := passkey.Load(item.Passkey)
-				if e == nil {
+				for _, raw := range item.PasskeyRecords() {
+					record, e := passkey.Load(raw)
+					if e != nil {
+						continue
+					}
 					excluded := request.Excludes(record)
 					record.Clear()
 					if excluded {
@@ -206,9 +309,15 @@ func (s *Session) PerformPasskey(t PasskeyTarget, verified bool, g *MutationGate
 					}
 				}
 			}
-			// Never silently replace a previously registered credential.
-			if index >= 0 && len(items[index].Passkey) > 0 {
-				return passkey.ErrExcluded
+			// Never silently replace or re-identify a previously registered
+			// credential: attaching to an existing login is only allowed for
+			// the exact same RP ID and user handle, and always appends.
+			existing := [][]byte(nil)
+			if index >= 0 {
+				existing = items[index].PasskeyRecords()
+				if !createRecordsMatch(request, existing) {
+					return passkey.ErrExcluded
+				}
 			}
 			var record []byte
 			record, response, e = passkey.Create(request, verified)
@@ -222,18 +331,46 @@ func (s *Session) PerformPasskey(t PasskeyTarget, verified bool, g *MutationGate
 					return e
 				}
 				items = append(items, vault.Item{ID: itemID, Kind: "login", Title: request.RPID + " · " + request.Options.User.Name, URL: t.Context.Origin, Username: request.Options.User.Name, Passkey: record})
+			} else if len(existing) == 0 && len(items[index].Passkeys) == 0 {
+				// The first credential of an otherwise empty login stays in the
+				// legacy slot: existing readers and backups keep seeing the same
+				// single-record form. A second credential migrates the login to
+				// the versioned collection below.
+				next := vault.CloneItem(items[index])
+				if e := next.SetLegacyPasskey(record); e != nil {
+					return passkey.ErrRefused
+				}
+				items[index].ClearPasskeys()
+				items[index] = next
 			} else {
-				items[index].Passkey = record
+				// Adding a sibling migrates the login to the versioned collection.
+				// The merged list is cloned before the borrowed durable bytes are
+				// zeroed.
+				merged := make([][]byte, 0, len(existing)+1)
+				merged = append(merged, existing...)
+				merged = append(merged, record)
+				next := vault.CloneItem(items[index])
+				if e := next.SetPasskeyRecords(merged); e != nil {
+					return passkey.ErrRefused
+				}
+				items[index].ClearPasskeys()
+				items[index] = next
 			}
 		} else {
 			if index < 0 {
 				return passkey.ErrRefused
 			}
-			record, e := passkey.Load(items[index].Passkey)
+			record, e := selectAssertionRecord(items[index].PasskeyRecords(), t.CredentialID)
 			if e != nil {
 				return e
 			}
 			defer record.Clear()
+			if t.CredentialRevision != "" {
+				actual, revisionErr := credentialRevisionFromRecord(auth.identity.AuditEncryption, items[index].ID, record)
+				if revisionErr != nil || !hmac.Equal([]byte(actual), []byte(t.CredentialRevision)) {
+					return passkey.ErrRefused
+				}
+			}
 			response, e = passkey.Get(request, record, verified)
 			if e != nil {
 				return e
@@ -242,8 +379,9 @@ func (s *Session) PerformPasskey(t PasskeyTarget, verified bool, g *MutationGate
 		if vault.ValidateItems([]byte(schema), items) != nil {
 			return passkey.ErrRefused
 		}
-		// Bind the origin, document, request, challenge/options, exact selected item
-		// and UV result without publishing any of them as raw audit payloads.
+		// Bind the origin, document, request, challenge/options, exact selected
+		// item, credential selector and UV result without publishing any of them
+		// as raw audit payloads.
 		bound, _ := json.Marshal(struct {
 			Target   PasskeyTarget
 			Verified bool

@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { createHash, createPublicKey, verify } from "node:crypto";
 import { createRequire } from "node:module";
+import { passkeyChoiceLabel } from "./browser_passkey_management_acceptance.mjs";
 
 function prepareFields() {
   document.querySelector("#username").autocomplete = "username webauthn";
@@ -44,6 +45,98 @@ function readConditional() {
   };
 }
 
+
+// Two credentials under one parent share the public account label. The picker
+// must therefore expose both full labels and the caller must select the exact
+// second credential rather than accepting the first record.
+export async function acceptConditionalSibling({
+  origin, fixture, first, second, pageEval, clickDocument, inlineClick, inlinePresent,
+  focusPage, navigate, eventually, input, observe, phase,
+}) {
+  const rp = new URL(origin).hostname;
+  assert.equal(rp, "login.locklark.test", "Controlled conditional RP required");
+  const hint = id => id.slice(0, 6) + "…" + id.slice(-4);
+  const firstLabel = "Synthetic user · passkey-test · " + hint(first.id);
+  const secondLabel = "Synthetic user · passkey-test · " + hint(second.id);
+  assert.notEqual(firstLabel, secondLabel, "Sibling public selectors must differ");
+  const factors = [
+    { wait_label: "验证主密码" }, { click_label: "验证主密码" }, { text: fixture.Password },
+    { click_label: "验证 Secret Key" }, { text: fixture.Secret },
+  ];
+  phase("passkey-conditional:two-siblings-document");
+  await navigate(origin + "/passkey?conditional-siblings=1");
+  await focusPage();
+  await pageEval(prepareFields);
+  await eventually(async () =>
+    (await pageEval(async () => await PublicKeyCredential.isConditionalMediationAvailable())) === true,
+  "Conditional availability missing", 20000);
+  const nativeChoice = () => passkeyChoiceLabel({
+    rp, title: rp + " · passkey-test", username: "passkey-test", credentialId: second.id,
+  });
+  const noApproval = () => {
+    const controls = input([], true, { inspect: true }).controls || {};
+    assert(!controls["验证主密码"]?.showing && !controls[nativeChoice()]?.showing,
+      "Conditional sibling waiting opened approval before account selection");
+  };
+  const before = observe();
+  const challenge = Buffer.from("synthetic-conditional-two-siblings").toString("base64url");
+  await pageEval(startConditional, { rp, challenge });
+  noApproval();
+  let state = await pageEval(readConditional);
+  assert.equal(state.metadataExposed, false, "Sibling account metadata crossed into MAIN");
+  assert.equal(state.lightDOMChoices, 0, "Sibling account metadata escaped the closed shadow");
+  assert.equal(observe().snapshot_digest, before.snapshot_digest,
+    "Conditional sibling listing changed the vault snapshot");
+  await clickDocument("#username");
+  await eventually(() => inlinePresent(secondLabel), "Second sibling conditional choice missing", 20000);
+  assert.equal(await inlinePresent(firstLabel), true, "First sibling conditional choice missing");
+  assert.equal(await inlinePresent("Synthetic user · passkey-test"), false,
+    "Ambiguous bare account label must not be offered for two siblings");
+  noApproval();
+  state = await pageEval(readConditional);
+  assert.equal(state.metadataExposed, false, "Sibling account metadata crossed into MAIN");
+  assert.equal(state.lightDOMChoices, 0, "Sibling account metadata escaped the closed shadow");
+  assert.equal(observe().snapshot_digest, before.snapshot_digest,
+    "Conditional sibling selection changed the vault snapshot before the selected get");
+  phase("passkey-conditional:select-second-sibling");
+  // noApproval() is a native control inspection: the XTest driver raises and
+  // focuses the native app window, and the browser-side coordinate probe cannot
+  // see that overlapping window. Browser focus must therefore be the last focus
+  // action, with a fresh probe of the selector, before the single physical
+  // selection below.
+  await focusPage();
+  await eventually(() => inlinePresent(secondLabel),
+    "Second sibling conditional choice missing after restoring browser focus", 20000);
+  await inlineClick(secondLabel);
+  input([...factors, {
+    click_label: passkeyChoiceLabel({
+      rp, title: rp + " · passkey-test", username: "passkey-test", credentialId: second.id,
+    }),
+  }]);
+  await focusPage();
+  await eventually(async () => {
+    const current = await pageEval(readConditional);
+    return !!(current.result || current.error);
+  }, "Conditional sibling assertion did not finish", 20000);
+  state = await pageEval(readConditional);
+  assert(!state.error && state.result?.instance, "Conditional second sibling was rejected");
+  assert.equal(state.result.json.id, second.id, "Conditional picker signed with the first sibling");
+  assert.equal(state.metadataExposed, false, "Sibling selection exposed account metadata to MAIN");
+  assert.equal(state.lightDOMChoices, 0, "Sibling selection left private metadata in light DOM");
+  const clientBytes = Buffer.from(state.result.json.response.clientDataJSON, "base64url");
+  const client = JSON.parse(clientBytes);
+  assert.equal(client.origin, origin); assert.equal(client.challenge, challenge);
+  assert.equal(client.type, "webauthn.get");
+  const auth = Buffer.from(state.result.json.response.authenticatorData, "base64url");
+  assert.deepEqual(auth.subarray(0, 32), createHash("sha256").update(rp).digest());
+  assert.equal(auth[32] & 5, 5, "Presence and fresh verification required");
+  const publicKey = createPublicKey({ key: Buffer.from(second.response.publicKey, "base64url"), format: "der", type: "spki" });
+  assert(verify("sha256", Buffer.concat([auth, createHash("sha256").update(clientBytes).digest()]),
+    publicKey, Buffer.from(state.result.json.response.signature, "base64url")),
+  "Conditional second sibling signature verification failed");
+  console.log("PASS: real conditional account picker offers both full sibling selectors and signs with the exact second credential");
+}
+
 export async function acceptConditionalPasskey({
   origin, fixture, first, pageEval, clickDocument, inlineClick, inlinePresent,
   focusPage, navigate, eventually, input, observe, phase, inspectConditional, openPopup, reconnect,
@@ -51,10 +144,10 @@ export async function acceptConditionalPasskey({
   const rp = new URL(origin).hostname;
   assert.equal(rp, "login.locklark.test", "Controlled conditional RP required");
   const label = "Synthetic user · passkey-test";
-  const nativeChoice = "登录：" + rp + " · passkey-test · passkey-test";
+  const nativeChoice = () => passkeyChoiceLabel({ rp, title: rp + " · passkey-test", username: "passkey-test", credentialId: first.id });
   const noApproval = () => {
     const controls = input([], true, { inspect: true }).controls || {};
-    assert(!controls["验证主密码"]?.showing && !controls[nativeChoice]?.showing,
+    assert(!controls["验证主密码"]?.showing && !controls[nativeChoice()]?.showing,
       "Conditional waiting opened approval before account selection");
   };
   const start = async name => {
@@ -121,10 +214,13 @@ export async function acceptConditionalPasskey({
   phase("passkey-conditional:select-account");
   const challenge = await start("selected-account");
   await clickDocument("#username");
+  // The click above already restores browser focus; repeat it as the last focus
+  // action so the single physical selection can never follow a native snapshot.
+  await focusPage();
   await inlineClick(label);
   input([
     { wait_label: "验证主密码" }, { click_label: "验证主密码" }, { text: fixture.Password },
-    { click_label: "验证 Secret Key" }, { text: fixture.Secret }, { click_label: nativeChoice },
+    { click_label: "验证 Secret Key" }, { text: fixture.Secret }, { click_label: nativeChoice() },
   ]);
   await focusPage();
   await eventually(async () => {

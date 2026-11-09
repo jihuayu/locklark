@@ -1088,3 +1088,313 @@ test("capability state refresh hides a now-unsupported passkey delete button", a
   assert.equal(h.el("#passkey-remove").hidden, true);
   assert.match(h.el("#passkey-detail-unsupported").textContent, /升级原生宿主/);
 });
+
+const MCRED1 = core.base64URLEncode(new Uint8Array(32).fill(5));
+const MCRED2 = core.base64URLEncode(new Uint8Array(32).fill(6));
+const MREV1 = "1".repeat(64);
+const MREV2 = "2".repeat(64);
+const MREV3 = "3".repeat(64);
+
+function passkeyEntry(credentialId, revision, userName, displayName) {
+  return {
+    credential_id: credentialId,
+    credential_revision: revision,
+    rp_id: "example.test",
+    user_name: userName,
+    display_name: displayName,
+  };
+}
+function multiPasskeyDetail(entries, overrides = {}) {
+  return {
+    ...detailDocument(),
+    has_passkey: entries.length > 0,
+    passkey_count: entries.length,
+    passkeys: entries,
+    ...overrides,
+  };
+}
+function twoPasskeys() {
+  return [
+    passkeyEntry(MCRED1, MREV1, "ada@example.test", "Ada Lovelace"),
+    passkeyEntry(MCRED2, MREV2, "grace@example.test", "Grace Hopper"),
+  ];
+}
+
+async function openMultiPasskeyDetail(h, detail) {
+  await openDetail(h, detail, {
+    state: { passkeyManagementSupported: true },
+    reply: { passkeyManagementSupported: true },
+  });
+}
+
+async function resolveRemovalRefresh(h, captured, refreshedDetail) {
+  await settle();
+  const list = h.take("vault-search");
+  list.resolve({
+    connected: true,
+    passkeyManagementSupported: true,
+    vaultItems: [{
+      id: ID, revision: captured.revision, category: "login", title: "Login",
+      urls: ["https://example.test/"], tags: [], favorite: false,
+    }],
+  });
+  await settle();
+  const refreshed = h.take("item-get");
+  assert.equal(refreshed.message.revision, captured.revision);
+  refreshed.resolve({
+    connected: true,
+    passkeyManagementSupported: true,
+    detail: refreshedDetail,
+  });
+  await settle();
+}
+
+test("multi passkey detail requires an explicit choice and deletes the exact SECOND child", async () => {
+  const h = harness();
+  await openMultiPasskeyDetail(h, multiPasskeyDetail(twoPasskeys()));
+  assert.equal(h.el("#passkey-detail").hidden, false);
+  assert.equal(h.el("#passkey-select-row").hidden, false);
+  assert.equal(h.el("#passkey-select").children.length, 3, "placeholder plus two entries");
+  assert.equal(h.el("#passkey-select").value, "", "no automatic first selection");
+  assert.equal(h.el("#passkey-rp").textContent, "-");
+  assert.equal(h.el("#passkey-remove").hidden, true, "choice is required before removal");
+
+  h.el("#passkey-select").value = MCRED2;
+  h.el("#passkey-select").listeners.get("change")({ target: { value: MCRED2 } });
+  assert.equal(h.el("#passkey-username").textContent, "grace@example.test");
+  assert.match(h.el("#passkey-credential-hint").textContent, /^.{6}….{6}$/);
+  assert.equal(h.el("#passkey-remove").hidden, false);
+  h.el("#passkey-remove").listeners.get("click")();
+  h.el("#passkey-remove-confirm").listeners.get("click")();
+  await settle();
+  const remove = h.take("passkey-remove");
+  assert.deepEqual(Object.keys(remove.message).sort(), [
+    "credential_id", "credential_revision", "id", "revision", "type",
+  ]);
+  assert.equal(remove.message.id, ID);
+  assert.equal(remove.message.revision, REV);
+  assert.equal(remove.message.credential_id, MCRED2);
+  assert.equal(remove.message.credential_revision, MREV2);
+  remove.resolve({
+    connected: true,
+    passkeyManagementSupported: true,
+    passkeyRemoved: { item_id: ID, revision: NEXT, credential_id: MCRED2 },
+  });
+  await resolveRemovalRefresh(
+    h,
+    { revision: NEXT },
+    multiPasskeyDetail([twoPasskeys()[0]], { revision: NEXT }),
+  );
+  assert.equal(h.el("#passkey-detail").hidden, false, "sibling credential remains");
+  assert.equal(h.el("#passkey-username").textContent, "ada@example.test");
+  assert.equal(h.el("#passkey-select-row").hidden, true, "single sibling keeps direct delete");
+  assert.equal(h.el("#passkey-remove").hidden, false);
+  assert.match(h.el("#passkey-status").textContent, /其他 Passkey/);
+  assert.match(shown(h), /ada/, "login fields remain");
+  assert.equal(
+    h.el("#vault-list").children[0].dataset.itemRevision,
+    NEXT,
+    "list row adopts the fresh parent revision",
+  );
+});
+
+test("changing the passkey choice clears confirmation without sending a removal", async () => {
+  const h = harness();
+  await openMultiPasskeyDetail(h, multiPasskeyDetail(twoPasskeys()));
+  h.el("#passkey-select").value = MCRED1;
+  h.el("#passkey-select").listeners.get("change")({ target: { value: MCRED1 } });
+  h.el("#passkey-remove").listeners.get("click")();
+  assert.equal(h.el("#passkey-remove-confirm").hidden, false);
+  h.el("#passkey-select").value = MCRED2;
+  h.el("#passkey-select").listeners.get("change")({ target: { value: MCRED2 } });
+  assert.equal(h.el("#passkey-remove-confirm").hidden, true);
+  assert.equal(h.el("#passkey-remove-cancel").hidden, true);
+  assert.equal(h.el("#passkey-remove-warning").hidden, true);
+  h.el("#passkey-remove-confirm").listeners.get("click")();
+  await settle();
+  assert.equal(
+    h.requests.some((request) => request.message.type === "passkey-remove"),
+    false,
+    "a cleared confirmation must not send an RPC",
+  );
+  assert.equal(h.el("#passkey-username").textContent, "grace@example.test");
+});
+
+test("a refreshed parent or child revision resets the multi selection and confirmation", async () => {
+  const h = harness();
+  await openMultiPasskeyDetail(h, multiPasskeyDetail(twoPasskeys()));
+  h.el("#passkey-select").value = MCRED1;
+  h.el("#passkey-select").listeners.get("change")({ target: { value: MCRED1 } });
+  h.el("#passkey-remove").listeners.get("click")();
+  assert.equal(h.el("#passkey-remove-confirm").hidden, false);
+
+  h.el("#detail-back").listeners.get("click")();
+  await settle();
+  h.el("#vault-list").children[0].listeners.get("click")();
+  const fresh = h.take("item-get");
+  fresh.resolve({
+    connected: true,
+    passkeyManagementSupported: true,
+    detail: multiPasskeyDetail(
+      [
+        passkeyEntry(MCRED1, MREV3, "ada@example.test", "Ada Lovelace"),
+        passkeyEntry(MCRED2, MREV2, "grace@example.test", "Grace Hopper"),
+      ],
+      { revision: REV },
+    ),
+  });
+  await settle();
+  assert.equal(h.el("#passkey-select").value, "", "child revision change clears the choice");
+  assert.equal(h.el("#passkey-remove").hidden, true);
+  assert.equal(h.el("#passkey-remove-confirm").hidden, true);
+
+  h.el("#detail-back").listeners.get("click")();
+  await settle();
+  h.el("#vault-list").children[0].listeners.get("click")();
+  const parentFresh = h.take("item-get");
+  parentFresh.resolve({
+    connected: true,
+    passkeyManagementSupported: true,
+    detail: multiPasskeyDetail(twoPasskeys(), { revision: NEXT }),
+  });
+  await settle();
+  assert.equal(h.el("#passkey-select").value, "", "parent revision change clears the choice");
+  assert.equal(h.el("#passkey-remove").hidden, true);
+});
+
+test("removing the last sibling clears passkey metadata but keeps the login", async () => {
+  const h = harness();
+  const detail = multiPasskeyDetail(twoPasskeys());
+  await openMultiPasskeyDetail(h, detail);
+  h.el("#passkey-select").value = MCRED1;
+  h.el("#passkey-select").listeners.get("change")({ target: { value: MCRED1 } });
+  h.el("#passkey-remove").listeners.get("click")();
+  h.el("#passkey-remove-confirm").listeners.get("click")();
+  await settle();
+  const first = h.take("passkey-remove");
+  first.resolve({
+    connected: true,
+    passkeyManagementSupported: true,
+    passkeyRemoved: { item_id: ID, revision: NEXT, credential_id: MCRED1 },
+  });
+  await resolveRemovalRefresh(
+    h,
+    { revision: NEXT },
+    multiPasskeyDetail([twoPasskeys()[1]], { revision: NEXT }),
+  );
+  assert.match(h.el("#passkey-status").textContent, /其他 Passkey/);
+  assert.equal(h.el("#passkey-username").textContent, "grace@example.test");
+
+  h.el("#passkey-remove").listeners.get("click")();
+  h.el("#passkey-remove-confirm").listeners.get("click")();
+  await settle();
+  const second = h.take("passkey-remove");
+  assert.equal(second.message.credential_id, MCRED2);
+  assert.equal(second.message.credential_revision, MREV2);
+  second.resolve({
+    connected: true,
+    passkeyManagementSupported: true,
+    passkeyRemoved: { item_id: ID, revision: "a".repeat(64), credential_id: MCRED2 },
+  });
+  await resolveRemovalRefresh(
+    h,
+    { revision: "a".repeat(64) },
+    { ...detailDocument(), revision: "a".repeat(64), has_passkey: false },
+  );
+  assert.equal(h.el("#passkey-detail").hidden, true);
+  assert.match(h.el("#passkey-status").textContent, /此登录和其他信息仍保留/);
+  assert.match(shown(h), /ada/, "login fields remain after the last passkey");
+  assert.equal(
+    h.requests.some((request) => request.message.type === "passkey-remove"),
+    true,
+  );
+});
+
+test("a malformed or oversized passkey array fails closed without singleton fallback", async () => {
+  const legacy = passkeyEntry(MCRED1, MREV1, "ada@example.test", "Ada Lovelace");
+  delete legacy.credential_revision;
+  const cases = [
+    [legacy],
+    [twoPasskeys()[0], { ...twoPasskeys()[0], credential_revision: MREV3 }],
+    Array.from({ length: 17 }, (_, index) =>
+      passkeyEntry(
+        core.base64URLEncode(new Uint8Array(32).fill(index)),
+        index.toString(16).padStart(2, "0").repeat(32),
+        "user" + index,
+        "User " + index,
+      ),
+    ),
+  ];
+  for (const passkeys of cases) {
+    const h = harness();
+    await openMultiPasskeyDetail(h, {
+      ...detailDocument(),
+      has_passkey: true,
+      passkey_count: passkeys.length,
+      passkeys,
+      passkey: passkeyEntry(MCRED1, MREV1, "legacy@example.test", "Legacy"),
+    });
+    assert.equal(h.el("#passkey-detail").hidden, false);
+    assert.equal(h.el("#passkey-select-row").hidden, true);
+    assert.equal(h.el("#passkey-username").textContent, "-", "no legacy fallback");
+    assert.equal(h.el("#passkey-remove").hidden, true);
+    assert.match(h.el("#passkey-detail-unsupported").textContent, /未提供可安全显示/);
+  }
+});
+
+test("unknown multi removal blocks retry until a different choice is made", async () => {
+  const h = harness();
+  await openMultiPasskeyDetail(h, multiPasskeyDetail(twoPasskeys()));
+  h.el("#passkey-select").value = MCRED1;
+  h.el("#passkey-select").listeners.get("change")({ target: { value: MCRED1 } });
+  h.el("#passkey-remove").listeners.get("click")();
+  h.el("#passkey-remove-confirm").listeners.get("click")();
+  await settle();
+  h.take("passkey-remove").resolve({
+    connected: true,
+    passkeyManagementSupported: true,
+    passkeyRemoveError: "uncertain",
+  });
+  await settle();
+  assert.match(h.el("#passkey-status").textContent, /结果未确认/);
+  assert.equal(h.el("#passkey-remove").hidden, true);
+  const before = h.requests.filter(
+    (request) => request.message.type === "passkey-remove",
+  ).length;
+  h.el("#passkey-remove").listeners.get("click")();
+  h.el("#passkey-remove-confirm").listeners.get("click")();
+  await settle();
+  assert.equal(
+    h.requests.filter((request) => request.message.type === "passkey-remove").length,
+    before,
+    "uncertain state must block a retry for the same child selector",
+  );
+
+  h.el("#passkey-select").value = MCRED2;
+  h.el("#passkey-select").listeners.get("change")({ target: { value: MCRED2 } });
+  assert.equal(h.el("#passkey-remove").hidden, false, "a different choice starts fresh");
+  assert.equal(h.el("#passkey-status").textContent, "");
+});
+
+test("list rows expose multi-passkey count without a detail array", async () => {
+  const h = harness();
+  h.take("state").resolve({
+    connected: true,
+    status: "ready",
+    origin: "https://example.test/",
+    candidates: [],
+    passkeyManagementSupported: true,
+    vaultItems: [{
+      id: ID, revision: REV, category: "login", title: "Login",
+      urls: ["https://example.test/"], tags: [], favorite: false,
+      has_passkey: true, passkey_count: 2,
+    }],
+    generatorDefaults: { mode: "random", length: 24 },
+  });
+  await settle();
+  const row = h.el("#vault-list").children[0];
+  const subtitle = row.children.find((child) => child.className === "vault-item-subtitle");
+  const badge = row.children.find((child) => child.className === "badge");
+  assert.equal(subtitle.textContent, "2 个 Passkey");
+  assert.equal(badge.textContent, "Passkey ×2 · 登录");
+});

@@ -27,6 +27,9 @@ from desktop_clipboard_owner import current_owner
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 TITLE = "Locklark · 本地金库"
 MARKER = "Later independent synthetic clipboard owner"
+OTP_WINDOW_SECONDS = 20
+OTP_WINDOW_MIN_REMAINING = 18
+OTP_WINDOW_TIMEOUT = 30
 
 
 class AcceptanceFailure(Exception):
@@ -535,13 +538,42 @@ class Acceptance:
     def align(self, lower, upper):
         self.eventually(lambda: lower <= time.time() % 20 < upper, timeout=22)
 
+    @staticmethod
+    def otp_window(now):
+        return int(now) // OTP_WINDOW_SECONDS
+
+    @staticmethod
+    def otp_remaining(now):
+        return OTP_WINDOW_SECONDS - (now % OTP_WINDOW_SECONDS)
+
+    def await_new_otp_window(self, margin=OTP_WINDOW_MIN_REMAINING, timeout=OTP_WINDOW_TIMEOUT):
+        """Wait on the public wall clock for a fresh 20-second TOTP window.
+
+        The counter is captured before any sample is accepted, so a sample
+        from the pre-rollover window is ignored. A sample is accepted only
+        after the counter advances with at least ``margin`` seconds left,
+        keeping the fixed product preparation and delivery delays inside the
+        same window. The wait times out closed.
+        """
+        started = self.otp_window(time.time())
+        deadline = time.monotonic() + timeout
+        while True:
+            now = time.time()
+            if self.otp_window(now) != started and self.otp_remaining(now) >= margin:
+                return now
+            if time.monotonic() >= deadline:
+                self.reason = "otp-window-timeout"
+                raise AcceptanceFailure()
+            time.sleep(0.2)
+
     def show_copy_otp(self):
-        self.align(1, 12)
+        self.wait("显示验证码")
+        window = self.await_new_otp_window()
         self.click("显示验证码")
         self.wait("隐藏验证码")
-        require(self.display(otp=True, expected=[self.otp()])["matches"] == [True])
+        require(self.display(otp=True, expected=[self.otp(window)])["matches"] == [True])
         self.click("复制验证码")
-        self.eventually(lambda: self.clipboard([self.otp()])["matches"] == [True])
+        self.eventually(lambda: self.clipboard([self.otp(window)])["matches"] == [True])
 
     def otp_acceptance(self):
         self.select("Daily OTP login")

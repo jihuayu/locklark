@@ -1,6 +1,7 @@
 package personal
 
 import (
+	"crypto/hmac"
 	"errors"
 	"time"
 
@@ -11,10 +12,11 @@ import (
 
 const passkeyRemoveAction = "item.passkey.remove"
 
-// ReadPasskeyMetadata returns public passkey metadata keyed by item ID. The
-// projection happens while the authenticated items are still owned by the
-// transaction; callers never receive the raw record or its private key.
-func (s *Session) ReadPasskeyMetadata(touch bool) (map[string]passkey.Metadata, error) {
+// ReadPasskeysMetadata returns public passkey metadata keyed by item ID, one
+// entry per durable credential of that login. The projection happens while the
+// authenticated items are still owned by the transaction; callers never receive
+// the raw record or its private key.
+func (s *Session) ReadPasskeysMetadata(touch bool) (map[string][]passkey.Metadata, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.active(touch); err != nil {
@@ -24,7 +26,7 @@ func (s *Session) ReadPasskeyMetadata(touch bool) (map[string]passkey.Metadata, 
 	if err != nil {
 		return nil, err
 	}
-	metadata := map[string]passkey.Metadata{}
+	metadata := map[string][]passkey.Metadata{}
 	err = db.View(func(tx *bolt.Tx) error {
 		auth, err := authenticateState(tx, "", nil, passkeyGetAction, s)
 		if err != nil {
@@ -32,14 +34,17 @@ func (s *Session) ReadPasskeyMetadata(touch bool) (map[string]passkey.Metadata, 
 		}
 		defer auth.clear()
 		for _, item := range auth.items {
-			if len(item.Passkey) == 0 {
-				continue
+			var values []passkey.Metadata
+			for _, raw := range item.PasskeyRecords() {
+				value, err := passkey.MetadataFromRecord(raw)
+				if err != nil {
+					continue
+				}
+				values = append(values, value)
 			}
-			value, err := passkey.MetadataFromRecord(item.Passkey)
-			if err != nil {
-				continue
+			if len(values) > 0 {
+				metadata[item.ID] = values
 			}
-			metadata[item.ID] = value
 		}
 		return nil
 	})
@@ -58,6 +63,25 @@ func (s *Session) ReadPasskeyMetadata(touch bool) (map[string]passkey.Metadata, 
 	return metadata, nil
 }
 
+// ReadPasskeyMetadata is the single-credential compatibility projection. It
+// returns only the logins whose metadata is unambiguous, i.e. exactly one
+// durable credential. A login with several credentials is reported as absent
+// rather than as its first record, so callers that only understand one
+// credential per login can never silently act on an arbitrary sibling.
+func (s *Session) ReadPasskeyMetadata(touch bool) (map[string]passkey.Metadata, error) {
+	all, err := s.ReadPasskeysMetadata(touch)
+	if err != nil {
+		return nil, err
+	}
+	metadata := map[string]passkey.Metadata{}
+	for id, values := range all {
+		if len(values) == 1 {
+			metadata[id] = values[0]
+		}
+	}
+	return metadata, nil
+}
+
 // PasskeyRevocationEpoch returns the session-wide passkey revocation sequence.
 // Browser connections capture it when a pending passkey request starts and
 // compare it again before delivering a queued credential response. The epoch is
@@ -69,13 +93,19 @@ func (s *Session) PasskeyRevocationEpoch() uint64 {
 	return s.passkeyEpoch.Load()
 }
 
-// RemovePasskey clears exactly the persisted passkey of one login through the
-// authenticated, exact-revision, gated mutation path. Every other durable item
-// field and the item's active/archived state are preserved. Trashed items are
-// refused. The audit, signed snapshot and encrypted record removal share one
-// transaction.
+// RemovePasskey removes exactly the credential named by credentialID from one
+// login through the authenticated, exact-revision, gated mutation path. Every
+// other durable item field, every sibling credential and the item's
+// active/archived state are preserved. Trashed items are refused. Removing the
+// last credential clears both persisted passkey forms; removing one of several
+// keeps the versioned collection. The audit, signed snapshot and encrypted
+// record removal share one transaction.
 func (s *Session) RemovePasskey(id, revision, credentialID string, g *MutationGate) (string, error) {
-	if !idOK(id) || !digestOK(revision) || !passkey.ValidCredentialID(credentialID) {
+	return s.removePasskey(id, revision, credentialID, "", g)
+}
+
+func (s *Session) removePasskey(id, revision, credentialID, credentialRevision string, g *MutationGate) (string, error) {
+	if !idOK(id) || !digestOK(revision) || !passkey.ValidCredentialID(credentialID) || credentialRevision != "" && !digestOK(credentialRevision) {
 		if g != nil {
 			g.Cancel()
 			s.ReleaseMutation(g)
@@ -125,16 +155,38 @@ func (s *Session) RemovePasskey(id, revision, credentialID string, g *MutationGa
 		if current.Kind != "login" || current.EffectiveCategory() != vault.CategoryLogin {
 			return ErrMutationRefused
 		}
-		if len(current.Passkey) == 0 {
+		records := current.PasskeyRecords()
+		if len(records) == 0 {
 			return ErrMutationRefused
 		}
-		record, err := passkey.Load(current.Passkey)
-		if err != nil {
-			return ErrMutationRefused
+		// Select exactly one credential. Unreadable records are preserved
+		// byte-for-byte instead of being dropped by a selector mismatch.
+		remaining := make([][]byte, 0, len(records))
+		matched := false
+		for _, raw := range records {
+			record, err := passkey.Load(raw)
+			if err != nil {
+				remaining = append(remaining, raw)
+				continue
+			}
+			remove := record.ID == credentialID
+			if remove && credentialRevision != "" {
+				// The child revision is checked against the authenticated record
+				// before the commit gate, while the parent CAS is still mandatory.
+				actual, revisionErr := credentialRevisionFromRecord(auth.identity.AuditEncryption, id, record)
+				if revisionErr != nil || !hmac.Equal([]byte(actual), []byte(credentialRevision)) {
+					record.Clear()
+					return ErrMutationRefused
+				}
+			}
+			record.Clear()
+			if remove {
+				matched = true
+				continue
+			}
+			remaining = append(remaining, raw)
 		}
-		matches := record.ID == credentialID
-		record.Clear()
-		if !matches {
+		if !matched {
 			return ErrMutationRefused
 		}
 		// All selectors, state and the credential identity are now verified.
@@ -148,7 +200,19 @@ func (s *Session) RemovePasskey(id, revision, credentialID string, g *MutationGa
 		s.passkeyEpoch.Add(1)
 		items := append([]vault.Item(nil), auth.items...)
 		next := vault.CloneItem(current)
-		next.Passkey = nil
+		if len(remaining) == 0 {
+			// The last credential is gone: both persisted forms are cleared so
+			// the login cannot keep an empty-but-present passkey slot.
+			next.ClearPasskeys()
+		} else {
+			// Removing one of several keeps the versioned collection, even when
+			// a single sibling remains. SetPasskeyRecords clones before the
+			// borrowed durable bytes below are zeroed.
+			if err := next.SetPasskeyRecords(remaining); err != nil {
+				return ErrMutationRefused
+			}
+		}
+		current.ClearPasskeys()
 		next.UpdatedAt = time.Now().Unix()
 		items[index] = next
 		if vault.ValidateItems([]byte(schema), items) != nil {

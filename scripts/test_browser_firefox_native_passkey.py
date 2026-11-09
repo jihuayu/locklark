@@ -7,6 +7,7 @@ two-realm popup selection that decides where the single physical click lands.
 """
 import ast
 import pathlib
+import re
 import subprocess
 import unittest
 
@@ -313,6 +314,122 @@ async function scenario(hit) {
         self.assertIn("Failure class: ", native)
         self.assertIn("/^PasskeyFailure:[a-z-]+(:[^:]{0,40})?$/", native)
 
+    def test_conditional_sibling_focus_order_around_single_click(self):
+        # The native snapshot raises and focuses the app X window and the XTest
+        # inline click is bare, so the driver must refocus the browser page after
+        # the last snapshot and before exactly one physical selection. Native
+        # factor entry then stops the mock with a sentinel, so no signature has
+        # to be fabricated and no approval is granted here.
+        script = r"""
+const assert = require("node:assert/strict");
+(async () => {
+ const { acceptConditionalSibling } = await import("./browser_conditional_passkey_acceptance.mjs");
+ const origin = "https://login.locklark.test";
+ const first = { id: "first-sibling-public-id" };
+ const second = { id: "second-sibling-id-public" };
+ const events = [];
+ const sentinel = new Error("sentinel:native-factors");
+ const hooks = {
+  origin,
+  fixture: { Password: "synthetic-password", Secret: "synthetic-secret" },
+  first, second,
+  phase: (value) => { events.push({ event: "phase", phase: value }); },
+  navigate: async (url) => { events.push({ event: "navigate", url }); },
+  pageEval: async (fn) => {
+   events.push({ event: "page", fn: fn.name || "capability" });
+   if (fn.name === "readConditional")
+    return { result: null, error: null, metadataExposed: false, lightDOMChoices: 0 };
+   return true;
+  },
+  clickDocument: async (selector) => { events.push({ event: "document-click", selector }); },
+  inlinePresent: async (label) => {
+   events.push({ event: "inline-probe", label });
+   return label !== "Synthetic user · passkey-test";
+  },
+  inlineClick: async (label) => { events.push({ event: "inline-click", label }); },
+  focusPage: async () => { events.push({ event: "browser-focus" }); },
+  eventually: async (check, message) => {
+   for (let attempt = 0; attempt < 20; attempt++) if (await check()) return;
+   throw Error(message);
+  },
+  input: (actions, native = true, options = {}) => {
+   if (options.inspect === true) {
+    events.push({ event: "native-inspect" });
+    return { controls: {} };
+   }
+   if (native === false) {
+    events.push({ event: "browser-focus" });
+    return {};
+   }
+   events.push({ event: "native-factors", actions });
+   throw sentinel;
+  },
+  observe: () => ({ snapshot_digest: "synthetic-digest" }),
+ };
+ let failure = null;
+ try {
+  await acceptConditionalSibling(hooks);
+ } catch (error) {
+  failure = error;
+ }
+ assert.equal(failure, sentinel, "selection did not reach native factor entry");
+ const indexes = (name) => events
+  .map((entry, index) => [entry.event, index])
+  .filter(([event]) => event === name)
+  .map(([, index]) => index);
+ const hint = (id) => id.slice(0, 6) + "…" + id.slice(-4);
+ const clicks = events.filter((entry) => entry.event === "inline-click");
+ assert.equal(clicks.length, 1, "exactly one physical sibling selection");
+ assert.equal(clicks[0].label, "Synthetic user · passkey-test · " + hint(second.id));
+ const click = indexes("inline-click")[0];
+ const inspection = indexes("native-inspect").pop();
+ const focus = indexes("browser-focus").pop();
+ const factors = indexes("native-factors")[0];
+ assert.ok(indexes("native-inspect").length >= 2, "native snapshots preceded selection");
+ assert.ok(inspection < focus, "browser focus must follow the last native snapshot");
+ assert.ok(focus < click, "browser focus must precede the physical selection");
+ assert.ok(click < factors, "native factor entry must follow the physical selection");
+ const between = events.slice(focus + 1, click).map((entry) => entry.event);
+ assert.deepEqual([...new Set(between)], ["inline-probe"],
+  "no native access between refocus and the single click: " + between.join(","));
+ assert.ok(events.slice(0, click).every((entry) => entry.event !== "native-factors"),
+  "no native factor entry before the selection");
+ const actions = events[factors].actions;
+ assert.deepEqual(actions.slice(0, 5), [
+  { wait_label: "验证主密码" }, { click_label: "验证主密码" },
+  { text: "synthetic-password" }, { click_label: "验证 Secret Key" }, { text: "synthetic-secret" },
+ ]);
+ assert.equal(actions.length, 6);
+ assert.match(actions[5].click_label,
+  /^登录：login\.locklark\.test · login\.locklark\.test · passkey-test · passkey-test · 凭据 /);
+ console.log("conditional sibling driver order scenarios passed");
+})().catch((error) => { console.error(error.message); process.exitCode = 1; });
+"""
+        result = node("-e", script)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("conditional sibling driver order scenarios passed", result.stdout)
+
+    def test_failure_diagnostics_stay_on_public_controls(self):
+        text = FIREFOX.read_text(encoding="utf-8")
+        # Debugging must never enumerate processes, their arguments or their
+        # environments; only the existing public native control snapshot stays.
+        for forbidden in ("/proc", "cmdline", "readdirSync", "/environ"):
+            self.assertNotIn(forbidden, text)
+        self.assertNotIn("Native accessibility environment", text)
+        self.assertNotIn("NO_AT_BRIDGE", text)
+        reads = re.findall(r'os\.environ\[[^\]]*\]', text)
+        self.assertEqual(reads, ['os.environ["DISPLAY"]'] * 2)
+        # The public snapshot keeps fixed labels and boolean states only.
+        self.assertIn('"Native control state: "', text)
+        for label in ("验证主密码", "验证 Secret Key", "批准本次填充", "拒绝本次填充"):
+            self.assertIn('"' + label + '"', text)
+        for state in (
+            "present: control?.present === true",
+            "enabled: control?.enabled === true",
+            "showing: control?.showing === true",
+        ):
+            self.assertIn(state, text)
+
     def test_no_privileged_extension_or_cdp_shortcut(self):
         text = PASSKEY.read_text(encoding="utf-8")
         for forbidden in (
@@ -345,10 +462,16 @@ async function scenario(hit) {
             "验证主密码",
             "验证 Secret Key",
             "创建新登录并保存 Passkey",
-            "登录：login.locklark.test · passkey-test · passkey-test",
         ):
             self.assertIn(label, labels, label)
             self.assertIn(label, passkey, label)
+        # Dynamic labels include the public credential ID hint and are matched
+        # by full equality in the driver; the grammar stays narrow.
+        self.assertIn("PASSKEY_CHOICE_LABEL", source)
+        self.assertIn("control_label_allowed", source)
+        self.assertIn("passkeyChoiceLabel", passkey)
+        self.assertIn("凭据 ", (SCRIPTS / "browser_passkey_management_acceptance.mjs").read_text(encoding="utf-8"))
+        self.assertNotIn('"登录：" + rp', passkey)
 
 
 class FirefoxPasskeyVerifier(unittest.TestCase):

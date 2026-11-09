@@ -305,9 +305,11 @@ type authenticatedState struct {
 func (a *authenticatedState) clear() {
 	clear(a.opened)
 	a.identity.clear()
-	for _, item := range a.items {
-		clear(item.SSHSeed)
-		clear(item.Passkey)
+	for n := range a.items {
+		clear(a.items[n].SSHSeed)
+		// Both passkey forms (legacy single record and versioned collection)
+		// must be zeroed here.
+		clearItemPasskeys(&a.items[n])
 	}
 }
 
@@ -321,9 +323,9 @@ func authenticateState(tx *bolt.Tx, pw string, key []byte, action string, unlock
 		if err != nil {
 			clear(opened)
 			i.clear()
-			for _, item := range items {
-				clear(item.SSHSeed)
-				clear(item.Passkey)
+			for n := range items {
+				clear(items[n].SSHSeed)
+				clearItemPasskeys(&items[n])
 			}
 		}
 	}()
@@ -1178,6 +1180,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 				next.SSHSeed = items[idx].SSHSeed
 				next.SSHPublicKey = items[idx].SSHPublicKey
 				next.Passkey = items[idx].Passkey
+				next.Passkeys = items[idx].Passkeys
 				next.Attachments = items[idx].Attachments
 				if next.Filename == "" && next.Attachment == nil {
 					next.Filename, next.Attachment, next.AttachmentProtected = items[idx].Filename, items[idx].Attachment, items[idx].AttachmentProtected

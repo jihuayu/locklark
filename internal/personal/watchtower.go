@@ -75,7 +75,7 @@ func watchtowerItems(items []vault.Item, revisions map[string]string) ([]watchto
 			Password:   it.Password,
 			OTP:        it.OTP,
 			State:      it.State,
-			HasPasskey: len(it.Passkey) > 0,
+			HasPasskey: len(it.PasskeyRecords()) > 0,
 		})
 	}
 	return out, nil

@@ -77,7 +77,7 @@ func stateName(s string) string {
 
 func summaryFor(it vault.Item, rev string, watch *personal.WatchtowerItemFinding) BrowserItemSummary {
 	category := categoryOf(it)
-	summary := BrowserItemSummary{ID: it.ID, Revision: rev, Category: category, VaultID: vaultOf(it), Title: it.Title, State: stateName(it.State), Favorite: it.Favorite, HasOTP: it.OTP != "", HasPasskey: len(it.Passkey) != 0, PrimaryURL: primaryURLOf(it), UpdatedAt: it.UpdatedAt}
+	summary := BrowserItemSummary{ID: it.ID, Revision: rev, Category: category, VaultID: vaultOf(it), Title: it.Title, State: stateName(it.State), Favorite: it.Favorite, HasOTP: it.OTP != "", HasPasskey: len(it.PasskeyRecords()) != 0, PrimaryURL: primaryURLOf(it), UpdatedAt: it.UpdatedAt}
 	summary.Tags = append([]string(nil), it.Tags...)
 	switch category {
 	case "credit_card":
@@ -146,7 +146,7 @@ func (c *Connection) handleSearch(r Request) error {
 	if e != nil {
 		return c.refuse(r.ID)
 	}
-	passkeys, err := s.ReadPasskeyMetadata(false)
+	passkeys, err := s.ReadManagedPasskeysMetadata(false)
 	if err != nil {
 		return c.refuse(r.ID)
 	}
@@ -224,7 +224,9 @@ func (c *Connection) handleSearch(r Request) error {
 			subtitle := strings.ToLower(it.Username)
 			matched := strings.Contains(title, query) || strings.Contains(subtitle, query)
 			if !matched && r.PasskeysOnly != nil && *r.PasskeysOnly {
-				matched = passkeyMetadataMatches(passkeyMetadata, query)
+				// Every credential's public RP/account metadata is considered;
+				// a multi-credential login is never judged by its first record.
+				matched = passkeysMetadataMatch(passkeyMetadata, query)
 			}
 			if !matched {
 				continue
@@ -232,8 +234,11 @@ func (c *Connection) handleSearch(r Request) error {
 		}
 		vaultSet[vaultOf(it)] = true
 		summary := summaryFor(it, rev, watchByID[it.ID])
-		if hasPasskey {
-			summary.Passkey = browserPasskey(passkeyMetadata)
+		// A list frame carries only the count plus the unambiguous legacy
+		// single-credential projection; full arrays belong to one detail frame.
+		summary.PasskeyCount = len(passkeyMetadata)
+		if len(passkeyMetadata) == 1 {
+			summary.Passkey = browserPasskey(passkeyMetadata[0])
 		}
 		out = append(out, summary)
 	}
@@ -272,7 +277,7 @@ func (c *Connection) handleItemGet(r Request) error {
 	if e != nil {
 		return c.refuse(r.ID)
 	}
-	passkeys, e := s.ReadPasskeyMetadata(false)
+	passkeys, e := s.ReadManagedPasskeysMetadata(false)
 	if e != nil {
 		return c.refuse(r.ID)
 	}
@@ -285,9 +290,19 @@ func (c *Connection) handleItemGet(r Request) error {
 		return c.refuse(r.ID)
 	}
 	category := categoryOf(it)
-	detail := &BrowserItemDetail{ID: it.ID, Revision: rev, Category: category, VaultID: vaultOf(it), Title: it.Title, Username: it.Username, HasPassword: it.Password != "" && (category == "login" || category == "password"), HasOTP: it.OTP != "", HasNotes: it.Notes != "", HasPasskey: len(it.Passkey) != 0, URL: it.URL, State: stateName(it.State), Favorite: it.Favorite, AutoSubmit: it.AutoSubmit, CreatedAt: it.CreatedAt, UpdatedAt: it.UpdatedAt}
-	if metadata, ok := passkeys[it.ID]; ok {
-		detail.Passkey = browserPasskey(metadata)
+	detail := &BrowserItemDetail{ID: it.ID, Revision: rev, Category: category, VaultID: vaultOf(it), Title: it.Title, Username: it.Username, HasPassword: it.Password != "" && (category == "login" || category == "password"), HasOTP: it.OTP != "", HasNotes: it.Notes != "", HasPasskey: len(it.PasskeyRecords()) != 0, URL: it.URL, State: stateName(it.State), Favorite: it.Favorite, AutoSubmit: it.AutoSubmit, CreatedAt: it.CreatedAt, UpdatedAt: it.UpdatedAt}
+	if metadata := passkeys[it.ID]; len(metadata) > 0 {
+		// A detail frame is the only place per-credential arrays appear, and it
+		// stays bounded. The legacy field remains single-credential only.
+		for _, value := range metadata {
+			if len(detail.Passkeys) == MaxBrowserPasskeys {
+				break
+			}
+			detail.Passkeys = append(detail.Passkeys, *browserPasskey(value))
+		}
+		if len(metadata) == 1 {
+			detail.Passkey = browserPasskey(metadata[0])
+		}
 	}
 	detail.Tags = append([]string(nil), it.Tags...)
 	for _, u := range it.URLs {

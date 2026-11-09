@@ -927,6 +927,8 @@
     editorConflict = "",
     vaultQueryGeneration = 0,
     passkeyDetailGeneration = 0,
+    passkeySelection = "",
+    passkeySelectionKey = "",
     detailReadOperation = 0,
     passkeyRemoveGeneration = 0,
     passkeyConfirm = null,
@@ -1090,6 +1092,7 @@
         fieldLabels(item.fields), fieldLabels(item.custom_fields),
         Array.isArray(item.sections) ? item.sections.slice(0, 20).map(section =>
           section && [section.id, section.title, fieldLabels(section.fields)]) : [],
+        Number.isInteger(item.passkey_count) ? item.passkey_count : null,
         core?.validPasskeyMetadata?.(item.passkey) ? [
           item.passkey.credential_id, item.passkey.rp_id,
           item.passkey.user_name, item.passkey.display_name] : null])]);
@@ -1112,16 +1115,27 @@
       const passkey = core?.validPasskeyMetadata?.(item.passkey)
         ? item.passkey
         : null;
+      const passkeyCount = Number.isInteger(item.passkey_count)
+        ? Math.max(0, item.passkey_count)
+        : passkey
+          ? 1
+          : 0;
       const subtitle = document.createElement("span");
       subtitle.className = "vault-item-subtitle";
       subtitle.textContent = passkey
         ? passkey.user_name + " · " + passkey.rp_id
-        : item.subtitle || item.username || "";
+        : passkeyCount > 0
+          ? passkeyCount + " 个 Passkey"
+          : item.subtitle || item.username || "";
       const badge = document.createElement("span");
       badge.className = "badge";
-      badge.textContent = passkey
-        ? "Passkey · " + categoryLabel(item.category)
-        : categoryLabel(item.category);
+      badge.textContent =
+        passkeyCount > 0
+          ? "Passkey" +
+            (passkeyCount > 1 ? " ×" + passkeyCount : "") +
+            " · " +
+            categoryLabel(item.category)
+          : categoryLabel(item.category);
       row.append(title, subtitle, badge);
       if (item.favorite === true) {
         const star = document.createElement("span");
@@ -1326,18 +1340,95 @@
       });
     return fields;
   }
+  function passkeyEntriesFrom(detail) {
+    if (!detail || typeof detail !== "object") return [];
+    // A present array is authoritative and fails closed: a malformed,
+    // duplicated, oversized or partially unreadable list is never silently
+    // filtered, and the legacy singleton must never mask it.
+    if (detail.passkeys !== undefined) {
+      if (!core?.validPasskeyMetadataList?.(detail.passkeys)) return [];
+      return detail.passkeys.map((entry) => ({
+        credential_id: entry.credential_id,
+        rp_id: entry.rp_id,
+        user_name: entry.user_name,
+        display_name: entry.display_name,
+        credential_revision: entry.credential_revision,
+        legacy: false,
+      }));
+    }
+    if (!core?.validPasskeyMetadata?.(detail.passkey)) return [];
+    return [
+      {
+        credential_id: detail.passkey.credential_id,
+        rp_id: detail.passkey.rp_id,
+        user_name: detail.passkey.user_name,
+        display_name: detail.passkey.display_name,
+        credential_revision: core.validCredentialRevision?.(
+          detail.passkey.credential_revision,
+        )
+          ? detail.passkey.credential_revision
+          : "",
+        legacy: true,
+      },
+    ];
+  }
+  function passkeyShortHint(credentialId) {
+    return typeof credentialId === "string" && credentialId.length >= 12
+      ? credentialId.slice(0, 6) + "…" + credentialId.slice(-6)
+      : "";
+  }
+  function detailHasPasskey(detail) {
+    return (
+      passkeyEntriesFrom(detail).length > 0 ||
+      detail?.has_passkey === true ||
+      (Number.isInteger(detail?.passkey_count) && detail.passkey_count > 0)
+    );
+  }
+  function selectedPasskeyEntry(detail, entries) {
+    const list = entries || passkeyEntriesFrom(detail);
+    if (!list.length) return null;
+    // A single credential keeps the old direct-delete behavior. Two or more
+    // require an explicit choice: there is deliberately no automatic first.
+    if (list.length === 1) return list[0];
+    return list.find((entry) => entry.credential_id === passkeySelection) || null;
+  }
+  function passkeyEntriesKey(detail, entries) {
+    return [
+      detail?.id || "",
+      detail?.revision || "",
+      String(passkeyDetailGeneration),
+      entries
+        .map((entry) => entry.credential_id + ":" + entry.credential_revision)
+        .join(","),
+    ].join("|");
+  }
+  function syncPasskeySelection(detail, entries) {
+    const key = passkeyEntriesKey(detail, entries);
+    if (key === passkeySelectionKey) return false;
+    passkeySelectionKey = key;
+    // Detail identity, parent revision, child revisions and the popup detail
+    // generation all invalidate the prior choice, confirmation and outcome.
+    passkeySelection = "";
+    cancelPasskeyRemoval();
+    return true;
+  }
   function passkeyTargetFrom(detail) {
-    const passkey = detail?.passkey;
-    if (!detail || !core?.validPasskeyMetadata?.(passkey)) return null;
+    const entries = passkeyEntriesFrom(detail);
+    if (!entries.length) return null;
     if (
-      !/^[a-f0-9]{32}$/.test(detail.id || "") ||
-      !/^[a-f0-9]{64}$/.test(detail.revision || "")
+      !/^[a-f0-9]{32}$/.test(detail?.id || "") ||
+      !/^[a-f0-9]{64}$/.test(detail?.revision || "")
     )
+      return null;
+    const entry = selectedPasskeyEntry(detail, entries);
+    if (!entry) return null;
+    if (!entry.legacy && !core?.validCredentialRevision?.(entry.credential_revision))
       return null;
     return {
       itemId: detail.id,
       revision: detail.revision,
-      credentialId: passkey.credential_id,
+      credentialId: entry.credential_id,
+      credentialRevision: entry.credential_revision,
       detailGeneration: passkeyDetailGeneration,
     };
   }
@@ -1347,8 +1438,19 @@
       !!b &&
       a.itemId === b.itemId &&
       a.revision === b.revision &&
-      a.credentialId === b.credentialId
+      a.credentialId === b.credentialId &&
+      (a.credentialRevision || "") === (b.credentialRevision || "")
     );
+  }
+  function selectPasskeyCredential(value) {
+    const next = typeof value === "string" ? value : "";
+    if (next === passkeySelection) return;
+    passkeySelection = next;
+    passkeyRemoveGeneration++;
+    passkeyConfirm = null;
+    passkeyUncertain = null;
+    passkeyStatusText = "";
+    renderPasskeyDetail(lastDetail);
   }
   function cancelPasskeyRemoval(options = {}) {
     passkeyRemoveGeneration++;
@@ -1364,25 +1466,54 @@
   }
   function renderPasskeyDetail(detail) {
     if (!els?.passkeyDetail) return;
-    const passkey = core?.validPasskeyMetadata?.(detail?.passkey)
-      ? {
-          credential_id: detail.passkey.credential_id,
-          rp_id: detail.passkey.rp_id,
-          user_name: detail.passkey.user_name,
-          display_name: detail.passkey.display_name,
-        }
-      : null;
-    const shouldShow = !!passkey || detail?.has_passkey === true;
+    const entries = passkeyEntriesFrom(detail);
+    syncPasskeySelection(detail, entries);
+    const supported = lastState?.passkeyManagementSupported === true;
+    const shouldShow = detailHasPasskey(detail);
     els.passkeyDetail.hidden = !shouldShow;
     if (!shouldShow) {
       if (passkeyConfirm) cancelPasskeyRemoval({ keepStatus: true });
-      for (const key of ["passkeyRp", "passkeyUsername", "passkeyDisplayName"])
+      for (const key of [
+        "passkeyRp",
+        "passkeyUsername",
+        "passkeyDisplayName",
+        "passkeyCredentialHint",
+      ])
         if (els[key]) els[key].textContent = "";
+      if (els.passkeySelectRow) els.passkeySelectRow.hidden = true;
+      if (els.passkeySelect) {
+        els.passkeySelect.replaceChildren();
+        els.passkeySelect.value = "";
+      }
       if (els.passkeyDetailUnsupported) els.passkeyDetailUnsupported.hidden = true;
       return;
     }
+    const selected = selectedPasskeyEntry(detail, entries);
+    const multi = entries.length >= 2;
+    if (els.passkeySelectRow) els.passkeySelectRow.hidden = !multi;
+    if (els.passkeySelect) {
+      if (multi) {
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        placeholder.textContent = "请选择要管理的 Passkey";
+        const options = entries.map((entry) => {
+          const option = document.createElement("option");
+          option.value = entry.credential_id;
+          option.textContent = [
+            entry.user_name || "（无账号）",
+            entry.rp_id,
+            passkeyShortHint(entry.credential_id),
+          ].join(" · ");
+          return option;
+        });
+        els.passkeySelect.replaceChildren(placeholder, ...options);
+        els.passkeySelect.value = selected ? selected.credential_id : "";
+      } else {
+        els.passkeySelect.replaceChildren();
+        els.passkeySelect.value = "";
+      }
+    }
     const target = passkeyTargetFrom(detail);
-    const supported = lastState?.passkeyManagementSupported === true;
     if (
       passkeyConfirm &&
       (!target || !samePasskeyTarget(passkeyConfirm, target) || !supported)
@@ -1393,23 +1524,28 @@
       !!passkeyUncertain &&
       samePasskeyTarget(passkeyUncertain, target) &&
       passkeyUncertain.detailGeneration === passkeyDetailGeneration;
-    if (els.passkeyRp) els.passkeyRp.textContent = passkey?.rp_id || "-";
+    if (els.passkeyRp) els.passkeyRp.textContent = selected?.rp_id || "-";
     if (els.passkeyUsername)
-      els.passkeyUsername.textContent = passkey?.user_name || "-";
+      els.passkeyUsername.textContent = selected?.user_name || "-";
     if (els.passkeyDisplayName)
-      els.passkeyDisplayName.textContent = passkey?.display_name || "-";
+      els.passkeyDisplayName.textContent = selected?.display_name || "-";
+    if (els.passkeyCredentialHint)
+      els.passkeyCredentialHint.textContent = selected
+        ? passkeyShortHint(selected.credential_id)
+        : "";
     if (els.passkeyDetailUnsupported) {
-      els.passkeyDetailUnsupported.hidden = supported && !!passkey;
-      els.passkeyDetailUnsupported.textContent = !supported
+      const notice = !supported
         ? "当前原生宿主不支持 Passkey 管理，请升级原生宿主后再试。"
-        : !passkey
+        : !entries.length
           ? "当前原生宿主未提供可安全显示的 Passkey 元数据，请刷新或升级原生宿主。"
           : "";
+      els.passkeyDetailUnsupported.hidden = !notice;
+      els.passkeyDetailUnsupported.textContent = notice;
     }
     const confirming = !!passkeyConfirm;
     if (els.passkeyRemove) {
       els.passkeyRemove.hidden =
-        !passkey || !supported || confirming || uncertain;
+        !target || !supported || confirming || uncertain;
       els.passkeyRemove.disabled =
         passkeyRemoving || uncertain || detail.readOnly === true;
     }
@@ -1423,7 +1559,12 @@
   }
   function requestPasskeyRemovalConfirmation() {
     const target = passkeyTargetFrom(lastDetail);
-    if (!target) return;
+    if (!target) {
+      if (passkeyEntriesFrom(lastDetail).length >= 2)
+        passkeyStatusText = "请先选择要删除的 Passkey";
+      renderPasskeyDetail(lastDetail);
+      return;
+    }
     if (
       passkeyUncertain &&
       samePasskeyTarget(passkeyUncertain, target) &&
@@ -1480,6 +1621,9 @@
         id: captured.itemId,
         revision: captured.revision,
         credential_id: captured.credentialId,
+        ...(captured.credentialRevision
+          ? { credential_revision: captured.credentialRevision }
+          : {}),
       });
     } catch {}
     if (operation !== passkeyRemoveGeneration) return;
@@ -1507,7 +1651,9 @@
     if (
       removed.item_id !== captured.itemId ||
       removed.credential_id !== captured.credentialId ||
-      !/^[a-f0-9]{64}$/.test(removed.revision || "")
+      !/^[a-f0-9]{64}$/.test(removed.revision || "") ||
+      (removed.credential_revision !== undefined &&
+        removed.credential_revision !== captured.credentialRevision)
     ) {
       passkeyUncertain = {
         ...captured,
@@ -1522,15 +1668,62 @@
     lastState = { ...lastState, ...reply };
     vaultItems = [];
     vaultLoaded = false;
+    // Remove exactly the selected credential from the local projection. A
+    // sibling credential keeps the item's passkey flag and metadata alive.
+    let remaining = 0;
     if (lastDetail?.id === captured.itemId) {
-      const { passkey, ...rest } = lastDetail;
-      lastDetail = { ...rest, revision: removed.revision, has_passkey: false };
+      const kept = passkeyEntriesFrom(lastDetail).filter(
+        (entry) => entry.credential_id !== captured.credentialId,
+      );
+      remaining = kept.length;
+      if (Array.isArray(lastDetail.passkeys)) {
+        lastDetail = {
+          ...lastDetail,
+          revision: removed.revision,
+          passkey_count: kept.length,
+          has_passkey: kept.length > 0,
+        };
+        delete lastDetail.passkeys;
+        delete lastDetail.passkey;
+        if (kept.length) {
+          lastDetail.passkeys = kept.map((entry) => ({
+            credential_id: entry.credential_id,
+            rp_id: entry.rp_id,
+            user_name: entry.user_name,
+            display_name: entry.display_name,
+            credential_revision: entry.credential_revision,
+          }));
+        }
+        if (kept.length === 1)
+          lastDetail.passkey = {
+            credential_id: kept[0].credential_id,
+            rp_id: kept[0].rp_id,
+            user_name: kept[0].user_name,
+            display_name: kept[0].display_name,
+            credential_revision: kept[0].credential_revision,
+          };
+      } else {
+        const { passkey, ...rest } = lastDetail;
+        lastDetail = {
+          ...rest,
+          revision: removed.revision,
+          has_passkey: false,
+          passkey_count: 0,
+        };
+      }
     }
     passkeyDetailGeneration++;
-    passkeyStatusText = "Passkey 已删除；此登录和其他信息仍保留";
     renderPasskeyDetail(lastDetail);
+    // The key-change reset above bumps the removal generation on purpose; the
+    // freshly settled local projection is the new baseline for this operation.
+    const settledOperation = passkeyRemoveGeneration;
+    passkeyStatusText =
+      remaining > 0
+        ? "Passkey 已删除；其他 Passkey 和登录信息仍保留"
+        : "Passkey 已删除；此登录和其他信息仍保留";
+    if (els?.passkeyStatus) els.passkeyStatus.textContent = passkeyStatusText;
     await refreshVault(true);
-    if (operation !== passkeyRemoveGeneration) return;
+    if (settledOperation !== passkeyRemoveGeneration) return;
     try {
       const refreshed = await api.runtime.sendMessage({
         type: "item-get",
@@ -1538,15 +1731,19 @@
         revision: removed.revision,
       });
       if (
-        operation !== passkeyRemoveGeneration ||
+        settledOperation !== passkeyRemoveGeneration ||
         document.body?.dataset?.view !== "detail"
       )
         return;
       if (refreshed?.detail) {
         lastState = { ...lastState, ...refreshed };
         lastDetail = refreshed.detail;
-        passkeyStatusText = "Passkey 已删除；此登录和其他信息仍保留";
         renderDetail(lastDetail);
+        passkeyStatusText = detailHasPasskey(lastDetail)
+          ? "Passkey 已删除；其他 Passkey 和登录信息仍保留"
+          : "Passkey 已删除；此登录和其他信息仍保留";
+        if (els?.passkeyStatus)
+          els.passkeyStatus.textContent = passkeyStatusText;
       }
     } catch {}
   }
@@ -2785,9 +2982,12 @@
       passkeyUnsupported: q("#vault-passkey-unsupported"),
       passkeyDetail: q("#passkey-detail"),
       passkeyDetailUnsupported: q("#passkey-detail-unsupported"),
+      passkeySelectRow: q("#passkey-select-row"),
+      passkeySelect: q("#passkey-select"),
       passkeyRp: q("#passkey-rp"),
       passkeyUsername: q("#passkey-username"),
       passkeyDisplayName: q("#passkey-display-name"),
+      passkeyCredentialHint: q("#passkey-credential-hint"),
       passkeyRemove: q("#passkey-remove"),
       passkeyRemoveConfirm: q("#passkey-remove-confirm"),
       passkeyRemoveCancel: q("#passkey-remove-cancel"),
@@ -2987,6 +3187,9 @@
         void openAndFill(lastDetail, lastDetail.urls[0]);
     });
     els.detailTrash.addEventListener("click", () => void detailTrash());
+    els.passkeySelect?.addEventListener("change", (event) =>
+      selectPasskeyCredential(event?.target?.value),
+    );
     els.passkeyRemove.addEventListener("click", () =>
       requestPasskeyRemovalConfirmation(),
     );
