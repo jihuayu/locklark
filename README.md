@@ -356,7 +356,7 @@ go test -count=1 ./internal/vault -run 'TestKDBXIndependentPeer|TestIndependentN
 
 ### 原生桌面（开发版）
 
-使用 Go 1.27.3 运行 `go run ./cmd/locklark-desktop`。界面由 MyGo 原生 UI 渲染，支持创建/解锁个人金库、标题搜索、逐字段显示/复制、编辑、归档/回收站、审计、体检和现有基本登录导入/加密导出。首次使用主密码与 Secret Key；解锁后在安全设置主动启用系统快捷解锁。Windows 使用 Passport KSP 的 Hello 私钥操作；macOS 构建需开启 CGO，使用本设备钥匙串及用户验证；Linux 使用 Secret Service。系统服务不可用时回到完整解锁，没有明文文件替代存储。
+使用 Go 1.27.3 运行 `go run ./cmd/locklark-desktop` 可启动开发版。界面由 MyGo 原生 UI 渲染，当前为三栏 Onevra 布局（[桌面 UI 规范](docs/desktop-onevra-ui.md)），支持创建/解锁个人金库、标题搜索、逐字段显示/复制、编辑、归档/回收站、审计、体检和现有基本登录导入/加密导出。首次使用主密码与 Secret Key；解锁后在安全设置主动启用系统快捷解锁。Windows 使用 Passport KSP 的 Hello 私钥操作；Linux 使用 Secret Service。**macOS 的 Touch ID / 系统快捷解锁必须使用签名后的 `.app`**：`go run` / `go build` 产物是 ad-hoc 裸二进制，没有 `keychain-access-groups`，带 `SecAccessControl` 的钥匙串写入会返回 `-34018`，只能完整解锁。用 `mygo.config.ts` + `scripts/macos_release.sh` 生成 Developer ID 签名的 `.app`，步骤与安全边界见 [macOS 签名与 Touch ID](macos/README.md)。系统服务不可用时回到完整解锁，没有明文文件替代存储。
 
 可用窗口或托盘中的“快捷搜索”，也可用 `Ctrl+Shift+L`（macOS 为 `⌘⇧L`）唤起。输入标题后按 Enter 查询活动登录，用 Tab 和 Enter 选定条目，再明确显示或复制字段。Escape 关闭搜索并保留原编辑草稿；锁定时只显示解锁界面，忙操作期间只唤起窗口。系统可能需要允许全局快捷键，窗口按钮始终可用。使用与验证范围见 [快捷搜索验收](docs/desktop-quick-search-validation.md)。
 
@@ -366,7 +366,7 @@ go test -count=1 ./internal/vault -run 'TestKDBXIndependentPeer|TestIndependentN
 
 登录详情可按次“显示备注”“复制备注”或“编辑备注”。多行编辑器会先记录读取意图再填入原文，保存绑定当前条目的修订号；取消不改内容，锁库或切换目标会清除草稿。备注按纯文本加密保存，最长 64 KiB；浏览器填充和 Next.js 管理不会收到正文。1PUX 备注迁入及 KDBX 迁出保留换行和空格；导入来源记录仍可能保留编辑前的旧备注。范围与验证见[登录备注验收](docs/login-notes-validation.md)。
 
-系统快捷解锁默认 24 小时后要求完整解锁；这是本地系统时间策略，不能抵抗系统时钟回拨。开启快捷解锁会将金库身份材料交给对应 OS 的保护机制；不保存主密码或 Secret Key。Linux 系统钥匙串可能不逐次弹验证，且同一系统用户的其他程序可能有读取权限。屏幕锁定/睡眠通知能否到达取决于平台会话服务。Windows Hello/TPM、macOS Touch ID 的设备行为尚需真机验收，当前不能作为生产替换承诺。详见 [桌面验收](docs/desktop-validation.md)。
+系统快捷解锁默认 24 小时后要求完整解锁；这是本地系统时间策略，不能抵抗系统时钟回拨。开启快捷解锁会将金库身份材料交给对应 OS 的保护机制；不保存主密码或 Secret Key。Linux 系统钥匙串可能不逐次弹验证，且同一系统用户的其他程序可能有读取权限。屏幕锁定/睡眠通知能否到达取决于平台会话服务。已在 macOS 27 arm64 实测：未签名的开发构建在钥匙串 ACL 路径返回 `-34018`，UI 会明确提示需要签名 `.app`，不再误报“金库已锁定”；Developer ID 签名后的 Touch ID 验收仍需 Apple Developer 身份。macOS 的 `kSecAccessControlUserPresence` 接受 Touch ID **或 Mac 登录密码**，不是纯生物识别，取舍见 [macOS 文档](macos/README.md)。Windows Hello/TPM、Linux Secret Service 的真实硬件行为仍需真机验收，当前不能作为生产替换承诺。详见 [桌面验收](docs/desktop-validation.md)。
 
 ### 浏览器登录（开发版）
 
