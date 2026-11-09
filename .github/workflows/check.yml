@@ -219,16 +219,24 @@ jobs:
         timeout-minutes: 10
         run: node --test browser-extension/test/*.test.js
       - name: Prepare reproducible unsigned extension packages
-        timeout-minutes: 2
+        timeout-minutes: 5
         run: |
+          python3 -m pip install -r scripts/browserrelease/requirements.txt
+          PYTHONPATH=scripts python3 -m unittest discover -s scripts/browserrelease/tests -t scripts
           python3 scripts/test_package_browser_extension.py
           python3 scripts/package_browser_extension.py --product chromium --output "$RUNNER_TEMP/locklark-extension-unsigned"
           python3 scripts/package_browser_extension.py --product firefox --output "$RUNNER_TEMP/locklark-extension-unsigned"
+          for product in chromium firefox safari; do
+            PYTHONPATH=scripts python3 -m browserrelease --product "$product" --output "$RUNNER_TEMP/locklark-extension-verified"
+            PYTHONPATH=scripts python3 -m browserrelease --verify --product "$product" --output "$RUNNER_TEMP/locklark-extension-verified"
+          done
       - name: Preserve unsigned extension preparation artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: locklark-extension-unsigned-preparation
-          path: ${{ runner.temp }}/locklark-extension-unsigned/
+          path: |
+            ${{ runner.temp }}/locklark-extension-unsigned/
+            ${{ runner.temp }}/locklark-extension-verified/
           if-no-files-found: error
           retention-days: 14
       - name: Test native acceptance readiness and reference cleanup

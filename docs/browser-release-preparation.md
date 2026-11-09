@@ -17,6 +17,14 @@ No support URL, privacy-policy URL, homepage URL, store listing text, or license
 choice is created or implied by this preparation. Those are release-owner
 decisions and must not be invented in the manifest or a store form.
 
+Two preparation tools exist. `scripts/package_browser_extension.py` is the
+original chromium/firefox packager (eleven-file allowlist, unchanged and
+still tested). `scripts/browserrelease` is the current helper: it reads the
+single central version, also packages Safari, records the source commit and
+provides a no-extract ZIP verifier. The sections below describing the
+original tool remain accurate for it; the “central version”, “current
+helper”, “validation” and “still not done” sections describe the newer work.
+
 ## Prepared artifact
 
 Run the packager with an explicit output directory. The parent directory must
@@ -67,9 +75,14 @@ locklark-browser-extension-firefox-unsigned.receipt.json
 Both products may use the same output directory. Re-running into a directory is
 allowed only when every existing file is a complete, receipt-verified Locklark
 preparation artifact. Any unrelated file, partial pair, unreadable receipt, or
-hash mismatch refuses the run. A ZIP and its receipt are written atomically
-through a same-directory temporary file plus `os.replace`, with fsync before
-publication; the receipt is published last.
+hash mismatch refuses the run. Note that this original tool replaces each file
+separately through a same-directory temporary file plus `os.replace` with fsync
+before publication, and publishes the receipt last: each *file* replacement is
+atomic, but the ZIP/receipt *pair* is not. A crash between the two writes can
+leave an orphan ZIP, which this tool then refuses on the next run; recovery is
+owner-initiated (remove the orphan deliberately). The newer helper in
+`scripts/browserrelease` instead never replaces an existing name and can
+safely complete a byte-identical orphan.
 
 ## Reproducibility and receipt
 
@@ -308,3 +321,184 @@ The following are explicitly pending and must not be reported as passed:
 
 This worktree only prepared and inspected unsigned ZIPs and their public
 receipts.
+
+## Central version metadata
+
+`browser-extension/release-version.json` is now the only place the extension
+version is written:
+
+```json
+{
+  "version": "0.1.0"
+}
+```
+
+Rules enforced by `browser-extension/build.js` and by
+`scripts/browserrelease/version.py`:
+
+- exactly one member, `version`; any other member is a hard failure;
+- a string of 1–4 dot-separated decimal components;
+- no leading zeros (`01.0`), no empty components, no sign, whitespace or
+  pre-release suffix;
+- every component ≤ 65535 (uint16), matching Chrome/Edge/Firefox/Safari store
+  parsers.
+
+The value is consumed unchanged: nothing bumps it automatically, this
+preparation chooses no release number, and the value stays `0.1.0`. All three
+build modes (`chromium`, `firefox`, `safari`) read the same file and throw
+before writing output if it is missing, invalid, or has unknown members. A
+manifest version that drifts from the central document (for example a
+hardcoded literal) is refused by the packager. The manifest `name`,
+permissions, Chromium `key`/ID, Firefox Gecko ID, Safari bundle identity,
+content-script worlds and CSP are unchanged.
+
+## Current prepare/verify helper
+
+The newer helper lives in `scripts/browserrelease`. Its allowlist is derived
+from the real build output per product, and Safari additionally ships the
+native-port shim:
+
+```text
+chromium / firefox (11 entries)
+  manifest.json
+  core.js content.js webauthn.js background.js
+  popup.html popup.css popup.js
+  options.html options.css options.js
+
+safari (12 entries)
+  the same names plus safari-native-port.js
+```
+
+```sh
+mkdir -p /absolute/release-parent
+PYTHONPATH=scripts python3 -m browserrelease --product chromium \
+  --output /absolute/release-parent
+PYTHONPATH=scripts python3 -m browserrelease --product safari \
+  --output /absolute/release-parent
+PYTHONPATH=scripts python3 -m browserrelease --product chromium \
+  --output /absolute/release-parent --verify
+```
+
+`prepare` refuses a dirty source tree. `git status --porcelain
+--untracked-files=all` must be empty for the whole repository (ignored build
+output such as `browser-extension/dist` is not a source input) both before the
+build and again when the commit is pinned; only a fixed refusal is printed, and
+the status output or file contents are never shown. The receipt therefore says
+“this exact 40-hex commit produced these bytes”, which is only true while the
+tree is committed — an uncommitted preparation is refused rather than labelled
+with a commit that does not contain it.
+
+`prepare` then runs `node build.js <product>` with an argv list, `shell=False`,
+no stdin, and a minimal environment (PATH/LC_ALL only; no profile, vault, home
+or credential input), then reads only the allowlisted output. The archive is
+`ZIP_STORED` with fixed `1980-01-01T00:00:00Z` entry timestamps, `0644`
+regular-file entries and a fixed entry order. Budgets: ≤ 64 MiB per ZIP and
+uncompressed total, < 64 entries, ≤ 16 MiB per raw file, so a valid ~17 MiB
+archive of several ≤ 16 MiB files is still accepted. Symlinks, hidden files,
+source maps, tests, temp files, remote assets and extra build output are
+refused. `browser-extension/dist` and `dist/<product>` are checked as real
+directories before the build and re-checked by realpath afterwards, and
+`build.js` itself refuses a symlinked `dist`/output directory, so a symlinked
+build path cannot copy product files elsewhere (the product formats for
+chromium, firefox and safari are unchanged).
+
+A *committed* symlink is the harder case: `git status` stays clean because the
+link itself is the committed content. Therefore every build input - the product
+files, `release-version.json` and `build.js` itself - is refused unless it is a
+committed regular blob with git mode `100644`/`100755` (never `120000`), and
+`build.js` independently requires an ordinary non-symlink file whose realpath
+stays inside the extension source tree. It reads through a descriptor opened
+with `O_NOFOLLOW`, then compares the opened device/inode with the checked one,
+so a file cannot be swapped between the check and the copy. The direct
+`node build.js <product>` path enforces the same rule, not only the Python
+helper.
+
+Publication is per-name and never replaces an existing name: each payload goes
+to a same-directory `0600` temporary file, is fsynced, then linked into place
+with `os.link` (which fails if the name exists), the directory is fsynced, and
+the receipt is linked last. **This is not pair-atomic** — a crash between the
+two links can leave the ZIP without its receipt. Recovery is explicit, never
+automatic deletion or replacement:
+
+- complete pair: re-verified against its receipt; identical bytes make the run
+  reuse it, and any difference (unrelated, tampered, symlinked, different
+  version) is a fixed refusal;
+- ZIP without receipt (crash orphan): completed by publishing only the missing
+  receipt, and only when the existing file is a regular non-symlink whose bytes
+  equal the current preparation exactly; a mismatched orphan is left untouched
+  and refused, so owner recovery is required;
+- receipt without ZIP: refused, because writing a ZIP next to an owner-visible
+  receipt would be indistinguishable from replacing one;
+- every other known product pair already in the output directory is verified
+  (and a partial or corrupt one refused) before the target product is built.
+
+The receipt (`locklark-browser-extension-unsigned-receipt/v2`) records the
+canonical version, product, browser identity, 40-hex source commit, artifact
+and per-entry sizes/SHA256, and the build-script plus version-metadata hashes.
+It contains no absolute path, host name, user name, wall-clock time or
+environment value. It is public metadata, **not** a signature.
+
+`--verify` never extracts: it re-opens the ZIP in memory and rejects absolute
+paths, backslashes, `..`, directories, duplicates, symlink or non-`0644`
+entries, non-stored compression, data descriptors, unexpected comments,
+zip-bomb ratios and size overruns. Raw NUL bytes in either the central or the
+local entry name are refused: Python truncates a NUL-terminated central name,
+so the original name is compared against the stored one and the local records
+are walked byte by byte. The raw layout must be strict and deterministic: the
+local headers are contiguous from byte 0 and end exactly at the EOCD central-
+directory offset, the central records are contiguous and end exactly at the
+EOCD, and the EOCD is the final 22 bytes with no comment or trailer. Each local
+header must also match its central record exactly (flags, method, date, time,
+CRC and both sizes) and carry no local extra field or data descriptor. Bytes
+hidden in a prefix, an interstitial gap, a duplicate local entry, a local
+extra field or a trailer are refused, never stripped or normalized. It then
+compares every file size and digest with the receipt and re-applies the fixed
+manifest policy (no SSO/`clipboardRead`/`externally_connectable`/host/
+permission/identity changes).
+
+## Validation executed for this preparation
+
+```sh
+PYTHONPATH=scripts python3 -m unittest discover -s scripts/browserrelease/tests -t scripts
+python3 scripts/test_package_browser_extension.py
+python3 scripts/test_safari_package.py
+```
+
+Observed results: 76 tests, 8 tests and 15 tests respectively, all passing. The
+new tests build real output in private temporary trees that contain their own
+committed throwaway history and are deleted afterwards. They cover deterministic
+bytes across output directories, the central version flowing into all three
+modes, invalid/unknown-member version refusals, hardcoded-version drift,
+permission/identity/`externally_connectable` refusals, dirty and untracked
+source refusals, unsafe output paths, symlinked/extra/directory build output, a
+symlinked `dist` with an outside canary, ZIP tamper, extra entry, traversal,
+duplicate, symlink entry, raw central/local NUL names, oversize and comment
+entries, a valid ~17 MiB archive, a committed symlink in a product file or the
+version document (refused by the Python pin, the direct `build.js`, and the
+receipt path with the synthetic outside canary unchanged), interstitial gap,
+prefix, hidden duplicate local entry, a local extra field with an updated
+receipt, local/central header mismatch and trailing bytes, receipt mismatch,
+orphan completion/refusal, cross-product validation, publication races,
+“signed” claims and the no-overwrite rules. Re-running `node build.js` for chromium/firefox/safari with
+the pre-change script from `HEAD` produced byte-identical `manifest.json` files,
+so the existing formats are preserved.
+
+## Still not done (owner, store, signing)
+
+Explicitly unverified and not claimed by this preparation:
+
+- release-owner store accounts, listings, review, and any upload or publish;
+- Chrome Web Store / Microsoft Edge Addons signing and the AMO-signed XPI;
+- clean install and same-identity upgrade from store-signed packages;
+- real store URLs and support/privacy/license content;
+- native-host registration and end-to-end messaging from a signed install;
+- any detached Ed25519 public release attestation (designed as a later stage;
+  not implemented here, and no signed artifact exists to verify).
+
+An unsigned preparation receipt is not a signature and not an accepted store
+release; verification here only proves receipt/archive self-consistency against
+the fixed policy. A detached Ed25519 public release attestation is the next
+phase and is not implemented, and no owner key, store credential or signed
+artifact was provided.
+
+Issue #53 stays open for owner/store/signing/install/update evidence.

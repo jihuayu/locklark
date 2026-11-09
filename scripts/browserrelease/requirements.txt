@@ -1,0 +1,11 @@
+# Optional dependencies for the offline detached publisher attestation verifier
+# (scripts/browser-release-verify). The unsigned package/receipt preparation
+# path remains dependency-free and does not import cryptography or PyNaCl.
+#
+# cryptography performs the Ed25519 signature equation. PyNaCl supplies mature
+# libsodium point validation (crypto_core_ed25519_is_valid_point) so a
+# non-canonical, off-curve, small-order, or non-prime-subgroup public key (for
+# example the identity point 01 followed by 31 zero bytes) is refused before
+# the signature equation is consulted.
+cryptography==50.0.0
+PyNaCl==1.6.2
