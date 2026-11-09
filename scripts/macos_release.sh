@@ -43,6 +43,12 @@ export CGO_ENABLED=1
 if [[ -z "${SDKROOT:-}" ]]; then
   export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
 fi
+if [[ -z "${CGO_CFLAGS:-}" ]]; then
+  export CGO_CFLAGS="-isysroot $SDKROOT"
+fi
+if [[ -z "${CGO_LDFLAGS:-}" ]]; then
+  export CGO_LDFLAGS="-isysroot $SDKROOT"
+fi
 
 export LOCKLARK_MACOS_ENTITLEMENTS="$entitlements"
 export LOCKLARK_MACOS_PROVISIONING_PROFILE="$profile"
