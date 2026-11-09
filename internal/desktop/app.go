@@ -67,8 +67,6 @@ type App struct {
 	brokerEpoch    uint64
 	cliApprover    func(context.Context, browserhost.Peer, browserhost.BrokerCLIRequest) (bool, error)
 	cliPending     *cliRunPending
-	cliV2Pending   *cliRunV2Pending
-	cliLeases      *cliLeaseCache
 
 	browserPasskeyID                               string
 	browserSaveID, browserSaveTitle                string
@@ -123,7 +121,6 @@ func New() *App {
 	a.settingsPath = SettingsPath()
 	a.settingsLoaded = true
 	a.v2 = newV2State()
-	a.cliLeases = newCLILeaseCache()
 	a.refreshClipboardClearSeconds(a.settings)
 	return a
 }
@@ -621,16 +618,10 @@ func (a *App) View(c *ui.Context) {
 	}
 	c.After(time.Second)
 	a.brokerMu.Lock()
-	cliPending, cliV2Pending := a.cliPending != nil, a.cliV2Pending != nil
+	cliPending := a.cliPending != nil
 	a.brokerMu.Unlock()
-	if cliPending || cliV2Pending {
-		ui.Column(c.Key(a.generation)).Fill().Padding(24).Gap(16).Children(func() {
-			if cliV2Pending {
-				a.cliV2ApprovalView(c)
-				return
-			}
-			a.cliApprovalView(c)
-		})
+	if cliPending {
+		ui.Column(c.Key(a.generation)).Fill().Padding(24).Gap(16).Children(func() { a.cliApprovalView(c) })
 		return
 	}
 	ui.Column(c.Key(a.generation)).Fill().Padding(24).Gap(16).Children(func() {

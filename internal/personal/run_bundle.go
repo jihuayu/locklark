@@ -23,22 +23,6 @@ import (
 
 const runBundleAction = "item.run.bundle"
 
-// ErrRunProgramPinUnsupported reports that this platform has no implemented
-// immutable byte-snapshot execution primitive. A caller that approved one exact
-// program image is refused explicitly instead of being executed through a path
-// that was verified earlier and may have changed; there is no unverified
-// fallback.
-var ErrRunProgramPinUnsupported = errors.New("exact program byte pin is unavailable on this platform; refusing to execute an approved pinned program")
-
-// ErrRunProgramScriptPinUnsupported reports that a pinned program is an
-// interpreted shebang script. Linux executes a pinned native executable from an
-// immutable memfd snapshot reached through /proc/self/fd, and the kernel script
-// loader rewrites a script's argv0 to that descriptor path. That changes $0 and
-// breaks relative assets and Node-style CLI package context, so a pinned script
-// is refused instead of being executed under changed semantics. There is no
-// shell or interpreter wrapper and no path-based fallback.
-var ErrRunProgramScriptPinUnsupported = errors.New("pinned program is an interpreted script; a sealed snapshot would rewrite the script $0 and break relative assets: bind an explicit trusted interpreter ELF with --program and pass the original script path as an argument, or bind with --pin-sha256 false to run the original script path unpinned (no exact byte guarantee)")
-
 // BundleTarget names one vault field and the profile slot it populates.
 type BundleTarget struct {
 	Slot     string `json:"slot"`
@@ -47,26 +31,11 @@ type BundleTarget struct {
 	Field    string `json:"field"`
 }
 
-// runBundleBeforeStart is an unexported test seam placed after the exact
-// program snapshot is sealed but immediately before the child starts.
-// Production leaves it as a no-op.
-var runBundleBeforeStart = func() {}
-
 // RunBundleRequest describes a one-time, multi-credential disclosure to a
 // trusted process. The process still runs as the local user; this is not a
 // sandbox or a reusable machine grant.
 type RunBundleRequest struct {
-	Program string
-	// ProgramSHA256, when non-empty, is the canonical SHA-256 of the exact
-	// program image the caller approved. Linux execution re-hashes the sealed
-	// snapshot and refuses a mismatch, so the executed bytes name the same
-	// image the approval saw; a shebang script is refused because the sealed
-	// descriptor path would change its $0. Other platforms refuse explicitly
-	// rather than execute an image they cannot pin to an immutable snapshot.
-	// Empty is the explicit unpinned scope: the original path is executed
-	// directly (preserving script $0 and relative assets) and no exact-byte
-	// guarantee is made, so the desktop lease path is never used for it.
-	ProgramSHA256  string
+	Program        string
 	Args           []string
 	Directory      string
 	TimeoutSeconds int
@@ -93,9 +62,6 @@ func (r RunBundleRequest) Validate(targets []BundleTarget) error {
 		return ErrRunTarget
 	}
 	if runtime.GOOS == "windows" && !strings.EqualFold(filepath.Ext(r.Program), ".exe") {
-		return ErrRunTarget
-	}
-	if r.ProgramSHA256 != "" && !digestOK(r.ProgramSHA256) {
 		return ErrRunTarget
 	}
 	if len(r.Args) > 64 {
@@ -278,7 +244,6 @@ func (s *runBundleStoreRequest) binding(secret []byte) (string, error) {
 		TokenEnvName                                         string
 		Spec                                                 cliprofile.Spec
 		Program                                              string
-		ProgramSHA256                                        string
 		Args                                                 []string
 		Directory                                            string
 		TimeoutSeconds                                       int
@@ -294,7 +259,6 @@ func (s *runBundleStoreRequest) binding(secret []byte) (string, error) {
 		TokenEnvName:   s.request.TokenEnvName,
 		Spec:           s.request.Spec,
 		Program:        s.request.Program,
-		ProgramSHA256:  s.request.ProgramSHA256,
 		Args:           s.request.Args,
 		Directory:      s.request.Directory,
 		TimeoutSeconds: s.request.TimeoutSeconds,
@@ -330,21 +294,6 @@ func cloneStringMap(values map[string]string) map[string]string {
 	return out
 }
 
-// cloneRunBundleTargets and cloneRunBundleRequest own every caller slice and
-// map so a signed intent cannot be changed afterwards. The session-native grant
-// API reuses them before it binds the same all-target intent.
-func cloneRunBundleTargets(targets []BundleTarget) []BundleTarget {
-	return append([]BundleTarget(nil), targets...)
-}
-
-func cloneRunBundleRequest(request RunBundleRequest) RunBundleRequest {
-	request.Args = append([]string(nil), request.Args...)
-	request.HelperPath = append([]string(nil), request.HelperPath...)
-	request.Passthrough = cloneStringMap(request.Passthrough)
-	request.Spec = cliprofile.CloneSpec(request.Spec)
-	return request
-}
-
 func runBundle(ctx context.Context, targets []BundleTarget, request RunBundleRequest, createTemp func() (string, error), prepare func(*runBundleStoreRequest) (result, error), execute func(context.Context, RunBundleRequest, string, cliprofile.RenderedBundle) (int, error), remove func(string) error) (receipt RunReceipt, retErr error) {
 	if ctx == nil || request.Validate(targets) != nil {
 		return RunReceipt{}, ErrRunTarget
@@ -354,8 +303,11 @@ func runBundle(ctx context.Context, targets []BundleTarget, request RunBundleReq
 	}
 	// Own every caller slice and map before the signed intent so nothing can
 	// change the disclosed set between authorization and execution.
-	targets = cloneRunBundleTargets(targets)
-	request = cloneRunBundleRequest(request)
+	targets = append([]BundleTarget(nil), targets...)
+	request.Args = append([]string(nil), request.Args...)
+	request.HelperPath = append([]string(nil), request.HelperPath...)
+	request.Passthrough = cloneStringMap(request.Passthrough)
+	request.Spec = cliprofile.CloneSpec(request.Spec)
 
 	root, e := createTemp()
 	if e != nil {
@@ -398,12 +350,6 @@ func runBundle(ctx context.Context, targets []BundleTarget, request RunBundleReq
 	}
 	if errors.Is(e, ErrRunCredential) {
 		return RunReceipt{}, ErrRunCredential
-	}
-	if errors.Is(e, ErrRunProgramPinUnsupported) {
-		return RunReceipt{}, ErrRunProgramPinUnsupported
-	}
-	if errors.Is(e, ErrRunProgramScriptPinUnsupported) {
-		return RunReceipt{}, ErrRunProgramScriptPinUnsupported
 	}
 	if e != nil || code < 0 {
 		return RunReceipt{}, ErrRunResult
@@ -453,6 +399,10 @@ func executeRunBundle(ctx context.Context, req RunBundleRequest, root string, re
 	if err := writeRunBundleFiles(root, rendered.Files); err != nil {
 		return 0, ErrRunTemporary
 	}
+	info, e := os.Stat(req.Program)
+	if e != nil || !info.Mode().IsRegular() {
+		return 0, ErrRunResult
+	}
 	env, e := runBaseEnvironment()
 	if e != nil {
 		return 0, ErrRunResult
@@ -475,14 +425,9 @@ func executeRunBundle(ctx context.Context, req RunBundleRequest, root string, re
 	defer clear(env)
 	limited, cancel := context.WithTimeout(ctx, time.Duration(req.TimeoutSeconds)*time.Second)
 	defer cancel()
-	cmd, closeProgram, e := newRunBundleCommand(limited, req.Program, req.Args, req.ProgramSHA256)
-	if e != nil {
-		return 0, e
-	}
-	defer closeProgram()
+	cmd := exec.CommandContext(limited, req.Program, req.Args...)
 	cmd.Dir, cmd.Env = req.Directory, env
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = streams.in, streams.out, streams.err
-	runBundleBeforeStart()
 	// CommandContext rechecks cancellation immediately before Start and kills
 	// the direct child on cancellation. It cannot revoke a disclosed credential
 	// or promise to terminate descendants of an intentionally trusted program.

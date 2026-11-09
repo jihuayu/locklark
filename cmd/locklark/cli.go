@@ -893,9 +893,6 @@ func runCLIRun(args []string) error {
 	if err = clibinding.VerifyProgram(binding); err != nil {
 		return err
 	}
-	if err = checkCLIRunProgramPolicy(binding); err != nil {
-		return err
-	}
 	prof, ok := cliprofile.Lookup(binding.Profile)
 	if !ok {
 		return clibinding.ErrBinding
@@ -944,16 +941,6 @@ func runCLIRun(args []string) error {
 	return executeCLIAuthenticated(tool, binding, spec, childArgs, cwd, timeout)
 }
 
-// checkCLIRunProgramPolicy applies the provider-independent program policy
-// before any desktop request, owner prompt, console prompt or child start. A
-// pinned Linux program must be a native executable image; a shebang script is
-// refused here because executing a sealed snapshot would rewrite its $0 and
-// break relative assets. Unpinned bindings have no pin to check and keep the
-// original direct-exec path.
-func checkCLIRunProgramPolicy(binding clibinding.ToolBinding) error {
-	return personal.CheckRunBundleProgramPinPreflight(binding.Program, binding.ProgramSHA256)
-}
-
 func executeCLIFastPath(tool string, binding clibinding.ToolBinding, spec cliprofile.Spec, args []string, cwd string, timeout int) error {
 	passthrough := make(map[string]string)
 	for _, name := range binding.PassthroughEnv {
@@ -968,7 +955,6 @@ func executeCLIFastPath(tool string, binding clibinding.ToolBinding, spec clipro
 	}
 	request := personal.RunBundleRequest{
 		Program:        binding.Program,
-		ProgramSHA256:  binding.ProgramSHA256,
 		Args:           append([]string(nil), args...),
 		Directory:      cwd,
 		TimeoutSeconds: timeout,
@@ -987,23 +973,6 @@ func executeCLIFastPath(tool string, binding clibinding.ToolBinding, spec clipro
 	return nil
 }
 
-// openCLIConsole and makeCLIConsoleRaw are package seams for the CLI tests.
-// Production always opens the real controlling console and changes its mode
-// through the same term package call the local path has always used.
-var openCLIConsole = openRunCLIConsole
-var makeCLIConsoleRaw = term.MakeRaw
-
-// executeCLIAuthenticated validates the complete request, applies the common
-// program policy, opens the controlling console and creates the signal
-// context. A pinned binding then attempts the desktop run bundle provider
-// before raw mode or any master-password/Secret Key prompt; only the exact
-// pre-connect browserhost.ErrBrokerUnavailable outcome reaches the existing
-// local full-factor path, and the provider has already removed its temporary
-// root and zeroed every value before that fallback is considered. An
-// explicitly unpinned binding never contacts the broker: it has no exact bytes
-// for a native lease and goes straight to the one-shot full-factor local path.
-// A successful desktop run executes the child once through the shared runBundle
-// inherited-stdio path and never starts a second local attempt.
 func executeCLIAuthenticated(tool string, binding clibinding.ToolBinding, spec cliprofile.Spec, childArgs []string, cwd string, timeout int) error {
 	passthrough := make(map[string]string)
 	for _, name := range binding.PassthroughEnv {
@@ -1018,7 +987,6 @@ func executeCLIAuthenticated(tool string, binding clibinding.ToolBinding, spec c
 	}
 	request := personal.RunBundleRequest{
 		Program:        binding.Program,
-		ProgramSHA256:  binding.ProgramSHA256,
 		Args:           append([]string(nil), childArgs...),
 		Directory:      cwd,
 		TimeoutSeconds: timeout,
@@ -1030,13 +998,7 @@ func executeCLIAuthenticated(tool string, binding clibinding.ToolBinding, spec c
 	if err := request.Validate(targets); err != nil {
 		return cliUsage
 	}
-	if err := checkCLIRunProgramPolicy(binding); err != nil {
-		return err
-	}
-	// The controlling console is required for this authenticated path, but it
-	// stays in normal mode until the desktop provider has been tried and only
-	// the local fallback can write factor prompts to it.
-	controlInput, controlOutput, err := openCLIConsole()
+	controlInput, controlOutput, err := openRunCLIConsole()
 	if err != nil {
 		return errRunCLIConsole
 	}
@@ -1044,34 +1006,11 @@ func executeCLIAuthenticated(tool string, binding clibinding.ToolBinding, spec c
 	if controlOutput != controlInput {
 		defer controlOutput.Close()
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
-	defer stop()
-	// An explicitly unpinned binding (--pin-sha256 false) has no exact program
-	// bytes that a session-native desktop lease could bind. It must not create
-	// or reuse a five-minute native lease, so it skips the desktop provider
-	// entirely and enters the existing one-shot full-factor local path before
-	// any broker contact. The local disclosure already states that no SHA-256
-	// pin applies. There is no fabricated pre-connect "unavailable" outcome.
-	if binding.ProgramSHA256 == "" {
-		return executeCLILocalAuthenticated(tool, binding, targets, request, controlInput, controlOutput)
-	}
-	provider := newCLIDesktopRunBundleProvider(binding)
-	return runCLIBundleWithDesktopOrLocal(ctx, targets, request, provider, func() error {
-		return executeCLILocalAuthenticated(tool, binding, targets, request, controlInput, controlOutput)
-	})
-}
-
-// executeCLILocalAuthenticated is the existing full-factor path: it disables
-// console echo, reads the master password and Secret Key from the controlling
-// console, renders the same disclosure and requires the literal RUN before
-// invoking personal.RunBundle. Its restore logic remains one-shot, and the
-// child still receives the inherited process standard streams without capture.
-func executeCLILocalAuthenticated(tool string, binding clibinding.ToolBinding, targets []personal.BundleTarget, request personal.RunBundleRequest, controlInput, controlOutput *os.File) error {
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(signals)
 	fd := int(controlInput.Fd())
-	state, err := makeCLIConsoleRaw(fd)
+	state, err := term.MakeRaw(fd)
 	if err != nil {
 		return errors.New("cannot disable terminal echo")
 	}

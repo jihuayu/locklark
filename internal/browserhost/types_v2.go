@@ -24,7 +24,7 @@ func SupportedCapabilities() []string {
 		"checkout-frames-v1",
 		"watchtower-v1",
 		"attachments-v1",
-		"cli-broker-v2",
+		"cli-broker-v1",
 	}
 }
 

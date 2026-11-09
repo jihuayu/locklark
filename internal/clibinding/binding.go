@@ -48,11 +48,6 @@ var (
 	toolNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 	targetIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
 	digestPattern   = regexp.MustCompile(`^[0-9a-f]{64}$`)
-
-	// computeProgramBeforeFinalCheck is an unexported test seam placed after
-	// the descriptor read and stat but before the final path identity check.
-	// Production leaves it as a no-op.
-	computeProgramBeforeFinalCheck = func() {}
 )
 
 // SlotTarget binds one profile slot to one immutable field of a vault item.
@@ -237,22 +232,8 @@ func ComputeProgramSHA256(programPath string) (string, error) {
 		return "", ErrBinding
 	}
 	h := sha256.New()
-	n, err := io.Copy(h, file)
-	if err != nil || n != info.Size() {
-		return "", ErrBinding
-	}
-	computeProgramBeforeFinalCheck()
-	// The descriptor fixes the inode that was hashed, but the caller and a
-	// later exec name the path. Re-stat it and require the same inode, mode,
-	// size and modification time, so an atomic rename after Open fails closed
-	// instead of pinning bytes the path no longer names. Stat follows a final
-	// symlink, preserving the existing symlinked-program behaviour; the
-	// comparison still catches a swapped link target.
-	final, err := os.Stat(programPath)
-	if err != nil || !final.Mode().IsRegular() || !os.SameFile(info, final) ||
-		final.Mode() != info.Mode() || final.Size() != info.Size() ||
-		!final.ModTime().Equal(info.ModTime()) {
-		return "", ErrBinding
+	if _, err = io.Copy(h, file); err != nil {
+		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
