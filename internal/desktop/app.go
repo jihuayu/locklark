@@ -725,7 +725,13 @@ func (a *App) lockView(c *ui.Context) {
 }
 func (a *App) vaultView(c *ui.Context) {
 	ui.Row(c).Gap(8).Children(func() {
-		for _, tab := range []struct{ id, label string }{{"vault", "金库"}, {"ssh", "SSH 密钥"}, {"activity", "活动"}, {"health", "体检"}, {"transfer", "导入与导出"}} {
+		tabs := []struct{ id, label string }{{"vault", "金库"}, {"ssh", "SSH 密钥"}, {"activity", "活动"}, {"health", "体检"}, {"transfer", "导入与导出"}}
+		if classicLayoutRequested() {
+			// Keep the classic tab as the only "安全设置" control there; the
+			// Onevra shell hides its gear in this mode.
+			tabs = append(tabs, struct{ id, label string }{"security", "安全设置"})
+		}
+		for _, tab := range tabs {
 			tab := tab
 			ui.Button(c, tab.label).OnClick(func() {
 				a.clearNotesEditor()

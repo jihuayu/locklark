@@ -39,13 +39,18 @@ func (a *App) onevraHeaderActions(c *ui.Context) {
 	if a.browser == nil && oneui.IconButton(c, lucide.Search(), "快捷搜索", oneui.IconButtonPlain).Clicked() {
 		a.showQuickSearch()
 	}
-	settings := oneui.IconButton(c, lucide.Settings(), "安全设置", oneui.IconButtonPlain)
-	settings.Disabled(a.session == nil)
-	if settings.Clicked() {
-		a.page = "security"
-		a.status = "安全设置"
-		if a.win != nil {
-			a.win.Invalidate()
+	// The classic layout keeps its own security tab. Showing the shell gear as
+	// well would create two controls with the same accessible name, which the
+	// native acceptance driver rejects as ambiguous.
+	if !classicLayoutRequested() {
+		settings := oneui.IconButton(c, lucide.Settings(), "安全设置", oneui.IconButtonPlain)
+		settings.Disabled(a.session == nil)
+		if settings.Clicked() {
+			a.page = "security"
+			a.status = "安全设置"
+			if a.win != nil {
+				a.win.Invalidate()
+			}
 		}
 	}
 	if a.session != nil && oneui.Button(c, "立即锁定", oneui.ButtonGhost).Clicked() {
