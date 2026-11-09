@@ -1,0 +1,9 @@
+#!/usr/bin/env python3
+"""Dedicated offline attestation verifier: no signing, upload, or network."""
+
+from __future__ import annotations
+
+from browserrelease.attestation import main
+
+if __name__ == "__main__":
+    raise SystemExit(main())
