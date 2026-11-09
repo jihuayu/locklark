@@ -234,3 +234,42 @@ func TestBrowserOTPAuthenticatedRefusalsPreserveSnapshotAndHistory(t *testing.T)
 		t.Fatal("refusal history could not reopen")
 	}
 }
+
+// browserOTPAuthorizationControl builds the control that authorization-path
+// semantic tests (readonly revalidation, cancel-before-output) need. It moves
+// the fixture OTP to the default 30s period, pins the session onto
+// dailyOTPSemanticClock, and bounds the control one minute beyond that
+// synthetic instant. PrepareBrowserOTP shortens the control to
+// otpNow()+BrowserOTPBudget, so the pending window becomes ~1.5s of semantic
+// time instead of ~1.5s of real time and a multi-second Windows/race DB
+// preparation pause cannot expire it before the test reaches its explicit
+// Cancel/RequestLock boundary. Dedicated expiry tests keep their real clock and
+// timer coverage; the caller owns the returned control.
+func browserOTPAuthorizationControl(t *testing.T, s *Session, target BrowserOTPTarget) (*BrowserOTPControl, BrowserOTPTarget) {
+	t.Helper()
+	rev, err := s.Edit(Edit{ID: target.ID, Revision: target.Revision, Field: "otp", Value: "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target.Revision = rev
+	semantic := dailyOTPSemanticClock(s)
+	control := NewBrowserOTPControl(semantic.Add(time.Minute))
+	t.Cleanup(func() { control.Cancel() })
+	return control, target
+}
+
+// stopBrowserOTPAuthorizationTimer makes a cancellation test own the only
+// wall-clock timer able to revoke the pending code, so a later zeroization
+// assertion can only be satisfied by the explicit Cancel/RequestLock under
+// test rather than by expiry.
+func stopBrowserOTPAuthorizationTimer(t *testing.T, control *BrowserOTPControl) {
+	t.Helper()
+	if control == nil || !control.Pending() {
+		t.Fatal("control was not pending when the cancel boundary was entered")
+	}
+	control.inner.mu.Lock()
+	defer control.inner.mu.Unlock()
+	if control.inner.timer == nil || !control.inner.timer.Stop() {
+		t.Fatal("control timer had already fired before the cancel boundary")
+	}
+}
