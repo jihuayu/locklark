@@ -52,7 +52,11 @@ checked before any prompt or child start.
    - target IDs/revisions and slot fields,
    - helper-directory and passthrough allow-lists,
    - timeout bounds and dynamic token environment name,
-   - regular-file check and SHA-256 pin match.
+   - regular-file check and SHA-256 pin match,
+   - pinned-program policy: a pinned shebang script is refused here (and
+     again before the sealed snapshot) rather than executed under a rewritten
+     `$0`; an unpinned binding is allowed and keeps direct original-path
+     execution.
 2. **Denied-argument check** via `cliprofile.ValidateArgs`. This happens
    before a controlling terminal is opened, before a password is requested and
    before the child is started.
@@ -128,7 +132,32 @@ checked before any prompt or child start.
   not inherited by that child.
 - **Pinned executable.** Binding records a SHA-256 digest of the executable by
   default. `clibinding.VerifyProgram` re-hashes the regular file on every run,
-  so replacing or modifying the program after binding is refused.
+  so replacing or modifying the program after binding is refused. On Linux the
+  pinned bytes are additionally copied into a sealed anonymous `memfd` snapshot
+  and executed from it, so a rename, truncate or in-place rewrite after the
+  check cannot change the bytes the child runs. Windows holds deny-write/delete
+  handles on the verified image and every ancestor until the child exits.
+  Platforms without an implemented pin explicitly refuse a pinned run.
+- **Pinned programs must be native executables.** A non-empty
+  `program_sha256` names one exact ELF/native executable image. A shebang
+  script is refused with a fixed, actionable error before any desktop request,
+  owner prompt, console prompt or child start, because the kernel would pass
+  the sealed `/proc/self/fd` path as the script's `$0` and silently break
+  relative assets and Node-style CLI package context. To pin an interpreted
+  tool, bind the explicit trusted interpreter ELF with `--program` and pass the
+  original script path as a normal argument. That pin covers only the
+  interpreter executable: the script argument, its assets, and any other files
+  or dependencies it loads are not implicitly pinned and must be reviewed and
+  protected separately. Locklark does not claim a full script or code pin.
+- **Unpinned bindings are an explicit, narrower scope.** `--pin-sha256 false`
+  records no digest. Every platform then executes the original program path directly
+  (never a memfd copy), preserving `$0`, relative assets and package context;
+  this is not an exact-byte pin and the executable may change between runs.
+  An unpinned binding is shown as `SHA-256：未固定` in the local disclosure
+  and never contacts the desktop broker or creates/reuses a session-native
+  lease: it goes straight to the existing one-shot local full-factor
+  confirmation before any broker contact.
+  See [program pinning](cli-run-program-pin.md) for platform tests and limits.
 
 ## Built-in profiles
 
@@ -630,6 +659,7 @@ error before the interactive console is opened.
 | Invalid CLI arguments | Error, exit 1 |
 | Binding missing | `CLI tool binding not found`, exit 1 |
 | Pin mismatch, unsafe file, stale metadata | Validation error, exit 1 |
+| Pinned shebang script | Fixed actionable refusal before approval or child, exit 1 |
 | Vault, intent or cleanup error | Fixed `personal` package error, exit 1 |
 | Recursive fast-path run | `recursive locklark cli run is not allowed`, exit 1 |
 
@@ -650,6 +680,20 @@ The immediate parent must not be group/other writable. The file must be `0600`
 on Unix. Symlinks and Windows reparse points are refused. If the program was
 updated intentionally, rerun `locklark cli init` for that tool to record the new
 SHA-256.
+
+### `pinned program is an interpreted script; ...`
+
+The binding pinned a shebang script. Linux cannot execute that script from the
+sealed immutable snapshot without the kernel rewriting its `$0` to the
+descriptor path, which breaks relative assets and Node-style CLI package
+resolution, so the run is refused before approval or child start. Two supported
+options:
+
+- Bind an explicit trusted interpreter ELF with `--program` and pass the
+  original script path as a normal argument. Only the interpreter executable is
+  pinned; the script, its assets and its dependencies are not.
+- Rebind with `--pin-sha256 false` to run the original script path directly as
+  an explicit unpinned binding (no exact-byte guarantee, no desktop lease).
 
 ### `CLI tool binding not found`
 

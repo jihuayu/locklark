@@ -261,19 +261,19 @@ func TestBrokerCLIRunApprovalAndFallback(t *testing.T) {
 	}
 	defer broker.Close()
 
-	req := CLIRunBrokerRequest{V: 1, VaultPath: "placeholder"}
+	s, row := brokerTestSession(t)
+	req := CLIRunBrokerRequest{V: 1, VaultPath: s.VaultPath(), Targets: []personal.CLIBrokerTarget{{Slot: "LOGIN_PASSWORD", ID: row.ID, Revision: row.Revision, Field: "password"}}}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	// A running broker with no unlocked session is the legitimate pre-disclosure
+	// "unavailable" path, so callers may still fall back.
 	if _, e := RequestCLIRun(ctx, req); !errors.Is(e, ErrBrokerUnavailable) {
 		t.Fatalf("locked broker: %v", e)
 	}
 
-	s, row := brokerTestSession(t)
 	mu.Lock()
 	session = s
 	mu.Unlock()
-	req.VaultPath = s.VaultPath()
-	req.Targets = []personal.CLIBrokerTarget{{Slot: "LOGIN_PASSWORD", ID: row.ID, Revision: row.Revision, Field: "password"}}
 	resp, e := RequestCLIRun(ctx, req)
 	if e != nil || resp.Values["LOGIN_PASSWORD"] != "broker-password" {
 		t.Fatalf("approved CLI run: %v %#v", e, resp)

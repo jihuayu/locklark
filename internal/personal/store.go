@@ -1689,7 +1689,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 				}
 			}
 		}
-		if (action == sshSignAction || readValueAction(action) || otpAction(action) || action == inspectionAction || action == exportAction || migrationAction(action) || action == healthAction || action == searchAction) && refusal == nil {
+		if (action == sshSignAction || action == runBundleAction || readValueAction(action) || otpAction(action) || action == inspectionAction || action == exportAction || migrationAction(action) || action == healthAction || action == searchAction) && refusal == nil {
 			out.session, out.intent = ev.Session, ev.hash()
 		}
 		if action == "backup.prepare" {

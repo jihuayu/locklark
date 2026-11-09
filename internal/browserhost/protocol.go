@@ -39,6 +39,14 @@ const (
 var ErrProtocol = errors.New("native messaging refused")
 var ErrBrokerUnavailable = errors.New("desktop browser broker is unavailable")
 
+// ErrBrokerRefused is a fixed sentinel for requests this client or the broker
+// refused before disclosure. Callers must not fall back to another path.
+var ErrBrokerRefused = errors.New("desktop browser broker refused the request")
+
+// ErrBrokerUnknown is a fixed sentinel for an outcome that may already have
+// disclosed credentials, or that cannot be verified. Callers must not retry or
+// fall back automatically.
+var ErrBrokerUnknown = errors.New("desktop browser broker outcome is unknown")
 var errDuplicateRequest = errors.New("native duplicate request ignored")
 var token = regexp.MustCompile(`^[a-f0-9]{32}$`)
 var revision = regexp.MustCompile(`^[a-f0-9]{64}$`)

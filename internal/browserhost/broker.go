@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"sort"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jihuayu/locklark/internal/nativeclipboard"
 	"github.com/jihuayu/locklark/internal/personal"
@@ -55,6 +57,11 @@ type BrokerCallbacks struct {
 	NotifyChanged      func()
 	ApproveCLIRun      func(context.Context, Peer, CLIRunBrokerRequest) (bool, error)
 	HandleCLIRun       func(context.Context, Peer, CLIRunBrokerRequest) (CLIRunBrokerResponse, error)
+	// PrepareCLIRunV2 is the one-shot cli-run v2 approval path. It receives the
+	// fully reconstructed trusted scope (never caller JSON) and returns only an
+	// opaque native grant. When it is set, the legacy per-field v1 path is
+	// disabled so an old client can never be served implicitly.
+	PrepareCLIRunV2 func(context.Context, CLIRunV2Scope) (*NativeCLIRunV2, error)
 	// NewClipboard is the only native-clipboard-lease-v1 capability source.
 	// It returns one manager and one immutable clear TTL per connection; a
 	// zero TTL disables automatic clearing. Without this callback the browser
@@ -212,6 +219,17 @@ func (b *Broker) serve(conn net.Conn) {
 	if e != nil {
 		return
 	}
+	// authenticatedPeer names the connection creator (SO_PEERCRED). On Linux the
+	// creator is not necessarily the writer: a forked/exec'd child can inherit
+	// the connected descriptor and send the request. Every subsequent read must
+	// therefore be attributed to its real writer before the first hello byte is
+	// parsed, so wrap the connection ahead of readFrame. The wrapper keeps normal
+	// writes, deadlines and Close and refuses mismatched or missing
+	// SCM_CREDENTIALS instead of falling back to an unverified Read.
+	conn, e = guardRequestWriter(conn)
+	if e != nil {
+		return
+	}
 	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	raw, e := readFrame(conn, 4096)
 	if e != nil {
@@ -221,11 +239,20 @@ func (b *Broker) serve(conn net.Conn) {
 	var hello BrokerHello
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
-	if dec.Decode(&hello) != nil || hello.V != 1 {
+	if dec.Decode(&hello) != nil {
 		clear(raw)
 		return
 	}
+	v1 := hello.V == 1
+	v2 := hello.V == cliRunV2Version && hello.Mode == cliRunV2Mode && hello.Browser == "" && hello.Origin == "" && validCLIRunV2Hello(raw)
 	clear(raw)
+	if v2 {
+		b.serveCLIRunV2(conn, peer)
+		return
+	}
+	if !v1 {
+		return
+	}
 	switch hello.Mode {
 	case "", "browser":
 		b.serveBrowser(conn, peer, hello)
@@ -301,6 +328,12 @@ func (b *Broker) serveBrowser(conn net.Conn, peer Peer, hello BrokerHello) {
 }
 
 func (b *Broker) serveCLIRun(conn net.Conn, peer Peer) {
+	// A shipped v2 CLI disables the legacy per-field path entirely: no request
+	// may silently fall through to the older extract-and-return protocol.
+	if b.callbacks.PrepareCLIRunV2 != nil {
+		writeCLIResponse(conn, CLIRunBrokerResponse{V: 1, Error: "refused"})
+		return
+	}
 	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	raw, e := readFrame(conn, MaxInput)
 	if e != nil {
@@ -319,9 +352,12 @@ func (b *Broker) serveCLIRun(conn net.Conn, peer Peer) {
 	if b.callbacks.HandleCLIRun != nil {
 		out, err := b.callbacks.HandleCLIRun(context.Background(), peer, req)
 		if err != nil {
-			if errors.Is(err, ErrBrokerUnavailable) {
+			switch {
+			case errors.Is(err, ErrBrokerUnavailable):
 				resp.Error = "unavailable"
-			} else {
+			case errors.Is(err, ErrBrokerUnknown):
+				resp.Error = "unknown"
+			default:
 				resp.Error = "refused"
 			}
 		} else {
@@ -331,9 +367,7 @@ func (b *Broker) serveCLIRun(conn net.Conn, peer Peer) {
 		resp.Error = "unavailable"
 	}
 	writeCLIResponse(conn, resp)
-	for k := range resp.Values {
-		resp.Values[k] = ""
-	}
+	resp.dropValues()
 }
 
 func writeCLIResponse(conn net.Conn, resp CLIRunBrokerResponse) {
@@ -450,49 +484,220 @@ func RelayStdio(browser Browser, args []string, stdin io.Reader, stdout io.Write
 	return nil
 }
 
+// cliRunMaxValueBytes bounds each disclosed CLI-run value so one slot can never
+// consume the whole response frame.
+const cliRunMaxValueBytes = 64 << 10
+
 // RequestCLIRun asks a running desktop broker for F17 pinned credentials.
+//
+// The returned sentinel drives the caller's fallback decision. ErrBrokerUnavailable
+// is reserved for a clearly absent trusted endpoint or a connection that was
+// never established, which are the only cases where no secret request can have
+// reached the broker. Anything after the connection exists (write failure, read
+// timeout, disconnect, malformed or unverifiable response, unknown server
+// outcome) may already have disclosed credentials and is reported as
+// ErrBrokerUnknown. Locally rejected requests, cancellation before the
+// secret request is written, and explicit refusals are ErrBrokerRefused.
+// Neither sentinel permits an automatic fallback, and peer-supplied error text
+// is never echoed.
 func RequestCLIRun(ctx context.Context, req CLIRunBrokerRequest) (CLIRunBrokerResponse, error) {
-	if ctx == nil || req.V != 1 || len(req.VaultPath) == 0 || len(req.Targets) < 1 || len(req.Targets) > 16 {
-		return CLIRunBrokerResponse{}, ErrBrokerUnavailable
+	if ctx == nil || !validCLIRunBrokerRequest(req) || ctx.Err() != nil {
+		return CLIRunBrokerResponse{}, ErrBrokerRefused
 	}
-	endpoint, e := DefaultBrokerEndpoint()
+	hello, e := json.Marshal(BrokerHello{V: 1, Mode: "cli-run"})
 	if e != nil {
-		return CLIRunBrokerResponse{}, ErrBrokerUnavailable
+		return CLIRunBrokerResponse{}, ErrBrokerRefused
 	}
-	conn, e := dialLocal(ctx, endpoint)
-	if e != nil {
-		return CLIRunBrokerResponse{}, ErrBrokerUnavailable
-	}
-	defer conn.Close()
-	hello, _ := json.Marshal(BrokerHello{V: 1, Mode: "cli-run"})
-	if e = writeFrame(conn, hello); e != nil {
-		return CLIRunBrokerResponse{}, ErrBrokerUnavailable
-	}
-	clear(hello)
+	defer clear(hello)
 	raw, e := json.Marshal(req)
 	if e != nil {
-		return CLIRunBrokerResponse{}, ErrBrokerUnavailable
+		return CLIRunBrokerResponse{}, ErrBrokerRefused
 	}
 	defer clear(raw)
-	if e = writeFrame(conn, raw); e != nil {
-		return CLIRunBrokerResponse{}, ErrBrokerUnavailable
+
+	endpoint, e := brokerEndpointForClient()
+	if e != nil {
+		return CLIRunBrokerResponse{}, e
 	}
+	conn, e := dialVerifiedBroker(ctx, endpoint)
+	if e != nil {
+		return CLIRunBrokerResponse{}, e
+	}
+	defer conn.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	}
+	stop := watchCLIRunContext(ctx, conn)
+	defer stop()
+
+	// From here on the trusted broker is reachable and may act on the request,
+	// so no failure may be classified as "unavailable" (fallback-safe).
+	if e = writeFrame(conn, hello); e != nil {
+		return CLIRunBrokerResponse{}, cliRunFailure(ctx, false)
+	}
+	clear(hello)
+	if e = writeFrame(conn, raw); e != nil {
+		return CLIRunBrokerResponse{}, cliRunFailure(ctx, true)
+	}
+	clear(raw)
 	respRaw, e := readFrame(conn, MaxOutput)
 	if e != nil {
-		return CLIRunBrokerResponse{}, ErrBrokerUnavailable
+		return CLIRunBrokerResponse{}, cliRunFailure(ctx, true)
 	}
 	defer clear(respRaw)
-	var resp CLIRunBrokerResponse
-	dec := json.NewDecoder(bytes.NewReader(respRaw))
-	dec.DisallowUnknownFields()
-	if dec.Decode(&resp) != nil || resp.V != 1 {
-		return CLIRunBrokerResponse{}, ErrBrokerUnavailable
+	resp, e := decodeCLIRunResponse(respRaw)
+	if e != nil {
+		return CLIRunBrokerResponse{}, e
+	}
+	if ctx.Err() != nil {
+		resp.dropValues()
+		return CLIRunBrokerResponse{}, ErrBrokerUnknown
 	}
 	if resp.Error != "" {
-		if resp.Error == "unavailable" {
-			return CLIRunBrokerResponse{}, ErrBrokerUnavailable
-		}
-		return CLIRunBrokerResponse{}, errors.New(resp.Error)
+		e := cliRunServerError(resp.Error)
+		resp.dropValues()
+		return CLIRunBrokerResponse{}, e
+	}
+	if !cliRunSlotsMatch(req.Targets, resp.Values) {
+		resp.dropValues()
+		// The request was accepted and possibly acted on; a nonconforming
+		// success payload is an unverifiable post-request outcome, not a
+		// pre-disclosure refusal.
+		return CLIRunBrokerResponse{}, ErrBrokerUnknown
 	}
 	return resp, nil
+}
+
+// watchCLIRunContext closes conn as soon as ctx is done, including contexts
+// without a deadline. The returned stop function waits for the watcher to exit
+// so no goroutine outlives the request.
+func watchCLIRunContext(ctx context.Context, conn net.Conn) func() {
+	stop := make(chan struct{})
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-stop:
+		}
+	}()
+	return func() {
+		close(stop)
+		<-exited
+	}
+}
+
+// cliRunFailure classifies a post-connect transport failure. Before the secret
+// request write is attempted a cancelled context is a local refusal; once that
+// write has been attempted the broker may already have acted and disclosed
+// credentials, so cancellation and deadline expiry are unknown.
+func cliRunFailure(ctx context.Context, submitted bool) error {
+	if !submitted && ctx.Err() != nil {
+		return ErrBrokerRefused
+	}
+	return ErrBrokerUnknown
+}
+
+func validCLIRunBrokerRequest(req CLIRunBrokerRequest) bool {
+	if req.V != 1 || len(req.VaultPath) == 0 || len(req.VaultPath) > 4096 || !utf8.ValidString(req.VaultPath) {
+		return false
+	}
+	if len(req.Targets) < 1 || len(req.Targets) > 16 {
+		return false
+	}
+	seen := make(map[string]bool, len(req.Targets))
+	for _, t := range req.Targets {
+		if t.Slot == "" || len(t.Slot) > 128 || !utf8.ValidString(t.Slot) || seen[t.Slot] {
+			return false
+		}
+		if !cliRunCanonicalHex(t.ID, 16) || !cliRunCanonicalHex(t.Revision, 32) {
+			return false
+		}
+		switch t.Field {
+		case "username", "password", "url", "notes", "otp":
+		default:
+			return false
+		}
+		seen[t.Slot] = true
+	}
+	return true
+}
+
+// cliRunCanonicalHex accepts exactly the canonical lowercase hex encoding of
+// an n-byte value (16 bytes for item IDs, 32 for revisions). Anything else,
+// including shorter, longer, uppercase or non-hex text, is invalid locally.
+func cliRunCanonicalHex(s string, n int) bool {
+	if len(s) != n*2 {
+		return false
+	}
+	raw, e := hex.DecodeString(s)
+	if e != nil || len(raw) != n {
+		return false
+	}
+	canonical := hex.EncodeToString(raw) == s
+	clear(raw)
+	return canonical
+}
+
+// decodeCLIRunResponse accepts exactly one bounded version-1 response object.
+// Version drift, unknown fields and trailing content are distinct from an
+// explicit refusal and are reported as unknown.
+func decodeCLIRunResponse(raw []byte) (CLIRunBrokerResponse, error) {
+	var resp CLIRunBrokerResponse
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if dec.Decode(&resp) != nil {
+		return CLIRunBrokerResponse{}, ErrBrokerUnknown
+	}
+	var extra json.RawMessage
+	if dec.Decode(&extra) != io.EOF {
+		resp.dropValues()
+		return CLIRunBrokerResponse{}, ErrBrokerUnknown
+	}
+	if resp.V != 1 {
+		resp.dropValues()
+		return CLIRunBrokerResponse{}, ErrBrokerUnknown
+	}
+	return resp, nil
+}
+
+// cliRunServerError maps the broker's fixed error codes onto fixed sentinels.
+// The peer string is never propagated to the caller.
+func cliRunServerError(code string) error {
+	switch code {
+	case "unavailable":
+		return ErrBrokerUnavailable
+	case "refused":
+		return ErrBrokerRefused
+	default:
+		return ErrBrokerUnknown
+	}
+}
+
+// cliRunSlotsMatch requires the success payload to carry exactly one
+// length-bounded value for each requested slot, with no extras or omissions.
+func cliRunSlotsMatch(targets []personal.CLIBrokerTarget, values map[string]string) bool {
+	if len(values) != len(targets) {
+		return false
+	}
+	for _, t := range targets {
+		value, ok := values[t.Slot]
+		if !ok || len(value) > cliRunMaxValueBytes {
+			return false
+		}
+	}
+	return true
+}
+
+// dropValues releases the response's owned secret references. Go strings cannot
+// be zeroized, so this drops the map rather than claiming erasure.
+func (r *CLIRunBrokerResponse) dropValues() {
+	if r.Values == nil {
+		return
+	}
+	for k := range r.Values {
+		r.Values[k] = ""
+	}
+	r.Values = nil
 }

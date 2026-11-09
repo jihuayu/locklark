@@ -87,6 +87,91 @@ func dialLocal(ctx context.Context, endpoint string) (net.Conn, error) {
 	return conn, nil
 }
 
+// brokerEndpointForClient resolves the CLI client's pipe without collapsing
+// configuration errors into the fallback-safe "absent" sentinel. An explicit
+// custom token that is unsafe is a configuration error, never a missing
+// default broker. An identity query failure is also a refusal: without our own
+// SID there is no trusted endpoint identity to compare against.
+func brokerEndpointForClient() (string, error) {
+	if custom := brokerSocketEnv(); custom != "" && !safeBrokerToken(custom) {
+		return "", ErrBrokerRefused
+	}
+	path, e := DefaultBrokerEndpoint()
+	if e != nil {
+		return "", ErrBrokerRefused
+	}
+	if !strings.HasPrefix(path, `\\.\pipe\`) || !safeBrokerToken(strings.TrimPrefix(path, `\\.\pipe\`)) {
+		return "", ErrBrokerRefused
+	}
+	return path, nil
+}
+
+// authenticatedServerPeer verifies the process listening on the broker pipe
+// before any hello or secret request is written. It uses the server process ID
+// for the client end of the pipe, opens that process's token and requires the
+// token's user SID to equal the current process SID. Every handle is closed.
+func authenticatedServerPeer(conn net.Conn) (Peer, error) {
+	fd, ok := conn.(interface{ Fd() uintptr })
+	if !ok {
+		return Peer{}, ErrBrokerUnavailable
+	}
+	var pid uint32
+	if windows.GetNamedPipeServerProcessId(windows.Handle(fd.Fd()), &pid) != nil || pid == 0 {
+		return Peer{}, ErrBrokerUnavailable
+	}
+	owner, e := ownerSID()
+	if e != nil {
+		return Peer{}, ErrBrokerUnavailable
+	}
+	process, e := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	if e != nil {
+		return Peer{}, ErrBrokerUnavailable
+	}
+	defer windows.CloseHandle(process)
+	var token windows.Token
+	if windows.OpenProcessToken(process, windows.TOKEN_QUERY, &token) != nil {
+		return Peer{}, ErrBrokerUnavailable
+	}
+	defer token.Close()
+	user, e := token.GetTokenUser()
+	if e != nil || user == nil || user.User.Sid == nil {
+		return Peer{}, ErrBrokerUnavailable
+	}
+	server := user.User.Sid.String()
+	if server == "" || server != owner {
+		return Peer{}, ErrBrokerUnavailable
+	}
+	name := ""
+	var buf [512]uint16
+	n := uint32(len(buf))
+	if windows.QueryFullProcessImageName(process, 0, &buf[0], &n) == nil {
+		name = windows.UTF16ToString(buf[:n])
+	}
+	return Peer{User: "SID " + server, PID: pid, Process: name}, nil
+}
+
+// dialVerifiedBroker validates the pipe name and the server's SID boundary
+// before returning a connection. Unverifiable identities are fixed refusals;
+// only an absent pipe or a connection that was never established is
+// fallback-safe unavailable.
+func dialVerifiedBroker(ctx context.Context, endpoint string) (net.Conn, error) {
+	if !strings.HasPrefix(endpoint, `\\.\pipe\`) || len(endpoint) > 256 {
+		return nil, ErrBrokerRefused
+	}
+	conn, e := dialLocal(ctx, endpoint)
+	if e != nil {
+		if ctx.Err() != nil {
+			return nil, ErrBrokerRefused
+		}
+		return nil, ErrBrokerUnavailable
+	}
+	if _, e := authenticatedServerPeer(conn); e != nil {
+		_ = conn.Close()
+		return nil, ErrBrokerRefused
+	}
+	return conn, nil
+}
+
 func authenticatedPeer(conn net.Conn) (Peer, error) {
 	fd, ok := conn.(interface{ Fd() uintptr })
 	if !ok {

@@ -22,6 +22,7 @@ jobs:
           bun-version: 1.4.4
       - run: bun test ./plugins/github-pull-reader
       - run: python -m unittest discover -s scripts -p test_personal_windows.py
+      - run: python -m unittest discover -s scripts -p test_cli_fixture_import.py
       - run: python -m unittest discover -s scripts -p test_run_cli_windows_acceptance.py
       - run: go mod verify
       - run: go vet ./...
@@ -241,7 +242,9 @@ jobs:
           retention-days: 14
       - name: Test native acceptance readiness and reference cleanup
         timeout-minutes: 1
-        run: python3 -m unittest discover -s scripts -p 'test_*native*.py'
+        run: |
+          python3 -m unittest discover -s scripts -p 'test_*native*.py'
+          python3 -m unittest discover -s scripts -p test_cli_desktop_acceptance.py
       - run: npm ci
         working-directory: web
       - run: npm audit --audit-level=high && npm test && npm run typecheck && npm run build
@@ -311,6 +314,9 @@ jobs:
         env:
           LOCKLARK_GO: go
           LOCKLARK_DESKTOP_HOST: ${{ runner.temp }}/locklark-desktop
+      - name: Test native CLI terminal lease and lock revocation
+        timeout-minutes: 15
+        run: dbus-run-session -- xvfb-run -a -s '-screen 0 1440x1000x24' python3 scripts/cli_desktop_acceptance.py --go "$(command -v go)" --lease
       - name: Test native desktop global quick search
         timeout-minutes: 10
         run: dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' python3 scripts/desktop_quick_search_acceptance.py
