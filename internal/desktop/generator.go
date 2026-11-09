@@ -205,13 +205,6 @@ func clipboardDeadline(timeout time.Duration) time.Time {
 	return time.Now().Add(timeout)
 }
 
-func clipboardStatus(timeout time.Duration) string {
-	if timeout <= 0 {
-		return "已复制到系统剪贴板（未配置自动清理）"
-	}
-	return fmt.Sprintf("已复制到系统剪贴板 · %d 秒后尝试清理", int(timeout/time.Second))
-}
-
 func (a *App) generatorView(c *ui.Context) {
 	g := &a.v2.generator
 	ui.Column(c.Key("generator")).Role(ui.RoleGroup).Label("Password Generator").Gap(8).Children(func() {

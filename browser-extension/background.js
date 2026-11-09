@@ -560,6 +560,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       preferredTitle: multiStepFor(context?.tabId, context?.origin)?.title || "",
       step: multiStepFor(context?.tabId, context?.origin)?.stepCompleted || "",
       attachmentsSupported: !!capability && core.attachmentCapability(hostCapabilities),
+      nativeClipboard: nativeClipboardSupported(),
       passkeyManagementSupported: passkeyManagementSupported(),
       vaultItems: vaultItems.map((item) => ({ ...item })),
       pending: !!pending || !!pendingOTP || !!pendingPasskey,
@@ -677,6 +678,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     multiStepSessions.clear();
     clearConditionalIntentsWithNotify();
     refreshPasskeyConditionalSupport();
+    invalidateClipboardGrants();
     advanceEpoch();
     for (const [requestId, c] of calls) {
       retired.add(requestId);
@@ -1220,6 +1222,9 @@ if (typeof importScripts === "function") importScripts("core.js");
         "item-get": "item-detail",
         "item-reveal-field": "field-value",
         "item-copy-field": "field-value",
+        "prepare-copy-field": "copy-prepared",
+        "commit-copy-field": "copy-result",
+        "cancel-copy-field": "copy-cancelled",
         "item-save": "saved",
         "item-state": "saved",
         generate: "generated",
@@ -3119,6 +3124,329 @@ if (typeof importScripts === "function") importScripts("core.js");
   async function copyFieldValue(message) {
     return fieldValue(message, true);
   }
+
+  // Native clipboard leasing (capability native-clipboard-lease-v1).
+  //
+  // The popup is the only client. It opens one private runtime port, so no
+  // content script, tab or page can ever drive a native grant. Each port owns
+  // at most one outstanding grant, and every message carries fresh bounded
+  // selectors: the background never borrows another popup's grant.
+  const NATIVE_CLIPBOARD_PORT_NAME = "native-clipboard";
+  const NATIVE_CLIPBOARD_MAX_PORTS = 4;
+  const NATIVE_CLIPBOARD_MAX_REQUEST_IDS = 32;
+  const NATIVE_CLIPBOARD_MAX_GRANT_SECONDS = 15;
+  const clipboardPorts = new Set();
+  function nativeClipboardSupported() {
+    return !!capability && core.nativeClipboardCapability(hostCapabilities);
+  }
+  function clipboardGrantIdle(state) {
+    if (state.timer) {
+      clearTimeout(state.timer);
+      state.timer = null;
+    }
+  }
+  function clipboardCancelOffer(capabilityNow, ticket) {
+    if (!capabilityNow || !core.validCopyTicket(ticket)) return;
+    try {
+      void request(
+        "cancel-copy-field",
+        { capability: capabilityNow, copy_ticket: ticket },
+        5000,
+      ).catch(() => {});
+    } catch {}
+  }
+  // A commit request can still be waiting in the desktop UI queue. CancelOffer
+  // revokes that pending job and never clears a confirmed native clipboard lease.
+  function clipboardDropGrant(state, cancel) {
+    const grant = state.grant;
+    state.grant = null;
+    state.preparing = null;
+    clipboardGrantIdle(state);
+    if (!grant || !cancel) return;
+    clipboardCancelOffer(grant.capability, grant.ticket);
+  }
+  function clipboardPortAlive(state) {
+    return !state.closed && clipboardPorts.has(state);
+  }
+  function clipboardPortPost(state, message) {
+    if (!clipboardPortAlive(state)) return false;
+    try {
+      state.port.postMessage(message);
+      return true;
+    } catch {
+      state.closed = true;
+      clipboardPorts.delete(state);
+      clipboardDropGrant(state, true);
+      return false;
+    }
+  }
+  // A lock, disconnect or worker reconnect invalidates every grant: the old
+  // capability/epoch is dead, so the popup must not commit.
+  function invalidateClipboardGrants() {
+    const states = [...clipboardPorts];
+    clipboardPorts.clear();
+    for (const state of states) {
+      state.closed = true;
+      clipboardDropGrant(state, true);
+      try {
+        state.port.postMessage({ type: "revoked" });
+      } catch {}
+    }
+  }
+  function clipboardRequestIdFresh(state, requestId) {
+    return state.ids.size < NATIVE_CLIPBOARD_MAX_REQUEST_IDS &&
+      /^[a-f0-9]{32}$/.test(requestId || "") && !state.ids.has(requestId);
+  }
+  function clipboardRememberRequestId(state, requestId) {
+    if (state.ids.has(requestId)) return;
+    state.ids.add(requestId);
+    state.order.push(requestId);
+  }
+  function clipboardSelector(message) {
+    return (
+      /^[a-f0-9]{32}$/.test(message.item_id || "") &&
+      /^[a-f0-9]{64}$/.test(message.revision || "") &&
+      core.validCopyFieldSelector(message.field)
+    );
+  }
+  function clipboardRefused(requestId) {
+    return { type: "refused", request_id: requestId, unknown: false };
+  }
+  async function clipboardPrepare(state, message) {
+    const requestId = message.request_id;
+    if (
+      Object.keys(message).sort().join(",") !==
+        "field,item_id,request_id,revision,type" ||
+      !clipboardSelector(message) ||
+      !clipboardRequestIdFresh(state, requestId) ||
+      state.grant ||
+      state.preparing ||
+      !nativeClipboardSupported()
+    )
+      return clipboardRefused("");
+    clipboardRememberRequestId(state, requestId);
+    const preparation = {};
+    state.preparing = preparation;
+    const requestEpoch = epoch,
+      requestCapability = capability;
+    let response = null;
+    try {
+      response = await request(
+        "prepare-copy-field",
+        {
+          capability: requestCapability,
+          item_id: message.item_id,
+          revision: message.revision,
+          field: message.field,
+        },
+        12000,
+      );
+    } catch {
+      if (state.preparing === preparation) state.preparing = null;
+      return clipboardRefused(requestId);
+    }
+    const seconds = Number.isSafeInteger(response?.expires_in_seconds)
+      ? response.expires_in_seconds
+      : 0;
+    const cleanup = Number.isSafeInteger(response?.cleanup_ttl_seconds)
+      ? response.cleanup_ttl_seconds
+      : 0;
+    if (
+      requestEpoch !== epoch ||
+      requestCapability !== capability ||
+      !clipboardPortAlive(state) ||
+      state.preparing !== preparation ||
+      state.grant ||
+      !core.validResponse(response) ||
+      response.type !== "copy-prepared" ||
+      response.item_id !== message.item_id ||
+      response.revision !== message.revision ||
+      response.field !== message.field ||
+      seconds < 1 ||
+      seconds > NATIVE_CLIPBOARD_MAX_GRANT_SECONDS ||
+      cleanup < 0 ||
+      cleanup > 3600
+    ) {
+      // A stale, mismatched or unbounded preparation never becomes a grant,
+      // and its offer is dropped before anything could be committed.
+      clipboardCancelOffer(requestCapability, response?.copy_ticket);
+      if (state.preparing === preparation) state.preparing = null;
+      return clipboardRefused(requestId);
+    }
+    state.preparing = null;
+    state.grant = {
+      ticket: response.copy_ticket,
+      capability: requestCapability,
+      itemId: message.item_id,
+      revision: message.revision,
+      field: message.field,
+      epoch: requestEpoch,
+      cleanupTTLSeconds: cleanup,
+      expiresAt: Date.now() + seconds * 1000,
+      committed: false,
+    };
+    state.timer = setTimeout(
+      () => {
+        if (state.grant && !state.grant.committed)
+          clipboardDropGrant(state, true);
+      },
+      (seconds + 1) * 1000,
+    );
+    return {
+      type: "prepared",
+      request_id: requestId,
+      item_id: message.item_id,
+      revision: message.revision,
+      field: message.field,
+      copy_ticket: response.copy_ticket,
+      expires_in_seconds: seconds,
+      cleanup_ttl_seconds: cleanup,
+    };
+  }
+  async function clipboardCommit(state, message) {
+    const requestId = message.request_id;
+    const grant = state.grant;
+    if (
+      Object.keys(message).sort().join(",") !==
+        "copy_ticket,field,item_id,request_id,revision,type" ||
+      !clipboardRequestIdFresh(state, requestId) ||
+      !clipboardSelector(message) ||
+      !grant ||
+      grant.committed ||
+      grant.epoch !== epoch ||
+      grant.capability !== capability ||
+      grant.ticket !== message.copy_ticket ||
+      grant.itemId !== message.item_id ||
+      grant.revision !== message.revision ||
+      grant.field !== message.field ||
+      grant.expiresAt <= Date.now() ||
+      !nativeClipboardSupported()
+    )
+      return clipboardRefused(requestId);
+    clipboardRememberRequestId(state, requestId);
+    // Consume the commit once. Keep its ticket until the result so a popup
+    // cancellation can still revoke a job waiting for native dispatch.
+    grant.committed = true;
+    clipboardGrantIdle(state);
+    const requestEpoch = epoch,
+      requestCapability = capability;
+    let response = null;
+    try {
+      response = await request(
+        "commit-copy-field",
+        { capability: requestCapability, copy_ticket: grant.ticket },
+        20000,
+      );
+    } catch {
+      response = null;
+    }
+    const grantLive = state.grant === grant && clipboardPortAlive(state);
+    if (state.grant === grant) state.grant = null;
+    // An unknown outcome is reported as uncertain and never retried: the
+    // desktop may already own the clipboard bytes.
+    let resultState = "unknown";
+    if (
+      response &&
+      grantLive &&
+      requestEpoch === epoch &&
+      requestCapability === capability &&
+      core.validResponse(response) &&
+      response.type === "copy-result" &&
+      response.copy_ticket === grant.ticket
+    )
+      resultState = response.state;
+    return {
+      type: "result",
+      request_id: requestId,
+      copy_ticket: grant.ticket,
+      state: resultState,
+      copied: resultState === "confirmed",
+      cleanup_ttl_seconds: grant.cleanupTTLSeconds,
+    };
+  }
+  function clipboardCancel(state, message) {
+    if (
+      Object.keys(message).sort().join(",") !== "copy_ticket,request_id,type" ||
+      !clipboardRequestIdFresh(state, message.request_id) ||
+      !core.validCopyTicket(message.copy_ticket)
+    )
+      return null;
+    clipboardRememberRequestId(state, message.request_id);
+    const grant = state.grant;
+    if (grant && grant.ticket === message.copy_ticket)
+      clipboardDropGrant(state, true);
+    return { type: "cancelled", request_id: message.request_id };
+  }
+  function clipboardPortMessage(state, message) {
+    if (
+      state.closed ||
+      !message ||
+      typeof message !== "object" ||
+      Array.isArray(message)
+    )
+      return Promise.resolve(null);
+    switch (message.type) {
+      case "prepare":
+        return clipboardPrepare(state, message);
+      case "commit":
+        return clipboardCommit(state, message);
+      case "cancel":
+        return Promise.resolve(clipboardCancel(state, message));
+      default:
+        return Promise.resolve(null);
+    }
+  }
+  function openClipboardPort(port, sender) {
+    if (
+      !port ||
+      port.name !== NATIVE_CLIPBOARD_PORT_NAME ||
+      !core.validSender(sender, api.runtime)
+    ) {
+      try {
+        port?.disconnect?.();
+      } catch {}
+      return;
+    }
+    if (clipboardPorts.size >= NATIVE_CLIPBOARD_MAX_PORTS) {
+      try {
+        port.disconnect();
+      } catch {}
+      return;
+    }
+    const state = {
+      port,
+      grant: null,
+      preparing: null,
+      ids: new Set(),
+      order: [],
+      closed: false,
+      timer: null,
+    };
+    clipboardPorts.add(state);
+    port.onMessage.addListener((message) => {
+      clipboardPortMessage(state, message)
+        .then((reply) => {
+          if (reply) clipboardPortPost(state, reply);
+        })
+        .catch(() =>
+          clipboardPortPost(state, {
+            type: "refused",
+            request_id: "",
+            unknown: true,
+          }),
+        );
+    });
+    port.onDisconnect.addListener(() => {
+      state.closed = true;
+      clipboardPorts.delete(state);
+      clipboardDropGrant(state, true);
+      void api.runtime.lastError;
+    });
+    clipboardPortPost(state, {
+      type: "ready",
+      native: nativeClipboardSupported(),
+    });
+  }
   async function openAndFill(message) {
     if (
       !capability ||
@@ -4190,6 +4518,11 @@ if (typeof importScripts === "function") importScripts("core.js");
         throw attachmentRefusal();
     }
   }
+  // Private popup runtime port. Only the extension's own popup page may open
+  // it, and only the native host can make the capability available.
+  api.runtime.onConnect?.addListener((port) => {
+    openClipboardPort(port, port?.sender);
+  });
   api.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!core.validSender(sender, api.runtime)) return false;
     if (!message || typeof message !== "object" || !ATTACHMENT_REQUESTS.has(message.type))

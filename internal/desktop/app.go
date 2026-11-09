@@ -12,6 +12,7 @@ import (
 	"image/png"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -91,6 +92,7 @@ type App struct {
 	clipboardLease, clipboardPending               *nativeclipboard.Lease
 	clipboardRetry                                 *time.Timer
 	clipboardWarning                               bool
+	clipboardManual                                bool
 	clipboardWrite                                 func([]byte) (*nativeclipboard.Lease, error)
 	clipboardClear                                 func(*nativeclipboard.Lease) nativeclipboard.Result
 	audit                                          []personal.Event
@@ -99,12 +101,16 @@ type App struct {
 
 	// M2.4 desktop v2 state. It is reset on lock and never survives a
 	// session boundary; settings are non-secret and survive lock.
-	v2                    v2State
-	v2Mode                bool
-	settings              Settings
-	settingsPath          string
-	settingsLoaded        bool
-	lastActivity          time.Time
+	v2             v2State
+	v2Mode         bool
+	settings       Settings
+	settingsPath   string
+	settingsLoaded bool
+	lastActivity   time.Time
+	// clipboardClearSeconds mirrors security.clipboard.clearAfterSeconds for
+	// broker connection goroutines. Only settings mutations and UI start write
+	// it; the IPC factory and lease getter read it without touching a.settings.
+	clipboardClearSeconds atomic.Int64
 	backgroundStop        chan struct{}
 	backgroundRunningFlag uint32
 }
@@ -115,6 +121,7 @@ func New() *App {
 	a.settingsPath = SettingsPath()
 	a.settingsLoaded = true
 	a.v2 = newV2State()
+	a.refreshClipboardClearSeconds(a.settings)
 	return a
 }
 func (a *App) run(work func() outcome) { a.runContext(func(context.Context) outcome { return work() }) }
@@ -572,7 +579,7 @@ func (a *App) disclose(field, purpose string) {
 					if e := a.writeClipboard(value, time.Now().Add(30*time.Second), valid); e != nil {
 						return e
 					}
-					a.status = "已复制到系统剪贴板 · 30 秒后尝试清理"
+					a.status = clipboardStatus(30 * time.Second)
 				} else {
 					shown := visible(string(value))
 					if field == "notes" {
@@ -646,6 +653,9 @@ func (a *App) View(c *ui.Context) {
 		}
 		if a.clipboardWarning {
 			ui.Text(c, "系统剪贴板清理未确认；会仅对原所有权重试").Bold()
+		}
+		if a.clipboardManual {
+			ui.Text(c, clipboardManualCleanupNotice()).Bold()
 		}
 		ui.Text(c, a.status).FontSize(13)
 	})
@@ -907,6 +917,7 @@ func Run() error {
 		a.status = "安全设置文件无法读取；已使用默认值"
 	}
 	a.startBackgroundLoop()
+	a.refreshClipboardClearSeconds(a.settingsSnapshot())
 	mygo.App.SetName("Locklark")
 	mygo.App.WhenReady(func() {
 		a.win = mygo.NewWindow(mygo.WindowOptions{Title: "Locklark · 本地金库", Width: 1100, Height: 820, MinWidth: 900, MinHeight: 680, Content: ui.View(a.View)})
@@ -914,6 +925,9 @@ func Run() error {
 		a.win.OnClose(func(*mygo.CloseEvent) { a.Lock() })
 		a.clipboardWrite = nativeclipboard.Write
 		a.clipboardClear = nativeclipboard.ClearOwned
+		// The broker may have started before the UI thread existed; publish the
+		// settings snapshot again so every connection factory reads live values.
+		a.refreshClipboardClearSeconds(a.settingsSnapshot())
 		mygo.Power.OnSuspend(a.Lock)
 		mygo.Power.OnLockScreen(a.Lock)
 		mygo.App.OnQuit(a.Lock)

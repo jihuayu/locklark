@@ -6,6 +6,14 @@ const path = require("node:path");
 const { webcrypto } = require("node:crypto");
 const core = require("../core.js");
 const tick = () => new Promise((resolve) => setImmediate(resolve));
+async function waitFor(pred, label = "condition") {
+  for (let i = 0; i < 200; i++) {
+    const value = pred();
+    if (value) return value;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  throw new Error("timed out waiting for " + label);
+}
 function harness(options = {}) {
   const timers = new Map();
   const listeners = {},
@@ -13,6 +21,7 @@ function harness(options = {}) {
     injected = [],
     otpProbes = [];
   const messageListeners = [];
+  const connectListeners = [];
   let fillWait = null;
   let messageListener,
     portMessage,
@@ -175,6 +184,31 @@ function harness(options = {}) {
             never_origins: [],
           }),
         );
+      if (r.type === "prepare-copy-field" && !options.holdCopyPrepare)
+        queueMicrotask(() =>
+          portMessage({
+            v: 1,
+            id: r.id,
+            type: "copy-prepared",
+            item_id: r.item_id,
+            revision: r.revision,
+            field: r.field,
+            copy_mode: "native",
+            copy_ticket: options.copyTicket || "f".repeat(64),
+            expires_in_seconds: 10,
+            cleanup_ttl_seconds: 30,
+          }),
+        );
+      if (r.type === "cancel-copy-field")
+        queueMicrotask(() =>
+          portMessage({
+            v: 1,
+            id: r.id,
+            type: "copy-cancelled",
+            copy_ticket: r.copy_ticket,
+            copy_mode: "native",
+          }),
+        );
       if (typeof options.onRequest === "function") {
         const reply = options.onRequest(r);
         if (reply) queueMicrotask(() => portMessage(reply));
@@ -199,6 +233,7 @@ function harness(options = {}) {
       getURL: (p) => "chrome-extension://fixed/" + p,
       connectNative: () => port,
       onMessage: { addListener: (f) => messageListeners.push(f) },
+      onConnect: { addListener: (f) => connectListeners.push(f) },
     },
     tabs: {
       query: async () => [{ id: tabId, url: tabUrl, windowId }],
@@ -390,6 +425,46 @@ function harness(options = {}) {
     setDoc: (x) => (doc = x),
     tabMessages,
     setTab: (x) => (tabId = x),
+    // Emit the popup-private native-clipboard runtime port via onConnect.
+    emitPort: (name = "native-clipboard", overrides = {}) => {
+      assert.ok(connectListeners.length, "background never registered onConnect");
+      let onMessageFn, onDisconnectFn;
+      const port = {
+        name,
+        received: [],
+        disconnected: false,
+        onMessage: { addListener: (f) => (onMessageFn = f) },
+        onDisconnect: { addListener: (f) => (onDisconnectFn = f) },
+        postMessage: (m) => port.received.push(m),
+        disconnect: () => {
+          port.disconnected = true;
+          onDisconnectFn?.();
+        },
+      };
+      const portSender = {
+        id: "fixed",
+        url: "chrome-extension://fixed/popup.html",
+        ...overrides,
+      };
+      port.sender = portSender;
+      for (const listen of connectListeners) listen(port, portSender);
+      return {
+        port,
+        received: port.received,
+        post: (m) => onMessageFn?.(m),
+        disconnect: () => port.disconnect(),
+        get disconnected() {
+          return port.disconnected;
+        },
+        waitFor: (pred, label = "clipboard port message") =>
+          waitFor(() => port.received.find(pred), label),
+        waitReady: () =>
+          waitFor(
+            () => port.received.find((m) => m.type === "ready"),
+            "native-clipboard ready",
+          ),
+      };
+    },
     deliver: (r) => {
       if (r.type === "save-ready") readyIds.add(r.id);
       portMessage(r);
@@ -3334,6 +3409,183 @@ test("signal: a hint never occupies the ordinary fill slot", async () => {
   const match = await h.send({ type: "inline-match" }, contentSender());
   assert.equal(match.candidates.length, 1, "candidates still load");
   assert.equal((await h.send({ type: "state" })).pending, false);
+});
+
+// Private native-clipboard port regressions (capability
+// native-clipboard-lease-v1). Only the popup may open "native-clipboard".
+const CLIPBOARD_CAP = "native-clipboard-lease-v1";
+const COPY_TICKET = "f".repeat(64);
+const hexId = (n) => n.toString(16).padStart(32, "0");
+const SELECTOR = {
+  item_id: "b".repeat(32),
+  revision: "c".repeat(64),
+  field: "password",
+};
+async function clipboardPort(options = {}, name, sender) {
+  const h = harness({ capabilities: [CLIPBOARD_CAP], ...options });
+  await ready(h);
+  return { h, port: h.emitPort(name, sender) };
+}
+test("private clipboard port: a disconnect cancels the exact prepared ticket", async () => {
+  const { h, port } = await clipboardPort();
+  assert.equal((await port.waitReady()).native, true);
+  port.post({ type: "prepare", request_id: hexId(1), ...SELECTOR });
+  const prepared = await port.waitFor((m) => m.type === "prepared");
+  assert.equal(prepared.copy_ticket, COPY_TICKET);
+  assert.equal(prepared.request_id, hexId(1));
+  const prepare = h.sent.find((x) => x.type === "prepare-copy-field");
+  assert.deepEqual(
+    [prepare.item_id, prepare.revision, prepare.field],
+    [SELECTOR.item_id, SELECTOR.revision, "password"],
+  );
+  port.post({
+    type: "commit",
+    request_id: hexId(2),
+    ...SELECTOR,
+    copy_ticket: COPY_TICKET,
+  });
+  const commit = await waitFor(
+    () => h.sent.find((x) => x.type === "commit-copy-field"),
+    "commit forward",
+  );
+  assert.deepEqual(Object.keys(commit).sort(), [
+    "capability",
+    "copy_ticket",
+    "id",
+    "type",
+    "v",
+  ]);
+  assert.equal(commit.copy_ticket, COPY_TICKET);
+  assert.equal(commit.capability, prepare.capability);
+  // No native response ever arrives: the popup closing must still revoke the
+  // pending desktop job with the one exact ticket it was given.
+  port.disconnect();
+  const cancel = await waitFor(
+    () => h.sent.find((x) => x.type === "cancel-copy-field"),
+    "cancel after disconnect",
+  );
+  assert.equal(cancel.copy_ticket, COPY_TICKET);
+  assert.equal(cancel.capability, prepare.capability);
+  assert.deepEqual(
+    h.sent.filter(
+      (x) => x.type === "item-copy-field" || x.type === "copy-field",
+    ),
+    [],
+  );
+  assert.deepEqual(
+    h.sent.filter((x) => x.type === "cancel-copy-field").length,
+    1,
+  );
+  h.deliver({
+    v: 1,
+    id: commit.id,
+    type: "copy-result",
+    copy_mode: "native",
+    copied: true,
+    copy_ticket: COPY_TICKET,
+    state: "confirmed",
+  });
+  await tick();
+  assert.equal(
+    h.sent.filter((x) => x.type === "commit-copy-field").length,
+    1,
+    "an unknown outcome is never retried",
+  );
+});
+test("private clipboard port: one preparation in flight, late ticket cancelled", async () => {
+  const { h, port } = await clipboardPort({ holdCopyPrepare: true });
+  await port.waitReady();
+  port.post({ type: "prepare", request_id: hexId(1), ...SELECTOR });
+  const prepare = await waitFor(
+    () => h.sent.find((x) => x.type === "prepare-copy-field"),
+    "prepare forward",
+  );
+  port.post({ type: "prepare", request_id: hexId(2), ...SELECTOR });
+  const refusal = await port.waitFor((m) => m.type === "refused");
+  assert.equal(refusal.request_id, "");
+  assert.equal(refusal.unknown, false);
+  assert.equal(
+    h.sent.filter((x) => x.type === "prepare-copy-field").length,
+    1,
+    "the second prepare never reaches the host",
+  );
+  port.disconnect();
+  h.deliver({
+    v: 1,
+    id: prepare.id,
+    type: "copy-prepared",
+    copy_mode: "native",
+    ...SELECTOR,
+    copy_ticket: COPY_TICKET,
+    expires_in_seconds: 10,
+    cleanup_ttl_seconds: 30,
+  });
+  const cancel = await waitFor(
+    () => h.sent.find((x) => x.type === "cancel-copy-field"),
+    "late cancel",
+  );
+  assert.equal(cancel.copy_ticket, COPY_TICKET);
+  assert.equal(
+    port.received.filter((m) => m.type === "prepared").length,
+    0,
+    "a closed port never receives a grant",
+  );
+});
+test("private clipboard port: wrong senders are dropped and IDs are bounded", async () => {
+  for (const [name, sender] of [
+    ["native-clipboard", { tab: { id: 1 } }],
+    ["native-clipboard", { url: "https://example.test" }],
+    ["other-port", {}],
+  ]) {
+    const { h, port } = await clipboardPort({}, name, sender);
+    assert.equal(port.disconnected, true, "the port is closed");
+    assert.deepEqual(port.received, []);
+    port.post({ type: "prepare", request_id: hexId(1), ...SELECTOR });
+    await tick();
+    assert.deepEqual(h.sent.filter((x) => x.type === "prepare-copy-field"), []);
+  }
+  const { h, port } = await clipboardPort();
+  await port.waitReady();
+  const refused = async (n) => {
+    await waitFor(
+      () => port.received.filter((m) => m.type === "refused").length >= n,
+      "refusal " + n,
+    );
+    return port.received.filter((m) => m.type === "refused").at(-1);
+  };
+  for (let n = 0; n < 32; n++) {
+    port.post({
+      type: "cancel",
+      request_id: hexId(n + 1),
+      copy_ticket: "0".repeat(64),
+    });
+    await port.waitFor(
+      (m) => m.type === "cancelled" && m.request_id === hexId(n + 1),
+    );
+  }
+  assert.equal(port.received.filter((m) => m.type === "cancelled").length, 32);
+  // The 33rd fresh id is refused, and a replayed old id is never accepted.
+  port.post({ type: "prepare", request_id: hexId(33), ...SELECTOR });
+  assert.equal((await refused(1)).request_id, "");
+  port.post({ type: "cancel", request_id: hexId(1), copy_ticket: "0".repeat(64) });
+  port.post({ type: "prepare", request_id: hexId(1), ...SELECTOR });
+  assert.equal((await refused(2)).request_id, "");
+  assert.equal(port.received.filter((m) => m.type === "cancelled").length, 32);
+  assert.deepEqual(h.sent.filter((x) => x.type === "prepare-copy-field"), []);
+  // A fresh port starts with its own full budget of 32 request ids.
+  const next = h.emitPort();
+  await next.waitReady();
+  for (let n = 0; n < 32; n++) {
+    next.post({
+      type: "cancel",
+      request_id: hexId(n + 33),
+      copy_ticket: "0".repeat(64),
+    });
+    await next.waitFor(
+      (m) => m.type === "cancelled" && m.request_id === hexId(n + 33),
+    );
+  }
+  assert.equal(next.received.filter((m) => m.type === "cancelled").length, 32);
 });
 
 // ---- Multi-credential conditional selection (exact child revision) ----------

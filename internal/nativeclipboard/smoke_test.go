@@ -31,8 +31,8 @@ func TestNativeClipboardSmoke(t *testing.T) {
 	if !readSmokeOwned(first, value) {
 		t.Fatal("native Unicode content mismatch")
 	}
-	if ClearOwned(first) != Cleared {
-		t.Fatal("native owned cleanup failed")
+	if ClearOwned(first) != smokeOwnedClearResult() {
+		t.Fatal("native owned cleanup result was not platform-truthful")
 	}
 	first, err = Write(value)
 	if err != nil {
@@ -42,11 +42,11 @@ func TestNativeClipboardSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatal("same-value native acquisition failed")
 	}
-	if ClearOwned(first) != Superseded || !readSmokeOwned(second, value) {
+	if ClearOwned(first) != smokeStaleClearResult() || !readSmokeOwned(second, value) {
 		t.Fatal("old lease erased same-value acquisition")
 	}
-	if ClearOwned(second) != Cleared {
-		t.Fatal("new lease cleanup failed")
+	if ClearOwned(second) != smokeOwnedClearResult() {
+		t.Fatal("new lease cleanup result was not platform-truthful")
 	}
 	first, err = Write(value)
 	if err != nil {
@@ -54,7 +54,7 @@ func TestNativeClipboardSmoke(t *testing.T) {
 	}
 	finish := startSmokeChild(t, "owner")
 	before := smokeOwnership()
-	if ClearOwned(first) != Superseded || smokeOwnership() != before {
+	if ClearOwned(first) != smokeForeignClearResult() || smokeOwnership() != before {
 		t.Fatal("foreign same-value owner was changed")
 	}
 	finish()
@@ -117,8 +117,8 @@ func smokeChild(t *testing.T, mode string) {
 			t.Fatal("child native acquisition failed")
 		}
 		finish = func() {
-			if ClearOwned(lease) != Cleared {
-				t.Fatal("child cleanup failed")
+			if ClearOwned(lease) != smokeOwnedClearResult() {
+				t.Fatal("child cleanup result was not platform-truthful")
 			}
 		}
 	}

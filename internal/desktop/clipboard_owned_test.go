@@ -34,6 +34,9 @@ func TestOwnedClipboardWriteReturnsExactPartialLease(t *testing.T) {
 }
 
 func TestBrowserClipboardManagerUsesOwnedWriterAndLockClearsGlobalLease(t *testing.T) {
+	if !nativeclipboard.NativeLeaseSupported() {
+		t.Skip("native clipboard leases are unavailable; platform fallback has separate coverage")
+	}
 	a := New()
 	f := attachFakeClipboard(a)
 	m := a.newBrowserClipboardManager()

@@ -32,6 +32,46 @@ LOCKLARK_BROWSER_HOST=/tmp/locklark-tools/locklark-browser-chromium \
 dbus-run-session -- node scripts/browser_native_acceptance.mjs
 ```
 
+## 共享桌面金库的剪贴板租约外部验收
+
+`scripts/browser_native_acceptance.mjs` 新增显式外部验收模式（不是产品测试开关）：同时设置 `LOCKLARK_TEST_SHARED_CLIPBOARD=1` 与绝对路径 `LOCKLARK_DESKTOP_HOST` 时，脚本在生成私有合成 fixture、注册真实 native host manifest 并启动固定身份扩展之后、进入原有独立宿主配对流程之前，直接转入 `scripts/browser_shared_clipboard_acceptance.mjs`。未设置该变量时原独立宿主验收路径完全不变。
+
+该模式首先在私有验收目录下创建 0700 的 `shared-environment/home` 与 `shared-environment/tmp`，并把 `HOME`、`TMPDIR`、`XDG_CONFIG_HOME`/`XDG_CACHE_HOME`/`XDG_DATA_HOME` 与显式 `LOCKLARK_BROWSER_SOCKET=<state>/shared-environment/tmp/b.sock` 组成独立环境：它同时传给 Playwright 的浏览器进程和真实 `locklark-desktop` 普通进程（无参数启动），因此浏览器启动的 native host 子进程与桌面 App 使用同一个私有 broker 端点，不会连接或影响真实用户的桌面 App/设置。启动前断言私有 HOME/配置/临时目录为空且该端点尚不存在（因此产品使用默认 30 秒清理设置、只打开本脚本生成的受控 fixture 金库），启动后断言端点已是 socket。Go fixture/注册步骤仍使用原环境，因为其输出路径都是显式私有路径。
+
+宿主随后按其正常 native-messaging 通道转发到该桌面 broker，`native-clipboard-lease-v1` 能力由实际 App 的 `NewClipboard` 工厂发布；popup 的连接不依赖任何“快捷配对”勾选。桌面解锁只通过 `scripts/browser_native_x11.py` 的真实 AT-SPI 控件、就绪状态与 XTest 物理输入完成，桌面窗口使用标题 `Locklark · 本地金库` 与桌面可执行文件，独立宿主窗口标题 `Locklark · 浏览器原生确认` 与之区分为不同 UI 宿主。
+
+popup 侧只有真实用户动作：定位实际合成登录行、打开详情、点击隐藏密码行的 `[data-field-id="password"] [data-action="copy-field"]`。脚本等待真实 DOM 复制确认，并用 `scripts/desktop_native_probe.py` 通过私有 JSON stdin 比对操作系统剪贴板；期望值只出现在私有管道中， argv、环境变量、DOM 与日志都不含该值。关闭 popup 后再次独立读取，值必须仍可粘贴。
+
+后续断言：外部独立 foreign X11 owner 由 `scripts/desktop_clipboard_owner.py` 提供（marker 也仅经私有管道），在原始 30 秒 TTL 加余量后断言 owner 与 marker 未被改写、应用未请求其它载荷、未写入空值；一次新的真实复制后通过桌面 UI 锁定，断言应用拥有的值被清除，之后出现的 foreign owner 不再被清除。迟到 prepare 场景只在点击复制前对本脚本自己启动的 App PID 发送 `SIGSTOP`，在 popup 仍等待响应时关闭 popup，始终在 `finally` 中 `SIGCONT` 并等待响应/取消，断言剪贴板保持 foreign marker、隐藏后没有发生复制。暂停只是外部进程编排，不是认证钩子；脚本不停止任何 foreign 或用户进程。
+
+失败诊断：驱动的 `catch` 在 `finally` 结束 App 之前调用 `desktopInspect`，只输出固定 `failed_stage`、公开窗口 XID 和白名单控件名的 `present`/`enabled`/`showing` 布尔值，不输出任何解锁因素、控件值、正文、命令或异常文本；随后才结束 App 与 foreign owner。
+
+原生复制判别：除真实 DOM “已复制”与 `desktop_native_probe.py` 私有 stdin 的秘密值比对之外，脚本要求 popup 可见提示为原生自动清理措辞（“已启用自动清理”），并拒绝 legacy 手动措辞（“浏览器无法保证自动清除”）；`prepared.cleanup_ttl_seconds` 只可能来自实际 App 工厂发布的原生租约，因此仅凭“复制成功文本”或同值不构成通过。
+
+隐私边界：不授予浏览器 `clipboardRead`/`clipboardWrite` 权限，不注入产品消息、不覆盖 CDP/JS 剪贴板、不设置任何隐藏状态；不读取原始因素、密钥、金库数据或剪贴板值。输出仅有固定阶段名、布尔回执和既有私有 fixture/控制器扫描。
+
+2026-11-09（香港）实测：主代理在隔离的 Linux D-Bus/Xvfb 中运行真实 Edge 和 Firefox，共享桌面金库的上述完整旅程均通过。Edge 验证源码为 `fcf2c79fa4abfc690c7624f1f4e12d553798f8b9`，Firefox 为 `9f18a7cde3daf0dc68d9308cab398d08d0a96517`；后续重放到 main `1598380` 未改变产品逻辑。回执分别为 `clipboard-real-edge-run-result.json`、`clipboard-real-firefox-run-result.json`（独立验收工作区，仅保留公开阶段与退出状态，不纳入产品包）。
+
+两者都覆盖完整因素真实 UI 解锁、隐藏密码的原生复制、popup 关闭后可粘贴、30 秒到期后 foreign owner 保留且零载荷请求、锁库只清除自有内容，以及迟到 prepare 在 popup 隐藏后取消。受控探针经真正的 POSIX FIFO 传递，未放宽原有 stdin/stdout 管道检查。Firefox 使用实际 action popup 和键盘事件，并由其 native host 转发到相同桌面 App。
+
+尚未在独立 Chrome 安装、真实 Windows/macOS 上重跑这条完整浏览器共享旅程；已有平台原生剪贴板 smoke 不替代它。#59 因这些剩余平台证据保持开放。可复跑示例（使用各环境实际工具路径）：
+
+```sh
+DISPLAY=:94 \
+LOCKLARK_TEST_PLAYWRIGHT=/workspace/locklark/web/node_modules/playwright \
+LOCKLARK_GO=/tmp/locklark-tools/go/bin/go \
+LOCKLARK_BROWSER_HOST=/tmp/locklark-tools/locklark-browser-chromium \
+LOCKLARK_DESKTOP_HOST=/tmp/locklark-tools/locklark-desktop \
+LOCKLARK_TEST_SHARED_CLIPBOARD=1 \
+dbus-run-session -- node scripts/browser_native_acceptance.mjs
+```
+
+## 独立宿主能力协商回归
+
+2026-11-09：PR #72 首轮 CI 与主代理本地真实 Edge 均在 2 MiB 附件上传处失败。原因是独立宿主的配对回执错误调用仅对共享桌面有效的能力列表，丢失了 `attachments-v1` 等原有能力，页面据此禁用上传。修复为配对/解锁回执发布原有基线，仅在实际原生管理器存在时附加剪贴板能力；独立 status 的历史语义保持不变。
+
+DeepSeek 补齐独立/共享、管理器存在/缺失及锁定状态的六组回归。主代理独立 race 检查通过（17.369 秒），相关宿主 race 批次通过（100.517 秒），Luna 确认能力边界。修复后的真实 Edge 完整普通旅程通过，包含 2 MiB 上传、下载 SHA-256 比对、删除，以及原生填充/保存/更新/OTP/Passkey。共享桌面 Edge/Firefox 的前述完整租约证据保留；本段不冒充 Windows/macOS 或最终远端提交的 CI 结果。
+
 ## 独立 review 与待验收
 
 Luna 的架构预审及最终实现复审已完成，未发现剩余阻塞项。安装路径/权限与原子发布、无关标签导航、配对前锁定通知、取消授权顺序、候选 JSON 编码预算、外置提交按钮、值后浏览器 API 无界等待与迟到状态覆盖均已修复并有回归。独立运行宿主测试、14 项扩展测试及 Windows 测试交叉编译通过；最后新增一项过期参数测试并格式化后，Sol 的 15 项 Node 测试及真实 DOM 再次通过。主代理在最终二进制上重新运行完整真实 GUI，`browser-native-e2e-final.log` 通过，合成证据目录 `/tmp/locklark-browser-acceptance-bSULDZ`。精确 PR head 远端 CI 尚待完成。已开始写管道/注入的字段无法撤回，失败或回执丢失只表示交付未知；不自动重试或声称网站接收成功。

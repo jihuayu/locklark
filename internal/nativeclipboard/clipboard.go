@@ -21,6 +21,11 @@ const (
 	Cleared Result = iota
 	Superseded
 	Unavailable
+	// ManualCleanup means this platform cannot revoke only our native owner:
+	// the lease must be dropped, no retry may be scheduled, and the user must
+	// be told to clear the system clipboard manually. It never means Cleared
+	// or Superseded and must not be reported as a confirmed cleanup.
+	ManualCleanup
 )
 
 // Lease identifies one native acquisition. It contains no publicly accessible
@@ -45,10 +50,18 @@ func Write(value []byte) (*Lease, error) {
 
 // ClearOwned revokes this provider and clears only the matching native owner.
 // Unavailable retains an opaque retryable lease; Superseded preserves the new
-// owner, even when it contains the same text. There is no foreign Read API.
+// owner, even when it contains the same text; ManualCleanup is terminal and
+// asks the user to clear the clipboard by hand. There is no foreign Read API.
 func ClearOwned(lease *Lease) Result {
 	if lease == nil {
 		return Superseded
 	}
 	return clearOwned(lease)
 }
+
+// NativeLeaseSupported reports whether ClearOwned can revoke only this
+// process's native owner without risking a foreign value. Platforms such as
+// Darwin without a public compare-and-clear operation return false; callers
+// must then use their ordinary manual-cleanup path instead of advertising an
+// automatic native lease.
+func NativeLeaseSupported() bool { return leaseSupported }

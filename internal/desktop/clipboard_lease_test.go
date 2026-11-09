@@ -15,6 +15,7 @@ type fakeClipboard struct {
 	value                    string
 	beforeWrite, beforeClear func()
 	unavailable              bool
+	manual                   bool
 }
 
 func attachFakeClipboard(a *App) *fakeClipboard {
@@ -37,6 +38,9 @@ func (f *fakeClipboard) clear(lease *nativeclipboard.Lease) nativeclipboard.Resu
 	}
 	if f.unavailable {
 		return nativeclipboard.Unavailable
+	}
+	if f.manual {
+		return nativeclipboard.ManualCleanup
 	}
 	if f.owner != lease {
 		return nativeclipboard.Superseded
@@ -156,4 +160,45 @@ func TestClipboardExpiredReplacementRetainsPartialCleanupLease(t *testing.T) {
 	}
 	f.unavailable, f.beforeWrite = false, nil
 	a.cleanupClipboard(a.clipboardPending)
+}
+
+func TestClipboardManualCleanupDropsRetryAndReportsManualStatus(t *testing.T) {
+	a := New()
+	f := attachFakeClipboard(a)
+	lease, _ := f.write([]byte("manual-value"))
+	a.recordClipboardOwner(lease, time.Now().Add(time.Minute))
+	f.manual = true
+	a.Lock()
+	if a.clipboardPending != nil || a.clipboardWarning || a.clipboardRetry != nil {
+		t.Fatal("manual cleanup retained retry or pending ownership")
+	}
+	if !a.clipboardManual {
+		t.Fatal("manual cleanup did not expose truthful manual status")
+	}
+	if f.value != "manual-value" {
+		t.Fatal("manual cleanup was reported as a destructive confirmed clear")
+	}
+	newLease, _ := f.write([]byte("next-value"))
+	a.recordClipboardOwner(newLease, time.Now().Add(time.Minute))
+	if a.clipboardManual {
+		t.Fatal("a later explicit copy retained the old manual warning")
+	}
+	a.clearClipboard()
+}
+
+func TestClipboardStatusIsTruthfulWithoutNativeCleanup(t *testing.T) {
+	darwin := clipboardStatusForOS("darwin", false, 30*time.Second)
+	if !strings.Contains(darwin, "macOS") || !strings.Contains(darwin, "无法保证自动清除") || !strings.Contains(darwin, "手动清理") {
+		t.Fatalf("Darwin copy status was not explicit/manual: %q", darwin)
+	}
+	otp := clipboardOTPCopiedStatusForOS("darwin", false)
+	if !strings.Contains(otp, "macOS") || !strings.Contains(otp, "无法保证") || !strings.Contains(otp, "手动清理") {
+		t.Fatalf("Darwin OTP status claimed a guaranteed clear: %q", otp)
+	}
+	if got := clipboardStatusForOS("linux", true, 30*time.Second); got != "已复制到系统剪贴板 · 30 秒后尝试清理" {
+		t.Fatalf("normal Linux status changed: %q", got)
+	}
+	if got := clipboardOTPCopiedStatusForOS("linux", true); got != "已复制验证码；到期尝试清理，系统剪贴板历史可能保留" {
+		t.Fatalf("normal Linux OTP status changed: %q", got)
+	}
 }

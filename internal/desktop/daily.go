@@ -237,7 +237,7 @@ func (a *App) requestOTP(purpose string) {
 						}
 					})
 				})
-				a.status = "已复制验证码；到期尝试清理，系统剪贴板历史可能保留"
+				a.status = clipboardOTPCopiedStatus()
 			} else {
 				a.hideOTP()
 				a.otpDisplay = string(code)

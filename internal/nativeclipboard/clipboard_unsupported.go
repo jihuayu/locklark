@@ -2,5 +2,7 @@
 
 package nativeclipboard
 
+const leaseSupported = false
+
 func write([]byte) (*Lease, error) { return nil, ErrUnsupported }
 func clearOwned(*Lease) Result     { return Unavailable }

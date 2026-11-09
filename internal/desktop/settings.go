@@ -250,9 +250,11 @@ func (a *App) ConfigureSettingsPath(path string) error {
 	s, err := LoadSettings(path)
 	if err != nil {
 		a.settings = DefaultSettings()
+		a.refreshClipboardClearSeconds(a.settings)
 		return err
 	}
 	a.settings = s
+	a.refreshClipboardClearSeconds(s)
 	return nil
 }
 
@@ -277,6 +279,7 @@ func (a *App) SetAutoLockMinutes(minutes int) error {
 		return err
 	}
 	a.settings = s
+	a.refreshClipboardClearSeconds(s)
 	a.touchActivity()
 	return a.SaveSettings()
 }
@@ -292,6 +295,7 @@ func (a *App) SetClipboardClearSeconds(seconds int) error {
 		return err
 	}
 	a.settings = s
+	a.refreshClipboardClearSeconds(s)
 	return a.SaveSettings()
 }
 
@@ -300,6 +304,7 @@ func (a *App) SetLockOnSleep(on bool) error {
 	s := a.settingsSnapshot()
 	s.LockOnSleep = on
 	a.settings = s.normalized()
+	a.refreshClipboardClearSeconds(a.settings)
 	return a.SaveSettings()
 }
 
@@ -307,6 +312,7 @@ func (a *App) SetLockOnScreenLock(on bool) error {
 	s := a.settingsSnapshot()
 	s.LockOnScreenLock = on
 	a.settings = s.normalized()
+	a.refreshClipboardClearSeconds(a.settings)
 	return a.SaveSettings()
 }
 
@@ -315,6 +321,7 @@ func (a *App) SetRevealPasswords(on bool) error {
 	s := a.settingsSnapshot()
 	s.RevealPasswords = on
 	a.settings = s.normalized()
+	a.refreshClipboardClearSeconds(a.settings)
 	return a.SaveSettings()
 }
 
@@ -326,6 +333,7 @@ func (a *App) ApplySettings(s Settings) error {
 		return err
 	}
 	a.settings = s
+	a.refreshClipboardClearSeconds(s)
 	a.touchActivity()
 	return a.SaveSettings()
 }
@@ -333,9 +341,37 @@ func (a *App) ApplySettings(s Settings) error {
 // idleTimeout returns the effective idle timeout.
 func (a *App) idleTimeout() time.Duration { return a.settingsSnapshot().AutoLockDuration() }
 
+// clipboardClearDuration is the non-blocking mirror of
+// security.clipboard.clearAfterSeconds. Broker connection goroutines call it
+// while holding no App state, so it never reads the UI settings struct. A
+// negative result signals an invalid mirror and every caller fails closed
+// instead of silently disabling cleanup.
+func (a *App) clipboardClearDuration() time.Duration {
+	seconds := a.clipboardClearSeconds.Load()
+	if seconds < 0 || seconds > maxClipboardClearSeconds {
+		return -1
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+// refreshClipboardClearSeconds republishes the validated preference into the
+// atomic mirror. Every settings mutation entry point and the UI start call it
+// exactly once so an accepted broker connection always sees a live value.
+func (a *App) refreshClipboardClearSeconds(s Settings) {
+	seconds := int64(s.ClipboardClearSeconds)
+	if seconds < 0 || seconds > maxClipboardClearSeconds {
+		seconds = 0
+	}
+	a.clipboardClearSeconds.Store(seconds)
+}
+
+// maxClipboardClearSeconds is the documented upper bound for automatic
+// clipboard clearing; ValidateSettings enforces the same range.
+const maxClipboardClearSeconds = 3600
+
 // clipboardTimeout returns the effective clipboard lease duration.
 func (a *App) clipboardTimeout() time.Duration {
-	return a.settingsSnapshot().ClipboardClearDuration()
+	return a.clipboardClearDuration()
 }
 
 // touchActivity records an explicit user interaction for idle auto-lock.

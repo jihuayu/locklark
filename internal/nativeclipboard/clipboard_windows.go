@@ -15,6 +15,8 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+const leaseSupported = true
+
 var globalLockOnce sync.Once
 var globalLockPointer func(uintptr) unsafe.Pointer
 

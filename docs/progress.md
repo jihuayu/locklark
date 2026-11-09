@@ -1,4 +1,4 @@
-> 2026-11-09（香港）更新：PR #61、#62 已合并；主线为 `fcbb6c6`。#62 的六项精确提交检查全部通过，macOS 实际运行 77 项 Swift 测试、原生 audit-token/SIGPIPE 探针和 Xcode 构建。整合 E2E 为 215 项：183 PASS、32 PENDING、0 FAIL，七项 F6 真实终端流程通过。原始 SSH typed 创建的八项 F6 真实终端用例全部通过；同父项多 Passkey、共享桌面剪贴板和迁移仍在各功能分支验收；CLI HIBP 的 PR #67 已重放到新主线，等待新 head 的 CI。逐项证据与未完成范围以[遗留 issues 实现台账](all-issues-implementation-ledger.md)为准；下文旧日期中的“仅剩一个 issue”或旧 E2E 总数为历史记录。
+> 2026-11-09（香港）更新：PR #61、#62、#67、#68、#70 已合并，当前主线 `20f3f25`；#63 typed SSH 文件导入和 #66 显式 HIBP 已关闭。多 Passkey 的真实 Edge/Firefox 完整旅程通过，PR #71 正在新 head 重新检查；共享桌面原生剪贴板的真实 Edge/Firefox 完整旅程通过，正在提交独立 PR。iOS 曾将正向保护预检失败转换为绿色状态，此结果不代表正向验收；已合并的 PR #70 修正 CI，缺少保护能力的运行环境与真实设备证据由 #69 跟踪。整合 E2E 原报告仍是 215 项：183 PASS、32 PENDING、0 FAIL；八项 F6 真实终端增量证据单列，未冒充全量重跑。CLI broker、跨设备导入和结算框架填充仍在实现。详见[遗留 issues 台账](all-issues-implementation-ledger.md)。
 
 # Locklark 开发进度
 
