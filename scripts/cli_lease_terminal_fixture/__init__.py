@@ -11,6 +11,15 @@ that importing the package (or letting ``unittest`` discovery probe it) never
 touches ``fcntl``/``pty``/``termios`` and never spawns a process. On Windows the
 package stays importable; a real ``TerminalSession`` is still kernel-proofed on
 POSIX hosts, never faked.
+
+``__dir__`` only advertises names that are currently bound in the module
+namespace. ``unittest.TestLoader.loadTestsFromModule`` walks ``dir(module)`` and
+``getattr``s every advertised name, so advertising the unresolved exports would
+force the POSIX implementation (and therefore ``fcntl``/``pty``/``termios``) on a
+bare discovery import. The public surface is unchanged: ``__all__`` still lists
+every export, ``from cli_lease_terminal_fixture import TerminalSession`` and any
+explicit attribute access still resolve the real object on first use, and a
+blocked host still raises the genuine ``ImportError`` instead of pretending.
 """
 import importlib
 
@@ -30,4 +39,5 @@ def __getattr__(name):
 
 
 def __dir__():
-    return sorted(set(globals()) | _EXPORTED_NAMES)
+    """Advertise only names already loaded; lazy exports stay unadvertised."""
+    return sorted(globals())
