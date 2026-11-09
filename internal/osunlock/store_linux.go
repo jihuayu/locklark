@@ -6,6 +6,9 @@ type keyring struct{}
 
 func New() Store    { return keyring{} }
 func Label() string { return "系统钥匙串" }
+func Biometry() string {
+	return "Secret Service"
+}
 func Description() string {
 	return "由 Secret Service 保护；已解锁的系统钥匙串可能不再次提示，同一系统用户的其他程序可能有权读取。24 小时后需完整解锁。"
 }

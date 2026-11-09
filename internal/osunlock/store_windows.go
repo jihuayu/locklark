@@ -21,6 +21,9 @@ type hello struct{}
 
 func New() Store    { return hello{} }
 func Label() string { return "Windows Hello" }
+func Biometry() string {
+	return "Windows Hello"
+}
 func Description() string {
 	return "使用 Windows Hello 保护的密钥解锁；人脸、指纹或系统 PIN 由 Windows 验证。24 小时后需完整解锁。"
 }

@@ -56,20 +56,28 @@ int ll_passkey_load(const char *id, unsigned char **value, long *n) {
 	CFTypeRef contextRef = LL_CONTEXT_RETAIN(context);
 	CFMutableDictionaryRef query = ll_passkey_query(id);
 	CFTypeRef item = NULL;
-	int status = -1;
+	OSStatus status = errSecParam;
 	if (contextRef && query) {
 		CFDictionarySetValue(query, kSecReturnData, kCFBooleanTrue);
 		CFDictionarySetValue(query, kSecMatchLimit, kSecMatchLimitOne);
 		CFDictionarySetValue(query, kSecUseAuthenticationContext, contextRef);
-		if (SecItemCopyMatching(query, &item) == errSecSuccess && item && CFGetTypeID(item) == CFDataGetTypeID()) {
-			CFIndex length = CFDataGetLength((CFDataRef)item);
-			if (length > 0 && length <= LL_PASSKEY_MAX) {
-				unsigned char *copy = malloc((size_t)length);
-				if (copy) {
-					memcpy(copy, CFDataGetBytePtr((CFDataRef)item), (size_t)length);
-					*value = copy;
-					*n = (long)length;
-					status = 0;
+		status = SecItemCopyMatching(query, &item);
+		if (status == errSecSuccess) {
+			if (!item || CFGetTypeID(item) != CFDataGetTypeID()) {
+				status = errSecParam;
+			} else {
+				CFIndex length = CFDataGetLength((CFDataRef)item);
+				if (length <= 0 || length > LL_PASSKEY_MAX) {
+					status = errSecParam;
+				} else {
+					unsigned char *copy = malloc((size_t)length);
+					if (!copy) {
+						status = errSecAllocate;
+					} else {
+						memcpy(copy, CFDataGetBytePtr((CFDataRef)item), (size_t)length);
+						*value = copy;
+						*n = (long)length;
+					}
 				}
 			}
 		}

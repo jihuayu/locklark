@@ -23,7 +23,9 @@ func TestSystemUnlockMessagesAreActionable(t *testing.T) {
 		{name: "missing entitlement", err: errors.Join(personal.ErrSystemUnlockUnavailable, osunlock.ErrMissingEntitlement), want: "签名权限"},
 		{name: "unavailable", err: personal.ErrSystemUnlockUnavailable, want: "系统快捷解锁不可用"},
 		{name: "cancelled", err: osunlock.ErrCancelled, want: "已取消"},
-		{name: "interaction not allowed", err: osunlock.ErrInteractionNotAllowed, want: "当前不可用"},
+		{name: "auth failed", err: osunlock.ErrAuthFailed, want: "未通过"},
+		{name: "keychain unavailable", err: osunlock.ErrNotAvailable, want: "暂不可用"},
+		{name: "interaction not allowed", err: osunlock.ErrInteractionNotAllowed, want: "无法显示"},
 		{name: "actually locked", err: personal.ErrSessionLocked, want: "金库已锁定"},
 	}
 	for _, tc := range cases {

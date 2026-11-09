@@ -9,24 +9,72 @@ package osunlock
 */
 import "C"
 
-import "unsafe"
+import (
+	"sync"
+	"unsafe"
+)
 
 // Native status codes returned by Security.framework. They are mapped to
 // fixed Go errors below so callers can distinguish a signed-code/keychain
-// configuration failure from a locked vault or a dismissed prompt.
+// configuration failure from a locked vault, a dismissed prompt or a failed
+// Touch ID match.
 const (
 	statusUserCanceled          = -128
-	statusInteractionNotAllowed = -25308
+	statusNotAvailable          = -25291
+	statusAuthFailed            = -25293
 	statusItemNotFound          = -25300
+	statusInteractionNotAllowed = -25308
+	statusInteractionRequired   = -25315
 	statusMissingEntitlement    = -34018
+	statusServiceNotAvailable   = -67585
 )
 
 type keychain struct{}
 
-func New() Store    { return keychain{} }
-func Label() string { return "Touch ID / 系统密码" }
+func New() Store { return keychain{} }
+
+var (
+	biometryOnce sync.Once
+	biometryName string
+)
+
+// Biometry reports what the user-presence prompt can use on this Mac. It never
+// prompts: canEvaluatePolicy only inspects local capability. The value is
+// cached because Label and Description are rendered together and Touch ID
+// enrollment changes require an app restart to take effect.
+func Biometry() string {
+	biometryOnce.Do(func() {
+		switch int(C.ll_biometry_available()) {
+		case 2:
+			biometryName = "Touch ID"
+		case 1:
+			biometryName = "系统密码"
+		default:
+			biometryName = "不可用"
+		}
+	})
+	return biometryName
+}
+
+func Label() string {
+	switch Biometry() {
+	case "Touch ID":
+		return "Touch ID / 系统密码"
+	case "系统密码":
+		return "系统密码"
+	default:
+		return "系统验证"
+	}
+}
 func Description() string {
-	return "系统钥匙串要求用户验证（Touch ID 或系统密码），仅存于本设备。24 小时后需完整解锁。"
+	switch Biometry() {
+	case "Touch ID":
+		return "系统钥匙串要求 Touch ID 或系统密码验证，仅存于本设备。24 小时后需完整解锁。"
+	case "系统密码":
+		return "此 Mac 当前未检测到可用的 Touch ID；系统钥匙串使用系统密码验证，仅存于本设备。24 小时后需完整解锁。"
+	default:
+		return "此 Mac 当前没有可用的系统用户验证；系统快捷解锁不可用，请使用完整解锁。"
+	}
 }
 
 // Requirement explains the platform prerequisite in user-facing terms. The
@@ -40,11 +88,15 @@ func nativeError(status int) error {
 	switch status {
 	case statusUserCanceled:
 		return ErrCancelled
+	case statusNotAvailable, statusServiceNotAvailable:
+		return ErrNotAvailable
+	case statusAuthFailed:
+		return ErrAuthFailed
 	case statusItemNotFound:
 		return ErrNotFound
 	case statusMissingEntitlement:
 		return ErrMissingEntitlement
-	case statusInteractionNotAllowed:
+	case statusInteractionNotAllowed, statusInteractionRequired:
 		return ErrInteractionNotAllowed
 	default:
 		return ErrUnavailable
