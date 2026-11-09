@@ -99,6 +99,14 @@ export async function acceptConditionalSibling({
   assert.equal(observe().snapshot_digest, before.snapshot_digest,
     "Conditional sibling selection changed the vault snapshot before the selected get");
   phase("passkey-conditional:select-second-sibling");
+  // noApproval() is a native control inspection: the XTest driver raises and
+  // focuses the native app window, and the browser-side coordinate probe cannot
+  // see that overlapping window. Browser focus must therefore be the last focus
+  // action, with a fresh probe of the selector, before the single physical
+  // selection below.
+  await focusPage();
+  await eventually(() => inlinePresent(secondLabel),
+    "Second sibling conditional choice missing after restoring browser focus", 20000);
   await inlineClick(secondLabel);
   input([...factors, {
     click_label: passkeyChoiceLabel({
@@ -206,6 +214,9 @@ export async function acceptConditionalPasskey({
   phase("passkey-conditional:select-account");
   const challenge = await start("selected-account");
   await clickDocument("#username");
+  // The click above already restores browser focus; repeat it as the last focus
+  // action so the single physical selection can never follow a native snapshot.
+  await focusPage();
   await inlineClick(label);
   input([
     { wait_label: "验证主密码" }, { click_label: "验证主密码" }, { text: fixture.Password },

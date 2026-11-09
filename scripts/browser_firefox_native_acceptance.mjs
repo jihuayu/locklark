@@ -23,7 +23,6 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  readdirSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -287,6 +286,8 @@ function input(actions, native = true, options = {}) {
           "拒绝保存登录",
           "批准更新登录",
           "拒绝更新登录",
+          "验证主密码",
+          "验证 Secret Key",
         ];
         const controls = Object.fromEntries(
           labels.map((label) => {
@@ -301,40 +302,11 @@ function input(actions, native = true, options = {}) {
             ];
           }),
         );
+        // Only public native control presence/enabled/showing is reported:
+        // no field values, no process state, no exception bodies.
         console.error("Native control state: " + JSON.stringify(controls));
       } catch {
         console.error("Native control inspection unavailable");
-      }
-      for (const pid of readdirSync("/proc").filter((value) =>
-        /^[0-9]+$/.test(value),
-      )) {
-        try {
-          if (
-            readFileSync("/proc/" + pid + "/cmdline")
-              .toString()
-              .split("\0")[0] !== host
-          )
-            continue;
-          const environment = Object.fromEntries(
-            readFileSync("/proc/" + pid + "/environ")
-              .toString()
-              .split("\0")
-              .filter(Boolean)
-              .map((item) => {
-                const offset = item.indexOf("=");
-                return [item.slice(0, offset), item.slice(offset + 1)];
-              }),
-          );
-          console.error(
-            "Native accessibility environment: " +
-              JSON.stringify({
-                initialBridgeDisabled: environment.NO_AT_BRIDGE === "1",
-                hasA11ySetting: !!environment.GTK_A11Y,
-                hasSessionBus: !!environment.DBUS_SESSION_BUS_ADDRESS,
-                displayMatches: environment.DISPLAY === env.DISPLAY,
-              }),
-          );
-        } catch {}
       }
     }
     throw error;

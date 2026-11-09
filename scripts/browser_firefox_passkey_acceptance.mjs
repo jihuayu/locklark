@@ -456,6 +456,22 @@ export async function acceptFirefoxPasskey(driver) {
     return { found: false, strategies };
   };
   const inlinePoint = probeInline;
+  // The physical click is bare XTest and its point comes from page geometry, so
+  // a native window raised above the browser (for example by a native control
+  // snapshot) would receive the click instead of the inline control. Require the
+  // browser content to be the foreground document immediately before that one
+  // click; this gate never retries the click and never touches native approval.
+  const inlineForeground = async () => {
+    try {
+      return (
+        (await pageEval(
+          () => document.hasFocus() === true && document.visibilityState === "visible",
+        )) === true
+      );
+    } catch {
+      return false;
+    }
+  };
   const clickInline = async (label) => {
     let found;
     try {
@@ -481,6 +497,7 @@ export async function acceptFirefoxPasskey(driver) {
       found.width > 8 && found.height > 8 && found.x > 0 && found.y > 0,
       "PasskeyFailure:inline-geometry:" + label,
     );
+    assert(await inlineForeground(), "PasskeyFailure:inline-foreground:" + label);
     clickScreen(found.x, found.y);
     return found.strategy;
   };
