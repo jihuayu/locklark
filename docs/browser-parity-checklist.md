@@ -1,8 +1,8 @@
 # 浏览器插件当前功能与 1:1 对照清单
 
-更新：2026-11-07。本批已合并起点 main 9cbc34c（[PR #48](https://github.com/jihuayu/locklark/pull/48)），含 PR #44–48。条件式/共存已合并，见[验收](conditional-passkey-validation.md)；下一批 Signal APIs、逐次系统 UV、公共站点组件和未签名发布准备见[综合验收](browser-completion-validation.md)。未取得固定参考版本逐项对照结果。 本轮 UI、元数据刷新性能与安全修补从 main 38c8324 接续，见[专项验收](ui-performance-security-validation.md)；原未关闭范围已拆到 #50–#59，#39 仍开放。
+更新：2026-11-09。本批已合并起点 main 9cbc34c（[PR #48](https://github.com/jihuayu/locklark/pull/48)），含 PR #44–48。条件式/共存已合并，见[验收](conditional-passkey-validation.md)；下一批 Signal APIs、逐次系统 UV、公共站点组件和未签名发布准备见[综合验收](browser-completion-validation.md)。未取得固定参考版本逐项对照结果。 本轮 UI、元数据刷新性能与安全修补从 main 38c8324 接续，见[专项验收](ui-performance-security-validation.md)；原未关闭范围已拆到 #50–#59，#39 仍开放。
 
-旧清单基于 `8e61dc1` 和当时未合并的 PR #40；其中“39 项未实现”“没有 v2 协议/共享会话”等结论已过时。完整参考分析、65 项稳定 ID、行为约定和当时的结果保存在[历史快照](history/browser-parity-m3-baseline-2026-11-06.md)，不再作为当前缺口统计。
+旧清单基于 `8e61dc1` 和当时未合并的 PR #40；其中“39 项未实现”“没有 v2 协议/共享会话”等结论已过时。完整参考分析、65 项稳定 ID、行为约定和当时的结果保存在[历史快照](history/browser-parity-m3-baseline-2026-11-06.md)，不再作为当前缺口统计。机器可读的 65 行映射见[证据映射](browser-parity-evidence.json)，由 `scripts/check_browser_parity_evidence.py` 校验；除 B13.3 的既有经确认差异外，参考状态仍为未对照。
 
 ## 状态与证据
 
@@ -10,7 +10,7 @@
 
 - 参考行为基线仍为历史记录的 1Password `8.12.44.33`；当前没有新的参考截图/安装版逐任务对照。只按行为清单开发，不复制其代码、品牌或素材。
 - PR #44 的最终开发 head `faf4732` 六项 CI 通过后 squash 合入上述 main；附件、显式清空、172 项扩展测试、206 项 E2E 以及真实 Chromium/Edge/Firefox 范围见[插件收尾验收](plugin-completion-validation.md)。以下 PR #43 的 run 保留为上一阶段证据。
-- [检查 run](https://github.com/jihuayu/locklark/actions/runs/42315487787)、[移动 run](https://github.com/jihuayu/locklark/actions/runs/42315487747)。iOS 通过的是保护能力不足时的拒绝路径，不能称完整真机成功。
+- [检查 run](https://github.com/jihuayu/locklark/actions/runs/42315487787)、[移动 run](https://github.com/jihuayu/locklark/actions/runs/42315487747)。iOS 只覆盖保护能力不足时的拒绝路径；PR #69/#70 保持正向保护失败为红色的门槛检查也不等于完整真机成功。
 - 对应实现与测试：`content.js`、`core.js`、`background.js`、`popup.js`、`options.js`、`test/m3_fill_v2.test.js`、`test/host_v2_contract.test.js`，以及 `internal/browserhost` / `internal/personal`。具体实际命令与边界见 [M6 集成验收](m6-integration-validation.md)。
 
 ## 当前逐项清单
@@ -43,7 +43,7 @@
 | B6.4 | Generated-password history and staged recovery | 已实现未对照 | 当前代码已有对应实现；单测/DOM/原生验收见下方证据，尚无固定参考版本逐项对照结果。 |
 | B9.1 | Popup vault search bar | 已实现未对照 | 当前代码已有对应实现；单测/DOM/原生验收见下方证据，尚无固定参考版本逐项对照结果。 |
 | B9.2 | Suggested / All Items / Favorites / Categories tabs | 已实现未对照 | 当前代码已有对应实现；单测/DOM/原生验收见下方证据，尚无固定参考版本逐项对照结果。 |
-| B9.3 | Item detail view | 已实现未对照 | 持久化详情/编辑及按次取值已通过真实 Chromium；附件与显式清空在本轮补齐并另记结果。 |
+| B9.3 | Item detail view | 已实现未对照 | 持久化详情/编辑及按次取值已通过真实 Chromium；附件与显式清空在本轮补齐并另记结果。剪贴板所有权 PR #72 的真实 Edge/Firefox 检查仍待完成，不能把 Chromium 结果外推。 |
 | B9.4 | Create and edit items in the popup | 已实现未对照 | 持久化详情/编辑及按次取值已通过真实 Chromium；附件与显式清空在本轮补齐并另记结果。 |
 | B9.5 | Popup header lock | 已实现未对照 | 当前代码已有对应实现；单测/DOM/原生验收见下方证据，尚无固定参考版本逐项对照结果。 |
 | B10.1 | Open popup shortcut | 已实现未对照 | 当前代码已有对应实现；单测/DOM/原生验收见下方证据，尚无固定参考版本逐项对照结果。 |
@@ -69,7 +69,7 @@
 | B3.5 | `excludeCredentials`/`allowCredentials` and overwrite prevention | 已实现未对照 | 当前代码已有对应实现；单测/DOM/原生验收见下方证据，尚无固定参考版本逐项对照结果。 |
 | B3.6 | Browser fallback and cancellation | 已实现未对照 | 当前代码已有对应实现；单测/DOM/原生验收见下方证据，尚无固定参考版本逐项对照结果。 |
 | B13.1 | Conditional UI | 已实现未对照 | 本批新增 metadata-only 账户列表、能力接口、开放 Shadow DOM 焦点、无提前批准和期限/取消/断连清理；Chromium/Edge/Firefox 实际组合旅程通过。参考版本对照仍待完成，见条件式验收。 |
-| B13.2 | Passkey management and separate removal | 已实现未对照 | 弹窗服务端筛选、RP/账号元数据、明确确认/取消和独立删除；Chromium/Edge/Firefox 真实双账号、其他字段保留、另一凭据签名及重连已通过。每条登录一个凭据，多账号分条目管理；同条目多凭据迁移未做，远端检查见本轮验收。 |
+| B13.2 | Passkey management and separate removal | 已实现未对照 | 弹窗服务端筛选、RP/账号元数据、明确确认/取消和独立删除；既有双账号旅程记录不覆盖 PR #71 的同父项多凭据范围。PR #71 的实现与测试已完成，真实 Edge/Firefox 检查待 CI，不能先记为通过。每条登录一个凭据，多账号分条目管理；同条目多凭据迁移未做，远端检查见本轮验收。 |
 | B13.3 | Advanced WebAuthn extensions, algorithms, related origins, signal APIs | 经用户确认的差异 | 沿用历史清单记录的 P2 差异：高级算法/扩展走原生认证器回退；本批补 RS256/EdDSA-only、enterprise attestation 和超长算法列表的回退回归，Edge 其他软件验证器实际签名共存通过。本批已实现已有原生 Signal APIs 的 owner 确认流程，相关来源/非本域 RP 委托浏览器；Chrome/Edge 真实 Signal 验收通过。高级能力回退不是本地实现全部扩展，见综合验收；原历史决定见 §6.3。 |
 | B14.1 | Truthful user verification | 已实现未对照 | 当前代码已有对应实现；单测/DOM/原生验收见下方证据，尚无固定参考版本逐项对照结果。 |
 | B14.2 | Windows Hello / Touch ID biometric prompt | 已实现未对照 | 本批接入每次新鲜系统保护 capsule 的 Passkey 验证，等待后重新核验请求；fake adapter 与 race 通过，真实 Hello/Touch ID 提示、拒绝及硬件失效仍待验收。 |
@@ -79,7 +79,7 @@
 | B4.4 | Standalone fallback when desktop is not running | 已实现未对照 | 共享会话/单独宿主路径已有；锁库撤销测试通过，跨平台完整交互仍待对照。 |
 | B16.1 | Chromium/Edge MV3 manifest and native registration | 已实现未对照 | Chromium 及独立 Edge 157 的真实原生流程、附件/清空、填充/保存/更新/OTP、快捷配对/自动登录/Passkey 均实跑通过；发布安装仍待验证。 |
 | B16.2 | Firefox MV3 manifest and native acceptance | 已实现未对照 | Firefox 填充/保存/更新/OTP 及新增 Passkey 创建/断言/签名验证/取消/回退分别实跑通过，范围及最终 CI 见本轮验收。 |
-| B16.3 | macOS Safari Web Extension | 未实现 | Safari 需要 macOS Web Extension 适配及实测；不能以 Linux 不适用关闭产品要求。 |
+| B16.3 | macOS Safari Web Extension | 已实现未对照 | Safari Web Extension 清单、`safari-native-port.js` 传输与 Swift 宿主已存在；真实 macOS job `128804121932` 通过 77 项 Swift 测试、系统探针及 Xcode app/extension **未签名**构建。尚无签名安装、实际 Safari 加载/生命周期或固定参考对照，不能以构建通过关闭。 |
 | B17.1 | Commands (`_execute_action`, autofill, lock) | 已实现未对照 | 当前代码已有对应实现；单测/DOM/原生验收见下方证据，尚无固定参考版本逐项对照结果。 |
 | B17.2 | Connection status, pairing UX, onboarding | 已实现未对照 | 共享会话/单独宿主路径已有；锁库撤销测试通过，跨平台完整交互仍待对照。 |
 
@@ -87,6 +87,6 @@
 
 附件上传/下载/删除、未读取备注及隐藏自定义字段的显式清空，在 [插件收尾验收](plugin-completion-validation.md) 记录实际结果。未运行的流程不能仅凭代码或新按钮记为通过。
 
-仍开放：Safari；各浏览器的 Windows/macOS 原生组合；同一登录条目的多凭据管理；真实系统生物识别；更多站点和输入框兼容性；签名、商店分发与自动更新。条件式账号列表已实现并完成三浏览器受控验收；公共站点精简 fixture 与未签名准备已有证据，不能代替实际站点账户或签名分发验收。已实现范围的完整参考对照仍需逐项关闭。
+仍开放：Safari；各浏览器的 Windows/macOS 原生组合；同一登录条目的多凭据管理；真实系统生物识别；更多站点和输入框兼容性；签名、商店分发与自动更新。条件式账号列表已实现并完成三浏览器受控验收；公共站点精简 fixture 与未签名准备已有证据，不能代替实际站点账户或签名分发验收。已实现范围的完整参考对照仍需逐项关闭。真实 NVDA/VoiceOver/JAWS、操作系统缩放/高对比度、固定参考安装及外部 owner 验收仍开放（#57）；自动化驱动已加入 `scripts/browser_accessibility_acceptance.mjs`，但主代理尚未运行，不得据此声称通过。
 
 新结果应更新本表相应行及精确提交/平台证据；旧版本计数、E2E 的能力探针通过和 CI 绿色均不能代替完整产品任务验收。
