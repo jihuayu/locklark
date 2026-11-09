@@ -725,7 +725,7 @@ func (a *App) lockView(c *ui.Context) {
 }
 func (a *App) vaultView(c *ui.Context) {
 	ui.Row(c).Gap(8).Children(func() {
-		for _, tab := range []struct{ id, label string }{{"vault", "金库"}, {"ssh", "SSH 密钥"}, {"activity", "活动"}, {"health", "体检"}, {"transfer", "导入与导出"}, {"security", "安全设置"}} {
+		for _, tab := range []struct{ id, label string }{{"vault", "金库"}, {"ssh", "SSH 密钥"}, {"activity", "活动"}, {"health", "体检"}, {"transfer", "导入与导出"}} {
 			tab := tab
 			ui.Button(c, tab.label).OnClick(func() {
 				a.clearNotesEditor()
