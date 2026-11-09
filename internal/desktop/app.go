@@ -23,6 +23,8 @@ import (
 	"github.com/jihuayu/locklark/internal/osunlock"
 	"github.com/jihuayu/locklark/internal/personal"
 	"github.com/jihuayu/locklark/internal/sshagent"
+	"github.com/oneo-me/onevra/source/shells/plain"
+	"github.com/oneo-me/onevra/source/theme"
 )
 
 type outcome struct {
@@ -103,6 +105,7 @@ type App struct {
 	// session boundary; settings are non-secret and survive lock.
 	v2             v2State
 	v2Mode         bool
+	onevra         onevraUI
 	settings       Settings
 	settingsPath   string
 	settingsLoaded bool
@@ -122,6 +125,7 @@ func New() *App {
 	a.settingsLoaded = true
 	a.v2 = newV2State()
 	a.refreshClipboardClearSeconds(a.settings)
+	a.onevra = newOnevraUI()
 	return a
 }
 func (a *App) run(work func() outcome) { a.runContext(func(context.Context) outcome { return work() }) }
@@ -395,6 +399,7 @@ func (a *App) Lock() {
 	}
 	a.clearDailyExposure()
 	a.resetV2()
+	a.onevra.resetOnevra()
 	a.v2Mode = false
 	a.lastActivity = time.Time{}
 }
@@ -636,6 +641,10 @@ func (a *App) View(c *ui.Context) {
 		ui.Column(c.Key(a.generation)).Fill().Padding(24).Gap(16).Children(func() { a.cliApprovalView(c) })
 		return
 	}
+	if a.session != nil && a.sshApproval == nil && a.browser == nil && !a.quick.open && a.v2Mode && a.page == "vault" {
+		a.v2View(c)
+		return
+	}
 	ui.Column(c.Key(a.generation)).Fill().Padding(24).Gap(16).Children(func() {
 		ui.Row(c).Gap(12).Children(func() {
 			ui.Text(c, "LOCKLARK").FontSize(24).Bold()
@@ -655,8 +664,6 @@ func (a *App) View(c *ui.Context) {
 			a.browserView(c)
 		} else if a.quick.open {
 			a.quickSearchView(c)
-		} else if a.v2Mode && a.page == "vault" {
-			a.v2View(c)
 		} else {
 			a.vaultView(c)
 		}
@@ -933,7 +940,19 @@ func Run() error {
 	a.refreshClipboardClearSeconds(a.settingsSnapshot())
 	mygo.App.SetName("Locklark")
 	mygo.App.WhenReady(func() {
-		a.win = mygo.NewWindow(mygo.WindowOptions{Title: "Locklark · 本地金库", Width: 1100, Height: 820, MinWidth: 900, MinHeight: 680, Content: ui.View(a.View)})
+		shell := plain.NewShell(plain.ShellOptions{
+			Title:         "Locklark · 本地金库",
+			Width:         1240,
+			Height:        820,
+			MinWidth:      980,
+			MinHeight:     680,
+			StateKey:      "locklark.main",
+			Theme:         theme.Onevra,
+			HeaderLeading: a.onevraHeaderLeading,
+			HeaderActions: a.onevraHeaderActions,
+			Content:       a.View,
+		})
+		a.win = shell.Window()
 		a.dispatch = a.win.Update
 		a.win.OnClose(func(*mygo.CloseEvent) { a.Lock() })
 		a.clipboardWrite = nativeclipboard.Write

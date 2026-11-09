@@ -27,7 +27,7 @@ const (
 
 func cliTestDir(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
+	dir := newPrivateCLITestDir(t)
 	if err := os.Chmod(dir, 0700); err != nil {
 		t.Fatal("private directory unavailable")
 	}

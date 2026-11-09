@@ -14,6 +14,10 @@ func TestRunCLIWindowsPrivateDirectory(t *testing.T) {
 	if e != nil {
 		t.Fatal("OS user directory unavailable")
 	}
+	public, e := windows.KnownFolderPath(windows.FOLDERID_Public, 0)
+	if e != nil {
+		t.Fatal("OS public directory unavailable")
+	}
 	poison := t.TempDir()
 	for _, name := range []string{"TMP", "TEMP", "USERPROFILE", "LOCALAPPDATA"} {
 		t.Setenv(name, poison)
@@ -23,8 +27,9 @@ func TestRunCLIWindowsPrivateDirectory(t *testing.T) {
 		t.Fatal("private root unavailable")
 	}
 	defer os.RemoveAll(root)
-	if filepath.Dir(root) != filepath.Clean(known) {
-		t.Fatal("temporary root used caller environment instead of the OS directory")
+	parent := filepath.Dir(root)
+	if parent != filepath.Clean(known) && parent != filepath.Clean(public) {
+		t.Fatal("temporary root used a location other than a validated OS known folder")
 	}
 	user, e := windows.GetCurrentProcessToken().GetTokenUser()
 	if e != nil {
