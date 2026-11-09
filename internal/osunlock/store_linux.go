@@ -9,6 +9,9 @@ func Label() string { return "系统钥匙串" }
 func Description() string {
 	return "由 Secret Service 保护；已解锁的系统钥匙串可能不再次提示，同一系统用户的其他程序可能有权读取。24 小时后需完整解锁。"
 }
+func Requirement() string {
+	return "需要当前桌面会话提供 Secret Service；已解锁的钥匙串可能不会逐次要求用户验证。"
+}
 func (keyring) Store(id string, b []byte) error {
 	if !validID(id) || len(b) > mygo.MaxSecretSize {
 		return ErrUnavailable

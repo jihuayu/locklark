@@ -193,6 +193,18 @@ func message(e error) string {
 		return "条目已在其他操作中变更，请刷新后重试"
 	case errors.Is(e, personal.ErrTrashed):
 		return "条目在回收站中，请先恢复"
+	case errors.Is(e, personal.ErrSystemUnlockExpired):
+		return "系统快捷解锁已过期；请重新完整解锁后主动启用"
+	case errors.Is(e, osunlock.ErrNotFound):
+		return "尚未启用系统快捷解锁；请先完整解锁并在安全设置启用"
+	case errors.Is(e, osunlock.ErrMissingEntitlement):
+		return "系统钥匙串缺少签名权限；此构建无法使用 Touch ID，请使用主密码与 Secret Key"
+	case errors.Is(e, osunlock.ErrCancelled):
+		return "系统验证已取消；可继续使用主密码与 Secret Key"
+	case errors.Is(e, osunlock.ErrInteractionNotAllowed):
+		return "系统钥匙串当前不可用；解锁 Mac 后重试，或使用主密码与 Secret Key"
+	case errors.Is(e, personal.ErrSystemUnlockUnavailable):
+		return "系统快捷解锁不可用；需要系统密钥服务与正确权限，请使用主密码与 Secret Key"
 	case errors.Is(e, personal.ErrSessionLocked):
 		return "金库已锁定，请重新解锁"
 	default:
@@ -695,6 +707,7 @@ func (a *App) lockView(c *ui.Context) {
 			ui.PrimaryButton(c, "解锁").Disabled(a.busy).OnClick(a.unlock)
 			ui.Button(c, "使用"+osunlock.Label()+"解锁").Disabled(a.busy || a.path == "").OnClick(a.systemUnlock)
 			ui.Text(c, "需先完整解锁并在安全设置启用；失败时可继续使用主密码与 Secret Key。")
+			ui.Text(c, osunlock.Requirement()).FontSize(12)
 		}
 		label := "创建新金库"
 		if a.create {
@@ -989,6 +1002,7 @@ func (a *App) securityView(c *ui.Context) {
 	ui.Text(c, shortcut)
 	ui.Text(c, "快捷解锁："+osunlock.Label()).Bold()
 	ui.Text(c, osunlock.Description())
+	ui.Text(c, osunlock.Requirement()).FontSize(12)
 	ui.Text(c, "首次或到期后使用主密码与 Secret Key 完整解锁，再主动启用。系统验证失败时保留完整解锁入口。")
 	ui.Button(c, "启用系统快捷解锁（有效期 24 小时）").Disabled(a.busy).OnClick(func() {
 		s, store := a.session, a.systemStore

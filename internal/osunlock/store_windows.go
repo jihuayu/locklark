@@ -24,6 +24,9 @@ func Label() string { return "Windows Hello" }
 func Description() string {
 	return "使用 Windows Hello 保护的密钥解锁；人脸、指纹或系统 PIN 由 Windows 验证。24 小时后需完整解锁。"
 }
+func Requirement() string {
+	return "需要 Windows Hello 与 Passport KSP；系统未配置 Hello 时只能使用完整解锁。"
+}
 
 var ncrypt = windows.NewLazySystemDLL("ncrypt.dll")
 var nOpen = ncrypt.NewProc("NCryptOpenStorageProvider")

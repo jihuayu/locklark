@@ -19,8 +19,11 @@
 #define LL_OBJC_RELEASE(object) [(object) release]
 #endif
 
-// Same scoped quick-unlock record as ll_query in store_darwin.go. This helper
-// never creates, replaces or migrates the record.
+// Same scoped quick-unlock record as ll_unlock_query in store_darwin.m. This
+// helper never creates, replaces or migrates the record. The explicit
+// kSecUseDataProtectionKeychain flag is required because access-control items
+// and access groups belong to the data protection keychain, not the legacy
+// login keychain.
 static CFMutableDictionaryRef ll_passkey_query(const char *id) {
 	CFMutableDictionaryRef query = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
 	if (!query) return NULL;
@@ -32,19 +35,21 @@ static CFMutableDictionaryRef ll_passkey_query(const char *id) {
 	CFDictionarySetValue(query, kSecClass, kSecClassGenericPassword);
 	CFDictionarySetValue(query, kSecAttrService, CFSTR("app.locklark.unlock.v1"));
 	CFDictionarySetValue(query, kSecAttrAccount, account);
+	CFDictionarySetValue(query, kSecUseDataProtectionKeychain, kCFBooleanTrue);
 	CFRelease(account);
 	return query;
 }
 
 int ll_passkey_load(const char *id, unsigned char **value, long *n) {
-	if (!id || !value || !n) return -1;
+	if (!id || !value || !n) return errSecParam;
 	*value = NULL;
 	*n = 0;
 	// One fresh context per call: no successful evaluation from an earlier
 	// unlock or passkey operation may release this capsule. A zero reuse
 	// duration also forbids Touch ID reuse inside the same flow.
 	LAContext *context = [[LAContext alloc] init];
-	if (!context) return -1;
+	if (!context) return errSecInternalComponent;
+	context.localizedReason = @"验证 Locklark Passkey";
 	context.touchIDAuthenticationAllowableReuseDuration = 0;
 	// Explicit kSecUseAuthenticationContext: Security.framework runs the
 	// item's userPresence evaluation (Touch ID or system password) itself.
