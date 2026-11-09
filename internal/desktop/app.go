@@ -23,6 +23,8 @@ import (
 	"github.com/jihuayu/locklark/internal/osunlock"
 	"github.com/jihuayu/locklark/internal/personal"
 	"github.com/jihuayu/locklark/internal/sshagent"
+	"github.com/oneo-me/onevra/source/shells/plain"
+	"github.com/oneo-me/onevra/source/theme"
 )
 
 type outcome struct {
@@ -103,6 +105,7 @@ type App struct {
 	// session boundary; settings are non-secret and survive lock.
 	v2             v2State
 	v2Mode         bool
+	onevra         onevraUI
 	settings       Settings
 	settingsPath   string
 	settingsLoaded bool
@@ -122,6 +125,7 @@ func New() *App {
 	a.settingsLoaded = true
 	a.v2 = newV2State()
 	a.refreshClipboardClearSeconds(a.settings)
+	a.onevra = newOnevraUI()
 	return a
 }
 func (a *App) run(work func() outcome) { a.runContext(func(context.Context) outcome { return work() }) }
@@ -193,6 +197,18 @@ func message(e error) string {
 		return "条目已在其他操作中变更，请刷新后重试"
 	case errors.Is(e, personal.ErrTrashed):
 		return "条目在回收站中，请先恢复"
+	case errors.Is(e, personal.ErrSystemUnlockExpired):
+		return "系统快捷解锁已过期；请重新完整解锁后主动启用"
+	case errors.Is(e, osunlock.ErrNotFound):
+		return "尚未启用系统快捷解锁；请先完整解锁并在安全设置启用"
+	case errors.Is(e, osunlock.ErrMissingEntitlement):
+		return "系统钥匙串缺少签名权限；此构建无法使用 Touch ID，请使用主密码与 Secret Key"
+	case errors.Is(e, osunlock.ErrCancelled):
+		return "系统验证已取消；可继续使用主密码与 Secret Key"
+	case errors.Is(e, osunlock.ErrInteractionNotAllowed):
+		return "系统钥匙串当前不可用；解锁 Mac 后重试，或使用主密码与 Secret Key"
+	case errors.Is(e, personal.ErrSystemUnlockUnavailable):
+		return "系统快捷解锁不可用；需要系统密钥服务与正确权限，请使用主密码与 Secret Key"
 	case errors.Is(e, personal.ErrSessionLocked):
 		return "金库已锁定，请重新解锁"
 	default:
@@ -383,6 +399,7 @@ func (a *App) Lock() {
 	}
 	a.clearDailyExposure()
 	a.resetV2()
+	a.onevra.resetOnevra()
 	a.v2Mode = false
 	a.lastActivity = time.Time{}
 }
@@ -624,6 +641,10 @@ func (a *App) View(c *ui.Context) {
 		ui.Column(c.Key(a.generation)).Fill().Padding(24).Gap(16).Children(func() { a.cliApprovalView(c) })
 		return
 	}
+	if a.session != nil && a.sshApproval == nil && a.browser == nil && !a.quick.open && a.v2Mode && a.page == "vault" {
+		a.v2View(c)
+		return
+	}
 	ui.Column(c.Key(a.generation)).Fill().Padding(24).Gap(16).Children(func() {
 		ui.Row(c).Gap(12).Children(func() {
 			ui.Text(c, "LOCKLARK").FontSize(24).Bold()
@@ -643,8 +664,6 @@ func (a *App) View(c *ui.Context) {
 			a.browserView(c)
 		} else if a.quick.open {
 			a.quickSearchView(c)
-		} else if a.v2Mode && a.page == "vault" {
-			a.v2View(c)
 		} else {
 			a.vaultView(c)
 		}
@@ -695,6 +714,7 @@ func (a *App) lockView(c *ui.Context) {
 			ui.PrimaryButton(c, "解锁").Disabled(a.busy).OnClick(a.unlock)
 			ui.Button(c, "使用"+osunlock.Label()+"解锁").Disabled(a.busy || a.path == "").OnClick(a.systemUnlock)
 			ui.Text(c, "需先完整解锁并在安全设置启用；失败时可继续使用主密码与 Secret Key。")
+			ui.Text(c, osunlock.Requirement()).FontSize(12)
 		}
 		label := "创建新金库"
 		if a.create {
@@ -705,7 +725,13 @@ func (a *App) lockView(c *ui.Context) {
 }
 func (a *App) vaultView(c *ui.Context) {
 	ui.Row(c).Gap(8).Children(func() {
-		for _, tab := range []struct{ id, label string }{{"vault", "金库"}, {"ssh", "SSH 密钥"}, {"activity", "活动"}, {"health", "体检"}, {"transfer", "导入与导出"}, {"security", "安全设置"}} {
+		tabs := []struct{ id, label string }{{"vault", "金库"}, {"ssh", "SSH 密钥"}, {"activity", "活动"}, {"health", "体检"}, {"transfer", "导入与导出"}}
+		if classicLayoutRequested() {
+			// Keep the classic tab as the only "安全设置" control there; the
+			// Onevra shell hides its gear in this mode.
+			tabs = append(tabs, struct{ id, label string }{"security", "安全设置"})
+		}
+		for _, tab := range tabs {
 			tab := tab
 			ui.Button(c, tab.label).OnClick(func() {
 				a.clearNotesEditor()
@@ -920,7 +946,34 @@ func Run() error {
 	a.refreshClipboardClearSeconds(a.settingsSnapshot())
 	mygo.App.SetName("Locklark")
 	mygo.App.WhenReady(func() {
-		a.win = mygo.NewWindow(mygo.WindowOptions{Title: "Locklark · 本地金库", Width: 1100, Height: 820, MinWidth: 900, MinHeight: 680, Content: ui.View(a.View)})
+		if classicLayoutRequested() {
+			// Keep the classic layout on its original window and header. The
+			// Onevra shell header would duplicate its "快捷搜索", "立即锁定" and
+			// "安全设置" controls, which breaks accessibility and the native
+			// acceptance driver's unique-label requirement.
+			a.win = mygo.NewWindow(mygo.WindowOptions{
+				Title:     "Locklark · 本地金库",
+				Width:     1100,
+				Height:    820,
+				MinWidth:  900,
+				MinHeight: 680,
+				Content:   ui.View(a.View),
+			})
+		} else {
+			shell := plain.NewShell(plain.ShellOptions{
+				Title:         "Locklark · 本地金库",
+				Width:         1240,
+				Height:        820,
+				MinWidth:      980,
+				MinHeight:     680,
+				StateKey:      "locklark.main",
+				Theme:         theme.Onevra,
+				HeaderLeading: a.onevraHeaderLeading,
+				HeaderActions: a.onevraHeaderActions,
+				Content:       a.View,
+			})
+			a.win = shell.Window()
+		}
 		a.dispatch = a.win.Update
 		a.win.OnClose(func(*mygo.CloseEvent) { a.Lock() })
 		a.clipboardWrite = nativeclipboard.Write
@@ -989,6 +1042,7 @@ func (a *App) securityView(c *ui.Context) {
 	ui.Text(c, shortcut)
 	ui.Text(c, "快捷解锁："+osunlock.Label()).Bold()
 	ui.Text(c, osunlock.Description())
+	ui.Text(c, osunlock.Requirement()).FontSize(12)
 	ui.Text(c, "首次或到期后使用主密码与 Secret Key 完整解锁，再主动启用。系统验证失败时保留完整解锁入口。")
 	ui.Button(c, "启用系统快捷解锁（有效期 24 小时）").Disabled(a.busy).OnClick(func() {
 		s, store := a.session, a.systemStore

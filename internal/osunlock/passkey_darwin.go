@@ -21,8 +21,8 @@ import "unsafe"
 // touchIDAuthenticationAllowableReuseDuration is 0, the context is invalidated
 // after the call, and no context is reused. Touch ID or the system password is
 // accepted, matching the adapter label. A decline, missing item, oversized
-// payload or any native failure returns ErrUnavailable without logging capsule
-// values or prompt internals.
+// payload or any native failure returns a fixed Go error without logging
+// capsule values or prompt internals.
 //
 // The caller must re-validate the passkey request after this returns; this
 // method only authenticates the capsule bytes.
@@ -34,7 +34,13 @@ func (keychain) LoadForPasskeyVerification(id string) ([]byte, error) {
 	defer C.free(unsafe.Pointer(name))
 	var value *C.uchar
 	var n C.long
-	if C.ll_passkey_load(name, &value, &n) != 0 || value == nil || n <= 0 || n > maxPasskeyCapsule {
+	if status := int(C.ll_passkey_load(name, &value, &n)); status != 0 {
+		if value != nil {
+			C.ll_passkey_clear_free(value, n)
+		}
+		return nil, nativeError(status)
+	}
+	if value == nil || n <= 0 || n > maxPasskeyCapsule {
 		if value != nil {
 			C.ll_passkey_clear_free(value, n)
 		}

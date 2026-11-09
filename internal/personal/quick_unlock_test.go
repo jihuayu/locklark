@@ -118,6 +118,48 @@ func TestSystemUnlockExpiryAndBinding(t *testing.T) {
 	}
 }
 
+// A native store failure or an expired capsule is not a locked vault. The UI
+// must be able to tell the user to sign the app, enable the keychain, or
+// perform a fresh full unlock instead of pointlessly asking to unlock again.
+func TestSystemUnlockFailuresAreClassified(t *testing.T) {
+	path, key, _ := revealFixture(t)
+	s, e := UnlockSession(path, []byte("fixture"), key, time.Minute)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer s.Lock()
+	store := &testSystemStore{values: map[string][]byte{}, deny: true}
+	if e = s.EnableSystemUnlock(store); !errors.Is(e, ErrSystemUnlockUnavailable) || errors.Is(e, ErrSessionLocked) {
+		t.Fatalf("store failure = %v, want ErrSystemUnlockUnavailable", e)
+	}
+	store.deny = false
+	if e = s.EnableSystemUnlock(store); e != nil {
+		t.Fatal(e)
+	}
+	s.Lock()
+	store.deny = true
+	if _, e = UnlockWithSystem(path, store, time.Minute); !errors.Is(e, ErrSystemUnlockUnavailable) || errors.Is(e, ErrSessionLocked) {
+		t.Fatalf("load failure = %v, want ErrSystemUnlockUnavailable", e)
+	}
+	store.deny = false
+	id, _, _ := systemStoreID(path)
+	raw := bytes.Clone(store.values[id])
+	defer clear(raw)
+	var capsule systemCapsule
+	if e = json.Unmarshal(raw, &capsule); e != nil {
+		t.Fatal(e)
+	}
+	defer clear(capsule.Identity)
+	capsule.Created = time.Now().Add(-25 * time.Hour)
+	capsule.Expires = capsule.Created.Add(24 * time.Hour)
+	if store.values[id], e = json.Marshal(capsule); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = UnlockWithSystem(path, store, time.Minute); !errors.Is(e, ErrSystemUnlockExpired) || errors.Is(e, ErrSessionLocked) {
+		t.Fatalf("expired capsule = %v, want ErrSystemUnlockExpired", e)
+	}
+}
+
 type waitingSystemStore struct {
 	testSystemStore
 	entered, release chan struct{}

@@ -147,8 +147,10 @@ func TestStandaloneUnlockedPushAdvertisesBaselineCapabilities(t *testing.T) {
 }
 
 // TestSharedApprovePairAdvertisesClipboardOnlyWithManager keeps the clipboard
-// lease additive: a shared host with a native manager advertises it, a shared
-// host without one stays on the plain baseline.
+// lease additive: a shared host with a native manager advertises it where the
+// platform supports an owner-safe lease, while a shared host without a manager
+// stays on the plain baseline. Darwin deliberately reports no native lease
+// support, because its pasteboard API cannot revoke only this process's owner.
 func TestSharedApprovePairAdvertisesClipboardOnlyWithManager(t *testing.T) {
 	for _, testCase := range []struct {
 		name      string
@@ -159,6 +161,7 @@ func TestSharedApprovePairAdvertisesClipboardOnlyWithManager(t *testing.T) {
 		{name: "without manager", manager: false, clipboard: false},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
+			wantClipboard := testCase.clipboard && nativeclipboard.NativeLeaseSupported()
 			s := pairedCapabilitiesSession(t)
 			out := &memoryPipe{}
 			c := NewDesktopConnection(NewWriter(out, time.Second), nil)
@@ -179,7 +182,7 @@ func TestSharedApprovePairAdvertisesClipboardOnlyWithManager(t *testing.T) {
 			if paired.Type != "paired" || paired.Capability == "" {
 				t.Fatalf("shared pairing: %#v", paired)
 			}
-			assertBaselineCapabilities(t, "shared paired", paired.Capabilities, testCase.clipboard)
+			assertBaselineCapabilities(t, "shared paired", paired.Capabilities, wantClipboard)
 		})
 	}
 }
@@ -202,7 +205,7 @@ func TestSharedUnlockedPushIncludesClipboardWithManager(t *testing.T) {
 	if unlocked.Type != "unlocked" || !unlocked.DesktopConnected {
 		t.Fatalf("shared unlocked push: %#v", unlocked)
 	}
-	assertBaselineCapabilities(t, "shared unlocked", unlocked.Capabilities, true)
+	assertBaselineCapabilities(t, "shared unlocked", unlocked.Capabilities, nativeclipboard.NativeLeaseSupported())
 }
 
 // TestStandaloneStatusCapabilitiesRemainEmpty keeps the historical status

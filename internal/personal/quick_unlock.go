@@ -5,11 +5,21 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/jihuayu/locklark/internal/vault"
+)
+
+// Fixed, user-safe failures for the system quick-unlock path. They are
+// deliberately distinct from ErrSessionLocked: a missing entitlement, an
+// expired capsule or a dismissed OS prompt must not be reported as "unlock the
+// vault again".
+var (
+	ErrSystemUnlockUnavailable = errors.New("system quick unlock is unavailable")
+	ErrSystemUnlockExpired     = errors.New("system quick unlock has expired")
 )
 
 // SystemUnlockStore is a trusted native OS adapter, never a renderer binding.
@@ -56,8 +66,8 @@ func (s *Session) EnableSystemUnlock(store SystemUnlockStore) error {
 	if s.lockRequested.Load() {
 		return ErrSessionLocked
 	}
-	if store.Store(id, raw) != nil {
-		return ErrSessionLocked
+	if e := store.Store(id, raw); e != nil {
+		return errors.Join(ErrSystemUnlockUnavailable, e)
 	}
 	s.mu.Lock()
 	active := s.active(false) == nil
@@ -72,8 +82,11 @@ func (s *Session) EnableSystemUnlock(store SystemUnlockStore) error {
 func (s *Session) prepareSystemUnlock(store SystemUnlockStore) ([]byte, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if store == nil || s.active(false) != nil || s.fullUnlock.IsZero() || time.Since(s.fullUnlock) < 0 || time.Since(s.fullUnlock) >= 24*time.Hour {
+	if store == nil || s.active(false) != nil {
 		return nil, "", ErrSessionLocked
+	}
+	if s.fullUnlock.IsZero() || time.Since(s.fullUnlock) < 0 || time.Since(s.fullUnlock) >= 24*time.Hour {
+		return nil, "", ErrSystemUnlockExpired
 	}
 	id, path, e := systemStoreID(s.path)
 	if e != nil {
@@ -108,17 +121,23 @@ func UnlockWithSystemContext(ctx context.Context, path string, store SystemUnloc
 	}
 	raw, e := store.Load(id)
 	defer clear(raw)
-	if ctx.Err() != nil || e != nil || len(raw) > 8192 {
+	if ctx.Err() != nil {
 		return nil, ErrSessionLocked
+	}
+	if e != nil {
+		return nil, errors.Join(ErrSystemUnlockUnavailable, e)
+	}
+	if len(raw) == 0 || len(raw) > 8192 {
+		return nil, ErrSystemUnlockExpired
 	}
 	var capsule systemCapsule
 	defer func() { clear(capsule.Identity) }()
 	if json.Unmarshal(raw, &capsule) != nil {
-		return nil, ErrSessionLocked
+		return nil, ErrSystemUnlockExpired
 	}
 	now := time.Now()
 	if capsule.Version != 1 || capsule.Path != absolute || len(capsule.Identity) == 0 || now.Before(capsule.Created) || !now.Before(capsule.Expires) || capsule.Expires.Sub(capsule.Created) != 24*time.Hour {
-		return nil, ErrSessionLocked
+		return nil, ErrSystemUnlockExpired
 	}
 	s := &Session{path: path, material: append([]byte(nil), capsule.Identity...), slotDigest: capsule.Slot, last: now, idle: idle, pending: make(map[*NativeField]bool)}
 	if ctx.Err() != nil {
@@ -145,8 +164,8 @@ func DisableSystemUnlock(path string, store SystemUnlockStore) error {
 	if e != nil {
 		return e
 	}
-	if store.Delete(id) != nil {
-		return ErrSessionLocked
+	if e := store.Delete(id); e != nil {
+		return errors.Join(ErrSystemUnlockUnavailable, e)
 	}
 	return nil
 }

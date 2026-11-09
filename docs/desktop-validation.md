@@ -13,7 +13,7 @@ Session 只保留已解开的身份材料，不保留主密码/Secret Key或条�
 系统快捷解锁必须由完整解锁会话主动启用，绑定绝对路径和密钥槽摘要。截止时间固定于该次完整解锁后的 24 小时，快捷解锁不能刷新。它是本地墙钟策略，非抗时钟回拨保证。启用记录为 intent；OS 写入失败/取消/进程中断不能误记成功。系统记录清理失败时结果未知；需要完整解锁后重试停用，不能声称平台记录已删除。
 
 - Windows：只使用 Microsoft Passport Key Storage Provider；非导出 RSA 密钥解开随机 AES-GCM 包装密钥，Credential Manager 仅保存密文；强制 NgcCacheType 和每次 gesture 属性，属性不支持则拒绝。RSA-OAEP/SHA-256 不支持时拒绝，无软件 KSP、DPAPI-only 或布尔提示降级。
-- macOS：Security.framework 设备本地、WhenUnlocked 钥匙串，SecAccessControlUserPresence（Touch ID 或系统密码）。需要原生 CGO 构建；CGO 关闭时明确不支持，不退回普通钥匙串。
+- macOS：Security.framework 设备本地、WhenUnlocked 钥匙串，SecAccessControlUserPresence（Touch ID 或系统密码）。需要原生 CGO 构建；CGO 关闭时明确不支持，不退回普通钥匙串。**还必须用 Developer ID 签名的 `.app` 并带 `keychain-access-groups`**；ad-hoc 裸二进制（`go run`/`go build`）没有该 entitlement，`SecItemAdd` 返回 `-34018`，不能把此状态说成可用的 Touch ID。`UserPresence` 接受 Mac 登录密码，不是纯生物识别；签名、entitlement 和真机验收步骤见 [macOS 文档](../macos/README.md)。
 - Linux：MyGo Secret Service/libsecret；无服务时拒绝；已打开的系统钥匙串可能不提示，同用户程序可能访问。它不是逐次生物识别保证。
 
 参考：[1Password 使用](https://support.1password.com/windows-hello/)、[1Password 安全属性](https://support.1password.com/windows-hello-security/)、[Microsoft CNG 属性](https://learn.microsoft.com/windows/win32/seccng/key-storage-property-identifiers)、[Passport KSP 名称](https://learn.microsoft.com/en-us/uwp/api/windows.security.cryptography.certificates.keystorageprovidernames.passportkeystorageprovider)。
@@ -33,3 +33,5 @@ Luna/max 首轮复核发现锁清理时序、系统认证持锁、CNG 指针存�
 ## 尚待真实平台验收
 
 Windows Hello 每次解密提示、拒绝/取消、TPM 清除/密钥失效、休眠锁屏、系统时间变化；macOS 原生编译及签名后的 Touch ID/密码提示、Keychain 权限变化；Linux Secret Service 锁定/取消与 GNOME/KDE 锁屏通知；三平台剪贴板管理器、窗口关闭/托盘与密码字符串残留边界。跨编译和 fake Store 测试不替代这些条目。完整产品和安全认证未完成。
+
+2026-11-09 的 macOS 27.0.1 arm64 实测补记：Touch ID 硬件可用（`LAContext` biometryType=touchID，`bioutil` 已启用），但 `go build` 的 ad-hoc 二进制在 `SecItemAdd`（ACL=UserPresence）上返回 `-34018 errSecMissingEntitlement`；`osunlock.Store` 与 `Session.EnableSystemUnlock` 均失败，UI 曾误报“金库已锁定”。现已把该失败分类为 `ErrMissingEntitlement`/`ErrSystemUnlockUnavailable`，并增加签名提示；`mygo.config.ts`、`macos/locklark.entitlements.plist.template` 与 `scripts/macos_release.sh` 提供签名 `.app` 的构建入口。**签名后的成功 Touch ID 提示仍未取得验收回执**，不能把本记录当作已完成的生物识别验收。

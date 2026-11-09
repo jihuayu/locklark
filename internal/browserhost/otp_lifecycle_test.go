@@ -17,6 +17,24 @@ func lifecycleWait(t *testing.T, done <-chan struct{}) {
 		t.Fatal("OTP lifecycle barrier timed out")
 	}
 }
+
+// lifecycleSnapshot waits for a snapshot that actually acquired Connection.mu.
+// Snapshot is deliberately non-blocking for the UI, so a concurrent handler
+// briefly holding mu reports Busy without the connection being stuck. The test
+// must distinguish that transient Busy from a real lock retention.
+func lifecycleSnapshot(t *testing.T, c *Connection) View {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if view := c.Snapshot(); !view.Busy {
+			return view
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Connection.mu was not released")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
 func lifecycleCancel(r Request, n int) Request {
 	return Request{V: 1, ID: reqID(n), Type: "cancel-otp", Capability: r.Capability, RequestID: r.ID}
 }
@@ -385,7 +403,7 @@ func TestOTPLifecycleCancelAfterAckBeforeWriterGrant(t *testing.T) {
 	}
 	// Both the worker and cancellation reply may wait for the occupied slot.
 	// Neither may retain Connection.mu while waiting for the transport.
-	if view := c.Snapshot(); view.Busy || !view.Paired || view.OTP != nil {
+	if view := lifecycleSnapshot(t, c); !view.Paired || view.OTP != nil {
 		t.Fatal("cancelled output kept connection state locked")
 	}
 	unblock()

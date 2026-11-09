@@ -1,9 +1,13 @@
 /.ryugi/
+/.codex-tmp/
+/artifacts/
 /bin/
 /locklark.exe
 /locklark
 /out/
 /demo-out/
+/.mygo-release/
+*.provisionprofile
 *.kdbx
 *.1pux
 *.age

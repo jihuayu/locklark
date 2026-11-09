@@ -15,10 +15,21 @@ func createRunCLITemp() (string, error) {
 	if e != nil {
 		return "", e
 	}
-	// Unlike GetTempPath and os.TempDir, this resolves the OS-known user
-	// location, rather than trusting TEMP/TMP/USERPROFILE environment text.
-	parent, e := windows.KnownFolderPath(windows.FOLDERID_LocalAppData, 0)
-	if e != nil || trustedRunCLITemporaryParent(parent, user.User.Sid) != nil {
+	// Unlike GetTempPath and os.TempDir, these resolve OS-known locations
+	// rather than trusting TEMP/TMP/USERPROFILE environment text. LocalAppData
+	// is the preferred private location. Public is a bounded fallback for
+	// managed environments that grant another principal replacement rights on
+	// the profile chain. Public may allow unrelated principals to create new
+	// children, so the random child is created with its own current-user-only
+	// DACL first and the complete resulting path is validated before use.
+	var parents []string
+	for _, folder := range []*windows.KNOWNFOLDERID{windows.FOLDERID_LocalAppData, windows.FOLDERID_Public} {
+		parent, e := windows.KnownFolderPath(folder, 0)
+		if e == nil {
+			parents = append(parents, parent)
+		}
+	}
+	if len(parents) == 0 {
 		return "", ErrRunTemporary
 	}
 	sd, e := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;" + user.User.Sid.String() + ")")
@@ -26,26 +37,34 @@ func createRunCLITemp() (string, error) {
 		return "", e
 	}
 	attributes := windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: sd}
-	for attempt := 0; attempt < 16; attempt++ {
-		id, e := randomID()
-		if e != nil {
-			return "", e
+	for _, parent := range parents {
+		for attempt := 0; attempt < 16; attempt++ {
+			id, e := randomID()
+			if e != nil {
+				return "", e
+			}
+			path := filepath.Join(parent, "locklark-run-cli-"+id)
+			name, e := windows.UTF16PtrFromString(path)
+			if e != nil {
+				return "", e
+			}
+			e = windows.CreateDirectory(name, &attributes)
+			if e == windows.ERROR_ALREADY_EXISTS || e == windows.ERROR_FILE_EXISTS {
+				continue
+			}
+			if e != nil {
+				break
+			}
+			if trustedRunCLITemporaryParent(path, user.User.Sid) == nil {
+				return path, nil
+			}
+			if e = os.Remove(path); e != nil {
+				return "", e
+			}
+			break
 		}
-		path := filepath.Join(parent, "locklark-run-cli-"+id)
-		name, e := windows.UTF16PtrFromString(path)
-		if e != nil {
-			return "", e
-		}
-		e = windows.CreateDirectory(name, &attributes)
-		if e == windows.ERROR_ALREADY_EXISTS || e == windows.ERROR_FILE_EXISTS {
-			continue
-		}
-		if e != nil {
-			return "", e
-		}
-		return path, nil
 	}
-	return "", os.ErrExist
+	return "", ErrRunTemporary
 }
 
 func runCLITrustedSID(sid, user *windows.SID) bool {
