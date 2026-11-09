@@ -61,10 +61,20 @@ func mustReadRequest(t *testing.T, value map[string]any) Request {
 
 func v2Handle(t *testing.T, c *Connection, out *memoryPipe, value map[string]any) Response {
 	t.Helper()
+	v2Send(t, c, value)
+	return v2Last(t, out)
+}
+
+func v2Send(t *testing.T, c *Connection, value map[string]any) {
+	t.Helper()
 	r := mustReadRequest(t, value)
 	if e := c.Handle(r); e != nil {
 		t.Fatal(e)
 	}
+}
+
+func v2Last(t *testing.T, out *memoryPipe) Response {
+	t.Helper()
 	all := out.responses(t)
 	if len(all) == 0 {
 		t.Fatal("no response")
@@ -289,7 +299,21 @@ func TestPopupVaultCRUDAndProfileFill(t *testing.T) {
 			identityProfile = p
 		}
 	}
-	ccFill := v2Handle(t, c, out, map[string]any{"v": 1, "id": reqID(58), "type": "fill-profile", "capability": cap, "origin": "https://shop.example.test", "tab_id": 7, "document_id": "doc-9", "item_id": ccProfile.ID, "revision": ccProfile.Revision})
+	before := len(out.responses(t))
+	v2Send(t, c, map[string]any{"v": 1, "id": reqID(58), "type": "fill-profile", "capability": cap, "origin": "https://shop.example.test", "tab_id": 7, "document_id": "doc-9", "item_id": ccProfile.ID, "revision": ccProfile.Revision})
+	// A profile fill is public metadata until the native owner explicitly
+	// approves this exact request; no private response may be written first.
+	if len(out.responses(t)) != before {
+		t.Fatal("profile fill answered before native approval")
+	}
+	view := c.Snapshot()
+	if view.Profile == nil || view.Profile.ID != reqID(58) || view.Profile.ItemID != ccProfile.ID || view.Profile.Revision != ccProfile.Revision || view.Profile.Category != "credit_card" || view.Profile.Origin != "https://shop.example.test" {
+		t.Fatalf("profile review: %#v", view.Profile)
+	}
+	if e := c.ApproveProfile(reqID(58)); e != nil {
+		t.Fatal(e)
+	}
+	ccFill := v2Last(t, out)
 	if ccFill.Type != "profile-fill" || ccFill.ProfileFill == nil {
 		t.Fatalf("cc fill: %#v", ccFill)
 	}
@@ -305,7 +329,15 @@ func TestPopupVaultCRUDAndProfileFill(t *testing.T) {
 		t.Fatal(e)
 	}
 	v2Handle(t, c, out, map[string]any{"v": 1, "id": reqID(59), "type": "match-profiles", "capability": cap, "origin": "https://shop.example.test", "tab_id": 8, "document_id": "doc-10", "profile_kind": "identity"})
-	idFill := v2Handle(t, c, out, map[string]any{"v": 1, "id": reqID(60), "type": "fill-profile", "capability": cap, "origin": "https://shop.example.test", "tab_id": 8, "document_id": "doc-10", "item_id": identityProfile.ID, "revision": identityProfile.Revision})
+	before = len(out.responses(t))
+	v2Send(t, c, map[string]any{"v": 1, "id": reqID(60), "type": "fill-profile", "capability": cap, "origin": "https://shop.example.test", "tab_id": 8, "document_id": "doc-10", "item_id": identityProfile.ID, "revision": identityProfile.Revision})
+	if len(out.responses(t)) != before {
+		t.Fatal("identity profile fill answered before native approval")
+	}
+	if e := c.ApproveProfile(reqID(60)); e != nil {
+		t.Fatal(e)
+	}
+	idFill := v2Last(t, out)
 	if idFill.Type != "profile-fill" || idFill.ProfileFill == nil {
 		t.Fatalf("identity fill: %#v", idFill)
 	}

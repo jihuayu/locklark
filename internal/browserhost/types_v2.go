@@ -19,6 +19,9 @@ func SupportedCapabilities() []string {
 		"stage-save-v1",
 		"popup-vault-v1",
 		"profile-fill-v1",
+		// Advertised only now that the native cross-origin checkout policy is
+		// enforced in front of every card profile read.
+		"checkout-frames-v1",
 		"watchtower-v1",
 		"attachments-v1",
 		"cli-broker-v1",

@@ -2,6 +2,151 @@
 (() => {
   "use strict";
   const core = globalThis.LocklarkCore || null;
+  // Private isolated-world DOM-policy fence. It is installed at document_start
+  // in every frame the content script runs, including a cross-origin frame that
+  // frameAllowed() refuses below. It only tracks whether this document's root
+  // stayed stable and whether any iframe/frame sandbox attribute was ever seen.
+  // It never reads vault state, sends messages, renders UI or touches the page
+  // bridge, and a missing fence is never initialized on demand by a probe.
+  function installCheckoutFence() {
+    try {
+      const g = globalThis;
+      if (!g || !g.document) return;
+      if (Object.prototype.hasOwnProperty.call(g, "LocklarkCheckoutFence"))
+        return;
+      const doc = g.document;
+      const state = {
+        latched: false,
+        root: null,
+        stable: true,
+        sandboxEver: false,
+      };
+      function currentRoot() {
+        try {
+          return doc.documentElement || null;
+        } catch {
+          return null;
+        }
+      }
+      function observeRoot() {
+        const root = currentRoot();
+        if (!state.latched) {
+          if (root) {
+            state.root = root;
+            state.latched = true;
+          }
+        } else if (root !== state.root) {
+          // document.open()/replacement is permanent: never recover stability.
+          state.stable = false;
+        }
+      }
+      function frameSandboxed(node) {
+        if (!node || typeof node !== "object") return false;
+        let tag = "";
+        try {
+          tag = String(node.tagName || "").toUpperCase();
+        } catch {
+          return false;
+        }
+        try {
+          if (
+            (tag === "IFRAME" || tag === "FRAME") &&
+            typeof node.hasAttribute === "function" &&
+            node.hasAttribute("sandbox")
+          )
+            return true;
+        } catch {}
+        try {
+          if (typeof node.querySelectorAll === "function")
+            for (const selector of ["iframe", "frame"]) {
+              let found;
+              try {
+                found = node.querySelectorAll(selector);
+              } catch {
+                continue;
+              }
+              for (const el of found || [])
+                if (
+                  el &&
+                  typeof el.hasAttribute === "function" &&
+                  el.hasAttribute("sandbox")
+                )
+                  return true;
+            }
+        } catch {}
+        return false;
+      }
+      function markSandbox(node) {
+        if (!state.sandboxEver && frameSandboxed(node)) state.sandboxEver = true;
+      }
+      observeRoot();
+      markSandbox(doc);
+      const snapshot = function () {
+        observeRoot();
+        return Object.freeze({
+          document_stable: state.latched === true && state.stable === true,
+          sandbox_ever: state.sandboxEver === true,
+        });
+      };
+      Object.freeze(snapshot);
+      try {
+        Object.defineProperty(g, "LocklarkCheckoutFence", {
+          value: snapshot,
+          writable: false,
+          configurable: false,
+          enumerable: false,
+        });
+      } catch {
+        return;
+      }
+      if (typeof g.MutationObserver !== "function") return;
+      try {
+        const observer = new g.MutationObserver((records) => {
+          try {
+            observeRoot();
+            for (const record of records || []) {
+              if (!record) continue;
+              if (record.type === "attributes") {
+                if (record.attributeName !== "sandbox") continue;
+                // An immediate add/remove race still shows a non-null oldValue.
+                if (record.oldValue !== null && record.oldValue !== undefined)
+                  state.sandboxEver = true;
+                const target = record.target;
+                if (
+                  target &&
+                  typeof target.hasAttribute === "function" &&
+                  target.hasAttribute("sandbox")
+                )
+                  state.sandboxEver = true;
+              } else if (record.type === "childList") {
+                for (const node of record.addedNodes || []) markSandbox(node);
+                for (const node of record.removedNodes || []) markSandbox(node);
+              }
+            }
+          } catch {}
+        });
+        observer.observe(doc, {
+          childList: true,
+          subtree: true,
+          attributes: true,
+          attributeFilter: ["sandbox"],
+          attributeOldValue: true,
+        });
+      } catch {}
+      if (typeof doc.addEventListener === "function")
+        doc.addEventListener(
+          "DOMContentLoaded",
+          () => {
+            try {
+              observeRoot();
+              markSandbox(doc);
+            } catch {}
+          },
+          { once: true },
+        );
+    } catch {}
+  }
+  installCheckoutFence();
   function frameAllowed() {
     if (
       typeof isSecureContext !== "undefined" &&

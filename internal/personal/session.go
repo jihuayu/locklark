@@ -43,6 +43,7 @@ type Session struct {
 	fullUnlock           time.Time
 	pending              map[*NativeField]bool
 	browserPending       map[*NativeBrowserFill]bool
+	profilePending       map[*NativeBrowserProfile]bool
 	passkeyEpoch         atomic.Uint64
 	// Watchtower state is in-memory only. The range client owns the prefix
 	// cache; dropping it on lock clears both the cache and its transport.
@@ -119,6 +120,10 @@ func (s *Session) lock() {
 		f.clear()
 		delete(s.browserPending, f)
 	}
+	for p := range s.profilePending {
+		p.clear()
+		delete(s.profilePending, p)
+	}
 	s.hibp = nil
 	s.clearAuditCache()
 	clear(s.watchtowerKey)
@@ -182,6 +187,12 @@ func (s *Session) active(touch bool) error {
 			delete(s.browserPending, f)
 		}
 	}
+	for p := range s.profilePending {
+		if !now.Before(p.until) {
+			p.clear()
+			delete(s.profilePending, p)
+		}
+	}
 	if s.lockRequested.Load() || len(s.material) == 0 || now.Sub(s.last) >= s.idle {
 		s.lock()
 		return ErrSessionLocked
@@ -224,6 +235,7 @@ func (s *Session) executeActive(action string, add vault.Item, edit *Edit, optio
 	}
 	if s.active(false) != nil {
 		r.browser.clear()
+		r.browserProfile.clear()
 		clear(r.material)
 		clear(r.value)
 		clear(r.sshSeed)

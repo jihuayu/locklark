@@ -22,6 +22,10 @@ type fixture struct {
 	OTPSeed, OTPURI                                        string
 	SaveUsername, SaveValue, UpdateUsername, UpdateValue   string
 	RejectedUsername, RejectedValue                        string
+	// Optional synthetic credit card, present only with -checkout-card. The
+	// omitempty tags keep the default fixture JSON byte-identical.
+	CardID, CardRevision, CardTitle, CardNumber       string `json:",omitempty"`
+	CardHolder, CardVerification, CardExpiry, CardPIN string `json:",omitempty"`
 }
 
 func run() error {
@@ -30,15 +34,16 @@ func run() error {
 	observe := flag.String("observe", "", "read a generated private fixture and observe a consistent vault copy")
 	configure := flag.String("configure-otp", "", "configure the synthetic seed login through the authenticated Session API")
 	digits := flag.Int("digits", 6, "synthetic OTP digits: 0 clears, 6 or 8 configures")
+	checkout := flag.Bool("checkout-card", false, "also create one synthetic credit card through the ordinary authenticated Session API")
 	flag.Parse()
 	if *configure != "" {
-		if *out != "" || *site != "" || *observe != "" || flag.NArg() != 0 {
+		if *out != "" || *site != "" || *observe != "" || *checkout || flag.NArg() != 0 {
 			return fmt.Errorf("one fixture operation required")
 		}
 		return configureOTP(*configure, *digits)
 	}
 	if *observe != "" {
-		if *out != "" || *site != "" || flag.NArg() != 0 {
+		if *out != "" || *site != "" || *checkout || flag.NArg() != 0 {
 			return fmt.Errorf("one fixture operation required")
 		}
 		return observeFixture(*observe)
@@ -94,6 +99,13 @@ func run() error {
 	}
 	if err = setOTP(f, 6); err != nil {
 		return err
+	}
+	if *checkout {
+		// Registered-gate AddItem on the same synthetic vault, before the
+		// fixture is published; no card value is ever printed.
+		if err = createCheckoutCard(&f); err != nil {
+			return err
+		}
 	}
 	data, err := json.Marshal(f)
 	if err != nil {

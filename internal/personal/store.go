@@ -201,6 +201,7 @@ type result struct {
 	sshSeed           []byte
 	savePersisted     bool
 	browser           *NativeBrowserFill
+	browserProfile    *NativeBrowserProfile
 	material          []byte
 	slotDigest        [32]byte
 	destinationDigest string
@@ -237,6 +238,7 @@ type commandOption struct {
 	nativeMutation *nativeMutationRequest
 	browserSave    *browserSaveRequest
 	browser        *BrowserFillTarget
+	browserProfile *BrowserProfileTarget
 	unlocked       *Session
 	run            *RunRequest
 	runBundle      *runBundleStoreRequest
@@ -269,6 +271,7 @@ func commandWithClose(run func() (result, error), closeDB func() error) (r resul
 	defer func() {
 		if closeErr := closeDB(); closeErr != nil && (err == nil || r.savePersisted) {
 			r.browser.clear()
+			r.browserProfile.clear()
 			clear(r.value)
 			clearBundleValues(r.values)
 			clear(r.sshSeed)
@@ -501,6 +504,9 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 	}
 	if option.browser != nil && (edit == nil || edit.ID != option.browser.ID || edit.Revision != option.browser.Revision) {
 		return result{}, ErrBrowserFill
+	}
+	if (action == browserProfileFillAction) != (option.browserProfile != nil) || option.browserProfile != nil && (!option.browserProfile.valid() || edit == nil || edit.ID != option.browserProfile.ID || edit.Revision != option.browserProfile.Revision) {
+		return result{}, ErrBrowserProfileFill
 	}
 	if (action == browserOTPAction) != (option.browserOTP != nil) || option.browserOTP != nil && (!option.browserOTP.valid() || option.unlocked == nil || option.nativeMutation == nil || edit == nil || edit.ID != option.browserOTP.ID || edit.Revision != option.browserOTP.Revision) {
 		return result{}, ErrBrowserOTP
@@ -800,7 +806,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			if option.backup == "" {
 				return invalid
 			}
-		case browserOTPAction, browserFillAction, v2AttachmentReadAction, "item.desktop.show.username", "item.desktop.show.password", "item.desktop.copy.username", "item.desktop.copy.password", "item.desktop.show.notes", "item.desktop.copy.notes", "item.desktop.edit.notes", "item.edit.notes", "item.run.username", "item.run.password", livePullAction, "item.inject.username", "item.inject.password", "item.trash", "item.untrash", "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.reveal.notes", referenceRevealAction, referenceOTPAction, "item.regenerate.password", otpDisclosureAction, desktopOTPShowAction, desktopOTPCopyAction:
+		case browserOTPAction, browserFillAction, browserProfileFillAction, v2AttachmentReadAction, "item.desktop.show.username", "item.desktop.show.password", "item.desktop.copy.username", "item.desktop.copy.password", "item.desktop.show.notes", "item.desktop.copy.notes", "item.desktop.edit.notes", "item.edit.notes", "item.run.username", "item.run.password", livePullAction, "item.inject.username", "item.inject.password", "item.trash", "item.untrash", "item.archive", "item.unarchive", "item.edit.url", "item.edit.title", "item.edit.username", "item.edit.password", "item.edit.otp", "item.reveal.username", "item.reveal.password", "item.reveal.notes", referenceRevealAction, referenceOTPAction, "item.regenerate.password", otpDisclosureAction, desktopOTPShowAction, desktopOTPCopyAction:
 			if edit == nil {
 				return invalid
 			}
@@ -817,7 +823,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 						if option.sshState && items[i].Kind != "ssh-key" {
 							return ErrSSHKey
 						}
-						v2Read := action == v2AttachmentReadAction || action == referenceRevealAction || action == referenceOTPAction || action == "item.reveal.notes"
+						v2Read := action == v2AttachmentReadAction || action == referenceRevealAction || action == referenceOTPAction || action == "item.reveal.notes" || action == browserProfileFillAction
 						lifecycleTarget := (items[i].Kind == "ssh-key" || items[i].Kind == "document") && (trashAction(action) || lifecycleAction(action))
 						if !option.sshState && option.nativeMutation != nil && items[i].Kind != "login" && !v2Read && !v2MutationAction(action) && !lifecycleTarget {
 							return ErrMutationRefused
@@ -839,6 +845,20 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 								break
 							}
 							out.browser = &NativeBrowserFill{username: []byte(items[i].Username), password: []byte(items[i].Password)}
+							outcome = "intent"
+							break
+						}
+						if action == browserProfileFillAction {
+							if items[i].State != "" || string(items[i].EffectiveCategory()) != option.browserProfile.Category {
+								outcome, refusal = "browser-refused", ErrBrowserProfileFill
+								break
+							}
+							content, err := profileFillContent(items[i], option.browserProfile.Category)
+							if err != nil {
+								outcome, refusal = "browser-refused", ErrBrowserProfileFill
+								break
+							}
+							out.browserProfile = &NativeBrowserProfile{content: content}
 							outcome = "intent"
 							break
 						}
@@ -1590,6 +1610,12 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 				return e
 			}
 		}
+		if action == browserProfileFillAction && refusal == nil {
+			link, e = option.browserProfile.binding(i.AuditEncryption)
+			if e != nil {
+				return e
+			}
+		}
 		if action == searchAction {
 			link, e = option.search.binding(i.AuditEncryption)
 			if e != nil {
@@ -1681,6 +1707,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 	})
 	if e != nil {
 		out.browser.clear()
+		out.browserProfile.clear()
 		clear(out.archive)
 		clear(out.material)
 		clear(out.value)

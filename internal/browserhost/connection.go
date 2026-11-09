@@ -15,6 +15,22 @@ type Pending struct {
 	ID, Origin, ItemID, Revision, Title string
 	Until                               time.Time
 }
+
+// ProfileView is the public native review of one sensitive profile fill. It
+// carries only selectors and the deadline; no approved field value is ever
+// present in a snapshot.
+type ProfileView struct {
+	ID, Origin, Title, ItemID, Revision, Category string
+	Deadline                                      time.Time
+	// Checkout marks a checkout-frames-v1 review. Only then are TopOrigin,
+	// TopDocumentID, FrameOrigin, FrameDocumentID and FrameID meaningful.
+	Checkout        bool
+	TopOrigin       string
+	TopDocumentID   string
+	FrameOrigin     string
+	FrameDocumentID string
+	FrameID         int64
+}
 type View struct {
 	Passkey                 *PasskeyView
 	PasskeyStatus           string
@@ -26,6 +42,7 @@ type View struct {
 	Save                    *SaveView
 	SaveStatus              string
 	SaveRequestID           string
+	Profile                 *ProfileView
 	Pair                    bool
 	Paired                  bool
 	Closed                  bool
@@ -56,7 +73,9 @@ type Connection struct {
 	seenPos                 int
 	sessionEpoch            uint64
 	profileContext          personal.BrowserContext
+	profileCheckout         *BrowserCheckout
 	matchedProfiles         map[string]string
+	profile                 *pendingProfile
 	generation              atomic.Uint64
 	cancelEpoch             atomic.Uint64
 	pendingEpoch            uint64
@@ -134,6 +153,7 @@ func (c *Connection) bindDesktopSession(s *personal.Session, epoch uint64, quick
 		c.invalidate()
 		c.epoch = c.generation.Load()
 	}
+	c.profile = nil
 	var b [16]byte
 	if _, e := rand.Read(b[:]); e != nil {
 		return ErrProtocol
@@ -198,7 +218,9 @@ func (c *Connection) invalidate() {
 	c.clearUpload()
 	c.neverOrigins = nil
 	c.profileContext = personal.BrowserContext{}
+	c.profileCheckout = nil
 	c.matchedProfiles = map[string]string{}
+	c.profile = nil
 	if c.save != nil {
 		if !c.save.gate.Cancel() && c.save.gate.CommitWon() {
 			c.save.uncertain.Store(true)
@@ -260,6 +282,12 @@ func (c *Connection) expire() {
 		c.pending = nil
 		c.rows = nil
 		c.context = personal.BrowserContext{}
+		go c.refuse(id)
+	}
+	if p := c.profile; p != nil && !now.Before(p.deadline) {
+		id := p.request.ID
+		c.clearProfilePendingLocked(p)
+		c.profileCheckout = nil
 		go c.refuse(id)
 	}
 	c.expireStaged()
@@ -411,6 +439,13 @@ func (c *Connection) Handle(r Request) error {
 		if c.save != nil || c.otp != nil {
 			return c.refuse(r.ID)
 		}
+		if p := c.profile; p != nil {
+			c.clearProfilePendingLocked(p)
+			c.profileCheckout = nil
+			if e := c.refuse(p.request.ID); e != nil {
+				return e
+			}
+		}
 		if c.pending != nil {
 			if e := c.refuse(c.pending.ID); e != nil {
 				return e
@@ -426,6 +461,12 @@ func (c *Connection) Handle(r Request) error {
 		// even while another native operation is pending and never creates an
 		// approval surface of its own.
 		return c.listPasskeyCandidates(r)
+	}
+	// A reserved sensitive profile fill is the only live operation until the
+	// native owner approves or rejects it. No save, passkey, generator or other
+	// vault mutation may run concurrently with that review.
+	if c.profile != nil {
+		return c.refuse(r.ID)
 	}
 	if r.Type == "passkey-signal" {
 		return c.handlePasskeySignal(r)
@@ -485,6 +526,7 @@ func (c *Connection) Handle(r Request) error {
 		}
 		c.context = r.Context()
 		c.profileContext = r.Context()
+		c.profileCheckout = nil
 		c.rows = rows
 		return c.response(Response{ID: r.ID, Type: "candidates", Candidates: rows})
 	}
@@ -605,7 +647,10 @@ func (c *Connection) Reject() error {
 	if c.save != nil || c.otp != nil {
 		return ErrProtocol
 	}
-
+	if p := c.profile; p != nil {
+		c.clearProfilePendingLocked(p)
+		return c.refuse(p.request.ID)
+	}
 	if c.pending != nil {
 		id := c.pending.ID
 		c.pending = nil
@@ -685,6 +730,20 @@ func (c *Connection) Snapshot() View {
 	v.SaveRequestID = c.saveRequestID
 	v.OTP, v.OTPStatus = c.otpSnapshot()
 	v.OTPRequestID = c.otpRequestID
+	if p := c.profile; p != nil {
+		review := &ProfileView{ID: p.request.ID, Origin: p.request.Origin, Title: p.title, ItemID: p.request.ItemID, Revision: p.request.Revision, Category: p.category, Deadline: p.deadline}
+		if p.checkout != nil {
+			// Public selectors only: the owner sees the top document and the
+			// target frame side by side before approving.
+			review.Checkout = true
+			review.TopOrigin = p.checkout.TopOrigin
+			review.TopDocumentID = p.checkout.TopDocumentID
+			review.FrameOrigin = p.request.Origin
+			review.FrameDocumentID = p.request.DocumentID
+			review.FrameID = p.checkout.FrameID
+		}
+		v.Profile = review
+	}
 	if c.pending != nil {
 		r := c.pending
 		title := ""

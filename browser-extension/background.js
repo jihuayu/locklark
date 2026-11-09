@@ -35,11 +35,14 @@ if (typeof importScripts === "function") importScripts("core.js");
     pendingOpenAndFill = null,
     openAndFillTimer = null,
     hostCapabilities = [],
-    attachmentUpload = null;
+    attachmentUpload = null,
+    checkoutPicker = null;
   const STAGED_TTL = 5 * 60 * 1000,
     LAST_FILLED_TTL = 60 * 1000,
     HISTORY_LIMIT = 20,
-    MULTI_STEP_TTL = 120000;
+    MULTI_STEP_TTL = 120000,
+    CHECKOUT_PICKER_TTL = 30000,
+    CHECKOUT_MAX_FRAMES = 32;
   const CONDITIONAL_INTENT_LIMIT = 64,
     CONDITIONAL_OPTIONS_MAX = 32768;
   // Conditional (autofill) Passkey intents are metadata-only and never set
@@ -562,6 +565,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       attachmentsSupported: !!capability && core.attachmentCapability(hostCapabilities),
       nativeClipboard: nativeClipboardSupported(),
       passkeyManagementSupported: passkeyManagementSupported(),
+      checkoutFramesSupported: checkoutFramePolicy(),
       vaultItems: vaultItems.map((item) => ({ ...item })),
       pending: !!pending || !!pendingOTP || !!pendingPasskey,
       otpPending: !!pendingOTP,
@@ -657,6 +661,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     });
   }
   function clear() {
+    clearCheckoutPicker();
     if (pending?.injectionStarted) fillUnknown = true;
     if (pendingPasskey?.create) passkeyUnknown = true;
     pendingPasskey = null;
@@ -987,6 +992,532 @@ if (typeof importScripts === "function") importScripts("core.js");
       topOrigin,
     };
   }
+  // Explicit checkout-frame selection is public metadata only: one bounded
+  // list of the HTTPS frames the browser actually injected into. No card
+  // field is read, returned or cached until the native owner approves the
+  // exact frozen target later.
+  function checkoutFramePolicy() {
+    return (
+      !!capability &&
+      typeof core.checkoutProbe === "function" &&
+      typeof core.fillCheckoutCardDocument === "function" &&
+      hostCapabilities.includes("checkout-frames-v1")
+    );
+  }
+  function canonicalHTTPSOrigin(value) {
+    if (typeof value !== "string" || !value || value.length > 2048) return "";
+    try {
+      if (!core.validHTTPSOrigin(value)) return "";
+      return core.originFromURL(value) === value ? value : "";
+    } catch {
+      return "";
+    }
+  }
+  function checkoutDocumentID(value) {
+    return typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value);
+  }
+  function checkoutProbeResultValid(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    if (
+      Object.keys(value).sort().join(",") !==
+      "document_stable,fence_present,origin,sandbox_ever,secure,top"
+    )
+      return false;
+    return (
+      canonicalHTTPSOrigin(value.origin) === value.origin &&
+      typeof value.top === "boolean" &&
+      value.secure === true &&
+      value.fence_present === true &&
+      value.document_stable === true &&
+      value.sandbox_ever === false
+    );
+  }
+  async function checkoutCaptureFrames() {
+    const tabs = await api.tabs.query({ active: true, currentWindow: true });
+    if (!Array.isArray(tabs) || tabs.length !== 1) throw Error("refused");
+    const tab = tabs[0];
+    if (
+      !Number.isSafeInteger(tab?.id) || tab.id < 1 ||
+      !Number.isSafeInteger(tab?.windowId) || tab.windowId < 1
+    )
+      throw Error("refused");
+    const topOrigin = canonicalHTTPSOrigin(core.originFromURL(tab.url));
+    if (!topOrigin) throw Error("refused");
+    const results = await api.scripting.executeScript({
+      target: { tabId: tab.id, allFrames: true },
+      func: core.checkoutProbe,
+    });
+    if (
+      !Array.isArray(results) || results.length < 1 ||
+      results.length > CHECKOUT_MAX_FRAMES
+    )
+      throw Error("refused");
+    const frames = [],
+      frameIds = new Set(),
+      documentIds = new Set();
+    let top = null;
+    for (const entry of results) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry))
+        throw Error("refused");
+      const frameId = entry.frameId,
+        documentId = entry.documentId,
+        result = entry.result;
+      if (!Number.isSafeInteger(frameId) || frameId < 0) throw Error("refused");
+      if (!checkoutDocumentID(documentId) || !checkoutProbeResultValid(result))
+        throw Error("refused");
+      if (frameIds.has(frameId) || documentIds.has(documentId))
+        throw Error("refused");
+      frameIds.add(frameId);
+      documentIds.add(documentId);
+      if (result.top) {
+        if (frameId !== 0 || top) throw Error("refused");
+        top = { frameId, documentId, origin: result.origin, top: true };
+      } else {
+        if (frameId === 0) throw Error("refused");
+        frames.push({ frameId, documentId, origin: result.origin, top: false });
+      }
+    }
+    if (!top || top.origin !== topOrigin) throw Error("refused");
+    const again = await api.tabs.query({ active: true, currentWindow: true });
+    if (
+      !Array.isArray(again) || again.length !== 1 ||
+      again[0]?.id !== tab.id || again[0]?.windowId !== tab.windowId ||
+      canonicalHTTPSOrigin(core.originFromURL(again[0]?.url)) !== topOrigin
+    )
+      throw Error("refused");
+    return {
+      tabId: tab.id,
+      windowId: tab.windowId,
+      topOrigin,
+      topDocumentId: top.documentId,
+      frames: [top, ...frames],
+    };
+  }
+  function checkoutFrameSignature(capture) {
+    return JSON.stringify({
+      tabId: capture.tabId,
+      windowId: capture.windowId,
+      topOrigin: capture.topOrigin,
+      topDocumentId: capture.topDocumentId,
+      frames: capture.frames.map((frame) => [
+        frame.frameId,
+        frame.documentId,
+        frame.origin,
+        frame.top,
+      ]),
+    });
+  }
+  function clearCheckoutPicker() {
+    const picker = checkoutPicker;
+    checkoutPicker = null;
+    if (picker?.timer) clearTimeout(picker.timer);
+  }
+  function checkoutPickerView(picker) {
+    return {
+      nonce: picker.nonce,
+      topOrigin: picker.topOrigin,
+      expiresAt: picker.expiresAt,
+      candidates: [...picker.candidates.values()].map((entry) => ({
+        choice: entry.choice,
+        origin: entry.origin,
+        frameId: entry.frameId,
+        top: entry.top,
+      })),
+    };
+  }
+  async function startCheckoutPicker(message) {
+    if (Object.keys(message).sort().join(",") !== "id,revision,type")
+      throw Error("refused");
+    if (
+      !/^[a-f0-9]{32}$/.test(message.id || "") ||
+      !/^[a-f0-9]{64}$/.test(message.revision || "")
+    )
+      throw Error("refused");
+    // A new picker always invalidates the previous public choice set.
+    clearCheckoutPicker();
+    if (!capability || pending || pendingOTP || pendingPasskey)
+      throw Error("refused");
+    if (!checkoutFramePolicy()) {
+      status = "当前原生宿主或浏览器不支持选择结账表单";
+      throw Error("refused");
+    }
+    const item = await getVaultItem(message.id, message.revision);
+    if (
+      !item ||
+      item.id !== message.id ||
+      item.revision !== message.revision ||
+      core.normalizeCategory(item.category) !== "card" ||
+      item.unavailable ||
+      item.readOnly
+    )
+      throw Error("refused");
+    const generation = epoch,
+      expectedCapability = capability;
+    const capture = await checkoutCaptureFrames();
+    if (generation !== epoch || capability !== expectedCapability)
+      throw Error("refused");
+    const candidates = new Map();
+    for (const frame of capture.frames) {
+      const choice = id();
+      candidates.set(choice, {
+        choice,
+        frameId: frame.frameId,
+        documentId: frame.documentId,
+        origin: frame.origin,
+        top: frame.frameId === 0,
+      });
+    }
+    if (candidates.size < 1 || candidates.size > CHECKOUT_MAX_FRAMES)
+      throw Error("refused");
+    const nonce = id(),
+      expiresAt = Date.now() + CHECKOUT_PICKER_TTL;
+    const picker = {
+      nonce,
+      epoch: generation,
+      capability: expectedCapability,
+      itemId: message.id,
+      revision: message.revision,
+      tabId: capture.tabId,
+      windowId: capture.windowId,
+      topOrigin: capture.topOrigin,
+      topDocumentId: capture.topDocumentId,
+      signature: checkoutFrameSignature(capture),
+      candidates,
+      createdAt: Date.now(),
+      expiresAt,
+      timer: null,
+    };
+    picker.timer = setTimeout(() => {
+      if (checkoutPicker !== picker) return;
+      checkoutPicker = null;
+      status = "选择结账表单已过期，请重新选择";
+      updateBadge();
+    }, CHECKOUT_PICKER_TTL);
+    checkoutPicker = picker;
+    status = "请选择要填充的结账表单来源；不会自动选择";
+    updateBadge();
+    return checkoutPickerView(picker);
+  }
+  function consumeCheckoutChoice(message) {
+    if (Object.keys(message).sort().join(",") !== "choice,id,nonce,revision,type")
+      return null;
+    if (
+      !/^[a-f0-9]{32}$/.test(message.nonce || "") ||
+      !/^[a-f0-9]{32}$/.test(message.choice || "") ||
+      !/^[a-f0-9]{32}$/.test(message.id || "") ||
+      !/^[a-f0-9]{64}$/.test(message.revision || "")
+    )
+      return null;
+    const picker = checkoutPicker;
+    if (
+      !picker ||
+      picker.nonce !== message.nonce ||
+      picker.itemId !== message.id ||
+      picker.revision !== message.revision ||
+      picker.epoch !== epoch ||
+      picker.capability !== capability ||
+      Date.now() > picker.expiresAt
+    ) {
+      clearCheckoutPicker();
+      return null;
+    }
+    if (pending || pendingOTP || pendingPasskey) return null;
+    const entry = picker.candidates.get(message.choice);
+    if (!entry) return null;
+    // Consume exactly once before any asynchronous native request.
+    clearCheckoutPicker();
+    return { picker, entry };
+  }
+  async function selectCheckout(message) {
+    const chosen = consumeCheckoutChoice(message);
+    if (!chosen) throw Error("refused");
+    status = "已选择结账表单，正在核对当前页面";
+    void checkoutFill(chosen.picker, chosen.entry).catch(() => {});
+    return true;
+  }
+  function cancelCheckoutPickerMessage(message) {
+    if (Object.keys(message).sort().join(",") !== "nonce,type")
+      throw Error("refused");
+    if (!/^[a-f0-9]{32}$/.test(message.nonce || "")) throw Error("refused");
+    if (checkoutPicker?.nonce !== message.nonce) return false;
+    clearCheckoutPicker();
+    status = "已取消本次填充";
+    return true;
+  }
+  function stopCheckoutMonitor(intent) {
+    if (intent?.monitor) {
+      clearTimeout(intent.monitor);
+      intent.monitor = null;
+    }
+  }
+  // Native generic cancellation is allowed only while this exact intent still
+  // owns the single pending slot and no OTP or Passkey approval is in flight.
+  function cancelOwnCheckoutNative(intent) {
+    if (
+      pending !== intent ||
+      pendingOTP ||
+      pendingPasskey ||
+      intent.cancelSent ||
+      !capability
+    )
+      return;
+    intent.cancelSent = true;
+    void request("cancel", { capability }).catch(() => {});
+  }
+  function markCheckoutStale(intent, generation) {
+    stopCheckoutMonitor(intent);
+    intent.stale = true;
+    if (generation !== epoch || pending !== intent) return;
+    cancelOwnCheckoutNative(intent);
+    pending = null;
+    context = null;
+    rows = [];
+    advanceEpoch();
+    status = "结账页面已变化，本次填充已取消";
+    updateBadge();
+    rebuildContextMenus();
+  }
+  // One bounded monitor per chosen context. It only observes public frame
+  // identity; any child navigation, document replacement, tab switch or lock
+  // invalidates the native approval before it can release card fields.
+  function watchCheckoutContext(intent, generation) {
+    const tick = async () => {
+      intent.monitor = null;
+      if (generation !== epoch || pending !== intent || intent.stale) return;
+      if (Date.now() > intent.monitorUntil) {
+        markCheckoutStale(intent, generation);
+        return;
+      }
+      try {
+        const capture = await checkoutCaptureFrames();
+        if (generation !== epoch || pending !== intent || intent.stale) return;
+        if (checkoutFrameSignature(capture) !== intent.signature) {
+          markCheckoutStale(intent, generation);
+          return;
+        }
+      } catch {
+        markCheckoutStale(intent, generation);
+        return;
+      }
+      if (generation === epoch && pending === intent && !intent.stale)
+        intent.monitor = setTimeout(tick, 750);
+    };
+    intent.monitor = setTimeout(tick, 750);
+  }
+  async function checkoutRevalidate(intent, generation) {
+    if (generation !== epoch || pending !== intent || intent.stale)
+      throw Error("refused");
+    const capture = await checkoutCaptureFrames();
+    if (generation !== epoch || pending !== intent || intent.stale)
+      throw Error("refused");
+    if (checkoutFrameSignature(capture) !== intent.signature)
+      throw Error("refused");
+    const target = capture.frames.find(
+      (frame) => frame.frameId === intent.frameId,
+    );
+    if (
+      !target ||
+      target.documentId !== intent.documentId ||
+      target.origin !== intent.origin ||
+      target.top !== (intent.frameId === 0) ||
+      capture.topOrigin !== intent.topOrigin ||
+      capture.topDocumentId !== intent.topDocumentId ||
+      capture.tabId !== intent.tabId ||
+      capture.windowId !== intent.windowId
+    )
+      throw Error("refused");
+    return capture;
+  }
+  function checkoutWireFields(intent) {
+    const payload = {
+      ...fields(intent),
+      profile_kind: "credit_card",
+    };
+    if (intent.checkout) payload.checkout = { ...intent.checkout };
+    return payload;
+  }
+  async function checkoutMatch(intent, generation) {
+    await checkoutRevalidate(intent, generation);
+    const response = await request("match-profiles", checkoutWireFields(intent), 35000);
+    if (generation !== epoch || pending !== intent || intent.stale)
+      throw Error("refused");
+    if (
+      !response ||
+      response.type !== "profiles" ||
+      !Array.isArray(response.profiles) ||
+      response.profiles.length > 100
+    )
+      throw Error("refused");
+    const profile = response.profiles.find(
+      (row) =>
+        row &&
+        row.id === intent.itemId &&
+        row.revision === intent.revision &&
+        row.category === "credit_card",
+    );
+    if (!profile) throw Error("refused");
+    return profile;
+  }
+  async function checkoutFill(picker, target) {
+    const generation = epoch;
+    if (pending || pendingOTP || pendingPasskey) throw Error("refused");
+    const intent = {
+      kind: "checkout",
+      itemId: picker.itemId,
+      revision: picker.revision,
+      tabId: picker.tabId,
+      windowId: picker.windowId,
+      frameId: target.frameId,
+      documentId: target.documentId,
+      origin: target.origin,
+      topOrigin: picker.topOrigin,
+      topDocumentId: picker.topDocumentId,
+      signature: picker.signature,
+      // The optional native checkout object is proposed only for a target
+      // frame that is neither the top document nor the top origin. Native PSL
+      // policy remains the authority on whether that proposal is acceptable.
+      checkout:
+        target.frameId > 0 && target.origin !== picker.topOrigin
+          ? {
+              top_origin: picker.topOrigin,
+              top_document_id: picker.topDocumentId,
+              frame_id: target.frameId,
+            }
+          : null,
+      requestId: "",
+      sent: false,
+      cancelSent: false,
+      injectionStarted: false,
+      stale: false,
+      monitor: null,
+      monitorUntil: Date.now() + 35000,
+    };
+    pending = intent;
+    context = {
+      tabId: intent.tabId,
+      windowId: intent.windowId,
+      frameId: intent.frameId,
+      documentId: intent.documentId,
+      origin: intent.origin,
+      topOrigin: intent.topOrigin,
+      topDocumentId: intent.topDocumentId,
+    };
+    // The choice is only consumed; the exact page and the native profile set
+    // are still being revalidated, so do not imply an approval already exists.
+    status = "正在核对所选结账表单页面";
+    updateBadge();
+    rebuildContextMenus();
+    let response = null;
+    try {
+      await checkoutMatch(intent, generation);
+      await checkoutRevalidate(intent, generation);
+      if (generation !== epoch || pending !== intent || intent.stale)
+        throw Error("refused");
+      intent.requestId = id();
+      intent.sent = true;
+      // Only now is the cross-site or same-site target actually proposed to the
+      // native owner, which may require an in-window approval.
+      status = "请在原生窗口核对两个网站来源并批准本次结账表单填充";
+      updateBadge();
+      watchCheckoutContext(intent, generation);
+      response = await request(
+        "fill-profile",
+        {
+          ...fields(intent),
+          item_id: intent.itemId,
+          revision: intent.revision,
+          ...(intent.checkout ? { checkout: { ...intent.checkout } } : {}),
+        },
+        35000,
+        intent.requestId,
+      );
+      stopCheckoutMonitor(intent);
+      if (generation !== epoch || pending !== intent || intent.stale)
+        throw Error("refused");
+      const fill = response?.profile_fill;
+      if (
+        !fill ||
+        typeof fill !== "object" ||
+        Array.isArray(fill) ||
+        fill.item_id !== intent.itemId ||
+        fill.revision !== intent.revision ||
+        fill.category !== "credit_card" ||
+        !fill.fields ||
+        typeof fill.fields !== "object" ||
+        Array.isArray(fill.fields)
+      )
+        throw Error("refused");
+      // Bind the approval to the live page again before the single exact-document
+      // injection. The native values never leave this scope.
+      await checkoutRevalidate(intent, generation);
+      if (generation !== epoch || pending !== intent || intent.stale)
+        throw Error("refused");
+      intent.injectionStarted = true;
+      let results;
+      try {
+        results = await api.scripting.executeScript({
+          target: { tabId: intent.tabId, documentIds: [intent.documentId] },
+          func: core.fillCheckoutCardDocument,
+          args: [
+            intent.origin,
+            fill.fields,
+            Date.now() + 1500,
+            intent.frameId === 0,
+          ],
+        });
+      } finally {
+        wipeMap(fill.fields);
+        if (response.profile_fill) {
+          wipeMap(response.profile_fill.fields);
+          response.profile_fill.fields = {};
+        }
+      }
+      const result = results?.length === 1 ? results[0]?.result : null;
+      if (
+        generation !== epoch ||
+        pending !== intent ||
+        intent.stale ||
+        !Array.isArray(results) ||
+        results.length !== 1 ||
+        results[0].frameId !== intent.frameId ||
+        results[0].documentId !== intent.documentId ||
+        !result ||
+        typeof result !== "object" ||
+        Array.isArray(result) ||
+        Object.keys(result).sort().join(",") !== "count,filled" ||
+        result.filled !== true ||
+        !Number.isSafeInteger(result.count) ||
+        result.count < 1 ||
+        result.count > CHECKOUT_MAX_FRAMES
+      )
+        throw Error("refused");
+      intent.injectionStarted = false;
+      fillUnknown = false;
+      status = "本次已请求填充结账表单；未自动提交；请核实网站结果";
+    } catch {
+      if (generation === epoch && pending === intent) {
+        fillUnknown = intent.injectionStarted === true;
+        status = fillUnknown
+          ? FILL_UNKNOWN
+          : intent.stale
+            ? "结账页面已变化，本次填充已取消"
+            : "本次结账表单填充未完成；未自动重试";
+      }
+    } finally {
+      stopCheckoutMonitor(intent);
+      if (response?.profile_fill) {
+        if (response.profile_fill.fields) wipeMap(response.profile_fill.fields);
+        response.profile_fill.fields = {};
+      }
+      if (generation === epoch && pending === intent) {
+        pending = null;
+        rows = [];
+        context = null;
+      }
+      updateBadge();
+      rebuildContextMenus();
+    }
+  }
   async function activeSite() {
     try {
       const tabs = await api.tabs.query({ active: true, currentWindow: true });
@@ -1229,6 +1760,7 @@ if (typeof importScripts === "function") importScripts("core.js");
         "item-state": "saved",
         generate: "generated",
         "fill-profile": "profile-fill",
+        "match-profiles": "profiles",
         "attachment-begin": "attachment-transfer",
         "attachment-chunk": "attachment-transfer",
         "attachment-commit": "attachment-saved",
@@ -2497,6 +3029,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     rebuildContextMenus();
   }
   api.tabs.onActivated.addListener(() => {
+    clearCheckoutPicker();
     cancelContext();
     updateBadge();
     rebuildContextMenus();
@@ -2512,8 +3045,10 @@ if (typeof importScripts === "function") importScripts("core.js");
         multiStepSessions.delete(tabId);
       }
     }
-    if ("url" in change || change.status === "loading")
+    if ("url" in change || change.status === "loading") {
       clearConditionalIntentsForTab(tabId);
+      if (checkoutPicker?.tabId === tabId) clearCheckoutPicker();
+    }
     if (
       (context?.tabId === tabId ||
         pending?.tabId === tabId ||
@@ -2529,6 +3064,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     void processOpenAndFill(tabId, change);
   });
   api.tabs.onRemoved?.addListener((tabId) => {
+    if (checkoutPicker?.tabId === tabId) clearCheckoutPicker();
     multiStepSessions.delete(tabId);
     clearConditionalIntentsForTab(tabId);
     if (
@@ -2542,6 +3078,8 @@ if (typeof importScripts === "function") importScripts("core.js");
   api.windows.onFocusChanged.addListener((windowId) => {
     updateBadge();
     if (windowId === api.windows.WINDOW_ID_NONE) return;
+    if (checkoutPicker && checkoutPicker.windowId !== windowId)
+      clearCheckoutPicker();
     const bound =
       pendingPasskey?.windowId ??
       pendingOTP?.windowId ??
@@ -2692,8 +3230,16 @@ if (typeof importScripts === "function") importScripts("core.js");
     }
   }
   async function fillItemCategory(itemId, revision, category) {
+    const kind = core.normalizeCategory(category);
+    if (kind !== "card" && kind !== "identity") {
+      status = "此条目类别不支持填充";
+      return;
+    }
     if (
       !capability ||
+      pending ||
+      pendingOTP ||
+      pendingPasskey ||
       !vaultItems.some(
         (item) => item.id === itemId && item.revision === revision,
       )
@@ -2701,34 +3247,116 @@ if (typeof importScripts === "function") importScripts("core.js");
       status = "条目已变化，请刷新后重试";
       return;
     }
+    const generation = epoch;
+    let response = null;
+    const intent = { kind: "profile", itemId, revision, injectionStarted: false };
+    pending = intent;
     try {
       const c = await capture();
       await current(c);
-      const response = await request(
-        "fill-profile",
-        {
-          ...fields(c),
-          item_id: itemId,
-          revision,
-        },
+      const profileKind = kind === "card" ? "credit_card" : "identity";
+      const match = await request(
+        "match-profiles",
+        { ...fields(c), profile_kind: profileKind },
         35000,
       );
+      if (
+        generation !== epoch ||
+        pending !== intent ||
+        !match ||
+        match.type !== "profiles" ||
+        !Array.isArray(match.profiles) ||
+        match.profiles.length > 100 ||
+        !match.profiles.some(
+          (row) =>
+            row &&
+            row.id === itemId &&
+            row.revision === revision &&
+            row.category === profileKind,
+        )
+      )
+        throw Error("refused");
+      response = await request(
+        "fill-profile",
+        { ...fields(c), item_id: itemId, revision },
+        35000,
+      );
+      if (generation !== epoch || pending !== intent) throw Error("refused");
       const fill = response.profile_fill;
-      if (!fill || fill.item_id !== itemId || fill.revision !== revision)
+      if (
+        !fill ||
+        fill.item_id !== itemId ||
+        fill.revision !== revision ||
+        fill.category !== profileKind ||
+        !fill.fields ||
+        typeof fill.fields !== "object" ||
+        Array.isArray(fill.fields)
+      )
         throw Error("refused");
       await current(c);
-      if (api.tabs?.sendMessage)
-        await api.tabs
-          .sendMessage(c.tabId, {
-            type: "locklark:fill-fields",
-            fields: fill.fields,
-          })
-          .catch(() => {});
-      status = "已请求填充所选条目；请核实网站结果";
+      if (generation !== epoch || pending !== intent) throw Error("refused");
+      intent.injectionStarted = true;
+      let results;
+      try {
+        results = await api.scripting.executeScript({
+          target: { tabId: c.tabId, documentIds: [c.documentId] },
+          func:
+            kind === "card"
+              ? core.fillCheckoutCardDocument
+              : core.fillIdentityDocument,
+          args:
+            kind === "card"
+              ? [c.origin, fill.fields, Date.now() + 1500, true]
+              : [c.origin, fill.fields, Date.now() + 1500, false, "identity"],
+        });
+      } finally {
+        wipeMap(fill.fields);
+        if (response.profile_fill) {
+          wipeMap(response.profile_fill.fields);
+          response.profile_fill.fields = {};
+        }
+      }
+      const result = results?.length === 1 ? results[0]?.result : null;
+      if (
+        generation !== epoch ||
+        pending !== intent ||
+        !Array.isArray(results) ||
+        results.length !== 1 ||
+        results[0].frameId !== 0 ||
+        results[0].documentId !== c.documentId ||
+        (kind === "card"
+          ? !result ||
+            typeof result !== "object" ||
+            Array.isArray(result) ||
+            Object.keys(result).sort().join(",") !== "count,filled" ||
+            result.filled !== true ||
+            !Number.isSafeInteger(result.count) ||
+            result.count < 1 ||
+            result.count > CHECKOUT_MAX_FRAMES
+          : result !== true)
+      )
+        throw Error("refused");
+      intent.injectionStarted = false;
+      fillUnknown = false;
+      status =
+        kind === "card"
+          ? "已请求填充所选银行卡；未自动提交；请核实网站结果"
+          : "已请求填充所选身份信息；未自动提交；请核实网站结果";
     } catch {
-      status = "此原生宿主暂不支持填充该条目类别";
+      if (generation === epoch && pending === intent) {
+        fillUnknown = intent.injectionStarted === true;
+        status = fillUnknown
+          ? FILL_UNKNOWN
+          : "此原生宿主暂不支持填充该条目类别";
+      }
+    } finally {
+      if (response?.profile_fill) {
+        if (response.profile_fill.fields) wipeMap(response.profile_fill.fields);
+        response.profile_fill.fields = {};
+      }
+      if (generation === epoch && pending === intent) pending = null;
+      updateBadge();
     }
-    updateBadge();
   }
   function candidateItems() {
     if (!context?.origin) return [];
@@ -2769,14 +3397,16 @@ if (typeof importScripts === "function") importScripts("core.js");
     const category = core.validCategory(rawCategory) ? rawCategory : "all";
     const query =
       typeof rawQuery === "string" ? rawQuery.slice(0, 500) : "";
-    const canonical = core.normalizeCategory(category);
+    // The native wire uses canonical v2 categories; normalizeCategory()
+    // returns UI aliases such as "card" and would filter every card out.
+    const wireCategory = core.nativeCategory(category);
     try {
       const response = await request(
         "vault-search",
         {
           capability,
           query,
-          category: canonical,
+          category: wireCategory,
           favorites_only: category === "favorites",
           ...(passkeysOnly ? { passkeys_only: true } : {}),
         },
@@ -3875,6 +4505,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       site,
       attachmentsSupported: !!capability && core.attachmentCapability(hostCapabilities),
       passkeyManagementSupported: passkeyManagementSupported(),
+      checkoutFramesSupported: checkoutFramePolicy(),
       passkeyConditionalSupported: passkeyConditionalSupported === true,
       watchtower: watchtowerReport,
     };
@@ -4826,6 +5457,25 @@ if (typeof importScripts === "function") importScripts("core.js");
           if (Object.keys(message).join(",") !== "type") throw Error("refused");
           cancelOTP();
           break;
+        case "checkout-frames":
+          extra.checkoutPicker = await startCheckoutPicker(message);
+          break;
+        case "checkout-select":
+          extra.checkoutStarted = await selectCheckout(message);
+          break;
+        case "checkout-cancel":
+          await cancelCheckoutPickerMessage(message);
+          break;
+        case "item-save":
+          await settingsReady;
+          // Any vault mutation may change the reviewed card revision.
+          clearCheckoutPicker();
+          extra.saved = await saveVaultItem(message);
+          break;
+        case "item-state":
+          clearCheckoutPicker();
+          extra.itemState = await setItemState(message);
+          break;
         case "fill": {
           const category = message.category ?? "login";
           if (
@@ -4887,15 +5537,6 @@ if (typeof importScripts === "function") importScripts("core.js");
           )
             throw Error("refused");
           extra.detail = await getVaultItem(message.id, message.revision);
-          break;
-        case "item-save": {
-          await settingsReady;
-          const saved = await saveVaultItem(message);
-          extra.saved = saved;
-          break;
-        }
-        case "item-state":
-          extra.itemState = await setItemState(message);
           break;
         case "copy-field":
           extra.copiedField = await copyFieldValue(message);

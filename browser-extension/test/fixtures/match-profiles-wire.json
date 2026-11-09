@@ -1,0 +1,65 @@
+{
+  "responses": {
+    "card": {
+      "v": 1,
+      "id": "fedcba9876543210fedcba9876543210",
+      "type": "profiles",
+      "profiles": [
+        {
+          "id": "0123456789abcdef0123456789abcdef",
+          "revision": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          "category": "credit_card",
+          "title": "Synthetic Card",
+          "subtitle": "Visa •••• 1111",
+          "card_brand": "visa",
+          "card_last4": "1111",
+          "card_exp": "2030-01"
+        }
+      ]
+    },
+    "identity": {
+      "v": 1,
+      "id": "fedcba9876543210fedcba9876543210",
+      "type": "profiles",
+      "profiles": [
+        {
+          "id": "abcdef0123456789abcdef0123456789",
+          "revision": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          "category": "identity",
+          "title": "Synthetic Identity",
+          "subtitle": "Ada Lovelace · ada@example.test"
+        }
+      ]
+    },
+    "mixed": {
+      "v": 1,
+      "id": "fedcba9876543210fedcba9876543210",
+      "type": "profiles",
+      "profiles": [
+        {
+          "id": "0123456789abcdef0123456789abcdef",
+          "revision": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          "category": "credit_card",
+          "title": "Synthetic Card",
+          "subtitle": "Visa •••• 1111",
+          "card_brand": "visa",
+          "card_last4": "1111",
+          "card_exp": "2030-01"
+        },
+        {
+          "id": "abcdef0123456789abcdef0123456789",
+          "revision": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          "category": "identity",
+          "title": "Synthetic Identity",
+          "subtitle": "Ada Lovelace · ada@example.test"
+        }
+      ]
+    },
+    "empty": {
+      "v": 1,
+      "id": "fedcba9876543210fedcba9876543210",
+      "type": "profiles",
+      "profiles": []
+    }
+  }
+}

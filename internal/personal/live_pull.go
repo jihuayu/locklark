@@ -111,5 +111,5 @@ func executeLivePull(ctx context.Context, r LivePullRequest, value []byte) (gate
 }
 
 func boundValueAction(action string) bool {
-	return injectAction(action) || runAction(action) || action == runBundleAction || action == livePullAction || action == passkeyGetAction || (action == browserFillAction || action == browserOTPAction)
+	return injectAction(action) || runAction(action) || action == runBundleAction || action == livePullAction || action == passkeyGetAction || action == browserFillAction || action == browserOTPAction || action == browserProfileFillAction
 }

@@ -817,6 +817,19 @@ func (c *Connection) handleMatchProfiles(r Request) error {
 	if _, e := origin.Parse(r.Origin); e != nil {
 		return c.refuse(r.ID)
 	}
+	// checkout-frames-v1: the extension only proposes the observed context and
+	// the native same-site policy is authoritative. A refused proposal returns
+	// before any profile metadata (and so before any secret) is read.
+	c.profileCheckout = nil
+	var checkout *BrowserCheckout
+	if r.Checkout != nil {
+		if r.ProfileKind != "credit_card" || !r.Checkout.personal().Valid(r.Context()) {
+			c.profileContext = personal.BrowserContext{}
+			c.matchedProfiles = map[string]string{}
+			return c.refuse(r.ID)
+		}
+		checkout = r.Checkout.clone()
+	}
 	items, revisions, e := s.ReadAuthenticatedItems(true)
 	if e != nil {
 		return c.refuse(r.ID)
@@ -863,12 +876,23 @@ func (c *Connection) handleMatchProfiles(r Request) error {
 		profiles = append(profiles, p)
 	}
 	c.profileContext = r.Context()
+	// Records the exact checkout selectors this card list was produced under;
+	// a later fill must repeat them byte for byte.
+	c.profileCheckout = checkout
 	sort.Slice(profiles, func(i, j int) bool { return profiles[i].Title < profiles[j].Title })
 	return c.response(Response{ID: r.ID, Type: "profiles", Profiles: profiles})
 }
 
 func (c *Connection) handleFillProfile(r Request) error {
+	if c.profile != nil || c.pending != nil || c.save != nil || c.otp != nil || c.passkey != nil || c.signal != nil || c.stagedBusy {
+		return c.refuse(r.ID)
+	}
 	if c.profileContext.Origin != r.Origin || c.profileContext.TabID != r.TabID || c.profileContext.DocumentID != r.DocumentID {
+		return c.refuse(r.ID)
+	}
+	// The fill must repeat the exact checkout selectors (top origin, top
+	// document and frame id) the card list was produced under, or none at all.
+	if !sameCheckout(c.profileCheckout, r.Checkout) {
 		return c.refuse(r.ID)
 	}
 	if _, ok := c.matchedProfiles[r.ItemID+":"+r.Revision]; !ok {
@@ -886,57 +910,39 @@ func (c *Connection) handleFillProfile(r Request) error {
 	if !ok || revisions[it.ID] != r.Revision || it.State != "" {
 		return c.refuse(r.ID)
 	}
-	fill := &BrowserProfileFill{ItemID: it.ID, Revision: r.Revision, Category: categoryOf(it), Fields: map[string]string{}}
-	switch categoryOf(it) {
+	category := categoryOf(it)
+	switch category {
 	case "credit_card":
-		card := it.NormalizedCreditCard()
-		if card == nil {
+		if it.NormalizedCreditCard() == nil {
 			return c.refuse(r.ID)
 		}
-		month, year, short := expiryParts(card.ExpiryDate)
-		cc := &BrowserCreditCardFill{CardholderName: card.CardholderName, Type: card.Type, Number: card.Number, Verification: card.Verification, ExpiryDate: card.ExpiryDate, ExpMonth: month, ExpYear: year, ExpYearShort: short, PIN: card.PIN}
-		fill.CreditCard = cc
-		addField(fill.Fields, "cc-name", card.CardholderName)
-		addField(fill.Fields, "cc-number", card.Number)
-		addField(fill.Fields, "cc-exp", card.ExpiryDate)
-		addField(fill.Fields, "cc-exp-month", month)
-		addField(fill.Fields, "cc-exp-year", year)
-		addField(fill.Fields, "cc-exp-year-short", short)
-		addField(fill.Fields, "cc-csc", card.Verification)
-		addField(fill.Fields, "cc-type", card.Type)
 	case "identity":
-		ident := it.NormalizedIdentity()
-		if ident == nil {
+		if it.NormalizedIdentity() == nil {
 			return c.refuse(r.ID)
 		}
-		fill.Identity = identitySummary(ident)
-		addField(fill.Fields, "honorific-prefix", ident.Title)
-		addField(fill.Fields, "given-name", ident.FirstName)
-		addField(fill.Fields, "additional-name", ident.MiddleName)
-		addField(fill.Fields, "family-name", ident.LastName)
-		name := strings.TrimSpace(ident.FirstName + " " + ident.MiddleName + " " + ident.LastName)
-		if name == "" {
-			name = ident.Title
-		}
-		addField(fill.Fields, "name", name)
-		addField(fill.Fields, "organization", ident.Company)
-		addField(fill.Fields, "organization-title", ident.JobTitle)
-		addField(fill.Fields, "email", ident.Email)
-		addField(fill.Fields, "tel", ident.Phone)
-		street := strings.TrimSpace(strings.TrimPrefix(ident.AddressLine1+", "+ident.AddressLine2, ", "))
-		addField(fill.Fields, "street-address", street)
-		addField(fill.Fields, "address-line1", ident.AddressLine1)
-		addField(fill.Fields, "address-line2", ident.AddressLine2)
-		addField(fill.Fields, "address-level2", ident.City)
-		addField(fill.Fields, "address-level1", ident.State)
-		addField(fill.Fields, "postal-code", ident.PostalCode)
-		addField(fill.Fields, "country", ident.Country)
-		addField(fill.Fields, "country-name", ident.Country)
-		addField(fill.Fields, "bday", ident.BirthDate)
 	default:
 		return c.refuse(r.ID)
 	}
-	return c.response(Response{ID: r.ID, Type: "profile-fill", ProfileFill: fill})
+	if c.profileCheckout != nil && category != "credit_card" {
+		return c.refuse(r.ID)
+	}
+	// Reserve only public selectors. The private projection is prepared later,
+	// after the native owner presses the approval button for this exact review;
+	// no browser request can cause private fields to be read into a response.
+	// Own a private copy of the proposal so the caller cannot mutate the
+	// captured review after Handle returned.
+	reserved := c.profileCheckout.clone()
+	r.Checkout = reserved.clone()
+	c.profile = &pendingProfile{
+		request:     r,
+		checkout:    reserved,
+		title:       it.Title,
+		category:    category,
+		deadline:    c.now().Add(30 * time.Second),
+		epoch:       c.epoch,
+		cancelEpoch: c.cancelEpoch.Load(),
+	}
+	return nil
 }
 
 func addField(fields map[string]string, key, value string) {
