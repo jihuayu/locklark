@@ -1045,7 +1045,6 @@ func (a *App) securityView(c *ui.Context) {
 	}
 	ui.Text(c, shortcut)
 	ui.Text(c, "快捷解锁："+osunlock.Label()).Bold()
-	ui.Text(c, "系统验证："+osunlock.Biometry()).FontSize(12)
 	ui.Text(c, osunlock.Description())
 	ui.Text(c, osunlock.Requirement()).FontSize(12)
 	ui.Text(c, "首次或到期后使用主密码与 Secret Key 完整解锁，再主动启用。系统验证失败时保留完整解锁入口。")

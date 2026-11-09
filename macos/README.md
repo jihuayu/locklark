@@ -32,7 +32,7 @@ export LOCKLARK_NOTARY_PROFILE="notary"   # xcrun notarytool store-credentials n
 
 ## 系统验证能力与错误码
 
-安全设置会显示 `osunlock.Biometry()` 的结果，不会触发验证提示：
+安全设置中的“快捷解锁”标签和说明会反映 `osunlock.Biometry()` 的结果，不会触发验证提示：
 
 - `Touch ID`：当前 Mac 已启用 Touch ID，`UserPresence` 会优先弹 Touch ID，也可回退到系统密码。
 - `系统密码`：`canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics)` 当前不可用，但系统密码策略可用。
@@ -71,7 +71,7 @@ codesign --verify --deep --strict --verbose=2 /Applications/Locklark.app
 在签名版里：
 
 1. `./scripts/macos_verify_touchid.sh /Applications/Locklark.app` 全部 PASS。
-2. 完整解锁金库，打开安全设置；应显示“系统验证：Touch ID”或“系统验证：系统密码”。
+2. 完整解锁金库，打开安全设置；应显示“快捷解锁：Touch ID / 系统密码”或“快捷解锁：系统密码”。
 3. 点“启用系统快捷解锁”；应出现 Touch ID / 系统密码提示（或在 enrollment 后首次解锁时出现）。
 4. 成功后锁定，点“使用 Touch ID / 系统密码解锁”，确认无需主密码 + Secret Key 即可恢复会话。
 5. 再验证 Passkey 的系统验证按钮会为新操作重新提示；取消后应提示已取消，而不是“金库已锁定”。
