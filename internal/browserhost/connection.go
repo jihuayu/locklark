@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jihuayu/locklark/internal/nativeclipboard"
 	"github.com/jihuayu/locklark/internal/personal"
 )
 
@@ -67,6 +68,10 @@ type Connection struct {
 	authUntil               time.Time
 	closed                  atomic.Bool
 	session                 atomic.Pointer[personal.Session]
+	clipboard               atomic.Pointer[clipboardState]
+	clipboardMu             sync.Mutex
+	clipboardGrant          *clipboardGrant
+	clipboardTicket         string
 	writer                  *Writer
 	notify                  func()
 	seen                    map[string]bool
@@ -95,7 +100,14 @@ func NewDesktopConnection(writer *Writer, notify func()) *Connection {
 }
 
 // SetBroker attaches the local IPC broker that owns desktop callbacks.
-func (c *Connection) SetBroker(b *Broker) { c.broker = b }
+func (c *Connection) SetBroker(b *Broker) {
+	c.broker = b
+	if b != nil && b.callbacks.NewClipboard != nil && nativeclipboard.NativeLeaseSupported() {
+		if m, ttl := b.callbacks.NewClipboard(); m != nil {
+			c.setClipboardWithDuration(m, ttl, b.callbacks.ClipboardClearDuration)
+		}
+	}
+}
 
 // BindDesktopSession shares the desktop session with this extension connection.
 // A pending "hello" is answered immediately; otherwise an unsolicited
@@ -138,13 +150,13 @@ func (c *Connection) bindDesktopSession(s *personal.Session, epoch uint64, quick
 	if c.hello != "" {
 		id := c.hello
 		c.hello = ""
-		return c.response(Response{ID: id, Type: "paired", Capability: c.capability, QuickFill: quickFill, Capabilities: supportedCapabilities})
+		return c.response(Response{ID: id, Type: "paired", Capability: c.capability, QuickFill: quickFill, Capabilities: c.pairedCapabilities()})
 	}
 	if !announce {
 		c.changed()
 		return nil
 	}
-	return c.response(Response{Type: "unlocked", Capability: c.capability, QuickFill: quickFill, DesktopConnected: true, Unlocked: true, SessionEpoch: epoch, Capabilities: supportedCapabilities})
+	return c.response(Response{Type: "unlocked", Capability: c.capability, QuickFill: quickFill, DesktopConnected: true, Unlocked: true, SessionEpoch: epoch, Capabilities: c.pairedCapabilities()})
 }
 
 // InvalidateDesktopLock revokes session authority and pushes "locked" without
@@ -328,6 +340,9 @@ func (c *Connection) Handle(r Request) error {
 	if r.Type == "otp" || r.Type == "otp-ack" || r.Type == "cancel-otp" {
 		return c.handleOTP(r, allowed)
 	}
+	if isClipboardOperation(r.Type) {
+		return c.handleClipboard(r, allowed)
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	defer c.changed()
@@ -361,7 +376,7 @@ func (c *Connection) Handle(r Request) error {
 				if c.capability == "" {
 					return c.bindDesktopSession(s, c.sessionEpoch, c.quickFill, false)
 				}
-				return c.response(Response{ID: r.ID, Type: "paired", Capability: c.capability, QuickFill: c.quickFill, Capabilities: supportedCapabilities})
+				return c.response(Response{ID: r.ID, Type: "paired", Capability: c.capability, QuickFill: c.quickFill, Capabilities: c.pairedCapabilities()})
 			}
 			if c.broker != nil && c.broker.callbacks.RequestUnlockFocus != nil {
 				c.broker.callbacks.RequestUnlockFocus()
@@ -381,6 +396,7 @@ func (c *Connection) Handle(r Request) error {
 		return c.refuse(r.ID)
 	}
 	if r.Type == "cancel" {
+		c.cancelClipboardPending()
 		if p := c.passkey; p != nil {
 			p.cancelled.Store(true)
 			p.gate.Cancel()
@@ -534,7 +550,7 @@ func (c *Connection) approvePair(s *personal.Session, quick bool) error {
 	}
 	id := c.hello
 	c.hello = ""
-	return c.response(Response{ID: id, Type: "paired", Capability: c.capability, QuickFill: quick, Capabilities: supportedCapabilities})
+	return c.response(Response{ID: id, Type: "paired", Capability: c.capability, QuickFill: quick, Capabilities: c.pairedCapabilities()})
 }
 func (c *Connection) ApproveFill(id string) error {
 	c.mu.Lock()
@@ -608,6 +624,7 @@ func (c *Connection) Reject() error {
 // immediately even while a bounded pipe write or a transaction is completing.
 func (c *Connection) Invalidate() {
 	c.generation.Add(1)
+	c.revokeClipboard(false)
 	c.authMu.Lock()
 	if p := c.passkeyAuth; p != nil {
 		p.cancelled.Store(true)
@@ -642,6 +659,7 @@ func (c *Connection) Invalidate() {
 }
 func (c *Connection) Close() {
 	c.closed.Store(true)
+	c.revokeClipboard(true)
 	if s := c.session.Load(); s != nil {
 		s.RequestLock()
 	}
@@ -695,11 +713,31 @@ func (c *Connection) unlocked() bool {
 	return s != nil && s.Unlocked()
 }
 
-func (c *Connection) capabilities() []string {
-	if c.desktopShared {
-		return supportedCapabilities
+// pairedCapabilities is the negotiation list advertised with an authority
+// grant ("paired"/"unlocked"). Standalone native pairing never set
+// desktopShared, so gating this list on capabilities() silently revoked the
+// baseline (attachments-v1 and friends) from every manual pairing and disabled
+// attachment upload. The baseline is therefore always advertised here, and the
+// clipboard lease is appended only when this connection actually owns a
+// clipboard manager: no manager, no clipboard claim, and desktopConnected is
+// left to the callers.
+func (c *Connection) pairedCapabilities() []string {
+	out := append([]string(nil), supportedCapabilities...)
+	if c.clipboard.Load() != nil && nativeclipboard.NativeLeaseSupported() {
+		out = append(out, clipboardCapability)
 	}
-	return nil
+	return out
+}
+
+func (c *Connection) capabilities() []string {
+	if !c.desktopShared {
+		return nil
+	}
+	out := append([]string(nil), supportedCapabilities...)
+	if c.clipboard.Load() != nil && nativeclipboard.NativeLeaseSupported() {
+		out = append(out, clipboardCapability)
+	}
+	return out
 }
 
 func (c *Connection) handleStatus(r Request) error {

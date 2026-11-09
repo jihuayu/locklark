@@ -15,6 +15,8 @@
     generatorInitialized = false,
     connectionEpoch = 0,
     popupInactive = false,
+    nativeClipboardClient = null,
+    nativeCopyBusy = false,
     generatedPassword = "",
     generatedProfile = null,
     generatedDataWiped = false,
@@ -1899,6 +1901,7 @@
     });
   function clearRevealedSecrets() {
     secretGeneration++;
+    closeNativeClipboard();
     const hadSecrets = revealedSecrets.size > 0;
     for (const timer of revealTimers.values()) clearTimeout(timer);
     revealTimers.clear();
@@ -1972,11 +1975,142 @@
       toast("无法显示该字段");
     }
   }
+  function clipboardRequestID() {
+    return globalThis.crypto.randomUUID().replace(/-/g, "");
+  }
+  function closeNativeClipboard(disconnect = true) {
+    const client = nativeClipboardClient;
+    nativeClipboardClient = null;
+    if (!client || client.closed) return;
+    client.closed = true;
+    clearTimeout(client.readyTimer);
+    client.rejectReady(Error("clipboard unavailable"));
+    for (const pending of client.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(Error("clipboard cancelled"));
+    }
+    client.pending.clear();
+    if (client.ticket) {
+      try {
+        client.port.postMessage({ type: "cancel", request_id: clipboardRequestID(), copy_ticket: client.ticket });
+      } catch {}
+    }
+    if (disconnect) {
+      try { client.port.disconnect(); } catch {}
+    }
+  }
+  function openNativeClipboard() {
+    // Runtimes without Port support retain explicit manual browser copy. When
+    // a Port is available, only native:false selects that legacy path.
+    if (typeof api.runtime.connect !== "function") return null;
+    closeNativeClipboard();
+    const port = api.runtime.connect({ name: "native-clipboard" });
+    const client = { port, closed: false, pending: new Map(), ticket: "", readySeen: false };
+    nativeClipboardClient = client;
+    client.ready = new Promise((resolve, reject) => {
+      client.resolveReady = resolve;
+      client.rejectReady = reject;
+    });
+    // Closing before a caller reaches await must not create an unhandled rejection.
+    void client.ready.catch(() => {});
+    client.readyTimer = setTimeout(() => {
+      if (nativeClipboardClient === client) closeNativeClipboard();
+    }, 5000);
+    port.onDisconnect.addListener(() => {
+      if (nativeClipboardClient === client) closeNativeClipboard(false);
+      void api.runtime.lastError;
+    });
+    port.onMessage.addListener((message) => {
+      if (client.closed || nativeClipboardClient !== client) return;
+      if (!message || typeof message !== "object" || Array.isArray(message)) {
+        closeNativeClipboard();
+        return;
+      }
+      if (message.type === "ready") {
+        if (client.readySeen || typeof message.native !== "boolean" ||
+            Object.keys(message).some((key) => !["type", "native"].includes(key))) {
+          closeNativeClipboard();
+          return;
+        }
+        client.readySeen = true;
+        clearTimeout(client.readyTimer);
+        client.resolveReady(message.native);
+        return;
+      }
+      if (message.type === "revoked" || message.type === "refused" && !message.request_id) {
+        closeNativeClipboard();
+        return;
+      }
+      const pending = client.pending.get(message.request_id);
+      if (!pending) return;
+      const allowed = message.type === "prepared"
+        ? ["type", "request_id", "item_id", "revision", "field", "copy_ticket", "expires_in_seconds", "cleanup_ttl_seconds"]
+        : message.type === "result"
+          ? ["type", "request_id", "copy_ticket", "state", "copied", "cleanup_ttl_seconds"]
+          : message.type === "refused" ? ["type", "request_id", "unknown"] : [];
+      if (!allowed.length || Object.keys(message).some((key) => !allowed.includes(key))) {
+        closeNativeClipboard();
+        return;
+      }
+      client.pending.delete(message.request_id);
+      clearTimeout(pending.timer);
+      if (message.type === "refused") pending.reject(Error("clipboard refused"));
+      else pending.resolve(message);
+    });
+    client.request = (type, fields) => new Promise((resolve, reject) => {
+      if (client.closed || nativeClipboardClient !== client || client.pending.size) {
+        reject(Error("clipboard unavailable"));
+        return;
+      }
+      const request_id = clipboardRequestID();
+      const timer = setTimeout(() => {
+        if (nativeClipboardClient === client) closeNativeClipboard();
+      }, 21000);
+      client.pending.set(request_id, { resolve, reject, timer });
+      try { port.postMessage({ type, request_id, ...fields }); }
+      catch { closeNativeClipboard(); }
+    });
+    return client;
+  }
   async function copySecret(field, detail, button) {
     const generation = secretGeneration;
-    if (!detailLeaseLive(detail, generation)) return;
+    if (!detailLeaseLive(detail, generation) || nativeCopyBusy) return;
+    nativeCopyBusy = true;
     const key = field.id || field.label;
     try {
+      const client = openNativeClipboard();
+      const native = client ? await client.ready : false;
+      if (!detailLeaseLive(detail, generation)) return;
+      if (native) {
+        const selector = { item_id: detail.id, revision: detail.revision, field: key };
+        const prepared = await client.request("prepare", selector);
+        if (prepared.type !== "prepared" ||
+            prepared.item_id !== selector.item_id || prepared.revision !== selector.revision ||
+            prepared.field !== key || !core?.validCopyTicket?.(prepared.copy_ticket) ||
+            !Number.isSafeInteger(prepared.expires_in_seconds) ||
+            prepared.expires_in_seconds < 1 || prepared.expires_in_seconds > 15 ||
+            !Number.isSafeInteger(prepared.cleanup_ttl_seconds) ||
+            prepared.cleanup_ttl_seconds < 0 || prepared.cleanup_ttl_seconds > 3600)
+          throw Error("clipboard refused");
+        client.ticket = prepared.copy_ticket;
+        if (!detailLeaseLive(detail, generation) || nativeClipboardClient !== client || client.closed) return;
+        const result = await client.request("commit", { ...selector, copy_ticket: client.ticket });
+        if (!detailLeaseLive(detail, generation) || nativeClipboardClient !== client || client.closed) return;
+        if (result.type !== "result" || result.copy_ticket !== client.ticket ||
+            !["confirmed", "refused", "unknown"].includes(result.state) ||
+            result.copied !== (result.state === "confirmed")) throw Error("clipboard unknown");
+        client.ticket = "";
+        if (result.state === "confirmed") {
+          copiedFeedback(button, prepared.cleanup_ttl_seconds > 0
+            ? "已复制；已启用自动清理" : "已复制；自动清理已关闭");
+        } else if (result.state === "unknown") {
+          toast("复制结果未确认，请核实剪贴板后再操作");
+        } else toast("复制已取消或被拒绝");
+        return;
+      }
+      // Legacy mode is selected only before any native prepare or commit.
+      closeNativeClipboard();
+      if (!detailLeaseLive(detail, generation)) return;
       const reply = await api.runtime.sendMessage({
         type: "copy-field",
         id: detail.id,
@@ -1994,7 +2128,11 @@
       result.value = "";
       await writeClipboard(value, button, result.clearAfterSeconds);
     } catch {
-      toast("复制失败");
+      if (detailLeaseLive(detail, generation))
+        toast("复制结果未确认，请核实剪贴板后再操作");
+    } finally {
+      closeNativeClipboard();
+      nativeCopyBusy = false;
     }
   }
   async function writeClipboard(value, button) {
@@ -2007,6 +2145,9 @@
       toast("复制失败");
       return;
     }
+    copiedFeedback(button, "已复制；浏览器无法保证自动清除，请按需手动清理");
+  }
+  function copiedFeedback(button, message) {
     const original = button.textContent;
     button.textContent = "已复制 ✓";
     if (feedbackTimer) clearTimeout(feedbackTimer);
@@ -2016,7 +2157,7 @@
     }, 1500);
     // The browser does not expose a trustworthy native clipboard lease. Never
     // schedule a blank write: a later foreign owner must not be overwritten.
-    toast("已复制；浏览器无法保证自动清除，请按需手动清理");
+    toast(message);
   }
   async function copyValue(value, button) {
     return writeClipboard(value, button);

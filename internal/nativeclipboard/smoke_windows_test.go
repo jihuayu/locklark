@@ -11,6 +11,10 @@ import (
 
 func smokeOwnership() uint64 { owner, _, _ := clipOwner.Call(); return uint64(owner) }
 
+func smokeOwnedClearResult() Result   { return Cleared }
+func smokeStaleClearResult() Result   { return Superseded }
+func smokeForeignClearResult() Result { return Superseded }
+
 func readSmokeOwned(lease *Lease, expected []byte) bool {
 	p := lease.native.(*winLease)
 	opened, _, _ := clipOpen.Call(p.window)

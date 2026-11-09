@@ -1,3 +1,5 @@
+> 2026-11-09 更新：本文下方为 PR #61 的历史修复。本轮已完成原生两阶段租约、App 工厂及 popup 私有通道接入，真实 Linux Edge/Firefox 的完整共享桌面旅程通过，详见[实测证据](browser-native-validation.md#共享桌面金库的剪贴板租约外部验收)。#59 保持开放以补齐实际平台证据。
+
 # 浏览器剪贴板归属修复
 
 日期：2026-11-08（香港），起点 main `b1a5e85`。本批修复 #59 的已确认数据丢失路径，不宣称原生剪贴板租约已接入浏览器。
@@ -9,3 +11,14 @@
 DeepSeek 完成实现和回归，主代理独立执行全部扩展测试：304 通过、0 失败、0 跳过。新增回归执行实际 popup 脚本并控制定时器，覆盖后来复制的外部内容、后续 Locklark 复制及生成器提示；旧的锁定/隐藏/迟到回复回归保留。受控 clipboard 替身证明定时器行为，不冒充真实 OS 剪贴板验收。
 
 #59 保持开放：后续通过原生宿主的归属租约及两阶段提交恢复可验证的自动到期。仍需覆盖弹窗关闭、锁库、部分写入/结果未知、外部相同文本所有者及各实际平台；macOS 非原子接口的限制必须明确处理。最终合并以本 PR 精确提交的六项检查为准。
+
+
+## macOS safety boundary — 2026-11-09
+
+NSPasteboard exposes separate changeCount and unconditional clearContents calls, not an atomic compare-and-clear. The old check-then-clear could erase a later application's clipboard. Darwin cleanup now performs no destructive pasteboard call and returns the terminal ManualCleanup result. Both the App and manager drop retries without reporting Cleared or Superseded.
+
+The Darwin broker does not advertise native-clipboard-lease-v1 or create/install its manager. Browser copying follows the existing manual-cleanup path without adding clipboard-read permission. Explicit desktop copy remains available and reports that macOS requires manual cleanup, including after OTP expiry and lock. Linux X11 and Windows retain owner-safe native cleanup.
+
+Primary verification: nativeclipboard race tests PASS (1.972s); desktop clipboard race tests PASS (1.064s); browserhost clipboard/capability race tests PASS (72.996s). Darwin arm64 nativeclipboard, browserhost and desktop test executables compile. The controlled Darwin regression makes destructive cleanup callbacks unreachable; manager coverage confirms unsupported cleanup does not retry. Existing native lease protocol tests skip only where the product does not offer that protocol; separate Darwin capability/factory refusal tests cover that platform's actual policy. The opt-in native macOS smoke expects the distinct manual result and preserves later ownership.
+
+These checks do not claim actual full macOS/Windows browser/native acceptance. Issue #59 remains open for that evidence.

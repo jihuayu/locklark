@@ -6,9 +6,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/egoist/mygo/ui"
 	"github.com/jihuayu/locklark/internal/browserhost"
+	"github.com/jihuayu/locklark/internal/nativeclipboard"
 	"github.com/jihuayu/locklark/internal/personal"
 )
 
@@ -31,16 +33,11 @@ func (p *cliRunPending) choose(approved bool) {
 	p.once.Do(func() { p.decision <- true })
 }
 
-// startBrowserBroker hosts the shared desktop↔extension IPC endpoint.
-func (a *App) startBrowserBroker() {
-	if a.broker != nil {
-		return
-	}
-	endpoint, e := browserhost.DefaultBrokerEndpoint()
-	if e != nil {
-		return
-	}
-	callbacks := browserhost.BrokerCallbacks{
+// browserBrokerCallbacks builds the desktop side of the IPC contract. It is a
+// separate method so the clipboard factory and settings getter can be
+// exercised without opening a listener.
+func (a *App) browserBrokerCallbacks() browserhost.BrokerCallbacks {
+	return browserhost.BrokerCallbacks{
 		CurrentSession: func() (*personal.Session, uint64, bool) {
 			a.brokerMu.Lock()
 			defer a.brokerMu.Unlock()
@@ -68,8 +65,28 @@ func (a *App) startBrowserBroker() {
 			})
 		},
 		HandleCLIRun: a.handleCLIRun,
+		// The clipboard capability is announced only when this factory actually
+		// exists. Each accepted connection gets its own two-phase manager over
+		// the single App-owned native writer and global lease.
+		NewClipboard: func() (*nativeclipboard.Manager, time.Duration) {
+			return a.newBrowserClipboardManager(), a.clipboardClearDuration()
+		},
+		// The live getter is atomic only: the accept goroutine must never read
+		// the UI settings struct. A negative mirror fails closed upstream.
+		ClipboardClearDuration: a.clipboardClearDuration,
 	}
-	b := browserhost.NewBroker(callbacks)
+}
+
+// startBrowserBroker hosts the shared desktop↔extension IPC endpoint.
+func (a *App) startBrowserBroker() {
+	if a.broker != nil {
+		return
+	}
+	endpoint, e := browserhost.DefaultBrokerEndpoint()
+	if e != nil {
+		return
+	}
+	b := browserhost.NewBroker(a.browserBrokerCallbacks())
 	if e = b.Start(endpoint); e != nil {
 		return
 	}

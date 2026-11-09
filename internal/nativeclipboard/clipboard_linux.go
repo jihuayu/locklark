@@ -10,6 +10,8 @@ import (
 	"github.com/ebitengine/purego"
 )
 
+const leaseSupported = true
+
 type gtkLease struct {
 	owner, window uintptr
 	data          []byte

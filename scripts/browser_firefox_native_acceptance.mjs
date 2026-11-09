@@ -82,6 +82,10 @@ import {
   acceptFirefoxPasskey,
   CHROME_VIEWPORT_SOURCE,
 } from "./browser_firefox_passkey_acceptance.mjs";
+import {
+  acceptSharedClipboard,
+  prepareSharedEnvironment,
+} from "./browser_shared_clipboard_acceptance.mjs";
 
 const firefox =
   process.env.LOCKLARK_FIREFOX ||
@@ -93,9 +97,24 @@ const host = resolve(process.env.LOCKLARK_BROWSER_HOST);
 const register = resolve(process.env.LOCKLARK_BROWSER_REGISTER);
 const state = mkdtempSync(join(tmpdir(), "locklark-firefox-native-"));
 const diagnostics = mkdtempSync(join(state, "diagnostics-"));
-const env = { ...process.env };
+const sharedClipboard = process.env.LOCKLARK_TEST_SHARED_CLIPBOARD === "1";
+const originalEnv = { ...process.env };
+const env = sharedClipboard
+  ? prepareSharedEnvironment(state, originalEnv)
+  : originalEnv;
+if (sharedClipboard && !env.GOMODCACHE) {
+  // Keep the original module cache while every launched process gets the
+  // private HOME/TMPDIR/broker environment.
+  try {
+    env.GOMODCACHE = execFileSync(
+      process.env.LOCKLARK_GO || "go",
+      ["env", "GOMODCACHE"],
+      { env: originalEnv, encoding: "utf8" },
+    ).trim();
+  } catch {}
+}
 const nativeManifest = join(
-  homedir(),
+  sharedClipboard ? env.HOME : homedir(),
   ".mozilla/native-messaging-hosts/org.locklark.browser.json",
 );
 try {
@@ -1028,14 +1047,114 @@ try {
   )?.context;
   assert(pageContext, "Controlled HTTPS page browsing context missing");
   await blank();
-  progress("open actual Firefox extension action");
-  await openPopup();
-  progress("save-new control");
-  assert(
-    await popupEvaluate('return !!document.querySelector("#save-new");'),
-    "Explicit save-new action is required",
-  );
-  {
+  if (sharedClipboard) {
+    // The actual desktop app is the shared broker and sole clipboard owner. It
+    // is spawned and unlocked through the real native UI before any action
+    // popup exists, so focusing the desktop inspector cannot close the popup.
+    progress("shared-clipboard");
+    const wrapPopup = async () => {
+      await openPopup();
+      const evaluate = (selector, expression) =>
+        popupEvaluate(
+          "return " +
+            expression.replaceAll("SELECTOR", JSON.stringify(selector)) +
+            ";",
+        );
+      return {
+        click: popupClick,
+        disabled: (selector) =>
+          evaluate(
+            selector,
+            "document.querySelector(SELECTOR)?.disabled !== false",
+          ),
+        count: (selector) =>
+          evaluate(selector, "document.querySelectorAll(SELECTOR).length"),
+        text: (selector) =>
+          evaluate(
+            selector,
+            'document.querySelector(SELECTOR)?.textContent || ""',
+          ),
+        visible: (selector) =>
+          evaluate(
+            selector,
+            "!!document.querySelector(SELECTOR)?.getClientRects().length",
+          ),
+        // Read-only DOM observations only: shared activation stays physical.
+        attribute: (selector, name) =>
+          popupEvaluate(
+            "return document.querySelector(" +
+              JSON.stringify(selector) +
+              ")?.getAttribute(" +
+              JSON.stringify(name) +
+              ");",
+          ),
+        value: (selector) =>
+          evaluate(
+            selector,
+            'typeof document.querySelector(SELECTOR)?.value === "string" ? document.querySelector(SELECTOR).value : null',
+          ),
+        dismiss: async () => {
+          input([{ key: "Escape" }], false);
+          await pause(250);
+        },
+      };
+    };
+    await acceptSharedClipboard({
+      fixture,
+      root,
+      state,
+      env,
+      openPopup: wrapPopup,
+      eventually,
+      delay: pause,
+      phase: progress,
+    });
+    assert(
+      !logs.some((line) =>
+        fixtureCanaries(fixture).some((value) => line.includes(value)),
+      ),
+      "Synthetic factor or value found in browser logs",
+    );
+    for (const line of logs) assertPrivateText(line, fixture);
+    writeFileSync(
+      join(state, "acceptance-report.json"),
+      JSON.stringify(
+        {
+          passed: true,
+          scope: "shared-clipboard",
+          legacyFillSaveOtpPasskey: "not-run",
+          privateAppHomeTmpdirBroker: true,
+          controlledFixtureVault: true,
+          nativeUnlockUi: true,
+          sharedNativeIpc: true,
+          normalActionPopupNativeCopy: true,
+          osClipboardMatch: true,
+          popupClosePreservesPaste: true,
+          foreignOwnerTtlZeroRead: true,
+          appLockClearsOwnedValue: true,
+          laterForeignOwnerPreserved: true,
+          latePrepareOwnAppStopped: true,
+          pageHiddenNoCopy: true,
+          browserVersion: created.capabilities.browserVersion,
+          geckodriverVersion: driverVersion,
+          hostSha256: createHash("sha256").update(readFileSync(host)).digest("hex"),
+          certificateVerification: true,
+          productionExtension: "browser@locklark.local",
+          realAction: true,
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    successful = true;
+  } else {
+    progress("open actual Firefox extension action");
+    await openPopup();
+    progress("save-new control");
+    assert(
+      await popupEvaluate('return !!document.querySelector("#save-new");'),
+      "Explicit save-new action is required",
+    );
     progress("native-connect");
     await popupClick("#connect");
     progress("native-unlock");
@@ -1405,7 +1524,9 @@ try {
 }
 if (successful && !process.exitCode) {
   console.log(
-    passkeyOnly
+    sharedClipboard
+      ? "PASS: real Firefox shared desktop native clipboard lease, OS reads, owner preservation, lock and hidden-popup cancellation"
+      : passkeyOnly
       ? "PASS: real Firefox native Passkey-only acceptance (create/get/abort/browser-fallback) with native factor approval"
       : "PASS: real Firefox fill/save/update/OTP with native approval, cancellation, Unicode, and no synthetic secrets in console or persistent diagnostics" +
           (firefoxPasskey

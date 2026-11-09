@@ -422,6 +422,12 @@ func (m *Manager) tryCleanup(lease *Lease, sequence uint64, attempt int) {
 		if m.pending != lease || m.cleanupSeq != sequence {
 			return
 		}
+		if result == ManualCleanup {
+			// The platform cannot revoke only our owner. This is terminal: drop
+			// the lease and retry queue without claiming a confirmed cleanup.
+			m.pending = nil
+			return
+		}
 		if result != Unavailable {
 			m.pending = nil
 			return

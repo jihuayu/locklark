@@ -144,6 +144,21 @@ func (s *Session) sessionLocked() bool {
 	return s.lockRequested.Load() || len(s.material) == 0 || time.Since(s.last) >= s.idle
 }
 
+// AuthorityDeadline is the real idle boundary used to cap a native grant. It
+// blocks only on Session.mu, returns zero when the session is not active, and
+// never refreshes idle authority.
+func (s *Session) AuthorityDeadline() time.Time {
+	if s == nil {
+		return time.Time{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.active(false) != nil {
+		return time.Time{}
+	}
+	return s.last.Add(s.idle)
+}
+
 // IdleDeadline reports when the session will expire from inactivity if no
 // further active operations occur, or false when the session is locked.
 func (s *Session) IdleDeadline() (time.Time, bool) {

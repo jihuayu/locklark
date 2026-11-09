@@ -37,6 +37,10 @@ func readSmokeOwned(lease *Lease, expected []byte) (matches bool) {
 	return matches
 }
 
+func smokeOwnedClearResult() Result   { return ManualCleanup }
+func smokeStaleClearResult() Result   { return ManualCleanup }
+func smokeForeignClearResult() Result { return ManualCleanup }
+
 func smokeHoldClipboard(t *testing.T) func() { t.Fatal("macOS has no OpenClipboard lock"); return nil }
 func smokePlatformCases(*testing.T, []byte)  {}
 

@@ -2,6 +2,8 @@ package desktop
 
 import (
 	"errors"
+	"fmt"
+	"runtime"
 	"time"
 
 	"github.com/jihuayu/locklark/internal/nativeclipboard"
@@ -43,6 +45,25 @@ func (a *App) cleanupClipboard(lease *nativeclipboard.Lease) {
 	if a.clipboardClear != nil {
 		result = a.clipboardClear(lease)
 	}
+	if result == nativeclipboard.ManualCleanup {
+		// The platform cannot revoke only this owner. Drop every retry/lease
+		// reference and expose a truthful manual-cleanup notice instead of
+		// claiming Cleared, Superseded or an unconfirmed retry loop. A newer
+		// current owner still wins over stale cleanup.
+		if a.clipboardLease != nil && a.clipboardLease != lease {
+			return
+		}
+		if a.clipboardPending == lease {
+			a.clipboardPending = nil
+		}
+		a.clipboardWarning = false
+		a.clipboardManual = true
+		if a.clipboardRetry != nil {
+			a.clipboardRetry.Stop()
+			a.clipboardRetry = nil
+		}
+		return
+	}
 	if result == nativeclipboard.Unavailable {
 		// A confirmed newer acquisition supersedes older cleanup, even if its
 		// bytes happen to be identical. Never retain a queue of payloads.
@@ -81,6 +102,7 @@ func (a *App) recordClipboardOwner(lease *nativeclipboard.Lease, until time.Time
 	a.clipboardLease, a.clipboardUntil = lease, until
 	a.clipboardPending = nil
 	a.clipboardWarning = false
+	a.clipboardManual = false
 	if a.clipboardRetry != nil {
 		a.clipboardRetry.Stop()
 		a.clipboardRetry = nil
@@ -161,6 +183,12 @@ func (a *App) writeClipboardOwned(value []byte, until time.Time, valid func() bo
 // Manager's dispatch contract. The shared App lease remains the single owner of
 // actual OS clipboard state.
 func (a *App) newBrowserClipboardManager() *nativeclipboard.Manager {
+	if !nativeclipboard.NativeLeaseSupported() {
+		// Do not advertise a native lease where cleanup cannot be owner-safe.
+		// Ordinary desktop copy still uses the explicit-copy path and reports
+		// the platform's manual-cleanup status.
+		return nil
+	}
 	return nativeclipboard.NewManagerWithWriter(a.dispatchClipboard, a.writeClipboardContext, a.clearBrowserClipboardLease)
 }
 
@@ -201,6 +229,21 @@ func (a *App) clearBrowserClipboardLease(lease *nativeclipboard.Lease) nativecli
 	if result == nativeclipboard.Unavailable {
 		return result
 	}
+	if result == nativeclipboard.ManualCleanup {
+		if a.clipboardLease == lease {
+			a.detachClipboard()
+		}
+		if a.clipboardPending == lease {
+			a.clipboardPending = nil
+		}
+		a.clipboardWarning = false
+		a.clipboardManual = true
+		if a.clipboardRetry != nil {
+			a.clipboardRetry.Stop()
+			a.clipboardRetry = nil
+		}
+		return result
+	}
 	if a.clipboardLease == lease {
 		a.detachClipboard()
 	}
@@ -215,4 +258,46 @@ func (a *App) clearBrowserClipboardLease(lease *nativeclipboard.Lease) nativecli
 		}
 	}
 	return result
+}
+
+// clipboardStatusForOS is a pure status policy so platform truthfulness can be
+// tested without a GUI or a real macOS pasteboard. Native cleanup reports an
+// attempted expiry; a platform without owner-safe cleanup must tell the user
+// explicitly to clear the clipboard by hand.
+func clipboardStatusForOS(goos string, nativeCleanup bool, timeout time.Duration) string {
+	if !nativeCleanup {
+		if goos == "darwin" {
+			return "已复制到系统剪贴板；macOS 无法保证自动清除，请手动清理系统剪贴板"
+		}
+		return "已复制到系统剪贴板；当前系统无法保证自动清除，请手动清理系统剪贴板"
+	}
+	if timeout <= 0 {
+		return "已复制到系统剪贴板（未配置自动清理）"
+	}
+	return fmt.Sprintf("已复制到系统剪贴板 · %d 秒后尝试清理", int(timeout/time.Second))
+}
+
+func clipboardStatus(timeout time.Duration) string {
+	return clipboardStatusForOS(runtime.GOOS, nativeclipboard.NativeLeaseSupported(), timeout)
+}
+
+func clipboardOTPCopiedStatusForOS(goos string, nativeCleanup bool) string {
+	if nativeCleanup {
+		return "已复制验证码；到期尝试清理，系统剪贴板历史可能保留"
+	}
+	if goos == "darwin" {
+		return "已复制验证码；macOS 无法保证到期或锁定自动清除，请手动清理系统剪贴板"
+	}
+	return "已复制验证码；无法保证到期或锁定自动清除，请手动清理系统剪贴板"
+}
+
+func clipboardOTPCopiedStatus() string {
+	return clipboardOTPCopiedStatusForOS(runtime.GOOS, nativeclipboard.NativeLeaseSupported())
+}
+
+func clipboardManualCleanupNotice() string {
+	if runtime.GOOS == "darwin" {
+		return "macOS 无法保证自动清除系统剪贴板；请手动清理"
+	}
+	return "当前系统无法保证自动清除系统剪贴板；请手动清理"
 }

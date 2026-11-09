@@ -356,7 +356,7 @@ func identitySummary(in *vault.IdentityDetails) *BrowserIdentitySummary {
 	return &BrowserIdentitySummary{Title: in.Title, FirstName: in.FirstName, MiddleName: in.MiddleName, LastName: in.LastName, BirthDate: in.BirthDate, Company: in.Company, Department: in.Department, JobTitle: in.JobTitle, Email: in.Email, Phone: in.Phone, AddressLine1: in.AddressLine1, AddressLine2: in.AddressLine2, City: in.City, State: in.State, PostalCode: in.PostalCode, Country: in.Country, Website: in.Website}
 }
 
-func (c *Connection) handleFieldValue(r Request) error {
+func (c *Connection) withFieldValue(r Request, deliver func(id, revision, value string, expires int, otpExpiry time.Time) error) error {
 	s := c.session.Load()
 	if s == nil {
 		return c.refuse(r.ID)
@@ -371,6 +371,7 @@ func (c *Connection) handleFieldValue(r Request) error {
 	}
 	value := ""
 	expires := 0
+	var otpExpiry time.Time
 	category := categoryOf(it)
 	switch {
 	case r.Field == "username":
@@ -399,6 +400,7 @@ func (c *Connection) handleFieldValue(r Request) error {
 		}
 		value = code.Value()
 		expires = int(code.Window().Until - time.Now().Unix())
+		otpExpiry = time.Unix(code.Window().Until, 0)
 		if expires < 0 {
 			expires = 0
 		}
@@ -439,21 +441,29 @@ func (c *Connection) handleFieldValue(r Request) error {
 	default:
 		return c.refuse(r.ID)
 	}
-	action := r.FieldAction
-	if action == "" {
-		if r.Type == "item-reveal-field" {
-			action = "reveal"
-		} else {
-			action = "copy"
-		}
-	}
 	if e := s.AuditV2Disclosure(it.ID, revisions[it.ID], r.Field); e != nil {
 		return c.refuse(r.ID)
 	}
-	if action == "copy" && expires == 0 {
-		expires = 30
-	}
-	return c.response(Response{ID: r.ID, Type: "field-value", ItemID: it.ID, Revision: revisions[it.ID], Field: r.Field, FieldValue: value, Copied: action == "copy", ExpiresInSeconds: expires})
+	return deliver(it.ID, revisions[it.ID], value, expires, otpExpiry)
+}
+
+// handleFieldValue keeps the original inline field-value wire exactly. Only the
+// resolver and audit are shared with the native prepare path.
+func (c *Connection) handleFieldValue(r Request) error {
+	return c.withFieldValue(r, func(id, revision, value string, expires int, _ time.Time) error {
+		action := r.FieldAction
+		if action == "" {
+			if r.Type == "item-reveal-field" {
+				action = "reveal"
+			} else {
+				action = "copy"
+			}
+		}
+		if action == "copy" && expires == 0 {
+			expires = 30
+		}
+		return c.response(Response{ID: r.ID, Type: "field-value", ItemID: id, Revision: revision, Field: r.Field, FieldValue: value, Copied: action == "copy", ExpiresInSeconds: expires})
+	})
 }
 
 var allowedCategories = map[string]bool{

@@ -65,19 +65,19 @@ type Request struct {
 	Revision       string `json:"revision,omitempty"`
 	// Attachment transport (capability attachments-v1). Size is a pointer so a
 	// zero-length file is distinguishable from an omitted field.
-	FileName     string `json:"file_name,omitempty"`
-	Size         *int64 `json:"size,omitempty"`
-	SHA256       string `json:"sha256,omitempty"`
-	MimeType     string `json:"mime_type,omitempty"`
-	TransferID   string `json:"transfer_id,omitempty"`
-	Offset       int64  `json:"offset,omitempty"`
-	Data         string `json:"data,omitempty"`
-	AttachmentID string `json:"attachment_id,omitempty"`
-	CredentialID string `json:"credential_id,omitempty"`
-	// CredentialRevision is the optional opaque content revision of the exact
-	// selected credential. It is accepted only by passkey-get/passkey-remove and
-	// only together with credential_id and the exact parent item/revision pair.
-	// Creation and every other operation must leave it empty.
+	FileName          string `json:"file_name,omitempty"`
+	Size              *int64 `json:"size,omitempty"`
+	SHA256            string `json:"sha256,omitempty"`
+	MimeType          string `json:"mime_type,omitempty"`
+	TransferID        string `json:"transfer_id,omitempty"`
+	Offset            int64  `json:"offset,omitempty"`
+	Data              string `json:"data,omitempty"`
+	AttachmentID      string `json:"attachment_id,omitempty"`
+	CredentialID      string `json:"credential_id,omitempty"`
+	CopyTicket        string `json:"copy_ticket,omitempty"`
+	CopyMode          string `json:"copy_mode,omitempty"`
+	CleanupTTLSeconds int    `json:"cleanup_ttl_seconds,omitempty"`
+	// CredentialRevision binds the exact selected Passkey child revision.
 	CredentialRevision string `json:"credential_revision,omitempty"`
 
 	Length      int   `json:"length,omitempty"`
@@ -160,6 +160,9 @@ func (r Request) valid() bool {
 		return false
 	}
 	if r.Type != "generate" && !attachmentReadType(r.Type) && (r.Length != 0 || r.Digits != nil || r.Symbols != nil || r.SaveHistory != nil) {
+		return false
+	}
+	if !isClipboardOperation(r.Type) && (r.CopyTicket != "" || r.CopyMode != "" || r.CleanupTTLSeconds != 0) {
 		return false
 	}
 	switch r.Type {
@@ -295,6 +298,12 @@ func (r Request) valid() bool {
 			attachmentSelector(r.AttachmentID) && r.TransferID == "" && r.Data == "" && r.Offset == 0 && r.Length == 0 &&
 			r.FileName == "" && r.Size == nil && r.SHA256 == "" && r.MimeType == "" && r.Origin == "" &&
 			r.TabID == 0 && r.DocumentID == ""
+	case "prepare-copy-field":
+		return token.MatchString(r.Capability) && token.MatchString(r.ItemID) && revision.MatchString(r.Revision) &&
+			r.Field != "" && len(r.Field) <= 512 && r.CopyTicket == "" && r.CopyMode == "" && r.CleanupTTLSeconds == 0 && clipboardIdle(r, true)
+	case "commit-copy-field", "cancel-copy-field":
+		return token.MatchString(r.Capability) && revision.MatchString(r.CopyTicket) && r.CopyMode == "" && r.CleanupTTLSeconds == 0 &&
+			r.ItemID == "" && r.Revision == "" && r.Field == "" && clipboardIdle(r, false)
 	case "hello":
 		return r.Capability == "" && r.Origin == "" && r.TabID == 0 && r.DocumentID == "" && r.ItemID == "" && r.Revision == ""
 	case "cancel":
@@ -414,16 +423,19 @@ type Response struct {
 	PasswordProfile *BrowserPasswordProfile `json:"-"`
 	StagedSave      *BrowserStagedSave      `json:"-"`
 
-	Items            []BrowserItemSummary  `json:"items,omitempty"`
-	Vaults           []BrowserVaultSummary `json:"vaults,omitempty"`
-	Item             *BrowserItemDetail    `json:"item,omitempty"`
-	ItemSummary      *BrowserItemSummary   `json:"item_summary,omitempty"`
-	Field            string                `json:"field,omitempty"`
-	FieldValue       string                `json:"value,omitempty"`
-	Copied           bool                  `json:"copied,omitempty"`
-	ExpiresInSeconds int                   `json:"expires_in_seconds,omitempty"`
-	State            string                `json:"state,omitempty"`
-	Favorite         bool                  `json:"favorite,omitempty"`
+	Items             []BrowserItemSummary  `json:"items,omitempty"`
+	Vaults            []BrowserVaultSummary `json:"vaults,omitempty"`
+	Item              *BrowserItemDetail    `json:"item,omitempty"`
+	ItemSummary       *BrowserItemSummary   `json:"item_summary,omitempty"`
+	Field             string                `json:"field,omitempty"`
+	FieldValue        string                `json:"value,omitempty"`
+	Copied            bool                  `json:"copied,omitempty"`
+	CopyTicket        string                `json:"copy_ticket,omitempty"`
+	CopyMode          string                `json:"copy_mode,omitempty"`
+	CleanupTTLSeconds int                   `json:"cleanup_ttl_seconds,omitempty"`
+	ExpiresInSeconds  int                   `json:"expires_in_seconds,omitempty"`
+	State             string                `json:"state,omitempty"`
+	Favorite          bool                  `json:"favorite,omitempty"`
 
 	Profiles    []BrowserProfileSummary `json:"profiles,omitempty"`
 	ProfileFill *BrowserProfileFill     `json:"profile_fill,omitempty"`
@@ -467,6 +479,9 @@ func (r *Response) UnmarshalJSON(data []byte) error {
 // Candidate rows keep the original four keys for logins and add optional
 // category/subtitle metadata for other vault item kinds.
 func (r Response) MarshalJSON() ([]byte, error) {
+	if r.Type != "copy-prepared" && r.Type != "copy-result" && r.Type != "copy-cancelled" {
+		r.CopyTicket, r.CopyMode, r.CleanupTTLSeconds = "", "", 0
+	}
 	type plain Response
 	type candidate struct {
 		ID               string   `json:"id"`
@@ -642,6 +657,41 @@ func (r Response) MarshalJSON() ([]byte, error) {
 			Type         string   `json:"type"`
 			NeverOrigins []string `json:"never_origins"`
 		}{r.V, r.ID, r.Type, never})
+	}
+	if r.Type == "copy-prepared" {
+		return json.Marshal(struct {
+			V                 int    `json:"v"`
+			ID                string `json:"id,omitempty"`
+			Type              string `json:"type"`
+			ItemID            string `json:"item_id"`
+			Revision          string `json:"revision"`
+			Field             string `json:"field"`
+			CopyTicket        string `json:"copy_ticket"`
+			CopyMode          string `json:"copy_mode"`
+			CleanupTTLSeconds int    `json:"cleanup_ttl_seconds"`
+			ExpiresInSeconds  int    `json:"expires_in_seconds"`
+		}{r.V, r.ID, r.Type, r.ItemID, r.Revision, r.Field, r.CopyTicket, r.CopyMode, r.CleanupTTLSeconds, r.ExpiresInSeconds})
+	}
+	if r.Type == "copy-result" {
+		return json.Marshal(struct {
+			V          int    `json:"v"`
+			ID         string `json:"id,omitempty"`
+			Type       string `json:"type"`
+			CopyTicket string `json:"copy_ticket"`
+			CopyMode   string `json:"copy_mode"`
+			Copied     bool   `json:"copied"`
+			State      string `json:"state"`
+		}{r.V, r.ID, r.Type, r.CopyTicket, r.CopyMode, r.Copied, r.State})
+	}
+	if r.Type == "copy-cancelled" {
+		return json.Marshal(struct {
+			V          int    `json:"v"`
+			ID         string `json:"id,omitempty"`
+			Type       string `json:"type"`
+			CopyTicket string `json:"copy_ticket"`
+			CopyMode   string `json:"copy_mode"`
+			State      string `json:"state,omitempty"`
+		}{r.V, r.ID, r.Type, r.CopyTicket, r.CopyMode, r.State})
 	}
 	if r.Type == "field-value" {
 		out := struct {
@@ -866,6 +916,9 @@ func (r *Response) Clear() {
 	r.CredentialID = ""
 	r.Passkeys = nil
 	r.PasskeyTruncated = false
+	r.CopyTicket = ""
+	r.CopyMode = ""
+	r.CleanupTTLSeconds = 0
 }
 
 func (Response) String() string   { return "[native browser response]" }
@@ -912,6 +965,9 @@ func (r *Request) Clear() {
 		r.payload = nil
 		r.ItemJSON = ""
 		r.Data = ""
+		r.CopyTicket = ""
+		r.CopyMode = ""
+		r.CleanupTTLSeconds = 0
 	}
 }
 
@@ -1061,6 +1117,9 @@ func ReadRequest(reader io.Reader) (Request, error) {
 		Data               string  `json:"data"`
 		AttachmentID       string  `json:"attachment_id"`
 		CredentialID       string  `json:"credential_id"`
+		CopyTicket         string  `json:"copy_ticket"`
+		CopyMode           string  `json:"copy_mode"`
+		CleanupTTLSeconds  int     `json:"cleanup_ttl_seconds"`
 		CredentialRevision string  `json:"credential_revision"`
 	}
 	dec = json.NewDecoder(bytes.NewReader(raw))
@@ -1080,7 +1139,9 @@ func ReadRequest(reader io.Reader) (Request, error) {
 		StateAction: wire.StateAction, ItemJSON: wire.ItemJSON, ProfileKind: wire.ProfileKind,
 		FileName: wire.FileName, Size: wire.Size, SHA256: wire.SHA256, MimeType: wire.MimeType,
 		TransferID: wire.TransferID, Offset: wire.Offset, Data: wire.Data, AttachmentID: wire.AttachmentID,
-		CredentialID: wire.CredentialID, CredentialRevision: wire.CredentialRevision,
+		CredentialID: wire.CredentialID, CopyTicket: wire.CopyTicket,
+		CopyMode: wire.CopyMode, CleanupTTLSeconds: wire.CleanupTTLSeconds,
+		CredentialRevision: wire.CredentialRevision,
 	}
 	r.NeverForOrigin = wire.NeverForOrigin != nil && *wire.NeverForOrigin
 	if wire.IncludeHIBP != nil {
@@ -1151,6 +1212,10 @@ func ReadRequest(reader io.Reader) (Request, error) {
 func requestKeys(kind string) (required, optional []string, ok bool) {
 	base := []string{"v", "id", "type"}
 	switch kind {
+	case "prepare-copy-field":
+		return append(base, "capability", "item_id", "revision", "field"), nil, true
+	case "commit-copy-field", "cancel-copy-field":
+		return append(base, "capability", "copy_ticket"), nil, true
 	case "hello":
 		return base, nil, true
 	case "attachment-begin":

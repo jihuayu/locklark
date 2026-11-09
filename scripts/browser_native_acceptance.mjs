@@ -21,6 +21,10 @@ import {
 import { acceptBrowserPasskey } from "./browser_passkey_acceptance.mjs";
 import { acceptBrowserOTP, otpHTML } from "./browser_otp_acceptance.mjs";
 import { acceptPopupVault } from "./browser_popup_vault_acceptance.mjs";
+import {
+  acceptSharedClipboard,
+  prepareSharedEnvironment,
+} from "./browser_shared_clipboard_acceptance.mjs";
 
 const scanController = captureControllerOutput();
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -47,6 +51,12 @@ assert(
 );
 const state = mkdtempSync("/tmp/locklark-browser-acceptance-");
 const env = { ...process.env, GOTOOLCHAIN: "go1.27.3" };
+// Explicit external test mode only: the actual desktop app and the browser it
+// hosts share a private HOME/TMPDIR/broker endpoint, never the real user's.
+const sharedEnvironment =
+  process.env.LOCKLARK_TEST_SHARED_CLIPBOARD === "1"
+    ? prepareSharedEnvironment(state, env)
+    : null;
 const diagnostics = mkdtempSync(join(state, "diagnostics-"));
 let stage = "fixture",
   lastPopup = null,
@@ -177,6 +187,7 @@ try {
     channel: browserName === "edge" ? undefined : "chromium",
     ...(browserExecutable ? { executablePath: browserExecutable } : {}),
     viewport: { width: 1100, height: 700 },
+    ...(sharedEnvironment ? { env: sharedEnvironment } : {}),
     args: [
       "--no-sandbox",
       "--disable-extensions-except=" + extension,
@@ -493,6 +504,20 @@ try {
     phase(scenario + ":native-confirmation");
     return popup;
   }
+  if (process.env.LOCKLARK_TEST_SHARED_CLIPBOARD === "1") {
+    // Explicit external test mode: the actual desktop app is the shared
+    // broker and sole clipboard owner; the extension uses its normal port.
+    await acceptSharedClipboard({
+      fixture,
+      root,
+      state,
+      env: sharedEnvironment,
+      openPopup,
+      eventually,
+      delay,
+      phase,
+    });
+  } else {
   phase("native-connect");
   let popup = await openPopup();
   phase("save-new:control");
@@ -711,6 +736,7 @@ try {
   for (const line of logs) assertPrivateText(line, fixture);
   popup = await openPopup();
   await popup.click("#disconnect");
+  }
 } catch (error) {
   // Deliberately omit fixture files and exception/command bodies. The only
   // inspection text is the trusted popup's bounded status; native metadata is
@@ -730,6 +756,11 @@ try {
     "Popup CDP connection failed",
     "Popup CDP connection timed out",
     "Action popup must be unique",
+    "Shared native clipboard acceptance failed",
+    "Shared clipboard mode must be requested explicitly",
+    "Shared desktop host must be an absolute executable path",
+    "Synthetic fixture vault path is required",
+    "Synthetic fixture password is required",
   ];
   const report = {
     reason: safeReasons.includes(error?.message)
@@ -793,7 +824,9 @@ try {
   }
 }
 console.log(
-  process.env.LOCKLARK_TEST_BROWSER_PARITY
+  process.env.LOCKLARK_TEST_SHARED_CLIPBOARD === "1"
+    ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} extension shared Locklark desktop native clipboard lease, private OS reads, foreign-owner TTL preservation, lock clearing and hidden-popup prepare cancellation`
+    : process.env.LOCKLARK_TEST_BROWSER_PARITY
     ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} quick pairing, inline fill, automatic sign-in, Passkey creation/assertion, relying-party signature verification and abort`
     : `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} fill/save/update/OTP and Passkey with native approval and private diagnostics`,
 );

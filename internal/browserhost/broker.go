@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jihuayu/locklark/internal/nativeclipboard"
 	"github.com/jihuayu/locklark/internal/personal"
 )
 
@@ -54,6 +55,15 @@ type BrokerCallbacks struct {
 	NotifyChanged      func()
 	ApproveCLIRun      func(context.Context, Peer, CLIRunBrokerRequest) (bool, error)
 	HandleCLIRun       func(context.Context, Peer, CLIRunBrokerRequest) (CLIRunBrokerResponse, error)
+	// NewClipboard is the only native-clipboard-lease-v1 capability source.
+	// It returns one manager and one immutable clear TTL per connection; a
+	// zero TTL disables automatic clearing. Without this callback the browser
+	// protocol never advertises or accepts the clipboard lease operations.
+	NewClipboard func() (*nativeclipboard.Manager, time.Duration)
+	// ClipboardClearDuration is the live settings getter. It is captured per
+	// prepare and must be atomic and non-blocking; nil keeps the duration
+	// returned alongside NewClipboard for tests and compatibility.
+	ClipboardClearDuration func() time.Duration
 }
 
 // Broker is the desktop-hosted local IPC endpoint.

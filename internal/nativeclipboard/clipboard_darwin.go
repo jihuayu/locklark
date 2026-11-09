@@ -11,6 +11,8 @@ import (
 	"github.com/ebitengine/purego/objc"
 )
 
+const leaseSupported = false
+
 type macLease struct{ count int64 }
 
 var appKitOnce sync.Once
@@ -84,20 +86,15 @@ func write(value []byte) (lease *Lease, err error) {
 	return lease, err
 }
 
-func clearOwned(lease *Lease) (result Result) {
+func clearOwned(lease *Lease) Result {
 	p, ok := lease.native.(*macLease)
 	if !ok || p == nil {
 		return Superseded
 	}
-	result = Unavailable
-	withPool(func() {
-		board := pasteboard()
-		if board == 0 {
-			return
-		}
-		result = clearMac(p, func() int64 { return msg[int64](board, "changeCount") }, func() int64 { return msg[int64](board, "clearContents") })
-	})
-	return result
+	// Never touch NSPasteboard here. clearContents/declareTypes destroy the
+	// current owner unconditionally, and a changeCount precheck cannot close
+	// the race with a foreign process. Production passes no probes.
+	return clearMac(p, nil, nil)
 }
 
 func acquireMac(declare func() int64, set func() bool, count func() int64) (*Lease, error) {
@@ -109,15 +106,16 @@ func acquireMac(declare func() int64, set func() bool, count func() int64) (*Lea
 	return lease, nil
 }
 
-func clearMac(p *macLease, count func() int64, clear func() int64) Result {
-	if count() != p.count {
+// clearMac is the terminal Darwin cleanup boundary. NSPasteboard has no public
+// atomic compare-and-clear, so even a fresh changeCount observation can be
+// followed by a foreign write before any unconditional clear. This function
+// therefore never invokes count or clear, never registers clearContents or
+// declareTypes, and returns the distinct terminal ManualCleanup result. The
+// observe/clear probes exist only so the regression test can prove both remain
+// uncalled; production passes nil.
+func clearMac(p *macLease, _ func() int64, _ func() int64) Result {
+	if p == nil {
 		return Superseded
 	}
-	// NSPasteboard has no public atomic compare-and-clear operation. A
-	// different application can change it after this metadata check. This
-	// best-effort platform boundary never invokes dataForType/foreign providers.
-	if clear() <= p.count {
-		return Unavailable
-	}
-	return Cleared
+	return ManualCleanup
 }

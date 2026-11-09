@@ -1,8 +1,11 @@
 package browserhost
 
-// SupportedCapabilities is the fixed v2 negotiation list advertised by a
-// shared desktop broker. Standalone native hosts keep their legacy shape and
-// do not emit this list on "paired".
+// SupportedCapabilities is the fixed v2 negotiation baseline. Standalone native
+// hosts advertise it on "paired"/"unlocked" authority grants exactly like a
+// shared desktop broker does, so the baseline (attachments-v1 and the rest) is
+// never accidentally revoked from manual pairing. The native clipboard lease is
+// separate: Connection.pairedCapabilities appends it only when this host owns a
+// real clipboard manager. Status answers keep the older shared-only shape.
 func SupportedCapabilities() []string {
 	return []string{
 		"shared-session-v1",

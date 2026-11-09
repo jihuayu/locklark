@@ -966,3 +966,45 @@ func TestManagerQueuedContextCancelReleasesSlot(t *testing.T) {
 		t.Fatalf("context-cancelled commit wrote %d times", writes)
 	}
 }
+
+// TestManagerManualCleanupIsTerminal proves the platform-manual result drops
+// both the retry queue and old lease instead of pretending cleanup was
+// confirmed or looping forever.
+func TestManagerManualCleanupIsTerminal(t *testing.T) {
+	queue, owner := &fakeQueue{}, &fakeOwner{}
+	clears := 0
+	m := NewManager(queue.dispatch, owner.write, func(*Lease) Result {
+		clears++
+		return ManualCleanup
+	})
+	defer m.Close()
+	ticket, err := m.Prepare([]byte("manual canary"), time.Now().Add(10*time.Second), time.Time{}, func() bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := m.Commit(context.Background(), ticket)
+	queue.drain()
+	if outcome := waitOutcome(t, done); outcome != Confirmed {
+		t.Fatalf("commit = %v", outcome)
+	}
+	m.Clear()
+	if !m.CleanupPending() {
+		t.Fatal("manual cleanup did not retain its opaque cleanup authority until dispatch")
+	}
+	queue.drain()
+	if m.CleanupPending() {
+		t.Fatal("manual cleanup stayed pending")
+	}
+	if m.retryTimer != nil {
+		t.Fatal("manual cleanup scheduled a retry")
+	}
+	if m.lease != nil {
+		t.Fatal("manual cleanup retained the old lease")
+	}
+	if clears != 1 {
+		t.Fatalf("manual cleanup calls = %d, want one terminal call", clears)
+	}
+	if queue.step() {
+		t.Fatal("manual cleanup queued a retry callback")
+	}
+}

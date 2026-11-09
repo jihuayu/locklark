@@ -1033,6 +1033,27 @@ globalThis.LocklarkCore = (() => {
   }
   const ATTACHMENT_CAPABILITY = "attachments-v1";
   const PASSKEY_MANAGEMENT_CAPABILITY = "passkey-management-v1";
+  // Native clipboard leasing. The capability is advertised by the native host
+  // only when the desktop App actually owns a two-phase clipboard writer; the
+  // popup must never treat a browser clipboard API as equivalent.
+  const NATIVE_CLIPBOARD_CAPABILITY = "native-clipboard-lease-v1";
+  const COPY_FIELD_PATTERN =
+    /^(?:username|password|notes|url|otp|cc-number|cc-csc|cc-pin|section:[A-Za-z0-9_.-]{1,128}:[A-Za-z0-9_.-]{1,128})$/;
+  const COPY_TICKET_PATTERN = /^[a-f0-9]{64}$/;
+  function nativeClipboardCapability(capabilities) {
+    return (
+      Array.isArray(capabilities) &&
+      capabilities.includes(NATIVE_CLIPBOARD_CAPABILITY)
+    );
+  }
+  // Field selectors are bounded to the same fixed grammar the legacy copy path
+  // accepts, so a native lease cannot be prepared for an invented field.
+  function validCopyFieldSelector(field) {
+    return typeof field === "string" && COPY_FIELD_PATTERN.test(field);
+  }
+  function validCopyTicket(ticket) {
+    return typeof ticket === "string" && COPY_TICKET_PATTERN.test(ticket);
+  }
   const CONDITIONAL_PASSKEY_CAPABILITY = "passkey-conditional-v1";
   const CONDITIONAL_PASSKEY_LIMIT = 50;
   const ATTACHMENT_MAX_BYTES = 2097152;
@@ -1506,6 +1527,35 @@ globalThis.LocklarkCore = (() => {
         ],
         "profile-fill": ["v", "id", "type", "profile_fill"],
         "item-detail": ["v", "id", "type", "item"],
+        "copy-prepared": [
+          "v",
+          "id",
+          "type",
+          "item_id",
+          "revision",
+          "field",
+          "copy_ticket",
+          "copy_mode",
+          "cleanup_ttl_seconds",
+          "expires_in_seconds",
+        ],
+        "copy-result": [
+          "v",
+          "id",
+          "type",
+          "copy_ticket",
+          "copy_mode",
+          "copied",
+          "state",
+        ],
+        "copy-cancelled": [
+          "v",
+          "id",
+          "type",
+          "copy_ticket",
+          "copy_mode",
+          "state",
+        ],
         "field-value": [
           "v",
           "id",
@@ -1632,6 +1682,35 @@ globalThis.LocklarkCore = (() => {
       );
     if (m.type === "attachment-cancelled")
       return /^[a-f0-9]{32}$/.test(m.transfer_id || "");
+    if (m.type === "copy-prepared")
+      return (
+        /^[a-f0-9]{32}$/.test(m.item_id || "") &&
+        /^[a-f0-9]{64}$/.test(m.revision || "") &&
+        validCopyFieldSelector(m.field) &&
+        validCopyTicket(m.copy_ticket) &&
+        m.copy_mode === "native" &&
+        (m.cleanup_ttl_seconds === undefined ||
+          boundedInteger(m.cleanup_ttl_seconds, 0, 3600)) &&
+        (m.expires_in_seconds === undefined ||
+          boundedInteger(m.expires_in_seconds, 0, 15))
+      );
+    if (m.type === "copy-result")
+      return (
+        validCopyTicket(m.copy_ticket) &&
+        m.copy_mode === "native" &&
+        ["confirmed", "refused", "unknown"].includes(m.state) &&
+        // A denied or unknown commit may omit the false flag entirely; a
+        // confirmed result must state it explicitly.
+        (m.state === "confirmed"
+          ? m.copied === true
+          : m.copied === undefined || m.copied === false)
+      );
+    if (m.type === "copy-cancelled")
+      return (
+        validCopyTicket(m.copy_ticket) &&
+        m.copy_mode === "native" &&
+        (m.state === undefined || m.state === "pending")
+      );
     if (m.type === "attachment-removed")
       return (
         /^[a-f0-9]{32}$/.test(m.item_id || "") &&
@@ -5129,6 +5208,10 @@ globalThis.LocklarkCore = (() => {
     ATTACHMENT_TRANSFER_TTL_SECONDS,
     attachmentCapability,
     PASSKEY_MANAGEMENT_CAPABILITY,
+    NATIVE_CLIPBOARD_CAPABILITY,
+    nativeClipboardCapability,
+    validCopyFieldSelector,
+    validCopyTicket,
     passkeyManagementCapability,
     CONDITIONAL_PASSKEY_CAPABILITY,
     CONDITIONAL_PASSKEY_LIMIT,
