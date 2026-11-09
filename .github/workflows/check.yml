@@ -217,7 +217,7 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - name: Test browser extension
         timeout-minutes: 10
-        run: node --test browser-extension/test/*.test.js
+        run: node --test browser-extension/test/*.test.js scripts/test_browser_accessibility_acceptance.mjs
       - name: Prepare reproducible unsigned extension packages
         timeout-minutes: 5
         run: |
