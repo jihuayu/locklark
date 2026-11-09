@@ -392,8 +392,10 @@ func authenticateState(tx *bolt.Tx, pw string, key []byte, action string, unlock
 	if events == nil {
 		return nil, invalid
 	}
-	wantRows := action == "audit.list" || action == "backup.prepare"
-	forceCold := action == "audit.list" || action == "audit.archived" || action == "backup.prepare"
+	wantRows := action == "audit.list" || action == "backup.prepare" || passkeyTransferAction(action) || action == passkeyTransferItemAction
+	// Transfer decisions derive one-use/revoke authority only from the complete
+	// authenticated current chain. Other actions keep the warm-prefix fast path.
+	forceCold := action == "audit.list" || action == "audit.archived" || action == "backup.prepare" || passkeyTransferAction(action) || action == passkeyTransferExportAction || action == passkeyTransferItemAction
 	var rows []Event
 	var full [32]byte
 	var hashed uint64
