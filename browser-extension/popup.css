@@ -663,3 +663,24 @@ textarea:focus-visible, summary:focus-visible {
   .detail-field { grid-template-columns: 64px minmax(0, 1fr) auto auto; gap: 4px; }
   .detail-field button { padding: 6px; }
 }
+
+.checkout-picker {
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid var(--border, #d8dee9);
+  border-radius: 10px;
+}
+.checkout-picker h3 {
+  margin: 0 0 6px;
+  font-size: 1rem;
+}
+.checkout-choices {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0;
+}
+.checkout-choices button {
+  width: 100%;
+  text-align: left;
+  overflow-wrap: anywhere;
+}

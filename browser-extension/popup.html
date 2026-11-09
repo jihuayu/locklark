@@ -150,6 +150,18 @@
           <button id="detail-open-fill" type="button">打开并填充</button>
           <button id="detail-trash" type="button">移至废纸篓</button>
         </div>
+        <section id="checkout-picker" class="checkout-picker" hidden>
+          <h3>选择结账表单</h3>
+          <p id="checkout-current-page" class="note"></p>
+          <p class="note">
+            请选择要填充的网页或表单来源；不会自动选择，也不会自动提交。
+          </p>
+          <div id="checkout-choices" class="checkout-choices"></div>
+          <div class="actions">
+            <button id="checkout-cancel" type="button">取消本次填充</button>
+          </div>
+          <p id="checkout-status" class="note" role="status"></p>
+        </section>
         <div id="detail-fields" class="detail-fields"></div>
         <section id="passkey-detail" class="passkey-detail" hidden>
           <h3>Passkey</h3>

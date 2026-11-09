@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/egoist/mygo"
@@ -69,6 +70,12 @@ func (a *App) browserView(c *ui.Context) {
 	if view.SignalStatus != "" {
 		ui.Text(c, view.SignalStatus).FontSize(13)
 	}
+	// A reserved sensitive profile review must be rendered before the generic
+	// login prompt: the login approval path cannot deliver profile fields.
+	if view.Profile != nil {
+		a.browserProfileView(c, *view.Profile)
+		return
+	}
 	if view.Pending == nil {
 		ui.Text(c, "在浏览器弹窗中选择当前网站的登录。此窗口不会自行请求或刷新候选。")
 		return
@@ -82,6 +89,69 @@ func (a *App) browserView(c *ui.Context) {
 	ui.Text(c, "仅交付用户名和密码；扩展可按自动登录设置提交。请求 30 秒后失效。")
 	ui.PrimaryButton(c, "批准本次填充").Disabled(a.busy).OnClick(func() { a.run(func() outcome { return outcome{err: a.browser.ApproveFill(pending.ID)} }) })
 	ui.Button(c, "拒绝本次填充").Disabled(a.busy).OnClick(func() { a.run(func() outcome { return outcome{err: a.browser.Reject()} }) })
+}
+
+// browserProfileView is the owner review for one sensitive profile fill. The
+// page proposed only public selectors; this view never reads a card or identity
+// value, and the private projection is prepared only after the approval click.
+func (a *App) browserProfileView(c *ui.Context, p browserhost.ProfileView) {
+	category := "身份信息（identity）"
+	if p.Category == "credit_card" {
+		category = "信用卡（credit_card）"
+	}
+	heading := "本次敏感字段填充"
+	if p.Checkout {
+		heading = "跨源结账银行卡"
+	}
+	ui.Column(c).Gap(6).Children(func() {
+		ui.Text(c, heading).FontSize(22).Bold()
+		ui.Text(c, "HTTPS 来源："+visible(p.Origin)).FontSize(20).Bold()
+		if p.Checkout {
+			// A cross-origin checkout frame always shows both sides: the top
+			// document that embedded it and the exact card frame target. The
+			// native policy already proved they share one registrable domain.
+			ui.Text(c, "顶层页面来源："+visible(p.TopOrigin)).FontSize(20).Bold()
+			ui.Text(c, "目标框架来源："+visible(p.FrameOrigin)).FontSize(20).Bold()
+			ui.Text(c, "顶层文档："+visible(p.TopDocumentID)).FontSize(12)
+			ui.Text(c, "框架文档："+visible(p.FrameDocumentID)).FontSize(12)
+			ui.Text(c, "框架 ID："+strconv.FormatInt(p.FrameID, 10)).FontSize(12)
+		}
+		ui.Text(c, "类别："+category)
+		ui.Text(c, "条目："+browserTitle(p.Title))
+		ui.Text(c, "ID："+p.ItemID).FontSize(12)
+		ui.Text(c, "精确修订："+p.Revision).FontSize(12)
+		ui.Text(c, "仅在本窗口批准后，才读取本条目本次允许填充的字段；卡片 PIN、身份证件号码及未列出的字段永不填入。请求 30 秒后失效。")
+		// Fixed action area after the bounded review rows: both buttons stay
+		// visible for any accepted title length.
+		approve, reject := "批准本次敏感字段填充", "拒绝本次敏感字段填充"
+		if p.Checkout {
+			approve, reject = "批准本次跨源银行卡填充", "拒绝本次跨源银行卡填充"
+		}
+		ui.Row(c).Gap(8).Children(func() {
+			ui.PrimaryButton(c, approve).Disabled(a.busy).OnClick(func() { a.browserProfileAction(p.ID, true) })
+			ui.Button(c, reject).Disabled(a.busy).OnClick(func() { a.browserProfileAction(p.ID, false) })
+		})
+	})
+}
+
+func (a *App) browserProfileAction(id string, approve bool) {
+	a.run(func() outcome {
+		var err error
+		if approve {
+			err = a.browser.ApproveProfile(id)
+		} else {
+			err = a.browser.RejectProfile(id)
+		}
+		return outcome{err: err, apply: func() {
+			if v := a.browser.Snapshot(); v.Profile == nil {
+				if err != nil {
+					a.status = message(err)
+				} else if !approve {
+					a.status = "已拒绝本次敏感字段填充"
+				}
+			}
+		}}
+	})
 }
 
 func (a *App) browserSaveView(c *ui.Context, p browserhost.SaveView, status string) {

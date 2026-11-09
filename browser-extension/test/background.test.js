@@ -3906,3 +3906,51 @@ test("legacy singleton detail is unchanged and an exact child revision is forwar
   assert.equal(removals.length, 1, "a malformed child revision never reaches the host");
   await h.send({ type: "disconnect" });
 });
+
+test("credit card vault filter forwards the canonical native category and keeps the exact row", async () => {
+  const CARD_ID = "a1".repeat(16);
+  const CARD_REV = "b2".repeat(32);
+  const h = harness({
+    onRequest: (r) =>
+      r.type === "vault-search"
+        ? {
+            v: 1,
+            id: r.id,
+            type: "vault-items",
+            items: [
+              {
+                id: CARD_ID,
+                revision: CARD_REV,
+                category: "credit_card",
+                title: "Browser acceptance card",
+                subtitle: "Visa 0000",
+                state: "active",
+              },
+            ],
+          }
+        : undefined,
+  });
+  await ready(h);
+  const reply = await h.send({
+    type: "vault-search",
+    query: "",
+    category: "credit_card",
+  });
+  const request = h.sent.filter((r) => r.type === "vault-search").at(-1);
+  assert.equal(request.query, "");
+  assert.equal(request.category, "credit_card");
+  assert.equal(reply.vaultItems.length, 1);
+  assert.equal(reply.vaultItems[0].id, CARD_ID);
+  assert.equal(reply.vaultItems[0].revision, CARD_REV);
+
+  // The popup row contract keeps the exact id/revision and still selects the
+  // card through the public credit_card filter after internal normalization.
+  const rows = core.filterVaultItems(reply.vaultItems, {
+    query: "",
+    category: "credit_card",
+  });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].id, CARD_ID);
+  assert.equal(rows[0].revision, CARD_REV);
+  await h.send({ type: "disconnect" });
+});

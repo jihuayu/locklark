@@ -634,6 +634,8 @@
     }
     if (state.connected === false) generatedDataWiped = false;
     lastState = state;
+    if (state.connected === false && checkoutPicker)
+      clearCheckoutPickerView();
     if (
       vaultEnabled &&
       document.body?.dataset?.view === "detail" &&
@@ -943,6 +945,9 @@
     attachmentCancelled = false,
     attachmentCommitting = false,
     blobURLs = new Set(),
+    checkoutPicker = null,
+    checkoutPickerTimer = null,
+    renderedCheckout = "",
     els = null;
 
   function q(selector) {
@@ -982,6 +987,7 @@
   }
   function wipeDetail() {
     cancelPasskeyRemoval();
+    clearCheckoutPickerView();
     passkeyDetailGeneration++;
     if (els?.passkeyDetail) els.passkeyDetail.hidden = true;
     clearAttachmentBuffers();
@@ -1110,7 +1116,7 @@
       row.className = "vault-item";
       row.dataset.itemId = item.id;
       row.dataset.itemRevision = item.revision;
-      row.dataset.category = core?.normalizeCategory(item.category) || "login";
+      row.dataset.category = core?.nativeCategory(item.category) || "login";
       const title = document.createElement("span");
       title.className = "vault-item-title";
       title.textContent = item.title || "（无标题）";
@@ -1280,6 +1286,7 @@
     if (!item || vaultBusy || !lastState?.connected || popupInactive) return;
     const generation = ++passkeyDetailGeneration;
     cancelPasskeyRemoval({ clearUncertain: false });
+    if (checkoutPicker) clearCheckoutPickerView();
     const operation = beginVaultOperation();
     detailReadOperation = operation;
     try {
@@ -1749,6 +1756,233 @@
       }
     } catch {}
   }
+  // Explicit checkout-form selection. The background returns one bounded list
+  // of the HTTPS frames it actually injected into for the reviewed card and
+  // nothing else: no card field is read, cached or shown here. Every origin is
+  // rendered as inert text and only the opaque nonce/choice pair travels back,
+  // so a displayed origin, a frame id or "the first frame" is never authority.
+  function checkoutIsCard(detail) {
+    const category = core
+      ? core.normalizeCategory(detail?.category)
+      : detail?.category;
+    return category === "card" || category === "credit_card";
+  }
+  // The picker only ever accepts a canonical public identity: a 32-hex item
+  // id and a 64-hex revision, exactly as the native metadata read returned
+  // them. No candidate, origin or frame is inferred from this.
+  function checkoutIdentityCanonical(detail) {
+    return (
+      /^[a-f0-9]{32}$/.test(detail?.id || "") &&
+      /^[a-f0-9]{64}$/.test(detail?.revision || "")
+    );
+  }
+  function checkoutChoicesSupported(detail) {
+    return (
+      checkoutIsCard(detail) &&
+      checkoutIdentityCanonical(detail) &&
+      lastState?.checkoutFramesSupported === true
+    );
+  }
+  function checkoutChoiceKey(value) {
+    return typeof value === "string" && /^[a-f0-9]{32}$/.test(value);
+  }
+  // The background view is accepted only when every public field is a
+  // canonical HTTPS origin and the opaque keys are well formed. A single top
+  // document is required; nothing is ever picked automatically.
+  function adoptCheckoutPickerView(view, detail) {
+    if (!view || typeof view !== "object" || Array.isArray(view)) return null;
+    if (!checkoutChoiceKey(view.nonce)) return null;
+    if (!Number.isSafeInteger(view.expiresAt) || view.expiresAt <= Date.now())
+      return null;
+    const topOrigin = httpsOrigin(view.topOrigin);
+    if (!topOrigin) return null;
+    const candidates = [];
+    let tops = 0;
+    for (const entry of Array.isArray(view.candidates) ? view.candidates : []) {
+      if (candidates.length >= 32) return null;
+      if (!entry || typeof entry !== "object" || Array.isArray(entry))
+        return null;
+      if (!checkoutChoiceKey(entry.choice)) return null;
+      if (candidates.some((known) => known.choice === entry.choice)) return null;
+      const origin = httpsOrigin(entry.origin);
+      if (!origin || typeof entry.top !== "boolean") return null;
+      if (entry.top) {
+        tops++;
+        if (origin !== topOrigin) return null;
+      }
+      candidates.push({ choice: entry.choice, origin, top: entry.top });
+    }
+    if (!candidates.length || tops !== 1) return null;
+    return {
+      nonce: view.nonce,
+      id: detail.id,
+      revision: detail.revision,
+      topOrigin,
+      expiresAt: view.expiresAt,
+      candidates,
+      used: false,
+    };
+  }
+  function renderCheckoutPicker() {
+    if (!els || !els.checkoutPicker) return;
+    const picker = checkoutPicker;
+    if (!picker) {
+      // The panel is closed whenever no picker is live, whatever the initial
+      // markup said.
+      els.checkoutPicker.hidden = true;
+      if (renderedCheckout === "") return;
+      renderedCheckout = "";
+      els.checkoutChoices.replaceChildren();
+      els.checkoutCurrentPage.textContent = "";
+      els.checkoutStatus.textContent = "";
+      return;
+    }
+    const signature = JSON.stringify([
+      picker.nonce,
+      picker.topOrigin,
+      picker.used,
+      busy,
+      picker.candidates.map((entry) => [entry.choice, entry.origin, entry.top]),
+    ]);
+    if (signature === renderedCheckout) return;
+    renderedCheckout = signature;
+    els.checkoutPicker.hidden = false;
+    els.checkoutCurrentPage.textContent = "当前页面来源：" + picker.topOrigin;
+    els.checkoutChoices.replaceChildren(
+      ...picker.candidates.map((entry) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.dataset.action = "checkout-select";
+        // Opaque key only; the visible label is the public origin text.
+        button.dataset.choice = entry.choice;
+        button.textContent =
+          entry.origin + (entry.top ? "（当前页面）" : "（页面中的表单框架）");
+        button.disabled = picker.used || busy;
+        button.addEventListener("click", (event) =>
+          void chooseCheckoutFrame(picker, entry.choice, event),
+        );
+        return button;
+      }),
+    );
+    els.checkoutStatus.textContent = picker.used
+      ? "已选择所选结账表单，正在核对所选页面"
+      : "请选择一个结账表单来源；不会自动选择，也不会自动提交";
+  }
+  // Hiding or replacing the panel drops an unused picker in the background
+  // too. A picker whose choice was already accepted belongs to the native
+  // approval in flight and is never cancelled from here.
+  function clearCheckoutPickerView(options = {}) {
+    if (checkoutPickerTimer) {
+      clearTimeout(checkoutPickerTimer);
+      checkoutPickerTimer = null;
+    }
+    const picker = checkoutPicker;
+    checkoutPicker = null;
+    renderedCheckout = "";
+    if (els) {
+      if (els.checkoutPicker) els.checkoutPicker.hidden = true;
+      if (els.checkoutChoices) els.checkoutChoices.replaceChildren();
+      if (els.checkoutCurrentPage) els.checkoutCurrentPage.textContent = "";
+      if (els.checkoutStatus) els.checkoutStatus.textContent = "";
+    }
+    if (!picker || picker.used || options.keepChoice) return;
+    const nonce = picker.nonce;
+    Promise.resolve()
+      .then(() => api.runtime.sendMessage({ type: "checkout-cancel", nonce }))
+      .catch(() => {});
+  }
+  async function startCheckoutPicker(detail, event) {
+    // Only a real user gesture may enumerate checkout frames.
+    if (event?.isTrusted !== true) return;
+    if (!detail || !lastState?.connected || popupInactive || busy) return;
+    if (!checkoutChoicesSupported(detail)) {
+      toast("当前原生宿主或浏览器不支持选择结账表单");
+      return;
+    }
+    // Any earlier unused list is dropped before a new one is requested.
+    clearCheckoutPickerView({ keepChoice: true });
+    const generation = ++actionGeneration;
+    busy = true;
+    const state = await send(
+      { type: "checkout-frames", id: detail.id, revision: detail.revision },
+      generation,
+    );
+    if (generation !== actionGeneration || popupInactive) return;
+    busy = false;
+    if (lastDetail) renderDetail(lastDetail);
+    const view =
+      state && detail === lastDetail
+        ? adoptCheckoutPickerView(state.checkoutPicker, detail)
+        : null;
+    if (!view) {
+      toast(state?.status || "无法列出当前页面的结账表单");
+      return;
+    }
+    checkoutPicker = view;
+    checkoutPickerTimer = setTimeout(() => {
+      checkoutPickerTimer = null;
+      if (!checkoutPicker || checkoutPicker.nonce !== view.nonce) return;
+      clearCheckoutPickerView({ keepChoice: true });
+      toast("选择结账表单已过期，请重新选择");
+      if (lastDetail) renderDetail(lastDetail);
+    }, view.expiresAt - Date.now());
+    renderCheckoutPicker();
+  }
+  async function chooseCheckoutFrame(picker, choice, event) {
+    // An explicit gesture for this exact opaque key; nothing is preselected.
+    if (event?.isTrusted !== true) return;
+    if (!picker || picker !== checkoutPicker || picker.used) return;
+    if (!checkoutChoiceKey(choice)) return;
+    if (!picker.candidates.some((entry) => entry.choice === choice)) return;
+    if (busy) return;
+    if (Date.now() > picker.expiresAt) {
+      clearCheckoutPickerView({ keepChoice: true });
+      if (lastDetail) renderDetail(lastDetail);
+      toast("选择结账表单已过期，请重新选择");
+      return;
+    }
+    picker.used = true;
+    if (checkoutPickerTimer) {
+      clearTimeout(checkoutPickerTimer);
+      checkoutPickerTimer = null;
+    }
+    renderCheckoutPicker();
+    const generation = ++actionGeneration;
+    busy = true;
+    const state = await send(
+      {
+        type: "checkout-select",
+        nonce: picker.nonce,
+        choice,
+        id: picker.id,
+        revision: picker.revision,
+      },
+      generation,
+    );
+    if (generation !== actionGeneration || popupInactive) return;
+    busy = false;
+    if (state?.checkoutStarted === true) {
+      // `true` only acknowledges that the background consumed this exact
+      // choice. It is still revalidating the selected page and has not asked
+      // native for approval yet, so the popup must not claim one exists.
+      if (els?.checkoutStatus)
+        els.checkoutStatus.textContent = "已提交所选表单，正在核对所选页面";
+      toast("正在核对所选页面；未自动提交");
+      return;
+    }
+    // Refused, expired or unanswered: the background already dropped the
+    // picker, so only the local view is retired.
+    if (state) clearCheckoutPickerView({ keepChoice: true });
+    else clearCheckoutPickerView();
+    if (lastDetail) renderDetail(lastDetail);
+    toast(state?.status || "所选结账表单已失效，请重新选择");
+  }
+  function cancelCheckoutChoice(event) {
+    if (event?.isTrusted !== true) return;
+    if (!checkoutPicker) return;
+    clearCheckoutPickerView();
+    toast("已取消本次结账表单填充");
+  }
   function renderDetail(detail) {
     if (!els || !detail) return;
     els.detailTitle.textContent = detail.title || "（无标题）";
@@ -1847,15 +2081,34 @@
       els.detailTags.append(item);
     }
     renderPasskeyDetail(detail);
+    const cardCheckout = checkoutChoicesSupported(detail);
+    // A matched page candidate still owns the ordinary fill path. A reviewed
+    // card with a canonical identity is the one exception: the candidate list
+    // is built from login/URL matches, so a card that lives only behind the
+    // native metadata read is never listed there. Enabling this action only
+    // starts the metadata frame picker; no field is read and native approval,
+    // frame enumeration, exact-context and CAS checks still gate the fill.
+    const candidateExact = (lastState?.candidates || []).some(
+      (row) => row.id === detail.id && row.revision === detail.revision,
+    );
     els.detailFill.disabled =
-      !lastState?.connected ||
-      !(lastState?.candidates || []).some(
-        (row) =>
-          row.id === detail.id && row.revision === detail.revision,
-      );
+      !lastState?.connected || (!cardCheckout && !candidateExact);
     els.detailOtp.hidden = !detail.has_otp && !detail.otp_code;
     els.detailOpenFill.disabled = !(detail.urls || []).length;
     els.detailEdit.disabled = !!detail.readOnly;
+    els.detailFill.textContent = cardCheckout
+      ? "选择结账表单并填充"
+      : "填充到此页面";
+    els.detailFill.dataset.checkout = cardCheckout ? "1" : "";
+    // A picker only ever belongs to the one reviewed card revision on screen.
+    if (
+      checkoutPicker &&
+      (!cardCheckout ||
+        checkoutPicker.id !== detail.id ||
+        checkoutPicker.revision !== detail.revision)
+    )
+      clearCheckoutPickerView();
+    renderCheckoutPicker();
     renderAttachments(detail);
   }
   globalThis.addEventListener?.("pagehide", () => {
@@ -1870,6 +2123,7 @@
     if (els?.searchInput) els.searchInput.disabled = false;
     clearGeneratedData();
     clearRevealedSecrets();
+    clearCheckoutPickerView();
   });
   globalThis.addEventListener?.("pageshow", () => {
     if (!popupInactive) return;
@@ -1897,7 +2151,9 @@
   });
   if (typeof document !== "undefined")
     document.addEventListener?.("visibilitychange", () => {
-      if (document.visibilityState === "hidden") clearRevealedSecrets();
+      if (document.visibilityState !== "hidden") return;
+      clearRevealedSecrets();
+      clearCheckoutPickerView();
     });
   function clearRevealedSecrets() {
     secretGeneration++;
@@ -3148,6 +3404,11 @@
       attachmentUpload: q("#attachment-upload"),
       attachmentCancel: q("#attachment-cancel"),
       attachmentUnsupported: q("#attachment-unsupported"),
+      checkoutPicker: q("#checkout-picker"),
+      checkoutCurrentPage: q("#checkout-current-page"),
+      checkoutChoices: q("#checkout-choices"),
+      checkoutCancel: q("#checkout-cancel"),
+      checkoutStatus: q("#checkout-status"),
     };
     els.searchInput.addEventListener("input", (event) => {
       searchQuery = String(event.target.value || "");
@@ -3307,14 +3568,22 @@
     els.detailEdit.addEventListener("click", () => {
       if (lastDetail) openEditor("edit", lastDetail);
     });
-    els.detailFill.addEventListener("click", () => {
+    els.detailFill.addEventListener("click", (event) => {
       if (!lastDetail) return;
+      // A card whose form may live in a frame is chosen explicitly first.
+      if (checkoutChoicesSupported(lastDetail)) {
+        void startCheckoutPicker(lastDetail, event);
+        return;
+      }
       void classifyDetailAction({
         type: "fill",
         id: lastDetail.id,
         revision: lastDetail.revision,
       }).catch(() => toast("请先读取当前网站候选"));
     });
+    els.checkoutCancel.addEventListener("click", (event) =>
+      cancelCheckoutChoice(event),
+    );
     els.detailOtp.addEventListener("click", () => {
       if (!lastDetail) return;
       void classifyDetailAction({
