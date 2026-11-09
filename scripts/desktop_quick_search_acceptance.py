@@ -20,6 +20,8 @@ def disclosure_action(action):
 
 
 class QuickSearchAcceptance(Acceptance):
+    RESULT_FOCUS_TIMEOUT=2.0
+
     def __init__(self):
         super().__init__()
         self.launcher=None
@@ -29,6 +31,8 @@ class QuickSearchAcceptance(Acceptance):
         self.completed=[]
         self.reader=None
         self.last_metadata={}
+        self.result_focus_elapsed_ms=0
+        self.last_native_focus_after_shortcut=False
         self.barriers=[]
 
     def phase(self,value):
@@ -41,11 +45,17 @@ class QuickSearchAcceptance(Acceptance):
         try:result=self.launcher.wake(xid)
         except ShortcutFailure as error:
             self.shortcut_observations.append(safe_shortcut_attempt(getattr(self.launcher,"last_attempt",{})))
+            self.last_native_focus_after_shortcut=False
             self.reason="shortcut-"+(error.reason if error.reason in SHORTCUT_REASONS else "unexpected")
             raise AcceptanceFailure() from None
-        self.shortcut_observations.append(safe_shortcut_attempt(result))
+        observation=safe_shortcut_attempt(result)
+        self.shortcut_observations.append(observation)
+        self.last_native_focus_after_shortcut=observation.get("native_focus_after_shortcut") is True
         self.reason="global-shortcut-focus"
         require(result["foreign_focus_established"] and result["native_focus_after_shortcut"])
+        # The shortcut itself passed; drop its reason so a later failure is not
+        # attributed to a wake that already succeeded.
+        self.reason="wake-complete"
 
     def prepare_window_manager(self):
         self.reason="window-manager-discovery"
@@ -96,6 +106,34 @@ class QuickSearchAcceptance(Acceptance):
                         self.metadata(expected)["result_count"]==len(expected))
         require(self.metadata(expected)["all_results_exact"])
 
+    def await_result_focus(self,expected,target):
+        # A source wake only asks for query focus. The native window can be
+        # focused before the widget tree restores the selected row, so the
+        # restored result focus is polled for a bounded window before it is
+        # asserted; no extra key, click or wake is sent while polling.
+        self.reason="quick-result-focus"
+        started=time.monotonic()
+        deadline=started+self.RESULT_FOCUS_TIMEOUT
+        focused=False
+        while True:
+            if self.metadata(expected,target)["target_focused"]:focused=True;break
+            if time.monotonic()>=deadline:break
+            time.sleep(.05)
+        self.result_focus_elapsed_ms=min(int((time.monotonic()-started)*1000),int(self.RESULT_FOCUS_TIMEOUT*1000))
+        require(focused)
+
+    def failure_diagnostic(self):
+        # Fixed public booleans plus a bounded elapsed value only: never ids,
+        # titles, focus factors, raw errors or full metadata.
+        latest=self.shortcut_observations[-1] if self.shortcut_observations else {}
+        native=latest.get("native_focus_after_shortcut")
+        if type(native) is not bool:native=self.last_native_focus_after_shortcut is True
+        elapsed=min(max(int(self.result_focus_elapsed_ms),0),int(self.RESULT_FOCUS_TIMEOUT*1000))
+        return ("Desktop quick search public failure diagnostics: "
+                "native_focus_after_shortcut="+("true" if native else "false")+
+                " target_focused="+("true" if self.last_metadata.get("target_focused") is True else "false")+
+                " target_focus_elapsed_ms="+str(elapsed))
+
     def tab_select(self,expected,target):
         self.phase("keyboard-select-stable-id")
         for _ in range(16):
@@ -105,7 +143,10 @@ class QuickSearchAcceptance(Acceptance):
         # Another real wake must preserve the focused result and list rather
         # than requesting query focus again on every frame/open callback.
         self.wake()
-        require(self.metadata(expected,target)["target_focused"])
+        self.await_result_focus(expected,target)
+        # Restored focus must also survive the settle window; losing it is a
+        # hard failure and never a reason to press Tab again.
+        self.reason="quick-result-focus-lost"
         time.sleep(.2)
         require(self.metadata(expected,target)["target_focused"])
         self.input([{"key":"Return"}])
@@ -258,6 +299,7 @@ class QuickSearchAcceptance(Acceptance):
             except Exception:failure["controls_unavailable"]=True
             with os.fdopen(os.open(self.diagnostics/"failure.json",os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600),"w") as out:json.dump(failure,out)
             self.reason,self.native_action=failure["reason"],failure["native_action"]
+            self.emit(self.failure_diagnostic())
         finally:
             record={"ewmh_window_manager_ready":self.wm_ready,
                     "shortcut_observations":self.shortcut_observations,
