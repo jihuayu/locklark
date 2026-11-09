@@ -946,19 +946,34 @@ func Run() error {
 	a.refreshClipboardClearSeconds(a.settingsSnapshot())
 	mygo.App.SetName("Locklark")
 	mygo.App.WhenReady(func() {
-		shell := plain.NewShell(plain.ShellOptions{
-			Title:         "Locklark · 本地金库",
-			Width:         1240,
-			Height:        820,
-			MinWidth:      980,
-			MinHeight:     680,
-			StateKey:      "locklark.main",
-			Theme:         theme.Onevra,
-			HeaderLeading: a.onevraHeaderLeading,
-			HeaderActions: a.onevraHeaderActions,
-			Content:       a.View,
-		})
-		a.win = shell.Window()
+		if classicLayoutRequested() {
+			// Keep the classic layout on its original window and header. The
+			// Onevra shell header would duplicate its "快捷搜索", "立即锁定" and
+			// "安全设置" controls, which breaks accessibility and the native
+			// acceptance driver's unique-label requirement.
+			a.win = mygo.NewWindow(mygo.WindowOptions{
+				Title:     "Locklark · 本地金库",
+				Width:     1100,
+				Height:    820,
+				MinWidth:  900,
+				MinHeight: 680,
+				Content:   ui.View(a.View),
+			})
+		} else {
+			shell := plain.NewShell(plain.ShellOptions{
+				Title:         "Locklark · 本地金库",
+				Width:         1240,
+				Height:        820,
+				MinWidth:      980,
+				MinHeight:     680,
+				StateKey:      "locklark.main",
+				Theme:         theme.Onevra,
+				HeaderLeading: a.onevraHeaderLeading,
+				HeaderActions: a.onevraHeaderActions,
+				Content:       a.View,
+			})
+			a.win = shell.Window()
+		}
 		a.dispatch = a.win.Update
 		a.win.OnClose(func(*mygo.CloseEvent) { a.Lock() })
 		a.clipboardWrite = nativeclipboard.Write
