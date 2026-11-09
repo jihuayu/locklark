@@ -1,0 +1,230 @@
+{
+  "schema": "locklark.browser-accessibility-receipt.v1",
+  "state": "PASS",
+  "head": "2778d7cbc076f01bae167f361dc7510c001b7476",
+  "source_clean": true,
+  "source_sha256": "2290aec47be8b8e5580c327a0cdef49041305ce99e502916dc01ad97fdcb2c70",
+  "browser": "edge",
+  "browser_version": "Edg/157.0.4341.42",
+  "extension_id": "geldnhjapnackobgknocomedmjgphnpe",
+  "axe": {
+    "status": "available",
+    "version": "4.10.3",
+    "source_sha256": "880970c081707360e64f34cea25ff91892f5bc95675b0776925b9709dd8a68bb"
+  },
+  "audits": [
+    {
+      "page": "popup.html",
+      "mode": "default",
+      "viewport": "native-action-popup",
+      "viewport_px": {
+        "width": 390,
+        "height": 600
+      },
+      "forced_colors": "none",
+      "reduced_motion": "no-preference",
+      "locked": true,
+      "overflow": false,
+      "violations": [],
+      "incomplete": [],
+      "keyboard": {
+        "total": 8,
+        "reached": 8,
+        "tab_steps": 8,
+        "status": "PASS"
+      },
+      "status": "PASS"
+    },
+    {
+      "page": "popup.html",
+      "mode": "forced-colors",
+      "viewport": "native-action-popup",
+      "viewport_px": {
+        "width": 390,
+        "height": 600
+      },
+      "forced_colors": "active",
+      "reduced_motion": "no-preference",
+      "locked": true,
+      "overflow": false,
+      "violations": [],
+      "incomplete": [],
+      "keyboard": {
+        "total": 8,
+        "reached": 8,
+        "tab_steps": 7,
+        "status": "PASS"
+      },
+      "status": "PASS"
+    },
+    {
+      "page": "popup.html",
+      "mode": "reduced-motion",
+      "viewport": "native-action-popup",
+      "viewport_px": {
+        "width": 390,
+        "height": 600
+      },
+      "forced_colors": "none",
+      "reduced_motion": "reduce",
+      "locked": true,
+      "overflow": false,
+      "violations": [],
+      "incomplete": [],
+      "keyboard": {
+        "total": 8,
+        "reached": 8,
+        "tab_steps": 7,
+        "status": "PASS"
+      },
+      "status": "PASS"
+    },
+    {
+      "page": "options.html",
+      "mode": "default",
+      "viewport": "desktop",
+      "viewport_px": {
+        "width": 1280,
+        "height": 800
+      },
+      "forced_colors": "none",
+      "reduced_motion": "no-preference",
+      "locked": true,
+      "overflow": false,
+      "violations": [],
+      "incomplete": [],
+      "keyboard": {
+        "total": 24,
+        "reached": 24,
+        "tab_steps": 24,
+        "status": "PASS"
+      },
+      "status": "PASS"
+    },
+    {
+      "page": "options.html",
+      "mode": "forced-colors",
+      "viewport": "desktop",
+      "viewport_px": {
+        "width": 1280,
+        "height": 800
+      },
+      "forced_colors": "active",
+      "reduced_motion": "no-preference",
+      "locked": true,
+      "overflow": false,
+      "violations": [],
+      "incomplete": [],
+      "keyboard": {
+        "total": 24,
+        "reached": 24,
+        "tab_steps": 24,
+        "status": "PASS"
+      },
+      "status": "PASS"
+    },
+    {
+      "page": "options.html",
+      "mode": "reduced-motion",
+      "viewport": "desktop",
+      "viewport_px": {
+        "width": 1280,
+        "height": 800
+      },
+      "forced_colors": "none",
+      "reduced_motion": "reduce",
+      "locked": true,
+      "overflow": false,
+      "violations": [],
+      "incomplete": [],
+      "keyboard": {
+        "total": 24,
+        "reached": 24,
+        "tab_steps": 24,
+        "status": "PASS"
+      },
+      "status": "PASS"
+    },
+    {
+      "page": "options.html",
+      "mode": "default",
+      "viewport": "narrow-200pct-equivalent",
+      "viewport_px": {
+        "width": 640,
+        "height": 800
+      },
+      "forced_colors": "none",
+      "reduced_motion": "no-preference",
+      "locked": true,
+      "overflow": false,
+      "violations": [],
+      "incomplete": [],
+      "keyboard": {
+        "total": 24,
+        "reached": 24,
+        "tab_steps": 24,
+        "status": "PASS"
+      },
+      "status": "PASS"
+    },
+    {
+      "page": "options.html",
+      "mode": "forced-colors",
+      "viewport": "narrow-200pct-equivalent",
+      "viewport_px": {
+        "width": 640,
+        "height": 800
+      },
+      "forced_colors": "active",
+      "reduced_motion": "no-preference",
+      "locked": true,
+      "overflow": false,
+      "violations": [],
+      "incomplete": [],
+      "keyboard": {
+        "total": 24,
+        "reached": 24,
+        "tab_steps": 24,
+        "status": "PASS"
+      },
+      "status": "PASS"
+    },
+    {
+      "page": "options.html",
+      "mode": "reduced-motion",
+      "viewport": "narrow-200pct-equivalent",
+      "viewport_px": {
+        "width": 640,
+        "height": 800
+      },
+      "forced_colors": "none",
+      "reduced_motion": "reduce",
+      "locked": true,
+      "overflow": false,
+      "violations": [],
+      "incomplete": [],
+      "keyboard": {
+        "total": 24,
+        "reached": 24,
+        "tab_steps": 24,
+        "status": "PASS"
+      },
+      "status": "PASS"
+    }
+  ],
+  "summary": {
+    "audits": 9,
+    "violations": 0,
+    "incomplete": 0,
+    "failed_audits": 0
+  },
+  "not_claimed": [
+    "No real screen reader (NVDA, VoiceOver or JAWS) was run.",
+    "forced-colors and reduced-motion are browser emulation, not actual OS high contrast or motion settings.",
+    "The narrow viewport is equivalent layout coverage, not real browser 200% zoom.",
+    "The action popup is audited at its actual native dimensions; responsive viewport emulation is limited to the options page.",
+    "Media emulation is CDP emulation, not real OS zoom, high contrast or reader output.",
+    "The action popup was opened by the physical Ctrl+Shift+Y shortcut; no product state, unlock, approval or auth message was injected.",
+    "No native host, vault, unlock, approval or authentication fixture was used."
+  ]
+}

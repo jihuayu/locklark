@@ -116,6 +116,9 @@ func personalImportConsent(action string) (string, string) {
 }
 
 func runPersonal(args []string, out io.Writer) (retErr error) {
+	if isPasskeyTransferAction(args) {
+		return runPersonalPasskeyTransfer(args, out)
+	}
 	var processArgs []string
 	if len(args) > 0 && (args[0] == "run-env" || args[0] == "run-cli") {
 		for i := 1; i < len(args); i++ {

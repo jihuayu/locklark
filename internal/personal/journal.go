@@ -78,7 +78,17 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 	if e.Sequence != n || e.Previous != prev || !idOK(e.Session) || e.Actor != "local-owner" || !ed25519.Verify(pub, e.proof(), e.Signature) {
 		return invalid
 	}
-	if e.Action != passkeyCreateAction && e.Action != passkeySignalAction && e.Action != "desktop.system.enable" && e.Action != sshSignAction && !browserSaveAction(e.Action) && !editAction(e.Action) && !readValueAction(e.Action) && !otpAction(e.Action) && e.Action != referenceRejectAction && e.Action != inspectionAction && e.Action != exportAction && e.Action != matchAction && !migrationAction(e.Action) && e.Action != v2PurgeAction && e.Action != v2EmptyTrashAction && e.Action != v2CreateVaultAction && e.Action != v2ListVaultsAction && e.Action != v2DetailViewAction && e.Action != v2DetailInspectAction && e.Action != v2AttachmentReadAction && e.Action != watchtowerAction && e.Action != hibpAction && !((e.Action == sshGenerateAction || e.Action == sshImportAction || e.Action == "item.add" || e.Action == "item.generate") && e.Result == "native-refused") && (e.Result != "succeeded" || e.BaseRevision != "") {
+	// The export intent is an exact fixed known shape checked before the
+	// generic Link guards, and it is intentionally not part of
+	// passkeyTransferAction because the invitation scanner only sees
+	// invite/revoke/consume state.
+	if e.Action == passkeyTransferExportAction {
+		return verifyPasskeyTransferExportEvent(e, n)
+	}
+	if e.Action == passkeyTransferItemAction {
+		return verifyPasskeyTransferItemEvent(e, n)
+	}
+	if e.Action != passkeyCreateAction && e.Action != passkeySignalAction && e.Action != "desktop.system.enable" && e.Action != sshSignAction && !browserSaveAction(e.Action) && !editAction(e.Action) && !readValueAction(e.Action) && !otpAction(e.Action) && e.Action != referenceRejectAction && e.Action != inspectionAction && e.Action != exportAction && e.Action != matchAction && !migrationAction(e.Action) && e.Action != v2PurgeAction && e.Action != v2EmptyTrashAction && e.Action != v2CreateVaultAction && e.Action != v2ListVaultsAction && e.Action != v2DetailViewAction && e.Action != v2DetailInspectAction && e.Action != v2AttachmentReadAction && e.Action != watchtowerAction && e.Action != hibpAction && !passkeyTransferAction(e.Action) && !((e.Action == sshGenerateAction || e.Action == sshImportAction || e.Action == "item.add" || e.Action == "item.generate") && e.Result == "native-refused") && (e.Result != "succeeded" || e.BaseRevision != "") {
 		return invalid
 	}
 	if (e.Action == inspectionAction || migrationAction(e.Action) || e.Action == "item.import" || e.Action == healthAction || e.Action == watchtowerAction || e.Action == hibpAction) && e.Result == "succeeded" {
@@ -88,7 +98,7 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 	} else if e.ReportDigest != "" {
 		return invalid
 	}
-	if e.Action != passkeyCreateAction && e.Action != passkeySignalAction && e.Action != sshSignAction && e.Action != "backup.prepare" && e.Action != "vault.restore" && !browserSaveAction(e.Action) && !boundValueAction(e.Action) && e.Action != searchAction && e.Link != "" {
+	if e.Action != passkeyCreateAction && e.Action != passkeySignalAction && e.Action != sshSignAction && e.Action != "backup.prepare" && e.Action != "vault.restore" && !browserSaveAction(e.Action) && !boundValueAction(e.Action) && e.Action != searchAction && !passkeyTransferAction(e.Action) && e.Link != "" {
 		return invalid
 	}
 	if e.Action == passkeySignalAction && !digestOK(e.Link) {
@@ -137,6 +147,20 @@ func (e Event) verify(pub ed25519.PublicKey, n uint64, prev string) error {
 		// One replayable single-item event per affected login. The keyed link
 		// digest binds the hint and the exact reviewed selectors without
 		// publishing any of them.
+		if n <= 1 || !idOK(e.Item) || e.Result != "succeeded" || !digestOK(e.BaseRevision) || !digestOK(e.Link) {
+			return invalid
+		}
+	case passkeyTransferInviteAction:
+		// Invitation creation is independent of item revisions: the 16-byte
+		// invitation ID is the audit item, and the keyed link binds the exact
+		// canonical signed invitation without persisting it.
+		if n <= 1 || !idOK(e.Item) || e.Result != "succeeded" || e.BaseRevision != "" || !digestOK(e.Link) {
+			return invalid
+		}
+	case passkeyTransferRevokeAction, passkeyTransferConsumeAction:
+		// Revocation/consumption names the immutable creation event hash as
+		// its base and reuses the creation link. Relational uniqueness and
+		// ordering are checked against the authenticated current chain.
 		if n <= 1 || !idOK(e.Item) || e.Result != "succeeded" || !digestOK(e.BaseRevision) || !digestOK(e.Link) {
 			return invalid
 		}
@@ -334,6 +358,14 @@ func eventLabel(seq []byte) []byte { return append([]byte("locklark/personal/eve
 // history verification, warm tail verification and cache extension.
 func applyAuditRevision(ev Event, hash string, revisions map[string]string) error {
 	if ev.Action == passkeyCreateAction {
+		if ev.BaseRevision != revisions[ev.Item] {
+			return invalid
+		}
+		revisions[ev.Item] = hash
+	} else if ev.Action == passkeyTransferItemAction {
+		// Imported parent revisions use the same strict CAS shape: the base
+		// must equal the current revision and a new parent may only be absent
+		// before its first event.
 		if ev.BaseRevision != revisions[ev.Item] {
 			return invalid
 		}
