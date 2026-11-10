@@ -2057,7 +2057,14 @@
   document.addEventListener(
     "click",
     (event) => {
-      if (host && event.target !== host) dismiss();
+      if (!host || event.target === host) return;
+      // A click on the field the panel is anchored to must not dismiss the
+      // panel that focusin just opened; the click and focusin belong to the
+      // same interaction.
+      const anchor = panelAnchor;
+      if (anchor && (event.target === anchor || anchor.contains?.(event.target)))
+        return;
+      dismiss();
     },
     true,
   );
