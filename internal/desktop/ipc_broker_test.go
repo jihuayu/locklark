@@ -197,7 +197,15 @@ func TestDesktopIPCBrokerUnlockLockAndCLIRun(t *testing.T) {
 		if a.session == nil {
 			t.Fatal("desktop did not re-unlock")
 		}
-		client.recvType(t, "unlocked")
+		// Lock revokes the existing browser consent, so re-unlock must not
+		// revive the old connection's capability. The extension has to send a
+		// fresh hello and pass native pairing review again.
+		client.send(t, map[string]any{"v": 1, "id": reqIDDesktop(3), "type": "hello"})
+		repaired := client.recvType(t, "paired")
+		capability, _ = repaired["capability"].(string)
+		if !desktopCapabilityOK(capability) || repaired["quick_fill"] != true {
+			t.Fatalf("re-pair after unlock: %#v", repaired)
+		}
 		rows, e := a.session.List("active")
 		if e != nil {
 			t.Fatal(e)
