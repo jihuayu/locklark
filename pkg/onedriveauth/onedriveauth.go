@@ -18,9 +18,14 @@
 //   - A successful callback writes the fixed success page and only then closes
 //     the listener, so the page reaches the browser before the port goes away.
 //     A cancellation or timeout closes the listener before Wait returns.
+//   - AuthorizationURL builds the public-client v2 /authorize URL for one run
+//     from the caller's client ID, tenant, explicit scopes and verifier, and
+//     the redirect URI and state read from that same Callback. It never
+//     contains a client secret, verifier or token, and the caller must not
+//     log it.
 //
-// Scope. This package only receives and validates the callback. It does not
-// build or open authorization URLs, perform token exchange or refresh, call
+// Scope. This package receives and validates the callback and builds the
+// authorization URL, but never opens it. It does not perform token exchange or refresh, call
 // Microsoft Graph, Opendal or any account, upload or share files, and makes no
 // account-capability claims. The authorization code is returned to the caller
 // as data for a later, separate token exchange; it is never logged by this
@@ -79,6 +84,19 @@ var (
 	// ErrTimeout reports that the context was cancelled or the wait expired
 	// before a valid callback arrived.
 	ErrTimeout = errors.New("onedrive auth: callback not received in time")
+	// ErrClientID reports an empty or malformed ClientID passed to
+	// AuthorizationURL.
+	ErrClientID = errors.New("onedrive auth: invalid client ID")
+	// ErrTenant reports an empty or malformed Tenant, or one that is unsafe
+	// as an authorization endpoint path segment.
+	ErrTenant = errors.New("onedrive auth: invalid tenant")
+	// ErrScope reports missing, too many, or malformed explicit Scopes.
+	ErrScope = errors.New("onedrive auth: invalid scope")
+	// ErrVerifier reports a verifier that is not well formed.
+	ErrVerifier = errors.New("onedrive auth: invalid PKCE verifier")
+	// ErrCallback reports a missing or unusable Callback passed to
+	// AuthorizationURL.
+	ErrCallback = errors.New("onedrive auth: callback unavailable")
 )
 
 // Start binds a fresh IPv4 loopback listener for one authorization request and
