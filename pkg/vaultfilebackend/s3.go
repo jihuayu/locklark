@@ -95,7 +95,10 @@ type S3Config struct {
 // Error mapping (Read). Read never writes: ErrUnknown here means only that
 // the bytes and revision were not reliably obtained, and the caller may retry
 // Read.
-//   - A missing key (any 404, conditional or not) is ErrNotFound.
+//   - A 404 whose error code is NoSuchKey, or a 404 carrying no service code
+//     (including the SDK's status-derived NotFound), is ErrNotFound.
+//   - A 404 whose code is NoSuchBucket or another explicit service code (for
+//     example NoSuchAccessPoint) means the configuration is wrong: ErrDenied.
 //   - Any other 4xx response (authorization, malformed request) is ErrDenied;
 //     a 5xx, 429, or any response whose status is neither 4xx nor 5xx is
 //     ErrUnknown.
@@ -441,7 +444,9 @@ func mapS3WriteError(err error) error {
 	return unknown(err)
 }
 
-// mapS3ReadError classifies a failed GetObject or body read.
+// mapS3ReadError classifies a failed GetObject or body read. It distinguishes
+// a missing key from a misconfigured bucket the same way mapS3WriteError does:
+// with s3ErrorCode, which reads the service's error code through the API error.
 func mapS3ReadError(ctx context.Context, err error) error {
 	if errors.Is(err, ErrCorrupt) {
 		return err
@@ -459,7 +464,15 @@ func mapS3ReadError(ctx context.Context, err error) error {
 		code := respErr.HTTPStatusCode()
 		switch {
 		case code == 404:
-			return classified(ErrNotFound, err)
+			// Only a missing key says the requested name has no version. A
+			// missing bucket, or another explicit 404 code (for example
+			// NoSuchAccessPoint), is a configuration error. A 404 without a
+			// service code, or the SDK's status-derived NotFound, is a bare
+			// 404 and means the key is absent.
+			if c := s3ErrorCode(err); c == "" || c == "NoSuchKey" || c == "NotFound" {
+				return classified(ErrNotFound, err)
+			}
+			return classified(ErrDenied, err)
 		case code >= 400 && code < 500:
 			return classified(ErrDenied, err)
 		}

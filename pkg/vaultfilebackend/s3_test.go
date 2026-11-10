@@ -1428,6 +1428,57 @@ func TestS3Replace404DistinguishesConfigErrors(t *testing.T) {
 	}
 }
 
+// TestS3Read404DistinguishesMissingBucket: only NoSuchKey, or a 404 without
+// an S3 code, means the requested name has no version; NoSuchBucket (and any
+// other explicit 404 code) is a configuration error, never ErrNotFound.
+func TestS3Read404DistinguishesConfigErrors(t *testing.T) {
+	cases := []struct {
+		name string
+		hook func(w http.ResponseWriter, r *http.Request) bool
+		want error
+	}{
+		{"no_such_key", func(w http.ResponseWriter, r *http.Request) bool {
+			s3ErrorResponse(w, 404, "NoSuchKey")
+			return true
+		}, ErrNotFound},
+		{"bare_404", func(w http.ResponseWriter, r *http.Request) bool {
+			w.WriteHeader(404)
+			return true
+		}, ErrNotFound},
+		{"no_such_bucket", func(w http.ResponseWriter, r *http.Request) bool {
+			s3ErrorResponse(w, 404, "NoSuchBucket")
+			return true
+		}, ErrDenied},
+		{"access_point_not_found", func(w http.ResponseWriter, r *http.Request) bool {
+			s3ErrorResponse(w, 404, "NoSuchAccessPoint")
+			return true
+		}, ErrDenied},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newS3Mock(t)
+			m.seed(testS3Prefix+"/vault.db", []byte("committed"))
+			b := newMockBackend(t, m)
+			m.setHook(tc.hook)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			_, err := b.Read(ctx, "vault.db")
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("read on 404 %s = %v, want %v", tc.name, err, tc.want)
+			}
+			if tc.want == ErrNotFound && errors.Is(err, ErrDenied) {
+				t.Fatalf("read on 404 %s = %v, must not also be ErrDenied", tc.name, err)
+			}
+			if tc.want == ErrDenied && errors.Is(err, ErrNotFound) {
+				t.Fatalf("read on 404 %s = %v, must not also be ErrNotFound", tc.name, err)
+			}
+			if reqs, puts := m.recorded(); len(reqs) != 1 || reqs[0] != "GET vault/vault.db" || len(puts) != 0 {
+				t.Fatalf("requests = %v, PUT headers = %d, want exactly one GET and no write", reqs, len(puts))
+			}
+		})
+	}
+}
+
 func TestS3MockUsesTLSServer(t *testing.T) {
 	// Guard: every test above talks to httptest.NewTLSServer, so the
 	// conditional headers travel inside a TLS session the SDK's transport
