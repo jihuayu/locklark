@@ -2,6 +2,8 @@ package personal
 
 import (
 	"bytes"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -56,6 +58,57 @@ func profileIntents(t *testing.T, s *Session) []Event {
 		}
 	}
 	return out
+}
+
+// auditPINLeak walks decoded audit JSON and reports a four-digit PIN in any
+// readable string. Opaque identifiers, digests and signatures are skipped so a
+// random "9999" inside them cannot fail the privacy check.
+func auditPINLeak(value any) bool {
+	switch v := value.(type) {
+	case string:
+		if opaqueAuditString(v) {
+			return false
+		}
+		return strings.Contains(v, "9999")
+	case []any:
+		for _, item := range v {
+			if auditPINLeak(item) {
+				return true
+			}
+		}
+	case map[string]any:
+		for key, item := range v {
+			if auditPINLeak(key) || auditPINLeak(item) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func opaqueAuditString(value string) bool {
+	if len(value) < 32 {
+		return false
+	}
+	if _, e := hex.DecodeString(value); e == nil {
+		return true
+	}
+	if _, e := base64.StdEncoding.DecodeString(value); e == nil && len(value) >= 44 {
+		return true
+	}
+	return false
+}
+
+func TestAuditPINLeakIgnoresOpaqueAuditValues(t *testing.T) {
+	if !auditPINLeak(map[string]any{"result": "pin=9999"}) {
+		t.Fatal("readable PIN leak was missed")
+	}
+	if auditPINLeak(map[string]any{"link": strings.Repeat("9", 64)}) {
+		t.Fatal("hex digest false positive")
+	}
+	if auditPINLeak(map[string]any{"signature": "9999" + strings.Repeat("A", 40)}) {
+		t.Fatal("base64 signature false positive")
+	}
 }
 
 func profileValues(c *BrowserProfileContent) map[string]string {
@@ -122,8 +175,21 @@ func TestBrowserProfileFillCardGrantIsAuditedAndOneUse(t *testing.T) {
 		t.Fatal("grant replayed")
 	}
 	raw, _ := json.Marshal(after)
-	if bytes.Contains(raw, []byte("4111111111111111")) || bytes.Contains(raw, []byte("Card Holder")) || bytes.Contains(raw, []byte("9999")) {
-		t.Fatal("audit leaked a private value")
+	if bytes.Contains(raw, []byte("4111111111111111")) {
+		t.Fatal("audit leaked the card number")
+	}
+	if bytes.Contains(raw, []byte("Card Holder")) {
+		t.Fatal("audit leaked the cardholder name")
+	}
+	// A four-digit PIN can occur by chance inside a random digest, session or
+	// signature. Those values are opaque and are not a disclosure; only a PIN
+	// in readable metadata is. Long secrets are still scanned everywhere.
+	var decoded any
+	if e := json.Unmarshal(raw, &decoded); e != nil {
+		t.Fatal(e)
+	}
+	if auditPINLeak(decoded) {
+		t.Fatal("audit leaked the card PIN")
 	}
 	if _, e := s.PrepareBrowserProfileFill(profileTarget(id, strings.Repeat("0", 64), "credit_card")); !errors.Is(e, ErrConflict) {
 		t.Fatalf("stale revision accepted: %v", e)
