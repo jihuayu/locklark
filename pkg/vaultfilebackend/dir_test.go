@@ -2201,53 +2201,73 @@ func TestDirOpenDirDoesNotReleaseHeldLock(t *testing.T) {
 // The lock timeout covers the OS lock wait of another process: a waiter
 // blocked by a live holder fails with a definite ErrConflict (never
 // ErrUnknown) and writes nothing.
-// A canceled caller must be reported as Denied even when the internal lock
-// wait budget is exhausted at the same time. Both branches of the in-process
-// wait are ready at once, so the old select could pick the timeout and report
-// ErrConflict; every attempt must be a context cancellation instead.
+// Caller cancellation must win over the in-process wait timeout, and each
+// mechanism is proven deterministically rather than by relying on which ready
+// case a select happens to pick.
 func TestDirInProcWaitCancellationWinsOverExpiredDeadline(t *testing.T) {
 	ctx := context.Background()
-	b := openAt(t, t.TempDir()).(*Dir)
-	if err := b.inProc.acquire(ctx, time.Time{}); err != nil {
-		t.Fatal(err)
-	}
-	defer b.inProc.release()
-
-	cctx, cancel := context.WithCancel(ctx)
-	cancel()
 	expired := time.Now().Add(-time.Minute)
-	// The select is random when both cases are ready, so repeat enough times
-	// to make a regression (some attempts returning ErrConflict) reliable.
-	const attempts = 500
-	for i := 0; i < attempts; i++ {
-		err := b.inProc.acquire(cctx, expired)
+
+	t.Run("already_canceled_precheck", func(t *testing.T) {
+		// Free semaphore: without the precheck the fast path would take it and
+		// return nil, so a canceled context must be reported before the try.
+		l := &inProcLock{sem: make(chan struct{}, 1)}
+		cctx, cancel := context.WithCancel(ctx)
+		cancel()
+		err := l.acquire(cctx, expired)
 		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("attempt %d: acquire = %v, want context.Canceled", i, err)
+			t.Fatalf("acquire with canceled ctx = %v, want context.Canceled", err)
 		}
-		werr := lockWaitError(err)
-		if !errors.Is(werr, ErrDenied) || errors.Is(werr, ErrConflict) || errors.Is(werr, ErrUnknown) || !errors.Is(werr, context.Canceled) {
-			t.Fatalf("attempt %d: lockWaitError = %v, want ErrDenied wrapping context.Canceled", i, werr)
+		if len(l.sem) != 0 {
+			t.Fatal("acquire took the semaphore for a canceled context")
 		}
-	}
-	// A live caller with an exhausted budget still gets the definite conflict.
-	if err := b.inProc.acquire(ctx, expired); !errors.Is(err, errLockTimeout) {
-		t.Fatalf("live ctx with expired deadline = %v, want errLockTimeout", err)
-	}
+		if werr := lockWaitError(err); !errors.Is(werr, ErrDenied) || errors.Is(werr, ErrConflict) || errors.Is(werr, ErrUnknown) {
+			t.Fatalf("lockWaitError = %v, want ErrDenied, not Conflict or Unknown", werr)
+		}
+	})
+
+	t.Run("timeout_recheck", func(t *testing.T) {
+		// Semaphore held, so the send is unavailable; context is live for the
+		// precheck (call 1) and only Done is the deadline timer, which is
+		// already expired. The timeout branch's recheck (call 2) sees the
+		// cancellation. No random select is involved: the only ready wait case
+		// is the expired timer.
+		l := &inProcLock{sem: make(chan struct{}, 1)}
+		l.sem <- struct{}{}
+		cctx := &ctxCancelAtN{limit: 1, done: make(chan struct{}), cause: context.Canceled}
+		err := l.acquire(cctx, expired)
+		if cctx.calls != 2 {
+			t.Fatalf("context Err called %d times, want 2 (precheck, timeout recheck)", cctx.calls)
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("acquire with expired deadline and canceled ctx = %v, want context.Canceled", err)
+		}
+		if len(l.sem) != 1 {
+			t.Fatal("acquire took a semaphore that was not available")
+		}
+		if werr := lockWaitError(err); !errors.Is(werr, ErrDenied) || errors.Is(werr, ErrConflict) || errors.Is(werr, ErrUnknown) || !errors.Is(werr, context.Canceled) {
+			t.Fatalf("lockWaitError = %v, want ErrDenied wrapping context.Canceled", werr)
+		}
+	})
+
+	t.Run("live_context_expired_is_timeout", func(t *testing.T) {
+		l := &inProcLock{sem: make(chan struct{}, 1)}
+		l.sem <- struct{}{}
+		if err := l.acquire(ctx, expired); !errors.Is(err, errLockTimeout) {
+			t.Fatalf("live ctx with expired deadline = %v, want errLockTimeout", err)
+		}
+		if werr := lockWaitError(errLockTimeout); !errors.Is(werr, ErrConflict) || errors.Is(werr, ErrDenied) {
+			t.Fatalf("lockWaitError(errLockTimeout) = %v, want ErrConflict", werr)
+		}
+	})
 }
 
-// The OS-lock wait must also prefer caller cancellation over the internal
-// deadline. A cancellation trigger is armed on the descriptor a guarded write
-// is about to try in pollLock, so the context is canceled right after the check
-// at the top of the first iteration. The internal wait began before the child
-// child in startDirHelper, so the child cannot take the lock in the window
-// between this process's attempt and its decision, and the deadline branch's
-// recheck is what reports the cancellation. A separate process then confirms
 // pollLock must prefer caller cancellation over the internal deadline. A real
-// child process holds the lock, so the parent's attempt is busy. The context is
-// live on pollLock's first Err call at the top of the loop and canceled on its
-// second, which is the deadline-branch recheck after the failed attempt; with
-// an already-expired deadline that recheck is the only place the cancellation
-// can be seen before the wait would continue.
+// child process holds the lock, so the attempt is busy. The context is live on
+// pollLock's first Err call (loop top) and canceled on its second (the
+// deadline-branch recheck after the failed attempt); with an already-expired
+// deadline that recheck is the only place the cancellation is seen before the
+// wait would continue.
 func TestDirOSLockWaitCancellationWinsOverExpiredDeadline(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
