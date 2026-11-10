@@ -283,6 +283,14 @@ func RunBundle(ctx context.Context, path, pw string, key []byte, targets []Bundl
 	}, os.RemoveAll)
 }
 
+func cloneRunBundleRequest(request RunBundleRequest) RunBundleRequest {
+	request.Args = append([]string(nil), request.Args...)
+	request.HelperPath = append([]string(nil), request.HelperPath...)
+	request.Passthrough = cloneStringMap(request.Passthrough)
+	request.Spec = cliprofile.CloneSpec(request.Spec)
+	return request
+}
+
 func cloneStringMap(values map[string]string) map[string]string {
 	if values == nil {
 		return nil
@@ -355,6 +363,80 @@ func runBundle(ctx context.Context, targets []BundleTarget, request RunBundleReq
 		return RunReceipt{}, ErrRunResult
 	}
 	return RunReceipt{Status: "process-exited", Session: r.session, Intent: r.intent, TargetDigest: r.destinationDigest, ExitCode: code}, nil
+}
+
+// RunBundlePreparationStatus is the explicit lifecycle state of a prepared
+// brokered run. "intent-recorded" means the session committed the same signed
+// item.run.bundle binding RunBundle would commit before rendering credentials.
+const RunBundlePreparationStatus = "intent-recorded"
+
+// RunBundlePreparationReceipt is the non-secret metadata returned with a
+// prepared run. It carries no program, directory, helper or credential value.
+type RunBundlePreparationReceipt struct {
+	Status       string `json:"status"`
+	Session      string `json:"session"`
+	Intent       string `json:"intent"`
+	TargetDigest string `json:"target_digest"`
+}
+
+// cloneBundleTargets deep-owns caller target data before any validation or
+// transaction so a concurrent caller mutation cannot change what was signed.
+func cloneBundleTargets(targets []BundleTarget) []BundleTarget {
+	return append([]BundleTarget(nil), targets...)
+}
+
+// PrepareBrokeredRun validates the exact request, targets and private temporary
+// root, then commits the RunBundle intent through the session transaction so
+// session lock/epoch and audit logic apply. It returns the all-or-nothing slot
+// values with the receipt; it never starts a child or creates bundle files. A
+// cancelled context clears any extracted values and commits no intent.
+func (s *Session) PrepareBrokeredRun(ctx context.Context, targets []BundleTarget, request RunBundleRequest, root string) (receipt RunBundlePreparationReceipt, values map[string][]byte, err error) {
+	if ctx == nil || s == nil {
+		return RunBundlePreparationReceipt{}, nil, ErrRunTarget
+	}
+	if ctx.Err() != nil {
+		return RunBundlePreparationReceipt{}, nil, ErrRunCancelled
+	}
+	targets = cloneBundleTargets(targets)
+	request = cloneRunBundleRequest(request)
+	if (&runBundleStoreRequest{targets: targets, request: request, root: root}).validate() != nil {
+		return RunBundlePreparationReceipt{}, nil, ErrRunTarget
+	}
+	if ctx.Err() != nil {
+		return RunBundlePreparationReceipt{}, nil, ErrRunCancelled
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, e := s.execute(runBundleAction, vault.Item{}, nil, commandOption{runBundle: &runBundleStoreRequest{targets: targets, request: request, root: root}})
+	defer func() {
+		if err != nil {
+			// Never hand back a partial set, and never leave extracted bytes
+			// in scope after a failed or cancelled preparation.
+			clearBundleValues(r.values)
+			clearBundleValues(values)
+			values, receipt = nil, RunBundlePreparationReceipt{}
+		}
+	}()
+	// Recheck cancellation after the transaction: the intent may already be
+	// committed, but no value may cross the boundary.
+	if ctx.Err() != nil {
+		return RunBundlePreparationReceipt{}, nil, ErrRunCancelled
+	}
+	if e != nil {
+		return RunBundlePreparationReceipt{}, nil, e
+	}
+	if r.session == "" || r.intent == "" || r.destinationDigest == "" || len(r.values) != len(targets) {
+		return RunBundlePreparationReceipt{}, nil, ErrRunCredential
+	}
+	values = r.values
+	r.values = nil
+	return RunBundlePreparationReceipt{
+		Status:       RunBundlePreparationStatus,
+		Session:      r.session,
+		Intent:       r.intent,
+		TargetDigest: r.destinationDigest,
+	}, values, nil
 }
 
 func makeBundleDirs(root string, extra []string) error {

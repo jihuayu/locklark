@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -1113,4 +1114,190 @@ func TestRunCLIBundleCancellationTimeoutAndCleanup(t *testing.T) {
 }
 func TestRunBundleCancellationTimeoutAndCleanup(t *testing.T) {
 	testBundleCancellationTimeoutAndCleanup(t)
+}
+
+// ---------------------------------------------------------------------------
+// Session-backed brokered CLI run preparation
+// ---------------------------------------------------------------------------
+
+// brokeredRunFixture unlocks an in-memory temp vault and captures the existing
+// journal so tests can prove preparation records exactly one intent.
+func brokeredRunFixture(t *testing.T) (*Session, *bundleTestFixture) {
+	t.Helper()
+	f := newBundleTestFixture(t)
+	s, err := UnlockSession(f.path, []byte("fixture"), f.key, time.Minute)
+	if err != nil {
+		t.Fatal("unlock session", err)
+	}
+	t.Cleanup(s.Lock)
+	return s, f
+}
+
+// brokeredRunRoot returns a private path below a 0700 parent that does not
+// exist yet, so tests can prove preparation never creates the root.
+func brokeredRunRoot(t *testing.T) string {
+	t.Helper()
+	parent, err := testBundleTempCreator(t)()
+	if err != nil {
+		t.Fatal("temporary parent", err)
+	}
+	return filepath.Join(parent, "not-created")
+}
+
+func brokeredRunIntents(t *testing.T, s *Session) []Event {
+	t.Helper()
+	events, err := s.Audit()
+	if err != nil {
+		t.Fatal("audit", err)
+	}
+	var intents []Event
+	for _, event := range events {
+		if event.Action == runBundleAction && event.Result == "intent" {
+			intents = append(intents, event)
+		}
+	}
+	return intents
+}
+
+func sortedKeys(values map[string][]byte) []string {
+	keys := make([]string, 0, len(values))
+	for name := range values {
+		keys = append(keys, name)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func assertNoBrokeredSecrets(t *testing.T, label string, raw []byte, paths ...string) {
+	t.Helper()
+	needles := []string{
+		bundleTestPassword, bundleTestUsername, "clusters: []",
+		`"program"`, `"directory"`, `"args"`, `"helper_path"`, `"passthrough"`, `"token_env_name"`,
+	}
+	for _, path := range paths {
+		needles = append(needles, path, filepath.Base(path))
+	}
+	for _, needle := range needles {
+		if strings.Contains(string(raw), needle) {
+			t.Fatalf("%s leaked %q: %s", label, needle, raw)
+		}
+	}
+}
+
+func TestPrepareBrokeredRunReturnsSlotValuesAfterIntent(t *testing.T) {
+	s, f := brokeredRunFixture(t)
+	request := bundleTestRequest(t, f)
+	request.Program = filepath.Join(t.TempDir(), "synthetic-program")
+	root := brokeredRunRoot(t)
+
+	receipt, values, err := s.PrepareBrokeredRun(context.Background(), bundleTestTargets(f), request, root)
+	defer clearBundleValues(values)
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if receipt.Status != RunBundlePreparationStatus || !digestOK(receipt.Intent) || !digestOK(receipt.TargetDigest) || receipt.Session == "" {
+		t.Fatalf("receipt: %+v", receipt)
+	}
+	if !reflect.DeepEqual(values, bundleTestValues()) {
+		t.Fatalf("values: %#v", values)
+	}
+
+	intents := brokeredRunIntents(t, s)
+	if len(intents) != 1 {
+		t.Fatalf("intents: %#v", intents)
+	}
+	intent := intents[0]
+	if intent.Item != f.loginID || intent.BaseRevision != f.loginRevision || intent.Link != receipt.TargetDigest || intent.Session != receipt.Session {
+		t.Fatalf("intent metadata: %+v receipt: %+v", intent, receipt)
+	}
+
+	// Preparation never starts a process and never creates bundle files.
+	if _, err = os.Stat(root); !os.IsNotExist(err) {
+		t.Fatal("preparation created the temporary root")
+	}
+	if _, err = os.Stat(request.Program); !os.IsNotExist(err) {
+		t.Fatal("preparation created the program path")
+	}
+	if s.Unlocked() != true {
+		t.Fatal("preparation locked the session")
+	}
+
+	// The receipt binds the exact target set: the slot keys are the targets'
+	// slots, and the commit is keyed to the first target revision.
+	if slots := strings.Join(sortedKeys(values), ","); slots != "kubeconfig,password,token,username" {
+		t.Fatalf("slot set: %s", slots)
+	}
+
+	rawReceipt, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertNoBrokeredSecrets(t, "receipt", rawReceipt, request.Program, request.Directory, root)
+	events, err := s.Audit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawAudit, err := json.Marshal(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertNoBrokeredSecrets(t, "audit", rawAudit, request.Program, request.Directory, root)
+}
+
+func TestPrepareBrokeredRunStaleAndMissingTargets(t *testing.T) {
+	s, f := brokeredRunFixture(t)
+	request := bundleTestRequest(t, f)
+	request.Program = filepath.Join(t.TempDir(), "synthetic-program")
+	root := brokeredRunRoot(t)
+	before := len(brokeredRunIntents(t, s))
+
+	stale := bundleTestTargets(f)
+	stale[1].Revision = strings.Repeat("a", 64)
+	if receipt, values, err := s.PrepareBrokeredRun(context.Background(), stale, request, root); !errors.Is(err, ErrConflict) || values != nil || receipt != (RunBundlePreparationReceipt{}) {
+		t.Fatalf("stale: %v %#v %+v", err, values, receipt)
+	}
+
+	missing := bundleTestTargets(f)
+	missing[3].ID = strings.Repeat("b", 32)
+	if receipt, values, err := s.PrepareBrokeredRun(context.Background(), missing, request, root); !errors.Is(err, ErrNotFound) || values != nil || receipt != (RunBundlePreparationReceipt{}) {
+		t.Fatalf("missing: %v %#v %+v", err, values, receipt)
+	}
+
+	short := bundleTestTargets(f)
+	short = short[:2] // required "password" and "kubeconfig" profile slots missing
+	if receipt, values, err := s.PrepareBrokeredRun(context.Background(), short, request, root); !errors.Is(err, ErrRunTarget) || values != nil || receipt != (RunBundlePreparationReceipt{}) {
+		t.Fatalf("missing slot: %v %#v %+v", err, values, receipt)
+	}
+
+	if _, err := s.SetState(f.loginID, f.loginRevision, "item.trash"); err != nil {
+		t.Fatal("trash", err)
+	}
+	f.refresh(t)
+	if receipt, values, err := s.PrepareBrokeredRun(context.Background(), bundleTestTargets(f), request, root); !errors.Is(err, ErrTrashed) || values != nil || receipt != (RunBundlePreparationReceipt{}) {
+		t.Fatalf("trashed: %v %#v %+v", err, values, receipt)
+	}
+
+	if after := len(brokeredRunIntents(t, s)); after != before {
+		t.Fatalf("refused preparations recorded intents: %d -> %d", before, after)
+	}
+}
+
+func TestPrepareBrokeredRunCancelledContext(t *testing.T) {
+	s, f := brokeredRunFixture(t)
+	request := bundleTestRequest(t, f)
+	request.Program = filepath.Join(t.TempDir(), "synthetic-program")
+	root := brokeredRunRoot(t)
+	before := len(brokeredRunIntents(t, s))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if receipt, values, err := s.PrepareBrokeredRun(ctx, bundleTestTargets(f), request, root); !errors.Is(err, ErrRunCancelled) || values != nil || receipt != (RunBundlePreparationReceipt{}) {
+		t.Fatalf("cancelled: %v %#v %+v", err, values, receipt)
+	}
+	if after := len(brokeredRunIntents(t, s)); after != before {
+		t.Fatalf("cancelled preparation recorded an intent: %d -> %d", before, after)
+	}
+	if !s.Unlocked() {
+		t.Fatal("cancelled preparation touched the session")
+	}
 }
