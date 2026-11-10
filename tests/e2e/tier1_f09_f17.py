@@ -49,6 +49,7 @@ from .support import (
     require_hex64,
     reveal_login,
     shell_function_body,
+    source_text,
 )
 
 
@@ -283,9 +284,20 @@ def t1_f11_04(ctx):
     assert counts["pass"] >= 1, counts
 
 
-@e2e_test("T1_F11_05", 1, ["F11"], "Same-site iframe fill validates top-level and frame origins")
+@e2e_test(
+    "T1_F11_05",
+    1,
+    ["F11"],
+    "Same-site boundary component contract: same-origin subframe fill and sameSite evaluation",
+    coverage_kind="component_contract",
+)
 def t1_f11_05(ctx):
-    # Supported half, asserted for real: same-origin subframe fill validates the
+    # Component checks only.  Both Node tests call the shipped extension code
+    # directly; neither loads a page, a subframe or a browser runtime, so no
+    # page/subframe/browser injection journey (including sibling-domain iframe
+    # fill) is covered or end-to-end verified here.
+    #
+    # Same-origin half: the shipped identity fill entrypoint validates the
     # top-level and frame origins.
     counts = node_test_pattern(
         ctx,
@@ -294,23 +306,39 @@ def t1_f11_05(ctx):
         min_passed=1,
     )
     assert counts["pass"] >= 1, counts
-    # Unsupported half: same-site (sibling-subdomain) cross-origin frame fill is
-    # genuinely not implemented.  Gate on the real artifact instead of claiming
-    # the whole same-origin path is missing.
+    # Same-site half: the behavioural evidence is the direct sameSite test in
+    # M3_FILL.  The gate only decides whether a same-site helper is shipped at
+    # all: the current core.js sameSite/siteKey exports, or an actual psl.js
+    # registrable-domain helper when one exists.  It is not full PSL coverage -
+    # siteKey resolves suffixes from the finite MULTI_LABEL_SUFFIXES list.
     text = extension_or_source_text(ctx, "core.js") + extension_or_source_text(
         ctx, "content.js"
     )
-    same_site = any(
-        token in text for token in ("registrableDomain", "eTLD", "sameSiteOrigin")
-    )
+    has_core_same_site = "function sameSite" in text and "function siteKey" in text
+    psl = source_text(ctx, "browser-extension/psl.js")
+    has_psl = re.search(
+        r"\bfunction\s+(?:registrableDomain|getDomain)\b|\b(?:registrableDomain|getDomain)\s*[:=]",
+        psl,
+    ) is not None
     gate(
         ctx,
         "F11",
-        same_site,
-        "same-site cross-origin iframe fill is not supported by the extension "
-        "(same-origin subframe fill is implemented and covered by the M3 "
-        "component contract); end-to-end same-site validation remains blocked",
+        has_core_same_site or has_psl,
+        "same-site boundary component is absent: the extension ships neither the "
+        "core.js sameSite/siteKey helper nor a psl.js registrable-domain helper",
     )
+    assert has_core_same_site, (
+        "a psl.js registrable-domain helper was found, but the direct sameSite "
+        "component test in the M3 suite covers the core.js sameSite/siteKey helper; "
+        "add a behavioral test for the psl.js helper before claiming this half"
+    )
+    same_site_counts = node_test_pattern(
+        ctx,
+        M3_FILL,
+        r"M3 sameSite treats sibling subdomains as one site",
+        min_passed=1,
+    )
+    assert same_site_counts["pass"] >= 1, same_site_counts
 
 
 # ---------------------------------------------------------------------------
