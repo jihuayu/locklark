@@ -552,6 +552,19 @@ test("Enter in the save banner commits the staged save", async () => {
   assert.equal(commit.mode, "new");
 });
 
+test("clicking outside the panel dismisses it", async () => {
+  const h = makeHarness();
+  h.image(OTPAUTH);
+  await h.runTimers();
+  assert.ok(h.panel(), "panel rendered");
+  h.document.dispatchEvent({
+    type: "click",
+    target: h.document.body,
+    isTrusted: true,
+  });
+  assert.equal(h.panel(), null);
+});
+
 test("panel keyboard cycles actions and Escape closes it", async () => {
   const h = makeHarness();
   h.image(OTPAUTH);

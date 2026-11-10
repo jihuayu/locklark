@@ -2021,6 +2021,16 @@
   }
 
   // Reposition/revalidate the open panel without ever exposing page values.
+  // Clicking outside the open panel closes it. Clicks inside a closed shadow
+  // root are retargeted to the host element, so they never dismiss the panel
+  // before the button's own click handler runs.
+  document.addEventListener(
+    "click",
+    (event) => {
+      if (host && event.target !== host) dismiss();
+    },
+    true,
+  );
   document.addEventListener("scroll", setPanelPosition, {
     capture: true,
     passive: true,

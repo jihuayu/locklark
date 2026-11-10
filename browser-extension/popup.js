@@ -1166,6 +1166,8 @@
       const row = document.createElement("button");
       row.type = "button";
       row.className = "vault-item";
+      // Roving tabindex: the list is one tab stop; arrows move inside it.
+      row.tabIndex = -1;
       row.dataset.itemId = item.id;
       row.dataset.itemRevision = item.revision;
       row.dataset.category = core?.nativeCategory(item.category) || "login";
@@ -1220,10 +1222,13 @@
       list.append(row);
     }
     list.scrollTop = scrollTop;
-    if (focusedID) {
-      const retained = [...list.children].find(row => row.dataset.itemId === focusedID);
-      retained?.focus?.({ preventScroll: true });
-    }
+    const rows = [...list.children];
+    const activeRow = focusedID
+      ? rows.find((row) => row.dataset.itemId === focusedID)
+      : null;
+    if (activeRow) activeRow.tabIndex = 0;
+    else if (rows[0]) rows[0].tabIndex = 0;
+    if (activeRow) activeRow.focus?.({ preventScroll: true });
     const passkeysUnsupported =
       activeFilter === "passkeys" &&
       (lastState?.passkeyManagementSupported === false ||
@@ -3711,6 +3716,10 @@
       checkoutCancel: q("#checkout-cancel"),
       checkoutStatus: q("#checkout-status"),
     };
+    els.vaultList?.addEventListener("focusin", (event) => {
+      const rows = [...(els.vaultList.querySelectorAll?.(".vault-item") || [])];
+      for (const row of rows) row.tabIndex = row === event.target ? 0 : -1;
+    });
     els.vaultList?.addEventListener("keydown", (event) => {
       const rows = [...(els.vaultList.querySelectorAll?.(".vault-item") || [])];
       const at = rows.indexOf(event.target);

@@ -510,4 +510,6 @@ test("popup completes keyboard, focus and destructive-confirmation interactions"
   assert.match(popupJS, /确认移入回收站/);
   assert.match(popupJS, /vaultList\?\.addEventListener\("keydown"/);
   assert.match(popupJS, /event\.key === "\/"/);
+  assert.match(popupJS, /row\.tabIndex = -1/);
+  assert.match(popupJS, /focusin/);
 });
