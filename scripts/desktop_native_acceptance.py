@@ -51,7 +51,9 @@ class Acceptance:
         require(bool(os.environ.get("DISPLAY")))
         self.env = {**os.environ, "GOTOOLCHAIN": "go1.27.3"}
         self.go = os.environ.get("LOCKLARK_GO", "go")
-        self.fixture_binary = self.state / "fixture-observer"
+        fixture = os.environ.get("LOCKLARK_DESKTOP_FIXTURE")
+        self.fixture_prebuilt = bool(fixture)
+        self.fixture_binary = pathlib.Path(fixture).resolve() if fixture else self.state / "fixture-observer"
         self.fixture_path = self.state / "vault" / "fixture.json"
         self.values, self.codes = set(), set()
         self.started = time.time()
@@ -413,8 +415,14 @@ class Acceptance:
                     {"click_label":"Secret Key"}, {"text":self.fixture["Secret"]}, {"click_label":"解锁"},
                     {"wait_label":"新建登录"}])
 
-    def setup(self):
+    def build_fixture(self):
+        if self.fixture_prebuilt:
+            require(self.fixture_binary.is_file() and os.access(self.fixture_binary, os.X_OK))
+            return
         self.command([self.go, "build", "-o", str(self.fixture_binary), "./scripts/desktop_acceptance_fixture"])
+
+    def setup(self):
+        self.build_fixture()
         self.command([str(self.fixture_binary), "-out", str(self.state / "vault")])
         self.fixture = json.loads(self.fixture_path.read_bytes())
         self.values.update(self.fixture[key] for key in ("Password", "Secret", "Username", "Value", "OTPSeed", "OTPConfig", "ProviderValue", "ProviderCanary"))

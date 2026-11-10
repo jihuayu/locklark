@@ -1,4 +1,9 @@
 #requires -Version 7.0
+param(
+    # Optional prebuilt CLI. When omitted this script keeps its historical
+    # behavior and builds one with go build.
+    [string]$Cli
+)
 # Windows CLI acceptance. Only synthetic data; leaves a fresh temporary directory for inspection.
 $ErrorActionPreference = "Stop"
 $repo = Split-Path $PSScriptRoot -Parent
@@ -6,9 +11,14 @@ Push-Location $repo
 try {
     $work = Join-Path ([IO.Path]::GetTempPath()) ("locklark-check-" + [Guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Path $work | Out-Null
-    $exe = Join-Path $work "locklark.exe"
-    go build -trimpath -o $exe ./cmd/locklark
-    if ($LASTEXITCODE -ne 0) { throw "Go build failed" }
+    if ($Cli) {
+        if (-not (Test-Path -LiteralPath $Cli -PathType Leaf)) { throw "CLI executable unavailable" }
+        $exe = (Resolve-Path -LiteralPath $Cli).Path
+    } else {
+        $exe = Join-Path $work "locklark.exe"
+        go build -trimpath -o $exe ./cmd/locklark
+        if ($LASTEXITCODE -ne 0) { throw "Go build failed" }
+    }
     function Invoke-Ok([string[]]$argv) {
         $output = & $exe @argv
         if ($LASTEXITCODE -ne 0) { throw "CLI failed: $($argv[0])" }

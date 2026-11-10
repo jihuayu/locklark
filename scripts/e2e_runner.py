@@ -37,6 +37,7 @@ from tests.e2e.harness import (  # noqa: E402  (path setup must run first)
     SECRET_KEY_RE,
     VALID_FEATURES,
     VALID_TIERS,
+    _go_build_targets,
     ensure_binaries_built,
     ensure_vm_temp_root,
     get_registered_tests,
@@ -621,6 +622,31 @@ def _run_self_test(bin_dir: Path) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _select_bin_dir(
+    raw: str | None,
+    skip_build: bool,
+    parser: argparse.ArgumentParser,
+) -> Path | None:
+    """Resolve an explicit binary directory without silently rebuilding it."""
+
+    if raw is None:
+        return None
+    bin_dir = Path(raw).expanduser().resolve()
+    if not skip_build:
+        return bin_dir
+    missing = [
+        name
+        for name, _ in _go_build_targets(REPO_ROOT)
+        if not (bin_dir / name).is_file() or not os.access(bin_dir / name, os.X_OK)
+    ]
+    if missing:
+        parser.error(
+            "--skip-build requires every product executable in --bin-dir; "
+            "missing: " + ", ".join(sorted(missing))
+        )
+    return bin_dir
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="e2e_runner.py",
@@ -666,9 +692,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="exit 1 when any test fails or is PENDING_FEATURE",
     )
     parser.add_argument(
+        "--bin-dir",
+        default=None,
+        metavar="DIR",
+        help=(
+            "explicit directory containing or receiving the product binaries; "
+            "with --skip-build, fail instead of rebuilding when any are missing"
+        ),
+    )
+    parser.add_argument(
         "--skip-build",
         action="store_true",
-        help="reuse cached binaries in $HOME/.cache/lltmp/e2e-bin when present",
+        help=(
+            "reuse prebuilt binaries instead of invoking go build; "
+            "with --bin-dir, every required executable must already exist"
+        ),
     )
     parser.add_argument(
         "--workers",
@@ -691,11 +729,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.workers < 1:
         parser.error("--workers must be a positive integer")
     all_features, feature_filter = _parse_feature_filter(parser, args.feature)
+    bin_dir = _select_bin_dir(args.bin_dir, args.skip_build, parser)
 
     if args.self_test:
         try:
             bin_dir = ensure_binaries_built(
-                REPO_ROOT, skip_build=args.skip_build
+                REPO_ROOT, bin_dir=bin_dir, skip_build=args.skip_build
             )
         except Exception as exc:  # noqa: BLE001 - actionable build failure
             print(f"e2e_runner: cannot build binaries: {exc}", file=sys.stderr)
@@ -721,12 +760,15 @@ def main(argv: list[str] | None = None) -> int:
 
     start_all = time.monotonic()
     if specs:
-        bin_dir = ensure_binaries_built(REPO_ROOT, skip_build=args.skip_build)
+        bin_dir = ensure_binaries_built(
+            REPO_ROOT, bin_dir=bin_dir, skip_build=args.skip_build
+        )
     else:
         # No selected test can use a binary; keep the progressive smoke run
         # quick and avoid requiring a Go toolchain when no suite modules exist.
         print("No E2E tests matched the selected filters.", file=sys.stderr)
-        bin_dir = ensure_vm_temp_root() / "e2e-bin"
+        if bin_dir is None:
+            bin_dir = ensure_vm_temp_root() / "e2e-bin"
 
     report = run_tests(specs, bin_dir, start_all)
     report["summary"]["strict"] = bool(args.strict)

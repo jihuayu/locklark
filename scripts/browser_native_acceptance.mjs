@@ -37,10 +37,15 @@ const { chromium } = process.env.LOCKLARK_TEST_PLAYWRIGHT
   : require("playwright");
 const go = process.env.LOCKLARK_GO || "go";
 const host = process.env.LOCKLARK_BROWSER_HOST;
+const register = process.env.LOCKLARK_BROWSER_REGISTER
+  ? resolve(process.env.LOCKLARK_BROWSER_REGISTER)
+  : null;
 const browserName = process.env.LOCKLARK_TEST_BROWSER === "edge" ? "edge" : "chromium";
 const browserExecutable = process.env.LOCKLARK_TEST_BROWSER_EXECUTABLE;
 if (browserName === "edge")
   assert(browserExecutable && browserExecutable.startsWith("/"), "Edge requires an explicit absolute executable path");
+if (register)
+  assert(existsSync(register), "LOCKLARK_BROWSER_REGISTER must name a built executable");
 assert(
   host && process.env.DISPLAY,
   "A built native host and real X display are required",
@@ -188,18 +193,17 @@ try {
   privacyValues = fixtureCanaries(fixture);
   const profile = join(state, "profile");
   mkdirSync(join(profile, "NativeMessagingHosts"), { recursive: true });
+  const registerArgs = [
+    "--browser",
+    browserName === "edge" ? "edge" : "chrome",
+    "--host",
+    resolve(host),
+    "--output",
+    join(profile, "NativeMessagingHosts/org.locklark.browser.json"),
+  ];
   execFileSync(
-    go,
-    [
-      "run",
-      "./cmd/locklark-browser-register",
-      "--browser",
-      browserName === "edge" ? "edge" : "chrome",
-      "--host",
-      resolve(host),
-      "--output",
-      join(profile, "NativeMessagingHosts/org.locklark.browser.json"),
-    ],
+    register || go,
+    register ? registerArgs : ["run", "./cmd/locklark-browser-register", ...registerArgs],
     { cwd: root, env, stdio: "inherit" },
   );
   execFileSync(process.execPath, ["browser-extension/build.js", "chromium"], {
