@@ -164,14 +164,14 @@ class PickerObservationTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 native.wait_picker_closed({"observation_deadline": time.monotonic() + 1})
 
-    def test_normal_confirm_follows_exact_path_one_open_click_and_real_modal_absence(self):
-        self.check_selection(path_matches=1, closed=True, expected=["type-path", "verify-path", "open-click", "x11-absence", "confirm", "imported"])
+    def test_normal_confirm_follows_exact_path_one_return_submission_and_real_modal_absence(self):
+        self.check_selection(path_matches=1, closed=True, expected=["type-path", "verify-path", "return-submit", "x11-absence", "confirm", "imported"])
 
     def test_mismatched_path_never_submits_or_confirms(self):
         self.check_selection(path_matches=0, closed=True, expected=["type-path", "verify-path"], refuses=True)
 
-    def test_remaining_modal_never_confirms_or_repeats_open_click(self):
-        self.check_selection(path_matches=1, closed=False, expected=["type-path", "verify-path", "open-click", "x11-absence"], refuses=True)
+    def test_remaining_modal_never_confirms_or_repeats_return_submission(self):
+        self.check_selection(path_matches=1, closed=False, expected=["type-path", "verify-path", "return-submit", "x11-absence"], refuses=True)
 
     def check_selection(self, path_matches, closed, expected, refuses=False):
         with tempfile.TemporaryDirectory() as directory:
@@ -186,8 +186,8 @@ class PickerObservationTests(unittest.TestCase):
                     self.assertGreater(options["observation_deadline"], time.monotonic())
                     self.assertLessEqual(options["timeout"], 10)
                     return {"absent": closed}
-                if actions == [{"click_label": "Open"}]:
-                    trace.append("open-click")
+                if actions == [{"key": "Return"}]:
+                    trace.append("return-submit")
                 elif actions == [{"click_label": acceptance.LABELS["import-confirm"]}]:
                     trace.append("confirm")
                 elif actions == [{"wait_label": acceptance.LABELS["imported"]}]:
@@ -202,13 +202,15 @@ class PickerObservationTests(unittest.TestCase):
             else:
                 runner.complete_import_selection(runner.root / "fixture-key")
             self.assertEqual(trace, expected)
-            submitted = False
+            submissions = 0
             for call in runner.native.call_args_list:
-                if call.args == ([{"click_label": "Open"}],):
-                    submitted = True
-                self.assertNotEqual(call.args, ([{"key": "Return"}],))
-                if submitted:
+                self.assertNotEqual(call.args, ([{"click_label": "Open"}],))
+                if call.args == ([{"key": "Return"}],):
+                    submissions += 1
+                    self.assertIsNone(call.kwargs.get("observe"))
+                if submissions:
                     self.assertNotEqual(call.kwargs.get("observe"), "picker")
+            self.assertEqual(submissions, 1 if "return-submit" in expected else 0)
 
     def test_fixed_a11y_refusal_classification_retains_digit(self):
         with tempfile.TemporaryDirectory() as directory:
