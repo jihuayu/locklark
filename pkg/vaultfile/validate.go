@@ -18,50 +18,52 @@ import (
 //
 // An unsigned builder draft is not a wire file and always fails here. It
 // exists only in memory for preimage construction and is checked by the
-// private validateDraft; ParseFile, EncodeFile and FileDigest all require a
-// sealed file through this function. Validation performs no cryptographic
+// private validateDraft; ParseFile, EncodeFile and FileDigest only ever
+// accept a sealed file. Validation performs no cryptographic
 // verification: signatures and wrapped keys are only checked for shape and
 // consistency.
 func ValidateFile(f *File) error {
-	if err := validateStructure(f); err != nil {
+	current, err := validateStructure(f)
+	if err != nil {
 		return err
 	}
-	return validateSealed(f)
+	return validateSealed(f, current)
 }
 
 // validateStructure checks every rule of ValidateFile except that f is sealed.
-// A sealed file passes it too. It never accepts a draft as a wire file on its
-// own: only the private draft path calls it without validateSealed.
-func validateStructure(f *File) error {
+// It returns the current policy: the one proof whose policy_seq is the header
+// policy_seq, which every role and slot check binds to. Proof order is not a
+// rule, so proofs need not be latest-first and the current one may be anywhere.
+func validateStructure(f *File) (*Policy, error) {
 	if f == nil {
-		return Err("", CodeInvalidValue)
+		return nil, Err("", CodeInvalidValue)
 	}
 	if f.Format != Format {
-		return Err("", CodeInvalidValue)
+		return nil, Err("", CodeInvalidValue)
 	}
 	if f.Version != Version {
-		return Err("", CodeInvalidValue)
+		return nil, Err("", CodeInvalidValue)
 	}
 	h := &f.Header
 	if err := ValidateHeader(h); err != nil {
-		return err
+		return nil, err
 	}
 	if f.ContentEncoding != ContentEncoding {
-		return Err("", CodeInvalidValue)
+		return nil, Err("", CodeInvalidValue)
 	}
 	if f.KDBXCiphertext == nil || len(f.KDBXCiphertext) > MaxKDBXCiphertextBytes {
-		return Err("", CodeLimitExceeded)
+		return nil, Err("", CodeLimitExceeded)
 	}
 	if len(f.SignedPolicyProofs) == 0 || len(f.SignedPolicyProofs) > MaxArrayItems {
-		return Err("", CodeInvalidValue)
+		return nil, Err("", CodeInvalidValue)
 	}
 	for i := range f.SignedPolicyProofs {
 		sp := &f.SignedPolicyProofs[i]
 		if err := validateSignedPolicy(sp); err != nil {
-			return err
+			return nil, err
 		}
 		if sp.Policy.VaultID != h.VaultID {
-			return Err("", CodeHeaderMismatch)
+			return nil, Err("", CodeHeaderMismatch)
 		}
 	}
 	// Exactly one proof must carry the current policy (header policy_seq).
@@ -74,23 +76,26 @@ func validateStructure(f *File) error {
 			continue
 		}
 		if current != nil {
-			return Err("", CodeInvalidValue)
+			return nil, Err("", CodeInvalidValue)
 		}
 		if !bytes.Equal(policyDigest(sp), h.PolicyDigest) {
-			return Err("", CodeHeaderMismatch)
+			return nil, Err("", CodeHeaderMismatch)
 		}
 		current = &sp.Policy
 	}
 	if current == nil {
-		return Err("", CodeHeaderMismatch)
+		return nil, Err("", CodeHeaderMismatch)
 	}
 	// A file may only be authored by a device whose principal is a writer,
 	// admin or owner. Readers hold no content signing authority.
 	author := findDevice(current, h.AuthorDeviceID)
 	if author == nil || !current.hasRole(author.PrincipalID, RoleWriter, RoleAdmin, RoleOwner) {
-		return Err("", CodeInvalidValue)
+		return nil, Err("", CodeInvalidValue)
 	}
-	return validateCEKAndSlots(f, current)
+	if err := validateCEKAndSlots(f, current); err != nil {
+		return nil, err
+	}
+	return current, nil
 }
 
 // validateCEKAndSlots checks the CEK slot epoch and the VUK device slots
@@ -127,18 +132,59 @@ func validateCEKAndSlots(f *File, current *Policy) error {
 	return nil
 }
 
+// validateDraft is the private validation path for the in-memory builder
+// draft. It is what RevisionID and ContentSigningBytes accept so a writer can
+// derive the preimages before it has a signature.
+//
+// f may be either shape:
+//
+//   - builder draft: header.revision_id is "" and content_signature is the
+//     null sig {"signer_id":"","alg":"","sig":null} or the shaped signature
+//     f is about to be sealed with: signer_id equal to the header's author
+//     device, alg that device's content signing algorithm and a 64-byte sig.
+//     Any non-empty signer or algorithm beside a null sig is rejected. A
+//     draft is only ever built without a revision id, so a revision id in
+//     this state is not covered here; a parsed document always carries the
+//     member, and content_signature is rejected first when it is not a
+//     signature.
+//   - sealed: exactly what ValidateFile accepts.
+//
+// A non-null sig is always checked as a content signature: it must name the
+// header's author device, and a non-empty revision id is accepted only when
+// f is sealed and carries the exact derived id. No other combination is
+// accepted: the carried revision and signature are omitted from the revision
+// preimage, but they are still inspected here to decide whether f is a
+// draft at all. ParseFile, EncodeFile, FileDigest and ValidateFile never
+// take the draft branch of this path: a draft is never a wire record.
+func validateDraft(f *File) error {
+	current, err := validateStructure(f)
+	if err != nil {
+		return err
+	}
+	if err := checkCarriedSignature(f, current); err != nil {
+		return err
+	}
+	if f.Header.RevisionID == "" {
+		// A builder draft, with or without its about-to-be-sealed signature:
+		// shape-checked above, never sealed.
+		return nil
+	}
+	return validateSealed(f, current)
+}
+
 // validateSealed checks that f is the one valid wire state: sealed.
 //
 //   - content_signature.sig must be non-null, a 64-byte signature by the
 //     header's author device with the shape of that device's content signing
-//     key. A null sig is an invalid_value at content_signature: a draft is
-//     not a wire file.
+//     key, resolved in the current policy. A null sig is an invalid_value at
+//     content_signature: a draft is not a wire file.
 //   - header.revision_id must be exactly RevisionID of f. A missing one is a
 //     missing_field and a different one an invalid_value.
 //
-// Signature bytes are only shape-checked: no signature is verified anywhere
-// in this package.
-func validateSealed(f *File) error {
+// current is the policy validateStructure selected by header policy_seq, not
+// whichever proof comes first. Signature bytes are only shape-checked: no
+// signature is verified anywhere in this package.
+func validateSealed(f *File, current *Policy) error {
 	h := &f.Header
 	if f.ContentSignature.Sig == nil {
 		return Err("content_signature", CodeInvalidValue)
@@ -156,37 +202,7 @@ func validateSealed(f *File) error {
 	if f.ContentSignature.SignerID != h.AuthorDeviceID {
 		return Err("", CodeSignatureInvalid)
 	}
-	return checkContentSigner(h.AuthorDeviceID, &f.SignedPolicyProofs[0].Policy, &f.ContentSignature)
-}
-
-// validateDraft is the private validation path for the in-memory builder
-// draft. It is what RevisionID and ContentSigningBytes accept so a writer can
-// derive the preimages before it has a signature.
-//
-// draft may be either shape:
-//
-//   - builder draft: content_signature is the null sig {"signer_id":"",
-//     "alg":"","sig":null}, the already signed but unsealed sig, or a shaped
-//     signature over a draft, and header.revision_id is "". Any non-empty
-//     signer or algorithm beside a null sig is rejected, as is a revision id.
-//   - sealed: exactly what ValidateFile accepts.
-//
-// No other combination is accepted. ParseFile, EncodeFile, FileDigest and
-// ValidateFile never call this: a draft is never a wire record.
-func validateDraft(draft *File) error {
-	if err := validateStructure(draft); err != nil {
-		return err
-	}
-	if draft.ContentSignature.Sig == nil {
-		if draft.ContentSignature.SignerID != "" || draft.ContentSignature.Alg != "" {
-			return Err("", CodeSignatureInvalid)
-		}
-		if draft.Header.RevisionID != "" {
-			return Err("revision_id", CodeInvalidValue)
-		}
-		return nil
-	}
-	return validateSealed(draft)
+	return checkContentSigner(h.AuthorDeviceID, current, &f.ContentSignature)
 }
 
 // policyDigest is the one and only policy digest (see PolicyDigest) of the
@@ -495,6 +511,24 @@ func validAgeX25519Recipient(s string) bool {
 
 // ---- role and key binding ----
 
+// checkCarriedSignature checks the content signature shape and signer of f
+// independently of its revision id, so a builder draft that carries the
+// signature it is about to be sealed with gets the same shape rules as a
+// sealed file. A null sig must be the exact null signature.
+func checkCarriedSignature(f *File, current *Policy) error {
+	s := &f.ContentSignature
+	if s.Sig == nil {
+		if s.SignerID != "" || s.Alg != "" {
+			return Err("", CodeSignatureInvalid)
+		}
+		return nil
+	}
+	if s.SignerID != f.Header.AuthorDeviceID {
+		return Err("", CodeSignatureInvalid)
+	}
+	return checkContentSigner(f.Header.AuthorDeviceID, current, s)
+}
+
 // checkContentSigner requires deviceID to be a policy device and s to have
 // the shape of a signature by that device's content signing key.
 func checkContentSigner(deviceID string, p *Policy, s *Signature) error {
@@ -539,9 +573,11 @@ func CanonicalPolicyBytes(sp *SignedPolicy) ([]byte, error) {
 // Whether PrevDigest matches a known parent is a sync decision, not a wire one.
 //
 // RevisionID is 32 bytes as lowercase hex, the size of a SHA-256 value, in a
-// sealed file and "" only in an in-memory draft, which is not a wire record.
-// The header alone cannot check the binding: that a sealed file carries
-// exactly its derived revision id is checked by ValidateFile.
+// sealed file and "" only in an in-memory builder draft, which is not a wire
+// record. Over the wire ValidateFile always rejects an empty one, so an empty
+// revision id is never a wire value. The header alone cannot check the
+// binding: that a sealed file carries exactly its derived revision id is
+// checked by ValidateFile.
 func ValidateHeader(h *Header) error {
 	if h == nil {
 		return Err("", CodeInvalidValue)
@@ -551,9 +587,9 @@ func ValidateHeader(h *Header) error {
 		!validID(h.AuthorDeviceID, MaxDeviceIDLength) {
 		return Err("", CodeInvalidValue)
 	}
-	// An in-memory draft has no revision id; a sealed file carries it as
+	// A builder draft has no revision id; a sealed file carries it as
 	// lowercase hex. Here it is only checked for shape; the header alone
-	// cannot recompute the derivation.
+	// cannot recompute the derivation or enforce that it is present.
 	if h.RevisionID != "" && !validDigestID(h.RevisionID) {
 		return Err("", CodeInvalidValue)
 	}

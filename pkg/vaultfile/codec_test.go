@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"strings"
 	"testing"
 )
@@ -728,5 +729,180 @@ func TestValidWriterRoundTrip(t *testing.T) {
 	}
 	if len(got.VUKDeviceSlots) != 2 {
 		t.Fatalf("slots = %d, want 2", len(got.VUKDeviceSlots))
+	}
+}
+
+// twoProofFile returns f authored by device-3: a new writer device that only
+// the current policy knows. The current policy is otherwise the vector policy
+// (policy_seq 7), so f is a valid sealed file:
+//
+//	proofs[0]: policy_seq 6, the genuine predecessor of the current policy
+//	proofs[1]: policy_seq 7, the current policy, not first
+//
+// Proof order is not a rule, so this file is valid.
+func twoProofFile(t *testing.T) *File {
+	t.Helper()
+	f := buildFile(t)
+	// reseal replaces the revision id of a stale one, it never accepts it.
+	f.Header.RevisionID = ""
+	cur := clonePolicy(&f.SignedPolicyProofs[0].Policy)
+	old := clonePolicy(cur)
+	// The older proof's own sequence, never the header's: the shared
+	// fixtures may leave a zero header behind. Both digests are fresh
+	// slices: clonePolicy does not copy PrevPolicyDigest.
+	old.PolicySeq = cur.PolicySeq - 1
+	old.PrevPolicyDigest = digest("policy-5")
+	cur.PrevPolicyDigest = bytes.Clone(PolicyDigest(old))
+	// device-3 is a new device of bob, a writer, added in the current
+	// policy only.
+	cur.Devices = append(cur.Devices, Device{
+		DeviceID:          "device-3",
+		PrincipalID:       "bob",
+		Label:             "Bob tablet",
+		ContentSigningKey: PublicKey{Alg: SigAlgEd25519, PublicKey: pf(0x61, 32)},
+		AgeEncryptionKey:  ageRecipient(clientKey("device-3")),
+	})
+	f.VUKDeviceSlots = append(f.VUKDeviceSlots,
+		DeviceSlot{DeviceID: "device-3", Recipient: ageRecipient(clientKey("device-3")), WrappedVUK: []byte("synthetic-age-wrapped-vuk-3")})
+	f.Header.AuthorDeviceID = "device-3"
+	f.ContentSignature.SignerID = "device-3"
+	return sealTwoProof(t, f, old, cur)
+}
+
+// sealTwoProof writes old then cur as the two proofs of f, binds the header to
+// cur and reseals f. It fails if the fixture is not itself a valid file.
+func sealTwoProof(t *testing.T, f *File, old, cur *Policy) *File {
+	t.Helper()
+	f.SignedPolicyProofs = []SignedPolicy{
+		{Document: docFor(old), Policy: *old, SignerID: "owner-root-01", Alg: PolicySigAlgEd25519, Sig: pf(0x43, 64)},
+		{Document: docFor(cur), Policy: *cur, SignerID: "owner-root-01", Alg: PolicySigAlgEd25519, Sig: pf(0x44, 64)},
+	}
+	f.Header.PolicySeq = cur.PolicySeq
+	f.Header.PolicyDigest = policyDigest(&f.SignedPolicyProofs[1])
+	reseal(t, f)
+	if _, err := EncodeFile(f); err != nil {
+		t.Fatalf("two-proof fixture is not a valid file: %v", err)
+	}
+	return f
+}
+
+// modifyCurrent returns a mutable copy of the current (second) proof policy
+// of a twoProofFile.
+func modifyCurrent(f *File) *Policy {
+	return clonePolicy(&f.SignedPolicyProofs[1].Policy)
+}
+
+// writeCurrent installs cur as the current (second) proof of f and rebinds the
+// header policy digest to it, leaving the older first proof in place. The
+// older proof stays the predecessor cur chains to.
+func writeCurrent(t *testing.T, f *File, cur *Policy) {
+	t.Helper()
+	cur.PrevPolicyDigest = bytes.Clone(PolicyDigest(&f.SignedPolicyProofs[0].Policy))
+	f.SignedPolicyProofs[1] = SignedPolicy{
+		Document: docFor(cur), Policy: *cur,
+		SignerID: "owner-root-01", Alg: PolicySigAlgEd25519, Sig: pf(0x44, 64),
+	}
+	f.Header.PolicySeq = cur.PolicySeq
+	f.Header.PolicyDigest = policyDigest(&f.SignedPolicyProofs[1])
+}
+
+// sealNegativeFixture binds f.Header.RevisionID to the direct internal
+// revisionHash of f, so a wire-rejected fixture still carries a
+// well-formed revision id and fails on the rule under test, not on a stale
+// one. It never goes through SealFile: that validates first and rejects the
+// very rule this fixture is about to test.
+func sealNegativeFixture(t *testing.T, f *File) {
+	t.Helper()
+	rev, err := revisionHash(f)
+	if err != nil {
+		t.Fatalf("negative fixture revision hash: %v", err)
+	}
+	f.Header.RevisionID = hex.EncodeToString(rev)
+}
+
+// TestCurrentPolicyNotFirstProof is the regression for a file whose current
+// policy proof is not the first one: the author device and the slots are
+// checked against the policy at header policy_seq, not proofs[0]. A new
+// writer device known only to the current proof may author such a file, and
+// an author without the writer role in the current policy is still rejected.
+func TestCurrentPolicyNotFirstProof(t *testing.T) {
+	f := twoProofFile(t)
+	if f.SignedPolicyProofs[0].Policy.PolicySeq == f.Header.PolicySeq || len(f.SignedPolicyProofs) != 2 {
+		t.Fatalf("fixture proofs are not old-then-current: %d vs %d",
+			f.SignedPolicyProofs[0].Policy.PolicySeq, f.Header.PolicySeq)
+	}
+	enc, err := EncodeFile(f)
+	if err != nil {
+		t.Fatalf("valid file with a non-leading current proof rejected: %v", err)
+	}
+	got, err := ParseFile(enc)
+	if err != nil {
+		t.Fatalf("parsing valid file with a non-leading current proof: %v", err)
+	}
+	if got.Header.AuthorDeviceID != "device-3" || findDevice(&got.SignedPolicyProofs[0].Policy, "device-3") != nil {
+		t.Fatal("fixture no longer authors from a device outside the first proof")
+	}
+
+	// Any proof position for the current policy is accepted: proof order is
+	// part of the revision input, so the swapped file is resealed.
+	swapped := twoProofFile(t)
+	swapped.SignedPolicyProofs[0], swapped.SignedPolicyProofs[1] = swapped.SignedPolicyProofs[1], swapped.SignedPolicyProofs[0]
+	reseal(t, swapped)
+	if _, err := EncodeFile(swapped); err != nil {
+		t.Fatalf("current-proof-first variant rejected: %v", err)
+	}
+
+	// A truly unauthorized author is still rejected: device-4 is a new device
+	// of carol, a reader, known to the current policy only.
+	f = twoProofFile(t)
+	cur := modifyCurrent(f)
+	cur.Devices = append(cur.Devices, Device{
+		DeviceID:          "device-4",
+		PrincipalID:       "carol",
+		Label:             "Carol tablet",
+		ContentSigningKey: PublicKey{Alg: SigAlgEd25519, PublicKey: pf(0x62, 32)},
+		AgeEncryptionKey:  ageRecipient(clientKey("device-4")),
+	})
+	f.VUKDeviceSlots = append(f.VUKDeviceSlots,
+		DeviceSlot{DeviceID: "device-4", Recipient: ageRecipient(clientKey("device-4")), WrappedVUK: []byte("synthetic-age-wrapped-vuk-4")})
+	f.Header.AuthorDeviceID = "device-4"
+	f.ContentSignature.SignerID = "device-4"
+	writeCurrent(t, f, cur)
+	// A negative fixture cannot be sealed: SealFile rejects the unauthorized
+	// author before the wire path is reached. Bind the revision directly and
+	// check the wire entry points instead.
+	sealNegativeFixture(t, f)
+	wantCode(t, ValidateFile(f), CodeInvalidValue)
+	_, err = EncodeFile(f)
+	wantCode(t, err, CodeInvalidValue)
+	_, err = RevisionID(f)
+	wantCode(t, err, CodeInvalidValue)
+
+	// An author device the older proof lists as bob's stays rejected when the
+	// current policy no longer grants bob the writer role.
+	f = twoProofFile(t)
+	cur = modifyCurrent(f)
+	cur.Writers = nil
+	f.Header.AuthorDeviceID = "device-2"
+	f.ContentSignature.SignerID = "device-2"
+	writeCurrent(t, f, cur)
+	sealNegativeFixture(t, f)
+	if findDevice(&f.SignedPolicyProofs[0].Policy, "device-2") == nil || !f.SignedPolicyProofs[0].Policy.hasRole("bob", RoleWriter) {
+		t.Fatal("fixture: older proof must still list device-2 for bob as a writer")
+	}
+	wantCode(t, ValidateFile(f), CodeInvalidValue)
+	_, err = EncodeFile(f)
+	wantCode(t, err, CodeInvalidValue)
+	_, err = RevisionID(f)
+	wantCode(t, err, CodeInvalidValue)
+
+	// bob still a writer in the current policy: the same file is valid, so
+	// the rejection above is the current author role and not the fixture.
+	f = twoProofFile(t)
+	f.Header.AuthorDeviceID = "device-2"
+	f.ContentSignature.SignerID = "device-2"
+	reseal(t, f)
+	if _, err := EncodeFile(f); err != nil {
+		t.Fatalf("writer-authored two-proof file rejected: %v", err)
 	}
 }

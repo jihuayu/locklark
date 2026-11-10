@@ -46,11 +46,17 @@ import (
 // SHA-256 of DomainRevision, a NUL, and the canonical file with
 // header.revision_id and content_signature removed.
 //
-// It never reads f.Header.RevisionID or f.ContentSignature, so the same file
-// gives the same identity before and after sealing and a stale revision id
-// cannot change it. It validates first (validateDraft) so every other field
-// has its wire shape. f may be the in-memory builder draft or a sealed file;
-// the draft is never a wire record.
+// The hashed bytes omit f.Header.RevisionID and f.ContentSignature entirely,
+// so the same file gives the same identity before and after sealing: a
+// carried revision or signature never enters the hash. They are still
+// inspected by the private draft validation that runs first (validateDraft),
+// which decides whether a carried value is accepted at all: a carried
+// signature must be shaped as its author device key, and a non-empty revision
+// is accepted only when it is the exact derived id of a sealed file, so a
+// stale revision id cannot change the identity. Every other field has its
+// wire shape. f may be the in-memory builder draft, with the null sig
+// or with the signature it is about to be sealed with under an empty revision
+// id, or a sealed file; the draft is never a wire record.
 func RevisionID(f *File) (string, error) {
 	if f == nil {
 		return "", &Error{Code: CodeInvalidValue}
@@ -74,10 +80,11 @@ func RevisionID(f *File) (string, error) {
 // preimage is the same for a draft and the file sealed from it.
 //
 // f may be any builder state: the null-sig draft, the draft already carrying
-// the signature it is about to be sealed with, or a sealed file; the private
-// draft validation checks every field except that the revision is present and
-// derived. A sealed file yields the same bytes as its draft. No signature is
-// verified.
+// the signature it is about to be sealed with, or a sealed file. Every field
+// is checked as in validateStructure, and a carried signature must have the
+// shape of its author device key in the current policy; only the sealed
+// revision-id binding is not required. A sealed file yields the same bytes as
+// its draft. No signature is verified.
 func ContentSigningBytes(f *File) ([]byte, error) {
 	return contentSigningBytes(f, true)
 }
@@ -91,8 +98,14 @@ func contentSigningBytes(f *File, validate bool) ([]byte, error) {
 	}
 	if validate {
 		// The content-signing input names the revision it derives, so the
-		// revision id is not part of this shape check.
-		if err := validateStructure(f); err != nil {
+		// revision id is not part of this shape check; a carried signature
+		// is still checked for the shape of the author device key, without
+		// the sealed revision binding a stale draft revision would break.
+		current, err := validateStructure(f)
+		if err != nil {
+			return nil, err
+		}
+		if err := checkCarriedSignature(f, current); err != nil {
 			return nil, err
 		}
 	}
@@ -157,9 +170,9 @@ func SealFile(f *File, sig *Signature) ([]byte, error) {
 	sealed.Header.RevisionID = ""
 	sealed.ContentSignature = *sig
 	sealed.ContentSignature.Sig = bytes.Clone(sig.Sig)
-	// The revision identity never reads the incoming revision id or
-	// signature: its preimage omits both members, so the draft's values and
-	// the sealed ones cover the same revision input.
+	// The revision preimage omits the incoming revision id and signature
+	// entirely, so the draft's values and the sealed ones cover the same
+	// revision input.
 	rev, err := revisionHash(sealed)
 	if err != nil {
 		return nil, err

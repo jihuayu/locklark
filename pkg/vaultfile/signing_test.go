@@ -366,8 +366,9 @@ func TestDraftRejectedByWire(t *testing.T) {
 	if _, err := RevisionID(draft); err != nil {
 		t.Fatalf("RevisionID(draft): %v", err)
 	}
-	// The content-signing input never reads the carried revision id, so a
-	// stale one on the pre-signature draft gives the same preimage.
+	// The content-signing input never writes the carried revision id, so a
+	// well-formed stale one on the pre-signature draft gives the same
+	// preimage: the signature shape is checked, the revision binding is not.
 	partial := draftWithSignature(t)
 	partial.Header.RevisionID = strings.Repeat("b", sha256.Size*2)
 	partialCSB, err := ContentSigningBytes(partial)
@@ -380,14 +381,27 @@ func TestDraftRejectedByWire(t *testing.T) {
 }
 
 // TestDraftShapeRules pins the shapes the private draft path accepts: the
-// builder draft and the sealed file.
+// null-sig builder draft, the pre-signature builder draft and the sealed file.
 func TestDraftShapeRules(t *testing.T) {
 	draft := buildDraft(t)
+	sealed := buildFile(t)
 	if err := validateDraft(draft); err != nil {
 		t.Fatalf("builder draft rejected: %v", err)
 	}
-	if err := validateDraft(buildFile(t)); err != nil {
+	if err := validateDraft(draftWithSignature(t)); err != nil {
+		t.Fatalf("pre-signature builder draft rejected: %v", err)
+	}
+	if err := validateDraft(sealed); err != nil {
 		t.Fatalf("sealed file rejected as draft: %v", err)
+	}
+	// The wire state still requires the sealed revision binding.
+	for name, d := range map[string]*File{"null-signature": draft, "pre-signature": draftWithSignature(t)} {
+		if err := ValidateFile(d); err == nil {
+			t.Fatalf("wire state accepted the %s draft", name)
+		}
+		if _, err := EncodeFile(d); err == nil {
+			t.Fatalf("EncodeFile accepted the %s draft", name)
+		}
 	}
 
 	// Null sig with a non-empty signer or algorithm is not a draft shape the
@@ -405,10 +419,11 @@ func TestDraftShapeRules(t *testing.T) {
 			t.Fatal("malformed draft reached the revision path")
 		}
 	}
-	// A null sig with a revision id is not a draft shape either.
-	bad := deepCopyFile(draft)
-	bad.Header.RevisionID = buildFile(t).Header.RevisionID
-	_, err := RevisionID(bad)
+	// A revision id beside a non-null signature must be the derived one:
+	// that combination is sealed, not a draft, on the preimage path too.
+	stale := draftWithSignature(t)
+	stale.Header.RevisionID = strings.Repeat("a", sha256.Size*2)
+	_, err := RevisionID(stale)
 	wantCodeAt(t, err, CodeInvalidValue, "revision_id")
 }
 
@@ -496,3 +511,101 @@ const (
 	fixedRevisionInputSHA256 = "e80510b9592680ec31a776ba0593edb00d0b080da788a42133cf20428e2767a3"
 	fixedRevisionID          = "930c61862a60a3070b4cef23cee7711e086913f678c861dbf25d63b0ff128b5d"
 )
+
+// TestDraftRevisionIdentity pins the public preimage contract for every
+// builder state: the null-sig draft, the draft already carrying the shaped
+// signature it is about to be sealed with (revision id still empty), and the
+// sealed file all derive one RevisionID. The wire entry points keep rejecting
+// both drafts.
+func TestDraftRevisionIdentity(t *testing.T) {
+	nullDraft := buildDraft(t)
+	preSigned := draftWithSignature(t)
+	sealed := buildFile(t)
+	if preSigned.Header.RevisionID != "" || nullDraft.Header.RevisionID != "" {
+		t.Fatal("builder draft fixture carries a revision id")
+	}
+
+	want, err := RevisionID(sealed)
+	if err != nil {
+		t.Fatalf("RevisionID(sealed): %v", err)
+	}
+	if want != fixedRevisionID {
+		t.Fatalf("sealed revision id = %s, want fixed %s", want, fixedRevisionID)
+	}
+
+	drafts := map[string]*File{"null-signature draft": nullDraft, "pre-signature draft": preSigned}
+	for name, d := range drafts {
+		got, err := RevisionID(d)
+		if err != nil {
+			t.Fatalf("RevisionID(%s): %v", name, err)
+		}
+		if got != want {
+			t.Fatalf("%s revision id = %s, want %s", name, got, want)
+		}
+	}
+
+	// The decoded wire document is the same sealed file, and its preimages
+	// match the drafts: the identity is derivable from the wire alone.
+	wire, err := ParseFile(mustEncode(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wireRev, err := RevisionID(wire)
+	if err != nil || wireRev != want {
+		t.Fatalf("RevisionID(parsed wire) = %s, %v; want %s", wireRev, err, want)
+	}
+	wireCSB, err := ContentSigningBytes(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, d := range drafts {
+		csb, err := ContentSigningBytes(d)
+		if err != nil {
+			t.Fatalf("ContentSigningBytes(%s): %v", name, err)
+		}
+		if !bytes.Equal(csb, wireCSB) {
+			t.Fatalf("%s content signing input differs from the sealed file", name)
+		}
+	}
+
+	// A draft is still never a wire record.
+	for name, d := range drafts {
+		if _, err := EncodeFile(d); err == nil {
+			t.Fatalf("EncodeFile accepted the %s", name)
+		}
+		if _, err := FileBytes(d); err == nil {
+			t.Fatalf("FileBytes accepted the %s", name)
+		}
+		if err := ValidateFile(d); err == nil {
+			t.Fatalf("ValidateFile accepted the %s", name)
+		}
+		if _, err := FileDigest(d); err == nil {
+			t.Fatalf("FileDigest accepted the %s", name)
+		}
+		if _, err := SealFile(d, nil); err == nil {
+			t.Fatalf("SealFile(f, nil) accepted the %s", name)
+		}
+	}
+	// EncodeFile never emits a draft document: the pre-signed draft encoded
+	// by the wire codec lacks its revision id and is still rejected.
+	doc, err := encodeFileWire(preSigned, fileEncoding{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = ParseFile(doc)
+	wantCodeAt(t, err, CodeMissingField, "revision_id")
+
+	// A carried signature is part of the draft shape: it must be the shape
+	// of the author device's key, so a pre-signature draft signed by another
+	// device is not a state a writer can derive an identity from. Both
+	// preimage paths inspect it, though they omit it from their bytes.
+	foreign := draftWithSignature(t)
+	foreign.ContentSignature.SignerID = "device-2"
+	_, err = RevisionID(foreign)
+	wantCodeAt(t, err, CodeSignatureInvalid, "")
+	csb, err := ContentSigningBytes(foreign)
+	wantCodeAt(t, err, CodeSignatureInvalid, "")
+	if csb != nil {
+		t.Fatalf("ContentSigningBytes(foreign signer) returned %d bytes", len(csb))
+	}
+}

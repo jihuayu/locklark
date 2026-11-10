@@ -13,14 +13,17 @@ import (
 //
 // A file has exactly two states:
 //
-//   - in-memory builder draft: content_signature is the null sig
-//     {"signer_id":"","alg":"","sig":null} and header.revision_id is "". A
-//     writer holds it in memory between building the file and signing
-//     ContentSigningBytes. It is not a wire record: ParseFile, EncodeFile,
-//     FileDigest and ValidateFile reject it.
+//   - in-memory builder draft: header.revision_id is "" and content_signature
+//     is the null sig {"signer_id":"","alg":"","sig":null} or the shaped
+//     signature the file is about to be sealed with (signer_id is the
+//     header's author device). A writer holds it in memory between building
+//     the file and sealing it; RevisionID and ContentSigningBytes accept both
+//     shapes. It is not a wire record: ParseFile, EncodeFile, FileDigest and
+//     ValidateFile reject it.
 //   - sealed: content_signature is a 64-byte signature by the header's author
-//     device and header.revision_id is the derived RevisionID of the file.
-//     Only this state is a valid wire file.
+//     device, resolved in the policy at header policy_seq, and
+//     header.revision_id is the derived RevisionID of the file. Only this
+//     state is a valid wire file.
 //
 // There is no header signature. The header is covered by the content
 // signature through RevisionID, so a writer never manages a header key.
