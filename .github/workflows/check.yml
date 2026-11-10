@@ -11,7 +11,37 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
+  linux-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Build CLI and primary artifacts once
+        timeout-minutes: 10
+        run: |
+          bin="$RUNNER_TEMP/locklark-bin"
+          mkdir -p "$bin"
+          go build -trimpath -o "$bin/locklark" ./cmd/locklark
+          go build -trimpath -o "$bin/locklark-desktop" ./cmd/locklark-desktop
+          go build -trimpath -o "$bin/locklark-browser-chromium" ./cmd/locklark-browser-chromium
+          go build -trimpath -o "$bin/locklark-browser-firefox" ./cmd/locklark-browser-firefox
+          go build -trimpath -o "$bin/locklark-browser-register" ./cmd/locklark-browser-register
+          go build -trimpath -o "$bin/locklark-team-sync" ./cmd/locklark-team-sync
+          go build -trimpath -o "$bin/desktop-acceptance-fixture" ./scripts/desktop_acceptance_fixture
+      - name: Smoke test real CLI before acceptance
+        run: python3 scripts/cli_smoke.py --cli "$RUNNER_TEMP/locklark-bin/locklark"
+      - name: Preserve Linux primary binaries
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: locklark-linux-bin
+          path: ${{ runner.temp }}/locklark-bin/
+          if-no-files-found: error
+          retention-days: 14
   go:
+    needs: [linux-build]
+    if: ${{ !cancelled() }}
     strategy:
       fail-fast: false
       matrix:
@@ -25,16 +55,15 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.4
-      - name: Build CLI and primary artifacts once
+      - name: Download Linux primary binaries
         if: runner.os == 'Linux'
-        run: |
-          bin="$RUNNER_TEMP/locklark-bin"
-          mkdir -p "$bin"
-          go build -trimpath -o "$bin/locklark" ./cmd/locklark
-          go build -trimpath -o "$bin/locklark-desktop" ./cmd/locklark-desktop
-          go build -trimpath -o "$bin/locklark-browser-chromium" ./cmd/locklark-browser-chromium
-          go build -trimpath -o "$bin/locklark-browser-firefox" ./cmd/locklark-browser-firefox
-          go build -trimpath -o "$bin/locklark-browser-register" ./cmd/locklark-browser-register
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: locklark-linux-bin
+          path: ${{ runner.temp }}/locklark-bin
+      - name: Make Linux binaries executable
+        if: runner.os == 'Linux'
+        run: chmod +x "$RUNNER_TEMP"/locklark-bin/*
       - name: Build CLI and primary artifacts once
         if: runner.os == 'Windows'
         shell: pwsh
@@ -51,7 +80,7 @@ jobs:
             go build -trimpath -o (Join-Path $bin $target[0]) $target[1]
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
-      - name: Smoke test real CLI before acceptance
+      - name: Smoke test downloaded CLI before acceptance
         if: runner.os == 'Linux'
         run: python3 scripts/cli_smoke.py --cli "$RUNNER_TEMP/locklark-bin/locklark"
       - name: Smoke test real CLI before acceptance
@@ -246,6 +275,7 @@ jobs:
           go test ./internal/sshagent ./internal/localpath -count=1
           go test ./internal/personal ./cmd/locklark -run '^TestRunCLI' -count=1
   web:
+    needs: [linux-build]
     runs-on: ubuntu-latest
     env:
       LOCKLARK_DESKTOP_LAYOUT: classic
@@ -259,19 +289,14 @@ jobs:
           node-version: '24'
           cache: npm
           cache-dependency-path: web/package-lock.json
-      - name: Build CLI and primary artifacts once
-        timeout-minutes: 10
-        run: |
-          bin="$RUNNER_TEMP/locklark-bin"
-          mkdir -p "$bin"
-          go build -trimpath -o "$bin/locklark" ./cmd/locklark
-          go build -trimpath -o "$bin/locklark-desktop" ./cmd/locklark-desktop
-          go build -trimpath -o "$bin/locklark-browser-chromium" ./cmd/locklark-browser-chromium
-          go build -trimpath -o "$bin/locklark-browser-firefox" ./cmd/locklark-browser-firefox
-          go build -trimpath -o "$bin/locklark-browser-register" ./cmd/locklark-browser-register
-          go build -trimpath -o "$bin/locklark-team-sync" ./cmd/locklark-team-sync
-          go build -trimpath -o "$bin/desktop-acceptance-fixture" ./scripts/desktop_acceptance_fixture
-      - name: Smoke test real CLI before acceptance
+      - name: Download Linux primary binaries
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: locklark-linux-bin
+          path: ${{ runner.temp }}/locklark-bin
+      - name: Make Linux binaries executable
+        run: chmod +x "$RUNNER_TEMP"/locklark-bin/*
+      - name: Smoke test downloaded CLI before acceptance
         run: python3 scripts/cli_smoke.py --cli "$RUNNER_TEMP/locklark-bin/locklark"
       - name: Test browser extension
         timeout-minutes: 10
