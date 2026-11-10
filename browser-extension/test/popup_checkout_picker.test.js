@@ -269,8 +269,8 @@ async function openPicker(h, view = pickerView()) {
   const request = h.take("checkout-frames");
   assert.deepEqual(
     Object.keys(request.message).sort(),
-    ["id", "revision", "type"],
-    "checkout-frames carries only the reviewed card identity",
+    ["id", "revision", "type", "userGesture"],
+    "checkout-frames carries only the reviewed card identity and gesture proof",
   );
   assert.equal(request.message.id, ID);
   assert.equal(request.message.revision, REV);
@@ -344,7 +344,7 @@ test("a trusted choice sends back only the opaque nonce and key", async () => {
   const select = h.take("checkout-select");
   assert.deepEqual(
     Object.keys(select.message).sort(),
-    ["choice", "id", "nonce", "revision", "type"],
+    ["choice", "id", "nonce", "revision", "type", "userGesture"],
   );
   assert.equal(select.message.nonce, NONCE);
   assert.equal(select.message.choice, CHOICE_FRAME);
@@ -501,8 +501,8 @@ test("a connected card outside the page candidates still enables the picker", as
   const request = h.take("checkout-frames");
   assert.deepEqual(
     Object.keys(request.message).sort(),
-    ["id", "revision", "type"],
-    "the picker start carries only the reviewed card identity",
+    ["id", "revision", "type", "userGesture"],
+    "the picker start carries only the reviewed card identity and gesture proof",
   );
   assert.equal(request.message.id, ID);
   assert.equal(request.message.revision, REV);

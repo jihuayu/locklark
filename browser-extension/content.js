@@ -355,7 +355,7 @@
     const b = element("button", label);
     b.type = "button";
     b.addEventListener("click", (e) => {
-      if (e.isTrusted) void action();
+      if (e.isTrusted) void action(e);
     });
     box.append(b);
     return b;
@@ -418,6 +418,21 @@
       return rect.width > 0 && rect.height > 0;
     } catch {
       return false;
+    }
+  }
+  // Credit-card fills cross an asynchronous native approval, so transient
+  // activation cannot be re-checked in the injected frame later. Mint an
+  // explicit, short-lived authorization here, synchronously inside the trusted
+  // click, and let the worker validate its freshness before it asks native.
+  function creditCardGesture(event) {
+    try {
+      if (event?.isTrusted !== true) return null;
+      const activation =
+        typeof navigator !== "undefined" ? navigator.userActivation : null;
+      if (activation && activation.isActive !== true) return null;
+      return { v: 1, scope: "credit_card", at: Date.now() };
+    } catch {
+      return null;
     }
   }
   function deepAll(selector) {
@@ -1108,7 +1123,12 @@
           box,
           (row.title || "未命名条目") +
             (row.subtitle ? " · " + row.subtitle : ""),
-          () => {
+          (clickEvent) => {
+            const userGesture =
+              category === "credit_card"
+                ? creditCardGesture(clickEvent)
+                : null;
+            if (category === "credit_card" && !userGesture) return;
             dismiss();
             void send({
               type:
@@ -1117,6 +1137,7 @@
                   : "inline-fill-card",
               id: row.id,
               revision: row.revision,
+              ...(userGesture ? { userGesture } : {}),
             });
           },
         );
@@ -2178,49 +2199,6 @@
   else void checkPendingSave();
   setTimeout(() => void checkPendingSave(), 1200);
 
-  function fillFields(fields) {
-    if (!fields || typeof fields !== "object" || Array.isArray(fields))
-      return 0;
-    const inputs = [...document.querySelectorAll("input,textarea,select")];
-    let filled = 0;
-    for (const [key, value] of Object.entries(fields).slice(0, 100)) {
-      if (typeof value !== "string" || value.length > 16384) continue;
-      const normalized = key.toLowerCase().replace(/[_-]/g, "");
-      const input = inputs.find((element) => {
-        if (element.disabled || element.readOnly) return false;
-        const autocomplete = (
-          element.getAttribute?.("autocomplete") ||
-          element.autocomplete ||
-          ""
-        )
-          .toLowerCase()
-          .replace(/[_-]/g, "");
-        return (
-          autocomplete === normalized ||
-          String(element.name || "")
-            .toLowerCase()
-            .replace(/[_-]/g, "") === normalized ||
-          String(element.id || "")
-            .toLowerCase()
-            .replace(/[_-]/g, "") === normalized
-        );
-      });
-      if (!input) continue;
-      const prototype =
-        input instanceof HTMLTextAreaElement
-          ? HTMLTextAreaElement.prototype
-          : input instanceof HTMLSelectElement
-            ? HTMLSelectElement.prototype
-            : HTMLInputElement.prototype;
-      const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
-      if (!setter) continue;
-      setter.call(input, value);
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-      input.dispatchEvent(new Event("change", { bubbles: true }));
-      filled++;
-    }
-    return filled;
-  }
   try {
     api.runtime.onMessage.addListener((message, sender, respond) => {
       if (!sender || sender.id !== api.runtime.id) return false;
@@ -2262,14 +2240,6 @@
           void showSuggestions(input);
         }
         respond({ opened: !!input });
-        return true;
-      }
-      if (message?.type === "locklark:fill-fields") {
-        let filled = 0;
-        try {
-          filled = fillFields(message.fields);
-        } catch {}
-        respond({ filled });
         return true;
       }
       return false;

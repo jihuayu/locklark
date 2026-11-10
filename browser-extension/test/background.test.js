@@ -15,6 +15,17 @@ async function waitFor(pred, label = "condition") {
   throw new Error("timed out waiting for " + label);
 }
 function harness(options = {}) {
+  const RealDate = Date;
+  let clock = options.clock ?? RealDate.now();
+  class ClockDate extends RealDate {
+    constructor(...args) {
+      if (args.length) super(...args);
+      else super(clock);
+    }
+    static now() {
+      return clock;
+    }
+  }
   const timers = new Map();
   const listeners = {},
     sent = [],
@@ -360,6 +371,7 @@ function harness(options = {}) {
     chrome: api,
     LocklarkCore: core,
     crypto: webcrypto,
+    Date: options.clock === undefined ? RealDate : ClockDate,
     setTimeout: (fn, ms) => {
       const h = setTimeout(fn, ms);
       timers.set(h, { fn, ms });
@@ -385,6 +397,7 @@ function harness(options = {}) {
   return {
     sent,
     notifications,
+    advanceClock: (ms) => (clock += ms),
     idleInterval: () => idleInterval,
     fireIdle: (state) => idleListener?.(state),
     holdFill: (promise) => (fillWait = promise),
@@ -4375,5 +4388,71 @@ test("credit card vault filter forwards the canonical native category and keeps 
   assert.equal(rows.length, 1);
   assert.equal(rows[0].id, CARD_ID);
   assert.equal(rows[0].revision, CARD_REV);
+  await h.send({ type: "disconnect" });
+});
+
+test("generated history expires by TTL and is pruned on read", async () => {
+  const h = harness({
+    clock: 1_700_000_000_000,
+    capabilities: ["generate-v1"],
+  });
+  await ready(h);
+  const generated = await h.send({
+    type: "generate",
+    recordHistory: true,
+    length: 20,
+    digits: true,
+    symbols: true,
+  });
+  assert.equal(typeof generated.historyId, "string");
+  assert.match(generated.historyId, /^[a-f0-9]{32}$/);
+  let state = await h.send({ type: "state" });
+  assert.equal(state.generatedHistory.length, 1);
+  assert.equal(state.generatedHistory[0].id, generated.historyId);
+
+  // The plaintext generated password must not outlive the bounded TTL.
+  h.advanceClock(5 * 60 * 1000 + 1);
+  state = await h.send({ type: "state" });
+  assert.equal(state.generatedHistory.length, 0);
+  await h.send({ type: "disconnect" });
+});
+
+test("credit-card fill refuses a missing or stale explicit gesture", async () => {
+  const h = harness({ clock: 1_700_000_000_000 });
+  await ready(h);
+  const before = h.sent.filter((request) => request.type === "fill").length;
+  const id = "b".repeat(32);
+  const revision = "c".repeat(64);
+
+  const missing = await h.send({
+    type: "fill",
+    id,
+    revision,
+    category: "credit_card",
+  });
+  assert.match(missing.status, /拒绝/);
+  assert.equal(
+    h.sent.filter((request) => request.type === "fill").length,
+    before,
+    "no native card fill without a gesture",
+  );
+
+  const stale = await h.send({
+    type: "fill",
+    id,
+    revision,
+    category: "credit_card",
+    userGesture: {
+      v: 1,
+      scope: "credit_card",
+      at: 1_700_000_000_000 - 10 * 1000 - 1,
+    },
+  });
+  assert.match(stale.status, /拒绝/);
+  assert.equal(
+    h.sent.filter((request) => request.type === "fill").length,
+    before,
+    "no native card fill from an expired gesture",
+  );
   await h.send({ type: "disconnect" });
 });

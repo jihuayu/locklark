@@ -334,8 +334,10 @@ function cardSandbox(options = {}) {
     csc: makeControl("INPUT", { autocomplete: "cc-csc" }),
   };
   const sandbox = makeSandbox(Object.values(elements), { ...options, clock });
-  const fn = compiledDocumentFunction("fillCardDocument", sandbox);
-  return { elements, sandbox, fn, clock };
+  const compiled = compiledDocumentFunction("fillCardDocument", sandbox);
+  // Card injection is only valid with the worker's explicit authorization.
+  const fn = (...args) => compiled(...args, true);
+  return { elements, sandbox, fn, raw: compiled, clock };
 }
 
 function otpSandbox(count, options = {}) {
@@ -659,6 +661,22 @@ test("M3 fillCardDocument fills number, expiry variants, selects and csc", () =>
   assert.equal(derived.elements.expLong.value, "11/2030");
   assert.equal(derived.elements.expMonth.value, "11");
   assert.equal(derived.elements.expYear.value, "2030");
+});
+
+test("M3 fillCardDocument refuses credit-card data without explicit authorization", () => {
+  const { elements, raw, clock } = cardSandbox();
+  assert.equal(
+    raw(
+      "https://example.test",
+      { number: "4242 4242 4242 4242" },
+      clock + 2000,
+      false,
+      "credit_card",
+    ),
+    false,
+  );
+  assert.equal(elements.number.value, "");
+  assert.equal(elements.number.events.length, 0);
 });
 
 test("M3 card validResponse accepts only bounded card maps", () => {
@@ -1151,6 +1169,7 @@ function harness(options = {}) {
     deliver: (message) => portMessage(message),
     setFillResult: (value) => (nextFillResult = value),
     advanceClock: (milliseconds) => (clock += milliseconds),
+    now: () => clock,
     setTab: (url, nextDoc) => {
       tabURL = url;
       if (nextDoc) doc = nextDoc;
@@ -1224,6 +1243,9 @@ async function fillStructured(h, category, payload) {
     id: h.itemId,
     revision: h.itemRevision,
     category,
+    ...(category === "credit_card"
+      ? { userGesture: { v: 1, scope: "credit_card", at: h.now() } }
+      : {}),
   });
   for (let index = 0; index < 30; index++) {
     await tick();

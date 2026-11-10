@@ -39,12 +39,14 @@ if (typeof importScripts === "function") importScripts("core.js");
     checkoutPicker = null;
   const STAGED_TTL = 5 * 60 * 1000,
     LAST_FILLED_TTL = 60 * 1000,
+    GENERATED_TTL = 5 * 60 * 1000,
     HISTORY_LIMIT = 20,
     MULTI_STEP_TTL = 120000,
     CHECKOUT_PICKER_TTL = 30000,
     CHECKOUT_MAX_FRAMES = 32,
     OTP_CAPTURE_TTL = 2 * 60 * 1000,
-    OTP_CAPTURE_LIMIT = 8;
+    OTP_CAPTURE_LIMIT = 8,
+    USER_GESTURE_TTL = 10 * 1000;
   const CONDITIONAL_INTENT_LIMIT = 64,
     CONDITIONAL_OPTIONS_MAX = 32768;
   // Conditional (autofill) Passkey intents are metadata-only and never set
@@ -255,6 +257,14 @@ if (typeof importScripts === "function") importScripts("core.js");
     clearGeneratedHistory();
     clearLastFilled();
   }
+  function pruneGenerated(now = Date.now()) {
+    for (let index = generatedHistory.length - 1; index >= 0; index--) {
+      const entry = generatedHistory[index];
+      if (now < entry.expiresAt) continue;
+      entry.password = "";
+      generatedHistory.splice(index, 1);
+    }
+  }
   function pruneStaged() {
     const now = Date.now();
     for (const [stageId, record] of stagedSaves)
@@ -264,6 +274,7 @@ if (typeof importScripts === "function") importScripts("core.js");
         entry.password = "";
         lastFilledCredentials.delete(tabId);
       }
+    pruneGenerated(now);
   }
   function stagedForTab(tabId, origin) {
     pruneStaged();
@@ -948,7 +959,10 @@ if (typeof importScripts === "function") importScripts("core.js");
       return;
     }
     if (kind === "fill-card") {
-      void fillItemCategory(itemId, revision, "card");
+      // A context-menu click is itself the explicit user action; the worker
+      // cannot observe transient activation from that browser UI, so this
+      // branch is the only place that authorizes a card fill internally.
+      void fillItemCategory(itemId, revision, "card", true);
     }
   }
   function commandInvoked(command) {
@@ -1203,11 +1217,16 @@ if (typeof importScripts === "function") importScripts("core.js");
     };
   }
   async function startCheckoutPicker(message) {
-    if (Object.keys(message).sort().join(",") !== "id,revision,type")
+    const keys = Object.keys(message).sort().join(",");
+    if (
+      keys !== "id,revision,type" &&
+      keys !== "id,revision,type,userGesture"
+    )
       throw Error("refused");
     if (
       !/^[a-f0-9]{32}$/.test(message.id || "") ||
-      !/^[a-f0-9]{64}$/.test(message.revision || "")
+      !/^[a-f0-9]{64}$/.test(message.revision || "") ||
+      !validUserGesture(message.userGesture)
     )
       throw Error("refused");
     // A new picker always invalidates the previous public choice set.
@@ -1259,6 +1278,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       topOrigin: capture.topOrigin,
       topDocumentId: capture.topDocumentId,
       signature: checkoutFrameSignature(capture),
+      userAuthorized: true,
       candidates,
       createdAt: Date.now(),
       expiresAt,
@@ -1276,15 +1296,21 @@ if (typeof importScripts === "function") importScripts("core.js");
     return checkoutPickerView(picker);
   }
   function consumeCheckoutChoice(message) {
-    if (Object.keys(message).sort().join(",") !== "choice,id,nonce,revision,type")
+    const keys = Object.keys(message).sort().join(",");
+    if (
+      keys !== "choice,id,nonce,revision,type" &&
+      keys !== "choice,id,nonce,revision,type,userGesture"
+    )
       return null;
     if (
       !/^[a-f0-9]{32}$/.test(message.nonce || "") ||
       !/^[a-f0-9]{32}$/.test(message.choice || "") ||
       !/^[a-f0-9]{32}$/.test(message.id || "") ||
-      !/^[a-f0-9]{64}$/.test(message.revision || "")
+      !/^[a-f0-9]{64}$/.test(message.revision || "") ||
+      !validUserGesture(message.userGesture)
     )
       return null;
+    if (message.type !== "checkout-select") return null;
     const picker = checkoutPicker;
     if (
       !picker ||
@@ -1309,7 +1335,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     const chosen = consumeCheckoutChoice(message);
     if (!chosen) throw Error("refused");
     status = "已选择结账表单，正在核对当前页面";
-    void checkoutFill(chosen.picker, chosen.entry).catch(() => {});
+    void checkoutFill(chosen.picker, chosen.entry, true).catch(() => {});
     return true;
   }
   function cancelCheckoutPickerMessage(message) {
@@ -1435,9 +1461,14 @@ if (typeof importScripts === "function") importScripts("core.js");
     if (!profile) throw Error("refused");
     return profile;
   }
-  async function checkoutFill(picker, target) {
+  async function checkoutFill(picker, target, userAuthorized = false) {
     const generation = epoch;
     if (pending || pendingOTP || pendingPasskey) throw Error("refused");
+    if (
+      userAuthorized !== true ||
+      picker?.userAuthorized !== true
+    )
+      throw Error("refused");
     const intent = {
       kind: "checkout",
       itemId: picker.itemId,
@@ -1540,6 +1571,7 @@ if (typeof importScripts === "function") importScripts("core.js");
             fill.fields,
             Date.now() + 1500,
             intent.frameId === 0,
+            true,
           ],
         });
       } finally {
@@ -1633,6 +1665,18 @@ if (typeof importScripts === "function") importScripts("core.js");
       tab_id: c.tabId,
       document_id: c.documentId,
     };
+  }
+  // The popup and content script mint this only inside a trusted click with
+  // live transient activation. The worker accepts it once, immediately, before
+  // the asynchronous native approval; the injected frame then receives a plain
+  // "authorized" flag instead of relying on activation that has since expired.
+  function validUserGesture(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    if (Object.keys(value).sort().join(",") !== "at,scope,v") return false;
+    if (value.v !== 1 || value.scope !== "credit_card") return false;
+    if (!Number.isSafeInteger(value.at)) return false;
+    const now = Date.now();
+    return value.at <= now + 1000 && now - value.at <= USER_GESTURE_TTL;
   }
   async function current(expected) {
     const now = await capture(expected.frameId || 0);
@@ -1976,8 +2020,15 @@ if (typeof importScripts === "function") importScripts("core.js");
     updateBadge();
     rebuildContextMenus();
   }
-  async function fill(itemId, revision, category = "login") {
+  async function fill(
+    itemId,
+    revision,
+    category = "login",
+    userAuthorized = false,
+  ) {
     if (!validCategory(category)) throw Error("refused");
+    if (category === "credit_card" && userAuthorized !== true)
+      throw Error("refused");
     const row = rows.find(
         (r) =>
           r.id === itemId &&
@@ -2033,13 +2084,23 @@ if (typeof importScripts === "function") importScripts("core.js");
                 category === "identity"
                   ? core.fillIdentityDocument
                   : core.fillCardDocument,
-              args: [
-                c.origin,
-                data,
-                Date.now() + 1500,
-                (c.frameId || 0) > 0,
-                category,
-              ],
+              args:
+                category === "credit_card"
+                  ? [
+                      c.origin,
+                      data,
+                      Date.now() + 1500,
+                      (c.frameId || 0) > 0,
+                      category,
+                      true,
+                    ]
+                  : [
+                      c.origin,
+                      data,
+                      Date.now() + 1500,
+                      (c.frameId || 0) > 0,
+                      category,
+                    ],
             }),
             generation,
           );
@@ -2417,13 +2478,15 @@ if (typeof importScripts === "function") importScripts("core.js");
     return { ...core.generatePassword(options), historyId: "" };
   }
   function recordGenerated(origin, username, generated) {
+    const createdAt = Date.now();
     const entry = {
       id: id(),
       origin,
       username: typeof username === "string" ? username : "",
       password: generated.password,
       profile: generated.profile,
-      createdAt: Date.now(),
+      createdAt,
+      expiresAt: createdAt + GENERATED_TTL,
     };
     generatedHistory.unshift(entry);
     while (generatedHistory.length > HISTORY_LIMIT) {
@@ -2433,6 +2496,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     return entry.id;
   }
   function generatedHistoryView() {
+    pruneGenerated();
     return generatedHistory.map((entry) => ({
       id: entry.id,
       origin: entry.origin,
@@ -3379,10 +3443,19 @@ if (typeof importScripts === "function") importScripts("core.js");
       updateBadge();
     }
   }
-  async function fillItemCategory(itemId, revision, category) {
+  async function fillItemCategory(
+    itemId,
+    revision,
+    category,
+    userAuthorized = false,
+  ) {
     const kind = core.normalizeCategory(category);
     if (kind !== "card" && kind !== "identity") {
       status = "此条目类别不支持填充";
+      return;
+    }
+    if (kind === "card" && userAuthorized !== true) {
+      status = "本次信用卡填充需要明确的用户操作";
       return;
     }
     if (
@@ -3456,7 +3529,7 @@ if (typeof importScripts === "function") importScripts("core.js");
               : core.fillIdentityDocument,
           args:
             kind === "card"
-              ? [c.origin, fill.fields, Date.now() + 1500, true]
+              ? [c.origin, fill.fields, Date.now() + 1500, true, true]
               : [c.origin, fill.fields, Date.now() + 1500, false, "identity"],
         });
       } finally {
@@ -4794,12 +4867,22 @@ if (typeof importScripts === "function") importScripts("core.js");
       else if (message.type === "inline-fill")
         category = message.category ?? "login";
       if (!validCategory(category)) throw Error("refused");
+      if (
+        category === "credit_card" &&
+        !validUserGesture(message.userGesture)
+      )
+        throw Error("refused");
       if (message.type === "inline-fill") {
-        await fill(message.id, message.revision, category);
+        await fill(
+          message.id,
+          message.revision,
+          category,
+          category === "credit_card",
+        );
       } else if (message.type === "inline-fill-identity") {
         await fill(message.id, message.revision, "identity");
       } else if (message.type === "inline-fill-card") {
-        await fill(message.id, message.revision, "credit_card");
+        await fill(message.id, message.revision, "credit_card", true);
       } else if (message.type === "inline-otp") {
         await otp(message.id, message.revision);
       } else {
@@ -5770,6 +5853,7 @@ if (typeof importScripts === "function") importScripts("core.js");
         case "generator-history-fill": {
           if (!/^[a-f0-9]{32}$/.test(message.historyId || ""))
             throw Error("refused");
+          pruneGenerated();
           const c = await capture();
           const entry = generatedHistory.find(
             (item) => item.id === message.historyId,
@@ -5820,6 +5904,7 @@ if (typeof importScripts === "function") importScripts("core.js");
         case "generator-history-save": {
           if (!/^[a-f0-9]{32}$/.test(message.historyId || ""))
             throw Error("refused");
+          pruneGenerated();
           const c = await capture();
           const entry = generatedHistory.find(
             (item) => item.id === message.historyId,
@@ -5980,10 +6065,17 @@ if (typeof importScripts === "function") importScripts("core.js");
           if (
             typeof message.id !== "string" ||
             typeof message.revision !== "string" ||
-            !validCategory(category)
+            !validCategory(category) ||
+            (category === "credit_card" &&
+              !validUserGesture(message.userGesture))
           )
             throw Error("refused");
-          void fill(message.id, message.revision, category).catch(() => {
+          void fill(
+            message.id,
+            message.revision,
+            category,
+            category === "credit_card",
+          ).catch(() => {
             if (requestEpoch === epoch) status = "本次请求被拒绝";
           });
           break;

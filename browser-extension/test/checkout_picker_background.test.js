@@ -254,11 +254,14 @@ async function connect(h) {
   assert.equal(state.connected, true, "native pairing must succeed");
 }
 
+const gesture = () => ({ v: 1, scope: "credit_card", at: CLOCK });
+
 async function openPicker(h) {
   const state = await h.send({
     type: "checkout-frames",
     id: CARD_ID,
     revision: CARD_REV,
+    userGesture: gesture(),
   });
   assert.ok(state && state.checkoutPicker, "picker view expected");
   return state.checkoutPicker;
@@ -279,6 +282,7 @@ const select = (h, picker, choice) =>
     choice,
     id: CARD_ID,
     revision: CARD_REV,
+    userGesture: gesture(),
   });
 
 test("picker exposes only public same-site origins and opaque keys", async () => {

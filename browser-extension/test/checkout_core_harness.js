@@ -182,8 +182,8 @@ function makeFillHarness(options = {}) {
     setRoot(next) {
       document.documentElement = next;
     },
-    call: (origin, fields, deadline, allowTop) => ({
-      ...fn(origin, fields, deadline, allowTop),
+    call: (origin, fields, deadline, allowTop, userAuthorized = true) => ({
+      ...fn(origin, fields, deadline, allowTop, userAuthorized),
     }),
   };
 }

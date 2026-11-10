@@ -26,6 +26,21 @@
     hibpOptInPending = false,
     hibpNotice = "";
   const query = (selector) => document.querySelector(selector);
+  // A card fill is authorized only from a trusted click whose transient
+  // activation is still live in this extension page. The token is consumed by
+  // the worker before it requests native approval, so later asynchronous work
+  // cannot turn a page-load or scripted action into a card fill.
+  function creditCardGesture(event) {
+    try {
+      if (event?.isTrusted !== true) return null;
+      const activation =
+        typeof navigator !== "undefined" ? navigator.userActivation : null;
+      if (activation && activation.isActive !== true) return null;
+      return { v: 1, scope: "credit_card", at: Date.now() };
+    } catch {
+      return null;
+    }
+  }
   // Only an explicit generate reply may repopulate the preview while a
   // lock/hide-time wipe is still unconfirmed; generic state polls may not.
   const TRUSTED_GENERATED_SOURCES = new Set(["generate", "popup-generate"]);
@@ -764,14 +779,18 @@
         (row.title || "（无标题）") +
         (row.subtitle ? " · " + row.subtitle : "");
       button.disabled = state.pending || busy;
-      button.addEventListener("click", () =>
+      button.addEventListener("click", (event) => {
+        const userGesture =
+          category === "credit_card" ? creditCardGesture(event) : null;
+        if (category === "credit_card" && !userGesture) return;
         void act({
           type: "fill",
           id: row.id,
           revision: row.revision,
           ...(category === "login" ? {} : { category }),
-        }),
-      );
+          ...(userGesture ? { userGesture } : {}),
+        });
+      });
       if (category !== "login") {
         container.append(button);
         list.append(container);
@@ -2043,7 +2062,8 @@
   }
   async function startCheckoutPicker(detail, event) {
     // Only a real user gesture may enumerate checkout frames.
-    if (event?.isTrusted !== true) return;
+    const userGesture = creditCardGesture(event);
+    if (!userGesture) return;
     if (!detail || !lastState?.connected || popupInactive || busy) return;
     if (!checkoutChoicesSupported(detail)) {
       toast("当前原生宿主或浏览器不支持选择结账表单");
@@ -2054,7 +2074,12 @@
     const generation = ++actionGeneration;
     busy = true;
     const state = await send(
-      { type: "checkout-frames", id: detail.id, revision: detail.revision },
+      {
+        type: "checkout-frames",
+        id: detail.id,
+        revision: detail.revision,
+        userGesture,
+      },
       generation,
     );
     if (generation !== actionGeneration || popupInactive) return;
@@ -2080,7 +2105,8 @@
   }
   async function chooseCheckoutFrame(picker, choice, event) {
     // An explicit gesture for this exact opaque key; nothing is preselected.
-    if (event?.isTrusted !== true) return;
+    const userGesture = creditCardGesture(event);
+    if (!userGesture) return;
     if (!picker || picker !== checkoutPicker || picker.used) return;
     if (!checkoutChoiceKey(choice)) return;
     if (!picker.candidates.some((entry) => entry.choice === choice)) return;
@@ -2106,6 +2132,7 @@
         choice,
         id: picker.id,
         revision: picker.revision,
+        userGesture,
       },
       generation,
     );
@@ -3613,10 +3640,14 @@
       }
     });
   }
-  async function detailAddSiteAndFill() {
+  async function detailAddSiteAndFill(event) {
     const detail = lastDetail;
     const origin = detailCurrentOrigin();
     if (!detail || !origin || !detailLacksOrigin(detail, origin)) return;
+    const userGesture = checkoutIsCard(detail)
+      ? creditCardGesture(event)
+      : null;
+    if (checkoutIsCard(detail) && !userGesture) return;
     try {
       const reply = await classifyDetailAction({
         type: "add-site",
@@ -3636,6 +3667,7 @@
         type: "fill",
         id: lastDetail.id,
         revision: lastDetail.revision,
+        ...(userGesture ? { userGesture } : {}),
       });
     } catch {
       toast("无法添加到当前网站");
@@ -3999,10 +4031,15 @@
         void startCheckoutPicker(lastDetail, event);
         return;
       }
+      const userGesture = checkoutIsCard(lastDetail)
+        ? creditCardGesture(event)
+        : null;
+      if (checkoutIsCard(lastDetail) && !userGesture) return;
       void classifyDetailAction({
         type: "fill",
         id: lastDetail.id,
         revision: lastDetail.revision,
+        ...(userGesture ? { userGesture } : {}),
       }).catch(() => toast("请先刷新当前网站匹配"));
     });
     els.checkoutCancel.addEventListener("click", (event) =>
@@ -4021,7 +4058,9 @@
         void openAndFill(lastDetail, preferredFillURL(lastDetail));
     });
     els.detailHistoryLoad?.addEventListener("click", () => void loadHistoryVersions());
-    els.detailAddSite?.addEventListener("click", () => void detailAddSiteAndFill());
+    els.detailAddSite?.addEventListener("click", (event) =>
+      void detailAddSiteAndFill(event),
+    );
     els.detailArchive?.addEventListener("click", () => void detailArchiveToggle());
     els.detailTrash.addEventListener("click", () => void detailTrash());
     els.passkeySelect?.addEventListener("change", (event) =>
