@@ -244,9 +244,42 @@ if (typeof importScripts === "function") importScripts("core.js");
     for (const record of stagedSaves.values()) zeroStaged(record);
     stagedSaves.clear();
   }
+  // Generated plaintext is released by its own timer, not only by a later
+  // visit to the popup or history. A released session never comes back: after
+  // lock, disconnect, session reset or a resumed worker there is no entry.
+  let generatedTimer = null,
+    generatedTimerAt = 0;
   function clearGeneratedHistory() {
+    if (generatedTimer) {
+      clearTimeout(generatedTimer);
+      generatedTimer = null;
+    }
+    generatedTimerAt = 0;
     for (const entry of generatedHistory) entry.password = "";
     generatedHistory.length = 0;
+  }
+  function releaseGenerated() {
+    generatedTimer = null;
+    generatedTimerAt = 0;
+    pruneGenerated();
+    scheduleGeneratedPrune();
+  }
+  function scheduleGeneratedPrune() {
+    if (generatedTimer) clearTimeout(generatedTimer);
+    generatedTimer = null;
+    generatedTimerAt = 0;
+    if (!generatedHistory.length) return;
+    let next = Infinity;
+    for (const entry of generatedHistory)
+      if (Number.isSafeInteger(entry.expiresAt) && entry.expiresAt < next)
+        next = entry.expiresAt;
+    if (!Number.isFinite(next)) return;
+    generatedTimerAt = next;
+    generatedTimer = setTimeout(
+      releaseGenerated,
+      Math.max(0, Math.min(next - Date.now(), 24 * 60 * 60 * 1000)),
+    );
+    generatedTimer.unref?.();
   }
   function clearLastFilled() {
     for (const entry of lastFilledCredentials.values()) entry.password = "";
@@ -265,6 +298,19 @@ if (typeof importScripts === "function") importScripts("core.js");
       generatedHistory.splice(index, 1);
     }
   }
+  // A worker that was suspended and resumed starts with an empty heap, so no
+  // old entry can return and there is no timer to reuse. Discard any armed
+  // deadline from a previous session and only arm one for live entries.
+  function resumeGenerated() {
+    if (generatedTimer) {
+      clearTimeout(generatedTimer);
+      generatedTimer = null;
+    }
+    generatedTimerAt = 0;
+    pruneGenerated();
+    scheduleGeneratedPrune();
+  }
+  resumeGenerated();
   function pruneStaged() {
     const now = Date.now();
     for (const [stageId, record] of stagedSaves)
@@ -2493,6 +2539,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       const removed = generatedHistory.pop();
       if (removed) removed.password = "";
     }
+    scheduleGeneratedPrune();
     return entry.id;
   }
   function generatedHistoryView() {

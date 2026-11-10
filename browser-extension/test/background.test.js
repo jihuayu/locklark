@@ -374,6 +374,7 @@ function harness(options = {}) {
     Date: options.clock === undefined ? RealDate : ClockDate,
     setTimeout: (fn, ms) => {
       const h = setTimeout(fn, ms);
+      h.unref?.();
       timers.set(h, { fn, ms });
       return h;
     },
@@ -398,6 +399,9 @@ function harness(options = {}) {
     sent,
     notifications,
     advanceClock: (ms) => (clock += ms),
+    // The timer armed for this exact delay, if any (deadline pruning).
+    timerFor: (ms) => [...timers].find(([, timer]) => timer.ms === ms),
+    pendingDelays: () => [...timers].map(([, timer]) => timer.ms),
     idleInterval: () => idleInterval,
     fireIdle: (state) => idleListener?.(state),
     holdFill: (promise) => (fillWait = promise),
@@ -4455,4 +4459,69 @@ test("credit-card fill refuses a missing or stale explicit gesture", async () =>
     "no native card fill from an expired gesture",
   );
   await h.send({ type: "disconnect" });
+});
+
+function generatedHistoryLength(state) {
+  return state.generatedHistory.length;
+}
+
+test("generated history is released by its timer without a later visit", async () => {
+  const TTL = 5 * 60 * 1000;
+  const h = harness({ clock: 1_700_000_000_000, capabilities: ["generate-v1"] });
+  await ready(h);
+  const generated = await h.send({
+    type: "generate",
+    recordHistory: true,
+    length: 20,
+    digits: true,
+    symbols: true,
+  });
+  assert.equal(generatedHistoryLength(await h.send({ type: "state" })), 1);
+  // No user access after this point: only the deadline timer runs.
+  const armed = h.timerFor(TTL);
+  assert.ok(armed, "a deadline timer is armed for the generated entry");
+  h.advanceClock(TTL);
+  clearTimeout(armed[0]);
+  armed[1].fn();
+  assert.equal(generatedHistoryLength(await h.send({ type: "state" })), 0);
+  const stale = await h.send({
+    type: "generator-history-fill",
+    historyId: generated.historyId,
+  });
+  assert.match(stale.status, /拒绝/);
+  await h.send({ type: "disconnect" });
+});
+
+test("regenerate, lock and disconnect clear the deadline timer", async () => {
+  const TTL = 5 * 60 * 1000;
+  const h = harness({ clock: 1_700_000_000_000, capabilities: ["generate-v1"] });
+  await ready(h);
+  await h.send({ type: "generate", recordHistory: true, length: 20 });
+  assert.ok(h.timerFor(TTL));
+  await h.send({ type: "lock" });
+  assert.equal(h.timerFor(TTL), undefined, "lock clears the timer");
+  assert.equal(generatedHistoryLength(await h.send({ type: "state" })), 0);
+
+  await ready(h);
+  await h.send({ type: "generate", recordHistory: true, length: 20 });
+  assert.ok(h.timerFor(TTL));
+  await h.send({ type: "disconnect" });
+  assert.equal(h.timerFor(TTL), undefined, "disconnect clears the timer");
+  assert.equal(generatedHistoryLength(await h.send({ type: "state" })), 0);
+});
+
+test("a resumed worker neither revives old entries nor keeps a stale deadline", async () => {
+  const TTL = 5 * 60 * 1000;
+  const h = harness({ clock: 1_700_000_000_000, capabilities: ["generate-v1"] });
+  await ready(h);
+  await h.send({ type: "generate", recordHistory: true, length: 20 });
+  assert.ok(h.timerFor(TTL));
+  // The worker is suspended and resumes late: it starts with an empty heap
+  // and no carried-over timer, so nothing is revived.
+  h.advanceClock(TTL + 1);
+  const resumed = harness({ clock: 1_700_000_000_000 + TTL + 1 });
+  assert.equal(generatedHistoryLength(await resumed.send({ type: "state" })), 0);
+  assert.deepEqual(resumed.pendingDelays().filter((ms) => ms === TTL), []);
+  await h.send({ type: "disconnect" });
+  await resumed.send({ type: "disconnect" });
 });
