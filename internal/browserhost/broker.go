@@ -8,8 +8,11 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,6 +33,22 @@ type BrokerHello struct {
 	Mode    string  `json:"mode,omitempty"`
 	Browser Browser `json:"browser,omitempty"`
 	Origin  string  `json:"origin,omitempty"`
+}
+
+// BrowserPairRequest is the native review of one local browser-host peer. The
+// Browser and Origin fields are asserted by the client and are display-only;
+// the OS-authenticated Peer and the user's decision are the authority.
+type BrowserPairRequest struct {
+	Peer    Peer
+	Browser Browser
+	Origin  string
+}
+
+// BrowserPairDecision is the explicit native pairing result. QuickFill is a
+// separate user gesture, never inferred from a browser-supplied field.
+type BrowserPairDecision struct {
+	Approved  bool
+	QuickFill bool
 }
 
 // CLIRunBrokerRequest asks the desktop broker for pinned secret values.
@@ -55,6 +74,10 @@ type BrokerCallbacks struct {
 	NotifyChanged      func()
 	ApproveCLIRun      func(context.Context, Peer, CLIRunBrokerRequest) (bool, error)
 	HandleCLIRun       func(context.Context, Peer, CLIRunBrokerRequest) (CLIRunBrokerResponse, error)
+	// ApproveBrowserPair is the explicit browser pairing gate. It is required
+	// for every brokered browser connection; a nil callback refuses pairing.
+	// The callback may block while the native owner decides.
+	ApproveBrowserPair func(context.Context, BrowserPairRequest) (BrowserPairDecision, error)
 	// NewClipboard is the only native-clipboard-lease-v1 capability source.
 	// It returns one manager and one immutable clear TTL per connection; a
 	// zero TTL disables automatic clearing. Without this callback the browser
@@ -160,7 +183,13 @@ func (b *Broker) NotifyUnlocked(s *personal.Session, epoch uint64, quickFill boo
 	}
 	b.mu.Unlock()
 	for _, c := range conns {
-		_ = c.BindDesktopSession(s, epoch, quickFill)
+		if c.PairAuthorized() {
+			_ = c.BindDesktopSession(s, epoch, quickFill)
+		} else {
+			// A connection that connected while the desktop was locked may
+			// already be waiting in hello. It still needs explicit approval.
+			go c.requestBrowserPair(s, epoch)
+		}
 	}
 	if b.callbacks.NotifyChanged != nil {
 		b.callbacks.NotifyChanged()
@@ -209,7 +238,7 @@ func (b *Broker) neverOrigins() []string {
 func (b *Broker) serve(conn net.Conn) {
 	defer conn.Close()
 	peer, e := authenticatedPeer(conn)
-	if e != nil {
+	if e != nil || !peerProcessAllowed(peer) {
 		return
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
@@ -274,6 +303,7 @@ func (b *Broker) serveBrowser(conn net.Conn, peer Peer, hello BrokerHello) {
 		}
 	})
 	c.SetBroker(b)
+	c.setBrokerPeer(peer, hello)
 	if !b.addConn(c) {
 		return
 	}
@@ -281,11 +311,8 @@ func (b *Broker) serveBrowser(conn net.Conn, peer Peer, hello BrokerHello) {
 		b.dropConn(c)
 		c.Close()
 	}()
-	if b.callbacks.CurrentSession != nil {
-		if s, epoch, quick := b.callbacks.CurrentSession(); s != nil && s.Unlocked() {
-			_ = c.bindDesktopSession(s, epoch, quick, false)
-		}
-	}
+	// No session authority is granted here. A browser connection must send
+	// "hello" and pass ApproveBrowserPair before any capability is issued.
 	for {
 		req, e := ReadRequest(conn)
 		if e != nil {
@@ -380,6 +407,31 @@ func writeFrame(w io.Writer, raw []byte) error {
 		frame = frame[n:]
 	}
 	return nil
+}
+
+// peerProcessAllowed checks the OS-authenticated process identity. It is a
+// defence in depth on top of same-UID socket credentials: the browser relay is
+// always a Locklark browser host (or this same executable in tests/embedders).
+// The request's declared Browser/Origin never decide this.
+func peerProcessAllowed(peer Peer) bool {
+	if peer.PID == 0 || peer.User == "" {
+		return false
+	}
+	base := filepath.Base(peer.Process)
+	if base == "" || base == "." || base == string(filepath.Separator) {
+		return false
+	}
+	// macOS reports only the 16-byte P_comm, which truncates the browser host
+	// name to "locklark-browser"; longer platforms report the full basename.
+	if strings.HasPrefix(base, "locklark-browser") {
+		return true
+	}
+	self, e := os.Executable()
+	if e != nil {
+		return false
+	}
+	selfBase := filepath.Base(self)
+	return base == selfBase || strings.HasPrefix(selfBase, base) || strings.HasPrefix(base, selfBase)
 }
 
 // RelayStdio dials the desktop broker and relays framed native messages.

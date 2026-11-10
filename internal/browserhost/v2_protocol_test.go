@@ -39,7 +39,7 @@ func v2Fixture(t *testing.T) (*Connection, *memoryPipe, *personal.Session, strin
 	if e := c.Handle(Request{V: 1, ID: reqID(1), Type: "hello"}); e != nil {
 		t.Fatal(e)
 	}
-	if e := c.ApprovePair(s); e != nil {
+	if e := c.ApproveQuickPair(s); e != nil {
 		t.Fatal(e)
 	}
 	cap := out.responses(t)[0].Capability

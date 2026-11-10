@@ -314,3 +314,101 @@ func TestConnectionSlowWriteLockIsImmediate(t *testing.T) {
 		t.Fatal("write hung")
 	}
 }
+
+// A shared desktop capability is per-browser-window authority. Closing it or
+// losing its pipe must revoke only that connection, never request a lock on the
+// owner's shared *personal.Session.
+func TestSharedConnectionCloseDoesNotLockDesktopSession(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "shared-close.ll")
+	key := bytes.Repeat([]byte{6}, 16)
+	if e := personal.Create(path, "fixture", key); e != nil {
+		t.Fatal(e)
+	}
+	s, e := personal.UnlockSession(path, []byte("fixture"), key, time.Minute)
+	if e != nil {
+		t.Fatal(e)
+	}
+	t.Cleanup(s.Lock)
+	out := &memoryPipe{}
+	c := NewDesktopConnection(NewWriter(out, time.Second), nil)
+	if e := c.BindDesktopSession(s, 3, true); e != nil {
+		t.Fatal(e)
+	}
+	c.Close()
+	if !s.Unlocked() {
+		t.Fatal("shared connection close locked the desktop session")
+	}
+	if !c.Snapshot().Closed {
+		t.Fatal("closed connection still reported open")
+	}
+}
+
+type failingPipe struct{}
+
+func (failingPipe) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
+func (failingPipe) Close() error              { return nil }
+
+func TestSharedPipeFailureDoesNotLockDesktopSession(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "shared-write.ll")
+	key := bytes.Repeat([]byte{8}, 16)
+	if e := personal.Create(path, "fixture", key); e != nil {
+		t.Fatal(e)
+	}
+	s, e := personal.UnlockSession(path, []byte("fixture"), key, time.Minute)
+	if e != nil {
+		t.Fatal(e)
+	}
+	t.Cleanup(s.Lock)
+	out := &memoryPipe{}
+	c := NewDesktopConnection(NewWriter(out, time.Second), nil)
+	if e := c.BindDesktopSession(s, 4, false); e != nil {
+		t.Fatal(e)
+	}
+	c.writer = NewWriter(failingPipe{}, time.Second)
+	if e := c.response(Response{Type: "status"}); e == nil {
+		t.Fatal("broken pipe response succeeded")
+	}
+	if !s.Unlocked() {
+		t.Fatal("shared pipe failure locked the desktop session")
+	}
+}
+
+// A lock request is a vault mutation and therefore needs the current
+// capability. An unauthenticated frame must not even reach the native lock
+// callback.
+func TestUnauthenticatedLockIsRefused(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lock-cap.ll")
+	key := bytes.Repeat([]byte{10}, 16)
+	if e := personal.Create(path, "fixture", key); e != nil {
+		t.Fatal(e)
+	}
+	s, e := personal.UnlockSession(path, []byte("fixture"), key, time.Minute)
+	if e != nil {
+		t.Fatal(e)
+	}
+	t.Cleanup(s.Lock)
+	locks := 0
+	b := NewBroker(BrokerCallbacks{RequestLock: func() { locks++ }})
+	out := &memoryPipe{}
+	c := NewDesktopConnection(NewWriter(out, time.Second), nil)
+	c.SetBroker(b)
+	if e := c.BindDesktopSession(s, 5, false); e != nil {
+		t.Fatal(e)
+	}
+	if e := c.Handle(Request{V: 1, ID: reqID(70), Type: "lock"}); e != nil {
+		t.Fatal(e)
+	}
+	if locks != 0 || !s.Unlocked() {
+		t.Fatal("unauthenticated lock reached the desktop")
+	}
+	all := out.responses(t)
+	if all[len(all)-1].Type != "error" {
+		t.Fatal("unauthenticated lock was not refused")
+	}
+	if e := c.Handle(Request{V: 1, ID: reqID(71), Type: "lock", Capability: c.capability}); e != nil {
+		t.Fatal(e)
+	}
+	if locks != 1 {
+		t.Fatal("authenticated lock did not reach the desktop")
+	}
+}

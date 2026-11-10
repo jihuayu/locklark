@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -118,9 +119,25 @@ func TestDesktopIPCBrokerUnlockLockAndCLIRun(t *testing.T) {
 		defer mu.Unlock()
 		return approved, nil
 	}
+	a.browserPairApprover = func(ctx context.Context, req browserhost.BrowserPairRequest) (browserhost.BrowserPairDecision, error) {
+		if req.Peer.PID == 0 || req.Peer.User == "" {
+			t.Errorf("browser pair request without OS peer: %#v", req)
+		}
+		return browserhost.BrowserPairDecision{Approved: true, QuickFill: true}, nil
+	}
 	defer a.stopBrowserBroker()
 
-	dir := t.TempDir()
+	// Use the standard sticky temp root explicitly: some CI TMPDIR ancestors
+	// are not private enough for localpath, and this test must exercise the
+	// real socket entrypoint rather than silently falling back.
+	dir, e := os.MkdirTemp("/tmp", "llb-")
+	if e != nil {
+		t.Fatal(e)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	if os.Chmod(dir, 0700) != nil {
+		t.Fatal("private test directory")
+	}
 	if _, e := localpath.TrustedTemporaryParent(dir); e == nil {
 		t.Setenv("LOCKLARK_BROWSER_SOCKET", filepath.Join(dir, "b.sock"))
 		// The relay dials once; start its listener before launching the client.
@@ -159,15 +176,11 @@ func TestDesktopIPCBrokerUnlockLockAndCLIRun(t *testing.T) {
 		if a.session == nil {
 			t.Fatal("desktop did not unlock")
 		}
-		unlocked := client.recvType(t, "unlocked")
-		capability, _ := unlocked["capability"].(string)
-		if !desktopCapabilityOK(capability) || unlocked["quick_fill"] != true {
-			t.Fatalf("unlocked push: %#v", unlocked)
-		}
 		client.send(t, map[string]any{"v": 1, "id": reqIDDesktop(2), "type": "hello"})
 		paired := client.recvType(t, "paired")
-		if paired["capability"] != capability {
-			t.Fatalf("pair: %#v", paired)
+		capability, _ := paired["capability"].(string)
+		if !desktopCapabilityOK(capability) || paired["quick_fill"] != true {
+			t.Fatalf("explicit pair: %#v", paired)
 		}
 		a.Lock()
 		client.recvType(t, "locked")

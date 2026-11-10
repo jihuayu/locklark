@@ -14,21 +14,21 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jihuayu/locklark/internal/localpath"
 	"github.com/jihuayu/locklark/internal/personal"
 )
 
 func brokerTestSocket(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
-	if os.Chmod(dir, 0700) != nil {
+	// Keep the absolute socket path short: listenLocal intentionally bounds it
+	// at 100 bytes, and t.TempDir includes the long test name.
+	dir, e := os.MkdirTemp("", "llb-")
+	if e != nil || os.Chmod(dir, 0700) != nil {
 		t.Fatal("private test directory")
 	}
-	if _, e := localpath.TrustedTemporaryParent(dir); e != nil {
-		old := trustedBrokerParent
-		trustedBrokerParent = func(string) (string, error) { return dir, nil }
-		t.Cleanup(func() { trustedBrokerParent = old })
-	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	old := trustedBrokerParent
+	trustedBrokerParent = func(string) (string, error) { return dir, nil }
+	t.Cleanup(func() { trustedBrokerParent = old })
 	sock := filepath.Join(dir, "b.sock")
 	t.Setenv("LOCKLARK_BROWSER_SOCKET", sock)
 	return sock
@@ -152,6 +152,12 @@ func TestBrokerSharedUnlockAndLockPropagation(t *testing.T) {
 			default:
 			}
 		},
+		ApproveBrowserPair: func(ctx context.Context, req BrowserPairRequest) (BrowserPairDecision, error) {
+			if req.Peer.PID == 0 || req.Peer.User == "" {
+				t.Errorf("pair request without OS peer: %#v", req)
+			}
+			return BrowserPairDecision{Approved: true, QuickFill: true}, nil
+		},
 	})
 	if e := broker.Start(endpoint); e != nil {
 		t.Fatal(e)
@@ -164,25 +170,21 @@ func TestBrokerSharedUnlockAndLockPropagation(t *testing.T) {
 	if status["desktop_connected"] != true || status["unlocked"] != false || status["vault_locked"] != true {
 		t.Fatalf("locked status: %#v", status)
 	}
+	// The extension's hello waits for the owner's explicit pairing decision.
+	client.send(t, map[string]any{"v": 1, "id": reqID(2), "type": "hello"})
 
 	s, row := brokerTestSession(t)
 	mu.Lock()
 	session = s
 	mu.Unlock()
 	broker.NotifyUnlocked(s, 1, true)
-	unlocked := client.recvType(t, "unlocked")
-	capability, _ := unlocked["capability"].(string)
-	if !token.MatchString(capability) || unlocked["quick_fill"] != true {
-		t.Fatalf("unlocked push: %#v", unlocked)
-	}
-	if caps, ok := unlocked["capabilities"].([]any); !ok || len(caps) != len(SupportedCapabilities()) {
-		t.Fatalf("capabilities: %#v", unlocked["capabilities"])
-	}
-
-	client.send(t, map[string]any{"v": 1, "id": reqID(2), "type": "hello"})
 	paired := client.recvType(t, "paired")
-	if paired["capability"] != capability || paired["quick_fill"] != true {
-		t.Fatalf("auto pair: %#v", paired)
+	capability, _ := paired["capability"].(string)
+	if !token.MatchString(capability) || paired["quick_fill"] != true {
+		t.Fatalf("explicit pair: %#v", paired)
+	}
+	if caps, ok := paired["capabilities"].([]any); !ok || len(caps) != len(SupportedCapabilities()) {
+		t.Fatalf("capabilities: %#v", paired["capabilities"])
 	}
 	for _, key := range []string{"v", "id", "type", "capability", "quick_fill", "capabilities"} {
 		if _, ok := paired[key]; !ok {
@@ -221,7 +223,7 @@ func TestBrokerSharedUnlockAndLockPropagation(t *testing.T) {
 	session = s2
 	mu.Unlock()
 	broker.NotifyUnlocked(s2, 2, true)
-	unlocked = client.recvType(t, "unlocked")
+	unlocked := client.recvType(t, "unlocked")
 	capability, _ = unlocked["capability"].(string)
 	if !token.MatchString(capability) {
 		t.Fatalf("re-unlock capability: %#v", unlocked)
@@ -312,5 +314,47 @@ func TestBrokerCLIRunApprovalAndFallback(t *testing.T) {
 	}
 	if _, e := RequestCLIRun(ctx, req); !errors.Is(e, ErrBrokerUnavailable) {
 		t.Fatalf("stopped broker: %v", e)
+	}
+}
+
+// A brokered browser gets no capability unless the native pairing callback
+// explicitly approves. A refused hello must fail closed, not auto-pair.
+func TestBrokerBrowserPairingIsExplicitAndRefusable(t *testing.T) {
+	endpoint := brokerTestSocket(t)
+	s, _ := brokerTestSession(t)
+	requests := make(chan BrowserPairRequest, 1)
+	broker := NewBroker(BrokerCallbacks{
+		CurrentSession: func() (*personal.Session, uint64, bool) { return s, 7, true },
+		ApproveBrowserPair: func(ctx context.Context, req BrowserPairRequest) (BrowserPairDecision, error) {
+			requests <- req
+			return BrowserPairDecision{Approved: false}, nil
+		},
+	})
+	if e := broker.Start(endpoint); e != nil {
+		t.Fatal(e)
+	}
+	defer broker.Close()
+	client := startRelayClient(t)
+	client.send(t, map[string]any{"v": 1, "id": reqID(80), "type": "hello"})
+	out := client.recvType(t, "error")
+	if out["error"] != "refused" {
+		t.Fatalf("refused pairing: %#v", out)
+	}
+	select {
+	case req := <-requests:
+		if req.Peer.PID == 0 || req.Peer.User == "" || req.Origin == "" {
+			t.Fatalf("pair review lacked authenticated peer or extension identity: %#v", req)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("pairing callback was not invoked")
+	}
+}
+
+func TestPeerProcessAllowedRejectsArbitrarySameUIDProcess(t *testing.T) {
+	if peerProcessAllowed(Peer{User: "UID 501", PID: 1, Process: "/tmp/evil"}) {
+		t.Fatal("arbitrary process accepted as a browser host")
+	}
+	if !peerProcessAllowed(Peer{User: "UID 501", PID: 2, Process: "/opt/locklark-browser-chromium"}) {
+		t.Fatal("browser host rejected")
 	}
 }

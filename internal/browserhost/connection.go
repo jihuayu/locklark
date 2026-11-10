@@ -1,6 +1,7 @@
 package browserhost
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"sync"
@@ -14,6 +15,22 @@ import (
 type Pending struct {
 	ID, Origin, ItemID, Revision, Title string
 	Until                               time.Time
+}
+
+// V2ApprovalView is the native review of one non-quick-fill V2 disclosure or
+// mutation. It carries only protocol selectors; mutation payloads, passwords
+// and field values never enter the view.
+type V2ApprovalView struct {
+	ID, Type, Origin, ItemID, Revision, Title string
+	Deadline                                  time.Time
+}
+
+type pendingV2 struct {
+	request     Request
+	title       string
+	deadline    time.Time
+	epoch       uint64
+	cancelEpoch uint64
 }
 
 // ProfileView is the public native review of one sensitive profile fill. It
@@ -43,6 +60,7 @@ type View struct {
 	SaveStatus              string
 	SaveRequestID           string
 	Profile                 *ProfileView
+	V2                      *V2ApprovalView
 	Pair                    bool
 	Paired                  bool
 	Closed                  bool
@@ -68,6 +86,11 @@ type Connection struct {
 	stagedBusy              bool
 	neverOrigins            map[string]bool
 	desktopShared           bool
+	pairAuthorized          bool
+	pairQuickFill           bool
+	pairing                 bool
+	peer                    Peer
+	helloInfo               BrokerHello
 	broker                  *Broker
 	seenOrder               []string
 	seenPos                 int
@@ -76,6 +99,7 @@ type Connection struct {
 	profileCheckout         *BrowserCheckout
 	matchedProfiles         map[string]string
 	profile                 *pendingProfile
+	v2pending               *pendingV2
 	generation              atomic.Uint64
 	cancelEpoch             atomic.Uint64
 	pendingEpoch            uint64
@@ -118,6 +142,22 @@ func NewDesktopConnection(writer *Writer, notify func()) *Connection {
 	return c
 }
 
+// setBrokerPeer records the OS-authenticated peer and the bounded hello facts.
+// Only the native pairing approval may turn this into session authority.
+func (c *Connection) setBrokerPeer(peer Peer, hello BrokerHello) {
+	c.mu.Lock()
+	c.peer, c.helloInfo = peer, hello
+	c.mu.Unlock()
+}
+
+// PairAuthorized reports whether the native owner explicitly paired this
+// brokered connection. It never becomes true through a browser frame.
+func (c *Connection) PairAuthorized() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.pairAuthorized
+}
+
 // SetBroker attaches the local IPC broker that owns desktop callbacks.
 func (c *Connection) SetBroker(b *Broker) {
 	c.broker = b
@@ -136,13 +176,22 @@ func (c *Connection) BindDesktopSession(s *personal.Session, epoch uint64, quick
 }
 
 func (c *Connection) bindDesktopSession(s *personal.Session, epoch uint64, quickFill, announce bool) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.bindDesktopSessionLocked(s, epoch, quickFill, announce)
+}
+
+func (c *Connection) bindDesktopSessionLocked(s *personal.Session, epoch uint64, quickFill, announce bool) error {
 	if s == nil || !s.Unlocked() {
 		return ErrProtocol
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.closed.Load() {
 		return ErrProtocol
+	}
+	if c.pairAuthorized {
+		// The native pairing choice is the only source of quick-fill authority
+		// for a brokered connection.
+		quickFill = c.pairQuickFill
 	}
 	c.desktopShared = true
 	c.sessionEpoch = epoch
@@ -179,6 +228,63 @@ func (c *Connection) bindDesktopSession(s *personal.Session, epoch uint64, quick
 	return c.response(Response{Type: "unlocked", Capability: c.capability, QuickFill: quickFill, DesktopConnected: true, Unlocked: true, SessionEpoch: epoch, Capabilities: c.pairedCapabilities()})
 }
 
+// requestBrowserPair performs the explicit native pairing review off the
+// connection mutex. It is the only path that can grant a brokered browser a
+// capability. The peer is OS-authenticated; Browser/Origin are display-only.
+func (c *Connection) requestBrowserPair(s *personal.Session, epoch uint64) {
+	if s == nil || !s.Unlocked() {
+		return
+	}
+	c.mu.Lock()
+	id := c.hello
+	hello := c.helloInfo
+	peer := c.peer
+	b := c.broker
+	if id == "" || c.closed.Load() || c.capability != "" || c.pairing || !c.now().Before(c.pairUntil) {
+		c.mu.Unlock()
+		return
+	}
+	c.pairing = true
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		c.pairing = false
+		c.mu.Unlock()
+	}()
+	if b == nil || b.callbacks.ApproveBrowserPair == nil {
+		c.finishBrowserPairRefusal(id)
+		return
+	}
+	decision, err := b.callbacks.ApproveBrowserPair(context.Background(), BrowserPairRequest{Peer: peer, Browser: hello.Browser, Origin: hello.Origin})
+	if err != nil || !decision.Approved {
+		c.finishBrowserPairRefusal(id)
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	defer c.changed()
+	if c.hello != id || c.closed.Load() || c.capability != "" || !c.now().Before(c.pairUntil) {
+		return
+	}
+	c.pairAuthorized = true
+	c.pairQuickFill = decision.QuickFill
+	if err := c.bindDesktopSessionLocked(s, epoch, decision.QuickFill, false); err != nil {
+		c.hello = ""
+		go c.refuse(id)
+	}
+}
+
+func (c *Connection) finishBrowserPairRefusal(id string) {
+	c.mu.Lock()
+	if c.hello == id {
+		c.hello = ""
+	}
+	c.mu.Unlock()
+	if id != "" {
+		go c.refuse(id)
+	}
+}
+
 // InvalidateDesktopLock revokes session authority and pushes "locked" without
 // closing the relay pipe.
 func (c *Connection) InvalidateDesktopLock() { c.Invalidate() }
@@ -192,7 +298,10 @@ func (c *Connection) response(r Response) error {
 	defer r.Clear()
 	if e := c.writer.Write(r); e != nil {
 		c.closed.Store(true)
-		if s := c.session.Load(); s != nil {
+		// A broken pipe belongs to this one capability. A shared desktop
+		// connection must never lock the owner's whole vault because a browser
+		// window went away.
+		if s := c.session.Load(); s != nil && !c.desktopShared {
 			s.RequestLock()
 		}
 		return e
@@ -221,6 +330,7 @@ func (c *Connection) invalidate() {
 	c.profileCheckout = nil
 	c.matchedProfiles = map[string]string{}
 	c.profile = nil
+	c.clearV2PendingLocked(c.v2pending)
 	if c.save != nil {
 		if !c.save.gate.Cancel() && c.save.gate.CommitWon() {
 			c.save.uncertain.Store(true)
@@ -288,6 +398,11 @@ func (c *Connection) expire() {
 		id := p.request.ID
 		c.clearProfilePendingLocked(p)
 		c.profileCheckout = nil
+		go c.refuse(id)
+	}
+	if p := c.v2pending; p != nil && !now.Before(p.deadline) {
+		id := p.request.ID
+		c.clearV2PendingLocked(p)
 		go c.refuse(id)
 	}
 	c.expireStaged()
@@ -386,6 +501,12 @@ func (c *Connection) Handle(r Request) error {
 		return c.response(Response{ID: r.ID, Type: "status", DesktopConnected: c.desktopShared, Unlocked: c.unlocked(), VaultLocked: !c.unlocked(), Capabilities: c.capabilities()})
 	}
 	if r.Type == "lock" || r.Type == "vault-lock" {
+		// Only an authenticated capability may lock. Handling this before the
+		// capability check let any local process that reached the socket lock
+		// the unlocked desktop vault without pairing.
+		if !allowed {
+			return c.refuse(r.ID)
+		}
 		if c.broker != nil && c.broker.callbacks.RequestLock != nil {
 			c.broker.callbacks.RequestLock()
 		}
@@ -398,16 +519,67 @@ func (c *Connection) Handle(r Request) error {
 	if !allowed {
 		return c.refuse(r.ID)
 	}
+	if p := c.v2pending; p != nil {
+		if r.Type == "cancel" {
+			id := p.request.ID
+			c.clearV2PendingLocked(p)
+			if e := c.refuse(id); e != nil {
+				return e
+			}
+			return c.response(Response{ID: r.ID, Type: "cancelled"})
+		}
+		if r.Type == "attachment-cancel" {
+			return c.attachmentCancel(r)
+		}
+		return c.refuse(r.ID)
+	}
+	if !c.quickFill && requiresV2NativeApproval(r.Type) {
+		if c.profile != nil || c.pending != nil || c.save != nil || c.otp != nil || c.passkey != nil || c.signal != nil || c.stagedBusy || c.upload != nil {
+			return c.refuse(r.ID)
+		}
+		if e := c.startV2Approval(r); e != nil {
+			return e
+		}
+		// The pending review owns the private payload from here. Detach the
+		// Handle copy so its deferred Clear cannot wipe the stored request.
+		r.payload = nil
+		return nil
+	}
 	if r.Type == "hello" {
 		if c.desktopShared {
-			if s := c.session.Load(); s != nil && s.Unlocked() {
-				if c.capability == "" {
-					return c.bindDesktopSession(s, c.sessionEpoch, c.quickFill, false)
-				}
+			if c.capability != "" {
 				return c.response(Response{ID: r.ID, Type: "paired", Capability: c.capability, QuickFill: c.quickFill, Capabilities: c.pairedCapabilities()})
 			}
-			if c.broker != nil && c.broker.callbacks.RequestUnlockFocus != nil {
-				c.broker.callbacks.RequestUnlockFocus()
+			if s := c.session.Load(); s != nil && s.Unlocked() {
+				if c.broker != nil && !c.pairAuthorized {
+					if c.hello != "" || c.pairing {
+						return c.refuse(r.ID)
+					}
+					c.hello = r.ID
+					c.pairUntil = c.now().Add(time.Minute)
+					go c.requestBrowserPair(s, c.sessionEpoch)
+					return nil
+				}
+				return c.bindDesktopSessionLocked(s, c.sessionEpoch, c.quickFill, false)
+			}
+			// A brokered connection may only obtain a capability through the
+			// explicit native pairing callback. Mark the hello pending and let
+			// NotifyUnlocked start or retry that review.
+			if c.broker != nil {
+				if c.broker.callbacks.CurrentSession != nil {
+					if s, epoch, ok := c.broker.callbacks.CurrentSession(); ok && s != nil && s.Unlocked() {
+						if c.hello != "" || c.pairing {
+							return c.refuse(r.ID)
+						}
+						c.hello = r.ID
+						c.pairUntil = c.now().Add(time.Minute)
+						go c.requestBrowserPair(s, epoch)
+						return nil
+					}
+				}
+				if c.broker.callbacks.RequestUnlockFocus != nil {
+					c.broker.callbacks.RequestUnlockFocus()
+				}
 			}
 		}
 		if c.hello != "" || c.capability != "" {
@@ -692,7 +864,7 @@ func (c *Connection) Invalidate() {
 	if !c.closed.Load() {
 		go c.response(Response{Type: "locked"})
 	}
-	if s := c.session.Swap(nil); s != nil {
+	if s := c.session.Swap(nil); s != nil && !c.desktopShared {
 		s.RequestLock()
 	}
 	if c.mu.TryLock() {
@@ -705,12 +877,96 @@ func (c *Connection) Invalidate() {
 func (c *Connection) Close() {
 	c.closed.Store(true)
 	c.revokeClipboard(true)
-	if s := c.session.Load(); s != nil {
+	if s := c.session.Load(); s != nil && !c.desktopShared {
 		s.RequestLock()
 	}
 	c.writer.Close()
 	c.Invalidate()
 }
+func requiresV2NativeApproval(kind string) bool {
+	switch kind {
+	case "item-copy-field", "item-reveal-field", "item-create", "item-edit", "item-save",
+		"item-state", "item-restore-history", "passkey-remove",
+		"stage-save", "commit-staged-save",
+		"attachment-read", "attachment-commit", "attachment-remove":
+		return true
+	}
+	return false
+}
+
+// startV2Approval reserves one public review. The caller holds c.mu. The
+// request payload stays private in memory and is cleared on rejection, expiry,
+// lock or disconnect.
+func (c *Connection) startV2Approval(r Request) error {
+	title := r.Title
+	if title == "" {
+		title = r.Origin
+	}
+	c.v2pending = &pendingV2{request: r, title: title, deadline: c.now().Add(30 * time.Second), epoch: c.epoch, cancelEpoch: c.cancelEpoch.Load()}
+	c.changed()
+	return nil
+}
+
+func (c *Connection) clearV2PendingLocked(p *pendingV2) {
+	if p == nil || c.v2pending != p {
+		return
+	}
+	p.request.Clear()
+	c.v2pending = nil
+}
+
+// ApproveV2 is called only by the native owner's explicit button. It
+// revalidates the exact reservation before executing the original request.
+func (c *Connection) ApproveV2(id string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	defer c.changed()
+	c.syncEpoch()
+	c.expire()
+	p := c.v2pending
+	if p == nil || p.request.ID != id || p.epoch != c.epoch || p.cancelEpoch != c.cancelEpoch.Load() || !c.valid(p.request.Capability) || !c.now().Before(p.deadline) {
+		return ErrProtocol
+	}
+	r := p.request
+	c.v2pending = nil
+	return c.executeV2Approved(r)
+}
+
+func (c *Connection) executeV2Approved(r Request) error {
+	switch r.Type {
+	case "stage-save", "commit-staged-save":
+		if handled, e := c.stagedMessage(r); handled {
+			return e
+		}
+	case "attachment-commit", "attachment-remove", "attachment-read":
+		if handled, e := c.attachmentMessage(r); handled {
+			return e
+		}
+	default:
+		if isV2Operation(r.Type) {
+			return c.handleV2(r)
+		}
+	}
+	return c.refuse(r.ID)
+}
+
+// RejectV2 is the native refusal for one exact pending V2 review. It never
+// executes the stored mutation or disclosure.
+func (c *Connection) RejectV2(id string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	defer c.changed()
+	c.syncEpoch()
+	c.expire()
+	p := c.v2pending
+	if p == nil || p.request.ID != id {
+		return ErrProtocol
+	}
+	requestID := p.request.ID
+	c.clearV2PendingLocked(p)
+	return c.refuse(requestID)
+}
+
 func (c *Connection) Snapshot() View {
 	if !c.mu.TryLock() {
 		return View{Busy: true, Closed: c.closed.Load()}
@@ -730,6 +986,9 @@ func (c *Connection) Snapshot() View {
 	v.SaveRequestID = c.saveRequestID
 	v.OTP, v.OTPStatus = c.otpSnapshot()
 	v.OTPRequestID = c.otpRequestID
+	if p := c.v2pending; p != nil {
+		v.V2 = &V2ApprovalView{ID: p.request.ID, Type: p.request.Type, Origin: p.request.Origin, ItemID: p.request.ItemID, Revision: p.request.Revision, Title: p.title, Deadline: p.deadline}
+	}
 	if p := c.profile; p != nil {
 		review := &ProfileView{ID: p.request.ID, Origin: p.request.Origin, Title: p.title, ItemID: p.request.ItemID, Revision: p.request.Revision, Category: p.category, Deadline: p.deadline}
 		if p.checkout != nil {

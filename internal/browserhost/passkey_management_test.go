@@ -242,7 +242,7 @@ func pairedToSession(t *testing.T, s *personal.Session) (*Connection, *memoryPip
 	if err := c.Handle(Request{V: 1, ID: reqID(90), Type: "hello"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.ApprovePair(s); err != nil {
+	if err := c.ApproveQuickPair(s); err != nil {
 		t.Fatal(err)
 	}
 	return c, out, out.responses(t)[0].Capability
