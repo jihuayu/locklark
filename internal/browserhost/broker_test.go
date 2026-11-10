@@ -350,11 +350,158 @@ func TestBrokerBrowserPairingIsExplicitAndRefusable(t *testing.T) {
 	}
 }
 
-func TestPeerProcessAllowedRejectsArbitrarySameUIDProcess(t *testing.T) {
-	if peerProcessAllowed(Peer{User: "UID 501", PID: 1, Process: "/tmp/evil"}) {
-		t.Fatal("arbitrary process accepted as a browser host")
+func TestPeerProcessAllowedUsesExactHostNamesAndInstallLocation(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name string) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if e := os.WriteFile(path, []byte("fixture"), 0700); e != nil {
+			t.Fatal(e)
+		}
+		return path
 	}
-	if !peerProcessAllowed(Peer{User: "UID 501", PID: 2, Process: "/opt/locklark-browser-chromium"}) {
-		t.Fatal("browser host rejected")
+	self := write("locklark-desktop")
+	host := write("locklark-browser-chromium")
+	evilPrefix := write("locklark-browser-chromium-evil")
+	shortPrefix := write("locklark-browser")
+	otherDir := filepath.Join(dir, "other")
+	if e := os.Mkdir(otherDir, 0700); e != nil {
+		t.Fatal(e)
+	}
+	otherHost := filepath.Join(otherDir, "locklark-browser-chromium")
+	if e := os.WriteFile(otherHost, []byte("fixture"), 0700); e != nil {
+		t.Fatal(e)
+	}
+	cases := []struct {
+		name string
+		path string
+		goos string
+		want bool
+	}{
+		{"exact executable", self, "linux", true},
+		{"installed host beside desktop", host, "linux", true},
+		{"longer prefix", evilPrefix, "linux", false},
+		{"short prefix", shortPrefix, "linux", false},
+		{"same basename in another directory", otherHost, "linux", false},
+		{"bare basename", "locklark-browser-chromium", "linux", false},
+		{"arbitrary executable", "/tmp/evil", "linux", false},
+	}
+	for _, tc := range cases {
+		peer := Peer{User: "UID 501", PID: 2, Process: tc.path}
+		if got := peerProcessAllowedFor(peer, self, tc.goos); got != tc.want {
+			t.Fatalf("%s: got %v want %v", tc.name, got, tc.want)
+		}
+	}
+
+	apps := filepath.Join(dir, "Applications")
+	desktop := filepath.Join(apps, "Locklark.app", "Contents", "MacOS", "locklark-desktop")
+	safari := filepath.Join(apps, "Locklark Safari.app", "Contents", "MacOS", "locklark-browser-safari")
+	for _, path := range []string{desktop, safari} {
+		if e := os.MkdirAll(filepath.Dir(path), 0700); e != nil {
+			t.Fatal(e)
+		}
+		if e := os.WriteFile(path, []byte("fixture"), 0700); e != nil {
+			t.Fatal(e)
+		}
+	}
+	if !peerProcessAllowedFor(Peer{User: "UID 501", PID: 3, Process: safari}, desktop, "darwin") {
+		t.Fatal("sibling Safari helper rejected")
+	}
+	if peerProcessAllowedFor(Peer{User: "UID 501", PID: 3, Process: safari}, desktop, "linux") {
+		t.Fatal("Safari sibling location accepted off macOS")
+	}
+}
+
+func pairingTestConnection(t *testing.T) (*Connection, *memoryPipe, *personal.Session, *Broker) {
+	t.Helper()
+	s, _ := brokerTestSession(t)
+	out := &memoryPipe{}
+	c := NewDesktopConnection(NewWriter(out, time.Second), nil)
+	return c, out, s, NewBroker(BrokerCallbacks{})
+}
+
+func TestBrokerPairingCloseCancelsNativeReview(t *testing.T) {
+	c, out, s, b := pairingTestConnection(t)
+	entered := make(chan struct{})
+	canceled := make(chan struct{})
+	b.callbacks.ApproveBrowserPair = func(ctx context.Context, req BrowserPairRequest) (BrowserPairDecision, error) {
+		close(entered)
+		<-ctx.Done()
+		close(canceled)
+		return BrowserPairDecision{}, ctx.Err()
+	}
+	c.SetBroker(b)
+	now := time.Now()
+	c.now = func() time.Time { return now }
+	c.mu.Lock()
+	c.hello, c.pairUntil = reqID(90), now.Add(time.Minute)
+	c.mu.Unlock()
+	done := make(chan struct{})
+	go func() { c.requestBrowserPair(s, 1); close(done) }()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("pairing review did not start")
+	}
+	c.Close()
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("connection close did not cancel the pairing context")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("pairing review did not return after close")
+	}
+	if c.PairAuthorized() || c.Snapshot().Paired {
+		t.Fatal("closed connection obtained pairing authority")
+	}
+	for _, frame := range out.responses(t) {
+		if frame.Type == "paired" || frame.Type == "unlocked" {
+			t.Fatalf("closed pairing wrote %q", frame.Type)
+		}
+	}
+}
+
+func TestBrokerPairingExpiryRejectsLateApproval(t *testing.T) {
+	c, out, s, b := pairingTestConnection(t)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	b.callbacks.ApproveBrowserPair = func(ctx context.Context, req BrowserPairRequest) (BrowserPairDecision, error) {
+		if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > 61*time.Second || time.Until(deadline) <= 0 {
+			t.Errorf("pairing context deadline: %v %v", deadline, ok)
+		}
+		close(entered)
+		<-release
+		return BrowserPairDecision{Approved: true, QuickFill: true}, nil
+	}
+	c.SetBroker(b)
+	now := time.Now()
+	c.now = func() time.Time { return now }
+	c.mu.Lock()
+	c.hello, c.pairUntil = reqID(91), now.Add(time.Minute)
+	c.mu.Unlock()
+	done := make(chan struct{})
+	go func() { c.requestBrowserPair(s, 1); close(done) }()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("pairing review did not start")
+	}
+	now = now.Add(61 * time.Second)
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("pairing review did not return after expiry")
+	}
+	if c.PairAuthorized() || c.Snapshot().Paired {
+		t.Fatal("expired pairing bound a late approval")
+	}
+	for _, frame := range out.responses(t) {
+		if frame.Type == "paired" || frame.Type == "unlocked" {
+			t.Fatalf("expired pairing wrote %q", frame.Type)
+		}
 	}
 }

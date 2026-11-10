@@ -118,6 +118,8 @@ type Connection struct {
 	authEpoch               uint64
 	authUntil               time.Time
 	closed                  atomic.Bool
+	closeOnce               sync.Once
+	done                    chan struct{}
 	session                 atomic.Pointer[personal.Session]
 	clipboard               atomic.Pointer[clipboardState]
 	clipboardMu             sync.Mutex
@@ -139,7 +141,7 @@ type Connection struct {
 }
 
 func NewConnection(writer *Writer, notify func()) *Connection {
-	return &Connection{writer: writer, notify: notify, seen: map[string]bool{}, neverOrigins: map[string]bool{}, matchedProfiles: map[string]string{}, now: time.Now}
+	return &Connection{writer: writer, notify: notify, seen: map[string]bool{}, neverOrigins: map[string]bool{}, matchedProfiles: map[string]string{}, done: make(chan struct{}), now: time.Now}
 }
 
 // NewDesktopConnection creates a connection in shared desktop mode. The
@@ -248,7 +250,9 @@ func (c *Connection) requestBrowserPair(s *personal.Session, epoch uint64) {
 	hello := c.helloInfo
 	peer := c.peer
 	b := c.broker
-	if id == "" || c.closed.Load() || c.capability != "" || c.pairing || !c.now().Before(c.pairUntil) {
+	pairUntil := c.pairUntil
+	done := c.done
+	if id == "" || c.closed.Load() || c.capability != "" || c.pairing || !c.now().Before(pairUntil) {
 		c.mu.Unlock()
 		return
 	}
@@ -263,7 +267,18 @@ func (c *Connection) requestBrowserPair(s *personal.Session, epoch uint64) {
 		c.finishBrowserPairRefusal(id)
 		return
 	}
-	decision, err := b.callbacks.ApproveBrowserPair(context.Background(), BrowserPairRequest{Peer: peer, Browser: hello.Browser, Origin: hello.Origin})
+	ctx, cancel := context.WithDeadline(context.Background(), pairUntil)
+	defer cancel()
+	// A closed connection must remove its native pairing review immediately;
+	// a late click can then never bind a session.
+	go func() {
+		select {
+		case <-done:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	decision, err := b.callbacks.ApproveBrowserPair(ctx, BrowserPairRequest{Peer: peer, Browser: hello.Browser, Origin: hello.Origin})
 	if err != nil || !decision.Approved {
 		c.finishBrowserPairRefusal(id)
 		return
@@ -278,7 +293,9 @@ func (c *Connection) requestBrowserPair(s *personal.Session, epoch uint64) {
 	c.pairQuickFill = decision.QuickFill
 	if err := c.bindDesktopSessionLocked(s, epoch, decision.QuickFill, false); err != nil {
 		c.hello = ""
-		go c.refuse(id)
+		if !c.closed.Load() {
+			go c.refuse(id)
+		}
 	}
 }
 
@@ -287,8 +304,9 @@ func (c *Connection) finishBrowserPairRefusal(id string) {
 	if c.hello == id {
 		c.hello = ""
 	}
+	closed := c.closed.Load()
 	c.mu.Unlock()
-	if id != "" {
+	if id != "" && !closed {
 		go c.refuse(id)
 	}
 }
@@ -884,6 +902,7 @@ func (c *Connection) Invalidate() {
 }
 func (c *Connection) Close() {
 	c.closed.Store(true)
+	c.closeOnce.Do(func() { close(c.done) })
 	c.revokeClipboard(true)
 	if s := c.session.Load(); s != nil && !c.desktopShared {
 		s.RequestLock()
