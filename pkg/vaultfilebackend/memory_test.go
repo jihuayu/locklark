@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 )
 
 func memoryOpen(t *testing.T) Backend { return NewMemory() }
@@ -20,22 +21,37 @@ func TestMemoryRevisionsAreInstanceScoped(t *testing.T) {
 	if err := a.CreateIfAbsent(ctx, "x", []byte("same")); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.CreateIfAbsent(ctx, "y", []byte("same")); err != nil {
-		t.Fatal(err)
-	}
-	ra, _ := a.Read(ctx, "x")
-	rb, _ := b.Read(ctx, "y")
-	if ra.Revision.Zero() || rb.Revision.Zero() {
-		t.Fatal("Memory must mint non-zero revisions")
-	}
-	// Revisions are opaque: not required to be equal across instances or
-	// derivable from bytes, and a revision from one store must not authorize a
-	// write in another.
 	if err := b.CreateIfAbsent(ctx, "x", []byte("same")); err != nil {
 		t.Fatal(err)
 	}
+	ra, err := a.Read(ctx, "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rb, err := b.Read(ctx, "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ra.Revision.Zero() || rb.Revision.Zero() {
+		t.Fatal("Memory must mint non-zero revisions")
+	}
+	// Two fresh instances committing identical bytes as their first version
+	// must still mint distinct revisions.
+	if string(ra.Bytes) != "same" || string(rb.Bytes) != "same" {
+		t.Fatalf("bytes = %q, %q", ra.Bytes, rb.Bytes)
+	}
+	if ra.Revision == rb.Revision {
+		t.Fatalf("first revisions of distinct instances collided: %q", ra.Revision)
+	}
+	if len(ra.Revision) > MaxRevisionSize || len(rb.Revision) > MaxRevisionSize {
+		t.Fatalf("revision length over MaxRevisionSize: %d, %d", len(ra.Revision), len(rb.Revision))
+	}
+	// A revision from one store must not authorize a write in another.
 	if err := b.ReplaceIfVersion(ctx, "x", ra.Revision, []byte("other")); !errors.Is(err, ErrConflict) {
 		t.Fatalf("foreign revision = %v, want ErrConflict", err)
+	}
+	if got, err := b.Read(ctx, "x"); err != nil || string(got.Bytes) != "same" || got.Revision != rb.Revision {
+		t.Fatalf("foreign revision wrote state: %q %v", got.Bytes, err)
 	}
 	// Committed versions in one instance have distinct revisions even with
 	// identical bytes.
@@ -60,11 +76,11 @@ func (e *etagMemory) CreateIfAbsent(ctx context.Context, name string, value []by
 		return err
 	}
 	e.next++
-	e.Memory.mu.Lock()
+	e.Memory.mu.lock(ctx)
 	v := e.Memory.values[name]
 	v.revision = Revision(e.etag)
 	e.Memory.values[name] = v
-	e.Memory.mu.Unlock()
+	e.Memory.mu.unlock()
 	return nil
 }
 
@@ -87,64 +103,90 @@ func TestMemoryPreservesQuotedETagRevision(t *testing.T) {
 	}
 }
 
-func TestMemoryCancelWhileWaitingForLockDoesNotWrite(t *testing.T) {
-	ctx := context.Background()
+// TestMemoryCancelReturnsWhileLockHeld proves every operation gives up waiting
+// for the internal lock as soon as ctx is cancelled: the holder never unlocks
+// before the cancelled calls have returned.
+func TestMemoryCancelReturnsWhileLockHeld(t *testing.T) {
 	m := NewMemory()
-	t.Cleanup(func() { _ = m.Close() })
-	if err := m.CreateIfAbsent(ctx, "n", []byte("v1")); err != nil {
+	if err := m.mu.lock(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	cur, err := m.Read(ctx, "n")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Hold the lock: the writers below must queue on it.
-	m.mu.Lock()
 	locked := true
 	unlock := sync.OnceFunc(func() {
 		locked = false
-		m.mu.Unlock()
+		m.mu.unlock()
 	})
 	t.Cleanup(func() {
 		if locked {
 			unlock()
 		}
 	})
+	m.values["n"] = memoryVersion{bytes: []byte("v1"), revision: Revision("seed")}
 
-	wctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	var started, done sync.WaitGroup
-	var createErr, replaceErr error
-	started.Add(2)
-	done.Add(2)
-	go func() {
-		defer done.Done()
-		started.Done()
-		createErr = m.CreateIfAbsent(wctx, "n2", []byte("new"))
-	}()
-	go func() {
-		defer done.Done()
-		started.Done()
-		replaceErr = m.ReplaceIfVersion(wctx, "n", cur.Revision, []byte("v2"))
-	}()
-	started.Wait()
-
-	// Cancel while both writers are queued on the held lock.
-	cancel()
+	ops := []struct {
+		name string
+		call func(ctx context.Context) error
+	}{
+		{"read", func(ctx context.Context) error {
+			_, err := m.Read(ctx, "n")
+			return err
+		}},
+		{"create", func(ctx context.Context) error {
+			return m.CreateIfAbsent(ctx, "n2", []byte("new"))
+		}},
+		{"replace", func(ctx context.Context) error {
+			return m.ReplaceIfVersion(ctx, "n", Revision("seed"), []byte("v2"))
+		}},
+		{"list", func(ctx context.Context) error {
+			_, err := m.List(ctx)
+			return err
+		}},
+	}
+	for _, op := range ops {
+		t.Run(op.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			started := make(chan struct{})
+			res := make(chan error, 1)
+			go func() {
+				close(started)
+				res <- op.call(ctx)
+			}()
+			<-started
+			// Give the goroutine a chance to block on the held lock.
+			time.Sleep(10 * time.Millisecond)
+			select {
+			case err := <-res:
+				t.Fatalf("%s returned before cancel: %v", op.name, err)
+			default:
+			}
+			cancel()
+			select {
+			case err := <-res:
+				if !errors.Is(err, ErrDenied) || !errors.Is(err, context.Canceled) {
+					t.Fatalf("cancelled %s = %v, want ErrDenied wrapping context.Canceled", op.name, err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatalf("%s still blocked on the held lock after cancel", op.name)
+			}
+			if !locked {
+				t.Fatalf("%s observed the lock released before returning", op.name)
+			}
+		})
+	}
 	unlock()
-	done.Wait()
 
-	if !errors.Is(createErr, ErrDenied) || !errors.Is(createErr, context.Canceled) {
-		t.Fatalf("cancelled create = %v, want ErrDenied wrapping context.Canceled", createErr)
-	}
-	if !errors.Is(replaceErr, ErrDenied) || !errors.Is(replaceErr, context.Canceled) {
-		t.Fatalf("cancelled replace = %v, want ErrDenied wrapping context.Canceled", replaceErr)
-	}
+	// Cancelled writers must not have committed anything.
+	ctx := context.Background()
 	if _, err := m.Read(ctx, "n2"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("cancelled create wrote state: %v", err)
 	}
-	if got, err := m.Read(ctx, "n"); err != nil || string(got.Bytes) != "v1" || got.Revision != cur.Revision {
+	if got, err := m.Read(ctx, "n"); err != nil || string(got.Bytes) != "v1" || got.Revision != Revision("seed") {
 		t.Fatalf("cancelled replace wrote state: %q %v", got.Bytes, err)
+	}
+	// The lock is usable again after the holder releases it.
+	if err := m.CreateIfAbsent(ctx, "n3", []byte("ok")); err != nil {
+		t.Fatalf("create after unlock: %v", err)
 	}
 }
 
