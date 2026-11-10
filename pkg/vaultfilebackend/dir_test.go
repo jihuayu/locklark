@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -810,10 +811,94 @@ type replacedComponent struct {
 	path func(b *Dir) string
 }
 
-// assertComponentReplacementDenied moves b's component c aside and puts a real
-// directory with valid-looking contents in its place, then requires Read,
-// Replace and Create to be denied and nothing under the replacement to change
-// or be created.
+// fileList returns the regular files below dir, sorted, with their contents.
+// It captures both the shape and the bytes of a tree for before/after checks.
+func fileList(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	if err := filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		out[p] = string(raw)
+		return nil
+	}); err != nil {
+		t.Fatalf("list %s: %v", dir, err)
+	}
+	return out
+}
+
+// assertFileListUnchanged fails when a tree gained, lost or changed a file.
+func assertFileListUnchanged(t *testing.T, label, dir string, before map[string]string) {
+	t.Helper()
+	after := fileList(t, dir)
+	for p, body := range before {
+		if got, ok := after[p]; !ok || got != body {
+			t.Fatalf("%s: file %s changed or removed by a refused operation", label, p)
+		}
+	}
+	for p := range after {
+		if _, ok := before[p]; !ok {
+			t.Fatalf("%s: refused operation created %s", label, p)
+		}
+	}
+}
+
+// underPath reports whether p is dir or lies below it.
+func underPath(dir, p string) bool {
+	rel, err := filepath.Rel(dir, p)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// validLayoutBelow returns the directories that must exist below a valid
+// replacement for the named protected component: exactly the components the
+// backend's path-based checks would look below it. A replaced tmp or data
+// directory is a leaf and needs nothing below it.
+func validLayoutBelow(name string) []string {
+	switch name {
+	case "root":
+		return []string{dirSubdir, filepath.Join(dirSubdir, dirVer), filepath.Join(dirSubdir, dirVer, tmpName), filepath.Join(dirSubdir, dirVer, dataName)}
+	case "namespace":
+		return []string{dirVer, filepath.Join(dirVer, tmpName), filepath.Join(dirVer, dataName)}
+	case "version":
+		return []string{tmpName, dataName}
+	}
+	return nil
+}
+
+// mapPath joins every relative path in rels onto base.
+func mapPath(base string, rels []string) []string {
+	out := make([]string, 0, len(rels))
+	for _, rel := range rels {
+		out = append(out, filepath.Join(base, rel))
+	}
+	return out
+}
+
+// mkdirPrivate creates p as a real 0700 directory.
+func mkdirPrivate(t *testing.T, p string) {
+	t.Helper()
+	if err := os.Mkdir(p, 0700); err != nil {
+		t.Fatalf("create replacement %s: %v", p, err)
+	}
+}
+
+// assertComponentReplacementDenied moves b's component c aside and puts a
+// valid replacement in its place: a real 0700 directory with the complete
+// layout the backend would look for below it, so the existing mode, symlink
+// and descendant checks all pass for it. When the backend's record path lies
+// below the replacement it holds a well-formed record with the current
+// revision but alternate bytes; for tmp the real data file is left in place.
+// Read, Replace and Create must still be denied, proving the inode identity
+// check refuses the replacement on its own, and the alternate and original
+// trees must be unchanged.
 func assertComponentReplacementDenied(t *testing.T, b *Dir, c replacedComponent) {
 	t.Helper()
 	ctx := context.Background()
@@ -821,69 +906,88 @@ func assertComponentReplacementDenied(t *testing.T, b *Dir, c replacedComponent)
 		t.Fatal(err)
 	}
 	cur := mustRead(t, b, "n")
+	origRecord, err := os.ReadFile(b.dataPath("n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	origDataPath := b.dataPath("n")
 	orig := c.path(b)
 	moved := orig + ".moved"
 	if err := os.Rename(orig, moved); err != nil {
 		t.Fatal(err)
 	}
-	// Build the replacement at the same absolute path, so the backend's own
-	// paths reach it, with valid-looking contents: a complete v1 layout and a
-	// well-formed record carrying the current revision, so a follow-through
-	// would let Read return alternate bytes and let Replace commit there.
-	// Only the identity differs.
-	altValue := []byte("alternate")
-	altRecord := record{version: string(cur.Revision), digest: sha256.Sum256(altValue), value: altValue}.encode()
-	for _, d := range []string{orig, filepath.Join(orig, dirVer), filepath.Join(orig, dirVer, tmpName), filepath.Join(orig, dirVer, dataName)} {
-		if err := os.Mkdir(d, 0700); err != nil {
+	// The valid layout below each component, so no descendant check can refuse
+	// the replacement: root needs vaultfile-backend/v1, the namespace needs
+	// v1, and v1 needs tmp and data. For tmp and data themselves only the
+	// replaced leaf is rebuilt; their siblings stay real.
+	// validLayoutBelow lists the wrong order for creation: sort by depth, so
+	// every parent exists before its child.
+	layout := validLayoutBelow(c.name)
+	slices.SortFunc(layout, func(a, b string) int {
+		return strings.Count(a, string(filepath.Separator)) - strings.Count(b, string(filepath.Separator))
+	})
+	mkdirPrivate(t, orig)
+	for _, d := range layout {
+		mkdirPrivate(t, filepath.Join(orig, d))
+	}
+	// Put a well-formed, revision-matching record at the exact path the
+	// backend would read, when that path is below the replacement.
+	entry := ""
+	var altRecord []byte
+	if underPath(orig, origDataPath) {
+		altValue := []byte("alternate")
+		altRecord = record{version: string(cur.Revision), digest: sha256.Sum256(altValue), value: altValue}.encode()
+		entry = origDataPath
+		if err := os.WriteFile(entry, altRecord, 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	// The record goes where the backend would look for it under the
-	// replacement, whatever component was replaced.
-	rel, err := filepath.Rel(b.root, b.dataPath("n"))
-	if err != nil {
-		t.Fatal(err)
+	// The replacement must be a valid stand-in, so nothing but identity can
+	// refuse it.
+	for _, p := range append([]string{orig}, mapPath(orig, validLayoutBelow(c.name))...) {
+		if st, err := os.Lstat(p); err != nil {
+			t.Fatalf("replacement layout missing %s: %v", p, err)
+		} else if !st.IsDir() || st.Mode()&os.ModeSymlink != 0 || st.Mode().Perm() != 0700 || !ownedByEUID(st) {
+			t.Fatalf("replacement %s is not a real private 0700 directory: %v", p, st.Mode())
+		}
 	}
-	entry := filepath.Join(orig, rel)
-	if err := os.MkdirAll(filepath.Dir(entry), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(entry, altRecord, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if st, err := os.Lstat(orig); err != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 || st.Mode().Perm() != 0700 {
-		t.Fatalf("replacement is not a real 0700 directory: %v %v", st, err)
-	}
+	replacementBefore := fileList(t, orig)
+
 	if _, err := b.Read(ctx, "n"); !errors.Is(err, ErrDenied) {
-		t.Fatalf("%s replaced by a real directory: read = %v, want ErrDenied", c.name, err)
+		t.Fatalf("%s replaced by a valid real directory: read = %v, want ErrDenied", c.name, err)
 	}
 	if err := b.ReplaceIfVersion(ctx, "n", cur.Revision, []byte("v2")); !errors.Is(err, ErrDenied) {
-		t.Fatalf("%s replaced by a real directory: replace = %v, want ErrDenied", c.name, err)
+		t.Fatalf("%s replaced by a valid real directory: replace = %v, want ErrDenied", c.name, err)
 	}
 	if err := b.CreateIfAbsent(ctx, "fresh", []byte("v2")); !errors.Is(err, ErrDenied) {
-		t.Fatalf("%s replaced by a real directory: create = %v, want ErrDenied", c.name, err)
+		t.Fatalf("%s replaced by a valid real directory: create = %v, want ErrDenied", c.name, err)
 	}
-	// Exactly the seed record is present: no other data file, no temporary
-	// file and no lock file was created under the replacement.
-	if got, err := os.ReadFile(entry); err != nil || !bytes.Equal(got, altRecord) {
-		t.Fatalf("%s replaced: alternative record changed: %v", c.name, err)
-	}
-	var listed []string
-	if err := filepath.WalkDir(orig, func(p string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
+
+	// The replacement tree is byte-for-byte as built, and the original record
+	// is untouched: for tmp the record is outside the replaced component, for
+	// every other component it is the alternate record.
+	assertFileListUnchanged(t, "replacement "+c.name, orig, replacementBefore)
+	if entry != "" {
+		if got := replacementBefore[entry]; got != string(altRecord) {
+			t.Fatalf("%s replaced: alternate record not at the backend path %s", c.name, entry)
 		}
-		if !d.IsDir() {
-			listed = append(listed, p)
+	}
+	if underPath(orig, origDataPath) {
+		if _, ok := replacementBefore[origDataPath]; !ok {
+			t.Fatalf("%s replaced: alternate record missing", c.name)
 		}
-		return nil
-	}); err != nil {
-		t.Fatalf("%s replaced: walk alternative: %v", c.name, err)
+	} else {
+		// tmp: the real data file and the moved-aside tmp directory decide
+		// whether a replacement could have been published.
+		if got, err := os.ReadFile(origDataPath); err != nil || !bytes.Equal(got, origRecord) {
+			t.Fatalf("%s replaced: stored record changed: %v", c.name, err)
+		}
+		if entries, err := os.ReadDir(moved); err != nil || len(entries) != 0 {
+			t.Fatalf("%s replaced: temporary files were staged: %v %v", c.name, entries, err)
+		}
 	}
-	if len(listed) != 1 || listed[0] != entry {
-		t.Fatalf("%s replaced: alternative tree gained files: %v", c.name, listed)
-	}
-	// Restoring the original tree restores service and the committed version.
+
+	// Restoring the original directory restores normal read.
 	if err := os.RemoveAll(orig); err != nil {
 		t.Fatal(err)
 	}
@@ -891,17 +995,17 @@ func assertComponentReplacementDenied(t *testing.T, b *Dir, c replacedComponent)
 		t.Fatal(err)
 	}
 	if got := mustRead(t, b, "n"); string(got.Bytes) != "v1" || got.Revision != cur.Revision {
-		t.Fatal("restored component does not serve the committed version")
+		t.Fatalf("%s restored: read = %q %q, want the committed version", c.name, got.Bytes, got.Revision)
 	}
 }
 
 // Every protected component replaced after OpenDir by another real directory
-// with acceptable mode, owner and valid-looking contents is refused: the
-// inode identity captured by OpenDir no longer matches, so the existing
-// backend never silently switches to the alternative tree. For the root and
-// v1 the replacement lacks the subdirectories below them, so the operation is
-// also refused by the component checks; for ns, tmp and data the replacement
-// is fully valid and only the identity check stands between it and the store.
+// with acceptable mode, owner and a complete valid layout is refused. The
+// replacement is indistinguishable from the original to every path-based
+// check except inode identity, so this proves the identity comparison itself
+// rejects each component; removing only sameIdentity makes every subtest here
+// fail. See TestDirRejectsReplacedComponentsUnderSameIdentity for the
+// automated check of that.
 func TestDirRejectsReplacedComponents(t *testing.T) {
 	rootPath := func(b *Dir) string { return b.cfgRoot }
 	components := []replacedComponent{
@@ -916,6 +1020,81 @@ func TestDirRejectsReplacedComponents(t *testing.T) {
 			b := openAt(t, filepath.Join(t.TempDir(), "root")).(*Dir)
 			assertComponentReplacementDenied(t, b, c)
 		})
+	}
+}
+
+// Mutation check for the replacement subtests. The replacements they build are
+// real 0700 directories with complete valid layouts, so the only check that
+// can refuse them is the identity comparison. To verify that this is what
+// happens, temporarily change sameIdentity in dir.go to "return true" and run
+// with this opt-in set:
+//
+//	VAULTFILE_DIR_IDENTITY_MUTATION_CHECK=1 go test -run '^TestDirRejectsReplacedComponentsMutationNote$' ./pkg/vaultfilebackend/
+//
+// Every component must then be accepted (this test passes) and
+// TestDirRejectsReplacedComponents must fail for every component. An automated
+// in-process version would need a test hook inside sameIdentity, which is
+// product code; this checkpoint deliberately adds none.
+func TestDirRejectsReplacedComponentsMutationNote(t *testing.T) {
+	if os.Getenv("VAULTFILE_DIR_IDENTITY_MUTATION_CHECK") == "" {
+		t.Skip("opt-in check: patch sameIdentity in dir.go to return true and set VAULTFILE_DIR_IDENTITY_MUTATION_CHECK=1")
+	}
+	rootPath := func(b *Dir) string { return b.cfgRoot }
+	components := []replacedComponent{
+		{"root", rootPath},
+		{"namespace", func(b *Dir) string { return b.ns }},
+		{"version", func(b *Dir) string { return b.root }},
+		{"tmp", func(b *Dir) string { return filepath.Join(b.root, tmpName) }},
+		{"data", func(b *Dir) string { return filepath.Join(b.root, dataName) }},
+	}
+	for _, c := range components {
+		t.Run(c.name, func(t *testing.T) {
+			b := openAt(t, filepath.Join(t.TempDir(), "root")).(*Dir)
+			assertComponentReplacementAccepted(t, b, c)
+		})
+	}
+}
+
+// assertComponentReplacementAccepted is the mutation counterpart of
+// assertComponentReplacementDenied: with the identity comparison disabled the
+// replacement must take over, which proves its subtree is complete and valid
+// and that only identity refuses it.
+func assertComponentReplacementAccepted(t *testing.T, b *Dir, c replacedComponent) {
+	t.Helper()
+	ctx := context.Background()
+	if err := b.CreateIfAbsent(ctx, "n", []byte("v1")); err != nil {
+		t.Fatal(err)
+	}
+	cur := mustRead(t, b, "n")
+	origDataPath := b.dataPath("n")
+	orig := c.path(b)
+	if err := os.Rename(orig, orig+".moved"); err != nil {
+		t.Fatal(err)
+	}
+	layout := validLayoutBelow(c.name)
+	slices.SortFunc(layout, func(a, b string) int {
+		return strings.Count(a, string(filepath.Separator)) - strings.Count(b, string(filepath.Separator))
+	})
+	mkdirPrivate(t, orig)
+	for _, d := range layout {
+		mkdirPrivate(t, filepath.Join(orig, d))
+	}
+	altValue := []byte("alternate")
+	if underPath(orig, origDataPath) {
+		alt := record{version: string(cur.Revision), digest: sha256.Sum256(altValue), value: altValue}.encode()
+		if err := os.WriteFile(origDataPath, alt, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := b.Read(ctx, "n")
+	if err != nil {
+		t.Fatalf("%s replacement not accepted: %v (is sameIdentity patched?)", c.name, err)
+	}
+	if c.name != "tmp" && !bytes.Equal(got.Bytes, altValue) {
+		t.Fatalf("%s replacement not read through: got %q", c.name, got.Bytes)
+	}
+	if err := b.ReplaceIfVersion(ctx, "n", cur.Revision, []byte("v2")); err != nil {
+		t.Fatalf("%s replacement not written through: %v", c.name, err)
 	}
 }
 
