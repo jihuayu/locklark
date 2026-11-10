@@ -146,6 +146,18 @@ private struct RootView: View {
         .accessibilityIdentifier("locked-screen")
     }
 
+    private func fieldDisplayName(_ field: String?) -> String {
+        switch field {
+        case "title": return "标题"
+        case "url": return "网址"
+        case "username": return "用户名"
+        case "password": return "密码"
+        case "otp": return "验证码配置"
+        case "notes": return "备注"
+        default: return "凭据字段"
+        }
+    }
+
     private var createVault: some View {
         Form {
             Section("1. 设置主密码") {
@@ -155,6 +167,11 @@ private struct RootView: View {
                 SecureField("再次输入", text: $model.confirmation)
                     .textContentType(.newPassword)
                     .accessibilityIdentifier("create-confirmation")
+                if !model.confirmation.isEmpty && model.password != model.confirmation {
+                    Label("两次输入的主密码不一致", systemImage: "exclamationmark.circle.fill")
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                }
             }
             Section("2. 账户 Secret Key") {
                 Button("生成新的 Secret Key", systemImage: "key.horizontal.fill") { model.generateAccountKey() }
@@ -163,7 +180,16 @@ private struct RootView: View {
                 if !model.generatedSecretKey.isEmpty {
                     Text(verbatim: model.generatedSecretKey)
                         .font(.system(.callout, design: .monospaced).weight(.semibold))
-                        .padding(.vertical, 4)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
+                        .background(
+                            Color(uiColor: .secondarySystemBackground),
+                            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .strokeBorder(Color.secondary.opacity(0.25))
+                        )
                         .privacySensitive()
                         .accessibilityLabel("账户 Secret Key")
                         .accessibilityValue(model.generatedSecretKey)
@@ -175,11 +201,13 @@ private struct RootView: View {
                         .accessibilityIdentifier("backup-ack")
                 }
             }
-            Button("确认备份并创建", systemImage: "checkmark.shield.fill") { model.createVault() }
-                .font(.body.weight(.semibold))
-                .accessibilityIdentifier("confirm-create")
-                .disabled(model.interactionBusy || model.password.isEmpty || model.password != model.confirmation || !model.backupAcknowledged)
-            Button("取消", role: .cancel) { model.lock(); model.creatingVault = false }
+            Section {
+                Button("确认备份并创建", systemImage: "checkmark.shield.fill") { model.createVault() }
+                    .font(.body.weight(.semibold))
+                    .accessibilityIdentifier("confirm-create")
+                    .disabled(model.interactionBusy || model.password.isEmpty || model.password != model.confirmation || !model.backupAcknowledged)
+                Button("取消", role: .cancel) { model.lock(); model.creatingVault = false }
+            }
         }
         .navigationTitle("创建金库")
     }
@@ -187,7 +215,7 @@ private struct RootView: View {
     private var vault: some View {
         List {
             Section {
-                HStack {
+                HStack(spacing: 8) {
                     Image(systemName: "magnifyingglass")
                         .foregroundStyle(.secondary)
                         .accessibilityHidden(true)
@@ -195,6 +223,17 @@ private struct RootView: View {
                         .submitLabel(.search)
                         .onSubmit { model.search() }
                         .accessibilityIdentifier("title-search")
+                    if !model.query.isEmpty {
+                        Button {
+                            model.query = ""
+                            model.search()
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("清除搜索")
+                    }
                     Button("搜索") { model.search() }
                         .buttonStyle(.bordered)
                         .accessibilityIdentifier("search-submit")
@@ -228,7 +267,16 @@ private struct RootView: View {
                     if model.hasDisclosure {
                         Text(verbatim: model.revealed.isEmpty ? "（空值）" : model.revealed)
                             .font(.system(.body, design: .monospaced).weight(.medium))
-                            .padding(.vertical, 4)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(10)
+                            .background(
+                                Color(uiColor: .secondarySystemBackground),
+                                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .strokeBorder(Color.blue.opacity(0.3))
+                            )
                             .privacySensitive()
                             .accessibilityLabel("本次显示值")
                             .accessibilityValue(model.revealed)
@@ -265,9 +313,18 @@ private struct RootView: View {
                         .foregroundStyle(.secondary)
                 }
                 ForEach(model.rows, id: \.identifier) { row in
+                    let isSelected = model.selected?.identifier == row.identifier
                     Button { model.select(row) } label: {
-                        Text(verbatim: VisibleText.title(row.title))
-                            .font(.body.weight(model.selected?.identifier == row.identifier ? .semibold : .regular))
+                        HStack {
+                            Text(verbatim: VisibleText.title(row.title))
+                                .font(.body.weight(isSelected ? .semibold : .regular))
+                            Spacer()
+                            if isSelected {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundStyle(.blue)
+                                    .accessibilityHidden(true)
+                            }
+                        }
                     }
                     .accessibilityIdentifier("row-title-\(VisibleText.title(row.title))")
                 }
@@ -328,6 +385,9 @@ private struct RootView: View {
         NavigationStack {
             Form {
                 Section("安全编辑说明") {
+                    Label("正在更新：\(fieldDisplayName(model.editingField))", systemImage: "pencil.and.outline")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.blue)
                     Text("编辑从空白开始输入。保存将更新目标条目的对应字段；取消不会写入任何更改。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)

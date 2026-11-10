@@ -17,38 +17,41 @@ func runPull(args []string, out, diag io.Writer) error {
 	var repo gateway.Repository
 	var slug, session, reason, device, pub, inbox, recipient, key, plan string
 	var n int
-	f.StringVar(&slug, "repo", "", "approved owner/name")
+	f.StringVar(&slug, "repo", "", "approved repository in OWNER/NAME format")
 	f.StringVar(&repo.ID, "repo-id", "", "stable numeric repository ID")
-	f.StringVar(&session, "session", "", "agent session")
-	f.StringVar(&reason, "reason", "", "business reason")
+	f.StringVar(&session, "session", "", "agent session identifier")
+	f.StringVar(&reason, "reason", "", "synthetic business reason")
 	if enroll {
-		f.StringVar(&device, "device", "", "owner device")
-		f.StringVar(&pub, "public", "", "verified session public key")
+		f.StringVar(&device, "device", "", "trusted owner device directory")
+		f.StringVar(&pub, "public", "", "independently verified session public key (hex)")
 	} else {
-		f.StringVar(&inbox, "inbox", "", "request directory")
-		f.StringVar(&recipient, "recipient", "", "owner inbox public key")
-		f.StringVar(&key, "session-key", "", "agent session key")
-		f.StringVar(&plan, "proposal", "", "bounded built-in proposal JSON")
+		f.StringVar(&inbox, "inbox", "", "local request spool directory")
+		f.StringVar(&recipient, "recipient", "", "owner inbox public key file")
+		f.StringVar(&key, "session-key", "", "agent signing seed file")
+		f.StringVar(&plan, "proposal", "", "bounded built-in proposal JSON file")
 		f.IntVar(&n, "pr", 0, "pull request number")
 	}
 	if err := f.Parse(args[1:]); err != nil {
 		return err
 	}
+	if f.NArg() != 0 {
+		return errors.New("unexpected positional argument")
+	}
 	var ok bool
 	repo.Owner, repo.Name, ok = strings.Cut(slug, "/")
-	if f.NArg() != 0 || !ok {
-		return errors.New("repository must be owner/name")
+	if !ok || repo.Owner == "" || repo.Name == "" {
+		return errors.New("--repo must be in OWNER/NAME format")
 	}
 	var value any
 	var err error
 	if enroll {
 		if device == "" || pub == "" {
-			return errors.New("device and session public key required")
+			return errors.New("--device and --public are required")
 		}
 		value, err = preview.EnrollPullSession(device, session, pub, reason, repo)
 	} else {
 		if inbox == "" || recipient == "" || key == "" || plan == "" {
-			return errors.New("inbox, recipient, session key and proposal required")
+			return errors.New("--inbox, --recipient, --session-key, and --proposal are required")
 		}
 		value, err = preview.SubmitPullFile(inbox, recipient, session, reason, key, repo, n, plan)
 	}

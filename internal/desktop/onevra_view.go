@@ -46,8 +46,19 @@ func (a *App) onevraHeaderActions(c *ui.Context) {
 		settings := oneui.IconButton(c, lucide.Settings(), "安全设置", oneui.IconButtonPlain)
 		settings.Disabled(a.session == nil)
 		if settings.Clicked() {
-			a.page = "security"
-			a.status = "安全设置"
+			if a.v2Mode {
+				a.page = "vault"
+				if a.v2.settingsOpen {
+					a.closeSettings()
+					a.status = "已关闭设置"
+				} else {
+					a.openSettings()
+					a.status = "安全与偏好设置"
+				}
+			} else {
+				a.page = "security"
+				a.status = "安全设置"
+			}
 			if a.win != nil {
 				a.win.Invalidate()
 			}
@@ -275,12 +286,14 @@ func (a *App) onevraDetailPane(c *ui.Context) {
 		oneui.ScrollView(c, oneui.ScrollViewOptions{}).Fill().ScrollbarInsets(16, 0, 16).Children(func() {
 			ui.Column(c).FillWidth().MinWidth(0).Padding(t.Space(5), t.Space(5), t.Space(5), t.Space(5)).Gap(t.Space(3)).Children(func() {
 				switch {
+				case a.v2.settingsOpen:
+					a.settingsView(c)
+				case a.v2.generator.open:
+					a.generatorView(c)
 				case a.v2.nav == navWatchtower:
 					a.v2WatchtowerView(c)
 				case a.v2.editing && a.v2.draft != nil:
 					a.v2EditorView(c)
-				case a.v2.generator.open:
-					a.generatorView(c)
 				default:
 					a.onevraDetailView(c)
 				}
@@ -315,9 +328,11 @@ func (a *App) onevraDetailView(c *ui.Context) {
 			oneui.Text(c, visible(detail.Title)).FontSize(t.Rem(1.35)).Bold().SingleLine().Ellipsis("…")
 			oneui.Text(c, CategoryDisplayName(detail.Category)+" · "+a.onevraVaultLabel()).FontSize(t.Rem(.78)).TextColor(t.TextMuted).SingleLine()
 		})
-		if oneui.Button(c, "编辑", oneui.ButtonSecondary).Disabled(a.busy).Clicked() {
-			if err := a.beginEdit(); err != nil {
-				a.status = message(err)
+		if detail.State != "trashed" {
+			if oneui.Button(c, "编辑", oneui.ButtonSecondary).Disabled(a.busy).Clicked() {
+				if err := a.beginEdit(); err != nil {
+					a.status = message(err)
+				}
 			}
 		}
 		if oneui.IconButton(c, lucide.Ellipsis(), "更多操作", oneui.IconButtonPlain).Disabled(a.busy).Clicked() {
@@ -330,14 +345,33 @@ func (a *App) onevraDetailView(c *ui.Context) {
 
 	if detail.State == "trashed" {
 		a.onevraNoticeCard(c, "条目在回收站中", "恢复后才能显示、复制或使用字段。", t.Danger)
-		if oneui.Button(c, "恢复到金库", oneui.ButtonPrimary).Disabled(a.busy).Clicked() {
-			a.restoreSelected()
+		if a.v2.confirmPurge {
+			a.onevraNoticeCard(c, "确认永久删除", "永久删除后无法恢复该条目及其任何历史修订版本。", t.Danger)
 		}
+		ui.Row(c).FillWidth().Wrap().Gap(t.Space(1.5)).Children(func() {
+			if oneui.Button(c, "恢复到金库", oneui.ButtonPrimary).Disabled(a.busy).Clicked() {
+				a.restoreSelected()
+			}
+			if !a.v2.confirmPurge {
+				if oneui.Button(c, "永久删除", oneui.ButtonOutline).Disabled(a.busy).Clicked() {
+					a.purgeSelected()
+				}
+			} else {
+				if oneui.Button(c, "确认永久删除", oneui.ButtonSecondary).Disabled(a.busy).Clicked() {
+					a.purgeSelected()
+				}
+				if oneui.Button(c, "取消删除", oneui.ButtonGhost).Disabled(a.busy).Clicked() {
+					a.v2.confirmPurge = false
+					a.v2.editorError = ""
+				}
+			}
+		})
 		return
 	}
 
 	a.onevraFieldCard(c, detail)
 	a.onevraCustomFieldsCard(c, detail)
+	a.onevraAttachmentsCard(c, detail)
 
 	if len(detail.Tags) > 0 {
 		ui.Column(c).FillWidth().Gap(t.Space(1.5)).Children(func() {
@@ -381,6 +415,9 @@ func (a *App) onevraDetailView(c *ui.Context) {
 		if oneui.Button(c, "收藏 / 取消收藏", oneui.ButtonOutline).Disabled(a.busy).Clicked() {
 			a.toggleSelectedFavorite()
 		}
+		if oneui.Button(c, "创建副本", oneui.ButtonOutline).Disabled(a.busy).Clicked() {
+			_, _, _ = a.duplicateSelected()
+		}
 		if detail.State == "archived" {
 			if oneui.Button(c, "取消归档", oneui.ButtonOutline).Disabled(a.busy).Clicked() {
 				a.unarchiveSelected()
@@ -392,6 +429,63 @@ func (a *App) onevraDetailView(c *ui.Context) {
 			a.trashSelected()
 		}
 	})
+}
+
+func (a *App) onevraAttachmentsCard(c *ui.Context, detail *personal.ItemDetail) {
+	if detail == nil || len(detail.Attachments) == 0 {
+		return
+	}
+	t := c.Theme()
+	ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).
+		Padding(t.Space(3)).Gap(t.Space(2)).Children(func() {
+		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(t.Space(1.5)).Children(func() {
+			oneui.Text(c, "加密附件").Bold().Grow(1)
+			oneui.Badge(c, fmt.Sprintf("%d", len(detail.Attachments)), oneui.BadgeOptions{Tone: oneui.BadgeNeutral})
+			oneui.Icon(c, lucide.Paperclip()).Size(t.Space(3.5), t.Space(3.5)).TextColor(t.TextMuted)
+		})
+		for _, att := range detail.Attachments {
+			att := att
+			ui.Row(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Background).
+				Padding(t.Space(2), t.Space(2.5)).AlignItems(ui.Center).Gap(t.Space(2)).Children(func() {
+				iconBox := ui.Box(c).Size(t.Space(8), t.Space(8)).Shrink(0).Radius(t.Space(1.75)).
+					Background(t.Accent.Alpha(.10)).AlignItems(ui.Center).Justify(ui.Center)
+				iconBox.Children(func() {
+					oneui.Icon(c, lucide.FileLock()).Size(t.Space(4), t.Space(4)).TextColor(t.Accent)
+				})
+				ui.Column(c).Grow(1).MinWidth(0).Gap(t.Space(.25)).Children(func() {
+					name := visible(att.FileName)
+					if name == "" {
+						name = "未命名附件"
+					}
+					oneui.Text(c, name).FontSize(t.Rem(.86)).Bold().SingleLine().Ellipsis("…")
+					metaParts := []string{formatAttachmentBytes(att.Size)}
+					if att.MIMEType != "" {
+						metaParts = append(metaParts, visible(att.MIMEType))
+					}
+					if len(att.SHA256) >= 12 {
+						metaParts = append(metaParts, "SHA-256 "+att.SHA256[:12]+"…")
+					} else if att.SHA256 != "" {
+						metaParts = append(metaParts, "SHA-256 "+att.SHA256)
+					}
+					oneui.Text(c, strings.Join(metaParts, " · ")).FontSize(t.Rem(.74)).TextColor(t.TextMuted).SingleLine().Ellipsis("…")
+				})
+				if att.Protected {
+					oneui.Badge(c, "内存保护", oneui.BadgeOptions{Tone: oneui.BadgeAccent})
+				}
+			})
+		}
+	})
+}
+
+func formatAttachmentBytes(size int64) string {
+	switch {
+	case size < 1024:
+		return fmt.Sprintf("%d B", size)
+	case size < 1024*1024:
+		return fmt.Sprintf("%.1f KB", float64(size)/1024)
+	default:
+		return fmt.Sprintf("%.1f MB", float64(size)/(1024*1024))
+	}
 }
 
 func (a *App) onevraFieldCard(c *ui.Context, detail *personal.ItemDetail) {
@@ -451,7 +545,7 @@ func (a *App) v2DetailFieldRow(c *ui.Context, detail *personal.ItemDetail, key, 
 			if oneui.IconButton(c, lucide.Copy(), "复制 "+label, oneui.IconButtonCompact).Disabled(a.busy).Clicked() {
 				a.copyField(key)
 			}
-			if key == "otp" && oneui.IconButton(c, lucide.ScanText(), "大号显示 "+label, oneui.IconButtonCompact).Disabled(a.busy).Clicked() {
+			if (key == "password" || key == "otp") && oneui.IconButton(c, lucide.ScanText(), "大号显示 "+label, oneui.IconButtonCompact).Disabled(a.busy).Clicked() {
 				a.showLargeType(key)
 			}
 		})

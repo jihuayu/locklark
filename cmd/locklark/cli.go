@@ -25,7 +25,7 @@ import (
 	"golang.org/x/term"
 )
 
-var cliUsage = errors.New("invalid cli arguments; see locklark help")
+var cliUsage = errors.New("invalid cli arguments; run 'locklark cli --help' for usage")
 
 var errCLIRecursion = errors.New("recursive locklark cli run is not allowed")
 
@@ -40,26 +40,121 @@ var (
 var cliCoreTools = []string{"aws", "docker", "gh", "git", "kubectl", "npm", "psql", "terraform"}
 
 var cliCommandHelp = map[string]string{
-	"profiles":   "usage: locklark cli profiles\n\nList the built-in CLI wrapper profiles as JSON. No binding or vault is read.\n",
-	"list":       "usage: locklark cli list [--binding PATH] [--config PATH]\n\nPrint the non-secret CLI binding store as JSON.\n",
-	"init":       "usage: locklark cli init|bind <tool> --file PATH --program ABS_PROGRAM [--profile PROFILE] [--binding PATH] [--id ID --revision REV] [--slot-<name> ID:REV] [--helper-path ABS_DIR_LIST] [--passthrough ENV_LIST] [--timeout SECONDS] [--name ENV] [--pin-sha256 true|false]\n\nBind a tool to one profile, one owner-only vault and one pinned executable.\n",
-	"bind":       "usage: locklark cli init|bind <tool> --file PATH --program ABS_PROGRAM [--profile PROFILE] [--binding PATH] [--id ID --revision REV] [--slot-<name> ID:REV] [--helper-path ABS_DIR_LIST] [--passthrough ENV_LIST] [--timeout SECONDS] [--name ENV] [--pin-sha256 true|false]\n\nBind a tool to one profile, one owner-only vault and one pinned executable.\n",
-	"show":       "usage: locklark cli show <tool> [--binding PATH] [--config PATH]\n\nPrint one non-secret CLI binding as JSON.\n",
-	"remove":     "usage: locklark cli remove <tool> [--binding PATH] [--config PATH]\n\nRemove one CLI binding from the store.\n",
-	"shell-init": "usage: locklark cli shell-init [bash|zsh|fish|powershell|pwsh] [--shell SHELL] [--binding PATH] [--tools TOOL_LIST]\n\nPrint shell functions that forward to locklark cli run.\n",
-	"run":        "usage: locklark cli run <tool> [--binding PATH] [--cwd ABS_DIR] [--timeout SECONDS] -- [ARG...]\n\nRun a bound tool in the foreground. Informational --help/--version commands use the credential-free fast path.\n",
+	"profiles": `usage: locklark cli profiles
+
+List built-in CLI wrapper profiles, credential slots, allowed passthrough
+variables, and timeout limits as JSON. Reads no binding store or vault.
+`,
+	"list": `usage: locklark cli list [--binding PATH] [--config PATH]
+
+Print the non-secret CLI tool binding store as JSON.
+
+FLAGS
+  --binding PATH   Explicit path to the owner-only binding JSON store
+  --config PATH    Alias for --binding PATH (mutually exclusive)
+`,
+	"init": `usage: locklark cli init|bind <tool> --file PATH --program ABS_PROGRAM [flags]
+
+Bind a CLI tool to a built-in profile, an owner-only vault, and a pinned executable.
+
+REQUIRED FLAGS
+  --file PATH              Owner-only Locklark vault path
+  --program ABS_PROGRAM    Clean absolute path to the target executable
+
+OPTIONAL FLAGS
+  --profile PROFILE        Built-in profile name (defaults to <tool>)
+  --binding PATH           Explicit binding store path
+  --id ID --revision REV   Pinned item ID (32 hex) and revision (64 hex)
+  --slot-<name> ID:REV     Explicit slot target binding for multi-slot profiles
+  --login ID:REV           Bind required login slot(s)
+  --document ID:REV        Bind required document slot(s)
+  --session-token ID:REV   Bind optional session_token slot
+  --helper-path ABS_LIST   OS path-list of helper directories (default: program dir)
+  --passthrough ENV_LIST   Comma-separated allowlisted environment variable names
+  --timeout SECONDS        Per-run timeout in seconds (1..profile max)
+  --name ENV               Explicit environment variable name for dynamic token profiles
+  --pin-sha256 true|false  Pin executable SHA-256 digest (default: true)
+`,
+	"bind": `usage: locklark cli init|bind <tool> --file PATH --program ABS_PROGRAM [flags]
+
+Bind a CLI tool to a built-in profile, an owner-only vault, and a pinned executable.
+
+REQUIRED FLAGS
+  --file PATH              Owner-only Locklark vault path
+  --program ABS_PROGRAM    Clean absolute path to the target executable
+
+OPTIONAL FLAGS
+  --profile PROFILE        Built-in profile name (defaults to <tool>)
+  --binding PATH           Explicit binding store path
+  --id ID --revision REV   Pinned item ID (32 hex) and revision (64 hex)
+  --slot-<name> ID:REV     Explicit slot target binding for multi-slot profiles
+  --login ID:REV           Bind required login slot(s)
+  --document ID:REV        Bind required document slot(s)
+  --session-token ID:REV   Bind optional session_token slot
+  --helper-path ABS_LIST   OS path-list of helper directories (default: program dir)
+  --passthrough ENV_LIST   Comma-separated allowlisted environment variable names
+  --timeout SECONDS        Per-run timeout in seconds (1..profile max)
+  --name ENV               Explicit environment variable name for dynamic token profiles
+  --pin-sha256 true|false  Pin executable SHA-256 digest (default: true)
+`,
+	"show": `usage: locklark cli show <tool> [--binding PATH] [--config PATH]
+
+Print one non-secret CLI binding entry as JSON.
+
+FLAGS
+  --binding PATH   Explicit path to the owner-only binding JSON store
+  --config PATH    Alias for --binding PATH (mutually exclusive)
+`,
+	"remove": `usage: locklark cli remove <tool> [--binding PATH] [--config PATH]
+
+Remove one CLI tool binding from the binding store.
+
+FLAGS
+  --binding PATH   Explicit path to the owner-only binding JSON store
+  --config PATH    Alias for --binding PATH (mutually exclusive)
+`,
+	"shell-init": `usage: locklark cli shell-init [bash|zsh|fish|powershell|pwsh] [--shell SHELL] [--binding PATH] [--tools TOOL_LIST]
+
+Print shell wrapper functions that forward bound tools to "locklark cli run".
+
+FLAGS
+  --shell SHELL       Target shell: bash, zsh, fish, powershell, or pwsh
+  --binding PATH      Pin wrappers to a specific binding JSON store
+  --tools TOOL_LIST   Comma-separated list of tools to wrap (defaults to bound or core tools)
+`,
+	"run": `usage: locklark cli run <tool> [--binding PATH] [--cwd ABS_DIR] [--timeout SECONDS] -- [ARG...]
+
+Run a bound CLI tool in the foreground with isolated, ephemeral credentials.
+Informational invocations (such as --help or --version) automatically take a
+credential-free fast path without unlocking the vault.
+
+FLAGS
+  --binding PATH      Explicit path to the owner-only binding JSON store
+  --cwd ABS_DIR       Clean absolute working directory for the child process
+  --timeout SECONDS   Override execution timeout in seconds (1..profile max)
+  -- [ARG...]         Arguments forwarded verbatim to the bound executable
+`,
 }
 
 var cliTopLevelHelp = `usage: locklark cli <command> [options]
 
-  cli profiles
-  cli list [--binding PATH]
-  cli init|bind <tool> --file PATH --program ABS_PROGRAM [options]
-  cli show|remove <tool> [--binding PATH]
-  cli shell-init [bash|zsh|fish|powershell|pwsh] [--binding PATH] [--tools TOOL_LIST]
-  cli run <tool> [--binding PATH] [--cwd ABS_DIR] [--timeout SECONDS] -- [ARG...]
+Bind developer CLIs to pinned vault revisions and run them in the foreground
+with sanitized environments and ephemeral credential files.
 
-Use "locklark cli <command> --help" for command-specific usage.
+COMMANDS
+  cli profiles                                    List built-in tool profiles as JSON
+  cli list [--binding PATH]                       List configured non-secret tool bindings
+  cli init|bind <tool> --file PATH --program ABS_PROGRAM [options]
+                                                  Create or update a pinned tool binding
+  cli show|remove <tool> [--binding PATH]         Inspect or delete a single tool binding
+  cli shell-init [bash|zsh|fish|powershell|pwsh] [--binding PATH] [--tools TOOL_LIST]
+                                                  Emit shell wrapper functions
+  cli run <tool> [--binding PATH] [--cwd ABS_DIR] [--timeout SECONDS] -- [ARG...]
+                                                  Execute a bound tool in the foreground
+
+NOTES
+  - Every long option requires an explicit value; place child flags after "--".
+  - Run "locklark cli <command> --help" for command-specific flags.
 `
 
 func writeCLIHelp(out io.Writer, text string) error {
@@ -71,7 +166,7 @@ func runCLICommand(args []string, out io.Writer) error {
 	if len(args) == 0 {
 		return cliUsage
 	}
-	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
+	if len(args) == 1 && (args[0] == "help" || args[0] == "--help" || args[0] == "-h") {
 		return writeCLIHelp(out, cliTopLevelHelp)
 	}
 	if len(args) == 2 && (args[1] == "--help" || args[1] == "-h") {
@@ -1076,25 +1171,25 @@ func confirmRunBundle(c *console, tool string, binding clibinding.ToolBinding, t
 		return errors.New("local process cancelled")
 	}
 	var summary strings.Builder
-	fmt.Fprintf(&summary, "将以下一次性凭据交给本次可信本地程序。\r\n")
-	fmt.Fprintf(&summary, "这不是沙箱，也不能收回已披露的值：程序及后代可读取、打印、联网或保存凭据。\r\n")
-	fmt.Fprintf(&summary, "使用真实标准输入/输出/错误；Locklark 不捕获或记录子进程正文。\r\n")
-	fmt.Fprintf(&summary, "命令及其参数会显示在终端和进程列表中；不要把秘密写入参数。\r\n")
-	fmt.Fprintf(&summary, "超时只尝试终止直接子进程，后代可能继续运行；中断或清理失败结果可能未知。\r\n")
-	fmt.Fprintf(&summary, "工具：%s\r\n", strconv.QuoteToASCII(tool))
-	fmt.Fprintf(&summary, "profile：%s\r\n", strconv.QuoteToASCII(binding.Profile))
-	fmt.Fprintf(&summary, "库：%s\r\n", strconv.QuoteToASCII(binding.VaultPath))
-	fmt.Fprintf(&summary, "程序：%s\r\n", strconv.QuoteToASCII(binding.Program))
+	fmt.Fprintf(&summary, "可信命令包装器凭据披露确认（locklark cli run）\r\n")
+	fmt.Fprintf(&summary, "  工具    ：%s（profile：%s）\r\n", strconv.QuoteToASCII(tool), strconv.QuoteToASCII(binding.Profile))
+	fmt.Fprintf(&summary, "  密码库  ：%s\r\n", strconv.QuoteToASCII(binding.VaultPath))
+	fmt.Fprintf(&summary, "  执行程序：%s\r\n", strconv.QuoteToASCII(binding.Program))
 	if binding.ProgramSHA256 != "" {
-		fmt.Fprintf(&summary, "SHA-256：%s\r\n", binding.ProgramSHA256)
+		fmt.Fprintf(&summary, "  SHA-256 ：%s\r\n", binding.ProgramSHA256)
 	} else {
-		fmt.Fprintf(&summary, "SHA-256：未固定（仍会校验为普通文件）\r\n")
+		fmt.Fprintf(&summary, "  SHA-256 ：未固定（仍会校验为普通可执行文件）\r\n")
 	}
-	fmt.Fprintf(&summary, "目录：%s\r\n", strconv.QuoteToASCII(request.Directory))
-	fmt.Fprintf(&summary, "超时：%d 秒\r\n", request.TimeoutSeconds)
+	fmt.Fprintf(&summary, "  工作目录：%s\r\n", strconv.QuoteToASCII(request.Directory))
+	fmt.Fprintf(&summary, "  超时上限：%d 秒\r\n", request.TimeoutSeconds)
+	fmt.Fprintf(&summary, "安全提示：\r\n")
+	fmt.Fprintf(&summary, "  - 这不是沙箱，也无法收回已披露的值：程序及后代可读取、打印、联网或保存凭据。\r\n")
+	fmt.Fprintf(&summary, "  - 直连当前终端标准输入/输出/错误；Locklark 不捕获或记录子进程正文。\r\n")
+	fmt.Fprintf(&summary, "  - 命令及其参数会显示在终端和进程列表中；请勿把秘密写入参数。\r\n")
+	fmt.Fprintf(&summary, "  - 超时仅尝试终止直接子进程，后代可能继续运行；中断或清理失败时结果可能未知。\r\n")
 	fmt.Fprintf(&summary, "槽位目标（读取不可变修订）：\r\n")
 	for _, target := range targets {
-		fmt.Fprintf(&summary, "  %s = %s @ %s 字段 %s\r\n", strconv.QuoteToASCII(target.Slot),
+		fmt.Fprintf(&summary, "  %s = %s @ %s（字段 %s）\r\n", strconv.QuoteToASCII(target.Slot),
 			target.ID, target.Revision, strconv.QuoteToASCII(target.Field))
 	}
 	envNames := make([]string, 0, len(request.Spec.Env)+1)
@@ -1105,14 +1200,14 @@ func confirmRunBundle(c *console, tool string, binding clibinding.ToolBinding, t
 		envNames = append(envNames, request.TokenEnvName)
 	}
 	sort.Strings(envNames)
-	fmt.Fprintf(&summary, "环境变量键（不显示值）：\r\n")
+	fmt.Fprintf(&summary, "注入环境变量键（不显示值）：\r\n")
 	if len(envNames) == 0 {
 		fmt.Fprintf(&summary, "  （无）\r\n")
 	}
 	for _, name := range envNames {
 		fmt.Fprintf(&summary, "  %s\r\n", name)
 	}
-	fmt.Fprintf(&summary, "临时凭据文件（位于本次 0700 临时根，结束删除）：\r\n")
+	fmt.Fprintf(&summary, "临时凭据文件（位于本次 0700 临时目录，退出后自动清理）：\r\n")
 	if len(request.Spec.Files) == 0 {
 		fmt.Fprintf(&summary, "  （无）\r\n")
 	}
@@ -1138,7 +1233,7 @@ func confirmRunBundle(c *console, tool string, binding clibinding.ToolBinding, t
 	for _, directory := range request.HelperPath {
 		fmt.Fprintf(&summary, "  %s\r\n", strconv.QuoteToASCII(directory))
 	}
-	fmt.Fprintf(&summary, "参数：\r\n")
+	fmt.Fprintf(&summary, "命令参数：\r\n")
 	if len(request.Args) == 0 {
 		fmt.Fprintf(&summary, "  （无）\r\n")
 	}

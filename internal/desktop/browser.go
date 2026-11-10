@@ -15,6 +15,7 @@ import (
 )
 
 func (a *App) browserView(c *ui.Context) {
+	t := c.Theme()
 	view := a.browser.Snapshot()
 	if view.SaveStatus != "" {
 		a.status = view.SaveStatus
@@ -22,34 +23,40 @@ func (a *App) browserView(c *ui.Context) {
 	if view.OTPStatus != "" {
 		a.status = view.OTPStatus
 	}
-	ui.Text(c, "浏览器连接").FontSize(24).Bold()
-	ui.Text(c, "固定扩展身份："+a.browserLabel).FontSize(12)
-	ui.Text(c, "此窗口与浏览器共享已解锁的金库会话；请核对浏览器当前网站，再确认本次操作。")
+	ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(10).Children(func() {
+		ui.Text(c, "浏览器连接").FontSize(22).Bold().TextColor(t.Text)
+		ui.Text(c, "固定扩展身份："+a.browserLabel).FontSize(12).TextColor(t.TextMuted)
+	})
+	ui.Text(c, "此窗口与浏览器共享已解锁的金库会话；请核对浏览器当前网站，再确认本次操作。").FontSize(13).TextColor(t.TextMuted)
 	if view.Busy {
-		ui.Text(c, "正在核对请求…")
+		ui.Text(c, "正在核对请求…").TextColor(t.TextMuted)
 		return
 	}
 	if view.Closed {
-		ui.Text(c, "扩展已断开；请重新从浏览器连接。")
+		ui.Text(c, "扩展已断开；请重新从浏览器连接。").TextColor(t.Warning)
 		return
 	}
 	if view.Pair {
-		ui.Text(c, "连接后可在浏览器选择账号填充、保存登录或使用验证码。快捷模式允许本次连接中的明确浏览器操作，无需反复切回此窗口；锁库或连接到期后失效。")
-		ui.PrimaryButton(c, "连接并启用快捷填充").Disabled(a.busy).OnClick(func() { s := a.session; a.run(func() outcome { return outcome{err: a.browser.ApproveQuickPair(s)} }) })
-		ui.PrimaryButton(c, "确认连接此扩展").Disabled(a.busy).OnClick(func() { s := a.session; a.run(func() outcome { return outcome{err: a.browser.ApprovePair(s)} }) })
-		ui.Button(c, "拒绝连接").Disabled(a.busy).OnClick(func() { a.run(func() outcome { return outcome{err: a.browser.Reject()} }) })
+		ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).Padding(t.Space(3)).Gap(10).Children(func() {
+			ui.Text(c, "连接后可在浏览器选择账号填充、保存登录或使用验证码。快捷模式允许本次连接中的明确浏览器操作，无需反复切回此窗口；锁库或连接到期后失效。").FontSize(13).TextColor(t.Text)
+			ui.Row(c).Gap(8).Wrap().Children(func() {
+				ui.PrimaryButton(c, "连接并启用快捷填充").Disabled(a.busy).OnClick(func() { s := a.session; a.run(func() outcome { return outcome{err: a.browser.ApproveQuickPair(s)} }) })
+				ui.PrimaryButton(c, "确认连接此扩展").Disabled(a.busy).OnClick(func() { s := a.session; a.run(func() outcome { return outcome{err: a.browser.ApprovePair(s)} }) })
+				ui.Button(c, "拒绝连接").Disabled(a.busy).OnClick(func() { a.run(func() outcome { return outcome{err: a.browser.Reject()} }) })
+			})
+		})
 		return
 	}
 	if !view.Paired {
-		ui.Text(c, "等待扩展发起新连接；重新解锁后必须重新配对。")
+		ui.Text(c, "等待扩展发起新连接；重新解锁后必须重新配对。").TextColor(t.TextMuted)
 		return
 	}
-	ui.Text(c, "已连接 · 连接最多 15 分钟；5 分钟未明确操作自动锁定。")
+	ui.Text(c, "已连接 · 连接最多 15 分钟；5 分钟未明确操作自动锁定。").FontSize(12).TextColor(t.Success)
 	if view.QuickFill {
-		ui.Text(c, "快捷填充已启用：在浏览器选择账号即可继续。自动登录设置由扩展管理。")
+		ui.Text(c, "快捷填充已启用：在浏览器选择账号即可继续。自动登录设置由扩展管理。").FontSize(12).TextColor(t.TextMuted)
 	}
 	if view.Passkey == nil && view.PasskeyStatus != "" {
-		ui.Text(c, view.PasskeyStatus).FontSize(13)
+		ui.Text(c, view.PasskeyStatus).FontSize(13).TextColor(t.TextMuted)
 	}
 	if view.Passkey != nil {
 		a.browserPasskeyView(c, *view.Passkey, view.PasskeyStatus)
@@ -68,7 +75,7 @@ func (a *App) browserView(c *ui.Context) {
 		return
 	}
 	if view.SignalStatus != "" {
-		ui.Text(c, view.SignalStatus).FontSize(13)
+		ui.Text(c, view.SignalStatus).FontSize(13).TextColor(t.TextMuted)
 	}
 	// A reserved sensitive profile review must be rendered before the generic
 	// login prompt: the login approval path cannot deliver profile fields.
@@ -77,24 +84,29 @@ func (a *App) browserView(c *ui.Context) {
 		return
 	}
 	if view.Pending == nil {
-		ui.Text(c, "在浏览器弹窗中选择当前网站的登录。此窗口不会自行请求或刷新候选。")
+		ui.Text(c, "在浏览器弹窗中选择当前网站的登录。此窗口不会自行请求或刷新候选。").FontSize(13).TextColor(t.TextMuted)
 		return
 	}
 	pending := *view.Pending
-	ui.Text(c, "确认本次登录填充").FontSize(22).Bold()
-	ui.Text(c, "HTTPS 来源："+pending.Origin).FontSize(20).Bold()
-	ui.Text(c, "条目："+browserTitle(pending.Title))
-	ui.Text(c, "ID："+pending.ItemID).FontSize(12)
-	ui.Text(c, "精确修订："+pending.Revision).FontSize(12)
-	ui.Text(c, "仅交付用户名和密码；扩展可按自动登录设置提交。请求 30 秒后失效。")
-	ui.PrimaryButton(c, "批准本次填充").Disabled(a.busy).OnClick(func() { a.run(func() outcome { return outcome{err: a.browser.ApproveFill(pending.ID)} }) })
-	ui.Button(c, "拒绝本次填充").Disabled(a.busy).OnClick(func() { a.run(func() outcome { return outcome{err: a.browser.Reject()} }) })
+	ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).Padding(t.Space(3)).Gap(8).Children(func() {
+		ui.Text(c, "确认本次登录填充").FontSize(20).Bold().TextColor(t.Text)
+		ui.Text(c, "HTTPS 来源："+pending.Origin).FontSize(18).Bold().TextColor(t.Accent)
+		ui.Text(c, "条目："+browserTitle(pending.Title)).TextColor(t.Text)
+		ui.Text(c, "ID："+pending.ItemID).FontSize(12).TextColor(t.TextMuted)
+		ui.Text(c, "精确修订："+pending.Revision).FontSize(12).TextColor(t.TextMuted)
+		ui.Text(c, "仅交付用户名和密码；扩展可按自动登录设置提交。请求 30 秒后失效。").FontSize(13).TextColor(t.TextMuted)
+		ui.Row(c).Gap(8).Children(func() {
+			ui.PrimaryButton(c, "批准本次填充").Disabled(a.busy).OnClick(func() { a.run(func() outcome { return outcome{err: a.browser.ApproveFill(pending.ID)} }) })
+			ui.Button(c, "拒绝本次填充").Disabled(a.busy).OnClick(func() { a.run(func() outcome { return outcome{err: a.browser.Reject()} }) })
+		})
+	})
 }
 
 // browserProfileView is the owner review for one sensitive profile fill. The
 // page proposed only public selectors; this view never reads a card or identity
 // value, and the private projection is prepared only after the approval click.
 func (a *App) browserProfileView(c *ui.Context, p browserhost.ProfileView) {
+	t := c.Theme()
 	category := "身份信息（identity）"
 	if p.Category == "credit_card" {
 		category = "信用卡（credit_card）"
@@ -103,24 +115,24 @@ func (a *App) browserProfileView(c *ui.Context, p browserhost.ProfileView) {
 	if p.Checkout {
 		heading = "跨源结账银行卡"
 	}
-	ui.Column(c).Gap(6).Children(func() {
-		ui.Text(c, heading).FontSize(22).Bold()
-		ui.Text(c, "HTTPS 来源："+visible(p.Origin)).FontSize(20).Bold()
+	ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).Padding(t.Space(3)).Gap(6).Children(func() {
+		ui.Text(c, heading).FontSize(20).Bold().TextColor(t.Text)
+		ui.Text(c, "HTTPS 来源："+visible(p.Origin)).FontSize(18).Bold().TextColor(t.Accent)
 		if p.Checkout {
 			// A cross-origin checkout frame always shows both sides: the top
 			// document that embedded it and the exact card frame target. The
 			// native policy already proved they share one registrable domain.
-			ui.Text(c, "顶层页面来源："+visible(p.TopOrigin)).FontSize(20).Bold()
-			ui.Text(c, "目标框架来源："+visible(p.FrameOrigin)).FontSize(20).Bold()
-			ui.Text(c, "顶层文档："+visible(p.TopDocumentID)).FontSize(12)
-			ui.Text(c, "框架文档："+visible(p.FrameDocumentID)).FontSize(12)
-			ui.Text(c, "框架 ID："+strconv.FormatInt(p.FrameID, 10)).FontSize(12)
+			ui.Text(c, "顶层页面来源："+visible(p.TopOrigin)).FontSize(17).Bold().TextColor(t.Text)
+			ui.Text(c, "目标框架来源："+visible(p.FrameOrigin)).FontSize(17).Bold().TextColor(t.Text)
+			ui.Text(c, "顶层文档："+visible(p.TopDocumentID)).FontSize(12).TextColor(t.TextMuted)
+			ui.Text(c, "框架文档："+visible(p.FrameDocumentID)).FontSize(12).TextColor(t.TextMuted)
+			ui.Text(c, "框架 ID："+strconv.FormatInt(p.FrameID, 10)).FontSize(12).TextColor(t.TextMuted)
 		}
-		ui.Text(c, "类别："+category)
-		ui.Text(c, "条目："+browserTitle(p.Title))
-		ui.Text(c, "ID："+p.ItemID).FontSize(12)
-		ui.Text(c, "精确修订："+p.Revision).FontSize(12)
-		ui.Text(c, "仅在本窗口批准后，才读取本条目本次允许填充的字段；卡片 PIN、身份证件号码及未列出的字段永不填入。请求 30 秒后失效。")
+		ui.Text(c, "类别："+category).TextColor(t.Text)
+		ui.Text(c, "条目："+browserTitle(p.Title)).TextColor(t.Text)
+		ui.Text(c, "ID："+p.ItemID).FontSize(12).TextColor(t.TextMuted)
+		ui.Text(c, "精确修订："+p.Revision).FontSize(12).TextColor(t.TextMuted)
+		ui.Text(c, "仅在本窗口批准后，才读取本条目本次允许填充的字段；卡片 PIN、身份证件号码及未列出的字段永不填入。请求 30 秒后失效。").FontSize(13).TextColor(t.TextMuted)
 		// Fixed action area after the bounded review rows: both buttons stay
 		// visible for any accepted title length.
 		approve, reject := "批准本次敏感字段填充", "拒绝本次敏感字段填充"
@@ -155,6 +167,7 @@ func (a *App) browserProfileAction(id string, approve bool) {
 }
 
 func (a *App) browserSaveView(c *ui.Context, p browserhost.SaveView, status string) {
+	t := c.Theme()
 	if a.browserSaveID != p.ID {
 		a.browserSaveID = p.ID
 		a.browserSaveTitle = p.Title
@@ -163,28 +176,32 @@ func (a *App) browserSaveView(c *ui.Context, p browserhost.SaveView, status stri
 	if p.Mode == "update" {
 		heading, approve, reject = "更新登录", "批准更新登录", "拒绝更新登录"
 	}
-	ui.Text(c, heading).FontSize(22).Bold()
-	ui.Text(c, "HTTPS 来源："+p.Origin).FontSize(20).Bold()
-	if p.Mode == "new" {
-		ui.TextInput(c, &a.browserSaveTitle).Label("新登录标题").Disabled(a.busy || p.Stage != "pending")
-	} else {
-		ui.Text(c, "条目："+browserTitle(p.Title))
-		ui.Text(c, "ID："+p.ItemID).FontSize(12)
-		ui.Text(c, "精确修订："+p.Revision).FontSize(12)
-	}
-	ui.Text(c, "保存的是点击时捕获的用户名与密码；不会验证网站账号是否正确。")
-	if p.Mode == "update" {
-		ui.Text(c, "仅替换用户名和密码；保留标题、网址、OTP、备注及来源记录。")
-	}
-	ui.Text(c, status)
-	if p.Stage != "pending" {
-		return
-	}
-	ui.PrimaryButton(c, approve).Disabled(a.busy).OnClick(func() {
-		id, title := p.ID, a.browserSaveTitle
-		a.browserSaveAction(id, func() error { return a.browser.ApproveSave(id, title) })
+	ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).Padding(t.Space(3)).Gap(8).Children(func() {
+		ui.Text(c, heading).FontSize(20).Bold().TextColor(t.Text)
+		ui.Text(c, "HTTPS 来源："+p.Origin).FontSize(18).Bold().TextColor(t.Accent)
+		if p.Mode == "new" {
+			ui.TextInput(c, &a.browserSaveTitle).Label("新登录标题").Disabled(a.busy || p.Stage != "pending")
+		} else {
+			ui.Text(c, "条目："+browserTitle(p.Title)).TextColor(t.Text)
+			ui.Text(c, "ID："+p.ItemID).FontSize(12).TextColor(t.TextMuted)
+			ui.Text(c, "精确修订："+p.Revision).FontSize(12).TextColor(t.TextMuted)
+		}
+		ui.Text(c, "保存的是点击时捕获的用户名与密码；不会验证网站账号是否正确。").FontSize(13).TextColor(t.TextMuted)
+		if p.Mode == "update" {
+			ui.Text(c, "仅替换用户名和密码；保留标题、网址、OTP、备注及来源记录。").FontSize(13).TextColor(t.TextMuted)
+		}
+		ui.Text(c, status).FontSize(13).TextColor(t.TextMuted)
+		if p.Stage != "pending" {
+			return
+		}
+		ui.Row(c).Gap(8).Children(func() {
+			ui.PrimaryButton(c, approve).Disabled(a.busy).OnClick(func() {
+				id, title := p.ID, a.browserSaveTitle
+				a.browserSaveAction(id, func() error { return a.browser.ApproveSave(id, title) })
+			})
+			ui.Button(c, reject).Disabled(a.busy).OnClick(func() { a.browserSaveAction(p.ID, func() error { return a.browser.RejectSave(p.ID) }) })
+		})
 	})
-	ui.Button(c, reject).Disabled(a.busy).OnClick(func() { a.browserSaveAction(p.ID, func() error { return a.browser.RejectSave(p.ID) }) })
 }
 func (a *App) browserSaveAction(id string, work func() error) {
 	a.run(func() outcome {
@@ -200,18 +217,23 @@ func (a *App) browserSaveAction(id string, work func() error) {
 }
 
 func (a *App) browserOTPView(c *ui.Context, p browserhost.OTPView, status string) {
-	ui.Text(c, "确认本次验证码填充").FontSize(22).Bold()
-	ui.Text(c, "HTTPS 来源："+visible(p.Origin)).FontSize(20).Bold()
-	ui.Text(c, "条目："+browserTitle(p.Title))
-	ui.Text(c, "ID："+p.ItemID).FontSize(12)
-	ui.Text(c, "精确修订："+p.Revision).FontSize(12)
-	ui.Text(c, "仅填入当前页面的唯一标准验证码框；不会自动提交，也不会自动生成下一期。").Bold()
-	ui.Text(c, status)
-	if p.Stage != "pending" {
-		return
-	}
-	ui.PrimaryButton(c, "批准填充验证码").Disabled(a.busy).OnClick(func() { a.browserOTPAction(p.ID, func() error { return a.browser.ApproveOTP(p.ID) }) })
-	ui.Button(c, "拒绝填充验证码").Disabled(a.busy).OnClick(func() { a.browserOTPAction(p.ID, func() error { return a.browser.RejectOTP(p.ID) }) })
+	t := c.Theme()
+	ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).Padding(t.Space(3)).Gap(8).Children(func() {
+		ui.Text(c, "确认本次验证码填充").FontSize(20).Bold().TextColor(t.Text)
+		ui.Text(c, "HTTPS 来源："+visible(p.Origin)).FontSize(18).Bold().TextColor(t.Accent)
+		ui.Text(c, "条目："+browserTitle(p.Title)).TextColor(t.Text)
+		ui.Text(c, "ID："+p.ItemID).FontSize(12).TextColor(t.TextMuted)
+		ui.Text(c, "精确修订："+p.Revision).FontSize(12).TextColor(t.TextMuted)
+		ui.Text(c, "仅填入当前页面的唯一标准验证码框；不会自动提交，也不会自动生成下一期。").FontSize(13).Bold().TextColor(t.Text)
+		ui.Text(c, status).FontSize(13).TextColor(t.TextMuted)
+		if p.Stage != "pending" {
+			return
+		}
+		ui.Row(c).Gap(8).Children(func() {
+			ui.PrimaryButton(c, "批准填充验证码").Disabled(a.busy).OnClick(func() { a.browserOTPAction(p.ID, func() error { return a.browser.ApproveOTP(p.ID) }) })
+			ui.Button(c, "拒绝填充验证码").Disabled(a.busy).OnClick(func() { a.browserOTPAction(p.ID, func() error { return a.browser.RejectOTP(p.ID) }) })
+		})
+	})
 }
 func (a *App) browserOTPAction(id string, work func() error) {
 	a.run(func() outcome {
@@ -239,6 +261,7 @@ func (a *App) browserOTPAction(id string, work func() error) {
 // viewport by unbounded text. The nested compact column keeps the fixed
 // chrome (heading, origin/RP, privacy copy, warning, status) tight.
 func (a *App) browserSignalView(c *ui.Context, p browserhost.SignalView, status string) {
+	t := c.Theme()
 	heading := "网站请求更新 Passkey 账号"
 	switch p.Kind {
 	case "unknown":
@@ -256,32 +279,32 @@ func (a *App) browserSignalView(c *ui.Context, p browserhost.SignalView, status 
 			removals++
 		}
 	}
-	ui.Column(c).Gap(6).Children(func() {
-		ui.Text(c, heading).FontSize(22).Bold()
-		ui.Text(c, "HTTPS 来源："+visible(p.Origin)).FontSize(20).Bold()
-		ui.Text(c, "Passkey 域名："+visible(p.RPID))
-		ui.Text(c, "仅处理下列已启用的登录 Passkey。网站不会获知本地是否存在凭据，也不会收到处理结果或数量。")
+	ui.Column(c).FillWidth().Gap(6).Children(func() {
+		ui.Text(c, heading).FontSize(20).Bold().TextColor(t.Text)
+		ui.Text(c, "HTTPS 来源："+visible(p.Origin)).FontSize(18).Bold().TextColor(t.Accent)
+		ui.Text(c, "Passkey 域名："+visible(p.RPID)).TextColor(t.Text)
+		ui.Text(c, "仅处理下列已启用的登录 Passkey。网站不会获知本地是否存在凭据，也不会收到处理结果或数量。").FontSize(13).TextColor(t.TextMuted)
 		// Every reviewed account stays reachable by scrolling; nothing is
 		// truncated and no row is dropped.
-		ui.Scroll(c).Height(170).FillWidth().Children(func() {
+		ui.Scroll(c).Height(165).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).Padding(6).Children(func() {
 			ui.Column(c).Gap(4).Children(func() {
 				for _, change := range p.Changes {
 					if change.Action == "remove" {
-						ui.Text(c, "移除 Passkey："+browserTitle(change.Title)+" · "+visible(change.Username))
+						ui.Text(c, "移除 Passkey："+browserTitle(change.Title)+" · "+visible(change.Username)).TextColor(t.Danger)
 						continue
 					}
-					ui.Text(c, "更新账号名称："+browserTitle(change.Title)+" · "+visible(change.Username))
-					ui.Text(c, "  新用户名："+visible(change.Name)).FontSize(13)
-					ui.Text(c, "  新显示名："+visible(change.DisplayName)).FontSize(13)
+					ui.Text(c, "更新账号名称："+browserTitle(change.Title)+" · "+visible(change.Username)).TextColor(t.Text)
+					ui.Text(c, "  新用户名："+visible(change.Name)).FontSize(13).TextColor(t.TextMuted)
+					ui.Text(c, "  新显示名："+visible(change.DisplayName)).FontSize(13).TextColor(t.TextMuted)
 				}
 			})
 		})
 		if removals > 0 {
-			ui.Text(c, "注意：移除操作会在本地不可撤销地清除这些 Passkey；登录名、密码、验证码、备注与附件都会保留。网站信号本身不代表用户验证。").Bold()
+			ui.Text(c, "注意：移除操作会在本地不可撤销地清除这些 Passkey；登录名、密码、验证码、备注与附件都会保留。网站信号本身不代表用户验证。").FontSize(13).Bold().TextColor(t.Danger)
 		} else {
-			ui.Text(c, "仅修改 Passkey 记录中的用户名和显示名；凭据 ID、用户句柄、私钥及所有登录字段保持不变。")
+			ui.Text(c, "仅修改 Passkey 记录中的用户名和显示名；凭据 ID、用户句柄、私钥及所有登录字段保持不变。").FontSize(13).TextColor(t.TextMuted)
 		}
-		ui.Text(c, status)
+		ui.Text(c, status).FontSize(13).TextColor(t.TextMuted)
 		if p.Working {
 			// The cancel path stays busy-independent and outside the bounded
 			// list, so a pending approval can still be revoked.
@@ -442,29 +465,32 @@ func passkeyChoiceLabel(p browserhost.PasskeyView, choice personal.PasskeyChoice
 }
 
 func (a *App) browserPasskeyView(c *ui.Context, p browserhost.PasskeyView, status string) {
+	t := c.Theme()
 	if a.browserPasskeyID != p.ID {
 		a.browserPasskeyID = p.ID
 		a.password = ""
 		a.secret = ""
 	}
-	ui.Column(c).Gap(6).Children(func() {
+	ui.Column(c).FillWidth().Gap(6).Children(func() {
 		heading := "使用 Passkey 登录"
 		if p.Create {
 			heading = "保存 Passkey"
 		}
-		ui.Text(c, heading).FontSize(18).Bold()
-		ui.Text(c, "网站："+visible(p.Origin)).FontSize(16).Bold()
-		ui.Text(c, "Passkey 域名："+visible(p.RPID))
+		ui.Text(c, heading).FontSize(18).Bold().TextColor(t.Text)
+		ui.Text(c, "网站："+visible(p.Origin)).FontSize(16).Bold().TextColor(t.Accent)
+		ui.Text(c, "Passkey 域名："+visible(p.RPID)).TextColor(t.Text)
 		if p.Create {
-			ui.Text(c, "账号："+visible(p.Username))
+			ui.Text(c, "账号："+visible(p.Username)).TextColor(t.Text)
 		}
-		ui.Text(c, status)
+		ui.Text(c, status).FontSize(13).TextColor(t.TextMuted)
 		if p.Working {
 			return
 		}
-		ui.Text(c, "需要用户验证时，请在此重新输入主密码和 Secret Key。网站不会获得这些解锁因素。")
-		ui.TextInput(c, &a.password).Label("验证主密码").Password().Disabled(a.busy)
-		ui.TextInput(c, &a.secret).Label("验证 Secret Key").Password().Disabled(a.busy)
+		ui.Text(c, "需要用户验证时，请在此重新输入主密码和 Secret Key。网站不会获得这些解锁因素。").FontSize(12).TextColor(t.TextMuted)
+		ui.Row(c).FillWidth().Gap(8).Children(func() {
+			ui.TextInput(c, &a.password).Label("验证主密码").Password().Disabled(a.busy).Grow(1)
+			ui.TextInput(c, &a.secret).Label("验证 Secret Key").Password().Disabled(a.busy).Grow(1)
+		})
 		approve := func(item, credential string) {
 			pw := []byte(a.password)
 			var key []byte
@@ -486,15 +512,15 @@ func (a *App) browserPasskeyView(c *ui.Context, p browserhost.PasskeyView, statu
 			})
 		}
 		if p.VerificationRequired {
-			ui.Text(c, "此网站要求用户验证；必须填写两个解锁因素。").Bold()
+			ui.Text(c, "此网站要求用户验证；必须填写两个解锁因素。").FontSize(13).Bold().TextColor(t.Warning)
 		}
 		factorsReady := a.password != "" && a.secret != "" || !p.VerificationRequired && a.password == "" && a.secret == ""
 		// Keep reviewed choices reachable while factors and cancel remain visible.
 		if p.Create {
-			ui.Text(c, "添加第二个 Passkey 会升级该登录的加密格式；旧客户端将拒绝打开金库。请仅在核对账号后明确批准。").Bold()
+			ui.Text(c, "添加第二个 Passkey 会升级该登录的加密格式；旧客户端将拒绝打开金库。请仅在核对账号后明确批准。").FontSize(12).Bold().TextColor(t.Warning)
 			ui.PrimaryButton(c, "创建新登录并保存 Passkey").Disabled(a.busy || !factorsReady).OnClick(func() { approve("", "") })
 		}
-		ui.Scroll(c).Height(160).FillWidth().Children(func() {
+		ui.Scroll(c).Height(160).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).Padding(6).Children(func() {
 			ui.Column(c).Gap(4).Children(func() {
 				for index, choice := range p.Choices {
 					choice := choice
@@ -525,7 +551,7 @@ func (a *App) browserPasskeyView(c *ui.Context, p browserhost.PasskeyView, statu
 							}}
 						})
 					}
-					ui.Text(c, "系统验证（"+systemLabel+"）：需先在“安全设置”启用系统快捷解锁；每次操作都会重新由系统验证，网站不会获得解锁因素。").FontSize(12)
+					ui.Text(c, "系统验证（"+systemLabel+"）：需先在“安全设置”启用系统快捷解锁；每次操作都会重新由系统验证，网站不会获得解锁因素。").FontSize(12).TextColor(t.TextMuted)
 					if p.Create {
 						ui.Button(c, "使用"+systemLabel+"创建并保存 Passkey").Disabled(a.busy).OnClick(func() { approveSystem("", "") })
 					}
@@ -538,7 +564,7 @@ func (a *App) browserPasskeyView(c *ui.Context, p browserhost.PasskeyView, statu
 						label := "使用" + systemLabel + passkeyChoiceLabel(p, choice, p.Create, existing)
 						ui.Button(c, label).Key("passkey-system:" + choice.ID + ":" + choice.CredentialID).Disabled(a.busy).OnClick(func() { approveSystem(choice.ID, choice.CredentialID) })
 					}
-					ui.Text(c, "系统验证失败或被取消时，请继续使用主密码与 Secret Key。").FontSize(12)
+					ui.Text(c, "系统验证失败或被取消时，请继续使用主密码与 Secret Key。").FontSize(12).TextColor(t.TextMuted)
 				}
 			})
 		})

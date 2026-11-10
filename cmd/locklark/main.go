@@ -13,76 +13,113 @@ import (
 	"github.com/jihuayu/locklark/internal/teambootstrapcli"
 )
 
-const usage = `Locklark · personal CLI, manual GitHub query and synthetic gateway preview
+const usage = `Locklark — Local-first vault CLI, credential wrappers, team bootstrap & synthetic gateway preview
 
-  team create|export-initial|fetch-initial|status|reconcile-protection --profile ABS_PATH
+USAGE
+  locklark <command> [subcommand] [flags]
+  locklark help | --help | -h
 
-  plugin init --file NEW_DB
-  plugin inspect --package FILE --id ID --publisher HEX_KEY
-  plugin install --file DB --parent CHECKPOINT --pins TRUSTED_JSON --package FILE --id ID --publisher HEX_KEY --digest PACKAGE_DIGEST
-  plugin list|audit --file DB --anchor CHECKPOINT --pins TRUSTED_JSON
-  plugin revoke --file DB --parent CHECKPOINT --pins TRUSTED_JSON --id ID
-  Third-party plugin execution is disabled.
+COMMAND GROUPS
+  personal      Manage an owner-only local vault in an interactive hidden terminal
+  cli           Bind and run pinned developer CLIs with ephemeral credentials
+  team          Bootstrap and inspect owner team profiles and trust pins
+  plugin        Manage signed local plugin catalogs (third-party execution disabled)
 
-  personal edit-login --file PATH --id ID --revision REV --field title|username|password|otp|url
-  personal reveal-login --file PATH --id ID --revision REV --field username|password
-  personal generate-login --file PATH [--length N]
-  personal regenerate-password --file PATH --id ID --revision REV [--length N]
-  personal otp --file PATH --id ID --revision REV
-  personal references --file PATH
-  personal health --file PATH
-  personal search --file PATH [--state active|archived|trashed|all]  (query entered in hidden terminal)
-  personal github-pull --file PATH --id ID --revision REV --repository-id NUMERIC_ID --owner OWNER --repository NAME --number PR --api-ip PUBLIC_IPV4
-  personal run-env --file PATH --id ID --revision REV --field username|password --name ENV --cwd ABS_DIR --timeout SECONDS -- ABS_PROGRAM [ARG...]
-  personal run-cli --file PATH --id ID --revision REV --profile token|gh --name ENV --cwd ABS_DIR --timeout SECONDS [--helper-path ABS_DIR_LIST] -- ABS_PROGRAM [ARG...]
-  personal inject-json --file PATH --id ID --revision REV --field username|password --name PROPERTY --out NEW.json
-  personal inspect-1pux --file PATH --source ARCHIVE
-  personal plan-import-1pux --file PATH --source ARCHIVE
-  personal import-1pux --file PATH --source ARCHIVE --digest PLAN_DIGEST
-  personal export-kdbx --file PATH --out NEW_FILE.kdbx
-  personal trash-login|restore-login --file PATH --id ID --revision REV
-  personal archive-login|unarchive-login --file PATH --id ID --revision REV
-  personal list --file PATH [--state active|archived|trashed|all]
-  personal match-logins --file PATH --origin HTTPS_ORIGIN --frame-origin HTTPS_ORIGIN
-  personal reveal-ref|otp-ref --file PATH --ref REF --revision REV
-  personal <init|add-login|list|audit> --file PATH  (interactive local-owner terminal)
+PERSONAL VAULT (locklark personal <action> --file PATH ...)
+  Vault & Lifecycle
+    personal init|audit|archived-audit|references     --file PATH
+    personal backup|restore                           --file SOURCE --out NEW_PATH
+    personal list|search                              --file PATH [--state active|archived|trashed|all]
+    personal match-logins                             --file PATH --origin HTTPS_ORIGIN --frame-origin HTTPS_ORIGIN
+    personal health                                   --file PATH [--hibp true]
 
+  Items & Logins
+    personal add-login                                --file PATH
+    personal generate-login                           --file PATH [--length N]
+    personal add-item                                 --file PATH --input ITEM.json
+    personal edit-login                               --file PATH --id ID --revision REV --field title|username|password|otp|url|notes
+    personal regenerate-password                      --file PATH --id ID --revision REV [--length N]
+    personal archive-login|unarchive-login            --file PATH --id ID --revision REV
+    personal trash-login|restore-login                --file PATH --id ID --revision REV
+
+  Secrets & Process Disclosure
+    personal reveal-login                             --file PATH --id ID --revision REV --field username|password
+    personal otp                                      --file PATH --id ID --revision REV
+    personal reveal-ref|otp-ref                       --file PATH --ref REF --revision REV
+    personal inject-json                              --file PATH --id ID --revision REV --field username|password --name PROPERTY --out NEW.json
+    personal github-pull                              --file PATH --id ID --revision REV --repository-id NUMERIC_ID --owner OWNER --repository NAME --number PR --api-ip PUBLIC_IPV4
+    personal run-env                                  --file PATH --id ID --revision REV --field username|password --name ENV --cwd ABS_DIR --timeout SECONDS -- ABS_PROGRAM [ARG...]
+    personal run-cli                                  --file PATH --id ID --revision REV --profile token|gh --name ENV --cwd ABS_DIR --timeout SECONDS [--helper-path ABS_DIR_LIST] -- ABS_PROGRAM [ARG...]
+
+  Migration, Export & Passkey Transfer
+    personal inspect-1pux                             --file PATH --source ARCHIVE
+    personal plan-import-1pux                         --file PATH --source ARCHIVE [--model v2]
+    personal import-1pux                              --file PATH --source ARCHIVE --digest PLAN_DIGEST [--model v2]
+    personal export-kdbx                              --file PATH --out NEW_FILE.kdbx
+    personal passkey-invite                           --file PATH --out NEW --ttl SECONDS
+    personal passkey-revoke                           --file PATH --invitation FILE
+    personal passkey-list                             --file PATH
+    personal passkey-export                           --file PATH --invitation FILE --target-pin HEX64 --selection PRIVATE_JSON --out NEW_PACKET
+    personal passkey-plan                             --file PATH --invitation FILE --packet FILE --source-pin HEX64
+    personal passkey-import                           --file PATH --invitation FILE --packet FILE --source-pin HEX64 --digest HEX64 --mapping PRIVATE_JSON
+
+CLI WRAPPERS (locklark cli <command> ...)
   cli profiles
-  cli list [--binding PATH]
-  cli init|bind <tool> --file PATH --program ABS_PROGRAM [--binding PATH] [--id ID --revision REV] [--slot-<name> ID:REV] [--helper-path ABS_DIR_LIST] [--passthrough ENV_LIST] [--timeout SECONDS] [--name ENV]
+  cli list       [--binding PATH]
+  cli init|bind  <tool> --file PATH --program ABS_PROGRAM [--profile PROFILE] [--binding PATH] [--id ID --revision REV] [--slot-<name> ID:REV] [--helper-path ABS_DIR_LIST] [--passthrough ENV_LIST] [--timeout SECONDS] [--name ENV] [--pin-sha256 true|false]
   cli show|remove <tool> [--binding PATH]
-  cli shell-init [bash|zsh|fish|powershell|pwsh] [--binding PATH]
+  cli shell-init [bash|zsh|fish|powershell|pwsh] [--binding PATH] [--tools TOOL_LIST]
   cli run <tool> [--binding PATH] [--cwd ABS_DIR] [--timeout SECONDS] -- [ARG...]
 
-  demo     --out NEW_DIR --session ID --reason TEXT
-  inspect  --bundle EPOCH_DIR --device CLIENT_DIR --epoch N
-  fixture-export --bundle EPOCH_DIR --device CLIENT_DIR --epoch N --out NEW_FILE.1pux
-  audit    --bundle EPOCH_DIR --device CLIENT_DIR --epoch N --session ID [--checkpoint FILE]
-  audit-verify --bundle EPOCH_DIR --device CLIENT_DIR --epoch N --checkpoint FILE
-  request  --inbox DIR --recipient PUBLIC_KEY_FILE --session ID --reason TEXT --ref REF [--session-key FILE]
-  inbox    --inbox DIR --device CLIENT_B_DIR --session ID [--after CURSOR]
+TEAM BOOTSTRAP (locklark team <command> ...)
+  team create|export-initial|fetch-initial|status|reconcile-protection --profile ABS_PATH [flags]
+  Run "locklark team --help" for subcommand flags and exit codes.
 
-  approval-revoke --device CLIENT_B_DIR --id ID --review DIGEST --reason TEXT
-  invoke-prepare --session-key FILE --recipient FILE --host-sign-key FILE --session ID --id ID --review DIGEST --attempt NEW_DIR
-  pull-enroll --device CLIENT_B_DIR --session ID --public PUBLIC_HEX --repo OWNER/NAME --repo-id ID --reason TEXT
-  pull-request --inbox DIR --recipient FILE --session-key FILE --session ID --reason TEXT --repo OWNER/NAME --repo-id ID --pr NUMBER --proposal FILE
-  invoke-run     --device CLIENT_B_DIR --bundle EPOCH_3_DIR --ticket FILE --out NEW_REPLY [--recorded-response JSON]
-  invoke-receipt --device CLIENT_B_DIR --ticket FILE --out NEW_REPLY
-  invoke-result  --attempt DIR --reply FILE
-  executions     --device CLIENT_B_DIR --session ID
-  bridge-profile --device CLIENT_B_DIR --session ID --out NEW_PROFILE
-  mcp-stdio --profile FILE --session-key FILE --recipient FILE --host-sign-key FILE --inbox DIR --exchange DIR --private DIR --bun ABSOLUTE_PATH
-  status-serve --device CLIENT_B_DIR --inbox DIR --exchange DIR [--once] [--session ID --profile MANAGED_FILE]
-  status-answer --device CLIENT_B_DIR --inbox DIR --exchange DIR --poll QUERY_ID
-  session-keygen --out NEW_FILE.sessionkey
-  session-enroll --device CLIENT_B_DIR --session ID --public PUBLIC_HEX --reason TEXT
-  session-revoke --device CLIENT_B_DIR --session ID --reason TEXT
-  session-history --device CLIENT_B_DIR --session ID
-  decide   --inbox DIR --device CLIENT_B_DIR --id ID --review DIGEST --choice approve|deny --reason TEXT [--bundle EPOCH_3_DIR]
-  decisions --device CLIENT_B_DIR --session ID
+PLUGIN CATALOG (locklark plugin <command> ...)
+  plugin init        --file NEW_DB
+  plugin inspect     --package FILE --id ID --publisher HEX_KEY
+  plugin install     --file DB --parent CHECKPOINT --pins TRUSTED_JSON --package FILE --id ID --publisher HEX_KEY --digest PACKAGE_DIGEST
+  plugin list|audit  --file DB --anchor CHECKPOINT --pins TRUSTED_JSON
+  plugin revoke      --file DB --parent CHECKPOINT --pins TRUSTED_JSON --id ID
+  Third-party plugin execution is disabled.
 
-The metadata request command accepts only ` + preview.FixtureRef + `.
-request records a pending request. It cannot release any credential.
+SYNTHETIC GATEWAY PREVIEW & MCP BRIDGE
+  Fixtures & Audit
+    demo             --out NEW_DIR --session ID --reason TEXT
+    inspect          --bundle EPOCH_DIR --device CLIENT_DIR --epoch N
+    fixture-export   --bundle EPOCH_DIR --device CLIENT_DIR --epoch N --out NEW_FILE.1pux
+    audit            --bundle EPOCH_DIR --device CLIENT_DIR --epoch N --session ID [--checkpoint FILE]
+    audit-verify     --bundle EPOCH_DIR --device CLIENT_DIR --epoch N --checkpoint FILE
+
+  Sessions & Approvals
+    session-keygen   --out NEW_FILE.sessionkey
+    session-enroll   --device CLIENT_B_DIR --session ID --public PUBLIC_HEX --reason TEXT
+    session-revoke   --device CLIENT_B_DIR --session ID --reason TEXT
+    session-history  --device CLIENT_B_DIR --session ID
+    request          --inbox DIR --recipient PUBLIC_KEY_FILE --session ID --reason TEXT --ref REF [--session-key FILE]
+    inbox            --inbox DIR --device CLIENT_B_DIR --session ID [--after CURSOR]
+    decide           --inbox DIR --device CLIENT_B_DIR --id ID --review DIGEST --choice approve|deny --reason TEXT [--bundle EPOCH_3_DIR]
+    decisions        --device CLIENT_B_DIR --session ID
+    approval-revoke  --device CLIENT_B_DIR --id ID --review DIGEST --reason TEXT
+
+  Pull Proposals, Invocation & MCP Status Bridge
+    pull-enroll      --device CLIENT_B_DIR --session ID --public PUBLIC_HEX --repo OWNER/NAME --repo-id ID --reason TEXT
+    pull-request     --inbox DIR --recipient FILE --session-key FILE --session ID --reason TEXT --repo OWNER/NAME --repo-id ID --pr NUMBER --proposal FILE
+    invoke-prepare   --session-key FILE --recipient FILE --host-sign-key FILE --session ID --id ID --review DIGEST --attempt NEW_DIR
+    invoke-run       --device CLIENT_B_DIR --bundle EPOCH_3_DIR --ticket FILE --out NEW_REPLY [--recorded-response JSON]
+    invoke-receipt   --device CLIENT_B_DIR --ticket FILE --out NEW_REPLY
+    invoke-result    --attempt DIR --reply FILE
+    executions       --device CLIENT_B_DIR --session ID
+    bridge-profile   --device CLIENT_B_DIR --session ID --out NEW_PROFILE
+    mcp-stdio        --profile FILE --session-key FILE --recipient FILE --host-sign-key FILE --inbox DIR --exchange DIR --private DIR --bun ABSOLUTE_PATH
+    status-serve     --device CLIENT_B_DIR --inbox DIR --exchange DIR [--once] [--session ID --profile MANAGED_FILE]
+    status-answer    --device CLIENT_B_DIR --inbox DIR --exchange DIR --poll QUERY_ID
+
+NOTES
+  - Passwords, Secret Keys, search queries, and consent phrases are read only from an interactive hidden terminal.
+  - Run "locklark <personal|cli|team|plugin> --help" for detailed group help.
+  - The metadata request command accepts only ` + preview.FixtureRef + `.
+  - request records a pending request. It cannot release any credential.
 `
 
 func run(args []string, out, errOut io.Writer) error {
@@ -115,30 +152,30 @@ func run(args []string, out, errOut io.Writer) error {
 	var epoch uint64
 	switch command {
 	case "demo":
-		f.StringVar(&dir, "out", "", "new fixture directory")
+		f.StringVar(&dir, "out", "", "new synthetic fixture directory")
 	case "inspect", "audit", "audit-verify", "fixture-export":
-		f.StringVar(&bundle, "bundle", "", "shared epoch directory")
-		f.Uint64Var(&epoch, "epoch", 0, "expected epoch, pinned independently")
+		f.StringVar(&bundle, "bundle", "", "shared epoch snapshot directory")
+		f.Uint64Var(&epoch, "epoch", 0, "expected epoch number, pinned independently")
 	case "decide":
-		f.StringVar(&dir, "inbox", "", "request spool")
-		f.StringVar(&bundle, "bundle", "", "required to approve the verified fixture target")
+		f.StringVar(&dir, "inbox", "", "local request spool directory")
+		f.StringVar(&bundle, "bundle", "", "epoch snapshot directory required to approve the verified fixture target")
 		f.StringVar(&id, "id", "", "reviewed request ID")
 		f.StringVar(&review, "review", "", "digest shown during inbox review")
-		f.StringVar(&choice, "choice", "", "approve or deny")
+		f.StringVar(&choice, "choice", "", "decision choice: approve or deny")
 	case "decisions": // session-filtered local journal
 	case "request", "inbox":
-		f.StringVar(&dir, "inbox", "", "local request spool")
+		f.StringVar(&dir, "inbox", "", "local request spool directory")
 	default:
 		return errors.New("unknown command; see locklark help")
 	}
 	if command == "audit" || command == "audit-verify" {
-		f.StringVar(&checkpoint, "checkpoint", "", "checkpoint from an independent trusted location")
+		f.StringVar(&checkpoint, "checkpoint", "", "checkpoint file from an independent trusted location")
 	}
 	if command == "fixture-export" {
-		f.StringVar(&dir, "out", "", "new plaintext synthetic .1pux file")
+		f.StringVar(&dir, "out", "", "new plaintext synthetic .1pux output file")
 	}
 	if command == "inbox" {
-		f.StringVar(&after, "after", "", "cursor from the previous page")
+		f.StringVar(&after, "after", "", "pagination cursor from the previous page")
 	}
 	if command == "inspect" || command == "audit" || command == "inbox" || command == "fixture-export" || command == "audit-verify" || command == "decide" || command == "decisions" {
 		f.StringVar(&device, "device", "", "private fixture client directory")
@@ -147,7 +184,7 @@ func run(args []string, out, errOut io.Writer) error {
 		f.StringVar(&session, "session", "", "agent session identifier")
 	}
 	if command == "demo" || command == "request" || command == "decide" {
-		f.StringVar(&reason, "reason", "", "synthetic business reason; never include a credential")
+		f.StringVar(&reason, "reason", "", "synthetic business reason (never include a credential)")
 	}
 	if command == "request" {
 		f.StringVar(&sessionKey, "session-key", "", "agent-owned signing seed file")
@@ -168,7 +205,7 @@ func run(args []string, out, errOut io.Writer) error {
 		}
 	})
 	if requestedKey && sessionKey == "" {
-		return errors.New("--session-key requires a file")
+		return errors.New("--session-key requires a file path")
 	}
 	if requestedWitness && checkpoint == "" {
 		return errors.New("--checkpoint requires a trusted checkpoint file")
@@ -184,7 +221,7 @@ func run(args []string, out, errOut io.Writer) error {
 		result = map[string]any{"synthetic": true, "epochs": []int{1, 2, 3}, "out": dir}
 	case "inspect", "audit", "audit-verify", "fixture-export":
 		if bundle == "" || device == "" || epoch == 0 {
-			return errors.New("--bundle, --device and --epoch are required")
+			return errors.New("--bundle, --device, and --epoch are required")
 		}
 		if command == "fixture-export" {
 			err = preview.ExportFixture(bundle, device, epoch, dir)

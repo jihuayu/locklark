@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { parseSummary, type Summary } from "../../lib/summary";
 type Tab = "overview" | "members" | "devices" | "connection";
 const tabs: { id: Tab; label: string; subtitle: string; mark: string }[] = [
@@ -30,6 +30,37 @@ const tabs: { id: Tab; label: string; subtitle: string; mark: string }[] = [
 ];
 const roleName = (role: string) =>
   role === "writer" ? "可写成员" : "只读成员";
+
+function CopyId({ value, label }: { value: string; label: string }) {
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const timer = window.setTimeout(() => setCopied(false), 1500);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
+  async function copy() {
+    try {
+      await navigator.clipboard?.writeText(value);
+      setCopied(true);
+    } catch {
+      setCopied(false);
+    }
+  }
+  return (
+    <span className="id-inline">
+      <code className="id-code">{value}</code>
+      <button
+        type="button"
+        className={copied ? "copy-chip copied" : "copy-chip"}
+        aria-label={`复制${label}`}
+        onClick={() => void copy()}
+      >
+        {copied ? "已复制" : "复制"}
+      </button>
+    </span>
+  );
+}
+
 export function Dashboard({
   initial,
   expires,
@@ -44,6 +75,7 @@ export function Dashboard({
   const [error, setError] = useState(
     initial ? "" : "无法验证当前本地目录，请检查本机管理服务。",
   );
+  const searchRef = useRef<HTMLInputElement | null>(null);
   useEffect(() => {
     const timer = window.setTimeout(
       () => {
@@ -54,6 +86,26 @@ export function Dashboard({
     );
     return () => window.clearTimeout(timer);
   }, [expires]);
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (
+        event.key !== "/" ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.altKey ||
+        (tab !== "members" && tab !== "devices")
+      ) {
+        return;
+      }
+      const target = event.target as HTMLElement | null;
+      const tag = target?.tagName?.toUpperCase() ?? "";
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      event.preventDefault();
+      searchRef.current?.focus();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [tab]);
   const members = summary?.members ?? [];
   const writerCount = members.filter((m) => m.role === "writer").length;
   const readerCount = members.length - writerCount;
@@ -258,7 +310,11 @@ export function Dashboard({
                   <div>
                     <h2>
                       团队成员{" "}
-                      <span className="count-pill">
+                      <span
+                        className="count-pill"
+                        role="status"
+                        aria-live="polite"
+                      >
                         {needle
                           ? `${filteredMembers.length} / ${members.length}`
                           : members.length}
@@ -266,20 +322,36 @@ export function Dashboard({
                     </h2>
                   </div>
                   <div className="search-controls">
-                    <label className="search-label">
-                      搜索成员 ID
+                    <div className="search-label">
+                      <div className="search-label-row">
+                        <label htmlFor="member-search">搜索成员 ID</label>
+                        <kbd className="shortcut-kbd" aria-hidden="true">
+                          /
+                        </kbd>
+                      </div>
                       <input
+                        id="member-search"
+                        ref={searchRef}
                         value={query}
                         onChange={(e) => setQuery(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key !== "Escape") return;
+                          e.preventDefault();
+                          if (query) setQuery("");
+                          else e.currentTarget.blur();
+                        }}
                         placeholder="输入成员 ID 筛选"
                         maxLength={64}
                       />
-                    </label>
+                    </div>
                     {query ? (
                       <button
                         type="button"
                         className="ghost-action clear-search"
-                        onClick={() => setQuery("")}
+                        onClick={() => {
+                          setQuery("");
+                          searchRef.current?.focus();
+                        }}
                       >
                         清除
                       </button>
@@ -299,7 +371,10 @@ export function Dashboard({
                       {filteredMembers.map((member) => (
                         <tr key={member.id}>
                           <td>
-                            <code className="id-code">{member.id}</code>
+                            <CopyId
+                              value={member.id}
+                              label={`成员 ID ${member.id}`}
+                            />
                           </td>
                           <td>
                             <span
@@ -327,7 +402,10 @@ export function Dashboard({
                       <button
                         type="button"
                         className="secondary"
-                        onClick={() => setQuery("")}
+                        onClick={() => {
+                          setQuery("");
+                          searchRef.current?.focus();
+                        }}
                       >
                         清除筛选条件
                       </button>
@@ -342,7 +420,11 @@ export function Dashboard({
                   <div>
                     <h2>
                       已登记设备{" "}
-                      <span className="count-pill">
+                      <span
+                        className="count-pill"
+                        role="status"
+                        aria-live="polite"
+                      >
                         {needle
                           ? `${filteredDevices.length} / ${devices.length}`
                           : devices.length}
@@ -350,20 +432,38 @@ export function Dashboard({
                     </h2>
                   </div>
                   <div className="search-controls">
-                    <label className="search-label">
-                      搜索设备或成员 ID
+                    <div className="search-label">
+                      <div className="search-label-row">
+                        <label htmlFor="device-search">
+                          搜索设备或成员 ID
+                        </label>
+                        <kbd className="shortcut-kbd" aria-hidden="true">
+                          /
+                        </kbd>
+                      </div>
                       <input
+                        id="device-search"
+                        ref={searchRef}
                         value={query}
                         onChange={(e) => setQuery(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key !== "Escape") return;
+                          e.preventDefault();
+                          if (query) setQuery("");
+                          else e.currentTarget.blur();
+                        }}
                         placeholder="输入设备或成员 ID 筛选"
                         maxLength={64}
                       />
-                    </label>
+                    </div>
                     {query ? (
                       <button
                         type="button"
                         className="ghost-action clear-search"
-                        onClick={() => setQuery("")}
+                        onClick={() => {
+                          setQuery("");
+                          searchRef.current?.focus();
+                        }}
                       >
                         清除
                       </button>
@@ -383,10 +483,16 @@ export function Dashboard({
                       {filteredDevices.map((device) => (
                         <tr key={device.id}>
                           <td>
-                            <code className="id-code">{device.id}</code>
+                            <CopyId
+                              value={device.id}
+                              label={`设备 ID ${device.id}`}
+                            />
                           </td>
                           <td>
-                            <code className="id-code">{device.member}</code>
+                            <CopyId
+                              value={device.member}
+                              label={`成员 ID ${device.member}`}
+                            />
                           </td>
                           <td>
                             <span
@@ -411,7 +517,10 @@ export function Dashboard({
                       <button
                         type="button"
                         className="secondary"
-                        onClick={() => setQuery("")}
+                        onClick={() => {
+                          setQuery("");
+                          searchRef.current?.focus();
+                        }}
                       >
                         清除筛选条件
                       </button>
@@ -456,17 +565,19 @@ export function Dashboard({
                     <div>
                       <dt>目录范围</dt>
                       <dd>
-                        <code className="id-code">
-                          {summary.checkpoint.scope}
-                        </code>
+                        <CopyId
+                          value={summary.checkpoint.scope}
+                          label="目录范围"
+                        />
                       </dd>
                     </div>
                     <div>
                       <dt>检查点摘要</dt>
                       <dd>
-                        <code className="id-code">
-                          {summary.checkpoint.hash}
-                        </code>
+                        <CopyId
+                          value={summary.checkpoint.hash}
+                          label="检查点摘要"
+                        />
                       </dd>
                     </div>
                   </dl>

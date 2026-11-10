@@ -26,8 +26,48 @@ import (
 	"github.com/jihuayu/locklark/internal/teamsync"
 )
 
-const OwnerUsage = "locklark team create|export-initial|fetch-initial|status|reconcile-protection (see command flags)\n"
-const ServiceUsage = "locklark-team-sync prepare-identity|initialize|reconcile-initialize|serve-profile|status|reconcile-protection\n"
+const OwnerUsage = `usage: locklark team <command> --profile ABS_PATH [flags]
+
+Bootstrap and inspect OS-protected owner team profiles without exposing private keys.
+
+OWNER COMMANDS
+  create                --profile NEW_PROFILE --anchor NEW_ANCHOR --service SERVICE_JSON
+                        --expect-sequencer-fingerprint SHA256:HEX64 --pins-out NEW_PINS_JSON
+  export-initial        --profile PROFILE --out NEW_ARTIFACT_JSON
+  fetch-initial         --profile PROFILE --endpoint https://HOST:PORT [--ca PEM_FILE]
+  status                --profile PROFILE [--pins-out NEW_PINS_JSON]
+  reconcile-protection  --profile PROFILE
+
+EXIT CODES
+  0  Completed
+  1  Refused before or without uncertain state change
+  2  Invalid command or flag usage
+  3  Outcome unknown — retain the original profile and reconcile the same operation
+  4  State or identity conflict — never replace original files or identities
+
+Run "locklark team <command> --help" for command-specific flag details.
+`
+
+const ServiceUsage = `OS-PROTECTED SERVICE BOOTSTRAP COMMANDS (usage: locklark-team-sync <command> --profile ABS_PATH [flags])
+  prepare-identity      --profile NEW_PROFILE --public-out NEW_SERVICE_JSON
+  initialize            --profile PROFILE --service SERVICE_JSON --trusted-pins PINS_JSON
+                        --expect-owner-fingerprint SHA256:HEX64 --artifact ARTIFACT_JSON
+                        --directory NEW_DB --anchor NEW_ANCHOR
+  reconcile-initialize  --profile PROFILE --service SERVICE_JSON --trusted-pins PINS_JSON
+                        --expect-owner-fingerprint SHA256:HEX64 --artifact ARTIFACT_JSON
+                        --directory DB --anchor ANCHOR
+  serve-profile         --profile PROFILE --service SERVICE_JSON --trusted-pins PINS_JSON
+                        --listen HOST:PORT --certificate CERT_PEM --tls-key KEY_PEM
+  status                --profile PROFILE [--public-out NEW_SERVICE_JSON]
+  reconcile-protection  --profile PROFILE
+
+EXIT CODES
+  0  Completed
+  1  Refused before or without uncertain state change
+  2  Invalid command or flag usage
+  3  Outcome unknown — retain the original profile and reconcile the same operation
+  4  State or identity conflict — never replace original files or identities
+`
 
 type failure struct {
 	code  int
@@ -37,7 +77,7 @@ type failure struct {
 func (e failure) Error() string {
 	switch e.code {
 	case 2:
-		return "team bootstrap usage refused; see help"
+		return "team bootstrap usage refused; run with --help for command flags"
 	case 3:
 		return "team bootstrap result unknown at " + e.stage + "; retain the original profile and reconcile the same operation"
 	case 4:
@@ -159,6 +199,26 @@ func trustedPins(path string) (directory.Pins, *directory.Config, error) {
 	c, err := directory.NewConfigWithWriterACL(p)
 	return p, c, err
 }
+
+var bootstrapFlagDescriptions = map[string]string{
+	"profile":                      "clean absolute path to the owner-only bootstrap profile",
+	"public-out":                   "new clean absolute path for the public sequencer descriptor JSON",
+	"pins-out":                     "new clean absolute path for the public trusted pins JSON",
+	"anchor":                       "clean absolute path to the independent checkpoint anchor file",
+	"service":                      "clean absolute path to the reviewed public sequencer descriptor JSON",
+	"expect-sequencer-fingerprint": "independently verified sequencer fingerprint (SHA256:<64 lowercase hex>)",
+	"expect-owner-fingerprint":     "independently verified owner fingerprint (SHA256:<64 lowercase hex>)",
+	"trusted-pins":                 "clean absolute path to the reviewed trusted pins JSON",
+	"out":                          "new clean absolute path for the signed initial bootstrap artifact JSON",
+	"artifact":                     "clean absolute path to the signed initial bootstrap artifact JSON",
+	"directory":                    "clean absolute path to the encrypted team directory database",
+	"endpoint":                     "HTTPS origin URL of the team sync sequencer (https://host:port)",
+	"ca":                           "optional clean absolute path to a PEM root certificate bundle",
+	"listen":                       "TCP listen address in host:port form",
+	"certificate":                  "clean absolute path to the TLS server certificate PEM file",
+	"tls-key":                      "clean absolute path to the owner-only TLS private key PEM file",
+}
+
 func run(ctx context.Context, args []string, out io.Writer, service bool, rt runtime) error {
 	if len(args) == 0 || len(args) == 1 && (args[0] == "help" || args[0] == "--help" || args[0] == "-h") {
 		usage := OwnerUsage
@@ -185,7 +245,11 @@ func run(ctx context.Context, args []string, out io.Writer, service bool, rt run
 	specified := map[string]bool{}
 	str := func(flagName string) *string {
 		value := new(string)
-		f.Func(flagName, "absolute reviewed path or bounded public value", func(input string) error {
+		desc := bootstrapFlagDescriptions[flagName]
+		if desc == "" {
+			desc = "absolute reviewed path or bounded public value"
+		}
+		f.Func(flagName, desc, func(input string) error {
 			if specified[flagName] {
 				return errors.New("duplicate bootstrap option")
 			}

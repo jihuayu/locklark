@@ -11,6 +11,10 @@ import (
 	"time"
 
 	"github.com/egoist/mygo/ui"
+	"github.com/jihuayu/locklark/internal/osunlock"
+	"github.com/jihuayu/locklark/internal/personal"
+	oneui "github.com/oneo-me/onevra/source/components"
+	"github.com/oneo-me/onevra/source/icons/lucide"
 )
 
 // Settings holds the local, non-secret desktop preferences described by the
@@ -463,58 +467,143 @@ func (a *App) backgroundRunning() bool {
 // settingsView renders configurable security preferences. It is reachable
 // from the top bar and is deliberately usable while a vault is unlocked.
 func (a *App) settingsView(c *ui.Context) {
+	t := c.Theme()
 	s := a.settingsSnapshot()
-	ui.Scroll(c).Fill().Children(func() {
-		ui.Column(c).Width(760).Gap(14).Children(func() {
-			ui.Row(c).Gap(8).Children(func() {
-				ui.Text(c, "安全与偏好设置").FontSize(22).Bold().Grow(1)
-				ui.Button(c, "关闭设置").OnClick(a.closeSettings)
+
+	ui.Column(c.Key("settings")).Role(ui.RoleGroup).Label("安全与偏好设置").FillWidth().MinWidth(0).Gap(t.Space(3)).Children(func() {
+		// Header
+		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(t.Space(2.5)).Children(func() {
+			iconBox := ui.Box(c).Size(t.Space(10), t.Space(10)).Shrink(0).Radius(t.Space(2.5)).
+				Background(t.Accent.Alpha(.12)).AlignItems(ui.Center).Justify(ui.Center)
+			iconBox.Children(func() {
+				oneui.Icon(c, lucide.Settings()).Size(t.Space(5), t.Space(5)).TextColor(t.Accent)
 			})
-			ui.Text(c, "自动锁定").FontSize(18).Bold()
-			ui.Text(c, "空闲自动锁定时间（分钟）— security.autolock.minutes").FontSize(12)
-			ui.Row(c).Gap(6).Children(func() {
+			ui.Column(c).Grow(1).MinWidth(0).Gap(t.Space(.5)).Children(func() {
+				oneui.Text(c, "安全与偏好设置").FontSize(t.Rem(1.35)).Bold().SingleLine()
+				oneui.Text(c, "管理本地自动锁定、剪贴板自动清理与系统级快捷解锁策略。").FontSize(t.Rem(.78)).TextColor(t.TextMuted).Wrap()
+			})
+			oneui.Button(c, "关闭设置", oneui.ButtonOutline).OnClick(a.closeSettings)
+		})
+
+		// 1. Auto-Lock Card
+		ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).
+			Padding(t.Space(3)).Gap(t.Space(2)).Children(func() {
+			ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(t.Space(1.5)).Children(func() {
+				oneui.Text(c, "自动锁定").Bold().Grow(1)
+				oneui.Badge(c, durationLabel(s.AutoLockDuration()), oneui.BadgeOptions{Tone: oneui.BadgeAccent})
+			})
+			oneui.Text(c, "空闲自动锁定时间（分钟）— security.autolock.minutes").FontSize(t.Rem(.76)).TextColor(t.TextMuted).Wrap()
+			ui.Row(c).FillWidth().Wrap().Gap(t.Space(1)).Children(func() {
 				for _, m := range AutoLockPresets {
 					m := m
 					label := fmt.Sprintf("%d 分钟", m)
 					if m == 0 {
 						label = "从不"
 					}
-					button := ui.Button(c, label)
+					variant := oneui.ButtonOutline
 					if s.AutoLockMinutes == m {
-						button = ui.PrimaryButton(c, label)
+						variant = oneui.ButtonPrimary
 					}
-					button.OnClick(func() { _ = a.SetAutoLockMinutes(m) })
+					oneui.Button(c, label, variant).OnClick(func() { _ = a.SetAutoLockMinutes(m) })
 				}
 			})
-			ui.Text(c, fmt.Sprintf("当前空闲自动锁定阈值：%s", durationLabel(s.AutoLockDuration())))
+			oneui.Text(c, fmt.Sprintf("当前空闲自动锁定阈值：%s", durationLabel(s.AutoLockDuration()))).FontSize(t.Rem(.82)).TextColor(t.TextMuted)
+			ui.Box(c).FillWidth().Height(1).Background(t.Border)
 			sleep := s.LockOnSleep
-			ui.Checkbox(c, &sleep, "系统休眠时自动锁定").OnChange(func() { _ = a.SetLockOnSleep(sleep) })
+			oneui.Checkbox(c, &sleep, "系统休眠时自动锁定").OnChange(func() { _ = a.SetLockOnSleep(sleep) })
 			screen := s.LockOnScreenLock
-			ui.Checkbox(c, &screen, "屏幕锁定时自动锁定").OnChange(func() { _ = a.SetLockOnScreenLock(screen) })
-			ui.Text(c, "剪贴板防护").FontSize(18).Bold()
-			ui.Text(c, "复制敏感内容后尝试清理时间（秒）— security.clipboard.clearAfterSeconds").FontSize(12)
-			ui.Row(c).Gap(6).Children(func() {
+			oneui.Checkbox(c, &screen, "屏幕锁定时自动锁定").OnChange(func() { _ = a.SetLockOnScreenLock(screen) })
+		})
+
+		// 2. Clipboard Protection Card
+		ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).
+			Padding(t.Space(3)).Gap(t.Space(2)).Children(func() {
+			ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(t.Space(1.5)).Children(func() {
+				oneui.Text(c, "剪贴板防护").Bold().Grow(1)
+				oneui.Badge(c, durationLabel(s.ClipboardClearDuration()), oneui.BadgeOptions{Tone: oneui.BadgeNeutral})
+			})
+			oneui.Text(c, "复制敏感内容后尝试清理时间（秒）— security.clipboard.clearAfterSeconds").FontSize(t.Rem(.76)).TextColor(t.TextMuted).Wrap()
+			ui.Row(c).FillWidth().Wrap().Gap(t.Space(1)).Children(func() {
 				for _, n := range ClipboardClearPresets {
 					n := n
 					label := fmt.Sprintf("%d 秒", n)
 					if n == 0 {
 						label = "从不"
 					}
-					button := ui.Button(c, label)
+					variant := oneui.ButtonOutline
 					if s.ClipboardClearSeconds == n {
-						button = ui.PrimaryButton(c, label)
+						variant = oneui.ButtonPrimary
 					}
-					button.OnClick(func() { _ = a.SetClipboardClearSeconds(n) })
+					oneui.Button(c, label, variant).OnClick(func() { _ = a.SetClipboardClearSeconds(n) })
 				}
 			})
-			ui.Text(c, fmt.Sprintf("当前剪贴板清理策略：%s", durationLabel(s.ClipboardClearDuration())))
+			oneui.Text(c, fmt.Sprintf("当前剪贴板清理策略：%s", durationLabel(s.ClipboardClearDuration()))).FontSize(t.Rem(.82)).TextColor(t.TextMuted)
+			ui.Box(c).FillWidth().Height(1).Background(t.Border)
 			reveal := s.RevealPasswords
-			ui.Checkbox(c, &reveal, "默认显示遮蔽字段").OnChange(func() { _ = a.SetRevealPasswords(reveal) })
-			ui.Text(c, "非敏感偏好设置以 0600 权限保存于 "+a.settingsPath).FontSize(12)
-			if a.status != "" {
-				ui.Text(c, a.status)
-			}
+			oneui.Checkbox(c, &reveal, "默认显示遮蔽字段").OnChange(func() { _ = a.SetRevealPasswords(reveal) })
 		})
+
+		// 3. System Quick Unlock & Shortcut Card
+		ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).
+			Padding(t.Space(3)).Gap(t.Space(2)).Children(func() {
+			ui.Row(c).FillWidth().AlignItems(ui.Center).Children(func() {
+				oneui.Text(c, "快捷解锁："+osunlock.Label()).Bold().Grow(1)
+				oneui.Icon(c, lucide.KeyRound()).Size(t.Space(3.5), t.Space(3.5)).TextColor(t.TextMuted)
+			})
+			oneui.Text(c, osunlock.Description()).FontSize(t.Rem(.82)).Wrap()
+			oneui.Text(c, osunlock.Requirement()).FontSize(t.Rem(.76)).TextColor(t.TextMuted).Wrap()
+			oneui.Text(c, "首次或授权到期后需使用主密码与 Secret Key 完整解锁，再主动启用；系统验证失败时仍可通过完整凭据解锁。").FontSize(t.Rem(.76)).TextColor(t.TextMuted).Wrap()
+			ui.Row(c).FillWidth().Wrap().Gap(t.Space(1.5)).Children(func() {
+				oneui.Button(c, "启用系统快捷解锁（有效期 24 小时）", oneui.ButtonSecondary).Disabled(a.busy || a.session == nil).OnClick(func() {
+					sess, store := a.session, a.systemStore
+					if sess == nil {
+						return
+					}
+					a.run(func() outcome {
+						return outcome{err: sess.EnableSystemUnlock(store), apply: func() { a.status = "系统快捷解锁已启用；现在可锁定并试用" }}
+					})
+				})
+				oneui.Button(c, "停用系统快捷解锁", oneui.ButtonOutline).Disabled(a.busy).OnClick(func() {
+					path, store := a.path, a.systemStore
+					a.run(func() outcome {
+						return outcome{err: personal.DisableSystemUnlock(path, store), apply: func() { a.status = "系统快捷解锁已停用" }}
+					})
+				})
+			})
+			ui.Box(c).FillWidth().Height(1).Background(t.Border)
+			oneui.Text(c, "快捷搜索："+quickSearchAcceleratorLabel()).FontSize(t.Rem(.84)).Bold()
+			shortcut := a.quickShortcut
+			if shortcut == "" {
+				shortcut = "全局快捷键尚未提交注册；可使用窗口顶部的「快捷搜索」按钮。"
+			}
+			oneui.Text(c, shortcut).FontSize(t.Rem(.76)).TextColor(t.TextMuted).Wrap()
+		})
+
+		// 4. Advanced Workspace Tools Card (when unlocked in v2 workspace)
+		if a.v2Mode && a.session != nil {
+			ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).
+				Padding(t.Space(3)).Gap(t.Space(2)).Children(func() {
+				oneui.Text(c, "高级工作区工具").Bold()
+				oneui.Text(c, "管理本地 SSH Agent 密钥、1Password 1PUX 迁移导入、KDBX 加密备份与安全审计记录。").FontSize(t.Rem(.78)).TextColor(t.TextMuted).Wrap()
+				ui.Row(c).FillWidth().Wrap().Gap(t.Space(1.5)).Children(func() {
+					oneui.Button(c, "SSH 密钥与 Agent", oneui.ButtonOutline).Disabled(a.busy).OnClick(func() {
+						a.v2.settingsOpen = false
+						a.page = "ssh"
+						a.refreshSSHKeys()
+					})
+					oneui.Button(c, "导入与导出", oneui.ButtonOutline).Disabled(a.busy).OnClick(func() {
+						a.v2.settingsOpen = false
+						a.page = "transfer"
+					})
+					oneui.Button(c, "安全审计日志", oneui.ButtonOutline).Disabled(a.busy).OnClick(func() {
+						a.v2.settingsOpen = false
+						a.page = "activity"
+					})
+				})
+			})
+		}
+
+		oneui.Text(c, "非敏感偏好设置以 0600 权限保存于 "+a.settingsPath).FontSize(t.Rem(.75)).TextColor(t.TextMuted).Wrap()
 	})
 }
 

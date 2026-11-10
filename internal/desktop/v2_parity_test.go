@@ -447,7 +447,7 @@ func TestV2DetailAndEditorViewsRenderRichItem(t *testing.T) {
 
 	view := ui.NewTester(a.View, 1200, 1800)
 	for _, label := range []string{
-		"Username", "Password", "One-Time Password",
+		"用户名", "密码", "一次性验证码",
 		"Bank（主）", "持卡人", "卡号",
 		"Extra · Recovery", "Extra · Card PIN",
 		"显示", "复制",

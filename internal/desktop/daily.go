@@ -185,17 +185,24 @@ func (a *App) confirmRegeneration() {
 	})
 }
 func (a *App) regenerationView(c *ui.Context) {
+	t := c.Theme()
 	target := *a.regenerate
-	ui.Text(c, "确认重新生成本地密码").FontSize(22).Bold()
-	ui.Text(c, "仅替换本地金库密码，不会替你修改网站密码。").Bold()
-	ui.Text(c, "条目："+browserTitle(target.Title))
-	ui.Text(c, "网站："+visible(target.URL))
-	ui.Text(c, "状态："+target.State)
-	ui.Text(c, "ID："+target.ID).FontSize(12)
-	ui.Text(c, "修订："+target.Revision).FontSize(12)
-	ui.TextInput(c, &a.generationLength).Label("密码长度（22–256）").Disabled(a.busy)
-	ui.PrimaryButton(c, "确认生成并替换").Disabled(a.busy).OnClick(a.confirmRegeneration)
-	ui.Button(c, "取消重新生成").Disabled(a.busy).OnClick(func() { a.regenerate = nil; a.status = "未重新生成" })
+	ui.Column(c).Width(560).Border(1, t.Border).Radius(t.Radius).Background(t.Surface).Padding(t.Space(4)).Gap(12).Children(func() {
+		ui.Text(c, "确认重新生成本地密码").FontSize(22).Bold().TextColor(t.Text)
+		ui.Text(c, "仅替换本地金库密码，不会替你修改网站密码。").Bold().TextColor(t.Warning)
+		ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Background).Padding(t.Space(3)).Gap(4).Children(func() {
+			ui.Text(c, "条目："+browserTitle(target.Title)).TextColor(t.Text)
+			ui.Text(c, "网站："+visible(target.URL)).TextColor(t.Text)
+			ui.Text(c, "状态："+target.State).TextColor(t.TextMuted)
+			ui.Text(c, "ID："+target.ID).FontSize(12).TextColor(t.TextMuted)
+			ui.Text(c, "修订："+target.Revision).FontSize(12).TextColor(t.TextMuted)
+		})
+		ui.TextInput(c, &a.generationLength).Label("密码长度（22–256）").Disabled(a.busy)
+		ui.Row(c).Gap(8).Children(func() {
+			ui.PrimaryButton(c, "确认生成并替换").Disabled(a.busy).OnClick(a.confirmRegeneration)
+			ui.Button(c, "取消重新生成").Disabled(a.busy).OnClick(func() { a.regenerate = nil; a.status = "未重新生成" })
+		})
+	})
 }
 
 // UI state only: never reenter a Session mutex from a granted callback.

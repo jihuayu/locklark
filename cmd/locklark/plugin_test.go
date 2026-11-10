@@ -36,4 +36,13 @@ func TestPluginCLIOutputFailureAndDisabledExecution(t *testing.T) {
 	if json.Unmarshal(out.Bytes(), &status) != nil || status.Execution != "disabled" || status.Sequence != 1 {
 		t.Fatal("CLI route")
 	}
+	for _, helpFlag := range []string{"help", "--help", "-h"} {
+		var helpOut bytes.Buffer
+		if e := runPlugin([]string{helpFlag}, &helpOut); e != nil {
+			t.Fatalf("plugin %s failed: %v", helpFlag, e)
+		}
+		if !bytes.Contains(helpOut.Bytes(), []byte("usage: locklark plugin")) || !bytes.Contains(helpOut.Bytes(), []byte("execution is disabled")) {
+			t.Fatalf("plugin %s output incomplete: %q", helpFlag, helpOut.String())
+		}
+	}
 }

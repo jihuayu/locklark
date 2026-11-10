@@ -77,7 +77,11 @@ func confirmTerminal(ctx context.Context, input *os.File, output io.Writer, role
 			ret = ErrTrust
 		}
 	}()
-	if _, err = fmt.Fprintf(output, "Team bootstrap trust review\r\nRole: %s\r\nPublic key: %s\r\nFingerprint: %s\r\nScope: %s\r\nType TRUST %s to confirm: ", role, public, fp, scope, fp); err != nil {
+	scopeDisplay := scope
+	if scopeDisplay == "" {
+		scopeDisplay = "(not bound at sequencer review)"
+	}
+	if _, err = fmt.Fprintf(output, "Team bootstrap trust review\r\n  Role:        %s\r\n  Public key:  %s\r\n  Fingerprint: %s\r\n  Scope:       %s\r\nVerify the fingerprint out of band before confirming.\r\nType TRUST %s to confirm: ", role, public, fp, scopeDisplay, fp); err != nil {
 		return ErrTrust
 	}
 	defer fmt.Fprint(output, "\r\n")

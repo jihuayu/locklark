@@ -241,18 +241,27 @@ func (a *App) cliApprovalView(c *ui.Context) {
 	if p == nil {
 		return
 	}
-	ui.Column(c).Width(640).Gap(12).Children(func() {
-		ui.Text(c, "批准本地 CLI 凭据请求").FontSize(26).Bold()
-		ui.Text(c, "Vault: "+p.request.VaultPath).FontSize(12)
-		ui.Text(c, "Peer: "+p.peer.User).FontSize(12)
-		ui.Text(c, "PID: "+uintString(p.peer.PID)+" · "+p.peer.Process).FontSize(12)
-		ui.Text(c, "目标条目数："+intString(len(p.request.Targets)))
-		for _, t := range p.request.Targets {
-			ui.Text(c, t.Slot+" ← "+t.Field+" · "+t.ID).FontSize(12)
+	t := c.Theme()
+	ui.Column(c).Width(640).Border(1, t.Border).Radius(t.Radius).Background(t.Surface).Padding(t.Space(4)).Gap(12).Children(func() {
+		ui.Text(c, "批准本地 CLI 凭据请求").FontSize(24).Bold().TextColor(t.Text)
+		ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Background).Padding(t.Space(3)).Gap(4).Children(func() {
+			ui.Text(c, "金库路径："+p.request.VaultPath).FontSize(12).TextColor(t.TextMuted)
+			ui.Text(c, "本机用户："+p.peer.User).FontSize(12).TextColor(t.TextMuted)
+			ui.Text(c, "调用进程：PID "+uintString(p.peer.PID)+" · "+p.peer.Process).FontSize(12).TextColor(t.TextMuted)
+			ui.Text(c, "目标条目数："+intString(len(p.request.Targets))).FontSize(13).Bold().TextColor(t.Text)
+		})
+		if len(p.request.Targets) > 0 {
+			ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Background).Padding(t.Space(2)).Gap(4).Children(func() {
+				for _, target := range p.request.Targets {
+					ui.Text(c, target.Slot+" ← "+target.Field+" · "+target.ID).FontSize(12).TextColor(t.Text)
+				}
+			})
 		}
-		ui.Text(c, "批准后，以下固定字段将一次性交给本机 CLI 进程。每次请求都需要明确确认。").Bold()
-		ui.PrimaryButton(c, "仅批准本次 CLI 请求").OnClick(func() { a.approveCLIRun(true) })
-		ui.Button(c, "拒绝本次请求").OnClick(func() { a.approveCLIRun(false) })
+		ui.Text(c, "批准后，以上固定字段将一次性交给本机 CLI 进程。每次请求都需要明确确认。").FontSize(13).Bold().TextColor(t.Warning)
+		ui.Row(c).Gap(8).Children(func() {
+			ui.PrimaryButton(c, "仅批准本次 CLI 请求").OnClick(func() { a.approveCLIRun(true) })
+			ui.Button(c, "拒绝本次请求").OnClick(func() { a.approveCLIRun(false) })
+		})
 	})
 }
 

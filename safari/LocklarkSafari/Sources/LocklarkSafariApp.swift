@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import SafariServices
 import SwiftUI
 
 @main
@@ -11,6 +12,7 @@ struct LocklarkSafariApp: App {
             RelayStatusView(coordinator: coordinator)
                 .task { coordinator.start() }
         }
+        .windowResizability(.contentSize)
         .commands {
             CommandGroup(replacing: .newItem) {}
         }
@@ -63,6 +65,7 @@ struct RelayStatusView: View {
                     .frame(width: 48, height: 48)
                     .background(Color.blue.opacity(0.12))
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .accessibilityHidden(true)
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Locklark for Safari")
@@ -85,6 +88,8 @@ struct RelayStatusView: View {
                 .padding(.vertical, 5)
                 .background(coordinator.state.tintColor.opacity(0.12))
                 .clipShape(Capsule())
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("桥接服务状态：\(coordinator.state.badgeTitle)")
             }
 
             GroupBox {
@@ -121,17 +126,19 @@ struct RelayStatusView: View {
             }
 
             GroupBox("安全隔离架构") {
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 10) {
                     securityRow(
                         icon: "checkmark.seal.fill",
                         title: "App Group 代码签名双向核验",
                         detail: "仅接受具备相同开发者团队签名与固定 Bundle ID 的 Safari Web 扩展连接。"
                     )
+                    Divider()
                     securityRow(
                         icon: "cpu.fill",
                         title: "受限沙箱原生金库辅助进程",
                         detail: "The Safari extension connects through this app. Keep the app running while you use the extension. The native vault stays in the embedded helper."
                     )
+                    Divider()
                     securityRow(
                         icon: "person.crop.rectangle.stack.fill",
                         title: "Safari 个人资料会话绑定",
@@ -141,16 +148,25 @@ struct RelayStatusView: View {
                 .padding(8)
             }
 
-            HStack(spacing: 8) {
+            HStack(alignment: .center, spacing: 10) {
                 Image(systemName: "safari")
                     .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
                 Text("启用方式：打开 Safari 浏览器 → 设置 (⌘,) → 扩展，勾选启用 Locklark 并保持本应用在后台运行。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
+                Button("打开 Safari 扩展设置…") {
+                    SFSafariApplication.showPreferencesForExtension(
+                        withIdentifier: ConfiguredIdentity.fixedExtensionBundleID
+                    ) { _ in }
+                }
+                .controlSize(.small)
             }
         }
         .padding(24)
-        .frame(minWidth: 540, minHeight: 360, alignment: .topLeading)
+        .frame(minWidth: 560, idealWidth: 580, minHeight: 380, alignment: .topLeading)
     }
 
     private func securityRow(icon: String, title: String, detail: String) -> some View {
@@ -160,6 +176,7 @@ struct RelayStatusView: View {
                 .foregroundStyle(.blue)
                 .frame(width: 18, alignment: .center)
                 .padding(.top, 2)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(.subheadline.weight(.medium))

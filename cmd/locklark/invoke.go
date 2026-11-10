@@ -18,33 +18,33 @@ func runInvoke(args []string, out, diag io.Writer) error {
 	f.SetOutput(diag)
 	var device, bundle, ticket, path, dir, session, id, review, key, pub, host, reason string
 	if cmd == "approval-revoke" {
-		f.StringVar(&id, "id", "", "approval request ID")
+		f.StringVar(&id, "id", "", "approved request ID to revoke")
 		f.StringVar(&review, "review", "", "review digest")
-		f.StringVar(&reason, "reason", "", "reason to revoke")
+		f.StringVar(&reason, "reason", "", "business reason for revocation")
 	}
 	if cmd == "invoke-prepare" {
-		f.StringVar(&key, "session-key", "", "agent session key")
-		f.StringVar(&pub, "recipient", "", "pinned host inbox public key")
-		f.StringVar(&host, "host-sign-key", "", "pinned host receipt verifier")
+		f.StringVar(&key, "session-key", "", "agent signing seed file")
+		f.StringVar(&pub, "recipient", "", "pinned host inbox public key file")
+		f.StringVar(&host, "host-sign-key", "", "pinned host receipt verification key file")
 		f.StringVar(&id, "id", "", "request ID")
 		f.StringVar(&review, "review", "", "submitted request digest")
 	}
 	if cmd == "executions" || cmd == "invoke-prepare" {
-		f.StringVar(&session, "session", "", "agent session")
+		f.StringVar(&session, "session", "", "agent session identifier")
 	}
 	if cmd == "invoke-result" || cmd == "invoke-prepare" {
-		f.StringVar(&dir, "attempt", "", "private attempt directory (new for prepare)")
+		f.StringVar(&dir, "attempt", "", "private attempt directory (must be new for invoke-prepare)")
 	} else {
-		f.StringVar(&device, "device", "", "trusted device directory")
+		f.StringVar(&device, "device", "", "trusted holder device directory")
 	}
 	if cmd == "invoke-run" || cmd == "invoke-receipt" {
-		f.StringVar(&ticket, "ticket", "", "encrypted invocation")
-		f.StringVar(&path, "out", "", "new encrypted reply file")
+		f.StringVar(&ticket, "ticket", "", "encrypted invocation ticket file")
+		f.StringVar(&path, "out", "", "new encrypted reply output file")
 	}
 	var recording string
 	if cmd == "invoke-run" {
-		f.StringVar(&recording, "recorded-response", "", "local synthetic upstream JSON; never contacts GitHub")
-		f.StringVar(&bundle, "bundle", "", "verified local snapshot")
+		f.StringVar(&recording, "recorded-response", "", "local synthetic upstream JSON file (never contacts GitHub)")
+		f.StringVar(&bundle, "bundle", "", "verified local epoch snapshot directory")
 	}
 	if cmd == "invoke-result" {
 		f.StringVar(&path, "reply", "", "encrypted reply file")
@@ -60,18 +60,21 @@ func runInvoke(args []string, out, diag io.Writer) error {
 	switch cmd {
 	case "approval-revoke":
 		if device == "" {
-			return errors.New("device required")
+			return errors.New("--device is required")
 		}
 		result, err = preview.RevokeApproval(device, id, review, reason)
 	case "invoke-prepare":
 		if dir == "" || key == "" || pub == "" || host == "" {
-			return errors.New("attempt directory and pinned key files required")
+			return errors.New("--attempt, --session-key, --recipient, and --host-sign-key are required")
 		}
 		err = preview.PrepareInvocation(dir, key, pub, host, session, id, review)
 		result = map[string]string{"id": id, "state": "prepared"}
 	case "invoke-run", "invoke-receipt":
-		if device == "" || path == "" || ticket == "" || (cmd == "invoke-run" && bundle == "") {
-			return errors.New("device, ticket, output and (for execution) bundle required")
+		if cmd == "invoke-run" && (device == "" || bundle == "" || ticket == "" || path == "") {
+			return errors.New("--device, --bundle, --ticket, and --out are required")
+		}
+		if cmd == "invoke-receipt" && (device == "" || ticket == "" || path == "") {
+			return errors.New("--device, --ticket, and --out are required")
 		}
 		if _, stat := os.Lstat(path); stat == nil {
 			return errors.New("output already exists; choose a new path")
@@ -83,7 +86,7 @@ func runInvoke(args []string, out, diag io.Writer) error {
 			return stat
 		}
 		if !parent.IsDir() {
-			return errors.New("output parent must be a directory")
+			return errors.New("output parent must be an existing directory")
 		}
 		var ciphertext []byte
 		if cmd == "invoke-run" && recording != "" {
@@ -95,18 +98,18 @@ func runInvoke(args []string, out, diag io.Writer) error {
 		}
 		if err == nil {
 			if err = preview.WriteReply(path, ciphertext); err != nil {
-				return fmt.Errorf("encrypted result is recorded; use invoke-receipt with the same ticket and a new --out path: %w", err)
+				return fmt.Errorf("encrypted result is recorded; run invoke-receipt with the same --ticket and a new --out path: %w", err)
 			}
 		}
 		result = map[string]string{"state": "sealed"}
 	case "invoke-result":
 		if dir == "" || path == "" {
-			return errors.New("attempt directory and reply required")
+			return errors.New("--attempt and --reply are required")
 		}
 		result, err = preview.InvocationResult(dir, path)
 	case "executions":
 		if device == "" {
-			return errors.New("device required")
+			return errors.New("--device is required")
 		}
 		result, err = preview.Executions(device, session)
 	}

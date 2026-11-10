@@ -16,14 +16,14 @@ func runSession(args []string, out, diag io.Writer) error {
 	if cmd == "session-keygen" {
 		f.StringVar(&path, "out", "", "new .sessionkey file in a private agent directory")
 	} else {
-		f.StringVar(&device, "device", "", "owner device")
-		f.StringVar(&session, "session", "", "session ID")
+		f.StringVar(&device, "device", "", "trusted owner device directory")
+		f.StringVar(&session, "session", "", "agent session identifier")
 	}
 	if cmd == "session-enroll" {
-		f.StringVar(&key, "public", "", "independently verified Ed25519 public key")
+		f.StringVar(&key, "public", "", "independently verified Ed25519 public key (hex)")
 	}
 	if cmd == "session-enroll" || cmd == "session-revoke" {
-		f.StringVar(&reason, "reason", "", "business reason")
+		f.StringVar(&reason, "reason", "", "synthetic business reason")
 	}
 	if err := f.Parse(args[1:]); err != nil {
 		return err
@@ -32,7 +32,7 @@ func runSession(args []string, out, diag io.Writer) error {
 		return errors.New("unexpected positional argument")
 	}
 	if cmd != "session-keygen" && device == "" {
-		return errors.New("--device required")
+		return errors.New("--device is required")
 	}
 	var result any
 	var err error

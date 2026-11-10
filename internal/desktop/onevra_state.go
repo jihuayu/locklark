@@ -14,6 +14,7 @@ type onevraUI struct {
 	listWidth    float32
 	rowCursor    int
 	list         *components.ListState
+	shellActive  bool
 }
 
 func newOnevraUI() onevraUI {

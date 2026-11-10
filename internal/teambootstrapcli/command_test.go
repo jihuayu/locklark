@@ -216,3 +216,30 @@ func TestExplicitEmptyPolicyAndRepeatedSelectorsAreUsageErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestBootstrapHelpOutputsCommandsAndExitCodes(t *testing.T) {
+	rt := runtime{store: func() teamclient.SystemStore { t.Fatal("help reached OS"); return nil }}
+	for _, flag := range [][]string{nil, {"help"}, {"--help"}, {"-h"}} {
+		var ownerOut, serviceOut bytes.Buffer
+		if err := run(context.Background(), flag, &ownerOut, false, rt); err != nil {
+			t.Fatalf("owner help %v failed: %v", flag, err)
+		}
+		if !strings.Contains(ownerOut.String(), "OWNER COMMANDS") || !strings.Contains(ownerOut.String(), "EXIT CODES") {
+			t.Fatalf("owner help missing structured sections: %s", ownerOut.String())
+		}
+		if err := run(context.Background(), flag, &serviceOut, true, rt); err != nil {
+			t.Fatalf("service help %v failed: %v", flag, err)
+		}
+		if !strings.Contains(serviceOut.String(), "prepare-identity") || !strings.Contains(serviceOut.String(), "EXIT CODES") {
+			t.Fatalf("service help missing structured sections: %s", serviceOut.String())
+		}
+	}
+
+	var subOut bytes.Buffer
+	if err := run(context.Background(), []string{"create", "--help"}, &subOut, false, rt); err != nil {
+		t.Fatalf("create --help failed: %v", err)
+	}
+	if !strings.Contains(subOut.String(), "expect-sequencer-fingerprint") || !strings.Contains(subOut.String(), "SHA256:") {
+		t.Fatalf("create --help missing descriptive flag text: %s", subOut.String())
+	}
+}

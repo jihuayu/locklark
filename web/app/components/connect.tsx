@@ -109,10 +109,22 @@ export function Connect() {
                 type={reveal ? "text" : "password"}
                 autoComplete="off"
                 spellCheck={false}
+                aria-describedby="connect-help-note"
                 value={code}
                 onChange={(e) => {
                   setCode(e.target.value);
                   if (error) setError("");
+                }}
+                onKeyDown={(e) => {
+                  if (e.key !== "Escape") return;
+                  if (reveal) {
+                    e.preventDefault();
+                    setReveal(false);
+                  } else if (code) {
+                    e.preventDefault();
+                    setCode("");
+                    setError("");
+                  }
                 }}
                 maxLength={128}
                 required
@@ -152,7 +164,7 @@ export function Connect() {
               {error}
             </p>
           ) : null}
-          <div className="help-note">
+          <div id="connect-help-note" className="help-note">
             <strong>连接码在哪里获取？</strong>
             <p>
               在本机运行管理服务与 Web 启动命令后，终端窗口会输出一次性连接码。本页面永远不会要求输入主密码或 Secret Key。

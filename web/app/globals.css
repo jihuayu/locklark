@@ -480,7 +480,13 @@ h2 {
 }
 
 .sidebar {
-  background: var(--nav);
+  background:
+    radial-gradient(
+      circle at 18% 8%,
+      hsla(216, 65%, 28%, 0.34) 0%,
+      transparent 48%
+    ),
+    var(--nav);
   color: hsl(214, 45%, 95%);
   padding: 26px 18px;
   display: flex;
@@ -706,6 +712,14 @@ h2 {
   padding: 22px 24px;
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-sm);
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.stat-card:hover {
+  border-color: var(--line-strong);
+  box-shadow: var(--shadow-md);
 }
 
 .stat-card p {
@@ -818,6 +832,34 @@ h2 {
   width: 260px;
 }
 
+.search-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.search-label-row label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.shortcut-kbd {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 4px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface-subtle);
+  color: var(--subtle);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1;
+}
+
 .search-label input {
   margin-top: 5px;
   padding: 8px 12px;
@@ -870,12 +912,43 @@ code {
   overflow-wrap: anywhere;
 }
 
+.id-inline {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 100%;
+}
+
 .id-code {
   background: var(--surface-subtle);
   border: 1px solid var(--line);
   color: var(--ink);
   padding: 3px 7px;
   border-radius: 5px;
+}
+
+.copy-chip {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  padding: 2px 7px;
+  border-radius: 5px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.35;
+}
+
+.copy-chip:hover:not(:disabled) {
+  color: var(--blue);
+  background: var(--blue-soft);
+  border-color: var(--blue-border);
+}
+
+.copy-chip.copied {
+  color: var(--emerald-ink);
+  background: var(--emerald-bg);
+  border-color: hsl(156, 48%, 78%);
 }
 
 .tabular-cell {
@@ -1157,3 +1230,15 @@ dd {
     gap: 8px;
   }
 }
+
+@media (prefers-reduced-motion: reduce) {
+  button,
+  input,
+  .stat-card {
+    transition: none;
+  }
+  button:active:not(:disabled) {
+    transform: none;
+  }
+}
+

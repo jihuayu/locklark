@@ -609,3 +609,38 @@ test("a cancelled warning leaves nothing behind in the worker or the field", asy
   assert.equal(JSON.stringify(h.sent).includes("LL1-"), false);
   assert.equal(h.host(), null);
 });
+
+test("paste warning renders alertdialog semantics with safe primary cancel and caution override", async () => {
+  const h = makeHarness();
+  const input = h.field({
+    type: "password",
+    autocomplete: "current-password",
+    id: "password",
+  });
+  await focusLinked(h, input);
+  await h.paste(input, "hunter2");
+  const dialog = h
+    .nodes()
+    .find((node) => node.tagName === "SECTION" && node.getAttribute("role") === "alertdialog");
+  assert.ok(dialog);
+  assert.equal(dialog.getAttribute("data-kind"), "unlinked-password");
+  const buttons = dialog.querySelectorAll("button");
+  assert.equal(buttons.length, 2);
+  assert.equal(buttons[0].textContent, "取消粘贴");
+  assert.equal(buttons[0].className, "btn-safe-primary");
+  assert.equal(buttons[1].textContent, "仍要粘贴");
+  assert.equal(buttons[1].className, "btn-caution");
+  await h.click("取消粘贴");
+
+  await h.paste(input, SECRET);
+  const secretDialog = h
+    .nodes()
+    .find((node) => node.tagName === "SECTION" && node.getAttribute("role") === "alertdialog");
+  assert.ok(secretDialog);
+  assert.equal(secretDialog.getAttribute("data-kind"), "secret-key");
+  const secretButtons = secretDialog.querySelectorAll("button");
+  assert.equal(secretButtons[0].className, "btn-safe-primary");
+  assert.equal(secretButtons[1].className, "btn-caution btn-danger");
+  await h.click("取消粘贴");
+});
+

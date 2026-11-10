@@ -198,10 +198,14 @@ func (a *App) chooseQuickResult(panel, sequence uint64, target personal.Row) {
 }
 
 func (a *App) quickSearchView(c *ui.Context) {
+	t := c.Theme()
 	q := &a.quick
-	panel := ui.Column(c.Key(q.generation)).Grow(1).Gap(12)
+	panel := ui.Column(c.Key(q.generation)).Grow(1).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).Padding(t.Space(4)).Gap(12)
 	panel.Children(func() {
-		ui.Text(c, "快捷搜索活动登录").FontSize(24).Bold()
+		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(8).Children(func() {
+			ui.Text(c, "快捷搜索活动登录").FontSize(22).Bold().TextColor(t.Text).Grow(1)
+			ui.Text(c, "快捷键 "+quickSearchAcceleratorLabel()+" · Esc 关闭").FontSize(12).TextColor(t.TextMuted)
+		})
 		// SearchField consumes Escape to clear its text. This modal instead
 		// gives Escape to the enclosing panel, even for a nonempty query.
 		input := ui.TextInput(c.Key("quick-query"), &q.query).Label("快捷搜索标题").Placeholder("输入登录标题")
@@ -219,16 +223,25 @@ func (a *App) quickSearchView(c *ui.Context) {
 			ui.PrimaryButton(c, "搜索活动登录").Disabled(q.loading).OnClick(a.searchQuick)
 			ui.Button(c, "关闭快捷搜索").OnClick(a.closeQuickSearch)
 		})
-		ui.Text(c, q.status)
-		ui.Scroll(c).Grow(1).Children(func() {
-			for _, row := range q.rows {
-				row := row
-				generation, sequence := q.generation, q.sequence
-				ui.Column(c.Key(row.ID)).Role(ui.RoleGroup).Label("快捷搜索结果").Gap(4).Children(func() {
-					ui.Button(c, "选择登录："+browserTitle(row.Title)).Disabled(q.loading).OnClick(func() { a.chooseQuickResult(generation, sequence, row) })
-					ui.Text(c, "ID："+row.ID).FontSize(12)
-				})
-			}
+		ui.Text(c, q.status).FontSize(13).TextColor(t.TextMuted)
+		ui.Scroll(c).Grow(1).FillWidth().Children(func() {
+			ui.Column(c).FillWidth().Gap(8).Children(func() {
+				for _, row := range q.rows {
+					row := row
+					generation, sequence := q.generation, q.sequence
+					ui.Column(c.Key(row.ID)).Role(ui.RoleGroup).Label("快捷搜索结果").
+						FillWidth().
+						Border(1, t.Border).
+						Radius(t.Radius).
+						Background(t.Background).
+						Padding(t.Space(2)).
+						Gap(4).
+						Children(func() {
+							ui.Button(c, "选择登录："+browserTitle(row.Title)).Disabled(q.loading).OnClick(func() { a.chooseQuickResult(generation, sequence, row) })
+							ui.Text(c, "ID："+row.ID).FontSize(12).TextColor(t.TextMuted)
+						})
+				}
+			})
 		})
 	})
 	if panel.OverlayShortcut(0, ui.KeyEscape) {

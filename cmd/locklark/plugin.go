@@ -8,10 +8,28 @@ import (
 	"github.com/jihuayu/locklark/internal/pluginstore"
 )
 
-var pluginUsage = errors.New("usage: locklark plugin init --file NEW_DB; inspect --package FILE --id ID --publisher HEX_KEY; install --file DB --parent CHECKPOINT --pins TRUSTED_JSON --package FILE --id ID --publisher HEX_KEY --digest PACKAGE_DIGEST; list|audit --file DB --anchor CHECKPOINT --pins TRUSTED_JSON; revoke --file DB --parent CHECKPOINT --pins TRUSTED_JSON --id ID; execution is disabled")
+const pluginHelpText = `usage: locklark plugin <command> [flags]
+
+COMMANDS
+  init        --file NEW_DB
+  inspect     --package FILE --id ID --publisher HEX_KEY
+  install     --file DB --parent CHECKPOINT --pins TRUSTED_JSON --package FILE --id ID --publisher HEX_KEY --digest PACKAGE_DIGEST
+  list|audit  --file DB --anchor CHECKPOINT --pins TRUSTED_JSON
+  revoke      --file DB --parent CHECKPOINT --pins TRUSTED_JSON --id ID
+
+NOTES
+  - Every catalog read or mutation verifies the trusted checkpoint and publisher pins.
+  - Third-party plugin execution is disabled.
+`
+
+var pluginUsage = errors.New(pluginHelpText)
 var pluginOutputFailure = errors.New("plugin output failed; a catalog mutation may already be committed")
 
 func runPlugin(args []string, out io.Writer) error {
+	if len(args) == 1 && (args[0] == "help" || args[0] == "--help" || args[0] == "-h") {
+		_, err := io.WriteString(out, pluginHelpText)
+		return err
+	}
 	if len(args) < 3 || len(args)%2 != 1 {
 		return pluginUsage
 	}

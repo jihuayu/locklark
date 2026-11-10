@@ -30,9 +30,20 @@ import (
 	"golang.org/x/term"
 )
 
-var errCommand = errors.New("team sync server refused; check trusted configuration, checkpoint, TLS files and hidden terminal input")
+var errCommand = errors.New("team sync server refused; verify trusted configuration, checkpoint, TLS files, and hidden terminal input")
 
-const usage = "usage: locklark-team-sync init-anchor|serve --config ABSOLUTE_CONFIG_FILE\nSequencer seed is accepted only in a hidden controlling-terminal prompt. No secret argv, environment, stdin or key-file fallback.\n"
+const usage = `Locklark Team Sync — Fixed-pin TLS sequencer & OS-protected service bootstrap
+
+USAGE
+  locklark-team-sync <command> [flags]
+  locklark-team-sync help | --help | -h
+
+MANUAL SEQUENCER COMMANDS
+  init-anchor   --config ABS_CONFIG_JSON   Initialize the server checkpoint anchor from the configured minimum
+  serve         --config ABS_CONFIG_JSON   Start the TLS 1.3 sequencer using a seed entered on the hidden terminal
+    (Manual sequencer seed is read only from a hidden controlling-terminal prompt—never from argv, env, stdin, or key files.)
+
+`
 
 type serverConfig struct {
 	Pins        directory.Pins       `json:"pins"`
@@ -231,7 +242,7 @@ func readSequencerTerminal(console *os.File, output io.Writer) (key ed25519.Priv
 	}
 }
 func run(args []string, out io.Writer) error {
-	if len(args) == 1 && (args[0] == "--help" || args[0] == "help") {
+	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h" || args[0] == "help") {
 		_, e := io.WriteString(out, usage+teambootstrapcli.ServiceUsage)
 		return e
 	}

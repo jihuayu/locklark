@@ -30,6 +30,10 @@
 	<string>$(LOCKLARK_APP_GROUP_ID)</string>
 	<key>LocklarkTeamID</key>
 	<string>$(LOCKLARK_TEAM_ID)</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © Locklark Contributors. All rights reserved.</string>
+	<key>NSHumanReadableDescription</key>
+	<string>本机零知识密码与通行密钥管理扩展，所有敏感凭据仅在受保护的原生金库辅助进程中处理。</string>
 	<key>NSExtension</key>
 	<dict>
 		<key>NSExtensionPointIdentifier</key>

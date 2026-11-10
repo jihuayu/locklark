@@ -300,14 +300,19 @@ button {
   transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease, transform 80ms ease;
 }
 
-button:hover {
+button:hover:not(:disabled) {
   border-color: var(--accent);
   background: var(--soft);
   color: var(--ink);
 }
 
-button:active {
+button:active:not(:disabled) {
   transform: translateY(1px);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .origin-list,

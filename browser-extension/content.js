@@ -307,7 +307,7 @@
     style.textContent =
       ":host{color-scheme:light dark}.panel{box-sizing:border-box;width:" +
       panelWidth +
-      'px;max-height:380px;overflow:auto;background:light-dark(#ffffff,#111827);color:light-dark(#0f172a,#f8fafc);border:1px solid light-dark(#cbd5e1,#334155);border-radius:10px;padding:12px;box-shadow:0 12px 32px -4px rgba(15,23,42,.18),0 4px 12px -2px rgba(15,23,42,.08);font:13.5px/1.45 -apple-system,BlinkMacSystemFont,"Inter","Segoe UI","PingFang SC",system-ui,sans-serif;-webkit-font-smoothing:antialiased}strong{display:block;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid light-dark(#e2e8f0,#1e293b);font-size:13px;font-weight:600;letter-spacing:-0.01em}button{display:block;width:100%;text-align:left;font:inherit;font-size:13px;font-weight:500;padding:8px 10px;margin-top:2px;border:1px solid transparent;border-radius:7px;background:transparent;color:inherit;cursor:pointer;transition:background-color 120ms ease,border-color 120ms ease}button:hover,button:focus{background:light-dark(#eff6ff,#1e293b);border-color:light-dark(#bfdbfe,#334155);outline:2px solid light-dark(#1d4ed8,#38bdf8);outline-offset:1px}button:disabled{opacity:.5;cursor:default}p{font-size:12px;line-height:1.5;margin:4px 0}label{display:block;font-size:12px;margin:6px 0}label.check{display:flex;align-items:center;gap:6px}input[type=range]{width:100%;margin:6px 0;accent-color:light-dark(#1d4ed8,#38bdf8)}input[type=text],select{box-sizing:border-box;width:100%;font:inherit;padding:6px 8px;border:1px solid light-dark(#cbd5e1,#334155);border-radius:6px;background:light-dark(#ffffff,#0b0f19);color:inherit}.row{display:flex;align-items:center;justify-content:space-between;gap:8px}.mono{display:block;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere;padding:7px 9px;border:1px solid light-dark(#e2e8f0,#1e293b);border-radius:6px;background:light-dark(#f1f5f9,#1e293b)}.badge{display:inline-block;font-size:11px;font-weight:600;font-variant-numeric:tabular-nums;padding:2px 7px;border-radius:999px;border:1px solid light-dark(#bfdbfe,rgba(56,189,248,.3));background:light-dark(#eff6ff,rgba(56,189,248,.14));color:light-dark(#1d4ed8,#38bdf8)}.status{color:light-dark(#475569,#94a3b8)}';
+      'px;max-height:380px;overflow:auto;background:light-dark(#ffffff,#111827);color:light-dark(#0f172a,#f8fafc);border:1px solid light-dark(#cbd5e1,#334155);border-radius:10px;padding:12px;box-shadow:0 12px 32px -4px rgba(15,23,42,.18),0 4px 12px -2px rgba(15,23,42,.08);font:13.5px/1.45 -apple-system,BlinkMacSystemFont,"Inter","Segoe UI","PingFang SC",system-ui,sans-serif;-webkit-font-smoothing:antialiased}strong{display:block;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid light-dark(#e2e8f0,#1e293b);font-size:13px;font-weight:600;letter-spacing:-0.01em}button{display:block;width:100%;text-align:left;font:inherit;font-size:13px;font-weight:500;padding:8px 10px;margin-top:2px;border:1px solid transparent;border-radius:7px;background:transparent;color:inherit;cursor:pointer;transition:background-color 120ms ease,border-color 120ms ease,color 120ms ease}button:hover,button:focus{background:light-dark(#eff6ff,#1e293b);border-color:light-dark(#bfdbfe,#334155);outline:2px solid light-dark(#1d4ed8,#38bdf8);outline-offset:1px}button:disabled{opacity:.5;cursor:default}p{font-size:12px;line-height:1.5;margin:4px 0}label{display:block;font-size:12px;margin:6px 0}label.check{display:flex;align-items:center;gap:6px}input[type=range]{width:100%;margin:6px 0;accent-color:light-dark(#1d4ed8,#38bdf8)}input[type=text],select{box-sizing:border-box;width:100%;font:inherit;padding:6px 8px;border:1px solid light-dark(#cbd5e1,#334155);border-radius:6px;background:light-dark(#ffffff,#0b0f19);color:inherit}.row{display:flex;align-items:center;justify-content:space-between;gap:8px}.mono{display:block;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere;padding:7px 9px;border:1px solid light-dark(#e2e8f0,#1e293b);border-radius:6px;background:light-dark(#f1f5f9,#1e293b)}.badge{display:inline-block;font-size:11px;font-weight:600;font-variant-numeric:tabular-nums;padding:2px 7px;border-radius:999px;border:1px solid light-dark(#bfdbfe,rgba(56,189,248,.3));background:light-dark(#eff6ff,rgba(56,189,248,.14));color:light-dark(#1d4ed8,#38bdf8)}.status{color:light-dark(#475569,#94a3b8)}.panel.warn{border-color:light-dark(#fcd34d,rgba(245,158,11,.45));border-top:3px solid light-dark(#d97706,#f59e0b);padding:13px}.panel.warn[data-kind=secret-key]{border-color:light-dark(#fca5a5,rgba(248,113,113,.45));border-top-color:light-dark(#dc2626,#f87171)}.panel.warn strong{display:flex;align-items:center;gap:7px;color:light-dark(#92400e,#fde68a)}.panel.warn strong::before{content:"!";display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:999px;font-size:11.5px;font-weight:700;background:light-dark(#fef3c7,rgba(245,158,11,.2));color:light-dark(#b45309,#fbbf24);border:1px solid light-dark(#fde68a,rgba(245,158,11,.4));flex:none}.panel.warn[data-kind=secret-key] strong{color:light-dark(#991b1b,#fecaca)}.panel.warn[data-kind=secret-key] strong::before{background:light-dark(#fee2e2,rgba(248,113,113,.2));color:light-dark(#dc2626,#f87171);border-color:light-dark(#fecaca,rgba(248,113,113,.4))}.warn-callout{padding:9px 10px;border-radius:8px;border:1px solid light-dark(#fde68a,rgba(245,158,11,.28));background:light-dark(#fffbeb,rgba(245,158,11,.08))}.warn-callout.danger{border-color:light-dark(#fecaca,rgba(248,113,113,.3));background:light-dark(#fef2f2,rgba(248,113,113,.09))}.warn-kicker{display:inline-block;margin-bottom:4px;padding:1px 7px;border-radius:999px;font-size:11px;font-weight:600;letter-spacing:.01em;background:light-dark(#fef3c7,rgba(245,158,11,.18));color:light-dark(#92400e,#fcd34d)}.warn-kicker.danger{background:light-dark(#fee2e2,rgba(248,113,113,.18));color:light-dark(#b91c1c,#fca5a5)}.warn-body{margin:2px 0 0;color:light-dark(#1e293b,#e2e8f0);font-size:12.5px;line-height:1.5}.warn-origin{display:block;margin-top:6px;padding:4px 7px;border-radius:5px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;overflow-wrap:anywhere;background:light-dark(rgba(255,255,255,.75),rgba(15,23,42,.55));border:1px solid light-dark(#e2e8f0,#334155);color:light-dark(#334155,#cbd5e1)}.warn-actions{display:grid;grid-template-columns:1.35fr 1fr;gap:8px;margin-top:10px}button.btn-safe-primary{margin-top:0;text-align:center;font-weight:600;padding:8px 12px;background:light-dark(#1d4ed8,#2563eb);border-color:light-dark(#1e40af,#3b82f6);color:#ffffff;box-shadow:0 1px 2px rgba(15,23,42,.16)}button.btn-safe-primary:hover,button.btn-safe-primary:focus{background:light-dark(#1e40af,#1d4ed8);border-color:light-dark(#1e3a8a,#60a5fa);color:#ffffff;outline:2px solid light-dark(#1d4ed8,#60a5fa);outline-offset:2px}button.btn-caution{margin-top:0;text-align:center;font-size:12.5px;font-weight:500;padding:8px 10px;background:light-dark(#f8fafc,rgba(30,41,59,.7));border-color:light-dark(#cbd5e1,#475569);color:light-dark(#475569,#cbd5e1)}button.btn-caution:hover,button.btn-caution:focus{background:light-dark(#fffbeb,rgba(245,158,11,.14));border-color:light-dark(#f59e0b,rgba(245,158,11,.45));color:light-dark(#92400e,#fde68a);outline:2px solid light-dark(#d97706,#fbbf24);outline-offset:2px}button.btn-caution.btn-danger:hover,button.btn-caution.btn-danger:focus{background:light-dark(#fef2f2,rgba(248,113,113,.15));border-color:light-dark(#dc2626,rgba(248,113,113,.5));color:light-dark(#991b1b,#fecaca);outline-color:light-dark(#dc2626,#f87171)}@media (prefers-reduced-motion:reduce){button{transition:none}}';
     const box = element("section");
     box.className = "panel";
     box.setAttribute("role", "dialog");
@@ -1535,15 +1535,42 @@
     return true;
   }
   function showPasteWarning(field, text, kind) {
-    const box = panel(field, "粘贴保护");
-    note(
-      box,
-      kind === "secret-key"
-        ? "这看起来是 Locklark 的 Secret Key。Secret Key 只应在 Locklark 应用中使用。"
-        : "此网站没有已保存的登录。确认信任此网站后再粘贴密码。",
+    const isSecret = kind === "secret-key";
+    const box = panel(field, "粘贴保护", true);
+    box.className = "panel warn";
+    box.setAttribute("role", "alertdialog");
+    box.setAttribute("data-kind", isSecret ? "secret-key" : "unlinked-password");
+    const callout = element(
+      "div",
+      undefined,
+      isSecret ? "warn-callout danger" : "warn-callout",
     );
-    const cancel = button(box, "取消粘贴", () => dismiss());
-    button(box, "仍要粘贴", () => {
+    callout.append(
+      element(
+        "span",
+        isSecret ? "高危凭据拦截 · Secret Key" : "钓鱼防护 · 未知来源网站",
+        isSecret ? "warn-kicker danger" : "warn-kicker",
+      ),
+    );
+    note(
+      callout,
+      isSecret
+        ? "这看起来是 Locklark 的 Secret Key。Secret Key 只应在 Locklark 应用中使用，切勿粘贴到任何网页。"
+        : "此网站没有已保存的登录。确认信任此网站后再粘贴密码，以防钓鱼网站窃取凭据。",
+      "warn-body",
+    );
+    const originText =
+      location?.origin && location.origin !== "null"
+        ? location.origin
+        : location?.hostname || "";
+    if (originText) {
+      callout.append(element("code", originText, "warn-origin"));
+    }
+    box.append(callout);
+    const actions = element("div", undefined, "warn-actions");
+    const cancel = button(actions, "取消粘贴", () => dismiss());
+    cancel.className = "btn-safe-primary";
+    const proceed = button(actions, "仍要粘贴", () => {
       dismiss();
       // The original paste default action has already been cancelled, so a
       // failed insertion must be reported instead of silently dropping text.
@@ -1555,6 +1582,9 @@
         field.focus();
       } catch {}
     });
+    proceed.className = isSecret ? "btn-caution btn-danger" : "btn-caution";
+    box.append(actions);
+    setPanelPosition();
     try {
       cancel.focus();
     } catch {}

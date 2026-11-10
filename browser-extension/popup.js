@@ -3840,7 +3840,29 @@
       els.searchInput.value = "";
       if (activeFilter === "passkeys") vaultItems = [];
       renderVaultList();
+      els.searchInput.focus?.();
       void refreshVault(true);
+    });
+    document.addEventListener?.("keydown", (event) => {
+      if (
+        event.key !== "/" ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.altKey ||
+        document.body?.dataset?.view !== "vault"
+      )
+        return;
+      const activeTag = String(
+        event.target?.tagName || document.activeElement?.tagName || "",
+      ).toUpperCase();
+      if (
+        activeTag === "INPUT" ||
+        activeTag === "TEXTAREA" ||
+        activeTag === "SELECT"
+      )
+        return;
+      event.preventDefault?.();
+      els.searchInput.focus?.();
     });
     els.newItemBtn.addEventListener("click", () => {
       els.newItemMenu.hidden = !els.newItemMenu.hidden;

@@ -118,22 +118,27 @@ func (a *App) saveNotesCaptured(s *personal.Session, target personal.RevealTarge
 }
 
 func (a *App) notesEditorView(c *ui.Context) {
+	t := c.Theme()
 	draft := a.notesEditor
 	ui.Scroll(c).Fill().Children(func() {
-		ui.Column(c).Gap(12).Children(func() {
-			ui.Text(c, "编辑登录备注").FontSize(24).Bold()
-			ui.Text(c, "登录："+browserTitle(draft.title)).Bold()
-			ui.Text(c, "这是可见的秘密正文。仅按保存按钮提交，Enter 只换行；取消不修改金库。")
-			ui.Text(c, "ID: "+draft.target.ID).FontSize(12)
-			ui.Text(c, "修订: "+draft.target.Revision).FontSize(12)
-			ui.TextArea(c, &draft.value).Label("备注正文（可见多行）").Height(300).Disabled(a.busy)
-			ui.PrimaryButton(c, "保存备注").Disabled(a.busy).OnClick(func() { a.saveNotes(draft) })
-			ui.Button(c, "取消编辑备注").Disabled(a.busy).OnClick(func() {
-				if a.notesEditor == draft {
-					a.clearNotesEditor()
-					a.clearDailyExposure()
-					a.status = "备注编辑已取消；未保存。"
-				}
+		ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).Padding(t.Space(4)).Gap(12).Children(func() {
+			ui.Text(c, "编辑登录备注").FontSize(22).Bold().TextColor(t.Text)
+			ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Background).Padding(t.Space(3)).Gap(4).Children(func() {
+				ui.Text(c, "登录："+browserTitle(draft.title)).Bold().TextColor(t.Text)
+				ui.Text(c, "ID: "+draft.target.ID).FontSize(12).TextColor(t.TextMuted)
+				ui.Text(c, "修订: "+draft.target.Revision).FontSize(12).TextColor(t.TextMuted)
+			})
+			ui.Text(c, "这是可见的秘密正文。仅按保存按钮提交，Enter 只换行；取消不修改金库。").FontSize(13).TextColor(t.Warning)
+			ui.TextArea(c, &draft.value).Label("备注正文（可见多行）").Height(260).Disabled(a.busy)
+			ui.Row(c).Gap(8).Children(func() {
+				ui.PrimaryButton(c, "保存备注").Disabled(a.busy).OnClick(func() { a.saveNotes(draft) })
+				ui.Button(c, "取消编辑备注").Disabled(a.busy).OnClick(func() {
+					if a.notesEditor == draft {
+						a.clearNotesEditor()
+						a.clearDailyExposure()
+						a.status = "备注编辑已取消；未保存。"
+					}
+				})
 			})
 		})
 	})

@@ -95,6 +95,8 @@ class MainActivity : Activity() {
     private fun dp(value: Int): Int =
         TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, value.toFloat(), resources.displayMetrics).toInt()
 
+    private fun color(resId: Int): Int = getColor(resId)
+
     private fun roundedBox(fillColor: Int, strokeColor: Int = Color.TRANSPARENT, radiusDp: Int = 10, strokeWidthDp: Int = 1): GradientDrawable =
         GradientDrawable().apply {
             shape = GradientDrawable.RECTANGLE
@@ -111,7 +113,7 @@ class MainActivity : Activity() {
         val card = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             isSaveEnabled = false
-            background = roundedBox(Color.parseColor("#FFFFFF"), Color.parseColor("#DCE3EE"), radiusDp = 12)
+            background = roundedBox(color(R.color.ll_surface_card), color(R.color.ll_border_subtle), radiusDp = 12)
             setPadding(dp(12), dp(10), dp(12), dp(10))
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -124,7 +126,7 @@ class MainActivity : Activity() {
                 isSaveEnabled = false
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                 setTypeface(typeface, Typeface.BOLD)
-                setTextColor(Color.parseColor("#475569"))
+                setTextColor(color(R.color.ll_text_secondary))
                 setPadding(0, 0, 0, dp(4))
             }
             card.addView(sectionHeader)
@@ -143,16 +145,16 @@ class MainActivity : Activity() {
         super.onCreate(null)
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-        window.statusBarColor = Color.parseColor("#0F172A")
+        window.statusBarColor = color(R.color.ll_surface_code)
         // Intents/extras and saved instance state are never unlock sources.
         val filter = IntentFilter(Intent.ACTION_SCREEN_OFF).apply {
             addAction(Intent.ACTION_TIME_CHANGED); addAction(Intent.ACTION_TIMEZONE_CHANGED)
         }
         if (android.os.Build.VERSION.SDK_INT >= 33) registerReceiver(securityEvents, filter, Context.RECEIVER_NOT_EXPORTED)
         else registerReceiver(securityEvents, filter)
-        page("Locklark")
+        page(getString(R.string.app_name))
         sectionCard("安全初始化") {
-            label("正在打开此设备的本地金库…")
+            label(getString(R.string.opening_vault))
         }
     }
     override fun onStart() {
@@ -162,7 +164,7 @@ class MainActivity : Activity() {
         resumeLocked()
     }
     private fun resumeLocked() {
-        if (cleanupPending) { lockedPage(); setBusy(true); status.text = "正在完成锁定…"; return }
+        if (cleanupPending) { lockedPage(); setBusy(true); status.text = getString(R.string.locking_vault); return }
         setBusy(false)
         if (vault == null) {
             opening = true
@@ -198,7 +200,7 @@ class MainActivity : Activity() {
         promptSlot.cancel()
         clearInputs(); generatedKey?.fill(0); generatedKey = null
         clearDisplay(); currentRow = null; unlockedUi = false; busy = false
-        page("Locklark 已锁定")
+        page(getString(R.string.page_locked_cover))
         enqueueLockCleanup()
         main.removeCallbacks(tick)
         super.onStop()
@@ -233,14 +235,16 @@ class MainActivity : Activity() {
         }
         val isWarning = text.contains("未完成：") || text.startsWith("结果未确认") ||
             text.startsWith("请先确认") || text.contains("已使用或撤销") || text.contains("必须为")
-        val isSuccess = text.startsWith("已启用；") || text.startsWith("已明确授权") || text.startsWith("活动登录：")
+        val isOk = text.startsWith("已启用；") || text.startsWith("已明确授权")
+        val isInfo = text.startsWith("活动登录：") || text.startsWith("字段为空")
         val (bg, border, fg) = when {
-            isWarning -> Triple("#FEF2F2", "#FECACA", "#991B1B")
-            isSuccess -> Triple("#EFF6FF", "#BFDBFE", "#1E40AF")
-            else -> Triple("#F8FAFC", "#CBD5E1", "#334155")
+            isWarning -> Triple(color(R.color.ll_status_warn_bg), color(R.color.ll_status_warn_border), color(R.color.ll_status_warn_text))
+            isOk -> Triple(color(R.color.ll_status_ok_bg), color(R.color.ll_status_ok_border), color(R.color.ll_status_ok_text))
+            isInfo -> Triple(color(R.color.ll_status_info_bg), color(R.color.ll_status_info_border), color(R.color.ll_status_info_text))
+            else -> Triple(color(R.color.ll_surface_muted), color(R.color.ll_secondary_border), color(R.color.ll_text_secondary))
         }
-        view.background = roundedBox(Color.parseColor(bg), Color.parseColor(border), radiusDp = 8)
-        view.setTextColor(Color.parseColor(fg))
+        view.background = roundedBox(bg, border, radiusDp = 8)
+        view.setTextColor(fg)
         view.setPadding(dp(10), dp(6), dp(10), dp(6))
     }
 
@@ -249,7 +253,7 @@ class MainActivity : Activity() {
         activeContainer = null
         val scroll = ScrollView(this).apply {
             isSaveEnabled = false
-            setBackgroundColor(Color.parseColor("#F4F7FB"))
+            setBackgroundColor(color(R.color.ll_bg_canvas))
             setOnApplyWindowInsetsListener { view, insets ->
                 val safe = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.ime())
                 view.setPadding(safe.left, safe.top, safe.right, safe.bottom)
@@ -267,8 +271,13 @@ class MainActivity : Activity() {
         label(title).apply {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
             setTypeface(typeface, Typeface.BOLD)
-            setTextColor(Color.parseColor("#0F172A"))
-            setPadding(0, 0, 0, dp(4))
+            setTextColor(color(R.color.ll_text_primary))
+            setPadding(0, 0, 0, dp(1))
+        }
+        label(getString(R.string.security_badge)).apply {
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+            setTextColor(color(R.color.ll_text_muted))
+            setPadding(0, 0, 0, dp(6))
         }
         status = label("").apply {
             tag = "status"
@@ -291,11 +300,11 @@ class MainActivity : Activity() {
         it.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
         if (value.startsWith("ID: ") || value.startsWith("修订: ")) {
             it.typeface = Typeface.MONOSPACE
-            it.setTextColor(Color.parseColor("#475569"))
+            it.setTextColor(color(R.color.ll_text_secondary))
             it.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             it.setPadding(0, dp(1), 0, dp(1))
         } else {
-            it.setTextColor(Color.parseColor("#334155"))
+            it.setTextColor(color(R.color.ll_text_secondary))
             it.setPadding(0, dp(2), 0, dp(4))
         }
         currentParent().addView(it)
@@ -311,12 +320,12 @@ class MainActivity : Activity() {
                 it.gravity = Gravity.TOP or Gravity.START
             }
             it.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-            it.setTextColor(Color.parseColor("#0F172A"))
-            it.setHintTextColor(Color.parseColor("#64748B"))
+            it.setTextColor(color(R.color.ll_text_primary))
+            it.setHintTextColor(color(R.color.ll_text_muted))
             val bg = StateListDrawable().apply {
-                addState(intArrayOf(android.R.attr.state_focused), roundedBox(Color.parseColor("#FFFFFF"), Color.parseColor("#1A56DB"), radiusDp = 8, strokeWidthDp = 2))
+                addState(intArrayOf(android.R.attr.state_focused), roundedBox(color(R.color.ll_surface_card), color(R.color.ll_border_focus), radiusDp = 8, strokeWidthDp = 2))
                 addState(intArrayOf(-android.R.attr.state_enabled), roundedBox(Color.parseColor("#F1F5F9"), Color.parseColor("#E2E8F0"), radiusDp = 8))
-                addState(intArrayOf(), roundedBox(Color.parseColor("#F8FAFC"), Color.parseColor("#CBD5E1"), radiusDp = 8))
+                addState(intArrayOf(), roundedBox(color(R.color.ll_surface_muted), color(R.color.ll_secondary_border), radiusDp = 8))
             }
             it.background = bg
             it.setPadding(dp(12), dp(8), dp(12), dp(8))
@@ -339,40 +348,40 @@ class MainActivity : Activity() {
         val bg = StateListDrawable()
         when {
             isPrimary -> {
-                bg.addState(intArrayOf(-android.R.attr.state_enabled), roundedBox(Color.parseColor("#94A3B8"), radiusDp = 8))
-                bg.addState(intArrayOf(android.R.attr.state_pressed), roundedBox(Color.parseColor("#1E40AF"), radiusDp = 8))
-                bg.addState(intArrayOf(), roundedBox(Color.parseColor("#1A56DB"), radiusDp = 8))
+                bg.addState(intArrayOf(-android.R.attr.state_enabled), roundedBox(color(R.color.ll_primary_disabled), radiusDp = 8))
+                bg.addState(intArrayOf(android.R.attr.state_pressed), roundedBox(color(R.color.ll_status_info_text), radiusDp = 8))
+                bg.addState(intArrayOf(), roundedBox(color(R.color.ll_primary), radiusDp = 8))
                 it.setTextColor(ColorStateList(
                     arrayOf(intArrayOf(-android.R.attr.state_enabled), intArrayOf()),
-                    intArrayOf(Color.parseColor("#E2E8F0"), Color.parseColor("#FFFFFF"))
+                    intArrayOf(Color.parseColor("#E2E8F0"), color(R.color.ll_text_on_primary))
                 ))
                 it.setTypeface(it.typeface, Typeface.BOLD)
             }
             isDanger -> {
-                bg.addState(intArrayOf(-android.R.attr.state_enabled), roundedBox(Color.parseColor("#F8FAFC"), Color.parseColor("#E2E8F0"), radiusDp = 8))
+                bg.addState(intArrayOf(-android.R.attr.state_enabled), roundedBox(color(R.color.ll_surface_muted), Color.parseColor("#E2E8F0"), radiusDp = 8))
                 bg.addState(intArrayOf(android.R.attr.state_pressed), roundedBox(Color.parseColor("#FFE4E6"), Color.parseColor("#FDA4AF"), radiusDp = 8))
-                bg.addState(intArrayOf(), roundedBox(Color.parseColor("#FFF1F2"), Color.parseColor("#FECDD3"), radiusDp = 8))
+                bg.addState(intArrayOf(), roundedBox(color(R.color.ll_danger_bg), color(R.color.ll_danger_border), radiusDp = 8))
                 it.setTextColor(ColorStateList(
                     arrayOf(intArrayOf(-android.R.attr.state_enabled), intArrayOf()),
-                    intArrayOf(Color.parseColor("#94A3B8"), Color.parseColor("#BE123C"))
+                    intArrayOf(color(R.color.ll_primary_disabled), color(R.color.ll_danger_text))
                 ))
                 it.setTypeface(it.typeface, Typeface.BOLD)
             }
             isItemRow -> {
-                bg.addState(intArrayOf(-android.R.attr.state_enabled), roundedBox(Color.parseColor("#F8FAFC"), Color.parseColor("#E2E8F0"), radiusDp = 8))
-                bg.addState(intArrayOf(android.R.attr.state_pressed), roundedBox(Color.parseColor("#EFF6FF"), Color.parseColor("#93C5FD"), radiusDp = 8))
-                bg.addState(intArrayOf(), roundedBox(Color.parseColor("#F8FAFC"), Color.parseColor("#CBD5E1"), radiusDp = 8))
-                it.setTextColor(Color.parseColor("#0F172A"))
+                bg.addState(intArrayOf(-android.R.attr.state_enabled), roundedBox(color(R.color.ll_surface_muted), Color.parseColor("#E2E8F0"), radiusDp = 8))
+                bg.addState(intArrayOf(android.R.attr.state_pressed), roundedBox(color(R.color.ll_status_info_bg), Color.parseColor("#93C5FD"), radiusDp = 8))
+                bg.addState(intArrayOf(), roundedBox(color(R.color.ll_surface_muted), color(R.color.ll_secondary_border), radiusDp = 8))
+                it.setTextColor(color(R.color.ll_text_primary))
                 it.gravity = Gravity.START or Gravity.CENTER_VERTICAL
                 it.setTypeface(it.typeface, Typeface.BOLD)
             }
             else -> {
-                bg.addState(intArrayOf(-android.R.attr.state_enabled), roundedBox(Color.parseColor("#F8FAFC"), Color.parseColor("#E2E8F0"), radiusDp = 8))
-                bg.addState(intArrayOf(android.R.attr.state_pressed), roundedBox(Color.parseColor("#E2E8F0"), Color.parseColor("#94A3B8"), radiusDp = 8))
-                bg.addState(intArrayOf(), roundedBox(Color.parseColor("#EEF2F8"), Color.parseColor("#CBD5E1"), radiusDp = 8))
+                bg.addState(intArrayOf(-android.R.attr.state_enabled), roundedBox(color(R.color.ll_surface_muted), Color.parseColor("#E2E8F0"), radiusDp = 8))
+                bg.addState(intArrayOf(android.R.attr.state_pressed), roundedBox(Color.parseColor("#E2E8F0"), color(R.color.ll_primary_disabled), radiusDp = 8))
+                bg.addState(intArrayOf(), roundedBox(color(R.color.ll_secondary_bg), color(R.color.ll_secondary_border), radiusDp = 8))
                 it.setTextColor(ColorStateList(
                     arrayOf(intArrayOf(-android.R.attr.state_enabled), intArrayOf()),
-                    intArrayOf(Color.parseColor("#94A3B8"), Color.parseColor("#1E293B"))
+                    intArrayOf(color(R.color.ll_primary_disabled), color(R.color.ll_text_primary))
                 ))
             }
         }
@@ -421,14 +430,14 @@ class MainActivity : Activity() {
         clearInputs(); generatedKey?.fill(0); generatedKey = null
         clearDisplay(); currentRow = null; unlockedUi = false; busy = false
         enqueueLockCleanup()
-        lockedPage(); setBusy(true); status.text = "正在完成锁定…"
+        lockedPage(); setBusy(true); status.text = getString(R.string.locking_vault)
     }
 
     private fun lockedPage() {
-        unlockedUi = false; currentRow = null; page("Locklark · 本机离线金库")
+        unlockedUi = false; currentRow = null; page(getString(R.string.page_locked_vault))
         if (!database.exists()) {
             sectionCard("欢迎使用本机零知识金库") {
-                label("此设备尚无加密金库。请先生成并离线妥善保存新的 Secret Key；设备快速解锁不能替代完整双因素恢复。")
+                label(getString(R.string.empty_vault_onboarding))
                 button("生成新的 Secret Key", "generate-account-key") {
                     work(task = { _, _ -> Mobilecore.generateSecretKey() }, drop = { it.fill(0) }) { value ->
                         generatedKey?.fill(0); generatedKey = value; createPage(value)
@@ -438,6 +447,7 @@ class MainActivity : Activity() {
             return
         }
         sectionCard("双因素完整验证") {
+            label(getString(R.string.unlock_guidance))
             val password = input("主密码", "master-password", true)
             val key = input("Secret Key", "secret-key", true)
             button("打开本地金库", "unlock") {
@@ -456,14 +466,14 @@ class MainActivity : Activity() {
         }
     }
     private fun createPage(key: ByteArray) {
-        page("创建本机金库")
+        page(getString(R.string.page_create_vault))
         sectionCard("1. 离线备份 Secret Key") {
-            label("请在应用外安全备份此 Secret Key。遗失两项完整因素后，无法依靠设备快速解锁恢复金库。")
+            label(getString(R.string.create_backup_guidance))
             backupKeyView = label(Mobilecore.formatSecretKey(key)).apply {
                 tag = "backup-secret-key"
                 typeface = Typeface.MONOSPACE
-                setTextColor(Color.parseColor("#F8FAFC"))
-                background = roundedBox(Color.parseColor("#0F172A"), Color.parseColor("#334155"), radiusDp = 8)
+                setTextColor(color(R.color.ll_text_code))
+                background = roundedBox(color(R.color.ll_surface_code), Color.parseColor("#334155"), radiusDp = 8)
                 setPadding(dp(10), dp(8), dp(10), dp(8))
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
@@ -474,7 +484,7 @@ class MainActivity : Activity() {
                 text = "我已离线保存 Secret Key"
                 tag = "backup-ack"
                 isSaveEnabled = false
-                setTextColor(Color.parseColor("#0F172A"))
+                setTextColor(color(R.color.ll_text_primary))
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
             }
             currentParent().addView(acknowledgement)
@@ -502,7 +512,7 @@ class MainActivity : Activity() {
     }
 
     private fun showList(query: String? = null) {
-        unlockedUi = true; currentRow = null; page("Locklark · 登录")
+        unlockedUi = true; currentRow = null; page(getString(R.string.page_vault_list))
         sectionCard("检索与管理") {
             val search = input("搜索标题", "query")
             if (query != null) search.setText(query)
@@ -520,7 +530,7 @@ class MainActivity : Activity() {
         work(task = { _, api -> NativeFailures.call(NativePhase.REFRESH) { if (query == null) api!!.list("active") else api!!.search(query, "active") } }) { rows ->
             sectionCard("已保存的登录凭据") {
                 if (rows.count() == 0L) {
-                    label("暂无匹配的登录凭据。点击上方「新建登录」添加条目。")
+                    label(getString(R.string.empty_login_list))
                 }
                 for (i in 0 until rows.count()) {
                     val row = rows.at(i)
@@ -575,8 +585,8 @@ class MainActivity : Activity() {
                     secretView?.apply {
                         this.text = text
                         if (text.isNotEmpty()) {
-                            setTextColor(Color.parseColor("#F8FAFC"))
-                            background = roundedBox(Color.parseColor("#0F172A"), Color.parseColor("#334155"), radiusDp = 8)
+                            setTextColor(color(R.color.ll_text_code))
+                            background = roundedBox(color(R.color.ll_surface_code), Color.parseColor("#334155"), radiusDp = 8)
                             setPadding(dp(10), dp(8), dp(10), dp(8))
                         }
                     }
@@ -586,7 +596,7 @@ class MainActivity : Activity() {
         }
     }
     private fun newLoginPage() {
-        page("新建登录")
+        page(getString(R.string.page_new_login))
         sectionCard("凭据信息与密码生成") {
             val title = input("登录标题", "login-title")
             val url = input("网站 HTTPS URL（可选）", "login-url")
@@ -598,7 +608,7 @@ class MainActivity : Activity() {
                 tag = "generate-password"
                 isChecked = true
                 isSaveEnabled = false
-                setTextColor(Color.parseColor("#0F172A"))
+                setTextColor(color(R.color.ll_text_primary))
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
             }
             currentParent().addView(generate)
@@ -618,15 +628,15 @@ class MainActivity : Activity() {
         }
     }
     private fun editPage(row: Row) {
-        page("编辑登录字段")
+        page(getString(R.string.page_edit_field))
         sectionCard("安全更新单项字段") {
             label("ID: " + row.getID()); label("修订: " + row.getRevision())
-            label("新值从空白开始输入。查看旧值需单独授权；取消操作不会改动已保存内容。")
+            label(getString(R.string.edit_field_guidance))
             val fields = arrayOf("title", "url", "username", "password", "otp", "notes")
             val field = Spinner(this).apply {
                 tag = "edit-field"
                 adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, fields)
-                background = roundedBox(Color.parseColor("#F8FAFC"), Color.parseColor("#CBD5E1"), radiusDp = 8)
+                background = roundedBox(color(R.color.ll_surface_muted), color(R.color.ll_secondary_border), radiusDp = 8)
                 layoutParams = LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT
@@ -644,9 +654,9 @@ class MainActivity : Activity() {
         }
     }
     private fun regeneratePage(row: Row) {
-        page("确认重新生成本地密码")
+        page(getString(R.string.page_regenerate_password))
         sectionCard("生成并替换金库密码") {
-            label("仅替换此本地金库中的密码记录，不会自动更改对应网站上的账户密码。")
+            label(getString(R.string.regenerate_password_guidance))
             label("ID: " + row.getID()); label("修订: " + row.getRevision())
             val length = input("密码长度（22–256）", "regenerate-length").apply { setText("24"); inputType = InputType.TYPE_CLASS_NUMBER }
             button("确认生成并替换", "confirm-regenerate") {

@@ -580,6 +580,11 @@ func (a *App) newItem(category vault.ItemCategory) {
 	a.v2.detailPlain = nil
 	a.v2.selectedID, a.v2.selectedRevision = "", ""
 	a.selected = nil
+	if a.v2.nav == navWatchtower {
+		a.v2.nav = navAllItems
+	}
+	a.v2.settingsOpen = false
+	a.v2.generator.open = false
 	a.v2.historyOpen = false
 	a.v2.confirmPurge = false
 	a.v2.draft = draft
@@ -620,6 +625,8 @@ func (a *App) beginEdit() error {
 			a.v2.detailPlain = &plain
 			a.v2.draft = draftFromDetail(plain)
 			a.v2.editing = true
+			a.v2.settingsOpen = false
+			a.v2.generator.open = false
 			a.v2.historyOpen = false
 			a.v2.editorError = ""
 			a.v2.revealed = map[string]bool{}
@@ -1050,41 +1057,42 @@ func (a *App) fillGeneratorPassword(value string) {
 	a.status = "已填入生成的密码；保存条目后生效"
 }
 
-// CategoryDisplayName is the English label used by the sidebar and editor.
+// CategoryDisplayName returns the localized Chinese label used by the sidebar,
+// detail header, and item editor.
 func CategoryDisplayName(category vault.ItemCategory) string {
 	switch category {
 	case vault.CategoryLogin:
-		return "Login"
+		return "登录"
 	case vault.CategoryPassword:
-		return "Password"
+		return "密码"
 	case vault.CategorySecureNote:
-		return "Secure Note"
+		return "安全笔记"
 	case vault.CategoryCreditCard:
-		return "Credit Card"
+		return "信用卡"
 	case vault.CategoryIdentity:
-		return "Identity"
+		return "身份信息"
 	case vault.CategorySSHKey:
-		return "SSH Key"
+		return "SSH 密钥"
 	case vault.CategoryAPICredential:
-		return "API Credential"
+		return "API 凭据"
 	case vault.CategoryDatabase:
-		return "Database"
+		return "数据库"
 	case vault.CategoryServer:
-		return "Server"
+		return "服务器"
 	case vault.CategoryWirelessRouter:
-		return "Wireless Router"
+		return "无线路由器"
 	case vault.CategorySoftwareLicense:
-		return "Software License"
+		return "软件许可"
 	case vault.CategoryBankAccount:
-		return "Bank Account"
+		return "银行账户"
 	case vault.CategoryCryptoWallet:
-		return "Crypto Wallet"
+		return "加密钱包"
 	case vault.CategoryMedicalRecord:
-		return "Medical Record"
+		return "医疗记录"
 	case vault.CategoryDocument:
-		return "Document"
+		return "文档"
 	case vault.CategoryMembership:
-		return "Membership"
+		return "会员卡"
 	}
 	return string(category)
 }

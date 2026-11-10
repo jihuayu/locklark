@@ -59,7 +59,7 @@ func confirmPersonalHIBP(ask func(string) ([]byte, error), out io.Writer) error 
 	if ask == nil || out == nil {
 		return errPersonalHIBPCancelled
 	}
-	if _, err := fmt.Fprint(out, "显式启用 HIBP 泄露库查询：只检查当前活动登录的本地规则，不检查归档、回收站或导入来源旧值；未发现问题不代表密码安全，未保存 TOTP 不代表网站未启用双因素。仅把每个非空密码 SHA-1 的前 5 个十六进制字符发送到固定端点 https://api.pwnedpasswords.com/range/，并设置 Add-Padding: true。\r\n不会发送明文密码、完整哈希或哈希后缀，请求不携带 Cookie；但前缀和来源 IP 仍会暴露给 HIBP，可能被关联。取消或不确认不会联网，也不会创建联网意图审计。\r\n"); err != nil {
+	if _, err := fmt.Fprint(out, "安全体检 — 显式启用 HIBP 泄露库查询\r\n  检查范围：仅当前活动登录（不含归档、回收站或导入来源旧值）\r\n  查询端点：https://api.pwnedpasswords.com/range/（请求头 Add-Padding: true，不携带 Cookie）\r\n  发送内容：仅每个非空密码 SHA-1 的前 5 个十六进制字符；不会发送明文密码、完整哈希或哈希后缀。\r\n  隐私提示：查询前缀与来源 IP 仍会暴露给 HIBP 并可能被关联；未发现问题不代表密码绝对安全，未保存 TOTP 也不代表网站未启用双因素。\r\n  取消保障：取消或未确认时不会联网，也不会写入联网意图审计。\r\n"); err != nil {
 		return err
 	}
 	consent, err := ask("输入 NETWORK 确认联网查询泄露前缀")

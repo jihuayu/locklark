@@ -536,18 +536,26 @@ func (a *App) drainPendingV2Reload() {
 // selectItem loads the masked detail for a list row.
 func (a *App) selectItem(id, revision string) {
 	a.EnableV2()
+	if a.v2.nav == navWatchtower {
+		a.v2.nav = navAllItems
+	}
+	a.v2.settingsOpen = false
+	a.v2.generator.open = false
+	a.v2.historyOpen = false
+	a.v2.confirmPurge = false
 	s := a.session
 	if s == nil {
+		if a.v2.detail != nil && a.v2.detail.ID == id {
+			a.v2.selectedID, a.v2.selectedRevision = id, revision
+		}
 		return
 	}
 	a.touchActivity()
 	a.clearNotesEditor()
 	a.clearDailyExposure()
 	a.regenerate = nil
-	a.v2.historyOpen = false
 	a.v2.editing = false
 	a.v2.draft = nil
-	a.v2.confirmPurge = false
 	a.run(func() outcome {
 		detail, err := s.GetItemDetail(id, revision, false)
 		return outcome{err: err, apply: func() {
@@ -575,6 +583,7 @@ func (a *App) clearSelection() {
 	a.v2.editing = false
 	a.v2.draft = nil
 	a.v2.historyOpen = false
+	a.v2.confirmPurge = false
 	a.selected = nil
 }
 
@@ -584,7 +593,7 @@ func (a *App) selectVault(id string) {
 		id = "all"
 	}
 	a.v2.vaultID = id
-	if id == "all" {
+	if id == "all" || a.v2.nav == navWatchtower {
 		a.v2.nav = navAllItems
 	}
 	a.touchV2Query()
@@ -592,6 +601,7 @@ func (a *App) selectVault(id string) {
 
 func (a *App) SelectVault(id string) {
 	a.EnableV2()
+	a.v2.settingsOpen = false
 	a.selectVault(id)
 	a.touchActivity()
 	a.reloadV2(true)

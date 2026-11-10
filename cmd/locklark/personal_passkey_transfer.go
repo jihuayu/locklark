@@ -557,7 +557,7 @@ func executePasskeyTransferAction(action string, opts map[string]string, input *
 	switch action {
 	case "passkey-invite":
 		seconds, _ := strconv.Atoi(opts["--ttl"])
-		if _, err = fmt.Fprintf(prompt, "Will create a one-time migration invitation from the existing device identity of this unlocked vault.\r\nPrivate output file: %s\r\nValidity: %d seconds (maximum %d). Verify the public fingerprint out of band on both devices.\r\nCreation appends one signed audit event; if file publication fails the result is unknown and is never retried automatically.\r\n", strconv.QuoteToASCII(opts["--out"]), seconds, passkeyTransferInvitationTTLSeconds); err != nil {
+		if _, err = fmt.Fprintf(prompt, "Passkey transfer — create one-time invitation\r\n  Output file: %s\r\n  Validity:    %d seconds (max %d)\r\nVerify the public fingerprint out of band on both devices.\r\nCreation appends one signed audit event; if file publication fails, the outcome is unknown and is never retried automatically.\r\n", strconv.QuoteToASCII(opts["--out"]), seconds, passkeyTransferInvitationTTLSeconds); err != nil {
 			return err
 		}
 		consent, err := ask("Enter INVITE to confirm invitation creation")
@@ -589,7 +589,7 @@ func executePasskeyTransferAction(action string, opts map[string]string, input *
 			ExpiresAt:    invite.ExpiresAt.UTC(),
 		})
 	case "passkey-revoke":
-		if _, err = fmt.Fprintf(prompt, "Will revoke the unused invitation represented by this private file and append a signed audit event: %s\r\nRevocation only changes invitation state in this device's audit chain; it deletes no item or credential.\r\n", strconv.QuoteToASCII(opts["--invitation"])); err != nil {
+		if _, err = fmt.Fprintf(prompt, "Passkey transfer — revoke unused invitation\r\n  Invitation file: %s\r\nRevocation appends a signed audit event in this device's audit chain; no vault item or credential is deleted.\r\n", strconv.QuoteToASCII(opts["--invitation"])); err != nil {
 			return err
 		}
 		consent, err := ask("Enter REVOKE to confirm revocation")
@@ -637,7 +637,7 @@ func executePasskeyTransferAction(action string, opts map[string]string, input *
 		return json.NewEncoder(out).Encode(list)
 	case "passkey-export":
 		targetPin := opts["--target-pin"]
-		if _, err = fmt.Fprintf(prompt, "Will select exactly %d credential record(s) from this unlocked source vault and seal them for the pinned receiver.\r\nFull target pin: %s\r\nInvitation file: %s\r\nSelection file: %s\r\nPrivate packet output: %s\r\nExporting writes one signed audit intent; it does not delete source credentials or prove receiver persistence.\r\n", len(input.targets), strconv.QuoteToASCII(targetPin), strconv.QuoteToASCII(opts["--invitation"]), strconv.QuoteToASCII(opts["--selection"]), strconv.QuoteToASCII(opts["--out"])); err != nil {
+		if _, err = fmt.Fprintf(prompt, "Passkey transfer — export sealed credential packet\r\n  Selected records: %d\r\n  Target pin:       %s\r\n  Invitation file:  %s\r\n  Selection file:   %s\r\n  Packet output:    %s\r\nExporting records one signed audit intent; it never deletes source credentials or proves receiver persistence.\r\n", len(input.targets), strconv.QuoteToASCII(targetPin), strconv.QuoteToASCII(opts["--invitation"]), strconv.QuoteToASCII(opts["--selection"]), strconv.QuoteToASCII(opts["--out"])); err != nil {
 			return err
 		}
 		consent, err := ask("Enter EXPORT to confirm sealed credential export")
@@ -669,7 +669,7 @@ func executePasskeyTransferAction(action string, opts map[string]string, input *
 			TargetFingerprint: export.TargetFingerprint,
 		})
 	case "passkey-plan":
-		if _, err = fmt.Fprintf(prompt, "Will verify the sealed packet against the pinned source and preview public receiver mappings. This is read-only: no audit event, no item change and no invitation consumption.\r\nFull source pin: %s\r\nInvitation file: %s\r\nPacket file: %s\r\nThe preview contains only public selectors; raw credential records, user handles and keys are never printed.\r\n", strconv.QuoteToASCII(opts["--source-pin"]), strconv.QuoteToASCII(opts["--invitation"]), strconv.QuoteToASCII(opts["--packet"])); err != nil {
+		if _, err = fmt.Fprintf(prompt, "Passkey transfer — read-only receiver preview\r\n  Source pin:      %s\r\n  Invitation file: %s\r\n  Packet file:     %s\r\nRead-only check: appends no audit event, modifies no items, and leaves the invitation unconsumed.\r\nPreview output contains public selectors only; raw credential records, user handles, and keys are never printed.\r\n", strconv.QuoteToASCII(opts["--source-pin"]), strconv.QuoteToASCII(opts["--invitation"]), strconv.QuoteToASCII(opts["--packet"])); err != nil {
 			return err
 		}
 		consent, err := ask("Enter PLAN to confirm receiver preview")
@@ -691,7 +691,7 @@ func executePasskeyTransferAction(action string, opts map[string]string, input *
 		return nil
 	case "passkey-import":
 		digest := opts["--digest"]
-		if _, err = fmt.Fprintf(prompt, "Will import exactly the owner-mapped groups into this unlocked receiver vault after revalidating the invitation chain, pins, expiry and current revisions. The invitation is consumed once.\r\nFull source pin: %s\r\nPlan digest: %s\r\nMapping groups: %d\r\nInvitation file: %s\r\nPacket file: %s\r\nMapping file: %s\r\nImport never deletes source credentials, never claims remote backup, and is never retried automatically.\r\n", strconv.QuoteToASCII(opts["--source-pin"]), strconv.QuoteToASCII(digest), len(input.mappings), strconv.QuoteToASCII(opts["--invitation"]), strconv.QuoteToASCII(opts["--packet"]), strconv.QuoteToASCII(opts["--mapping"])); err != nil {
+		if _, err = fmt.Fprintf(prompt, "Passkey transfer — import mapped credentials\r\n  Source pin:      %s\r\n  Plan digest:     %s\r\n  Mapped groups:   %d\r\n  Invitation file: %s\r\n  Packet file:     %s\r\n  Mapping file:    %s\r\nRevalidates invitation chain, pins, expiry, and live revisions before consuming the invitation once.\r\nImport never deletes source credentials, never claims remote backup, and is never retried automatically.\r\n", strconv.QuoteToASCII(opts["--source-pin"]), strconv.QuoteToASCII(digest), len(input.mappings), strconv.QuoteToASCII(opts["--invitation"]), strconv.QuoteToASCII(opts["--packet"]), strconv.QuoteToASCII(opts["--mapping"])); err != nil {
 			return err
 		}
 		consent, err := ask("Enter IMPORT to confirm passkey import")

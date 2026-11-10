@@ -882,7 +882,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     menuCreate({
       id: "locklark-toggle-site-inline",
       parentId: "locklark-root",
-      title: "在此网站禁用内联菜单",
+      title: "在此网站停用快捷菜单",
       type: "checkbox",
       checked: currentSiteFlags().disabledInline,
       contexts: ["page", "editable"],

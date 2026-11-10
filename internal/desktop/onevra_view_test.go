@@ -9,6 +9,7 @@ import (
 	"github.com/egoist/mygo/ui"
 	"github.com/jihuayu/locklark/internal/personal"
 	"github.com/jihuayu/locklark/internal/vault"
+	"github.com/jihuayu/locklark/internal/watchtower"
 	"github.com/oneo-me/onevra/source/theme"
 )
 
@@ -192,3 +193,152 @@ func resize(t *testing.T, tester *ui.Tester, label string, delta float32) {
 	tester.Release(x+delta, y)
 	tester.Frame()
 }
+
+func TestOnevraDetailSupportsAttachmentsDuplicateLargeTypeAndPurgeConfirm(t *testing.T) {
+	a := newOnevraTestApp()
+	a.v2.detail.Attachments = []vault.AttachmentMeta{
+		{ID: "att-1", FileName: "recovery-codes.pdf", MIMEType: "application/pdf", Size: 4096},
+	}
+	a.v2.detailPlain = &personal.ItemDetail{
+		ID:       a.v2.detail.ID,
+		Revision: a.v2.detail.Revision,
+		Password: "A9#x",
+	}
+	tester := newOnevraTestTesterSize(a, 1280, 1100)
+
+	for _, want := range []string{
+		"加密附件",
+		"recovery-codes.pdf",
+		"4.0 KB",
+		"创建副本",
+		"大号显示 密码",
+		"大号显示 一次性验证码",
+	} {
+		if !tester.HasText(want) {
+			t.Fatalf("Onevra detail missing %q", want)
+		}
+	}
+
+	// Open Large Type on password and verify character index tiles.
+	a.v2.largeTypeOpen = true
+	a.v2.largeTypeKey = "password"
+	a.v2.largeTypeLabel = "密码"
+	a.v2.largeTypeValue = "A9#x"
+	tester.Frame()
+	for _, want := range []string{"大号显示 · 密码", "共 4 个字符", "A9#x", "关闭大号显示"} {
+		if !tester.HasText(want) {
+			t.Fatalf("large type view missing %q", want)
+		}
+	}
+	if err := tester.Click("关闭大号显示"); err != nil {
+		t.Fatal(err)
+	}
+	if a.v2.largeTypeOpen {
+		t.Fatal("large type was not closed")
+	}
+
+	// Trashed item shows 恢复到金库 and two-step 永久删除 confirmation without 编辑.
+	a.v2.detail.State = "trashed"
+	tester.Frame()
+	if !tester.HasText("恢复到金库") || !tester.HasText("永久删除") {
+		t.Fatal("trashed Onevra detail missing restore or purge action")
+	}
+	if err := tester.Click("永久删除"); err != nil {
+		t.Fatal(err)
+	}
+	if !a.v2.confirmPurge || !tester.HasText("确认永久删除") || !tester.HasText("取消删除") {
+		t.Fatal("clicking 永久删除 did not enter two-step confirmation")
+	}
+	if err := tester.Click("取消删除"); err != nil {
+		t.Fatal(err)
+	}
+	if a.v2.confirmPurge {
+		t.Fatal("取消删除 did not reset confirmPurge")
+	}
+}
+
+func TestOnevraEditorGeneratorSettingsAndWatchtowerViews(t *testing.T) {
+	a := newOnevraTestApp()
+	a.v2Mode = true
+
+	// 1. Settings opens cleanly inside Onevra detail pane and closes back to detail.
+	a.openSettings()
+	tester := newOnevraTestTesterSize(a, 1280, 1000)
+	for _, want := range []string{"安全与偏好设置", "自动锁定", "剪贴板防护", "关闭设置"} {
+		if !tester.HasText(want) {
+			t.Fatalf("Onevra settings pane missing %q", want)
+		}
+	}
+	if err := tester.Click("关闭设置"); err != nil {
+		t.Fatal(err)
+	}
+	if a.v2.settingsOpen {
+		t.Fatal("settings remained open after 关闭设置")
+	}
+
+	// 2. Editor -> Generator ("生成密码") -> Fill Draft ("填入当前条目") returns to Editor!
+	a.v2.editing = true
+	a.v2.draft = newItemDraft(vault.CategoryLogin)
+	a.v2.draft.Title = "Draft Login"
+	tester = newOnevraTestTesterSize(a, 1280, 1200)
+	for _, want := range []string{"编辑条目", "基本信息", "生成密码", "保存", "取消"} {
+		if !tester.HasText(want) {
+			t.Fatalf("Onevra editor missing %q", want)
+		}
+	}
+	if err := tester.Click("生成密码"); err != nil {
+		t.Fatal(err)
+	}
+	if !a.v2.generator.open || !tester.HasText("密码生成器") || !tester.HasText("填入当前条目") {
+		t.Fatal("clicking 生成密码 inside editor did not display generatorView")
+	}
+	generated := a.v2.generator.preview
+	if generated == "" {
+		t.Fatal("generator preview was empty")
+	}
+	if err := tester.Click("填入当前条目"); err != nil {
+		t.Fatal(err)
+	}
+	if a.v2.generator.open || a.v2.draft.Password != generated || !tester.HasText("编辑条目") {
+		t.Fatal("填入当前条目 did not fill draft password and return to editor")
+	}
+	a.cancelEdit()
+
+	// 3. Watchtower renders score hero, Chinese flag badges, and 打开条目 navigates out of Watchtower.
+	a.v2.nav = navWatchtower
+	a.v2.watchtower = &WatchtowerReport{
+		OverallScore: 62,
+		Checked:      3,
+		Counts: watchtower.Counts{
+			Vulnerable:    1,
+			Reused:        1,
+			Weak:          1,
+			UnsecuredHTTP: 1,
+			TOTPNotStored: 1,
+		},
+		Findings: []watchtower.Finding{
+			{
+				ID:            "item-1",
+				Revision:      "revision-1",
+				Title:         "Example Login",
+				Origin:        "http://example.test",
+				StrengthScore: 35,
+				Flags:         []string{"vulnerable", "weak", "unsecured-http"},
+				BreachCount:   42,
+			},
+		},
+	}
+	tester.Frame()
+	for _, want := range []string{"Watchtower 安全体检", "安全评分 62 / 100", "已泄露", "弱密码", "非加密 HTTP", "该密码在公开泄露库中出现 42 次，请立即更换。", "打开条目"} {
+		if !tester.HasText(want) {
+			t.Fatalf("Watchtower view missing %q", want)
+		}
+	}
+	if err := tester.Click("打开条目"); err != nil {
+		t.Fatal(err)
+	}
+	if a.v2.nav == navWatchtower || a.v2.selectedID != "item-1" {
+		t.Fatalf("打开条目 did not switch from Watchtower to item detail: nav=%q selected=%q", a.v2.nav, a.v2.selectedID)
+	}
+}
+

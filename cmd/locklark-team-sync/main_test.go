@@ -101,3 +101,18 @@ func TestServerConfigRejectsAmbiguousOrUntrustedFiles(t *testing.T) {
 		}
 	}
 }
+
+func TestServerHelpFlagsEmitStructuredUsage(t *testing.T) {
+	for _, arg := range []string{"help", "--help", "-h"} {
+		var out bytes.Buffer
+		if err := run([]string{arg}, &out); err != nil {
+			t.Fatalf("run(%q) failed: %v", arg, err)
+		}
+		text := out.String()
+		for _, want := range []string{"USAGE", "init-anchor", "serve", "prepare-identity", "EXIT CODES"} {
+			if !strings.Contains(text, want) {
+				t.Fatalf("team-sync help (%s) missing %q: %s", arg, want, text)
+			}
+		}
+	}
+}

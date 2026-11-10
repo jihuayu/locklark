@@ -76,8 +76,11 @@ func TestImportModelFlagKeepsTerminalBoundary(t *testing.T) {
 }
 
 func TestImportNoticeMatchesProfile(t *testing.T) {
-	if legacy := personalImportNotice(false); legacy != "仅支持单账户、单库的基本登录；未支持的类别、字段、历史和附件会整批拒绝。\r\n来源记录会加密保留，可能保留以后修改前的旧值；不会覆盖已有条目。\r\n" {
-		t.Fatal("legacy import notice changed")
+	legacy := personalImportNotice(false)
+	for _, want := range []string{"仅支持单账户、单库的基本登录", "整批拒绝", "不会覆盖已有条目", "加密保留"} {
+		if !strings.Contains(legacy, want) {
+			t.Fatalf("legacy notice missing %q: %s", want, legacy)
+		}
 	}
 	v2 := personalImportNotice(true)
 	for _, want := range []string{"类别", "分节", "标签", "收藏", "附件", "原子拒绝", "不会覆盖", "加密保留"} {

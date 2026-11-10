@@ -24,7 +24,102 @@ import (
 	"unicode/utf8"
 )
 
-var personalUsage = errors.New("usage: locklark personal run-cli --file PATH --id ID --revision REV --profile token|gh --name ENV --cwd ABS_DIR --timeout SECONDS [--helper-path ABS_DIR_LIST] -- ABS_PROGRAM [ARG...], or run-env --file PATH --id ID --revision REV --field username|password --name ENV --cwd ABS_DIR --timeout SECONDS -- ABS_PROGRAM [ARG...], or <init|add-login|list|audit|archived-audit|references> --file PATH, or health --file PATH [--hibp true], or add-item --file PATH --input ITEM.json, or backup|restore --file SOURCE --out NEW_PATH, or edit-login --file PATH --id ID --revision REV --field title|username|password|otp|url|notes (hidden single-line replacement; use native editor for multiline notes), or reveal-login --file PATH --id ID --revision REV --field username|password, or generate-login --file PATH [--length N], or regenerate-password --file PATH --id ID --revision REV [--length N], or otp --file PATH --id ID --revision REV, or reveal-ref|otp-ref --file PATH --ref REF --revision REV, or inspect-1pux --file PATH --source ARCHIVE, or plan-import-1pux --file PATH --source ARCHIVE [--model v2], or import-1pux --file PATH --source ARCHIVE --digest PLAN_DIGEST [--model v2], or export-kdbx --file PATH --out NEW_FILE.kdbx, or archive-login|unarchive-login --file PATH --id ID --revision REV, or list|search --file PATH [--state active|archived|trashed|all], or trash-login|restore-login --file PATH --id ID --revision REV, or match-logins --file PATH --origin HTTPS_ORIGIN --frame-origin HTTPS_ORIGIN, or inject-json --file PATH --id ID --revision REV --field username|password --name PROPERTY --out NEW.json, or github-pull --file PATH --id ID --revision REV --repository-id NUMERIC_ID --owner OWNER --repository NAME --number PR --api-ip PUBLIC_IPV4")
+const personalHelpText = `usage: locklark personal <command> --file PATH [flags]
+
+Manage an owner-only local vault from an interactive controlling terminal.
+Master passwords, Secret Keys, search queries, and consent phrases are read
+with terminal echo disabled and are never accepted via flags or environment.
+
+VAULT & LIFECYCLE
+  init                  --file NEW_PATH
+  backup                --file SOURCE --out NEW_PATH
+  restore               --file BACKUP --out NEW_PATH
+  list                  --file PATH [--state active|archived|trashed|all]
+  search                --file PATH [--state active|archived|trashed|all]
+  match-logins          --file PATH --origin HTTPS_ORIGIN --frame-origin HTTPS_ORIGIN
+  references            --file PATH
+  audit                 --file PATH
+  archived-audit        --file PATH
+  health                --file PATH [--hibp true]
+
+ITEMS & LOGINS
+  add-login             --file PATH
+  generate-login        --file PATH [--length N]
+  add-item              --file PATH --input ITEM.json
+  edit-login            --file PATH --id ID --revision REV --field title|username|password|otp|url|notes
+                        (hidden single-line replacement; use native editor for multiline notes)
+  regenerate-password   --file PATH --id ID --revision REV [--length N]
+  archive-login         --file PATH --id ID --revision REV
+  unarchive-login       --file PATH --id ID --revision REV
+  trash-login           --file PATH --id ID --revision REV
+  restore-login         --file PATH --id ID --revision REV
+
+SECRETS & PROCESS DISCLOSURE
+  reveal-login          --file PATH --id ID --revision REV --field username|password
+  otp                   --file PATH --id ID --revision REV
+  reveal-ref            --file PATH --ref REF --revision REV
+  otp-ref               --file PATH --ref REF --revision REV
+  inject-json           --file PATH --id ID --revision REV --field username|password --name PROPERTY --out NEW.json
+  github-pull           --file PATH --id ID --revision REV --repository-id NUMERIC_ID --owner OWNER --repository NAME --number PR --api-ip PUBLIC_IPV4
+  run-env               --file PATH --id ID --revision REV --field username|password --name ENV --cwd ABS_DIR --timeout SECONDS -- ABS_PROGRAM [ARG...]
+  run-cli               --file PATH --id ID --revision REV --profile token|gh --name ENV --cwd ABS_DIR --timeout SECONDS [--helper-path ABS_DIR_LIST] -- ABS_PROGRAM [ARG...]
+
+MIGRATION, EXPORT & PASSKEY TRANSFER
+  inspect-1pux          --file PATH --source ARCHIVE
+  plan-import-1pux      --file PATH --source ARCHIVE [--model v2]
+  import-1pux           --file PATH --source ARCHIVE --digest PLAN_DIGEST [--model v2]
+  export-kdbx           --file PATH --out NEW_FILE.kdbx
+  passkey-invite        --file PATH --out NEW --ttl SECONDS
+  passkey-revoke        --file PATH --invitation FILE
+  passkey-list          --file PATH
+  passkey-export        --file PATH --invitation FILE --target-pin HEX64 --selection PRIVATE_JSON --out NEW_PACKET
+  passkey-plan          --file PATH --invitation FILE --packet FILE --source-pin HEX64
+  passkey-import        --file PATH --invitation FILE --packet FILE --source-pin HEX64 --digest HEX64 --mapping PRIVATE_JSON
+
+Run "locklark personal <command> --help" for single-command usage.
+`
+
+var personalUsage = errors.New(personalHelpText)
+
+var personalActionHelp = map[string]string{
+	"init":                "usage: locklark personal init --file NEW_PATH\n\nCreate a new owner-only vault, issue a fresh Secret Key, and verify offline backup confirmation.\n",
+	"backup":              "usage: locklark personal backup --file SOURCE --out NEW_PATH\n\nWrite an encrypted backup snapshot and issue an offline recovery kit with a trusted checkpoint.\n",
+	"restore":             "usage: locklark personal restore --file BACKUP --out NEW_PATH\n\nVerify a backup and recovery kit, issue a fresh Secret Key, and write a restored vault to NEW_PATH.\n",
+	"list":                "usage: locklark personal list --file PATH [--state active|archived|trashed|all]\n\nList non-secret item metadata for the selected lifecycle state (default: active).\n",
+	"search":              "usage: locklark personal search --file PATH [--state active|archived|trashed|all]\n\nSearch login titles using a query entered in the hidden terminal prompt.\n",
+	"match-logins":        "usage: locklark personal match-logins --file PATH --origin HTTPS_ORIGIN --frame-origin HTTPS_ORIGIN\n\nQuery candidate login items matching the caller-supplied HTTPS origins without autofilling.\n",
+	"references":          "usage: locklark personal references --file PATH\n\nList canonical secret references and current immutable revisions.\n",
+	"audit":               "usage: locklark personal audit --file PATH\n\nVerify and print the active signed audit chain.\n",
+	"archived-audit":      "usage: locklark personal archived-audit --file PATH\n\nVerify and print archived audit segments.\n",
+	"health":              "usage: locklark personal health --file PATH [--hibp true]\n\nRun offline password health checks on active logins, or opt in to k-anonymity HIBP prefix checks with --hibp true.\n",
+	"add-login":           "usage: locklark personal add-login --file PATH\n\nInteractively add a login item using hidden terminal prompts.\n",
+	"generate-login":      "usage: locklark personal generate-login --file PATH [--length N]\n\nCreate a login item with a newly generated alphanumeric password.\n",
+	"add-item":            "usage: locklark personal add-item --file PATH --input ITEM.json\n\nCreate a typed vault item from an owner-only JSON document after interactive SAVE confirmation.\n",
+	"edit-login":          "usage: locklark personal edit-login --file PATH --id ID --revision REV --field title|username|password|otp|url|notes\n\nReplace one field on a pinned login revision via hidden single-line terminal input.\n",
+	"regenerate-password": "usage: locklark personal regenerate-password --file PATH --id ID --revision REV [--length N]\n\nGenerate and save a replacement alphanumeric password for a pinned login revision.\n",
+	"archive-login":       "usage: locklark personal archive-login --file PATH --id ID --revision REV\n\nArchive a pinned login revision without deleting it.\n",
+	"unarchive-login":     "usage: locklark personal unarchive-login --file PATH --id ID --revision REV\n\nRestore an archived login revision to active state.\n",
+	"trash-login":         "usage: locklark personal trash-login --file PATH --id ID --revision REV\n\nMove a pinned login revision to the trash.\n",
+	"restore-login":       "usage: locklark personal restore-login --file PATH --id ID --revision REV\n\nRestore a trashed login revision to its prior active or archived state.\n",
+	"reveal-login":        "usage: locklark personal reveal-login --file PATH --id ID --revision REV --field username|password\n\nDisplay a single field from a pinned login revision on the controlling terminal after SHOW confirmation.\n",
+	"otp":                 "usage: locklark personal otp --file PATH --id ID --revision REV\n\nGenerate and display the current TOTP code for a pinned login revision after SHOW confirmation.\n",
+	"reveal-ref":          "usage: locklark personal reveal-ref --file PATH --ref REF --revision REV\n\nDisplay a secret value by canonical reference and pinned revision after SHOW confirmation.\n",
+	"otp-ref":             "usage: locklark personal otp-ref --file PATH --ref REF --revision REV\n\nDisplay a TOTP code by canonical reference and pinned revision after SHOW confirmation.\n",
+	"inject-json":         "usage: locklark personal inject-json --file PATH --id ID --revision REV --field username|password --name PROPERTY --out NEW.json\n\nWrite one secret field into a new owner-only plaintext JSON file after WRITE confirmation.\n",
+	"github-pull":         "usage: locklark personal github-pull --file PATH --id ID --revision REV --repository-id NUMERIC_ID --owner OWNER --repository NAME --number PR --api-ip PUBLIC_IPV4\n\nPerform a one-shot read-only GitHub pull request query pinned to repository ID and public IPv4 after CALL confirmation.\n",
+	"run-env":             "usage: locklark personal run-env --file PATH --id ID --revision REV --field username|password --name ENV --cwd ABS_DIR --timeout SECONDS -- ABS_PROGRAM [ARG...]\n\nPass one pinned field via environment variable to a trusted local executable with null stdio.\n",
+	"run-cli":             "usage: locklark personal run-cli --file PATH --id ID --revision REV --profile token|gh --name ENV --cwd ABS_DIR --timeout SECONDS [--helper-path ABS_DIR_LIST] -- ABS_PROGRAM [ARG...]\n\nRun a trusted local CLI in the foreground with an isolated credential environment after RUN confirmation.\n",
+	"inspect-1pux":        "usage: locklark personal inspect-1pux --file PATH --source ARCHIVE\n\nRead-only preflight scan of a plaintext 1PUX archive without importing items.\n",
+	"plan-import-1pux":    "usage: locklark personal plan-import-1pux --file PATH --source ARCHIVE [--model v2]\n\nBuild an atomic 1PUX import plan and return its verification digest.\n",
+	"import-1pux":         "usage: locklark personal import-1pux --file PATH --source ARCHIVE --digest PLAN_DIGEST [--model v2]\n\nAtomically import a 1PUX archive matching the approved plan digest without overwriting existing items.\n",
+	"export-kdbx":         "usage: locklark personal export-kdbx --file PATH --out NEW_FILE.kdbx\n\nExport vault items to a new KDBX 4 archive encrypted with an independent export password.\n",
+	"passkey-invite":      "usage: locklark personal passkey-invite --file PATH --out NEW --ttl SECONDS\n\nCreate a one-time signed passkey transfer invitation valid for 1..900 seconds.\n",
+	"passkey-revoke":      "usage: locklark personal passkey-revoke --file PATH --invitation FILE\n\nRevoke an unused passkey transfer invitation in the local audit chain.\n",
+	"passkey-list":        "usage: locklark personal passkey-list --file PATH\n\nList public metadata for active managed passkeys.\n",
+	"passkey-export":      "usage: locklark personal passkey-export --file PATH --invitation FILE --target-pin HEX64 --selection PRIVATE_JSON --out NEW_PACKET\n\nSeal selected passkey credentials for the pinned target vault.\n",
+	"passkey-plan":        "usage: locklark personal passkey-plan --file PATH --invitation FILE --packet FILE --source-pin HEX64\n\nVerify a sealed passkey packet against the pinned source and preview public receiver mappings.\n",
+	"passkey-import":      "usage: locklark personal passkey-import --file PATH --invitation FILE --packet FILE --source-pin HEX64 --digest HEX64 --mapping PRIVATE_JSON\n\nImport mapped passkey groups after revalidating the invitation, pins, digest, and live revisions.\n",
+}
 
 // One terminal mode covers the entire interaction; no prompt or inter-field
 // gap is visible while echo is enabled.
@@ -60,7 +155,7 @@ func (c *console) field(prompt string) ([]byte, error) {
 		b, err := c.reader.ReadByte()
 		if err != nil || b == 3 || b == 4 || b == 27 || len(value) > 64<<10 {
 			clear(value)
-			return nil, errors.New("terminal input cancelled or too long")
+			return nil, errors.New("terminal input cancelled or exceeded maximum length")
 		}
 		if c.skipLF {
 			c.skipLF = false
@@ -102,9 +197,9 @@ func confirmIssued(c *console, label, value, prompt string) error {
 // unknown or unsupported record as a whole instead of writing partial items.
 func personalImportNotice(v2 bool) string {
 	if v2 {
-		return "显式启用 v2 完整映射：支持受限的类别、分节字段、标签、收藏与附件。\r\n未知或不受支持的类别、字段、历史、标签或附件会整批原子拒绝，不写入部分条目，也不会覆盖已有条目。\r\n来源记录会加密保留，可能保留以后修改前的旧值。\r\n"
+		return "导入模式：v2 完整映射（支持受限的类别、分节字段、标签、收藏与附件）。\r\n安全边界：未知或不受支持的类别、字段、历史、标签或附件会整批原子拒绝，不写入部分条目，也不会覆盖已有条目。\r\n来源记录：原始归档记录会加密保留，可能包含修改前的历史旧值。\r\n"
 	}
-	return "仅支持单账户、单库的基本登录；未支持的类别、字段、历史和附件会整批拒绝。\r\n来源记录会加密保留，可能保留以后修改前的旧值；不会覆盖已有条目。\r\n"
+	return "导入模式：标准登录映射（仅支持单账户、单库的基本登录；不受支持的类别、字段、历史与附件会整批拒绝）。\r\n安全边界：不会覆盖已有条目；来源记录会加密保留，可能包含修改前的历史旧值。\r\n"
 }
 
 // personalImportConsent reports the confirmation phrase for the requested step.
@@ -116,6 +211,17 @@ func personalImportConsent(action string) (string, string) {
 }
 
 func runPersonal(args []string, out io.Writer) (retErr error) {
+	if len(args) == 1 && (args[0] == "help" || args[0] == "--help" || args[0] == "-h") {
+		_, err := io.WriteString(out, personalHelpText)
+		return err
+	}
+	if len(args) == 2 && (args[1] == "--help" || args[1] == "-h") {
+		if help, ok := personalActionHelp[args[0]]; ok {
+			_, err := io.WriteString(out, help)
+			return err
+		}
+		return personalUsage
+	}
 	if isPasskeyTransferAction(args) {
 		return runPersonalPasskeyTransfer(args, out)
 	}
@@ -387,7 +493,7 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 			return e
 		}
 		defer clear(key)
-		if _, e = fmt.Fprintf(os.Stderr, "请离线保存 Secret Key；丢失它将无法打开此库。 %s\r\n", personal.FormatSecret(key)); e != nil {
+		if _, e = fmt.Fprintf(os.Stderr, "请离线妥善保存 Secret Key（丢失后将无法打开此库）： %s\r\n", personal.FormatSecret(key)); e != nil {
 			return e
 		}
 		typed, e := consoleField("重新输入刚保存的 Secret Key")
@@ -440,8 +546,13 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 			// No receipt is appended to the child's output stream.
 			return nil
 		case "run-env":
-			if _, e = fmt.Fprintf(os.Stderr, "将条目 %s（修订 %s）的 %s 交给所选可信本地程序的环境变量 %s。\r\n这不是沙箱：程序可联网、写文件和向后代传递值；同用户或管理员也可能读取环境。\r\n参数会显示并出现在进程列表中，不要把秘密写入参数。标准输入/输出/错误接空设备；只返回退出码。\r\n超时仅终止直接子进程，后代可能继续运行；中断后结果可能未知。\r\n程序：%s\r\n目录：%s\r\n超时：%d 秒\r\n参数：\r\n", reveal.ID, reveal.Revision, reveal.Field, run.Name, strconv.QuoteToASCII(run.Program), strconv.QuoteToASCII(run.Directory), run.TimeoutSeconds); e != nil {
+			if _, e = fmt.Fprintf(os.Stderr, "可信进程环境变量披露确认（personal run-env）\r\n  目标条目：%s @ %s（字段 %s -> 环境变量 %s）\r\n  执行程序：%s\r\n  工作目录：%s\r\n  超时上限：%d 秒\r\n安全提示：\r\n  - 这不是沙箱：程序可联网、写文件并向后代进程传递该值；同账户进程或管理员也可能读取环境变量。\r\n  - 标准输入/输出/错误均绑定空设备，只返回退出码。\r\n  - 超时仅终止直接子进程，后代可能继续运行；中断后执行结果可能未知。\r\n命令参数（会显示在进程列表中，请勿在参数内写入秘密）：\r\n", reveal.ID, reveal.Revision, reveal.Field, run.Name, strconv.QuoteToASCII(run.Program), strconv.QuoteToASCII(run.Directory), run.TimeoutSeconds); e != nil {
 				return e
+			}
+			if len(run.Args) == 0 {
+				if _, e = fmt.Fprint(os.Stderr, "  （无）\r\n"); e != nil {
+					return e
+				}
 			}
 			for i, arg := range run.Args {
 				if _, e = fmt.Fprintf(os.Stderr, "  [%d] %s\r\n", i, strconv.QuoteToASCII(arg)); e != nil {
@@ -458,7 +569,7 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 			}
 			response, err = personal.RunEnv(context.Background(), path, string(pw), key, reveal, run)
 		case "search":
-			if _, e = fmt.Fprint(os.Stderr, "仅搜索当前登录标题，不搜索用户名、密码、备注、验证码配置或导入来源旧值。\r\n"); e != nil {
+			if _, e = fmt.Fprint(os.Stderr, "搜索范围：仅匹配当前登录标题（不搜索用户名、密码、备注、TOTP 配置或导入来源旧值）。\r\n"); e != nil {
 				return e
 			}
 			query, e := consoleField("搜索标题（隐藏输入）")
@@ -468,7 +579,7 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 			}
 			response, err = personal.Search(path, string(pw), key, string(query), opts["--state"])
 		case "github-pull":
-			if _, e = fmt.Fprintf(os.Stderr, "将条目 %s（修订 %s）的 password 作为 GitHub token，仅发送至 api.github.com。\r\n目标：%s/%s，固定仓库 ID %s，PR #%d；独立确认的 API IPv4：%s。\r\n只读查询状态，不返回 token；此次确认仅授权一次请求，失败或中断后结果可能未知。\r\n", reveal.ID, reveal.Revision, pull.Repository.Owner, pull.Repository.Name, pull.Repository.ID, pull.Number, pull.Address); e != nil {
+			if _, e = fmt.Fprintf(os.Stderr, "单次 GitHub 只读查询确认（personal github-pull）\r\n  凭据条目：%s @ %s（字段 password 作为 GitHub token，仅发送至 api.github.com）\r\n  查询目标：%s/%s（固定仓库 ID：%s），PR #%d\r\n  锁定地址：独立确认的 API IPv4 %s\r\n  安全提示：仅查询只读状态，不输出 token；本次确认仅授权一次请求，网络失败或中断后结果可能未知。\r\n", reveal.ID, reveal.Revision, pull.Repository.Owner, pull.Repository.Name, pull.Repository.ID, pull.Number, pull.Address); e != nil {
 				return e
 			}
 			consent, e := consoleField("输入 CALL 确认此次 GitHub 查询")
@@ -481,10 +592,7 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 			}
 			response, err = personal.LivePull(context.Background(), path, string(pw), key, reveal, pull)
 		case "inject-json":
-			if _, e = fmt.Fprintf(os.Stderr, "将条目 %s（修订 %s）的 %s 写入明文 JSON 属性 %s。\r\n目标文件不会覆盖，采用当前账户的受限文件权限；请妥善保管或删除明文文件。\r\n目标：", reveal.ID, reveal.Revision, reveal.Field, opts["--name"]); e != nil {
-				return e
-			}
-			if _, e = fmt.Fprintf(os.Stderr, "%s\r\n", strconv.QuoteToASCII(opts["--out"])); e != nil {
+			if _, e = fmt.Fprintf(os.Stderr, "明文 JSON 写出确认（personal inject-json）\r\n  凭据条目：%s @ %s（字段 %s -> JSON 属性 %s）\r\n  输出文件：%s\r\n  安全提示：不会覆盖已有文件，并以当前账户受限权限创建；用毕请妥善保管或及时删除明文文件。\r\n", reveal.ID, reveal.Revision, reveal.Field, opts["--name"], strconv.QuoteToASCII(opts["--out"])); e != nil {
 				return e
 			}
 			consent, e := consoleField("输入 WRITE 确认写出明文 JSON")
@@ -501,7 +609,7 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 				response, err = personalHealthHIBP(path, string(pw), key, consoleField, os.Stderr)
 				break
 			}
-			if _, e = fmt.Fprint(os.Stderr, "仅检查当前活动登录的本地规则，不检查归档、回收站或导入来源旧值。\r\n不会联网查询泄露数据；未发现问题不代表密码安全，未保存 TOTP 不代表网站未启用双因素。\r\n"); e != nil {
+			if _, e = fmt.Fprint(os.Stderr, "本地安全体检确认（personal health）\r\n  检查范围：仅评估当前活动登录的本地规则，不检查归档、回收站或导入来源旧值。\r\n  离线保障：不会联网查询泄露库；未发现问题不代表密码绝对安全，未保存 TOTP 也不代表网站未启用双因素。\r\n"); e != nil {
 				return e
 			}
 			consent, e := consoleField("输入 SCAN 确认本地体检")
@@ -519,7 +627,7 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 			}
 			prompt, answer := personalImportConsent(action)
 			if action == "import-1pux" {
-				if _, e = fmt.Fprintf(os.Stderr, "确认导入计划的来源摘要：%s\r\n", opts["--digest"]); e != nil {
+				if _, e = fmt.Fprintf(os.Stderr, "核对计划摘要：%s\r\n", opts["--digest"]); e != nil {
 					return e
 				}
 			}
@@ -559,7 +667,7 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 			if subtle.ConstantTimeCompare(password, confirmation) != 1 {
 				return errors.New("export passwords did not match")
 			}
-			if _, e = fmt.Fprint(os.Stderr, "导出包含活动、归档和回收站条目的敏感值，以独立密码加密；不包含账户钥匙、审计或恢复材料。\r\n包含导入来源记录，可能保留修改前的旧值。\r\n其他工具未必识别归档或回收站状态。\r\n"); e != nil {
+			if _, e = fmt.Fprint(os.Stderr, "KDBX 加密导出确认（personal export-kdbx）\r\n  导出内容：包含活动、归档与回收站条目的敏感值，使用上方独立导出密码加密；不含 Secret Key、审计链或恢复码。\r\n  附加提示：包含导入来源记录（可能含修改前的历史旧值）；第三方工具未必区分归档或回收站状态。\r\n"); e != nil {
 				return e
 			}
 			consent, e := consoleField("输入 SAVE 确认加密导出")
@@ -572,7 +680,7 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 			}
 			response, err = personal.ExportKDBX(path, string(pw), key, string(password), opts["--out"])
 		case "inspect-1pux":
-			if _, e = fmt.Fprint(os.Stderr, "将只读检查明文 1PUX 归档并记录审计；不会导入条目，报告不包含字段值。\r\n"); e != nil {
+			if _, e = fmt.Fprint(os.Stderr, "1PUX 预检确认：将只读扫描明文 1PUX 归档并记录审计事件；不会导入任何条目，输出报告亦不含秘密字段值。\r\n"); e != nil {
 				return e
 			}
 			confirmation, e := consoleField("输入 SCAN 确认预检")
@@ -589,9 +697,9 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 		case "reveal-ref", "otp-ref":
 			kind := "字段值"
 			if action == "otp-ref" {
-				kind = "TOTP 验证码（请确保本机时间准确）"
+				kind = "TOTP 验证码（请确保本机时钟准确）"
 			}
-			if _, e = fmt.Fprintf(os.Stderr, "将在本终端显示引用 %s（修订 %s）的%s；终端历史可能保留显示值。\r\n", opts["--ref"], opts["--revision"], kind); e != nil {
+			if _, e = fmt.Fprintf(os.Stderr, "即将在此终端显示引用 %s（修订 %s）的%s；终端滚动缓冲区可能保留已显示内容。\r\n", opts["--ref"], opts["--revision"], kind); e != nil {
 				return e
 			}
 			confirmation, e := consoleField("输入 SHOW 确认按引用显示")
@@ -608,7 +716,7 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 				response, err = personal.RevealReference(path, string(pw), key, opts["--ref"], opts["--revision"], os.Stderr)
 			}
 		case "otp":
-			if _, e = fmt.Fprintf(os.Stderr, "将在本终端显示条目 %s（修订 %s）的 TOTP 验证码；请确保本机时间准确，终端历史可能保留验证码。\r\n", edit.ID, edit.Revision); e != nil {
+			if _, e = fmt.Fprintf(os.Stderr, "即将在此终端显示条目 %s（修订 %s）的 TOTP 验证码；请确保本机时钟准确，终端滚动缓冲区可能保留验证码。\r\n", edit.ID, edit.Revision); e != nil {
 				return e
 			}
 			confirmation, e := consoleField("输入 SHOW 确认显示验证码")
@@ -621,7 +729,7 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 			}
 			response, err = personal.RevealOTP(path, string(pw), key, edit.ID, edit.Revision, os.Stderr)
 		case "reveal-login":
-			if _, e = fmt.Fprintf(os.Stderr, "即将在本终端显示条目 %s（修订 %s）的 %s 字段（JSON 字符串）；终端历史可能保留原值。\r\n", reveal.ID, reveal.Revision, reveal.Field); e != nil {
+			if _, e = fmt.Fprintf(os.Stderr, "即将在此终端显示条目 %s（修订 %s）的 %s 字段（JSON 字符串格式）；终端滚动缓冲区可能保留原值。\r\n", reveal.ID, reveal.Revision, reveal.Field); e != nil {
 				return e
 			}
 			confirmation, e := consoleField("输入 SHOW 确认显示")
@@ -660,7 +768,7 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 				return e
 			}
 			defer clear(fresh)
-			if e = confirmIssued(&c, "恢复库沿用主密码，请离线保存新的 Secret Key", personal.FormatSecret(fresh), "重新输入新 Secret Key"); e != nil {
+			if e = confirmIssued(&c, "恢复库沿用原主密码，请离线妥善保存新的 Secret Key", personal.FormatSecret(fresh), "重新输入新 Secret Key"); e != nil {
 				return e
 			}
 			err = prepared.Publish(fresh)
@@ -668,7 +776,7 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 		case "archived-audit":
 			response, err = personal.ArchivedAudit(path, string(pw), key)
 		case "regenerate-password":
-			if _, e = fmt.Fprintf(os.Stderr, "将为条目 %s（修订 %s）生成 %d 位字母数字密码并替换本地保存值。此操作不会修改网站密码；需要时请先备份。\r\n", opts["--id"], opts["--revision"], length); e != nil {
+			if _, e = fmt.Fprintf(os.Stderr, "将为条目 %s（修订 %s）生成 %d 位字母数字新密码并替换本地记录。此操作不会自动同步修改远端网站密码；如需留存旧密码请先备份。\r\n", opts["--id"], opts["--revision"], length); e != nil {
 				return e
 			}
 			confirmation, e := consoleField("输入 SAVE 确认替换本地密码")
@@ -692,7 +800,7 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 			}
 			defer clear(username)
 			if action == "generate-login" {
-				if _, e = fmt.Fprintf(os.Stderr, "将生成并加密保存 %d 位字母数字密码；需要查看时另用 reveal-login。\r\n", length); e != nil {
+				if _, e = fmt.Fprintf(os.Stderr, "将自动生成并加密保存 %d 位字母数字密码；如需查看请另行执行 reveal-login。\r\n", length); e != nil {
 					return e
 				}
 				confirmation, e := consoleField("输入 SAVE 确认生成并保存")
@@ -724,7 +832,7 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 			}
 			defer clear(value)
 			if edit.Field == "otp" {
-				if _, e = fmt.Fprint(os.Stderr, "此操作只更新本地保存的 TOTP 配置，不会开启或关闭网站的双因素认证。\r\n"); e != nil {
+				if _, e = fmt.Fprint(os.Stderr, "注意：此操作仅更新本地保存的 TOTP 密钥配置，不会开启或关闭目标网站的双因素认证。\r\n"); e != nil {
 					return e
 				}
 				confirmation, e := consoleField("输入 SAVE 确认更新 TOTP")
@@ -747,7 +855,7 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 			if action == "restore-login" {
 				verb = "从回收站恢复"
 			}
-			if _, e := fmt.Fprintf(os.Stderr, "将%s登录 %s（修订 %s）。恢复后回到原活动/归档状态；回收站不自动清空。\r\n", verb, opts["--id"], opts["--revision"]); e != nil {
+			if _, e := fmt.Fprintf(os.Stderr, "即将%s登录条目 %s（修订 %s）。恢复后将回到原活动或归档状态；回收站条目不会自动清空。\r\n", verb, opts["--id"], opts["--revision"]); e != nil {
 				return e
 			}
 			confirmation, e := consoleField("输入 SAVE 确认更改回收站状态")
@@ -768,7 +876,7 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 			if action == "archive-login" {
 				verb = "归档"
 			}
-			if _, e := fmt.Fprintf(os.Stderr, "将%s登录 %s（修订 %s）；条目不会删除。\r\n", verb, opts["--id"], opts["--revision"]); e != nil {
+			if _, e := fmt.Fprintf(os.Stderr, "即将%s登录条目 %s（修订 %s）；该条目不会被删除。\r\n", verb, opts["--id"], opts["--revision"]); e != nil {
 				return e
 			}
 			confirmation, e := consoleField("输入 SAVE 确认更改归档状态")
@@ -785,7 +893,7 @@ func runPersonal(args []string, out io.Writer) (retErr error) {
 			}
 			response = map[string]string{"id": opts["--id"], "revision": revision}
 		case "match-logins":
-			if _, e := fmt.Fprint(os.Stderr, "按调用者提供的来源查询候选；未验证浏览器页面来源，不执行填充。\r\n"); e != nil {
+			if _, e := fmt.Fprint(os.Stderr, "说明：仅按调用参数提供的 HTTPS 来源匹配候选条目；未验证真实浏览器上下文，也不执行自动填充。\r\n"); e != nil {
 				return e
 			}
 			response, err = personal.MatchLogins(path, string(pw), key, opts["--origin"], opts["--frame-origin"])

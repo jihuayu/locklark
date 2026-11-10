@@ -9,6 +9,9 @@ import (
 	"github.com/jihuayu/locklark/internal/personal"
 	"github.com/jihuayu/locklark/internal/totp"
 	"github.com/jihuayu/locklark/internal/vault"
+	oneui "github.com/oneo-me/onevra/source/components"
+	"github.com/oneo-me/onevra/source/icons/lucide"
+	"unicode"
 )
 
 // detailURLs returns the ordered URLs of a detail, including the legacy
@@ -232,26 +235,26 @@ func isConcealedKey(detail *personal.ItemDetail, key string) bool {
 func fieldLabel(key string) string {
 	switch key {
 	case "title":
-		return "Title"
+		return "标题"
 	case "username":
-		return "Username"
+		return "用户名"
 	case "password":
-		return "Password"
+		return "密码"
 	case "otp":
-		return "One-Time Password"
+		return "一次性验证码"
 	case "notes":
-		return "Notes"
+		return "备注"
 	case "url":
-		return "Website"
+		return "网站"
 	}
 	if strings.HasPrefix(key, "url:") {
-		return "Website " + strings.TrimPrefix(key, "url:")
+		return "网站 " + strings.TrimPrefix(key, "url:")
 	}
 	if strings.HasPrefix(key, "credit_card.") {
-		return "Credit Card " + strings.TrimPrefix(key, "credit_card.")
+		return "信用卡 " + strings.TrimPrefix(key, "credit_card.")
 	}
 	if strings.HasPrefix(key, "identity.") {
-		return "Identity " + strings.TrimPrefix(key, "identity.")
+		return "身份 " + strings.TrimPrefix(key, "identity.")
 	}
 	if parts := strings.SplitN(key, "/", 2); len(parts) == 2 {
 		return parts[1]
@@ -439,16 +442,74 @@ func (a *App) largeTypeView(c *ui.Context) {
 	if !a.v2.largeTypeOpen {
 		return
 	}
-	ui.Column(c.Key("large-type")).Role(ui.RoleGroup).Label("大号显示").Gap(10).Children(func() {
-		ui.Text(c, "大号显示 · "+a.v2.largeTypeLabel).FontSize(22).Bold()
-		ui.Text(c, "逐字核对长密码或一次性验证码；关闭后将立即从界面清除。").FontSize(12)
-		ui.Text(c, a.v2.largeTypeValue).FontSize(30).Bold()
-		positions := make([]string, 0, len([]rune(a.v2.largeTypeValue)))
-		for i := range []rune(a.v2.largeTypeValue) {
-			positions = append(positions, fmt.Sprintf("%d", i+1))
-		}
-		ui.Text(c, strings.Join(positions, " ")).FontSize(12)
-		ui.Button(c, "关闭大号显示").OnClick(a.closeLargeType)
+	t := c.Theme()
+	runes := []rune(a.v2.largeTypeValue)
+
+	ui.Column(c.Key("large-type")).Role(ui.RoleGroup).Label("大号显示").Fill().Background(t.Background).Children(func() {
+		oneui.ScrollView(c, oneui.ScrollViewOptions{}).Fill().Children(func() {
+			ui.Column(c).FillWidth().MinWidth(0).Padding(t.Space(5)).Gap(t.Space(3)).Children(func() {
+				// Header
+				ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(t.Space(2.5)).Children(func() {
+					iconBox := ui.Box(c).Size(t.Space(10), t.Space(10)).Shrink(0).Radius(t.Space(2.5)).
+						Background(t.Accent.Alpha(.12)).AlignItems(ui.Center).Justify(ui.Center)
+					iconBox.Children(func() {
+						oneui.Icon(c, lucide.ScanText()).Size(t.Space(5), t.Space(5)).TextColor(t.Accent)
+					})
+					ui.Column(c).Grow(1).MinWidth(0).Gap(t.Space(.5)).Children(func() {
+						oneui.Text(c, "大号显示 · "+a.v2.largeTypeLabel).FontSize(t.Rem(1.35)).Bold().SingleLine()
+						oneui.Text(c, "逐字核对长密码或一次性验证码；关闭后将立即从界面清除。").FontSize(t.Rem(.78)).TextColor(t.TextMuted).Wrap()
+					})
+					oneui.Button(c, "关闭大号显示", oneui.ButtonPrimary).OnClick(a.closeLargeType)
+				})
+
+				// Full value hero card
+				ui.Column(c).FillWidth().Border(1, t.Accent.Alpha(.45)).Radius(t.Radius).Background(t.Surface).
+					Padding(t.Space(3.5)).Gap(t.Space(1.5)).Children(func() {
+					ui.Row(c).FillWidth().AlignItems(ui.Center).Children(func() {
+						oneui.Text(c, "完整内容").FontSize(t.Rem(.76)).Bold().TextColor(t.TextMuted).Grow(1)
+						oneui.Badge(c, fmt.Sprintf("共 %d 个字符", len(runes)), oneui.BadgeOptions{Tone: oneui.BadgeAccent})
+					})
+					oneui.Text(c, visible(a.v2.largeTypeValue)).FontSize(t.Rem(1.65)).Bold().Wrap()
+				})
+
+				// Character index / grouping cards
+				if len(runes) > 0 {
+					ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).
+						Padding(t.Space(3)).Gap(t.Space(2.5)).Children(func() {
+						ui.Row(c).FillWidth().Wrap().AlignItems(ui.Center).Gap(t.Space(2)).Children(func() {
+							oneui.Text(c, "逐字符索引对照").Bold().Grow(1)
+							oneui.Text(c, "数字以强调色标出 · 符号以警示色标出").FontSize(t.Rem(.75)).TextColor(t.TextMuted)
+						})
+						ui.Row(c).FillWidth().Wrap().Gap(t.Space(1.25)).Children(func() {
+							for i, r := range runes {
+								charColor := t.Text
+								borderColor := t.Border
+								switch {
+								case unicode.IsDigit(r):
+									charColor = t.Accent
+									borderColor = t.Accent.Alpha(.45)
+								case !unicode.IsLetter(r):
+									charColor = t.Warning
+									borderColor = t.Warning.Alpha(.45)
+								}
+								glyph := visible(string(r))
+								if r == ' ' {
+									glyph = "␣"
+								}
+								tile := ui.Column(c).MinWidth(44).Border(1, borderColor).Radius(t.Radius).
+									Background(t.Background).Padding(t.Space(1.25), t.Space(1.5)).
+									AlignItems(ui.Center).Justify(ui.Center).Gap(t.Space(.5))
+								tile.Children(func() {
+									oneui.Text(c, glyph).FontSize(t.Rem(1.25)).Bold().TextColor(charColor)
+									oneui.Text(c, fmt.Sprintf("%d", i+1)).FontSize(t.Rem(.68)).TextColor(t.TextMuted)
+								})
+							}
+						})
+					})
+				}
+			})
+		})
 	})
 }
+
 
