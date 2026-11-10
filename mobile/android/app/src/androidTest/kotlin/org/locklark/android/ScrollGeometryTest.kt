@@ -110,6 +110,63 @@ class ScrollGeometryTest {
         assertEquals(Rect(0, 88, 400, 300), safeLocalRect(scroll, whole, root, detached = true))
     }
     /**
+     * Negative regression for the screen intersection only: the safe screen
+     * rect lies entirely above the app root's screen rect, yet it falls inside
+     * the ScrollView's padding box in local coordinates. Rect.intersect leaves
+     * its receiver untouched when there is no overlap, so without checking the
+     * first return value the old, still non-empty rect would be mapped and
+     * clamped as if visible. The root is pinned at a fixed screen origin by
+     * getLocationOnScreen, as a system layout would report.
+     */
+    @Test fun safeRectOutsideRootScreenBoundsMapsToEmpty() {
+        val scroll = scrollView()
+        rows(scroll, height = 1000, content = 20, padding = Rect(0, 88, 0, 120))
+        val top = IntArray(2).also { scroll.getLocationOnScreen(it) }[1]
+        val root = object : View(scroll.context) {
+            override fun getLocationOnScreen(outLocation: IntArray) {
+                outLocation[0] = 0; outLocation[1] = top
+            }
+        }.apply { layout(0, 0, 400, 1000) }
+        // Entirely above the root's screen rect (top - 100 .. top - 20), but
+        // local -100 .. -20 is inside the padding box 88 .. 880.
+        val safe = Rect(0, top - 100, 400, top - 20)
+        val clipped = Rect(safe).apply { intersect(Rect(0, top, 400, top + 1000)) }
+        assertTrue("The fixture safe rect must not overlap the root", !Rect.intersects(safe, Rect(0, top, 400, top + 1000)))
+        assertEquals("No overlap leaves the receiver untouched", safe, clipped)
+        assertEquals("A safe rect outside the root maps to nothing", Rect(), safeLocalRect(scroll, safe, root, detached = true))
+        // Control: the same local window is mapped when the root covers it.
+        assertEquals(Rect(0, 88, 400, 880),
+            safeLocalRect(scroll, Rect(0, top, 400, top + 1000), root, detached = true))
+    }
+    /**
+     * Negative regression for the padding-box intersection only: the safe rect
+     * overlaps the root, so the screen intersection succeeds, but mapped into
+     * local coordinates it lies entirely above the padding box. The second
+     * Rect.intersect leaves its receiver untouched on no overlap, so without
+     * checking it the out-of-box local rect would be returned as visible.
+     */
+    @Test fun localRectOutsideScrollPaddingBoxMapsToEmpty() {
+        val scroll = scrollView()
+        rows(scroll, height = 1000, content = 20, padding = Rect(0, 88, 0, 120))
+        val top = IntArray(2).also { scroll.getLocationOnScreen(it) }[1]
+        val root = object : View(scroll.context) {
+            override fun getLocationOnScreen(outLocation: IntArray) {
+                outLocation[0] = 0; outLocation[1] = top
+            }
+        }.apply { layout(0, 0, 400, 1000) }
+        // Screen top - 60 .. top + 40 overlaps the root, but maps to local
+        // -60 .. 40, entirely above the padding box top 88.
+        val safe = Rect(0, top - 60, 400, top + 40)
+        val paddingBox = Rect(0, 88, 400, 880)
+        assertTrue("The fixture safe rect must overlap the root", Rect.intersects(safe, Rect(0, top, 400, top + 1000)))
+        val local = Rect(safe).apply { offset(0, -top) }
+        assertTrue("The mapped rect must miss the padding box", !Rect.intersects(local, paddingBox))
+        assertEquals("No overlap leaves the receiver untouched", local, Rect(local).apply { intersect(paddingBox) })
+        assertEquals("A local rect outside the padding box maps to nothing", Rect(), safeLocalRect(scroll, safe, root, detached = true))
+        // Control: from local 0 the same padding box is returned.
+        assertEquals(paddingBox, safeLocalRect(scroll, Rect(0, top, 400, top + 1000), root, detached = true))
+    }
+    /**
      * Detached-layout regression: a real nested tree (ScrollView -> body ->
      * cards -> control) laid out at a fixed size, so
      * offsetDescendantRectToMyCoords composes every nested offset and the
