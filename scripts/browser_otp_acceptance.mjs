@@ -4,8 +4,32 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 
+import { browserFixtureExecutable } from "./browser_save_acceptance.mjs";
+
 export const otpHTML =
   '<!doctype html><html><title>Locklark OTP acceptance</title><body><form id="otp-form" action="/verify"><input id="otp-code" autocomplete="one-time-code"><button>Verify</button></form><script>window.submits=0;document.addEventListener("submit",event=>{event.preventDefault();window.submits++;});</script></body></html>';
+
+// Resolve the fixture once per configure call through the same helper as the
+// vault observer: LOCKLARK_BROWSER_FIXTURE is reused, otherwise the historical
+// state/fixture-observer build path is kept.
+export function configureOTPFixture(driver, digits) {
+  const { root, state, env, go } = driver;
+  return execFileSync(
+    browserFixtureExecutable({
+      go: go || process.env.LOCKLARK_GO || "go",
+      root,
+      env,
+      state,
+    }),
+    [
+      "-configure-otp",
+      join(state, "vault/fixture.json"),
+      "-digits",
+      String(digits),
+    ],
+    { cwd: root, env, stdio: ["ignore", "ignore", "pipe"], timeout: 20000 },
+  );
+}
 
 export async function acceptBrowserOTP(driver) {
   const {
@@ -22,6 +46,7 @@ export async function acceptBrowserOTP(driver) {
     root,
     state,
     env,
+    go,
   } = driver;
   fixture.OTPCodes = [];
   let stage = "otp",
@@ -76,17 +101,7 @@ export async function acceptBrowserOTP(driver) {
         ) && window.submits === 0
       );
     });
-  const configure = (digits) =>
-    execFileSync(
-      join(state, "fixture-observer"),
-      [
-        "-configure-otp",
-        join(state, "vault/fixture.json"),
-        "-digits",
-        String(digits),
-      ],
-      { cwd: root, env, stdio: ["ignore", "ignore", "pipe"], timeout: 20000 },
-    );
+  const configure = (digits) => configureOTPFixture(driver, digits);
   const page = async (variant) => {
     step("controlled-document");
     await navigate(origin + "/otp-acceptance");
