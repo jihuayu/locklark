@@ -32,6 +32,14 @@ var bucket = []byte("locklark.personal/v1")
 var slotKey = []byte("device-slot")
 var snapshotKey = []byte("snapshot")
 
+// encodedSnapshotLimit bounds the JSON-encoded snapshot value. It is the
+// stored-snapshot ceiling inflated by JSON/base64 overhead (binary fields grow
+// by 4/3), so it is evaluated from the vault ceiling instead of copied.
+// Deriving it at init time by calling into vault keeps this package free of
+// vault's (incompressible) embedded assets; VerifySnapshot re-checks every
+// field against the vault limits once the value is parsed.
+var encodedSnapshotLimit = vault.MaxStoredSnapshot() + vault.MaxStoredSnapshot()/2
+
 type identity struct {
 	Device                          string
 	Signing, Audit, AuditEncryption []byte
@@ -366,7 +374,7 @@ func authenticateState(tx *bolt.Tx, pw string, key []byte, action string, unlock
 	}
 	var s vault.Snapshot
 	raw = b.Get(snapshotKey)
-	if len(raw) > 12<<20 || json.Unmarshal(raw, &s) != nil {
+	if len(raw) > encodedSnapshotLimit || json.Unmarshal(raw, &s) != nil {
 		return nil, invalid
 	}
 	signer := ed25519.NewKeyFromSeed(i.Signing)

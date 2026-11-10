@@ -24,6 +24,16 @@ type Snapshot struct {
 
 const MaxPayload = 16 << 20
 
+// The stored KDBX snapshot exceeds MaxPayload: KDBX headers, the attachment
+// index and protected-value framing add per-item overhead, and the personal
+// store persists the snapshot as JSON (base64 inflates binary by 4/3) next to
+// the account metadata in the same small value. authenticateState therefore
+// admits everything this bound allows on decode, and seal rejects anything
+// that could not be read back.
+func MaxStoredSnapshot() int { return maxStoredSnapshot }
+
+const maxStoredSnapshot = 30 << 20
+
 var ErrSnapshot = errors.New("invalid or unexpected snapshot")
 
 // The signature binds both exact artifacts and their epoch before any KDBX
@@ -87,7 +97,7 @@ func seal(payload []byte, items []Item, epoch uint64, recipients []*age.X25519Re
 	if err := kdbx.NewEncoder(&data).Encode(db); err != nil {
 		return Snapshot{}, err
 	}
-	if data.Len() > 8<<20 {
+	if data.Len() > maxStoredSnapshot {
 		return Snapshot{}, ErrSnapshot
 	}
 	w, err := age.Encrypt(&env, allowed...)
@@ -122,7 +132,7 @@ func unwrap(envelope []byte, id *age.X25519Identity) ([]byte, error) {
 }
 
 func VerifySnapshot(s Snapshot, authority ed25519.PublicKey, expectedEpoch uint64) error {
-	if expectedEpoch == 0 || expectedEpoch != s.Epoch || len(authority) != ed25519.PublicKeySize || len(s.Database) > 8<<20 || len(s.Envelope) > 128<<10 || !ed25519.Verify(authority, s.signed(), s.Signature) {
+	if expectedEpoch == 0 || expectedEpoch != s.Epoch || len(authority) != ed25519.PublicKeySize || len(s.Database) > maxStoredSnapshot || len(s.Envelope) > 128<<10 || !ed25519.Verify(authority, s.signed(), s.Signature) {
 		return ErrSnapshot
 	}
 	return nil

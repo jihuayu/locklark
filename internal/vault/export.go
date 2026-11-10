@@ -44,7 +44,7 @@ func ExportKDBX(items []Item, password string) ([]byte, error) {
 	if err := kdbx.NewEncoder(&out).Encode(db); err != nil {
 		return nil, err
 	}
-	if out.Len() > 8<<20 {
+	if out.Len() > maxStoredSnapshot {
 		return nil, ErrSnapshot
 	}
 	return out.Bytes(), nil
