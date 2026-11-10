@@ -66,22 +66,32 @@ func canonical(raw []byte, v any) bool {
 	return len(raw) > 0 && json.Unmarshal(raw, v) == nil && bytes.Equal(raw, encoded(v))
 }
 
-func load(tx *bolt.Tx, c *Config, anchor Checkpoint) (View, *evolution, error) {
-	var out View
+// loaded is one verified committed state: the head view and its evolution,
+// plus the exact stored receipt bytes of the chain and the stored head
+// snapshot bytes, so a commit budgets the retained History without re-encoding
+// it.
+type loaded struct {
+	view     View
+	state    *evolution
+	receipts []Receipt
+	snapshot []byte
+}
+
+func load(tx *bolt.Tx, c *Config, anchor Checkpoint) (out loaded, err error) {
 	if !c.validCheckpoint(anchor) {
-		return out, nil, ErrInvalid
+		return loaded{}, ErrInvalid
 	}
 	b := tx.Bucket(bucket)
 	if b == nil {
-		return out, nil, ErrInvalid
+		return loaded{}, ErrInvalid
 	}
 	records := b.Bucket(recordsKey)
 	if records == nil {
-		return out, nil, ErrInvalid
+		return loaded{}, ErrInvalid
 	}
 	verifier, err := newHistoryVerifier(c, anchor)
 	if err != nil {
-		return View{}, nil, err
+		return loaded{}, err
 	}
 	err = records.ForEach(func(k, raw []byte) error {
 		if len(k) != 8 || verifier.current.Version >= maxVersions || binary.BigEndian.Uint64(k) != verifier.current.Version+1 || len(raw) > maxRecord {
@@ -91,25 +101,29 @@ func load(tx *bolt.Tx, c *Config, anchor Checkpoint) (View, *evolution, error) {
 		if !canonical(raw, &receipt) || verifier.advance(receipt) != nil {
 			return ErrInvalid
 		}
-		out.Receipt = receipt
+		out.receipts = append(out.receipts, receipt)
 		return nil
 	})
 	if err != nil || verifier.current.Version == 0 || !verifier.matched {
-		return View{}, nil, ErrInvalid
+		return loaded{}, ErrInvalid
 	}
-	raw := b.Get(snapshotKey)
-	if out.Receipt.Proposal.Mode == "active" {
-		if len(raw) > 12<<20 || !canonical(raw, &out.Snapshot) || c.verifySnapshot(out.Receipt.Proposal, out.Snapshot) != nil {
-			return View{}, nil, ErrInvalid
+	out.view.Receipt = out.receipts[len(out.receipts)-1]
+	if stored := b.Get(snapshotKey); stored != nil {
+		out.snapshot = bytes.Clone(stored) // Own it past the Bolt transaction.
+	}
+	if out.view.Receipt.Proposal.Mode == "active" {
+		if len(out.snapshot) > 12<<20 || !canonical(out.snapshot, &out.view.Snapshot) || c.verifySnapshot(out.view.Receipt.Proposal, out.view.Snapshot) != nil {
+			return loaded{}, ErrInvalid
 		}
-	} else if raw != nil {
-		return View{}, nil, ErrInvalid
+	} else if out.snapshot != nil {
+		return loaded{}, ErrInvalid
 	}
-	out, err = verifier.finish(out.Snapshot)
+	out.view, err = verifier.finish(out.view.Snapshot)
 	if err != nil {
-		return View{}, nil, ErrInvalid
+		return loaded{}, ErrInvalid
 	}
-	return out, verifier.state, nil
+	out.state = verifier.state
+	return out, nil
 }
 
 // readRequest narrows one store read. A nil value is a plain Read. A non-nil
@@ -281,6 +295,7 @@ func commitWithUpdate(update func(func(*bolt.Tx) error) error, c *Config, sequen
 	err := update(func(tx *bolt.Tx) error {
 		var b *bolt.Bucket
 		var state *evolution
+		var retained loaded
 		current := c.Genesis()
 		if initial {
 			if tx.Bucket(bucket) != nil || p.Parent != current || p.Mode != "active" {
@@ -296,12 +311,12 @@ func commitWithUpdate(update func(func(*bolt.Tx) error) error, c *Config, sequen
 			}
 			state = newEvolution()
 		} else {
-			view, e, err := load(tx, c, c.Genesis())
-			if err != nil {
+			var err error
+			if retained, err = load(tx, c, c.Genesis()); err != nil {
 				return err
 			}
-			current = view.Receipt.Checkpoint()
-			state = e
+			current = retained.view.Receipt.Checkpoint()
+			state = retained.state
 			b = tx.Bucket(bucket)
 		}
 		if current.Version >= maxVersions {
@@ -319,6 +334,19 @@ func commitWithUpdate(update func(func(*bolt.Tx) error) error, c *Config, sequen
 		if len(raw) > maxRecord {
 			return ErrInvalid
 		}
+		snapshot := []byte(nil)
+		if p.Mode != "frozen" {
+			if snapshot = encoded(s); len(snapshot) > 12<<20 {
+				return ErrInvalid
+			}
+		}
+		// Refuse the whole publication, inside this transaction, when the
+		// retained History it would leave behind (every stored receipt, this
+		// receipt and the one head snapshot) exceeds MaxHistoryBytes. Otherwise
+		// a valid commit could make every later read and publish fail.
+		if _, err := retainedHistorySize(retained.receipts, out, s); err != nil {
+			return err
+		}
 		if err := b.Bucket(recordsKey).Put(binary.BigEndian.AppendUint64(nil, p.Epoch), raw); err != nil {
 			return ErrStorage
 		}
@@ -326,14 +354,8 @@ func commitWithUpdate(update func(func(*bolt.Tx) error) error, c *Config, sequen
 			if err := b.Delete(snapshotKey); err != nil {
 				return ErrStorage
 			}
-		} else {
-			raw = encoded(s)
-			if len(raw) > 12<<20 {
-				return ErrInvalid
-			}
-			if err := b.Put(snapshotKey, raw); err != nil {
-				return ErrStorage
-			}
+		} else if err := b.Put(snapshotKey, snapshot); err != nil {
+			return ErrStorage
 		}
 		return nil
 	})

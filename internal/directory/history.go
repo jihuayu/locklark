@@ -64,7 +64,7 @@ func (h History) valid() bool { return len(h.Receipts) > 0 && len(h.Receipts) <=
 // Protocol fields are plain ASCII, so their encoding never grows past these
 // bounds; a forged value that could still verify is always within limits.
 func (h History) storageSize() (int, error) {
-	size := len(`{"receipts":[`) + len(`],"snapshot":`) + 1
+	size := historyBudgetBase
 	for n, r := range h.Receipts {
 		raw := encoded(r)
 		if len(raw) > maxRecord {
@@ -82,6 +82,40 @@ func (h History) storageSize() (int, error) {
 		return 0, ErrCapacity
 	}
 	return size, nil
+}
+
+// historyBudgetBase is every byte of the stored History JSON except the
+// receipts and the one head snapshot.
+const historyBudgetBase = len(`{"receipts":[`) + len(`],"snapshot":`) + 1
+
+// retainedHistorySize projects the stored serialized History a commit would
+// leave behind: every stored receipt, the new receipt and the one current head
+// snapshot, framed exactly like History.storageSize (canonical receipt bytes,
+// end-of-receipt separators, canonical snapshot bytes and JSON framing). The
+// database keeps no historic snapshot, so none is counted.
+func retainedHistorySize(retained []Receipt, receipt Receipt, snapshot vault.Snapshot) (int, error) {
+	size := historyBudgetBase
+	for n, r := range append(retained, receipt) {
+		raw := encoded(r)
+		if len(raw) > maxRecord {
+			return 0, ErrInvalid
+		}
+		size += len(raw)
+		if n > 0 {
+			size++
+		}
+		if size > MaxHistoryBytes {
+			return 0, ErrCapacity
+		}
+	}
+	raw := encoded(snapshot)
+	if len(raw) > 12<<20 {
+		return 0, ErrInvalid
+	}
+	if size+len(raw) > MaxHistoryBytes {
+		return 0, ErrCapacity
+	}
+	return size + len(raw), nil
 }
 
 func VerifyHistory(c *Config, anchor Checkpoint, h History) (View, error) {
