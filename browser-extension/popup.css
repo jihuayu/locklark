@@ -285,8 +285,17 @@ details {
   padding: 8px;
 }
 .vault-item-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-weight: 600;
   overflow-wrap: anywhere;
+}
+.vault-item-icon {
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  flex: 0 0 auto;
 }
 .vault-item-subtitle {
   grid-column: 1;

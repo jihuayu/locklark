@@ -3111,6 +3111,46 @@ if (typeof importScripts === "function") importScripts("core.js");
     updateBadge();
     rebuildContextMenus();
   }
+  async function diagnosticsSnapshot() {
+    const manifest = api.runtime.getManifest?.() || {};
+    let permissions = [];
+    try {
+      const granted = await api.permissions?.getAll?.();
+      permissions = Array.isArray(granted?.permissions)
+        ? granted.permissions.filter((name) => typeof name === "string").sort()
+        : [];
+    } catch {}
+    return {
+      extension: {
+        version: String(manifest.version || ""),
+        manifest_version: manifest.manifest_version || 3,
+      },
+      connection: {
+        connected: !!capability,
+        quick_fill: quickFill,
+        capabilities: hostCapabilities.slice(),
+        status,
+      },
+      counts: {
+        candidates: rows.length,
+        vault_items: vaultItems.length,
+        pending_save: pending ? 1 : 0,
+        pending_otp: pendingOTP ? 1 : 0,
+        pending_passkey: pendingPasskey ? 1 : 0,
+      },
+      settings: {
+        auto_login: settings.autoLogin === true,
+        show_inline_menu: settings.showInlineMenu !== false,
+        offer_passkeys: settings.offerPasskeys !== false,
+        paste_protection: settings.pasteProtection !== false,
+        otp_capture: settings.otpCapture !== false,
+        idle_lock_minutes: settings.idleLockMinutes || 0,
+        notifications: settings.notifications === true,
+      },
+      permissions,
+      generated_at: new Date().toISOString(),
+    };
+  }
   async function setSiteSettings(disabledInline, neverSave) {
     if (!context?.origin) throw Error("refused");
     const origin = context.origin;
@@ -5330,6 +5370,12 @@ if (typeof importScripts === "function") importScripts("core.js");
       switch (message.type) {
         case "state":
           await settingsReady;
+          break;
+        case "diagnostics":
+          if (Object.keys(message).sort().join(",") !== "type")
+            throw Error("refused");
+          await settingsReady;
+          extra.diagnostics = await diagnosticsSnapshot();
           break;
         case "settings": {
           await settingsReady;

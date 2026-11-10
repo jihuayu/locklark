@@ -1086,6 +1086,16 @@
     if (els.siteNeverSave)
       els.siteNeverSave.checked = state.neverSave === true;
   }
+  function currentOriginIcon(item) {
+    const origin = String(lastState?.origin || "");
+    if (!origin.startsWith("https://") || !Array.isArray(item.urls)) return "";
+    for (const url of item.urls) {
+      try {
+        if (core.originFromURL(url) === origin) return origin;
+      } catch {}
+    }
+    return "";
+  }
   function renderVaultList() {
     if (!els) return;
     const list = els.vaultList;
@@ -1121,6 +1131,19 @@
       const title = document.createElement("span");
       title.className = "vault-item-title";
       title.textContent = item.title || "（无标题）";
+      // Only the site the user is actually on is asked for its favicon; vault
+      // items from other origins get no network request and no third-party CDN.
+      const iconOrigin = currentOriginIcon(item);
+      if (iconOrigin) {
+        const icon = document.createElement("img");
+        icon.className = "vault-item-icon";
+        icon.alt = "";
+        icon.loading = "lazy";
+        icon.referrerPolicy = "no-referrer";
+        icon.src = iconOrigin + "/favicon.ico";
+        icon.addEventListener("error", () => icon.remove());
+        title.prepend?.(icon);
+      }
       const passkey = core?.validPasskeyMetadata?.(item.passkey)
         ? item.passkey
         : null;
@@ -2443,6 +2466,19 @@
   async function copyValue(value, button) {
     return writeClipboard(value, button);
   }
+  function preferredFillURL(detail) {
+    const urls = Array.isArray(detail?.urls) ? detail.urls : [];
+    if (!urls.length) return "";
+    const signIn =
+      /(?:^|\/)(?:login|sign-?in|auth|session|users\/sign_in|account\/login)(?:[\/?#]|$)/i;
+    for (const url of urls) {
+      try {
+        const path = new URL(url).pathname;
+        if (path !== "/" && signIn.test(path)) return url;
+      } catch {}
+    }
+    return urls[0];
+  }
   async function openAndFill(detail, url) {
     if (!detail || !url) return;
     try {
@@ -3700,7 +3736,7 @@
     });
     els.detailOpenFill.addEventListener("click", () => {
       if (lastDetail?.urls?.length)
-        void openAndFill(lastDetail, lastDetail.urls[0]);
+        void openAndFill(lastDetail, preferredFillURL(lastDetail));
     });
     els.detailAddSite?.addEventListener("click", () => void detailAddSiteAndFill());
     els.detailArchive?.addEventListener("click", () => void detailArchiveToggle());

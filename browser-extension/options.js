@@ -356,6 +356,28 @@
   function reset() {
     void save(core.normalizeSettings({}));
   }
+  const diagnosticsButton = $("diagnostics-export");
+  const diagnosticsStatus = $("diagnostics-status");
+  diagnosticsButton?.addEventListener("click", async () => {
+    if (!diagnosticsStatus) return;
+    diagnosticsStatus.textContent = "正在生成…";
+    try {
+      const reply = await api.runtime.sendMessage({ type: "diagnostics" });
+      if (!reply?.diagnostics) throw Error("refused");
+      const blob = new Blob([JSON.stringify(reply.diagnostics, null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = "locklark-diagnostics.json";
+      anchor.click();
+      URL.revokeObjectURL(url);
+      diagnosticsStatus.textContent = "已导出诊断报告。";
+    } catch {
+      diagnosticsStatus.textContent = "无法导出：请先连接 Locklark 后重试。";
+    }
+  });
   for (const [id, key] of Object.entries(BOOLEAN_FIELDS)) {
     const element = $(id);
     if (!element) continue;

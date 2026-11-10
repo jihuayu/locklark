@@ -2537,6 +2537,33 @@ test("conditional list is public metadata only and never starts a native get", a
   assert.equal(state.pending, false);
 });
 
+test("diagnostics describe the session without vault data or secrets", async () => {
+  const h = harness();
+  await ready(h);
+  const reply = await h.send({ type: "diagnostics" });
+  const report = reply.diagnostics;
+  assert.ok(report, JSON.stringify(reply));
+  const text = JSON.stringify(report);
+  assert.equal(text.includes("Fixture"), false);
+  assert.equal(text.includes("b".repeat(32)), false);
+  assert.equal(text.includes("password"), false);
+  assert.deepEqual(Object.keys(report).sort(), [
+    "connection",
+    "counts",
+    "extension",
+    "generated_at",
+    "permissions",
+    "settings",
+  ]);
+  assert.equal(report.connection.connected, true);
+  assert.equal(Array.isArray(report.connection.capabilities), true);
+  assert.equal(report.counts.candidates, 1);
+  assert.equal(report.settings.otp_capture, true);
+  assert.equal(report.counts.vault_items >= 0, true);
+  const refused = await h.send({ type: "diagnostics", extra: true });
+  assert.equal(refused.diagnostics, undefined);
+});
+
 test("vault search forwards only a valid archived state filter", async () => {
   const h = harness({
     onRequest: (r) => {

@@ -483,3 +483,13 @@ test("popup exposes the archive tab and forwards the archived state filter", () 
   assert.match(backgroundJS, /message\.stateFilter/);
   assert.match(backgroundJS, /state: stateFilter/);
 });
+
+test("rich icons and diagnostics stay bounded to the current site", () => {
+  assert.match(popupJS, /vault-item-icon/);
+  assert.match(popupJS, /iconOrigin \+ "\/favicon\.ico"/);
+  assert.match(popupJS, /preferredFillURL/);
+  assert.match(popupJS, /sign-\?in/);
+  assert.match(optionsHTML, /id="diagnostics-export"/);
+  assert.match(optionsJS, /locklark-diagnostics\.json/);
+  assert.match(backgroundJS, /async function diagnosticsSnapshot/);
+});
