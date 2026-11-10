@@ -84,7 +84,30 @@ func xmlText(s string) bool {
 // MaxItems bounds one encrypted item snapshot.
 const MaxItems = 1024
 
-func validItems(items []Item, size int) bool {
+// validItems is the strict write path: KDBX/XML plain text only.
+func validItems(items []Item, size int) bool { return validItemsMode(items, size, legacyStrict) }
+
+// legacyCheckMode selects the read validation applied to an already decrypted
+// item snapshot.
+type legacyCheckMode int
+
+const (
+	legacyStrict legacyCheckMode = iota
+	legacyRead
+)
+
+// validLegacyItems accepts older snapshots whose JSON-only values (custom
+// fields, credit card and identity fields) carry valid UTF-8 control
+// characters that were never round-tripped through KDBX XML text. Direct XML
+// slots stay strict.
+func validLegacyItems(items []Item, size int) bool { return validItemsMode(items, size, legacyRead) }
+
+// legacyValue accepts any valid UTF-8 for read-only JSON-carried values that a
+// strict write would reject, such as legacy credit card/identity text. It
+// exists only for the read path; writes still go through xmlText.
+func legacyValue(s string) bool { return utf8.ValidString(s) }
+
+func validItemsMode(items []Item, size int, mode legacyCheckMode) bool {
 	if items == nil || len(items) > MaxItems {
 		return false
 	}
@@ -168,7 +191,11 @@ func validItems(items []Item, size int) bool {
 		}
 		urls := map[string]bool{}
 		for _, u := range it.URLs {
-			if !validURL(u.URL) || !validMatchMode(u.MatchMode) || !xmlText(u.Label) || len(u.Label) > 256 || urls[u.URL] {
+			label := xmlText
+			if mode == legacyRead {
+				label = legacyValue
+			}
+			if !validURL(u.URL) || !validMatchMode(u.MatchMode) || !label(u.Label) || len(u.Label) > 256 || urls[u.URL] {
 				return false
 			}
 			urls[u.URL] = true
@@ -177,7 +204,7 @@ func validItems(items []Item, size int) bool {
 			}
 		}
 		if len(it.Sections) > 0 {
-			if !validSections(it.Sections) {
+			if !validSections(it.Sections, mode) {
 				return false
 			}
 			for _, s := range it.Sections {
@@ -191,7 +218,7 @@ func validItems(items []Item, size int) bool {
 				}
 			}
 		}
-		if !validCreditCard(it.CreditCard) || !validIdentity(it.Identity) {
+		if !validCreditCard(it.CreditCard, mode) || !validIdentity(it.Identity, mode) {
 			return false
 		}
 		for _, s := range creditCardFieldValues(it.CreditCard) {
@@ -208,10 +235,10 @@ func validItems(items []Item, size int) bool {
 			return false
 		}
 		for _, h := range it.History {
-			if h.Timestamp < 0 || !xmlText(h.Action) || len(h.Action) > 64 || !xmlText(h.Password) || !xmlText(h.Title) || !xmlText(h.Username) || !xmlText(h.Notes) {
+			if h.Timestamp < 0 || len(h.Action) > 64 || !historyText(h, mode) {
 				return false
 			}
-			if len(h.Sections) > 0 && !validSections(h.Sections) {
+			if len(h.Sections) > 0 && !validSections(h.Sections, mode) {
 				return false
 			}
 			if !charge(len(h.Action) + len(h.Password) + len(h.Title) + len(h.Username) + len(h.Notes)) {
@@ -287,6 +314,14 @@ func validItems(items []Item, size int) bool {
 	}
 	return true
 }
+func historyText(h ItemHistoryEntry, mode legacyCheckMode) bool {
+	check := xmlText
+	if mode == legacyRead {
+		check = legacyValue
+	}
+	return check(h.Action) && check(h.Password) && check(h.Title) && check(h.Username) && check(h.Notes)
+}
+
 func SealItems(metadata []byte, items []Item, epoch uint64, recipients []*age.X25519Recipient, signer ed25519.PrivateKey) (Snapshot, error) {
 	if err := ValidateItems(metadata, items); err != nil {
 		return Snapshot{}, err
@@ -789,7 +824,7 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 		items = append(items, it)
 		pending = nil
 	}
-	if !foundMeta || len(used) != len(db.Content.InnerHeader.Binaries) || !validItems(items, len(metadata)) {
+	if !foundMeta || len(used) != len(db.Content.InnerHeader.Binaries) || !validLegacyItems(items, len(metadata)) {
 		return nil, nil, ErrSnapshot
 	}
 	success = true

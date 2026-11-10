@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/jihuayu/locklark/internal/origin"
 )
@@ -451,14 +450,18 @@ func validURL(u string) bool {
 	return err == nil
 }
 
-func validSections(sections []ItemSection) bool {
+func validSections(sections []ItemSection, mode legacyCheckMode) bool {
+	check := xmlText
+	if mode == legacyRead {
+		check = legacyValue
+	}
 	if len(sections) > 64 {
 		return false
 	}
 	sectionIDs := map[string]bool{}
 	fieldIDs := map[string]bool{}
 	for _, s := range sections {
-		if !selectorID(s.ID) || sectionIDs[strings.ToLower(s.ID)] || len(s.Title) > 1024 || !xmlText(s.Title) {
+		if !selectorID(s.ID) || sectionIDs[strings.ToLower(s.ID)] || len(s.Title) > 1024 || !check(s.Title) {
 			return false
 		}
 		sectionIDs[strings.ToLower(s.ID)] = true
@@ -466,7 +469,7 @@ func validSections(sections []ItemSection) bool {
 			return false
 		}
 		for _, f := range s.Fields {
-			if !selectorID(f.ID) || fieldIDs[strings.ToLower(f.ID)] || len(f.Label) > 1024 || !xmlText(f.Label) || !validFieldTypeValue(f.Type) || len(f.Purpose) > 64 || !xmlText(f.Purpose) || !utf8.ValidString(f.Value) {
+			if !selectorID(f.ID) || fieldIDs[strings.ToLower(f.ID)] || len(f.Label) > 1024 || !check(f.Label) || !validFieldTypeValue(f.Type) || len(f.Purpose) > 64 || !check(f.Purpose) || !check(f.Value) {
 				return false
 			}
 			fieldIDs[strings.ToLower(f.ID)] = true
@@ -492,18 +495,26 @@ func identityFieldValues(id *IdentityDetails) []string {
 	return []string{id.Title, id.FirstName, id.MiddleName, id.LastName, id.BirthDate, id.Company, id.Department, id.JobTitle, id.Email, id.Phone, id.AddressLine1, id.AddressLine2, id.City, id.State, id.PostalCode, id.Country, id.SSN, id.PassportNumber, id.LicenseNumber, id.Website}
 }
 
-func validCreditCard(cc *CreditCardDetails) bool {
+func validCreditCard(cc *CreditCardDetails, mode legacyCheckMode) bool {
+	check := xmlText
+	if mode == legacyRead {
+		check = legacyValue
+	}
 	for _, s := range creditCardFieldValues(cc) {
-		if len(s) > 1024 || !xmlText(s) {
+		if len(s) > 1024 || !check(s) {
 			return false
 		}
 	}
 	return true
 }
 
-func validIdentity(id *IdentityDetails) bool {
+func validIdentity(id *IdentityDetails, mode legacyCheckMode) bool {
+	check := xmlText
+	if mode == legacyRead {
+		check = legacyValue
+	}
 	for _, s := range identityFieldValues(id) {
-		if len(s) > 1024 || !xmlText(s) {
+		if len(s) > 1024 || !check(s) {
 			return false
 		}
 	}
