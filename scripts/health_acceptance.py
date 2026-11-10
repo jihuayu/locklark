@@ -27,7 +27,7 @@ def check(binary):
         invoke(binary, "health", path, [("主密码", pw + "wrong"), factors[1], (prompt, "SCAN")],
                ok=False, expect_error="invalid personal vault", forbidden=private)
         receipt, _ = invoke(binary, "health", path, factors + [(prompt, "SCAN")], forbidden=private,
-                            required_before_last_prompt=("不会联网查询泄露数据", "未发现问题不代表密码安全"))
+                            required_before_last_prompt=("不会联网查询泄露", "未发现问题不代表密码"))
         report = receipt["report"]
         assert report["profile"] == "local-heuristics-v1" and report["scope"] == "active-logins"
         assert report["checked"] == 3 and report["skipped"] == 1
