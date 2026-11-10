@@ -498,6 +498,90 @@ class F13HostWatchtowerDetectionTests(unittest.TestCase):
                 support.go_package_test(ctx, "./internal/watchtower", "TestAnything")
 
 
+class F13CLIHIBPDetectionTests(unittest.TestCase):
+    """#103: the opt-in gate is the literal `--hibp true` pair, not old flags."""
+
+    def _ctx(self, responses: dict[tuple[str, ...], tuple[int, str, str]]) -> FakeContext:
+        return FakeContext(responses)
+
+    def test_personal_help_hibp_pair_detected(self):
+        ctx = self._ctx(
+            {
+                ("help",): (0, "locklark help\n", ""),
+                ("personal", "help"): (0, "  health --file PATH [--hibp true]\n", ""),
+            }
+        )
+        self.assertTrue(support.f13_cli_health_flags(ctx))
+
+    def test_health_help_is_read_even_when_it_exits_non_zero(self):
+        ctx = self._ctx(
+            {
+                ("help",): (0, "locklark help\n", ""),
+                ("personal", "help"): (0, "usage: locklark personal\n", ""),
+                ("personal", "health", "--help"): (
+                    1,
+                    "usage: locklark personal health --file PATH [--hibp true]\n",
+                    "",
+                ),
+            }
+        )
+        self.assertTrue(support.f13_cli_health_flags(ctx))
+
+    def test_stale_check_breached_and_endpoint_flags_are_not_evidence(self):
+        ctx = self._ctx(
+            {
+                ("help",): (0, "  --check-breached\n  --hibp-endpoint URL\n", ""),
+                ("personal", "help"): (0, "usage: locklark personal\n", ""),
+            }
+        )
+        self.assertFalse(support.f13_cli_health_flags(ctx))
+
+    def test_bare_hibp_without_true_is_not_the_landed_contract(self):
+        ctx = self._ctx(
+            {
+                ("help",): (0, "locklark help\n", ""),
+                ("personal", "help"): (0, "  health --file PATH [--hibp]\n", ""),
+            }
+        )
+        self.assertFalse(support.f13_cli_health_flags(ctx))
+
+    def test_range_lookup_that_never_reaches_the_mock_is_not_a_pass(self):
+        # A runtime that cannot route the hard-coded provider host to the
+        # loopback mock must yield ``not-interceptable`` - never ``ran``.
+        ctx = mock.Mock()
+        ctx.temp_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, ctx.temp_dir, True)
+
+        class DummyServer:
+            trust_env = {"SSL_CERT_FILE": "/dev/null"}
+
+            def __init__(self) -> None:
+                self.requests: list[dict[str, object]] = []
+
+            def start_forwarder(self) -> bool:
+                return False
+
+            def close(self) -> None:
+                pass
+
+        dummy = DummyServer()
+        ctx.run_pty_cli.return_value = support.PTYResult(
+            0,
+            '{"status":"hibp-unavailable","hibp_checked":false}',
+            "",
+            [],
+            True,
+        )
+        with mock.patch.object(
+            support, "local_hibp_range_server", lambda _ctx, _counts: dummy
+        ):
+            observed = support.f13_cli_hibp_range_lookups(
+                ctx, {"path": "vault.ll", "password": "p", "secret": "s"}, ["ABCDE"], {}
+            )
+        self.assertEqual(observed["status"], "not-interceptable")
+        self.assertEqual(observed["requests"], [])
+
+
 class F11PageLoadFillDetectionTests(unittest.TestCase):
     """T2_F11_05 must observe behaviour, not a `userActivation` literal."""
 

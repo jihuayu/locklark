@@ -1320,6 +1320,219 @@ def f13_cli_hibp_opt_in(ctx: E2EContext, vault: dict[str, Any]) -> dict[str, Any
 HIBP_NETWORK_PROMPT = "输入 NETWORK 确认联网查询泄露前缀"
 
 
+HIBP_RANGE_SEGMENT = "/range/"
+
+
+def local_hibp_range_server(
+    ctx: E2EContext, counts: dict[str, int] | None = None
+) -> "LocalHIBPRangeServer":
+    """Start a loopback-only Pwned-Passwords-shaped range server.
+
+    The production CLI hard-codes ``https://api.pwnedpasswords.com/range/`` and
+    documents that it offers no endpoint override; the only documented
+    interception handle left to an ordinary process is the
+    ``SSL_CERT_FILE``/``SSL_CERT_DIR`` trust anchors, which the Go runtime
+    honours.  The server therefore presents a throwaway synthetic certificate
+    for that hostname, recorded into both trust slots under the per-test
+    ``0700`` directory.  It binds loopback on an ephemeral port only.
+
+    ``counts`` maps an uppercase 35-hex SHA-1 suffix to its breach count; a
+    zero-count padding line is always included because the real provider sends
+    one and the client must ignore it.  Every request path is recorded so the
+    test can prove what left the process.
+    """
+
+    return LocalHIBPRangeServer(ctx, counts or {})
+
+
+class LocalHIBPRangeServer:
+    """Loopback range server plus the env that trusts its synthetic CA."""
+
+    def __init__(self, ctx: E2EContext, counts: dict[str, int]) -> None:
+        work = ctx.temp_dir / "hibp-range"
+        work.mkdir(mode=0o700, exist_ok=True)
+        cert = work / "range.pem"
+        key = work / "range.key"
+        subprocess.run(
+            [
+                "openssl",
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-days",
+                "2",
+                "-subj",
+                "/CN=api.pwnedpasswords.com",
+                "-addext",
+                "subjectAltName=DNS:api.pwnedpasswords.com",
+                "-keyout",
+                str(key),
+                "-out",
+                str(cert),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=60,
+        )
+        os.chmod(key, 0o600)
+        os.chmod(cert, 0o600)
+        self._trust = ctx.temp_dir / "hibp-trust"
+        self._trust.mkdir(mode=0o700, exist_ok=True)
+        self.cert = cert
+
+        self.requests: list[dict[str, Any]] = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802 - http.server API
+                record: dict[str, Any] = {
+                    "path": self.path,
+                    "headers": dict(self.headers),
+                }
+                self.server.records.append(record)
+                if not self.path.startswith(HIBP_RANGE_SEGMENT):
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                prefix = self.path[len(HIBP_RANGE_SEGMENT) :]
+                record["prefix"] = prefix
+                body = "".join(
+                    f"{suffix.upper()}:{count}\r\n"
+                    for suffix, count in counts.items()
+                )
+                # Zero-count padding: the client must not treat it as a breach.
+                body += "0" * 35 + ":0\r\n"
+                payload = body.encode("ascii")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *_: Any) -> None:
+                return
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._server.records = self.requests  # type: ignore[attr-defined]
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(str(cert), str(key))
+        self._server.socket = context.wrap_socket(
+            self._server.socket, server_side=True
+        )
+        self._thread = threading.Thread(
+            target=self._server.serve_forever, daemon=True
+        )
+        self._thread.start()
+        self._port = self._server.server_address[1]
+
+        # Optional same-port hand-off for runtimes that route the fixed
+        # hostname to loopback: only ever launched on an explicit call.
+        self._forwarder: subprocess.Popen[bytes] | None = None
+
+    @property
+    def trust_env(self) -> dict[str, str]:
+        """Trust anchors only; never a proxy or endpoint variable."""
+
+        return {
+            "SSL_CERT_FILE": str(self.cert),
+            "SSL_CERT_DIR": str(self._trust),
+        }
+
+    def start_forwarder(self) -> bool:
+        socat = shutil.which("socat")
+        if socat is None:
+            return False
+        try:
+            self._forwarder = subprocess.Popen(
+                [
+                    socat,
+                    "TCP-LISTEN:443,bind=127.0.0.1,reuseaddr,fork",
+                    f"TCP:127.0.0.1:{self._port}",
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError:
+            return False
+        time.sleep(0.3)
+        return self._forwarder.poll() is None
+
+    def close(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=5)
+        if self._forwarder is not None:
+            terminate_process_group(self._forwarder, owned_group=self._forwarder.pid)
+
+
+def f13_cli_hibp_range_lookups(
+    ctx: E2EContext,
+    vault: dict[str, Any],
+    prefixes: Sequence[str],
+    counts: dict[str, int],
+) -> dict[str, Any]:
+    """Run a consented ``--hibp true`` check against a loopback range server.
+
+    The production CLI hard-codes ``https://api.pwnedpasswords.com/range/`` and
+    offers no endpoint, proxy or client hook, so a real CLI process can only
+    reach a local mock through what the *environment* of an ordinary process
+    controls: the ``SSL_CERT_FILE``/``SSL_CERT_DIR`` trust anchors that the Go
+    runtime honours.  The loopback server presents a throwaway synthetic
+    certificate for the fixed hostname, and a loopback-only forwarder on port
+    443 is started with ``socat`` only when that binary is installed — no
+    product change, no endpoint flag, no proxy variable.
+
+    The returned ``status`` is ``"ran"`` only when the local server actually
+    received a request.  Without that, the status is ``"not-interceptable"``
+    and the caller must report the scenario as not validated (never a pass or a
+    pending feature): an unavailable endpoint proves nothing about the k-
+    anonymity behaviour.
+    """
+
+    counts_json = json.dumps(
+        {prefix.upper(): counts for prefix in prefixes}, sort_keys=True
+    )
+    server = local_hibp_range_server(ctx, counts)
+    forwarder = server.start_forwarder()
+    try:
+        started = time.monotonic()
+        result = ctx.run_pty_cli(
+            ["personal", "health", "--file", str(vault["path"]), "--hibp", "true"],
+            prompts=[
+                ("主密码", vault["password"]),
+                ("Secret Key", vault["secret"]),
+                (HIBP_NETWORK_PROMPT, "NETWORK"),
+            ],
+            env=server.trust_env,
+            timeout=180,
+        )
+        elapsed = time.monotonic() - started
+        requests = list(server.requests)
+        payload: Any = None
+        if result.returncode == 0:
+            try:
+                payload = result.json()
+            except ValueError:
+                raise AssertionError(
+                    f"personal health --hibp true printed invalid JSON: {result.stdout[:400]!r}"
+                )
+    finally:
+        server.close()
+    status = "ran" if requests else "not-interceptable"
+    return {
+        "status": status,
+        "returncode": result.returncode,
+        "elapsed": round(elapsed, 3),
+        "forwarder": forwarder,
+        "payload": payload,
+        "requests": requests,
+        "transcript": result.transcript,
+    }
+
+
 def card_fill_page_load_component(
     ctx: E2EContext, core_path: Path | None = None
 ) -> dict[str, Any] | None:
@@ -1834,6 +2047,10 @@ class TrapListener:
 
 
 __all__ = [
+    "HIBP_RANGE_SEGMENT",
+    "LocalHIBPRangeServer",
+    "f13_cli_hibp_range_lookups",
+    "local_hibp_range_server",
     "HIBP_NETWORK_PROMPT",
     "card_fill_page_load_component",
     "f13_cli_hibp_opt_in",
