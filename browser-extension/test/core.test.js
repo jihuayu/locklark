@@ -1165,3 +1165,22 @@ test("two-factor setup parsing refuses HOTP, unknown fields and bad bounds", () 
   ])
     assert.equal(core.parseOTPAuthTOTP(value), null, String(value));
 });
+
+test("idle auto-lock and notifications stay bounded and opt-in", () => {
+  for (const value of [0, 1, 5, 15, 30, 60])
+    assert.equal(
+      core.normalizeSettings({ idleLockMinutes: value }).idleLockMinutes,
+      value,
+    );
+  for (const value of [-1, 2, 7, 1.5, "5", null, undefined])
+    assert.equal(
+      core.normalizeSettings({ idleLockMinutes: value }).idleLockMinutes,
+      0,
+    );
+  assert.equal(core.normalizeSettings({}).notifications, false);
+  assert.equal(core.normalizeSettings({ notifications: true }).notifications, true);
+  assert.equal(
+    core.normalizeSettings({ notifications: "true" }).notifications,
+    false,
+  );
+});

@@ -91,7 +91,10 @@
 - **Locklark Secret Key 粘贴保护**：粘贴 `LL1-`、`LLR2-` 或 110 位恢复材料形态的文本时，无论站点是否已关联都先确认；与参考的 `authorize-paste-secret-key` 对应。状态：已实现未对照，只有 Node DOM 测试。
 - **两步验证二维码捕获并保存**：`BarcodeDetector` 可用时本地解码页面上的 `otpauth://totp` 二维码，显示 issuer/account，用户确认后把 OTP 配置写入当前来源的已有登录；种子不回传页面、不自动保存、不新增权限。与参考的 `autosave-qr-code-detected` 对应。状态：已实现未对照，只有 Node DOM 与 Go 单测，未在真实浏览器运行；Chromium 系以外不可用。见[二维码捕获验收](browser-otp-qr-capture-validation.md)。
 
-以上行为默认开启，可在选项页“自动填充与登录”关闭；剪贴板文本与二维码种子都不写入扩展存储。
+- **金库外围能力**：弹窗“已归档”筛选与归档/取消归档、把当前网站追加到条目后填充、显式打开内联菜单时聚焦首项、仅当前站点的 favicon、选项页诊断报告导出、Open & Fill 优先已保存的登录页路径。见[缺口盘点](browser-native-gap-inventory.md)。
+- **空闲自动锁定与系统通知**：新增 `idle` 与 `notifications` 权限；空闲锁定默认关闭、通知默认关闭，通知只含标题或固定锁定文案。权限理由见[发布准备](browser-release-preparation.md)。
+
+以上行为除空闲锁定与系统通知默认关闭外均默认开启，可在选项页关闭；剪贴板文本与二维码种子都不写入扩展存储。
 
 ## 本轮补齐与仍开放的产品范围
 

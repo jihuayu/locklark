@@ -61,6 +61,7 @@
     "opt-offer-passkeys": "offerUsePasskeys",
     "opt-paste-protection": "pasteProtection",
     "opt-otp-capture": "otpCapture",
+    "opt-notifications": "notifications",
     "opt-offer-save": "offerSaveLogins",
     "opt-offer-save-passkeys": "offerSavePasskeys",
     "opt-inline-generator": "showInlineGenerator",
@@ -134,6 +135,8 @@
     if (seconds) seconds.value = String(settings.clipboardClearSeconds);
     const theme = $("opt-theme");
     if (theme) theme.value = settings.theme;
+    const idleLock = $("opt-idle-lock");
+    if (idleLock) idleLock.value = String(settings.idleLockMinutes || 0);
     renderOriginList(
       "disabled-inline-list",
       settings.disabledInlineMenuOrigins,
@@ -425,6 +428,11 @@
       void save({
         clipboardClearSeconds: Number.parseInt(clipboardSeconds.value, 10),
       });
+    });
+  const idleLock = $("opt-idle-lock");
+  if (idleLock)
+    idleLock.addEventListener("change", () => {
+      void save({ idleLockMinutes: Number(idleLock.value) });
     });
   const theme = $("opt-theme");
   if (theme)

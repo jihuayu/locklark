@@ -192,7 +192,7 @@ test("build emits options UI, autofill/lock commands, and compatible manifests",
   );
   assert.deepEqual(
     [...firefox.manifest.permissions].sort(),
-    ["activeTab", "nativeMessaging", "scripting", "storage"].sort(),
+    ["activeTab", "idle", "nativeMessaging", "notifications", "scripting", "storage"].sort(),
     "Firefox native acceptance requires exactly these permissions",
   );
   assert.equal(

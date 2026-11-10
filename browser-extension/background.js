@@ -77,7 +77,15 @@ if (typeof importScripts === "function") importScripts("core.js");
       pinLength: generatorDefaults.pinLength,
     });
     refreshPasskeyConditionalSupport();
+    applyIdleDetection();
     return settings;
+  }
+  function applyIdleDetection() {
+    const minutes = settings.idleLockMinutes;
+    try {
+      if (minutes > 0)
+        api.idle?.setDetectionInterval?.(Math.max(30, minutes * 60));
+    } catch {}
   }
   const settingsReady = (async () => {
     try {
@@ -102,6 +110,31 @@ if (typeof importScripts === "function") importScripts("core.js");
       rebuildContextMenus();
     });
   } catch {}
+  // Browser idle detection is advisory: a locked/idle profile locks the
+  // native session only when the user opted in, and never unlocks anything.
+  try {
+    api.idle?.onStateChanged?.addListener((state) => {
+      if (state === "active" || !(settings.idleLockMinutes > 0)) return;
+      if (!capability) return;
+      status = "空闲自动锁定";
+      notify("Locklark 已锁定", "因空闲已自动锁定，请重新解锁。");
+      lockVault();
+    });
+  } catch {}
+  const NOTIFICATION_ICON =
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+  function notify(title, message) {
+    if (settings.notifications !== true) return;
+    try {
+      const result = api.notifications?.create?.({
+        type: "basic",
+        iconUrl: NOTIFICATION_ICON,
+        title: String(title).slice(0, 120),
+        message: String(message).slice(0, 300),
+      });
+      result?.catch?.(() => {});
+    } catch {}
+  }
   const PASSKEY_UNKNOWN = "Passkey 创建结果未确认，请检查金库和网站后再试";
   const FILL_UNKNOWN = "登录填充结果未确认，请核实页面；不会自动重试";
   let port = null,
@@ -2581,6 +2614,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       }
       removeStaged(stageId);
       status = "已保存";
+      notify("已保存登录", title);
       return { saved: true, mode, title, status };
     } catch (error) {
       if (!record.commitStarted || !unconfirmedSave) status = "未保存";

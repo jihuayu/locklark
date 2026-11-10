@@ -5326,6 +5326,8 @@ globalThis.LocklarkCore = (() => {
     showInlineGenerator: true,
     pasteProtection: true,
     otpCapture: true,
+    idleLockMinutes: 0,
+    notifications: false,
     generatorDefaults: Object.freeze({
       mode: "random",
       length: 24,
@@ -5463,6 +5465,7 @@ globalThis.LocklarkCore = (() => {
       "showInlineGenerator",
       "pasteProtection",
       "otpCapture",
+      "notifications",
       "watchtowerLocalChecks",
       "watchtowerHIBP",
     ])
@@ -5472,6 +5475,11 @@ globalThis.LocklarkCore = (() => {
     )
       ? Math.max(5, Math.min(300, source.clipboardClearSeconds))
       : DEFAULT_SETTINGS.clipboardClearSeconds;
+    result.idleLockMinutes = [0, 1, 5, 15, 30, 60].includes(
+      source.idleLockMinutes,
+    )
+      ? source.idleLockMinutes
+      : DEFAULT_SETTINGS.idleLockMinutes;
     result.theme = ["system", "light", "dark"].includes(source.theme)
       ? source.theme
       : DEFAULT_SETTINGS.theme;

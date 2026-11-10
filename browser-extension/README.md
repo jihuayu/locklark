@@ -123,6 +123,15 @@ worker or stored. See
 [the 1Password beta parity note](../docs/browser-1password-beta-parity.md) for
 the reference behaviour, decision table and limits.
 
+The vault view also exposes an **archived** filter and archive/unarchive
+actions, and an item can add the current site to its saved URLs (a URLs-only
+native edit) before filling. Rich icons are requested only from the current
+site's `/favicon.ico`; no third-party icon service is used. The options page can
+export a diagnostics report containing version, connection state, capability
+names, non-secret settings and counts. Optional **idle auto-lock** (off by
+default) needs the `idle` permission, and optional **system notifications**
+(off by default, save or idle-lock only) need `notifications`.
+
 **Two-factor setup capture** is also on by default. On pages that look like
 account-security pages, the content script decodes visible QR codes with the
 browser's `BarcodeDetector` and, for a valid `otpauth://totp` configuration,

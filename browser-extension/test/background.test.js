@@ -22,6 +22,9 @@ function harness(options = {}) {
     otpProbes = [];
   const messageListeners = [];
   const connectListeners = [];
+  const notifications = [];
+  let idleListener = null,
+    idleInterval = 0;
   let fillWait = null;
   let messageListener,
     portMessage,
@@ -249,6 +252,18 @@ function harness(options = {}) {
       WINDOW_ID_NONE: -1,
       onFocusChanged: { addListener: (f) => (listeners.focus = f) },
     },
+    idle: {
+      setDetectionInterval: (seconds) => {
+        idleInterval = seconds;
+      },
+      onStateChanged: { addListener: (f) => (idleListener = f) },
+    },
+    notifications: {
+      create: (options) => {
+        notifications.push(options);
+        return Promise.resolve("n1");
+      },
+    },
     scripting: {
       executeScript: async (options) => {
         if (options.target.frameIds && options.target.documentIds)
@@ -352,6 +367,9 @@ function harness(options = {}) {
   const sender = { id: "fixed", url: "chrome-extension://fixed/popup.html" };
   return {
     sent,
+    notifications,
+    idleInterval: () => idleInterval,
+    fireIdle: (state) => idleListener?.(state),
     holdFill: (promise) => (fillWait = promise),
     injected,
     otpProbes,
@@ -2562,6 +2580,35 @@ test("diagnostics describe the session without vault data or secrets", async () 
   assert.equal(report.counts.vault_items >= 0, true);
   const refused = await h.send({ type: "diagnostics", extra: true });
   assert.equal(refused.diagnostics, undefined);
+});
+
+test("idle auto-lock needs the opt-in setting and a live capability", async () => {
+  const h = harness({
+    settings: { idleLockMinutes: 1, notifications: true },
+  });
+  await ready(h);
+  assert.equal(h.idleInterval(), 60);
+  h.fireIdle("active");
+  assert.equal(h.sent.some((r) => r.type === "lock"), false);
+  h.fireIdle("idle");
+  await tick();
+  assert.equal(
+    h.sent.some((r) => r.type === "lock"),
+    true,
+    "the native lock request is sent",
+  );
+  assert.equal(h.notifications.length, 1);
+  assert.equal(h.notifications[0].title, "Locklark 已锁定");
+  assert.equal((await h.send({ type: "state" })).connected, false);
+});
+
+test("idle events do nothing when auto-lock is off", async () => {
+  const h = harness({ settings: { notifications: true } });
+  await ready(h);
+  h.fireIdle("idle");
+  await tick();
+  assert.equal(h.sent.some((r) => r.type === "lock"), false);
+  assert.equal(h.notifications.length, 0);
 });
 
 test("vault search forwards only a valid archived state filter", async () => {

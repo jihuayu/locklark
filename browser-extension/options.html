@@ -225,6 +225,21 @@
         </label>
         <p id="clipboard-seconds-hint" class="muted">允许 5–300 秒。</p>
         <label class="row">
+          <span>空闲自动锁定</span>
+          <select id="opt-idle-lock">
+            <option value="0">关闭</option>
+            <option value="1">1 分钟</option>
+            <option value="5">5 分钟</option>
+            <option value="15">15 分钟</option>
+            <option value="30">30 分钟</option>
+            <option value="60">60 分钟</option>
+          </select>
+        </label>
+        <label class="row">
+          <input id="opt-notifications" type="checkbox" />
+          <span>系统通知：保存登录、空闲锁定时提醒</span>
+        </label>
+        <label class="row">
           <input id="opt-watchtower-local" type="checkbox" />
           <span>启用本地安全检查（弱密码、复用密码、HTTP 登录）</span>
         </label>

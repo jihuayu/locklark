@@ -2,6 +2,8 @@
 
 # Locklark 开发进度
 
+2026-11-10（香港）：按[浏览器缺口盘点](browser-native-gap-inventory.md)落地第一批外围能力：弹窗已归档筛选与归档/取消归档、添加当前网站并填充（仅 URLs 的原生编辑）、显式打开内联菜单时聚焦首项、仅当前站点的 favicon、诊断报告导出、Open & Fill 优先登录页路径；并新增 `idle` 与 `notifications` 权限，实现默认关闭的空闲自动锁定与保存/锁定系统通知。扩展 Node 测试 434 项通过；Chromium/Firefox 权限白名单、打包校验（未签名 ZIP）通过。未在真实浏览器验证自动锁定触发时机与通知展示，权限变更需要重新过商店审核。上一批二维码捕获与粘贴保护仍在。
+
 2026-11-10（香港）：浏览器扩展补入两步验证二维码捕获与保存。内容脚本在账号安全类页面上用 `BarcodeDetector` 本地解码二维码，只把合法的 `otpauth://totp` 交给 worker；worker 绑定当前文档并返回该来源的 login 候选，页面只看到 issuer/account 与标题，用户点击后才以仅含 `otp` 的 `item-save` 变更写入。捕获 2 分钟过期、单次使用，锁库/断连清除，不新增浏览器权限或原生协议消息。扩展 Node 测试 427 项通过（本功能新增 10 项），原生契约用 `CGO_ENABLED=0 go test ./internal/browserhost -run 'TestItemSaveOTP|TestItemSaveRefusesInvalidOTP' -count=1` 四项通过；本机 cgo 链接受 SDK 影响失败，完整 browserhost 包另有本地 IPC 环境失败，均未据此记为通过。未在真实浏览器/真实站点运行，Chromium 系以外不可用，见[二维码捕获验收](browser-otp-qr-capture-validation.md)。
 
 2026-11-10（香港）：用 REA 6.8.0 对 1Password beta Chromium 扩展 8.12.46.26 做静态重建（Evidence `ev_c87bf6…`，选中 `inline/injected.js`，118,969 AST 节点），确认 beta 与 stable 8.12.44.33 文件集合相同、38 个文件内容不同、英文 UI 新增 8 条且集中于引导与快捷键提示，未发现 beta 专属的填充/保存/Passkey 行为。按参考的钓鱼粘贴与 Secret Key 粘贴保护，在扩展补齐两项粘贴期保护：未关联站点密码粘贴与 Secret Key 形态文本粘贴先确认，未知站点状态不拦截，剪贴板文本不进入后台或存储。扩展 417 项 Node 测试通过；其中新增 13 项，未在真实浏览器或真实站点验证，不能记为参考已对照。行为、差异与限制见[1Password beta 对照](browser-1password-beta-parity.md)，65 项冻结合同未改动。
