@@ -35,7 +35,9 @@ var (
 	// ErrConflict reports that no committed version exists for the name or that
 	// the caller's expected revision (non-zero) does not match the current
 	// committed version. The stored version is unchanged. It is also returned
-	// by timeouts discovered before publication; see ErrUnknown.
+	// when the driver's internal wait budget (for example DefaultLockTimeout)
+	// is exhausted before publication, which likewise guarantees that nothing
+	// was committed; see ErrUnknown.
 	ErrConflict = errors.New("vault file backend: version conflict")
 	// ErrDenied reports that the operation is refused by policy: a malformed
 	// argument (bad name, empty or oversize value, zero or oversize expected
@@ -120,7 +122,8 @@ type ReadResult struct {
 // discoverable via context.Cause) or ErrUnknown when cancellation raced
 // publication and the outcome cannot be determined. ErrConflict and
 // ErrUnknown are distinct: ErrConflict means the write definitely did not
-// commit because the caller's precondition was false at publication time.
+// commit because the caller's precondition was false at publication time or
+// the driver's internal wait budget was exhausted before publication.
 //
 // Values: an empty value is rejected with ErrDenied by every mutating call.
 // A value larger than MaxValueSize is rejected with ErrDenied.
