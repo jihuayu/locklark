@@ -1323,6 +1323,96 @@ test("inline site-link metadata stays unknown when no login match ran", async ()
   assert.equal(disconnected.siteLinked, null);
   assert.equal(disconnected.candidates.length, 0);
 });
+test("two-factor setup capture is document-bound and saves through item-edit", async () => {
+  const secret = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
+  const otpauth = "otpauth://totp/ACME:john?secret=" + secret;
+  const h = harness({
+    onRequest: (r) => {
+      if (r.type === "item-save")
+        return {
+          v: 1,
+          id: r.id,
+          type: "item-saved",
+          item_id: r.item_id,
+          revision: "f".repeat(64),
+        };
+    },
+  });
+  await ready(h);
+  const captured = await h.send(
+    { type: "inline-otp-capture", otpauth },
+    contentSender(),
+  );
+  assert.equal(captured.ok, true);
+  assert.equal(captured.label, "ACME · john");
+  assert.equal(captured.items.length, 1);
+  assert.equal(captured.items[0].id, "b".repeat(32));
+  assert.equal(
+    JSON.stringify(captured).includes(secret),
+    false,
+    "the seed must not return to the page",
+  );
+
+  h.setDoc("doc-2");
+  const foreignDocument = await h.send(
+    { type: "inline-otp-save", captureId: captured.captureId, itemId: "b".repeat(32) },
+    contentSender("doc-2"),
+  );
+  assert.equal(foreignDocument.ok, false);
+  h.setDoc("doc-1");
+  const foreignItem = await h.send(
+    { type: "inline-otp-save", captureId: captured.captureId, itemId: "d".repeat(32) },
+    contentSender(),
+  );
+  assert.equal(foreignItem.ok, false);
+  assert.equal(
+    h.sent.some((r) => r.type === "item-save"),
+    false,
+    "a refused owner must not write",
+  );
+
+  const saved = await h.send(
+    { type: "inline-otp-save", captureId: captured.captureId, itemId: "b".repeat(32) },
+    contentSender(),
+  );
+  assert.equal(saved.ok, true, JSON.stringify(saved));
+  assert.equal(saved.revision, "f".repeat(64));
+  const edit = h.sent.find((r) => r.type === "item-save");
+  assert.equal(edit.item_id, "b".repeat(32));
+  assert.equal(edit.revision, "c".repeat(64));
+  assert.deepEqual(JSON.parse(edit.item_json), {
+    title: "Fixture",
+    category: "login",
+    otp: otpauth,
+  });
+
+  const replay = await h.send(
+    { type: "inline-otp-save", captureId: captured.captureId, itemId: "b".repeat(32) },
+    contentSender(),
+  );
+  assert.equal(replay.ok, false, "a capture is single use");
+  assert.equal(h.sent.filter((r) => r.type === "item-save").length, 1);
+});
+
+test("two-factor capture needs a connected host and a matching login", async () => {
+  const otpauth =
+    "otpauth://totp/ACME:john?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
+  const h = harness();
+  const disconnected = await h.send(
+    { type: "inline-otp-capture", otpauth },
+    contentSender(),
+  );
+  assert.equal(disconnected.ok, false);
+  assert.equal(disconnected.reason, "busy");
+  await ready(h);
+  const invalid = await h.send(
+    { type: "inline-otp-capture", otpauth: "otpauth://hotp/x?secret=JBSWY3DPEHPK3PXP" },
+    contentSender(),
+  );
+  assert.equal(invalid.ok, false);
+  assert.equal(invalid.reason, "invalid");
+});
+
 test("passkey uses authenticated sender origin and cancels on navigation", async () => {
   const h = harness();
   await ready(h);

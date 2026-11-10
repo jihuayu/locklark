@@ -89,8 +89,9 @@
 
 - **未关联站点粘贴密码前的钓鱼警告**：当前密码框粘贴时，若本页最近一次候选匹配明确报告“无已保存登录”，先显示关闭 Shadow DOM 的确认面板；取消则阻止本次粘贴。站点状态未知（未连接、锁定、有未完成原生请求、观测过期）不拦截。参考行为、决策表与差异见 [1Password beta 对照](browser-1password-beta-parity.md)。状态：已实现未对照，只有 Node DOM 测试。
 - **Locklark Secret Key 粘贴保护**：粘贴 `LL1-`、`LLR2-` 或 110 位恢复材料形态的文本时，无论站点是否已关联都先确认；与参考的 `authorize-paste-secret-key` 对应。状态：已实现未对照，只有 Node DOM 测试。
+- **两步验证二维码捕获并保存**：`BarcodeDetector` 可用时本地解码页面上的 `otpauth://totp` 二维码，显示 issuer/account，用户确认后把 OTP 配置写入当前来源的已有登录；种子不回传页面、不自动保存、不新增权限。与参考的 `autosave-qr-code-detected` 对应。状态：已实现未对照，只有 Node DOM 与 Go 单测，未在真实浏览器运行；Chromium 系以外不可用。见[二维码捕获验收](browser-otp-qr-capture-validation.md)。
 
-两项都默认开启，可在选项页“自动填充与登录”关闭；剪贴板文本不发送到后台、不写入存储。
+以上行为默认开启，可在选项页“自动填充与登录”关闭；剪贴板文本与二维码种子都不写入扩展存储。
 
 ## 本轮补齐与仍开放的产品范围
 

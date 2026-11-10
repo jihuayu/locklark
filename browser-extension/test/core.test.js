@@ -1095,3 +1095,73 @@ test("paste protection is on by default and normalises a stored boolean", () => 
   assert.equal(core.normalizeSettings({ pasteProtection: false }).pasteProtection, false);
   assert.equal(core.normalizeSettings({ pasteProtection: "off" }).pasteProtection, true);
 });
+
+test("two-factor setup URLs are parsed strictly and never expose the seed", () => {
+  const secret = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
+  const parsed = core.parseOTPAuthTOTP(
+    "otpauth://totp/ACME%20Co:john@example.com?secret=" +
+      secret +
+      "&issuer=ACME%20Co&algorithm=SHA256&digits=8&period=60",
+  );
+  assert.deepEqual(parsed, {
+    issuer: "ACME Co",
+    account: "john@example.com",
+    label: "ACME Co · john@example.com",
+    digits: 8,
+    period: 60,
+    algorithm: "SHA256",
+  });
+  assert.equal("secret" in parsed, false);
+  assert.deepEqual(core.parseOTPAuthTOTP("otpauth://totp/ACME:john?secret=" + secret), {
+    issuer: "ACME",
+    account: "john",
+    label: "ACME · john",
+    digits: 6,
+    period: 30,
+    algorithm: "SHA1",
+  });
+  // Lowercase Base32 is accepted by the native parser and stored upper-cased.
+  assert.equal(
+    core.parseOTPAuthTOTP("otpauth://totp/x?secret=" + secret.toLowerCase()).label,
+    "x",
+  );
+  // An issuer parameter alone is valid; only a conflicting label issuer is not.
+  assert.equal(
+    core.parseOTPAuthTOTP("otpauth://totp/x?secret=" + secret + "&issuer=Other")
+      .label,
+    "Other · x",
+  );
+  // Padded Base32 that decodes to fewer than 16 bytes is refused.
+  assert.equal(
+    core.parseOTPAuthTOTP("otpauth://totp/x?secret=MZXW6YTBOI======"),
+    null,
+  );
+});
+
+test("two-factor setup parsing refuses HOTP, unknown fields and bad bounds", () => {
+  const secret = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
+  const base = "otpauth://totp/x?secret=" + secret;
+  for (const value of [
+    "otpauth://hotp/x?secret=" + secret,
+    base + "&digits=7",
+    base + "&digits=06",
+    base + "&period=0",
+    base + "&period=3601",
+    base + "&algorithm=MD5",
+    base + "&foo=bar",
+    "otpauth://totp/ACME:john?secret=" + secret + "&issuer=Other",
+    "otpauth://totp/ACME:a:b?secret=" + secret,
+    "otpauth://totp/x?secret=" + secret + "#fragment",
+    "otpauth://totp/x?secret=" + secret + "&secret=" + secret,
+    "otpauth://totp/x?secret=" + secret + ";a=b",
+    "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP",
+    "otpauth://totp/x?secret=" + "A".repeat(105),
+    "otpauth://totp/x?secret=" + "1".repeat(32),
+    "otpauth://totp/x?secret=",
+    "otpauth://totp/x?secret=" + secret + "&issuer=bad/issuer",
+    "otpauth://totp/x?secret=" + secret + " ",
+    42,
+    null,
+  ])
+    assert.equal(core.parseOTPAuthTOTP(value), null, String(value));
+});

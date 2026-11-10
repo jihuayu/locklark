@@ -198,11 +198,13 @@
         "showInlineGenerator",
         "disabledInlineMenuOrigins",
         "pasteProtection",
+        "otpCapture",
       ]);
       if (value && typeof value === "object") {
         siteSettings.showInlineMenu = value.showInlineMenu !== false;
         siteSettings.showInlineGenerator = value.showInlineGenerator !== false;
         siteSettings.pasteProtection = value.pasteProtection !== false;
+        siteSettings.otpCapture = value.otpCapture !== false;
         siteSettings.disabledInlineMenuOrigins = Array.isArray(
           value.disabledInlineMenuOrigins,
         )
@@ -240,6 +242,7 @@
       showInlineMenu: true,
       showInlineGenerator: true,
       pasteProtection: true,
+      otpCapture: true,
       disabledInlineMenuOrigins: [],
     },
     observer = null,
@@ -1589,6 +1592,196 @@
     );
   }
   installPasteProtection();
+  // Two-factor setup capture. Detection uses the browser's BarcodeDetector:
+  // decoding is local, needs no new permission and never sends the QR image or
+  // the seed anywhere. Only pages that look like account-security pages are
+  // scanned, each element is decoded at most once and the page-facing panel
+  // shows only issuer/account metadata plus item titles.
+  const OTP_SCAN_LIMIT = 24,
+    OTP_SCAN_MIN_SIDE = 96,
+    OTP_SCAN_MAX_SIDE = 1024;
+  let otpDetector = null,
+    otpScanning = false,
+    otpScanTimer = null,
+    otpScans = 0;
+  const otpSeen = new WeakSet(),
+    otpPrompted = new Set();
+  function otpHash(text) {
+    let hash = 5381;
+    for (let index = 0; index < text.length; index++)
+      hash = ((hash << 5) + hash + text.charCodeAt(index)) >>> 0;
+    return hash.toString(36) + ":" + text.length;
+  }
+  function otpPageRelevant() {
+    if (
+      /2fa|mfa|two[-_]?factor|authenticator|totp|otp|setup|security/i.test(
+        location.pathname + location.search,
+      )
+    )
+      return true;
+    try {
+      const text = String(document.body?.innerText || "").slice(0, 20000);
+      return /two[- ]?factor|2fa|authenticator|scan (this|the) qr|qr code/i.test(
+        text,
+      );
+    } catch {
+      return false;
+    }
+  }
+  function otpImages() {
+    const found = [];
+    let nodes = [];
+    try {
+      nodes = [...document.querySelectorAll("img,canvas")];
+    } catch {
+      return found;
+    }
+    for (const node of nodes) {
+      if (found.length >= 8) break;
+      if (!node.isConnected || otpSeen.has(node)) continue;
+      if (node.tagName === "IMG" && node.complete === false) continue;
+      const rect = node.getBoundingClientRect?.();
+      if (
+        !rect ||
+        rect.width < OTP_SCAN_MIN_SIDE ||
+        rect.height < OTP_SCAN_MIN_SIDE ||
+        rect.width > OTP_SCAN_MAX_SIDE ||
+        rect.height > OTP_SCAN_MAX_SIDE
+      )
+        continue;
+      try {
+        const style = getComputedStyle(node);
+        if (
+          style.display === "none" ||
+          style.visibility === "hidden" ||
+          style.opacity === "0"
+        )
+          continue;
+      } catch {}
+      found.push(node);
+    }
+    return found;
+  }
+  async function otpDecode(node) {
+    if (!otpDetector) return null;
+    let results;
+    try {
+      results = await Promise.race([
+        otpDetector.detect(node),
+        new Promise((resolve) => setTimeout(() => resolve(null), 2500)),
+      ]);
+    } catch {
+      return null;
+    }
+    for (const result of results || []) {
+      if (typeof result?.rawValue !== "string") continue;
+      const parsed = core?.parseOTPAuthTOTP?.(result.rawValue);
+      if (parsed) return { raw: result.rawValue, parsed };
+    }
+    return null;
+  }
+  async function otpOffer(anchor, raw, parsed) {
+    if (host) return;
+    let reply;
+    try {
+      reply = await send({ type: "inline-otp-capture", otpauth: raw });
+    } catch {
+      return;
+    }
+    if (!reply?.ok) {
+      if (reply?.reason === "no-item")
+        showToast("未找到此网站的登录，请先保存登录再添加两步验证");
+      return;
+    }
+    if (host || !anchor.isConnected) return;
+    const box = panel(anchor, "保存两步验证");
+    note(box, "检测到此页面的两步验证二维码：" + (reply.label || parsed.label));
+    const status = note(box, "", "status");
+    const items = Array.isArray(reply.items) ? reply.items.slice(0, 10) : [];
+    for (const item of items) {
+      button(box, "保存到 " + (item.title || "未命名登录"), async () => {
+        status.textContent = "正在保存…";
+        let result;
+        try {
+          result = await send({
+            type: "inline-otp-save",
+            captureId: reply.captureId,
+            itemId: item.id,
+          });
+        } catch {
+          result = { ok: false };
+        }
+        if (result?.ok) {
+          dismiss();
+          showToast("已保存两步验证");
+        } else {
+          status.textContent = "保存失败，请重试";
+        }
+      });
+    }
+    button(box, "忽略", () => dismiss());
+  }
+  async function otpScan() {
+    if (
+      otpScanning ||
+      !otpDetector ||
+      siteSettings.otpCapture === false ||
+      document.visibilityState !== "visible" ||
+      otpScans >= OTP_SCAN_LIMIT ||
+      host ||
+      !otpPageRelevant()
+    )
+      return;
+    otpScanning = true;
+    try {
+      for (const node of otpImages()) {
+        otpSeen.add(node);
+        otpScans++;
+        const found = await otpDecode(node);
+        if (!found) continue;
+        const key = otpHash(found.raw);
+        if (otpPrompted.has(key)) continue;
+        otpPrompted.add(key);
+        await otpOffer(node, found.raw, found.parsed);
+        break;
+      }
+    } finally {
+      otpScanning = false;
+    }
+  }
+  function scheduleOTPScan(delay = 1500) {
+    if (otpScanTimer || !otpDetector || siteSettings.otpCapture === false) return;
+    otpScanTimer = setTimeout(() => {
+      otpScanTimer = null;
+      void otpScan();
+    }, delay);
+  }
+  async function installOTPCapture() {
+    if (typeof BarcodeDetector !== "function") return;
+    try {
+      const formats = await BarcodeDetector.getSupportedFormats?.();
+      if (Array.isArray(formats) && !formats.includes("qr_code")) return;
+      otpDetector = new BarcodeDetector({ formats: ["qr_code"] });
+    } catch {
+      otpDetector = null;
+      return;
+    }
+    await settingsReady;
+    if (siteSettings.otpCapture === false) return;
+    scheduleOTPScan(2000);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") scheduleOTPScan(1200);
+    });
+    if (typeof MutationObserver === "function") {
+      try {
+        new MutationObserver(() => scheduleOTPScan()).observe(
+          document.documentElement,
+          { childList: true, subtree: true },
+        );
+      } catch {}
+    }
+  }
+  void installOTPCapture();
   if (typeof MutationObserver === "function") {
     const observer = new MutationObserver(() => {
       if (!lastEditedCredential) return;

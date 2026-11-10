@@ -123,6 +123,17 @@ worker or stored. See
 [the 1Password beta parity note](../docs/browser-1password-beta-parity.md) for
 the reference behaviour, decision table and limits.
 
+**Two-factor setup capture** is also on by default. On pages that look like
+account-security pages, the content script decodes visible QR codes with the
+browser's `BarcodeDetector` and, for a valid `otpauth://totp` configuration,
+shows a closed-shadow panel listing the logins saved for the current origin.
+Choosing one writes only the `otp` field through the existing native item-save
+path; the seed is never displayed in the page, never stored by the extension and
+never saved automatically. Captures are bound to one document, expire after two
+minutes and are single use. The feature is silent where `BarcodeDetector` is
+unavailable (Firefox, Safari). See
+[two-factor capture validation](../docs/browser-otp-qr-capture-validation.md).
+
 To fill a saved TOTP, configure the login's `otp` field in the native vault,
 read the current website's candidates, and choose **填充验证码** (Fill one-time
 code). Approve that exact website and item in MyGo, or select it in an authorized quick session. The extension rechecks the

@@ -60,6 +60,7 @@
     "opt-offer-identity-card": "offerFillIdentitiesAndCards",
     "opt-offer-passkeys": "offerUsePasskeys",
     "opt-paste-protection": "pasteProtection",
+    "opt-otp-capture": "otpCapture",
     "opt-offer-save": "offerSaveLogins",
     "opt-offer-save-passkeys": "offerSavePasskeys",
     "opt-inline-generator": "showInlineGenerator",
@@ -117,6 +118,7 @@
     );
     setCheckbox("opt-offer-passkeys", settings.offerUsePasskeys);
     setCheckbox("opt-paste-protection", settings.pasteProtection);
+    setCheckbox("opt-otp-capture", settings.otpCapture);
     setCheckbox("opt-offer-save", settings.offerSaveLogins);
     setCheckbox("opt-offer-save-passkeys", settings.offerSavePasskeys);
     setCheckbox("opt-inline-generator", settings.showInlineGenerator);

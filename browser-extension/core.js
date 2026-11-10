@@ -475,6 +475,146 @@ globalThis.LocklarkCore = (() => {
       return "phishing";
     return "";
   }
+  // Two-factor setup capture. A page may render an otpauth:// QR code during
+  // setup; the content script decodes it with the browser's BarcodeDetector and
+  // offers to save the configuration to an existing login after an explicit
+  // click. Validation mirrors the native totp parser: TOTP only, the five
+  // supported parameters, a canonical-enough Base32 secret, SHA1/256/512,
+  // 6/8 digits and a 1-3600 second period. The returned object carries display
+  // metadata only and never the secret.
+  const OTPAUTH_MAX_LENGTH = 1024;
+  const OTPAUTH_SECRET_MIN_BYTES = 16;
+  const OTPAUTH_SECRET_MAX_BYTES = 64;
+  const OTPAUTH_PARAMS = new Set([
+    "secret",
+    "issuer",
+    "algorithm",
+    "digits",
+    "period",
+  ]);
+  function otpAuthText(value) {
+    return (
+      typeof value === "string" &&
+      value.length >= 8 &&
+      value.length <= OTPAUTH_MAX_LENGTH &&
+      value.isWellFormed()
+    );
+  }
+  // Mirrors the native label rule: non-empty, at most 256 characters, no
+  // control characters and no path separators.
+  function boundedLabel(value, max) {
+    if (typeof value !== "string") return "";
+    const text = value.trim();
+    if (text.length === 0 || text.length > max) return "";
+    if (text.includes("/") || text.includes("\\")) return "";
+    for (const character of text) {
+      const code = character.codePointAt(0);
+      if (code < 32 || (code >= 0x7f && code < 0xa0)) return "";
+    }
+    return text;
+  }
+  // Decoded byte count for an unpadded Base32 string; null when the length
+  // cannot decode at all (length mod 8 == 1, 3 or 6).
+  function base32DecodedLength(characters) {
+    const remainder = characters % 8;
+    if (![0, 2, 4, 5, 7].includes(remainder)) return null;
+    return Math.floor((characters * 5) / 8);
+  }
+  // Returns {issuer, account, label, digits, period, algorithm} or null.
+  function parseOTPAuthTOTP(value) {
+    if (!otpAuthText(value)) return null;
+    // No surrounding or embedded whitespace: the native parser treats any
+    // such byte as part of the seed or label and refuses it.
+    if (value !== value.trim() || value.includes("#") || /\s/.test(value))
+      return null;
+    const raw = value;
+    let parsed;
+    try {
+      parsed = new URL(raw);
+    } catch {
+      return null;
+    }
+    if (
+      parsed.protocol !== "otpauth:" ||
+      parsed.hostname.toLowerCase() !== "totp" ||
+      parsed.username !== "" ||
+      parsed.password !== "" ||
+      parsed.hash !== ""
+    )
+      return null;
+    const query = parsed.search.replace(/^\?/, "");
+    if (!query || query.includes(";")) return null;
+    const params = new Map();
+    for (const [key, field] of parsed.searchParams) {
+      if (!OTPAUTH_PARAMS.has(key) || params.has(key) || field === "")
+        return null;
+      params.set(key, field);
+    }
+    const secret = (params.get("secret") || "").toUpperCase();
+    const padding = /(=*)$/.exec(secret)?.[1] || "";
+    const characters = secret.length - padding.length;
+    if (
+      !/^[A-Z2-7]+=*$/.test(secret) ||
+      (padding && secret.length % 8 !== 0)
+    )
+      return null;
+    const bytes = base32DecodedLength(characters);
+    if (
+      bytes === null ||
+      bytes < OTPAUTH_SECRET_MIN_BYTES ||
+      bytes > OTPAUTH_SECRET_MAX_BYTES ||
+      secret.length > 104
+    )
+      return null;
+    const digits = params.has("digits") ? params.get("digits") : "6";
+    if (digits !== "6" && digits !== "8") return null;
+    const period = params.has("period") ? params.get("period") : "30";
+    if (!/^[1-9][0-9]{0,3}$/.test(period)) return null;
+    const periodSeconds = Number(period);
+    if (periodSeconds < 1 || periodSeconds > 3600) return null;
+    const algorithm = (params.get("algorithm") || "SHA1").toUpperCase();
+    if (!["SHA1", "SHA256", "SHA512"].includes(algorithm)) return null;
+    let label = parsed.pathname.replace(/^\//, "");
+    try {
+      label = decodeURIComponent(label);
+    } catch {
+      return null;
+    }
+    if ((label.match(/:/g) || []).length > 1) return null;
+    let accountIssuer = "";
+    let account = label;
+    const separator = label.indexOf(":");
+    if (separator >= 0) {
+      accountIssuer = label.slice(0, separator);
+      account = label.slice(separator + 1);
+    }
+    const declaredRaw = params.get("issuer") || "";
+    const declaredIssuer = declaredRaw ? boundedLabel(declaredRaw, 256) : "";
+    if (declaredRaw && !declaredIssuer) return null;
+    const labelIssuer = accountIssuer
+      ? boundedLabel(accountIssuer, 256)
+      : "";
+    if (accountIssuer && !labelIssuer) return null;
+    if (declaredIssuer && labelIssuer && declaredIssuer !== labelIssuer)
+      return null;
+    const issuer = declaredIssuer || labelIssuer;
+    const accountLabel = account ? boundedLabel(account, 256) : "";
+    if (account && !accountLabel) return null;
+    if (!issuer && !accountLabel) return null;
+    const display = issuer
+      ? accountLabel && accountLabel !== issuer
+        ? issuer + " · " + accountLabel
+        : issuer
+      : accountLabel;
+    return {
+      issuer,
+      account: accountLabel,
+      label: display,
+      digits: Number(digits),
+      period: periodSeconds,
+      algorithm,
+    };
+  }
   function validFieldMap(value, allowed) {
     if (!value || typeof value !== "object" || Array.isArray(value))
       return false;
@@ -5185,6 +5325,7 @@ globalThis.LocklarkCore = (() => {
     offerSavePasskeys: true,
     showInlineGenerator: true,
     pasteProtection: true,
+    otpCapture: true,
     generatorDefaults: Object.freeze({
       mode: "random",
       length: 24,
@@ -5321,6 +5462,7 @@ globalThis.LocklarkCore = (() => {
       "offerSavePasskeys",
       "showInlineGenerator",
       "pasteProtection",
+      "otpCapture",
       "watchtowerLocalChecks",
       "watchtowerHIBP",
     ])
@@ -5760,6 +5902,7 @@ globalThis.LocklarkCore = (() => {
     generatePasswordString,
     looksLikeLocklarkSecret,
     pasteWarning,
+    parseOTPAuthTOTP,
   };
 })();
 if (typeof module !== "undefined") module.exports = globalThis.LocklarkCore;

@@ -42,7 +42,9 @@ if (typeof importScripts === "function") importScripts("core.js");
     HISTORY_LIMIT = 20,
     MULTI_STEP_TTL = 120000,
     CHECKOUT_PICKER_TTL = 30000,
-    CHECKOUT_MAX_FRAMES = 32;
+    CHECKOUT_MAX_FRAMES = 32,
+    OTP_CAPTURE_TTL = 2 * 60 * 1000,
+    OTP_CAPTURE_LIMIT = 8;
   const CONDITIONAL_INTENT_LIMIT = 64,
     CONDITIONAL_OPTIONS_MAX = 32768;
   // Conditional (autofill) Passkey intents are metadata-only and never set
@@ -52,7 +54,12 @@ if (typeof importScripts === "function") importScripts("core.js");
     stagedSaves = new Map(),
     lastFilledCredentials = new Map(),
     generatedHistory = [],
-    multiStepSessions = new Map();
+    multiStepSessions = new Map(),
+    // Two-factor setup captures. Each entry holds the validated otpauth text
+    // and the login candidates observed for one exact document; it is memory
+    // only, bounded, expires after two minutes and is cleared on lock,
+    // disconnect or a successful save.
+    otpCaptures = new Map();
   function applySettings(raw) {
     settings = core.normalizeSettings(raw);
     autoLogin = settings.autoLogin;
@@ -680,6 +687,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     attachmentUpload = null;
     clearPendingOpenAndFill();
     matchCategory = "login";
+    otpCaptures.clear();
     multiStepSessions.clear();
     clearConditionalIntentsWithNotify();
     refreshPasskeyConditionalSupport();
@@ -3630,6 +3638,130 @@ if (typeof importScripts === "function") importScripts("core.js");
     rebuildContextMenus();
     return { item_id: response.item_id, revision: response.revision };
   }
+  function expireOTPCaptures() {
+    const now = Date.now();
+    for (const [key, capture] of otpCaptures) {
+      if (now - capture.at > OTP_CAPTURE_TTL) otpCaptures.delete(key);
+    }
+    while (otpCaptures.size > OTP_CAPTURE_LIMIT) {
+      const oldest = [...otpCaptures.entries()].sort(
+        (left, right) => left[1].at - right[1].at,
+      )[0];
+      if (!oldest) break;
+      otpCaptures.delete(oldest[0]);
+    }
+  }
+  // A page may show a two-factor setup QR code. The content script decodes it
+  // with BarcodeDetector and sends the otpauth text here. Nothing is written:
+  // the validated text and the exact document's login candidates are kept in
+  // worker memory, and the page only receives the display label plus item
+  // titles. A later save must name this capture ID and one of those items.
+  async function captureOTPForContent(message, c) {
+    if (!capability || pending || pendingOTP || pendingPasskey)
+      return { ok: false, reason: "busy" };
+    const parsed = core.parseOTPAuthTOTP(message.otpauth);
+    if (!parsed) return { ok: false, reason: "invalid" };
+    if (
+      !core.sameContext(c, context) ||
+      matchCategory !== "login" ||
+      Date.now() - lastMatchAt > 5000
+    ) {
+      await match("login", c.frameId);
+      lastMatchAt = Date.now();
+    }
+    await current(c);
+    const candidates = rows
+      .filter((row) => rowCategory(row) === "login")
+      .slice(0, 10)
+      .map((row) => ({
+        id: row.id,
+        revision: row.revision,
+        title: row.title || "",
+      }));
+    if (!candidates.length) return { ok: false, reason: "no-item" };
+    expireOTPCaptures();
+    const captureId = id();
+    otpCaptures.set(captureId, {
+      config: String(message.otpauth).trim(),
+      origin: c.origin,
+      tabId: c.tabId,
+      documentId: c.documentId,
+      candidates,
+      at: Date.now(),
+    });
+    expireOTPCaptures();
+    return {
+      ok: true,
+      captureId,
+      label: parsed.label,
+      items: candidates.map((row) => ({ id: row.id, title: row.title })),
+    };
+  }
+  // Saves one captured TOTP configuration into an existing login. The target
+  // item must be one of the candidates observed for this exact document, and
+  // the whole mutation is written by the existing native item-edit path, which
+  // re-reads the item under its revision, validates the otpauth text again and
+  // preserves every field this mutation does not name.
+  async function saveCapturedOTP(message, c) {
+    const capture = otpCaptures.get(message.captureId);
+    if (!capture) return { ok: false, reason: "expired" };
+    if (Date.now() - capture.at > OTP_CAPTURE_TTL) {
+      otpCaptures.delete(message.captureId);
+      return { ok: false, reason: "expired" };
+    }
+    // A capture belongs to one exact document. A different tab, origin or
+    // document may not spend it; the owner document keeps its chance.
+    if (
+      capture.origin !== c.origin ||
+      capture.tabId !== c.tabId ||
+      capture.documentId !== c.documentId
+    )
+      return { ok: false, reason: "expired" };
+    if (!/^[a-f0-9]{32}$/.test(message.itemId || ""))
+      return { ok: false, reason: "item" };
+    if (!capability) {
+      otpCaptures.delete(message.captureId);
+      return { ok: false, reason: "locked" };
+    }
+    const target = capture.candidates.find((row) => row.id === message.itemId);
+    if (!target) return { ok: false, reason: "item" };
+    const itemJSON = JSON.stringify({
+      title: target.title,
+      category: "login",
+      otp: capture.config,
+    });
+    if (new TextEncoder().encode(itemJSON).length > 32768)
+      return { ok: false, reason: "invalid" };
+    let response;
+    try {
+      response = await request(
+        "item-save",
+        {
+          capability,
+          item_id: target.id,
+          revision: target.revision,
+          item_json: itemJSON,
+        },
+        20000,
+      );
+    } catch {
+      return { ok: false, reason: "host" };
+    }
+    if (
+      !["item-saved", "saved"].includes(response?.type) ||
+      response.item_id !== target.id ||
+      !/^[a-f0-9]{64}$/.test(response.revision || "")
+    )
+      return { ok: false, reason: "host" };
+    otpCaptures.delete(message.captureId);
+    rows = rows.map((row) =>
+      row.id === response.item_id ? { ...row, revision: response.revision } : row,
+    );
+    vaultSearchGeneration++;
+    detailCache.clear();
+    updateBadge();
+    return { ok: true, revision: response.revision };
+  }
   async function setItemState(message) {
     if (
       !capability ||
@@ -4283,6 +4415,9 @@ if (typeof importScripts === "function") importScripts("core.js");
       await current(c);
       return { connected: !!capability };
     }
+    if (message.type === "inline-otp-capture")
+      return captureOTPForContent(message, c);
+    if (message.type === "inline-otp-save") return saveCapturedOTP(message, c);
     if (message.type === "inline-pending-save")
       return { pendingSave: serializeStaged(stagedForTab(c.tabId, c.origin)) };
     if (message.type === "inline-stage-save") {
