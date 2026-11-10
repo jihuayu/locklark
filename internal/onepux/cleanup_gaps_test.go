@@ -2,10 +2,14 @@ package onepux
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"encoding/json"
+	"encoding/pem"
 	"reflect"
 	"testing"
 
 	"github.com/jihuayu/locklark/internal/vault"
+	"golang.org/x/crypto/ssh"
 )
 
 // TestMapArchiveItemRejectsAttachmentBeforeClone covers every attachment
@@ -99,23 +103,62 @@ func TestMapArchiveV2OuterFailureWipesCurrentItem(t *testing.T) {
 	}
 }
 
-// TestMapArchiveItemRejectWipesOwnedClone rejects a document item after its
-// attachment clone is attached: the notes carry a control character the vault
-// refuses, so only the trailing notes check fires. The failure cleanup clears
-// the clone the item owned, the caller receives the zero item, and the buffered
-// entry it owns stays untouched.
+// TestMapArchiveItemRejectWipesOwnedClone rejects an SSH key item after it has
+// allocated byte buffers: the mapper stores the decoded SSH seed and then the
+// password history exceeds its limit. The failure cleanup clears what the item
+// owns, the caller receives the zero item, and the caller's input maps and
+// buffers stay untouched.
 func TestMapArchiveItemRejectWipesOwnedClone(t *testing.T) {
-	buffered := []byte(clearSource)
-	files := map[string][]byte{"files/body.txt": buffered}
-	item := documentItemFor(t, "doc", "doc", "body.txt", len(buffered))
-	item["details"].(map[string]any)["notesPlain"] = "a\x01b"
+	seed := bytes.Repeat([]byte{33}, ed25519.SeedSize)
+	private := ed25519.NewKeyFromSeed(seed)
+	defer clear(private)
+	block, err := ssh.MarshalPrivateKey(private, "fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	privatePEM := pem.EncodeToMemory(block)
+	if privatePEM == nil {
+		t.Fatal("private key encoding failed")
+	}
+	// The mapper reads sections as []any, so the fixture is shaped like a
+	// decoded archive instead of typedSection's []map[string]any.
+	section := map[string]any{"name": "ssh", "title": "SSH", "fields": []any{typedField("key", "Private Key", map[string]any{"sshKey": string(privatePEM)})}}
+	item := onepuxItem(t, "ssh", "115", "active", map[string]any{"title": "SSH Key"}, map[string]any{"sections": []any{section}})
+	seeded, err := mapArchiveItem(item, map[string][]byte{})
+	if err != nil || len(seeded.SSHSeed) != ed25519.SeedSize {
+		t.Fatalf("fixture never decoded the SSH seed: %v", err)
+	}
+	wipeItem(&seeded)
+	// Each entry is purchased after the SSH seed, so the oversize history
+	// rejects the item with ErrLimit once it already owns that buffer.
+	history := make([]any, 101)
+	for n := range history {
+		history[n] = map[string]any{"value": clearPlaceholder}
+	}
+	item["details"].(map[string]any)["passwordHistory"] = history
+	files := map[string][]byte{}
+	bytesBefore := bytes.Clone([]byte(string(privatePEM)))
+	dataBefore := mustJSON(t, item)
+
 	owned, err := mapArchiveItem(item, files)
-	if err != ErrUnsupported || !reflect.DeepEqual(owned, vault.Item{}) {
+	if err != ErrLimit || !reflect.DeepEqual(owned, vault.Item{}) {
 		t.Fatalf("failed mapping escaped an item: %v", err)
 	}
-	if !bytes.Equal(files["files/body.txt"], buffered) {
-		t.Fatal("failed mapping wiped the caller's buffered entry")
+	if string(privatePEM) != string(bytesBefore) {
+		t.Fatal("failed mapping wiped the caller's private key bytes")
 	}
+	if dataBefore != mustJSON(t, item) || len(files) != 0 {
+		t.Fatal("failed mapping modified the caller's input")
+	}
+}
+
+func mustJSON(t *testing.T, value any) string {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
 }
 
 // TestReleaseFailedItemWipesEveryOwnedBuffer builds an item that still owns an
