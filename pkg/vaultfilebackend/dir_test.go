@@ -1805,13 +1805,13 @@ func TestDirListHonorsCancellation(t *testing.T) {
 //
 //  1. ReplaceIfVersion's own ctx.Err
 //  2. write's ctx.Err
-//  3. pollLock's ctx.Err, once when the lock is immediately available
+//  3. inProcLock.acquire's ctx.Err before trying the uncontended semaphore
+//  4. pollLock's ctx.Err, once, before the immediately available lock
 //
-// Call 4 is Dir.run's ctx.Err right after the lock is acquired and before
-// resolve. With limit 3 and an uncontended lock, cancellation is therefore
+// Call 5 is Dir.run's ctx.Err right after the lock is acquired and before
+// resolve. With limit 4 and an uncontended lock, cancellation is therefore
 // observed exactly once the operation holds the lock, before recovery, with no
-// sleep or timing used as the trigger. (The measurements confirm the message
-// "write cancelled after acquiring the lock" at limit 3.)
+// sleep or timing used as the trigger.
 type ctxCancelAtN struct {
 	calls  int
 	limit  int
@@ -1863,13 +1863,16 @@ func TestDirCancellationAfterLockSkipsRecovery(t *testing.T) {
 	// The lock is immediately available, so pollLock checks Err exactly once.
 	// Limit 3 is live for ReplaceIfVersion, write and pollLock, and canceled
 	// for Dir.run's post-lock check before resolve.
-	cctx := &ctxCancelAtN{limit: 3, done: make(chan struct{}), cause: context.Canceled}
+	// The semaphore is uncontended, so acquire checks Err once before taking it
+	// and pollLock checks Err once. Limit 4 is live for ReplaceIfVersion,
+	// write, acquire and pollLock, and canceled for Dir.run's post-lock check.
+	cctx := &ctxCancelAtN{limit: 4, done: make(chan struct{}), cause: context.Canceled}
 	err := b.ReplaceIfVersion(cctx, "n", cur.Revision, []byte("v2"))
 	if !errors.Is(err, ErrDenied) || !errors.Is(err, context.Canceled) || errors.Is(err, ErrUnknown) {
 		t.Fatalf("replace canceled after lock = %v, want ErrDenied wrapping context.Canceled", err)
 	}
-	if cctx.calls != 4 {
-		t.Fatalf("context Err called %d times, want 4 (ReplaceIfVersion, write, pollLock, post-lock)", cctx.calls)
+	if cctx.calls != 5 {
+		t.Fatalf("context Err called %d times, want 5 (ReplaceIfVersion, write, acquire, pollLock, post-lock)", cctx.calls)
 	}
 	// The error must come from the post-lock check, proving cancellation was
 	// not observed earlier; otherwise this test would only exercise a
@@ -2198,6 +2201,95 @@ func TestDirOpenDirDoesNotReleaseHeldLock(t *testing.T) {
 // The lock timeout covers the OS lock wait of another process: a waiter
 // blocked by a live holder fails with a definite ErrConflict (never
 // ErrUnknown) and writes nothing.
+// A canceled caller must be reported as Denied even when the internal lock
+// wait budget is exhausted at the same time. Both branches of the in-process
+// wait are ready at once, so the old select could pick the timeout and report
+// ErrConflict; every attempt must be a context cancellation instead.
+func TestDirInProcWaitCancellationWinsOverExpiredDeadline(t *testing.T) {
+	ctx := context.Background()
+	b := openAt(t, t.TempDir()).(*Dir)
+	if err := b.inProc.acquire(ctx, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	defer b.inProc.release()
+
+	cctx, cancel := context.WithCancel(ctx)
+	cancel()
+	expired := time.Now().Add(-time.Minute)
+	// The select is random when both cases are ready, so repeat enough times
+	// to make a regression (some attempts returning ErrConflict) reliable.
+	const attempts = 500
+	for i := 0; i < attempts; i++ {
+		err := b.inProc.acquire(cctx, expired)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("attempt %d: acquire = %v, want context.Canceled", i, err)
+		}
+		werr := lockWaitError(err)
+		if !errors.Is(werr, ErrDenied) || errors.Is(werr, ErrConflict) || errors.Is(werr, ErrUnknown) || !errors.Is(werr, context.Canceled) {
+			t.Fatalf("attempt %d: lockWaitError = %v, want ErrDenied wrapping context.Canceled", i, werr)
+		}
+	}
+	// A live caller with an exhausted budget still gets the definite conflict.
+	if err := b.inProc.acquire(ctx, expired); !errors.Is(err, errLockTimeout) {
+		t.Fatalf("live ctx with expired deadline = %v, want errLockTimeout", err)
+	}
+}
+
+// The OS-lock wait must also prefer caller cancellation over the internal
+// deadline. A cancellation trigger is armed on the descriptor a guarded write
+// is about to try in pollLock, so the context is canceled right after the check
+// at the top of the first iteration. The internal wait began before the child
+// child in startDirHelper, so the child cannot take the lock in the window
+// between this process's attempt and its decision, and the deadline branch's
+// recheck is what reports the cancellation. A separate process then confirms
+// pollLock must prefer caller cancellation over the internal deadline. A real
+// child process holds the lock, so the parent's attempt is busy. The context is
+// live on pollLock's first Err call at the top of the loop and canceled on its
+// second, which is the deadline-branch recheck after the failed attempt; with
+// an already-expired deadline that recheck is the only place the cancellation
+// can be seen before the wait would continue.
+func TestDirOSLockWaitCancellationWinsOverExpiredDeadline(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	b := openAt(t, root).(*Dir)
+	if err := b.CreateIfAbsent(ctx, "n", []byte("v1")); err != nil {
+		t.Fatal(err)
+	}
+	cur := mustRead(t, b, "n")
+
+	holder := startDirHelper(t, "hold-lock", root, "", "", "")
+	t.Cleanup(holder.kill)
+	if line := holder.lineWithin(t, 10*time.Second); line != "ready" {
+		t.Fatalf("holder line = %q, want ready", line)
+	}
+
+	// Limit 1: call 1 (loop top) is nil, call 2 (deadline recheck) closes Done
+	// and returns context.Canceled.
+	cctx := &ctxCancelAtN{limit: 1, done: make(chan struct{}), cause: context.Canceled}
+	f, err := openExistingLockFile(b.lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = pollLock(cctx, f, time.Now().Add(-time.Minute))
+	_ = f.Close()
+	if cctx.calls != 2 {
+		t.Fatalf("context Err called %d times, want 2 (loop top, deadline recheck)", cctx.calls)
+	}
+	if !errors.Is(err, ErrDenied) || !errors.Is(err, context.Canceled) || errors.Is(err, ErrConflict) || errors.Is(err, ErrUnknown) {
+		t.Fatalf("canceled OS lock wait = %v, want ErrDenied wrapping context.Canceled", err)
+	}
+
+	// The stored version is untouched, and after the holder exits a live caller
+	// can take the lock and write normally.
+	holder.kill()
+	if got := mustRead(t, b, "n"); string(got.Bytes) != "v1" || got.Revision != cur.Revision {
+		t.Fatal("canceled lock wait changed the stored version")
+	}
+	if err := b.ReplaceIfVersion(ctx, "n", cur.Revision, []byte("v2")); err != nil {
+		t.Fatalf("replace after holder exit = %v", err)
+	}
+}
+
 func TestDirOSLockTimeoutIsConflict(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()

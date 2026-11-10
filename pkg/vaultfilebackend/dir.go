@@ -129,6 +129,12 @@ func inProcFor(path string) *inProcLock {
 // acquire takes the lock, waiting until deadline. A zero deadline waits
 // without limit.
 func (l *inProcLock) acquire(ctx context.Context, deadline time.Time) error {
+	// Caller cancellation has priority over the internal deadline: a canceled
+	// caller must never be reported as an elapsed internal wait, so ctx is
+	// checked before the semaphore is tried or a wait is started.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	select {
 	case l.sem <- struct{}{}:
 		return nil
@@ -146,6 +152,12 @@ func (l *inProcLock) acquire(ctx context.Context, deadline time.Time) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-timeout:
+		// Both branches can be ready at once, and select picks at random, so
+		// a ready timeout may really be a cancellation: recheck ctx before
+		// reporting the internal deadline as exhausted.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		return errLockTimeout
 	}
 }
@@ -601,6 +613,12 @@ func pollLock(ctx context.Context, f *os.File, deadline time.Time) error {
 			return nil
 		}
 		if !deadline.IsZero() && !time.Now().Before(deadline) {
+			// Cancellation can land after the check at the top of the loop and
+			// before this deadline test. Caller cancellation takes priority, so
+			// it is reported as Denied rather than as an elapsed internal wait.
+			if err := ctx.Err(); err != nil {
+				return deniedMsg(err, "lock")
+			}
 			return lockWaitError(errLockTimeout)
 		}
 		wait := lockPoll
