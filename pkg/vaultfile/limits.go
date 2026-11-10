@@ -1,4 +1,4 @@
-// Package vaultfile defines the locklark.vault-file/v3 wire schema, its
+// Package vaultfile defines the locklark.vault-file/v1 wire schema, its
 // strict canonical-JSON codec and fixed synthetic encoding vectors.
 //
 // A vault file is a single complete object that carries everything a peer
@@ -9,7 +9,7 @@
 //
 // This package deliberately contains no signature verification, no
 // migration/import and no product wiring. It validates only wire structure,
-// canonical encoding and size/length budgets. See docs/vaultfile-wire-v3.md.
+// canonical encoding and size/length budgets. See docs/vaultfile-wire-v1.md.
 package vaultfile
 
 // Size and length budgets fixed by this schema. Every one of them is checked
@@ -22,7 +22,7 @@ const (
 	// encryption-scheme overhead (see MaxKDBXCiphertextBytes).
 	MaxPlaintextBytes = 16 << 20
 	// MaxKDBXCiphertextOverhead is the largest permitted encryption overhead
-	// on top of MaxPlaintextBytes. It covers a v3 age/stream header, the AEAD
+	// on top of MaxPlaintextBytes. It covers an age/stream header, the AEAD
 	// tags and chunk framing of a single encryption pass.
 	MaxKDBXCiphertextOverhead = 64 << 10
 	// MaxKDBXCiphertextBytes is the largest permitted encrypted content.
@@ -81,12 +81,11 @@ const (
 // Wire identifiers that must appear literally in an encoded file.
 const (
 	Format    = "locklark.vault-file"
-	Version   = 3
+	Version   = 1
 	MIME      = "application/vnd.locklark.vault-file+json"
-	SchemaURI = "https://locklark.dev/schema/locklark.vault-file/v3"
+	SchemaURI = "https://locklark.dev/schema/locklark.vault-file/v1"
 
-	EncryptionKDBXv3 = "kdbxv3"
-	ContentEncoding  = "kdbx"
+	ContentEncoding = "kdbx"
 
 	SigAlgEd25519 = "ed25519"
 

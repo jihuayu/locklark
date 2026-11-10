@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-// File is one complete locklark.vault-file/v3 object. It is self-contained:
+// File is one complete locklark.vault-file/v1 object. It is self-contained:
 // content bytes are embedded, never referenced by digest only.
 //
 // R in the sync protocol means exactly these bytes as read back from the

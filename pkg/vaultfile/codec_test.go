@@ -94,7 +94,7 @@ func mustEncodeWith(t *testing.T, f *File) string {
 	var b bytes.Buffer
 	b.WriteString(`{"format":`)
 	b.WriteString(quote(f.Format))
-	b.WriteString(`,"version":3,"header":`)
+	b.WriteString(`,"version":` + itoa(uint64(Version)) + `,"header":`)
 	writeHeader(&b, &f.Header)
 	b.WriteString(`,"header_sig":`)
 	writeSignature(&b, &f.HeaderSig)
@@ -201,6 +201,7 @@ func TestStrictJSON(t *testing.T) {
 		{"unknown nested", []byte(strings.Replace(string(enc), `"vault_id":`, `"nope":1,"vault_id":`, 1)), CodeUnknownField},
 		{"duplicate nested", []byte(strings.Replace(string(enc), `"vault_id":`, `"vault_id":"vault-01","vault_id":`, 1)), CodeDuplicateField},
 		{"missing member", []byte(strings.Replace(string(enc), `,"op_id":"op-0042"`, ``, 1)), CodeMissingField},
+		{"wrong wire version", []byte(strings.Replace(string(enc), `"version":1`, `"version":3`, 1)), CodeInvalidValue},
 		{"not an object", []byte(`[]`), CodeWrongType},
 		{"empty", nil, CodeInvalidJSON},
 		{"truncated", enc[:len(enc)/2], CodeInvalidJSON},
@@ -307,7 +308,7 @@ func TestPolicyDocumentBinding(t *testing.T) {
 	wantCode(t, err, CodePolicyMismatch)
 
 	f = buildFile()
-	rebindProof(f, []byte(`{"format":"locklark.vault-file","version":3}`), "owner-root-01", PolicySigAlgEd25519)
+	rebindProof(f, []byte(`{"format":"locklark.vault-file","version":1}`), "owner-root-01", PolicySigAlgEd25519)
 	_, err = EncodeFile(f)
 	wantCode(t, err, CodeMissingField)
 

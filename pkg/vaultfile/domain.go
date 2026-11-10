@@ -13,33 +13,33 @@ import (
 // derive anything.
 const (
 	// Content signatures over the canonical file bytes.
-	DomainContentSignature = "locklark.vault-file/v3/content-signature"
+	DomainContentSignature = "locklark.vault-file/v1/content-signature"
 
 	// Header signatures over HeaderBytes (vault, epoch, seq, revision, parent
 	// digest, policy digest, author device).
-	DomainHeaderSignature = "locklark.vault-file/v3/header-signature"
+	DomainHeaderSignature = "locklark.vault-file/v1/header-signature"
 
 	// Policy document signatures over SignedPolicy.Document.
-	DomainPolicyDocumentSignature = "locklark.vault-file/v3/policy-document-signature"
+	DomainPolicyDocumentSignature = "locklark.vault-file/v1/policy-document-signature"
 
 	// Restricted admin delegations issued by the owner root.
-	DomainAdminDelegation = "locklark.vault-file/v3/admin-delegation"
+	DomainAdminDelegation = "locklark.vault-file/v1/admin-delegation"
 
 	// age wrapping of the VUK to a device encryption key (vuk_device_slots).
-	DomainVUKDeviceWrapping = "locklark.vault-file/v3/vuk-device-wrapping"
+	DomainVUKDeviceWrapping = "locklark.vault-file/v1/vuk-device-wrapping"
 
 	// Wrapping of the per-snapshot CEK by the epoch VUK (cek_slot).
-	DomainCEKWrapping = "locklark.vault-file/v3/cek-wrapping"
+	DomainCEKWrapping = "locklark.vault-file/v1/cek-wrapping"
 
 	// Key fingerprints, one per key role.
-	UsageVaultID                 = "locklark.vault-file/v3/vault-id"
-	UsageContentRevisionID       = "locklark.vault-file/v3/content-revision-id"
-	UsageOpID                    = "locklark.vault-file/v3/op-id"
-	UsageDeviceID                = "locklark.vault-file/v3/device-id"
-	UsageDeviceContentSigningKey = "locklark.vault-file/v3/key/device-content-signing"
-	UsageDevicePolicySigningKey  = "locklark.vault-file/v3/key/device-policy-signing"
-	UsageAgeEncryptionKey        = "locklark.vault-file/v3/key/age-x25519"
-	UsagePolicyDocument          = "locklark.vault-file/v3/policy-document"
+	UsageVaultID                 = "locklark.vault-file/v1/vault-id"
+	UsageContentRevisionID       = "locklark.vault-file/v1/content-revision-id"
+	UsageOpID                    = "locklark.vault-file/v1/op-id"
+	UsageDeviceID                = "locklark.vault-file/v1/device-id"
+	UsageDeviceContentSigningKey = "locklark.vault-file/v1/key/device-content-signing"
+	UsageDevicePolicySigningKey  = "locklark.vault-file/v1/key/device-policy-signing"
+	UsageAgeEncryptionKey        = "locklark.vault-file/v1/key/age-x25519"
+	UsagePolicyDocument          = "locklark.vault-file/v1/policy-document"
 
 	// Digest algorithms named on the wire.
 	DigestSHA256 = DigestAlgSHA256
