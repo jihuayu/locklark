@@ -1737,12 +1737,19 @@ func TestDirListHonorsCancellation(t *testing.T) {
 }
 
 // ctxCancelAtN is a context that is live for its first n Err calls and
-// canceled (Done closed, Err returns its cause) from call n+1 on. The write
-// path calls Err deterministically: once in replaceOrWrite/write before the
-// lock, then once right after the lock is acquired and before recovery. So
-// ctxCancelAtN(canceled, 1) is live up to and including lock acquisition and
-// is canceled exactly once the operation holds the lock, before resolve runs.
-// No sleep or timing is used as the trigger.
+// canceled (Done closed, Err returns its cause) from call n+1 on. The public
+// ReplaceIfVersion path calls Err a deterministic number of times before it
+// holds the lock:
+//
+//  1. ReplaceIfVersion's own ctx.Err
+//  2. write's ctx.Err
+//  3. pollLock's ctx.Err, once when the lock is immediately available
+//
+// Call 4 is Dir.run's ctx.Err right after the lock is acquired and before
+// resolve. With limit 3 and an uncontended lock, cancellation is therefore
+// observed exactly once the operation holds the lock, before recovery, with no
+// sleep or timing used as the trigger. (The measurements confirm the message
+// "write cancelled after acquiring the lock" at limit 3.)
 type ctxCancelAtN struct {
 	calls  int
 	limit  int
@@ -1768,7 +1775,9 @@ func (c *ctxCancelAtN) Err() error {
 
 // A write that acquires the lock and is then canceled before recovery must not
 // clean anything up: resolve would otherwise clear a stale holder ticket and
-// sweep temporary files even though the request returns ErrDenied.
+// sweep temporary files even though the request returns ErrDenied. The
+// cancellation is triggered on the post-lock ctx.Err, so this exercises the
+// path between lock acquisition and resolve, not a pre-lock cancellation.
 func TestDirCancellationAfterLockSkipsRecovery(t *testing.T) {
 	ctx := context.Background()
 	b := openAt(t, t.TempDir()).(*Dir)
@@ -1789,13 +1798,22 @@ func TestDirCancellationAfterLockSkipsRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cctx := &ctxCancelAtN{limit: 1, done: make(chan struct{}), cause: context.Canceled}
+	// The lock is immediately available, so pollLock checks Err exactly once.
+	// Limit 3 is live for ReplaceIfVersion, write and pollLock, and canceled
+	// for Dir.run's post-lock check before resolve.
+	cctx := &ctxCancelAtN{limit: 3, done: make(chan struct{}), cause: context.Canceled}
 	err := b.ReplaceIfVersion(cctx, "n", cur.Revision, []byte("v2"))
 	if !errors.Is(err, ErrDenied) || !errors.Is(err, context.Canceled) || errors.Is(err, ErrUnknown) {
 		t.Fatalf("replace canceled after lock = %v, want ErrDenied wrapping context.Canceled", err)
 	}
-	if cctx.calls != 2 {
-		t.Fatalf("context Err called %d times, want 2 (before and after the lock)", cctx.calls)
+	if cctx.calls != 4 {
+		t.Fatalf("context Err called %d times, want 4 (ReplaceIfVersion, write, pollLock, post-lock)", cctx.calls)
+	}
+	// The error must come from the post-lock check, proving cancellation was
+	// not observed earlier; otherwise this test would only exercise a
+	// cancellation before the lock.
+	if !strings.Contains(err.Error(), "after acquiring the lock") {
+		t.Fatalf("replace = %v, want the cancellation observed after acquiring the lock", err)
 	}
 	// Nothing was cleaned or changed by the canceled operation.
 	if _, err := os.Lstat(orphan); err != nil {
