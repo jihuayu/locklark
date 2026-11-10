@@ -3,6 +3,7 @@ package vaultfile
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -190,12 +191,13 @@ func buildPolicy() *Policy {
 	return p
 }
 
-func buildFile() *File {
+// buildFile builds the sealed vector file. The content signature bytes are
+// shaped, not real; revision_id is derived by SealFile from exactly this.
+func buildFile(t *testing.T) *File {
 	// The header digest of the current policy is PolicyDigest over the
 	// canonical policy document bytes held in the proof; the policy carries
 	// no digest of itself.
-	base := buildPolicy()
-	p := clonePolicy(base)
+	p := clonePolicy(buildPolicy())
 	doc := docFor(p)
 	f := &File{
 		Format:  Format,
@@ -204,7 +206,6 @@ func buildFile() *File {
 			VaultID:    "vault-01",
 			KeyEpoch:   3,
 			ContentSeq: 42,
-			RevisionID: "rev-0042",
 			PrevDigest: digest("content-41"),
 			OpID:       "op-0042",
 			PolicySeq:  7,
@@ -212,7 +213,6 @@ func buildFile() *File {
 			PolicyDigest:   make([]byte, sha256.Size),
 			AuthorDeviceID: "device-1",
 		},
-		HeaderSig: Signature{SignerID: "device-1", Alg: SigAlgEd25519, Sig: pf(0x41, 64)},
 		SignedPolicyProofs: []SignedPolicy{{
 			Document: doc,
 			Policy:   *p,
@@ -226,11 +226,62 @@ func buildFile() *File {
 			{DeviceID: "device-1", Recipient: p.Devices[0].AgeEncryptionKey, WrappedVUK: []byte("synthetic-age-wrapped-vuk-1")},
 			{DeviceID: "device-2", Recipient: p.Devices[1].AgeEncryptionKey, WrappedVUK: []byte("synthetic-age-wrapped-vuk-2")},
 		},
-		CEKSlot:          CEKSlot{KeyEpoch: 3, WrappedCEK: []byte("synthetic-vuk-wrapped-cek")},
-		ContentSignature: Signature{SignerID: "device-1", Alg: SigAlgEd25519, Sig: pf(0x51, 64)},
+		CEKSlot: CEKSlot{KeyEpoch: 3, WrappedCEK: []byte("synthetic-vuk-wrapped-cek")},
 	}
 	f.Header.PolicyDigest = policyDigest(&f.SignedPolicyProofs[0])
+	f.ContentSignature = Signature{SignerID: "device-1", Alg: SigAlgEd25519, Sig: shapedSignature()}
+	seal(t, f, &f.ContentSignature)
 	return f
+}
+
+// shapedSignature is the synthetic content signature of the vector. Its
+// bytes only have the shape of an ed25519 signature: they are not a
+// signature, and nothing in this package verifies one.
+func shapedSignature() []byte { return pf(0x51, 64) }
+
+// unsignedFile is buildFile's content in the unsigned-draft state: null
+// signature, empty revision id.
+func unsignedFile(t *testing.T) *File {
+	f := buildFile(t)
+	f.Header.RevisionID = ""
+	f.ContentSignature = Signature{}
+	seal(t, f, nil)
+	return f
+}
+
+// seal runs SealFile (no signature is computed) and replaces f with the
+// parsed canonical result.
+func seal(t *testing.T, f *File, sig *Signature) []byte {
+	t.Helper()
+	enc, err := SealFile(f, sig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseFile(enc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	*f = *parsed
+	return enc
+}
+
+// reseal re-derives the revision id of a sealed file after its content
+// changed, keeping its (shaped) content signature. Every edit to a sealed
+// file's preimage-covered fields must go through it: a stale revision id is
+// rejected by ValidateFile.
+func reseal(t *testing.T, f *File) {
+	t.Helper()
+	sig := f.ContentSignature
+	f.Header.RevisionID = ""
+	seal(t, f, &sig)
+}
+
+// encodedHeader is the canonical header of a file exactly as it appears on
+// the wire (revision_id included), so vectors stay auditable without base64.
+func encodedHeader(f *File) string {
+	var b bytes.Buffer
+	writeHeader(&b, &f.Header)
+	return b.String()
 }
 
 func canonicalJSON(v any) string {
@@ -259,10 +310,9 @@ func (e encodedFile) MarshalJSON() ([]byte, error) {
 	f := e.T
 	p := f.SignedPolicyProofs[0]
 	out := map[string]any{
-		"format":     f.Format,
-		"version":    f.Version,
-		"header":     string(HeaderBytes(&f.Header)),
-		"header_sig": f.HeaderSig,
+		"format":  f.Format,
+		"version": f.Version,
+		"header":  encodedHeader(f),
 		"signed_policy_proofs": []map[string]any{{
 			"document":  string(p.Document),
 			"policy":    string(p.Document),
@@ -292,10 +342,14 @@ func TestVectors(t *testing.T) {
 	var doc struct {
 		Vectors []struct {
 			Name                 string `json:"name"`
+			State                string `json:"state"`
 			File                 string `json:"file"`
 			FileSHA256           string `json:"file_sha256"`
-			Header               string `json:"header"`
-			HeaderSHA256         string `json:"header_sha256"`
+			RevisionID           string `json:"revision_id"`
+			ContentSigning       string `json:"content_signing_input"`
+			ContentSigningSHA256 string `json:"content_signing_input_sha256"`
+			RevisionDomainInput  string `json:"revision_domain_input"`
+			FileDigest           string `json:"file_digest"`
 			PolicyDocument       string `json:"policy_document"`
 			PolicyDocumentSHA256 string `json:"policy_document_sha256"`
 		} `json:"vectors"`
@@ -318,24 +372,71 @@ func TestVectors(t *testing.T) {
 		if string(enc) != v.File {
 			t.Fatalf("%s: re-encoding differs from vector", v.Name)
 		}
-		sum := sha256.Sum256(enc)
-		if fmt.Sprintf("%x", sum) != v.FileSHA256 {
-			t.Fatalf("%s: sha256 mismatch", v.Name)
+		if got := sha256Hex(enc); got != v.FileSHA256 {
+			t.Fatalf("%s: file sha256 = %s, want %s", v.Name, got, v.FileSHA256)
 		}
-		if hb := HeaderBytes(&f.Header); string(hb) != v.Header {
-			t.Fatalf("%s: header bytes differ", v.Name)
+
+		// Revision identity: the vector pins both the input (canonical file
+		// without revision_id and content_signature) and the derived id.
+		rev, err := RevisionID(f)
+		if err != nil {
+			t.Fatalf("%s: revision id: %v", v.Name, err)
 		}
-		sum = sha256.Sum256(HeaderBytes(&f.Header))
-		if fmt.Sprintf("%x", sum) != v.HeaderSHA256 {
-			t.Fatalf("%s: header sha256 mismatch", v.Name)
+		if rev != v.RevisionID {
+			t.Fatalf("%s: revision id = %s, want %s", v.Name, rev, v.RevisionID)
 		}
+		// The draft carries no revision id and the sealed file carries
+		// exactly its derived one.
+		if v.State == "draft" && f.Header.RevisionID != "" {
+			t.Fatalf("%s: draft carries revision_id %q", v.Name, f.Header.RevisionID)
+		}
+		if v.State == "sealed" && f.Header.RevisionID != rev {
+			t.Fatalf("%s: sealed revision_id = %s, want derived %s", v.Name, f.Header.RevisionID, rev)
+		}
+		input, err := revisionDomainInput(f)
+		if err != nil {
+			t.Fatalf("%s: revision domain input: %v", v.Name, err)
+		}
+		if string(input) != v.RevisionDomainInput {
+			t.Fatalf("%s: revision domain input differs from vector", v.Name)
+		}
+		want, err := hex.DecodeString(v.RevisionID)
+		if err != nil {
+			t.Fatalf("%s: vector revision_id: %v", v.Name, err)
+		}
+		if !bytes.Equal(DomainSeparated(DomainRevision, input), want) {
+			t.Fatalf("%s: revision domain hash does not reproduce revision_id", v.Name)
+		}
+
+		// Content signing preimage: no content_signature member at all.
+		csb, err := ContentSigningBytes(f)
+		if err != nil {
+			t.Fatalf("%s: content signing bytes: %v", v.Name, err)
+		}
+		if string(csb) != v.ContentSigning {
+			t.Fatalf("%s: content signing input differs from vector", v.Name)
+		}
+		if got := sha256Hex(csb); got != v.ContentSigningSHA256 {
+			t.Fatalf("%s: content signing sha256 = %s, want %s", v.Name, got, v.ContentSigningSHA256)
+		}
+
+		// File digest: the complete canonical signed file.
+		if v.State == "sealed" {
+			fd, err := FileDigest(f)
+			if err != nil {
+				t.Fatalf("%s: file digest: %v", v.Name, err)
+			}
+			if fd != v.FileDigest {
+				t.Fatalf("%s: file digest = %s, want %s", v.Name, fd, v.FileDigest)
+			}
+		}
+
 		sp := &f.SignedPolicyProofs[0]
 		if string(sp.Document) != v.PolicyDocument {
 			t.Fatalf("%s: policy document differs", v.Name)
 		}
-		sum = sha256.Sum256(sp.Document)
-		if fmt.Sprintf("%x", sum) != v.PolicyDocumentSHA256 {
-			t.Fatalf("%s: policy document sha256 mismatch", v.Name)
+		if got := sha256Hex(sp.Document); got != v.PolicyDocumentSHA256 {
+			t.Fatalf("%s: policy document sha256 = %s, want %s", v.Name, got, v.PolicyDocumentSHA256)
 		}
 		// The carried document must be exactly the canonical bytes of the
 		// typed policy it is paired with.
@@ -343,30 +444,78 @@ func TestVectors(t *testing.T) {
 		if !bytes.Equal(canon, []byte(v.PolicyDocument)) {
 			t.Fatalf("%s: policy document not canonical", v.Name)
 		}
+		// Policy digest keeps its one external definition.
+		if !bytes.Equal(f.Header.PolicyDigest, PolicyDigest(&sp.Policy)) {
+			t.Fatalf("%s: header does not reference the policy digest", v.Name)
+		}
 	}
 }
 
-func writeVectors(t *testing.T) {
-	f := buildFile()
+func sha256Hex(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+func vectorEntry(t *testing.T, name, state string, f *File) map[string]any {
+	t.Helper()
 	enc, err := EncodeFile(f)
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := sha256.Sum256(enc)
-	hh := sha256.Sum256(HeaderBytes(&f.Header))
-	pd := sha256.Sum256(f.SignedPolicyProofs[0].Document)
+	rev, err := RevisionID(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state == "sealed" && rev != f.Header.RevisionID {
+		t.Fatalf("%s: revision id %s, header %s", name, rev, f.Header.RevisionID)
+	}
+	if state == "draft" && f.Header.RevisionID != "" {
+		t.Fatalf("%s: draft carries a revision id", name)
+	}
+	input, err := revisionDomainInput(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	csb, err := ContentSigningBytes(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := map[string]any{
+		"file_json":                    encodedNestedJSON(f),
+		"name":                         name,
+		"state":                        state,
+		"file":                         string(enc),
+		"file_sha256":                  sha256Hex(enc),
+		"revision_id":                  rev,
+		"revision_domain_input":        string(input),
+		"content_signing_input":        string(csb),
+		"content_signing_input_sha256": sha256Hex(csb),
+		"policy_document":              string(f.SignedPolicyProofs[0].Document),
+		"policy_document_sha256":       sha256Hex(f.SignedPolicyProofs[0].Document),
+	}
+	if state == "sealed" {
+		fd, err := FileDigest(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		entry["file_digest"] = fd
+	} else {
+		entry["file_digest"] = nil
+	}
+	return entry
+}
+
+func writeVectors(t *testing.T) {
+	sealed := buildFile(t)
+	// The draft is the sealed file before signing: only the signature and
+	// the revision id differ, so both share one revision identity.
+	draft := unsignedFile(t)
 	doc := map[string]any{
-		"$comment": "Synthetic locklark.vault-file/v1 encoding vectors. Signatures and wrapped keys are shaped, not valid; no cryptographic verification applies. Generated by TestWriteVectors; verify with TestVectors.",
-		"vectors": []map[string]any{{
-			"file_json":              encodedNestedJSON(f),
-			"name":                   "v1-canonical",
-			"file":                   string(enc),
-			"file_sha256":            fmt.Sprintf("%x", h),
-			"header":                 string(HeaderBytes(&f.Header)),
-			"header_sha256":          fmt.Sprintf("%x", hh),
-			"policy_document":        string(f.SignedPolicyProofs[0].Document),
-			"policy_document_sha256": fmt.Sprintf("%x", pd),
-		}},
+		"$comment": "Synthetic locklark.vault-file/v1 encoding vectors (see docs/vaultfile-wire-v1.md). Signature and wrapped-key bytes are shaped, not valid, and no signature is verified. revision_id is the v1 RevisionID hash of revision_domain_input (the canonical file with header.revision_id and content_signature omitted); content_signing_input is the canonical file with content_signature omitted and header.revision_id set to revision_id; file_digest is the v1 FileDigest of the sealed file only. Generated by TestWriteVectors; verify with TestVectors.",
+		"vectors": []map[string]any{
+			vectorEntry(t, "v1-canonical", "sealed", sealed),
+			vectorEntry(t, "v1-unsigned-draft", "draft", draft),
+		},
 	}
 	b := []byte(canonicalJSON(doc))
 	if *updateVectors {

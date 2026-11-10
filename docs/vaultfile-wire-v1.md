@@ -1,8 +1,9 @@
 # locklark.vault-file/v1 Wire Schema
 
-Status: draft. Implemented in `pkg/vaultfile` (structure and canonical codec
-only). This document describes the wire format; it makes no cryptographic
-correctness claim and grants no migration or product permission.
+Status: draft. Implemented in `pkg/vaultfile` (structure, canonical codec and
+preimage derivation only). This document describes the wire format and the
+frozen v1 preimages; it makes no cryptographic correctness claim and grants no
+migration or product permission.
 
 ## Background
 
@@ -14,6 +15,11 @@ protocol identifier in this document, in `pkg/vaultfile` and in
 token, `version` is `1`, and the schema URI is
 `https://locklark.dev/schema/locklark.vault-file/v1`.
 
+v1 has no header signature. An earlier draft carried a `header_sig` member;
+it is not a member of v1 and is rejected as `unknown_field`. The header is
+covered through `content_signature`, which commits to the derived revision id
+(see [File states](#file-states)).
+
 ## Wire identifiers
 
 | Constant        | Value                                                 |
@@ -24,10 +30,17 @@ token, `version` is `1`, and the schema URI is
 | MIME type       | `application/vnd.locklark.vault-file+json`            |
 | `content_encoding` | `kdbx`                                             |
 
-Every domain-separation label is prefixed with `locklark.vault-file/v1/`:
+Every domain-separation label is prefixed with `locklark.vault-file/v1/`.
 
-- `/content-signature`, `/header-signature`, `/policy-document-signature`
-- `/admin-delegation`, `/vuk-device-wrapping`, `/cek-wrapping`
+Purpose domains (each prefixes exactly one preimage, followed by `0x00`):
+
+- `/content-signature`, `/revision`, `/file-digest`
+- `/policy-document-signature`, `/admin-delegation`
+- `/vuk-device-wrapping`, `/cek-wrapping`
+
+Identification usage labels (fingerprints only; they never appear in a signing,
+revision or file-digest preimage):
+
 - `/vault-id`, `/content-revision-id`, `/op-id`, `/device-id`
 - `/key/device-content-signing`, `/key/device-policy-signing`,
   `/key/age-x25519`, `/policy-document`
@@ -41,30 +54,32 @@ A vault file is one self-contained canonical-JSON object. Content bytes are
 embedded (`kdbx_ciphertext`), never referenced by digest only. In the sync
 protocol, `R` is exactly these bytes as read back from the backend.
 
+The file members are exactly these, in this order; any other member is
+unknown:
+
 ```
 {
-  "format":             <format>,
-  "version":            <version>,
-  "header":             { Header },
-  "header_sig":         { Signature },
+  "format":               <format>,
+  "version":              <version>,
+  "header":               { Header },
   "signed_policy_proofs": [ { SignedPolicy } ],
-  "content_encoding":   <content_encoding>,
-  "kdbx_ciphertext":    <base64url>,
-  "vuk_device_slots":   [ { DeviceSlot } ],
-  "cek_slot":           { "key_epoch": <int>, "wrapped_cek": <base64url> },
-  "content_signature":  { Signature }
+  "content_encoding":     <content_encoding>,
+  "kdbx_ciphertext":      <base64url>,
+  "vuk_device_slots":     [ { DeviceSlot } ],
+  "cek_slot":             { "key_epoch": <int>, "wrapped_cek": <base64url> },
+  "content_signature":    { Signature }
 }
 ```
 
-`Header` (the bytes `header_sig` covers):
+`Header`:
 
 ```
 {
   "vault_id":         <id>,
   "key_epoch":        <int>,
   "content_seq":      <int>,
-  "revision_id":      <id>,
-  "prev_digest":      <base64url sha256> | null,   // null only at content_seq 0
+  "revision_id":      <lowercase hex sha256> | "",   // "" only in an unsigned draft
+  "prev_digest":      <base64url sha256> | null,     // null only at content_seq 0
   "op_id":            <id>,
   "policy_seq":       <int>,
   "policy_digest":    <base64url sha256>,
@@ -72,7 +87,12 @@ protocol, `R` is exactly these bytes as read back from the backend.
 }
 ```
 
-`Signature`: `{"signer_id": <id>, "alg": "ed25519", "sig": <base64url 64 bytes>}`.
+`revision_id` is the derived `RevisionID` of the file (see
+[Preimages](#frozen-v1-preimages)); it is never an input of any preimage.
+
+`Signature`: `{"signer_id": <id>, "alg": "ed25519", "sig": <base64url 64 bytes> | null}`.
+`sig` is `null` only in the unsigned draft (below); every other signature
+member requires a 64-byte value.
 
 `SignedPolicy`: `{"document": <base64url>, "policy": { Policy }, "signer_id",
 "alg", "sig"}`. `document` is the canonical encoding of `policy`; verification
@@ -118,7 +138,7 @@ policy_digest(P) = SHA-256( "locklark.vault-file/v1/policy-document" || 0x00
 ```
 
 It is always computed outside the `Policy` document (the `/policy-document`
-domain label with the NUL separator, as in `DomainSeparated`), from the same
+usage label with the NUL separator, as in `DomainSeparated`), from the same
 canonical bytes that `SignedPolicy.document` carries. Two references point at
 this one value:
 
@@ -141,6 +161,70 @@ before them: writer implies reader, admin implies writer, owner implies admin.
 A device whose principal is in none of `readers`, `writers`, `admins`,
 `owners` is rejected.
 
+## File states
+
+A file has exactly two valid states. `SealFile(f, sig)` produces exactly one
+of them; nothing else is a valid file.
+
+- **unsigned draft**: `header.revision_id` is `""` and `content_signature` is
+  exactly `{"signer_id":"","alg":"","sig":null}`. A non-empty `signer_id` or
+  `alg` here is a signature-shape error. A writer holds this state between
+  building the file and signing `ContentSigningBytes`.
+- **sealed**: `header.revision_id` is exactly `RevisionID` of the file, and
+  `content_signature` carries a 64-byte `sig` by the header's author device
+  with the shape of that device's content signing key. An empty
+  `header.revision_id` is a `missing_field`; a different one is an
+  `invalid_value`.
+
+No other combination is accepted, including a null `sig` with a revision id or
+a non-null `sig` without one.
+
+## Frozen v1 preimages
+
+Three values are derived from one file. Each is
+`SHA-256(domain || 0x00 || input)`; the 32-byte result is written as lowercase
+hex where the schema says hex.
+
+The inputs are the same canonical-JSON bytes as the file, produced with the
+same member order and binary encodings. "Omitted" is literal: the member is
+absent, not `null`, `""`, or any other placeholder. An independent
+implementation must omit the member too; an omitted member and an empty
+member are different bytes and different hashes.
+
+```
+RevisionID(f) = SHA-256( "/locklark.vault-file/v1/revision" || 0x00
+                         || canonical file
+                            without header.revision_id
+                            without content_signature )
+```
+
+Both members are removed entirely. `RevisionID` never reads the file's
+carried `revision_id` or `content_signature`, so a draft and the file sealed
+from it have the same revision id, and a stale revision id cannot change it.
+When `header.revision_id` is removed, the header keeps the order of its other
+members: `vault_id`, `key_epoch`, `content_seq`, `prev_digest`, `op_id`,
+`policy_seq`, `policy_digest`, `author_device_id`.
+
+```
+ContentSigningBytes(f) = canonical file
+                         with header.revision_id = RevisionID(f)
+                         without content_signature
+```
+
+`header.revision_id` is present and names the derived revision.
+`content_signature` is removed entirely. The signer signs
+`"/locklark.vault-file/v1/content-signature" || 0x00 || ContentSigningBytes(f)`.
+The preimage is identical for the draft and for the sealed file, so the header
+is covered through the revision id without a second signature.
+
+```
+FileDigest(f) = SHA-256( "/locklark.vault-file/v1/file-digest" || 0x00
+                         || EncodeFile(f) )
+```
+
+The input is the complete canonical sealed file, `revision_id` and
+`content_signature` included, unchanged.
+
 ## Structural rules
 
 The codec is strict:
@@ -157,15 +241,30 @@ The codec is strict:
 `ValidateFile` also checks the cross-member bindings: every policy proof names
 the header vault, exactly one proof carries the header policy sequence and its
 `policy_digest` (as defined above) equals `Header.policy_digest`, the content
-signature names the authoring device, the header signature names a device with
-a policy signing key, the CEK slot epoch matches the header epoch, and the
-author's principal is a writer, admin or owner.
+signature and `revision_id` follow the two states above, the CEK slot epoch
+matches the header epoch, and the author is a policy device whose principal is
+a writer, admin or owner.
 
 The VUK slots are exactly the approved devices whose principal has read
-access (reader, writer, admin or owner): every such device has one slot and no
-other device has any, so no device without a read role is wrapped the VUK and
-no read-capable device is left without it. A slot must name a policy device
-and carry that device's age recipient.
+access (reader, writer, admin or owner): every such device has one slot in the
+set and no other device has any, so no device without a read role is wrapped
+the VUK and no read-capable device is left without it. A slot must name a
+policy device and carry that device's age recipient. Slot position is not a
+rule: moving a slot changes the revision input and therefore the revision id,
+so a file is resealed after reordering.
+
+## Validation scope
+
+Validation is shape only:
+
+- signature bytes are checked for length and encoding, never verified; the
+  package computes no signature and accepts none;
+- `revision_id` is checked to equal `RevisionID`; it is not a signature;
+- wrapped-key bytes are checked for presence and size, never unwrapped;
+- public keys and age recipients are parsed for shape only;
+- whether `prev_digest` or `prev_policy_digest` names a known prior value, and
+  whether a signer's principal currently holds the role it claims, are sync
+  and authorization decisions outside this codec.
 
 ## Budgets
 
@@ -191,21 +290,34 @@ and carry that device's age recipient.
 
 ## Encoding vectors
 
-`pkg/vaultfile/testdata/vaultfile-v1-vectors.json` holds one fixed synthetic
-vector named `v1-canonical`. Its signatures and wrapped keys are shaped, not
-valid. Regenerate it with:
+`pkg/vaultfile/testdata/vaultfile-v1-vectors.json` holds two fixed synthetic
+vectors:
+
+- `v1-canonical` (`state: sealed`);
+- `v1-unsigned-draft` (`state: draft`), the same content before signing.
+
+Signature and wrapped-key bytes are shaped, not valid. Each vector records,
+for exactly these bytes: `file`, `file_sha256`, `revision_id`,
+`revision_domain_input` (the unhashed `RevisionID` input),
+`content_signing_input` and `content_signing_input_sha256`,
+`policy_document` and `policy_document_sha256`, and `file_digest` for the
+sealed vector. Both vectors share one `revision_id` and one
+`content_signing_input`. Regenerate with:
 
 ```
 go test ./pkg/vaultfile/... -run TestWriteVectors -update
 ```
 
 `TestVectors` verifies that re-encoding reproduces the vector bytes and that
-the recorded SHA-256 digests of the file, header and policy document still
-match.
+every recorded value is reproduced. `TestRevisionPreimageOmitsRevisionID`,
+`TestContentSigningPreimage`, `TestSealedEncodingMembers`,
+`TestRevisionPreimageFixedVector` and `TestSealFileStates` in
+`pkg/vaultfile/signing_test.go` pin the exact JSON members of every preimage and
+both file states independently of the vector file.
 
 ## Out of scope
 
 This schema revision does not include signature verification, permission
-checks, key or digest crypto beyond the fixed `policy_digest` definition,
-migration/import or product wiring. Encoding and validation are structural
-only and have not been reviewed for cryptographic correctness.
+checks, key or digest crypto beyond the definitions above, migration/import or
+product wiring. Encoding and validation are shape-only and have not been
+reviewed for cryptographic correctness.

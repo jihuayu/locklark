@@ -12,12 +12,15 @@ import (
 // Labels are defined here only; this package does not sign, verify, wrap or
 // derive anything.
 const (
-	// Content signatures over the canonical file bytes.
+	// Content signatures over ContentSigningBytes.
 	DomainContentSignature = "locklark.vault-file/v1/content-signature"
 
-	// Header signatures over HeaderBytes (vault, epoch, seq, revision, parent
-	// digest, policy digest, author device).
-	DomainHeaderSignature = "locklark.vault-file/v1/header-signature"
+	// Revision identities over the canonical file with header.revision_id and
+	// content_signature removed (RevisionID).
+	DomainRevision = "locklark.vault-file/v1/revision"
+
+	// File digests over the complete canonical signed file (FileDigest).
+	DomainFileDigest = "locklark.vault-file/v1/file-digest"
 
 	// Policy document signatures over SignedPolicy.Document.
 	DomainPolicyDocumentSignature = "locklark.vault-file/v1/policy-document-signature"
@@ -39,6 +42,7 @@ const (
 	UsageDeviceContentSigningKey = "locklark.vault-file/v1/key/device-content-signing"
 	UsageDevicePolicySigningKey  = "locklark.vault-file/v1/key/device-policy-signing"
 	UsageAgeEncryptionKey        = "locklark.vault-file/v1/key/age-x25519"
+
 	// UsagePolicyDocument is the policy digest domain: the SHA-256 digest of
 	// a canonical policy document (PolicyDigest). It is computed outside the
 	// policy and referenced by Header.PolicyDigest and the next policy's
@@ -49,12 +53,16 @@ const (
 	DigestSHA256 = DigestAlgSHA256
 )
 
+// Key fingerprints are identification only (the Usage* labels): they never
+// appear in a signing, revision or file-digest preimage.
+//
 // Domains lists all purpose domains in a stable order. Implementations of
 // signing (outside this package) must prefix inputs with exactly one of them.
 func Domains() []string {
 	return []string{
 		DomainContentSignature,
-		DomainHeaderSignature,
+		DomainRevision,
+		DomainFileDigest,
 		DomainPolicyDocumentSignature,
 		DomainAdminDelegation,
 		DomainVUKDeviceWrapping,

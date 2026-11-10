@@ -11,7 +11,7 @@ import (
 
 func mustEncode(t *testing.T) []byte {
 	t.Helper()
-	b, err := EncodeFile(buildFile())
+	b, err := EncodeFile(buildFile(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,8 +93,6 @@ func mustEncodeWith(t *testing.T, f *File) string {
 	b.WriteString(quote(f.Format))
 	b.WriteString(`,"version":` + itoa(uint64(Version)) + `,"header":`)
 	writeHeader(&b, &f.Header)
-	b.WriteString(`,"header_sig":`)
-	writeSignature(&b, &f.HeaderSig)
 	b.WriteString(`,"signed_policy_proofs":`)
 	writeArray(&b, len(f.SignedPolicyProofs), func(i int) {
 		sp := &f.SignedPolicyProofs[i]
@@ -263,7 +261,7 @@ func TestLimitsBeforeUse(t *testing.T) {
 	wantCode(t, err, CodeTooLarge)
 
 	// Content above the ciphertext budget fails on the typed path ...
-	f := buildFile()
+	f := buildFile(t)
 	f.KDBXCiphertext = make([]byte, MaxKDBXCiphertextBytes+1)
 	_, err = EncodeFile(f)
 	wantCode(t, err, CodeLimitExceeded)
@@ -301,20 +299,20 @@ func mustEncodeDoc(t *testing.T) []byte {
 }
 
 func TestPolicyDocumentBinding(t *testing.T) {
-	f := buildFile()
+	f := buildFile(t)
 	p := f.SignedPolicyProofs[0].Policy
 	p.Readers = append(p.Readers, Member{PrincipalID: "dave", Label: "Dave"})
 	rebindProof(f, docFor(&p), "owner-root-01", PolicySigAlgEd25519)
 	_, err := EncodeFile(f)
 	wantCode(t, err, CodePolicyMismatch)
 
-	f = buildFile()
+	f = buildFile(t)
 	rebindProof(f, []byte(`{"format":"locklark.vault-file","version":1}`), "owner-root-01", PolicySigAlgEd25519)
 	_, err = EncodeFile(f)
 	wantCode(t, err, CodeMissingField)
 
 	// A proof must name a signer and a supported algorithm.
-	f = buildFile()
+	f = buildFile(t)
 	rebindProof(f, f.SignedPolicyProofs[0].Document, "owner-root-01", "rsa")
 	_, err = EncodeFile(f)
 	wantCode(t, err, CodeSignatureInvalid)
@@ -322,12 +320,12 @@ func TestPolicyDocumentBinding(t *testing.T) {
 
 func TestHeaderBinding(t *testing.T) {
 	mutate := func(f *File) { f.Header.PolicySeq = 6 }
-	f := buildFile()
+	f := buildFile(t)
 	mutate(f)
 	_, err := EncodeFile(f)
 	wantCode(t, err, CodeHeaderMismatch)
 
-	f = buildFile()
+	f = buildFile(t)
 	f.Header.PolicyDigest = digest("other")
 	_, err = EncodeFile(f)
 	wantCode(t, err, CodeHeaderMismatch)
@@ -335,42 +333,42 @@ func TestHeaderBinding(t *testing.T) {
 
 func TestSignerShape(t *testing.T) {
 	// Content signature must name a valid device with a content key.
-	f := buildFile()
+	f := buildFile(t)
 	f.ContentSignature.SignerID = "device-9"
 	_, err := EncodeFile(f)
 	wantCode(t, err, CodeSignatureInvalid)
 
-	f = buildFile()
+	f = buildFile(t)
 	f.ContentSignature.Sig = f.ContentSignature.Sig[:63]
 	_, err = EncodeFile(f)
 	wantCode(t, err, CodeSignatureInvalid)
 
-	f = buildFile()
+	// A sealed file with a null sig is not a draft; a draft also has an
+	// empty signer and algorithm and no revision id.
+	f = buildFile(t)
 	f.ContentSignature.Sig = nil
 	_, err = EncodeFile(f)
 	wantCode(t, err, CodeSignatureInvalid)
+	if _, err := EncodeFile(unsignedFile(t)); err != nil {
+		t.Fatalf("unsigned draft rejected: %v", err)
+	}
 
-	// Header signature must come from a device holding a policy key.
-	f = buildFile()
-	f.HeaderSig.Alg = "rsa"
-	f.HeaderSig.Sig = f.HeaderSig.Sig[:32]
+	// The content signature must have the author device's content key shape.
+	f = buildFile(t)
+	f.ContentSignature.Alg = "rsa"
 	_, err = EncodeFile(f)
 	wantCode(t, err, CodeSignatureInvalid)
 
-	f = buildFile()
-	f.HeaderSig.SignerID = "owner-root-01"
-	_, err = EncodeFile(f)
-	wantCode(t, err, CodeSignatureInvalid)
-
-	f = buildFile()
-	f.HeaderSig.Sig = f.HeaderSig.Sig[:32]
+	// The signer must be the authoring device itself.
+	f = buildFile(t)
+	f.ContentSignature.SignerID = "device-2"
 	_, err = EncodeFile(f)
 	wantCode(t, err, CodeSignatureInvalid)
 }
 
 func TestPurposeSeparatedKeys(t *testing.T) {
 	// The same bytes in the content role and the policy role must be rejected.
-	f := buildFile()
+	f := buildFile(t)
 	p := f.SignedPolicyProofs[0].Policy
 	p.Devices[0].PolicySigningKey.PublicKey =
 		append([]byte(nil), p.Devices[0].ContentSigningKey.PublicKey...)
@@ -379,14 +377,14 @@ func TestPurposeSeparatedKeys(t *testing.T) {
 	wantCode(t, err, CodeInvalidValue)
 
 	// An age key slot whose recipient is not the device's key is rejected.
-	f = buildFile()
+	f = buildFile(t)
 	f.VUKDeviceSlots = f.VUKDeviceSlots[:1]
 	f.VUKDeviceSlots[0].Recipient = f.SignedPolicyProofs[0].Policy.Devices[1].AgeEncryptionKey
 	_, err = EncodeFile(f)
 	wantCode(t, err, CodeInvalidValue)
 
 	// A private key is never valid in a public-key member.
-	f = buildFile()
+	f = buildFile(t)
 	p = f.SignedPolicyProofs[0].Policy
 	p.Devices[0].ContentSigningKey.PublicKey = make([]byte, ed25519.PrivateKeySize)
 	setPolicy(f, &p)
@@ -394,7 +392,7 @@ func TestPurposeSeparatedKeys(t *testing.T) {
 	wantCode(t, err, CodeInvalidValue)
 
 	// Delegations may never delegate owner promotion or root replacement.
-	f = buildFile()
+	f = buildFile(t)
 	p = f.SignedPolicyProofs[0].Policy
 	p.AdminDelegations[0].Scope.PromoteOwner = true
 	setPolicy(f, &p)
@@ -402,7 +400,7 @@ func TestPurposeSeparatedKeys(t *testing.T) {
 	wantCode(t, err, CodeInvalidValue)
 
 	// A policy without any owner is rejected.
-	f = buildFile()
+	f = buildFile(t)
 	p = f.SignedPolicyProofs[0].Policy
 	p.Owners = nil
 	p.OwnerRoot.Owners = nil
@@ -412,11 +410,12 @@ func TestPurposeSeparatedKeys(t *testing.T) {
 }
 
 func TestGenesisPrevDigest(t *testing.T) {
-	f := buildFile()
+	f := buildFile(t)
 	f.Header.ContentSeq = 0
 	_, err := EncodeFile(f)
 	wantCode(t, err, CodeInvalidValue)
 	f.Header.PrevDigest = nil
+	reseal(t, f)
 	if _, err := EncodeFile(f); err != nil {
 		t.Fatal(err)
 	}
@@ -426,7 +425,7 @@ func TestGenesisPrevDigest(t *testing.T) {
 // computed outside the policy, referenced by Header.PolicyDigest, and the next
 // policy's PrevPolicyDigest is the same value.
 func TestPolicyDigestContract(t *testing.T) {
-	f := buildFile()
+	f := buildFile(t)
 	sp := &f.SignedPolicyProofs[0]
 
 	// SHA-256(domain || NUL || canonical document bytes), computed by hand.
@@ -503,7 +502,7 @@ func deviceByID(t *testing.T, p *Policy, id string) Device {
 
 func TestDevicePrincipalRequired(t *testing.T) {
 	// The principal is mandatory on the typed path ...
-	f := buildFile()
+	f := buildFile(t)
 	f.SignedPolicyProofs[0].Policy.Devices[0].PrincipalID = ""
 	_, err := EncodeFile(f)
 	wantCode(t, err, CodeInvalidValue)
@@ -524,7 +523,7 @@ func TestDevicePrincipalRequired(t *testing.T) {
 	wantCode(t, err, CodeInvalidValue)
 
 	// A principal in the owner root but in no role array grants no device.
-	f = buildFile()
+	f = buildFile(t)
 	p := f.SignedPolicyProofs[0].Policy
 	p.OwnerRoot.Owners = append(p.OwnerRoot.Owners, Principal{PrincipalID: "dave", Label: "Dave"})
 	p.Devices[1].PrincipalID = "dave"
@@ -554,36 +553,39 @@ func TestRoleImplication(t *testing.T) {
 
 func TestAuthorRole(t *testing.T) {
 	// A device whose principal is only a reader may not author a file.
-	f := buildFile()
+	f := buildFile(t)
 	p := f.SignedPolicyProofs[0].Policy
 	p.Devices[1].PrincipalID = "carol"
 	setPolicy(f, &p)
 	f.Header.AuthorDeviceID = "device-2"
-	f.HeaderSig.SignerID = "device-2"
 	f.ContentSignature.SignerID = "device-2"
 	_, err := EncodeFile(f)
 	wantCode(t, err, CodeInvalidValue)
 
 	// An owner may author.
-	f = buildFile()
+	f = buildFile(t)
 	if _, err := EncodeFile(f); err != nil {
 		t.Fatalf("owner-authored file rejected: %v", err)
 	}
 
 	// A writer may author though it is not listed under readers.
-	f = buildFile()
+	f = buildFile(t)
 	f.Header.AuthorDeviceID = "device-2"
-	f.HeaderSig.SignerID = "device-2"
 	f.ContentSignature.SignerID = "device-2"
+	reseal(t, f)
 	if _, err := EncodeFile(f); err != nil {
 		t.Fatalf("writer-authored file rejected: %v", err)
 	}
 
-	// A device not in the policy is still a signature-shape error.
-	f = buildFile()
+	// A device not in the policy holds no role and is rejected, in either
+	// signature state.
+	f = buildFile(t)
 	f.Header.AuthorDeviceID = "device-9"
+	f.ContentSignature.SignerID = "device-9"
 	_, err = EncodeFile(f)
-	wantCode(t, err, CodeSignatureInvalid)
+	wantCode(t, err, CodeInvalidValue)
+	_, err = SealFile(f, nil)
+	wantCode(t, err, CodeInvalidValue)
 }
 
 func TestVUKSlots(t *testing.T) {
@@ -594,7 +596,7 @@ func TestVUKSlots(t *testing.T) {
 
 	// A slot for a device whose principal has no read role is rejected,
 	// even with a matching recipient: that would hand it the vault key.
-	f := buildFile()
+	f := buildFile(t)
 	p := f.SignedPolicyProofs[0].Policy
 	p.Writers = nil
 	p.Devices[1].PrincipalID = "bob" // bob now has no role at all
@@ -602,7 +604,7 @@ func TestVUKSlots(t *testing.T) {
 	_, err := EncodeFile(f)
 	wantCode(t, err, CodeInvalidValue)
 
-	f = buildFile()
+	f = buildFile(t)
 	p = f.SignedPolicyProofs[0].Policy
 	p.Devices[1].PrincipalID = "dave"
 	p.OwnerRoot.Owners = append(p.OwnerRoot.Owners, Principal{PrincipalID: "dave", Label: "Dave"})
@@ -611,24 +613,24 @@ func TestVUKSlots(t *testing.T) {
 	wantCode(t, err, CodeInvalidValue)
 
 	// An approved device with a read role must have a slot.
-	f = buildFile()
+	f = buildFile(t)
 	f.VUKDeviceSlots = f.VUKDeviceSlots[:1]
 	_, err = EncodeFile(f)
 	wantCode(t, err, CodeInvalidValue)
 
 	// A slot may only name a policy device; unknown and duplicate ids fail.
-	f = buildFile()
+	f = buildFile(t)
 	f.VUKDeviceSlots[1].DeviceID = "device-9"
 	_, err = EncodeFile(f)
 	wantCode(t, err, CodeInvalidValue)
 
-	f = buildFile()
+	f = buildFile(t)
 	f.VUKDeviceSlots[1] = f.VUKDeviceSlots[0]
 	_, err = EncodeFile(f)
 	wantCode(t, err, CodeInvalidValue)
 
 	// A device added to the policy needs its slot in the same file.
-	f = buildFile()
+	f = buildFile(t)
 	p = f.SignedPolicyProofs[0].Policy
 	// carol already holds a device, so the new one goes to another reader.
 	p.Readers = append(p.Readers, Member{PrincipalID: "erin", Label: "Erin"})
@@ -643,6 +645,7 @@ func TestVUKSlots(t *testing.T) {
 	_, err = EncodeFile(f)
 	wantCode(t, err, CodeInvalidValue)
 	f.VUKDeviceSlots = append(f.VUKDeviceSlots, slotOf(&f.SignedPolicyProofs[0].Policy, "device-3"))
+	reseal(t, f)
 	if _, err := EncodeFile(f); err != nil {
 		t.Fatalf("complete slot set rejected: %v", err)
 	}
@@ -651,12 +654,26 @@ func TestVUKSlots(t *testing.T) {
 	// reordering of the same slots is still valid.
 	base := mustEncode(t)
 	enc := string(base)
-	s0, s1 := string(mustSlotJSON(t, buildFile(), 0)), string(mustSlotJSON(t, buildFile(), 1))
+	s0, s1 := string(mustSlotJSON(t, buildFile(t), 0)), string(mustSlotJSON(t, buildFile(t), 1))
 	if !strings.Contains(enc, s0+","+s1) {
 		t.Fatal("unexpected slot encoding in vector")
 	}
 	swapped := strings.Replace(enc, s0+","+s1, s1+","+s0, 1)
+	if swapped == enc {
+		t.Fatal("slots were not reordered")
+	}
+	// Slot order is inside the revision input, so the reordered file is a
+	// different revision and its stale revision id is rejected ...
 	if _, err := ParseFile([]byte(swapped)); err != nil {
+		wantCode(t, err, CodeInvalidValue)
+	} else {
+		t.Fatal("stale revision id accepted after reordering")
+	}
+	// ... while the same slot set moved into a type value reseals and parses.
+	reordered := buildFile(t)
+	reordered.VUKDeviceSlots[0], reordered.VUKDeviceSlots[1] = reordered.VUKDeviceSlots[1], reordered.VUKDeviceSlots[0]
+	reseal(t, reordered)
+	if _, err := EncodeFile(reordered); err != nil {
 		t.Fatalf("reordered slots rejected: %v", err)
 	}
 }
@@ -678,10 +695,10 @@ func mustSlotJSON(t *testing.T, f *File, i int) []byte {
 func TestValidWriterRoundTrip(t *testing.T) {
 	// Bob is only a writer. His device authors the file and keeps exactly
 	// its own slot beside the owner's; the encoding round-trips unchanged.
-	f := buildFile()
+	f := buildFile(t)
 	f.Header.AuthorDeviceID = "device-2"
-	f.HeaderSig.SignerID = "device-2"
 	f.ContentSignature.SignerID = "device-2"
+	reseal(t, f)
 	enc, err := EncodeFile(f)
 	if err != nil {
 		t.Fatal(err)

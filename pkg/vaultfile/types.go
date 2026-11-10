@@ -10,11 +10,21 @@ import (
 //
 // R in the sync protocol means exactly these bytes as read back from the
 // backend; it is never a legacy document.
+//
+// A file has exactly two states (see ValidateFile):
+//
+//   - unsigned draft: content_signature is the null sig {"signer_id":"",
+//     "alg":"","sig":null} and header.revision_id is "". A writer holds this
+//     state between building the file and signing ContentSigningBytes.
+//   - sealed: content_signature is a 64-byte signature by the header's author
+//     device and header.revision_id is the derived RevisionID of the file.
+//
+// There is no header signature. The header is covered by the content
+// signature through RevisionID, so a writer never manages a header key.
 type File struct {
 	Format             string         `json:"format"`
 	Version            int            `json:"version"`
 	Header             Header         `json:"header"`
-	HeaderSig          Signature      `json:"header_sig"`
 	SignedPolicyProofs []SignedPolicy `json:"signed_policy_proofs"`
 	ContentEncoding    string         `json:"content_encoding"`
 	KDBXCiphertext     []byte         `json:"kdbx_ciphertext"`
@@ -29,6 +39,10 @@ type File struct {
 // the policy document at PolicySeq, computed outside the header. All
 // identifiers that are not names are opaque byte strings carried as
 // base64url without padding.
+//
+// RevisionID is the derived revision identity of the file (RevisionID), 32
+// bytes as lowercase hex, or "" in an unsigned draft. It is never an input of
+// a preimage: see ContentSigningBytes.
 type Header struct {
 	VaultID        string `json:"vault_id"`
 	KeyEpoch       uint64 `json:"key_epoch"`
@@ -164,8 +178,10 @@ type CEKSlot struct {
 	WrappedCEK []byte `json:"wrapped_cek"`
 }
 
-// ContentRevision identifies a content snapshot by its ordinal and digest.
-// It is what the signature commits to and what device checkpoints compare.
+// ContentRevision identifies a content snapshot by its ordinal, revision
+// identity and file digest. RevisionID is RevisionID of the sealed file and
+// Digest is FileDigest of it; neither value is carried inside the preimage it
+// is derived from.
 type ContentRevision struct {
 	ContentSeq uint64 `json:"content_seq"`
 	RevisionID string `json:"revision_id"`

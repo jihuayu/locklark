@@ -23,13 +23,12 @@ func TestAgeRecipientRealIdentityAccepted(t *testing.T) {
 	}
 
 	// The same recipient must pass through a whole policy and file.
-	f := buildFile()
+	f := buildFile(t)
 	p := f.SignedPolicyProofs[0].Policy
 	p.Devices[0].AgeEncryptionKey = r
-	f.SignedPolicyProofs[0].Document = docFor(&p)
-	f.SignedPolicyProofs[0].Policy = p
-	f.Header.PolicyDigest = policyDigest(&f.SignedPolicyProofs[0])
+	setPolicy(f, &p)
 	f.VUKDeviceSlots[0].Recipient = r
+	reseal(t, f)
 	if _, err := EncodeFile(f); err != nil {
 		t.Fatalf("file with real recipient rejected: %v", err)
 	}
@@ -75,7 +74,7 @@ func TestAgeRecipientNegative(t *testing.T) {
 		{"checksum", ageRecipientCorruptChecksum(r)},
 		{"identity", id.String()},
 	} {
-		f := buildFile()
+		f := buildFile(t)
 		p := f.SignedPolicyProofs[0].Policy
 		p.Devices[0].AgeEncryptionKey = tc.in
 		setPolicy(f, &p)
@@ -84,7 +83,7 @@ func TestAgeRecipientNegative(t *testing.T) {
 
 		// Same bad text in both the policy and the slot must not slip past
 		// the equality binding either.
-		f = buildFile()
+		f = buildFile(t)
 		p = f.SignedPolicyProofs[0].Policy
 		p.Devices[0].AgeEncryptionKey = tc.in
 		setPolicy(f, &p)

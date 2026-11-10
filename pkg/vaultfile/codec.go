@@ -22,16 +22,20 @@ import (
 // Encoding never uses json.Marshal on a struct: output member order is the
 // schema order below so fixed vectors are byte-stable.
 
+// fileMembers is the exact, ordered member set of a vault file. Any other
+// member is rejected as unknown; header_sig is not a member of v1.
+var fileMembers = []string{
+	"format", "version", "header", "signed_policy_proofs",
+	"content_encoding", "kdbx_ciphertext", "vuk_device_slots", "cek_slot",
+	"content_signature",
+}
+
 // ParseFile strictly parses and validates one complete vault file.
 func ParseFile(data []byte) (*File, error) {
 	if len(data) > MaxFileBytes {
 		return nil, &Error{Code: CodeTooLarge, Path: ""}
 	}
-	v, err := decodeCanonical(data, []string{
-		"format", "version", "header", "header_sig", "signed_policy_proofs",
-		"content_encoding", "kdbx_ciphertext", "vuk_device_slots", "cek_slot",
-		"content_signature",
-	}, MaxJSONDepth)
+	v, err := decodeCanonical(data, fileMembers, MaxJSONDepth)
 	if err != nil {
 		return nil, err
 	}
@@ -48,20 +52,50 @@ func ParseFile(data []byte) (*File, error) {
 // EncodeFile validates f and returns its canonical encoding.
 func EncodeFile(f *File) ([]byte, error) {
 	if f == nil {
-		return nil, &Error{Code: CodeInvalidValue, Path: ""}
+		return nil, &Error{Code: CodeInvalidValue}
 	}
 	if err := ValidateFile(f); err != nil {
 		return nil, err
 	}
+	return encodeFileWire(f, fileEncoding{})
+}
+
+// fileEncoding selects which derived values the internal canonical encoder
+// writes, independently of the fields f carries. It never validates: it
+// writes the member shapes only, so a preimage can name members that are not
+// yet derivable from f.
+type fileEncoding struct {
+	// revisionID, when non-nil, is written as header.revision_id.
+	revisionID *string
+	// omitRevision drops the header member revision_id entirely. It takes
+	// precedence over revisionID; the two are never set together.
+	omitRevision bool
+	// omitSignature drops the file member content_signature entirely.
+	omitSignature bool
+}
+
+// encodeFileWire writes the canonical encoding of f under enc without
+// validating it. Without an omission option the encoding is exactly
+// EncodeFile's: header.revision_id as f carries it (including "" for an
+// unsigned draft) and content_signature as f carries it (sig null for an
+// unsigned draft). With enc.omitRevision or enc.omitSignature set, the named
+// member is absent rather than empty, so a derived preimage is literally the
+// canonical file minus that member.
+func encodeFileWire(f *File, enc fileEncoding) ([]byte, error) {
 	var b bytes.Buffer
 	b.WriteByte('{')
 	writeStr(&b, "format", f.Format)
 	b.WriteByte(',')
 	writeInt(&b, "version", uint64(f.Version))
 	b.WriteString(`,"header":`)
-	writeHeader(&b, &f.Header)
-	b.WriteString(`,"header_sig":`)
-	writeSignature(&b, &f.HeaderSig)
+	switch {
+	case enc.omitRevision:
+		writeHeaderWithoutRevision(&b, &f.Header)
+	case enc.revisionID != nil:
+		writeHeaderWithRevision(&b, &f.Header, *enc.revisionID)
+	default:
+		writeHeader(&b, &f.Header)
+	}
 	b.WriteString(`,"signed_policy_proofs":`)
 	writeArray(&b, len(f.SignedPolicyProofs), func(i int) {
 		sp := &f.SignedPolicyProofs[i]
@@ -96,8 +130,11 @@ func EncodeFile(f *File) ([]byte, error) {
 	b.WriteString(itoa(f.CEKSlot.KeyEpoch))
 	b.WriteString(`,"wrapped_cek":`)
 	writeBytes(&b, f.CEKSlot.WrappedCEK)
-	b.WriteString(`},"content_signature":`)
-	writeSignature(&b, &f.ContentSignature)
+	b.WriteByte('}')
+	if !enc.omitSignature {
+		b.WriteString(`,"content_signature":`)
+		writeSignature(&b, &f.ContentSignature)
+	}
 	b.WriteByte('}')
 	if b.Len() > MaxFileBytes {
 		return nil, &Error{Code: CodeTooLarge}
@@ -140,14 +177,37 @@ func ParsePolicyDocument(data []byte) (*Policy, error) {
 }
 
 func writeHeader(b *bytes.Buffer, h *Header) {
+	writeHeaderWithRevision(b, h, h.RevisionID)
+}
+
+// writeHeaderWithRevision writes h exactly as writeHeader does, except that
+// revision_id is the given value. Preimages name a revision that the header
+// field does not carry yet (or must not carry), without rewriting h.
+func writeHeaderWithRevision(b *bytes.Buffer, h *Header, revisionID string) {
+	writeHeaderMembers(b, h, true, func(b *bytes.Buffer) { b.WriteString(quote(revisionID)) })
+}
+
+// writeHeaderWithoutRevision writes h exactly as writeHeader does, except that
+// the revision_id member is absent entirely. This is the RevisionID preimage
+// form: the derived revision is never named by its own input.
+func writeHeaderWithoutRevision(b *bytes.Buffer, h *Header) {
+	writeHeaderMembers(b, h, false, nil)
+}
+
+// writeHeaderMembers writes the header in schema order. With withRevision set,
+// writeRev writes the revision value after its member name; otherwise the
+// member and its name are both skipped.
+func writeHeaderMembers(b *bytes.Buffer, h *Header, withRevision bool, writeRev func(*bytes.Buffer)) {
 	b.WriteString(`{"vault_id":`)
 	b.WriteString(quote(h.VaultID))
 	b.WriteString(`,"key_epoch":`)
 	b.WriteString(itoa(h.KeyEpoch))
 	b.WriteString(`,"content_seq":`)
 	b.WriteString(itoa(h.ContentSeq))
-	b.WriteString(`,"revision_id":`)
-	b.WriteString(quote(h.RevisionID))
+	if withRevision {
+		b.WriteString(`,"revision_id":`)
+		writeRev(b)
+	}
 	b.WriteString(`,"prev_digest":`)
 	writeBytes(b, h.PrevDigest)
 	b.WriteString(`,"op_id":`)
@@ -609,18 +669,12 @@ func list(m map[string]*value, k string, max int) ([]*value, error) {
 }
 
 func fileFromValue(v *value) (*File, error) {
-	// Signature sizes are checked before any other member of the file.
-	if err := checkSignatureMember(v, "header_sig"); err != nil {
-		return nil, err
-	}
+	// The content signature size is checked before any other member of the
+	// file is decoded; sig null is the unsigned-draft state.
 	if err := checkSignatureMember(v, "content_signature"); err != nil {
 		return nil, err
 	}
-	m, err := obj(v,
-		"format", "version", "header", "header_sig", "signed_policy_proofs",
-		"content_encoding", "kdbx_ciphertext", "vuk_device_slots", "cek_slot",
-		"content_signature",
-	)
+	m, err := obj(v, fileMembers...)
 	if err != nil {
 		return nil, err
 	}
@@ -632,9 +686,6 @@ func fileFromValue(v *value) (*File, error) {
 		return nil, err
 	}
 	if f.Header, err = headerFromValue(m["header"]); err != nil {
-		return nil, err
-	}
-	if f.HeaderSig, err = signatureFromValue(m["header_sig"]); err != nil {
 		return nil, err
 	}
 	proofs, err := list(m, "signed_policy_proofs", MaxArrayItems)
@@ -688,6 +739,9 @@ func checkSignatureMember(v *value, k string) error {
 	sig, ok := sv.obj["sig"]
 	if !ok {
 		return Err(k+".sig", CodeMissingField)
+	}
+	if sig.kind == kindNull {
+		return nil
 	}
 	if sig.kind != kindString || len(sig.s) != base64.RawURLEncoding.EncodedLen(ed25519.SignatureSize) {
 		return Err(k+".sig", CodeSignatureInvalid)
@@ -989,7 +1043,9 @@ func signatureFromValue(v *value) (Signature, error) {
 	if s.Alg, err = str(m, "alg", len(SigAlgEd25519)); err != nil {
 		return s, err
 	}
-	if s.Sig, err = bin(m, "sig", MaxSignatureLength, false); err != nil {
+	// sig null is the unsigned-draft content signature; every other
+	// signature member requires a value.
+	if s.Sig, err = bin(m, "sig", MaxSignatureLength, true); err != nil {
 		return s, err
 	}
 	return s, nil

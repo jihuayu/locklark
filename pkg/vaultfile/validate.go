@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"unicode/utf8"
 
@@ -65,33 +66,14 @@ func ValidateFile(f *File) error {
 	if current == nil {
 		return Err("", CodeHeaderMismatch)
 	}
-	if err := checkSigner(h.AuthorDeviceID, current, ContentSigner, &f.ContentSignature); err != nil {
+	if err := validateSignatureState(f, current); err != nil {
 		return err
-	}
-	// The content signature must name the authoring device itself; a valid
-	// device id alone is not enough.
-	if f.ContentSignature.SignerID != h.AuthorDeviceID {
-		return Err("", CodeSignatureInvalid)
 	}
 	// A file may only be authored by a device whose principal is a writer,
 	// admin or owner. Readers hold no content signing authority.
 	author := findDevice(current, h.AuthorDeviceID)
-	if !current.hasRole(author.PrincipalID, RoleWriter, RoleAdmin, RoleOwner) {
+	if author == nil || !current.hasRole(author.PrincipalID, RoleWriter, RoleAdmin, RoleOwner) {
 		return Err("", CodeInvalidValue)
-	}
-	var headerSigner *Device
-	for i := range current.Devices {
-		d := &current.Devices[i]
-		if d.DeviceID == f.HeaderSig.SignerID {
-			headerSigner = d
-			break
-		}
-	}
-	if headerSigner == nil || headerSigner.PolicySigningKey == nil {
-		return Err("", CodeSignatureInvalid)
-	}
-	if err := checkSignatureShape(&f.HeaderSig, headerSigner.PolicySigningKey.Alg); err != nil {
-		return err
 	}
 	if f.CEKSlot.KeyEpoch != h.KeyEpoch || f.CEKSlot.WrappedCEK == nil || len(f.CEKSlot.WrappedCEK) == 0 {
 		return Err("", CodeInvalidValue)
@@ -121,6 +103,47 @@ func ValidateFile(f *File) error {
 		}
 	}
 	return nil
+}
+
+// validateSignatureState checks the two file states and the revision binding.
+//
+// Exactly two states are valid:
+//
+//   - unsigned draft: content_signature is {"signer_id":"", "alg":"",
+//     "sig":null} and header.revision_id is "". Any non-empty signer or
+//     algorithm is a signature-shape error; any revision id is rejected.
+//   - sealed: header.revision_id is exactly RevisionID, and content_signature
+//     is a 64-byte signature by the header's author device with the shape of
+//     that device's content signing key. An empty revision id is a
+//     missing_field at revision_id and a wrong one an invalid_value.
+//
+// Signature bytes are only shape-checked: no signature is verified anywhere
+// in this package.
+func validateSignatureState(f *File, current *Policy) error {
+	h := &f.Header
+	if f.ContentSignature.Sig == nil {
+		if f.ContentSignature.SignerID != "" || f.ContentSignature.Alg != "" {
+			return Err("", CodeSignatureInvalid)
+		}
+		if h.RevisionID != "" {
+			return Err("revision_id", CodeInvalidValue)
+		}
+		return nil
+	}
+	if h.RevisionID == "" {
+		return Err("revision_id", CodeMissingField)
+	}
+	rev, err := revisionHash(f)
+	if err != nil {
+		return err
+	}
+	if h.RevisionID != hex.EncodeToString(rev) {
+		return Err("revision_id", CodeInvalidValue)
+	}
+	if f.ContentSignature.SignerID != h.AuthorDeviceID {
+		return Err("", CodeSignatureInvalid)
+	}
+	return checkContentSigner(h.AuthorDeviceID, current, &f.ContentSignature)
 }
 
 // policyDigest is the one and only policy digest (see PolicyDigest) of the
@@ -393,6 +416,19 @@ func validDigest(b []byte) bool {
 	return len(b) == sha256.Size
 }
 
+// validDigestID reports whether s is a SHA-256 value written as lowercase hex.
+func validDigestID(s string) bool {
+	if len(s) != sha256.Size*2 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 func validEd25519Key(b []byte) bool {
 	return len(b) == ed25519.PublicKeySize
 }
@@ -416,29 +452,14 @@ func validAgeX25519Recipient(s string) bool {
 
 // ---- role and key binding ----
 
-// SignerRole says which policy key a signature must be checked with.
-type SignerRole int
-
-const (
-	ContentSigner SignerRole = iota
-	PolicySigner
-)
-
-func checkSigner(deviceID string, p *Policy, role SignerRole, s *Signature) error {
+// checkContentSigner requires deviceID to be a policy device and s to have
+// the shape of a signature by that device's content signing key.
+func checkContentSigner(deviceID string, p *Policy, s *Signature) error {
 	d := findDevice(p, deviceID)
 	if d == nil {
 		return Err("", CodeSignatureInvalid)
 	}
-	switch role {
-	case ContentSigner:
-		return checkSignatureShape(s, d.ContentSigningKey.Alg)
-	case PolicySigner:
-		if d.PolicySigningKey == nil {
-			return Err("", CodeSignatureInvalid)
-		}
-		return checkSignatureShape(s, d.PolicySigningKey.Alg)
-	}
-	return Err("", CodeSignatureInvalid)
+	return checkSignatureShape(s, d.ContentSigningKey.Alg)
 }
 
 func boolEqualPolicy(a, b *Policy) bool {
@@ -461,14 +482,6 @@ func policyEqualBytes(p *Policy) ([]byte, error) {
 
 // ---- canonical signed forms ----
 
-// HeaderBytes returns the canonical encoding of the header that HeaderSig
-// covers.
-func HeaderBytes(h *Header) []byte {
-	var b bytes.Buffer
-	writeHeader(&b, h)
-	return b.Bytes()
-}
-
 // FileBytes is the exact byte sequence stored for a file, provided f is the
 // parsed form of it.
 func FileBytes(f *File) ([]byte, error) { return EncodeFile(f) }
@@ -481,14 +494,22 @@ func CanonicalPolicyBytes(sp *SignedPolicy) ([]byte, error) {
 
 // ValidateHeader validates a header on its own: types, value rules and sizes.
 // Whether PrevDigest matches a known parent is a sync decision, not a wire one.
+//
+// RevisionID is "" (unsigned draft) or 32 bytes as lowercase hex, the size of
+// a SHA-256 value. That a sealed file carries exactly its derived revision id
+// is checked by ValidateFile.
 func ValidateHeader(h *Header) error {
 	if h == nil {
 		return Err("", CodeInvalidValue)
 	}
 	if !validID(h.VaultID, MaxIDLength) ||
-		!validID(h.RevisionID, MaxIDLength) ||
 		!validID(h.OpID, MaxIDLength) ||
 		!validID(h.AuthorDeviceID, MaxDeviceIDLength) {
+		return Err("", CodeInvalidValue)
+	}
+	// An unsigned draft has no revision id; a sealed file carries the
+	// lowercase hex SHA-256 of RevisionID exactly.
+	if h.RevisionID != "" && !validDigestID(h.RevisionID) {
 		return Err("", CodeInvalidValue)
 	}
 	if h.ContentSeq == 0 && h.PrevDigest != nil {
