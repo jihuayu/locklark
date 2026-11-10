@@ -28,7 +28,12 @@ func (d *Dir) resolve(f *os.File) error {
 		return err
 	}
 	if cur.kind == ticketFree {
-		return nil
+		// A free ticket means no cooperating writer is staging: resolve runs
+		// under the OS lock this process just took. A staged file present now
+		// was left by a writer that died after creating and syncing it but
+		// before recording its holder ticket, so it is an orphan and is swept
+		// exactly like the untracked files left after a recovered ticket.
+		return d.sweepTmp()
 	}
 	tmp := d.tmpPath(cur.token)
 	removeQuiet(tmp)

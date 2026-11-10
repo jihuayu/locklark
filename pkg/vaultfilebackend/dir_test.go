@@ -1645,6 +1645,68 @@ func TestDirInterruptBeforePublicationDenied(t *testing.T) {
 	}
 }
 
+// A writer that dies after creating and syncing its staged file but before
+// recording its holder ticket leaves the ticket free and an untracked staged
+// file. A free ticket under the OS lock means no cooperating writer is staging,
+// so the orphan must be swept on the next mutation, whether the free ticket is
+// stored as an empty file or as the explicit "free" marker.
+func TestDirSweepsOrphanTempUnderFreeTicket(t *testing.T) {
+	ctx := context.Background()
+	cases := map[string][]byte{
+		"empty_ticket":  nil,
+		"explicit_free": []byte(ticketFree + "\n"),
+	}
+	for name, ticket := range cases {
+		t.Run(name, func(t *testing.T) {
+			b := openAt(t, t.TempDir()).(*Dir)
+			if err := b.CreateIfAbsent(ctx, "n", []byte("v1")); err != nil {
+				t.Fatal(err)
+			}
+			cur := mustRead(t, b, "n")
+			lock := filepath.Join(b.root, lockName)
+
+			// A well-formed staged record, named like a real staging file.
+			orphan := b.tmpPath(strings.Repeat("0c", 16))
+			staged := record{version: strings.Repeat("d4", 16), digest: sha256.Sum256([]byte("never")), value: []byte("never committed")}
+			if err := os.WriteFile(orphan, staged.encode(), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(lock, ticket, 0600); err != nil {
+				t.Fatal(err)
+			}
+			// Make sure the ticket really is free in the intended form.
+			f, err := openLockFile(lock)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := readTicket(f)
+			_ = f.Close()
+			if err != nil || got.kind != ticketFree {
+				t.Fatalf("seeded ticket = %+v %v, want free", got, err)
+			}
+
+			if err := b.ReplaceIfVersion(ctx, "n", cur.Revision, []byte("v2")); err != nil {
+				t.Fatalf("replace with free ticket and orphan = %v", err)
+			}
+			if _, err := os.Lstat(orphan); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("untracked staged file was not swept under a free ticket")
+			}
+			if got := mustRead(t, b, "n"); string(got.Bytes) != "v2" {
+				t.Fatalf("stored = %q, want the committed v2", got.Bytes)
+			}
+			f, err = openLockFile(lock)
+			if err != nil {
+				t.Fatal(err)
+			}
+			after, err := readTicket(f)
+			_ = f.Close()
+			if err != nil || after.kind != ticketFree {
+				t.Fatalf("ticket after write = %+v %v, want free", after, err)
+			}
+		})
+	}
+}
+
 // ---- real cross-process helpers ----
 
 const (
