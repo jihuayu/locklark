@@ -990,6 +990,12 @@ class GuiSessionWrappingTests(unittest.TestCase):
 
         return mock.patch.object(harness.shutil, "which", fake)
 
+    def _linux_gui_command(self, target, *, env: dict[str, str], use_xvfb: bool):
+        """Build the command as if the harness ran on Linux (owned dbus session)."""
+
+        with mock.patch.object(harness.sys, "platform", "linux"):
+            return harness.owned_gui_command(target, env=env, use_xvfb=use_xvfb)
+
     def _assert_wrapped(self, command, *, dbus: bool, xvfb: bool, target: list[str]) -> None:
         self.assertEqual(command[0], "sh")
         self.assertEqual(command[1], "-c")
@@ -1016,7 +1022,7 @@ class GuiSessionWrappingTests(unittest.TestCase):
         with self._which(
             {"xvfb-run": "/usr/bin/xvfb-run", "dbus-run-session": "/usr/bin/dbus-run-session"}
         ):
-            command = harness.owned_gui_command(target, env=env, use_xvfb=True)
+            command = self._linux_gui_command(target, env=env, use_xvfb=True)
         self._assert_wrapped(command, dbus=True, xvfb=True, target=target)
 
     def test_supplied_usable_bus_is_preserved(self):
@@ -1046,13 +1052,15 @@ class GuiSessionWrappingTests(unittest.TestCase):
         with self._which(
             {"xvfb-run": "/usr/bin/xvfb-run", "dbus-run-session": "/usr/bin/dbus-run-session"}
         ):
-            command = harness.owned_gui_command(["host"], env={"DISPLAY": " "}, use_xvfb=True)
+            command = self._linux_gui_command(
+                ["host"], env={"DISPLAY": " "}, use_xvfb=True
+            )
         self._assert_wrapped(command, dbus=True, xvfb=True, target=["host"])
 
     def test_missing_dbus_wrapper_is_a_validation_blocked_error(self):
         with self._which({"xvfb-run": "/usr/bin/xvfb-run"}):
             with self.assertRaisesRegex(AssertionError, "validation blocked"):
-                harness.owned_gui_command(["host"], env={"DISPLAY": ""}, use_xvfb=True)
+                self._linux_gui_command(["host"], env={"DISPLAY": ""}, use_xvfb=True)
 
     def test_missing_xvfb_is_a_validation_blocked_error(self):
         with self._which({"dbus-run-session": "/usr/bin/dbus-run-session"}):
@@ -1096,7 +1104,7 @@ class GuiSessionWrappingTests(unittest.TestCase):
         with self._which(
             {"xvfb-run": str(fake_xvfb), "dbus-run-session": str(fake_dbus)}
         ):
-            command = harness.owned_gui_command(
+            command = self._linux_gui_command(
                 target, env={"DISPLAY": ""}, use_xvfb=True
             )
         proc = subprocess.Popen(
