@@ -8,10 +8,14 @@ always execute for real.
 
 from __future__ import annotations
 
+import hashlib
 import json
 
 from .harness import e2e_test
 from .support import (
+    HIBP_FIXED_HOST,
+    HIBP_HTTPS_PORT,
+    HIBP_NETWORK_PROMPT,
     add_login,
     audit_events,
     cli_supports,
@@ -21,6 +25,7 @@ from .support import (
     f11_identity_ready,
     f12_parity_doc,
     f13_cli_hibp_opt_in,
+    f13_cli_hibp_range_lookups,
     f13_watchtower_ready,
     f14_cli_profiles_ready,
     f15_run_bundle_ready,
@@ -275,7 +280,12 @@ def t4_05(ctx):
     "Security incident response: breach -> browser rotation -> stale CLI refusal -> refresh",
 )
 def t4_06(ctx):
-    vault = make_vault(ctx, ["GitHub"])
+    # The declined-consent and strict-option checks below run against a
+    # genuinely empty vault.  The two synthetic canaries that the mocked HIBP
+    # run may query (and nothing else) are added later, so only their two
+    # prefixes can reach the mock.
+    vault = init_vault(ctx)
+    assert list_rows(ctx, vault) == [], "the consent fixture vault must start empty"
     ready = f13_watchtower_ready(ctx) and f9_save_generator_ready(ctx)
     gate(
         ctx,
@@ -301,18 +311,170 @@ def t4_06(ctx):
     # intent appended).
     assert opt_in["audit_delta"] == [], opt_in
     health_report(ctx, vault)
-    # A single CLI HIBP check can be routed to a loopback mock via HTTPS_PROXY
-    # (see T1_F13_06), but this scenario still does not execute the browser
-    # rotation or the CLI lease refresh, and it never queries the live service.
-    # This stays an explicit not-verified result.
+    _t4_06_consented_mock_hibp(ctx, vault)
+    # The consent-gated CLI HIBP lookup above ran for real against the local
+    # CONNECT/TLS mock (never the live service), but this scenario still does
+    # not execute the browser rotation or the CLI lease refresh.  This stays an
+    # explicit not-verified result and is never reported as a pass.
     raise AssertionError(
         "UNVERIFIED (not a pass): breach-to-rotation journey not exercised - "
         "the CLI HIBP opt-in contract (strict pair, consent refusal, no intent) "
-        "was validated and T1_F13_06 routes one synthetic range check to a "
-        "loopback mock, but T4_06 does not execute the browser rotation or the "
-        "CLI lease refresh, so the whole breach -> rotation -> stale CLI refusal "
-        "-> refresh path remains unvalidated"
+        "was validated and the real consented `personal health --hibp true` "
+        "substep was exercised against the local CONNECT/TLS HIBP mock (two "
+        "synthetic prefixes, breached suffix matched, route and audit checked), "
+        "but T4_06 does not execute the browser rotation or the CLI lease "
+        "refresh, so the whole breach -> rotation -> stale CLI refusal -> "
+        "refresh path remains unvalidated"
     )
+
+
+def _t4_06_consented_mock_hibp(ctx, vault):
+    """Consented ``personal health --hibp true`` through the local HIBP mock.
+
+    Uses the existing, already-tested ``f13_cli_hibp_range_lookups`` helper: the
+    fixed endpoint and the shipped client are untouched, and a private child
+    environment routes ``api.pwnedpasswords.com:443`` to a loopback CONNECT
+    proxy/TLS range server.  Only the two synthetic canaries below are added,
+    so the mock must see exactly their two prefixes and nothing else.
+    """
+
+    breached = "T4-Synthetic-Breached-Pass!2026"
+    clean = "T4-Synthetic-Clean-Pass!2026-Xy9"
+    breached_id, _ = add_login(ctx, vault, "T4 Breached Canary", password=breached)
+    clean_id, _ = add_login(ctx, vault, "T4 Clean Canary", password=clean)
+    breached_hash = hashlib.sha1(breached.encode("utf-8")).hexdigest().upper()
+    clean_hash = hashlib.sha1(clean.encode("utf-8")).hexdigest().upper()
+    breached_prefix = breached_hash[:5]
+    clean_prefix = clean_hash[:5]
+    assert breached_prefix != clean_prefix, "the synthetic passwords share a prefix"
+    # Each prefix receives only its own answer lines: the breached password's
+    # real 35-hex suffix with count 2, and an empty (padding-only) clean range.
+    # No suffix, hash or password is ever sent by the test or the SUT.
+    responses = {
+        breached_prefix: ((breached_hash[5:], 2),),
+        clean_prefix: (),
+    }
+    before = audit_events(ctx, vault)
+    observed = f13_cli_hibp_range_lookups(ctx, vault, responses)
+    after = audit_events(ctx, vault)
+    # A missing route is never a pass: pending gates the scenario.
+    if observed["status"] != "ran":
+        gate(
+            ctx,
+            "F13",
+            False,
+            "local HIBP route not established (loopback CONNECT proxy or synthetic "
+            f"CA unavailable): {observed.get('reason', 'no proxy connection')}; the "
+            "real service is never contacted and the consented breach match stays "
+            "unvalidated",
+        )
+    assert observed["returncode"] == 0, (
+        observed["returncode"],
+        observed["transcript"][-1200:],
+    )
+    # Only the fixed destination was attempted and nothing was refused.
+    assert observed["connections"], observed
+    assert all(
+        host == f"{HIBP_FIXED_HOST}:{HIBP_HTTPS_PORT}" for host in observed["connections"]
+    ), observed["connections"]
+    assert observed["refused"] == [], observed["refused"]
+    # Split forbidden material by surface.  The expected five-hex prefixes are
+    # the only hash material allowed to leave the process (in the request
+    # path), so they are deliberately not treated as secret.  The breached
+    # suffix is the correct mock answer, so it is expected in that prefix's
+    # response body.  Passwords, full hashes, suffixes and the Secret Key must
+    # never appear in any request header or forwarded request.
+    forbidden_secrets = (
+        breached,
+        clean,
+        breached_hash,
+        clean_hash,
+        breached_hash[5:],
+        clean_hash[5:],
+        vault["secret"],
+    )
+    header_dumps: list[str] = []
+    by_prefix: dict[str, list[dict]] = {}
+    for record in observed["requests"]:
+        assert not record.get("refused"), record
+        path = record["path"]
+        prefix = path[len("/range/") :] if path.startswith("/range/") else ""
+        # The request path is exactly the fixed segment plus this prefix's
+        # exact uppercase five-hex hash.
+        assert prefix in (breached_prefix, clean_prefix), path
+        assert path == f"/range/{prefix}", path
+        assert record["headers"].get("Add-Padding", "").lower() == "true", record["headers"]
+        headers_dump = json.dumps(record["headers"])
+        # The proxy only forwards a CONNECT target plus the GET line and
+        # headers; none of them may carry a password, full hash, suffix or key.
+        for canary in forbidden_secrets:
+            ctx.assert_no_canary_leak(canary, path, headers_dump)
+        forwarded = f"CONNECT {HIBP_FIXED_HOST}:{HIBP_HTTPS_PORT}\nGET {path}\n{headers_dump}"
+        for canary in forbidden_secrets:
+            ctx.assert_no_canary_leak(canary, forwarded)
+        header_dumps.append(headers_dump)
+        by_prefix.setdefault(prefix, []).append(record)
+    # Exactly one request per expected prefix, no unknown prefix, and each got
+    # its own independent answer including the zero-count padding line.
+    assert set(by_prefix) == set(responses), (set(by_prefix), set(responses))
+    for prefix, expected_lines in responses.items():
+        records = by_prefix[prefix]
+        assert len(records) == 1, (prefix, records)
+        record = records[0]
+        assert record["unknown_prefix"] is False, record
+        served = tuple((line["suffix"], line["count"]) for line in record["suffixes"])
+        assert served == expected_lines, (prefix, served, expected_lines)
+        assert record["body"] == "".join(
+            f"{suffix}:{count}\r\n" for suffix, count in expected_lines
+        ) + "0" * 35 + ":0\r\n", record["body"]
+    assert len({record["body"] for record in observed["requests"]}) == 2, (
+        "the two prefixes did not receive independent responses"
+    )
+    # The receipt is the reviewed non-secret projection of the provider answer.
+    payload = observed["payload"]
+    assert isinstance(payload, dict), payload
+    assert payload["hibp_checked"] is True, payload
+    assert payload["status"] == "checked-hibp", payload
+    assert payload["checked"] == 2, payload
+    assert payload["skipped"] == 0, payload
+    breach_counts = {
+        finding["id"]: finding["breach_count"] for finding in payload["findings"]
+    }
+    assert breach_counts.get(breached_id) == 2, (payload, responses)
+    assert breach_counts.get(clean_id) == 0, payload
+    # No password, full hash, hash suffix or Secret Key in the CLI receipt,
+    # stdout or terminal transcript.
+    transcript = observed["transcript"]
+    for canary in forbidden_secrets:
+        ctx.assert_no_canary_leak(canary, payload, observed["stdout"], transcript)
+    # The consent prompt was presented before the (mocked) network phase.
+    assert HIBP_NETWORK_PROMPT in transcript, transcript[-1200:]
+    assert "Add-Padding: true" in transcript, transcript[-1200:]
+    # The successful run unlocked the authenticated session, recorded one
+    # succeeded local Watchtower pass, then the ``vault.health.hibp`` intent
+    # followed by its succeeded result.
+    delta = [
+        event
+        for event in after[len(before) :]
+        if event.get("action") != "audit.list"
+    ]
+    assert len(after) >= len(before), (len(before), len(after))
+    actions = [event.get("action") for event in delta]
+    expected_actions = [
+        "desktop.unlock",
+        "vault.health.watchtower",
+        "vault.health.hibp",
+        "vault.health.hibp",
+    ]
+    assert actions == expected_actions, actions
+    unlock_event, watchtower_event, intent_event, result_event = delta
+    assert unlock_event.get("result") == "succeeded", unlock_event
+    assert watchtower_event.get("result") == "succeeded", watchtower_event
+    assert intent_event.get("result") == "intent", intent_event
+    assert result_event.get("result") == "succeeded", result_event
+    audit_dump = json.dumps(delta)
+    for canary in forbidden_secrets:
+        ctx.assert_no_canary_leak(canary, audit_dump)
 
 
 @e2e_test(
