@@ -1,6 +1,7 @@
 package directory
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/jihuayu/locklark/internal/vault"
@@ -143,4 +144,74 @@ func wrapAdvance(t *testing.T, n *int) {
 	previous := chainAdvanceObserver
 	chainAdvanceObserver = func() { *n++ }
 	t.Cleanup(func() { chainAdvanceObserver = previous })
+}
+
+// TestTrustedReadClonesAdmissions pins that trusted evidence owns its nested
+// admission bytes: mutating a returned receipt's nonce, signature or challenge
+// buffers never reaches the sealed evidence or a later independent copy.
+func TestTrustedReadClonesAdmissions(t *testing.T) {
+	f, path, first := writerFixture(t)
+	if len(first.Proposal.Admissions) == 0 || len(first.Proposal.Admissions[0].Challenge.Ciphertext) == 0 || len(first.Proposal.Admissions[0].Challenge.Signature) == 0 {
+		t.Fatal("fixture carries no nested admission bytes")
+	}
+	r, e := ReadTrusted(path, f.cfg, f.cfg.Genesis(), f.cfg.Genesis())
+	if e != nil {
+		t.Fatal(e)
+	}
+	want, e := Read(path, f.cfg, f.cfg.Genesis())
+	if e != nil {
+		t.Fatal(e)
+	}
+	h, e := r.History()
+	if e != nil {
+		t.Fatal(e)
+	}
+	for i := range h.Receipts[0].Proposal.Admissions {
+		polluteAdmission(&h.Receipts[0].Proposal.Admissions[i])
+	}
+	var v View
+	if v, e = r.HeadView(); e != nil {
+		t.Fatal(e)
+	}
+	for i := range v.Receipt.Proposal.Admissions {
+		polluteAdmission(&v.Receipt.Proposal.Admissions[i])
+	}
+	if v, e = r.ProvenAnchorView(f.cfg.Genesis()); e != nil {
+		t.Fatal(e)
+	}
+	for i := range v.Receipt.Proposal.Admissions {
+		polluteAdmission(&v.Receipt.Proposal.Admissions[i])
+	}
+	h2, e := r.History()
+	if e != nil {
+		t.Fatal(e)
+	}
+	if !reflect.DeepEqual(h2.Receipts[0].Proposal.Admissions, want.Receipt.Proposal.Admissions) {
+		t.Fatal("History aliased sealed admission bytes")
+	}
+	v2, e := r.HeadView()
+	if e != nil {
+		t.Fatal(e)
+	}
+	if !reflect.DeepEqual(v2.Receipt.Proposal.Admissions, first.Proposal.Admissions) {
+		t.Fatal("HeadView aliased sealed admission bytes")
+	}
+	if _, e = VerifyHistory(f.cfg, f.cfg.Genesis(), h2); e != nil {
+		t.Fatal("polluted copies changed the verified chain", e)
+	}
+}
+
+func polluteAdmission(a *Admission) {
+	for i := range a.Nonce {
+		a.Nonce[i] ^= 1
+	}
+	for i := range a.Signature {
+		a.Signature[i] ^= 1
+	}
+	for i := range a.Challenge.Ciphertext {
+		a.Challenge.Ciphertext[i] ^= 1
+	}
+	for i := range a.Challenge.Signature {
+		a.Challenge.Signature[i] ^= 1
+	}
 }

@@ -191,9 +191,7 @@ func cloneReceipts(in []Receipt) []Receipt {
 		out[i] = r
 		out[i].Proposal.Parent = r.Proposal.Parent
 		out[i].Proposal.Members = cloneMembers(r.Proposal.Members)
-		if r.Proposal.Admissions != nil {
-			out[i].Proposal.Admissions = append([]Admission{}, r.Proposal.Admissions...)
-		}
+		out[i].Proposal.Admissions = cloneAdmissions(r.Proposal.Admissions)
 		out[i].Signature = bytes.Clone(r.Signature)
 	}
 	return out

@@ -293,6 +293,13 @@ func (s *server) handle(r *http.Request, q request) response {
 	if !s.live(r.Context()) {
 		return fail(ErrTransport)
 	}
+	// Every read and publish answers from the retained history, so the one
+	// ReadHistory size budget applies to both sides before anything moves: an
+	// oversized chain leaves the anchor and the database exactly as they were.
+	h, e := trusted.History()
+	if e != nil {
+		return fail(mapDirectoryError(e))
+	}
 	head := trusted.Checkpoint()
 	if head != anchor {
 		if s.anchors.Advance(anchor, head) != nil {
@@ -304,11 +311,7 @@ func (s *server) handle(r *http.Request, q request) response {
 		return fail(ErrTransport)
 	}
 	if q.Proof.Action == "read" {
-		// An independent copy: no caller-owned buffer aliases verified evidence.
-		h, e := trusted.History()
-		if e != nil {
-			return fail(mapDirectoryError(e))
-		}
+		// h is an independent copy: no caller-owned buffer aliases verified evidence.
 		return response{Status: "current", Head: head, History: &h}
 	}
 	p := q.Publication
