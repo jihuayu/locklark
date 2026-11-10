@@ -16,6 +16,19 @@ import (
 
 var errCLIRunRefused = errors.New("refused")
 
+// browserPairPending is one explicit OS-peer browser pairing review. The
+// decision is a fresh native gesture; no browser-supplied field can fill it in.
+type browserPairPending struct {
+	id       string
+	request  browserhost.BrowserPairRequest
+	decision chan browserhost.BrowserPairDecision
+	once     sync.Once
+}
+
+func (p *browserPairPending) choose(decision browserhost.BrowserPairDecision) {
+	p.once.Do(func() { p.decision <- decision })
+}
+
 type cliRunPending struct {
 	id       string
 	peer     browserhost.Peer
@@ -65,6 +78,10 @@ func (a *App) browserBrokerCallbacks() browserhost.BrokerCallbacks {
 			})
 		},
 		HandleCLIRun: a.handleCLIRun,
+		// Every brokered browser connection must pass this native review
+		// before it can receive any capability. The declared Browser/Origin
+		// are displayed, never trusted.
+		ApproveBrowserPair: a.approveBrowserPair,
 		// The clipboard capability is announced only when this factory actually
 		// exists. Each accepted connection gets its own two-phase manager over
 		// the single App-owned native writer and global lease.
@@ -98,6 +115,7 @@ func (a *App) startBrowserBroker() {
 
 func (a *App) stopBrowserBroker() {
 	a.cancelPendingCLIRun()
+	a.cancelPendingBrowserPairs()
 	a.brokerMu.Lock()
 	b := a.broker
 	a.broker = nil
@@ -125,7 +143,7 @@ func (a *App) notifyBrowserBrokerUnlocked() {
 	b, s, generation := a.broker, a.brokerSession, a.brokerEpoch
 	a.brokerMu.Unlock()
 	if b != nil && s != nil {
-		b.NotifyUnlocked(s, generation, true)
+		b.NotifyUnlocked(s, generation)
 	}
 }
 
@@ -300,4 +318,129 @@ func intString(v int) string {
 		b[i] = '-'
 	}
 	return string(b[i:])
+}
+
+// approveBrowserPair is the only bridge from an OS-authenticated browser relay
+// to a desktop session capability. It blocks the connection goroutine while
+// the owner decides; the UI thread is never blocked.
+func (a *App) approveBrowserPair(ctx context.Context, request browserhost.BrowserPairRequest) (browserhost.BrowserPairDecision, error) {
+	if a.browserPairApprover != nil {
+		return a.browserPairApprover(ctx, request)
+	}
+	var b [16]byte
+	if _, e := rand.Read(b[:]); e != nil {
+		return browserhost.BrowserPairDecision{}, errCLIRunRefused
+	}
+	p := &browserPairPending{id: hex.EncodeToString(b[:]), request: request, decision: make(chan browserhost.BrowserPairDecision, 1)}
+	a.brokerMu.Lock()
+	if len(a.browserPairs) >= 8 {
+		a.brokerMu.Unlock()
+		return browserhost.BrowserPairDecision{}, errCLIRunRefused
+	}
+	a.browserPairs = append(a.browserPairs, p)
+	a.brokerMu.Unlock()
+	a.dispatch(func() {
+		if a.win != nil {
+			a.win.Show()
+			a.win.Focus()
+			a.win.Invalidate()
+		}
+	})
+	select {
+	case decision := <-p.decision:
+		a.removeBrowserPair(p)
+		return decision, nil
+	case <-ctx.Done():
+		a.removeBrowserPair(p)
+		return browserhost.BrowserPairDecision{}, errCLIRunRefused
+	}
+}
+
+func (a *App) removeBrowserPair(p *browserPairPending) {
+	a.brokerMu.Lock()
+	out := a.browserPairs[:0]
+	for _, item := range a.browserPairs {
+		if item != p {
+			out = append(out, item)
+		}
+	}
+	a.browserPairs = out
+	a.brokerMu.Unlock()
+	a.dispatch(func() {
+		if a.win != nil {
+			a.win.Invalidate()
+		}
+	})
+}
+
+func (a *App) cancelPendingBrowserPairs() {
+	a.brokerMu.Lock()
+	pending := a.browserPairs
+	a.browserPairs = nil
+	a.brokerMu.Unlock()
+	for _, p := range pending {
+		p.choose(browserhost.BrowserPairDecision{})
+	}
+}
+
+func (a *App) pendingBrowserPair() *browserPairPending {
+	a.brokerMu.Lock()
+	defer a.brokerMu.Unlock()
+	if len(a.browserPairs) == 0 {
+		return nil
+	}
+	return a.browserPairs[0]
+}
+
+func (a *App) decideBrowserPair(id string, decision browserhost.BrowserPairDecision) {
+	a.brokerMu.Lock()
+	var chosen *browserPairPending
+	out := a.browserPairs[:0]
+	for _, item := range a.browserPairs {
+		if item.id == id && chosen == nil {
+			chosen = item
+			continue
+		}
+		out = append(out, item)
+	}
+	a.browserPairs = out
+	a.brokerMu.Unlock()
+	if chosen != nil {
+		chosen.choose(decision)
+	}
+}
+
+func (a *App) browserPairView(c *ui.Context) {
+	p := a.pendingBrowserPair()
+	if p == nil {
+		return
+	}
+	t := c.Theme()
+	label := string(p.request.Browser)
+	if label == "" || label == "auto" {
+		label = "Chromium / Firefox"
+	}
+	ui.Column(c).Width(680).Border(1, t.Border).Radius(t.Radius).Background(t.Surface).Padding(t.Space(4)).Gap(12).Children(func() {
+		ui.Text(c, "批准浏览器连接桌面金库").FontSize(24).Bold().TextColor(t.Text)
+		ui.Text(c, "此请求来自本机同一用户的进程。请核对系统认证的调用进程与浏览器扩展身份；浏览器声明不能替代本次授权。").FontSize(13).TextColor(t.TextMuted)
+		ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Background).Padding(t.Space(3)).Gap(4).Children(func() {
+			ui.Text(c, "本机用户："+p.request.Peer.User).FontSize(12).TextColor(t.TextMuted)
+			ui.Text(c, "调用进程：PID "+uintString(p.request.Peer.PID)+" · "+p.request.Peer.Process).FontSize(12).TextColor(t.TextMuted)
+			ui.Text(c, "声明的浏览器："+label).FontSize(13).TextColor(t.Text)
+			ui.Text(c, "声明的扩展来源："+p.request.Origin).FontSize(12).TextColor(t.TextMuted)
+		})
+		ui.Text(c, "启用快捷填充：你显式授权本连接在 15 分钟内执行 V2 列表/详情（含身份信息与非隐藏字段）、字段复制/显示、附件读取、条目新建/编辑/状态/恢复、暂存保存、附件写入，以及验证码填充和保存登录，不再逐次弹窗。Passkey 删除和附件删除始终逐次确认，即使启用快捷填充也不例外；Passkey 登录/创建/信号和跨源或资料字段填充同样仍会逐次确认。").FontSize(13).TextColor(t.Text)
+		ui.Text(c, "逐次确认：V2 列表仍可直接显示标题和公开元数据用于选择；条目详情（含身份信息与非隐藏字段）、字段复制/显示、附件读取、条目/附件写入、验证码填充和保存登录都会逐个回到此窗口批准。Passkey 删除和附件删除始终逐次确认，即使启用快捷填充也不例外；Passkey 其他操作和资料填充同样逐次确认。锁库、断连或到期后两种模式都失效。").FontSize(13).TextColor(t.TextMuted)
+		ui.Row(c).Gap(8).Wrap().Children(func() {
+			ui.PrimaryButton(c, "连接并启用快捷填充").OnClick(func() {
+				a.decideBrowserPair(p.id, browserhost.BrowserPairDecision{Approved: true, QuickFill: true})
+			})
+			ui.PrimaryButton(c, "确认连接（每次敏感操作需批准）").OnClick(func() {
+				a.decideBrowserPair(p.id, browserhost.BrowserPairDecision{Approved: true})
+			})
+			ui.Button(c, "拒绝连接").OnClick(func() {
+				a.decideBrowserPair(p.id, browserhost.BrowserPairDecision{})
+			})
+		})
+	})
 }

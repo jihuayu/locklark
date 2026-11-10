@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/egoist/mygo"
@@ -14,18 +15,53 @@ import (
 	"github.com/jihuayu/locklark/internal/personal"
 )
 
-func (a *App) browserView(c *ui.Context) {
+func (a *App) browserView(c *ui.Context) { a.browserViewFor(c, a.browser) }
+
+// brokeredBrowserApproval returns the exact broker-owned connection that owns
+// a pending interactive approval. The view routes every button through this
+// pointer, so two extension windows can never share an approval surface.
+func (a *App) brokeredBrowserApproval() *browserhost.Connection {
+	a.brokerMu.Lock()
+	b := a.broker
+	a.brokerMu.Unlock()
+	if b == nil {
+		return nil
+	}
+	for _, connection := range b.Connections() {
+		view := connection.Snapshot()
+		if view.Busy {
+			continue
+		}
+		if view.V2 != nil || view.Passkey != nil || view.Signal != nil || view.Profile != nil ||
+			view.Pending != nil || view.OTP != nil || view.Save != nil {
+			return connection
+		}
+	}
+	return nil
+}
+
+// browserViewFor renders one exact connection. Standalone mode passes
+// a.browser; brokered desktop mode passes the originating Broker connection so
+// approvals can never be routed to a different extension window.
+func (a *App) browserViewFor(c *ui.Context, b *browserhost.Connection) {
+	if b == nil {
+		return
+	}
 	t := c.Theme()
-	view := a.browser.Snapshot()
+	view := b.Snapshot()
 	if view.SaveStatus != "" {
 		a.status = view.SaveStatus
 	}
 	if view.OTPStatus != "" {
 		a.status = view.OTPStatus
 	}
+	label := a.browserLabel
+	if label == "" {
+		label = "经桌面 IPC 的固定扩展"
+	}
 	ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(10).Children(func() {
 		ui.Text(c, "浏览器连接").FontSize(22).Bold().TextColor(t.Text)
-		ui.Text(c, "固定扩展身份："+a.browserLabel).FontSize(12).TextColor(t.TextMuted)
+		ui.Text(c, "固定扩展身份："+label).FontSize(12).TextColor(t.TextMuted)
 	})
 	ui.Text(c, "此窗口与浏览器共享已解锁的金库会话；请核对浏览器当前网站，再确认本次操作。").FontSize(13).TextColor(t.TextMuted)
 	if view.Busy {
@@ -40,9 +76,9 @@ func (a *App) browserView(c *ui.Context) {
 		ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).Padding(t.Space(3)).Gap(10).Children(func() {
 			ui.Text(c, "连接后可在浏览器选择账号填充、保存登录或使用验证码。快捷模式允许本次连接中的明确浏览器操作，无需反复切回此窗口；锁库或连接到期后失效。").FontSize(13).TextColor(t.Text)
 			ui.Row(c).Gap(8).Wrap().Children(func() {
-				ui.PrimaryButton(c, "连接并启用快捷填充").Disabled(a.busy).OnClick(func() { s := a.session; a.run(func() outcome { return outcome{err: a.browser.ApproveQuickPair(s)} }) })
-				ui.PrimaryButton(c, "确认连接此扩展").Disabled(a.busy).OnClick(func() { s := a.session; a.run(func() outcome { return outcome{err: a.browser.ApprovePair(s)} }) })
-				ui.Button(c, "拒绝连接").Disabled(a.busy).OnClick(func() { a.run(func() outcome { return outcome{err: a.browser.Reject()} }) })
+				ui.PrimaryButton(c, "连接并启用快捷填充").Disabled(a.busy).OnClick(func() { s := a.session; a.run(func() outcome { return outcome{err: b.ApproveQuickPair(s)} }) })
+				ui.PrimaryButton(c, "确认连接此扩展").Disabled(a.busy).OnClick(func() { s := a.session; a.run(func() outcome { return outcome{err: b.ApprovePair(s)} }) })
+				ui.Button(c, "拒绝连接").Disabled(a.busy).OnClick(func() { a.run(func() outcome { return outcome{err: b.Reject()} }) })
 			})
 		})
 		return
@@ -55,23 +91,27 @@ func (a *App) browserView(c *ui.Context) {
 	if view.QuickFill {
 		ui.Text(c, "快捷填充已启用：在浏览器选择账号即可继续。自动登录设置由扩展管理。").FontSize(12).TextColor(t.TextMuted)
 	}
+	if view.V2 != nil {
+		a.browserV2ApprovalView(c, b, *view.V2)
+		return
+	}
 	if view.Passkey == nil && view.PasskeyStatus != "" {
 		ui.Text(c, view.PasskeyStatus).FontSize(13).TextColor(t.TextMuted)
 	}
 	if view.Passkey != nil {
-		a.browserPasskeyView(c, *view.Passkey, view.PasskeyStatus)
+		a.browserPasskeyView(c, b, *view.Passkey, view.PasskeyStatus)
 		return
 	}
 	if view.OTP != nil {
-		a.browserOTPView(c, *view.OTP, view.OTPStatus)
+		a.browserOTPView(c, b, *view.OTP, view.OTPStatus)
 		return
 	}
 	if view.Save != nil {
-		a.browserSaveView(c, *view.Save, view.SaveStatus)
+		a.browserSaveView(c, b, *view.Save, view.SaveStatus)
 		return
 	}
 	if view.Signal != nil {
-		a.browserSignalView(c, *view.Signal, view.SignalStatus)
+		a.browserSignalView(c, b, *view.Signal, view.SignalStatus)
 		return
 	}
 	if view.SignalStatus != "" {
@@ -80,7 +120,7 @@ func (a *App) browserView(c *ui.Context) {
 	// A reserved sensitive profile review must be rendered before the generic
 	// login prompt: the login approval path cannot deliver profile fields.
 	if view.Profile != nil {
-		a.browserProfileView(c, *view.Profile)
+		a.browserProfileView(c, b, *view.Profile)
 		return
 	}
 	if view.Pending == nil {
@@ -96,16 +136,161 @@ func (a *App) browserView(c *ui.Context) {
 		ui.Text(c, "精确修订："+pending.Revision).FontSize(12).TextColor(t.TextMuted)
 		ui.Text(c, "仅交付用户名和密码；扩展可按自动登录设置提交。请求 30 秒后失效。").FontSize(13).TextColor(t.TextMuted)
 		ui.Row(c).Gap(8).Children(func() {
-			ui.PrimaryButton(c, "批准本次填充").Disabled(a.busy).OnClick(func() { a.run(func() outcome { return outcome{err: a.browser.ApproveFill(pending.ID)} }) })
-			ui.Button(c, "拒绝本次填充").Disabled(a.busy).OnClick(func() { a.run(func() outcome { return outcome{err: a.browser.Reject()} }) })
+			ui.PrimaryButton(c, "批准本次填充").Disabled(a.busy).OnClick(func() { a.run(func() outcome { return outcome{err: b.ApproveFill(pending.ID)} }) })
+			ui.Button(c, "拒绝本次填充").Disabled(a.busy).OnClick(func() { a.run(func() outcome { return outcome{err: b.Reject()} }) })
 		})
+	})
+}
+
+// browserV2ApprovalView is the owner review for one non-quick-fill V2
+// disclosure or mutation. It renders only protocol selectors; secrets and
+// mutation payloads remain private to the connection until this click.
+func (a *App) browserV2ApprovalView(c *ui.Context, b *browserhost.Connection, p browserhost.V2ApprovalView) {
+	t := c.Theme()
+	heading := "确认浏览器敏感操作"
+	detail := "仅在本窗口批准后，才会执行这次操作。"
+	approve, reject := "批准本次操作", "拒绝本次操作"
+	switch p.Type {
+	case "item-reveal-field", "item-copy-field":
+		heading, detail = "确认披露金库字段", "仅在本窗口批准后，才会把这一字段交给当前浏览器页面。"
+		approve, reject = "批准本次字段披露", "拒绝本次字段披露"
+	case "item-create", "item-edit", "item-save", "item-state", "item-restore-history":
+		heading, detail = "确认浏览器修改金库", "仅在本窗口批准后，才会写入这次金库变更。"
+		approve, reject = "批准本次金库写入", "拒绝本次金库写入"
+	case "stage-save", "commit-staged-save":
+		heading, detail = "确认浏览器保存登录", "仅在本窗口批准后，才会暂存或提交这次登录保存。"
+		approve, reject = "批准本次保存", "拒绝本次保存"
+	case "attachment-read":
+		heading, detail = "确认下载金库附件", "仅在本窗口批准后，才会把附件内容交给当前浏览器页面。"
+		approve, reject = "批准本次附件读取", "拒绝本次附件读取"
+	case "attachment-commit", "attachment-remove":
+		heading, detail = "确认浏览器修改附件", "仅在本窗口批准后，才会写入或删除附件。"
+		approve, reject = "批准本次附件操作", "拒绝本次附件操作"
+	case "passkey-remove":
+		heading, detail = "确认浏览器删除 Passkey", "仅在本窗口批准后，才会删除该 Passkey。"
+		approve, reject = "批准删除 Passkey", "拒绝删除 Passkey"
+	}
+	ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).Padding(t.Space(3)).Gap(6).Children(func() {
+		ui.Text(c, heading).FontSize(20).Bold().TextColor(t.Text)
+		if p.Origin != "" {
+			ui.Text(c, "HTTPS 来源："+visible(p.Origin)).FontSize(17).Bold().TextColor(t.Accent)
+		}
+		if p.ItemID != "" {
+			ui.Text(c, "条目 ID："+p.ItemID).FontSize(12).TextColor(t.TextMuted)
+		}
+		if p.Revision != "" {
+			ui.Text(c, "精确修订："+p.Revision).FontSize(12).TextColor(t.TextMuted)
+		}
+		if p.RevisionPinned {
+			ui.Text(c, "修订已固定：按批准时的当前修订执行；条目若已改变则拒绝。").FontSize(12).TextColor(t.TextMuted)
+		}
+		if p.Title != "" && p.Title != p.Origin {
+			ui.Text(c, "来源名称："+browserTitle(p.Title)).TextColor(t.Text)
+		}
+		a.browserV2AnchorView(c, p)
+		if p.Field != "" {
+			ui.Text(c, "字段选择器："+visible(p.Field)).FontSize(13).Bold().TextColor(t.Text)
+		}
+		if p.Action != "" {
+			ui.Text(c, "操作："+visible(p.Action)).FontSize(13).Bold().TextColor(t.Text)
+		}
+		if p.Summary != "" {
+			ui.Text(c, "变更摘要："+visible(p.Summary)).FontSize(13).TextColor(t.TextMuted)
+		}
+		ui.Text(c, detail).FontSize(13).TextColor(t.TextMuted)
+		ui.Text(c, "此操作不是快捷填充；请求 30 秒后失效。").FontSize(12).TextColor(t.TextMuted)
+		ui.Row(c).Gap(8).Wrap().Children(func() {
+			ui.PrimaryButton(c, approve).Disabled(a.busy).OnClick(func() { a.browserV2Action(b, p.ID, true) })
+			ui.Button(c, reject).Disabled(a.busy).OnClick(func() { a.browserV2Action(b, p.ID, false) })
+		})
+	})
+}
+
+// browserV2AnchorView renders the bounded public anchors of one review. The
+// current item (what the approval would read or edit) and the request (what it
+// asks to write) are kept visually separate. Only names appear here: the host
+// never puts a value, note, card/CVV/PIN, identity number or passkey material
+// into the view. Rows sit in a bounded scroll region so the action buttons stay
+// visible for any accepted list length.
+func (a *App) browserV2AnchorView(c *ui.Context, p browserhost.V2ApprovalView) {
+	if p.StoredTitle == "" && p.RequestedTitle == "" && len(p.StoredFields) == 0 && len(p.RequestedFields) == 0 {
+		return
+	}
+	t := c.Theme()
+	ui.Scroll(c).Height(210).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).Padding(6).Children(func() {
+		ui.Column(c).Gap(3).Children(func() {
+			if p.StoredTitle != "" {
+				ui.Text(c, "当前条目：").FontSize(13).Bold().TextColor(t.Text)
+				ui.Text(c, "  当前名称："+browserTitle(p.StoredTitle)).FontSize(13).TextColor(t.Text)
+				ui.Text(c, "  当前类别："+browserV2Category(p.StoredCategory)).FontSize(13).TextColor(t.TextMuted)
+				ui.Text(c, "  当前字段名："+browserV2FieldNames(p.StoredFields)).FontSize(13).TextColor(t.TextMuted)
+			}
+			if p.RequestedTitle != "" || p.RequestedCategory != "" || len(p.RequestedFields) != 0 {
+				ui.Text(c, "请求：").FontSize(13).Bold().TextColor(t.Text)
+				if p.RequestedTitle != "" {
+					ui.Text(c, "  请求名称："+browserTitle(p.RequestedTitle)).FontSize(13).TextColor(t.Text)
+				}
+				if p.RequestedCategory != "" {
+					ui.Text(c, "  请求类别："+browserV2Category(p.RequestedCategory)).FontSize(13).TextColor(t.TextMuted)
+				}
+				if len(p.RequestedFields) != 0 {
+					ui.Text(c, "  请求字段名称："+browserV2FieldNames(p.RequestedFields)).FontSize(13).TextColor(t.TextMuted)
+				}
+			}
+			ui.Text(c, "以上仅为字段名称，不包含任何字段值。").FontSize(12).TextColor(t.TextMuted)
+		})
+	})
+}
+
+func browserV2Category(category string) string {
+	switch category {
+	case "login":
+		return "登录（login）"
+	case "password":
+		return "密码（password）"
+	case "secure_note":
+		return "安全笔记（secure_note）"
+	case "credit_card":
+		return "信用卡（credit_card）"
+	case "identity":
+		return "身份信息（identity）"
+	case "":
+		return "（未注明）"
+	}
+	return visible(category)
+}
+
+func browserV2FieldNames(fields []string) string {
+	if len(fields) == 0 {
+		return "（无）"
+	}
+	return strings.Join(fields, "、")
+}
+
+func (a *App) browserV2Action(b *browserhost.Connection, id string, approve bool) {
+	a.run(func() outcome {
+		var err error
+		if approve {
+			err = b.ApproveV2(id)
+		} else {
+			err = b.RejectV2(id)
+		}
+		return outcome{err: err, apply: func() {
+			if v := b.Snapshot(); v.V2 == nil {
+				if err != nil {
+					a.status = message(err)
+				} else if !approve {
+					a.status = "已拒绝本次浏览器敏感操作"
+				}
+			}
+		}}
 	})
 }
 
 // browserProfileView is the owner review for one sensitive profile fill. The
 // page proposed only public selectors; this view never reads a card or identity
 // value, and the private projection is prepared only after the approval click.
-func (a *App) browserProfileView(c *ui.Context, p browserhost.ProfileView) {
+func (a *App) browserProfileView(c *ui.Context, b *browserhost.Connection, p browserhost.ProfileView) {
 	t := c.Theme()
 	category := "身份信息（identity）"
 	if p.Category == "credit_card" {
@@ -140,22 +325,22 @@ func (a *App) browserProfileView(c *ui.Context, p browserhost.ProfileView) {
 			approve, reject = "批准本次跨源银行卡填充", "拒绝本次跨源银行卡填充"
 		}
 		ui.Row(c).Gap(8).Children(func() {
-			ui.PrimaryButton(c, approve).Disabled(a.busy).OnClick(func() { a.browserProfileAction(p.ID, true) })
-			ui.Button(c, reject).Disabled(a.busy).OnClick(func() { a.browserProfileAction(p.ID, false) })
+			ui.PrimaryButton(c, approve).Disabled(a.busy).OnClick(func() { a.browserProfileAction(b, p.ID, true) })
+			ui.Button(c, reject).Disabled(a.busy).OnClick(func() { a.browserProfileAction(b, p.ID, false) })
 		})
 	})
 }
 
-func (a *App) browserProfileAction(id string, approve bool) {
+func (a *App) browserProfileAction(b *browserhost.Connection, id string, approve bool) {
 	a.run(func() outcome {
 		var err error
 		if approve {
-			err = a.browser.ApproveProfile(id)
+			err = b.ApproveProfile(id)
 		} else {
-			err = a.browser.RejectProfile(id)
+			err = b.RejectProfile(id)
 		}
 		return outcome{err: err, apply: func() {
-			if v := a.browser.Snapshot(); v.Profile == nil {
+			if v := b.Snapshot(); v.Profile == nil {
 				if err != nil {
 					a.status = message(err)
 				} else if !approve {
@@ -166,7 +351,7 @@ func (a *App) browserProfileAction(id string, approve bool) {
 	})
 }
 
-func (a *App) browserSaveView(c *ui.Context, p browserhost.SaveView, status string) {
+func (a *App) browserSaveView(c *ui.Context, b *browserhost.Connection, p browserhost.SaveView, status string) {
 	t := c.Theme()
 	if a.browserSaveID != p.ID {
 		a.browserSaveID = p.ID
@@ -197,17 +382,17 @@ func (a *App) browserSaveView(c *ui.Context, p browserhost.SaveView, status stri
 		ui.Row(c).Gap(8).Children(func() {
 			ui.PrimaryButton(c, approve).Disabled(a.busy).OnClick(func() {
 				id, title := p.ID, a.browserSaveTitle
-				a.browserSaveAction(id, func() error { return a.browser.ApproveSave(id, title) })
+				a.browserSaveAction(b, id, func() error { return b.ApproveSave(id, title) })
 			})
-			ui.Button(c, reject).Disabled(a.busy).OnClick(func() { a.browserSaveAction(p.ID, func() error { return a.browser.RejectSave(p.ID) }) })
+			ui.Button(c, reject).Disabled(a.busy).OnClick(func() { a.browserSaveAction(b, p.ID, func() error { return b.RejectSave(p.ID) }) })
 		})
 	})
 }
-func (a *App) browserSaveAction(id string, work func() error) {
+func (a *App) browserSaveAction(b *browserhost.Connection, id string, work func() error) {
 	a.run(func() outcome {
 		e := work()
 		return outcome{apply: func() {
-			v := a.browser.Snapshot()
+			v := b.Snapshot()
 			a.status = v.SaveStatus
 			if v.SaveRequestID == id && e != nil && a.status == "" {
 				a.status = message(e)
@@ -216,7 +401,7 @@ func (a *App) browserSaveAction(id string, work func() error) {
 	})
 }
 
-func (a *App) browserOTPView(c *ui.Context, p browserhost.OTPView, status string) {
+func (a *App) browserOTPView(c *ui.Context, b *browserhost.Connection, p browserhost.OTPView, status string) {
 	t := c.Theme()
 	ui.Column(c).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).Padding(t.Space(3)).Gap(8).Children(func() {
 		ui.Text(c, "确认本次验证码填充").FontSize(20).Bold().TextColor(t.Text)
@@ -230,16 +415,16 @@ func (a *App) browserOTPView(c *ui.Context, p browserhost.OTPView, status string
 			return
 		}
 		ui.Row(c).Gap(8).Children(func() {
-			ui.PrimaryButton(c, "批准填充验证码").Disabled(a.busy).OnClick(func() { a.browserOTPAction(p.ID, func() error { return a.browser.ApproveOTP(p.ID) }) })
-			ui.Button(c, "拒绝填充验证码").Disabled(a.busy).OnClick(func() { a.browserOTPAction(p.ID, func() error { return a.browser.RejectOTP(p.ID) }) })
+			ui.PrimaryButton(c, "批准填充验证码").Disabled(a.busy).OnClick(func() { a.browserOTPAction(b, p.ID, func() error { return b.ApproveOTP(p.ID) }) })
+			ui.Button(c, "拒绝填充验证码").Disabled(a.busy).OnClick(func() { a.browserOTPAction(b, p.ID, func() error { return b.RejectOTP(p.ID) }) })
 		})
 	})
 }
-func (a *App) browserOTPAction(id string, work func() error) {
+func (a *App) browserOTPAction(b *browserhost.Connection, id string, work func() error) {
 	a.run(func() outcome {
 		err := work()
 		return outcome{apply: func() {
-			view := a.browser.Snapshot()
+			view := b.Snapshot()
 			if view.OTPRequestID == id {
 				a.status = view.OTPStatus
 				if err != nil && a.status == "" {
@@ -260,7 +445,7 @@ func (a *App) browserOTPAction(id string, work func() error) {
 // reviewed accounts (including 2 or 50 rows) instead of being pushed below the
 // viewport by unbounded text. The nested compact column keeps the fixed
 // chrome (heading, origin/RP, privacy copy, warning, status) tight.
-func (a *App) browserSignalView(c *ui.Context, p browserhost.SignalView, status string) {
+func (a *App) browserSignalView(c *ui.Context, b *browserhost.Connection, p browserhost.SignalView, status string) {
 	t := c.Theme()
 	heading := "网站请求更新 Passkey 账号"
 	switch p.Kind {
@@ -308,27 +493,27 @@ func (a *App) browserSignalView(c *ui.Context, p browserhost.SignalView, status 
 		if p.Working {
 			// The cancel path stays busy-independent and outside the bounded
 			// list, so a pending approval can still be revoked.
-			ui.Button(c, "取消尚未提交的更新").OnClick(func() { a.browserSignalCancel(p.ID) })
+			ui.Button(c, "取消尚未提交的更新").OnClick(func() { a.browserSignalCancel(b, p.ID) })
 			return
 		}
 		// Fixed action area: rendered after the bounded rows, never after
 		// unbounded text.
 		ui.Row(c).Gap(8).Children(func() {
 			ui.PrimaryButton(c, "确认应用这些更新").Disabled(a.busy || len(p.Changes) == 0).OnClick(func() {
-				a.browserSignalAction(p.ID, func() error { return a.browser.ApprovePasskeySignal(p.ID) })
+				a.browserSignalAction(b, p.ID, func() error { return b.ApprovePasskeySignal(p.ID) })
 			})
 			ui.Button(c, "取消（不做任何更改）").Disabled(a.busy).OnClick(func() {
-				a.browserSignalAction(p.ID, func() error { return a.browser.RejectPasskeySignal(p.ID) })
+				a.browserSignalAction(b, p.ID, func() error { return b.RejectPasskeySignal(p.ID) })
 			})
 		})
 	})
 }
 
-func (a *App) browserSignalAction(id string, work func() error) {
+func (a *App) browserSignalAction(b *browserhost.Connection, id string, work func() error) {
 	a.run(func() outcome {
 		err := work()
 		return outcome{apply: func() {
-			view := a.browser.Snapshot()
+			view := b.Snapshot()
 			if view.Signal == nil || view.Signal.ID == id {
 				if view.SignalStatus != "" {
 					a.status = view.SignalStatus
@@ -345,10 +530,10 @@ func (a *App) browserSignalAction(id string, work func() error) {
 // the database, and a cancel must still reach the host to cancel that gate.
 // RejectPasskeySignal takes only the short Connection lock and performs no
 // database work, so this click handler cannot block on the vault.
-func (a *App) browserSignalCancel(id string) {
+func (a *App) browserSignalCancel(b *browserhost.Connection, id string) {
 	a.status = "已请求取消；若已提交请核实金库"
-	err := a.browser.RejectPasskeySignal(id)
-	view := a.browser.Snapshot()
+	err := b.RejectPasskeySignal(id)
+	view := b.Snapshot()
 	if view.Busy || (view.Signal != nil && view.Signal.ID == id) {
 		return
 	}
@@ -464,7 +649,7 @@ func passkeyChoiceLabel(p browserhost.PasskeyView, choice personal.PasskeyChoice
 	return label
 }
 
-func (a *App) browserPasskeyView(c *ui.Context, p browserhost.PasskeyView, status string) {
+func (a *App) browserPasskeyView(c *ui.Context, b *browserhost.Connection, p browserhost.PasskeyView, status string) {
 	t := c.Theme()
 	if a.browserPasskeyID != p.ID {
 		a.browserPasskeyID = p.ID
@@ -508,7 +693,7 @@ func (a *App) browserPasskeyView(c *ui.Context, p browserhost.PasskeyView, statu
 			a.run(func() outcome {
 				defer clear(pw)
 				defer clear(key)
-				return outcome{err: a.browser.ApprovePasskeyCredential(p.ID, item, credential, pw, key)}
+				return outcome{err: b.ApprovePasskeyCredential(p.ID, item, credential, pw, key)}
 			})
 		}
 		if p.VerificationRequired {
@@ -543,9 +728,9 @@ func (a *App) browserPasskeyView(c *ui.Context, p browserhost.PasskeyView, statu
 						a.password = ""
 						a.secret = ""
 						a.run(func() outcome {
-							e := a.browser.ApprovePasskeyCredentialWithSystem(p.ID, item, credential, store)
+							e := b.ApprovePasskeyCredentialWithSystem(p.ID, item, credential, store)
 							return outcome{err: e, apply: func() {
-								if v := a.browser.Snapshot(); v.PasskeyStatus != "" {
+								if v := b.Snapshot(); v.PasskeyStatus != "" {
 									a.status = v.PasskeyStatus
 								}
 							}}
@@ -571,7 +756,7 @@ func (a *App) browserPasskeyView(c *ui.Context, p browserhost.PasskeyView, statu
 		ui.Button(c, "取消 / 使用其他验证器").Disabled(a.busy).OnClick(func() {
 			a.password = ""
 			a.secret = ""
-			a.run(func() outcome { return outcome{err: a.browser.RejectPasskey(p.ID)} })
+			a.run(func() outcome { return outcome{err: b.RejectPasskey(p.ID)} })
 		})
 	})
 }

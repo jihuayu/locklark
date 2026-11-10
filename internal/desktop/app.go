@@ -72,6 +72,11 @@ type App struct {
 	brokerEpoch    uint64
 	cliApprover    func(context.Context, browserhost.Peer, browserhost.BrokerCLIRequest) (bool, error)
 	cliPending     *cliRunPending
+	// browserPairs are explicit OS-peer pairing reviews. browserPairApprover
+	// is a test-only hook used by the direct IPC regression; production always
+	// waits for the native buttons below.
+	browserPairs        []*browserPairPending
+	browserPairApprover func(context.Context, browserhost.BrowserPairRequest) (browserhost.BrowserPairDecision, error)
 
 	browserPasskeyID                               string
 	browserSaveID, browserSaveTitle                string
@@ -429,6 +434,7 @@ func (a *App) Lock() {
 		s.RequestLock()
 	}
 	a.cancelPendingCLIRun()
+	a.cancelPendingBrowserPairs()
 	a.notifyBrowserBrokerLocked()
 	if s != nil {
 		a.launch(s.Lock)
@@ -717,12 +723,21 @@ func (a *App) View(c *ui.Context) {
 	t := c.Theme()
 	a.brokerMu.Lock()
 	cliPending := a.cliPending != nil
+	pairPending := len(a.browserPairs) != 0
 	a.brokerMu.Unlock()
 	if cliPending {
 		ui.Column(c.Key(a.generation)).Fill().Background(t.Background).Padding(24).Gap(16).Children(func() { a.cliApprovalView(c) })
 		return
 	}
-	if a.session != nil && a.sshApproval == nil && a.browser == nil && !a.quick.open && a.v2Mode && a.page == "vault" {
+	if pairPending {
+		ui.Column(c.Key(a.generation)).Fill().Background(t.Background).Padding(24).Gap(16).Children(func() { a.browserPairView(c) })
+		return
+	}
+	browser := a.browser
+	if browser == nil {
+		browser = a.brokeredBrowserApproval()
+	}
+	if a.session != nil && a.sshApproval == nil && browser == nil && !a.quick.open && a.v2Mode && a.page == "vault" {
 		a.v2View(c)
 		return
 	}
@@ -743,8 +758,8 @@ func (a *App) View(c *ui.Context) {
 			a.lockView(c)
 		} else if a.sshApproval != nil {
 			a.sshApprovalView(c)
-		} else if a.browser != nil {
-			a.browserView(c)
+		} else if browser != nil {
+			a.browserViewFor(c, browser)
 		} else if a.quick.open {
 			a.quickSearchView(c)
 		} else {
