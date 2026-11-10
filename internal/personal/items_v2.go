@@ -286,9 +286,12 @@ func (s *Session) AddAttachment(id, revision, fileName, mimeType string, content
 		return "", "", ErrMutationRefused
 	}
 	body := append([]byte(nil), content...)
+	// The request holds only a copy, so the caller's slice is never touched;
+	// the copy is zeroed once the mutation no longer needs it (the persisted
+	// value was sealed into its own buffers).
+	defer clear(body)
 	r, e := s.nativeMutation(v2AttachmentAddAction, vault.Item{}, &Edit{ID: id, Revision: revision}, commandOption{v2: &v2Request{fileName: fileName, mimeType: mimeType, content: body}}, g)
 	if e != nil {
-		clear(body)
 		return "", "", e
 	}
 	return r.attachment.ID, r.revision, nil

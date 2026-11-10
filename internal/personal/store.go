@@ -289,14 +289,20 @@ func commandWithClose(run func() (result, error), closeDB func() error) (r resul
 }
 
 type authenticatedState struct {
-	slot      account.Slot
-	opened    []byte
-	identity  identity
-	snapshot  vault.Snapshot
-	tip       auditTip
-	rows      []Event
-	chains    []Chain
-	items     []vault.Item
+	slot     account.Slot
+	opened   []byte
+	identity identity
+	snapshot vault.Snapshot
+	tip      auditTip
+	rows     []Event
+	chains   []Chain
+	items    []vault.Item
+	// origin is a shallow copy of the decrypted items taken before any
+	// transactional mutation. Updates replace entries with CloneItem copies and
+	// drop purged entries, so origin is the lifetime root holding the
+	// byte-slice backing buffers (attachment bodies, import provenance, seeds
+	// and passkeys) reachable before the transaction began. clear() zeroes it.
+	origin    []vault.Item
 	revisions map[string]string
 	vaults    []vault.VaultMeta
 	// nextCache is a private, session-bound candidate built only after the
@@ -317,15 +323,25 @@ func clearItemSensitiveBuffers(item *vault.Item) {
 	clear(item.ImportSource)
 }
 
+// clear zeroes both the origin items and the transaction's final items.
+// Entries shared by both views are zeroed twice, which is harmless; entries
+// replaced by CloneItem are only reachable through origin, and fresh buffers
+// belonging to the new persisted value were sealed before this runs.
 func (a *authenticatedState) clear() {
 	clear(a.opened)
 	a.identity.clear()
-	for n := range a.items {
-		clearItemSensitiveBuffers(&a.items[n])
-		clear(a.items[n].SSHSeed)
+	clearAuthenticatedItems(a.origin)
+	clearAuthenticatedItems(a.items)
+	a.origin = nil
+}
+
+func clearAuthenticatedItems(items []vault.Item) {
+	for n := range items {
+		clearItemSensitiveBuffers(&items[n])
+		clear(items[n].SSHSeed)
 		// Both passkey forms (legacy single record and versioned collection)
 		// must be zeroed here.
-		clearItemPasskeys(&a.items[n])
+		clearItemPasskeys(&items[n])
 	}
 }
 
@@ -339,11 +355,7 @@ func authenticateState(tx *bolt.Tx, pw string, key []byte, action string, unlock
 		if err != nil {
 			clear(opened)
 			i.clear()
-			for n := range items {
-				clearItemSensitiveBuffers(&items[n])
-				clear(items[n].SSHSeed)
-				clearItemPasskeys(&items[n])
-			}
+			clearAuthenticatedItems(items)
 		}
 	}()
 	b := tx.Bucket(bucket)
@@ -478,7 +490,10 @@ func authenticateState(tx *bolt.Tx, pw string, key []byte, action string, unlock
 	if e != nil {
 		return nil, e
 	}
-	return &authenticatedState{slot: slot, opened: opened, identity: i, snapshot: s, tip: tip, rows: rows, chains: chains, items: items, revisions: revisions, vaults: vaults, nextCache: nextCache}, nil
+	// Shallow copy: it shares the decrypted structs (and their byte buffers)
+	// without preserving anything the transaction replaces into items.
+	origin := append([]vault.Item(nil), items...)
+	return &authenticatedState{slot: slot, opened: opened, identity: i, snapshot: s, tip: tip, rows: rows, chains: chains, items: items, origin: origin, revisions: revisions, vaults: vaults, nextCache: nextCache}, nil
 }
 
 // The updater returns only after commit (including bbolt's default fsync).
@@ -1436,6 +1451,8 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 				}
 				items[idx] = next
 				out.attachment = att
+				// The result carries metadata only; its Content alias keeps the
+				// new sealed attachment buffer reachable until auth.clear().
 				out.attachment.Content = nil
 			}
 		case v2AttachmentRemoveAct:
