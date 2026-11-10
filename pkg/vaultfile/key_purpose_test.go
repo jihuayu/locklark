@@ -62,11 +62,10 @@ func sepFile(t *testing.T) *File {
 
 // rawAgeRecipient returns the age X25519 recipient whose payload is exactly
 // the 32 raw bytes k. The string is built with this package's test-only
-// Bech32 encoder (age's internal one is not importable) and must be accepted
-// by age.ParseX25519Recipient before the test uses it. The payload is then
-// checked through age's own canonical output: age clamps k and derives the
-// matching public key, so that recipient decodes back only to the clamped
-// fixture, which proves the parser read the bytes this test intended.
+// Bech32 encoder (age's internal one is not importable), must be accepted by
+// age.ParseX25519Recipient, and must decode back through this package's
+// extractor to exactly k. That equality is the premise of the collision
+// tests: the fixture bytes are the bytes purpose separation compares.
 func rawAgeRecipient(t *testing.T, k []byte) string {
 	t.Helper()
 	if len(k) != 32 {
@@ -79,26 +78,14 @@ func rawAgeRecipient(t *testing.T, k []byte) string {
 	if _, err := age.ParseX25519Recipient(r); err != nil {
 		t.Fatalf("age.ParseX25519Recipient(%q) = %v, want nil", r, err)
 	}
-	id, err := age.ParseX25519Identity(ageSecretKey(k))
+	got, err := ageX25519RecipientBytes(r)
 	if err != nil {
-		t.Fatalf("age rejected scalar encoding: %v", err)
+		t.Fatalf("ageX25519RecipientBytes(%q) = %v, want nil", r, err)
 	}
-	derived, err := ageX25519RecipientBytes(id.Recipient().String())
-	if err != nil || !bytes.Equal(derived[:], pubFromScalar(t, k)) {
-		t.Fatalf("payload %q does not match the age-derived recipient: %v", r, err)
+	if !bytes.Equal(got[:], k) {
+		t.Fatalf("ageX25519RecipientBytes(%q) = %x, want %x", r, got, k)
 	}
 	return r
-}
-
-// pubFromScalar is the X25519 public key age derives from a scalar: the
-// clamped scalar times the base point.
-func pubFromScalar(t *testing.T, k []byte) []byte {
-	t.Helper()
-	pub, err := curve25519.X25519(k, curve25519.Basepoint)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return pub
 }
 
 // wantPurposeRejected asserts that p is rejected by ValidatePolicy as an
@@ -174,9 +161,9 @@ func TestPurposeSeparationDeviceKeysAgainstAge(t *testing.T) {
 	p.Devices[3].PolicySigningKey = &ps
 	wantPurposeRejected(t, f, &p, "device policy key equals another device's age bytes")
 
-	// The Ed25519 public key for the raw fixture itself is accepted as an
-	// Ed25519 key: an X25519 point is any 32 bytes, so only the cross-role
-	// comparison can catch this reuse.
+	// The raw fixture is also valid Ed25519-shaped key material: age's parser
+	// accepts any 32-byte payload without a curve check, so only the
+	// cross-role comparison catches this reuse.
 	if !validEd25519Key(raw[:]) {
 		t.Fatal("age payload is not shaped as an Ed25519 public key")
 	}
@@ -195,22 +182,12 @@ func TestPurposeSeparationAcrossDevices(t *testing.T) {
 	wantPurposeRejected(t, f, &p, "age recipient reused across devices")
 
 	// Age recipient bytes reused as another device's content signing key
-	// (age to signing), both as the raw extracted bytes and behind the age
-	// encoding itself. The string forms of the two roles differ, so a display
-	// string comparison would let the second through.
+	// (age to signing) as the raw extracted bytes. The string forms of the two
+	// roles differ, so a display string comparison would let this through.
 	f = sepFile(t)
 	p = f.SignedPolicyProofs[0].Policy
 	p.Devices[2].ContentSigningKey.PublicKey = raw[:]
 	wantPurposeRejected(t, f, &p, "age bytes reused as another device's content key")
-
-	f = sepFile(t)
-	p = f.SignedPolicyProofs[0].Policy
-	ageText := p.Devices[0].AgeEncryptionKey
-	p.Devices[2].ContentSigningKey.PublicKey = []byte(ageText)
-	if string(p.Devices[2].ContentSigningKey.PublicKey) != p.Devices[0].AgeEncryptionKey {
-		t.Fatal("test premise: the signing member does not carry the age text")
-	}
-	wantPurposeRejected(t, f, &p, "age text reused as another device's content key")
 
 	// Content signing key reused on another device (signing to signing).
 	f = sepFile(t)

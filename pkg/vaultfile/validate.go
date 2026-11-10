@@ -580,9 +580,10 @@ func validEd25519Key(b []byte) bool {
 }
 
 // validAgeX25519Recipient reports whether s is a well-formed age X25519
-// recipient. Delegated to filippo.io/age so Bech32, the checksum and the
-// 32-byte X25519 point are checked by the reference implementation; no
-// cryptographic operation beyond parsing the public key happens here.
+// recipient. Delegated to filippo.io/age, which in v1.3.2 checks the Bech32
+// encoding and checksum, the "age" HRP/type and that the payload is exactly
+// 32 bytes. It does not check the curve point or reject low-order points at
+// parse time; no cryptographic operation happens here.
 func validAgeX25519Recipient(s string) bool {
 	_, err := ageX25519RecipientBytes(s)
 	return err == nil
@@ -593,15 +594,17 @@ func validAgeX25519Recipient(s string) bool {
 // so the same key written as an age recipient and as an Ed25519 public key is
 // one key, not two display strings.
 //
-// The gate is age.ParseX25519Recipient: all Bech32 rules, the checksum, the
-// "age" type and the X25519 key length/point are validated by age, the pinned
-// reference implementation. age v1.3.2 keeps the point in an unexported field
-// with no raw accessor, and this package does not reach into it with
-// reflection or unsafe. After that successful parse, the smallest Bech32
-// extraction needed recovers the payload from age's canonical
-// recipient.String() output (lowercase "age1" text), never from the
-// caller's string directly; it performs no checksum, type or point
-// validation of its own.
+// The gate is age.ParseX25519Recipient at the pinned v1.3.2: it validates the
+// Bech32 encoding and checksum, the "age" HRP/type, and (in
+// newX25519RecipientFromPoint) exactly 32 payload bytes. It does not check the
+// curve point or reject low-order points at parse time. age keeps the payload
+// in an unexported field with no raw accessor, and this package does not reach
+// into it with reflection or unsafe. After that successful parse, the smallest
+// Bech32 extraction needed recovers the payload from age's canonical
+// recipient.String() output (lowercase "age1" text), never from the caller's
+// string directly. That extraction validates only shape, payload length and a
+// canonical round trip; it does not re-check the checksum, the type or the
+// curve point.
 func ageX25519RecipientBytes(s string) (k [32]byte, err error) {
 	if len(s) > MaxPublicKeyLength || !strings.HasPrefix(s, AgeX25519RecipientPrefix) {
 		return k, Err("", CodeInvalidValue)
