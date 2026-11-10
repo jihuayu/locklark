@@ -211,7 +211,7 @@ func (b *s3Backend) live() bool {
 
 func (b *s3Backend) Read(ctx context.Context, name string) (ReadResult, error) {
 	if err := ctx.Err(); err != nil {
-		return ReadResult{}, classified(ErrDenied, err)
+		return ReadResult{}, deniedContext(err)
 	}
 	if !b.live() {
 		return ReadResult{}, ErrDenied
@@ -256,7 +256,7 @@ func (b *s3Backend) Read(ctx context.Context, name string) (ReadResult, error) {
 		return ReadResult{}, fmt.Errorf("%w: body length %d does not match Content-Length %d", ErrCorrupt, len(data), *declared)
 	}
 	if err := ctx.Err(); err != nil {
-		return ReadResult{}, classified(ErrDenied, err)
+		return ReadResult{}, deniedContext(err)
 	}
 	return ReadResult{Bytes: data, Revision: Revision(*etag)}, nil
 }
@@ -346,7 +346,7 @@ func (b *s3Backend) ReplaceIfVersion(ctx context.Context, name string, expected 
 	// A well-formed revision is not checked here: whether it matches is the
 	// service's decision, made by the single conditional Put that put sends.
 	if err := ctx.Err(); err != nil {
-		return classified(ErrDenied, err)
+		return deniedContext(err)
 	}
 	if !b.live() {
 		return ErrDenied
@@ -366,7 +366,7 @@ func (b *s3Backend) ReplaceIfVersion(ctx context.Context, name string, expected 
 // PutObject.
 func (b *s3Backend) put(ctx context.Context, name, expected string, value []byte) error {
 	if err := ctx.Err(); err != nil {
-		return classified(ErrDenied, err)
+		return deniedContext(err)
 	}
 	if !b.live() {
 		return ErrDenied
@@ -397,7 +397,7 @@ func (b *s3Backend) put(ctx context.Context, name, expected string, value []byte
 
 func (b *s3Backend) List(ctx context.Context) ([]string, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, classified(ErrDenied, err)
+		return nil, deniedContext(err)
 	}
 	if !b.live() {
 		return nil, ErrDenied
@@ -454,11 +454,12 @@ func mapS3ReadError(ctx context.Context, err error) error {
 	// Once response headers arrived the caller's own deadline means the body
 	// read was interrupted. Read has no side effect on the stored version and
 	// the caller asked to stop, so this is the caller's cancellation:
-	// ErrDenied (the cause stays in the message). A deadline reached while
-	// still connecting or waiting for headers is likewise ErrDenied. Read is
-	// not a mutation, so there is no "unknown outcome" to report.
+	// ErrDenied, with the caller's context error kept in the chain. A deadline
+	// reached while still connecting or waiting for headers is likewise
+	// ErrDenied. Read is not a mutation, so there is no "unknown outcome" to
+	// report.
 	if ctxErr := ctx.Err(); ctxErr != nil && !sent(err) {
-		return classified(ErrDenied, ctxErr)
+		return deniedContext(ctxErr)
 	}
 	if respErr, ok := asS3Response(err); ok {
 		code := respErr.HTTPStatusCode()
@@ -544,4 +545,15 @@ func unknown(err error) error { return classified(ErrUnknown, err) }
 // transport's own context errors for the bridge outcome.
 func classified(sentinel error, err error) error {
 	return fmt.Errorf("%w: %v", sentinel, err)
+}
+
+// deniedContext wraps a caller context error (context.Canceled or
+// context.DeadlineExceeded) that the caller observed itself. Unlike a service
+// or transport error, it is the caller's own cause, so both ErrDenied and the
+// cause stay in the chain: errors.Is reports the deadline or cancellation as
+// well as the denial. Service and transport errors keep going through
+// classified, so a request that may have reached the service never looks like
+// a caller cancellation.
+func deniedContext(err error) error {
+	return fmt.Errorf("%w: %w", ErrDenied, err)
 }

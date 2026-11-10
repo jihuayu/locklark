@@ -744,6 +744,69 @@ func TestS3CallerCancelBeforeSendIsDenied(t *testing.T) {
 	}
 }
 
+// TestS3DeniedContextErrorsRemainDiscoverable pins the caller-context denial
+// shape: every S3 path that observes a caller's own context error returns
+// ErrDenied while keeping that cause in the error chain, so
+// errors.Is(err, context.DeadlineExceeded) still holds. The denial happens
+// before any request, so none of the calls reaches the service.
+func TestS3DeniedContextErrorsRemainDiscoverable(t *testing.T) {
+	m := newS3Mock(t)
+	var hits atomic.Int32
+	m.setHook(func(w http.ResponseWriter, r *http.Request) bool {
+		hits.Add(1)
+		return true
+	})
+	b := newMockBackend(t, m)
+	m.seed(testS3Prefix+"/vault.db", []byte("committed"))
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Unix(0, 0))
+	defer cancel()
+	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		t.Fatalf("pre-expired context err = %v, want context.DeadlineExceeded", ctx.Err())
+	}
+
+	calls := []struct {
+		name string
+		call func() error
+	}{
+		{"CreateIfAbsent", func() error { return b.CreateIfAbsent(ctx, "new", []byte("v")) }},
+		{"Read", func() error {
+			_, err := b.Read(ctx, "vault.db")
+			return err
+		}},
+		{"ReplaceIfVersion", func() error {
+			return b.ReplaceIfVersion(ctx, "vault.db", Revision(`"etag"`), []byte("v2"))
+		}},
+		{"List", func() error {
+			_, err := b.List(ctx)
+			return err
+		}},
+	}
+	for _, c := range calls {
+		err := c.call()
+		if !errors.Is(err, ErrDenied) {
+			t.Errorf("%s = %v, want ErrDenied", c.name, err)
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("%s = %v, want errors.Is(err, context.DeadlineExceeded)", c.name, err)
+		}
+		if errors.Is(err, ErrUnknown) {
+			t.Errorf("%s = %v, must not also report ErrUnknown", c.name, err)
+		}
+	}
+
+	// mapS3ReadError's caller-context branch keeps the cause too, for a Get
+	// that failed while the caller's context was already expired.
+	if err := mapS3ReadError(ctx, errors.New("transport failure")); !errors.Is(err, ErrDenied) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("mapS3ReadError = %v, want ErrDenied wrapping context.DeadlineExceeded", err)
+	}
+
+	reqs, _ := m.recorded()
+	if hits.Load() != 0 || len(reqs) != 0 {
+		t.Fatalf("expired-context calls reached the service: %v", reqs)
+	}
+}
+
 func TestS3RequestTimeoutIsUnknown(t *testing.T) {
 	m := newS3Mock(t)
 	m.seed(testS3Prefix+"/vault.db", []byte("committed"))
