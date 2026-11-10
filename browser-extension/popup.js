@@ -26,17 +26,33 @@
     hibpOptInPending = false,
     hibpNotice = "";
   const query = (selector) => document.querySelector(selector);
-  // A card fill is authorized only from a trusted click whose transient
-  // activation is still live in this extension page. The token is consumed by
-  // the worker before it requests native approval, so later asynchronous work
-  // cannot turn a page-load or scripted action into a card fill.
-  function creditCardGesture(event) {
+  function freshNonce() {
+    try {
+      const bytes = crypto.getRandomValues(new Uint8Array(16));
+      return [...bytes]
+        .map((byte) => byte.toString(16).padStart(2, "0"))
+        .join("");
+    } catch {
+      return "";
+    }
+  }
+  // A card fill is authorized only from a trusted click in this extension page.
+  // `userActivation.isActive` is required wherever the API exists; a browser
+  // without it still needs the trusted click and a fresh nonce. New nonces are
+  // minted only while the popup is open and not already busy with an action.
+  // The proof carries only the nonce and its mint time; the worker consumes it
+  // exactly once and binds it to the tab/document the browser reports.
+  function cardGesture(event) {
     try {
       if (event?.isTrusted !== true) return null;
+      if (popupInactive || busy) return null;
       const activation =
         typeof navigator !== "undefined" ? navigator.userActivation : null;
-      if (activation && activation.isActive !== true) return null;
-      return { v: 1, scope: "credit_card", at: Date.now() };
+      if (activation != null && activation.isActive !== true) return null;
+      const nonce = freshNonce();
+      return nonce
+        ? { v: 2, scope: "credit_card", at: Date.now(), nonce }
+        : null;
     } catch {
       return null;
     }
@@ -780,16 +796,19 @@
         (row.subtitle ? " · " + row.subtitle : "");
       button.disabled = state.pending || busy;
       button.addEventListener("click", (event) => {
-        const userGesture =
-          category === "credit_card" ? creditCardGesture(event) : null;
-        if (category === "credit_card" && !userGesture) return;
-        void act({
+        const message = {
           type: "fill",
           id: row.id,
           revision: row.revision,
           ...(category === "login" ? {} : { category }),
-          ...(userGesture ? { userGesture } : {}),
-        });
+        };
+        if (category !== "credit_card") {
+          void act(message);
+          return;
+        }
+        const userGesture = cardGesture(event);
+        if (!userGesture) return;
+        void act({ ...message, userGesture });
       });
       if (category !== "login") {
         container.append(button);
@@ -2055,16 +2074,18 @@
       if (els.checkoutStatus) els.checkoutStatus.textContent = "";
     }
     if (!picker || picker.used || options.keepChoice) return;
+    // The picker was started by a consumed one-time gesture; an unused list is
+    // withdrawn together with its choice set.
     const nonce = picker.nonce;
     Promise.resolve()
       .then(() => api.runtime.sendMessage({ type: "checkout-cancel", nonce }))
       .catch(() => {});
   }
   async function startCheckoutPicker(detail, event) {
-    // Only a real user gesture may enumerate checkout frames.
-    const userGesture = creditCardGesture(event);
-    if (!userGesture) return;
     if (!detail || !lastState?.connected || popupInactive || busy) return;
+    // Only a real user gesture may enumerate checkout frames.
+    const userGesture = cardGesture(event);
+    if (!userGesture) return;
     if (!checkoutChoicesSupported(detail)) {
       toast("当前原生宿主或浏览器不支持选择结账表单");
       return;
@@ -2105,8 +2126,6 @@
   }
   async function chooseCheckoutFrame(picker, choice, event) {
     // An explicit gesture for this exact opaque key; nothing is preselected.
-    const userGesture = creditCardGesture(event);
-    if (!userGesture) return;
     if (!picker || picker !== checkoutPicker || picker.used) return;
     if (!checkoutChoiceKey(choice)) return;
     if (!picker.candidates.some((entry) => entry.choice === choice)) return;
@@ -2117,6 +2136,9 @@
       toast("选择结账表单已过期，请重新选择");
       return;
     }
+    // The picker's one-time gesture was consumed when it was opened; this
+    // click only selects one of its opaque candidates.
+    if (event?.isTrusted !== true) return;
     picker.used = true;
     if (checkoutPickerTimer) {
       clearTimeout(checkoutPickerTimer);
@@ -2132,7 +2154,6 @@
         choice,
         id: picker.id,
         revision: picker.revision,
-        userGesture,
       },
       generation,
     );
@@ -3644,9 +3665,8 @@
     const detail = lastDetail;
     const origin = detailCurrentOrigin();
     if (!detail || !origin || !detailLacksOrigin(detail, origin)) return;
-    const userGesture = checkoutIsCard(detail)
-      ? creditCardGesture(event)
-      : null;
+    // Mint while this click is still the current action; two awaits follow.
+    const userGesture = checkoutIsCard(detail) ? cardGesture(event) : null;
     if (checkoutIsCard(detail) && !userGesture) return;
     try {
       const reply = await classifyDetailAction({
@@ -4032,7 +4052,7 @@
         return;
       }
       const userGesture = checkoutIsCard(lastDetail)
-        ? creditCardGesture(event)
+        ? cardGesture(event)
         : null;
       if (checkoutIsCard(lastDetail) && !userGesture) return;
       void classifyDetailAction({

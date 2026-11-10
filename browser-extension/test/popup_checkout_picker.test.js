@@ -344,12 +344,15 @@ test("a trusted choice sends back only the opaque nonce and key", async () => {
   const select = h.take("checkout-select");
   assert.deepEqual(
     Object.keys(select.message).sort(),
-    ["choice", "id", "nonce", "revision", "type", "userGesture"],
+    // The one-time card gesture was consumed when the list was requested;
+    // selecting an opaque key never mints a second authorization.
+    ["choice", "id", "nonce", "revision", "type"],
   );
   assert.equal(select.message.nonce, NONCE);
   assert.equal(select.message.choice, CHOICE_FRAME);
   assert.equal(select.message.id, ID);
   assert.equal(select.message.revision, REV);
+  assert.equal("userGesture" in select.message, false);
   // No origin, frame id or document id is presented as an authority claim.
   assert.equal("origin" in select.message, false);
   assert.equal("frameId" in select.message, false);

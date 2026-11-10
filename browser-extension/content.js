@@ -421,16 +421,21 @@
     }
   }
   // Credit-card fills cross an asynchronous native approval, so transient
-  // activation cannot be re-checked in the injected frame later. Mint an
-  // explicit, short-lived authorization here, synchronously inside the trusted
-  // click, and let the worker validate its freshness before it asks native.
-  function creditCardGesture(event) {
+  // activation cannot be re-checked in the injected frame later. Mint a
+  // one-time proof (nonce plus its mint time) here, synchronously inside the
+  // trusted click. No tab/frame/document id is claimed: the worker binds the
+  // nonce to the sender the browser reports and consumes it exactly once.
+  function cardGesture(event) {
     try {
       if (event?.isTrusted !== true) return null;
       const activation =
         typeof navigator !== "undefined" ? navigator.userActivation : null;
-      if (activation && activation.isActive !== true) return null;
-      return { v: 1, scope: "credit_card", at: Date.now() };
+      if (activation != null && activation.isActive !== true) return null;
+      const bytes = crypto.getRandomValues(new Uint8Array(16));
+      const nonce = [...bytes]
+        .map((byte) => byte.toString(16).padStart(2, "0"))
+        .join("");
+      return { v: 2, scope: "credit_card", at: Date.now(), nonce };
     } catch {
       return null;
     }
@@ -1125,9 +1130,7 @@
             (row.subtitle ? " · " + row.subtitle : ""),
           (clickEvent) => {
             const userGesture =
-              category === "credit_card"
-                ? creditCardGesture(clickEvent)
-                : null;
+              category === "credit_card" ? cardGesture(clickEvent) : null;
             if (category === "credit_card" && !userGesture) return;
             dismiss();
             void send({
