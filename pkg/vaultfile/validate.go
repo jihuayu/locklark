@@ -73,6 +73,12 @@ func ValidateFile(f *File) error {
 	if f.ContentSignature.SignerID != h.AuthorDeviceID {
 		return Err("", CodeSignatureInvalid)
 	}
+	// A file may only be authored by a device whose principal is a writer,
+	// admin or owner. Readers hold no content signing authority.
+	author := findDevice(current, h.AuthorDeviceID)
+	if !current.hasRole(author.PrincipalID, RoleWriter, RoleAdmin, RoleOwner) {
+		return Err("", CodeInvalidValue)
+	}
 	var headerSigner *Device
 	for i := range current.Devices {
 		d := &current.Devices[i]
@@ -93,15 +99,26 @@ func ValidateFile(f *File) error {
 	if len(f.VUKDeviceSlots) == 0 || len(f.VUKDeviceSlots) > MaxDeviceSlots {
 		return Err("", CodeInvalidValue)
 	}
+	// The VUK slots are exactly the approved devices whose principal has
+	// read access (reader, writer, admin or owner). A slot for a device
+	// without a read role hands the vault key to it and is rejected; a device
+	// with a read role missing from the slots could not open the snapshot.
 	seen := make(map[string]bool, len(f.VUKDeviceSlots))
 	for i := range f.VUKDeviceSlots {
 		s := &f.VUKDeviceSlots[i]
 		dev := findDevice(current, s.DeviceID)
-		if dev == nil || seen[s.DeviceID] || s.Recipient != dev.AgeEncryptionKey ||
+		if dev == nil || !current.hasRole(dev.PrincipalID, RoleReader, RoleWriter, RoleAdmin, RoleOwner) ||
+			seen[s.DeviceID] || s.Recipient != dev.AgeEncryptionKey ||
 			s.WrappedVUK == nil || len(s.WrappedVUK) == 0 {
 			return Err("", CodeInvalidValue)
 		}
 		seen[s.DeviceID] = true
+	}
+	for i := range current.Devices {
+		d := &current.Devices[i]
+		if current.hasRole(d.PrincipalID, RoleReader, RoleWriter, RoleAdmin, RoleOwner) && !seen[d.DeviceID] {
+			return Err("", CodeInvalidValue)
+		}
 	}
 	return nil
 }
@@ -166,10 +183,16 @@ func ValidatePolicy(p *Policy) error {
 	keys := map[string]string{}
 	for i := range p.Devices {
 		d := &p.Devices[i]
-		if !validID(d.DeviceID, MaxDeviceIDLength) || !validLabel(d.Label) || devices[d.DeviceID] {
+		if !validID(d.DeviceID, MaxDeviceIDLength) || !validID(d.PrincipalID, MaxIDLength) ||
+			!validLabel(d.Label) || devices[d.DeviceID] {
 			return Err("", CodeInvalidValue)
 		}
 		devices[d.DeviceID] = true
+		// A device acts only with the vault roles of its principal: the
+		// principal must be a reader, writer, admin or owner of this policy.
+		if !p.hasRole(d.PrincipalID, RoleReader, RoleWriter, RoleAdmin, RoleOwner) {
+			return Err("", CodeInvalidValue)
+		}
 		if d.ContentSigningKey.Alg != SigAlgEd25519 || !validEd25519Key(d.ContentSigningKey.PublicKey) {
 			return Err("", CodeInvalidValue)
 		}
@@ -282,6 +305,43 @@ func checkPrincipals(ps []Principal) error {
 		local[p.PrincipalID] = true
 	}
 	return nil
+}
+
+// Role names one vault role of a principal. The role order is significant:
+// a writer, admin or owner also reads, an admin or owner also writes, and an
+// owner also administers. Every role implies the roles before it.
+type Role int
+
+const (
+	RoleReader Role = iota
+	RoleWriter
+	RoleAdmin
+	RoleOwner
+)
+
+// hasRole reports whether principalID holds any of roles in p. A role also
+// counts through the implication order: a writer is a reader.
+func (p *Policy) hasRole(principalID string, roles ...Role) bool {
+	for _, r := range roles {
+		if p.hasRoleAtLeast(principalID, r) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasRoleAtLeast reports whether principalID is listed under role or under any
+// stronger role.
+func (p *Policy) hasRoleAtLeast(principalID string, role Role) bool {
+	lists := [4][]Member{p.Readers, p.Writers, p.Admins, p.Owners}
+	for r := role; r <= RoleOwner; r++ {
+		for i := range lists[r] {
+			if lists[r][i].PrincipalID == principalID {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func findDevice(p *Policy, id string) *Device {

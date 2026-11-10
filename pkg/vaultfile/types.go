@@ -116,11 +116,14 @@ type DelegationScope struct {
 	ReplaceRoot   bool `json:"replace_root"`
 }
 
-// Device is one approved device. The three key roles are distinct: a device
-// holds at most one content signing key, one policy signing key and one age
-// X25519 encryption key, and no key of one role may equal a key of another.
+// Device is one approved device. Every device belongs to exactly one
+// principal, named by its mandatory PrincipalID; the device acts with that
+// principal's vault roles. The three key roles are distinct: a device holds
+// at most one content signing key, one policy signing key and one age X25519
+// encryption key, and no key of one role may equal a key of another.
 type Device struct {
 	DeviceID          string     `json:"device_id"`
+	PrincipalID       string     `json:"principal_id"`
 	Label             string     `json:"label"`
 	ContentSigningKey PublicKey  `json:"content_signing_key"`
 	PolicySigningKey  *PublicKey `json:"policy_signing_key"`

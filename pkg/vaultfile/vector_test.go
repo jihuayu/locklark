@@ -172,6 +172,7 @@ func buildPolicy() *Policy {
 		Devices: []Device{
 			{
 				DeviceID:          "device-1",
+				PrincipalID:       "alice",
 				Label:             "Alice laptop",
 				ContentSigningKey: PublicKey{Alg: SigAlgEd25519, PublicKey: pf(0x21, 32)},
 				PolicySigningKey:  &PublicKey{Alg: PolicySigAlgEd25519, PublicKey: pf(0x22, 32)},
@@ -179,6 +180,7 @@ func buildPolicy() *Policy {
 			},
 			{
 				DeviceID:          "device-2",
+				PrincipalID:       "bob",
 				Label:             "Bob phone",
 				ContentSigningKey: PublicKey{Alg: SigAlgEd25519, PublicKey: pf(0x31, 32)},
 				PolicySigningKey:  &PublicKey{Alg: PolicySigAlgEd25519, PublicKey: pf(0x32, 32)},

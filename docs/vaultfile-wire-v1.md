@@ -104,14 +104,21 @@ code re-parses it and requires byte equality with the canonical re-encoding.
   "remove_devices", "promote_admin", "promote_owner", "replace_root"},
   "scope_note", "expires_policy_seq"}`. `promote_owner` and `replace_root`
   must be `false`.
-- `Device`: `{"device_id", "label", "content_signing_key": {PublicKey},
-  "policy_signing_key": {PublicKey} | null, "age_encryption_key": <age1...>}`.
+- `Device`: `{"device_id", "principal_id", "label", "content_signing_key":
+  {PublicKey}, "policy_signing_key": {PublicKey} | null, "age_encryption_key":
+  <age1...>}`. `principal_id` is mandatory: every device belongs to exactly
+  one principal.
 - `PublicKey`: `{"alg": "ed25519", "public_key": <base64url>}`.
 - `DeviceSlot`: `{"device_id", "recipient": <age1...>, "wrapped_vuk": <base64url>}`.
 
 Role semantics are fixed: the owner root is independent of any device, and
 the three device key roles (content signing, policy signing, age encryption)
 are distinct and never interchangeable.
+
+A device acts only with the roles of its principal, and roles imply the ones
+before them: writer implies reader, admin implies writer, owner implies admin.
+A device whose principal is in none of `readers`, `writers`, `admins`,
+`owners` is rejected.
 
 ## Structural rules
 
@@ -130,8 +137,14 @@ The codec is strict:
 the header vault, exactly one proof carries the header policy sequence and its
 domain-separated digest matches `policy_digest`, the content signature names
 the authoring device, the header signature names a device with a policy
-signing key, the CEK slot epoch matches the header epoch, and every VUK slot
-names a policy device with the matching age recipient.
+signing key, the CEK slot epoch matches the header epoch, and the author's
+principal is a writer, admin or owner.
+
+The VUK slots are exactly the approved devices whose principal has read
+access (reader, writer, admin or owner): every such device has one slot and no
+other device has any, so no device without a read role is wrapped the VUK and
+no read-capable device is left without it. A slot must name a policy device
+and carry that device's age recipient.
 
 ## Budgets
 

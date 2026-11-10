@@ -72,9 +72,11 @@ func setPolicy(f *File, p *Policy) {
 	doc := docFor(p)
 	cur := currentPolicy(p, doc)
 	f.Header.PolicySeq = cur.PolicySeq
-	f.Header.PolicyDigest = cur.PolicyDigest
 	f.SignedPolicyProofs[0].Document = doc
 	f.SignedPolicyProofs[0].Policy = *cur
+	// The header binds the domain-separated digest of the carried document,
+	// not the opaque digest member inside it.
+	f.Header.PolicyDigest = policyDigest(&f.SignedPolicyProofs[0])
 }
 
 // rebind proof with a fresh document that is not paired and binds header
@@ -430,5 +432,222 @@ func TestFineGrantedWithoutCrypto(t *testing.T) {
 	}
 	if err := ValidateFile(f); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// deviceByID returns a copy of the given device of p.
+func deviceByID(t *testing.T, p *Policy, id string) Device {
+	t.Helper()
+	d := findDevice(p, id)
+	if d == nil {
+		t.Fatalf("device %q not in policy", id)
+	}
+	return *d
+}
+
+func TestDevicePrincipalRequired(t *testing.T) {
+	// The principal is mandatory on the typed path ...
+	f := buildFile()
+	f.SignedPolicyProofs[0].Policy.Devices[0].PrincipalID = ""
+	_, err := EncodeFile(f)
+	wantCode(t, err, CodeInvalidValue)
+	if _, err := EncodePolicyDocument(buildPolicy()); err != nil {
+		t.Fatal(err)
+	}
+
+	// ... and on the wire: a device without principal_id is rejected before
+	// validation, and a device that names one the policy does not know is
+	// rejected by validation.
+	enc := string(mustEncode(t))
+	noPrincipal := strings.Replace(enc, `"principal_id":"alice","label":"Alice laptop"`, `"label":"Alice laptop"`, 1)
+	_, err = ParseFile([]byte(noPrincipal))
+	wantCode(t, err, CodeMissingField)
+
+	unknown := strings.Replace(enc, `"device_id":"device-2","principal_id":"bob"`, `"device_id":"device-2","principal_id":"mallory"`, 1)
+	_, err = ParseFile([]byte(unknown))
+	wantCode(t, err, CodeInvalidValue)
+
+	// A principal in the owner root but in no role array grants no device.
+	f = buildFile()
+	p := f.SignedPolicyProofs[0].Policy
+	p.OwnerRoot.Owners = append(p.OwnerRoot.Owners, Principal{PrincipalID: "dave", Label: "Dave"})
+	p.Devices[1].PrincipalID = "dave"
+	setPolicy(f, &p)
+	_, err = EncodeFile(f)
+	wantCode(t, err, CodeInvalidValue)
+}
+
+func TestRoleImplication(t *testing.T) {
+	// A writer implicitly reads; it is not listed under readers.
+	p := buildPolicy()
+	if !p.hasRole("bob", RoleReader) || !p.hasRole("bob", RoleWriter) || p.hasRole("bob", RoleAdmin, RoleOwner) {
+		t.Fatal("role implication for writer is wrong")
+	}
+	// An owner implicitly writes and administers.
+	if !p.hasRole("alice", RoleReader, RoleWriter, RoleAdmin) {
+		t.Fatal("role implication for owner is wrong")
+	}
+	// A reader reads and nothing more.
+	if !p.hasRole("carol", RoleReader) || p.hasRole("carol", RoleWriter, RoleAdmin, RoleOwner) {
+		t.Fatal("role implication for reader is wrong")
+	}
+	if p.hasRole("nobody", RoleReader, RoleWriter, RoleAdmin, RoleOwner) {
+		t.Fatal("unknown principal has a role")
+	}
+}
+
+func TestAuthorRole(t *testing.T) {
+	// A device whose principal is only a reader may not author a file.
+	f := buildFile()
+	p := f.SignedPolicyProofs[0].Policy
+	p.Devices[1].PrincipalID = "carol"
+	setPolicy(f, &p)
+	f.Header.AuthorDeviceID = "device-2"
+	f.HeaderSig.SignerID = "device-2"
+	f.ContentSignature.SignerID = "device-2"
+	_, err := EncodeFile(f)
+	wantCode(t, err, CodeInvalidValue)
+
+	// An owner may author.
+	f = buildFile()
+	if _, err := EncodeFile(f); err != nil {
+		t.Fatalf("owner-authored file rejected: %v", err)
+	}
+
+	// A writer may author though it is not listed under readers.
+	f = buildFile()
+	f.Header.AuthorDeviceID = "device-2"
+	f.HeaderSig.SignerID = "device-2"
+	f.ContentSignature.SignerID = "device-2"
+	if _, err := EncodeFile(f); err != nil {
+		t.Fatalf("writer-authored file rejected: %v", err)
+	}
+
+	// A device not in the policy is still a signature-shape error.
+	f = buildFile()
+	f.Header.AuthorDeviceID = "device-9"
+	_, err = EncodeFile(f)
+	wantCode(t, err, CodeSignatureInvalid)
+}
+
+func TestVUKSlots(t *testing.T) {
+	slotOf := func(p *Policy, id string) DeviceSlot {
+		d := deviceByID(t, p, id)
+		return DeviceSlot{DeviceID: d.DeviceID, Recipient: d.AgeEncryptionKey, WrappedVUK: []byte("synthetic")}
+	}
+
+	// A slot for a device whose principal has no read role is rejected,
+	// even with a matching recipient: that would hand it the vault key.
+	f := buildFile()
+	p := f.SignedPolicyProofs[0].Policy
+	p.Writers = nil
+	p.Devices[1].PrincipalID = "bob" // bob now has no role at all
+	setPolicy(f, &p)
+	_, err := EncodeFile(f)
+	wantCode(t, err, CodeInvalidValue)
+
+	f = buildFile()
+	p = f.SignedPolicyProofs[0].Policy
+	p.Devices[1].PrincipalID = "dave"
+	p.OwnerRoot.Owners = append(p.OwnerRoot.Owners, Principal{PrincipalID: "dave", Label: "Dave"})
+	setPolicy(f, &p)
+	_, err = EncodeFile(f)
+	wantCode(t, err, CodeInvalidValue)
+
+	// An approved device with a read role must have a slot.
+	f = buildFile()
+	f.VUKDeviceSlots = f.VUKDeviceSlots[:1]
+	_, err = EncodeFile(f)
+	wantCode(t, err, CodeInvalidValue)
+
+	// A slot may only name a policy device; unknown and duplicate ids fail.
+	f = buildFile()
+	f.VUKDeviceSlots[1].DeviceID = "device-9"
+	_, err = EncodeFile(f)
+	wantCode(t, err, CodeInvalidValue)
+
+	f = buildFile()
+	f.VUKDeviceSlots[1] = f.VUKDeviceSlots[0]
+	_, err = EncodeFile(f)
+	wantCode(t, err, CodeInvalidValue)
+
+	// A device added to the policy needs its slot in the same file.
+	f = buildFile()
+	p = f.SignedPolicyProofs[0].Policy
+	// carol already holds a device, so the new one goes to another reader.
+	p.Readers = append(p.Readers, Member{PrincipalID: "erin", Label: "Erin"})
+	p.Devices = append(p.Devices, Device{
+		DeviceID:          "device-3",
+		PrincipalID:       "erin",
+		Label:             "Erin desktop",
+		ContentSigningKey: PublicKey{Alg: SigAlgEd25519, PublicKey: pf(0x61, 32)},
+		AgeEncryptionKey:  ageRecipient(clientKey("device-3")),
+	})
+	setPolicy(f, &p)
+	_, err = EncodeFile(f)
+	wantCode(t, err, CodeInvalidValue)
+	f.VUKDeviceSlots = append(f.VUKDeviceSlots, slotOf(&f.SignedPolicyProofs[0].Policy, "device-3"))
+	if _, err := EncodeFile(f); err != nil {
+		t.Fatalf("complete slot set rejected: %v", err)
+	}
+
+	// Slots are matched as a set, not by position: an order-preserving
+	// reordering of the same slots is still valid.
+	base := mustEncode(t)
+	enc := string(base)
+	s0, s1 := string(mustSlotJSON(t, buildFile(), 0)), string(mustSlotJSON(t, buildFile(), 1))
+	if !strings.Contains(enc, s0+","+s1) {
+		t.Fatal("unexpected slot encoding in vector")
+	}
+	swapped := strings.Replace(enc, s0+","+s1, s1+","+s0, 1)
+	if _, err := ParseFile([]byte(swapped)); err != nil {
+		t.Fatalf("reordered slots rejected: %v", err)
+	}
+}
+
+func mustSlotJSON(t *testing.T, f *File, i int) []byte {
+	t.Helper()
+	var b bytes.Buffer
+	s := &f.VUKDeviceSlots[i]
+	b.WriteString(`{"device_id":`)
+	b.WriteString(quote(s.DeviceID))
+	b.WriteString(`,"recipient":`)
+	b.WriteString(quote(s.Recipient))
+	b.WriteString(`,"wrapped_vuk":`)
+	writeBytes(&b, s.WrappedVUK)
+	b.WriteByte('}')
+	return b.Bytes()
+}
+
+func TestValidWriterRoundTrip(t *testing.T) {
+	// Bob is only a writer. His device authors the file and keeps exactly
+	// its own slot beside the owner's; the encoding round-trips unchanged.
+	f := buildFile()
+	f.Header.AuthorDeviceID = "device-2"
+	f.HeaderSig.SignerID = "device-2"
+	f.ContentSignature.SignerID = "device-2"
+	enc, err := EncodeFile(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ParseFile(enc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := EncodeFile(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(enc, again) {
+		t.Fatal("writer round trip is not byte-stable")
+	}
+	p := &got.SignedPolicyProofs[0].Policy
+	for _, d := range p.Devices {
+		if got.Header.AuthorDeviceID == d.DeviceID && d.PrincipalID != "bob" {
+			t.Fatalf("author device principal = %q, want bob", d.PrincipalID)
+		}
+	}
+	if len(got.VUKDeviceSlots) != 2 {
+		t.Fatalf("slots = %d, want 2", len(got.VUKDeviceSlots))
 	}
 }

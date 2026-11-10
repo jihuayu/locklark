@@ -255,6 +255,8 @@ func writePolicy(b *bytes.Buffer, p *Policy) {
 		d := &p.Devices[i]
 		b.WriteString(`{"device_id":`)
 		b.WriteString(quote(d.DeviceID))
+		b.WriteString(`,"principal_id":`)
+		b.WriteString(quote(d.PrincipalID))
 		b.WriteString(`,"label":`)
 		b.WriteString(quote(d.Label))
 		b.WriteString(`,"content_signing_key":{"alg":`)
@@ -933,11 +935,14 @@ func delegationFromValue(v *value) (AdminDelegation, error) {
 
 func deviceFromValue(v *value) (Device, error) {
 	var d Device
-	m, err := obj(v, "device_id", "label", "content_signing_key", "policy_signing_key", "age_encryption_key")
+	m, err := obj(v, "device_id", "principal_id", "label", "content_signing_key", "policy_signing_key", "age_encryption_key")
 	if err != nil {
 		return d, err
 	}
 	if d.DeviceID, err = str(m, "device_id", MaxDeviceIDLength); err != nil {
+		return d, err
+	}
+	if d.PrincipalID, err = str(m, "principal_id", MaxIDLength); err != nil {
 		return d, err
 	}
 	if d.Label, err = str(m, "label", MaxLabelLength); err != nil {
