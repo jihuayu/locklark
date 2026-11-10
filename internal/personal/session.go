@@ -225,11 +225,20 @@ func (s *Session) execute(action string, add vault.Item, edit *Edit, option comm
 	return s.executeActive(action, add, edit, option, true)
 }
 func (s *Session) executeActive(action string, add vault.Item, edit *Edit, option commandOption, touch bool) (result, error) {
+	return s.executeActiveWith(action, add, edit, option, touch, func(option commandOption) (result, error) {
+		return command(s.path, "", nil, action, add, edit, option)
+	})
+}
+
+// executeActiveWith runs one session transaction through run and then discards
+// every sensitive result field if the session locked meanwhile. run is the
+// command boundary; tests substitute it to place a lock deterministically.
+func (s *Session) executeActiveWith(action string, add vault.Item, edit *Edit, option commandOption, touch bool, run func(commandOption) (result, error)) (result, error) {
 	if e := s.active(touch); e != nil {
 		return result{}, e
 	}
 	option.unlocked = s
-	r, e := command(s.path, "", nil, action, add, edit, option)
+	r, e := run(option)
 	if errors.Is(e, invalid) {
 		s.lock()
 	}
@@ -240,6 +249,7 @@ func (s *Session) executeActive(action string, add vault.Item, edit *Edit, optio
 		clear(r.value)
 		clear(r.sshSeed)
 		clear(r.archive)
+		clearBundleValues(r.values)
 		if r.otp != nil {
 			r.otp.Clear()
 		}

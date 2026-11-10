@@ -1301,3 +1301,80 @@ func TestPrepareBrokeredRunCancelledContext(t *testing.T) {
 		t.Fatal("cancelled preparation touched the session")
 	}
 }
+
+// TestExecuteActiveClearsBundleValuesOnLock proves a prepared RunBundle result
+// the store already populated is zeroized when Lock() commits after the
+// in-transaction state check but before command returns. The real
+// executeActive discard path rejects the result, so PrepareBrokeredRun never
+// sees it and cannot be the one to clear the buffers. The run callback stands
+// in for command at the session's existing execution boundary; it sets the
+// lock before returning, so no scheduler timing is involved.
+func TestExecuteActiveClearsBundleValuesOnLock(t *testing.T) {
+	s, f := brokeredRunFixture(t)
+	t.Cleanup(s.Lock)
+	targets := bundleTestTargets(f)
+	want := bundleTestValues()
+	if len(want) != len(targets) {
+		t.Fatalf("fixture values: %d targets: %d", len(want), len(targets))
+	}
+	// The values the store would have extracted; the session must clear
+	// these very buffers.
+	raw := bundleTestValues()
+	slots := sortedKeys(raw)
+	// clearBundleValues deletes each key as well as zeroing its slice, so
+	// retain the original slice aliases to prove the bytes themselves.
+	buffers := make(map[string][]byte, len(raw))
+	for name, value := range raw {
+		buffers[name] = value
+	}
+	for name, secret := range map[string]string{
+		"token": bundleTestPassword, "password": bundleTestPassword,
+		"username": bundleTestUsername, "kubeconfig": bundleTestAttachment,
+	} {
+		if !bytes.Equal(buffers[name], []byte(secret)) {
+			t.Fatalf("slot %q fixture is not the expected secret", name)
+		}
+	}
+	if got := strings.Join(slots, ","); got != "kubeconfig,password,token,username" {
+		t.Fatalf("slot set: %s", got)
+	}
+	// Enter exactly as production callers do: holding s.mu across the
+	// transaction, so the lock is committed by the transaction's own check.
+	s.mu.Lock()
+	r, err := s.executeActiveWith(runBundleAction, vault.Item{}, nil, commandOption{runBundle: &runBundleStoreRequest{targets: targets, request: bundleTestRequest(t, f), root: brokeredRunRoot(t)}}, true, func(option commandOption) (result, error) {
+		if option.unlocked != s {
+			t.Error("run callback did not receive the active session")
+		}
+		// Lock lands after the store's in-transaction state check.
+		s.lockRequested.Store(true)
+		return result{values: raw, session: "synthetic-session", intent: "synthetic-intent", destinationDigest: "synthetic-digest"}, nil
+	})
+	s.mu.Unlock()
+	if !errors.Is(err, ErrSessionLocked) {
+		t.Fatalf("lock after command: %v", err)
+	}
+	if r.values != nil {
+		t.Fatal("locked result kept bundle values")
+	}
+	if s.Unlocked() {
+		t.Fatal("session stayed unlocked")
+	}
+	if len(want) != len(slots) {
+		t.Fatalf("fixture values: %d slot buffers: %d", len(want), len(slots))
+	}
+	for _, name := range slots {
+		if _, ok := raw[name]; ok {
+			t.Fatalf("slot %q was not discarded", name)
+		}
+	}
+	if len(raw) != 0 {
+		t.Fatalf("locked result kept %d slot entries", len(raw))
+	}
+	for _, name := range slots {
+		for i, b := range buffers[name] {
+			if b != 0 {
+				t.Fatalf("slot %q byte %d survived the session lock", name, i)
+			}
+		}
+	}
+}
