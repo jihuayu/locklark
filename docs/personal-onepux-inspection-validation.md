@@ -6,7 +6,7 @@
 
 `personal inspect-1pux --file owner.ll --source export.1pux` 要求交互 stdin/stderr、隐藏双因素和 `SCAN` 确认。先验证个人库因素、快照、全部审计及恢复历史，之后才调用源文件 reader；错误因素和损坏账本不会访问源路径。源路径不进入提示、错误、审计或 JSON 回执。
 
-源文件以只读方式打开，针对打开的句柄验证普通文件和大小，再限读 MaxArchive+1（当前 32 MiB+1）。检查初始大小和读后长度，拒绝增长越界。Stat/Read/Close/非普通文件失败统一固定 source-error，ZIP/JSON 核心的 invalid/unsupported/limit 保留固定分类。原始缓冲返回时清除；不保证 Go 字符串副本、操作系统缓存或原明文导出文件被擦除。
+源文件以只读方式打开，针对打开的句柄验证普通文件和大小，再限读 MaxArchive+1（当前 64 MiB+1）。检查初始大小和读后长度，拒绝增长越界。Stat/Read/Close/非普通文件失败统一固定 source-error，ZIP/JSON 核心的 invalid/unsupported/limit 保留固定分类。原始缓冲返回时清除；不保证 Go 字符串副本、操作系统缓存或原明文导出文件被擦除。
 
 在同一 bbolt Update 内完成检查与 `migration.inspect.1pux` 事件：成功只保存报告的 SHA-256 摘要，失败只保存固定类别。事件无源路径、源文件摘要、字段值、条目 ID 或修订。成功摘要对 `json.Marshal(report)` 的精确 UTF-8 字节计算，不含尾随换行；它绑定报告，不证明源文件内容、出处或迁移许可。不同归档可能产生相同报告摘要。
 
