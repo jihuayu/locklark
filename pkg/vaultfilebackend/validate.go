@@ -41,3 +41,10 @@ func validUTF8NoNUL(s string) bool {
 func validValue(value []byte) bool {
 	return len(value) > 0 && len(value) <= MaxValueSize
 }
+
+// validExpectedRevision reports whether expected is a well-formed revision for
+// ReplaceIfVersion: non-zero and within MaxRevisionSize bytes. Drivers store and
+// compare it verbatim; no other interpretation is allowed.
+func validExpectedRevision(expected Revision) bool {
+	return expected != "" && len(expected) <= MaxRevisionSize
+}

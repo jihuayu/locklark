@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -14,6 +15,11 @@ type openFunc func(t *testing.T) Backend
 
 // RunConformance runs the shared contract suite. Every driver must pass it with
 // its own backend, and must not special-case subtests by name.
+//
+// The suite pins the contract, not the revision scheme: it requires revisions
+// to be opaque, non-zero, bounded, and to change whenever bytes change, but it
+// never requires them to be derived from the bytes or shared across backends
+// or stores.
 //
 // open is called for each subtest and the backend is closed afterwards. reopen
 // returns a fresh backend over the same durable state (a new instance rooted at
@@ -35,14 +41,17 @@ func RunConformance(t *testing.T, open openFunc, reopen openFunc) {
 			t.Fatalf("create: %v", err)
 		}
 		got, err := b.Read(ctx, "vault.db")
-		if err != nil || !bytes.Equal(got.Bytes, value) || got.Token.Zero() {
-			t.Fatalf("read after create = %q, %v, token zero=%v", got.Bytes, err, got.Token.Zero())
+		if err != nil || !bytes.Equal(got.Bytes, value) || got.Revision.Zero() {
+			t.Fatalf("read after create = %q, %v, zero revision=%v", got.Bytes, err, got.Revision.Zero())
+		}
+		if len(got.Revision) > MaxRevisionSize {
+			t.Fatalf("revision length %d exceeds MaxRevisionSize", len(got.Revision))
 		}
 		// Mutating the caller's buffer must not change stored state.
 		value[0] = 'X'
 		again, err := b.Read(ctx, "vault.db")
-		if err != nil || again.Token != got.Token || bytes.Equal(again.Bytes, value) {
-			t.Fatal("stored value aliased or token changed without a write")
+		if err != nil || again.Revision != got.Revision || bytes.Equal(again.Bytes, value) {
+			t.Fatal("stored value aliased or revision changed without a write")
 		}
 		value[0] = 'o'
 		if err := b.CreateIfAbsent(ctx, "vault.db", []byte("second")); !errors.Is(err, ErrConflict) {
@@ -66,24 +75,30 @@ func RunConformance(t *testing.T, open openFunc, reopen openFunc) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := b.ReplaceIfVersion(ctx, "n", first.Token, []byte("v2")); err != nil {
+		if err := b.ReplaceIfVersion(ctx, "n", first.Revision, []byte("v2")); err != nil {
 			t.Fatalf("replace: %v", err)
 		}
 		second, err := b.Read(ctx, "n")
-		if err != nil || string(second.Bytes) != "v2" || second.Token == first.Token {
+		if err != nil || string(second.Bytes) != "v2" || second.Revision == first.Revision {
 			t.Fatalf("after replace = %q, %v", second.Bytes, err)
 		}
-		if err := b.ReplaceIfVersion(ctx, "n", first.Token, []byte("stale")); !errors.Is(err, ErrConflict) {
+		if err := b.ReplaceIfVersion(ctx, "n", first.Revision, []byte("stale")); !errors.Is(err, ErrConflict) {
 			t.Fatalf("stale replace = %v, want ErrConflict", err)
 		}
-		if cur, err := b.Read(ctx, "n"); err != nil || string(cur.Bytes) != "v2" || cur.Token != second.Token {
+		if cur, err := b.Read(ctx, "n"); err != nil || string(cur.Bytes) != "v2" || cur.Revision != second.Revision {
 			t.Fatal("conflicting replace changed the stored version")
 		}
-		if err := b.ReplaceIfVersion(ctx, "missing", second.Token, []byte("x")); !errors.Is(err, ErrConflict) {
+		if err := b.ReplaceIfVersion(ctx, "missing", second.Revision, []byte("x")); !errors.Is(err, ErrConflict) {
 			t.Fatalf("replace missing = %v, want ErrConflict", err)
 		}
-		if err := b.ReplaceIfVersion(ctx, "n", Token{}, []byte("x")); !errors.Is(err, ErrDenied) {
-			t.Fatalf("replace with zero token = %v, want ErrDenied", err)
+		if err := b.ReplaceIfVersion(ctx, "n", Revision(""), []byte("x")); !errors.Is(err, ErrDenied) {
+			t.Fatalf("replace with zero revision = %v, want ErrDenied", err)
+		}
+		if err := b.ReplaceIfVersion(ctx, "n", Revision(strings.Repeat("r", MaxRevisionSize+1)), []byte("x")); !errors.Is(err, ErrDenied) {
+			t.Fatalf("replace with oversize revision = %v, want ErrDenied", err)
+		}
+		if cur, err := b.Read(ctx, "n"); err != nil || string(cur.Bytes) != "v2" || cur.Revision != second.Revision {
+			t.Fatal("malformed revision changed the stored version")
 		}
 	})
 
@@ -96,23 +111,23 @@ func RunConformance(t *testing.T, open openFunc, reopen openFunc) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := b.ReplaceIfVersion(ctx, "n", cur.Token, []byte("done")); err != nil {
+		if err := b.ReplaceIfVersion(ctx, "n", cur.Revision, []byte("done")); err != nil {
 			t.Fatal(err)
 		}
 		after, err := b.Read(ctx, "n")
 		if err != nil {
 			t.Fatal(err)
 		}
-		// An unknown outcome is resolved by retrying the identical write with
-		// the observed token, which leaves the committed bytes in place.
-		if err := b.ReplaceIfVersion(ctx, "n", after.Token, []byte("done")); err != nil {
-			t.Fatalf("idempotent retry = %v", err)
+		// A write whose outcome was unknown is resolved by observing the
+		// current revision; retrying with the pre-write revision conflicts.
+		if after.Revision == cur.Revision {
+			t.Fatal("a committed replace must change the revision")
 		}
 		if got, _ := b.Read(ctx, "n"); string(got.Bytes) != "done" {
 			t.Fatal("retry changed bytes")
 		}
-		if err := b.ReplaceIfVersion(ctx, "n", cur.Token, []byte("stale")); !errors.Is(err, ErrConflict) {
-			t.Fatalf("retry with pre-write token = %v, want ErrConflict", err)
+		if err := b.ReplaceIfVersion(ctx, "n", cur.Revision, []byte("stale")); !errors.Is(err, ErrConflict) {
+			t.Fatalf("retry with pre-write revision = %v, want ErrConflict", err)
 		}
 	})
 
@@ -139,7 +154,7 @@ func RunConformance(t *testing.T, open openFunc, reopen openFunc) {
 				go func(i int) {
 					defer done.Done()
 					start.Wait()
-					err := b.ReplaceIfVersion(ctx, name, base.Token, []byte{byte(i), byte(round)})
+					err := b.ReplaceIfVersion(ctx, name, base.Revision, []byte{byte(i), byte(round)})
 					switch {
 					case err == nil:
 						wins.Add(1)
@@ -201,8 +216,57 @@ func RunConformance(t *testing.T, open openFunc, reopen openFunc) {
 		if err := b.CreateIfAbsent(ctx, "ok", make([]byte, MaxValueSize+1)); !errors.Is(err, ErrDenied) {
 			t.Fatalf("oversize value = %v, want ErrDenied", err)
 		}
-		if err := b.CreateIfAbsent(ctx, "ok", make([]byte, MaxValueSize)); err != nil {
+	})
+
+	t.Run("full_file_budget", func(t *testing.T) {
+		b := f(t)
+		if MaxValueSize != 32<<20 {
+			t.Fatalf("MaxValueSize = %d, want 32 MiB for the complete file", MaxValueSize)
+		}
+		if err := b.CreateIfAbsent(ctx, "full", make([]byte, MaxValueSize)); err != nil {
 			t.Fatalf("max value = %v", err)
+		}
+		got, err := b.Read(ctx, "full")
+		if err != nil || len(got.Bytes) != MaxValueSize {
+			t.Fatalf("read max value = %d bytes, %v", len(got.Bytes), err)
+		}
+		cur, err := b.Read(ctx, "full")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := b.ReplaceIfVersion(ctx, "full", cur.Revision, make([]byte, MaxValueSize+1)); !errors.Is(err, ErrDenied) {
+			t.Fatalf("replace oversize value = %v, want ErrDenied", err)
+		}
+		if err := b.ReplaceIfVersion(ctx, "full", cur.Revision, make([]byte, MaxValueSize)); err != nil {
+			t.Fatalf("replace at max value = %v", err)
+		}
+	})
+
+	// A revision is compared verbatim: no trimming, no quote folding.
+	t.Run("revision_compared_verbatim", func(t *testing.T) {
+		b := f(t)
+		if err := b.CreateIfAbsent(ctx, "etag", []byte("v1")); err != nil {
+			t.Fatal(err)
+		}
+		first, err := b.Read(ctx, "etag")
+		if err != nil {
+			t.Fatal(err)
+		}
+		again, err := b.Read(ctx, "etag")
+		if err != nil || again.Revision != first.Revision {
+			t.Fatalf("revision round trip = %q, %v", again.Revision, err)
+		}
+		if len([]byte(first.Revision)) > MaxRevisionSize {
+			t.Fatalf("revision length %d exceeds MaxRevisionSize", len(first.Revision))
+		}
+		if err := b.ReplaceIfVersion(ctx, "etag", Revision(`"`+string(first.Revision)+`"`), []byte("v2")); !errors.Is(err, ErrConflict) {
+			t.Fatalf("revision wrapped in quotes = %v, want ErrConflict", err)
+		}
+		if err := b.ReplaceIfVersion(ctx, "etag", first.Revision+" ", []byte("v2")); !errors.Is(err, ErrConflict) {
+			t.Fatalf("revision with trailing space = %v, want ErrConflict", err)
+		}
+		if cur, err := b.Read(ctx, "etag"); err != nil || string(cur.Bytes) != "v1" {
+			t.Fatal("non-matching revision changed the stored version")
 		}
 	})
 
@@ -221,12 +285,14 @@ func RunConformance(t *testing.T, open openFunc, reopen openFunc) {
 		}
 	})
 
-	t.Run("list_unsupported", func(t *testing.T) {
-		b := f(t)
-		if _, err := b.List(ctx); !errors.Is(err, ErrUnsupported) {
-			t.Fatalf("list = %v, want ErrUnsupported", err)
-		}
-	})
+	if reopen == nil {
+		t.Run("list_unsupported", func(t *testing.T) {
+			b := f(t)
+			if _, err := b.List(ctx); !errors.Is(err, ErrUnsupported) {
+				t.Fatalf("list = %v, want ErrUnsupported", err)
+			}
+		})
+	}
 
 	t.Run("close", func(t *testing.T) {
 		b := open(t)
@@ -241,6 +307,12 @@ func RunConformance(t *testing.T, open openFunc, reopen openFunc) {
 		}
 		if _, err := b.Read(ctx, "after"); !errors.Is(err, ErrDenied) {
 			t.Fatalf("read after close = %v, want ErrDenied", err)
+		}
+		if err := b.ReplaceIfVersion(ctx, "after", Revision("1"), []byte("v")); !errors.Is(err, ErrDenied) {
+			t.Fatalf("replace after close = %v, want ErrDenied", err)
+		}
+		if _, err := b.List(ctx); !errors.Is(err, ErrDenied) {
+			t.Fatalf("list after close = %v, want ErrDenied", err)
 		}
 	})
 
@@ -260,10 +332,10 @@ func RunConformance(t *testing.T, open openFunc, reopen openFunc) {
 			b2 := reopen(t)
 			defer b2.Close()
 			again, err := b2.Read(ctx, "d")
-			if err != nil || !bytes.Equal(again.Bytes, []byte("v1")) || again.Token != first.Token {
-				t.Fatalf("reopen read = %q %v, token equal=%v", again.Bytes, err, again.Token == first.Token)
+			if err != nil || !bytes.Equal(again.Bytes, []byte("v1")) || again.Revision != first.Revision {
+				t.Fatalf("reopen read = %q %v, revision equal=%v", again.Bytes, err, again.Revision == first.Revision)
 			}
-			if err := b2.ReplaceIfVersion(ctx, "d", first.Token, []byte("v2")); err != nil {
+			if err := b2.ReplaceIfVersion(ctx, "d", first.Revision, []byte("v2")); err != nil {
 				t.Fatalf("reopen replace: %v", err)
 			}
 			if err := b.Close(); err != nil {
