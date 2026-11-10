@@ -10,7 +10,9 @@ printed.
 """
 import argparse
 import base64
+import csv
 import hashlib
+import io
 import json
 import os
 import pathlib
@@ -22,8 +24,9 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PROFILES = {
-    "gh", "aws", "kubectl", "docker", "npm", "terraform", "git", "netrc",
-    "psql", "openai", "anthropic", "stripe", "flyctl", "vercel", "token", "deepseek",
+    "gh", "glab", "aws", "codex", "kubectl", "docker", "npm", "terraform", "git",
+    "netrc", "psql", "openai", "anthropic", "stripe", "flyctl", "vercel", "wrangler",
+    "supabase", "railway", "railway-account", "huggingface", "gemini", "token", "deepseek",
 }
 DEFAULT_TOOLS = ["aws", "docker", "gh", "git", "kubectl", "npm", "psql", "terraform"]
 STAGES = {
@@ -72,6 +75,42 @@ def write_private(path, raw):
     path.chmod(0o600)
 
 
+def executable_name(name):
+    return name + ".exe" if os.name == "nt" else name
+
+
+def windows_private_directory():
+    """Create a current-user-only directory under the Windows Public folder.
+
+    Binding validation intentionally rejects a path whose ancestors are
+    writable by untrusted principals. The process TEMP directory does not
+    satisfy that policy on Windows, so keep the binding itself in a dedicated
+    private directory while leaving the rest of the acceptance evidence in the
+    caller-selected artifact root.
+    """
+    require(os.name == "nt")
+    public = os.environ.get("PUBLIC")
+    parent = pathlib.Path(public) if public else pathlib.Path(os.environ.get("SystemDrive", "C:")) / "Users" / "Public"
+    require(parent.is_absolute() and parent.is_dir())
+    directory = pathlib.Path(tempfile.mkdtemp(prefix="cli-wrappers-private-", dir=parent))
+    try:
+        whoami = subprocess.run(
+            ["whoami", "/user", "/fo", "csv", "/nh"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=15, check=True,
+        )
+        row = next(csv.reader(io.StringIO(whoami.stdout.decode("utf-8", errors="replace"))))
+        sid = row[-1].strip()
+        require(sid.startswith("S-1-"))
+        subprocess.run(
+            ["icacls", str(directory), "/inheritance:r", "/grant:r", f"*{sid}:(OI)(CI)F"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15, check=True,
+        )
+    except Exception:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise AcceptanceFailure()
+    return directory
+
+
 class Acceptance:
     def __init__(self, args):
         self.args = args
@@ -94,10 +133,11 @@ class Acceptance:
         self.environment["LOCKLARK_TEST_SECRET_CANARY"] = self.values[0]
         self.bin_dir = self.root / "bin"
         self.bin_dir.mkdir(mode=0o700)
-        self.cli = pathlib.Path(args.cli).resolve() if args.cli else self.bin_dir / "locklark"
-        self.fixture = pathlib.Path(args.fixture_bin).resolve() if args.fixture_bin else self.bin_dir / "cli-wrappers-fixture"
-        self.binding_dir = self.root / "binding"
-        self.binding_dir.mkdir(mode=0o700)
+        self.cli = pathlib.Path(args.cli).resolve() if args.cli else self.bin_dir / executable_name("locklark")
+        self.fixture = pathlib.Path(args.fixture_bin).resolve() if args.fixture_bin else self.bin_dir / executable_name("cli-wrappers-fixture")
+        self.private_root = windows_private_directory() if os.name == "nt" else None
+        self.binding_dir = self.private_root if self.private_root else self.root / "binding"
+        self.binding_dir.mkdir(mode=0o700, exist_ok=True)
         self.binding = self.binding_dir / ".locklark-cli.json"
         self.vault = self.root / "owner.ll"
 
@@ -321,7 +361,7 @@ class Acceptance:
 
     def tamper(self):
         self.stage = "tamper"
-        tampered = self.root / "tampered-tool"
+        tampered = self.root / executable_name("tampered-tool")
         shutil.copy2(self.fixture, tampered)
         tampered.chmod(0o700)
         payload = self.init_tool("gh-tampered", [
@@ -368,7 +408,8 @@ class Acceptance:
         }).encode())
 
     def close(self):
-        pass
+        if self.private_root:
+            shutil.rmtree(self.private_root)
 
 
 def main(argv=None):

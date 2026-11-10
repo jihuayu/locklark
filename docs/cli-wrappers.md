@@ -132,7 +132,7 @@ checked before any prompt or child start.
 
 ## Built-in profiles
 
-Profiles are deterministic and side-effect free. A slot is one encrypted vault
+The current build contains 24 deterministic, side-effect-free profiles. A slot is one encrypted vault
 field:
 
 - `login` slots can target `username`, `password`, `url` or `notes`.
@@ -147,6 +147,7 @@ field:
 | Profile | Executable(s) | Slots | Environment injected | Max timeout | Denied arguments |
 | --- | --- | --- | --- | --- | --- |
 | `gh` | `gh` | `token` = password (required) | `GH_TOKEN=slot:token` | 300 s | `auth login`, `auth setup-git`, `auth token`, `auth refresh` |
+| `glab` | `glab` | `token` = password (required) | `GITLAB_TOKEN=slot:token` | 600 s | `auth login`, `auth logout`, `auth switch` |
 | `aws` | `aws` | `access_key_id` = username (required)<br>`secret_access_key` = password (required)<br>`session_token` = password (optional) | `AWS_ACCESS_KEY_ID`<br>`AWS_SECRET_ACCESS_KEY`<br>`AWS_SESSION_TOKEN`<br>`AWS_CONFIG_FILE=file:aws/config`<br>`AWS_SHARED_CREDENTIALS_FILE=file:aws/credentials`<br>`AWS_PAGER=` (empty literal) | 3600 s | `configure` |
 | `deepseek` | — (absolute Python interpreter must be supplied with `--program`) | `token` = password (required) | `DEEPSEEK_API_KEY=slot:token` | 3600 s | `configure`, `spawn`, `--background` |
 | `kubectl` | `kubectl`, `helm` | `kubeconfig` = attachment (required document) | `KUBECONFIG=file:kube/config`<br>`KUBECACHEDIR=root:cache` | 28800 s | `config set-credentials`, `config set-cluster`, `config set-context` |
@@ -157,10 +158,17 @@ field:
 | `netrc` | `curl` | `username` = username (required)<br>`password` = password (required)<br>`url` = url (optional) | `NETRC=file:home/.netrc` | 600 s | — |
 | `psql` | `psql`, `pg_dump`, `pg_restore` | `username` = username (required)<br>`password` = password (required)<br>`url` = url (optional) | `PGPASSFILE=file:pg/pgpass` | 28800 s | — |
 | `openai` | `openai` | `token` = password (required) | `OPENAI_API_KEY=slot:token` | 600 s | — |
+| `codex` | `codex` | `token` = password (required) | `CODEX_HOME=root:codex`; API key in `codex/auth.json` | 600 s | `login`, `logout` |
 | `anthropic` | `anthropic`, `claude` | `token` = password (required) | `ANTHROPIC_API_KEY=slot:token` | 600 s | — |
 | `stripe` | `stripe` | `token` = password (required) | `STRIPE_API_KEY=slot:token` | 600 s | `login`, `logout` |
 | `flyctl` | `flyctl`, `fly` | `token` = password (required) | `FLY_API_TOKEN=slot:token` | 1800 s | `auth login`, `auth logout`, `auth token` |
 | `vercel` | `vercel`, `vc` | `token` = password (required) | `VERCEL_TOKEN=slot:token` | 1800 s | `login`, `logout` |
+| `wrangler` | `wrangler` | `token` = password (required) | `CLOUDFLARE_API_TOKEN=slot:token` | 1800 s | `login`, `logout`, `auth token` |
+| `supabase` | `supabase` | `token` = password (required) | `SUPABASE_ACCESS_TOKEN=slot:token` | 1800 s | `login`, `logout` |
+| `railway` | `railway` | `token` = password (required, project token) | `RAILWAY_TOKEN=slot:token` | 1800 s | `login`, `logout` |
+| `railway-account` | `railway` | `token` = password (required, account token) | `RAILWAY_API_TOKEN=slot:token` | 1800 s | `login`, `logout` |
+| `huggingface` | `hf`, `huggingface-cli` | `token` = password (required) | `HF_TOKEN=slot:token` | 600 s | `login`, `logout`, `auth login`, `auth logout` |
+| `gemini` | `gemini` | `token` = password (required) | `GEMINI_API_KEY=slot:token` | 600 s | — |
 | `token` | — (program must be supplied) | `token` = password (required) | Dynamic name via `--name`, e.g. `MY_API_TOKEN=slot:token` | 300 s | — |
 
 ### Profile matrix B: ephemeral files and passthrough allow-lists
@@ -177,15 +185,28 @@ unless a different mode is shown.
 | `docker` | `docker/config.json` (`0600`, `auths` document) | `DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_TLS_VERIFY`, `DOCKER_CERT_PATH`, `DOCKER_BUILDKIT`, `TERM`, `NO_COLOR` |
 | `npm` | `npm/npmrc` (`0600`, `_authToken`) | `TERM`, `NO_COLOR` |
 | `terraform` | `terraform/terraform.rc` (`0600`, empty) | `TF_PLUGIN_CACHE_DIR`, `AWS_REGION`, `AWS_DEFAULT_REGION`, `TF_LOG`, `TERM`, `NO_COLOR` |
-| `git` | `git/askpass_secret` (`0600`)<br>`git/askpass.sh` (`0700`)<br>`git/netrc` (`0600`)<br>`git/credentials` (`0600`)<br>`git/gitconfig` (`0600`) | `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, `GIT_COMMITTER_EMAIL`, `TERM`, `NO_COLOR` |
+| `git` | `git/askpass_secret` (`0600`)<br>`git/askpass.sh` (`0700`)<br>`git/netrc` (`0600`)<br>`git/credentials` (`0600`)<br>`git/gitconfig` (`0600`) | `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, `GIT_COMMITTER_EMAIL`, `SSH_AUTH_SOCK`, `TERM`, `NO_COLOR` |
 | `netrc` | `home/.netrc` (`0600`) | `TERM`, `NO_COLOR` |
 | `psql` | `pg/pgpass` (`0600`) | `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGSSLMODE`, `TERM`, `NO_COLOR` |
 | `openai` | — | `OPENAI_ORG_ID`, `OPENAI_PROJECT_ID`, `OPENAI_BASE_URL`, `TERM`, `NO_COLOR` |
+| `codex` | `codex/auth.json` (`0600`, API-key auth document) | `OPENAI_ORG_ID`, `OPENAI_PROJECT_ID`, `OPENAI_BASE_URL`, `TERM`, `NO_COLOR` |
 | `anthropic` | — | `TERM`, `NO_COLOR` |
 | `stripe` | — | `TERM`, `NO_COLOR` |
 | `flyctl` | — | `FLY_APP`, `FLY_REGION`, `TERM`, `NO_COLOR` |
 | `vercel` | — | `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`, `TERM`, `NO_COLOR` |
+| `wrangler` | — | `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_BASE_URL`, `TERM`, `NO_COLOR` |
+| `supabase` | — | `TERM`, `NO_COLOR` |
+| `railway` | — | `RAILWAY_ENVIRONMENT`, `TERM`, `NO_COLOR` |
+| `railway-account` | — | `RAILWAY_ENVIRONMENT`, `TERM`, `NO_COLOR` |
+| `huggingface` | — | `HF_ENDPOINT`, `TERM`, `NO_COLOR` |
+| `gemini` | — | `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`, `TERM`, `NO_COLOR` |
 | `token` | — | `TERM`, `NO_COLOR` |
+
+`codex` supports API-key authentication only. It writes a short-lived
+`codex/auth.json` under the isolated `CODEX_HOME`; ChatGPT OAuth credentials
+are not imported or copied. `railway` uses the project token
+(`RAILWAY_TOKEN`), while `railway-account` uses the account token
+(`RAILWAY_API_TOKEN`) so the two credential kinds cannot be silently mixed.
 
 The passthrough implementation additionally refuses `PATH`, `HOME`, `TMPDIR`,
 loader variables, proxy variables, credential variables and every name with a
@@ -193,14 +214,21 @@ loader variables, proxy variables, credential variables and every name with a
 `_SECRET`, `_PASSWORD`, `_ACCESS_KEY` or `_PRIVATE_KEY` suffix. A profile
 allow-list is necessary but not sufficient: these hard denials always win.
 
+`SSH_AUTH_SOCK` is the one deliberate exception: only the `git` profile may
+list it, and only when the binding explicitly selects it with
+`--passthrough SSH_AUTH_SOCK`. This lets a signed Git operation use the
+Locklark SSH agent without inheriting an unrelated ambient agent endpoint.
+
 ### Ergonomic target selection
 
 `locklark cli init` can build targets in several ways:
 
 - `--id ID --revision REV` fills the single slot of one-slot profiles
-  (`gh`, `deepseek`, `kubectl`, `openai`, `anthropic`, `stripe`, `flyctl`,
-  `vercel`, `token`). `deepseek` additionally requires an explicit absolute
-  `--program`; it never auto-discovers a Python interpreter.
+  (`gh`, `glab`, `deepseek`, `kubectl`, `openai`, `codex`, `anthropic`,
+  `stripe`, `flyctl`, `vercel`, `wrangler`, `supabase`, `railway`,
+  `railway-account`, `huggingface`, `gemini`, `token`). `deepseek`
+  additionally requires an explicit absolute `--program`; it never
+  auto-discovers a Python interpreter.
 - For multi-slot login profiles (`aws`, `docker`, `npm`, `git`, `netrc`,
   `psql`), the same pair fills every **required** `login` slot with the shared
   item ID/revision and each slot's own field (`username` or `password`).
@@ -217,6 +245,38 @@ allow-list is necessary but not sufficient: these hard denials always win.
 `--id` and `--revision` are indivisible: supplying only one is an argument
 error. Every ID must be 32 lowercase hex characters and every revision 64
 lowercase hex characters.
+
+### Git SSH commit signing
+
+The `git` profile keeps HTTP credentials isolated, but it can also use the
+Locklark SSH agent for signed commits. Bind the endpoint name explicitly:
+
+```sh
+locklark cli init git \
+  --program /absolute/path/to/git \
+  --file /absolute/path/to/owner.ll \
+  --id ID --revision REV \
+  --passthrough SSH_AUTH_SOCK \
+  --helper-path /absolute/path/to/ssh-keygen-directory
+```
+
+Then configure signing in the repository, not in the user's global Git
+configuration:
+
+```powershell
+git config --local gpg.format ssh
+git config --local user.signingkey C:/secure/locklark-signing.pub
+git config --local gpg.ssh.program C:/Windows/System32/OpenSSH/ssh-keygen.exe
+git config --local commit.gpgsign true
+git config --local tag.gpgsign true
+```
+
+Set `SSH_AUTH_SOCK` to the private endpoint displayed by the desktop SSH
+agent before running the wrapped command. The public key file must match the
+key enabled in the agent; the private key is never written to the Git
+configuration or the run root. The helper directory is required so the child
+can resolve `ssh-keygen` even though Locklark starts it with an isolated
+`PATH`. The `config --global` and `config --system` mutations remain refused.
 
 ### DeepSeek worker harness workflow
 
@@ -650,6 +710,12 @@ The immediate parent must not be group/other writable. The file must be `0600`
 on Unix. Symlinks and Windows reparse points are refused. If the program was
 updated intentionally, rerun `locklark cli init` for that tool to record the new
 SHA-256.
+
+On Windows, `%TEMP%` is commonly not a trusted binding parent because its ACLs
+allow more than the current user. Put the binding file in a directory whose
+whole ancestor chain is trusted. The executable itself must be an absolute
+`.exe`; npm `.cmd` shims are refused. For Node-based tools, bind `node.exe`
+explicitly and pass the package entry point in the child argv.
 
 ### `CLI tool binding not found`
 

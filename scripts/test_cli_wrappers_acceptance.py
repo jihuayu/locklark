@@ -88,8 +88,9 @@ class EndToEndTests(unittest.TestCase):
         cls.root.chmod(0o700)
         bin_dir = cls.root / "bin"
         bin_dir.mkdir(mode=0o700)
-        cls.cli = bin_dir / "locklark"
-        cls.fixture = bin_dir / "cli-wrappers-fixture"
+        suffix = ".exe" if os.name == "nt" else ""
+        cls.cli = bin_dir / ("locklark" + suffix)
+        cls.fixture = bin_dir / ("cli-wrappers-fixture" + suffix)
         environment = dict(os.environ)
         environment.pop("LOCKLARK_CLI_ACTIVE", None)
         environment.setdefault("GOTOOLCHAIN", "go1.27.3")

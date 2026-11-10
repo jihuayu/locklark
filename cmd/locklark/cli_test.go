@@ -64,7 +64,11 @@ func TestCLIProfilesAndStoreLifecycle(t *testing.T) {
 	}
 	var profiles []cliProfileDescription
 	decodeCLIJSON(t, raw, &profiles)
-	wantNames := []string{"anthropic", "aws", "deepseek", "docker", "flyctl", "gh", "git", "kubectl", "netrc", "npm", "openai", "psql", "stripe", "terraform", "token", "vercel"}
+	wantNames := []string{
+		"anthropic", "aws", "codex", "deepseek", "docker", "flyctl", "gemini", "gh", "git",
+		"glab", "huggingface", "kubectl", "netrc", "npm", "openai", "psql", "railway",
+		"railway-account", "stripe", "supabase", "terraform", "token", "vercel", "wrangler",
+	}
 	if len(profiles) != len(wantNames) {
 		t.Fatalf("profile count = %d, want %d", len(profiles), len(wantNames))
 	}
@@ -207,6 +211,58 @@ func TestCLIProfilesAndStoreLifecycle(t *testing.T) {
 	}
 	if !strings.Contains(usage, "cli run <tool>") || !strings.Contains(usage, "cli shell-init") {
 		t.Fatal("usage omits cli commands")
+	}
+}
+
+func TestCLIInitExpandedOneSlotProfiles(t *testing.T) {
+	dir := cliTestDir(t)
+	bindingPath := filepath.Join(dir, clibinding.DefaultFileName)
+	vaultPath := filepath.Join(dir, "owner.ll")
+	program := cliTestExecutable(t)
+	names := []string{"glab", "codex", "wrangler", "supabase", "railway", "railway-account", "huggingface", "gemini"}
+	for _, name := range names {
+		args := []string{
+			"init", name, "--profile", name,
+			"--file", vaultPath, "--program", program, "--binding", bindingPath,
+			"--id", cliTestID, "--revision", cliTestRevision, "--timeout", "60",
+		}
+		raw, err := runCLIForTest(t, args...)
+		if err != nil {
+			t.Fatalf("%s init failed: %v", name, err)
+		}
+		var receipt struct {
+			Status  string `json:"status"`
+			Tool    string `json:"tool"`
+			Profile string `json:"profile"`
+		}
+		decodeCLIJSON(t, raw, &receipt)
+		if receipt.Status != "bound" || receipt.Tool != name || receipt.Profile != name {
+			t.Fatalf("%s receipt = %+v", name, receipt)
+		}
+	}
+	raw, err := runCLIForTest(t,
+		"init", "git-signing", "--profile", "git",
+		"--file", vaultPath, "--program", program, "--binding", bindingPath,
+		"--id", cliTestID, "--revision", cliTestRevision,
+		"--passthrough", "SSH_AUTH_SOCK", "--timeout", "60",
+	)
+	if err != nil {
+		t.Fatal("git signing init failed:", err)
+	}
+	var receipt struct {
+		Status string `json:"status"`
+		Tool   string `json:"tool"`
+	}
+	decodeCLIJSON(t, raw, &receipt)
+	if receipt.Status != "bound" || receipt.Tool != "git-signing" {
+		t.Fatalf("git signing receipt = %+v", receipt)
+	}
+	store, err := clibinding.Load(bindingPath)
+	if err != nil {
+		t.Fatal("expanded binding store failed:", err)
+	}
+	if !reflect.DeepEqual(store.Bindings["git-signing"].PassthroughEnv, []string{"SSH_AUTH_SOCK"}) {
+		t.Fatal("git signing did not persist SSH_AUTH_SOCK")
 	}
 }
 

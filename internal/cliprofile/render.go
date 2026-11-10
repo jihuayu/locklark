@@ -235,6 +235,8 @@ func renderFile(file FileSpec, known map[string]Slot, slots map[string][]byte, r
 		return renderGitCredentials(slots)
 	case file.Format == "git-config-store-v1":
 		return renderGitConfig(root)
+	case file.Format == "codex-auth-v1":
+		return renderCodexAuth(slots)
 	default:
 		return nil, fmt.Errorf("cliprofile: unknown file format")
 	}
@@ -448,6 +450,24 @@ func renderGitConfig(root string) ([]byte, error) {
 		return nil, fmt.Errorf("cliprofile: git credential path contains an unsafe character")
 	}
 	return []byte("[credential]\n\thelper = store --file=" + credentialPath + "\n"), nil
+}
+
+func renderCodexAuth(slots map[string][]byte) ([]byte, error) {
+	token := slotText(slots, "token")
+	if !nonBlank(token) {
+		return nil, fmt.Errorf("cliprofile: Codex API key is blank")
+	}
+	if strings.ContainsAny(token, "\r\n\x00") {
+		return nil, fmt.Errorf("cliprofile: Codex API key contains a line break or NUL")
+	}
+	raw, err := json.Marshal(struct {
+		AuthMode string `json:"auth_mode"`
+		APIKey   string `json:"OPENAI_API_KEY"`
+	}{AuthMode: "apikey", APIKey: token})
+	if err != nil {
+		return nil, fmt.Errorf("cliprofile: Codex auth document unavailable")
+	}
+	return append(raw, '\n'), nil
 }
 
 func safeJoin(root, relative string, allowEmpty bool) (string, error) {

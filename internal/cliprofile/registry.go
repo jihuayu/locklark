@@ -49,6 +49,7 @@ type Spec struct {
 	Files           []FileSpec        `json:"files,omitempty"`
 	Dirs            []string          `json:"dirs,omitempty"`
 	PassthroughEnv  []string          `json:"passthrough_env,omitempty"`
+	AllowSSHAgent   bool              `json:"allow_ssh_agent,omitempty"`
 	MaxTimeout      int               `json:"max_timeout"`
 	DenyArgs        [][]string        `json:"deny_args,omitempty"`
 	// RequireExplicitProgram refuses automatic PATH lookup. Profiles used for
@@ -191,7 +192,7 @@ func ValidPassthroughName(spec Spec, name, value string) bool {
 		return false
 	}
 	upper := strings.ToUpper(name)
-	if deniedPassthroughExact[upper] {
+	if deniedPassthroughExact[upper] && !(upper == "SSH_AUTH_SOCK" && spec.AllowSSHAgent) {
 		return false
 	}
 	for _, prefix := range deniedPassthroughPrefixes {

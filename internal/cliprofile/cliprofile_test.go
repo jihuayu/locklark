@@ -47,8 +47,9 @@ func renderBuiltin(t *testing.T, name, tokenEnv string, slots map[string][]byte,
 }
 
 var expectedProfiles = []string{
-	"anthropic", "aws", "deepseek", "docker", "flyctl", "gh", "git", "kubectl", "netrc",
-	"npm", "openai", "psql", "stripe", "terraform", "token", "vercel",
+	"anthropic", "aws", "codex", "deepseek", "docker", "flyctl", "gemini", "gh", "git",
+	"glab", "huggingface", "kubectl", "netrc", "npm", "openai", "psql", "railway",
+	"railway-account", "stripe", "supabase", "terraform", "token", "vercel", "wrangler",
 }
 
 func TestListLookupAndCloneSpec(t *testing.T) {
@@ -77,20 +78,28 @@ func TestListLookupAndCloneSpec(t *testing.T) {
 		t.Fatal("deepseek profile allows automatic program lookup")
 	}
 	executables := map[string][]string{
-		"gh":        {"gh"},
-		"aws":       {"aws"},
-		"kubectl":   {"kubectl", "helm"},
-		"docker":    {"docker"},
-		"npm":       {"npm", "pnpm", "yarn"},
-		"terraform": {"terraform", "tofu"},
-		"git":       {"git"},
-		"netrc":     {"curl"},
-		"psql":      {"psql", "pg_dump", "pg_restore"},
-		"openai":    {"openai"},
-		"anthropic": {"anthropic", "claude"},
-		"stripe":    {"stripe"},
-		"flyctl":    {"flyctl", "fly"},
-		"vercel":    {"vercel", "vc"},
+		"gh":              {"gh"},
+		"glab":            {"glab"},
+		"aws":             {"aws"},
+		"kubectl":         {"kubectl", "helm"},
+		"docker":          {"docker"},
+		"npm":             {"npm", "pnpm", "yarn"},
+		"terraform":       {"terraform", "tofu"},
+		"git":             {"git"},
+		"netrc":           {"curl"},
+		"psql":            {"psql", "pg_dump", "pg_restore"},
+		"openai":          {"openai"},
+		"codex":           {"codex"},
+		"anthropic":       {"anthropic", "claude"},
+		"stripe":          {"stripe"},
+		"flyctl":          {"flyctl", "fly"},
+		"vercel":          {"vercel", "vc"},
+		"wrangler":        {"wrangler"},
+		"supabase":        {"supabase"},
+		"railway":         {"railway"},
+		"railway-account": {"railway"},
+		"huggingface":     {"hf", "huggingface-cli"},
+		"gemini":          {"gemini"},
 	}
 	for name, want := range executables {
 		if got := Lookup0(t, name).Executables(); !reflect.DeepEqual(got, want) {
@@ -472,6 +481,42 @@ func TestRenderGitAndNetrc(t *testing.T) {
 	}
 }
 
+func TestRenderExpandedProfiles(t *testing.T) {
+	cases := []struct {
+		profile string
+		env     string
+		value   string
+	}{
+		{"glab", "GITLAB_TOKEN", "glab-token"},
+		{"wrangler", "CLOUDFLARE_API_TOKEN", "cloudflare-token"},
+		{"supabase", "SUPABASE_ACCESS_TOKEN", "supabase-token"},
+		{"railway", "RAILWAY_TOKEN", "railway-project-token"},
+		{"railway-account", "RAILWAY_API_TOKEN", "railway-account-token"},
+		{"huggingface", "HF_TOKEN", "hf-token"},
+		{"gemini", "GEMINI_API_KEY", "gemini-token"},
+	}
+	for _, test := range cases {
+		t.Run(test.profile, func(t *testing.T) {
+			rendered := renderBuiltin(t, test.profile, "", map[string][]byte{"token": []byte(test.value)}, nil)
+			if got := envLookup(rendered.Env)[test.env]; got != test.value {
+				t.Fatalf("%s = %q", test.env, got)
+			}
+		})
+	}
+
+	rendered := renderBuiltin(t, "codex", "", map[string][]byte{"token": []byte("sk-codex")}, nil)
+	auth := findRenderedFile(t, rendered.Files, "codex/auth.json")
+	if auth.Mode.Perm() != 0600 || string(auth.Content) != "{\"auth_mode\":\"apikey\",\"OPENAI_API_KEY\":\"sk-codex\"}\n" {
+		t.Fatalf("codex auth document mode=%v content=%q", auth.Mode, auth.Content)
+	}
+	if envLookup(rendered.Env)["CODEX_HOME"] == "" {
+		t.Fatal("CODEX_HOME missing")
+	}
+	if _, err := Render(Lookup0(t, "codex").Spec(), t.TempDir(), "", map[string][]byte{"token": []byte("bad\nkey")}, nil); err == nil {
+		t.Fatal("Codex API key with a line break accepted")
+	}
+}
+
 func TestRenderValidation(t *testing.T) {
 	spec := Lookup0(t, "gh").Spec()
 	slots := map[string][]byte{"token": []byte("secret")}
@@ -565,6 +610,7 @@ func TestValidateArgs(t *testing.T) {
 		allowed [][]string
 	}{
 		{"gh", [][]string{{"auth", "login"}, {"auth", "setup-git"}, {"auth", "token"}, {"auth", "refresh"}, {"--hostname", "h", "auth", "login"}, {"auth", "--web", "login"}}, [][]string{{"api", "user"}, {"pr", "list"}, {"--help"}}},
+		{"glab", [][]string{{"auth", "login"}, {"auth", "logout"}, {"auth", "switch"}}, [][]string{{"mr", "list"}, {"repo", "view"}}},
 		{"aws", [][]string{{"configure"}, {"--region", "us-east-1", "configure"}, {"s3", "ls", "configure"}}, [][]string{{"s3", "ls"}, {"ec2", "describe-instances"}}},
 		{"deepseek", [][]string{{"configure"}, {"spawn"}, {"--background"}, {"run", "--background"}, {"run", "configure"}}, [][]string{{"run", "--root", "/tmp/project", "--task-file", "/tmp/task.md"}, {"--help"}}},
 		{"kubectl", [][]string{{"config", "set-credentials", "x"}, {"config", "set-cluster", "x"}, {"config", "set-context", "x"}, {"--kubeconfig", "k", "config", "set-credentials", "x"}, {"config", "--kubeconfig=k", "set-context", "x"}}, [][]string{{"get", "pods"}, {"config", "view"}, {"config", "--local", "view"}}},
@@ -575,6 +621,13 @@ func TestValidateArgs(t *testing.T) {
 		{"stripe", [][]string{{"login"}, {"logout"}}, [][]string{{"payment-links", "create"}}},
 		{"flyctl", [][]string{{"auth", "login"}, {"auth", "logout"}, {"auth", "token"}}, [][]string{{"deploy"}, {"status"}}},
 		{"vercel", [][]string{{"login"}, {"logout"}}, [][]string{{"deploy"}, {"ls"}}},
+		{"wrangler", [][]string{{"login"}, {"logout"}, {"auth", "token"}}, [][]string{{"deploy"}, {"dev"}}},
+		{"supabase", [][]string{{"login"}, {"logout"}}, [][]string{{"projects", "list"}, {"db", "push"}}},
+		{"railway", [][]string{{"login"}, {"logout"}}, [][]string{{"up"}, {"status"}}},
+		{"railway-account", [][]string{{"login"}, {"logout"}}, [][]string{{"up"}, {"status"}}},
+		{"codex", [][]string{{"login"}, {"logout"}}, [][]string{{"exec", "review this change"}, {"doctor"}}},
+		{"huggingface", [][]string{{"login"}, {"logout"}, {"auth", "login"}, {"auth", "logout"}}, [][]string{{"download", "org/model"}, {"auth", "whoami"}}},
+		{"gemini", nil, [][]string{{"--prompt", "hello"}, {"--help"}}},
 	}
 	for _, test := range cases {
 		spec := Lookup0(t, test.profile).Spec()
@@ -616,6 +669,7 @@ func TestValidEnvironmentNames(t *testing.T) {
 func TestValidPassthroughName(t *testing.T) {
 	aws := Lookup0(t, "aws").Spec()
 	docker := Lookup0(t, "docker").Spec()
+	git := Lookup0(t, "git").Spec()
 	psql := Lookup0(t, "psql").Spec()
 	for name, value := range map[string]string{"AWS_REGION": "us-east-1", "AWS_DEFAULT_REGION": "eu-west-1", "AWS_DEFAULT_OUTPUT": "json", "AWS_CA_BUNDLE": "/tmp/ca.pem", "NO_COLOR": "1", "TERM": "xterm"} {
 		if !ValidPassthroughName(aws, name, value) {
@@ -628,10 +682,16 @@ func TestValidPassthroughName(t *testing.T) {
 	if !ValidPassthroughName(psql, "PGHOST", "db.example.com") {
 		t.Fatal("PGHOST refused")
 	}
+	if !ValidPassthroughName(git, "SSH_AUTH_SOCK", `\\.\pipe\Locklark-SSH-agent-test`) {
+		t.Fatal("git SSH_AUTH_SOCK refused")
+	}
 	for _, name := range []string{"LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "HTTPS_PROXY", "NODE_OPTIONS", "PATH", "SystemRoot", "GIT_ASKPASS", "AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN", "PGPASSWORD", "XDG_CONFIG_HOME", "LOCKLARK_SECRET", "_PRIVATE"} {
 		if ValidPassthroughName(aws, name, "value") {
 			t.Fatalf("denied passthrough %q accepted", name)
 		}
+	}
+	if ValidPassthroughName(aws, "SSH_AUTH_SOCK", "endpoint") {
+		t.Fatal("SSH_AUTH_SOCK accepted outside an SSH-agent-aware profile")
 	}
 	if ValidPassthroughName(aws, "AWS_REGION", "bad\x00value") {
 		t.Fatal("NUL passthrough value accepted")

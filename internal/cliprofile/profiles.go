@@ -31,6 +31,20 @@ var builtinProfiles = map[string]Profile{
 			DenyArgs:       [][]string{{"auth", "login"}, {"auth", "setup-git"}, {"auth", "token"}, {"auth", "refresh"}},
 		},
 	},
+	"glab": staticProfile{
+		name:        "glab",
+		executables: []string{"glab"},
+		spec: Spec{
+			ID: "glab-v1",
+			Slots: []Slot{
+				{Name: "token", Kind: "login", Field: FieldPassword, RequireNonBlank: true},
+			},
+			Env:            map[string]string{"GITLAB_TOKEN": "slot:token"},
+			PassthroughEnv: []string{"GITLAB_HOST", "GITLAB_REPO", "NO_COLOR", "TERM"},
+			MaxTimeout:     600,
+			DenyArgs:       [][]string{{"auth", "login"}, {"auth", "logout"}, {"auth", "switch"}},
+		},
+	},
 	"aws": staticProfile{
 		name:        "aws",
 		executables: []string{"aws"},
@@ -184,7 +198,8 @@ var builtinProfiles = map[string]Profile{
 				"NETRC":                    "file:git/netrc",
 				"GIT_TERMINAL_PROMPT":      "literal:0",
 			},
-			PassthroughEnv: []string{"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "TERM", "NO_COLOR"},
+			PassthroughEnv: []string{"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "SSH_AUTH_SOCK", "TERM", "NO_COLOR"},
+			AllowSSHAgent:  true,
 			MaxTimeout:     1800,
 			DenyArgs:       [][]string{{"config", "--global"}, {"config", "--system"}, {"credential", "approve"}, {"credential", "reject"}},
 		},
@@ -237,6 +252,24 @@ var builtinProfiles = map[string]Profile{
 			Env:            map[string]string{"OPENAI_API_KEY": "slot:token"},
 			PassthroughEnv: []string{"OPENAI_ORG_ID", "OPENAI_PROJECT_ID", "OPENAI_BASE_URL", "TERM", "NO_COLOR"},
 			MaxTimeout:     600,
+		},
+	},
+	"codex": staticProfile{
+		name:        "codex",
+		executables: []string{"codex"},
+		spec: Spec{
+			ID: "codex-api-key-v1",
+			Slots: []Slot{
+				{Name: "token", Kind: "login", Field: FieldPassword, RequireNonBlank: true},
+			},
+			Dirs: []string{"codex"},
+			Files: []FileSpec{
+				{RelPath: "codex/auth.json", Format: "codex-auth-v1", Mode: 0600},
+			},
+			Env:            map[string]string{"CODEX_HOME": "root:codex"},
+			PassthroughEnv: []string{"OPENAI_BASE_URL", "OPENAI_ORG_ID", "OPENAI_PROJECT_ID", "NO_COLOR", "TERM"},
+			MaxTimeout:     600,
+			DenyArgs:       [][]string{{"login"}, {"logout"}},
 		},
 	},
 	"anthropic": staticProfile{
@@ -292,6 +325,89 @@ var builtinProfiles = map[string]Profile{
 			PassthroughEnv: []string{"VERCEL_ORG_ID", "VERCEL_PROJECT_ID", "TERM", "NO_COLOR"},
 			MaxTimeout:     1800,
 			DenyArgs:       [][]string{{"login"}, {"logout"}},
+		},
+	},
+	"wrangler": staticProfile{
+		name:        "wrangler",
+		executables: []string{"wrangler"},
+		spec: Spec{
+			ID: "wrangler-v1",
+			Slots: []Slot{
+				{Name: "token", Kind: "login", Field: FieldPassword, RequireNonBlank: true},
+			},
+			Env:            map[string]string{"CLOUDFLARE_API_TOKEN": "slot:token"},
+			PassthroughEnv: []string{"CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_API_BASE_URL", "NO_COLOR", "TERM"},
+			MaxTimeout:     1800,
+			DenyArgs:       [][]string{{"login"}, {"logout"}, {"auth", "token"}},
+		},
+	},
+	"supabase": staticProfile{
+		name:        "supabase",
+		executables: []string{"supabase"},
+		spec: Spec{
+			ID: "supabase-v1",
+			Slots: []Slot{
+				{Name: "token", Kind: "login", Field: FieldPassword, RequireNonBlank: true},
+			},
+			Env:            map[string]string{"SUPABASE_ACCESS_TOKEN": "slot:token"},
+			PassthroughEnv: []string{"NO_COLOR", "TERM"},
+			MaxTimeout:     1800,
+			DenyArgs:       [][]string{{"login"}, {"logout"}},
+		},
+	},
+	"railway": staticProfile{
+		name:        "railway",
+		executables: []string{"railway"},
+		spec: Spec{
+			ID: "railway-project-token-v1",
+			Slots: []Slot{
+				{Name: "token", Kind: "login", Field: FieldPassword, RequireNonBlank: true},
+			},
+			Env:            map[string]string{"RAILWAY_TOKEN": "slot:token"},
+			PassthroughEnv: []string{"RAILWAY_ENVIRONMENT", "NO_COLOR", "TERM"},
+			MaxTimeout:     1800,
+			DenyArgs:       [][]string{{"login"}, {"logout"}},
+		},
+	},
+	"railway-account": staticProfile{
+		name:        "railway-account",
+		executables: []string{"railway"},
+		spec: Spec{
+			ID: "railway-account-token-v1",
+			Slots: []Slot{
+				{Name: "token", Kind: "login", Field: FieldPassword, RequireNonBlank: true},
+			},
+			Env:            map[string]string{"RAILWAY_API_TOKEN": "slot:token"},
+			PassthroughEnv: []string{"RAILWAY_ENVIRONMENT", "NO_COLOR", "TERM"},
+			MaxTimeout:     1800,
+			DenyArgs:       [][]string{{"login"}, {"logout"}},
+		},
+	},
+	"huggingface": staticProfile{
+		name:        "huggingface",
+		executables: []string{"hf", "huggingface-cli"},
+		spec: Spec{
+			ID: "huggingface-token-v1",
+			Slots: []Slot{
+				{Name: "token", Kind: "login", Field: FieldPassword, RequireNonBlank: true},
+			},
+			Env:            map[string]string{"HF_TOKEN": "slot:token"},
+			PassthroughEnv: []string{"HF_ENDPOINT", "NO_COLOR", "TERM"},
+			MaxTimeout:     600,
+			DenyArgs:       [][]string{{"login"}, {"logout"}, {"auth", "login"}, {"auth", "logout"}},
+		},
+	},
+	"gemini": staticProfile{
+		name:        "gemini",
+		executables: []string{"gemini"},
+		spec: Spec{
+			ID: "gemini-api-key-v1",
+			Slots: []Slot{
+				{Name: "token", Kind: "login", Field: FieldPassword, RequireNonBlank: true},
+			},
+			Env:            map[string]string{"GEMINI_API_KEY": "slot:token"},
+			PassthroughEnv: []string{"GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION", "NO_COLOR", "TERM"},
+			MaxTimeout:     600,
 		},
 	},
 	"token": staticProfile{
