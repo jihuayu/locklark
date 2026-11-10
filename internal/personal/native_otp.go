@@ -280,7 +280,7 @@ func (s *Session) DeliverOTP(d *NativeOTPDelivery, selected NativeOTPTarget, del
 		// This short grant is the delivery linearization point shared with
 		// RequestLock. A lock after grant cannot retract the synchronous callback.
 		s.saveMu.Lock()
-		if s.lockRequested.Load() || d.cap.cancelled.Load() || len(s.material) == 0 || time.Since(s.last) >= s.idle {
+		if s.lockRequested.Load() || d.cap.cancelled.Load() || len(s.material) == 0 || s.idleExpired(time.Now()) {
 			s.saveMu.Unlock()
 			return ErrSessionLocked
 		}

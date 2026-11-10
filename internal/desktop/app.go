@@ -120,6 +120,11 @@ type App struct {
 	clipboardClearSeconds atomic.Int64
 	backgroundStop        chan struct{}
 	backgroundRunningFlag uint32
+	// defaultRevealAt debounces revealPasswords disclosure after a selection
+	// read so each selection schedules exactly one narrow password read.
+	defaultRevealAt time.Time
+	// narrowRevealPending is the revealPasswords read currently in flight.
+	narrowRevealPending bool
 }
 
 func New() *App {
@@ -315,12 +320,18 @@ func (a *App) stopIdleTimer() {
 func (a *App) armIdleTimer() {
 	a.stopIdleTimer()
 	s := a.session
-	if s == nil {
+	if s == nil || a.idleTimeout() <= 0 {
+		// "Never" is enforced by both the session policy and the UI idle
+		// check; keeping an armed timer here would reintroduce the old
+		// hardcoded five-minute lock.
 		return
 	}
 	deadline, ok := s.IdleDeadline()
 	if !ok {
 		a.Lock()
+		return
+	}
+	if deadline.IsZero() {
 		return
 	}
 	generation := a.generation
@@ -340,6 +351,55 @@ func (a *App) armIdleTimer() {
 		})
 	})
 }
+
+// suspendEvent applies security.autolock.onSleep.
+func (a *App) suspendEvent() {
+	if a.settingsSnapshot().LockOnSleep {
+		a.Lock()
+	}
+}
+
+// screenLockEvent applies security.autolock.onDeviceLock.
+func (a *App) screenLockEvent() {
+	if a.settingsSnapshot().LockOnScreenLock {
+		a.Lock()
+	}
+}
+
+// windowClose applies security.autolock.onWindowClose. Locking on close keeps
+// the historical behaviour (lock, then let the window close). With the
+// preference disabled the unlocked session is retained in the tray when
+// app.keepInTray is on; without a tray the process still exits, which tears the
+// session down.
+func (a *App) windowClose(e *mygo.CloseEvent) {
+	if a.settingsSnapshot().LockOnWindowClose {
+		a.Lock()
+		return
+	}
+	if a.settingsSnapshot().KeepInTray && a.win != nil && e != nil {
+		e.PreventDefault()
+		a.win.Hide()
+	}
+}
+
+// applyIdlePolicy republishes the AutoLockMinutes preference to a running
+// session so changing the interval (including "Never") takes effect without a
+// re-unlock.
+func (a *App) applyIdlePolicy() {
+	if a.session == nil {
+		return
+	}
+	if err := a.session.SetIdleTimeout(a.idleTimeout()); err != nil {
+		return
+	}
+	if a.idleTimeout() <= 0 {
+		a.stopIdleTimer()
+		return
+	}
+	a.touchActivity()
+	a.armIdleTimer()
+}
+
 func (a *App) Lock() {
 	a.stopSSHAgent()
 	a.sshRows = nil
@@ -426,7 +486,7 @@ func (a *App) unlock() {
 	a.runContext(func(ctx context.Context) outcome {
 		defer clear(pw)
 		defer clear(key)
-		s, e := personal.UnlockSession(path, pw, key, 5*time.Minute)
+		s, e := personal.UnlockSession(path, pw, key, a.idleTimeout())
 		if e != nil {
 			return outcome{err: e}
 		}
@@ -476,7 +536,7 @@ func (a *App) createVaultFile() {
 		if e := personal.Create(path, string(pw), key); e != nil {
 			return outcome{err: e}
 		}
-		s, e := personal.UnlockSession(path, pw, key, 5*time.Minute)
+		s, e := personal.UnlockSession(path, pw, key, a.idleTimeout())
 		if e != nil {
 			return outcome{err: e}
 		}
@@ -607,10 +667,11 @@ func (a *App) disclose(field, purpose string) {
 			}
 			e := s.Consume(f, func(value []byte) error {
 				if purpose == "copy" {
-					if e := a.writeClipboard(value, time.Now().Add(30*time.Second), valid); e != nil {
+					timeout := a.clipboardTimeout()
+					if e := a.writeClipboard(value, clipboardDeadline(timeout), valid); e != nil {
 						return e
 					}
-					a.status = clipboardStatus(30 * time.Second)
+					a.status = clipboardStatus(timeout)
 				} else {
 					shown := visible(string(value))
 					if field == "notes" {
@@ -1115,14 +1176,14 @@ func Run() error {
 			a.win = shell.Window()
 		}
 		a.dispatch = a.win.Update
-		a.win.OnClose(func(*mygo.CloseEvent) { a.Lock() })
+		a.win.OnClose(func(e *mygo.CloseEvent) { a.windowClose(e) })
 		a.clipboardWrite = nativeclipboard.Write
 		a.clipboardClear = nativeclipboard.ClearOwned
 		// The broker may have started before the UI thread existed; publish the
 		// settings snapshot again so every connection factory reads live values.
 		a.refreshClipboardClearSeconds(a.settingsSnapshot())
-		mygo.Power.OnSuspend(a.Lock)
-		mygo.Power.OnLockScreen(a.Lock)
+		mygo.Power.OnSuspend(a.suspendEvent)
+		mygo.Power.OnLockScreen(a.screenLockEvent)
 		mygo.App.OnQuit(a.Lock)
 		a.startBrowserBroker()
 		a.registerQuickSearch(mygo.GlobalShortcut.Register)
@@ -1151,7 +1212,7 @@ func (a *App) systemUnlock() {
 	a.password = ""
 	a.secret = ""
 	a.runContext(func(ctx context.Context) outcome {
-		s, e := personal.UnlockWithSystemContext(ctx, path, store, 5*time.Minute)
+		s, e := personal.UnlockWithSystemContext(ctx, path, store, a.idleTimeout())
 		if e != nil {
 			return outcome{err: e}
 		}
@@ -1212,7 +1273,6 @@ func (a *App) securityView(c *ui.Context) {
 		})
 	})
 }
-
 
 func (a *App) chooseVault() {
 	win, create := a.win, a.create

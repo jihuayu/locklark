@@ -524,7 +524,11 @@ func (a *App) v2DetailFieldRow(c *ui.Context, detail *personal.ItemDetail, key, 
 	plain := a.plainDetail()
 	revealed := a.v2.revealed[key]
 	concealed := isConcealedKey(detail, key)
-	value := v2FieldDisplay(detail, plain, key, revealed)
+	var narrow func() string
+	if key == "password" {
+		narrow = a.revealPasswordValue
+	}
+	value := v2FieldDisplayWith(detail, plain, key, revealed, narrow)
 	ui.Column(c).FillWidth().MinWidth(0).Gap(t.Space(.75)).Children(func() {
 		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(t.Space(1)).Children(func() {
 			oneui.Text(c, label).FontSize(t.Rem(.72)).Bold().TextColor(t.TextMuted).Width(110)

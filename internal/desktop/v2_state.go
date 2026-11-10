@@ -60,10 +60,10 @@ type v2State struct {
 	watchtowerErr  string
 	ignored        map[string]bool
 
-
 	generator generatorState
 
 	revealed       map[string]bool
+	narrowPassword narrowPasswordDisclosure
 	revealUntil    time.Time
 	largeTypeOpen  bool
 	largeTypeKey   string
@@ -335,7 +335,6 @@ func (a *App) FilterByTag(tag string) {
 	a.reloadV2(false)
 }
 
-
 func (a *App) showAllItems()        { a.navigate(navAllItems) }
 func (a *App) showFavorites()       { a.navigate(navFavorites) }
 func (a *App) showRecentlyDeleted() { a.navigate(navRecentlyDelete) }
@@ -543,6 +542,7 @@ func (a *App) selectItem(id, revision string) {
 	a.v2.generator.open = false
 	a.v2.historyOpen = false
 	a.v2.confirmPurge = false
+	a.hideNarrowPassword()
 	s := a.session
 	if s == nil {
 		if a.v2.detail != nil && a.v2.detail.ID == id {
@@ -566,6 +566,7 @@ func (a *App) selectItem(id, revision string) {
 			selected := personal.Row{Kind: detail.Kind, ID: detail.ID, Title: detail.Title, Revision: detail.Revision, State: detail.State, RestoreState: detail.RestoreState}
 			a.selected = &selected
 			a.status = "已选择条目：" + detail.Title
+			a.revealPasswordByDefault()
 		}}
 	})
 }
@@ -835,4 +836,3 @@ func (a *App) closeSettings() {
 	a.v2.settingsOpen = false
 	a.touchActivity()
 }
-

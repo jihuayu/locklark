@@ -112,7 +112,7 @@ func UnlockWithSystem(path string, store SystemUnlockStore, idle time.Duration) 
 func UnlockWithSystemContext(ctx context.Context, path string, store SystemUnlockStore, idle time.Duration) (*Session, error) {
 	systemUnlockOperations.Lock()
 	defer systemUnlockOperations.Unlock()
-	if ctx == nil || ctx.Err() != nil || store == nil || idle < time.Second || idle > 15*time.Minute {
+	if ctx == nil || ctx.Err() != nil || store == nil || !validSessionIdle(idle) {
 		return nil, ErrSessionLocked
 	}
 	id, absolute, e := systemStoreID(path)

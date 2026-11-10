@@ -231,13 +231,14 @@ func (a *App) requestOTP(purpose string) {
 		valid := func() bool { return a.exposureCurrent(s, target, generation, exposure) }
 		e := s.DeliverOTP(r.delivery, target, func(code []byte, b personal.OTPBounds) error {
 			if purpose == "copy" {
-				if e := a.writeClipboard(code, b.Deadline, func() bool { return valid() && b.Check(time.Now()) }); e != nil {
+				deadline := otpClipboardDeadline(b.Deadline, a.clipboardTimeout(), time.Now())
+				if e := a.writeClipboard(code, deadline, func() bool { return valid() && b.Check(time.Now()) }); e != nil {
 					return e
 				}
 				sequence := a.clipboardSequence
 				a.otpClipboard = &b
 				a.otpClipboardTarget = target
-				a.otpClipboardTimer = time.AfterFunc(time.Until(b.Deadline), func() {
+				a.otpClipboardTimer = time.AfterFunc(time.Until(deadline), func() {
 					a.dispatch(func() {
 						if a.clipboardSequence == sequence {
 							a.clearClipboard()
