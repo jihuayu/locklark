@@ -645,9 +645,9 @@ func TestDirRefusesRootSwapToSymlink(t *testing.T) {
 	}
 }
 
-// stickyDir reports whether p is a sticky directory, following symlinks. It is
-// used with os.Lstat only: on macOS the temp path can include the /tmp symlink,
-// so lstat-ing a path below it would inspect the link, not the directory.
+// stickyDir reports whether p is a sticky directory. It uses os.Stat, not
+// os.Lstat, because on macOS the temp path can go through the /tmp symlink and
+// lstat would inspect the link rather than the directory.
 func stickyDir(t *testing.T, p string) bool {
 	t.Helper()
 	st, err := os.Stat(p)
@@ -669,7 +669,30 @@ func TestDirRejectsUntrustedStickyAncestor(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: sticky directories are intentionally trusted")
 	}
-	// The fixture sets modes explicitly, so the inherited umask cannot matter.
+	// assertUntrustedSticky checks that p is a real (not symlinked) directory
+	// with exactly sticky 0777, owned by this process: writable by group and
+	// others, so privateDir refuses it although the sticky bit is set.
+	assertUntrustedSticky := func(t *testing.T, p string) {
+		t.Helper()
+		st, err := os.Lstat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
+			t.Fatalf("%s is not a real directory: %v", p, st.Mode())
+		}
+		if st.Mode()&os.ModeSticky == 0 || st.Mode().Perm() != 0777 {
+			t.Fatalf("%s mode = %v, want sticky 0777", p, st.Mode())
+		}
+		if !stickyDir(t, p) {
+			t.Fatalf("%s is not reported sticky by Stat", p)
+		}
+		if !ownedByEUID(st) {
+			t.Fatalf("%s is not owned by the effective user", p)
+		}
+	}
+	// stickyChain creates base/sticky/root and makes the parent sticky 0777,
+	// leaving the configured root itself at 0700.
 	stickyChain := func(t *testing.T) (sticky, root string) {
 		t.Helper()
 		base := t.TempDir()
@@ -680,17 +703,10 @@ func TestDirRejectsUntrustedStickyAncestor(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		// 0777 plus the sticky bit, owned by this process: writable by group
-		// and others, so privateDir refuses it although the sticky bit is set.
 		if err := os.Chmod(sticky, os.ModeSticky|0777); err != nil {
 			t.Fatal(err)
 		}
-		if !stickyDir(t, sticky) {
-			t.Fatal("fixture is not sticky")
-		}
-		if st, err := os.Stat(sticky); err != nil || st.Mode().Perm()&0o022 == 0 || !ownedByEUID(st) {
-			t.Fatalf("fixture is not an untrusted sticky directory: %v", err)
-		}
+		assertUntrustedSticky(t, sticky)
 		return sticky, root
 	}
 
@@ -701,10 +717,33 @@ func TestDirRejectsUntrustedStickyAncestor(t *testing.T) {
 		}
 	})
 
+	// The configured root itself is already sticky 0777 at OpenDir, under a
+	// safe 0700 parent: OpenDir must refuse the root it was asked to open, not
+	// an ancestor of it.
 	t.Run("configured_root", func(t *testing.T) {
-		_, root := stickyChain(t)
+		root := filepath.Join(t.TempDir(), "root")
+		if err := os.Mkdir(root, 0700); err != nil {
+			t.Fatal(err)
+		}
+		// The parent (and every ancestor of the temp directory) must be
+		// trusted under the old policy: not group/world writable, or a
+		// root-owned system sticky directory. The temp directory's own mode
+		// varies by platform and umask, so the policy is what is asserted.
+		if st, err := os.Stat(filepath.Dir(root)); err != nil || !privateDir(st) {
+			t.Fatalf("fixture parent is not a safe directory: %v %v", st, err)
+		}
+		if st, err := os.Lstat(root); err != nil || st.Mode()&os.ModeSticky != 0 || st.Mode().Perm() != 0700 {
+			t.Fatalf("fixture root is not a plain 0700 directory: %v %v", st, err)
+		}
+		if err := os.Chmod(root, os.ModeSticky|0777); err != nil {
+			t.Fatal(err)
+		}
+		assertUntrustedSticky(t, root)
 		if _, err := OpenDir(root); !errors.Is(err, ErrDenied) {
 			t.Fatalf("open own sticky world-writable root = %v, want ErrDenied", err)
+		}
+		if _, err := os.Lstat(filepath.Join(root, dirSubdir)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("refused root was initialized")
 		}
 	})
 
