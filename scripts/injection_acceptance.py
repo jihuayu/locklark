@@ -25,7 +25,7 @@ def check(binary):
                options=options, ok=False, expect_error="invalid personal vault", forbidden=(secret,))
         assert not dest.exists()
         receipt, _ = invoke(binary, "inject-json", path, factors + [(prompt, "WRITE")], options=options,
-                            forbidden=(secret,), required_before_last_prompt=("明文 JSON", "目标文件不会覆盖"))
+                            forbidden=(secret,), required_before_last_prompt=("明文 JSON", "不会覆盖已有文件"))
         assert receipt["status"] == "written-sensitive-json" and len(receipt["destination_digest"]) == 64
         assert json.loads(dest.read_text(encoding="utf-8")) == {"TOKEN": secret}
         if os.name != "nt":
