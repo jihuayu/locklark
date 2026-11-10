@@ -374,8 +374,9 @@ func TestBrokeredV2DisclosureRendersNativeApproval(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	tester := ui.NewTester(a.View, 1200, 2400)
-	if !tester.HasText("确认披露金库字段") || !tester.HasText("批准本次字段披露") {
-		t.Fatal("v2 desktop did not render the brokered field disclosure")
+	if !tester.HasText("确认披露金库字段") || !tester.HasText("批准本次字段披露") ||
+		!tester.HasText("字段选择器：password") || !tester.HasText("操作：显示字段") || !tester.HasText("变更摘要：把所选字段交给当前浏览器页面") {
+		t.Fatal("v2 desktop did not render the brokered field selectors")
 	}
 	if e := tester.Click("批准本次字段披露"); e != nil {
 		t.Fatalf("click V2 disclosure approval: %v", e)

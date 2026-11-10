@@ -183,6 +183,15 @@ func (a *App) browserV2ApprovalView(c *ui.Context, b *browserhost.Connection, p 
 		if p.Title != "" && p.Title != p.Origin {
 			ui.Text(c, "名称："+browserTitle(p.Title)).TextColor(t.Text)
 		}
+		if p.Field != "" {
+			ui.Text(c, "字段选择器："+visible(p.Field)).FontSize(13).Bold().TextColor(t.Text)
+		}
+		if p.Action != "" {
+			ui.Text(c, "操作："+visible(p.Action)).FontSize(13).Bold().TextColor(t.Text)
+		}
+		if p.Summary != "" {
+			ui.Text(c, "变更摘要："+visible(p.Summary)).FontSize(13).TextColor(t.TextMuted)
+		}
 		ui.Text(c, detail).FontSize(13).TextColor(t.TextMuted)
 		ui.Text(c, "此操作不是快捷填充；请求 30 秒后失效。").FontSize(12).TextColor(t.TextMuted)
 		ui.Row(c).Gap(8).Wrap().Children(func() {

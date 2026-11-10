@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/locklark/internal/vault"
 )
 
 // nonQuickFixture is a real manual pairing: the owner approved the extension
@@ -64,6 +65,9 @@ func TestV2SecretDisclosureRequiresNativeApproval(t *testing.T) {
 	view := c.Snapshot()
 	if view.V2 == nil || view.V2.Type != "item-reveal-field" || view.V2.ItemID != rows[0].ID {
 		t.Fatalf("missing native review: %#v", view)
+	}
+	if view.V2.Field != "password" || view.V2.Action != "显示字段" || view.V2.Summary == "" {
+		t.Fatalf("public field review selectors: %#v", view.V2)
 	}
 	if got := len(out.responses(t)); got != 1 {
 		t.Fatalf("secret escaped before approval: %d frames", got)
@@ -136,5 +140,75 @@ func TestV2StagedSavePayloadSurvivesApproval(t *testing.T) {
 	last := out.responses(t)
 	if last[len(last)-1].Type != "save-staged" || last[len(last)-1].Staged == nil {
 		t.Fatalf("staged save after approval: %#v", last[len(last)-1])
+	}
+}
+
+func addApprovalIdentity(t *testing.T, s *personal.Session) (string, string) {
+	t.Helper()
+	gate := personal.NewMutationGate(time.Now().Add(time.Minute))
+	if e := s.RegisterMutation(gate); e != nil {
+		t.Fatal(e)
+	}
+	id, rev, e := s.AddItem(vault.Item{
+		Kind:     "identity",
+		Category: vault.CategoryIdentity,
+		Title:    "Approval identity",
+		Identity: &vault.IdentityDetails{FirstName: "Ada", LastName: "Lovelace", Email: "ada@example.test"},
+		Sections: []vault.Section{{ID: "public", Title: "Public", Fields: []vault.CustomField{
+			{ID: "visible", Label: "Visible", Type: vault.FieldTypeText, Value: "public-hint"},
+			{ID: "concealed", Label: "Concealed", Type: vault.FieldTypeConcealed, Value: "concealed-hint"},
+		}}},
+	}, gate)
+	if e != nil {
+		t.Fatal(e)
+	}
+	return id, rev
+}
+
+func TestV2ItemGetRequiresNativeApprovalForIdentityAndPublicFields(t *testing.T) {
+	c, out, s, cap := nonQuickFixture(t)
+	defer c.Close()
+	id, rev := addApprovalIdentity(t, s)
+	get := Request{V: 1, ID: reqID(60), Type: "item-get", Capability: cap, ItemID: id, Revision: rev}
+	if e := c.Handle(get); e != nil {
+		t.Fatal(e)
+	}
+	view := c.Snapshot()
+	if view.V2 == nil || view.V2.Type != "item-get" || view.V2.Action != "读取条目详情" || view.V2.Summary == "" {
+		t.Fatalf("missing item-get native review: %#v", view)
+	}
+	if got := len(out.responses(t)); got != 1 {
+		t.Fatalf("item detail escaped before approval: %d frames", got)
+	}
+	if e := c.ApproveV2(get.ID); e != nil {
+		t.Fatal(e)
+	}
+	all := out.responses(t)
+	last := all[len(all)-1]
+	if last.Type != "item-detail" || last.Item == nil || last.Item.Identity == nil || last.Item.Identity.FirstName != "Ada" {
+		t.Fatalf("approved item detail: %#v", last)
+	}
+	if len(last.Item.Sections) != 1 {
+		t.Fatalf("item sections: %#v", last.Item.Sections)
+	}
+	if last.Item.Sections[0].Fields[0].Value != "public-hint" || last.Item.Sections[0].Fields[1].Value != "" {
+		t.Fatalf("public/concealed projection: %#v", last.Item.Sections[0].Fields)
+	}
+}
+
+func TestV2QuickPathKeepsItemGetDirectAndNeverShowsReview(t *testing.T) {
+	c, out, s, cap := v2Fixture(t)
+	defer c.Close()
+	id, rev := addApprovalIdentity(t, s)
+	get := Request{V: 1, ID: reqID(70), Type: "item-get", Capability: cap, ItemID: id, Revision: rev}
+	if e := c.Handle(get); e != nil {
+		t.Fatal(e)
+	}
+	if c.Snapshot().V2 != nil {
+		t.Fatal("quick-fill item-get created a native review")
+	}
+	last := out.responses(t)
+	if len(last) == 0 || last[len(last)-1].Type != "item-detail" {
+		t.Fatalf("quick item-get did not execute directly: %#v", last)
 	}
 }

@@ -22,12 +22,20 @@ type Pending struct {
 // and field values never enter the view.
 type V2ApprovalView struct {
 	ID, Type, Origin, ItemID, Revision, Title string
-	Deadline                                  time.Time
+	// Field is the public wire selector (for example "password" or
+	// "attachment:<id>"), never a field value. Action and Summary are public
+	// descriptions of the requested operation, including state transitions;
+	// no payload or new secret value enters the view.
+	Field, Action, Summary string
+	Deadline               time.Time
 }
 
 type pendingV2 struct {
 	request     Request
 	title       string
+	field       string
+	action      string
+	summary     string
 	deadline    time.Time
 	epoch       uint64
 	cancelEpoch uint64
@@ -885,13 +893,77 @@ func (c *Connection) Close() {
 }
 func requiresV2NativeApproval(kind string) bool {
 	switch kind {
-	case "item-copy-field", "item-reveal-field", "item-create", "item-edit", "item-save",
+	case "item-get",
+		"item-copy-field", "item-reveal-field", "item-create", "item-edit", "item-save",
 		"item-state", "item-restore-history", "passkey-remove",
 		"stage-save", "commit-staged-save",
 		"attachment-read", "attachment-commit", "attachment-remove":
 		return true
 	}
 	return false
+}
+
+// v2ApprovalReview describes the requested operation using public selectors
+// only. It must never copy a field value, password or mutation payload.
+func v2ApprovalReview(r Request) (field, action, summary string) {
+	switch r.Type {
+	case "item-get":
+		action, summary = "读取条目详情", "包含身份信息和非隐藏字段值"
+	case "item-copy-field", "item-reveal-field":
+		field = r.Field
+		action = r.FieldAction
+		if action == "" {
+			if r.Type == "item-reveal-field" {
+				action = "显示字段"
+			} else {
+				action = "复制字段"
+			}
+		} else if action == "copy" {
+			action = "复制字段"
+		} else if action == "reveal" {
+			action = "显示字段"
+		}
+		summary = "把所选字段交给当前浏览器页面"
+	case "item-create":
+		action, summary = "新建条目", "写入一个新条目"
+	case "item-edit", "item-save":
+		action, summary = "编辑条目", "修改条目字段并生成新修订"
+	case "item-state":
+		action = r.StateAction
+		switch r.StateAction {
+		case "favorite":
+			summary = "把条目标记为收藏"
+		case "unfavorite":
+			summary = "取消条目的收藏标记"
+		case "archive":
+			summary = "把条目移入归档"
+		case "unarchive":
+			summary = "从归档恢复条目"
+		case "trash":
+			summary = "把条目移入回收站"
+		case "untrash":
+			summary = "从回收站恢复条目"
+		default:
+			summary = "修改条目状态"
+		}
+	case "item-restore-history":
+		action, summary = "恢复历史版本", "用历史内容替换当前条目"
+	case "passkey-remove":
+		action, summary = "删除 Passkey", "移除该条目的一个 Passkey"
+	case "stage-save":
+		action, summary = "暂存登录", "暂存浏览器提交的登录信息"
+	case "commit-staged-save":
+		action, summary = "提交暂存登录", "把暂存登录写入金库"
+	case "attachment-read":
+		field = "attachment:" + r.AttachmentID
+		action, summary = "读取附件", "把附件内容交给当前浏览器页面"
+	case "attachment-commit":
+		action, summary = "写入附件", "向条目添加一个附件"
+	case "attachment-remove":
+		field = "attachment:" + r.AttachmentID
+		action, summary = "删除附件", "从条目移除一个附件"
+	}
+	return field, action, summary
 }
 
 // startV2Approval reserves one public review. The caller holds c.mu. The
@@ -902,7 +974,8 @@ func (c *Connection) startV2Approval(r Request) error {
 	if title == "" {
 		title = r.Origin
 	}
-	c.v2pending = &pendingV2{request: r, title: title, deadline: c.now().Add(30 * time.Second), epoch: c.epoch, cancelEpoch: c.cancelEpoch.Load()}
+	field, action, summary := v2ApprovalReview(r)
+	c.v2pending = &pendingV2{request: r, title: title, field: field, action: action, summary: summary, deadline: c.now().Add(30 * time.Second), epoch: c.epoch, cancelEpoch: c.cancelEpoch.Load()}
 	c.changed()
 	return nil
 }
@@ -987,7 +1060,7 @@ func (c *Connection) Snapshot() View {
 	v.OTP, v.OTPStatus = c.otpSnapshot()
 	v.OTPRequestID = c.otpRequestID
 	if p := c.v2pending; p != nil {
-		v.V2 = &V2ApprovalView{ID: p.request.ID, Type: p.request.Type, Origin: p.request.Origin, ItemID: p.request.ItemID, Revision: p.request.Revision, Title: p.title, Deadline: p.deadline}
+		v.V2 = &V2ApprovalView{ID: p.request.ID, Type: p.request.Type, Origin: p.request.Origin, ItemID: p.request.ItemID, Revision: p.request.Revision, Title: p.title, Field: p.field, Action: p.action, Summary: p.summary, Deadline: p.deadline}
 	}
 	if p := c.profile; p != nil {
 		review := &ProfileView{ID: p.request.ID, Origin: p.request.Origin, Title: p.title, ItemID: p.request.ItemID, Revision: p.request.Revision, Category: p.category, Deadline: p.deadline}

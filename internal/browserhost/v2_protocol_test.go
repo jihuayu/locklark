@@ -223,7 +223,7 @@ func TestPopupVaultCRUDAndProfileFill(t *testing.T) {
 		t.Fatalf("card detail: %#v", cardDetail.Item)
 	}
 	cardRaw, _ := json.Marshal(cardDetail.Item)
-	if bytes.Contains(cardRaw, []byte("4242424242424242")) || bytes.Contains(cardRaw, []byte(`"123"`)) || bytes.Contains(cardRaw, []byte("4321")) {
+	if bytes.Contains(cardRaw, []byte("4242424242424242")) || bytes.Contains(cardRaw, []byte(`"123"`)) || bytes.Contains(cardRaw, []byte(`"pin":`)) {
 		t.Fatal("item-get leaked full PAN, CVV or PIN")
 	}
 	if !strings.Contains(cardDetail.Item.CreditCard.MaskedNumber, "4242") || strings.Contains(cardDetail.Item.CreditCard.MaskedNumber, "4242424242424242") {

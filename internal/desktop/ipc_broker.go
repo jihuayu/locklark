@@ -429,7 +429,8 @@ func (a *App) browserPairView(c *ui.Context) {
 			ui.Text(c, "声明的浏览器："+label).FontSize(13).TextColor(t.Text)
 			ui.Text(c, "声明的扩展来源："+p.request.Origin).FontSize(12).TextColor(t.TextMuted)
 		})
-		ui.Text(c, "快捷填充只授权本连接内的明确浏览器操作；Passkey、跨源结账和敏感 V2 操作仍会在此窗口逐次确认。锁库、断连或到期后失效。").FontSize(13).TextColor(t.Text)
+		ui.Text(c, "启用快捷填充：你显式授权本连接在 15 分钟内执行 V2 列表/详情（含身份信息与非隐藏字段）、字段复制/显示、附件读取、条目新建/编辑/状态/恢复、暂存保存、附件写入，以及验证码填充和保存登录，不再逐次弹窗。Passkey 登录/创建/信号和跨源或资料字段填充仍会逐次确认。").FontSize(13).TextColor(t.Text)
+		ui.Text(c, "逐次确认：V2 列表仍可直接显示标题和公开元数据用于选择；条目详情（含身份信息与非隐藏字段）、字段复制/显示、附件读取、条目/附件写入、验证码填充和保存登录都会逐个回到此窗口批准。Passkey 和资料填充同样逐次确认。锁库、断连或到期后两种模式都失效。").FontSize(13).TextColor(t.TextMuted)
 		ui.Row(c).Gap(8).Wrap().Children(func() {
 			ui.PrimaryButton(c, "连接并启用快捷填充").OnClick(func() {
 				a.decideBrowserPair(p.id, browserhost.BrowserPairDecision{Approved: true, QuickFill: true})

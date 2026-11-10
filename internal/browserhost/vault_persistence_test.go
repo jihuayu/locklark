@@ -147,7 +147,7 @@ func TestBrowserCreatePersistsWholeDurableItem(t *testing.T) {
 		t.Fatalf("reopened card detail: %#v", cardAfter.Item)
 	}
 	raw, _ := json.Marshal(cardAfter.Item)
-	for _, secret := range []string{"4242424242424242", `"123"`, "4321"} {
+	for _, secret := range []string{"4242424242424242", `"123"`, `"pin":`} {
 		if bytes.Contains(raw, []byte(secret)) {
 			t.Fatalf("reopened card detail leaked %q", secret)
 		}
