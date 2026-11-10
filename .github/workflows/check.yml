@@ -30,8 +30,11 @@ jobs:
           go build -trimpath -o "$bin/locklark-browser-register" ./cmd/locklark-browser-register
           go build -trimpath -o "$bin/locklark-team-sync" ./cmd/locklark-team-sync
           go build -trimpath -o "$bin/desktop-acceptance-fixture" ./scripts/desktop_acceptance_fixture
+          go build -trimpath -o "$bin/browser-acceptance-fixture" ./scripts/browser_acceptance_fixture
       - name: Smoke test real CLI before acceptance
         run: python3 scripts/cli_smoke.py --cli "$RUNNER_TEMP/locklark-bin/locklark"
+      - name: Test smoke failure paths
+        run: python3 -m unittest discover -s scripts -p test_cli_smoke.py
       - name: Preserve Linux primary binaries
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -300,7 +303,7 @@ jobs:
         run: python3 scripts/cli_smoke.py --cli "$RUNNER_TEMP/locklark-bin/locklark"
       - name: Test browser extension
         timeout-minutes: 10
-        run: node --test browser-extension/test/*.test.js scripts/test_browser_checkout_acceptance.mjs scripts/test_browser_accessibility_acceptance.mjs
+        run: node --test browser-extension/test/*.test.js scripts/test_browser_checkout_acceptance.mjs scripts/test_browser_accessibility_acceptance.mjs scripts/test_browser_fixture_path.mjs
       - name: Prepare reproducible unsigned extension packages
         timeout-minutes: 5
         run: |
@@ -460,6 +463,7 @@ jobs:
           LOCKLARK_GO: go
           LOCKLARK_BROWSER_HOST: ${{ runner.temp }}/locklark-bin/locklark-browser-chromium
           LOCKLARK_BROWSER_REGISTER: ${{ runner.temp }}/locklark-bin/locklark-browser-register
+          LOCKLARK_BROWSER_FIXTURE: ${{ runner.temp }}/locklark-bin/browser-acceptance-fixture
           LOCKLARK_TEST_POPUP_VAULT: "1"
           LOCKLARK_TEST_PASSKEY_MANAGEMENT: "1"
           LOCKLARK_TEST_PASSKEY_CONDITIONAL: "1"
@@ -473,6 +477,7 @@ jobs:
           LOCKLARK_GO: go
           LOCKLARK_BROWSER_HOST: ${{ runner.temp }}/locklark-bin/locklark-browser-chromium
           LOCKLARK_BROWSER_REGISTER: ${{ runner.temp }}/locklark-bin/locklark-browser-register
+          LOCKLARK_BROWSER_FIXTURE: ${{ runner.temp }}/locklark-bin/browser-acceptance-fixture
           LOCKLARK_TEST_CHECKOUT_FRAMES: "1"
       - name: Test Firefox native approval, fill, save, OTP and Passkey
         timeout-minutes: 10
@@ -484,6 +489,7 @@ jobs:
           LOCKLARK_GO: go
           LOCKLARK_BROWSER_HOST: ${{ runner.temp }}/locklark-bin/locklark-browser-firefox
           LOCKLARK_BROWSER_REGISTER: ${{ runner.temp }}/locklark-bin/locklark-browser-register
+          LOCKLARK_BROWSER_FIXTURE: ${{ runner.temp }}/locklark-bin/browser-acceptance-fixture
           LOCKLARK_GECKODRIVER: ${{ runner.temp }}/geckodriver
           LOCKLARK_TEST_FIREFOX_PASSKEY: "1"
           LOCKLARK_TEST_PASSKEY_MANAGEMENT: "1"

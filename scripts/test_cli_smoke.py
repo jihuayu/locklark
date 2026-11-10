@@ -2,7 +2,8 @@
 
 The positive path is exercised in CI by running scripts/cli_smoke.py against
 the just-built product executable. These tests only verify that invalid CLI
-paths fail closed; they do not stand in for that real smoke.
+paths and malformed child behavior fail closed and never echo child output;
+they do not stand in for that real smoke.
 """
 
 from __future__ import annotations
@@ -10,8 +11,12 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import json
 import os
 import pathlib
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -67,6 +72,85 @@ class CliSmokeFailureTests(unittest.TestCase):
             result, stderr = self.invoke("--cli", str(candidate))
         self.assertEqual(result, 1)
         self.assertEqual(stderr, "FAIL: CLI command failed: demo\n")
+
+
+class CliSmokeOutputFailureTests(unittest.TestCase):
+    """Exercise the smoke's own parsing against a scripted stand-in CLI.
+
+    The stand-in only imitates the output contract used by the smoke, so these
+    tests check the smoke gate's refusal and redaction behavior. They are not
+    real-product smoke evidence; that remains the CI invocation above.
+    """
+
+    def cli(self, directory: str, script: str) -> pathlib.Path:
+        candidate = pathlib.Path(directory) / "locklark"
+        candidate.write_text("#!/bin/sh\n" + script, encoding="utf-8")
+        candidate.chmod(0o700)
+        return candidate
+
+    def run_smoke(self, candidate: pathlib.Path) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "cli_smoke.py"), "--cli", str(candidate)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=60,
+            check=False,
+        )
+
+    def test_directory_cli_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            candidate = pathlib.Path(directory) / "locklark"
+            candidate.mkdir()
+            candidate.chmod(0o700)
+            completed = self.run_smoke(candidate)
+        self.assertEqual(completed.returncode, 1)
+        self.assertEqual(
+            completed.stderr, b"FAIL: CLI path is not an executable file\n"
+        )
+
+    @unittest.skipUnless(
+        os.name != "nt" and not (hasattr(os, "geteuid") and os.geteuid() == 0),
+        "POSIX executable bit and unprivileged account are required",
+    )
+    def test_malformed_json_fails_closed_without_echo(self):
+        if shutil.which("sh") is None:
+            self.skipTest("sh is unavailable")
+        with tempfile.TemporaryDirectory() as directory:
+            candidate = self.cli(
+                directory,
+                "if [ \"$1\" = \"--help\" ]; then printf 'Locklark help\\n'; exit 0; fi\n"
+                "printf 'not-json-private\\n'\n",
+            )
+            completed = self.run_smoke(candidate)
+        self.assertEqual(completed.returncode, 1)
+        self.assertEqual(completed.stderr, b"FAIL: CLI returned malformed JSON: demo\n")
+        self.assertEqual(completed.stdout, b"")
+        self.assertNotIn(b"not-json-private", completed.stderr + completed.stdout)
+
+    @unittest.skipUnless(
+        os.name != "nt" and not (hasattr(os, "geteuid") and os.geteuid() == 0),
+        "POSIX executable bit and unprivileged account are required",
+    )
+    def test_mismatched_summary_fails_closed(self):
+        if shutil.which("sh") is None:
+            self.skipTest("sh is unavailable")
+        with tempfile.TemporaryDirectory() as directory:
+            candidate = self.cli(
+                directory,
+                "if [ \"$1\" = \"--help\" ]; then printf 'Locklark help\\n'; exit 0; fi\n"
+                "if [ \"$1\" = \"demo\" ]; then\n"
+                f"  printf '%s\\n' '{json.dumps({'epochs': [1, 2, 3], 'synthetic': True})}'\n"
+                "  exit 0\n"
+                "fi\n"
+                f"printf '%s\\n' '{json.dumps({'epoch': 1, 'items': 2, 'attachments': 0})}'\n",
+            )
+            completed = self.run_smoke(candidate)
+        self.assertEqual(completed.returncode, 1)
+        self.assertEqual(
+            completed.stderr,
+            "FAIL: synthetic epoch 1 summary mismatch\n".encode(),
+        )
 
 
 if __name__ == "__main__":
