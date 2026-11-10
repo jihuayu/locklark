@@ -41,7 +41,7 @@ func MapLogins(raw []byte) (MappedLogins, error) {
 	if inventory.Accounts != 1 || inventory.Vaults != 1 {
 		return MappedLogins{}, ErrUnsupported
 	}
-	if inventory.Items > 256 {
+	if inventory.Items > vault.MaxItems {
 		return MappedLogins{}, ErrLimit
 	}
 	z, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))

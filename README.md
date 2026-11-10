@@ -30,7 +30,7 @@ Go TOTP 核心已通过 RFC 6238/4226 向量，支持有限的 Base32/otpauth �
 .\locklark.exe personal inspect-1pux --file owner.ll --source export.1pux
 ```
 
-在交互终端输入个人库双因素，并输入 `SCAN` 确认。命令只读检查不超过 8 MiB 的普通归档文件；输出条目/附件/登录字段/密码历史计数及固定待核对原因，不输出源标题或字段值，也不会导入数据。检查结果先记入个人库审计，提交后才输出报告和摘要回执。源 1PUX 仍是明文，命令不负责清除原文件；报告成功不表示可无损迁移。事务、恢复和平台边界见[个人预检验收](docs/personal-onepux-inspection-validation.md)。
+在交互终端输入个人库双因素，并输入 `SCAN` 确认。命令只读检查不超过 32 MiB 的普通归档文件；输出条目/附件/登录字段/密码历史计数及固定待核对原因，不输出源标题或字段值，也不会导入数据。检查结果先记入个人库审计，提交后才输出报告和摘要回执。源 1PUX 仍是明文，命令不负责清除原文件；报告成功不表示可无损迁移。事务、恢复和平台边界见[个人预检验收](docs/personal-onepux-inspection-validation.md)。
 
 ## 从 1Password 迁移（桌面）
 

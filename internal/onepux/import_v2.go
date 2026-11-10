@@ -59,7 +59,7 @@ func MapArchiveV2(raw []byte) (MappedLogins, error) {
 	if inventory.Items == 0 {
 		return MappedLogins{}, ErrUnsupported
 	}
-	if inventory.Items > 256 {
+	if inventory.Items > vault.MaxItems {
 		return MappedLogins{}, ErrLimit
 	}
 	z, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
