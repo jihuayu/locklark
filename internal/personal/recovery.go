@@ -29,18 +29,168 @@ var ErrHistoryLimit = errors.New("backup exceeds history limit (32 segments)")
 var ErrLegacyRecovery = errors.New("legacy recovery format has no independent history checkpoint; create a new backup from a trusted source vault")
 var ErrRecoverySource = errors.New("backup does not match the independently saved recovery checkpoint")
 var ErrArchiveType = errors.New("backup source must be a regular file")
+var ErrBackupMissingSubVault = errors.New("backup references a custom sub-vault whose metadata is missing from the backup")
 
 // Chain is verification material only. Signatures are kept byte-for-byte.
 type Chain struct {
 	Public ed25519.PublicKey `json:"audit_public"`
 	Events []Event           `json:"events"`
 }
+
+const (
+	maxVaults          = 64
+	maxItemAttachments = 16
+	// maxBackupAttachments mirrors the per-item bound already enforced by
+	// vault.ValidateItems so oversized lists are refused before indexing.
+	maxBackupAttachments = vault.MaxItems * maxItemAttachments
+)
+
+// backupAttachment carries the bytes that vault.AttachmentMeta intentionally
+// keeps out of its global JSON representation. It exists only in the
+// authenticated recovery payload and is bound back to an item attachment by
+// the pair below before validation or restoration.
+type backupAttachment struct {
+	ItemID       string `json:"item_id"`
+	AttachmentID string `json:"attachment_id"`
+	Content      []byte `json:"content"`
+}
+
 type payload struct {
 	Generation string
 	Epoch      uint64
 	Items      []vault.Item
 	Chains     []Chain
+	// These fields were appended after the original v2 payload fields. Their
+	// omitempty tags keep archives written before #99 byte-for-byte compatible
+	// with the existing signed manifest digest.
+	Vaults      []vault.VaultMeta  `json:",omitempty"`
+	Attachments []backupAttachment `json:",omitempty"`
 }
+
+func collectBackupAttachments(items []vault.Item) []backupAttachment {
+	var out []backupAttachment
+	for _, item := range items {
+		for _, att := range item.Attachments {
+			out = append(out, backupAttachment{ItemID: item.ID, AttachmentID: att.ID, Content: att.Content})
+		}
+	}
+	return out
+}
+
+// checkPayloadBounds rejects oversized counts before any item- or
+// attachment-proportional work runs.
+func checkPayloadBounds(p *payload) error {
+	if p == nil || len(p.Items) > vault.MaxItems || len(p.Vaults) > maxVaults || len(p.Chains) > maxChains {
+		return invalid
+	}
+	attachments := 0
+	seenIDs := make(map[string]struct{}, len(p.Items))
+	for n := range p.Items {
+		if !idOK(p.Items[n].ID) {
+			return invalid
+		}
+		if _, dup := seenIDs[p.Items[n].ID]; dup {
+			return invalid
+		}
+		seenIDs[p.Items[n].ID] = struct{}{}
+		if len(p.Items[n].Attachments) > maxItemAttachments {
+			return invalid
+		}
+		attachments += len(p.Items[n].Attachments)
+	}
+	if attachments > maxBackupAttachments || len(p.Attachments) > attachments {
+		return invalid
+	}
+	return nil
+}
+
+// applyBackupAttachments restores attachment bytes into the in-memory item
+// model using a single index over the bounded payload. Attachments with
+// positive size must have exactly one matching byte record; zero-length
+// legacy attachments may predate the backup-only field.
+func applyBackupAttachments(p *payload) error {
+	if len(p.Items) > vault.MaxItems || len(p.Attachments) > maxBackupAttachments {
+		return invalid
+	}
+	type attachmentKey struct{ item, attachment string }
+	index := make(map[attachmentKey]*vault.AttachmentMeta)
+	for n := range p.Items {
+		for m := range p.Items[n].Attachments {
+			att := &p.Items[n].Attachments[m]
+			key := attachmentKey{p.Items[n].ID, att.ID}
+			if _, dup := index[key]; dup {
+				return invalid
+			}
+			index[key] = att
+		}
+	}
+	seen := make(map[attachmentKey]bool, len(p.Attachments))
+	for _, data := range p.Attachments {
+		key := attachmentKey{data.ItemID, data.AttachmentID}
+		att, ok := index[key]
+		if !ok || seen[key] {
+			return invalid
+		}
+		seen[key] = true
+		att.Content = data.Content
+	}
+	for key, att := range index {
+		if seen[key] {
+			continue
+		}
+		if att.Size != 0 {
+			return invalid
+		}
+		att.Content = []byte{}
+	}
+	return nil
+}
+
+// checkRecoveredVaultRefs refuses any item that targets a custom sub-vault
+// absent from the backup's vault directory. It applies the runtime vaultExists
+// rule verbatim (empty or DefaultVaultID is always accepted; every other ID is
+// matched byte-for-byte), so a payload that would restore an orphan is never
+// accepted, and the signed payload itself is never rewritten.
+func checkRecoveredVaultRefs(p *payload) error {
+	if len(p.Items) > vault.MaxItems || len(p.Vaults) > maxVaults {
+		return invalid
+	}
+	known := make(map[string]struct{}, len(p.Vaults))
+	for _, v := range p.Vaults {
+		known[v.ID] = struct{}{}
+	}
+	for _, item := range p.Items {
+		if item.VaultID == "" || item.VaultID == vault.DefaultVaultID {
+			continue
+		}
+		if _, ok := known[item.VaultID]; !ok {
+			return ErrBackupMissingSubVault
+		}
+	}
+	return nil
+}
+
+func validateRecoveredVaults(vaults []vault.VaultMeta) error {
+	if len(vaults) == 0 {
+		return nil
+	}
+	if len(vaults) > maxVaults {
+		return invalid
+	}
+	seen := map[string]bool{vault.DefaultVaultID: true}
+	for _, v := range vaults {
+		if !validVaultMeta(v) || seen[strings.ToLower(v.ID)] {
+			return invalid
+		}
+		seen[strings.ToLower(v.ID)] = true
+	}
+	raw, e := json.Marshal(vaults)
+	if e != nil || len(raw) > 48<<10 {
+		return invalid
+	}
+	return nil
+}
+
 type signedBackup struct {
 	Body      payload
 	Signature []byte
@@ -272,19 +422,27 @@ func decodeArchive(path, pw string, key []byte, kit string) (*payload, error) {
 		return nil, invalid
 	}
 	p := &body.Body
+
 	if p.Generation != g || p.Items == nil || p.Epoch == 0 || p.Epoch == ^uint64(0) {
 		return nil, invalid
+	}
+	if e = checkPayloadBounds(p); e != nil {
+		return nil, e
 	}
 	if e = verifyChains(p.Chains); e != nil {
 		return nil, e
 	}
+	if e = validateRecoveredVaults(p.Vaults); e != nil {
+		return nil, e
+	}
+	if e = checkRecoveredVaultRefs(p); e != nil {
+		return nil, e
+	}
+	if e = applyBackupAttachments(p); e != nil {
+		return nil, e
+	}
 	if vault.ValidateItems([]byte(schema), p.Items) != nil {
 		return nil, invalid
-	}
-	for _, item := range p.Items {
-		if !idOK(item.ID) {
-			return nil, invalid
-		}
 	}
 	last := p.Chains[len(p.Chains)-1]
 	proof, e := payloadProof(*p)
@@ -343,6 +501,11 @@ func initializeRecovered(b *bolt.Bucket, i identity, p *payload) error {
 	}
 	if e = b.Put(archiveKey, enc); e != nil {
 		return e
+	}
+	if len(p.Vaults) > 0 {
+		if e = saveVaults(b, i, p.Vaults); e != nil {
+			return e
+		}
 	}
 	anchor, e := digest(p.Chains)
 	if e != nil {

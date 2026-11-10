@@ -398,7 +398,7 @@ func loadVaults(b *bolt.Bucket, i identity) ([]vault.VaultMeta, error) {
 	}
 	defer clear(p)
 	var vaults []vault.VaultMeta
-	if json.Unmarshal(p, &vaults) != nil || len(vaults) > 64 {
+	if json.Unmarshal(p, &vaults) != nil || len(vaults) > maxVaults {
 		return nil, invalid
 	}
 	seen := map[string]bool{vault.DefaultVaultID: true}
