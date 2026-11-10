@@ -12,6 +12,7 @@ import {
   chooseChildOrigin,
   openCheckoutPicker,
   assertProgrammaticClickRefused,
+  acceptCheckoutFrames,
 } from "./browser_checkout_acceptance.mjs";
 
 const TOP_ORIGIN = "https://login.locklark.test:8443";
@@ -608,6 +609,98 @@ test("native absence probes preserve popup focus across the journey", () => {
   // The journey never sends a physical Escape to its popup: closing the action
   // popup would leave the held CDP object disconnected.
   assert.doesNotMatch(journey, /pressEscape|checkout-picker-cancel:withdraw/);
+});
+
+test("native absence probes fail closed on an unavailable snapshot", async () => {
+  // A failed native probe observed no native UI, so it must fail the journey
+  // instead of reading as "both native decisions absent". The default journey
+  // probes its first popup before reading any card detail or picker state, so
+  // the popup is a bare object: any progress past the probe fails on a missing
+  // popup method, never inside the probe.
+  const fixture = {
+    CardID: "0".repeat(32),
+    CardRevision: "a".repeat(64),
+    CardTitle: "Synthetic checkout card",
+    CardNumber: "4111111111111111",
+    CardHolder: "Synthetic Holder",
+    CardVerification: "123",
+    CardExpiry: "2030-01",
+    CardPIN: "1234",
+  };
+  // A present, fully visible and blank form for both the top and child page.
+  const visibleFormState = () => {
+    const state = {
+      formPresent: true,
+      values: {},
+      visible: {},
+      tags: {},
+      submits: 0,
+    };
+    for (const key of ["name", "number", "month", "year", "csc", "pin"]) {
+      state.visible[key] = true;
+      state.tags[key] = key === "month" || key === "year" ? "SELECT" : "INPUT";
+    }
+    return state;
+  };
+  const probes = [];
+  const driver = (probe) => ({
+    page: {
+      url: () => TOP_ORIGIN + "/checkout",
+      goto: async () => assert.fail("journey navigated past the probe"),
+      frames: () => [
+        {
+          url: () => CARD_ORIGIN + "/card",
+          evaluate: async () => visibleFormState(),
+        },
+      ],
+      evaluate: async () => visibleFormState(),
+    },
+    origin: TOP_ORIGIN,
+    fixture,
+    input: (_actions, _native, options) => {
+      probes.push(options);
+      return probe();
+    },
+    openPopup: async () => ({}),
+    phase: () => {},
+    eventually: async (check, message) => {
+      if (!(await check())) throw Error(message);
+    },
+  });
+
+  // A thrown probe error propagates unchanged: it is never swallowed into a
+  // null snapshot and then read as "both controls absent".
+  const failed = Error(
+    "Native acceptance input failed [native-window-unavailable]",
+  );
+  await assert.rejects(
+    () =>
+      acceptCheckoutFrames(
+        driver(() => {
+          throw failed;
+        }),
+      ),
+    (error) => {
+      assert.deepEqual(probes, [
+        {
+          title_prefix: "Locklark",
+          preserve_focus: true,
+          inspect: true,
+        },
+      ]);
+      return error === failed;
+    },
+  );
+
+  // A probe that succeeds without a control object is an unavailable
+  // snapshot and fails closed instead of marking both controls absent.
+  const unavailable = ["x", null, {}, [], { controls: null }, { controls: [] }];
+  for (const result of unavailable) {
+    await assert.rejects(
+      () => acceptCheckoutFrames(driver(() => result)),
+      { message: "Native control snapshot unavailable" },
+    );
+  }
 });
 
 test("checkout choice options are strictly bounded", async () => {

@@ -306,7 +306,7 @@ function cardFrame(page, frameOrigin) {
     .find(
       (frame) =>
         frame.url() === frameOrigin + "/card" ||
-        frame.url().startsWith(frameOrigin + "/card?"),
+        String(frame.url()).startsWith(frameOrigin + "/card?"),
     );
 }
 
@@ -423,26 +423,32 @@ const POPUP_OPEN = Object.freeze({ popupOpen: true });
 // `options.popupOpen` requests the X11 helper's documented `preserve_focus` +
 // `title_prefix` form: it neither raises nor focuses the native window, which
 // would close a Chromium action popup the journey is still clicking. Other
-// callers keep the default probe.
+// callers keep the default probe. A probe error (unavailable, ambiguous or
+// unresponsive window, X11 query failure) propagates: a failed probe observed
+// no native UI and must never be read as "both controls absent".
 function nativeControls(input, options) {
-  try {
-    // A refused cross-site proposal or a sandbox-excluded page has no native
-    // window at all. The native probe waits for its bounded discovery deadline
-    // and reports that absence as a read-only result; no input is emitted.
-    return options?.popupOpen
-      ? input([], true, {
-          title_prefix: NATIVE_TITLE_PREFIX,
-          preserve_focus: true,
-          inspect: true,
-        })?.controls || null
-      : input([], true, true)?.controls || null;
-  } catch {
-    return null;
-  }
+  // Read-only probe: no input is emitted.
+  const result = options?.popupOpen
+    ? input([], true, {
+        title_prefix: NATIVE_TITLE_PREFIX,
+        preserve_focus: true,
+        inspect: true,
+      })
+    : input([], true, true);
+  const controls = result?.controls;
+  if (
+    !result ||
+    typeof result !== "object" ||
+    !controls ||
+    typeof controls !== "object" ||
+    Array.isArray(controls)
+  )
+    throw Error("Native control snapshot unavailable");
+  return controls;
 }
 
 function nativeControl(controls, label) {
-  const control = controls?.[label];
+  const control = controls[label];
   return {
     present: control?.present === true,
     enabled: control?.enabled === true,
@@ -451,7 +457,8 @@ function nativeControl(controls, label) {
 }
 
 // Read-only native accessibility snapshot: no click, wait or text action is
-// emitted. Both checkout decisions must be absent before any approval exists.
+// emitted. Both checkout decisions must be absent before any approval exists,
+// and an unavailable native window/control snapshot fails instead of passing.
 // `options.popupOpen` keeps the browser popup focused; omitting it uses the
 // default probe that raises and focuses the native window.
 function assertNoNativeApproval(input, options) {
@@ -723,6 +730,9 @@ async function runDefaultJourneys(driver, card, topOrigin, frameOrigin) {
   await assertBothBlank(page, frameOrigin, "Checkout forms must stay blank");
 
   let popup = await openPopup();
+  // Probe before the first selection, while this popup may still be focused:
+  // a failed native probe fails the journey here instead of at a later stage.
+  assertNoNativeApproval(input, POPUP_OPEN);
   await openCardDetail(popup, card, eventually);
   assert(
     await chooseChildOrigin(popup, topOrigin, frameOrigin, eventually),
