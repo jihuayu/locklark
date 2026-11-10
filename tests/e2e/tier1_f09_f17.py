@@ -510,20 +510,23 @@ def t1_f13_03(ctx):
     "Opt-in HIBP breach match through the CLI against the local mock range server",
 )
 def t1_f13_06(ctx):
-    # The CLI hard-codes https://api.pwnedpasswords.com/range/ and documents
-    # that it offers no endpoint/proxy/client override.  This drives the real
-    # consented `--hibp true` flow with a private child environment: a
-    # loopback HTTPS CONNECT proxy (`HTTPS_PROXY`, `NO_PROXY`/`no_proxy`
-    # emptied) that accepts only api.pwnedpasswords.com:443 and relays it to a
-    # loopback TLS range server whose throwaway certificate for that hostname
-    # is the child's only trust anchor (SSL_CERT_FILE/SSL_CERT_DIR).  No
-    # system DNS/hosts change, nothing listens on 443, no production switch.
+    # The CLI hard-codes https://api.pwnedpasswords.com/range/ and offers no
+    # endpoint/proxy/client override.  The shipped HIBP client is built with
+    # an empty `http.Client` (nil `Transport`), so its requests use Go's
+    # default transport, which honours `HTTPS_PROXY` via
+    # `ProxyFromEnvironment`.  That default is the only routing mechanism this
+    # test uses: a private child environment points `HTTPS_PROXY` at a
+    # loopback CONNECT proxy (`NO_PROXY`/`no_proxy` emptied) that accepts only
+    # api.pwnedpasswords.com:443 and relays it to a loopback TLS range server
+    # whose throwaway certificate for that hostname is the child's only trust
+    # anchor (SSL_CERT_FILE/SSL_CERT_DIR).  No system DNS/hosts change,
+    # nothing listens on 443, and no production switch is added.
     #
-    # If that route cannot be established, the run is never allowed to fall
-    # back to the real service: a crash-safe child guard (including ~orkcrash
-    # from the go test flag table) kills network processes with
-    # `kill -STOP` as soon as they start, so the CLI aborts on timeout
-    # instead.  The outcome is then an explicit PENDING result.
+    # If the proxy/CA cannot start or no CONNECT ever arrives, the helper
+    # returns PENDING and this run is never redirected to the real service.
+    # Once CONNECT arrives, the route is being exercised: a TLS handshake or
+    # range failure makes this test hard-fail.  It is never downgraded to
+    # pending and never reported green.
     if go_tool() is None:
         gate(
             ctx,

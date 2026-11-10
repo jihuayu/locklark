@@ -1475,14 +1475,17 @@ def local_hibp_range_proxy(
 ) -> "LocalHIBPRangeProxy":
     """Start a loopback HTTPS CONNECT proxy in front of a local range server.
 
-    The product's default ``http.Client`` transport honours ``HTTPS_PROXY``,
-    so a child process with a private environment can be routed to this proxy
-    without any production endpoint switch.  The proxy accepts exactly one
-    CONNECT target, ``api.pwnedpasswords.com:443``, and relays it to a local
-    TLS server with a throwaway certificate for that hostname (installed as
-    the child's only trust anchor through ``SSL_CERT_FILE``/``SSL_CERT_DIR``).
-    Every other target is refused; system DNS and hosts files are untouched
-    and nothing listens on port 443.
+    The shipped HIBP client is built with an empty ``http.Client`` (nil
+    ``Transport``), so its requests use Go's default transport and honour
+    ``HTTPS_PROXY`` through ``ProxyFromEnvironment``.  The product endpoint
+    stays the fixed ``https://api.pwnedpasswords.com/range/`` and there is no
+    endpoint/proxy/client override; this proxy is reached only because a
+    child process with a private environment supplies ``HTTPS_PROXY``.  It
+    accepts exactly that one CONNECT target, ``api.pwnedpasswords.com:443``,
+    and relays it to a local TLS server with a throwaway certificate for that
+    hostname (installed as the child's only trust anchor through
+    ``SSL_CERT_FILE``/``SSL_CERT_DIR``).  Every other target is refused;
+    system DNS and hosts files are untouched and nothing listens on port 443.
 
     ``responses`` maps each expected five-hex prefix to its own independent
     ``(suffix, count)`` lines.  The caller owns the synthetic passwords, so it
@@ -1728,11 +1731,14 @@ def f13_cli_hibp_range_lookups(
     derive from the synthetic passwords to that prefix's own answer lines.
     Outcomes:
 
-    - ``"ran"``: the proxy accepted the CLI's CONNECT and the local range
-      server answered; the caller checks which prefixes were really asked
-      for and what each prefix received;
-    - ``"pending"``: the route could not be established (proxy or CA failed),
-      so nothing was validated.
+    - ``"ran"``: the proxy accepted the CLI's CONNECT.  This only establishes
+      the route; the caller still asserts requests, range bodies, payload and
+      audit.  A TLS handshake failure after CONNECT returns ``"ran"`` with no
+      requests and usually a non-zero CLI result, so the caller hard-fails.
+      It is never downgraded to pending and never treated as green;
+    - ``"pending"``: no CONNECT ever arrived (local proxy/CA startup failed,
+      or the CLI never used the proxy), so nothing was validated.  This is a
+      PENDING_FEATURE outcome, never PASS.
     """
 
     try:
@@ -1785,24 +1791,25 @@ def f13_cli_hibp_range_lookups(
     }
 
 
-def card_fill_page_load_component(
+def card_fill_explicit_authorization_component(
     ctx: E2EContext, core_path: Path | None = None
 ) -> dict[str, Any] | None:
-    """Execute the shipped card fill against a synthetic, unactivated page.
+    """Execute the shipped card fill under explicit-authorization inputs.
 
-    T2_F11_05 asks whether credit-card fields can ever be filled on page load
-    without a gesture.  The shipped artifact is two layers: ``content.js`` runs
-    on every HTTPS page at ``document_start`` (no fill entrypoint there), and
-    ``core.fillCardDocument`` is the sandboxed function the extension injects
-    only after a trusted user gesture (``isTrusted``) and native approval have
-    produced a short-lived ``expiresAt`` intent.
+    T2_F11_05 is a **component contract**, not a page-load wiring test.  The
+    shipped artifact has two layers: ``content.js`` runs on HTTPS pages and
+    decides when to inject the sandboxed fill, while ``core.fillCardDocument``
+    is the function that may write only for a short-lived explicit
+    ``(expectedOrigin, expiresAt, category)`` intent.
 
     This runs the *built* bundle's ``core.js`` in a W3C-shaped synthetic
-    checkout page (one card form, no user activation, no extension runtime).
-    It reports whether a fill happened while the page was merely loading, and
-    which non-gesture invocations (expired/stale intent, wrong origin, wrong
-    category, cross-origin frame) the shipped function refuses.  Returns
-    ``None`` when no built bundle carries the entrypoint.
+    checkout page (one card form, no extension runtime) and calls the
+    component directly.  It does not exercise ``content.js``/background
+    injection, a real browser gesture, or native approval.  It reports that
+    no values exist before authorization, that expired/stale intents, a wrong
+    origin and a wrong category are refused without touching a control, and
+    that one valid intent writes the card controls once.  Returns ``None``
+    when no built bundle carries the entrypoint.
     """
 
     node = shutil.which("node")
@@ -1816,8 +1823,8 @@ def card_fill_page_load_component(
     for candidate in candidates:
         if not candidate.is_file():
             continue
-        script = ctx.temp_dir / "gesture_only_card_fill.cjs"
-        script.write_text(_PAGE_LOAD_FILL_HARNESS, encoding="utf-8")
+        script = ctx.temp_dir / "card_fill_explicit_authorization.cjs"
+        script.write_text(_CARD_FILL_AUTHORIZATION_HARNESS, encoding="utf-8")
         result = ctx.run_cli(
             [str(script), str(candidate)],
             binary=node,
@@ -1833,9 +1840,9 @@ def card_fill_page_load_component(
     return None
 
 
-_PAGE_LOAD_FILL_HARNESS = r"""
+_CARD_FILL_AUTHORIZATION_HARNESS = r"""
 "use strict";
-// Synthetic W3C-shaped checkout page: one card form, no user activation.
+// Synthetic W3C-shaped checkout page: one card form, no extension runtime.
 const vm = require("node:vm");
 const core = require(process.argv[2]);
 const events = [];
@@ -1930,18 +1937,17 @@ const fill = vm.runInNewContext(
   context,
 );
 const values = () => controls.map((control) => control.value);
-// The document load completes.  A page-load fill would have to run by itself,
-// so every value write from here on is recorded.
+// Record every write from here on.  No document-load event is dispatched:
+// this harness calls the fill component directly and proves only the
+// explicit-authorization contract, not page-load wiring.
 for (const control of controls) control._touched = true;
-document.dispatchEvent({ type: "DOMContentLoaded" });
-new Target().dispatchEvent({ type: "load" });
 const data = {
   cardholder_name: "Ada Lovelace",
   number: "4242424242424242",
   exp: "12/29",
   cvv: "123",
 };
-const afterLoad = values();
+const beforeAuthorization = values();
 const rejected = {};
 const afterRejects = {};
 const rejects = {
@@ -1954,16 +1960,14 @@ for (const [name, args] of Object.entries(rejects)) {
   rejected[name] = fill(...args());
   afterRejects[name] = values();
 }
-const beforeGesture = values();
-const gesture = fill(location.origin, data, clock + 1500, false, "credit_card");
+const authorized = fill(location.origin, data, clock + 1500, false, "credit_card");
 process.stdout.write(JSON.stringify({
-  afterLoad,
+  beforeAuthorization,
   afterRejects,
   rejects: rejected,
-  beforeGesture,
-  gesture,
+  authorized,
   written: events.slice(),
-  values: values(),
+  afterAuthorization: values(),
 }));
 """
 
@@ -2309,7 +2313,7 @@ __all__ = [
     "f13_cli_hibp_range_lookups",
     "local_hibp_range_server",
     "HIBP_NETWORK_PROMPT",
-    "card_fill_page_load_component",
+    "card_fill_explicit_authorization_component",
     "f13_cli_hibp_opt_in",
     "HEX32_RE",
     "F14_REQUIRED_PROFILES",

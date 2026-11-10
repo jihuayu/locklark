@@ -728,8 +728,11 @@ class PyKeePassExportDetectionTests(unittest.TestCase):
                 support.read_kdbx_entries(Path("/tmp/export.kdbx"), "export-pass-2026")
 
 
-class F11PageLoadFillDetectionTests(unittest.TestCase):
-    """T2_F11_05 must observe behaviour, not a `userActivation` literal."""
+class F11CardFillAuthorizationDetectionTests(unittest.TestCase):
+    """T2_F11_05 is a component explicit-authorization contract.
+
+    It must not be described as page-load wiring evidence.
+    """
 
     def _core(self) -> Path:
         root = Path(tempfile.mkdtemp())
@@ -748,13 +751,13 @@ class F11PageLoadFillDetectionTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, ctx.temp_dir, True)
         ctx.repo_root = ROOT
         ctx.run_cli.return_value = CLIResult(
-            0, json.dumps({"afterLoad": ["", "", "", ""]}), "", []
+            0, json.dumps({"beforeAuthorization": ["", "", "", ""]}), "", []
         )
-        return support.card_fill_page_load_component(ctx, self._core())
+        return support.card_fill_explicit_authorization_component(ctx, self._core())
 
     def test_harness_is_executed_against_the_built_bundle(self):
         observed = self._run("")
-        self.assertEqual(observed["afterLoad"], ["", "", "", ""])
+        self.assertEqual(observed["beforeAuthorization"], ["", "", "", ""])
 
     def test_pty_result_is_exported_for_detection_tests(self):
         self.assertTrue(hasattr(support, "PTYResult"))

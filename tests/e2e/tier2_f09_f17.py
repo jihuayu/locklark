@@ -15,7 +15,7 @@ from .support import (
     add_login,
     assert_audit_chain,
     audit_events,
-    card_fill_page_load_component,
+    card_fill_explicit_authorization_component,
     checklist_rows,
     cli_profiles,
     cli_supports,
@@ -273,7 +273,7 @@ def t2_f11_04(ctx):
     "T2_F11_05",
     2,
     ["F11"],
-    "Credit-card fields are never filled on page load without a gesture",
+    "Card fill component explicit-authorization contract",
     coverage_kind="component_contract",
 )
 def t2_f11_05(ctx):
@@ -282,23 +282,24 @@ def t2_f11_05(ctx):
         ctx,
         "F11",
         ready,
-        "credit-card fill entrypoints are absent from the shipped extension",
+        "credit-card fill explicit-authorization entrypoints are absent from the shipped extension",
     )
-    # Card fill is only reachable after a trusted inline-menu gesture and
-    # native approval.  The old probe searched for a literal `userActivation`
-    # check, which the shipped code never used, so a working gesture-only path
-    # showed up as a phantom feature gap.  Observe the behaviour instead: load
-    # the built extension's core.js into a synthetic W3C checkout page with no
-    # user activation and require that (a) the page load fills nothing and
-    # (b) every non-gesture invocation is refused.
-    observed = card_fill_page_load_component(ctx)
+    # Component contract only: this executes the built bundle's
+    # `core.fillCardDocument` directly.  It does not exercise `content.js` or
+    # any background page-load wiring, and it does not perform a real browser
+    # gesture.  The explicit authorization it verifies is the shipped
+    # short-lived (origin, expiresAt, category) intent; without one, the
+    # component must refuse and leave every control untouched.
+    observed = card_fill_explicit_authorization_component(ctx)
     gate(
         ctx,
         "F11",
         observed is not None,
         "the built extension bundle carries no fillCardDocument entrypoint",
     )
-    assert observed["afterLoad"] == ["", "", "", ""], observed["afterLoad"]
+    assert observed["beforeAuthorization"] == ["", "", "", ""], observed[
+        "beforeAuthorization"
+    ]
     for name, refused in observed["rejects"].items():
         assert refused is False, (name, refused)
         # A refused invocation must not touch any control.
@@ -306,11 +307,16 @@ def t2_f11_05(ctx):
             name,
             observed["afterRejects"][name],
         )
-    assert observed["beforeGesture"] == ["", "", "", ""], observed["beforeGesture"]
-    # Only an explicit gesture-driven fill may write, and it writes exactly the
+    # Only a valid explicit authorization may write, and it writes exactly the
     # card controls once.
-    assert observed["gesture"] is True, observed
+    assert observed["authorized"] is True, observed
     assert sorted(observed["written"]) == ["csc", "exp", "holder", "number"], observed["written"]
+    assert observed["afterAuthorization"] == [
+        "Ada Lovelace",
+        "4242424242424242",
+        "12/29",
+        "123",
+    ], observed["afterAuthorization"]
     counts = node_test_pattern(
         ctx,
         M3_FILL,
