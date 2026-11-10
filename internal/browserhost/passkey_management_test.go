@@ -250,18 +250,27 @@ func (f *removalReviewFixture) frame(n int) map[string]any {
 	return map[string]any{"v": 1, "id": reqID(n), "type": "passkey-remove", "capability": f.cap, "item_id": f.itemID, "revision": f.revision, "credential_id": f.cred}
 }
 
-// pending shows the removal's native review without answering it and proves a
-// second connection cannot reach the Session while that review holds the slot.
-func (f *removalReviewFixture) pending(t *testing.T, n int) {
+// review sends the removal, asserts no answer was sent before native approval
+// and returns its exact native review.
+func (f *removalReviewFixture) review(t *testing.T, n int) *V2ApprovalView {
 	t.Helper()
 	before := len(f.out.responses(t))
 	v2Send(t, f.c, f.frame(n))
 	if got := len(f.out.responses(t)); got != before {
 		t.Fatal("passkey-remove answered before native approval")
 	}
-	if v := f.c.Snapshot().V2; v == nil || v.Type != "passkey-remove" || v.ID != reqID(n) {
+	v := f.c.Snapshot().V2
+	if v == nil || v.Type != "passkey-remove" || v.ID != reqID(n) {
 		t.Fatalf("no exact native review: %#v", v)
 	}
+	return v
+}
+
+// pending shows the removal's native review without answering it and proves a
+// second connection cannot reach the Session while that review holds the slot.
+func (f *removalReviewFixture) pending(t *testing.T, n int) {
+	t.Helper()
+	f.review(t, n)
 	busy := v2Handle(t, f.other, f.otherOut, map[string]any{"v": 1, "id": reqID(n + 1), "type": "passkey-remove", "capability": f.otherCap, "item_id": f.itemID, "revision": f.revision, "credential_id": f.cred})
 	if busy.Type != "error" || f.other.Snapshot().V2 != nil {
 		t.Fatalf("pending removal review did not hold the mutation slot: %#v", busy)
@@ -275,6 +284,47 @@ func newRemovalReviewFixture(t *testing.T) *removalReviewFixture {
 	other, otherOut, otherCap := pairedToSession(t, s)
 	t.Cleanup(other.Close)
 	return &removalReviewFixture{c: c, out: out, s: s, cap: capability, itemID: itemID, revision: revision, cred: credential, other: other, otherOut: otherOut, otherCap: otherCap}
+}
+
+// TestPasskeyRemovalReviewTimerUsesCapabilityDeadline proves the review, its
+// passive timer and its exact gate share one deadline that never outlives a
+// short-lived capability: once the capability lapses the timer alone clears the
+// review, and the still-unlocked shared Session accepts a new registration.
+func TestPasskeyRemovalReviewTimerUsesCapabilityDeadline(t *testing.T) {
+	f := newRemovalReviewFixture(t)
+	// A shared desktop connection keeps the test Session unlocked when its own
+	// capability lapses; only the timer may release the reservation.
+	f.c.desktopShared = true
+	f.c.mu.Lock()
+	f.c.until = time.Now().Add(100 * time.Millisecond)
+	f.c.mu.Unlock()
+	review := f.review(t, 120)
+	if limit := time.Now().Add(100 * time.Millisecond); review.Deadline.After(limit) {
+		t.Fatalf("review deadline %v outlived the capability %v", review.Deadline, limit)
+	}
+	// No Snapshot/Handle on the owning connection: only the passive timer may
+	// clear it.
+	until := time.Now().Add(2 * time.Second)
+	for {
+		probe := personal.NewMutationGate(time.Now().Add(time.Minute))
+		if err := f.s.RegisterMutation(probe); err == nil {
+			f.s.ReleaseMutation(probe)
+			break
+		}
+		if time.Now().After(until) {
+			t.Fatal("capability expiry left the removal reservation in the Session")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !f.s.Unlocked() {
+		t.Fatal("the shared Session locked instead of just releasing the review")
+	}
+	f.c.mu.Lock()
+	pending := f.c.v2pending
+	f.c.mu.Unlock()
+	if pending != nil {
+		t.Fatal("timer did not clear the expired review")
+	}
 }
 
 // expectSlotReleased proves the shared Session can take a fresh registration,

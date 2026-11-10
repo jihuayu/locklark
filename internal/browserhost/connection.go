@@ -1536,9 +1536,12 @@ func (c *Connection) startV2Approval(r Request) error {
 	field, action, summary := v2ApprovalReview(r)
 	review := &pendingV2{title: title, field: field, action: action, summary: summary, deadline: c.now().Add(30 * time.Second), epoch: c.epoch, cancelEpoch: c.cancelEpoch.Load()}
 	if destructiveV2Operation(r.Type) {
-		// The reservation is made before any native review exists and is
-		// carried on the review itself.
-		gate, session, e := c.reserveV2Removal(r)
+		// A removal review, its passive expiry timer and its exact mutation
+		// gate share one deadline that never outlives the capability. The
+		// reservation is made before any native review exists and is carried
+		// on the review itself.
+		review.deadline = minTime(c.until, c.now().Add(30*time.Second))
+		gate, session, e := c.reserveV2Removal(r, review.deadline)
 		if e != nil {
 			return c.refuse(r.ID)
 		}
@@ -1618,29 +1621,22 @@ func (c *Connection) v2ReviewTimer() {
 // is still revalidated inside the approved Session transaction under this
 // exact gate. The caller holds c.mu and has already checked this connection's
 // own approval surfaces.
-func (c *Connection) reserveV2Removal(r Request) (*personal.MutationGate, *personal.Session, error) {
+func (c *Connection) reserveV2Removal(r Request, deadline time.Time) (*personal.MutationGate, *personal.Session, error) {
 	s := c.session.Load()
 	if s == nil || !s.Unlocked() || !c.valid(c.capability) {
 		return nil, nil, ErrProtocol
 	}
-	var until time.Time
-	switch r.Type {
-	case "passkey-remove":
-		if c.passkey != nil {
-			// A passkey review still preparing ownership of the slot on this
-			// connection must not be displaced.
-			return nil, nil, ErrProtocol
-		}
-		until = c.now().Add(30 * time.Second)
-	case "attachment-remove":
-		// The review must never outlive its capability, and the gate deadline
-		// must lie in the gate clock's range: a pending staged upload shares
-		// its session, so the review keeps the bound every other removal uses.
-		until = minTime(c.until, c.now().Add(30*time.Second))
-	default:
+	if r.Type != "passkey-remove" && r.Type != "attachment-remove" {
 		return nil, nil, ErrProtocol
 	}
-	gate := personal.NewMutationGate(until)
+	if c.passkey != nil {
+		// A passkey review still preparing ownership of the slot on this
+		// connection must not be displaced.
+		return nil, nil, ErrProtocol
+	}
+	// The gate carries the review's own deadline, so an expired capability
+	// makes the gate expire with it instead of lingering in the Session.
+	gate := personal.NewMutationGate(deadline)
 	if err := s.RegisterMutation(gate); err != nil {
 		return nil, nil, err
 	}
