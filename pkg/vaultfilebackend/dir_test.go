@@ -453,12 +453,22 @@ func TestDirRefusesForeignOwnedNamespace(t *testing.T) {
 			if err := b.ReplaceIfVersion(ctx, "n", cur.Revision, []byte("v2")); !errors.Is(err, ErrDenied) {
 				t.Fatalf("replace with foreign-owned %s = %v, want ErrDenied", tc.name, err)
 			}
-			if got := mustRead(t, b, "n"); string(got.Bytes) != "v1" || got.Revision != cur.Revision {
-				t.Fatal("refused write changed the stored version")
+			// The backend refuses every operation while the component is
+			// foreign-owned, so the stored record is inspected directly, not
+			// through Dir.Read: it must still be the seed version, and no
+			// temporary file may have been staged.
+			raw, err := os.ReadFile(b.dataPath("n"))
+			if err != nil {
+				t.Fatalf("inspect stored record: %v", err)
 			}
-			// Tmp remains process-owned below the data directory or not, so a
-			// refused write must not have staged anything or taken a ticket.
-			if entries, err := os.ReadDir(filepath.Join(b.root, tmpName)); err == nil && len(entries) != 0 {
+			rec, err := decodeRecord(raw)
+			if err != nil || rec.version != string(cur.Revision) || string(rec.value) != "v1" {
+				t.Fatalf("refused write changed the stored version: %v, %q", err, rec.value)
+			}
+			tmp := filepath.Join(b.root, tmpName)
+			if entries, err := os.ReadDir(tmp); err != nil && tc.name != "tmp_directory_after_open" {
+				t.Fatalf("inspect temporary directory: %v", err)
+			} else if len(entries) != 0 {
 				t.Fatalf("refused write left %d temporary files", len(entries))
 			}
 		})
@@ -548,6 +558,115 @@ func TestDirRefusesNamespaceSwapAfterOpen(t *testing.T) {
 	}
 	if err := b.ReplaceIfVersion(ctx, "n", cur.Revision, []byte("v2")); err != nil {
 		t.Fatalf("replace after restore = %v", err)
+	}
+}
+
+// Replacing the configured root itself with a symlink after OpenDir is refused
+// by every later operation. ns, v1, tmp and data are paths below the root, so
+// without checking the root by identity their Lstat would follow the swapped
+// root into an outside tree; the outside tree below is built to look valid.
+func TestDirRefusesRootSwapToSymlink(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	root := filepath.Join(base, "root")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	b := openAt(t, root).(*Dir)
+	if err := b.CreateIfAbsent(ctx, "n", []byte("v1")); err != nil {
+		t.Fatal(err)
+	}
+	cur := mustRead(t, b, "n")
+
+	// Move the real root aside and leave a symlink in its place. The target
+	// holds a valid-looking namespace, a valid temporary directory and the
+	// seed record, so following the link would otherwise succeed and a
+	// replace would write through it.
+	outside := filepath.Join(base, "outside")
+	outV1 := filepath.Join(outside, dirSubdir, dirVer)
+	for _, p := range []string{filepath.Join(outV1, tmpName), filepath.Join(outV1, dataName)} {
+		if err := os.MkdirAll(p, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	record, err := os.ReadFile(b.dataPath("n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := filepath.Join(outV1, dataName, filepath.Base(b.dataPath("n")))
+	if err := os.WriteFile(entry, record, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(root, filepath.Join(base, "moved")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, root); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := b.Read(ctx, "n"); !errors.Is(err, ErrDenied) {
+		t.Fatalf("read through swapped root = %v, want ErrDenied", err)
+	}
+	if err := b.ReplaceIfVersion(ctx, "n", cur.Revision, []byte("v2")); !errors.Is(err, ErrDenied) {
+		t.Fatalf("replace through swapped root = %v, want ErrDenied", err)
+	}
+	if err := b.CreateIfAbsent(ctx, "fresh", []byte("v2")); !errors.Is(err, ErrDenied) {
+		t.Fatalf("create through swapped root = %v, want ErrDenied", err)
+	}
+	if _, err := OpenDir(root); !errors.Is(err, ErrDenied) {
+		t.Fatalf("open of symlinked root = %v, want ErrDenied", err)
+	}
+	// The outside tree is byte-for-byte unchanged: no replaced or new data
+	// file, no staged temporary file and no lock file created through it.
+	if got, err := os.ReadFile(entry); err != nil || !bytes.Equal(got, record) {
+		t.Fatal("operation wrote through the swapped root")
+	}
+	if entries, _ := os.ReadDir(filepath.Join(outV1, dataName)); len(entries) != 1 {
+		t.Fatalf("operation added %d data files outside the root", len(entries)-1)
+	}
+	if entries, _ := os.ReadDir(filepath.Join(outV1, tmpName)); len(entries) != 0 {
+		t.Fatal("operation staged a temporary file outside the root")
+	}
+	if _, err := os.Lstat(filepath.Join(outV1, lockName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("operation created a lock file outside the root")
+	}
+	// Restoring the real root restores service.
+	if err := os.Remove(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(base, "moved"), root); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustRead(t, b, "n"); string(got.Bytes) != "v1" || got.Revision != cur.Revision {
+		t.Fatal("restored root does not serve the committed version")
+	}
+	if err := b.ReplaceIfVersion(ctx, "n", cur.Revision, []byte("v2")); err != nil {
+		t.Fatalf("replace after restore = %v", err)
+	}
+}
+
+// The root policy is not tightened: a safe 0755 root (not group/world
+// writable) is still accepted on OpenDir and still usable afterwards, while a
+// root that becomes group or world writable after OpenDir is refused.
+func TestDirRootModePolicyUnchanged(t *testing.T) {
+	ctx := context.Background()
+	parent := t.TempDir()
+	root := filepath.Join(parent, "root")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0755); err != nil {
+		t.Fatal(err)
+	}
+	b := openAt(t, root)
+	if err := b.CreateIfAbsent(ctx, "n", []byte("v")); err != nil {
+		t.Fatalf("0755 root: %v", err)
+	}
+	if err := os.Chmod(root, 0775); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Read(ctx, "n"); !errors.Is(err, ErrDenied) {
+		t.Fatalf("read with group-writable root = %v, want ErrDenied", err)
 	}
 }
 

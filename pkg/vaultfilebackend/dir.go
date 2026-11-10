@@ -80,11 +80,14 @@ const (
 // List and history are not part of the contract; List returns ErrUnsupported,
 // or ErrDenied after Close.
 type Dir struct {
-	// ns is <root>/vaultfile-backend and root is its v1 directory; both are
-	// re-validated by dir before every operation.
-	ns   string
-	root string
-	lock string
+	// cfgRoot is the resolved configured root, ns is <root>/vaultfile-backend
+	// and root is its v1 directory. All three are re-validated by dir before
+	// every operation: ns and root are paths below cfgRoot, so the root itself
+	// must stay a real directory for those checks to mean anything.
+	cfgRoot string
+	ns      string
+	root    string
+	lock    string
 
 	mu     sync.Mutex
 	closed bool
@@ -181,7 +184,7 @@ func OpenDir(root string) (*Dir, error) {
 		return nil, err
 	}
 	_ = f.Close()
-	return &Dir{ns: ns, root: base, lock: lock, timeout: DefaultLockTimeout, inProc: inProcFor(lock)}, nil
+	return &Dir{cfgRoot: real, ns: ns, root: base, lock: lock, timeout: DefaultLockTimeout, inProc: inProcFor(lock)}, nil
 }
 
 // makePrivateDir creates d with 0700 when it is missing and then validates it
@@ -247,7 +250,7 @@ func prepareRoot(abs string) (string, error) {
 	real := filepath.Join(parent, filepath.Base(abs))
 	for cur := real; ; cur = filepath.Dir(cur) {
 		info, err := os.Stat(cur)
-		if err != nil || !info.IsDir() || !privateDir(info) {
+		if err != nil || !info.IsDir() || !trustedAncestor(info) {
 			return "", deniedMsg(nil, "root ancestors are not trusted")
 		}
 		if filepath.Dir(cur) == cur {
@@ -256,14 +259,50 @@ func prepareRoot(abs string) (string, error) {
 	}
 }
 
-// dir re-validates every component of the namespace on every operation:
-// <root>/vaultfile-backend, its v1 directory, and the tmp and data directories.
-// Each component is Lstat-ed on its own path, so a component replaced by a
-// symlink or loosened to group/world-writable since OpenDir is refused before
-// any path below it is used, rather than followed to wherever it points. A
-// component that moved, was linked or was loosened fails with ErrDenied. The
-// check and the later use do not share a descriptor: see the threat model above.
+// trustedAncestor reports whether a directory may hold the configured root or
+// one of its ancestors: the root itself and its parents must not be group or
+// world writable, while a system sticky directory such as /tmp is accepted as
+// a top-level ancestor. Like an earlier OpenDir, it follows symlinks: OpenDir
+// resolves the root path, and Dir.dir re-checks the resolved root by identity.
+func trustedAncestor(info os.FileInfo) bool {
+	return privateDir(info) || info.Mode()&os.ModeSticky != 0
+}
+
+// checkRootIdentity confirms that the configured root is still the real
+// directory OpenDir opened, without following the final component and without
+// changing the root policy. OpenDir accepts a root of any mode as long as the
+// root and its ancestors are not group/world writable, so a relinked or loose
+// root fails only if it is a symlink, no longer a directory, or writable by
+// group or others. Ownership is not required: a root such as /var/tmp may
+// legitimately belong to root.
+func checkRootIdentity(p string) error {
+	st, err := os.Lstat(p)
+	if err != nil {
+		return deniedMsg(err, "root")
+	}
+	if st.Mode()&os.ModeSymlink != 0 || !st.IsDir() {
+		return deniedMsg(nil, "root is not a real directory")
+	}
+	if !trustedAncestor(st) {
+		return deniedMsg(nil, "root is writable by group or others")
+	}
+	return nil
+}
+
+// dir re-validates every component of the namespace on every operation: the
+// configured root, <root>/vaultfile-backend, its v1 directory, and the tmp and
+// data directories. Each component is Lstat-ed on its own path, so a component
+// replaced by a symlink or loosened to group/world-writable since OpenDir is
+// refused before any path below it is used, rather than followed to wherever it
+// points. Checking the root first matters because ns and root are paths below
+// it: without that check, a root swapped for a symlink would make the Lstat of
+// every other component follow the link into an outside tree. A component that
+// moved, was linked or was loosened fails with ErrDenied. The check and the
+// later use do not share a descriptor: see the threat model above.
 func (d *Dir) dir() (string, error) {
+	if err := checkRootIdentity(d.cfgRoot); err != nil {
+		return "", err
+	}
 	parts := []struct{ path, label string }{
 		{d.ns, "storage namespace"},
 		{d.root, "version directory"},
