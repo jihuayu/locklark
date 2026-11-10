@@ -302,16 +302,34 @@ func RunConformance(t *testing.T, open openFunc, reopen openFunc) {
 
 	t.Run("cancelled_before_start", func(t *testing.T) {
 		b := f(t)
+		if err := b.CreateIfAbsent(ctx, "c", []byte("v")); err != nil {
+			t.Fatal(err)
+		}
+		cur, err := b.Read(ctx, "c")
+		if err != nil {
+			t.Fatal(err)
+		}
 		cctx, cancel := context.WithCancel(ctx)
 		cancel()
-		if err := b.CreateIfAbsent(cctx, "c", []byte("v")); !errors.Is(err, ErrDenied) {
+		if err := b.CreateIfAbsent(cctx, "canc", []byte("v")); !errors.Is(err, ErrDenied) {
 			t.Fatalf("cancelled create = %v, want ErrDenied", err)
 		}
-		if _, err := b.Read(cctx, "c"); !errors.Is(err, ErrDenied) {
+		if _, err := b.Read(cctx, "canc"); !errors.Is(err, ErrDenied) {
 			t.Fatalf("cancelled read = %v, want ErrDenied", err)
 		}
-		if _, err := b.Read(ctx, "c"); !errors.Is(err, ErrNotFound) {
+		// The caller's cancellation takes precedence over the expected
+		// revision's shape: a cancelled call is ErrDenied even when the
+		// revision is zero, oversize or not a valid revision for the driver.
+		for _, expected := range []Revision{"1", "", Revision(strings.Repeat("r", MaxRevisionSize+1))} {
+			if err := b.ReplaceIfVersion(cctx, "c", expected, []byte("v2")); !errors.Is(err, ErrDenied) {
+				t.Fatalf("cancelled replace with expected %q = %v, want ErrDenied", expected, err)
+			}
+		}
+		if _, err := b.Read(ctx, "canc"); !errors.Is(err, ErrNotFound) {
 			t.Fatal("cancelled create wrote state")
+		}
+		if got, err := b.Read(ctx, "c"); err != nil || string(got.Bytes) != "v" || got.Revision != cur.Revision {
+			t.Fatal("cancelled replace changed the stored version")
 		}
 	})
 
@@ -325,6 +343,13 @@ func RunConformance(t *testing.T, open openFunc, reopen openFunc) {
 
 	t.Run("close", func(t *testing.T) {
 		b := open(t)
+		if err := b.CreateIfAbsent(ctx, "before", []byte("v")); err != nil {
+			t.Fatal(err)
+		}
+		cur, err := b.Read(ctx, "before")
+		if err != nil {
+			t.Fatal(err)
+		}
 		if err := b.Close(); err != nil {
 			t.Fatal(err)
 		}
@@ -339,6 +364,14 @@ func RunConformance(t *testing.T, open openFunc, reopen openFunc) {
 		}
 		if err := b.ReplaceIfVersion(ctx, "after", Revision("1"), []byte("v")); !errors.Is(err, ErrDenied) {
 			t.Fatalf("replace after close = %v, want ErrDenied", err)
+		}
+		// Close takes precedence over the expected revision's shape: a
+		// committed revision, zero, oversize and a malformed non-zero one are
+		// all ErrDenied once the backend is closed.
+		for _, expected := range []Revision{cur.Revision, "", Revision(strings.Repeat("r", MaxRevisionSize+1)), Revision("not-a-revision")} {
+			if err := b.ReplaceIfVersion(ctx, "before", expected, []byte("v2")); !errors.Is(err, ErrDenied) {
+				t.Fatalf("closed replace with expected %q = %v, want ErrDenied", expected, err)
+			}
 		}
 		if _, err := b.List(ctx); !errors.Is(err, ErrDenied) {
 			t.Fatalf("list after close = %v, want ErrDenied", err)
