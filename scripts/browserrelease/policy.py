@@ -43,8 +43,8 @@ _NATIVE_PERMISSIONS = frozenset(
     {"activeTab", "scripting", "nativeMessaging", "storage"}
 )
 EXPECTED_PERMISSIONS = {
-    "chromium": _NATIVE_PERMISSIONS | {"contextMenus"},
-    "firefox": _NATIVE_PERMISSIONS,
+    "chromium": _NATIVE_PERMISSIONS | {"contextMenus", "idle", "notifications"},
+    "firefox": _NATIVE_PERMISSIONS | {"idle", "notifications"},
     "safari": _NATIVE_PERMISSIONS,
 }
 COMMON_TOP_LEVEL = {
