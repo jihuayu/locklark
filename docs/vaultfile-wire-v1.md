@@ -158,6 +158,102 @@ this one value:
 - the next policy's `prev_policy_digest` is `policy_digest` of its
   immediate predecessor.
 
+## Set-like arrays
+
+Seven arrays in a v1 file are semantically sets. Each has exactly one accepted
+wire order; an out-of-order array is never accepted as a second representation
+of the same set:
+
+| Array                                 | Ordered by       | Array itself                                 |
+| ------------------------------------- | ---------------- | -------------------------------------------- |
+| file `signed_policy_proofs`           | `policy.policy_seq` | old to new (oldest first)                 |
+| policy `owner_root.owners`            | `principal_id`   | `{Principal}`                                |
+| policy `readers`, `writers`, `admins`, `owners` | `principal_id` | `{Member}`, each array separately |
+| policy `admin_delegations`            | `delegation_id`  | `{AdminDelegation}`                          |
+| policy `devices`                      | `device_id`      | `{Device}`                                   |
+| file `vuk_device_slots`               | `device_id`      | `{DeviceSlot}`                               |
+
+`signed_policy_proofs` is ordered by its numeric, non-negative
+`policy.policy_seq`, oldest first. Equal `policy_seq` values are rejected, so no
+two proofs carry the same sequence and the current policy is the last proof.
+Every other array above is ordered by its identifier as a string.
+
+Identifier comparison is bytewise over the raw ASCII bytes of the identifier,
+case-sensitive, with no case folding, no Unicode normalization, no locale rule
+and no numeric interpretation: `device-10` sorts before `device-2` because
+`1` (0x31) is less than `2` (0x32), and `deleg-10` sorts before `deleg-2`.
+Every ordinary identifier is already lower-case ASCII
+(see [Identifiers](#identifiers)), so bytewise ASCII order is also plain
+lexicographic order.
+
+Duplicates are rejected by the same strict-order check, not by a separate
+key-uniqueness rule: a repeated identifier or `policy_seq` is not strictly
+greater than its predecessor. The comparison covers the whole array: element
+0 has nothing to compare against, and element `i` (`i` ≥ 1) is accepted only
+when its key is strictly greater than element `i-1`'s. The first element that
+is not strictly greater (a decrease or an equal key) is reported as
+`unsorted_collection`, with a path naming that element by its zero-based
+index:
+
+- `signed_policy_proofs[i].policy.policy_seq`;
+- `owner_root.owners[i]`, `readers[i]`, `writers[i]`, `admins[i]`,
+  `owners[i]`, `admin_delegations[i]`, `devices[i]`;
+- `vuk_device_slots[i]`.
+
+The order check runs before the identifier-grammar check of the same array:
+an identifier that is out of order is reported as `unsorted_collection` even
+if it is also malformed.
+
+Neither the encoder nor the decoder sorts. `EncodeFile`,
+`EncodePolicyDocument`, `PolicyDigest`, `SealFile`, `ValidateFile` and
+`ParseFile` all reject an out-of-order array with `unsorted_collection`; input
+that is signed, digested or stored must already carry the one accepted order.
+Moving, inserting or swapping elements changes the canonical bytes and
+therefore the revision id and policy digest, so such a change is a new value
+that must be resealed, never an in-place rewrite.
+
+## Identifiers
+
+An **identifier** in v1 is an opaque key for lookup and comparison, not a
+display label. Display labels are separate members (`label`, `scope_note`);
+they are UTF-8 text and obey `MaxLabelLength` (`scope_note` also
+`MaxRoleScopeLength`) instead of the identifier grammar below. An identifier
+carries no structure a peer may interpret: no numeric meaning, no ordering
+meaning, and no required prefix or format beyond the grammar.
+
+The ordinary textual identifier grammar (the `validID` rule) is:
+
+- non-empty;
+- at most the field's limit in bytes;
+- every byte is one of `a`–`z`, `0`–`9`, `.`, `_`, `:`, `-`.
+
+Uppercase ASCII, non-ASCII, whitespace and every other byte (`+`, `/`, `@`,
+`#`, ...) are rejected. The set is not limited to names: it admits values such
+as `device-1`, `owner-root-01` and `deleg-01`. Each member that uses the
+grammar is bounded by its own limit:
+
+| Member                                              | Limit                     |
+| --------------------------------------------------- | ------------------------- |
+| `vault_id`, `op_id`, `principal_id`, `delegation_id` | `MaxIDLength` (64)        |
+| `device_id`, `author_device_id`, `delegate_device_id`, device-slot `device_id` | `MaxDeviceIDLength` (128) |
+| device `signer_id` in a policy proof or the file `content_signature` | `MaxDeviceIDLength` (128) |
+| `owner_root.key_id`, delegation `granted_by`        | `MaxKeyIDLength` (64)     |
+
+Several wire values that look like identifiers are deliberately **not**
+ordinary identifiers:
+
+- `revision_id` is exactly 64 characters of lowercase hex (a SHA-256 value),
+  not a `validID` value and not sorted anywhere; in a sealed file it is exactly
+  `RevisionID` (see [File states](#file-states)). In the builder draft it is
+  `""`, which is not a wire value.
+- Key fingerprint usages (`/key/device-content-signing`,
+  `/key/device-policy-signing`, `/key/age-x25519`, `/vault-id`,
+  `/content-revision-id`, `/op-id`, `/device-id`) are derived bytes
+  (`DomainSeparated` output) and follow no textual grammar.
+- age recipient strings (`age_encryption_key`, device-slot `recipient`) have
+  their own encoding: they start with `age1`, must not be identity material,
+  parse as an age X25519 recipient, and are bounded by `MaxPublicKeyLength`.
+
 The genesis policy (`policy_seq` 0) has no predecessor, so its
 `prev_policy_digest` is `null`. Any later policy (`policy_seq` > 0) carries
 exactly one 32-byte `prev_policy_digest`. Whether a predecessor digest names an
@@ -300,9 +396,10 @@ The VUK slots are exactly the approved devices whose principal has read
 access (reader, writer, admin or owner): every such device has one slot in the
 set and no other device has any, so no device without a read role is wrapped
 the VUK and no read-capable device is left without it. A slot must name a
-policy device and carry that device's age recipient. Slot position is not a
-rule: moving a slot changes the revision input and therefore the revision id,
-so a file is resealed after reordering.
+policy device and carry that device's age recipient. Slots are ordered strictly
+ascending by `device_id` (see [Set-like arrays](#set-like-arrays)); there is no
+other slot order. Moving a slot changes the revision input and therefore the
+revision id, so a file is resealed after reordering.
 
 ## Validation scope
 
