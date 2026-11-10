@@ -194,11 +194,21 @@ func validItems(items []Item, size int) bool {
 		if !validCreditCard(it.CreditCard) || !validIdentity(it.Identity) {
 			return false
 		}
+		for _, s := range creditCardFieldValues(it.CreditCard) {
+			if !charge(len(s)) {
+				return false
+			}
+		}
+		for _, s := range identityFieldValues(it.Identity) {
+			if !charge(len(s)) {
+				return false
+			}
+		}
 		if len(it.History) > 100 {
 			return false
 		}
 		for _, h := range it.History {
-			if h.Timestamp < 0 || !xmlText(h.Action) || len(h.Action) > 64 || !utf8.ValidString(h.Password) || !utf8.ValidString(h.Title) || !utf8.ValidString(h.Username) || !utf8.ValidString(h.Notes) {
+			if h.Timestamp < 0 || !xmlText(h.Action) || len(h.Action) > 64 || !xmlText(h.Password) || !xmlText(h.Title) || !xmlText(h.Username) || !xmlText(h.Notes) {
 				return false
 			}
 			if len(h.Sections) > 0 && !validSections(h.Sections) {
@@ -208,8 +218,11 @@ func validItems(items []Item, size int) bool {
 				return false
 			}
 			for _, s := range h.Sections {
+				if !charge(len(s.ID) + len(s.Title)) {
+					return false
+				}
 				for _, f := range s.Fields {
-					if !charge(len(f.Value)) {
+					if !charge(len(f.ID) + len(f.Label) + len(f.Value) + len(f.Purpose)) {
 						return false
 					}
 				}
