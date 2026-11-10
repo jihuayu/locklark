@@ -785,6 +785,29 @@ func sealTwoProof(t *testing.T, f *File, old, cur *Policy) *File {
 	return f
 }
 
+// futurePolicyFile returns f whose highest proof (cur, policy_seq 7) is
+// followed by a well-formed newer policy proof: a copy of cur renumbered to cur.PolicySeq+1, chaining prev_policy_digest to cur's digest.
+// The header still selects cur, so the list carries a later policy than the
+// one it names. f is not resealed; callers bind the revision with
+// sealNegativeFixture.
+func futurePolicyFile(t *testing.T) (*File, *Policy) {
+	t.Helper()
+	f := twoProofFile(t)
+	f.Header.RevisionID = ""
+	cur := &f.SignedPolicyProofs[1].Policy
+	future := clonePolicy(cur)
+	future.PolicySeq = cur.PolicySeq + 1
+	future.PrevPolicyDigest = bytes.Clone(PolicyDigest(cur))
+	if err := ValidatePolicy(future); err != nil {
+		t.Fatalf("fixture future policy is not well-formed: %v", err)
+	}
+	f.SignedPolicyProofs = append(f.SignedPolicyProofs, SignedPolicy{
+		Document: docFor(future), Policy: *future,
+		SignerID: "owner-root-01", Alg: PolicySigAlgEd25519, Sig: pf(0x45, 64),
+	})
+	return f, future
+}
+
 // modifyCurrent returns a mutable copy of the current (second) proof policy
 // of a twoProofFile.
 func modifyCurrent(f *File) *Policy {
@@ -904,5 +927,61 @@ func TestCurrentPolicyNotFirstProof(t *testing.T) {
 	reseal(t, f)
 	if _, err := EncodeFile(f); err != nil {
 		t.Fatalf("writer-authored two-proof file rejected: %v", err)
+	}
+}
+
+// TestCurrentPolicyProofLast is the regression for a proof list that is not
+// old-to-current: the current policy is the final proof and no proof may carry
+// a policy newer than the header's selected one. A well-formed future policy
+// proof appended after the current proof fails as a header mismatch, the same
+// as when the current policy is missing altogether; the earlier proof is never
+// selected as current instead.
+func TestCurrentPolicyProofLast(t *testing.T) {
+	// A later policy after the current one is rejected: the highest proof is
+	// above header policy_seq. Encode validates first, so this entry point
+	// reports it before the stale revision id is reached.
+	f, future := futurePolicyFile(t)
+	if len(f.SignedPolicyProofs) != 3 || future.PolicySeq <= f.Header.PolicySeq {
+		t.Fatal("fixture does not carry a future policy after the current one")
+	}
+	_, err := EncodeFile(f)
+	wantCode(t, err, CodeHeaderMismatch)
+	// On a well-formed (fresh) revision id, ValidateFile and the wire decoder
+	// report the same code.
+	sealNegativeFixture(t, f)
+	wantCode(t, ValidateFile(f), CodeHeaderMismatch)
+	_, err = ParseFile([]byte(mustEncodeWith(t, f)))
+	wantCode(t, err, CodeHeaderMismatch)
+	_, err = RevisionID(f)
+	wantCode(t, err, CodeHeaderMismatch)
+
+	// The same future proof alone, with the header selecting it, is a valid
+	// file: the rejection above is the order of current and future proofs.
+	f, future = futurePolicyFile(t)
+	f.SignedPolicyProofs = f.SignedPolicyProofs[1:]
+	f.Header.PolicySeq = future.PolicySeq
+	f.Header.PolicyDigest = policyDigest(&f.SignedPolicyProofs[1])
+	reseal(t, f)
+	if _, err := EncodeFile(f); err != nil {
+		t.Fatalf("file with the future proof as current rejected: %v", err)
+	}
+
+	// Only a proof below the header seq: the current policy is missing, and
+	// no earlier proof is substituted for it.
+	f = twoProofFile(t)
+	f.SignedPolicyProofs = f.SignedPolicyProofs[:1]
+	f.Header.RevisionID = ""
+	_, err = EncodeFile(f)
+	wantCode(t, err, CodeHeaderMismatch)
+	sealNegativeFixture(t, f)
+	wantCode(t, ValidateFile(f), CodeHeaderMismatch)
+
+	// Old-then-current, current last, stays valid.
+	f = twoProofFile(t)
+	if f.SignedPolicyProofs[len(f.SignedPolicyProofs)-1].Policy.PolicySeq != f.Header.PolicySeq {
+		t.Fatal("fixture current policy is not the final proof")
+	}
+	if _, err := EncodeFile(f); err != nil {
+		t.Fatalf("current-last proofs rejected: %v", err)
 	}
 }

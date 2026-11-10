@@ -34,8 +34,9 @@ func ValidateFile(f *File) error {
 // validateStructure checks every rule of ValidateFile except that f is sealed.
 // It returns the current policy: the one proof whose policy_seq is the header
 // policy_seq, which every role and slot check binds to. Proofs are held in
-// strictly increasing policy_seq order (checkPolicyProofOrder): the current
-// policy follows any older proof and is never the leading proof of two.
+// strictly increasing policy_seq order (checkPolicyProofOrder) and the list
+// is old-to-current: the current policy is the final proof, and no proof may
+// carry a policy newer than the one the header selects.
 func validateStructure(f *File) (*Policy, error) {
 	if f == nil {
 		return nil, Err("", CodeInvalidValue)
@@ -74,6 +75,16 @@ func validateStructure(f *File) (*Policy, error) {
 	// Exactly one proof must carry the current policy (header policy_seq).
 	// Its digest is PolicyDigest over the carried document bytes; the policy
 	// carries no digest of itself.
+	//
+	// The current policy is the final proof: proofs are strictly increasing,
+	// so the last one holds the highest sequence. A final proof below the
+	// header seq means the selected policy is missing, and a highest proof
+	// above it means a later policy is carried; an earlier proof is never
+	// selected as current instead.
+	last := &f.SignedPolicyProofs[len(f.SignedPolicyProofs)-1]
+	if last.Policy.PolicySeq != h.PolicySeq {
+		return nil, Err("", CodeHeaderMismatch)
+	}
 	var current *Policy
 	for i := range f.SignedPolicyProofs {
 		sp := &f.SignedPolicyProofs[i]
