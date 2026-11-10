@@ -606,7 +606,6 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		if e != nil {
 			return e
 		}
-		defer auth.clear()
 		b := tx.Bucket(bucket)
 		slot, opened, i, s := auth.slot, auth.opened, auth.identity, auth.snapshot
 		defer func() {
@@ -615,6 +614,13 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			}
 		}()
 		tip, rows, chains, items, revisions, vaults := auth.tip, auth.rows, auth.chains, auth.items, auth.revisions, auth.vaults
+		// items is reassigned and appended below; some appends reallocate, so
+		// the cleanup must cover the final local slice (in addition to the
+		// origin root inside auth.clear) on every return path.
+		defer func() {
+			clearAuthenticatedItems(items)
+			auth.clear()
+		}()
 		outcome := "succeeded"
 		var profile *password.Profile
 		if action == referenceDisclosureAction {
@@ -766,6 +772,9 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			}
 		case importPlanAction, importAction:
 			mapped, err := option.migration.mapSource(i.AuditEncryption)
+			// The mapped logins own separate byte buffers and are only passed to
+			// seal; zero them on every path, including plans that persist nothing.
+			defer clearAuthenticatedItems(mapped.Items)
 			if err == nil {
 				for _, item := range mapped.Items {
 					if revisions[item.ID] != "" {

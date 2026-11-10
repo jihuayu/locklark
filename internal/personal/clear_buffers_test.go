@@ -3,6 +3,7 @@ package personal
 import (
 	"bytes"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -258,4 +259,102 @@ func TestReadAuthenticatedItemsZeroesDecodedAttachmentBody(t *testing.T) {
 		return
 	}
 	t.Fatal("document item missing from authenticated read")
+}
+
+// Appends that reallocate auth.items leave new structs outside the length that
+// authenticatedState still records; the cleanup bound to the final local slice
+// must zero those buffers too, and the import mapped logins (separate owned
+// buffers passed only to seal) are cleared by their own defer.
+func TestAppendReallocationAndMappedLoginsAreCleared(t *testing.T) {
+	existing := []byte("reopened-existing-bytes")
+	decrypted := []vault.Item{{ID: "item-one", Attachments: []vault.AttachmentMeta{{Content: existing}}}}
+	auth := &authenticatedState{items: decrypted, origin: append([]vault.Item(nil), decrypted...)}
+	items := decrypted[:1:1] // force the next append to allocate
+	var appended [][]byte
+	for n := 0; n < 3; n++ {
+		next := vault.Item{ID: "appended", SSHSeed: []byte{byte('a' + n)}, Attachments: []vault.AttachmentMeta{{Content: []byte("reopened-new-body")}}}
+		items = append(items, next)
+		appended = append(appended, next.SSHSeed, next.Attachments[0].Content)
+	}
+	if len(auth.items) != 1 || cap(items) == len(decrypted) {
+		t.Fatalf("test did not grow past auth.items: auth=%d final=%d", len(auth.items), len(items))
+	}
+	mapped := []vault.Item{{ImportSource: []byte("reopened-mapped-source")}}
+	clearAuthenticatedItems(items)
+	clearAuthenticatedItems(mapped)
+	auth.clear()
+
+	for _, value := range append(append(appended, mapped[0].ImportSource), existing) {
+		if !bytes.Equal(value, make([]byte, len(value))) {
+			t.Fatalf("reallocated, mapped or origin buffer retained %q", value)
+		}
+	}
+}
+
+// AddItem appends the new item to the authenticated items slice; the persisted
+// copy must reopen complete from the encrypted snapshot.
+func TestAddItemReopenKeepsNewValue(t *testing.T) {
+	s, path, key := v2Session(t)
+	item := v2LoginItem()
+	item.Title = "Synthetic appended login"
+	if _, _, err := s.AddItem(item, v2Gate(t, s)); err != nil {
+		t.Fatalf("add item failed: %v", err)
+	}
+	reopened, err := UnlockSession(path, []byte("v2-fixture"), key, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Lock()
+	items, _, err := reopened.ReadAuthenticatedItems(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Title != "Synthetic appended login" || items[0].Password != "old-password" || items[0].OTP != v2OTPConfig || len(items[0].Sections) != 1 || len(items[0].Sections[0].Fields) != 4 {
+		t.Fatalf("appended item did not reopen intact: %+v", items)
+	}
+}
+
+// The import plan and import both map the same source into separately owned
+// items; neither may leave decrypted mapped buffers behind, and the persisted
+// logins must reopen complete.
+func TestImportPlanAndImportReopenIntact(t *testing.T) {
+	s, path, key := v2Session(t)
+	source := filepath.Join(t.TempDir(), "full.1pux")
+	if err := os.WriteFile(source, v2ImportArchive(t), 0600); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := s.PlanImportV2(source)
+	if err != nil || plan.Report.SourceDigest == "" {
+		t.Fatalf("import plan failed: %+v %v", plan, err)
+	}
+	if items, _, err := s.ReadAuthenticatedItems(false); err != nil || len(items) != 0 {
+		t.Fatalf("plan mutated the vault: %d %v", len(items), err)
+	}
+	if _, err := s.ImportV2(source, plan.Report.SourceDigest); err != nil {
+		t.Fatalf("import failed: %v", err)
+	}
+	if _, err := s.ImportV2(source, plan.Report.SourceDigest); !errors.Is(err, ErrImportDuplicate) {
+		t.Fatalf("duplicate import accepted: %v", err)
+	}
+	reopened, err := UnlockSession(path, []byte("v2-fixture"), key, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Lock()
+	items, _, err := reopened.ReadAuthenticatedItems(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var login, document bool
+	for _, it := range items {
+		switch it.Kind {
+		case "login":
+			login = it.Title == "Imported Login" && it.Username == "private-user" && it.Password == "private-password" && it.OTP == v2OTPConfig && it.Notes == "imported notes"
+		case "document":
+			document = len(it.Attachments) == 1 && it.Attachments[0].FileName == "report.txt"
+		}
+	}
+	if len(items) != 3 || !login || !document {
+		t.Fatalf("imported content lost after reopen: %d login=%v document=%v", len(items), login, document)
+	}
 }
