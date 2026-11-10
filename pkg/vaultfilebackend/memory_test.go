@@ -249,16 +249,17 @@ func TestMemoryCancelledAfterLockIsDenied(t *testing.T) {
 	m := NewMemory()
 	m.values["n"] = memoryVersion{bytes: []byte("v1"), revision: Revision("seed")}
 
-	// Pre-lock check is call 1; the check after lock is call 2.
-	ctx := idleHookContext(2)
+	// Pre-lock check is call 1, memoryLock.lock's own check is call 2, and the
+	// check after lock acquisition is call 3.
+	ctx := idleHookContext(3)
 	if _, err := m.Read(ctx, "n"); !errors.Is(err, ErrDenied) || !errors.Is(err, context.Canceled) {
 		t.Fatalf("read = %v, want ErrDenied wrapping context.Canceled", err)
 	}
-	ctx = idleHookContext(2)
+	ctx = idleHookContext(3)
 	if err := m.CreateIfAbsent(ctx, "n2", []byte("new")); !errors.Is(err, ErrDenied) || !errors.Is(err, context.Canceled) {
 		t.Fatalf("create = %v, want ErrDenied wrapping context.Canceled", err)
 	}
-	ctx = idleHookContext(2)
+	ctx = idleHookContext(3)
 	if err := m.ReplaceIfVersion(ctx, "n", Revision("seed"), []byte("v2")); !errors.Is(err, ErrDenied) || !errors.Is(err, context.Canceled) {
 		t.Fatalf("replace = %v, want ErrDenied wrapping context.Canceled", err)
 	}
@@ -272,14 +273,67 @@ func TestMemoryCancelledAfterLockIsDenied(t *testing.T) {
 	}
 }
 
+// TestMemoryReadMissingKeyCancelledAfterLock covers the post-lock check on
+// Read's missing-name path: a cancelled caller must see the cancellation, not
+// ErrNotFound, and must not mutate state.
+func TestMemoryReadMissingKeyCancelledAfterLock(t *testing.T) {
+	m := NewMemory()
+	// Read checks Err before locking (1), memoryLock.lock checks it before
+	// waiting (2), and Read checks again right after locking (3). Cancelling at
+	// call 3 proves the named post-lock phase ran.
+	ctx := idleHookContext(3)
+	if _, err := m.Read(ctx, "missing"); !errors.Is(err, ErrDenied) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("read missing = %v, want ErrDenied wrapping context.Canceled", err)
+	}
+	if got := ctx.calls.Load(); got != 3 {
+		t.Fatalf("read made %d Err calls, want 3 (post-lock)", got)
+	}
+	if m.seq != 0 {
+		t.Fatalf("cancelled read advanced seq to %d", m.seq)
+	}
+	if m.closed {
+		t.Fatal("cancelled read closed the backend")
+	}
+	if len(m.values) != 0 {
+		t.Fatalf("cancelled read changed state: %v", m.values)
+	}
+}
+
+// TestMemoryListCancelledAfterLock covers the post-lock check on List's
+// unsupported path: a cancelled caller must see the cancellation, not
+// ErrUnsupported, and must not mutate state.
+func TestMemoryListCancelledAfterLock(t *testing.T) {
+	m := NewMemory()
+	// List has no pre-lock check of its own; memoryLock.lock checks Err before
+	// waiting (1) and List checks again right after locking (2). Cancelling at
+	// call 2 proves the named post-lock phase ran.
+	ctx := idleHookContext(2)
+	if _, err := m.List(ctx); !errors.Is(err, ErrDenied) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("list = %v, want ErrDenied wrapping context.Canceled", err)
+	}
+	if got := ctx.calls.Load(); got != 2 {
+		t.Fatalf("list made %d Err calls, want 2 (post-lock)", got)
+	}
+	if m.seq != 0 {
+		t.Fatalf("cancelled list advanced seq to %d", m.seq)
+	}
+	if m.closed {
+		t.Fatal("cancelled list closed the backend")
+	}
+	if len(m.values) != 0 {
+		t.Fatalf("cancelled list changed state: %v", m.values)
+	}
+}
+
 // TestMemoryReadCancelledAfterCopyIsDenied covers cancellation after the
 // stored bytes were copied: Read must return nothing.
 func TestMemoryReadCancelledAfterCopyIsDenied(t *testing.T) {
 	m := NewMemory()
 	m.values["n"] = memoryVersion{bytes: []byte("v1"), revision: Revision("seed")}
 
-	// Pre-lock check 1, post-lock check 2, post-copy check 3.
-	ctx := idleHookContext(3)
+	// Pre-lock check 1, memoryLock.lock's check 2, post-lock check 3,
+	// post-copy check 4.
+	ctx := idleHookContext(4)
 	got, err := m.Read(ctx, "n")
 	if !errors.Is(err, ErrDenied) || !errors.Is(err, context.Canceled) {
 		t.Fatalf("read = %v, want ErrDenied wrapping context.Canceled", err)
@@ -299,12 +353,14 @@ func TestMemoryWriteCancelledAfterCopyNotCommitted(t *testing.T) {
 		begin int32
 		call  func(ctx context.Context, m *Memory) error
 	}{
-		// Create: pre-lock 1, post-lock 2, post-copy 3.
-		{"create", 3, func(ctx context.Context, m *Memory) error {
+		// Create: pre-lock 1, memoryLock.lock's check 2, post-lock 3,
+		// commit post-copy 4.
+		{"create", 4, func(ctx context.Context, m *Memory) error {
 			return m.CreateIfAbsent(ctx, "new", []byte("new"))
 		}},
-		// Replace: pre-lock 1, post-lock 2, post-copy 3.
-		{"replace", 3, func(ctx context.Context, m *Memory) error {
+		// Replace: pre-lock 1, memoryLock.lock's check 2, post-lock 3,
+		// commit post-copy 4.
+		{"replace", 4, func(ctx context.Context, m *Memory) error {
 			return m.ReplaceIfVersion(ctx, "n", Revision("seed"), []byte("v2"))
 		}},
 	} {

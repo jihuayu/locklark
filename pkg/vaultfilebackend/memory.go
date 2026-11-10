@@ -55,7 +55,11 @@ func (m *Memory) Read(ctx context.Context, name string) (ReadResult, error) {
 	}
 	defer m.mu.unlock()
 	// The fast path in lock can win the lock after ctx was already cancelled:
-	// re-check so a cancelled caller never observes stored state.
+	// re-check so a cancelled caller never observes stored state, including the
+	// ErrNotFound path for a missing name.
+	if err := ctx.Err(); err != nil {
+		return ReadResult{}, denied(err)
+	}
 	if m.closed {
 		return ReadResult{}, denied(nil)
 	}
@@ -122,6 +126,12 @@ func (m *Memory) List(ctx context.Context) ([]string, error) {
 		return nil, denied(err)
 	}
 	defer m.mu.unlock()
+	// The fast path in lock can win the lock after ctx was already cancelled:
+	// re-check so a cancelled caller sees the cancellation rather than
+	// ErrUnsupported.
+	if err := ctx.Err(); err != nil {
+		return nil, denied(err)
+	}
 	if m.closed {
 		return nil, denied(nil)
 	}
