@@ -323,6 +323,69 @@ func TestBrokerCLIRunApprovalAndFallback(t *testing.T) {
 	}
 }
 
+func TestBrokerCLIRunClientCancelCancelsApproval(t *testing.T) {
+	endpoint := brokerTestSocket(t)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	canceled := make(chan error)
+	broker := NewBroker(BrokerCallbacks{
+		// A pending native approval waits on its context; the release also
+		// lets it finish if cancellation never arrives.
+		HandleCLIRun: func(ctx context.Context, peer Peer, req CLIRunBrokerRequest) (BrokerCLIResponse, error) {
+			close(entered)
+			select {
+			case <-ctx.Done():
+			case <-release:
+			}
+			canceled <- ctx.Err()
+			return BrokerCLIResponse{}, ctx.Err()
+		},
+	})
+	if e := broker.Start(endpoint); e != nil {
+		t.Fatal(e)
+	}
+	defer broker.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, e := RequestCLIRun(ctx, cliRunFixtureRequest())
+		result <- e
+	}()
+	t.Cleanup(func() { close(release) })
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("HandleCLIRun did not start")
+	}
+	cancel()
+	select {
+	case e := <-canceled:
+		if !errors.Is(e, context.Canceled) {
+			t.Fatalf("callback context after client cancellation: %v", e)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("client cancellation did not cancel the callback context")
+	}
+	select {
+	case e := <-result:
+		if !errors.Is(e, context.Canceled) {
+			t.Fatalf("client return after cancellation: %v", e)
+		}
+		if errors.Is(e, ErrBrokerUnavailable) {
+			t.Fatal("cancellation must never be classified as fallback-eligible")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RequestCLIRun did not return after cancellation")
+	}
+	// Close the broker on failure paths too; closing twice is a no-op.
+	if e := broker.Close(); e != nil {
+		t.Fatal(e)
+	}
+}
+
 // cliRunFixtureRequest is a valid CLI-run request for outcome classification.
 func cliRunFixtureRequest() CLIRunBrokerRequest {
 	return CLIRunBrokerRequest{

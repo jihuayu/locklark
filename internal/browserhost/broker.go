@@ -353,24 +353,71 @@ func (b *Broker) serveCLIRun(conn net.Conn, peer Peer) {
 	}
 	resp := CLIRunBrokerResponse{V: 1}
 	if b.callbacks.HandleCLIRun != nil {
-		out, err := b.callbacks.HandleCLIRun(context.Background(), peer, req)
-		if err != nil {
-			if errors.Is(err, ErrBrokerUnavailable) {
-				resp.Error = "unavailable"
-			} else {
-				resp.Error = "refused"
-			}
-		} else {
-			resp.Values = out.Values
-		}
+		// The request frame is fully read and validated; the callback still
+		// runs with an OS-authenticated peer. Monitor the now-idle connection
+		// while it waits: a client that closes, or sends an unexpected extra
+		// byte, cancels the callback instead of leaving a native approval
+		// prompt pending after the CLI exited. Context values stay nil; only
+		// cancellation is propagated.
+		b.handleCLIRunConn(conn, peer, req, &resp)
 	} else {
 		resp.Error = "unavailable"
+		writeCLIResponse(conn, resp)
 	}
-	writeCLIResponse(conn, resp)
 	for k := range resp.Values {
 		resp.Values[k] = ""
 	}
 }
+
+// handleCLIRunConn runs HandleCLIRun with a cancelable context, writes the
+// single classified response, and only then closes conn. The close is what
+// releases the idle connection monitor, which is never awaited here because
+// it cannot write: a close after the response, while the monitor goroutine only
+// reads, is safe. Before the close, a client that closed (EOF) or sent an
+// unexpected extra byte cancels the callback, so a pending native approval
+// stops instead of waiting after the CLI has exited.
+func (b *Broker) handleCLIRunConn(conn net.Conn, peer Peer, req CLIRunBrokerRequest, resp *CLIRunBrokerResponse) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stop := make(chan struct{})
+	go watchCLIRunConn(conn, cancel, stop)
+	out, err := b.callbacks.HandleCLIRun(ctx, peer, req)
+	switch {
+	case err == nil:
+		resp.Values = out.Values
+	case errors.Is(err, ErrBrokerUnavailable):
+		resp.Error = "unavailable"
+	default:
+		resp.Error = "refused"
+	}
+	writeCLIResponse(conn, *resp)
+	// Closing unblocks the monitor if it is still reading; the close of stop
+	// tells it a lost monitor is expected rather than a client cancellation.
+	close(stop)
+	_ = conn.Close()
+}
+
+// watchCLIRunConn watches an idle CLI-run connection while a callback is
+// pending and calls cancel on EOF, on any unexpected inbound byte, or on any
+// non-timeout read failure. A silent client is not a cancellation; the read
+// deadline bounds each idle read, and the channel closed by stop releases a
+// monitor that outlived the connection handler. The watcher never writes.
+func watchCLIRunConn(conn net.Conn, cancel context.CancelFunc, stop <-chan struct{}) {
+	_ = conn.SetReadDeadline(time.Now().Add(cliRunMonitorLifetime))
+	var in [1]byte
+	_, e := conn.Read(in[:])
+	if errors.Is(e, os.ErrDeadlineExceeded) {
+		<-stop
+		return
+	}
+	cancel()
+}
+
+// cliRunMonitorLifetime bounds one idle read of a CLI-run connection monitor,
+// so the read deadline never outlives the watch indefinitely. Reaching the
+// bound does not cancel the callback; the monitor then waits for the handler
+// to close the connection.
+const cliRunMonitorLifetime = time.Minute
 
 func writeCLIResponse(conn net.Conn, resp CLIRunBrokerResponse) {
 	raw, e := json.Marshal(resp)
