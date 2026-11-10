@@ -2,6 +2,8 @@
 
 # Locklark 开发进度
 
+2026-11-10（香港）：浏览器扩展并入主干的新版 UI 样式，并补齐键盘与焦点交互：金库列表 `↑`/`↓`/`Home`/`End`、详情返回焦点还原、`/` 聚焦搜索、回收站两步确认、保存横幅聚焦标题并支持 `Esc`/`Enter`、页面内面板 `Home`/`End`、切换筛选的“正在读取”与 `aria-busy`、`prefers-reduced-motion`。用真实 Chromium 构建渲染了金库/已归档/详情/历史四个状态并据此修正收藏星标错位和已归档筛选的旧数据显示。扩展 443 项 Node 测试通过；没有真实原生宿主或与 1Password 并排验收。见[交互对齐记录](browser-interaction-parity.md)。
+
 2026-11-10（香港）：新增原生能力 `history-v1`：浏览器可读取条目历史版本的元数据（时间、类型、是否含密码）并按索引恢复，旧密码与隐藏字段永不下发；恢复复用原生 `item.history.restore` 与精确 revision 校验。身份提供商（Google/Microsoft/Apple/GitHub/Okta）只做保存横幅上的展示识别，不接入 OAuth。扩展 Node 测试 439 项、Go 历史契约 4 项通过；未在真实浏览器或桌面会话验证恢复流程。见[历史与提供商验证](browser-history-and-provider-validation.md)。
 
 2026-11-10（香港）：按[浏览器缺口盘点](browser-native-gap-inventory.md)落地第一批外围能力：弹窗已归档筛选与归档/取消归档、添加当前网站并填充（仅 URLs 的原生编辑）、显式打开内联菜单时聚焦首项、仅当前站点的 favicon、诊断报告导出、Open & Fill 优先登录页路径；并新增 `idle` 与 `notifications` 权限，实现默认关闭的空闲自动锁定与保存/锁定系统通知。扩展 Node 测试 434 项通过；Chromium/Firefox 权限白名单、打包校验（未签名 ZIP）通过。未在真实浏览器验证自动锁定触发时机与通知展示，权限变更需要重新过商店审核。上一批二维码捕获与粘贴保护仍在。

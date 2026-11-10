@@ -123,6 +123,11 @@ worker or stored. See
 [the 1Password beta parity note](../docs/browser-1password-beta-parity.md) for
 the reference behaviour, decision table and limits.
 
+Keyboard: in the vault list use Up/Down/Home/End and Enter; Escape returns from a
+detail view to the originating row; press `/` to focus search. The in-page menu
+supports Up/Down/Home/End, and Escape closes it and returns focus to the field.
+The save banner focuses its title, Escape declines, and Enter saves.
+
 The vault view also exposes an **archived** filter and archive/unarchive
 actions, and an item can add the current site to its saved URLs (a URLs-only
 native edit) before filling. Rich icons are requested only from the current

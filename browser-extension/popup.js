@@ -1071,6 +1071,17 @@
     // Passkey rows are already filtered by the native host before its 500-row
     // cap; filtering this truncated page again would hide valid matches.
     if (activeFilter === "passkeys") return items;
+    if (activeFilter === "archived") {
+      const archived = items.filter(
+        (item) => String(item.state || "active") === "archived",
+      );
+      if (!core) return archived;
+      return core.filterVaultItems(archived, {
+        query: searchQuery,
+        category: "all",
+        origin: lastState?.origin || "",
+      });
+    }
     if (!core) return items;
     return core.filterVaultItems(items, {
       query: searchQuery,
@@ -1203,7 +1214,7 @@
         const star = document.createElement("span");
         star.className = "favorite-mark";
         star.textContent = "★";
-        row.prepend(star);
+        title.prepend?.(star);
       }
       row.addEventListener("click", () => void openDetail(item));
       list.append(row);
@@ -1297,6 +1308,8 @@
     const generation = ++vaultQueryGeneration;
     const filters = vaultFilterState();
     if (els?.searchInput) els.searchInput.disabled = true;
+    if (els?.vaultList) els.vaultList.setAttribute("aria-busy", "true");
+    if (els?.vaultCount && !silent) els.vaultCount.textContent = "正在读取…";
     const isCurrent = () =>
       !popupInactive && lastState?.connected === true &&
       generation === vaultQueryGeneration &&
@@ -1330,6 +1343,7 @@
     } finally {
       if (generation === vaultQueryGeneration) {
         if (els?.searchInput) els.searchInput.disabled = false;
+        if (els?.vaultList) els.vaultList.setAttribute("aria-busy", "false");
         renderLockedView(lastState || {});
       }
     }
@@ -3465,6 +3479,7 @@
   async function loadHistoryVersions() {
     const detail = lastDetail;
     if (!detail || !lastState?.historySupported) return;
+    if (els?.detailHistoryLoad) els.detailHistoryLoad.disabled = true;
     if (els?.detailHistoryStatus)
       els.detailHistoryStatus.textContent = "正在读取…";
     try {
@@ -3476,10 +3491,15 @@
       if (lastDetail !== detail) return;
       if (!reply?.history) throw Error("refused");
       historyEntries = reply.history.entries || [];
+      if (els?.detailHistoryLoad) {
+        els.detailHistoryLoad.disabled = false;
+        els.detailHistoryLoad.textContent = "刷新历史版本";
+      }
       renderHistoryVersions();
     } catch {
+      if (els?.detailHistoryLoad) els.detailHistoryLoad.disabled = false;
       if (els?.detailHistoryStatus)
-        els.detailHistoryStatus.textContent = "无法读取历史版本";
+        els.detailHistoryStatus.textContent = "无法读取历史版本，请重试";
     }
   }
   async function restoreHistoryVersion(index) {
@@ -3592,9 +3612,11 @@
       });
       if (!reply?.itemState) throw Error("refused");
       vaultLoaded = false;
+      vaultReturnFocusId = "";
       wipeSensitiveViews();
       showView("vault");
       await refreshVault(true);
+      restoreVaultFocus();
       toast("条目已移入回收站");
     } catch {
       toast("无法移入回收站");
@@ -3758,6 +3780,7 @@
         // truncated page while the host is still filtering.
         vaultItems = [];
         if (lastState) lastState = { ...lastState, vaultItems: [] };
+        if (els?.vaultCount) els.vaultCount.textContent = "正在读取…";
         renderVaultList();
         void refreshVault(true);
       });
