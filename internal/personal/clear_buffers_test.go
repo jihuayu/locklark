@@ -2,6 +2,8 @@ package personal
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"encoding/pem"
 	"errors"
 	"os"
 	"path/filepath"
@@ -9,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jihuayu/locklark/internal/vault"
+	"golang.org/x/crypto/ssh"
 )
 
 func TestAuthenticatedStateClearZeroesAttachmentAndProvenanceBuffers(t *testing.T) {
@@ -338,6 +341,76 @@ func TestLegacyAddKeepsCallerBuffersAndReopens(t *testing.T) {
 	stored := readStoredItems(t, path, "legacy-fixture", key)
 	if len(stored) != 1 || stored[0].ID != r.id || stored[0].Filename != "body.bin" || !bytes.Equal(stored[0].ImportSource, importSource) || !bytes.Equal(stored[0].Attachment, attachment) || len(stored[0].Attachments) != 1 || !bytes.Equal(stored[0].Attachments[0].Content, extra) {
 		t.Fatalf("added document did not reopen byte-exact: %+v", stored)
+	}
+}
+
+// The ssh generate/import branches must also append an owned clone: the
+// caller's seed stays intact for saveSSHKey's outer defer, while the sealed
+// key reopens byte-exact and stays listed.
+func TestSSHAddKeepsCallerSeedAndReopens(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ssh.ll")
+	key := bytes.Repeat([]byte{43}, 16)
+	if err := Create(path, "ssh-fixture", key); err != nil {
+		t.Fatal(err)
+	}
+	private := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{59}, ed25519.SeedSize))
+	defer clear(private)
+	block, err := ssh.MarshalPrivateKey(private, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := pem.EncodeToMemory(block)
+	public, err := ssh.NewPublicKey(private.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := UnlockSession(path, []byte("ssh-fixture"), key, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Lock()
+	seed := bytes.Repeat([]byte{59}, ed25519.SeedSize)
+	seedRef := append([]byte(nil), seed...)
+	g := v2Gate(t, s)
+	r, err := command(path, "", nil, sshImportAction, vault.Item{Kind: "ssh-key", Title: "Imported key", SSHSeed: seed, SSHPublicKey: public.Marshal()}, nil, commandOption{ssh: &sshStoreRequest{}, unlocked: s, nativeMutation: &nativeMutationRequest{gate: g}})
+	if err != nil || r.id == "" {
+		t.Fatalf("ssh import failed: %+v %v", r, err)
+	}
+	g.Cancel()
+	s.ReleaseMutation(g)
+	if !bytes.Equal(seed, seedRef) {
+		t.Fatal("ssh import modified the caller's seed")
+	}
+	first, err := s.ImportSSHKey("Session import", input, v2Gate(t, s))
+	if err != nil {
+		t.Fatalf("session ssh import failed: %v", err)
+	}
+	rows, err := s.ListSSHKeys()
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("imported keys missing after commit: %+v %v", rows, err)
+	}
+	for _, row := range rows {
+		if row.ID != first.ID && row.ID != r.id {
+			t.Fatalf("unexpected ssh key row: %+v", row)
+		}
+	}
+	reopened, err := UnlockSession(path, []byte("ssh-fixture"), key, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Lock()
+	keys, err := reopened.ListSSHKeys()
+	if err != nil || len(keys) != 2 {
+		t.Fatalf("imported keys did not reopen: %+v %v", keys, err)
+	}
+	stored := readStoredItems(t, path, "ssh-fixture", key)
+	if len(stored) != 2 {
+		t.Fatalf("ssh snapshot lost items: %d", len(stored))
+	}
+	for _, it := range stored {
+		if !bytes.Equal(it.SSHSeed, seedRef) || !bytes.Equal(it.SSHPublicKey, public.Marshal()) {
+			t.Fatalf("imported key did not reopen byte-exact: id=%s", it.ID)
+		}
 	}
 }
 
