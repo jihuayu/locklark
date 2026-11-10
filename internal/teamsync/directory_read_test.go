@@ -74,3 +74,44 @@ func TestRequestProofAnchorRefusalReadsOnce(t *testing.T) {
 		t.Fatalf("refused request read the directory %d times", n)
 	}
 }
+
+// TestRequestProofAnchorSelectsHeadAuthority pins the single-pass proof-anchor
+// semantics: a plain genesis Read succeeds, a genesis proof anchor is proven
+// without widening anything, a non-genesis anchor on the chain is accepted,
+// and an off-chain anchor is refused after exactly one directory read.
+func TestRequestProofAnchorSelectsHeadAuthority(t *testing.T) {
+	f, s := lifecycleFixture(t)
+	counts := countReads(s)
+	unknown := directory.Checkpoint{Scope: f.cfg.Genesis().Scope, Version: 1, Hash: strings.Repeat("00", 32)}
+	serve := func(anchor directory.Checkpoint) (string, error) {
+		q := request{Proof: requestProof{Protocol: protocol, Scope: f.cfg.Genesis().Scope, Action: "read", Kind: "owner",
+			ID: publicKey(f.owner), Nonce: strings.Repeat("e", 64), Anchor: anchor, BodyDigest: digest("payload", nil)}}
+		q.Proof.Signature = ed25519.Sign(f.owner, q.Proof.signingBytes())
+		r := lifecycleRequest(f, nil)
+		r.Body = io.NopCloser(bytes.NewReader(encode(q)))
+		w := newLifecycleWriter()
+		s.ServeHTTP(w, r)
+		var out response
+		if decode(w.body.Bytes(), &out) != nil {
+			t.Fatal("undecodable response")
+		}
+		return out.Status, nil
+	}
+	if view, e := directory.Read(f.path, f.cfg, f.cfg.Genesis()); e != nil || view.Receipt.Checkpoint() != f.first.Checkpoint() {
+		t.Fatal("plain genesis Read failed", e)
+	}
+	for _, anchor := range []directory.Checkpoint{f.cfg.Genesis(), f.first.Checkpoint()} {
+		if status, _ := serve(anchor); status != "current" {
+			t.Fatalf("anchor %v status = %q, want current", anchor.Version, status)
+		}
+		if n := counts.opens.Load(); n != 1 {
+			t.Fatalf("anchor %v read the directory %d times", anchor.Version, n)
+		}
+	}
+	if status, _ := serve(unknown); status != "invalid" {
+		t.Fatalf("off-chain anchor status = %q, want invalid", status)
+	}
+	if n := counts.opens.Load(); n != 1 {
+		t.Fatalf("refused request read the directory %d times", n)
+	}
+}

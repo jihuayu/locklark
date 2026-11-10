@@ -36,6 +36,9 @@ func newHistoryVerifier(c *Config, anchor Checkpoint) (*historyVerifier, error) 
 // This reducer is shared by trusted local reload and untrusted remote history.
 // A valid individual signature never substitutes for transition authorization.
 func (v *historyVerifier) advance(r Receipt) error {
+	if chainAdvanceObserver != nil {
+		chainAdvanceObserver()
+	}
 	if v.current.Version >= maxVersions || v.config.verifyReceipt(r) != nil || r.Proposal.Parent != v.current || v.config.verifyTransition(v.state, r.Proposal) != nil || v.state.advance(r.Proposal) != nil {
 		return ErrInvalid
 	}
@@ -133,12 +136,104 @@ func verifyHistory(c *Config, anchor Checkpoint, h History) (View, int, error) {
 // transition history behind it. It opens the database once and verifies the
 // chain once; the returned history satisfies VerifyHistory(anchor).
 func ReadHistory(path string, c *Config, anchor Checkpoint) (View, History, error) {
-	var h History
-	res, e := readStore(path, c, anchor, &h)
+	res, e := readStore(path, c, anchor, &readRequest{proof: anchor})
+	if e != nil {
+		return View{}, History{}, e
+	}
+	h, e := res.trusted.History()
 	if e != nil {
 		return View{}, History{}, e
 	}
 	return res.view, h, nil
+}
+
+// TrustedRead is the evidence one completed database read produced for the
+// team sync handler: the trusted head, every canonical receipt advanced
+// exactly once from the persistent anchor this read was authorized against,
+// and the head snapshot. It is sealed instead of public: every field is
+// private, only ReadTrusted fills it, and the zero value is refused. It is not
+// an untrusted history: VerifyHistory and AssembleHistory continue to verify
+// externally supplied evidence in full.
+type TrustedRead struct {
+	valid    bool
+	head     Receipt
+	receipts []Receipt
+	snapshot vault.Snapshot
+	signer   ed25519.PublicKey
+	proof    Checkpoint // The one anchor this pass proved, genesis included.
+}
+
+// ReadTrusted opens the trusted local directory once and verifies the whole
+// chain once, requiring the persistent rollback anchor persisted and the
+// request's detached proof anchor q.Proof.Anchor to both lie on that chain.
+func ReadTrusted(path string, c *Config, persisted, requested Checkpoint) (TrustedRead, error) {
+	if c == nil {
+		return TrustedRead{}, ErrInvalid
+	}
+	res, e := readStore(path, c, persisted, &readRequest{proof: requested})
+	if e != nil {
+		return TrustedRead{}, e
+	}
+	return res.trusted, nil
+}
+
+// trusted reports whether a finished single pass produced this evidence:
+// versioned receipts advance without a gap and the head is their last receipt.
+func (t TrustedRead) trusted() bool {
+	if !t.valid || len(t.receipts) == 0 || len(t.receipts) > maxVersions || t.head.Checkpoint() != t.receipts[len(t.receipts)-1].Checkpoint() {
+		return false
+	}
+	for n, r := range t.receipts {
+		if r.Proposal.Epoch != uint64(n)+1 || r.Proposal.Scope == "" || len(r.Signature) != ed25519.SignatureSize {
+			return false
+		}
+	}
+	return true
+}
+
+// Checkpoint is the verified head: the direct successor of the persisted
+// anchor this read was authorized against.
+func (t TrustedRead) Checkpoint() Checkpoint { return t.head.Checkpoint() }
+
+// History returns an independent copy of every already-verified receipt and
+// the verified head snapshot. It does not re-run the chain; the recomputed
+// bytes must still fit the budget an export applies.
+func (t TrustedRead) History() (History, error) {
+	if !t.trusted() {
+		return History{}, ErrInvalid
+	}
+	h := History{Receipts: cloneReceipts(t.receipts), Snapshot: cloneSnapshot(t.snapshot)}
+	if _, e := h.storageSize(); e != nil {
+		return History{}, e
+	}
+	return h, nil
+}
+
+// chainAdvanceObserver is set only by package tests to count stored-chain
+// advance steps; nil in production.
+var chainAdvanceObserver func()
+
+// HeadView is the view authorized at the trusted head. Every mutable field is
+// an independent copy, so a caller can neither read nor alter sealed evidence.
+func (t TrustedRead) HeadView() (View, error) {
+	if !t.trusted() {
+		return View{}, ErrInvalid
+	}
+	receipts := cloneReceipts([]Receipt{t.head})
+	return View{Receipt: receipts[0], Snapshot: cloneSnapshot(t.snapshot), SnapshotSigner: bytes.Clone(t.signer)}, nil
+}
+
+// ProvenAnchorView is the view authorized at the request's proof anchor, which
+// the same pass proved lies on the chain up to the trusted head. Unlike
+// AssembleHistory it is not an ancestor-history membership check: the receipt
+// is the head, and the permission it carries is the head's. It only selects
+// the one proof anchor this read already verified; it never repeats a
+// signature or transition check, and it returns an independent copy.
+func (t TrustedRead) ProvenAnchorView(anchor Checkpoint) (View, error) {
+	if anchor != t.proof {
+		return View{}, ErrInvalid
+	}
+	return t.HeadView()
 }
 
 func (c *Config) WriterACLPolicy() bool              { return c.valid() && c.writerACL && c.requirePossession }

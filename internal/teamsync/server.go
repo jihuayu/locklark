@@ -260,7 +260,10 @@ func (s *server) handle(r *http.Request, q request) response {
 	if !s.live(r.Context()) {
 		return fail(ErrTransport)
 	}
-	view, h, e := directory.ReadHistory(s.path, s.config, anchor)
+	// One BoltDB read advances every receipt once and requires both the
+	// persistent rollback anchor and this request's proof anchor on that chain.
+	// The sealed result is this request's only evidence: nothing re-verifies it.
+	trusted, e := directory.ReadTrusted(s.path, s.config, anchor, q.Proof.Anchor)
 	if s.hooks != nil && s.hooks.afterRead != nil {
 		s.hooks.afterRead()
 	}
@@ -270,23 +273,27 @@ func (s *server) handle(r *http.Request, q request) response {
 	if e != nil {
 		return fail(mapDirectoryError(e))
 	}
-	if e = authorize(s.config, q, view); e != nil {
-		return fail(e)
-	}
-	// The same single read already carries every authenticated receipt, so the
-	// proof-anchor view used to be re-authorized here is rebuilt in memory and
-	// the two authorization decisions stay identical to the former re-read.
-	proof, e := directory.AssembleHistory(s.config, q.Proof.Anchor, view.Receipt.Checkpoint(), h)
+	headView, e := trusted.HeadView()
 	if e != nil {
 		return fail(ErrInvalid)
 	}
-	if e = authorize(s.config, q, proof); e != nil {
+	if e = authorize(s.config, q, headView); e != nil {
+		return fail(e)
+	}
+	// The proof anchor was proven on the same pass. Its view keeps head
+	// authority: it authorizes against the head receipt, exactly like the
+	// former AssembleHistory head view, not against ancestor membership.
+	proofView, e := trusted.ProvenAnchorView(q.Proof.Anchor)
+	if e != nil {
+		return fail(ErrInvalid)
+	}
+	if e = authorize(s.config, q, proofView); e != nil {
 		return fail(e)
 	}
 	if !s.live(r.Context()) {
 		return fail(ErrTransport)
 	}
-	head := view.Receipt.Checkpoint()
+	head := trusted.Checkpoint()
 	if head != anchor {
 		if s.anchors.Advance(anchor, head) != nil {
 			return fail(ErrAnchor)
@@ -297,6 +304,11 @@ func (s *server) handle(r *http.Request, q request) response {
 		return fail(ErrTransport)
 	}
 	if q.Proof.Action == "read" {
+		// An independent copy: no caller-owned buffer aliases verified evidence.
+		h, e := trusted.History()
+		if e != nil {
+			return fail(mapDirectoryError(e))
+		}
 		return response{Status: "current", Head: head, History: &h}
 	}
 	p := q.Publication

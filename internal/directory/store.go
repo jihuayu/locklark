@@ -112,13 +112,22 @@ func load(tx *bolt.Tx, c *Config, anchor Checkpoint) (View, *evolution, error) {
 	return out, verifier.state, nil
 }
 
+// readRequest narrows one store read. A nil value is a plain Read. A non-nil
+// value also proves a detached proof anchor on the same pass and returns the
+// sealed evidence behind it.
+type readRequest struct{ proof Checkpoint }
+
 // checkedView performs the single hash-chain pass for one request. Receipts and
-// the head snapshot are re-verified from their stored canonical bytes. With a
-// nil history it returns only the head view; otherwise it also returns every
-// retained receipt and the record size the stored history occupies.
-func checkedView(tx *bolt.Tx, c *Config, anchor Checkpoint, history *History) (res readResult, err error) {
+// the head snapshot are re-verified from their stored canonical bytes. A plain
+// read returns only the head view; a readRequest also returns every retained
+// receipt, once both the persistent anchor and the requested proof anchor have
+// been proven by that same pass.
+func checkedView(tx *bolt.Tx, c *Config, anchor Checkpoint, req *readRequest) (res readResult, err error) {
+	// A trusted single pass may pass the zero minimum NewHandler is constructed
+	// with; any other anchor must be a canonical checkpoint.
+	zeroMin := req != nil && anchor == (Checkpoint{})
 	b := tx.Bucket(bucket)
-	if b == nil || !c.validCheckpoint(anchor) {
+	if b == nil || c == nil || !zeroMin && !c.validCheckpoint(anchor) {
 		return readResult{}, ErrInvalid
 	}
 	records := b.Bucket(recordsKey)
@@ -129,7 +138,15 @@ func checkedView(tx *bolt.Tx, c *Config, anchor Checkpoint, history *History) (r
 	if err != nil {
 		return readResult{}, err
 	}
-	version, stored := uint64(0), 0
+	// The proof anchor is an additional constraint on the same pass, checked in
+	// the same loop that advances the chain; the persistent anchor still decides
+	// rollback exactly as Read does. A plain read has no proof anchor to match.
+	// A proof anchor this configuration could not have issued is unsatisfiable on
+	// this chain and is known before the pass; it never widens any check.
+	proof, proofMatched := Checkpoint{}, true
+	if req != nil {
+		proof, proofMatched = req.proof, c.valid() && req.proof == c.Genesis()
+	}
 	var receipts []Receipt
 	err = records.ForEach(func(k, raw []byte) error {
 		if len(k) != 8 || len(raw) > maxRecord || v.current.Version >= maxVersions || binary.BigEndian.Uint64(k) != v.current.Version+1 {
@@ -140,14 +157,11 @@ func checkedView(tx *bolt.Tx, c *Config, anchor Checkpoint, history *History) (r
 			return ErrInvalid
 		}
 		res.view.Receipt = receipt
-		version++
-		stored += len(raw)
-		if history != nil {
-			receipts = append(receipts, receipt)
-		}
+		receipts = append(receipts, receipt)
+		proofMatched = proofMatched || receipt.Checkpoint() == proof
 		return nil
 	})
-	if err != nil || version == 0 || !v.matched {
+	if err != nil || len(receipts) == 0 || !v.matched || !proofMatched {
 		return readResult{}, ErrInvalid
 	}
 	raw := tx.Bucket(bucket).Get(snapshotKey)
@@ -165,29 +179,10 @@ func checkedView(tx *bolt.Tx, c *Config, anchor Checkpoint, history *History) (r
 	if res.view, err = v.finish(snapshot); err != nil {
 		return readResult{}, ErrInvalid
 	}
-	if history != nil {
-		if e := verifyStoredHistory(c, anchor, History{Receipts: receipts, Snapshot: snapshot}, stored+len(raw)); e != nil {
-			return readResult{}, e
-		}
-		*history = History{Receipts: cloneReceipts(receipts), Snapshot: cloneSnapshot(snapshot)}
+	if req != nil {
+		res.trusted = TrustedRead{valid: true, head: res.view.Receipt, receipts: receipts, snapshot: snapshot, signer: res.view.SnapshotSigner, proof: proof}
 	}
 	return res, nil
-}
-
-// verifyStoredHistory re-verifies the just-decoded history through the same path
-// an untrusted history takes and applies the stored JSON sizes that a separate
-// export and re-verification pass accounted for.
-func verifyStoredHistory(c *Config, anchor Checkpoint, h History, stored int) error {
-	if _, e := VerifyHistory(c, anchor, h); e != nil {
-		return e
-	}
-	if _, e := h.storageSize(); e != nil {
-		return e
-	}
-	if stored > MaxHistoryBytes {
-		return ErrCapacity
-	}
-	return nil
 }
 
 func cloneReceipts(in []Receipt) []Receipt {
@@ -368,10 +363,10 @@ func Read(path string, c *Config, anchor Checkpoint) (View, error) {
 }
 
 // readStore opens the trusted local directory once and performs one hash-chain
-// pass. A non-nil history receives the verified transition history and head
-// snapshot under the same limits an explicit export and re-verification apply.
-func readStore(path string, c *Config, anchor Checkpoint, history *History) (res readResult, err error) {
-	if !c.validCheckpoint(anchor) {
+// pass. A non-nil readRequest additionally proves its proof anchor on the same
+// pass and receives the sealed evidence behind it.
+func readStore(path string, c *Config, anchor Checkpoint, req *readRequest) (res readResult, err error) {
+	if c == nil || !c.validCheckpoint(anchor) {
 		return readResult{}, ErrInvalid
 	}
 	db, err := open(path, true, false)
@@ -380,7 +375,7 @@ func readStore(path string, c *Config, anchor Checkpoint, history *History) (res
 	}
 	var txn readResult
 	err = db.View(func(tx *bolt.Tx) (e error) {
-		txn, e = checkedView(tx, c, anchor, history)
+		txn, e = checkedView(tx, c, anchor, req)
 		return e
 	})
 	if closeErr := db.Close(); closeErr != nil && err == nil {
@@ -393,5 +388,6 @@ func readStore(path string, c *Config, anchor Checkpoint, history *History) (res
 }
 
 type readResult struct {
-	view View
+	view    View
+	trusted TrustedRead
 }
