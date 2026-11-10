@@ -27,6 +27,11 @@ import (
 //
 // There is no header signature. The header is covered by the content
 // signature through RevisionID, so a writer never manages a header key.
+//
+// Arrays that are semantically sets carry exactly one accepted order on the
+// wire: SignedPolicyProofs strictly increasing by policy.policy_seq and
+// VUKDeviceSlots strictly increasing by device_id; each policy array has its
+// own rule (see Policy).
 type File struct {
 	Format             string         `json:"format"`
 	Version            int            `json:"version"`
@@ -66,6 +71,10 @@ type Header struct {
 // signs. The bytes are carried verbatim so the signature can be checked over
 // exactly what the signer committed to; VerifyPolicyDocument re-parses them to
 // prove they equal Policy and pass the same strict limits.
+//
+// In File.SignedPolicyProofs, Policy.PolicySeq must be strictly increasing:
+// old proofs first, the current policy after them, duplicates rejected. A
+// proof sequence is therefore old-then-current, never current-first.
 type SignedPolicy struct {
 	Policy   Policy `json:"policy"`
 	Document []byte `json:"document"`
@@ -85,6 +94,13 @@ type SignedPolicy struct {
 // policy; Header.PolicyDigest and the next policy's PrevPolicyDigest both
 // reference that same value. PrevPolicyDigest is nil exactly for the genesis
 // policy (policy_seq 0).
+//
+// Every array below is semantically a set and is frozen to one wire order:
+// OwnerRoot.Owners, Readers, Writers, Admins and Owners strictly increasing
+// by principal_id; AdminDelegations by delegation_id; Devices by device_id.
+// Identifiers compare bytewise and case-sensitively (no case folding, no
+// Unicode normalization) and a duplicate fails the same check. Decoders and
+// encoders never sort: an unsorted value is rejected, never rewritten.
 type Policy struct {
 	Format           string            `json:"format"`
 	Version          int               `json:"version"`
@@ -250,7 +266,18 @@ const (
 	// Input that is not valid UTF-8 is malformed JSON, not a spelling of it,
 	// and is reported as CodeInvalidJSON instead.
 	CodeNonCanonical = "non_canonical"
+
+	// CodeUnsortedCollection reports a semantically-set array that is not in
+	// its one frozen wire order: strictly ascending, duplicates rejected.
+	// Path names the array, or the first element (zero-based index) that does
+	// not sort strictly after its predecessor. The encoder never sorts input
+	// to satisfy this rule.
+	CodeUnsortedCollection = "unsorted_collection"
 )
+
+// fieldSignedPolicyProofs is the wire member whose proof array has a frozen
+// order: strictly increasing policy_seq, reported at element.policy.policy_seq.
+const fieldSignedPolicyProofs = "signed_policy_proofs"
 
 // AsError reports whether err is a *Error.
 func AsError(err error) (*Error, bool) {

@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -32,8 +33,9 @@ func ValidateFile(f *File) error {
 
 // validateStructure checks every rule of ValidateFile except that f is sealed.
 // It returns the current policy: the one proof whose policy_seq is the header
-// policy_seq, which every role and slot check binds to. Proof order is not a
-// rule, so proofs need not be latest-first and the current one may be anywhere.
+// policy_seq, which every role and slot check binds to. Proofs are held in
+// strictly increasing policy_seq order (checkPolicyProofOrder): the current
+// policy follows any older proof and is never the leading proof of two.
 func validateStructure(f *File) (*Policy, error) {
 	if f == nil {
 		return nil, Err("", CodeInvalidValue)
@@ -56,6 +58,9 @@ func validateStructure(f *File) (*Policy, error) {
 	}
 	if len(f.SignedPolicyProofs) == 0 || len(f.SignedPolicyProofs) > MaxArrayItems {
 		return nil, Err("", CodeInvalidValue)
+	}
+	if err := checkPolicyProofOrder(f.SignedPolicyProofs); err != nil {
+		return nil, err
 	}
 	for i := range f.SignedPolicyProofs {
 		sp := &f.SignedPolicyProofs[i]
@@ -112,6 +117,14 @@ func validateCEKAndSlots(f *File, current *Policy) error {
 	// read access (reader, writer, admin or owner). A slot for a device
 	// without a read role hands the vault key to it and is rejected; a device
 	// with a read role missing from the slots could not open the snapshot.
+	// Membership is a set check, but the wire carries exactly one
+	// representation of that set: slots in strictly increasing device_id
+	// order (checkAscendingIDs, called first).
+	if err := checkAscendingIDs("vuk_device_slots", len(f.VUKDeviceSlots), func(i int) string {
+		return f.VUKDeviceSlots[i].DeviceID
+	}); err != nil {
+		return err
+	}
 	seen := make(map[string]bool, len(f.VUKDeviceSlots))
 	for i := range f.VUKDeviceSlots {
 		s := &f.VUKDeviceSlots[i]
@@ -244,17 +257,28 @@ func ValidatePolicy(p *Policy) error {
 		!validEd25519Key(r.PublicKey) || len(r.Owners) == 0 || len(r.Owners) > MaxPolicyArrayItems {
 		return Err("", CodeInvalidValue)
 	}
+	if err := checkAscendingIDs("owner_root.owners", len(r.Owners), func(i int) string {
+		return r.Owners[i].PrincipalID
+	}); err != nil {
+		return err
+	}
 	if err := checkPrincipals(r.Owners); err != nil {
 		return err
 	}
 	// Role arrays may repeat a principal across roles (writer implies reader
-	// through the role ordering) but not within one role.
+	// through the role ordering) but not within one role. Each array is
+	// frozen to strictly increasing principal_id order.
 	for _, role := range []struct {
 		name string
 		ps   []Member
 	}{{"readers", p.Readers}, {"writers", p.Writers}, {"admins", p.Admins}, {"owners", p.Owners}} {
 		if len(role.ps) > MaxPolicyArrayItems {
 			return Err("", CodeLimitExceeded)
+		}
+		if err := checkAscendingIDs(role.name, len(role.ps), func(i int) string {
+			return role.ps[i].PrincipalID
+		}); err != nil {
+			return err
 		}
 		seen := map[string]bool{}
 		for i := range role.ps {
@@ -271,6 +295,11 @@ func ValidatePolicy(p *Policy) error {
 	}
 	if len(p.Devices) == 0 || len(p.Devices) > MaxArrayItems {
 		return Err("", CodeInvalidValue)
+	}
+	if err := checkAscendingIDs("devices", len(p.Devices), func(i int) string {
+		return p.Devices[i].DeviceID
+	}); err != nil {
+		return err
 	}
 	devices := map[string]bool{}
 	keys := map[string]string{}
@@ -323,6 +352,11 @@ func ValidatePolicy(p *Policy) error {
 	}
 	if len(p.AdminDelegations) > MaxDelegations {
 		return Err("", CodeLimitExceeded)
+	}
+	if err := checkAscendingIDs("admin_delegations", len(p.AdminDelegations), func(i int) string {
+		return p.AdminDelegations[i].DelegationID
+	}); err != nil {
+		return err
 	}
 	delSeen := map[string]bool{}
 	for i := range p.AdminDelegations {
@@ -386,6 +420,44 @@ func checkSignatureShape(s *Signature, alg string) error {
 		return Err("", CodeSignatureInvalid)
 	}
 	return nil
+}
+
+// checkPolicyProofOrder freezes File.SignedPolicyProofs to strictly increasing
+// policy_seq order. Equal sequence numbers are rejected by the same rule as a
+// decrease: two proofs of one sequence would give one policy value two signed
+// encodings. Old-then-current is the only accepted order, so a proof sequence
+// that starts at the current policy can only be carried as one proof.
+func checkPolicyProofOrder(ps []SignedPolicy) error {
+	for i := 1; i < len(ps); i++ {
+		if ps[i].Policy.PolicySeq <= ps[i-1].Policy.PolicySeq {
+			return Err(pathIndex(fieldSignedPolicyProofs, i, "policy.policy_seq"), CodeUnsortedCollection)
+		}
+	}
+	return nil
+}
+
+// checkAscendingIDs freezes one semantically-set array to strictly increasing
+// raw-ASCII identifier order: ids are compared bytewise and case-sensitively,
+// and a repeated id is rejected by the same rule. It reports
+// CodeUnsortedCollection at the path of the first element that breaks the
+// order, named by its ID field. The encoder never sorts: input that is
+// signed or digested must already carry the one accepted order.
+func checkAscendingIDs(collection string, n int, id func(i int) string) error {
+	for i := 1; i < n; i++ {
+		if id(i) <= id(i-1) {
+			return Err(pathIndex(collection, i), CodeUnsortedCollection)
+		}
+	}
+	return nil
+}
+
+// pathIndex names element i of an array at path with a zero-based index.
+func pathIndex(path string, i int, suffix ...string) string {
+	p := path + "[" + strconv.Itoa(i) + "]"
+	for _, s := range suffix {
+		p += "." + s
+	}
+	return p
 }
 
 func checkPrincipals(ps []Principal) error {

@@ -41,13 +41,24 @@ func TestAgeRecipientNegative(t *testing.T) {
 	}
 	r := id.Recipient().String()
 
+	// A deterministic invalid checksum: a fixed valid recipient with its last
+	// checksum character replaced by a different character of the bech32
+	// alphabet. It is derived from fixed key material, never from the random
+	// identity above, so a coincidental match with r is impossible.
+	valid := ageRecipient(clientKey("negative-checksum"))
+	const bech32 = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+	synth := valid[:len(valid)-1] + string(bech32[(strings.IndexByte(bech32, valid[len(valid)-1])+1)%len(bech32)])
+	if synth == valid {
+		t.Fatalf("deterministic checksum mutation left %q unchanged", valid)
+	}
+
 	for _, tc := range []struct {
 		name string
 		in   string
 	}{
 		{"empty", ""},
 		{"checksum flipped", ageRecipientCorruptChecksum(r)},
-		{"synthetic 4-char checksum", "age1" + r[4:len(r)-2] + "qq"},
+		{"synthetic 4-char checksum", synth},
 		{"truncated", r[:len(r)-1]},
 		{"extended", r + "q"},
 		{"uppercased", strings.ToUpper(r)},

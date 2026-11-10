@@ -70,7 +70,7 @@ func setPolicy(f *File, p *Policy) {
 	cur := currentPolicy(p, doc)
 	f.Header.PolicySeq = cur.PolicySeq
 	f.SignedPolicyProofs[0].Document = doc
-	f.SignedPolicyProofs[0].Policy = *cur
+	f.SignedPolicyProofs[0].Policy = *clonePolicy(cur)
 	// The header binds the domain-separated digest of the carried document.
 	f.Header.PolicyDigest = policyDigest(&f.SignedPolicyProofs[0])
 }
@@ -625,9 +625,9 @@ func TestVUKSlots(t *testing.T) {
 	wantCode(t, err, CodeInvalidValue)
 
 	f = buildFile(t)
-	f.VUKDeviceSlots[1] = f.VUKDeviceSlots[0]
+	f.VUKDeviceSlots[1].DeviceID = f.VUKDeviceSlots[0].DeviceID
 	_, err = EncodeFile(f)
-	wantCode(t, err, CodeInvalidValue)
+	wantCodeAt(t, err, CodeUnsortedCollection, "vuk_device_slots[1]")
 
 	// A device added to the policy needs its slot in the same file.
 	f = buildFile(t)
@@ -650,8 +650,9 @@ func TestVUKSlots(t *testing.T) {
 		t.Fatalf("complete slot set rejected: %v", err)
 	}
 
-	// Slots are matched as a set, not by position: an order-preserving
-	// reordering of the same slots is still valid.
+	// Slot membership is a set, but its wire order is frozen: exactly
+	// strictly increasing device_id. A reordering of the same slots is not
+	// accepted, and is reported before the revision id can matter.
 	base := mustEncode(t)
 	enc := string(base)
 	s0, s1 := string(mustSlotJSON(t, buildFile(t), 0)), string(mustSlotJSON(t, buildFile(t), 1))
@@ -662,20 +663,26 @@ func TestVUKSlots(t *testing.T) {
 	if swapped == enc {
 		t.Fatal("slots were not reordered")
 	}
-	// Slot order is inside the revision input, so the reordered file is a
-	// different revision and its stale revision id is rejected ...
 	if _, err := ParseFile([]byte(swapped)); err != nil {
-		wantCode(t, err, CodeInvalidValue)
+		wantCodeAt(t, err, CodeUnsortedCollection, "vuk_device_slots[1]")
 	} else {
-		t.Fatal("stale revision id accepted after reordering")
+		t.Fatal("reordered slots accepted")
 	}
-	// ... while the same slot set moved into a type value reseals and parses.
+	// The same slot set in a type value is still rejected: no encoder sorts
+	// it into the frozen order. The file is not resealed, because SealFile
+	// validates first and rejects the order before deriving a revision id,
+	// so no sealed file can carry it.
 	reordered := buildFile(t)
 	reordered.VUKDeviceSlots[0], reordered.VUKDeviceSlots[1] = reordered.VUKDeviceSlots[1], reordered.VUKDeviceSlots[0]
-	reseal(t, reordered)
-	if _, err := EncodeFile(reordered); err != nil {
-		t.Fatalf("reordered slots rejected: %v", err)
-	}
+	_, err = EncodeFile(reordered)
+	wantCodeAt(t, err, CodeUnsortedCollection, "vuk_device_slots[1]")
+	// Equal device ids are rejected by the same rule, before the duplicate
+	// membership check the slot set already had. As above, this defect cannot
+	// be resealed, so the file keeps its original revision id.
+	duplicated := buildFile(t)
+	duplicated.VUKDeviceSlots[1].DeviceID = duplicated.VUKDeviceSlots[0].DeviceID
+	_, err = EncodeFile(duplicated)
+	wantCodeAt(t, err, CodeUnsortedCollection, "vuk_device_slots[1]")
 }
 
 func mustSlotJSON(t *testing.T, f *File, i int) []byte {
@@ -739,7 +746,8 @@ func TestValidWriterRoundTrip(t *testing.T) {
 //	proofs[0]: policy_seq 6, the genuine predecessor of the current policy
 //	proofs[1]: policy_seq 7, the current policy, not first
 //
-// Proof order is not a rule, so this file is valid.
+// Proof order is frozen to strictly increasing policy_seq, so this old-then-
+// current file is valid.
 func twoProofFile(t *testing.T) *File {
 	t.Helper()
 	f := buildFile(t)
@@ -843,14 +851,15 @@ func TestCurrentPolicyNotFirstProof(t *testing.T) {
 		t.Fatal("fixture no longer authors from a device outside the first proof")
 	}
 
-	// Any proof position for the current policy is accepted: proof order is
-	// part of the revision input, so the swapped file is resealed.
+	// The current policy is not required to be the first proof, but proofs
+	// must be strictly increasing by policy_seq: a swapped (current-first)
+	// sequence is rejected. It is not resealed: reseal validates first and
+	// cannot produce a sealed invalid-order file, so order is rejected before
+	// the stale revision id is even reached.
 	swapped := twoProofFile(t)
 	swapped.SignedPolicyProofs[0], swapped.SignedPolicyProofs[1] = swapped.SignedPolicyProofs[1], swapped.SignedPolicyProofs[0]
-	reseal(t, swapped)
-	if _, err := EncodeFile(swapped); err != nil {
-		t.Fatalf("current-proof-first variant rejected: %v", err)
-	}
+	_, err = EncodeFile(swapped)
+	wantCodeAt(t, err, CodeUnsortedCollection, "signed_policy_proofs[1].policy.policy_seq")
 
 	// A truly unauthorized author is still rejected: device-4 is a new device
 	// of carol, a reader, known to the current policy only.
