@@ -10,6 +10,8 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,6 +19,7 @@ import (
 	"unicode"
 
 	"github.com/egoist/mygo"
+	"github.com/egoist/mygo/transfer"
 	"github.com/egoist/mygo/ui"
 	"github.com/jihuayu/locklark/internal/browserhost"
 	"github.com/jihuayu/locklark/internal/nativeclipboard"
@@ -911,13 +914,21 @@ func (a *App) healthView(c *ui.Context) {
 	})
 	ui.Text(c, a.report)
 }
+func importDirectory() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, "Downloads")
+}
+
 func (a *App) transferView(c *ui.Context) {
 	ui.Text(c, "1Password 1PUX 导入：默认登录及纯文本备注，可选择完整类别（实验）；不支持的数据整批拒绝，来源记录保留旧值。").Bold()
 	ui.TextInput(c, &a.source).Label("1PUX 文件").Placeholder("1PUX 归档完整路径").Disabled(a.busy)
 	ui.Button(c, "选择 1PUX 文件…").Disabled(a.busy).OnClick(func() {
 		win := a.win
 		a.run(func() outcome {
-			paths, e := mygo.Dialog.Open(mygo.OpenDialogOptions{Parent: win, Title: "选择 1Password 1PUX", Filters: []mygo.FileFilter{{Name: "1Password 1PUX", Extensions: []string{"1pux"}}}})
+			paths, e := mygo.Dialog.Open(mygo.OpenDialogOptions{Parent: win, Title: "选择 1Password 1PUX", DefaultPath: importDirectory(), Filters: []mygo.FileFilter{{Name: "1Password 1PUX", Extensions: []string{"1pux"}}}})
 			return outcome{err: e, apply: func() {
 				if len(paths) == 1 {
 					a.source = paths[0]
@@ -927,6 +938,25 @@ func (a *App) transferView(c *ui.Context) {
 			}}
 		})
 	})
+	drop := ui.Column(c).Gap(2).Padding(10).Children(func() {
+		ui.Text(c, "或把 .1pux 文件拖到这里").Bold()
+	})
+	if !a.busy {
+		if d, ok := ui.DropData(drop, transfer.DropOptions{Formats: []transfer.Format{transfer.FileList, transfer.URIList}, Operations: transfer.Copy}); ok {
+			files, e := d.Data.Files()
+			switch {
+			case e != nil:
+				a.status = "无法读取拖入的文件"
+			case len(files) != 1:
+				a.status = "一次只能拖入一个 .1pux 文件"
+			case !strings.EqualFold(filepath.Ext(files[0]), ".1pux"):
+				a.status = "请拖入 1Password 导出的 .1pux 文件"
+			default:
+				a.source, a.planDigest, a.report = files[0], "", ""
+				a.status = "已选择 1PUX，请生成导入计划"
+			}
+		}
+	}
 	ui.Checkbox(c, &a.importFull, "完整类别（含卡片/身份/笔记，实验）").Disabled(a.busy).OnChange(func() {
 		a.planDigest = ""
 		a.report = ""

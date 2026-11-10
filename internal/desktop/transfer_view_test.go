@@ -21,6 +21,7 @@ func TestTransferViewShows1PUXMigration(t *testing.T) {
 		"确认整批导入",
 		".opvault",
 		"未加密",
+		"拖到这里",
 	} {
 		if !tester.HasText(want) {
 			t.Fatalf("transfer page missing %q", want)
