@@ -184,3 +184,91 @@ func TestReleaseFailedItemWipesEveryOwnedBuffer(t *testing.T) {
 		t.Fatal("failure cleanup touched a caller-owned buffer")
 	}
 }
+
+func sshKeyPEM(t *testing.T, fill byte) []byte {
+	t.Helper()
+	private := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{fill}, ed25519.SeedSize))
+	block, err := ssh.MarshalPrivateKey(private, "fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pem.EncodeToMemory(block)
+}
+
+func sshKeyItem(t *testing.T, keys ...[]byte) map[string]any {
+	t.Helper()
+	fields := make([]any, len(keys))
+	for n, key := range keys {
+		fields[n] = typedField("key", "Private Key", map[string]any{"sshKey": string(key)})
+	}
+	return onepuxItem(t, "ssh", "115", "active", map[string]any{"title": "SSH Key"}, map[string]any{
+		"sections": []any{map[string]any{"name": "ssh", "title": "SSH", "fields": fields}},
+	})
+}
+
+// TestAdoptSSHKeyOwnership covers the transfer rules directly: the first key
+// moves into the item as-is, a later identical key leaves the item's buffers
+// alone and is wiped instead, and a conflicting key is wiped and reported.
+func TestAdoptSSHKeyOwnership(t *testing.T) {
+	seed := bytes.Repeat([]byte{33}, ed25519.SeedSize)
+	public := []byte{1, 2, 3}
+	var item vault.Item
+	if !adoptSSHKey(&item, seed, public) || &item.SSHSeed[0] != &seed[0] || &item.SSHPublicKey[0] != &public[0] {
+		t.Fatal("first key was not transferred into the item")
+	}
+	duplicate := bytes.Repeat([]byte{33}, ed25519.SeedSize)
+	if !adoptSSHKey(&item, duplicate, []byte{4, 5, 6}) {
+		t.Fatal("identical key rejected")
+	}
+	if &item.SSHSeed[0] != &seed[0] || !bytes.Equal(item.SSHSeed, seed) || !bytes.Equal(duplicate, make([]byte, len(duplicate))) {
+		t.Fatal("identical key replaced or kept the item buffers")
+	}
+	conflict := bytes.Repeat([]byte{44}, ed25519.SeedSize)
+	conflictPublic := []byte{7, 8, 9}
+	if adoptSSHKey(&item, conflict, conflictPublic) {
+		t.Fatal("conflicting key accepted")
+	}
+	if !bytes.Equal(conflict, make([]byte, len(conflict))) || !bytes.Equal(conflictPublic, make([]byte, len(conflictPublic))) {
+		t.Fatal("conflicting key buffers were not wiped")
+	}
+	if &item.SSHSeed[0] != &seed[0] || !bytes.Equal(item.SSHSeed, seed) {
+		t.Fatal("conflicting key disturbed the item buffers")
+	}
+}
+
+// TestMapArchiveItemSSHKeyOwnership maps SSH key items with a duplicate and a
+// conflicting key, and a login field that carries a private key. Identical
+// keys keep the item intact, the conflicting and login-field keys are rejected
+// without escaping their parsed buffers, and every caller value stays as sent.
+func TestMapArchiveItemSSHKeyOwnership(t *testing.T) {
+	first, twin, other := sshKeyPEM(t, 33), sshKeyPEM(t, 33), sshKeyPEM(t, 44)
+	twinBefore, otherBefore := bytes.Clone(twin), bytes.Clone(other)
+
+	dup := sshKeyItem(t, first, twin)
+	mapped, err := mapArchiveItem(dup, map[string][]byte{})
+	if err != nil || len(mapped.SSHSeed) != ed25519.SeedSize || len(mapped.SSHPublicKey) == 0 {
+		t.Fatalf("duplicate key mapping failed: %v", err)
+	}
+	if !bytes.Equal(twin, twinBefore) {
+		t.Fatal("duplicate key wiped the caller's value")
+	}
+
+	conflict := sshKeyItem(t, first, other)
+	if got, err := mapArchiveItem(conflict, map[string][]byte{}); err != ErrUnsupported || !reflect.DeepEqual(got, vault.Item{}) {
+		t.Fatalf("conflicting key escaped an item: %v", err)
+	}
+	if !bytes.Equal(other, otherBefore) {
+		t.Fatal("conflicting key wiped the caller's value")
+	}
+
+	login := onepuxItem(t, "login", "001", "active", map[string]any{"title": "Login"}, map[string]any{"loginFields": []any{
+		map[string]any{"name": "password", "designation": "password", "fieldType": "P", "value": clearPlaceholder},
+		map[string]any{"name": "key", "designation": "", "fieldType": "T", "value": map[string]any{"sshKey": string(other)}},
+	}})
+	if got, err := mapArchiveItem(login, map[string][]byte{}); err != ErrUnsupported || !reflect.DeepEqual(got, vault.Item{}) {
+		t.Fatalf("login-field SSH key escaped an item: %v", err)
+	}
+	if !bytes.Equal(other, otherBefore) {
+		t.Fatal("login-field key wiped the caller's value")
+	}
+}

@@ -362,11 +362,9 @@ func mapArchiveItem(source map[string]any, files map[string][]byte) (item vault.
 					return item, err
 				}
 				if parsed.sshSeed != nil {
-					if len(item.SSHSeed) > 0 && !bytes.Equal(item.SSHSeed, parsed.sshSeed) {
+					if !adoptSSHKey(&item, parsed.sshSeed, parsed.sshPublic) {
 						return reject()
 					}
-					item.SSHSeed = parsed.sshSeed
-					item.SSHPublicKey = parsed.sshPublic
 					continue
 				}
 				if parsed.totp != "" && item.OTP == "" {
@@ -518,6 +516,30 @@ func mapArchiveItem(source map[string]any, files map[string][]byte) (item vault.
 	return item, nil
 }
 
+// adoptSSHKey takes ownership of a parsed SSH key. The first key transfers into
+// the item; a later identical key leaves the item's buffers in place and is
+// wiped here, and a conflicting key is wiped and reported so the caller rejects
+// before anything it parsed remains allocated.
+func adoptSSHKey(item *vault.Item, seed, public []byte) bool {
+	switch {
+	case item.SSHSeed == nil:
+		item.SSHSeed, item.SSHPublicKey = seed, public
+		return true
+	case bytes.Equal(item.SSHSeed, seed):
+		wipeSSHKey(seed, public)
+		return true
+	default:
+		wipeSSHKey(seed, public)
+		return false
+	}
+}
+
+// wipeSSHKey clears parsed SSH key material that never reached the item.
+func wipeSSHKey(seed, public []byte) {
+	clear(seed)
+	clear(public)
+}
+
 // releaseFailedItem wipes every buffer a failed mapping still owns and hands
 // the caller the zero item. It runs from mapArchiveItem's defer, so the caller
 // never sees a partially built item or an attachment copy of its own.
@@ -552,6 +574,11 @@ func mapLoginFields(item *vault.Item, fields []any, usedSections, usedFields map
 				parsed, err := parseTypedField(rawValue)
 				if err != nil {
 					return err
+				}
+				if parsed.sshSeed != nil {
+					// Login fields cannot carry SSH key material.
+					wipeSSHKey(parsed.sshSeed, parsed.sshPublic)
+					return ErrUnsupported
 				}
 				value, typ, protected = parsed.value, parsed.typ, parsed.protected
 			}
