@@ -111,6 +111,102 @@ func load(tx *bolt.Tx, c *Config, anchor Checkpoint) (View, *evolution, error) {
 	}
 	return out, verifier.state, nil
 }
+
+// checkedView performs the single hash-chain pass for one request. Receipts and
+// the head snapshot are re-verified from their stored canonical bytes. With a
+// nil history it returns only the head view; otherwise it also returns every
+// retained receipt and the record size the stored history occupies.
+func checkedView(tx *bolt.Tx, c *Config, anchor Checkpoint, history *History) (res readResult, err error) {
+	b := tx.Bucket(bucket)
+	if b == nil || !c.validCheckpoint(anchor) {
+		return readResult{}, ErrInvalid
+	}
+	records := b.Bucket(recordsKey)
+	if records == nil {
+		return readResult{}, ErrInvalid
+	}
+	v, err := newHistoryVerifier(c, anchor)
+	if err != nil {
+		return readResult{}, err
+	}
+	version, stored := uint64(0), 0
+	var receipts []Receipt
+	err = records.ForEach(func(k, raw []byte) error {
+		if len(k) != 8 || len(raw) > maxRecord || v.current.Version >= maxVersions || binary.BigEndian.Uint64(k) != v.current.Version+1 {
+			return ErrInvalid
+		}
+		var receipt Receipt
+		if !canonical(raw, &receipt) || v.advance(receipt) != nil {
+			return ErrInvalid
+		}
+		res.view.Receipt = receipt
+		version++
+		stored += len(raw)
+		if history != nil {
+			receipts = append(receipts, receipt)
+		}
+		return nil
+	})
+	if err != nil || version == 0 || !v.matched {
+		return readResult{}, ErrInvalid
+	}
+	raw := tx.Bucket(bucket).Get(snapshotKey)
+	if len(raw) > 12<<20 {
+		return readResult{}, ErrInvalid
+	}
+	var snapshot vault.Snapshot
+	if res.view.Receipt.Proposal.Mode == "active" {
+		if !canonical(raw, &snapshot) || c.verifySnapshot(res.view.Receipt.Proposal, snapshot) != nil {
+			return readResult{}, ErrInvalid
+		}
+	} else if raw != nil {
+		return readResult{}, ErrInvalid
+	}
+	if res.view, err = v.finish(snapshot); err != nil {
+		return readResult{}, ErrInvalid
+	}
+	if history != nil {
+		if e := verifyStoredHistory(c, anchor, History{Receipts: receipts, Snapshot: snapshot}, stored+len(raw)); e != nil {
+			return readResult{}, e
+		}
+		*history = History{Receipts: cloneReceipts(receipts), Snapshot: cloneSnapshot(snapshot)}
+	}
+	return res, nil
+}
+
+// verifyStoredHistory re-verifies the just-decoded history through the same path
+// an untrusted history takes and applies the stored JSON sizes that a separate
+// export and re-verification pass accounted for.
+func verifyStoredHistory(c *Config, anchor Checkpoint, h History, stored int) error {
+	if _, e := VerifyHistory(c, anchor, h); e != nil {
+		return e
+	}
+	if _, e := h.storageSize(); e != nil {
+		return e
+	}
+	if stored > MaxHistoryBytes {
+		return ErrCapacity
+	}
+	return nil
+}
+
+func cloneReceipts(in []Receipt) []Receipt {
+	out := make([]Receipt, len(in))
+	for i, r := range in {
+		out[i] = r
+		out[i].Proposal.Parent = r.Proposal.Parent
+		out[i].Proposal.Members = cloneMembers(r.Proposal.Members)
+		if r.Proposal.Admissions != nil {
+			out[i].Proposal.Admissions = append([]Admission{}, r.Proposal.Admissions...)
+		}
+		out[i].Signature = bytes.Clone(r.Signature)
+	}
+	return out
+}
+
+func cloneSnapshot(s vault.Snapshot) vault.Snapshot {
+	return vault.Snapshot{Epoch: s.Epoch, Database: bytes.Clone(s.Database), Envelope: bytes.Clone(s.Envelope), Signature: bytes.Clone(s.Signature)}
+}
 func open(path string, readOnly, initial bool) (*bolt.DB, error) {
 	return bolt.Open(path, 0600, &bolt.Options{ReadOnly: readOnly, Timeout: 10 * time.Second, OpenFile: func(name string, flags int, mode os.FileMode) (*os.File, error) {
 		f, err := os.OpenFile(name, flags&^os.O_CREATE, mode)
@@ -263,23 +359,39 @@ func commitWithUpdate(update func(func(*bolt.Tx) error) error, c *Config, sequen
 // retained anchor to be an ancestor (or the exact head). A genesis anchor has no
 // rollback protection. Read from the trusted sequencer's local storage only;
 // an untrusted relay can withhold a newer valid head.
-func Read(path string, c *Config, anchor Checkpoint) (out View, err error) {
-	if !c.validCheckpoint(anchor) {
-		return View{}, ErrInvalid
-	}
-	db, err := open(path, true, false)
-	if err != nil {
-		return View{}, ErrStorage
-	}
-	defer func() {
-		if closeErr := db.Close(); closeErr != nil && err == nil {
-			out = View{}
-			err = ErrStorage
-		}
-	}()
-	err = db.View(func(tx *bolt.Tx) error { var e error; out, _, e = load(tx, c, anchor); return e })
+func Read(path string, c *Config, anchor Checkpoint) (View, error) {
+	res, err := readStore(path, c, anchor, nil)
 	if err != nil {
 		return View{}, err
 	}
-	return out, nil
+	return res.view, nil
+}
+
+// readStore opens the trusted local directory once and performs one hash-chain
+// pass. A non-nil history receives the verified transition history and head
+// snapshot under the same limits an explicit export and re-verification apply.
+func readStore(path string, c *Config, anchor Checkpoint, history *History) (res readResult, err error) {
+	if !c.validCheckpoint(anchor) {
+		return readResult{}, ErrInvalid
+	}
+	db, err := open(path, true, false)
+	if err != nil {
+		return readResult{}, ErrStorage
+	}
+	var txn readResult
+	err = db.View(func(tx *bolt.Tx) (e error) {
+		txn, e = checkedView(tx, c, anchor, history)
+		return e
+	})
+	if closeErr := db.Close(); closeErr != nil && err == nil {
+		return readResult{}, ErrStorage
+	}
+	if err != nil {
+		return readResult{}, err
+	}
+	return txn, nil
+}
+
+type readResult struct {
+	view View
 }

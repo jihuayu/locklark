@@ -260,7 +260,10 @@ func (s *server) handle(r *http.Request, q request) response {
 	if !s.live(r.Context()) {
 		return fail(ErrTransport)
 	}
-	view, e := directory.Read(s.path, s.config, anchor)
+	view, h, e := directory.ReadHistory(s.path, s.config, anchor)
+	if s.hooks != nil && s.hooks.afterRead != nil {
+		s.hooks.afterRead()
+	}
 	if !s.live(r.Context()) {
 		return fail(ErrTransport)
 	}
@@ -270,27 +273,14 @@ func (s *server) handle(r *http.Request, q request) response {
 	if e = authorize(s.config, q, view); e != nil {
 		return fail(e)
 	}
-	h, e := directory.ExportHistory(s.path, s.config, anchor)
-	if !s.live(r.Context()) {
-		return fail(ErrTransport)
-	}
-	if e != nil {
-		return fail(mapDirectoryError(e))
-	}
-	view, e = directory.VerifyHistory(s.config, s.minimum, h)
+	// The same single read already carries every authenticated receipt, so the
+	// proof-anchor view used to be re-authorized here is rebuilt in memory and
+	// the two authorization decisions stay identical to the former re-read.
+	proof, e := directory.AssembleHistory(s.config, q.Proof.Anchor, view.Receipt.Checkpoint(), h)
 	if e != nil {
 		return fail(ErrInvalid)
 	}
-	if !s.live(r.Context()) {
-		return fail(ErrTransport)
-	}
-	if _, e = directory.VerifyHistory(s.config, q.Proof.Anchor, h); e != nil {
-		return fail(ErrInvalid)
-	}
-	if !s.live(r.Context()) {
-		return fail(ErrTransport)
-	}
-	if e = authorize(s.config, q, view); e != nil {
+	if e = authorize(s.config, q, proof); e != nil {
 		return fail(e)
 	}
 	if !s.live(r.Context()) {

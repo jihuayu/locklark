@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 
 	"github.com/jihuayu/locklark/internal/vault"
-	bolt "go.etcd.io/bbolt"
 )
 
 // History is signed public transition evidence and the encrypted head snapshot.
@@ -56,85 +55,90 @@ func (v *historyVerifier) finish(snapshot vault.Snapshot) (View, error) {
 	return View{Receipt: v.head, Snapshot: snapshot, SnapshotSigner: signer}, nil
 }
 
-func ExportHistory(path string, c *Config, anchor Checkpoint) (out History, err error) {
-	if !c.validCheckpoint(anchor) {
-		return History{}, ErrInvalid
-	}
-	db, e := open(path, true, false)
-	if e != nil {
-		return History{}, ErrStorage
-	}
-	defer func() {
-		if e := db.Close(); e != nil && err == nil {
-			out = History{}
-			err = ErrStorage
-		}
-	}()
-	err = db.View(func(tx *bolt.Tx) error {
-		v, _, e := load(tx, c, anchor)
-		if e != nil {
-			return e
-		}
-		out.Snapshot = v.Snapshot
-		out.Receipts = make([]Receipt, 0, v.Receipt.Proposal.Epoch)
-		size := len(`{"receipts":[`) + len(`],"snapshot":`) + len(encoded(v.Snapshot)) + 1
-		return tx.Bucket(bucket).Bucket(recordsKey).ForEach(func(_ []byte, raw []byte) error {
-			if len(out.Receipts) > 0 {
-				size++
-			}
-			size += len(raw)
-			if size > MaxHistoryBytes {
-				return ErrCapacity
-			}
-			var receipt Receipt
-			if json.Unmarshal(raw, &receipt) != nil {
-				return ErrInvalid
-			}
-			out.Receipts = append(out.Receipts, receipt)
-			return nil
-		})
-	})
-	if err != nil {
-		return History{}, err
-	}
-	return out, nil
-}
+func (h History) valid() bool { return len(h.Receipts) > 0 && len(h.Receipts) <= maxVersions }
 
-func VerifyHistory(c *Config, anchor Checkpoint, h History) (View, error) {
-	v, e := newHistoryVerifier(c, anchor)
-	if e != nil || len(h.Receipts) == 0 || len(h.Receipts) > maxVersions {
-		return View{}, ErrInvalid
-	}
+// storageSize counts the stored JSON bytes a verified history would occupy.
+// Protocol fields are plain ASCII, so their encoding never grows past these
+// bounds; a forged value that could still verify is always within limits.
+func (h History) storageSize() (int, error) {
 	size := len(`{"receipts":[`) + len(`],"snapshot":`) + 1
 	for n, r := range h.Receipts {
-		if v.advance(r) != nil {
-			return View{}, ErrInvalid
-		}
 		raw := encoded(r)
 		if len(raw) > maxRecord {
-			return View{}, ErrInvalid
+			return 0, ErrInvalid
 		}
 		size += len(raw)
 		if n > 0 {
 			size++
 		}
 		if size > MaxHistoryBytes {
-			return View{}, ErrCapacity
+			return 0, ErrCapacity
 		}
 	}
-	out, e := v.finish(h.Snapshot)
+	if size+len(encoded(h.Snapshot)) > MaxHistoryBytes {
+		return 0, ErrCapacity
+	}
+	return size, nil
+}
+
+func VerifyHistory(c *Config, anchor Checkpoint, h History) (View, error) {
+	view, _, e := verifyHistory(c, anchor, h)
+	return view, e
+}
+
+// AssembleHistory verifies an untrusted history and requires it to be exactly
+// the history retained by a database read that produced the expected head, so
+// a tampered receipt cannot be mistaken for the trusted checkpoint.
+func AssembleHistory(c *Config, anchor, expected Checkpoint, h History) (View, error) {
+	if expected == (Checkpoint{}) {
+		return View{}, ErrInvalid
+	}
+	view, _, e := verifyHistory(c, anchor, h)
 	if e != nil {
 		return View{}, e
 	}
-	if size+len(encoded(h.Snapshot)) > MaxHistoryBytes {
-		return View{}, ErrCapacity
+	if view.Receipt.Checkpoint() != expected {
+		return View{}, ErrInvalid
+	}
+	return view, nil
+}
+
+func verifyHistory(c *Config, anchor Checkpoint, h History) (View, int, error) {
+	v, e := newHistoryVerifier(c, anchor)
+	if e != nil || !h.valid() {
+		return View{}, 0, ErrInvalid
+	}
+	for _, r := range h.Receipts {
+		if v.advance(r) != nil {
+			return View{}, 0, ErrInvalid
+		}
+	}
+	size, e := h.storageSize()
+	if e != nil {
+		return View{}, 0, e
+	}
+	out, e := v.finish(h.Snapshot)
+	if e != nil {
+		return View{}, 0, e
 	}
 	// Do not lend caller-owned mutable proof or ciphertext buffers to consumers.
 	var owned View
 	if json.Unmarshal(encoded(out), &owned) != nil {
-		return View{}, ErrInvalid
+		return View{}, 0, ErrInvalid
 	}
-	return owned, nil
+	return owned, size, nil
+}
+
+// ReadHistory returns the trusted local view together with the exact signed
+// transition history behind it. It opens the database once and verifies the
+// chain once; the returned history satisfies VerifyHistory(anchor).
+func ReadHistory(path string, c *Config, anchor Checkpoint) (View, History, error) {
+	var h History
+	res, e := readStore(path, c, anchor, &h)
+	if e != nil {
+		return View{}, History{}, e
+	}
+	return res.view, h, nil
 }
 
 func (c *Config) WriterACLPolicy() bool              { return c.valid() && c.writerACL && c.requirePossession }
