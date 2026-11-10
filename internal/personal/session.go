@@ -75,8 +75,22 @@ func desktopFieldAction(action string) bool {
 func validNativeFieldTarget(target RevealTarget, purpose string) bool {
 	return idOK(target.ID) && digestOK(target.Revision) && desktopFieldAction("item.desktop."+purpose+"."+target.Field)
 }
+
+// maxSessionIdle bounds a positive unlock idle timeout. Zero is a distinct,
+// explicit request for "never": only callers that expose that choice (the
+// desktop auto-lock preference) pass it, so a mistaken zero elsewhere still
+// fails the constructor's range check through validSessionIdle.
+const maxSessionIdle = 24 * time.Hour
+
+// validSessionIdle accepts either the explicit "never" value (0) or a bounded
+// positive interval. Tiny positive values are rejected instead of silently
+// becoming a near-instant lock.
+func validSessionIdle(idle time.Duration) bool {
+	return idle == 0 || idle >= time.Second && idle <= maxSessionIdle
+}
+
 func UnlockSession(path string, password, key []byte, idle time.Duration) (*Session, error) {
-	if idle < time.Second || idle > 15*time.Minute {
+	if !validSessionIdle(idle) {
 		return nil, ErrSessionLocked
 	}
 	r, e := command(path, string(password), key, "desktop.unlock", vault.Item{}, nil)
@@ -84,7 +98,46 @@ func UnlockSession(path string, password, key []byte, idle time.Duration) (*Sess
 		clear(r.material)
 		return nil, e
 	}
-	return &Session{path: path, material: r.material, slotDigest: r.slotDigest, last: time.Now(), fullUnlock: time.Now(), idle: idle, pending: make(map[*NativeField]bool), hibp: watchtower.NewHIBPClient(watchtower.HIBPOptions{})}, nil
+	return newUnlockedSession(path, r.material, r.slotDigest, time.Now(), idle), nil
+}
+
+// newUnlockedSession is the single constructor for an authenticated session so
+// every unlock path (password and system quick unlock) starts with the same
+// opt-in HIBP client and empty pending tables.
+func newUnlockedSession(path string, material []byte, slotDigest [32]byte, now time.Time, idle time.Duration) *Session {
+	return &Session{path: path, material: material, slotDigest: slotDigest, last: now, fullUnlock: now, idle: idle, pending: make(map[*NativeField]bool), hibp: watchtower.NewHIBPClient(watchtower.HIBPOptions{})}
+}
+
+// SetIdleTimeout applies a new inactivity policy to an active session. A zero
+// duration means "never expire from inactivity"; positive values are bounded
+// like UnlockSession. The current activity timestamp is kept, so lowering the
+// timeout can lock on the next check instead of granting a fresh full window.
+func (s *Session) SetIdleTimeout(idle time.Duration) error {
+	if s == nil || !validSessionIdle(idle) {
+		return ErrSessionLocked
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.active(false) != nil {
+		return ErrSessionLocked
+	}
+	s.idle = idle
+	return nil
+}
+
+// idleExpired reports whether the inactivity deadline has passed. The caller
+// must hold Session.mu (or otherwise serialize with Session.last). Zero idle
+// is the explicit "never auto-lock" preference.
+func (s *Session) idleExpired(now time.Time) bool {
+	return s.idle > 0 && now.Sub(s.last) >= s.idle
+}
+
+// idleDeadline returns the activity-derived expiry and whether one exists.
+func (s *Session) idleDeadline() (time.Time, bool) {
+	if s.idle <= 0 {
+		return time.Time{}, false
+	}
+	return s.last.Add(s.idle), true
 }
 func (s *Session) lock() {
 	s.sshPending.Range(func(key, _ any) bool {
@@ -146,7 +199,7 @@ func (s *Session) sessionLocked() bool {
 	}
 	s.saveMu.Lock()
 	defer s.saveMu.Unlock()
-	return s.lockRequested.Load() || len(s.material) == 0 || time.Since(s.last) >= s.idle
+	return s.lockRequested.Load() || len(s.material) == 0 || s.idleExpired(time.Now())
 }
 
 // AuthorityDeadline is the real idle boundary used to cap a native grant. It
@@ -161,7 +214,12 @@ func (s *Session) AuthorityDeadline() time.Time {
 	if s.active(false) != nil {
 		return time.Time{}
 	}
-	return s.last.Add(s.idle)
+	if idle, ok := s.idleDeadline(); ok {
+		return idle
+	}
+	// No inactivity boundary: native grants are capped by their own expiry and
+	// are still cancelled by Lock.
+	return time.Time{}
 }
 
 // IdleDeadline reports when the session will expire from inactivity if no
@@ -177,7 +235,10 @@ func (s *Session) IdleDeadline() (time.Time, bool) {
 	if s.active(false) != nil {
 		return time.Time{}, false
 	}
-	return s.last.Add(s.idle), true
+	if deadline, ok := s.idleDeadline(); ok {
+		return deadline, true
+	}
+	return time.Time{}, true
 }
 func (s *Session) active(touch bool) error {
 	now := time.Now()
@@ -193,7 +254,7 @@ func (s *Session) active(touch bool) error {
 			delete(s.profilePending, p)
 		}
 	}
-	if s.lockRequested.Load() || len(s.material) == 0 || now.Sub(s.last) >= s.idle {
+	if s.lockRequested.Load() || len(s.material) == 0 || s.idleExpired(now) {
 		s.lock()
 		return ErrSessionLocked
 	}

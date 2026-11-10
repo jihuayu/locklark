@@ -299,10 +299,136 @@ func (a *App) revealField(key string) {
 
 func (a *App) RevealField(key string) { a.revealField(key) }
 
+// narrowPasswordDisclosure is the only plaintext the security.revealPasswords
+// preference may surface by default: one password, read through the audited
+// Session.PrepareField("password", "show") capability and consumed immediately.
+// The value is held only in this narrow App state, never in a cached plaintext
+// detail; the UI renders it while the disclosure lease is live and hides it as
+// soon as the preference is turned off.
+type narrowPasswordDisclosure struct {
+	value    []byte
+	until    time.Time
+	itemID   string
+	revision string
+}
+
+func (d narrowPasswordDisclosure) current(itemID, revision string, now time.Time) bool {
+	return len(d.value) > 0 && d.itemID == itemID && d.revision == revision && now.Before(d.until)
+}
+
+// revealPasswordByDefault applies security.revealPasswords to the selected
+// item. Only a login item with a real stored password is considered, and the
+// value comes from a narrow password-only disclosure instead of a full
+// plaintext detail read. The read is deferred to the background ticker so the
+// selection's own detail read is not serialized behind it; the preference is
+// re-checked when the asynchronous result arrives, and turning the preference
+// off retracts any live value.
+func (a *App) revealPasswordByDefault() {
+	if a.session == nil || a.v2.detail == nil || !a.settingsSnapshot().RevealPasswords {
+		return
+	}
+	if a.defaultRevealAt.IsZero() {
+		a.defaultRevealAt = time.Now()
+	}
+}
+
+// defaultRevealDelay debounces the revealPasswords read after a selection so a
+// slow metadata read never queues behind it.
+const defaultRevealDelay = 500 * time.Millisecond
+
+// requestPasswordReveal starts at most one narrow password disclosure.
+func (a *App) requestPasswordReveal() {
+	d := a.v2.detail
+	if a.session == nil || d == nil || d.Kind != string(vault.CategoryLogin) || !a.settingsSnapshot().RevealPasswords || a.narrowRevealPending || a.busy || a.v2.narrowPassword.value != nil {
+		return
+	}
+	s, target := a.session, personal.RevealTarget{ID: d.ID, Revision: d.Revision, Field: "password"}
+	exposure, generation := a.exposureGeneration, a.generation
+	a.narrowRevealPending = true
+	a.narrowRevealSeq++
+	seq := a.narrowRevealSeq
+	// done clears pending only for the request that owns the sequence. A stale
+	// callback from an older read must never clear a newer request.
+	done := func() {
+		if a.narrowRevealSeq == seq {
+			a.narrowRevealPending = false
+		}
+	}
+	a.run(func() outcome {
+		f, err := s.PrepareField(target, "show")
+		if err != nil {
+			// runContext never runs drop for a plain error, so the failed read
+			// releases pending itself on the UI thread.
+			a.dispatch(done)
+			return outcome{err: err}
+		}
+		var disclosed narrowPasswordDisclosure
+		err = s.Consume(f, func(value []byte) error {
+			if len(value) == 0 {
+				return nil
+			}
+			disclosed = narrowPasswordDisclosure{value: append([]byte(nil), value...), until: time.Now().Add(15 * time.Second), itemID: target.ID, revision: target.Revision}
+			return nil
+		})
+		if err != nil {
+			clear(disclosed.value)
+			a.dispatch(done)
+			return outcome{err: err}
+		}
+		return outcome{drop: func() {
+			done()
+			clear(disclosed.value)
+		}, apply: func() {
+			done()
+			// Transfer ownership to the App before the deferred scratch clear.
+			value := disclosed.value
+			disclosed.value = nil
+			if len(value) == 0 || !a.settingsSnapshot().RevealPasswords || !a.narrowDisclosureCurrent(s, target, generation, exposure) {
+				clear(value)
+				return
+			}
+			disclosed.value = value
+			a.v2.narrowPassword = disclosed
+			a.v2.revealUntil = disclosed.until
+			a.status = "已按设置显示密码 15 秒"
+		}}
+	})
+}
+
+// narrowDisclosureCurrent is the UI-only staleness guard for an asynchronous
+// password disclosure: the same session, item, generation, exposure and vault
+// page must still be active.
+func (a *App) narrowDisclosureCurrent(s *personal.Session, target personal.RevealTarget, generation, exposure uint64) bool {
+	return a.exposureCurrent(s, personal.NativeOTPTarget{ID: target.ID, Revision: target.Revision}, generation, exposure) && a.v2.detail != nil && a.v2.detail.ID == target.ID && a.v2.detail.Kind == string(vault.CategoryLogin)
+}
+
+// hideNarrowPassword drops any live password-only disclosure. An active
+// preference re-arms itself for the still-selected login item through the
+// background ticker on the next explicit activity or selection; hiding here is
+// never followed by an automatic immediate reappearance within the same tick.
+func (a *App) hideNarrowPassword() bool {
+	if a.v2.narrowPassword.value == nil {
+		return false
+	}
+	clear(a.v2.narrowPassword.value)
+	a.v2.narrowPassword = narrowPasswordDisclosure{}
+	return true
+}
+
 func (a *App) hideRevealed() {
 	a.v2.revealed = map[string]bool{}
 	a.v2.revealUntil = time.Time{}
 	a.v2.detailPlain = nil
+	a.hideNarrowPassword()
+}
+
+// revealPasswordValue is the narrow-disclosure lookup used by the detail pane.
+func (a *App) revealPasswordValue() string {
+	d := a.v2.detail
+	if d == nil || !a.v2.narrowPassword.current(d.ID, d.Revision, time.Now()) {
+		return ""
+	}
+	return string(a.v2.narrowPassword.value)
 }
 
 // copyField copies a field with an owned clipboard lease. The background
@@ -311,6 +437,12 @@ func (a *App) hideRevealed() {
 // pull the full plaintext item into memory.
 func (a *App) copyField(key string) {
 	if a.v2.detail == nil {
+		return
+	}
+	if key == "otp" {
+		// A one-time code copied through the field action must honour the
+		// same OTP-validity cap as the dedicated "copy code" action.
+		a.requestOTP("copy")
 		return
 	}
 	if !isConcealedKey(a.v2.detail, key) {

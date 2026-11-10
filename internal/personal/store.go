@@ -32,6 +32,14 @@ var bucket = []byte("locklark.personal/v1")
 var slotKey = []byte("device-slot")
 var snapshotKey = []byte("snapshot")
 
+// encodedSnapshotLimit bounds the JSON-encoded snapshot value. It is the
+// stored-snapshot ceiling inflated by JSON/base64 overhead (binary fields grow
+// by 4/3), so it is evaluated from the vault ceiling instead of copied.
+// Deriving it at init time by calling into vault keeps this package free of
+// vault's (incompressible) embedded assets; VerifySnapshot re-checks every
+// field against the vault limits once the value is parsed.
+var encodedSnapshotLimit = vault.MaxStoredSnapshot() + vault.MaxStoredSnapshot()/2
+
 type identity struct {
 	Device                          string
 	Signing, Audit, AuditEncryption []byte
@@ -86,6 +94,12 @@ func seal(b *bolt.Bucket, i identity, epoch uint64, items []vault.Item) (vault.S
 	signer := ed25519.NewKeyFromSeed(i.Signing)
 	defer clear(signer)
 	s, e := vault.SealItems([]byte(schema), items, epoch, []*age.X25519Recipient{id.Recipient()}, signer)
+	if errors.Is(e, vault.ErrSnapshotCapacity) {
+		// The items validated but their encoded KDBX exceeds the stored bound.
+		// Return a stable user-facing capacity refusal instead of the generic
+		// invalid-snapshot text; the surrounding transaction rolls back.
+		return s, ErrSnapshotCapacity
+	}
 	if e != nil {
 		return s, e
 	}
@@ -474,7 +488,7 @@ func authenticateState(tx *bolt.Tx, pw string, key []byte, action string, unlock
 	}
 	var s vault.Snapshot
 	raw = b.Get(snapshotKey)
-	if len(raw) > 12<<20 || json.Unmarshal(raw, &s) != nil {
+	if len(raw) > encodedSnapshotLimit || json.Unmarshal(raw, &s) != nil {
 		return nil, invalid
 	}
 	signer := ed25519.NewKeyFromSeed(i.Signing)
@@ -682,6 +696,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 	}
 	var out result
 	var refusal error
+	var capacity bool
 	var auditCandidate *auditCache
 	e := update(func(tx *bolt.Tx) (err error) {
 		auth, e := authenticateState(tx, pw, key, action, option.unlocked)
@@ -886,7 +901,16 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 				return e
 			}
 			if action == importAction {
-				s, e = seal(b, i, s.Epoch+1, append(items, mapped.Items...))
+				sealed, sealErr := seal(b, i, s.Epoch+1, append(items, mapped.Items...))
+				if errors.Is(sealErr, ErrSnapshotCapacity) {
+					// The mapped items fit the plaintext schema but their
+					// snapshot does not fit; nothing was written. Keep the
+					// transaction going so the linked limit/refusal audit is
+					// recorded like every other import refusal.
+					outcome, refusal = "limit", ErrImportCapacity
+					break
+				}
+				s, e = sealed, sealErr
 				if e != nil {
 					return e
 				}
@@ -909,6 +933,16 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			}
 		case exportAction:
 			out.archive, e = vault.ExportKDBX(items, option.export.password)
+			if errors.Is(e, vault.ErrSnapshotCapacity) {
+				// The export shares the stored bound but encodes a wider
+				// artifact, so it can refuse a vault that fits. Keep the
+				// transaction going so the linked export intent is prepared,
+				// then return the capacity refusal from the Bolt update callback
+				// below: Bolt rolls back the transaction, including that
+				// prepared intent event, and no output file is published.
+				out.archive, e = nil, nil
+				capacity = true
+			}
 			if e != nil {
 				return e
 			}
@@ -1832,6 +1866,9 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			out.events = append(rows, ev)
 		} else if (editAction(action) || browserSaveAction(action) || action == "item.generate" || action == "item.add" || action == v2AddAction || action == sshGenerateAction || action == sshImportAction) && refusal == nil {
 			out.revision = ev.hash()
+		}
+		if capacity {
+			return ErrSnapshotCapacity
 		}
 		return nil
 	})

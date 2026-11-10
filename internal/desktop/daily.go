@@ -12,6 +12,10 @@ import (
 
 const mutationUnknownStatus = "有一项操作结果未确认，请在金库核实，勿重复该操作"
 
+// capacityStatus reports a schema-valid write whose encrypted snapshot would
+// exceed the stored vault size. The vault stays unlocked and unchanged.
+const capacityStatus = "金库容量已满，无法保存：此条目加密后超过金库存储上限。请删除或缩小大型条目/附件后重试；原金库未更改"
+
 type nativeOperation struct {
 	gate       *personal.MutationGate
 	generation uint64
@@ -231,13 +235,14 @@ func (a *App) requestOTP(purpose string) {
 		valid := func() bool { return a.exposureCurrent(s, target, generation, exposure) }
 		e := s.DeliverOTP(r.delivery, target, func(code []byte, b personal.OTPBounds) error {
 			if purpose == "copy" {
-				if e := a.writeClipboard(code, b.Deadline, func() bool { return valid() && b.Check(time.Now()) }); e != nil {
+				deadline := otpClipboardDeadline(b.Deadline, a.clipboardTimeout(), time.Now())
+				if e := a.writeClipboard(code, deadline, func() bool { return valid() && b.Check(time.Now()) }); e != nil {
 					return e
 				}
 				sequence := a.clipboardSequence
 				a.otpClipboard = &b
 				a.otpClipboardTarget = target
-				a.otpClipboardTimer = time.AfterFunc(time.Until(b.Deadline), func() {
+				a.otpClipboardTimer = time.AfterFunc(time.Until(deadline), func() {
 					a.dispatch(func() {
 						if a.clipboardSequence == sequence {
 							a.clearClipboard()
