@@ -123,8 +123,8 @@ func ParsePolicyDocument(data []byte) (*Policy, error) {
 	}
 	v, err := decodeCanonical(data, []string{
 		"format", "version", "vault_id", "policy_seq", "prev_policy_digest",
-		"policy_digest", "owner_root", "readers", "writers", "admins",
-		"owners", "admin_delegations", "devices",
+		"owner_root", "readers", "writers", "admins", "owners",
+		"admin_delegations", "devices",
 	}, MaxJSONDepth)
 	if err != nil {
 		return nil, err
@@ -184,8 +184,6 @@ func writePolicy(b *bytes.Buffer, p *Policy) {
 	b.WriteString(itoa(p.PolicySeq))
 	b.WriteString(`,"prev_policy_digest":`)
 	writeBytes(b, p.PrevPolicyDigest)
-	b.WriteString(`,"policy_digest":`)
-	writeBytes(b, p.PolicyDigest)
 	b.WriteString(`,"owner_root":{"key_id":`)
 	b.WriteString(quote(p.OwnerRoot.KeyID))
 	b.WriteString(`,"alg":`)
@@ -765,8 +763,8 @@ func signedPolicyFromValue(v *value) (SignedPolicy, error) {
 func policyFromValue(v *value) (*Policy, error) {
 	m, err := obj(v,
 		"format", "version", "vault_id", "policy_seq", "prev_policy_digest",
-		"policy_digest", "owner_root", "readers", "writers", "admins",
-		"owners", "admin_delegations", "devices",
+		"owner_root", "readers", "writers", "admins", "owners",
+		"admin_delegations", "devices",
 	)
 	if err != nil {
 		return nil, err
@@ -785,9 +783,6 @@ func policyFromValue(v *value) (*Policy, error) {
 		return nil, err
 	}
 	if p.PrevPolicyDigest, err = bin(m, "prev_policy_digest", 64, true); err != nil {
-		return nil, err
-	}
-	if p.PolicyDigest, err = bin(m, "policy_digest", 64, false); err != nil {
 		return nil, err
 	}
 	if p.OwnerRoot, err = ownerRootFromValue(m["owner_root"]); err != nil {

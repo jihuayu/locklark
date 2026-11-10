@@ -150,7 +150,6 @@ func buildPolicy() *Policy {
 		VaultID:          "vault-01",
 		PolicySeq:        7,
 		PrevPolicyDigest: digest("policy-6"),
-		PolicyDigest:     digest("policy-7"),
 		OwnerRoot: OwnerRoot{
 			KeyID:     "owner-root-01",
 			Alg:       PolicySigAlgEd25519,
@@ -192,9 +191,9 @@ func buildPolicy() *Policy {
 }
 
 func buildFile() *File {
-	// The header digest of the current policy is a function of the policy
-	// document bytes. Policy.PolicyDigest is an opaque member carried inside
-	// those bytes; it is set here to a fixed value so the vector is stable.
+	// The header digest of the current policy is PolicyDigest over the
+	// canonical policy document bytes held in the proof; the policy carries
+	// no digest of itself.
 	base := buildPolicy()
 	p := clonePolicy(base)
 	doc := docFor(p)
@@ -202,14 +201,15 @@ func buildFile() *File {
 		Format:  Format,
 		Version: Version,
 		Header: Header{
-			VaultID:        "vault-01",
-			KeyEpoch:       3,
-			ContentSeq:     42,
-			RevisionID:     "rev-0042",
-			PrevDigest:     digest("content-41"),
-			OpID:           "op-0042",
-			PolicySeq:      7,
-			PolicyDigest:   policyDigest(&SignedPolicy{Document: doc}),
+			VaultID:    "vault-01",
+			KeyEpoch:   3,
+			ContentSeq: 42,
+			RevisionID: "rev-0042",
+			PrevDigest: digest("content-41"),
+			OpID:       "op-0042",
+			PolicySeq:  7,
+			// Placeholder; the digest is bound to the proof below.
+			PolicyDigest:   make([]byte, sha256.Size),
 			AuthorDeviceID: "device-1",
 		},
 		HeaderSig: Signature{SignerID: "device-1", Alg: SigAlgEd25519, Sig: pf(0x41, 64)},
@@ -229,6 +229,7 @@ func buildFile() *File {
 		CEKSlot:          CEKSlot{KeyEpoch: 3, WrappedCEK: []byte("synthetic-vuk-wrapped-cek")},
 		ContentSignature: Signature{SignerID: "device-1", Alg: SigAlgEd25519, Sig: pf(0x51, 64)},
 	}
+	f.Header.PolicyDigest = policyDigest(&f.SignedPolicyProofs[0])
 	return f
 }
 

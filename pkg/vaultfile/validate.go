@@ -46,8 +46,8 @@ func ValidateFile(f *File) error {
 		}
 	}
 	// Exactly one proof must carry the current policy (header policy_seq).
-	// Its digest is computed here from the carried document bytes;
-	// Policy.PolicyDigest is an opaque member and is not used as trust.
+	// Its digest is PolicyDigest over the carried document bytes; the policy
+	// carries no digest of itself.
 	var current *Policy
 	for i := range f.SignedPolicyProofs {
 		sp := &f.SignedPolicyProofs[i]
@@ -123,10 +123,22 @@ func ValidateFile(f *File) error {
 	return nil
 }
 
-// policyDigest is SHA-256 over the purpose domain and the canonical policy
-// document bytes carried in the proof.
+// policyDigest is the one and only policy digest (see PolicyDigest) of the
+// policy carried in the proof.
 func policyDigest(sp *SignedPolicy) []byte {
-	return DomainSeparated(UsagePolicyDocument, sp.Document)
+	return PolicyDigest(&sp.Policy)
+}
+
+// PolicyDigest is the SHA-256 digest of a policy, computed outside the policy
+// document and never stored inside it: SHA-256(UsagePolicyDocument || 0x00 ||
+// canonical policy document bytes). Header.PolicyDigest and the next policy's
+// PrevPolicyDigest both reference this one value.
+func PolicyDigest(p *Policy) []byte {
+	doc, err := EncodePolicyDocument(p)
+	if err != nil {
+		return nil
+	}
+	return DomainSeparated(UsagePolicyDocument, doc)
 }
 
 // ValidatePolicy checks a policy document on its own.
@@ -137,9 +149,8 @@ func ValidatePolicy(p *Policy) error {
 	if p.Format != Format || p.Version != Version || !validID(p.VaultID, MaxIDLength) {
 		return Err("", CodeInvalidValue)
 	}
-	if !validDigest(p.PolicyDigest) {
-		return Err("", CodeInvalidValue)
-	}
+	// The genesis policy has no predecessor; every later policy references
+	// exactly one predecessor digest.
 	if p.PolicySeq == 0 && p.PrevPolicyDigest != nil {
 		return Err("", CodeInvalidValue)
 	}

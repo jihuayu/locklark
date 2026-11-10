@@ -86,8 +86,7 @@ code re-parses it and requires byte equality with the canonical re-encoding.
   "version":            <version>,
   "vault_id":           <id>,
   "policy_seq":         <int>,
-  "prev_policy_digest": <base64url sha256> | null,   // null only at policy_seq 0
-  "policy_digest":      <base64url sha256>,
+  "prev_policy_digest": <base64url sha256> | null,   // null only for the genesis policy
   "owner_root":         { "key_id", "alg", "public_key", "owners": [ {Principal} ] },
   "readers":            [ {Member} ],
   "writers":            [ {Member} ],
@@ -110,6 +109,28 @@ code re-parses it and requires byte equality with the canonical re-encoding.
   one principal.
 - `PublicKey`: `{"alg": "ed25519", "public_key": <base64url>}`.
 - `DeviceSlot`: `{"device_id", "recipient": <age1...>, "wrapped_vuk": <base64url>}`.
+
+A policy carries no digest of itself. There is exactly one policy digest:
+
+```
+policy_digest(P) = SHA-256( "locklark.vault-file/v1/policy-document" || 0x00
+                            || canonical policy document bytes )
+```
+
+It is always computed outside the `Policy` document (the `/policy-document`
+domain label with the NUL separator, as in `DomainSeparated`), from the same
+canonical bytes that `SignedPolicy.document` carries. Two references point at
+this one value:
+
+- `Header.policy_digest` is `policy_digest` of the policy at
+  `Header.policy_seq`;
+- the next policy's `prev_policy_digest` is `policy_digest` of its
+  immediate predecessor.
+
+The genesis policy (`policy_seq` 0) has no predecessor, so its
+`prev_policy_digest` is `null`. Any later policy (`policy_seq` > 0) carries
+exactly one 32-byte `prev_policy_digest`. Whether a predecessor digest names an
+actually known prior policy is a sync decision, not a wire rule.
 
 Role semantics are fixed: the owner root is independent of any device, and
 the three device key roles (content signing, policy signing, age encryption)
@@ -135,10 +156,10 @@ The codec is strict:
 
 `ValidateFile` also checks the cross-member bindings: every policy proof names
 the header vault, exactly one proof carries the header policy sequence and its
-domain-separated digest matches `policy_digest`, the content signature names
-the authoring device, the header signature names a device with a policy
-signing key, the CEK slot epoch matches the header epoch, and the author's
-principal is a writer, admin or owner.
+`policy_digest` (as defined above) equals `Header.policy_digest`, the content
+signature names the authoring device, the header signature names a device with
+a policy signing key, the CEK slot epoch matches the header epoch, and the
+author's principal is a writer, admin or owner.
 
 The VUK slots are exactly the approved devices whose principal has read
 access (reader, writer, admin or owner): every such device has one slot and no
@@ -184,6 +205,7 @@ match.
 
 ## Out of scope
 
-This schema revision does not include signature verification,
+This schema revision does not include signature verification, permission
+checks, key or digest crypto beyond the fixed `policy_digest` definition,
 migration/import or product wiring. Encoding and validation are structural
 only and have not been reviewed for cryptographic correctness.

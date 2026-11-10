@@ -3,6 +3,7 @@ package vaultfile
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
 	"strings"
 	"testing"
@@ -33,11 +34,6 @@ func docFor(p *Policy) []byte {
 // clonePolicy deep-copies p so rebinding one copy never aliases another.
 func clonePolicy(p *Policy) *Policy {
 	q := *p
-	if q.PolicyDigest == nil {
-		q.PolicyDigest = make([]byte, 32)
-	} else {
-		q.PolicyDigest = bytes.Clone(q.PolicyDigest)
-	}
 	q.PrevPolicyDigest = bytes.Clone(q.PrevPolicyDigest)
 	q.OwnerRoot.PublicKey = bytes.Clone(q.OwnerRoot.PublicKey)
 	q.OwnerRoot.Owners = append([]Principal(nil), p.OwnerRoot.Owners...)
@@ -74,8 +70,7 @@ func setPolicy(f *File, p *Policy) {
 	f.Header.PolicySeq = cur.PolicySeq
 	f.SignedPolicyProofs[0].Document = doc
 	f.SignedPolicyProofs[0].Policy = *cur
-	// The header binds the domain-separated digest of the carried document,
-	// not the opaque digest member inside it.
+	// The header binds the domain-separated digest of the carried document.
 	f.Header.PolicyDigest = policyDigest(&f.SignedPolicyProofs[0])
 }
 
@@ -251,8 +246,12 @@ func TestJSONValueRules(t *testing.T) {
 	wrapped := base64.RawURLEncoding.EncodeToString([]byte("synthetic-vuk-wrapped-cek"))
 	_, err = ParseFile([]byte(strings.Replace(enc, wrapped, wrapped+"==", 1)))
 	wantCode(t, err, CodeInvalidValue)
+	// The same holds for the policy document's own binary members: a standard
+	// base64 alphabet must not stand in for canonical base64url.
 	standard := base64.StdEncoding.EncodeToString([]byte{0xfb, 0xef})
-	_, err = ParseFile([]byte(strings.Replace(enc, `"policy_digest":"`+base64.RawURLEncoding.EncodeToString(digest("policy-7"))+`"`, `"policy_digest":"`+standard+`"`, 1)))
+	doc := string(mustEncodeDoc(t))
+	prev := base64.RawURLEncoding.EncodeToString(digest("policy-6"))
+	_, err = ParsePolicyDocument([]byte(strings.Replace(doc, `"prev_policy_digest":"`+prev+`"`, `"prev_policy_digest":"`+standard+`"`, 1)))
 	wantCode(t, err, CodeInvalidValue)
 }
 
@@ -421,6 +420,63 @@ func TestGenesisPrevDigest(t *testing.T) {
 	if _, err := EncodeFile(f); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// TestPolicyDigestContract pins the single policy digest definition: it is
+// computed outside the policy, referenced by Header.PolicyDigest, and the next
+// policy's PrevPolicyDigest is the same value.
+func TestPolicyDigestContract(t *testing.T) {
+	f := buildFile()
+	sp := &f.SignedPolicyProofs[0]
+
+	// SHA-256(domain || NUL || canonical document bytes), computed by hand.
+	h := sha256.New()
+	h.Write([]byte(UsagePolicyDocument))
+	h.Write([]byte{0})
+	doc, err := EncodePolicyDocument(&sp.Policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.Write(doc)
+	want := h.Sum(nil)
+	if got := PolicyDigest(&sp.Policy); !bytes.Equal(got, want) {
+		t.Fatalf("PolicyDigest = %x, want %x", got, want)
+	}
+	if !bytes.Equal(f.Header.PolicyDigest, want) {
+		t.Fatal("Header.PolicyDigest does not reference the policy digest")
+	}
+
+	// The digest is not carried inside the policy, neither on the wire nor
+	// as a member of the carried document.
+	if strings.Contains(string(doc), `"policy_digest"`) {
+		t.Fatal("policy document carries a policy_digest member")
+	}
+	_, err = ParsePolicyDocument([]byte(strings.Replace(string(doc), `"policy_seq":7,`, `"policy_seq":7,"policy_digest":"`+base64.RawURLEncoding.EncodeToString(want)+`",`, 1)))
+	wantCode(t, err, CodeUnknownField)
+
+	// The next policy references the same value as its predecessor.
+	next := clonePolicy(&sp.Policy)
+	next.PolicySeq = 8
+	next.PrevPolicyDigest = PolicyDigest(&sp.Policy)
+	nextDoc, err := EncodePolicyDocument(next)
+	if err != nil {
+		t.Fatalf("policy chained to the digest rejected: %v", err)
+	}
+	if strings.Contains(string(nextDoc), `"policy_digest":"`+base64.RawURLEncoding.EncodeToString(next.PrevPolicyDigest)+`"`) {
+		t.Fatal("next policy carries its predecessor digest inside the document instead of only in prev_policy_digest")
+	}
+	if prev := next.PrevPolicyDigest; !bytes.Equal(prev, want) {
+		t.Fatalf("next PrevPolicyDigest = %x, want %x", prev, want)
+	}
+	// Genesis: no predecessor. A genesis policy with a predecessor digest is
+	// rejected; a later policy without one is rejected too.
+	next.PolicySeq = 0
+	_, err = EncodePolicyDocument(next)
+	wantCode(t, err, CodeInvalidValue)
+	next.PolicySeq = 8
+	next.PrevPolicyDigest = nil
+	_, err = EncodePolicyDocument(next)
+	wantCode(t, err, CodeInvalidValue)
 }
 
 func TestFineGrantedWithoutCrypto(t *testing.T) {

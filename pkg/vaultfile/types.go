@@ -25,8 +25,10 @@ type File struct {
 
 // Header is the minimal plaintext metadata and version tuple of a vault file.
 // Every field except prev_digest (nil only for the genesis content revision)
-// is mandatory. All identifiers that are not names are opaque byte strings
-// carried as base64url without padding.
+// is mandatory. PolicyDigest is the SHA-256 policy digest (PolicyDigest) of
+// the policy document at PolicySeq, computed outside the header. All
+// identifiers that are not names are opaque byte strings carried as
+// base64url without padding.
 type Header struct {
 	VaultID        string `json:"vault_id"`
 	KeyEpoch       uint64 `json:"key_epoch"`
@@ -56,13 +58,18 @@ type SignedPolicy struct {
 // The owner root is independent of any device: it is the security root of the
 // vault. Devices hold role-bound policy signing keys and content signing keys;
 // readers do not hold content signing keys.
+//
+// A policy carries no digest of itself. Its one and only digest is computed
+// outside this document (PolicyDigest), over the canonical encoding of the
+// policy; Header.PolicyDigest and the next policy's PrevPolicyDigest both
+// reference that same value. PrevPolicyDigest is nil exactly for the genesis
+// policy (policy_seq 0).
 type Policy struct {
 	Format           string            `json:"format"`
 	Version          int               `json:"version"`
 	VaultID          string            `json:"vault_id"`
 	PolicySeq        uint64            `json:"policy_seq"`
 	PrevPolicyDigest []byte            `json:"prev_policy_digest"`
-	PolicyDigest     []byte            `json:"policy_digest"`
 	OwnerRoot        OwnerRoot         `json:"owner_root"`
 	Readers          []Member          `json:"readers"`
 	Writers          []Member          `json:"writers"`

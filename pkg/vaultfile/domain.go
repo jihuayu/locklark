@@ -39,7 +39,11 @@ const (
 	UsageDeviceContentSigningKey = "locklark.vault-file/v1/key/device-content-signing"
 	UsageDevicePolicySigningKey  = "locklark.vault-file/v1/key/device-policy-signing"
 	UsageAgeEncryptionKey        = "locklark.vault-file/v1/key/age-x25519"
-	UsagePolicyDocument          = "locklark.vault-file/v1/policy-document"
+	// UsagePolicyDocument is the policy digest domain: the SHA-256 digest of
+	// a canonical policy document (PolicyDigest). It is computed outside the
+	// policy and referenced by Header.PolicyDigest and the next policy's
+	// PrevPolicyDigest.
+	UsagePolicyDocument = "locklark.vault-file/v1/policy-document"
 
 	// Digest algorithms named on the wire.
 	DigestSHA256 = DigestAlgSHA256
