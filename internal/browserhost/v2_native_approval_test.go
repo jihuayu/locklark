@@ -667,6 +667,39 @@ func TestV2SecureNoteCreateNamesEmptyPassword(t *testing.T) {
 	}
 }
 
+func TestV2ItemSaveEmptyPasswordWithItemIDNamesNoPassword(t *testing.T) {
+	c, _, s, cap := nonQuickFixture(t)
+	defer c.Close()
+	rows, e := s.List("active")
+	if e != nil || len(rows) != 1 {
+		t.Fatal("rows", e)
+	}
+	// The fixture login has a genuinely stored password, so an empty edit
+	// must never claim to write it.
+	save := mustReadRequest(t, map[string]any{"v": 1, "id": reqID(104), "type": "item-save", "capability": cap,
+		"item_id": rows[0].ID, "revision": rows[0].Revision,
+		"item_json": `{"category":"login","title":"Keeps Password","password":""}`})
+	if e := c.Handle(save); e != nil {
+		t.Fatal(e)
+	}
+	view := c.Snapshot().V2
+	if view == nil || view.Type != "item-save" || view.ItemID != rows[0].ID || view.Revision != rows[0].Revision {
+		t.Fatalf("item-save review: %#v", view)
+	}
+	if !v2ViewHas(view.RequestedFields, "标题") {
+		t.Fatalf("item-save review omitted the title: %#v", view.RequestedFields)
+	}
+	if v2ViewHas(view.RequestedFields, "密码") {
+		t.Fatalf("empty-password item-save named the kept password: %#v", view.RequestedFields)
+	}
+	if e := c.RejectV2(save.ID); e != nil {
+		t.Fatal(e)
+	}
+	if c.Snapshot().V2 != nil {
+		t.Fatal("rejected item-save review survived")
+	}
+}
+
 func TestV2HistoryAndPasskeySelectorsStayVisible(t *testing.T) {
 	c, out, s, cap := nonQuickFixture(t)
 	defer c.Close()
