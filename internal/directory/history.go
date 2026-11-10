@@ -88,12 +88,13 @@ func (h History) storageSize() (int, error) {
 // receipts and the one head snapshot.
 const historyBudgetBase = len(`{"receipts":[`) + len(`],"snapshot":`) + 1
 
-// retainedHistorySize projects the stored serialized History a commit would
-// leave behind: every stored receipt, the new receipt and the one current head
-// snapshot, framed exactly like History.storageSize (canonical receipt bytes,
-// end-of-receipt separators, canonical snapshot bytes and JSON framing). The
-// database keeps no historic snapshot, so none is counted.
-func retainedHistorySize(retained []Receipt, receipt Receipt, snapshot vault.Snapshot) (int, error) {
+// retainedHistorySize projects the stored serialized History a commit against
+// budget would leave behind: every stored receipt, the new receipt and the one
+// current head snapshot, framed exactly like History.storageSize (canonical
+// receipt bytes, end-of-receipt separators, canonical snapshot bytes and JSON
+// framing). The database keeps no historic snapshot, so none is counted.
+// Production passes MaxHistoryBytes; only package tests pass a smaller budget.
+func retainedHistorySize(retained []Receipt, receipt Receipt, snapshot vault.Snapshot, budget int) (int, error) {
 	size := historyBudgetBase
 	for n, r := range append(retained, receipt) {
 		raw := encoded(r)
@@ -104,7 +105,7 @@ func retainedHistorySize(retained []Receipt, receipt Receipt, snapshot vault.Sna
 		if n > 0 {
 			size++
 		}
-		if size > MaxHistoryBytes {
+		if size > budget {
 			return 0, ErrCapacity
 		}
 	}
@@ -112,7 +113,7 @@ func retainedHistorySize(retained []Receipt, receipt Receipt, snapshot vault.Sna
 	if len(raw) > 12<<20 {
 		return 0, ErrInvalid
 	}
-	if size+len(raw) > MaxHistoryBytes {
+	if size+len(raw) > budget {
 		return 0, ErrCapacity
 	}
 	return size + len(raw), nil

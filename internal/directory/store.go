@@ -272,7 +272,9 @@ func commit(path string, c *Config, sequencer ed25519.PrivateKey, p Proposal, s 
 	if err != nil {
 		return Receipt{}, ErrStorage
 	}
-	return commitWithClose(func() (Receipt, error) { return commitWithUpdate(db.Update, c, sequencer, p, s, initial) }, db.Close)
+	return commitWithClose(func() (Receipt, error) {
+		return commitWithUpdate(db.Update, c, sequencer, p, s, initial, MaxHistoryBytes)
+	}, db.Close)
 }
 func commitWithClose(run func() (Receipt, error), closeDB func() error) (out Receipt, err error) {
 	defer func() {
@@ -283,7 +285,11 @@ func commitWithClose(run func() (Receipt, error), closeDB func() error) (out Rec
 	}()
 	return run()
 }
-func commitWithUpdate(update func(func(*bolt.Tx) error) error, c *Config, sequencer ed25519.PrivateKey, p Proposal, s vault.Snapshot, initial bool) (Receipt, error) {
+
+// commitWithUpdate runs the whole commit transaction through update and checks
+// the retained History it would leave against budget before writing. Production
+// always passes MaxHistoryBytes; budget is a per-call value, never package state.
+func commitWithUpdate(update func(func(*bolt.Tx) error) error, c *Config, sequencer ed25519.PrivateKey, p Proposal, s vault.Snapshot, initial bool, budget int) (Receipt, error) {
 	if err := authorized(c, sequencer, p, s); err != nil {
 		return Receipt{}, err
 	}
@@ -342,9 +348,9 @@ func commitWithUpdate(update func(func(*bolt.Tx) error) error, c *Config, sequen
 		}
 		// Refuse the whole publication, inside this transaction, when the
 		// retained History it would leave behind (every stored receipt, this
-		// receipt and the one head snapshot) exceeds MaxHistoryBytes. Otherwise
-		// a valid commit could make every later read and publish fail.
-		if _, err := retainedHistorySize(retained.receipts, out, s); err != nil {
+		// receipt and the one head snapshot) exceeds budget. Otherwise a valid
+		// commit could make every later read and publish fail.
+		if _, err := retainedHistorySize(retained.receipts, out, s, budget); err != nil {
 			return err
 		}
 		if err := b.Bucket(recordsKey).Put(binary.BigEndian.AppendUint64(nil, p.Epoch), raw); err != nil {
