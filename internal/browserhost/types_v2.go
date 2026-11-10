@@ -24,6 +24,7 @@ func SupportedCapabilities() []string {
 		"checkout-frames-v1",
 		"watchtower-v1",
 		"attachments-v1",
+		"history-v1",
 		"cli-broker-v1",
 	}
 }
@@ -209,6 +210,18 @@ type BrowserItemDetail struct {
 	StrengthCategory string                    `json:"strength_category,omitempty"`
 	CreatedAt        int64                     `json:"created_at,omitempty"`
 	UpdatedAt        int64                     `json:"updated_at,omitempty"`
+}
+
+// BrowserHistoryEntry is a metadata-only password-history row. The previous
+// password and section snapshot never cross the browser boundary; the popup can
+// list entries and ask the native host to restore one by index.
+type BrowserHistoryEntry struct {
+	Index       int    `json:"index"`
+	Timestamp   int64  `json:"timestamp"`
+	Action      string `json:"action,omitempty"`
+	Title       string `json:"title,omitempty"`
+	Username    string `json:"username,omitempty"`
+	HasPassword bool   `json:"has_password"`
 }
 
 type BrowserItemMutation struct {

@@ -693,3 +693,28 @@ textarea:focus-visible, summary:focus-visible {
   text-align: left;
   overflow-wrap: anywhere;
 }
+
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0;
+}
+.history-entry {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 12px;
+}
+.history-entry .history-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.history-entry .history-time {
+  color: var(--muted);
+}

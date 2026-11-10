@@ -168,6 +168,15 @@
           <p id="checkout-status" class="note" role="status"></p>
         </section>
         <div id="detail-fields" class="detail-fields"></div>
+        <section id="detail-history" class="history" hidden>
+          <h3>历史版本</h3>
+          <p class="note">
+            只显示时间、变更类型与是否含密码；旧密码不会发送到浏览器。
+          </p>
+          <button id="detail-history-load" type="button">查看历史版本</button>
+          <div id="detail-history-list" class="history-list"></div>
+          <p id="detail-history-status" class="note" role="status"></p>
+        </section>
         <section id="passkey-detail" class="passkey-detail" hidden>
           <h3>Passkey</h3>
           <div id="passkey-select-row" class="passkey-select" hidden>

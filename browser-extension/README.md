@@ -132,6 +132,14 @@ names, non-secret settings and counts. Optional **idle auto-lock** (off by
 default) needs the `idle` permission, and optional **system notifications**
 (off by default, save or idle-lock only) need `notifications`.
 
+The item detail view can also list **password history** when the native host
+advertises `history-v1`. The browser receives only timestamps, labels and
+whether the old entry had a password; the old value never crosses the native
+boundary. Restoring one row is an explicit, revision-checked native mutation.
+Known identity providers (Google, Microsoft, Apple, GitHub, Okta) are labelled
+in the save banner, but there is no OAuth integration and the label never
+changes what is saved.
+
 **Two-factor setup capture** is also on by default. On pages that look like
 account-security pages, the content script decodes visible QR codes with the
 browser's `BarcodeDetector` and, for a valid `otpauth://totp` configuration,

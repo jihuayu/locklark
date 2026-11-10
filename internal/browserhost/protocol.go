@@ -80,6 +80,8 @@ type Request struct {
 	CleanupTTLSeconds int    `json:"cleanup_ttl_seconds,omitempty"`
 	// CredentialRevision binds the exact selected Passkey child revision.
 	CredentialRevision string `json:"credential_revision,omitempty"`
+	// HistoryIndex selects one password-history row for an explicit restore.
+	HistoryIndex int `json:"history_index,omitempty"`
 
 	Length      int   `json:"length,omitempty"`
 	Digits      *bool `json:"digits,omitempty"`
@@ -105,6 +107,9 @@ type Request struct {
 	// includeHIBPSet records whether include_hibp was present. ReadRequest is
 	// the only production constructor.
 	includeHIBPSet bool
+	// historyIndexSet records whether history_index was present, so a restore
+	// to index 0 is distinguishable from an omitted field.
+	historyIndexSet bool
 }
 
 func (r Request) Context() personal.BrowserContext {
@@ -351,6 +356,13 @@ func (r Request) valid() bool {
 		return r.ItemID == "" && r.Revision == ""
 	case "item-state":
 		return token.MatchString(r.Capability) && token.MatchString(r.ItemID) && revision.MatchString(r.Revision) && r.StateAction != "" && r.payload == nil && r.RequestID == "" && r.Nonce == ""
+	case "item-history":
+		return token.MatchString(r.Capability) && token.MatchString(r.ItemID) && revision.MatchString(r.Revision) &&
+			!r.historyIndexSet && r.payload == nil && r.RequestID == "" && r.Nonce == ""
+	case "item-restore-history":
+		return token.MatchString(r.Capability) && token.MatchString(r.ItemID) && revision.MatchString(r.Revision) &&
+			r.historyIndexSet && r.HistoryIndex >= 0 && r.HistoryIndex < maxBrowserHistoryEntries &&
+			r.payload == nil && r.RequestID == "" && r.Nonce == ""
 	case "passkey-remove":
 		return token.MatchString(r.Capability) && token.MatchString(r.ItemID) && revision.MatchString(r.Revision) && passkey.ValidCredentialID(r.CredentialID) &&
 			(r.CredentialRevision == "" || revision.MatchString(r.CredentialRevision)) &&
@@ -408,6 +420,7 @@ type Response struct {
 	Capability        string             `json:"capability,omitempty"`
 	GeneratedPassword string             `json:"generated_password,omitempty"`
 	HistoryID         string             `json:"history_id,omitempty"`
+	History           []BrowserHistoryEntry `json:"entries,omitempty"`
 	Candidates        []personal.Row     `json:"candidates,omitempty"`
 	Capabilities      []string           `json:"capabilities,omitempty"`
 	NeverOrigins      []string           `json:"never_origins,omitempty"`
@@ -1143,6 +1156,7 @@ func ReadRequest(reader io.Reader) (Request, error) {
 		CopyMode           string          `json:"copy_mode"`
 		CleanupTTLSeconds  int             `json:"cleanup_ttl_seconds"`
 		CredentialRevision string          `json:"credential_revision"`
+		HistoryIndex       *int            `json:"history_index"`
 		Checkout           json.RawMessage `json:"checkout"`
 	}
 	dec = json.NewDecoder(bytes.NewReader(raw))
@@ -1165,6 +1179,10 @@ func ReadRequest(reader io.Reader) (Request, error) {
 		CredentialID: wire.CredentialID, CopyTicket: wire.CopyTicket,
 		CopyMode: wire.CopyMode, CleanupTTLSeconds: wire.CleanupTTLSeconds,
 		CredentialRevision: wire.CredentialRevision,
+	}
+	if wire.HistoryIndex != nil {
+		r.HistoryIndex = *wire.HistoryIndex
+		r.historyIndexSet = true
 	}
 	r.NeverForOrigin = wire.NeverForOrigin != nil && *wire.NeverForOrigin
 	r.Checkout = checkout
@@ -1311,6 +1329,10 @@ func requestKeys(kind string) (required, optional []string, ok bool) {
 		return append(base, "capability", "item_json"), []string{"item_id", "revision"}, true
 	case "item-state":
 		return append(base, "capability", "item_id", "revision", "state_action"), nil, true
+	case "item-history":
+		return append(base, "capability", "item_id", "revision"), nil, true
+	case "item-restore-history":
+		return append(base, "capability", "item_id", "revision", "history_index"), nil, true
 	case "match-profiles":
 		// checkout-frames-v1: the checkout assertion is accepted on this
 		// operation only, and only the native policy decides what it means.

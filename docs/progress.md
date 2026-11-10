@@ -2,6 +2,8 @@
 
 # Locklark 开发进度
 
+2026-11-10（香港）：新增原生能力 `history-v1`：浏览器可读取条目历史版本的元数据（时间、类型、是否含密码）并按索引恢复，旧密码与隐藏字段永不下发；恢复复用原生 `item.history.restore` 与精确 revision 校验。身份提供商（Google/Microsoft/Apple/GitHub/Okta）只做保存横幅上的展示识别，不接入 OAuth。扩展 Node 测试 438 项、Go 历史契约 4 项通过；未在真实浏览器或桌面会话验证恢复流程。见[历史与提供商验证](browser-history-and-provider-validation.md)。
+
 2026-11-10（香港）：按[浏览器缺口盘点](browser-native-gap-inventory.md)落地第一批外围能力：弹窗已归档筛选与归档/取消归档、添加当前网站并填充（仅 URLs 的原生编辑）、显式打开内联菜单时聚焦首项、仅当前站点的 favicon、诊断报告导出、Open & Fill 优先登录页路径；并新增 `idle` 与 `notifications` 权限，实现默认关闭的空闲自动锁定与保存/锁定系统通知。扩展 Node 测试 434 项通过；Chromium/Firefox 权限白名单、打包校验（未签名 ZIP）通过。未在真实浏览器验证自动锁定触发时机与通知展示，权限变更需要重新过商店审核。上一批二维码捕获与粘贴保护仍在。
 
 2026-11-10（香港）：浏览器扩展补入两步验证二维码捕获与保存。内容脚本在账号安全类页面上用 `BarcodeDetector` 本地解码二维码，只把合法的 `otpauth://totp` 交给 worker；worker 绑定当前文档并返回该来源的 login 候选，页面只看到 issuer/account 与标题，用户点击后才以仅含 `otp` 的 `item-save` 变更写入。捕获 2 分钟过期、单次使用，锁库/断连清除，不新增浏览器权限或原生协议消息。扩展 Node 测试 427 项通过（本功能新增 10 项），原生契约用 `CGO_ENABLED=0 go test ./internal/browserhost -run 'TestItemSaveOTP|TestItemSaveRefusesInvalidOTP' -count=1` 四项通过；本机 cgo 链接受 SDK 影响失败，完整 browserhost 包另有本地 IPC 环境失败，均未据此记为通过。未在真实浏览器/真实站点运行，Chromium 系以外不可用，见[二维码捕获验收](browser-otp-qr-capture-validation.md)。

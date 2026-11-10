@@ -1184,3 +1184,19 @@ test("idle auto-lock and notifications stay bounded and opt-in", () => {
     false,
   );
 });
+
+test("identity provider recognition is display-only and cannot be spoofed", () => {
+  assert.equal(core.identityProviderFor("https://accounts.google.com/o/oauth2"), "Google");
+  assert.equal(core.identityProviderFor("https://login.microsoftonline.com/common"), "Microsoft");
+  assert.equal(core.identityProviderFor("https://appleid.apple.com/auth"), "Apple");
+  assert.equal(core.identityProviderFor("https://github.com/login"), "GitHub");
+  assert.equal(core.identityProviderFor("https://example.okta.com/login"), "Okta");
+  for (const host of [
+    "https://accounts.google.com.evil.test/",
+    "https://evil-accounts.google.com.test/",
+    "https://accounts.google.com@evil.test/",
+    "https://notgoogle.com/",
+    "not a url",
+  ])
+    assert.equal(core.identityProviderFor(host), "", host);
+});

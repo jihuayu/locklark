@@ -605,6 +605,8 @@ if (typeof importScripts === "function") importScripts("core.js");
       attachmentsSupported: !!capability && core.attachmentCapability(hostCapabilities),
       nativeClipboard: nativeClipboardSupported(),
       passkeyManagementSupported: passkeyManagementSupported(),
+      historySupported:
+        !!capability && hostCapabilities.includes("history-v1"),
       checkoutFramesSupported: checkoutFramePolicy(),
       vaultItems: vaultItems.map((item) => ({ ...item })),
       pending: !!pending || !!pendingOTP || !!pendingPasskey,
@@ -1799,6 +1801,8 @@ if (typeof importScripts === "function") importScripts("core.js");
         "cancel-copy-field": "copy-cancelled",
         "item-save": "saved",
         "item-state": "saved",
+        "item-history": "item-history",
+        "item-restore-history": "saved",
         generate: "generated",
         "fill-profile": "profile-fill",
         "match-profiles": "profiles",
@@ -1834,6 +1838,7 @@ if (typeof importScripts === "function") importScripts("core.js");
               "vault-list": ["items", "vault-items"],
               "item-save": ["item-saved", "saved"],
               "item-state": ["item-saved", "saved"],
+              "item-restore-history": ["item-saved", "saved"],
               "fill-profile": ["profile-fill"],
             }[call.type] || [expected];
       if (!accepted.includes(message.type)) {
@@ -3440,6 +3445,22 @@ if (typeof importScripts === "function") importScripts("core.js");
       updateBadge();
     }
   }
+  function publicHistory(entries) {
+    if (!Array.isArray(entries)) return [];
+    return entries.slice(0, 20).map((entry, index) => ({
+      index: Number.isInteger(entry?.index) ? entry.index : index,
+      timestamp: Number.isInteger(entry?.timestamp) ? entry.timestamp : 0,
+      action:
+        typeof entry?.action === "string" ? entry.action.slice(0, 64) : "",
+      title:
+        typeof entry?.title === "string" ? entry.title.slice(0, 256) : "",
+      username:
+        typeof entry?.username === "string"
+          ? entry.username.slice(0, 256)
+          : "",
+      has_password: entry?.has_password === true,
+    }));
+  }
   function candidateItems() {
     if (!context?.origin) return [];
     return rows
@@ -4725,6 +4746,8 @@ if (typeof importScripts === "function") importScripts("core.js");
       site,
       attachmentsSupported: !!capability && core.attachmentCapability(hostCapabilities),
       passkeyManagementSupported: passkeyManagementSupported(),
+      historySupported:
+        !!capability && hostCapabilities.includes("history-v1"),
       checkoutFramesSupported: checkoutFramePolicy(),
       passkeyConditionalSupported: passkeyConditionalSupported === true,
       watchtower: watchtowerReport,
@@ -5702,6 +5725,62 @@ if (typeof importScripts === "function") importScripts("core.js");
           clearCheckoutPicker();
           extra.itemState = await setItemState(message);
           break;
+        case "item-history": {
+          if (!capability || !hostCapabilities.includes("history-v1"))
+            throw Error("refused");
+          if (Object.keys(message).sort().join(",") !== "id,revision,type")
+            throw Error("refused");
+          const response = await request(
+            "item-history",
+            {
+              capability,
+              item_id: message.id,
+              revision: message.revision,
+            },
+            12000,
+          );
+          extra.history = {
+            item_id: response.item_id,
+            revision: response.revision,
+            entries: publicHistory(response.entries),
+          };
+          break;
+        }
+        case "item-restore-history": {
+          if (!capability || !hostCapabilities.includes("history-v1"))
+            throw Error("refused");
+          if (
+            Object.keys(message).sort().join(",") !==
+            "historyIndex,id,revision,type"
+          )
+            throw Error("refused");
+          if (
+            !Number.isInteger(message.historyIndex) ||
+            message.historyIndex < 0 ||
+            message.historyIndex > 19
+          )
+            throw Error("refused");
+          const response = await request(
+            "item-restore-history",
+            {
+              capability,
+              item_id: message.id,
+              revision: message.revision,
+              history_index: message.historyIndex,
+            },
+            20000,
+          );
+          if (response.type !== "item-saved") throw Error("refused");
+          detailCache.clear();
+          vaultItems = [];
+          vaultSearchGeneration++;
+          status = "已恢复历史版本";
+          extra.saved = {
+            item_id: response.item_id,
+            revision: response.revision,
+          };
+          break;
+        }
         case "fill": {
           const category = message.category ?? "login";
           if (

@@ -1867,6 +1867,15 @@
       ),
     );
     box.append(element("p", staged.origin || location.origin));
+    const provider = core?.identityProviderFor?.(staged.origin || location.origin);
+    if (provider)
+      box.append(
+        element(
+          "p",
+          "检测到 " + provider + " 账号登录；这里仍只保存普通登录，不接入第三方 OAuth。",
+          "status",
+        ),
+      );
     const titleLabel = element("label", "标题");
     const titleInput = element("input");
     titleInput.type = "text";

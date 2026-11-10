@@ -2611,6 +2611,89 @@ test("idle events do nothing when auto-lock is off", async () => {
   assert.equal(h.notifications.length, 0);
 });
 
+test("history entries are projected without password values", async () => {
+  const h = harness({
+    capabilities: ["history-v1"],
+    onRequest: (r) => {
+      if (r.type === "item-history")
+        return {
+          v: 1,
+          id: r.id,
+          type: "item-history",
+          item_id: r.item_id,
+          revision: r.revision,
+          entries: [
+            {
+              index: 0,
+              timestamp: 1700000000,
+              action: "edit",
+              title: "Old",
+              username: "ada",
+              has_password: true,
+              password: "leaked-secret",
+              sections: [{ password: "leaked-secret" }],
+            },
+          ],
+        };
+    },
+  });
+  await ready(h);
+  const reply = await h.send({
+    type: "item-history",
+    id: "b".repeat(32),
+    revision: "c".repeat(64),
+  });
+  assert.ok(reply.history, JSON.stringify(reply));
+  assert.equal(reply.history.entries.length, 1);
+  assert.equal(JSON.stringify(reply).includes("leaked-secret"), false);
+  assert.equal(reply.history.entries[0].has_password, true);
+  assert.equal(reply.history.entries[0].title, "Old");
+  const native = h.sent.find((r) => r.type === "item-history");
+  assert.equal(native.item_id, "b".repeat(32));
+  const unsupported = harness();
+  await ready(unsupported);
+  const refused = await unsupported.send({
+    type: "item-history",
+    id: "b".repeat(32),
+    revision: "c".repeat(64),
+  });
+  assert.equal(refused.history, undefined);
+});
+
+test("history restore sends the index and rejects out-of-bound values", async () => {
+  const h = harness({
+    capabilities: ["history-v1"],
+    onRequest: (r) => {
+      if (r.type === "item-restore-history")
+        return {
+          v: 1,
+          id: r.id,
+          type: "item-saved",
+          item_id: r.item_id,
+          revision: "e".repeat(64),
+        };
+    },
+  });
+  await ready(h);
+  const reply = await h.send({
+    type: "item-restore-history",
+    id: "b".repeat(32),
+    revision: "c".repeat(64),
+    historyIndex: 2,
+  });
+  assert.equal(reply.saved.item_id, "b".repeat(32));
+  assert.equal(reply.saved.revision, "e".repeat(64));
+  const native = h.sent.find((r) => r.type === "item-restore-history");
+  assert.equal(native.history_index, 2);
+  const bad = await h.send({
+    type: "item-restore-history",
+    id: "b".repeat(32),
+    revision: "c".repeat(64),
+    historyIndex: 20,
+  });
+  assert.equal(bad.saved, undefined);
+});
+
 test("vault search forwards only a valid archived state filter", async () => {
   const h = harness({
     onRequest: (r) => {

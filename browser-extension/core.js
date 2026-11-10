@@ -303,6 +303,29 @@ globalThis.LocklarkCore = (() => {
     "com.ng",
     "co.ke",
   ]);
+  // Display-only recognition of common identity providers. There is no OAuth
+  // integration: the label never changes what is saved and never bypasses the
+  // normal origin/model checks.
+  const IDENTITY_PROVIDERS = Object.freeze([
+    [/(^|\.)accounts\.google\.com$/i, "Google"],
+    [/(^|\.)login\.microsoftonline\.com$/i, "Microsoft"],
+    [/(^|\.)login\.live\.com$/i, "Microsoft"],
+    [/(^|\.)appleid\.apple\.com$/i, "Apple"],
+    [/(^|\.)github\.com$/i, "GitHub"],
+    [/(^|\.)okta\.com$/i, "Okta"],
+  ]);
+  function identityProviderFor(raw) {
+    let host = "";
+    try {
+      host = new URL(raw).hostname.toLowerCase();
+    } catch {
+      return "";
+    }
+    if (!host) return "";
+    for (const [pattern, name] of IDENTITY_PROVIDERS)
+      if (pattern.test(host)) return name;
+    return "";
+  }
   function originFromURL(raw) {
     if (
       typeof raw !== "string" ||
@@ -1781,6 +1804,7 @@ globalThis.LocklarkCore = (() => {
         ],
         "profile-fill": ["v", "id", "type", "profile_fill"],
         "item-detail": ["v", "id", "type", "item"],
+        "item-history": ["v", "id", "type", "item_id", "revision", "entries"],
         "copy-prepared": [
           "v",
           "id",
@@ -5911,6 +5935,7 @@ globalThis.LocklarkCore = (() => {
     looksLikeLocklarkSecret,
     pasteWarning,
     parseOTPAuthTOTP,
+    identityProviderFor,
   };
 })();
 if (typeof module !== "undefined") module.exports = globalThis.LocklarkCore;

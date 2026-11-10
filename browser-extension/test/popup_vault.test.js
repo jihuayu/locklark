@@ -493,3 +493,13 @@ test("rich icons and diagnostics stay bounded to the current site", () => {
   assert.match(optionsJS, /locklark-diagnostics\.json/);
   assert.match(backgroundJS, /async function diagnosticsSnapshot/);
 });
+
+test("popup exposes the bounded password-history surface", () => {
+  assert.match(popupHTML, /id="detail-history"/);
+  assert.match(popupHTML, /id="detail-history-load"/);
+  assert.match(popupJS, /loadHistoryVersions/);
+  assert.match(popupJS, /restoreHistoryVersion/);
+  assert.match(popupJS, /historySupported/);
+  assert.match(backgroundJS, /publicHistory/);
+  assert.match(backgroundJS, /item-restore-history/);
+});

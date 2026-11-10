@@ -986,6 +986,8 @@
     els.editorView.hidden = name !== "editor";
     document.body.dataset.view = name;
   }
+  let historyEntries = [];
+  let historyFor = "";
   function wipeDetail() {
     cancelPasskeyRemoval();
     clearCheckoutPickerView();
@@ -993,6 +995,11 @@
     if (els?.passkeyDetail) els.passkeyDetail.hidden = true;
     clearAttachmentBuffers();
     if (els?.detailFields) els.detailFields.replaceChildren();
+    historyEntries = [];
+    historyFor = "";
+    if (els?.detailHistory) els.detailHistory.hidden = true;
+    if (els?.detailHistoryList) els.detailHistoryList.replaceChildren();
+    if (els?.detailHistoryStatus) els.detailHistoryStatus.textContent = "";
     if (els) {
       els.detailTitle.textContent = "";
       els.detailNotes.textContent = "";
@@ -2048,6 +2055,15 @@
     els.detailUpdated.textContent = detail.updated_at
       ? "最近修改：" + detail.updated_at
       : "";
+    if (els?.detailHistory) {
+      els.detailHistory.hidden = lastState?.historySupported !== true;
+      if (historyFor !== detail.id) {
+        historyFor = detail.id;
+        historyEntries = [];
+        els.detailHistoryList?.replaceChildren();
+        if (els.detailHistoryStatus) els.detailHistoryStatus.textContent = "";
+      }
+    }
     els.detailFields.replaceChildren();
     const fields = detailFields(detail);
     for (const field of fields) {
@@ -3369,6 +3385,92 @@
       toast("收藏状态未更新");
     }
   }
+  function historyActionLabel(action) {
+    return (
+      {
+        edit: "修改",
+        "password-change": "修改密码",
+        "import-1pux": "从 1Password 导入",
+      }[action] ||
+      action ||
+      "修改"
+    );
+  }
+  function renderHistoryVersions() {
+    if (!els?.detailHistoryList) return;
+    els.detailHistoryList.replaceChildren();
+    if (els.detailHistoryStatus)
+      els.detailHistoryStatus.textContent = historyEntries.length
+        ? ""
+        : "没有可恢复的历史版本";
+    for (const entry of historyEntries) {
+      const row = document.createElement("div");
+      row.className = "history-entry";
+      const meta = document.createElement("span");
+      meta.className = "history-meta";
+      const time = document.createElement("span");
+      time.className = "history-time";
+      time.textContent = entry.timestamp
+        ? new Date(entry.timestamp * 1000).toLocaleString()
+        : "时间未知";
+      const label = document.createElement("span");
+      label.textContent = [
+        historyActionLabel(entry.action),
+        entry.has_password ? "含密码" : "无密码",
+        entry.title ? "标题：" + entry.title : "",
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      meta.append(time, label);
+      const restore = document.createElement("button");
+      restore.type = "button";
+      restore.textContent = "恢复";
+      restore.addEventListener("click", () =>
+        void restoreHistoryVersion(entry.index),
+      );
+      row.append(meta, restore);
+      els.detailHistoryList.append(row);
+    }
+  }
+  async function loadHistoryVersions() {
+    const detail = lastDetail;
+    if (!detail || !lastState?.historySupported) return;
+    if (els?.detailHistoryStatus)
+      els.detailHistoryStatus.textContent = "正在读取…";
+    try {
+      const reply = await classifyDetailAction({
+        type: "item-history",
+        id: detail.id,
+        revision: detail.revision,
+      });
+      if (lastDetail !== detail) return;
+      if (!reply?.history) throw Error("refused");
+      historyEntries = reply.history.entries || [];
+      renderHistoryVersions();
+    } catch {
+      if (els?.detailHistoryStatus)
+        els.detailHistoryStatus.textContent = "无法读取历史版本";
+    }
+  }
+  async function restoreHistoryVersion(index) {
+    const detail = lastDetail;
+    if (!detail || !Number.isInteger(index)) return;
+    const question = "恢复此历史版本？当前条目的密码、用户名和备注会被替换。";
+    if (typeof confirm === "function" && !confirm(question)) return;
+    try {
+      const reply = await classifyDetailAction({
+        type: "item-restore-history",
+        id: detail.id,
+        revision: detail.revision,
+        historyIndex: index,
+      });
+      if (!reply?.saved) throw Error("refused");
+      toast("已恢复历史版本");
+      await openDetail({ id: detail.id, revision: reply.saved.revision });
+    } catch {
+      toast("无法恢复此历史版本");
+    }
+  }
   function detailCurrentOrigin() {
     try {
       const origin = core.originFromURL(String(lastState?.origin || ""));
@@ -3511,6 +3613,10 @@
       detailOpenFill: q("#detail-open-fill"),
       detailArchive: q("#detail-archive"),
       detailAddSite: q("#detail-add-site"),
+      detailHistory: q("#detail-history"),
+      detailHistoryLoad: q("#detail-history-load"),
+      detailHistoryList: q("#detail-history-list"),
+      detailHistoryStatus: q("#detail-history-status"),
       detailTrash: q("#detail-trash"),
       detailFields: q("#detail-fields"),
       detailUrls: q("#detail-urls"),
@@ -3738,6 +3844,7 @@
       if (lastDetail?.urls?.length)
         void openAndFill(lastDetail, preferredFillURL(lastDetail));
     });
+    els.detailHistoryLoad?.addEventListener("click", () => void loadHistoryVersions());
     els.detailAddSite?.addEventListener("click", () => void detailAddSiteAndFill());
     els.detailArchive?.addEventListener("click", () => void detailArchiveToggle());
     els.detailTrash.addEventListener("click", () => void detailTrash());
