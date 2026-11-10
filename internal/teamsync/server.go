@@ -371,16 +371,18 @@ func (s *server) handle(r *http.Request, q request, budget int) (response, error
 		return fail(ErrUnknown)
 	}
 	// The commit is durable: from here on the only answer is the signed actual
-	// result, never a capacity refusal. The stored receipt must serialize to
-	// exactly the projected length; an impossible mismatch is a small signed
-	// unknown error, not a claim that the caller hit a budget.
+	// result: neither a length mismatch nor an unexpected capacity refusal from
+	// prepare may tell the caller that the commit hit a budget. Either way the
+	// answer is the small signed unknown error and the anchor does not move.
 	out := response{Status: "committed", Head: receipt.Checkpoint(), Receipt: &receipt}
 	if len(receipt.Proposal.Scope) != len(projection.Proposal.Scope) || receipt.Proposal.Epoch != projection.Proposal.Epoch || len(receipt.Proposal.Parent.Hash) != len(projection.Proposal.Parent.Hash) || !s.prepare(r.Context(), q, &out, budget) {
 		return fail(ErrUnknown)
 	}
 	if out.Status == "capacity" {
-		// prepare already signed this small unknown error in out's place.
-		return out, nil
+		// prepare replaced out with a signed capacity refusal, which must never
+		// tell the caller that a durable commit hit a budget. Return the small
+		// signed unknown error instead and leave the anchor where it was.
+		return fail(ErrUnknown)
 	}
 	if s.anchors.Advance(anchor, receipt.Checkpoint()) != nil {
 		return fail(ErrUnknown)
