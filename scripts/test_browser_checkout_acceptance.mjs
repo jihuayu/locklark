@@ -9,6 +9,7 @@ import {
   checkoutSameOrigin,
   checkoutRouteCase,
   chooseChildOrigin,
+  openCheckoutPicker,
 } from "./browser_checkout_acceptance.mjs";
 
 const TOP_ORIGIN = "https://login.locklark.test:8443";
@@ -174,8 +175,12 @@ test("fixture routing accepts only the known checkout query cases", () => {
     assert.throws(() => checkoutRouteCase(bad), /checkout/i);
 });
 
+// `options.status` is the popup's bounded public status line read after the
+// trusted fill click. `options.noPicker` models a popup that never shows the
+// picker after that one click, while the cancel control still "exists" in the
+// markup so a harness that skips the picker wait would press it.
 function pickerPopup(labels, options = {}) {
-  const state = { open: true };
+  const state = { open: options.noPicker !== true };
   const count = (selector) =>
     selector.includes('button[data-action="checkout-select"]')
       ? state.open
@@ -206,6 +211,8 @@ function pickerPopup(labels, options = {}) {
         return "当前页面来源：" + TOP_ORIGIN;
       if (selector === "#checkout-status")
         return "请选择一个结账表单来源；不会自动选择，也不会自动提交";
+      if (selector === "#status")
+        return options.status === undefined ? "已连接" : options.status;
       const match = selector.match(/:nth-child\((\d+)\)$/);
       if (match) return labels[Number(match[1]) - 1];
       return "";
@@ -322,6 +329,62 @@ test("missing or duplicate public origins are never guessed or forced", async ()
     /Expected exactly one explicit checkout child origin/,
   );
   assert.deepEqual(duplicate.clicked, ["#detail-fill"]);
+});
+
+test("the picker is requested by exactly one trusted fill click", async () => {
+  const popup = pickerPopup([TOP_LABEL, CARD_ORIGIN + FRAME_SUFFIX]);
+  await openCheckoutPicker(popup, eventually);
+  assert.deepEqual(popup.clicked, ["#detail-fill"]);
+
+  // The cancel path reuses the same request: no second request opens a
+  // different picker before the user cancels the first one.
+  const cancel = pickerPopup([TOP_LABEL, CARD_ORIGIN + FRAME_SUFFIX]);
+  await chooseChildOrigin(cancel, TOP_ORIGIN, CARD_ORIGIN, eventually, {
+    cancel: true,
+  });
+  assert.deepEqual(cancel.clicked, ["#detail-fill", "#checkout-cancel"]);
+});
+
+test("a picker that never appears is never reported as cancelled", async () => {
+  // A fixed public status is carried on the same bounded reason so the red
+  // stage stays diagnosable, while an unrecognised status is never echoed.
+  for (const [line, shown] of [
+    ["请选择要填充的结账表单来源；不会自动选择", "不会自动选择"],
+    ["当前原生宿主或浏览器不支持选择结账表单", "不支持选择结账表单"],
+    ["无法列出当前页面的结账表单", "无法列出当前页面的结账表单"],
+    ["本次请求被拒绝", "other (unrecognised public status)"],
+    [undefined, "other (unrecognised public status)"],
+    ["", "unavailable"],
+  ]) {
+    await assert.rejects(
+      () =>
+        chooseChildOrigin(
+          pickerPopup([TOP_LABEL], { status: line, noPicker: true }),
+          TOP_ORIGIN,
+          CARD_ORIGIN,
+          eventually,
+          { cancel: true },
+        ),
+      new RegExp(
+        "^Error: Checkout origin picker missing: popup status " +
+          shown.replace(/[()]/g, "\\$&") +
+          "$",
+      ),
+    );
+  }
+
+  // The unreadable popup status must not hide the bounded reason either.
+  const unreadable = pickerPopup([TOP_LABEL], { noPicker: true });
+  unreadable.text = async (selector) => {
+    if (selector === "#status") throw Error("Popup inspection failed");
+    return "";
+  };
+  await assert.rejects(
+    () => openCheckoutPicker(unreadable, eventually),
+    /^Error: Checkout origin picker missing: popup status unavailable$/,
+  );
+  // No cancel control may be pressed when the picker never appeared.
+  assert.deepEqual(unreadable.clicked, ["#detail-fill"]);
 });
 
 test("picker cancellation presses only the real cancel control", async () => {

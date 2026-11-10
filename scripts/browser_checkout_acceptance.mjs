@@ -499,6 +499,46 @@ async function openCardDetail(popup, fixture, eventually) {
   );
 }
 
+// The popup's bounded public status lines that only a card form picker can
+// set: the list was offered, the native host refused or does not support the
+// picker, or the one-time gesture was not accepted for this document.
+const CHECKOUT_PICKER_STATUS = [
+  "不会自动选择",
+  "不支持选择结账表单",
+  "无法列出当前页面的结账表单",
+  "已选择结账表单",
+  "已取消本次填充",
+];
+
+// Requests the metadata frame picker with one explicit trusted pointer click
+// on the real "#detail-fill" control. The popup only enumerates frames from a
+// trusted gesture with an active user activation, so this control must not be
+// clicked programmatically and the click must not be repeated: a second click
+// would either be swallowed by the in-flight request or reveal a different
+// failure. When no picker appears, the fixed public status is attached to the
+// same "Checkout origin picker missing" reason so the stage stays diagnosable.
+export async function openCheckoutPicker(popup, eventually) {
+  await popup.click("#detail-fill");
+  let shown = false;
+  try {
+    await eventually(async () => {
+      shown = (await popup.visible("#checkout-picker")) === true;
+      return shown;
+    }, "Checkout origin picker missing");
+  } catch (error) {
+    let status = "";
+    try {
+      status = String((await popup.text("#status")) || "");
+    } catch {}
+    const known = CHECKOUT_PICKER_STATUS.find((line) => status.includes(line));
+    assert(!shown, "Checkout origin picker missing");
+    throw Error(status
+      ? "Checkout origin picker missing: popup status " +
+        (known || "other (unrecognised public status)")
+      : "Checkout origin picker missing: popup status unavailable");
+  }
+}
+
 // Explicitly locate the non-top origin button by its exact public origin
 // label, then use the popup adapter's trusted pointer click on that exact
 // selector. No frame is chosen automatically, no ordinal position is assumed
@@ -520,11 +560,7 @@ export async function chooseChildOrigin(
     assert(key === "cancel", "Unsupported checkout choice option");
   const cancel = options.cancel === undefined ? false : options.cancel;
   assert(typeof cancel === "boolean", "Checkout cancel must be boolean");
-  await popup.click("#detail-fill");
-  await eventually(
-    async () => (await popup.visible("#checkout-picker")) === true,
-    "Checkout origin picker missing",
-  );
+  await openCheckoutPicker(popup, eventually);
   assert(
     (await popup.text("#checkout-current-page")) ===
       "当前页面来源：" + topOrigin,
@@ -973,9 +1009,15 @@ async function runPickerCancelJourney(driver, card, topOrigin) {
   assertNoNativeApproval(input);
   assertNoNativeProfileReview(input);
 
+  // A freshly opened popup: the picker is requested from this exact popup's
+  // own trusted "#detail-fill" click, never from a popup that a previous
+  // journey left open or that the harness closed by handling.
   const popup = await openPopup();
   await openCardDetail(popup, card, eventually);
   phase("checkout-picker-cancel:picker");
+  // The explicit trusted click must open the real picker before its cancel
+  // control is clicked; a journey whose picker never appeared fails here and
+  // never reports a cancellation.
   const choice = await chooseChildOrigin(
     popup,
     topOrigin,
