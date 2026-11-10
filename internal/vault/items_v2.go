@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jihuayu/locklark/internal/origin"
 )
@@ -450,18 +451,16 @@ func validURL(u string) bool {
 	return err == nil
 }
 
-func validSections(sections []ItemSection, mode legacyCheckMode) bool {
-	check := xmlText
-	if mode == legacyRead {
-		check = legacyValue
-	}
+// validSections checks section metadata strictly. Field values are JSON-only
+// data and remain valid-UTF-8, as before #95.
+func validSections(sections []ItemSection) bool {
 	if len(sections) > 64 {
 		return false
 	}
 	sectionIDs := map[string]bool{}
 	fieldIDs := map[string]bool{}
 	for _, s := range sections {
-		if !selectorID(s.ID) || sectionIDs[strings.ToLower(s.ID)] || len(s.Title) > 1024 || !check(s.Title) {
+		if !selectorID(s.ID) || sectionIDs[strings.ToLower(s.ID)] || len(s.Title) > 1024 || !xmlText(s.Title) {
 			return false
 		}
 		sectionIDs[strings.ToLower(s.ID)] = true
@@ -469,7 +468,7 @@ func validSections(sections []ItemSection, mode legacyCheckMode) bool {
 			return false
 		}
 		for _, f := range s.Fields {
-			if !selectorID(f.ID) || fieldIDs[strings.ToLower(f.ID)] || len(f.Label) > 1024 || !check(f.Label) || !validFieldTypeValue(f.Type) || len(f.Purpose) > 64 || !check(f.Purpose) || !check(f.Value) {
+			if !selectorID(f.ID) || fieldIDs[strings.ToLower(f.ID)] || len(f.Label) > 1024 || !xmlText(f.Label) || !validFieldTypeValue(f.Type) || len(f.Purpose) > 64 || !xmlText(f.Purpose) || !utf8.ValidString(f.Value) {
 				return false
 			}
 			fieldIDs[strings.ToLower(f.ID)] = true

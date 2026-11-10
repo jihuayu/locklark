@@ -191,11 +191,7 @@ func validItemsMode(items []Item, size int, mode legacyCheckMode) bool {
 		}
 		urls := map[string]bool{}
 		for _, u := range it.URLs {
-			label := xmlText
-			if mode == legacyRead {
-				label = legacyValue
-			}
-			if !validURL(u.URL) || !validMatchMode(u.MatchMode) || !label(u.Label) || len(u.Label) > 256 || urls[u.URL] {
+			if !validURL(u.URL) || !validMatchMode(u.MatchMode) || !xmlText(u.Label) || len(u.Label) > 256 || urls[u.URL] {
 				return false
 			}
 			urls[u.URL] = true
@@ -204,7 +200,7 @@ func validItemsMode(items []Item, size int, mode legacyCheckMode) bool {
 			}
 		}
 		if len(it.Sections) > 0 {
-			if !validSections(it.Sections, mode) {
+			if !validSections(it.Sections) {
 				return false
 			}
 			for _, s := range it.Sections {
@@ -238,7 +234,7 @@ func validItemsMode(items []Item, size int, mode legacyCheckMode) bool {
 			if h.Timestamp < 0 || len(h.Action) > 64 || !historyText(h, mode) {
 				return false
 			}
-			if len(h.Sections) > 0 && !validSections(h.Sections, mode) {
+			if len(h.Sections) > 0 && !validSections(h.Sections) {
 				return false
 			}
 			if !charge(len(h.Action) + len(h.Password) + len(h.Title) + len(h.Username) + len(h.Notes)) {
@@ -314,12 +310,20 @@ func validItemsMode(items []Item, size int, mode legacyCheckMode) bool {
 	}
 	return true
 }
+
+// historyText validates persisted history text. #95 tightened every field with
+// xmlText for new writes; older JSON-only snapshots may still carry valid
+// UTF-8 control characters in the value fields, while the Action metadata key
+// stays strictly XML text.
 func historyText(h ItemHistoryEntry, mode legacyCheckMode) bool {
+	if !xmlText(h.Action) {
+		return false
+	}
 	check := xmlText
 	if mode == legacyRead {
 		check = legacyValue
 	}
-	return check(h.Action) && check(h.Password) && check(h.Title) && check(h.Username) && check(h.Notes)
+	return check(h.Password) && check(h.Title) && check(h.Username) && check(h.Notes)
 }
 
 func SealItems(metadata []byte, items []Item, epoch uint64, recipients []*age.X25519Recipient, signer ed25519.PrivateKey) (Snapshot, error) {

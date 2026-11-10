@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"sort"
 	"testing"
 
 	"filippo.io/age"
@@ -112,10 +113,7 @@ func TestLegacySnapshotControlCharactersReadable(t *testing.T) {
 	if err := json.Unmarshal(raw, &envelope); err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(raw, []byte(`\u0001`)) {
-		t.Fatal("legacy fixture lost its serialized control characters")
-	}
-	if envelope.Sections[0].Fields[0].Value != legacyControlText || envelope.CreditCard.CardholderName != legacyControlText || envelope.Identity.FirstName != legacyControlText || envelope.History[0].Title != legacyControlText || envelope.History[0].Sections[0].Fields[0].Value != legacyControlText {
+	if !bytes.Contains(raw, []byte(`\u0001`)) || envelope.Sections[0].Fields[0].Value != legacyControlText || envelope.CreditCard.CardholderName != legacyControlText || envelope.Identity.FirstName != legacyControlText || envelope.History[0].Title != legacyControlText || envelope.History[0].Notes != legacyControlText {
 		t.Fatal("legacy fixture lost its control characters")
 	}
 
@@ -131,6 +129,9 @@ func TestLegacySnapshotControlCharactersReadable(t *testing.T) {
 	}
 }
 
+// TestNewWriteRejectsControlCharacters covers the fields #95 tightened for
+// persisted writes: custom field values are still strict, and the card,
+// identity and history values reject control characters.
 func TestNewWriteRejectsControlCharacters(t *testing.T) {
 	_, signer, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -140,49 +141,139 @@ func TestNewWriteRejectsControlCharacters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bad := map[string]func(*Item){
-		"section value": func(it *Item) {
-			it.Sections = []ItemSection{{ID: "s1", Title: "S", Fields: []CustomField{{ID: "f1", Label: "F", Type: FieldTypeText, Value: legacyControlText}}}}
-		},
-		"credit card": func(it *Item) { it.CreditCard = &CreditCardDetails{CardholderName: legacyControlText} },
-		"identity":    func(it *Item) { it.Identity = &IdentityDetails{FirstName: legacyControlText} },
-		"history title": func(it *Item) {
-			it.History = []ItemHistoryEntry{{Timestamp: 1, Action: "edit", Title: legacyControlText}}
-		},
-		"history notes": func(it *Item) {
-			it.History = []ItemHistoryEntry{{Timestamp: 1, Action: "edit", Notes: legacyControlText}}
-		},
-		"history section": func(it *Item) {
-			it.History = []ItemHistoryEntry{{Timestamp: 1, Action: "edit", Sections: []ItemSection{{ID: "h1", Title: "H", Fields: []CustomField{{ID: "hf1", Label: "F", Type: FieldTypeText, Value: legacyControlText}}}}}}
-		},
-		"direct XML notes": func(it *Item) { it.Notes = legacyControlText },
-		"direct XML title": func(it *Item) { it.Title = legacyControlText },
-		"direct XML url ": func(it *Item) {
-			it.URLs = []ItemURL{{URL: "https://example.test", MatchMode: "host", Label: legacyControlText}}
-		},
-		"invalid UTF-8": func(it *Item) {
-			it.Sections = []ItemSection{{ID: "s1", Title: "S", Fields: []CustomField{{ID: "f1", Label: "F", Type: FieldTypeText, Value: "\xff"}}}}
-		},
-	}
-	for name, mutate := range bad {
+	for name, mutate := range tightenedFieldControls() {
 		it := Item{ID: "strict", Kind: "login", Title: "Strict", Username: "u", Password: "p"}
 		mutate(&it)
-
 		if err := ValidateItems(nil, []Item{it}); !errors.Is(err, ErrSnapshot) {
 			t.Fatalf("%s: ValidateItems = %v, want ErrSnapshot", name, err)
 		}
 		if _, err := SealItems([]byte("new"), []Item{it}, 1, []*age.X25519Recipient{device.Recipient()}, signer); !errors.Is(err, ErrSnapshot) {
 			t.Fatalf("%s: SealItems = %v, want ErrSnapshot", name, err)
 		}
-		// The read-mode validator must not relax the JSON-only field rule for
-		// anything other than valid UTF-8: invalid bytes stay rejected.
-		if name == "invalid UTF-8" && validLegacyItems([]Item{it}, 0) {
-			t.Fatalf("%s: legacy validator accepted invalid UTF-8", name)
-		}
 	}
-	// Invalid UTF-8 in direct XML fields is rejected on the read path as well.
-	if validLegacyItems([]Item{{ID: "x", Kind: "login", Title: "\xff"}}, 0) {
-		t.Fatal("legacy validator accepted invalid UTF-8 in XML text")
+}
+
+// tightenedFieldControls mutates one #95 value field at a time. Section field
+// values stay on the pre-existing valid-UTF-8 rule, so they are only rejected for
+// invalid bytes (see "invalid UTF-8"); metadata lives in strictMetadataControls.
+func tightenedFieldControls() map[string]func(*Item) {
+	return map[string]func(*Item){
+		"credit card": func(it *Item) { it.CreditCard = &CreditCardDetails{CardholderName: legacyControlText} },
+		"identity":    func(it *Item) { it.Identity = &IdentityDetails{FirstName: legacyControlText} },
+		"history action": func(it *Item) {
+			it.History = []ItemHistoryEntry{{Timestamp: 1, Action: legacyControlText}}
+		},
+		"history title": func(it *Item) {
+			it.History = []ItemHistoryEntry{{Timestamp: 1, Action: "edit", Title: legacyControlText}}
+		},
+		"history notes": func(it *Item) {
+			it.History = []ItemHistoryEntry{{Timestamp: 1, Action: "edit", Notes: legacyControlText}}
+		},
+		"history password": func(it *Item) {
+			it.History = []ItemHistoryEntry{{Timestamp: 1, Action: "edit", Password: legacyControlText}}
+		},
+		"history username": func(it *Item) {
+			it.History = []ItemHistoryEntry{{Timestamp: 1, Action: "edit", Username: legacyControlText}}
+		},
+		"invalid UTF-8": func(it *Item) {
+			it.Sections = []ItemSection{{ID: "s1", Title: "S", Fields: []CustomField{{ID: "f1", Label: "F", Type: FieldTypeText, Value: "\xff"}}}}
+		},
+	}
+}
+
+// strictMetadataControls mutates metadata that was strict before #95 and must
+// stay strict on both the write and the legacy read paths.
+func strictMetadataControls() map[string]func(*Item) {
+	return map[string]func(*Item){
+		"url label": func(it *Item) {
+			it.URLs = []ItemURL{{URL: "https://example.test", MatchMode: "host", Label: legacyControlText}}
+		},
+		"section title": func(it *Item) {
+			it.Sections = []ItemSection{{ID: "s1", Title: legacyControlText, Fields: []CustomField{{ID: "f1", Label: "F", Type: FieldTypeText, Value: "v"}}}}
+		},
+		"field label": func(it *Item) {
+			it.Sections = []ItemSection{{ID: "s1", Title: "S", Fields: []CustomField{{ID: "f1", Label: legacyControlText, Type: FieldTypeText, Value: "v"}}}}
+		},
+		"field purpose": func(it *Item) {
+			it.Sections = []ItemSection{{ID: "s1", Title: "S", Fields: []CustomField{{ID: "f1", Label: "F", Type: FieldTypeText, Value: "v", Purpose: legacyControlText}}}}
+		},
+		"history action": func(it *Item) {
+			it.History = []ItemHistoryEntry{{Timestamp: 1, Action: legacyControlText}}
+		},
+		"history section title": func(it *Item) {
+			it.History = []ItemHistoryEntry{{Timestamp: 1, Action: "edit", Sections: []ItemSection{{ID: "h1", Title: legacyControlText, Fields: []CustomField{{ID: "hf1", Label: "F", Type: FieldTypeText, Value: "v"}}}}}}
+		},
+		"history field label": func(it *Item) {
+			it.History = []ItemHistoryEntry{{Timestamp: 1, Action: "edit", Sections: []ItemSection{{ID: "h1", Title: "H", Fields: []CustomField{{ID: "hf1", Label: legacyControlText, Type: FieldTypeText, Value: "v"}}}}}}
+		},
+		"direct XML notes": func(it *Item) { it.Notes = legacyControlText },
+		"direct XML url":   func(it *Item) { it.URL = "https://example.test/\x01" },
+	}
+}
+
+// TestControlCharacterFieldValuesReadable keeps the pre-#95 rule for JSON-only
+// custom field values, including sections stored in item history: valid UTF-8
+// control characters are read back unchanged.
+func TestControlCharacterFieldValuesReadable(t *testing.T) {
+	pub, signer, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	device, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	it := Item{
+		ID:       "legacy-fields",
+		Kind:     "login",
+		Title:    "Fields",
+		Username: "u",
+		Password: "p",
+		Sections: []ItemSection{{ID: "s1", Title: "S", Fields: []CustomField{{ID: "f1", Label: "F", Type: FieldTypeText, Value: legacyControlText}}}},
+		History:  []ItemHistoryEntry{{Timestamp: 1, Action: "edit", Sections: []ItemSection{{ID: "h1", Title: "H", Fields: []CustomField{{ID: "hf1", Label: "F", Type: FieldTypeText, Value: legacyControlText}}}}}},
+	}
+	if err := ValidateItems(nil, []Item{it}); err != nil {
+		t.Fatalf("custom field control characters must stay writable: %v", err)
+	}
+	snapshot, _ := pastSealItems(t, []byte("legacy"), []Item{it}, 1, []*age.X25519Recipient{device.Recipient()}, signer)
+	_, got, err := OpenItems(snapshot, device, pub, 1)
+	if err != nil {
+		t.Fatalf("legacy field snapshot rejected: %v", err)
+	}
+	if g := got[0]; g.Sections[0].Fields[0].Value != legacyControlText || g.History[0].Sections[0].Fields[0].Value != legacyControlText {
+		t.Fatalf("custom field values not preserved: %+v", g)
+	}
+}
+
+// TestStrictMetadataRejectedOnReadPath proves the legacy read mode does not
+// relax metadata that was strict before #95: a past-format snapshot carrying
+// such a value is rejected instead of silently read.
+func TestStrictMetadataRejectedOnReadPath(t *testing.T) {
+	pub, signer, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	device, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	controls := strictMetadataControls()
+	names := make([]string, 0, len(controls))
+	for name := range controls {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		mutate := controls[name]
+		it := Item{ID: "legacy-meta", Kind: "login", Title: "Strict", Username: "u", Password: "p"}
+		mutate(&it)
+		if validLegacyItems([]Item{it}, 0) {
+			t.Fatalf("%s: legacy read validator accepted strict metadata", name)
+		}
+		snapshot, _ := pastSealItems(t, []byte("legacy"), []Item{it}, 1, []*age.X25519Recipient{device.Recipient()}, signer)
+		if _, _, err := OpenItems(snapshot, device, pub, 1); !errors.Is(err, ErrSnapshot) {
+			t.Fatalf("%s: OpenItems = %v, want ErrSnapshot", name, err)
+		}
 	}
 }
 
