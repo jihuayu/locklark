@@ -1639,6 +1639,7 @@
   let otpDetector = null,
     otpScanning = false,
     otpScanTimer = null,
+    otpObserver = null,
     otpScans = 0;
   const otpSeen = new WeakSet(),
     otpPrompted = new Set();
@@ -1648,21 +1649,53 @@
       hash = ((hash << 5) + hash + text.charCodeAt(index)) >>> 0;
     return hash.toString(36) + ":" + text.length;
   }
-  function otpPageRelevant() {
+  function otpPageRelevant(candidates = []) {
     if (
       /2fa|mfa|two[-_]?factor|authenticator|totp|otp|setup|security/i.test(
         location.pathname + location.search,
       )
     )
       return true;
+    // Never read body.innerText here: it forces a full-page style/layout flush
+    // on every mutation. Title, headings, dialogs, forms and the candidate's
+    // nearest container are layout-free and enough to recognize setup pages.
+    const pieces = [];
     try {
-      const text = String(document.body?.innerText || "").slice(0, 20000);
-      return /two[- ]?factor|2fa|authenticator|scan (this|the) qr|qr code/i.test(
-        text,
+      pieces.push(String(document.title || ""));
+    } catch {}
+    let nodes = [];
+    try {
+      nodes = document.querySelectorAll(
+        "h1,h2,h3,[role='dialog'],dialog,form",
       );
     } catch {
-      return false;
+      nodes = [];
     }
+    for (const node of nodes) {
+      if (pieces.length >= 64) break;
+      try {
+        pieces.push(String(node.textContent || "").slice(0, 4000));
+      } catch {}
+    }
+    for (const node of candidates) {
+      if (pieces.length >= 72) break;
+      try {
+        let container = null;
+        if (typeof node.closest === "function")
+          container = node.closest("form,[role='dialog'],dialog,main,section");
+        if (!container) {
+          const parent = node.parentElement || null;
+          const tag = String(parent?.tagName || "").toUpperCase();
+          if (parent && tag !== "BODY" && tag !== "HTML") container = parent;
+        }
+        if (container)
+          pieces.push(String(container.textContent || "").slice(0, 4000));
+      } catch {}
+    }
+    const text = pieces.join("\n").slice(0, 20000);
+    return /two[- ]?factor|2fa|authenticator|scan (this|the) qr|qr code/i.test(
+      text,
+    );
   }
   function otpImages() {
     const found = [];
@@ -1757,22 +1790,43 @@
     }
     button(box, "忽略", () => dismiss());
   }
+  function stopOTPCapture() {
+    if (otpScanTimer) {
+      clearTimeout(otpScanTimer);
+      otpScanTimer = null;
+    }
+    if (otpObserver) {
+      try {
+        otpObserver.disconnect();
+      } catch {}
+      otpObserver = null;
+    }
+  }
   async function otpScan() {
     if (
       otpScanning ||
       !otpDetector ||
       siteSettings.otpCapture === false ||
       document.visibilityState !== "visible" ||
-      otpScans >= OTP_SCAN_LIMIT ||
-      host ||
-      !otpPageRelevant()
+      host
     )
       return;
+    if (otpScans >= OTP_SCAN_LIMIT) {
+      stopOTPCapture();
+      return;
+    }
+    // Candidate discovery is cheap and bounded. Do it before any page-text
+    // relevance check so ordinary pages never pay for relevance work and a
+    // scan with no QR-sized candidate exits without touching the page text.
+    const candidates = otpImages();
+    if (!candidates.length) return;
+    if (!otpPageRelevant(candidates)) return;
     otpScanning = true;
     try {
-      for (const node of otpImages()) {
+      for (const node of candidates) {
         otpSeen.add(node);
         otpScans++;
+        if (otpScans >= OTP_SCAN_LIMIT) stopOTPCapture();
         const found = await otpDecode(node);
         if (!found) continue;
         const key = otpHash(found.raw);
@@ -1786,6 +1840,10 @@
     }
   }
   function scheduleOTPScan(delay = 1500) {
+    if (otpScans >= OTP_SCAN_LIMIT) {
+      stopOTPCapture();
+      return;
+    }
     if (otpScanTimer || !otpDetector || siteSettings.otpCapture === false) return;
     otpScanTimer = setTimeout(() => {
       otpScanTimer = null;
@@ -1810,11 +1868,14 @@
     });
     if (typeof MutationObserver === "function") {
       try {
-        new MutationObserver(() => scheduleOTPScan()).observe(
-          document.documentElement,
-          { childList: true, subtree: true },
-        );
-      } catch {}
+        otpObserver = new MutationObserver(() => scheduleOTPScan());
+        otpObserver.observe(document.documentElement, {
+          childList: true,
+          subtree: true,
+        });
+      } catch {
+        otpObserver = null;
+      }
     }
   }
   void installOTPCapture();
