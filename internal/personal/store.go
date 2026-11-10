@@ -808,8 +808,10 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			if errors.Is(e, vault.ErrSnapshotCapacity) {
 				// The export shares the stored bound but encodes a wider
 				// artifact, so it can refuse a vault that fits. Keep the
-				// transaction going to journal the signed intent, then report
-				// the capacity refusal so no file is published.
+				// transaction going so the linked export intent is prepared,
+				// then return the capacity refusal from the Bolt update callback
+				// below: Bolt rolls back the transaction, including that
+				// prepared intent event, and no output file is published.
 				out.archive, e = nil, nil
 				capacity = true
 			}
