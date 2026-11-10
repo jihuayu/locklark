@@ -402,6 +402,13 @@ func pre99Archive(t *testing.T, src, pw string, key []byte, mutate func(*payload
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Baseline items exactly as the pre-#99 writer would have signed them:
+	// no sub-vault directory is carried, so every reference must be the
+	// default vault unless the caller re-signs matching metadata.
+	for n := range p.Items {
+		p.Items[n].VaultID = vault.DefaultVaultID
+	}
+	p.Vaults = nil
 	mutate(p)
 	i := recoveryIdentity(t, src, pw, key)
 	legacy := legacyRecoveryPayload{Generation: p.Generation, Epoch: p.Epoch, Items: p.Items, Chains: p.Chains}
@@ -459,7 +466,7 @@ func TestRecoveryRejectsItemsReferencingMissingSubVault(t *testing.T) {
 	// reference a custom VaultID. Restoring it would leave an orphan item that
 	// every later edit refuses with ErrMutationRefused.
 	archive, kit := pre99Archive(t, src, pw, key, func(p *payload) {
-		if len(p.Items) != 1 || p.Items[0].ID != id || p.Items[0].VaultID != sub.ID {
+		if len(p.Items) != 1 || p.Items[0].ID != id {
 			t.Fatalf("unexpected fixture items: %+v", p.Items)
 		}
 		p.Items[0].VaultID = sub.ID
@@ -478,5 +485,115 @@ func TestRecoveryRejectsItemsReferencingMissingSubVault(t *testing.T) {
 	after, err := os.ReadFile(archive)
 	if err != nil || !bytes.Equal(raw, after) {
 		t.Fatal("refused restore modified the source backup")
+	}
+}
+
+// seedRecoverySource creates a vault holding a sub-vault and one default-vault
+// item, then seals it so Backup can read a closed file.
+func seedRecoverySource(t *testing.T, src, pw string, key []byte) (id string, err error) {
+	t.Helper()
+	if err := Create(src, pw, key); err != nil {
+		t.Fatal(err)
+	}
+	s, err := UnlockSession(src, []byte(pw), key, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Lock()
+	if _, e := s.CreateVault("Synthetic Case", "", "", v2Gate(t, s)); e != nil {
+		return "", e
+	}
+	id, _, err = s.AddItem(vault.Item{
+		Kind:     "login",
+		Category: vault.CategoryLogin,
+		Title:    "Synthetic case login",
+		Username: "synthetic-case-user",
+		Password: "synthetic-case-password",
+	}, v2Gate(t, s))
+	return id, err
+}
+
+// currentFormatArchive writes a current-format backup whose signed payload is
+// re-mutated while carrying Vaults and attachment records. Only the kit
+// checksum is refreshed; the payload itself is re-signed through the same
+// encodeArchive path the writer uses.
+func currentFormatArchive(t *testing.T, src, pw string, key []byte, mutate func(*payload)) (string, string) {
+	t.Helper()
+	archive := filepath.Join(t.TempDir(), "current.llb")
+	kit, err := Backup(src, archive, pw, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := decodeArchive(archive, pw, key, kit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutate(p)
+	i := recoveryIdentity(t, src, pw, key)
+	rewriteRecoveryArchive(t, archive, kit, pw, key, i, *p)
+	raw, err := os.ReadFile(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(raw)
+	return archive, kit[:57] + "-" + b32.EncodeToString(sum[:])
+}
+
+func TestRecoveryVaultRefsMatchRuntimeExactIDs(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "source.ll")
+	pw, key, fresh := "synthetic-recovery-case", bytes.Repeat([]byte{0x74}, 16), bytes.Repeat([]byte{0x75}, 16)
+	id, err := seedRecoverySource(t, src, pw, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The mixed-case ID exists only in the re-signed fixture metadata, so the
+	// negative case proves checkRecoveredVaultRefs, not anything else.
+	upper := "MixedCase-Vault"
+	lower := strings.ToLower(upper)
+	// sign returns a current-format archive carrying exactly one VaultMeta.
+	sign := func(vaultID string) (string, string) {
+		return currentFormatArchive(t, src, pw, key, func(p *payload) {
+			if len(p.Items) != 1 || p.Items[0].ID != id {
+				t.Fatalf("unexpected fixture items: %+v", p.Items)
+			}
+			p.Items[0].VaultID = vaultID
+			p.Vaults = []vault.VaultMeta{{ID: upper, Name: "Mixed", CreatedAt: 1}}
+		})
+	}
+
+	// Metadata holds the upper-case ID while the item references the lower-case
+	// ID: the runtime accepts the metadata but vaultExists would treat the item
+	// as an orphan, so the signed payload carrying it must be refused.
+	archive, kit := sign(lower)
+	raw, err := os.ReadFile(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = decodeArchive(archive, pw, key, kit); !errors.Is(err, ErrBackupMissingSubVault) {
+		t.Fatalf("case-mismatched sub-vault reference was not refused: %v", err)
+	}
+	if data, err := os.ReadFile(archive); err != nil || !bytes.Equal(raw, data) {
+		t.Fatal("refused decode modified the source backup")
+	}
+
+	// Exact-case metadata and reference restore and stay editable through the
+	// same vaultExists rule.
+	archive, kit = sign(upper)
+	restored := filepath.Join(dir, "case-ok.ll")
+	if err = Restore(archive, restored, pw, key, kit, fresh); err != nil {
+		t.Fatalf("exact-case sub-vault reference was refused: %v", err)
+	}
+	s2, err := UnlockSession(restored, []byte(pw), fresh, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Lock()
+	rows, err := s2.ListByFilter(ItemFilter{State: "all"})
+	if err != nil || len(rows) != 1 || rows[0].ID != id || rows[0].VaultID != upper {
+		t.Fatalf("restored item lost its exact vault reference: %+v %v", rows, err)
+	}
+	if _, err = s2.SetFavorite(id, rows[0].Revision, true, v2Gate(t, s2)); err != nil {
+		t.Fatalf("restored exact-case item could not be edited: %v", err)
 	}
 }

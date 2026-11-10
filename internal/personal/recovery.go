@@ -147,21 +147,23 @@ func applyBackupAttachments(p *payload) error {
 }
 
 // checkRecoveredVaultRefs refuses any item that targets a custom sub-vault
-// absent from the backup's vault directory. Restoring such an item would
-// succeed yet leave it uneditable behind the vaultExists check.
+// absent from the backup's vault directory. It applies the runtime vaultExists
+// rule verbatim (empty or DefaultVaultID is always accepted; every other ID is
+// matched byte-for-byte), so a payload that would restore an orphan is never
+// accepted, and the signed payload itself is never rewritten.
 func checkRecoveredVaultRefs(p *payload) error {
 	if len(p.Items) > vault.MaxItems || len(p.Vaults) > maxVaults {
 		return invalid
 	}
 	known := make(map[string]struct{}, len(p.Vaults))
 	for _, v := range p.Vaults {
-		known[strings.ToLower(v.ID)] = struct{}{}
+		known[v.ID] = struct{}{}
 	}
 	for _, item := range p.Items {
 		if item.VaultID == "" || item.VaultID == vault.DefaultVaultID {
 			continue
 		}
-		if _, ok := known[strings.ToLower(item.VaultID)]; !ok {
+		if _, ok := known[item.VaultID]; !ok {
 			return ErrBackupMissingSubVault
 		}
 	}
@@ -420,6 +422,7 @@ func decodeArchive(path, pw string, key []byte, kit string) (*payload, error) {
 		return nil, invalid
 	}
 	p := &body.Body
+
 	if p.Generation != g || p.Items == nil || p.Epoch == 0 || p.Epoch == ^uint64(0) {
 		return nil, invalid
 	}
