@@ -8,12 +8,21 @@ import assert from "node:assert/strict";
 
 const CHECKOUT_DEFAULT_HOST = "checkout.locklark.test";
 const CHECKOUT_CROSS_SITE_HOST = "checkout.other.test";
+// The same-origin variant's child is the exact top HTTPS origin (same host
+// and the same ephemeral port), so every frame on that page shares one origin.
+const CHECKOUT_TOP_HOST = "login.locklark.test";
 const CHECKOUT_HOSTS = new Set([
   CHECKOUT_DEFAULT_HOST,
   CHECKOUT_CROSS_SITE_HOST,
+  CHECKOUT_TOP_HOST,
 ]);
 const CHECKOUT_APPROVE_LABEL = "批准本次跨源银行卡填充";
 const CHECKOUT_DENY_LABEL = "拒绝本次跨源银行卡填充";
+// A same-origin child is not a cross-origin proposal: the extension omits the
+// checkout assertion and the native owner sees the ordinary card profile
+// review. These are different fixed labels on purpose.
+const PROFILE_APPROVE_LABEL = "批准本次敏感字段填充";
+const PROFILE_DENY_LABEL = "拒绝本次敏感字段填充";
 const CHECKOUT_FRAME_LABEL = "（页面中的表单框架）";
 const MONTH_OPTIONS = Array.from({ length: 12 }, (_, index) => {
   const value = String(index + 1).padStart(2, "0");
@@ -35,7 +44,7 @@ function checkoutPort(port) {
   return text;
 }
 
-// Only the two synthetic hosts and the optional sandbox attribute are
+// Only the three synthetic hosts and the optional sandbox attribute are
 // accepted. A caller cannot inject an arbitrary iframe source or sandbox
 // tokens through the acceptance fixture.
 export function checkoutVariant(options = {}) {
@@ -68,8 +77,14 @@ function checkoutFrameSource(port, options = {}) {
 // are ordinary DOM forms: no product hook, no synthetic runtime message. The
 // optional variants are limited to an allowlisted card host and the exact
 // opaque-origin sandbox token `allow-scripts` (never `allow-same-origin`).
+// With the top host the child has the exact top origin (same port); a sandboxed
+// same-host child would be an opaque origin, so that combination is refused.
 export function checkoutTopHTML(port, options = {}) {
-  const { sandbox } = checkoutVariant(options);
+  const { host, sandbox } = checkoutVariant(options);
+  assert(
+    !(sandbox && host === CHECKOUT_TOP_HOST),
+    "Same-origin checkout variant cannot be sandboxed",
+  );
   const frameSource = checkoutFrameSource(port, options);
   const sandboxAttribute = sandbox ? ' sandbox="allow-scripts"' : "";
   return (
@@ -136,7 +151,7 @@ export function checkoutCardHTML() {
   );
 }
 
-export function checkoutFrameOrigin(topOrigin, options = {}) {
+function checkedTopOrigin(topOrigin) {
   let parsed;
   try {
     parsed = new URL(String(topOrigin || ""));
@@ -147,8 +162,26 @@ export function checkoutFrameOrigin(topOrigin, options = {}) {
     parsed.protocol === "https:" && parsed.port,
     "Checkout top origin must be an ephemeral HTTPS origin",
   );
+  return parsed;
+}
+
+export function checkoutFrameOrigin(topOrigin, options = {}) {
+  const parsed = checkedTopOrigin(topOrigin);
   const { host } = checkoutVariant(options);
   return "https://" + host + ":" + parsed.port;
+}
+
+// The same-origin variant's frame must be byte-identical to the top origin and
+// served by the exact allowlisted top host. Anything else is refused rather
+// than compared loosely.
+export function checkoutSameOrigin(topOrigin) {
+  const parsed = checkedTopOrigin(topOrigin);
+  assert(
+    parsed.hostname === CHECKOUT_TOP_HOST &&
+      parsed.origin === String(topOrigin),
+    "Checkout same-origin variant requires the exact top origin",
+  );
+  return parsed.origin;
 }
 
 // The local HTTPS fixture routes only the exact acceptance paths and query
@@ -173,6 +206,8 @@ export function checkoutRouteCase(requestURL) {
       return { kind: "checkout", options: { host: CHECKOUT_CROSS_SITE_HOST } };
     if (variants[0] === "sandbox")
       return { kind: "checkout", options: { sandbox: true } };
+    if (variants[0] === "same-origin")
+      return { kind: "checkout", options: { host: CHECKOUT_TOP_HOST } };
     assert(false, "Unknown checkout variant");
   }
   const cases = url.searchParams.getAll("case");
@@ -409,6 +444,19 @@ function assertNoNativeApproval(input) {
   }
 }
 
+// The ordinary card profile review (same-origin child) must not be offered
+// either, so no frame picker path can leak into the profile approval.
+function assertNoNativeProfileReview(input) {
+  const controls = nativeControls(input);
+  for (const label of [PROFILE_APPROVE_LABEL, PROFILE_DENY_LABEL]) {
+    const control = nativeControl(controls, label);
+    assert(
+      !control.enabled && !control.showing,
+      "Native profile approval must not be available",
+    );
+  }
+}
+
 // Opens the synthetic card from the vault list by its exact item id, then
 // waits for the detail action that starts the real frame picker.
 async function openCardDetail(popup, fixture, eventually) {
@@ -454,14 +502,24 @@ async function openCardDetail(popup, fixture, eventually) {
 // Explicitly locate the non-top origin button by its exact public origin
 // label, then use the popup adapter's trusted pointer click on that exact
 // selector. No frame is chosen automatically, no ordinal position is assumed
-// and no runtime message is synthesized. Returns false when the expected
-// origin is absent from the public picker so the caller can prove exclusion.
+// and no runtime message is synthesized. Returns `selected: false` when the
+// expected origin is absent from the public picker so the caller can prove
+// exclusion, or when the user pressed the picker's own cancel control.
 export async function chooseChildOrigin(
   popup,
   topOrigin,
   frameOrigin,
   eventually,
+  options = {},
 ) {
+  assert(
+    options && typeof options === "object" && !Array.isArray(options),
+    "Checkout choice options must be an object",
+  );
+  for (const key of Object.keys(options))
+    assert(key === "cancel", "Unsupported checkout choice option");
+  const cancel = options.cancel === undefined ? false : options.cancel;
+  assert(typeof cancel === "boolean", "Checkout cancel must be boolean");
   await popup.click("#detail-fill");
   await eventually(
     async () => (await popup.visible("#checkout-picker")) === true,
@@ -489,17 +547,48 @@ export async function chooseChildOrigin(
     if ((await popup.text(selector)) === frameOrigin + CHECKOUT_FRAME_LABEL)
       matches.push(index);
   }
+  // The top origin carries its own "（当前页面）" label, so even in the
+  // same-origin variant the exact frame label identifies one child only.
+  // Duplicate frame labels are ambiguous on every origin and are refused
+  // rather than resolved by taking the first candidate.
   assert(
     matches.length <= 1,
     "Expected exactly one explicit checkout child origin",
   );
-  if (!matches.length) return false;
-  await popup.click(
-    '#checkout-choices button[data-action="checkout-select"]:nth-child(' +
-      matches[0] +
-      ")",
+  // `null` means the requested child origin is absent from the public list.
+  const match = matches.length === 1 ? matches[0] : null;
+  const cancelSelector = "#checkout-cancel";
+  assert(
+    (await popup.count(cancelSelector)) === 1 &&
+      (await popup.visible(cancelSelector)) === true &&
+      (await popup.disabled(cancelSelector)) === false,
+    "Checkout picker cancel control unavailable",
   );
-  return true;
+  const target =
+    match == null
+      ? null
+      : '#checkout-choices button[data-action="checkout-select"]:nth-child(' +
+        match +
+        ")";
+  if (match != null && !cancel) {
+    await popup.click(target);
+    return { selected: true };
+  }
+  // An absent origin is a read-only result: the caller decides whether to
+  // prove exclusion by cancelling. A candidate that exists but was not chosen
+  // without an explicit cancel request would silently drop the picker.
+  if (match == null && !cancel) return { selected: false };
+  assert(cancel, "Checkout picker cancellation was not requested");
+  // The actual popup cancel control, with a real trusted click while nothing
+  // is selected. No candidate button is pressed.
+  await popup.click(cancelSelector);
+  await eventually(
+    async () =>
+      (await popup.visible("#checkout-picker")) === false &&
+      (await popup.count('#checkout-choices button')) === 0,
+    "Checkout picker cancel did not close",
+  );
+  return { selected: false };
 }
 
 async function runDefaultJourneys(driver, card, topOrigin, frameOrigin) {
@@ -776,6 +865,147 @@ async function runStaleDocumentJourney(driver, card, topOrigin) {
   );
 }
 
+// The same-origin variant embeds its child on the exact top origin (same host
+// and port). The extension therefore sends no checkout proposal and the native
+// owner shows the ordinary "敏感字段" card review. The journey proves both
+// forms stay blank until that exact native approval, then that only the
+// selected child document is filled: top form and PIN untouched, no submit.
+async function runSameOriginJourney(driver, card, topOrigin) {
+  const { page, input, openPopup, phase, eventually } = driver;
+  const frameOrigin = checkoutSameOrigin(topOrigin);
+  const frameURL = frameOrigin + "/card";
+  phase("checkout-same-origin:navigation");
+  await page.goto(topOrigin + "/checkout?variant=same-origin");
+  // Before any popup or selection action: the exact top-origin child exists,
+  // both forms are blank and no native decision is available.
+  await eventually(
+    async () => cardFrame(page, frameOrigin) !== null,
+    "Same-origin checkout card frame did not load",
+  );
+  const child = cardFrame(page, frameOrigin);
+  assert(child && child !== page.mainFrame(), "Child must be an embedded frame");
+  assert(
+    child.url() === frameURL,
+    "Same-origin child must be the exact top-origin card",
+  );
+  assert(
+    checkoutFrameOrigin(topOrigin, { host: CHECKOUT_TOP_HOST }) === frameOrigin,
+    "Same-origin frame origin must equal the top origin",
+  );
+  phase("checkout-same-origin:blank");
+  await assertControls(page, frameOrigin);
+  await assertBothBlank(
+    page,
+    frameOrigin,
+    "Same-origin checkout forms must stay blank",
+  );
+  assertNoNativeApproval(input);
+  assertNoNativeProfileReview(input);
+
+  const popup = await openPopup();
+  await openCardDetail(popup, card, eventually);
+  const choice = await chooseChildOrigin(
+    popup,
+    topOrigin,
+    frameOrigin,
+    eventually,
+  );
+  assert(choice.selected === true, "Same-origin child was not selected");
+  input([{ wait_label: PROFILE_APPROVE_LABEL }]);
+  phase("checkout-same-origin:native-review");
+  await assertBothBlank(
+    page,
+    frameOrigin,
+    "Same-origin checkout forms changed before native approval",
+  );
+  // The same-origin review is the ordinary profile review, not the checkout
+  // one: the cross-origin labels stay absent while only the profile approval
+  // is visible. The approve click below uses that profile label, so the journey
+  // cannot pass through the cross-origin approval path.
+  assertNoNativeApproval(input);
+  const review = nativeControl(nativeControls(input), PROFILE_APPROVE_LABEL);
+  assert(
+    review.enabled && review.showing,
+    "Same-origin native profile approval must be visible",
+  );
+  phase("checkout-same-origin:approve");
+  input([{ click_label: PROFILE_APPROVE_LABEL }]);
+  await eventually(
+    async () => cardMatches(card, await childFormState(page, frameOrigin)),
+    "Approved same-origin fill did not reach the child frame",
+  );
+  // The same-origin child still rides the checkout fill path, so its terminal
+  // public status is the fixed "已请求填充结账表单…" one. The exact child,
+  // top and PIN states are re-read after it settles.
+  await eventually(
+    async () =>
+      String((await popup.text("#status")) || "").includes(
+        "已请求填充结账表单",
+      ),
+    "Same-origin fill did not finish",
+    8000,
+  );
+  assertNoNativeProfileReview(input);
+  await assertOnlyChildFilled(page, frameOrigin, card);
+}
+
+// A fresh same-site cross-origin checkout page: the card picker is opened with
+// real popup clicks and withdrawn through the popup's own cancel control while
+// no native approval exists. Nothing may be written and no approval (checkout
+// or profile) may become available afterwards.
+async function runPickerCancelJourney(driver, card, topOrigin) {
+  const { page, input, openPopup, phase, eventually } = driver;
+  const frameOrigin = checkoutFrameOrigin(topOrigin);
+  phase("checkout-picker-cancel:navigation");
+  // The deny case is an allowed fresh default-route document; the picker is
+  // withdrawn before any choice, so the case never reaches the native owner.
+  await page.goto(topOrigin + "/checkout?case=deny");
+  await eventually(
+    async () => (await childFormState(page, frameOrigin)) !== null,
+    "Fresh checkout card frame did not load",
+  );
+  await assertControls(page, frameOrigin);
+  await assertBothBlank(
+    page,
+    frameOrigin,
+    "Fresh checkout forms must stay blank",
+  );
+  assertNoNativeApproval(input);
+  assertNoNativeProfileReview(input);
+
+  const popup = await openPopup();
+  await openCardDetail(popup, card, eventually);
+  phase("checkout-picker-cancel:picker");
+  const choice = await chooseChildOrigin(
+    popup,
+    topOrigin,
+    frameOrigin,
+    eventually,
+    { cancel: true },
+  );
+  assert(choice.selected === false, "Picker cancel must not select a frame");
+  await eventually(
+    async () => {
+      const status = String((await popup.text("#status")) || "");
+      return !status.includes("原生窗口核对");
+    },
+    "Cancelled checkout picker still requests native approval",
+  );
+  // Give any stray native request time to surface before proving its absence.
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assertNoNativeApproval(input);
+  assertNoNativeProfileReview(input);
+  await assertBothBlank(
+    page,
+    frameOrigin,
+    "Cancelled checkout picker wrote a value",
+  );
+  assert(
+    (await popup.count('#checkout-choices button')) === 0,
+    "Cancelled checkout picker must keep no candidate",
+  );
+}
+
 export async function acceptCheckoutFrames(driver) {
   const { page, origin, input, fixture, openPopup, phase, eventually } = driver;
   assert(
@@ -793,15 +1023,20 @@ export async function acceptCheckoutFrames(driver) {
   );
   const card = checkedFixture(fixture);
   const topOrigin = String(origin || "");
+  const parsed = checkedTopOrigin(topOrigin);
+  assert(
+    parsed.hostname === CHECKOUT_TOP_HOST && parsed.origin === topOrigin,
+    "Checkout acceptance requires the exact synthetic top origin",
+  );
   const frameOrigin = checkoutFrameOrigin(topOrigin);
-  let parsed;
+  let current;
   try {
-    parsed = new URL(page.url());
+    current = new URL(page.url());
   } catch {
     throw Error("Checkout top document URL missing");
   }
   assert(
-    parsed.pathname === "/checkout",
+    current.pathname === "/checkout" && current.origin === topOrigin,
     "Checkout contact route must be the top document",
   );
 
@@ -809,4 +1044,8 @@ export async function acceptCheckoutFrames(driver) {
   await runCrossSiteJourney(driver, card, topOrigin);
   await runSandboxJourney(driver, card, topOrigin);
   await runStaleDocumentJourney(driver, card, topOrigin);
+  // Same-origin after the stale journey so its exact child assertion runs on
+  // a fresh same-origin document rather than the stale replaced one.
+  await runSameOriginJourney(driver, card, topOrigin);
+  await runPickerCancelJourney(driver, card, topOrigin);
 }
