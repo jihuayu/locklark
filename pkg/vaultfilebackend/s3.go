@@ -92,14 +92,30 @@ type S3Config struct {
 //     5xx responses, 429, and unparseable or ambiguous responses are
 //     ErrUnknown: the write may or may not have committed.
 //
-// Read maps a missing key (NoSuchKey or any non-conditional 404) to
-// ErrNotFound, a caller cancellation to ErrDenied, an authorization 4xx to
-// ErrDenied, an ETag that cannot be safely handed back as an If-Match value
-// (see validStrongETag: weak, list, OWS-padded, control characters, empty or
-// over MaxRevisionSize; an opaque tag containing ',' is valid) to ErrCorrupt,
-// and timeouts, transport failures, 5xx and unparseable responses to
-// ErrUnknown. A body larger than MaxValueSize is ErrCorrupt. List returns
-// ErrUnsupported.
+// Error mapping (Read). Read never writes: ErrUnknown here means only that
+// the bytes and revision were not reliably obtained, and the caller may retry
+// Read.
+//   - A missing key (any 404, conditional or not) is ErrNotFound.
+//   - Any other 4xx response (authorization, malformed request) is ErrDenied;
+//     a 5xx, 429, or any response whose status is neither 4xx nor 5xx is
+//     ErrUnknown.
+//   - Transport failures whose request definitely did not reach the service
+//     (DNS lookup, dial/connect, certificate verification; see notSent), and
+//     a caller cancellation that the SDK reports as not sent, are ErrDenied:
+//     nothing was read or written. A caller cancellation observed before any
+//     request or after the body was read is ErrDenied.
+//   - Transport failures after the request was (possibly) sent, timeouts,
+//     5xx responses, 429, and unparseable or ambiguous responses are
+//     ErrUnknown: no reliable bytes or revision were obtained, and the caller
+//     may retry Read.
+//   - An ETag that cannot be safely handed back as an If-Match value (see
+//     validStrongETag: weak, list, OWS-padded, control characters, empty or
+//     over MaxRevisionSize; an opaque tag containing ',' is valid) is
+//     ErrCorrupt.
+//   - A body larger than MaxValueSize, or a body whose length does not match
+//     Content-Length, is ErrCorrupt.
+//
+// List returns ErrUnsupported.
 //
 // This bridge is only verified against an in-process TLS S3 mock. It is not
 // wired to product or account code and has not been accepted against any real
