@@ -1048,11 +1048,21 @@ var validStrongETagCases = []struct {
 	{`"9b2cf535f27731c974343645a3985328-3"`, true},
 	{`""`, true},
 	{"\"obs\x80text\"", true},
+	// ',' is etagc (RFC 9110 §8.8.3): an opaque tag may contain it, and it
+	// must not be mistaken for the list separator, which only ever sits
+	// outside the quotes.
+	{`"a,b"`, true},
+	{`"provider,opaque"`, true},
+	{`","`, true},
 	{``, false},
 	{`abc`, false},
 	{`"abc`, false},
 	{`abc"`, false},
+	// Real lists have a DQUOTE inside the value (or after the closing one).
 	{`"a","b"`, false},
+	{`"a", "b"`, false},
+	{`"a,b","c"`, false},
+	{`"abc",`, false},
 	{`*`, false},
 	{`W/"abc"`, false},
 	{`w/"abc"`, false},
@@ -1255,18 +1265,20 @@ func TestS3ReadRejectsUnsafeETag(t *testing.T) {
 			t.Fatalf("read with ETag %q = %v, want ErrCorrupt", etag, err)
 		}
 	}
-	// A legal quoted ETag is returned unmodified, quotes and all.
-	const legal = `"a-b-c"`
-	m.setHook(func(w http.ResponseWriter, r *http.Request) bool {
-		w.Header().Set("ETag", legal)
-		w.Header().Set("Content-Length", "4")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("body"))
-		return true
-	})
-	res, err := b.Read(context.Background(), "vault.db")
-	if err != nil || string(res.Revision) != legal || string(res.Bytes) != "body" {
-		t.Fatalf("legal ETag read = %q %q, %v, want verbatim %q", res.Revision, res.Bytes, err, legal)
+	// A legal quoted ETag is returned unmodified, quotes and all, including
+	// an opaque value containing ','.
+	for _, legal := range []string{`"a-b-c"`, `"a,b"`} {
+		m.setHook(func(w http.ResponseWriter, r *http.Request) bool {
+			w.Header().Set("ETag", legal)
+			w.Header().Set("Content-Length", "4")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("body"))
+			return true
+		})
+		res, err := b.Read(context.Background(), "vault.db")
+		if err != nil || string(res.Revision) != legal || string(res.Bytes) != "body" {
+			t.Fatalf("legal ETag read = %q %q, %v, want verbatim %q", res.Revision, res.Bytes, err, legal)
+		}
 	}
 	// The SDK deserializer trims external OWS off ETag, which can only turn a
 	// legal tag into a legal tag; it can never hide an unsafe one.
@@ -1275,6 +1287,63 @@ func TestS3ReadRejectsUnsafeETag(t *testing.T) {
 		if validStrongETag(v) && !validStrongETag(trimmed) {
 			t.Errorf("header %q is accepted verbatim but its trimmed form %q is not", v, trimmed)
 		}
+	}
+}
+
+// TestS3ReadThenReplaceOpaqueCommaETag: a provider ETag that is one strong tag
+// whose opaque value contains ',' is a valid revision. It round-trips
+// verbatim from Read into ReplaceIfVersion, which sends exactly one
+// conditional PUT carrying it byte for byte as If-Match, with no
+// unconditional request.
+func TestS3ReadThenReplaceOpaqueCommaETag(t *testing.T) {
+	const etag = `"provider,opaque"`
+	m := newS3Mock(t)
+	key := testS3Prefix + "/vault.db"
+	body := []byte("complete encrypted payload")
+	m.seed(key, body)
+	m.mu.Lock()
+	m.etags[key] = etag
+	m.mu.Unlock()
+	b := newMockBackend(t, m)
+	ctx := context.Background()
+	m.reset()
+
+	res, err := b.Read(ctx, "vault.db")
+	if err != nil {
+		t.Fatalf("read with ETag %q: %v", etag, err)
+	}
+	if string(res.Revision) != etag {
+		t.Fatalf("revision = %q, want verbatim %q", res.Revision, etag)
+	}
+	if string(res.Bytes) != string(body) {
+		t.Fatalf("bytes = %q, want %q", res.Bytes, body)
+	}
+
+	if err := b.ReplaceIfVersion(ctx, "vault.db", res.Revision, []byte("v2")); err != nil {
+		t.Fatalf("replace with revision %q: %v", res.Revision, err)
+	}
+	// The mock records the requests and, separately, a header snapshot for
+	// each PUT only. Two requests with one recorded PUT means the sole write
+	// is the conditional one.
+	reqs, puts := m.recorded()
+	if len(reqs) != 2 || len(puts) != 1 {
+		t.Fatalf("requests = %v (%d PUTs), want exactly one GET and one conditional PUT", reqs, len(puts))
+	}
+	if reqs[0] != "GET vault/vault.db" {
+		t.Fatalf("first request = %q, want the GET", reqs[0])
+	}
+	if reqs[1] != "PUT vault/vault.db" {
+		t.Fatalf("second request = %q, want one conditional PUT; no unconditional or HEAD request allowed", reqs[1])
+	}
+	put := puts[0]
+	if got := put.Get("If-Match"); got != etag {
+		t.Fatalf("If-Match = %q, want %q verbatim", got, etag)
+	}
+	if got := put.Get("If-None-Match"); got != "" {
+		t.Fatalf("If-None-Match = %q, want only an If-Match conditional PUT", got)
+	}
+	if got, _, _ := m.get(key); string(got) != "v2" {
+		t.Fatalf("stored bytes = %q, want %q", got, "v2")
 	}
 }
 

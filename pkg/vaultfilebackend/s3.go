@@ -95,9 +95,10 @@ type S3Config struct {
 // ErrNotFound, a caller cancellation to ErrDenied, an authorization 4xx to
 // ErrDenied, an ETag that cannot be safely handed back as an If-Match value
 // (see validStrongETag: weak, list, OWS-padded, control characters, empty or
-// over MaxRevisionSize) to ErrCorrupt, and timeouts, transport failures, 5xx
-// and unparseable responses to ErrUnknown. A body larger than MaxValueSize is
-// ErrCorrupt. List returns ErrUnsupported.
+// over MaxRevisionSize; an opaque tag containing ',' is valid) to ErrCorrupt,
+// and timeouts, transport failures, 5xx and unparseable responses to
+// ErrUnknown. A body larger than MaxValueSize is ErrCorrupt. List returns
+// ErrUnsupported.
 //
 // This bridge is only verified against an in-process TLS S3 mock. It is not
 // wired to product or account code and has not been accepted against any real
@@ -286,20 +287,24 @@ func readBounded(r io.Reader, limit int64) ([]byte, error) {
 }
 
 // validStrongETag reports whether s is exactly one strong-entity-tag
-// (RFC 9110 §8.8.3): a pair of DQUOTE characters enclosing entity-tagc bytes,
-// with no surrounding optional whitespace and no weak ("W/") prefix. '*', a
-// comma-separated list, an unquoted value, a weak tag or a tag containing
-// control characters is not accepted. It is what Read may return as a
-// Revision and the only shape ReplaceIfVersion accepts as expected.
+// (RFC 9110 §8.8.3): a pair of DQUOTE characters enclosing etagc bytes, with
+// no surrounding optional whitespace and no weak ("W/") prefix. etagc is
+// %x21 / %x23-7E / obs-text, so it is opaque: every byte except SP, DQUOTE
+// and CTLs is allowed inside, including ','. A header field combining tags
+// uses ',' only outside the quotes, so a tag list ("a","b", "a", "b") always
+// has a DQUOTE inside the value and is rejected. '*' and the "W/" weak prefix
+// carry bytes outside etagc, so they are rejected too, as are an unquoted
+// value, a control character and surrounding OWS. It is what Read may return
+// as a Revision and the only shape ReplaceIfVersion accepts as expected.
 func validStrongETag(s string) bool {
 	if len(s) < 2 || len(s) > MaxRevisionSize || s[0] != '"' || s[len(s)-1] != '"' {
 		return false
 	}
-	// Inner bytes are entity-tagc = %x21 / %x23-7E / obs-text: DQUOTE and
-	// comma never occur inside, so a tag list can't pass. This rejects every
-	// C0/space/DEL control and leaves DQUOTE solely as a delimiter.
+	// Inner bytes are etagc = %x21 / %x23-7E / obs-text: every byte that is
+	// not a C0 control, SP or DEL, except DQUOTE, which ends the tag. A comma
+	// is a legal part of the opaque tag value.
 	for i := 1; i < len(s)-1; i++ {
-		if c := s[i]; !(c > 0x20 && c != '"' && c != ',' && c != 0x7f) {
+		if c := s[i]; !(c > 0x20 && c != '"' && c != 0x7f) {
 			return false
 		}
 	}
