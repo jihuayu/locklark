@@ -1034,3 +1034,64 @@ test("watchtower flag helper filters unknown and duplicate values in stable orde
   });
   assert.equal(core.siteFromURL("chrome://settings"), null);
 });
+
+test("paste protection recognises only complete Locklark Secret Key material", () => {
+  const key = "LL1-" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ".slice(0, 26);
+  const seed = "LLR2-" + "A".repeat(52);
+  assert.equal(key.length, 30);
+  assert.equal(core.looksLikeLocklarkSecret(key), true);
+  assert.equal(core.looksLikeLocklarkSecret("  " + key + "\n"), true);
+  assert.equal(core.looksLikeLocklarkSecret(seed), true);
+  assert.equal(core.looksLikeLocklarkSecret(seed + "-" + "B".repeat(52)), true);
+  assert.equal(core.looksLikeLocklarkSecret(key.toLowerCase()), false);
+  assert.equal(core.looksLikeLocklarkSecret("LL1-" + "A".repeat(25)), false);
+  assert.equal(core.looksLikeLocklarkSecret("LL1-" + "1".repeat(26)), false);
+  assert.equal(core.looksLikeLocklarkSecret(key + " trailer"), false);
+  assert.equal(core.looksLikeLocklarkSecret(""), false);
+  assert.equal(core.looksLikeLocklarkSecret(null), false);
+});
+
+test("paste protection warns only on known state and never blocks by default", () => {
+  const key = "LL1-" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ".slice(0, 26);
+  assert.equal(
+    core.pasteWarning({ text: key, isPasswordField: false, siteLinked: true }),
+    "secret-key",
+  );
+  assert.equal(
+    core.pasteWarning({ text: "hunter2", isPasswordField: true, siteLinked: false }),
+    "phishing",
+  );
+  assert.equal(
+    core.pasteWarning({ text: "hunter2", isPasswordField: true, siteLinked: true }),
+    "",
+  );
+  assert.equal(
+    core.pasteWarning({ text: "hunter2", isPasswordField: true, siteLinked: null }),
+    "",
+  );
+  assert.equal(
+    core.pasteWarning({ text: "hunter2", isPasswordField: false, siteLinked: false }),
+    "",
+  );
+  assert.equal(
+    core.pasteWarning({
+      text: "hunter2",
+      isPasswordField: true,
+      siteLinked: false,
+      enabled: false,
+    }),
+    "",
+  );
+  assert.equal(
+    core.pasteWarning({ text: "   ", isPasswordField: true, siteLinked: false }),
+    "",
+  );
+  assert.equal(core.pasteWarning(null), "");
+});
+
+test("paste protection is on by default and normalises a stored boolean", () => {
+  assert.equal(core.DEFAULT_SETTINGS.pasteProtection, true);
+  assert.equal(core.normalizeSettings({}).pasteProtection, true);
+  assert.equal(core.normalizeSettings({ pasteProtection: false }).pasteProtection, false);
+  assert.equal(core.normalizeSettings({ pasteProtection: "off" }).pasteProtection, true);
+});

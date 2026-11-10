@@ -110,6 +110,19 @@ transaction that already won. Browser state and database commit are not one
 atomic operation. See [save validation](../docs/browser-save-validation.md) for
 the exact verification status and limitations.
 
+**Paste protection** is on by default and can be turned off in the extension
+options. Pasting into a current-password field on a page whose last candidate
+lookup explicitly reported no saved login shows a confirmation panel first;
+cancelling blocks the paste. Pasting text shaped like a Locklark Secret Key
+(`LL1-`, `LLR2-`, or the 110-character recovery material) is always confirmed,
+even on a linked page. An unknown site state (locked vault, disconnected host,
+or an expired observation) never blocks a paste, and signup/confirm-password
+fields are excluded so generated passwords can still be pasted. The pasted text
+stays in the content script for the single decision and is never sent to the
+worker or stored. See
+[the 1Password beta parity note](../docs/browser-1password-beta-parity.md) for
+the reference behaviour, decision table and limits.
+
 To fill a saved TOTP, configure the login's `otp` field in the native vault,
 read the current website's candidates, and choose **填充验证码** (Fill one-time
 code). Approve that exact website and item in MyGo, or select it in an authorized quick session. The extension rechecks the

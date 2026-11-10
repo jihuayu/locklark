@@ -59,6 +59,7 @@
     "opt-open-fill-submit": "openAndFillAutoSubmit",
     "opt-offer-identity-card": "offerFillIdentitiesAndCards",
     "opt-offer-passkeys": "offerUsePasskeys",
+    "opt-paste-protection": "pasteProtection",
     "opt-offer-save": "offerSaveLogins",
     "opt-offer-save-passkeys": "offerSavePasskeys",
     "opt-inline-generator": "showInlineGenerator",
@@ -115,6 +116,7 @@
       settings.offerFillIdentitiesAndCards,
     );
     setCheckbox("opt-offer-passkeys", settings.offerUsePasskeys);
+    setCheckbox("opt-paste-protection", settings.pasteProtection);
     setCheckbox("opt-offer-save", settings.offerSaveLogins);
     setCheckbox("opt-offer-save-passkeys", settings.offerSavePasskeys);
     setCheckbox("opt-inline-generator", settings.showInlineGenerator);

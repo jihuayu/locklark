@@ -2,6 +2,8 @@
 
 # Locklark 开发进度
 
+2026-11-10（香港）：用 REA 6.8.0 对 1Password beta Chromium 扩展 8.12.46.26 做静态重建（Evidence `ev_c87bf6…`，选中 `inline/injected.js`，118,969 AST 节点），确认 beta 与 stable 8.12.44.33 文件集合相同、38 个文件内容不同、英文 UI 新增 8 条且集中于引导与快捷键提示，未发现 beta 专属的填充/保存/Passkey 行为。按参考的钓鱼粘贴与 Secret Key 粘贴保护，在扩展补齐两项粘贴期保护：未关联站点密码粘贴与 Secret Key 形态文本粘贴先确认，未知站点状态不拦截，剪贴板文本不进入后台或存储。扩展 417 项 Node 测试通过；其中新增 13 项，未在真实浏览器或真实站点验证，不能记为参考已对照。行为、差异与限制见[1Password beta 对照](browser-1password-beta-parity.md)，65 项冻结合同未改动。
+
 2026-11-08（香港）：DeepSeek 已修复浏览器复制后的无条件清空定时器，避免覆盖后来复制的内容，并改为准确的手动清理提示；主代理独立复跑 304 项扩展测试通过。见[剪贴板归属验收](browser-clipboard-ownership-validation.md)。#59 的原生租约接入和实际 OS 验收仍在推进，其他 #50–#58 不因本补丁自动完成。
 
 本轮优化起点：main 38c8324（PR #49），日期 2026-11-07（香港）。已实现首屏搜索/可展开工具/深色对比度/键盘筛选、弹窗迟到秘密回复及锁定抢占保护、一次认证三份桌面元数据快照（保留三条原审计）、x/net 安全更新与持续扫描。301 Node、两浏览器各 32 组 DOM/组件及快照 race 通过；E2E 213 项为 177 通过、36 pending、0 失败，完整原生和最终 CI 回执见本批 PR。详见[UI、性能与安全验收](ui-performance-security-validation.md)。

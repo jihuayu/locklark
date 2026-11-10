@@ -175,16 +175,34 @@
     "value",
   );
   const send = (message) => api.runtime.sendMessage(message);
+  // Paste protection keeps at most one metadata-only site-link observation per
+  // document. A stale observation is unknown, never "unlinked".
+  const SITE_LINK_TTL = 5 * 60 * 1000;
+  let siteLink = { origin: "", linked: null, at: 0 };
+  function rememberSiteLink(reply) {
+    const linked =
+      reply && reply.connected === true && typeof reply.siteLinked === "boolean"
+        ? reply.siteLinked
+        : null;
+    siteLink = { origin: location.origin, linked, at: Date.now() };
+  }
+  function siteLinkedForPaste() {
+    if (siteLink.origin !== location.origin) return null;
+    if (Date.now() - siteLink.at > SITE_LINK_TTL) return null;
+    return siteLink.linked;
+  }
   const settingsReady = (async () => {
     try {
       const value = await api.storage?.local?.get?.([
         "showInlineMenu",
         "showInlineGenerator",
         "disabledInlineMenuOrigins",
+        "pasteProtection",
       ]);
       if (value && typeof value === "object") {
         siteSettings.showInlineMenu = value.showInlineMenu !== false;
         siteSettings.showInlineGenerator = value.showInlineGenerator !== false;
+        siteSettings.pasteProtection = value.pasteProtection !== false;
         siteSettings.disabledInlineMenuOrigins = Array.isArray(
           value.disabledInlineMenuOrigins,
         )
@@ -220,6 +238,7 @@
     siteSettings = {
       showInlineMenu: true,
       showInlineGenerator: true,
+      pasteProtection: true,
       disabledInlineMenuOrigins: [],
     },
     observer = null,
@@ -931,6 +950,7 @@
         !state
       )
         return;
+      rememberSiteLink(state);
       if (state.neverSaveForOrigin || state.suppressInline) return;
       const anchor = target;
       const isPassword = anchor.type === "password";
@@ -1471,6 +1491,96 @@
   }
   window.addEventListener("popstate", stageEditedCredential);
   window.addEventListener("hashchange", stageEditedCredential);
+  // Paste protection mirrors the reference extension's two paste guards while
+  // keeping this extension's rule that a secret only ever reaches a page after
+  // an explicit user decision. The pasted text is held in this closure only
+  // until the choice is made and is never sent to the worker.
+  function insertPastedText(field, text) {
+    try {
+      const start =
+        typeof field.selectionStart === "number" ? field.selectionStart : null;
+      const end =
+        typeof field.selectionEnd === "number" ? field.selectionEnd : start;
+      if (start !== null && typeof field.setRangeText === "function") {
+        field.setRangeText(text, start, end, "end");
+      } else if (nativeValue?.set) {
+        nativeValue.set.call(field, inputValue(field) + text);
+      } else {
+        field.value = inputValue(field) + text;
+      }
+    } catch {
+      return false;
+    }
+    try {
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+      field.dispatchEvent(new Event("change", { bubbles: true }));
+    } catch {}
+    return true;
+  }
+  function showPasteWarning(field, text, kind) {
+    const box = panel(field, "粘贴保护");
+    note(
+      box,
+      kind === "secret-key"
+        ? "这看起来是 Locklark 的 Secret Key。Secret Key 只应在 Locklark 应用中使用。"
+        : "此网站没有已保存的登录。确认信任此网站后再粘贴密码。",
+    );
+    const cancel = button(box, "取消粘贴", () => dismiss());
+    button(box, "仍要粘贴", () => {
+      dismiss();
+      // The original paste default action has already been cancelled, so a
+      // failed insertion must be reported instead of silently dropping text.
+      if (!insertPastedText(field, text)) {
+        showToast("无法自动完成粘贴，请重新复制后手动粘贴");
+        return;
+      }
+      try {
+        field.focus();
+      } catch {}
+    });
+    try {
+      cancel.focus();
+    } catch {}
+  }
+  function installPasteProtection() {
+    document.addEventListener(
+      "paste",
+      (event) => {
+        if (!event.isTrusted) return;
+        if (siteSettings.pasteProtection === false) return;
+        const field = eventInputTarget(event);
+        const tag = String((field && field.tagName) || "").toUpperCase();
+        if (tag !== "INPUT" && tag !== "TEXTAREA") return;
+        if (field.disabled || field.readOnly) return;
+        let text = "";
+        try {
+          text = String(event.clipboardData?.getData("text/plain") || "");
+        } catch {
+          return;
+        }
+        const password =
+          tag === "INPUT" && String(field.type).toLowerCase() === "password";
+        // Signup and confirm-password fields routinely receive a generated
+        // password by paste; they are not a phishing signal.
+        const currentPassword =
+          password &&
+          !isNewPasswordInput(field) &&
+          !isConfirmPassword(field);
+        const kind = core?.pasteWarning?.({
+          text,
+          enabled: siteSettings.pasteProtection !== false,
+          isPasswordField: currentPassword,
+          siteLinked: siteLinkedForPaste(),
+        });
+        if (!kind) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        showPasteWarning(field, text, kind);
+      },
+      true,
+    );
+  }
+  installPasteProtection();
   if (typeof MutationObserver === "function") {
     const observer = new MutationObserver(() => {
       if (!lastEditedCredential) return;
@@ -1602,6 +1712,8 @@
         });
         if (result?.saved) {
           dismissPending();
+          // A confirmed save makes this origin linked for paste protection.
+          siteLink = { origin: location.origin, linked: true, at: Date.now() };
           showToast("已保存到 Locklark");
         } else status.textContent = result?.status || "保存失败，请稍后重试";
       } catch {

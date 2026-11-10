@@ -83,6 +83,15 @@
 | B17.1 | Commands (`_execute_action`, autofill, lock) | 已实现未对照 | 当前代码已有对应实现；单测/DOM/原生验收见下方证据，尚无固定参考版本逐项对照结果。 |
 | B17.2 | Connection status, pairing UX, onboarding | 已实现未对照 | 共享会话/单独宿主路径已有；锁库撤销测试通过，跨平台完整交互仍待对照。 |
 
+## 本批新增行为（不计入 65 项冻结合同）
+
+2026-11-10 以 REA 静态对照 1Password beta 8.12.46.26 后，补入两项粘贴期保护。它们**不在**上表 65 项稳定 ID 中：该合同锚定 8.12.44.33，扩表需要单独决定并同步 `scripts/check_browser_parity_evidence.py` 的 tripwire；在决定前只用本节记录，不改变 `browser-parity-evidence.json` 的 65 行。
+
+- **未关联站点粘贴密码前的钓鱼警告**：当前密码框粘贴时，若本页最近一次候选匹配明确报告“无已保存登录”，先显示关闭 Shadow DOM 的确认面板；取消则阻止本次粘贴。站点状态未知（未连接、锁定、有未完成原生请求、观测过期）不拦截。参考行为、决策表与差异见 [1Password beta 对照](browser-1password-beta-parity.md)。状态：已实现未对照，只有 Node DOM 测试。
+- **Locklark Secret Key 粘贴保护**：粘贴 `LL1-`、`LLR2-` 或 110 位恢复材料形态的文本时，无论站点是否已关联都先确认；与参考的 `authorize-paste-secret-key` 对应。状态：已实现未对照，只有 Node DOM 测试。
+
+两项都默认开启，可在选项页“自动填充与登录”关闭；剪贴板文本不发送到后台、不写入存储。
+
 ## 本轮补齐与仍开放的产品范围
 
 附件上传/下载/删除、未读取备注及隐藏自定义字段的显式清空，在 [插件收尾验收](plugin-completion-validation.md) 记录实际结果。未运行的流程不能仅凭代码或新按钮记为通过。
