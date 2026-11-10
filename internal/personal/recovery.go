@@ -35,12 +35,106 @@ type Chain struct {
 	Public ed25519.PublicKey `json:"audit_public"`
 	Events []Event           `json:"events"`
 }
+
+// backupAttachment carries the bytes that vault.AttachmentMeta intentionally
+// keeps out of its global JSON representation. It exists only in the
+// authenticated recovery payload and is bound back to an item attachment by
+// the pair below before validation or restoration.
+type backupAttachment struct {
+	ItemID       string `json:"item_id"`
+	AttachmentID string `json:"attachment_id"`
+	Content      []byte `json:"content"`
+}
+
 type payload struct {
 	Generation string
 	Epoch      uint64
 	Items      []vault.Item
 	Chains     []Chain
+	// These fields were appended after the original v2 payload fields. Their
+	// omitempty tags keep archives written before #99 byte-for-byte compatible
+	// with the existing signed manifest digest.
+	Vaults      []vault.VaultMeta  `json:",omitempty"`
+	Attachments []backupAttachment `json:",omitempty"`
 }
+
+func collectBackupAttachments(items []vault.Item) []backupAttachment {
+	var out []backupAttachment
+	for _, item := range items {
+		for _, att := range item.Attachments {
+			out = append(out, backupAttachment{ItemID: item.ID, AttachmentID: att.ID, Content: att.Content})
+		}
+	}
+	return out
+}
+
+// applyBackupAttachments restores attachment bytes into the in-memory item
+// model. Attachments with positive size must have exactly one matching byte
+// record; zero-length legacy attachments may predate the backup-only field.
+func applyBackupAttachments(p *payload) error {
+	seen := map[[2]string]bool{}
+	for _, data := range p.Attachments {
+		if !idOK(data.ItemID) || !selectorID(data.AttachmentID) {
+			return invalid
+		}
+		key := [2]string{data.ItemID, data.AttachmentID}
+		if seen[key] {
+			return invalid
+		}
+		seen[key] = true
+		idx := findItemIndex(p.Items, data.ItemID)
+		if idx < 0 {
+			return invalid
+		}
+		found := false
+		for n := range p.Items[idx].Attachments {
+			att := &p.Items[idx].Attachments[n]
+			if att.ID == data.AttachmentID {
+				att.Content = data.Content
+				found = true
+				break
+			}
+		}
+		if !found {
+			return invalid
+		}
+	}
+	for n := range p.Items {
+		for m := range p.Items[n].Attachments {
+			att := &p.Items[n].Attachments[m]
+			if seen[[2]string{p.Items[n].ID, att.ID}] {
+				continue
+			}
+			if att.Size != 0 {
+				return invalid
+			}
+			att.Content = []byte{}
+		}
+	}
+	return nil
+}
+
+func validateRecoveredVaults(vaults []vault.VaultMeta) error {
+	if len(vaults) == 0 {
+		return nil
+	}
+	if len(vaults) > 64 {
+		return invalid
+	}
+	seen := map[string]bool{vault.DefaultVaultID: true}
+	for _, v := range vaults {
+		if !validVaultMeta(v) || seen[strings.ToLower(v.ID)] {
+			return invalid
+		}
+		seen[strings.ToLower(v.ID)] = true
+	}
+	raw, e := json.Marshal(vaults)
+	if e != nil || len(raw) > 48<<10 {
+		return invalid
+	}
+	return nil
+}
+
 type signedBackup struct {
 	Body      payload
 	Signature []byte
@@ -278,6 +372,12 @@ func decodeArchive(path, pw string, key []byte, kit string) (*payload, error) {
 	if e = verifyChains(p.Chains); e != nil {
 		return nil, e
 	}
+	if e = validateRecoveredVaults(p.Vaults); e != nil {
+		return nil, e
+	}
+	if e = applyBackupAttachments(p); e != nil {
+		return nil, e
+	}
 	if vault.ValidateItems([]byte(schema), p.Items) != nil {
 		return nil, invalid
 	}
@@ -343,6 +443,11 @@ func initializeRecovered(b *bolt.Bucket, i identity, p *payload) error {
 	}
 	if e = b.Put(archiveKey, enc); e != nil {
 		return e
+	}
+	if len(p.Vaults) > 0 {
+		if e = saveVaults(b, i, p.Vaults); e != nil {
+			return e
+		}
 	}
 	anchor, e := digest(p.Chains)
 	if e != nil {

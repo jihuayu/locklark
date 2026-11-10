@@ -1696,7 +1696,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			auditPriv := ed25519.NewKeyFromSeed(i.Audit)
 			defer clear(auditPriv)
 			chains = append(chains, Chain{auditPriv.Public().(ed25519.PublicKey), append(rows, ev)})
-			p := payload{Generation: link, Epoch: s.Epoch, Items: items, Chains: chains}
+			p := payload{Generation: link, Epoch: s.Epoch, Items: items, Chains: chains, Vaults: vaults, Attachments: collectBackupAttachments(items)}
 			out.archive, e = encodeArchive(p, pw, key, slot.Account, option.backup, auditPriv)
 			return e
 		}
