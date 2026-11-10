@@ -1413,6 +1413,68 @@ func TestDirCorruptLockTicketIsDenied(t *testing.T) {
 	}
 }
 
+// Malformed length fields in a stored record must be reported as ErrCorrupt
+// and never panic, on 32-bit platforms too: a 4-byte length with the high bit
+// set used to become a negative int there and bypass the range checks, then
+// panic on the slice bound. Lengths at and above the record boundary are
+// covered as well.
+func TestDirCorruptRecordLengths(t *testing.T) {
+	header := func(versionLen uint32) []byte {
+		raw := append([]byte(nil), recordMagic...)
+		return append(raw, byte(versionLen), byte(versionLen>>8), byte(versionLen>>16), byte(versionLen>>24))
+	}
+	// A body long enough that only the length checks, not truncation, decide.
+	body := func(n int) []byte { return make([]byte, n) }
+	cases := map[string][]byte{
+		// The reported bug: on 32-bit int this length is negative.
+		"version length high bit set": append(header(0x80000000), body(128)...),
+		"version length 0xffffffff":   append(header(0xffffffff), body(128)...),
+		"version length 0x7fffffff":   append(header(0x7fffffff), body(128)...),
+		"version length is Max+1":     append(header(recordVersionMax+1), body(128)...),
+		"version length 1e9":          append(header(1_000_000_000), body(128)...),
+		"version length 0":            append(header(0), body(32)...),
+	}
+	for name, raw := range cases {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("%s: decodeRecord panicked: %v", name, r)
+				}
+			}()
+			if _, err := decodeRecord(raw); !errors.Is(err, ErrCorrupt) {
+				t.Fatalf("%s: decodeRecord = %v, want ErrCorrupt", name, err)
+			}
+		}()
+	}
+
+	// Boundary: a structurally valid record with a version length of exactly
+	// recordVersionMax decodes, while one byte more is rejected by the length
+	// check. A digest length with the high bit set or above the digest size is
+	// rejected as well.
+	valid := func(versionLen int, dlen uint32) []byte {
+		value := []byte("v")
+		rec := record{version: strings.Repeat("a", versionLen), digest: sha256.Sum256(value), value: value}
+		raw := rec.encode()
+		if dlen != sha256.Size {
+			at := len(recordMagic) + 4 + versionLen
+			raw[at], raw[at+1], raw[at+2], raw[at+3] = byte(dlen), byte(dlen>>8), byte(dlen>>16), byte(dlen>>24)
+		}
+		return raw
+	}
+	if rec, err := decodeRecord(valid(recordVersionMax, sha256.Size)); err != nil || rec.version != strings.Repeat("a", recordVersionMax) {
+		t.Fatalf("decode at recordVersionMax = %v, want a valid record", err)
+	}
+	if _, err := decodeRecord(valid(recordVersionMax+1, sha256.Size)); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("decode at recordVersionMax+1 = %v, want ErrCorrupt", err)
+	}
+	if _, err := decodeRecord(valid(4, 0x80000000)); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("decode with high-bit digest length = %v, want ErrCorrupt", err)
+	}
+	if _, err := decodeRecord(valid(4, sha256.Size+1)); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("decode with oversize digest length = %v, want ErrCorrupt", err)
+	}
+}
+
 func TestDirCorruptDataIsReportedNotOverwritten(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()

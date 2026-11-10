@@ -745,26 +745,45 @@ func (r record) encode() []byte {
 
 // decodeRecord parses and authenticates an on-disk record. Any framing error,
 // zero or oversize revision, or digest mismatch is ErrCorrupt.
+//
+// Lengths are parsed as uint32 and range-checked before they are converted to
+// int or used as slice bounds, so a length with the high bit set is rejected as
+// corrupt on 32-bit platforms instead of becoming a negative index. The bounds
+// arithmetic compares remaining length rather than computing p+len, so no
+// addition can overflow.
 func decodeRecord(raw []byte) (record, error) {
 	corrupt := func(why string) (record, error) {
 		return record{}, fmt.Errorf("%w: %s", ErrCorrupt, why)
+	}
+	// readU32 parses the little-endian 4-byte length at p and reports whether
+	// four bytes are available.
+	readU32 := func(p int) (uint32, bool) {
+		if len(raw)-p < 4 {
+			return 0, false
+		}
+		return uint32(raw[p]) | uint32(raw[p+1])<<8 | uint32(raw[p+2])<<16 | uint32(raw[p+3])<<24, true
 	}
 	if len(raw) < len(recordMagic)+4 || string(raw[:len(recordMagic)]) != recordMagic {
 		return corrupt("missing or foreign record header")
 	}
 	p := len(recordMagic)
-	vlen := int(raw[p]) | int(raw[p+1])<<8 | int(raw[p+2])<<16 | int(raw[p+3])<<24
-	p += 4
-	if vlen == 0 || vlen > recordVersionMax || vlen > MaxRevisionSize || p+vlen+4 > len(raw) {
+	// Range-check the unsigned revision length before narrowing it, so only a
+	// small valid length ever becomes an int. The remaining-length comparison
+	// reserves the 4 digest-length bytes that must follow the version.
+	vlen32, ok := readU32(p)
+	if !ok || vlen32 == 0 || vlen32 > recordVersionMax || vlen32 > MaxRevisionSize || uint64(vlen32)+4 > uint64(len(raw)-p) {
 		return corrupt("invalid stored revision")
 	}
+	vlen := int(vlen32)
+	p += 4
 	version := string(raw[p : p+vlen])
 	p += vlen
-	dlen := int(raw[p]) | int(raw[p+1])<<8 | int(raw[p+2])<<16 | int(raw[p+3])<<24
-	p += 4
-	if dlen != sha256.Size || p+dlen > len(raw) {
+	dlen32, ok := readU32(p)
+	if !ok || dlen32 != sha256.Size || uint64(dlen32) > uint64(len(raw)-p) {
 		return corrupt("invalid stored digest")
 	}
+	dlen := int(dlen32)
+	p += 4
 	var rec record
 	rec.version = version
 	copy(rec.digest[:], raw[p:p+dlen])
