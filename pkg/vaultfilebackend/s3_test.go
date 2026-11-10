@@ -1186,26 +1186,36 @@ func TestS3ReplaceRejectsUnsafeExpectedWithoutRequest(t *testing.T) {
 			t.Fatalf("replace with expected %q = %v, want ErrConflict", unsafe, err)
 		}
 	}
-	// A well-formed but non-matching ETag conflicts too, after exactly one
-	// conditional PUT; neither a weak prefix nor extra quotes match.
+	// A non-matching ETag conflicts too. Only "nope" and "a-b" are strong
+	// quoted tags, so only they reach the service, each as exactly one
+	// conditional PUT that it refuses. Extra quotes and a weak prefix are not
+	// strong tags and are rejected locally without a request.
 	for _, wrong := range []Revision{`"nope"`, `"a-b"`, Revision(`"` + etag + `"`), Revision("W/" + etag), Revision("w/" + etag)} {
 		if err := b.ReplaceIfVersion(ctx, "vault.db", wrong, []byte("v2")); !errors.Is(err, ErrConflict) {
 			t.Fatalf("replace with expected %q = %v, want ErrConflict", wrong, err)
 		}
 	}
-	reqs, _ := m.recorded()
-	if len(reqs) != 4 {
-		t.Fatalf("requests = %v, want one PUT per well-formed expected and none for the rest", reqs)
+	reqs, headers := m.recorded()
+	if len(reqs) != 2 {
+		t.Fatalf("requests = %v, want two PUTs, one per well-formed non-matching expected, and none for the rest", reqs)
 	}
-	for _, r := range reqs {
+	for i, r := range reqs {
 		if r != "PUT vault/vault.db" {
 			t.Fatalf("unexpected request %q, want only conditional PUTs", r)
+		}
+		if im := headers[i].Get("If-Match"); im != `"nope"` && im != `"a-b"` {
+			t.Fatalf("PUT If-Match = %q, want the non-matching expected ETag", im)
+		}
+		if headers[i].Get("If-None-Match") != "" {
+			t.Fatalf("PUT If-None-Match = %q, want an If-Match conditional PUT only", headers[i].Get("If-None-Match"))
 		}
 	}
 	if body, _, _ := m.get(key); string(body) != "committed" {
 		t.Fatalf("rejected replace changed stored bytes: %q", body)
 	}
-	// The zero Revision stays malformed, not a conflict.
+	// The zero Revision stays malformed, not a conflict, and is resolved
+	// locally: the recording is cleared first so that is observable.
+	m.reset()
 	if err := b.ReplaceIfVersion(ctx, "vault.db", Revision(""), []byte("v2")); !errors.Is(err, ErrDenied) {
 		t.Fatalf("zero expected = %v, want ErrDenied", err)
 	}
