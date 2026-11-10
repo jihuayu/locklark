@@ -19,7 +19,7 @@ cd "$(dirname "$0")"
 platform="${1:-linux/arm64}"
 mode="${2:-emulated}"
 image="${SPIKE_IMAGE:-golang:1.24-trixie@sha256:5835f052b784aa39f2fe9070def3568605c8bc3fcd810f10402066348b61e716}"
-modcache="${SPIKE_GOMODCACHE:-oci/docker-image/golang/trixie}"
+modcache="${SPIKE_GOMODCACHE:-opendal-spike-gomodcache-trixie}"
 
 case "$mode" in
   emulated|native) ;;
