@@ -95,6 +95,11 @@ func desktopBrokerSocket(t *testing.T) string {
 
 func brokeredDesktopFixture(t *testing.T) (*App, *personal.Session, *brokerFrameClient, *browserhost.Connection, string) {
 	t.Helper()
+	return brokeredDesktopFixtureWithQuick(t, true)
+}
+
+func brokeredDesktopFixtureWithQuick(t *testing.T, quickFill bool) (*App, *personal.Session, *brokerFrameClient, *browserhost.Connection, string) {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "brokered.ll")
 	key := bytes.Repeat([]byte{13}, 16)
 	if e := personal.Create(path, "fixture", key); e != nil {
@@ -149,7 +154,7 @@ func brokeredDesktopFixture(t *testing.T) (*App, *personal.Session, *brokerFrame
 	a.v2Mode = true
 	a.page = "vault"
 	a.browserPairApprover = func(ctx context.Context, req browserhost.BrowserPairRequest) (browserhost.BrowserPairDecision, error) {
-		return browserhost.BrowserPairDecision{Approved: true, QuickFill: true}, nil
+		return browserhost.BrowserPairDecision{Approved: true, QuickFill: quickFill}, nil
 	}
 	a.startBrowserBroker()
 	if a.broker == nil {
@@ -329,5 +334,57 @@ func TestBrokeredDesktopRendersAndRoutesInteractiveApprovals(t *testing.T) {
 	}
 	if conn.Snapshot().Profile != nil {
 		t.Fatal("approved checkout review remained pending")
+	}
+}
+
+// A non-quick brokered connection must return a sensitive V2 disclosure to the
+// V2 desktop, and the rendered button must call the originating connection's
+// ApproveV2 rather than the standalone-only App.browser.
+func TestBrokeredV2DisclosureRendersNativeApproval(t *testing.T) {
+	a, s, client, _, capability := brokeredDesktopFixtureWithQuick(t, false)
+	rows, e := s.List("active")
+	if e != nil {
+		t.Fatal(e)
+	}
+	var itemID, revision string
+	for _, row := range rows {
+		if row.Title == "Broker Passkey" {
+			itemID, revision = row.ID, row.Revision
+		}
+	}
+	if itemID == "" {
+		t.Fatal("fixture login missing")
+	}
+	client.send(t, map[string]any{
+		"v": 1, "id": fmt.Sprintf("%032x", 200), "type": "item-reveal-field", "capability": capability,
+		"item_id": itemID, "revision": revision, "field": "password",
+	})
+	var conn *browserhost.Connection
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if candidate := a.brokeredBrowserApproval(); candidate != nil {
+			if view := candidate.Snapshot().V2; view != nil && view.Type == "item-reveal-field" {
+				conn = candidate
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("brokered V2 disclosure review did not surface")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	tester := ui.NewTester(a.View, 1200, 2400)
+	if !tester.HasText("确认披露金库字段") || !tester.HasText("批准本次字段披露") {
+		t.Fatal("v2 desktop did not render the brokered field disclosure")
+	}
+	if e := tester.Click("批准本次字段披露"); e != nil {
+		t.Fatalf("click V2 disclosure approval: %v", e)
+	}
+	reply := client.recvType(t, "field-value", 10*time.Second)
+	if reply["value"] != "broker-password" {
+		t.Fatalf("brokered V2 disclosure result: %#v", reply)
+	}
+	if conn.Snapshot().V2 != nil {
+		t.Fatal("approved V2 review remained pending")
 	}
 }
