@@ -90,6 +90,10 @@ type Dir struct {
 	ns      string
 	root    string
 	lock    string
+	// lockID is the identity of the lock inode captured from the descriptor
+	// OpenDir opened. Every operation refuses a lock path that now names a
+	// different inode, so an instance never locks a replacement file.
+	lockID os.FileInfo
 	// identity holds the directory identity of each protected component as
 	// OpenDir validated it. dir compares every later Lstat against it, so a
 	// component replaced by another real directory is refused even when the
@@ -257,14 +261,23 @@ func OpenDir(root string) (*Dir, error) {
 		return nil, lockWaitError(err)
 	}
 	f, err := openLockFile(lock)
-	if err == nil {
-		_ = f.Close()
-	}
-	pl.release()
 	if err != nil {
+		pl.release()
 		return nil, err
 	}
-	return &Dir{cfgRoot: real, ns: ns, root: base, lock: lock, identity: ids, timeout: DefaultLockTimeout, inProc: inProcFor(lock)}, nil
+	// The identity comes from the opened descriptor, so it names exactly the
+	// inode this Dir is pinned to rather than whatever a later path lookup
+	// would find. The descriptor is then closed under the semaphore (see
+	// above) and later opens are compared against this identity.
+	var lockID os.FileInfo
+	if lockID, err = f.Stat(); err != nil {
+		f.Close()
+		pl.release()
+		return nil, deniedMsg(err, "lock file")
+	}
+	_ = f.Close()
+	pl.release()
+	return &Dir{cfgRoot: real, ns: ns, root: base, lock: lock, lockID: lockID, identity: ids, timeout: DefaultLockTimeout, inProc: inProcFor(lock)}, nil
 }
 
 // makePrivateDir creates d with 0700 when it is missing and then validates it
@@ -540,10 +553,27 @@ func (d *Dir) lockHandle(ctx context.Context) (*os.File, func(), error) {
 	}, nil
 }
 
+// lockHandleOS opens the existing lock file, checks that it is still the inode
+// OpenDir captured, and only then takes the OS lock on that descriptor. It
+// never creates the lock file: a lock removed after OpenDir is refused with
+// ErrDenied rather than silently recreated, and no descriptor for a different
+// inode is ever locked. The check and the later use do not share a path lookup,
+// so a same-UID process replacing the path between them is not defended against
+// (see the package threat model); the lock handle itself still refers to the
+// inode that passed the check.
 func (d *Dir) lockHandleOS(ctx context.Context, deadline time.Time) (*os.File, error) {
-	f, err := openLockFile(d.lock)
+	f, err := openExistingLockFile(d.lock)
 	if err != nil {
 		return nil, err
+	}
+	st, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, deniedMsg(err, "lock file")
+	}
+	if !sameIdentity(d.lockID, st) {
+		_ = f.Close()
+		return nil, deniedMsg(nil, "lock file is not the inode opened")
 	}
 	if err := pollLock(ctx, f, deadline); err != nil {
 		_ = f.Close()

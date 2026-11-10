@@ -13,6 +13,10 @@ func openLockFile(string) (*os.File, error) {
 	return nil, deniedMsg(nil, "the local directory backend is unsupported on this platform")
 }
 
+func openExistingLockFile(string) (*os.File, error) {
+	return nil, deniedMsg(nil, "the local directory backend is unsupported on this platform")
+}
+
 func readLockFile(*os.File, int) ([]byte, error) {
 	return nil, deniedMsg(nil, "unsupported platform")
 }

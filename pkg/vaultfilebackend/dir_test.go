@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -170,6 +171,10 @@ func TestDirLockInodeIsStable(t *testing.T) {
 	if !os.SameFile(st1, st2) {
 		t.Fatal("a fresh OpenDir locked a different inode")
 	}
+	// Each instance pins its own capture, which must be the same inode.
+	if !sameIdentity(b.lockID, c.lockID) {
+		t.Fatal("instances captured different lock inode identities")
+	}
 	if err := b.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -177,6 +182,13 @@ func TestDirLockInodeIsStable(t *testing.T) {
 	st3, err := os.Stat(d.lock)
 	if err != nil || !os.SameFile(st1, st3) {
 		t.Fatal("reopen after Close locked a different inode")
+	}
+	if !sameIdentity(b.lockID, d.lockID) {
+		t.Fatal("reopen after Close pinned a different lock inode identity")
+	}
+	// Both live instances still operate through the same inode.
+	if got := mustRead(t, c, "n"); string(got.Bytes) != "v2" {
+		t.Fatal("second instance does not serve the committed version")
 	}
 	// A loosened lock file is refused rather than silently reused.
 	if err := os.Chmod(b.lock, 0644); err != nil {
@@ -562,6 +574,133 @@ func TestDirRefusesNamespaceSwapAfterOpen(t *testing.T) {
 	if err := b.ReplaceIfVersion(ctx, "n", cur.Revision, []byte("v2")); err != nil {
 		t.Fatalf("replace after restore = %v", err)
 	}
+}
+
+// Two live instances sharing the original lock inode must never use a
+// different one. Replacing the lock pathname with another ordinary private
+// 0600 regular file, or removing it, makes every operation of both instances
+// fail with ErrDenied without locking, writing or re-creating the lock, and the
+// replacement's inode and bytes and the data files stay unchanged.
+func TestDirPinsLockInodePerInstance(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	a := openAt(t, root).(*Dir)
+	b := openAt(t, root).(*Dir)
+	if err := a.CreateIfAbsent(ctx, "n", []byte("v1")); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustRead(t, b, "n"); string(got.Bytes) != "v1" {
+		t.Fatal("second instance does not serve the committed version")
+	}
+	rev := mustRead(t, a, "n").Revision
+	dataBefore := fileList(t, filepath.Join(a.root, dataName))
+
+	original, err := os.Stat(a.lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameIdentity(a.lockID, original) || !sameIdentity(b.lockID, original) {
+		t.Fatal("instances are not pinned to the open lock inode")
+	}
+
+	t.Run("replaced_regular_file", func(t *testing.T) {
+		// Detach the original inode and put an ordinary, private 0600
+		// regular file in its place: identical mode and owner, different
+		// inode, no symlink involved.
+		old := filepath.Join(t.TempDir(), "old-lock")
+		if err := os.Rename(a.lock, old); err != nil {
+			t.Fatal(err)
+		}
+		replacement := []byte("replacement lock contents\n")
+		if err := os.WriteFile(a.lock, replacement, 0600); err != nil {
+			t.Fatal(err)
+		}
+		replaced, err := os.Lstat(a.lock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !replaced.Mode().IsRegular() || replaced.Mode()&os.ModeSymlink != 0 || replaced.Mode().Perm() != 0600 || !ownedByEUID(replaced) {
+			t.Fatalf("replacement is not a private regular file: %v", replaced.Mode())
+		}
+		if os.SameFile(original, replaced) {
+			t.Fatal("replacement is not a different inode")
+		}
+
+		for name, d := range map[string]*Dir{"a": a, "b": b} {
+			if _, err := d.Read(ctx, "n"); !errors.Is(err, ErrDenied) {
+				t.Fatalf("%s: read with replaced lock = %v, want ErrDenied", name, err)
+			}
+			if err := d.ReplaceIfVersion(ctx, "n", rev, []byte("v2")); !errors.Is(err, ErrDenied) {
+				t.Fatalf("%s: replace with replaced lock = %v, want ErrDenied", name, err)
+			}
+			if err := d.CreateIfAbsent(ctx, "fresh-"+name, []byte("v2")); !errors.Is(err, ErrDenied) {
+				t.Fatalf("%s: create with replaced lock = %v, want ErrDenied", name, err)
+			}
+		}
+		// The replacement is untouched and still the same inode: no lock was
+		// taken on it and no ticket was written through it.
+		after, err := os.Lstat(a.lock)
+		if err != nil || !os.SameFile(replaced, after) {
+			t.Fatal("operation replaced or recreated the lock path")
+		}
+		if got, err := os.ReadFile(a.lock); err != nil || !bytes.Equal(got, replacement) {
+			t.Fatalf("replacement lock bytes changed: %q %v", got, err)
+		}
+		// No new lock inode was created anywhere else and no data changed.
+		if _, err := os.Lstat(old); err != nil {
+			t.Fatal("original lock inode disappeared")
+		}
+		if !maps.Equal(dataBefore, fileList(t, filepath.Join(a.root, dataName))) {
+			t.Fatal("refused operations changed data files")
+		}
+		if got, _ := os.ReadDir(filepath.Join(a.root, tmpName)); len(got) != 0 {
+			t.Fatalf("refused operations left %d temporary files", len(got))
+		}
+		// Restoring the original inode restores both instances.
+		if err := os.Remove(a.lock); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(old, a.lock); err != nil {
+			t.Fatal(err)
+		}
+		if got := mustRead(t, a, "n"); got.Revision != rev {
+			t.Fatal("instance a does not recover after restoring the lock")
+		}
+		if got := mustRead(t, b, "n"); got.Revision != rev {
+			t.Fatal("instance b does not recover after restoring the lock")
+		}
+	})
+
+	t.Run("removed", func(t *testing.T) {
+		if err := os.Remove(a.lock); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := a.Read(ctx, "n"); !errors.Is(err, ErrDenied) {
+			t.Fatalf("read with removed lock = %v, want ErrDenied", err)
+		}
+		if err := a.ReplaceIfVersion(ctx, "n", rev, []byte("v2")); !errors.Is(err, ErrDenied) {
+			t.Fatalf("replace with removed lock = %v, want ErrDenied", err)
+		}
+		if err := a.CreateIfAbsent(ctx, "fresh", []byte("v2")); !errors.Is(err, ErrDenied) {
+			t.Fatalf("create with removed lock = %v, want ErrDenied", err)
+		}
+		// No operation re-created the lock inode.
+		if _, err := os.Lstat(a.lock); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("an operation re-created the removed lock file")
+		}
+		if !maps.Equal(dataBefore, fileList(t, filepath.Join(a.root, dataName))) {
+			t.Fatal("refused operations changed data files")
+		}
+		// A fresh OpenDir creates a new lock inode, but the old instance stays
+		// pinned to its own and keeps refusing.
+		fresh := openAt(t, root).(*Dir)
+		if sameIdentity(a.lockID, fresh.lockID) {
+			t.Fatal("a recreated lock inode was reported identical to the original")
+		}
+		if _, err := a.Read(ctx, "n"); !errors.Is(err, ErrDenied) {
+			t.Fatalf("old instance accepted a re-created lock = %v, want ErrDenied", err)
+		}
+	})
 }
 
 // Replacing the configured root itself with a symlink after OpenDir is refused

@@ -11,21 +11,54 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// openLockFile opens the dedicated lock file without following a symlink and
-// without blocking on a FIFO or device planted in the directory. It refuses a
-// non-regular, symlinked, multiply-linked or group/world-writable file: every
-// process shares only this inode for locking, so it must never be swapped.
+// openLockFile opens or creates the dedicated lock file without following a
+// symlink and without blocking on a FIFO or device planted in the directory. It
+// refuses a non-regular, symlinked, multiply-linked or group/world-writable
+// file: every process shares only this inode for locking, so it must never be
+// swapped. Creation is exclusive: when two processes initialize the same store
+// at once, exactly one creates the inode and the other opens the winner, never
+// a half-linked file.
 func openLockFile(path string) (*os.File, error) {
-	fd, err := unix.Open(path, unix.O_RDWR|unix.O_CREAT|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0600)
-	if err != nil {
-		if errors.Is(err, unix.ELOOP) || errors.Is(err, unix.EMLINK) {
-			return nil, deniedMsg(nil, "lock file is a symlink or has multiple links")
-		}
-		if st, statErr := os.Lstat(path); statErr == nil && !st.Mode().IsRegular() {
-			return nil, deniedMsg(nil, "lock file is not a regular file")
-		}
-		return nil, deniedMsg(err, "open lock file")
+	fd, err := unix.Open(path, unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0600)
+	if errors.Is(err, unix.EEXIST) {
+		return openExistingLockFile(path)
 	}
+	if err != nil {
+		return nil, lockOpenError(path, err)
+	}
+	return lockFileFromFD(path, fd)
+}
+
+// openExistingLockFile opens a lock file that must already exist. It never
+// creates one, so a lock file removed after OpenDir is refused rather than
+// silently recreated as a different inode.
+func openExistingLockFile(path string) (*os.File, error) {
+	fd, err := unix.Open(path, unix.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, lockOpenError(path, err)
+	}
+	return lockFileFromFD(path, fd)
+}
+
+// lockOpenError classifies a failed lock open with the same refusals as a
+// successfully opened but unacceptable entry.
+func lockOpenError(path string, err error) error {
+	if errors.Is(err, unix.ENOENT) {
+		return deniedMsg(err, "lock file is missing")
+	}
+	if errors.Is(err, unix.ELOOP) || errors.Is(err, unix.EMLINK) {
+		return deniedMsg(nil, "lock file is a symlink or has multiple links")
+	}
+	if st, statErr := os.Lstat(path); statErr == nil && !st.Mode().IsRegular() {
+		return deniedMsg(nil, "lock file is not a regular file")
+	}
+	return deniedMsg(err, "open lock file")
+}
+
+// lockFileFromFD wraps an opened descriptor after checking it is a private
+// regular file. Its identity is taken from the descriptor itself, never from a
+// later pathname stat, so it describes exactly the inode that was opened.
+func lockFileFromFD(path string, fd int) (*os.File, error) {
 	f := os.NewFile(uintptr(fd), path)
 	st, err := f.Stat()
 	if err != nil || !st.Mode().IsRegular() || !privateFile(st) {
