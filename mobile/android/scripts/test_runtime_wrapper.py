@@ -69,10 +69,19 @@ class RuntimeWrapperTests(unittest.TestCase):
         self.assertEqual(invalid["failed_contexts"][0]["input_active"], "unknown")
 
     def test_failure_or_partial_instrumentation_cannot_pass(self):
-        passed = b"OK (2 tests)\nINSTRUMENTATION_CODE: -1\n"
+        passed = b"OK (4 tests)\nINSTRUMENTATION_CODE: -1\n"
         self.assertTrue(complete_pass(0, passed))
-        for code, raw in ((1, passed), (0,b"INSTRUMENTATION_CODE: -1"), (0,passed+b"FAILURES!!!"), (0,passed.replace(b"2 tests",b"0 tests")), (0,passed+b"Process crashed")):
+        self.assertTrue(complete_pass(0, b"Time: 12.34\nOK (4 tests)\nINSTRUMENTATION_CODE: -1\n"))
+        for code, raw in ((1, passed), (0,b"INSTRUMENTATION_CODE: -1"), (0,passed+b"FAILURES!!!"), (0,passed+b"Process crashed")):
             self.assertFalse(complete_pass(code, raw))
+        for count in (0, 2, 3, 5):
+            with self.subTest(count=count):
+                partial = passed.replace(b"4 tests", str(count).encode() + b" tests")
+                self.assertFalse(complete_pass(0, partial))
+                self.assertFalse(complete_pass(0, passed + b"OK (" + str(count).encode() + b" tests)\nINSTRUMENTATION_CODE: -1\n"))
+                self.assertFalse(complete_pass(0, passed + b"FAILURES!!! Tests run: " + str(count).encode() + b", Failures: 1\n"))
+                self.assertFalse(complete_pass(0, passed.replace(b"OK (", b"FAILURES!!! Tests run: " + str(count).encode() + b"\nOK (")))
+        self.assertFalse(complete_pass(0, passed.replace(b"OK (4 tests)", b"OK (4 tests)\nFAILURES!!! Tests run: 4, Failures: 1")))
 
     def test_diagnostic_returns_only_fixed_classes_steps_and_source_integers(self):
         raw = b"INSTRUMENTATION_STATUS: locklark_stage=create\njava.lang.AssertionError: private-field-contents\nat org.locklark.android.OfflineVaultTest.run(OfflineVaultTest.kt:123)\nTests run: 1"
@@ -107,6 +116,21 @@ class RuntimeWrapperTests(unittest.TestCase):
         self.assertEqual(result["failed_contexts"][0]["control_visible"], "false")
         self.assertEqual(result["failed_contexts"][0]["activity"], "RESUMED")
         self.assertNotIn("private-field-contents", str(result))
+
+    def test_offscreen_control_context_stays_distinct_from_visibility(self):
+        raw = (b"INSTRUMENTATION_STATUS: locklark_stage=search\n"
+               b"INSTRUMENTATION_STATUS: locklark_wait=native-visible\n"
+               b"INSTRUMENTATION_STATUS: locklark_control=back-to-list\n"
+               b"INSTRUMENTATION_STATUS: locklark_control_phase=offscreen\n"
+               b"INSTRUMENTATION_STATUS: locklark_ime=false\n"
+               b"INSTRUMENTATION_STATUS: locklark_control_visible=false\n"
+               b"INSTRUMENTATION_STATUS: locklark_control_enabled=true\n"
+               b"INSTRUMENTATION_STATUS: locklark_activity=RESUMED\n"
+               b"INSTRUMENTATION_STATUS_CODE: -2\n")
+        failure = safe_diagnostic(raw)["failed_contexts"][0]
+        self.assertEqual((failure["step"], failure["wait"], failure["control"], failure["control_phase"]),
+                         ("search", "native-visible", "back-to-list", "offscreen"))
+        self.assertEqual((failure["control_enabled"], failure["control_visible"]), ("true", "false"))
 
     def test_even_failed_test_output_must_be_scanned(self):
         values = ["master-fixture", "account-fixture", "username-fixture", "password-fixture", "line one private\nline two private"]
