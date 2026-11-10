@@ -10,8 +10,9 @@ import (
 	"testing"
 )
 
-// The tests here pin the frozen v1 preimages and the two file states against
-// exact JSON member sets. Bytes are shaped, never verified.
+// The tests here pin the frozen v1 preimages, the one valid wire state and
+// the separate in-memory draft path against exact JSON member sets. Bytes are
+// shaped, never verified.
 
 // jsonMembers decodes one complete JSON object and returns its member names in
 // wire order. It fails on a duplicate so member removal cannot hide behind
@@ -94,7 +95,7 @@ func wantMembers(t *testing.T, what string, got, want []string) {
 // the same content, so both must derive the same revision id.
 func TestRevisionPreimageOmitsRevisionID(t *testing.T) {
 	sealed := buildFile(t)
-	draft := unsignedFile(t)
+	draft := buildDraft(t)
 
 	input, err := revisionDomainInput(sealed)
 	if err != nil {
@@ -144,6 +145,18 @@ func TestRevisionPreimageOmitsRevisionID(t *testing.T) {
 		t.Fatal("draft and sealed revision inputs differ")
 	}
 
+	// The draft is not a wire file: its identity is still derived, but it
+	// never encodes, parses or digests.
+	if _, err := EncodeFile(draft); err == nil {
+		t.Fatal("draft encoded as a wire file")
+	}
+	if _, err := FileDigest(draft); err == nil {
+		t.Fatal("draft hashed as a sealed file")
+	}
+	if err := ValidateFile(draft); err == nil {
+		t.Fatal("draft validated as a wire file")
+	}
+
 	// Reordering a slot changes the input, so a stale id is rejected.
 	reordered := deepCopyFile(sealed)
 	reordered.VUKDeviceSlots[0], reordered.VUKDeviceSlots[1] = reordered.VUKDeviceSlots[1], reordered.VUKDeviceSlots[0]
@@ -156,7 +169,10 @@ func TestRevisionPreimageOmitsRevisionID(t *testing.T) {
 // member is present and the signature member is absent, in both states.
 func TestContentSigningPreimage(t *testing.T) {
 	sealed := buildFile(t)
-	draft := unsignedFile(t)
+	draft := buildDraft(t)
+	// The writer drafts with the signature it is about to set; the revision
+	// id is still absent.
+	signed := draftWithSignature(t)
 	csb, err := ContentSigningBytes(draft)
 	if err != nil {
 		t.Fatal(err)
@@ -167,6 +183,13 @@ func TestContentSigningPreimage(t *testing.T) {
 	}
 	if !bytes.Equal(csb, sealedCSB) {
 		t.Fatal("draft and sealed content signing inputs differ")
+	}
+	signedCSB, err := ContentSigningBytes(signed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(csb, signedCSB) {
+		t.Fatal("pre-signature draft and sealed content signing inputs differ")
 	}
 	wantMembers(t, "content signing file", jsonMembers(t, csb),
 		sealedFileMembers[:len(sealedFileMembers)-1])
@@ -196,36 +219,15 @@ func TestContentSigningPreimage(t *testing.T) {
 	}
 }
 
-// TestSealFileStates pins SealFile's two outcomes: nil gives the only valid
-// unsigned draft, and a non-nil signature gives the sealed file with exactly
-// its derived revision id.
-func TestSealFileStates(t *testing.T) {
+// TestSealFileSealed pins SealFile's one outcome: a non-nil signature gives
+// the sealed file with exactly its derived revision id.
+func TestSealFileSealed(t *testing.T) {
 	base := buildFile(t)
 
-	// The source file may carry stale values; sealing replaces them.
-	src := buildFile(t)
+	// The source draft may carry a stale revision id; sealing replaces it.
+	src := draftWithSignature(t)
 	src.Header.RevisionID = strings.Repeat("a", sha256.Size*2)
 
-	// Nil: the unsigned draft.
-	enc, err := SealFile(src, nil)
-	if err != nil {
-		t.Fatalf("SealFile(nil): %v", err)
-	}
-	draft, err := ParseFile(enc)
-	if err != nil {
-		t.Fatalf("unsigned draft rejected: %v", err)
-	}
-	if draft.Header.RevisionID != "" {
-		t.Fatalf("draft revision_id = %q", draft.Header.RevisionID)
-	}
-	if draft.ContentSignature.SignerID != "" || draft.ContentSignature.Alg != "" || draft.ContentSignature.Sig != nil {
-		t.Fatalf("draft signature = %+v", draft.ContentSignature)
-	}
-	if !bytes.Contains(enc, []byte(`"revision_id":""`)) || !bytes.Contains(enc, []byte(`"content_signature":{"signer_id":"","alg":"","sig":null}`)) {
-		t.Fatal("draft is not the exact unsigned shape")
-	}
-
-	// Non-nil: the sealed file.
 	sealedEnc, err := SealFile(src, &src.ContentSignature)
 	if err != nil {
 		t.Fatalf("SealFile(sig): %v", err)
@@ -243,8 +245,8 @@ func TestSealFileStates(t *testing.T) {
 	if bytes.Contains(sealedEnc, []byte(`"revision_id":""`)) {
 		t.Fatal("sealed file carries an empty revision id")
 	}
-	if _, err := ParseFile(enc); err != nil {
-		t.Fatalf("draft no longer parses: %v", err)
+	if bytes.Contains(sealedEnc, []byte(`"sig":null`)) {
+		t.Fatal("sealed file carries a null signature")
 	}
 	// Sealing is idempotent on an already sealed file.
 	again, err := SealFile(sealed, &sealed.ContentSignature)
@@ -252,17 +254,13 @@ func TestSealFileStates(t *testing.T) {
 		t.Fatalf("resealing a sealed file is not byte-stable: %v", err)
 	}
 
-	// A draft carrying a revision id is rejected.
-	bad := deepCopyFile(draft)
-	bad.Header.RevisionID = sealed.Header.RevisionID
-	_, err = EncodeFile(bad)
-	wantCodeAt(t, err, CodeInvalidValue, "revision_id")
-
-	// A non-null signature without a revision id is rejected.
-	noRev := deepCopyFile(sealed)
+	// A non-null signature without a revision id in the input is fine: the
+	// revision id is always replaced by the derived one, never required.
+	noRev := draftWithSignature(t)
 	noRev.Header.RevisionID = ""
-	_, err = EncodeFile(noRev)
-	wantCodeAt(t, err, CodeMissingField, "revision_id")
+	if _, err := parseSealedOnly(t, noRev, &noRev.ContentSignature); err != nil {
+		t.Fatalf("draft without revision id did not seal: %v", err)
+	}
 
 	// A stale revision id under a signature is rejected.
 	stale := deepCopyFile(base)
@@ -270,16 +268,158 @@ func TestSealFileStates(t *testing.T) {
 	_, err = EncodeFile(stale)
 	wantCodeAt(t, err, CodeInvalidValue, "revision_id")
 
-	// A null signature with a non-empty signer or algorithm is rejected.
+	// A sealed file with no revision id is rejected as missing.
+	noRevSealed := deepCopyFile(base)
+	noRevSealed.Header.RevisionID = ""
+	_, err = EncodeFile(noRevSealed)
+	wantCodeAt(t, err, CodeMissingField, "revision_id")
+}
+
+// parseSealedOnly seals draft with sig and parses the result back.
+func parseSealedOnly(t *testing.T, draft *File, sig *Signature) (*File, error) {
+	t.Helper()
+	enc, err := SealFile(draft, sig)
+	if err != nil {
+		return nil, err
+	}
+	return ParseFile(enc)
+}
+
+// TestSealFileNilRejected is the regression that SealFile(f, nil) must never
+// return bytes that look like a wire file: a null-sig draft is not one.
+func TestSealFileNilRejected(t *testing.T) {
+	for _, f := range []*File{buildDraft(t), buildFile(t), draftWithSignature(t)} {
+		enc, err := SealFile(f, nil)
+		wantCodeAt(t, err, CodeInvalidValue, "content_signature")
+		if enc != nil {
+			t.Fatalf("SealFile(f, nil) returned %d bytes", len(enc))
+		}
+	}
+	// A signature whose value is null is the same draft request.
+	sig := Signature{SignerID: "device-1", Alg: SigAlgEd25519}
+	_, err := SealFile(buildDraft(t), &sig)
+	wantCodeAt(t, err, CodeInvalidValue, "content_signature")
+}
+
+// TestDraftRejectedByWire is the regression that ParseFile, EncodeFile,
+// FileBytes, ValidateFile and FileDigest accept only sealed files. The draft
+// JSON below is the exact shape the old encoder used to emit for it and must
+// never come back as a valid wire record.
+func TestDraftRejectedByWire(t *testing.T) {
+	draft := buildDraft(t)
+
+	// The historical draft document: null sig, empty signer/alg, empty
+	// revision id, complete otherwise.
+	draftJSON, err := encodeFileWire(draft, fileEncoding{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, needle := range []string{
+		`"revision_id":""`,
+		`"content_signature":{"signer_id":"","alg":"","sig":null}`,
+	} {
+		if !bytes.Contains(draftJSON, []byte(needle)) {
+			t.Fatalf("draft fixture lacks %s", needle)
+		}
+	}
+
+	// ParseFile rejects the draft document.
+	_, err = ParseFile(draftJSON)
+	wantCodeAt(t, err, CodeInvalidValue, "content_signature")
+
+	// The same document with a revision id added is still a draft.
+	withRev, err := encodeFileWire(draft, fileEncoding{revisionID: new(string)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = ParseFile(withRev)
+	wantCodeAt(t, err, CodeInvalidValue, "content_signature")
+
+	// EncodeFile and FileBytes reject the typed draft.
+	if _, err := EncodeFile(draft); err == nil {
+		t.Fatal("EncodeFile accepted a draft")
+	}
+	if _, err := FileBytes(draft); err == nil {
+		t.Fatal("FileBytes accepted a draft")
+	}
+	if err := ValidateFile(draft); err == nil {
+		t.Fatal("ValidateFile accepted a draft")
+	}
+
+	// FileDigest cannot hash a draft, in any in-memory draft shape.
+	nullSig := buildFile(t)
+	nullSig.ContentSignature.Sig = nil
+	for name, f := range map[string]*File{
+		"building":      draft,
+		"pre-signature": draftWithSignature(t),
+		"null sig":      nullSig,
+	} {
+		if fd, err := FileDigest(f); err == nil || fd != "" {
+			t.Fatalf("%s: FileDigest = %q, %v; want error", name, fd, err)
+		}
+	}
+
+	// Only the preimage path accepts the draft.
+	if _, err := ContentSigningBytes(draft); err != nil {
+		t.Fatalf("ContentSigningBytes(draft): %v", err)
+	}
+	if _, err := RevisionID(draft); err != nil {
+		t.Fatalf("RevisionID(draft): %v", err)
+	}
+	// The content-signing input never reads the carried revision id, so a
+	// stale one on the pre-signature draft gives the same preimage.
+	partial := draftWithSignature(t)
+	partial.Header.RevisionID = strings.Repeat("b", sha256.Size*2)
+	partialCSB, err := ContentSigningBytes(partial)
+	if err != nil {
+		t.Fatalf("ContentSigningBytes(pre-signature draft): %v", err)
+	}
+	if !bytes.Equal(partialCSB, mustContentSigning(t, draft)) {
+		t.Fatal("stale revision id changed the content signing input")
+	}
+}
+
+// TestDraftShapeRules pins the shapes the private draft path accepts: the
+// builder draft and the sealed file.
+func TestDraftShapeRules(t *testing.T) {
+	draft := buildDraft(t)
+	if err := validateDraft(draft); err != nil {
+		t.Fatalf("builder draft rejected: %v", err)
+	}
+	if err := validateDraft(buildFile(t)); err != nil {
+		t.Fatalf("sealed file rejected as draft: %v", err)
+	}
+
+	// Null sig with a non-empty signer or algorithm is not a draft shape the
+	// writer holds, on either preimage path.
 	for _, mutate := range []func(*Signature){
 		func(s *Signature) { s.SignerID = "device-1" },
 		func(s *Signature) { s.Alg = SigAlgEd25519 },
 	} {
 		bad := deepCopyFile(draft)
 		mutate(&bad.ContentSignature)
-		_, err = EncodeFile(bad)
-		wantCode(t, err, CodeSignatureInvalid)
+		if err := validateDraft(bad); err == nil {
+			t.Fatal("malformed draft validated")
+		}
+		if _, err := RevisionID(bad); err == nil {
+			t.Fatal("malformed draft reached the revision path")
+		}
 	}
+	// A null sig with a revision id is not a draft shape either.
+	bad := deepCopyFile(draft)
+	bad.Header.RevisionID = buildFile(t).Header.RevisionID
+	_, err := RevisionID(bad)
+	wantCodeAt(t, err, CodeInvalidValue, "revision_id")
+}
+
+// mustContentSigning returns the content signing input of f or fails.
+func mustContentSigning(t *testing.T, f *File) []byte {
+	t.Helper()
+	b, err := ContentSigningBytes(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 func wantCodeAt(t *testing.T, err error, code, path string) {
@@ -299,14 +439,23 @@ func TestSealedEncodingMembers(t *testing.T) {
 	enc := mustEncode(t)
 	wantMembers(t, "sealed file", jsonMembers(t, enc), sealedFileMembers)
 	wantMembers(t, "sealed header", jsonMembers(t, headerOf(t, enc)), sealedHeaderMembers)
-	draft, err := SealFile(buildFile(t), nil)
+	// The draft preimages keep the same member sets: the revision input
+	// drops revision_id, the content signing input keeps it.
+	draft := buildDraft(t)
+	revInput, err := revisionDomainInput(draft)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantMembers(t, "draft file", jsonMembers(t, draft), sealedFileMembers)
-	wantMembers(t, "draft header", jsonMembers(t, headerOf(t, draft)), sealedHeaderMembers)
+	wantMembers(t, "draft revision input", jsonMembers(t, revInput), sealedFileMembers[:len(sealedFileMembers)-1])
+	wantMembers(t, "draft revision input header", jsonMembers(t, headerOf(t, revInput)), revisionHeaderMembers)
+	csb, err := ContentSigningBytes(draft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantMembers(t, "draft content signing input", jsonMembers(t, csb), sealedFileMembers[:len(sealedFileMembers)-1])
+	wantMembers(t, "draft content signing header", jsonMembers(t, headerOf(t, csb)), sealedHeaderMembers)
 
-	// header_sig is not a v1 member in either state.
+	// header_sig is not a v1 member of a sealed file.
 	withHeaderSig := strings.Replace(string(enc), `,"signed_policy_proofs":`,
 		`,"header_sig":{"signer_id":"","alg":"","sig":null},"signed_policy_proofs":`, 1)
 	_, err = ParseFile([]byte(withHeaderSig))
@@ -317,7 +466,7 @@ func TestSealedEncodingMembers(t *testing.T) {
 // an implementation that changes member order or placeholder bytes fails even
 // after regenerating the vector file.
 func TestRevisionPreimageFixedVector(t *testing.T) {
-	f := unsignedFile(t)
+	f := buildDraft(t)
 	rev, err := RevisionID(f)
 	if err != nil {
 		t.Fatal(err)
@@ -342,8 +491,8 @@ func TestRevisionPreimageFixedVector(t *testing.T) {
 }
 
 const (
-	// Fixed values of the synthetic unsigned-draft vector (see
-	// testdata/vaultfile-v1-vectors.json, entry "v1-unsigned-draft").
+	// Fixed values shared by the in-memory builder draft and the sealed
+	// vector (see testdata/vaultfile-v1-vectors.json, entry "v1-canonical").
 	fixedRevisionInputSHA256 = "e80510b9592680ec31a776ba0593edb00d0b080da788a42133cf20428e2767a3"
 	fixedRevisionID          = "930c61862a60a3070b4cef23cee7711e086913f678c861dbf25d63b0ff128b5d"
 )

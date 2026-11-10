@@ -194,6 +194,14 @@ func buildPolicy() *Policy {
 // buildFile builds the sealed vector file. The content signature bytes are
 // shaped, not real; revision_id is derived by SealFile from exactly this.
 func buildFile(t *testing.T) *File {
+	f := draftWithSignature(t)
+	return sealFile(t, f, &f.ContentSignature)
+}
+
+// buildDraft builds the in-memory builder draft of the vector file: the
+// sealed content with a null content signature and an empty revision id. It
+// is never a wire record; only ContentSigningBytes and RevisionID accept it.
+func buildDraft(t *testing.T) *File {
 	// The header digest of the current policy is PolicyDigest over the
 	// canonical policy document bytes held in the proof; the policy carries
 	// no digest of itself.
@@ -229,8 +237,14 @@ func buildFile(t *testing.T) *File {
 		CEKSlot: CEKSlot{KeyEpoch: 3, WrappedCEK: []byte("synthetic-vuk-wrapped-cek")},
 	}
 	f.Header.PolicyDigest = policyDigest(&f.SignedPolicyProofs[0])
+	return f
+}
+
+// draftWithSignature returns the in-memory draft carrying the shaped signature
+// it is about to be sealed with, still without a revision id.
+func draftWithSignature(t *testing.T) *File {
+	f := buildDraft(t)
 	f.ContentSignature = Signature{SignerID: "device-1", Alg: SigAlgEd25519, Sig: shapedSignature()}
-	seal(t, f, &f.ContentSignature)
 	return f
 }
 
@@ -239,18 +253,22 @@ func buildFile(t *testing.T) *File {
 // signature, and nothing in this package verifies one.
 func shapedSignature() []byte { return pf(0x51, 64) }
 
-// unsignedFile is buildFile's content in the unsigned-draft state: null
-// signature, empty revision id.
-func unsignedFile(t *testing.T) *File {
-	f := buildFile(t)
-	f.Header.RevisionID = ""
-	f.ContentSignature = Signature{}
-	seal(t, f, nil)
-	return f
+// sealFile runs SealFile (no signature is computed), parses the sealed bytes
+// back and returns the parsed file.
+func sealFile(t *testing.T, f *File, sig *Signature) *File {
+	t.Helper()
+	enc, err := SealFile(f, sig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseFile(enc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return parsed
 }
 
-// seal runs SealFile (no signature is computed) and replaces f with the
-// parsed canonical result.
+// seal is sealFile, replacing f with the parsed canonical result.
 func seal(t *testing.T, f *File, sig *Signature) []byte {
 	t.Helper()
 	enc, err := SealFile(f, sig)
@@ -273,7 +291,7 @@ func reseal(t *testing.T, f *File) {
 	t.Helper()
 	sig := f.ContentSignature
 	f.Header.RevisionID = ""
-	seal(t, f, &sig)
+	*f = *sealFile(t, f, &sig)
 }
 
 // encodedHeader is the canonical header of a file exactly as it appears on
@@ -385,12 +403,12 @@ func TestVectors(t *testing.T) {
 		if rev != v.RevisionID {
 			t.Fatalf("%s: revision id = %s, want %s", v.Name, rev, v.RevisionID)
 		}
-		// The draft carries no revision id and the sealed file carries
-		// exactly its derived one.
-		if v.State == "draft" && f.Header.RevisionID != "" {
-			t.Fatalf("%s: draft carries revision_id %q", v.Name, f.Header.RevisionID)
+		// Every vector is a sealed wire file and carries exactly its
+		// derived revision id.
+		if v.State != "sealed" {
+			t.Fatalf("%s: state = %q; only sealed files are wire vectors", v.Name, v.State)
 		}
-		if v.State == "sealed" && f.Header.RevisionID != rev {
+		if f.Header.RevisionID != rev {
 			t.Fatalf("%s: sealed revision_id = %s, want derived %s", v.Name, f.Header.RevisionID, rev)
 		}
 		input, err := revisionDomainInput(f)
@@ -420,15 +438,13 @@ func TestVectors(t *testing.T) {
 			t.Fatalf("%s: content signing sha256 = %s, want %s", v.Name, got, v.ContentSigningSHA256)
 		}
 
-		// File digest: the complete canonical signed file.
-		if v.State == "sealed" {
-			fd, err := FileDigest(f)
-			if err != nil {
-				t.Fatalf("%s: file digest: %v", v.Name, err)
-			}
-			if fd != v.FileDigest {
-				t.Fatalf("%s: file digest = %s, want %s", v.Name, fd, v.FileDigest)
-			}
+		// File digest: the complete canonical sealed file.
+		fd, err := FileDigest(f)
+		if err != nil {
+			t.Fatalf("%s: file digest: %v", v.Name, err)
+		}
+		if fd != v.FileDigest {
+			t.Fatalf("%s: file digest = %s, want %s", v.Name, fd, v.FileDigest)
 		}
 
 		sp := &f.SignedPolicyProofs[0]
@@ -456,6 +472,8 @@ func sha256Hex(b []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// vectorEntry records f as one sealed wire vector. The in-memory draft is
+// never recorded: it has no wire bytes.
 func vectorEntry(t *testing.T, name, state string, f *File) map[string]any {
 	t.Helper()
 	enc, err := EncodeFile(f)
@@ -466,11 +484,8 @@ func vectorEntry(t *testing.T, name, state string, f *File) map[string]any {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state == "sealed" && rev != f.Header.RevisionID {
+	if rev != f.Header.RevisionID {
 		t.Fatalf("%s: revision id %s, header %s", name, rev, f.Header.RevisionID)
-	}
-	if state == "draft" && f.Header.RevisionID != "" {
-		t.Fatalf("%s: draft carries a revision id", name)
 	}
 	input, err := revisionDomainInput(f)
 	if err != nil {
@@ -493,28 +508,55 @@ func vectorEntry(t *testing.T, name, state string, f *File) map[string]any {
 		"policy_document":              string(f.SignedPolicyProofs[0].Document),
 		"policy_document_sha256":       sha256Hex(f.SignedPolicyProofs[0].Document),
 	}
-	if state == "sealed" {
-		fd, err := FileDigest(f)
-		if err != nil {
-			t.Fatal(err)
-		}
-		entry["file_digest"] = fd
-	} else {
-		entry["file_digest"] = nil
+	fd, err := FileDigest(f)
+	if err != nil {
+		t.Fatal(err)
 	}
+	entry["file_digest"] = fd
 	return entry
 }
 
 func writeVectors(t *testing.T) {
 	sealed := buildFile(t)
-	// The draft is the sealed file before signing: only the signature and
-	// the revision id differ, so both share one revision identity.
-	draft := unsignedFile(t)
+
+	// The draft is checked against the sealed file, not written: it is an
+	// in-memory builder state with no wire bytes. Both must derive the one
+	// identity and the one content-signing preimage recorded in the vector.
+	draft := buildDraft(t)
+	sealedRev, err := RevisionID(sealed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	draftRev, err := RevisionID(draft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if draftRev != sealedRev {
+		t.Fatalf("draft revision id %s, sealed %s", draftRev, sealedRev)
+	}
+	sealedCSB, err := ContentSigningBytes(sealed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	draftCSB, err := ContentSigningBytes(draft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(draftCSB, sealedCSB) {
+		t.Fatal("draft content signing preimage differs from the sealed vector")
+	}
+	// The draft is not a wire file.
+	if _, err := EncodeFile(draft); err == nil {
+		t.Fatal("draft encodes as a wire file")
+	}
+	if _, err := FileDigest(draft); err == nil {
+		t.Fatal("draft has a file digest")
+	}
+
 	doc := map[string]any{
-		"$comment": "Synthetic locklark.vault-file/v1 encoding vectors (see docs/vaultfile-wire-v1.md). Signature and wrapped-key bytes are shaped, not valid, and no signature is verified. revision_id is the v1 RevisionID hash of revision_domain_input (the canonical file with header.revision_id and content_signature omitted); content_signing_input is the canonical file with content_signature omitted and header.revision_id set to revision_id; file_digest is the v1 FileDigest of the sealed file only. Generated by TestWriteVectors; verify with TestVectors.",
+		"$comment": "Synthetic locklark.vault-file/v1 encoding vectors (see docs/vaultfile-wire-v1.md). Only sealed files are wire records: every vector has state \"sealed\", a non-null content signature and a header.revision_id equal to revision_id. There is no unsigned-draft fixture; a draft is an in-memory builder state with no wire bytes (see docs/vaultfile-wire-v1.md). Signature and wrapped-key bytes are shaped, not valid, and no signature is verified. revision_id is the v1 RevisionID hash of revision_domain_input (the canonical file with header.revision_id and content_signature omitted); content_signing_input is the canonical file with content_signature omitted and header.revision_id set to revision_id; file_digest is the v1 FileDigest of the sealed file. Generated by TestWriteVectors; verify with TestVectors.",
 		"vectors": []map[string]any{
 			vectorEntry(t, "v1-canonical", "sealed", sealed),
-			vectorEntry(t, "v1-unsigned-draft", "draft", draft),
 		},
 	}
 	b := []byte(canonicalJSON(doc))

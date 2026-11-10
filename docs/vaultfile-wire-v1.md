@@ -78,7 +78,7 @@ unknown:
   "vault_id":         <id>,
   "key_epoch":        <int>,
   "content_seq":      <int>,
-  "revision_id":      <lowercase hex sha256> | "",   // "" only in an unsigned draft
+  "revision_id":      <lowercase hex sha256>,        // exactly RevisionID
   "prev_digest":      <base64url sha256> | null,     // null only at content_seq 0
   "op_id":            <id>,
   "policy_seq":       <int>,
@@ -90,9 +90,9 @@ unknown:
 `revision_id` is the derived `RevisionID` of the file (see
 [Preimages](#frozen-v1-preimages)); it is never an input of any preimage.
 
-`Signature`: `{"signer_id": <id>, "alg": "ed25519", "sig": <base64url 64 bytes> | null}`.
-`sig` is `null` only in the unsigned draft (below); every other signature
-member requires a 64-byte value.
+`Signature`: `{"signer_id": <id>, "alg": "ed25519", "sig": <base64url 64 bytes>}`.
+Every file `content_signature` is a non-null 64-byte signature. A `null` `sig`
+is not a wire value.
 
 `SignedPolicy`: `{"document": <base64url>, "policy": { Policy }, "signer_id",
 "alg", "sig"}`. `document` is the canonical encoding of `policy`; verification
@@ -163,21 +163,54 @@ A device whose principal is in none of `readers`, `writers`, `admins`,
 
 ## File states
 
-A file has exactly two valid states. `SealFile(f, sig)` produces exactly one
-of them; nothing else is a valid file.
+A file has exactly two states (see [Builder draft versus sealed file](#builder-draft-versus-sealed-file)):
 
-- **unsigned draft**: `header.revision_id` is `""` and `content_signature` is
-  exactly `{"signer_id":"","alg":"","sig":null}`. A non-empty `signer_id` or
-  `alg` here is a signature-shape error. A writer holds this state between
-  building the file and signing `ContentSigningBytes`.
+- **builder draft**: `header.revision_id` is `""` and `content_signature` is
+  exactly `{"signer_id":"","alg":"","sig":null}`. A writer holds it in memory
+  between building the file and signing `ContentSigningBytes`. It is not a
+  wire record and is never serialized by this package.
 - **sealed**: `header.revision_id` is exactly `RevisionID` of the file, and
   `content_signature` carries a 64-byte `sig` by the header's author device
   with the shape of that device's content signing key. An empty
   `header.revision_id` is a `missing_field`; a different one is an
   `invalid_value`.
 
-No other combination is accepted, including a null `sig` with a revision id or
-a non-null `sig` without one.
+`SealFile(f, sig)` produces exactly one state, the sealed file, and `sig` must
+be non-nil: `SealFile(f, nil)` returns an `invalid_value` at
+`content_signature` and no bytes. No other combination is accepted, including
+a null `sig` with a revision id or a non-null `sig` without one.
+
+## Builder draft versus sealed file
+
+Only a sealed file is a valid wire record. It is the only kind of file that is
+transferred to or stored by a backend, and the only kind this package
+accepts or emits on the wire:
+
+- `ValidateFile` accepts exactly one state: sealed. A null `sig` is an
+  `invalid_value` at `content_signature`; an empty `revision_id` is a
+  `missing_field`.
+- `ParseFile` rejects a document with a null `sig` or an empty `revision_id`.
+- `EncodeFile` (and `FileBytes`, its alias) rejects a draft: it never emits
+  draft JSON.
+- `FileDigest` hashes only a sealed file.
+
+The builder draft exists only in memory, only so a writer can compute the
+two preimages it needs before it has a signature:
+
+- `RevisionID(draft)` and `ContentSigningBytes(draft)` accept the builder
+  state. Content signing does not need a revision id, so the draft may already
+  carry the signature it is about to be sealed with (`{"signer_id":"device-1",
+  "alg":"ed25519","sig":<64 bytes>}`) with `header.revision_id` still `""`.
+  Neither function serializes a draft as a wire file, and a null `sig` is
+  never written into either preimage.
+- `RevisionID` and `ContentSigningBytes` also accept a sealed file and derive
+  the same preimages, so a verifier can recompute them from the wire file
+  alone.
+
+The writer never needs draft bytes: it builds the draft, calls
+`ContentSigningBytes` (and optionally `RevisionID`), signs those bytes, and
+calls `SealFile` with the signature. A writer that serializes its draft with
+its own encoder must never treat the result as a wire record.
 
 ## Frozen v1 preimages
 
@@ -199,8 +232,9 @@ RevisionID(f) = SHA-256( "/locklark.vault-file/v1/revision" || 0x00
 ```
 
 Both members are removed entirely. `RevisionID` never reads the file's
-carried `revision_id` or `content_signature`, so a draft and the file sealed
-from it have the same revision id, and a stale revision id cannot change it.
+carried `revision_id` or `content_signature`, so the builder draft and the
+file sealed from it have the same revision id, and a stale revision id cannot
+change it.
 When `header.revision_id` is removed, the header keeps the order of its other
 members: `vault_id`, `key_epoch`, `content_seq`, `prev_digest`, `op_id`,
 `policy_seq`, `policy_digest`, `author_device_id`.
@@ -214,8 +248,8 @@ ContentSigningBytes(f) = canonical file
 `header.revision_id` is present and names the derived revision.
 `content_signature` is removed entirely. The signer signs
 `"/locklark.vault-file/v1/content-signature" || 0x00 || ContentSigningBytes(f)`.
-The preimage is identical for the draft and for the sealed file, so the header
-is covered through the revision id without a second signature.
+The preimage is the same for the builder draft and for the sealed file, so the
+header is covered through the revision id without a second signature.
 
 ```
 FileDigest(f) = SHA-256( "/locklark.vault-file/v1/file-digest" || 0x00
@@ -223,7 +257,7 @@ FileDigest(f) = SHA-256( "/locklark.vault-file/v1/file-digest" || 0x00
 ```
 
 The input is the complete canonical sealed file, `revision_id` and
-`content_signature` included, unchanged.
+`content_signature` included, unchanged. A builder draft has no file digest.
 
 ## Structural rules
 
@@ -238,12 +272,13 @@ The codec is strict:
 - binary values are base64url without padding, canonical for the value;
 - `version` must equal `1` in both the file and the policy document.
 
-`ValidateFile` also checks the cross-member bindings: every policy proof names
-the header vault, exactly one proof carries the header policy sequence and its
-`policy_digest` (as defined above) equals `Header.policy_digest`, the content
-signature and `revision_id` follow the two states above, the CEK slot epoch
-matches the header epoch, and the author is a policy device whose principal is
-a writer, admin or owner.
+`ValidateFile` first requires the sealed state (non-null shaped author
+signature and the exact derived `revision_id`) and also checks the
+cross-member bindings. The same checks apply to sealed files in every entry
+point: every policy proof names the header vault, exactly one proof carries
+the header policy sequence and its `policy_digest` (as defined above) equals
+`Header.policy_digest`, the CEK slot epoch matches the header epoch, and the
+author is a policy device whose principal is a writer, admin or owner.
 
 The VUK slots are exactly the approved devices whose principal has read
 access (reader, writer, admin or owner): every such device has one slot in the
@@ -257,8 +292,8 @@ so a file is resealed after reordering.
 
 Validation is shape only:
 
-- signature bytes are checked for length and encoding, never verified; the
-  package computes no signature and accepts none;
+- signature bytes are checked for presence, length and encoding, never
+  verified; the package computes no signature and accepts none;
 - `revision_id` is checked to equal `RevisionID`; it is not a signature;
 - wrapped-key bytes are checked for presence and size, never unwrapped;
 - public keys and age recipients are parsed for shape only;
@@ -290,30 +325,34 @@ Validation is shape only:
 
 ## Encoding vectors
 
-`pkg/vaultfile/testdata/vaultfile-v1-vectors.json` holds two fixed synthetic
-vectors:
+`pkg/vaultfile/testdata/vaultfile-v1-vectors.json` holds one fixed synthetic
+vector, `v1-canonical` (`state: sealed`). It is the only entry:
+there is no serialized unsigned-draft fixture, because a draft has no wire
+bytes.
 
-- `v1-canonical` (`state: sealed`);
-- `v1-unsigned-draft` (`state: draft`), the same content before signing.
-
-Signature and wrapped-key bytes are shaped, not valid. Each vector records,
-for exactly these bytes: `file`, `file_sha256`, `revision_id`,
+Signature and wrapped-key bytes are shaped, not valid. The vector records, for
+exactly these bytes: `file`, `file_sha256`, `revision_id`,
 `revision_domain_input` (the unhashed `RevisionID` input),
 `content_signing_input` and `content_signing_input_sha256`,
-`policy_document` and `policy_document_sha256`, and `file_digest` for the
-sealed vector. Both vectors share one `revision_id` and one
-`content_signing_input`. Regenerate with:
+`policy_document`, `policy_document_sha256` and `file_digest`. The
+in-memory builder draft built from the same content is checked by
+`TestWriteVectors` to derive the same `revision_id` and the same
+`content_signing_input`, and is checked to be rejected by `EncodeFile` and
+`FileDigest`. Regenerate with:
 
 ```
 go test ./pkg/vaultfile/... -run TestWriteVectors -update
 ```
 
-`TestVectors` verifies that re-encoding reproduces the vector bytes and that
-every recorded value is reproduced. `TestRevisionPreimageOmitsRevisionID`,
-`TestContentSigningPreimage`, `TestSealedEncodingMembers`,
-`TestRevisionPreimageFixedVector` and `TestSealFileStates` in
-`pkg/vaultfile/signing_test.go` pin the exact JSON members of every preimage and
-both file states independently of the vector file.
+`TestVectors` verifies that every vector is sealed, that re-encoding reproduces
+the vector bytes and that every recorded value is reproduced.
+`TestRevisionPreimageOmitsRevisionID`, `TestContentSigningPreimage`,
+`TestSealedEncodingMembers`, `TestRevisionPreimageFixedVector`,
+`TestSealFileSealed`, `TestSealFileNilRejected`, `TestDraftRejectedByWire` and
+`TestDraftShapeRules` in `pkg/vaultfile/signing_test.go` pin the exact JSON
+members of every preimage, the builder draft and the sealed file, and that
+`ParseFile`, `EncodeFile`, `FileBytes`, `ValidateFile` and `FileDigest` reject
+the draft, independently of the vector file.
 
 ## Out of scope
 

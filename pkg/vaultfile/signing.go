@@ -33,6 +33,12 @@ import (
 // (encodeFileWire) directly, never by EncodeFile or ValidateFile, so a
 // preimage is not rejected for lacking the very values it omits.
 //
+// Only FileDigest is a wire operation: it hashes a sealed file, the only kind
+// of file that exists on the wire. RevisionID and ContentSigningBytes accept
+// the writer's in-memory draft as well, so a writer can hold an unsigned File
+// between building it and sealing it without that draft ever being a wire
+// record: ParseFile, EncodeFile and exported ValidateFile all reject it.
+//
 // This package computes hashes only. Nothing returned here is a signature and
 // nothing here verifies one.
 
@@ -42,13 +48,14 @@ import (
 //
 // It never reads f.Header.RevisionID or f.ContentSignature, so the same file
 // gives the same identity before and after sealing and a stale revision id
-// cannot change it. It validates first (ValidateFile) so every other field
-// has its wire shape.
+// cannot change it. It validates first (validateDraft) so every other field
+// has its wire shape. f may be the in-memory builder draft or a sealed file;
+// the draft is never a wire record.
 func RevisionID(f *File) (string, error) {
 	if f == nil {
 		return "", &Error{Code: CodeInvalidValue}
 	}
-	if err := ValidateFile(f); err != nil {
+	if err := validateDraft(f); err != nil {
 		return "", err
 	}
 	rev, err := revisionHash(f)
@@ -66,20 +73,26 @@ func RevisionID(f *File) (string, error) {
 // revision id is derived from the same file with the signature absent, the
 // preimage is the same for a draft and the file sealed from it.
 //
-// f must be a valid draft or sealed file. No signature is verified.
+// f may be any builder state: the null-sig draft, the draft already carrying
+// the signature it is about to be sealed with, or a sealed file; the private
+// draft validation checks every field except that the revision is present and
+// derived. A sealed file yields the same bytes as its draft. No signature is
+// verified.
 func ContentSigningBytes(f *File) ([]byte, error) {
 	return contentSigningBytes(f, true)
 }
 
 // contentSigningBytes is ContentSigningBytes. With validate unset it skips
-// validation and trusts the wire shape; SealFile needs that because it builds
-// the preimage of the signature it is about to set.
+// validation and trusts the shape; SealFile needs that because it builds the
+// preimage of the signature it is about to set.
 func contentSigningBytes(f *File, validate bool) ([]byte, error) {
 	if f == nil {
 		return nil, &Error{Code: CodeInvalidValue}
 	}
 	if validate {
-		if err := ValidateFile(f); err != nil {
+		// The content-signing input names the revision it derives, so the
+		// revision id is not part of this shape check.
+		if err := validateStructure(f); err != nil {
 			return nil, err
 		}
 	}
@@ -88,6 +101,9 @@ func contentSigningBytes(f *File, validate bool) ([]byte, error) {
 		return nil, err
 	}
 	revID := hex.EncodeToString(rev)
+	// A draft carries the null sig; the preimage omits the member entirely,
+	// so it never writes draft signature JSON. A sealed file's signature is
+	// written unchanged before the member is removed.
 	return encodeFileWire(f, fileEncoding{revisionID: &revID, omitSignature: true})
 }
 
@@ -95,8 +111,10 @@ func contentSigningBytes(f *File, validate bool) ([]byte, error) {
 // lowercase hex SHA-256 of DomainFileDigest, a NUL, and EncodeFile(f).
 //
 // Nothing is omitted or replaced: the input includes header.revision_id and
-// content_signature. f must be a valid file; a sealed file must already carry
-// its derived revision id. No signature is verified.
+// content_signature. f must be a validated sealed file (ValidateFile), so it
+// carries its derived revision id and a non-null author signature. A draft is
+// rejected: it is not a wire record and has no digest. No signature is
+// verified.
 func FileDigest(f *File) (string, error) {
 	if f == nil {
 		return "", &Error{Code: CodeInvalidValue}
@@ -112,49 +130,47 @@ func FileDigest(f *File) (string, error) {
 }
 
 // SealFile performs the writer's sealing step and returns the canonical bytes
-// of f with content_signature set to sig and header.revision_id set to the
-// RevisionID of exactly those bytes.
+// of the sealed file: content_signature set to sig and header.revision_id set
+// to the RevisionID of exactly those bytes.
 //
-// The result is always one of the two ValidateFile states:
+// f is the in-memory draft (or an already sealed file); any revision id or
+// content signature it already carries is replaced, so a stale value never
+// blocks sealing.
 //
-//   - sig nil: the unsigned draft, content_signature
-//     {"signer_id":"","alg":"","sig":null} and header.revision_id "".
-//   - sig non-nil: the sealed file, header.revision_id exactly its derived
-//     RevisionID and content_signature exactly sig.
+// sig must be non-nil. A nil sig would produce an unsigned draft, and a draft
+// is not a wire record: SealFile(f, nil) returns an invalid_value at
+// content_signature and no bytes. Writers get the draft preimage from
+// ContentSigningBytes and the identity from RevisionID; they never need draft
+// bytes.
 //
-// Any revision id or content signature f already carries is replaced, so a
-// stale value never blocks sealing. The result may still fail ValidateFile for
-// any other reason, and then SealFile returns that error and no bytes.
-//
-// A non-nil sig must be the writer's signature over
-// DomainContentSignature || 0x00 || ContentSigningBytes(draft); sig.SignerID
-// must name the header's author device. This function does not compute,
-// verify or otherwise check that signature beyond what ValidateFile checks.
+// The result may still fail ValidateFile for any other reason, and then
+// SealFile returns that error and no bytes. sig must be the writer's
+// signature over DomainContentSignature || 0x00 || ContentSigningBytes(draft);
+// sig.SignerID must name the header's author device. This function does not
+// compute, verify or otherwise check that signature beyond what ValidateFile
+// checks.
 func SealFile(f *File, sig *Signature) ([]byte, error) {
-	if f == nil {
-		return nil, &Error{Code: CodeInvalidValue}
+	if f == nil || sig == nil || sig.Sig == nil {
+		return nil, Err("content_signature", CodeInvalidValue)
 	}
 	sealed := deepCopyFile(f)
 	sealed.Header.RevisionID = ""
-	sealed.ContentSignature = Signature{}
-	if sig != nil {
-		sealed.ContentSignature = *sig
-		sealed.ContentSignature.Sig = bytes.Clone(sig.Sig)
-		// The revision identity never reads the incoming revision id or
-		// signature: its preimage omits both members. The draft's null
-		// signature and the sealed sig cover the same revision input.
-		rev, err := revisionHash(sealed)
-		if err != nil {
-			return nil, err
-		}
-		sealed.Header.RevisionID = hex.EncodeToString(rev)
+	sealed.ContentSignature = *sig
+	sealed.ContentSignature.Sig = bytes.Clone(sig.Sig)
+	// The revision identity never reads the incoming revision id or
+	// signature: its preimage omits both members, so the draft's values and
+	// the sealed ones cover the same revision input.
+	rev, err := revisionHash(sealed)
+	if err != nil {
+		return nil, err
 	}
+	sealed.Header.RevisionID = hex.EncodeToString(rev)
 	return EncodeFile(sealed)
 }
 
 // revisionHash returns the decoded RevisionID of f. It does not validate: it
-// only requires the wire shape, so callers that need a valid file call
-// ValidateFile first.
+// only requires the field shape, so callers validate first (ValidateFile for
+// a sealed file, validateDraft for a draft or sealed one).
 func revisionHash(f *File) ([]byte, error) {
 	if f == nil {
 		return nil, &Error{Code: CodeInvalidValue}

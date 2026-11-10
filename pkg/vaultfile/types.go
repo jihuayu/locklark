@@ -11,13 +11,16 @@ import (
 // R in the sync protocol means exactly these bytes as read back from the
 // backend; it is never a legacy document.
 //
-// A file has exactly two states (see ValidateFile):
+// A file has exactly two states:
 //
-//   - unsigned draft: content_signature is the null sig {"signer_id":"",
-//     "alg":"","sig":null} and header.revision_id is "". A writer holds this
-//     state between building the file and signing ContentSigningBytes.
+//   - in-memory builder draft: content_signature is the null sig
+//     {"signer_id":"","alg":"","sig":null} and header.revision_id is "". A
+//     writer holds it in memory between building the file and signing
+//     ContentSigningBytes. It is not a wire record: ParseFile, EncodeFile,
+//     FileDigest and ValidateFile reject it.
 //   - sealed: content_signature is a 64-byte signature by the header's author
 //     device and header.revision_id is the derived RevisionID of the file.
+//     Only this state is a valid wire file.
 //
 // There is no header signature. The header is covered by the content
 // signature through RevisionID, so a writer never manages a header key.
@@ -41,8 +44,9 @@ type File struct {
 // base64url without padding.
 //
 // RevisionID is the derived revision identity of the file (RevisionID), 32
-// bytes as lowercase hex, or "" in an unsigned draft. It is never an input of
-// a preimage: see ContentSigningBytes.
+// bytes as lowercase hex. It is "" only in an in-memory builder draft, which
+// is never encoded or parsed as a wire file. It is never an input of a
+// preimage: see ContentSigningBytes.
 type Header struct {
 	VaultID        string `json:"vault_id"`
 	KeyEpoch       uint64 `json:"key_epoch"`

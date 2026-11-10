@@ -30,7 +30,13 @@ var fileMembers = []string{
 	"content_signature",
 }
 
-// ParseFile strictly parses and validates one complete vault file.
+// ParseFile strictly parses and validates one sealed vault file.
+//
+// A sealed file is the only valid wire record: it must carry a non-null
+// author content signature and header.revision_id exactly its derived
+// RevisionID. An unsigned builder draft is not a wire file and is rejected
+// here (invalid_value at content_signature for a null sig, missing_field at
+// revision_id for an empty one).
 func ParseFile(data []byte) (*File, error) {
 	if len(data) > MaxFileBytes {
 		return nil, &Error{Code: CodeTooLarge, Path: ""}
@@ -49,7 +55,9 @@ func ParseFile(data []byte) (*File, error) {
 	return f, nil
 }
 
-// EncodeFile validates f and returns its canonical encoding.
+// EncodeFile validates that f is a sealed file and returns its canonical
+// encoding. It never emits draft JSON: a null content signature or an empty
+// revision id is an invalid value here.
 func EncodeFile(f *File) ([]byte, error) {
 	if f == nil {
 		return nil, &Error{Code: CodeInvalidValue}
@@ -76,12 +84,28 @@ type fileEncoding struct {
 
 // encodeFileWire writes the canonical encoding of f under enc without
 // validating it. Without an omission option the encoding is exactly
-// EncodeFile's: header.revision_id as f carries it (including "" for an
-// unsigned draft) and content_signature as f carries it (sig null for an
-// unsigned draft). With enc.omitRevision or enc.omitSignature set, the named
-// member is absent rather than empty, so a derived preimage is literally the
-// canonical file minus that member.
+// EncodeFile's: header.revision_id and content_signature exactly as f carries
+// them. It is only reached for a sealed f, except through SealFile, which sets
+// both values on its private copy first.
+//
+// With enc.omitRevision or enc.omitSignature set, the named member is absent
+// rather than empty, so a derived preimage is literally the canonical file
+// minus that member. With enc.omitRevision set and enc.revisionID nil, the
+// content signature is always omitted too: omitting the revision while
+// writing a content signature would be a draft-shaped document, and no caller
+// has one.
+//
+// With enc.omitSignature set, a null sig (a draft's) is written as the empty
+// signature before the member is removed: no encoding ever writes a null sig
+// into a derived document.
 func encodeFileWire(f *File, enc fileEncoding) ([]byte, error) {
+	if enc.omitRevision && enc.revisionID == nil {
+		enc.omitSignature = true
+	}
+	if f.ContentSignature.Sig == nil && (enc.omitSignature || enc.revisionID != nil) {
+		f = deepCopyFile(f)
+		f.ContentSignature = Signature{}
+	}
 	var b bytes.Buffer
 	b.WriteByte('{')
 	writeStr(&b, "format", f.Format)
@@ -670,7 +694,8 @@ func list(m map[string]*value, k string, max int) ([]*value, error) {
 
 func fileFromValue(v *value) (*File, error) {
 	// The content signature size is checked before any other member of the
-	// file is decoded; sig null is the unsigned-draft state.
+	// file is decoded. sig null decodes but is not a wire value; the sealed
+	// check rejects it.
 	if err := checkSignatureMember(v, "content_signature"); err != nil {
 		return nil, err
 	}
@@ -1043,8 +1068,8 @@ func signatureFromValue(v *value) (Signature, error) {
 	if s.Alg, err = str(m, "alg", len(SigAlgEd25519)); err != nil {
 		return s, err
 	}
-	// sig null is the unsigned-draft content signature; every other
-	// signature member requires a value.
+	// sig null decodes so the sealed check can reject it with an exact
+	// diagnostic; every other signature member requires a value.
 	if s.Sig, err = bin(m, "sig", MaxSignatureLength, true); err != nil {
 		return s, err
 	}

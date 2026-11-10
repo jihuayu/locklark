@@ -343,15 +343,14 @@ func TestSignerShape(t *testing.T) {
 	_, err = EncodeFile(f)
 	wantCode(t, err, CodeSignatureInvalid)
 
-	// A sealed file with a null sig is not a draft; a draft also has an
-	// empty signer and algorithm and no revision id.
+	// A null sig is never a wire value: a sealed file with a null sig is
+	// rejected, and an in-memory draft is not encodable at all.
 	f = buildFile(t)
 	f.ContentSignature.Sig = nil
 	_, err = EncodeFile(f)
-	wantCode(t, err, CodeSignatureInvalid)
-	if _, err := EncodeFile(unsignedFile(t)); err != nil {
-		t.Fatalf("unsigned draft rejected: %v", err)
-	}
+	wantCodeAt(t, err, CodeInvalidValue, "content_signature")
+	_, err = EncodeFile(buildDraft(t))
+	wantCodeAt(t, err, CodeInvalidValue, "content_signature")
 
 	// The content signature must have the author device's content key shape.
 	f = buildFile(t)
@@ -584,7 +583,7 @@ func TestAuthorRole(t *testing.T) {
 	f.ContentSignature.SignerID = "device-9"
 	_, err = EncodeFile(f)
 	wantCode(t, err, CodeInvalidValue)
-	_, err = SealFile(f, nil)
+	_, err = SealFile(fdraftWithAuthor(t, "device-9"), &f.ContentSignature)
 	wantCode(t, err, CodeInvalidValue)
 }
 
@@ -690,6 +689,13 @@ func mustSlotJSON(t *testing.T, f *File, i int) []byte {
 	writeBytes(&b, s.WrappedVUK)
 	b.WriteByte('}')
 	return b.Bytes()
+}
+
+// fdraftWithAuthor returns the in-memory draft authored by device id.
+func fdraftWithAuthor(t *testing.T, id string) *File {
+	f := buildDraft(t)
+	f.Header.AuthorDeviceID = id
+	return f
 }
 
 func TestValidWriterRoundTrip(t *testing.T) {
