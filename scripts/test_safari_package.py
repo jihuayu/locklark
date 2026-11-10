@@ -397,6 +397,21 @@ class SafariPackagingTests(unittest.TestCase):
         self.assertIn("not", docs.lower())
         self.assertIn("unsigned", docs.lower())
 
+    def test_safari_container_app_status_ui_and_safe_copy(self) -> None:
+        app_src = (SAFARI / "LocklarkSafari/Sources/LocklarkSafariApp.swift").read_text("utf-8")
+        for required in (
+            "enum RelayState",
+            "Locklark for Safari",
+            "Native relay ready",
+            "Native relay stopped",
+            "Unavailable: signed app identity or app group is missing",
+            "The Safari extension connects through this app.",
+            "func restart()",
+        ):
+            self.assertIn(required, app_src)
+        self.assertNotIn("error.localizedDescription", app_src)
+        self.assertNotIn("\\(error)", app_src)
+
 
 def main() -> int:
     if "--verify-dist" in sys.argv:

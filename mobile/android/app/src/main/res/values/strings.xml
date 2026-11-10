@@ -1,1 +1,20 @@
-<resources><string name="app_name">Locklark</string></resources>
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Locklark</string>
+    <string name="security_badge">本机零知识加密 · 离线安全金库</string>
+    <string name="opening_vault">正在打开此设备的本地金库…</string>
+    <string name="locking_vault">正在完成锁定…</string>
+    <string name="page_locked_cover">Locklark 已锁定</string>
+    <string name="page_locked_vault">Locklark · 本机离线金库</string>
+    <string name="page_create_vault">创建本机金库</string>
+    <string name="page_vault_list">Locklark · 登录</string>
+    <string name="page_new_login">新建登录</string>
+    <string name="page_edit_field">编辑登录字段</string>
+    <string name="page_regenerate_password">确认重新生成本地密码</string>
+    <string name="empty_vault_onboarding">此设备尚无加密金库。请先生成并离线妥善保管专属 Secret Key（注意：设备快速解锁不能替代完整双因素恢复）。</string>
+    <string name="unlock_guidance">请输入主密码与 Secret Key 双因素解锁，或使用已授权的本机生物识别/锁屏凭据。</string>
+    <string name="create_backup_guidance">请在应用外安全备份此 Secret Key。一旦同时遗失主密码或 Secret Key，设备快速解锁无法用于恢复金库。</string>
+    <string name="edit_field_guidance">新值将从空白开始输入。查看旧值需单独发起授权；取消操作不会改动现有凭据。</string>
+    <string name="regenerate_password_guidance">仅更新此金库内保存的本地密码，不会自动同步修改对应网站的账户密码。</string>
+    <string name="empty_login_list">暂无匹配的登录凭据。可点击上方「新建登录」添加受保护条目。</string>
+</resources>

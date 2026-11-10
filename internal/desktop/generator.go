@@ -156,15 +156,15 @@ func generatorErrorMessage(err error) string {
 func generatorStrength(entropy int) string {
 	switch {
 	case entropy >= 128:
-		return "Fantastic"
+		return "极强"
 	case entropy >= 100:
-		return "Very Good"
+		return "很强"
 	case entropy >= 75:
-		return "Good"
+		return "良好"
 	case entropy >= 50:
-		return "Weak"
+		return "较弱"
 	default:
-		return "Very Weak"
+		return "极弱"
 	}
 }
 
@@ -207,16 +207,17 @@ func clipboardDeadline(timeout time.Duration) time.Time {
 
 func (a *App) generatorView(c *ui.Context) {
 	g := &a.v2.generator
-	ui.Column(c.Key("generator")).Role(ui.RoleGroup).Label("Password Generator").Gap(8).Children(func() {
-		ui.Text(c, "Password Generator").FontSize(20).Bold()
+	ui.Column(c.Key("generator")).Role(ui.RoleGroup).Label("密码生成器").Gap(10).Children(func() {
+		ui.Text(c, "密码生成器").FontSize(22).Bold()
+		ui.Text(c, "基于系统级加密随机源生成高强度随机密码、易记短语或 PIN 码。").FontSize(12)
 		ui.Row(c).Gap(6).Children(func() {
 			for _, mode := range []struct {
 				id    pwgen.Mode
 				label string
 			}{
-				{pwgen.ModeRandom, "Random"},
-				{pwgen.ModeMemorable, "Memorable"},
-				{pwgen.ModePIN, "PIN"},
+				{pwgen.ModeRandom, "随机密码"},
+				{pwgen.ModeMemorable, "易记短语"},
+				{pwgen.ModePIN, "PIN 码"},
 			} {
 				mode := mode
 				button := ui.Button(c, mode.label)
@@ -228,33 +229,33 @@ func (a *App) generatorView(c *ui.Context) {
 		})
 		switch g.mode {
 		case pwgen.ModeMemorable:
-			ui.Text(c, fmt.Sprintf("Word count: %d", g.wordCount))
-			ui.Row(c).Gap(4).Children(func() {
-				ui.Button(c, "Words -").OnClick(func() {
+			ui.Text(c, fmt.Sprintf("词数：%d", g.wordCount)).Bold()
+			ui.Row(c).Gap(6).Children(func() {
+				ui.Button(c, "减少词数").OnClick(func() {
 					if g.wordCount > 3 {
 						g.wordCount--
 						a.regenerateGenerator()
 					}
 				})
-				ui.Button(c, "Words +").OnClick(func() {
+				ui.Button(c, "增加词数").OnClick(func() {
 					if g.wordCount < 15 {
 						g.wordCount++
 						a.regenerateGenerator()
 					}
 				})
 			})
-			ui.TextInput(c, &g.separator).Label("Separator").Placeholder("hyphens, spaces, periods, commas, underscores, numbers")
-			ui.Checkbox(c, &g.capitalize, "Capitalize").OnChange(a.regenerateGenerator)
+			ui.TextInput(c, &g.separator).Label("分隔符").Placeholder("hyphens, spaces, periods, commas, underscores, numbers")
+			ui.Checkbox(c, &g.capitalize, "首字母大写").OnChange(a.regenerateGenerator)
 		case pwgen.ModePIN:
-			ui.Text(c, fmt.Sprintf("PIN length: %d", g.pinLength))
-			ui.Row(c).Gap(4).Children(func() {
-				ui.Button(c, "PIN length -").OnClick(func() {
+			ui.Text(c, fmt.Sprintf("PIN 长度：%d", g.pinLength)).Bold()
+			ui.Row(c).Gap(6).Children(func() {
+				ui.Button(c, "缩短 PIN").OnClick(func() {
 					if g.pinLength > 3 {
 						g.pinLength--
 						a.regenerateGenerator()
 					}
 				})
-				ui.Button(c, "PIN length +").OnClick(func() {
+				ui.Button(c, "加长 PIN").OnClick(func() {
 					if g.pinLength < 12 {
 						g.pinLength++
 						a.regenerateGenerator()
@@ -262,35 +263,36 @@ func (a *App) generatorView(c *ui.Context) {
 				})
 			})
 		default:
-			ui.Text(c, fmt.Sprintf("Length: %d", g.length))
-			ui.Row(c).Gap(4).Children(func() {
-				ui.Button(c, "Length -").OnClick(func() {
+			ui.Text(c, fmt.Sprintf("密码长度：%d", g.length)).Bold()
+			ui.Row(c).Gap(6).Children(func() {
+				ui.Button(c, "缩短长度").OnClick(func() {
 					if g.length > 8 {
 						g.length--
 						a.regenerateGenerator()
 					}
 				})
-				ui.Button(c, "Length +").OnClick(func() {
+				ui.Button(c, "加长长度").OnClick(func() {
 					if g.length < 64 {
 						g.length++
 						a.regenerateGenerator()
 					}
 				})
 			})
-			ui.Checkbox(c, &g.digits, "Include digits").OnChange(a.regenerateGenerator)
-			ui.Checkbox(c, &g.symbols, "Include symbols").OnChange(a.regenerateGenerator)
+			ui.Checkbox(c, &g.digits, "包含数字").OnChange(a.regenerateGenerator)
+			ui.Checkbox(c, &g.symbols, "包含符号").OnChange(a.regenerateGenerator)
 		}
 		if g.preview != "" {
 			ui.Text(c, g.preview).FontSize(18).Bold()
 		}
-		ui.Text(c, g.status)
-		ui.Row(c).Gap(6).Children(func() {
-			ui.Button(c, "Regenerate").OnClick(a.regenerateGenerator)
-			ui.Button(c, "Copy").OnClick(a.copyGeneratorPassword)
+		ui.Text(c, g.status).FontSize(12)
+		ui.Row(c).Gap(8).Children(func() {
+			ui.Button(c, "重新生成").OnClick(a.regenerateGenerator)
+			ui.Button(c, "复制密码").OnClick(a.copyGeneratorPassword)
 			if a.v2.draft != nil {
-				ui.PrimaryButton(c, "Use").OnClick(a.useGenerator)
+				ui.PrimaryButton(c, "填入当前条目").OnClick(a.useGenerator)
 			}
-			ui.Button(c, "Close Generator").OnClick(a.closeGenerator)
+			ui.Button(c, "关闭生成器").OnClick(a.closeGenerator)
 		})
 	})
 }
+

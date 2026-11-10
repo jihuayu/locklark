@@ -141,18 +141,18 @@ func (a *App) v2EditorView(c *ui.Context) {
 		return
 	}
 	ui.Text(c, "编辑条目").FontSize(22).Bold()
-	ui.Text(c, "修改会生成新的修订版本；原值写入历史。")
+	ui.Text(c, "保存后将生成新修订版本，原有字段值自动加密归入历史版本。").FontSize(12)
 	category := string(draft.Category)
 	sel := ui.Select(c, &category, v2CategoryOptions()).Disabled(a.busy)
 	if sel.Changed() {
 		a.setDraftCategory(vault.ItemCategory(category))
 	}
-	ui.TextInput(c, &draft.Title).Label("标题").Disabled(a.busy)
-	ui.TextInput(c, &draft.Username).Label("用户名").Disabled(a.busy)
-	ui.TextInput(c, &draft.Password).Label("密码").Password().Disabled(a.busy)
-	ui.TextInput(c, &draft.OTP).Label("一次性验证码配置").Disabled(a.busy)
-	ui.TextInput(c, &draft.URL).Label("网站").Disabled(a.busy)
-	ui.TextInput(c, &draft.Notes).Label("备注").Password().Disabled(a.busy)
+	ui.TextInput(c, &draft.Title).Label("标题").Placeholder("例如：GitHub、公司邮箱、主力信用卡").Disabled(a.busy)
+	ui.TextInput(c, &draft.Username).Label("用户名").Placeholder("用户名、邮箱或账号标识").Disabled(a.busy)
+	ui.TextInput(c, &draft.Password).Label("密码").Placeholder("输入或使用下方生成器创建高强度密码").Password().Disabled(a.busy)
+	ui.TextInput(c, &draft.OTP).Label("一次性验证码配置").Placeholder("otpauth://totp/... 或 Base32 密钥").Disabled(a.busy)
+	ui.TextInput(c, &draft.URL).Label("网站").Placeholder("https://example.com").Disabled(a.busy)
+	ui.TextInput(c, &draft.Notes).Label("备注").Placeholder("加密安全备注、恢复码或补充说明").Password().Disabled(a.busy)
 	ui.Checkbox(c, &draft.Favorite, "收藏").Disabled(a.busy)
 
 	// Tags: the add/remove helpers keep drafts de-duplicated and trimmed.
@@ -449,33 +449,36 @@ func (a *App) v2WatchtowerView(c *ui.Context) {
 			})
 		})
 	})
-	ui.Text(c, "本地检查完全离线；HIBP 泄露库检查需在浏览器扩展中显式启用。")
+	ui.Text(c, "本地检查全程离线运行；HIBP 泄露前缀核验需在浏览器扩展或 CLI 中显式启用。").FontSize(12)
 	report := a.v2.watchtower
 	if report == nil {
-		ui.Text(c, "尚未运行安全体检。")
+		ui.Text(c, "点击右上角「运行本地检查」开始扫描弱密码、重复密码及 2FA 配置缺失。").FontSize(13)
 		return
 	}
-	ui.Text(c, fmt.Sprintf("安全评分 %d/100 · 已检查 %d 项 · 跳过 %d 项", report.OverallScore, report.Checked, report.Skipped)).FontSize(18).Bold()
-	ui.Row(c).Gap(8).Children(func() {
-		ui.Text(c, fmt.Sprintf("已泄露 %d", report.Counts.Vulnerable))
-		ui.Text(c, fmt.Sprintf("重复 %d", report.Counts.Reused))
-		ui.Text(c, fmt.Sprintf("弱密码 %d", report.Counts.Weak))
-		ui.Text(c, fmt.Sprintf("HTTP %d", report.Counts.UnsecuredHTTP))
-		ui.Text(c, fmt.Sprintf("未设 2FA %d", report.Counts.TOTPNotStored))
-		ui.Text(c, fmt.Sprintf("即将过期 %d", report.Counts.Expiring))
+	ui.Text(c, fmt.Sprintf("安全评分 %d / 100 · 已检查 %d 项 · 跳过 %d 项", report.OverallScore, report.Checked, report.Skipped)).FontSize(18).Bold()
+	ui.Row(c).Gap(12).Children(func() {
+		ui.Text(c, fmt.Sprintf("已泄露：%d", report.Counts.Vulnerable))
+		ui.Text(c, fmt.Sprintf("重复密码：%d", report.Counts.Reused))
+		ui.Text(c, fmt.Sprintf("弱密码：%d", report.Counts.Weak))
+		ui.Text(c, fmt.Sprintf("非加密 HTTP：%d", report.Counts.UnsecuredHTTP))
+		ui.Text(c, fmt.Sprintf("未设 2FA：%d", report.Counts.TOTPNotStored))
+		ui.Text(c, fmt.Sprintf("即将过期：%d", report.Counts.Expiring))
 	})
 	if len(report.Findings) == 0 {
-		ui.Text(c, "未发现已知问题。")
+		ui.Text(c, "未发现已知安全隐患，当前保险库状态良好。").FontSize(13)
 		return
 	}
 	for _, finding := range report.Findings {
 		finding := finding
-		ui.Column(c).Gap(2).Children(func() {
-			ui.Text(c, fmt.Sprintf("%s · 强度 %d · %s", visible(finding.Title), finding.StrengthScore, strings.Join(finding.Flags, ", "))).Bold()
+		ui.Column(c).Gap(4).Children(func() {
+			ui.Row(c).Gap(8).Children(func() {
+				ui.Text(c, fmt.Sprintf("%s · 强度 %d · %s", visible(finding.Title), finding.StrengthScore, strings.Join(finding.Flags, ", "))).Bold().Grow(1)
+				ui.Button(c, "打开条目").OnClick(func() { a.selectItem(finding.ID, finding.Revision) })
+			})
 			if finding.BreachCount > 0 {
-				ui.Text(c, fmt.Sprintf("公开泄露库出现 %d 次，请立即更新密码。", finding.BreachCount))
+				ui.Text(c, fmt.Sprintf("该密码在公开泄露库中出现 %d 次，请立即更换。", finding.BreachCount)).FontSize(12)
 			}
-			ui.Button(c, "打开条目").OnClick(func() { a.selectItem(finding.ID, finding.Revision) })
 		})
 	}
 }
+

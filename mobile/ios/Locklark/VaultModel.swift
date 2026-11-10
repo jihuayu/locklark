@@ -296,15 +296,15 @@ final class VaultModel: ObservableObject {
                 switch result {
                 case .success:
                     self.hasVault = true
-                    self.status = "已创建加密金库。请使用两个完整因素解锁。"
+                    self.status = "已创建加密金库，请使用主密码与 Secret Key 完整双因素解锁。"
                 case .failure(let error):
                     self.vault?.requestLock()
                     if error is PlatformProtectionError { self.ready = false }
-                    self.status = "创建结果未确认，或本机文件保护检查失败；请检查金库后再操作。"
+                    self.status = "创建结果未确认或本机文件保护检查未通过，请核实金库状态后再试。"
                     if self.ready { self.refreshPresence() }
                 }
             })
-        } catch { lock(); status = "Secret Key 格式无效。" }
+        } catch { lock(); status = "Secret Key 格式无效，请检查后重试。" }
     }
 
     func unlockWithFactors() {
@@ -320,7 +320,7 @@ final class VaultModel: ObservableObject {
                 try ticket.check()
                 try vault.unlock(password: passwordData.data, secretKey: key.data)
             }, cleanup: { passwordData.clear(); key.clear() }, completion: { [weak self] result in self?.finishUnlock(result, attempt: attempt, owner: owner) })
-        } catch { lock(); status = "Secret Key 格式无效。" }
+        } catch { lock(); status = "Secret Key 格式无效，请检查后重试。" }
     }
 
     func unlockWithSystem() {
@@ -346,7 +346,7 @@ final class VaultModel: ObservableObject {
                     var error: NSError?
                     guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) else { throw PlatformProtectionError.unavailable }
                     try ticket.check()
-                    context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "解锁此设备上已启用的 Locklark 金库") { success, _ in
+                    context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "验证设备身份以解锁已授权的 Locklark 本地金库") { success, _ in
                         let completed = ContinuousClock.now
                         DispatchQueue.main.async {
                             self?.receivedSystemAuthentication(token, context: context, success: success, completed: completed)
@@ -356,7 +356,7 @@ final class VaultModel: ObservableObject {
             } catch {
                 DispatchQueue.main.async {
                     guard let self, self.ownedAuthentication.owns(token) else { context.invalidate(); return }
-                    self.cancelOwnedAuthentication(message: "本机快速解锁不可用或验证已取消；请使用完整因素。")
+                    self.cancelOwnedAuthentication(message: "本机快速解锁暂不可用或验证已取消，请使用完整双因素解锁。")
                 }
             }
         }
@@ -371,7 +371,7 @@ final class VaultModel: ObservableObject {
         let pending = systemUnlockPending
         cancelOwnedAuthentication(message: nil)
         if pending { lock() }
-        status = "系统验证已取消。"
+        status = "已取消系统验证。"
     }
 
     private func cancelOwnedAuthentication(message: String?) {
@@ -392,13 +392,13 @@ final class VaultModel: ObservableObject {
     private func receivedSystemAuthentication(_ token: AuthenticationToken, context: LAContext, success: Bool, completed: ContinuousClock.Instant) {
         guard ownedAuthentication.owns(token), authenticationContext === context else { context.invalidate(); return }
         guard success, ownedAuthentication.systemSucceeded(token, monotonicNow: authenticationMillis(at: completed)) else {
-            cancelOwnedAuthentication(message: "系统验证未完成；请重新发起或使用完整因素。")
+            cancelOwnedAuthentication(message: "系统验证未通过，请重新发起或使用完整双因素解锁。")
             return
         }
         context.interactionNotAllowed = true
         authenticationSucceededAt = completed
         let remaining = 10_000 - (authenticationMillis() - authenticationMillis(at: completed))
-        guard remaining > 0 else { cancelOwnedAuthentication(message: "系统验证已过期。请重新发起。"); return }
+        guard remaining > 0 else { cancelOwnedAuthentication(message: "系统验证授权已超时，请重新发起。"); return }
         armAuthenticationTimeout(token, milliseconds: remaining)
         continueOwnedAuthenticationIfReady()
     }
@@ -431,7 +431,7 @@ final class VaultModel: ObservableObject {
         authenticationTimeout = Task { [weak self] in
             do { try await Task.sleep(for: .milliseconds(milliseconds)) } catch { return }
             guard !Task.isCancelled, let self, self.ownedAuthentication.owns(token) else { return }
-            self.cancelOwnedAuthentication(message: "系统验证已过期。请重新发起。")
+            self.cancelOwnedAuthentication(message: "系统验证授权已超时，请重新发起。")
         }
     }
 
@@ -454,7 +454,7 @@ final class VaultModel: ObservableObject {
         case .failure(let error):
             lock()
             if error is PlatformProtectionError { ready = false }
-            status = "无法解锁；系统验证取消或失效时，请使用两个完整因素。"
+            status = "无法解锁金库；若系统验证取消或过期，请使用主密码与 Secret Key 解锁。"
         }
     }
 
@@ -469,8 +469,8 @@ final class VaultModel: ObservableObject {
             guard let self, self.finishOperation(owner), self.boundary.permits(token) else { return }
             self.activeAuthentication = nil
             switch result {
-            case .success: self.status = enable ? "已启用本机快速解锁，最多至本次完整解锁后 24 小时。" : "已移除本机快速解锁。"
-            case .failure: self.status = "系统保护不可用或操作已取消；未使用较弱的存储方式。"
+            case .success: self.status = enable ? "已启用本机快速解锁（自本次完整双因素解锁起 24 小时内有效）。" : "已移除本机快速解锁授权。"
+            case .failure: self.status = "本机安全钥匙串暂不可用或操作已取消；未回退至低强度存储。"
             }
         })
     }
@@ -493,7 +493,7 @@ final class VaultModel: ObservableObject {
             guard self.vault?.isUnlocked() == true else { self.lock(); return }
             switch result {
             case .success(let rows): self.rows = rows
-            case .failure: self.status = "无法读取当前列表。"
+            case .failure: self.status = "无法读取当前登录凭据列表。"
             }
         })
     }
@@ -519,7 +519,7 @@ final class VaultModel: ObservableObject {
             switch result {
             case .failure:
                 guard self.finishOperation(owner), self.boundary.permits(token) else { return }
-                self.status = "该值不可显示，可能未配置或条目已改变。"
+                self.status = "无法显示该字段，可能尚未配置或条目版本已变更。"
             case .success(let handle):
                 guard self.boundary.permits(token), self.vault?.isUnlocked() == true else {
                     self.finishOperation(owner)
@@ -530,7 +530,7 @@ final class VaultModel: ObservableObject {
                     switch taken {
                     case .failure:
                         guard self.finishOperation(owner), self.boundary.permits(token) else { return }
-                        self.status = "该值已过期或请求已取消。"
+                        self.status = "单次显示授权已过期或请求已取消。"
                     case .success(let value):
                         guard self.finishOperation(owner), self.boundary.permits(token), self.selected?.identifier == target.id,
                               self.selected?.revision == target.revision, self.vault?.isUnlocked() == true,
@@ -542,7 +542,7 @@ final class VaultModel: ObservableObject {
                         let exposureOwner = self.exposure.begin()
                         let started = ContinuousClock.now
                         self.revealed = VisibleText.secret(text)
-                        self.status = "仅本次显示；验证码不会自动取下一期。"
+                        self.status = "已单次限时显示；到期将自动隐藏，验证码不自动轮询下一周期。"
                         self.expiryTask = Task { [weak self] in
                             while !Task.isCancelled {
                                 do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
@@ -628,13 +628,13 @@ final class VaultModel: ObservableObject {
             switch result {
             case .success:
                 self.select(nil)
-                self.status = "已保存。显示任何值仍需明确选择。"
+                self.status = "更改已加密保存。查看敏感字段仍需单独显式点击。"
                 self.refresh()
             case .failure(let error):
                 self.vault?.requestLock()
                 self.lock()
                 if error is PlatformProtectionError { self.ready = false }
-                self.status = "操作被拒绝，或结果未确认。请重新解锁检查；不会自动重试或覆盖。"
+                self.status = "操作被拒绝或结果未确认，请重新解锁核实；系统不会自动重试或覆盖。"
             }
         })
     }

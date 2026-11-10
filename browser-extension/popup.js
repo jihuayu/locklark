@@ -597,7 +597,7 @@
     const list = document.querySelector("#watchtower-findings");
     list.replaceChildren(...findings.slice(0, 100).map(findingNode));
     const defaultNote =
-      "本地检查完全离线；HIBP 仅在你勾选并点击“检查泄露库”时联网。";
+      "本地体检完全离线运行；仅在勾选上方选项并点击“在线检测泄露”时才会发送匿名前缀。";
     text(
       "#watchtower-hibp-note",
       hibpNotice ||
@@ -3322,9 +3322,9 @@
       wipeSensitiveViews();
       showView("vault");
       await refreshVault(true);
-      toast("条目已移至废纸篓");
+      toast("条目已移入回收站");
     } catch {
-      toast("无法移至废纸篓");
+      toast("无法移入回收站");
     }
   }
   function openOptions() {
@@ -3579,7 +3579,7 @@
         type: "fill",
         id: lastDetail.id,
         revision: lastDetail.revision,
-      }).catch(() => toast("请先读取当前网站候选"));
+      }).catch(() => toast("请先刷新当前网站匹配"));
     });
     els.checkoutCancel.addEventListener("click", (event) =>
       cancelCheckoutChoice(event),
