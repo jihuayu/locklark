@@ -16,6 +16,29 @@ import (
 
 func (a *App) browserView(c *ui.Context) { a.browserViewFor(c, a.browser) }
 
+// brokeredBrowserApproval returns the exact broker-owned connection that owns
+// a pending interactive approval. The view routes every button through this
+// pointer, so two extension windows can never share an approval surface.
+func (a *App) brokeredBrowserApproval() *browserhost.Connection {
+	a.brokerMu.Lock()
+	b := a.broker
+	a.brokerMu.Unlock()
+	if b == nil {
+		return nil
+	}
+	for _, connection := range b.Connections() {
+		view := connection.Snapshot()
+		if view.Busy {
+			continue
+		}
+		if view.V2 != nil || view.Passkey != nil || view.Signal != nil || view.Profile != nil ||
+			view.Pending != nil || view.OTP != nil || view.Save != nil {
+			return connection
+		}
+	}
+	return nil
+}
+
 // browserViewFor renders one exact connection. Standalone mode passes
 // a.browser; brokered desktop mode passes the originating Broker connection so
 // approvals can never be routed to a different extension window.

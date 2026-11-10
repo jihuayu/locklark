@@ -171,6 +171,19 @@ func (b *Broker) dropConn(c *Connection) {
 	b.mu.Unlock()
 }
 
+// Connections returns a stable copy of the active browser connections. The
+// desktop UI uses it to surface and route native approvals to the exact
+// originating connection; it never grants authority by itself.
+func (b *Broker) Connections() []*Connection {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]*Connection, 0, len(b.conns))
+	for c := range b.conns {
+		out = append(out, c)
+	}
+	return out
+}
+
 // NotifyUnlocked binds the shared desktop session to all connected clients.
 func (b *Broker) NotifyUnlocked(s *personal.Session, epoch uint64, quickFill bool) {
 	if s == nil || !s.Unlocked() {
