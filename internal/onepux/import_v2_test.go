@@ -288,3 +288,21 @@ func FuzzMapArchiveV2(f *testing.F) {
 		}
 	})
 }
+
+func TestMapArchiveV2AcceptsArchiveLargerThanLegacyLimit(t *testing.T) {
+	item := onepuxItem(t, "login-large", "001", "active",
+		map[string]any{"title": "Large Archive Login"},
+		map[string]any{"loginFields": []any{
+			map[string]any{"designation": "username", "fieldType": "T", "value": "user"},
+			map[string]any{"designation": "password", "fieldType": "P", "value": "pass"},
+		}})
+	large := bytes.Repeat([]byte{7}, 9<<20)
+	raw := onepuxArchive(t, []map[string]any{item}, map[string][]byte{"files/large.bin": large})
+	if len(raw) <= 8<<20 {
+		t.Fatalf("test archive is not above the legacy limit: %d", len(raw))
+	}
+	mapped, err := MapArchiveV2(raw)
+	if err != nil || len(mapped.Items) != 1 || mapped.Items[0].Title != "Large Archive Login" {
+		t.Fatalf("archive above the legacy limit was refused: %+v %v", mapped, err)
+	}
+}
