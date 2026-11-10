@@ -306,3 +306,25 @@ func TestMapArchiveV2AcceptsArchiveLargerThanLegacyLimit(t *testing.T) {
 		t.Fatalf("archive above the legacy limit was refused: %+v %v", mapped, err)
 	}
 }
+
+func TestMapArchiveV2AcceptsArchiveAbove32MiB(t *testing.T) {
+	item := onepuxItem(t, "login-64", "001", "active",
+		map[string]any{"title": "64 MiB Archive Login"},
+		map[string]any{"loginFields": []any{
+			map[string]any{"designation": "username", "fieldType": "T", "value": "user"},
+			map[string]any{"designation": "password", "fieldType": "P", "value": "pass"},
+		}})
+	files := map[string][]byte{
+		"files/part-a.bin": bytes.Repeat([]byte{1}, 12<<20),
+		"files/part-b.bin": bytes.Repeat([]byte{2}, 12<<20),
+		"files/part-c.bin": bytes.Repeat([]byte{3}, 12<<20),
+	}
+	raw := onepuxArchive(t, []map[string]any{item}, files)
+	if len(raw) <= 32<<20 || len(raw) >= MaxArchive {
+		t.Fatalf("test archive size outside the intended 32..64 MiB window: %d", len(raw))
+	}
+	mapped, err := MapArchiveV2(raw)
+	if err != nil || len(mapped.Items) != 1 || mapped.Items[0].Title != "64 MiB Archive Login" {
+		t.Fatalf("archive above the previous 32 MiB limit was refused: %+v %v", mapped, err)
+	}
+}
