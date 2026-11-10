@@ -578,25 +578,32 @@ func completeHistorySections(sections []vault.ItemSection) []vault.ItemSection {
 	return out
 }
 
+// historyAutoEditAction is the action autoHistory has always stamped on full
+// Title/Username/Notes/Sections field snapshots.
+const historyAutoEditAction = "edit"
+
 // historyEntryCarriesFieldSnapshot reports whether an entry records the full
-// Title/Username/Notes/Sections state. Entries written by autoHistory always
-// carry Sections (possibly empty). Older password-only import rows carry none
-// of these fields and must keep the existing restore-compatibility behavior.
+// Title/Username/Notes state. Every autoHistory row does, even when the
+// snapshot fields are empty; only password-only import rows (1PUX history)
+// stay partial. Sections are tracked separately: older autoHistory rows only
+// stored sections when a concealed field changed, so a nil sections key means
+// "not recorded", never "empty".
 func historyEntryCarriesFieldSnapshot(entry vault.ItemHistoryEntry) bool {
-	return entry.Sections != nil || entry.Title != "" || entry.Username != "" || entry.Notes != ""
+	return entry.Action == historyAutoEditAction || entry.Title != "" || entry.Username != "" || entry.Notes != ""
 }
 
-// restoreHistoryEntry applies one historical snapshot. Legacy password-only
-// rows restore just the password; complete rows restore the exact field state,
-// including empty values that must clear the current item.
+// restoreHistoryEntry applies one historical snapshot. Password-only rows
+// restore just the password; field snapshots restore the exact recorded
+// Title/Username/Notes, including empty values. Sections change only when the
+// entry actually recorded them: a present empty list clears them, a nil list
+// (legacy row that never stored sections) keeps the current ones.
 func restoreHistoryEntry(next *vault.Item, entry vault.ItemHistoryEntry) {
 	next.Password = entry.Password
-	if !historyEntryCarriesFieldSnapshot(entry) {
-		return
+	if historyEntryCarriesFieldSnapshot(entry) {
+		next.Title = entry.Title
+		next.Username = entry.Username
+		next.Notes = entry.Notes
 	}
-	next.Title = entry.Title
-	next.Username = entry.Username
-	next.Notes = entry.Notes
 	if entry.Sections != nil {
 		next.Sections = vault.CloneSections(entry.Sections)
 	}
@@ -612,7 +619,7 @@ func autoHistory(prev, next vault.Item) []vault.ItemHistoryEntry {
 	}
 	entry := vault.ItemHistoryEntry{
 		Timestamp: time.Now().Unix(),
-		Action:    "edit",
+		Action:    historyAutoEditAction,
 		Password:  prev.Password,
 		Title:     prev.Title,
 		Username:  prev.Username,

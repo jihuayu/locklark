@@ -198,6 +198,74 @@ func TestHistoryRestoreReproducesExactSnapshotAcrossReopen(t *testing.T) {
 	}
 }
 
+// TestHistoryRestoreHonorsLegacyAutoEditEmptySnapshotAcrossReopen reproduces
+// the historical autoHistory entry shape written before full section snapshots:
+// Action "edit" whose Title/Username/Notes were all empty and whose sections
+// key is absent because the old writer only stored sections when a concealed
+// field changed. Restoring it clears the empty Title/Username/Notes but a nil
+// sections key means "not recorded" and must keep the current protected and
+// OTP sections. The 1PUX-only row stays password-only.
+func TestHistoryRestoreHonorsLegacyAutoEditEmptySnapshotAcrossReopen(t *testing.T) {
+	s, path, key := v2Session(t)
+	t.Cleanup(func() { s.Lock() })
+
+	legacy := vault.Item{
+		Kind:     "login",
+		Category: vault.CategoryLogin,
+		Title:    "Legacy Auto Login",
+		URL:      "https://example.test/login",
+		Username: "current-user",
+		Password: "current-password",
+		Notes:    "current notes",
+		Sections: []vault.ItemSection{{ID: "section-one", Title: "Section One", Fields: []vault.CustomField{
+			{ID: "secret", Label: "Secret", Type: vault.FieldTypeConcealed, Value: "current-secret", Protected: true},
+			{ID: "totp", Label: "TOTP", Type: vault.FieldTypeOTP, Value: v2OTPConfig, Protected: true},
+		}}},
+		History: []vault.ItemHistoryEntry{
+			{Timestamp: 1600000000, Action: "edit", Password: "empty-fields-password", Sections: nil},
+			{Timestamp: 1600000001, Action: "import-1pux", Password: "imported-password"},
+		},
+	}
+	id, rev, err := s.AddItem(legacy, v2Gate(t, s))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry := historyRoundtripState(t, s, id).History[0]; entry.Action != "edit" || entry.Title != "" || entry.Username != "" || entry.Notes != "" || entry.Sections != nil {
+		t.Fatalf("legacy auto edit row changed shape: %+v", entry)
+	}
+
+	legacyRestored, err := s.RestoreHistory(id, rev, 0, v2Gate(t, s))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Lock()
+	s, err = UnlockSession(path, []byte("v2-fixture"), key, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := historyRoundtripState(t, s, id)
+	if got.Revision != legacyRestored || got.Password != "empty-fields-password" || got.Title != "" || got.Username != "" || got.Notes != "" || !reflect.DeepEqual(got.Sections, legacy.Sections) {
+		t.Fatalf("legacy auto edit restore: %+v", got)
+	}
+
+	// Removing the restored edit row leaves the 1PUX row at index 0. It must
+	// still restore only its password and keep the current empty fields and
+	// untouched sections.
+	importedRestored, err := s.RestoreHistory(id, legacyRestored, 0, v2Gate(t, s))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Lock()
+	s, err = UnlockSession(path, []byte("v2-fixture"), key, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = historyRoundtripState(t, s, id)
+	if got.Revision != importedRestored || got.Password != "imported-password" || got.Title != "" || got.Username != "" || got.Notes != "" || !reflect.DeepEqual(got.Sections, legacy.Sections) {
+		t.Fatalf("legacy 1PUX restore: %+v", got)
+	}
+}
+
 // TestHistoryRestoreKeepsLegacyPasswordOnlyEntryCompatible verifies that an
 // imported 1PUX history row, which only ever carried a password, still restores
 // that password without clearing fields the row never recorded.
