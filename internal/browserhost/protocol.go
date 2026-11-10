@@ -39,6 +39,15 @@ const (
 var ErrProtocol = errors.New("native messaging refused")
 var ErrBrokerUnavailable = errors.New("desktop browser broker is unavailable")
 
+// ErrCLIRunRefused is the stable, generic outcome of an explicit broker
+// refusal. It deliberately carries no broker payload or request secret.
+var ErrCLIRunRefused = errors.New("desktop browser broker refused the request")
+
+// errCLIRunEndpoint is the fixed, generic outcome of an invalid or untrusted
+// broker endpoint configuration. Such a failure is not evidence that the
+// broker is down, so it is never ErrBrokerUnavailable.
+var errCLIRunEndpoint = errors.New("desktop browser broker endpoint rejected")
+
 var errDuplicateRequest = errors.New("native duplicate request ignored")
 var token = regexp.MustCompile(`^[a-f0-9]{32}$`)
 var revision = regexp.MustCompile(`^[a-f0-9]{64}$`)

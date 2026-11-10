@@ -4,6 +4,7 @@ package browserhost
 
 import (
 	"context"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -111,5 +112,25 @@ func listenLocal(path string) (net.Listener, error) {
 
 func dialLocal(ctx context.Context, endpoint string) (net.Conn, error) {
 	d := net.Dialer{Timeout: 300 * time.Millisecond}
-	return d.DialContext(ctx, "unix", endpoint)
+	conn, e := d.DialContext(ctx, "unix", endpoint)
+	if e != nil {
+		// Keep the platform error so the CLI-run client can distinguish an
+		// absent broker owner from every other dial failure.
+		return nil, &dialLocalError{err: e}
+	}
+	return conn, nil
+}
+
+// dialLocalError preserves the original platform dial error (via Unwrap) and
+// never echoes the endpoint path in its own text.
+type dialLocalError struct{ err error }
+
+func (e *dialLocalError) Error() string { return "desktop browser broker dial failed" }
+func (e *dialLocalError) Unwrap() error { return e.err }
+
+// dialAbsent reports whether e is unambiguous evidence that no broker is
+// listening: a missing socket file or a refused connection before any byte was
+// sent. Permission, trust, timeout and unknown failures are not absence.
+func dialAbsent(e error) bool {
+	return errors.Is(e, syscall.ENOENT) || errors.Is(e, syscall.ECONNREFUSED)
 }

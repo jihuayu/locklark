@@ -588,49 +588,261 @@ func RelayStdio(browser Browser, args []string, stdin io.Reader, stdout io.Write
 	return nil
 }
 
+// cliRunReply is the strict on-the-wire shape of a fixed CLI-run broker reply
+// without values ({"v":1,"error":...}). Decoding into this struct only happens
+// after the raw object has already been validated as one duplicate-free JSON
+// object with exactly the expected keys.
+type cliRunReply struct {
+	V     int    `json:"v"`
+	Error string `json:"error"`
+}
+
+// cliRunWireError reports a transport or protocol failure on the CLI-run
+// channel. Its text never carries broker payloads, endpoint paths, or request
+// secrets, and it never wraps the underlying error.
+type cliRunWireError struct{ kind string }
+
+func (e *cliRunWireError) Error() string { return "desktop browser broker " + e.kind }
+
+var (
+	errCLIRunHello        = &cliRunWireError{kind: "hello failed"}
+	errCLIRunRequest      = &cliRunWireError{kind: "request failed"}
+	errCLIRunDial         = &cliRunWireError{kind: "connection failed"}
+	errCLIRunResponse     = &cliRunWireError{kind: "response invalid"}
+	errCLIRunDisconnected = &cliRunWireError{kind: "disconnected before a response"}
+)
+
+var (
+	errCLIRunInvalid = errors.New("desktop browser broker request invalid")
+	errCLIRunTimeout = errors.New("desktop browser broker timed out")
+)
+
 // RequestCLIRun asks a running desktop broker for F17 pinned credentials.
+//
+// ErrBrokerUnavailable (matched with errors.Is) is returned only when the
+// broker is unambiguously absent before any byte was sent (missing or refused
+// local socket / missing named pipe) or when the server replies with the exact
+// one-object protocol response {"v":1,"error":"unavailable"}. Invalid or
+// untrusted endpoint configuration, access/trust dial failures, timeouts,
+// malformed or unknown replies, and refusals are never ErrBrokerUnavailable, so
+// callers cannot silently fall back to local factors after disclosure may have
+// occurred. Cancellation and deadlines are always preserved in every phase.
+// Errors never echo broker payloads, endpoint paths, or request secrets.
 func RequestCLIRun(ctx context.Context, req CLIRunBrokerRequest) (CLIRunBrokerResponse, error) {
-	if ctx == nil || req.V != 1 || len(req.VaultPath) == 0 || len(req.Targets) < 1 || len(req.Targets) > 16 {
-		return CLIRunBrokerResponse{}, ErrBrokerUnavailable
+	if ctx == nil {
+		return CLIRunBrokerResponse{}, errCLIRunInvalid
+	}
+	if req.V != 1 || len(req.VaultPath) == 0 || len(req.Targets) < 1 || len(req.Targets) > 16 {
+		// Invalid input is a caller bug, not proof the broker is absent.
+		return CLIRunBrokerResponse{}, errCLIRunInvalid
+	}
+	if ce := ctx.Err(); ce != nil {
+		return CLIRunBrokerResponse{}, ce
 	}
 	endpoint, e := DefaultBrokerEndpoint()
 	if e != nil {
-		return CLIRunBrokerResponse{}, ErrBrokerUnavailable
+		if ce := ctx.Err(); ce != nil {
+			return CLIRunBrokerResponse{}, ce
+		}
+		// Invalid or untrusted configuration is not proof of absence.
+		return CLIRunBrokerResponse{}, errCLIRunEndpoint
 	}
 	conn, e := dialLocal(ctx, endpoint)
 	if e != nil {
-		return CLIRunBrokerResponse{}, ErrBrokerUnavailable
+		if ce := ctx.Err(); ce != nil {
+			return CLIRunBrokerResponse{}, ce
+		}
+		if dialAbsent(e) {
+			return CLIRunBrokerResponse{}, ErrBrokerUnavailable
+		}
+		return CLIRunBrokerResponse{}, errCLIRunDial
 	}
 	defer conn.Close()
+	// Interrupt a blocked hello/request write or response read on cancellation.
+	// After the request frame the reply alone decides availability.
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
+	resp, e := cliRunExchange(ctx, conn, req)
+	if e == nil {
+		return resp, nil
+	}
+	// A completed exact "unavailable" reply stays fallback-eligible. Every
+	// other failure after a cancellation races to the context error so
+	// errors.Is(err, context.Canceled/DeadlineExceeded) is preserved.
+	if e != ErrBrokerUnavailable {
+		if ce := ctx.Err(); ce != nil {
+			return CLIRunBrokerResponse{}, cliRunContextError(ce)
+		}
+	}
+	return CLIRunBrokerResponse{}, e
+}
+
+// cliRunContextError preserves errors.Is(..., context.Canceled) and
+// errors.Is(..., context.DeadlineExceeded) for cause-carrying contexts (for
+// example WithTimeoutCause) without exposing the caller's cause text.
+func cliRunContextError(ce error) error {
+	switch {
+	case errors.Is(ce, context.Canceled):
+		return context.Canceled
+	case errors.Is(ce, context.DeadlineExceeded):
+		return context.DeadlineExceeded
+	}
+	return errCLIRunTimeout
+}
+
+// cliRunExchange writes the hello and request frames, then reads and strictly
+// classifies the single response. Once the hello write starts, every failure
+// except the exact "unavailable" reply is non-fallback.
+func cliRunExchange(ctx context.Context, conn net.Conn, req CLIRunBrokerRequest) (resp CLIRunBrokerResponse, e error) {
 	hello, _ := json.Marshal(BrokerHello{V: 1, Mode: "cli-run"})
 	if e = writeFrame(conn, hello); e != nil {
-		return CLIRunBrokerResponse{}, ErrBrokerUnavailable
+		clear(hello)
+		if ce := ctx.Err(); ce != nil {
+			return CLIRunBrokerResponse{}, cliRunContextError(ce)
+		}
+		return CLIRunBrokerResponse{}, errCLIRunHello
 	}
 	clear(hello)
-	raw, e := json.Marshal(req)
-	if e != nil {
-		return CLIRunBrokerResponse{}, ErrBrokerUnavailable
-	}
+	raw, _ := json.Marshal(req)
 	defer clear(raw)
 	if e = writeFrame(conn, raw); e != nil {
-		return CLIRunBrokerResponse{}, ErrBrokerUnavailable
+		if ce := ctx.Err(); ce != nil {
+			return CLIRunBrokerResponse{}, cliRunContextError(ce)
+		}
+		return CLIRunBrokerResponse{}, errCLIRunRequest
 	}
 	respRaw, e := readFrame(conn, MaxOutput)
 	if e != nil {
-		return CLIRunBrokerResponse{}, ErrBrokerUnavailable
+		if ce := ctx.Err(); ce != nil {
+			return CLIRunBrokerResponse{}, cliRunContextError(ce)
+		}
+		return CLIRunBrokerResponse{}, errCLIRunDisconnected
 	}
 	defer clear(respRaw)
-	var resp CLIRunBrokerResponse
-	dec := json.NewDecoder(bytes.NewReader(respRaw))
-	dec.DisallowUnknownFields()
-	if dec.Decode(&resp) != nil || resp.V != 1 {
-		return CLIRunBrokerResponse{}, ErrBrokerUnavailable
+	return classifyCLIRunResponse(ctx, respRaw)
+}
+
+// classifyCLIRunResponse accepts exactly one JSON object with unique keys and
+// no trailing data. Only {"v":1,"error":"unavailable"} is fallback-eligible;
+// only {"v":1,"error":"refused"} maps to ErrCLIRunRefused. A value reply is
+// accepted only without an "error" key and with at least one slot.
+func classifyCLIRunResponse(ctx context.Context, raw []byte) (CLIRunBrokerResponse, error) {
+	if ce := ctx.Err(); ce != nil {
+		return CLIRunBrokerResponse{}, cliRunContextError(ce)
 	}
-	if resp.Error != "" {
-		if resp.Error == "unavailable" {
+	keys, values, ok := strictJSONObject(raw)
+	if !ok {
+		return CLIRunBrokerResponse{}, errCLIRunResponse
+	}
+	if _, hasError := keys["error"]; !hasError {
+		return cliRunValuesResponse(keys, values)
+	}
+	if _, hasValues := keys["values"]; hasValues {
+		return CLIRunBrokerResponse{}, errCLIRunResponse
+	}
+	var errorText string
+	if json.Unmarshal(values["error"], &errorText) != nil {
+		return CLIRunBrokerResponse{}, errCLIRunResponse
+	}
+	switch rawError := errorText; rawError {
+	case "unavailable", "refused":
+		var reply cliRunReply
+		if len(keys) != 2 || json.Unmarshal(raw, &reply) != nil || reply.V != 1 || reply.Error != rawError {
+			return CLIRunBrokerResponse{}, errCLIRunResponse
+		}
+		if rawError == "unavailable" {
 			return CLIRunBrokerResponse{}, ErrBrokerUnavailable
 		}
-		return CLIRunBrokerResponse{}, errors.New(resp.Error)
+		return CLIRunBrokerResponse{}, ErrCLIRunRefused
 	}
-	return resp, nil
+	// Unknown error tokens are surfaced only as a fixed, non-sensitive error.
+	return CLIRunBrokerResponse{}, errCLIRunResponse
+}
+
+// cliRunValuesResponse maps a disclosed-values reply {"v":1,"values":{...}}.
+// The body is re-encoded from the already duplicate-free top-level object and
+// decoded with DisallowUnknownFields; on any defect every decoded value is
+// cleared and a generic error is returned.
+func cliRunValuesResponse(keys map[string]struct{}, values map[string]json.RawMessage) (CLIRunBrokerResponse, error) {
+	if len(keys) != 2 || !json.Valid(values["values"]) {
+		return CLIRunBrokerResponse{}, errCLIRunResponse
+	}
+	var slotKeys map[string]json.RawMessage
+	if err := json.Unmarshal(values["values"], &slotKeys); err != nil {
+		return CLIRunBrokerResponse{}, errCLIRunResponse
+	}
+	if len(slotKeys) == 0 {
+		return CLIRunBrokerResponse{}, errCLIRunResponse
+	}
+	for slot := range slotKeys {
+		if slot == "" {
+			return CLIRunBrokerResponse{}, errCLIRunResponse
+		}
+	}
+	var body struct {
+		V      int               `json:"v"`
+		Values map[string]string `json:"values"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(values["values"]))
+	dec.DisallowUnknownFields()
+	if json.Unmarshal(values["v"], &body.V) != nil || body.V != 1 ||
+		dec.Decode(&body.Values) != nil || len(body.Values) != len(slotKeys) {
+		clearCLIRunValues(body.Values)
+		return CLIRunBrokerResponse{}, errCLIRunResponse
+	}
+	for _, value := range body.Values {
+		if value == "" {
+			clearCLIRunValues(body.Values)
+			return CLIRunBrokerResponse{}, errCLIRunResponse
+		}
+	}
+	return CLIRunBrokerResponse{V: 1, Values: body.Values}, nil
+}
+
+// clearCLIRunValues clears decoded (and duplicated) secret strings on refusal
+// paths so they are not retained by returned errors.
+func clearCLIRunValues(values map[string]string) {
+	for slot := range values {
+		values[slot] = ""
+	}
+}
+
+// strictJSONObject validates that raw is exactly one JSON object (no trailing
+// values), reports its top-level keys (rejecting duplicates and non-string
+// keys), and returns each top-level value's raw bytes.
+func strictJSONObject(raw []byte) (map[string]struct{}, map[string]json.RawMessage, bool) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	tok, e := dec.Token()
+	if e != nil || tok != json.Delim('{') {
+		return nil, nil, false
+	}
+	keys := map[string]struct{}{}
+	values := map[string]json.RawMessage{}
+	for dec.More() {
+		tok, e := dec.Token()
+		if e != nil {
+			return nil, nil, false
+		}
+		key, ok := tok.(string)
+		if !ok {
+			return nil, nil, false
+		}
+		if _, dup := keys[key]; dup {
+			return nil, nil, false
+		}
+		var value json.RawMessage
+		if dec.Decode(&value) != nil {
+			return nil, nil, false
+		}
+		keys[key] = struct{}{}
+		values[key] = value
+	}
+	if tok, e := dec.Token(); e != nil || tok != json.Delim('}') {
+		return nil, nil, false
+	}
+	if _, e := dec.Token(); e != io.EOF {
+		return nil, nil, false
+	}
+	return keys, values, true
 }

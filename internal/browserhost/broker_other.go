@@ -13,4 +13,6 @@ func listenLocal(string) (net.Listener, error) { return nil, ErrBrokerUnavailabl
 
 func dialLocal(context.Context, string) (net.Conn, error) { return nil, ErrBrokerUnavailable }
 
+func dialAbsent(error) bool { return false }
+
 func authenticatedPeer(net.Conn) (Peer, error) { return Peer{}, ErrBrokerUnavailable }

@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -266,7 +268,8 @@ func TestBrokerCLIRunApprovalAndFallback(t *testing.T) {
 	}
 	defer broker.Close()
 
-	req := CLIRunBrokerRequest{V: 1, VaultPath: "placeholder"}
+	req := cliRunFixtureRequest()
+	req.VaultPath = "placeholder"
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if _, e := RequestCLIRun(ctx, req); !errors.Is(e, ErrBrokerUnavailable) {
@@ -300,8 +303,8 @@ func TestBrokerCLIRunApprovalAndFallback(t *testing.T) {
 	mu.Lock()
 	approved = false
 	mu.Unlock()
-	if _, e := RequestCLIRun(ctx, req); e == nil {
-		t.Fatal("rejected CLI run disclosed values")
+	if _, e := RequestCLIRun(ctx, req); !errors.Is(e, ErrCLIRunRefused) || errors.Is(e, ErrBrokerUnavailable) {
+		t.Fatalf("rejected CLI run must be an explicit, non-fallback refusal: %v", e)
 	}
 	mu.Lock()
 	approved = true
@@ -317,6 +320,306 @@ func TestBrokerCLIRunApprovalAndFallback(t *testing.T) {
 	}
 	if _, e := RequestCLIRun(ctx, req); !errors.Is(e, ErrBrokerUnavailable) {
 		t.Fatalf("stopped broker: %v", e)
+	}
+}
+
+// cliRunFixtureRequest is a valid CLI-run request for outcome classification.
+func cliRunFixtureRequest() CLIRunBrokerRequest {
+	return CLIRunBrokerRequest{
+		V:         1,
+		VaultPath: "/fixture/vault.ll",
+		Targets:   []personal.CLIBrokerTarget{{Slot: "LOGIN_PASSWORD", ID: reqID(1), Revision: reqID(2), Field: "password"}},
+	}
+}
+
+// cliRunScriptedServer listens on a fresh broker socket and answers one CLI-run
+// connection with the supplied reply. It reports whether the client's request
+// frame was actually received before any reply behaviour.
+func cliRunScriptedServer(t *testing.T, reply func(net.Conn)) <-chan bool {
+	t.Helper()
+	endpoint := brokerTestSocket(t)
+	l, e := net.Listen("unix", endpoint)
+	if e != nil {
+		t.Fatal(e)
+	}
+	sent := make(chan bool, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, e := l.Accept()
+		if e != nil {
+			sent <- false
+			return
+		}
+		defer conn.Close()
+		// hello frame, then the request frame, both exactly as the client writes.
+		if _, e := readFrame(conn, MaxInput); e != nil {
+			sent <- false
+			return
+		}
+		if _, e := readFrame(conn, MaxInput); e != nil {
+			sent <- false
+			return
+		}
+		sent <- true
+		reply(conn)
+	}()
+	t.Cleanup(func() {
+		_ = l.Close()
+		<-done
+	})
+	return sent
+}
+
+func cliRunReplyPayload(raw string) func(net.Conn) {
+	return func(conn net.Conn) { _ = writeFrame(conn, []byte(raw)) }
+}
+
+func TestCLIRunNoListenerIsUnavailable(t *testing.T) {
+	brokerTestSocket(t) // endpoint configured, but nothing listens on it
+	if _, e := RequestCLIRun(context.Background(), cliRunFixtureRequest()); !errors.Is(e, ErrBrokerUnavailable) {
+		t.Fatalf("no listener: %v", e)
+	}
+}
+
+func TestCLIRunExplicitUnavailableIsUnavailable(t *testing.T) {
+	sent := cliRunScriptedServer(t, cliRunReplyPayload(`{"v":1,"error":"unavailable"}`))
+	if _, e := RequestCLIRun(context.Background(), cliRunFixtureRequest()); !errors.Is(e, ErrBrokerUnavailable) {
+		t.Fatalf("explicit unavailable: %v", e)
+	}
+	if !<-sent {
+		t.Fatal("server did not receive the request frame")
+	}
+}
+
+func TestCLIRunRefusalIsNonUnavailableWithoutLeakage(t *testing.T) {
+	req := cliRunFixtureRequest()
+	req.Targets[0].ID = "leak-target-" + reqID(3)
+	// The exact protocol refusal maps to the stable generic error and never
+	// echoes request material.
+	sent := cliRunScriptedServer(t, cliRunReplyPayload(`{"v":1,"error":"refused"}`))
+	_, e := RequestCLIRun(context.Background(), req)
+	if !<-sent {
+		t.Fatal("server did not receive the request frame")
+	}
+	if e == nil || errors.Is(e, ErrBrokerUnavailable) {
+		t.Fatalf("refusal classified as unavailable: %v", e)
+	}
+	if !errors.Is(e, ErrCLIRunRefused) {
+		t.Fatalf("refusal did not map to ErrCLIRunRefused: %v", e)
+	}
+	assertNoCLIRunLeak(t, e, req)
+
+	// A reply mixing a refusal with values is malformed: generic error, no
+	// values, and no broker payload echoed back.
+	sent = cliRunScriptedServer(t, cliRunReplyPayload(`{"v":1,"error":"refused","values":{"LOGIN_PASSWORD":"leak-masked-value"}}`))
+	resp, e := RequestCLIRun(context.Background(), req)
+	if !<-sent {
+		t.Fatal("server did not receive the request frame")
+	}
+	if e == nil || errors.Is(e, ErrBrokerUnavailable) || errors.Is(e, ErrCLIRunRefused) {
+		t.Fatalf("refusal with values classification: %v", e)
+	}
+	if len(resp.Values) != 0 {
+		t.Fatal("malformed refusal returned response values")
+	}
+	assertNoCLIRunLeak(t, e, req)
+
+	// Unknown error tokens are never surfaced verbatim either.
+	sent = cliRunScriptedServer(t, cliRunReplyPayload(`{"v":1,"error":"token-secret-xyz"}`))
+	_, e = RequestCLIRun(context.Background(), req)
+	if !<-sent {
+		t.Fatal("server did not receive the request frame")
+	}
+	if e == nil || errors.Is(e, ErrBrokerUnavailable) || errors.Is(e, ErrCLIRunRefused) {
+		t.Fatalf("unknown error token classification: %v", e)
+	}
+	assertNoCLIRunLeak(t, e, req)
+}
+
+// assertNoCLIRunLeak rejects any error text carrying broker payloads, opaque
+// error tokens, or request material.
+func assertNoCLIRunLeak(t *testing.T, e error, req CLIRunBrokerRequest) {
+	t.Helper()
+	if e == nil {
+		t.Fatal("expected an error")
+	}
+	msg := e.Error()
+	for _, secret := range []string{"leak-masked-value", "token-secret-xyz", "LOGIN_PASSWORD", req.Targets[0].ID, req.Targets[0].Revision, req.VaultPath} {
+		if strings.Contains(msg, secret) {
+			t.Fatalf("error leaked %q: %q", secret, msg)
+		}
+	}
+}
+
+func TestCLIRunBadResponsesAfterTransmissionAreNonUnavailable(t *testing.T) {
+	cases := []struct {
+		name  string
+		reply func(net.Conn)
+	}{
+		{"malformed json", cliRunReplyPayload(`{"v":1,"values":`)},
+		{"empty object", cliRunReplyPayload(`{}`)},
+		{"empty error", cliRunReplyPayload(`{"v":1,"error":""}`)},
+		{"bad version", cliRunReplyPayload(`{"v":2,"error":"refused"}`)},
+		{"missing version", cliRunReplyPayload(`{"error":"refused"}`)},
+		{"second document", cliRunReplyPayload(`{"v":1,"error":"refused"}{}`)},
+		{"duplicate keys unavailable", cliRunReplyPayload(`{"v":1,"error":"unavailable","error":"unavailable"}`)},
+		{"duplicate version unavailable", cliRunReplyPayload(`{"v":1,"v":1,"error":"unavailable"}`)},
+		{"trailing document after unavailable", cliRunReplyPayload(`{"v":1,"error":"unavailable"}{"v":1}`)},
+		{"trailing whitespace value", cliRunReplyPayload(`{"v":1,"error":"unavailable"} null`)},
+		{"unavailable with empty values", cliRunReplyPayload(`{"v":1,"error":"unavailable","values":{}}`)},
+		{"unavailable with extra field", cliRunReplyPayload(`{"v":1,"error":"unavailable","extra":true}`)},
+		{"duplicate keys refused", cliRunReplyPayload(`{"v":1,"error":"refused","error":"refused"}`)},
+		{"trailing document after values", cliRunReplyPayload(`{"v":1,"values":{"LOGIN_PASSWORD":"x"}}{}`)},
+		{"duplicate values key", cliRunReplyPayload(`{"v":1,"values":{"LOGIN_PASSWORD":"x"},"values":{"LOGIN_PASSWORD":"y"}}`)},
+		{"unknown response field", cliRunReplyPayload(`{"v":1,"values":{"LOGIN_PASSWORD":"x"},"extra":true}`)},
+		{"values with error", cliRunReplyPayload(`{"v":1,"error":"refused","values":{"LOGIN_PASSWORD":"x"}}`)},
+		{"success without values", cliRunReplyPayload(`{"v":1}`)},
+		{"oversized frame header", func(conn net.Conn) {
+			_, _ = conn.Write([]byte{0xff, 0xff, 0xff, 0xff})
+		}},
+		{"wrong field type", cliRunReplyPayload(`{"v":1,"values":"nope","error":"refused"}`)},
+		{"disconnect after request", func(conn net.Conn) {}},
+		{"partial frame then disconnect", func(conn net.Conn) {
+			_, _ = conn.Write([]byte{4, 0, 0, 0, '{'})
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sent := cliRunScriptedServer(t, tc.reply)
+			_, e := RequestCLIRun(context.Background(), cliRunFixtureRequest())
+			if !<-sent {
+				t.Fatal("server did not receive the request frame")
+			}
+			if e == nil || errors.Is(e, ErrBrokerUnavailable) {
+				t.Fatalf("%s classified as available/unavailable: %v", tc.name, e)
+			}
+		})
+	}
+}
+
+func TestCLIRunCancellationWhileAwaitingResponse(t *testing.T) {
+	requestSeen := make(chan struct{})
+	sent := cliRunScriptedServer(t, func(conn net.Conn) {
+		close(requestSeen)
+		// Never reply: the client must be interrupted by cancellation.
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		var b [1]byte
+		_, _ = conn.Read(b[:])
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, e := RequestCLIRun(ctx, cliRunFixtureRequest())
+		result <- e
+	}()
+	select {
+	case <-requestSeen:
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not receive the request frame")
+	}
+	cancel()
+	select {
+	case e := <-result:
+		if !<-sent {
+			t.Fatal("server did not receive the request frame")
+		}
+		if !errors.Is(e, context.Canceled) {
+			t.Fatalf("cancellation error: %v", e)
+		}
+		if errors.Is(e, ErrBrokerUnavailable) {
+			t.Fatal("cancellation must never be classified as fallback-eligible")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RequestCLIRun did not return after cancellation")
+	}
+}
+
+func TestCLIRunDeadlineWhileAwaitingResponse(t *testing.T) {
+	requestSeen := make(chan struct{})
+	release := make(chan struct{})
+	cliRunScriptedServer(t, func(conn net.Conn) {
+		close(requestSeen)
+		<-release // hold the response until the client's deadline fires
+	})
+	// Registered after the helper's cleanup, so LIFO runs this first and the
+	// blocked callback is released even if the test fails early.
+	t.Cleanup(func() { close(release) })
+	// The hello and request are already delivered before this short real
+	// timeout fires; the server never replies, so the client must be
+	// interrupted by the deadline (never by an explicit cancel).
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, e := RequestCLIRun(ctx, cliRunFixtureRequest())
+		result <- e
+	}()
+	select {
+	case <-requestSeen:
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not receive the request frame")
+	}
+	var e error
+	select {
+	case <-ctx.Done():
+		select {
+		case e = <-result:
+		case <-time.After(5 * time.Second):
+			t.Fatal("RequestCLIRun did not return after the deadline")
+		}
+	case e = <-result:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RequestCLIRun did not return after the deadline")
+	}
+	if !errors.Is(e, context.DeadlineExceeded) {
+		t.Fatalf("deadline error: %v", e)
+	}
+	if errors.Is(e, ErrBrokerUnavailable) {
+		t.Fatal("deadline must never be classified as fallback-eligible")
+	}
+
+	// A context that is already done never classifies as unavailability.
+	expired, stop := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer stop()
+	if _, e := RequestCLIRun(expired, cliRunFixtureRequest()); !errors.Is(e, context.DeadlineExceeded) {
+		t.Fatalf("pre-expired context: %v", e)
+	}
+	canceled, stopCanceled := context.WithCancel(context.Background())
+	stopCanceled()
+	if _, e := RequestCLIRun(canceled, cliRunFixtureRequest()); !errors.Is(e, context.Canceled) || errors.Is(e, ErrBrokerUnavailable) {
+		t.Fatalf("pre-canceled context: %v", e)
+	}
+}
+
+func TestCLIRunInvalidRequestIsNotFallbackEligible(t *testing.T) {
+	brokerTestSocket(t) // even a reachable endpoint must not turn bad input into unavailability
+	cases := []CLIRunBrokerRequest{
+		{V: 2, VaultPath: "/fixture/vault.ll", Targets: cliRunFixtureRequest().Targets},
+		{V: 1, Targets: cliRunFixtureRequest().Targets},
+		{V: 1, VaultPath: "/fixture/vault.ll"},
+		{V: 1, VaultPath: "/fixture/vault.ll", Targets: make([]personal.CLIBrokerTarget, 17)},
+	}
+	for i, req := range cases {
+		_, e := RequestCLIRun(context.Background(), req)
+		if e == nil || errors.Is(e, ErrBrokerUnavailable) {
+			t.Fatalf("case %d: invalid request classified as fallback-eligible: %v", i, e)
+		}
+	}
+	if _, e := RequestCLIRun(nil, cliRunFixtureRequest()); e == nil || errors.Is(e, ErrBrokerUnavailable) {
+		t.Fatalf("nil context classified as fallback-eligible: %v", e)
+	}
+}
+
+func TestDialAbsentOnlyForClearlyAbsentBroker(t *testing.T) {
+	if dialAbsent(errors.New("unknown")) {
+		t.Fatal("unknown dial error classified as absence")
+	}
+	if dialAbsent(nil) {
+		t.Fatal("nil dial error classified as absence")
+	}
+	if dialAbsent(context.DeadlineExceeded) || dialAbsent(context.Canceled) {
+		t.Fatal("context errors classified as absence")
 	}
 }
 
