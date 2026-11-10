@@ -1160,9 +1160,15 @@ summary:focus-visible {
   font-variant-numeric: tabular-nums;
 }
 
+.history {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
 .history h3 {
   color: var(--ink);
-  margin-bottom: 4px;
+  margin: 0 0 4px;
 }
 
 .history .note {
