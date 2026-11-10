@@ -307,7 +307,7 @@
     style.textContent =
       ":host{color-scheme:light dark}.panel{box-sizing:border-box;width:" +
       panelWidth +
-      "px;max-height:380px;overflow:auto;background:light-dark(#fff,#1f2430);color:light-dark(#192235,#f2f4f8);border:1px solid #798298;border-radius:12px;padding:12px;box-shadow:0 8px 30px #0004;font:14px system-ui}strong{display:block;margin-bottom:8px}button{display:block;width:100%;text-align:left;font:inherit;padding:9px;border:0;border-radius:6px;background:transparent;color:inherit;cursor:pointer}button:hover,button:focus{background:light-dark(#e8efff,#344667);outline:2px solid #8daef9}button:disabled{opacity:.55;cursor:default}p{font-size:12px;line-height:1.5;margin:4px 0}label{display:block;font-size:12px;margin:6px 0}label.check{display:flex;align-items:center;gap:6px}input[type=range]{width:100%;margin:6px 0}input[type=text],select{box-sizing:border-box;width:100%;font:inherit;padding:6px;border:1px solid #798298;border-radius:6px;background:light-dark(#fff,#1f2430);color:inherit}.row{display:flex;align-items:center;justify-content:space-between;gap:8px}.mono{display:block;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;overflow-wrap:anywhere;padding:6px;border-radius:6px;background:light-dark(#f1f4f9,#2a3140)}.badge{display:inline-block;font-size:11px;padding:2px 6px;border-radius:999px;background:light-dark(#e6f4ec,#1f3b2c);color:light-dark(#17633a,#a6e2bd)}.status{color:light-dark(#52645a,#b9c5d3)}";
+      'px;max-height:380px;overflow:auto;background:light-dark(#ffffff,#111827);color:light-dark(#0f172a,#f8fafc);border:1px solid light-dark(#cbd5e1,#334155);border-radius:10px;padding:12px;box-shadow:0 12px 32px -4px rgba(15,23,42,.18),0 4px 12px -2px rgba(15,23,42,.08);font:13.5px/1.45 -apple-system,BlinkMacSystemFont,"Inter","Segoe UI","PingFang SC",system-ui,sans-serif;-webkit-font-smoothing:antialiased}strong{display:block;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid light-dark(#e2e8f0,#1e293b);font-size:13px;font-weight:600;letter-spacing:-0.01em}button{display:block;width:100%;text-align:left;font:inherit;font-size:13px;font-weight:500;padding:8px 10px;margin-top:2px;border:1px solid transparent;border-radius:7px;background:transparent;color:inherit;cursor:pointer;transition:background-color 120ms ease,border-color 120ms ease}button:hover,button:focus{background:light-dark(#eff6ff,#1e293b);border-color:light-dark(#bfdbfe,#334155);outline:2px solid light-dark(#1d4ed8,#38bdf8);outline-offset:1px}button:disabled{opacity:.5;cursor:default}p{font-size:12px;line-height:1.5;margin:4px 0}label{display:block;font-size:12px;margin:6px 0}label.check{display:flex;align-items:center;gap:6px}input[type=range]{width:100%;margin:6px 0;accent-color:light-dark(#1d4ed8,#38bdf8)}input[type=text],select{box-sizing:border-box;width:100%;font:inherit;padding:6px 8px;border:1px solid light-dark(#cbd5e1,#334155);border-radius:6px;background:light-dark(#ffffff,#0b0f19);color:inherit}.row{display:flex;align-items:center;justify-content:space-between;gap:8px}.mono{display:block;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere;padding:7px 9px;border:1px solid light-dark(#e2e8f0,#1e293b);border-radius:6px;background:light-dark(#f1f5f9,#1e293b)}.badge{display:inline-block;font-size:11px;font-weight:600;font-variant-numeric:tabular-nums;padding:2px 7px;border-radius:999px;border:1px solid light-dark(#bfdbfe,rgba(56,189,248,.3));background:light-dark(#eff6ff,rgba(56,189,248,.14));color:light-dark(#1d4ed8,#38bdf8)}.status{color:light-dark(#475569,#94a3b8)}';
     const box = element("section");
     box.className = "panel";
     box.setAttribute("role", "dialog");
@@ -329,17 +329,22 @@
         return;
       }
       if (
-        ["ArrowDown", "ArrowUp"].includes(event.key) &&
+        ["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key) &&
         (event.target === box || event.target?.tagName === "BUTTON")
       ) {
         const buttons = [...box.querySelectorAll("button")];
+        if (!buttons.length) return;
         const index = buttons.indexOf(root.activeElement);
-        buttons[
-          (index +
-            (event.key === "ArrowDown" ? 1 : buttons.length - 1) +
-            buttons.length) %
-            buttons.length
-        ]?.focus();
+        const next =
+          event.key === "Home"
+            ? 0
+            : event.key === "End"
+              ? buttons.length - 1
+              : (index +
+                  (event.key === "ArrowDown" ? 1 : buttons.length - 1) +
+                  buttons.length) %
+                buttons.length;
+        buttons[next]?.focus();
         event.preventDefault();
       }
     });
@@ -1828,7 +1833,7 @@
     const shadow = toast.attachShadow({ mode: "closed" });
     const style = element("style");
     style.textContent =
-      ".toast{box-sizing:border-box;max-width:340px;padding:10px 14px;border-radius:8px;background:#163f36;color:#fff;font:13px system-ui;box-shadow:0 8px 30px #0004;overflow-wrap:anywhere}";
+      '.toast{box-sizing:border-box;max-width:340px;padding:10px 14px;border-radius:8px;border:1px solid #334155;border-left:3px solid #38bdf8;background:#0f172a;color:#f8fafc;font:500 13px/1.45 -apple-system,BlinkMacSystemFont,"Inter","Segoe UI","PingFang SC",system-ui,sans-serif;box-shadow:0 10px 28px -4px rgba(15,23,42,.32);overflow-wrap:anywhere;-webkit-font-smoothing:antialiased}';
     const box = element("div", textValue, "toast");
     box.setAttribute("role", "status");
     shadow.append(style, box);
@@ -1854,7 +1859,7 @@
     const shadow = pendingHost.attachShadow({ mode: "closed" });
     const style = element("style");
     style.textContent =
-      ".banner{box-sizing:border-box;width:340px;max-width:calc(100vw - 32px);background:light-dark(#fff,#1f2430);color:light-dark(#192235,#f2f4f8);border:1px solid #798298;border-radius:12px;padding:12px;box-shadow:0 8px 30px #0004;font:13px system-ui}.banner strong{display:block;font-size:14px;margin-bottom:6px}.banner p{margin:4px 0;overflow-wrap:anywhere}.banner .mono{font-family:ui-monospace,monospace}.banner button{display:block;width:100%;text-align:left;font:inherit;padding:8px;margin-top:6px;border:0;border-radius:6px;background:light-dark(#e8efff,#2a3140);color:inherit;cursor:pointer}.banner button:hover,.banner button:focus{background:light-dark(#d7e5ff,#344667);outline:2px solid #8daef9}.banner button:disabled{opacity:.55;cursor:default}.banner input[type=text]{box-sizing:border-box;width:100%;margin-top:3px;font:inherit;padding:6px;border:1px solid #798298;border-radius:6px;background:light-dark(#fff,#1f2430);color:inherit}.status{font-size:12px;color:light-dark(#52645a,#b9c5d3)}";
+      ':host{color-scheme:light dark}.banner{box-sizing:border-box;width:340px;max-width:calc(100vw - 32px);background:light-dark(#ffffff,#111827);color:light-dark(#0f172a,#f8fafc);border:1px solid light-dark(#cbd5e1,#334155);border-radius:10px;padding:14px;box-shadow:0 12px 32px -4px rgba(15,23,42,.18),0 4px 12px -2px rgba(15,23,42,.08);font:13px/1.45 -apple-system,BlinkMacSystemFont,"Inter","Segoe UI","PingFang SC",system-ui,sans-serif;-webkit-font-smoothing:antialiased}.banner strong{display:block;font-size:13.5px;font-weight:600;margin-bottom:6px;padding-bottom:6px;border-bottom:1px solid light-dark(#e2e8f0,#1e293b)}.banner p{margin:4px 0;overflow-wrap:anywhere}.banner .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}.banner button{display:block;width:100%;text-align:left;font:inherit;font-weight:500;padding:8px 10px;margin-top:6px;border:1px solid light-dark(#cbd5e1,#334155);border-radius:7px;background:light-dark(#f8fafc,#1e293b);color:inherit;cursor:pointer;transition:background-color 120ms ease,border-color 120ms ease}.banner button:first-of-type{background:light-dark(#1d4ed8,#38bdf8);border-color:light-dark(#1d4ed8,#38bdf8);color:light-dark(#ffffff,#082f49);font-weight:600}.banner button:hover,.banner button:focus{background:light-dark(#eff6ff,#334155);border-color:light-dark(#1d4ed8,#38bdf8);outline:2px solid light-dark(#1d4ed8,#38bdf8);outline-offset:1px}.banner button:first-of-type:hover,.banner button:first-of-type:focus{background:light-dark(#1e40af,#7dd3fc);color:light-dark(#ffffff,#082f49)}.banner button:disabled{opacity:.5;cursor:default}.banner input[type=text]{box-sizing:border-box;width:100%;margin-top:4px;font:inherit;padding:6px 8px;border:1px solid light-dark(#cbd5e1,#334155);border-radius:6px;background:light-dark(#ffffff,#0b0f19);color:inherit}.status{font-size:12px;color:light-dark(#475569,#94a3b8)}';
     const box = element("section");
     box.className = "banner";
     box.setAttribute("role", "alertdialog");
@@ -1947,47 +1952,48 @@
       controls.push(
         button(box, "另存为新登录", () => commit("new")),
       );
+    async function dismissSave(never) {
+      if (busy) return;
+      setBusy(true);
+      try {
+        await send({
+          type: "inline-dismiss-save",
+          stageId: staged.stageId,
+          neverForOrigin: never,
+        });
+        dismissPending();
+        showToast(never ? "已设置此网站不再提示保存" : "已忽略本次保存");
+      } catch {
+        status.textContent = "操作失败，请稍后重试";
+      } finally {
+        setBusy(false);
+      }
+    }
+    controls.push(button(box, "暂不保存", () => dismissSave(false)));
     controls.push(
-      button(box, "暂不保存", async () => {
-        if (busy) return;
-        setBusy(true);
-        try {
-          await send({
-            type: "inline-dismiss-save",
-            stageId: staged.stageId,
-            neverForOrigin: false,
-          });
-          dismissPending();
-          showToast("已忽略本次保存");
-        } catch {
-          status.textContent = "操作失败，请稍后重试";
-        } finally {
-          setBusy(false);
-        }
-      }),
+      button(box, "在此网站永不提示保存", () => dismissSave(true)),
     );
-    controls.push(
-      button(box, "在此网站永不提示保存", async () => {
-        if (busy) return;
-        setBusy(true);
-        try {
-          await send({
-            type: "inline-dismiss-save",
-            stageId: staged.stageId,
-            neverForOrigin: true,
-          });
-          dismissPending();
-          showToast("已设置此网站不再提示保存");
-        } catch {
-          status.textContent = "操作失败，请稍后重试";
-        } finally {
-          setBusy(false);
-        }
-      }),
-    );
+    box.addEventListener("keydown", (event) => {
+      if (!event.isTrusted) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        void dismissSave(false);
+        return;
+      }
+      if (
+        event.key === "Enter" &&
+        !event.isComposing &&
+        !event.shiftKey &&
+        event.target?.tagName !== "TEXTAREA"
+      ) {
+        event.preventDefault();
+        void commit(staged.mode === "update" ? "update" : "new");
+      }
+    });
     box.append(status);
     shadow.append(style, box);
     document.documentElement.append(pendingHost);
+    titleInput.focus?.();
   }
   async function checkPendingSave() {
     if (pendingCheckInFlight || request) return;

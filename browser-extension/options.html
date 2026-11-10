@@ -9,32 +9,30 @@
   </head>
   <body>
     <header class="page-header">
-      <h1>Locklark 设置</h1>
+      <h1>Locklark 扩展设置</h1>
       <p class="muted">
-        这些设置保存在本机浏览器扩展存储中。金库内容始终由原生 Locklark
-        服务解密，扩展不会缓存密码。
+        偏好设置保存在本机浏览器扩展存储中。金库数据始终由本地 Locklark 桌面端解密，浏览器扩展绝不缓存明文密码。
       </p>
       <p id="options-status" class="status" role="status" aria-live="polite"></p>
     </header>
 
     <main>
       <section aria-labelledby="general-heading">
-        <h2 id="general-heading">桌面与应用集成</h2>
+        <h2 id="general-heading">桌面端联动</h2>
         <label class="row">
           <input id="opt-shared-session" type="checkbox" />
-          <span>与 Locklark 桌面端共享解锁与锁定状态</span>
+          <span>与 Locklark 桌面端同步解锁与锁定状态</span>
         </label>
         <label class="row">
           <input id="opt-biometric" type="checkbox" />
-          <span>允许通过桌面端使用系统生物识别/快速解锁</span>
+          <span>允许通过桌面端调用系统生物识别或快速解锁</span>
         </label>
         <label class="row">
           <input id="opt-badge-count" type="checkbox" />
-          <span>在工具栏图标显示当前网站匹配条目数量</span>
+          <span>在扩展图标上显示当前网站的匹配条目数</span>
         </label>
         <p id="connection-status" class="muted">
-          设置存储：修改会立即写入本机扩展存储（storage.local），并自动应用到扩展。原生连接与解锁状态请打开
-          Locklark 弹窗查看。
+          存储说明：修改会立即写入本机扩展存储（storage.local）并实时生效。本地宿主连接与金库解锁状态可在 Locklark 弹窗中查看。
         </p>
       </section>
 
@@ -42,7 +40,7 @@
         <h2 id="autofill-heading">自动填充与登录</h2>
         <label class="row">
           <input id="opt-inline-menu" type="checkbox" />
-          <span>选中输入框时显示内联填充菜单</span>
+          <span>聚焦输入框时显示页面内快捷填充菜单</span>
         </label>
         <label class="row">
           <input id="opt-auto-login" type="checkbox" />
@@ -50,15 +48,15 @@
         </label>
         <label class="row">
           <input id="opt-open-fill-submit" type="checkbox" />
-          <span>通过「打开并填充」跳转后自动登录</span>
+          <span>通过「打开并填充」跳转后自动完成登录</span>
         </label>
         <label class="row">
           <input id="opt-offer-identity-card" type="checkbox" />
-          <span>在内联菜单提供身份信息与银行卡填充</span>
+          <span>在快捷菜单中提供身份信息与银行卡填充</span>
         </label>
         <label class="row">
           <input id="opt-offer-passkeys" type="checkbox" />
-          <span>提供使用 Locklark Passkey 登录</span>
+          <span>允许使用 Locklark 中的 Passkey 登录网站</span>
         </label>
         <label class="row">
           <input id="opt-paste-protection" type="checkbox" />
@@ -67,37 +65,30 @@
             时先确认</span
           >
         </label>
-        <label class="row">
-          <input id="opt-otp-capture" type="checkbox" />
-          <span
-            >识别页面上的两步验证二维码，并在确认后保存到已有登录（需要浏览器
-            支持 BarcodeDetector，当前为 Chromium 系）</span
-          >
-        </label>
       </section>
 
       <section aria-labelledby="saving-heading">
-        <h2 id="saving-heading">保存与密码生成</h2>
+        <h2 id="saving-heading">凭据保存与密码生成</h2>
         <label class="row">
           <input id="opt-offer-save" type="checkbox" />
-          <span>提交表单后提示保存或更新登录</span>
+          <span>提交登录表单后提示保存或更新密码</span>
         </label>
         <label class="row">
           <input id="opt-offer-save-passkeys" type="checkbox" />
-          <span>提供使用 Locklark 保存新 Passkey</span>
+          <span>注册通行密钥时提示保存新 Passkey 到 Locklark</span>
         </label>
         <label class="row">
           <input id="opt-inline-generator" type="checkbox" />
-          <span>在注册/改密密码框显示内联密码生成器</span>
+          <span>在注册或改密密码框旁显示快捷密码生成器</span>
         </label>
         <fieldset class="generator">
-          <legend>默认密码生成器</legend>
+          <legend>默认密码生成规则</legend>
           <label>
             模式
             <select id="opt-generator-mode">
-              <option value="random">随机密码</option>
-              <option value="memorable">易记密码</option>
-              <option value="pin">PIN</option>
+              <option value="random">随机字符</option>
+              <option value="memorable">易记词组</option>
+              <option value="pin">PIN 码</option>
             </select>
           </label>
           <label>
@@ -112,7 +103,7 @@
             />
           </label>
           <p id="generator-length-hint" class="muted">
-            随机密码 8–128 位；易记密码 3–12 位；PIN 4–12 位。
+            随机字符 8–128 位；易记词组 3–12 词；PIN 码 4–12 位。
           </p>
           <label class="row">
             <input id="opt-generator-digits" type="checkbox" />
@@ -126,12 +117,11 @@
       </section>
 
       <section aria-labelledby="sites-heading">
-        <h2 id="sites-heading">网站例外管理</h2>
+        <h2 id="sites-heading">网站例外名单</h2>
         <p id="origin-help" class="muted">
-          请输入完整的 HTTPS 网站地址（例如 https://example.com）。重复或无效地址不会添加，列表最多保存
-          100 个网站。
+          请输入完整的 HTTPS 网站源地址（例如 https://example.com）。重复或无效地址将自动忽略，每个列表最多保存 100 个网站。
         </p>
-        <h3 id="disabled-inline-heading">已禁用内联菜单的网站</h3>
+        <h3 id="disabled-inline-heading">已停用快捷菜单的网站</h3>
         <ul
           id="disabled-inline-list"
           class="origin-list"
@@ -158,7 +148,7 @@
             添加
           </button>
         </div>
-        <h3 id="never-save-heading">从不提示保存登录的网站</h3>
+        <h3 id="never-save-heading">不再提示保存登录的网站</h3>
         <ul
           id="never-save-list"
           class="origin-list"
@@ -185,9 +175,9 @@
             添加
           </button>
         </div>
-        <h3 id="login-overrides-heading">已禁用自动提交的特定登录条目</h3>
+        <h3 id="login-overrides-heading">已停用自动提交的登录条目</h3>
         <p class="muted">
-          这些条目来自弹窗中的「不再为此登录自动提交」操作，可在此恢复。
+          这些条目来自弹窗中的「取消此登录自动提交」设置，可在此随时恢复。
         </p>
         <ul
           id="login-overrides-list"
@@ -197,23 +187,21 @@
       </section>
 
       <section aria-labelledby="shortcuts-heading">
-        <h2 id="shortcuts-heading">快捷键与安全</h2>
-        <p class="muted">以下为浏览器当前绑定的扩展快捷键。</p>
+        <h2 id="shortcuts-heading">快捷键与安全偏好</h2>
+        <p class="muted">以下为当前浏览器中绑定的扩展快捷键。</p>
         <ul id="shortcuts" class="shortcuts" aria-label="浏览器扩展快捷键"></ul>
         <p class="muted shortcut-note">
-          默认（Chromium）：打开弹窗 Ctrl+Shift+Y，填充登录 Ctrl+Shift+L，锁定
-          Locklark Ctrl+Shift+U；macOS 使用 Command。Firefox
-          中打开弹窗的快捷键默认未绑定，可在下方设置。
+          默认快捷键（Chromium）：打开弹窗 Ctrl+Shift+Y，填充登录 Ctrl+Shift+L，立即锁定 Ctrl+Shift+U（macOS 使用 Command）。Firefox 中打开弹窗的快捷键可按需在浏览器中绑定。
         </p>
         <button
           id="open-shortcuts"
           type="button"
           title="打开浏览器的扩展快捷键设置"
         >
-          打开浏览器快捷键设置
+          管理浏览器快捷键
         </button>
         <label class="row">
-          <span>剪贴板自动清除时间（秒）</span>
+          <span>剪贴板自动清理倒计时（秒）</span>
           <input
             id="opt-clipboard-seconds"
             type="number"
@@ -223,7 +211,7 @@
             aria-describedby="clipboard-seconds-hint"
           />
         </label>
-        <p id="clipboard-seconds-hint" class="muted">允许 5–300 秒。</p>
+        <p id="clipboard-seconds-hint" class="muted">可设置范围：5–300 秒。</p>
         <label class="row">
           <span>空闲自动锁定</span>
           <select id="opt-idle-lock">
@@ -241,10 +229,10 @@
         </label>
         <label class="row">
           <input id="opt-watchtower-local" type="checkbox" />
-          <span>启用本地安全检查（弱密码、复用密码、HTTP 登录）</span>
+          <span>启用 Watchtower 本地安全体检（检测弱密码、重复密码与不安全 HTTP 网站）</span>
         </label>
         <label class="row">
-          <span>主题</span>
+          <span>界面主题</span>
           <select id="opt-theme">
             <option value="system">跟随系统</option>
             <option value="light">浅色</option>

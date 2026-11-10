@@ -86,7 +86,8 @@ class Element {
   getRootNode() {
     let node = this;
     while (node.parentElement) node = node.parentElement;
-    return node._isDocument ? node : null;
+    if (node._isDocument) return node;
+    return node._isShadowRoot ? node : null;
   }
   closest(selector) {
     for (let node = this; node; node = node.parentElement)
@@ -127,6 +128,7 @@ class Element {
   }
   attachShadow() {
     const root = new Element("#shadow-root");
+    root._isShadowRoot = true;
     root.host = this;
     return root;
   }
@@ -296,6 +298,18 @@ function makeHarness(options = {}) {
                 items: [{ id: "b".repeat(32), title: "Example login" }],
               },
             );
+          case "inline-pending-save":
+            return Promise.resolve(
+              options.pendingSave
+                ? { pendingSave: options.pendingSave }
+                : {},
+            );
+          case "inline-dismiss-save":
+            return Promise.resolve({ ok: true });
+          case "inline-commit-staged-save":
+            return Promise.resolve(
+              options.commitReply || { saved: false, status: "保存失败" },
+            );
           case "inline-otp-save":
             return Promise.resolve(
               options.saveReply || { ok: true, revision: "c".repeat(64) },
@@ -443,12 +457,29 @@ function makeHarness(options = {}) {
           .some(
             (candidate) =>
               candidate.className === "panel" &&
-              candidate.getRootNode?.() === null &&
               closestRoot(candidate) === root,
           );
         if (hasPanel) return root;
       }
       return null;
+    },
+    banner() {
+      for (const node of documentElement.children) {
+        const root = closedRoots.get(node);
+        if (!root) continue;
+        const banner = harness
+          .nodes()
+          .find(
+            (candidate) =>
+              candidate.className === "banner" && closestRoot(candidate) === root,
+          );
+        if (banner) return { root, banner };
+      }
+      return null;
+    },
+    bannerText() {
+      const found = harness.banner();
+      return found ? found.banner.textContent : "";
     },
     panelText() {
       const root = harness.panel();
@@ -457,6 +488,102 @@ function makeHarness(options = {}) {
   };
   return harness;
 }
+
+test("save banner focuses the title and maps Escape and Enter", async () => {
+  const stage = {
+    stageId: "a".repeat(32),
+    mode: "new",
+    origin: "https://example.test",
+    title: "Example",
+    username: "john",
+    connected: true,
+  };
+  const h = makeHarness({ pendingSave: stage });
+  await h.runTimers();
+  const found = h.banner();
+  assert.ok(found, "save banner rendered");
+  const title = found.banner.querySelector("input");
+  assert.equal(found.root.activeElement, title, "the title input is focused");
+  dispatch(found.banner, {
+    type: "keydown",
+    key: "Escape",
+    isTrusted: true,
+    target: title,
+    preventDefault() {},
+  });
+  await flush();
+  assert.equal(h.banner(), null, "Escape dismisses without saving");
+  assert.equal(
+    h.sent.some((message) => message.type === "inline-dismiss-save"),
+    true,
+  );
+  assert.equal(
+    h.sent.some((message) => message.type === "inline-commit-staged-save"),
+    false,
+  );
+});
+
+test("Enter in the save banner commits the staged save", async () => {
+  const stage = {
+    stageId: "b".repeat(32),
+    mode: "new",
+    origin: "https://example.test",
+    title: "Example",
+    username: "john",
+    connected: true,
+  };
+  const h = makeHarness({ pendingSave: stage });
+  await h.runTimers();
+  const found = h.banner();
+  assert.ok(found);
+  dispatch(found.banner, {
+    type: "keydown",
+    key: "Enter",
+    isTrusted: true,
+    target: found.banner,
+    preventDefault() {},
+  });
+  await flush();
+  const commit = h.sent.find(
+    (message) => message.type === "inline-commit-staged-save",
+  );
+  assert.ok(commit, "commit was sent");
+  assert.equal(commit.stageId, stage.stageId);
+  assert.equal(commit.mode, "new");
+});
+
+test("panel keyboard cycles actions and Escape closes it", async () => {
+  const h = makeHarness();
+  h.image(OTPAUTH);
+  await h.runTimers();
+  const root = h.panel();
+  assert.ok(root, "panel rendered");
+  const box = root.children.find((node) => node.className === "panel");
+  const buttons = box.children.filter((node) => node.tagName === "BUTTON");
+  assert.ok(buttons.length >= 2);
+  const press = (key) => {
+    let prevented = false;
+    dispatch(box, {
+      type: "keydown",
+      key,
+      isTrusted: true,
+      target: box,
+      preventDefault() {
+        prevented = true;
+      },
+    });
+    return prevented;
+  };
+  buttons[0].focus();
+  assert.equal(press("ArrowDown"), true);
+  assert.equal(root.activeElement, buttons[1]);
+  press("End");
+  assert.equal(root.activeElement, buttons[buttons.length - 1]);
+  press("ArrowDown");
+  assert.equal(root.activeElement, buttons[0]);
+  press("Escape");
+  assert.equal(h.panel(), null);
+});
 
 test("a setup QR code offers the matching login and saves after a click", async () => {
   const h = makeHarness();

@@ -503,3 +503,11 @@ test("popup exposes the bounded password-history surface", () => {
   assert.match(backgroundJS, /publicHistory/);
   assert.match(backgroundJS, /item-restore-history/);
 });
+
+test("popup completes keyboard, focus and destructive-confirmation interactions", () => {
+  assert.match(popupJS, /restoreVaultFocus/);
+  assert.match(popupJS, /ArrowUp/);
+  assert.match(popupJS, /确认移入回收站/);
+  assert.match(popupJS, /vaultList\?\.addEventListener\("keydown"/);
+  assert.match(popupJS, /event\.key === "\/"/);
+});

@@ -27,7 +27,7 @@
       <header class="popup-header">
         <div>
           <h1>Locklark</h1>
-          <p class="subtitle">当前网站登录</p>
+          <p class="subtitle">密码金库与安全填充</p>
         </div>
         <div class="header-actions">
           <button id="lock-btn" type="button" title="立即锁定">
@@ -44,11 +44,11 @@
       </div>
 
       <div class="actions">
-        <button id="connect">连接原生金库</button
-        ><button id="refresh">读取当前网站候选</button
+        <button id="connect">连接本地金库</button
+        ><button id="refresh">刷新当前网站匹配</button
         ><button id="save-new">保存当前登录</button
-        ><button id="cancel-otp" disabled>取消本次验证码</button
-        ><button id="disconnect">断开</button>
+        ><button id="cancel-otp" disabled>取消验证码填充</button
+        ><button id="disconnect">断开连接</button>
       </div>
       <section id="watchtower-site-banner" class="wt-banner" hidden>
         <strong id="watchtower-site-badge"></strong>
@@ -60,9 +60,9 @@
       <div id="candidates"></div>
 
       <section id="locked-view" class="locked-view" hidden>
-        <p class="note">解锁后可搜索、查看和编辑完整金库。</p>
+        <p class="note">解锁后可搜索、查看与管理完整金库。</p>
         <div class="actions">
-          <button id="unlock-connect" type="button">连接并解锁原生金库</button>
+          <button id="unlock-connect" type="button">连接并解锁金库</button>
           <button id="open-options" type="button">扩展设置</button>
         </div>
       </section>
@@ -112,19 +112,19 @@
         </div>
         <p id="vault-count" class="vault-count" role="status"></p>
         <div id="vault-list" class="vault-list" role="region" aria-label="金库搜索结果"></div>
-        <p id="vault-empty" class="note" hidden>暂无条目</p>
+        <p id="vault-empty" class="note" hidden>暂无匹配条目</p>
         <p id="vault-passkey-unsupported" class="note" hidden>
           当前原生宿主不支持 Passkey 管理，请升级原生宿主后再试。
         </p>
         <fieldset id="site-controls" class="site-controls">
-          <legend>此网站设置</legend>
+          <legend>当前网站偏好</legend>
           <label
             ><input id="site-disable-inline" type="checkbox" />
-            在此网站禁用内联菜单</label
+            在此网站停用快捷菜单</label
           >
           <label
             ><input id="site-never-save" type="checkbox" />
-            在此网站从不提示保存</label
+            在此网站不再提示保存</label
           >
         </fieldset>
       </section>
@@ -153,7 +153,7 @@
             添加当前网站并填充
           </button>
           <button id="detail-archive" type="button">归档</button>
-          <button id="detail-trash" type="button">移至废纸篓</button>
+          <button id="detail-trash" type="button">移入回收站</button>
         </div>
         <section id="checkout-picker" class="checkout-picker" hidden>
           <h3>选择结账表单</h3>
@@ -191,7 +191,7 @@
             <div><dt>凭据</dt><dd id="passkey-credential-hint"></dd></div>
           </dl>
           <p id="passkey-remove-warning" class="note" hidden>
-            删除后，本扩展仅移除此条 Passkey 凭据；同一登录中的其他 Passkey 与登录信息会保留。网站上的账号凭据不会自动撤销，请确保你仍有密码或其他登录方式。
+            删除后仅从本地金库移除此条 Passkey 凭据；同一条目中的其他 Passkey 与登录信息仍会保留。网站端的通行密钥不会自动吊销，请确认仍保留密码或其他登录方式。
           </p>
           <div class="actions">
             <button id="passkey-remove" type="button">删除 Passkey</button>
@@ -205,7 +205,7 @@
         <h3>附件</h3>
         <div id="attachment-list" class="attachment-list"></div>
         <p id="attachment-unsupported" class="note" hidden>
-          当前原生宿主不支持附件（需要 attachments-v1）
+          当前桌面端版本不支持附件管理（需支持 attachments-v1）
         </p>
         <div class="attachment-actions">
           <input id="attachment-file" type="file" hidden />
@@ -292,18 +292,18 @@
         </div>
         <p id="gen-status" class="note" role="status"></p>
         <details>
-          <summary>已生成的密码</summary>
+          <summary>近期生成的密码</summary>
           <div id="gen-history"></div>
         </details>
       </details>
       <details class="card site-preferences">
         <summary>网站与 Passkey 设置</summary>
       <label
-        ><input id="auto-login" type="checkbox" /> 选择账号后自动登录</label
+        ><input id="auto-login" type="checkbox" /> 填充账号后自动提交登录</label
       >
       <label
         ><input id="offer-save-logins" type="checkbox" />
-        提交表单后提示保存/更新登录</label
+        提交表单后提示保存或更新登录</label
       >
       <button id="clear-never-save" disabled hidden>
         允许在此网站提示保存
@@ -311,15 +311,15 @@
       <details>
         <summary>Passkey 设置</summary>
         <label
-          ><input id="passkey-save" type="checkbox" /> 提供保存 Passkey</label
+          ><input id="passkey-save" type="checkbox" /> 允许保存 Passkey</label
         ><label
-          ><input id="passkey-use" type="checkbox" /> 提供 Passkey 登录</label
+          ><input id="passkey-use" type="checkbox" /> 允许使用 Passkey 登录</label
         >
       </details>
       </details>
 
       <details id="watchtower-panel">
-        <summary>Watchtower / 安全体检</summary>
+        <summary>Watchtower 安全体检</summary>
         <div class="wt-score">
           <span>安全评分</span>
           <div class="wt-score-track">
@@ -334,10 +334,10 @@
         </div>
         <label class="wt-optin"
           ><input id="watchtower-hibp-optin" type="checkbox" />
-          使用 k-Anonymity 检查已泄露密码（HIBP，仅发送 SHA-1 前 5 位）</label
+          使用 k-Anonymity 匿名检测泄露密码（仅发送 SHA-1 前 5 位前缀）</label
         >
         <div class="wt-actions">
-          <button id="watchtower-run-hibp" type="button">检查泄露库</button>
+          <button id="watchtower-run-hibp" type="button">在线检测泄露</button>
         </div>
         <p id="watchtower-hibp-note" class="note"></p>
         <div id="watchtower-cards" class="wt-cards">
@@ -395,8 +395,7 @@
         <div id="watchtower-findings"></div>
       </details>
       <p class="note">
-        在原生窗口连接并启用快捷填充后，可直接在网页选择账号。自动登录只提交可明确识别的登录表单；Passkey
-        需在原生窗口确认。
+        在桌面端连接并启用快捷填充后，可直接在网页中选择账号。自动登录仅对可明确识别的登录表单生效；Passkey 操作需在桌面端确认。
       </p>
     </main>
     <script src="core.js"></script>

@@ -155,8 +155,8 @@
     if (!list) return;
     const listLabel =
       key === "disabledInlineMenuOrigins"
-        ? "已禁用内联菜单的网站"
-        : "从不提示保存登录的网站";
+        ? "已停用快捷菜单的网站"
+        : "不再提示保存登录的网站";
     list.replaceChildren();
     if (!origins.length) {
       const empty = document.createElement("li");
@@ -193,7 +193,7 @@
     if (!entries.length) {
       const empty = document.createElement("li");
       empty.className = "empty";
-      empty.textContent = "暂无禁用的登录条目";
+      empty.textContent = "暂无已停用的登录条目";
       list.append(empty);
       return;
     }
@@ -224,7 +224,7 @@
       return true;
     } catch {
       if (at !== revision) return false;
-      status("无法读取设置；已临时使用默认值", true);
+      status("无法读取本机设置，已临时使用默认配置", true);
       settings = core.normalizeSettings({});
       render();
       return false;
@@ -242,7 +242,7 @@
         if (current === revision) status("设置已保存");
       } catch {
         if (current !== revision) return;
-        status("设置未保存，已重新读取本机存储", true);
+        status("设置未能保存，已重新读取本机配置", true);
         await load();
       }
     });
@@ -255,14 +255,14 @@
     if (!input) return;
     const raw = String(input.value || "").trim();
     if (!raw) {
-      status("请输入 HTTPS 网站地址", true);
+      status("请输入完整的 HTTPS 网站源地址", true);
       return;
     }
     let origin;
     try {
       origin = core.originFromURL(raw);
     } catch {
-      status("仅支持有效的 HTTPS 网站地址", true);
+      status("仅支持有效的 HTTPS 网站源地址", true);
       return;
     }
     if (settings[key].includes(origin)) {
@@ -270,7 +270,7 @@
       return;
     }
     if (settings[key].length >= 100) {
-      status("每个列表最多添加 100 个网站", true);
+      status("每个列表最多保存 100 个网站", true);
       return;
     }
     input.value = "";
@@ -285,7 +285,7 @@
       const label = document.createElement("span");
       label.textContent = entry.label;
       const key = document.createElement("kbd");
-      key.textContent = entry.shortcut || "未设置（可在浏览器中绑定）";
+      key.textContent = entry.shortcut || "未绑定（可在浏览器中设置）";
       if (entry.fallback) key.title = "默认快捷键，当前浏览器可能尚未绑定";
       item.append(label, key);
       list.append(item);

@@ -597,7 +597,7 @@
     const list = document.querySelector("#watchtower-findings");
     list.replaceChildren(...findings.slice(0, 100).map(findingNode));
     const defaultNote =
-      "本地检查完全离线；HIBP 仅在你勾选并点击“检查泄露库”时联网。";
+      "本地体检完全离线运行；仅在勾选上方选项并点击“在线检测泄露”时才会发送匿名前缀。";
     text(
       "#watchtower-hibp-note",
       hibpNotice ||
@@ -988,6 +988,8 @@
   }
   let historyEntries = [];
   let historyFor = "";
+  let vaultReturnFocusId = "";
+  let trashConfirmRevision = "";
   function wipeDetail() {
     cancelPasskeyRemoval();
     clearCheckoutPickerView();
@@ -997,6 +999,7 @@
     if (els?.detailFields) els.detailFields.replaceChildren();
     historyEntries = [];
     historyFor = "";
+    trashConfirmRevision = "";
     if (els?.detailHistory) els.detailHistory.hidden = true;
     if (els?.detailHistoryList) els.detailHistoryList.replaceChildren();
     if (els?.detailHistoryStatus) els.detailHistoryStatus.textContent = "";
@@ -1102,6 +1105,26 @@
       } catch {}
     }
     return "";
+  }
+  function vaultRows() {
+    try {
+      return [...els.vaultList.querySelectorAll(".vault-item")];
+    } catch {
+      return [];
+    }
+  }
+  function focusVaultRow(itemId) {
+    const rows = vaultRows();
+    if (!rows.length) return;
+    const target = itemId
+      ? rows.find((row) => row.dataset.itemId === itemId)
+      : null;
+    (target || rows[0]).focus?.();
+  }
+  function restoreVaultFocus() {
+    const itemId = vaultReturnFocusId;
+    vaultReturnFocusId = "";
+    focusVaultRow(itemId);
   }
   function renderVaultList() {
     if (!els) return;
@@ -1323,6 +1346,8 @@
     const generation = ++passkeyDetailGeneration;
     cancelPasskeyRemoval({ clearUncertain: false });
     if (checkoutPicker) clearCheckoutPickerView();
+    vaultReturnFocusId =
+      document.activeElement?.dataset?.itemId || vaultReturnFocusId;
     const operation = beginVaultOperation();
     detailReadOperation = operation;
     try {
@@ -1340,6 +1365,7 @@
       clearRevealedSecrets();
       renderDetail(reply.detail);
       showView("detail");
+      els.detailBack?.focus?.();
     } catch {
       toast("无法读取条目详情");
     } finally {
@@ -2048,6 +2074,10 @@
         "aria-pressed",
         archived ? "true" : "false",
       );
+    }
+    if (els.detailTrash) {
+      els.detailTrash.textContent = "移入回收站";
+      delete els.detailTrash.dataset.confirm;
     }
     els.detailUnavailable.hidden = !detail.unavailable;
     els.detailUnavailable.textContent = detail.unavailable || "";
@@ -3543,6 +3573,16 @@
   }
   async function detailTrash() {
     if (!lastDetail) return;
+    if (trashConfirmRevision !== lastDetail.revision) {
+      trashConfirmRevision = lastDetail.revision;
+      if (els?.detailTrash) {
+        els.detailTrash.textContent = "确认移入回收站";
+        els.detailTrash.dataset.confirm = "1";
+      }
+      toast("再次点击确认移入回收站");
+      return;
+    }
+    trashConfirmRevision = "";
     try {
       const reply = await classifyDetailAction({
         type: "item-state",
@@ -3555,9 +3595,9 @@
       wipeSensitiveViews();
       showView("vault");
       await refreshVault(true);
-      toast("条目已移至废纸篓");
+      toast("条目已移入回收站");
     } catch {
-      toast("无法移至废纸篓");
+      toast("无法移入回收站");
     }
   }
   function openOptions() {
@@ -3649,6 +3689,19 @@
       checkoutCancel: q("#checkout-cancel"),
       checkoutStatus: q("#checkout-status"),
     };
+    els.vaultList?.addEventListener("keydown", (event) => {
+      const rows = [...(els.vaultList.querySelectorAll?.(".vault-item") || [])];
+      const at = rows.indexOf(event.target);
+      if (at < 0) return;
+      let next = -1;
+      if (event.key === "ArrowDown") next = Math.min(rows.length - 1, at + 1);
+      else if (event.key === "ArrowUp") next = Math.max(0, at - 1);
+      else if (event.key === "Home") next = 0;
+      else if (event.key === "End") next = rows.length - 1;
+      else return;
+      event.preventDefault();
+      rows[next]?.focus?.();
+    });
     els.searchInput.addEventListener("input", (event) => {
       searchQuery = String(event.target.value || "");
       if (activeFilter === "passkeys") vaultItems = [];
@@ -3802,6 +3855,7 @@
       wipeDetail();
       showView("vault");
       renderVaultList();
+      restoreVaultFocus();
     });
     els.detailFavorite.addEventListener("click", () => void detailFavorite());
     els.detailEdit.addEventListener("click", () => {
@@ -3818,7 +3872,7 @@
         type: "fill",
         id: lastDetail.id,
         revision: lastDetail.revision,
-      }).catch(() => toast("请先读取当前网站候选"));
+      }).catch(() => toast("请先刷新当前网站匹配"));
     });
     els.checkoutCancel.addEventListener("click", (event) =>
       cancelCheckoutChoice(event),
@@ -3902,7 +3956,16 @@
           wipeDetail();
           showView("vault");
           renderVaultList();
+          restoreVaultFocus();
         }
+        return;
+      }
+      if (
+        event.key === "/" &&
+        !/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || "")
+      ) {
+        event.preventDefault();
+        els?.searchInput?.focus?.();
       }
     });
     globalThis.addEventListener?.("pagehide", wipeSensitiveViews);
