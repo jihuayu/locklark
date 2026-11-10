@@ -40,8 +40,8 @@ EXPECTED_FILES = {
 }
 
 FROZEN_MANIFEST_SHA256 = {
-    "chromium": "861ee5ba8f7c3dba5f24ba906ab0edc056e0b546ee1ec9f9387a2d31c4a27472",
-    "firefox": "b9220f9cf622d1f478a5e6f57e49b28308a130e5753780579079ae1c568401c4",
+    "chromium": "717db9a0140563ac7d40fb44a8ac8ec5657d3928dc56d0b89bc1707aaf0d8e20",
+    "firefox": "acad78db31d7d3572c993463b48e8913a6eba16ade3fea435ff1a73a17e1f424",
 }
 
 APPLE_SOURCE = (

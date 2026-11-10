@@ -757,7 +757,14 @@ try {
   );
   assert.deepEqual(
     [...manifest.permissions].sort(),
-    ["activeTab", "nativeMessaging", "scripting", "storage"].sort(),
+    [
+      "activeTab",
+      "idle",
+      "nativeMessaging",
+      "notifications",
+      "scripting",
+      "storage",
+    ].sort(),
   );
   assert.deepEqual(manifest.host_permissions, ["https://*/*"]);
   assert.equal(manifest.content_scripts?.length, 2);
