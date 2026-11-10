@@ -314,6 +314,33 @@ func TestAddItemReopenKeepsNewValue(t *testing.T) {
 	}
 }
 
+// The legacy item.add path appends the caller's item to the transaction items;
+// it must seal an owned clone instead, so the caller's provenance and document
+// buffers stay byte-exact while the stored value reopens intact.
+func TestLegacyAddKeepsCallerBuffersAndReopens(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "legacy.ll")
+	key := bytes.Repeat([]byte{42}, 16)
+	if err := Create(path, "legacy-fixture", key); err != nil {
+		t.Fatal(err)
+	}
+	importSource := []byte("synthetic-legacy-provenance")
+	attachment := []byte("synthetic-legacy-document-body")
+	extra := []byte("synthetic-legacy-extra-attachment")
+	item := vault.Item{Kind: "document", Title: "Legacy Document", Filename: "body.bin", Attachment: attachment, Attachments: []vault.AttachmentMeta{{ID: "extra", FileName: "extra.txt", MIMEType: "text/plain", Size: int64(len(extra)), SHA256: vault.AttachmentSHA256(extra), Content: extra}}, ImportSource: importSource}
+	r, err := command(path, "legacy-fixture", key, "item.add", item, nil)
+	if err != nil || r.id == "" {
+		t.Fatalf("legacy add failed: %+v %v", r, err)
+	}
+	if !bytes.Equal(importSource, []byte("synthetic-legacy-provenance")) || !bytes.Equal(attachment, []byte("synthetic-legacy-document-body")) || !bytes.Equal(extra, []byte("synthetic-legacy-extra-attachment")) {
+		t.Fatal("successful add modified the caller's buffers")
+	}
+	stored := readStoredItems(t, path, "legacy-fixture", key)
+	if len(stored) != 1 || stored[0].ID != r.id || stored[0].Filename != "body.bin" || !bytes.Equal(stored[0].ImportSource, importSource) || !bytes.Equal(stored[0].Attachment, attachment) || len(stored[0].Attachments) != 1 || !bytes.Equal(stored[0].Attachments[0].Content, extra) {
+		t.Fatalf("added document did not reopen byte-exact: %+v", stored)
+	}
+}
+
 // The import plan and import both map the same source into separately owned
 // items; neither may leave decrypted mapped buffers behind, and the persisted
 // logins must reopen complete.

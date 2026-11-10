@@ -731,8 +731,11 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 				outcome, refusal = "native-refused", ErrMutationRefused
 				break
 			}
-			items = append(items, add)
-			out.id = add.ID
+			// The add input is caller-owned; hand items an owned clone that the
+			// transaction-end clearAuthenticatedItems(items) zeroes after the seal.
+			owned := temporaries.track(add)
+			items = append(items, *owned)
+			out.id = owned.ID
 		case sshSignAction:
 			out.id = edit.ID
 			switch rev := revisions[edit.ID]; {
@@ -1214,8 +1217,11 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 				out.profile = secret.Profile()
 				profile = &out.profile
 			}
-			items = append(items, add)
-			out.id = add.ID
+			// The add input is caller-owned; hand items an owned clone that the
+			// transaction-end clearAuthenticatedItems(items) zeroes after the seal.
+			owned := temporaries.track(add)
+			items = append(items, *owned)
+			out.id = owned.ID
 		case "item.list", "item.list.archived", "item.list.trashed", "item.list.all":
 			out.rows = make([]Row, 0, len(items))
 			for _, it := range items {
