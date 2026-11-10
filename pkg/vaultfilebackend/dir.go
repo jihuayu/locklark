@@ -28,11 +28,13 @@ import (
 // non-directory where <root>/vaultfile-backend, v1, tmp or data is expected,
 // or one of those directories loosened past 0700, is refused instead of
 // followed, and the whole namespace is re-validated on every path-based
-// operation, so a component swapped after OpenDir is refused before it is
-// used. They do not defend against a same-UID process that races arbitrary
-// replacement of these components between a check and the use that follows it;
-// closing that gap needs directory-descriptor-relative operations, which this
-// driver does not use.
+// operation and compared with the directory identity captured by OpenDir, so a
+// component swapped after OpenDir for another real directory of acceptable
+// mode and owner is refused instead of silently redirecting the store. These
+// are static checks: they do not defend against a same-UID process that races
+// arbitrary replacement of these components between a check and the use that
+// follows it; closing that gap needs directory-descriptor-relative operations,
+// which this driver does not use.
 //
 // Crash handling. The lock inode carries the kernel lock plus an owner ticket
 // naming the temporary file of the write in progress. A dead holder releases
@@ -88,6 +90,11 @@ type Dir struct {
 	ns      string
 	root    string
 	lock    string
+	// identity holds the directory identity of each protected component as
+	// OpenDir validated it. dir compares every later Lstat against it, so a
+	// component replaced by another real directory is refused even when the
+	// replacement has an acceptable mode and owner.
+	identity componentIdentities
 
 	mu     sync.Mutex
 	closed bool
@@ -143,6 +150,39 @@ func (l *inProcLock) release() { <-l.sem }
 
 var errLockTimeout = errors.New("lock wait exceeded its deadline")
 
+// componentIdentities are the directory identities captured by OpenDir, in the
+// order dir validates the components. An empty identity means it was not
+// captured, and identity checks are then skipped.
+type componentIdentities struct {
+	root os.FileInfo
+	ns   os.FileInfo
+	v1   os.FileInfo
+	tmp  os.FileInfo
+	data os.FileInfo
+}
+
+// captureIdentity records the identity of d, which must already have passed the
+// matching check, so a failed OpenDir cannot leave a half-captured namespace in
+// service.
+func captureIdentity(d, label string) (os.FileInfo, error) {
+	st, err := os.Lstat(d)
+	if err != nil {
+		return nil, deniedMsg(err, label)
+	}
+	return st, nil
+}
+
+// sameIdentity reports whether a later Lstat st is the directory OpenDir opened.
+// os.SameFile compares device and inode (or volume and file id), so a rename
+// within the same file system keeps the identity while a different directory,
+// including one moved into the old path, does not.
+func sameIdentity(want, got os.FileInfo) bool {
+	if want == nil {
+		return true
+	}
+	return got != nil && os.SameFile(want, got)
+}
+
 // OpenDir prepares root and opens a private namespace below it. Lock waits are
 // bounded by DefaultLockTimeout.
 func OpenDir(root string) (*Dir, error) {
@@ -165,18 +205,40 @@ func OpenDir(root string) (*Dir, error) {
 	// existing symlink, a non-directory or a loosened directory is refused
 	// before anything is created below it.
 	ns := filepath.Join(real, dirSubdir)
-	if err := makePrivateDir(ns, "storage namespace"); err != nil {
-		return nil, err
-	}
 	base := filepath.Join(ns, dirVer)
-	if err := makePrivateDir(base, "version directory"); err != nil {
+	tmpDir := filepath.Join(base, tmpName)
+	dataDir := filepath.Join(base, dataName)
+	var ids componentIdentities
+	// The configured root keeps its own policy (any mode that is not group or
+	// world writable), so it is validated with checkRootIdentity rather than as
+	// a private 0700 directory.
+	if ids.root, err = captureIdentity(real, "root"); err != nil {
 		return nil, err
 	}
-	if err := makePrivateDir(filepath.Join(base, tmpName), "data directory"); err != nil {
+	if err := checkRootIdentity(real, ids.root); err != nil {
 		return nil, err
 	}
-	if err := makePrivateDir(filepath.Join(base, dataName), "data directory"); err != nil {
-		return nil, err
+	for _, c := range []struct {
+		path  string
+		label string
+		out   *os.FileInfo
+	}{
+		{ns, "storage namespace", &ids.ns},
+		{base, "version directory", &ids.v1},
+		{tmpDir, "data directory", &ids.tmp},
+		{dataDir, "data directory", &ids.data},
+	} {
+		if err := makePrivateDir(c.path, c.label); err != nil {
+			return nil, err
+		}
+		// Capture the identity of the exact directory just validated, so
+		// every later operation can detect a replacement, not only a symlink
+		// or a loosened mode.
+		st, err := captureIdentity(c.path, c.label)
+		if err != nil {
+			return nil, err
+		}
+		*c.out = st
 	}
 	lock := filepath.Join(base, lockName)
 	f, err := openLockFile(lock)
@@ -184,7 +246,7 @@ func OpenDir(root string) (*Dir, error) {
 		return nil, err
 	}
 	_ = f.Close()
-	return &Dir{cfgRoot: real, ns: ns, root: base, lock: lock, timeout: DefaultLockTimeout, inProc: inProcFor(lock)}, nil
+	return &Dir{cfgRoot: real, ns: ns, root: base, lock: lock, identity: ids, timeout: DefaultLockTimeout, inProc: inProcFor(lock)}, nil
 }
 
 // makePrivateDir creates d with 0700 when it is missing and then validates it
@@ -273,10 +335,11 @@ func trustedAncestor(info os.FileInfo) bool {
 // directory OpenDir opened, without following the final component and without
 // changing the root policy. OpenDir accepts a root of any mode as long as the
 // root and its ancestors are not group/world writable, so a relinked or loose
-// root fails only if it is a symlink, no longer a directory, or writable by
-// group or others. Ownership is not required: a root such as /var/tmp may
+// root fails if it is a symlink, no longer a directory, writable by group or
+// others, or a different directory than the one opened (a nil want skips the
+// identity comparison). Ownership is not required: a root such as /var/tmp may
 // legitimately belong to root.
-func checkRootIdentity(p string) error {
+func checkRootIdentity(p string, want os.FileInfo) error {
 	st, err := os.Lstat(p)
 	if err != nil {
 		return deniedMsg(err, "root")
@@ -286,6 +349,9 @@ func checkRootIdentity(p string) error {
 	}
 	if !trustedAncestor(st) {
 		return deniedMsg(nil, "root is writable by group or others")
+	}
+	if !sameIdentity(want, st) {
+		return deniedMsg(nil, "root is not the directory opened")
 	}
 	return nil
 }
@@ -298,24 +364,40 @@ func checkRootIdentity(p string) error {
 // points. Checking the root first matters because ns and root are paths below
 // it: without that check, a root swapped for a symlink would make the Lstat of
 // every other component follow the link into an outside tree. A component that
-// moved, was linked or was loosened fails with ErrDenied. The check and the
-// later use do not share a descriptor: see the threat model above.
+// moved, was linked, loosened or replaced by a different directory fails with
+// ErrDenied: each component must have the identity OpenDir captured, so a
+// replacement that happens to have an acceptable mode and owner still does not
+// redirect the store. These are static checks of each path's final component;
+// the check and the later use do not share a descriptor, so a replacement
+// between them is not prevented (see the threat model above).
 func (d *Dir) dir() (string, error) {
-	if err := checkRootIdentity(d.cfgRoot); err != nil {
+	if err := checkRootIdentity(d.cfgRoot, d.identity.root); err != nil {
 		return "", err
 	}
-	parts := []struct{ path, label string }{
-		{d.ns, "storage namespace"},
-		{d.root, "version directory"},
-		{filepath.Join(d.root, tmpName), "temporary directory"},
-		{filepath.Join(d.root, dataName), "data directory"},
+	dataDir := filepath.Join(d.root, dataName)
+	parts := []struct {
+		path  string
+		want  os.FileInfo
+		label string
+	}{
+		{d.ns, d.identity.ns, "storage namespace"},
+		{d.root, d.identity.v1, "version directory"},
+		{filepath.Join(d.root, tmpName), d.identity.tmp, "temporary directory"},
+		{dataDir, d.identity.data, "data directory"},
 	}
 	for _, p := range parts {
 		if err := checkPrivateDir(p.path, p.label); err != nil {
 			return "", err
 		}
+		st, err := os.Lstat(p.path)
+		if err != nil {
+			return "", deniedMsg(err, p.label)
+		}
+		if !sameIdentity(p.want, st) {
+			return "", deniedMsg(nil, p.label+" is not the directory opened")
+		}
 	}
-	return filepath.Join(d.root, dataName), nil
+	return dataDir, nil
 }
 
 func (d *Dir) dataPath(name string) string {
