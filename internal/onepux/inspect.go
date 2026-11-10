@@ -225,25 +225,23 @@ func readEntry(f *zip.File, limit int64, keep bool) ([]byte, int64, error) {
 	if err != nil {
 		return nil, 0, ErrInvalid
 	}
+	// The error paths below never close the reader themselves, so the defer
+	// owns it; the success path closes it explicitly and ignores the repeat.
+	defer r.Close()
 	var out bytes.Buffer
 	var dst io.Writer = io.Discard
 	if keep {
 		dst = &out
 	}
-	n, err := io.Copy(dst, io.LimitReader(r, limit+1))
-	if err != nil || n > limit {
-		clearBuffer(&out)
-		if n > limit {
-			return nil, 0, ErrLimit
-		}
-		return nil, 0, ErrInvalid
+	data, n, err := readEntryBytes(r, dst, &out, f.UncompressedSize64, limit)
+	if err != nil {
+		return nil, 0, err
 	}
-	closed := r.Close()
-	if closed != nil || uint64(n) != f.UncompressedSize64 {
+	if err := r.Close(); err != nil {
 		clearBuffer(&out)
 		return nil, 0, ErrInvalid
 	}
-	return out.Bytes(), n, nil
+	return data, n, nil
 }
 
 // readEntryBytes copies one entry into the retained buffer and returns the

@@ -131,6 +131,15 @@ func MapArchiveV2(raw []byte) (MappedLogins, error) {
 				if e != nil {
 					return releaseMappedItems(&out), e
 				}
+				// The outer guard owns item until it is appended: any failure
+				// between the mapper returning and the append wipes the item,
+				// including the ImportSource written here.
+				handedOff := false
+				defer func() {
+					if !handedOff {
+						wipeItem(&item)
+					}
+				}()
 				identity, _ := json.Marshal([]any{accountAttrs["uuid"], vaultAttrs["uuid"], source["uuid"]})
 				h := sha256.Sum256(append([]byte(importItemDomain), identity...))
 				item.ID = hex.EncodeToString(h[:16])
@@ -148,6 +157,7 @@ func MapArchiveV2(raw []byte) (MappedLogins, error) {
 					out.Report.Archived++
 				}
 				out.Items = append(out.Items, item)
+				handedOff = true
 			}
 		}
 	}
@@ -471,13 +481,12 @@ func mapArchiveItem(source map[string]any, files map[string][]byte) (item vault.
 		if !found {
 			return reject()
 		}
-		// Own a copy: the buffered entry is wiped when mapping finishes, while
-		// the mapped attachment is handed to the caller.
-		content := bytes.Clone(buffered)
-		if expectedSize >= 0 && int64(len(content)) != expectedSize {
+		// Every check that can reject the entry runs before anything is
+		// cloned, so a rejected item never holds a copy to leak.
+		if expectedSize >= 0 && int64(len(buffered)) != expectedSize {
 			return reject()
 		}
-		if len(content) > vault.MaxAttachmentSize {
+		if len(buffered) > vault.MaxAttachmentSize {
 			return vault.Item{}, ErrLimit
 		}
 		name := fileName
@@ -487,6 +496,10 @@ func mapArchiveItem(source map[string]any, files map[string][]byte) (item vault.
 		if !validAttachmentName(name) {
 			return reject()
 		}
+		// Own a copy: the buffered entry is wiped when mapping finishes, while
+		// the mapped attachment is handed to the caller. The copy is attached
+		// immediately so the failure defer above wipes it.
+		content := bytes.Clone(buffered)
 		att := vault.AttachmentMeta{ID: attachmentID(item.ID, name, content), FileName: name, Size: int64(len(content)), MIMEType: mimeFor(name), SHA256: vault.AttachmentSHA256(content), Content: content}
 		item.Attachments = append(item.Attachments, att)
 		if item.Category == vault.CategoryDocument {
