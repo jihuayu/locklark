@@ -422,7 +422,9 @@ func writeFrame(w io.Writer, raw []byte) error {
 // defence in depth on top of same-UID socket credentials, not a code-signing
 // claim: a same-UID process that can replace a trusted path is still stopped by
 // the explicit native pairing prompt. The request's declared Browser/Origin
-// never participate.
+// never participate. The on-disk owner/permission check is platform-specific
+// (see peer_exec_*.go); it refuses a host binary writable by anyone but its
+// owner.
 func peerProcessAllowed(peer Peer) bool {
 	if peer.PID == 0 || peer.User == "" {
 		return false
@@ -434,10 +436,13 @@ func peerProcessAllowed(peer Peer) bool {
 	return peerProcessAllowedFor(peer, self, runtime.GOOS)
 }
 
-// peerProcessAllowedFor is the pure policy used by tests. A browser host must
-// be the current executable (tests/embedders) or one exact Locklark browser
-// host name installed beside the desktop executable. macOS Safari helpers may
-// sit in a sibling signed app bundle, but never at an arbitrary path.
+// peerProcessAllowedFor is the pure policy used by tests. The process must be
+// the desktop's own canonical executable or one exact Locklark browser host
+// name at any absolute installation directory. The directory is deliberately
+// not constrained: native-host registration accepts any absolute --host path.
+// What binds the peer is the OS-authenticated canonical path, its exact
+// basename, and the owner/permission trust of the file on disk. The user's
+// declared Browser/Origin never participate.
 func peerProcessAllowedFor(peer Peer, selfPath, goos string) bool {
 	if peer.PID == 0 || peer.User == "" {
 		return false
@@ -446,21 +451,13 @@ func peerProcessAllowedFor(peer Peer, selfPath, goos string) bool {
 	if !ok {
 		return false
 	}
-	self, ok := canonicalExecutablePath(selfPath)
-	if !ok {
-		return false
-	}
-	if process == self {
+	if self, ok := canonicalExecutablePath(selfPath); ok && process == self {
 		return true
 	}
-	name := filepath.Base(process)
-	if !trustedBrowserHostName(name, goos) {
+	if !trustedBrowserHostName(filepath.Base(process), goos) {
 		return false
 	}
-	if filepath.Dir(process) == filepath.Dir(self) {
-		return true
-	}
-	return goos == "darwin" && trustedDarwinSafariHelper(process, self)
+	return trustedPeerExecutable(process, peer.User, goos)
 }
 
 func canonicalExecutablePath(path string) (string, bool) {
@@ -487,37 +484,6 @@ func trustedBrowserHostName(name, goos string) bool {
 		return true
 	}
 	return false
-}
-
-// trustedDarwinSafariHelper accepts only a Safari helper inside a sibling
-// Locklark app bundle. The bundle identity is not verified here; the explicit
-// pairing prompt remains the authorization boundary.
-func trustedDarwinSafariHelper(process, self string) bool {
-	if filepath.Base(process) != "locklark-browser-safari" {
-		return false
-	}
-	processBundle, ok := darwinAppBundleRoot(process)
-	if !ok {
-		return false
-	}
-	selfBundle, ok := darwinAppBundleRoot(self)
-	if !ok {
-		return false
-	}
-	return filepath.Dir(processBundle) == filepath.Dir(selfBundle)
-}
-
-func darwinAppBundleRoot(path string) (string, bool) {
-	macos := filepath.Dir(path)
-	contents := filepath.Dir(macos)
-	if filepath.Base(macos) != "MacOS" || filepath.Base(contents) != "Contents" {
-		return "", false
-	}
-	root := filepath.Dir(contents)
-	if !strings.HasSuffix(root, ".app") {
-		return "", false
-	}
-	return root, true
 }
 
 // RelayStdio dials the desktop broker and relays framed native messages.

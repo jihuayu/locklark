@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -353,65 +354,111 @@ func TestBrokerBrowserPairingIsExplicitAndRefusable(t *testing.T) {
 	}
 }
 
+// The peer must be the desktop's own canonical executable or an exact Locklark
+// host basename at any absolute install directory, provided the file is a
+// trusted regular executable owned by the authenticated user. Prefixes, bare
+// names, arbitrary executables and writable/unowned/non-executable files are
+// refused; neither the declared browser nor origin participates.
 func TestPeerProcessAllowedUsesExactHostNamesAndInstallLocation(t *testing.T) {
 	dir := t.TempDir()
-	write := func(name string) string {
+	write := func(path string, perm os.FileMode) string {
 		t.Helper()
-		path := filepath.Join(dir, name)
-		if e := os.WriteFile(path, []byte("fixture"), 0700); e != nil {
+		if perm == 0 {
+			perm = 0700
+		}
+		if e := os.MkdirAll(filepath.Dir(path), 0700); e != nil {
+			t.Fatal(e)
+		}
+		if e := os.WriteFile(path, []byte("fixture"), perm); e != nil {
+			t.Fatal(e)
+		}
+		if e := os.Chmod(path, perm); e != nil {
 			t.Fatal(e)
 		}
 		return path
 	}
-	self := write("locklark-desktop")
-	host := write("locklark-browser-chromium")
-	evilPrefix := write("locklark-browser-chromium-evil")
-	shortPrefix := write("locklark-browser")
-	otherDir := filepath.Join(dir, "other")
-	if e := os.Mkdir(otherDir, 0700); e != nil {
+	self := write(filepath.Join(dir, "bin", "locklark-desktop"), 0)
+	host := write(filepath.Join(dir, "bin", "locklark-browser-chromium"), 0)
+	installed := write(filepath.Join(dir, "Library Application Support", "Locklark Browser Host", "locklark-browser-chromium"), 0)
+	firefox := write(filepath.Join(dir, "opt", "locklark", "locklark-browser-firefox"), 0)
+	evilPrefix := write(filepath.Join(dir, "opt", "locklark", "locklark-browser-chromium-evil"), 0)
+	shortPrefix := write(filepath.Join(dir, "opt", "locklark", "locklark-browser"), 0)
+	arbitrary := write(filepath.Join(dir, "opt", "locklark", "evil"), 0)
+	groupWritable := write(filepath.Join(dir, "rw", "locklark-browser-chromium"), 0770)
+	otherWritable := write(filepath.Join(dir, "rw", "locklark-browser-firefox"), 0702)
+	notExecutable := write(filepath.Join(dir, "rx", "locklark-browser-chromium"), 0600)
+	directory := filepath.Join(dir, "a-directory", "locklark-browser-chromium")
+	if e := os.MkdirAll(directory, 0700); e != nil {
 		t.Fatal(e)
 	}
-	otherHost := filepath.Join(otherDir, "locklark-browser-chromium")
-	if e := os.WriteFile(otherHost, []byte("fixture"), 0700); e != nil {
-		t.Fatal(e)
+	// Give the file an owner uid other than the broker's. Unprivileged
+	// processes cannot chown, so this check is skipped when refused.
+	unowned := write(filepath.Join(dir, "unowned", "locklark-browser-chromium"), 0)
+	chowned := os.Chown(unowned, 12345, 12345) == nil
+	peerUser := "UID " + strconv.Itoa(os.Geteuid())
+	otherUser := "UID " + strconv.Itoa(os.Geteuid()+1)
+	type tc struct {
+		name, path, user, goos string
+		want                   bool
 	}
-	cases := []struct {
-		name string
-		path string
-		goos string
-		want bool
-	}{
-		{"exact executable", self, "linux", true},
-		{"installed host beside desktop", host, "linux", true},
-		{"longer prefix", evilPrefix, "linux", false},
-		{"short prefix", shortPrefix, "linux", false},
-		{"same basename in another directory", otherHost, "linux", false},
-		{"bare basename", "locklark-browser-chromium", "linux", false},
-		{"arbitrary executable", "/tmp/evil", "linux", false},
+	cases := []tc{
+		{"exact executable", self, peerUser, "linux", true},
+		{"installed host beside desktop", host, peerUser, "linux", true},
+		{"exact host in another absolute directory", installed, peerUser, "linux", true},
+		{"exact firefox host in another directory", firefox, peerUser, "darwin", true},
+		{"longer prefix", evilPrefix, peerUser, "linux", false},
+		{"short prefix", shortPrefix, peerUser, "linux", false},
+		{"arbitrary executable", arbitrary, peerUser, "linux", false},
+		{"group writable", groupWritable, peerUser, "linux", false},
+		{"other writable", otherWritable, peerUser, "linux", false},
+		{"non executable", notExecutable, peerUser, "linux", false},
+		{"directory", directory, peerUser, "linux", false},
+		{"bare basename", "locklark-browser-chromium", peerUser, "linux", false},
+		{"unauthenticated PID", installed, peerUser, "linux", false},
 	}
-	for _, tc := range cases {
-		peer := Peer{User: "UID 501", PID: 2, Process: tc.path}
-		if got := peerProcessAllowedFor(peer, self, tc.goos); got != tc.want {
-			t.Fatalf("%s: got %v want %v", tc.name, got, tc.want)
+	if chowned {
+		cases = append(cases, tc{"unowned host", unowned, peerUser, "linux", false})
+	}
+	// Unless a case names the desktop itself, the broker runs from another
+	// absolute desktop path so install-directory equality cannot help.
+	broker := write(filepath.Join(dir, "unrelated", "locklark-desktop"), 0)
+	against := make(map[string]string, len(cases))
+	for _, c := range cases {
+		against[c.path] = broker
+	}
+	against[self] = self
+	for _, c := range cases {
+		peer := Peer{User: c.user, PID: 2, Process: c.path}
+		if c.name == "unauthenticated PID" {
+			peer.PID = 0
 		}
+		if got := peerProcessAllowedFor(peer, against[c.path], c.goos); got != c.want {
+			t.Fatalf("%s: got %v want %v", c.name, got, c.want)
+		}
+	}
+	// Ownership names the authenticated peer user, not just any user string.
+	if peerProcessAllowedFor(Peer{User: otherUser, PID: 2, Process: installed}, self, "linux") {
+		t.Fatal("host owned by this broker accepted for a foreign peer user")
 	}
 
+	// macOS Safari follows the same exact-basename policy at any directory; the
+	// sibling app-bundle requirement is gone.
 	apps := filepath.Join(dir, "Applications")
-	desktop := filepath.Join(apps, "Locklark.app", "Contents", "MacOS", "locklark-desktop")
-	safari := filepath.Join(apps, "Locklark Safari.app", "Contents", "MacOS", "locklark-browser-safari")
-	for _, path := range []string{desktop, safari} {
-		if e := os.MkdirAll(filepath.Dir(path), 0700); e != nil {
-			t.Fatal(e)
-		}
-		if e := os.WriteFile(path, []byte("fixture"), 0700); e != nil {
-			t.Fatal(e)
-		}
+	desktop := write(filepath.Join(apps, "Locklark.app", "Contents", "MacOS", "locklark-desktop"), 0)
+	safari := write(filepath.Join(apps, "Locklark Safari.app", "Contents", "MacOS", "locklark-browser-safari"), 0)
+	if !peerProcessAllowedFor(Peer{User: peerUser, PID: 3, Process: safari}, desktop, "darwin") {
+		t.Fatal("exact Safari helper rejected")
 	}
-	if !peerProcessAllowedFor(Peer{User: "UID 501", PID: 3, Process: safari}, desktop, "darwin") {
-		t.Fatal("sibling Safari helper rejected")
+	looseSafari := write(filepath.Join(dir, "safari elsewhere", "locklark-browser-safari"), 0)
+	if !peerProcessAllowedFor(Peer{User: peerUser, PID: 3, Process: looseSafari}, desktop, "darwin") {
+		t.Fatal("Safari helper outside an app bundle rejected")
 	}
-	if peerProcessAllowedFor(Peer{User: "UID 501", PID: 3, Process: safari}, desktop, "linux") {
-		t.Fatal("Safari sibling location accepted off macOS")
+	writableSafari := write(filepath.Join(dir, "safari elsewhere", "locklark-browser-chromium"), 0o702)
+	if e := os.Chmod(writableSafari, 0702); e != nil {
+		t.Fatal(e)
+	}
+	if peerProcessAllowedFor(Peer{User: peerUser, PID: 3, Process: writableSafari}, desktop, "darwin") {
+		t.Fatal("writable Darwin host accepted")
 	}
 }
 
