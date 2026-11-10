@@ -771,8 +771,10 @@ func cliRunValuesResponse(keys map[string]struct{}, values map[string]json.RawMe
 		return CLIRunBrokerResponse{}, errCLIRunResponse
 	}
 	var slotKeys map[string]json.RawMessage
-	// Clear nested raw copies even if Unmarshal fails partway through.
-	defer clearCLIRunRawMessages(slotKeys)
+	// Clear nested raw copies even if Unmarshal fails partway through. The
+	// closure reads slotKeys when it runs, after the map is populated; a
+	// deferred call would capture the nil map at registration.
+	defer func() { clearCLIRunRawMessages(slotKeys) }()
 	if err := json.Unmarshal(values["values"], &slotKeys); err != nil {
 		return CLIRunBrokerResponse{}, errCLIRunResponse
 	}
