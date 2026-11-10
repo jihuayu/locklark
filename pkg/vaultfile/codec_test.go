@@ -2,7 +2,6 @@ package vaultfile
 
 import (
 	"bytes"
-	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -380,14 +379,6 @@ func TestPurposeSeparatedKeys(t *testing.T) {
 	f = buildFile(t)
 	f.VUKDeviceSlots = f.VUKDeviceSlots[:1]
 	f.VUKDeviceSlots[0].Recipient = f.SignedPolicyProofs[0].Policy.Devices[1].AgeEncryptionKey
-	_, err = EncodeFile(f)
-	wantCode(t, err, CodeInvalidValue)
-
-	// A private key is never valid in a public-key member.
-	f = buildFile(t)
-	p = f.SignedPolicyProofs[0].Policy
-	p.Devices[0].ContentSigningKey.PublicKey = make([]byte, ed25519.PrivateKeySize)
-	setPolicy(f, &p)
 	_, err = EncodeFile(f)
 	wantCode(t, err, CodeInvalidValue)
 

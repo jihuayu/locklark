@@ -302,7 +302,24 @@ func ValidatePolicy(p *Policy) error {
 		return err
 	}
 	devices := map[string]bool{}
-	keys := map[string]string{}
+	// Purpose separation: every key role in the policy - the owner-root
+	// signing key and, on each device, the content signing, optional policy
+	// signing and age encryption keys - is distinct global key material. The
+	// same 32 raw public-key bytes may not occupy two entries, on one device,
+	// two devices, or across root and devices, whatever encoding each role
+	// carries them in. The age recipient's X25519 bytes are recovered only
+	// after age has validated the string (ageX25519RecipientBytes).
+	keys := map[[32]byte]bool{}
+	claimKey := func(k [32]byte) error {
+		if keys[k] {
+			return Err("", CodeInvalidValue)
+		}
+		keys[k] = true
+		return nil
+	}
+	if err := claimKey(([32]byte)(r.PublicKey)); err != nil {
+		return err
+	}
 	for i := range p.Devices {
 		d := &p.Devices[i]
 		if !validID(d.DeviceID, MaxDeviceIDLength) || !validID(d.PrincipalID, MaxIDLength) ||
@@ -326,22 +343,20 @@ func ValidatePolicy(p *Policy) error {
 		if !validAgeX25519Recipient(d.AgeEncryptionKey) {
 			return Err("", CodeInvalidValue)
 		}
-		// Purpose separation: no key may serve two roles, on this device or
-		// any other; the same raw bytes in different encodings are caught
-		// too because all three canonical encodings are carried here.
-		sep := [][2]string{
-			{"content_signing", string(d.ContentSigningKey.PublicKey)},
-			{"policy_signing", string(policyKeyBytes(d))},
-			{"age_encryption", d.AgeEncryptionKey},
+		if err := claimKey(([32]byte)(d.ContentSigningKey.PublicKey)); err != nil {
+			return err
 		}
-		for _, kv := range sep {
-			if kv[1] == "" {
-				continue
+		if d.PolicySigningKey != nil {
+			if err := claimKey(([32]byte)(d.PolicySigningKey.PublicKey)); err != nil {
+				return err
 			}
-			if _, ok := keys[kv[1]]; ok {
-				return Err("", CodeInvalidValue)
-			}
-			keys[kv[1]] = kv[0]
+		}
+		ageKey, err := ageX25519RecipientBytes(d.AgeEncryptionKey)
+		if err != nil {
+			return Err("", CodeInvalidValue)
+		}
+		if err := claimKey(ageKey); err != nil {
+			return err
 		}
 		// Private keys must never appear in any wire field.
 		for _, b := range [][]byte{d.ContentSigningKey.PublicKey, policyKeyBytes(d)} {
@@ -569,16 +584,155 @@ func validEd25519Key(b []byte) bool {
 // 32-byte X25519 point are checked by the reference implementation; no
 // cryptographic operation beyond parsing the public key happens here.
 func validAgeX25519Recipient(s string) bool {
+	_, err := ageX25519RecipientBytes(s)
+	return err == nil
+}
+
+// ageX25519RecipientBytes returns the raw 32 public-key bytes of a valid age
+// X25519 recipient string. It is the binary form purpose separation compares,
+// so the same key written as an age recipient and as an Ed25519 public key is
+// one key, not two display strings.
+//
+// The gate is age.ParseX25519Recipient: all Bech32 rules, the checksum, the
+// "age" type and the X25519 key length/point are validated by age, the pinned
+// reference implementation. age v1.3.2 keeps the point in an unexported field
+// with no raw accessor, and this package does not reach into it with
+// reflection or unsafe. After that successful parse, the smallest Bech32
+// extraction needed recovers the payload from age's canonical
+// recipient.String() output (lowercase "age1" text), never from the
+// caller's string directly; it performs no checksum, type or point
+// validation of its own.
+func ageX25519RecipientBytes(s string) (k [32]byte, err error) {
 	if len(s) > MaxPublicKeyLength || !strings.HasPrefix(s, AgeX25519RecipientPrefix) {
-		return false
+		return k, Err("", CodeInvalidValue)
 	}
 	// Identity (private key) material must never be accepted, whatever
 	// case convention it is written in.
 	if strings.HasPrefix(strings.ToUpper(s), AgeX25519IdentityPrefix) {
-		return false
+		return k, Err("", CodeInvalidValue)
 	}
-	_, err := age.ParseX25519Recipient(s)
-	return err == nil
+	r, err := age.ParseX25519Recipient(s)
+	if err != nil {
+		return k, Err("", CodeInvalidValue)
+	}
+	if err := decodeAgeRecipientPayload(r.String(), &k); err != nil {
+		return k, Err("", CodeInvalidValue)
+	}
+	return k, nil
+}
+
+// ageBech32Charset is the BIP-173 data alphabet age encodes recipients in.
+const ageBech32Charset = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+
+// decodeAgeRecipientPayload recovers the 32-byte X25519 payload from canonical,
+// already-validated age X25519 recipient text. It checks only encoding shape:
+// lowercase, the "age" prefix, exactly 52 data characters (a 32-byte payload
+// in 5-bit groups with zero padding plus a 6-character checksum) and that the
+// recovered bytes encode back to exactly s. The checksum itself is not
+// recomputed: age.ParseX25519Recipient has already verified it.
+func decodeAgeRecipientPayload(s string, k *[32]byte) error {
+	if len(s) != len(AgeX25519RecipientPrefix)+58 || !strings.HasPrefix(s, AgeX25519RecipientPrefix) {
+		return Err("", CodeInvalidValue)
+	}
+	const dataLen, groupBits = 52, 5
+	data := s[len(AgeX25519RecipientPrefix):]
+	var acc uint32
+	var bits uint
+	var out []byte
+	for i := 0; i < dataLen; i++ {
+		v := strings.IndexByte(ageBech32Charset, data[i])
+		if v < 0 {
+			return Err("", CodeInvalidValue)
+		}
+		acc = acc<<groupBits | uint32(v)
+		bits += groupBits
+		if bits >= 8 {
+			bits -= 8
+			out = append(out, byte(acc>>bits))
+		}
+	}
+	// 52 groups carry 260 bits: 256 payload bits and one zero-bit pad that
+	// carries no value.
+	if len(out) != len(k) || acc&(1<<bits-1) != 0 {
+		return Err("", CodeInvalidValue)
+	}
+	for i := range out {
+		k[i] = out[i]
+	}
+	// Canonical round-trip: k re-encoded must reproduce s exactly, so no
+	// non-canonical spelling is admitted.
+	if canonicalAgeRecipient(k) != s {
+		return Err("", CodeInvalidValue)
+	}
+	return nil
+}
+
+// canonicalAgeRecipient encodes the 32-byte X25519 payload k as the age Bech32
+// recipient string "age1" || 52 data characters || 6 checksum characters
+// (BIP-173, checksum constant 1). It is the independent inverse used only to
+// confirm that decodeAgeRecipientPayload recovered the canonical spelling.
+func canonicalAgeRecipient(k *[32]byte) string {
+	gen := [5]uint32{0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3}
+	const hrp, dataLen, checksumLen = "age", 52, 6
+	// 32 bytes are 256 bits: 51 full 5-bit groups and one zero-padded group.
+	var acc uint32
+	var bits uint
+	var data [dataLen]byte
+	n := 0
+	for _, b := range k {
+		acc = acc<<8 | uint32(b)
+		bits += 8
+		for bits >= 5 {
+			bits -= 5
+			data[n] = byte(acc>>bits) & 31
+			n++
+		}
+	}
+	if bits > 0 {
+		data[n] = byte(acc<<(5-bits)) & 31
+		n++
+	}
+	if n != dataLen {
+		panic("vaultfile: unexpected bech32 group count")
+	}
+	// BIP-173 polymod over the expanded HRP, the data and six zero
+	// placeholder characters, XOR 1.
+	chk := uint32(1)
+	polymod := func(v uint32) {
+		top := chk >> 25
+		chk = (chk&0x1ffffff)<<5 ^ v
+		for i := range gen {
+			if top>>i&1 == 1 {
+				chk ^= gen[i]
+			}
+		}
+	}
+	for _, c := range []byte(hrp) {
+		polymod(uint32(c >> 5))
+	}
+	polymod(0)
+	for _, c := range []byte(hrp) {
+		polymod(uint32(c & 31))
+	}
+	for _, v := range data {
+		polymod(uint32(v))
+	}
+	for i := 0; i < checksumLen; i++ {
+		polymod(0)
+	}
+	mod := chk ^ 1
+	var groups [dataLen + checksumLen]byte
+	copy(groups[:], data[:])
+	for i := 0; i < checksumLen; i++ {
+		groups[dataLen+i] = byte(mod >> uint(5*(checksumLen-1-i)) & 31)
+	}
+	var sb strings.Builder
+	sb.WriteString(hrp)
+	sb.WriteByte('1')
+	for _, g := range groups {
+		sb.WriteByte(ageBech32Charset[g])
+	}
+	return sb.String()
 }
 
 // ---- role and key binding ----

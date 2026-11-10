@@ -266,8 +266,12 @@ exactly one 32-byte `prev_policy_digest`. Whether a predecessor digest names an
 actually known prior policy is a sync decision, not a wire rule.
 
 Role semantics are fixed: the owner root is independent of any device, and
-the three device key roles (content signing, policy signing, age encryption)
-are distinct and never interchangeable.
+every key role in one policy — the owner-root signing key and, on each device,
+the content signing, policy signing and age encryption keys — carries distinct
+global key material. No 32 raw public-key bytes may occupy two entries, on one
+device, two devices, or across root and device; an age recipient is compared
+by the X25519 bytes it encodes, once `filippo.io/age` has accepted it, not by
+its text. Reuse is an `invalid_value`.
 
 A device acts only with the roles of its principal, and roles imply the ones
 before them: writer implies reader, admin implies writer, owner implies admin.
