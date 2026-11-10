@@ -15,10 +15,13 @@ import os
 import re
 import shutil
 import socket
+import ssl
 import stat
 import subprocess
+import threading
 import time
 import zipfile
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -828,10 +831,15 @@ def source_files(ctx: E2EContext, relative_glob: str) -> list[Path]:
     return [path for path in ctx.repo_root.glob(relative_glob) if path.is_file()]
 
 
-def cli_help(ctx: E2EContext) -> str:
-    result = ctx.run_cli(["help"])
+def cli_help(ctx: E2EContext, args: Sequence[Any] = ("help",)) -> str:
+    """Run the real CLI help surface (``locklark help`` by default)."""
+
+    result = ctx.run_cli(list(args))
     if result.returncode != 0:
-        raise AssertionError(f"locklark help failed (rc={result.returncode}): {result.stderr}")
+        raise AssertionError(
+            f"locklark {' '.join(str(arg) for arg in args)} failed "
+            f"(rc={result.returncode}): {result.stderr}"
+        )
     return result.stdout + "\n" + result.stderr
 
 
@@ -1232,10 +1240,267 @@ def f12_parity_doc(ctx: E2EContext) -> Path | None:
 
 
 def f13_cli_health_flags(ctx: E2EContext) -> bool:
-    """Opt-in HIBP flags on the CLI ``health`` command (a separate surface)."""
+    """Opt-in HIBP surface on ``personal health`` (a separate CLI surface).
 
-    help_text = cli_help(ctx)
-    return "--check-breached" in help_text or "--hibp-endpoint" in help_text
+    The landed contract is the strict literal pair ``--hibp true`` (``--hibp
+    false``, ``--check-breached`` and ``--hibp-endpoint`` are all refused).
+    This only looks for the advertised option; whether the opted-in run really
+    reaches the range client is decided by :func:`f13_cli_hibp_opt_in`
+    against the real binary.
+    """
+
+    # Read every help surface and match the literal option pair.  `personal
+    # help` and `personal health --help` are read as text without requiring
+    # exit 0: this probe only locates the advertised pair, while behaviour is
+    # asserted by :func:`f13_cli_hibp_opt_in` on the real binary.
+    help_text = [cli_help(ctx)]
+    for surface in (
+        ["personal", "help"],
+        ["personal", "health", "--help"],
+        ["personal", "health"],
+    ):
+        result = ctx.run_cli(surface)
+        help_text.append(result.stdout + "\n" + result.stderr)
+    return any("--hibp true" in chunk for chunk in help_text)
+
+
+def f13_cli_hibp_opt_in(ctx: E2EContext, vault: dict[str, Any]) -> dict[str, Any]:
+    """Exercise the real ``personal health --hibp true`` opt-in contract.
+
+    Everything happens on the synthetic vault through the compiled CLI and the
+    hidden NETWORK consent.  Returns the observations the caller asserts on;
+    no HIBP endpoint is contacted:
+
+    - ``flags``: the option pair is advertised by the ``personal`` help
+      surfaces;
+    - ``bad_pair_refused``: free-form spellings (``--hibp false``,
+      ``--hibp endpoint``) are rejected with the fixed usage refusal before any
+      prompt;
+    - ``declined_refused``: a wrong NETWORK consent exits non-zero with the
+      fixed cancellation message and no stdio receipt;
+    - ``intent_actions``: every audit action observed around the refusal, so
+      the caller can prove no ``vault.health.hibp`` intent was written and no
+      unlock happened.
+    """
+
+    path = str(vault["path"])
+    flags = f13_cli_health_flags(ctx)
+    bad_pairs = [
+        ctx.run_cli(["personal", "health", "--file", path, "--hibp", value])
+        for value in ("false", "endpoint")
+    ]
+    before = audit_events(ctx, vault)
+    # Interactive commands default to a 20s PTY timeout; a full vault unlock on
+    # a slower machine must not turn a real refusal into a timeout error.
+    declined = pty(
+        ctx,
+        ["personal", "health", "--file", path, "--hibp", "true"],
+        password=vault["password"],
+        secret=vault["secret"],
+        extra=[(HIBP_NETWORK_PROMPT, "DECLINE")],
+        timeout=180,
+    )
+    after = audit_events(ctx, vault)
+    return {
+        "flags": flags,
+        "bad_pair_refused": all(
+            result.returncode != 0
+            and "usage: locklark personal" in result.stderr
+            for result in bad_pairs
+        ),
+        "declined_refused": declined.returncode != 0 and not declined.stdout.strip(),
+        "intent_actions": [
+            event.get("action") for event in [*before, *after]
+        ],
+    }
+
+
+# The hidden consent prompt emitted by ``personal health --hibp true`` before
+# any unlock or network access (cmd/locklark/personal_health_hibp.go).
+HIBP_NETWORK_PROMPT = "输入 NETWORK 确认联网查询泄露前缀"
+
+
+def card_fill_page_load_component(
+    ctx: E2EContext, core_path: Path | None = None
+) -> dict[str, Any] | None:
+    """Execute the shipped card fill against a synthetic, unactivated page.
+
+    T2_F11_05 asks whether credit-card fields can ever be filled on page load
+    without a gesture.  The shipped artifact is two layers: ``content.js`` runs
+    on every HTTPS page at ``document_start`` (no fill entrypoint there), and
+    ``core.fillCardDocument`` is the sandboxed function the extension injects
+    only after a trusted user gesture (``isTrusted``) and native approval have
+    produced a short-lived ``expiresAt`` intent.
+
+    This runs the *built* bundle's ``core.js`` in a W3C-shaped synthetic
+    checkout page (one card form, no user activation, no extension runtime).
+    It reports whether a fill happened while the page was merely loading, and
+    which non-gesture invocations (expired/stale intent, wrong origin, wrong
+    category, cross-origin frame) the shipped function refuses.  Returns
+    ``None`` when no built bundle carries the entrypoint.
+    """
+
+    node = shutil.which("node")
+    if node is None:
+        raise AssertionError("node is required for extension E2E checks")
+    candidates = (
+        [Path(core_path)]
+        if core_path is not None
+        else [directory / "core.js" for directory in built_extension(ctx)]
+    )
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        script = ctx.temp_dir / "gesture_only_card_fill.cjs"
+        script.write_text(_PAGE_LOAD_FILL_HARNESS, encoding="utf-8")
+        result = ctx.run_cli(
+            [str(script), str(candidate)],
+            binary=node,
+            cwd=ctx.repo_root,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            raise AssertionError(
+                f"gesture-only card fill harness failed (rc={result.returncode}):\n"
+                f"{result.stdout[-2000:]}\n{result.stderr[-2000:]}"
+            )
+        return json.loads(result.stdout)
+    return None
+
+
+_PAGE_LOAD_FILL_HARNESS = r"""
+"use strict";
+// Synthetic W3C-shaped checkout page: one card form, no user activation.
+const vm = require("node:vm");
+const core = require(process.argv[2]);
+const events = [];
+class Target {
+  constructor() { this.listeners = {}; }
+  addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
+  dispatchEvent(event) {
+    for (const fn of this.listeners[event.type] || []) fn(event);
+    return true;
+  }
+}
+class Element extends Target {
+  constructor(tag, attrs) {
+    super();
+    this.tagName = tag;
+    this.attrs = attrs;
+    this.isConnected = true;
+    this.disabled = false;
+    this.readOnly = false;
+    this.hidden = false;
+    this._value = "";
+  }
+  getAttribute(name) {
+    return Object.hasOwn(this.attrs, name) ? this.attrs[name] : null;
+  }
+  hasAttribute(name) { return Object.hasOwn(this.attrs, name); }
+  matches() { return false; }
+  closest() { return null; }
+  getRootNode() { return this.ownerDocument; }
+  getBoundingClientRect() { return { width: 240, height: 28 }; }
+  getClientRects() { return [{}]; }
+  focus() {}
+  get labels() { return []; }
+}
+class HtmlInput extends Element {
+  constructor(attrs) {
+    super("INPUT", attrs);
+    this.type = attrs.type || "text";
+    this.name = attrs.name || "";
+    this.id = attrs.id || "";
+    this.placeholder = attrs.placeholder || "";
+    this.autocomplete = attrs.autocomplete || "";
+    this.maxLength = Number(attrs.maxlength || -1);
+  }
+}
+Object.defineProperty(HtmlInput.prototype, "value", {
+  get() { return this._value; },
+  set(value) {
+    this._value = String(value);
+    if (this._touched) events.push(this.id);
+  },
+});
+const form = new Target();
+const controls = [
+  new HtmlInput({ id: "holder", autocomplete: "cc-name", "aria-label": "Cardholder" }),
+  new HtmlInput({ id: "number", autocomplete: "cc-number", type: "tel", placeholder: "1234 5678 9012 3456" }),
+  new HtmlInput({ id: "exp", autocomplete: "cc-exp", maxlength: "5", placeholder: "MM/YY" }),
+  new HtmlInput({ id: "csc", autocomplete: "cc-csc", "aria-label": "Security code" }),
+];
+for (const control of controls) control.form = form;
+form.querySelectorAll = (selector) =>
+  selector === 'input[type="password"]' ? [] : controls.slice();
+const documentElement = new Target();
+const document = new Target();
+Object.assign(document, {
+  documentElement,
+  baseURI: "https://shop.example.test/pay",
+  querySelectorAll: () => controls.slice(),
+  querySelector: () => controls[0],
+  getElementById: (id) => controls.find((c) => c.id === id) || null,
+});
+for (const control of controls) control.ownerDocument = document;
+const location = {
+  origin: "https://shop.example.test",
+  protocol: "https:",
+  href: "https://shop.example.test/pay",
+};
+const clock = 1_700_000_000_000;
+const context = {
+  document, location, Event, URL,
+  getComputedStyle: () => ({ display: "block", visibility: "visible", opacity: "1" }),
+  CSS: { escape: (value) => String(value) },
+  Element, HTMLInputElement: HtmlInput,
+  Date: { now: () => clock },
+  performance: { timeOrigin: 1, now: () => 50 },
+  console: {},
+};
+context.window = context;
+context.top = context;
+const fill = vm.runInNewContext(
+  "(" + core.fillCardDocument.toString() + ")",
+  context,
+);
+const values = () => controls.map((control) => control.value);
+// The document load completes.  A page-load fill would have to run by itself,
+// so every value write from here on is recorded.
+for (const control of controls) control._touched = true;
+document.dispatchEvent({ type: "DOMContentLoaded" });
+new Target().dispatchEvent({ type: "load" });
+const data = {
+  cardholder_name: "Ada Lovelace",
+  number: "4242424242424242",
+  exp: "12/29",
+  cvv: "123",
+};
+const afterLoad = values();
+const rejected = {};
+const afterRejects = {};
+const rejects = {
+  expired: () => [location.origin, data, clock - 1, false, "credit_card"],
+  stale_window: () => [location.origin, data, clock + 60000, false, "credit_card"],
+  wrong_origin: () => ["https://evil.example.test", data, clock + 1500, false, "credit_card"],
+  wrong_category: () => [location.origin, data, clock + 1500, false, "identity"],
+};
+for (const [name, args] of Object.entries(rejects)) {
+  rejected[name] = fill(...args());
+  afterRejects[name] = values();
+}
+const beforeGesture = values();
+const gesture = fill(location.origin, data, clock + 1500, false, "credit_card");
+process.stdout.write(JSON.stringify({
+  afterLoad,
+  afterRejects,
+  rejects: rejected,
+  beforeGesture,
+  gesture,
+  written: events.slice(),
+  values: values(),
+}));
+"""
 
 
 def f13_hibp_client_ready(ctx: E2EContext) -> bool:
@@ -1569,6 +1834,9 @@ class TrapListener:
 
 
 __all__ = [
+    "HIBP_NETWORK_PROMPT",
+    "card_fill_page_load_component",
+    "f13_cli_hibp_opt_in",
     "HEX32_RE",
     "F14_REQUIRED_PROFILES",
     "HEX32_RE",

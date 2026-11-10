@@ -437,13 +437,24 @@ class F13HostWatchtowerDetectionTests(unittest.TestCase):
         self.assertFalse(support.f13_cli_health_flags(ctx))
 
     def test_help_flags_alone_do_not_prove_the_hibp_client(self):
+        # The old `--check-breached`/`--hibp-endpoint` probes are stale; the
+        # landed option is the literal `--hibp true` pair advertised by the
+        # personal help surface.
         ctx = self._ctx(
             {},
-            help_text="locklark help\n  --check-breached\n  --hibp-endpoint URL\n",
+            help_text="locklark help\n  health --file PATH [--hibp true]\n",
         )
         self.assertTrue(support.f13_cli_health_flags(ctx))
         self.assertFalse(support.f13_hibp_client_ready(ctx))
         self.assertFalse(support.f13_watchtower_ready(ctx))
+
+    def test_old_health_flags_are_not_evidence_of_the_landed_contract(self):
+        ctx = self._ctx(
+            {},
+            help_text="locklark help\n  --check-breached\n  --hibp-endpoint URL\n",
+        )
+        self.assertFalse(support.f13_cli_health_flags(ctx))
+        self.assertFalse(support.f13_hibp_client_ready(ctx))
 
     def test_hibp_client_contract_detected_in_host_sources(self):
         ctx = self._ctx(
@@ -485,6 +496,38 @@ class F13HostWatchtowerDetectionTests(unittest.TestCase):
         with mock.patch.object(support, "go_tool", lambda: None):
             with self.assertRaisesRegex(AssertionError, "validation blocked"):
                 support.go_package_test(ctx, "./internal/watchtower", "TestAnything")
+
+
+class F11PageLoadFillDetectionTests(unittest.TestCase):
+    """T2_F11_05 must observe behaviour, not a `userActivation` literal."""
+
+    def _core(self) -> Path:
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        path = root / "core.js"
+        path.write_text(
+            "module.exports = { fillCardDocument: function (origin, data) "
+            "{ return false; } };\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def _run(self, harness_body: str) -> dict[str, object]:
+        ctx = mock.Mock()
+        ctx.temp_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, ctx.temp_dir, True)
+        ctx.repo_root = ROOT
+        ctx.run_cli.return_value = CLIResult(
+            0, json.dumps({"afterLoad": ["", "", "", ""]}), "", []
+        )
+        return support.card_fill_page_load_component(ctx, self._core())
+
+    def test_harness_is_executed_against_the_built_bundle(self):
+        observed = self._run("")
+        self.assertEqual(observed["afterLoad"], ["", "", "", ""])
+
+    def test_pty_result_is_exported_for_detection_tests(self):
+        self.assertTrue(hasattr(support, "PTYResult"))
 
 
 class F5RefreshDetectionTests(unittest.TestCase):

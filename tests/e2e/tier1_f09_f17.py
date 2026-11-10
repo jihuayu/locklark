@@ -23,6 +23,7 @@ from .support import (
     f10_popup_vault_ready,
     f11_fill_contract_ready,
     f12_parity_doc,
+    f13_cli_hibp_opt_in,
     f13_hibp_client_ready,
     f13_watchtower_ready,
     go_package_test,
@@ -418,14 +419,15 @@ def t1_f13_01(ctx):
 )
 def t1_f13_02(ctx):
     # Local health categories ship in internal/watchtower and are surfaced by
-    # the desktop dashboard/popup banner.  The CLI health command has no opt-in
-    # HIBP flags; that is a different surface, not missing Watchtower analysis.
+    # the desktop dashboard/popup banner.  The CLI's opt-in network surface
+    # (``personal health --hibp true``) is a different surface, not missing
+    # Watchtower analysis.
     ready = f13_watchtower_ready(ctx)
     gate(
         ctx,
         "F13",
         ready,
-        "host Watchtower unsecured-HTTP/missing-2FA analysis is absent (CLI health flags are a separate command surface)",
+        "host Watchtower unsecured-HTTP/missing-2FA analysis is absent (the CLI --hibp opt-in is a separate command surface)",
     )
     if go_tool() is None:
         gate(
@@ -453,8 +455,8 @@ def t1_f13_02(ctx):
 def t1_f13_03(ctx):
     # Component-level evidence: the host range client is executed against its
     # bundled httptest server, so only the five-hex prefix leaves the process.
-    # A live api.pwnedpasswords.com round trip is NOT exercised offline; that
-    # residual end-to-end validation stays blocked rather than being claimed.
+    # The CLI opt-in contract is additionally exercised against the synthetic
+    # vault (declined consent, strict option pair) by the code after the gate.
     ready = f13_hibp_client_ready(ctx)
     gate(
         ctx,
@@ -469,6 +471,24 @@ def t1_f13_03(ctx):
             False,
             "validation blocked: go toolchain unavailable; HIBP client component test not executed",
         )
+    vault = make_vault(ctx, ["Breach Probe"])
+    opt_in = f13_cli_hibp_opt_in(ctx, vault)
+    gate(
+        ctx,
+        "F13",
+        opt_in["flags"],
+        "`personal health` does not advertise the `--hibp true` opt-in",
+    )
+    # A refused option pair and a declined consent must both stop before any
+    # unlock or vault.health.hibp intent, on the real compiled CLI.
+    assert opt_in["bad_pair_refused"], (
+        "personal health accepted a non-literal --hibp option pair: "
+        f"{opt_in}"
+    )
+    assert opt_in["declined_refused"], (
+        f"a wrong NETWORK consent was not refused: {opt_in}"
+    )
+    assert "vault.health.hibp" not in opt_in["intent_actions"], opt_in
     counts = go_package_test(
         ctx,
         "./internal/watchtower",

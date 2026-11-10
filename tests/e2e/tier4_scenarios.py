@@ -20,7 +20,7 @@ from .support import (
     f10_popup_vault_ready,
     f11_identity_ready,
     f12_parity_doc,
-    f13_cli_health_flags,
+    f13_cli_hibp_opt_in,
     f13_watchtower_ready,
     f14_cli_profiles_ready,
     f15_run_bundle_ready,
@@ -39,6 +39,7 @@ from .support import (
     init_vault,
     list_rows,
     make_vault,
+    match_logins,
     multi_category_1pux,
     pty,
 )
@@ -48,9 +49,18 @@ from .support import (
     "T4_01",
     4,
     ["F2", "F6", "F8", "F10", "F13", "F14", "F15", "F16"],
-    "Capability probe (CLI segment only): 1PUX v2 import -> health -> CLI wrappers",
+    "Capability probe (CLI segment only): 1PUX v2 import -> search -> reveal -> export",
 )
 def t4_01(ctx):
+    import_ready = cli_supports(ctx, "plan-import-1pux") and cli_supports(
+        ctx, "import-1pux"
+    )
+    gate(
+        ctx,
+        "F6",
+        import_ready,
+        "`personal plan-import-1pux`/`import-1pux` are not advertised by the CLI",
+    )
     vault = make_vault(ctx, ["GitHub", "AWS"])
     archive = multi_category_1pux(ctx)
     plan = pty(
@@ -69,26 +79,81 @@ def t4_01(ctx):
         secret=vault["secret"],
         extra=[("输入 PLAN 确认生成导入计划", "PLAN")],
     )
-    health_report(ctx, vault)
-    ready = plan.returncode == 0 and cli_supports(ctx, "add-item")
-    gate(
+    assert plan.returncode == 0, plan.transcript[-1200:]
+    report = plan.json()["report"]
+    assert report["items"] >= 4, report
+    assert report["profile"] == "1pux-full-v2", report
+    digest = report["source_digest"]
+    _import_multi(ctx, vault, archive, digest)
+
+    # Search reaches the imported login by title only.
+    found = pty(
         ctx,
-        "F6",
-        ready,
-        "CLI plan-import-1pux rejects non-basic-login archives and the CLI has no "
-        "add-item surface; the v2 item model exists in the desktop/browser host, "
-        "so the whole migration journey is blocked on the CLI command surface",
+        ["personal", "search", "--file", str(vault["path"])],
+        password=vault["password"],
+        secret=vault["secret"],
+        extra=[("搜索标题（隐藏输入）", "Corp SSO")],
     )
-    assert plan.json()["report"]["items"] >= 4
-    _import_multi(ctx, vault, archive, plan.json()["report"]["source_digest"])
-    assert f14_cli_profiles_ready(ctx)
-    ctx.require_feature(
-        "F6",
-        False,
-        "FEATURE_NOT_YET_LANDED: F6 - coverage bound: this capability probe executes only "
-        "the CLI 1PUX/health segment; browser fill and the desktop GUI journey are not "
-        "executed here, so the whole migration is not credited as functional",
+    assert found.returncode == 0, found.transcript[-800:]
+    rows = found.json()["rows"]
+    assert [row["title"] for row in rows] == ["Corp SSO"], rows
+    imported_id = rows[0]["id"]
+    imported_revision = rows[0]["revision"]
+
+    # The native origin match surfaces the same item for its imported URL.
+    matched = match_logins(ctx, vault, "https://sso.corp.example.test")
+    matched_ids = [row["id"] for row in matched]
+    assert imported_id in matched_ids, matched
+
+    # Controlled disclosure: the imported password leaves only through the
+    # explicit SHOW consent.  The receipt proves the terminal write and no
+    # secret may reach stdout, search rows or match rows.
+    revealed = pty(
+        ctx,
+        [
+            "personal",
+            "reveal-login",
+            "--file",
+            str(vault["path"]),
+            "--id",
+            imported_id,
+            "--revision",
+            imported_revision,
+            "--field",
+            "password",
+        ],
+        password=vault["password"],
+        secret=vault["secret"],
+        extra=[("输入 SHOW 确认显示", "SHOW")],
+        timeout=180,
     )
+    assert revealed.returncode == 0, revealed.transcript[-800:]
+    assert revealed.json().get("status") == "written-to-terminal", revealed.stdout[:200]
+    for canary in ("P@ssw0rd-2026", vault["secret"]):
+        ctx.assert_no_canary_leak(
+            canary, revealed.stdout, found.stdout, matched, json.dumps(plan.json())
+        )
+
+    # Export: an authenticated KDBX of the migrated vault.
+    exported = ctx.temp_dir / "migrated.kdbx"
+    export = pty(
+        ctx,
+        ["personal", "export-kdbx", "--file", str(vault["path"]), "--out", str(exported)],
+        password=vault["password"],
+        secret=vault["secret"],
+        extra=[
+            ("新导出密码（至少 12 字符）", "export-pass-2026"),
+            ("再次输入导出密码", "export-pass-2026"),
+            ("输入 SAVE 确认加密导出", "SAVE"),
+        ],
+    )
+    assert export.returncode == 0, export.transcript[-1200:]
+    assert exported.is_file() and exported.stat().st_size > 0
+    assert exported.read_bytes()[:8] == b"\x03\xd9\xa2\x9ag\xfbK\xb5", (
+        "unexpected KDBX signature"
+    )
+    for canary in ("Corp SSO", "P@ssw0rd-2026", vault["secret"]):
+        ctx.assert_no_canary_leak(canary, exported.read_bytes())
 
 
 def _import_multi(ctx, vault, archive, digest):
@@ -111,6 +176,7 @@ def _import_multi(ctx, vault, archive, digest):
         extra=[("输入 SAVE 确认整批导入", "SAVE")],
     )
     assert result.returncode == 0, result.transcript[-1200:]
+    assert result.json().get("status") == "imported-1pux-full-v2", result.stdout[:400]
 
 
 @e2e_test(
@@ -208,18 +274,36 @@ def t4_06(ctx):
         ready,
         "host Watchtower service or inline generator remediation is absent",
     )
-    # The breach-to-rotation journey needs an opt-in HIBP run.  The host range
-    # client exists, but CLI health exposes no opt-in HIBP flags and no live
-    # api.pwnedpasswords.com round trip is exercised offline, so this end-to-end
-    # validation stays blocked instead of claiming breach detection is absent.
+    # The breach-to-rotation journey needs the opt-in HIBP run on the CLI.
+    # Observe the real CLI contract: the strict `--hibp true` pair is refused
+    # for any other spelling, and the local (offline) report still executes.
+    opt_in = f13_cli_hibp_opt_in(ctx, vault)
     gate(
         ctx,
         "F13",
-        f13_cli_health_flags(ctx),
-        "breach-to-rotation journey blocked: no opt-in HIBP flags on CLI health "
-        "and no live HIBP egress exercised offline (host HIBP client exists)",
+        opt_in["flags"],
+        "`personal health` does not advertise the `--hibp true` opt-in",
     )
+    assert opt_in["bad_pair_refused"], (
+        "a non-literal --hibp option pair was accepted by `personal health`"
+    )
+    assert opt_in["declined_refused"], (
+        "a declined NETWORK consent still ran the opted-in check"
+    )
+    assert "vault.health.hibp" not in opt_in["intent_actions"], opt_in
     health_report(ctx, vault)
+    # The breach -> rotation -> stale-refusal -> refresh journey still needs a
+    # reachable range server: the CLI hard-codes the production endpoint and
+    # exposes no endpoint/proxy/client hook, so the synthetic breach match, the
+    # browser rotation and the CLI lease refresh cannot be exercised against a
+    # local mock here.  This stays an explicit not-verified result.
+    raise AssertionError(
+        "UNVERIFIED (not a pass): breach-to-rotation journey not exercised - "
+        "the CLI HIBP opt-in contract (strict pair, consent refusal, no intent) "
+        "was validated, but the range lookup cannot be routed to a local mock "
+        "and no live network query is made, so the synthetic breach -> browser "
+        "rotation -> stale CLI refusal -> refresh path remains unvalidated"
+    )
 
 
 @e2e_test(
