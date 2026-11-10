@@ -78,8 +78,9 @@ func Domains() []string {
 	}
 }
 
-// DomainSeparated computes SHA-256 over domain || 0x00 || data. This is a
-// fingerprint for identification only; it is not a signature and grants no
+// DomainSeparated computes the v1 domain-separated SHA-256 digest over
+// domain || 0x00 || data. It backs RevisionID, FileDigest and PolicyDigest as
+// well as key fingerprints. It is not a signature and does not establish
 // trust. Callers must use it with a label from this package.
 func DomainSeparated(domain string, data []byte) []byte {
 	h := sha256.New()

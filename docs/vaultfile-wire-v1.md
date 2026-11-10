@@ -30,7 +30,15 @@ covered through `content_signature`, which commits to the derived revision id
 | MIME type       | `application/vnd.locklark.vault-file+json`            |
 | `content_encoding` | `kdbx`                                             |
 
-Every domain-separation label is prefixed with `locklark.vault-file/v1/`.
+Domain-separation labels are the constant strings defined in
+`pkg/vaultfile/domain.go`. None of them starts with `/`: every label begins
+with `locklark.vault-file/v1/`, and `DomainSeparated` hashes
+`domain || 0x00 || data` with no separator between the domain and the NUL.
+
+The entries below are listed by their suffix only, for brevity. The leading `/`
+in an entry is suffix shorthand and is **never** part of the label bytes: the
+label for `/revision` is exactly `locklark.vault-file/v1/revision`, not
+`/locklark.vault-file/v1/revision`.
 
 Purpose domains (each prefixes exactly one preimage, followed by `0x00`):
 
@@ -225,7 +233,7 @@ implementation must omit the member too; an omitted member and an empty
 member are different bytes and different hashes.
 
 ```
-RevisionID(f) = SHA-256( "/locklark.vault-file/v1/revision" || 0x00
+RevisionID(f) = SHA-256( "locklark.vault-file/v1/revision" || 0x00
                          || canonical file
                             without header.revision_id
                             without content_signature )
@@ -247,12 +255,12 @@ ContentSigningBytes(f) = canonical file
 
 `header.revision_id` is present and names the derived revision.
 `content_signature` is removed entirely. The signer signs
-`"/locklark.vault-file/v1/content-signature" || 0x00 || ContentSigningBytes(f)`.
+`"locklark.vault-file/v1/content-signature" || 0x00 || ContentSigningBytes(f)`.
 The preimage is the same for the builder draft and for the sealed file, so the
 header is covered through the revision id without a second signature.
 
 ```
-FileDigest(f) = SHA-256( "/locklark.vault-file/v1/file-digest" || 0x00
+FileDigest(f) = SHA-256( "locklark.vault-file/v1/file-digest" || 0x00
                          || EncodeFile(f) )
 ```
 
