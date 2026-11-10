@@ -94,6 +94,12 @@ func seal(b *bolt.Bucket, i identity, epoch uint64, items []vault.Item) (vault.S
 	signer := ed25519.NewKeyFromSeed(i.Signing)
 	defer clear(signer)
 	s, e := vault.SealItems([]byte(schema), items, epoch, []*age.X25519Recipient{id.Recipient()}, signer)
+	if errors.Is(e, vault.ErrSnapshotCapacity) {
+		// The items validated but their encoded KDBX exceeds the stored bound.
+		// Return a stable user-facing capacity refusal instead of the generic
+		// invalid-snapshot text; the surrounding transaction rolls back.
+		return s, ErrSnapshotCapacity
+	}
 	if e != nil {
 		return s, e
 	}
@@ -579,6 +585,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 	}
 	var out result
 	var refusal error
+	var capacity bool
 	var auditCandidate *auditCache
 	e := update(func(tx *bolt.Tx) (err error) {
 		auth, e := authenticateState(tx, pw, key, action, option.unlocked)
@@ -766,7 +773,16 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 				return e
 			}
 			if action == importAction {
-				s, e = seal(b, i, s.Epoch+1, append(items, mapped.Items...))
+				sealed, sealErr := seal(b, i, s.Epoch+1, append(items, mapped.Items...))
+				if errors.Is(sealErr, ErrSnapshotCapacity) {
+					// The mapped items fit the plaintext schema but their
+					// snapshot does not fit; nothing was written. Keep the
+					// transaction going so the linked limit/refusal audit is
+					// recorded like every other import refusal.
+					outcome, refusal = "limit", ErrImportCapacity
+					break
+				}
+				s, e = sealed, sealErr
 				if e != nil {
 					return e
 				}
@@ -789,6 +805,14 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			}
 		case exportAction:
 			out.archive, e = vault.ExportKDBX(items, option.export.password)
+			if errors.Is(e, vault.ErrSnapshotCapacity) {
+				// The export shares the stored bound but encodes a wider
+				// artifact, so it can refuse a vault that fits. Keep the
+				// transaction going to journal the signed intent, then report
+				// the capacity refusal so no file is published.
+				out.archive, e = nil, nil
+				capacity = true
+			}
 			if e != nil {
 				return e
 			}
@@ -1707,6 +1731,9 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 			out.events = append(rows, ev)
 		} else if (editAction(action) || browserSaveAction(action) || action == "item.generate" || action == "item.add" || action == v2AddAction || action == sshGenerateAction || action == sshImportAction) && refusal == nil {
 			out.revision = ev.hash()
+		}
+		if capacity {
+			return ErrSnapshotCapacity
 		}
 		return nil
 	})

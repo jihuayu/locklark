@@ -192,6 +192,8 @@ func message(e error) string {
 		return mutationUnknownStatus
 	case errors.Is(e, personal.ErrMutationCancelled):
 		return "操作已取消，未开始写入"
+	case errors.Is(e, personal.ErrSnapshotCapacity), errors.Is(e, personal.ErrImportCapacity):
+		return capacityStatus
 	case errors.Is(e, personal.ErrMutationRefused):
 		return "输入不符合保存要求；未保存"
 	case errors.Is(e, personal.ErrOTPNotConfigured):

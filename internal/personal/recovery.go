@@ -512,6 +512,11 @@ func initializeRecovered(b *bolt.Bucket, i identity, p *payload) error {
 		return e
 	}
 	s, e := seal(b, i, p.Epoch+1, p.Items)
+	if errors.Is(e, ErrSnapshotCapacity) {
+		// A valid backup can still be larger than the stored snapshot bound.
+		// Report capacity, not corruption.
+		return ErrArchiveLimit
+	}
 	if e != nil {
 		return e
 	}

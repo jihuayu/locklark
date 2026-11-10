@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"testing"
 
 	"filippo.io/age"
@@ -93,5 +94,33 @@ func clearJoined(items []Item) {
 		for m := range items[n].Attachments {
 			clear(items[n].Attachments[m].Content)
 		}
+	}
+}
+
+// A schema-valid item whose encoded KDBX exceeds the stored bound must fail
+// at the size check with the distinct capacity error, not the generic
+// invalid/corrupt ErrSnapshot, for both write and export paths.
+func TestSnapshotCapacityBeyondStoredBoundIsDistinct(t *testing.T) {
+	item := syntheticCapacityItem()
+	if err := ValidateItems(nil, []Item{item}); err != nil {
+		t.Fatalf("capacity fixture is not schema-valid: %v", err)
+	}
+	_, signer, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := SealItems(nil, []Item{item}, 1, []*age.X25519Recipient{id.Recipient()}, signer)
+	if !errors.Is(err, ErrSnapshotCapacity) || errors.Is(err, ErrSnapshot) {
+		t.Fatalf("SealItems = %v, want only ErrSnapshotCapacity", err)
+	}
+	if len(s.Database) != 0 || len(s.Signature) != 0 {
+		t.Fatal("refused seal returned snapshot material")
+	}
+	if _, err := ExportKDBX([]Item{item}, "synthetic-export-password"); !errors.Is(err, ErrSnapshotCapacity) || errors.Is(err, ErrSnapshot) {
+		t.Fatalf("ExportKDBX = %v, want only ErrSnapshotCapacity", err)
 	}
 }

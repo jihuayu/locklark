@@ -195,7 +195,7 @@ func (s *Session) saveBrowser(t BrowserSaveTarget, user, password []byte, g *Bro
 		s.lock()
 	}
 	active := s.active(false) == nil
-	if g.CommitWon() && (!active || e != nil && !errors.Is(e, ErrBrowserSaveRefused) && !errors.Is(e, ErrConflict) && !errors.Is(e, ErrNotFound)) {
+	if g.CommitWon() && (!active || e != nil && !errors.Is(e, ErrBrowserSaveRefused) && !errors.Is(e, ErrConflict) && !errors.Is(e, ErrNotFound) && !errors.Is(e, ErrSnapshotCapacity)) {
 		return BrowserSaveReceipt{}, ErrBrowserSaveUnknown
 	}
 	if !active {

@@ -36,6 +36,13 @@ const maxStoredSnapshot = 30 << 20
 
 var ErrSnapshot = errors.New("invalid or unexpected snapshot")
 
+// ErrSnapshotCapacity marks a write or export whose encoded KDBX artifact
+// exceeds MaxStoredSnapshot() even though the plaintext items passed
+// ValidateItems. It is deliberately distinct from ErrSnapshot so callers can
+// report a capacity-specific message; malformed or corrupt snapshots stay
+// ErrSnapshot. The text is user-facing and safe to show.
+var ErrSnapshotCapacity = errors.New("vault exceeds its stored snapshot capacity; remove or shrink large items and attachments")
+
 // The signature binds both exact artifacts and their epoch before any KDBX
 // header is parsed. The caller supplies the independently pinned public key.
 func (s Snapshot) signed() []byte {
@@ -98,7 +105,8 @@ func seal(payload []byte, items []Item, epoch uint64, recipients []*age.X25519Re
 		return Snapshot{}, err
 	}
 	if data.Len() > maxStoredSnapshot {
-		return Snapshot{}, ErrSnapshot
+		clear(data.Bytes())
+		return Snapshot{}, ErrSnapshotCapacity
 	}
 	w, err := age.Encrypt(&env, allowed...)
 	if err != nil {

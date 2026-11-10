@@ -15,7 +15,33 @@ const importPlanAction = "migration.plan.1pux"
 const importAction = "migration.import.1pux"
 
 var ErrImportChanged = errors.New("1PUX source changed since the confirmed plan")
+
+// ErrImportCapacity reports that the mapped 1PUX batch is schema-valid but
+// would push the stored snapshot over its size ceiling; nothing is imported.
+var ErrImportCapacity error = errImportCapacity{}
+
+type errImportCapacity struct{}
+
+func (errImportCapacity) Error() string {
+	return "1PUX batch exceeds vault capacity; no items imported"
+}
+func (errImportCapacity) Unwrap() error { return ErrSnapshotCapacity }
+
 var ErrImportDuplicate = errors.New("1PUX source item already exists; no items imported")
+
+// ErrSnapshotCapacity reports that a mutation or export passed item validation
+// but its encrypted snapshot would exceed the vault's stored-size ceiling:
+// "vault capacity exceeded; remove or shrink large items/attachments; nothing
+// was saved". It is errors.Is-compatible with itself across the personal API
+// and is distinct from invalid/corrupt snapshot failures.
+var ErrSnapshotCapacity error = errSnapshotCapacity{}
+
+type errSnapshotCapacity struct{}
+
+func (errSnapshotCapacity) Error() string {
+	return "vault capacity exceeded; remove or shrink large items/attachments; nothing was saved"
+}
+func (errSnapshotCapacity) Unwrap() error { return vault.ErrSnapshotCapacity }
 
 type ImportReceipt struct {
 	Status       string               `json:"status"`

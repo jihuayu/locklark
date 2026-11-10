@@ -12,6 +12,10 @@ import (
 
 const mutationUnknownStatus = "有一项操作结果未确认，请在金库核实，勿重复该操作"
 
+// capacityStatus reports a schema-valid write whose encrypted snapshot would
+// exceed the stored vault size. The vault stays unlocked and unchanged.
+const capacityStatus = "金库容量已满，无法保存：此条目加密后超过金库存储上限。请删除或缩小大型条目/附件后重试；原金库未更改"
+
 type nativeOperation struct {
 	gate       *personal.MutationGate
 	generation uint64
