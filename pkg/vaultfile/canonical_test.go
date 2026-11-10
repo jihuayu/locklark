@@ -106,6 +106,33 @@ func TestParsePolicyDocumentRequiresCanonicalBytes(t *testing.T) {
 	}
 }
 
+// corruptLabel returns in with one raw 0xff byte spliced into its first
+// string value. The byte is not a \u escape, so the input is not valid UTF-8;
+// encoding/json would otherwise replace it with U+FFFD and let it through.
+func corruptLabel(t *testing.T, in []byte) []byte {
+	t.Helper()
+	s := string(in)
+	i := strings.Index(s, "\"vault-0")
+	if i < 0 {
+		t.Fatal("fixture has no vault-0 string")
+	}
+	i += len("\"vault-0")
+	return []byte(s[:i] + "\xff" + s[i:])
+}
+
+// Invalid UTF-8 is malformed JSON, not an alternate spelling: both public
+// parse entry points report invalid_json, never non_canonical. The equivalent
+// \u escape cases above remain valid JSON and are still non_canonical.
+func TestParseFileRejectsInvalidUTF8AsInvalidJSON(t *testing.T) {
+	_, err := ParseFile(corruptLabel(t, mustEncode(t)))
+	wantCode(t, err, CodeInvalidJSON)
+}
+
+func TestParsePolicyDocumentRejectsInvalidUTF8AsInvalidJSON(t *testing.T) {
+	_, err := ParsePolicyDocument(corruptLabel(t, mustEncodeDoc(t)))
+	wantCode(t, err, CodeInvalidJSON)
+}
+
 // A proof whose document member carries a non-canonical spelling of the
 // policy the proof also carries by value is rejected as non_canonical: SealFile
 // and ValidateFile reject it outright, and ParseFile rejects a file that

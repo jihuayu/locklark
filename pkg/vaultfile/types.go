@@ -240,6 +240,8 @@ const (
 	// CodeNonCanonical reports valid JSON that is not the byte-exact canonical
 	// encoding the canonical encoder produces for the same value. It is
 	// reported only after structural validation of the value succeeded.
+	// Input that is not valid UTF-8 is malformed JSON, not a spelling of it,
+	// and is reported as CodeInvalidJSON instead.
 	CodeNonCanonical = "non_canonical"
 )
 

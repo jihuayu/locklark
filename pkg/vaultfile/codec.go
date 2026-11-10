@@ -8,10 +8,14 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"unicode/utf8"
 )
 
 // The codec is strict on purpose:
 //   - the whole input must be exactly one complete object;
+//   - the whole input must be valid UTF-8: encoding/json would otherwise
+//     replace invalid bytes inside strings with U+FFFD, so this is checked
+//     before any token is decoded;
 //   - unknown and duplicate members are rejected at every depth;
 //   - nesting depth, array lengths, string lengths and byte lengths are
 //     limited before anything is decoded;
@@ -48,6 +52,9 @@ var fileMembers = []string{
 func ParseFile(data []byte) (*File, error) {
 	if len(data) > MaxFileBytes {
 		return nil, &Error{Code: CodeTooLarge, Path: ""}
+	}
+	if err := checkUTF8(data); err != nil {
+		return nil, err
 	}
 	v, err := decodeCanonical(data, fileMembers, MaxJSONDepth)
 	if err != nil {
@@ -203,6 +210,9 @@ func EncodePolicyDocument(p *Policy) ([]byte, error) {
 func ParsePolicyDocument(data []byte) (*Policy, error) {
 	if len(data) > MaxSignedPolicyProofBytes {
 		return nil, &Error{Code: CodeTooLarge}
+	}
+	if err := checkUTF8(data); err != nil {
+		return nil, err
 	}
 	v, err := decodeCanonical(data, []string{
 		"format", "version", "vault_id", "policy_seq", "prev_policy_digest",
@@ -480,6 +490,18 @@ const maxIntegerDigits = 20
 // reCanonicalString rejects numbers written as strings; numbers are only
 // accepted in bare JSON form.
 var reNumberString = regexp.MustCompile(`\A-?[0-9][0-9eE+.]*\z`)
+
+// checkUTF8 rejects input that is not valid UTF-8 as invalid JSON.
+// encoding/json substitutes U+FFFD for invalid bytes inside strings instead of
+// failing, which would otherwise reach structural validation as a well-formed
+// value of a different code, so every public parse entry point checks this
+// after its size limit and before decoding.
+func checkUTF8(data []byte) error {
+	if !utf8.Valid(data) {
+		return &Error{Code: CodeInvalidJSON}
+	}
+	return nil
+}
 
 // decodeCanonical parses data into a value tree. Numbers never arrive as
 // float64 (UseNumber), so precision is never silently lost.
