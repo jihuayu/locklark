@@ -237,7 +237,7 @@ func validItems(items []Item, size int) bool {
 				return false
 			}
 			atts[strings.ToLower(att.ID)] = true
-			if !charge(int(att.Size)) {
+			if !charge(int(att.Size) + len(att.ID) + len(att.FileName) + len(att.MIMEType) + len(att.SHA256)) {
 				return false
 			}
 		}

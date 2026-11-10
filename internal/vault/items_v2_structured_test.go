@@ -138,6 +138,13 @@ func TestItemV2StructuredDetailsMaxPayloadAccounting(t *testing.T) {
 		item := Item{ID: "history", Kind: "secure_note", Category: CategorySecureNote, Title: "history", History: []ItemHistoryEntry{h}}
 		assertMaxPayloadBoundary(t, item, len(item.ID)+len(item.Kind)+len(item.Title)+historyPayloadBytes(h))
 	})
+
+	t.Run("attachments", func(t *testing.T) {
+		content := []byte("synthetic attachment body")
+		att := AttachmentMeta{ID: "attachment-one", FileName: "fixture.bin", Size: int64(len(content)), MIMEType: "application/octet-stream", SHA256: AttachmentSHA256(content), Content: content}
+		item := Item{ID: "note", Kind: "secure_note", Category: CategorySecureNote, Title: "note", Attachments: []AttachmentMeta{att}}
+		assertMaxPayloadBoundary(t, item, len(item.ID)+len(item.Kind)+len(item.Title)+len(att.ID)+len(att.FileName)+len(att.MIMEType)+len(att.SHA256)+int(att.Size))
+	})
 }
 
 func TestItemV2StructuredDetailsExportRoundTrip(t *testing.T) {
