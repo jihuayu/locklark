@@ -16,7 +16,7 @@ Pinned official sources:
 ## 1. Published versions and pins
 
 Queried with `go list -m -versions` / `go mod download -json` against
-`proxy.golang.org` on 2026-09-24 (host clock). Latest published release line is
+`proxy.golang.org` on 2026-11-10 (host clock). Latest published release line is
 **v0.1.16** for both the binding and the companion service modules.
 
 | Module | Pinned version | `h1:` (go.sum) | License | Source / tag |
@@ -76,7 +76,7 @@ cd tools/opendal-spike
 ./run-memory.sh linux/arm64   # or linux/amd64
 ```
 
-Actual command result (2026-09-24, macOS 27.0.1 / Apple M2 Max, OrbStack Docker
+Actual command result (2026-11-10, macOS 27.0.1 / Apple M2 Max, OrbStack Docker
 running the official **linux/arm64** native library in `golang:1.24-trixie`):
 
 ```
@@ -103,24 +103,114 @@ Binding API notes found while writing it (v0.1.16):
   takes no options; the doc comment says recursion is unsupported), so the list
   check is single-level.
 - Capabilities are `Info().GetFullCapability()` / `GetNativeCapability()`.
-- `OperatorInfo.GetName()` returned non-reproducible garbage/dangling data
-  (`len` varied 10→14 across runs) because `Info()` frees the underlying
-  `opendal_operator_info` right after copying; the spike therefore does not call
-  `GetName()`. Scheme/root are stable.
+- `OperatorInfo.GetName()` is broken in v0.1.16: it returns a formatted pointer
+  string (e.g. `0xffff38…`) instead of the backend name, because the FFI wrapper
+  reads the returned pointer as a C string. Scheme/root are stable; the spike
+  does not rely on `GetName()`.
 
-## 3. Platform matrix (host = macOS arm64, no official darwin native library)
+## 3. Task 2 — failure, timeout, capability, error and cancellation boundaries
+
+Program: `tools/opendal-spike/cmd/probe`; runner: `tools/opendal-spike/run-probes.sh`.
+Every case runs in its own process (`timeout 25s`, `slow-uncancellable` 5s)
+because several cases intentionally panic or never return. Synthetic memory
+data only.
+
+Actual result summary (linux/arm64, `golang:1.24-trixie`, 2026-11-10):
+
+| Case | Exit | Observation |
+| --- | --- | --- |
+| `load-missing` | 0 | `NewOperator` → `/tmp/.../libopendal_c.so: cannot open shared object file: No such file or directory`; plain `error`, **not** `*opendal.Error` |
+| `load-corrupt` | 0 | → `/tmp/corrupt-libopendal.so: file too short`; plain error |
+| `load-tmpdir` | 0 | `opendal/services/memory: cannot create temp file: open /nonexistent-spike-tmp/...: no such file or directory` |
+| `timeout-invalid` | 0 | `WithTimeout(0,0)` → `timeout must be positive` at construction |
+| `info-name` | 0 | `GetName()` returned a 14-byte string like `0xffff38…` 50/50 times — a formatted pointer, **not** the backend name |
+| `capabilities` | 0 | full: stat/read/write/list/delete/create_dir/list_recursive=true, copy/rename/presign=false; native: create_dir=false; `Rename`/`PresignRead` → `CodeUnsupported (1)` |
+| `error-matrix` | 0 | read/stat missing → `CodeNotFound (3)`; read `dir/` → `CodeIsADirectory (5)`; delete missing → `nil`; rename missing → `CodeUnsupported (1)` (capability gate wins over path check); list missing dir → 0 entries, `nil` error |
+| `timeout-io` | 0 | `WithTimeout(1s, 1ns)`: 13 B and 8 MiB write/read all succeeded in 0.1–6 ms with `err=nil`; no timeout expiry observed |
+| `close-then-use` | **2** | `op.Close()` then `op.Read()` → `SIGSEGV: segmentation violation` in the FFI call |
+| `close-during-list` | **2** | `op.Close()` while another goroutine lists 2000 keys → `SIGSEGV` |
+| `slow-uncancellable` | **124** | loop writing 1 MiB objects; only the external `timeout 5s` stopped it |
+
+### Interpretation
+
+- **Native load failures are returned, not fatal**, but they are plain Go errors
+  from `dlopen`/temp-file creation, so callers must not assume
+  `errors.As(err, *opendal.Error)`. Companion `LoadOnce` caches the first error
+  in a `sync.Once`, so a failed load cannot be retried in-process.
+- **Timeout is configuration, not a cancellation primitive.** The layer is
+  accepted and validated, but with the in-memory backend every operation
+  finished far below even a 1 ns IO budget, so expiry was never observed.
+  The binding has **no per-call `context.Context`** (verified against
+  `reader.go`, `opendal.go` and the production guide): a blocked/long operation
+  cannot be cancelled in-process. The only proven bound is killing the process
+  (`slow-uncancellable` exit 124). Treat timeout expiry as unverified until a
+  slow but credential-free backend is introduced.
+- **Capability is honest for copy/rename/presign**, but full vs native disagree
+  on `create_dir` (compat layer emulates it). Check capabilities before optional
+  calls, and still handle `CodeUnsupported` because rename-on-missing surfaces
+  `Unsupported` before `NotFound`.
+- **Close is destructive and not concurrency-safe.** Using an operator after
+  `Close`, or closing while an operation is in flight, segfaults the whole
+  process (Go reports SIGSEGV, exit 2). Ownership must be single-goroutine:
+  quiesce all operations before `Close`, never share an operator across
+  independent lifetimes.
+- **`OperatorInfo.GetName()` is unusable in v0.1.16** (returns a hex pointer
+  string). Use `GetScheme()`/`GetRoot()` instead.
+
+## 4. Platform matrix (host = macOS arm64, no official darwin native library)
 
 | Target | Official native lib? | What was actually done | Result |
 | --- | --- | --- | --- |
-| linux/arm64 (container on this Mac) | yes, embedded in module | built + **executed** real write/read/list/close | PASS |
-| linux/amd64 (container on this Mac) | yes, embedded in module | cross-built for amd64, **executed** under emulation | PASS |
-| darwin/arm64 (host) | **no** | `GOOS=darwin go build` succeeds (guard `cmd/memory/status_unsupported.go`), executing prints unsupported and exits 3 | not runnable — native lib not published |
-| darwin/amd64 | **no** | `go vet` cross-compile only | cross-build only, never executed |
-| windows/amd64 | **no** | `go vet` cross-compile only | cross-build only, never executed |
-| linux/arm64 natively (bare metal, no container) | yes | not tested in this session | untested |
-| linux/amd64 natively (bare metal, no container) | yes | not tested in this session | untested |
+| linux/arm64 (container on this Mac) | yes, embedded in module | built + **executed** `cmd/memory` and the full `cmd/probe` suite | memory PASS; probes as in §3 |
+| linux/amd64 (container on this Mac) | yes, embedded in module | cross-built for amd64 and **executed** under emulation | memory PASS; same probe outcomes |
+| darwin/arm64 (host) | **no** | `go build` OK; executing `cmd/memory` prints the unsupported guard and exits 3 | not runnable — native lib not published |
+| darwin/amd64 | **no** | `GOOS=darwin GOARCH=amd64 go build ./...` OK | cross-build only, never executed |
+| windows/amd64 | **no** | `GOOS=windows GOARCH=amd64 go build ./...` OK | cross-build only, never executed |
+| windows/arm64 | **no** | `GOOS=windows GOARCH=arm64 go build ./...` OK | cross-build only, never executed |
+| linux/amd64 or arm64, bare metal | yes | not tested in this session | untested |
+| Debian bookworm (glibc 2.36) | yes, but too-old glibc | built + executed in container | `GLIBC_2.38 not found` at load |
+| alpine/musl | yes, but glibc-linked | built + executed in container | `jupiterrider/ffi` init fails (no musl artifact) |
+| onedrive companion | **module not published** | proxy 404 / `no matching versions` | unsupported as a Go companion; no fake implemented |
+| s3 companion | yes (module `v0.1.16`) | version/hash pinned only | never executed or connected (no credentials, no network allowed) |
 
 Container execution is **not** a real-machine claim: linux/* rows mean the
 official native `.so` ran inside a Linux container on this Mac, not on a Linux
-host. `darwin`/`windows` cross-build success must never be reported as a
-working native run.
+host. `darwin`/`windows` build success must never be reported as a working
+native run.
+
+Actual cross-build commands and results:
+
+```
+$ for t in darwin/arm64 darwin/amd64 windows/amd64 windows/arm64 linux/amd64 linux/arm64; do
+    GOOS=${t%/*} GOARCH=${t#*/} go build -o /dev/null ./...
+  done
+darwin/arm64 build=ok
+darwin/amd64 build=ok
+windows/amd64 build=ok
+windows/arm64 build=ok
+linux/amd64 build=ok
+linux/arm64 build=ok
+
+$ go build -o /tmp/spike-host ./cmd/memory && /tmp/spike-host; echo exit=$?
+opendal-spike/memory: official opendal-go-services/memory supports only linux/amd64 and linux/arm64; this build is / (unsupported)
+exit=3
+```
+
+## 5. Unfinished / not proven
+
+- Timeout **expiry** was never observed (memory backend too fast); only
+  configuration, validation, and external process-kill bounding were proven.
+- No in-process cancellation exists to test; `Close` is unsafe during in-flight
+  work and is not a cancellation mechanism.
+- s3/onedrive were **not** run at all: no cloud credentials are read, no real
+  S3/OneDrive endpoint is contacted, and no product integration is implemented.
+  The onedrive Go companion module has no published version, so it cannot even
+  be compiled against today.
+- darwin/windows binaries were cross-built but never executed (no official
+  native library for those platforms).
+- Bare-metal Linux (non-container) was not tested.
+- No stress test of concurrent reads/writes on a live operator (only
+  close-during-list); no exhaustive enumeration of every error code.
+- glibc requirement is bounded only as “fails on 2.36, works on 2.41”; not
+  bisected.
+- No changes to the root `go.mod`, other repositories, or CI.
