@@ -21,6 +21,8 @@ const (
 	testHandshakeLimit = 3 * time.Second
 )
 
+var testBindingContext = []byte("remote-unlock/smoke/v1/request=42;generation=7;epoch=1")
+
 // TestMTLSSmoke is the positive end-to-end smoke: an in-memory PKI, a
 // loopback TCP pair, a concurrent client/server handshake, and a channel
 // binding exported and verified on both sides. It then closes the client
@@ -198,6 +200,37 @@ func (ca *testCA) issue(t *testing.T, serial int64, cn string, usage []x509.ExtK
 	}, PeerSPKIPinOf(cert)
 }
 
+// reissue signs a new certificate for the public key of source with ca, so the
+// returned certificate keeps source's SPKI pin but chains to a different CA.
+func (ca *testCA) reissue(t *testing.T, serial int64, cn string, source tls.Certificate, usage []x509.ExtKeyUsage) (tls.Certificate, PeerSPKIPin) {
+	t.Helper()
+	key, ok := source.PrivateKey.(*ecdsa.PrivateKey)
+	if !ok {
+		t.Fatalf("test certificate key is %T, want *ecdsa.PrivateKey", source.PrivateKey)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(serial),
+		Subject:      pkix.Name{CommonName: cn},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  usage,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.cert, &key.PublicKey, ca.key)
+	if err != nil {
+		t.Fatalf("reissue %s certificate: %v", cn, err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("parse reissued %s certificate: %v", cn, err)
+	}
+	return tls.Certificate{
+		Certificate: [][]byte{der},
+		PrivateKey:  key,
+		Leaf:        cert,
+	}, PeerSPKIPinOf(cert)
+}
+
 func newTestKey(t *testing.T) *ecdsa.PrivateKey {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -242,4 +275,429 @@ func loopbackPair(t *testing.T) (net.Conn, net.Conn) {
 		t.Fatal("timed out accepting loopback connection")
 	}
 	return client, server
+}
+
+// handshakeResult is one side's handshake outcome.
+type handshakeResult struct {
+	ch  *Channel
+	raw net.Conn
+	err error
+}
+
+// runHandshakes runs the client and server handshake concurrently over a fresh
+// loopback pair and waits for both outcomes. Each goroutine reports to its own
+// buffered channel, so neither side can block the other. The raw endpoints are
+// closed directly on cleanup: a failed handshake may leave the peer waiting
+// for records, and a TLS close_notify exchange could hang.
+func runHandshakes(t *testing.T, clientOpts ClientOptions, serverOpts ServerOptions) (handshakeResult, handshakeResult) {
+	t.Helper()
+	clientRaw, serverRaw := loopbackPair(t)
+	t.Cleanup(func() {
+		clientRaw.Close()
+		serverRaw.Close()
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), testHandshakeLimit)
+	t.Cleanup(cancel)
+
+	clientRes := make(chan handshakeResult, 1)
+	serverRes := make(chan handshakeResult, 1)
+	go func() {
+		ch, err := ClientHandshake(ctx, clientRaw, clientOpts)
+		clientRes <- handshakeResult{ch: ch, raw: clientRaw, err: err}
+	}()
+	go func() {
+		ch, err := ServerHandshake(ctx, serverRaw, serverOpts)
+		serverRes <- handshakeResult{ch: ch, raw: serverRaw, err: err}
+	}()
+
+	var clientGot, serverGot handshakeResult
+	for i := 0; i < 2; i++ {
+		select {
+		case clientGot = <-clientRes:
+		case serverGot = <-serverRes:
+		case <-time.After(testHandshakeLimit):
+			t.Fatal("timed out waiting for handshakes")
+		}
+	}
+	return clientGot, serverGot
+}
+
+// mustChannel fails the test when a handshake did not produce a channel. A
+// successful channel's raw endpoint is closed on cleanup, bypassing the TLS
+// close_notify exchange deliberately.
+func mustChannel(t *testing.T, name string, got handshakeResult) *Channel {
+	t.Helper()
+	if got.err != nil {
+		t.Fatalf("%s: %v", name, got.err)
+	}
+	if got.ch == nil {
+		t.Fatalf("%s: nil channel", name)
+	}
+	t.Cleanup(func() { got.raw.Close() })
+	return got.ch
+}
+
+// wrongPin returns a pin that differs from pin in its last byte. If that
+// happened to yield the all-zero pin (rejected as missing before the mismatch
+// check can run), it flips the first byte as well.
+func wrongPin(pin PeerSPKIPin) PeerSPKIPin {
+	wrong := pin
+	wrong[len(wrong)-1] ^= 0xff
+	if isZeroPin(wrong) {
+		wrong[0] ^= 0xff
+	}
+	return wrong
+}
+
+// TestWrongServerPinRejected asserts the client refuses a server whose SPKI
+// does not match its out-of-band pin, even though the chain is valid.
+func TestWrongServerPinRejected(t *testing.T) {
+	ca := newTestCA(t)
+	serverCert, serverPin := ca.issue(t, 2, "server", []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, []string{testServerName})
+	clientCert, clientPin := ca.issue(t, 3, "client", []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, nil)
+
+	client, server := runHandshakes(t,
+		ClientOptions{
+			ServerName:  testServerName,
+			Roots:       ca.pool,
+			Certificate: clientCert,
+			ServerPin:   wrongPin(serverPin),
+		},
+		ServerOptions{
+			Roots:       ca.pool,
+			Certificate: serverCert,
+			ClientPin:   clientPin,
+		},
+	)
+	if !errors.Is(client.err, ErrPeerPinMismatch) {
+		t.Fatalf("ClientHandshake = %v, want ErrPeerPinMismatch", client.err)
+	}
+	if client.ch != nil {
+		t.Fatal("ClientHandshake returned a channel on pin mismatch")
+	}
+	if server.err == nil || server.ch != nil {
+		t.Fatalf("ServerHandshake = (%v, %v), want rejection with no channel", server.ch, server.err)
+	}
+}
+
+// TestWrongClientPinRejected asserts the server refuses a client whose SPKI
+// does not match its out-of-band pin, though the client chain verifies.
+func TestWrongClientPinRejected(t *testing.T) {
+	ca := newTestCA(t)
+	serverCert, serverPin := ca.issue(t, 2, "server", []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, []string{testServerName})
+	clientCert, clientPin := ca.issue(t, 3, "client", []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, nil)
+
+	client, server := runHandshakes(t,
+		ClientOptions{
+			ServerName:  testServerName,
+			Roots:       ca.pool,
+			Certificate: clientCert,
+			ServerPin:   serverPin,
+		},
+		ServerOptions{
+			Roots:       ca.pool,
+			Certificate: serverCert,
+			ClientPin:   wrongPin(clientPin),
+		},
+	)
+	if !errors.Is(server.err, ErrPeerPinMismatch) {
+		t.Fatalf("ServerHandshake = %v, want ErrPeerPinMismatch", server.err)
+	}
+	if server.ch != nil {
+		t.Fatal("ServerHandshake returned a channel on pin mismatch")
+	}
+	if client.ch != nil {
+		// TLS 1.3 lets the client finish before the server verifies the
+		// client certificate, so its side may still report success; the
+		// server rejection above is authoritative. Close its raw endpoint
+		// directly so cleanup never waits on close_notify.
+		client.raw.Close()
+	}
+}
+
+// TestWrongServerNameRejected asserts hostname verification rejects a
+// certificate issued for a different name, before pinning decides anything.
+func TestWrongServerNameRejected(t *testing.T) {
+	ca := newTestCA(t)
+	serverCert, serverPin := ca.issue(t, 2, "server", []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, []string{"other-host.test"})
+	clientCert, clientPin := ca.issue(t, 3, "client", []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, nil)
+
+	client, server := runHandshakes(t,
+		ClientOptions{
+			ServerName:  testServerName,
+			Roots:       ca.pool,
+			Certificate: clientCert,
+			ServerPin:   serverPin,
+		},
+		ServerOptions{
+			Roots:       ca.pool,
+			Certificate: serverCert,
+			ClientPin:   clientPin,
+		},
+	)
+	if client.err == nil {
+		t.Fatal("ClientHandshake accepted a certificate for the wrong hostname")
+	}
+	if errors.Is(client.err, ErrPeerPinMismatch) {
+		t.Fatalf("ClientHandshake failed on the pin, not hostname verification: %v", client.err)
+	}
+	var hostnameErr x509.HostnameError
+	if !errors.As(client.err, &hostnameErr) {
+		t.Fatalf("ClientHandshake = %v, want x509.HostnameError", client.err)
+	}
+	if client.ch != nil {
+		t.Fatal("ClientHandshake returned a channel for the wrong hostname")
+	}
+	if server.err == nil || server.ch != nil {
+		t.Fatalf("ServerHandshake = (%v, %v), want rejection with no channel", server.ch, server.err)
+	}
+}
+
+// TestUntrustedClientCARejected asserts server chain verification wins over a
+// matching client SPKI pin: a pin alone must never admit an unknown CA. The
+// rogue client certificate reuses the trusted leaf's key so its SPKI pin is
+// identical; only chain verification can reject it.
+func TestUntrustedClientCARejected(t *testing.T) {
+	ca := newTestCA(t)
+	otherCA := newTestCA(t)
+	serverCert, serverPin := ca.issue(t, 2, "server", []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, []string{testServerName})
+	clientCert, clientPin := ca.issue(t, 3, "client", []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, nil)
+	rogueCert, roguePin := otherCA.reissue(t, 4, "client", clientCert, []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth})
+	if roguePin != clientPin {
+		t.Fatal("test setup: rogue certificate must reuse the trusted SPKI pin")
+	}
+
+	client, server := runHandshakes(t,
+		ClientOptions{
+			ServerName:  testServerName,
+			Roots:       ca.pool,
+			Certificate: rogueCert,
+			ServerPin:   serverPin,
+		},
+		ServerOptions{
+			Roots:       ca.pool,
+			Certificate: serverCert,
+			ClientPin:   clientPin,
+		},
+	)
+	if server.err == nil {
+		t.Fatal("ServerHandshake accepted a client certificate from an untrusted CA")
+	}
+	var unknownCA x509.UnknownAuthorityError
+	if !errors.As(server.err, &unknownCA) {
+		t.Fatalf("ServerHandshake = %v, want x509.UnknownAuthorityError", server.err)
+	}
+	if server.ch != nil {
+		t.Fatal("ServerHandshake returned a channel for an untrusted CA")
+	}
+	if client.ch != nil {
+		// The client can complete TLS 1.3 before the server rejects its
+		// certificate; the server-side chain failure above is the assertion.
+		client.raw.Close()
+	}
+}
+
+// TestFreshHandshakeRotatesBinding rebuilds both options into fresh configs and
+// performs a second full handshake with the same certificate identities. The
+// new channels derive a different exporter for the same context, reject the old
+// binding, and neither side resumes. A closed old channel rejects its own
+// binding too.
+func TestFreshHandshakeRotatesBinding(t *testing.T) {
+	ca := newTestCA(t)
+	serverCert, serverPin := ca.issue(t, 2, "server", []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, []string{testServerName})
+	clientCert, clientPin := ca.issue(t, 3, "client", []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, nil)
+
+	clientOpts := ClientOptions{
+		ServerName:  testServerName,
+		Roots:       ca.pool,
+		Certificate: clientCert,
+		ServerPin:   serverPin,
+	}
+	serverOpts := ServerOptions{
+		Roots:       ca.pool,
+		Certificate: serverCert,
+		ClientPin:   clientPin,
+	}
+
+	oldClientGot, oldServerGot := runHandshakes(t, clientOpts, serverOpts)
+	oldClient := mustChannel(t, "old ClientHandshake", oldClientGot)
+	oldServer := mustChannel(t, "old ServerHandshake", oldServerGot)
+	oldClientBinding, err := oldClient.ExportBinding(testBindingContext)
+	if err != nil {
+		t.Fatalf("old client ExportBinding: %v", err)
+	}
+	if oldServerBinding, err := oldServer.ExportBinding(testBindingContext); err != nil {
+		t.Fatalf("old server ExportBinding: %v", err)
+	} else if !bytes.Equal(oldClientBinding, oldServerBinding) {
+		t.Fatal("old channel bindings disagree")
+	}
+
+	// Both configs are rebuilt from scratch by the second handshake call;
+	// there is no shared tls.Config, session cache or ticket state between
+	// the old and new connections.
+	newClientGot, newServerGot := runHandshakes(t, clientOpts, serverOpts)
+	newClient := mustChannel(t, "new ClientHandshake", newClientGot)
+	newServer := mustChannel(t, "new ServerHandshake", newServerGot)
+
+	for name, ch := range map[string]*Channel{"new client": newClient, "new server": newServer} {
+		st := ch.conn.ConnectionState()
+		if st.DidResume {
+			t.Errorf("%s resumed a session", name)
+		}
+		if st.Version != tls.VersionTLS13 {
+			t.Errorf("%s negotiated version %#x, want TLS 1.3", name, st.Version)
+		}
+	}
+
+	newClientBinding, err := newClient.ExportBinding(testBindingContext)
+	if err != nil {
+		t.Fatalf("new client ExportBinding: %v", err)
+	}
+	newServerBinding, err := newServer.ExportBinding(testBindingContext)
+	if err != nil {
+		t.Fatalf("new server ExportBinding: %v", err)
+	}
+	if !bytes.Equal(newClientBinding, newServerBinding) {
+		t.Fatal("new client and server bindings for the same context differ")
+	}
+	if bytes.Equal(newClientBinding, oldClientBinding) {
+		t.Fatal("fresh handshake reused the old channel exporter for the same context")
+	}
+	for name, ch := range map[string]*Channel{"new client": newClient, "new server": newServer} {
+		if err := ch.VerifyBinding(testBindingContext, oldClientBinding); !errors.Is(err, ErrBindingMismatch) {
+			t.Errorf("%s VerifyBinding(old binding) = %v, want ErrBindingMismatch", name, err)
+		}
+		if err := ch.VerifyBinding(testBindingContext, newClientBinding); err != nil {
+			t.Errorf("%s VerifyBinding(new binding) = %v, want nil", name, err)
+		}
+	}
+
+	// The old channel keeps exporting only until it is closed, and then fails
+	// closed for Check and its own binding too.
+	if err := oldClient.Check(); err != nil {
+		t.Fatalf("old client Check before Close: %v", err)
+	}
+	if err := oldClient.Close(); err != nil {
+		t.Fatalf("old client Close: %v", err)
+	}
+	if b, err := oldClient.ExportBinding(testBindingContext); !errors.Is(err, ErrChannelClosed) {
+		t.Fatalf("old client ExportBinding after Close = (%d bytes, %v), want ErrChannelClosed", len(b), err)
+	}
+	if err := oldClient.VerifyBinding(testBindingContext, oldClientBinding); !errors.Is(err, ErrChannelClosed) {
+		t.Fatalf("old client VerifyBinding after Close = %v, want ErrChannelClosed", err)
+	}
+	if err := oldClient.Check(); !errors.Is(err, ErrChannelClosed) {
+		t.Fatalf("old client Check after Close = %v, want ErrChannelClosed", err)
+	}
+	if err := oldServer.Close(); err != nil {
+		t.Fatalf("old server Close: %v", err)
+	}
+	if b, err := oldServer.ExportBinding(testBindingContext); !errors.Is(err, ErrChannelClosed) {
+		t.Fatalf("old server ExportBinding after Close = (%d bytes, %v), want ErrChannelClosed", len(b), err)
+	}
+	if err := oldServer.Check(); !errors.Is(err, ErrChannelClosed) {
+		t.Fatalf("old server Check after Close = %v, want ErrChannelClosed", err)
+	}
+}
+
+// TestFailClosedAPIs covers the zero-value and missing-input edges of the
+// Channel and the private config builders.
+func TestFailClosedAPIs(t *testing.T) {
+	var zero Channel
+	if err := zero.Check(); !errors.Is(err, ErrUninitializedChannel) {
+		t.Fatalf("zero Channel Check = %v, want ErrUninitializedChannel", err)
+	}
+	if b, err := zero.ExportBinding(testBindingContext); !errors.Is(err, ErrUninitializedChannel) {
+		t.Fatalf("zero Channel ExportBinding = (%d bytes, %v), want ErrUninitializedChannel", len(b), err)
+	}
+	if err := zero.VerifyBinding(testBindingContext, make([]byte, ChannelBindingSize)); !errors.Is(err, ErrUninitializedChannel) {
+		t.Fatalf("zero Channel VerifyBinding = %v, want ErrUninitializedChannel", err)
+	}
+	if err := zero.Close(); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("zero Channel Close = %v, want net.ErrClosed", err)
+	}
+
+	// An empty exporter context is refused even on a live channel.
+	ca := newTestCA(t)
+	serverCert, serverPin := ca.issue(t, 2, "server", []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, []string{testServerName})
+	clientCert, clientPin := ca.issue(t, 3, "client", []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, nil)
+	clientGot, serverGot := runHandshakes(t,
+		ClientOptions{
+			ServerName:  testServerName,
+			Roots:       ca.pool,
+			Certificate: clientCert,
+			ServerPin:   serverPin,
+		},
+		ServerOptions{
+			Roots:       ca.pool,
+			Certificate: serverCert,
+			ClientPin:   clientPin,
+		},
+	)
+	ch := mustChannel(t, "ClientHandshake", clientGot)
+	mustChannel(t, "ServerHandshake", serverGot)
+	if b, err := ch.ExportBinding(nil); !errors.Is(err, ErrEmptyContext) {
+		t.Fatalf("ExportBinding(nil) = (%d bytes, %v), want ErrEmptyContext", len(b), err)
+	}
+	if b, err := ch.ExportBinding([]byte{}); !errors.Is(err, ErrEmptyContext) {
+		t.Fatalf("ExportBinding(empty) = (%d bytes, %v), want ErrEmptyContext", len(b), err)
+	}
+
+	// Private config builders reject missing pins (and other missing inputs).
+	if cfg, err := clientConfig(ClientOptions{ServerName: testServerName, Roots: ca.pool, Certificate: clientCert}); err == nil || cfg != nil {
+		t.Fatalf("clientConfig without pin = (%v, %v), want error", cfg, err)
+	}
+	if cfg, err := serverConfig(ServerOptions{Roots: ca.pool, Certificate: serverCert}); err == nil || cfg != nil {
+		t.Fatalf("serverConfig without pin = (%v, %v), want error", cfg, err)
+	}
+
+	clientCfg, err := clientConfig(ClientOptions{ServerName: testServerName, Roots: ca.pool, Certificate: clientCert, ServerPin: serverPin})
+	if err != nil {
+		t.Fatalf("clientConfig: %v", err)
+	}
+	if clientCfg.MinVersion != tls.VersionTLS13 || clientCfg.MaxVersion != tls.VersionTLS13 {
+		t.Errorf("client TLS bounds = (%#x, %#x), want TLS 1.3 only", clientCfg.MinVersion, clientCfg.MaxVersion)
+	}
+	if clientCfg.ServerName != testServerName {
+		t.Errorf("client ServerName = %q, want %q", clientCfg.ServerName, testServerName)
+	}
+	if clientCfg.RootCAs != ca.pool {
+		t.Error("client RootCAs is not the explicit test pool")
+	}
+	if !clientCfg.SessionTicketsDisabled {
+		t.Error("client session tickets are not disabled")
+	}
+	if clientCfg.ClientSessionCache != nil {
+		t.Error("client session cache is not nil")
+	}
+	if clientCfg.InsecureSkipVerify {
+		t.Error("client standard verification is disabled")
+	}
+	if clientCfg.VerifyConnection == nil {
+		t.Error("client pin verifier is not installed")
+	}
+
+	serverCfg, err := serverConfig(ServerOptions{Roots: ca.pool, Certificate: serverCert, ClientPin: clientPin})
+	if err != nil {
+		t.Fatalf("serverConfig: %v", err)
+	}
+	if serverCfg.MinVersion != tls.VersionTLS13 || serverCfg.MaxVersion != tls.VersionTLS13 {
+		t.Errorf("server TLS bounds = (%#x, %#x), want TLS 1.3 only", serverCfg.MinVersion, serverCfg.MaxVersion)
+	}
+	if !serverCfg.SessionTicketsDisabled {
+		t.Error("server session tickets are not disabled")
+	}
+	if serverCfg.InsecureSkipVerify {
+		t.Error("server standard verification is disabled")
+	}
+	if serverCfg.ClientAuth != tls.RequireAndVerifyClientCert {
+		t.Errorf("server ClientAuth = %v, want tls.RequireAndVerifyClientCert", serverCfg.ClientAuth)
+	}
+	if serverCfg.ClientCAs != ca.pool {
+		t.Error("server ClientCAs is not the explicit test pool")
+	}
+	if serverCfg.VerifyConnection == nil {
+		t.Error("server pin verifier is not installed")
+	}
 }
