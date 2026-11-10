@@ -14,6 +14,7 @@ import {
   browserScreenshotsAllowed,
   assertPrivateText,
   assertPrivateArtifacts,
+  browserFixtureExecutable,
   fixtureCanaries,
   vaultObserver,
 } from "./browser_save_acceptance.mjs";
@@ -175,11 +176,12 @@ async function eventually(check, message, limit = 10000) {
   throw Error(message);
 }
 try {
+  // LOCKLARK_BROWSER_FIXTURE reuses one prebuilt fixture for this run, its
+  // vault observers and the checkout step; otherwise the fixture is built.
+  const fixtureExecutable = browserFixtureExecutable({ go, root, env, state });
   execFileSync(
-    go,
+    fixtureExecutable,
     [
-      "run",
-      "./scripts/browser_acceptance_fixture",
       "-out",
       join(state, "vault"),
       "-origin",

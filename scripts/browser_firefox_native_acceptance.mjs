@@ -6,7 +6,8 @@
 // Archive SHA-256: 0bde38707eb0a686a20c6bd50f4adcc7d60d4f73c60eb83ee9e0db8f65823e04
 // Set LOCKLARK_BROWSER_HOST and LOCKLARK_BROWSER_REGISTER to built Firefox/helper
 // binaries. Optional: LOCKLARK_FIREFOX (otherwise installed Playwright Firefox),
-// LOCKLARK_TEST_PLAYWRIGHT, LOCKLARK_GECKODRIVER (otherwise PATH), LOCKLARK_GO.
+// LOCKLARK_TEST_PLAYWRIGHT, LOCKLARK_GECKODRIVER (otherwise PATH), LOCKLARK_GO,
+// LOCKLARK_BROWSER_FIXTURE (prebuilt browser_acceptance_fixture; otherwise built).
 // For an intentional privacy-check failure after real pairing, set the tool-only
 // LOCKLARK_TEST_FAILURE_STAGE=after-pair. It must exit 1 without echoing factors.
 // page-arguments exercises a real driver failure carrying synthetic parameters.
@@ -35,6 +36,7 @@ import {
   browserScreenshotsAllowed,
   assertPrivateText,
   assertPrivateArtifacts,
+  browserFixtureExecutable,
   fixtureCanaries,
   vaultObserver,
 } from "./browser_save_acceptance.mjs";
@@ -891,11 +893,15 @@ try {
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const origin = "https://login.locklark.test:" + server.address().port;
   progress("create private synthetic fixture");
+  // LOCKLARK_BROWSER_FIXTURE reuses one prebuilt fixture instead of building.
   execFileSync(
-    process.env.LOCKLARK_GO || "go",
+    browserFixtureExecutable({
+      go: process.env.LOCKLARK_GO || "go",
+      root,
+      env,
+      state,
+    }),
     [
-      "run",
-      "./scripts/browser_acceptance_fixture",
       "-out",
       join(state, "vault"),
       "-origin",

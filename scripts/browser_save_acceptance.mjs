@@ -4,7 +4,13 @@ import assert from "node:assert/strict";
 import { format } from "node:util";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
-import { lstatSync, readFileSync, readdirSync } from "node:fs";
+import {
+  accessSync,
+  constants as fsConstants,
+  lstatSync,
+  readFileSync,
+  readdirSync,
+} from "node:fs";
 
 const CANARY_KEYS = [
   "Password",
@@ -207,13 +213,36 @@ export function assertPrivateArtifacts(state, fixture) {
   return scanned;
 }
 
-export function vaultObserver({ go, root, env, state }) {
+// A caller-supplied LOCKLARK_BROWSER_FIXTURE is reused as-is and must already
+// be executable; without it the historical per-call go build is kept.
+export function browserFixtureExecutable({ go, root, env, state }) {
+  const prebuilt = process.env.LOCKLARK_BROWSER_FIXTURE;
+  if (prebuilt) {
+    let usable = false;
+    try {
+      accessSync(prebuilt, fsConstants.X_OK);
+      usable = lstatSync(prebuilt).isFile();
+    } catch {
+      usable = false;
+    }
+    if (!usable) {
+      throw new Error(
+        "LOCKLARK_BROWSER_FIXTURE must name an executable built fixture",
+      );
+    }
+    return prebuilt;
+  }
   const executable = join(state, "fixture-observer");
   execFileSync(
     go,
     ["build", "-o", executable, "./scripts/browser_acceptance_fixture"],
     { cwd: root, env, stdio: ["ignore", "ignore", "pipe"] },
   );
+  return executable;
+}
+
+export function vaultObserver({ go, root, env, state }) {
+  const executable = browserFixtureExecutable({ go, root, env, state });
   return () => {
     const view = JSON.parse(
       execFileSync(
