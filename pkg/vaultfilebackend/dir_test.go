@@ -1708,6 +1708,118 @@ func TestDirSweepsOrphanTempUnderFreeTicket(t *testing.T) {
 	}
 }
 
+// List is unsupported, but a caller that cancels first sees its own context
+// error wrapped in ErrDenied; after Close the backend is still ErrDenied.
+func TestDirListHonorsCancellation(t *testing.T) {
+	b := openAt(t, t.TempDir())
+	ctx := context.Background()
+
+	cctx, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := b.List(cctx); !errors.Is(err, ErrDenied) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("list with canceled ctx = %v, want ErrDenied wrapping context.Canceled", err)
+	}
+	dctx, dcancel := context.WithTimeout(ctx, time.Nanosecond)
+	defer dcancel()
+	<-dctx.Done()
+	if _, err := b.List(dctx); !errors.Is(err, ErrDenied) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("list with expired ctx = %v, want ErrDenied wrapping context.DeadlineExceeded", err)
+	}
+	if _, err := b.List(ctx); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("list with live ctx = %v, want ErrUnsupported", err)
+	}
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.List(cctx); !errors.Is(err, ErrDenied) {
+		t.Fatalf("list after close with canceled ctx = %v, want ErrDenied", err)
+	}
+}
+
+// ctxCancelAtN is a context that is live for its first n Err calls and
+// canceled (Done closed, Err returns its cause) from call n+1 on. The write
+// path calls Err deterministically: once in replaceOrWrite/write before the
+// lock, then once right after the lock is acquired and before recovery. So
+// ctxCancelAtN(canceled, 1) is live up to and including lock acquisition and
+// is canceled exactly once the operation holds the lock, before resolve runs.
+// No sleep or timing is used as the trigger.
+type ctxCancelAtN struct {
+	calls  int
+	limit  int
+	done   chan struct{}
+	closed bool
+	cause  error
+}
+
+func (c *ctxCancelAtN) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c *ctxCancelAtN) Done() <-chan struct{}       { return c.done }
+func (c *ctxCancelAtN) Value(any) any               { return nil }
+func (c *ctxCancelAtN) Err() error {
+	c.calls++
+	if c.calls > c.limit {
+		if !c.closed {
+			c.closed = true
+			close(c.done)
+		}
+		return c.cause
+	}
+	return nil
+}
+
+// A write that acquires the lock and is then canceled before recovery must not
+// clean anything up: resolve would otherwise clear a stale holder ticket and
+// sweep temporary files even though the request returns ErrDenied.
+func TestDirCancellationAfterLockSkipsRecovery(t *testing.T) {
+	ctx := context.Background()
+	b := openAt(t, t.TempDir()).(*Dir)
+	if err := b.CreateIfAbsent(ctx, "n", []byte("v1")); err != nil {
+		t.Fatal(err)
+	}
+	cur := mustRead(t, b, "n")
+
+	// Seed recovery work that resolve would consume: a free ticket and a
+	// well-formed but untracked staged file.
+	lock := filepath.Join(b.root, lockName)
+	if err := os.WriteFile(lock, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	orphan := b.tmpPath(strings.Repeat("0f", 16))
+	stagedValue := []byte("never committed")
+	if err := os.WriteFile(orphan, record{version: strings.Repeat("d5", 16), digest: sha256.Sum256(stagedValue), value: stagedValue}.encode(), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cctx := &ctxCancelAtN{limit: 1, done: make(chan struct{}), cause: context.Canceled}
+	err := b.ReplaceIfVersion(cctx, "n", cur.Revision, []byte("v2"))
+	if !errors.Is(err, ErrDenied) || !errors.Is(err, context.Canceled) || errors.Is(err, ErrUnknown) {
+		t.Fatalf("replace canceled after lock = %v, want ErrDenied wrapping context.Canceled", err)
+	}
+	if cctx.calls != 2 {
+		t.Fatalf("context Err called %d times, want 2 (before and after the lock)", cctx.calls)
+	}
+	// Nothing was cleaned or changed by the canceled operation.
+	if _, err := os.Lstat(orphan); err != nil {
+		t.Fatalf("canceled write swept the orphan: %v", err)
+	}
+	if st, err := os.Lstat(lock); err != nil || st.Size() != 0 {
+		t.Fatalf("canceled write changed the ticket: %v %v", st, err)
+	}
+	if got := mustRead(t, b, "n"); string(got.Bytes) != "v1" || got.Revision != cur.Revision {
+		t.Fatal("canceled write changed the committed version")
+	}
+
+	// A live request now performs the recovery and the write.
+	if err := b.ReplaceIfVersion(ctx, "n", cur.Revision, []byte("v2")); err != nil {
+		t.Fatalf("replace after the canceled attempt = %v", err)
+	}
+	if _, err := os.Lstat(orphan); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("recovery did not sweep the orphan")
+	}
+	if got := mustRead(t, b, "n"); string(got.Bytes) != "v2" {
+		t.Fatalf("stored = %q, want v2", got.Bytes)
+	}
+}
+
 // ---- real cross-process helpers ----
 
 const (

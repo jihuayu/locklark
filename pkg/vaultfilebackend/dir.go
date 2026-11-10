@@ -506,9 +506,14 @@ func (d *Dir) ReplaceIfVersion(ctx context.Context, name string, expected Revisi
 
 // List is not supported, and neither is history. Like every method it is
 // refused with ErrDenied once the backend is closed.
-func (d *Dir) List(context.Context) ([]string, error) {
+func (d *Dir) List(ctx context.Context) ([]string, error) {
 	if err := d.closedErr(); err != nil {
 		return nil, err
+	}
+	// Cancellation is honored before the operation is classified as
+	// unsupported, so a canceled caller sees its own context error.
+	if err := ctx.Err(); err != nil {
+		return nil, deniedMsg(err, "list")
 	}
 	return nil, ErrUnsupported
 }

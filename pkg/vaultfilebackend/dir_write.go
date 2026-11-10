@@ -62,6 +62,14 @@ func (d *Dir) run(ctx context.Context, op *writeOp) error {
 	}
 	defer release()
 
+	// A cancellation that landed while this operation was waiting for the
+	// lock must stop it before recovery: resolve and sweepTmp mutate the
+	// ticket and temporary files, and a request that reports ErrDenied must
+	// leave them exactly as it found them. The later checks before the
+	// comparison and before publication still guard the rest of the write.
+	if err := ctx.Err(); err != nil {
+		return deniedMsg(err, "write cancelled after acquiring the lock")
+	}
 	// Recover the ticket of a writer that died while it held the lock.
 	if err := d.resolve(lockFile); err != nil {
 		return err
