@@ -199,9 +199,11 @@ func makePrivateDir(d, label string) error {
 }
 
 // checkPrivateDir Lstats d without following it and accepts only a real
-// directory owned by the current user that is not group/world writable and has
-// exactly 0700. A symlink, a non-directory, a looser mode or a foreign owner is
-// ErrDenied; a missing entry is returned as os.ErrNotExist.
+// directory owned by the effective user that is not group/world writable and
+// has exactly 0700. A symlink, a non-directory, a looser mode or a foreign
+// owner is ErrDenied; a missing entry is returned as os.ErrNotExist. Ownership
+// is checked here, not in privateDir, which also covers trusted ancestors such
+// as /usr that are legitimately owned by root.
 func checkPrivateDir(d, label string) error {
 	st, err := os.Lstat(d)
 	if err != nil {
@@ -212,6 +214,9 @@ func checkPrivateDir(d, label string) error {
 	}
 	if !privateDir(st) || st.Mode().Perm() != 0700 {
 		return deniedMsg(nil, label+" is not a private 0700 directory")
+	}
+	if !ownedByEUID(st) {
+		return deniedMsg(nil, label+" is not owned by the current user")
 	}
 	return nil
 }

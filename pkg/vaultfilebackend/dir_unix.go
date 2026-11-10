@@ -83,6 +83,17 @@ func privateFile(info os.FileInfo) bool {
 	return stat.Uid == uint32(os.Geteuid()) && stat.Nlink == 1 && info.Mode().IsRegular() && info.Mode().Perm() == 0600
 }
 
+// ownedByEUID reports whether info is owned by the effective user. Unlike
+// privateDir, which also accepts trusted ancestors such as /usr owned by root,
+// this is required of every protected namespace directory.
+func ownedByEUID(info os.FileInfo) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return false
+	}
+	return stat.Uid == uint32(os.Geteuid())
+}
+
 // privateDir reports whether the directory is not group/world writable, or is
 // a system sticky directory such as /tmp.
 func privateDir(info os.FileInfo) bool {

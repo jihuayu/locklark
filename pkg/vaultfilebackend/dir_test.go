@@ -366,6 +366,105 @@ func TestDirRefusesSymlinkedOrLoosenedNamespace(t *testing.T) {
 	}
 }
 
+// Every protected namespace component must be owned by the effective user even
+// when it is a non-symlink directory with exactly 0700, so a directory that is
+// loose in neither mode nor linkness but belongs to someone else is refused.
+// Changing a file's owner requires privilege, so the test is skipped where
+// chown to a foreign UID is not permitted. -1 is used as the UID so that an
+// unprivileged chown fails instead of silently succeeding.
+func TestDirRefusesForeignOwnedNamespace(t *testing.T) {
+	ctx := context.Background()
+	foreign := os.Geteuid() + 1
+	chown := func(t *testing.T, p string) {
+		t.Helper()
+		if err := os.Lchown(p, foreign, -1); err != nil {
+			t.Skipf("cannot change owner to UID %d: %v", foreign, err)
+		}
+		st, err := os.Lstat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ownedByEUID(st) {
+			t.Fatalf("chown to UID %d left %s owned by the effective user", foreign, p)
+		}
+	}
+
+	// The process's own directories pass the ownership check, and every
+	// directory below a fresh root is created owned by this process.
+	if st, err := os.Lstat(t.TempDir()); err != nil || !ownedByEUID(st) {
+		t.Fatalf("process-owned temp directory not reported as owned: %v", err)
+	}
+	if st, err := os.Lstat("/"); err != nil || ownedByEUID(st) && os.Geteuid() != 0 {
+		t.Fatal("root directory reported as owned by the effective user")
+	}
+	d := openAt(t, t.TempDir()).(*Dir)
+	for p := d.ns; p != filepath.Dir(d.ns); p = filepath.Dir(p) {
+		if st, err := os.Lstat(p); err != nil || !ownedByEUID(st) {
+			t.Fatalf("created namespace directory %s is not owned by the effective user: %v", p, err)
+		}
+	}
+	if err := d.CreateIfAbsent(ctx, "seed", []byte("v1")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Read(ctx, "seed"); err != nil {
+		t.Fatalf("read in process-owned namespace = %v", err)
+	}
+
+	components := []struct{ name, sub string }{
+		{"storage_namespace", ""},
+		{"version_directory", dirVer},
+		{"tmp_directory", filepath.Join(dirVer, tmpName)},
+		{"data_directory", filepath.Join(dirVer, dataName)},
+	}
+	for _, tc := range components {
+		t.Run(tc.name+"_before_open", func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "root")
+			if _, err := OpenDir(root); err != nil {
+				t.Fatal(err)
+			}
+			ns := filepath.Join(root, dirSubdir)
+			target := filepath.Join(ns, tc.sub)
+			chown(t, target)
+			if st, err := os.Lstat(target); err != nil {
+				t.Fatal(err)
+			} else if !st.IsDir() || st.Mode()&os.ModeSymlink != 0 || st.Mode().Perm() != 0700 {
+				t.Fatalf("fixture is not a real 0700 directory: %v", st.Mode())
+			}
+			if _, err := OpenDir(root); !errors.Is(err, ErrDenied) {
+				t.Fatalf("open with foreign-owned %s = %v, want ErrDenied", tc.name, err)
+			}
+		})
+		t.Run(tc.name+"_after_open", func(t *testing.T) {
+			b := openAt(t, t.TempDir()).(*Dir)
+			if err := b.CreateIfAbsent(ctx, "n", []byte("v1")); err != nil {
+				t.Fatal(err)
+			}
+			cur := mustRead(t, b, "n")
+			target := filepath.Join(b.ns, tc.sub)
+			chown(t, target)
+			if st, err := os.Lstat(target); err != nil {
+				t.Fatal(err)
+			} else if !st.IsDir() || st.Mode()&os.ModeSymlink != 0 || st.Mode().Perm() != 0700 {
+				t.Fatalf("fixture is not a real 0700 directory: %v", st.Mode())
+			}
+			if _, err := b.Read(ctx, "n"); !errors.Is(err, ErrDenied) {
+				t.Fatalf("read with foreign-owned %s = %v, want ErrDenied", tc.name, err)
+			}
+			if err := b.ReplaceIfVersion(ctx, "n", cur.Revision, []byte("v2")); !errors.Is(err, ErrDenied) {
+				t.Fatalf("replace with foreign-owned %s = %v, want ErrDenied", tc.name, err)
+			}
+			if got := mustRead(t, b, "n"); string(got.Bytes) != "v1" || got.Revision != cur.Revision {
+				t.Fatal("refused write changed the stored version")
+			}
+			// Tmp remains process-owned below the data directory or not, so a
+			// refused write must not have staged anything or taken a ticket.
+			if entries, err := os.ReadDir(filepath.Join(b.root, tmpName)); err == nil && len(entries) != 0 {
+				t.Fatalf("refused write left %d temporary files", len(entries))
+			}
+		})
+	}
+}
+
 // Replacing <root>/vaultfile-backend with a symlink after OpenDir is refused by
 // every later operation: the checks of the final v1, tmp and data components
 // no longer follow the intermediate link, and nothing is created or read or

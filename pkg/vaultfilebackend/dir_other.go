@@ -31,4 +31,6 @@ func linkNoReplace(string, string) error { return deniedMsg(nil, "unsupported pl
 
 func privateDir(os.FileInfo) bool { return false }
 
+func ownedByEUID(os.FileInfo) bool { return false }
+
 func privateFile(os.FileInfo) bool { return false }
