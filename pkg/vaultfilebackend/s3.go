@@ -3,6 +3,7 @@ package vaultfilebackend
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -480,16 +481,24 @@ func asS3Response(err error) (interface{ HTTPStatusCode() int }, bool) {
 
 // notSent reports whether err is a transport failure that happened before any
 // byte of the request could have reached the service: DNS lookup or connect
-// (including connection refused) failed. A certificate or handshake error is
-// deliberately not included: on an existing keep-alive connection the SDK may
-// already have written request bytes.
+// (including connection refused) failed, or the server's certificate was
+// rejected during the TLS handshake. A certificate that fails verification
+// can only be seen on a fresh handshake, which happens before any HTTP request
+// bytes are written, so no publication can have started. Other TLS errors
+// (for example a failed renegotiation or a broken handshake midway) are
+// deliberately not included: they can arise after request bytes were written,
+// so they stay conservatively unknown.
 func notSent(err error) bool {
 	var connErr *net.OpError
 	if errors.As(err, &connErr) && (connErr.Op == "dial" || connErr.Op == "connect") {
 		return true
 	}
 	var dnsErr *net.DNSError
-	return errors.As(err, &dnsErr)
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+	var certErr *tls.CertificateVerificationError
+	return errors.As(err, &certErr)
 }
 
 // sent reports whether the SDK observed the request leaving the client, for

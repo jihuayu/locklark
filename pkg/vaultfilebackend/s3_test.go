@@ -793,6 +793,42 @@ func TestS3ConnectionRefusedIsDenied(t *testing.T) {
 	}
 }
 
+// TestS3RejectedCertificateIsDenied pins the handshake outcome: the mock's
+// self-signed certificate is not trusted by the default HTTP client, so the
+// TLS handshake fails before any request byte is written. The mutation
+// therefore certainly did not reach the service and is ErrDenied, not
+// ErrUnknown.
+func TestS3RejectedCertificateIsDenied(t *testing.T) {
+	m := newS3Mock(t)
+	var hits atomic.Int32
+	m.setHook(func(w http.ResponseWriter, r *http.Request) bool {
+		hits.Add(1)
+		return true
+	})
+	// No HTTPClient: the SDK's default client rejects the mock's certificate.
+	b, err := NewS3(S3Config{
+		Endpoint:    m.endpoint(),
+		Region:      testS3Region,
+		Bucket:      testS3Bucket,
+		Prefix:      testS3Prefix,
+		Credentials: staticProvider(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err = b.CreateIfAbsent(ctx, "x", []byte("v"))
+	if !errors.Is(err, ErrDenied) {
+		t.Fatalf("rejected certificate create = %v, want ErrDenied", err)
+	}
+	reqs, _ := m.recorded()
+	if hits.Load() != 0 || len(reqs) != 0 {
+		t.Fatalf("rejected certificate reached the service: %v", reqs)
+	}
+}
+
 func TestS3ConditionalPutIsActuallySignedBySDK(t *testing.T) {
 	// The bridge must let the SDK sign: the Authorization header carries a
 	// SigV4 signature over signedHeaders that include the conditional header.
