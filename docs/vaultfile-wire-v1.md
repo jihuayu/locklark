@@ -160,7 +160,7 @@ this one value:
 
 ## Set-like arrays
 
-Seven arrays in a v1 file are semantically sets. Each has exactly one accepted
+Nine arrays in a v1 file are semantically sets. Each has exactly one accepted
 wire order; an out-of-order array is never accepted as a second representation
 of the same set:
 
@@ -209,8 +209,10 @@ Neither the encoder nor the decoder sorts. `EncodeFile`,
 `ParseFile` all reject an out-of-order array with `unsorted_collection`; input
 that is signed, digested or stored must already carry the one accepted order.
 Moving, inserting or swapping elements changes the canonical bytes and
-therefore the revision id and policy digest, so such a change is a new value
-that must be resealed, never an in-place rewrite.
+therefore the canonical file, and hence its `RevisionID`; if the array is inside
+a `Policy` document, it also changes the bytes of that document and hence its
+`PolicyDigest`. Such a change is a new value that must be resealed, never an
+in-place rewrite.
 
 ## Identifiers
 
@@ -236,8 +238,12 @@ grammar is bounded by its own limit:
 | --------------------------------------------------- | ------------------------- |
 | `vault_id`, `op_id`, `principal_id`, `delegation_id` | `MaxIDLength` (64)        |
 | `device_id`, `author_device_id`, `delegate_device_id`, device-slot `device_id` | `MaxDeviceIDLength` (128) |
-| device `signer_id` in a policy proof or the file `content_signature` | `MaxDeviceIDLength` (128) |
+| `signed_policy_proofs[].signer_id`, `content_signature.signer_id` | `MaxDeviceIDLength` (128) |
 | `owner_root.key_id`, delegation `granted_by`        | `MaxKeyIDLength` (64)     |
+
+`signed_policy_proofs[].signer_id` and `content_signature.signer_id` are bounded
+structurally at `MaxDeviceIDLength` (128); cryptographic verification of either
+signature is not implemented in this schema revision.
 
 Several wire values that look like identifiers are deliberately **not**
 ordinary identifiers:
