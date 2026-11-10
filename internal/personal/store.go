@@ -277,6 +277,7 @@ func commandWithClose(run func() (result, error), closeDB func() error) (r resul
 			clear(r.sshSeed)
 			clear(r.material)
 			clear(r.archive)
+			clear(r.attachmentBytes)
 			if r.otp != nil {
 				r.otp.Clear()
 			}
@@ -305,10 +306,22 @@ type authenticatedState struct {
 	nextCache *auditCache
 }
 
+// clearItemSensitiveBuffers zeroes decrypted attachment bodies and import
+// provenance in place. Slice lengths are retained so presence checks still
+// reflect the persisted item; Go strings and unrelated copies are out of scope.
+func clearItemSensitiveBuffers(item *vault.Item) {
+	clear(item.Attachment)
+	for n := range item.Attachments {
+		clear(item.Attachments[n].Content)
+	}
+	clear(item.ImportSource)
+}
+
 func (a *authenticatedState) clear() {
 	clear(a.opened)
 	a.identity.clear()
 	for n := range a.items {
+		clearItemSensitiveBuffers(&a.items[n])
 		clear(a.items[n].SSHSeed)
 		// Both passkey forms (legacy single record and versioned collection)
 		// must be zeroed here.
@@ -327,6 +340,7 @@ func authenticateState(tx *bolt.Tx, pw string, key []byte, action string, unlock
 			clear(opened)
 			i.clear()
 			for n := range items {
+				clearItemSensitiveBuffers(&items[n])
 				clear(items[n].SSHSeed)
 				clearItemPasskeys(&items[n])
 			}
@@ -1710,6 +1724,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 		clear(out.value)
 		clearBundleValues(out.values)
 		clear(out.sshSeed)
+		clear(out.attachmentBytes)
 		if out.otp != nil {
 			out.otp.Clear()
 		}
