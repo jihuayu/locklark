@@ -611,11 +611,9 @@ func (a *App) beginEdit() error {
 	}
 	s := a.session
 	generation := a.generation
-	var opErr error
 	a.run(func() outcome {
 		plain, err := s.GetItemDetail(detail.ID, detail.Revision, true)
 		if err != nil {
-			opErr = err
 			return outcome{err: err}
 		}
 		return outcome{apply: func() {
@@ -634,7 +632,9 @@ func (a *App) beginEdit() error {
 			a.status = "编辑条目：" + plain.Title
 		}}
 	})
-	return opErr
+	// The read is asynchronous; its failure is reported through a.status by the
+	// dispatcher, never by a value read across goroutines here.
+	return nil
 }
 
 func (a *App) EditSelected() error { return a.beginEdit() }
@@ -681,7 +681,6 @@ func (a *App) saveDraft() error {
 	s := a.session
 	filter := a.currentFilter()
 	isNew := draft.ID == ""
-	var opErr error
 	var saved personal.ItemDetail
 	var hasSaved bool
 	var snap v2Snapshot
@@ -689,25 +688,21 @@ func (a *App) saveDraft() error {
 		if isNew {
 			id, revision, err := s.AddItem(item, g)
 			if err != nil {
-				opErr = err
 				return nativeResult{err: err}
 			}
 			item.ID = id
 			saved, err = s.GetItemDetail(id, revision, false)
 			if err != nil {
-				opErr = err
 				return nativeResult{err: err}
 			}
 			hasSaved = true
 		} else {
 			revision, err := s.EditItem(draft.ID, draft.Revision, item, g)
 			if err != nil {
-				opErr = err
 				return nativeResult{err: err}
 			}
 			saved, err = s.GetItemDetail(draft.ID, revision, false)
 			if err != nil {
-				opErr = err
 				return nativeResult{err: err}
 			}
 			hasSaved = true
@@ -728,12 +723,11 @@ func (a *App) saveDraft() error {
 		a.status = "条目已保存"
 	})
 	if !ok {
-		if opErr == nil {
-			opErr = personal.ErrMutationRefused
-		}
-		return opErr
+		return personal.ErrMutationRefused
 	}
-	return opErr
+	// The mutation is asynchronous; its failure is reported through a.status by
+	// the dispatcher, never by a value read across goroutines here.
+	return nil
 }
 
 func (a *App) SaveDraft() error { return a.saveDraft() }

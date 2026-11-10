@@ -355,11 +355,5 @@ func (hello) Delete(id string) error {
 	if json.Unmarshal(raw, &blob) != nil || blob.Version != 1 {
 		return ErrUnavailable
 	}
-	if deleteKey(id, blob.Token) != nil {
-		return ErrUnavailable
-	}
-	if store().Delete(id) != nil {
-		return ErrUnavailable
-	}
-	return nil
+	return deleteBoth(func() error { return deleteKey(id, blob.Token) }, func() error { return store().Delete(id) })
 }
