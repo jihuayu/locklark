@@ -67,14 +67,12 @@ func canonical(raw []byte, v any) bool {
 }
 
 // loaded is one verified committed state: the head view and its evolution,
-// plus the exact stored receipt bytes of the chain and the stored head
-// snapshot bytes, so a commit budgets the retained History without re-encoding
-// it.
+// plus the decoded receipts from the single verified chain pass. A commit's
+// projected History sizing may serialize them.
 type loaded struct {
 	view     View
 	state    *evolution
 	receipts []Receipt
-	snapshot []byte
 }
 
 func load(tx *bolt.Tx, c *Config, anchor Checkpoint) (out loaded, err error) {
@@ -108,14 +106,14 @@ func load(tx *bolt.Tx, c *Config, anchor Checkpoint) (out loaded, err error) {
 		return loaded{}, ErrInvalid
 	}
 	out.view.Receipt = out.receipts[len(out.receipts)-1]
-	if stored := b.Get(snapshotKey); stored != nil {
-		out.snapshot = bytes.Clone(stored) // Own it past the Bolt transaction.
-	}
+	// The raw snapshot is only needed inside this transaction to decode and
+	// verify into out.view.Snapshot.
+	raw := b.Get(snapshotKey)
 	if out.view.Receipt.Proposal.Mode == "active" {
-		if len(out.snapshot) > 12<<20 || !canonical(out.snapshot, &out.view.Snapshot) || c.verifySnapshot(out.view.Receipt.Proposal, out.view.Snapshot) != nil {
+		if len(raw) > 12<<20 || !canonical(raw, &out.view.Snapshot) || c.verifySnapshot(out.view.Receipt.Proposal, out.view.Snapshot) != nil {
 			return loaded{}, ErrInvalid
 		}
-	} else if out.snapshot != nil {
+	} else if raw != nil {
 		return loaded{}, ErrInvalid
 	}
 	out.view, err = verifier.finish(out.view.Snapshot)
