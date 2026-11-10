@@ -54,6 +54,8 @@ func (m *Memory) Read(ctx context.Context, name string) (ReadResult, error) {
 		return ReadResult{}, denied(err)
 	}
 	defer m.mu.unlock()
+	// The fast path in lock can win the lock after ctx was already cancelled:
+	// re-check so a cancelled caller never observes stored state.
 	if m.closed {
 		return ReadResult{}, denied(nil)
 	}
@@ -61,7 +63,11 @@ func (m *Memory) Read(ctx context.Context, name string) (ReadResult, error) {
 	if !ok {
 		return ReadResult{}, ErrNotFound
 	}
-	return ReadResult{Bytes: append([]byte(nil), v.bytes...), Revision: v.revision}, nil
+	b := append([]byte(nil), v.bytes...)
+	if err := ctx.Err(); err != nil {
+		return ReadResult{}, denied(err)
+	}
+	return ReadResult{Bytes: b, Revision: v.revision}, nil
 }
 
 func (m *Memory) CreateIfAbsent(ctx context.Context, name string, value []byte) error {
@@ -75,14 +81,16 @@ func (m *Memory) CreateIfAbsent(ctx context.Context, name string, value []byte) 
 		return denied(err)
 	}
 	defer m.mu.unlock()
+	if err := ctx.Err(); err != nil {
+		return denied(err)
+	}
 	if m.closed {
 		return denied(nil)
 	}
 	if _, ok := m.values[name]; ok {
 		return ErrConflict
 	}
-	m.commit(name, value)
-	return nil
+	return m.commit(ctx, name, value)
 }
 
 func (m *Memory) ReplaceIfVersion(ctx context.Context, name string, expected Revision, value []byte) error {
@@ -96,6 +104,9 @@ func (m *Memory) ReplaceIfVersion(ctx context.Context, name string, expected Rev
 		return denied(err)
 	}
 	defer m.mu.unlock()
+	if err := ctx.Err(); err != nil {
+		return denied(err)
+	}
 	if m.closed {
 		return denied(nil)
 	}
@@ -103,8 +114,7 @@ func (m *Memory) ReplaceIfVersion(ctx context.Context, name string, expected Rev
 	if !ok || cur.revision != expected {
 		return ErrConflict
 	}
-	m.commit(name, value)
-	return nil
+	return m.commit(ctx, name, value)
 }
 
 func (m *Memory) List(ctx context.Context) ([]string, error) {
@@ -127,12 +137,19 @@ func (m *Memory) Close() error {
 	return nil
 }
 
-// commit must be called with m.mu held.
-func (m *Memory) commit(name string, value []byte) {
-	m.seq++
+// commit must be called with m.mu held and ctx already checked. It copies
+// value into a private buffer and checks ctx once more right before installing
+// the version: if the caller was cancelled in between, the copy is discarded
+// and nothing is committed.
+func (m *Memory) commit(ctx context.Context, name string, value []byte) error {
 	b := append([]byte(nil), value...)
+	if err := ctx.Err(); err != nil {
+		return denied(err)
+	}
+	m.seq++
 	rev := Revision(m.id + "-" + strconv.FormatUint(m.seq, 10))
 	m.values[name] = memoryVersion{bytes: b, revision: rev}
+	return nil
 }
 
 // memoryLock is a mutex whose acquisition can be abandoned when ctx is done:

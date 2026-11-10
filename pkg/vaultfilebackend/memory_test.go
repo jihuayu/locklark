@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -206,5 +207,126 @@ func TestMemoryCancellationKeepsCause(t *testing.T) {
 	err := NewMemory().CreateIfAbsent(ctx, "n", []byte("v"))
 	if !errors.Is(err, ErrDenied) || !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled = %v, want ErrDenied wrapping context.Canceled", err)
+	}
+}
+
+// hookContext is a test-only context whose Err reports a non-nil cause from
+// the begin-th call onward while Done and Deadline stay inert. It lets tests
+// cancel at an exact internal point of an operation without touching
+// production code; it implements only what Memory's ctx.Err checks use.
+type hookContext struct {
+	armed atomic.Bool
+	calls atomic.Int32
+	begin int32
+}
+
+func (c *hookContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (c *hookContext) Done() <-chan struct{}       { return nil }
+func (c *hookContext) Value(any) any               { return nil }
+func (c *hookContext) Err() error {
+	if !c.armed.Load() {
+		return nil
+	}
+	if c.calls.Add(1) >= c.begin {
+		return context.Canceled
+	}
+	return nil
+}
+
+// idleHookContext is a context that is already cancelled but reports it only
+// from its begin-th Err call, so the pre-lock fast paths pass and the next
+// check observes the cancellation.
+func idleHookContext(begin int32) *hookContext {
+	c := &hookContext{begin: begin}
+	c.armed.Store(true)
+	return c
+}
+
+// TestMemoryCancelledAfterLockIsDenied covers the race where ctx is cancelled
+// after the pre-lock check but a lock fast path still succeeds: every operation
+// must re-check under the lock and refuse, writing nothing.
+func TestMemoryCancelledAfterLockIsDenied(t *testing.T) {
+	m := NewMemory()
+	m.values["n"] = memoryVersion{bytes: []byte("v1"), revision: Revision("seed")}
+
+	// Pre-lock check is call 1; the check after lock is call 2.
+	ctx := idleHookContext(2)
+	if _, err := m.Read(ctx, "n"); !errors.Is(err, ErrDenied) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("read = %v, want ErrDenied wrapping context.Canceled", err)
+	}
+	ctx = idleHookContext(2)
+	if err := m.CreateIfAbsent(ctx, "n2", []byte("new")); !errors.Is(err, ErrDenied) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("create = %v, want ErrDenied wrapping context.Canceled", err)
+	}
+	ctx = idleHookContext(2)
+	if err := m.ReplaceIfVersion(ctx, "n", Revision("seed"), []byte("v2")); !errors.Is(err, ErrDenied) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("replace = %v, want ErrDenied wrapping context.Canceled", err)
+	}
+
+	bg := context.Background()
+	if _, err := m.Read(bg, "n2"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cancelled create wrote state: %v", err)
+	}
+	if got, err := m.Read(bg, "n"); err != nil || string(got.Bytes) != "v1" || got.Revision != Revision("seed") {
+		t.Fatalf("cancelled replace wrote state: %q %v", got.Bytes, err)
+	}
+}
+
+// TestMemoryReadCancelledAfterCopyIsDenied covers cancellation after the
+// stored bytes were copied: Read must return nothing.
+func TestMemoryReadCancelledAfterCopyIsDenied(t *testing.T) {
+	m := NewMemory()
+	m.values["n"] = memoryVersion{bytes: []byte("v1"), revision: Revision("seed")}
+
+	// Pre-lock check 1, post-lock check 2, post-copy check 3.
+	ctx := idleHookContext(3)
+	got, err := m.Read(ctx, "n")
+	if !errors.Is(err, ErrDenied) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("read = %v, want ErrDenied wrapping context.Canceled", err)
+	}
+	if got.Bytes != nil || got.Revision != "" {
+		t.Fatalf("cancelled read returned %q %q", got.Bytes, got.Revision)
+	}
+}
+
+// TestMemoryWriteCancelledAfterCopyNotCommitted covers cancellation after
+// commit copied value but before installing it: the write must not commit, the
+// revision counter must not advance, and a later write succeeds normally.
+func TestMemoryWriteCancelledAfterCopyNotCommitted(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// begin is the Err call that first reports cancellation.
+		begin int32
+		call  func(ctx context.Context, m *Memory) error
+	}{
+		// Create: pre-lock 1, post-lock 2, post-copy 3.
+		{"create", 3, func(ctx context.Context, m *Memory) error {
+			return m.CreateIfAbsent(ctx, "new", []byte("new"))
+		}},
+		// Replace: pre-lock 1, post-lock 2, post-copy 3.
+		{"replace", 3, func(ctx context.Context, m *Memory) error {
+			return m.ReplaceIfVersion(ctx, "n", Revision("seed"), []byte("v2"))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewMemory()
+			m.values["n"] = memoryVersion{bytes: []byte("v1"), revision: Revision("seed")}
+			err := tc.call(idleHookContext(tc.begin), m)
+			if !errors.Is(err, ErrDenied) || !errors.Is(err, context.Canceled) {
+				t.Fatalf("%s = %v, want ErrDenied wrapping context.Canceled", tc.name, err)
+			}
+			if m.seq != 0 {
+				t.Fatalf("cancelled %s advanced seq to %d", tc.name, m.seq)
+			}
+			if _, ok := m.values["new"]; ok {
+				t.Fatal("cancelled create installed a version")
+			}
+			if cur := m.values["n"]; string(cur.bytes) != "v1" || cur.revision != Revision("seed") {
+				t.Fatalf("cancelled %s changed n: %q %q", tc.name, cur.bytes, cur.revision)
+			}
+			if err := m.CreateIfAbsent(context.Background(), "n3", []byte("ok")); err != nil {
+				t.Fatalf("write after cancelled %s: %v", tc.name, err)
+			}
+		})
 	}
 }
