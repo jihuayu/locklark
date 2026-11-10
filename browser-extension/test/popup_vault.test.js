@@ -474,3 +474,12 @@ test("passkey management selectors and metadata stay out of save mutations", () 
   assert.equal(Object.hasOwn(mutation, "passkey"), false);
   assert.equal(Object.hasOwn(mutation, "has_passkey"), false);
 });
+
+test("popup exposes the archive tab and forwards the archived state filter", () => {
+  assert.match(popupHTML, /data-filter="archived"/);
+  assert.match(popupHTML, /id="detail-archive"/);
+  assert.match(popupJS, /detailArchiveToggle/);
+  assert.match(popupJS, /stateFilter: activeFilter === "archived" \? "archived" : ""/);
+  assert.match(backgroundJS, /message\.stateFilter/);
+  assert.match(backgroundJS, /state: stateFilter/);
+});

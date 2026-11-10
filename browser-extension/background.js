@@ -3371,7 +3371,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       )
       .filter(Boolean);
   }
-  async function vaultSearch(rawQuery, rawCategory, rawPasskeysOnly) {
+  async function vaultSearch(rawQuery, rawCategory, rawPasskeysOnly, rawStateFilter) {
     if (!capability) throw Error("refused");
     const generation = ++vaultSearchGeneration,
       requestEpoch = epoch,
@@ -3395,6 +3395,11 @@ if (typeof importScripts === "function") importScripts("core.js");
       return { items: [], source: "unsupported", fallback: false, unsupported: true };
     }
     const category = core.validCategory(rawCategory) ? rawCategory : "all";
+    const stateFilter = ["active", "archived", "trashed", "all"].includes(
+      rawStateFilter,
+    )
+      ? rawStateFilter
+      : "";
     const query =
       typeof rawQuery === "string" ? rawQuery.slice(0, 500) : "";
     // The native wire uses canonical v2 categories; normalizeCategory()
@@ -3408,6 +3413,7 @@ if (typeof importScripts === "function") importScripts("core.js");
           query,
           category: wireCategory,
           favorites_only: category === "favorites",
+          ...(stateFilter ? { state: stateFilter } : {}),
           ...(passkeysOnly ? { passkeys_only: true } : {}),
         },
         12000,
@@ -5501,6 +5507,7 @@ if (typeof importScripts === "function") importScripts("core.js");
             message.query,
             message.category,
             message.passkeysOnly === true,
+            message.stateFilter,
           );
           extra.vaultItems = result.items;
           extra.vaultSource = result.source;

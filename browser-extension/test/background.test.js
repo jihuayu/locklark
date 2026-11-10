@@ -2447,6 +2447,36 @@ test("conditional list is public metadata only and never starts a native get", a
   assert.equal(state.pending, false);
 });
 
+test("vault search forwards only a valid archived state filter", async () => {
+  const h = harness({
+    onRequest: (r) => {
+      if (r.type === "vault-search")
+        return { v: 1, id: r.id, type: "vault-items", items: [] };
+    },
+  });
+  await ready(h);
+  await h.send({
+    type: "vault-search",
+    query: "",
+    category: "archived",
+    stateFilter: "archived",
+  });
+  const archived = h.sent.filter((r) => r.type === "vault-search").at(-1);
+  assert.equal(archived.state, "archived");
+  assert.equal(archived.category, "");
+  await h.send({
+    type: "vault-search",
+    query: "",
+    category: "all",
+    stateFilter: "bogus",
+  });
+  const invalid = h.sent.filter((r) => r.type === "vault-search").at(-1);
+  assert.equal("state" in invalid, false);
+  await h.send({ type: "vault-search", query: "", category: "all" });
+  const plain = h.sent.filter((r) => r.type === "vault-search").at(-1);
+  assert.equal("state" in plain, false);
+});
+
 test("conditional request does not block ordinary match or fill state", async () => {
   const h = await conditionalReady([conditionalEntry(1)]);
   await h.send(

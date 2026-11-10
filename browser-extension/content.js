@@ -233,6 +233,7 @@
     stageCooldownSignature = "",
     stageCooldownAt = 0,
     lastEditedCredential = null,
+    focusMenuOnOpen = false,
     mutationCheckTimer = null,
     generatorSerial = 0,
     siteSettings = {
@@ -927,6 +928,8 @@
   }
 
   async function showLogins(input, otp) {
+    const focusMenu = focusMenuOnOpen;
+    focusMenuOnOpen = false;
     if (request || !loginInput(input)) return;
     if (
       input.closest?.("[data-locklark-ignore]") ||
@@ -1053,6 +1056,11 @@
           void send({ type: "inline-save" });
         });
       button(box, "关闭", dismiss);
+      if (focusMenu) {
+        try {
+          box.querySelector("button")?.focus();
+        } catch {}
+      }
     } catch {
       dismiss();
     }
@@ -1991,7 +1999,12 @@
             : document.querySelector(
                 'input[type="password"],input[autocomplete="username"],input[type="email"]',
               );
-        if (input) void showSuggestions(input);
+        if (input) {
+          // An explicit open command is keyboard intent: move focus into the
+          // menu once it renders. Focus-triggered menus keep focus in the field.
+          focusMenuOnOpen = true;
+          void showSuggestions(input);
+        }
         respond({ opened: !!input });
         return true;
       }

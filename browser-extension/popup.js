@@ -842,6 +842,7 @@
     suggested: "当前网站",
     all: "全部",
     favorites: "收藏",
+    archived: "已归档",
     passkeys: "Passkey",
     login: "登录",
     identity: "身份",
@@ -1180,6 +1181,8 @@
         ? "暂无收藏条目"
         : activeFilter === "suggested"
           ? "当前网站无匹配条目"
+        : activeFilter === "archived"
+          ? "暂无已归档条目"
           : searchQuery
             ? "没有匹配的条目"
             : "金库中暂无条目";
@@ -1223,6 +1226,7 @@
       query: searchQuery,
       category: activeFilter,
       passkeysOnly: activeFilter === "passkeys",
+      stateFilter: activeFilter === "archived" ? "archived" : "",
     };
   }
   function sameVaultFilter(a, b) {
@@ -1231,7 +1235,8 @@
       !!b &&
       a.query === b.query &&
       a.category === b.category &&
-      a.passkeysOnly === b.passkeysOnly
+      a.passkeysOnly === b.passkeysOnly &&
+      a.stateFilter === b.stateFilter
     );
   }
   async function refreshVault(silent = false) {
@@ -1249,6 +1254,7 @@
         query: filters.query,
         category: filters.category,
         passkeysOnly: filters.passkeysOnly,
+        ...(filters.stateFilter ? { stateFilter: filters.stateFilter } : {}),
       });
       if (!isCurrent()) return;
       if (reply && typeof reply === "object") {
@@ -1994,6 +2000,25 @@
       detail.favorite === true ? "true" : "false",
     );
     els.detailFavorite.textContent = detail.favorite === true ? "★" : "☆";
+    if (els.detailAddSite) {
+      const origin = detailCurrentOrigin();
+      const offered =
+        ["login", "password"].includes(
+          core.normalizeCategory?.(detail.category) || detail.category,
+        ) && detailLacksOrigin(detail, origin);
+      els.detailAddSite.hidden = !offered;
+      if (offered)
+        els.detailAddSite.textContent =
+          "添加到 " + origin.replace(/^https:\/\//, "") + " 并填充";
+    }
+    if (els.detailArchive) {
+      const archived = String(detail.state || "active") === "archived";
+      els.detailArchive.textContent = archived ? "取消归档" : "归档";
+      els.detailArchive.setAttribute(
+        "aria-pressed",
+        archived ? "true" : "false",
+      );
+    }
     els.detailUnavailable.hidden = !detail.unavailable;
     els.detailUnavailable.textContent = detail.unavailable || "";
     els.detailNotes.textContent = detail.notes || "";
@@ -3308,6 +3333,85 @@
       toast("收藏状态未更新");
     }
   }
+  function detailCurrentOrigin() {
+    try {
+      const origin = core.originFromURL(String(lastState?.origin || ""));
+      return origin && origin.startsWith("https://") ? origin : "";
+    } catch {
+      return "";
+    }
+  }
+  function detailLacksOrigin(detail, origin) {
+    if (!detail?.urls?.length || !origin) return false;
+    return !detail.urls.some((url) => {
+      try {
+        return core.originFromURL(url) === origin;
+      } catch {
+        return false;
+      }
+    });
+  }
+  async function detailAddSiteAndFill() {
+    const detail = lastDetail;
+    const origin = detailCurrentOrigin();
+    if (!detail || !origin || !detailLacksOrigin(detail, origin)) return;
+    const urls = (detail.urls || [])
+      .slice(0, 19)
+      .map((url, index) =>
+        index === 0
+          ? { url, primary: true, match_mode: "origin" }
+          : { url, match_mode: "origin" },
+      );
+    urls.push({ url: origin, match_mode: "origin" });
+    try {
+      const reply = await classifyDetailAction({
+        type: "item-save",
+        mode: "edit",
+        id: detail.id,
+        revision: detail.revision,
+        item: { category: detail.category, title: detail.title, urls },
+      });
+      if (!reply?.saved) throw Error("refused");
+      lastDetail = {
+        ...detail,
+        revision: reply.saved.revision,
+        urls: [...(detail.urls || []), origin],
+      };
+      renderDetail(lastDetail);
+      toast("已添加到当前网站");
+      await classifyDetailAction({
+        type: "fill",
+        id: lastDetail.id,
+        revision: lastDetail.revision,
+      });
+    } catch {
+      toast("无法添加到当前网站");
+    }
+  }
+  async function detailArchiveToggle() {
+    if (!lastDetail) return;
+    const archived = String(lastDetail.state || "active") === "archived";
+    try {
+      const reply = await classifyDetailAction({
+        type: "item-state",
+        id: lastDetail.id,
+        revision: lastDetail.revision,
+        state: archived ? "active" : "archived",
+      });
+      if (!reply?.itemState) throw Error("refused");
+      lastDetail = {
+        ...lastDetail,
+        state: archived ? "active" : "archived",
+        revision: reply.itemState.revision,
+      };
+      renderDetail(lastDetail);
+      vaultLoaded = false;
+      await refreshVault(true);
+      toast(archived ? "条目已取消归档" : "条目已归档");
+    } catch {
+      toast(archived ? "无法取消归档" : "无法归档");
+    }
+  }
   async function detailTrash() {
     if (!lastDetail) return;
     try {
@@ -3369,6 +3473,8 @@
       detailFill: q("#detail-fill"),
       detailOtp: q("#detail-otp"),
       detailOpenFill: q("#detail-open-fill"),
+      detailArchive: q("#detail-archive"),
+      detailAddSite: q("#detail-add-site"),
       detailTrash: q("#detail-trash"),
       detailFields: q("#detail-fields"),
       detailUrls: q("#detail-urls"),
@@ -3596,6 +3702,8 @@
       if (lastDetail?.urls?.length)
         void openAndFill(lastDetail, lastDetail.urls[0]);
     });
+    els.detailAddSite?.addEventListener("click", () => void detailAddSiteAndFill());
+    els.detailArchive?.addEventListener("click", () => void detailArchiveToggle());
     els.detailTrash.addEventListener("click", () => void detailTrash());
     els.passkeySelect?.addEventListener("change", (event) =>
       selectPasskeyCredential(event?.target?.value),
