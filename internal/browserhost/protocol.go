@@ -52,6 +52,10 @@ type Request struct {
 	Category       string `json:"category,omitempty"`
 	IncludeHIBP    bool   `json:"include_hibp,omitempty"`
 	payload        *savePayload
+	// v2Reserved is the Session mutation slot a destructive removal's native
+	// review reserved. ApproveV2 sets it on the stored request only; it is not
+	// part of the wire protocol and valid() never consults it.
+	v2Reserved     *personal.MutationGate
 	WindowID       int64  `json:"window_id,omitempty"`
 	RequestID      string `json:"request_id,omitempty"`
 	Nonce          string `json:"nonce,omitempty"`

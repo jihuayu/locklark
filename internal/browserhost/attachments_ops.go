@@ -205,13 +205,15 @@ func (c *Connection) attachmentRead(r Request) error {
 	return c.response(Response{ID: r.ID, Type: "attachment-data", ItemID: r.ItemID, Revision: r.Revision, Attachment: attachmentSummary(meta), Offset: offset, NextOffset: end, Done: end == size, Data: data})
 }
 
+// attachmentRemove runs the approved removal under the exact mutation slot the
+// native review reserved; it never registers or releases that slot itself.
 func (c *Connection) attachmentRemove(r Request) error {
 	s := c.session.Load()
 	if s == nil || !s.Unlocked() {
 		return c.refuse(r.ID)
 	}
-	gate := personal.NewMutationGate(minTime(c.until, c.now().Add(attachmentCommitWindow)))
-	if s.RegisterMutation(gate) != nil {
+	gate := r.v2Reserved
+	if gate == nil {
 		return c.refuse(r.ID)
 	}
 	rev, e := s.RemoveAttachment(r.ItemID, r.Revision, r.AttachmentID, gate)

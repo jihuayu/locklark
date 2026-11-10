@@ -72,6 +72,14 @@ type pendingV2 struct {
 	cancelEpoch uint64
 	stored      itemAnchor
 	requested   *itemAnchor
+	// gate is the exact Session mutation slot a destructive removal claimed
+	// in startV2Approval, and session is the Session that registered it. The
+	// approved removal executes under this same gate; it is never released and
+	// re-registered around the native review. timer arms the matching passive
+	// release at deadline.
+	gate    *personal.MutationGate
+	session *personal.Session
+	timer   *time.Timer
 }
 
 // ProfileView is the public native review of one sensitive profile fill. It
@@ -700,6 +708,10 @@ func (c *Connection) Handle(r Request) error {
 	}
 	// Removal is destructive and never silently authorized by quick fill.
 	if (!c.quickFill || destructiveV2Operation(r.Type)) && requiresV2NativeApproval(r.Type) {
+		// A destructive removal must claim the Session's shared mutation slot
+		// itself, while its own review is pending, so a pending passkey, OTP,
+		// save or mutation on another connection blocks it before any native
+		// approval is shown.
 		if c.profile != nil || c.pending != nil || c.save != nil || c.otp != nil || c.passkey != nil || c.signal != nil || c.stagedBusy || c.upload != nil {
 			return c.refuse(r.ID)
 		}
@@ -1523,6 +1535,15 @@ func (c *Connection) startV2Approval(r Request) error {
 	}
 	field, action, summary := v2ApprovalReview(r)
 	review := &pendingV2{title: title, field: field, action: action, summary: summary, deadline: c.now().Add(30 * time.Second), epoch: c.epoch, cancelEpoch: c.cancelEpoch.Load()}
+	if destructiveV2Operation(r.Type) {
+		// The reservation is made before any native review exists and is
+		// carried on the review itself.
+		gate, session, e := c.reserveV2Removal(r)
+		if e != nil {
+			return c.refuse(r.ID)
+		}
+		review.gate, review.session = gate, session
+	}
 	switch r.Type {
 	case "item-get":
 		// An omitted revision is pinned to the authenticated revision read
@@ -1563,14 +1584,98 @@ func (c *Connection) startV2Approval(r Request) error {
 	}
 	review.request = r
 	c.v2pending = review
+	if review.gate != nil {
+		// No native event necessarily touches this connection when the review
+		// lapses, so lazy expiry alone could leave the Session slot registered.
+		// One bounded timer fires at the wall-clock deadline and runs the
+		// ordinary expiry path under c.mu. The connection clock is re-read
+		// there; a slow connection clock only defers to its next event.
+		review.timer = time.AfterFunc(review.deadline.Sub(c.now()), c.v2ReviewTimer)
+	}
 	c.changed()
 	return nil
+}
+
+// v2ReviewTimer is the passive expiry timer of one pending V2 review. It runs
+// the regular expiry path, so the same release code covers reject, cancel,
+// lock, disconnect and lapse.
+func (c *Connection) v2ReviewTimer() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.syncEpoch()
+	if c.v2pending == nil {
+		return
+	}
+	c.expire()
+	c.expireUpload()
+	c.changed()
+}
+
+// reserveV2Removal claims the Session's single shared mutation slot for the
+// whole lifetime of one destructive removal review, so a pending passkey, OTP,
+// save or native mutation on any connection blocks it before any native
+// approval exists, and its own reserved review blocks theirs. Every selector
+// is still revalidated inside the approved Session transaction under this
+// exact gate. The caller holds c.mu and has already checked this connection's
+// own approval surfaces.
+func (c *Connection) reserveV2Removal(r Request) (*personal.MutationGate, *personal.Session, error) {
+	s := c.session.Load()
+	if s == nil || !s.Unlocked() || !c.valid(c.capability) {
+		return nil, nil, ErrProtocol
+	}
+	var until time.Time
+	switch r.Type {
+	case "passkey-remove":
+		if c.passkey != nil {
+			// A passkey review still preparing ownership of the slot on this
+			// connection must not be displaced.
+			return nil, nil, ErrProtocol
+		}
+		until = c.now().Add(30 * time.Second)
+	case "attachment-remove":
+		// The review must never outlive its capability, and the gate deadline
+		// must lie in the gate clock's range: a pending staged upload shares
+		// its session, so the review keeps the bound every other removal uses.
+		until = minTime(c.until, c.now().Add(30*time.Second))
+	default:
+		return nil, nil, ErrProtocol
+	}
+	gate := personal.NewMutationGate(until)
+	if err := s.RegisterMutation(gate); err != nil {
+		return nil, nil, err
+	}
+	return gate, s, nil
+}
+
+// releaseV2Removal drops the reservation of one review. The caller holds c.mu.
+// It runs on native reject/cancel, review expiry, lock/revocation, disconnect
+// and after the approved execution. A gate that already won is left to its
+// transaction observer; cancelling it then could turn a durable removal into an
+// unconfirmed result. The reservation carries its exact Session because
+// Invalidate detaches c.session before it clears the review.
+func (c *Connection) releaseV2Removal(p *pendingV2) {
+	if p == nil || p.gate == nil {
+		return
+	}
+	gate, s := p.gate, p.session
+	p.gate, p.session = nil, nil
+	if p.timer != nil {
+		p.timer.Stop()
+		p.timer = nil
+	}
+	if !gate.CommitWon() {
+		gate.Cancel()
+	}
+	if s != nil {
+		s.ReleaseMutation(gate)
+	}
 }
 
 func (c *Connection) clearV2PendingLocked(p *pendingV2) {
 	if p == nil || c.v2pending != p {
 		return
 	}
+	c.releaseV2Removal(p)
 	p.request.Clear()
 	c.v2pending = nil
 }
@@ -1584,11 +1689,16 @@ func (c *Connection) ApproveV2(id string) error {
 	c.syncEpoch()
 	c.expire()
 	p := c.v2pending
-	if p == nil || p.request.ID != id || p.epoch != c.epoch || p.cancelEpoch != c.cancelEpoch.Load() || !c.valid(p.request.Capability) || !c.now().Before(p.deadline) {
+	if p == nil || p.request.ID != id || p.epoch != c.epoch || p.cancelEpoch != c.cancelEpoch.Load() || !c.valid(c.capability) || !c.now().Before(p.deadline) {
 		return ErrProtocol
 	}
 	r := p.request
+	r.v2Reserved = p.gate
 	c.v2pending = nil
+	// A destructive removal executes under the exact gate its review reserved;
+	// the slot is neither released nor re-registered around this call, and no
+	// other connection can register until the transaction has finished.
+	defer c.releaseV2Removal(p)
 	return c.executeV2Approved(r)
 }
 

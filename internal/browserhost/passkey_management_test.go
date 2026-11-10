@@ -224,7 +224,8 @@ func TestPasskeyPendingApprovalBlocksRemovalAcrossConnections(t *testing.T) {
 	if err := c1.Handle(cancel); err != nil {
 		t.Fatal(err)
 	}
-	removed := destructiveCall(t, c2, out2, map[string]any{"v": 1, "id": reqID(83), "type": "passkey-remove", "capability": cap2, "item_id": itemID, "revision": revision, "credential_id": credential})
+	removal := map[string]any{"v": 1, "id": reqID(83), "type": "passkey-remove", "capability": cap2, "item_id": itemID, "revision": revision, "credential_id": credential}
+	removed := destructiveCall(t, c2, out2, removal)
 	if removed.Type != "passkey-removed" {
 		t.Fatalf("cross-connection removal: %#v", removed)
 	}
@@ -233,6 +234,85 @@ func TestPasskeyPendingApprovalBlocksRemovalAcrossConnections(t *testing.T) {
 			t.Fatal("cancelled credential escaped")
 		}
 	}
+}
+
+// removalReviewFixture is a passkey removal review opened on one connection
+// while a second connection shares the same Session.
+type removalReviewFixture struct {
+	c, other               *Connection
+	out, otherOut          *memoryPipe
+	cap, otherCap          string
+	s                      *personal.Session
+	itemID, revision, cred string
+}
+
+func (f *removalReviewFixture) frame(n int) map[string]any {
+	return map[string]any{"v": 1, "id": reqID(n), "type": "passkey-remove", "capability": f.cap, "item_id": f.itemID, "revision": f.revision, "credential_id": f.cred}
+}
+
+// pending shows the removal's native review without answering it and proves a
+// second connection cannot reach the Session while that review holds the slot.
+func (f *removalReviewFixture) pending(t *testing.T, n int) {
+	t.Helper()
+	before := len(f.out.responses(t))
+	v2Send(t, f.c, f.frame(n))
+	if got := len(f.out.responses(t)); got != before {
+		t.Fatal("passkey-remove answered before native approval")
+	}
+	if v := f.c.Snapshot().V2; v == nil || v.Type != "passkey-remove" || v.ID != reqID(n) {
+		t.Fatalf("no exact native review: %#v", v)
+	}
+	busy := v2Handle(t, f.other, f.otherOut, map[string]any{"v": 1, "id": reqID(n + 1), "type": "passkey-remove", "capability": f.otherCap, "item_id": f.itemID, "revision": f.revision, "credential_id": f.cred})
+	if busy.Type != "error" || f.other.Snapshot().V2 != nil {
+		t.Fatalf("pending removal review did not hold the mutation slot: %#v", busy)
+	}
+}
+
+func newRemovalReviewFixture(t *testing.T) *removalReviewFixture {
+	t.Helper()
+	c, out, s, capability, itemID, revision, credential := fixturePasskey(t)
+	t.Cleanup(c.Close)
+	other, otherOut, otherCap := pairedToSession(t, s)
+	t.Cleanup(other.Close)
+	return &removalReviewFixture{c: c, out: out, s: s, cap: capability, itemID: itemID, revision: revision, cred: credential, other: other, otherOut: otherOut, otherCap: otherCap}
+}
+
+// expectSlotReleased proves the shared Session can take a fresh registration,
+// so the ended review left no mutation slot behind.
+func expectSlotReleased(t *testing.T, s *personal.Session, label string) {
+	t.Helper()
+	probe := personal.NewMutationGate(time.Now().Add(time.Minute))
+	if err := s.RegisterMutation(probe); err != nil {
+		t.Fatalf("%s: review left the mutation slot occupied: %v", label, err)
+	}
+	s.ReleaseMutation(probe)
+}
+
+func TestPasskeyRemovalReviewRejectReleasesMutationSlot(t *testing.T) {
+	f := newRemovalReviewFixture(t)
+	f.pending(t, 100)
+	if err := f.c.RejectV2(reqID(100)); err != nil {
+		t.Fatal(err)
+	}
+	if v := f.c.Snapshot(); v.V2 != nil || !v.Paired {
+		t.Fatalf("reject left a review or revoked pairing: %#v", v)
+	}
+	expectSlotReleased(t, f.s, "reject")
+}
+
+// TestPasskeyRemovalReviewInvalidateReleasesSharedSessionSlot covers a
+// brokered connection: Invalidate detaches its own Session pointer before it
+// clears the review, so only the Session captured at reservation can give the
+// shared mutation slot back.
+func TestPasskeyRemovalReviewInvalidateReleasesSharedSessionSlot(t *testing.T) {
+	f := newRemovalReviewFixture(t)
+	f.c.desktopShared = true
+	f.pending(t, 110)
+	f.c.Invalidate()
+	if v := f.c.Snapshot(); v.V2 != nil || v.Paired || f.c.session.Load() != nil {
+		t.Fatalf("invalidate left a review or session: %#v", v)
+	}
+	expectSlotReleased(t, f.s, "invalidate")
 }
 
 func pairedToSession(t *testing.T, s *personal.Session) (*Connection, *memoryPipe, string) {
