@@ -251,7 +251,7 @@ func (b *Broker) neverOrigins() []string {
 func (b *Broker) serve(conn net.Conn) {
 	defer conn.Close()
 	peer, e := authenticatedPeer(conn)
-	if e != nil || !peerProcessAllowed(peer) {
+	if e != nil {
 		return
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
@@ -306,7 +306,7 @@ func validHelloForOS(hello BrokerHello, goos string) bool {
 }
 
 func (b *Broker) serveBrowser(conn net.Conn, peer Peer, hello BrokerHello) {
-	if !validHello(hello) {
+	if !validHello(hello) || !peerProcessAllowed(peer) {
 		return
 	}
 	writer := NewNativeWriter(conn, 250*time.Millisecond, func() { _ = conn.Close() })
