@@ -100,6 +100,7 @@ type App struct {
 	audit                                          []personal.Event
 	report                                         string
 	source, planDigest, exportPath, exportPassword string
+	importFull                                     bool
 
 	// M2.4 desktop v2 state. It is reset on lock and never survives a
 	// session boundary; settings are non-secret and survive lock.
@@ -126,6 +127,7 @@ func New() *App {
 	a.v2 = newV2State()
 	a.refreshClipboardClearSeconds(a.settings)
 	a.onevra = newOnevraUI()
+	a.importFull = true
 	return a
 }
 func (a *App) run(work func() outcome) { a.runContext(func(context.Context) outcome { return work() }) }
@@ -910,25 +912,59 @@ func (a *App) healthView(c *ui.Context) {
 	ui.Text(c, a.report)
 }
 func (a *App) transferView(c *ui.Context) {
-	ui.Text(c, "1PUX 登录及纯文本备注导入：不支持的数据整批拒绝；来源记录保留旧值。").Bold()
+	ui.Text(c, "1Password 1PUX 导入：默认登录及纯文本备注，可选择完整类别（实验）；不支持的数据整批拒绝，来源记录保留旧值。").Bold()
 	ui.TextInput(c, &a.source).Label("1PUX 文件").Placeholder("1PUX 归档完整路径").Disabled(a.busy)
-	ui.Button(c, "生成导入计划").Disabled(a.busy).OnClick(func() {
-		s, source := a.session, a.source
+	ui.Button(c, "选择 1PUX 文件…").Disabled(a.busy).OnClick(func() {
+		win := a.win
+		a.run(func() outcome {
+			paths, e := mygo.Dialog.Open(mygo.OpenDialogOptions{Parent: win, Title: "选择 1Password 1PUX", Filters: []mygo.FileFilter{{Name: "1Password 1PUX", Extensions: []string{"1pux"}}}})
+			return outcome{err: e, apply: func() {
+				if len(paths) == 1 {
+					a.source = paths[0]
+					a.planDigest = ""
+					a.report = ""
+				}
+			}}
+		})
+	})
+	ui.Checkbox(c, &a.importFull, "完整类别（含卡片/身份/笔记，实验）").Disabled(a.busy).OnChange(func() {
+		a.planDigest = ""
+		a.report = ""
+	})
+	ui.Text(c, "1Password 7 的 .opvault 目录不能直接导入；请先在 1Password 中导出为 .1pux。").FontSize(12)
+	ui.Text(c, "1PUX 是未加密导出文件；导入完成后请安全删除。").FontSize(12)
+	ui.Button(c, "生成导入计划").Disabled(a.busy || strings.TrimSpace(a.source) == "").OnClick(func() {
+		s, source, full := a.session, a.source, a.importFull
 		a.planDigest = ""
 		a.run(func() outcome {
-			r, e := s.PlanImport(source)
+			var r personal.ImportReceipt
+			var e error
+			if full {
+				r, e = s.PlanImportV2(source)
+			} else {
+				r, e = s.PlanImport(source)
+			}
 			return outcome{err: e, apply: func() {
 				a.planDigest = r.Report.SourceDigest
-				a.report = fmt.Sprintf("待导入 %d 条，归档 %d 条", r.Report.Items, r.Report.Archived)
+				mode := "登录与备注"
+				if full {
+					mode = "完整类别"
+				}
+				a.report = fmt.Sprintf("%s：待导入 %d 条，归档 %d 条", mode, r.Report.Items, r.Report.Archived)
 			}}
 		})
 	})
 	ui.Text(c, a.report)
 	ui.Button(c, "确认整批导入").Disabled(a.busy || a.planDigest == "").OnClick(func() {
-		s, source, digest := a.session, a.source, a.planDigest
+		s, source, digest, full := a.session, a.source, a.planDigest, a.importFull
 		a.planDigest = ""
 		a.run(func() outcome {
-			_, e := s.Import(source, digest)
+			var e error
+			if full {
+				_, e = s.ImportV2(source, digest)
+			} else {
+				_, e = s.Import(source, digest)
+			}
 			return outcome{err: e, apply: func() { a.status = "导入完成，请到金库刷新" }}
 		})
 	})

@@ -32,6 +32,17 @@ Go TOTP 核心已通过 RFC 6238/4226 向量，支持有限的 Base32/otpauth �
 
 在交互终端输入个人库双因素，并输入 `SCAN` 确认。命令只读检查不超过 8 MiB 的普通归档文件；输出条目/附件/登录字段/密码历史计数及固定待核对原因，不输出源标题或字段值，也不会导入数据。检查结果先记入个人库审计，提交后才输出报告和摘要回执。源 1PUX 仍是明文，命令不负责清除原文件；报告成功不表示可无损迁移。事务、恢复和平台边界见[个人预检验收](docs/personal-onepux-inspection-validation.md)。
 
+## 从 1Password 迁移（桌面）
+
+当前桌面支持 **1Password 8 的 `.1pux` 导出**：
+
+1. 在 1Password 中选择目标金库，使用“导出 → 1PUX”生成文件。`.1pux` 是**明文**归档，请放到仅自己可读的目录；导入完成后删除原文件。
+2. Locklark 完整解锁后进入“导入与导出”，点“选择 1PUX 文件…”。
+3. 默认勾选“完整类别（含卡片/身份/笔记，实验）”，再点“生成导入计划”；核对条目/归档计数后点“确认整批导入”。
+4. 导入是整批原子的：计划不改库，源文件变化会使旧计划失效，不支持的数据整批拒绝；原始来源旧值会加密保留在导入记录里。
+
+取消“完整类别”可回到更窄的登录及纯文本备注 profile。**1Password 7 的 `.opvault` 本地目录和 `.1pif` 导出当前不支持**，不能把它们称为已可迁移；需要另做 importer 和真实来源验收。1PUX 的字段/类别边界见[导入验收](docs/personal-import-validation.md)。
+
 ## 按字段引用操作
 
 离线插件包可用 `plugin inspect/install/list/audit/revoke` 管理，安装要求独立核对的发布者公钥、可信 pins 文件、已检查包的 digest 和当前目录 checkpoint。升级必须数值版本递增，撤销 ID 在该目录永久禁用；所有状态仍为 `execution: disabled`。安装不运行脚本、不下载依赖、不授予工具能力，见[签名插件目录与命令](docs/signed-plugin-catalog-validation.md)。
@@ -356,7 +367,7 @@ go test -count=1 ./internal/vault -run 'TestKDBXIndependentPeer|TestIndependentN
 
 ### 原生桌面（开发版）
 
-使用 Go 1.27.3 运行 `go run ./cmd/locklark-desktop` 可启动开发版。界面由 MyGo 原生 UI 渲染，当前为三栏 Onevra 布局（[桌面 UI 规范](docs/desktop-onevra-ui.md)），支持创建/解锁个人金库、标题搜索、逐字段显示/复制、编辑、归档/回收站、审计、体检和现有基本登录导入/加密导出。首次使用主密码与 Secret Key；解锁后在安全设置主动启用系统快捷解锁。Windows 使用 Passport KSP 的 Hello 私钥操作；Linux 使用 Secret Service。**macOS 的 Touch ID / 系统快捷解锁必须使用签名后的 `.app`**：`go run` / `go build` 产物是 ad-hoc 裸二进制，没有 `keychain-access-groups`，带 `SecAccessControl` 的钥匙串写入会返回 `-34018`，只能完整解锁。用 `mygo.config.ts` + `scripts/macos_release.sh` 生成 Developer ID 签名的 `.app`，步骤与安全边界见 [macOS 签名与 Touch ID](macos/README.md)。系统服务不可用时回到完整解锁，没有明文文件替代存储。
+使用 Go 1.27.3 运行 `go run ./cmd/locklark-desktop` 可启动开发版。界面由 MyGo 原生 UI 渲染，当前为三栏 Onevra 布局（[桌面 UI 规范](docs/desktop-onevra-ui.md)），支持创建/解锁个人金库、标题搜索、逐字段显示/复制、编辑、归档/回收站、审计、体检、1PUX 迁移导入和 KDBX 加密导出。首次使用主密码与 Secret Key；解锁后在安全设置主动启用系统快捷解锁。Windows 使用 Passport KSP 的 Hello 私钥操作；Linux 使用 Secret Service。**macOS 的 Touch ID / 系统快捷解锁必须使用签名后的 `.app`**：`go run` / `go build` 产物是 ad-hoc 裸二进制，没有 `keychain-access-groups`，带 `SecAccessControl` 的钥匙串写入会返回 `-34018`，只能完整解锁。用 `mygo.config.ts` + `scripts/macos_release.sh` 生成 Developer ID 签名的 `.app`，步骤与安全边界见 [macOS 签名与 Touch ID](macos/README.md)。系统服务不可用时回到完整解锁，没有明文文件替代存储。
 
 可用窗口或托盘中的“快捷搜索”，也可用 `Ctrl+Shift+L`（macOS 为 `⌘⇧L`）唤起。输入标题后按 Enter 查询活动登录，用 Tab 和 Enter 选定条目，再明确显示或复制字段。Escape 关闭搜索并保留原编辑草稿；锁定时只显示解锁界面，忙操作期间只唤起窗口。系统可能需要允许全局快捷键，窗口按钮始终可用。使用与验证范围见 [快捷搜索验收](docs/desktop-quick-search-validation.md)。
 
