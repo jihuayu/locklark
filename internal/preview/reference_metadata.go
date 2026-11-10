@@ -18,12 +18,16 @@ var ErrFixtureReferenceMetadata = errors.New("invalid synthetic native reference
 
 const fixtureReferenceRevision = "snapshot-signature-v1:"
 
+// Fixture metadata keeps its original 4 MiB budget. The larger vault snapshot
+// budget is for imported vaults, not for this synthetic preview profile.
+const fixtureReferenceMetadataLimit = 4 << 20
+
 // ProjectFixtureReferenceMetadata supports only the built-in native fixture
 // profile. The caller must authenticate the metadata, items and snapshot
 // signature together. A signature-shaped string does not establish trust.
 // Private native values are never read or reinserted into the source layout.
 func ProjectFixtureReferenceMetadata(metadata []byte, items []vault.Item, snapshotSignature string) ([]reference.Vault, error) {
-	if len(metadata) > vault.MaxPayload {
+	if len(metadata) > fixtureReferenceMetadataLimit {
 		return nil, reference.ErrLimit
 	}
 	var m nativeMeta

@@ -26,6 +26,7 @@ test("real directory → Go broker → Next.js → browser stays read-only and p
   expect(csp).toContain("'nonce-");
   expect(csp).not.toContain("unsafe-inline");
   await expect(page.getByRole("heading", { name: "欢迎回来" })).toBeVisible();
+  await expect(page.getByText("已输入 0 / 64 位")).toBeVisible();
   await page.screenshot({ path: ".test-state/connect.png", fullPage: true });
   const anonymous = await request.get("/api/summary");
   expect(anonymous.status()).toBe(401);
@@ -39,6 +40,7 @@ test("real directory → Go broker → Next.js → browser stays read-only and p
   });
   expect(evilHost.status()).toBe(403);
   await page.getByLabel("本机连接码").fill(config.code);
+  await expect(page.getByText("已输入 64 / 64 位")).toBeVisible();
   await page.getByRole("button", { name: "连接管理界面", exact: true }).click();
   await expect(
     page.getByRole("heading", { name: "概览", exact: true }),
@@ -96,7 +98,8 @@ test("real directory → Go broker → Next.js → browser stays read-only and p
   await expect(page.locator("tbody tr")).toHaveCount(2);
   await page.getByLabel("搜索成员 ID").fill("nomatch");
   await expect(page.getByText("没有匹配的成员")).toBeVisible();
-  await page.getByLabel("搜索成员 ID").fill("");
+  await page.getByRole("button", { name: "清除筛选条件" }).click();
+  await expect(page.locator("tbody tr")).toHaveCount(2);
   await page.getByRole("button", { name: "设备", exact: true }).click();
   await expect(page.locator("tbody tr")).toHaveCount(2);
   await page.setViewportSize({ width: 390, height: 844 });

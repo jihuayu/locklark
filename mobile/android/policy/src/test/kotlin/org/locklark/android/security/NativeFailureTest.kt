@@ -29,4 +29,13 @@ class NativeFailureTest {
         assertEquals(NativeAuthError.NO_DEVICE_CREDENTIAL, NativeFailures.authError(14))
         assertSame(failure, NativeFailures.failure(NativePhase.OPERATION, failure))
     }
+
+    @Test fun userFacingFailureAndPhaseCopyRemainsDistinctAndNonEmpty() {
+        val codeTexts = NativeFailureCode.entries.map { it.userText }
+        assertTrue(codeTexts.all { it.isNotBlank() && it.endsWith("。") })
+        assertEquals(codeTexts.size, codeTexts.toSet().size)
+        val phaseTexts = NativePhase.entries.map { it.userText }
+        assertTrue(phaseTexts.all { it.isNotBlank() })
+        assertEquals(phaseTexts.size, phaseTexts.toSet().size)
+    }
 }

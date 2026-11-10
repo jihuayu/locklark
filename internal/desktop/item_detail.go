@@ -439,14 +439,16 @@ func (a *App) largeTypeView(c *ui.Context) {
 	if !a.v2.largeTypeOpen {
 		return
 	}
-	ui.Column(c.Key("large-type")).Role(ui.RoleGroup).Label("Large Type").Gap(8).Children(func() {
-		ui.Text(c, "Large Type · "+a.v2.largeTypeLabel).FontSize(22).Bold()
+	ui.Column(c.Key("large-type")).Role(ui.RoleGroup).Label("大号显示").Gap(10).Children(func() {
+		ui.Text(c, "大号显示 · "+a.v2.largeTypeLabel).FontSize(22).Bold()
+		ui.Text(c, "逐字核对长密码或一次性验证码；关闭后将立即从界面清除。").FontSize(12)
 		ui.Text(c, a.v2.largeTypeValue).FontSize(30).Bold()
 		positions := make([]string, 0, len([]rune(a.v2.largeTypeValue)))
 		for i := range []rune(a.v2.largeTypeValue) {
 			positions = append(positions, fmt.Sprintf("%d", i+1))
 		}
 		ui.Text(c, strings.Join(positions, " ")).FontSize(12)
-		ui.Button(c, "Close Large Type").OnClick(a.closeLargeType)
+		ui.Button(c, "关闭大号显示").OnClick(a.closeLargeType)
 	})
 }
+

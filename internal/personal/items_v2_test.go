@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -494,6 +495,68 @@ func TestSessionV2ReferencesResolveCustomSectionsAndStructuredFields(t *testing.
 	if _, err := s.Audit(); err != nil {
 		t.Fatalf("journal after reference operations failed: %v", err)
 	}
+}
+
+func TestSessionV2ImportLargeArchive(t *testing.T) {
+	s, _, _ := v2Session(t)
+	source := filepath.Join(t.TempDir(), "large.1pux")
+	if err := os.WriteFile(source, v2LargeImportArchive(t, 300), 0600); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := s.PlanImportV2(source)
+	if err != nil || plan.Report.Items != 300 || plan.Report.Profile != onepux.FullProfileV2 {
+		t.Fatalf("large v2 plan failed: %+v %v", plan, err)
+	}
+	receipt, err := s.ImportV2(source, plan.Report.SourceDigest)
+	if err != nil || receipt.Status != "imported-"+onepux.FullProfileV2 {
+		t.Fatalf("large v2 import failed: %+v %v", receipt, err)
+	}
+	rows, err := s.ListByFilter(ItemFilter{State: "all"})
+	if err != nil || len(rows) != 300 {
+		t.Fatalf("large import rows = %d, %v", len(rows), err)
+	}
+}
+
+func v2LargeImportArchive(t *testing.T, count int) []byte {
+	t.Helper()
+	items := make([]any, 0, count)
+	for i := 0; i < count; i++ {
+		items = append(items, map[string]any{
+			"uuid": fmt.Sprintf("login-%03d", i), "categoryUuid": "001", "state": "active",
+			"overview": map[string]any{"title": fmt.Sprintf("Imported Login %03d", i), "url": "https://example.test/login"},
+			"details": map[string]any{"loginFields": []any{
+				map[string]any{"designation": "username", "fieldType": "T", "value": fmt.Sprintf("user-%03d", i)},
+				map[string]any{"designation": "password", "fieldType": "P", "value": fmt.Sprintf("pass-%03d", i)},
+			}},
+		})
+	}
+	data, err := json.Marshal(map[string]any{"accounts": []any{map[string]any{"attrs": map[string]any{"uuid": "a"}, "vaults": []any{map[string]any{"attrs": map[string]any{"uuid": "v"}, "items": items}}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	z := zip.NewWriter(&out)
+	for _, file := range [][2]string{
+		{"export.attributes", `{"version":3,"description":"1Password Unencrypted Export","createdAt":0}`},
+		{"export.data", string(data)},
+		{"files/", ""},
+	} {
+		header := &zip.FileHeader{Name: file[0], Method: zip.Store}
+		if file[0] == "files/" {
+			header.SetMode(os.ModeDir | 0700)
+		}
+		w, err := z.CreateHeader(header)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = w.Write([]byte(file[1])); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := z.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return out.Bytes()
 }
 
 func v2ImportArchive(t *testing.T) []byte {

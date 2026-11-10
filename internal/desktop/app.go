@@ -695,7 +695,7 @@ func (a *App) lockView(c *ui.Context) {
 			heading = "创建离线金库"
 		}
 		ui.Text(c, heading).FontSize(28).Bold()
-		ui.Text(c, "主密码与 Secret Key 仅在本机原生窗口输入。")
+		ui.Text(c, "主密码与 Secret Key 仅在本机原生窗口输入，全程离线完成派生与加解密。")
 		ui.TextInput(c, &a.path).Label("金库文件").Placeholder("金库文件的完整路径").Disabled(a.busy)
 		ui.Button(c, "选择金库位置…").Disabled(a.busy).OnClick(a.chooseVault)
 		ui.TextInput(c, &a.password).Label("主密码").Placeholder("主密码").Password().Disabled(a.busy)
@@ -712,8 +712,8 @@ func (a *App) lockView(c *ui.Context) {
 					clear(key)
 				})
 			} else {
-				ui.Text(c, "请离线抄写这份密钥，遗失后无法仅凭主密码恢复：")
-				ui.Text(c, a.issued).FontSize(17)
+				ui.Text(c, "请立即离线备份此 Secret Key；一旦遗失，无法仅凭主密码恢复金库：")
+				ui.Text(c, a.issued).FontSize(17).Bold()
 			}
 		}
 		ui.TextInput(c, &a.secret).Label("Secret Key").Placeholder("LL1-…（创建时重新输入已保存密钥）").Password().Disabled(a.busy)
@@ -722,7 +722,7 @@ func (a *App) lockView(c *ui.Context) {
 		} else {
 			ui.PrimaryButton(c, "解锁").Disabled(a.busy).OnClick(a.unlock)
 			ui.Button(c, "使用"+osunlock.Label()+"解锁").Disabled(a.busy || a.path == "").OnClick(a.systemUnlock)
-			ui.Text(c, "需先完整解锁并在安全设置启用；失败时可继续使用主密码与 Secret Key。")
+			ui.Text(c, "首次或过期后需先完整解锁并在「安全设置」中启用快捷解锁；验证失败时可随时使用主密码与 Secret Key。").FontSize(12)
 			ui.Text(c, osunlock.Requirement()).FontSize(12)
 		}
 		label := "创建新金库"
@@ -834,7 +834,7 @@ func (a *App) itemsView(c *ui.Context) {
 					ui.Button(c, "恢复条目").Disabled(a.busy).OnClick(func() { a.state("item.untrash") })
 					return
 				}
-				ui.Text(c, "以下操作会记录审计。复制内容可能被系统剪贴板历史保留。")
+				ui.Text(c, "所有显示与复制操作均记录本地审计；复制内容可能被系统剪贴板历史保留。").FontSize(12)
 				ui.Row(c).Gap(8).Children(func() {
 					ui.Button(c, "显示备注").Disabled(a.busy).OnClick(func() { a.disclose("notes", "show") })
 					ui.Button(c, "复制备注").Disabled(a.busy).OnClick(func() { a.disclose("notes", "copy") })
@@ -858,7 +858,7 @@ func (a *App) itemsView(c *ui.Context) {
 					ui.Column(c).Role(ui.RoleGroup).Label("已授权显示的字段").Children(func() { ui.Text(c, a.display) })
 					ui.Button(c, "立即隐藏").OnClick(func() { a.exposureGeneration++; a.hideDisplay() })
 				}
-				ui.Text(c, "更新一个字段（原值不预填）：")
+				ui.Text(c, "更新单个字段（不预填原值，保存后旧值归入修订历史）：").Bold()
 				ui.Row(c).Gap(6).Children(func() {
 					for _, field := range []string{"title", "username", "password", "otp", "url"} {
 						field := field
@@ -883,7 +883,7 @@ func (a *App) itemsView(c *ui.Context) {
 func (a *App) addView(c *ui.Context) {
 	ui.Text(c, "新建登录").FontSize(22).Bold()
 	ui.TextInput(c, &a.title).Label("登录标题").Placeholder("标题").Disabled(a.busy)
-	ui.TextInput(c, &a.website).Label("网站（可选）").Disabled(a.busy)
+	ui.TextInput(c, &a.website).Label("网站（可选）").Placeholder("https://example.com").Disabled(a.busy)
 	ui.TextInput(c, &a.username).Label("新登录用户名").Placeholder("用户名").Password().Disabled(a.busy)
 	ui.TextInput(c, &a.value).Label("新登录密码").Placeholder("密码").Password().Disabled(a.busy)
 	ui.PrimaryButton(c, "保存登录").Disabled(a.busy || strings.TrimSpace(a.title) == "").OnClick(a.add)
@@ -891,6 +891,8 @@ func (a *App) addView(c *ui.Context) {
 	ui.Button(c, "生成强密码并保存").Disabled(a.busy || strings.TrimSpace(a.title) == "").OnClick(func() { a.saveNative(true) })
 }
 func (a *App) activityView(c *ui.Context) {
+	ui.Text(c, "安全审计日志").FontSize(20).Bold()
+	ui.Text(c, "记录所有解锁、显示、复制、自动填充、SSH 签名与 CLI 授权事件。").FontSize(12)
 	ui.Button(c, "刷新活动").Disabled(a.busy).OnClick(func() {
 		s := a.session
 		a.run(func() outcome { events, e := s.Audit(); return outcome{err: e, apply: func() { a.audit = events }} })
@@ -904,7 +906,8 @@ func (a *App) activityView(c *ui.Context) {
 	})
 }
 func (a *App) healthView(c *ui.Context) {
-	ui.Text(c, "本地规则体检，不查询泄露库；没有发现问题不表示密码安全。")
+	ui.Text(c, "本地安全体检").FontSize(20).Bold()
+	ui.Text(c, "基于本地离线规则检测弱密码、重复密码与未启用 2FA 的登录条目，不发起任何联网查询。")
 	ui.Button(c, "确认扫描活动登录").Disabled(a.busy).OnClick(func() {
 		s := a.session
 		a.run(func() outcome {
@@ -923,7 +926,7 @@ func importDirectory() string {
 }
 
 func (a *App) transferView(c *ui.Context) {
-	ui.Text(c, "1Password 1PUX 导入：默认登录及纯文本备注，可选择完整类别（实验）；不支持的数据整批拒绝，来源记录保留旧值。").Bold()
+	ui.Text(c, "1Password 1PUX 导入：默认导入登录与纯文本备注，可选完整类别（实验）；不支持的数据将整批原子拒绝，来源记录加密保留。").Bold()
 	ui.TextInput(c, &a.source).Label("1PUX 文件").Placeholder("1PUX 归档完整路径").Disabled(a.busy)
 	ui.Button(c, "选择 1PUX 文件…").Disabled(a.busy).OnClick(func() {
 		win := a.win
@@ -1012,7 +1015,7 @@ func (a *App) transferView(c *ui.Context) {
 			return outcome{err: e, apply: func() { a.status = "导入完成，请到金库刷新" }}
 		})
 	})
-	ui.Text(c, "导出所有状态的条目与来源旧值，使用独立密码加密为 KDBX。").Bold()
+	ui.Text(c, "KDBX 加密导出：导出所有状态条目及来源元数据，使用独立导出密码加密。").Bold()
 	ui.TextInput(c, &a.exportPath).Label("导出路径").Placeholder("新的 .kdbx 完整路径")
 	ui.TextInput(c, &a.exportPassword).Label("独立导出密码").Placeholder("至少 12 字符的独立导出密码").Password()
 	ui.Button(c, "确认加密导出").Disabled(a.busy).OnClick(func() {
@@ -1121,13 +1124,13 @@ func (a *App) securityView(c *ui.Context) {
 	ui.Text(c, "快捷搜索："+quickSearchAcceleratorLabel()).Bold()
 	shortcut := a.quickShortcut
 	if shortcut == "" {
-		shortcut = "全局快捷键尚未提交注册；可使用窗口的快捷搜索按钮。"
+		shortcut = "全局快捷键尚未提交注册；可使用窗口顶部的「快捷搜索」按钮。"
 	}
 	ui.Text(c, shortcut)
 	ui.Text(c, "快捷解锁："+osunlock.Label()).Bold()
 	ui.Text(c, osunlock.Description())
 	ui.Text(c, osunlock.Requirement()).FontSize(12)
-	ui.Text(c, "首次或到期后使用主密码与 Secret Key 完整解锁，再主动启用。系统验证失败时保留完整解锁入口。")
+	ui.Text(c, "首次或授权到期后需使用主密码与 Secret Key 完整解锁，再主动启用；系统验证失败时仍可通过完整凭据解锁。")
 	ui.Button(c, "启用系统快捷解锁（有效期 24 小时）").Disabled(a.busy).OnClick(func() {
 		s, store := a.session, a.systemStore
 		a.run(func() outcome {
@@ -1140,8 +1143,9 @@ func (a *App) securityView(c *ui.Context) {
 			return outcome{err: personal.DisableSystemUnlock(path, store), apply: func() { a.status = "系统快捷解锁已停用" }}
 		})
 	})
-	ui.Text(c, "自动锁定：5 分钟未操作、锁屏、睡眠；退出时清除当前会话。")
+	ui.Text(c, "自动锁定策略：默认 5 分钟无操作、系统锁屏或休眠时自动锁定；退出应用时立即清除内存会话。")
 }
+
 
 func (a *App) chooseVault() {
 	win, create := a.win, a.create

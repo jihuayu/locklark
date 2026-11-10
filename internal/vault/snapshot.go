@@ -22,7 +22,7 @@ type Snapshot struct {
 	Database, Envelope, Signature []byte
 }
 
-const MaxPayload = 4 << 20
+const MaxPayload = 16 << 20
 
 var ErrSnapshot = errors.New("invalid or unexpected snapshot")
 

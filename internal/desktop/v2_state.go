@@ -54,10 +54,12 @@ type v2State struct {
 	draft       *ItemDraft
 
 	historyOpen    bool
+	settingsOpen   bool
 	showWatchtower bool
 	watchtower     *WatchtowerReport
 	watchtowerErr  string
 	ignored        map[string]bool
+
 
 	generator generatorState
 
@@ -244,6 +246,7 @@ func legacyRows(rows []personal.ItemSummary) []personal.Row {
 //	<category slug>            (e.g. "credit_card")
 func (a *App) navigate(target string) {
 	a.EnableV2()
+	a.v2.settingsOpen = false
 	target = strings.TrimSpace(target)
 	lower := strings.ToLower(target)
 	switch lower {
@@ -307,6 +310,7 @@ func (a *App) setCategoryFilter(category vault.ItemCategory) {
 
 func (a *App) FilterByCategory(category vault.ItemCategory) {
 	a.EnableV2()
+	a.v2.settingsOpen = false
 	a.setCategoryFilter(category)
 	a.touchActivity()
 	a.reloadV2(false)
@@ -325,10 +329,12 @@ func (a *App) setTagFilter(tag string) {
 
 func (a *App) FilterByTag(tag string) {
 	a.EnableV2()
+	a.v2.settingsOpen = false
 	a.setTagFilter(tag)
 	a.touchActivity()
 	a.reloadV2(false)
 }
+
 
 func (a *App) showAllItems()        { a.navigate(navAllItems) }
 func (a *App) showFavorites()       { a.navigate(navFavorites) }
@@ -809,3 +815,14 @@ func idleLockLabel(d time.Duration) string {
 	}
 	return fmt.Sprintf("%d 分钟未操作自动锁定", int(d/time.Minute))
 }
+
+func (a *App) openSettings() {
+	a.v2.settingsOpen = true
+	a.touchActivity()
+}
+
+func (a *App) closeSettings() {
+	a.v2.settingsOpen = false
+	a.touchActivity()
+}
+

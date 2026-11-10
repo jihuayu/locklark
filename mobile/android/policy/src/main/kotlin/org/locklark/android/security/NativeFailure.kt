@@ -2,10 +2,10 @@ package org.locklark.android.security
 
 /** Fixed user-facing categories. Never display a native exception body. */
 enum class NativeFailureCode(val userText: String) {
-    LOCKED("金库已锁定，请重新解锁。"), CLOSED("金库已关闭。"), INVALID("输入内容不符合要求。"),
-    CONFLICT("条目已变化，请刷新后核对。"), CANCELLED("操作已取消。"), UNKNOWN("结果未确认，请核实金库后再决定。"),
-    EXPIRED("本次显示授权已过期。"), UNAVAILABLE("金库或设备认证暂不可用，或完整因素未通过。"),
-    EXISTS("金库已存在，请用完整因素打开。"), CAPACITY("请先隐藏已有显示内容。"), OTHER("操作暂不可用。")
+    LOCKED("金库已锁定，请重新验证解锁。"), CLOSED("金库连接已关闭。"), INVALID("输入格式或长度不符合安全要求。"),
+    CONFLICT("凭据已被更新，请刷新列表后重试。"), CANCELLED("操作已取消。"), UNKNOWN("结果未确认，请核实金库状态后再操作。"),
+    EXPIRED("单次显示授权已到期，请重新读取。"), UNAVAILABLE("金库或本机认证暂不可用，或双因素验证未通过。"),
+    EXISTS("本机金库已存在，请使用完整双因素解锁。"), CAPACITY("当前已有展开的敏感字段，请先隐藏后再试。"), OTHER("当前操作暂不可用。")
 }
 enum class NativePhase(val userText: String) {
     OPERATION("操作"), CAPTURE("准备操作"), CREATE("创建金库"), UNLOCK("解锁"), REFRESH("刷新列表"),

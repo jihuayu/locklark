@@ -214,7 +214,7 @@ func TestInventoryTotalBudgetsAndZipFeatures(t *testing.T) {
 		e := int(binary.LittleEndian.Uint16(raw[at+30:]))
 		c := int(binary.LittleEndian.Uint16(raw[at+32:]))
 		if strings.HasPrefix(string(raw[at+46:at+46+n]), "files/") {
-			binary.LittleEndian.PutUint32(raw[at+24:], MaxEntry)
+			binary.LittleEndian.PutUint32(raw[at+24:], MaxEntry+1)
 		}
 		at += 46 + n + e + c
 	}

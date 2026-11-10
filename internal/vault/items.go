@@ -80,8 +80,12 @@ func xmlText(s string) bool {
 	}
 	return true
 }
+
+// MaxItems bounds one encrypted item snapshot.
+const MaxItems = 1024
+
 func validItems(items []Item, size int) bool {
-	if items == nil || len(items) > 256 {
+	if items == nil || len(items) > MaxItems {
 		return false
 	}
 	seen := map[string]bool{}
@@ -480,7 +484,7 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 	if !supportedGroup(g) || len(db.Content.Root.DeletedObjects) != 0 {
 		return nil, nil, ErrSnapshot
 	}
-	if len(g.Groups) != 0 || len(g.Entries) < 1 || len(g.Entries) > 257 || db.Content.InnerHeader == nil {
+	if len(g.Groups) != 0 || len(g.Entries) < 1 || len(g.Entries) > MaxItems+1 || db.Content.InnerHeader == nil {
 		return nil, nil, ErrSnapshot
 	}
 	var metadata []byte

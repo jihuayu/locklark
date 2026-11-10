@@ -466,48 +466,51 @@ func (a *App) settingsView(c *ui.Context) {
 	s := a.settingsSnapshot()
 	ui.Scroll(c).Fill().Children(func() {
 		ui.Column(c).Width(760).Gap(14).Children(func() {
-			ui.Text(c, "Security Settings").FontSize(24).Bold()
-			ui.Text(c, "Auto-lock").FontSize(18).Bold()
-			ui.Text(c, "Idle auto-lock (minutes) — security.autolock.minutes")
+			ui.Row(c).Gap(8).Children(func() {
+				ui.Text(c, "安全与偏好设置").FontSize(22).Bold().Grow(1)
+				ui.Button(c, "关闭设置").OnClick(a.closeSettings)
+			})
+			ui.Text(c, "自动锁定").FontSize(18).Bold()
+			ui.Text(c, "空闲自动锁定时间（分钟）— security.autolock.minutes").FontSize(12)
 			ui.Row(c).Gap(6).Children(func() {
 				for _, m := range AutoLockPresets {
 					m := m
-					label := fmt.Sprintf("%d", m)
+					label := fmt.Sprintf("%d 分钟", m)
 					if m == 0 {
-						label = "Never"
+						label = "从不"
 					}
-					button := ui.Button(c, "Auto-lock "+label)
+					button := ui.Button(c, label)
 					if s.AutoLockMinutes == m {
-						button = ui.PrimaryButton(c, "Auto-lock "+label)
+						button = ui.PrimaryButton(c, label)
 					}
 					button.OnClick(func() { _ = a.SetAutoLockMinutes(m) })
 				}
 			})
-			ui.Text(c, fmt.Sprintf("Current idle timeout: %s", durationLabel(s.AutoLockDuration())))
+			ui.Text(c, fmt.Sprintf("当前空闲自动锁定阈值：%s", durationLabel(s.AutoLockDuration())))
 			sleep := s.LockOnSleep
-			ui.Checkbox(c, &sleep, "Lock on sleep").OnChange(func() { _ = a.SetLockOnSleep(sleep) })
+			ui.Checkbox(c, &sleep, "系统休眠时自动锁定").OnChange(func() { _ = a.SetLockOnSleep(sleep) })
 			screen := s.LockOnScreenLock
-			ui.Checkbox(c, &screen, "Lock on screen lock").OnChange(func() { _ = a.SetLockOnScreenLock(screen) })
-			ui.Text(c, "Clipboard").FontSize(18).Bold()
-			ui.Text(c, "Clear copied secrets after (seconds) — security.clipboard.clearAfterSeconds")
+			ui.Checkbox(c, &screen, "屏幕锁定时自动锁定").OnChange(func() { _ = a.SetLockOnScreenLock(screen) })
+			ui.Text(c, "剪贴板防护").FontSize(18).Bold()
+			ui.Text(c, "复制敏感内容后尝试清理时间（秒）— security.clipboard.clearAfterSeconds").FontSize(12)
 			ui.Row(c).Gap(6).Children(func() {
 				for _, n := range ClipboardClearPresets {
 					n := n
-					label := fmt.Sprintf("%d s", n)
+					label := fmt.Sprintf("%d 秒", n)
 					if n == 0 {
-						label = "Never"
+						label = "从不"
 					}
-					button := ui.Button(c, "Clipboard "+label)
+					button := ui.Button(c, label)
 					if s.ClipboardClearSeconds == n {
-						button = ui.PrimaryButton(c, "Clipboard "+label)
+						button = ui.PrimaryButton(c, label)
 					}
 					button.OnClick(func() { _ = a.SetClipboardClearSeconds(n) })
 				}
 			})
-			ui.Text(c, fmt.Sprintf("Current clipboard timeout: %s", durationLabel(s.ClipboardClearDuration())))
+			ui.Text(c, fmt.Sprintf("当前剪贴板清理策略：%s", durationLabel(s.ClipboardClearDuration())))
 			reveal := s.RevealPasswords
-			ui.Checkbox(c, &reveal, "Reveal concealed fields by default").OnChange(func() { _ = a.SetRevealPasswords(reveal) })
-			ui.Text(c, "Settings are stored with 0600 permissions at "+a.settingsPath).FontSize(12)
+			ui.Checkbox(c, &reveal, "默认显示遮蔽字段").OnChange(func() { _ = a.SetRevealPasswords(reveal) })
+			ui.Text(c, "非敏感偏好设置以 0600 权限保存于 "+a.settingsPath).FontSize(12)
 			if a.status != "" {
 				ui.Text(c, a.status)
 			}
@@ -517,13 +520,14 @@ func (a *App) settingsView(c *ui.Context) {
 
 func durationLabel(d time.Duration) string {
 	if d <= 0 {
-		return "never"
+		return "从不"
 	}
 	if d%time.Minute == 0 {
-		return fmt.Sprintf("%d minutes", int(d/time.Minute))
+		return fmt.Sprintf("%d 分钟", int(d/time.Minute))
 	}
-	return fmt.Sprintf("%d seconds", int(d/time.Second))
+	return fmt.Sprintf("%d 秒", int(d/time.Second))
 }
+
 
 // normalizeThemeName is a small helper for future appearance controls and
 // keeps the accepted values in one place.

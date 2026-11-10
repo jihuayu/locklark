@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ll_bg_canvas">#F4F7FB</color>
+    <color name="ll_surface_card">#FFFFFF</color>
+    <color name="ll_surface_muted">#F8FAFC</color>
+    <color name="ll_surface_code">#0F172A</color>
+    <color name="ll_border_subtle">#DCE3EE</color>
+    <color name="ll_border_focus">#1A56DB</color>
+    <color name="ll_primary">#1A56DB</color>
+    <color name="ll_primary_disabled">#94A3B8</color>
+    <color name="ll_secondary_bg">#EEF2F8</color>
+    <color name="ll_secondary_border">#CBD5E1</color>
+    <color name="ll_danger_bg">#FFF1F2</color>
+    <color name="ll_danger_border">#FECDD3</color>
+    <color name="ll_danger_text">#BE123C</color>
+    <color name="ll_text_primary">#0F172A</color>
+    <color name="ll_text_secondary">#475569</color>
+    <color name="ll_text_muted">#64748B</color>
+    <color name="ll_text_on_primary">#FFFFFF</color>
+    <color name="ll_text_code">#F8FAFC</color>
+    <color name="ll_status_info_bg">#EFF6FF</color>
+    <color name="ll_status_info_border">#BFDBFE</color>
+    <color name="ll_status_info_text">#1E40AF</color>
+    <color name="ll_status_warn_bg">#FEF2F2</color>
+    <color name="ll_status_warn_border">#FECACA</color>
+    <color name="ll_status_warn_text">#991B1B</color>
+    <color name="ll_status_ok_bg">#ECFDF5</color>
+    <color name="ll_status_ok_border">#A7F3D0</color>
+    <color name="ll_status_ok_text">#065F46</color>
+</resources>
