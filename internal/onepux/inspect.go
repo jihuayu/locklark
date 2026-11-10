@@ -231,12 +231,40 @@ func readEntry(f *zip.File, limit int64, keep bool) ([]byte, int64, error) {
 		dst = &out
 	}
 	n, err := io.Copy(dst, io.LimitReader(r, limit+1))
-	closed := r.Close()
-	if n > limit {
-		return nil, 0, ErrLimit
+	if err != nil || n > limit {
+		clearBuffer(&out)
+		if n > limit {
+			return nil, 0, ErrLimit
+		}
+		return nil, 0, ErrInvalid
 	}
-	if err != nil || closed != nil || uint64(n) != f.UncompressedSize64 {
+	closed := r.Close()
+	if closed != nil || uint64(n) != f.UncompressedSize64 {
+		clearBuffer(&out)
 		return nil, 0, ErrInvalid
 	}
 	return out.Bytes(), n, nil
+}
+
+// readEntryBytes copies one entry into the retained buffer and returns the
+// bytes. The buffer only becomes owned by the caller on success; after a copy
+// error, an oversize entry or a length mismatch the partial bytes are wiped.
+func readEntryBytes(reader io.Reader, dst io.Writer, buf *bytes.Buffer, expected uint64, limit int64) ([]byte, int64, error) {
+	n, err := io.Copy(dst, io.LimitReader(reader, limit+1))
+	if err != nil || n > limit || uint64(n) != expected {
+		clearBuffer(buf)
+		if n > limit {
+			return nil, 0, ErrLimit
+		}
+		return nil, 0, ErrInvalid
+	}
+	return buf.Bytes(), n, nil
+}
+
+// clearBuffer wipes the retained entry bytes and empties the buffer. Rewinding
+// with Reset alone would let a later write overwrite a secret that was never
+// cleared, so the bytes are zeroed in place first.
+func clearBuffer(buf *bytes.Buffer) {
+	clear(buf.Bytes())
+	buf.Reset()
 }

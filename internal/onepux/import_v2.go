@@ -50,7 +50,11 @@ var categoryV2 = map[string]vault.ItemCategory{
 }
 
 // MapArchiveV2 maps every supported 1PUX v3 category into the Item Model v2.
-// MapLogins remains the narrow, byte-stable login profile.
+// MapLogins remains the narrow, byte-stable login profile. On failure, every
+// item appended so far and every archive entry buffered for attachments is
+// wiped before the error is returned. A successful result transfers item
+// ownership to the caller; the buffered entries are wiped and dropped, and the
+// caller's raw archive is never modified.
 func MapArchiveV2(raw []byte) (MappedLogins, error) {
 	inventory, err := Inspect(raw)
 	if err != nil {
@@ -62,11 +66,19 @@ func MapArchiveV2(raw []byte) (MappedLogins, error) {
 	if inventory.Items > vault.MaxItems {
 		return MappedLogins{}, ErrLimit
 	}
-	z, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
-	if err != nil {
-		return MappedLogins{}, ErrInvalid
+	out := MappedLogins{
+		Report: MappingReport{Profile: FullProfileV2, Items: inventory.Items},
+		Items:  make([]vault.Item, 0, inventory.Items),
 	}
 	files := map[string][]byte{}
+	// The buffered archive entries belong to this mapper: whatever happens,
+	// wipe and drop them before returning. Mapped attachments hold their own
+	// copies, so wiping never reaches items handed to the caller.
+	defer func() { releaseSourceFiles(files) }()
+	z, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
+	if err != nil {
+		return releaseMappedItems(&out), ErrInvalid
+	}
 	var root, attrs map[string]any
 	for _, f := range z.File {
 		if f.Mode().IsDir() {
@@ -75,7 +87,7 @@ func MapArchiveV2(raw []byte) (MappedLogins, error) {
 		if strings.HasPrefix(f.Name, "files/") {
 			data, _, e := readEntry(f, MaxEntry, true)
 			if e != nil {
-				return MappedLogins{}, e
+				return releaseMappedItems(&out), e
 			}
 			files[f.Name] = data
 			continue
@@ -85,12 +97,12 @@ func MapArchiveV2(raw []byte) (MappedLogins, error) {
 		}
 		data, _, e := readEntry(f, MaxJSON, true)
 		if e != nil {
-			return MappedLogins{}, e
+			return releaseMappedItems(&out), e
 		}
 		object, e := decodeObject(data)
 		clear(data)
 		if e != nil {
-			return MappedLogins{}, e
+			return releaseMappedItems(&out), e
 		}
 		if f.Name == "export.data" {
 			root = object
@@ -99,26 +111,25 @@ func MapArchiveV2(raw []byte) (MappedLogins, error) {
 		}
 	}
 	if root == nil || attrs == nil || extra(root, "accounts") || extra(attrs, "version", "description", "createdAt") {
-		return MappedLogins{}, ErrUnsupported
+		return releaseMappedItems(&out), ErrUnsupported
 	}
-	out := MappedLogins{Report: MappingReport{Profile: FullProfileV2, Items: inventory.Items}, Items: make([]vault.Item, 0, inventory.Items)}
 	for _, a := range root["accounts"].([]any) {
 		account := a.(map[string]any)
 		accountAttrs := account["attrs"].(map[string]any)
 		if extra(account, "attrs", "vaults") || extra(accountAttrs, "uuid", "accountName", "name", "avatar", "email", "domain") {
-			return MappedLogins{}, ErrUnsupported
+			return releaseMappedItems(&out), ErrUnsupported
 		}
 		for _, v := range account["vaults"].([]any) {
 			sourceVault := v.(map[string]any)
 			vaultAttrs := sourceVault["attrs"].(map[string]any)
 			if extra(sourceVault, "attrs", "items") || extra(vaultAttrs, "uuid", "desc", "avatar", "name", "type") {
-				return MappedLogins{}, ErrUnsupported
+				return releaseMappedItems(&out), ErrUnsupported
 			}
 			for _, i := range sourceVault["items"].([]any) {
 				source := i.(map[string]any)
 				item, e := mapArchiveItem(source, files)
 				if e != nil {
-					return MappedLogins{}, e
+					return releaseMappedItems(&out), e
 				}
 				identity, _ := json.Marshal([]any{accountAttrs["uuid"], vaultAttrs["uuid"], source["uuid"]})
 				h := sha256.Sum256(append([]byte(importItemDomain), identity...))
@@ -128,10 +139,10 @@ func MapArchiveV2(raw []byte) (MappedLogins, error) {
 				}
 				item.ImportSource, e = json.Marshal(map[string]any{"format": "locklark/1pux-source/v1", "attributes": attrs, "account": accountAttrs, "vault": vaultAttrs, "item": source})
 				if e != nil {
-					return MappedLogins{}, ErrInvalid
+					return releaseMappedItems(&out), ErrInvalid
 				}
 				if vault.ValidateItems(nil, []vault.Item{item}) != nil {
-					return MappedLogins{}, ErrLimit
+					return releaseMappedItems(&out), ErrLimit
 				}
 				if item.State == "archived" {
 					out.Report.Archived++
@@ -141,13 +152,24 @@ func MapArchiveV2(raw []byte) (MappedLogins, error) {
 		}
 	}
 	if vault.ValidateItems(nil, out.Items) != nil {
-		return MappedLogins{}, ErrLimit
+		return releaseMappedItems(&out), ErrLimit
 	}
-	return out, nil
+	// Ownership of out.Items transfers to the caller here; no later error can
+	// wipe them, so the transfer happens only at this final successful return.
+	mapped := MappedLogins{Report: out.Report, Items: out.Items}
+	out.Items = nil
+	return mapped, nil
 }
 
-func mapArchiveItem(source map[string]any, files map[string][]byte) (vault.Item, error) {
-	var err error
+func mapArchiveItem(source map[string]any, files map[string][]byte) (item vault.Item, err error) {
+	// Every failure path returns the zero value; the defer wipes whatever the
+	// item had already accumulated, including attachment copies.
+	defer func() {
+		if err != nil {
+			wipeItem(&item)
+			item = vault.Item{}
+		}
+	}()
 	reject := func() (vault.Item, error) { return vault.Item{}, ErrUnsupported }
 	code, ok := source["categoryUuid"].(string)
 	if !ok {
@@ -158,7 +180,7 @@ func mapArchiveItem(source map[string]any, files map[string][]byte) (vault.Item,
 		return reject()
 	}
 	state, _ := source["state"].(string)
-	item := vault.Item{Kind: string(cat), Category: cat}
+	item = vault.Item{Kind: string(cat), Category: cat}
 	switch state {
 	case "active":
 	case "archived":
@@ -445,10 +467,13 @@ func mapArchiveItem(source map[string]any, files map[string][]byte) (vault.Item,
 		if !strings.HasPrefix(attachmentPath, "files/") {
 			return reject()
 		}
-		content, found := files[attachmentPath]
+		buffered, found := files[attachmentPath]
 		if !found {
 			return reject()
 		}
+		// Own a copy: the buffered entry is wiped when mapping finishes, while
+		// the mapped attachment is handed to the caller.
+		content := bytes.Clone(buffered)
 		if expectedSize >= 0 && int64(len(content)) != expectedSize {
 			return reject()
 		}
