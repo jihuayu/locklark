@@ -8,7 +8,7 @@ set -uo pipefail
 
 cd "$(dirname "$0")"
 platform="${1:-linux/arm64}"
-image="${SPIKE_IMAGE:-golang:1.24-trixie}"
+image="${SPIKE_IMAGE:-golang:1.24-trixie@sha256:5835f052b784aa39f2fe9070def3568605c8bc3fcd810f10402066348b61e716}"
 
 exec docker run --rm --platform "$platform" \
   -v "$PWD":/src:ro -w /src \

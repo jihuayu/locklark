@@ -5,6 +5,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"runtime"
 )
 
 // The published github.com/apache/opendal-go-services/memory module only
@@ -13,6 +14,6 @@ import (
 // No other platform is supported by the official package, so we fail
 // loudly instead of shipping a fake in-process replacement.
 func main() {
-	fmt.Fprintf(os.Stderr, "opendal-spike/memory: official opendal-go-services/memory supports only linux/amd64 and linux/arm64; this build is %s/%s (unsupported)\n", os.Getenv("GOOS"), os.Getenv("GOARCH"))
+	fmt.Fprintf(os.Stderr, "opendal-spike/memory: official opendal-go-services/memory supports only linux/amd64 and linux/arm64; this build is %s/%s (unsupported)\n", runtime.GOOS, runtime.GOARCH)
 	os.Exit(3)
 }
