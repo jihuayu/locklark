@@ -22,6 +22,11 @@ import (
 // errTypedCreateCancelled is the fixed refusal for a missing SAVE confirmation.
 var errTypedCreateCancelled = errors.New("typed item creation cancelled")
 
+// The typed add-item input keeps its own smaller aggregate budget. Raising the
+// encrypted snapshot capacity for large 1PUX imports must not silently widen
+// this long-standing API limit.
+const maxTypedAttachmentAggregate = 4 << 20
+
 // createTypedPersonal reads the private typed input document, authenticates the
 // vault with both factors, asks for a SAVE confirmation and performs one gated
 // item creation. It returns only status, id and revision so the caller's JSON
@@ -138,7 +143,7 @@ func resolveTypedAttachments(item *vault.Item, requests []typedAttachmentRequest
 		}
 		item.Attachments[i].Content = content
 		aggregate += len(content) + len(request.fileName) + len(request.mimeType) + typedAttachmentMetaOverhead
-		if aggregate > vault.MaxPayload {
+		if aggregate > maxTypedAttachmentAggregate {
 			return errTypedInputRefused
 		}
 	}
