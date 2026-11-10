@@ -412,3 +412,73 @@ func TestUnauthenticatedLockIsRefused(t *testing.T) {
 		t.Fatal("authenticated lock did not reach the desktop")
 	}
 }
+
+// A valid capability lock must block every other shared connection before the
+// asynchronous App/UI lock dispatch runs. Disconnect and pipe failure paths
+// remain per-connection and are covered separately.
+func TestAuthenticatedLockBlocksOtherSharedConnectionsBeforeDispatch(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "shared-lock.ll")
+	key := bytes.Repeat([]byte{12}, 16)
+	if e := personal.Create(path, "fixture", key); e != nil {
+		t.Fatal(e)
+	}
+	s, e := personal.UnlockSession(path, []byte("fixture"), key, time.Minute)
+	if e != nil {
+		t.Fatal(e)
+	}
+	t.Cleanup(s.Lock)
+	id, e := s.AddLogin("Shared lock login", "shared-user", "shared-secret")
+	if e != nil {
+		t.Fatal(e)
+	}
+	rows, e := s.List("active")
+	if e != nil {
+		t.Fatal(e)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	b := NewBroker(BrokerCallbacks{RequestLock: func() {
+		close(entered)
+		<-release
+	}})
+	out1, out2 := &memoryPipe{}, &memoryPipe{}
+	c1 := NewDesktopConnection(NewWriter(out1, time.Second), nil)
+	c1.SetBroker(b)
+	if e := c1.BindDesktopSession(s, 3, true); e != nil {
+		t.Fatal(e)
+	}
+	c2 := NewDesktopConnection(NewWriter(out2, time.Second), nil)
+	c2.SetBroker(b)
+	if e := c2.BindDesktopSession(s, 3, true); e != nil {
+		t.Fatal(e)
+	}
+	cap1 := out1.responses(t)[0].Capability
+	cap2 := out2.responses(t)[0].Capability
+	finished := make(chan error, 1)
+	go func() {
+		finished <- c1.Handle(Request{V: 1, ID: reqID(500), Type: "lock", Capability: cap1})
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("lock callback was not reached")
+	}
+	if s.Unlocked() {
+		t.Fatal("lock did not synchronously block the shared session")
+	}
+	if e := c2.Handle(Request{V: 1, ID: reqID(501), Type: "item-get", Capability: cap2, ItemID: id, Revision: rows[0].Revision}); e != nil {
+		t.Fatal(e)
+	}
+	all := out2.responses(t)
+	if all[len(all)-1].Type != "error" {
+		t.Fatal("another paired connection disclosed after lock but before UI dispatch")
+	}
+	close(release)
+	select {
+	case e := <-finished:
+		if e != nil {
+			t.Fatal(e)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("lock request did not finish")
+	}
+}

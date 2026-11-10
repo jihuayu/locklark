@@ -533,6 +533,13 @@ func (c *Connection) Handle(r Request) error {
 		if !allowed {
 			return c.refuse(r.ID)
 		}
+		// Lock must revoke secret authority synchronously. The desktop's
+		// RequestLock callback dispatches UI work asynchronously, so relying on
+		// it alone would leave other paired connections able to disclose until
+		// the UI loop runs.
+		if s := c.session.Load(); s != nil {
+			s.RequestLock()
+		}
 		if c.broker != nil && c.broker.callbacks.RequestLock != nil {
 			c.broker.callbacks.RequestLock()
 		}
