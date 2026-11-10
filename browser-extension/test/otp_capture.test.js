@@ -552,6 +552,19 @@ test("Enter in the save banner commits the staged save", async () => {
   assert.equal(commit.mode, "new");
 });
 
+test("clicking the panel anchor keeps the capture panel open", async () => {
+  const h = makeHarness();
+  const image = h.image(OTPAUTH);
+  await h.runTimers();
+  assert.ok(h.panel(), "panel rendered");
+  h.document.dispatchEvent({
+    type: "click",
+    target: image,
+    isTrusted: true,
+  });
+  assert.ok(h.panel(), "clicking the anchored field must not dismiss it");
+});
+
 test("clicking outside the panel dismisses it", async () => {
   const h = makeHarness();
   h.image(OTPAUTH);
