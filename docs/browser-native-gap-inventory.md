@@ -58,7 +58,7 @@
 | 密码历史 | 新原生能力 `history-v1`：`item-history` 只回元数据，`item-restore-history` 按索引恢复并复核 revision | 已实现，Node + Go 测试；未在真实会话验证 |
 | Sign in with | 只做提供商**展示**识别（固定主机名白名单）；无 OAuth、不改变保存内容 | 部分实现，见[验证](browser-history-and-provider-validation.md) |
 
-因此下面的“建议顺序”现在只剩后续批次（密码历史、Sign in with 等）。
+因此下面的“建议顺序”只剩无法自包含的项（OAuth 绑定、SSH Agent、第三方便捷卡与 Masked Email、企业集成、agentic autofill）。
 
 ## 建议顺序
 
