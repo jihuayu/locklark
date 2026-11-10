@@ -565,18 +565,17 @@ test("a picker already open cannot be proven refused programmatically", async ()
   assert.equal(popup.state.evaluated.length, 0);
 });
 
-test("the real popup adapter exposes evaluation and physical Escape", () => {
+test("the real popup adapter exposes CDP evaluation", () => {
   // The picker-cancel journey dispatches a DOM `.click()` through the popup's
-  // own CDP Runtime and withdraws the trusted picker with a physical Escape.
-  // Dropping either adapter must fail here instead of silently skipping the
-  // real-browser proof.
+  // own CDP Runtime. Dropping that adapter must fail here instead of silently
+  // skipping the real-browser proof. The journey sends no physical Escape:
+  // closing the action popup would disconnect the same CDP target.
   const source = readFileSync(
     new URL("./browser_native_acceptance.mjs", import.meta.url),
     "utf8",
   );
   assert.match(source, /^\s*evaluate,$/m);
-  assert.match(source, /pressEscape: async \(\) => \{/);
-  assert.match(source, /type: "keyDown", key: "Escape"/);
+  assert.doesNotMatch(source, /pressEscape/);
 });
 
 test("native absence probes preserve popup focus across the journey", () => {
@@ -590,8 +589,8 @@ test("native absence probes preserve popup focus across the journey", () => {
     "utf8",
   );
   assert.doesNotMatch(source, /assertNoNative(Approval|ProfileReview)\(input\)/);
-  // The exact six probes the picker-cancel journey makes after its popup
-  // opens, all through the focused-preserving form.
+  // Every native absence probe the picker-cancel journey makes uses the
+  // focus-preserving form while its popup stays open.
   const journey = source.slice(
     source.indexOf("async function runPickerCancelJourney"),
     source.indexOf("export async function acceptCheckoutFrames"),
@@ -606,15 +605,9 @@ test("native absence probes preserve popup focus across the journey", () => {
     /title_prefix: NATIVE_TITLE_PREFIX,\n\s+preserve_focus: true,\n\s+inspect: true,/,
   );
   assert.match(source, /const NATIVE_TITLE_PREFIX = "Locklark";/);
-  // The withdraw comment must not claim Escape cancels the picker: the
-  // cancel control already did that.
-  const withdraw = source.slice(
-    source.indexOf('phase("checkout-picker-cancel:withdraw")'),
-  );
-  assert.doesNotMatch(
-    withdraw.slice(0, withdraw.indexOf("pressEscape")),
-    /Escape[^\n]*cancel/i,
-  );
+  // The journey never sends a physical Escape to its popup: closing the action
+  // popup would leave the held CDP object disconnected.
+  assert.doesNotMatch(journey, /pressEscape|checkout-picker-cancel:withdraw/);
 });
 
 test("checkout choice options are strictly bounded", async () => {

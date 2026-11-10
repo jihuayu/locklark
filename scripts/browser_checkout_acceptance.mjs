@@ -1131,37 +1131,10 @@ async function runPickerCancelJourney(driver, card, topOrigin) {
     },
     "Cancelled checkout picker still requests native approval",
   );
-  // The trusted picker was already cancelled by the "#checkout-cancel" click
-  // above. One physical Escape only leaves the card detail (returning to the
-  // vault); it is not what cancels the picker. Re-open the same card detail in
-  // this popup and prove a fresh picker still cannot be triggered
-  // programmatically.
-  phase("checkout-picker-cancel:withdraw");
-  assert(
-    typeof popup.pressEscape === "function",
-    "Popup must accept a physical Escape",
-  );
-  await popup.pressEscape();
-  await eventually(
-    async () => (await popup.visible("#checkout-picker")) === false,
-    "Checkout picker did not close on Escape",
-  );
-  await openCardDetail(popup, card, eventually);
-  phase("checkout-picker-cancel:withdrawn-programmatic-refused");
-  await assertProgrammaticClickRefused(popup, eventually);
-  assertNoNativeApproval(input, POPUP_OPEN);
-  assertNoNativeProfileReview(input, POPUP_OPEN);
-  await assertBothBlank(
-    page,
-    frameOrigin,
-    "Withdrawn checkout picker programmatic click wrote a value",
-  );
-  // The withdrawn picker left no candidate: a re-open must start from a
-  // blank picker panel rather than a stale list.
-  assert(
-    (await popup.count('#checkout-choices button')) === 0,
-    "Withdrawn checkout picker must keep no candidate",
-  );
+  // The trusted picker was cancelled by the "#checkout-cancel" click above,
+  // and the programmatic refusal was already proven on this popup. The same
+  // popup is kept: closing it by physical Escape would disconnect this CDP
+  // target, so no re-open or repeated refusal is checked here.
   assertNoNativeApproval(input, POPUP_OPEN);
   assertNoNativeProfileReview(input, POPUP_OPEN);
   // Give any stray native request time to surface before proving its absence.

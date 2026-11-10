@@ -383,16 +383,6 @@ try {
         await call("Page.close").catch(() => {});
         ws.close();
       },
-      // One physical Escape so the popup leaves the card detail view; the
-      // popup's own handler withdraws an unused picker and its candidate list.
-      pressEscape: async () => {
-        await call("Input.dispatchKeyEvent", {
-          type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27,
-        });
-        await call("Input.dispatchKeyEvent", {
-          type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27,
-        });
-      },
       ready: () =>
         evaluate(
           'document.readyState === "complete" && document.visibilityState === "visible" && document.hasFocus() && document.querySelector("#status")?.textContent.length > 0',
