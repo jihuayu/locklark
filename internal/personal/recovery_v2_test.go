@@ -388,3 +388,95 @@ func TestRecoveryStillRestoresPre99ArchiveShape(t *testing.T) {
 		t.Fatalf("pre-#99 restore changed the item: %+v", items)
 	}
 }
+
+// pre99Archive writes a backup whose body is re-signed using the exact
+// pre-#99 signed payload shape, without Vaults or attachment records.
+func pre99Archive(t *testing.T, src, pw string, key []byte, mutate func(*payload)) (string, string) {
+	t.Helper()
+	archive := filepath.Join(t.TempDir(), "pre99.llb")
+	kit, err := Backup(src, archive, pw, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := decodeArchive(archive, pw, key, kit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutate(p)
+	i := recoveryIdentity(t, src, pw, key)
+	legacy := legacyRecoveryPayload{Generation: p.Generation, Epoch: p.Epoch, Items: p.Items, Chains: p.Chains}
+	proofDigest, err := digest(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	priv := ed25519.NewKeyFromSeed(i.Audit)
+	defer clear(priv)
+	body, err := json.Marshal(legacySignedBackup{legacy, ed25519.Sign(priv, []byte(backupDomain+"/manifest/"+proofDigest))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	share := bytes.Repeat([]byte{0x71}, 32)
+	slot, err := account.Wrap(pw, key, make([]byte, 16), share)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := aeadBackup(share, kit, legacy.Generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(envelope{2, legacy.Generation, slot, a.Seal(nil, nil, body, []byte(backupDomain+"/"+legacy.Generation))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(archive, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(raw)
+	return archive, kit[:57] + "-" + b32.EncodeToString(sum[:])
+}
+
+func TestRecoveryRejectsItemsReferencingMissingSubVault(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "source.ll")
+	pw, key := "synthetic-recovery-orphan", bytes.Repeat([]byte{0x72}, 16)
+	s := recoveryV2Session(t, src, pw, key)
+	sub, err := s.CreateVault("Synthetic Orphan", "", "", v2Gate(t, s))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _, err := s.AddItem(vault.Item{
+		Kind:     "login",
+		Category: vault.CategoryLogin,
+		Title:    "Synthetic orphan login",
+		Username: "synthetic-orphan-user",
+		Password: "synthetic-orphan-password",
+		VaultID:  sub.ID,
+	}, v2Gate(t, s))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A pre-#99 archive never carried sub-vault metadata, yet an item may
+	// reference a custom VaultID. Restoring it would leave an orphan item that
+	// every later edit refuses with ErrMutationRefused.
+	archive, kit := pre99Archive(t, src, pw, key, func(p *payload) {
+		if len(p.Items) != 1 || p.Items[0].ID != id || p.Items[0].VaultID != sub.ID {
+			t.Fatalf("unexpected fixture items: %+v", p.Items)
+		}
+		p.Items[0].VaultID = sub.ID
+	})
+	raw, err := os.ReadFile(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(dir, "restored.ll")
+	if _, err = PrepareRestore(archive, dest, pw, key, kit); !errors.Is(err, ErrBackupMissingSubVault) {
+		t.Fatalf("orphan sub-vault reference was not refused explicitly: %v", err)
+	}
+	if _, err = os.Lstat(dest); !os.IsNotExist(err) {
+		t.Fatal("refused restore created a destination vault")
+	}
+	after, err := os.ReadFile(archive)
+	if err != nil || !bytes.Equal(raw, after) {
+		t.Fatal("refused restore modified the source backup")
+	}
+}

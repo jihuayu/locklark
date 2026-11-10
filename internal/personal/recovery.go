@@ -29,6 +29,7 @@ var ErrHistoryLimit = errors.New("backup exceeds history limit (32 segments)")
 var ErrLegacyRecovery = errors.New("legacy recovery format has no independent history checkpoint; create a new backup from a trusted source vault")
 var ErrRecoverySource = errors.New("backup does not match the independently saved recovery checkpoint")
 var ErrArchiveType = errors.New("backup source must be a regular file")
+var ErrBackupMissingSubVault = errors.New("backup references a custom sub-vault whose metadata is missing from the backup")
 
 // Chain is verification material only. Signatures are kept byte-for-byte.
 type Chain struct {
@@ -141,6 +142,28 @@ func applyBackupAttachments(p *payload) error {
 			return invalid
 		}
 		att.Content = []byte{}
+	}
+	return nil
+}
+
+// checkRecoveredVaultRefs refuses any item that targets a custom sub-vault
+// absent from the backup's vault directory. Restoring such an item would
+// succeed yet leave it uneditable behind the vaultExists check.
+func checkRecoveredVaultRefs(p *payload) error {
+	if len(p.Items) > vault.MaxItems || len(p.Vaults) > maxVaults {
+		return invalid
+	}
+	known := make(map[string]struct{}, len(p.Vaults))
+	for _, v := range p.Vaults {
+		known[strings.ToLower(v.ID)] = struct{}{}
+	}
+	for _, item := range p.Items {
+		if item.VaultID == "" || item.VaultID == vault.DefaultVaultID {
+			continue
+		}
+		if _, ok := known[strings.ToLower(item.VaultID)]; !ok {
+			return ErrBackupMissingSubVault
+		}
 	}
 	return nil
 }
@@ -407,6 +430,9 @@ func decodeArchive(path, pw string, key []byte, kit string) (*payload, error) {
 		return nil, e
 	}
 	if e = validateRecoveredVaults(p.Vaults); e != nil {
+		return nil, e
+	}
+	if e = checkRecoveredVaultRefs(p); e != nil {
 		return nil, e
 	}
 	if e = applyBackupAttachments(p); e != nil {
