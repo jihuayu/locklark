@@ -8,7 +8,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"filippo.io/age"
 )
 
 var updateVectors = flag.Bool("update", false, "rewrite testdata/vaultfile-v1-vectors.json")
@@ -22,6 +25,9 @@ func pf(seed byte, n int) []byte {
 	return b
 }
 
+// clientKey is a deterministic X25519 scalar. The clamp is the one RFC 7748
+// applies, so age's secret-key encoding and the scalar here carry the same
+// 32 bytes.
 func clientKey(label string) []byte {
 	k := DomainSeparated(UsageVaultID, []byte("vector-key/"+label))
 	k[0] &= 248
@@ -30,29 +36,105 @@ func clientKey(label string) []byte {
 	return k
 }
 
-const (
-	ageB64 = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
-)
+// ageRecipient derives the real age1 recipient (62 characters, genuine
+// Bech32 checksum) for an X25519 scalar through filippo.io/age: the secret
+// key is parsed by age and the recipient is what age itself emits. No
+// checksum is computed in this package.
+func ageRecipient(scalar []byte) string {
+	id, err := age.ParseX25519Identity(ageSecretKey(scalar))
+	if err != nil {
+		panic(err)
+	}
+	return id.Recipient().String()
+}
 
-func ageRecipient(key []byte) string {
-	out := make([]byte, 0, 58)
-	var acc, bits uint32
-	for _, b := range key {
-		acc = acc<<8 | uint32(b)
+// ageSecretKey is the age identity text for scalar: the bech32 secret-key
+// encoding of filippo.io/age, upper-cased exactly as age prints it.
+func ageSecretKey(scalar []byte) string {
+	s, err := bech32Encode("AGE-SECRET-KEY-", scalar)
+	if err != nil {
+		panic(err)
+	}
+	return strings.ToUpper(s)
+}
+
+// bech32Encode is the BIP-173 bech32 encoding that age uses (checksum
+// constant 1), ported verbatim from age's internal bech32 package because
+// that package is not importable from outside age. It is used only in tests
+// and only to turn a scalar into the secret-key text age accepts; every
+// recipient in the vectors comes out of age's own encoder.
+func bech32Encode(hrp string, payload []byte) (string, error) {
+	const charset = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+	generator := []uint32{0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3}
+	polymod := func(values []byte) uint32 {
+		chk := uint32(1)
+		for _, v := range values {
+			top := chk >> 25
+			chk = (chk & 0x1ffffff) << 5
+			chk = chk ^ uint32(v)
+			for i := 0; i < 5; i++ {
+				if top>>i&1 == 1 {
+					chk ^= generator[i]
+				}
+			}
+		}
+		return chk
+	}
+	var data []byte
+	acc := uint32(0)
+	bits := byte(0)
+	for _, value := range payload {
+		acc = acc<<8 | uint32(value)
 		bits += 8
 		for bits >= 5 {
 			bits -= 5
-			out = append(out, ageB64[(acc>>bits)&31])
+			data = append(data, byte(acc>>bits)&31)
 		}
 	}
 	if bits > 0 {
-		out = append(out, ageB64[(acc<<(5-bits))&31])
+		data = append(data, byte(acc<<(5-bits))&31)
 	}
-	// 4 checksum characters in the same alphabet (not an age bech32 checksum).
-	for _, c := range pf(9, 4) {
-		out = append(out, ageB64[c&31])
+	hrp = strings.ToLower(hrp)
+	if len(hrp) < 1 {
+		return "", fmt.Errorf("invalid HRP")
 	}
-	return "age1" + string(out)
+	for _, c := range []byte(hrp) {
+		if c < 33 || c > 126 {
+			return "", fmt.Errorf("invalid HRP character")
+		}
+	}
+	var expansion []byte
+	for _, c := range []byte(hrp) {
+		expansion = append(expansion, c>>5)
+	}
+	expansion = append(expansion, 0)
+	for _, c := range []byte(hrp) {
+		expansion = append(expansion, c&31)
+	}
+	values := append([]byte{}, expansion...)
+	values = append(values, data...)
+	values = append(values, 0, 0, 0, 0, 0, 0)
+	mod := polymod(values) ^ 1
+	var sb strings.Builder
+	sb.WriteString(hrp)
+	sb.WriteByte('1')
+	for _, p := range data {
+		sb.WriteByte(charset[p])
+	}
+	for i := 0; i < 6; i++ {
+		sb.WriteByte(charset[mod>>uint(5*(5-i))&31])
+	}
+	return sb.String(), nil
+}
+
+// ageRecipientCorruptChecksum flips one data character of r; the 32 key bytes
+// are unchanged, so only a checksum check can reject the result.
+func ageRecipientCorruptChecksum(r string) string {
+	const b64 = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+	s := []byte(r)
+	i := strings.IndexByte(r, '1') + 10
+	s[i] = b64[(strings.IndexByte(b64, s[i])+1)%len(b64)]
+	return string(s)
 }
 
 func digest(label string) []byte {

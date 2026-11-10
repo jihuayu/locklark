@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"strings"
 	"unicode/utf8"
+
+	"filippo.io/age"
 )
 
 // ValidateFile checks every structural rule of the schema, length and size
@@ -323,38 +326,21 @@ func validEd25519Key(b []byte) bool {
 	return len(b) == ed25519.PublicKeySize
 }
 
-var ageX25519Alphabet = []byte("qpzry9x8gf2tvdw0s3jn54khce6mua7l")
-
-// validAgeX25519Recipient checks the structure of an age X25519 recipient
-// string without any cryptographic use.
+// validAgeX25519Recipient reports whether s is a well-formed age X25519
+// recipient. Delegated to filippo.io/age so Bech32, the checksum and the
+// 32-byte X25519 point are checked by the reference implementation; no
+// cryptographic operation beyond parsing the public key happens here.
 func validAgeX25519Recipient(s string) bool {
-	const hrp = AgeX25519RecipientPrefix
-	if len(s) != len(hrp)+56 || s[:len(hrp)] != hrp || len(s) > MaxPublicKeyLength {
+	if len(s) > MaxPublicKeyLength || !strings.HasPrefix(s, AgeX25519RecipientPrefix) {
 		return false
 	}
-	data := make([]byte, 0, 52)
-	for i := len(hrp); i < len(s); i++ {
-		idx := bytes.IndexByte(ageX25519Alphabet, s[i])
-		if idx < 0 {
-			return false
-		}
-		data = append(data, byte(idx))
+	// Identity (private key) material must never be accepted, whatever
+	// case convention it is written in.
+	if strings.HasPrefix(strings.ToUpper(s), AgeX25519IdentityPrefix) {
+		return false
 	}
-	// 52 base32 characters = 260 bits: 32 key bytes plus 4 checksum
-	// characters. Only the first 52 characters carry key bits.
-	var acc uint64
-	var have uint
-	out := 0
-	for _, d := range data[:52] {
-		acc = acc<<5 | uint64(d)
-		have += 5
-		if have >= 8 {
-			have -= 8
-			out++
-			acc &= (1 << have) - 1
-		}
-	}
-	return out == 32
+	_, err := age.ParseX25519Recipient(s)
+	return err == nil
 }
 
 // ---- role and key binding ----
