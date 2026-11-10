@@ -608,9 +608,11 @@ class Acceptance:
 
     def complete_import_selection(self, keyfile):
         # GTK's location entry may contain the current folder after Ctrl+L.
-        # Verify its exact replacement before one Return. After submission,
-        # observe only the owned top-level X11 window closing, not its dying
-        # AT-SPI children. Normal confirm readiness and exact seed checks follow.
+        # Verify its exact replacement before exactly one physical click on the
+        # already shown/enabled Open control (click_label waits for it). After
+        # submission, observe only the owned top-level X11 window closing, not
+        # its dying AT-SPI children. Normal confirm readiness and exact seed
+        # checks follow.
         self.step = "picker-location-input"
         self.native([{"key": "Control_L+l"}, {"key": "Control_L+a"}, {"text": str(keyfile)}], title="选择未加密 OpenSSH Ed25519 私钥")
         self.step = "picker-location-verify"
@@ -618,7 +620,7 @@ class Acceptance:
         self.cli.write(self.root / "picker-observation.json", picker)
         require(picker["path_match"] == 1)
         self.step = "picker-location-submit"
-        self.native([{"key": "Return"}], title="选择未加密 OpenSSH Ed25519 私钥")
+        self.native([{"click_label": "Open"}], title="选择未加密 OpenSSH Ed25519 私钥")
         deadline = time.monotonic() + 10
         self.step = "picker-close-observe"
         closed = self.native(observe="picker-closed", title="选择未加密 OpenSSH Ed25519 私钥", observation_deadline=deadline,
