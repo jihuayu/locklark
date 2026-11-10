@@ -16,6 +16,11 @@ const CHECKOUT_HOSTS = new Set([
   CHECKOUT_CROSS_SITE_HOST,
   CHECKOUT_TOP_HOST,
 ]);
+// The real Chromium journey window is titled "Locklark · 浏览器原生确认". A
+// focused-preserving probe matches it by this product prefix instead of
+// raising and focusing it (which would close the open action popup); see
+// browser_native_x11.py.
+const NATIVE_TITLE_PREFIX = "Locklark";
 const CHECKOUT_APPROVE_LABEL = "批准本次跨源银行卡填充";
 const CHECKOUT_DENY_LABEL = "拒绝本次跨源银行卡填充";
 // A same-origin child is not a cross-origin proposal: the extension omits the
@@ -411,12 +416,26 @@ async function assertOnlyChildFilled(page, frameOrigin, fixture) {
   assert(noSubmit(top) && noSubmit(child), "Checkout forms must not submit");
 }
 
-function nativeControls(input) {
+// Probe option for every journey stage that is checked while the popup is
+// still open and yet to be clicked.
+const POPUP_OPEN = Object.freeze({ popupOpen: true });
+
+// `options.popupOpen` requests the X11 helper's documented `preserve_focus` +
+// `title_prefix` form: it neither raises nor focuses the native window, which
+// would close a Chromium action popup the journey is still clicking. Other
+// callers keep the default probe.
+function nativeControls(input, options) {
   try {
     // A refused cross-site proposal or a sandbox-excluded page has no native
     // window at all. The native probe waits for its bounded discovery deadline
     // and reports that absence as a read-only result; no input is emitted.
-    return input([], true, true)?.controls || null;
+    return options?.popupOpen
+      ? input([], true, {
+          title_prefix: NATIVE_TITLE_PREFIX,
+          preserve_focus: true,
+          inspect: true,
+        })?.controls || null
+      : input([], true, true)?.controls || null;
   } catch {
     return null;
   }
@@ -433,8 +452,10 @@ function nativeControl(controls, label) {
 
 // Read-only native accessibility snapshot: no click, wait or text action is
 // emitted. Both checkout decisions must be absent before any approval exists.
-function assertNoNativeApproval(input) {
-  const controls = nativeControls(input);
+// `options.popupOpen` keeps the browser popup focused; omitting it uses the
+// default probe that raises and focuses the native window.
+function assertNoNativeApproval(input, options) {
+  const controls = nativeControls(input, options);
   for (const label of [CHECKOUT_APPROVE_LABEL, CHECKOUT_DENY_LABEL]) {
     const control = nativeControl(controls, label);
     assert(
@@ -445,9 +466,10 @@ function assertNoNativeApproval(input) {
 }
 
 // The ordinary card profile review (same-origin child) must not be offered
-// either, so no frame picker path can leak into the profile approval.
-function assertNoNativeProfileReview(input) {
-  const controls = nativeControls(input);
+// either, so no frame picker path can leak into the profile approval. Same
+// `options` as `assertNoNativeApproval`.
+function assertNoNativeProfileReview(input, options) {
+  const controls = nativeControls(input, options);
   for (const label of [PROFILE_APPROVE_LABEL, PROFILE_DENY_LABEL]) {
     const control = nativeControl(controls, label);
     assert(
@@ -794,7 +816,7 @@ async function runCrossSiteJourney(driver, card, topOrigin) {
       ((await popup.text("#checkout-status")) || "").includes("不会自动选择"),
       "Excluded checkout origin must not be auto-selected",
     );
-    assertNoNativeApproval(input);
+    assertNoNativeApproval(input, POPUP_OPEN);
     await popup.click("#checkout-cancel");
     await eventually(
       async () => (await popup.visible("#checkout-picker")) === false,
@@ -825,7 +847,7 @@ async function runCrossSiteJourney(driver, card, topOrigin) {
     "Cross-site checkout refusal did not finish",
     8000,
   );
-  assertNoNativeApproval(input);
+  assertNoNativeApproval(input, POPUP_OPEN);
   await assertBothBlank(
     page,
     frameOrigin,
@@ -874,7 +896,7 @@ async function runSandboxJourney(driver, card, topOrigin) {
     (await popup.count('#checkout-choices button')) === 0,
     "Checkout sandboxed child must be excluded from the picker",
   );
-  assertNoNativeApproval(input);
+  assertNoNativeApproval(input, POPUP_OPEN);
   await assertBothBlank(
     page,
     frameOrigin,
@@ -955,7 +977,7 @@ async function runStaleDocumentJourney(driver, card, topOrigin) {
     "Changed checkout document did not finish",
     8000,
   );
-  assertNoNativeApproval(input);
+  assertNoNativeApproval(input, POPUP_OPEN);
   await assertBothBlank(
     page,
     frameOrigin,
@@ -997,8 +1019,8 @@ async function runSameOriginJourney(driver, card, topOrigin) {
     frameOrigin,
     "Same-origin checkout forms must stay blank",
   );
-  assertNoNativeApproval(input);
-  assertNoNativeProfileReview(input);
+  assertNoNativeApproval(input, POPUP_OPEN);
+  assertNoNativeProfileReview(input, POPUP_OPEN);
 
   const popup = await openPopup();
   await openCardDetail(popup, card, eventually);
@@ -1020,7 +1042,7 @@ async function runSameOriginJourney(driver, card, topOrigin) {
   // one: the cross-origin labels stay absent while only the profile approval
   // is visible. The approve click below uses that profile label, so the journey
   // cannot pass through the cross-origin approval path.
-  assertNoNativeApproval(input);
+  assertNoNativeApproval(input, POPUP_OPEN);
   const review = nativeControl(nativeControls(input), PROFILE_APPROVE_LABEL);
   assert(
     review.enabled && review.showing,
@@ -1043,7 +1065,7 @@ async function runSameOriginJourney(driver, card, topOrigin) {
     "Same-origin fill did not finish",
     8000,
   );
-  assertNoNativeProfileReview(input);
+  assertNoNativeProfileReview(input, POPUP_OPEN);
   await assertOnlyChildFilled(page, frameOrigin, card);
 }
 
@@ -1068,9 +1090,12 @@ async function runPickerCancelJourney(driver, card, topOrigin) {
     frameOrigin,
     "Fresh checkout forms must stay blank",
   );
-  assertNoNativeApproval(input);
-  assertNoNativeProfileReview(input);
+  assertNoNativeApproval(input, POPUP_OPEN);
+  assertNoNativeProfileReview(input, POPUP_OPEN);
 
+  // Every native absence probe from here on runs while this popup stays open,
+  // so it must use the focus-preserving form (POPUP_OPEN); the default probe
+  // would focus the native window and close the popup.
   // A freshly opened popup: the picker is requested from this exact popup's
   // own trusted "#detail-fill" click, never from a popup that a previous
   // journey left open or that the harness closed by handling.
@@ -1080,8 +1105,8 @@ async function runPickerCancelJourney(driver, card, topOrigin) {
   // picker control must be received untrusted and expose no checkout field.
   phase("checkout-picker-cancel:programmatic-refused");
   await assertProgrammaticClickRefused(popup, eventually);
-  assertNoNativeApproval(input);
-  assertNoNativeProfileReview(input);
+  assertNoNativeApproval(input, POPUP_OPEN);
+  assertNoNativeProfileReview(input, POPUP_OPEN);
   await assertBothBlank(
     page,
     frameOrigin,
@@ -1106,9 +1131,11 @@ async function runPickerCancelJourney(driver, card, topOrigin) {
     },
     "Cancelled checkout picker still requests native approval",
   );
-  // The trusted picker is open and withdrawn on the real popup. Withdraw it
-  // with one physical Escape, re-open the same card detail in this popup, and
-  // prove a fresh picker still cannot be triggered programmatically.
+  // The trusted picker was already cancelled by the "#checkout-cancel" click
+  // above. One physical Escape only leaves the card detail (returning to the
+  // vault); it is not what cancels the picker. Re-open the same card detail in
+  // this popup and prove a fresh picker still cannot be triggered
+  // programmatically.
   phase("checkout-picker-cancel:withdraw");
   assert(
     typeof popup.pressEscape === "function",
@@ -1122,8 +1149,8 @@ async function runPickerCancelJourney(driver, card, topOrigin) {
   await openCardDetail(popup, card, eventually);
   phase("checkout-picker-cancel:withdrawn-programmatic-refused");
   await assertProgrammaticClickRefused(popup, eventually);
-  assertNoNativeApproval(input);
-  assertNoNativeProfileReview(input);
+  assertNoNativeApproval(input, POPUP_OPEN);
+  assertNoNativeProfileReview(input, POPUP_OPEN);
   await assertBothBlank(
     page,
     frameOrigin,
@@ -1135,12 +1162,12 @@ async function runPickerCancelJourney(driver, card, topOrigin) {
     (await popup.count('#checkout-choices button')) === 0,
     "Withdrawn checkout picker must keep no candidate",
   );
-  assertNoNativeApproval(input);
-  assertNoNativeProfileReview(input);
+  assertNoNativeApproval(input, POPUP_OPEN);
+  assertNoNativeProfileReview(input, POPUP_OPEN);
   // Give any stray native request time to surface before proving its absence.
   await new Promise((resolve) => setTimeout(resolve, 500));
-  assertNoNativeApproval(input);
-  assertNoNativeProfileReview(input);
+  assertNoNativeApproval(input, POPUP_OPEN);
+  assertNoNativeProfileReview(input, POPUP_OPEN);
   await assertBothBlank(
     page,
     frameOrigin,

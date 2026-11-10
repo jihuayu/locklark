@@ -579,6 +579,44 @@ test("the real popup adapter exposes evaluation and physical Escape", () => {
   assert.match(source, /type: "keyDown", key: "Escape"/);
 });
 
+test("native absence probes preserve popup focus across the journey", () => {
+  // Default callers ask for the plain inspect request, which raises and
+  // focuses the native window. Every popup-stage probe must instead use the
+  // X11 helper's documented `preserve_focus` + `title_prefix` form: focusing
+  // the native window closes the Chromium action popup that is still to be
+  // clicked, which is exactly the "Popup control must be available" failure.
+  const source = readFileSync(
+    new URL("./browser_checkout_acceptance.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.doesNotMatch(source, /assertNoNative(Approval|ProfileReview)\(input\)/);
+  // The exact six probes the picker-cancel journey makes after its popup
+  // opens, all through the focused-preserving form.
+  const journey = source.slice(
+    source.indexOf("async function runPickerCancelJourney"),
+    source.indexOf("export async function acceptCheckoutFrames"),
+  );
+  assert.equal(
+    countMatches(journey, /assertNoNative(?:Approval|ProfileReview)\(input, POPUP_OPEN\)/g),
+    countMatches(journey, /assertNoNative(?:Approval|ProfileReview)\(/g),
+  );
+  assert.ok(countMatches(journey, /assertNoNative(?:Approval|ProfileReview)\(/g) >= 6);
+  assert.match(
+    source,
+    /title_prefix: NATIVE_TITLE_PREFIX,\n\s+preserve_focus: true,\n\s+inspect: true,/,
+  );
+  assert.match(source, /const NATIVE_TITLE_PREFIX = "Locklark";/);
+  // The withdraw comment must not claim Escape cancels the picker: the
+  // cancel control already did that.
+  const withdraw = source.slice(
+    source.indexOf('phase("checkout-picker-cancel:withdraw")'),
+  );
+  assert.doesNotMatch(
+    withdraw.slice(0, withdraw.indexOf("pressEscape")),
+    /Escape[^\n]*cancel/i,
+  );
+});
+
 test("checkout choice options are strictly bounded", async () => {
   const popup = pickerPopup([TOP_LABEL, CARD_ORIGIN + FRAME_SUFFIX]);
   await assert.rejects(
