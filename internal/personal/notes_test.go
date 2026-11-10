@@ -146,6 +146,7 @@ func TestNativeNotesSaveDisclosureAndLifecycle(t *testing.T) {
 func TestNativeNotesConcurrentEditorsHaveOneWinner(t *testing.T) {
 	fixture := newNotesBoundaryFixture(t)
 	s := fixture.s
+	originalNotes := fixture.want.Notes
 	target := RevealTarget{ID: fixture.want.ID, Revision: fixture.rev, Field: "notes"}
 	other, e := UnlockSession(s.path, []byte("boundary-fixture"), fixture.key, time.Minute)
 	if e != nil {
@@ -188,7 +189,11 @@ func TestNativeNotesConcurrentEditorsHaveOneWinner(t *testing.T) {
 	if actual.Notes != "editor "+string(rune('A'+winner)) {
 		t.Fatal("stored notes do not match committed editor")
 	}
+	if len(actual.History) != 1 || actual.History[0].Notes != originalNotes || actual.History[0].Password != fixture.want.Password || actual.History[0].Action != "edit" {
+		t.Fatalf("notes edit history: %+v", actual.History)
+	}
 	actual.Notes = fixture.want.Notes
+	actual.History = nil
 	if !reflect.DeepEqual(actual, fixture.want) {
 		t.Fatal("notes edit changed another field or original import source")
 	}
@@ -215,6 +220,7 @@ func TestNativeNotesBackupRestoreRetainsValuesSourceAndHistory(t *testing.T) {
 		t.Fatal(e)
 	}
 	s.Discard(field)
+	originalNotes := f.want.Notes
 	f.rev, e = s.SaveNativeNotes(f.want.ID, f.rev, []byte("edited\r\n备注🙂  "), dailyGate(t, s))
 	if e != nil {
 		t.Fatal(e)
@@ -230,7 +236,12 @@ func TestNativeNotesBackupRestoreRetainsValuesSourceAndHistory(t *testing.T) {
 	if e = Restore(archive, dest, "boundary-fixture", f.key, kit, key); e != nil {
 		t.Fatal(e)
 	}
-	if got := readStoredItems(t, dest, "boundary-fixture", key); !reflect.DeepEqual(got, []vault.Item{f.want}) {
+	got := readStoredItems(t, dest, "boundary-fixture", key)
+	if len(got) != 1 || len(got[0].History) != 1 || got[0].History[0].Notes != originalNotes || got[0].History[0].Password != f.want.Password || got[0].History[0].Action != "edit" {
+		t.Fatalf("notes backup lost history: %+v", got)
+	}
+	got[0].History = nil
+	if !reflect.DeepEqual(got, []vault.Item{f.want}) {
 		t.Fatal("notes backup lost values or original source")
 	}
 	chains, e := ArchivedAudit(dest, "boundary-fixture", key)

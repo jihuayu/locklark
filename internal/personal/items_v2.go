@@ -566,6 +566,42 @@ func appendHistory(history []vault.ItemHistoryEntry, entry vault.ItemHistoryEntr
 	return history
 }
 
+// completeHistorySections keeps an empty historical section list distinct from
+// a legacy entry that never recorded sections at all. ItemHistoryEntry sections
+// are always serialized, so a non-nil empty slice survives a vault round trip
+// and can clear the current sections deterministically on restore.
+func completeHistorySections(sections []vault.ItemSection) []vault.ItemSection {
+	out := vault.CloneSections(sections)
+	if out == nil {
+		return []vault.ItemSection{}
+	}
+	return out
+}
+
+// historyEntryCarriesFieldSnapshot reports whether an entry records the full
+// Title/Username/Notes/Sections state. Entries written by autoHistory always
+// carry Sections (possibly empty). Older password-only import rows carry none
+// of these fields and must keep the existing restore-compatibility behavior.
+func historyEntryCarriesFieldSnapshot(entry vault.ItemHistoryEntry) bool {
+	return entry.Sections != nil || entry.Title != "" || entry.Username != "" || entry.Notes != ""
+}
+
+// restoreHistoryEntry applies one historical snapshot. Legacy password-only
+// rows restore just the password; complete rows restore the exact field state,
+// including empty values that must clear the current item.
+func restoreHistoryEntry(next *vault.Item, entry vault.ItemHistoryEntry) {
+	next.Password = entry.Password
+	if !historyEntryCarriesFieldSnapshot(entry) {
+		return
+	}
+	next.Title = entry.Title
+	next.Username = entry.Username
+	next.Notes = entry.Notes
+	if entry.Sections != nil {
+		next.Sections = vault.CloneSections(entry.Sections)
+	}
+}
+
 func autoHistory(prev, next vault.Item) []vault.ItemHistoryEntry {
 	history := next.History
 	if history == nil {
@@ -581,9 +617,7 @@ func autoHistory(prev, next vault.Item) []vault.ItemHistoryEntry {
 		Title:     prev.Title,
 		Username:  prev.Username,
 		Notes:     prev.Notes,
-	}
-	if concealedChanged(prev.Sections, next.Sections) {
-		entry.Sections = vault.CloneSections(prev.Sections)
+		Sections:  completeHistorySections(prev.Sections),
 	}
 	return appendHistory(history, entry)
 }

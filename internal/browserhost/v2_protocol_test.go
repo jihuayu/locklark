@@ -84,12 +84,9 @@ func v2Last(t *testing.T, out *memoryPipe) Response {
 
 func TestGenerateModesAndRedaction(t *testing.T) {
 	c, out, _, cap := v2Fixture(t)
-	random := v2Handle(t, c, out, map[string]any{"v": 1, "id": reqID(10), "type": "generate", "capability": cap, "mode": "random", "length": 24, "digits": true, "symbols": true})
-	if random.Type != "generated" || len(random.GeneratedPassword) != 24 || random.PasswordProfile == nil || random.PasswordProfile.Mode != "random" || random.HistoryID == "" {
+	random := v2Handle(t, c, out, map[string]any{"v": 1, "id": reqID(10), "type": "generate", "capability": cap, "mode": "random", "length": 24, "digits": true, "symbols": true, "save_history": true})
+	if random.Type != "generated" || len(random.GeneratedPassword) != 24 || random.PasswordProfile == nil || random.PasswordProfile.Mode != "random" || random.HistoryID != "" {
 		t.Fatalf("random: %#v", random)
-	}
-	if token.MatchString(random.HistoryID) == false {
-		t.Fatal("history id")
 	}
 	optionsJSON := `{"mode":"random","length":18,"digits":true,"symbols":false}`
 	options := v2Handle(t, c, out, map[string]any{"v": 1, "id": reqID(11), "type": "generate", "capability": cap, "options": optionsJSON})

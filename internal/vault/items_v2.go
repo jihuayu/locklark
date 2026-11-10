@@ -127,7 +127,7 @@ type ItemHistoryEntry struct {
 	Title     string        `json:"title,omitempty"`    // previous title if changed
 	Username  string        `json:"username,omitempty"` // previous username if changed
 	Notes     string        `json:"notes,omitempty"`    // previous notes if changed
-	Sections  []ItemSection `json:"sections,omitempty"` // optional previous sections snapshot
+	Sections  []ItemSection `json:"sections"`           // previous sections snapshot; nil means legacy partial entry
 }
 
 // ItemRevision is a compatibility alias for ItemHistoryEntry.

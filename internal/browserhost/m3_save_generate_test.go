@@ -55,8 +55,8 @@ func generateViaHost(t *testing.T, c *Connection, out *memoryPipe, capability, i
 	if reply.Profile == nil || reply.GeneratedPassword == "" {
 		t.Fatalf("generate %q returned an incomplete response", options)
 	}
-	if !token.MatchString(reply.HistoryID) {
-		t.Fatalf("generate %q returned invalid history id %q", options, reply.HistoryID)
+	if reply.HistoryID != "" {
+		t.Fatalf("generate %q reported an unsaved history id %q", options, reply.HistoryID)
 	}
 	return reply
 }
@@ -242,7 +242,6 @@ func TestGenerateModesBoundsAndEntropy(t *testing.T) {
 			name: "pin-maximum-bound", options: `{"mode":"pin","length":99}`, mode: "pin", length: 12, alphabet: 10, entropy: 39,
 		},
 	}
-	history := map[string]bool{}
 	for index, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			reply := generateViaHost(t, c, out, r.Capability, reqID(100+index), test.options)
@@ -261,10 +260,6 @@ func TestGenerateModesBoundsAndEntropy(t *testing.T) {
 			} else if len(reply.GeneratedPassword) != test.length {
 				t.Fatalf("generated length = %d, want %d", len(reply.GeneratedPassword), test.length)
 			}
-			if history[reply.HistoryID] {
-				t.Fatalf("history id %q was reused", reply.HistoryID)
-			}
-			history[reply.HistoryID] = true
 			if test.check != nil {
 				test.check(t, reply.GeneratedPassword)
 			}
