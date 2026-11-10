@@ -443,6 +443,38 @@ globalThis.LocklarkCore = (() => {
       })
     );
   }
+  // Paste-time protection. A Secret Key (LL1-, LLR2- recovery material) is only
+  // ever entered inside the Locklark app, so pasting one into a web page is
+  // always refused by default. The phishing warning is narrower: it needs
+  // positive knowledge that this origin has no saved login (siteLinked ===
+  // false). An unknown site state, a locked vault or a disconnected host must
+  // never block or warn on a paste.
+  const SECRET_KEY_PATTERNS = Object.freeze([
+    /^LL1-[A-Z2-7]{26}$/,
+    /^LLR2-[A-Z2-7]{52}$/,
+    /^LLR2-[A-Z2-7]{52}-[A-Z2-7]{52}$/,
+  ]);
+  const SECRET_KEY_MIN_LENGTH = 30;
+  const SECRET_KEY_MAX_LENGTH = 110;
+  function looksLikeLocklarkSecret(text) {
+    if (typeof text !== "string") return false;
+    const value = text.trim();
+    if (
+      value.length < SECRET_KEY_MIN_LENGTH ||
+      value.length > SECRET_KEY_MAX_LENGTH
+    )
+      return false;
+    return SECRET_KEY_PATTERNS.some((pattern) => pattern.test(value));
+  }
+  function pasteWarning(raw) {
+    if (!raw || typeof raw !== "object" || raw.enabled === false) return "";
+    const text = typeof raw.text === "string" ? raw.text : "";
+    if (!text.trim()) return "";
+    if (looksLikeLocklarkSecret(text)) return "secret-key";
+    if (raw.isPasswordField === true && raw.siteLinked === false)
+      return "phishing";
+    return "";
+  }
   function validFieldMap(value, allowed) {
     if (!value || typeof value !== "object" || Array.isArray(value))
       return false;
@@ -5152,6 +5184,7 @@ globalThis.LocklarkCore = (() => {
     offerSaveLogins: true,
     offerSavePasskeys: true,
     showInlineGenerator: true,
+    pasteProtection: true,
     generatorDefaults: Object.freeze({
       mode: "random",
       length: 24,
@@ -5287,6 +5320,7 @@ globalThis.LocklarkCore = (() => {
       "offerSaveLogins",
       "offerSavePasskeys",
       "showInlineGenerator",
+      "pasteProtection",
       "watchtowerLocalChecks",
       "watchtowerHIBP",
     ])
@@ -5724,6 +5758,8 @@ globalThis.LocklarkCore = (() => {
     validClearFields,
     nativeOriginalFieldAny,
     generatePasswordString,
+    looksLikeLocklarkSecret,
+    pasteWarning,
   };
 })();
 if (typeof module !== "undefined") module.exports = globalThis.LocklarkCore;

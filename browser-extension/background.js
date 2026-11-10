@@ -4352,8 +4352,12 @@ if (typeof importScripts === "function") importScripts("core.js");
     if (message.type === "inline-match") {
       const category = message.category ?? "login";
       if (!validCategory(category)) throw Error("refused");
+      // siteLinked is a metadata-only fact for paste protection: true only when
+      // this reply observed an actual login match for the document's origin.
+      // A locked, disconnected or busy host stays "unknown" (null) so a paste
+      // is never blocked on a guess.
       if (!capability || pending || pendingOTP || pendingPasskey)
-        return { connected: !!capability, candidates: [] };
+        return { connected: !!capability, candidates: [], siteLinked: null };
       if (
         !core.sameContext(c, context) ||
         matchCategory !== category ||
@@ -4384,6 +4388,7 @@ if (typeof importScripts === "function") importScripts("core.js");
         preferredTitle: session?.title || "",
         step: session?.stepCompleted || "",
         candidates: list,
+        siteLinked: category === "login" ? rows.length > 0 : null,
       };
     }
     if (

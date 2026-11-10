@@ -1294,10 +1294,9 @@ const contentSender = (doc = "doc-1", frame = 0) => ({
 test("inline channel is bound to browser sender document and cannot connect", async () => {
   const h = harness();
   await ready(h);
-  assert.equal(
-    (await h.send({ type: "inline-match" }, contentSender())).candidates.length,
-    1,
-  );
+  const linked = await h.send({ type: "inline-match" }, contentSender());
+  assert.equal(linked.candidates.length, 1);
+  assert.equal(linked.siteLinked, true);
   for (const sender of [contentSender("old-doc"), contentSender("doc-1", 2)]) {
     const before = h.sent.length;
     await h.send(
@@ -1309,6 +1308,20 @@ test("inline channel is bound to browser sender document and cannot connect", as
   const before = h.sent.length;
   await h.send({ type: "connect" }, contentSender());
   assert.equal(h.sent.length, before);
+});
+test("inline site-link metadata stays unknown when no login match ran", async () => {
+  const h = harness();
+  await ready(h);
+  const identity = await h.send(
+    { type: "inline-match", category: "identity" },
+    contentSender(),
+  );
+  assert.equal(identity.siteLinked, null);
+  await h.send({ type: "disconnect" });
+  const disconnected = await h.send({ type: "inline-match" }, contentSender());
+  assert.equal(disconnected.connected, false);
+  assert.equal(disconnected.siteLinked, null);
+  assert.equal(disconnected.candidates.length, 0);
 });
 test("passkey uses authenticated sender origin and cancels on navigation", async () => {
   const h = harness();
