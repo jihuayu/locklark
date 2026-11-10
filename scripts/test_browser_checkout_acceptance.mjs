@@ -2,6 +2,7 @@
 // These run without a browser, native host or private vault fixture.
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   checkoutTopHTML,
   checkoutCardHTML,
@@ -10,6 +11,7 @@ import {
   checkoutRouteCase,
   chooseChildOrigin,
   openCheckoutPicker,
+  assertProgrammaticClickRefused,
 } from "./browser_checkout_acceptance.mjs";
 
 const TOP_ORIGIN = "https://login.locklark.test:8443";
@@ -225,8 +227,11 @@ function pickerPopup(labels, options = {}) {
 
 // The real driver throws its message when the predicate never becomes true;
 // the stub does exactly one attempt so module failures stay observable.
+// A fulfilled `false` keeps the exact message a real missing picker would
+// report here; a bare `assert.equal(result, true)` would compare a Promise.
 const eventually = async (check, message) => {
-  assert.equal(await check(), true, message);
+  const result = await check();
+  assert.equal(result, true, message);
 };
 
 test("physical choice uses the exact public origin label, not an ordinal", async () => {
@@ -436,6 +441,142 @@ test("picker cancellation presses only the real cancel control", async () => {
     /Checkout picker cancel control unavailable/,
   );
   assert.deepEqual(disabled.clicked, ["#detail-fill"]);
+});
+
+// Models the real popup for the programmatic-click refusal. `evaluate` runs
+// the bounded expression in the popup and records it; `click` models only the
+// physical Input.dispatch path. A DOM click is received as untrusted and
+// refused. Only a received `false` counts as that proof; a missing receipt is
+// a failure, never a silent pass.
+function programmaticPopup() {
+  const state = {
+    pickerOpen: false,
+    status: "已连接",
+    trusted: null,
+    evaluated: [],
+    clicked: [],
+  };
+  return {
+    state,
+    async evaluate(expression) {
+      state.evaluated.push(expression);
+      state.trusted = false;
+      return false;
+    },
+    async click(selector) {
+      state.clicked.push(selector);
+      state.pickerOpen = true;
+    },
+    async visible(selector) {
+      if (selector === "#checkout-picker") return state.pickerOpen;
+      return selector === "#checkout-cancel";
+    },
+    async disabled() {
+      return false;
+    },
+    async text(selector) {
+      return selector === "#status" ? state.status : "";
+    },
+    async count() {
+      // Candidate markup belongs to the picker panel and is rendered only
+      // while that panel is open.
+      return state.pickerOpen ? 1 : 0;
+    },
+  };
+}
+
+test("programmatic fill click must be received untrusted and refused", async () => {
+  const popup = programmaticPopup();
+  await assertProgrammaticClickRefused(popup, eventually);
+  // Exactly one DOM click, evaluated in the popup and not through the physical
+  // input path; the physical "#detail-fill" click is left to the caller.
+  assert.equal(popup.state.evaluated.length, 1);
+  assert.match(popup.state.evaluated[0], /#detail-fill/);
+  assert.match(popup.state.evaluated[0], /\.click\(\)/);
+  assert.match(popup.state.evaluated[0], /isTrusted/);
+  assert.deepEqual(popup.state.clicked, []);
+  assert.equal(popup.state.trusted, false);
+  assert.equal(popup.state.pickerOpen, false);
+  assert.equal(popup.state.status, "已连接");
+});
+
+test("a popup that acts on a programmatic click is never reported as refusing it", async () => {
+  // A DOM click that is somehow received as trusted yields no evidence of
+  // refusal, and no physical click is made on its behalf.
+  const trusted = programmaticPopup();
+  trusted.evaluate = async (expression) => {
+    trusted.state.evaluated.push(expression);
+    trusted.state.trusted = true;
+    return true;
+  };
+  await assert.rejects(
+    () => assertProgrammaticClickRefused(trusted, eventually),
+    /Programmatic checkout fill click must be received as untrusted/,
+  );
+  assert.deepEqual(trusted.state.clicked, []);
+
+  // A DOM click that is refused yet still shows the picker is an exposure
+  // even though the received click was untrusted.
+  const accepted = programmaticPopup();
+  accepted.evaluate = async (expression) => {
+    accepted.state.evaluated.push(expression);
+    accepted.state.trusted = false;
+    accepted.state.pickerOpen = true;
+    return false;
+  };
+  await assert.rejects(
+    () => assertProgrammaticClickRefused(accepted, eventually),
+    /Programmatic checkout fill click opened the picker/,
+  );
+  assert.deepEqual(accepted.state.clicked, []);
+
+  // A popup that reports the click as untrusted yet still renders a candidate
+  // is caught by the panel check as well, even if the panel is hidden.
+  const shown = programmaticPopup();
+  shown.visible = async (selector) => selector !== "#detail-fill";
+  shown.count = async () => 1;
+  await assert.rejects(
+    () => assertProgrammaticClickRefused(shown, eventually),
+    /Checkout picker must be absent before the programmatic click/,
+  );
+
+  // A refused click that still moves a bounded public status line is a
+  // failure: the unchanged status is the proof no frame listing started.
+  const noisy = programmaticPopup();
+  noisy.evaluate = async (expression) => {
+    noisy.state.evaluated.push(expression);
+    noisy.state.status =
+      "请选择一个结账表单来源；不会自动选择，也不会自动提交";
+    return false;
+  };
+  await assert.rejects(
+    () => assertProgrammaticClickRefused(noisy, eventually),
+    /Programmatic checkout fill click changed the popup status/,
+  );
+});
+
+test("a picker already open cannot be proven refused programmatically", async () => {
+  const popup = programmaticPopup();
+  popup.state.pickerOpen = true;
+  await assert.rejects(
+    () => assertProgrammaticClickRefused(popup, eventually),
+    /Checkout picker must be absent before the programmatic click/,
+  );
+  assert.equal(popup.state.evaluated.length, 0);
+});
+
+test("the real popup adapter exposes evaluation and physical Escape", () => {
+  // The picker-cancel journey dispatches a DOM `.click()` through the popup's
+  // own CDP Runtime and withdraws the trusted picker with a physical Escape.
+  // Dropping either adapter must fail here instead of silently skipping the
+  // real-browser proof.
+  const source = readFileSync(
+    new URL("./browser_native_acceptance.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /^\s*evaluate,$/m);
+  assert.match(source, /pressEscape: async \(\) => \{/);
+  assert.match(source, /type: "keyDown", key: "Escape"/);
 });
 
 test("checkout choice options are strictly bounded", async () => {

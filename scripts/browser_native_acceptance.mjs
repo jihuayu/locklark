@@ -354,6 +354,9 @@ try {
       return r.result.value;
     };
     return {
+      // Real evaluation in this exact popup document, used for a DOM-dispatched
+      // event that is deliberately not a browser input gesture.
+      evaluate,
       insertText: (text) => call("Input.insertText", { text }),
       attribute: (selector, name) => evaluate(
         "document.querySelector(" + JSON.stringify(selector) + ")?.getAttribute(" + JSON.stringify(name) + ")",
@@ -379,6 +382,16 @@ try {
       dismiss: async () => {
         await call("Page.close").catch(() => {});
         ws.close();
+      },
+      // One physical Escape so the popup leaves the card detail view; the
+      // popup's own handler withdraws an unused picker and its candidate list.
+      pressEscape: async () => {
+        await call("Input.dispatchKeyEvent", {
+          type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27,
+        });
+        await call("Input.dispatchKeyEvent", {
+          type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27,
+        });
       },
       ready: () =>
         evaluate(

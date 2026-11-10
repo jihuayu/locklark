@@ -539,6 +539,68 @@ export async function openCheckoutPicker(popup, eventually) {
   }
 }
 
+// A DOM `.click()` is dispatched as an ordinary untrusted click on the real
+// popup control, from the popup document itself through the popup's CDP
+// Runtime. The capture listener only receives the click the page dispatches;
+// it never synthesizes a second one. The popup's own gesture check refuses an
+// untrusted click before any frame listing is requested, so no picker may be
+// shown.
+const UNTRUSTED_FILL_CLICK = `(() => {
+  const button = document.querySelector("#detail-fill");
+  if (!button) return null;
+  const seen = [];
+  const record = (event) => { seen.push(event.isTrusted === true); };
+  button.addEventListener("click", record, { capture: true, once: true });
+  try { button.click(); } finally { button.removeEventListener("click", record, true); }
+  return seen.length === 1 ? seen[0] : null;
+})()`;
+
+// Proves that programmatic activation cannot open the picker. Call it while
+// the popup already shows the synthetic card detail and no native approval
+// exists. Exactly one untrusted DOM click is dispatched; the picker must stay
+// absent, the popup status must not change, and the caller re-proves the
+// blank forms and native absence afterwards.
+export async function assertProgrammaticClickRefused(popup, eventually) {
+  const before = String((await popup.text("#status")) || "");
+  assert(
+    popup.visible &&
+      popup.count &&
+      (await popup.visible("#checkout-picker")) === false &&
+      (await popup.count('#checkout-choices button')) === 0,
+    "Checkout picker must be absent before the programmatic click",
+  );
+  assert(
+    (await popup.disabled("#detail-fill")) === false,
+    "Checkout form picker control unavailable",
+  );
+  const trusted = await popup.evaluate(UNTRUSTED_FILL_CLICK);
+  // A refused gesture leaves nothing pending, so a short bounded wait settles
+  // a harness failure quickly instead of hiding it behind a long timeout.
+  await eventually(
+    async () =>
+      (await popup.visible("#checkout-picker")) !== true &&
+      (await popup.count('#checkout-choices button')) === 0,
+    "Programmatic checkout fill click opened the picker",
+    1000,
+  );
+  // The received click itself must have been untrusted: a popup that opened
+  // no picker by accident is not proof that the gesture was refused.
+  assert(
+    trusted === false,
+    "Programmatic checkout fill click must be received as untrusted",
+  );
+  // An in-flight listing would set one of the bounded public status lines; an
+  // unchanged status proves no frame request was started by the DOM click.
+  assert(
+    String((await popup.text("#status")) || "") === before,
+    "Programmatic checkout fill click changed the popup status",
+  );
+  assert(
+    (await popup.disabled("#detail-fill")) === false,
+    "Programmatic checkout fill click consumed the picker control",
+  );
+}
+
 // Explicitly locate the non-top origin button by its exact public origin
 // label, then use the popup adapter's trusted pointer click on that exact
 // selector. No frame is chosen automatically, no ordinal position is assumed
@@ -1014,6 +1076,17 @@ async function runPickerCancelJourney(driver, card, topOrigin) {
   // journey left open or that the harness closed by handling.
   const popup = await openPopup();
   await openCardDetail(popup, card, eventually);
+  // Programmatic activation is not a gesture: a DOM `.click()` on the real
+  // picker control must be received untrusted and expose no checkout field.
+  phase("checkout-picker-cancel:programmatic-refused");
+  await assertProgrammaticClickRefused(popup, eventually);
+  assertNoNativeApproval(input);
+  assertNoNativeProfileReview(input);
+  await assertBothBlank(
+    page,
+    frameOrigin,
+    "Programmatic checkout fill click wrote a value",
+  );
   phase("checkout-picker-cancel:picker");
   // The explicit trusted click must open the real picker before its cancel
   // control is clicked; a journey whose picker never appeared fails here and
@@ -1033,6 +1106,37 @@ async function runPickerCancelJourney(driver, card, topOrigin) {
     },
     "Cancelled checkout picker still requests native approval",
   );
+  // The trusted picker is open and withdrawn on the real popup. Withdraw it
+  // with one physical Escape, re-open the same card detail in this popup, and
+  // prove a fresh picker still cannot be triggered programmatically.
+  phase("checkout-picker-cancel:withdraw");
+  assert(
+    typeof popup.pressEscape === "function",
+    "Popup must accept a physical Escape",
+  );
+  await popup.pressEscape();
+  await eventually(
+    async () => (await popup.visible("#checkout-picker")) === false,
+    "Checkout picker did not close on Escape",
+  );
+  await openCardDetail(popup, card, eventually);
+  phase("checkout-picker-cancel:withdrawn-programmatic-refused");
+  await assertProgrammaticClickRefused(popup, eventually);
+  assertNoNativeApproval(input);
+  assertNoNativeProfileReview(input);
+  await assertBothBlank(
+    page,
+    frameOrigin,
+    "Withdrawn checkout picker programmatic click wrote a value",
+  );
+  // The withdrawn picker left no candidate: a re-open must start from a
+  // blank picker panel rather than a stale list.
+  assert(
+    (await popup.count('#checkout-choices button')) === 0,
+    "Withdrawn checkout picker must keep no candidate",
+  );
+  assertNoNativeApproval(input);
+  assertNoNativeProfileReview(input);
   // Give any stray native request time to surface before proving its absence.
   await new Promise((resolve) => setTimeout(resolve, 500));
   assertNoNativeApproval(input);
