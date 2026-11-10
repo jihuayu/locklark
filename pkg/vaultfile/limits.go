@@ -40,6 +40,38 @@ const (
 	// MaxJSONDepth bounds nesting of the canonical header document.
 	MaxJSONDepth = 8
 
+	// MaxObjectMembers bounds the members of every JSON object, at every
+	// depth, before the decoder asks for the next key. The largest object in
+	// v1 is the policy document itself, with 12 members (see Policy); every
+	// nested object (header, owner_root, member, delegation, scope, device,
+	// signing key, device slot, cek_slot) has fewer. 16 leaves room for
+	// four members of growth without admitting unbounded maps on an unknown
+	// or duplicate-key path.
+	MaxObjectMembers = 16
+
+	// MaxJSONNodes bounds the number of JSON value and container nodes
+	// (object, array, string, number, bool, null), object keys excluded, in
+	// one ParseFile or ParsePolicyDocument input. It is counted before each
+	// value token is requested, so the decoded tree can never hold more.
+	//
+	// The bound admits every value the other budgets allow. The checked-in
+	// v1 file vector decodes to 105 nodes and its policy to 68. The largest
+	// file the per-array budgets admit is dominated by 128 proofs in
+	// `signed_policy_proofs`, each carrying a 5-member proof object whose
+	// `policy` is a maximal policy: its object (1) and twelve members, six
+	// literals (including a null `prev_policy_digest`), the owner_root
+	// object with 4 literals (5), five member arrays (readers, writers,
+	// admins, owners and owner_root.owners: 1 + 64*3 = 193 each),
+	// admin_delegations (1 + 64*14 = 897) and devices
+	// (1 + 128*11 = 1,409): 1 + 6 + 5 + 5*193 + 897 + 1,409 = 3,281
+	// nodes. A proof adds its object and two literals (3,286); the file
+	// adds its object and the proofs array: 2 + 128*3,286 = 420,610
+	// nodes, pinned by TestNodeCapAdmitsV1ArrayBounds. That leaves a
+	// margin above 100,000 nodes, more than 1/8 of the cap. Remaining
+	// slack covers a further policy-list-sized growth without changing
+	// the bound.
+	MaxJSONNodes = 524288
+
 	// MaxArrayItems is the length limit for every array in the header and in
 	// a policy document.
 	MaxArrayItems = 128

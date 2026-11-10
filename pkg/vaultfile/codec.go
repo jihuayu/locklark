@@ -17,8 +17,9 @@ import (
 //     replace invalid bytes inside strings with U+FFFD, so this is checked
 //     before any token is decoded;
 //   - unknown and duplicate members are rejected at every depth;
-//   - nesting depth, array lengths, string lengths and byte lengths are
-//     limited before anything is decoded;
+//   - nesting depth, object member counts, total value-node counts, array
+//     lengths, string lengths and byte lengths are limited before the next
+//     token or value is decoded; the counts are per input;
 //   - numbers must be positive integers (no fractions, exponents, negatives
 //     or leading zeros);
 //   - binary values are base64url without padding, canonical for the value;
@@ -56,7 +57,7 @@ func ParseFile(data []byte) (*File, error) {
 	if err := checkUTF8(data); err != nil {
 		return nil, err
 	}
-	v, err := decodeCanonical(data, fileMembers, MaxJSONDepth)
+	v, err := decodeCanonical(data, fileMembers, defaultDecodeLimits())
 	if err != nil {
 		return nil, err
 	}
@@ -218,7 +219,7 @@ func ParsePolicyDocument(data []byte) (*Policy, error) {
 		"format", "version", "vault_id", "policy_seq", "prev_policy_digest",
 		"owner_root", "readers", "writers", "admins", "owners",
 		"admin_delegations", "devices",
-	}, MaxJSONDepth)
+	}, defaultDecodeLimits())
 	if err != nil {
 		return nil, err
 	}
@@ -503,12 +504,42 @@ func checkUTF8(data []byte) error {
 	return nil
 }
 
+// decodeLimits are the value-tree budgets applied while decoding one input.
+// The package constants are passed in; tests pass tiny values to exercise
+// exhaustion cheaply. Budgets are per decodeCanonical call, so every
+// ParseFile or ParsePolicyDocument starts from zero.
+type decodeLimits struct {
+	// maxDepth is the deepest allowed container nesting (the top-level
+	// value is depth 0).
+	maxDepth int
+	// maxMembers is the largest allowed object.
+	maxMembers int
+	// maxNodes is the largest allowed number of value and container
+	// nodes, object keys excluded.
+	maxNodes int
+	// maxArray is the largest allowed array length.
+	maxArray int
+}
+
+// defaultDecodeLimits are the schema-wide budgets every public parse uses.
+// Both ParseFile and ParsePolicyDocument build a fresh decodeState per call,
+// so node and member counts never carry over between inputs.
+func defaultDecodeLimits() decodeLimits {
+	return decodeLimits{
+		maxDepth:   MaxJSONDepth,
+		maxMembers: MaxObjectMembers,
+		maxNodes:   MaxJSONNodes,
+		maxArray:   MaxArrayItems,
+	}
+}
+
 // decodeCanonical parses data into a value tree. Numbers never arrive as
 // float64 (UseNumber), so precision is never silently lost.
-func decodeCanonical(data []byte, allowed []string, maxDepth int) (*value, error) {
+func decodeCanonical(data []byte, allowed []string, lim decodeLimits) (*value, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
-	v, err := decodeValue(dec, 0, maxDepth, true, "", allowed)
+	st := decodeState{}
+	v, err := st.decodeValue(dec, 0, true, "", allowed, lim)
 	if err != nil {
 		return nil, err
 	}
@@ -518,9 +549,27 @@ func decodeCanonical(data []byte, allowed []string, maxDepth int) (*value, error
 	return v, nil
 }
 
-func decodeValue(dec *json.Decoder, depth, maxDepth int, top bool, path string, allowed []string) (*value, error) {
-	if depth > maxDepth {
+// decodeState is the per-input node counter shared by one decodeValue tree.
+type decodeState struct {
+	nodes int
+}
+
+// takeNode charges one value or container node before its token is requested,
+// so the decoded tree can never exceed lim.maxNodes.
+func (st *decodeState) takeNode(path string, lim decodeLimits) error {
+	if st.nodes >= lim.maxNodes {
+		return &Error{Code: CodeTooManyNodes, Path: path}
+	}
+	st.nodes++
+	return nil
+}
+
+func (st *decodeState) decodeValue(dec *json.Decoder, depth int, top bool, path string, allowed []string, lim decodeLimits) (*value, error) {
+	if depth > lim.maxDepth {
 		return nil, &Error{Code: CodeTooDeep, Path: path}
+	}
+	if err := st.takeNode(path, lim); err != nil {
+		return nil, err
 	}
 	tok, err := dec.Token()
 	if err != nil {
@@ -571,6 +620,11 @@ func decodeValue(dec *json.Decoder, depth, maxDepth int, top bool, path string, 
 			obj := map[string]*value{}
 			keys := []string{}
 			for dec.More() {
+				// Reject before reading or decoding the next key/value, so
+				// the map and key slice never grow past the budget.
+				if len(keys) >= lim.maxMembers {
+					return nil, &Error{Code: CodeTooManyMembers, Path: path}
+				}
 				kt, err := dec.Token()
 				if err != nil {
 					return nil, &Error{Code: CodeInvalidJSON, Path: path}
@@ -586,10 +640,12 @@ func decodeValue(dec *json.Decoder, depth, maxDepth int, top bool, path string, 
 				if _, dup := obj[key]; dup {
 					return nil, &Error{Code: CodeDuplicateField, Path: childPath}
 				}
-				if top && !contains(allowed, key) {
+				// allowed is empty only when no top-level member list
+				// applies (tests of the budget helper).
+				if top && allowed != nil && !contains(allowed, key) {
 					return nil, &Error{Code: CodeUnknownField, Path: childPath}
 				}
-				child, err := decodeValue(dec, depth+1, maxDepth, false, childPath, nil)
+				child, err := st.decodeValue(dec, depth+1, false, childPath, nil, lim)
 				if err != nil {
 					return nil, err
 				}
@@ -603,10 +659,11 @@ func decodeValue(dec *json.Decoder, depth, maxDepth int, top bool, path string, 
 		case '[':
 			arr := []*value{}
 			for dec.More() {
-				if len(arr) >= MaxArrayItems {
+				// The array precheck stays ahead of decoding the next child.
+				if len(arr) >= lim.maxArray {
 					return nil, &Error{Code: CodeTooManyItems, Path: path}
 				}
-				child, err := decodeValue(dec, depth+1, maxDepth, false, path+"[]", nil)
+				child, err := st.decodeValue(dec, depth+1, false, path+"[]", nil, lim)
 				if err != nil {
 					return nil, err
 				}

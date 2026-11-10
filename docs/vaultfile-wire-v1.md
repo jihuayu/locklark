@@ -326,6 +326,8 @@ Validation is shape only:
 | `MaxKDBXCiphertextOverhead`                            | 64 KiB   |
 | `MaxSignedPolicyProofBytes`                            | 256 KiB  |
 | `MaxJSONDepth`                                         | 8        |
+| `MaxObjectMembers`                                     | 16       |
+| `MaxJSONNodes`                                         | 524288   |
 | `MaxArrayItems`                                        | 128      |
 | `MaxPolicyArrayItems`                                  | 64       |
 | `MaxDelegations`                                       | 64       |
@@ -338,6 +340,12 @@ Validation is shape only:
 | `MaxSignatureLength`                                   | 4 KiB    |
 | `MaxWrappedKeyLength`                                  | 512      |
 | `MaxPublicKeyLength`                                   | 1024     |
+
+The object-member and aggregate-node checks run before the decoder requests or
+decodes the next key or value token, so an input over either budget is rejected
+as `too_many_members` or `too_many_nodes` without decoding the token beyond it.
+Object keys do not count as nodes. Both counts reset per input: each
+`ParseFile` or `ParsePolicyDocument` call starts from zero.
 
 ## Encoding vectors
 

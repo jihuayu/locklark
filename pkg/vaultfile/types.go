@@ -237,6 +237,13 @@ const (
 	CodeSignatureInvalid = "signature_shape_invalid"
 	CodeHeaderMismatch   = "header_mismatch"
 
+	// CodeTooManyMembers reports an object that would exceed
+	// MaxObjectMembers. Path is the object itself.
+	CodeTooManyMembers = "too_many_members"
+	// CodeTooManyNodes reports an input that would exceed MaxJSONNodes. Path
+	// is the value that would have become node MaxJSONNodes+1.
+	CodeTooManyNodes = "too_many_nodes"
+
 	// CodeNonCanonical reports valid JSON that is not the byte-exact canonical
 	// encoding the canonical encoder produces for the same value. It is
 	// reported only after structural validation of the value succeeded.
