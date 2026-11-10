@@ -99,7 +99,7 @@ def check(binary,legacy=None):
         phase("notes-import")
         receipt, _ = invoke(binary, "import-1pux", path, factors + [(import_prompt, "SAVE")],
                             options=apply_options, forbidden=private,
-                            required_before_last_prompt=("来源记录会加密保留", "不会覆盖已有条目"))
+                            required_before_last_prompt=("会加密保留", "不会覆盖已有条目"))
         assert receipt["report_digest"] == plan["report_digest"] and receipt["status"] == "imported-login-notes-v2"
         invoke(binary, "import-1pux", path, factors + [(import_prompt, "SAVE")], options=apply_options,
                ok=False, expect_error="source item already exists", forbidden=private)
