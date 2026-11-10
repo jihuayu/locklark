@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/egoist/mygo"
@@ -180,9 +181,13 @@ func (a *App) browserV2ApprovalView(c *ui.Context, b *browserhost.Connection, p 
 		if p.Revision != "" {
 			ui.Text(c, "精确修订："+p.Revision).FontSize(12).TextColor(t.TextMuted)
 		}
-		if p.Title != "" && p.Title != p.Origin {
-			ui.Text(c, "名称："+browserTitle(p.Title)).TextColor(t.Text)
+		if p.RevisionPinned {
+			ui.Text(c, "修订已固定：按批准时的当前修订执行；条目若已改变则拒绝。").FontSize(12).TextColor(t.TextMuted)
 		}
+		if p.Title != "" && p.Title != p.Origin {
+			ui.Text(c, "来源名称："+browserTitle(p.Title)).TextColor(t.Text)
+		}
+		a.browserV2AnchorView(c, p)
 		if p.Field != "" {
 			ui.Text(c, "字段选择器："+visible(p.Field)).FontSize(13).Bold().TextColor(t.Text)
 		}
@@ -199,6 +204,67 @@ func (a *App) browserV2ApprovalView(c *ui.Context, b *browserhost.Connection, p 
 			ui.Button(c, reject).Disabled(a.busy).OnClick(func() { a.browserV2Action(b, p.ID, false) })
 		})
 	})
+}
+
+// browserV2AnchorView renders the bounded public anchors of one review. The
+// current item (what the approval would read or edit) and the request (what it
+// asks to write) are kept visually separate. Only names appear here: the host
+// never puts a value, note, card/CVV/PIN, identity number or passkey material
+// into the view. Rows sit in a bounded scroll region so the action buttons stay
+// visible for any accepted list length.
+func (a *App) browserV2AnchorView(c *ui.Context, p browserhost.V2ApprovalView) {
+	if p.StoredTitle == "" && p.RequestedTitle == "" && len(p.StoredFields) == 0 && len(p.RequestedFields) == 0 {
+		return
+	}
+	t := c.Theme()
+	ui.Scroll(c).Height(210).FillWidth().Border(1, t.Border).Radius(t.Radius).Background(t.Surface).Padding(6).Children(func() {
+		ui.Column(c).Gap(3).Children(func() {
+			if p.StoredTitle != "" {
+				ui.Text(c, "当前条目：").FontSize(13).Bold().TextColor(t.Text)
+				ui.Text(c, "  当前名称："+browserTitle(p.StoredTitle)).FontSize(13).TextColor(t.Text)
+				ui.Text(c, "  当前类别："+browserV2Category(p.StoredCategory)).FontSize(13).TextColor(t.TextMuted)
+				ui.Text(c, "  当前字段名："+browserV2FieldNames(p.StoredFields)).FontSize(13).TextColor(t.TextMuted)
+			}
+			if p.RequestedTitle != "" || p.RequestedCategory != "" || len(p.RequestedFields) != 0 {
+				ui.Text(c, "请求：").FontSize(13).Bold().TextColor(t.Text)
+				if p.RequestedTitle != "" {
+					ui.Text(c, "  请求名称："+browserTitle(p.RequestedTitle)).FontSize(13).TextColor(t.Text)
+				}
+				if p.RequestedCategory != "" {
+					ui.Text(c, "  请求类别："+browserV2Category(p.RequestedCategory)).FontSize(13).TextColor(t.TextMuted)
+				}
+				if len(p.RequestedFields) != 0 {
+					ui.Text(c, "  请求字段名称："+browserV2FieldNames(p.RequestedFields)).FontSize(13).TextColor(t.TextMuted)
+				}
+			}
+			ui.Text(c, "以上仅为字段名称，不包含任何字段值。").FontSize(12).TextColor(t.TextMuted)
+		})
+	})
+}
+
+func browserV2Category(category string) string {
+	switch category {
+	case "login":
+		return "登录（login）"
+	case "password":
+		return "密码（password）"
+	case "secure_note":
+		return "安全笔记（secure_note）"
+	case "credit_card":
+		return "信用卡（credit_card）"
+	case "identity":
+		return "身份信息（identity）"
+	case "":
+		return "（未注明）"
+	}
+	return visible(category)
+}
+
+func browserV2FieldNames(fields []string) string {
+	if len(fields) == 0 {
+		return "（无）"
+	}
+	return strings.Join(fields, "、")
 }
 
 func (a *App) browserV2Action(b *browserhost.Connection, id string, approve bool) {

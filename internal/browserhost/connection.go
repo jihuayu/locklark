@@ -4,12 +4,18 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/jihuayu/locklark/internal/nativeclipboard"
 	"github.com/jihuayu/locklark/internal/personal"
+	"github.com/jihuayu/locklark/internal/vault"
 )
 
 type Pending struct {
@@ -18,8 +24,15 @@ type Pending struct {
 }
 
 // V2ApprovalView is the native review of one non-quick-fill V2 disclosure or
-// mutation. It carries only protocol selectors; mutation payloads, passwords
-// and field values never enter the view.
+// mutation. It carries only protocol selectors and bounded public names;
+// mutation payloads, passwords and field values never enter the view.
+//
+// Stored* describe the authenticated item the request targets, exactly as read
+// when the review was reserved. Requested* describe what the request asks to
+// read or write: a mutation's requested identity anchor and the public names of
+// the fields it would write. Both are label lists only (builtin member names
+// such as "用户名"/"密码" and custom field labels); no value, note text, raw
+// item JSON or credential material is ever projected.
 type V2ApprovalView struct {
 	ID, Type, Origin, ItemID, Revision, Title string
 	// Field is the public wire selector (for example "password" or
@@ -28,6 +41,24 @@ type V2ApprovalView struct {
 	// no payload or new secret value enters the view.
 	Field, Action, Summary string
 	Deadline               time.Time
+	// RevisionPinned reports that an item-get request omitted its revision and
+	// the review reserved the exact authenticated revision in Revision. The
+	// approval executes the original handleItemGet path, which rechecks that
+	// same revision, so a concurrent edit refuses the disclosure.
+	RevisionPinned bool
+	// StoredTitle / StoredCategory / StoredFields anchor the authenticated
+	// item. StoredFields names the public builtin members the item's detail
+	// frame shows and its custom section field labels.
+	StoredTitle    string
+	StoredCategory string
+	StoredFields   []string
+	// RequestedTitle / RequestedCategory / RequestedFields describe a mutation
+	// payload: the title and category it writes, and the names of the fields it
+	// would write or explicitly clear (including the notes field when the
+	// payload writes notes).
+	RequestedTitle    string
+	RequestedCategory string
+	RequestedFields   []string
 }
 
 type pendingV2 struct {
@@ -39,6 +70,8 @@ type pendingV2 struct {
 	deadline    time.Time
 	epoch       uint64
 	cancelEpoch uint64
+	stored      itemAnchor
+	requested   *itemAnchor
 }
 
 // ProfileView is the public native review of one sensitive profile fill. It
@@ -1110,16 +1143,358 @@ func v2ApprovalReview(r Request) (field, action, summary string) {
 	return field, action, summary
 }
 
+// itemAnchor is bounded, name-only metadata about one item. It never carries a
+// field value, note text, secret, passkey material or the raw item_json.
+type itemAnchor struct {
+	title, category, revision string
+	fields                    []string
+	// clears maps a lower-cased "section:id" pair to the stored field's public
+	// label, so an explicit clear can be named by the field it empties.
+	clears map[string]string
+}
+
+// Bounds shared by every review list. They are label lists, so a few dozen
+// entries already covers real items; anything longer is cut, not expanded.
+const (
+	v2AnchorMaxLabel = 64
+	v2AnchorMaxList  = 48
+)
+
+// projectionListLen keeps the test suite able to prove truncation with a few
+// synthetic entries instead of a maximally sized item. The production value is
+// v2AnchorMaxList.
+var projectionListLen = v2AnchorMaxList
+
+// v2PublicLabel turns one name into a bounded, single-line label. Control
+// characters and line separators become visible escapes so a crafted label
+// cannot inject another review row or line in the native view.
+func v2PublicLabel(raw string) string {
+	var out strings.Builder
+	for _, r := range raw {
+		switch {
+		case unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == '\u2028' || r == '\u2029':
+			fmt.Fprintf(&out, `\u{%X}`, r)
+		case r == utf8.RuneError:
+			continue
+		default:
+			out.WriteRune(r)
+		}
+	}
+	label := strings.TrimSpace(out.String())
+	if runes := []rune(label); len(runes) > v2AnchorMaxLabel {
+		label = strings.TrimSpace(string(runes[:v2AnchorMaxLabel]))
+	}
+	return label
+}
+
+// v2FieldLabel names a custom field by its label without letting the label
+// impersonate one of the review's own prefixes ("清除：" etc.).
+func v2FieldLabel(raw string) string {
+	label := v2PublicLabel(raw)
+	if label == "" {
+		return "未命名字段"
+	}
+	if strings.Contains(label, "：") || strings.HasPrefix(label, "stored:") {
+		return "「" + label + "」"
+	}
+	return label
+}
+
+// v2SortedNames returns a deduplicated, sorted, bounded copy of the member
+// names whose value is present. Non-empty strings and true flags count.
+func v2SortedNames(members map[string]any) []string {
+	seen := make([]string, 0, len(members))
+	for name, value := range members {
+		present := false
+		switch v := value.(type) {
+		case string:
+			present = v != ""
+		case bool:
+			present = v
+		}
+		if present {
+			seen = append(seen, name)
+		}
+	}
+	sort.Strings(seen)
+	if len(seen) > projectionListLen {
+		seen = seen[:projectionListLen]
+	}
+	return seen
+}
+
+// v2FieldTypeSensitive reports whether a custom field type is stored as a
+// secret. Only such fields can be explicitly cleared through clear_fields.
+func v2FieldTypeSensitive(typ vault.FieldType) bool {
+	switch typ {
+	case vault.FieldTypeConcealed, vault.FieldTypeOTP, vault.FieldTypeTOTP:
+		return true
+	}
+	return false
+}
+
+// v2DetailFieldNames projects the public field names the approved item detail
+// would show: every login builtin member, card and identity member with a
+// value, and every custom section field label. Values are never read.
+func v2DetailFieldNames(it vault.Item) []string {
+	category := categoryOf(it)
+	// The authenticated anchor always names the item title and the members
+	// the detail frame defines; value-bearing members are added below.
+	fields := []string{"标题", "用户名", "验证码", "网址", "备注", "标签", "收藏", "自动提交"}
+	if it.Password != "" && (category == "login" || category == "password") {
+		fields = append(fields, "密码")
+	}
+	if card := it.NormalizedCreditCard(); card != nil {
+		present := map[string]any{
+			"持卡人": card.CardholderName, "卡类型": card.Type, "卡号": card.Number,
+			"安全码": card.Verification, "有效期": card.ExpiryDate, "生效日期": card.ValidFrom,
+			"PIN": card.PIN, "发卡银行": card.IssuingBank,
+		}
+		for _, name := range v2SortedNames(present) {
+			fields = append(fields, "信用卡·"+name)
+		}
+	}
+	if ident := it.NormalizedIdentity(); ident != nil {
+		present := map[string]any{
+			"称谓": ident.Title, "名": ident.FirstName, "中间名": ident.MiddleName, "姓": ident.LastName,
+			"生日": ident.BirthDate, "公司": ident.Company, "部门": ident.Department, "职位": ident.JobTitle,
+			"邮箱": ident.Email, "电话": ident.Phone,
+			"地址行 1": ident.AddressLine1, "地址行 2": ident.AddressLine2,
+			"城市": ident.City, "州/省": ident.State, "邮编": ident.PostalCode, "国家": ident.Country,
+			"网站": ident.Website,
+		}
+		for _, name := range v2SortedNames(present) {
+			fields = append(fields, "身份·"+name)
+		}
+	}
+	for _, sec := range it.Sections {
+		for _, f := range sec.Fields {
+			label := v2PublicLabel(f.Label)
+			if label == "" {
+				label = "未命名字段"
+			}
+			fields = append(fields, "自定义字段："+label)
+		}
+	}
+	return fields
+}
+
+// v2RequestedAnchor projects the public names one mutation payload asks to
+// write. Decoding uses the same decodeMutation the approval executes, and the
+// member order mirrors mergeMeta / v2ItemFromMutation / applyClearFields so only
+// members that are actually applied are named.
+func (c *Connection) v2RequestedAnchor(target, raw string) itemAnchor {
+	m, err := decodeMutation(raw)
+	if err != nil {
+		// handleItemSave refuses this payload; the review still names the
+		// request without trusting any of it.
+		return itemAnchor{category: "（无效请求）", fields: []string{}}
+	}
+	var fields []string
+	if m.Title != "" {
+		fields = append(fields, "标题")
+	}
+	if m.Username != nil {
+		fields = append(fields, "用户名")
+	}
+	// v2ItemFromMutation keeps the stored password when an edit sends an empty
+	// value; only a creation writes it then.
+	if m.Password != nil && (*m.Password != "" || m.Category == "login" || m.Category == "password") {
+		fields = append(fields, "密码")
+	}
+	if m.OTP != nil {
+		fields = append(fields, "验证码")
+	}
+	if m.URL != nil || m.URLs != nil {
+		fields = append(fields, "网址")
+	}
+	if m.Notes != nil {
+		fields = append(fields, "备注")
+	}
+	if m.Favorite != nil {
+		fields = append(fields, "收藏")
+	}
+	if m.AutoSubmit != nil {
+		fields = append(fields, "自动提交")
+	}
+	if m.Tags != nil {
+		fields = append(fields, "标签")
+	}
+	if m.VaultID != "" {
+		fields = append(fields, "保管库")
+	}
+	if card := m.CreditCard; card != nil {
+		// mergeMeta applies only the member when its own input is present.
+		present := map[string]any{
+			"持卡人": card.CardholderName, "卡类型": card.Type, "卡号": card.Number != nil,
+			"安全码": card.Verification != nil, "有效期": card.ExpiryDate, "生效日期": card.ValidFrom,
+			"PIN": card.PIN != nil, "发卡银行": card.IssuingBank,
+		}
+		for _, name := range v2SortedNames(present) {
+			fields = append(fields, "信用卡·"+name)
+		}
+	}
+	if ident := m.Identity; ident != nil {
+		present := map[string]any{
+			"称谓": ident.Title, "名": ident.FirstName, "中间名": ident.MiddleName, "姓": ident.LastName,
+			"生日": ident.BirthDate, "公司": ident.Company, "部门": ident.Department, "职位": ident.JobTitle,
+			"邮箱": ident.Email, "电话": ident.Phone,
+			"地址行 1": ident.AddressLine1, "地址行 2": ident.AddressLine2,
+			"城市": ident.City, "州/省": ident.State, "邮编": ident.PostalCode, "国家": ident.Country,
+			"网站": ident.Website,
+		}
+		for _, name := range v2SortedNames(present) {
+			fields = append(fields, "身份·"+name)
+		}
+	}
+	if m.Sections != nil {
+		// Supplied sections replace the structure; each listed field would be
+		// written (a nil value preserves the stored value under that id).
+		for _, sec := range m.Sections {
+			for _, f := range sec.Fields {
+				fields = append(fields, "自定义字段："+v2FieldLabel(f.Label))
+			}
+		}
+	}
+	anchor := itemAnchor{title: v2PublicLabel(m.Title), category: m.Category, fields: fields}
+	if len(m.ClearFields) != 0 {
+		// Resolve every explicit clear against the item the approval would
+		// edit, so a payload without the target's label still names it.
+		stored, err := c.v2StoredAnchor(target)
+		if err != nil {
+			stored = itemAnchor{}
+		}
+		for _, key := range m.ClearFields {
+			fields = append(fields, "清除："+v2ClearLabel(m, key, stored))
+		}
+	}
+	anchor.fields = v2BoundedLabels(fields)
+	return anchor
+}
+
+// v2StoredAnchor reads one authenticated item through the existing
+// ReadAuthenticatedItems(false) view and projects only its title, category,
+// revision and the public field names its detail frame would show. No item,
+// section or value escapes this call.
+func (c *Connection) v2StoredAnchor(id string) (itemAnchor, error) {
+	s := c.session.Load()
+	if s == nil {
+		return itemAnchor{}, ErrProtocol
+	}
+	items, revisions, err := s.ReadAuthenticatedItems(false)
+	if err != nil {
+		return itemAnchor{}, err
+	}
+	it, ok := c.findItem(items, id)
+	if !ok || revisions[it.ID] == "" {
+		return itemAnchor{}, ErrProtocol
+	}
+	anchor := itemAnchor{title: v2PublicLabel(it.Title), category: categoryOf(it), revision: revisions[it.ID]}
+	anchor.fields = v2BoundedLabels(v2DetailFieldNames(it))
+	for _, sec := range it.Sections {
+		for _, f := range sec.Fields {
+			if !v2FieldTypeSensitive(f.Type) && !f.Protected {
+				continue
+			}
+			if anchor.clears == nil {
+				anchor.clears = map[string]string{}
+			}
+			anchor.clears[strings.ToLower(sec.ID)+":"+strings.ToLower(f.ID)] = "自定义隐藏字段：" + v2FieldLabel(f.Label)
+		}
+	}
+	return anchor, nil
+}
+
+// v2ClearLabel names one explicit clear by the field it empties. The payload's
+// own section labels win; otherwise the stored item's label is used.
+func v2ClearLabel(m BrowserItemMutation, key string, stored itemAnchor) string {
+	if key == "notes" {
+		return "备注"
+	}
+	parts := strings.Split(key, ":")
+	if len(parts) != 3 {
+		return "自定义字段"
+	}
+	// The stored item knows whether the target is stored as a secret; that
+	// classification wins over the payload's own echo.
+	if label := stored.clears[strings.ToLower(parts[1])+":"+strings.ToLower(parts[2])]; label != "" {
+		return label
+	}
+	for _, sec := range m.Sections {
+		if !strings.EqualFold(sec.ID, parts[1]) {
+			continue
+		}
+		for _, f := range sec.Fields {
+			if strings.EqualFold(f.ID, parts[2]) && f.Label != "" {
+				return "自定义字段：" + v2FieldLabel(f.Label)
+			}
+		}
+	}
+	return "自定义字段（ID " + v2PublicLabel(parts[1]+":"+parts[2]) + "）"
+}
+
+// v2BoundedLabels trims, de-duplicates, caps and copies a label list.
+func v2BoundedLabels(in []string) []string {
+	out := make([]string, 0, len(in))
+	seen := map[string]bool{}
+	for _, raw := range in {
+		label := v2PublicLabel(raw)
+		if label == "" || seen[label] {
+			continue
+		}
+		seen[label] = true
+		out = append(out, label)
+	}
+	if len(out) > projectionListLen {
+		out = out[:projectionListLen]
+	}
+	if out == nil {
+		out = []string{}
+	}
+	return out
+}
+
 // startV2Approval reserves one public review. The caller holds c.mu. The
 // request payload stays private in memory and is cleared on rejection, expiry,
 // lock or disconnect.
+//
+// The review also prepares bounded metadata for the native owner: the
+// authenticated anchor (title, category, public field names) of an existing
+// item, and the public names a mutation asks to write. Only names are copied;
+// items, values and the payload itself are never retained by the view.
 func (c *Connection) startV2Approval(r Request) error {
 	title := r.Title
 	if title == "" {
 		title = r.Origin
 	}
 	field, action, summary := v2ApprovalReview(r)
-	c.v2pending = &pendingV2{request: r, title: title, field: field, action: action, summary: summary, deadline: c.now().Add(30 * time.Second), epoch: c.epoch, cancelEpoch: c.cancelEpoch.Load()}
+	review := &pendingV2{title: title, field: field, action: action, summary: summary, deadline: c.now().Add(30 * time.Second), epoch: c.epoch, cancelEpoch: c.cancelEpoch.Load()}
+	switch r.Type {
+	case "item-get":
+		// An omitted revision is pinned to the authenticated revision read
+		// now. The approval still runs the unchanged handleItemGet, which
+		// rechecks the exact revision and refuses if it moved.
+		if stored, err := c.v2StoredAnchor(r.ItemID); err == nil {
+			review.stored = stored
+			if r.Revision == "" && stored.revision != "" {
+				r.Revision = stored.revision
+			}
+		}
+	case "item-edit", "item-save":
+		if stored, err := c.v2StoredAnchor(r.ItemID); err == nil && stored.revision == r.Revision {
+			review.stored = stored
+		} else {
+			// The edit names an item this host cannot anchor right now; the
+			// approval path still rechecks it. Show only the request names.
+			review.stored = itemAnchor{}
+		}
+	}
+	if r.Type == "item-create" || r.Type == "item-edit" || r.Type == "item-save" {
+		requested := c.v2RequestedAnchor(r.ItemID, r.ItemJSON)
+		review.requested = &requested
+	}
+	review.request = r
+	c.v2pending = review
 	c.changed()
 	return nil
 }
@@ -1205,6 +1580,15 @@ func (c *Connection) Snapshot() View {
 	v.OTPRequestID = c.otpRequestID
 	if p := c.v2pending; p != nil {
 		v.V2 = &V2ApprovalView{ID: p.request.ID, Type: p.request.Type, Origin: p.request.Origin, ItemID: p.request.ItemID, Revision: p.request.Revision, Title: p.title, Field: p.field, Action: p.action, Summary: p.summary, Deadline: p.deadline}
+		// Independent copies: a snapshot never aliases the pending review, and
+		// mutating one snapshot cannot reach the connection or another one.
+		v.V2.RevisionPinned = p.request.Type == "item-get" && p.stored.revision != "" && p.stored.revision == p.request.Revision
+		v.V2.StoredTitle, v.V2.StoredCategory = p.stored.title, p.stored.category
+		v.V2.StoredFields = append([]string(nil), p.stored.fields...)
+		if p.requested != nil {
+			v.V2.RequestedTitle, v.V2.RequestedCategory = p.requested.title, p.requested.category
+			v.V2.RequestedFields = append([]string(nil), p.requested.fields...)
+		}
 	}
 	if p := c.profile; p != nil {
 		review := &ProfileView{ID: p.request.ID, Origin: p.request.Origin, Title: p.title, ItemID: p.request.ItemID, Revision: p.request.Revision, Category: p.category, Deadline: p.deadline}

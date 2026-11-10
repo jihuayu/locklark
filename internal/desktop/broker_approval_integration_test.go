@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -387,5 +388,139 @@ func TestBrokeredV2DisclosureRendersNativeApproval(t *testing.T) {
 	}
 	if conn.Snapshot().V2 != nil {
 		t.Fatal("approved V2 review remained pending")
+	}
+}
+
+// brokeredV2Review waits for the exact brokered V2 review of one request.
+func brokeredV2Review(t *testing.T, a *App, id string) *browserhost.Connection {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if conn := a.brokeredBrowserApproval(); conn != nil {
+			if view := conn.Snapshot().V2; view != nil && view.ID == id {
+				return conn
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("brokered V2 review %s did not surface", id)
+	return nil
+}
+
+// The brokered native approval view shows the current item and the request as
+// separate, name-only summaries. Every synthetic secret sentinel must stay out
+// of the rendered texts while the approved disclosure still delivers the real
+// value.
+func TestBrokeredV2ApprovalRendersPublicFieldSummary(t *testing.T) {
+	a, s, client, _, capability := brokeredDesktopFixtureWithQuick(t, false)
+	rows, e := s.List("active")
+	if e != nil {
+		t.Fatal(e)
+	}
+	var itemID, revision string
+	for _, row := range rows {
+		if row.Title == "Broker Passkey" {
+			itemID, revision = row.ID, row.Revision
+		}
+	}
+	if itemID == "" {
+		t.Fatal("fixture login missing")
+	}
+
+	const sentinel = "SYNTHETIC-SECRET-SENTINEL-7f3c"
+	requestID := fmt.Sprintf("%032x", 300)
+	payload := `{"category":"login","title":"Requested Sanitized Login","username":"` + sentinel + `","password":"` + sentinel +
+		`","otp":"JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP","url":"https://requested.example.test/` + sentinel +
+		`","notes":"` + sentinel + `","favorite":true,"sections":[{"id":"requested","title":"Requested","fields":[{"id":"recovery","label":"Recovery Code","type":"concealed","value":"` + sentinel + `"}]}]}`
+	client.send(t, map[string]any{
+		"v": 1, "id": requestID, "type": "item-edit", "capability": capability,
+		"item_id": itemID, "revision": revision, "item_json": payload,
+	})
+	conn := brokeredV2Review(t, a, requestID)
+	view := conn.Snapshot().V2
+	if view == nil || view.Type != "item-edit" {
+		t.Fatalf("brokered edit review: %#v", view)
+	}
+	tester := ui.NewTester(a.View, 1200, 2400)
+	for _, want := range []string{
+		"确认浏览器修改金库",
+		"当前条目：", "当前名称：Broker Passkey", "当前类别：登录（login）", "当前字段名：",
+		"请求：", "请求名称：Requested Sanitized Login", "请求类别：登录（login）", "请求字段名称：",
+		"用户名", "密码", "验证码", "网址", "备注", "收藏", "自定义字段：Recovery Code",
+		"以上仅为字段名称，不包含任何字段值。",
+		"批准本次金库写入", "拒绝本次金库写入",
+		"此操作不是快捷填充；请求 30 秒后失效。",
+	} {
+		if !tester.HasText(want) {
+			t.Fatalf("v2 desktop did not render %q", want)
+		}
+	}
+	if !tester.HasText("操作：编辑条目") {
+		t.Fatal("v2 desktop stopped rendering the operation summary")
+	}
+	texts := strings.Join(tester.Texts(), "\n")
+	if strings.Contains(texts, sentinel) || strings.Contains(texts, "JBSWY3DPEHPK3PXP") {
+		t.Fatalf("field value leaked into the native approval texts: %s", texts)
+	}
+	if e := tester.Click("批准本次金库写入"); e != nil {
+		t.Fatalf("click V2 edit approval: %v", e)
+	}
+	saved := client.recvType(t, "item-saved", 10*time.Second)
+	if saved["title"] != nil && saved["title"] != "Requested Sanitized Login" {
+		t.Fatalf("approved edit result: %#v", saved)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for conn.Snapshot().V2 != nil {
+		if time.Now().After(deadline) {
+			t.Fatal("approved V2 edit review remained pending")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// A non-quick item-get without a revision is pinned to the authenticated revision read when the review is
+// reserved, and the desktop renders the pinned selector.
+func TestBrokeredV2ItemGetPinsRevisionInNativeView(t *testing.T) {
+	a, s, client, _, capability := brokeredDesktopFixtureWithQuick(t, false)
+	rows, e := s.List("active")
+	if e != nil {
+		t.Fatal(e)
+	}
+	var itemID, revision string
+	for _, row := range rows {
+		if row.Title == "Broker Passkey" {
+			itemID, revision = row.ID, row.Revision
+		}
+	}
+	if itemID == "" || revision == "" {
+		t.Fatal("fixture login missing")
+	}
+	requestID := fmt.Sprintf("%032x", 310)
+	client.send(t, map[string]any{
+		"v": 1, "id": requestID, "type": "item-get", "capability": capability, "item_id": itemID,
+	})
+	conn := brokeredV2Review(t, a, requestID)
+	view := conn.Snapshot().V2
+	if view == nil || view.Revision != revision || !view.RevisionPinned {
+		t.Fatalf("pinned review: %#v", view)
+	}
+	tester := ui.NewTester(a.View, 1200, 2400)
+	for _, want := range []string{
+		"确认浏览器敏感操作", "精确修订：" + revision, "修订已固定：按批准时的当前修订执行；条目若已改变则拒绝。",
+		"当前名称：Broker Passkey", "当前类别：登录（login）", "批准本次操作", "拒绝本次操作",
+	} {
+		if !tester.HasText(want) {
+			t.Fatalf("v2 desktop did not render %q", want)
+		}
+	}
+	if e := tester.Click("拒绝本次操作"); e != nil {
+		t.Fatalf("click V2 reject: %v", e)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for conn.Snapshot().V2 != nil {
+		if time.Now().After(deadline) {
+			t.Fatal("rejected V2 review remained pending")
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
 }
