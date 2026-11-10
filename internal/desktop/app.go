@@ -957,11 +957,25 @@ func (a *App) transferView(c *ui.Context) {
 			}
 		}
 	}
-	ui.Checkbox(c, &a.importFull, "完整类别（含卡片/身份/笔记，实验）").Disabled(a.busy).OnChange(func() {
-		a.planDigest = ""
-		a.report = ""
+	ui.Row(c).Gap(8).Children(func() {
+		ui.Checkbox(c, &a.importFull, "完整类别（含卡片/身份/笔记，实验）").Disabled(a.busy).OnChange(func() {
+			a.planDigest = ""
+			a.report = ""
+		})
+		ui.Button(c, "打开 1Password 导出…").Disabled(a.busy).OnClick(func() {
+			c.OpenURLThen("onepassword://", func(err error) {
+				a.dispatch(func() {
+					if err != nil {
+						a.status = "无法自动打开 1Password，请手动启动并导出 .1pux"
+						return
+					}
+					a.status = "已打开 1Password；请选择金库 → 导出 → 1PUX，再把文件拖回此页"
+				})
+			})
+		})
 	})
-	ui.Text(c, "1Password 7 的 .opvault 目录不能直接导入；请先在 1Password 中导出为 .1pux。").FontSize(12)
+	ui.Text(c, "1Password 8：选择金库 → 导出 → 1PUX；Locklark 不接收 1Password 主密码或 Secret Key。").FontSize(12)
+	ui.Text(c, "1Password 7 的 .opvault 目录不能直接导入；请先导出为 .1pux。").FontSize(12)
 	ui.Text(c, "1PUX 是未加密导出文件；导入完成后请安全删除。").FontSize(12)
 	ui.Button(c, "生成导入计划").Disabled(a.busy || strings.TrimSpace(a.source) == "").OnClick(func() {
 		s, source, full := a.session, a.source, a.importFull

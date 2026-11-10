@@ -22,6 +22,8 @@ func TestTransferViewShows1PUXMigration(t *testing.T) {
 		".opvault",
 		"未加密",
 		"拖到这里",
+		"打开 1Password 导出…",
+		"不接收 1Password 主密码",
 	} {
 		if !tester.HasText(want) {
 			t.Fatalf("transfer page missing %q", want)
