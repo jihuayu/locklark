@@ -26,6 +26,7 @@ from .support import (
     f12_parity_doc,
     HIBP_FIXED_HOST,
     HIBP_HTTPS_PORT,
+    HIBP_NETWORK_PROMPT,
     HIBP_PREFIX_RE,
     f13_cli_hibp_opt_in,
     f13_cli_hibp_range_lookups,
@@ -580,7 +581,9 @@ def t1_f13_06(ctx):
         clean_hash[:5]: (),
     }
     assert len(responses) == 2, "the synthetic passwords must share no prefix"
+    before = audit_events(ctx, vault)
     observed = f13_cli_hibp_range_lookups(ctx, vault, responses)
+    after = audit_events(ctx, vault)
     if observed["status"] != "ran":
         gate(
             ctx,
@@ -646,6 +649,38 @@ def t1_f13_06(ctx):
     clean_id = next(key for key, title in titles.items() if title == "Clean Mail")
     assert breach_counts.get(breached_id) == 2, (payload, responses)
     assert breach_counts.get(clean_id) == 0, payload
+    # Positive consent: the fixed NETWORK prompt and the Add-Padding notice
+    # were shown on the terminal before the mocked network phase.
+    assert HIBP_NETWORK_PROMPT in observed["transcript"], observed["transcript"][-1200:]
+    assert "Add-Padding: true" in observed["transcript"], observed["transcript"][-1200:]
+    # Positive audit: the consented run unlocked, recorded one succeeded local
+    # Watchtower pass, then the ``vault.health.hibp`` intent and its succeeded
+    # result.  ``personal audit`` observes with ``audit.list`` events of its
+    # own; only those observation events are dropped from the delta.
+    assert len(after) >= len(before), (len(before), len(after))
+    delta = [
+        event for event in after[len(before) :] if event.get("action") != "audit.list"
+    ]
+    results_by_action = [
+        (event.get("action"), event.get("result")) for event in delta
+    ]
+    assert results_by_action == [
+        ("desktop.unlock", "succeeded"),
+        ("vault.health.watchtower", "succeeded"),
+        ("vault.health.hibp", "intent"),
+        ("vault.health.hibp", "succeeded"),
+    ], results_by_action
+    audit_delta = json.dumps(delta)
+    for canary in (
+        breached,
+        clean,
+        breached_hash,
+        clean_hash,
+        breached_hash[5:],
+        clean_hash[5:],
+        vault["secret"],
+    ):
+        ctx.assert_no_canary_leak(canary, audit_delta)
 
 
 @e2e_test("T1_F13_04", 1, ["F13"], "Popup Watchtower banner warns on a matching login")
