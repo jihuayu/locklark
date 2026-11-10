@@ -995,6 +995,112 @@ async function runStaleDocumentJourney(driver, card, topOrigin) {
   );
 }
 
+// The fixed public statuses that only a finished native review can set.
+const CHECKOUT_TERMINAL_STATUS = ["已变化", "未完成", "已取消"];
+
+function terminalStatus(status) {
+  return CHECKOUT_TERMINAL_STATUS.some((line) => status.includes(line));
+}
+
+// The valid child was explicitly chosen and its real cross-origin native
+// approval is visible. Navigate only the top tab to a fresh `/checkout?case=deny`
+// document, which discards the reviewed top document and its child frame. Both
+// approval and refusal must then leave the native review, the reloaded top and
+// child forms stay blank and unsubmitted, and only after that the popup is
+// reopened to observe one fixed terminal status. The stale approval is never
+// clicked or otherwise acted on.
+async function runDenyNavigationJourney(driver, card, topOrigin) {
+  const { page, input, openPopup, phase, eventually } = driver;
+  const frameOrigin = checkoutFrameOrigin(topOrigin);
+  phase("checkout-deny-navigation:navigation");
+  await page.goto(topOrigin + "/checkout");
+  await eventually(
+    async () => (await childFormState(page, frameOrigin)) !== null,
+    "Checkout card frame did not load",
+  );
+  await assertBothBlank(
+    page,
+    frameOrigin,
+    "Fresh checkout forms must stay blank",
+  );
+
+  const popup = await openPopup();
+  await openCardDetail(popup, card, eventually);
+  assert(
+    await chooseChildOrigin(popup, topOrigin, frameOrigin, eventually),
+    "Expected exactly one explicit checkout child origin",
+  );
+  input([{ wait_label: CHECKOUT_APPROVE_LABEL }]);
+  phase("checkout-deny-navigation:native-review");
+  // The native review owns focus from here on, so its probes use the existing
+  // default inspected probe rather than the popup-preserving one.
+  for (const label of [CHECKOUT_APPROVE_LABEL, CHECKOUT_DENY_LABEL]) {
+    const control = nativeControl(nativeControls(input), label);
+    assert(
+      control.enabled && control.showing,
+      "Checkout native review must be visible before navigation",
+    );
+  }
+  await assertBothBlank(
+    page,
+    frameOrigin,
+    "Checkout forms changed before native approval",
+  );
+
+  phase("checkout-deny-navigation:top-navigation");
+  await page.goto(topOrigin + "/checkout?case=deny");
+  // Wait for both cross-origin decisions to leave the finished review. The
+  // bounded diagnostic carries only public control states, never values.
+  await eventually(
+    async () => {
+      const controls = nativeControls(input);
+      const available = [];
+      for (const [name, label] of [
+        ["approve", CHECKOUT_APPROVE_LABEL],
+        ["refuse", CHECKOUT_DENY_LABEL],
+      ]) {
+        const control = nativeControl(controls, label);
+        if (control.present && control.enabled && control.showing)
+          available.push(name);
+      }
+      // Only public control names: no label geometry, values or paths.
+      assert(
+        available.length === 0,
+        "Native checkout review still available after top navigation: " +
+          available.join("/"),
+      );
+      return true;
+    },
+    "Native checkout review did not finish after top navigation",
+    8000,
+  );
+  await eventually(
+    async () => (await childFormState(page, frameOrigin)) !== null,
+    "Fresh checkout card frame did not load",
+  );
+  await assertBothBlank(
+    page,
+    frameOrigin,
+    "Checkout forms received a value after top navigation",
+  );
+
+  // Only now, after the native review finished, does a second popup observe
+  // the public result. Its first native probe runs while that popup is live.
+  phase("checkout-deny-navigation:status");
+  const reopened = await openPopup();
+  assertNoNativeApproval(input, POPUP_OPEN);
+  await eventually(
+    async () => terminalStatus(String((await reopened.text("#status")) || "")),
+    "Navigated checkout approval did not reach a terminal status",
+    8000,
+  );
+  await assertBothBlank(
+    page,
+    frameOrigin,
+    "Cancelled checkout approval received a value",
+  );
+}
+
 // The same-origin variant embeds its child on the exact top origin (same host
 // and port). The extension therefore sends no checkout proposal and the native
 // owner shows the ordinary "敏感字段" card review. The journey proves both
@@ -1200,6 +1306,7 @@ export async function acceptCheckoutFrames(driver) {
   await runCrossSiteJourney(driver, card, topOrigin);
   await runSandboxJourney(driver, card, topOrigin);
   await runStaleDocumentJourney(driver, card, topOrigin);
+  await runDenyNavigationJourney(driver, card, topOrigin);
   // Same-origin after the stale journey so its exact child assertion runs on
   // a fresh same-origin document rather than the stale replaced one.
   await runSameOriginJourney(driver, card, topOrigin);

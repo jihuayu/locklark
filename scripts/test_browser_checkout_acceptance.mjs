@@ -25,6 +25,23 @@ function countMatches(text, pattern) {
   return (text.match(pattern) || []).length;
 }
 
+// A present, fully visible and blank form for both the top and child page.
+function blankFormState() {
+  const state = {
+    formPresent: true,
+    values: {},
+    visible: {},
+    tags: {},
+    submits: 0,
+  };
+  for (const key of ["name", "number", "month", "year", "csc", "pin"]) {
+    state.values[key] = "";
+    state.visible[key] = true;
+    state.tags[key] = key === "month" || key === "year" ? "SELECT" : "INPUT";
+  }
+  return state;
+}
+
 test("default checkout fixture keeps the original host and no sandbox", () => {
   const html = checkoutTopHTML(8443);
   assert.match(html, /src="https:\/\/checkout\.locklark\.test:8443\/card"/);
@@ -627,21 +644,7 @@ test("native absence probes fail closed on an unavailable snapshot", async () =>
     CardExpiry: "2030-01",
     CardPIN: "1234",
   };
-  // A present, fully visible and blank form for both the top and child page.
-  const visibleFormState = () => {
-    const state = {
-      formPresent: true,
-      values: {},
-      visible: {},
-      tags: {},
-      submits: 0,
-    };
-    for (const key of ["name", "number", "month", "year", "csc", "pin"]) {
-      state.visible[key] = true;
-      state.tags[key] = key === "month" || key === "year" ? "SELECT" : "INPUT";
-    }
-    return state;
-  };
+  const visibleFormState = blankFormState;
   const probes = [];
   const driver = (probe) => ({
     page: {
@@ -701,6 +704,79 @@ test("native absence probes fail closed on an unavailable snapshot", async () =>
       { message: "Native control snapshot unavailable" },
     );
   }
+});
+
+// Source of one journey, bounded by the next journey's comment block.
+function journeySource(name) {
+  const source = readFileSync(
+    new URL("./browser_checkout_acceptance.mjs", import.meta.url),
+    "utf8",
+  );
+  const start = source.indexOf(name);
+  assert.ok(start >= 0, name + " missing");
+  const rest = source.slice(start + name.length);
+  const end = rest.indexOf("\n// The same-origin variant embeds its child");
+  assert.ok(end > 0, "Journey source end not found");
+  return rest.slice(0, end);
+}
+
+test("navigating the top tab never acts on the stale native approval", () => {
+  const journey = journeySource("async function runDenyNavigationJourney");
+  // The stale review is only observed: no native action of any kind is sent
+  // while it is visible, before, during or after the top navigation. The one
+  // native request is the explicit selection wait that surfaces the review.
+  assert.doesNotMatch(journey, /click_label|key:/);
+  assert.equal(countMatches(journey, /wait_label/g), 1);
+  assert.match(
+    journey,
+    /input\(\[\{ wait_label: CHECKOUT_APPROVE_LABEL \}\]\)/,
+  );
+  // Only the top tab navigates, to a fresh default-route document; the child
+  // frame is of that new document and is never navigated by this journey.
+  assert.equal(countMatches(journey, /page\.goto\(/g), 2);
+  assert.match(journey, /page\.goto\(topOrigin \+ "\/checkout\?case=deny"\)/);
+  assert.doesNotMatch(journey, /frame\.goto|goto\(frameOrigin/);
+  // The popup-preserving probe only guards the reopened, live popup.
+  const reopen = journey.indexOf("const reopened = await openPopup();");
+  assert.ok(reopen > 0);
+  assert.doesNotMatch(journey.slice(0, reopen), /POPUP_OPEN/);
+  assert.match(
+    journey.slice(reopen),
+    /assertNoNativeApproval\(input, POPUP_OPEN\)/,
+  );
+});
+
+test("fixed PASS summary names the top-navigation rejection", () => {
+  const source = readFileSync(
+    new URL("./browser_native_acceptance.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /checkout same-origin child approval \(profile review\) and picker cancellation, cross-origin approval\/refusal, cross-site, opaque sandbox, changed-document and top-navigation rejection/,
+  );
+});
+
+test("a stale approval that stays available fails instead of being read as absent", () => {
+  // The bounded wait proves the review finished before the popup is reopened:
+  // any still-available approve or refuse control fails the check with a
+  // public control-name reason, and the popup open comes only after the wait.
+  const journey = journeySource("async function runDenyNavigationJourney");
+  const wait = journey.indexOf(
+    "Native checkout review did not finish after top navigation",
+  );
+  const reopen = journey.indexOf("const reopened = await openPopup();");
+  assert.ok(wait > 0 && reopen > wait);
+  assert.match(
+    journey.slice(0, reopen),
+    /available\.length === 0,\s*"Native checkout review still available after top navigation: "/,
+  );
+  // Both decisions are part of the requirement, each from a default probe.
+  assert.equal(
+    countMatches(journey.slice(0, reopen), /nativeControls\(input\)/g),
+    2,
+  );
+  assert.doesNotMatch(journey.slice(0, reopen), /POPUP_OPEN/);
 });
 
 test("checkout choice options are strictly bounded", async () => {
