@@ -386,6 +386,130 @@ func TestBrokerCLIRunClientCancelCancelsApproval(t *testing.T) {
 	}
 }
 
+// scriptedTimeout is a read timeout observable only through net.Error
+// Timeout, like the Windows named-pipe deadline of go-winio.
+type scriptedTimeout struct{}
+
+func (scriptedTimeout) Error() string   { return "i/o timeout" }
+func (scriptedTimeout) Timeout() bool   { return true }
+func (scriptedTimeout) Temporary() bool { return true }
+
+// scriptedDrop is a transport failure that is not an idle deadline.
+var scriptedDrop = errors.New("scripted transport drop")
+
+// cliRunScriptedConn is a net.Conn with scripted reads: the first reads return
+// the timeout, then the tail decides the last read. It never blocks. The tail
+// "extra-with-timeout" reports input and a timeout together.
+type cliRunScriptedConn struct {
+	net.Conn
+	mu      sync.Mutex
+	lim     int
+	timeout error
+	tail    string
+	reads   int
+}
+
+func (c *cliRunScriptedConn) SetReadDeadline(time.Time) error { return nil }
+func (c *cliRunScriptedConn) Read(b []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.reads++
+	if c.reads < c.lim {
+		return 0, c.timeout
+	}
+	switch c.tail {
+	case "disconnect":
+		return 0, io.EOF
+	case "extra":
+		b[0] = '{'
+		return 1, nil
+	case "extra-with-timeout":
+		b[0] = '{'
+		return 1, c.timeout
+	default:
+		return 0, scriptedDrop
+	}
+}
+
+func (c *cliRunScriptedConn) readCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.reads
+}
+
+// TestWatchCLIRunConnMonitorsPastIdleTimeouts pins the monitor to a scripted
+// connection so no real idle deadline is waited. Timeouts of either portable
+// shape never cancel on their own, but the monitor must keep reading past
+// them: a later disconnect or extra byte still cancels the callback. The
+// test's stop is only closed after the monitor exits, so it is never the
+// cause of a cancel.
+func TestWatchCLIRunConnMonitorsPastIdleTimeouts(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		timeout error
+		tail    string
+		cancel  bool
+	}{
+		{"disconnect after deadline exceeded", os.ErrDeadlineExceeded, "disconnect", true},
+		{"extra byte after deadline exceeded", os.ErrDeadlineExceeded, "extra", true},
+		{"disconnect after net timeout", scriptedTimeout{}, "disconnect", true},
+		{"extra byte after net timeout", scriptedTimeout{}, "extra", true},
+		{"input with a timeout error still cancels", scriptedTimeout{}, "extra-with-timeout", true},
+		{"transport drop is not a timeout", scriptedTimeout{}, "drop", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := &cliRunScriptedConn{lim: 3, timeout: tc.timeout, tail: tc.tail}
+			stop := make(chan struct{})
+			canceled := make(chan struct{})
+			cancels := 0
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				watchCLIRunConn(conn, func() { cancels++; close(canceled) }, stop, time.Hour)
+			}()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("monitor neither canceled nor stopped after the scripted reads")
+			}
+			close(stop)
+			cancelled := false
+			select {
+			case <-canceled:
+				cancelled = true
+			default:
+			}
+			if n := conn.readCount(); n < 3 || cancelled != tc.cancel || cancels > 1 {
+				t.Fatalf("reads=%d canceled=%v (want %v) after idle timeouts", n, cancelled, tc.cancel)
+			}
+		})
+	}
+}
+
+// TestWatchCLIRunConnIdleTimeoutsDoNotCancel keeps the monitor on timeouts
+// indefinitely, then releases it through the handler's stop: an idle timeout
+// must neither cancel nor end the watch.
+func TestWatchCLIRunConnIdleTimeoutsDoNotCancel(t *testing.T) {
+	for _, timeout := range []error{os.ErrDeadlineExceeded, scriptedTimeout{}} {
+		conn := &cliRunScriptedConn{lim: 1 << 30, timeout: timeout}
+		stop := make(chan struct{})
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			watchCLIRunConn(conn, func() { t.Errorf("%T canceled on idle timeout", timeout) }, stop, time.Hour)
+		}()
+		for conn.readCount() < 5 {
+			time.Sleep(time.Millisecond)
+		}
+		close(stop)
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("stop did not release the monitor")
+		}
+	}
+}
+
 // cliRunFixtureRequest is a valid CLI-run request for outcome classification.
 func cliRunFixtureRequest() CLIRunBrokerRequest {
 	return CLIRunBrokerRequest{

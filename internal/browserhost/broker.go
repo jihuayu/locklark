@@ -371,16 +371,17 @@ func (b *Broker) serveCLIRun(conn net.Conn, peer Peer) {
 
 // handleCLIRunConn runs HandleCLIRun with a cancelable context, writes the
 // single classified response, and only then closes conn. The close is what
-// releases the idle connection monitor, which is never awaited here because
-// it cannot write: a close after the response, while the monitor goroutine only
-// reads, is safe. Before the close, a client that closed (EOF) or sent an
-// unexpected extra byte cancels the callback, so a pending native approval
-// stops instead of waiting after the CLI has exited.
+// releases the connection monitor, which is never awaited here because it
+// cannot write: a close after the response, while the monitor goroutine only
+// reads, is safe. Until then the monitor keeps reading across idle timeouts,
+// so a client that closes (EOF) or sends an unexpected extra byte at any point
+// cancels the callback instead of leaving a native approval pending after the
+// CLI has exited.
 func (b *Broker) handleCLIRunConn(conn net.Conn, peer Peer, req CLIRunBrokerRequest, resp *CLIRunBrokerResponse) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	stop := make(chan struct{})
-	go watchCLIRunConn(conn, cancel, stop)
+	go watchCLIRunConn(conn, cancel, stop, cliRunMonitorIdle)
 	out, err := b.callbacks.HandleCLIRun(ctx, peer, req)
 	switch {
 	case err == nil:
@@ -397,27 +398,50 @@ func (b *Broker) handleCLIRunConn(conn net.Conn, peer Peer, req CLIRunBrokerRequ
 	_ = conn.Close()
 }
 
-// watchCLIRunConn watches an idle CLI-run connection while a callback is
-// pending and calls cancel on EOF, on any unexpected inbound byte, or on any
-// non-timeout read failure. A silent client is not a cancellation; the read
-// deadline bounds each idle read, and the channel closed by stop releases a
-// monitor that outlived the connection handler. The watcher never writes.
-func watchCLIRunConn(conn net.Conn, cancel context.CancelFunc, stop <-chan struct{}) {
-	_ = conn.SetReadDeadline(time.Now().Add(cliRunMonitorLifetime))
+// watchCLIRunConn watches an idle CLI-run connection for the whole time the
+// callback is pending and calls cancel on EOF, on any unexpected inbound byte,
+// or on any non-timeout read failure. An idle read timeout is not a
+// cancellation: it only bounds each read (so the monitor wakes to observe
+// stop), after which the monitor keeps reading. Once stop is closed the
+// handler has completed and closes the connection itself, so the monitor may
+// exit without cancelling. The watcher never writes.
+func watchCLIRunConn(conn net.Conn, cancel context.CancelFunc, stop <-chan struct{}, idle time.Duration) {
 	var in [1]byte
-	_, e := conn.Read(in[:])
-	if errors.Is(e, os.ErrDeadlineExceeded) {
-		<-stop
-		return
+	for {
+		_ = conn.SetReadDeadline(time.Now().Add(idle))
+		n, e := conn.Read(in[:])
+		if n > 0 {
+			break // unexpected input, even alongside a timeout error
+		}
+		if !cliRunMonitorTimeout(e) {
+			cancel()
+			return
+		}
+		select {
+		case <-stop:
+			return
+		default:
+		}
 	}
 	cancel()
 }
 
-// cliRunMonitorLifetime bounds one idle read of a CLI-run connection monitor,
-// so the read deadline never outlives the watch indefinitely. Reaching the
-// bound does not cancel the callback; the monitor then waits for the handler
-// to close the connection.
-const cliRunMonitorLifetime = time.Minute
+// cliRunMonitorTimeout reports whether a read error is an idle deadline, not a
+// disconnect. It accepts both the portable net.Error timeout and
+// os.ErrDeadlineExceeded: some transports (for example Windows named pipes via
+// go-winio) report a timeout without unwrapping to os.ErrDeadlineExceeded.
+func cliRunMonitorTimeout(e error) bool {
+	if errors.Is(e, os.ErrDeadlineExceeded) {
+		return true
+	}
+	var timeout interface{ Timeout() bool }
+	return errors.As(e, &timeout) && timeout.Timeout()
+}
+
+// cliRunMonitorIdle bounds one idle read of the continuous CLI-run connection
+// monitor. Reaching it only reschedules the next read; cancellation is still
+// observed when the CLI later disconnects or sends an extra byte.
+const cliRunMonitorIdle = time.Minute
 
 func writeCLIResponse(conn net.Conn, resp CLIRunBrokerResponse) {
 	raw, e := json.Marshal(resp)
