@@ -1283,8 +1283,12 @@ function harness(options = {}) {
       tabURL = url;
       if (nextDoc) doc = nextDoc;
     },
-    clickMenu: (menuItemId) =>
-      listeners.menu?.({ menuItemId }, { id: tabId, url: tabURL }),
+    // Chrome passes the clicked tab object as the second listener argument.
+    clickMenu: (menuItemId, tab = {}) =>
+      listeners.menu?.(
+        { menuItemId },
+        { id: tabId, windowId, url: tabURL, ...tab },
+      ),
     // The external checkout page the user is looking at, if any.
     cardPage: (page) => (cardPage.page = page || null),
     setFrame: (origin, nextDoc) => {
@@ -1704,6 +1708,7 @@ test("inline and context-menu card fills use the same proof shape", async () => 
     assert.equal(fills(), 1, "the menu click sends no login/card fill request");
     const matches = h.sent.filter((entry) => entry.type === "match-profiles");
     assert.equal(matches.length, 1, "the menu asked native to match profiles");
+    assert.equal(matches[0].tab_id, 1);
     assert.equal(matches[0].profile_kind, "credit_card");
     assert.equal(JSON.stringify(matches[0]).includes(proof.nonce), false);
     const profiles = h.sent.filter((entry) => entry.type === "fill-profile");
@@ -1774,6 +1779,26 @@ test("inline and context-menu card fills use the same proof shape", async () => 
     state = await h.state();
     assert.equal(state.pending, false);
     assert.equal(fills(), 1);
+    // A click whose reported tab is not the active captured tab/documents
+    // sends no native profile request.
+    const menuRequests = () => ({
+      matches: h.sent.filter((entry) => entry.type === "match-profiles").length,
+      profiles: h.sent.filter((entry) => entry.type === "fill-profile").length,
+    });
+    const settled = menuRequests();
+    h.clickMenu(`fill-card:${h.itemId}:${h.itemRevision}`, {
+      id: 99,
+      windowId: 8,
+    });
+    await settle(15);
+    assert.deepEqual(
+      menuRequests(),
+      settled,
+      "a click for another tab sends no native profile request",
+    );
+    assert.equal(cardInjection().length, 2);
+    state = await h.state();
+    assert.equal(state.pending, false);
   } finally {
     h.cardPage(null);
     await h.send({ type: "disconnect" });

@@ -1027,7 +1027,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       .map((b) => b.toString(16).padStart(2, "0"))
       .join("");
   }
-  function contextMenuClicked(info) {
+  function contextMenuClicked(info, menuTab) {
     const id = typeof info?.menuItemId === "string" ? info.menuItemId : "";
     if (id === "locklark-connect") {
       void connect();
@@ -1070,14 +1070,25 @@ if (typeof importScripts === "function") importScripts("core.js");
     }
     if (kind === "fill-card") {
       // The context-menu click is a trusted click the worker itself receives;
-      // mint the same one-time proof at the click and bind it in fillItemCategory.
+      // the menu branch mints the same at+nonce proof on that click and binds
+      // it to the tab Chrome reports for that click through fillItemCategory.
       const userGesture = {
         v: 2,
         scope: "credit_card",
         at: Date.now(),
         nonce: menuNonce(),
       };
-      void fillItemCategory(itemId, revision, "card", userGesture);
+      const clickedTab =
+        menuTab &&
+        typeof menuTab === "object" &&
+        !Array.isArray(menuTab) &&
+        Number.isSafeInteger(menuTab.id) &&
+        menuTab.id > 0 &&
+        Number.isSafeInteger(menuTab.windowId) &&
+        menuTab.windowId > 0
+          ? { id: menuTab.id, windowId: menuTab.windowId }
+          : null;
+      void fillItemCategory(itemId, revision, "card", userGesture, clickedTab);
     }
   }
   function commandInvoked(command) {
@@ -3584,6 +3595,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     revision,
     category,
     userGesture = null,
+    clickedTab = null,
   ) {
     const kind = core.normalizeCategory(category);
     if (kind !== "card" && kind !== "identity") {
@@ -3591,6 +3603,23 @@ if (typeof importScripts === "function") importScripts("core.js");
       return;
     }
     if (kind === "card" && !userGestureValid(userGesture)) {
+      status = "本次信用卡填充需要明确的用户操作";
+      return;
+    }
+    // The card menu entry is authorized only for the exact tab Chrome reported
+    // for that click; a missing or malformed tab identity binds nothing.
+    if (
+      kind === "card" &&
+      !(
+        clickedTab &&
+        typeof clickedTab === "object" &&
+        !Array.isArray(clickedTab) &&
+        Number.isSafeInteger(clickedTab.id) &&
+        clickedTab.id > 0 &&
+        Number.isSafeInteger(clickedTab.windowId) &&
+        clickedTab.windowId > 0
+      )
+    ) {
       status = "本次信用卡填充需要明确的用户操作";
       return;
     }
@@ -3613,7 +3642,13 @@ if (typeof importScripts === "function") importScripts("core.js");
     try {
       const c = await captureTopDocument();
       // Bind the menu click's nonce to the tab and document the browser
-      // reports before any native request leaves.
+      // reports before any native request leaves, and require that context to
+      // be the tab Chrome attached to the click itself.
+      if (
+        kind === "card" &&
+        (c.tabId !== clickedTab.id || c.windowId !== clickedTab.windowId)
+      )
+        throw Error("refused");
       if (kind === "card" && !consumeUserGesture(userGesture, c))
         throw Error("refused");
       await current(c);
