@@ -183,8 +183,9 @@ func sameIdentity(want, got os.FileInfo) bool {
 	return got != nil && os.SameFile(want, got)
 }
 
-// OpenDir prepares root and opens a private namespace below it. Lock waits are
-// bounded by DefaultLockTimeout.
+// OpenDir prepares root and opens a private namespace below it. Any wait it
+// performs, including the wait for the process-wide lock-file semaphore, is
+// bounded by DefaultLockTimeout and reports ErrConflict when it runs out.
 func OpenDir(root string) (*Dir, error) {
 	if !dirSupported {
 		return nil, fmt.Errorf("%w: the local directory backend is implemented for darwin and linux only", ErrUnsupported)
@@ -241,11 +242,28 @@ func OpenDir(root string) (*Dir, error) {
 		*c.out = st
 	}
 	lock := filepath.Join(base, lockName)
+	// POSIX record locks belong to the process, not to a descriptor, and
+	// closing any descriptor for the lock inode releases every lock the
+	// process holds on it. The descriptor opened here exists only to create
+	// and validate the lock file, so it is closed while holding the same
+	// in-process semaphore as operations: an in-flight operation of this
+	// process keeps owning its lock until it releases the semaphore, and the
+	// close can never drop that lock underneath it. The wait is bounded so an
+	// operation that is stuck does not hang OpenDir; a timeout is a definite
+	// ErrConflict, as for any other lock wait.
+	pl := inProcFor(lock)
+	deadline := time.Now().Add(DefaultLockTimeout)
+	if err := pl.acquire(context.Background(), deadline); err != nil {
+		return nil, lockWaitError(err)
+	}
 	f, err := openLockFile(lock)
+	if err == nil {
+		_ = f.Close()
+	}
+	pl.release()
 	if err != nil {
 		return nil, err
 	}
-	_ = f.Close()
 	return &Dir{cfgRoot: real, ns: ns, root: base, lock: lock, identity: ids, timeout: DefaultLockTimeout, inProc: inProcFor(lock)}, nil
 }
 

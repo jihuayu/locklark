@@ -1543,6 +1543,26 @@ func TestDirHelperProcess(t *testing.T) {
 	}
 
 	switch mode {
+	case "try-lock":
+		// One non-blocking attempt on the lock inode. Prints "locked" when
+		// granted and "busy" when another process holds it; the caller's
+		// stdout stays open so the lock is never released early.
+		f, err := openLockFile(d.lock)
+		if err != nil {
+			fmt.Printf("open lock: %v\n", err)
+			os.Exit(2)
+		}
+		ok, err := tryLock(f)
+		if err != nil {
+			fmt.Printf("try lock: %v\n", err)
+			os.Exit(2)
+		}
+		if ok {
+			fmt.Println("locked")
+		} else {
+			fmt.Println("busy")
+		}
+		block()
 	case "hold-lock":
 		f, err := openLockFile(d.lock)
 		if err != nil {
@@ -1658,6 +1678,127 @@ func (h *helperProc) finish(t *testing.T) {
 	if err := h.wait(); err != nil {
 		t.Fatalf("helper exit: %v", err)
 	}
+}
+
+// startTryLockHelper starts a child process that makes one non-blocking lock
+// attempt on root's lock inode and parks afterwards, reporting "locked" or
+// "busy". Deadlines and reaping come from startDirHelper.
+func startTryLockHelper(t *testing.T, root string) *helperProc {
+	t.Helper()
+	return startDirHelper(t, "try-lock", root, "", "", "")
+}
+
+// lineWithin reads one helper line, failing the test rather than blocking
+// forever if the child does not answer within d.
+func (h *helperProc) lineWithin(t *testing.T, d time.Duration) string {
+	t.Helper()
+	type result struct {
+		line string
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		line, err := h.out.ReadString('\n')
+		done <- result{strings.TrimSpace(line), err}
+	}()
+	select {
+	case r := <-done:
+		if r.err != nil {
+			t.Fatalf("helper output: %v (line %q)", r.err, r.line)
+		}
+		return r.line
+	case <-time.After(d):
+		t.Fatalf("helper did not answer within %v", d)
+		return ""
+	}
+}
+
+// OpenDir closes its lock-file descriptor while another operation of this
+// process holds the POSIX lock on that inode; POSIX locks are owned by the
+// process, so an unsynchronized close would silently drop the holder's lock.
+// This test holds the in-process semaphore and the OS lock, starts OpenDir,
+// and checks that a child process still cannot take the lock while OpenDir
+// waits. Only after the holder releases both may OpenDir finish and the child
+// acquire the lock.
+func TestDirOpenDirDoesNotReleaseHeldLock(t *testing.T) {
+	root := t.TempDir()
+	b := openAt(t, root).(*Dir)
+	ctx := context.Background()
+
+	// Hold the process-wide semaphore as an operation does, then the OS lock.
+	if err := b.inProc.acquire(ctx, time.Now().Add(5*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	held := true
+	defer func() {
+		if held {
+			b.inProc.release()
+		}
+	}()
+	holder, err := openLockFile(b.lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Close()
+	if ok, err := tryLock(holder); err != nil || !ok {
+		t.Fatalf("holder tryLock = %v %v", ok, err)
+	}
+
+	opened := make(chan struct{})
+	var openErr error
+	go func() {
+		d, err := OpenDir(root)
+		if d != nil {
+			_ = d.Close()
+		}
+		openErr = err
+		close(opened)
+	}()
+	// OpenDir must block on the semaphore while the lock is held: give it a
+	// bounded window and require that it has not returned.
+	select {
+	case <-opened:
+		t.Fatal("OpenDir returned while the in-process lock was held")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// While OpenDir waits, a separate process must not be able to take the
+	// lock. Before the fix, OpenDir's close released this process's record
+	// lock and the child reported "locked" here.
+	child := startTryLockHelper(t, root)
+	if line := child.lineWithin(t, 5*time.Second); line != "busy" {
+		t.Fatalf("child lock attempt while OpenDir waited = %q, want busy", line)
+	}
+	select {
+	case <-opened:
+		t.Fatal("OpenDir returned while the child held the lock")
+	default:
+	}
+
+	// Release in the order an operation does: unlock, then the semaphore.
+	// OpenDir may then finish, and a fresh child can take the lock.
+	if err := unlock(holder); err != nil {
+		t.Fatal(err)
+	}
+	held = false
+	b.inProc.release()
+	select {
+	case <-opened:
+		if openErr != nil {
+			t.Fatalf("OpenDir after release = %v", openErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("OpenDir did not return after the lock was released")
+	}
+	child.kill()
+	if err := holder.Close(); err != nil {
+		t.Fatal(err)
+	}
+	after := startTryLockHelper(t, root)
+	if line := after.lineWithin(t, 5*time.Second); line != "locked" {
+		t.Fatalf("child lock attempt after release = %q, want locked", line)
+	}
+	after.kill()
 }
 
 // The lock timeout covers the OS lock wait of another process: a waiter
