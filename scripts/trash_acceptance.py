@@ -41,7 +41,7 @@ def check(binary, legacy=None):
                 invoke(legacy, "list", path, factors, ok=False, expect_error="invalid personal vault")
             portable = str(root / "portable.kdbx")
             export_pw = "synthetic-export-password"
-            invoke(binary, "export-kdbx", path, factors + [("新导出密码（至少 12 字符）", export_pw), ("再次输入导出密码", export_pw), ("输入 SAVE 确认加密导出", "SAVE")], options=("--out", portable), forbidden=(secret,), required_before_last_prompt=("活动、归档和回收站", "其他工具未必识别归档或回收站状态"))
+            invoke(binary, "export-kdbx", path, factors + [("新导出密码（至少 12 字符）", export_pw), ("再次输入导出密码", export_pw), ("输入 SAVE 确认加密导出", "SAVE")], options=("--out", portable), forbidden=(secret,), required_before_last_prompt=("归档与回收站", "未必区分归档或回收站"))
             entry = PyKeePass(portable, password=export_pw).entries[0]
             assert entry.password == secret and entry.get_custom_property("Locklark.State") == "trashed"
             assert (entry.get_custom_property("Locklark.PreviousState") or "active") == prior
