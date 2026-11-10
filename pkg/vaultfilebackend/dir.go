@@ -259,13 +259,14 @@ func prepareRoot(abs string) (string, error) {
 	}
 }
 
-// trustedAncestor reports whether a directory may hold the configured root or
-// one of its ancestors: the root itself and its parents must not be group or
-// world writable, while a system sticky directory such as /tmp is accepted as
-// a top-level ancestor. Like an earlier OpenDir, it follows symlinks: OpenDir
-// resolves the root path, and Dir.dir re-checks the resolved root by identity.
+// trustedAncestor applies exactly the policy of privateDir, which is what
+// OpenDir used to check the root and its ancestors: a directory is accepted
+// only when it is not group/world writable, or when it is a root-owned system
+// sticky directory such as /tmp. A sticky directory owned by anyone else is
+// refused. Like OpenDir, it follows symlinks: OpenDir resolves the root path,
+// and Dir.dir re-checks the resolved root by identity.
 func trustedAncestor(info os.FileInfo) bool {
-	return privateDir(info) || info.Mode()&os.ModeSticky != 0
+	return privateDir(info)
 }
 
 // checkRootIdentity confirms that the configured root is still the real
