@@ -98,3 +98,46 @@ func TestMapArchiveV2OuterFailureWipesCurrentItem(t *testing.T) {
 		t.Fatal("handed-off attachment content was wiped")
 	}
 }
+
+// TestMapArchiveItemRejectWipesOwnedClone rejects a document item after its
+// attachment clone is attached: the notes carry a control character the vault
+// refuses, so only the trailing notes check fires. The failure cleanup clears
+// the clone the item owned, the caller receives the zero item, and the buffered
+// entry it owns stays untouched.
+func TestMapArchiveItemRejectWipesOwnedClone(t *testing.T) {
+	buffered := []byte(clearSource)
+	files := map[string][]byte{"files/body.txt": buffered}
+	item := documentItemFor(t, "doc", "doc", "body.txt", len(buffered))
+	item["details"].(map[string]any)["notesPlain"] = "a\x01b"
+	owned, err := mapArchiveItem(item, files)
+	if err != ErrUnsupported || !reflect.DeepEqual(owned, vault.Item{}) {
+		t.Fatalf("failed mapping escaped an item: %v", err)
+	}
+	if !bytes.Equal(files["files/body.txt"], buffered) {
+		t.Fatal("failed mapping wiped the caller's buffered entry")
+	}
+}
+
+// TestReleaseFailedItemWipesEveryOwnedBuffer builds an item that still owns an
+// attachment clone and a second copy of it, plus mapped credential buffers,
+// then runs the failure cleanup directly: every byte buffer is zeroed and the
+// item collapses to the zero value. Buffers outside the item are untouched.
+func TestReleaseFailedItemWipesEveryOwnedBuffer(t *testing.T) {
+	caller := []byte(clearSource)
+	content := bytes.Clone(caller)
+	item := vault.Item{
+		ID: "doc", Kind: "document", Title: "doc", Notes: clearPlaceholder,
+		Password: clearPlaceholder, Attachment: content,
+		Attachments: []vault.AttachmentMeta{{ID: "att", FileName: "body.txt", Content: content}},
+	}
+	releaseFailedItem(&item)
+	if !reflect.DeepEqual(item, vault.Item{}) {
+		t.Fatalf("failure cleanup left an item behind: %+v", item)
+	}
+	if !bytes.Equal(content, make([]byte, len(caller))) {
+		t.Fatal("failure cleanup left the owned attachment clone uncleared")
+	}
+	if !bytes.Equal(caller, []byte(clearSource)) {
+		t.Fatal("failure cleanup touched a caller-owned buffer")
+	}
+}

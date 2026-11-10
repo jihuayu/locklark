@@ -172,15 +172,20 @@ func MapArchiveV2(raw []byte) (MappedLogins, error) {
 }
 
 func mapArchiveItem(source map[string]any, files map[string][]byte) (item vault.Item, err error) {
-	// Every failure path returns the zero value; the defer wipes whatever the
-	// item had already accumulated, including attachment copies.
+	// Every failure path sets the named error and returns the named item, so
+	// the defer wipes whatever the item has already accumulated, including
+	// attachment copies, before the caller sees the zero value.
 	defer func() {
 		if err != nil {
-			wipeItem(&item)
-			item = vault.Item{}
+			releaseFailedItem(&item)
 		}
 	}()
-	reject := func() (vault.Item, error) { return vault.Item{}, ErrUnsupported }
+	// reject returns the item built so far: returning vault.Item{} here would
+	// zero the named result before the defer runs and leak attachment clones.
+	reject := func() (vault.Item, error) {
+		err = ErrUnsupported
+		return item, err
+	}
 	code, ok := source["categoryUuid"].(string)
 	if !ok {
 		return reject()
@@ -304,7 +309,7 @@ func mapArchiveItem(source map[string]any, files map[string][]byte) (item vault.
 			return reject()
 		}
 		if err := mapLoginFields(&item, fields, usedSections, usedFields); err != nil {
-			return vault.Item{}, err
+			return item, err
 		}
 	}
 	var identityFields map[string]string
@@ -354,7 +359,7 @@ func mapArchiveItem(source map[string]any, files map[string][]byte) (item vault.
 				}
 				parsed, err := parseTypedField(field["value"])
 				if err != nil {
-					return vault.Item{}, err
+					return item, err
 				}
 				if parsed.sshSeed != nil {
 					if len(item.SSHSeed) > 0 && !bytes.Equal(item.SSHSeed, parsed.sshSeed) {
@@ -402,7 +407,7 @@ func mapArchiveItem(source map[string]any, files map[string][]byte) (item vault.
 			return reject()
 		}
 		if len(entries) > 100 {
-			return vault.Item{}, ErrLimit
+			return item, ErrLimit
 		}
 		for _, value := range entries {
 			entry, ok := value.(map[string]any)
@@ -487,7 +492,7 @@ func mapArchiveItem(source map[string]any, files map[string][]byte) (item vault.
 			return reject()
 		}
 		if len(buffered) > vault.MaxAttachmentSize {
-			return vault.Item{}, ErrLimit
+			return item, ErrLimit
 		}
 		name := fileName
 		if name == "" {
@@ -511,6 +516,14 @@ func mapArchiveItem(source map[string]any, files map[string][]byte) (item vault.
 		return reject()
 	}
 	return item, nil
+}
+
+// releaseFailedItem wipes every buffer a failed mapping still owns and hands
+// the caller the zero item. It runs from mapArchiveItem's defer, so the caller
+// never sees a partially built item or an attachment copy of its own.
+func releaseFailedItem(item *vault.Item) {
+	wipeItem(item)
+	*item = vault.Item{}
 }
 
 func mapLoginFields(item *vault.Item, fields []any, usedSections, usedFields map[string]bool) error {
