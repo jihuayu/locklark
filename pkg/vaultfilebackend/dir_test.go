@@ -1667,7 +1667,8 @@ func TestDirSweepsOrphanTempUnderFreeTicket(t *testing.T) {
 
 			// A well-formed staged record, named like a real staging file.
 			orphan := b.tmpPath(strings.Repeat("0c", 16))
-			staged := record{version: strings.Repeat("d4", 16), digest: sha256.Sum256([]byte("never")), value: []byte("never committed")}
+			stagedValue := []byte("never committed")
+			staged := record{version: strings.Repeat("d4", 16), digest: sha256.Sum256(stagedValue), value: stagedValue}
 			if err := os.WriteFile(orphan, staged.encode(), 0600); err != nil {
 				t.Fatal(err)
 			}
