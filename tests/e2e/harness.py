@@ -714,6 +714,7 @@ class E2EContext:
         timeout: float = 20.0,
         binary: Path | str | None = None,
         check_echo: bool = True,
+        drain_after_exit: float = 0.2,
     ) -> PTYResult:
         """Run the CLI with a real POSIX PTY and answer hidden prompts.
 
@@ -900,7 +901,10 @@ class E2EContext:
             if slave_open:
                 os.close(slave)
                 slave_open = False
-            drain_available(0.2)
+            # Output written by the child just before it exits can still be in
+            # the PTY buffer; callers that assert on late terminal text request
+            # a longer bounded drain.
+            drain_available(drain_after_exit)
             return PTYResult(
                 returncode=proc.returncode,
                 stdout=stdout_bytes.decode("utf-8", "replace"),

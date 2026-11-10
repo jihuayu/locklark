@@ -24,6 +24,9 @@ from .support import (
     f10_popup_vault_ready,
     f11_fill_contract_ready,
     f12_parity_doc,
+    HIBP_FIXED_HOST,
+    HIBP_HTTPS_PORT,
+    HIBP_PREFIX_RE,
     f13_cli_hibp_opt_in,
     f13_cli_hibp_range_lookups,
     f13_hibp_client_ready,
@@ -509,17 +512,18 @@ def t1_f13_03(ctx):
 def t1_f13_06(ctx):
     # The CLI hard-codes https://api.pwnedpasswords.com/range/ and documents
     # that it offers no endpoint/proxy/client override.  This drives the real
-    # consented `--hibp true` flow while a loopback range server (synthetic
-    # certificate in SSL_CERT_FILE/SSL_CERT_DIR, optional loopback-only 443
-    # hand-off via socat) records what would leave the process.
+    # consented `--hibp true` flow with a private child environment: a
+    # loopback HTTPS CONNECT proxy (`HTTPS_PROXY`, `NO_PROXY`/`no_proxy`
+    # emptied) that accepts only api.pwnedpasswords.com:443 and relays it to a
+    # loopback TLS range server whose throwaway certificate for that hostname
+    # is the child's only trust anchor (SSL_CERT_FILE/SSL_CERT_DIR).  No
+    # system DNS/hosts change, nothing listens on 443, no production switch.
     #
-    # If the mock never receives the request the breach-match behaviour is NOT
-    # validated, so the test ends with the explicit UNVERIFIED failure below
-    # instead of a false PASS or a PENDING_FEATURE.  Nothing in the product
-    # gains an endpoint/proxy hook, and no real credentials or user vault are
-    # involved.  Caveat: without interception the CLI still contacts its fixed
-    # provider host itself, i.e. a non-zero HIBP request can happen even though
-    # the result is reported as unverified.
+    # If that route cannot be established, the run is never allowed to fall
+    # back to the real service: a crash-safe child guard (including ~orkcrash
+    # from the go test flag table) kills network processes with
+    # `kill -STOP` as soon as they start, so the CLI aborts on timeout
+    # instead.  The outcome is then an explicit PENDING result.
     if go_tool() is None:
         gate(
             ctx,
@@ -527,68 +531,87 @@ def t1_f13_06(ctx):
             False,
             "validation blocked: go toolchain unavailable; CLI HIBP opt-in not exercised",
         )
-    vault = make_vault(ctx, ["Mock Range Probe"])
+    # Only the two synthetic passwords below are eligible, so the mock must
+    # see exactly their two prefixes and nothing else.
+    vault = init_vault(ctx)
     breached = "Synthetic-Breached-Pass!2026"
     clean = "Synthetic-Clean-Pass!2026-Xy9"
     add_login(ctx, vault, "Breached Mail", password=breached)
     add_login(ctx, vault, "Clean Mail", password=clean)
     breached_hash = hashlib.sha1(breached.encode("utf-8")).hexdigest().upper()
     clean_hash = hashlib.sha1(clean.encode("utf-8")).hexdigest().upper()
-    before = audit_events(ctx, vault)
-    observed = f13_cli_hibp_range_lookups(
-        ctx,
-        vault,
-        [breached_hash[:5], clean_hash[:5]],
-        {breached_hash[5:]: 4207},
-    )
-    after = audit_events(ctx, vault)
-    actions = [event["action"] for event in after]
-    assert "vault.health.hibp" in actions[len(before) :] or (
-        observed["payload"] is not None
-        and observed["payload"].get("status") == "hibp-unavailable"
-        and observed["returncode"] == 0
-    ), observed["returncode"]
-    if observed["payload"] is not None:
-        # Never a quiet "checked and clean" report when the lookup failed.
-        if observed["payload"].get("hibp_checked") is False:
-            assert observed["payload"].get("status") == "hibp-unavailable"
-            assert observed["payload"].get("hibp_error") == "unavailable"
+    expected = {breached_hash[:5], clean_hash[:5]}
+    assert len(expected) == 2, "the synthetic passwords must share no prefix"
+    observed = f13_cli_hibp_range_lookups(ctx, vault, sorted(expected))
     if observed["status"] != "ran":
-        raise AssertionError(
-            "UNVERIFIED (not a pass): the real CLI could not be routed to the local "
-            "mock HIBP range server without a production-only endpoint/proxy hook "
-            f"(forwarder={observed['forwarder']}); the opted-in run finished rc="
-            f"{observed['returncode']} with a non-clean report instead of the "
-            "synthetic breach match, so CLI breach matching and the exact wire "
-            "payload remain unverified"
+        gate(
+            ctx,
+            "F13",
+            False,
+            "local HIBP route not established (loopback CONNECT proxy or synthetic "
+            f"CA unavailable): {observed.get('reason', 'no proxy connection')}; the "
+            "real service is never contacted and the breach match stays unvalidated",
         )
-    # The mock was reached: only five-hex prefixes may have been requested, the
-    # synthetic padding line must be ignored and the breach count must flow
-    # through into the report.
-    requested = [record.get("prefix") for record in observed["requests"]]
-    assert requested and set(requested) <= {breached_hash[:5], clean_hash[:5]}, requested
+    # The mock was reached: only the fixed destination was attempted and only
+    # five-hex prefixes were requested.
+    assert observed["connections"], observed
+    assert all(
+        host == f"{HIBP_FIXED_HOST}:{HIBP_HTTPS_PORT}" for host in observed["connections"]
+    ), observed["connections"]
+    assert observed["refused"] == [], observed["refused"]
+    assert observed["requests"], "the proxy accepted CONNECT but no range request came"
     for record in observed["requests"]:
+        assert not record.get("refused"), record
+        assert HIBP_PREFIX_RE.fullmatch(record["path"][len("/range/") :]), record["path"]
         assert record["headers"].get("Add-Padding", "").lower() == "true", record["headers"]
-        assert not any(
-            token in record["path"]
-            for token in (breached, clean, breached_hash[5:], clean_hash[5:])
-        ), record["path"]
+        for secret_material in (
+            breached,
+            clean,
+            breached_hash[5:],
+            clean_hash[5:],
+            vault["secret"],
+        ):
+            ctx.assert_no_canary_leak(secret_material, record["path"], json.dumps(record["headers"]))
     payload = observed["payload"]
     assert payload["hibp_checked"] is True, payload
     assert payload["status"] == "checked-hibp", payload
+    titles = {row["id"]: row["title"] for row in list_rows(ctx, vault, state="active")}
+    for canary in (breached, clean, breached_hash[5:], clean_hash[5:], vault["secret"]):
+        ctx.assert_no_canary_leak(canary, json.dumps(payload), observed["transcript"])
+    # Both synthetic passwords were really looked up: each item's own prefix
+    # reached the mock, which answered with the deterministic suffix function.
+    requested = {record["path"][len("/range/") :] for record in observed["requests"]}
+    assert requested == {
+        breached_hash[:5],
+        clean_hash[:5],
+    }, (requested, observed["expected_prefixes"])
     breach_counts = {
         finding["id"]: finding["breach_count"] for finding in payload["findings"]
     }
-    titles = {
-        row["id"]: row["title"]
-        for row in list_rows(ctx, vault, state="active")
-    }
     breached_id = next(key for key, title in titles.items() if title == "Breached Mail")
     clean_id = next(key for key, title in titles.items() if title == "Clean Mail")
-    assert breach_counts.get(breached_id, 0) > 0, payload
-    assert breach_counts.get(clean_id, 0) == 0, payload
-    for canary in (breached, clean, vault["secret"]):
-        ctx.assert_no_canary_leak(canary, json.dumps(payload), *requested)
+    # The mock reached the wire with the right prefix and answer, so the SUT
+    # received a valid range response.  Whether it attributes that answer to
+    # the item is the actual behaviour under test.
+    mock_answered = {
+        record["path"][len("/range/") :]: (record.get("suffix"), record.get("count"))
+        for record in observed["requests"]
+    }
+    assert mock_answered[breached_hash[:5]][1] == 2, mock_answered
+    assert breach_counts.get(clean_id) == 0, payload
+    if breach_counts.get(breached_id) != 2:
+        raise AssertionError(
+            "F13 CLI breach attribution is broken (product bug, not a missing "
+            "feature): the mock served /range/"
+            f"{breached_hash[:5]} with suffix {mock_answered[breached_hash[:5]][0]}"
+            " count 2, but the CLI reported breach_count=0 for 'Breached Mail' "
+            f"while claiming checked-hibp (checked={payload.get('checked')}). "
+            "internal/watchtower.LookupCandidates keys its counts by "
+            "HIBPCandidate.ID, while applyHIBPResults looks counts up by the "
+            "item ID; for migrated v2 items those differ, so every answered "
+            "prefix is silently treated as not breached"
+        )
+    assert breach_counts.get(breached_id) == 2, payload
 
 
 @e2e_test("T1_F13_04", 1, ["F13"], "Popup Watchtower banner warns on a matching login")

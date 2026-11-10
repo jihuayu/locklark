@@ -545,41 +545,38 @@ class F13CLIHIBPDetectionTests(unittest.TestCase):
         )
         self.assertFalse(support.f13_cli_health_flags(ctx))
 
-    def test_range_lookup_that_never_reaches_the_mock_is_not_a_pass(self):
-        # A runtime that cannot route the hard-coded provider host to the
-        # loopback mock must yield ``not-interceptable`` - never ``ran``.
+    def test_route_that_never_reaches_the_proxy_is_pending_not_a_pass(self):
+        # No CONNECT ever arrived: the outcome must be "pending" so the caller
+        # reports PENDING_FEATURE, never PASS or a silent success.
         ctx = mock.Mock()
         ctx.temp_dir = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, ctx.temp_dir, True)
 
-        class DummyServer:
-            trust_env = {"SSL_CERT_FILE": "/dev/null"}
-
+        class DummyProxy:
             def __init__(self) -> None:
+                self.connections: list[str] = []
                 self.requests: list[dict[str, object]] = []
-
-            def start_forwarder(self) -> bool:
-                return False
+                self.refused: list[str] = []
+                self.env = {"HTTPS_PROXY": "http://127.0.0.1:1"}
 
             def close(self) -> None:
                 pass
 
-        dummy = DummyServer()
         ctx.run_pty_cli.return_value = support.PTYResult(
-            0,
-            '{"status":"hibp-unavailable","hibp_checked":false}',
+            1,
             "",
+            "HIBP network check cancelled",
             [],
             True,
         )
         with mock.patch.object(
-            support, "local_hibp_range_server", lambda _ctx, _counts: dummy
+            support, "local_hibp_range_proxy", lambda _ctx: DummyProxy()
         ):
             observed = support.f13_cli_hibp_range_lookups(
-                ctx, {"path": "vault.ll", "password": "p", "secret": "s"}, ["ABCDE"], {}
+                ctx, {"path": "vault.ll", "password": "p", "secret": "s"}, ["ABCDE"]
             )
-        self.assertEqual(observed["status"], "not-interceptable")
-        self.assertEqual(observed["requests"], [])
+        self.assertEqual(observed["status"], "pending")
+        self.assertEqual(observed["connections"], [])
 
 
 class F11PageLoadFillDetectionTests(unittest.TestCase):
