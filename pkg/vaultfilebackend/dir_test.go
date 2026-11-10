@@ -672,6 +672,28 @@ func TestDirPinsLockInodePerInstance(t *testing.T) {
 	})
 
 	t.Run("removed", func(t *testing.T) {
+		// Hold the old lock inode open across the unlink: its Stat must still
+		// match the pinned identity, and an open descriptor keeps the inode
+		// allocated so the filesystem cannot recycle its identity for the
+		// lock that a later OpenDir creates.
+		oldFD, err := os.Open(a.lock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		oldStat, err := oldFD.Stat()
+		if err != nil {
+			oldFD.Close()
+			t.Fatal(err)
+		}
+		if !sameIdentity(a.lockID, oldStat) {
+			oldFD.Close()
+			t.Fatal("open descriptor is not the pinned lock inode")
+		}
+		defer func() {
+			if err := oldFD.Close(); err != nil {
+				t.Errorf("close old lock descriptor: %v", err)
+			}
+		}()
 		if err := os.Remove(a.lock); err != nil {
 			t.Fatal(err)
 		}
