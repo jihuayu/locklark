@@ -861,7 +861,8 @@ func TestClearCLIRunRawMessagesOnParseFailure(t *testing.T) {
 
 func TestClearCLIRunRawMessagesRejectPathsZeroNamedCollection(t *testing.T) {
 	// Every rejection path must return nil/nil/false and must run cleanup over
-	// the named collection, not a nil shadow of it.
+	// the local collection the deferred closure captures, not a nil shadow of
+	// it (a named result would be set to nil by the return statement first).
 	for _, raw := range []string{
 		`{"v":1,"a":"s3cret-a","b":"s3cret-b","a":"s3cret-dup"}`,
 		`{"a":"s3cret-a","b":{"x":"s3cret-b"`,

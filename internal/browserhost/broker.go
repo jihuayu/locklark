@@ -824,11 +824,18 @@ func clearCLIRunValues(values map[string]string) {
 // strictJSONObject validates that raw is exactly one JSON object (no trailing
 // values), reports its top-level keys (rejecting duplicates and non-string
 // keys), and returns each top-level value's raw bytes.
-func strictJSONObject(raw []byte) (keys map[string]struct{}, values map[string]json.RawMessage, ok bool) {
+func strictJSONObject(raw []byte) (map[string]struct{}, map[string]json.RawMessage, bool) {
+	// The locals below are what the deferred cleanup sees; the printed
+	// rejection returns do not reset them before the defer runs.
+	var (
+		keys   map[string]struct{}
+		values map[string]json.RawMessage
+		valid  bool
+	)
 	// On rejection the caller never sees the raw copies, so clear the fields
-	// collected into the named result before the failing token.
+	// collected before the failing token.
 	defer func() {
-		if !ok {
+		if !valid {
 			clearCLIRunRawMessages(values)
 		}
 	}()
@@ -854,6 +861,8 @@ func strictJSONObject(raw []byte) (keys map[string]struct{}, values map[string]j
 		}
 		var value json.RawMessage
 		if dec.Decode(&value) != nil {
+			// Clear the scratch copy that was never inserted into the map.
+			clear(value)
 			return nil, nil, false
 		}
 		keys[key] = struct{}{}
@@ -865,5 +874,6 @@ func strictJSONObject(raw []byte) (keys map[string]struct{}, values map[string]j
 	if _, e := dec.Token(); e != io.EOF {
 		return nil, nil, false
 	}
+	valid = true
 	return keys, values, true
 }
