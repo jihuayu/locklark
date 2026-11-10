@@ -673,6 +673,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 				} else {
 					candidate[index].Username = string(rq.username)
 					candidate[index].Password = string(rq.password)
+					candidate[index].History = autoHistory(items[index], candidate[index])
 				}
 				if vault.ValidateItems([]byte(schema), candidate) != nil {
 					outcome, refusal = "browser-refused", ErrBrowserSaveRefused
@@ -965,6 +966,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 							break
 						}
 						if action == "item.regenerate.password" {
+							previous := items[i]
 							if option.nativeMutation != nil {
 								if _, err := password.Validate(option.generation.policy); err != nil {
 									outcome, refusal = "native-refused", ErrMutationRefused
@@ -982,6 +984,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 								return err
 							}
 							items[i].Password = secret.Value()
+							items[i].History = autoHistory(previous, items[i])
 							out.profile = secret.Profile()
 							profile = &out.profile
 							break
@@ -1014,6 +1017,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 								break
 							}
 						}
+						previous := items[i]
 						switch edit.Field {
 						case "notes":
 							probe := append([]vault.Item(nil), items...)
@@ -1033,6 +1037,9 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 							items[i].Password = edit.Value
 						case "otp":
 							items[i].OTP = edit.Value
+						}
+						if refusal == nil {
+							items[i].History = autoHistory(previous, items[i])
 						}
 						break
 					}
@@ -1296,21 +1303,9 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 				}
 				next := vault.CloneItem(items[idx])
 				entry := history[option.v2.historyIndex]
-				snapshot := vault.ItemHistoryEntry{Timestamp: time.Now().Unix(), Action: "restore", Password: next.Password, Title: next.Title, Username: next.Username, Notes: next.Notes, Sections: vault.CloneSections(next.Sections)}
+				snapshot := vault.ItemHistoryEntry{Timestamp: time.Now().Unix(), Action: "restore", Password: next.Password, Title: next.Title, Username: next.Username, Notes: next.Notes, Sections: completeHistorySections(next.Sections)}
 				history = append(history[:option.v2.historyIndex], history[option.v2.historyIndex+1:]...)
-				next.Password = entry.Password
-				if entry.Title != "" {
-					next.Title = entry.Title
-				}
-				if entry.Username != "" {
-					next.Username = entry.Username
-				}
-				if entry.Notes != "" {
-					next.Notes = entry.Notes
-				}
-				if entry.Sections != nil {
-					next.Sections = vault.CloneSections(entry.Sections)
-				}
+				restoreHistoryEntry(&next, entry)
 				next.History = appendHistory(history, snapshot)
 				next.UpdatedAt = time.Now().Unix()
 				candidate := append([]vault.Item(nil), items...)
