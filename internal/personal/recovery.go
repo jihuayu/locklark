@@ -36,6 +36,14 @@ type Chain struct {
 	Events []Event           `json:"events"`
 }
 
+const (
+	maxVaults          = 64
+	maxItemAttachments = 16
+	// maxBackupAttachments mirrors the per-item bound already enforced by
+	// vault.ValidateItems so oversized lists are refused before indexing.
+	maxBackupAttachments = vault.MaxItems * maxItemAttachments
+)
+
 // backupAttachment carries the bytes that vault.AttachmentMeta intentionally
 // keeps out of its global JSON representation. It exists only in the
 // authenticated recovery payload and is bound back to an item attachment by
@@ -68,48 +76,71 @@ func collectBackupAttachments(items []vault.Item) []backupAttachment {
 	return out
 }
 
-// applyBackupAttachments restores attachment bytes into the in-memory item
-// model. Attachments with positive size must have exactly one matching byte
-// record; zero-length legacy attachments may predate the backup-only field.
-func applyBackupAttachments(p *payload) error {
-	seen := map[[2]string]bool{}
-	for _, data := range p.Attachments {
-		if !idOK(data.ItemID) || !selectorID(data.AttachmentID) {
-			return invalid
-		}
-		key := [2]string{data.ItemID, data.AttachmentID}
-		if seen[key] {
-			return invalid
-		}
-		seen[key] = true
-		idx := findItemIndex(p.Items, data.ItemID)
-		if idx < 0 {
-			return invalid
-		}
-		found := false
-		for n := range p.Items[idx].Attachments {
-			att := &p.Items[idx].Attachments[n]
-			if att.ID == data.AttachmentID {
-				att.Content = data.Content
-				found = true
-				break
-			}
-		}
-		if !found {
-			return invalid
-		}
+// checkPayloadBounds rejects oversized counts before any item- or
+// attachment-proportional work runs.
+func checkPayloadBounds(p *payload) error {
+	if p == nil || len(p.Items) > vault.MaxItems || len(p.Vaults) > maxVaults || len(p.Chains) > maxChains {
+		return invalid
 	}
+	attachments := 0
+	seenIDs := make(map[string]struct{}, len(p.Items))
+	for n := range p.Items {
+		if !idOK(p.Items[n].ID) {
+			return invalid
+		}
+		if _, dup := seenIDs[p.Items[n].ID]; dup {
+			return invalid
+		}
+		seenIDs[p.Items[n].ID] = struct{}{}
+		if len(p.Items[n].Attachments) > maxItemAttachments {
+			return invalid
+		}
+		attachments += len(p.Items[n].Attachments)
+	}
+	if attachments > maxBackupAttachments || len(p.Attachments) > attachments {
+		return invalid
+	}
+	return nil
+}
+
+// applyBackupAttachments restores attachment bytes into the in-memory item
+// model using a single index over the bounded payload. Attachments with
+// positive size must have exactly one matching byte record; zero-length
+// legacy attachments may predate the backup-only field.
+func applyBackupAttachments(p *payload) error {
+	if len(p.Items) > vault.MaxItems || len(p.Attachments) > maxBackupAttachments {
+		return invalid
+	}
+	type attachmentKey struct{ item, attachment string }
+	index := make(map[attachmentKey]*vault.AttachmentMeta)
 	for n := range p.Items {
 		for m := range p.Items[n].Attachments {
 			att := &p.Items[n].Attachments[m]
-			if seen[[2]string{p.Items[n].ID, att.ID}] {
-				continue
-			}
-			if att.Size != 0 {
+			key := attachmentKey{p.Items[n].ID, att.ID}
+			if _, dup := index[key]; dup {
 				return invalid
 			}
-			att.Content = []byte{}
+			index[key] = att
 		}
+	}
+	seen := make(map[attachmentKey]bool, len(p.Attachments))
+	for _, data := range p.Attachments {
+		key := attachmentKey{data.ItemID, data.AttachmentID}
+		att, ok := index[key]
+		if !ok || seen[key] {
+			return invalid
+		}
+		seen[key] = true
+		att.Content = data.Content
+	}
+	for key, att := range index {
+		if seen[key] {
+			continue
+		}
+		if att.Size != 0 {
+			return invalid
+		}
+		att.Content = []byte{}
 	}
 	return nil
 }
@@ -118,7 +149,7 @@ func validateRecoveredVaults(vaults []vault.VaultMeta) error {
 	if len(vaults) == 0 {
 		return nil
 	}
-	if len(vaults) > 64 {
+	if len(vaults) > maxVaults {
 		return invalid
 	}
 	seen := map[string]bool{vault.DefaultVaultID: true}
@@ -369,6 +400,9 @@ func decodeArchive(path, pw string, key []byte, kit string) (*payload, error) {
 	if p.Generation != g || p.Items == nil || p.Epoch == 0 || p.Epoch == ^uint64(0) {
 		return nil, invalid
 	}
+	if e = checkPayloadBounds(p); e != nil {
+		return nil, e
+	}
 	if e = verifyChains(p.Chains); e != nil {
 		return nil, e
 	}
@@ -380,11 +414,6 @@ func decodeArchive(path, pw string, key []byte, kit string) (*payload, error) {
 	}
 	if vault.ValidateItems([]byte(schema), p.Items) != nil {
 		return nil, invalid
-	}
-	for _, item := range p.Items {
-		if !idOK(item.ID) {
-			return nil, invalid
-		}
 	}
 	last := p.Chains[len(p.Chains)-1]
 	proof, e := payloadProof(*p)

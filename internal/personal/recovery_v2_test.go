@@ -5,6 +5,8 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -258,6 +260,41 @@ func TestRecoveryRejectsDroppedOrAlteredBackupAttachments(t *testing.T) {
 				t.Fatal("rejected backup left a restored vault")
 			}
 		})
+	}
+}
+
+func TestRecoveryRefusesOversizedPayloadCounts(t *testing.T) {
+	archive, pw, key, kit := recoveryFixture(t)
+	p, err := decodeArchive(archive, pw, key, kit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = checkPayloadBounds(p); err != nil {
+		t.Fatalf("valid payload refused: %v", err)
+	}
+	item := func(n int) []vault.Item {
+		out := make([]vault.Item, n)
+		for i := range out {
+			out[i] = vault.Item{ID: fmt.Sprintf("%032x", i+1), Kind: "login"}
+		}
+		return out
+	}
+	cases := []struct {
+		name string
+		payload
+	}{
+		{"items", payload{Items: item(vault.MaxItems + 1)}},
+		{"duplicate item", payload{Items: append(item(1), item(1)...)}},
+		{"vaults", payload{Items: item(1), Vaults: make([]vault.VaultMeta, maxVaults+1)}},
+		{"item attachments", payload{Items: []vault.Item{{ID: item(1)[0].ID, Kind: "login", Attachments: make([]vault.AttachmentMeta, maxItemAttachments+1)}}}},
+		{"attachment records", payload{Items: item(1), Attachments: make([]backupAttachment, maxBackupAttachments+1)}},
+		{"orphan attachment record", payload{Items: item(1), Attachments: []backupAttachment{{ItemID: item(2)[1].ID, AttachmentID: "a", Content: []byte{1}}}}},
+	}
+	for _, c := range cases {
+		c.payload.Generation, c.payload.Epoch, c.payload.Chains = p.Generation, p.Epoch, p.Chains
+		if !errors.Is(checkPayloadBounds(&c.payload), invalid) {
+			t.Fatalf("%s: oversized payload accepted", c.name)
+		}
 	}
 }
 
