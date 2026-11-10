@@ -15,6 +15,7 @@ from .support import (
     add_login,
     assert_audit_chain,
     audit_events,
+    card_fill_explicit_authorization_component,
     checklist_rows,
     cli_profiles,
     cli_supports,
@@ -268,40 +269,61 @@ def t2_f11_04(ctx):
     assert counts["pass"] >= 1, counts
 
 
-@e2e_test("T2_F11_05", 2, ["F11"], "Credit-card fields are never filled on page load without a gesture")
+@e2e_test(
+    "T2_F11_05",
+    2,
+    ["F11"],
+    "Card fill component explicit-authorization contract",
+    coverage_kind="component_contract",
+)
 def t2_f11_05(ctx):
     ready = f11_fill_contract_ready(ctx)
     gate(
         ctx,
         "F11",
         ready,
-        "credit-card fill entrypoints are absent from the shipped extension",
+        "credit-card fill explicit-authorization entrypoints are absent from the shipped extension",
     )
-    # Card fill is only reachable from the inline-menu gesture, but there is no
-    # user-activation assertion in the content script to prove the gesture-only
-    # page-load policy end-to-end.  Gate on that real artifact instead of
-    # declaring credit-card fill missing.
-    text = extension_or_source_text(ctx, "core.js") + extension_or_source_text(
-        ctx, "content.js"
-    )
-    # isTrusted only guards inline-menu clicks; the missing artifact is an
-    # explicit user-activation assertion on the card fill itself.
-    activation = "userActivation" in text
+    # Component contract only: this executes the built bundle's
+    # `core.fillCardDocument` directly.  It does not exercise `content.js` or
+    # any background page-load wiring, and it does not perform a real browser
+    # gesture.  The explicit authorization it verifies is the shipped
+    # short-lived (origin, expiresAt, category) intent; without one, the
+    # component must refuse and leave every control untouched.
+    observed = card_fill_explicit_authorization_component(ctx)
     gate(
         ctx,
         "F11",
-        activation,
-        "no explicit user-activation check guards card fill (fill is only "
-        "reachable from the inline-menu gesture), so gesture-only page-load "
-        "enforcement is unproven; end-to-end validation blocked",
+        observed is not None,
+        "the built extension bundle carries no fillCardDocument entrypoint",
     )
+    assert observed["beforeAuthorization"] == ["", "", "", ""], observed[
+        "beforeAuthorization"
+    ]
+    for name, refused in observed["rejects"].items():
+        assert refused is False, (name, refused)
+        # A refused invocation must not touch any control.
+        assert observed["afterRejects"][name] == ["", "", "", ""], (
+            name,
+            observed["afterRejects"][name],
+        )
+    # Only a valid explicit authorization may write, and it writes exactly the
+    # card controls once.
+    assert observed["authorized"] is True, observed
+    assert sorted(observed["written"]) == ["csc", "exp", "holder", "number"], observed["written"]
+    assert observed["afterAuthorization"] == [
+        "Ada Lovelace",
+        "4242424242424242",
+        "12/29",
+        "123",
+    ], observed["afterAuthorization"]
     counts = node_test_pattern(
         ctx,
         M3_FILL,
-        r"M3 fillCardDocument fills number, expiry variants, selects and csc",
-        min_passed=1,
+        r"M3 fillCardDocument fills number, expiry variants, selects and csc|M3 same-origin iframe fill",
+        min_passed=2,
     )
-    assert counts["pass"] >= 1, counts
+    assert counts["pass"] >= 2, counts
 
 
 # ---------------------------------------------------------------------------
