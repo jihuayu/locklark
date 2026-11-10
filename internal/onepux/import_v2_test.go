@@ -257,7 +257,7 @@ func TestMapArchiveV2RejectsLossyOrUnsupportedInput(t *testing.T) {
 }
 
 func TestMapArchiveV2CapacityBound(t *testing.T) {
-	items := make([]map[string]any, 257)
+	items := make([]map[string]any, vault.MaxItems+1)
 	for n := range items {
 		item := onepuxItem(t, "login-"+string(rune('a'+n%26))+"-"+strings.Repeat("x", n/26+1), "001", "active", map[string]any{"title": "Login"}, map[string]any{
 			"loginFields": []any{map[string]any{"designation": "password", "fieldType": "P", "value": "value"}},

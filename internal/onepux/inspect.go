@@ -18,13 +18,13 @@ import (
 )
 
 const (
-	MaxArchive  = 8 << 20
-	MaxExpanded = 16 << 20
-	MaxEntry    = 8 << 20
-	MaxJSON     = 4 << 20
-	MaxEntries  = 1024
-	MaxObjects  = 4096
-	MaxNodes    = 100000
+	MaxArchive  = 32 << 20
+	MaxExpanded = 64 << 20
+	MaxEntry    = 16 << 20
+	MaxJSON     = 16 << 20
+	MaxEntries  = 8192
+	MaxObjects  = 16384
+	MaxNodes    = 200000
 	MaxDepth    = 32
 )
 
