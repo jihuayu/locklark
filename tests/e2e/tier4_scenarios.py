@@ -41,7 +41,10 @@ from .support import (
     make_vault,
     match_logins,
     multi_category_1pux,
+    pykeepass_peer,
     pty,
+    read_kdbx_entries,
+    reveal_login,
 )
 
 
@@ -61,6 +64,17 @@ def t4_01(ctx):
         import_ready,
         "`personal plan-import-1pux`/`import-1pux` are not advertised by the CLI",
     )
+    # The export must be reopened by an independent KDBX reader, not by the
+    # product that wrote it.  A missing peer blocks the assertion instead of
+    # silently downgrading it to a signature check.
+    peer = pykeepass_peer()
+    if peer is None:
+        ctx.require_feature(
+            "F6",
+            False,
+            "validation blocked: an independent PyKeePass reader is unavailable; "
+            "install pykeepass==4.2.0 or point LOCKLARK_TEST_PYKEEPASS at a peer interpreter",
+        )
     vault = make_vault(ctx, ["GitHub", "AWS"])
     archive = multi_category_1pux(ctx)
     plan = pty(
@@ -106,32 +120,16 @@ def t4_01(ctx):
     assert imported_id in matched_ids, matched
 
     # Controlled disclosure: the imported password leaves only through the
-    # explicit SHOW consent.  The receipt proves the terminal write and no
-    # secret may reach stdout, search rows or match rows.
-    revealed = pty(
-        ctx,
-        [
-            "personal",
-            "reveal-login",
-            "--file",
-            str(vault["path"]),
-            "--id",
-            imported_id,
-            "--revision",
-            imported_revision,
-            "--field",
-            "password",
-        ],
-        password=vault["password"],
-        secret=vault["secret"],
-        extra=[("输入 SHOW 确认显示", "SHOW")],
-        timeout=180,
+    # explicit SHOW consent.  The transcript must carry the actual value, while
+    # stdout, search rows and match rows must never do so.
+    revealed_value, revealed_transcript = reveal_login(
+        ctx, vault, imported_id, imported_revision, "password"
     )
-    assert revealed.returncode == 0, revealed.transcript[-800:]
-    assert revealed.json().get("status") == "written-to-terminal", revealed.stdout[:200]
+    assert revealed_value == "P@ssw0rd-2026", revealed_value
+    assert json.dumps(revealed_value) in revealed_transcript, revealed_transcript[-400:]
     for canary in ("P@ssw0rd-2026", vault["secret"]):
         ctx.assert_no_canary_leak(
-            canary, revealed.stdout, found.stdout, matched, json.dumps(plan.json())
+            canary, found.stdout, matched, json.dumps(plan.json())
         )
 
     # Export: an authenticated KDBX of the migrated vault.
@@ -152,6 +150,17 @@ def t4_01(ctx):
     assert exported.read_bytes()[:8] == b"\x03\xd9\xa2\x9ag\xfbK\xb5", (
         "unexpected KDBX signature"
     )
+    # Reopen the export with PyKeePass, independently of the writer.  This
+    # asserts the real imported content and not just the KDBX magic.
+    entries = read_kdbx_entries(exported, "export-pass-2026", peer=peer)
+    by_title = {entry["title"]: entry for entry in entries}
+    assert {"Corp SSO", "Runbook", "Ada Lovelace", "Corp Visa"} <= set(by_title), (
+        sorted(by_title)
+    )
+    sso = by_title["Corp SSO"]
+    assert sso["username"] == "alice", sso
+    assert sso["password"] == "P@ssw0rd-2026", sso
+    assert sso["url"] == "https://sso.corp.example.test/login", sso
     for canary in ("Corp SSO", "P@ssw0rd-2026", vault["secret"]):
         ctx.assert_no_canary_leak(canary, exported.read_bytes())
 
@@ -287,22 +296,22 @@ def t4_06(ctx):
     assert opt_in["bad_pair_refused"], (
         "a non-literal --hibp option pair was accepted by `personal health`"
     )
-    assert opt_in["declined_refused"], (
-        "a declined NETWORK consent still ran the opted-in check"
-    )
-    assert "vault.health.hibp" not in opt_in["intent_actions"], opt_in
+    # The refusal itself was asserted inside f13_cli_hibp_opt_in (fixed
+    # cancellation error, no receipt, no unlock and no vault.health.hibp
+    # intent appended).
+    assert opt_in["audit_delta"] == [], opt_in
     health_report(ctx, vault)
-    # The breach -> rotation -> stale-refusal -> refresh journey still needs a
-    # reachable range server: the CLI hard-codes the production endpoint and
-    # exposes no endpoint/proxy/client hook, so the synthetic breach match, the
-    # browser rotation and the CLI lease refresh cannot be exercised against a
-    # local mock here.  This stays an explicit not-verified result.
+    # A single CLI HIBP check can be routed to a loopback mock via HTTPS_PROXY
+    # (see T1_F13_06), but this scenario still does not execute the browser
+    # rotation or the CLI lease refresh, and it never queries the live service.
+    # This stays an explicit not-verified result.
     raise AssertionError(
         "UNVERIFIED (not a pass): breach-to-rotation journey not exercised - "
         "the CLI HIBP opt-in contract (strict pair, consent refusal, no intent) "
-        "was validated, but the range lookup cannot be routed to a local mock "
-        "and no live network query is made, so the synthetic breach -> browser "
-        "rotation -> stale CLI refusal -> refresh path remains unvalidated"
+        "was validated and T1_F13_06 routes one synthetic range check to a "
+        "loopback mock, but T4_06 does not execute the browser rotation or the "
+        "CLI lease refresh, so the whole breach -> rotation -> stale CLI refusal "
+        "-> refresh path remains unvalidated"
     )
 
 

@@ -490,10 +490,10 @@ def t1_f13_03(ctx):
         "personal health accepted a non-literal --hibp option pair: "
         f"{opt_in}"
     )
-    assert opt_in["declined_refused"], (
-        f"a wrong NETWORK consent was not refused: {opt_in}"
-    )
-    assert "vault.health.hibp" not in opt_in["intent_actions"], opt_in
+    # The refusal itself was asserted inside f13_cli_hibp_opt_in (fixed
+    # cancellation error, no receipt, no unlock and no vault.health.hibp
+    # intent appended).
+    assert opt_in["audit_delta"] == [], opt_in
     counts = go_package_test(
         ctx,
         "./internal/watchtower",
@@ -540,9 +540,16 @@ def t1_f13_06(ctx):
     add_login(ctx, vault, "Clean Mail", password=clean)
     breached_hash = hashlib.sha1(breached.encode("utf-8")).hexdigest().upper()
     clean_hash = hashlib.sha1(clean.encode("utf-8")).hexdigest().upper()
-    expected = {breached_hash[:5], clean_hash[:5]}
-    assert len(expected) == 2, "the synthetic passwords must share no prefix"
-    observed = f13_cli_hibp_range_lookups(ctx, vault, sorted(expected))
+    # Each prefix gets only its own suffix lines.  The breached password's real
+    # suffix is the one returned below, so the SUT must match it to report a
+    # breach; the clean prefix gets padding only.  The test still sends no
+    # suffix or password: only the prefix leaves the process.
+    responses = {
+        breached_hash[:5]: ((breached_hash[5:], 2),),
+        clean_hash[:5]: (),
+    }
+    assert len(responses) == 2, "the synthetic passwords must share no prefix"
+    observed = f13_cli_hibp_range_lookups(ctx, vault, responses)
     if observed["status"] != "ran":
         gate(
             ctx,
@@ -560,9 +567,13 @@ def t1_f13_06(ctx):
     ), observed["connections"]
     assert observed["refused"] == [], observed["refused"]
     assert observed["requests"], "the proxy accepted CONNECT but no range request came"
+    by_prefix: dict[str, list[dict]] = {}
     for record in observed["requests"]:
         assert not record.get("refused"), record
-        assert HIBP_PREFIX_RE.fullmatch(record["path"][len("/range/") :]), record["path"]
+        path = record["path"]
+        assert path.startswith("/range/"), record
+        prefix = path[len("/range/") :]
+        assert HIBP_PREFIX_RE.fullmatch(prefix), path
         assert record["headers"].get("Add-Padding", "").lower() == "true", record["headers"]
         for secret_material in (
             breached,
@@ -571,47 +582,39 @@ def t1_f13_06(ctx):
             clean_hash[5:],
             vault["secret"],
         ):
-            ctx.assert_no_canary_leak(secret_material, record["path"], json.dumps(record["headers"]))
+            ctx.assert_no_canary_leak(secret_material, path, json.dumps(record["headers"]))
+        by_prefix.setdefault(prefix, []).append(record)
+    # Both expected prefixes reached the mock, each exactly once, and each got
+    # exactly its own independent answer rather than a shared canned body.
+    assert set(by_prefix) == set(responses), (set(by_prefix), set(responses))
+    for prefix, expected_lines in responses.items():
+        records = by_prefix[prefix]
+        assert len(records) == 1, (prefix, records)
+        record = records[0]
+        assert record["unknown_prefix"] is False, record
+        served = tuple(
+            (line["suffix"], line["count"]) for line in record["suffixes"]
+        )
+        assert served == expected_lines, (prefix, served, expected_lines)
+        assert record["body"] == "".join(
+            f"{suffix}:{count}\r\n" for suffix, count in expected_lines
+        ) + "0" * 35 + ":0\r\n", record["body"]
+    assert len({record["body"] for record in observed["requests"]}) == 2, (
+        "the two prefixes did not receive independent responses"
+    )
     payload = observed["payload"]
     assert payload["hibp_checked"] is True, payload
     assert payload["status"] == "checked-hibp", payload
     titles = {row["id"]: row["title"] for row in list_rows(ctx, vault, state="active")}
     for canary in (breached, clean, breached_hash[5:], clean_hash[5:], vault["secret"]):
         ctx.assert_no_canary_leak(canary, json.dumps(payload), observed["transcript"])
-    # Both synthetic passwords were really looked up: each item's own prefix
-    # reached the mock, which answered with the deterministic suffix function.
-    requested = {record["path"][len("/range/") :] for record in observed["requests"]}
-    assert requested == {
-        breached_hash[:5],
-        clean_hash[:5],
-    }, (requested, observed["expected_prefixes"])
     breach_counts = {
         finding["id"]: finding["breach_count"] for finding in payload["findings"]
     }
     breached_id = next(key for key, title in titles.items() if title == "Breached Mail")
     clean_id = next(key for key, title in titles.items() if title == "Clean Mail")
-    # The mock reached the wire with the right prefix and answer, so the SUT
-    # received a valid range response.  Whether it attributes that answer to
-    # the item is the actual behaviour under test.
-    mock_answered = {
-        record["path"][len("/range/") :]: (record.get("suffix"), record.get("count"))
-        for record in observed["requests"]
-    }
-    assert mock_answered[breached_hash[:5]][1] == 2, mock_answered
+    assert breach_counts.get(breached_id) == 2, (payload, responses)
     assert breach_counts.get(clean_id) == 0, payload
-    if breach_counts.get(breached_id) != 2:
-        raise AssertionError(
-            "F13 CLI breach attribution is broken (product bug, not a missing "
-            "feature): the mock served /range/"
-            f"{breached_hash[:5]} with suffix {mock_answered[breached_hash[:5]][0]}"
-            " count 2, but the CLI reported breach_count=0 for 'Breached Mail' "
-            f"while claiming checked-hibp (checked={payload.get('checked')}). "
-            "internal/watchtower.LookupCandidates keys its counts by "
-            "HIBPCandidate.ID, while applyHIBPResults looks counts up by the "
-            "item ID; for migrated v2 items those differ, so every answered "
-            "prefix is silently treated as not breached"
-        )
-    assert breach_counts.get(breached_id) == 2, payload
 
 
 @e2e_test("T1_F13_04", 1, ["F13"], "Popup Watchtower banner warns on a matching login")

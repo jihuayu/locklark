@@ -898,13 +898,14 @@ class E2EContext:
             except termios.error:
                 echo_restored = False
 
+            # Output written by the child just before it exits can still be in
+            # the PTY buffer; callers that assert on late terminal text request
+            # a longer bounded drain.  Drain before closing the slave: closing
+            # it first makes the pending final write unreadable.
+            drain_available(drain_after_exit)
             if slave_open:
                 os.close(slave)
                 slave_open = False
-            # Output written by the child just before it exits can still be in
-            # the PTY buffer; callers that assert on late terminal text request
-            # a longer bounded drain.
-            drain_available(drain_after_exit)
             return PTYResult(
                 returncode=proc.returncode,
                 stdout=stdout_bytes.decode("utf-8", "replace"),

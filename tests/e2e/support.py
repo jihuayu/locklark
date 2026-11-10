@@ -19,12 +19,13 @@ import socket
 import ssl
 import stat
 import subprocess
+import sys
 import threading
 import time
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from .harness import (
     CLIResult,
@@ -478,16 +479,124 @@ def reveal_login(
         password=vault["password"],
         secret=vault["secret"],
         extra=[("输入 SHOW 确认显示", "SHOW")],
+        timeout=180,
+        # The disclosed JSON is the last terminal write; keep a bounded drain
+        # window so a loaded runner does not assert on a truncated transcript.
+        drain_after_exit=2.0,
     )
     if result.returncode != 0:
         raise AssertionError(
             f"reveal-login failed (rc={result.returncode}): {result.transcript[-800:]}"
         )
+    receipt = result.json()
+    if receipt.get("status") != "written-to-terminal":
+        raise AssertionError(f"reveal-login did not write to the terminal: {receipt!r}")
     # The disclosed JSON string is written to the terminal, not stdout.
     match = re.search(r'\r?\n("(?:[^"\\]|\\.)*")\s*$', result.transcript)
     if not match:
         raise AssertionError(f"reveal-login did not disclose JSON: {result.transcript[-400:]!r}")
-    return json.loads(match.group(1)), result.transcript
+    value = json.loads(match.group(1))
+    if value:
+        # The receipt and stdout must never carry the disclosed value.
+        ctx.assert_no_canary_leak(value, result.stdout, json.dumps(receipt))
+    return value, result.transcript
+
+
+PYKEEPASS_ENV = "LOCKLARK_TEST_PYKEEPASS"
+
+_PYKEEPASS_READER = r"""
+import json
+import sys
+from pykeepass import PyKeePass
+
+request = json.load(sys.stdin)
+db = PyKeePass(sys.argv[1], password=request["password"])
+print(json.dumps([
+    {
+        "title": entry.title or "",
+        "username": entry.username or "",
+        "password": entry.password or "",
+        "url": entry.url or "",
+        "notes": entry.notes or "",
+    }
+    for entry in db.entries
+], ensure_ascii=False))
+"""
+
+
+def pykeepass_peer() -> str | None:
+    """Return an interpreter that can import PyKeePass, if one is installed.
+
+    CI installs ``pykeepass==4.2.0`` into a peer virtualenv and points
+    ``LOCKLARK_TEST_PYKEEPASS`` at it.  The current interpreter is probed as a
+    local fallback; when neither works the export content cannot be read
+    independently and the caller must report a blocked assertion, never pass.
+    """
+
+    configured = os.environ.get(PYKEEPASS_ENV)
+    candidates = [configured, sys.executable]
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            probe = subprocess.run(
+                [candidate, "-c", "import pykeepass"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if probe.returncode == 0:
+            return candidate
+    return None
+
+
+def read_kdbx_entries(
+    path: Path,
+    password: str,
+    *,
+    peer: str | None = None,
+) -> list[dict[str, str]]:
+    """Read an exported KDBX with PyKeePass, independently of the product.
+
+    The export password travels over stdin, never argv.  Only the projection
+    used for content assertions is returned; no vault credential is read.
+    """
+
+    interpreter = peer or pykeepass_peer()
+    if interpreter is None:
+        raise AssertionError(
+            "validation blocked: an independent PyKeePass reader is unavailable; "
+            f"install pykeepass==4.2.0 or point {PYKEEPASS_ENV} at a peer interpreter"
+        )
+    proc = subprocess.run(
+        [interpreter, "-c", _PYKEEPASS_READER, str(path)],
+        input=json.dumps({"password": password}).encode("utf-8"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=180,
+    )
+    if proc.returncode != 0:
+        raise AssertionError(
+            "PyKeePass could not open the exported KDBX (rc=%d): %s"
+            % (proc.returncode, proc.stderr.decode("utf-8", "replace")[-600:])
+        )
+    try:
+        entries = json.loads(proc.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise AssertionError(f"PyKeePass returned invalid JSON: {exc}") from exc
+    if not isinstance(entries, list) or not all(
+        isinstance(entry, dict)
+        and set(entry) == {"title", "username", "password", "url", "notes"}
+        and all(isinstance(value, str) for value in entry.values())
+        for entry in entries
+    ):
+        raise AssertionError(f"PyKeePass returned an unexpected projection: {entries!r}")
+    return entries
 
 
 def edit_url(
@@ -1269,19 +1378,23 @@ def f13_cli_hibp_opt_in(ctx: E2EContext, vault: dict[str, Any]) -> dict[str, Any
     """Exercise the real ``personal health --hibp true`` opt-in contract.
 
     Everything happens on the synthetic vault through the compiled CLI and the
-    hidden NETWORK consent.  Returns the observations the caller asserts on;
-    no HIBP endpoint is contacted:
+    hidden NETWORK consent; no endpoint is contacted.  A declined consent is a
+    real failure (never a clean result), so the strict checks raise here:
 
-    - ``flags``: the option pair is advertised by the ``personal`` help
+    - the CLI exits non-zero and the terminal shows the fixed cancellation
+      error verbatim, with no stdio receipt;
+    - the audit chain gains no event at all, i.e. no unlock and no
+      ``vault.health.hibp`` intent.
+
+    Returns the option-surface observations for the caller:
+
+    - ``flags``: ``--hibp true`` is advertised by the ``personal`` help
       surfaces;
     - ``bad_pair_refused``: free-form spellings (``--hibp false``,
-      ``--hibp endpoint``) are rejected with the fixed usage refusal before any
-      prompt;
-    - ``declined_refused``: a wrong NETWORK consent exits non-zero with the
-      fixed cancellation message and no stdio receipt;
-    - ``intent_actions``: every audit action observed around the refusal, so
-      the caller can prove no ``vault.health.hibp`` intent was written and no
-      unlock happened.
+      ``--hibp endpoint``) are rejected with the fixed usage refusal;
+    - ``audit_delta``: audit actions appended across the refusal, excluding the
+      observation's own ``audit.list`` disclosure event (always empty here,
+      re-checked even on a failure path).
     """
 
     path = str(vault["path"])
@@ -1302,18 +1415,47 @@ def f13_cli_hibp_opt_in(ctx: E2EContext, vault: dict[str, Any]) -> dict[str, Any
         timeout=180,
     )
     after = audit_events(ctx, vault)
-    return {
+    # ``personal audit`` appends one ``audit.list`` disclosure event of its own.
+    # Drop only that observation noise so the delta still proves the declined
+    # run wrote no unlock, no local health report and no HIBP intent.
+    delta = [
+        event.get("action")
+        for event in after[len(before) :]
+        if event.get("action") != "audit.list"
+    ]
+    # The fixed refusal is what the cancellation error maps to on the CLI
+    # (cmd/locklark prints it as its error line); an accepted decline would
+    # instead finish rc=0 with a JSON receipt.
+    cancelled_error = "HIBP network check cancelled"
+    observations = {
         "flags": flags,
         "bad_pair_refused": all(
             result.returncode != 0
             and "usage: locklark personal" in result.stderr
             for result in bad_pairs
         ),
-        "declined_refused": declined.returncode != 0 and not declined.stdout.strip(),
-        "intent_actions": [
-            event.get("action") for event in [*before, *after]
-        ],
+        "declined_rc": declined.returncode,
+        "declined_error": (
+            cancelled_error
+            if cancelled_error in declined.stdout + declined.transcript
+            else "missing"
+        ),
+        "audit_delta": delta,
     }
+    ctx.require_feature(
+        "F13",
+        declined.returncode != 0
+        and cancelled_error in declined.stdout + declined.transcript
+        and not declined.stdout.strip(),
+        "FEATURE_NOT_YET_LANDED: F13 - a declined NETWORK consent did not stop "
+        "with the fixed cancellation error before any network access "
+        f"(rc={declined.returncode}, stdout={declined.stdout[:120]!r})",
+    )
+    assert delta == [], (
+        "a declined NETWORK consent wrote audit events (no unlock / no "
+        f"vault.health.hibp intent allowed): {delta}"
+    )
+    return observations
 
 
 # The hidden consent prompt emitted by ``personal health --hibp true`` before
@@ -1327,7 +1469,10 @@ HIBP_HTTPS_PORT = 443
 HIBP_PREFIX_RE = re.compile(r"^[0-9A-F]{5}$")
 
 
-def local_hibp_range_proxy(ctx: E2EContext) -> "LocalHIBPRangeProxy":
+def local_hibp_range_proxy(
+    ctx: E2EContext,
+    responses: Mapping[str, Sequence[tuple[str, int]]],
+) -> "LocalHIBPRangeProxy":
     """Start a loopback HTTPS CONNECT proxy in front of a local range server.
 
     The product's default ``http.Client`` transport honours ``HTTPS_PROXY``,
@@ -1338,29 +1483,58 @@ def local_hibp_range_proxy(ctx: E2EContext) -> "LocalHIBPRangeProxy":
     the child's only trust anchor through ``SSL_CERT_FILE``/``SSL_CERT_DIR``).
     Every other target is refused; system DNS and hosts files are untouched
     and nothing listens on port 443.
+
+    ``responses`` maps each expected five-hex prefix to its own independent
+    ``(suffix, count)`` lines.  The caller owns the synthetic passwords, so it
+    can supply the one suffix that really belongs to each prefix; the SUT only
+    ever sends the prefix.  A zero-count padding line is appended to every
+    response, exactly like the real provider.
     """
 
-    return LocalHIBPRangeProxy(ctx)
+    return LocalHIBPRangeProxy(ctx, responses)
+
+
+def _normalise_hibp_responses(
+    responses: Mapping[str, Sequence[tuple[str, int]]],
+) -> dict[str, tuple[tuple[str, int], ...]]:
+    """Validate the synthetic per-prefix range answers before serving them."""
+
+    normalised: dict[str, tuple[tuple[str, int], ...]] = {}
+    for raw_prefix, raw_lines in responses.items():
+        prefix = str(raw_prefix).upper()
+        if not HIBP_PREFIX_RE.fullmatch(prefix):
+            raise AssertionError(f"synthetic HIBP prefix is not five hex: {raw_prefix!r}")
+        if prefix in normalised:
+            raise AssertionError(f"duplicate synthetic HIBP prefix: {prefix}")
+        lines: list[tuple[str, int]] = []
+        for raw_suffix, raw_count in raw_lines:
+            suffix = str(raw_suffix).upper()
+            if not re.fullmatch(r"[0-9A-F]{35}", suffix):
+                raise AssertionError(
+                    f"synthetic HIBP suffix is not 35 hex: {raw_suffix!r}"
+                )
+            if not isinstance(raw_count, int) or isinstance(raw_count, bool) or raw_count <= 0:
+                raise AssertionError(f"synthetic HIBP count is not positive: {raw_count!r}")
+            lines.append((suffix, raw_count))
+        normalised[prefix] = tuple(lines)
+    return normalised
 
 
 class LocalHIBPRangeProxy:
     """Loopback CONNECT proxy with a mock range server behind it.
 
-    The mock derives one suffix per requested five-hex prefix from the
-    ``suffix_seed`` string:
-
-    ``suffix = SHA1(suffix_seed).hexdigest().upper()[:3] + prefix + "A"*27``
-
-    so its answer is a pure function of the prefix the SUT itself computed -
-    the test never injects a mapping and cannot leak the password into it.  The
-    count is ``2``.  A zero-count padding line is appended like the real
-    provider does.
+    Each requested five-hex prefix receives only the lines the caller supplied
+    for that prefix (plus zero-count padding).  The answers are therefore
+    independent: the test asserts what each prefix received and that the SUT
+    matched its own full-hash suffix rather than a shared canned response.
     """
 
-    PREFIX_COUNT = 2
-    SUFFIX_SEED = "locklark-e2e-hibp-suffix"
-
-    def __init__(self, ctx: E2EContext) -> None:
+    def __init__(
+        self,
+        ctx: E2EContext,
+        responses: Mapping[str, Sequence[tuple[str, int]]],
+    ) -> None:
+        self.responses = _normalise_hibp_responses(responses)
         work = ctx.temp_dir / "hibp-proxy"
         work.mkdir(mode=0o700, exist_ok=True)
         self.cert = work / "range.pem"
@@ -1483,16 +1657,16 @@ class LocalHIBPRangeProxy:
                     self.end_headers()
                     self.close_connection = True
                     return
-                suffix = (
-                    hashlib.sha1(proxy.SUFFIX_SEED.encode("ascii"))
-                    .hexdigest()
-                    .upper()[:3]
-                    + prefix
-                    + "A" * 27
-                )
-                record["suffix"] = suffix
-                record["count"] = proxy.PREFIX_COUNT
-                body = f"{suffix}:{proxy.PREFIX_COUNT}\r\n" + "0" * 35 + ":0\r\n"
+                lines = proxy.responses.get(prefix)
+                record["unknown_prefix"] = lines is None
+                lines = lines or ()
+                record["suffixes"] = [
+                    {"suffix": suffix, "count": count} for suffix, count in lines
+                ]
+                body = "".join(
+                    f"{suffix}:{count}\r\n" for suffix, count in lines
+                ) + "0" * 35 + ":0\r\n"
+                record["body"] = body
                 payload = body.encode("ascii")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain")
@@ -1544,22 +1718,25 @@ class LocalHIBPRangeProxy:
 
 
 def f13_cli_hibp_range_lookups(
-    ctx: E2EContext, vault: dict[str, Any], prefixes: Sequence[str]
+    ctx: E2EContext,
+    vault: dict[str, Any],
+    responses: Mapping[str, Sequence[tuple[str, int]]],
 ) -> dict[str, Any]:
     """Run one consented ``--hibp true`` check routed to the local mock.
 
-    ``prefixes`` are the five-hex SHA-1 prefixes the test expects the CLI to
-    derive from the synthetic passwords.  Outcomes:
+    ``responses`` maps the five-hex SHA-1 prefixes the test expects the CLI to
+    derive from the synthetic passwords to that prefix's own answer lines.
+    Outcomes:
 
     - ``"ran"``: the proxy accepted the CLI's CONNECT and the local range
       server answered; the caller checks which prefixes were really asked
-      for;
+      for and what each prefix received;
     - ``"pending"``: the route could not be established (proxy or CA failed),
       so nothing was validated.
     """
 
     try:
-        proxy = local_hibp_range_proxy(ctx)
+        proxy = local_hibp_range_proxy(ctx, responses)
     except (OSError, subprocess.SubprocessError) as exc:
         return {"status": "pending", "reason": f"local proxy/CA unavailable: {exc}"}
     try:
@@ -1599,7 +1776,7 @@ def f13_cli_hibp_range_lookups(
         "status": "ran",
         "returncode": result.returncode,
         "payload": payload,
-        "expected_prefixes": set(prefixes),
+        "expected_prefixes": set(proxy.responses),
         "connections": connections,
         "requests": requests,
         "refused": refused,
@@ -2208,6 +2385,8 @@ __all__ = [
     "node_eval",
     "node_test",
     "pty",
+    "pykeepass_peer",
+    "read_kdbx_entries",
     "require_hex32",
     "require_hex64",
     "reveal_login",
