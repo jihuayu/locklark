@@ -84,7 +84,14 @@ func UnlockSession(path string, password, key []byte, idle time.Duration) (*Sess
 		clear(r.material)
 		return nil, e
 	}
-	return &Session{path: path, material: r.material, slotDigest: r.slotDigest, last: time.Now(), fullUnlock: time.Now(), idle: idle, pending: make(map[*NativeField]bool), hibp: watchtower.NewHIBPClient(watchtower.HIBPOptions{})}, nil
+	return newUnlockedSession(path, r.material, r.slotDigest, time.Now(), idle), nil
+}
+
+// newUnlockedSession is the single constructor for an authenticated session so
+// every unlock path (password and system quick unlock) starts with the same
+// opt-in HIBP client and empty pending tables.
+func newUnlockedSession(path string, material []byte, slotDigest [32]byte, now time.Time, idle time.Duration) *Session {
+	return &Session{path: path, material: material, slotDigest: slotDigest, last: now, fullUnlock: now, idle: idle, pending: make(map[*NativeField]bool), hibp: watchtower.NewHIBPClient(watchtower.HIBPOptions{})}
 }
 func (s *Session) lock() {
 	s.sshPending.Range(func(key, _ any) bool {

@@ -139,7 +139,11 @@ func UnlockWithSystemContext(ctx context.Context, path string, store SystemUnloc
 	if capsule.Version != 1 || capsule.Path != absolute || len(capsule.Identity) == 0 || now.Before(capsule.Created) || !now.Before(capsule.Expires) || capsule.Expires.Sub(capsule.Created) != 24*time.Hour {
 		return nil, ErrSystemUnlockExpired
 	}
-	s := &Session{path: path, material: append([]byte(nil), capsule.Identity...), slotDigest: capsule.Slot, last: now, idle: idle, pending: make(map[*NativeField]bool)}
+	// Quick unlock restores the pre-enrollment material, not a full-factor
+	// unlock: newUnlockedSession's fullUnlock epoch is cleared below so this
+	// session can never extend or re-enroll OS quick unlock.
+	s := newUnlockedSession(path, append([]byte(nil), capsule.Identity...), capsule.Slot, now, idle)
+	s.fullUnlock = time.Time{}
 	if ctx.Err() != nil {
 		s.Lock()
 		return nil, ErrSessionLocked
