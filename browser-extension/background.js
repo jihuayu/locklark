@@ -42,7 +42,9 @@ if (typeof importScripts === "function") importScripts("core.js");
     HISTORY_LIMIT = 20,
     MULTI_STEP_TTL = 120000,
     CHECKOUT_PICKER_TTL = 30000,
-    CHECKOUT_MAX_FRAMES = 32;
+    CHECKOUT_MAX_FRAMES = 32,
+    OTP_CAPTURE_TTL = 2 * 60 * 1000,
+    OTP_CAPTURE_LIMIT = 8;
   const CONDITIONAL_INTENT_LIMIT = 64,
     CONDITIONAL_OPTIONS_MAX = 32768;
   // Conditional (autofill) Passkey intents are metadata-only and never set
@@ -52,7 +54,12 @@ if (typeof importScripts === "function") importScripts("core.js");
     stagedSaves = new Map(),
     lastFilledCredentials = new Map(),
     generatedHistory = [],
-    multiStepSessions = new Map();
+    multiStepSessions = new Map(),
+    // Two-factor setup captures. Each entry holds the validated otpauth text
+    // and the login candidates observed for one exact document; it is memory
+    // only, bounded, expires after two minutes and is cleared on lock,
+    // disconnect or a successful save.
+    otpCaptures = new Map();
   function applySettings(raw) {
     settings = core.normalizeSettings(raw);
     autoLogin = settings.autoLogin;
@@ -70,7 +77,15 @@ if (typeof importScripts === "function") importScripts("core.js");
       pinLength: generatorDefaults.pinLength,
     });
     refreshPasskeyConditionalSupport();
+    applyIdleDetection();
     return settings;
+  }
+  function applyIdleDetection() {
+    const minutes = settings.idleLockMinutes;
+    try {
+      if (minutes > 0)
+        api.idle?.setDetectionInterval?.(Math.max(30, minutes * 60));
+    } catch {}
   }
   const settingsReady = (async () => {
     try {
@@ -95,10 +110,36 @@ if (typeof importScripts === "function") importScripts("core.js");
       rebuildContextMenus();
     });
   } catch {}
+  // Browser idle detection is advisory: a locked/idle profile locks the
+  // native session only when the user opted in, and never unlocks anything.
+  try {
+    api.idle?.onStateChanged?.addListener((state) => {
+      if (state === "active" || !(settings.idleLockMinutes > 0)) return;
+      if (!capability) return;
+      status = "空闲自动锁定";
+      notify("Locklark 已锁定", "因空闲已自动锁定，请重新解锁。");
+      lockVault();
+    });
+  } catch {}
+  const NOTIFICATION_ICON =
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+  function notify(title, message) {
+    if (settings.notifications !== true) return;
+    try {
+      const result = api.notifications?.create?.({
+        type: "basic",
+        iconUrl: NOTIFICATION_ICON,
+        title: String(title).slice(0, 120),
+        message: String(message).slice(0, 300),
+      });
+      result?.catch?.(() => {});
+    } catch {}
+  }
   const PASSKEY_UNKNOWN = "Passkey 创建结果未确认，请检查金库和网站后再试";
   const FILL_UNKNOWN = "登录填充结果未确认，请核实页面；不会自动重试";
   let port = null,
     capability = "",
+    hostState = "",
     context = null,
     rows = [],
     status = "未连接",
@@ -562,9 +603,13 @@ if (typeof importScripts === "function") importScripts("core.js");
       preferredItemId: multiStepFor(context?.tabId, context?.origin)?.itemId || "",
       preferredTitle: multiStepFor(context?.tabId, context?.origin)?.title || "",
       step: multiStepFor(context?.tabId, context?.origin)?.stepCompleted || "",
+      hostState,
+      hostOutdated: hostState === "outdated",
       attachmentsSupported: !!capability && core.attachmentCapability(hostCapabilities),
       nativeClipboard: nativeClipboardSupported(),
       passkeyManagementSupported: passkeyManagementSupported(),
+      historySupported:
+        !!capability && hostCapabilities.includes("history-v1"),
       checkoutFramesSupported: checkoutFramePolicy(),
       vaultItems: vaultItems.map((item) => ({ ...item })),
       pending: !!pending || !!pendingOTP || !!pendingPasskey,
@@ -680,6 +725,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     attachmentUpload = null;
     clearPendingOpenAndFill();
     matchCategory = "login";
+    otpCaptures.clear();
     multiStepSessions.clear();
     clearConditionalIntentsWithNotify();
     refreshPasskeyConditionalSupport();
@@ -700,6 +746,35 @@ if (typeof importScripts === "function") importScripts("core.js");
     clear();
     if (!preservePrivateSessions) clearPrivateSessions();
     if (p) p.disconnect();
+  }
+  function classifyNativeError(error) {
+    const text = String(error?.message || error || "");
+    if (
+      /not found|no such native|specified native messaging host|native messaging host.*(missing|not installed)/i.test(
+        text,
+      )
+    )
+      return "missing";
+    if (/forbidden|access to the specified native messaging host/i.test(text))
+      return "forbidden";
+    if (/exited|disconnected|terminated|closed/i.test(text)) return "exited";
+    return "error";
+  }
+  function nativeGuidanceText(code) {
+    return (
+      {
+        missing:
+          "未找到 Locklark 原生宿主：请重新安装桌面端，或运行 locklark-browser-register 注册后重试",
+        forbidden:
+          "浏览器拒绝了这个原生宿主：请重新运行注册命令并确认清单路径",
+        exited: "Locklark 原生宿主已退出：请确认桌面端已安装并重新连接",
+        timeout:
+          "等待 Locklark 解锁超时：请在 Locklark 窗口中完成解锁后重试",
+        outdated:
+          "Locklark 原生宿主版本过旧，请升级桌面端后重新连接",
+        error: "无法连接 Locklark 原生宿主，请重新连接",
+      }[code] || "无法连接 Locklark 原生宿主，请重新连接"
+    );
   }
   function disconnectWithStatus(message) {
     disconnect();
@@ -903,7 +978,9 @@ if (typeof importScripts === "function") importScripts("core.js");
     });
     const timer = setTimeout(() => {
       calls.delete(requestId);
-      reject(Error("refused"));
+      const error = Error("refused");
+      error.timeout = true;
+      reject(error);
       disconnectWithStatus("连接或请求已过期，请重新连接");
     }, timeout);
     calls.set(requestId, { resolve, reject, timer, type });
@@ -1644,17 +1721,29 @@ if (typeof importScripts === "function") importScripts("core.js");
     unconfirmedSave = false;
     retired.clear();
     status = "请在原生窗口解锁并确认连接";
-    const p = nativeConnect();
+    let p;
+    try {
+      p = nativeConnect();
+    } catch (error) {
+      hostState = classifyNativeError(error);
+      status = nativeGuidanceText(hostState);
+      updateBadge();
+      return null;
+    }
     port = p;
     p.onDisconnect.addListener(() => {
       if (port !== p) return;
       port = null;
       const uncertain = unconfirmedSave;
+      const neverPaired = !capability;
       clear();
       clearPrivateSessions();
+      if (neverPaired) hostState = "exited";
       status = uncertain
         ? "结果未确认，请在金库核实，勿重复保存"
-        : "原生连接已断开，请重新连接";
+        : neverPaired
+          ? "Locklark 原生宿主已退出，请确认桌面端已安装并重新连接"
+          : "原生连接已断开，请重新连接";
       if (otpUnknown) status += " · " + OTP_UNKNOWN;
       void api.runtime.lastError;
     });
@@ -1758,6 +1847,9 @@ if (typeof importScripts === "function") importScripts("core.js");
         "cancel-copy-field": "copy-cancelled",
         "item-save": "saved",
         "item-state": "saved",
+        "unlock-request": "status",
+        "item-history": "item-history",
+        "item-restore-history": "saved",
         generate: "generated",
         "fill-profile": "profile-fill",
         "match-profiles": "profiles",
@@ -1793,6 +1885,7 @@ if (typeof importScripts === "function") importScripts("core.js");
               "vault-list": ["items", "vault-items"],
               "item-save": ["item-saved", "saved"],
               "item-state": ["item-saved", "saved"],
+              "item-restore-history": ["item-saved", "saved"],
               "fill-profile": ["profile-fill"],
             }[call.type] || [expected];
       if (!accepted.includes(message.type)) {
@@ -1816,10 +1909,25 @@ if (typeof importScripts === "function") importScripts("core.js");
           )
         : [];
       refreshPasskeyConditionalSupport();
-      status = "已连接，请读取当前网站候选";
+      if (
+        hostCapabilities.includes("shared-session-v1") &&
+        !hostCapabilities.includes("popup-vault-v1")
+      ) {
+        hostState = "outdated";
+        status = "Locklark 原生宿主版本过旧，请升级桌面端后重新连接";
+      } else {
+        hostState = "";
+        status = "已连接，请读取当前网站候选";
+      }
       updateBadge();
       rebuildContextMenus();
-    } catch {
+    } catch (error) {
+      if (error?.timeout) {
+        hostState = "timeout";
+        status = "等待 Locklark 解锁超时：请在 Locklark 窗口中完成解锁后重试";
+        updateBadge();
+        return;
+      }
       if (port === p && generation === epoch) {
         disconnect();
         status = "连接未获批准或已过期";
@@ -2573,6 +2681,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       }
       removeStaged(stageId);
       status = "已保存";
+      notify("已保存登录", title);
       return { saved: true, mode, title, status };
     } catch (error) {
       if (!record.commitStarted || !unconfirmedSave) status = "未保存";
@@ -3103,6 +3212,47 @@ if (typeof importScripts === "function") importScripts("core.js");
     updateBadge();
     rebuildContextMenus();
   }
+  async function diagnosticsSnapshot() {
+    const manifest = api.runtime.getManifest?.() || {};
+    let permissions = [];
+    try {
+      const granted = await api.permissions?.getAll?.();
+      permissions = Array.isArray(granted?.permissions)
+        ? granted.permissions.filter((name) => typeof name === "string").sort()
+        : [];
+    } catch {}
+    return {
+      extension: {
+        version: String(manifest.version || ""),
+        manifest_version: manifest.manifest_version || 3,
+      },
+      connection: {
+        connected: !!capability,
+        quick_fill: quickFill,
+        capabilities: hostCapabilities.slice(),
+        state: hostState,
+        status,
+      },
+      counts: {
+        candidates: rows.length,
+        vault_items: vaultItems.length,
+        pending_save: pending ? 1 : 0,
+        pending_otp: pendingOTP ? 1 : 0,
+        pending_passkey: pendingPasskey ? 1 : 0,
+      },
+      settings: {
+        auto_login: settings.autoLogin === true,
+        show_inline_menu: settings.showInlineMenu !== false,
+        offer_passkeys: settings.offerPasskeys !== false,
+        paste_protection: settings.pasteProtection !== false,
+        otp_capture: settings.otpCapture !== false,
+        idle_lock_minutes: settings.idleLockMinutes || 0,
+        notifications: settings.notifications === true,
+      },
+      permissions,
+      generated_at: new Date().toISOString(),
+    };
+  }
   async function setSiteSettings(disabledInline, neverSave) {
     if (!context?.origin) throw Error("refused");
     const origin = context.origin;
@@ -3358,6 +3508,22 @@ if (typeof importScripts === "function") importScripts("core.js");
       updateBadge();
     }
   }
+  function publicHistory(entries) {
+    if (!Array.isArray(entries)) return [];
+    return entries.slice(0, 20).map((entry, index) => ({
+      index: Number.isInteger(entry?.index) ? entry.index : index,
+      timestamp: Number.isInteger(entry?.timestamp) ? entry.timestamp : 0,
+      action:
+        typeof entry?.action === "string" ? entry.action.slice(0, 64) : "",
+      title:
+        typeof entry?.title === "string" ? entry.title.slice(0, 256) : "",
+      username:
+        typeof entry?.username === "string"
+          ? entry.username.slice(0, 256)
+          : "",
+      has_password: entry?.has_password === true,
+    }));
+  }
   function candidateItems() {
     if (!context?.origin) return [];
     return rows
@@ -3371,7 +3537,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       )
       .filter(Boolean);
   }
-  async function vaultSearch(rawQuery, rawCategory, rawPasskeysOnly) {
+  async function vaultSearch(rawQuery, rawCategory, rawPasskeysOnly, rawStateFilter) {
     if (!capability) throw Error("refused");
     const generation = ++vaultSearchGeneration,
       requestEpoch = epoch,
@@ -3395,6 +3561,11 @@ if (typeof importScripts === "function") importScripts("core.js");
       return { items: [], source: "unsupported", fallback: false, unsupported: true };
     }
     const category = core.validCategory(rawCategory) ? rawCategory : "all";
+    const stateFilter = ["active", "archived", "trashed", "all"].includes(
+      rawStateFilter,
+    )
+      ? rawStateFilter
+      : "";
     const query =
       typeof rawQuery === "string" ? rawQuery.slice(0, 500) : "";
     // The native wire uses canonical v2 categories; normalizeCategory()
@@ -3408,6 +3579,7 @@ if (typeof importScripts === "function") importScripts("core.js");
           query,
           category: wireCategory,
           favorites_only: category === "favorites",
+          ...(stateFilter ? { state: stateFilter } : {}),
           ...(passkeysOnly ? { passkeys_only: true } : {}),
         },
         12000,
@@ -3563,6 +3735,93 @@ if (typeof importScripts === "function") importScripts("core.js");
       return detail;
     }
   }
+  async function addSiteToItem(message) {
+    if (
+      !capability ||
+      !/^[a-f0-9]{32}$/.test(message.id || "") ||
+      !/^[a-f0-9]{64}$/.test(message.revision || "") ||
+      typeof message.origin !== "string"
+    )
+      throw Error("refused");
+    let origin;
+    try {
+      origin = core.originFromURL(message.origin);
+    } catch {
+      throw Error("refused");
+    }
+    if (origin !== message.origin || !origin.startsWith("https://"))
+      throw Error("refused");
+    const detail = await request(
+      "item-get",
+      { capability, item_id: message.id, revision: message.revision },
+      12000,
+    );
+    const item = detail.item;
+    if (
+      !item ||
+      item.id !== message.id ||
+      item.revision !== message.revision ||
+      !["login", "password"].includes(item.category)
+    )
+      throw Error("refused");
+    const existing = Array.isArray(item.urls) ? item.urls : [];
+    const originOf = (entry) => {
+      try {
+        return core.originFromURL(
+          typeof entry === "string" ? entry : entry?.url,
+        );
+      } catch {
+        return "";
+      }
+    };
+    if (existing.some((entry) => originOf(entry) === origin))
+      throw Error("refused");
+    if (existing.length >= 20) throw Error("refused");
+    // Preserve labels, primary flags and match modes; only append one origin.
+    const urls = existing.map((entry) => ({
+      url: typeof entry === "string" ? entry : String(entry?.url || ""),
+      ...(typeof entry === "object" && entry?.label
+        ? { label: String(entry.label).slice(0, 256) }
+        : {}),
+      ...(typeof entry === "object" && entry?.primary === true
+        ? { primary: true }
+        : {}),
+      match_mode:
+        typeof entry === "object" &&
+        ["origin", "host", "exact"].includes(entry?.match_mode)
+          ? entry.match_mode
+          : "origin",
+    }));
+    urls.push({ url: origin, match_mode: "origin" });
+    const itemJSON = JSON.stringify({
+      category: item.category,
+      title: item.title,
+      urls,
+    });
+    const response = await request(
+      "item-save",
+      {
+        capability,
+        item_id: message.id,
+        revision: message.revision,
+        item_json: itemJSON,
+      },
+      20000,
+    );
+    if (
+      response.type !== "item-saved" ||
+      response.item_id !== message.id ||
+      !/^[a-f0-9]{64}$/.test(response.revision || "")
+    )
+      throw Error("refused");
+    detailCache.clear();
+    vaultItems = [];
+    status = "已添加到当前网站";
+    return {
+      saved: { item_id: response.item_id, revision: response.revision },
+      origin,
+    };
+  }
   async function saveVaultItem(message) {
     if (!capability || !core.validItemForSave(message.item))
       throw Error("refused");
@@ -3623,6 +3882,130 @@ if (typeof importScripts === "function") importScripts("core.js");
     updateBadge();
     rebuildContextMenus();
     return { item_id: response.item_id, revision: response.revision };
+  }
+  function expireOTPCaptures() {
+    const now = Date.now();
+    for (const [key, capture] of otpCaptures) {
+      if (now - capture.at > OTP_CAPTURE_TTL) otpCaptures.delete(key);
+    }
+    while (otpCaptures.size > OTP_CAPTURE_LIMIT) {
+      const oldest = [...otpCaptures.entries()].sort(
+        (left, right) => left[1].at - right[1].at,
+      )[0];
+      if (!oldest) break;
+      otpCaptures.delete(oldest[0]);
+    }
+  }
+  // A page may show a two-factor setup QR code. The content script decodes it
+  // with BarcodeDetector and sends the otpauth text here. Nothing is written:
+  // the validated text and the exact document's login candidates are kept in
+  // worker memory, and the page only receives the display label plus item
+  // titles. A later save must name this capture ID and one of those items.
+  async function captureOTPForContent(message, c) {
+    if (!capability || pending || pendingOTP || pendingPasskey)
+      return { ok: false, reason: "busy" };
+    const parsed = core.parseOTPAuthTOTP(message.otpauth);
+    if (!parsed) return { ok: false, reason: "invalid" };
+    if (
+      !core.sameContext(c, context) ||
+      matchCategory !== "login" ||
+      Date.now() - lastMatchAt > 5000
+    ) {
+      await match("login", c.frameId);
+      lastMatchAt = Date.now();
+    }
+    await current(c);
+    const candidates = rows
+      .filter((row) => rowCategory(row) === "login")
+      .slice(0, 10)
+      .map((row) => ({
+        id: row.id,
+        revision: row.revision,
+        title: row.title || "",
+      }));
+    if (!candidates.length) return { ok: false, reason: "no-item" };
+    expireOTPCaptures();
+    const captureId = id();
+    otpCaptures.set(captureId, {
+      config: String(message.otpauth).trim(),
+      origin: c.origin,
+      tabId: c.tabId,
+      documentId: c.documentId,
+      candidates,
+      at: Date.now(),
+    });
+    expireOTPCaptures();
+    return {
+      ok: true,
+      captureId,
+      label: parsed.label,
+      items: candidates.map((row) => ({ id: row.id, title: row.title })),
+    };
+  }
+  // Saves one captured TOTP configuration into an existing login. The target
+  // item must be one of the candidates observed for this exact document, and
+  // the whole mutation is written by the existing native item-edit path, which
+  // re-reads the item under its revision, validates the otpauth text again and
+  // preserves every field this mutation does not name.
+  async function saveCapturedOTP(message, c) {
+    const capture = otpCaptures.get(message.captureId);
+    if (!capture) return { ok: false, reason: "expired" };
+    if (Date.now() - capture.at > OTP_CAPTURE_TTL) {
+      otpCaptures.delete(message.captureId);
+      return { ok: false, reason: "expired" };
+    }
+    // A capture belongs to one exact document. A different tab, origin or
+    // document may not spend it; the owner document keeps its chance.
+    if (
+      capture.origin !== c.origin ||
+      capture.tabId !== c.tabId ||
+      capture.documentId !== c.documentId
+    )
+      return { ok: false, reason: "expired" };
+    if (!/^[a-f0-9]{32}$/.test(message.itemId || ""))
+      return { ok: false, reason: "item" };
+    if (!capability) {
+      otpCaptures.delete(message.captureId);
+      return { ok: false, reason: "locked" };
+    }
+    const target = capture.candidates.find((row) => row.id === message.itemId);
+    if (!target) return { ok: false, reason: "item" };
+    const itemJSON = JSON.stringify({
+      title: target.title,
+      category: "login",
+      otp: capture.config,
+    });
+    if (new TextEncoder().encode(itemJSON).length > 32768)
+      return { ok: false, reason: "invalid" };
+    let response;
+    try {
+      response = await request(
+        "item-save",
+        {
+          capability,
+          item_id: target.id,
+          revision: target.revision,
+          item_json: itemJSON,
+        },
+        20000,
+      );
+    } catch {
+      return { ok: false, reason: "host" };
+    }
+    if (
+      !["item-saved", "saved"].includes(response?.type) ||
+      response.item_id !== target.id ||
+      !/^[a-f0-9]{64}$/.test(response.revision || "")
+    )
+      return { ok: false, reason: "host" };
+    otpCaptures.delete(message.captureId);
+    rows = rows.map((row) =>
+      row.id === response.item_id ? { ...row, revision: response.revision } : row,
+    );
+    vaultSearchGeneration++;
+    detailCache.clear();
+    updateBadge();
+    return { ok: true, revision: response.revision };
   }
   async function setItemState(message) {
     if (
@@ -4277,6 +4660,9 @@ if (typeof importScripts === "function") importScripts("core.js");
       await current(c);
       return { connected: !!capability };
     }
+    if (message.type === "inline-otp-capture")
+      return captureOTPForContent(message, c);
+    if (message.type === "inline-otp-save") return saveCapturedOTP(message, c);
     if (message.type === "inline-pending-save")
       return { pendingSave: serializeStaged(stagedForTab(c.tabId, c.origin)) };
     if (message.type === "inline-stage-save") {
@@ -4510,6 +4896,8 @@ if (typeof importScripts === "function") importScripts("core.js");
       site,
       attachmentsSupported: !!capability && core.attachmentCapability(hostCapabilities),
       passkeyManagementSupported: passkeyManagementSupported(),
+      historySupported:
+        !!capability && hostCapabilities.includes("history-v1"),
       checkoutFramesSupported: checkoutFramePolicy(),
       passkeyConditionalSupported: passkeyConditionalSupported === true,
       watchtower: watchtowerReport,
@@ -5190,6 +5578,12 @@ if (typeof importScripts === "function") importScripts("core.js");
         case "state":
           await settingsReady;
           break;
+        case "diagnostics":
+          if (Object.keys(message).sort().join(",") !== "type")
+            throw Error("refused");
+          await settingsReady;
+          extra.diagnostics = await diagnosticsSnapshot();
+          break;
         case "settings": {
           await settingsReady;
           const next = {
@@ -5257,6 +5651,42 @@ if (typeof importScripts === "function") importScripts("core.js");
         case "connect":
           void connect();
           break;
+        case "native-connect":
+          if (Object.keys(message).sort().join(",") !== "type")
+            throw Error("refused");
+          void connect();
+          extra.nativeConnect = { started: true };
+          break;
+        case "native-unlock": {
+          if (Object.keys(message).sort().join(",") !== "type")
+            throw Error("refused");
+          if (!port) {
+            void connect();
+            extra.nativeUnlock = {
+              ok: false,
+              pending: true,
+              status: "正在启动 Locklark，请在窗口中完成解锁",
+            };
+            break;
+          }
+          try {
+            const reply = await request("unlock-request", {}, 8000);
+            const unlocked = reply.unlocked === true;
+            status = unlocked
+              ? "Locklark 已解锁，请重新连接"
+              : "请在 Locklark 窗口中完成解锁";
+            extra.nativeUnlock = {
+              ok: reply.type === "status",
+              pending: false,
+              unlocked,
+              status,
+            };
+          } catch {
+            status = "无法请求桌面解锁，请确认 Locklark 正在运行";
+            extra.nativeUnlock = { ok: false, pending: false, status };
+          }
+          break;
+        }
         case "disconnect":
           disconnectWithStatus("已断开");
           break;
@@ -5477,10 +5907,74 @@ if (typeof importScripts === "function") importScripts("core.js");
           clearCheckoutPicker();
           extra.saved = await saveVaultItem(message);
           break;
+        case "add-site": {
+          if (
+            Object.keys(message).sort().join(",") !== "id,origin,revision,type"
+          )
+            throw Error("refused");
+          extra.added = await addSiteToItem(message);
+          break;
+        }
         case "item-state":
           clearCheckoutPicker();
           extra.itemState = await setItemState(message);
           break;
+        case "item-history": {
+          if (!capability || !hostCapabilities.includes("history-v1"))
+            throw Error("refused");
+          if (Object.keys(message).sort().join(",") !== "id,revision,type")
+            throw Error("refused");
+          const response = await request(
+            "item-history",
+            {
+              capability,
+              item_id: message.id,
+              revision: message.revision,
+            },
+            12000,
+          );
+          extra.history = {
+            item_id: response.item_id,
+            revision: response.revision,
+            entries: publicHistory(response.entries),
+          };
+          break;
+        }
+        case "item-restore-history": {
+          if (!capability || !hostCapabilities.includes("history-v1"))
+            throw Error("refused");
+          if (
+            Object.keys(message).sort().join(",") !==
+            "historyIndex,id,revision,type"
+          )
+            throw Error("refused");
+          if (
+            !Number.isInteger(message.historyIndex) ||
+            message.historyIndex < 0 ||
+            message.historyIndex > 19
+          )
+            throw Error("refused");
+          const response = await request(
+            "item-restore-history",
+            {
+              capability,
+              item_id: message.id,
+              revision: message.revision,
+              history_index: message.historyIndex,
+            },
+            20000,
+          );
+          if (response.type !== "item-saved") throw Error("refused");
+          detailCache.clear();
+          vaultItems = [];
+          vaultSearchGeneration++;
+          status = "已恢复历史版本";
+          extra.saved = {
+            item_id: response.item_id,
+            revision: response.revision,
+          };
+          break;
+        }
         case "fill": {
           const category = message.category ?? "login";
           if (
@@ -5501,6 +5995,7 @@ if (typeof importScripts === "function") importScripts("core.js");
             message.query,
             message.category,
             message.passkeysOnly === true,
+            message.stateFilter,
           );
           extra.vaultItems = result.items;
           extra.vaultSource = result.source;

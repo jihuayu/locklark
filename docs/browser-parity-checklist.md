@@ -89,8 +89,15 @@
 
 - **未关联站点粘贴密码前的钓鱼警告**：当前密码框粘贴时，若本页最近一次候选匹配明确报告“无已保存登录”，先显示关闭 Shadow DOM 的确认面板；取消则阻止本次粘贴。站点状态未知（未连接、锁定、有未完成原生请求、观测过期）不拦截。参考行为、决策表与差异见 [1Password beta 对照](browser-1password-beta-parity.md)。状态：已实现未对照，只有 Node DOM 测试。
 - **Locklark Secret Key 粘贴保护**：粘贴 `LL1-`、`LLR2-` 或 110 位恢复材料形态的文本时，无论站点是否已关联都先确认；与参考的 `authorize-paste-secret-key` 对应。状态：已实现未对照，只有 Node DOM 测试。
+- **两步验证二维码捕获并保存**：`BarcodeDetector` 可用时本地解码页面上的 `otpauth://totp` 二维码，显示 issuer/account，用户确认后把 OTP 配置写入当前来源的已有登录；种子不回传页面、不自动保存、不新增权限。与参考的 `autosave-qr-code-detected` 对应。状态：已实现未对照，只有 Node DOM 与 Go 单测，未在真实浏览器运行；Chromium 系以外不可用。见[二维码捕获验收](browser-otp-qr-capture-validation.md)。
 
-两项都默认开启，可在选项页“自动填充与登录”关闭；剪贴板文本不发送到后台、不写入存储。
+- **金库外围能力**：弹窗“已归档”筛选与归档/取消归档、把当前网站追加到条目后填充、显式打开内联菜单时聚焦首项、仅当前站点的 favicon、选项页诊断报告导出、Open & Fill 优先已保存的登录页路径。见[缺口盘点](browser-native-gap-inventory.md)。
+- **空闲自动锁定与系统通知**：新增 `idle` 与 `notifications` 权限；空闲锁定默认关闭、通知默认关闭，通知只含标题或固定锁定文案。权限理由见[发布准备](browser-release-preparation.md)。
+- **密码历史与身份提供商标识**：新增原生能力 `history-v1`，浏览器只读元数据并按索引恢复（旧密码不外发）；身份提供商只做展示识别，不接入 OAuth。见[历史与提供商验证](browser-history-and-provider-validation.md)。
+- **交互完整度**：金库与页面内面板的键盘导航、详情返回焦点、`/` 聚焦搜索、回收站两步确认、保存横幅聚焦与 `Esc`/`Enter`、加载与空状态、减少动画。见[交互对齐记录](browser-interaction-parity.md)。
+- **原生连接交互**：原生宿主缺失/被拒/退出/超时/过旧的状态分类与指引卡、重新连接、请求桌面解锁、选项页原生连接区块。见[原生连接交互](browser-native-connection-ux.md)。
+
+以上行为除空闲锁定与系统通知默认关闭外均默认开启，可在选项页关闭；剪贴板文本与二维码种子都不写入扩展存储。
 
 ## 本轮补齐与仍开放的产品范围
 

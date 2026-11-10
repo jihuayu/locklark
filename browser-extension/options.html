@@ -213,6 +213,21 @@
         </label>
         <p id="clipboard-seconds-hint" class="muted">可设置范围：5–300 秒。</p>
         <label class="row">
+          <span>空闲自动锁定</span>
+          <select id="opt-idle-lock">
+            <option value="0">关闭</option>
+            <option value="1">1 分钟</option>
+            <option value="5">5 分钟</option>
+            <option value="15">15 分钟</option>
+            <option value="30">30 分钟</option>
+            <option value="60">60 分钟</option>
+          </select>
+        </label>
+        <label class="row">
+          <input id="opt-notifications" type="checkbox" />
+          <span>系统通知：保存登录、空闲锁定时提醒</span>
+        </label>
+        <label class="row">
           <input id="opt-watchtower-local" type="checkbox" />
           <span>启用 Watchtower 本地安全体检（检测弱密码、重复密码与不安全 HTTP 网站）</span>
         </label>
@@ -224,6 +239,31 @@
             <option value="dark">深色</option>
           </select>
         </label>
+      </section>
+
+      <section aria-labelledby="native-heading">
+        <h2 id="native-heading">原生连接</h2>
+        <p class="muted">
+          扩展通过本机原生宿主与 Locklark 桌面端通信。这里只显示连接状态与能力，
+          不读取金库内容。
+        </p>
+        <p id="native-status" class="muted" role="status">尚未检测</p>
+        <div class="actions">
+          <button id="native-refresh" type="button">刷新状态</button>
+          <button id="native-connect" type="button">连接或重新连接</button>
+          <button id="native-unlock" type="button">在 Locklark 中解锁</button>
+        </div>
+        <p id="native-detail" class="muted"></p>
+      </section>
+
+      <section aria-labelledby="diagnostics-heading">
+        <h2 id="diagnostics-heading">诊断</h2>
+        <p class="muted">
+          导出的报告只含版本、连接状态、能力名、设置开关和计数；不含条目、URL、
+          用户名、密码或种子。
+        </p>
+        <button id="diagnostics-export" type="button">导出诊断报告</button>
+        <p id="diagnostics-status" class="muted" role="status"></p>
       </section>
 
       <section class="footer-actions">

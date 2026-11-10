@@ -67,10 +67,25 @@ FIREFOX_MIN_VERSION = "153.0"
 CHROMIUM_MIN_VERSION = "120"
 EXPECTED_PERMISSIONS = {
     "chromium": frozenset(
-        {"activeTab", "scripting", "nativeMessaging", "storage", "contextMenus"}
+        {
+            "activeTab",
+            "scripting",
+            "nativeMessaging",
+            "storage",
+            "contextMenus",
+            "idle",
+            "notifications",
+        }
     ),
     "firefox": frozenset(
-        {"activeTab", "scripting", "nativeMessaging", "storage"}
+        {
+            "activeTab",
+            "scripting",
+            "nativeMessaging",
+            "storage",
+            "idle",
+            "notifications",
+        }
     ),
 }
 EXPECTED_CONTENT_SCRIPTS = [

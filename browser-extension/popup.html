@@ -50,6 +50,17 @@
         ><button id="cancel-otp" disabled>取消验证码填充</button
         ><button id="disconnect">断开连接</button>
       </div>
+      <section id="native-guidance" class="native-guidance" hidden>
+        <strong id="native-guidance-title"></strong>
+        <p id="native-guidance-text" class="note"></p>
+        <pre id="native-guidance-command" class="mono" hidden></pre>
+        <div class="actions">
+          <button id="native-retry" type="button">重新连接</button>
+          <button id="native-unlock" type="button">在 Locklark 中解锁</button>
+          <button id="native-copy-command" type="button">复制安装命令</button>
+        </div>
+        <p id="native-guidance-status" class="note" role="status"></p>
+      </section>
       <section id="watchtower-site-banner" class="wt-banner" hidden>
         <strong id="watchtower-site-badge"></strong>
         <p id="watchtower-site-text"></p>
@@ -72,7 +83,7 @@
           <input
             id="search-input"
             type="search"
-            placeholder="搜索金库（标题、账号、网址、标签）…"
+            placeholder="搜索标题、账号或网址"
             autocomplete="off"
             spellcheck="false"
             aria-label="搜索金库"
@@ -97,6 +108,7 @@
           </button>
           <button type="button" data-filter="all" role="tab">全部</button>
           <button type="button" data-filter="favorites" role="tab">收藏</button>
+          <button type="button" data-filter="archived" role="tab">已归档</button>
           <button type="button" id="tab-passkeys" data-filter="passkeys" role="tab">
             Passkey
           </button>
@@ -148,6 +160,10 @@
           <button id="detail-fill" type="button">填充到此页面</button>
           <button id="detail-otp" type="button">填充验证码</button>
           <button id="detail-open-fill" type="button">打开并填充</button>
+          <button id="detail-add-site" type="button" hidden>
+            添加当前网站并填充
+          </button>
+          <button id="detail-archive" type="button">归档</button>
           <button id="detail-trash" type="button">移入回收站</button>
         </div>
         <section id="checkout-picker" class="checkout-picker" hidden>
@@ -163,6 +179,15 @@
           <p id="checkout-status" class="note" role="status"></p>
         </section>
         <div id="detail-fields" class="detail-fields"></div>
+        <section id="detail-history" class="history" hidden>
+          <h3>历史版本</h3>
+          <p class="note">
+            只显示时间、变更类型与是否含密码；旧密码不会发送到浏览器。
+          </p>
+          <button id="detail-history-load" type="button">查看历史版本</button>
+          <div id="detail-history-list" class="history-list"></div>
+          <p id="detail-history-status" class="note" role="status"></p>
+        </section>
         <section id="passkey-detail" class="passkey-detail" hidden>
           <h3>Passkey</h3>
           <div id="passkey-select-row" class="passkey-select" hidden>

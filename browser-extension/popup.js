@@ -608,7 +608,76 @@
             : defaultNote),
     );
   }
+  function nativeCommand() {
+    const ua = String(globalThis.navigator?.userAgent || "");
+    if (/Firefox\//i.test(ua))
+      return "locklark-browser-register --browser firefox --host /path/to/locklark-browser-firefox";
+    if (/Safari\//i.test(ua) && !/Chrome\//i.test(ua))
+      return "";
+    return "locklark-browser-register --browser chromium --host /path/to/locklark-browser-chromium";
+  }
+  const NATIVE_GUIDANCE = {
+    missing: {
+      title: "未找到 Locklark 原生宿主",
+      text: "桌面端可能未安装，或还没有注册浏览器集成。注册后点击重新连接。",
+      command: true,
+      unlock: false,
+    },
+    forbidden: {
+      title: "浏览器拒绝了原生宿主",
+      text: "请重新运行注册命令，并确认清单指向 Locklark 原生宿主二进制。",
+      command: true,
+      unlock: false,
+    },
+    exited: {
+      title: "原生宿主已退出",
+      text: "Locklark 可能已关闭或升级。重新连接会再次启动原生宿主。",
+      command: false,
+      unlock: true,
+    },
+    timeout: {
+      title: "等待桌面解锁",
+      text: "Locklark 窗口可能已在后台打开；请在其中完成解锁，然后重新连接。",
+      command: false,
+      unlock: true,
+    },
+    outdated: {
+      title: "需要升级桌面端",
+      text: "当前原生宿主缺少新版能力。请升级 Locklark 后重新连接。",
+      command: false,
+      unlock: false,
+    },
+    error: {
+      title: "无法连接桌面端",
+      text: "请确认 Locklark 已安装并正在运行；也可以先在桌面应用中解锁。",
+      command: false,
+      unlock: true,
+    },
+  };
+  function renderNativeGuidance(state) {
+    if (!els?.nativeGuidance) return;
+    if (els.connect)
+      els.connect.textContent = state.hostState
+        ? "重新连接本地金库"
+        : "连接本地金库";
+    const entry = NATIVE_GUIDANCE[state.hostState] || null;
+    els.nativeGuidance.hidden = !entry;
+    if (!entry) return;
+    if (els.nativeGuidanceTitle)
+      els.nativeGuidanceTitle.textContent = entry.title;
+    if (els.nativeGuidanceText) els.nativeGuidanceText.textContent = entry.text;
+    const command = entry.command ? nativeCommand() : "";
+    if (els.nativeGuidanceCommand) {
+      els.nativeGuidanceCommand.hidden = !command;
+      els.nativeGuidanceCommand.textContent = command;
+    }
+    if (els.nativeCopyCommand) els.nativeCopyCommand.hidden = !command;
+    if (els.nativeUnlock) els.nativeUnlock.hidden = !entry.unlock;
+    if (els.nativeGuidanceStatus && !state.hostState)
+      els.nativeGuidanceStatus.textContent = "";
+  }
   function render(state, sourceType) {
+    renderNativeGuidance(state);
     if (
       state.connected === false &&
       (attachmentBusy || attachmentTransfer || blobURLs.size)
@@ -842,6 +911,7 @@
     suggested: "当前网站",
     all: "全部",
     favorites: "收藏",
+    archived: "已归档",
     passkeys: "Passkey",
     login: "登录",
     identity: "身份",
@@ -985,6 +1055,10 @@
     els.editorView.hidden = name !== "editor";
     document.body.dataset.view = name;
   }
+  let historyEntries = [];
+  let historyFor = "";
+  let vaultReturnFocusId = "";
+  let trashConfirmRevision = "";
   function wipeDetail() {
     cancelPasskeyRemoval();
     clearCheckoutPickerView();
@@ -992,6 +1066,12 @@
     if (els?.passkeyDetail) els.passkeyDetail.hidden = true;
     clearAttachmentBuffers();
     if (els?.detailFields) els.detailFields.replaceChildren();
+    historyEntries = [];
+    historyFor = "";
+    trashConfirmRevision = "";
+    if (els?.detailHistory) els.detailHistory.hidden = true;
+    if (els?.detailHistoryList) els.detailHistoryList.replaceChildren();
+    if (els?.detailHistoryStatus) els.detailHistoryStatus.textContent = "";
     if (els) {
       els.detailTitle.textContent = "";
       els.detailNotes.textContent = "";
@@ -1060,6 +1140,17 @@
     // Passkey rows are already filtered by the native host before its 500-row
     // cap; filtering this truncated page again would hide valid matches.
     if (activeFilter === "passkeys") return items;
+    if (activeFilter === "archived") {
+      const archived = items.filter(
+        (item) => String(item.state || "active") === "archived",
+      );
+      if (!core) return archived;
+      return core.filterVaultItems(archived, {
+        query: searchQuery,
+        category: "all",
+        origin: lastState?.origin || "",
+      });
+    }
     if (!core) return items;
     return core.filterVaultItems(items, {
       query: searchQuery,
@@ -1084,6 +1175,36 @@
       els.siteDisableInline.checked = state.disabledInline === true;
     if (els.siteNeverSave)
       els.siteNeverSave.checked = state.neverSave === true;
+  }
+  function currentOriginIcon(item) {
+    const origin = String(lastState?.origin || "");
+    if (!origin.startsWith("https://") || !Array.isArray(item.urls)) return "";
+    for (const url of item.urls) {
+      try {
+        if (core.originFromURL(url) === origin) return origin;
+      } catch {}
+    }
+    return "";
+  }
+  function vaultRows() {
+    try {
+      return [...els.vaultList.querySelectorAll(".vault-item")];
+    } catch {
+      return [];
+    }
+  }
+  function focusVaultRow(itemId) {
+    const rows = vaultRows();
+    if (!rows.length) return;
+    const target = itemId
+      ? rows.find((row) => row.dataset.itemId === itemId)
+      : null;
+    (target || rows[0]).focus?.();
+  }
+  function restoreVaultFocus() {
+    const itemId = vaultReturnFocusId;
+    vaultReturnFocusId = "";
+    focusVaultRow(itemId);
   }
   function renderVaultList() {
     if (!els) return;
@@ -1114,12 +1235,27 @@
       const row = document.createElement("button");
       row.type = "button";
       row.className = "vault-item";
+      // Roving tabindex: the list is one tab stop; arrows move inside it.
+      row.tabIndex = -1;
       row.dataset.itemId = item.id;
       row.dataset.itemRevision = item.revision;
       row.dataset.category = core?.nativeCategory(item.category) || "login";
       const title = document.createElement("span");
       title.className = "vault-item-title";
       title.textContent = item.title || "（无标题）";
+      // Only the site the user is actually on is asked for its favicon; vault
+      // items from other origins get no network request and no third-party CDN.
+      const iconOrigin = currentOriginIcon(item);
+      if (iconOrigin) {
+        const icon = document.createElement("img");
+        icon.className = "vault-item-icon";
+        icon.alt = "";
+        icon.loading = "lazy";
+        icon.referrerPolicy = "no-referrer";
+        icon.src = iconOrigin + "/favicon.ico";
+        icon.addEventListener("error", () => icon.remove());
+        title.prepend?.(icon);
+      }
       const passkey = core?.validPasskeyMetadata?.(item.passkey)
         ? item.passkey
         : null;
@@ -1149,16 +1285,19 @@
         const star = document.createElement("span");
         star.className = "favorite-mark";
         star.textContent = "★";
-        row.prepend(star);
+        title.prepend?.(star);
       }
       row.addEventListener("click", () => void openDetail(item));
       list.append(row);
     }
     list.scrollTop = scrollTop;
-    if (focusedID) {
-      const retained = [...list.children].find(row => row.dataset.itemId === focusedID);
-      retained?.focus?.({ preventScroll: true });
-    }
+    const rows = [...list.children];
+    const activeRow = focusedID
+      ? rows.find((row) => row.dataset.itemId === focusedID)
+      : null;
+    if (activeRow) activeRow.tabIndex = 0;
+    else if (rows[0]) rows[0].tabIndex = 0;
+    if (activeRow) activeRow.focus?.({ preventScroll: true });
     const passkeysUnsupported =
       activeFilter === "passkeys" &&
       (lastState?.passkeyManagementSupported === false ||
@@ -1180,6 +1319,8 @@
         ? "暂无收藏条目"
         : activeFilter === "suggested"
           ? "当前网站无匹配条目"
+        : activeFilter === "archived"
+          ? "暂无已归档条目"
           : searchQuery
             ? "没有匹配的条目"
             : "金库中暂无条目";
@@ -1223,6 +1364,7 @@
       query: searchQuery,
       category: activeFilter,
       passkeysOnly: activeFilter === "passkeys",
+      stateFilter: activeFilter === "archived" ? "archived" : "",
     };
   }
   function sameVaultFilter(a, b) {
@@ -1231,7 +1373,8 @@
       !!b &&
       a.query === b.query &&
       a.category === b.category &&
-      a.passkeysOnly === b.passkeysOnly
+      a.passkeysOnly === b.passkeysOnly &&
+      a.stateFilter === b.stateFilter
     );
   }
   async function refreshVault(silent = false) {
@@ -1239,6 +1382,8 @@
     const generation = ++vaultQueryGeneration;
     const filters = vaultFilterState();
     if (els?.searchInput) els.searchInput.disabled = true;
+    if (els?.vaultList) els.vaultList.setAttribute("aria-busy", "true");
+    if (els?.vaultCount && !silent) els.vaultCount.textContent = "正在读取…";
     const isCurrent = () =>
       !popupInactive && lastState?.connected === true &&
       generation === vaultQueryGeneration &&
@@ -1249,6 +1394,7 @@
         query: filters.query,
         category: filters.category,
         passkeysOnly: filters.passkeysOnly,
+        ...(filters.stateFilter ? { stateFilter: filters.stateFilter } : {}),
       });
       if (!isCurrent()) return;
       if (reply && typeof reply === "object") {
@@ -1271,6 +1417,7 @@
     } finally {
       if (generation === vaultQueryGeneration) {
         if (els?.searchInput) els.searchInput.disabled = false;
+        if (els?.vaultList) els.vaultList.setAttribute("aria-busy", "false");
         renderLockedView(lastState || {});
       }
     }
@@ -1287,6 +1434,8 @@
     const generation = ++passkeyDetailGeneration;
     cancelPasskeyRemoval({ clearUncertain: false });
     if (checkoutPicker) clearCheckoutPickerView();
+    vaultReturnFocusId =
+      document.activeElement?.dataset?.itemId || vaultReturnFocusId;
     const operation = beginVaultOperation();
     detailReadOperation = operation;
     try {
@@ -1304,6 +1453,7 @@
       clearRevealedSecrets();
       renderDetail(reply.detail);
       showView("detail");
+      els.detailBack?.focus?.();
     } catch {
       toast("无法读取条目详情");
     } finally {
@@ -1994,12 +2144,44 @@
       detail.favorite === true ? "true" : "false",
     );
     els.detailFavorite.textContent = detail.favorite === true ? "★" : "☆";
+    if (els.detailAddSite) {
+      const origin = detailCurrentOrigin();
+      const offered =
+        ["login", "password"].includes(
+          core.normalizeCategory?.(detail.category) || detail.category,
+        ) && detailLacksOrigin(detail, origin);
+      els.detailAddSite.hidden = !offered;
+      if (offered)
+        els.detailAddSite.textContent =
+          "添加到 " + origin.replace(/^https:\/\//, "") + " 并填充";
+    }
+    if (els.detailArchive) {
+      const archived = String(detail.state || "active") === "archived";
+      els.detailArchive.textContent = archived ? "取消归档" : "归档";
+      els.detailArchive.setAttribute(
+        "aria-pressed",
+        archived ? "true" : "false",
+      );
+    }
+    if (els.detailTrash) {
+      els.detailTrash.textContent = "移入回收站";
+      delete els.detailTrash.dataset.confirm;
+    }
     els.detailUnavailable.hidden = !detail.unavailable;
     els.detailUnavailable.textContent = detail.unavailable || "";
     els.detailNotes.textContent = detail.notes || "";
     els.detailUpdated.textContent = detail.updated_at
       ? "最近修改：" + detail.updated_at
       : "";
+    if (els?.detailHistory) {
+      els.detailHistory.hidden = lastState?.historySupported !== true;
+      if (historyFor !== detail.id) {
+        historyFor = detail.id;
+        historyEntries = [];
+        els.detailHistoryList?.replaceChildren();
+        if (els.detailHistoryStatus) els.detailHistoryStatus.textContent = "";
+      }
+    }
     els.detailFields.replaceChildren();
     const fields = detailFields(detail);
     for (const field of fields) {
@@ -2417,6 +2599,19 @@
   }
   async function copyValue(value, button) {
     return writeClipboard(value, button);
+  }
+  function preferredFillURL(detail) {
+    const urls = Array.isArray(detail?.urls) ? detail.urls : [];
+    if (!urls.length) return "";
+    const signIn =
+      /(?:^|\/)(?:login|sign-?in|auth|session|users\/sign_in|account\/login)(?:[\/?#]|$)/i;
+    for (const url of urls) {
+      try {
+        const path = new URL(url).pathname;
+        if (path !== "/" && signIn.test(path)) return url;
+      } catch {}
+    }
+    return urls[0];
   }
   async function openAndFill(detail, url) {
     if (!detail || !url) return;
@@ -3308,8 +3503,180 @@
       toast("收藏状态未更新");
     }
   }
+  function historyActionLabel(action) {
+    return (
+      {
+        edit: "修改",
+        "password-change": "修改密码",
+        "import-1pux": "从 1Password 导入",
+      }[action] ||
+      action ||
+      "修改"
+    );
+  }
+  function renderHistoryVersions() {
+    if (!els?.detailHistoryList) return;
+    els.detailHistoryList.replaceChildren();
+    if (els.detailHistoryStatus)
+      els.detailHistoryStatus.textContent = historyEntries.length
+        ? ""
+        : "没有可恢复的历史版本";
+    for (const entry of historyEntries) {
+      const row = document.createElement("div");
+      row.className = "history-entry";
+      const meta = document.createElement("span");
+      meta.className = "history-meta";
+      const time = document.createElement("span");
+      time.className = "history-time";
+      time.textContent = entry.timestamp
+        ? new Date(entry.timestamp * 1000).toLocaleString()
+        : "时间未知";
+      const label = document.createElement("span");
+      label.textContent = [
+        historyActionLabel(entry.action),
+        entry.has_password ? "含密码" : "无密码",
+        entry.title ? "标题：" + entry.title : "",
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      meta.append(time, label);
+      const restore = document.createElement("button");
+      restore.type = "button";
+      restore.textContent = "恢复";
+      restore.addEventListener("click", () =>
+        void restoreHistoryVersion(entry.index),
+      );
+      row.append(meta, restore);
+      els.detailHistoryList.append(row);
+    }
+  }
+  async function loadHistoryVersions() {
+    const detail = lastDetail;
+    if (!detail || !lastState?.historySupported) return;
+    if (els?.detailHistoryLoad) els.detailHistoryLoad.disabled = true;
+    if (els?.detailHistoryStatus)
+      els.detailHistoryStatus.textContent = "正在读取…";
+    try {
+      const reply = await classifyDetailAction({
+        type: "item-history",
+        id: detail.id,
+        revision: detail.revision,
+      });
+      if (lastDetail !== detail) return;
+      if (!reply?.history) throw Error("refused");
+      historyEntries = reply.history.entries || [];
+      if (els?.detailHistoryLoad) {
+        els.detailHistoryLoad.disabled = false;
+        els.detailHistoryLoad.textContent = "刷新历史版本";
+      }
+      renderHistoryVersions();
+    } catch {
+      if (els?.detailHistoryLoad) els.detailHistoryLoad.disabled = false;
+      if (els?.detailHistoryStatus)
+        els.detailHistoryStatus.textContent = "无法读取历史版本，请重试";
+    }
+  }
+  async function restoreHistoryVersion(index) {
+    const detail = lastDetail;
+    if (!detail || !Number.isInteger(index)) return;
+    const question = "恢复此历史版本？当前条目的密码、用户名和备注会被替换。";
+    if (typeof confirm === "function" && !confirm(question)) return;
+    try {
+      const reply = await classifyDetailAction({
+        type: "item-restore-history",
+        id: detail.id,
+        revision: detail.revision,
+        historyIndex: index,
+      });
+      if (!reply?.saved) throw Error("refused");
+      toast("已恢复历史版本");
+      await openDetail({ id: detail.id, revision: reply.saved.revision });
+    } catch {
+      toast("无法恢复此历史版本");
+    }
+  }
+  function detailCurrentOrigin() {
+    try {
+      const origin = core.originFromURL(String(lastState?.origin || ""));
+      return origin && origin.startsWith("https://") ? origin : "";
+    } catch {
+      return "";
+    }
+  }
+  function detailLacksOrigin(detail, origin) {
+    if (!detail?.urls?.length || !origin) return false;
+    return !detail.urls.some((url) => {
+      try {
+        return core.originFromURL(url) === origin;
+      } catch {
+        return false;
+      }
+    });
+  }
+  async function detailAddSiteAndFill() {
+    const detail = lastDetail;
+    const origin = detailCurrentOrigin();
+    if (!detail || !origin || !detailLacksOrigin(detail, origin)) return;
+    try {
+      const reply = await classifyDetailAction({
+        type: "add-site",
+        id: detail.id,
+        revision: detail.revision,
+        origin,
+      });
+      if (!reply?.added?.saved) throw Error("refused");
+      lastDetail = {
+        ...detail,
+        revision: reply.added.saved.revision,
+        urls: [...(detail.urls || []), origin],
+      };
+      renderDetail(lastDetail);
+      toast("已添加到当前网站");
+      await classifyDetailAction({
+        type: "fill",
+        id: lastDetail.id,
+        revision: lastDetail.revision,
+      });
+    } catch {
+      toast("无法添加到当前网站");
+    }
+  }
+  async function detailArchiveToggle() {
+    if (!lastDetail) return;
+    const archived = String(lastDetail.state || "active") === "archived";
+    try {
+      const reply = await classifyDetailAction({
+        type: "item-state",
+        id: lastDetail.id,
+        revision: lastDetail.revision,
+        state: archived ? "active" : "archived",
+      });
+      if (!reply?.itemState) throw Error("refused");
+      lastDetail = {
+        ...lastDetail,
+        state: archived ? "active" : "archived",
+        revision: reply.itemState.revision,
+      };
+      renderDetail(lastDetail);
+      vaultLoaded = false;
+      await refreshVault(true);
+      toast(archived ? "条目已取消归档" : "条目已归档");
+    } catch {
+      toast(archived ? "无法取消归档" : "无法归档");
+    }
+  }
   async function detailTrash() {
     if (!lastDetail) return;
+    if (trashConfirmRevision !== lastDetail.revision) {
+      trashConfirmRevision = lastDetail.revision;
+      if (els?.detailTrash) {
+        els.detailTrash.textContent = "确认移入回收站";
+        els.detailTrash.dataset.confirm = "1";
+      }
+      toast("再次点击确认移入回收站");
+      return;
+    }
+    trashConfirmRevision = "";
     try {
       const reply = await classifyDetailAction({
         type: "item-state",
@@ -3319,9 +3686,11 @@
       });
       if (!reply?.itemState) throw Error("refused");
       vaultLoaded = false;
+      vaultReturnFocusId = "";
       wipeSensitiveViews();
       showView("vault");
       await refreshVault(true);
+      restoreVaultFocus();
       toast("条目已移入回收站");
     } catch {
       toast("无法移入回收站");
@@ -3341,6 +3710,14 @@
   }
   function initVault() {
     els = {
+      nativeGuidance: q("#native-guidance"),
+      nativeGuidanceTitle: q("#native-guidance-title"),
+      nativeGuidanceText: q("#native-guidance-text"),
+      nativeGuidanceCommand: q("#native-guidance-command"),
+      nativeGuidanceStatus: q("#native-guidance-status"),
+      nativeRetry: q("#native-retry"),
+      nativeUnlock: q("#native-unlock"),
+      nativeCopyCommand: q("#native-copy-command"),
       lockedView: q("#locked-view"),
       vaultView: q("#vault-view"),
       detailView: q("#detail-view"),
@@ -3369,6 +3746,12 @@
       detailFill: q("#detail-fill"),
       detailOtp: q("#detail-otp"),
       detailOpenFill: q("#detail-open-fill"),
+      detailArchive: q("#detail-archive"),
+      detailAddSite: q("#detail-add-site"),
+      detailHistory: q("#detail-history"),
+      detailHistoryLoad: q("#detail-history-load"),
+      detailHistoryList: q("#detail-history-list"),
+      detailHistoryStatus: q("#detail-history-status"),
       detailTrash: q("#detail-trash"),
       detailFields: q("#detail-fields"),
       detailUrls: q("#detail-urls"),
@@ -3410,6 +3793,23 @@
       checkoutCancel: q("#checkout-cancel"),
       checkoutStatus: q("#checkout-status"),
     };
+    els.vaultList?.addEventListener("focusin", (event) => {
+      const rows = [...(els.vaultList.querySelectorAll?.(".vault-item") || [])];
+      for (const row of rows) row.tabIndex = row === event.target ? 0 : -1;
+    });
+    els.vaultList?.addEventListener("keydown", (event) => {
+      const rows = [...(els.vaultList.querySelectorAll?.(".vault-item") || [])];
+      const at = rows.indexOf(event.target);
+      if (at < 0) return;
+      let next = -1;
+      if (event.key === "ArrowDown") next = Math.min(rows.length - 1, at + 1);
+      else if (event.key === "ArrowUp") next = Math.max(0, at - 1);
+      else if (event.key === "Home") next = 0;
+      else if (event.key === "End") next = rows.length - 1;
+      else return;
+      event.preventDefault();
+      rows[next]?.focus?.();
+    });
     els.searchInput.addEventListener("input", (event) => {
       searchQuery = String(event.target.value || "");
       if (activeFilter === "passkeys") vaultItems = [];
@@ -3466,6 +3866,7 @@
         // truncated page while the host is still filtering.
         vaultItems = [];
         if (lastState) lastState = { ...lastState, vaultItems: [] };
+        if (els?.vaultCount) els.vaultCount.textContent = "正在读取…";
         renderVaultList();
         void refreshVault(true);
       });
@@ -3563,6 +3964,7 @@
       wipeDetail();
       showView("vault");
       renderVaultList();
+      restoreVaultFocus();
     });
     els.detailFavorite.addEventListener("click", () => void detailFavorite());
     els.detailEdit.addEventListener("click", () => {
@@ -3594,8 +3996,11 @@
     });
     els.detailOpenFill.addEventListener("click", () => {
       if (lastDetail?.urls?.length)
-        void openAndFill(lastDetail, lastDetail.urls[0]);
+        void openAndFill(lastDetail, preferredFillURL(lastDetail));
     });
+    els.detailHistoryLoad?.addEventListener("click", () => void loadHistoryVersions());
+    els.detailAddSite?.addEventListener("click", () => void detailAddSiteAndFill());
+    els.detailArchive?.addEventListener("click", () => void detailArchiveToggle());
     els.detailTrash.addEventListener("click", () => void detailTrash());
     els.passkeySelect?.addEventListener("change", (event) =>
       selectPasskeyCredential(event?.target?.value),
@@ -3660,7 +4065,16 @@
           wipeDetail();
           showView("vault");
           renderVaultList();
+          restoreVaultFocus();
         }
+        return;
+      }
+      if (
+        event.key === "/" &&
+        !/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || "")
+      ) {
+        event.preventDefault();
+        els?.searchInput?.focus?.();
       }
     });
     globalThis.addEventListener?.("pagehide", wipeSensitiveViews);
@@ -3672,6 +4086,34 @@
   document
     .querySelector("#connect")
     .addEventListener("click", () => void act({ type: "connect" }));
+  document.querySelector("#native-retry")?.addEventListener("click", () => {
+    if (els?.nativeGuidanceStatus)
+      els.nativeGuidanceStatus.textContent = "正在重新连接…";
+    void act({ type: "native-connect" });
+  });
+  document.querySelector("#native-unlock")?.addEventListener("click", () => {
+    if (els?.nativeGuidanceStatus)
+      els.nativeGuidanceStatus.textContent = "正在请求桌面解锁…";
+    void api.runtime
+      .sendMessage({ type: "native-unlock" })
+      .then((reply) => {
+        if (els?.nativeGuidanceStatus)
+          els.nativeGuidanceStatus.textContent =
+            reply?.nativeUnlock?.status || "已请求桌面解锁";
+      })
+      .catch(() => {
+        if (els?.nativeGuidanceStatus)
+          els.nativeGuidanceStatus.textContent = "无法请求桌面解锁";
+      });
+  });
+  document.querySelector("#native-copy-command")?.addEventListener("click", () => {
+    const command = els?.nativeGuidanceCommand?.textContent || "";
+    if (!command) return;
+    void navigator.clipboard
+      ?.writeText(command)
+      .then(() => toast("安装命令已复制"))
+      .catch(() => toast("复制失败"));
+  });
   document
     .querySelector("#refresh")
     .addEventListener("click", () => void act({ type: "match" }));

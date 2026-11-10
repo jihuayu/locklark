@@ -22,6 +22,9 @@ function harness(options = {}) {
     otpProbes = [];
   const messageListeners = [];
   const connectListeners = [];
+  const notifications = [];
+  let idleListener = null,
+    idleInterval = 0;
   let fillWait = null;
   let messageListener,
     portMessage,
@@ -87,6 +90,19 @@ function harness(options = {}) {
                 title: "Fixture",
               },
             ],
+          }),
+        );
+      if (r.type === "unlock-request")
+        queueMicrotask(() =>
+          portMessage({
+            v: 1,
+            id: r.id,
+            type: "status",
+            desktop_connected: true,
+            unlocked: false,
+            vault_locked: true,
+            paired: false,
+            capabilities: [],
           }),
         );
       if (r.type === "commit-ready" && autoCommit)
@@ -231,7 +247,11 @@ function harness(options = {}) {
     runtime: {
       id: "fixed",
       getURL: (p) => "chrome-extension://fixed/" + p,
-      connectNative: () => port,
+      connectNative: () => {
+        if (options.connectNativeError)
+          throw Error(options.connectNativeError);
+        return port;
+      },
       onMessage: { addListener: (f) => messageListeners.push(f) },
       onConnect: { addListener: (f) => connectListeners.push(f) },
     },
@@ -248,6 +268,18 @@ function harness(options = {}) {
     windows: {
       WINDOW_ID_NONE: -1,
       onFocusChanged: { addListener: (f) => (listeners.focus = f) },
+    },
+    idle: {
+      setDetectionInterval: (seconds) => {
+        idleInterval = seconds;
+      },
+      onStateChanged: { addListener: (f) => (idleListener = f) },
+    },
+    notifications: {
+      create: (options) => {
+        notifications.push(options);
+        return Promise.resolve("n1");
+      },
     },
     scripting: {
       executeScript: async (options) => {
@@ -352,6 +384,9 @@ function harness(options = {}) {
   const sender = { id: "fixed", url: "chrome-extension://fixed/popup.html" };
   return {
     sent,
+    notifications,
+    idleInterval: () => idleInterval,
+    fireIdle: (state) => idleListener?.(state),
     holdFill: (promise) => (fillWait = promise),
     injected,
     otpProbes,
@@ -1323,6 +1358,96 @@ test("inline site-link metadata stays unknown when no login match ran", async ()
   assert.equal(disconnected.siteLinked, null);
   assert.equal(disconnected.candidates.length, 0);
 });
+test("two-factor setup capture is document-bound and saves through item-edit", async () => {
+  const secret = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
+  const otpauth = "otpauth://totp/ACME:john?secret=" + secret;
+  const h = harness({
+    onRequest: (r) => {
+      if (r.type === "item-save")
+        return {
+          v: 1,
+          id: r.id,
+          type: "item-saved",
+          item_id: r.item_id,
+          revision: "f".repeat(64),
+        };
+    },
+  });
+  await ready(h);
+  const captured = await h.send(
+    { type: "inline-otp-capture", otpauth },
+    contentSender(),
+  );
+  assert.equal(captured.ok, true);
+  assert.equal(captured.label, "ACME · john");
+  assert.equal(captured.items.length, 1);
+  assert.equal(captured.items[0].id, "b".repeat(32));
+  assert.equal(
+    JSON.stringify(captured).includes(secret),
+    false,
+    "the seed must not return to the page",
+  );
+
+  h.setDoc("doc-2");
+  const foreignDocument = await h.send(
+    { type: "inline-otp-save", captureId: captured.captureId, itemId: "b".repeat(32) },
+    contentSender("doc-2"),
+  );
+  assert.equal(foreignDocument.ok, false);
+  h.setDoc("doc-1");
+  const foreignItem = await h.send(
+    { type: "inline-otp-save", captureId: captured.captureId, itemId: "d".repeat(32) },
+    contentSender(),
+  );
+  assert.equal(foreignItem.ok, false);
+  assert.equal(
+    h.sent.some((r) => r.type === "item-save"),
+    false,
+    "a refused owner must not write",
+  );
+
+  const saved = await h.send(
+    { type: "inline-otp-save", captureId: captured.captureId, itemId: "b".repeat(32) },
+    contentSender(),
+  );
+  assert.equal(saved.ok, true, JSON.stringify(saved));
+  assert.equal(saved.revision, "f".repeat(64));
+  const edit = h.sent.find((r) => r.type === "item-save");
+  assert.equal(edit.item_id, "b".repeat(32));
+  assert.equal(edit.revision, "c".repeat(64));
+  assert.deepEqual(JSON.parse(edit.item_json), {
+    title: "Fixture",
+    category: "login",
+    otp: otpauth,
+  });
+
+  const replay = await h.send(
+    { type: "inline-otp-save", captureId: captured.captureId, itemId: "b".repeat(32) },
+    contentSender(),
+  );
+  assert.equal(replay.ok, false, "a capture is single use");
+  assert.equal(h.sent.filter((r) => r.type === "item-save").length, 1);
+});
+
+test("two-factor capture needs a connected host and a matching login", async () => {
+  const otpauth =
+    "otpauth://totp/ACME:john?secret=JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
+  const h = harness();
+  const disconnected = await h.send(
+    { type: "inline-otp-capture", otpauth },
+    contentSender(),
+  );
+  assert.equal(disconnected.ok, false);
+  assert.equal(disconnected.reason, "busy");
+  await ready(h);
+  const invalid = await h.send(
+    { type: "inline-otp-capture", otpauth: "otpauth://hotp/x?secret=JBSWY3DPEHPK3PXP" },
+    contentSender(),
+  );
+  assert.equal(invalid.ok, false);
+  assert.equal(invalid.reason, "invalid");
+});
+
 test("passkey uses authenticated sender origin and cancels on navigation", async () => {
   const h = harness();
   await ready(h);
@@ -2445,6 +2570,291 @@ test("conditional list is public metadata only and never starts a native get", a
   const state = await h.send({ type: "state" });
   assert.equal(state.passkeyConditionalSupported, true);
   assert.equal(state.pending, false);
+});
+
+test("diagnostics describe the session without vault data or secrets", async () => {
+  const h = harness();
+  await ready(h);
+  const reply = await h.send({ type: "diagnostics" });
+  const report = reply.diagnostics;
+  assert.ok(report, JSON.stringify(reply));
+  const text = JSON.stringify(report);
+  assert.equal(text.includes("Fixture"), false);
+  assert.equal(text.includes("b".repeat(32)), false);
+  assert.equal(text.includes("password"), false);
+  assert.deepEqual(Object.keys(report).sort(), [
+    "connection",
+    "counts",
+    "extension",
+    "generated_at",
+    "permissions",
+    "settings",
+  ]);
+  assert.equal(report.connection.connected, true);
+  assert.equal(Array.isArray(report.connection.capabilities), true);
+  assert.equal(report.counts.candidates, 1);
+  assert.equal(report.settings.otp_capture, true);
+  assert.equal(report.counts.vault_items >= 0, true);
+  const refused = await h.send({ type: "diagnostics", extra: true });
+  assert.equal(refused.diagnostics, undefined);
+});
+
+test("a missing native host is reported with actionable guidance", async () => {
+  const h = harness({
+    connectNativeError: "Specified native messaging host not found.",
+  });
+  await h.send({ type: "connect" });
+  await tick();
+  const state = await h.send({ type: "state" });
+  assert.equal(state.connected, false);
+  assert.equal(state.hostState, "missing");
+  assert.match(state.status, /未找到 Locklark 原生宿主/);
+});
+
+test("an old native host is flagged when shared session exists without vault", async () => {
+  const h = harness({ capabilities: ["shared-session-v1"] });
+  await h.send({ type: "connect" });
+  await tick();
+  const state = await h.send({ type: "state" });
+  assert.equal(state.hostState, "outdated");
+  assert.equal(state.hostOutdated, true);
+  assert.match(state.status, /版本过旧/);
+});
+
+test("native unlock asks the host to focus the desktop window", async () => {
+  const h = harness();
+  await ready(h);
+  const reply = await h.send({ type: "native-unlock" });
+  assert.equal(reply.nativeUnlock.ok, true);
+  assert.equal(
+    h.sent.some((r) => r.type === "unlock-request"),
+    true,
+  );
+  assert.match(reply.nativeUnlock.status, /完成解锁/);
+});
+
+test("idle auto-lock needs the opt-in setting and a live capability", async () => {
+  const h = harness({
+    settings: { idleLockMinutes: 1, notifications: true },
+  });
+  await ready(h);
+  assert.equal(h.idleInterval(), 60);
+  h.fireIdle("active");
+  assert.equal(h.sent.some((r) => r.type === "lock"), false);
+  h.fireIdle("idle");
+  await tick();
+  assert.equal(
+    h.sent.some((r) => r.type === "lock"),
+    true,
+    "the native lock request is sent",
+  );
+  assert.equal(h.notifications.length, 1);
+  assert.equal(h.notifications[0].title, "Locklark 已锁定");
+  assert.equal((await h.send({ type: "state" })).connected, false);
+});
+
+test("idle events do nothing when auto-lock is off", async () => {
+  const h = harness({ settings: { notifications: true } });
+  await ready(h);
+  h.fireIdle("idle");
+  await tick();
+  assert.equal(h.sent.some((r) => r.type === "lock"), false);
+  assert.equal(h.notifications.length, 0);
+});
+
+test("adding a site preserves existing URL metadata", async () => {
+  const id = "b".repeat(32),
+    rev = "c".repeat(64);
+  const h = harness({
+    onRequest: (r) => {
+      if (r.type === "item-get")
+        return {
+          v: 1,
+          id: r.id,
+          type: "item-detail",
+          item: {
+            id,
+            revision: rev,
+            category: "login",
+            title: "Example",
+            urls: [
+              {
+                url: "https://example.test/login",
+                primary: true,
+                match_mode: "exact",
+                label: "Main",
+              },
+              { url: "https://alt.example.test/", match_mode: "host" },
+            ],
+          },
+        };
+      if (r.type === "item-save")
+        return {
+          v: 1,
+          id: r.id,
+          type: "item-saved",
+          item_id: r.item_id,
+          revision: "f".repeat(64),
+        };
+    },
+  });
+  await ready(h);
+  const reply = await h.send({
+    type: "add-site",
+    id,
+    revision: rev,
+    origin: "https://new.example.test",
+  });
+  assert.equal(reply.added.origin, "https://new.example.test");
+  assert.equal(reply.added.saved.revision, "f".repeat(64));
+  const save = JSON.parse(
+    h.sent.find((r) => r.type === "item-save").item_json,
+  );
+  assert.deepEqual(save.urls, [
+    {
+      url: "https://example.test/login",
+      label: "Main",
+      primary: true,
+      match_mode: "exact",
+    },
+    { url: "https://alt.example.test/", match_mode: "host" },
+    { url: "https://new.example.test", match_mode: "origin" },
+  ]);
+  assert.equal(save.username, undefined);
+  assert.equal(save.password, undefined);
+  const before = h.sent.filter((r) => r.type === "item-save").length;
+  const http = await h.send({
+    type: "add-site",
+    id,
+    revision: rev,
+    origin: "http://new.example.test",
+  });
+  assert.equal(http.added, undefined);
+  const duplicate = await h.send({
+    type: "add-site",
+    id,
+    revision: rev,
+    origin: "https://example.test",
+  });
+  assert.equal(duplicate.added, undefined);
+  assert.equal(
+    h.sent.filter((r) => r.type === "item-save").length,
+    before,
+    "refused requests must not write",
+  );
+});
+
+test("history entries are projected without password values", async () => {
+  const h = harness({
+    capabilities: ["history-v1"],
+    onRequest: (r) => {
+      if (r.type === "item-history")
+        return {
+          v: 1,
+          id: r.id,
+          type: "item-history",
+          item_id: r.item_id,
+          revision: r.revision,
+          entries: [
+            {
+              index: 0,
+              timestamp: 1700000000,
+              action: "edit",
+              title: "Old",
+              username: "ada",
+              has_password: true,
+              password: "leaked-secret",
+              sections: [{ password: "leaked-secret" }],
+            },
+          ],
+        };
+    },
+  });
+  await ready(h);
+  const reply = await h.send({
+    type: "item-history",
+    id: "b".repeat(32),
+    revision: "c".repeat(64),
+  });
+  assert.ok(reply.history, JSON.stringify(reply));
+  assert.equal(reply.history.entries.length, 1);
+  assert.equal(JSON.stringify(reply).includes("leaked-secret"), false);
+  assert.equal(reply.history.entries[0].has_password, true);
+  assert.equal(reply.history.entries[0].title, "Old");
+  const native = h.sent.find((r) => r.type === "item-history");
+  assert.equal(native.item_id, "b".repeat(32));
+  const unsupported = harness();
+  await ready(unsupported);
+  const refused = await unsupported.send({
+    type: "item-history",
+    id: "b".repeat(32),
+    revision: "c".repeat(64),
+  });
+  assert.equal(refused.history, undefined);
+});
+
+test("history restore sends the index and rejects out-of-bound values", async () => {
+  const h = harness({
+    capabilities: ["history-v1"],
+    onRequest: (r) => {
+      if (r.type === "item-restore-history")
+        return {
+          v: 1,
+          id: r.id,
+          type: "item-saved",
+          item_id: r.item_id,
+          revision: "e".repeat(64),
+        };
+    },
+  });
+  await ready(h);
+  const reply = await h.send({
+    type: "item-restore-history",
+    id: "b".repeat(32),
+    revision: "c".repeat(64),
+    historyIndex: 2,
+  });
+  assert.equal(reply.saved.item_id, "b".repeat(32));
+  assert.equal(reply.saved.revision, "e".repeat(64));
+  const native = h.sent.find((r) => r.type === "item-restore-history");
+  assert.equal(native.history_index, 2);
+  const bad = await h.send({
+    type: "item-restore-history",
+    id: "b".repeat(32),
+    revision: "c".repeat(64),
+    historyIndex: 20,
+  });
+  assert.equal(bad.saved, undefined);
+});
+
+test("vault search forwards only a valid archived state filter", async () => {
+  const h = harness({
+    onRequest: (r) => {
+      if (r.type === "vault-search")
+        return { v: 1, id: r.id, type: "vault-items", items: [] };
+    },
+  });
+  await ready(h);
+  await h.send({
+    type: "vault-search",
+    query: "",
+    category: "archived",
+    stateFilter: "archived",
+  });
+  const archived = h.sent.filter((r) => r.type === "vault-search").at(-1);
+  assert.equal(archived.state, "archived");
+  assert.equal(archived.category, "");
+  await h.send({
+    type: "vault-search",
+    query: "",
+    category: "all",
+    stateFilter: "bogus",
+  });
+  const invalid = h.sent.filter((r) => r.type === "vault-search").at(-1);
+  assert.equal("state" in invalid, false);
+  await h.send({ type: "vault-search", query: "", category: "all" });
+  const plain = h.sent.filter((r) => r.type === "vault-search").at(-1);
+  assert.equal("state" in plain, false);
 });
 
 test("conditional request does not block ordinary match or fill state", async () => {

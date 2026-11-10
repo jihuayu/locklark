@@ -163,6 +163,24 @@ and per-item automatic-login overrides. Examples:
 `browser-extension/options.js:210-235`. It does not hold passwords, vault
 factors, private keys, or TOTP values.
 
+### `idle`
+
+The `idle` permission powers optional inactivity locking. `background.js`
+registers `idle.onStateChanged` and, only when the user selected a non-zero
+`idleLockMinutes` and a live capability exists, forwards the existing native
+`lock` request and clears browser state. It never unlocks, never reads page
+content and never runs while the setting is `0` (the default). Detection
+interval is clamped to at least 30 seconds.
+
+### `notifications`
+
+The `notifications` permission is opt-in (`notifications: false` by default).
+Only two events can create a system notification: a successful staged save and
+an idle auto-lock. The body contains the item title or a fixed lock sentence;
+it never contains passwords, TOTP codes, candidate lists, URLs or field values.
+The icon is an inline data URL, so no additional asset or network request is
+introduced.
+
 ### `contextMenus` (Chromium/Edge only)
 
 Chromium builds add `contextMenus` for the right-click vault menu

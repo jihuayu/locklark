@@ -1095,3 +1095,124 @@ test("paste protection is on by default and normalises a stored boolean", () => 
   assert.equal(core.normalizeSettings({ pasteProtection: false }).pasteProtection, false);
   assert.equal(core.normalizeSettings({ pasteProtection: "off" }).pasteProtection, true);
 });
+
+test("two-factor setup URLs are parsed strictly and never expose the seed", () => {
+  const secret = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
+  const parsed = core.parseOTPAuthTOTP(
+    "otpauth://totp/ACME%20Co:john@example.com?secret=" +
+      secret +
+      "&issuer=ACME%20Co&algorithm=SHA256&digits=8&period=60",
+  );
+  assert.deepEqual(parsed, {
+    issuer: "ACME Co",
+    account: "john@example.com",
+    label: "ACME Co · john@example.com",
+    digits: 8,
+    period: 60,
+    algorithm: "SHA256",
+  });
+  assert.equal("secret" in parsed, false);
+  assert.deepEqual(core.parseOTPAuthTOTP("otpauth://totp/ACME:john?secret=" + secret), {
+    issuer: "ACME",
+    account: "john",
+    label: "ACME · john",
+    digits: 6,
+    period: 30,
+    algorithm: "SHA1",
+  });
+  // Lowercase Base32 is accepted by the native parser and stored upper-cased.
+  assert.equal(
+    core.parseOTPAuthTOTP("otpauth://totp/x?secret=" + secret.toLowerCase()).label,
+    "x",
+  );
+  // An issuer parameter alone is valid; only a conflicting label issuer is not.
+  assert.equal(
+    core.parseOTPAuthTOTP("otpauth://totp/x?secret=" + secret + "&issuer=Other")
+      .label,
+    "Other · x",
+  );
+  // Padded Base32 that decodes to fewer than 16 bytes is refused.
+  assert.equal(
+    core.parseOTPAuthTOTP("otpauth://totp/x?secret=MZXW6YTBOI======"),
+    null,
+  );
+});
+
+test("two-factor setup parsing refuses HOTP, unknown fields and bad bounds", () => {
+  const secret = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
+  const base = "otpauth://totp/x?secret=" + secret;
+  for (const value of [
+    "otpauth://hotp/x?secret=" + secret,
+    base + "&digits=7",
+    base + "&digits=06",
+    base + "&period=0",
+    base + "&period=3601",
+    base + "&algorithm=MD5",
+    base + "&foo=bar",
+    "otpauth://totp/ACME:john?secret=" + secret + "&issuer=Other",
+    "otpauth://totp/ACME:a:b?secret=" + secret,
+    "otpauth://totp/x?secret=" + secret + "#fragment",
+    "otpauth://totp/x?secret=" + secret + "&secret=" + secret,
+    "otpauth://totp/x?secret=" + secret + ";a=b",
+    "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP",
+    "otpauth://totp/x?secret=" + "A".repeat(105),
+    "otpauth://totp/x?secret=" + "1".repeat(32),
+    "otpauth://totp/x?secret=",
+    "otpauth://totp/x?secret=" + secret + "&issuer=bad/issuer",
+    "otpauth://totp/x?secret=" + secret + " ",
+    42,
+    null,
+  ])
+    assert.equal(core.parseOTPAuthTOTP(value), null, String(value));
+});
+
+test("idle auto-lock and notifications stay bounded and opt-in", () => {
+  for (const value of [0, 1, 5, 15, 30, 60])
+    assert.equal(
+      core.normalizeSettings({ idleLockMinutes: value }).idleLockMinutes,
+      value,
+    );
+  for (const value of [-1, 2, 7, 1.5, "5", null, undefined])
+    assert.equal(
+      core.normalizeSettings({ idleLockMinutes: value }).idleLockMinutes,
+      0,
+    );
+  assert.equal(core.normalizeSettings({}).notifications, false);
+  assert.equal(core.normalizeSettings({ notifications: true }).notifications, true);
+  assert.equal(
+    core.normalizeSettings({ notifications: "true" }).notifications,
+    false,
+  );
+});
+
+test("identity provider recognition is display-only and cannot be spoofed", () => {
+  assert.equal(core.identityProviderFor("https://accounts.google.com/o/oauth2"), "Google");
+  assert.equal(core.identityProviderFor("https://login.microsoftonline.com/common"), "Microsoft");
+  assert.equal(core.identityProviderFor("https://appleid.apple.com/auth"), "Apple");
+  assert.equal(core.identityProviderFor("https://github.com/login"), "GitHub");
+  assert.equal(core.identityProviderFor("https://example.okta.com/login"), "Okta");
+  for (const host of [
+    "https://accounts.google.com.evil.test/",
+    "https://evil-accounts.google.com.test/",
+    "https://accounts.google.com@evil.test/",
+    "https://notgoogle.com/",
+    "not a url",
+  ])
+    assert.equal(core.identityProviderFor(host), "", host);
+});
+
+test("native status frames are bounded and unknown keys are refused", () => {
+  const frame = {
+    v: 1,
+    id: "a".repeat(32),
+    type: "status",
+    desktop_connected: true,
+    unlocked: false,
+    vault_locked: true,
+    paired: false,
+    capabilities: ["shared-session-v1"],
+  };
+  assert.equal(core.validResponse(frame), true);
+  assert.equal(core.validResponse({ ...frame, unexpected: 1 }), false);
+  assert.equal(core.validResponse({ ...frame, v: 2 }), false);
+});

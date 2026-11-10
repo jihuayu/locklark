@@ -204,8 +204,10 @@ for (const mode of modes) {
     // builds deliberately omit it to keep the native acceptance permission set
     // at activeTab/nativeMessaging/scripting/storage.
     manifest.permissions.push("contextMenus");
+    manifest.permissions.push("idle", "notifications");
     manifest.background = { service_worker: "background.js" };
   } else if (mode === "firefox") {
+    manifest.permissions.push("idle", "notifications");
     // Firefox reserves Ctrl+Shift+Y for Library in real profiles. Keep the
     // toolbar action and let users choose an extension shortcut explicitly.
     delete manifest.commands._execute_action.suggested_key;

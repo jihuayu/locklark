@@ -19,7 +19,8 @@ func isV2Operation(kind string) bool {
 	switch kind {
 	case "search", "list", "vault-search", "vault-list", "item-get",
 		"item-copy-field", "item-reveal-field", "item-create", "item-edit", "item-save",
-		"item-state", "match-profiles", "fill-profile", "passkey-remove":
+		"item-state", "item-history", "item-restore-history",
+		"match-profiles", "fill-profile", "passkey-remove":
 		return true
 	}
 	return false
@@ -37,6 +38,10 @@ func (c *Connection) handleV2(r Request) error {
 		return c.handleItemSave(r)
 	case "item-state":
 		return c.handleItemState(r)
+	case "item-history":
+		return c.handleItemHistory(r)
+	case "item-restore-history":
+		return c.handleItemRestoreHistory(r)
 	case "match-profiles":
 		return c.handleMatchProfiles(r)
 	case "fill-profile":
@@ -635,6 +640,85 @@ func (c *Connection) handleItemSave(r Request) error {
 	}
 	summary := summaryFor(it, rev, nil)
 	return c.response(Response{ID: r.ID, Type: "item-saved", ItemID: id, Revision: rev, ItemSummary: &summary})
+}
+
+// maxBrowserHistoryEntries mirrors the native retention bound; a restore index
+// outside it cannot name a retained row.
+const maxBrowserHistoryEntries = 20
+
+func clipHistoryText(value string, limit int) string {
+	if limit <= 0 || len(value) <= limit {
+		return value
+	}
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit])
+}
+
+// handleItemHistory projects the bounded, metadata-only history list. The
+// native password and section snapshots are never serialized: only timestamps,
+// labels and whether the old entry carried a password cross the boundary.
+func (c *Connection) handleItemHistory(r Request) error {
+	s := c.session.Load()
+	if s == nil {
+		return c.refuse(r.ID)
+	}
+	items, revisions, e := s.ReadAuthenticatedItems(true)
+	if e != nil {
+		return c.refuse(r.ID)
+	}
+	it, ok := c.findItem(items, r.ItemID)
+	if !ok || revisions[it.ID] != r.Revision {
+		return c.refuse(r.ID)
+	}
+	entries := make([]BrowserHistoryEntry, 0, len(it.History))
+	for i, entry := range it.History {
+		if i >= maxBrowserHistoryEntries {
+			break
+		}
+		entries = append(entries, BrowserHistoryEntry{
+			Index:       i,
+			Timestamp:   entry.Timestamp,
+			Action:      clipHistoryText(entry.Action, 64),
+			Title:       clipHistoryText(entry.Title, 256),
+			Username:    clipHistoryText(entry.Username, 256),
+			HasPassword: entry.Password != "",
+		})
+	}
+	return c.response(Response{ID: r.ID, Type: "item-history", ItemID: it.ID, Revision: r.Revision, History: entries})
+}
+
+// handleItemRestoreHistory restores one retained row through the existing
+// native history-restore action. The exact revision is rechecked by the
+// session mutation, so a stale popup cannot overwrite a newer edit.
+func (c *Connection) handleItemRestoreHistory(r Request) error {
+	s := c.session.Load()
+	if s == nil {
+		return c.refuse(r.ID)
+	}
+	gate := personal.NewMutationGate(minTime(c.until, c.now().Add(30*time.Second)))
+	if s.RegisterMutation(gate) != nil {
+		return c.refuse(r.ID)
+	}
+	rev, e := s.RestoreHistory(r.ItemID, r.Revision, r.HistoryIndex, gate)
+	if e != nil {
+		return c.refuse(r.ID)
+	}
+	items, revisions, e := s.ReadAuthenticatedItems(false)
+	if e != nil {
+		return c.refuse(r.ID)
+	}
+	it, ok := c.findItem(items, r.ItemID)
+	if !ok {
+		return c.refuse(r.ID)
+	}
+	if rev == "" {
+		rev = revisions[r.ItemID]
+	}
+	summary := summaryFor(it, rev, nil)
+	return c.response(Response{ID: r.ID, Type: "item-saved", ItemID: r.ItemID, Revision: rev, ItemSummary: &summary})
 }
 
 // v2ItemFromMutation builds the complete durable item for one browser

@@ -2,6 +2,16 @@
 
 # Locklark 开发进度
 
+2026-11-10（香港）：补齐扩展与本机原生应用的运行时交互：连接失败分类为 `missing/forbidden/exited/timeout/outdated/error`，弹窗显示带注册命令的指引卡并支持重新连接，选项页新增原生连接区块（刷新/连接/请求桌面解锁），`native-unlock` 通过配对前允许的 `unlock-request` 请求桌面窗口聚焦；诊断报告增加原生状态。扩展 449 项 Node 测试、原生解锁协议测试通过；未在真实桌面端验证窗口聚焦与独立确认窗口。见[原生连接交互](browser-native-connection-ux.md)。
+
+2026-11-10（香港）：浏览器扩展并入主干的新版 UI 样式，并补齐键盘与焦点交互：金库列表 `↑`/`↓`/`Home`/`End`、详情返回焦点还原、`/` 聚焦搜索、回收站两步确认、保存横幅聚焦标题并支持 `Esc`/`Enter`、页面内面板 `Home`/`End`、切换筛选的“正在读取”与 `aria-busy`、`prefers-reduced-motion`。用真实 Chromium 构建渲染了金库/已归档/详情/历史四个状态并据此修正收藏星标错位和已归档筛选的旧数据显示。扩展 443 项 Node 测试通过；没有真实原生宿主或与 1Password 并排验收。见[交互对齐记录](browser-interaction-parity.md)。
+
+2026-11-10（香港）：新增原生能力 `history-v1`：浏览器可读取条目历史版本的元数据（时间、类型、是否含密码）并按索引恢复，旧密码与隐藏字段永不下发；恢复复用原生 `item.history.restore` 与精确 revision 校验。身份提供商（Google/Microsoft/Apple/GitHub/Okta）只做保存横幅上的展示识别，不接入 OAuth。扩展 Node 测试 439 项、Go 历史契约 4 项通过；未在真实浏览器或桌面会话验证恢复流程。见[历史与提供商验证](browser-history-and-provider-validation.md)。
+
+2026-11-10（香港）：按[浏览器缺口盘点](browser-native-gap-inventory.md)落地第一批外围能力：弹窗已归档筛选与归档/取消归档、添加当前网站并填充（仅 URLs 的原生编辑）、显式打开内联菜单时聚焦首项、仅当前站点的 favicon、诊断报告导出、Open & Fill 优先登录页路径；并新增 `idle` 与 `notifications` 权限，实现默认关闭的空闲自动锁定与保存/锁定系统通知。扩展 Node 测试 434 项通过；Chromium/Firefox 权限白名单、打包校验（未签名 ZIP）通过。未在真实浏览器验证自动锁定触发时机与通知展示，权限变更需要重新过商店审核。上一批二维码捕获与粘贴保护仍在。
+
+2026-11-10（香港）：浏览器扩展补入两步验证二维码捕获与保存。内容脚本在账号安全类页面上用 `BarcodeDetector` 本地解码二维码，只把合法的 `otpauth://totp` 交给 worker；worker 绑定当前文档并返回该来源的 login 候选，页面只看到 issuer/account 与标题，用户点击后才以仅含 `otp` 的 `item-save` 变更写入。捕获 2 分钟过期、单次使用，锁库/断连清除，不新增浏览器权限或原生协议消息。扩展 Node 测试 427 项通过（本功能新增 10 项），原生契约用 `CGO_ENABLED=0 go test ./internal/browserhost -run 'TestItemSaveOTP|TestItemSaveRefusesInvalidOTP' -count=1` 四项通过；本机 cgo 链接受 SDK 影响失败，完整 browserhost 包另有本地 IPC 环境失败，均未据此记为通过。未在真实浏览器/真实站点运行，Chromium 系以外不可用，见[二维码捕获验收](browser-otp-qr-capture-validation.md)。
+
 2026-11-10（香港）：用 REA 6.8.0 对 1Password beta Chromium 扩展 8.12.46.26 做静态重建（Evidence `ev_c87bf6…`，选中 `inline/injected.js`，118,969 AST 节点），确认 beta 与 stable 8.12.44.33 文件集合相同、38 个文件内容不同、英文 UI 新增 8 条且集中于引导与快捷键提示，未发现 beta 专属的填充/保存/Passkey 行为。按参考的钓鱼粘贴与 Secret Key 粘贴保护，在扩展补齐两项粘贴期保护：未关联站点密码粘贴与 Secret Key 形态文本粘贴先确认，未知站点状态不拦截，剪贴板文本不进入后台或存储。扩展 417 项 Node 测试通过；其中新增 13 项，未在真实浏览器或真实站点验证，不能记为参考已对照。行为、差异与限制见[1Password beta 对照](browser-1password-beta-parity.md)，65 项冻结合同未改动。
 
 2026-11-08（香港）：DeepSeek 已修复浏览器复制后的无条件清空定时器，避免覆盖后来复制的内容，并改为准确的手动清理提示；主代理独立复跑 304 项扩展测试通过。见[剪贴板归属验收](browser-clipboard-ownership-validation.md)。#59 的原生租约接入和实际 OS 验收仍在推进，其他 #50–#58 不因本补丁自动完成。

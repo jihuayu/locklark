@@ -123,6 +123,46 @@ worker or stored. See
 [the 1Password beta parity note](../docs/browser-1password-beta-parity.md) for
 the reference behaviour, decision table and limits.
 
+If the native host is missing, rejected by the browser, exits before pairing,
+times out waiting for desktop unlock, or is too old, the popup shows a guidance
+card with the matching fix and a reconnect action; the options page has a
+native-connection section with refresh/connect/unlock. “Unlock in Locklark”
+sends the bounded `unlock-request` frame so the desktop or standalone window is
+raised; it never grants a capability or bypasses approval.
+
+Keyboard: in the vault list use Up/Down/Home/End and Enter; Escape returns from a
+detail view to the originating row; press `/` to focus search. The in-page menu
+supports Up/Down/Home/End, and Escape closes it and returns focus to the field.
+The save banner focuses its title, Escape declines, and Enter saves.
+
+The vault view also exposes an **archived** filter and archive/unarchive
+actions, and an item can add the current site to its saved URLs (a URLs-only
+native edit) before filling. Rich icons are requested only from the current
+site's `/favicon.ico`; no third-party icon service is used. The options page can
+export a diagnostics report containing version, connection state, capability
+names, non-secret settings and counts. Optional **idle auto-lock** (off by
+default) needs the `idle` permission, and optional **system notifications**
+(off by default, save or idle-lock only) need `notifications`.
+
+The item detail view can also list **password history** when the native host
+advertises `history-v1`. The browser receives only timestamps, labels and
+whether the old entry had a password; the old value never crosses the native
+boundary. Restoring one row is an explicit, revision-checked native mutation.
+Known identity providers (Google, Microsoft, Apple, GitHub, Okta) are labelled
+in the save banner, but there is no OAuth integration and the label never
+changes what is saved.
+
+**Two-factor setup capture** is also on by default. On pages that look like
+account-security pages, the content script decodes visible QR codes with the
+browser's `BarcodeDetector` and, for a valid `otpauth://totp` configuration,
+shows a closed-shadow panel listing the logins saved for the current origin.
+Choosing one writes only the `otp` field through the existing native item-save
+path; the seed is never displayed in the page, never stored by the extension and
+never saved automatically. Captures are bound to one document, expire after two
+minutes and are single use. The feature is silent where `BarcodeDetector` is
+unavailable (Firefox, Safari). See
+[two-factor capture validation](../docs/browser-otp-qr-capture-validation.md).
+
 To fill a saved TOTP, configure the login's `otp` field in the native vault,
 read the current website's candidates, and choose **填充验证码** (Fill one-time
 code). Approve that exact website and item in MyGo, or select it in an authorized quick session. The extension rechecks the

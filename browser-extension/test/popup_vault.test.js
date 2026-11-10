@@ -192,7 +192,7 @@ test("build emits options UI, autofill/lock commands, and compatible manifests",
   );
   assert.deepEqual(
     [...firefox.manifest.permissions].sort(),
-    ["activeTab", "nativeMessaging", "scripting", "storage"].sort(),
+    ["activeTab", "idle", "nativeMessaging", "notifications", "scripting", "storage"].sort(),
     "Firefox native acceptance requires exactly these permissions",
   );
   assert.equal(
@@ -473,4 +473,64 @@ test("passkey management selectors and metadata stay out of save mutations", () 
   });
   assert.equal(Object.hasOwn(mutation, "passkey"), false);
   assert.equal(Object.hasOwn(mutation, "has_passkey"), false);
+});
+
+test("popup exposes the archive tab and forwards the archived state filter", () => {
+  assert.match(popupHTML, /data-filter="archived"/);
+  assert.match(popupHTML, /id="detail-archive"/);
+  assert.match(popupJS, /detailArchiveToggle/);
+  assert.match(popupJS, /stateFilter: activeFilter === "archived" \? "archived" : ""/);
+  assert.match(backgroundJS, /message\.stateFilter/);
+  assert.match(backgroundJS, /state: stateFilter/);
+});
+
+test("rich icons and diagnostics stay bounded to the current site", () => {
+  assert.match(popupJS, /vault-item-icon/);
+  assert.match(popupJS, /iconOrigin \+ "\/favicon\.ico"/);
+  assert.match(popupJS, /preferredFillURL/);
+  assert.match(popupJS, /sign-\?in/);
+  assert.match(optionsHTML, /id="diagnostics-export"/);
+  assert.match(optionsJS, /locklark-diagnostics\.json/);
+  assert.match(backgroundJS, /async function diagnosticsSnapshot/);
+});
+
+test("popup exposes the bounded password-history surface", () => {
+  assert.match(popupHTML, /id="detail-history"/);
+  assert.match(popupHTML, /id="detail-history-load"/);
+  assert.match(popupJS, /loadHistoryVersions/);
+  assert.match(popupJS, /restoreHistoryVersion/);
+  assert.match(popupJS, /historySupported/);
+  assert.match(backgroundJS, /publicHistory/);
+  assert.match(backgroundJS, /item-restore-history/);
+});
+
+test("popup completes keyboard, focus and destructive-confirmation interactions", () => {
+  assert.match(popupJS, /restoreVaultFocus/);
+  assert.match(popupJS, /ArrowUp/);
+  assert.match(popupJS, /确认移入回收站/);
+  assert.match(popupJS, /vaultList\?\.addEventListener\("keydown"/);
+  assert.match(popupJS, /event\.key === "\/"/);
+  assert.match(popupJS, /row\.tabIndex = -1/);
+  assert.match(popupJS, /focusin/);
+});
+
+test("native host guidance is actionable from popup and options", () => {
+  for (const id of [
+    "native-guidance",
+    "native-guidance-title",
+    "native-guidance-text",
+    "native-guidance-command",
+    "native-guidance-status",
+    "native-retry",
+    "native-unlock",
+    "native-copy-command",
+  ])
+    assert.match(popupHTML, new RegExp(`id="${id}"`));
+  assert.match(popupJS, /renderNativeGuidance/);
+  assert.match(popupJS, /locklark-browser-register --browser chromium/);
+  assert.match(popupJS, /native-unlock/);
+  for (const id of ["native-heading", "native-status", "native-refresh", "native-connect", "native-unlock", "native-detail"])
+    assert.match(optionsHTML, new RegExp(`id="${id}"`));
+  assert.match(optionsJS, /refreshNativeStatus/);
+  assert.match(optionsJS, /native-connect/);
 });

@@ -60,6 +60,8 @@
     "opt-offer-identity-card": "offerFillIdentitiesAndCards",
     "opt-offer-passkeys": "offerUsePasskeys",
     "opt-paste-protection": "pasteProtection",
+    "opt-otp-capture": "otpCapture",
+    "opt-notifications": "notifications",
     "opt-offer-save": "offerSaveLogins",
     "opt-offer-save-passkeys": "offerSavePasskeys",
     "opt-inline-generator": "showInlineGenerator",
@@ -117,6 +119,7 @@
     );
     setCheckbox("opt-offer-passkeys", settings.offerUsePasskeys);
     setCheckbox("opt-paste-protection", settings.pasteProtection);
+    setCheckbox("opt-otp-capture", settings.otpCapture);
     setCheckbox("opt-offer-save", settings.offerSaveLogins);
     setCheckbox("opt-offer-save-passkeys", settings.offerSavePasskeys);
     setCheckbox("opt-inline-generator", settings.showInlineGenerator);
@@ -132,6 +135,8 @@
     if (seconds) seconds.value = String(settings.clipboardClearSeconds);
     const theme = $("opt-theme");
     if (theme) theme.value = settings.theme;
+    const idleLock = $("opt-idle-lock");
+    if (idleLock) idleLock.value = String(settings.idleLockMinutes || 0);
     renderOriginList(
       "disabled-inline-list",
       settings.disabledInlineMenuOrigins,
@@ -354,6 +359,79 @@
   function reset() {
     void save(core.normalizeSettings({}));
   }
+  const nativeStatus = $("native-status");
+  const nativeDetail = $("native-detail");
+  async function refreshNativeStatus() {
+    if (!nativeStatus) return;
+    try {
+      const reply = await api.runtime.sendMessage({ type: "diagnostics" });
+      const connection = reply?.diagnostics?.connection;
+      if (!connection) throw Error("refused");
+      const stateLabel =
+        {
+          missing: "未找到原生宿主",
+          forbidden: "浏览器拒绝了原生宿主",
+          exited: "原生宿主已退出",
+          timeout: "等待桌面解锁超时",
+          outdated: "原生宿主版本过旧",
+          error: "无法连接原生宿主",
+        }[connection.state] || (connection.connected ? "已连接" : "未连接");
+      nativeStatus.textContent = stateLabel + " · " + (connection.status || "");
+      if (nativeDetail) {
+        const capabilities = Array.isArray(connection.capabilities)
+          ? connection.capabilities
+          : [];
+        nativeDetail.textContent = capabilities.length
+          ? "原生能力：" + capabilities.join("、")
+          : "尚未协商原生能力";
+      }
+    } catch {
+      nativeStatus.textContent = "无法读取原生连接状态";
+      if (nativeDetail) nativeDetail.textContent = "";
+    }
+  }
+  $("native-refresh")?.addEventListener("click", () => void refreshNativeStatus());
+  $("native-connect")?.addEventListener("click", async () => {
+    if (nativeStatus) nativeStatus.textContent = "已请求连接；请在 Locklark 窗口中确认";
+    try {
+      await api.runtime.sendMessage({ type: "native-connect" });
+    } catch {}
+    setTimeout(() => void refreshNativeStatus(), 1200);
+  });
+  $("native-unlock")?.addEventListener("click", async () => {
+    if (nativeStatus) nativeStatus.textContent = "正在请求桌面解锁…";
+    try {
+      const reply = await api.runtime.sendMessage({ type: "native-unlock" });
+      if (nativeStatus)
+        nativeStatus.textContent =
+          reply?.nativeUnlock?.status || "已请求桌面解锁";
+    } catch {
+      if (nativeStatus) nativeStatus.textContent = "无法请求桌面解锁";
+    }
+  });
+  void refreshNativeStatus();
+  const diagnosticsButton = $("diagnostics-export");
+  const diagnosticsStatus = $("diagnostics-status");
+  diagnosticsButton?.addEventListener("click", async () => {
+    if (!diagnosticsStatus) return;
+    diagnosticsStatus.textContent = "正在生成…";
+    try {
+      const reply = await api.runtime.sendMessage({ type: "diagnostics" });
+      if (!reply?.diagnostics) throw Error("refused");
+      const blob = new Blob([JSON.stringify(reply.diagnostics, null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = "locklark-diagnostics.json";
+      anchor.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      diagnosticsStatus.textContent = "已导出诊断报告。";
+    } catch {
+      diagnosticsStatus.textContent = "无法导出：请先连接 Locklark 后重试。";
+    }
+  });
   for (const [id, key] of Object.entries(BOOLEAN_FIELDS)) {
     const element = $(id);
     if (!element) continue;
@@ -401,6 +479,11 @@
       void save({
         clipboardClearSeconds: Number.parseInt(clipboardSeconds.value, 10),
       });
+    });
+  const idleLock = $("opt-idle-lock");
+  if (idleLock)
+    idleLock.addEventListener("change", () => {
+      void save({ idleLockMinutes: Number(idleLock.value) });
     });
   const theme = $("opt-theme");
   if (theme)

@@ -420,3 +420,6 @@ button:active {
     transform: none;
   }
 }
+
+/* Diagnostics section (feature addition). */
+#diagnostics-status { min-height: 1.2em; }
