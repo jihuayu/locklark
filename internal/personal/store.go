@@ -1438,7 +1438,7 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 				entry := history[option.v2.historyIndex]
 				snapshot := vault.ItemHistoryEntry{Timestamp: time.Now().Unix(), Action: "restore", Password: next.Password, Title: next.Title, Username: next.Username, Notes: next.Notes, Sections: completeHistorySections(next.Sections)}
 				history = append(history[:option.v2.historyIndex], history[option.v2.historyIndex+1:]...)
-				restoreHistoryEntry(&next, entry)
+				restoreHistoryEntry(next, entry)
 				next.History = appendHistory(history, snapshot)
 				next.UpdatedAt = time.Now().Unix()
 				candidate := append([]vault.Item(nil), items...)
