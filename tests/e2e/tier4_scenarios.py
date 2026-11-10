@@ -276,8 +276,9 @@ def t4_05(ctx):
 @e2e_test(
     "T4_06",
     4,
-    ["F9", "F10", "F13", "F14", "F15", "F16"],
+    ["F9", "F10", "F13", "F14", "F15", "F16", "F17"],
     "Security incident response: breach -> browser rotation -> stale CLI refusal -> refresh",
+    coverage_kind="functional",
 )
 def t4_06(ctx):
     # The declined-consent and strict-option checks below run against a
@@ -312,10 +313,20 @@ def t4_06(ctx):
     assert opt_in["audit_delta"] == [], opt_in
     health_report(ctx, vault)
     _t4_06_consented_mock_hibp(ctx, vault)
-    # The consent-gated CLI HIBP lookup above ran for real against the local
-    # CONNECT/TLS mock (never the live service), but this scenario still does
-    # not execute the browser rotation or the CLI lease refresh.  This stays an
-    # explicit not-verified result and is never reported as a pass.
+    # The breach was observed for real through the mocked CLI HIBP lookup.  The
+    # rest of the journey (browser rotation, then the stale CLI refusal and
+    # refresh) needs #64's CLI-side broker client and its scoped terminal
+    # lease.  Gate on the real capability probe, never on a hardcoded flag.
+    gate(
+        ctx,
+        "F17",
+        f17_broker_ready(ctx),
+        "#64's CLI-side broker client / scoped terminal lease is absent, so the "
+        "browser rotation and the stale CLI refusal/refresh remain unverified",
+    )
+    # If F17 becomes ready the journey still must not report PASS before the
+    # browser rotation and stale-lease refresh steps are implemented: the
+    # explicit not-verified result below stays in place.
     raise AssertionError(
         "UNVERIFIED (not a pass): breach-to-rotation journey not exercised - "
         "the CLI HIBP opt-in contract (strict pair, consent refusal, no intent) "
