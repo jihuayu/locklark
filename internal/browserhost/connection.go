@@ -97,6 +97,8 @@ type Connection struct {
 	pairAuthorized          bool
 	pairQuickFill           bool
 	pairing                 bool
+	pairHello               uint64 // review phase of the hello slot
+	pairAsk                 string // hello id that claimed the review slot
 	peer                    Peer
 	helloInfo               BrokerHello
 	broker                  *Broker
@@ -179,19 +181,27 @@ func (c *Connection) SetBroker(b *Broker) {
 }
 
 // BindDesktopSession shares the desktop session with this extension connection.
-// A pending "hello" is answered immediately; otherwise an unsolicited
-// "unlocked" event is pushed.
+// It is the direct native-host binding, never a brokered path. A connection
+// owned by a Broker has no authority until the owner approves a pairing
+// review, so an unlock event can never mint a capability by itself.
 func (c *Connection) BindDesktopSession(s *personal.Session, epoch uint64, quickFill bool) error {
-	return c.bindDesktopSession(s, epoch, quickFill, true)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.broker != nil {
+		return ErrProtocol
+	}
+	return c.bindDesktopSessionLocked(s, epoch, quickFill, true, "")
 }
 
 func (c *Connection) bindDesktopSession(s *personal.Session, epoch uint64, quickFill, announce bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.bindDesktopSessionLocked(s, epoch, quickFill, announce)
+	return c.bindDesktopSessionLocked(s, epoch, quickFill, announce, "")
 }
 
-func (c *Connection) bindDesktopSessionLocked(s *personal.Session, epoch uint64, quickFill, announce bool) error {
+// bindDesktopSessionLocked issues the capability and answers replyID, which
+// defaults to the pending hello.
+func (c *Connection) bindDesktopSessionLocked(s *personal.Session, epoch uint64, quickFill, announce bool, replyID string) error {
 	if s == nil || !s.Unlocked() {
 		return ErrProtocol
 	}
@@ -226,10 +236,12 @@ func (c *Connection) bindDesktopSessionLocked(s *personal.Session, epoch uint64,
 	c.seen = map[string]bool{}
 	c.seenOrder = nil
 	c.seenPos = 0
-	if c.hello != "" {
-		id := c.hello
+	if replyID == "" {
+		replyID = c.hello
+	}
+	if replyID != "" {
 		c.hello = ""
-		return c.response(Response{ID: id, Type: "paired", Capability: c.capability, QuickFill: quickFill, Capabilities: c.pairedCapabilities()})
+		return c.response(Response{ID: replyID, Type: "paired", Capability: c.capability, QuickFill: quickFill, Capabilities: c.pairedCapabilities()})
 	}
 	if !announce {
 		c.changed()
@@ -238,33 +250,57 @@ func (c *Connection) bindDesktopSessionLocked(s *personal.Session, epoch uint64,
 	return c.response(Response{Type: "unlocked", Capability: c.capability, QuickFill: quickFill, DesktopConnected: true, Unlocked: true, SessionEpoch: epoch, Capabilities: c.pairedCapabilities()})
 }
 
-// requestBrowserPair performs the explicit native pairing review off the
-// connection mutex. It is the only path that can grant a brokered browser a
-// capability. The peer is OS-authenticated; Browser/Origin are display-only.
-func (c *Connection) requestBrowserPair(s *personal.Session, epoch uint64) {
+// pairingBegin claims the single review slot for the hello that just arrived
+// on the connection goroutine. A review that already entered the native
+// callback keeps that slot: its decision belongs to every hello that landed
+// before it, so a later frame waits for it instead of asking twice.
+func (c *Connection) pairingBegin() uint64 {
+	if c.hello == "" || c.closed.Load() || c.capability != "" || !c.now().Before(c.pairUntil) {
+		return 0
+	}
+	if !c.pairing || c.pairAsk != c.hello {
+		c.pairHello++
+		c.pairAsk = c.hello
+		c.pairing = true
+	}
+	return c.pairHello
+}
+
+// pairingEnd releases the review slot of an exact hello phase.
+func (c *Connection) pairingEnd(phase uint64) {
+	if phase != 0 && phase == c.pairHello {
+		c.pairing = false
+	}
+}
+
+// requestBrowserPair fulfils the hello Handle claimed through pairingBegin. It
+// never claims a slot itself and is the only path that can grant a brokered
+// browser a capability. The decision is committed to the hello that claimed
+// the slot, and only a hello sent after that frame asks for a new review. The
+// peer is OS-authenticated; Browser/Origin are display-only.
+func (c *Connection) requestBrowserPair(s *personal.Session, epoch, phase uint64) {
 	if s == nil || !s.Unlocked() {
 		return
 	}
 	c.mu.Lock()
-	id := c.hello
+	id := c.pairAsk
 	hello := c.helloInfo
 	peer := c.peer
 	b := c.broker
 	pairUntil := c.pairUntil
 	done := c.done
-	if id == "" || c.closed.Load() || c.capability != "" || c.pairing || !c.now().Before(pairUntil) {
+	if phase == 0 || phase != c.pairHello || !c.pairing || id == "" || c.closed.Load() || c.capability != "" || !c.now().Before(pairUntil) {
 		c.mu.Unlock()
 		return
 	}
-	c.pairing = true
 	c.mu.Unlock()
 	defer func() {
 		c.mu.Lock()
-		c.pairing = false
+		c.pairingEnd(phase)
 		c.mu.Unlock()
 	}()
 	if b == nil || b.callbacks.ApproveBrowserPair == nil {
-		c.finishBrowserPairRefusal(id)
+		c.finishBrowserPairRefusal(id, phase)
 		return
 	}
 	ctx, cancel := context.WithDeadline(context.Background(), pairUntil)
@@ -280,18 +316,24 @@ func (c *Connection) requestBrowserPair(s *personal.Session, epoch uint64) {
 	}()
 	decision, err := b.callbacks.ApproveBrowserPair(ctx, BrowserPairRequest{Peer: peer, Browser: hello.Browser, Origin: hello.Origin})
 	if err != nil || !decision.Approved {
-		c.finishBrowserPairRefusal(id)
+		c.finishBrowserPairRefusal(id, phase)
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	defer c.changed()
-	if c.hello != id || c.closed.Load() || c.capability != "" || !c.now().Before(c.pairUntil) {
+	// The native callback may ignore ctx.Done and return after the hello
+	// deadline or cancellation. Commit the decision only to the exact review
+	// that requested it, to its still-pending hello and to the session it was
+	// reviewed against; a late approval of an expired, cancelled or replaced
+	// hello grants nothing.
+	if c.closed.Load() || c.capability != "" || !c.pairing || phase != c.pairHello ||
+		c.hello != id || !c.now().Before(c.pairUntil) || !s.Unlocked() || !c.pairSessionCurrentLocked(s, epoch) {
 		return
 	}
 	c.pairAuthorized = true
 	c.pairQuickFill = decision.QuickFill
-	if err := c.bindDesktopSessionLocked(s, epoch, decision.QuickFill, false); err != nil {
+	if err := c.bindDesktopSessionLocked(s, epoch, decision.QuickFill, false, id); err != nil {
 		c.hello = ""
 		if !c.closed.Load() {
 			go c.refuse(id)
@@ -299,11 +341,63 @@ func (c *Connection) requestBrowserPair(s *personal.Session, epoch uint64) {
 	}
 }
 
-func (c *Connection) finishBrowserPairRefusal(id string) {
+// pairSessionCurrentLocked reports whether the session a review was requested
+// for is still the one desktop authority serves. A brokered connection has no
+// session of its own before it is paired, so there the broker is asked; a
+// direct bind keeps the session this connection already holds. The caller must
+// hold c.mu.
+func (c *Connection) pairSessionCurrentLocked(s *personal.Session, epoch uint64) bool {
+	if c.broker != nil && c.broker.callbacks.CurrentSession != nil {
+		cur, curEpoch, ok := c.broker.callbacks.CurrentSession()
+		return ok && cur == s && curEpoch == epoch && cur.Unlocked()
+	}
+	if held := c.session.Load(); held != nil {
+		return held == s && c.sessionEpoch == epoch
+	}
+	return true
+}
+
+// reviewBrowserHello claims the slot of the pending hello and runs the only
+// review that can grant a brokered browser a capability. A hello that does not
+// exist, has expired, or was already claimed by another frame is not reviewed.
+//
+// Callers outside Handle run under c.mu; Handle already holds it and calls
+// reviewBrowserHelloLocked so the in-goroutine reentry cannot deadlock.
+func (c *Connection) reviewBrowserHello(s *personal.Session, epoch uint64) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.reviewBrowserHelloLocked(s, epoch)
+}
+
+// reviewBrowserHelloLocked implements reviewBrowserHello. The caller must hold
+// c.mu.
+func (c *Connection) reviewBrowserHelloLocked(s *personal.Session, epoch uint64) bool {
+	if s == nil || !s.Unlocked() {
+		return false
+	}
+	phase := c.pairingBegin()
+	if phase == 0 {
+		return false
+	}
+	go c.requestBrowserPair(s, epoch, phase)
+	return true
+}
+
+// offerBrowserSession hands a session unlocked after a pending hello to that
+// hello's review. A hello accepted before the session existed could not claim
+// a slot then, so a pending claim starts its review here. Unlock alone never
+// starts a review and never issues a capability.
+func (c *Connection) offerBrowserSession(s *personal.Session, epoch uint64) bool {
+	return c.reviewBrowserHello(s, epoch)
+}
+
+func (c *Connection) finishBrowserPairRefusal(id string, phase uint64) {
 	c.mu.Lock()
 	if c.hello == id {
 		c.hello = ""
 	}
+	// A refused review must also release its in-flight slot.
+	c.pairingEnd(phase)
 	closed := c.closed.Load()
 	c.mu.Unlock()
 	if id != "" && !closed {
@@ -339,6 +433,11 @@ func (c *Connection) refuse(id string) error {
 }
 func (c *Connection) invalidate() {
 	c.quickFill = false
+	// The native pairing consent is bound to one unlocked session. Lock,
+	// expiry and capability revocation drop it; a later unlock must obtain a
+	// new explicit approval instead of silently renewing quick-fill.
+	c.pairAuthorized = false
+	c.pairQuickFill = false
 	if c.passkey != nil {
 		if c.passkey.gate.CommitWon() {
 			c.passkeyStatus = "Passkey 结果未确认；请核实网站与金库"
@@ -566,7 +665,8 @@ func (c *Connection) Handle(r Request) error {
 		}
 		return c.refuse(r.ID)
 	}
-	if !c.quickFill && requiresV2NativeApproval(r.Type) {
+	// Removal is destructive and never silently authorized by quick fill.
+	if (!c.quickFill || destructiveV2Operation(r.Type)) && requiresV2NativeApproval(r.Type) {
 		if c.profile != nil || c.pending != nil || c.save != nil || c.otp != nil || c.passkey != nil || c.signal != nil || c.stagedBusy || c.upload != nil {
 			return c.refuse(r.ID)
 		}
@@ -584,29 +684,40 @@ func (c *Connection) Handle(r Request) error {
 				return c.response(Response{ID: r.ID, Type: "paired", Capability: c.capability, QuickFill: c.quickFill, Capabilities: c.pairedCapabilities()})
 			}
 			if s := c.session.Load(); s != nil && s.Unlocked() {
-				if c.broker != nil && !c.pairAuthorized {
-					if c.hello != "" || c.pairing {
+				if c.broker != nil {
+					// A brokered connection only ever obtains a capability from
+					// the explicit native pairing decision. An in-flight review
+					// owns its hello, but a hello claimed without one (e.g. one
+					// left behind by a refused direct bind) must not block the
+					// owner's next explicit approval.
+					if c.hello != "" && c.pairing {
 						return c.refuse(r.ID)
 					}
 					c.hello = r.ID
 					c.pairUntil = c.now().Add(time.Minute)
-					go c.requestBrowserPair(s, c.sessionEpoch)
+					if !c.reviewBrowserHelloLocked(s, c.sessionEpoch) {
+						c.hello = ""
+						return c.refuse(r.ID)
+					}
 					return nil
 				}
-				return c.bindDesktopSessionLocked(s, c.sessionEpoch, c.quickFill, false)
+				return c.bindDesktopSessionLocked(s, c.sessionEpoch, c.quickFill, false, r.ID)
 			}
 			// A brokered connection may only obtain a capability through the
-			// explicit native pairing callback. Mark the hello pending and let
-			// NotifyUnlocked start or retry that review.
+			// explicit native pairing callback. Keep the hello pending; an
+			// unlock only offers it to that review, never grants by itself.
 			if c.broker != nil {
 				if c.broker.callbacks.CurrentSession != nil {
 					if s, epoch, ok := c.broker.callbacks.CurrentSession(); ok && s != nil && s.Unlocked() {
-						if c.hello != "" || c.pairing {
+						if c.hello != "" {
 							return c.refuse(r.ID)
 						}
 						c.hello = r.ID
 						c.pairUntil = c.now().Add(time.Minute)
-						go c.requestBrowserPair(s, epoch)
+						if !c.reviewBrowserHelloLocked(s, epoch) {
+							c.hello = ""
+							return c.refuse(r.ID)
+						}
 						return nil
 					}
 				}
@@ -917,6 +1028,13 @@ func (c *Connection) Close() {
 	c.writer.Close()
 	c.Invalidate()
 }
+
+// destructiveV2Operation lists removals that always return to the native
+// owner, even in quick-fill mode. Nothing here is part of ordinary fill.
+func destructiveV2Operation(kind string) bool {
+	return kind == "passkey-remove" || kind == "attachment-remove"
+}
+
 func requiresV2NativeApproval(kind string) bool {
 	switch kind {
 	case "item-get",

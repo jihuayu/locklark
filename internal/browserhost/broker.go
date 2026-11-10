@@ -184,8 +184,11 @@ func (b *Broker) Connections() []*Connection {
 	return out
 }
 
-// NotifyUnlocked binds the shared desktop session to all connected clients.
-func (b *Broker) NotifyUnlocked(s *personal.Session, epoch uint64, quickFill bool) {
+// NotifyUnlocked publishes the newly unlocked session to the connections that
+// sent hello before it was unlocked. It never grants authority by itself: those
+// hellos are only offered to the explicit native pairing approval, and a
+// connection without a pending hello waits for its next one.
+func (b *Broker) NotifyUnlocked(s *personal.Session, epoch uint64) {
 	if s == nil || !s.Unlocked() {
 		return
 	}
@@ -196,16 +199,9 @@ func (b *Broker) NotifyUnlocked(s *personal.Session, epoch uint64, quickFill boo
 	}
 	b.mu.Unlock()
 	for _, c := range conns {
-		if c.PairAuthorized() {
-			_ = c.BindDesktopSession(s, epoch, quickFill)
-		} else {
-			// A connection that connected while the desktop was locked may
-			// already be waiting in hello. It still needs explicit approval.
-			go c.requestBrowserPair(s, epoch)
+		if c.offerBrowserSession(s, epoch) && b.callbacks.NotifyChanged != nil {
+			b.callbacks.NotifyChanged()
 		}
-	}
-	if b.callbacks.NotifyChanged != nil {
-		b.callbacks.NotifyChanged()
 	}
 }
 

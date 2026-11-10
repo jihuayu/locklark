@@ -153,7 +153,7 @@ func TestPasskeyPendingApprovalBlocksRemovalSameConnection(t *testing.T) {
 	if c.Snapshot().Passkey != nil {
 		t.Fatal("cancel left the approval pending")
 	}
-	removed := v2Handle(t, c, out, map[string]any{"v": 1, "id": reqID(63), "type": "passkey-remove", "capability": capability, "item_id": itemID, "revision": revision, "credential_id": credential})
+	removed := destructiveCall(t, c, out, map[string]any{"v": 1, "id": reqID(63), "type": "passkey-remove", "capability": capability, "item_id": itemID, "revision": revision, "credential_id": credential})
 	if removed.Type != "passkey-removed" || removed.ItemID != itemID || removed.CredentialID != credential || removed.Revision == "" || removed.Revision == revision {
 		t.Fatalf("remove response: %#v", removed)
 	}
@@ -188,7 +188,7 @@ func TestPasskeyEpochSuppressesQueuedSignatureAcrossConnections(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- c1.ApprovePasskey(get.ID, pending.Choices[0].ID, nil, nil) }()
 	waitForQueuedPasskey(t, c1)
-	removed := v2Handle(t, c2, out2, map[string]any{"v": 1, "id": reqID(71), "type": "passkey-remove", "capability": cap2, "item_id": itemID, "revision": revision, "credential_id": credential})
+	removed := destructiveCall(t, c2, out2, map[string]any{"v": 1, "id": reqID(71), "type": "passkey-remove", "capability": cap2, "item_id": itemID, "revision": revision, "credential_id": credential})
 	if removed.Type != "passkey-removed" {
 		t.Fatalf("cross-connection removal: %#v", removed)
 	}
@@ -224,7 +224,7 @@ func TestPasskeyPendingApprovalBlocksRemovalAcrossConnections(t *testing.T) {
 	if err := c1.Handle(cancel); err != nil {
 		t.Fatal(err)
 	}
-	removed := v2Handle(t, c2, out2, map[string]any{"v": 1, "id": reqID(83), "type": "passkey-remove", "capability": cap2, "item_id": itemID, "revision": revision, "credential_id": credential})
+	removed := destructiveCall(t, c2, out2, map[string]any{"v": 1, "id": reqID(83), "type": "passkey-remove", "capability": cap2, "item_id": itemID, "revision": revision, "credential_id": credential})
 	if removed.Type != "passkey-removed" {
 		t.Fatalf("cross-connection removal: %#v", removed)
 	}

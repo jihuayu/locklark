@@ -2,6 +2,7 @@ package browserhost
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -391,10 +393,13 @@ func TestUnauthenticatedLockIsRefused(t *testing.T) {
 	b := NewBroker(BrokerCallbacks{RequestLock: func() { locks++ }})
 	out := &memoryPipe{}
 	c := NewDesktopConnection(NewWriter(out, time.Second), nil)
-	c.SetBroker(b)
+	// A brokered connection can never be bound directly; this fixture binds the
+	// direct desktop session first, then attaches the broker callbacks it
+	// exercises.
 	if e := c.BindDesktopSession(s, 5, false); e != nil {
 		t.Fatal(e)
 	}
+	c.SetBroker(b)
 	if e := c.Handle(Request{V: 1, ID: reqID(70), Type: "lock"}); e != nil {
 		t.Fatal(e)
 	}
@@ -442,15 +447,15 @@ func TestAuthenticatedLockBlocksOtherSharedConnectionsBeforeDispatch(t *testing.
 	}})
 	out1, out2 := &memoryPipe{}, &memoryPipe{}
 	c1 := NewDesktopConnection(NewWriter(out1, time.Second), nil)
-	c1.SetBroker(b)
 	if e := c1.BindDesktopSession(s, 3, true); e != nil {
 		t.Fatal(e)
 	}
+	c1.SetBroker(b)
 	c2 := NewDesktopConnection(NewWriter(out2, time.Second), nil)
-	c2.SetBroker(b)
 	if e := c2.BindDesktopSession(s, 3, true); e != nil {
 		t.Fatal(e)
 	}
+	c2.SetBroker(b)
 	cap1 := out1.responses(t)[0].Capability
 	cap2 := out2.responses(t)[0].Capability
 	finished := make(chan error, 1)
@@ -480,5 +485,308 @@ func TestAuthenticatedLockBlocksOtherSharedConnectionsBeforeDispatch(t *testing.
 		}
 	case <-time.After(time.Second):
 		t.Fatal("lock request did not finish")
+	}
+}
+
+// Lock or expiry revokes the native pairing consent. A later unlock on the same
+// connection must not silently reissue a quick capability; only a fresh native
+// approval can do that.
+func TestBrokeredLockRevokesPairingConsentUntilFreshApproval(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "consent.ll")
+	key := bytes.Repeat([]byte{14}, 16)
+	if e := personal.Create(path, "fixture", key); e != nil {
+		t.Fatal(e)
+	}
+	unlock := func() *personal.Session {
+		s, e := personal.UnlockSession(path, []byte("fixture"), key, time.Minute)
+		if e != nil {
+			t.Fatal(e)
+		}
+		t.Cleanup(s.Lock)
+		return s
+	}
+	s := unlock()
+	// The broker reports the session exactly as the desktop does: locked while
+	// locked, then the freshly unlocked session and its new epoch. The current
+	// session and epoch are read under the broker lock so the hello review never
+	// races the desktop switching them below.
+	var epoch atomic.Uint64
+	epoch.Store(1)
+	var curMu sync.Mutex
+	cur := s
+	reviews := make(chan struct{}, 4)
+	b := NewBroker(BrokerCallbacks{
+		CurrentSession: func() (*personal.Session, uint64, bool) {
+			curMu.Lock()
+			defer curMu.Unlock()
+			n := epoch.Load()
+			if cur.Unlocked() {
+				return cur, n, true
+			}
+			return nil, 0, false
+		},
+		ApproveBrowserPair: func(ctx context.Context, req BrowserPairRequest) (BrowserPairDecision, error) {
+			reviews <- struct{}{}
+			return BrowserPairDecision{Approved: true, QuickFill: true}, nil
+		},
+	})
+	out := &memoryPipe{}
+	c := NewDesktopConnection(NewWriter(out, time.Second), nil)
+	// Only a connection the broker knows receives NotifyLocked and
+	// NotifyUnlocked; drop it from the broker when the fixture ends.
+	if !b.addConn(c) {
+		t.Fatal("broker refused the fixture connection")
+	}
+	t.Cleanup(func() { b.dropConn(c); c.Close() })
+	c.SetBroker(b)
+	// Handle serves the frame directly: it takes the connection mutex itself
+	// and must not reenter it through its own hello review.
+	hello := func(id int) {
+		t.Helper()
+		if e := c.Handle(Request{V: 1, ID: reqID(id), Type: "hello"}); e != nil {
+			t.Fatal(e)
+		}
+	}
+	hello(80)
+	// The review runs off the caller and commits after its callback returns.
+	select {
+	case <-reviews:
+	case <-time.After(time.Second):
+		t.Fatal("native review was not requested")
+	}
+	waitPaired(t, c)
+	if !c.PairAuthorized() || !c.Snapshot().QuickFill {
+		t.Fatal("explicit approval did not pair the connection")
+	}
+	// The successful bind answered the hello and released its review slot.
+	c.mu.Lock()
+	cleared := c.hello == "" && !c.pairing
+	c.mu.Unlock()
+	if !cleared {
+		t.Fatal("pairing review did not clear the hello it answered")
+	}
+	b.NotifyLocked(1)
+	if c.PairAuthorized() || c.Snapshot().QuickFill || c.Snapshot().Paired {
+		t.Fatal("lock kept pairing consent")
+	}
+	// The lock revoked the vault key, so unlocking opens a new session.
+	if e := c.BindDesktopSession(s, 2, true); e == nil {
+		t.Fatal("direct bind bypassed the pairing review")
+	}
+	// Lock already blocked the session; take the lock and switch the fixture
+	// to the freshly unlocked session and epoch before announcing it. Both move
+	// together under curMu, as they do on the desktop.
+	s.Lock()
+	fresh := unlock()
+	curMu.Lock()
+	cur = fresh
+	epoch.Store(2)
+	curMu.Unlock()
+	if c.PairAuthorized() || c.Snapshot().QuickFill || c.Snapshot().Paired {
+		t.Fatal("unlock silently reissued a capability")
+	}
+	select {
+	case <-reviews:
+		t.Fatal("unlock without a pending hello started a review")
+	default:
+	}
+	// Only a hello sent after the unlock starts the explicit review.
+	hello(81)
+	select {
+	case <-reviews:
+	case <-time.After(time.Second):
+		t.Fatal("new hello did not request a fresh native review")
+	}
+	// The review callback returns before the approval is committed; wait for
+	// it to give the connection mutex back before reading the consent.
+	waitPaired(t, c)
+	deadline := time.Now().Add(time.Second)
+	for !c.Snapshot().QuickFill && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !c.PairAuthorized() || !c.Snapshot().QuickFill {
+		t.Fatal("fresh approval did not restore the capability")
+	}
+}
+
+// waitPaired waits a bounded time for the pairing goroutine to commit the
+// native approval and its capability and release the connection mutex.
+func waitPaired(t *testing.T, c *Connection) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if c.mu.TryLock() {
+			paired := c.pairAuthorized && !c.pairing
+			c.mu.Unlock()
+			if paired {
+				return
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("native approval was not committed")
+}
+
+// pairFixture starts a brokered connection on a fake clock frozen at base. The
+// broker reports the unlocked session and epoch exactly as the desktop does, so
+// only a deadline or phase check can refuse a late approval. It leaves the
+// hello slot empty: the test sends the hello through Handle so the pending
+// slot and its deadline are created by production code alone.
+func pairFixture(t *testing.T, b *Broker, now *time.Time) (*Connection, *memoryPipe, *personal.Session) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "late-pair.ll")
+	key := bytes.Repeat([]byte{16}, 16)
+	if e := personal.Create(path, "fixture", key); e != nil {
+		t.Fatal(e)
+	}
+	s, e := personal.UnlockSession(path, []byte("fixture"), key, time.Minute)
+	if e != nil {
+		t.Fatal(e)
+	}
+	t.Cleanup(s.Lock)
+	b.callbacks.CurrentSession = func() (*personal.Session, uint64, bool) {
+		if s.Unlocked() {
+			return s, 1, true
+		}
+		return nil, 0, false
+	}
+	out := &memoryPipe{}
+	c := NewDesktopConnection(NewWriter(out, time.Second), nil)
+	c.desktopShared = true
+	c.SetBroker(b)
+	c.mu.Lock()
+	c.now = func() time.Time { return *now }
+	c.mu.Unlock()
+	return c, out, s
+}
+
+// noGrant asserts the hello obtained no capability, quick-fill or consent.
+func noGrant(t *testing.T, c *Connection, out *memoryPipe) {
+	t.Helper()
+	if c.PairAuthorized() {
+		t.Fatal("late approval granted pairing consent")
+	}
+	if v := c.Snapshot(); v.Paired || v.QuickFill {
+		t.Fatal("late approval issued a capability")
+	}
+	c.mu.Lock()
+	cap, quick := c.capability, c.quickFill
+	c.mu.Unlock()
+	if cap != "" || quick {
+		t.Fatal("late approval issued a capability")
+	}
+	for _, r := range out.responses(t) {
+		if r.Type == "paired" || r.Capability != "" {
+			t.Fatal("late approval answered with a capability")
+		}
+	}
+}
+
+// A native callback that ignores the canceled ctx and returns Approved=true
+// after the hello deadline grants nothing: no capability, no quick-fill, no
+// consent. The pending hello, its deadline and the review all come from real
+// Handle production code on a matching broker session, and nothing touches the
+// connection between the review entering and the late decision. So with only
+// the deadline check removed from the commit the approval lands on the live
+// hello slot and pairs: this is the minimal regression that falsifies that code.
+func TestBrokeredLateApprovalAfterHelloDeadlineGrantsNothing(t *testing.T) {
+	id := reqID(82)
+	base := time.Now()
+	now := base
+	entered, release := make(chan struct{}), make(chan struct{})
+	b := NewBroker(BrokerCallbacks{ApproveBrowserPair: func(ctx context.Context, req BrowserPairRequest) (BrowserPairDecision, error) {
+		close(entered)
+		// A late click: ignore the canceled ctx and approve regardless.
+		<-release
+		return BrowserPairDecision{Approved: true, QuickFill: true}, nil
+	}})
+	c, out, _ := pairFixture(t, b, &now)
+	// Handle creates the pending hello slot and its deadline itself and starts
+	// the review off the caller.
+	if e := c.Handle(Request{V: 1, ID: id, Type: "hello"}); e != nil {
+		t.Fatalf("hello was refused: %v", e)
+	}
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("native pairing review was not requested")
+	}
+	c.mu.Lock()
+	live, till, phase := c.hello, c.pairUntil, c.pairing
+	c.mu.Unlock()
+	if live != id || !phase || till.IsZero() {
+		t.Fatalf("hello did not leave a live review slot: hello=%q pairing=%v until=%v", live, phase, till)
+	}
+	// Advance only the clock past the deadline. No Handle or Snapshot runs
+	// before the approval is released: those expire the hello and would let the
+	// old commit succeed by refusing a missing slot rather than by its own
+	// deadline check.
+	now = till.Add(time.Second)
+	c.mu.Lock()
+	still := c.hello
+	c.mu.Unlock()
+	if still != id {
+		t.Fatalf("hello vanished before the late approval: %q", still)
+	}
+	close(release)
+	deadline := time.Now().Add(time.Second)
+	for {
+		c.mu.Lock()
+		released := !c.pairing
+		c.mu.Unlock()
+		if released {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("late review never finished")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	noGrant(t, c, out)
+}
+
+// Closing one brokered connection revokes only that connection; the other
+// Closing one brokered connection revokes only that connection; the other
+// paired connection and the desktop session stay usable.
+func TestBrokeredCloseDoesNotRevokeOtherPairing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "close-peer.ll")
+	key := bytes.Repeat([]byte{15}, 16)
+	if e := personal.Create(path, "fixture", key); e != nil {
+		t.Fatal(e)
+	}
+	s, e := personal.UnlockSession(path, []byte("fixture"), key, time.Minute)
+	if e != nil {
+		t.Fatal(e)
+	}
+	t.Cleanup(s.Lock)
+	b := NewBroker(BrokerCallbacks{
+		ApproveBrowserPair: func(ctx context.Context, req BrowserPairRequest) (BrowserPairDecision, error) {
+			return BrowserPairDecision{Approved: true, QuickFill: true}, nil
+		},
+	})
+	pair := func(id int) *Connection {
+		out := &memoryPipe{}
+		c := NewDesktopConnection(NewWriter(out, time.Second), nil)
+		c.SetBroker(b)
+		c.mu.Lock()
+		c.hello, c.pairUntil = reqID(id), time.Now().Add(time.Minute)
+		c.mu.Unlock()
+		c.reviewBrowserHello(s, 1)
+		waitPaired(t, c)
+		c.mu.Lock()
+		paired := c.pairAuthorized && c.capability != ""
+		c.mu.Unlock()
+		if !paired {
+			t.Fatal("pairing failed")
+		}
+		return c
+	}
+	first, second := pair(60), pair(61)
+	first.Close()
+	second.mu.Lock()
+	paired := second.pairAuthorized && second.capability != "" && !second.closed.Load()
+	second.mu.Unlock()
+	if !s.Unlocked() || !paired || second.Snapshot().Closed {
+		t.Fatal("closing one connection affected the other pairing or session")
 	}
 }

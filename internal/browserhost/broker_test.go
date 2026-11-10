@@ -177,7 +177,7 @@ func TestBrokerSharedUnlockAndLockPropagation(t *testing.T) {
 	mu.Lock()
 	session = s
 	mu.Unlock()
-	broker.NotifyUnlocked(s, 1, true)
+	broker.NotifyUnlocked(s, 1)
 	paired := client.recvType(t, "paired")
 	capability, _ := paired["capability"].(string)
 	if !token.MatchString(capability) || paired["quick_fill"] != true {
@@ -222,11 +222,14 @@ func TestBrokerSharedUnlockAndLockPropagation(t *testing.T) {
 	mu.Lock()
 	session = s2
 	mu.Unlock()
-	broker.NotifyUnlocked(s2, 2, true)
-	unlocked := client.recvType(t, "unlocked")
-	capability, _ = unlocked["capability"].(string)
-	if !token.MatchString(capability) {
-		t.Fatalf("re-unlock capability: %#v", unlocked)
+	// Re-unlock does not renew the old capability. The extension must send a
+	// fresh hello and the owner must approve that pairing again.
+	broker.NotifyUnlocked(s2, 2)
+	client.send(t, map[string]any{"v": 1, "id": reqID(9), "type": "hello"})
+	repaired := client.recvType(t, "paired")
+	capability, _ = repaired["capability"].(string)
+	if !token.MatchString(capability) || repaired["quick_fill"] != true {
+		t.Fatalf("re-pair capability: %#v", repaired)
 	}
 	client.send(t, map[string]any{"v": 1, "id": reqID(6), "type": "vault-lock", "capability": capability})
 	client.recvType(t, "locked")
@@ -437,7 +440,7 @@ func TestBrokerPairingCloseCancelsNativeReview(t *testing.T) {
 	c.hello, c.pairUntil = reqID(90), now.Add(time.Minute)
 	c.mu.Unlock()
 	done := make(chan struct{})
-	go func() { c.requestBrowserPair(s, 1); close(done) }()
+	go func() { c.reviewBrowserHello(s, 1); close(done) }()
 	select {
 	case <-entered:
 	case <-time.After(time.Second):
@@ -483,7 +486,7 @@ func TestBrokerPairingExpiryRejectsLateApproval(t *testing.T) {
 	c.hello, c.pairUntil = reqID(91), now.Add(time.Minute)
 	c.mu.Unlock()
 	done := make(chan struct{})
-	go func() { c.requestBrowserPair(s, 1); close(done) }()
+	go func() { c.reviewBrowserHello(s, 1); close(done) }()
 	select {
 	case <-entered:
 	case <-time.After(time.Second):

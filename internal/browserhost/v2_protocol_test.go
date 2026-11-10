@@ -3,6 +3,7 @@ package browserhost
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -80,6 +81,27 @@ func v2Last(t *testing.T, out *memoryPipe) Response {
 		t.Fatal("no response")
 	}
 	return all[len(all)-1]
+}
+
+// destructiveCall sends a removal even on a quick-fill connection and proves
+// it wrote nothing until its own native review was approved. Removals are never
+// covered by the pairing's quick-fill grant.
+func destructiveCall(t *testing.T, c *Connection, out *memoryPipe, value map[string]any) Response {
+	t.Helper()
+	kind, id := value["type"], value["id"]
+	before := len(out.responses(t))
+	v2Send(t, c, value)
+	if got := len(out.responses(t)); got != before {
+		t.Fatalf("%v executed before native approval: %d new frames", kind, got-before)
+	}
+	view := c.Snapshot()
+	if view.V2 == nil || view.V2.ID != id || view.V2.Type != kind {
+		t.Fatalf("%v did not create an exact native review: %#v", kind, view.V2)
+	}
+	if e := c.ApproveV2(fmt.Sprint(id)); e != nil {
+		t.Fatal(e)
+	}
+	return v2Last(t, out)
 }
 
 func TestGenerateModesAndRedaction(t *testing.T) {
