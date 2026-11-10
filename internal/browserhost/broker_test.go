@@ -811,3 +811,99 @@ func TestBrokerPairingExpiryRejectsLateApproval(t *testing.T) {
 		}
 	}
 }
+
+func TestClearCLIRunRawMessagesZeroesEverySlice(t *testing.T) {
+	first := json.RawMessage(`"s3cret-one"`)
+	second := json.RawMessage(`{"nested":"s3cret-two"}`)
+	raws := map[string]json.RawMessage{"a": first, "b": second}
+	clearCLIRunRawMessages(raws)
+	for name, raw := range raws {
+		for i, b := range raw {
+			if b != 0 {
+				t.Fatalf("%s: byte %d not cleared: %q", name, i, raw)
+			}
+		}
+	}
+	// The backing bytes of each slice are zeroed in place.
+	for _, raw := range [][]byte{first, second} {
+		for i, b := range raw {
+			if b != 0 {
+				t.Fatalf("backing byte %d not cleared: %q", i, raw)
+			}
+		}
+	}
+	clearCLIRunRawMessages(nil)
+	clearCLIRunRawMessages(map[string]json.RawMessage{})
+}
+
+func TestClearCLIRunRawMessagesOnParseFailure(t *testing.T) {
+	cases := []struct{ name, raw string }{
+		{"duplicate-key", `{"a":"s3cret-a","b":"s3cret-b","a":"s3cret-dup"}`},
+		{"truncated-value", `{"a":"s3cret-a","b":{"x":"s3cret-b"`},
+		{"not-object", `["s3cret-a"]`},
+		{"trailing-data", `{"a":"s3cret-a"} {"b":"s3cret-b"}`},
+		{"unterminated", `{"a":"s3cret-a"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			keys, values, ok := strictJSONObject([]byte(tc.raw))
+			if ok || keys != nil || values != nil {
+				t.Fatalf("accepted %q: keys=%v values=%q", tc.raw, keys, values)
+			}
+		})
+	}
+	// A well-formed object is still returned with raw values intact.
+	_, values, ok := strictJSONObject([]byte(`{"v":1,"x":"keep"}`))
+	if !ok || string(values["x"]) != `"keep"` || string(values["v"]) != `1` {
+		t.Fatalf("valid object not preserved: ok=%v values=%q", ok, values)
+	}
+}
+
+func TestClearCLIRunRawMessagesRejectPathsZeroNamedCollection(t *testing.T) {
+	// Every rejection path must return nil/nil/false and must run cleanup over
+	// the named collection, not a nil shadow of it.
+	for _, raw := range []string{
+		`{"v":1,"a":"s3cret-a","b":"s3cret-b","a":"s3cret-dup"}`,
+		`{"a":"s3cret-a","b":{"x":"s3cret-b"`,
+		`{"a":"s3cret-a"} {"b":"s3cret-b"}`,
+		`{"a":"s3cret-a"`,
+		`{"a":"s3cret-a",1:true}`,
+		``,
+	} {
+		keys, values, ok := strictJSONObject([]byte(raw))
+		if ok || keys != nil || values != nil {
+			t.Fatalf("accepted %q: keys=%v values=%q", raw, keys, values)
+		}
+	}
+}
+
+func TestCLIRunResponsesClearRawCopiesWithoutAlteringValues(t *testing.T) {
+	// Success: the decoded map[string]string reaches the caller intact and is
+	// the exact value the reply carried.
+	sent := cliRunScriptedServer(t, cliRunReplyPayload(`{"v":1,"values":{"slot-7":"pw-exact"}}`))
+	resp, e := RequestCLIRun(context.Background(), cliRunFixtureRequest())
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(resp.Values) != 1 || resp.Values["slot-7"] != "pw-exact" {
+		t.Fatalf("values altered: %q", resp.Values)
+	}
+	if !<-sent {
+		t.Fatal("server did not receive the request frame")
+	}
+	// Partially invalid nested values and error replies stay generic.
+	for name, reply := range map[string]string{
+		"nested-unknown-field": `{"v":1,"values":{"slot-1":"p","x":1}}`,
+		"nested-empty-slot":    `{"v":1,"values":{"":"p"}}`,
+		"nested-empty-value":   `{"v":1,"values":{"slot-1":"","slot-2":"q"}}`,
+		"unknown-error":        `{"v":1,"error":"s3cret-token"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			sent := cliRunScriptedServer(t, cliRunReplyPayload(reply))
+			if _, e := RequestCLIRun(context.Background(), cliRunFixtureRequest()); !errors.Is(e, errCLIRunResponse) {
+				t.Fatalf("%s: %v", reply, e)
+			}
+			<-sent
+		})
+	}
+}

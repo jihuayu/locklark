@@ -734,6 +734,9 @@ func classifyCLIRunResponse(ctx context.Context, raw []byte) (CLIRunBrokerRespon
 	if !ok {
 		return CLIRunBrokerResponse{}, errCLIRunResponse
 	}
+	// The raw copies carry sensitive values; clear them on every return. The
+	// caller-owned decoded map[string]string is returned and stays intact.
+	defer clearCLIRunRawMessages(values)
 	if _, hasError := keys["error"]; !hasError {
 		return cliRunValuesResponse(keys, values)
 	}
@@ -768,6 +771,8 @@ func cliRunValuesResponse(keys map[string]struct{}, values map[string]json.RawMe
 		return CLIRunBrokerResponse{}, errCLIRunResponse
 	}
 	var slotKeys map[string]json.RawMessage
+	// Clear nested raw copies even if Unmarshal fails partway through.
+	defer clearCLIRunRawMessages(slotKeys)
 	if err := json.Unmarshal(values["values"], &slotKeys); err != nil {
 		return CLIRunBrokerResponse{}, errCLIRunResponse
 	}
@@ -799,6 +804,15 @@ func cliRunValuesResponse(keys map[string]struct{}, values map[string]json.RawMe
 	return CLIRunBrokerResponse{V: 1, Values: body.Values}, nil
 }
 
+// clearCLIRunRawMessages zeroes the bytes of every raw value in raws, releasing
+// intermediate copies of sensitive values that were decoded only for
+// validation.
+func clearCLIRunRawMessages(raws map[string]json.RawMessage) {
+	for _, raw := range raws {
+		clear(raw)
+	}
+}
+
 // clearCLIRunValues clears decoded (and duplicated) secret strings on refusal
 // paths so they are not retained by returned errors.
 func clearCLIRunValues(values map[string]string) {
@@ -810,22 +824,29 @@ func clearCLIRunValues(values map[string]string) {
 // strictJSONObject validates that raw is exactly one JSON object (no trailing
 // values), reports its top-level keys (rejecting duplicates and non-string
 // keys), and returns each top-level value's raw bytes.
-func strictJSONObject(raw []byte) (map[string]struct{}, map[string]json.RawMessage, bool) {
+func strictJSONObject(raw []byte) (keys map[string]struct{}, values map[string]json.RawMessage, ok bool) {
+	// On rejection the caller never sees the raw copies, so clear the fields
+	// collected into the named result before the failing token.
+	defer func() {
+		if !ok {
+			clearCLIRunRawMessages(values)
+		}
+	}()
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	tok, e := dec.Token()
 	if e != nil || tok != json.Delim('{') {
 		return nil, nil, false
 	}
-	keys := map[string]struct{}{}
-	values := map[string]json.RawMessage{}
+	keys = map[string]struct{}{}
+	values = map[string]json.RawMessage{}
 	for dec.More() {
 		tok, e := dec.Token()
 		if e != nil {
 			return nil, nil, false
 		}
-		key, ok := tok.(string)
-		if !ok {
+		key, isString := tok.(string)
+		if !isString {
 			return nil, nil, false
 		}
 		if _, dup := keys[key]; dup {
