@@ -1233,22 +1233,84 @@ func v2FieldTypeSensitive(typ vault.FieldType) bool {
 	return false
 }
 
+// v2IdentityMemberNames are all 17 writable members of BrowserIdentitySummary
+// in field order. mergeMeta writes every one of them from the identity DTO, so
+// a request that carries the DTO overwrites all 17, and an empty value clears.
+var v2IdentityMemberNames = []string{
+	"称谓", "名", "中间名", "姓", "生日", "公司", "部门", "职位", "邮箱", "电话",
+	"地址行 1", "地址行 2", "城市", "州/省", "邮编", "国家", "网站",
+}
+
 // v2DetailFieldNames projects the public field names the approved item detail
-// would show: every login builtin member, card and identity member with a
-// value, and every custom section field label. Values are never read.
-func v2DetailFieldNames(it vault.Item) []string {
+// would show. It mirrors the presence rules of the handleItemGet detail frame:
+// the title and the state are always present, every other member is named only
+// when the frame would carry it. Passkey presence is derived from the item's
+// public passkey-record presence and the managed metadata read through the same
+// metadata view; no record is loaded or parsed. Values are never read.
+func v2DetailFieldNames(it vault.Item, passkeys []personal.ManagedPasskeyMetadata) []string {
 	category := categoryOf(it)
-	// The authenticated anchor always names the item title and the members
-	// the detail frame defines; value-bearing members are added below.
-	fields := []string{"标题", "用户名", "验证码", "网址", "备注", "标签", "收藏", "自动提交"}
+	// Title and state are not omitempty on the detail frame.
+	fields := []string{"标题", "状态"}
+	if it.Username != "" {
+		fields = append(fields, "用户名")
+	}
 	if it.Password != "" && (category == "login" || category == "password") {
 		fields = append(fields, "密码")
 	}
+	if it.OTP != "" {
+		fields = append(fields, "验证码")
+	}
+	if it.Notes != "" {
+		fields = append(fields, "备注")
+	}
+	if len(it.PasskeyRecords()) != 0 || len(passkeys) != 0 {
+		// One public name for the detail frame's passkey metadata.
+		fields = append(fields, "Passkey")
+	}
+	switch {
+	case it.URL != "":
+		fields = append(fields, "网址")
+	case len(it.URLs) != 0:
+		fields = append(fields, "网址列表")
+	}
+	if it.Favorite {
+		fields = append(fields, "收藏")
+	}
+	if it.AutoSubmit != nil {
+		fields = append(fields, "自动提交")
+	}
+	if len(it.Tags) != 0 {
+		fields = append(fields, "标签")
+	}
+	for _, sec := range it.Sections {
+		if len(sec.Fields) == 0 {
+			continue
+		}
+		// The section title is kept alongside the field names, never instead
+		// of them: handleItemGet returns every field's own label.
+		group := v2PublicLabel(sec.Title)
+		if group == "" {
+			group = "未命名字段"
+		}
+		fields = append(fields, "自定义分组："+group)
+		for _, f := range sec.Fields {
+			fields = append(fields, "自定义字段："+v2FieldLabel(f.Label))
+		}
+	}
+	for _, att := range it.Attachments {
+		// Same selector and filename filters as handleItemGet.
+		if attachmentSelector(att.ID) && validAttachmentFileName(att.FileName) {
+			fields = append(fields, "附件")
+			break
+		}
+	}
 	if card := it.NormalizedCreditCard(); card != nil {
+		// The summary always carries the masked number and the CVV/PIN
+		// presence; the stored digits never are.
 		present := map[string]any{
-			"持卡人": card.CardholderName, "卡类型": card.Type, "卡号": card.Number,
-			"安全码": card.Verification, "有效期": card.ExpiryDate, "生效日期": card.ValidFrom,
-			"PIN": card.PIN, "发卡银行": card.IssuingBank,
+			"持卡人": card.CardholderName, "卡类型": card.Type,
+			"卡号": true, "安全码": card.Verification != "", "有效期": card.ExpiryDate,
+			"生效日期": card.ValidFrom, "PIN": card.PIN != "", "发卡银行": card.IssuingBank,
 		}
 		for _, name := range v2SortedNames(present) {
 			fields = append(fields, "信用卡·"+name)
@@ -1267,15 +1329,6 @@ func v2DetailFieldNames(it vault.Item) []string {
 			fields = append(fields, "身份·"+name)
 		}
 	}
-	for _, sec := range it.Sections {
-		for _, f := range sec.Fields {
-			label := v2PublicLabel(f.Label)
-			if label == "" {
-				label = "未命名字段"
-			}
-			fields = append(fields, "自定义字段："+label)
-		}
-	}
 	return fields
 }
 
@@ -1283,7 +1336,7 @@ func v2DetailFieldNames(it vault.Item) []string {
 // write. Decoding uses the same decodeMutation the approval executes, and the
 // member order mirrors mergeMeta / v2ItemFromMutation / applyClearFields so only
 // members that are actually applied are named.
-func (c *Connection) v2RequestedAnchor(target, raw string) itemAnchor {
+func (c *Connection) v2RequestedAnchor(target, raw string, create bool) itemAnchor {
 	m, err := decodeMutation(raw)
 	if err != nil {
 		// handleItemSave refuses this payload; the review still names the
@@ -1298,8 +1351,9 @@ func (c *Connection) v2RequestedAnchor(target, raw string) itemAnchor {
 		fields = append(fields, "用户名")
 	}
 	// v2ItemFromMutation keeps the stored password when an edit sends an empty
-	// value; only a creation writes it then.
-	if m.Password != nil && (*m.Password != "" || m.Category == "login" || m.Category == "password") {
+	// value; only a creation writes it then, whatever the category. An
+	// item-save with an item_id is an edit.
+	if m.Password != nil && (*m.Password != "" || create) {
 		fields = append(fields, "密码")
 	}
 	if m.OTP != nil {
@@ -1334,16 +1388,10 @@ func (c *Connection) v2RequestedAnchor(target, raw string) itemAnchor {
 			fields = append(fields, "信用卡·"+name)
 		}
 	}
-	if ident := m.Identity; ident != nil {
-		present := map[string]any{
-			"称谓": ident.Title, "名": ident.FirstName, "中间名": ident.MiddleName, "姓": ident.LastName,
-			"生日": ident.BirthDate, "公司": ident.Company, "部门": ident.Department, "职位": ident.JobTitle,
-			"邮箱": ident.Email, "电话": ident.Phone,
-			"地址行 1": ident.AddressLine1, "地址行 2": ident.AddressLine2,
-			"城市": ident.City, "州/省": ident.State, "邮编": ident.PostalCode, "国家": ident.Country,
-			"网站": ident.Website,
-		}
-		for _, name := range v2SortedNames(present) {
+	// A non-nil identity DTO overwrites all 17 members, empty ones included,
+	// so every name is listed regardless of the supplied values.
+	if m.Identity != nil {
+		for _, name := range v2IdentityMemberNames {
 			fields = append(fields, "身份·"+name)
 		}
 	}
@@ -1389,8 +1437,14 @@ func (c *Connection) v2StoredAnchor(id string) (itemAnchor, error) {
 	if !ok || revisions[it.ID] == "" {
 		return itemAnchor{}, ErrProtocol
 	}
+	// Passkey metadata comes from the same metadata read handleItemGet uses;
+	// records are never loaded or parsed.
+	passkeys, err := s.ReadManagedPasskeysMetadata(false)
+	if err != nil {
+		return itemAnchor{}, err
+	}
 	anchor := itemAnchor{title: v2PublicLabel(it.Title), category: categoryOf(it), revision: revisions[it.ID]}
-	anchor.fields = v2BoundedLabels(v2DetailFieldNames(it))
+	anchor.fields = v2BoundedLabels(v2DetailFieldNames(it, passkeys[it.ID]))
 	for _, sec := range it.Sections {
 		for _, f := range sec.Fields {
 			if !v2FieldTypeSensitive(f.Type) && !f.Protected {
@@ -1474,13 +1528,25 @@ func (c *Connection) startV2Approval(r Request) error {
 		// An omitted revision is pinned to the authenticated revision read
 		// now. The approval still runs the unchanged handleItemGet, which
 		// rechecks the exact revision and refuses if it moved.
-		if stored, err := c.v2StoredAnchor(r.ItemID); err == nil {
-			review.stored = stored
-			if r.Revision == "" && stored.revision != "" {
-				r.Revision = stored.revision
+		stored, err := c.v2StoredAnchor(r.ItemID)
+		if r.Revision == "" {
+			// No revision to compare against: only an authenticated anchor
+			// with a revision can pin the review. Without one the request is
+			// refused here and no review is reserved.
+			if err != nil || stored.revision == "" {
+				return c.refuse(r.ID)
 			}
+			r.Revision = stored.revision
+			review.stored = stored
+		} else if err == nil && stored.revision == r.Revision {
+			// Only the exact requested revision shows stored metadata.
+			review.stored = stored
 		}
 	case "item-edit", "item-save":
+		// item-save only edits when it names an item.
+		if r.Type == "item-save" && r.ItemID == "" {
+			break
+		}
 		if stored, err := c.v2StoredAnchor(r.ItemID); err == nil && stored.revision == r.Revision {
 			review.stored = stored
 		} else {
@@ -1490,7 +1556,9 @@ func (c *Connection) startV2Approval(r Request) error {
 		}
 	}
 	if r.Type == "item-create" || r.Type == "item-edit" || r.Type == "item-save" {
-		requested := c.v2RequestedAnchor(r.ItemID, r.ItemJSON)
+		// item-save only creates when it names no item.
+		create := r.Type == "item-create" || r.Type == "item-save" && r.ItemID == ""
+		requested := c.v2RequestedAnchor(r.ItemID, r.ItemJSON, create)
 		review.requested = &requested
 	}
 	review.request = r

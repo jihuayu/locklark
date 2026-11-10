@@ -291,8 +291,14 @@ func TestV2ItemGetWithoutRevisionPinsExactCurrentRevision(t *testing.T) {
 	if stored != rev {
 		t.Fatalf("pending request revision = %q, want %q", stored, rev)
 	}
-	if view.StoredTitle != "Approval identity" || view.StoredCategory != "identity" || !v2ViewHas(view.StoredFields, "身份·名") || !v2ViewHas(view.StoredFields, "自定义字段：Concealed") {
+	if view.StoredTitle != "Approval identity" || view.StoredCategory != "identity" || !v2ViewHas(view.StoredFields, "标题") || !v2ViewHas(view.StoredFields, "状态") || !v2ViewHas(view.StoredFields, "身份·名") || !v2ViewHas(view.StoredFields, "自定义字段：Concealed") {
 		t.Fatalf("stored anchor names: %#v", view)
+	}
+	if !v2ViewHas(view.StoredFields, "身份·邮箱") {
+		t.Fatalf("stored detail omitted a member the detail frame carries: %#v", view.StoredFields)
+	}
+	if v2ViewHas(view.StoredFields, "密码") || v2ViewHas(view.StoredFields, "用户名") || v2ViewHas(view.StoredFields, "备注") || v2ViewHas(view.StoredFields, "验证码") || v2ViewHas(view.StoredFields, "网址") {
+		t.Fatalf("stored detail named members the detail frame omits: %#v", view.StoredFields)
 	}
 	if got := len(out.responses(t)); got != 1 {
 		t.Fatalf("detail leaked into %d frames before approval", got)
@@ -306,6 +312,68 @@ func TestV2ItemGetWithoutRevisionPinsExactCurrentRevision(t *testing.T) {
 	last := all[len(all)-1]
 	if last.Type != "item-detail" || last.Item == nil || last.Item.Revision != rev {
 		t.Fatalf("approved item-get: %#v", last)
+	}
+}
+
+func TestV2ItemGetWithoutRevisionRefusesWhenAnchorUnavailable(t *testing.T) {
+	c, out, _, cap := nonQuickFixture(t)
+	defer c.Close()
+	get := Request{V: 1, ID: reqID(82), Type: "item-get", Capability: cap, ItemID: strings.Repeat("0", 32)}
+	if e := c.Handle(get); e != nil {
+		t.Fatal(e)
+	}
+	if v := c.Snapshot().V2; v != nil {
+		t.Fatalf("unanchored item-get reserved a review: %#v", v)
+	}
+	all := out.responses(t)
+	if last := all[len(all)-1]; last.Type != "error" {
+		t.Fatalf("unanchored item-get was not refused: %#v", last)
+	}
+	for _, r := range all {
+		if r.Type == "item-detail" || r.Item != nil {
+			t.Fatalf("unanchored item-get disclosed detail: %#v", r)
+		}
+	}
+}
+
+func TestV2EditWithEmptyPasswordNamesNoPassword(t *testing.T) {
+	c, _, s, cap := nonQuickFixture(t)
+	defer c.Close()
+	id, rev := addApprovalIdentity(t, s)
+	edit := mustReadRequest(t, map[string]any{"v": 1, "id": reqID(85), "type": "item-edit", "capability": cap, "item_id": id, "revision": rev,
+		"item_json": `{"category":"login","title":"Keeps Password","password":""}`})
+	if e := c.Handle(edit); e != nil {
+		t.Fatal(e)
+	}
+	view := c.Snapshot().V2
+	if view == nil || view.Type != "item-edit" || !v2ViewHas(view.RequestedFields, "标题") {
+		t.Fatalf("edit review: %#v", view)
+	}
+	if v2ViewHas(view.RequestedFields, "密码") {
+		t.Fatalf("empty-password edit named the kept password: %#v", view.RequestedFields)
+	}
+}
+
+func TestV2EmptyDetailSummaryIsTitleAndState(t *testing.T) {
+	c, _, s, cap := nonQuickFixture(t)
+	defer c.Close()
+	gate := personal.NewMutationGate(time.Now().Add(time.Minute))
+	if e := s.RegisterMutation(gate); e != nil {
+		t.Fatal(e)
+	}
+	id, _, e := s.AddItem(vault.Item{Kind: "secure_note", Category: vault.CategorySecureNote, Title: "Empty Detail"}, gate)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e := c.Handle(Request{V: 1, ID: reqID(86), Type: "item-get", Capability: cap, ItemID: id}); e != nil {
+		t.Fatal(e)
+	}
+	view := c.Snapshot().V2
+	if view == nil || !view.RevisionPinned {
+		t.Fatalf("empty detail review: %#v", view)
+	}
+	if len(view.StoredFields) != 2 || view.StoredFields[0] != "标题" || view.StoredFields[1] != "状态" {
+		t.Fatalf("empty detail summary: %#v", view.StoredFields)
 	}
 }
 
@@ -409,6 +477,9 @@ func TestV2MutationSummaryNamesPublicFieldsWithoutValues(t *testing.T) {
 	if !v2ViewHas(view.StoredFields, "信用卡·卡号") || !v2ViewHas(view.StoredFields, "身份·邮箱") || !v2ViewHas(view.StoredFields, "自定义字段：Stored Hidden") {
 		t.Fatalf("stored anchor names: %#v", view.StoredFields)
 	}
+	if !v2ViewHas(view.StoredFields, "标题") || !v2ViewHas(view.StoredFields, "状态") || !v2ViewHas(view.StoredFields, "密码") || !v2ViewHas(view.StoredFields, "验证码") || !v2ViewHas(view.StoredFields, "网址") || !v2ViewHas(view.StoredFields, "备注") {
+		t.Fatalf("stored detail presence drifted from the detail frame: %#v", view.StoredFields)
+	}
 	for _, want := range []string{
 		"标题", "用户名", "网址", "备注",
 		"身份·名", "身份·邮箱",
@@ -421,6 +492,15 @@ func TestV2MutationSummaryNamesPublicFieldsWithoutValues(t *testing.T) {
 	}
 	if v2ViewHas(view.RequestedFields, "密码") || v2ViewHas(view.RequestedFields, "标签") || v2ViewHas(view.RequestedFields, "收藏") {
 		t.Fatalf("edit summary named members the payload never writes: %#v", view.RequestedFields)
+	}
+	// The identity DTO overwrites all 17 writable members, empty ones included.
+	for _, name := range []string{
+		"称谓", "名", "中间名", "姓", "生日", "公司", "部门", "职位", "邮箱", "电话",
+		"地址行 1", "地址行 2", "城市", "州/省", "邮编", "国家", "网站",
+	} {
+		if !v2ViewHas(view.RequestedFields, "身份·"+name) {
+			t.Fatalf("identity write summary missing %q: %#v", name, view.RequestedFields)
+		}
 	}
 	for _, raw := range []string{v2ApprovalJSON(t, view), fmt.Sprint(out.responses(t))} {
 		if strings.Contains(raw, v2ApprovalSentinel) || strings.Contains(raw, "4242424242424242") {
@@ -503,11 +583,12 @@ func TestV2ApprovalFieldLabelsAreSnapshottedAndBounded(t *testing.T) {
 	// dropping control characters from named custom fields.
 	oldList := projectionListLen
 	projectionListLen = 3
-	defer func() { projectionListLen = oldList }()
 	labels := v2BoundedLabels([]string{"same", "same", "two", "three", "four"})
 	if len(labels) != 3 || labels[0] != "same" || labels[1] != "two" || labels[2] != "three" {
 		t.Fatalf("bounded labels: %#v", labels)
 	}
+	projectionListLen = oldList
+	defer func() { projectionListLen = oldList }()
 	long := strings.Repeat("界", v2AnchorMaxLabel+20)
 	if got := v2PublicLabel(long); len([]rune(got)) != v2AnchorMaxLabel {
 		t.Fatalf("label not clipped: %d runes", len([]rune(got)))
@@ -520,11 +601,18 @@ func TestV2ApprovalFieldLabelsAreSnapshottedAndBounded(t *testing.T) {
 	if e := s.RegisterMutation(gate); e != nil {
 		t.Fatal(e)
 	}
+	// Every custom field label is named, the duplicate collapses to one entry
+	// and the control characters in the crafted label are escaped away.
 	inject := []vault.Section{{ID: "inject", Title: "Inject", Fields: []vault.CustomField{
 		{ID: "a", Label: "Plain", Type: vault.FieldTypeText, Value: "x"},
 		{ID: "b", Label: "行\n注入", Type: vault.FieldTypeText, Value: "x"},
 		{ID: "c", Label: "Plain", Type: vault.FieldTypeText, Value: "x"},
 	}}}
+	// A connection holds one pending V2 at a time: retire the first review so
+	// the injected item-get reserves its own snapshot instead of reusing it.
+	if e := c.RejectV2(get.ID); e != nil {
+		t.Fatal(e)
+	}
 	injectedID, _, e := s.AddItem(vault.Item{Kind: "identity", Category: vault.CategoryIdentity, Title: "Injected", Sections: inject}, gate)
 	if e != nil {
 		t.Fatal(e)
@@ -537,18 +625,45 @@ func TestV2ApprovalFieldLabelsAreSnapshottedAndBounded(t *testing.T) {
 	if injected == nil || !injected.RevisionPinned {
 		t.Fatalf("injected review: %#v", injected)
 	}
-	custom := 0
 	for _, label := range injected.StoredFields {
-		if !strings.HasPrefix(label, "自定义字段：") {
-			continue
-		}
-		custom++
 		if strings.ContainsAny(label, "\n\r\t") {
 			t.Fatalf("custom label kept a control character: %q", label)
 		}
 	}
-	if custom != 2 {
-		t.Fatalf("duplicate custom labels were not de-duplicated: %#v", injected.StoredFields)
+	custom := 0
+	for _, label := range injected.StoredFields {
+		if strings.HasPrefix(label, "自定义字段：") {
+			custom++
+		}
+	}
+	var customWants []string
+	for _, raw := range []string{"自定义字段：Plain", `自定义字段：行\u{A}注入`} {
+		want := v2PublicLabel(raw)
+		customWants = append(customWants, want)
+		if !v2ViewHas(injected.StoredFields, want) {
+			t.Fatalf("custom field %q missing: %#v", want, injected.StoredFields)
+		}
+	}
+	if custom != len(customWants) {
+		t.Fatalf("custom field names were not de-duplicated: %#v", injected.StoredFields)
+	}
+}
+
+func TestV2SecureNoteCreateNamesEmptyPassword(t *testing.T) {
+	c, _, _, cap := nonQuickFixture(t)
+	defer c.Close()
+	create := mustReadRequest(t, map[string]any{"v": 1, "id": reqID(103), "type": "item-create", "capability": cap,
+		"item_json": `{"category":"secure_note","title":"Empty Password Note","password":""}`})
+	if e := c.Handle(create); e != nil {
+		t.Fatal(e)
+	}
+	view := c.Snapshot().V2
+	if view == nil || view.Type != "item-create" || view.RequestedCategory != "secure_note" || !v2ViewHas(view.RequestedFields, "标题") {
+		t.Fatalf("secure note create review: %#v", view)
+	}
+	// A creation writes the password member whatever the category.
+	if !v2ViewHas(view.RequestedFields, "密码") {
+		t.Fatalf("empty-password create omitted 密码: %#v", view.RequestedFields)
 	}
 }
 
