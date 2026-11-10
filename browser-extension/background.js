@@ -139,6 +139,7 @@ if (typeof importScripts === "function") importScripts("core.js");
   const FILL_UNKNOWN = "登录填充结果未确认，请核实页面；不会自动重试";
   let port = null,
     capability = "",
+    hostState = "",
     context = null,
     rows = [],
     status = "未连接",
@@ -602,6 +603,8 @@ if (typeof importScripts === "function") importScripts("core.js");
       preferredItemId: multiStepFor(context?.tabId, context?.origin)?.itemId || "",
       preferredTitle: multiStepFor(context?.tabId, context?.origin)?.title || "",
       step: multiStepFor(context?.tabId, context?.origin)?.stepCompleted || "",
+      hostState,
+      hostOutdated: hostState === "outdated",
       attachmentsSupported: !!capability && core.attachmentCapability(hostCapabilities),
       nativeClipboard: nativeClipboardSupported(),
       passkeyManagementSupported: passkeyManagementSupported(),
@@ -743,6 +746,35 @@ if (typeof importScripts === "function") importScripts("core.js");
     clear();
     if (!preservePrivateSessions) clearPrivateSessions();
     if (p) p.disconnect();
+  }
+  function classifyNativeError(error) {
+    const text = String(error?.message || error || "");
+    if (
+      /not found|no such native|specified native messaging host|native messaging host.*(missing|not installed)/i.test(
+        text,
+      )
+    )
+      return "missing";
+    if (/forbidden|access to the specified native messaging host/i.test(text))
+      return "forbidden";
+    if (/exited|disconnected|terminated|closed/i.test(text)) return "exited";
+    return "error";
+  }
+  function nativeGuidanceText(code) {
+    return (
+      {
+        missing:
+          "未找到 Locklark 原生宿主：请重新安装桌面端，或运行 locklark-browser-register 注册后重试",
+        forbidden:
+          "浏览器拒绝了这个原生宿主：请重新运行注册命令并确认清单路径",
+        exited: "Locklark 原生宿主已退出：请确认桌面端已安装并重新连接",
+        timeout:
+          "等待 Locklark 解锁超时：请在 Locklark 窗口中完成解锁后重试",
+        outdated:
+          "Locklark 原生宿主版本过旧，请升级桌面端后重新连接",
+        error: "无法连接 Locklark 原生宿主，请重新连接",
+      }[code] || "无法连接 Locklark 原生宿主，请重新连接"
+    );
   }
   function disconnectWithStatus(message) {
     disconnect();
@@ -946,7 +978,9 @@ if (typeof importScripts === "function") importScripts("core.js");
     });
     const timer = setTimeout(() => {
       calls.delete(requestId);
-      reject(Error("refused"));
+      const error = Error("refused");
+      error.timeout = true;
+      reject(error);
       disconnectWithStatus("连接或请求已过期，请重新连接");
     }, timeout);
     calls.set(requestId, { resolve, reject, timer, type });
@@ -1687,17 +1721,29 @@ if (typeof importScripts === "function") importScripts("core.js");
     unconfirmedSave = false;
     retired.clear();
     status = "请在原生窗口解锁并确认连接";
-    const p = nativeConnect();
+    let p;
+    try {
+      p = nativeConnect();
+    } catch (error) {
+      hostState = classifyNativeError(error);
+      status = nativeGuidanceText(hostState);
+      updateBadge();
+      return null;
+    }
     port = p;
     p.onDisconnect.addListener(() => {
       if (port !== p) return;
       port = null;
       const uncertain = unconfirmedSave;
+      const neverPaired = !capability;
       clear();
       clearPrivateSessions();
+      if (neverPaired) hostState = "exited";
       status = uncertain
         ? "结果未确认，请在金库核实，勿重复保存"
-        : "原生连接已断开，请重新连接";
+        : neverPaired
+          ? "Locklark 原生宿主已退出，请确认桌面端已安装并重新连接"
+          : "原生连接已断开，请重新连接";
       if (otpUnknown) status += " · " + OTP_UNKNOWN;
       void api.runtime.lastError;
     });
@@ -1801,6 +1847,7 @@ if (typeof importScripts === "function") importScripts("core.js");
         "cancel-copy-field": "copy-cancelled",
         "item-save": "saved",
         "item-state": "saved",
+        "unlock-request": "status",
         "item-history": "item-history",
         "item-restore-history": "saved",
         generate: "generated",
@@ -1862,10 +1909,25 @@ if (typeof importScripts === "function") importScripts("core.js");
           )
         : [];
       refreshPasskeyConditionalSupport();
-      status = "已连接，请读取当前网站候选";
+      if (
+        hostCapabilities.includes("shared-session-v1") &&
+        !hostCapabilities.includes("popup-vault-v1")
+      ) {
+        hostState = "outdated";
+        status = "Locklark 原生宿主版本过旧，请升级桌面端后重新连接";
+      } else {
+        hostState = "";
+        status = "已连接，请读取当前网站候选";
+      }
       updateBadge();
       rebuildContextMenus();
-    } catch {
+    } catch (error) {
+      if (error?.timeout) {
+        hostState = "timeout";
+        status = "等待 Locklark 解锁超时：请在 Locklark 窗口中完成解锁后重试";
+        updateBadge();
+        return;
+      }
       if (port === p && generation === epoch) {
         disconnect();
         status = "连接未获批准或已过期";
@@ -3168,6 +3230,7 @@ if (typeof importScripts === "function") importScripts("core.js");
         connected: !!capability,
         quick_fill: quickFill,
         capabilities: hostCapabilities.slice(),
+        state: hostState,
         status,
       },
       counts: {
@@ -5588,6 +5651,42 @@ if (typeof importScripts === "function") importScripts("core.js");
         case "connect":
           void connect();
           break;
+        case "native-connect":
+          if (Object.keys(message).sort().join(",") !== "type")
+            throw Error("refused");
+          void connect();
+          extra.nativeConnect = { started: true };
+          break;
+        case "native-unlock": {
+          if (Object.keys(message).sort().join(",") !== "type")
+            throw Error("refused");
+          if (!port) {
+            void connect();
+            extra.nativeUnlock = {
+              ok: false,
+              pending: true,
+              status: "正在启动 Locklark，请在窗口中完成解锁",
+            };
+            break;
+          }
+          try {
+            const reply = await request("unlock-request", {}, 8000);
+            const unlocked = reply.unlocked === true;
+            status = unlocked
+              ? "Locklark 已解锁，请重新连接"
+              : "请在 Locklark 窗口中完成解锁";
+            extra.nativeUnlock = {
+              ok: reply.type === "status",
+              pending: false,
+              unlocked,
+              status,
+            };
+          } catch {
+            status = "无法请求桌面解锁，请确认 Locklark 正在运行";
+            extra.nativeUnlock = { ok: false, pending: false, status };
+          }
+          break;
+        }
         case "disconnect":
           disconnectWithStatus("已断开");
           break;

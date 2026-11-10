@@ -51,6 +51,14 @@ const CATEGORIES = [
 ];
 function harness() {
   const ids = [
+    "native-guidance",
+    "native-guidance-title",
+    "native-guidance-text",
+    "native-guidance-command",
+    "native-guidance-status",
+    "native-retry",
+    "native-unlock",
+    "native-copy-command",
     "status",
     "auto-login",
     "passkey-save",

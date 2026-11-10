@@ -513,3 +513,24 @@ test("popup completes keyboard, focus and destructive-confirmation interactions"
   assert.match(popupJS, /row\.tabIndex = -1/);
   assert.match(popupJS, /focusin/);
 });
+
+test("native host guidance is actionable from popup and options", () => {
+  for (const id of [
+    "native-guidance",
+    "native-guidance-title",
+    "native-guidance-text",
+    "native-guidance-command",
+    "native-guidance-status",
+    "native-retry",
+    "native-unlock",
+    "native-copy-command",
+  ])
+    assert.match(popupHTML, new RegExp(`id="${id}"`));
+  assert.match(popupJS, /renderNativeGuidance/);
+  assert.match(popupJS, /locklark-browser-register --browser chromium/);
+  assert.match(popupJS, /native-unlock/);
+  for (const id of ["native-heading", "native-status", "native-refresh", "native-connect", "native-unlock", "native-detail"])
+    assert.match(optionsHTML, new RegExp(`id="${id}"`));
+  assert.match(optionsJS, /refreshNativeStatus/);
+  assert.match(optionsJS, /native-connect/);
+});

@@ -1131,3 +1131,20 @@ summary:focus-visible {
     scroll-behavior: auto !important;
   }
 }
+
+.native-guidance {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--blue, #1d4ed8);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin: 8px 0;
+}
+.native-guidance strong {
+  display: block;
+  margin-bottom: 4px;
+}
+.native-guidance pre {
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 6px 0;
+}

@@ -92,6 +92,19 @@ function harness(options = {}) {
             ],
           }),
         );
+      if (r.type === "unlock-request")
+        queueMicrotask(() =>
+          portMessage({
+            v: 1,
+            id: r.id,
+            type: "status",
+            desktop_connected: true,
+            unlocked: false,
+            vault_locked: true,
+            paired: false,
+            capabilities: [],
+          }),
+        );
       if (r.type === "commit-ready" && autoCommit)
         queueMicrotask(() =>
           portMessage({
@@ -234,7 +247,11 @@ function harness(options = {}) {
     runtime: {
       id: "fixed",
       getURL: (p) => "chrome-extension://fixed/" + p,
-      connectNative: () => port,
+      connectNative: () => {
+        if (options.connectNativeError)
+          throw Error(options.connectNativeError);
+        return port;
+      },
       onMessage: { addListener: (f) => messageListeners.push(f) },
       onConnect: { addListener: (f) => connectListeners.push(f) },
     },
@@ -2580,6 +2597,40 @@ test("diagnostics describe the session without vault data or secrets", async () 
   assert.equal(report.counts.vault_items >= 0, true);
   const refused = await h.send({ type: "diagnostics", extra: true });
   assert.equal(refused.diagnostics, undefined);
+});
+
+test("a missing native host is reported with actionable guidance", async () => {
+  const h = harness({
+    connectNativeError: "Specified native messaging host not found.",
+  });
+  await h.send({ type: "connect" });
+  await tick();
+  const state = await h.send({ type: "state" });
+  assert.equal(state.connected, false);
+  assert.equal(state.hostState, "missing");
+  assert.match(state.status, /未找到 Locklark 原生宿主/);
+});
+
+test("an old native host is flagged when shared session exists without vault", async () => {
+  const h = harness({ capabilities: ["shared-session-v1"] });
+  await h.send({ type: "connect" });
+  await tick();
+  const state = await h.send({ type: "state" });
+  assert.equal(state.hostState, "outdated");
+  assert.equal(state.hostOutdated, true);
+  assert.match(state.status, /版本过旧/);
+});
+
+test("native unlock asks the host to focus the desktop window", async () => {
+  const h = harness();
+  await ready(h);
+  const reply = await h.send({ type: "native-unlock" });
+  assert.equal(reply.nativeUnlock.ok, true);
+  assert.equal(
+    h.sent.some((r) => r.type === "unlock-request"),
+    true,
+  );
+  assert.match(reply.nativeUnlock.status, /完成解锁/);
 });
 
 test("idle auto-lock needs the opt-in setting and a live capability", async () => {

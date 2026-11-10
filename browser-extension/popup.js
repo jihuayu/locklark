@@ -608,7 +608,76 @@
             : defaultNote),
     );
   }
+  function nativeCommand() {
+    const ua = String(globalThis.navigator?.userAgent || "");
+    if (/Firefox\//i.test(ua))
+      return "locklark-browser-register --browser firefox --host /path/to/locklark-browser-firefox";
+    if (/Safari\//i.test(ua) && !/Chrome\//i.test(ua))
+      return "";
+    return "locklark-browser-register --browser chromium --host /path/to/locklark-browser-chromium";
+  }
+  const NATIVE_GUIDANCE = {
+    missing: {
+      title: "未找到 Locklark 原生宿主",
+      text: "桌面端可能未安装，或还没有注册浏览器集成。注册后点击重新连接。",
+      command: true,
+      unlock: false,
+    },
+    forbidden: {
+      title: "浏览器拒绝了原生宿主",
+      text: "请重新运行注册命令，并确认清单指向 Locklark 原生宿主二进制。",
+      command: true,
+      unlock: false,
+    },
+    exited: {
+      title: "原生宿主已退出",
+      text: "Locklark 可能已关闭或升级。重新连接会再次启动原生宿主。",
+      command: false,
+      unlock: true,
+    },
+    timeout: {
+      title: "等待桌面解锁",
+      text: "Locklark 窗口可能已在后台打开；请在其中完成解锁，然后重新连接。",
+      command: false,
+      unlock: true,
+    },
+    outdated: {
+      title: "需要升级桌面端",
+      text: "当前原生宿主缺少新版能力。请升级 Locklark 后重新连接。",
+      command: false,
+      unlock: false,
+    },
+    error: {
+      title: "无法连接桌面端",
+      text: "请确认 Locklark 已安装并正在运行；也可以先在桌面应用中解锁。",
+      command: false,
+      unlock: true,
+    },
+  };
+  function renderNativeGuidance(state) {
+    if (!els?.nativeGuidance) return;
+    if (els.connect)
+      els.connect.textContent = state.hostState
+        ? "重新连接本地金库"
+        : "连接本地金库";
+    const entry = NATIVE_GUIDANCE[state.hostState] || null;
+    els.nativeGuidance.hidden = !entry;
+    if (!entry) return;
+    if (els.nativeGuidanceTitle)
+      els.nativeGuidanceTitle.textContent = entry.title;
+    if (els.nativeGuidanceText) els.nativeGuidanceText.textContent = entry.text;
+    const command = entry.command ? nativeCommand() : "";
+    if (els.nativeGuidanceCommand) {
+      els.nativeGuidanceCommand.hidden = !command;
+      els.nativeGuidanceCommand.textContent = command;
+    }
+    if (els.nativeCopyCommand) els.nativeCopyCommand.hidden = !command;
+    if (els.nativeUnlock) els.nativeUnlock.hidden = !entry.unlock;
+    if (els.nativeGuidanceStatus && !state.hostState)
+      els.nativeGuidanceStatus.textContent = "";
+  }
   function render(state, sourceType) {
+    renderNativeGuidance(state);
     if (
       state.connected === false &&
       (attachmentBusy || attachmentTransfer || blobURLs.size)
@@ -3641,6 +3710,14 @@
   }
   function initVault() {
     els = {
+      nativeGuidance: q("#native-guidance"),
+      nativeGuidanceTitle: q("#native-guidance-title"),
+      nativeGuidanceText: q("#native-guidance-text"),
+      nativeGuidanceCommand: q("#native-guidance-command"),
+      nativeGuidanceStatus: q("#native-guidance-status"),
+      nativeRetry: q("#native-retry"),
+      nativeUnlock: q("#native-unlock"),
+      nativeCopyCommand: q("#native-copy-command"),
       lockedView: q("#locked-view"),
       vaultView: q("#vault-view"),
       detailView: q("#detail-view"),
@@ -4009,6 +4086,34 @@
   document
     .querySelector("#connect")
     .addEventListener("click", () => void act({ type: "connect" }));
+  document.querySelector("#native-retry")?.addEventListener("click", () => {
+    if (els?.nativeGuidanceStatus)
+      els.nativeGuidanceStatus.textContent = "正在重新连接…";
+    void act({ type: "native-connect" });
+  });
+  document.querySelector("#native-unlock")?.addEventListener("click", () => {
+    if (els?.nativeGuidanceStatus)
+      els.nativeGuidanceStatus.textContent = "正在请求桌面解锁…";
+    void api.runtime
+      .sendMessage({ type: "native-unlock" })
+      .then((reply) => {
+        if (els?.nativeGuidanceStatus)
+          els.nativeGuidanceStatus.textContent =
+            reply?.nativeUnlock?.status || "已请求桌面解锁";
+      })
+      .catch(() => {
+        if (els?.nativeGuidanceStatus)
+          els.nativeGuidanceStatus.textContent = "无法请求桌面解锁";
+      });
+  });
+  document.querySelector("#native-copy-command")?.addEventListener("click", () => {
+    const command = els?.nativeGuidanceCommand?.textContent || "";
+    if (!command) return;
+    void navigator.clipboard
+      ?.writeText(command)
+      .then(() => toast("安装命令已复制"))
+      .catch(() => toast("复制失败"));
+  });
   document
     .querySelector("#refresh")
     .addEventListener("click", () => void act({ type: "match" }));

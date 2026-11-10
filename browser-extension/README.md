@@ -123,6 +123,13 @@ worker or stored. See
 [the 1Password beta parity note](../docs/browser-1password-beta-parity.md) for
 the reference behaviour, decision table and limits.
 
+If the native host is missing, rejected by the browser, exits before pairing,
+times out waiting for desktop unlock, or is too old, the popup shows a guidance
+card with the matching fix and a reconnect action; the options page has a
+native-connection section with refresh/connect/unlock. “Unlock in Locklark”
+sends the bounded `unlock-request` frame so the desktop or standalone window is
+raised; it never grants a capability or bypasses approval.
+
 Keyboard: in the vault list use Up/Down/Home/End and Enter; Escape returns from a
 detail view to the originating row; press `/` to focus search. The in-page menu
 supports Up/Down/Home/End, and Escape closes it and returns focus to the field.

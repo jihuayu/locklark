@@ -1200,3 +1200,19 @@ test("identity provider recognition is display-only and cannot be spoofed", () =
   ])
     assert.equal(core.identityProviderFor(host), "", host);
 });
+
+test("native status frames are bounded and unknown keys are refused", () => {
+  const frame = {
+    v: 1,
+    id: "a".repeat(32),
+    type: "status",
+    desktop_connected: true,
+    unlocked: false,
+    vault_locked: true,
+    paired: false,
+    capabilities: ["shared-session-v1"],
+  };
+  assert.equal(core.validResponse(frame), true);
+  assert.equal(core.validResponse({ ...frame, unexpected: 1 }), false);
+  assert.equal(core.validResponse({ ...frame, v: 2 }), false);
+});

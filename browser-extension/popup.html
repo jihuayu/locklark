@@ -50,6 +50,17 @@
         ><button id="cancel-otp" disabled>取消验证码填充</button
         ><button id="disconnect">断开连接</button>
       </div>
+      <section id="native-guidance" class="native-guidance" hidden>
+        <strong id="native-guidance-title"></strong>
+        <p id="native-guidance-text" class="note"></p>
+        <pre id="native-guidance-command" class="mono" hidden></pre>
+        <div class="actions">
+          <button id="native-retry" type="button">重新连接</button>
+          <button id="native-unlock" type="button">在 Locklark 中解锁</button>
+          <button id="native-copy-command" type="button">复制安装命令</button>
+        </div>
+        <p id="native-guidance-status" class="note" role="status"></p>
+      </section>
       <section id="watchtower-site-banner" class="wt-banner" hidden>
         <strong id="watchtower-site-badge"></strong>
         <p id="watchtower-site-text"></p>
