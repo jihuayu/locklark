@@ -520,13 +520,15 @@ func (a *App) checkIdle(now time.Time) bool {
 // independent ticker started by Run and may also be called by tests with a
 // synthetic clock. It never assumes that View has rendered.
 func (a *App) backgroundTick(now time.Time) {
-	if a.settingsSnapshot().RevealPasswords && !a.narrowRevealPending && !a.v2.largeTypeOpen {
-		if !a.defaultRevealAt.IsZero() && !now.Before(a.defaultRevealAt.Add(defaultRevealDelay)) {
-			a.defaultRevealAt = time.Time{}
-			a.requestPasswordReveal()
-		}
-	} else {
+	switch {
+	case !a.settingsSnapshot().RevealPasswords || a.v2.largeTypeOpen:
 		a.defaultRevealAt = time.Time{}
+	case a.busy:
+		// The single worker slot is taken, so run would return before the
+		// read starts. Keep the schedule armed for a later tick.
+	case !a.narrowRevealPending && !a.defaultRevealAt.IsZero() && !now.Before(a.defaultRevealAt.Add(defaultRevealDelay)):
+		a.defaultRevealAt = time.Time{}
+		a.requestPasswordReveal()
 	}
 	if a.v2.narrowPassword.value != nil {
 		d := a.v2.detail

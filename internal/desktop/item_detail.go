@@ -327,17 +327,28 @@ const defaultRevealDelay = 500 * time.Millisecond
 // requestPasswordReveal starts at most one narrow password disclosure.
 func (a *App) requestPasswordReveal() {
 	d := a.v2.detail
-	if a.session == nil || d == nil || d.Kind != string(vault.CategoryLogin) || !a.settingsSnapshot().RevealPasswords || a.narrowRevealPending || a.v2.narrowPassword.value != nil {
+	if a.session == nil || d == nil || d.Kind != string(vault.CategoryLogin) || !a.settingsSnapshot().RevealPasswords || a.narrowRevealPending || a.busy || a.v2.narrowPassword.value != nil {
 		return
 	}
 	s, target := a.session, personal.RevealTarget{ID: d.ID, Revision: d.Revision, Field: "password"}
 	exposure, generation := a.exposureGeneration, a.generation
 	a.narrowRevealPending = true
-	done := func() { a.narrowRevealPending = false }
+	a.narrowRevealSeq++
+	seq := a.narrowRevealSeq
+	// done clears pending only for the request that owns the sequence. A stale
+	// callback from an older read must never clear a newer request.
+	done := func() {
+		if a.narrowRevealSeq == seq {
+			a.narrowRevealPending = false
+		}
+	}
 	a.run(func() outcome {
 		f, err := s.PrepareField(target, "show")
 		if err != nil {
-			return outcome{err: err, drop: done}
+			// runContext never runs drop for a plain error, so the failed read
+			// releases pending itself on the UI thread.
+			a.dispatch(done)
+			return outcome{err: err}
 		}
 		var disclosed narrowPasswordDisclosure
 		err = s.Consume(f, func(value []byte) error {
@@ -347,7 +358,12 @@ func (a *App) requestPasswordReveal() {
 			disclosed = narrowPasswordDisclosure{value: append([]byte(nil), value...), until: time.Now().Add(15 * time.Second), itemID: target.ID, revision: target.Revision}
 			return nil
 		})
-		return outcome{err: err, drop: func() {
+		if err != nil {
+			clear(disclosed.value)
+			a.dispatch(done)
+			return outcome{err: err}
+		}
+		return outcome{drop: func() {
 			done()
 			clear(disclosed.value)
 		}, apply: func() {

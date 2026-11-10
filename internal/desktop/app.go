@@ -123,8 +123,11 @@ type App struct {
 	// defaultRevealAt debounces revealPasswords disclosure after a selection
 	// read so each selection schedules exactly one narrow password read.
 	defaultRevealAt time.Time
-	// narrowRevealPending is the revealPasswords read currently in flight.
+	// narrowRevealPending is the revealPasswords read currently in flight;
+	// narrowRevealSeq identifies its request so a stale callback cannot clear
+	// a newer one.
 	narrowRevealPending bool
+	narrowRevealSeq     uint64
 }
 
 func New() *App {
