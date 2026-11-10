@@ -29,6 +29,12 @@ const CHECKOUT_DENY_LABEL = "拒绝本次跨源银行卡填充";
 const PROFILE_APPROVE_LABEL = "批准本次敏感字段填充";
 const PROFILE_DENY_LABEL = "拒绝本次敏感字段填充";
 const CHECKOUT_FRAME_LABEL = "（页面中的表单框架）";
+// The existing general acceptance locks through these exact native labels.
+const LOCK_LABEL = "立即锁定";
+const UNLOCK_SCREEN_LABEL = "解锁";
+// The only accepted result of the final journey: the real native lock already
+// invalidated the session, so the caller must not disconnect a session again.
+export const CHECKOUT_LOCKED = Object.freeze({ locked: true });
 const MONTH_OPTIONS = Array.from({ length: 12 }, (_, index) => {
   const value = String(index + 1).padStart(2, "0");
   return '<option value="' + value + '">' + value + "</option>";
@@ -1268,6 +1274,105 @@ async function runPickerCancelJourney(driver, card, topOrigin) {
   );
 }
 
+// The last journey, because it locks the session. A fresh exact synthetic
+// `/checkout` page, the same-site cross-origin child explicitly chosen and its
+// real native cross-origin review visible: the existing native "立即锁定"
+// action is then clicked while that review is pending and the lock screen's
+// "解锁" control is awaited, exactly like the general acceptance. The review is
+// never approved or refused. The lock must reject the pending review, leave
+// both forms blank and unsubmitted and leave the popup locked/disconnected.
+export async function runLockDuringReviewJourney(driver, card, topOrigin) {
+  const { page, input, openPopup, phase, eventually } = driver;
+  const frameOrigin = checkoutFrameOrigin(topOrigin);
+  const documentURL = topOrigin + "/checkout";
+  phase("checkout-lock-review:navigation");
+  await page.goto(documentURL);
+  assert(
+    page.url() === documentURL,
+    "Lock checkout document must be the exact /checkout page",
+  );
+  await eventually(
+    async () => (await childFormState(page, frameOrigin)) !== null,
+    "Checkout card frame did not load",
+  );
+  await assertControls(page, frameOrigin);
+  await assertBothBlank(
+    page,
+    frameOrigin,
+    "Fresh checkout forms must stay blank",
+  );
+
+  const popup = await openPopup();
+  await openCardDetail(popup, card, eventually);
+  assert(
+    await chooseChildOrigin(popup, topOrigin, frameOrigin, eventually),
+    "Expected exactly one explicit checkout child origin",
+  );
+  input([{ wait_label: CHECKOUT_APPROVE_LABEL }]);
+  phase("checkout-lock-review:native-review");
+  for (const label of [CHECKOUT_APPROVE_LABEL, CHECKOUT_DENY_LABEL]) {
+    const control = nativeControl(nativeControls(input), label);
+    assert(
+      control.enabled && control.showing,
+      "Checkout native review must be visible before lock",
+    );
+  }
+  await assertBothBlank(
+    page,
+    frameOrigin,
+    "Checkout forms changed before native lock",
+  );
+
+  phase("checkout-lock-review:lock");
+  // One physical native lock with the review pending; approve/refuse untouched.
+  input([{ click_label: LOCK_LABEL }, { wait_label: UNLOCK_SCREEN_LABEL }]);
+  await eventually(
+    async () => {
+      const controls = nativeControls(input);
+      const available = [];
+      for (const [name, label] of [
+        ["approve", CHECKOUT_APPROVE_LABEL],
+        ["refuse", CHECKOUT_DENY_LABEL],
+      ]) {
+        const control = nativeControl(controls, label);
+        if (control.present && control.enabled && control.showing)
+          available.push(name);
+      }
+      // Only public control names: no label geometry, values or paths.
+      assert(
+        available.length === 0,
+        "Native checkout review still available after lock: " +
+          available.join("/"),
+      );
+      return true;
+    },
+    "Native checkout review did not finish after lock",
+    8000,
+  );
+  await assertBothBlank(
+    page,
+    frameOrigin,
+    "Locked checkout approval received a value",
+  );
+
+  phase("checkout-lock-review:status");
+  const reopened = await openPopup();
+  await eventually(
+    async () => (await reopened.disabled("#refresh")) === true,
+    "Locked host still allowed matching",
+  );
+  const status = String((await reopened.text("#status")) || "");
+  assert(
+    status.includes("锁定") || status.includes("断开"),
+    "Lock status missing",
+  );
+  await assertBothBlank(
+    page,
+    frameOrigin,
+    "Locked checkout approval received a value",
+  );
+}
+
 export async function acceptCheckoutFrames(driver) {
   const { page, origin, input, fixture, openPopup, phase, eventually } = driver;
   assert(
@@ -1311,4 +1416,7 @@ export async function acceptCheckoutFrames(driver) {
   // a fresh same-origin document rather than the stale replaced one.
   await runSameOriginJourney(driver, card, topOrigin);
   await runPickerCancelJourney(driver, card, topOrigin);
+  // Last on purpose: locking the session invalidates it for every later stage.
+  await runLockDuringReviewJourney(driver, card, topOrigin);
+  return CHECKOUT_LOCKED;
 }

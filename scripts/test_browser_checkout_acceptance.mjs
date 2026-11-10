@@ -13,6 +13,8 @@ import {
   openCheckoutPicker,
   assertProgrammaticClickRefused,
   acceptCheckoutFrames,
+  runLockDuringReviewJourney,
+  CHECKOUT_LOCKED,
 } from "./browser_checkout_acceptance.mjs";
 
 const TOP_ORIGIN = "https://login.locklark.test:8443";
@@ -746,14 +748,14 @@ test("navigating the top tab never acts on the stale native approval", () => {
   );
 });
 
-test("fixed PASS summary names the top-navigation rejection", () => {
+test("fixed PASS summary names the top-navigation and pending-review lock", () => {
   const source = readFileSync(
     new URL("./browser_native_acceptance.mjs", import.meta.url),
     "utf8",
   );
   assert.match(
     source,
-    /checkout same-origin child approval \(profile review\) and picker cancellation, cross-origin approval\/refusal, cross-site, opaque sandbox, changed-document and top-navigation rejection/,
+    /checkout same-origin child approval \(profile review\) and picker cancellation, cross-origin approval\/refusal, cross-site, opaque sandbox, changed-document and top-navigation rejection, and lock while cross-origin card review is pending`/,
   );
 });
 
@@ -800,4 +802,203 @@ test("checkout choice options are strictly bounded", async () => {
     /Checkout cancel must be boolean/,
   );
   assert.deepEqual(popup.clicked, []);
+});
+
+test("lock during a pending cross-origin review is ordered, clicked physically and never decided", async () => {
+  const fixture = {
+    CardID: "0".repeat(32),
+    CardRevision: "a".repeat(64),
+    CardTitle: "Synthetic checkout card",
+    CardNumber: "4111111111111111",
+    CardHolder: "Synthetic Holder",
+    CardVerification: "123",
+    CardExpiry: "2030-01",
+    CardPIN: "1234",
+  };
+  const cardRow = '#vault-list [data-item-id="' + fixture.CardID + '"]';
+  let locked = false;
+  const log = [];
+  const page = {
+    url: () => (locked ? TOP_ORIGIN + "/" : TOP_ORIGIN + "/checkout"),
+    goto: async (url) => log.push(["goto", url]),
+    frames: () => [
+      {
+        url: () => CARD_ORIGIN + "/card",
+        evaluate: async () => blankFormState(),
+      },
+    ],
+    // The page-side form reader needs a DOM; returning a blank top form keeps
+    // the ordering test focused on native actions and popup clicks.
+    evaluate: async () => blankFormState(),
+  };
+  const reviewControls = () => {
+    const controls = {};
+    for (const label of [
+      "批准本次跨源银行卡填充",
+      "拒绝本次跨源银行卡填充",
+      "立即锁定",
+    ])
+      controls[label] = { present: true, enabled: !locked, showing: !locked };
+    controls["解锁"] = { present: locked, enabled: locked, showing: locked };
+    return controls;
+  };
+  const input = (actions, native, inspect) => {
+    const options = typeof inspect === "object" ? inspect : { inspect };
+    // Native label actions and the inspected probe both target the native
+    // window; only the harness key/pointer helper may pass a false flag.
+    assert.equal(actions.length > 0 || options.inspect === true, true);
+    assert.equal(options.preserve_focus, undefined);
+    log.push(["native", actions, options]);
+    for (const action of actions) {
+      assert.ok(
+        Object.prototype.hasOwnProperty.call(action, "click_label") ||
+          Object.prototype.hasOwnProperty.call(action, "wait_label") ||
+          Object.keys(action).length === 0,
+        "only native label actions or read-only probes",
+      );
+      if (action.click_label === "立即锁定") locked = true;
+      assert.notEqual(action.click_label, "批准本次跨源银行卡填充");
+      assert.notEqual(action.click_label, "拒绝本次跨源银行卡填充");
+      assert.notEqual(action.click_label, "解锁");
+    }
+    return actions.length === 0 ? { controls: reviewControls() } : {};
+  };
+  const labels = [TOP_LABEL, CARD_ORIGIN + FRAME_SUFFIX];
+  const controls = {
+    candidate: (selector) =>
+      selector.startsWith('#checkout-choices button[data-action="checkout-select"]')
+        ? 2
+        : 0,
+    // The popup is the reviewed picker popup: its cancel row is present.
+    cancelVisible: () => true,
+  };
+  const popup = {
+    clicked: [],
+    async disabled(selector) {
+      if (selector === "#refresh") return locked;
+      return false;
+    },
+    async count(selector) {
+      if (selector === '#filter-tabs [data-filter="credit_card"]') return 1;
+      if (selector === cardRow) return 1;
+      // Like the real adapter, an unmatched row reports 0 instead of null.
+      if (controls.candidate(selector)) return controls.candidate(selector);
+      if (selector === "#checkout-cancel") return 1;
+      return 0;
+    },
+    async click(selector) {
+      this.clicked.push(selector);
+      assert.equal(locked, false, "locked popup must not be clicked");
+      log.push(["popup", selector]);
+    },
+    async attribute(selector, name) {
+      if (name === "data-item-revision") return fixture.CardRevision;
+      if (name === "data-category") return "credit_card";
+      if (name === "data-checkout") return "1";
+      return null;
+    },
+    async text(selector) {
+      if (selector === "#detail-title") return fixture.CardTitle;
+      if (selector === "#detail-fill") return "选择结账表单并填充";
+      if (selector === "#status")
+        return locked ? "原生金库已锁定，请重新连接并配对" : "已连接";
+      if (selector === "#checkout-current-page")
+        return "当前页面来源：" + TOP_ORIGIN;
+      if (selector === "#checkout-status") return "不会自动选择";
+      const match = selector.match(/:nth-child\((\d+)\)$/);
+      if (match) return labels[Number(match[1]) - 1];
+      return "";
+    },
+    async visible(selector) {
+      if (selector === "#checkout-picker") return true;
+      if (selector === "#checkout-cancel") return true;
+      return controls.candidate(selector) === 1;
+    },
+  };
+  const phases = [];
+  const opens = [];
+  const driver = {
+    page,
+    input,
+    phase: (value) => phases.push(value),
+    openPopup: async () => {
+      opens.push(phases.length);
+      return popup;
+    },
+    eventually: async (check, message) => {
+      if (!(await check())) throw Error(message);
+    },
+  };
+  await runLockDuringReviewJourney(driver, fixture, TOP_ORIGIN);
+
+  // Fresh exact /checkout first; popup opened and picker used afterwards.
+  assert.deepEqual(log[0], ["goto", TOP_ORIGIN + "/checkout"]);
+  assert.deepEqual(phases, [
+    "checkout-lock-review:navigation",
+    "checkout-lock-review:native-review",
+    "checkout-lock-review:lock",
+    "checkout-lock-review:status",
+  ]);
+  // The initial popup opens before any native review, the reopened one only
+  // after the lock.
+  assert.deepEqual(opens, [1, 4]);
+  // The exact child origin is chosen, never the top origin.
+  assert.ok(
+    log.some(
+      ([kind, value]) =>
+        kind === "popup" &&
+        value === '#checkout-choices button[data-action="checkout-select"]:nth-child(2)',
+    ),
+  );
+  // Native grammar: review wait, read-only review probes, then exactly one
+  // physical lock followed by the unlock-screen wait. Nothing else is clicked,
+  // and the native window is never focused again while a popup is pending.
+  const nativeCalls = log.filter(([kind]) => kind === "native");
+  assert.deepEqual(
+    nativeCalls.map(([, actions]) => actions),
+    [
+      [{ wait_label: "批准本次跨源银行卡填充" }],
+      [],
+      [],
+      [{ click_label: "立即锁定" }, { wait_label: "解锁" }],
+      [],
+    ],
+  );
+  const lock = nativeCalls[3][1];
+  assert.deepEqual(lock, [
+    { click_label: "立即锁定" },
+    { wait_label: "解锁" },
+  ]);
+});
+
+
+test("acceptCheckoutFrames returns an explicit locked result only after the lock journey", () => {
+  const source = readFileSync(
+    new URL("./browser_checkout_acceptance.mjs", import.meta.url),
+    "utf8",
+  );
+  const accept = source.slice(source.indexOf("export async function acceptCheckoutFrames"));
+  const lock = accept.indexOf("await runLockDuringReviewJourney(driver, card, topOrigin);");
+  const result = accept.indexOf("return CHECKOUT_LOCKED;");
+  assert.ok(lock > 0 && result > lock);
+  for (const name of [
+    "runDefaultJourneys",
+    "runCrossSiteJourney",
+    "runSandboxJourney",
+    "runStaleDocumentJourney",
+    "runDenyNavigationJourney",
+    "runSameOriginJourney",
+    "runPickerCancelJourney",
+  ])
+    assert.ok(accept.indexOf("await " + name + "(") < lock, name);
+  assert.deepEqual(CHECKOUT_LOCKED, { locked: true });
+  // The harness skips its final popup disconnect only for that result.
+  const harness = readFileSync(
+    new URL("./browser_native_acceptance.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    harness,
+    /const checkout = await acceptCheckoutFrames\([\s\S]*?if \(checkout\?\.locked !== true\) \{[\s\S]*?popup\.click\("#disconnect"\)/,
+  );
 });

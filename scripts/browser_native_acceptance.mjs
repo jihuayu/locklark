@@ -572,9 +572,13 @@ try {
   input([{ click_label: "确认连接此扩展" }]);
   if (checkoutFrames) {
     await page.goto(origin + "/checkout");
-    await acceptCheckoutFrames({ page, origin, input, fixture, openPopup, phase, eventually });
-    popup = await openPopup();
-    await popup.click("#disconnect");
+    const checkout = await acceptCheckoutFrames({ page, origin, input, fixture, openPopup, phase, eventually });
+    // The final lock journey already invalidated/cleaned up the session; only
+    // any other result still needs the redundant popup disconnect.
+    if (checkout?.locked !== true) {
+      popup = await openPopup();
+      await popup.click("#disconnect");
+    }
   } else {
   if (process.env.LOCKLARK_TEST_POPUP_VAULT) {
     const downloadDirectory = join(state, "attachment-downloads");
@@ -833,6 +837,13 @@ try {
     "Checkout child document was not replaced",
     "Changed checkout document did not finish",
     "Changed checkout document received a value",
+    "Native checkout review must be visible before lock",
+    "Checkout forms changed before native lock",
+    "Native checkout review still available after lock",
+    "Native checkout review did not finish after lock",
+    "Locked host still allowed matching",
+    "Lock status missing",
+    "Locked checkout approval received a value",
   ];
   const report = {
     reason: safeReasons.includes(error?.message)
@@ -899,7 +910,7 @@ console.log(
   process.env.LOCKLARK_TEST_SHARED_CLIPBOARD === "1"
     ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} extension shared Locklark desktop native clipboard lease, private OS reads, foreign-owner TTL preservation, lock clearing and hidden-popup prepare cancellation`
     : checkoutFrames
-    ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} checkout same-origin child approval (profile review) and picker cancellation, cross-origin approval/refusal, cross-site, opaque sandbox, changed-document and top-navigation rejection`
+    ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} checkout same-origin child approval (profile review) and picker cancellation, cross-origin approval/refusal, cross-site, opaque sandbox, changed-document and top-navigation rejection, and lock while cross-origin card review is pending`
     : process.env.LOCKLARK_TEST_BROWSER_PARITY
     ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} quick pairing, inline fill, automatic sign-in, Passkey creation/assertion, relying-party signature verification and abort`
     : `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} fill/save/update/OTP and Passkey with native approval and private diagnostics`,
