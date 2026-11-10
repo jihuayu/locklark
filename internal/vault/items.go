@@ -57,6 +57,19 @@ type Item struct {
 	UpdatedAt   int64              `json:"updated_at,omitempty"`
 }
 
+// clearSensitiveItemBuffers zeroes decrypted attachment bodies and import
+// provenance in place. Slice lengths are preserved so callers that retain the
+// item can still tell that the persisted record carried those bytes. This is a
+// best-effort overwrite of these slices, not a guarantee of physical erasure
+// for Go strings or for unrelated copies.
+func clearSensitiveItemBuffers(it *Item) {
+	clear(it.Attachment)
+	for n := range it.Attachments {
+		clear(it.Attachments[n].Content)
+	}
+	clear(it.ImportSource)
+}
+
 const MaxNotes = 64 << 10
 
 // ValidNotes accepts only lossless KDBX/XML plain text. It does not trim or
@@ -542,9 +555,9 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 	var metadata []byte
 	items := make([]Item, 0, len(g.Entries)-1)
 	// A decoded-but-unappended item (pending) and every already accumulated item
-	// own private passkey bytes. Zeroization is best effort and runs only on
-	// failure exits: the success return transfers ownership of the records to
-	// the caller and must never clear them.
+	// own private passkey, attachment and provenance buffers. Zeroization is
+	// best effort and runs only on failure exits: the success return transfers
+	// ownership of the records to the caller and must never clear them.
 	success := false
 	var pending *Item
 	defer func() {
@@ -552,9 +565,11 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 			return
 		}
 		for i := range items {
+			clearSensitiveItemBuffers(&items[i])
 			items[i].ClearPasskeys()
 		}
 		if pending != nil {
+			clearSensitiveItemBuffers(pending)
 			pending.ClearPasskeys()
 		}
 		clear(metadata)

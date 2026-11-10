@@ -225,18 +225,44 @@ func readEntry(f *zip.File, limit int64, keep bool) ([]byte, int64, error) {
 	if err != nil {
 		return nil, 0, ErrInvalid
 	}
+	// The error paths below never close the reader themselves, so the defer
+	// owns it; the success path closes it explicitly and ignores the repeat.
+	defer r.Close()
 	var out bytes.Buffer
 	var dst io.Writer = io.Discard
 	if keep {
 		dst = &out
 	}
-	n, err := io.Copy(dst, io.LimitReader(r, limit+1))
-	closed := r.Close()
-	if n > limit {
-		return nil, 0, ErrLimit
+	data, n, err := readEntryBytes(r, dst, &out, f.UncompressedSize64, limit)
+	if err != nil {
+		return nil, 0, err
 	}
-	if err != nil || closed != nil || uint64(n) != f.UncompressedSize64 {
+	if err := r.Close(); err != nil {
+		clearBuffer(&out)
 		return nil, 0, ErrInvalid
 	}
-	return out.Bytes(), n, nil
+	return data, n, nil
+}
+
+// readEntryBytes copies one entry into the retained buffer and returns the
+// bytes. The buffer only becomes owned by the caller on success; after a copy
+// error, an oversize entry or a length mismatch the partial bytes are wiped.
+func readEntryBytes(reader io.Reader, dst io.Writer, buf *bytes.Buffer, expected uint64, limit int64) ([]byte, int64, error) {
+	n, err := io.Copy(dst, io.LimitReader(reader, limit+1))
+	if err != nil || n > limit || uint64(n) != expected {
+		clearBuffer(buf)
+		if n > limit {
+			return nil, 0, ErrLimit
+		}
+		return nil, 0, ErrInvalid
+	}
+	return buf.Bytes(), n, nil
+}
+
+// clearBuffer wipes the retained entry bytes and empties the buffer. Rewinding
+// with Reset alone would let a later write overwrite a secret that was never
+// cleared, so the bytes are zeroed in place first.
+func clearBuffer(buf *bytes.Buffer) {
+	clear(buf.Bytes())
+	buf.Reset()
 }
