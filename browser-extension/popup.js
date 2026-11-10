@@ -26,6 +26,37 @@
     hibpOptInPending = false,
     hibpNotice = "";
   const query = (selector) => document.querySelector(selector);
+  function freshNonce() {
+    try {
+      const bytes = crypto.getRandomValues(new Uint8Array(16));
+      return [...bytes]
+        .map((byte) => byte.toString(16).padStart(2, "0"))
+        .join("");
+    } catch {
+      return "";
+    }
+  }
+  // A card fill is authorized only from a trusted click in this extension page.
+  // `userActivation.isActive` is required wherever the API exists; a browser
+  // without it still needs the trusted click and a fresh nonce. New nonces are
+  // minted only while the popup is open and not already busy with an action.
+  // The proof carries only the nonce and its mint time; the worker consumes it
+  // exactly once and binds it to the tab/document the browser reports.
+  function cardGesture(event) {
+    try {
+      if (event?.isTrusted !== true) return null;
+      if (popupInactive || busy) return null;
+      const activation =
+        typeof navigator !== "undefined" ? navigator.userActivation : null;
+      if (activation != null && activation.isActive !== true) return null;
+      const nonce = freshNonce();
+      return nonce
+        ? { v: 2, scope: "credit_card", at: Date.now(), nonce }
+        : null;
+    } catch {
+      return null;
+    }
+  }
   // Only an explicit generate reply may repopulate the preview while a
   // lock/hide-time wipe is still unconfirmed; generic state polls may not.
   const TRUSTED_GENERATED_SOURCES = new Set(["generate", "popup-generate"]);
@@ -764,14 +795,21 @@
         (row.title || "（无标题）") +
         (row.subtitle ? " · " + row.subtitle : "");
       button.disabled = state.pending || busy;
-      button.addEventListener("click", () =>
-        void act({
+      button.addEventListener("click", (event) => {
+        const message = {
           type: "fill",
           id: row.id,
           revision: row.revision,
           ...(category === "login" ? {} : { category }),
-        }),
-      );
+        };
+        if (category !== "credit_card") {
+          void act(message);
+          return;
+        }
+        const userGesture = cardGesture(event);
+        if (!userGesture) return;
+        void act({ ...message, userGesture });
+      });
       if (category !== "login") {
         container.append(button);
         list.append(container);
@@ -2036,15 +2074,18 @@
       if (els.checkoutStatus) els.checkoutStatus.textContent = "";
     }
     if (!picker || picker.used || options.keepChoice) return;
+    // The picker was started by a consumed one-time gesture; an unused list is
+    // withdrawn together with its choice set.
     const nonce = picker.nonce;
     Promise.resolve()
       .then(() => api.runtime.sendMessage({ type: "checkout-cancel", nonce }))
       .catch(() => {});
   }
   async function startCheckoutPicker(detail, event) {
-    // Only a real user gesture may enumerate checkout frames.
-    if (event?.isTrusted !== true) return;
     if (!detail || !lastState?.connected || popupInactive || busy) return;
+    // Only a real user gesture may enumerate checkout frames.
+    const userGesture = cardGesture(event);
+    if (!userGesture) return;
     if (!checkoutChoicesSupported(detail)) {
       toast("当前原生宿主或浏览器不支持选择结账表单");
       return;
@@ -2054,7 +2095,12 @@
     const generation = ++actionGeneration;
     busy = true;
     const state = await send(
-      { type: "checkout-frames", id: detail.id, revision: detail.revision },
+      {
+        type: "checkout-frames",
+        id: detail.id,
+        revision: detail.revision,
+        userGesture,
+      },
       generation,
     );
     if (generation !== actionGeneration || popupInactive) return;
@@ -2080,7 +2126,6 @@
   }
   async function chooseCheckoutFrame(picker, choice, event) {
     // An explicit gesture for this exact opaque key; nothing is preselected.
-    if (event?.isTrusted !== true) return;
     if (!picker || picker !== checkoutPicker || picker.used) return;
     if (!checkoutChoiceKey(choice)) return;
     if (!picker.candidates.some((entry) => entry.choice === choice)) return;
@@ -2091,6 +2136,9 @@
       toast("选择结账表单已过期，请重新选择");
       return;
     }
+    // The picker's one-time gesture was consumed when it was opened; this
+    // click only selects one of its opaque candidates.
+    if (event?.isTrusted !== true) return;
     picker.used = true;
     if (checkoutPickerTimer) {
       clearTimeout(checkoutPickerTimer);
@@ -3613,10 +3661,13 @@
       }
     });
   }
-  async function detailAddSiteAndFill() {
+  async function detailAddSiteAndFill(event) {
     const detail = lastDetail;
     const origin = detailCurrentOrigin();
     if (!detail || !origin || !detailLacksOrigin(detail, origin)) return;
+    // Mint while this click is still the current action; two awaits follow.
+    const userGesture = checkoutIsCard(detail) ? cardGesture(event) : null;
+    if (checkoutIsCard(detail) && !userGesture) return;
     try {
       const reply = await classifyDetailAction({
         type: "add-site",
@@ -3636,6 +3687,7 @@
         type: "fill",
         id: lastDetail.id,
         revision: lastDetail.revision,
+        ...(userGesture ? { userGesture } : {}),
       });
     } catch {
       toast("无法添加到当前网站");
@@ -3999,10 +4051,15 @@
         void startCheckoutPicker(lastDetail, event);
         return;
       }
+      const userGesture = checkoutIsCard(lastDetail)
+        ? cardGesture(event)
+        : null;
+      if (checkoutIsCard(lastDetail) && !userGesture) return;
       void classifyDetailAction({
         type: "fill",
         id: lastDetail.id,
         revision: lastDetail.revision,
+        ...(userGesture ? { userGesture } : {}),
       }).catch(() => toast("请先刷新当前网站匹配"));
     });
     els.checkoutCancel.addEventListener("click", (event) =>
@@ -4021,7 +4078,9 @@
         void openAndFill(lastDetail, preferredFillURL(lastDetail));
     });
     els.detailHistoryLoad?.addEventListener("click", () => void loadHistoryVersions());
-    els.detailAddSite?.addEventListener("click", () => void detailAddSiteAndFill());
+    els.detailAddSite?.addEventListener("click", (event) =>
+      void detailAddSiteAndFill(event),
+    );
     els.detailArchive?.addEventListener("click", () => void detailArchiveToggle());
     els.detailTrash.addEventListener("click", () => void detailTrash());
     els.passkeySelect?.addEventListener("change", (event) =>

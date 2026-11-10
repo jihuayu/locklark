@@ -179,3 +179,21 @@ test("an unmatched select refuses the whole fill with zero writes and events", (
     assert.equal(month.events.length, 0);
   }
 });
+
+test("refuses a card fill without explicit user authorization", () => {
+  const number = control("input", { autocomplete: "cc-number" });
+  const csc = control("input", { autocomplete: "cc-csc" });
+  const harness = makeFillHarness({ elements: [number, csc] });
+  const result = harness.call(
+    ORIGIN,
+    { "cc-number": "4242", "cc-csc": "123" },
+    DEADLINE(harness),
+    false,
+    false,
+  );
+  assert.deepEqual(result, { filled: false, count: 0 });
+  assert.equal(number._value, "");
+  assert.equal(csc._value, "");
+  assert.equal(number.events.length, 0);
+  assert.equal(csc.events.length, 0);
+});
