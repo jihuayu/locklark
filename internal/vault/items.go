@@ -84,7 +84,30 @@ func xmlText(s string) bool {
 // MaxItems bounds one encrypted item snapshot.
 const MaxItems = 1024
 
-func validItems(items []Item, size int) bool {
+// validItems is the strict write path: KDBX/XML plain text only.
+func validItems(items []Item, size int) bool { return validItemsMode(items, size, legacyStrict) }
+
+// legacyCheckMode selects the read validation applied to an already decrypted
+// item snapshot.
+type legacyCheckMode int
+
+const (
+	legacyStrict legacyCheckMode = iota
+	legacyRead
+)
+
+// validLegacyItems accepts older snapshots whose JSON-only values (custom
+// fields, credit card and identity fields) carry valid UTF-8 control
+// characters that were never round-tripped through KDBX XML text. Direct XML
+// slots stay strict.
+func validLegacyItems(items []Item, size int) bool { return validItemsMode(items, size, legacyRead) }
+
+// legacyValue accepts any valid UTF-8 for read-only JSON-carried values that a
+// strict write would reject, such as legacy credit card/identity text. It
+// exists only for the read path; writes still go through xmlText.
+func legacyValue(s string) bool { return utf8.ValidString(s) }
+
+func validItemsMode(items []Item, size int, mode legacyCheckMode) bool {
 	if items == nil || len(items) > MaxItems {
 		return false
 	}
@@ -191,14 +214,24 @@ func validItems(items []Item, size int) bool {
 				}
 			}
 		}
-		if !validCreditCard(it.CreditCard) || !validIdentity(it.Identity) {
+		if !validCreditCard(it.CreditCard, mode) || !validIdentity(it.Identity, mode) {
 			return false
+		}
+		for _, s := range creditCardFieldValues(it.CreditCard) {
+			if !charge(len(s)) {
+				return false
+			}
+		}
+		for _, s := range identityFieldValues(it.Identity) {
+			if !charge(len(s)) {
+				return false
+			}
 		}
 		if len(it.History) > 100 {
 			return false
 		}
 		for _, h := range it.History {
-			if h.Timestamp < 0 || !xmlText(h.Action) || len(h.Action) > 64 || !utf8.ValidString(h.Password) || !utf8.ValidString(h.Title) || !utf8.ValidString(h.Username) || !utf8.ValidString(h.Notes) {
+			if h.Timestamp < 0 || len(h.Action) > 64 || !historyText(h, mode) {
 				return false
 			}
 			if len(h.Sections) > 0 && !validSections(h.Sections) {
@@ -208,8 +241,11 @@ func validItems(items []Item, size int) bool {
 				return false
 			}
 			for _, s := range h.Sections {
+				if !charge(len(s.ID) + len(s.Title)) {
+					return false
+				}
 				for _, f := range s.Fields {
-					if !charge(len(f.Value)) {
+					if !charge(len(f.ID) + len(f.Label) + len(f.Value) + len(f.Purpose)) {
 						return false
 					}
 				}
@@ -224,7 +260,7 @@ func validItems(items []Item, size int) bool {
 				return false
 			}
 			atts[strings.ToLower(att.ID)] = true
-			if !charge(int(att.Size)) {
+			if !charge(int(att.Size) + len(att.ID) + len(att.FileName) + len(att.MIMEType) + len(att.SHA256)) {
 				return false
 			}
 		}
@@ -274,6 +310,22 @@ func validItems(items []Item, size int) bool {
 	}
 	return true
 }
+
+// historyText validates persisted history text. #95 tightened every field with
+// xmlText for new writes; older JSON-only snapshots may still carry valid
+// UTF-8 control characters in the value fields, while the Action metadata key
+// stays strictly XML text.
+func historyText(h ItemHistoryEntry, mode legacyCheckMode) bool {
+	if !xmlText(h.Action) {
+		return false
+	}
+	check := xmlText
+	if mode == legacyRead {
+		check = legacyValue
+	}
+	return check(h.Password) && check(h.Title) && check(h.Username) && check(h.Notes)
+}
+
 func SealItems(metadata []byte, items []Item, epoch uint64, recipients []*age.X25519Recipient, signer ed25519.PrivateKey) (Snapshot, error) {
 	if err := ValidateItems(metadata, items); err != nil {
 		return Snapshot{}, err
@@ -776,7 +828,7 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 		items = append(items, it)
 		pending = nil
 	}
-	if !foundMeta || len(used) != len(db.Content.InnerHeader.Binaries) || !validItems(items, len(metadata)) {
+	if !foundMeta || len(used) != len(db.Content.InnerHeader.Binaries) || !validLegacyItems(items, len(metadata)) {
 		return nil, nil, ErrSnapshot
 	}
 	success = true

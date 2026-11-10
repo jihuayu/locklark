@@ -451,6 +451,8 @@ func validURL(u string) bool {
 	return err == nil
 }
 
+// validSections checks section metadata strictly. Field values are JSON-only
+// data and remain valid-UTF-8, as before #95.
 func validSections(sections []ItemSection) bool {
 	if len(sections) > 64 {
 		return false
@@ -478,24 +480,40 @@ func validSections(sections []ItemSection) bool {
 	return true
 }
 
-func validCreditCard(cc *CreditCardDetails) bool {
+func creditCardFieldValues(cc *CreditCardDetails) []string {
 	if cc == nil {
-		return true
+		return nil
 	}
-	for _, s := range []string{cc.CardholderName, cc.Type, cc.Number, cc.Verification, cc.ExpiryDate, cc.ValidFrom, cc.PIN, cc.IssuingBank} {
-		if len(s) > 1024 || !utf8.ValidString(s) {
+	return []string{cc.CardholderName, cc.Type, cc.Number, cc.Verification, cc.ExpiryDate, cc.ValidFrom, cc.PIN, cc.IssuingBank}
+}
+
+func identityFieldValues(id *IdentityDetails) []string {
+	if id == nil {
+		return nil
+	}
+	return []string{id.Title, id.FirstName, id.MiddleName, id.LastName, id.BirthDate, id.Company, id.Department, id.JobTitle, id.Email, id.Phone, id.AddressLine1, id.AddressLine2, id.City, id.State, id.PostalCode, id.Country, id.SSN, id.PassportNumber, id.LicenseNumber, id.Website}
+}
+
+func validCreditCard(cc *CreditCardDetails, mode legacyCheckMode) bool {
+	check := xmlText
+	if mode == legacyRead {
+		check = legacyValue
+	}
+	for _, s := range creditCardFieldValues(cc) {
+		if len(s) > 1024 || !check(s) {
 			return false
 		}
 	}
 	return true
 }
 
-func validIdentity(id *IdentityDetails) bool {
-	if id == nil {
-		return true
+func validIdentity(id *IdentityDetails, mode legacyCheckMode) bool {
+	check := xmlText
+	if mode == legacyRead {
+		check = legacyValue
 	}
-	for _, s := range []string{id.Title, id.FirstName, id.MiddleName, id.LastName, id.BirthDate, id.Company, id.Department, id.JobTitle, id.Email, id.Phone, id.AddressLine1, id.AddressLine2, id.City, id.State, id.PostalCode, id.Country, id.SSN, id.PassportNumber, id.LicenseNumber, id.Website} {
-		if len(s) > 1024 || !utf8.ValidString(s) {
+	for _, s := range identityFieldValues(id) {
+		if len(s) > 1024 || !check(s) {
 			return false
 		}
 	}
