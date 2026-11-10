@@ -78,6 +78,7 @@ function harness(options = {}) {
   const sent = [];
   const probes = [];
   const injections = [];
+  const hooks = { onCheckoutProbe: null };
   let portMessage, portDisconnect;
 
   const reply = (request, message) =>
@@ -153,8 +154,24 @@ function harness(options = {}) {
     scripting: {
       executeScript: async (scriptOptions) => {
         const target = scriptOptions.target || {};
+        if (scriptOptions.func === core.probe) {
+          const frameId = (target.frameIds || [])[0] ?? 0;
+          const match = frames.find((entry) => entry.frameId === frameId);
+          if (!match) throw Error("No frame with id " + frameId);
+          const origin = frameId
+            ? match.result.origin
+            : core.originFromURL(tabUrl);
+          return [
+            {
+              frameId,
+              documentId: match.documentId,
+              result: { top: frameId === 0, origin },
+            },
+          ];
+        }
         if (scriptOptions.func === core.checkoutProbe) {
           probes.push({ target });
+          hooks.onCheckoutProbe?.();
           return frames.map((entry) => ({
             frameId: entry.frameId,
             documentId: entry.documentId,
@@ -237,6 +254,9 @@ function harness(options = {}) {
     setTabUrl: (value) => {
       tabUrl = value;
     },
+    onCheckoutProbe: (fn) => {
+      hooks.onCheckoutProbe = fn;
+    },
     send: (message, from = sender) =>
       new Promise((resolve) => {
         let handled = false;
@@ -254,13 +274,28 @@ async function connect(h) {
   assert.equal(state.connected, true, "native pairing must succeed");
 }
 
-async function openPicker(h) {
+// The popup mints exactly this shape inside a trusted click: a nonce and its
+// mint time, with no tab, frame or document claim. The worker binds the nonce
+// to what the browser reports and consumes it once, within its TTL.
+let gestureSerial = 0;
+const freshNonce = () =>
+  (++gestureSerial).toString(16).padStart(32, "f");
+const gesture = (overrides = {}) => ({
+  v: 2,
+  scope: "credit_card",
+  at: CLOCK,
+  nonce: freshNonce(),
+  ...overrides,
+});
+
+async function openPicker(h, userGesture = gesture()) {
   const state = await h.send({
     type: "checkout-frames",
     id: CARD_ID,
     revision: CARD_REV,
+    userGesture,
   });
-  assert.ok(state && state.checkoutPicker, "picker view expected");
+  assert.ok(state && state.checkoutPicker, "picker view expected: " + state?.status);
   return state.checkoutPicker;
 }
 
@@ -382,6 +417,114 @@ test("a frame or document replaced before the choice is refused", async () => {
   assert.equal(h.injections.length, 0);
 });
 
+test("a page replaced mid-enumeration yields no choice set", async () => {
+  const h = harness();
+  await connect(h);
+  const gestureBefore = gesture();
+  // The click's page is replaced while the bounded probe is running.
+  h.onCheckoutProbe(() => {
+    h.onCheckoutProbe(null);
+    h.setFrames([
+      frame(0, "top-doc-2", TOP_ORIGIN, true),
+      frame(3, "sub-doc-9", FRAME_ORIGIN, false),
+    ]);
+  });
+  const state = await h.send({
+    type: "checkout-frames",
+    id: CARD_ID,
+    revision: CARD_REV,
+    userGesture: gestureBefore,
+  });
+  assert.equal(state.checkoutPicker, undefined);
+  assert.equal(h.sent.filter((r) => r.type === "match-profiles").length, 0);
+  assert.equal(h.injections.length, 0);
+  // The nonce was spent by the click, so it cannot retry the new document.
+  const again = await h.send({
+    type: "checkout-frames",
+    id: CARD_ID,
+    revision: CARD_REV,
+    userGesture: gestureBefore,
+  });
+  assert.equal(again.checkoutPicker, undefined);
+});
+
+test("the popup's tab/document claims are not part of the proof", async () => {
+  const h = harness();
+  await connect(h);
+  const state = await h.send({
+    type: "checkout-frames",
+    id: CARD_ID,
+    revision: CARD_REV,
+    userGesture: gesture({ tabId: 1, frameId: 0, documentId: "forged-document" }),
+  });
+  assert.equal(
+    state.checkoutPicker,
+    undefined,
+    "an extra claim is a different shape and is refused",
+  );
+  // A real nonce still binds to the browser-observed tab/document even if the
+  // popup never names one.
+  const picker = await openPicker(h);
+  assert.equal(picker.topOrigin, TOP_ORIGIN);
+});
+
+test("a nonce is consumed once and expires within ten seconds", async () => {
+  const h = harness();
+  await connect(h);
+  const used = gesture();
+  await openPicker(h, used);
+  const replay = await h.send({
+    type: "checkout-frames",
+    id: CARD_ID,
+    revision: CARD_REV,
+    userGesture: { ...used },
+  });
+  assert.equal(replay.checkoutPicker, undefined, "a nonce is never reusable");
+
+  // A nonce minted by a click more than ten seconds ago is stale.
+  const late = gesture();
+  CLOCK += 10_001;
+  const stale = await h.send({
+    type: "checkout-frames",
+    id: CARD_ID,
+    revision: CARD_REV,
+    userGesture: late,
+  });
+  assert.equal(stale.checkoutPicker, undefined);
+  // Inside the window (minted now) the fresh nonce is still good.
+  const ok = await h.send({
+    type: "checkout-frames",
+    id: CARD_ID,
+    revision: CARD_REV,
+    userGesture: gesture(),
+  });
+  assert.ok(ok.checkoutPicker);
+  CLOCK = 1_700_000_000_000;
+});
+
+test("a full nonce registry fails closed instead of evicting live nonces", async () => {
+  const h = harness();
+  await connect(h);
+  const first = gesture();
+  await openPicker(h, first);
+  for (let index = 1; index < 64; index++) await openPicker(h);
+  const refused = await h.send({
+    type: "checkout-frames",
+    id: CARD_ID,
+    revision: CARD_REV,
+    userGesture: gesture(),
+  });
+  assert.equal(refused.checkoutPicker, undefined);
+  // An earlier nonce is still consumed: the cap never made a replay valid.
+  const replay = await h.send({
+    type: "checkout-frames",
+    id: CARD_ID,
+    revision: CARD_REV,
+    userGesture: { ...first },
+  });
+  assert.equal(replay.checkoutPicker, undefined);
+});
+
 test("an expired picker nonce is refused", async () => {
   const h = harness();
   await connect(h);
@@ -480,3 +623,4 @@ test("a response from another frame or document is not trusted or retried", asyn
   const final = await h.send({ type: "state" });
   assert.match(final.status, /登录填充结果未确认/);
 });
+

@@ -936,11 +936,14 @@ func (r *Response) Clear() {
 	r.Code = ""
 	r.Credential = ""
 	r.CredentialID = ""
+	r.GeneratedPassword = ""
+	r.FieldValue = ""
 	r.Passkeys = nil
 	r.PasskeyTruncated = false
 	r.CopyTicket = ""
 	r.CopyMode = ""
 	r.CleanupTTLSeconds = 0
+	r.Data = ""
 }
 
 func (Response) String() string   { return "[native browser response]" }

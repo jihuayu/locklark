@@ -262,15 +262,27 @@ func fieldLabel(key string) string {
 	return key
 }
 
+// releasePlainDetail drops the unmasked detail once no disclosure still needs
+// it. Revealed fields and an open Large Type view are independent owners of the
+// same plaintext buffer, so one ending must not invalidate the other.
+func (a *App) releasePlainDetail() {
+	if len(a.v2.revealed) == 0 && !a.v2.largeTypeOpen {
+		a.v2.detailPlain = nil
+	}
+}
+
 // revealField toggles a concealed field. The unmasked value is held only in
-// detailPlain and is dropped when the exposure timer fires or the vault locks.
+// detailPlain and is dropped when the last exposure ends or the vault locks.
 func (a *App) revealField(key string) {
 	if a.v2.detail == nil {
 		return
 	}
 	if a.v2.revealed[key] {
 		delete(a.v2.revealed, key)
-		a.v2.revealUntil = time.Time{}
+		if len(a.v2.revealed) == 0 {
+			a.v2.revealUntil = time.Time{}
+			a.releasePlainDetail()
+		}
 		a.status = "字段已隐藏"
 		return
 	}
@@ -420,7 +432,9 @@ func (a *App) revealPasswordValue() string {
 }
 
 // copyField copies a field with an owned clipboard lease. The background
-// ticker performs the clear even when no View is rendering.
+// ticker performs the clear even when no View is rendering. Non-concealed
+// fields are already present in the masked detail, so copying them must not
+// pull the full plaintext item into memory.
 func (a *App) copyField(key string) {
 	if a.v2.detail == nil {
 		return
@@ -431,27 +445,38 @@ func (a *App) copyField(key string) {
 		a.requestOTP("copy")
 		return
 	}
+	if !isConcealedKey(a.v2.detail, key) {
+		value, ok := fieldValue(a.v2.detail, key)
+		a.copyValue(value, ok)
+		a.releasePlainDetail()
+		return
+	}
 	a.loadPlainDetail(func(plain *personal.ItemDetail) {
 		value, ok := fieldValue(plain, key)
-		if !ok {
-			a.status = "字段不存在"
-			return
-		}
-		if value == "" {
-			a.status = "字段为空"
-			return
-		}
-		s, generation := a.session, a.generation
-		valid := func() bool {
-			return a.session == s && a.generation == generation && a.v2.detail != nil
-		}
-		timeout := a.clipboardTimeout()
-		if err := a.writeClipboard([]byte(value), clipboardDeadline(timeout), valid); err != nil {
-			a.status = message(err)
-			return
-		}
-		a.status = clipboardStatus(timeout)
+		a.copyValue(value, ok)
+		a.releasePlainDetail()
 	})
+}
+
+func (a *App) copyValue(value string, ok bool) {
+	if !ok {
+		a.status = "字段不存在"
+		return
+	}
+	if value == "" {
+		a.status = "字段为空"
+		return
+	}
+	s, generation := a.session, a.generation
+	valid := func() bool {
+		return a.session == s && a.generation == generation && a.v2.detail != nil
+	}
+	timeout := a.clipboardTimeout()
+	if err := a.writeClipboard([]byte(value), clipboardDeadline(timeout), valid); err != nil {
+		a.status = message(err)
+		return
+	}
+	a.status = clipboardStatus(timeout)
 }
 
 func (a *App) CopyField(key string) { a.copyField(key) }
@@ -566,6 +591,7 @@ func (a *App) closeLargeType() {
 	a.v2.largeTypeKey = ""
 	a.v2.largeTypeLabel = ""
 	a.v2.largeTypeValue = ""
+	a.releasePlainDetail()
 }
 
 func (a *App) CloseLargeType() { a.closeLargeType() }

@@ -39,6 +39,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     checkoutPicker = null;
   const STAGED_TTL = 5 * 60 * 1000,
     LAST_FILLED_TTL = 60 * 1000,
+    GENERATED_TTL = 5 * 60 * 1000,
     HISTORY_LIMIT = 20,
     MULTI_STEP_TTL = 120000,
     CHECKOUT_PICKER_TTL = 30000,
@@ -242,9 +243,42 @@ if (typeof importScripts === "function") importScripts("core.js");
     for (const record of stagedSaves.values()) zeroStaged(record);
     stagedSaves.clear();
   }
+  // Generated plaintext is released by its own timer, not only by a later
+  // visit to the popup or history. A released session never comes back: after
+  // lock, disconnect, session reset or a resumed worker there is no entry.
+  let generatedTimer = null,
+    generatedTimerAt = 0;
   function clearGeneratedHistory() {
+    if (generatedTimer) {
+      clearTimeout(generatedTimer);
+      generatedTimer = null;
+    }
+    generatedTimerAt = 0;
     for (const entry of generatedHistory) entry.password = "";
     generatedHistory.length = 0;
+  }
+  function releaseGenerated() {
+    generatedTimer = null;
+    generatedTimerAt = 0;
+    pruneGenerated();
+    scheduleGeneratedPrune();
+  }
+  function scheduleGeneratedPrune() {
+    if (generatedTimer) clearTimeout(generatedTimer);
+    generatedTimer = null;
+    generatedTimerAt = 0;
+    if (!generatedHistory.length) return;
+    let next = Infinity;
+    for (const entry of generatedHistory)
+      if (Number.isSafeInteger(entry.expiresAt) && entry.expiresAt < next)
+        next = entry.expiresAt;
+    if (!Number.isFinite(next)) return;
+    generatedTimerAt = next;
+    generatedTimer = setTimeout(
+      releaseGenerated,
+      Math.max(0, Math.min(next - Date.now(), 24 * 60 * 60 * 1000)),
+    );
+    generatedTimer.unref?.();
   }
   function clearLastFilled() {
     for (const entry of lastFilledCredentials.values()) entry.password = "";
@@ -255,6 +289,86 @@ if (typeof importScripts === "function") importScripts("core.js");
     clearGeneratedHistory();
     clearLastFilled();
   }
+  function pruneGenerated(now = Date.now()) {
+    for (let index = generatedHistory.length - 1; index >= 0; index--) {
+      const entry = generatedHistory[index];
+      if (now < entry.expiresAt) continue;
+      entry.password = "";
+      generatedHistory.splice(index, 1);
+    }
+  }
+  // A worker that was suspended and resumed starts with an empty heap, so no
+  // old entry can return and there is no timer to reuse. Discard any armed
+  // deadline from a previous session and only arm one for live entries.
+  function resumeGenerated() {
+    if (generatedTimer) {
+      clearTimeout(generatedTimer);
+      generatedTimer = null;
+    }
+    generatedTimerAt = 0;
+    pruneGenerated();
+    scheduleGeneratedPrune();
+  }
+  resumeGenerated();
+
+  // One-time card-fill authorizations. The popup, the inline menu and the
+  // context menu mint only {v: 2, scope, at, nonce} synchronously inside a
+  // trusted click. Claimed tab, frame or document ids are never accepted: the
+  // worker binds each nonce to the context the browser reports for that same
+  // request (the active tab for popup/menu requests, the message sender for
+  // content frames). Each nonce is consumed exactly once within a short TTL,
+  // and the injected frame receives a plain authorization flag, never the
+  // nonce.
+  const USER_GESTURE_TTL = 10 * 1000,
+    GESTURE_REPLAY_LIMIT = 64;
+  const consumedGestures = new Map(),
+    gestureReplayOrder = [];
+  function userGestureValid(value) {
+    return (
+      !!value &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      Object.keys(value).sort().join(",") === "at,nonce,scope,v" &&
+      value.v === 2 &&
+      value.scope === "credit_card" &&
+      typeof value.nonce === "string" &&
+      /^[a-f0-9]{32}$/.test(value.nonce) &&
+      Number.isSafeInteger(value.at) &&
+      value.at > 0
+    );
+  }
+  function forgetConsumedGestures(now = Date.now()) {
+    while (
+      gestureReplayOrder.length &&
+      gestureReplayOrder[0].expiresAt <= now
+    )
+      consumedGestures.delete(gestureReplayOrder.shift().nonce);
+  }
+  // True only for a fresh, never-seen nonce bound to the browser-observed
+  // context given by the caller; the nonce is recorded as consumed before
+  // returning. Replays, stale, malformed or unbound values are refused and
+  // consume nothing.
+  function consumeUserGesture(value, c) {
+    if (!userGestureValid(value) || !c) return false;
+    const now = Date.now();
+    if (value.at > now + 1000 || now - value.at > USER_GESTURE_TTL) return false;
+    forgetConsumedGestures(now);
+    if (consumedGestures.has(value.nonce)) return false;
+    // The registry only holds nonces that still have time left, so a full
+    // registry refuses this request rather than dropping a live nonce and
+    // letting its replay through again.
+    if (gestureReplayOrder.length >= GESTURE_REPLAY_LIMIT) return false;
+    const record = {
+      nonce: value.nonce,
+      tabId: c.tabId,
+      frameId: c.frameId || 0,
+      documentId: c.documentId,
+      expiresAt: value.at + USER_GESTURE_TTL,
+    };
+    consumedGestures.set(record.nonce, record);
+    gestureReplayOrder.push(record);
+    return true;
+  }
   function pruneStaged() {
     const now = Date.now();
     for (const [stageId, record] of stagedSaves)
@@ -264,6 +378,7 @@ if (typeof importScripts === "function") importScripts("core.js");
         entry.password = "";
         lastFilledCredentials.delete(tabId);
       }
+    pruneGenerated(now);
   }
   function stagedForTab(tabId, origin) {
     pruneStaged();
@@ -906,7 +1021,13 @@ if (typeof importScripts === "function") importScripts("core.js");
       if (result && typeof result.catch === "function") result.catch(() => {});
     } catch {}
   }
-  function contextMenuClicked(info) {
+  // The same 32-hex nonce the popup and inline menu mint inside a click.
+  function menuNonce() {
+    return [...crypto.getRandomValues(new Uint8Array(16))]
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+  }
+  function contextMenuClicked(info, menuTab) {
     const id = typeof info?.menuItemId === "string" ? info.menuItemId : "";
     if (id === "locklark-connect") {
       void connect();
@@ -948,7 +1069,26 @@ if (typeof importScripts === "function") importScripts("core.js");
       return;
     }
     if (kind === "fill-card") {
-      void fillItemCategory(itemId, revision, "card");
+      // The context-menu click is a trusted click the worker itself receives;
+      // the menu branch mints the same at+nonce proof on that click and binds
+      // it to the tab Chrome reports for that click through fillItemCategory.
+      const userGesture = {
+        v: 2,
+        scope: "credit_card",
+        at: Date.now(),
+        nonce: menuNonce(),
+      };
+      const clickedTab =
+        menuTab &&
+        typeof menuTab === "object" &&
+        !Array.isArray(menuTab) &&
+        Number.isSafeInteger(menuTab.id) &&
+        menuTab.id > 0 &&
+        Number.isSafeInteger(menuTab.windowId) &&
+        menuTab.windowId > 0
+          ? { id: menuTab.id, windowId: menuTab.windowId }
+          : null;
+      void fillItemCategory(itemId, revision, "card", userGesture, clickedTab);
     }
   }
   function commandInvoked(command) {
@@ -1005,7 +1145,9 @@ if (typeof importScripts === "function") importScripts("core.js");
     }
     return promise;
   }
-  async function capture(frameId = 0) {
+  // Browser-observed identity of the active tab and its top document (and of
+  // the sender frame when frameId > 0).
+  async function captureTopDocument(frameId = 0) {
     if (!Number.isSafeInteger(frameId) || frameId < 0) throw Error("refused");
     const tabs = await api.tabs.query({ active: true, currentWindow: true });
     if (
@@ -1203,19 +1345,35 @@ if (typeof importScripts === "function") importScripts("core.js");
     };
   }
   async function startCheckoutPicker(message) {
-    if (Object.keys(message).sort().join(",") !== "id,revision,type")
+    if (Object.keys(message).sort().join(",") !== "id,revision,type,userGesture")
       throw Error("refused");
     if (
       !/^[a-f0-9]{32}$/.test(message.id || "") ||
       !/^[a-f0-9]{64}$/.test(message.revision || "")
     )
       throw Error("refused");
+    // The popup only supplies the nonce. The tab, its top frame and the
+    // nonce's age all come from the browser below.
+    const userGesture = message.userGesture;
     // A new picker always invalidates the previous public choice set.
     clearCheckoutPicker();
     if (!capability || pending || pendingOTP || pendingPasskey)
       throw Error("refused");
     if (!checkoutFramePolicy()) {
       status = "当前原生宿主或浏览器不支持选择结账表单";
+      throw Error("refused");
+    }
+    const generation = epoch,
+      expectedCapability = capability;
+    // Freeze the exact top document now; a picker started for a page that was
+    // already replaced is useless and must not inherit this tab's grant.
+    // The top document is identity-checked by the bounded all-frame probe
+    // below, which also proves the tab did not change mid-enumeration.
+    const frozenCapture = await captureTopDocument(0);
+    if (generation !== epoch || capability !== expectedCapability)
+      throw Error("refused");
+    if (!consumeUserGesture(userGesture, frozenCapture)) {
+      clearCheckoutPicker();
       throw Error("refused");
     }
     const item = await getVaultItem(message.id, message.revision);
@@ -1228,10 +1386,16 @@ if (typeof importScripts === "function") importScripts("core.js");
       item.readOnly
     )
       throw Error("refused");
-    const generation = epoch,
-      expectedCapability = capability;
-    const capture = await checkoutCaptureFrames();
     if (generation !== epoch || capability !== expectedCapability)
+      throw Error("refused");
+    const capture = await checkoutCaptureFrames();
+    if (
+      generation !== epoch ||
+      capability !== expectedCapability ||
+      capture.tabId !== frozenCapture.tabId ||
+      capture.windowId !== frozenCapture.windowId ||
+      capture.topDocumentId !== frozenCapture.topDocumentId
+    )
       throw Error("refused");
     const candidates = new Map();
     for (const frame of capture.frames) {
@@ -1259,6 +1423,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       topOrigin: capture.topOrigin,
       topDocumentId: capture.topDocumentId,
       signature: checkoutFrameSignature(capture),
+      userAuthorized: userGesture,
       candidates,
       createdAt: Date.now(),
       expiresAt,
@@ -1293,6 +1458,8 @@ if (typeof importScripts === "function") importScripts("core.js");
       picker.revision !== message.revision ||
       picker.epoch !== epoch ||
       picker.capability !== capability ||
+      // The picker's own TTL alone governs selection; a consumed gesture does
+      // not retire the list the user is looking at.
       Date.now() > picker.expiresAt
     ) {
       clearCheckoutPicker();
@@ -1309,7 +1476,16 @@ if (typeof importScripts === "function") importScripts("core.js");
     const chosen = consumeCheckoutChoice(message);
     if (!chosen) throw Error("refused");
     status = "已选择结账表单，正在核对当前页面";
-    void checkoutFill(chosen.picker, chosen.entry).catch(() => {});
+    // The picker exists only because a fresh one-time gesture was consumed for
+    // its exact tab/document. The grant is detached from any replayable request
+    // value and can authorize only this one crossing of the async gap.
+    const grant = Object.freeze({
+      nonce: chosen.picker.userAuthorized.nonce,
+      tabId: chosen.picker.tabId,
+      windowId: chosen.picker.windowId,
+      documentId: chosen.picker.topDocumentId,
+    });
+    void checkoutFill(chosen.picker, chosen.entry, grant).catch(() => {});
     return true;
   }
   function cancelCheckoutPickerMessage(message) {
@@ -1435,9 +1611,22 @@ if (typeof importScripts === "function") importScripts("core.js");
     if (!profile) throw Error("refused");
     return profile;
   }
-  async function checkoutFill(picker, target) {
+  async function checkoutFill(picker, target, grant = null) {
     const generation = epoch;
     if (pending || pendingOTP || pendingPasskey) throw Error("refused");
+    // The picker can only exist after a fresh gesture was consumed for it; the
+    // caller must pass the exact frozen grant derived from that consumption.
+    if (
+      !grant ||
+      !Object.isFrozen(grant) ||
+
+      grant.nonce !== picker?.userAuthorized?.nonce ||
+      grant.tabId !== picker?.tabId ||
+      grant.windowId !== picker?.windowId ||
+      grant.documentId !== picker?.topDocumentId ||
+      !picker.topDocumentId
+    )
+      throw Error("refused");
     const intent = {
       kind: "checkout",
       itemId: picker.itemId,
@@ -1540,6 +1729,7 @@ if (typeof importScripts === "function") importScripts("core.js");
             fill.fields,
             Date.now() + 1500,
             intent.frameId === 0,
+            true,
           ],
         });
       } finally {
@@ -1635,7 +1825,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     };
   }
   async function current(expected) {
-    const now = await capture(expected.frameId || 0);
+    const now = await captureTopDocument(expected.frameId || 0);
     if (!core.sameContext(expected, now)) throw Error("refused");
   }
   async function runWatchtower(message) {
@@ -1649,7 +1839,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     let c = context;
     if (!c) {
       try {
-        c = await capture();
+        c = await captureTopDocument();
       } catch {
         if (generation !== epoch) throw Error("refused");
         const site = await activeSite();
@@ -1944,7 +2134,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     matchCategory = category;
     updateBadge();
     const generation = epoch,
-      c = await capture(frameId);
+      c = await captureTopDocument(frameId);
     await current(c);
     if (generation !== epoch) throw Error("refused");
     const fieldsToSend = fields(c);
@@ -1976,8 +2166,15 @@ if (typeof importScripts === "function") importScripts("core.js");
     updateBadge();
     rebuildContextMenus();
   }
-  async function fill(itemId, revision, category = "login") {
+  async function fill(
+    itemId,
+    revision,
+    category = "login",
+    userAuthorized = false,
+  ) {
     if (!validCategory(category)) throw Error("refused");
+    if (category === "credit_card" && userAuthorized !== true)
+      throw Error("refused");
     const row = rows.find(
         (r) =>
           r.id === itemId &&
@@ -2033,13 +2230,23 @@ if (typeof importScripts === "function") importScripts("core.js");
                 category === "identity"
                   ? core.fillIdentityDocument
                   : core.fillCardDocument,
-              args: [
-                c.origin,
-                data,
-                Date.now() + 1500,
-                (c.frameId || 0) > 0,
-                category,
-              ],
+              args:
+                category === "credit_card"
+                  ? [
+                      c.origin,
+                      data,
+                      Date.now() + 1500,
+                      (c.frameId || 0) > 0,
+                      category,
+                      true,
+                    ]
+                  : [
+                      c.origin,
+                      data,
+                      Date.now() + 1500,
+                      (c.frameId || 0) > 0,
+                      category,
+                    ],
             }),
             generation,
           );
@@ -2269,7 +2476,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     status = "正在捕获当前登录";
     let captured;
     try {
-      const c = await bounded(capture(), generation);
+      const c = await bounded(captureTopDocument(), generation);
       intent.tabId = c.tabId;
       intent.windowId = c.windowId;
       if (itemId && !core.sameContext(c, previous)) throw Error("refused");
@@ -2417,22 +2624,26 @@ if (typeof importScripts === "function") importScripts("core.js");
     return { ...core.generatePassword(options), historyId: "" };
   }
   function recordGenerated(origin, username, generated) {
+    const createdAt = Date.now();
     const entry = {
       id: id(),
       origin,
       username: typeof username === "string" ? username : "",
       password: generated.password,
       profile: generated.profile,
-      createdAt: Date.now(),
+      createdAt,
+      expiresAt: createdAt + GENERATED_TTL,
     };
     generatedHistory.unshift(entry);
     while (generatedHistory.length > HISTORY_LIMIT) {
       const removed = generatedHistory.pop();
       if (removed) removed.password = "";
     }
+    scheduleGeneratedPrune();
     return entry.id;
   }
   function generatedHistoryView() {
+    pruneGenerated();
     return generatedHistory.map((entry) => ({
       id: entry.id,
       origin: entry.origin,
@@ -3357,7 +3568,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       } catch {
         password = core.generatePasswordString(options);
       }
-      const c = await capture();
+      const c = await captureTopDocument();
       await current(c);
       const results = await api.scripting.executeScript({
         target: { tabId: c.tabId, documentIds: [c.documentId] },
@@ -3379,10 +3590,37 @@ if (typeof importScripts === "function") importScripts("core.js");
       updateBadge();
     }
   }
-  async function fillItemCategory(itemId, revision, category) {
+  async function fillItemCategory(
+    itemId,
+    revision,
+    category,
+    userGesture = null,
+    clickedTab = null,
+  ) {
     const kind = core.normalizeCategory(category);
     if (kind !== "card" && kind !== "identity") {
       status = "此条目类别不支持填充";
+      return;
+    }
+    if (kind === "card" && !userGestureValid(userGesture)) {
+      status = "本次信用卡填充需要明确的用户操作";
+      return;
+    }
+    // The card menu entry is authorized only for the exact tab Chrome reported
+    // for that click; a missing or malformed tab identity binds nothing.
+    if (
+      kind === "card" &&
+      !(
+        clickedTab &&
+        typeof clickedTab === "object" &&
+        !Array.isArray(clickedTab) &&
+        Number.isSafeInteger(clickedTab.id) &&
+        clickedTab.id > 0 &&
+        Number.isSafeInteger(clickedTab.windowId) &&
+        clickedTab.windowId > 0
+      )
+    ) {
+      status = "本次信用卡填充需要明确的用户操作";
       return;
     }
     if (
@@ -3402,7 +3640,17 @@ if (typeof importScripts === "function") importScripts("core.js");
     const intent = { kind: "profile", itemId, revision, injectionStarted: false };
     pending = intent;
     try {
-      const c = await capture();
+      const c = await captureTopDocument();
+      // Bind the menu click's nonce to the tab and document the browser
+      // reports before any native request leaves, and require that context to
+      // be the tab Chrome attached to the click itself.
+      if (
+        kind === "card" &&
+        (c.tabId !== clickedTab.id || c.windowId !== clickedTab.windowId)
+      )
+        throw Error("refused");
+      if (kind === "card" && !consumeUserGesture(userGesture, c))
+        throw Error("refused");
       await current(c);
       const profileKind = kind === "card" ? "credit_card" : "identity";
       const match = await request(
@@ -3456,7 +3704,7 @@ if (typeof importScripts === "function") importScripts("core.js");
               : core.fillIdentityDocument,
           args:
             kind === "card"
-              ? [c.origin, fill.fields, Date.now() + 1500, true]
+              ? [c.origin, fill.fields, Date.now() + 1500, true, true]
               : [c.origin, fill.fields, Date.now() + 1500, false, "identity"],
         });
       } finally {
@@ -4564,7 +4812,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     }
   }
   async function contentContext(sender) {
-    const c = await capture(sender.frameId);
+    const c = await captureTopDocument(sender.frameId);
     if (
       c.tabId !== sender.tab.id ||
       c.windowId !== sender.tab.windowId ||
@@ -4794,12 +5042,24 @@ if (typeof importScripts === "function") importScripts("core.js");
       else if (message.type === "inline-fill")
         category = message.category ?? "login";
       if (!validCategory(category)) throw Error("refused");
+      // The inline menu is the only page-side card entry; its nonce is bound
+      // to the browser-verified sender frame/document, never a page claim.
+      if (
+        category === "credit_card" &&
+        !consumeUserGesture(message.userGesture, c)
+      )
+        throw Error("refused");
       if (message.type === "inline-fill") {
-        await fill(message.id, message.revision, category);
+        await fill(
+          message.id,
+          message.revision,
+          category,
+          category === "credit_card",
+        );
       } else if (message.type === "inline-fill-identity") {
         await fill(message.id, message.revision, "identity");
       } else if (message.type === "inline-fill-card") {
-        await fill(message.id, message.revision, "credit_card");
+        await fill(message.id, message.revision, "credit_card", true);
       } else if (message.type === "inline-otp") {
         await otp(message.id, message.revision);
       } else {
@@ -5716,7 +5976,7 @@ if (typeof importScripts === "function") importScripts("core.js");
         case "commit-staged-save": {
           if (!/^[a-f0-9]{32}$/.test(message.stageId || ""))
             throw Error("refused");
-          const c = await capture();
+          const c = await captureTopDocument();
           const result = await commitStagedSave(
             message.stageId,
             {
@@ -5731,7 +5991,7 @@ if (typeof importScripts === "function") importScripts("core.js");
         }
         case "dismiss-staged-save":
         case "never-save-origin": {
-          const c = await capture();
+          const c = await captureTopDocument();
           const stageId = /^[a-f0-9]{32}$/.test(message.stageId || "")
             ? message.stageId
             : "";
@@ -5763,14 +6023,15 @@ if (typeof importScripts === "function") importScripts("core.js");
           };
         }
         case "generator-fill": {
-          const c = await capture();
+          const c = await captureTopDocument();
           const result = await inlineGenerateFill(message, c, epoch);
           return { ...result, status };
         }
         case "generator-history-fill": {
           if (!/^[a-f0-9]{32}$/.test(message.historyId || ""))
             throw Error("refused");
-          const c = await capture();
+          pruneGenerated();
+          const c = await captureTopDocument();
           const entry = generatedHistory.find(
             (item) => item.id === message.historyId,
           );
@@ -5820,7 +6081,8 @@ if (typeof importScripts === "function") importScripts("core.js");
         case "generator-history-save": {
           if (!/^[a-f0-9]{32}$/.test(message.historyId || ""))
             throw Error("refused");
-          const c = await capture();
+          pruneGenerated();
+          const c = await captureTopDocument();
           const entry = generatedHistory.find(
             (item) => item.id === message.historyId,
           );
@@ -5983,7 +6245,19 @@ if (typeof importScripts === "function") importScripts("core.js");
             !validCategory(category)
           )
             throw Error("refused");
-          void fill(message.id, message.revision, category).catch(() => {
+          if (category === "credit_card") {
+            // Bind the popup's nonce to the active tab and its top document
+            // as the browser reports them now, never to a popup claim.
+            const active = await captureTopDocument(0);
+            if (!consumeUserGesture(message.userGesture, active))
+              throw Error("refused");
+          }
+          void fill(
+            message.id,
+            message.revision,
+            category,
+            category === "credit_card",
+          ).catch(() => {
             if (requestEpoch === epoch) status = "本次请求被拒绝";
           });
           break;
