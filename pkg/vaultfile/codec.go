@@ -17,7 +17,10 @@ import (
 //     limited before anything is decoded;
 //   - numbers must be positive integers (no fractions, exponents, negatives
 //     or leading zeros);
-//   - binary values are base64url without padding, canonical for the value.
+//   - binary values are base64url without padding, canonical for the value;
+//   - the input must be byte-identical to the canonical encoding of the value
+//     it parses: any other spelling of valid JSON (whitespace, member order or
+//     string escapes) is a non_canonical error.
 //
 // Encoding never uses json.Marshal on a struct: output member order is the
 // schema order below so fixed vectors are byte-stable.
@@ -37,6 +40,11 @@ var fileMembers = []string{
 // RevisionID. An unsigned builder draft is not a wire file and is rejected
 // here (invalid_value at content_signature for a null sig, missing_field at
 // revision_id for an empty one).
+//
+// The bytes must already be canonical: after structural validation the parsed
+// file is re-encoded and must equal data byte for byte, otherwise the error is
+// non_canonical. A resealed file is compared with its own carried values, so
+// only spelling is rejected; member order is canonical by construction.
 func ParseFile(data []byte) (*File, error) {
 	if len(data) > MaxFileBytes {
 		return nil, &Error{Code: CodeTooLarge, Path: ""}
@@ -51,6 +59,15 @@ func ParseFile(data []byte) (*File, error) {
 	}
 	if err := ValidateFile(f); err != nil {
 		return nil, err
+	}
+	// Only reached after every structural and cross-member check passed:
+	// re-encoding here is paid once per accepted file, never per rejection.
+	canon, err := encodeFileWire(f, fileEncoding{})
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(canon, data) {
+		return nil, &Error{Code: CodeNonCanonical}
 	}
 	return f, nil
 }
@@ -178,6 +195,11 @@ func EncodePolicyDocument(p *Policy) ([]byte, error) {
 }
 
 // ParsePolicyDocument strictly parses a policy document.
+//
+// Like ParseFile, the bytes must be exactly the canonical encoding of the
+// parsed policy: any other spelling is non_canonical. ValidateFile parses every
+// proof's SignedPolicy.Document through this function, so a proof carrying a
+// non-canonical policy document is rejected.
 func ParsePolicyDocument(data []byte) (*Policy, error) {
 	if len(data) > MaxSignedPolicyProofBytes {
 		return nil, &Error{Code: CodeTooLarge}
@@ -196,6 +218,14 @@ func ParsePolicyDocument(data []byte) (*Policy, error) {
 	}
 	if err := ValidatePolicy(p); err != nil {
 		return nil, err
+	}
+	// Only reached after structural validation, as in ParseFile.
+	canon, err := EncodePolicyDocument(p)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(canon, data) {
+		return nil, &Error{Code: CodeNonCanonical}
 	}
 	return p, nil
 }
@@ -256,8 +286,8 @@ func writeSignature(b *bytes.Buffer, s *Signature) {
 }
 
 func writePolicy(b *bytes.Buffer, p *Policy) {
-	// Canonical member order is not semantic; policy documents are signed as
-	// opaque bytes and re-parsed, so a stable order is enough.
+	// Policy documents are signed as opaque bytes and re-parsed; this order is
+	// the canonical one that ParsePolicyDocument requires byte for byte.
 	b.WriteString(`{"format":`)
 	b.WriteString(quote(p.Format))
 	b.WriteString(`,"version":`)

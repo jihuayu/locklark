@@ -236,6 +236,11 @@ const (
 	CodePolicyMismatch   = "policy_mismatch"
 	CodeSignatureInvalid = "signature_shape_invalid"
 	CodeHeaderMismatch   = "header_mismatch"
+
+	// CodeNonCanonical reports valid JSON that is not the byte-exact canonical
+	// encoding the canonical encoder produces for the same value. It is
+	// reported only after structural validation of the value succeeded.
+	CodeNonCanonical = "non_canonical"
 )
 
 // AsError reports whether err is a *Error.

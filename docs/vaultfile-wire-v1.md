@@ -103,8 +103,11 @@ Every file `content_signature` is a non-null 64-byte signature. A `null` `sig`
 is not a wire value.
 
 `SignedPolicy`: `{"document": <base64url>, "policy": { Policy }, "signer_id",
-"alg", "sig"}`. `document` is the canonical encoding of `policy`; verification
-code re-parses it and requires byte equality with the canonical re-encoding.
+"alg", "sig"}`. `document` is the canonical encoding of `policy`; the strict
+policy parser (`ParsePolicyDocument`) re-parses it and requires byte equality
+with the canonical re-encoding. A proof whose `document` is any other spelling
+is a `non_canonical` error, so `ParseFile`, `SealFile` and `ValidateFile` all
+reject it.
 
 `Policy` (the authorization document):
 
@@ -272,6 +275,11 @@ The input is the complete canonical sealed file, `revision_id` and
 The codec is strict:
 
 - the input is exactly one complete object (no trailing data);
+- the input bytes must be byte-for-byte the canonical encoding of the value
+  they parse: `ParseFile` and `ParsePolicyDocument` re-encode the typed value
+  with the canonical encoder after structural validation and reject any other
+  spelling as `non_canonical` (JSON whitespace anywhere, reordered object
+  members, or an equivalent string escape such as `\u0030` for `0`);
 - unknown and duplicate members are rejected at every depth;
 - nesting depth, array lengths, string lengths and byte lengths are limited
   before any value is copied or decoded;
@@ -361,6 +369,14 @@ the vector bytes and that every recorded value is reproduced.
 members of every preimage, the builder draft and the sealed file, and that
 `ParseFile`, `EncodeFile`, `FileBytes`, `ValidateFile` and `FileDigest` reject
 the draft, independently of the vector file.
+
+`TestParseFileRequiresCanonicalBytes` and
+`TestParsePolicyDocumentRequiresCanonicalBytes` in
+`pkg/vaultfile/canonical_test.go` pin that canonical bytes round-trip and that
+leading, trailing or inter-member whitespace, reordered members and an
+equivalent string escape are each rejected as `non_canonical`.
+`TestProofWithNonCanonicalDocumentRejected` pins that a proof carrying a
+non-canonical `document` is rejected, before any policy binding is considered.
 
 ## Out of scope
 
