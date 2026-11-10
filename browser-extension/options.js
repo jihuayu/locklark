@@ -375,7 +375,7 @@
       anchor.href = url;
       anchor.download = "locklark-diagnostics.json";
       anchor.click();
-      URL.revokeObjectURL(url);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
       diagnosticsStatus.textContent = "已导出诊断报告。";
     } catch {
       diagnosticsStatus.textContent = "无法导出：请先连接 Locklark 后重试。";

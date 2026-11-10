@@ -2,7 +2,7 @@
 
 # Locklark 开发进度
 
-2026-11-10（香港）：新增原生能力 `history-v1`：浏览器可读取条目历史版本的元数据（时间、类型、是否含密码）并按索引恢复，旧密码与隐藏字段永不下发；恢复复用原生 `item.history.restore` 与精确 revision 校验。身份提供商（Google/Microsoft/Apple/GitHub/Okta）只做保存横幅上的展示识别，不接入 OAuth。扩展 Node 测试 438 项、Go 历史契约 4 项通过；未在真实浏览器或桌面会话验证恢复流程。见[历史与提供商验证](browser-history-and-provider-validation.md)。
+2026-11-10（香港）：新增原生能力 `history-v1`：浏览器可读取条目历史版本的元数据（时间、类型、是否含密码）并按索引恢复，旧密码与隐藏字段永不下发；恢复复用原生 `item.history.restore` 与精确 revision 校验。身份提供商（Google/Microsoft/Apple/GitHub/Okta）只做保存横幅上的展示识别，不接入 OAuth。扩展 Node 测试 439 项、Go 历史契约 4 项通过；未在真实浏览器或桌面会话验证恢复流程。见[历史与提供商验证](browser-history-and-provider-validation.md)。
 
 2026-11-10（香港）：按[浏览器缺口盘点](browser-native-gap-inventory.md)落地第一批外围能力：弹窗已归档筛选与归档/取消归档、添加当前网站并填充（仅 URLs 的原生编辑）、显式打开内联菜单时聚焦首项、仅当前站点的 favicon、诊断报告导出、Open & Fill 优先登录页路径；并新增 `idle` 与 `notifications` 权限，实现默认关闭的空闲自动锁定与保存/锁定系统通知。扩展 Node 测试 434 项通过；Chromium/Firefox 权限白名单、打包校验（未签名 ZIP）通过。未在真实浏览器验证自动锁定触发时机与通知展示，权限变更需要重新过商店审核。上一批二维码捕获与粘贴保护仍在。
 

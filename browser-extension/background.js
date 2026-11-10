@@ -3672,6 +3672,93 @@ if (typeof importScripts === "function") importScripts("core.js");
       return detail;
     }
   }
+  async function addSiteToItem(message) {
+    if (
+      !capability ||
+      !/^[a-f0-9]{32}$/.test(message.id || "") ||
+      !/^[a-f0-9]{64}$/.test(message.revision || "") ||
+      typeof message.origin !== "string"
+    )
+      throw Error("refused");
+    let origin;
+    try {
+      origin = core.originFromURL(message.origin);
+    } catch {
+      throw Error("refused");
+    }
+    if (origin !== message.origin || !origin.startsWith("https://"))
+      throw Error("refused");
+    const detail = await request(
+      "item-get",
+      { capability, item_id: message.id, revision: message.revision },
+      12000,
+    );
+    const item = detail.item;
+    if (
+      !item ||
+      item.id !== message.id ||
+      item.revision !== message.revision ||
+      !["login", "password"].includes(item.category)
+    )
+      throw Error("refused");
+    const existing = Array.isArray(item.urls) ? item.urls : [];
+    const originOf = (entry) => {
+      try {
+        return core.originFromURL(
+          typeof entry === "string" ? entry : entry?.url,
+        );
+      } catch {
+        return "";
+      }
+    };
+    if (existing.some((entry) => originOf(entry) === origin))
+      throw Error("refused");
+    if (existing.length >= 20) throw Error("refused");
+    // Preserve labels, primary flags and match modes; only append one origin.
+    const urls = existing.map((entry) => ({
+      url: typeof entry === "string" ? entry : String(entry?.url || ""),
+      ...(typeof entry === "object" && entry?.label
+        ? { label: String(entry.label).slice(0, 256) }
+        : {}),
+      ...(typeof entry === "object" && entry?.primary === true
+        ? { primary: true }
+        : {}),
+      match_mode:
+        typeof entry === "object" &&
+        ["origin", "host", "exact"].includes(entry?.match_mode)
+          ? entry.match_mode
+          : "origin",
+    }));
+    urls.push({ url: origin, match_mode: "origin" });
+    const itemJSON = JSON.stringify({
+      category: item.category,
+      title: item.title,
+      urls,
+    });
+    const response = await request(
+      "item-save",
+      {
+        capability,
+        item_id: message.id,
+        revision: message.revision,
+        item_json: itemJSON,
+      },
+      20000,
+    );
+    if (
+      response.type !== "item-saved" ||
+      response.item_id !== message.id ||
+      !/^[a-f0-9]{64}$/.test(response.revision || "")
+    )
+      throw Error("refused");
+    detailCache.clear();
+    vaultItems = [];
+    status = "已添加到当前网站";
+    return {
+      saved: { item_id: response.item_id, revision: response.revision },
+      origin,
+    };
+  }
   async function saveVaultItem(message) {
     if (!capability || !core.validItemForSave(message.item))
       throw Error("refused");
@@ -5721,6 +5808,14 @@ if (typeof importScripts === "function") importScripts("core.js");
           clearCheckoutPicker();
           extra.saved = await saveVaultItem(message);
           break;
+        case "add-site": {
+          if (
+            Object.keys(message).sort().join(",") !== "id,origin,revision,type"
+          )
+            throw Error("refused");
+          extra.added = await addSiteToItem(message);
+          break;
+        }
         case "item-state":
           clearCheckoutPicker();
           extra.itemState = await setItemState(message);

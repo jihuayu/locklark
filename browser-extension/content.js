@@ -1069,6 +1069,7 @@
     }
   }
   async function showAutofillSuggestions(input, category) {
+    focusMenuOnOpen = false;
     if (request) return;
     target = input;
     const generation = ++focusGeneration;

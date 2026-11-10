@@ -44,7 +44,7 @@
 | 展示 | `browser-extension/test/core.test.js` | 提供商精确匹配与仿冒域名拒绝 |
 | 界面 | `browser-extension/test/popup_vault.test.js` | 历史区块与恢复入口存在，worker 有投影函数 |
 
-实际执行：扩展 `node --test test/*.test.js` 438 项通过；`CGO_ENABLED=0 go test ./internal/browserhost -run 'TestItemHistory|TestItemRestoreHistory'` 通过。
+实际执行：扩展 `node --test test/*.test.js` 439 项通过；`CGO_ENABLED=0 go test ./internal/browserhost -run 'TestItemHistory|TestItemRestoreHistory'` 通过。
 
 ## 复跑
 

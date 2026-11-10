@@ -2611,6 +2611,88 @@ test("idle events do nothing when auto-lock is off", async () => {
   assert.equal(h.notifications.length, 0);
 });
 
+test("adding a site preserves existing URL metadata", async () => {
+  const id = "b".repeat(32),
+    rev = "c".repeat(64);
+  const h = harness({
+    onRequest: (r) => {
+      if (r.type === "item-get")
+        return {
+          v: 1,
+          id: r.id,
+          type: "item-detail",
+          item: {
+            id,
+            revision: rev,
+            category: "login",
+            title: "Example",
+            urls: [
+              {
+                url: "https://example.test/login",
+                primary: true,
+                match_mode: "exact",
+                label: "Main",
+              },
+              { url: "https://alt.example.test/", match_mode: "host" },
+            ],
+          },
+        };
+      if (r.type === "item-save")
+        return {
+          v: 1,
+          id: r.id,
+          type: "item-saved",
+          item_id: r.item_id,
+          revision: "f".repeat(64),
+        };
+    },
+  });
+  await ready(h);
+  const reply = await h.send({
+    type: "add-site",
+    id,
+    revision: rev,
+    origin: "https://new.example.test",
+  });
+  assert.equal(reply.added.origin, "https://new.example.test");
+  assert.equal(reply.added.saved.revision, "f".repeat(64));
+  const save = JSON.parse(
+    h.sent.find((r) => r.type === "item-save").item_json,
+  );
+  assert.deepEqual(save.urls, [
+    {
+      url: "https://example.test/login",
+      label: "Main",
+      primary: true,
+      match_mode: "exact",
+    },
+    { url: "https://alt.example.test/", match_mode: "host" },
+    { url: "https://new.example.test", match_mode: "origin" },
+  ]);
+  assert.equal(save.username, undefined);
+  assert.equal(save.password, undefined);
+  const before = h.sent.filter((r) => r.type === "item-save").length;
+  const http = await h.send({
+    type: "add-site",
+    id,
+    revision: rev,
+    origin: "http://new.example.test",
+  });
+  assert.equal(http.added, undefined);
+  const duplicate = await h.send({
+    type: "add-site",
+    id,
+    revision: rev,
+    origin: "https://example.test",
+  });
+  assert.equal(duplicate.added, undefined);
+  assert.equal(
+    h.sent.filter((r) => r.type === "item-save").length,
+    before,
+    "refused requests must not write",
+  );
+});
+
 test("history entries are projected without password values", async () => {
   const h = harness({
     capabilities: ["history-v1"],

@@ -3493,26 +3493,17 @@
     const detail = lastDetail;
     const origin = detailCurrentOrigin();
     if (!detail || !origin || !detailLacksOrigin(detail, origin)) return;
-    const urls = (detail.urls || [])
-      .slice(0, 19)
-      .map((url, index) =>
-        index === 0
-          ? { url, primary: true, match_mode: "origin" }
-          : { url, match_mode: "origin" },
-      );
-    urls.push({ url: origin, match_mode: "origin" });
     try {
       const reply = await classifyDetailAction({
-        type: "item-save",
-        mode: "edit",
+        type: "add-site",
         id: detail.id,
         revision: detail.revision,
-        item: { category: detail.category, title: detail.title, urls },
+        origin,
       });
-      if (!reply?.saved) throw Error("refused");
+      if (!reply?.added?.saved) throw Error("refused");
       lastDetail = {
         ...detail,
-        revision: reply.saved.revision,
+        revision: reply.added.saved.revision,
         urls: [...(detail.urls || []), origin],
       };
       renderDetail(lastDetail);
