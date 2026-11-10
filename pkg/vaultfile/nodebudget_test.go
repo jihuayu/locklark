@@ -168,12 +168,12 @@ func TestNodeCapAdmitsV1ArrayBounds(t *testing.T) {
 	// The whole file is 2 container nodes (the file object and the proofs
 	// array) plus 128 copies of one proof subtree of 3,286 nodes: 420,610.
 	// Nodes are values and containers; object keys are free. A proof is its
-	// object (1) plus five members: `document`, `signer_id` and `alg`
-	// (3), `sig` (1) and the policy (3,281) = 3,286. The policy is its
-	// object (1) plus twelve members: six literals (1 each), owner_root
-	// object with four literals (5), five member arrays (1 + 64 * 3 = 193
-	// each), admin_delegations (1 + 64 * 14 = 897) and devices
-	// (1 + 128 * 11 = 1,409): 1 + 6 + 5 + 5*193 + 897 + 1,409 = 3,281.
+	// object plus document, signer_id, alg, sig and the policy:
+	// 1 + 4 + 3,281 = 3,286. The policy is its object plus five scalar
+	// fields (6), owner_root plus its three scalar fields (4), five member
+	// arrays (1 + 64 * 3 = 193 each), admin_delegations
+	// (1 + 64 * 14 = 897) and devices (1 + 128 * 11 = 1,409):
+	// 6 + 4 + 5*193 + 897 + 1,409 = 3,281.
 	want := 2 + 128*3286 // 420,610
 	if n := nodeCount(v); n != want {
 		t.Fatalf("maximal v1 file uses %d nodes, want %d", n, want)

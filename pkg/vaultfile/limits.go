@@ -58,15 +58,17 @@ const (
 	// v1 file vector decodes to 105 nodes and its policy to 68. The largest
 	// file the per-array budgets admit is dominated by 128 proofs in
 	// `signed_policy_proofs`, each carrying a 5-member proof object whose
-	// `policy` is a maximal policy: its object (1) and twelve members, six
-	// literals (including a null `prev_policy_digest`), the owner_root
-	// object with 4 literals (5), five member arrays (readers, writers,
-	// admins, owners and owner_root.owners: 1 + 64*3 = 193 each),
-	// admin_delegations (1 + 64*14 = 897) and devices
-	// (1 + 128*11 = 1,409): 1 + 6 + 5 + 5*193 + 897 + 1,409 = 3,281
-	// nodes. A proof adds its object and two literals (3,286); the file
-	// adds its object and the proofs array: 2 + 128*3,286 = 420,610
-	// nodes, pinned by TestNodeCapAdmitsV1ArrayBounds. That leaves a
+	// `policy` is a maximal policy. The policy object plus its five scalar
+	// fields (format, version, vault_id, policy_seq, prev_policy_digest) is
+	// 6 nodes; owner_root plus its three scalar fields is 4 nodes; the five
+	// member arrays (readers, writers, admins, owners, owner_root.owners)
+	// are 1 + 64*3 = 193 each; admin_delegations is 1 + 64*14 = 897;
+	// devices is 1 + 128*11 = 1,409. The policy totals
+	// 6 + 4 + 5*193 + 897 + 1,409 = 3,281 nodes. A proof is its object
+	// plus document, signer_id, alg, sig and the policy: 3,286. The file
+	// adds its object and the proofs array:
+	// 2 + 128*3,286 = 420,610 nodes, pinned by
+	// TestNodeCapAdmitsV1ArrayBounds. That leaves a
 	// margin above 100,000 nodes, more than 1/8 of the cap. Remaining
 	// slack covers a further policy-list-sized growth without changing
 	// the bound.
