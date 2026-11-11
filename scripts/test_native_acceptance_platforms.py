@@ -126,8 +126,7 @@ class WindowsAdapterTests(unittest.TestCase):
         cases = (([dict(WINDOW_RAW, trusted=False)], "process-untrusted"),
                  ([dict(WINDOW_RAW, secure=True)], "secure-desktop"),
                  ([dict(WINDOW_RAW), dict(WINDOW_RAW, id=7)], "window-ambiguous"),
-                 ([dict(WINDOW_RAW, visible=False)], "window-hidden"),
-                 ([dict(WINDOW_RAW, executable="/opt/other/browser")], "process-untrusted"))
+                 ([dict(WINDOW_RAW, visible=False)], "window-hidden"))
         for windows_list, code in cases:
             with self.subTest(code=code):
                 api = FakeWin32(windows_list=windows_list)
@@ -136,6 +135,23 @@ class WindowsAdapterTests(unittest.TestCase):
                     execute(adapter, document())
                 self.assertEqual(error.exception.code, code)
                 self.assertEqual(api.clicks, [])
+
+    def test_same_title_window_of_another_executable_is_not_a_candidate(self):
+        # Executable-scoped discovery filters the other executable's window
+        # before check_window, so discovery finds no candidate and times out.
+        # The helper freezes monotonic time, so a zero timeout keeps the
+        # first empty poll deterministic instead of exhausting the budget.
+        api, uia = FakeWin32(windows_list=[dict(WINDOW_RAW,
+                                                executable="/opt/other/browser")]), FakeUia()
+        adapter = windows.WindowsAdapter(api=api, uia=uia)
+        with patch.object(contract, "DISCOVER_TIMEOUT", 0):
+            with self.assertRaises(contract.ContractError) as error:
+                execute(adapter, document())
+        self.assertEqual(error.exception.code, "window-timeout")
+        self.assertEqual(api.clicks, [])
+        self.assertEqual(uia.reads, 0)
+        self.assertEqual(uia.hit_calls, [])
+        self.assertEqual(api.activations, 0)
 
     def test_secure_desktop_refused_before_any_observation(self):
         api = FakeWin32(secure=True)
