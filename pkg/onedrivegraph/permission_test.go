@@ -310,7 +310,7 @@ func TestNewManagerValidationAndFixedProductionEndpoint(t *testing.T) {
 }
 
 func TestManagerGrantSendsFixedInviteAndReturnsOnlyIDAndRole(t *testing.T) {
-	for _, role := range []PermissionRole{permissionRoleRead, permissionRoleWrite} {
+	for _, role := range []PermissionRole{PermissionRoleRead, PermissionRoleWrite} {
 		t.Run(string(role), func(t *testing.T) {
 			f := newPermissionFixture(t)
 			f.setInvite(serveBody(http.StatusOK, permissionBody(
@@ -389,7 +389,7 @@ func TestManagerGrantAcceptsLegacyGrantedToOnly(t *testing.T) {
 		"invitation": map[string]any{"signInRequired": true},
 	}
 	f.setInvite(serveBody(http.StatusOK, permissionBody(legacy)))
-	if _, err := f.manager(t, nil, "").Grant(context.Background(), testRecipientEmail, permissionRoleRead); err != nil {
+	if _, err := f.manager(t, nil, "").Grant(context.Background(), testRecipientEmail, PermissionRoleRead); err != nil {
 		t.Fatalf("Grant with grantedTo only: %v", err)
 	}
 }
@@ -406,11 +406,11 @@ func TestManagerGrantAcceptsDocumentedInvitationEmailOnly(t *testing.T) {
 		},
 		"invitation": map[string]any{"email": testRecipientUpper, "signInRequired": true},
 	})))
-	grant, err := f.manager(t, nil, "").Grant(context.Background(), testRecipientEmail, permissionRoleRead)
+	grant, err := f.manager(t, nil, "").Grant(context.Background(), testRecipientEmail, PermissionRoleRead)
 	if err != nil {
 		t.Fatalf("Grant with documented invitation.email: %v", err)
 	}
-	if grant.PermissionID != testPermissionID || grant.Role != permissionRoleRead {
+	if grant.PermissionID != testPermissionID || grant.Role != PermissionRoleRead {
 		t.Fatalf("grant = %+v, want only ID and role", grant)
 	}
 	if n := f.mutationCount(); n != 1 {
@@ -448,7 +448,7 @@ func TestManagerGrantRejectsConflictingInvitationEmail(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := newPermissionFixture(t)
 			f.setInvite(serveBody(http.StatusOK, permissionBody(permission)))
-			grant, err := f.manager(t, nil, "").Grant(context.Background(), testRecipientEmail, permissionRoleRead)
+			grant, err := f.manager(t, nil, "").Grant(context.Background(), testRecipientEmail, PermissionRoleRead)
 			if grant != (PermissionGrant{}) {
 				t.Errorf("conflicting recipient returned a grant")
 			}
@@ -467,16 +467,16 @@ func TestManagerGrantRejectsUnexpectedRecipientRoleOrFlags(t *testing.T) {
 		email string
 		role  PermissionRole
 	}{
-		"empty email":    {"", permissionRoleRead},
-		"no at":          {"synthetic.example.test", permissionRoleRead},
-		"two at":         {"a@b@example.test", permissionRoleRead},
-		"leading dot":    {".synthetic@example.test", permissionRoleRead},
-		"double dot":     {"syn..thetic@example.test", permissionRoleRead},
-		"bad domain":     {"synthetic@example..test", permissionRoleRead},
-		"no tld":         {"synthetic@localhost", permissionRoleRead},
-		"space":          {"synthetic recipient@example.test", permissionRoleRead},
-		"control":        {"synthetic@example.test\n", permissionRoleRead},
-		"oversize":       {strings.Repeat("a", maxInviteAddressLength+1) + "@example.test", permissionRoleRead},
+		"empty email":    {"", PermissionRoleRead},
+		"no at":          {"synthetic.example.test", PermissionRoleRead},
+		"two at":         {"a@b@example.test", PermissionRoleRead},
+		"leading dot":    {".synthetic@example.test", PermissionRoleRead},
+		"double dot":     {"syn..thetic@example.test", PermissionRoleRead},
+		"bad domain":     {"synthetic@example..test", PermissionRoleRead},
+		"no tld":         {"synthetic@localhost", PermissionRoleRead},
+		"space":          {"synthetic recipient@example.test", PermissionRoleRead},
+		"control":        {"synthetic@example.test\n", PermissionRoleRead},
+		"oversize":       {strings.Repeat("a", maxInviteAddressLength+1) + "@example.test", PermissionRoleRead},
 		"uppercase R":    {testRecipientEmail, PermissionRole("Read")},
 		"owner role":     {testRecipientEmail, PermissionRole("owner")},
 		"empty role":     {testRecipientEmail, PermissionRole("")},
@@ -601,7 +601,7 @@ func TestManagerPreflightRequiresExactlyTheConfiguredFile(t *testing.T) {
 			f.setInvite(inviteWrite(http.StatusOK))
 			m := f.manager(t, nil, "")
 
-			_, grantErr := m.Grant(context.Background(), testRecipientEmail, permissionRoleRead)
+			_, grantErr := m.Grant(context.Background(), testRecipientEmail, PermissionRoleRead)
 			assertErrorIs(t, grantErr, c.want...)
 			for _, nw := range c.notWant {
 				if errors.Is(grantErr, nw) {
@@ -627,7 +627,7 @@ func TestManagerPreflightRequiresExactlyTheConfiguredFile(t *testing.T) {
 		f.setInvite(serveBody(http.StatusOK, permissionBody(
 			permissionGrantFixture(testPermissionID, []string{"read"}, testRecipientEmail),
 		)))
-		if _, err := f.manager(t, nil, "").Grant(context.Background(), testRecipientEmail, permissionRoleRead); err != nil {
+		if _, err := f.manager(t, nil, "").Grant(context.Background(), testRecipientEmail, PermissionRoleRead); err != nil {
 			t.Fatalf("Grant with an exactly-selected file response: %v", err)
 		}
 		reqs := f.recorded()
@@ -660,7 +660,7 @@ func TestManagerPreflightRequiresExactlyTheConfiguredFile(t *testing.T) {
 		// The fixture reports testItemID only; configuring another ID gets a
 		// safe 404 and no mutation.
 		m := f.manager(t, nil, "synthetic-other-item")
-		_, err := m.Grant(context.Background(), testRecipientEmail, permissionRoleRead)
+		_, err := m.Grant(context.Background(), testRecipientEmail, PermissionRoleRead)
 		assertErrorIs(t, err, vaultfilebackend.ErrNotFound)
 		if n := f.mutationCount(); n != 0 {
 			t.Errorf("mutation requests = %d, want 0", n)
@@ -671,7 +671,7 @@ func TestManagerPreflightRequiresExactlyTheConfiguredFile(t *testing.T) {
 		f := newPermissionFixture(t)
 		f.setMetadata(func(c *fixtureConfig) { c.metadataStatus = http.StatusBadGateway })
 		f.setInvite(inviteWrite(http.StatusOK))
-		_, err := f.manager(t, nil, "").Grant(context.Background(), testRecipientEmail, permissionRoleRead)
+		_, err := f.manager(t, nil, "").Grant(context.Background(), testRecipientEmail, PermissionRoleRead)
 		assertErrorIs(t, err, vaultfilebackend.ErrUnknown)
 		if errors.Is(err, ErrPermissionOutcomeUnknown) {
 			t.Errorf("preflight failure must not be reported as a permission outcome")
@@ -694,7 +694,7 @@ func TestManagerPreflightRequiresExactlyTheConfiguredFile(t *testing.T) {
 			w.Header().Set("Location", target.URL+"/elsewhere")
 			w.WriteHeader(http.StatusFound)
 		})
-		_, err := f.manager(t, nil, "").Grant(context.Background(), testRecipientEmail, permissionRoleRead)
+		_, err := f.manager(t, nil, "").Grant(context.Background(), testRecipientEmail, PermissionRoleRead)
 		assertErrorIs(t, err, ErrUnsafeRedirect)
 		if redirectedTo != 0 {
 			t.Errorf("redirect was followed")
@@ -721,7 +721,7 @@ func TestManagerGrantDoesNotFollowRedirectsOrForwardBearer(t *testing.T) {
 		w.Header().Set("Location", target.URL+"/invite-shared")
 		w.WriteHeader(http.StatusTemporaryRedirect)
 	})
-	_, err := f.manager(t, nil, "").Grant(context.Background(), testRecipientEmail, permissionRoleRead)
+	_, err := f.manager(t, nil, "").Grant(context.Background(), testRecipientEmail, PermissionRoleRead)
 	assertErrorIs(t, err, vaultfilebackend.ErrUnknown, ErrPermissionOutcomeUnknown)
 	if len(seen) != 0 {
 		t.Fatalf("redirect target received requests")
@@ -901,7 +901,7 @@ func TestManagerGrantStrictlyValidatesResponse(t *testing.T) {
 				w.WriteHeader(c.status)
 				_, _ = w.Write(body)
 			})
-			grant, err := f.manager(t, nil, "").Grant(context.Background(), testRecipientEmail, permissionRoleRead)
+			grant, err := f.manager(t, nil, "").Grant(context.Background(), testRecipientEmail, PermissionRoleRead)
 			if c.want == nil {
 				if err != nil {
 					t.Fatalf("Grant: %v", err)
@@ -935,7 +935,7 @@ func TestManagerGrantTreatsDeclaredOversizeAsUnknownWithoutSendingBody(t *testin
 		w.(http.Flusher).Flush()
 		time.Sleep(20 * time.Millisecond)
 	})
-	_, err := f.manager(t, nil, "").Grant(context.Background(), testRecipientEmail, permissionRoleRead)
+	_, err := f.manager(t, nil, "").Grant(context.Background(), testRecipientEmail, PermissionRoleRead)
 	assertErrorIs(t, err, vaultfilebackend.ErrUnknown, ErrPermissionOutcomeUnknown)
 }
 
@@ -1038,6 +1038,34 @@ func TestManagerRevokeMapsStatuses(t *testing.T) {
 	}
 }
 
+func TestManagerRequestTimeoutAfterMutationIsUnknown(t *testing.T) {
+	for _, op := range []string{"grant", "revoke"} {
+		t.Run(op, func(t *testing.T) {
+			f := newPermissionFixture(t)
+			if op == "grant" {
+				f.setInvite(inviteWrite(http.StatusRequestTimeout))
+			} else {
+				f.setRevoke(inviteWrite(http.StatusRequestTimeout))
+			}
+			m := f.manager(t, nil, "")
+			var err error
+			if op == "grant" {
+				_, err = m.Grant(context.Background(), testRecipientEmail, PermissionRoleRead)
+			} else {
+				err = m.Revoke(context.Background(), testPermissionID)
+			}
+			assertErrorIs(t, err, vaultfilebackend.ErrUnknown, ErrPermissionOutcomeUnknown)
+			if errors.Is(err, vaultfilebackend.ErrDenied) {
+				t.Errorf("HTTP 408 must not be treated as a definite 4xx refusal")
+			}
+			assertNoSecrets(t, err, testToken, testRecipientEmail, testPermissionID)
+			if n := f.mutationCount(); n != 1 {
+				t.Errorf("mutation requests = %d, want exactly 1 (no retry)", n)
+			}
+		})
+	}
+}
+
 func TestManagerRevokeDoesNotFollowRedirects(t *testing.T) {
 	f := newPermissionFixture(t)
 	var reached int
@@ -1084,7 +1112,7 @@ func TestManagerRejectsInjectedRedirectPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newManager: %v", err)
 	}
-	_, err = m.Grant(context.Background(), testRecipientEmail, permissionRoleRead)
+	_, err = m.Grant(context.Background(), testRecipientEmail, PermissionRoleRead)
 	assertErrorIs(t, err, vaultfilebackend.ErrUnknown, ErrPermissionOutcomeUnknown)
 	if reached != 0 {
 		t.Errorf("injected redirect policy was honoured")
@@ -1104,7 +1132,7 @@ func TestManagerPreSendRefusalsSendNothing(t *testing.T) {
 	t.Run("nil context", func(t *testing.T) {
 		f := newPermissionFixture(t)
 		m := f.manager(t, nil, "")
-		_, err := m.Grant(nil, testRecipientEmail, permissionRoleRead)
+		_, err := m.Grant(nil, testRecipientEmail, PermissionRoleRead)
 		assertErrorIs(t, err, vaultfilebackend.ErrDenied, context.Canceled)
 		if err := m.Revoke(nil, testPermissionID); !errors.Is(err, vaultfilebackend.ErrDenied) {
 			t.Errorf("Revoke(nil) error = %v, want ErrDenied", err)
@@ -1119,7 +1147,7 @@ func TestManagerPreSendRefusalsSendNothing(t *testing.T) {
 		source := &testTokenSource{token: testToken}
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		_, err := f.manager(t, source, "").Grant(ctx, testRecipientEmail, permissionRoleRead)
+		_, err := f.manager(t, source, "").Grant(ctx, testRecipientEmail, PermissionRoleRead)
 		assertErrorIs(t, err, vaultfilebackend.ErrDenied, context.Canceled)
 		if errors.Is(err, ErrPermissionOutcomeUnknown) {
 			t.Errorf("pre-send cancellation reported as unknown outcome")
@@ -1138,7 +1166,7 @@ func TestManagerPreSendRefusalsSendNothing(t *testing.T) {
 			<-source.started
 			cancel()
 		}()
-		_, err := f.manager(t, source, "").Grant(ctx, testRecipientEmail, permissionRoleRead)
+		_, err := f.manager(t, source, "").Grant(ctx, testRecipientEmail, PermissionRoleRead)
 		assertErrorIs(t, err, vaultfilebackend.ErrDenied, context.Canceled)
 		if got := len(f.recorded()); got != 0 {
 			t.Errorf("requests = %d, want 0", got)
@@ -1148,7 +1176,7 @@ func TestManagerPreSendRefusalsSendNothing(t *testing.T) {
 	t.Run("token source failure", func(t *testing.T) {
 		f := newPermissionFixture(t)
 		source := &testTokenSource{token: testToken, err: errors.New("synthetic token source error " + testToken)}
-		_, err := f.manager(t, source, "").Grant(context.Background(), testRecipientEmail, permissionRoleRead)
+		_, err := f.manager(t, source, "").Grant(context.Background(), testRecipientEmail, PermissionRoleRead)
 		assertErrorIs(t, err, vaultfilebackend.ErrDenied, ErrAccessToken)
 		assertNoSecrets(t, err, testToken, "synthetic token source error")
 		if got := len(f.recorded()); got != 0 {
@@ -1174,7 +1202,7 @@ func TestManagerPreSendRefusalsSendNothing(t *testing.T) {
 			<-started
 			cancel()
 		}()
-		_, err := f.manager(t, nil, "").Grant(ctx, testRecipientEmail, permissionRoleRead)
+		_, err := f.manager(t, nil, "").Grant(ctx, testRecipientEmail, PermissionRoleRead)
 		assertErrorIs(t, err, vaultfilebackend.ErrDenied, context.Canceled)
 		if n := f.mutationCount(); n != 0 {
 			t.Errorf("mutation requests = %d, want 0", n)
@@ -1184,7 +1212,7 @@ func TestManagerPreSendRefusalsSendNothing(t *testing.T) {
 	t.Run("preflight transport failure", func(t *testing.T) {
 		f := newPermissionFixture(t)
 		f.server.Close()
-		_, err := f.manager(t, nil, "").Grant(context.Background(), testRecipientEmail, permissionRoleRead)
+		_, err := f.manager(t, nil, "").Grant(context.Background(), testRecipientEmail, PermissionRoleRead)
 		assertErrorIs(t, err, vaultfilebackend.ErrUnknown)
 		if errors.Is(err, ErrPermissionOutcomeUnknown) {
 			t.Errorf("preflight transport failure reported as permission outcome")
@@ -1218,7 +1246,7 @@ func TestManagerPostSendCancellationIsUnknown(t *testing.T) {
 			m := f.manager(t, nil, "")
 			var err error
 			if op == "grant" {
-				_, err = m.Grant(ctx, testRecipientEmail, permissionRoleRead)
+				_, err = m.Grant(ctx, testRecipientEmail, PermissionRoleRead)
 			} else {
 				err = m.Revoke(ctx, testPermissionID)
 			}
@@ -1245,7 +1273,7 @@ func TestManagerPostSendTransportFailureIsUnknown(t *testing.T) {
 		}
 		_ = conn.Close()
 	})
-	_, err := f.manager(t, nil, "").Grant(context.Background(), testRecipientEmail, permissionRoleRead)
+	_, err := f.manager(t, nil, "").Grant(context.Background(), testRecipientEmail, PermissionRoleRead)
 	assertErrorIs(t, err, vaultfilebackend.ErrUnknown, ErrPermissionOutcomeUnknown)
 	assertNoSecrets(t, err, testToken, testRecipientEmail, f.server.URL)
 	if n := f.mutationCount(); n != 1 {
@@ -1267,7 +1295,7 @@ func TestManagerGrantResponseInterruptedIsUnknown(t *testing.T) {
 		}
 		_ = conn.Close()
 	})
-	_, err := f.manager(t, nil, "").Grant(context.Background(), testRecipientEmail, permissionRoleRead)
+	_, err := f.manager(t, nil, "").Grant(context.Background(), testRecipientEmail, PermissionRoleRead)
 	assertErrorIs(t, err, vaultfilebackend.ErrUnknown, ErrPermissionOutcomeUnknown)
 	assertNoSecrets(t, err, testToken, testRecipientEmail, testPermissionSecret)
 }

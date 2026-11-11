@@ -37,7 +37,7 @@ import (
 // the bearer token is sent only to the explicit endpoint and never forwarded
 // to another host. Response bodies are size-bounded, must be valid UTF-8 and
 // must be valid JSON. Once a mutation request may have been sent, a transport
-// or context failure, a redirect, 429/5xx, or an invalid or oversize success
+// or context failure, a redirect, 408/429/5xx, or an invalid or oversize success
 // response is ErrUnknown: the change may or may not have happened. Nothing is
 // retried.
 //
@@ -47,10 +47,10 @@ import (
 // are never placed in an error.
 
 const (
-	// permissionRoleRead is the recipient role that grants read access.
-	permissionRoleRead PermissionRole = "read"
-	// permissionRoleWrite is the recipient role that grants read and write.
-	permissionRoleWrite PermissionRole = "write"
+	// PermissionRoleRead is the recipient role that grants read access.
+	PermissionRoleRead PermissionRole = "read"
+	// PermissionRoleWrite is the recipient role that grants read and write.
+	PermissionRoleWrite PermissionRole = "write"
 
 	// graphItemFacetSelect is the exact field set of the permission preflight.
 	// Both facets are requested so that a folder can be told apart from a
@@ -171,9 +171,9 @@ func newManager(cfg PermissionConfig, endpoint *url.URL, client *http.Client) (*
 // code: there are no other roles and no configuration that can add one.
 func graphRole(role PermissionRole) (string, bool) {
 	switch role {
-	case permissionRoleRead:
+	case PermissionRoleRead:
 		return "read", true
-	case permissionRoleWrite:
+	case PermissionRoleWrite:
 		return "write", true
 	default:
 		return "", false
@@ -194,9 +194,10 @@ func graphRole(role PermissionRole) (string, bool) {
 //     ErrCorrupt with ErrInvalidPermission, ErrNotFound when the item is
 //     missing, or ErrUnsupported with ErrInvalidPermission when the item is a
 //     folder or lacks a file facet. Nothing was sent.
-//   - A pre-send 4xx refusal is ErrDenied. Nothing was sent.
+//   - A definite 4xx refusal other than 408 and 429 is ErrDenied. Nothing was
+//     sent.
 //   - After the invite may have been sent, a transport or context failure, a
-//     redirect, 429, 5xx, a 207 partial result, or a 200 body that is not
+//     redirect, 408, 429, 5xx, a 207 partial result, or a 200 body that is not
 //     exactly one permission for the recipient and role (with
 //     invitation.signInRequired true and no link permission) is ErrUnknown
 //     with ErrPermissionOutcomeUnknown. The permission may or may not exist;
@@ -254,7 +255,7 @@ func (m *Manager) Grant(ctx context.Context, recipientEmail string, role Permiss
 		return PermissionGrant{}, unknownOutcome("invite")
 	case code >= 300 && code < 400:
 		return PermissionGrant{}, unknownOutcome("invite")
-	case code >= 400 && code < 500 && code != http.StatusTooManyRequests:
+	case code >= 400 && code < 500 && code != http.StatusTooManyRequests && code != http.StatusRequestTimeout:
 		return PermissionGrant{}, fmt.Errorf("%w: invite request was refused with HTTP %d", vaultfilebackend.ErrDenied, code)
 	default:
 		return PermissionGrant{}, unknownOutcome("invite")
@@ -276,10 +277,11 @@ func (m *Manager) Grant(ctx context.Context, recipientEmail string, role Permiss
 //     failure is ErrDenied (with ErrAccessToken for a failed source). Nothing
 //     was sent.
 //   - A preflight failure is mapped as in Grant. Nothing was sent.
-//   - A pre-send 4xx refusal is ErrDenied; 404 is ErrNotFound; 401 and 403 are
-//     ErrDenied with ErrPermissionNotDeletable. Nothing was sent.
+//   - A definite 4xx refusal other than 408 and 429 is ErrDenied; 404 is
+//     ErrNotFound; 401 and 403 are ErrDenied with ErrPermissionNotDeletable.
+//     Nothing was sent.
 //   - After the request may have been sent, a transport or context failure, a
-//     redirect, 429, 5xx, or a status other than 204 is ErrUnknown with
+//     redirect, 408, 429, 5xx, or a status other than 204 is ErrUnknown with
 //     ErrPermissionOutcomeUnknown. The caller must check the remaining
 //     permissions before retrying.
 func (m *Manager) Revoke(ctx context.Context, permissionID string) error {
@@ -316,7 +318,7 @@ func (m *Manager) Revoke(ctx context.Context, permissionID string) error {
 		// permissions, so the permission may be inherited or the caller may
 		// lack access. Nothing changed.
 		return fmt.Errorf("%w: %w: permission deletion was refused with HTTP %d", vaultfilebackend.ErrDenied, ErrPermissionNotDeletable, code)
-	case code == http.StatusTooManyRequests || code >= 500 || code >= 300 && code < 400:
+	case code == http.StatusTooManyRequests || code == http.StatusRequestTimeout || code >= 500 || code >= 300 && code < 400:
 		return unknownOutcome("permission deletion")
 	case code == http.StatusNotFound:
 		return fmt.Errorf("%w: permission was not found", vaultfilebackend.ErrNotFound)
