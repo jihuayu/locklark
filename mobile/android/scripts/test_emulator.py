@@ -150,9 +150,10 @@ def main():
         if setting.returncode:
             raise RuntimeFailure()
         return setting.stdout.strip()
-    prior_autofill = secure_setting(["get", "secure", "autofill_service"])
-    if prior_autofill in (b"", b"null"):
-        prior_autofill = b""
+    def normalized_autofill():
+        value = secure_setting(["get", "secure", "autofill_service"])
+        return b"" if value in (b"", b"null") else value
+    prior_autofill = normalized_autofill()
     try:
         STAGE = "autofill-setting"
         secure_setting(["put", "secure", "autofill_service", autofill_service])
@@ -160,13 +161,17 @@ def main():
             raise RuntimeFailure()
         run_gate(state, adb, root, package, test_package, log)
     finally:
-        STAGE = "autofill-setting-restore"
-        if prior_autofill:
-            secure_setting(["put", "secure", "autofill_service", prior_autofill.decode("ascii")])
-        else:
-            secure_setting(["delete", "secure", "autofill_service"])
-        if secure_setting(["get", "secure", "autofill_service"]) != prior_autofill:
-            raise RuntimeFailure()
+        try:
+            if prior_autofill:
+                secure_setting(["put", "secure", "autofill_service", prior_autofill.decode("ascii")])
+            else:
+                secure_setting(["delete", "secure", "autofill_service"])
+            if normalized_autofill() != prior_autofill:
+                raise RuntimeFailure()
+        except Exception:
+            # Only a failed restore/readback replaces the original failure stage.
+            STAGE = "autofill-setting-restore"
+            raise
     print("PASS: Android native offline UI instrumentation, real OS autofill authentication handoff; controller/logcat canary scan")
     print("Private Android runtime evidence: " + str(state))
 
