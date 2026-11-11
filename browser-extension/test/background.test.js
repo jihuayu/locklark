@@ -1598,6 +1598,46 @@ test("a fresh Port.sender object still admits the early route and its claim", as
   await route.h.send({ type: "disconnect" });
 });
 
+test("a lagging Port.sender.url still admits the early route and its claim", async () => {
+  const route = await earlyRouteStartupFixture();
+  const opened = route.h.send({ type: "open-route", id: route.ITEM_ID, revision: "c".repeat(64) });
+  await waitFor(() => route.route(), "browser-created route tab");
+  assert.equal(route.pending(), true, "tabs.create resolved before the port connected");
+  const token = route.h.routeToken(route.route().url);
+  assert.equal(token.length, 64);
+  // The documented lag case: sender.url is only the extension page base while
+  // the browser's own tab still carries the exact route token URL.
+  const base = "chrome-extension://fixed/popup.html";
+  const lagged = { ...route.routeSender(), url: base };
+  assert.equal(lagged.url, base);
+  assert.equal(lagged.url.includes("#route="), false);
+  assert.equal(lagged.tab.url, route.route().url);
+  assert.equal(route.h.routeToken(lagged.tab.url), token);
+  // Still a fresh, structurally identical Port.sender object on every read.
+  const port = openLifecyclePortFreshSender(route.h, lagged);
+  const ready = await waitFor(() => route.routeReady(port), "route-ready before activation");
+  assert.deepEqual([ready.type, ready.token], ["route-ready", token]);
+  assert.equal(port.disconnected, false, "a lagging sender.url was refused");
+  // The same lagged sender may claim, and only its own exact detail comes back.
+  const claim = await route.h.send({ type: "route-claim", token }, lagged);
+  assert.equal(claim?.type, "route-claimed", "the lagging-sender route could not claim");
+  assert.equal(claim.item_id, route.ITEM_ID);
+  assert.equal(claim.detail.id, route.ITEM_ID);
+  assert.equal(claim.detail.revision, "c".repeat(64));
+  assert.equal(claim.detail.title, "Target");
+  assert.deepEqual(route.nativeReads().map((r) => r.type), ["vault-search", "item-get"]);
+  const read = route.nativeReads()[1];
+  assert.equal(read.item_id, route.ITEM_ID);
+  assert.equal(read.revision, "c".repeat(64));
+  // The browser's own startup events and create continuation still land.
+  route.finishStartup();
+  const openedReply = await opened;
+  assert.ok(openedReply?.routeCreated, "the route create was refused");
+  await tick();
+  assert.equal(port.received.filter((m) => m.type === "route-revoked").length, 0);
+  await route.h.send({ type: "disconnect" });
+});
+
 test("an early route lifecycle port never admits a forged or unrelated page", async () => {
   const route = await earlyRouteStartupFixture();
   const opened = route.h.send({ type: "open-route", id: route.ITEM_ID, revision: "c".repeat(64) });

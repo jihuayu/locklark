@@ -4648,10 +4648,20 @@ if (typeof importScripts === "function") importScripts("core.js");
       !Number.isSafeInteger(sender.tab.id) ||
       sender.tab.id < 1 ||
       typeof sender.url !== "string" ||
-      sender.url !== sender.tab.url
+      typeof sender.tab.url !== "string"
     )
       return null;
-    const token = routeTokenFromPage(sender.tab.url);
+    // The browser's own tab must still be exactly the tab the sender carries.
+    // routePageURL() then applies the same admission contract as the ordinary
+    // route path, including a sender.url that lags within this tab: only the
+    // extension-page base is checked there, while the browser-reported tab is
+    // the current exact page. The token is taken from that verified page only,
+    // never from the sender's own claim.
+    const tab = await routeTabAt(sender.tab.id, sender.tab.url);
+    if (!tab) return null;
+    const pageURL = routePageURL(sender, tab);
+    if (!pageURL || pageURL !== tab.url) return null;
+    const token = routeTokenFromPage(pageURL);
     if (!token) return null;
     const boots = [...routeBoots].filter(
       (candidate) => candidate.token === token,
@@ -4661,30 +4671,24 @@ if (typeof importScripts === "function") importScripts("core.js");
     const boot = boots.length === 1 ? boots[0] : null;
     if (
       !boot ||
-      boot.routeURL !== sender.tab.url ||
+      boot.routeURL !== pageURL ||
       boot.routeURL !== routeURL(boot.token) ||
+      // Every mutable field is read after the await: the boot may have been
+      // revoked, bound by the browser's own event or claimed meanwhile.
       !routeBootLive(boot)
     )
       return null;
-    const expectedWindow = boot.windowId;
-    // The browser's own tab must be the tab the sender identifies, carry the
-    // exact route URL, sit in the source window and be the active tab.
-    const tab = await routeTabAt(sender.tab.id, boot.routeURL);
-    if (!tab || tab.windowId !== expectedWindow || tab.active !== true) {
+    // The browser's own tab must carry the exact route URL, sit in the source
+    // window, be the active tab, and agree with the sender's tab window.
+    if (
+      tab.windowId !== boot.windowId ||
+      tab.active !== true ||
+      sender.tab.windowId !== tab.windowId
+    ) {
       // A replaced, moved or inactive tab is not this route any more.
       revokeRoute(boot);
       return null;
     }
-    // Every mutable field is re-read after the await: the boot may have been
-    // revoked, bound by the browser's own event or claimed meanwhile.
-    if (
-      !routeBootLive(boot) ||
-      boot.windowId !== expectedWindow ||
-      boot.routeURL !== tab.url ||
-      boot.token !== routeTokenFromPage(tab.url) ||
-      sender.tab.id !== tab.id
-    )
-      return null;
     // Bind exactly as the create continuation would once tabs.create()
     // resolves; onActivated still consumes the one permitted startup switch.
     bindRouteTab(boot, tab.id, tab.windowId);
