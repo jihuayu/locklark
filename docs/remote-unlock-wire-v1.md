@@ -1,9 +1,11 @@
 # Remote unlock wire v1: canonical binding context
 
-Status: codec definition plus a process-local request lifecycle. The package
-`pkg/remoteunlock` implements exactly this encoding and the lifecycle in
-[Process-local request lifecycle](#process-local-request-lifecycle). The vector
-below is synthetic and demonstrates the codec only.
+Status: context and stable per-device binding codecs, plus a process-local
+request lifecycle. The package `pkg/remoteunlock` implements exactly these
+encodings, the binding signature check in
+[Stable device transport binding v1](#stable-device-transport-binding-v1), and
+the lifecycle in [Process-local request lifecycle](#process-local-request-lifecycle).
+The vectors below are synthetic and demonstrate the codecs only.
 
 ## Scope
 
@@ -180,6 +182,121 @@ Parsing rejects, among other things:
 
 Errors identify the failing member or structural rule with a static message;
 they never include a field value or digest bytes.
+
+## Stable device transport binding v1
+
+`DeviceTransportBinding` is a second, independent canonical object. It is the
+stable per-device claim that a member's device belongs to a vault and holds a
+particular delivery recipient. It is signed once by a caller-pinned device
+signing key and is not tied to one request. It intentionally contains no
+request ID or request digest, no deadline, no key epoch, no policy sequence or
+digest, and no lock generation. Those belong to a `ChannelBindingContext` and
+to later signed authorization. Later protocol layers may reference a binding by
+digest, but this codec defines no digest-reference message.
+
+### Binding schema
+
+| # | Member | Type | Constraint |
+|---|--------|------|------------|
+| 1 | `format` | string | constant `locklark.remote-unlock` |
+| 2 | `version` | integer | constant `1` |
+| 3 | `kind` | string | constant `device-transport-binding` |
+| 4 | `member_id` | string | identifier |
+| 5 | `device_id` | string | identifier |
+| 6 | `install_id` | string | identifier |
+| 7 | `vault_id` | string | identifier |
+| 8 | `pair_generation` | unsigned integer | uint64; `0` is explicit genesis |
+| 9 | `spki_sha256` | string | exactly 32 bytes, unpadded base64url |
+| 10 | `recipient_public_key` | string | canonical age X25519 recipient |
+| 11 | `signature` | string | exactly 64 bytes, unpadded base64url |
+
+Identifiers reuse the [identifier grammar](#identifier-grammar): non-empty,
+at most 128 bytes, and only ASCII `a`-`z`, `0`-`9`, `.`, `_`, `:` or `-`.
+Integer, digest, canonical-string, size-budget, and all-or-nothing parsing rules
+are the same as for the context, except that the binding budget is 2048 bytes
+(`MaxBindingSize`). The maximum legal binding, with four 128-byte identifiers,
+`pair_generation` = `2^64 - 1`, a 32-byte digest, a canonical recipient and a
+64-byte signature, is **941 bytes**, leaving 1107 bytes of headroom.
+
+`spki_sha256` is the SHA-256 digest of the DER SubjectPublicKeyInfo (SPKI) of
+the device certificate bound to the device's live channel. The codec neither
+computes nor compares that digest; a verifier must compare it to the actual
+pinned peer certificate. `recipient_public_key` is the canonical lowercase age
+X25519 recipient string (`age1...`) the device claims as its delivery
+recipient; the codec does not prove that the device holds the matching
+identity. `pair_generation` is assigned exactly as parsed, including `0`.
+
+### Signature domain and preimage
+
+The Ed25519 signature is over the following bytes, with no length prefix and no
+newline:
+
+```
+locklark.remote-unlock/v1/device-transport-binding\x00
+```
+
+followed immediately by the canonical JSON object containing members 1 through
+10 in the order above and **without** the `signature` member. The `\x00` is one
+literal NUL byte. `SigningBytes` returns exactly this preimage; the package
+never stores or derives a private key and provides no production signing helper.
+A caller signs the preimage with the existing protected enrolled device key and
+calls `VerifyDeviceTransportBinding` with the public key it pinned from
+authenticated vault policy.
+
+### Verification boundary
+
+- `VerifyDeviceTransportBinding(b, expectedDeviceID, pinnedKey)` requires the
+  expected device identifier to equal `b.DeviceID` exactly, the pinned key to
+  be exactly one Ed25519 public key, and the signature to verify. It does not
+  pin the key itself.
+- `VerifyDeviceTransportBindingForContext(b, c, expectedDeviceID, pinnedKey)`
+  performs the check above and additionally requires the context to be
+  canonical-valid, `b.MemberID`, `b.VaultID`, and `b.PairGeneration` to equal
+  the context values, the context's two device endpoints to differ, and
+  `b.DeviceID` to equal exactly one of them. It does not authenticate the
+  context, its digests, its deadline, or the channel.
+- Both functions return `ErrInvalidBinding`, and parsing returns
+  `ErrInvalidBindingEncoding`; a `BindingFieldError` names the failing member
+  without echoing its value.
+
+### Synthetic binding vector
+
+This vector is synthetic and uses the deterministic Ed25519 seed
+`0x00`-`0x1f`. Its signature is real Ed25519 output over the documented
+preimage, but the key belongs to no device, member, vault, pairing, certificate
+or enrollment. The SPKI digest is the bytes `0x00` through `0x1f` and the
+recipient is a throwaway synthetic age recipient.
+
+```json
+{"format":"locklark.remote-unlock","version":1,"kind":"device-transport-binding","member_id":"member-0001","device_id":"device-source","install_id":"install-0001","vault_id":"vault-0001","pair_generation":7,"spki_sha256":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8","recipient_public_key":"age12avp6cfclu3g432g8lhp6hyyhd5q78qjntxafudl2wnusnnprdwsqfy4ea","signature":"OhqXB70VKmxXIWcwdyZBA3vG6bt-7rc4angFC08DnXkFEF5wPEdt5JfImkRNMQEfc2PeficV4CDzBt40qbsFCg"}
+```
+
+The matching public key is the unpadded base64url string
+`A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg`, and the signed JSON without
+`signature` is the prefix of the vector above through
+`"recipient_public_key":"age12..."`. Encoding must produce these bytes; parsing
+must reproduce the fields (including `pair_generation` = 7); and the fixed
+signature must verify with that key. Tests also mutate every signed member,
+the signature, the pinned key and the expected device ID, and cross-check
+member, device, vault and pair generation against a context.
+
+### Explicit non-authorization limits
+
+A valid synthetic signature, by itself, does **not** prove or grant any of the
+following, and this checkpoint must not be cited as doing so:
+
+- enrollment of the device, member, install, or vault;
+- provenance or trust of the pinned key, or that it belongs to the claimed
+  member/device;
+- that `spki_sha256` matches the live TLS channel's peer certificate;
+- owner or admin `remote_unlock` authorization;
+- pairing approval or pairing state;
+- request freshness, one-shot consumption, or authenticity of the context;
+- access to a vault unlock key (VUK), or delivery of any key material;
+- a complete mobile unlock flow.
+
+Those properties require separate authenticated policy lookup, channel binding,
+authorization, pairing, replay and VUK controls outside this package.
 
 ## Process-local request lifecycle
 
