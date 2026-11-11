@@ -44,7 +44,7 @@ const biometryTTL = time.Second
 // Biometry reports what the user-presence prompt can use on this Mac. It never
 // prompts: canEvaluatePolicy only inspects local capability.
 func Biometry() string {
-	return biometry.get(time.Now(), biometryTTL, func() string {
+	return biometry.get(time.Now, biometryTTL, func() string {
 		switch int(C.ll_biometry_available()) {
 		case 2:
 			return "Touch ID"

@@ -46,9 +46,15 @@ type capabilityCache struct {
 	checked time.Time
 }
 
-func (c *capabilityCache) get(now time.Time, ttl time.Duration, probe func() string) string {
+// get receives a clock and reads it only after the mutex is held. A caller that
+// sampled its time before locking can acquire the mutex out of order, so the
+// later sample commits first and the earlier one then looks like the clock
+// moved backwards and forces a second probe. Sampling under the lock makes the
+// first caller through the lock the earliest observed time.
+func (c *capabilityCache) get(clock func() time.Time, ttl time.Duration, probe func() string) string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	now := clock()
 	if c.checked.IsZero() || now.Before(c.checked) || now.Sub(c.checked) >= ttl {
 		c.value, c.checked = probe(), now
 	}

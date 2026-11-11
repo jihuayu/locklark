@@ -21,18 +21,19 @@ func TestCapabilityCacheRechecksAfterTTL(t *testing.T) {
 		}
 		return "Touch ID"
 	}
+	clockAt := func(t time.Time) func() time.Time { return func() time.Time { return t } }
 	start := time.Unix(1000, 0)
-	if got := cache.get(start, time.Second, probe); got != "不可用" {
+	if got := cache.get(clockAt(start), time.Second, probe); got != "不可用" {
 		t.Fatalf("first probe = %q", got)
 	}
-	if got := cache.get(start.Add(900*time.Millisecond), time.Second, probe); got != "不可用" || probes.Load() != 1 {
+	if got := cache.get(clockAt(start.Add(900*time.Millisecond)), time.Second, probe); got != "不可用" || probes.Load() != 1 {
 		t.Fatalf("within-window probe = %q probes=%d", got, probes.Load())
 	}
-	if got := cache.get(start.Add(time.Second), time.Second, probe); got != "Touch ID" || probes.Load() != 2 {
+	if got := cache.get(clockAt(start.Add(time.Second)), time.Second, probe); got != "Touch ID" || probes.Load() != 2 {
 		t.Fatalf("expired-window probe = %q probes=%d", got, probes.Load())
 	}
 	// A clock that moved backwards must not pin a stale answer.
-	if got := cache.get(start, time.Second, probe); got != "Touch ID" || probes.Load() != 3 {
+	if got := cache.get(clockAt(start), time.Second, probe); got != "Touch ID" || probes.Load() != 3 {
 		t.Fatalf("backwards-clock probe = %q probes=%d", got, probes.Load())
 	}
 }
@@ -45,14 +46,37 @@ func TestCapabilityCacheConcurrent(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			cache.get(time.Now(), time.Minute, func() string { probes.Add(1); return "Touch ID" })
+			cache.get(time.Now, time.Minute, func() string { probes.Add(1); return "Touch ID" })
 		}()
 	}
 	wg.Wait()
 	if probes.Load() != 1 {
 		t.Fatalf("concurrent callers probed %d times", probes.Load())
 	}
-	if got := cache.get(time.Now(), time.Minute, func() string { return "other" }); got != "Touch ID" {
+	if got := cache.get(time.Now, time.Minute, func() string { return "other" }); got != "Touch ID" {
+		t.Fatalf("within-window probe = %q", got)
+	}
+}
+
+// TestCapabilityCacheSamplesClockUnderLock pins the timestamp race: callers
+// that sample their time before the mutex can acquire it out of order, so a
+// later sample commits first and an earlier one then appears to travel
+// backwards and forces a redundant probe. The clock is therefore read while the
+// mutex is held; the clock callback proves it by finding the lock unavailable.
+func TestCapabilityCacheSamplesClockUnderLock(t *testing.T) {
+	var cache capabilityCache
+	now := time.Unix(2000, 0)
+	clock := func() time.Time {
+		if cache.mu.TryLock() {
+			cache.mu.Unlock()
+			t.Fatal("clock called outside the cache lock")
+		}
+		return now
+	}
+	if got := cache.get(clock, time.Minute, func() string { return "Touch ID" }); got != "Touch ID" {
+		t.Fatalf("first probe = %q", got)
+	}
+	if got := cache.get(clock, time.Minute, func() string { return "other" }); got != "Touch ID" {
 		t.Fatalf("within-window probe = %q", got)
 	}
 }
