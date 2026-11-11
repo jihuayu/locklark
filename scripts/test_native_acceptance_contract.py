@@ -204,6 +204,26 @@ class RequestValidationTests(unittest.TestCase):
         self.assertEqual(len(contract.KNOWN_SYNTHETIC_LABELS), len(x11.CONTROL_LABELS))
         self.assertIn(LABEL, contract.KNOWN_SYNTHETIC_LABELS)
 
+    def test_cli_broker_review_labels_are_allowlisted(self):
+        import browser_native_x11 as x11
+        expected = ("仅批准本次 CLI 请求", "拒绝本次请求")
+        for label in expected:
+            with self.subTest(label=label):
+                self.assertIn(label, x11.CONTROL_LABELS)
+                self.assertIn(label, contract.KNOWN_SYNTHETIC_LABELS)
+                for action in ({"click_label": label}, {"wait_label": label}):
+                    with self.subTest(action=sorted(action)):
+                        plan = contract.parse_request(request(actions=[action]))
+                        self.assertEqual(plan["actions"][0], action)
+
+    def test_unapproved_cli_broker_like_label_is_rejected(self):
+        for label in ("仅批准本次 CLI 请求。", "仅批准本次 CLI 请求 ", "批准本次 CLI 请求",
+                      "拒绝本次 CLI 请求", "拒绝本次请求（CLI）"):
+            with self.subTest(label=label):
+                with self.assertRaises(contract.ContractError) as error:
+                    contract.parse_request(request(actions=[{"click_label": label}]))
+                self.assertEqual(error.exception.code, "label-not-allowed")
+
     def test_importing_contract_never_initialises_a_platform_library(self):
         code = (
             "import ctypes, sys\n"
