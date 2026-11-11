@@ -1766,6 +1766,11 @@ test("route worker trace keeps only allowlisted fixed lifecycle labels", () => {
     "route-create-not-owned",
     "route-expired",
     "routes-revoked-all",
+    "claim-started",
+    "claim-search-done",
+    "claim-item-get-done",
+    "claim-completed",
+    "request-vault-search-sent",
     "boot-bind-bound",
     "port-ready-sent",
     "port-refused",
@@ -1799,7 +1804,24 @@ test("route worker trace keeps only allowlisted fixed lifecycle labels", () => {
     "const ROUTE_WORKER_DIAG_EVENTS = [",
     "\n];",
   );
-  assert.ok(harnessList.length > 30, "harness allowlist must be complete");
+  assert.ok(harnessList.length > 60, "harness allowlist must be complete");
+  // Every fixed label the worker emits is allowlisted; the only computed one
+  // is the request-<type>-<phase> template, rebuilt here from its parts.
+  const labelsIn = (text, pattern) =>
+    [...text.matchAll(pattern)].map((match) => match[1]);
+  // The request-<type>-<phase> template is rebuilt below, not scanned.
+  const emitted = labelsIn(
+    background.replace(/routeLifecycleDiag\("request-" \+ type \+ "-" \+ phase\);/g, ""),
+    /routeLifecycleDiag\(\s*"([a-z0-9-]+)"/g,
+  );
+  for (const match of background.matchAll(/routeLifecycleDiag\(([^")]*\?[^)]*)\);/g))
+    emitted.push(...labelsIn(match[1], /"([a-z0-9-]+)"/g));
+  for (const type of ["vault-search", "item-get"])
+    for (const phase of ["no-port", "sent", "post-failed", "no-reply"])
+      emitted.push("request-" + type + "-" + phase);
+  assert.ok(emitted.length > 50);
+  for (const label of emitted)
+    assert.ok(harnessList.includes(label), "emitted label not allowlisted: " + label);
   assert.deepEqual(
     eventsBetween(
       background,

@@ -1152,9 +1152,20 @@ if (typeof importScripts === "function") importScripts("core.js");
     calls.set(requestId, { resolve, reject, timer, type });
     return promise;
   }
+  // Route lifecycle diagnostic only: a fixed phase for this request. Only the
+  // route's own vault-search and item-get are labelled, and no fields, reply
+  // or error text is ever logged.
+  function routeRequestDiag(type, phase) {
+    if (type === "vault-search" || type === "item-get")
+      routeLifecycleDiag("request-" + type + "-" + phase);
+  }
   function request(type, fields = {}, timeout = 35000, requestId = id()) {
-    if (!port) return Promise.reject(Error("refused"));
+    if (!port) {
+      routeRequestDiag(type, "no-port");
+      return Promise.reject(Error("refused"));
+    }
     const promise = startCall(type, requestId, timeout);
+    routeRequestDiag(type, "sent");
     try {
       port.postMessage({ v: 1, id: requestId, type, ...fields });
     } catch {
@@ -1164,6 +1175,7 @@ if (typeof importScripts === "function") importScripts("core.js");
         calls.delete(requestId);
         call.reject(Error("refused"));
       }
+      routeRequestDiag(type, "post-failed");
     } finally {
       if (Object.hasOwn(fields, "username")) fields.username = "";
       if (Object.hasOwn(fields, "password")) fields.password = "";
@@ -3403,6 +3415,15 @@ if (typeof importScripts === "function") importScripts("core.js");
     "source-tab-removed", "route-create-failed", "route-create-invalid-tab",
     "route-create-not-owned", "route-create-tab-mismatch",
     "route-expired", "routes-revoked-all",
+    "claim-message-refused", "claim-not-open", "claim-started",
+    "claim-search-rejected", "claim-list-invalid", "claim-row-missing",
+    "claim-anchors-rejected", "claim-item-get-rejected", "claim-revoked",
+    "claim-response-invalid", "claim-detail-invalid", "claim-unsettled",
+    "claim-completed", "claim-search-done", "claim-anchors-done",
+    "claim-item-get-done", "claim-settled", "request-vault-search-no-port",
+    "request-vault-search-sent", "request-vault-search-post-failed", "request-vault-search-no-reply",
+    "request-item-get-no-port", "request-item-get-sent", "request-item-get-post-failed",
+    "request-item-get-no-reply",
   ]);
   const ROUTE_LIFECYCLE_DIAG_LEAVES = ["activation-startup", "activation-late"];
   function routeLifecycleDiag(event) {
@@ -5091,13 +5112,19 @@ if (typeof importScripts === "function") importScripts("core.js");
       !grant ||
       Object.keys(message).sort().join(",") !== "token,type" ||
       message.token !== grant.token
-    )
+    ) {
+      routeLifecycleDiag("claim-message-refused");
       throw Error("refused");
+    }
     // The state transition below is synchronous, so a concurrent second claim
     // sees "claimed" and neither claim can start a second read. There is no
     // re-read path: a duplicate claim is refused outright.
-    if (grant.state !== "open") throw Error("refused");
+    if (grant.state !== "open") {
+      routeLifecycleDiag("claim-not-open");
+      throw Error("refused");
+    }
     grant.state = "claimed";
+    routeLifecycleDiag("claim-started");
     return routeApprovedDetail(grant);
   }
   // The same native V2 `item-get` the action popup used, under a fresh native
@@ -5117,6 +5144,15 @@ if (typeof importScripts === "function") importScripts("core.js");
           state: "all",
         },
         12000,
+      ).then(
+        (value) => {
+          routeLifecycleDiag("claim-search-done");
+          return value;
+        },
+        (error) => {
+          routeLifecycleDiag("claim-search-rejected");
+          throw error;
+        },
       );
     requireRoute(grant);
     if (
@@ -5127,8 +5163,10 @@ if (typeof importScripts === "function") importScripts("core.js");
       // and the exact row are still validated below.
       list.type !== "vault-items" ||
       !core.validResponse(list)
-    )
+    ) {
+      routeLifecycleDiag("claim-list-invalid");
       throw Error("refused");
+    }
     const row = list.items.find(
       (item) =>
         item &&
@@ -5136,8 +5174,13 @@ if (typeof importScripts === "function") importScripts("core.js");
         item.id === grant.itemId &&
         item.revision === grant.revision,
     );
-    if (!row) throw Error("refused");
-    if (!(await routeAnchors(grant))) throw Error("refused");
+    if (!row) {
+      routeLifecycleDiag("claim-row-missing");
+      throw Error("refused");
+    }
+    const claimAnchors = await routeAnchors(grant);
+    routeLifecycleDiag(claimAnchors ? "claim-anchors-done" : "claim-anchors-rejected");
+    if (!claimAnchors) throw Error("refused");
     requireRoute(grant);
     const response = await request(
       "item-get",
@@ -5147,12 +5190,22 @@ if (typeof importScripts === "function") importScripts("core.js");
         revision: grant.revision,
       },
       12000,
+    ).then(
+      (value) => {
+        routeLifecycleDiag("claim-item-get-done");
+        return value;
+      },
+      (error) => {
+        routeLifecycleDiag("claim-item-get-rejected");
+        throw error;
+      },
     );
     const live = routeLive(grant);
     if (!live) {
       // A late approval for a revoked or locked route is scrubbed here.
       if (response && typeof response === "object") response.item = null;
       revokeRoute(grant);
+      routeLifecycleDiag("claim-revoked");
       throw Error("refused");
     }
     if (
@@ -5160,25 +5213,32 @@ if (typeof importScripts === "function") importScripts("core.js");
       requestCapability !== capability ||
       !core.validResponse(response) ||
       response.type !== "item-detail"
-    )
+    ) {
+      routeLifecycleDiag("claim-response-invalid");
       throw Error("refused");
+    }
     const detail = publicDetail(response.item);
     if (
       !detail ||
       detail.id !== grant.itemId ||
       detail.revision !== grant.revision ||
       (detail.readOnly === true || detail.unavailable)
-    )
+    ) {
+      routeLifecycleDiag("claim-detail-invalid");
       throw Error("refused");
+    }
     await routeSettled(grant);
+    routeLifecycleDiag("claim-settled");
     if (!routeLive(grant)) {
       scrubDetail(detail);
+      routeLifecycleDiag("claim-unsettled");
       throw Error("refused");
     }
     // Field selectors of the approved detail, kept on the grant so this
     // route's own clipboard ports get them whether they were admitted before
     // or after the claim. No field value is retained.
     setRouteDetail(grant, detail);
+    routeLifecycleDiag("claim-completed");
     return {
       type: "route-claimed",
       token: grant.token,
