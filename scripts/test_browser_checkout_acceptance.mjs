@@ -1805,21 +1805,69 @@ test("route worker trace keeps only allowlisted fixed lifecycle labels", () => {
     "\n];",
   );
   assert.ok(harnessList.length > 60, "harness allowlist must be complete");
-  // Every fixed label the worker emits is allowlisted; the only computed one
-  // is the request-<type>-<phase> template, rebuilt here from its parts.
+  // Every label the worker can emit must be allowlisted, and the computed
+  // request-<type>-<phase> labels must each be reachable from the source: the
+  // request-<type>-sent/post-failed/no-port hooks in the helper plus the
+  // timeout callback's no-reply phase.
   const labelsIn = (text, pattern) =>
     [...text.matchAll(pattern)].map((match) => match[1]);
-  // The request-<type>-<phase> template is rebuilt below, not scanned.
+  // The request-<type>-<phase> template is rebuilt below, not scanned here.
   const emitted = labelsIn(
-    background.replace(/routeLifecycleDiag\("request-" \+ type \+ "-" \+ phase\);/g, ""),
+    background.replace(
+      /routeLifecycleDiag\("request-" \+ type \+ "-" \+ phase\);/g,
+      "",
+    ),
     /routeLifecycleDiag\(\s*"([a-z0-9-]+)"/g,
   );
   for (const match of background.matchAll(/routeLifecycleDiag\(([^")]*\?[^)]*)\);/g))
     emitted.push(...labelsIn(match[1], /"([a-z0-9-]+)"/g));
-  for (const type of ["vault-search", "item-get"])
-    for (const phase of ["no-port", "sent", "post-failed", "no-reply"])
-      emitted.push("request-" + type + "-" + phase);
-  assert.ok(emitted.length > 50);
+  const helper = background.slice(
+    background.indexOf("function routeRequestDiag(type, phase) {"),
+    background.indexOf("\n  }", background.indexOf("function routeRequestDiag(type, phase) {")),
+  );
+  const helperTypes = labelsIn(helper, /type === "([a-z-]+)"/g);
+  const template = /routeLifecycleDiag\("request-" \+ type \+ "-" \+ phase\)/.test(helper);
+  const timeout = background.slice(
+    background.indexOf("function startCall(type, requestId, timeout) {"),
+    background.indexOf("\n  }", background.indexOf("function startCall(type, requestId, timeout) {")),
+  );
+  assert.deepEqual(helperTypes.sort(), ["item-get", "vault-search"]);
+  assert.ok(template, "the request label template is missing");
+  assert.ok(
+    /routeRequestDiag\(type, "no-reply"\)/.test(timeout),
+    "no-reply must be emitted from the request timeout callback",
+  );
+  assert.equal(
+    countMatches(background, /routeRequestDiag\((?:type|type, )?"no-reply"\)/g),
+    1,
+    "no-reply must have exactly one emission point",
+  );
+  // Hook phases stated in the helper's own call sites (not the timeout one).
+  const hookCalls = [...background.matchAll(/routeRequestDiag\(type, "([a-z-]+)"\)/g)]
+    .map((match) => match[1])
+    .filter((phase) => phase !== "no-reply");
+  assert.ok(hookCalls.includes("sent"), "the sent hook is missing");
+  assert.ok(hookCalls.includes("post-failed"), "the post-failed hook is missing");
+  assert.ok(hookCalls.includes("no-port"), "the no-port hook is missing");
+  for (const type of helperTypes) {
+    for (const phase of new Set([...hookCalls, "no-reply"]))
+      assert.ok(
+        harnessList.includes("request-" + type + "-" + phase),
+        "reachable request label not allowlisted: request-" + type + "-" + phase,
+      );
+  }
+  // No allowlisted request label is unreachable: drop the reachable ones and
+  // require none to remain.
+  const reachable = new Set();
+  for (const type of helperTypes)
+    for (const phase of new Set([...hookCalls, "no-reply"]))
+      reachable.add("request-" + type + "-" + phase);
+  const allowedRequests = harnessList.filter((label) => label.startsWith("request-"));
+  assert.deepEqual(
+    allowedRequests.filter((label) => !reachable.has(label)),
+    [],
+    "allowlisted request labels with no source emission point",
+  );
   for (const label of emitted)
     assert.ok(harnessList.includes(label), "emitted label not allowlisted: " + label);
   assert.deepEqual(

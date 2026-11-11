@@ -1144,6 +1144,8 @@ if (typeof importScripts === "function") importScripts("core.js");
     });
     const timer = setTimeout(() => {
       calls.delete(requestId);
+      // This call never received a reply: its fixed no-reply phase.
+      routeRequestDiag(type, "no-reply");
       const error = Error("refused");
       error.timeout = true;
       reject(error);
@@ -1152,9 +1154,10 @@ if (typeof importScripts === "function") importScripts("core.js");
     calls.set(requestId, { resolve, reject, timer, type });
     return promise;
   }
-  // Route lifecycle diagnostic only: a fixed phase for this request. Only the
-  // route's own vault-search and item-get are labelled, and no fields, reply
-  // or error text is ever logged.
+  // Route lifecycle diagnostic only. This observes the shared native request
+  // helper, so it labels only the vault-search and item-get request types that
+  // the route claim also uses, by the fixed phase given; it cannot name the
+  // caller. No fields, reply or error text is ever logged.
   function routeRequestDiag(type, phase) {
     if (type === "vault-search" || type === "item-get")
       routeLifecycleDiag("request-" + type + "-" + phase);
