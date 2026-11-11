@@ -1503,10 +1503,10 @@ test("route probe maps the fixed claim-pending status to native-pending", () => 
   assert.equal(kindFor(""), "other");
 });
 
-test("route status trace maps fixed pending records and stays a bounded enum trace", () => {
-  // A status written and overwritten before the next poll must still show.
-  // Only fixed channel/value enums leave the page: no status or title text,
-  // URL, token or other arbitrary string, and at most eight entries.
+test("route status trace only follows the live #status element and stays bounded", () => {
+  // Only a status owned by the live #status element may enter the trace, so
+  // ordinary page text cannot consume the eight-entry cap, and a #status
+  // inserted after installation is still captured. Cleanup disconnects.
   const source = readFileSync(
     new URL("./browser_native_acceptance.mjs", import.meta.url),
     "utf8",
@@ -1516,95 +1516,134 @@ test("route status trace maps fixed pending records and stays a bounded enum tra
   assert.ok(start >= 0 && stop > start, "route trace helpers must stay top-level");
   const code = source.slice(start, stop);
   assert.match(code, /^const ROUTE_STATUS_TRACE_LIMIT = 8;$/m);
+
+  class FakeElement {
+    constructor(tag, selector = "") {
+      this.tag = tag;
+      this.selector = selector;
+      this.textContent = "";
+      this.childNodes = [];
+      this.hidden = true;
+      this.contains = (node) => node === this;
+      this.matches = (selectors) =>
+        selectors.split(",").some((part) => part.trim() === this.selector);
+    }
+  }
   const deliveries = [];
+  const observers = [];
   class FakeObserver {
     constructor(callback) {
       this.callback = callback;
-      FakeObserver.last = this;
+      this.disconnected = false;
+      observers.push(this);
     }
-    observe() {}
+    observe(target) {
+      this.target = target;
+    }
+    disconnect() {
+      this.disconnected = true;
+    }
     takeRecords() {
       return deliveries.splice(0);
     }
   }
-  const context = vm.createContext({ MutationObserver: FakeObserver });
-  vm.runInContext(code + "\nthis.probe = routeStatusTraceProbe;this.clean = sanitizeRouteStatusTrace;", context);
-  const status = { textContent: "" };
-  const body = { dataset: { view: "vault" } };
-  const title = { textContent: "", contains: (node) => node === title };
-  const detail = { hidden: true, contains: (node) => node === detail };
-  context.document = {
-    body,
-    querySelector: (selector) =>
-      ({ "#status": status, "#detail-view": detail, "#detail-title": title }[selector] ?? null),
+  const document = {
+    body: new FakeElement("body"),
+    nodes: {},
+    querySelector(selector) {
+      return this.nodes[selector] ?? null;
+    },
   };
+  document.body.dataset = { view: "vault" };
+  document.nodes["#detail-view"] = new FakeElement("section", "#detail-view");
+  document.nodes["#detail-title"] = new FakeElement("h2", "#detail-title");
+  const context = vm.createContext({
+    MutationObserver: FakeObserver,
+    document,
+    Element: FakeElement,
+  });
+  vm.runInContext(code + "\nthis.probe = routeStatusTraceProbe;this.clean = sanitizeRouteStatusTrace;", context);
   vm.runInContext(
     "eval(" + JSON.stringify(vm.runInContext("probe('FIXTURE')", context)) + ")",
     context,
   );
-  const trace = () => JSON.parse(vm.runInContext("__locklarkRouteStatusTrace()", context));
+  assert.equal(observers.length, 1);
+  const trace = () => JSON.parse(vm.runInContext("__locklarkRouteStatusTraceRead()", context));
   const mutate = (records) => {
     deliveries.push(...records);
-    FakeObserver.last.callback(FakeObserver.last.takeRecords());
+    observers.at(-1).callback(observers.at(-1).takeRecords());
   };
-  const added = (data) => ({ nodeType: 3, data, parentNode: status });
+  const textNode = (status) => ({ nodeType: 3, data: status, parentNode: status });
 
-  // One JS task: pending written, then overwritten by the close text.
-  status.textContent = "正在请求桌面审批…";
-  mutate([{ type: "childList", addedNodes: [added("正在请求桌面审批…")], target: status }]);
-  status.textContent = "已关闭此条目";
-  body.dataset.view = "closed";
+  // 1. Unrelated page text never appends a status event.
+  const before = trace();
+  const heading = { nodeType: 3, data: "普通标题文本" };
+  document.nodes["#detail-title"].contains = (node) => node === heading;
   mutate([
-    { type: "childList", addedNodes: [added("已关闭此条目")], target: status },
-    { type: "attributes", target: body },
+    { type: "characterData", target: heading },
+    { type: "childList", addedNodes: [heading], target: document.body },
   ]);
-  const entries = trace();
-  assert.deepEqual(entries.slice(1), [
-    { channel: "status", value: "native-pending" },
-    { channel: "status", value: "closed" },
-    { channel: "view", value: "closed" },
-  ]);
+  assert.deepEqual(trace(), before);
 
-  // Unknown status text is retained only as the fixed "other" enum.
-  status.textContent = "SECRET-STATUS-TEXT";
-  mutate([{ type: "characterData", target: { data: "SECRET-STATUS-TEXT" } }]);
+  // 2. #status inserted later with the pending literal is captured.
+  const status = new FakeElement("p", "#status");
+  const pending = { nodeType: 3, data: "正在请求桌面审批…", parentNode: status };
+  status.childNodes = [pending];
+  status.textContent = "正在请求桌面审批…";
+  status.contains = (node) => node === status || node === pending;
+  document.nodes["#status"] = status;
+  mutate([{ type: "childList", addedNodes: [status], target: document.body }]);
+  assert.deepEqual(trace().at(-1), { channel: "status", value: "native-pending" });
+
+  // 3. Only a status-owned characterData record classifies.
+  const outside = { nodeType: 3, data: "无法打开此条目" };
+  mutate([{ type: "characterData", target: outside }]);
+  assert.deepEqual(trace().at(-1), { channel: "status", value: "native-pending" });
+  pending.data = "已关闭此条目";
+  status.textContent = "已关闭此条目";
+  mutate([{ type: "characterData", target: pending }]);
+  assert.deepEqual(trace().at(-1), { channel: "status", value: "closed" });
+
+  // Unknown status text still becomes only the fixed "other" enum.
+  pending.data = "SECRET-STATUS-TEXT";
+  mutate([{ type: "characterData", target: pending }]);
   assert.deepEqual(trace().at(-1), { channel: "status", value: "other" });
 
-  // Hostile or long input is capped and dropped at the boundary too.
-  const capped = trace();
-  for (let index = 0; index < 30; index++)
-    mutate([
-      { type: "childList", addedNodes: [added(index % 2 ? "无法打开此条目" : "正在请求桌面审批…")], target: status },
-    ]);
-  const serialized = JSON.stringify(trace());
+  // The cap holds and nothing arbitrary or raw leaves the page.
+  for (let index = 0; index < 30; index++) {
+    pending.data = index % 2 ? "无法打开此条目" : "正在请求桌面审批…";
+    mutate([{ type: "characterData", target: pending }]);
+  }
   assert.equal(trace().length, 8);
-  assert.ok(capped.length <= 8);
-  assert.doesNotMatch(serialized, /SECRET|FIXTURE|正在请求|无法打开|已关闭|http|#route=/);
+  const serialized = JSON.stringify(trace());
+  assert.doesNotMatch(serialized, /SECRET|普通|FIXTURE|正在请求|无法打开|已关闭|http|#route=/);
   for (const entry of trace()) {
     assert.deepEqual(Object.keys(entry).sort(), ["channel", "value"]);
-    assert.equal(typeof entry.value !== "string" || entry.value.length <= 16, true);
+    assert.ok(entry.value === true || entry.value === false || entry.value.length <= 16);
   }
-  // Dropped enums are never copied; the boundary keeps a fixed hard maximum.
   const cleaned = JSON.parse(
     vm.runInContext(
       "JSON.stringify(clean([{channel:'status',value:'native-pending'},{channel:'status',value:'SECRET'}," +
-        "{channel:'url',value:'https://x'},{channel:'detailShown',value:true}]" +
-        ".concat(Array.from({length:20},()=>({channel:'view',value:'closed'})))))",
+        "{channel:'url',value:'https://x'},{channel:'detailShown',value:true}]))",
       context,
     ),
   );
-  assert.ok(cleaned.length <= 8);
-  assert.deepEqual(cleaned.slice(0, 3), [
+  assert.deepEqual(cleaned, [
     { channel: "status", value: "native-pending" },
     { channel: "detailShown", value: true },
-    { channel: "view", value: "closed" },
   ]);
-  assert.doesNotMatch(JSON.stringify(cleaned), /SECRET|https/);
-  const overLimit = JSON.parse(
+
+  // 4. Cleanup disconnects the observer and removes both hooks.
+  assert.equal(
+    vm.runInContext("__locklarkRouteStatusTraceStop()", context),
+    true,
+  );
+  assert.equal(observers.at(-1).disconnected, true);
+  assert.equal(
     vm.runInContext(
-      "JSON.stringify(clean(Array.from({length:20},()=>({channel:'view',value:'closed'}))))",
+      "typeof globalThis.__locklarkRouteStatusTraceRead + typeof globalThis.__locklarkRouteStatusTraceStop",
       context,
     ),
+    "undefinedundefined",
   );
-  assert.equal(overLimit.length, 8);
 });

@@ -347,59 +347,90 @@ function routeStateProbe(title) {
 // Route status trace. A visible-DOM MutationObserver on the exact route page
 // records each observable status/state change from the moment the target is
 // discovered, so a status written and overwritten before the next poll is not
-// lost. Each status childList record is classified here, in the page, against
-// only the fixed literals below; the added node's text is never stored. The
-// trace keeps at most ROUTE_STATUS_TRACE_LIMIT entries, dropping consecutive
-// repeats, of fixed view/status/detail/title enums only.
+// lost. The observer is installed immediately and holds no element references:
+// every relevant mutation resolves the current #status, #detail-view and
+// #detail-title, so nodes inserted after discovery (body parsing can follow
+// target discovery) are still traced. Only records owned by the live #status
+// element classify a status; unrelated page text never touches the trace. Each
+// status record is classified here, in the page, against only the fixed
+// literals below, and the added node's text is never stored. The trace keeps
+// at most ROUTE_STATUS_TRACE_LIMIT entries, dropping consecutive repeats, of
+// fixed view/status/detail/title enums only.
 const ROUTE_STATUS_TRACE_LIMIT = 8;
 const ROUTE_STATUS_TRACE_CHANNELS = ["status", "view", "detailShown", "titleKind"];
 const ROUTE_TITLE_KINDS = ["fixture", "other"];
 const ROUTE_CLOSED_STATUS = "已关闭此条目";
 // Returns the page-side expression that installs the observer and exposes one
-// read-only function returning the current sanitized trace as JSON.
+// read-only reader plus one stop function; both diagnostic hooks are removed
+// by the stop function.
 function routeStatusTraceProbe(title) {
   return `(()=>{
-    if(globalThis.__locklarkRouteStatusTrace)return true;
+    if(globalThis.__locklarkRouteStatusTraceRead)return true;
     const LIMIT=${ROUTE_STATUS_TRACE_LIMIT};
     const VIEWS=${JSON.stringify(ROUTE_VIEWS)};
     const FIXTURE_TITLE=${JSON.stringify(title)};
-    const current={view:'other',statusKind:'other',detailShown:false,titleKind:'other'};
-    const entries=[];
     const kindOf=(text)=>text===${JSON.stringify(ROUTE_CLAIM_PENDING_STATUS)}?'native-pending':text===${JSON.stringify(ROUTE_CLAIM_FAILED_STATUS)}?'claim-failed':text===${JSON.stringify(ROUTE_REVOKED_STATUS)}?'route-revoked':text===${JSON.stringify(ROUTE_CLOSED_STATUS)}?'closed':text?'other':'empty';
+    const entries=[];
+    let last=null,observing=null;
     const push=(channel,value)=>{
-      current[channel]=value;
-      const last=entries[entries.length-1];
       if(last&&last.channel===channel&&last.value===value)return;
-      if(entries.length<LIMIT)entries.push({channel,value});
+      last={channel,value};
+      if(entries.length<LIMIT)entries.push(last);
     };
-    const body=document.body;
-    const statusEl=document.querySelector('#status');
-    const detailEl=document.querySelector('#detail-view');
-    const titleEl=document.querySelector('#detail-title');
-    const observe=()=>{
-      const view=()=>VIEWS.includes(body?.dataset?.view)?body.dataset.view:'other';
-      const shown=()=>detailEl?detailEl.hidden!==true:false;
-      const titleKind=()=>titleEl?(String(titleEl.textContent||'')===FIXTURE_TITLE?'fixture':'other'):'other';
-      const statusKind=()=>statusEl?kindOf(String(statusEl.textContent||'').trim()):'other';
-      current.view=view();current.statusKind=statusKind();current.detailShown=shown();current.titleKind=titleKind();
-      push('status',current.statusKind);
-      const observer=new MutationObserver((records)=>{
-        for(const record of records){
-          if(record.type==='characterData')push('status',kindOf(String(record.target?.data||'').trim()));
-          else if(record.type==='attributes')push('view',view());
-          else for(const node of record.addedNodes){
-            if(node===statusEl)push('status',statusKind());
-            else if(node.nodeType===3&&node.parentNode===statusEl)push('status',kindOf(String(node.data||'').trim()));
-            else if(node===detailEl||detailEl?.contains?.(node))push('detailShown',shown());
-            else if(node===titleEl||titleEl?.contains?.(node))push('titleKind',titleKind());
-          }
+    const q=(selector)=>document.querySelector(selector);
+    const view=()=>VIEWS.includes(document.body?.dataset?.view)?document.body.dataset.view:'other';
+    const shown=()=>{const el=q('#detail-view');return el?el.hidden!==true:false;};
+    const titleKind=()=>{const el=q('#detail-title');return el?(String(el.textContent||'')===FIXTURE_TITLE?'fixture':'other'):'other';};
+    const statusKind=(statusEl)=>statusEl?kindOf(String(statusEl.textContent||'').trim()):'other';
+    const sync=()=>{push('status',statusKind(q('#status')));push('view',view());push('detailShown',shown());push('titleKind',titleKind());};
+    const statusText=(statusEl)=>{
+      if(statusEl&&statusEl.childNodes)
+        for(const child of statusEl.childNodes)
+          if(child.nodeType===3)push('status',kindOf(String(child.data||'').trim()));
+      push('status',statusKind(statusEl));
+    };
+    const handle=(record)=>{
+      const statusEl=q('#status');
+      if(record.type==='characterData'){
+        // Only text owned by the live #status element is a status change.
+        if(statusEl&&statusEl.contains?.(record.target))push('status',kindOf(String(record.target.data||'').trim()));
+        return;
+      }
+      if(record.type==='attributes'){
+        if(record.target===document.body)push('view',view());
+        return;
+      }
+      if(!record.addedNodes)return;
+      let statusChanged=false;
+      for(const node of record.addedNodes){
+        if(statusEl&&(node===statusEl||node.contains?.(statusEl))){
+          statusText(statusEl);
+          statusChanged=true;
         }
-      });
-      observer.observe(body,{attributes:true,attributeFilter:['data-view'],childList:true,subtree:true,characterData:true});
+      }
+      if(statusChanged)return;
+      for(const node of record.addedNodes){
+        if(node instanceof Element&&node.matches?.('#detail-view'))push('detailShown',node.hidden!==true);
+        if(node instanceof Element&&node.matches?.('#detail-title, #detail-title *'))push('titleKind',titleKind());
+      }
     };
-    if(body&&body.dataset)observe();
-    else if(!body)for(const type of ['DOMContentLoaded','pageshow'])globalThis.addEventListener?.(type,function once(){observe();globalThis.removeEventListener?.(type,once);},{once:true});
-    globalThis.__locklarkRouteStatusTrace=()=>JSON.stringify(entries);
+    const observer=new MutationObserver((records)=>{for(const record of records)handle(record);});
+    const start=()=>{
+      if(observing||!document.body)return;
+      observing=document.body;
+      observer.observe(observing,{attributes:true,attributeFilter:['data-view','hidden'],childList:true,subtree:true,characterData:true});
+      sync();
+    };
+    start();
+    for(const type of['DOMContentLoaded','pageshow'])globalThis.addEventListener?.(type,start,{once:true});
+    globalThis.__locklarkRouteStatusTraceRead=()=>JSON.stringify(entries);
+    globalThis.__locklarkRouteStatusTraceStop=()=>{
+      observer.disconnect();
+      for(const type of['DOMContentLoaded','pageshow'])globalThis.removeEventListener?.(type,start);
+      delete globalThis.__locklarkRouteStatusTraceRead;
+      delete globalThis.__locklarkRouteStatusTraceStop;
+      return true;
+    };
     return true;
   })()`;
 }
@@ -434,7 +465,7 @@ async function readRouteStatusTrace(connection) {
     routeStatusTrace = sanitizeRouteStatusTrace(
       JSON.parse(
         await connection.evaluate(
-          "globalThis.__locklarkRouteStatusTrace?.() ?? '[]'",
+          "globalThis.__locklarkRouteStatusTraceRead?.() ?? '[]'",
         ),
       ),
     );
@@ -447,8 +478,10 @@ async function refreshRouteStatusTrace(attach, target, uninstall = false) {
     connection = await attach(target);
     await readRouteStatusTrace(connection);
     if (!uninstall) return;
-    // Stop observing in the page (diagnostic hook only).
-    await connection.evaluate("delete globalThis.__locklarkRouteStatusTrace; true");
+    // Stop observing in the page: disconnect and remove both diagnostic hooks.
+    await connection.evaluate(
+      "globalThis.__locklarkRouteStatusTraceStop?.() ?? false",
+    );
   } catch {} finally {
     try {
       await connection?.close();
