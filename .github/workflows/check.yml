@@ -560,6 +560,24 @@ jobs:
           LOCKLARK_TEST_PASSKEY_MANAGEMENT: "1"
           LOCKLARK_TEST_PASSKEY_CONDITIONAL: "1"
           LOCKLARK_TEST_WEBAUTHN_SERVER: ${{ runner.temp }}/locklark-webauthn-peer/node_modules/@simplewebauthn/server
+      - name: Test shared desktop clipboard lease
+        timeout-minutes: 15
+        run: |
+          if [ "${{ matrix.browser }}" = firefox ]; then
+            dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' node scripts/browser_firefox_native_acceptance.mjs
+          else
+            dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' node scripts/browser_native_acceptance.mjs
+          fi
+        env:
+          LOCKLARK_TEST_SHARED_CLIPBOARD: "1"
+          LOCKLARK_TEST_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
+          LOCKLARK_GO: go
+          LOCKLARK_BROWSER_HOST: ${{ runner.temp }}/locklark-bin/locklark-browser-${{ matrix.browser }}
+          LOCKLARK_BROWSER_REGISTER: ${{ runner.temp }}/locklark-bin/locklark-browser-register
+          LOCKLARK_BROWSER_FIXTURE: ${{ runner.temp }}/locklark-bin/browser-acceptance-fixture
+          LOCKLARK_DESKTOP_HOST: ${{ runner.temp }}/locklark-bin/locklark-desktop
+          LOCKLARK_GECKODRIVER: ${{ runner.temp }}/geckodriver
+          LOCKLARK_TEST_WEBAUTHN_SERVER: ${{ runner.temp }}/locklark-webauthn-peer/node_modules/@simplewebauthn/server
   web:
     name: web
     needs: [web-core, web-browsers]
