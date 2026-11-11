@@ -1,5 +1,7 @@
-// Package onedrivegraph provides a narrow, read-only Microsoft Graph adapter
-// for one vault file.
+// Package onedrivegraph provides a narrow Microsoft Graph adapter for one
+// vault file: a read transport that fetches a non-atomic fetch candidate, and
+// a permission transport that grants or revokes one recipient permission on
+// that file.
 //
 // A Reader is bound to one explicit drive ID and item ID and to a caller-owned
 // in-memory access-token source. It never stores, refreshes or logs a token,
@@ -31,7 +33,7 @@
 // the access token is sent only to the fixed Graph endpoint, never to the
 // pre-authenticated download host.
 //
-// FetchCandidate is a read-only transport operation. Its errors wrap only fixed
+// FetchCandidate is a read transport operation. Its errors wrap only fixed
 // vaultfilebackend sentinels and the package's fixed sentinels; transport,
 // JSON, token-source and provider errors are deliberately not placed in the
 // error chain, because their messages can contain a token, a provider body, a

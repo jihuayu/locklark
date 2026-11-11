@@ -73,6 +73,25 @@ func newPermissionFixture(t *testing.T) *permissionFixture {
 
 func (f *permissionFixture) itemPath() string { return testItemPath() }
 
+// selectedItemFacets renders a successful permission preflight response that
+// contains exactly the fields requested by graphItemFacetSelect: the ID, and a
+// file facet (only when the item is a file). eTag and size are deliberately
+// absent because the preflight does not select them.
+func selectedItemFacets(cfg fixtureConfig) []byte {
+	m := map[string]any{"id": cfg.itemID}
+	if cfg.file {
+		m["file"] = map[string]any{
+			"mimeType": "application/octet-stream",
+			"hashes":   map[string]any{"quickXorHash": "syntheticQuickXorHash"},
+		}
+	}
+	body, err := json.Marshal(m)
+	if err != nil {
+		panic(err)
+	}
+	return body
+}
+
 func (f *permissionFixture) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	cfg := *f.metadata
@@ -115,7 +134,7 @@ func (f *permissionFixture) serve(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte(testPermissionSecret))
 			return
 		}
-		writeJSONResponse(w, generatedMetadata(cfg))
+		writeJSONResponse(w, selectedItemFacets(cfg))
 	case r.Method == http.MethodPost && r.URL.Path == itemPath+"/invite":
 		if inviteHook == nil {
 			f.t.Errorf("unexpected invite request")
@@ -375,6 +394,73 @@ func TestManagerGrantAcceptsLegacyGrantedToOnly(t *testing.T) {
 	}
 }
 
+func TestManagerGrantAcceptsDocumentedInvitationEmailOnly(t *testing.T) {
+	f := newPermissionFixture(t)
+	// The driveItem: invite documentation shape: invitation.email carries the
+	// invited address and grantedToV2 carries no user email yet.
+	f.setInvite(serveBody(http.StatusOK, permissionBody(map[string]any{
+		"id":    testPermissionID,
+		"roles": []string{"read"},
+		"grantedToV2": map[string]any{
+			"user": map[string]any{"id": "synthetic-invited-user-id"},
+		},
+		"invitation": map[string]any{"email": testRecipientUpper, "signInRequired": true},
+	})))
+	grant, err := f.manager(t, nil, "").Grant(context.Background(), testRecipientEmail, permissionRoleRead)
+	if err != nil {
+		t.Fatalf("Grant with documented invitation.email: %v", err)
+	}
+	if grant.PermissionID != testPermissionID || grant.Role != permissionRoleRead {
+		t.Fatalf("grant = %+v, want only ID and role", grant)
+	}
+	if n := f.mutationCount(); n != 1 {
+		t.Errorf("invite requests = %d, want exactly 1", n)
+	}
+}
+
+func TestManagerGrantRejectsConflictingInvitationEmail(t *testing.T) {
+	cases := map[string]map[string]any{
+		"grantedToV2 email conflicts with invitation.email": {
+			"id":          testPermissionID,
+			"roles":       []string{"read"},
+			"grantedToV2": map[string]any{"user": map[string]any{"email": testOtherEmail}},
+			"invitation":  map[string]any{"email": testRecipientEmail, "signInRequired": true},
+		},
+		"invitation.email conflicts with grantedToV2 email": {
+			"id":          testPermissionID,
+			"roles":       []string{"read"},
+			"grantedToV2": map[string]any{"user": map[string]any{"email": testRecipientEmail}},
+			"invitation":  map[string]any{"email": testOtherEmail, "signInRequired": true},
+		},
+		"grantedTo email conflicts with invitation.email": {
+			"id":         testPermissionID,
+			"roles":      []string{"read"},
+			"grantedTo":  map[string]any{"user": map[string]any{"email": testOtherEmail}},
+			"invitation": map[string]any{"email": testRecipientEmail, "signInRequired": true},
+		},
+		"invitation.email is another address": {
+			"id":         testPermissionID,
+			"roles":      []string{"read"},
+			"invitation": map[string]any{"email": testOtherEmail, "signInRequired": true},
+		},
+	}
+	for name, permission := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newPermissionFixture(t)
+			f.setInvite(serveBody(http.StatusOK, permissionBody(permission)))
+			grant, err := f.manager(t, nil, "").Grant(context.Background(), testRecipientEmail, permissionRoleRead)
+			if grant != (PermissionGrant{}) {
+				t.Errorf("conflicting recipient returned a grant")
+			}
+			assertErrorIs(t, err, vaultfilebackend.ErrUnknown, ErrPermissionOutcomeUnknown, ErrPermissionResponse)
+			assertNoSecrets(t, err, testRecipientEmail, testOtherEmail, testToken)
+			if n := f.mutationCount(); n != 1 {
+				t.Errorf("invite requests = %d, want exactly 1 (no retry)", n)
+			}
+		})
+	}
+}
+
 func TestManagerGrantRejectsUnexpectedRecipientRoleOrFlags(t *testing.T) {
 	m := newPermissionFixture(t).manager(t, nil, "")
 	cases := map[string]struct {
@@ -418,7 +504,7 @@ func TestManagerPreflightRequiresExactlyTheConfiguredFile(t *testing.T) {
 		{
 			name: "folder facet",
 			mutate: func(c *fixtureConfig) {
-				c.metadataJSON = []byte(`{"id":"` + testItemID + `","eTag":` + q(testETag) + `,"size":0,"file":{},"folder":{"childCount":3}}`)
+				c.metadataJSON = []byte(`{"id":"` + testItemID + `","file":{},"folder":{"childCount":3}}`)
 			},
 			want:    []error{vaultfilebackend.ErrUnsupported, ErrInvalidPermission},
 			notWant: []error{vaultfilebackend.ErrUnknown, vaultfilebackend.ErrCorrupt},
@@ -426,21 +512,28 @@ func TestManagerPreflightRequiresExactlyTheConfiguredFile(t *testing.T) {
 		{
 			name: "folder only",
 			mutate: func(c *fixtureConfig) {
-				c.metadataJSON = []byte(`{"id":"` + testItemID + `","eTag":` + q(testETag) + `,"size":0,"folder":{}}`)
+				c.metadataJSON = []byte(`{"id":"` + testItemID + `","folder":{"childCount":0}}`)
 			},
 			want: []error{vaultfilebackend.ErrUnsupported, ErrInvalidPermission},
 		},
 		{
 			name: "drive root reports root id",
 			mutate: func(c *fixtureConfig) {
-				c.metadataJSON = []byte(`{"id":"ROOT","eTag":"` + testETag + `","size":0,"file":{},"folder":{"childCount":1}}`)
+				c.metadataJSON = []byte(`{"id":"synthetic-root","file":{},"folder":{"childCount":1}}`)
 			},
 			want: []error{vaultfilebackend.ErrCorrupt, ErrInvalidPermission},
 		},
 		{
 			name: "mismatched file id",
 			mutate: func(c *fixtureConfig) {
-				c.itemID = "synthetic-other-item"
+				c.metadataJSON = []byte(`{"id":"synthetic-other-item","file":{}}`)
+			},
+			want: []error{vaultfilebackend.ErrCorrupt, ErrInvalidPermission},
+		},
+		{
+			name: "missing id",
+			mutate: func(c *fixtureConfig) {
+				c.metadataJSON = []byte(`{"file":{}}`)
 			},
 			want: []error{vaultfilebackend.ErrCorrupt, ErrInvalidPermission},
 		},
@@ -452,23 +545,16 @@ func TestManagerPreflightRequiresExactlyTheConfiguredFile(t *testing.T) {
 			want: []error{vaultfilebackend.ErrUnsupported, ErrInvalidPermission},
 		},
 		{
-			name: "missing etag",
+			name: "explicit null file facet",
 			mutate: func(c *fixtureConfig) {
-				c.etag = ""
+				c.metadataJSON = []byte(`{"id":"` + testItemID + `","file":null}`)
 			},
-			want: []error{vaultfilebackend.ErrCorrupt, ErrInvalidPermission},
-		},
-		{
-			name: "negative size",
-			mutate: func(c *fixtureConfig) {
-				c.size = -1
-			},
-			want: []error{vaultfilebackend.ErrCorrupt, ErrInvalidPermission},
+			want: []error{vaultfilebackend.ErrUnsupported, ErrInvalidPermission},
 		},
 		{
 			name: "invalid utf8",
 			mutate: func(c *fixtureConfig) {
-				c.metadataJSON = []byte(`{"id":"` + testItemID + `","leak":"` + testPermissionSecret + "\xff" + `"}`)
+				c.metadataJSON = []byte(`{"id":"` + testItemID + `","file":{},"leak":"` + testPermissionSecret + "\xff" + `"}`)
 			},
 			want: []error{vaultfilebackend.ErrCorrupt, ErrInvalidPermission},
 		},
@@ -480,6 +566,13 @@ func TestManagerPreflightRequiresExactlyTheConfiguredFile(t *testing.T) {
 			want: []error{vaultfilebackend.ErrCorrupt, ErrInvalidPermission},
 		},
 		{
+			name: "json null",
+			mutate: func(c *fixtureConfig) {
+				c.metadataJSON = []byte(`null`)
+			},
+			want: []error{vaultfilebackend.ErrCorrupt, ErrInvalidPermission},
+		},
+		{
 			name: "oversized body",
 			mutate: func(c *fixtureConfig) {
 				c.metadataJSON = []byte(`{"pad":"` + strings.Repeat("x", maxMetadataJSONSize) + `"}`)
@@ -487,9 +580,9 @@ func TestManagerPreflightRequiresExactlyTheConfiguredFile(t *testing.T) {
 			want: []error{vaultfilebackend.ErrCorrupt, ErrInvalidPermission},
 		},
 		{
-			name: "link facet on item",
+			name: "invalid permission request",
 			mutate: func(c *fixtureConfig) {
-				c.metadataJSON = []byte(`{"id":"` + testItemID + `","eTag":` + q(testETag) + `,"size":1,"file":{},"@microsoft.graph.link":{}}`)
+				c.metadataJSON = []byte(`{"leak":"` + testPermissionSecret + `"}`)
 			},
 			want: []error{vaultfilebackend.ErrCorrupt, ErrInvalidPermission},
 		},
@@ -526,6 +619,40 @@ func TestManagerPreflightRequiresExactlyTheConfiguredFile(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("validates only the selected fields", func(t *testing.T) {
+		// The default preflight response holds exactly id and file: no eTag,
+		// size or link, because those are not selected.
+		f := newPermissionFixture(t)
+		f.setInvite(serveBody(http.StatusOK, permissionBody(
+			permissionGrantFixture(testPermissionID, []string{"read"}, testRecipientEmail),
+		)))
+		if _, err := f.manager(t, nil, "").Grant(context.Background(), testRecipientEmail, permissionRoleRead); err != nil {
+			t.Fatalf("Grant with an exactly-selected file response: %v", err)
+		}
+		reqs := f.recorded()
+		if len(reqs) != 2 {
+			t.Fatalf("requests = %d, want preflight + invite", len(reqs))
+		}
+		if reqs[0].query != "$select=id,file,folder" {
+			t.Errorf("preflight query = %q", reqs[0].query)
+		}
+		var returned map[string]json.RawMessage
+		if err := json.Unmarshal(selectedItemFacets(fixtureConfig{itemID: testItemID, file: true}), &returned); err != nil {
+			t.Fatalf("fixture metadata is not JSON: %v", err)
+		}
+		if _, ok := returned["file"]; !ok {
+			t.Fatalf("fixture metadata lacks the file facet")
+		}
+		for _, k := range []string{"eTag", "size", "folder", "@microsoft.graph.link"} {
+			if _, ok := returned[k]; ok {
+				t.Errorf("fixture metadata unexpectedly contains %q", k)
+			}
+		}
+		if n := f.mutationCount(); n != 1 {
+			t.Errorf("mutation requests = %d, want exactly 1 invite", n)
+		}
+	})
 
 	t.Run("configured item id must match", func(t *testing.T) {
 		f := newPermissionFixture(t)
@@ -840,8 +967,13 @@ func TestManagerRevokeDeletesOnlyTheGivenPermission(t *testing.T) {
 	if del.authorization != "Bearer "+testToken {
 		t.Errorf("delete request missing bearer token")
 	}
-	if del.contentType != "" {
-		t.Errorf("delete request Content-Type = %q, want none", del.contentType)
+	// Microsoft's permission: delete documentation requires
+	// Content-Type application/json, and the request still carries no body.
+	if del.contentType != "application/json" {
+		t.Errorf("delete request Content-Type = %q, want application/json", del.contentType)
+	}
+	if len(del.body) != 0 {
+		t.Errorf("delete request carried a body")
 	}
 
 	t.Run("refused permission id", func(t *testing.T) {

@@ -28,7 +28,8 @@ import (
 // Grant sends exactly one recipient with one role (read or write) to the
 // invite route with requireSignIn true and sendInvitation false. No other
 // field is sent and there is no way to change those flags. Revoke deletes
-// exactly one caller-supplied permission ID under the configured drive/item;
+// exactly one caller-supplied permission ID under the configured drive/item,
+// sending the documented Content-Type application/json with no body;
 // Graph only deletes non-inherited permissions, and every deletion failure is
 // reported as such without provider detail.
 //
@@ -90,9 +91,8 @@ type PermissionGrant struct {
 // values that never contain provider data.
 var (
 	// ErrInvalidPermission reports a malformed argument or an item metadata
-	// preflight that does not describe exactly the configured file: a
-	// missing or mismatched ID, a missing or unsafe eTag, a missing file
-	// facet, a folder facet, or a non-numeric size.
+	// preflight that is not exactly the configured file: a missing or
+	// mismatched ID, a missing file facet or a folder facet.
 	ErrInvalidPermission = errors.New("onedrive graph: invalid permission request")
 	// ErrPermissionResponse reports a mutation response whose body is not
 	// exactly one permission for the requested recipient and role, a missing
@@ -300,7 +300,9 @@ func (m *Manager) Revoke(ctx context.Context, permissionID string) error {
 		return err
 	}
 
-	resp, err := m.do(ctx, token, http.MethodDelete, target, "", nil)
+	// Microsoft's permission: delete documentation marks Content-Type
+	// application/json as required, even though the request has no body.
+	resp, err := m.do(ctx, token, http.MethodDelete, target, "application/json", nil)
 	if err != nil {
 		return err
 	}
@@ -364,20 +366,19 @@ func checkContext(ctx context.Context) error {
 	return nil
 }
 
+// itemFacets holds exactly the fields requested by graphItemFacetSelect. Graph
+// returns only selected fields, so an unselected field must not be validated.
 type itemFacets struct {
-	ID     string          `json:"id"`
-	File   *struct{}       `json:"file"`
-	Folder *struct{}       `json:"folder"`
-	ETag   *string         `json:"eTag"`
-	Size   *int64          `json:"size"`
-	Link   json.RawMessage `json:"@microsoft.graph.link"`
+	ID     string    `json:"id"`
+	File   *struct{} `json:"file"`
+	Folder *struct{} `json:"folder"`
 }
 
 // preflight loads exactly graphItemFacetSelect for the configured item and
-// requires a file item: matching ID, a file facet, no folder facet, an opaque
-// eTag and a non-negative size. A folder-only or facet-less item is refused
-// with ErrUnsupported; the drive root can never pass because its ID differs
-// from the configured item ID or because it has a folder facet.
+// requires a file item: the requested ID, a non-nil file facet and a nil folder
+// facet. A folder-only or facet-less item is refused with ErrUnsupported; the
+// drive root can never pass because its ID differs from the configured item ID
+// or because it has a folder facet.
 func (m *Manager) preflight(ctx context.Context, token string) error {
 	raw, err := m.itemURL()
 	if err != nil {
@@ -436,15 +437,6 @@ func (m *Manager) preflight(ctx context.Context, token string) error {
 	if facets.Folder != nil {
 		return fmt.Errorf("%w: %w: configured item is a folder and cannot be shared", vaultfilebackend.ErrUnsupported, ErrInvalidPermission)
 	}
-	if facets.ETag == nil || !validOpaqueETag(*facets.ETag) {
-		return invalidPermission("item metadata ETag is missing, unsafe or too large")
-	}
-	if facets.Size == nil || *facets.Size < 0 {
-		return invalidPermission("item metadata size is missing or negative")
-	}
-	if len(facets.Link) > 0 && string(facets.Link) != "null" {
-		return invalidPermission("item metadata carries a link facet")
-	}
 	return nil
 }
 
@@ -469,7 +461,9 @@ type permission struct {
 }
 
 type permissionInvitation struct {
-	SignInRequired *bool `json:"signInRequired"`
+	// Email is the invited address documented by driveItem: invite.
+	Email          string `json:"email"`
+	SignInRequired *bool  `json:"signInRequired"`
 }
 
 type permissionIdentity struct {
@@ -479,8 +473,9 @@ type permissionIdentity struct {
 // readGrantResponse validates a 200 invite response. It accepts exactly one
 // permission whose ID is a bounded opaque value, whose roles are exactly the
 // requested role, whose invitation.signInRequired is true, and whose recipient
-// (grantedToV2, then grantedTo) email matches the requested address. Any link
-// permission rejects the whole response. Success only shows that Graph
+// (grantedToV2, then grantedTo user, then invitation.email as documented by
+// driveItem: invite) email matches the requested address. Any link permission
+// rejects the whole response. Success only shows that Graph
 // recorded a sign-in-gated permission for that address; it does not verify
 // that the address belongs to a Microsoft identity.
 func readGrantResponse(ctx context.Context, resp *http.Response, recipientEmail string, role PermissionRole) (string, error) {
@@ -523,9 +518,25 @@ func readGrantResponse(ctx context.Context, resp *http.Response, recipientEmail 
 }
 
 // matchesRecipient compares the permission's recipient email with the
-// requested address case-insensitively. grantedToV2 is preferred; grantedTo is
-// accepted for responses that only populate the older form.
+// requested address case-insensitively. The grantedToV2 user, the older
+// grantedTo user and the documented invitation.email are each accepted when
+// present. A returned recipient whose address disagrees is never accepted, so
+// a conflicting recipient rejects the response.
 func (p permission) matchesRecipient(email string) bool {
+	if p.GrantedToV2 != nil {
+		if user := p.GrantedToV2.User; user != nil && user.Email != "" && !strings.EqualFold(user.Email, email) {
+			return false
+		}
+		if user := p.GrantedToV2.SiteUser; user != nil && user.Email != "" && !strings.EqualFold(user.Email, email) {
+			return false
+		}
+	}
+	if p.GrantedTo != nil && p.GrantedTo.User != nil && p.GrantedTo.User.Email != "" && !strings.EqualFold(p.GrantedTo.User.Email, email) {
+		return false
+	}
+	if p.Invitation != nil && p.Invitation.Email != "" && !strings.EqualFold(p.Invitation.Email, email) {
+		return false
+	}
 	if p.GrantedToV2 != nil {
 		if user := p.GrantedToV2.User; user != nil && strings.EqualFold(user.Email, email) {
 			return true
@@ -534,10 +545,10 @@ func (p permission) matchesRecipient(email string) bool {
 			return true
 		}
 	}
-	if p.GrantedTo != nil && p.GrantedTo.User != nil {
-		return strings.EqualFold(p.GrantedTo.User.Email, email)
+	if p.GrantedTo != nil && p.GrantedTo.User != nil && strings.EqualFold(p.GrantedTo.User.Email, email) {
+		return true
 	}
-	return false
+	return p.Invitation != nil && p.Invitation.Email != "" && strings.EqualFold(p.Invitation.Email, email)
 }
 
 // itemURL is the fixed drive/item route shared by the preflight and the
@@ -576,8 +587,8 @@ func (m *Manager) do(ctx context.Context, token, method, raw, contentType string
 }
 
 // newGraphRequest builds one fresh request carrying only the bearer token, an
-// Accept header and, for mutations, a Content-Type and the fixed body. No
-// header or state is shared with another request.
+// Accept header, the given Content-Type (when set) and, when body is non-nil,
+// the fixed body. No header or state is shared with another request.
 func newGraphRequest(ctx context.Context, token, method, raw, contentType string, body []byte) (*http.Request, error) {
 	var reader io.Reader
 	if body != nil {
