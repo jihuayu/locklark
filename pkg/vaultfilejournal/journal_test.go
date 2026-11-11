@@ -129,16 +129,12 @@ func TestSaveLoadAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !fi.Mode().IsRegular() || fi.Mode().Perm() != 0o600 {
-		t.Fatalf("database mode = %v, want regular 0600", fi.Mode())
+	if !fi.Mode().IsRegular() {
+		t.Fatalf("database is not a regular file: %v", fi.Mode())
 	}
-	dfi, err := os.Lstat(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if dfi.Mode().Perm()&0o077 != 0 {
-		t.Fatalf("parent mode = %04o, want private", dfi.Mode().Perm())
-	}
+	// Mode bits are only meaningful on POSIX; Windows private DACLs are
+	// covered by the dedicated ACL tests.
+	checkLocalPermissions(t, path, dir)
 
 	j2, err := Open(path)
 	if err != nil {
@@ -200,13 +196,8 @@ func TestOpenRejectsInvalidPaths(t *testing.T) {
 		}
 	})
 	t.Run("shared_parent", func(t *testing.T) {
-		dir := filepath.Join(privateDir(t), "shared")
-		if err := os.Mkdir(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chmod(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
+		dir := privateDir(t)
+		makeParentShared(t, dir)
 		if _, err := Open(filepath.Join(dir, "journal.db")); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("err = %v, want ErrInvalid", err)
 		}
@@ -217,11 +208,12 @@ func TestOpenRejectsInvalidPaths(t *testing.T) {
 	t.Run("symlinked_parent", func(t *testing.T) {
 		real := privateDir(t)
 		link := filepath.Join(privateDir(t), "link")
-		if err := os.Symlink(real, link); err != nil {
-			t.Fatal(err)
-		}
+		mustLinkDir(t, real, link)
 		if _, err := Open(filepath.Join(link, "journal.db")); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("err = %v, want ErrInvalid", err)
+		}
+		if _, err := os.Lstat(filepath.Join(real, "journal.db")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("Open through a link created a database: %v", err)
 		}
 	})
 	t.Run("symlinked_db", func(t *testing.T) {
@@ -230,11 +222,12 @@ func TestOpenRejectsInvalidPaths(t *testing.T) {
 		if err := os.WriteFile(target, nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Symlink(target, filepath.Join(dir, "journal.db")); err != nil {
-			t.Fatal(err)
-		}
+		mustLinkFile(t, target, filepath.Join(dir, "journal.db"))
 		if _, err := Open(filepath.Join(dir, "journal.db")); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("err = %v, want ErrInvalid", err)
+		}
+		if info, err := os.Lstat(target); err != nil || info.Size() != 0 {
+			t.Fatalf("Open through a file link changed the target: %v, %v", info, err)
 		}
 	})
 	t.Run("directory_db", func(t *testing.T) {
@@ -252,12 +245,40 @@ func TestOpenRejectsInvalidPaths(t *testing.T) {
 		if err := os.WriteFile(path, []byte("not a database"), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		makeDBPrivate(t, path)
 		if _, err := Open(path); err == nil {
 			t.Fatal("Open accepted a non-bbolt file")
 		}
 		data, err := os.ReadFile(path)
 		if err != nil || string(data) != "not a database" {
 			t.Fatalf("failed Open modified the existing file: %q, %v", data, err)
+		}
+	})
+	t.Run("existing_db_group_readable_posix", func(t *testing.T) {
+		if !posixModeChecks {
+			t.Skip("POSIX mode bits are not ACL evidence on Windows; DACL checks are tested separately")
+		}
+		dir := privateDir(t)
+		path := filepath.Join(dir, "journal.db")
+		j, err := Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := j.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0o640); err != nil {
+			t.Fatal(err)
+		}
+		before := mustReadFile(t, path)
+		if _, err := Open(path); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("Open(group-readable db) = %v, want ErrInvalid", err)
+		}
+		if got := mustReadFile(t, path); !bytes.Equal(got, before) {
+			t.Fatal("rejecting a group-readable database changed its bytes")
+		}
+		if fi, err := os.Lstat(path); err != nil || fi.Mode().Perm() != 0o640 {
+			t.Fatalf("rejecting a group-readable database chmodded it: %v, %v", fi, err)
 		}
 	})
 }

@@ -100,10 +100,18 @@ type Journal struct {
 const lockTimeout = 2 * time.Second
 
 // Open opens (creating if absent) the journal database at path. path must be
-// absolute and name a regular file, not a symlink. The database file is created
-// with mode 0600, and the parent directory must be a real, non-symlinked
-// directory with no group or other permissions (0700 or stricter); Open does
-// not create it, so a filesystem-backed temp directory is rejected as well.
+// absolute and name a regular file, not a symlink or reparse point. The
+// database file is created with mode 0600 (POSIX) or a protected DACL
+// (Windows), and the parent directory must already exist and be private:
+// Open never creates or tightens it, and rejects one that is not private.
+// On POSIX a private directory is a real directory with no group or other
+// permission bits; an existing database with such bits is rejected, never
+// chmodded. On Windows it is a local fixed-drive path whose whole component
+// chain is free of reparse points, is owned by a trusted principal and whose
+// DACL grants no untrusted principal the rights to traverse it, list it,
+// write it, replace a component or rewrite an ACL; an existing database must
+// be a regular, non-reparse file whose DACL grants no untrusted principal
+// read, write, delete or ACL access.
 //
 // Open holds an exclusive lock on the file for the lifetime of the Journal; a
 // concurrent opener of the same path fails with ErrLocked after the bbolt lock
@@ -120,37 +128,7 @@ func Open(path string) (*Journal, error) {
 	if err != nil {
 		return nil, err
 	}
-	return openCheckedPath(path, parent, missing)
-}
-
-// openCheckedPath opens path with bbolt after Open's path checks. The missing
-// hint is only a hint: another opener may create the file between Open's
-// check and this call, so it decides only whether to fsync the parent after a
-// successful open. On any failure this never removes path, because another
-// call may have created it or may own it. An uncertain, empty or foreign file
-// is preserved and reported.
-func openCheckedPath(path, parent string, missingHint bool) (*Journal, error) {
-	db, err := bolt.Open(path, 0o600, &bolt.Options{NoSync: false, Timeout: lockTimeout})
-	if err != nil {
-		if errors.Is(err, bolt.ErrTimeout) {
-			return nil, fmt.Errorf("%w: %w", ErrLocked, err)
-		}
-		return nil, fmt.Errorf("vault file journal: open: %w", err)
-	}
-	// Bolt creates only the main file; checkpoint it so the 0600 inode is
-	// durable rather than depending on a later rename or a lazily written
-	// parent directory. If the file already existed, skip the extra sync.
-	if missingHint {
-		if err := syncDir(parent); err != nil {
-			_ = db.Close()
-			return nil, fmt.Errorf("vault file journal: sync directory: %w", err)
-		}
-	}
-	if err := verifyDBFile(path); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	return &Journal{db: db}, nil
+	return openDatabase(path, parent, missing)
 }
 
 // Close closes the journal. Later calls to Load and Save return ErrClosed.

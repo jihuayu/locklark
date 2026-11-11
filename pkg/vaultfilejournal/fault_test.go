@@ -1,6 +1,7 @@
 package vaultfilejournal
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -194,7 +195,7 @@ func TestOpenStaleMissingHintDoesNotRemoveOwnedJournal(t *testing.T) {
 	mustSave(t, owner, want)
 
 	start := time.Now()
-	j, err := openCheckedPath(path, dir, true)
+	j, err := openDatabase(path, dir, true)
 	if j != nil {
 		_ = j.Close()
 		t.Fatalf("stale-hint open unexpectedly succeeded")
@@ -221,26 +222,31 @@ func TestOpenStaleMissingHintDoesNotRemoveOwnedJournal(t *testing.T) {
 	assertProposal(t, mustLoad(t, openAt(t, dir)), next)
 }
 
-// TestOpenFailuresPreserveUnknownFile proves failed Opens preserve the path in
-// its current state and report an explicit error instead of removing it.
+// TestOpenFailuresPreserveUnknownFile proves failed Opens preserve the path
+// in its current state and report an explicit error instead of removing it.
 func TestOpenFailuresPreserveUnknownFile(t *testing.T) {
 	dir := privateDir(t)
 	path := filepath.Join(dir, "journal.db")
 
-	// Empty file: bbolt initializes it, so Open succeeds; the journal is
-	// simply empty rather than being treated as corrupt or removed.
+	// Empty file: platform-defined, but whatever the outcome the file is
+	// never removed.
 	if err := os.WriteFile(path, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	makeDBPrivate(t, path)
+	emptyBytes := mustReadFile(t, path)
 	j, err := openBounded(t, path, 10*time.Second)
-	if err != nil {
-		t.Fatalf("Open(empty) = %v", err)
-	}
-	if _, err := j.Load(); !errors.Is(err, ErrEmpty) {
-		t.Fatalf("Load after Open(empty) = %v, want ErrEmpty", err)
-	}
-	if err := j.Close(); err != nil {
-		t.Fatal(err)
+	switch {
+	case err == nil:
+		if err := j.Close(); err != nil {
+			t.Fatal(err)
+		}
+	case errors.Is(err, ErrInvalid):
+		if got := mustReadFile(t, path); !bytes.Equal(got, emptyBytes) {
+			t.Fatal("rejecting an empty database changed its bytes")
+		}
+	default:
+		t.Fatalf("Open(empty) = %v, want success or ErrInvalid", err)
 	}
 
 	// Foreign file: preserved byte for byte.
@@ -248,6 +254,7 @@ func TestOpenFailuresPreserveUnknownFile(t *testing.T) {
 	if err := os.WriteFile(path, foreign, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	makeDBPrivate(t, path)
 	if j, err := openBounded(t, path, 10*time.Second); j != nil || err == nil || errors.Is(err, ErrLocked) {
 		t.Fatalf("Open(foreign) = %v, %v; want explicit non-lock error", j, err)
 	}
