@@ -600,6 +600,18 @@ try {
     await wait(
       async () => (await action.disabled("#refresh")) === false,
       "Paired popup not ready",
+    "Exact-origin match missing",
+    );
+    // The worker binds a route only to a source document captured by the
+    // ordinary match the user starts from this popup. One physical refresh
+    // click is that user action; its rendered status proves the capture.
+    mark("route:match");
+    await action.click("#refresh");
+    await wait(
+      async () =>
+        String(await action.text("#status")).includes("个当前网站") &&
+        (await action.disabled("#refresh")) === false,
+      "Exact-origin match missing",
     );
     mark("route:vault-open");
     await action.click('#filter-tabs [data-filter="all"]');
@@ -760,6 +772,7 @@ try {
     await eventually(
       async () => (await popup.disabled("#refresh")) === false,
       "Paired popup not ready",
+    "Exact-origin match missing",
     );
     await popup.click("#refresh");
     await eventually(
@@ -1218,6 +1231,7 @@ try {
     "Route detail mode is incompatible",
     "Route detail mode requires Chromium",
     "Paired popup not ready",
+    "Exact-origin match missing",
     "Vault rows missing",
     "Exact synthetic vault row missing",
     "Synthetic seed item identity missing",
