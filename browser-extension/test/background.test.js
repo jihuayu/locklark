@@ -1583,6 +1583,54 @@ test("a transiently missing route tab keeps the startup route for its own activa
   await route.h.send({ type: "disconnect" });
 });
 
+test("an initializing route tab URL with the exact pendingUrl keeps startup", async () => {
+  // The browser can report the created tab while its navigation is still
+  // initializing: url is not yet the route, but pendingUrl is exactly it.
+  // That is this route's own startup, not a mismatch, so it must not revoke.
+  // Nothing may be read until the live URL is exact, and then exactly the
+  // ordinary vault-search + item-get happen after route-ready and claim.
+  const route = await earlyRouteStartupFixture();
+  const opened = route.h.send({ type: "open-route", id: route.ITEM_ID, revision: "c".repeat(64) });
+  await waitFor(() => route.route(), "browser-created route tab");
+  assert.equal(route.pending(), true, "tabs.create resolved before the port connected");
+  const exact = route.route();
+  const token = route.h.routeToken(exact.url);
+  assert.equal(token.length, 64);
+  // Activation lookup: exact id/window, initializing current url, exact
+  // browser-reported pendingUrl.
+  route.setRoute({
+    id: exact.id,
+    windowId: exact.windowId,
+    active: true,
+    url: "chrome-extension://fixed/popup.html",
+    pendingUrl: exact.url,
+  });
+  route.h.listeners.active({ tabId: route.ROUTE_TAB, windowId: 1 });
+  await tick();
+  // Startup survived and nothing was read while the URL is not exact.
+  assert.deepEqual(route.nativeReads(), [], "an initializing tab read the vault");
+  // The live URL becomes exact before lifecycle-port admission.
+  route.setRoute({ url: exact.url });
+  route.finishStartup();
+  const openedReply = await opened;
+  assert.ok(openedReply?.routeCreated, "the initializing route create was refused");
+  await tick();
+  assert.deepEqual(route.nativeReads(), [], "startup itself read the vault");
+  const port = openLifecyclePort(route.h, route.routeSender());
+  const ready = await waitFor(() => route.routeReady(port), "route-ready after initializing URL");
+  assert.deepEqual([ready.type, ready.token], ["route-ready", token]);
+  assert.equal(port.disconnected, false, "the initializing route port was refused");
+  assert.deepEqual(route.nativeReads(), [], "admission alone read the vault");
+  const claim = await route.claim(token);
+  assert.equal(claim?.type, "route-claimed", "the initializing route could not claim");
+  assert.equal(claim.item_id, route.ITEM_ID);
+  assert.equal(claim.detail.title, "Target");
+  assert.deepEqual(route.nativeReads().map((r) => r.type), ["vault-search", "item-get"]);
+  assert.equal(port.received.filter((m) => m.type === "route-revoked").length, 0);
+  assert.equal(port.disconnected, false);
+  await route.h.send({ type: "disconnect" });
+});
+
 // Chrome documents Port.sender as a getter, so it is not required to return
 // the same object twice. This port hands out a fresh but structurally
 // identical sender on every read, which must be admitted exactly like the

@@ -1755,7 +1755,9 @@ test("route worker trace keeps only allowlisted fixed lifecycle labels", () => {
   for (const name of [
     "activation-startup",
     "activation-target-confirmed",
-    "activation-target-mismatch",
+    "activation-target-pending",
+    "activation-target-identity-mismatch",
+    "activation-target-url-mismatch",
     "route-tab-url-mismatch",
     "source-loading",
     "source-url-mismatch",

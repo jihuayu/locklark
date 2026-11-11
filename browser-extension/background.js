@@ -3397,7 +3397,8 @@ if (typeof importScripts === "function") importScripts("core.js");
     "port-anchor-mismatch", "port-ready-sent",
     "port-disconnected", "port-refused",
     "activation-target-confirmed", "activation-target-missing",
-    "activation-target-mismatch", "route-tab-url-mismatch",
+    "activation-target-pending", "activation-target-identity-mismatch",
+    "activation-target-url-mismatch", "route-tab-url-mismatch",
     "source-loading", "source-url-mismatch", "route-tab-removed",
     "source-tab-removed", "route-create-failed", "route-create-invalid-tab",
     "route-create-not-owned", "route-create-tab-mismatch",
@@ -3450,13 +3451,15 @@ if (typeof importScripts === "function") importScripts("core.js");
     boot.startupActivation = true;
     boot.activated = true;
     boot.initialLoad = {};
-    // Distinguish a transiently absent tab (tabs.get yields or rejects with no
-    // tab) from an existing tab whose id, window or exact route URL is wrong.
-    // Only absence may still be this route's own startup: the exact routeTabs
-    // binding is kept and the one startup activation is reset so a later
-    // activation of the same route tab can consume it. Nothing is synthesized:
-    // the grant stays unusable until every ordinary routeAnchors() check
-    // passes. An existing mismatch still fails closed as before.
+    // Only this route's own startup may survive a lookup that is not yet
+    // exact. A transiently absent tab, or the same exact id/window whose
+    // navigation is still initializing with the exact route URL as its
+    // browser-reported pendingUrl, keeps the routeTabs binding and resets the
+    // one startup activation so a later activation of the same route tab can
+    // consume it. Nothing is synthesized: the grant stays unusable until every
+    // ordinary routeAnchors() check sees an exact, live, active URL and source.
+    // A wrong id/window, or a current URL that is not the route with no exact
+    // pendingUrl, still fails closed exactly as before.
     const verifyActivationTarget = (tab) => {
       if (routeTabs.get(tabId) !== boot) return;
       if (!tab) {
@@ -3464,18 +3467,24 @@ if (typeof importScripts === "function") importScripts("core.js");
         routeLifecycleDiag("activation-target-missing");
         return;
       }
-      if (
-        tab.id !== tabId ||
-        tab.windowId !== boot.windowId ||
-        typeof tab.url !== "string" ||
-        tab.url !== boot.routeURL
-      ) {
-        routeLifecycleDiag("activation-target-mismatch");
+      if (tab.id !== tabId || tab.windowId !== boot.windowId) {
+        routeLifecycleDiag("activation-target-identity-mismatch");
         revokeRoute(boot);
         cancelContext();
         return;
       }
-      routeLifecycleDiag("activation-target-confirmed");
+      if (typeof tab.url === "string" && tab.url === boot.routeURL) {
+        routeLifecycleDiag("activation-target-confirmed");
+        return;
+      }
+      if (tab.pendingUrl === boot.routeURL) {
+        boot.startupActivation = false;
+        routeLifecycleDiag("activation-target-pending");
+        return;
+      }
+      routeLifecycleDiag("activation-target-url-mismatch");
+      revokeRoute(boot);
+      cancelContext();
     };
     try {
       Promise.resolve(api.tabs.get(tabId)).then(verifyActivationTarget, () =>
