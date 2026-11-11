@@ -1343,16 +1343,16 @@ class MacWindowIdentityTests(unittest.TestCase):
     def identity_api(self, tree_windows, window=None):
         """The fixture above plus the ONLY native identity CFEqual may answer.
 
-        ``CFEqual`` is true for an element and the very object AXWindows holds
-        at that position: a second dict built with the same title and frame is
-        a distinct AXUIElement and never equal.  Nothing here compares values.
+        ``CFEqual`` is true only for two references to the very same object
+        AXWindows holds: a second dict built with the same title and frame is a
+        distinct AXUIElement and never equal.  Any other pair - two distinct
+        listed elements, a listed/unlisted pair or two unlisted objects - is
+        false.  Nothing here compares values or member counts.
         """
         api = self.api(tree_windows, window)
 
         def cf_equal(left, right):
-            listed = {id(item) for item in self.listed(api)}
-            return ((left is right and id(left) in listed) or
-                    (left is not right and (id(left) in listed) != (id(right) in listed)))
+            return left is right and any(item is left for item in self.listed(api))
 
         api.ax.CFEqual = cf_equal
         # The application and its AXWindows answer the same AX elements.
@@ -1579,6 +1579,56 @@ class MacWindowIdentityTests(unittest.TestCase):
             with self.subTest(count=len(tree_windows)):
                 self.refusal(self.api(tree_windows), "a11y-query")
 
+    # -- the shared CFEqual fake is truthful for distinct elements -----------
+    def test_general_cf_equal_refuses_a_distinct_same_title_same_frame_twin(self):
+        # A regression for the XOR-by-listed-membership fake: a listed window
+        # and ANY distinct unlisted lookalike (same title and frame) are not
+        # equal, with no per-object override in place.
+        listed = ax_window(frame=MEASURED_AX)
+        api = self.identity_api([listed])
+        twin = ax_window(frame=MEASURED_AX)
+        other_listed = ax_window(frame=MEASURED_AX)
+        api.ax_windows_source.append(other_listed)  # a second distinct listed element
+        equal = api.ax.CFEqual
+        # Very same object (twice in AXWindows) is the only true pair.
+        self.assertTrue(equal(listed, listed))
+        for left, right in ((listed, twin), (twin, listed), (listed, other_listed),
+                            (other_listed, listed), (twin, other_listed),
+                            (other_listed, twin), (twin, twin), (ax_window(), ax_window())):
+            with self.subTest(left=id(left), right=id(right)):
+                self.assertFalse(equal(left, right))
+        self.assertFalse(api._same_element(twin, listed))
+        self.assertTrue(api._same_element(listed, listed))
+        self.assertFalse(api._same_element(other_listed, listed))
+        # Two listed exact-title AXWindows refuse the binding itself.
+        self.assertEqual(self.without_identity_refusal(
+            api._identity_matches, twin, api.window_list[0]), (None, "window-ambiguous"))
+
+    def test_general_cf_equal_lone_listed_window_rejects_the_unlisted_twin(self):
+        api = self.identity_api([ax_window(frame=MEASURED_AX)])
+        listed = self.ax_windows(api)[0]
+        twin = ax_window(frame=MEASURED_AX)  # same title, same frame, unlisted
+        self.assertTrue(api._identity_matches(listed, api.window_list[0]))
+        self.assertFalse(api._identity_matches(twin, api.window_list[0]))
+
+    def test_shared_fixture_rejects_a_wrong_focused_and_hit_lookalike(self):
+        # The same-title/same-frame twin observed by focus or by hit is a
+        # distinct AXUIElement under the general fake, and each path refuses.
+        for focus in (False, True):
+            with self.subTest(focus=focus):
+                api = self.identity_api([ax_window(frame=MEASURED_AX, focused=True)])
+                twin = ax_window(frame=MEASURED_AX)
+                self.assertFalse(api.ax.CFEqual(twin, self.ax_windows(api)[0]))
+                if focus:
+                    api.ax.AXUIElementCopyAttributeValue = (
+                        lambda node, name, out, twin=twin, inner=api.ax.AXUIElementCopyAttributeValue:
+                        (0, twin) if name == "AXFocusedWindow" else inner(node, name, out))
+                    self.assertEqual(api.focus_state(api.window_list[0]),
+                                     {"pid": WINDOW_RAW["pid"], "window": None})
+                else:
+                    api.ax.AXUIElementCopyElementAtPosition = lambda app, x, y, out: (0, twin)
+                    self.assertFalse(api.root_at(api.window_list[0], 0, 0))
+
     # -- end-to-end: binding precedes controls and input ---------------------
     def test_ambiguity_refuses_before_controls_and_input(self):
         # Two same-PID, exact-title AX windows: one canonical and one exact
@@ -1667,9 +1717,9 @@ class MacWindowIdentityTests(unittest.TestCase):
         """One unique exact-title AXWindow, but a twin can be observed instead.
 
         The twin carries the identical title and frame and is its own native
-        AXUIElement, so CFEqual never equates it with the selection. ``focus``
-        makes AXFocusedWindow answer the twin; otherwise the AX element under
-        the point is the twin.
+        AXUIElement, so the general CFEqual never equates it with the selection
+        (no per-twin override). ``focus`` makes AXFocusedWindow answer the twin;
+        otherwise the AX element under the point is the twin.
         """
         selected = ax_window(frame=MEASURED_AX, focused=True)
         button = {"role": "AXButton", "title": LABEL, "enabled": True, "hidden": False,
@@ -1679,16 +1729,7 @@ class MacWindowIdentityTests(unittest.TestCase):
         twin = ax_window(frame=MEASURED_AX)
         twin["children"] = [dict(button, parent=twin)]
         api = self.identity_api([selected])
-        listed = api.ax.CFEqual
         api.twin = twin
-
-        def cf_equal(left, right):
-            # CFEqual itself: the twin is one native element, listed apart.
-            if left is twin or right is twin:
-                return left is right
-            return listed(left, right)
-
-        api.ax.CFEqual = cf_equal
         api.ax.AXUIElementCopyElementAtPosition = lambda app, x, y, out: (0, twin)
         if focus:  # bound after the spies, so focus_state sees the twin only
             listed = api.ax.AXUIElementCopyAttributeValue
