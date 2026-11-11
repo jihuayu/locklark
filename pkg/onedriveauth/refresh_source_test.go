@@ -13,6 +13,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 // Synthetic refresh-source values. Every one is an illustration, never a real
@@ -516,6 +517,152 @@ func TestRefreshSourcePreCanceledContext(t *testing.T) {
 	s.Close()
 }
 
+// TestRefreshSourceTerminalCloseWipes uses real state only: a synthetic
+// post-send failure makes the source unusable, and an explicit Close must still
+// wipe it exactly once. The source-owned scope and label buffers, kept by
+// reference for the check, are cleared, the client ID and tenant references are
+// dropped and the state is closed and cleaned, while later AccessToken calls
+// return the same fixed terminal error without another request. The terminal
+// failure itself releases the source refresh context, so Close has nothing left
+// to cancel.
+func TestRefreshSourceTerminalCloseWipes(t *testing.T) {
+	cfg := sourceTestConfig()
+	f, store := newSourceTestStore(t, cfg)
+	p := newTokenPeer(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusBadRequest, `{"error":"invalid_grant","error_description":"`+sourceTestBodyMark+`"}`)
+	})
+	s, err := newRefreshSourceAt(cfg, store, p.url, p.srv.Client())
+	if err != nil {
+		t.Fatalf("a valid configuration was rejected")
+	}
+	scopes, label, sourceCtx := sourceBuffers(s), sourceLabel(s), sourceContext(s)
+	if len(scopes) != len(cfg.Scopes) || string(label) != string(cfg.Profile) {
+		t.Fatalf("the source does not own a copy of every scope and the profile label")
+	}
+
+	token, err := s.AccessToken(context.Background())
+	assertSourceFailure(t, token, err, ErrRefreshStatus)
+	retained := s.terminalError()
+	if retained == nil || !errors.Is(retained, ErrRefreshStatus) {
+		t.Fatalf("a post-send failure did not retain its fixed terminal error")
+	}
+	if sourceStateOf(s) != sourceUnusable {
+		t.Fatalf("a post-send failure did not leave the source unusable")
+	}
+	if err := sourceCtx.Err(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("the terminal failure did not release the source refresh context")
+	}
+	if !bytes.Equal(label, cfg.Profile) || !scopesIntact(scopes, cfg.Scopes) {
+		t.Fatalf("the terminal failure wiped the binding before Close")
+	}
+	assertSourceStoreUntouched(t, f, cfg)
+
+	s.Close()
+	for i, scope := range scopes {
+		if !bytes.Equal(scope, make([]byte, len(scope))) {
+			t.Fatalf("Close did not clear copied scope %d", i)
+		}
+	}
+	if !bytes.Equal(label, make([]byte, len(label))) {
+		t.Fatalf("Close did not clear the copied profile label")
+	}
+	if st := sourceStateOf(s); st != sourceClosed {
+		t.Fatalf("Close did not leave the source closed (state %d)", st)
+	}
+	if !sourceCleaned(s) {
+		t.Fatalf("Close did not mark the source cleaned")
+	}
+	s.mu.Lock()
+	scopes, label = s.scopeSets, s.label
+	clientID, tenant := s.clientID, s.tenant
+	cancel := s.cancel
+	s.mu.Unlock()
+	if scopes != nil || label != nil {
+		t.Fatalf("Close did not drop the source's own scope and label references")
+	}
+	if clientID != "" || tenant != "" {
+		t.Fatalf("Close did not drop the client ID and tenant references")
+	}
+	if cancel != nil {
+		t.Fatalf("Close did not release the source context cancel function")
+	}
+
+	// The retained terminal error wins over the ordinary close sentinel,
+	// unchanged and without another request.
+	before := p.hits.Load()
+	for range 3 {
+		token, err := s.AccessToken(context.Background())
+		assertSourceFailure(t, token, err, ErrRefreshStatus)
+		if err != retained {
+			t.Fatalf("a closed terminal source returned a different error")
+		}
+	}
+	if got := p.hits.Load(); got != before || got != 1 {
+		t.Fatalf("a closed terminal source made %d requests, want exactly one total", got)
+	}
+	s.Close()
+	assertSourceStoreUntouched(t, f, cfg)
+}
+
+// TestRefreshSourceFetchBindingSnapshot checks the one-critical-section
+// binding: one call to binding returns the open source's client ID, tenant,
+// scopes and a copy of the profile label, carrying no reference to the source's
+// own buffers, so later cleanup cannot change it.
+func TestRefreshSourceFetchBindingSnapshot(t *testing.T) {
+	cfg := sourceTestConfig()
+	_, store := newSourceTestStore(t, cfg)
+	s, err := newRefreshSourceAt(cfg, store, nil, nil)
+	if err != nil {
+		t.Fatalf("a valid configuration was rejected")
+	}
+	b, state := s.binding()
+	defer clear(b.label)
+	if state != sourceOpen {
+		t.Fatalf("an open source did not report itself open")
+	}
+	if b.clientID != syntheticClientID || b.tenant != syntheticTenant {
+		t.Fatalf("the binding does not carry the source's client ID and tenant")
+	}
+	if strings.Join(b.scopes, " ") != syntheticScopeA+" "+syntheticScopeB {
+		t.Fatalf("the binding does not carry the explicit scopes exactly")
+	}
+	if string(b.label) != string(cfg.Profile) {
+		t.Fatalf("the binding does not carry the profile label")
+	}
+	scopes, label := sourceBuffers(s), sourceLabel(s)
+	if len(b.scopes) != len(scopes) || len(b.label) != len(label) {
+		t.Fatalf("the binding and the source hold different field widths")
+	}
+	for i, scope := range b.scopes {
+		if len(scope) != len(scopes[i]) || unsafePtr(scope) == unsafeBytesPtr(scopes[i]) {
+			t.Fatalf("binding scope %d aliases the source's own buffer", i)
+		}
+	}
+	if len(b.label) != 0 && unsafeBytesPtr(b.label) == unsafeBytesPtr(label) {
+		t.Fatalf("the binding label aliases the source's own buffer")
+	}
+
+	// The source clears its own copies; the snapshot must be unchanged.
+	s.Close()
+	for i, scope := range scopes {
+		if !bytes.Equal(scope, make([]byte, len(scope))) {
+			t.Fatalf("Close did not clear the source's own scope %d", i)
+		}
+	}
+	if !bytes.Equal(label, make([]byte, len(label))) {
+		t.Fatalf("Close did not clear the source's own label")
+	}
+	if closed, after := s.binding(); after != sourceClosed || closed.clientID != "" || closed.tenant != "" || closed.scopes != nil || closed.label != nil {
+		t.Fatalf("a closed source still hands out a binding")
+	}
+	if b.clientID != syntheticClientID || b.tenant != syntheticTenant || string(b.label) != string(cfg.Profile) {
+		t.Fatalf("cleanup changed the binding snapshot")
+	}
+	if strings.Join(b.scopes, " ") != syntheticScopeA+" "+syntheticScopeB {
+		t.Fatalf("cleanup changed the snapshot scopes")
+	}
+}
+
 // TestRefreshSourceTransientStoreFailuresAreRetried checks that a store load
 // failure or a missing item, for which no request was made, can be retried by a
 // later call in the same source, unlike a post-send failure.
@@ -937,7 +1084,8 @@ func TestRefreshSourceDropsTokenMaterial(t *testing.T) {
 	}
 }
 
-// sourceWaiters reports how many callers are currently attached to a flight.
+// sourceWaiters reports how many callers are currently attached to the active
+// flight. A finished flight is forgotten, so its count reads as zero.
 func sourceWaiters(s *RefreshSource) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -945,6 +1093,81 @@ func sourceWaiters(s *RefreshSource) int {
 		return 0
 	}
 	return s.flight.waiters
+}
+
+// sourceBuffers returns the source's own scope buffers by reference, so a test
+// can prove their bytes were cleared.
+func sourceBuffers(s *RefreshSource) [][]byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.scopeSets
+}
+
+// sourceLabel returns the source's own profile label by reference.
+func sourceLabel(s *RefreshSource) []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.label
+}
+
+// sourceContext returns the source refresh context.
+func sourceContext(s *RefreshSource) context.Context {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ctx
+}
+
+// sourceStateOf returns the lifecycle state under the lock.
+func sourceStateOf(s *RefreshSource) sourceState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.state
+}
+
+// sourceCleaned reports whether cleanup ran, under the lock.
+func sourceCleaned(s *RefreshSource) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cleaned
+}
+
+// terminalError returns the retained terminal error, nil while none, under the
+// lock.
+func (s *RefreshSource) terminalError() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.terminal
+}
+
+// scopesIntact reports whether buffers still hold the configured scopes.
+func scopesIntact(buffers [][]byte, scopes []string) bool {
+	if len(buffers) != len(scopes) {
+		return false
+	}
+	for i, scope := range scopes {
+		if string(buffers[i]) != scope {
+			return false
+		}
+	}
+	return true
+}
+
+// unsafePtr returns the address of a non-empty string's bytes, so a test can
+// show that two strings do not share storage.
+func unsafePtr(v string) uintptr {
+	if v == "" {
+		return 0
+	}
+	return uintptr(unsafe.Pointer(unsafe.StringData(v)))
+}
+
+// unsafeBytesPtr returns the address of a non-empty byte slice's storage, so a
+// test can show that two slices do not alias.
+func unsafeBytesPtr(v []byte) uintptr {
+	if len(v) == 0 {
+		return 0
+	}
+	return uintptr(unsafe.Pointer(unsafe.SliceData(v)))
 }
 
 // expireNow ages the cached token past its usable lifetime, so an expiry test

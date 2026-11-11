@@ -56,10 +56,11 @@ type RefreshSourceConfig struct {
 //     RefreshAccessToken fully validated the answer; when the answer omitted
 //     refresh_token the stored item is kept.
 //   - A failure after the request was sent, or a failed save of a validated
-//     replacement, is terminal for the source: the fixed redacted error is
-//     retained and every later AccessToken call returns it without another
-//     token-endpoint request. The caller recovers by discarding the source and
-//     enrolling the profile again; this checkpoint has no re-enrollment path.
+//     replacement, makes the source unusable: the fixed redacted error is
+//     retained, the source refresh context is released, and every later
+//     AccessToken call returns the error without another token-endpoint
+//     request. The caller recovers by closing the source and enrolling the
+//     profile again; this checkpoint has no re-enrollment path.
 //     Only a pre-send cancellation, or a store load failure or missing item
 //     (no request was made), can be retried by a later call.
 //   - Concurrent AccessToken calls share one in-flight refresh. A caller whose
@@ -69,22 +70,27 @@ type RefreshSourceConfig struct {
 //     a flight publishes only its error, and a successful waiter re-checks the
 //     cache under the lock, so a result closed by Close or by expiry is never
 //     returned as an empty token with no error.
-//   - The TokenResult lives only in memory. It is closed on replacement, on
-//     expiry, on a failed refresh and on Close, as far as this package holds
-//     it.
+//   - The TokenResult lives only in memory. It is closed on replacement, on a
+//     failed refresh and on Close, as far as this package holds it. There is no
+//     timer: a cached token is closed once a later call observes that it
+//     expired, unless Close closes it first.
 //   - Close stops later results from being returned, cancels an in-flight
-//     refresh, clears the cached material and forgets the copied client ID,
-//     tenant, scopes and profile. Close does not delete the stored refresh
-//     token. When Close cancels a request that was already sent, the refresh
-//     reports that the outcome is unknown and the source stays closed.
+//     refresh, closes the cached token material, clears the copied scopes and
+//     profile label, and drops the source's client ID and tenant references. It
+//     does that even after a terminal failure, which already released the
+//     source refresh context, and its cleanup runs exactly once. Close does not
+//     zeroize the backing bytes of the client ID and tenant strings: dropping
+//     the references only makes them unreachable from this source. Close does
+//     not delete the stored refresh token. When Close cancels a request that
+//     was already sent, the refresh reports that the outcome is unknown.
 //
 // Every AccessToken string is a caller-owned immutable copy: a string cannot be
 // zeroized, so the caller must drop it once it is no longer needed and must not
 // log or persist it. Failures are fixed sentinels only. Nothing is logged.
 type RefreshSource struct {
-	// clientID, tenant and the explicit scopes. They are read under mu,
-	// because Close clears the scopes, and are copied into a binding before
-	// any store or network call.
+	// clientID, tenant and the explicit scopes are set once by the
+	// constructor and dropped by cleanup, each under mu. They are copied
+	// into a binding under one lock before any store or network call.
 	clientID  string
 	tenant    string
 	scopeSets [][]byte
@@ -97,33 +103,49 @@ type RefreshSource struct {
 	endpoint *url.URL
 	client   *http.Client
 
-	mu     sync.Mutex
-	closed bool
-	ctx    context.Context
-	cancel context.CancelFunc
-	// terminal, when non-nil, is the fixed error of a failure that forbids
-	// another token-endpoint request. It is always set together with
-	// closed.
+	mu sync.Mutex
+	// state is closed after Close, or after a terminal failure, which
+	// forbids another token-endpoint request.
+	state sourceState
+	// cleaned reports that cleanup ran; it is kept apart from state,
+	// because a terminal failure must not stop a later Close from wiping
+	// the source.
+	cleaned  bool
 	terminal error
+	ctx      context.Context
+	cancel   context.CancelFunc
 	current  TokenResult
 	expires  time.Time
 	flight   *refreshFlight
 }
 
+// sourceState is the lifecycle state of a RefreshSource. Both later states
+// report no result; only an unusable source keeps a terminal error.
+type sourceState int
+
+const (
+	sourceOpen sourceState = iota
+	// sourceUnusable is the state after a failure that may have reached the
+	// provider or the store; its terminal error is retained.
+	sourceUnusable
+	// sourceClosed is the state after Close, which wiped the source.
+	sourceClosed
+)
+
 // refreshFlight is one in-flight refresh shared by every concurrent caller.
 // It publishes only its error; a successful waiter re-checks the cache, so no
 // token is ever read from a flight after its done channel closed. waiters
-// counts the attached callers and is read under s.mu.
+// counts the callers still attached, and is changed only under s.mu.
 type refreshFlight struct {
 	done    chan struct{}
 	waiters int
 	err     error
 }
 
-// sourceBinding is the source-owned input of one refresh: a safe snapshot of
-// the client ID, tenant and explicit scopes, and a copy of the profile label.
-// label may be cleared by the source only after it built this copy; the label
-// belongs to the refresh and is cleared on every exit.
+// sourceBinding is the input of one refresh: a snapshot of the client ID,
+// tenant and explicit scopes, and a copy of the profile label. It is taken in
+// one critical section, so Close cannot clear one field while another is
+// copied; label belongs to the refresh and is cleared on every exit.
 type sourceBinding struct {
 	clientID string
 	tenant   string
@@ -203,29 +225,27 @@ func newRefreshSourceAt(cfg RefreshSourceConfig, store *RefreshTokenStore, endpo
 	return s, nil
 }
 
-// binding returns a safe snapshot of the client ID, tenant and explicit scopes,
-// taken under s.mu before Close can clear the source's copies. The label field
-// is filled by the caller with a copy it owns and clears.
-func (s *RefreshSource) binding() sourceBinding {
+// binding returns the state of the source and, when it is open, a snapshot of
+// every binding field. All of it is read in one critical section, so Close
+// cannot clear one field while another is copied. The label is a new copy owned
+// by the caller, which must clear it.
+func (s *RefreshSource) binding() (sourceBinding, sourceState) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.state != sourceOpen {
+		return sourceBinding{}, s.state
+	}
 	b := sourceBinding{
 		clientID: s.clientID,
 		tenant:   s.tenant,
 		scopes:   make([]string, len(s.scopeSets)),
+		label:    make([]byte, len(s.label)),
 	}
 	for i, scope := range s.scopeSets {
 		b.scopes[i] = string(scope)
 	}
-	return b
-}
-
-// profileLabel returns a new copy of the source's profile label, taken under
-// s.mu before Close can clear it. The caller owns it and must clear it.
-func (s *RefreshSource) profileLabel() []byte {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]byte(nil), s.label...)
+	copy(b.label, s.label)
+	return b, sourceOpen
 }
 
 // AccessToken returns the cached access token while it is safely before its
@@ -234,8 +254,9 @@ func (s *RefreshSource) profileLabel() []byte {
 // dropped, never logged or persisted, once it is no longer needed.
 //
 // A failure returns "" and one of the fixed sentinels: a refresh sentinel, a
-// store sentinel, ErrRefreshSource when the source is closed (including after a
-// terminal failure), or ErrSourceStoreUnknown when a validated replacement could
+// store sentinel, ErrRefreshSource when the source is closed, a terminal sentinel
+// after a failure that may have reached the provider or the store, or
+// ErrSourceStoreUnknown when a validated replacement could
 // not be saved. A failure that may have reached the provider or the store is
 // terminal: later calls return it without a request. A nil ctx means
 // context.Background(); when ctx ends first, AccessToken returns ctx.Err()
@@ -249,11 +270,13 @@ func (s *RefreshSource) AccessToken(ctx context.Context) (string, error) {
 		return "", ctx.Err()
 	}
 	s.mu.Lock()
-	if s.closed {
-		token, err := s.closedResult()
+	if s.state != sourceOpen {
+		token, err := s.unusableResult()
 		s.mu.Unlock()
 		return token, err
 	}
+	// A later call is the only thing that notices expiry and closes the
+	// cached material before replacing it; no timer does.
 	if !s.expired() {
 		token := s.current.AccessToken()
 		s.mu.Unlock()
@@ -275,7 +298,19 @@ func (s *RefreshSource) AccessToken(ctx context.Context) (string, error) {
 	case <-f.done:
 		return s.settled(f)
 	case <-ctx.Done():
+		s.detach(f)
 		return "", ctx.Err()
+	}
+}
+
+// detach records that a canceled caller stopped waiting, so the flight counts
+// only the callers still attached. A flight that already finished is left
+// alone; refresh resets its count under the same lock before it closes done.
+func (s *RefreshSource) detach(f *refreshFlight) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.flight == f {
+		f.waiters--
 	}
 }
 
@@ -293,8 +328,8 @@ func (s *RefreshSource) settled(f *refreshFlight) (string, error) {
 	if f.err != nil {
 		return "", f.err
 	}
-	if s.closed {
-		return s.closedResult()
+	if s.state != sourceOpen {
+		return s.unusableResult()
 	}
 	if s.expired() {
 		return "", wrap(ErrRefreshSource, nil)
@@ -302,41 +337,59 @@ func (s *RefreshSource) settled(f *refreshFlight) (string, error) {
 	return s.current.AccessToken(), nil
 }
 
-// closedResult reports the error of a closed source. With s.mu held, it is the
-// retained terminal error, which keeps its own classification, or otherwise
-// the fixed closed-source sentinel. It never returns a token.
-func (s *RefreshSource) closedResult() (string, error) {
+// unusableResult reports the error of a closed or unusable source. With s.mu
+// held, it is the retained terminal error, which keeps its own classification,
+// or otherwise the fixed closed-source sentinel. It never returns a token.
+func (s *RefreshSource) unusableResult() (string, error) {
 	if s.terminal != nil {
 		return "", s.terminal
 	}
 	return "", wrap(ErrRefreshSource, nil)
 }
 
-// Close closes the source: later AccessToken calls return ErrRefreshSource, an
-// in-flight refresh is cancelled, and the cached token, copied scopes and
-// profile label are cleared. A request already sent is reported to its waiters
-// as outcome unknown; a pre-send cancellation or a result the refresh produced
-// but could not publish is closed and reported as a closed source. Close does
-// not touch the stored refresh token and is safe to call more than once.
+// Close closes the source and wipes it exactly once: later AccessToken calls
+// return the retained terminal error, or ErrRefreshSource, an in-flight refresh
+// is cancelled, and the cached token, copied scopes and profile label are
+// cleared, and the client ID and tenant references are dropped. The cleanup
+// runs even when a terminal failure closed the source first. A request already
+// sent is reported to its waiters as outcome unknown; a pre-send cancellation or
+// a result the refresh produced but could not publish is closed and reported as
+// a closed source. Close does not delete the stored refresh token, and it is
+// safe to call more than once.
 func (s *RefreshSource) Close() {
 	// The lock is held across the whole reset, so no concurrent AccessToken
 	// can observe a half-cleared source.
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
-		return
+	s.cleanup(sourceClosed)
+}
+
+// cleanup wipes the source once and moves it to next, which is sourceClosed for
+// Close or sourceUnusable for a terminal failure. With s.mu held.
+func (s *RefreshSource) cleanup(next sourceState) {
+	if !s.cleaned {
+		s.cleaned = true
+		if s.cancel != nil {
+			s.cancel()
+			s.cancel = nil
+		}
+		s.current.Close()
+		s.current = TokenResult{}
+		clear(s.label)
+		for _, scope := range s.scopeSets {
+			clear(scope)
+		}
+		// Dropping the references makes the client ID and tenant
+		// unreachable from the source; string backing bytes cannot be
+		// zeroized.
+		s.scopeSets = nil
+		s.label = nil
+		s.clientID = ""
+		s.tenant = ""
 	}
-	s.closed = true
-	s.cancel()
-	s.current.Close()
-	s.current = TokenResult{}
-	clear(s.label)
-	for _, scope := range s.scopeSets {
-		clear(scope)
+	if s.state == sourceOpen || next == sourceClosed {
+		s.state = next
 	}
-	s.scopeSets = nil
-	// A refresh goroutine may still be running with its own binding copy;
-	// it publishes nothing once the source is closed.
 }
 
 // expired reports whether the cached token must be refreshed. A token is
@@ -358,7 +411,7 @@ func (s *RefreshSource) refresh(f *refreshFlight) {
 	}()
 
 	s.mu.Lock()
-	if s.closed {
+	if s.state != sourceOpen {
 		// Publish nothing to a closed source, but keep a post-send
 		// failure's classification: the provider outcome is still
 		// unknown, even though Close caused it.
@@ -380,10 +433,14 @@ func (s *RefreshSource) refresh(f *refreshFlight) {
 		published = true
 	case terminal(err):
 		// The source must never send the possibly-consumed refresh token
-		// again. The retained error keeps its classification.
-		s.closed = true
+		// again. The retained error keeps its classification. The
+		// terminal state releases the source refresh context now; the
+		// copied binding and inputs are wiped by a later Close, which
+		// stays available because cleaned is not set.
+		s.state = sourceUnusable
 		s.terminal = err
 		s.cancel()
+		s.cancel = nil
 	}
 	f.waiters = 0
 	s.flight = nil
@@ -393,14 +450,19 @@ func (s *RefreshSource) refresh(f *refreshFlight) {
 }
 
 // fetch performs one refresh grant with the stored refresh token. The binding
-// and the stored token are copies owned here and cleared on every path. A
-// failure saves and deletes nothing; a validated replacement is saved before its
-// access token is returned, and a save failure closes the token material and
-// reports ErrSourceStoreUnknown without deleting anything.
+// and the stored token are copies owned here and cleared on every path, and the
+// stored refresh token is read and sent from those copies only, so a concurrent
+// Close cannot race the work. An already closed or unusable source is rejected
+// before the store or the network is touched. A failure saves and deletes
+// nothing; a validated replacement is saved before its access token is returned,
+// and a save failure closes the token material and reports ErrSourceStoreUnknown
+// without deleting anything.
 func (s *RefreshSource) fetch() (TokenResult, error) {
-	b := s.binding()
-	b.label = s.profileLabel()
+	b, state := s.binding()
 	defer clear(b.label)
+	if state != sourceOpen {
+		return TokenResult{}, wrap(ErrRefreshSource, nil)
+	}
 	old, present, err := s.store.LoadRefreshToken(b.clientID, b.tenant, b.label)
 	defer clear(old)
 	if err != nil {
