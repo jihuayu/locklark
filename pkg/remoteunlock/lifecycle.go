@@ -44,8 +44,9 @@ const (
 var (
 	// ErrLifecycle is the base of every lifecycle error.
 	ErrLifecycle = errors.New("remoteunlock: request lifecycle")
-	// ErrLifecycleInvalidTime reports a zero or negative caller-supplied time
-	// or a deadline computation that overflows.
+	// ErrLifecycleInvalidTime reports a zero or negative caller-supplied time,
+	// a caller-supplied time lower than the last accepted time of the same
+	// in-memory lifecycle, or a deadline computation that overflows.
 	ErrLifecycleInvalidTime = fmt.Errorf("%w: invalid or out-of-range time", ErrLifecycle)
 	// ErrLifecycleInvalidContext reports a context that is not a valid
 	// canonical binding context or whose deadline has already elapsed.
@@ -84,6 +85,12 @@ func deadlineAfter(now, delta int64) (int64, error) {
 // and does not recognize any prior request. A caller must issue fresh request
 // state and rely on the existing real TLS exporter channel binding to reject
 // old channel-bound packets.
+//
+// Caller-supplied times must be non-decreasing within one instance. The
+// lifecycle remembers the last accepted time and rejects any lower one with
+// ErrLifecycleInvalidTime before touching its status or deadlines. This is
+// in-memory only: it does not detect a whole-process snapshot rollback, does
+// not survive a restart, and is not durable replay protection.
 type RequestLifecycle struct {
 	mu     sync.Mutex
 	ctx    ChannelBindingContext
@@ -91,6 +98,9 @@ type RequestLifecycle struct {
 	// phaseDeadline is the current active phase's deadline; it is only
 	// meaningful while status is StatusRequested or StatusConfirmed.
 	phaseDeadline int64
+	// lastNowUnixMS is the last accepted caller-supplied time. It starts at
+	// the construction time and only moves forward.
+	lastNowUnixMS int64
 }
 
 // NewRequestLifecycle validates ctx through the canonical codec and starts a
@@ -98,7 +108,8 @@ type RequestLifecycle struct {
 //
 // The context must be a valid canonical binding context whose deadline is
 // strictly after nowUnixMS. It is preserved unchanged: its deadline is never
-// clamped, rewritten or extended. nowUnixMS must be positive. The returned
+// clamped, rewritten or extended. nowUnixMS must be positive and becomes the
+// last accepted time of the instance. The returned
 // lifecycle's partial deadlines are min(nowUnixMS+MaxActivePhaseMS,
 // ctx.DeadlineUnixMS); they are recomputed after the requested-to-confirmed
 // transition.
@@ -126,35 +137,38 @@ func NewRequestLifecycle(ctx ChannelBindingContext, nowUnixMS int64) (*RequestLi
 	if ctx.DeadlineUnixMS < phase {
 		phase = ctx.DeadlineUnixMS
 	}
-	return &RequestLifecycle{ctx: ctx, status: StatusRequested, phaseDeadline: phase}, nil
+	return &RequestLifecycle{ctx: ctx, status: StatusRequested, phaseDeadline: phase, lastNowUnixMS: nowUnixMS}, nil
 }
 
 // Context returns the binding context exactly as supplied to
 // NewRequestLifecycle.
 func (l *RequestLifecycle) Context() ChannelBindingContext { return l.ctx }
 
-// StatusAt returns the status at nowUnixMS without changing it. An active
-// status whose phase deadline or absolute deadline has elapsed at nowUnixMS
-// (nowUnixMS >= deadline) is reported as StatusExpired. A non-positive
-// nowUnixMS is rejected and reported as returned status StatusUnknown.
+// StatusAt returns the status at nowUnixMS without changing it, apart from
+// latching StatusExpired as described above. An active status whose phase
+// deadline or absolute deadline has elapsed at nowUnixMS (nowUnixMS >=
+// deadline) is reported as StatusExpired. A non-positive nowUnixMS, or one
+// lower than the last accepted time, is rejected with an empty status and
+// ErrLifecycleInvalidTime; it is never reported as StatusUnknown, which is
+// reserved for a genuine unknown request outcome.
 func (l *RequestLifecycle) StatusAt(nowUnixMS int64) (string, error) {
-	if nowUnixMS <= 0 {
-		return StatusUnknown, ErrLifecycleInvalidTime
-	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if !l.acceptTimeLocked(nowUnixMS) {
+		return "", ErrLifecycleInvalidTime
+	}
 	return l.statusAtLocked(nowUnixMS), nil
 }
 
 // Confirm moves a requested lifecycle to confirmed once. It fails when the
 // current phase is no longer active, when the status is not requested, or for
-// a non-positive nowUnixMS.
+// a non-positive or rolled-back nowUnixMS.
 func (l *RequestLifecycle) Confirm(nowUnixMS int64) error {
-	if nowUnixMS <= 0 {
-		return ErrLifecycleInvalidTime
-	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if !l.acceptTimeLocked(nowUnixMS) {
+		return ErrLifecycleInvalidTime
+	}
 	if l.statusAtLocked(nowUnixMS) != StatusRequested {
 		return ErrLifecycleTransition
 	}
@@ -173,13 +187,14 @@ func (l *RequestLifecycle) Confirm(nowUnixMS int64) error {
 // Receive moves a confirmed lifecycle to received, consuming it. It succeeds at
 // most once; a second call, or a call when the confirmed phase is no longer
 // active, fails. Receipt only records the local state transition; no key
-// material is accepted or returned.
+// material is accepted or returned. A non-positive or rolled-back nowUnixMS is
+// rejected.
 func (l *RequestLifecycle) Receive(nowUnixMS int64) error {
-	if nowUnixMS <= 0 {
-		return ErrLifecycleInvalidTime
-	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if !l.acceptTimeLocked(nowUnixMS) {
+		return ErrLifecycleInvalidTime
+	}
 	if l.statusAtLocked(nowUnixMS) != StatusConfirmed {
 		return ErrLifecycleTransition
 	}
@@ -190,13 +205,13 @@ func (l *RequestLifecycle) Receive(nowUnixMS int64) error {
 
 // MarkUnknown moves an active requested or confirmed lifecycle to terminal
 // unknown. It fails once the request is terminal or the current phase is no
-// longer active.
+// longer active. A non-positive or rolled-back nowUnixMS is rejected.
 func (l *RequestLifecycle) MarkUnknown(nowUnixMS int64) error {
-	if nowUnixMS <= 0 {
-		return ErrLifecycleInvalidTime
-	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if !l.acceptTimeLocked(nowUnixMS) {
+		return ErrLifecycleInvalidTime
+	}
 	switch l.statusAtLocked(nowUnixMS) {
 	case StatusRequested, StatusConfirmed:
 		l.status = StatusUnknown
@@ -210,12 +225,13 @@ func (l *RequestLifecycle) MarkUnknown(nowUnixMS int64) error {
 // cancelled. It is local only: it contacts no relay and cancels nothing
 // remotely. It fails once the request is terminal, so a received request cannot
 // be retroactively cancelled, and once the current phase is no longer active.
+// A non-positive or rolled-back nowUnixMS is rejected.
 func (l *RequestLifecycle) Cancel(nowUnixMS int64) error {
-	if nowUnixMS <= 0 {
-		return ErrLifecycleInvalidTime
-	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if !l.acceptTimeLocked(nowUnixMS) {
+		return ErrLifecycleInvalidTime
+	}
 	switch l.statusAtLocked(nowUnixMS) {
 	case StatusRequested, StatusConfirmed:
 		l.status = StatusCancelled
@@ -223,6 +239,18 @@ func (l *RequestLifecycle) Cancel(nowUnixMS int64) error {
 		return nil
 	}
 	return ErrLifecycleTransition
+}
+
+// acceptTimeLocked reports whether now is a valid, non-decreasing observation
+// time and, if so, records it as the last accepted time. It never changes the
+// status or a deadline, so a rejected time leaves the lifecycle untouched. The
+// caller holds l.mu.
+func (l *RequestLifecycle) acceptTimeLocked(nowUnixMS int64) bool {
+	if nowUnixMS <= 0 || nowUnixMS < l.lastNowUnixMS {
+		return false
+	}
+	l.lastNowUnixMS = nowUnixMS
+	return true
 }
 
 // statusAtLocked returns the status at now and latches StatusExpired when an

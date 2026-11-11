@@ -126,12 +126,222 @@ func TestLifecycleInvalidTransitions(t *testing.T) {
 			if err := l.Cancel(now); !errors.Is(err, ErrLifecycleInvalidTime) {
 				t.Fatalf("Cancel(%d) = %v, want ErrLifecycleInvalidTime", now, err)
 			}
-			if got, err := l.StatusAt(now); got != StatusUnknown || !errors.Is(err, ErrLifecycleInvalidTime) {
-				t.Fatalf("StatusAt(%d) = %q, %v; want unknown, ErrLifecycleInvalidTime", now, got, err)
+			// An invalid clock argument is not a request outcome: the
+			// returned status is empty, never StatusUnknown.
+			if got, err := l.StatusAt(now); got != "" || !errors.Is(err, ErrLifecycleInvalidTime) {
+				t.Fatalf("StatusAt(%d) = %q, %v; want \"\", ErrLifecycleInvalidTime", now, got, err)
 			}
 		}
 		mustStatus(t, l, lifecycleNowMS, StatusRequested)
 	})
+}
+
+// lifecycleSnapshot is the observable state of a lifecycle used to prove that a
+// rejected call leaves it untouched.
+type lifecycleSnapshot struct {
+	status        string
+	phaseDeadline int64
+	lastNowMS     int64
+	observedAt    int64
+}
+
+func snapshotLifecycle(l *RequestLifecycle, observedAt int64) lifecycleSnapshot {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return lifecycleSnapshot{
+		status:        l.status,
+		phaseDeadline: l.phaseDeadline,
+		lastNowMS:     l.lastNowUnixMS,
+		observedAt:    observedAt,
+	}
+}
+
+func assertUnchanged(t *testing.T, l *RequestLifecycle, want lifecycleSnapshot) {
+	t.Helper()
+	if got := snapshotLifecycle(l, want.observedAt); got != want {
+		t.Fatalf("lifecycle mutated by rejected call\n got: %+v\nwant: %+v", got, want)
+	}
+}
+
+// callAllLifecycleMethods applies every time-bearing observation and transition.
+func callAllLifecycleMethods(l *RequestLifecycle, now int64) []struct {
+	name string
+	err  error
+	at   string
+} {
+	status, err := l.StatusAt(now)
+	return []struct {
+		name string
+		err  error
+		at   string
+	}{
+		{"StatusAt", err, status},
+		{"Confirm", l.Confirm(now), ""},
+		{"Receive", l.Receive(now), ""},
+		{"MarkUnknown", l.MarkUnknown(now), ""},
+		{"Cancel", l.Cancel(now), ""},
+	}
+}
+
+func TestLifecycleRejectsClockRollback(t *testing.T) {
+	t.Run("after construction", func(t *testing.T) {
+		l := mustLifecycle(t, lifecycleContext(), lifecycleNowMS)
+		want := snapshotLifecycle(l, lifecycleNowMS)
+		for _, now := range []int64{lifecycleNowMS - 1, lifecycleNowMS - 50_000, 1} {
+			for _, call := range callAllLifecycleMethods(l, now) {
+				if !errors.Is(call.err, ErrLifecycleInvalidTime) {
+					t.Fatalf("%s(%d) = %v, want ErrLifecycleInvalidTime", call.name, now, call.err)
+				}
+				if call.name == "StatusAt" && call.at != "" {
+					t.Fatalf("StatusAt(%d) returned status %q, want empty", now, call.at)
+				}
+			}
+			assertUnchanged(t, l, want)
+		}
+	})
+
+	t.Run("after phase transition", func(t *testing.T) {
+		l := mustLifecycle(t, lifecycleContext(), lifecycleNowMS)
+		confirmAt := lifecycleNowMS + 10_000
+		if err := l.Confirm(confirmAt); err != nil {
+			t.Fatalf("Confirm: %v", err)
+		}
+		want := snapshotLifecycle(l, confirmAt)
+		if want.status != StatusConfirmed || want.lastNowMS != confirmAt {
+			t.Fatalf("unexpected state after Confirm: %+v", want)
+		}
+		// A rollback to the construction time, or anywhere before the
+		// confirmed phase's transition, must not run Receive early.
+		for _, now := range []int64{lifecycleNowMS, confirmAt - 1} {
+			for _, call := range callAllLifecycleMethods(l, now) {
+				if !errors.Is(call.err, ErrLifecycleInvalidTime) {
+					t.Fatalf("%s(%d) = %v, want ErrLifecycleInvalidTime", call.name, now, call.err)
+				}
+				if call.name == "StatusAt" && call.at != "" {
+					t.Fatalf("StatusAt(%d) returned status %q, want empty", now, call.at)
+				}
+			}
+			assertUnchanged(t, l, want)
+		}
+		// A rollback within the confirmed phase keeps the original phase
+		// deadline rather than recomputing it from the earlier time.
+		if err := l.Confirm(lifecycleNowMS); !errors.Is(err, ErrLifecycleInvalidTime) {
+			t.Fatalf("Confirm(lifecycleNowMS) = %v, want ErrLifecycleInvalidTime", err)
+		}
+		if err := l.Receive(confirmAt - 1); !errors.Is(err, ErrLifecycleInvalidTime) {
+			t.Fatalf("Receive(confirmAt-1) = %v, want ErrLifecycleInvalidTime", err)
+		}
+		assertUnchanged(t, l, want)
+
+		// The phase deadline is still measured from confirmAt, so the earlier
+		// rolled-back time did not extend or shift the confirmed phase.
+		mustStatus(t, l, confirmAt+MaxActivePhaseMS-1, StatusConfirmed)
+		mustStatus(t, l, confirmAt+MaxActivePhaseMS, StatusExpired)
+		if err := l.Receive(confirmAt + MaxActivePhaseMS); !errors.Is(err, ErrLifecycleTransition) {
+			t.Fatalf("Receive at confirmed phase deadline = %v, want ErrLifecycleTransition", err)
+		}
+	})
+
+	t.Run("after terminal transition", func(t *testing.T) {
+		l := mustLifecycle(t, lifecycleContext(), lifecycleNowMS)
+		if err := l.Cancel(lifecycleNowMS + 500); err != nil {
+			t.Fatalf("Cancel: %v", err)
+		}
+		want := snapshotLifecycle(l, 0)
+		if got, err := l.StatusAt(lifecycleNowMS + 499); got != "" || !errors.Is(err, ErrLifecycleInvalidTime) {
+			t.Fatalf("StatusAt before last accepted time = %q, %v; want \"\", ErrLifecycleInvalidTime", got, err)
+		}
+		if snapshotLifecycle(l, 0) != want {
+			t.Fatalf("rejected StatusAt changed terminal state")
+		}
+	})
+}
+
+func TestLifecycleNonDecreasingTimesAccepted(t *testing.T) {
+	l := mustLifecycle(t, lifecycleContext(), lifecycleNowMS)
+	// Equal times are valid at every step, including repeated observations.
+	for i := 0; i < 3; i++ {
+		mustStatus(t, l, lifecycleNowMS, StatusRequested)
+	}
+	if err := l.Confirm(lifecycleNowMS); err != nil {
+		t.Fatalf("Confirm at construction time: %v", err)
+	}
+	mustStatus(t, l, lifecycleNowMS, StatusConfirmed)
+	mustStatus(t, l, lifecycleNowMS, StatusConfirmed)
+	if err := l.Receive(lifecycleNowMS); err != nil {
+		t.Fatalf("Receive at same time as Confirm: %v", err)
+	}
+	mustStatus(t, l, lifecycleNowMS, StatusReceived)
+	mustStatus(t, l, lifecycleNowMS+1, StatusReceived)
+
+	// Equal and increasing times also work for MarkUnknown and Cancel.
+	for _, mark := range []string{"unknown", "cancel"} {
+		t.Run(mark, func(t *testing.T) {
+			l := mustLifecycle(t, lifecycleContext(), lifecycleNowMS)
+			mustStatus(t, l, lifecycleNowMS, StatusRequested)
+			if err := l.Confirm(lifecycleNowMS); err != nil {
+				t.Fatalf("Confirm: %v", err)
+			}
+			mustStatus(t, l, lifecycleNowMS, StatusConfirmed)
+			var err error
+			if mark == "unknown" {
+				err = l.MarkUnknown(lifecycleNowMS)
+			} else {
+				err = l.Cancel(lifecycleNowMS)
+			}
+			if err != nil {
+				t.Fatalf("%s at same time as Confirm: %v", mark, err)
+			}
+			mustStatus(t, l, lifecycleNowMS, map[string]string{"unknown": StatusUnknown, "cancel": StatusCancelled}[mark])
+		})
+	}
+}
+
+func TestLifecycleStatusAtInvalidTimeReturnsEmptyStatus(t *testing.T) {
+	active := mustLifecycle(t, lifecycleContext(), lifecycleNowMS)
+	unknown := mustLifecycle(t, lifecycleContext(), lifecycleNowMS)
+	if err := unknown.MarkUnknown(lifecycleNowMS); err != nil {
+		t.Fatalf("MarkUnknown: %v", err)
+	}
+	for name, l := range map[string]*RequestLifecycle{"active": active, "unknown": unknown} {
+		for _, now := range []int64{0, -1, math.MinInt64, lifecycleNowMS - 1} {
+			got, err := l.StatusAt(now)
+			if got != "" {
+				t.Fatalf("%s: StatusAt(%d) status = %q, want empty", name, now, got)
+			}
+			if !errors.Is(err, ErrLifecycleInvalidTime) {
+				t.Fatalf("%s: StatusAt(%d) err = %v, want ErrLifecycleInvalidTime", name, now, err)
+			}
+		}
+	}
+	// A valid observation still reports the real state.
+	mustStatus(t, active, lifecycleNowMS, StatusRequested)
+	mustStatus(t, unknown, lifecycleNowMS, StatusUnknown)
+}
+
+func TestLifecycleGenuineUnknownStillReported(t *testing.T) {
+	for _, phase := range []string{"requested", "confirmed"} {
+		t.Run(phase, func(t *testing.T) {
+			l := mustLifecycle(t, lifecycleContext(), lifecycleNowMS)
+			if phase == "confirmed" {
+				if err := l.Confirm(lifecycleNowMS + 10); err != nil {
+					t.Fatalf("Confirm: %v", err)
+				}
+			}
+			if err := l.MarkUnknown(lifecycleNowMS + 20); err != nil {
+				t.Fatalf("MarkUnknown: %v", err)
+			}
+			for _, now := range []int64{lifecycleNowMS + 20, lifecycleNowMS + 21, lifecycleNowMS + 10_000_000} {
+				got, err := l.StatusAt(now)
+				if err != nil {
+					t.Fatalf("StatusAt(%d): %v", now, err)
+				}
+				if got != StatusUnknown {
+					t.Fatalf("StatusAt(%d) = %q, want %q", now, got, StatusUnknown)
+				}
+			}
+		})
+	}
 }
 
 func TestLifecycleReceiveIsOneShot(t *testing.T) {
@@ -142,8 +352,10 @@ func TestLifecycleReceiveIsOneShot(t *testing.T) {
 	if err := l.Receive(lifecycleNowMS + 1); err != nil {
 		t.Fatalf("first Receive: %v", err)
 	}
+	// Caller times must be non-decreasing within one instance, so the repeated
+	// receives never go back before the accepted first Receive time.
 	for i := 0; i < 3; i++ {
-		if err := l.Receive(lifecycleNowMS + int64(2+i)); !errors.Is(err, ErrLifecycleTransition) {
+		if err := l.Receive(lifecycleNowMS + int64(1+i)); !errors.Is(err, ErrLifecycleTransition) {
 			t.Fatalf("repeated Receive #%d = %v, want ErrLifecycleTransition", i, err)
 		}
 	}
@@ -156,6 +368,9 @@ func TestLifecycleReceiveConcurrentlyOnce(t *testing.T) {
 	if err := l.Confirm(lifecycleNowMS); err != nil {
 		t.Fatalf("Confirm: %v", err)
 	}
+	// Caller times must be non-decreasing, so the concurrent racers all use the
+	// same observation time rather than distinct ones in completion order.
+	at := lifecycleNowMS + 1
 	start := make(chan struct{})
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -163,10 +378,10 @@ func TestLifecycleReceiveConcurrentlyOnce(t *testing.T) {
 	var wrong []error
 	for i := 0; i < goroutines; i++ {
 		wg.Add(1)
-		go func(i int) {
+		go func() {
 			defer wg.Done()
 			<-start
-			err := l.Receive(lifecycleNowMS + int64(i%5) + 1)
+			err := l.Receive(at)
 			mu.Lock()
 			defer mu.Unlock()
 			switch {
@@ -177,7 +392,7 @@ func TestLifecycleReceiveConcurrentlyOnce(t *testing.T) {
 			default:
 				wrong = append(wrong, err)
 			}
-		}(i)
+		}()
 	}
 	close(start)
 	wg.Wait()

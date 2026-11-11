@@ -227,6 +227,22 @@ reads the system clock, normalizes time, or waits.
   by the absolute context deadline, this is the earlier of the two. Expiry is
   latched by `StatusAt` or by the first attempted transition at or after the
   boundary; all methods apply the same check under the mutex.
+- Caller-supplied times must be non-decreasing within the same in-memory
+  instance. The constructor records its `nowUnixMS` as the last accepted time,
+  and every later call (`StatusAt`, `Confirm`, `Receive`, `MarkUnknown`,
+  `Cancel`) rejects a non-positive time, or a time lower than the last accepted
+  time, with `ErrLifecycleInvalidTime` before changing the status or a phase
+  deadline. Equal timestamps are valid. A rejected call leaves the instance
+  exactly as it was; an accepted call records its time as the new last accepted
+  time.
+- `StatusAt` with an invalid or rolled-back time returns an empty status
+  together with `ErrLifecycleInvalidTime`. `StatusUnknown` is reserved for a
+  genuine unknown request outcome, so an invalid clock argument is never
+  reported as `unknown`.
+- This rollback check is in-memory only. It is not durable replay protection
+  and does not detect a whole-process snapshot rollback: an instance restored
+  from an earlier snapshot, or a fresh instance after a restart, starts a new
+  time sequence and does not remember earlier accepted times.
 
 ### Concurrency and state
 
