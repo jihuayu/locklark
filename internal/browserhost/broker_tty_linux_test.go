@@ -5,6 +5,7 @@ package browserhost
 import (
 	"math"
 	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 )
@@ -152,5 +153,79 @@ func TestLinuxTTYDevEncoding(t *testing.T) {
 		if path != node || nodeDev != linuxDev(ttyMajor, minor) || unit != minor {
 			t.Fatalf("%s: identity 0x%x unit %d", node, nodeDev, unit)
 		}
+	}
+}
+
+// mountNamespacePath is checked against temporary symlinks only: one pointing
+// at this broker's own mount namespace stands in for the same namespace, one
+// pointing elsewhere for a distinct namespace. No privileges or unshare are
+// needed.
+func TestLinuxMountNamespacePathIdentity(t *testing.T) {
+	dir := t.TempDir()
+	same := filepath.Join(dir, "same")
+	if err := os.Symlink("/proc/self/ns/mnt", same); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+	info, ok := mountNamespacePath(same)
+	if !ok {
+		t.Fatalf("self namespace symlink %s rejected", same)
+	}
+	self, err := os.Stat("/proc/self/ns/mnt")
+	if err != nil || !os.SameFile(self, info) {
+		t.Fatalf("returned identity is not the self namespace: %v", err)
+	}
+
+	// A distinct identity: another namespace object when one is visible, else
+	// a regular file, which differs from the namespace in type and inode.
+	other := filepath.Join(dir, "other")
+	if _, err := os.Stat("/proc/1/ns/mnt"); err == nil {
+		if err := os.Symlink("/proc/1/ns/mnt", other); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		// A regular file has a different inode and mode; it is a distinct
+		// identity even where no second namespace is visible.
+		regular := filepath.Join(dir, "regular")
+		if err := os.WriteFile(regular, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(regular, other); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, ok := mountNamespacePath(other); ok {
+		t.Fatalf("distinct namespace identity %s accepted", other)
+	}
+
+	// Missing and unstatable paths fail closed.
+	for _, path := range []string{
+		filepath.Join(dir, "missing"),
+		filepath.Join(dir, "dangling"),
+		"",
+	} {
+		if _, ok := mountNamespacePath(path); ok {
+			t.Fatalf("unstatable path %q accepted", path)
+		}
+	}
+	if err := os.Symlink(filepath.Join(dir, "nowhere"), filepath.Join(dir, "dangling")); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := mountNamespacePath(filepath.Join(dir, "dangling")); ok {
+		t.Fatal("dangling namespace path accepted")
+	}
+}
+
+// TestLinuxSelfMountNamespaceAttestation checks that this process's own
+// controlling terminal is still attested when peer and broker share one mount
+// namespace; a process without a controlling terminal fails closed.
+func TestLinuxSelfMountNamespaceAttestation(t *testing.T) {
+	path, dev, unit, ok := peerControllingTerminal(os.Getpid())
+	if !ok {
+		if path, _, _, selfOK := peerControllingTerminal(os.Getpid()); selfOK {
+			t.Fatalf("inconsistent self attestations: %q", path)
+		}
+	}
+	if want := "/dev/pts/" + strconv.FormatUint(uint64(devMinor(dev)), 10); path != want || unit != devMinor(dev) {
+		t.Fatalf("self attestation = %q unit %d want %q", path, unit, want)
 	}
 }

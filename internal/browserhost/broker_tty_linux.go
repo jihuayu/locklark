@@ -59,13 +59,27 @@ func cliRunTTYAttestedPlatform() bool { return true }
 // kernel's own dev_t encoding (new_encode_dev). Nothing the peer writes can
 // choose this value. The peer's fd 0 is not consulted: it is the peer's
 // descriptor table, not its controlling terminal.
+//
+// A tty_nr is only a devpts major/minor, and separate devpts mounts in
+// different mount namespaces can reuse it, so the peer's mount namespace must
+// be this broker's before tty_nr names this broker's /dev/pts/N. The namespace
+// identity is compared before and after reading stat, so a peer that changes
+// mount namespace while it is looked up is rejected rather than resolved
+// against either namespace.
 func peerControllingTerminal(pid int) (path string, rdev uint64, unit uint32, ok bool) {
 	if pid <= 0 {
 		return "", 0, 0, false
 	}
 	base := "/proc/" + strconv.Itoa(pid)
+	mnt, ok := mountNamespacePath(base + "/ns/mnt")
+	if !ok {
+		return "", 0, 0, false
+	}
 	stat, e := os.ReadFile(base + "/stat")
 	if e != nil {
+		return "", 0, 0, false
+	}
+	if after, ok := mountNamespacePath(base + "/ns/mnt"); !ok || !os.SameFile(mnt, after) {
 		return "", 0, 0, false
 	}
 	// tty_nr is field 7 (1-based). Fields after the parenthesised command
@@ -117,6 +131,27 @@ func peerControllingTerminal(pid int) (path string, rdev uint64, unit uint32, ok
 	}
 	minor, _ := devUnit(dev)
 	return path, dev, minor, true
+}
+
+// mountNamespacePath stats one /proc/PID/ns/mnt link and accepts it only when
+// it identifies this broker's own mount namespace (/proc/self/ns/mnt). Any
+// failure to stat either side, an unreadable namespace, or a distinct
+// namespace file identity is a mismatch and fails closed. The comparison uses
+// os.SameFile on os.Stat results, whose FileInfo describes the namespace
+// object the link resolves to, not the /proc link itself.
+func mountNamespacePath(path string) (os.FileInfo, bool) {
+	self, err := os.Stat("/proc/self/ns/mnt")
+	if err != nil {
+		return nil, false
+	}
+	peer, err := os.Stat(path)
+	if err != nil {
+		return nil, false
+	}
+	if !os.SameFile(self, peer) {
+		return nil, false
+	}
+	return peer, true
 }
 
 // ttyNrDev decodes field 7 (tty_nr) of /proc/PID/stat into a dev_t. The kernel
