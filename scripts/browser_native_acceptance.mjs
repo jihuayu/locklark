@@ -99,6 +99,7 @@ const diagnostics = mkdtempSync(join(state, "diagnostics-"));
 let stage = "fixture",
   lastPopup = null,
   lastRouteObservation = null,
+  routeAfterPopupClose = null,
   routeObservationHistory = [],
   nativeInput = null;
 // Diagnostics only: keep at most ROUTE_HISTORY_LIMIT sanitized observations,
@@ -746,6 +747,25 @@ try {
         !(await targets()).some((target) => ACTION_POPUP.test(target.url)),
       "Action popup target stayed open",
     );
+    // Diagnostics only: one best-effort visible-DOM snapshot of the same exact
+    // route target right after both popup-closed waits, before the pagesAfter
+    // check and the route attachment, so a route-detail failure can tell
+    // whether the page was still locked or already closed at that point. No
+    // added wait or timeout; any failure is swallowed so no acceptance step
+    // can fail or skip because of it. It is stored separately from
+    // lastRouteObservation and the bounded history.
+    try {
+      const afterClose = await attach(opened);
+      try {
+        routeAfterPopupClose = sanitizeRouteObservation(
+          await afterClose.evaluate(routeStateProbe(fixture.Title)),
+        );
+      } finally {
+        try {
+          await afterClose.close();
+        } catch {}
+      }
+    } catch {}
     // The route tab is the only new browser page: every non-extension page
     // present now must be one of the controlled-login pages seen before.
     const pagesAfter = context
@@ -1370,6 +1390,15 @@ try {
       ? {
           routePage: sanitizeRouteObservation(lastRouteObservation),
           routeHistory: routeObservationHistory.map(sanitizeRouteObservation),
+          // Present only once the post-popup-close snapshot was taken, and only
+          // for route-detail failures; same four sanitized fields.
+          ...(routeAfterPopupClose
+            ? {
+                routeAfterPopupClose: sanitizeRouteObservation(
+                  routeAfterPopupClose,
+                ),
+              }
+            : {}),
         }
       : {}),
     popup: { available: false },
