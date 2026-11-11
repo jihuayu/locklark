@@ -4570,8 +4570,10 @@ if (typeof importScripts === "function") importScripts("core.js");
     if (!grant) return;
     const known =
       routeGrants.get(grant.token) === grant ||
-      routeTabs.get(grant.tabId) === grant;
+      routeTabs.get(grant.tabId) === grant ||
+      routeBoots.has(grant);
     routeGrants.delete(grant.token);
+    routeBoots.delete(grant);
     if ((routeTabs.get(grant.tabId) || null) === grant) routeTabs.delete(grant.tabId);
     for (const state of grant.clients) clipboardDropGrant(state, true);
     grant.clients.clear();
@@ -4586,6 +4588,14 @@ if (typeof importScripts === "function") importScripts("core.js");
   function pruneRoutes() {
     for (const grant of new Set([...routeGrants.values(), ...routeTabs.values()]))
       if (grant.expiresAt <= Date.now()) revokeRoute(grant);
+  }
+  // Every grant counts toward ROUTE_LIMIT, whether its tab is bound or its
+  // tabs.create() is still pending: a pending create holds a route slot.
+  function routeGrantSet() {
+    return new Set([...routeGrants.values(), ...routeTabs.values(), ...routeBoots]);
+  }
+  function routeGrantCount() {
+    return routeGrantSet().size;
   }
   async function routeTabAt(tabId, expectedURL) {
     if (!Number.isSafeInteger(tabId) || tabId < 1 || !expectedURL) return null;
@@ -4728,8 +4738,8 @@ if (typeof importScripts === "function") importScripts("core.js");
     for (const existing of new Set([...routeGrants.values(), ...routeTabs.values()]))
       if (existing.source.tabId === requestSource.tabId && existing.itemId === message.id)
         revokeRoute(existing);
-    while (routeTabs.size >= ROUTE_LIMIT) {
-      const oldest = [...routeTabs.values()].sort(
+    while (routeGrantCount() >= ROUTE_LIMIT) {
+      const oldest = [...routeGrantSet()].sort(
         (left, right) => left.expiresAt - right.expiresAt,
       )[0];
       if (!oldest) break;
@@ -4764,6 +4774,19 @@ if (typeof importScripts === "function") importScripts("core.js");
       throw Error("refused");
     }
     if (!created || !Number.isSafeInteger(created.id) || created.id < 1) {
+      revokeRoute(grant);
+      throw Error("refused");
+    }
+    // A lock, disconnect, source navigation or cap eviction may have revoked
+    // this grant while tabs.create() was in flight. The browser may already
+    // have opened the tab, so fail closed without binding, returning or
+    // closing it.
+    const stillOwned =
+      routeGrants.get(grant.token) === grant &&
+      grant.state === "open" &&
+      ((grant.tabId === 0 && routeBoots.has(grant)) ||
+        (grant.tabId !== 0 && routeTabs.get(grant.tabId) === grant));
+    if (!stillOwned) {
       revokeRoute(grant);
       throw Error("refused");
     }

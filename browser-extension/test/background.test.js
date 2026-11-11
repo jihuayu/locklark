@@ -907,6 +907,143 @@ test("concurrent route claims start exactly one read", async () => {
   await route.h.send({ type: "disconnect" });
 });
 
+test("revoking a pending route removes it from the boot set", async () => {
+  // Real production text: revocation must also drop the pending create, or a
+  // later unrelated activation adopts the dead grant as "startup" and
+  // suppresses cancelContext().
+  const revokeSource = await waitForSource("function revokeRoute(grant) {");
+  const bindSource = await waitForSource("function bindRouteTab(grant, tabId, windowId) {");
+  const activationSource = await waitForSource("function routeActivation(tabId, windowId) {");
+  const build = () => {
+    const token = "f".repeat(64);
+    const grant = {
+      token,
+      tabId: 0,
+      windowId: 1,
+      routeURL: "chrome-extension://fixed/popup.html#route=" + token,
+      state: "open",
+      epoch: 3,
+      capability: "a".repeat(32),
+      expiresAt: Date.now() + 60000,
+      clients: new Set(),
+    };
+    const grants = new Map([[token, grant]]);
+    const tabs = new Map();
+    const boots = new Set([grant]);
+    let cancelled = 0;
+    const load = new Function(
+      "routeGrants", "routeTabs", "routeBoots",
+      "clipboardDropGrant", "routeTabAt", "cancelContext", "Date",
+      '"use strict";' + revokeSource + bindSource + activationSource +
+        "\nreturn { revokeRoute, routeActivation };",
+    );
+    const api = load(
+      grants,
+      tabs,
+      boots,
+      () => {},
+      async () => null,
+      () => {
+        cancelled += 1;
+      },
+      Date,
+    );
+    return { grant, grants, tabs, boots, api, cancelled: () => cancelled };
+  };
+  const state = build();
+  state.api.revokeRoute(state.grant);
+  assert.equal(state.boots.has(state.grant), false, "revoked grant stayed in routeBoots");
+  assert.equal(state.api.routeActivation(42, 1), "switch",
+    "a revoked pending grant was adopted as a startup activation");
+  assert.equal(state.cancelled(), 0);
+});
+
+test("pending route grants count toward the route limit", async () => {
+  const background = fs.readFileSync(path.join(__dirname, "../background.js"), "utf8");
+  const limit = Number(/ROUTE_LIMIT = (\d+)/.exec(background)?.[1]);
+  assert.ok(Number.isSafeInteger(limit) && limit > 0, "ROUTE_LIMIT not found");
+  const h = harness();
+  await ready(h);
+  const sourceTab = { id: 1, windowId: 1, active: true, url: "https://example.test/login" };
+  h.api.tabs.get = async (tabId) => (tabId === sourceTab.id ? { ...sourceTab } : null);
+  h.api.scripting.executeScript = async () => [
+    { frameId: 0, documentId: h.docId(), result: { top: true, origin: "https://example.test" } },
+  ];
+  const held = [];
+  let createCalls = 0;
+  h.api.tabs.create = () => {
+    createCalls += 1;
+    return new Promise((resolve) => held.push(resolve));
+  };
+  const sends = [];
+  for (let index = 1; index <= limit + 1; index++)
+    sends.push(
+      h.send({
+        type: "open-route",
+        // Distinct targets so the same-source dedupe never fires.
+        id: index.toString(16).padStart(2, "0").repeat(16),
+        revision: "c".repeat(64),
+      }),
+    );
+  // Deterministic barrier: every create either produced a pending tab or was
+  // refused because the cap already counts pending grants.
+  await waitFor(() => createCalls > limit, "pending route creates");
+  let tabId = 70;
+  while (held.length) held.shift()({ id: tabId++, windowId: 1 });
+  const replies = await Promise.all(sends);
+  const created = replies.filter((reply) => reply?.routeCreated);
+  assert.equal(created.length, limit, "pending grants exceeded the route limit");
+  assert.equal(
+    new Set(created.map((reply) => reply.routeCreated.token)).size,
+    created.length,
+  );
+  await h.send({ type: "disconnect" });
+});
+
+test("a route revoked while tabs.create is pending fails closed", async () => {
+  const h = harness();
+  await ready(h);
+  const sourceTab = { id: 1, windowId: 1, active: true, url: "https://example.test/login" };
+  h.api.tabs.get = async (tabId) => (tabId === sourceTab.id ? { ...sourceTab } : null);
+  h.api.scripting.executeScript = async () => [
+    { frameId: 0, documentId: h.docId(), result: { top: true, origin: "https://example.test" } },
+  ];
+  let release = null;
+  let createCalls = 0;
+  h.api.tabs.create = () => {
+    createCalls += 1;
+    return new Promise((resolve) => (release = resolve));
+  };
+  const ITEM_ID = "b".repeat(32);
+  const send = h.send({ type: "open-route", id: ITEM_ID, revision: "c".repeat(64) });
+  await waitFor(() => createCalls === 1 && release, "pending route create");
+  // The source page reloads while tabs.create() is still pending, which
+  // revokes the grant before its create continuation runs.
+  h.listeners.updated(1, { status: "loading" });
+  release({ id: 7, windowId: 1 });
+  const reply = await send;
+  assert.equal(reply?.routeCreated, undefined, "a revoked pending grant was returned as created");
+  // The browser-created tab must not have turned the dead grant live.
+  const pageURL = "chrome-extension://fixed/popup.html#route=" + "0".repeat(64);
+  const claim = await h.send(
+    { type: "route-claim", token: "0".repeat(64) },
+    {
+      id: "fixed",
+      url: pageURL,
+      origin: "chrome-extension://fixed",
+      frameId: 0,
+      documentId: "route-doc",
+      tab: { id: 7, url: pageURL, windowId: 1 },
+    },
+  );
+  assert.ok(!claim || claim.error === "refused", "a revoked pending grant was claimed");
+  assert.equal(
+    h.sent.filter((r) => r.type === "vault-search" || r.type === "item-get").length,
+    0,
+  );
+  await h.send({ type: "disconnect" });
+});
+
 test("page sender cannot connect or choose a field", async () => {
   const h = harness();
   assert.equal(
