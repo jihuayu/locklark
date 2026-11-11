@@ -51,11 +51,12 @@ type EncodeLimits struct {
 	//     the budget;
 	//   - a KDBX4 NoCompressionFlag ChaCha20 or Twofish content additionally
 	//     reserves the writer's actual 1..16 padding bytes, because the
-	//     decoder keeps and counts them. The encoder pads to the next
-	//     16-byte boundary, and by a whole block when the content already
-	//     ends on one, so a budget M admits a serialized body of at most
-	//     floor(M/16)*16-1 bytes. A budget below 16 therefore admits no
-	//     content and is reported as ErrEncodeLimitExceeded.
+	//     decoder retains and counts every non-AES decrypted byte. The
+	//     encoder pads to the next 16-byte boundary, and by a whole block
+	//     when the content already ends on one, so a budget M admits a
+	//     serialized body of at most floor(M/16)*16-1 bytes. A budget below
+	//     16 therefore admits no content and is reported as
+	//     ErrEncodeLimitExceeded.
 	MaxPlaintextBytes int64
 }
 
@@ -80,9 +81,9 @@ func (e *Encoder) Encode(db *Database) error {
 // encoded bytes are exactly those of Encode; only the budget differs by
 // cipher. The budget bounds the serialized body except for a KDBX4
 // NoCompressionFlag ChaCha20 or Twofish content, where it also reserves the
-// writer's actual 1..16 padding bytes: the decoder keeps those bytes and
-// counts them, so the output still opens under DecodeWithLimits with the same
-// budget. See EncodeLimits.MaxPlaintextBytes.
+// writer's actual 1..16 padding bytes: the decoder retains and counts every
+// non-AES decrypted byte, so the output still opens under DecodeWithLimits
+// with the same budget. See EncodeLimits.MaxPlaintextBytes.
 //
 // The content is serialized exactly as Encode serializes it, and its budget
 // is enforced on the plaintext collector's writes before a byte beyond the
@@ -105,9 +106,9 @@ func (e *Encoder) EncodeWithLimits(db *Database, limits EncodeLimits) error {
 // hasLegacyWriterPaddingBudget reports whether encodeRawContent's 1..16
 // repeated-count padding of this database reaches DecodeWithLimits' plaintext
 // budget. That holds for a KDBX4 NoCompressionFlag ChaCha20 or Twofish
-// content: the decoder keeps and counts every decrypted byte of it. AES
-// content ends in PKCS#7, which the decoder removes, and a gzip content is
-// budgeted by its expansion.
+// content: the decoder retains and counts every decrypted byte of non-AES
+// content. For AES content the decoder removes a valid PKCS#7 suffix instead,
+// and a gzip content is budgeted by its expansion.
 func hasLegacyWriterPaddingBudget(db *Database) bool {
 	if !db.Header.IsKdbx4() || db.Header.FileHeaders.CompressionFlags == GzipCompressionFlag {
 		return false
@@ -186,8 +187,8 @@ func (e *Encoder) encode(db *Database, maxPlaintext int64) error {
 	// once, through the plaintext collector: a bounded encode charges both
 	// against one plaintext budget before the content is compressed.
 	if maxPlaintext > 0 && hasLegacyWriterPaddingBudget(db) {
-		// The decoder keeps this content's 1..16 writer padding bytes and
-		// counts them, so reserve them: the collector admits a body of at
+		// The decoder retains and counts this non-AES content's 1..16 writer
+		// padding bytes, so reserve them: the collector admits a body of at
 		// most this size, whose padding brings it to at most
 		// maxPlaintext.
 		maxPlaintext = maxPlaintext/16*16 - 1
@@ -345,11 +346,11 @@ func encodeRawContent(
 	}
 
 	// Always add padding, so that decoders that check for the last bytes can work correctly.
-	// For AES this is the PKCS#7 the CBC encrypter would add anyway; for
-	// Twofish and ChaCha20 the KDBX 4 format does not pad, yet this legacy
-	// writer appends the same 1..16 repeated-count bytes for every cipher.
-	// The bounded decoder keeps those non-AES bytes and counts them, which
-	// is why EncodeWithLimits reserves them for this content.
+	// The legacy writer appends the same 1..16 repeated-count bytes before
+	// encryption for every cipher; the bounded decoder removes a valid
+	// suffix for AES only, and retains and counts every non-AES decrypted
+	// byte, including these, which is why EncodeWithLimits reserves them for
+	// a NoCompressionFlag ChaCha20 or Twofish content.
 	padding := make([]byte, 16-(len(content)%16))
 	for i := range len(padding) {
 		padding[i] = byte(len(padding))

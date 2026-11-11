@@ -42,9 +42,9 @@ type DecodeLimits struct {
 	// cipher-specific exception: for an AES content, the valid 1..16-byte
 	// PKCS#7 suffix at the end of the decrypted content is removed first and
 	// excluded from the budget. No non-AES content is ever trimmed: every
-	// decrypted byte of ChaCha20 or Twofish content counts toward the
-	// budget, and the legacy writer appends 1..16 repeated-count bytes to
-	// both, so those bytes count too. When content is not compressed both
+	// decrypted byte of ChaCha20 or Twofish content is retained and counts
+	// toward the budget, including the 1..16 repeated-count bytes the legacy
+	// writer appends to that content. When content is not compressed both
 	// bounds apply to the same bytes, so the aggregate binary budget can
 	// only take effect for a binary inside an expanded body.
 	MaxPlaintextBytes int64
@@ -90,11 +90,12 @@ func (d *Decoder) Decode(db *Database) error {
 //     its gzip expansion when the header selects gzip) by
 //     limits.MaxPlaintextBytes, detected with one extra byte, and rejects an
 //     over-budget body with ErrDecodeLimitExceeded before XML decoding.
-//     Cipher padding is not part of the budget: without compression a valid
-//     1..16-byte PKCS#7 suffix of an AES content is removed before the limit
-//     is applied. ChaCha20 and Twofish content is never trimmed; every
-//     decrypted byte of it counts toward the limit, and gzip is budgeted by
-//     its expansion;
+//     A cipher suffix is not part of the budget for AES only: without
+//     compression a valid 1..16-byte PKCS#7 suffix of an AES content is
+//     removed before the limit is applied. ChaCha20 and Twofish content is
+//     never trimmed; every decrypted byte of it is retained and counts toward
+//     the limit, including the bytes the legacy writer appends, and gzip is
+//     budgeted by its expansion;
 //  4. parses the KDBX4 InnerHeader in bounded mode, which rejects a binary
 //     that would bring the aggregate binary bytes (protection flags
 //     included) over limits.MaxPlaintextBytes before copying it. A one-byte
@@ -370,14 +371,14 @@ func decodeRawContent(db *Database, content []byte, transformedKey []byte, budge
 		}
 	} else if budget.bounded {
 		// Without compression the decrypted content is the plaintext body
-		// followed by the cipher padding. Only AES content ends in PKCS#7
-		// padding, so only a valid PKCS#7 suffix of an AES content is
-		// dropped before it is measured. ChaCha20 content is unpadded and
-		// stays byte for byte; Twofish and ChaCha20 content the legacy
-		// writer produced carries its 1..16 repeated-count bytes, which are
-		// not PKCS#7 and are counted too. Cipher padding is derived from
-		// the authenticated decrypted bytes only. An over-budget body is
-		// rejected before it is handed on for parsing.
+		// optionally followed by a cipher suffix. The bounded decoder
+		// removes a valid suffix for AES content only: a valid 1..16-byte
+		// PKCS#7 suffix of an AES content is dropped before it is measured.
+		// Every decrypted byte of ChaCha20 and Twofish content is retained
+		// and counted, including the 1..16 repeated-count bytes the legacy
+		// writer appends to that content. Any suffix considered here is
+		// derived from the authenticated decrypted bytes only. An
+		// over-budget body is rejected before it is handed on for parsing.
 		if bytes.Equal(db.Header.FileHeaders.CipherID, CipherAES) && db.Header.IsKdbx4() {
 			decryptedContent = trimPKCS7Padding(decryptedContent)
 		}
@@ -393,8 +394,8 @@ func decodeRawContent(db *Database, content []byte, transformedKey []byte, budge
 // trimPKCS7Padding removes the trailing PKCS#7 padding from the decrypted
 // content of an uncompressed AES KDBX4 file: 1..16 bytes that each hold the
 // padding length, as the CBC encrypter adds them. Content without a valid
-// suffix is returned unchanged. It is called for AES content only: ChaCha20
-// and Twofish content keeps every decrypted byte.
+// suffix is returned unchanged. It is called for AES content only: every
+// decrypted byte of ChaCha20 and Twofish content is retained.
 func trimPKCS7Padding(content []byte) []byte {
 	if len(content) == 0 {
 		return content

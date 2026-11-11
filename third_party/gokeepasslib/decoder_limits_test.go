@@ -317,13 +317,13 @@ func TestDecodeWithLimitsRejectsUncompressedBodyOverBudget(t *testing.T) {
 }
 
 // TestDecodeWithLimitsKeepsUnpaddedChaChaBody is the regression for a
-// spec-valid unpadded ChaCha20 content that ends in ten line feeds. The KDBX
-// 4 format leaves ChaCha20 content unpadded (PKCS#7 applies to AES only), so
-// the bounded decoder removes a cipher suffix for AES only and keeps every
-// ChaCha20 byte: a non-aligned body and a 16-byte-aligned body that ends in
-// the same ten line feeds are both preserved byte for byte, even though the
-// aligned one ends in a repeated-count pattern, and both count toward the
-// budget. XML whitespace is never treated as padding.
+// spec-valid unpadded ChaCha20 content that ends in ten line feeds. The
+// bounded decoder removes a cipher suffix for AES only and retains and counts
+// every non-AES decrypted byte, so it keeps every ChaCha20 byte: a non-aligned
+// body and a 16-byte-aligned body that ends in the same ten line feeds are
+// both preserved byte for byte, even though the aligned one ends in a
+// repeated-count pattern, and both count toward the budget. XML whitespace is
+// never treated as padding.
 func TestDecodeWithLimitsKeepsUnpaddedChaChaBody(t *testing.T) {
 	base := append(innerHeaderBytes(t, testInnerHeader()), "<KeePassFile/>"...)
 	// The aligned body appends the fewest line feeds beyond the ten that
@@ -380,8 +380,9 @@ func TestDecodeWithLimitsKeepsUnpaddedChaChaBody(t *testing.T) {
 }
 
 // TestDecodeWithLimitsKeepsTwofishWriterPadding is the Twofish counterpart:
-// Twofish content is not PKCS#7-trimmed either, so the 1..16 repeated-count
-// bytes the legacy writer appends to it count toward the budget and stay in
+// the bounded decoder removes a valid suffix for AES only, so every Twofish
+// decrypted byte is retained and counted, and the 1..16 repeated-count bytes
+// the legacy writer appends to it count toward the budget and stay in
 // RawData. Exactly that padded content is accepted; one byte less rejects.
 func TestDecodeWithLimitsKeepsTwofishWriterPadding(t *testing.T) {
 	body := append(innerHeaderBytes(t, testInnerHeader()), "<KeePassFile/>"...)

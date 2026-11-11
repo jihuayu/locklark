@@ -556,10 +556,10 @@ func TestEncodeWithLimitsUncompressedDecodesAtExactBudget(t *testing.T) {
 
 // TestEncodeWithLimitsUncompressedChaChaCountsWriterPadding is the ChaCha20
 // counterpart of TestEncodeWithLimitsUncompressedDecodesAtExactBudget. The
-// KDBX 4 format leaves ChaCha20 content unpadded, but the legacy writer
-// still appends 1..16 repeated-count bytes to it. The bounded decoder keeps
-// and counts those bytes, so EncodeWithLimits budgets the actual post-padding
-// decrypted content: an output sealed with exactly that budget opens under
+// legacy writer appends 1..16 repeated-count bytes to this content before
+// encryption. The bounded decoder retains and counts every non-AES decrypted
+// byte, so EncodeWithLimits budgets the actual post-padding decrypted
+// content: an output sealed with exactly that budget opens under
 // DecodeWithLimits and keeps the full padded decrypted bytes in RawData,
 // while one byte less is rejected by both the encoder and the decoder for the
 // same real output. Encoded bytes are those of the unbounded writer.
@@ -656,10 +656,12 @@ func TestEncodeWithLimitsUncompressedChaChaCountsWriterPadding(t *testing.T) {
 // TestEncodeWithLimitsReservesLegacyWriterPadding pins the reserved padding
 // budget of a KDBX4 NoCompressionFlag ChaCha20 or Twofish content: for a
 // maximum decrypted-output limit M the collector admits a serialized body of
-// floor(M/16)*16-1 bytes, whose writer padding reaches exactly M, and rejects
-// one byte more. AES content reserves nothing, since the decoder removes its
-// PKCS#7 suffix. A reserved budget below 16 admits no padded content and is
-// reported as ErrEncodeLimitExceeded before any content is serialized.
+// floor(M/16)*16-1 bytes, whose maximum writer-padded size is
+// floor(M/16)*16, which is at most M; one byte more of serialized body is
+// rejected. The decoder removes a valid suffix for AES only, so the same
+// budget admits a body of M bytes for AES content, which reserves nothing. A
+// reserved budget below 16 admits no padded content and is reported as
+// ErrEncodeLimitExceeded before any content is serialized.
 //
 // The fixture grows its body to an exact size, so no fixed fixture size is
 // assumed. It uses a fixed IV: encoding a Twofish header in place bumps the

@@ -224,16 +224,17 @@ func configureKDBXProfile(db *kdbx.Database) error {
 // body above MaxPlaintextBytes is reported as CodeKDBXPayloadTooLarge and is
 // never compressed or encrypted. The budget is enforced on the body's writes,
 // so nothing beyond it is retained. For a NoCompressionFlag ChaCha20 or
-// Twofish payload the writer's 1..16 padding bytes are not PKCS#7 and are
-// counted by Open, so that budget also reserves them and admits a body of at
-// most floor(MaxPlaintextBytes/16)*16-1 bytes; for AES Open removes the PKCS#7
-// suffix, and a gzip payload is budgeted by its expansion. A plaintext value
-// that is large but compresses well is therefore rejected rather than sealed
-// into a payload Open would reject for its expanded size. The encoder keeps
-// its established write order, so by then the KDBX header and hashes have been
-// written into the output collector; that collector is bounded by MaxKDBXCiphertextBytes
-// and is released on every error, so an encoding rejected after that header
-// is reported as CodeKDBXPayloadTooLarge and no output is returned. Second, a
+// Twofish payload Open retains and counts every decrypted byte, including the
+// writer's 1..16 padding bytes, so that budget also reserves them and admits
+// a body of at most floor(MaxPlaintextBytes/16)*16-1 bytes; for AES Open
+// removes a valid PKCS#7 suffix, and a gzip payload is budgeted by its
+// expansion. A plaintext value that is large but compresses well is therefore
+// rejected rather than sealed into a payload Open would reject for its
+// expanded size. The encoder keeps its established write order, so by then the
+// KDBX header and hashes have been written into the output collector; that
+// collector is bounded by MaxKDBXCiphertextBytes and is released on every
+// error, so an encoding rejected after that header is reported as
+// CodeKDBXPayloadTooLarge and no output is returned. Second, a
 // returned payload never exceeds MaxKDBXCiphertextBytes: a larger encoding is
 // reported as CodeKDBXPayloadTooLarge and its collected bytes are released.
 // No output is returned for any error.
