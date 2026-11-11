@@ -718,12 +718,15 @@ _ABSENT = object()
 
 def folder_request(**overrides):
     # The exact purpose-bound folder action shape. The chooser title is the
-    # fixed reviewed literal; nothing else selects the chooser.
+    # fixed reviewed literal and the manager title is the observed real Edge
+    # manager page title, carried unchanged in all three title slots.
     request = {
         "owner": True,
         "chooser_action": {"select_folder": True},
         "chooser_title_prefix": "Select the extension directory.",
-        "owner_title_prefix": "Ext",
+        "title": "Extensions",
+        "title_prefix": "Extensions",
+        "owner_title_prefix": "Extensions",
         "user_data_dir": "/synthetic/profile-1",
         "executable": "/synthetic/edge",
     }
@@ -735,13 +738,61 @@ def folder_request(**overrides):
 
 class FolderActionTests(unittest.TestCase):
     def test_exact_semantic_action_is_the_only_accepted_shape(self):
+        self.assertEqual(native.EDGE_MANAGER_TITLE, "Extensions")
         parsed = native.parse_folder_action_request(folder_request())
-        self.assertEqual(parsed, {"owner_title_prefix": "Ext",
+        self.assertEqual(parsed, {"owner_title_prefix": "Extensions",
+                                  "title": "Extensions",
+                                  "title_prefix": "Extensions",
                                   "chooser_title_prefix": "Select the extension directory.",
                                   "user_data_dir": "/synthetic/profile-1",
                                   "executable": "/synthetic/edge",
                                   "caller_pid": None, "probe": False})
-        self.assertEqual(set(parsed), set(native.OWNER_FIELDS) | {"caller_pid", "probe"})
+        self.assertEqual(set(parsed), set(native.OWNER_FIELDS) |
+                         set(native.FOLDER_MANAGER_FIELDS) | {"caller_pid", "probe"})
+
+    def test_manager_title_must_be_the_exact_observed_manager_title(self):
+        # The exact observed title is the only accepted value, never a
+        # prefix, a generic prefix, a case variant or an altered title.
+        self.assertTrue(native.folder_manager_title_matches("Extensions"))
+        for value in ("Ext", "Extension", "Extensions - Profile 1", "Extensions - "
+                      "Profile 1 - Microsoft Edge", " extensions", "Extensions ",
+                      "extensions", "EXTENSIONS", "Extensionss", "Extensions.",
+                      "Edge Extensions", "", None, 1, True, ["Extensions"]):
+            with self.subTest(value=value):
+                self.assertFalse(native.folder_manager_title_matches(value))
+        cases = {
+            "generic owner prefix": folder_request(owner_title_prefix="Ext",
+                                                   title_prefix="Ext", title="Ext"),
+            "generic prefix only": folder_request(owner_title_prefix="Ext"),
+            "absent title": folder_request(title=_ABSENT),
+            "absent title prefix": folder_request(title_prefix=_ABSENT),
+            "absent owner title prefix": folder_request(owner_title_prefix=_ABSENT),
+            "null title": folder_request(title=None),
+            "title mismatch": folder_request(title="Extensions - Profile 1",
+                                             title_prefix="Extensions - Profile 1",
+                                             owner_title_prefix="Extensions - Profile 1"),
+            "title_prefix differs": folder_request(title_prefix="Extension"),
+            "owner prefix is only a prefix": folder_request(owner_title_prefix="Extension"),
+            "owner prefix longer": folder_request(owner_title_prefix="Extensions - Profile 1"),
+            "title differs from prefix": folder_request(title="Extensions",
+                                                        title_prefix="Extension"),
+            "case altered": folder_request(title="extensions", title_prefix="extensions",
+                                           owner_title_prefix="extensions"),
+            "suffixed": folder_request(title="Extensions - Profile 1 - Microsoft Edge",
+                                       title_prefix="Extensions - Profile 1 - Microsoft Edge",
+                                       owner_title_prefix="Extensions - Profile 1 - Microsoft Edge"),
+            "padded": folder_request(title=" Extensions", title_prefix=" Extensions",
+                                     owner_title_prefix=" Extensions"),
+            "non-ascii": folder_request(title="扩展", title_prefix="扩展",
+                                        owner_title_prefix="扩展"),
+            "non-string": folder_request(title=1, title_prefix=1, owner_title_prefix=1),
+        }
+        for name, request in cases.items():
+            with self.subTest(name):
+                self.assertIsNone(native.parse_folder_action_request(request))
+        # The request parser never returns the generic-prefix shape.
+        self.assertIsNone(native.parse_folder_action_request({**folder_request(),
+                                                             "owner_title_prefix": "Ext"}))
         # A caller PID is optional but only well formed and never trusted alone.
         self.assertEqual(native.parse_folder_action_request(
             folder_request(owner_pid=101))["caller_pid"], 101)
@@ -781,6 +832,8 @@ class FolderActionTests(unittest.TestCase):
             "title case": folder_request(chooser_title_prefix="select the extension directory."),
             "other title": folder_request(chooser_title_prefix="Select a folder"),
             "missing owner prefix": folder_request(owner_title_prefix=_ABSENT),
+            "generic manager prefix": folder_request(title="Ext", title_prefix="Ext",
+                                                     owner_title_prefix="Ext"),
             "relative profile": folder_request(user_data_dir="relative/profile"),
             "profile trailing slash": folder_request(user_data_dir="/synthetic/profile-1/"),
             "relative executable": folder_request(executable="edge"),
@@ -894,6 +947,82 @@ class ChooserXlibTests(unittest.TestCase):
             native.query_children(Lib(), "display", 5)
         with self.assertRaises(RuntimeError):
             native.query_children(Lib(), "display", 0)
+
+    def test_viewable_tree_walk_is_total_and_bounded(self):
+        # The real tree: root -> 10 (parent) -> 20 (chooser) -> 21, with an
+        # unrelated root child 30 and an override-redirect overlay 31 that is
+        # still visited but never reported as a normal viewable window.
+        tree = {1: [10, 30, 31], 10: [20], 20: [21], 30: [], 31: [], 21: []}
+        normal = {20, 30, 21}
+        queries = []
+
+        def children(parent):
+            queries.append(parent)
+            return list(tree[parent])
+
+        viewable = lambda candidate: candidate in normal
+        self.assertEqual(native.bounded_viewable_tree(children, viewable, 1), [30, 20, 21])
+        self.assertEqual(sorted(queries), [1, 10, 20, 21, 30, 31])
+        self.assertEqual((native.VIEWABLE_TREE_VISITS, native.VIEWABLE_TREE_DEPTH),
+                         (1024, 12))
+        # The total visited-window budget counts every window strictly below
+        # the root, not only the matches, and one window over it refuses.
+        wide = {1: list(range(10, 15))}
+        wide.update({index: [index + 10] for index in range(10, 15)})
+        wide.update({index: [] for index in range(20, 25)})
+        walk = lambda budget: native.bounded_viewable_tree(
+            lambda parent: list(wide[parent]), lambda _c: True, 1,
+            budget=budget, depth=native.VIEWABLE_TREE_DEPTH)
+        # The walk is deterministic: root children are queried deepest first.
+        self.assertEqual(walk(11), [10, 11, 12, 13, 14, 24, 23, 22, 21, 20])
+        for budget in (10, 9, 5, 1):
+            with self.subTest(budget=budget):
+                self.assertIsNone(walk(budget))
+        # The depth bound counts levels below the root; a window at the
+        # limit level is accepted and one level deeper fails closed. This
+        # chain stays inside the default budget, so only depth decides.
+        chain = {1: [10], 10: [11], 11: [12], 12: [13], 13: []}
+        deep = lambda depth: native.bounded_viewable_tree(
+            lambda parent: list(chain[parent]), lambda _c: True, 1, depth=depth)
+        # 13 is not a leaf, so its children must still be queried to prove
+        # the tree; depth 3 refuses that query and depth 4 accepts the tree.
+        self.assertIsNone(deep(3))
+        self.assertEqual(deep(4), [10, 11, 12, 13])
+        tail = {1: [10], 10: [11], 11: [12], 12: []}
+        self.assertEqual(native.bounded_viewable_tree(
+            lambda parent: list(tail[parent]), lambda _c: True, 1, depth=3),
+            [10, 11, 12])
+        self.assertIsNone(native.bounded_viewable_tree(
+            lambda parent: list(tail[parent]), lambda _c: True, 1, depth=2))
+        for depth in (2, 1, 0, -1):
+            with self.subTest(depth=depth):
+                self.assertIsNone(deep(depth))
+        # A refused child query, a malformed answer, a repeated window (a
+        # cycle) or a root reached again fails closed instead of looping.
+        refusing = Mock(side_effect=RuntimeError("X window query refused"))
+        self.assertIsNone(native.bounded_viewable_tree(refusing, viewable, 1))
+        for bad in (None, "x", [None], [0], [-1], [True], [10, 10], [1]):
+            with self.subTest(bad=bad):
+                lib = Mock(return_value=bad)
+                self.assertIsNone(native.bounded_viewable_tree(lib, viewable, 1))
+        self.assertEqual(len(lib.mock_calls), 1)
+        cycle = native.bounded_viewable_tree(
+            lambda parent: [10] if parent == 1 else [1], lambda _c: True, 1)
+        self.assertIsNone(cycle)
+        raising = Mock(side_effect=RuntimeError("attributes failed"))
+        self.assertIsNone(native.bounded_viewable_tree(children, raising, 1))
+        # A caller-supplied viewable failure on a deeper window also refuses.
+        self.assertIsNone(native.bounded_viewable_tree(
+            children, raising, 1, budget=8, depth=8))
+        for value in (0, -1, None, True, "1"):
+            with self.subTest(root=value):
+                self.assertIsNone(native.bounded_viewable_tree(children, viewable, value))
+        for budget, depth in ((0, 12), (-1, 12), (1024, 0), (1024, -1), (1024.0, 12)):
+            with self.subTest(budget=budget, depth=depth):
+                self.assertIsNone(native.bounded_viewable_tree(
+                    children, viewable, 1, budget=budget, depth=depth))
+        # Failures are a plain None: no window id, count or message leaks.
+        self.assertIs(type(native.bounded_viewable_tree(refusing, viewable, 1)), type(None))
 
     def property_lib(self, values, status=0, actual=7, fmt=32, remaining=0):
         kept = []
@@ -1085,15 +1214,44 @@ class PointerContainmentTests(unittest.TestCase):
         return native.pointer_containment(parent_of, ROOT, state, chain, ORIGIN, geometry)
 
     def test_true_owned_ancestry_children_are_accepted(self):
-        # qchild of a root query is a root child: the chooser itself or one of
-        # its actual ancestors below the root (10). A child of the chooser
-        # (21) can never be reported by XQueryPointer(root).
-        for qchild in (CHOOSER, OUTER):
+        # XQueryPointer(root) reports the root's direct child containing the
+        # pointer. With an intermediate parent (10) that is only 10; the
+        # chooser (20) and its own descendants (21, 22) are deeper windows
+        # that a root query can never report.
+        self.assertIs(self.judgement(qchild=OUTER), True)
+        for qchild in (CHOOSER, FRAME, BUTTON):
             with self.subTest(qchild=qchild):
-                self.assertIs(self.judgement(qchild=qchild), True)
-        # The chooser itself as an X tree leaf is the simplest owned path.
-        leaf = {CHOOSER: ROOT, ROOT: ROOT}
-        self.assertIs(self.judgement(io_parent=leaf, qchild=CHOOSER), True)
+                self.assertIs(self.judgement(qchild=qchild), False)
+        # Target at the root: the chooser's parent is the root, so chain[-2]
+        # is the chooser itself and that exact qchild is accepted.
+        direct = {CHOOSER: ROOT, FRAME: CHOOSER, ROOT: ROOT}
+        self.assertIs(self.judgement(io_parent=direct, qchild=CHOOSER), True)
+        # The chooser's frame under a direct chooser is still deeper than the
+        # root child and is never accepted for the root query.
+        self.assertIs(self.judgement(io_parent=direct, qchild=FRAME), False)
+
+    def test_real_trees_accept_only_the_root_child_on_the_chooser_chain(self):
+        # root -> 10 (parent) -> 20 (chooser): only the intermediate root
+        # child 10 is the qchild of a root query.
+        intermediate = {OUTER: ROOT, CHOOSER: OUTER, ROOT: ROOT}
+        self.assertIs(self.judgement(io_parent=intermediate, qchild=OUTER), True)
+        for qchild in (CHOOSER, ROOT, 0):
+            with self.subTest(tree="intermediate", qchild=qchild):
+                self.assertIs(self.judgement(io_parent=intermediate, qchild=qchild), False)
+        # root -> 20 (chooser): the chooser is its own direct root child.
+        direct = {CHOOSER: ROOT, ROOT: ROOT}
+        self.assertIs(self.judgement(io_parent=direct, qchild=CHOOSER), True)
+        # root -> 10 -> 20 -> 21: qchild 21 is a deeper chooser XID and is
+        # refused even though it sits inside the verified chooser's tree.
+        deeper = {FRAME: OUTER, CHOOSER: FRAME, OUTER: ROOT, ROOT: ROOT}
+        self.assertIs(self.judgement(io_parent=deeper, qchild=OUTER), True)
+        for qchild in (FRAME, CHOOSER):
+            with self.subTest(tree="deeper", qchild=qchild):
+                self.assertIs(self.judgement(io_parent=deeper, qchild=qchild), False)
+        # There is no chain form where the chooser still has a parent yet is
+        # accepted as qchild: the same real tree refuses it every time.
+        self.assertIs(self.judgement(io_parent=OWNED_TREE, qchild=CHOOSER), False)
+        self.assertIs(self.judgement(io_parent=OWNED_TREE, qchild=OUTER), True)
 
     def test_false_overlay_on_another_root_child_is_refused(self):
         # A viewable overlay is another root child: it would take the press.
@@ -1105,12 +1263,15 @@ class PointerContainmentTests(unittest.TestCase):
         self.assertIs(self.judgement(qroot=OVERLAY), False)
         # The chooser re-parented under the overlay (30) by the live tree
         # while the proven chain still points through 10: the two disagree,
-        # so the stale chain and the actual tree are both refused.
+        # so the stale chain and the actual tree are both refused, whether the
+        # qchild is the stale root child or the overlay itself.
         other = dict(OWNED_PARENT)
         other[CHOOSER] = OVERLAY
         other[OVERLAY] = ROOT
-        self.assertIs(self.judgement(io_parent=other, qchild=CHOOSER,
-                                     chain=self.chain), False)
+        for qchild in (CHOOSER, OUTER):
+            with self.subTest(qchild=qchild):
+                self.assertIs(self.judgement(io_parent=other, qchild=qchild,
+                                             chain=self.chain), False)
         # A decoy overlay inside the chooser's parent chain is not accepted
         # as the chooser's own descendant.
         decoy = dict(OWNED_PARENT)
@@ -1129,14 +1290,21 @@ class PointerContainmentTests(unittest.TestCase):
             with self.subTest(dx=dx, dy=dy):
                 self.assertIs(self.judgement(root_point=point), False)
                 self.assertIs(self.judgement(window_point=point), False)
+        # With an intermediate parent the root query reports that parent (10)
+        # only, even when the pointer point itself is exactly correct.
+        parent_of = tree_parents(OWNED_TREE)
+        chain = native.window_ancestry(parent_of, CHOOSER, ROOT)
+        self.assertIs(native.pointer_containment(
+            parent_of, ROOT, root_query(CHOOSER, EXPECTED_ROOT), chain, ORIGIN,
+            GEOMETRY), False)
         # A chooser at the root origin needs the derived point in both slots.
         with self.subTest(origin=(0, 0)):
-            parent_of = tree_parents(OWNED_TREE)
-            chain = native.window_ancestry(parent_of, CHOOSER, ROOT)
+            direct = tree_parents({CHOOSER: ROOT, ROOT: ROOT})
+            chain = native.window_ancestry(direct, CHOOSER, ROOT)
             self.assertIs(native.pointer_containment(
-                parent_of, ROOT, root_query(CHOOSER, POINT), chain, (0, 0), GEOMETRY), True)
+                direct, ROOT, root_query(CHOOSER, POINT), chain, (0, 0), GEOMETRY), True)
             self.assertIs(native.pointer_containment(
-                parent_of, ROOT, root_query(CHOOSER, EXPECTED_ROOT), chain, (0, 0),
+                direct, ROOT, root_query(CHOOSER, EXPECTED_ROOT), chain, (0, 0),
                 GEOMETRY), False)
         # The old syntheses are refused: chooser-local win coordinates
         # (the measured point itself) and root coordinates in a chooser-local
@@ -1237,7 +1405,9 @@ class PointerDriverTests(unittest.TestCase):
             require_motion)
 
     def test_only_the_derived_point_is_moved_then_proven(self):
-        io = PointerIO(CHOOSER)
+        # The chooser sits under an intermediate root child: the root query
+        # reports that child (10), never the chooser XID below it.
+        io = PointerIO(OUTER)
         self.assertEqual(self.run_driver(io), [CHOOSER, OUTER, ROOT])
         self.assertEqual(io.calls, [("motion", *EXPECTED_ROOT), "flush", "sync", "query"])
 
@@ -1252,9 +1422,12 @@ class PointerDriverTests(unittest.TestCase):
         moved_chooser = root_query(CHOOSER, EXPECTED_ROOT,
                                    (POINT[0], POINT[1] - 1))
         chooser_local = root_query(CHOOSER, EXPECTED_ROOT, POINT)
-        for io in (PointerIO(CHOOSER, state=drift),
-                   PointerIO(CHOOSER, state=moved_chooser),
-                   PointerIO(CHOOSER, state=chooser_local),
+        for io in (PointerIO(OUTER, state=drift),
+                   PointerIO(OUTER, state=moved_chooser),
+                   PointerIO(OUTER, state=chooser_local),
+                   # A deeper chooser XID than the root child is not the
+                   # window XQueryPointer(root) reports.
+                   PointerIO(CHOOSER),
                    PointerIO(FRAME),
                    PointerIO(ROOT)):
             with self.subTest(state=io.state):
@@ -1265,13 +1438,13 @@ class PointerDriverTests(unittest.TestCase):
             self.run_driver(PointerIO(CHOOSER, query_error=True))
 
     def test_refused_motion_stops_before_flush_and_query(self):
-        io = PointerIO(CHOOSER, motion=0)
+        io = PointerIO(OUTER, motion=0)
         with self.assertRaisesRegex(RuntimeError, "^Chooser folder input failed$"):
             self.run_driver(io)
         self.assertEqual(io.calls, [("motion", *EXPECTED_ROOT)])
 
     def test_reexecution_without_motion_never_moves_the_pointer(self):
-        io = PointerIO(CHOOSER)
+        io = PointerIO(OUTER)
         self.run_driver(io, require_motion=False)
         self.assertEqual(io.calls, ["query"])
         overlay = PointerIO(OVERLAY)

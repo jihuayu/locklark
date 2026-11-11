@@ -128,24 +128,40 @@ PROBE_KEYS = frozenset(OWNER_FIELDS) | {"actions", "ownership_probe", "preserve_
 INPUT_KEYS = frozenset(OWNER_FIELDS) | {
     "actions", "owner", "owner_pid", "preserve_focus", "title", "title_prefix",
 }
+# The real Edge manager page title observed in the probe. The folder action
+# carries it as the observed `title`, and `title`, `title_prefix` and
+# owner_title_prefix must all equal it exactly: a prefix such as "Ext" would
+# match a different Edge window and is never the manager page title.
+EDGE_MANAGER_TITLE = "Extensions"
 # One purpose-bound folder action, separate from the keyboard/coordinate input
-# shape. The chooser title must equal this exact literal and the chooser must
-# keep the measured client size; the point is always derived from that geometry.
+# shape. The chooser title must equal this exact literal, the manager window
+# must equal the observed manager title and the chooser must keep the measured
+# client size; the point is always derived from that geometry.
 FOLDER_ACTION = {"select_folder": True}
-FOLDER_ACTION_KEYS = frozenset(OWNER_FIELDS) | {"chooser_action", "owner", "owner_pid"}
+FOLDER_MANAGER_FIELDS = ("title", "title_prefix")
+FOLDER_ACTION_KEYS = frozenset(OWNER_FIELDS) | set(FOLDER_MANAGER_FIELDS) | {
+    "chooser_action", "owner", "owner_pid",
+}
 EDGE_CHOOSER_TITLE = "Select the extension directory."
 FOLDER_CHOOSER_SIZE = (1124, 822)
 FOLDER_POINT_OFFSETS = (("width", -62), ("height", -69))
+
+
+def folder_manager_title_matches(title):
+    """True only for the exact observed Edge manager title, never a prefix."""
+    return type(title) is str and title == EDGE_MANAGER_TITLE
 
 
 def parse_folder_action_request(request):
     """Exact purpose-bound `{"select_folder": true}` chooser request, or None.
 
     The request is never the keyboard/coordinate shape: there is no `actions`,
-    no caller title, no `title_prefix`, no focus or geometry value and no
-    click coordinate. The chooser title is the fixed literal and the optional
-    caller PID is bound exactly as in the owner input shape. Only the fixed
-    attribution values are returned; values are never printed.
+    no focus or geometry value and no click coordinate. The observed manager
+    title is required and `title`, `title_prefix` and owner_title_prefix must
+    all equal the exact Edge manager title; an absent, mismatched, generic
+    or altered title is refused. The chooser title is the fixed literal and
+    the optional caller PID is bound exactly as in the owner input shape.
+    Only the fixed attribution values are returned; values are never printed.
     """
     if type(request) is not dict or set(request) - FOLDER_ACTION_KEYS:
         return None
@@ -154,7 +170,13 @@ def parse_folder_action_request(request):
     if request.get("owner") is not True or type(action) is not dict or \
             set(action) != set(FOLDER_ACTION) or action.get("select_folder") is not True:
         return None
-    if not all(key in request for key in OWNER_FIELDS):
+    if not all(key in request for key in OWNER_FIELDS + FOLDER_MANAGER_FIELDS):
+        return None
+    # The same exact real manager window binding as the keyboard request: the
+    # observed title is carried unchanged and is both of its own prefixes.
+    title = request["title"]
+    if not folder_manager_title_matches(title) or \
+            request["title_prefix"] != title or request["owner_title_prefix"] != title:
         return None
     if request.get("chooser_title_prefix") != EDGE_CHOOSER_TITLE:
         return None
@@ -164,11 +186,11 @@ def parse_folder_action_request(request):
         if type(supplied) is not int or not 1 < supplied <= PID_LIMIT:
             return None
         validated_pid = supplied
-    if ascii_line(request["owner_title_prefix"]) is None or \
-            ascii_path(request["user_data_dir"]) is None or \
+    if ascii_path(request["user_data_dir"]) is None or \
             ascii_path(request["executable"]) is None:
         return None
     normalized = {key: request[key] for key in OWNER_FIELDS}
+    normalized.update({key: request[key] for key in FOLDER_MANAGER_FIELDS})
     normalized["caller_pid"] = validated_pid
     normalized["probe"] = False
     return normalized
@@ -246,8 +268,10 @@ def pointer_containment(parent_of, root, pointer_state, chain, expected_root, ge
     only permitted point is derived from `geometry`, the measured chooser
     (width, height): point = geometry + FOLDER_POINT_OFFSETS, strictly inside.
     A press is accepted only when:
-      - the query root is the display root, qchild is a positive non-root
-        window on the chooser's actual chain, and no button is held;
+      - the query root is the display root, qchild is exactly chain[-2] (the
+        root's direct child on the chooser's actual chain), and no button is
+        held; a deeper chooser descendant or any other chain member such as
+        the chooser itself below an intermediate parent is refused;
       - both the root-relative win position and the root position are exactly
         expected_root + point (root-relative values cannot be chooser-local);
       - every hop of the chooser's actual parent chain to the root matches the
@@ -298,10 +322,12 @@ def pointer_containment(parent_of, root, pointer_state, chain, expected_root, ge
             if parent_of(node) != ancestor:
                 return False
             node = ancestor
-        # qchild of a root query is a root child: the chooser itself or one of
-        # its actual ancestors below the root. A child of the chooser can only
-        # be reported for a query window of the chooser, never for root.
-        return qchild in chain[:-1]
+        # qchild of a root query is the root's direct child containing the
+        # pointer, so it is exactly the verified chain's last hop below the
+        # root. The chooser itself only qualifies when its parent is the root;
+        # a deeper chooser XID or the chooser under an intermediate parent can
+        # only be reported for a query window inside the chooser, never root.
+        return qchild == chain[-2]
     except Exception:
         # Any refused or malformed XQueryTree hop is a failed proof.
         return False
@@ -470,6 +496,59 @@ def query_children(x, display, parent):
     finally:
         if result:
             x.XFree(result)
+
+
+# The pre-click chooser re-discovery walks the whole real window tree, so it
+# has its own fixed total visited-window budget and depth, independent of the
+# per-query child count limit. The budget stays above the bounded accessible
+# window count the manager UI was inspected through, so the real manager
+# window can never be pushed out of the walk by its own popups.
+VIEWABLE_TREE_VISITS = 1024
+VIEWABLE_TREE_DEPTH = 12
+
+
+def bounded_viewable_tree(children, viewable, root,
+                          budget=VIEWABLE_TREE_VISITS, depth=VIEWABLE_TREE_DEPTH):
+    """Bounded whole real tree walk: every viewable normal window, or None.
+
+    Unlike a title-prefix search this never stops early on a title, so a
+    viewable override-redirect/pop-up overlay stays discoverable as an extra
+    window and is never read as our chooser or ignored. `children(parent)`
+    returns the actual XQueryTree children of one window and `viewable(w)`
+    is the mapped, non-override-redirect test. Only windows strictly below
+    the root are accepted, at most `depth` levels below it. A refused child
+    query, a window reached again or one below the depth limit, or the total
+    visited-window budget exhausted returns None: the walk fails closed and
+    never searches outside this tree.
+    """
+    if type(root) is not int or root <= 0 or type(budget) is not int or budget <= 0 or \
+            type(depth) is not int or depth <= 0:
+        return None
+    found, seen = [], {root}
+    stack = [(root, 0)]
+    while stack:
+        parent, level = stack.pop()
+        try:
+            kids = children(parent)
+        except Exception:
+            return None
+        if type(kids) is not list:
+            return None
+        for candidate in kids:
+            if type(candidate) is not int or candidate <= 0 or candidate in seen:
+                return None
+            # A child too deep is refused before any query of its own; the
+            # budget counts every window strictly below the root.
+            if level + 1 > depth or len(seen) + 1 > budget:
+                return None
+            seen.add(candidate)
+            try:
+                if viewable(candidate):
+                    found.append(candidate)
+            except Exception:
+                return None
+            stack.append((candidate, level + 1))
+    return found
 
 
 def distinct_transients(x, display, candidate):
@@ -1352,22 +1431,17 @@ def main():
             if result:
                 x.XFree(result)
 
-    def normal_viewable_tree():
-        """Every viewable non-override-redirect window in one real tree walk.
+    def whole_viewable_tree():
+        """Every viewable non-override-redirect window in one bounded tree walk.
 
         Unlike a title-prefix search this never stops early on a title, so a
-        viewable override-redirect/pop-up overlay stays an extra root child of
-        the click path and is never read as our chooser or ignored.
+        viewable override-redirect/pop-up overlay stays an extra window of the
+        click path and is never read as our chooser or ignored. The fixed
+        total visited-window budget and depth fail closed as a refused query.
         """
-        found, stack = [], [root]
-        while stack:
-            parent = stack.pop()
-            if len(found) > TREE_BUDGET:
-                raise RuntimeError("X window query refused")
-            for candidate in children(parent):
-                stack.append(candidate)
-                if normal_viewable(candidate):
-                    found.append(candidate)
+        found = bounded_viewable_tree(children, normal_viewable, root)
+        if found is None:
+            raise RuntimeError("X window query refused")
         return found
 
     def find_chooser():
@@ -1377,7 +1451,7 @@ def main():
         carries the fixed title, it is still `target`, mapped, not
         override-redirect and exactly the measured client size.
         """
-        same = [candidate for candidate in normal_viewable_tree()
+        same = [candidate for candidate in whole_viewable_tree()
                 if window_title(candidate) == EDGE_CHOOSER_TITLE]
         if not same:
             raise RuntimeError("Native acceptance window unavailable")
@@ -1391,12 +1465,17 @@ def main():
         return geometry
 
     def prove_folder_owner(owner_record):
-        """Owner window, PID, executable and profile, re-read before the click."""
+        """Owner window, title, PID, executable and profile, re-read before the click."""
         current = [candidate for candidate in collect_titles(owner["owner_title_prefix"])
                    if normal_viewable(candidate)]
         if current != [owner_window]:
             raise RuntimeError("Chooser owner window must be unique" if current
                                else "Chooser owner window unavailable")
+        # The exact observed manager title the caller carried is still the
+        # real manager window's title. A generic prefix is not used here, so an
+        # unrelated Edge window named "Ext..." can never stand in for it.
+        if not folder_manager_title_matches(window_title(owner_window)):
+            raise RuntimeError("Chooser owner window unavailable")
         owner_now = property_single_int(window_property(owner_window, "_NET_WM_PID"))
         if type(owner_now) is not int or owner_now != owner_pid:
             raise RuntimeError("Chooser owner window unavailable")
