@@ -104,8 +104,7 @@ func validateStructure(f *File) (*Policy, error) {
 	}
 	// A file may only be authored by a device whose principal is a writer,
 	// admin or owner. Readers hold no content signing authority.
-	author := findDevice(current, h.AuthorDeviceID)
-	if author == nil || !current.hasRole(author.PrincipalID, RoleWriter, RoleAdmin, RoleOwner) {
+	if !current.canAuthor(h.AuthorDeviceID) {
 		return nil, Err("", CodeInvalidValue)
 	}
 	if err := validateCEKAndSlots(f, current); err != nil {
@@ -767,6 +766,14 @@ func checkCarriedSignature(f *File, current *Policy) error {
 		return Err("", CodeSignatureInvalid)
 	}
 	return checkContentSigner(f.Header.AuthorDeviceID, current, s)
+}
+
+// canAuthor reports whether deviceID is a device of p whose principal may
+// author content: a writer, admin or owner. A reader, or a principal that
+// holds no role or no longer carries the device, may not.
+func (p *Policy) canAuthor(deviceID string) bool {
+	d := findDevice(p, deviceID)
+	return d != nil && p.hasRole(d.PrincipalID, RoleWriter, RoleAdmin, RoleOwner)
 }
 
 // checkContentSigner requires deviceID to be a policy device and s to have
