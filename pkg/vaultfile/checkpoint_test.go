@@ -1068,7 +1068,6 @@ func TestInviteReadersPolicyDiff(t *testing.T) {
 					t.Fatalf("reader-removal old has a device for carol: %s", d.DeviceID)
 				}
 			}
-			newReaders(p)
 			p.Readers = slices.DeleteFunc(p.Readers, func(m Member) bool { return m.PrincipalID == "carol" })
 		}},
 		{name: "existing device label mutated", next: func(p *Policy) {
