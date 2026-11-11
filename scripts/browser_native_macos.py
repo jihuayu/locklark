@@ -24,6 +24,10 @@ Quartz (``self.quartz``). CoreGraphics is never used as an AX stand-in at
 runtime, so a missing ApplicationServices import fails closed instead of
 silently reading the wrong framework. Everything imports and unit-tests on
 Linux.
+
+AX window identity: same PID, exactly one AX window with exactly the CG title,
+and an exact frame or the single measured one-pixel border inset with the same
+centre (``AX_CG_BORDER_INSET``). No generic tolerance and no private API.
 """
 import ctypes
 import math
@@ -61,6 +65,41 @@ FLAGS = {"Control_L": 0x00040000, "Control_R": 0x00040000, "Shift_L": 0x00020000
 
 PROC_PIDTBSDINFO = 3
 
+# The one measured AX<->CG window border relation. A real owned app reported
+# CGWindow bounds {313, 75, 1102, 822} and AXWindow frame {314, 76, 1100, 820}:
+# the AX frame is exactly 1 point inside every CG edge with the identical
+# centre. Public AX exposes no window number (AXAttributeConstants.h has no
+# AXWindowNumber) and NSWindow.windowNumber is not the window-server number, so
+# the exact title plus this canonical relation is the identity. It is one fixed
+# relation, never a +/-1 tolerance: a larger, smaller, partial or off-centre
+# difference never matches.
+AX_CG_BORDER_INSET = 1
+RECT_KEYS = ("x", "y", "width", "height")
+
+
+def _frame_relation(frame, bounds):
+    """'exact' or 'border-inset' for this AX frame/CG bounds pair, else None.
+
+    Both rectangles must be valid positive integer geometry. 'exact' requires
+    all four values to be equal. 'border-inset' requires the AX frame to be
+    exactly AX_CG_BORDER_INSET inside each CG edge and to share the same centre;
+    since both widths (and heights) differ by an even number, that centre is
+    whole. Anything else, including any other delta, has no relation.
+    """
+    if not contract.rect_positive(frame) or not contract.rect_positive(bounds):
+        return None
+    if all(frame[key] == bounds[key] for key in RECT_KEYS):
+        return "exact"
+    inset = AX_CG_BORDER_INSET
+    if (frame["x"] == bounds["x"] + inset and frame["y"] == bounds["y"] + inset and
+            frame["width"] == bounds["width"] - 2 * inset and
+            frame["height"] == bounds["height"] - 2 * inset):
+        outer = (2 * bounds["x"] + bounds["width"], 2 * bounds["y"] + bounds["height"])
+        inner = (2 * frame["x"] + frame["width"], 2 * frame["y"] + frame["height"])
+        if inner == outer:
+            return "border-inset"
+    return None
+
 
 class BSDInfo(ctypes.Structure):
     """Complete struct proc_bsdinfo: pbi_uid is the real process UID."""
@@ -80,6 +119,37 @@ class BSDInfo(ctypes.Structure):
 
 class AxValueUnavailable(Exception):
     """AX returned no usable geometry; the caller must fail closed."""
+
+
+def _exact_int(value):
+    """A plain built-in ``int``, or None for bool, non-integer or hostile values.
+
+    AX geometry is tested with ``type(...) is int`` so a float, a bool or an
+    ``int`` subclass with overridden arithmetic can never satisfy the frame
+    relation; ``int.__int__`` normalises a genuine ``int`` subclass to plain
+    ``int`` without dispatching to an override.
+    """
+    if type(value) is int:
+        return value
+    if isinstance(value, int):
+        return int.__int__(value)
+    return None
+
+
+def _geometry_int(value):
+    """The exact integer a finite, integral real value denotes, else refuse.
+
+    AXValueGetValue reports CGFloat coordinates as floats, so an integral float
+    such as 314.0 is the same pixel as 314. A fractional value is not integer
+    geometry and is refused rather than truncated into a near match.
+    """
+    if type(value) is bool or not isinstance(value, (int, float)):
+        raise AxValueUnavailable()
+    if type(value) is float:
+        if value != value or value in (float("inf"), float("-inf")) or value != int(value):
+            raise AxValueUnavailable()
+        return int(value)
+    return _exact_int(value)
 
 
 def _native_text(value):
@@ -173,12 +243,13 @@ class QuartzApi:
             raise AxValueUnavailable()
         payload = result[1]
         try:
-            return int(getattr(payload, first)), int(getattr(payload, second))
+            pair = (getattr(payload, first), getattr(payload, second))
         except Exception:
             try:
-                return int(payload[0]), int(payload[1])
+                pair = (payload[0], payload[1])
             except Exception:
                 raise AxValueUnavailable()
+        return _geometry_int(pair[0]), _geometry_int(pair[1])
 
     def frame(self, element):
         """AX frame in global display coordinates, or AxValueUnavailable."""
@@ -213,29 +284,45 @@ class QuartzApi:
         return ""
 
     # -- widget walk --------------------------------------------------------
-    def _identity_matches(self, element, window):
-        if self.title(element) != window.get("title"):
-            return False
+    def _relation(self, element, window):
+        """Frame relation of this AX window to the CG window, or None.
+
+        The title must be exactly the CG title and the frame exactly equal or
+        the one canonical ``AX_CG_BORDER_INSET`` border inset of ``_frame_relation``;
+        unreadable geometry has no relation.
+        """
+        if _native_text(self.title(element)) != _native_text(window.get("title")):
+            return None
         try:
             frame = self.frame(element)
         except AxValueUnavailable:
-            return False
-        bounds = window.get("bounds") or {}
-        return all(frame[key] == bounds.get(key) for key in ("x", "y", "width", "height"))
+            return None
+        return _frame_relation(frame, window.get("bounds"))
+
+    def _identity_matches(self, element, window):
+        return self._relation(element, window) is not None
 
     def window_element(self, window):
         """Bind the UNIQUE AX window to this exact CGWindow identity.
 
-        Identity is exact title plus exact frame equality; zero or several
-        candidates refuse.  The first window sharing a title is never used.
+        First the same-PID AX window list must hold exactly ONE window whose
+        title is exactly the CG title; zero refuses ``a11y-query`` and several
+        refuse ``window-ambiguous`` before any frame is compared, so a
+        same-title duplicate can never be resolved by frame.  That unique
+        window then has to satisfy the exact frame or the canonical one-pixel
+        border-inset relation; anything else refuses ``a11y-query``.  The first
+        window sharing a title is never used.
         """
-        candidates = [element for element in self.windows(window["pid"])
-                      if self._identity_matches(element, window)]
-        if len(candidates) > 1:
-            raise contract.ContractError("window-ambiguous", {"ax": len(candidates)})
-        if not candidates:
+        title = _native_text(window.get("title"))
+        titled = [element for element in self.windows(window["pid"])
+                  if _native_text(self.title(element)) == title]
+        if len(titled) > 1:
+            raise contract.ContractError("window-ambiguous", {"ax": len(titled)})
+        if not titled:
             raise contract.ContractError("a11y-query")
-        return candidates[0]
+        if self._relation(titled[0], window) is None:
+            raise contract.ContractError("a11y-query")
+        return titled[0]
 
     def _control(self, element, role, name):
         """Public fields only; missing or non-boolean AX state fails closed."""

@@ -194,10 +194,18 @@ cannot be opened read-only.
   `proc_pidinfo(PROC_PIDTBSDINFO)`. The executable file owner is never used as
   a process-identity guess: an unknown process UID leaves the window untrusted
   and every request against it refuses.
-* Window binding: the AX window must match the selected `CGWindow` by exact
-  title and exact frame; zero candidates refuses `a11y-query`, several refuse
-  `window-ambiguous`. The first AX window sharing a title is never used, and
-  `AXStaticText` is not treated as an editable/clickable control.
+* Window binding: the same-PID AX window list must hold exactly one window with
+  exactly the `CGWindow` title; zero refuses `a11y-query` and several refuse
+  `window-ambiguous` before any frame is compared. That unique window's frame
+  must then be exactly equal to the CG bounds or be the single measured
+  canonical border inset: 1 point inside every CG edge with the identical
+  centre (`AX_CG_BORDER_INSET`). This is one fixed relation, not a generic
+  tolerance: a centre shift, a larger/smaller/partial/non-integer delta or
+  non-positive geometry refuses `a11y-query`. Public AX exposes no window-number
+  attribute, and `NSWindow.windowNumber` is not the window-server number, so no
+  private API or window-number attribute is used. The first AX window sharing a
+  title is never used, and `AXStaticText` is not treated as an
+  editable/clickable control.
 * Widgets: bounded AX walk (4096 nodes, depth 12) reading `AXRole`,
   `AXTitle`/`AXDescription`, `AXEnabled`, `AXHidden`, `AXPosition`/`AXSize`.
   `AXEnabled`/`AXHidden` must be real booleans; a missing or unknown value

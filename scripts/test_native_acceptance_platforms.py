@@ -1254,6 +1254,334 @@ class MacAxWalkTests(unittest.TestCase):
         self.refused(self.api(button=button)[0], "control-geometry")
 
 
+# Measured on a real owned app: one CG window and one same-title AXWindow
+# whose frame is exactly one point inside every CG edge, same centre.
+MEASURED_CG = {"x": 313, "y": 75, "width": 1102, "height": 822}
+MEASURED_AX = {"x": 314, "y": 76, "width": 1100, "height": 820}
+
+
+def measured_window(**overrides):
+    value = dict(WINDOW_RAW, bounds=dict(MEASURED_CG))
+    value.update(overrides)
+    return value
+
+
+def ax_window(title=None, frame=None, role="AXWindow", focused=False):
+    return {"role": role, "title": TITLE if title is None else title,
+            "frame": dict(MEASURED_CG if frame is None else frame), "children": [],
+            "focused": focused}
+
+
+class MacWindowIdentityTests(unittest.TestCase):
+    """Exact title plus exact frame OR the one canonical border inset; no more.
+
+    The AX<->CG binding runs the real ``window_element``, ``_identity_matches``,
+    ``focus_state`` and ``root_at`` over an AX tree. Only the frame relation may
+    differ from equality; a title mismatch, a second same-title AX window or any
+    other frame refuses. The AX fake serves only the window list, titles and
+    public control metadata, so entering a factor/field value fails a test.
+    """
+
+    def api(self, tree_windows, window=None):
+        api = macos.QuartzApi.__new__(macos.QuartzApi)
+        api.quartz = types.SimpleNamespace()  # CFEqual source list only
+        # The public AXValue types only satisfy the real frame() signature;
+        # no AXValue payload is ever produced or read by these fixtures.
+        api.ax = types.SimpleNamespace(
+            kAXWindowsAttribute="AXWindows",
+            kAXValueCGPointType="AXValueCGPointType",
+            kAXValueCGSizeType="AXValueCGSizeType",
+            AXIsProcessTrusted=lambda: True,
+            AXValueGetValue=self.ax_value_get_value,
+            AXUIElementCreateApplication=lambda pid: ax_window(role="AXApplication"),
+            AXUIElementCopyAttributeValue=self.attribute(tree_windows),
+            AXUIElementCopyElementAtPosition=lambda app, x, y, out: (1, None))
+        api.window_list = [window if window is not None else measured_window()]
+        api.list_windows = lambda: [dict(item) for item in api.window_list]
+        api.process = lambda pid: (EXE, True)
+        # Spies around the real probes so "never read" is observable.
+        api.control_reads, api.hit_reads = [], []
+
+        def controls(window):
+            # Recorded only after the real bounded walk returned controls, so
+            # a binding refusal inside the walk is not a control read.
+            value = macos.QuartzApi.controls(api, window)
+            api.control_reads.append(window["id"])
+            return value
+
+        def hit(window, label, rect, x, y):
+            api.hit_reads.append((window["id"], label))
+            return macos.QuartzApi.hit_test_control(api, window, label, rect, x, y)
+
+        api.controls, api.hit_test_control = controls, hit
+        api.point_visible = lambda window, x, y: True
+        api.activate = lambda pid: True  # nothing below may reach input anyway
+        api.foreground_pid = lambda: WINDOW_RAW["pid"]
+        api.clicks, api.typed, api.chords = [], [], []
+        api.click = lambda x, y: api.clicks.append((x, y)) or {"move": True, "down": True, "up": True}
+        api.type_text = lambda text: api.typed.append(text) or {"move": True, "down": True, "up": True}
+        api.press_chord = lambda parts: api.chords.append(tuple(parts)) or {
+            "move": True, "down": True, "up": True}
+        api.inputs = lambda: (api.clicks, api.typed, api.chords)
+
+        def focus(window=None):  # the real bound-window check, instance-bound
+            return macos.QuartzApi.focus_state(api, window)
+
+        def root(window, x, y):  # the real hit-to-AXWindow walk, instance-bound
+            return macos.QuartzApi.root_at(api, window, x, y)
+
+        api.focus_state, api.root_at = focus, root
+        return api
+
+    def attribute(self, tree_windows):
+        def attribute(element, name, out):
+            if type(element) is not dict:  # AXApplication root: no such attribute
+                return -25205, None  # kAXErrorNoValue
+            if name in ("AXValue", "AXSelectedText", "AXValueType"):
+                raise AssertionError("forbidden accessibility attribute requested: " + name)
+            if name == "AXWindows":
+                return 0, list(tree_windows)
+            if name == "AXFocusedWindow":
+                return 0, next((item for item in tree_windows if item.get("focused")), None)
+            if name in ("AXPosition", "AXSize") and element.get("frame") is not None:
+                frame = element["frame"]
+                if name == "AXPosition":
+                    return 0, ("AXValueCGPointType", (frame["x"], frame["y"]))
+                return 0, ("AXValueCGSizeType", (frame["width"], frame["height"]))
+            return 0, {"AXRole": element.get("role"), "AXTitle": element.get("title"),
+                       "AXDescription": element.get("description"),
+                       "AXChildren": element.get("children"),
+                       "AXEnabled": element.get("enabled"), "AXHidden": element.get("hidden"),
+                       "AXParent": element.get("parent")}.get(name)
+        return attribute
+
+    @staticmethod
+    def ax_value_get_value(value, kind, out):
+        """AXValueGetValue over an (AXValue type, (first, second)) fixture."""
+        value_kind, payload = value
+        return value_kind == kind, types.SimpleNamespace(
+            x=payload[0], y=payload[1], width=payload[0], height=payload[1])
+
+    def ax_windows(self, api):
+        return api.windows(WINDOW_RAW["pid"])
+
+    def refusal(self, api, code):
+        with self.assertRaises(contract.ContractError) as error:
+            api.window_element(dict(api.window_list[0]))
+        self.assertEqual(error.exception.code, code)
+        return error.exception
+
+    # -- accepted relations -------------------------------------------------
+    def test_exact_frame_binds(self):
+        api = self.api([ax_window(frame=MEASURED_CG)])
+        self.assertIs(api.window_element(dict(api.window_list[0])), self.ax_windows(api)[0])
+        self.assertEqual(macos._frame_relation(dict(MEASURED_CG), dict(MEASURED_CG)), "exact")
+        self.assertTrue(api._identity_matches(self.ax_windows(api)[0], api.window_list[0]))
+
+    def test_measured_canonical_border_inset_binds(self):
+        # CG {313,75,1102,822} / AX {314,76,1100,820}: one point inside every
+        # edge, identical centre.
+        api = self.api([ax_window(frame=MEASURED_AX)])
+        self.assertIs(api.window_element(dict(api.window_list[0])), self.ax_windows(api)[0])
+        self.assertEqual(macos.AX_CG_BORDER_INSET, 1)
+        self.assertEqual(macos._frame_relation(dict(MEASURED_AX), dict(MEASURED_CG)), "border-inset")
+        self.assertTrue(api._identity_matches(self.ax_windows(api)[0], api.window_list[0]))
+
+    def test_relation_is_arithmetic_not_a_measured_coordinate(self):
+        # A secondary display can have a negative origin; the same arithmetic
+        # relation applies there.
+        for bounds, frame in (
+                ({"x": 0, "y": 0, "width": 804, "height": 604},
+                 {"x": 1, "y": 1, "width": 802, "height": 602}),
+                ({"x": -1200, "y": -200, "width": 804, "height": 604},
+                 {"x": -1199, "y": -199, "width": 802, "height": 602})):
+            with self.subTest(bounds=bounds):
+                api = self.api([ax_window(frame=frame)],
+                               window=dict(WINDOW_RAW, bounds=bounds))
+                self.assertIs(api.window_element(dict(api.window_list[0])),
+                              self.ax_windows(api)[0])
+
+    # -- refused relations --------------------------------------------------
+    def test_center_shift_larger_smaller_or_partial_inset_refuses(self):
+        cases = {
+            "center-shift-right": {"x": 315, "y": 76, "width": 1100, "height": 820},
+            "center-shift-down": {"x": 314, "y": 77, "width": 1100, "height": 820},
+            "center-shift-left": {"x": 313, "y": 76, "width": 1100, "height": 820},
+            "left-edge-only": {"x": 314, "y": 75, "width": 1101, "height": 822},
+            "top-edge-only": {"x": 313, "y": 76, "width": 1102, "height": 821},
+            "right-edge-only": {"x": 313, "y": 75, "width": 1101, "height": 822},
+            "bottom-edge-only": {"x": 313, "y": 75, "width": 1102, "height": 821},
+            "anti-diagonal-edges-only": {"x": 314, "y": 76, "width": 1101, "height": 821},
+            "two-pixel-inset": {"x": 315, "y": 77, "width": 1098, "height": 818},
+            "two-pixel-x-only": {"x": 314, "y": 75, "width": 1100, "height": 822},
+            "inset-one-pixel-wider": {"x": 314, "y": 76, "width": 1101, "height": 820},
+            "inset-one-pixel-shorter": {"x": 314, "y": 76, "width": 1100, "height": 821},
+            "ax-larger-than-cg": {"x": 312, "y": 74, "width": 1104, "height": 824},
+        }
+        for name, frame in cases.items():
+            with self.subTest(case=name):
+                self.assertIsNone(macos._frame_relation(frame, dict(MEASURED_CG)))
+                api = self.api([ax_window(frame=frame)])
+                self.assertFalse(api._identity_matches(self.ax_windows(api)[0], api.window_list[0]))
+                self.refusal(api, "a11y-query")
+        # The canonical shape 100 points away is still not this window.
+        api = self.api([ax_window(frame=dict(MEASURED_AX, x=MEASURED_AX["x"] + 100))])
+        self.refusal(api, "a11y-query")
+
+    def test_malformed_or_non_integer_geometry_refuses(self):
+        inset = {"x": 1, "y": 1, "width": 802, "height": 602}
+        malformed = [
+            {"x": True, "y": 1, "width": 802, "height": 602},
+            {"x": "1", "y": 1, "width": 802, "height": 602},
+            {"x": 1, "y": 1, "width": 802},
+            {"x": 1, "y": 1, "width": 0, "height": 602},
+            {"x": 1, "y": 1, "width": -802, "height": 602},
+            {"x": 1, "y": 1, "width": 802, "height": None},
+            [1, 1, 802, 602],
+            None,
+        ]
+        for frame in malformed:
+            with self.subTest(frame=frame):
+                self.assertIsNone(macos._frame_relation(frame, dict(MEASURED_CG)))
+        for bounds in ({"x": 0, "y": 0, "width": 804.0, "height": 604},
+                       {"x": 0, "y": 0, "width": 0, "height": 604},
+                       {"x": 0, "y": 0, "width": 804},
+                       None, "804x604"):
+            with self.subTest(bounds=bounds):
+                self.assertIsNone(macos._frame_relation(dict(inset), bounds))
+        # An integral AXValue coordinate is read only as a finite real number;
+        # bool, non-numeric, NaN/inf and an int subclass with overridden
+        # arithmetic never become geometry.
+        class Hostile(int):
+            def __int__(self):
+                raise AssertionError("int() dispatch on hostile AX geometry")
+
+        for value in (True, "1", None, float("nan"), float("inf"), float("-inf"),
+                      1.5, -0.25, 1100.5):
+            with self.subTest(ax_coordinate=value):
+                with self.assertRaises(macos.AxValueUnavailable):
+                    macos._geometry_int(value)
+        self.assertEqual(macos._geometry_int(1.0), 1)
+        self.assertEqual(macos._geometry_int(Hostile(1)), 1)
+        for position in ((1, (1, 1)), (1.5, (1, 1)), (1, (True, 1)), (1, (float("nan"), 1))):
+            with self.subTest(position=position):
+                api = self.api([ax_window(frame=MEASURED_AX)])
+                get = api.ax.AXValueGetValue
+
+                def get_value(value, kind, out, x=position[0], y=position[1]):
+                    if kind == "AXValueCGPointType":
+                        return True, types.SimpleNamespace(x=x, y=y)
+                    return get(value, kind, out)
+
+                api.ax.AXValueGetValue = get_value
+                with self.assertRaises(macos.AxValueUnavailable):
+                    api.frame(self.ax_windows(api)[0])
+                # The binding turns that into the fixed a11y-query refusal.
+                with self.assertRaises(contract.ContractError) as error:
+                    api.window_element(dict(api.window_list[0]))
+                self.assertEqual(error.exception.code, "a11y-query")
+
+    def test_unreadable_ax_geometry_refuses(self):
+        api = self.api([ax_window(frame=MEASURED_AX)])
+
+        def frame(element):
+            raise macos.AxValueUnavailable()
+
+        api.frame = frame
+        self.assertIsNone(api._relation(self.ax_windows(api)[0], api.window_list[0]))
+        self.refusal(api, "a11y-query")
+
+    def test_title_mismatch_refuses_even_with_the_canonical_frame(self):
+        for title in (TITLE + " ", TITLE[:-1], TITLE.upper(), "", "Locklark"):
+            with self.subTest(title=title):
+                api = self.api([ax_window(title=title, frame=MEASURED_AX)])
+                self.refusal(api, "a11y-query")
+
+    def test_duplicate_exact_title_ax_windows_refuse(self):
+        # Two exact-title windows where EACH would bind alone (canonical and
+        # exact frame): ambiguity is decided on the title, never on frame.
+        for frames in ([MEASURED_AX, MEASURED_CG], [MEASURED_AX, MEASURED_AX],
+                       [MEASURED_CG, MEASURED_CG], [MEASURED_AX, {"x": 0, "y": 0, "width": 1, "height": 1}]):
+            with self.subTest(frames=frames):
+                api = self.api([ax_window(frame=frame) for frame in frames])
+                error = self.refusal(api, "window-ambiguous")
+                self.assertEqual(error.guard, {"ax": 2})
+
+    def test_other_titles_leave_the_unique_exact_title_bindable(self):
+        api = self.api([ax_window(title="Locklark acceptance popup", frame=MEASURED_CG),
+                        ax_window(frame=MEASURED_AX)])
+        self.assertIs(api.window_element(dict(api.window_list[0])), self.ax_windows(api)[1])
+
+    def test_no_or_other_title_single_ax_window_refuses(self):
+        for tree_windows in ([], [ax_window(title=TITLE + " popup")],
+                             [ax_window(title="", frame=MEASURED_AX)]):
+            with self.subTest(count=len(tree_windows)):
+                self.refusal(self.api(tree_windows), "a11y-query")
+
+    # -- end-to-end: binding precedes controls and input ---------------------
+    def test_ambiguity_refuses_before_controls_and_input(self):
+        # Two same-PID, exact-title AX windows: one canonical and one exact
+        # frame. Either would bind alone, so only title uniqueness can refuse.
+        twin = [ax_window(frame=MEASURED_AX), ax_window(frame=MEASURED_CG)]
+        for tree_windows, code in (
+                (twin, "window-ambiguous"),
+                ([ax_window(title=TITLE + " · ")], "a11y-query"),
+                ([ax_window(frame={"x": 414, "y": 76, "width": 1100, "height": 820})], "a11y-query"),
+                ([ax_window(frame={"x": 315, "y": 77, "width": 1098, "height": 818})], "a11y-query"),
+                ([ax_window(frame={"x": 314, "y": 76, "width": 1101, "height": 820})], "a11y-query")):
+            with self.subTest(code=code, titles=[item["title"] for item in tree_windows],
+                              frames=[item["frame"] for item in tree_windows]):
+                api = self.api(tree_windows)
+                # The live target is the focused window (proven separately);
+                # this test isolates the AX<->CG binding refusal.
+                api.focus_state = lambda window=None: {
+                    "pid": WINDOW_RAW["pid"], "window": WINDOW_RAW["id"]}
+                with self.assertRaises(contract.ContractError) as error:
+                    execute(macos.MacAdapter(api=api), document(
+                        actions=[{"click_label": LABEL}, {"text": "abc"}, {"key": "Super_L+w"}]))
+                self.assertEqual(error.exception.code, code)
+                self.assertEqual(api.control_reads, [])
+                self.assertEqual(api.hit_reads, [])
+                self.assertEqual(api.inputs(), ([], [], []))
+
+    # -- the other identity consumers use the same relation ------------------
+    def test_canonical_border_inset_end_to_end_posts_one_click(self):
+        # The measured relation must carry the REAL adapter and shared
+        # contract all the way to exactly one physical input batch.
+        window = ax_window(frame=MEASURED_AX, focused=True)
+        button = {"role": "AXButton", "title": LABEL, "enabled": True,
+                  "hidden": False, "children": [], "parent": window,
+                  "frame": {"x": 200, "y": 300, "width": 80, "height": 30}}
+        window["children"] = [button]
+        api = self.api([window])
+        api.ax.CFEqual = lambda left, right: left is right
+        api.ax.AXUIElementCopyElementAtPosition = lambda app, x, y, out: (0, button)
+        result = execute(macos.MacAdapter(api=api), document(actions=[{"click_label": LABEL}]))
+        self.assertEqual(api.clicks, [(240, 315)])
+        self.assertEqual(result["clicks"][0]["evidence"], "posted")
+        self.assertEqual(result["window"], hex(WINDOW_RAW["id"]))
+        self.assertEqual((api.typed, api.chords), ([], []))
+
+    def test_focus_identity_accepts_only_the_canonical_border_inset(self):
+        # AXFocusedWindow is the SAME AXWindow as AXWindows[0]: one same-PID
+        # window. Its frame relation to the CG bounds decides the binding.
+        for frame, bound in ((MEASURED_AX, True), (MEASURED_CG, True),
+                             ({"x": 315, "y": 76, "width": 1100, "height": 820}, False),
+                             ({"x": 314, "y": 76, "width": 1101, "height": 820}, False),
+                             ({"x": 315, "y": 77, "width": 1098, "height": 818}, False)):
+            with self.subTest(frame=frame):
+                window = ax_window(frame=frame, focused=True)
+                api = self.api([window])
+                self.assertEqual(api.focus_state(api.window_list[0]),
+                                 {"pid": WINDOW_RAW["pid"],
+                                  "window": WINDOW_RAW["id"] if bound else None})
+                # The AX element under the point is walked to its AXWindow
+                # parent and tested with the same identity.
+                api.ax.AXUIElementCopyElementAtPosition = (
+                    lambda app, x, y, out, element=window: (0, element))
+                self.assertEqual(api.root_at(api.window_list[0], 0, 0), bound)
+
+
 class MacControlIdentityTests(unittest.TestCase):
     """AX hit identity: CFEqual against the ACTUAL selected AX element."""
 
