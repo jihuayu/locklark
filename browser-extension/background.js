@@ -5162,9 +5162,10 @@ if (typeof importScripts === "function") importScripts("core.js");
       requestEpoch !== epoch ||
       requestCapability !== capability ||
       !list ||
-      // The native host answers vault-search with "vault-items"; the full DTO
-      // and the exact row are still validated below.
-      list.type !== "vault-items" ||
+      // The V2 native host answers vault-search with "items" (items + vaults);
+      // "vault-items" stays accepted for older hosts. Either shape must pass
+      // core.validResponse and the exact row is still matched below.
+      (list.type !== "items" && list.type !== "vault-items") ||
       !core.validResponse(list)
     ) {
       routeLifecycleDiag("claim-list-invalid");

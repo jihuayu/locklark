@@ -738,7 +738,7 @@ test("an ordinary route opens its own tab and claims the approved detail", async
 // One ordinary route in front of a captured source tab. The source tab's
 // state is the browser's, re-read through tabs.get on every check; tests move
 // it to prove a route dies with its source page.
-async function openRouteFixture() {
+async function openRouteFixture(options = {}) {
   const ROUTE_TAB = 7;
   const ITEM_ID = "b".repeat(32);
   const ITEM_REV = "c".repeat(64);
@@ -746,10 +746,23 @@ async function openRouteFixture() {
   let routeTab = null;
   const h = harness({
     onRequest: (r) => {
-      if (r.type === "vault-search")
+      // Real V2 "items" by default; a legacy host replies "vault-items".
+      if (r.type === "vault-search" && options.malformedList)
+        return {
+          v: 1, id: r.id, type: "items",
+          items: [{ id: ITEM_ID, revision: ITEM_REV, category: "login", title: "Target" }],
+          vaults: ["not-a-vault"],
+        };
+      if (r.type === "vault-search" && options.legacyList)
         return {
           v: 1, id: r.id, type: "vault-items",
           items: [{ id: ITEM_ID, revision: ITEM_REV, category: "login", title: "Target" }],
+        };
+      if (r.type === "vault-search")
+        return {
+          v: 1, id: r.id, type: "items",
+          items: [{ id: ITEM_ID, revision: ITEM_REV, category: "login", title: "Target" }],
+          vaults: [{ id: "personal", name: "Personal" }],
         };
       if (r.type === "item-get")
         return {
@@ -814,6 +827,35 @@ async function openRouteFixture() {
     nativeReads: () => h.sent.filter((r) => r.type === "vault-search" || r.type === "item-get"),
   };
 }
+
+test("a route claims both the V2 items list and a legacy vault-items list", async () => {
+  // The real host answers vault-search with "items" plus vaults; older hosts
+  // answer "vault-items". Either shape is accepted only after
+  // core.validResponse and the exact id+revision row match, so an invalid
+  // list is still refused without any native item-get.
+  const v2 = await openRouteFixture();
+  const claimed = await v2.claim();
+  assert.equal(claimed?.type, "route-claimed", "the V2 items list was refused");
+  assert.deepEqual([claimed.item_id, claimed.revision], [v2.ITEM_ID, v2.ITEM_REV]);
+  assert.deepEqual(v2.nativeReads().map((r) => r.type), ["vault-search", "item-get"]);
+  await v2.h.send({ type: "disconnect" });
+  const legacy = await openRouteFixture({ legacyList: true });
+  const legacyClaim = await legacy.claim();
+  assert.equal(legacyClaim?.type, "route-claimed", "a legacy vault-items list was refused");
+  assert.deepEqual([legacyClaim.item_id, legacyClaim.revision], [legacy.ITEM_ID, legacy.ITEM_REV]);
+  assert.deepEqual(legacy.nativeReads().map((r) => r.type), ["vault-search", "item-get"]);
+  await legacy.h.send({ type: "disconnect" });
+  // An "items" list with a malformed vaults entry is still refused by
+  // core.validResponse, so the type fix never skips validation and no
+  // item-get follows the rejected list.
+  const malformed = await openRouteFixture({ malformedList: true });
+  malformed.h.sent.length = 0;
+  const invalid = await malformed.claim();
+  assert.ok(!invalid || invalid.error === "refused", "a malformed list was accepted");
+  assert.equal(invalid?.detail, undefined);
+  assert.deepEqual(malformed.nativeReads().map((r) => r.type), ["vault-search"]);
+  await malformed.h.send({ type: "disconnect" });
+});
 
 test("a same-origin source URL change revokes the open route", async () => {
   const route = await openRouteFixture();
