@@ -1,7 +1,8 @@
 // Package remoteunlock defines the standalone v1 canonical codecs for the
 // remote-unlock TLS exporter binding context, the stable per-device transport
-// binding, the owner-root authorization and the reusable owner-root admin
-// remote-unlock delegation.
+// binding, the owner-root authorization, the reusable owner-root admin
+// remote-unlock delegation and the per-request delegated-admin
+// authorization.
 //
 // A ChannelBindingContext is encoded to a single canonical UTF-8 JSON object
 // (at most MaxContextSize bytes) that is used as the exporter context of a
@@ -16,19 +17,26 @@
 // MaxAdminDelegationSize bytes) that the owner root signs once for one
 // delegate device and one requester's stable endpoints, with an exact policy
 // anchor and a validity interval, and that covers any number of requests in
-// that interval. Every Encode* and Parse* pair writes and accepts its members
-// manually in the fixed schema order, so every accepted input satisfies
-// Encode(Parse(b)) == b.
+// that interval. An AdminRemoteUnlockAuthorization is a fifth canonical object
+// (at most MaxAdminAuthorizationSize bytes) that the delegated admin device --
+// never the owner root -- signs fresh for one request: it binds the reusable
+// grant by digest, the full request context by digest, both complete endpoint
+// bindings by digest and one expiry. Every Encode* and Parse* pair writes and
+// accepts its members manually in the fixed schema order, so every accepted
+// input satisfies Encode(Parse(b)) == b.
 //
 // The wire format, domains, preimages, expiry semantics and limitation list
 // are documented in docs/remote-unlock-wire-v1.md. The reusable admin
-// delegation has its own schema, anchor and boundary; see the section there
-// and VerifyOwnerRootAdminRemoteUnlockDelegation below.
+// delegation and the per-request admin authorization have their own schemas,
+// anchors and boundaries; see those sections and
+// VerifyOwnerRootAdminRemoteUnlockDelegation and
+// VerifyAdminRemoteUnlockAuthorization below.
 //
 // Scope. This package encodes and decodes context, binding, authorization and
 // delegation bytes, computes the public signature preimages (SigningBytes,
-// AuthorizationSigningBytes and AdminDelegationSigningBytes), and verifies a
-// binding signature with a caller-pinned Ed25519 public key. VerifyOwnerRootAuthorization additionally
+// AuthorizationSigningBytes, AdminDelegationSigningBytes and
+// AdminAuthorizationSigningBytes), and verifies a binding signature with a
+// caller-pinned Ed25519 public key. VerifyOwnerRootAuthorization additionally
 // checks an authorization against a caller-pinned vault-file PolicyCheckpoint:
 // it requires vaultfile.VerifyPolicyCheckpoint to authenticate the carried
 // current policy and content first, then matches the context's member, vault,
@@ -71,15 +79,43 @@
 //
 // A nil return from that verifier proves only the root-signed reusable scope
 // for that policy anchor and interval. It does NOT authorize a concrete
-// request: this checkpoint verifies no request binding, no binding signature
-// or recipient key and no per-request consent, and the later per-request
-// authorization must both match the recorded binding digests and pair
-// generation and verify the bindings themselves. vaultfile.AdminDelegation is
-// never reinterpreted as remote-unlock authority and no vaultfile byte or
-// schema changes here.
+// request: it verifies no request binding, no binding signature or recipient
+// key and no per-request consent. That is the job of the later per-request
+// AdminRemoteUnlockAuthorization.
+//
+// VerifyAdminRemoteUnlockAuthorization composes the two objects. It verifies
+// the request authorization's context and grant digests, calls
+// VerifyOwnerRootAdminRemoteUnlockDelegation so the reusable grant is checked
+// against the actual authenticated current policy and its
+// [not_before, expires) interval, requires the request expiry to be strictly
+// after the caller's now, no later than the context deadline and no later than
+// the grant expiry, requires the context member, vault, both device
+// identifiers, pair generation, key epoch, policy sequence and policy digest
+// to equal the grant scope, re-resolves the delegate and both endpoint devices
+// in the authenticated current policy, verifies both binding recipient keys
+// and device signatures with each device's authenticated content signing key
+// (source then target), compares each complete-binding digest with both the
+// authorization member and the grant scope, and finally verifies the
+// per-request signature under exactly the delegate device's current non-nil
+// Ed25519 policy signing key with an admin or owner role. A content signing
+// key and the owner root key are never accepted for that signature, and the
+// owner root signs no per-request object. The reusable grant keeps its exact
+// shape: it carries no request identifier, request digest, lock generation or
+// request deadline, and one grant covers any number of requests in its scope.
+//
+// A nil return from VerifyAdminRemoteUnlockAuthorization still proves only
+// that the request context and two signed bindings match the currently valid
+// reusable scope and that the delegated admin device signed them before the
+// request expiry. It is not a TLS, relay, VUK-delivery or production-identity
+// check, and it is not a durable one-shot or replay defense: the same valid
+// bytes verify again, before and after a restart. The caller's request
+// lifecycle, not this verifier, must prevent replay and one-shot use.
+// vaultfile.AdminDelegation is never reinterpreted as remote-unlock authority,
+// no PC role is changed, and no vaultfile byte or schema changes here.
 //
 // The owner root is the sole issuer accepted by the owner-root authorization
-// and the admin delegation. This package does not create or inspect TLS
+// and the reusable admin delegation; it issues no per-request admin
+// authorization. This package does not create or inspect TLS
 // connections, derive or compare exporter output, match a live peer's SPKI
 // (the TLS adapter's separate check), define request-digest preimage
 // semantics, prove that a device holds its private keys, prove enrollment or
