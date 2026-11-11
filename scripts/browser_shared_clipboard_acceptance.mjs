@@ -485,7 +485,8 @@ async function connectedPopup(context) {
   return popup;
 }
 
-// No broker pairing prompt may be pending while the action popup holds focus.
+// No broker pairing prompt may be pending. This inspects (and focuses) the
+// desktop, so it must only run while the action popup is closed.
 function assertNoBrokerPairPrompt(context, desktop, reason) {
   const view = desktopInspect(context, desktop);
   for (const label of [NORMAL_CONSENT_LABEL, QUICK_CONSENT_LABEL, REFUSE_CONSENT_LABEL]) {
@@ -501,38 +502,44 @@ function assertNoBrokerPairPrompt(context, desktop, reason) {
 // connection is approved with the fixed per-operation label. Quick consent is
 // never clicked and no other label is substituted.
 async function pairSharedSession(context, desktop, step) {
-  // 1. Refusal on the actual broker prompt.
-  step("shared-clipboard:pair-connect");
-  // openPopup may dismiss the previous handle; any later failure must not touch
-  // a closed target.
+  // Native desktop inspection raises its window and closes the action popup, so
+  // it runs only while no popup is open. Every popup handle is discarded before
+  // an inspection; any later failure must not touch a closed target.
   let popup = null;
-  await context.eventually(
-    async () => (await popup.disabled("#connect")) === false,
-    "Shared popup connect control is unavailable",
-  );
+
+  // 1. Refusal on the actual broker prompt: no popup is open, no pending prompt.
+  step("shared-clipboard:pair-connect");
   assertNoBrokerPairPrompt(context, desktop, "before the user requested a connection");
   popup = await context.openPopup();
-  desktopInput(context, desktop, [{ click_label: REFUSE_CONSENT_LABEL }]);
   await assertPopupUnpaired(context, popup);
-  await popup.dismiss();
+  await popup.click("#connect");
   popup = null;
+  desktopInput(context, desktop, [
+    { wait_label: REFUSE_CONSENT_LABEL },
+    { click_label: REFUSE_CONSENT_LABEL },
+  ]);
+  // The refusal click focused the desktop; the former handle is stale.
   await context.delay(300);
 
-  // 2. A fresh popup must still observe an unpaired shared session.
+  // 2. The prompt is gone and a fresh popup still observes an unpaired session.
   step("shared-clipboard:pair-refused-state");
+  assertNoBrokerPairPrompt(context, desktop, "after the user refused the connection");
   popup = await context.openPopup();
   await assertPopupUnpaired(context, popup);
 
   // 3. New real connection approved only by the fixed normal-consent label.
+  // No desktop inspection may run while this popup holds focus.
   step("shared-clipboard:pair-normal-consent");
-  assertNoBrokerPairPrompt(context, desktop, "while the fresh popup had focus");
   await popup.click("#connect");
-  desktopInput(context, desktop, [{ click_label: NORMAL_CONSENT_LABEL }]);
+  popup = null;
+  desktopInput(context, desktop, [
+    { wait_label: NORMAL_CONSENT_LABEL },
+    { click_label: NORMAL_CONSENT_LABEL },
+  ]);
 
   // The native click moves focus to the desktop and may close the popup, so a
   // stale handle is discarded; a fresh popup must prove the actual binding.
   step("shared-clipboard:pair-verify");
-  popup = null;
   await context.delay(300);
   popup = await context.openPopup();
   await assertPopupPaired(context, popup);
