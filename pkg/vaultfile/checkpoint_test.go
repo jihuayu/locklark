@@ -190,17 +190,6 @@ func (c *cpChain) finalize(t *testing.T, k *cpKeys, mutate ...func()) {
 	*c.f = *sealFile(t, c.f, &c.f.ContentSignature)
 }
 
-// finalizeNegative finalizes f and, when it is rejected by the wire rules on
-// purpose, binds the revision id directly so the failure under test is not a
-// stale revision id.
-func (c *cpChain) finalizeNegative(t *testing.T, k *cpKeys, mutate ...func()) {
-	t.Helper()
-	c.finalize(t, k, mutate...)
-	if err := ValidateFile(c.f); err != nil {
-		sealNegativeFixture(t, c.f)
-	}
-}
-
 func (c *cpChain) pin(digest []byte, seq uint64) *PolicyCheckpoint {
 	a := *c.anchor
 	a.OwnerRootPublicKey = bytes.Clone(a.OwnerRootPublicKey)
@@ -547,35 +536,98 @@ func TestVerifyPolicyCheckpointNegative(t *testing.T) {
 	})
 
 	t.Run("revoked author", func(t *testing.T) {
-		// alice is demoted to reader in the current policy: the author-role
-		// rule rejects the file.
+		// The positive baseline: the base chain is valid and accepted, so
+		// each negative below fails on the author rule, not on a malformed
+		// fixture.
 		c := newCPChain(t, k)
+		if err := ValidateFile(c.f); err != nil {
+			t.Fatalf("baseline fixture is not structurally valid: %v", err)
+		}
+		if err := VerifyPolicyCheckpoint(c.f, c.anchor); err != nil {
+			t.Fatalf("baseline chain rejected: %v", err)
+		}
+
+		// revokeAuthor installs p as the current policy, root-signed and
+		// linked to the carried anchor, binds the header to it, and seals
+		// with a valid content signature by the real device-1 key even
+		// though its principal can no longer write.
+		revokeAuthor := func(p *Policy) {
+			t.Helper()
+			p.PolicySeq = 6
+			p.PrevPolicyDigest = bytes.Clone(policyDigest(&c.f.SignedPolicyProofs[0]))
+			c.replaceProof(1, p, "owner-root-01")
+			signPolicyProof(&c.f.SignedPolicyProofs[1], k.rootPriv)
+			c.f.Header.PolicySeq = p.PolicySeq
+			c.f.Header.PolicyDigest = policyDigest(&c.f.SignedPolicyProofs[1])
+			c.f.Header.AuthorDeviceID = "device-1"
+			c.f.Header.RevisionID = ""
+			msg, err := contentSigningBytes(c.f, false)
+			if err != nil {
+				t.Fatalf("revoked-author content preimage: %v", err)
+			}
+			cs := append([]byte(DomainContentSignature+"\x00"), msg...)
+			c.f.ContentSignature = Signature{SignerID: "device-1", Alg: SigAlgEd25519, Sig: ed25519.Sign(k.dev1Priv, cs)}
+			sealNegativeFixture(t, c.f)
+		}
+
+		// alice is demoted to reader in the current policy, keeping her
+		// device and its slot: the author-role rule rejects the file.
+		c = newCPChain(t, k)
 		cur := clonePolicy(c.policies[1])
 		cur.Writers = []Member{{PrincipalID: "bob", Label: "Bob"}}
 		cur.Admins = nil
 		cur.Owners = nil
 		cur.Readers = []Member{{PrincipalID: "alice", Label: "Alice"}, {PrincipalID: "bob", Label: "Bob"}}
-		c.replaceProof(1, cur, "owner-root-01")
-		c.finalizeNegative(t, k)
-		wantCode(t, VerifyPolicyCheckpoint(c.f, c.anchor), CodeInvalidValue)
+		revokeAuthor(cur)
+		if d := findDevice(&c.f.SignedPolicyProofs[1].Policy, "device-1"); d == nil || d.PrincipalID != "alice" {
+			t.Fatal("demotion fixture dropped alice's device")
+		}
+		wantCodeAt(t, ValidateFile(c.f), CodeInvalidValue, "")
+		wantCodeAt(t, VerifyPolicyCheckpoint(c.f, c.anchor), CodeInvalidValue, "")
 
-		// alice is removed entirely; her device is dropped with her.
+		// alice is removed entirely: her roles, device-1 and its slot. The
+		// header still names device-1 as author and the content signature is
+		// device-1's, so the targeted authorization rule rejects it.
 		c = newCPChain(t, k)
 		cur = clonePolicy(c.policies[1])
 		cur.Writers = nil
 		cur.Admins = []Member{{PrincipalID: "bob", Label: "Bob"}}
 		cur.Owners = []Member{{PrincipalID: "bob", Label: "Bob"}}
-		cur.Devices = cur.Devices[1:]
-		c.replaceProof(1, cur, "owner-root-01")
-		c.finalizeNegative(t, k)
-		wantCode(t, VerifyPolicyCheckpoint(c.f, c.anchor), CodeInvalidValue)
+		cur.Readers = []Member{{PrincipalID: "bob", Label: "Bob"}}
+		cur.Devices = []Device{cur.Devices[1]}
+		slots := c.f.VUKDeviceSlots[:0]
+		for _, s := range c.f.VUKDeviceSlots {
+			if s.DeviceID != "device-1" {
+				slots = append(slots, s)
+			}
+		}
+		c.f.VUKDeviceSlots = slots
+		revokeAuthor(cur)
+		if findDevice(&c.f.SignedPolicyProofs[1].Policy, "device-1") != nil {
+			t.Fatal("removal fixture kept alice's device")
+		}
+		for _, s := range c.f.VUKDeviceSlots {
+			if s.DeviceID == "device-1" {
+				t.Fatal("removal fixture kept alice's device slot")
+			}
+		}
+		if c.f.Header.AuthorDeviceID != "device-1" || c.f.ContentSignature.SignerID != "device-1" {
+			t.Fatal("removal fixture no longer authors from device-1")
+		}
+		wantCodeAt(t, ValidateFile(c.f), CodeInvalidValue, "")
+		wantCodeAt(t, VerifyPolicyCheckpoint(c.f, c.anchor), CodeInvalidValue, "")
 
 		// A content signature by another device key is not authorized.
 		c = newCPChain(t, k)
-		c.finalize(t, k, func() {
-			cs := append([]byte(DomainContentSignature+"\x00"), mustContentSigning(t, c.f)...)
-			c.f.ContentSignature.Sig = ed25519.Sign(k.dev2Priv, cs)
-		})
+		c.finalize(t, k)
+		cs := append([]byte(DomainContentSignature+"\x00"), mustContentSigning(t, c.f)...)
+		c.f.ContentSignature.Sig = ed25519.Sign(k.dev2Priv, cs)
+		if c.f.ContentSignature.SignerID != "device-1" || c.f.ContentSignature.Alg != SigAlgEd25519 {
+			t.Fatal("wrong-content-key fixture no longer names device-1 with Ed25519")
+		}
+		if err := ValidateFile(c.f); err != nil {
+			t.Fatalf("wrong-content-key fixture is not structurally valid: %v", err)
+		}
 		wantCodeAt(t, VerifyPolicyCheckpoint(c.f, c.anchor), CodeSignatureVerifyFailed, "")
 	})
 
