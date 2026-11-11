@@ -810,7 +810,11 @@ class FakeRunningApplication:
 
 
 class FakeWorkspaceAppKit:
-    """Strict AppKit stand-in: only the one NSRunningApplication lookup exists."""
+    """Strict AppKit stand-in: only the one NSRunningApplication lookup and the
+    one exported activation option exist; every other symbol is an error."""
+
+    # Deliberately not the SDK integer: only the named export may be used.
+    NSApplicationActivateIgnoringOtherApps = object()
 
     def __init__(self, running=None):
         self.running = running
@@ -845,6 +849,13 @@ def activation_api(path="/opt/locklark/locklark-desktop", uid=None, running=None
     return api
 
 
+def assert_named_activation_options(test, api, running):
+    """The one activation received the exact exported AppKit option object."""
+    option = api.appkit.NSApplicationActivateIgnoringOtherApps
+    test.assertEqual(len(running.options), 1)
+    test.assertIs(running.options[0], option)
+
+
 class MacActivationOnlyTests(unittest.TestCase):
     PID = 4242
     EXE = "/opt/locklark/locklark-desktop"
@@ -864,7 +875,7 @@ class MacActivationOnlyTests(unittest.TestCase):
         api = activation_api(running=running)
         self.assertEqual(self.run_driver(api), (0, '{"activated": true}\n', ""))
         self.assertEqual(api.appkit.lookups, [self.PID])
-        self.assertEqual(running.options, [1])
+        assert_named_activation_options(self, api, running)
 
     def test_trusted_real_api_path_checks_pid_path_and_uid_before_one_activation(self):
         requested = macos.QuartzApi.activate_process
@@ -881,7 +892,7 @@ class MacActivationOnlyTests(unittest.TestCase):
         self.assertIs(requested(api, self.PID, self.EXE), True)
         self.assertEqual(looked_up, [self.PID])
         self.assertEqual(api.appkit.lookups, [self.PID])
-        self.assertEqual(running.options, [1])
+        assert_named_activation_options(self, api, running)
 
     def test_identity_refusals_never_activate(self):
         # (process() answer, expected refusal). "" means the pid is absent.
@@ -911,8 +922,8 @@ class MacActivationOnlyTests(unittest.TestCase):
                 self.assertEqual((status, stdout), (1, ""))
                 self.assertIn("code=activation-failed", stderr)
                 self.assertNotIn(self.EXE, stderr)
-                if running is not None:
-                    self.assertEqual(running.options, [1])
+                if isinstance(running, FakeRunningApplication):
+                    assert_named_activation_options(self, api, running)
 
     def test_activation_exception_is_one_refusal_and_no_retry(self):
         running = FakeRunningApplication(RuntimeError("boom"))
@@ -920,7 +931,7 @@ class MacActivationOnlyTests(unittest.TestCase):
         status, stdout, stderr = self.run_driver(api)
         self.assertEqual((status, stdout), (1, ""))
         self.assertIn("code=activation-failed", stderr)
-        self.assertEqual(running.options, [1])
+        assert_named_activation_options(self, api, running)
 
     def test_process_without_an_activation_hook_never_claims_success(self):
         api = activation_api(running=FakeRunningApplication(True))

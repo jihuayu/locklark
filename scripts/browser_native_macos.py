@@ -682,7 +682,10 @@ class QuartzApi:
         running = self.appkit.NSRunningApplication.runningApplicationWithProcessIdentifier_(int(pid))
         if running is None:
             return False
-        return bool(running.activateWithOptions_(1))
+        # The named AppKit option, never a literal: NSApplicationActivateAllWindows
+        # is 1 and must not be what foregrounding an application asks for.
+        return bool(running.activateWithOptions_(
+            self.appkit.NSApplicationActivateIgnoringOtherApps))
 
     def activate_process(self, pid, executable):
         """Identity-proofed, once-only activation of ONE already-known pid.
