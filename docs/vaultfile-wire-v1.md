@@ -1,13 +1,32 @@
 # locklark.vault-file/v1 Wire Schema
 
 Status: draft. Implemented in `pkg/vaultfile`: structure, canonical codec,
-preimage derivation, and one pinned-key content signature check
-(`VerifyContentSignature`; see [Pinned-key content signature
-check](#pinned-key-content-signature-check)). Policy proof signatures, chains,
-authorization, key wrapping and vault trust are not verified or implemented.
-This document describes the wire format and the frozen v1 preimages; it makes
-no cryptographic correctness claim and grants no migration or product
-permission.
+preimage derivation, and two separate verification APIs (see [Verification
+APIs](#verification-apis)):
+
+- `VerifyContentSignature`, the narrow check: `ValidateFile` plus the file's
+  content signature against a caller-pinned device key. It does not
+  authenticate policy proofs and does not authorize the current policy.
+- `VerifyPolicyCheckpoint`, the checkpoint-scoped check: given an already
+  trusted out-of-band `PolicyCheckpoint` (vault id, owner-root key id and
+  public key, policy sequence and digest), which it treats as caller-owned,
+  does not retain after the call and whose digest it clones internally, it
+  binds the file to that vault,
+  authenticates the policy continuation from the pinned digest with
+  root-signed proofs (or, with no anchor carried, a first proof exactly at
+  checkpoint seq+1 linked to the pinned digest), requires the author's role in
+  the current policy to be writer, admin or owner, then verifies the content
+  signature with the current policy's device key. A carried anchor proof is
+  trusted through the caller's digest alone; its own signature is not
+  cryptographically reverified.
+
+Neither API establishes the trustworthiness or provenance of the caller's
+checkpoint, root or pinned key; admin-delegated policy transitions (no
+scope-to-policy-diff validation is implemented), key wrapping,
+encryption/decryption, content history through `prev_digest`, server freshness
+and overall vault trust are not implemented. This document describes the wire
+format and the frozen v1 preimages; it makes no cryptographic correctness
+claim and grants no migration or product permission.
 
 ## Background
 
@@ -58,10 +77,19 @@ revision or file-digest preimage):
   `/key/age-x25519`, `/policy-document`
 
 Labels are identification and purpose separators only. This package does not
-sign, wrap or derive any key. The only verification it performs is
-`VerifyContentSignature`, which checks one file content signature against a
-caller-pinned Ed25519 key using the `/content-signature` label; policy proof
-signatures and chains are not verified.
+sign, wrap or derive any key. The only authorization it checks is
+checkpoint-scoped: under a caller-supplied checkpoint, whether the author may
+author the authenticated current policy. It has no trust anchor of its own and
+does not check delegated authority. It performs signature checks in
+exactly two places, both described in [Verification APIs](#verification-apis):
+
+- `VerifyContentSignature` checks one file content signature under the
+  `/content-signature` label against a caller-pinned Ed25519 key. It does not
+  authenticate policy proofs or authorize the current policy.
+- `VerifyPolicyCheckpoint` checks, only relative to a caller-supplied
+  `PolicyCheckpoint`, the `/policy-document-signature` proofs that continue the
+  pinned digest, each against the pinned owner-root key, and then the
+  `/content-signature` signature against the current policy's device key.
 
 ## Documents
 
@@ -249,10 +277,13 @@ grammar is bounded by its own limit:
 | `owner_root.key_id`, delegation `granted_by`        | `MaxKeyIDLength` (64)     |
 
 `signed_policy_proofs[].signer_id` and `content_signature.signer_id` are bounded
-structurally at `MaxDeviceIDLength` (128). Cryptographic verification of
-`content_signature` is available only through `VerifyContentSignature` with a
-caller-pinned key; verification of `signed_policy_proofs[].signer_id` /
-`[].sig` (policy proof signatures) is not implemented in this schema revision.
+structurally at `MaxDeviceIDLength` (128). The codec never verifies either
+signature. `VerifyContentSignature` checks `content_signature` only against a
+caller-pinned key; `VerifyPolicyCheckpoint` checks the proof
+`signed_policy_proofs[].signer_id` / `[].sig` only from a caller-supplied
+checkpoint forward, each root-signed by the pinned owner-root key (see
+[Verification APIs](#verification-apis)). No other policy proof verification
+exists in this schema revision.
 
 Several wire values that look like identifiers are deliberately **not**
 ordinary identifiers:
@@ -422,24 +453,52 @@ revision id, so a file is resealed after reordering.
 
 ## Validation scope
 
-Validation is shape only:
+`ValidateFile` and every parser, encoder and preimage function are structural
+and shape-only. No structural path performs a cryptographic check, and the
+package computes no signature.
 
-- signature bytes are checked for presence, length and encoding only; neither
-  `ValidateFile` nor any validation path verifies a signature, and the package
-  computes no signature. The separate `VerifyContentSignature` checks the
-  content signature against a caller-pinned key; policy proof signatures and
-  signature chains are never verified;
+- signature bytes are checked for presence, length, algorithm and encoding
+  only; `ValidateFile` does not verify any signature. Cryptography lives only
+  in the two explicit APIs of [Verification APIs](#verification-apis): the
+  content signature is verified by `VerifyContentSignature` (pinned key) and by
+  `VerifyPolicyCheckpoint` (current policy key), and policy proof signatures
+  are cryptographically verified only by `VerifyPolicyCheckpoint`, only for the
+  continuation after a caller-supplied checkpoint. That API does not
+  cryptographically reverify the anchor proof's signature, though
+  `ValidateFile` still checks that proof's structural algorithm and signature
+  shape;
 - `revision_id` is checked to equal `RevisionID`; it is not a signature;
 - wrapped-key bytes are checked for presence and size, never unwrapped;
 - public keys and age recipients are parsed for shape only;
-- whether `prev_digest` or `prev_policy_digest` names a known prior value, and
-  whether a signer's principal currently holds the role it claims, are sync
-  and authorization decisions outside this codec.
+- in `ValidateFile`, the author's principal is required to be a writer, admin
+  or owner of the current policy by membership in the carried, unverified
+  policy. That is a structural membership check, not an authorization: which
+  policy is current becomes authenticated only under `VerifyPolicyCheckpoint`'s
+  caller-supplied checkpoint, and no structural path grants trust by itself.
+  Whether a carried digest names a known prior value is a sync decision
+  outside this codec; `VerifyPolicyCheckpoint` links `prev_policy_digest`
+  forward from the checkpoint digest but does not check content history
+  through `prev_digest`.
 
-## Pinned-key content signature check
+## Verification APIs
 
-`ValidateFile` stays shape only and introduces no trust anchor. One separate
-primitive performs the only signature check implemented in this package:
+`ValidateFile` stays shape only and introduces no trust anchor: it never
+verifies a signature, authenticates a policy proof or authorizes a policy.
+Two separate exported APIs add cryptography on top of it, and they answer
+different questions:
+
+| API | Input it trusts | What it establishes |
+| --- | ------------------- | ------------------- |
+| `VerifyContentSignature` | caller-pinned device id and content key | the sealed file's content signature, for the author device the caller names, under that caller-pinned key |
+| `VerifyPolicyCheckpoint` | caller-supplied `PolicyCheckpoint` (vault id, owner-root key id and public key, policy seq and digest) | the file and its proofs belong to that vault, the policy continuation from the pinned digest is signed by the pinned owner root, the author's role in the authenticated current policy is writer/admin/owner, and the content signature verifies under the current policy's device key |
+
+Neither API establishes or creates the trustworthiness or provenance of what
+the caller supplies. `VerifyContentSignature` does not authenticate policy
+proofs or authorize the current policy; `VerifyPolicyCheckpoint` takes the
+checkpoint and owner root as already trusted and does not prove where they came
+from. What neither establishes is stated in [Limits](#limits).
+
+### `VerifyContentSignature`: narrower pinned key check
 
 ```
 VerifyContentSignature(f *File, signerDeviceID string, publicKey ed25519.PublicKey) error
@@ -461,11 +520,122 @@ VerifyContentSignature(f *File, signerDeviceID string, publicKey ed25519.PublicK
   decision, not a structural defect; the file itself may still pass
   `ValidateFile`.
 
-This primitive alone does **not** establish that a vault or file is trusted
-or verified. It does not verify policy proof signatures
+This API does **not** verify policy proof signatures
 (`signed_policy_proofs[].sig`), any signature chain from the owner root or
 admin delegations, policy continuity through `prev_policy_digest`, or that
-the signer is authorized by a verified policy. Those are unimplemented.
+the signer is authorized by an authenticated policy. It is a narrower check
+than `VerifyPolicyCheckpoint`; use that API when the current policy itself
+must be authenticated.
+
+### `VerifyPolicyCheckpoint`: checkpoint-scoped verification
+
+```
+type PolicyCheckpoint struct {
+        VaultID            string
+        OwnerRootKeyID     string
+        OwnerRootPublicKey ed25519.PublicKey
+        PolicySeq          uint64
+        PolicyDigest       []byte
+}
+
+VerifyPolicyCheckpoint(f *File, checkpoint *PolicyCheckpoint) error
+```
+
+The `PolicyCheckpoint` is the caller's already-trusted policy state, derived
+out of band (for example from a trusted sharing, pairing or recovery exchange).
+This package neither creates nor infers one, and does not establish that it is
+genuine; that trust must already exist. The checkpoint is caller-owned:
+`VerifyPolicyCheckpoint` reads its fields and input bytes during the call and
+does not retain the checkpoint after it returns; the verifier clones
+`PolicyDigest` internally, so that clone is the only byte copy. The caller must
+keep the checkpoint's fields and `OwnerRootPublicKey` / `PolicyDigest` bytes
+stable while the call runs.
+
+- It runs `ValidateFile` first and returns any structural or sealed-state
+  error unchanged. It then requires a non-nil checkpoint with a valid
+  `VaultID` and `OwnerRootKeyID` identifier, a 32-byte `OwnerRootPublicKey`
+  and a 32-byte `PolicyDigest`; a malformed checkpoint is `invalid_value`.
+- **Vault binding**: `header.vault_id` and every carried proof's
+  `policy.vault_id` must equal `checkpoint.VaultID`.
+- **Anchor**: the carried proof at `checkpoint.PolicySeq` whose canonical
+  policy bytes hash to `checkpoint.PolicyDigest` is the anchor, and its owner
+  root (`key_id`, `alg`, public key) must equal the pinned root. The anchor's
+  signature is not cryptographically reverified; it is trusted through the
+  pinned digest alone, and this API does not look at its `signer_id`, `alg` or
+  `sig`. `ValidateFile` has still checked that proof's structural algorithm
+  and signature shape. The anchor's canonical digest is still
+  recomputed from its carried document bytes, which `ValidateFile` has already
+  required to be canonical. Proofs before the anchor are already established
+  and are ignored.
+- **No carried anchor**: for a continuation the file carries no proof of, the
+  carried proofs must begin exactly at `checkpoint.PolicySeq+1`, and that first
+  proof must carry `prev_policy_digest` equal to `checkpoint.PolicyDigest` and
+  be root-signed exactly as in the next bullet. A file that carries
+  `checkpoint.PolicySeq` with a different digest is rejected rather than treated
+  as a continuation.
+- **Continuations**: every later proof must carry exactly the previous trusted
+  sequence plus one, `prev_policy_digest` equal to the previous trusted
+  digest, the pinned owner root and `signer_id` equal to
+  `checkpoint.OwnerRootKeyID`, and a `crypto/ed25519` signature,
+  over `"locklark.vault-file/v1/policy-document-signature" || 0x00 ||
+  SignedPolicy.document`, that verifies under the pinned owner-root public
+  key. A failing proof signature is `signature_verify_failed` at
+  `signed_policy_proofs[i]`.
+- A file whose current policy is behind `checkpoint.PolicySeq` is stale, and
+  a carried sequence equal to `checkpoint.PolicySeq` with a different digest
+  is a mismatch; vault, anchor, tip, gap, link, root and admin-transition
+  failures are `policy_checkpoint_failed`.
+- **Authorize and check content**: having authenticated the chain to the
+  current policy, the author's principal must be a writer, admin or owner of
+  that current policy. A reader author, an author whose device is missing from
+  the current policy, or a demoted or removed author fails before the
+  sealed-state check as `invalid_value` with an empty path, because
+  `current.canAuthor` and `validateStructure` run before any signature lookup.
+  Structural and shape failures, including invalid policy content-key shapes,
+  are returned unchanged from `ValidateFile`; after validation the
+  cryptographic failures of the policy and content signatures are
+  `signature_verify_failed` with the paths below. An author whose device is
+  listed without an Ed25519 content signing key is therefore not reported as
+  `signature_shape_invalid` here: validation rejects the invalid policy first.
+  The content signature is then
+  verified with the current policy's `content_signing_key` for
+  `header.author_device_id`,
+  exactly `"locklark.vault-file/v1/content-signature" || 0x00 ||
+  ContentSigningBytes(f)`. A content signature that does not verify is
+  `signature_verify_failed` with an empty path; a policy proof signature that
+  does not verify is `signature_verify_failed` at
+  `signed_policy_proofs[i]`.
+
+Admin-delegated policy transitions are **not** supported. A continuation must
+be signed by the pinned owner root; a proof signed by any other device is
+rejected even when it carries an `AdminDelegation`, because there is no
+implemented validation of an admin's `scope` against the old-to-new policy and
+delegation diff. A delegated transition is never reinterpreted as a root-signed
+one.
+
+## Limits
+
+Neither API establishes overall vault trust beyond its caller-supplied anchor.
+Neither verifies content history through `prev_digest`, server freshness or
+ordering across snapshots, encryption or decryption, CEK or VUK key wrapping,
+or the authenticity of anything the caller did not pin. Neither cryptographically
+reverifies the carried anchor proof's signature; that signature is trusted only
+through the caller's checkpoint digest. The chain does authenticate the
+delegation fields (`owner_root`, `admin_delegations` and its `scope`) carried in
+root-signed policy documents, but neither API authorizes delegation: admin-signed
+policy transitions and scope-to-policy-diff authorization are unsupported, so
+a delegated transition is never accepted. Beyond that checkpoint-scoped
+current-author check, no authorization is implemented. In particular:
+
+- `VerifyContentSignature` does not authenticate policy proofs or authorize
+  the current policy; it proves only that a caller-pinned key signed this
+  file's content.
+- `VerifyPolicyCheckpoint` proves only that the file and its proofs continue a
+  checkpoint and root the caller already trusts, and that the content was
+  signed by a device of a writer, admin or owner of the authenticated current
+  policy. It does not establish the trustworthiness or provenance of the
+  checkpoint, the owner root or its key, and it does not support admin-signed
+  transitions.
 
 ## Budgets
 
@@ -538,8 +708,20 @@ non-canonical `document` is rejected, before any policy binding is considered.
 
 ## Out of scope
 
-This schema revision includes only the pinned-key content signature check
-described above, not policy proof or signature-chain verification,
-authorization, permission checks, key or digest crypto beyond the definitions,
-migration/import, encryption or product wiring. Encoding, validation and every
-option are shape-only, and the pinned-key check establishes no vault trust.
+This schema revision includes only the two verification APIs described above:
+`VerifyContentSignature` (narrow, caller-pinned content key) and
+`VerifyPolicyCheckpoint` (from a caller-supplied `PolicyCheckpoint` forward).
+`ValidateFile`, parsing, encoding and preimage derivation remain shape-only.
+
+It does not establish or create the trustworthiness or provenance of the
+caller's checkpoint, owner root or pinned key, and it does not
+cryptographically reverify the anchor proof's signature. The authenticated
+chain does cover the delegation fields carried in root-signed policy documents,
+but the package does not authorize delegation: admin-signed policy transitions
+and scope-to-policy-diff authorization are unsupported (so an `AdminDelegation`
+never authorizes a transition), and beyond the checkpoint-scoped current-author
+check it implements no other policy proof, signature-chain or authorization
+verification and no permission checks. It also leaves key or digest crypto
+beyond the definitions, content
+history through `prev_digest`, server freshness, migration/import, encryption
+or decryption, key wrapping or product wiring.

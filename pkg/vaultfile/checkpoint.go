@@ -8,19 +8,35 @@ import (
 
 // CodePolicyCheckpointFailed is reported by VerifyPolicyCheckpoint when the
 // carried policy chain does not continue the caller-pinned checkpoint: a
-// different vault or owner root, the anchor policy missing, a stale or
-// rolled-back tip, a chain gap, a foreign or wrongly linked proof, a
-// non-root policy transition, or a policy proof signature that does not
-// verify. Each case is a caller trust decision, not a structural defect of
-// the file.
+// different vault, an anchor at the checkpoint sequence with a different
+// digest or a foreign owner root, a stale or rolled-back tip, a chain gap, a
+// prev_policy_digest that does not name the previous trusted digest, a
+// continuation signed by any signer other than the pinned owner root or
+// naming a different owner root, or, when and only when the anchor is
+// omitted, a carried chain that does not begin exactly at the checkpoint
+// sequence + 1 with a prev_policy_digest equal to the checkpoint digest.
+// Omitting the anchor is not a failure on its own: such a file is accepted
+// when its first proof is exactly the checkpoint sequence + 1 linked to the
+// checkpoint digest. The carried anchor is the proof at the checkpoint
+// sequence; every accepted proof after it carries exactly the previous
+// sequence + 1, and proofs before the anchor may be carried and are ignored.
+// A continuation whose crypto/ed25519 signature does not verify is not this
+// code; it is CodeSignatureVerifyFailed. Each case is a caller trust
+// decision, not a structural defect of the file.
 const CodePolicyCheckpointFailed = "policy_checkpoint_failed"
 
 // PolicyCheckpoint is the caller's already-trusted policy state: the policy
 // sequence and its digest (PolicyDigest) together with the owner root that
 // owns it. A checkpoint is derived out of band, from a trusted sharing or
 // pairing exchange or from recovery; this package neither creates nor infers
-// one. OwnerRootPublicKey is copied so later edits by the caller cannot
-// change a checkpoint between calls.
+// one. A PolicyCheckpoint is caller-owned: VerifyPolicyCheckpoint reads its
+// fields and the bytes of OwnerRootPublicKey and PolicyDigest during the
+// call and does not retain a pointer or slices to it after the call returns;
+// the verifier clones PolicyDigest internally, so that clone is the only
+// byte copy. The caller must keep its fields and input bytes stable while
+// the call runs. Mutating them concurrently, or after the call without
+// treating that as a new checkpoint, is a caller error this package cannot
+// detect.
 type PolicyCheckpoint struct {
 	VaultID            string
 	OwnerRootKeyID     string
@@ -76,11 +92,18 @@ type PolicyCheckpoint struct {
 //
 // Errors:
 //   - structural, vault-consistency and role-membership failures are
-//     returned from ValidateFile unchanged; a content signer device missing
-//     from the authenticated current policy is signature_shape_invalid;
-//   - a header author whose principal is not a writer, admin or owner of the
-//     current policy (removed or demoted) is an invalid_value with an empty
-//     path, reported before the sealed revision binding;
+//     returned from ValidateFile unchanged; a header author whose device is
+//     missing from the carried current policy, or whose principal no longer
+//     holds a writer, admin or owner role (removed or demoted), is an
+//     invalid_value with an empty path, reported before the sealed revision
+//     binding, because current.canAuthor and validateStructure run before
+//     any signature lookup;
+//   - structural and shape failures are returned unchanged from ValidateFile,
+//     including invalid policy content-key shapes; after validation the
+//     cryptographic failures of the policy and content signatures are
+//     CodeSignatureVerifyFailed as listed below. A device listed without an
+//     Ed25519 content signing key cannot be rejected as signature_shape_invalid
+//     here, because validation rejects the invalid policy first;
 //   - a nil c, or a checkpoint whose vault ID or root key ID is not a valid
 //     identifier, whose root public key is not 32 bytes or whose digest is
 //     not 32 bytes, is an invalid_value: the supplied anchor itself is
