@@ -299,8 +299,16 @@ func TestVerifyPolicyCheckpointNegative(t *testing.T) {
 		a.PolicyDigest[0] ^= 0xff
 		wantCodeAt(t, VerifyPolicyCheckpoint(c.f, a), CodePolicyCheckpointFailed, "")
 
-		// An anchor sequence the file does not carry is missing.
-		wantCodeAt(t, VerifyPolicyCheckpoint(c.f, c.pin(digest("policy-4"), 4)), CodePolicyCheckpointFailed, "")
+		// An anchor sequence the file does not carry is accepted only as a
+		// checkpoint+1 continuation: proof 0 (seq 5) names the pinned digest
+		// as its predecessor and is root-signed.
+		c.finalize(t, k, func() { signPolicyProof(&c.f.SignedPolicyProofs[0], k.rootPriv) })
+		if err := ValidateFile(c.f); err != nil {
+			t.Fatalf("checkpoint+1 fixture does not validate: %v", err)
+		}
+		if err := VerifyPolicyCheckpoint(c.f, c.pin(digest("policy-4"), 4)); err != nil {
+			t.Fatalf("checkpoint+1 continuation rejected: %v", err)
+		}
 
 		// A seq+1 pin whose digest is not the carried predecessor is rejected.
 		wantCodeAt(t, VerifyPolicyCheckpoint(c.f, c.pin(digest("not-the-predecessor"), 6)), CodePolicyCheckpointFailed, "")
