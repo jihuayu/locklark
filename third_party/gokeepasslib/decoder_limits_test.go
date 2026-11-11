@@ -348,24 +348,75 @@ func TestInnerHeaderBinaryAggregateLimit(t *testing.T) {
 	if err := ih.readFromWithLimits(bytes.NewReader(raw), 21+10); !errors.Is(err, ErrDecodeLimitExceeded) {
 		t.Fatalf("two binaries over budget: %v", err)
 	}
-	// Bounded mode rejects empty, flag-only and negative binary lengths
-	// before allocating anything.
+	// Bounded mode rejects a missing protection flag (length 0) and a
+	// negative length as malformed, before allocating anything.
 	for name, field := range map[string][]byte{
-		"empty binary": {InnerHeaderBinary, 0, 0, 0, 0},
-		"flag only":    {InnerHeaderBinary, 1, 0, 0, 0, 1},
+		"missing flag": {InnerHeaderBinary, 0, 0, 0, 0},
 		"negative":     {InnerHeaderBinary, 0xff, 0xff, 0xff, 0xff},
 	} {
 		ih := new(InnerHeader)
-		if err := ih.readFromWithLimits(bytes.NewReader(field), 1<<20); !errors.Is(err, ErrDecodeLimitExceeded) || len(ih.Binaries) != 0 {
-			t.Fatalf("%s: err = %v, binaries = %v", name, err, ih.Binaries)
+		if err := ih.readFromWithLimits(bytes.NewReader(field), 1<<20); !errors.Is(err, ErrCorruptedDatabase) || len(ih.Binaries) != 0 {
+			t.Fatalf("%s: err = %v, binaries = %v, want ErrCorruptedDatabase", name, err, ih.Binaries)
+		}
+	}
+}
+
+// TestInnerHeaderBoundedEmptyBinary checks that a flag-only binary (one
+// protection-flag byte, zero content bytes) is a valid empty binary in
+// bounded mode, and that its flag byte is charged against the aggregate
+// binary budget: a budget of one accepts it, and an over-budget flag is
+// rejected before it is read.
+func TestInnerHeaderBoundedEmptyBinary(t *testing.T) {
+	header := innerHeaderBytes(t, binaryInnerHeader(t, 0))
+	payload := int64(1) // protection flag only
+
+	ih := new(InnerHeader)
+	if err := ih.readFromWithLimits(bytes.NewReader(header), payload); err != nil {
+		t.Fatalf("exact flag budget: %v", err)
+	}
+	if len(ih.Binaries) != 1 || ih.Binaries[0].MemoryProtection != 1 || len(ih.Binaries[0].Content) != 0 {
+		t.Fatalf("binaries = %v, want one empty binary with its flag", ih.Binaries)
+	}
+
+	// The flag byte is charged too: with two empty binaries a budget of one
+	// accepts only the first, and the second is rejected before its flag is
+	// read. A zero budget is the unbounded mode.
+	double := binaryInnerHeader(t, 0)
+	double.Binaries = append(Binaries{{ID: 1, MemoryProtection: 0, isKDBX4: true}}, double.Binaries...)
+	header = innerHeaderBytes(t, double)
+	payload = 2 // two protection flag bytes
+	src := &countReader{r: bytes.NewReader(header)}
+	ih = new(InnerHeader)
+	if err := ih.readFromWithLimits(src, payload-1); !errors.Is(err, ErrDecodeLimitExceeded) {
+		t.Fatalf("one flag budget: err = %v, want ErrDecodeLimitExceeded", err)
+	}
+	if len(ih.Binaries) != 1 || len(ih.Binaries[0].Content) != 0 {
+		t.Fatalf("binaries = %v, want only the within-budget empty binary", ih.Binaries)
+	}
+	if got, want := int64(src.saw), int64(len(header))-payload; got > want {
+		t.Fatalf("read %d bytes, want at most %d: the over-budget flag was read", got, want)
+	}
+
+	// The flag byte also counts in an aggregate shared with another binary.
+	two := binaryInnerHeader(t, 0)
+	two.Binaries = append(Binaries{{ID: 1, Content: bytes.Repeat([]byte{0xB6}, 4), isKDBX4: true}}, two.Binaries...)
+	raw := innerHeaderBytes(t, two)
+	for budget, want := range map[int64]bool{6: true, 5: false} { // 5 + 1 flag bytes
+		ih = new(InnerHeader)
+		err := ih.readFromWithLimits(bytes.NewReader(raw), budget)
+		if want && err != nil {
+			t.Fatalf("budget %d: %v", budget, err)
+		}
+		if !want && !errors.Is(err, ErrDecodeLimitExceeded) {
+			t.Fatalf("budget %d: err = %v, want ErrDecodeLimitExceeded", budget, err)
 		}
 	}
 }
 
 // TestInnerHeaderUnboundedCompatibility checks that the unbounded parser
 // keeps its original behavior: an empty field is accepted with zero bytes and
-// a one-byte binary is kept with no content. The bounded parser rejects a
-// one-byte binary before allocating any content.
+// a one-byte binary is kept with no content. The bounded parser accepts the
+// same one-byte binary as a valid empty binary.
 func TestInnerHeaderUnboundedCompatibility(t *testing.T) {
 	// An empty field is read as zero bytes and leaves the key empty; the
 	// following terminator ends the header.
@@ -389,11 +440,12 @@ func TestInnerHeaderUnboundedCompatibility(t *testing.T) {
 		t.Fatalf("unbounded binaries = %v", h.Binaries)
 	}
 
-	for name, data := range map[string][]byte{"flag only": flagOnly} {
-		ih := new(InnerHeader)
-		if err := ih.readFromWithLimits(bytes.NewReader(data), 1<<20); !errors.Is(err, ErrDecodeLimitExceeded) || len(ih.Binaries) != 0 {
-			t.Fatalf("%s: err = %v, binaries = %v, want ErrDecodeLimitExceeded", name, err, ih.Binaries)
-		}
+	h = new(InnerHeader)
+	if err := h.readFromWithLimits(bytes.NewReader(flagOnly), 1<<20); err != nil {
+		t.Fatalf("bounded flag-only binary: %v", err)
+	}
+	if len(h.Binaries) != 1 || h.Binaries[0].MemoryProtection != 1 || len(h.Binaries[0].Content) != 0 {
+		t.Fatalf("bounded binaries = %v", h.Binaries)
 	}
 
 	// A valid header with a binary before the terminator decodes in both

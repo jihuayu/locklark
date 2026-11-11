@@ -163,6 +163,46 @@ func TestKDBXPayloadSealOpenRoundTrip(t *testing.T) {
 	}
 }
 
+// TestKDBXPayloadSealOpenEmptyBinary checks the empty attachment round trip
+// through the public API: AddBinary([]byte{}) stores a flag-only inner-header
+// binary (no content bytes), which Seal emits and Open's bounded decoder must
+// accept as valid rather than reject as too large.
+func TestKDBXPayloadSealOpenEmptyBinary(t *testing.T) {
+	cek := payloadFixtureCEK(t)
+	db := payloadFixtureDB(t)
+	const name = "empty.bin"
+	binary := db.AddBinary([]byte{})
+	entry := &db.Content.Root.Groups[0].Entries[0]
+	entry.Binaries = append(entry.Binaries, binary.CreateReference(name))
+
+	sealed := sealedFixture(t, db, cek)
+
+	opened, err := OpenKDBXPayload(sealed, cek)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	openedEntry := opened.Content.Root.Groups[0].Entries[0]
+	var ref kdbx.BinaryReference
+	found := false
+	for _, r := range openedEntry.Binaries {
+		if r.Name == name {
+			ref, found = r, true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("empty attachment reference missing: %+v", openedEntry.Binaries)
+	}
+	openedBinary := opened.FindBinary(ref.Value.ID)
+	if openedBinary == nil || openedBinary.Content == nil || len(openedBinary.Content) != 0 {
+		t.Fatalf("empty attachment did not round trip intact: %v", openedBinary)
+	}
+	// The other fixture attachment is unaffected.
+	if other := opened.FindBinary(openedEntry.Binaries[0].Value.ID); other == nil || !bytes.Equal(other.Content, payloadAttachmentBytes) {
+		t.Fatalf("existing attachment did not round trip: %v", other)
+	}
+}
+
 func TestKDBXPayloadSealAppliesProfileAndPreservesSalt(t *testing.T) {
 	cek := payloadFixtureCEK(t)
 	db := payloadFixtureDB(t)

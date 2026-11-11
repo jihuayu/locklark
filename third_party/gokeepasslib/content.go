@@ -102,11 +102,12 @@ func (ih *InnerHeader) readFrom(r io.Reader) error {
 // cannot fit the remaining budget is rejected with ErrDecodeLimitExceeded
 // before any of it is copied.
 //
-// Bounded mode also rejects malformed fields which the unbounded parser
-// tolerates: a binary field of 0 or 1 bytes (no flag, or a flag without
-// content), an inner random stream id field which is not exactly 4 bytes, and
-// over-budget or negative binary lengths. Unbounded readFrom keeps its
-// original behavior exactly.
+// A one-byte binary (protection flag, no content) is a valid empty binary and
+// is accepted; its flag byte is charged against maxBinaryBytes like any other
+// binary byte. Bounded mode also rejects malformed fields which the unbounded
+// parser tolerates: a binary field of 0 bytes (no protection flag), an inner
+// random stream id field which is not exactly 4 bytes, and negative binary
+// lengths. Unbounded readFrom keeps its original behavior exactly.
 func (ih *InnerHeader) readFromWithLimits(r io.Reader, maxBinaryBytes int64) error {
 	return ih.parse(r, maxBinaryBytes)
 }
@@ -134,11 +135,19 @@ ForLoop:
 			return fmt.Errorf("%w: inner random stream id of %d bytes", ErrCorruptedDatabase, int64(length))
 		}
 		if bounded && headerType == InnerHeaderBinary {
-			n := uint32(length)
-			if n < 2 || int64(n) > maxBinaryBytes-aggregate {
+			// The payload is the memory protection flag byte followed by
+			// the content, so one byte is an empty binary and zero bytes
+			// is missing the required flag.
+			if length < 0 {
+				return fmt.Errorf("%w: negative inner header binary length", ErrCorruptedDatabase)
+			}
+			if int64(length) > maxBinaryBytes-aggregate {
 				return fmt.Errorf("%w: inner header binary budget exceeded", ErrDecodeLimitExceeded)
 			}
-			aggregate += int64(n)
+			if length < 1 {
+				return fmt.Errorf("%w: inner header binary of %d bytes has no protection flag", ErrCorruptedDatabase, int64(length))
+			}
+			aggregate += int64(length)
 		}
 		data, err := readBytes(r, int64(length))
 		if err != nil {

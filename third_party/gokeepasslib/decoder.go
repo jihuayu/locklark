@@ -84,8 +84,11 @@ func (d *Decoder) Decode(db *Database) error {
 //     over-budget body with ErrDecodeLimitExceeded before XML decoding;
 //  4. parses the KDBX4 InnerHeader in bounded mode, which rejects a binary
 //     that would bring the aggregate binary bytes (protection flags
-//     included) over limits.MaxPlaintextBytes before copying it, and rejects
-//     malformed empty or negative binary lengths.
+//     included) over limits.MaxPlaintextBytes before copying it. A one-byte
+//     binary is a valid empty binary: its protection flag alone, with no
+//     content, and that flag byte is charged against the budget. A binary
+//     without a protection flag (length 0) or a negative binary length is
+//     malformed and rejected with ErrCorruptedDatabase.
 //
 // The key derivation function stays guarded by the DBCredentials KDF check,
 // which rejects unsupported algorithms and parameters before any Argon2
