@@ -187,17 +187,23 @@ func decodeState(raw []byte) (State, error) {
 	if binary.BigEndian.Uint16(raw[4:6]) != stateVersion {
 		return s, ErrCorrupt
 	}
-	// Validate every declared length against its cap and the actual length
-	// before using any of them.
-	n1 := int(binary.BigEndian.Uint32(raw[14:18]))
-	n2 := int(binary.BigEndian.Uint16(raw[18:20]))
-	n3 := int(binary.BigEndian.Uint32(raw[20:24]))
-	if n1 > MaxBaseBytes ||
-		n2 > MaxStateRevisionBytes ||
-		n3 == 0 || n3 > MaxWorkingBytes ||
-		stateRecordLen(n1, n2, n3) != len(raw) {
+	// Validate every declared length against its cap and the exact derived
+	// total in uint64 before converting to int, so a length near MaxUint32
+	// cannot wrap to a negative int on 32-bit platforms.
+	u1 := binary.BigEndian.Uint32(raw[14:18])
+	u2 := binary.BigEndian.Uint16(raw[18:20])
+	u3 := binary.BigEndian.Uint32(raw[20:24])
+	if u1 > MaxBaseBytes ||
+		uint64(u2) > MaxStateRevisionBytes ||
+		u3 == 0 || u3 > MaxWorkingBytes {
 		return s, ErrCorrupt
 	}
+	want := uint64(stateOverhead) + uint64(u1) + uint64(u2) + uint64(u3)
+	if want != uint64(len(raw)) {
+		return s, ErrCorrupt
+	}
+	// The total now fits in an int and each field length fits within it.
+	n1, n2, n3 := int(u1), int(u2), int(u3)
 	if (n1 == 0) != (n2 == 0) {
 		return s, ErrCorrupt
 	}

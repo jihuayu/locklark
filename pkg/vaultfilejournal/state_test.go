@@ -71,10 +71,13 @@ func resealState(raw []byte) []byte {
 	return raw
 }
 
-func setStateLengths(raw []byte, n1 int, n2 int, n3 uint32) {
+// setStateLengths writes raw header lengths verbatim. Every length is a uint
+// so any field value (including math.MaxUint32) is expressible on all
+// platforms; callers pass plain integer constants or int lengths.
+func setStateLengths(raw []byte, n1 uint, n2 uint, n3 uint) {
 	binary.BigEndian.PutUint32(raw[14:18], uint32(n1))
 	binary.BigEndian.PutUint16(raw[18:20], uint16(n2))
-	binary.BigEndian.PutUint32(raw[20:24], n3)
+	binary.BigEndian.PutUint32(raw[20:24], uint32(n3))
 }
 
 // TestStateLifecycle is the real-file lifecycle test: Open, ErrEmpty, init,
@@ -492,18 +495,26 @@ func TestDecodeStateMalformed(t *testing.T) {
 		"bad-version-0":    func() []byte { r := clone(); binary.BigEndian.PutUint16(r[4:6], 0); return resealState(r) }(),
 		"bad-version-2":    func() []byte { r := clone(); binary.BigEndian.PutUint16(r[4:6], 2); return resealState(r) }(),
 		"bad-version-max":  func() []byte { r := clone(); binary.BigEndian.PutUint16(r[4:6], math.MaxUint16); return resealState(r) }(),
-		"zero-working-len": func() []byte { r := clone(); setStateLengths(r, n1, n2, 0); return resealState(r) }(),
-		"working-too-long": func() []byte { r := clone(); setStateLengths(r, n1, n2, MaxWorkingBytes+1); return resealState(r) }(),
-		"base-too-long":    func() []byte { r := clone(); setStateLengths(r, MaxBaseBytes+1, n2, uint32(n3)); return resealState(r) }(),
-		"revision-too-long": func() []byte {
+		"zero-working-len": func() []byte { r := clone(); setStateLengths(r, uint(n1), uint(n2), 0); return resealState(r) }(),
+		"working-too-long": func() []byte {
 			r := clone()
-			setStateLengths(r, n1, MaxStateRevisionBytes+1, uint32(n3))
+			setStateLengths(r, uint(n1), uint(n2), MaxWorkingBytes+1)
 			return resealState(r)
 		}(),
-		"base-without-rev": func() []byte { r := clone(); setStateLengths(r, n1, 0, uint32(n3)); return resealState(r) }(),
-		"rev-without-base": func() []byte { r := clone(); setStateLengths(r, 0, n2, uint32(n3)); return resealState(r) }(),
-		"length-runs-past": func() []byte { r := clone(); setStateLengths(r, n1, n2, uint32(n3+1)); return resealState(r) }(),
-		"length-short":     func() []byte { r := clone(); setStateLengths(r, n1, n2, uint32(n3-1)); return resealState(r) }(),
+		"base-too-long": func() []byte {
+			r := clone()
+			setStateLengths(r, MaxBaseBytes+1, uint(n2), uint(n3))
+			return resealState(r)
+		}(),
+		"revision-too-long": func() []byte {
+			r := clone()
+			setStateLengths(r, uint(n1), MaxStateRevisionBytes+1, uint(n3))
+			return resealState(r)
+		}(),
+		"base-without-rev": func() []byte { r := clone(); setStateLengths(r, uint(n1), 0, uint(n3)); return resealState(r) }(),
+		"rev-without-base": func() []byte { r := clone(); setStateLengths(r, 0, uint(n2), uint(n3)); return resealState(r) }(),
+		"length-runs-past": func() []byte { r := clone(); setStateLengths(r, uint(n1), uint(n2), uint(n3+1)); return resealState(r) }(),
+		"length-short":     func() []byte { r := clone(); setStateLengths(r, uint(n1), uint(n2), uint(n3-1)); return resealState(r) }(),
 		"header-only-huge": func() []byte {
 			r := bytes.Clone(good[:stateOverhead])
 			setStateLengths(r, MaxBaseBytes, MaxStateRevisionBytes, math.MaxUint32)
@@ -598,6 +609,59 @@ func TestDecodeStateBoundsBeforeAllocation(t *testing.T) {
 				t.Fatalf("%s (len %d, +%d): corrupt record allocated %d bytes before rejection", h.name, len(h.raw), grow, got)
 			}
 		}
+	}
+}
+
+// TestDecodeStateUint32LengthsNoWrap pins the exact hostile headers found in
+// review. Their lengths, converted to int on a 32-bit platform, would be
+// negative and slip past the cap checks, so the decoder must compare in uint64
+// and reject them as ErrCorrupt on every architecture without panicking.
+func TestDecodeStateUint32LengthsNoWrap(t *testing.T) {
+	// baseLen=0xffffffff, revisionLen=1, workingLen=1, rawLen=57: the base and
+	// revision pairing holds and a naive int comparison would accept it.
+	makeRaw := func(generation uint64) []byte {
+		raw := make([]byte, stateOverhead+1)
+		copy(raw[0:4], stateMagic)
+		binary.BigEndian.PutUint16(raw[4:6], stateVersion)
+		binary.BigEndian.PutUint64(raw[6:14], generation)
+		setStateLengths(raw, math.MaxUint32, 1, 1)
+		raw[statePrefix] = 0x01 // revision byte
+		raw[statePrefix+1] = 0x02
+		return resealState(raw)
+	}
+	raw := makeRaw(0)
+	if len(raw) != 57 {
+		t.Fatalf("fixture length = %d, want 57", len(raw))
+	}
+
+	for name, in := range map[string][]byte{
+		"exact":      raw,
+		"generation": makeRaw(math.MaxUint64),
+		"trailing":   append(bytes.Clone(raw), 0x00),
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, err := decodeState(in)
+			if !errors.Is(err, ErrCorrupt) {
+				t.Fatalf("decodeState(len %d) err = %v, want ErrCorrupt", len(in), err)
+			}
+			if !sameState(s, State{}) {
+				t.Fatalf("decodeState returned a partial state: %+v", s)
+			}
+		})
+	}
+
+	// The same header through the public path is ErrCorrupt too, and never a
+	// panic, leaving the stored value untouched.
+	j := openAt(t, privateDir(t))
+	writeRawState(t, j, raw)
+	if _, err := j.LoadState(); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("LoadState = %v, want ErrCorrupt", err)
+	}
+	if err := j.InitializeState(baseState()); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("InitializeState over wrapped-length header = %v, want ErrCorrupt", err)
+	}
+	if after := rawKey(t, j, stateKey); !bytes.Equal(after, raw) {
+		t.Fatal("rejected operations replaced the corrupt state")
 	}
 }
 
