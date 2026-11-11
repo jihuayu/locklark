@@ -187,31 +187,43 @@ func VerifyPolicyCheckpoint(f *File, c *PolicyCheckpoint) error {
 // draft's policy continuation and current reader roster before any encryption
 // or key-wrapping work.
 //
-// header and proofs are the caller-supplied draft state. The helper performs
-// the checkpoint half of VerifyPolicyCheckpoint's documented validation and
-// error order, and nothing else:
+// header and proofs are the caller-supplied draft state, which a direct caller
+// such as a Seal may pass before wrapping or KDF work. The helper therefore
+// makes no assumption that the caller ran ValidateFile, and it returns a policy
+// only once every proof is structurally valid; it is the checkpoint half of
+// VerifyPolicyCheckpoint's documented validation and error order, and nothing
+// else:
 //
 //   - c must be non-nil and carry a valid vault ID, root key ID, 32-byte root
 //     public key and 32-byte digest, or the result is an invalid_value: the
 //     supplied anchor itself is malformed;
-//   - header.VaultID and every carried proof's policy vault must equal
-//     c.VaultID;
-//   - an empty proofs slice has no authenticated current policy and fails as
-//     CodePolicyCheckpointFailed, exactly as a stale pin does; a non-empty
-//     slice must be strictly increasing in policy_seq and end at
-//     header.PolicySeq with header.PolicyDigest equal to its digest, so that
-//     the last proof is the current policy and no later policy is carried;
-//   - the anchor, link, tip, gap, root and delegated-transition rules are
-//     those documented on VerifyPolicyCheckpoint, and their failures are
-//     CodePolicyCheckpointFailed; a carried policy-document signature that
-//     does not verify is CodeSignatureVerifyFailed at
-//     signed_policy_proofs[i].
+//   - header must pass ValidateHeader unchanged, so its vault ID, op ID,
+//     author device ID, revision ID shape, content linkage and 32-byte policy
+//     digest are checked; an empty revision ID is allowed, as it is for a
+//     draft;
+//   - header.VaultID must equal c.VaultID;
+//   - proofs must be non-empty and no longer than MaxArrayItems, and must be
+//     strictly increasing in policy_seq (checkPolicyProofOrder), and every
+//     proof must pass validateSignedPolicy, which validates Policy, the
+//     bounded and canonical Document, and that Document and Policy are equal,
+//     keyed signatures and proof bounds included;
+//   - every carried proof's policy vault must equal header.VaultID
+//     (CodeHeaderMismatch), and the last proof must carry header.PolicySeq
+//     with header.PolicyDigest equal to its digest (CodeHeaderMismatch), so
+//     that the authenticated current policy is exactly the one the header
+//     selects and no later policy is carried;
+//   - only then is the chain authenticated: the anchor, link, tip, gap, root
+//     and delegated-transition rules are those documented on
+//     VerifyPolicyCheckpoint, and their failures are CodePolicyCheckpointFailed;
+//     a carried policy-document signature that does not verify is
+//     CodeSignatureVerifyFailed at signed_policy_proofs[i].
 //
-// It does not read or check content signatures, and it performs no encryption
-// or decryption. It retains no pointer into header, proofs or c: the returned
-// policy shares no mutable storage with its proof, so later mutation of the
-// caller's proof bytes cannot alter it. Authority and delegations are only
-// ever read from an authenticated predecessor policy, never from a successor.
+// Every error return is a nil policy. It does not read or check content
+// signatures, and it performs no encryption or decryption. It retains no
+// pointer into header, proofs or c: the returned policy shares no mutable
+// storage with its proof, so later mutation of the caller's proof bytes cannot
+// alter it. Authority and delegations are only ever read from an authenticated
+// predecessor policy, never from a successor.
 func verifyPolicyChain(header Header, proofs []SignedPolicy, c *PolicyCheckpoint) (*Policy, error) {
 	if c == nil {
 		return nil, Err("", CodeInvalidValue)
@@ -220,22 +232,35 @@ func verifyPolicyChain(header Header, proofs []SignedPolicy, c *PolicyCheckpoint
 		!validEd25519Key(c.OwnerRootPublicKey) || !validDigest(c.PolicyDigest) {
 		return nil, Err("", CodeInvalidValue)
 	}
+	if err := ValidateHeader(&header); err != nil {
+		return nil, err
+	}
 	if header.VaultID != c.VaultID {
 		return nil, Err("", CodePolicyCheckpointFailed)
 	}
-	for i := range proofs {
-		if proofs[i].Policy.VaultID != c.VaultID {
-			return nil, Err("", CodePolicyCheckpointFailed)
-		}
+	// The current policy is the last proof, by header selection. A direct
+	// caller may not have run validateStructure, which is what normally binds
+	// the header to the proofs, so the helper checks that binding itself
+	// before authenticating anything: every proof is structurally valid and
+	// paired with its Document, belongs to the header's vault, and the last
+	// one is exactly the policy the header selects.
+	if len(proofs) == 0 || len(proofs) > MaxArrayItems {
+		return nil, Err("", CodeInvalidValue)
 	}
-	// The current policy is the last proof, by header selection. Verify the
-	// shape that selection relies on so the helper is safe on its own.
-	if len(proofs) == 0 || checkPolicyProofOrder(proofs) != nil {
-		return nil, Err("", CodePolicyCheckpointFailed)
+	if err := checkPolicyProofOrder(proofs); err != nil {
+		return nil, err
+	}
+	for i := range proofs {
+		if err := validateSignedPolicy(&proofs[i]); err != nil {
+			return nil, err
+		}
+		if proofs[i].Policy.VaultID != header.VaultID {
+			return nil, Err("", CodeHeaderMismatch)
+		}
 	}
 	if last := &proofs[len(proofs)-1]; last.Policy.PolicySeq != header.PolicySeq ||
 		!bytes.Equal(policyDigest(last), header.PolicyDigest) {
-		return nil, Err("", CodePolicyCheckpointFailed)
+		return nil, Err("", CodeHeaderMismatch)
 	}
 
 	// Locate the caller's trusted checkpoint. The anchor is the carried

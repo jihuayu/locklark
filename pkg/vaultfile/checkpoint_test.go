@@ -815,7 +815,10 @@ func TestVerifyPolicyChainRootChain(t *testing.T) {
 	}
 
 	// A wrong checkpoint fails closed with the existing precise code and no
-	// policy.
+	// policy. The anchor proof is used unmutated: the loop above already
+	// corrupted its Policy, and the helper now also requires every proof to
+	// be structurally valid, so the chain check needs a clean fixture.
+	c = newCPChain(t, k)
 	a := c.pin(c.anchor.PolicyDigest, c.anchor.PolicySeq)
 	a.PolicyDigest[0] ^= 0xff
 	bad, err := verifyPolicyChain(c.f.Header, c.f.SignedPolicyProofs, a)
@@ -828,6 +831,134 @@ func TestVerifyPolicyChainRootChain(t *testing.T) {
 		t.Fatal("verifyPolicyChain returned a policy for a nil checkpoint")
 	}
 	wantCodeAt(t, err, CodeInvalidValue, "")
+}
+
+// TestVerifyPolicyChainDocumentPolicyBinding pins that the shared chain helper
+// is safe for a direct draft caller that never ran validateStructure: the
+// policy it authenticates and returns is the one bound to the signed Document
+// and to the header, so an untrusted roster cannot diverge from it.
+func TestVerifyPolicyChainDocumentPolicyBinding(t *testing.T) {
+	k := newCPKeys(t)
+	baseline := func(t *testing.T) *cpChain {
+		t.Helper()
+		c := newCPChain(t, k)
+		if err := ValidateFile(c.f); err != nil {
+			t.Fatalf("fixture is not structurally valid: %v", err)
+		}
+		if _, err := verifyPolicyChain(c.f.Header, c.f.SignedPolicyProofs, c.anchor); err != nil {
+			t.Fatalf("baseline chain rejected: %v", err)
+		}
+		return c
+	}
+	chain := func(c *cpChain) (*Policy, error) {
+		return verifyPolicyChain(c.f.Header, c.f.SignedPolicyProofs, c.anchor)
+	}
+
+	t.Run("policy diverges from document", func(t *testing.T) {
+		// A nested roster edit in the current proof's Policy, leaving the
+		// signed Document and every signature untouched, is exactly what an
+		// untrusted roster divergence looks like to a draft caller.
+		for name, mutate := range map[string]func(p *Policy){
+			"reader label":    func(p *Policy) { p.Readers[0].Label = "Mallory" },
+			"writer added":    func(p *Policy) { p.Writers = append(p.Writers, Member{PrincipalID: "dave", Label: "Dave"}) },
+			"admin removed":   func(p *Policy) { p.Admins = nil },
+			"device key":      func(p *Policy) { p.Devices[0].ContentSigningKey.PublicKey[0] ^= 0xff },
+			"root public key": func(p *Policy) { p.OwnerRoot.PublicKey[0] ^= 0xff },
+		} {
+			c := baseline(t)
+			last := len(c.f.SignedPolicyProofs) - 1
+			mutate(&c.f.SignedPolicyProofs[last].Policy)
+			got, err := chain(c)
+			if got != nil {
+				t.Fatalf("%s: verifyPolicyChain returned a policy for a diverged roster", name)
+			}
+			wantCodeAt(t, err, CodePolicyMismatch, "")
+		}
+
+		// The same holds for a proof before the current one: every proof is
+		// validated, not only the one returned.
+		c := baseline(t)
+		c.f.SignedPolicyProofs[0].Policy.Readers[0].Label = "Mallory"
+		got, err := chain(c)
+		if got != nil {
+			t.Fatal("verifyPolicyChain returned a policy for a diverged anchor roster")
+		}
+		wantCodeAt(t, err, CodePolicyMismatch, "")
+	})
+
+	t.Run("bounds and header", func(t *testing.T) {
+		c := baseline(t)
+
+		// An over-MaxArrayItems proof slice is rejected before any proof or
+		// signature is examined.
+		orig := c.f.SignedPolicyProofs
+		c.f.SignedPolicyProofs = make([]SignedPolicy, MaxArrayItems+1)
+		for i := range c.f.SignedPolicyProofs {
+			c.f.SignedPolicyProofs[i] = orig[len(orig)-1]
+		}
+		got, err := chain(c)
+		if got != nil {
+			t.Fatal("verifyPolicyChain returned a policy for an over-long proof slice")
+		}
+		wantCodeAt(t, err, CodeInvalidValue, "")
+		c.f.SignedPolicyProofs = orig
+
+		// A header that fails ValidateHeader is returned unchanged.
+		h := c.f.Header
+		h.OpID = ""
+		got, err = verifyPolicyChain(h, c.f.SignedPolicyProofs, c.anchor)
+		if got != nil {
+			t.Fatal("verifyPolicyChain returned a policy for an invalid header")
+		}
+		wantCodeAt(t, err, CodeInvalidValue, "")
+
+		// A proof in another vault, and a final proof that is not the
+		// policy the header selects, are header mismatches. The vault edit
+		// keeps the proof's Document canonical and in step with its Policy,
+		// so the header check, not the Policy/Document check, rejects it.
+		origVault := c.f.SignedPolicyProofs[0].Policy.VaultID
+		origDoc := c.f.SignedPolicyProofs[0].Document
+		c.f.SignedPolicyProofs[0].Policy.VaultID = "vault-02"
+		c.f.SignedPolicyProofs[0].Document = docFor(&c.f.SignedPolicyProofs[0].Policy)
+		got, err = chain(c)
+		if got != nil {
+			t.Fatal("verifyPolicyChain returned a policy for a foreign-vault proof")
+		}
+		wantCodeAt(t, err, CodeHeaderMismatch, "")
+		c.f.SignedPolicyProofs[0].Policy.VaultID = origVault
+		c.f.SignedPolicyProofs[0].Document = origDoc
+
+		// A final proof whose digest is not the header's is a header
+		// mismatch, not a chain result.
+		origDigest := c.f.Header.PolicyDigest
+		c.f.Header.PolicyDigest = bytes.Clone(policyDigest(&c.f.SignedPolicyProofs[0]))
+		got, err = chain(c)
+		if got != nil {
+			t.Fatal("verifyPolicyChain returned a policy not selected by the header")
+		}
+		wantCodeAt(t, err, CodeHeaderMismatch, "")
+		c.f.Header.PolicyDigest = origDigest
+
+		// A draft header has no revision id and is still accepted here; a
+		// malformed one is not.
+		h = c.f.Header
+		h.RevisionID = ""
+		got, err = verifyPolicyChain(h, c.f.SignedPolicyProofs, c.anchor)
+		if err != nil || got == nil {
+			t.Fatalf("draft header with a valid chain rejected: %v", err)
+		}
+		h.RevisionID = "not-a-digest"
+		got, err = verifyPolicyChain(h, c.f.SignedPolicyProofs, c.anchor)
+		if got != nil {
+			t.Fatal("verifyPolicyChain returned a policy for a malformed revision id")
+		}
+		wantCodeAt(t, err, CodeInvalidValue, "")
+
+		// The untouched proofs are intact: the baseline still verifies.
+		if _, err := chain(c); err != nil {
+			t.Fatalf("bounds negatives altered the good chain: %v", err)
+		}
+	})
 }
 
 // TestVerifyPolicyCheckpointAnchorRootBinding pins the anchor policy's owner
