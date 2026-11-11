@@ -35,7 +35,10 @@ const probeContext = "locklark/remote-unlock-tls/v1/handshake-probe"
 // though closing TLS does not discard the exporter inputs of the completed
 // handshake. Errors detected before the Channel check (a wrongly sized
 // expected value, an invalid typed context or an uninitialized Channel) may
-// take precedence over ErrChannelClosed.
+// take precedence over ErrChannelClosed. The exception is
+// VerifyPeerDeviceTransportBinding, which always calls Check first, so on a
+// closed Channel it returns ErrChannelClosed for every binding, context, device
+// ID and key.
 type Channel struct {
 	conn   *tls.Conn
 	pin    PeerSPKIPin
