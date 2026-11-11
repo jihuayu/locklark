@@ -99,7 +99,27 @@ const diagnostics = mkdtempSync(join(state, "diagnostics-"));
 let stage = "fixture",
   lastPopup = null,
   lastRouteObservation = null,
+  routeObservationHistory = [],
   nativeInput = null;
+// Diagnostics only: keep at most ROUTE_HISTORY_LIMIT sanitized observations,
+// appended only when one of the four fields actually changes, so a failure
+// can show whether the route page ever reached locked/vault/detail first.
+const ROUTE_HISTORY_LIMIT = 8;
+function recordRouteObservation(observation) {
+  const last = routeObservationHistory[routeObservationHistory.length - 1];
+  if (
+    last &&
+    last.view === observation.view &&
+    last.detailShown === observation.detailShown &&
+    last.titleMatchesFixture === observation.titleMatchesFixture &&
+    last.statusKind === observation.statusKind
+  )
+    return;
+  routeObservationHistory = [
+    ...routeObservationHistory,
+    observation,
+  ].slice(-ROUTE_HISTORY_LIMIT);
+}
 let privacyValues = [];
 let observedFixture = null;
 function popupStatusKind(value) {
@@ -740,6 +760,7 @@ try {
           lastRouteObservation = sanitizeRouteObservation(
             await route.evaluate(routeStateProbe(fixture.Title)),
           );
+          recordRouteObservation(lastRouteObservation);
         } catch {}
       };
       const approveLabel = async () => {
@@ -1324,9 +1345,13 @@ try {
         : [],
     stage,
     // Latest fixed-enum route-page observation from the bounded native-label
-    // wait. It only ever contains the four sanitized fields below.
+    // wait, plus its bounded state-transition history where consecutive
+    // entries differ. Both only ever contain the four sanitized fields.
     ...(routeDetailRead
-      ? { routePage: sanitizeRouteObservation(lastRouteObservation) }
+      ? {
+          routePage: sanitizeRouteObservation(lastRouteObservation),
+          routeHistory: routeObservationHistory.map(sanitizeRouteObservation),
+        }
       : {}),
     popup: { available: false },
     native: { available: false },
