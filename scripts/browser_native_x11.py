@@ -3,6 +3,8 @@
 Reads one JSON request from stdin. Values are never echoed. Requires DISPLAY,
 libX11 and libXtst. Native controls use their real AT-SPI labels, state and
 geometry. Legacy coordinates are relative to the requested real X window.
+The only pointer input is the purpose-bound `chooser_action`
+{"select_folder": true}, derived from the measured chooser geometry.
 """
 import ctypes as C
 import json
@@ -96,6 +98,12 @@ FAILURE_REASONS = {
     "Chooser must share the owner client leader": "chooser-leader",
     "Chooser must belong to the owner browser process": "chooser-process",
     "X window query refused": "x-query",
+    "Chooser folder action request required": "folder-action-request",
+    "Chooser must keep the requested title": "folder-title",
+    "Chooser must keep the measured geometry": "folder-geometry",
+    "Chooser folder point is not inside the chooser": "folder-point",
+    "Chooser folder pointer is not at the measured point": "folder-pointer",
+    "Chooser folder input failed": "folder-input",
 }
 
 
@@ -119,6 +127,89 @@ PROBE_KEYS = frozenset(OWNER_FIELDS) | {"actions", "ownership_probe", "preserve_
 INPUT_KEYS = frozenset(OWNER_FIELDS) | {
     "actions", "owner", "owner_pid", "preserve_focus", "title", "title_prefix",
 }
+# One purpose-bound folder action, separate from the keyboard/coordinate input
+# shape. The chooser title must equal this exact literal and the chooser must
+# keep the measured client size; the point is always derived from that geometry.
+FOLDER_ACTION = {"select_folder": True}
+FOLDER_ACTION_KEYS = frozenset(OWNER_FIELDS) | {"chooser_action", "owner", "owner_pid"}
+EDGE_CHOOSER_TITLE = "Select the extension directory."
+FOLDER_CHOOSER_SIZE = (1124, 822)
+FOLDER_POINT_OFFSETS = (("width", -62), ("height", -69))
+
+
+def parse_folder_action_request(request):
+    """Exact purpose-bound `{"select_folder": true}` chooser request, or None.
+
+    The request is never the keyboard/coordinate shape: there is no `actions`,
+    no caller title, no `title_prefix`, no focus or geometry value and no
+    click coordinate. The chooser title is the fixed literal and the optional
+    caller PID is bound exactly as in the owner input shape. Only the fixed
+    attribution values are returned; values are never printed.
+    """
+    if type(request) is not dict or set(request) - FOLDER_ACTION_KEYS:
+        return None
+    action = request.get("chooser_action")
+    # Strict identity: the value must be the JSON boolean true, not 1 or "true".
+    if request.get("owner") is not True or type(action) is not dict or \
+            set(action) != set(FOLDER_ACTION) or action.get("select_folder") is not True:
+        return None
+    if not all(key in request for key in OWNER_FIELDS):
+        return None
+    if request.get("chooser_title_prefix") != EDGE_CHOOSER_TITLE:
+        return None
+    validated_pid = None
+    if "owner_pid" in request:
+        supplied = request["owner_pid"]
+        if type(supplied) is not int or not 1 < supplied <= PID_LIMIT:
+            return None
+        validated_pid = supplied
+    if ascii_line(request["owner_title_prefix"]) is None or \
+            ascii_path(request["user_data_dir"]) is None or \
+            ascii_path(request["executable"]) is None:
+        return None
+    normalized = {key: request[key] for key in OWNER_FIELDS}
+    normalized["caller_pid"] = validated_pid
+    normalized["probe"] = False
+    return normalized
+
+
+def folder_point(width, height):
+    """The only permitted point, (width-62, height-69), or None.
+
+    Valid only for the exact measured 1124x822 chooser client geometry and
+    only when the derived point is strictly inside that geometry.
+    """
+    if type(width) is not int or type(height) is not int or \
+            (width, height) != FOLDER_CHOOSER_SIZE:
+        return None
+    offsets = dict(FOLDER_POINT_OFFSETS)
+    x, y = width + offsets["width"], height + offsets["height"]
+    if 0 < x < width and 0 < y < height:
+        return x, y
+    return None
+
+
+def chooser_geometry(attributes):
+    """(width, height) of one real mapped, non-override-redirect window.
+
+    None for a missing attribute record, an unmapped or override-redirect
+    window, or a non-positive client size. The exact measured size is enforced
+    only by folder_point, so this helper never widens the permitted point.
+    """
+    if attributes is None or attributes.map_state != 2 or attributes.override_redirect:
+        return None
+    if type(attributes.width) is not int or type(attributes.height) is not int:
+        return None
+    if attributes.width <= 0 or attributes.height <= 0:
+        return None
+    return attributes.width, attributes.height
+
+
+def folder_output(click_count):
+    """Fixed folder-action output: no window, title, path, PID or coordinate."""
+    if type(click_count) is not int or click_count not in (0, 1):
+        return None
+    return {"chooser_action": "select_folder", "clicks": click_count}
 
 
 def x_property(x, display, candidate, atom, expected_type):
@@ -272,6 +363,9 @@ def parse_owner_request(request):
     if input_mode is not None and input_mode is not True:
         return None
     if (probe is True) == (input_mode is True):
+        return None
+    # The purpose-bound folder action has its own closed schema.
+    if "chooser_action" in request:
         return None
     if probe is True:
         if set(request) - PROBE_KEYS:
@@ -986,11 +1080,16 @@ def main():
             found.extend(collect_titles(prefix, candidate, depth + 1))
         return found
 
+    # The folder action has its own closed request parser; it is never routed
+    # through the keyboard/coordinate owner input shape.
+    folder_mode = "chooser_action" in request
     owner = None
-    if request.get("owner") or request.get("ownership_probe"):
-        owner = parse_owner_request(request)
+    if folder_mode or request.get("owner") or request.get("ownership_probe"):
+        owner = parse_folder_action_request(request) if folder_mode \
+            else parse_owner_request(request)
         if owner is None or request.get("wait_absent") or request.get("inspect"):
-            raise RuntimeError("Chooser ownership request required")
+            raise RuntimeError("Chooser folder action request required" if folder_mode
+                               else "Chooser ownership request required")
 
     if request.get("wait_absent"):
         if not request.get("title") or not request.get("executable") or request.get("actions"):
@@ -1092,6 +1191,111 @@ def main():
                 return
         finally:
             errors.clear()
+
+    def find_chooser():
+        """The same unique chooser: exact title, bounded tree, re-read title.
+
+        Returns its (width, height) only when it is mapped, not
+        override-redirect and exactly the measured client size.
+        """
+        if window_title(target) != EDGE_CHOOSER_TITLE:
+            raise RuntimeError("Chooser must keep the requested title")
+        same = [candidate for candidate in collect_titles(EDGE_CHOOSER_TITLE)
+                if normal_viewable(candidate)]
+        if same != [target]:
+            raise RuntimeError("Native acceptance window must be unique" if same
+                               else "Native acceptance window unavailable")
+        if window_title(target) != EDGE_CHOOSER_TITLE:
+            raise RuntimeError("Chooser must keep the requested title")
+        geometry = chooser_geometry(attributes_of(target))
+        if geometry is None or folder_point(*geometry) is None:
+            raise RuntimeError("Chooser must keep the measured geometry")
+        return geometry
+
+    def prove_folder_owner(owner_record):
+        """Owner window, PID, executable and profile, re-read before the click."""
+        current = [candidate for candidate in collect_titles(owner["owner_title_prefix"])
+                   if normal_viewable(candidate)]
+        if current != [owner_window]:
+            raise RuntimeError("Chooser owner window must be unique" if current
+                               else "Chooser owner window unavailable")
+        owner_now = property_single_int(window_property(owner_window, "_NET_WM_PID"))
+        if type(owner_now) is not int or owner_now != owner_pid:
+            raise RuntimeError("Chooser owner window unavailable")
+        if derived_owner_pid(owner_record, owner_now) != owner_now:
+            raise RuntimeError("Chooser owner window unavailable")
+        if owner_process_matches(owner_now, owner_record) != owner_now:
+            raise RuntimeError("Chooser owner window unavailable")
+        if window_pid(target) != owner_now:
+            raise RuntimeError("Chooser must belong to the owner browser process")
+
+    def read_only(step, failure="Chooser folder input failed"):
+        """One read-only Xlib step; a refused or erroring query refuses input."""
+        errors.clear()
+        try:
+            value = step()
+        except RuntimeError:
+            raise
+        except Exception:
+            raise RuntimeError(failure)
+        x.XSync(display, 0)
+        if errors:
+            raise RuntimeError(failure)
+        return value
+
+    def click_folder(owner_record):
+        # Every check below runs before the request batch that queues the
+        # click. Chooser and owner proofs alternate so state must stay
+        # identical across them, ending with the owner re-read immediately
+        # before the single XTest button down/up pair.
+        geometry = read_only(find_chooser, "Native acceptance X query failed")
+        read_only(lambda: prove_folder_owner(owner_record), "Native acceptance X query failed")
+        if read_only(find_chooser, "Native acceptance X query failed") != geometry:
+            raise RuntimeError("Chooser must keep the measured geometry")
+        point = folder_point(*geometry)
+        if point is None:
+            raise RuntimeError("Chooser folder point is not inside the chooser")
+        read_only(lambda: prove_folder_owner(owner_record), "Native acceptance X query failed")
+        # Last identity/geometry re-read immediately before the click.
+        if read_only(find_chooser, "Native acceptance X query failed") != geometry:
+            raise RuntimeError("Chooser must keep the measured geometry")
+        # The click lands at the one derived point only when the chooser's root
+        # origin plus that point is exactly the current pointer position. No
+        # motion is emitted; the pointer stays where the reviewed probe left it.
+        px, py, child = C.c_int(), C.c_int(), window()
+        if not x.XTranslateCoordinates(display, target, root, 0, 0, C.byref(px),
+                                       C.byref(py), C.byref(child)):
+            raise RuntimeError("Chooser must keep the measured geometry")
+        qroot, qchild = window(), window()
+        rx, ry, wx, wy, mask = C.c_int(), C.c_int(), C.c_int(), C.c_int(), C.c_uint()
+        if not x.XQueryPointer(display, root, C.byref(qroot), C.byref(qchild),
+                               C.byref(rx), C.byref(ry), C.byref(wx), C.byref(wy),
+                               C.byref(mask)):
+            raise RuntimeError("Chooser folder pointer is not at the measured point")
+        if (rx.value, ry.value) != (px.value + point[0], py.value + point[1]):
+            raise RuntimeError("Chooser folder pointer is not at the measured point")
+        x.XSync(display, 0)
+        if errors:
+            raise RuntimeError("Native acceptance X query failed")
+        down = xt.XTestFakeButtonEvent(display, 1, 1, 0)
+        up = xt.XTestFakeButtonEvent(display, 1, 0, 0)
+        if not down or not up:
+            raise RuntimeError("Chooser folder input failed")
+        x.XFlush(display)
+        x.XSync(display, 0)
+        if errors:
+            raise RuntimeError("Chooser folder input failed")
+
+    if folder_mode:
+        if owner is None:
+            raise RuntimeError("Chooser folder action request required")
+        errors.clear()
+        FAILURE_CONTEXT["index"] = 0
+        FAILURE_CONTEXT["action"] = "folder-action"
+        click_folder(owner)
+        print(json.dumps(folder_output(1)))
+        x.XCloseDisplay(display)
+        return
 
     def selected_map_state():
         attributes = Attributes()

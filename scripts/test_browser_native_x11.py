@@ -713,6 +713,139 @@ class ChooserRelationTests(unittest.TestCase):
                 self.assertIsNone(native.owner_process_matches(101, owner))
 
 
+_ABSENT = object()
+
+
+def folder_request(**overrides):
+    # The exact purpose-bound folder action shape. The chooser title is the
+    # fixed reviewed literal; nothing else selects the chooser.
+    request = {
+        "owner": True,
+        "chooser_action": {"select_folder": True},
+        "chooser_title_prefix": "Select the extension directory.",
+        "owner_title_prefix": "Ext",
+        "user_data_dir": "/synthetic/profile-1",
+        "executable": "/synthetic/edge",
+    }
+    request.update(overrides)
+    for key in [key for key, value in overrides.items() if value is _ABSENT]:
+        del request[key]
+    return request
+
+
+class FolderActionTests(unittest.TestCase):
+    def test_exact_semantic_action_is_the_only_accepted_shape(self):
+        parsed = native.parse_folder_action_request(folder_request())
+        self.assertEqual(parsed, {"owner_title_prefix": "Ext",
+                                  "chooser_title_prefix": "Select the extension directory.",
+                                  "user_data_dir": "/synthetic/profile-1",
+                                  "executable": "/synthetic/edge",
+                                  "caller_pid": None, "probe": False})
+        self.assertEqual(set(parsed), set(native.OWNER_FIELDS) | {"caller_pid", "probe"})
+        # A caller PID is optional but only well formed and never trusted alone.
+        self.assertEqual(native.parse_folder_action_request(
+            folder_request(owner_pid=101))["caller_pid"], 101)
+        self.assertIsNone(native.derived_owner_pid(
+            native.parse_folder_action_request(folder_request(owner_pid=101)), 202))
+        self.assertEqual(native.derived_owner_pid(
+            native.parse_folder_action_request(folder_request()), 101), 101)
+
+    def test_generic_coordinates_and_unknown_actions_are_rejected(self):
+        cases = {
+            "false": folder_request(chooser_action={"select_folder": False}),
+            "absent value": folder_request(chooser_action={}),
+            "wrong key": folder_request(chooser_action={"select_directory": True}),
+            "extra action key": folder_request(chooser_action={"select_folder": True,
+                                                               "click": [1062, 753]}),
+            "true string": folder_request(chooser_action={"select_folder": "true"}),
+            "one": folder_request(chooser_action={"select_folder": 1}),
+            "null": folder_request(chooser_action={"select_folder": None}),
+            "action true": folder_request(chooser_action=True),
+            "action list": folder_request(chooser_action=[{"select_folder": True}]),
+            "action null": folder_request(chooser_action=None),
+            "actions": folder_request(actions=[{"click": [1062, 753]}]),
+            "keyboard actions": folder_request(actions=[{"key": "Return"}]),
+            "empty actions": folder_request(actions=[]),
+            "click field": folder_request(click=[1062, 753]),
+            "point field": folder_request(point={"x": 1062, "y": 753}),
+            "screen point": folder_request(x=1144, y=786),
+            "geometry": folder_request(width=1124, height=822),
+            "title override": folder_request(title="Other"),
+            "title prefix": folder_request(title_prefix="Ext"),
+            "focus": folder_request(preserve_focus=True),
+            "probe": folder_request(ownership_probe=True),
+            "owner false": folder_request(owner=False),
+            "owner absent": folder_request(owner=_ABSENT),
+            "nearby title": folder_request(chooser_title_prefix="Select the extension directory"),
+            "title suffix": folder_request(chooser_title_prefix="Select the extension directory.x"),
+            "title case": folder_request(chooser_title_prefix="select the extension directory."),
+            "other title": folder_request(chooser_title_prefix="Select a folder"),
+            "missing owner prefix": folder_request(owner_title_prefix=_ABSENT),
+            "relative profile": folder_request(user_data_dir="relative/profile"),
+            "profile trailing slash": folder_request(user_data_dir="/synthetic/profile-1/"),
+            "relative executable": folder_request(executable="edge"),
+            "pid string": folder_request(owner_pid="101"),
+            "pid bool": folder_request(owner_pid=True),
+            "pid root": folder_request(owner_pid=1),
+            "pid over limit": folder_request(owner_pid=native.PID_LIMIT + 1),
+        }
+        for name, request in cases.items():
+            with self.subTest(name):
+                self.assertIsNone(native.parse_folder_action_request(request))
+        for value in (None, [], "x", True):
+            with self.subTest(value=value):
+                self.assertIsNone(native.parse_folder_action_request(value))
+        # The folder key never routes through the generic owner input parser,
+        # and the zero-action probe keeps its own closed shape.
+        self.assertIsNone(native.parse_owner_request(folder_request()))
+        self.assertIsNone(native.parse_owner_request(
+            probe_request(chooser_action={"select_folder": True})))
+
+    def test_only_the_measured_point_is_derived(self):
+        self.assertEqual(native.FOLDER_CHOOSER_SIZE, (1124, 822))
+        self.assertEqual(native.folder_point(1124, 822), (1062, 753))
+        width, height = native.FOLDER_CHOOSER_SIZE
+        self.assertTrue(0 < 1062 < width and 0 < 753 < height)
+        for shape in ((1123, 822), (1124, 821), (1125, 822), (1124, 823), (1124, 824),
+                      (1120, 822), (1062, 753), (0, 0), (-1124, -822), (2248, 1644)):
+            with self.subTest(size=shape):
+                self.assertIsNone(native.folder_point(*shape))
+        for shape in ((1124, 822.0), ("1124", 822), (True, 822), (None, 822), (822, 1124)):
+            with self.subTest(size=shape):
+                self.assertIsNone(native.folder_point(*shape))
+
+    def test_geometry_requires_a_mapped_non_override_window(self):
+        mapped = types.SimpleNamespace(width=1124, height=822, map_state=2, override_redirect=0)
+        self.assertEqual(native.chooser_geometry(mapped), (1124, 822))
+        for change in ({"map_state": 0}, {"map_state": 1}, {"override_redirect": 1},
+                       {"width": 0}, {"height": -822}, {"width": None}, {"height": "822"}):
+            with self.subTest(change=change):
+                self.assertIsNone(native.chooser_geometry(
+                    types.SimpleNamespace(**{**vars(mapped), **change})))
+        self.assertIsNone(native.chooser_geometry(None))
+        # A mapped window of any other size is not a measured chooser: the
+        # point helper, not this reader, rejects it before any click.
+        for shape in ((1125, 822), (1124, 821), (1123, 823)):
+            with self.subTest(shape=shape):
+                self.assertIsNotNone(native.chooser_geometry(
+                    types.SimpleNamespace(width=shape[0], height=shape[1],
+                                          map_state=2, override_redirect=0)))
+                self.assertIsNone(native.folder_point(*shape))
+
+    def test_output_is_fixed_and_privacy_safe(self):
+        self.assertEqual(native.folder_output(1), {"chooser_action": "select_folder", "clicks": 1})
+        self.assertEqual(native.folder_output(0), {"chooser_action": "select_folder", "clicks": 0})
+        for value in (2, -1, True, None, "1"):
+            with self.subTest(value=value):
+                self.assertIsNone(native.folder_output(value))
+        for message in ("Chooser folder action request required",
+                        "Chooser must keep the requested title",
+                        "Chooser must keep the measured geometry",
+                        "Chooser folder point is not inside the chooser",
+                        "Chooser folder input failed"):
+            self.assertRegex(native.FAILURE_REASONS[message], r"^[a-z-]+$")
+
+
 class ChooserOwnerChainTests(unittest.TestCase):
     def test_owner_chain_requires_unique_linked_terminal(self):
         owner = (11, 101, True)
