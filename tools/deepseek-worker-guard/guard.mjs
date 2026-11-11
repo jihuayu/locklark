@@ -14,6 +14,16 @@ export const DENIAL_REASON = 'Direct Git stash commands are denied by the worker
 
 const SHELL_TOOL_NAMES = new Set(['bash', 'terminal'])
 const GIT_EXECUTABLES = new Set(['git', '/usr/bin/git'])
+const SHELL_EXECUTABLES = new Set([
+  'bash',
+  'sh',
+  '/bin/bash',
+  '/usr/bin/bash',
+  '/bin/sh',
+  '/usr/bin/sh',
+])
+const GIT_FLAGS_WITH_VALUE = new Set(['-C', '-c', '--git-dir', '--work-tree'])
+const GIT_FLAGS_WITHOUT_VALUE = new Set(['--no-pager', '--bare'])
 const ASSIGNMENT_PREFIX = /^[A-Za-z_][A-Za-z0-9_]*=/
 const SHELL_PREFIX_KEYWORDS = new Set([
   '!',
@@ -145,28 +155,50 @@ function isGitStashSegment(segment) {
     break
   }
 
-  if (!GIT_EXECUTABLES.has(tokens[index])) return false
-  index += 1
+  if (GIT_EXECUTABLES.has(tokens[index])) {
+    index += 1
 
-  // Skip only the global options this narrow guard is meant to cover.
-  while (index < tokens.length) {
-    const token = tokens[index]
+    // Skip only the global options this narrow guard is meant to cover.
+    while (index < tokens.length) {
+      const token = tokens[index]
 
-    if (token === '-C' || token === '-c') {
-      if (index + 1 >= tokens.length) return false
-      index += 2
-      continue
+      if (GIT_FLAGS_WITH_VALUE.has(token)) {
+        if (index + 1 >= tokens.length) return false
+        index += 2
+        continue
+      }
+
+      if (GIT_FLAGS_WITHOUT_VALUE.has(token)) {
+        index += 1
+        continue
+      }
+
+      if (token.length > 2 && (token.startsWith('-C') || token.startsWith('-c'))) {
+        index += 1
+        continue
+      }
+
+      if (token.startsWith('--git-dir=') || token.startsWith('--work-tree=')) {
+        index += 1
+        continue
+      }
+
+      break
     }
 
-    if (token.length > 2 && (token.startsWith('-C') || token.startsWith('-c'))) {
-      index += 1
-      continue
-    }
-
-    break
+    return tokens[index] === 'stash'
   }
 
-  return tokens[index] === 'stash'
+  // Inspect one literal shell `-c` argument, not arbitrary wrappers.
+  if (SHELL_EXECUTABLES.has(tokens[index])) {
+    index += 1
+    if (tokens[index] !== '-c') return false
+    index += 1
+    if (index >= tokens.length) return false
+    return isGitStashCommand(tokens[index])
+  }
+
+  return false
 }
 
 /**
