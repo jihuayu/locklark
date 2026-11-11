@@ -48,6 +48,13 @@ NATIVE_REASONS = {"a11y-unavailable", "a11y-query", "a11y-tree-limit", "a11y-chi
 ERROR_CLASSES = {"none", "assertion", "os", "timeout", "value", "type", "key", "json", "unexpected"}
 
 
+def error_class(error):
+    """Map an exception to a fixed public class without reading its text."""
+    classes = {AcceptanceFailure: "assertion", OSError: "os", subprocess.TimeoutExpired: "timeout",
+               ValueError: "value", TypeError: "type", KeyError: "key", json.JSONDecodeError: "json"}
+    return classes.get(type(error), "unexpected")
+
+
 def owned_runtime():
     # Socket addresses have a small OS/product bound. Artifact destinations
     # such as GitHub RUNNER_TEMP may be arbitrarily long; keep only the owned
@@ -111,6 +118,7 @@ def public_diagnostic(acceptance):
     result = {"stage": choice(acceptance.stage, STAGES), "step": choice(acceptance.step, STEPS),
               "operation": choice(acceptance.operation, LABELS), "error_class": choice(acceptance.error_class, ERROR_CLASSES),
               "source_line": count(acceptance.error_line),
+              "privacy_error_class": choice(getattr(acceptance, "privacy_error_class", "none"), ERROR_CLASSES, "unexpected"),
               "reason": choice(acceptance.reason, {"none", "external-command", "external-timeout", "external-launch"}
                                | {"native-" + reason for reason in NATIVE_REASONS})}
     command = acceptance.last_command if type(acceptance.last_command) is dict else {}
@@ -250,6 +258,70 @@ def observe_absence_until_eof(connection, observe, deadline, *, clock=time.monot
             require(connection.recv(1) == b"")
             sample()
             return {"observations": count, "maximum_gap_ms": round(maximum_gap * 1000), "eof": True}
+
+
+def frame_prefix(value, expected):
+    """True when value is a nonempty strict prefix of the expected frame."""
+    return bool(value) and len(value) < len(expected) and expected.startswith(value)
+
+
+def read_cancelled_failure(connection):
+    """Read a pending reply only up to the canonical failure frame. Each read
+    takes at most the remaining length, appends it, and must then keep the
+    bytes so far a prefix of the expected frame. A full frame succeeds, and
+    EOF is accepted before any byte or after an exact strict failure header
+    prefix; every other byte, short read, or read error fails closed as
+    invariant."""
+    expected, raw, eof = frame(bytes([5])), b"", False
+    while len(raw) < len(expected) and not eof:
+        try:
+            part = connection.recv(len(expected) - len(raw))
+        except (socket.timeout, OSError):
+            require(False)
+        if len(part) == 0:
+            eof = True
+            break
+        raw += part
+        require(len(raw) <= len(expected) and expected[:len(raw)] == raw)
+    require(expected[:len(raw)] == raw and (eof or raw == expected))
+    return raw
+
+
+def strip_cancelled_failure(wire, expected, observed):
+    """Return (parsed, partial) for the end of one response capture. Every
+    complete frame is parsed in full. A pending frame is accepted only when
+    its prefix is exactly the observed bytes, those bytes are a strict prefix
+    of expected, and the rest of the capture is empty. Because the observed
+    bytes are checked against the raw wire before any header is read, a
+    canonical value is never misread as a complete or oversized header. This
+    is one capture at a time: whether the run saw exactly one partial is the
+    caller's whole-run check, not this helper's."""
+    parsed, offset, partial = bytearray(), 0, False
+    correlated = frame_prefix(observed, expected) and len(observed) > 0
+    while offset < len(wire):
+        if correlated and wire.startswith(observed, offset):
+            rest = offset + len(observed)
+            if len(wire) - offset < 4 or offset + 4 + struct.unpack(">I", wire[offset:offset + 4])[0] > len(wire):
+                require(rest == len(wire))
+                parsed += observed
+                partial = True
+                break
+        require(len(wire) - offset >= 4)
+        size = struct.unpack(">I", wire[offset:offset + 4])[0]
+        value = wire[offset + 4:offset + 4 + size]
+        require(size == len(value) and 1 <= size <= 65536 and value[0] in (5, 12, 14))
+        if value[0] == 5:
+            require(value == b"\x05")
+        elif value[0] == 12:
+            identities(value)
+        else:
+            body, rest = take_string(value[1:])
+            kind, body = take_string(body)
+            signature, tail = take_string(body)
+            require(kind == b"ssh-ed25519" and len(signature) == 64 and not rest and not tail)
+        parsed += wire[offset:offset + 4 + size]
+        offset += 4 + size
+    return bytes(parsed), partial
 
 
 class AgentRelay:
@@ -413,9 +485,11 @@ class Acceptance:
         self.log = (self.root / "desktop.stdout-stderr").open("wb")
         self.cli.logs.append((self.root / "desktop.stdout-stderr", set()))
         self.worker_logs, self.secret_bytes = [], []
+        # Private raw bytes of the locked pending reply; never printed or serialized.
+        self.locked_failure = b""
         self.endpoint = None
         self.reason, self.control_diagnostic = "none", {}
-        self.error_class, self.error_line = "none", 0
+        self.error_class, self.error_line, self.privacy_error_class = "none", 0, "none"
         self.step, self.last_command = "none", {"category": "none", "state": "none", "exit_code": None, "elapsed_ms": 0}
 
     def mark(self, name):
@@ -785,10 +859,7 @@ class Acceptance:
         pending = self.request(self.import_public, os.urandom(50))
         self.observed_approval()
         self.click("locked")
-        prefix = pending.recv(4)
-        if prefix:
-            prefix += exact(pending, 4 - len(prefix))
-            require(struct.unpack(">I", prefix)[0] == 1 and exact(pending, 1) == b"\x05")
+        self.locked_failure = read_cancelled_failure(pending)
         pending.close()
         self.wait("unlock")
         require(not pathlib.Path(self.endpoint).exists())
@@ -843,27 +914,19 @@ class Acceptance:
             raw = path.read_bytes()
             scan(raw, [value for value in self.cli.values if value not in allowed])
             require(all(value not in raw for value in self.secret_bytes))
-        for path in self.root.glob("agent-wire-*.*"):
+        # A locked reply may end after an exact strict failure prefix. Only
+        # the one suffix equal to those observed bytes stays unparsed; every
+        # complete frame is still parsed in full, and any other partial fails.
+        expected, observed, partials = frame(bytes([5])), self.locked_failure, 0
+        for path in sorted(self.root.glob("agent-wire-*.*")):
             raw = path.read_bytes()
             scan(raw, self.cli.values)
             require(all(value not in raw for value in self.secret_bytes))
-            if path.suffix == ".response":
-                offset = 0
-                while offset < len(raw):
-                    require(len(raw) - offset >= 4)
-                    size = struct.unpack(">I", raw[offset:offset + 4])[0]
-                    value = raw[offset + 4:offset + 4 + size]
-                    require(size == len(value) and 1 <= size <= 65536 and value[0] in (5, 12, 14))
-                    if value[0] == 5:
-                        require(value == b"\x05")
-                    elif value[0] == 12:
-                        identities(value)
-                    else:
-                        wire, rest = take_string(value[1:])
-                        kind, wire = take_string(wire)
-                        signature, tail = take_string(wire)
-                        require(kind == b"ssh-ed25519" and len(signature) == 64 and not rest and not tail)
-                    offset += 4 + size
+            if path.name.endswith(".response"):
+                _parsed, partial = strip_cancelled_failure(raw, expected, observed)
+                require(not partial or not partials)
+                partials += partial
+        require(partials == (1 if frame_prefix(observed, expected) else 0))
         self.mark("full_public_outputs_and_observed_agent_wire_contain_no_factors_or_private_seed")
 
     def run(self):
@@ -935,9 +998,7 @@ def main(argv=None):
         success = True
     except Exception as error:
         if acceptance:
-            classes = {AcceptanceFailure: "assertion", OSError: "os", subprocess.TimeoutExpired: "timeout",
-                       ValueError: "value", TypeError: "type", KeyError: "key", json.JSONDecodeError: "json"}
-            acceptance.error_class = classes.get(type(error), "unexpected")
+            acceptance.error_class = error_class(error)
             trace = error.__traceback__
             while trace:
                 if pathlib.Path(trace.tb_frame.f_code.co_filename).resolve() == pathlib.Path(__file__).resolve():
@@ -957,17 +1018,25 @@ def main(argv=None):
                 acceptance.close()
             except Exception:
                 success, acceptance.stage = False, "cleanup"
+            # privacy() raises only a fixed AcceptanceFailure; keep the text out
+            # of results and classify it without reading it.
             previous_stage = acceptance.stage
             try:
                 acceptance.privacy()
-            except Exception:
-                success, previous_stage = False, "privacy"
+            except Exception as error:
+                # Keep a prior stage, class and source line as primary; only a
+                # privacy-only failure reports stage "privacy".
+                if success:
+                    previous_stage = "privacy"
+                success = False
+                acceptance.privacy_error_class = error_class(error)
             acceptance.stage = "complete" if success else previous_stage
             stage = acceptance.stage if acceptance.stage in STAGES else "prerequisites"
             diagnostic = public_diagnostic(acceptance)
             acceptance.cli.write(acceptance.root / "ssh-result.json", {"success": success, "stage": stage,
                 "operation": acceptance.operation if acceptance.operation in LABELS else "none", "reason": acceptance.reason,
                 "error_class": acceptance.error_class, "source_line": acceptance.error_line,
+                "privacy_error_class": diagnostic["privacy_error_class"],
                 "controls": acceptance.control_diagnostic, "diagnostic": diagnostic, "checks": acceptance.checks})
             print(("PASS" if success else "FAIL") + ": SSH acceptance at " + stage)
             if not success:

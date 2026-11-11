@@ -7,6 +7,7 @@ import io
 import json
 import os
 import pathlib
+import socket
 import stat
 import struct
 import subprocess
@@ -19,6 +20,7 @@ from unittest import mock
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import ssh_agent_acceptance as acceptance
 import ssh_native_x11 as native
+from run_cli_acceptance import scan
 
 
 class ProtocolOracleTests(unittest.TestCase):
@@ -117,6 +119,141 @@ class PrivacyTests(unittest.TestCase):
             self.assertNotIn(secret, out.getvalue())
             self.assertIn("at prerequisites", out.getvalue())
             fake.diagnose.assert_called_once_with()
+
+
+class PrivacyStageTests(unittest.TestCase):
+    # AcceptanceFailure's message is its fixed code, so these distinct canaries
+    # are allowlisted codes; constructing it directly never touches args.
+    primary_canary = "oracle-stream-truncated"
+    privacy_canary = "privacy-canary-disclosed"
+
+    class Controller:
+        """Fake controller whose privacy stage is the production method."""
+
+        # Unbound production method, so the real stage, scan and failure run.
+        privacy = acceptance.Acceptance.privacy
+
+        def __init__(self, root, primary=None):
+            self.root, self.primary = root, primary
+            self.stage, self.step, self.operation, self.reason = "slow-frame", "none", "approve", "none"
+            self.checks, self.control_diagnostic, self.secret_bytes = [], {}, []
+            self.locked_failure = b""
+            self.runtime_endpoint_bytes, self.runtime_owned, self.runtime_cleaned = 40, True, True
+            self.error_class, self.error_line, self.privacy_error_class = "none", 0, "none"
+            self.cli = mock.Mock(counter=0, logs=[(root / "desktop.stdout-stderr", set())], values=[])
+            self.cli.write = mock.Mock()
+            self.last_command = {"category": "native-observe", "state": "completed", "exit_code": 0, "elapsed_ms": 5}
+
+        def run(self):
+            if self.primary:
+                raise self.primary
+            self.stage = "lock"
+
+        def diagnose(self):
+            # main() records the failure's source line before diagnosing.
+            # Keep that line; diagnosis only captures it.
+            self.diagnosed_error_line = self.error_line
+
+        def close(self):
+            self.last_command = {"category": "native-observe", "state": "completed", "exit_code": 0, "elapsed_ms": 5}
+
+        def mark(self, name):
+            self.checks.append(name)
+
+    def run_main(self, primary=None, privacy=None):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "desktop.stdout-stderr").write_bytes(b"public evidence only\n")
+            if primary is not None:
+                primary = acceptance.AcceptanceFailure(self.primary_canary)
+            fake = self.Controller(root, primary)
+            calls, stages, real_scan = [], [], acceptance.scan
+            def scan(raw, values):
+                calls.append(values)
+                stages.append(fake.stage)
+                if privacy is not None:
+                    raise privacy
+                return real_scan(raw, values)
+            out = io.StringIO()
+            with mock.patch.object(acceptance, "Acceptance", return_value=fake), \
+                    mock.patch.object(acceptance, "scan", scan), \
+                    contextlib.redirect_stdout(out):
+                status = acceptance.main(["--host", "/unused", "--cli", "/unused", "--peer", "/unused"])
+            path, result = fake.cli.write.call_args.args
+            self.assertEqual(path, root / "ssh-result.json")
+        # Neither exception message's canary may reach stdout (FAIL line and
+        # diagnostic) or the serialized result. The only private path in output
+        # is the intended evidence line; the result must not carry it at all.
+        serialized = json.dumps(result)
+        for value in (self.primary_canary, self.privacy_canary):
+            self.assertNotIn(value, out.getvalue() + serialized)
+        for value in (str(root), "desktop.stdout-stderr", "/tmp/"):
+            self.assertNotIn(value, serialized)
+        # privacy() reached the production scan loop exactly once, after it
+        # set the stage.
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(stages, ["privacy"])
+        return root, status, result, out.getvalue(), fake, stages
+
+    def test_earlier_slow_frame_failure_stays_primary_when_privacy_also_fails(self):
+        primary = acceptance.AcceptanceFailure(self.primary_canary)
+        root, status, result, output, fake, stages = self.run_main(
+            primary=primary, privacy=acceptance.AcceptanceFailure(self.privacy_canary))
+        self.assertTrue(root)
+        self.assertEqual(fake.checks, [])
+        self.assertEqual(status, 1)
+        # main() recorded a positive line for the primary failure; the privacy
+        # failure must not replace it.
+        self.assertIsInstance(fake.diagnosed_error_line, int)
+        self.assertGreater(fake.diagnosed_error_line, 0)
+        self.assertEqual(result["source_line"], fake.diagnosed_error_line)
+        self.assertEqual(result["diagnostic"]["source_line"], fake.diagnosed_error_line)
+        # The earlier stage and class stay primary.
+        self.assertEqual(result["stage"], "slow-frame")
+        self.assertEqual(result["diagnostic"]["stage"], "slow-frame")
+        self.assertEqual(result["error_class"], "assertion")
+        self.assertEqual(result["diagnostic"]["error_class"], "assertion")
+        # The privacy failure is reported separately as a fixed class.
+        self.assertEqual(result["privacy_error_class"], "assertion")
+        self.assertEqual(result["diagnostic"]["privacy_error_class"], "assertion")
+        self.assertEqual(fake.privacy_error_class, "assertion")
+        self.assertIn("FAIL: SSH acceptance at slow-frame", output)
+
+    def test_privacy_only_failure_reports_privacy_stage(self):
+        _root, status, result, output, fake, stages = self.run_main(
+            privacy=acceptance.AcceptanceFailure(self.privacy_canary))
+        self.assertEqual(fake.stage, "privacy")
+        self.assertEqual(fake.checks, [])
+        self.assertEqual(status, 1)
+        # No primary failure, so privacy keeps the stage and its fixed class.
+        self.assertEqual(result["stage"], "privacy")
+        self.assertEqual(result["diagnostic"]["stage"], "privacy")
+        self.assertEqual(result["error_class"], "none")
+        self.assertEqual(result["diagnostic"]["error_class"], "none")
+        self.assertEqual(result["privacy_error_class"], "assertion")
+        self.assertEqual(result["diagnostic"]["privacy_error_class"], "assertion")
+        self.assertIn("FAIL: SSH acceptance at privacy", output)
+
+    def test_clean_privacy_scan_reports_complete_with_no_privacy_class(self):
+        _root, status, result, output, fake, stages = self.run_main()
+        self.assertEqual(status, 0)
+        self.assertEqual(result["stage"], "complete")
+        self.assertEqual(result["diagnostic"]["stage"], "complete")
+        self.assertEqual(result["privacy_error_class"], "none")
+        self.assertEqual(result["diagnostic"]["privacy_error_class"], "none")
+        self.assertEqual(fake.checks, ["full_public_outputs_and_observed_agent_wire_contain_no_factors_or_private_seed"])
+        self.assertIn("PASS: SSH acceptance at complete", output)
+
+    def test_privacy_failure_class_is_a_fixed_value_never_exception_text(self):
+        canary = "PrivatePrivacyClassCanary-" + "d" * 48
+        value, key = ValueError(canary), KeyError(canary)
+        unwanted = RuntimeError(canary)
+        for error, expected in ((value, "value"), (key, "key"), (unwanted, "unexpected"),
+                                (acceptance.AcceptanceFailure("privacy-canary-disclosed"), "assertion"),
+                                (subprocess.TimeoutExpired([canary], 1), "timeout"), (OSError(canary), "os")):
+            self.assertTrue(acceptance.error_class(error) == expected)
+        runner = mock.Mock(privacy_error_class=canary)
+        self.assertEqual(acceptance.public_diagnostic(runner)["privacy_error_class"], "unexpected")
 
 
 class PickerObservationTests(unittest.TestCase):
@@ -478,6 +615,188 @@ class RuntimeAndDiagnosticTests(unittest.TestCase):
             self.assertEqual(runner.reason, "external-timeout")
             self.assertEqual(len(runner.cli.logs), 2)
             self.assertTrue(all(path.read_bytes() == canary.encode() for path, _allowed in runner.cli.logs))
+
+
+
+
+class LockedFailureFrameTests(unittest.TestCase):
+    """Deterministic units for the locked pending-reply reader and the private
+    correlation of its capture. Only in-memory socket pairs and temp files are
+    used. The forced Go checkpoint only shows an injected ordering can end the
+    reply after the canonical header; it is not evidence of CI's actual bytes."""
+
+    canonical = acceptance.frame(bytes([5]))
+    mark = "full_public_outputs_and_observed_agent_wire_contain_no_factors_or_private_seed"
+
+    def reply(self, *parts, close=True):
+        """Feed parts through an in-memory socket pair, then EOF or stall."""
+        server, client = socket.socketpair()
+        self.addCleanup(server.close)
+        self.addCleanup(client.close)
+        for part in parts:
+            client.sendall(part)
+        server.settimeout(0.1)
+        if close:
+            client.shutdown(socket.SHUT_WR)
+        return server
+
+    def read(self, *parts, close=True):
+        return acceptance.read_cancelled_failure(self.reply(*parts, close=close))
+
+    def rejected(self, *parts, close=True):
+        try:
+            self.read(*parts, close=close)
+        except acceptance.AcceptanceFailure:
+            return
+        self.fail("reply became a partial failure frame")
+
+    def signed_reply(self):
+        signature = b"\x0e" + acceptance.ssh_string(acceptance.ssh_string(b"ssh-ed25519") + acceptance.ssh_string(bytes(64)))
+        return acceptance.frame(signature)
+
+    def runner(self, root, observed, values=()):
+        """Minimal Acceptance whose privacy stage is the production method."""
+        runner = acceptance.Acceptance.__new__(acceptance.Acceptance)
+        runner.root, runner.relay = root, None
+        runner.locked_failure, runner.secret_bytes = observed, []
+        runner.cli = mock.Mock(values=list(values), logs=[])
+        runner.checks = []
+        runner.mark = runner.checks.append
+        log = root / "desktop.stdout-stderr"
+        log.write_bytes(b"public evidence\n")
+        runner.cli.logs.append((log, set()))
+        return runner
+
+    def cannot_parse(self, message, response, observed):
+        try:
+            self.privacy(response, observed)
+        except acceptance.AcceptanceFailure:
+            return
+        self.fail(message)
+
+    def privacy(self, response, observed):
+        """Run the privacy stage over one response capture and a CLI log."""
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = pathlib.Path(directory.name)
+        (root / "agent-wire-0.response").write_bytes(response)
+        self.runner(root, observed).privacy()
+
+    def test_empty_eof_of_a_pending_reply_is_accepted(self):
+        self.assertEqual(self.read(), b"")
+
+    def test_full_canonical_failure_is_accepted(self):
+        self.assertEqual(self.read(self.canonical), self.canonical)
+        # Split deliveries still assemble the same frame within the bound.
+        self.assertEqual(self.read(self.canonical[:4], self.canonical[4:]), self.canonical)
+
+    def test_each_strict_canonical_prefix_followed_by_eof_is_accepted(self):
+        for size in range(1, len(self.canonical)):
+            self.assertEqual(self.read(self.canonical[:size]), self.canonical[:size])
+
+    def test_noncanonical_header_prefix_is_rejected(self):
+        for raw in (b"\x01", self.canonical[:2] + b"\x02", self.canonical[:3] + b"\x07"):
+            self.rejected(raw)
+
+    def test_identities_or_signature_commands_are_rejected(self):
+        identities_reply = acceptance.frame(b"\x0c" + bytes(4))
+        for data in (identities_reply, self.signed_reply()):
+            for size in (5, 6, 8, 11, len(data) - 1, len(data)):
+                self.rejected(data[:size])
+
+    def test_a_timeout_after_a_prefix_never_passes_as_a_partial(self):
+        for size in range(1, len(self.canonical)):
+            self.rejected(self.canonical[:size], close=False)
+
+    def test_exact_stays_strict_for_an_empty_eof(self):
+        with self.assertRaises(acceptance.AcceptanceFailure):
+            acceptance.exact(_Closed(), 1)
+
+    def test_privacy_accepts_the_correlated_canonical_suffix(self):
+        # A header-only capture, the forced ordering's observable suffix, and
+        # wire that is exactly the observed bytes, including from offset zero.
+        for observed in (self.canonical[:size] for size in range(1, len(self.canonical))):
+            self.privacy(observed, observed)
+        # A complete frame, then its normal same-size reply, then the partial.
+        wire = self.canonical * 2 + self.canonical[:4]
+        self.privacy(wire, self.canonical[:4])
+        # The locked reply completed in full: nothing may stay partial.
+        self.privacy(self.canonical, self.canonical)
+
+    def test_privacy_rejects_any_other_or_inconsistent_partial_capture(self):
+        canonical = self.canonical
+        identities_reply = acceptance.frame(b"\x0c" + bytes(4))
+        cannot = "the capture may not keep this as a partial"
+        cases = ((canonical[:4], canonical[:3]),        # suffix differs from observed
+                 (canonical[:3], canonical[:2]),        # shorter observed than suffix
+                 (b"", canonical[:3]),                  # nothing observed, no header parsed
+                 (canonical[:4], canonical),            # a complete reply when a partial was seen
+                 (canonical, canonical[:4]),            # a partial when the reply completed
+                 (canonical[:4], canonical * 2 + canonical[:2]),  # a second partial
+                 (canonical[:2], canonical[:2] + b"\x00\x00\x00\x02"),  # incomplete header
+                 (canonical[:3], canonical[:3] + identities_reply[:6]))   # partial signature
+        for observed, response in cases:
+            self.cannot_parse(cannot, response, observed)
+        # Later bytes after the observed prefix are not that prefix.
+        self.cannot_parse(cannot, canonical[:4] + b"\x00", canonical[:4])
+
+    def test_privacy_never_treats_a_signed_reply_as_a_failure_prefix(self):
+        signed = self.signed_reply()
+        # The signed frame shares only its leading zero bytes with the
+        # canonical header, so no short remainder of it is that header.
+        for observed in (self.canonical[:1], self.canonical[:2], self.canonical[:3]):
+            self.cannot_parse("a signed reply is not a failure prefix", signed, observed)
+
+    def captures(self, *responses):
+        """Run the privacy stage over separate captures and one CLI log."""
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = pathlib.Path(directory.name)
+        for index, response in enumerate(responses):
+            (root / ("agent-wire-" + str(index) + ".response")).write_bytes(response)
+        return self.runner(root, self.canonical[:4])
+
+    def test_privacy_accepts_one_correlated_locked_prefix_among_separate_complete_captures(self):
+        # Separate captures: the ordinary failure, identities and signature
+        # replies must each still be parsed, beside the one lock capture that
+        # ends at the observed four-byte canonical length header.
+        identities_reply = acceptance.frame(b"\x0c" + bytes(4))
+        runner = self.captures(self.canonical, identities_reply, self.signed_reply(), self.canonical[:4])
+        runner.privacy()
+        self.assertEqual(runner.checks, [self.mark])
+
+    def test_privacy_rejects_two_captures_ending_in_the_correlated_locked_prefix(self):
+        runner = self.captures(self.canonical, self.canonical[:4], self.signed_reply(), self.canonical[:4])
+        with self.assertRaises(acceptance.AcceptanceFailure):
+            runner.privacy()
+        self.assertEqual(runner.checks, [])
+
+    def test_privacy_still_scans_the_log_and_response_without_enriching_diagnostics(self):
+        # The run has no locked failure, so the response must parse in full.
+        wire = self.canonical + acceptance.frame(b"\x0c" + bytes(4))
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = pathlib.Path(directory.name)
+        (root / "agent-wire-0.response").write_bytes(wire)
+        # A foreign value present in neither file must not stop either scan.
+        runner = self.runner(root, b"", ["PublicFixtureValue-" + "f" * 32])
+        seen, real = [], acceptance.scan
+        with mock.patch.object(acceptance, "scan", lambda raw, values: seen.append((raw, list(values))) or real(raw, values)):
+            runner.privacy()
+        self.assertEqual([raw for raw, _values in seen], [b"public evidence\n", wire])
+        self.assertEqual(runner.checks, [self.mark])
+        runner.stage, runner.step, runner.operation = "privacy", "none", "none"
+        runner.error_class, runner.error_line, runner.reason = "none", 0, "none"
+        runner.last_command, runner.control_diagnostic = {}, {}
+        runner.runtime_endpoint_bytes, runner.runtime_owned, runner.runtime_cleaned = 40, True, True
+        self.assertNotIn("locked_failure", repr(acceptance.public_diagnostic(runner)))
+
+
+class _Closed:
+    """A reader already at end of stream."""
+
+    def recv(self, size):
+        return b""
 
 
 if __name__ == "__main__":
