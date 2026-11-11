@@ -40,7 +40,7 @@ dbus-run-session -- node scripts/browser_native_acceptance.mjs
 
 宿主随后按其正常 native-messaging 通道转发到该桌面 broker，`native-clipboard-lease-v1` 能力由实际 App 的 `NewClipboard` 工厂发布；popup 的连接不依赖任何“快捷配对”勾选。桌面解锁只通过 `scripts/browser_native_x11.py` 的真实 AT-SPI 控件、就绪状态与 XTest 物理输入完成，桌面窗口使用标题 `Locklark · 本地金库` 与桌面可执行文件，独立宿主窗口标题 `Locklark · 浏览器原生确认` 与之区分为不同 UI 宿主。
 
-popup 侧只有真实用户动作：定位实际合成登录行、打开详情、点击隐藏密码行的 `[data-field-id="password"] [data-action="copy-field"]`。脚本等待真实 DOM 复制确认，并用 `scripts/desktop_native_probe.py` 通过私有 JSON stdin 比对操作系统剪贴板；期望值只出现在私有管道中， argv、环境变量、DOM 与日志都不含该值。关闭 popup 后再次独立读取，值必须仍可粘贴。
+配对使用普通同意（`确认连接（每次敏感操作需批准）`），拒绝路径先用 `拒绝连接` 实证未配对；快捷填充同意从不点击。配对后的逐次审批也在真实桌面窗口中物理点击：点击实际合成登录行触发 `item-get`，脚本等待并点击通用审批 `批准本次操作`；点击隐藏密码行的 `[data-field-id="password"] [data-action="copy-field"]` 触发 `item-copy-field`，脚本等待并点击字段披露审批 `批准本次字段披露`。原生审批会关闭失去焦点的 popup，因此每次审批前丢弃旧 handle、审批后重新打开弹窗，并在新弹窗上保留原有的详情标题/密码控件与“已复制”+“已启用自动清理” toast 断言；新弹窗不会再次点击复制或登录行，复制只发生一次。标签均为源码固定的字面量，不从动态 UI 文本读取。脚本随后等待真实 DOM 复制确认，并用 `scripts/desktop_native_probe.py` 通过私有 JSON stdin 比对操作系统剪贴板；期望值只出现在私有管道中，argv、环境变量、DOM 与日志都不含该值。关闭 popup 后再次独立读取，值必须仍可粘贴。
 
 后续断言：外部独立 foreign X11 owner 由 `scripts/desktop_clipboard_owner.py` 提供（marker 也仅经私有管道），在原始 30 秒 TTL 加余量后断言 owner 与 marker 未被改写、应用未请求其它载荷、未写入空值；一次新的真实复制后通过桌面 UI 锁定，断言应用拥有的值被清除，之后出现的 foreign owner 不再被清除。迟到 prepare 场景只在点击复制前对本脚本自己启动的 App PID 发送 `SIGSTOP`，在 popup 仍等待响应时关闭 popup，始终在 `finally` 中 `SIGCONT` 并等待响应/取消，断言剪贴板保持 foreign marker、隐藏后没有发生复制。暂停只是外部进程编排，不是认证钩子；脚本不停止任何 foreign 或用户进程。
 

@@ -226,6 +226,18 @@ class AllowlistTests(unittest.TestCase):
             with self.subTest(label=label):
                 self.assertFalse(native.control_label_allowed(label))
 
+    def test_field_disclosure_labels_are_exact_literals(self):
+        for label in ("批准本次字段披露", "拒绝本次字段披露"):
+            self.assertIn(label, native.CONTROL_LABELS)
+            self.assertTrue(native.control_label_allowed(label))
+        # Nearby variants are never allowlisted; matching stays by full equality.
+        for label in ("批准本次字段披露 ", " 批准本次字段披露", "批准本次字段披露。",
+                      "批准本次字段披露！", "批准字段披露", "批准本次字段", "批准本次披露",
+                      "批准本次字段读取", "拒绝本次字段披露 ",
+                      "拒绝本次字段披露。", "拒绝字段披露", "拒绝本次披露", ""):
+            with self.subTest(label=label):
+                self.assertFalse(native.control_label_allowed(label))
+
     def test_passkey_remove_labels_are_exact_literals(self):
         for label in ("批准删除 Passkey", "拒绝删除 Passkey"):
             self.assertIn(label, native.CONTROL_LABELS)
