@@ -296,8 +296,13 @@ func (j *Journal) prepare(expectedWorkingGeneration uint64, p Proposal, hook fun
 // re-reads the state and the prepared record. It requires that:
 //
 //   - a prepared record exists (else ErrEmpty);
-//   - its OperationID equals operationID and its exact LLVJ v1 encoding equals
-//     exactProposalBytes (else ErrPreparedMismatch);
+//   - its OperationID equals operationID (else ErrPreparedMismatch);
+//   - exactProposalBytes, the sealed proposal file bytes the backend or caller
+//     read, equal the prepared Proposal.Bytes byte for byte (else
+//     ErrPreparedMismatch). Pass those raw file bytes as read: do not wrap them
+//     in the LLVJ v1 record encoding nor in the prepared wrapper. The stored
+//     prepared record itself still embeds the exact LLVJ v1 encoding of the
+//     proposal;
 //   - its ExpectedRevision still equals the stored RemoteRevision (else
 //     ErrPreparedMismatch);
 //   - newRevision is non-empty and at most MaxStateRevisionBytes (else
@@ -314,9 +319,10 @@ func (j *Journal) prepare(expectedWorkingGeneration uint64, p Proposal, hook fun
 // never read, rewritten or deleted.
 //
 // Ack validates only local durable state: that the prepared proposal and the
-// supplied operation ID and record bytes agree, and that it is still based on
-// the current remote base. It does not verify a remote acknowledgement's
-// signature, perform crypto or policy authorization, or contact a remote. The
+// supplied operation ID and sealed proposal bytes agree, and that it is still
+// based on the current remote base. It does not verify a remote
+// acknowledgement's signature, perform crypto or policy authorization, or
+// contact a remote. The
 // caller must verify the remote result outside this package; calling Ack is not
 // evidence that a remote publication happened. A rejected call changes no
 // record, and once acknowledged a repeated Ack returns ErrEmpty.
@@ -329,6 +335,7 @@ func (j *Journal) Ack(operationID string, exactProposalBytes []byte, newRevision
 
 // ackWithHook is Ack with a fault-injection hook that runs after the state Put
 // and the prepared delete and before the Bolt commit (tests only).
+// exactProposalBytes has the same meaning as in Ack.
 func (j *Journal) ackWithHook(operationID string, exactProposalBytes []byte, newRevision vaultfilebackend.Revision, hook func() error) error {
 	return j.ack(operationID, exactProposalBytes, newRevision, hook)
 }
@@ -361,8 +368,8 @@ func (j *Journal) ack(operationID string, exactProposalBytes []byte, newRevision
 		if pp.Proposal.OperationID != operationID {
 			return mismatchf("operation ID does not match prepared proposal")
 		}
-		if !bytes.Equal(encodeRecord(pp.Proposal), exactProposalBytes) {
-			return mismatchf("proposal bytes do not match prepared record")
+		if !bytes.Equal(pp.Proposal.Bytes, exactProposalBytes) {
+			return mismatchf("sealed proposal bytes do not match prepared proposal")
 		}
 		if pp.Proposal.ExpectedRevision != s.RemoteRevision {
 			return mismatchf("prepared proposal expected revision is no longer the state revision")

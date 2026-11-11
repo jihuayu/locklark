@@ -6,7 +6,9 @@ import (
 	"errors"
 	"math"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/jihuayu/locklark/pkg/vaultfilebackend"
 	bolt "go.etcd.io/bbolt"
@@ -88,6 +90,76 @@ func assertUnchanged(t *testing.T, j *Journal, before snapshot) {
 	}
 }
 
+// TestAckLegacyOperationIDRejectedKeepsPrepared is the real-file regression
+// where the legacy proposal record and the prepared proposal are different
+// operations with different generations. Acking with the legacy operation ID
+// and the legacy proposal bytes must be ErrPreparedMismatch and leave state,
+// prepared and legacy raw bytes exactly as they were; LoadPrepared still
+// returns the prepared operation and Load still returns the legacy one
+// verbatim. Acknowledging the prepared operation with its own sealed bytes
+// then succeeds and still leaves the legacy record untouched.
+func TestAckLegacyOperationIDRejectedKeepsPrepared(t *testing.T) {
+	dir := privateDir(t)
+	j := openAt(t, dir)
+
+	legacy := baseProposal()
+	mustSave(t, j, legacy)
+
+	s, p := preparedState()
+	p.OperationID = "op-2026-11-11:prepared.2"
+	p.Generation = legacy.Generation + 5
+	mustInitialize(t, j, s)
+	mustPrepare(t, j, 0, p)
+	if legacy.OperationID == p.OperationID || legacy.Generation == p.Generation {
+		t.Fatal("fixture must keep the legacy and prepared operations distinct")
+	}
+
+	before := takeSnapshot(t, j)
+	assertProposal(t, before.proposal, legacy)
+	assertPrepared(t, before.prepared, PreparedProposal{WorkingGeneration: 0, Proposal: p})
+
+	if err := j.Ack(legacy.OperationID, legacy.Bytes, `"legacy-ack"`); !errors.Is(err, ErrPreparedMismatch) {
+		t.Fatalf("Ack(legacy op, legacy bytes) = %v, want ErrPreparedMismatch", err)
+	}
+	assertUnchanged(t, j, before)
+	// Neither record was replaced by the other.
+	assertPrepared(t, mustLoadPrepared(t, j), PreparedProposal{WorkingGeneration: 0, Proposal: p})
+	assertProposal(t, mustLoad(t, j), legacy)
+
+	// The correct prepared operation is still acknowledged afterwards.
+	newRev := vaultfilebackend.Revision(`"prepared-ack"`)
+	if err := j.Ack(p.OperationID, p.Bytes, newRev); err != nil {
+		t.Fatalf("Ack(prepared op, prepared bytes): %v", err)
+	}
+	if _, err := j.LoadPrepared(); !errors.Is(err, ErrEmpty) {
+		t.Fatalf("LoadPrepared after Ack = %v, want ErrEmpty", err)
+	}
+	got := mustLoadState(t, j)
+	if !bytes.Equal(got.BaseBytes, p.Bytes) || got.RemoteRevision != newRev ||
+		!bytes.Equal(got.WorkingBytes, p.Bytes) || got.Generation != 0 {
+		t.Fatalf("acked state = rev %q gen %d base %d working %d",
+			got.RemoteRevision, got.Generation, len(got.BaseBytes), len(got.WorkingBytes))
+	}
+	// The legacy record is still exactly the legacy operation on disk.
+	assertProposal(t, mustLoad(t, j), legacy)
+	if !bytes.Equal(rawKey(t, j, recordKey), before.rawProposal) {
+		t.Fatal("Ack changed the legacy proposal record")
+	}
+	if err := j.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	j2 := openAt(t, dir)
+	assertState(t, mustLoadState(t, j2), got)
+	if _, err := j2.LoadPrepared(); !errors.Is(err, ErrEmpty) {
+		t.Fatalf("reopened LoadPrepared = %v, want ErrEmpty", err)
+	}
+	assertProposal(t, mustLoad(t, j2), legacy)
+	if !bytes.Equal(rawKey(t, j2, recordKey), before.rawProposal) {
+		t.Fatal("reopened legacy proposal record changed")
+	}
+}
+
 // TestPreparedLifecycleLateAckKeepsNewerWorking is the main real-file story:
 // a legacy LLVJ v1 proposal is saved, state is initialized, a proposal is
 // prepared, the process restarts, the prepared proposal matches exactly, a
@@ -143,14 +215,14 @@ func TestPreparedLifecycleLateAckKeepsNewerWorking(t *testing.T) {
 		t.Fatalf("newer edit not on disk: gen=%d", live.Generation)
 	}
 	newRev := vaultfilebackend.Revision(`W/"acked-8"`)
-	if err := j3.Ack(pp.Proposal.OperationID, encodeRecord(pp.Proposal), newRev); err != nil {
+	if err := j3.Ack(pp.Proposal.OperationID, pp.Proposal.Bytes, newRev); err != nil {
 		t.Fatalf("Ack: %v", err)
 	}
 	if _, err := j3.LoadPrepared(); !errors.Is(err, ErrEmpty) {
 		t.Fatalf("LoadPrepared after Ack = %v, want ErrEmpty", err)
 	}
 	// Repeating the ack is refused because there is nothing prepared.
-	if err := j3.Ack(pp.Proposal.OperationID, encodeRecord(pp.Proposal), newRev); !errors.Is(err, ErrEmpty) {
+	if err := j3.Ack(pp.Proposal.OperationID, pp.Proposal.Bytes, newRev); !errors.Is(err, ErrEmpty) {
 		t.Fatalf("second Ack = %v, want ErrEmpty", err)
 	}
 	assertProposal(t, mustLoad(t, j3), legacy)
@@ -193,7 +265,7 @@ func TestPreparedAckWithoutNewEditIsClean(t *testing.T) {
 	mustPrepare(t, j, 0, p)
 
 	newRev := vaultfilebackend.Revision(`"clean-1"`)
-	if err := j.Ack(p.OperationID, encodeRecord(p), newRev); err != nil {
+	if err := j.Ack(p.OperationID, p.Bytes, newRev); err != nil {
 		t.Fatalf("Ack: %v", err)
 	}
 	got := mustLoadState(t, j)
@@ -217,61 +289,99 @@ func TestPreparedAckWithoutNewEditIsClean(t *testing.T) {
 	assertProposal(t, mustLoad(t, j2), legacy)
 }
 
-// TestPreparedAckInterleavingsNondeterministic drives UpdateWorking and Ack
-// concurrently through the handle's serialized transactions. Whatever the
-// order, every ack either completes or reports ErrPreparedMismatch, and once
-// the ack completed the newer working bytes and generation are never lost.
-func TestPreparedAckInterleavingsNondeterministic(t *testing.T) {
-	for round := 0; round < 6; round++ {
-		dir := privateDir(t)
-		j := openAt(t, dir)
-		s, p := preparedState()
-		mustInitialize(t, j, s)
-		mustPrepare(t, j, 0, p)
-		acked := encodeRecord(p)
-		newRev := vaultfilebackend.Revision(`"interleaved"`)
+// TestPreparedAckAfterConcurrentEditCommit forces the order with channel
+// barriers. The edit transaction first holds the journal mutex and blocks (as
+// earlier public calls would do between transactions) through its hook, which
+// runs after the state Put and before the Bolt commit. The Ack for the older
+// prepared proposal then starts: it blocks on the journal mutex and cannot
+// begin its transaction. The edit resumes, commits and releases the mutex, and
+// the Ack runs afterwards. It must re-read the committed state and succeed: it
+// advances base/revision, keeps the newer working bytes and generation and
+// clears the prepared record. The edit committing first is the target path
+// here, not a mismatch. Every wait is bounded and the release is deferred, so
+// a failure cannot hang the test.
+func TestPreparedAckAfterConcurrentEditCommit(t *testing.T) {
+	j := openAt(t, privateDir(t))
+	s, p := preparedState()
+	mustInitialize(t, j, s)
+	mustPrepare(t, j, 0, p)
 
-		edit := opaque(len(p.Bytes)+5, byte(100+round))
-		var editErr, ackErr error
-		done := make(chan struct{})
-		go func() {
-			defer close(done)
-			editErr = j.UpdateWorking(0, edit)
-		}()
-		ackErr = j.Ack(p.OperationID, acked, newRev)
-		<-done
-		if editErr != nil {
-			t.Fatalf("round %d UpdateWorking: %v", round, editErr)
-		}
-		if ackErr != nil && !errors.Is(ackErr, ErrPreparedMismatch) {
-			t.Fatalf("round %d Ack: %v", round, ackErr)
-		}
+	edit := opaque(len(p.Bytes)+5, 117)
+	newRev := vaultfilebackend.Revision(`"acked-after-edit"`)
+	const wait = 10 * time.Second
 
-		got := mustLoadState(t, j)
-		switch ackErr {
-		case nil: // ack committed before the edit
-			if !bytes.Equal(got.BaseBytes, p.Bytes) || got.RemoteRevision != newRev {
-				t.Fatalf("round %d ack did not promote base", round)
-			}
-			_, perr := j.LoadPrepared()
-			if !errors.Is(perr, ErrEmpty) {
-				t.Fatalf("round %d prepared not cleared: %v", round, perr)
-			}
-		default: // the edit committed first; the stale ack is refused
-			assertState(t, got, s)
-			assertPrepared(t, mustLoadPrepared(t, j), PreparedProposal{WorkingGeneration: 0, Proposal: p})
+	editPut := make(chan struct{})
+	hookRelease := make(chan struct{})
+	var hookReleaseOnce sync.Once
+	// Deferred, so a t.Fatal after the goroutines started can never leave
+	// the edit transaction blocked in its hook.
+	defer hookReleaseOnce.Do(func() { close(hookRelease) })
+
+	editDone := make(chan error, 1)
+	go func() {
+		editDone <- j.updateWorkingWithHook(0, edit, func() error {
+			close(editPut)
+			<-hookRelease
+			return nil
+		})
+	}()
+
+	select {
+	case <-editPut:
+	case <-time.After(wait):
+		t.Fatal("edit never reached its state Put")
+	}
+
+	// The edit now holds the journal mutex in its hook. The Ack therefore
+	// cannot re-read state until the edit has committed and released it.
+	ackDone := make(chan error, 1)
+	go func() {
+		ackDone <- j.Ack(p.OperationID, p.Bytes, newRev)
+	}()
+	// The Ack's only wait at this point is the edit's journal mutex, so a
+	// short notice is enough; a committed edit or Ack here would break the
+	// barrier.
+	time.Sleep(50 * time.Millisecond)
+	select {
+	case err := <-editDone:
+		t.Fatalf("edit returned %v while its hook was still blocking", err)
+	case err := <-ackDone:
+		t.Fatalf("Ack returned %v before the edit transaction committed", err)
+	default:
+	}
+
+	// Let the edit commit and release the mutex; the Ack then proceeds.
+	hookReleaseOnce.Do(func() { close(hookRelease) })
+	select {
+	case err := <-editDone:
+		if err != nil {
+			t.Fatalf("UpdateWorking: %v", err)
 		}
-		if !bytes.Equal(got.WorkingBytes, edit) || got.Generation != 1 {
-			t.Fatalf("round %d lost the newer working edit: gen=%d", round, got.Generation)
+	case <-time.After(wait):
+		t.Fatal("edit did not commit after release (journal mutex still held)")
+	}
+
+	select {
+	case err := <-ackDone:
+		if err != nil {
+			t.Fatalf("Ack after the edit committed: %v", err)
 		}
-		if err := j.Close(); err != nil {
-			t.Fatal(err)
-		}
-		j2 := openAt(t, dir)
-		assertState(t, mustLoadState(t, j2), got)
-		if err := j2.Close(); err != nil {
-			t.Fatal(err)
-		}
+	case <-time.After(wait):
+		t.Fatal("Ack did not finish after the edit committed (journal mutex still held)")
+	}
+
+	got := mustLoadState(t, j)
+	if !bytes.Equal(got.BaseBytes, p.Bytes) {
+		t.Fatal("Ack did not advance the base to the acked proposal bytes")
+	}
+	if got.RemoteRevision != newRev {
+		t.Fatalf("revision = %q, want %q", got.RemoteRevision, newRev)
+	}
+	if !bytes.Equal(got.WorkingBytes, edit) || got.Generation != 1 {
+		t.Fatalf("Ack lost the newer working edit or generation: gen=%d", got.Generation)
+	}
+	if _, err := j.LoadPrepared(); !errors.Is(err, ErrEmpty) {
+		t.Fatalf("LoadPrepared after Ack = %v, want ErrEmpty", err)
 	}
 }
 
@@ -393,7 +503,7 @@ func TestPrepareReplayAndConflict(t *testing.T) {
 
 	// After the outstanding proposal is acked and a real working edit lands,
 	// the new proposal can be prepared.
-	if err := j.Ack(p.OperationID, encodeRecord(p), `"replayed"`); err != nil {
+	if err := j.Ack(p.OperationID, p.Bytes, `"replayed"`); err != nil {
 		t.Fatalf("Ack: %v", err)
 	}
 	newer := opaque(len(p.Bytes)+1, 121)
@@ -409,8 +519,10 @@ func TestPrepareReplayAndConflict(t *testing.T) {
 	assertProposal(t, mustLoad(t, j), legacy)
 }
 
-// TestAckRejectsMismatch proves wrong operation ID or proposal bytes, a stale
-// expected revision, and malformed new revisions change no record.
+// TestAckRejectsMismatch proves a wrong operation ID or wrong sealed proposal
+// bytes (truncated, flipped, another proposal's, or the journal envelope
+// instead of the file bytes), a stale expected revision, and malformed new
+// revisions change no record.
 func TestAckRejectsMismatch(t *testing.T) {
 	dir := privateDir(t)
 	j := openAt(t, dir)
@@ -420,7 +532,7 @@ func TestAckRejectsMismatch(t *testing.T) {
 	mustInitialize(t, j, s)
 	mustPrepare(t, j, 0, p)
 	before := takeSnapshot(t, j)
-	exact := encodeRecord(p)
+	exact := p.Bytes
 	rev := vaultfilebackend.Revision(`"new"`)
 
 	if err := j.Ack("op-wrong", exact, rev); !errors.Is(err, ErrPreparedMismatch) {
@@ -429,16 +541,22 @@ func TestAckRejectsMismatch(t *testing.T) {
 	if err := j.Ack(p.OperationID, exact[:len(exact)-1], rev); !errors.Is(err, ErrPreparedMismatch) {
 		t.Fatalf("Ack(truncated bytes) = %v, want ErrPreparedMismatch", err)
 	}
-	// The right operation ID and bytes with a wrong record is still refused.
+	// The right operation ID and length with one flipped byte is refused.
 	flipped := bytes.Clone(exact)
 	flipped[len(flipped)/2] ^= 0xff
 	if err := j.Ack(p.OperationID, flipped, rev); !errors.Is(err, ErrPreparedMismatch) {
-		t.Fatalf("Ack(tampered bytes) = %v, want ErrPreparedMismatch", err)
+		t.Fatalf("Ack(flipped bytes) = %v, want ErrPreparedMismatch", err)
 	}
+	// Another proposal's sealed file bytes, of the same length, are refused.
 	other := p
 	other.Bytes = opaque(len(p.Bytes), 9)
-	if err := j.Ack(p.OperationID, encodeRecord(other), rev); !errors.Is(err, ErrPreparedMismatch) {
+	if err := j.Ack(p.OperationID, other.Bytes, rev); !errors.Is(err, ErrPreparedMismatch) {
 		t.Fatalf("Ack(other proposal bytes) = %v, want ErrPreparedMismatch", err)
+	}
+	// The journal's own LLVJ v1 encoding of the right proposal is not the
+	// sealed file bytes the caller read, so it is refused too.
+	if err := j.Ack(p.OperationID, encodeRecord(p), rev); !errors.Is(err, ErrPreparedMismatch) {
+		t.Fatalf("Ack(record envelope instead of file bytes) = %v, want ErrPreparedMismatch", err)
 	}
 	if err := j.Ack(p.OperationID, exact, ""); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("Ack(empty revision) = %v, want ErrInvalid", err)
@@ -464,7 +582,7 @@ func TestAckNoPrepared(t *testing.T) {
 	s, p := preparedState()
 	mustInitialize(t, j, s)
 	before := mustLoadState(t, j)
-	if err := j.Ack(p.OperationID, encodeRecord(p), `"r"`); !errors.Is(err, ErrEmpty) {
+	if err := j.Ack(p.OperationID, p.Bytes, `"r"`); !errors.Is(err, ErrEmpty) {
 		t.Fatalf("Ack without prepared = %v, want ErrEmpty", err)
 	}
 	assertState(t, mustLoadState(t, j), before)
@@ -478,7 +596,7 @@ func TestAckStalePreparedRejected(t *testing.T) {
 	s, p := preparedState()
 	mustInitialize(t, j, s)
 	mustPrepare(t, j, 0, p)
-	exact := encodeRecord(p)
+	exact := p.Bytes
 
 	// Someone else advanced the remote base independently.
 	baseMoved := s
@@ -579,7 +697,7 @@ func TestAckFaultAfterDeleteRollsBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := takeSnapshot(t, j)
-	exact := encodeRecord(p)
+	exact := p.Bytes
 	newRev := vaultfilebackend.Revision(`"acked-after-fault"`)
 
 	fault := errors.New("injected ack fault")
@@ -713,7 +831,7 @@ func TestPreparedConcurrentUse(t *testing.T) {
 			for k := 0; k < 10; k++ {
 				_ = j.Prepare(0, p)
 				_, _ = j.LoadPrepared()
-				_ = j.Ack("wrong", encodeRecord(p), `"r"`)
+				_ = j.Ack("wrong", p.Bytes, `"r"`)
 			}
 		}()
 	}
@@ -738,7 +856,7 @@ func TestClosedPreparedAPI(t *testing.T) {
 	if err := j.Prepare(0, p); !errors.Is(err, ErrClosed) {
 		t.Fatalf("Prepare = %v, want ErrClosed", err)
 	}
-	if err := j.Ack(p.OperationID, encodeRecord(p), `"r"`); !errors.Is(err, ErrClosed) {
+	if err := j.Ack(p.OperationID, p.Bytes, `"r"`); !errors.Is(err, ErrClosed) {
 		t.Fatalf("Ack = %v, want ErrClosed", err)
 	}
 }
