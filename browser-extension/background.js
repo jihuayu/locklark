@@ -3450,16 +3450,40 @@ if (typeof importScripts === "function") importScripts("core.js");
     boot.startupActivation = true;
     boot.activated = true;
     boot.initialLoad = {};
-    routeTabAt(tabId, boot.routeURL).then((tab) => {
+    // Distinguish a transiently absent tab (tabs.get yields or rejects with no
+    // tab) from an existing tab whose id, window or exact route URL is wrong.
+    // Only absence may still be this route's own startup: the exact routeTabs
+    // binding is kept and the one startup activation is reset so a later
+    // activation of the same route tab can consume it. Nothing is synthesized:
+    // the grant stays unusable until every ordinary routeAnchors() check
+    // passes. An existing mismatch still fails closed as before.
+    const verifyActivationTarget = (tab) => {
       if (routeTabs.get(tabId) !== boot) return;
-      if (tab && tab.windowId === boot.windowId) {
-        routeLifecycleDiag("activation-target-confirmed");
+      if (!tab) {
+        boot.startupActivation = false;
+        routeLifecycleDiag("activation-target-missing");
         return;
       }
-      routeLifecycleDiag(tab ? "activation-target-mismatch" : "activation-target-missing");
-      revokeRoute(boot);
-      cancelContext();
-    }, () => {});
+      if (
+        tab.id !== tabId ||
+        tab.windowId !== boot.windowId ||
+        typeof tab.url !== "string" ||
+        tab.url !== boot.routeURL
+      ) {
+        routeLifecycleDiag("activation-target-mismatch");
+        revokeRoute(boot);
+        cancelContext();
+        return;
+      }
+      routeLifecycleDiag("activation-target-confirmed");
+    };
+    try {
+      Promise.resolve(api.tabs.get(tabId)).then(verifyActivationTarget, () =>
+        verifyActivationTarget(null),
+      );
+    } catch {
+      verifyActivationTarget(null);
+    }
     return "startup";
   }
   // Route lifecycle diagnostic only: `routeActivationLeaf` is only recorded

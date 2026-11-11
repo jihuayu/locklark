@@ -1540,6 +1540,49 @@ test("the route lifecycle port connects before the route tab is announced and ca
   await route.h.send({ type: "disconnect" });
 });
 
+test("a transiently missing route tab keeps the startup route for its own activation", async () => {
+  // Production observed routeActivation() binding the boot grant, then a
+  // tabs.get() that transiently reported no tab revoking it before the
+  // lifecycle port could be admitted. Absence is not a mismatch: the exact
+  // binding and the one startup activation must survive, with nothing read
+  // and no synthesized tab data, and the route must still admit exactly its
+  // own approved detail afterwards.
+  const route = await earlyRouteStartupFixture();
+  const opened = route.h.send({ type: "open-route", id: route.ITEM_ID, revision: "c".repeat(64) });
+  await waitFor(() => route.route(), "browser-created route tab");
+  assert.equal(route.pending(), true, "tabs.create resolved before the port connected");
+  const exact = route.route();
+  const token = route.h.routeToken(exact.url);
+  assert.equal(token.length, 64);
+  // The activation arrives while the browser transiently reports no such tab.
+  route.setRoute(null);
+  route.h.listeners.active({ tabId: route.ROUTE_TAB, windowId: 1 });
+  await tick();
+  // The missing lookup revoked nothing and started no native read.
+  assert.deepEqual(route.nativeReads(), [], "the missing lookup read the vault");
+  // The exact route tab is reported again and startup/create completes.
+  route.setRoute({ id: exact.id, windowId: exact.windowId, active: true, url: exact.url });
+  route.finishStartup();
+  const openedReply = await opened;
+  assert.ok(openedReply?.routeCreated, "the startup route create was refused");
+  await tick();
+  assert.deepEqual(route.nativeReads(), [], "startup itself read the vault");
+  // The startup route then admits its own lifecycle port and exactly its own
+  // approved detail: the ordinary vault-search then item-get read.
+  const port = openLifecyclePort(route.h, route.routeSender());
+  const ready = await waitFor(() => route.routeReady(port), "route-ready after transient absence");
+  assert.deepEqual([ready.type, ready.token], ["route-ready", token]);
+  assert.equal(port.disconnected, false, "the startup route port was refused");
+  const claim = await route.claim(token);
+  assert.equal(claim?.type, "route-claimed", "the startup route could not claim");
+  assert.equal(claim.item_id, route.ITEM_ID);
+  assert.equal(claim.detail.title, "Target");
+  assert.deepEqual(route.nativeReads().map((r) => r.type), ["vault-search", "item-get"]);
+  assert.equal(port.received.filter((m) => m.type === "route-revoked").length, 0);
+  assert.equal(port.disconnected, false);
+  await route.h.send({ type: "disconnect" });
+});
+
 // Chrome documents Port.sender as a getter, so it is not required to return
 // the same object twice. This port hands out a fresh but structurally
 // identical sender on every read, which must be admitted exactly like the
