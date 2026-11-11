@@ -1,10 +1,20 @@
 // Package vaultfilepublish coordinates publishing and pulling encrypted
 // vault files through a vaultfilebackend-compatible backend.
 //
-// This package is at its first checkpoint: it provides only the validated pull
-// capability. It does no wire parsing, cryptography, policy authorization
-// (for example KDBX or unlock-policy checks), KDBX validation, or merge logic.
-// Those steps stay with the caller.
+// This package provides the validated pull capability and, on top of it and
+// the vaultfilejournal, the I/O-only prepare/CAS/reconcile/Ack coordinator for
+// one file (see coordinator.go). It does no wire parsing, cryptography, policy
+// authorization (for example KDBX or unlock-policy checks), KDBX validation,
+// parent-digest or content-signature checks, or merge logic. It never parses
+// or accepts an uploaded proposal roster. Those steps stay with the caller, and
+// the coordinator claims no cryptographic closure of its own: the required
+// ProposalVerifier bound by NewCoordinator and the per-call PullVerifier are
+// the only trust decisions it relies on.
+//
+// No success is ever inferred from a write response. Every backend write is
+// followed by one verified readback, and only a readback that is exactly the
+// prepared proposal (and that the caller's ProposalVerifier, called with the
+// operation's original base R, still accepts) is acknowledged in the journal.
 //
 // # Caller-validated pull
 //
@@ -47,8 +57,10 @@ var (
 	// contract: empty or oversize bytes, or an empty or oversize revision. The
 	// verifier is not called and no Pulled value is returned.
 	ErrBackendResult = errors.New("vault file publish: invalid backend result")
-	// ErrVerification reports that the caller's PullVerifier rejected the pull.
-	// Its error remains discoverable through errors.Is and errors.As.
+	// ErrVerification reports that a caller-supplied verifier rejected: the
+	// PullVerifier rejected a pull, or the ProposalVerifier rejected a
+	// prepared proposal. Its error remains discoverable through errors.Is and
+	// errors.As.
 	ErrVerification = errors.New("vault file publish: verification failed")
 )
 
