@@ -11,7 +11,6 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -107,6 +106,37 @@ func newSourceTestStore(t *testing.T, cfg RefreshSourceConfig) (*fakeSecrets, *R
 	f.sets, f.values = 0, nil
 	f.keys = nil
 	return f, fakeStore(f)
+}
+
+// errorAfterWriteSecrets is a fake store whose Set writes the new value and
+// then fails, modeling a non-atomic backend that may have replaced the item
+// even though the save was reported as failed.
+type errorAfterWriteSecrets struct {
+	*fakeSecrets
+}
+
+func (e *errorAfterWriteSecrets) Set(key string, value []byte) error {
+	_ = e.fakeSecrets.Set(key, value)
+	return errors.New(sourceTestStoreMarker)
+}
+
+// flakySecrets fails its first get with the synthetic store error and answers
+// every later call as the embedded fake does.
+type flakySecrets struct {
+	*fakeSecrets
+	mu    sync.Mutex
+	fails int
+}
+
+func (f *flakySecrets) Get(key string) ([]byte, error) {
+	f.mu.Lock()
+	fail := f.fails
+	f.fails++
+	f.mu.Unlock()
+	if fail == 0 {
+		return nil, errors.New(sourceTestStoreMarker)
+	}
+	return f.fakeSecrets.Get(key)
 }
 
 // stored returns the refresh token the fake store holds for cfg's binding.
@@ -276,17 +306,17 @@ func TestRefreshSourceCachesAndCoalesces(t *testing.T) {
 		token string
 		err   error
 	}
-	// leaderGate holds the first caller past the flight's completion, while
-	// the other callers are still attaching to it.
+	// The leader starts the flight and is held at leaderGate, so the other
+	// callers find the same flight instead of racing to start one.
 	leaderGate := make(chan struct{})
-	var calls, entered atomic.Int32
 	results := make(chan outcome, callers)
-	for range callers {
+	go func() {
+		<-leaderGate
+		token, err := s.AccessToken(context.Background())
+		results <- outcome{token, err}
+	}()
+	for range callers - 1 {
 		go func() {
-			entered.Add(1)
-			if calls.Add(1) == 1 {
-				<-leaderGate
-			}
 			token, err := s.AccessToken(context.Background())
 			results <- outcome{token, err}
 		}()
@@ -297,14 +327,14 @@ func TestRefreshSourceCachesAndCoalesces(t *testing.T) {
 	if got := p.hits.Load(); got != 1 {
 		t.Fatalf("concurrent callers made %d requests before the refresh finished, want one", got)
 	}
-	close(release)
-	// The leader is released only once every other caller reached
-	// AccessToken, so the test never depends on goroutine scheduling, and
-	// those callers always attach before the flight completes, so they all
-	// receive the lead refresh's token instead of starting a new flight.
-	waitFor(t, "every caller to reach AccessToken", func() bool { return entered.Load() == callers })
-	waitFor(t, "the other callers to attach to the flight", func() bool { return sourceWaiters(s) == callers-1 })
+	// The other callers can attach only once the leader runs, so the leader
+	// is released before they are awaited; the flight stays open until
+	// every caller attached, so the test never depends on goroutine
+	// scheduling and those callers are served from the cached token, never
+	// from a second request.
 	close(leaderGate)
+	waitFor(t, "every caller to attach to the flight", func() bool { return sourceWaiters(s) == callers })
+	close(release)
 	for range callers {
 		got := <-results
 		if got.err != nil || got.token != sourceTestAccess {
@@ -408,6 +438,140 @@ func TestRefreshSourceFailuresKeepOldAndReturnNoAccess(t *testing.T) {
 	}
 }
 
+// TestRefreshSourcePostSendFailureIsTerminal proves a failure after the
+// request was sent is never sent again by a later AccessToken call in the same
+// source, that the same fixed error is returned, and that the source stays
+// closed even if a stored token looks usable.
+func TestRefreshSourcePostSendFailureIsTerminal(t *testing.T) {
+	a := newTokenPeer(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusBadRequest, `{"error":"invalid_grant","error_description":"`+sourceTestBodyMark+`"}`)
+	})
+	b := newTokenPeer(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, jsonBody(sourceTestAccess, 3600, ""))
+	})
+	cfg := sourceTestConfig()
+	_, store := newSourceTestStore(t, cfg)
+	s, err := newRefreshSourceAt(cfg, store, a.url, a.srv.Client())
+	if err != nil {
+		t.Fatalf("a valid configuration was rejected")
+	}
+	_, first := s.AccessToken(context.Background())
+	assertSourceFailure(t, "", first, ErrRefreshStatus)
+	assertSourceTerminal(t, s, a, ErrRefreshStatus)
+
+	// A different healthy peer cannot be reached either: the terminal state
+	// is part of the source, not of the endpoint.
+	s.mu.Lock()
+	s.endpoint, s.client = b.url, b.srv.Client()
+	s.mu.Unlock()
+	token, err := s.AccessToken(context.Background())
+	assertSourceFailure(t, token, err, ErrRefreshStatus)
+	if got := a.hits.Load(); got != 1 {
+		t.Fatalf("the failed refresh was sent %d times, want exactly one", got)
+	}
+	if got := b.hits.Load(); got != 0 {
+		t.Fatalf("a terminal source contacted a second peer")
+	}
+	_, second := s.AccessToken(context.Background())
+	if second != first {
+		t.Fatalf("later calls did not return the same fixed terminal error")
+	}
+	s.Close()
+}
+
+// TestRefreshSourcePreCanceledContext makes no store or network operation: a
+// context that is already done is answered before anything is read or sent.
+func TestRefreshSourcePreCanceledContext(t *testing.T) {
+	cfg := sourceTestConfig()
+	f, store := newSourceTestStore(t, cfg)
+	p := newTokenPeer(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, jsonBody(sourceTestAccess, 3600, ""))
+	})
+	s, err := newRefreshSourceAt(cfg, store, p.url, p.srv.Client())
+	if err != nil {
+		t.Fatalf("a valid configuration was rejected")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	token, err := s.AccessToken(ctx)
+	if token != "" || !errors.Is(err, context.Canceled) {
+		t.Fatalf("a pre-canceled context did not return its own error")
+	}
+	if f.gets+f.sets+f.dels != 0 {
+		t.Fatalf("a pre-canceled context touched the store")
+	}
+	if got := p.hits.Load(); got != 0 {
+		t.Fatalf("a pre-canceled context made %d requests, want none", got)
+	}
+	if sourceWaiters(s) != 0 {
+		t.Fatalf("a pre-canceled context started a refresh")
+	}
+	// The source itself is untouched: a later live call still succeeds.
+	if token, err := s.AccessToken(context.Background()); err != nil || token != sourceTestAccess {
+		t.Fatalf("a pre-canceled call affected the source")
+	}
+	if got := p.hits.Load(); got != 1 {
+		t.Fatalf("the source made %d requests, want exactly one", got)
+	}
+	s.Close()
+}
+
+// TestRefreshSourceTransientStoreFailuresAreRetried checks that a store load
+// failure or a missing item, for which no request was made, can be retried by a
+// later call in the same source, unlike a post-send failure.
+func TestRefreshSourceTransientStoreFailuresAreRetried(t *testing.T) {
+	t.Run("load failure then success", func(t *testing.T) {
+		cfg := sourceTestConfig()
+		f := newFakeSecrets()
+		if err := fakeStore(f).SaveRefreshToken(cfg.ClientID, cfg.Tenant, cfg.Profile, []byte(refreshTestOld)); err != nil {
+			t.Fatalf("seeding the fake store failed")
+		}
+		flaky := &flakySecrets{fakeSecrets: f}
+		p := newTokenPeer(t, func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, http.StatusOK, jsonBody(sourceTestAccess, 3600, ""))
+		})
+		s, err := newRefreshSourceAt(cfg, &RefreshTokenStore{secrets: flaky}, p.url, p.srv.Client())
+		if err != nil {
+			t.Fatalf("a valid configuration was rejected")
+		}
+		token, err := s.AccessToken(context.Background())
+		assertSourceFailure(t, token, err, ErrStoreUnsupported)
+		if got := p.hits.Load(); got != 0 {
+			t.Fatalf("a load failure made %d requests, want none", got)
+		}
+		if token, err := s.AccessToken(context.Background()); err != nil || token != sourceTestAccess {
+			t.Fatalf("a load failure was not retried by the next call")
+		}
+		if got := p.hits.Load(); got != 1 {
+			t.Fatalf("the retried source made %d requests, want exactly one", got)
+		}
+		s.Close()
+	})
+	t.Run("missing item then present", func(t *testing.T) {
+		cfg := sourceTestConfig()
+		f := newFakeSecrets()
+		p := newTokenPeer(t, func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, http.StatusOK, jsonBody(sourceTestAccess, 3600, ""))
+		})
+		s, err := newRefreshSourceAt(cfg, fakeStore(f), p.url, p.srv.Client())
+		if err != nil {
+			t.Fatalf("a valid configuration was rejected")
+		}
+		token, err := s.AccessToken(context.Background())
+		assertSourceFailure(t, token, err, ErrStoreNotFound)
+		if err := fakeStore(f).SaveRefreshToken(cfg.ClientID, cfg.Tenant, cfg.Profile, []byte(refreshTestOld)); err != nil {
+			t.Fatalf("enrolling the profile failed")
+		}
+		if token, err := s.AccessToken(context.Background()); err != nil || token != sourceTestAccess {
+			t.Fatalf("a missing item was not retried after enrollment")
+		}
+		if got := p.hits.Load(); got != 1 {
+			t.Fatalf("the source made %d requests, want exactly one", got)
+		}
+		s.Close()
+	})
+}
+
 // TestRefreshSourceTransportFailure checks the transport error and the
 // post-send cancellation: one attempt, no retry, outcome unknown.
 func TestRefreshSourceTransportFailure(t *testing.T) {
@@ -463,9 +627,13 @@ func TestRefreshSourceTransportFailure(t *testing.T) {
 		s.Close()
 		select {
 		case err := <-returned:
-			// Close cancelled the request, so this flight was abandoned
-			// and no result is returned; the sentinel conforms.
-			assertSourceFailure(t, "", err, ErrRefreshSource)
+			// Close cancelled a request that was already sent, so the
+			// provider outcome is still unknown; that fact is kept and
+			// not masked as a merely closed source.
+			assertSourceFailure(t, "", err, ErrRefreshOutcomeUnknown)
+			if errors.Is(err, ErrRefreshSource) {
+				t.Fatalf("a post-send Close masked the unknown outcome as a closed source")
+			}
 		case <-time.After(3 * time.Second):
 			t.Fatalf("an in-flight refresh did not settle after Close")
 		}
@@ -473,14 +641,17 @@ func TestRefreshSourceTransportFailure(t *testing.T) {
 			t.Fatalf("a cancelled refresh made %d requests, want exactly one", got)
 		}
 		assertSourceStoreUntouched(t, f, cfg)
+		// The source is closed, so later calls send nothing more.
+		assertSourceClosed(t, s, p)
 	})
 }
 
-// TestRefreshSourceStoreErrors checks that a save error returns no access
-// token, reports the possibly-unknown store state and does not delete the old
-// item, and that a load error returns no token either.
+// TestRefreshSourceStoreErrors checks that a failed save returns no access
+// token and reports the possibly-unknown store state without claiming the old
+// item is still stored, and that a load error or a missing item returns no
+// token either.
 func TestRefreshSourceStoreErrors(t *testing.T) {
-	t.Run("save error", func(t *testing.T) {
+	t.Run("save error before the write", func(t *testing.T) {
 		cfg := sourceTestConfig()
 		f, store := newSourceTestStore(t, cfg)
 		f.setErr = func(string) error { return errors.New(sourceTestStoreMarker) }
@@ -493,15 +664,48 @@ func TestRefreshSourceStoreErrors(t *testing.T) {
 		}
 		token, err := s.AccessToken(context.Background())
 		assertSourceFailure(t, token, err, ErrSourceStoreUnknown)
-		if !strings.Contains(err.Error(), "may be unknown") {
-			t.Fatalf("a save error does not say the store state may be unknown")
+		if !strings.Contains(err.Error(), "unknown") {
+			t.Fatalf("a save error does not say the store state is unknown")
+		}
+		if strings.Contains(err.Error(), "the old item was kept") {
+			t.Fatalf("a save error claims the old item was kept")
 		}
 		if f.dels != 0 {
 			t.Fatalf("a save error deleted the old item")
 		}
 		if got, present := stored(t, f, cfg); !present || got != refreshTestOld {
-			t.Fatalf("a save error did not keep the stored old item")
+			t.Fatalf("a save that wrote nothing did not leave the old item")
 		}
+		assertSourceTerminal(t, s, p, ErrSourceStoreUnknown)
+		s.Close()
+	})
+	t.Run("save error after the write", func(t *testing.T) {
+		cfg := sourceTestConfig()
+		f := &errorAfterWriteSecrets{fakeSecrets: newFakeSecrets()}
+		if err := fakeStore(f.fakeSecrets).SaveRefreshToken(cfg.ClientID, cfg.Tenant, cfg.Profile, []byte(refreshTestOld)); err != nil {
+			t.Fatalf("seeding the fake store failed")
+		}
+		p := newTokenPeer(t, func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, http.StatusOK, jsonBody(sourceTestAccess, 3600, sourceTestRefreshNew))
+		})
+		s, err := newRefreshSourceAt(cfg, &RefreshTokenStore{secrets: f}, p.url, p.srv.Client())
+		if err != nil {
+			t.Fatalf("a valid configuration was rejected")
+		}
+		token, err := s.AccessToken(context.Background())
+		assertSourceFailure(t, token, err, ErrSourceStoreUnknown)
+		if strings.Contains(err.Error(), "the old item was kept") {
+			t.Fatalf("a failed save claims the old item was kept")
+		}
+		if f.dels != 0 {
+			t.Fatalf("a failed save deleted the item")
+		}
+		// The underlying store already holds the replacement, so the source
+		// reports the unknown state instead of claiming the old value.
+		if got, present := stored(t, f.fakeSecrets, cfg); !present || got != sourceTestRefreshNew {
+			t.Fatalf("the error-after-write fake did not record the written replacement")
+		}
+		assertSourceTerminal(t, s, p, ErrSourceStoreUnknown)
 		s.Close()
 	})
 	t.Run("missing item", func(t *testing.T) {
@@ -589,8 +793,9 @@ func TestRefreshSourceCanceledWaiterDoesNotCancelLeader(t *testing.T) {
 		}
 		waiter <- err
 	}()
-	// The waiter must have joined the flight before it is canceled.
-	time.Sleep(20 * time.Millisecond)
+	// The waiter must have joined the flight before it is canceled; the
+	// leader's flight state proves it without a wall-clock wait.
+	waitFor(t, "the canceled waiter to attach to the leader's flight", func() bool { return sourceWaiters(s) == 2 })
 	cancel()
 	select {
 	case err := <-waiter:
@@ -771,6 +976,20 @@ func assertSourceStoreUntouched(t *testing.T, f *fakeSecrets, cfg RefreshSourceC
 	}
 	if got, present := stored(t, f, cfg); !present || got != refreshTestOld {
 		t.Fatalf("a failure did not keep the stored old refresh token")
+	}
+}
+
+// assertSourceTerminal checks that a terminal failure closed the source and is
+// returned, unchanged and redacted, by later calls without another request.
+func assertSourceTerminal(t *testing.T, s *RefreshSource, p *tokenPeer, want error) {
+	t.Helper()
+	before := p.hits.Load()
+	for range 3 {
+		token, err := s.AccessToken(context.Background())
+		assertSourceFailure(t, token, err, want)
+	}
+	if got := p.hits.Load(); got != before {
+		t.Fatalf("a terminal failure was sent again (%d requests, want %d)", got, before)
 	}
 }
 
