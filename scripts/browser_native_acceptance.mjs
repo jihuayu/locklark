@@ -25,6 +25,7 @@ import { acceptPopupVault } from "./browser_popup_vault_acceptance.mjs";
 import {
   acceptSharedClipboard,
   prepareSharedEnvironment,
+  PrivateClipboard,
 } from "./browser_shared_clipboard_acceptance.mjs";
 import { acceptCheckoutFrames, checkoutTopHTML, checkoutCardHTML, checkoutRouteCase } from "./browser_checkout_acceptance.mjs";
 const checkoutFrames = process.env.LOCKLARK_TEST_CHECKOUT_FRAMES === "1";
@@ -616,6 +617,26 @@ async function refreshRouteStatusTrace(attach, target, uninstall = false) {
       await connection?.close();
     } catch {}
   }
+}
+// Route field-copy acceptance. The concealled password row's own Copy control
+// is clicked physically; the worker then re-reads the value under the same
+// native V2 approval, so either the field-disclosure review appears directly
+// (native clipboard path) or one ordinary item-get review for this exact item
+// precedes it (legacy path; only the exact route approval label is accepted).
+// Clipboard bytes travel only on the private pipe; only booleans are kept.
+const ROUTE_COPY_FIELD_SELECTOR =
+  '[data-field-id="password"] [data-action="copy-field"]';
+const ROUTE_COPY_REVIEW_LABEL = "批准本次操作";
+const ROUTE_COPY_DISCLOSURE_LABEL = "批准本次字段披露";
+// Both fixed successful-copy feedback lines copiedFeedback() can render.
+const ROUTE_COPY_FEEDBACK = ["已启用自动清理", "自动清理已关闭"];
+// The concealed row's revealed value is masked, never a copy of the secret.
+function routePasswordRowProbe(password) {
+  return `(()=>{
+    const row=document.querySelector(${JSON.stringify(ROUTE_COPY_FIELD_SELECTOR.split(" ")[0])});
+    const value=row?row.querySelector(".field-value"):null;
+    return {masked:!!value&&/^[\u2022\u25cf*]+$/.test(String(value.textContent||"").trim()),leaked:!!document.body&&String(document.body.innerText).includes(${JSON.stringify(password)})};
+  })()`;
 }
 function phase(value) {
   stage = value;
@@ -1335,6 +1356,93 @@ try {
       );
       assert.equal(routes.length, 1, "Route target was replaced");
       assert.equal(routes[0].id, routeTarget, "Route target was replaced");
+      // Per-field copy proof. The harness only performs mouse input and reads
+      // fixed labels/booleans; it never dispatches DOM events or messages.
+      mark("route:copy-field");
+      assert.equal(
+        await route.count(ROUTE_COPY_FIELD_SELECTOR),
+        1,
+        "Route password copy control missing",
+      );
+      // The rendered value stays concealed: only the masked marker, and the
+      // raw password is nowhere in the page text.
+      const rowBefore = await route.evaluate(
+        routePasswordRowProbe(fixture.Value),
+      );
+      assert.equal(rowBefore?.masked, true, "Route password is not concealed");
+      assert.equal(rowBefore?.leaked, false, "Route displayed the password");
+      await route.click(ROUTE_COPY_FIELD_SELECTOR);
+      mark("route:field-approval");
+      const nativeControl = (label) => {
+        try {
+          return (
+            input([], true, {
+              inspect: true,
+              title_prefix: "Locklark · 浏览器原生确认",
+              preserve_focus: true,
+            }).controls?.[label] ?? null
+          );
+        } catch {
+          return null;
+        }
+      };
+      const nativeShown = (label) => {
+        const control = nativeControl(label);
+        return control?.present === true && control?.showing === true;
+      };
+      // Only the fixed approval label requested for this field disclosure, or
+      // (legacy fallback) the exact route item-get review, may be accepted.
+      await wait(
+        () => nativeShown(ROUTE_COPY_DISCLOSURE_LABEL) || nativeShown(ROUTE_COPY_REVIEW_LABEL),
+        "Native field disclosure did not appear",
+      );
+      // Legacy fallback: approve the pending item-get review physically once.
+      // A disclosure already present is the native path, never preceded.
+      let approvedReview = false;
+      if (
+        nativeShown(ROUTE_COPY_REVIEW_LABEL) &&
+        !nativeShown(ROUTE_COPY_DISCLOSURE_LABEL)
+      ) {
+        input([{ click_label: ROUTE_COPY_REVIEW_LABEL }]);
+        approvedReview = true;
+      }
+      // The requested field disclosure itself is always approved physically.
+      await wait(
+        () => nativeShown(ROUTE_COPY_DISCLOSURE_LABEL),
+        approvedReview
+          ? "Native field disclosure did not follow its review"
+          : "Native field disclosure did not appear",
+      );
+      mark("route:field-approve");
+      input([{ click_label: ROUTE_COPY_DISCLOSURE_LABEL }]);
+      mark("route:field-approved");
+      // The same UI shows its fixed successful-copy feedback.
+      await wait(
+        async () => {
+          const feedback = await route.text("#toast");
+          return ROUTE_COPY_FEEDBACK.some((text) => String(feedback ?? "").includes(text));
+        },
+        "Route copy feedback missing",
+      );
+      // Independent OS comparison: the expectation travels only on the
+      // private pipe; only the boolean comparison is kept.
+      mark("route:clipboard");
+      const clipboardReader = new PrivateClipboard({ root, state, env });
+      try {
+        await clipboardReader.start();
+        await wait(
+          () => clipboardReader.matches(fixture.Value),
+          "OS clipboard did not receive the approved field",
+        );
+      } finally {
+        clipboardReader.stop();
+      }
+      // The route page is still the same page after the copy.
+      const routesAfterCopy = (await targets()).filter((target) =>
+        ROUTE_PAGE.test(target.url),
+      );
+      assert.equal(routesAfterCopy.length, 1, "Route target was replaced");
+      assert.equal(routesAfterCopy[0].id, routeTarget, "Route target was replaced");
       // The same console canary checks the ordinary native journeys apply
       // before this checkpoint may claim a pass. Logs are never printed.
       assert(
@@ -1345,7 +1453,7 @@ try {
       );
       for (const line of logs) assertPrivateText(line, fixture);
       console.log(
-        "PASS: real popup exact row opened one persistent route tab; native approval kept the same tab's detail without revealing values",
+        "PASS: real popup exact row opened one persistent route tab; native approval kept the same tab's detail without revealing values; its concealed field copy was disclosed through native approval and only the independent OS clipboard comparison matched",
       );
     } finally {
       try {
@@ -1861,6 +1969,13 @@ try {
     "route-detail-title-mismatch",
     "route-concealed-control-missing",
     "route-password-rendered",
+    "Route password copy control missing",
+    "Route password is not concealed",
+    "Route displayed the password",
+    "Native field disclosure did not appear",
+    "Native field disclosure did not follow its review",
+    "Route copy feedback missing",
+    "OS clipboard did not receive the approved field",
   ];
   const report = {
     reason: safeReasons.includes(error?.message)

@@ -1890,3 +1890,96 @@ test("route worker trace keeps only allowlisted fixed lifecycle labels", () => {
   ]);
   assert.equal(run("clean('not-an-array')"), null);
 });
+
+test("route per-field copy uses physical input, exact native labels and the private pipe", () => {
+  // The route journey's field-copy proof must click the rendered Copy control
+  // with real CDP mouse input, accept only the fixed approval labels, approve
+  // physically, show the fixed feedback and compare the OS clipboard through
+  // the private-pipe reader. Only booleans leave; expected bytes never do.
+  const source = readFileSync(
+    new URL("./browser_native_acceptance.mjs", import.meta.url),
+    "utf8",
+  );
+  const ROUTE_REVIEW_LITERAL = '"批准本次操作"';
+  const helper = (name) => {
+    const from = source.indexOf(name);
+    assert.ok(from > 0, "missing " + name);
+    const body = source.slice(from);
+    const end = body.indexOf("\n  }\n", body.indexOf("async function"));
+    const next = source.indexOf("\n  async function ", from + name.length);
+    const stop = source.indexOf("\n  }\n", next);
+    return source.slice(from, next > 0 && stop > next ? stop : end);
+  };
+  assert.match(source, /^const ROUTE_COPY_FIELD_SELECTOR =\n  '\[data-field-id="password"\] \[data-action="copy-field"\]';$/m);
+  assert.match(source, /^const ROUTE_COPY_REVIEW_LABEL = "批准本次操作";$/m);
+  assert.match(source, /^const ROUTE_COPY_DISCLOSURE_LABEL = "批准本次字段披露";$/m);
+  const checkpoint = helper("async function acceptRouteDetailRead");
+  // One physical click on the exact Copy control through the wrapper.
+  assert.equal(
+    countMatches(checkpoint, /await route\.click\(ROUTE_COPY_FIELD_SELECTOR\);/g),
+    1,
+  );
+  assert.doesNotMatch(checkpoint, /\.evaluate\([^)]*click\(\)|dispatchEvent/);
+  // Only the fixed labels are ever clicked, each through the native helper.
+  assert.match(
+    checkpoint,
+    /input\(\[\{ click_label: ROUTE_COPY_REVIEW_LABEL \}\]\);/,
+  );
+  assert.match(
+    checkpoint,
+    /input\(\[\{ click_label: ROUTE_COPY_DISCLOSURE_LABEL \}\]\);/,
+  );
+  // Every native label click in the checkpoint is one of the two fixed
+  // approval labels (the earlier route review plus the field disclosure).
+  for (const match of checkpoint.matchAll(/click_label: ([^\s}]+)/g))
+    assert.ok(
+      [ROUTE_REVIEW_LITERAL, "ROUTE_COPY_REVIEW_LABEL", "ROUTE_COPY_DISCLOSURE_LABEL"].includes(
+        match[1],
+      ),
+      "unexpected native click label " + match[1],
+    );
+  // Focus-preserving inspect only for the approval waits.
+  assert.match(
+    checkpoint,
+    /inspect: true,\n\s+title_prefix: "Locklark · 浏览器原生确认",\n\s+preserve_focus: true,/,
+  );
+  assert.doesNotMatch(checkpoint, /input\(\[\], true, true\)/);
+  // The disclosure is always required, even after a legacy review.
+  assert.match(checkpoint, /Native field disclosure did not appear/);
+  assert.match(checkpoint, /Native field disclosure did not follow its review/);
+  // Fixed UI feedback, never a page-computed success.
+  assert.match(source, /^const ROUTE_COPY_FEEDBACK = \["已启用自动清理", "自动清理已关闭"\];$/m);
+  assert.match(checkpoint, /ROUTE_COPY_FEEDBACK\.some/);
+  // Private-pipe comparison; no success without a matching clipboard.
+  assert.match(checkpoint, /new PrivateClipboard\(\{ root, state, env \}\)/);
+  assert.match(checkpoint, /clipboardReader\.start\(\)/);
+  assert.match(checkpoint, /clipboardReader\.matches\(fixture\.Value\)/);
+  assert.match(checkpoint, /OS clipboard did not receive the approved field/);
+  assert.match(checkpoint, /clipboardReader\.stop\(\)/);
+  // The expected bytes are never passed to input/native helpers or printed.
+  assert.doesNotMatch(checkpoint, /input\([^)]*fixture\.Value/);
+  assert.doesNotMatch(checkpoint, /console\.(log|error)\([^)]*fixture\.Value/);
+  assert.doesNotMatch(checkpoint, /click_label: [^"]*Value/);
+  // Concealment is asserted again right before the copy, as booleans only.
+  assert.match(checkpoint, /routePasswordRowProbe\(fixture\.Value\)/);
+  assert.match(checkpoint, /rowBefore\?\.masked, true/);
+  assert.match(checkpoint, /rowBefore\?\.leaked, false/);
+  // The private-pipe reader is the shared one, exported without behavior change.
+  const shared = readFileSync(
+    new URL("./browser_shared_clipboard_acceptance.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(shared, /^export class PrivateClipboard \{$/m);
+  assert.match(
+    source,
+    /import \{\n  acceptSharedClipboard,\n  prepareSharedEnvironment,\n  PrivateClipboard,\n\} from "\.\/browser_shared_clipboard_acceptance\.mjs";/,
+  );
+  // Bounded stages exist for click, approval and clipboard comparison.
+  for (const stage of [
+    "route:copy-field",
+    "route:field-approval",
+    "route:field-approve",
+    "route:clipboard",
+  ])
+    assert.ok(source.includes('mark("' + stage + '")'), stage);
+});
