@@ -121,12 +121,10 @@ class PrivacyTests(unittest.TestCase):
 
 
 class PrivacyStageTests(unittest.TestCase):
-    primary_canary = "PrivatePrimaryCanary-" + "b" * 48
-    privacy_canary = "PrivatePrivacyCanary-" + "c" * 48
-    # Seeded by the controller's diagnosis: main() records the primary first
-    # and only then diagnoses, so this line is primary unless privacy replaced
-    # it, which the post-privacy cases below assert against.
-    sentinel_line = 4242
+    # AcceptanceFailure's message is its fixed code, so these distinct canaries
+    # are allowlisted codes; constructing it directly never touches args.
+    primary_canary = "oracle-stream-truncated"
+    privacy_canary = "privacy-canary-disclosed"
 
     class Controller:
         """Fake controller whose privacy stage is the production method."""
@@ -150,9 +148,9 @@ class PrivacyStageTests(unittest.TestCase):
             self.stage = "lock"
 
         def diagnose(self):
-            # main() runs diagnosis after it records the failure's source line,
-            # so the primary line here is final whatever raised the failure.
-            self.error_line = PrivacyStageTests.sentinel_line
+            # main() records the failure's source line before diagnosing.
+            # Keep that line; diagnosis only captures it.
+            self.diagnosed_error_line = self.error_line
 
         def close(self):
             self.last_command = {"category": "native-observe", "state": "completed", "exit_code": 0, "elapsed_ms": 5}
@@ -160,24 +158,12 @@ class PrivacyStageTests(unittest.TestCase):
         def mark(self, name):
             self.checks.append(name)
 
-    def fail(self, canary):
-        # Raised from a callee, as production privacy() raises after scan.
-        def disclose():
-            error = acceptance.AcceptanceFailure("privacy-canary-disclosed")
-            error.args = (canary,)
-            self.assertEqual(str(error), canary)
-            raise error
-        try:
-            disclose()
-        except acceptance.AcceptanceFailure as error:
-            return error
-
     def run_main(self, primary=None, privacy=None):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             (root / "desktop.stdout-stderr").write_bytes(b"public evidence only\n")
             if primary is not None:
-                primary = self.fail(self.primary_canary)
+                primary = acceptance.AcceptanceFailure(self.primary_canary)
             fake = self.Controller(root, primary)
             calls, stages, real_scan = [], [], acceptance.scan
             def scan(raw, values):
@@ -201,44 +187,60 @@ class PrivacyStageTests(unittest.TestCase):
             self.assertNotIn(value, out.getvalue() + serialized)
         for value in (str(root), "desktop.stdout-stderr", "/tmp/"):
             self.assertNotIn(value, serialized)
+        # privacy() reached the production scan loop exactly once, after it
+        # set the stage.
         self.assertEqual(len(calls), 1)
-        # Called from privacy()'s scan loop, after it sets the stage.
         self.assertEqual(stages, ["privacy"])
         return root, status, result, out.getvalue(), fake, stages
 
     def test_earlier_slow_frame_failure_stays_primary_when_privacy_also_fails(self):
-        root, status, result, output, fake, stages = self.run_main(primary=True, privacy=self.fail(self.privacy_canary))
-        # privacy() set the stage while it ran; only the result keeps the
-        # earlier primary stage.
-        assert root and stages == ["privacy"] and fake.checks == []
-        assert status == 1
-        # The earlier stage, class and source line stay primary.
-        assert result["stage"] == "slow-frame" and result["diagnostic"]["stage"] == "slow-frame"
-        assert result["error_class"] == "assertion" and result["diagnostic"]["error_class"] == "assertion"
-        assert result["source_line"] == self.sentinel_line
-        assert result["diagnostic"]["source_line"] == self.sentinel_line
+        primary = acceptance.AcceptanceFailure(self.primary_canary)
+        root, status, result, output, fake, stages = self.run_main(
+            primary=primary, privacy=acceptance.AcceptanceFailure(self.privacy_canary))
+        self.assertTrue(root)
+        self.assertEqual(fake.checks, [])
+        self.assertEqual(status, 1)
+        # main() recorded a positive line for the primary failure; the privacy
+        # failure must not replace it.
+        self.assertIsInstance(fake.diagnosed_error_line, int)
+        self.assertGreater(fake.diagnosed_error_line, 0)
+        self.assertEqual(result["source_line"], fake.diagnosed_error_line)
+        self.assertEqual(result["diagnostic"]["source_line"], fake.diagnosed_error_line)
+        # The earlier stage and class stay primary.
+        self.assertEqual(result["stage"], "slow-frame")
+        self.assertEqual(result["diagnostic"]["stage"], "slow-frame")
+        self.assertEqual(result["error_class"], "assertion")
+        self.assertEqual(result["diagnostic"]["error_class"], "assertion")
         # The privacy failure is reported separately as a fixed class.
-        assert result["privacy_error_class"] == "assertion"
-        assert result["diagnostic"]["privacy_error_class"] == "assertion"
-        assert "FAIL: SSH acceptance at slow-frame" in output
+        self.assertEqual(result["privacy_error_class"], "assertion")
+        self.assertEqual(result["diagnostic"]["privacy_error_class"], "assertion")
+        self.assertEqual(fake.privacy_error_class, "assertion")
+        self.assertIn("FAIL: SSH acceptance at slow-frame", output)
 
     def test_privacy_only_failure_reports_privacy_stage(self):
-        _root, status, result, output, fake, stages = self.run_main(privacy=self.fail(self.privacy_canary))
-        assert stages == ["privacy"] and fake.stage == "privacy" and status == 1
+        _root, status, result, output, fake, stages = self.run_main(
+            privacy=acceptance.AcceptanceFailure(self.privacy_canary))
+        self.assertEqual(fake.stage, "privacy")
+        self.assertEqual(fake.checks, [])
+        self.assertEqual(status, 1)
         # No primary failure, so privacy keeps the stage and its fixed class.
-        assert result["stage"] == "privacy" and result["diagnostic"]["stage"] == "privacy"
-        assert result["error_class"] == "none" and result["diagnostic"]["error_class"] == "none"
-        assert result["privacy_error_class"] == "assertion"
-        assert result["diagnostic"]["privacy_error_class"] == "assertion"
-        assert "FAIL: SSH acceptance at privacy" in output
+        self.assertEqual(result["stage"], "privacy")
+        self.assertEqual(result["diagnostic"]["stage"], "privacy")
+        self.assertEqual(result["error_class"], "none")
+        self.assertEqual(result["diagnostic"]["error_class"], "none")
+        self.assertEqual(result["privacy_error_class"], "assertion")
+        self.assertEqual(result["diagnostic"]["privacy_error_class"], "assertion")
+        self.assertIn("FAIL: SSH acceptance at privacy", output)
 
     def test_clean_privacy_scan_reports_complete_with_no_privacy_class(self):
         _root, status, result, output, fake, stages = self.run_main()
-        assert status == 0
-        assert result["stage"] == "complete" and result["diagnostic"]["stage"] == "complete"
-        assert result["privacy_error_class"] == "none" and result["diagnostic"]["privacy_error_class"] == "none"
-        assert fake.checks == ["full_public_outputs_and_observed_agent_wire_contain_no_factors_or_private_seed"]
-        assert "PASS: SSH acceptance at complete" in output
+        self.assertEqual(status, 0)
+        self.assertEqual(result["stage"], "complete")
+        self.assertEqual(result["diagnostic"]["stage"], "complete")
+        self.assertEqual(result["privacy_error_class"], "none")
+        self.assertEqual(result["diagnostic"]["privacy_error_class"], "none")
+        self.assertEqual(fake.checks, ["full_public_outputs_and_observed_agent_wire_contain_no_factors_or_private_seed"])
+        self.assertIn("PASS: SSH acceptance at complete", output)
 
     def test_privacy_failure_class_is_a_fixed_value_never_exception_text(self):
         canary = "PrivatePrivacyClassCanary-" + "d" * 48
