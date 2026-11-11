@@ -1,10 +1,13 @@
-# Remote unlock wire v1: canonical binding context
+# Remote unlock wire v1: binding context, device binding, owner-root authorization and lifecycle
 
-Status: context and stable per-device binding codecs, plus a process-local
-request lifecycle. The package `pkg/remoteunlock` implements exactly these
-encodings, the binding signature check in
-[Stable device transport binding v1](#stable-device-transport-binding-v1), and
-the lifecycle in [Process-local request lifecycle](#process-local-request-lifecycle).
+Status: context and stable per-device binding codecs, the independent
+owner-root authorization object and its checkpoint-scoped verifier, plus a
+process-local request lifecycle. The package `pkg/remoteunlock` implements
+exactly these encodings, the binding signature check in
+[Stable device transport binding v1](#stable-device-transport-binding-v1), the
+owner-root authorization in
+[Owner-root authorization v1](#owner-root-authorization-v1), and the lifecycle
+in [Process-local request lifecycle](#process-local-request-lifecycle).
 `internal/remoteunlocktls` additionally exposes a narrow channel-side check of a
 peer binding against the verified TLS peer certificate
 ([Peer binding over an established channel](#peer-binding-over-an-established-channel)).
@@ -12,16 +15,33 @@ The vectors below are synthetic and demonstrate the codecs only.
 
 ## Scope
 
-This document defines the bytes of the TLS exporter binding context for remote
-unlock v1, and nothing else.
+This document defines the remote unlock v1 artifacts described in the status
+above, and nothing else:
+
+- the canonical TLS exporter binding context encoding and parsing, specified
+  from [Encoding rules](#encoding-rules);
+- the [stable device transport binding](#stable-device-transport-binding-v1)
+  wire format and its state-free device-signature verification;
+- the [owner-root authorization](#owner-root-authorization-v1) wire format and
+  the [verification boundaries](#verification-procedure-and-boundary) of its
+  checkpoint-scoped verifier — not a general authorization system;
+- the [process-local request lifecycle](#process-local-request-lifecycle) state
+  machine; and
+- the internal [peer-channel check](#peer-binding-over-an-established-channel)
+  of a peer binding against the verified TLS peer certificate.
+
+Each section defines its own limits, and those limits remain in force. This
+document defines no relay protocol, no VUK delivery, no durable replay defense
+and no complete mobile unlock flow.
 
 Encoding or parsing a context proves only that the bytes are the canonical
 encoding of syntactically valid claims. It does **not** prove authorization,
 requester or device identity, pairing, membership, policy, request freshness,
 one-shot consumption, signatures, a TLS handshake, or delivery of a vault unlock
-key (VUK). This codec does not create or inspect TLS connections and does not
-verify any field. A caller that relies on these claims must verify them through
-separate mechanisms, including a TLS exporter binding on the actual connection.
+key (VUK). The context codec does not create or inspect TLS connections and does
+not verify any field. A caller that relies on these claims must verify them
+through separate mechanisms, including a TLS exporter binding on the actual
+connection.
 
 ## Encoding rules
 
@@ -194,8 +214,9 @@ particular delivery recipient. It is signed once by a caller-pinned device
 signing key and is not tied to one request. It intentionally contains no
 request ID or request digest, no deadline, no key epoch, no policy sequence or
 digest, and no lock generation. Those belong to a `ChannelBindingContext` and
-to later signed authorization. Later protocol layers may reference a binding by
-digest, but this codec defines no digest-reference message.
+to the owner-root authorization
+([Owner-root authorization v1](#owner-root-authorization-v1)), which references
+each endpoint binding by digest over its complete signed bytes.
 
 ### Binding schema
 
@@ -334,6 +355,200 @@ approval, request freshness, request or policy digest correctness, deadline
 validity, one-shot consumption, exporter/request binding, authentication of the
 context claims, VUK access or delivery, or a complete mobile unlock.
 
+## Owner-root authorization v1
+
+`OwnerRootAuthorization` is a third, independent canonical object. It is the
+vault owner root's signature over one request: the request context, both
+endpoint bindings of that request, and an absolute expiry. It supplements —
+and never replaces — the context, the bindings, the TLS channel APIs, or the
+vault-file policy checkpoint.
+
+```
+format, version, kind,
+owner_root_key_id,
+context_sha256, source_binding_sha256, target_binding_sha256,
+expires_unix_ms,
+signature
+```
+
+### Authorization schema
+
+| # | Member | Type | Constraint |
+|---|--------|------|------------|
+| 1 | `format` | string | constant `locklark.remote-unlock` |
+| 2 | `version` | integer | constant `1` |
+| 3 | `kind` | string | constant `owner-authorization` |
+| 4 | `owner_root_key_id` | string | identifier (non-empty, at most 128 bytes) |
+| 5 | `context_sha256` | string | exactly 32 bytes, unpadded base64url |
+| 6 | `source_binding_sha256` | string | exactly 32 bytes, unpadded base64url |
+| 7 | `target_binding_sha256` | string | exactly 32 bytes, unpadded base64url |
+| 8 | `expires_unix_ms` | integer | int64, strictly greater than zero; Unix milliseconds |
+| 9 | `signature` | string | exactly 64 bytes Ed25519, unpadded base64url |
+
+Members appear exactly once, in this order; the first eight are the signed
+members. Identifier, canonical-string, integer, digest and all-or-nothing
+parsing rules are those of the context. The authorization carries no request
+identifier, pair, lock generation, member, device or vault identifier of its
+own: those are bound through `context_sha256`, and both endpoint bindings
+(each with its own device signature) through their digests.
+
+The encoded size cap is `MaxAuthorizationSize` = 1024 bytes; input larger than
+that is rejected before interpretation. With six fixed-width members, the
+maximum legal encoding has a 128-byte `owner_root_key_id` and
+`expires_unix_ms` = `2^63 - 1` and is **569 bytes**, well under the cap. The
+canonical synthetic vector below is 450 bytes.
+
+### Domains and preimages
+
+Each value has its own domain label, followed immediately by one literal NUL
+byte (`\x00`):
+
+```
+context_sha256        = SHA-256( "locklark.remote-unlock/v1/authorization-context\x00"
+                                 || EncodeChannelBindingContext(context) )          (473-byte vector)
+
+binding_sha256(b)     = SHA-256( "locklark.remote-unlock/v1/device-transport-binding-digest\x00"
+                                 || EncodeDeviceTransportBinding(b) )               (complete bytes,
+                                                                                     signature included)
+
+signature             = Ed25519_sign( owner root key,
+                        "locklark.remote-unlock/v1/owner-authorization\x00"
+                        || canonical JSON of members 1..8 )
+```
+
+The binding digest covers each endpoint's **complete signed stable binding**,
+signature member included, so any change to a binding, its device signature or
+its recipient changes the digest. The authorization carries the digest of the
+source binding in member 6 and of the target binding in member 7, in that
+order; a swap is never normalized.
+
+`pkg/remoteunlock` exports the public helpers:
+
+- `RemoteUnlockContextDigest(c)`: `context_sha256`.
+- `DeviceTransportBindingDigest(b)`: `binding_sha256(b)`.
+- `AuthorizationSigningBytes(a)`: the exact signature preimage (members 1..8).
+- `EncodeOwnerRootAuthorization(a)` / `ParseOwnerRootAuthorization(b)`:
+  canonical encoding and strict parsing; `MarshalJSON`/`UnmarshalJSON` use them.
+- `VerifyOwnerRootAuthorization(...)`: the checkpoint-scoped verifier below.
+
+Like the binding API, the codec and signing helpers never sign and never hold,
+derive or store a private key. The owner root signs the returned preimage with
+its own protected Ed25519 key outside this package.
+
+### Verification procedure and boundary
+
+`VerifyOwnerRootAuthorization(f, checkpoint, a, c, source, target, nowUnixMS)`
+returns on the first failure, in this order:
+
+1. `nowUnixMS > 0`; the authorization, context, source binding and target
+   binding are canonical-valid. **Expiry is strict**: `nowUnixMS <
+   expires_unix_ms` (an authorization is expired exactly at its expiry
+   instant), and `expires_unix_ms <= c.deadline_unix_ms` (an authorization may
+   expire before the request does, never after). Only the caller-supplied
+   `nowUnixMS` is used; there is no hidden system clock.
+2. `a.context_sha256` equals `RemoteUnlockContextDigest(c)`.
+3. `vaultfile.VerifyPolicyCheckpoint(f, checkpoint)` must succeed **before any
+   carried policy claim is trusted**. Its error is returned wrapped with
+   `ErrInvalidAuthorization`. Only then are `f.header` and the current (final)
+   policy proof used.
+4. `f.header.vault_id`, `key_epoch`, `policy_seq` and `policy_digest` equal the
+   context exactly; `vaultfile.PolicyDigest` of the authenticated current
+   policy equals both `f.header.policy_digest` and `c.policy_digest`. No
+   normalization, case folding or defaulting is applied, and no carried proof
+   may be newer than the context policy sequence.
+5. The context's source and target devices differ, both resolve by device ID in
+   the authenticated current policy, both belong to `c.member_id`, and that
+   principal holds an **existing read qualification** — a reader, writer, admin
+   or owner role, exactly the vault file's role semantics (any one of the four
+   implies read). This is read qualification only: it grants no author role and
+   never elevates or rewrites a role. Each device's canonical policy
+   `age_encryption_key` must equal the matching binding's
+   `recipient_public_key`.
+6. Each binding verifies with `VerifyDeviceTransportBindingForContext` against
+   the **exact device's authenticated `content_signing_key.public_key`** and the
+   expected device ID, and the digest of the source binding then the digest of
+   the target binding equal members 6 and 7.
+7. `a.owner_root_key_id` equals `checkpoint.OwnerRootKeyID` (and the
+   authenticated policy's root key ID), and the signature verifies **only**
+   under the caller-pinned `checkpoint.OwnerRootPublicKey` — never a key carried
+   in the authorization object or in the current file.
+
+The owner root is the **sole issuer** accepted here. There is no admin,
+reader, device or delegation path, no permission flag and no role change.
+
+A nil return proves only that the owner root that owns the caller's checkpoint
+issued this authorization for this request context, these two signed stable
+bindings of the checkpoint-authenticated current policy, before the expiry and
+the request deadline. It does **not** prove:
+
+- the `request_digest` preimage or any request-content semantics;
+- the actual TLS exporter value, handshake, or that the channel equals the
+  context (that is the channel binding's own check);
+- that the live peer's SPKI matches `spki_sha256` (the internal TLS adapter's
+  separate check);
+- that either device holds its private key or recipient identity (real device
+  identity or enrollment);
+- one-shot use, restart safety, or anti-rollback (no durable replay defense);
+- VUK decryption, wrapping or delivery, or a complete mobile unlock.
+
+`VerifyPolicyCheckpoint` remains the authority for the content author role and
+for policy mutation, which this verifier never performs. A reader can read the
+file but cannot author it: `vaultfile` rejects a current file whose author is a
+reader-only device, and owner-root authorization fails closed on such a file.
+
+### Synthetic authorization vector
+
+All keys, identities, policies and file bytes are synthetic; the Ed25519 keys
+come from the declared deterministic seed spans and every signature is real
+output over the documented preimages, but none belongs to a production root,
+device, member or vault.
+
+Context: the 473-byte context vector above, whose digest is
+
+```
+context_sha256        = SFXeSJjOvMsmXh3eaNefOt_JDkO1JhrUTS6CnEabzyU
+```
+
+Bindings: the source and target vectors of
+[Synthetic binding vector](#synthetic-binding-vector) (`pair_generation` 0,
+signed by the synthetic source and target device keys):
+
+```
+source_binding_sha256 = H8uXANZqikFmCmZPEJo8AWtzmBn3xPH4D1wVj5rez_U
+target_binding_sha256 = yHvjY7BX-EVeru1GBSe5EBd4xIlk0dHfAjK8DFYBRKM
+```
+
+Signed JSON (members 1..8), followed immediately by the domain
+`locklark.remote-unlock/v1/owner-authorization\x00` and nothing else:
+
+```json
+{"format":"locklark.remote-unlock","version":1,"kind":"owner-authorization","owner_root_key_id":"owner-root-0001","context_sha256":"SFXeSJjOvMsmXh3eaNefOt_JDkO1JhrUTS6CnEabzyU","source_binding_sha256":"H8uXANZqikFmCmZPEJo8AWtzmBn3xPH4D1wVj5rez_U","target_binding_sha256":"yHvjY7BX-EVeru1GBSe5EBd4xIlk0dHfAjK8DFYBRKM","expires_unix_ms":1799999999000}
+```
+
+The synthetic owner-root public key is the unpadded base64url string
+`Kay64UG8yvCyLhqU000LxzYeUm0L_hlLIl5S8kyKWbdc`; the fixed signature over the
+preimage is `uo_poPoCLDqh7YE2gdpH8reRMVu7uDpHJ4sq3EMZVorh8kY04hFDfLpPrHEyDYK0tWZCPCPGogc-LwYFG0jeAw`.
+The complete canonical authorization is 450 bytes:
+
+```json
+{"format":"locklark.remote-unlock","version":1,"kind":"owner-authorization","owner_root_key_id":"owner-root-0001","context_sha256":"SFXeSJjOvMsmXh3eaNefOt_JDkO1JhrUTS6CnEabzyU","source_binding_sha256":"H8uXANZqikFmCmZPEJo8AWtzmBn3xPH4D1wVj5rez_U","target_binding_sha256":"yHvjY7BX-EVeru1GBSe5EBd4xIlk0dHfAjK8DFYBRKM","expires_unix_ms":1799999999000,"signature":"uo_poPoCLDqh7YE2gdpH8reRMVu7uDpHJ4sq3EMZVorh8kY04hFDfLpPrHEyDYK0tWZCPCPGogc-LwYFG0jeAw"}
+```
+
+These bytes are pinned literally in the package tests, which also recompute
+every digest and signature from the declared seeds, and verify them.
+
+### Rejected spellings
+
+Parsing an authorization rejects missing, unknown, duplicate and reordered
+members; wrong constants, types and versions; surrounding whitespace, trailing
+data and malformed structure; invalid UTF-8 and JSON escapes; integer signs,
+leading zeros, fractions, exponents, a zero or overflowing `expires_unix_ms`;
+identifiers that break the grammar; digests of the wrong size, padded, in the
+standard base64 alphabet or with non-canonical trailing bits; signatures of the
+wrong size or spelling; input over 1024 bytes; and any spelling that does not
+re-encode to the identical bytes. Errors name the failing member with a static
+message and never include a value, key or signature byte.
+
 ## Process-local request lifecycle
 
 `pkg/remoteunlock/lifecycle.go` defines `RequestLifecycle`, an in-memory status
@@ -421,6 +636,26 @@ or exposes no key material. A `received` status is a local bookkeeping fact, not
 evidence that a VUK was authorized or delivered.
 
 ## Scope boundary
+
+The owner-root authorization section above is the only signed authorization
+this document defines. It is issued by the vault owner root alone: there is no
+restricted admin delegation path, no request-digest preimage semantics, no
+durable replay or restart anti-rollback, and no VUK decryption, wrapping or
+delivery. A nil return from its verifier means exactly what that section states
+and nothing more. `VerifyOwnerRootAuthorization` is not an end-to-end verifier.
+It does not itself compute or verify a TLS exporter or channel binding, and it
+does not match a live peer SPKI. Those are separate APIs documented earlier,
+and callers must compose them explicitly. The binding
+[context codec](#encoding-rules) only encodes and parses context bytes;
+`remoteunlocktls.Channel.ExportBindingContext` and
+`remoteunlocktls.Channel.VerifyBindingContext` are what bind or verify those
+canonical context bytes against the exporter on an established TLS channel.
+Separately, `remoteunlocktls.Channel.VerifyPeerDeviceTransportBinding` checks
+the live peer SPKI and then the [stable device transport
+binding](#stable-device-transport-binding-v1) signature and context; see the
+[peer-channel check](#peer-binding-over-an-established-channel).
+`VerifyOwnerRootAuthorization` performs neither check, and none of them is
+integrated into the owner-root verifier.
 
 This context codec alone proves no authorization, requester identity, device
 identity, pairing, membership, policy, signature, request freshness or
