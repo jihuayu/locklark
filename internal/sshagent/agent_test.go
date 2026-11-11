@@ -5,10 +5,10 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"io"
 	"net"
-	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -140,36 +140,23 @@ func TestUnknownMessagesCannotMutateOrExposeKeys(t *testing.T) {
 	}
 }
 
-// SSH_AGENT_FAILURE is the one-byte failure body; no client library exports it.
-const sshAgentFailure = 5
+// sshAgentFailure is the SSH_AGENT_FAILURE message number, the one-byte
+// failure body no client library exports.
+const sshAgentFailure = byte(5)
 
-// failureHeader is the canonical length header of a one-byte SSH_AGENT_FAILURE
-// payload. The strict canonical frame is failureHeader followed by
-// sshAgentFailure.
-var failureHeader = []byte{0, 0, 0, 1}
+// canonicalFailureFrame is the full SSH_AGENT_FAILURE frame: its four-byte
+// big-endian length followed by the one-byte failure body. The forced ordering
+// below can only ever deliver its header.
+var canonicalFailureFrame = []byte{0, 0, 0, 1, sshAgentFailure}
 
-// refusingHandler announces that Sign was entered and immediately refuses.
+// refusingHandler announces its one Sign entry and immediately refuses.
 type refusingHandler struct {
-	key     ssh.PublicKey
 	entered chan struct{}
 	calls   atomic.Int32
 }
 
-func newRefusingHandler(t *testing.T) *refusingHandler {
-	t.Helper()
-	_, key, e := ed25519.GenerateKey(rand.Reader)
-	if e != nil {
-		t.Fatal("fixture generation failed")
-	}
-	pub, e := ssh.NewPublicKey(key.Public())
-	if e != nil {
-		t.Fatal("fixture public key failed")
-	}
-	return &refusingHandler{key: pub, entered: make(chan struct{}, 1)}
-}
-
 func (h *refusingHandler) Identities(context.Context, Peer) ([]Identity, error) {
-	return []Identity{{h.key.Marshal(), "Locklark fixture"}}, nil
+	return nil, ErrRefused
 }
 
 func (h *refusingHandler) Sign(context.Context, SignRequest) ([]byte, error) {
@@ -178,31 +165,35 @@ func (h *refusingHandler) Sign(context.Context, SignRequest) ([]byte, error) {
 	return nil, ErrRefused
 }
 
-// headerFirstGate wraps only the server side of a net.Pipe. The first Write (the
-// four-byte response header) delegates normally. The second Write (the
-// one-byte failure body) closes payloadStarted, waits for releasePayload, and
-// then delegates. Close closes the underlying connection first and signals
-// underlyingClosed exactly once, however often it is invoked.
-//
-// The wrapper never reads, so serve reads the request through net.Pipe
-// directly. Every read completes before any write can fail the peer's step
-// request write, so that write reports only success or its step deadline.
+// headerFirstGate wraps only the server side of a net.Pipe. The first Write
+// (the four-byte response header) delegates normally. The second Write (the
+// response body) signals payloadStarted and waits for release before it
+// delegates, and its result is recorded privately before bodyDrained closes.
+// release fires the gate exactly once, whether from the cancellation path or
+// from cleanup. Close closes the underlying connection first and signals
+// underlyingClosed once, however often it is invoked.
 type headerFirstGate struct {
 	net.Conn
 	writes           atomic.Int32
 	payloadStarted   chan struct{}
-	releasePayload   chan struct{}
+	released         chan struct{}
 	underlyingClosed chan struct{}
 	payloadStartOnce sync.Once
+	releaseOnce      sync.Once
 	underlyingOnce   sync.Once
+	bodyMu           sync.Mutex
+	bodyN            int
+	bodyErr          error
+	bodyDrained      chan struct{}
 }
 
 func newHeaderFirstGate(c net.Conn) *headerFirstGate {
 	return &headerFirstGate{
 		Conn:             c,
 		payloadStarted:   make(chan struct{}),
-		releasePayload:   make(chan struct{}),
+		released:         make(chan struct{}),
 		underlyingClosed: make(chan struct{}),
+		bodyDrained:      make(chan struct{}),
 	}
 }
 
@@ -211,8 +202,17 @@ func (g *headerFirstGate) Write(p []byte) (int, error) {
 		return g.Conn.Write(p)
 	}
 	g.payloadStartOnce.Do(func() { close(g.payloadStarted) })
-	<-g.releasePayload
-	return g.Conn.Write(p)
+	<-g.released
+	n, e := g.Conn.Write(p)
+	g.bodyMu.Lock()
+	g.bodyN, g.bodyErr = n, e
+	close(g.bodyDrained)
+	g.bodyMu.Unlock()
+	return n, e
+}
+
+func (g *headerFirstGate) release() {
+	g.releaseOnce.Do(func() { close(g.released) })
 }
 
 func (g *headerFirstGate) Close() error {
@@ -222,27 +222,45 @@ func (g *headerFirstGate) Close() error {
 }
 
 // TestForcedCancellationBetweenFailureHeaderAndPayload is an explicitly
-// injected cancellation ordering test. It demonstrates a forced reachable
-// ordering, cancel after the response header and before the payload, under
-// which the peer observes only the strict canonical SSH_AGENT_FAILURE header
-// prefix. It is neither a naturally observed ordering nor evidence of bytes
-// produced by CI.
+// injected cancellation ordering test. It forces a reachable ordering, cancel
+// after the response header and before the response body, and shows the peer
+// receives only the strict canonical SSH_AGENT_FAILURE header prefix. It is
+// neither a naturally observed ordering nor evidence of bytes produced by CI.
 func TestForcedCancellationBetweenFailureHeaderAndPayload(t *testing.T) {
 	const deadline = 5 * time.Second
-	h := newRefusingHandler(t)
+	_, signingKey, e := ed25519.GenerateKey(rand.Reader)
+	if e != nil {
+		t.Fatal("fixture generation failed")
+	}
+	pub, e := ssh.NewPublicKey(signingKey.Public())
+	if e != nil {
+		t.Fatal("fixture public key failed")
+	}
+	payload := append([]byte{13}, ssh.Marshal(struct {
+		Key, Data []byte
+		Flags     uint32
+	}{pub.Marshal(), []byte("forced cancellation ordering fixture"), 0})...)
+	// serve reads a four-byte big-endian outer frame length before the payload.
+	request := make([]byte, 4, 4+len(payload))
+	binary.BigEndian.PutUint32(request, uint32(len(payload)))
+	request = append(request, payload...)
+
+	h := &refusingHandler{entered: make(chan struct{}, 1)}
 	plainServer, peer := net.Pipe()
 	server := newHeaderFirstGate(plainServer)
 	parentCtx, cancelParent := context.WithCancel(context.Background())
 	cancelParent = sync.OnceFunc(cancelParent)
 	served := make(chan struct{})
 	requestDone := make(chan error, 1)
+	// The peer write cannot finish while serve is busy with Sign on a plain
+	// net.Pipe, so it is reported once Sign was entered and the header read.
+	var requestErr error
 
-	// Cleanup runs before any deferred assertion reports, so a failed
-	// assertion still releases the gates, closes both sockets, and reaps the
-	// serve goroutine even when the request write was already lost.
+	// Cleanup runs after the test body, including when an assertion failed:
+	// it cancels, fires the release gate, closes both sockets, and reaps serve.
 	t.Cleanup(func() {
 		cancelParent()
-		close(server.releasePayload)
+		server.release()
 		_ = server.Close()
 		_ = peer.Close()
 		select {
@@ -257,10 +275,6 @@ func TestForcedCancellationBetweenFailureHeaderAndPayload(t *testing.T) {
 		serve(parentCtx, server, Peer{"UID test", 1, "fixture"}, h, make(chan struct{}, MaxWriters))
 	}()
 
-	request := append([]byte{13}, ssh.Marshal(struct {
-		Key, Data []byte
-		Flags     uint32
-	}{h.key.Marshal(), []byte("forced cancellation ordering fixture"), 0})...)
 	go func() {
 		_ = peer.SetWriteDeadline(time.Now().Add(deadline))
 		n, e := peer.Write(request)
@@ -269,72 +283,71 @@ func TestForcedCancellationBetweenFailureHeaderAndPayload(t *testing.T) {
 		}
 		requestDone <- e
 	}()
-	entered := false
-	for !entered {
-		select {
-		case e := <-requestDone:
-			// The step request transfer is committed once serve consumes it,
-			// and that read precedes every write, so a completed write reports
-			// only nil or its step deadline: only those mean the write ended.
-			if e != nil && !errors.Is(e, os.ErrDeadlineExceeded) {
-				t.Fatal("sign request write failed")
-			}
-		case <-h.entered:
-			entered = true
-		case <-time.After(deadline):
-			t.Fatal("request did not reach the refusing handler")
-		}
-	}
 	select {
-	case <-requestDone:
+	case <-h.entered:
 	case <-time.After(deadline):
-		t.Fatal("sign request write did not finish")
+		t.Fatal("request did not reach the refusing handler")
 	}
 
-	header := make([]byte, len(failureHeader))
+	header := make([]byte, 4)
 	_ = peer.SetReadDeadline(time.Now().Add(deadline))
 	if n, e := peer.Read(header); e != nil || n != len(header) {
 		t.Fatal("failure header was not received")
 	}
-	if !bytes.Equal(header, failureHeader) {
-		t.Fatal("received header is not the one-byte payload length")
+	select {
+	case requestErr = <-requestDone:
+	case <-time.After(deadline):
+		t.Fatal("sign request write did not finish")
 	}
 	select {
 	case <-server.payloadStarted:
 	case <-time.After(deadline):
-		t.Fatal("failure payload write did not start")
+		t.Fatal("response body write did not start")
 	}
 
-	// Cancel strictly between the header and the payload; the header's
-	// transfer is already committed, so only the body could still be lost.
+	// Cancel strictly between the header and the body, wait for serve's own
+	// close of the server connection, and only then release the body write.
 	cancelParent()
 	select {
 	case <-server.underlyingClosed:
 	case <-time.After(deadline):
 		t.Fatal("cancellation did not close the server connection")
 	}
-	close(server.releasePayload)
+	server.release()
+	select {
+	case <-server.bodyDrained:
+	case <-time.After(deadline):
+		t.Fatal("response body write did not return")
+	}
+	server.bodyMu.Lock()
+	bodyN, bodyErr := server.bodyN, server.bodyErr
+	server.bodyMu.Unlock()
+	if bodyN != 0 || bodyErr == nil {
+		t.Fatal("response body write did not fail with zero bytes after close")
+	}
 
-	payload := make([]byte, 1)
+	buffer := make([]byte, 1)
 	_ = peer.SetReadDeadline(time.Now().Add(deadline))
-	n, e := peer.Read(payload)
+	n, e := peer.Read(buffer)
 	if n != 0 {
-		t.Fatal("failure payload was observable after cancellation")
+		t.Fatal("response body was observable after cancellation")
 	}
-	if completed := e == io.EOF || errors.Is(e, io.ErrClosedPipe); !completed {
-		t.Fatal("failure payload read did not observe end of stream")
+	if e != io.EOF && !errors.Is(e, io.ErrClosedPipe) {
+		t.Fatal("read after the header did not observe end of stream")
 	}
+
 	select {
 	case <-served:
 	case <-time.After(deadline):
-		t.Fatal("serve did not exit after cancellation")
+		t.Fatal("serve did not exit")
 	}
-
-	observed := append(append([]byte(nil), header...), payload...)
-	if !bytes.Equal(observed, append(append([]byte(nil), failureHeader...), 0)) {
-		t.Fatal("observed bytes are not only the strict canonical SSH_AGENT_FAILURE header prefix")
+	if requestErr != nil {
+		t.Fatal("sign request write did not succeed")
 	}
 	if h.calls.Load() != 1 {
 		t.Fatal("refusing handler Sign call count is not one")
+	}
+	if len(header) >= len(canonicalFailureFrame) || !bytes.Equal(header, canonicalFailureFrame[:len(header)]) {
+		t.Fatal("received bytes are not the strict canonical SSH_AGENT_FAILURE header prefix")
 	}
 }
