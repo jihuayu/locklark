@@ -1,6 +1,7 @@
 package org.locklark.android
 
 import android.os.Bundle
+import android.view.View
 import android.os.SystemClock
 import android.view.autofill.AutofillManager
 import android.widget.TextView
@@ -13,6 +14,7 @@ import androidx.test.uiautomator.UiDevice
 import androidx.test.uiautomator.Until
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -21,9 +23,10 @@ import org.locklark.android.autofill.AutofillSmokeTargetActivity
 
 /**
  * Real OS handoff smoke: the framework must send a FillRequest to the service,
- * render the authentication presentation, launch the explicit auth Activity,
- * and leave both synthetic test-APK fields empty after cancel. No real target
- * app, browser, password manager or vault is involved.
+ * render the authentication presentation, launch the explicit auth Activity
+ * with the exact target package and factor form, and leave both synthetic
+ * test-APK fields empty after cancel. No real target app, browser, password
+ * manager or vault is involved.
  */
 @RunWith(AndroidJUnit4::class)
 class AutofillHandoffTest {
@@ -68,7 +71,7 @@ class AutofillHandoffTest {
         ).close()
         val device = UiDevice.getInstance(instrumentation)
         val presentationText = context.getString(R.string.autofill_auth_presentation)
-        val challengeTitle = context.getString(R.string.autofill_challenge_title)
+        val challengeTitle = context.getString(R.string.autofill_auth_title)
         try {
             val usernameField = device.wait(
                 Until.findObject(By.desc(AutofillSmokeTargetActivity.SMOKE_USERNAME)),
@@ -95,6 +98,33 @@ class AutofillHandoffTest {
             assertEquals(challengeTitle, title)
             val body = auth.findViewById<TextView>(R.id.autofill_auth_body)?.text?.toString().orEmpty()
             assertTrue("Challenge must state that no fields were filled", body.contains("尚未填充任何字段"))
+
+            // The dialog must name the exact OS target package.
+            val target = auth.findViewById<TextView>(R.id.autofill_auth_target)?.text?.toString().orEmpty()
+            assertEquals(
+                "Target package must be displayed exactly",
+                context.getString(R.string.autofill_auth_target, targetPackage),
+                target,
+            )
+            val deadline = SystemClock.elapsedRealtime() + 10_000
+            var masterPasswordField = auth.findViewById<View>(R.id.autofill_auth_master_password)
+            var secret = auth.findViewById<View>(R.id.autofill_auth_secret_key)
+            while ((masterPasswordField == null || secret == null) && SystemClock.elapsedRealtime() < deadline) {
+                SystemClock.sleep(100)
+                masterPasswordField = auth.findViewById(R.id.autofill_auth_master_password)
+                secret = auth.findViewById(R.id.autofill_auth_secret_key)
+            }
+            assertNotNull("Master password field not shown", masterPasswordField)
+            assertNotNull("Secret Key field not shown", secret)
+            // Approve does not exist before a login is selected. The factor page
+            // is shown as soon as the fresh vault opens; until then the approve
+            // button may be missing, but it must never be present and enabled.
+            val approve = auth.findViewById<View>(R.id.autofill_auth_approve)
+            assertTrue(
+                "Approve must be missing or disabled while locked, but was present and enabled",
+                approve == null || !approve.isEnabled,
+            )
+            assertNull("No login may be silently selected", auth.findViewById(R.id.autofill_auth_row))
 
             device.pressBack()
             assertTrue(
