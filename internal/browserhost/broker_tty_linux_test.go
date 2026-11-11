@@ -3,6 +3,7 @@
 package browserhost
 
 import (
+	"math"
 	"os"
 	"strconv"
 	"testing"
@@ -47,6 +48,50 @@ func brokerTTYOtherNode(dev uint64) (path string, other uint64, ok bool) {
 // brokerTTYForeignDev returns a non-zero device number that no devpts node
 // can have (another major).
 func brokerTTYForeignDev() uint64 { return linuxDev(4, 1) }
+
+// TestLinuxTTYNrSignedDecoding pins tty_nr decoding for values with the high
+// bit of the new_encode_dev word set: the kernel prints them as negative
+// signed ints, and they must decode to the exact 32-bit device, not a
+// sign-extended uint64. Zero and impossible (out of int32) values fail closed.
+func TestLinuxTTYNrSignedDecoding(t *testing.T) {
+	// Sign-bit encoding for devpts major 136, minor 524288.
+	signed := int64(-2147454976)
+	dev, ok := ttyNrDev(signed)
+	if !ok || dev != 0x80008800 {
+		t.Fatalf("ttyNrDev(%d) = 0x%x,%v want 0x80008800,true", signed, dev, ok)
+	}
+	if major, minor := devMajor(dev), devMinor(dev); major != 136 || minor != 524288 {
+		t.Fatalf("decode 0x%x = %d,%d want 136,524288", dev, major, minor)
+	}
+	if unit, unitOK := devUnit(dev); !unitOK || unit != 524288 {
+		t.Fatalf("devUnit(0x%x) = %d,%v want 524288,true", dev, unit, unitOK)
+	}
+	// The unsigned 32-bit word encodes the same device, and sign extension
+	// (uint64(-2147454976)) must not have been used.
+	if dev != uint64(uint32(0x80008800)) || dev == uint64(signed) {
+		t.Fatalf("decoded 0x%x is not the unsigned 32-bit word", dev)
+	}
+	for _, tc := range []struct {
+		tty int64
+		dev uint64
+		ok  bool
+	}{
+		{0, 0, false},
+		{0x880, 0x880, true},
+		{math.MinInt32, 0x80000000, true},
+		{math.MaxInt32, 0x7fffffff, true},
+		{-1, 0xffffffff, true},
+		{math.MinInt32 - 1, 0, false},
+		{math.MaxInt32 + 1, 0, false},
+		{math.MinInt64, 0, false},
+		{math.MaxInt64, 0, false},
+	} {
+		got, gotOK := ttyNrDev(tc.tty)
+		if gotOK != tc.ok || got != tc.dev {
+			t.Fatalf("ttyNrDev(%d) = 0x%x,%v want 0x%x,%v", tc.tty, got, gotOK, tc.dev, tc.ok)
+		}
+	}
+}
 
 // TestLinuxTTYDevEncoding pins the Linux kernel dev_t encoding shared by
 // tty_nr and stat, including /dev/pts/0 as a valid unit zero.
