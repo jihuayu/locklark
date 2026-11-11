@@ -48,6 +48,13 @@ NATIVE_REASONS = {"a11y-unavailable", "a11y-query", "a11y-tree-limit", "a11y-chi
 ERROR_CLASSES = {"none", "assertion", "os", "timeout", "value", "type", "key", "json", "unexpected"}
 
 
+def error_class(error):
+    """Map an exception to a fixed public class without reading its text."""
+    classes = {AcceptanceFailure: "assertion", OSError: "os", subprocess.TimeoutExpired: "timeout",
+               ValueError: "value", TypeError: "type", KeyError: "key", json.JSONDecodeError: "json"}
+    return classes.get(type(error), "unexpected")
+
+
 def owned_runtime():
     # Socket addresses have a small OS/product bound. Artifact destinations
     # such as GitHub RUNNER_TEMP may be arbitrarily long; keep only the owned
@@ -111,6 +118,7 @@ def public_diagnostic(acceptance):
     result = {"stage": choice(acceptance.stage, STAGES), "step": choice(acceptance.step, STEPS),
               "operation": choice(acceptance.operation, LABELS), "error_class": choice(acceptance.error_class, ERROR_CLASSES),
               "source_line": count(acceptance.error_line),
+              "privacy_error_class": choice(getattr(acceptance, "privacy_error_class", "none"), ERROR_CLASSES, "unexpected"),
               "reason": choice(acceptance.reason, {"none", "external-command", "external-timeout", "external-launch"}
                                | {"native-" + reason for reason in NATIVE_REASONS})}
     command = acceptance.last_command if type(acceptance.last_command) is dict else {}
@@ -415,7 +423,7 @@ class Acceptance:
         self.worker_logs, self.secret_bytes = [], []
         self.endpoint = None
         self.reason, self.control_diagnostic = "none", {}
-        self.error_class, self.error_line = "none", 0
+        self.error_class, self.error_line, self.privacy_error_class = "none", 0, "none"
         self.step, self.last_command = "none", {"category": "none", "state": "none", "exit_code": None, "elapsed_ms": 0}
 
     def mark(self, name):
@@ -935,9 +943,7 @@ def main(argv=None):
         success = True
     except Exception as error:
         if acceptance:
-            classes = {AcceptanceFailure: "assertion", OSError: "os", subprocess.TimeoutExpired: "timeout",
-                       ValueError: "value", TypeError: "type", KeyError: "key", json.JSONDecodeError: "json"}
-            acceptance.error_class = classes.get(type(error), "unexpected")
+            acceptance.error_class = error_class(error)
             trace = error.__traceback__
             while trace:
                 if pathlib.Path(trace.tb_frame.f_code.co_filename).resolve() == pathlib.Path(__file__).resolve():
@@ -957,17 +963,25 @@ def main(argv=None):
                 acceptance.close()
             except Exception:
                 success, acceptance.stage = False, "cleanup"
+            # privacy() raises only a fixed AcceptanceFailure; keep the text out
+            # of results and classify it without reading it.
             previous_stage = acceptance.stage
             try:
                 acceptance.privacy()
-            except Exception:
-                success, previous_stage = False, "privacy"
+            except Exception as error:
+                # Keep a prior stage, class and source line as primary; only a
+                # privacy-only failure reports stage "privacy".
+                if success:
+                    previous_stage = "privacy"
+                success = False
+                acceptance.privacy_error_class = error_class(error)
             acceptance.stage = "complete" if success else previous_stage
             stage = acceptance.stage if acceptance.stage in STAGES else "prerequisites"
             diagnostic = public_diagnostic(acceptance)
             acceptance.cli.write(acceptance.root / "ssh-result.json", {"success": success, "stage": stage,
                 "operation": acceptance.operation if acceptance.operation in LABELS else "none", "reason": acceptance.reason,
                 "error_class": acceptance.error_class, "source_line": acceptance.error_line,
+                "privacy_error_class": diagnostic["privacy_error_class"],
                 "controls": acceptance.control_diagnostic, "diagnostic": diagnostic, "checks": acceptance.checks})
             print(("PASS" if success else "FAIL") + ": SSH acceptance at " + stage)
             if not success:

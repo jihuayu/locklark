@@ -19,6 +19,7 @@ from unittest import mock
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import ssh_agent_acceptance as acceptance
 import ssh_native_x11 as native
+from run_cli_acceptance import scan
 
 
 class ProtocolOracleTests(unittest.TestCase):
@@ -117,6 +118,93 @@ class PrivacyTests(unittest.TestCase):
             self.assertNotIn(secret, out.getvalue())
             self.assertIn("at prerequisites", out.getvalue())
             fake.diagnose.assert_called_once_with()
+
+
+class PrivacyStageTests(unittest.TestCase):
+    class Controller:
+        """Deterministic stand-in whose privacy stage performs the real scan."""
+
+        def __init__(self, root, primary_error, disclosure, verified_line=777):
+            self.root, self.primary_error, self.disclosure = root, primary_error, disclosure
+            self.verified_line = verified_line
+            self.stage, self.step, self.operation, self.reason = "slow-frame", "none", "approve", "none"
+            self.checks, self.control_diagnostic = [], {}
+            self.runtime_endpoint_bytes, self.runtime_owned, self.runtime_cleaned = 40, True, True
+            self.error_class, self.error_line, self.privacy_error_class = "none", 0, "none"
+            self.cli = mock.Mock(counter=0, logs=[], values=[])
+            self.cli.write = mock.Mock()
+            self.last_command = {"category": "native-observe", "state": "completed", "exit_code": 0, "elapsed_ms": 5}
+
+        def run(self):
+            if self.primary_error:
+                raise self.primary_error
+            self.stage = "lock"
+
+        def diagnose(self):
+            # Real diagnosis runs the native inspector; nothing it does is
+            # evaluated by these tests.
+            self.error_line = self.verified_line
+
+        def close(self):
+            self.last_command = {"category": "native-observe", "state": "completed", "exit_code": 0, "elapsed_ms": 5}
+
+        def privacy(self):
+            # Same fixed disclosure check as Acceptance.privacy, over one log.
+            path = self.root / "desktop.stdout-stderr"
+            self.cli.logs.append((path, set()))
+            scan(path.read_bytes(), [self.disclosure] if self.disclosure is not None else [])
+
+    def run_main(self, primary_error, disclosure, verified_line=777):
+        canary = "PrivatePrivacyStageCanary-" + "a" * 48
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "desktop.stdout-stderr").write_bytes(canary.encode() if disclosure else b"public evidence only\n")
+            fake = self.Controller(root, primary_error, canary, verified_line)
+            out = io.StringIO()
+            with mock.patch.object(acceptance, "Acceptance", return_value=fake), contextlib.redirect_stdout(out):
+                status = acceptance.main(["--host", "/unused", "--cli", "/unused", "--peer", "/unused"])
+            path, result = fake.cli.write.call_args.args
+            self.assertEqual(path, root / "ssh-result.json")
+        # The private evidence path is the only intended output; the canary
+        # and the root are checked against the diagnostic and result only.
+        for value in (canary, "PrivatePrivacyStageCanary"):
+            self.assertNotIn(value, out.getvalue() + json.dumps(result))
+        self.assertNotIn(str(root), json.dumps(result))
+        return status, result, out.getvalue()
+
+    def test_earlier_slow_frame_failure_stays_primary_when_privacy_also_fails(self):
+        # Any verified line would pass below, so the reported source line must
+        # come from the earlier failure rather than from this test's setup.
+        status, result, output = self.run_main(acceptance.AcceptanceFailure("invariant"), disclosure=True, verified_line=4242)
+        self.assertEqual(status, 1)
+        self.assertEqual((result["stage"], result["diagnostic"]["stage"]), ("slow-frame", "slow-frame"))
+        self.assertEqual(result["error_class"], "assertion")
+        self.assertEqual((result["source_line"], result["diagnostic"]["source_line"]), (4242, 4242))
+        self.assertEqual((result["privacy_error_class"], result["diagnostic"]["privacy_error_class"]), ("assertion", "assertion"))
+        self.assertIn("FAIL: SSH acceptance at slow-frame", output)
+
+    def test_privacy_only_failure_reports_privacy_stage(self):
+        status, result, output = self.run_main(primary_error=None, disclosure=True)
+        self.assertEqual(status, 1)
+        self.assertEqual((result["stage"], result["diagnostic"]["stage"]), ("privacy", "privacy"))
+        self.assertEqual(result["error_class"], "none")
+        self.assertEqual(result["source_line"], 0)
+        self.assertEqual((result["privacy_error_class"], result["diagnostic"]["privacy_error_class"]), ("assertion", "assertion"))
+        self.assertIn("FAIL: SSH acceptance at privacy", output)
+
+    def test_clean_privacy_scan_completes_with_no_privacy_class(self):
+        status, result, _output = self.run_main(primary_error=None, disclosure=False)
+        self.assertEqual(status, 0)
+        self.assertEqual((result["stage"], result["privacy_error_class"]), ("complete", "none"))
+
+    def test_privacy_failure_class_is_a_fixed_value_never_exception_text(self):
+        canary = "PrivatePrivacyClassCanary-" + "c" * 48
+        for error, expected in ((ValueError(canary), "value"), (KeyError(canary), "key"), (RuntimeError(canary), "unexpected"),
+                                (acceptance.AcceptanceFailure("privacy-canary-disclosed"), "assertion"),
+                                (subprocess.TimeoutExpired([canary], 1), "timeout"), (OSError(canary), "os")):
+            self.assertEqual(acceptance.error_class(error), expected)
+        runner = mock.Mock(privacy_error_class=canary)
+        self.assertEqual(acceptance.public_diagnostic(runner)["privacy_error_class"], "unexpected")
 
 
 class PickerObservationTests(unittest.TestCase):
