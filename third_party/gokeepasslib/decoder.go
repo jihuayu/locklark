@@ -393,7 +393,7 @@ func decodeRawContent(db *Database, content []byte, transformedKey []byte, budge
 
 // trimPKCS7Padding removes the trailing PKCS#7 padding from the decrypted
 // content of an uncompressed AES KDBX4 file: 1..16 bytes that each hold the
-// padding length, as the CBC encrypter adds them. Content without a valid
+// padding length, appended by encodeRawContent before encryption. Content without a valid
 // suffix is returned unchanged. It is called for AES content only: every
 // decrypted byte of ChaCha20 and Twofish content is retained.
 func trimPKCS7Padding(content []byte) []byte {
