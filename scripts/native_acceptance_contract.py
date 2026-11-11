@@ -18,6 +18,7 @@ existing X11 driver's literal label tuple is imported; that module defines
 constants and classes at import time and opens a display only inside main().
 """
 import json
+import math
 import os
 import re
 import sys
@@ -379,10 +380,56 @@ def same_executable(requested, observed, platform="linux"):
     return left == right
 
 
+def geometry_value(value):
+    """The plain int or finite built-in float this coordinate denotes, else None.
+
+    A plain ``int`` is kept as is.  A genuine built-in ``float`` must be finite;
+    it is preserved exactly so a fractional macOS (CGFloat) coordinate is never
+    truncated into a near match.  A safe ``int`` subclass (for example a ctypes
+    field) is normalised with ``int.__int__``, which never dispatches to an
+    override.  ``bool``, every ``float`` subclass, any other numeric or hostile
+    subclass, strings and non-numeric values are not geometry.
+    """
+    kind = type(value)
+    if kind is bool:
+        return None
+    if kind is int:
+        return value
+    if kind is float:
+        return value if math.isfinite(value) else None
+    if isinstance(value, int):
+        return int.__int__(value)
+    return None
+
+
+def _geometry(rect):
+    """The four geometry values of a rectangle dict, else None."""
+    if type(rect) is not dict:
+        return None
+    return tuple(geometry_value(rect.get(key)) for key in ("x", "y", "width", "height"))
+
+
 def rect_positive(rect):
-    return (type(rect) is dict and
-            all(type(rect.get(key)) is int for key in ("x", "y", "width", "height")) and
-            rect["width"] > 0 and rect["height"] > 0)
+    values = _geometry(rect)
+    return (values is not None and
+            all(value is not None for value in values) and
+            values[2] > 0 and values[3] > 0)
+
+
+def integer_rect(rect):
+    """The same rectangle with each value an exact plain ``int``, else None.
+
+    Used only to hand geometry to APIs that require integers; every value must
+    already be integral (an integer or an integral finite float), and the int
+    conversion happens here, before the call.
+    """
+    values = _geometry(rect)
+    if (values is None or not all(value is not None for value in values) or
+            values[2] <= 0 or values[3] <= 0):
+        return None
+    if not all(type(value) is float or value == int(value) for value in values):
+        return None
+    return {key: int(value) for key, value in zip(("x", "y", "width", "height"), values)}
 
 
 def rect_within(inner, outer):
@@ -490,7 +537,11 @@ def select_control(adapter, window, label, budget):
     if control.get("visible") is not True:
         raise ContractError("control-hidden")
     rect = control.get("bounds")
-    if not rect_positive(rect):
+    # The authorising rectangle carries only plain ints or finite built-in
+    # floats: its values feed the click-point arithmetic, so an int subclass
+    # is never used even though a window rectangle may be normalised.
+    if not rect_positive(rect) or any(type(rect.get(key)) not in (int, float)
+                                      for key in ("x", "y", "width", "height")):
         raise ContractError("control-geometry")
     frame = window.get("client") if rect_positive(window.get("client")) else window.get("bounds")
     if not rect_within(rect, frame):
@@ -649,12 +700,36 @@ def _window_record(window, plan):
 
 
 
-def click_record(window, label, x, y, ack, kind="accepted"):
+def _clicked(rect, x, y):
+    """The point as handed to the click call, or None unless it is inside.
+
+    Integer adapters (Windows, X11) only ever produce ints here and keep them.
+    A macOS fractional point must be reported exactly as it was passed to
+    Quartz, so geometry values are preserved and never int-cast; a point that
+    is not a finite number inside the freshly observed rectangle cannot be
+    proved to be the one the adapter received and is refused.
+    """
+    if rect_positive(rect):
+        for key, value in (("x", x), ("y", y)):
+            if type(value) not in (int, float):
+                return None
+            inside = rect[key] <= value < rect[key] + rect["width" if key == "x" else "height"]
+            if not inside:
+                return None
+    elif type(x) is not int or type(y) is not int:
+        return None
+    return x, y
+
+
+def click_record(window, label, x, y, ack, kind="accepted", rect=None):
+    point = _clicked(rect, x, y)
+    if point is None:
+        raise ContractError("control-hit")
     return {
         "label": label if label in _LABELS else "pointer",
         "window": hex(window["id"]) if type(window.get("id")) is int else "0x0",
-        "x": int(x),
-        "y": int(y),
+        "x": point[0],
+        "y": point[1],
         "before": {"focus_matches_target": True},
         "evidence": kind if kind in EVIDENCE_KINDS else "posted",
         "ack": {key: (type(ack) is dict and ack.get(key) is True) for key in ACK_KEYS},
@@ -725,7 +800,16 @@ def execute_activation(plan, adapter):
 # ----------------------------------------------------------------- execute ----
 
 def _center(rect):
-    return rect["x"] + rect["width"] // 2, rect["y"] + rect["height"] // 2
+    """Exact geometric centre of a validated control rectangle.
+
+    With only integer geometry this is the historical floor centre, unchanged.
+    A fractional macOS control bound is centred by true division: neither the
+    origin nor the half-extent is floored or truncated, so the point stays the
+    actual geometric centre of the control.
+    """
+    if all(type(rect[key]) is int for key in ("x", "y", "width", "height")):
+        return rect["x"] + rect["width"] // 2, rect["y"] + rect["height"] // 2
+    return rect["x"] + rect["width"] / 2, rect["y"] + rect["height"] / 2
 
 
 def _offset_click(fresh, point):
@@ -770,16 +854,17 @@ def execute(plan, adapter):
             kind = evidence_kind(adapter)
             ack = adapter.click(x, y)  # exactly one physical batch
             clicks.append(click_record(fresh, action["click_label"], x, y,
-                                       ack, kind))
+                                       ack, kind, rect))
             window = fresh
         elif "click" in action:
             ensure_focus(plan, adapter, window, budget)
             fresh, _ = authorize(plan, adapter, window, budget)
             point = _offset_click(fresh, action["click"])
             x, y = check_point(adapter, fresh, point[0], point[1])
+            frame = fresh.get("client") if rect_positive(fresh.get("client")) else fresh["bounds"]
             kind = evidence_kind(adapter)
             ack = adapter.click(x, y)
-            clicks.append(click_record(fresh, "pointer", x, y, ack, kind))
+            clicks.append(click_record(fresh, "pointer", x, y, ack, kind, frame))
             window = fresh
         elif "wait_label" in action:
             await_control(plan, adapter, window, action["wait_label"], budget)

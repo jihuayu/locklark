@@ -137,19 +137,22 @@ def _exact_int(value):
 
 
 def _geometry_int(value):
-    """The exact integer a finite, integral real value denotes, else refuse.
+    """A finite built-in float or a plain int from AXValue, else refuse.
 
-    AXValueGetValue reports CGFloat coordinates as floats, so an integral float
-    such as 314.0 is the same pixel as 314. A fractional value is not integer
-    geometry and is refused rather than truncated into a near match.
+    AXValueGetValue reports CGFloat coordinates as floats.  A genuine, finite
+    built-in float is preserved exactly, fractional or not, so a fractional
+    macOS control bound is never truncated into a near match; an integral float
+    such as 314.0 is still normalised to the same pixel as 314.  ``bool``, NaN,
+    infinities, strings and every float subclass (a hostile ``__float__`` is
+    never dispatched) are refused.
     """
-    if type(value) is bool or not isinstance(value, (int, float)):
-        raise AxValueUnavailable()
     if type(value) is float:
-        if value != value or value in (float("inf"), float("-inf")) or value != int(value):
+        if not math.isfinite(value):
             raise AxValueUnavailable()
-        return int(value)
-    return _exact_int(value)
+        return int(value) if value == int(value) else value
+    if type(value) is not int:
+        raise AxValueUnavailable()
+    return value
 
 
 def _native_text(value):
@@ -252,13 +255,18 @@ class QuartzApi:
         return _geometry_int(pair[0]), _geometry_int(pair[1])
 
     def frame(self, element):
-        """AX frame in global display coordinates, or AxValueUnavailable."""
+        """AX frame in global display coordinates, or AxValueUnavailable.
+
+        Coordinates are returned exactly as parsed (int or finite float), never
+        truncated: a fractional control bound must stay fractional all the way
+        to the centre calculation.
+        """
         position = self._geometry(element, "AXPosition", self.ax.kAXValueCGPointType, "x", "y")
         size = self._geometry(element, "AXSize", self.ax.kAXValueCGSizeType, "width", "height")
         if position is None or size is None:
             raise AxValueUnavailable()
-        return {"x": int(position[0]), "y": int(position[1]),
-                "width": int(size[0]), "height": int(size[1])}
+        return {"x": position[0], "y": position[1],
+                "width": size[0], "height": size[1]}
 
     def application(self, pid):
         return self.ax.AXUIElementCreateApplication(pid)
@@ -725,8 +733,16 @@ class QuartzApi:
         return {"move": True, "down": True, "up": True}
 
     def click(self, x, y):
-        """Build and validate move/down/up first; a failure posts nothing."""
-        quartz, point = self.quartz, (float(x), float(y))
+        """Build and validate move/down/up first; a failure posts nothing.
+
+        The point is passed to Quartz exactly as the contract authorised it: a
+        fractional coordinate keeps its fraction and is never int-cast, while a
+        bool or a non-numeric value is refused instead of being coerced.
+        """
+        if any(type(value) not in (int, float) or not math.isfinite(value)
+               for value in (x, y)):
+            raise contract.ContractError("input-failed")
+        quartz, point = self.quartz, (x, y)
         events = [quartz.CGEventCreateMouseEvent(None, quartz.kCGEventMouseMoved, point, 0),
                   quartz.CGEventCreateMouseEvent(None, quartz.kCGEventLeftMouseDown, point, 0),
                   quartz.CGEventCreateMouseEvent(None, quartz.kCGEventLeftMouseUp, point, 0)]

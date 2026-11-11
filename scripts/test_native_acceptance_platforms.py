@@ -1526,27 +1526,33 @@ class MacWindowIdentityTests(unittest.TestCase):
         for frame in malformed:
             with self.subTest(frame=frame):
                 self.assertIsNone(macos._frame_relation(frame, dict(MEASURED_CG)))
-        for bounds in ({"x": 0, "y": 0, "width": 804.0, "height": 604},
-                       {"x": 0, "y": 0, "width": 0, "height": 604},
+        for bounds in ({"x": 0, "y": 0, "width": 0, "height": 604},
                        {"x": 0, "y": 0, "width": 804},
                        None, "804x604"):
             with self.subTest(bounds=bounds):
                 self.assertIsNone(macos._frame_relation(dict(inset), bounds))
-        # An integral AXValue coordinate is read only as a finite real number;
-        # bool, non-numeric, NaN/inf and an int subclass with overridden
-        # arithmetic never become geometry.
+        # An AXValue coordinate is read only as a plain int or a finite
+        # built-in float; bool, non-numeric, NaN/inf and a numeric subclass
+        # never become geometry.
         class Hostile(int):
             def __int__(self):
                 raise AssertionError("int() dispatch on hostile AX geometry")
 
+        class HostileFloat(float):
+            def __float__(self):
+                raise AssertionError("float() dispatch on hostile AX geometry")
+
         for value in (True, "1", None, float("nan"), float("inf"), float("-inf"),
-                      1.5, -0.25, 1100.5):
+                      Hostile(1), HostileFloat(1.5)):
             with self.subTest(ax_coordinate=value):
                 with self.assertRaises(macos.AxValueUnavailable):
                     macos._geometry_int(value)
+        # Integral floats normalise to the same pixel; a genuine fractional
+        # built-in float is preserved exactly, never truncated.
         self.assertEqual(macos._geometry_int(1.0), 1)
-        self.assertEqual(macos._geometry_int(Hostile(1)), 1)
-        for position in ((1, (1, 1)), (1.5, (1, 1)), (1, (True, 1)), (1, (float("nan"), 1))):
+        self.assertEqual(macos._geometry_int(1.5), 1.5)
+        self.assertEqual(macos._geometry_int(-0.25), -0.25)
+        for position in ((1, (1, 1)), (1, (True, 1)), (1, (float("nan"), 1))):
             with self.subTest(position=position):
                 api = self.api([ax_window(frame=MEASURED_AX)])
                 get = api.ax.AXValueGetValue
@@ -2014,7 +2020,20 @@ class MacInputBuildingTests(unittest.TestCase):
         api = self.api()
         api.click(500, 400)
         self.assertEqual([event["kind"] for event in api.quartz.posted], [5, 1, 2])
-        self.assertEqual(api.quartz.posted[0]["point"], (500.0, 400.0))
+        self.assertEqual(api.quartz.posted[0]["point"], (500, 400))
+
+    def test_fractional_click_point_reaches_quartz_untruncated(self):
+        api = self.api()
+        api.click(240.5, 315.25)
+        self.assertEqual([event["point"] for event in api.quartz.posted],
+                         [(240.5, 315.25)] * 3)
+        for point in ((True, 1), (1, "2"), (float("nan"), 1), (1, float("inf"))):
+            with self.subTest(point=point):
+                before = len(api.quartz.posted)
+                with self.assertRaises(contract.ContractError) as error:
+                    api.click(*point)
+                self.assertEqual(error.exception.code, "input-failed")
+                self.assertEqual(len(api.quartz.posted), before)
 
     def test_chord_posts_modifier_first_and_release_last_with_flags(self):
         api = self.api()
@@ -2380,3 +2399,291 @@ class SourceHygieneTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+FRACTIONAL_CONTROL = {"x": 200.5, "y": 300.25, "width": 80.5, "height": 30.5}
+
+
+class MacFractionalGeometryTests(unittest.TestCase):
+    """A fractional CGFloat bound keeps its exact fraction to the click.
+
+    The full real AXValue -> QuartzApi.frame -> shared contract -> Quartz
+    CGEvent path runs over the shared AX tree fixture; the click point and the
+    receipt must both be the exact geometric centre of the control.
+    """
+
+    CENTRE = (240.75, 315.5)  # 200.5 + 80.5 / 2, 300.25 + 30.5 / 2 (true division)
+
+    def tree(self, control=None, window=None):
+        selected = ax_window(frame=MEASURED_AX, focused=True)
+        button = {"role": "AXButton", "title": LABEL, "enabled": True, "hidden": False,
+                  "parent": selected, "children": [],
+                  "frame": dict(FRACTIONAL_CONTROL if control is None else control)}
+        if window is not None:
+            selected["frame"] = dict(window)
+        selected["children"] = [button]
+        return [selected]
+
+    def api(self, tree_windows, hit=None):
+        fixture = self.fixture = MacWindowIdentityTests()  # fresh per graph
+        api = fixture.identity_api(list(tree_windows), measured_window())
+        api.quartz = FakeQuartzEvents()
+        # The shared fixture stubs input on the graph; the real QuartzApi
+        # methods must run instead, with the real posting loop bound to this
+        # graph's fake Quartz object (an instance attribute shadows the class).
+        for name in ("click", "type_text", "press_chord", "_post"):
+            api.__dict__.pop(name, None)
+        api._post = types.MethodType(macos.QuartzApi._post, api)
+        # ``__new__`` skipped __init__, so ``windows()`` would otherwise
+        # resolve to the class function and read ``self.window_list``.
+        api.windows = types.MethodType(macos.QuartzApi.windows, api)
+        # The nodes the AXWindows fake actually serves (it holds its own list).
+        served = fixture.listed(api)
+        api.selected = served[0]
+        # The shared fixture answers a fixed window list; serve the graph.
+        fixture.window_list = served
+        api.process = lambda pid: (EXE, True)
+        api.probed = []
+        # The topmost hit is the glyph (a child of the selected control); its
+        # own frame is never part of the control identity.
+        api.glyph = {"role": "AXStaticText", "title": "", "children": [],
+                     "frame": {"x": 210, "y": 305, "width": 20, "height": 10},
+                     "parent": served[0]["children"][0],
+                     "enabled": None, "hidden": None, "description": None}
+        served[0]["children"][0]["parent"] = served[0]
+        # CFEqual over these fakes is object identity (as for the other
+        # end-to-end Mac fixture): a distinct same-frame twin is never equal.
+        api.ax.CFEqual = lambda left, right: left is right
+
+        def element_at(app, x, y, out):
+            api.probed.append((x, y))
+            return (0, api.glyph if hit is None else hit)
+
+        api.ax.AXUIElementCopyElementAtPosition = element_at
+        api.control_rects = []
+
+        def hit_control(window, label, rect, x, y):
+            api.control_rects.append(dict(rect))
+            return macos.QuartzApi.hit_test_control(api, window, label, rect, x, y)
+
+        api.hit_test_control = hit_control
+        return api
+
+    def execute(self, api, actions=None):
+        adapter = macos.MacAdapter(api=api)
+        # This class tests geometry, not display membership.
+        adapter.point_visible = lambda window, x, y: True
+        return execute(adapter,
+                       document(actions=[{"click_label": LABEL}] if actions is None else actions))
+
+    def test_fractional_ax_position_and_size_are_preserved_by_frame(self):
+        api = self.api(self.tree())
+        button = api.selected["children"][0]
+        self.assertEqual(api.frame(button), FRACTIONAL_CONTROL)
+        self.assertEqual([type(api.frame(button)[key]) for key in ("x", "y", "width", "height")],
+                         [float, float, float, float])
+        # An integral float is still the same pixel as the integer.
+        api = self.api(self.tree(control={"x": 200.0, "y": 300.0, "width": 80.0, "height": 30.0}))
+        button = api.selected["children"][0]
+        self.assertEqual(api.frame(button), CONTROL["bounds"])
+        self.assertEqual([type(value) for value in api.frame(button).values()],
+                         [int, int, int, int])
+
+    def test_fractional_control_fits_the_window_and_clicks_its_exact_centre(self):
+        api = self.api(self.tree())
+        result = self.execute(api)
+        self.assertEqual(api.control_rects, [FRACTIONAL_CONTROL])
+        # The window-root hit test and the strict control hit test both query
+        # the element under the very same exact centre.
+        self.assertEqual(api.probed, [self.CENTRE, self.CENTRE])
+        self.assertEqual([event["point"] for event in api.quartz.posted],
+                         [self.CENTRE, self.CENTRE, self.CENTRE])
+        self.assertEqual([event["kind"] for event in api.quartz.posted],
+                         [FakeQuartzEvents.kCGEventMouseMoved,
+                          FakeQuartzEvents.kCGEventLeftMouseDown,
+                          FakeQuartzEvents.kCGEventLeftMouseUp])
+        recorded = result["clicks"][0]
+        self.assertEqual((recorded["x"], recorded["y"]), self.CENTRE)
+        self.assertEqual(recorded["x"], 200.5 + 80.5 / 2)  # exact fraction, no floor
+        self.assertEqual(recorded["evidence"], "posted")
+        self.assertEqual(result["window"], hex(WINDOW_RAW["id"]))
+
+    def test_fractional_odd_and_non_quarter_bounds_are_not_rounded(self):
+        cases = (
+            ("integral-origin-fractional-extent",
+             {"x": 200.0, "y": 300.0, "width": 80.5, "height": 30.5}, (240.25, 315.25)),
+            ("integral-floats-even-extent",
+             {"x": 200.0, "y": 300.0, "width": 80.0, "height": 30.0}, (240, 315)),
+            ("fractional-origin-odd-extent",
+             {"x": 200.25, "y": 300.25, "width": 81.0, "height": 31.0}, (240.75, 315.75)),
+            ("quarter-extents",
+             {"x": 200.25, "y": 300.75, "width": 80.5, "height": 30.5}, (240.5, 316.0)),
+            ("eighth-centre",
+             {"x": 200.5, "y": 300.25, "width": 81.5, "height": 31.25}, (241.25, 315.875)))
+        for name, control, centre in cases:
+            with self.subTest(case=name):
+                api = self.api(self.tree(control=control))
+                result = self.execute(api)
+                self.assertEqual([event["point"] for event in api.quartz.posted],
+                                 [centre, centre, centre])
+                recorded = (result["clicks"][0]["x"], result["clicks"][0]["y"])
+                self.assertEqual(recorded, centre)
+                # The centre is a float only when it carries a true fraction.
+                kinds = ["float" if str(value).count(".") else "int" for value in centre]
+                self.assertEqual([type(value).__name__ for value in recorded], kinds)
+
+    def test_integer_geometry_still_clicks_the_integer_centre(self):
+        api = self.api(self.tree(control=CONTROL["bounds"]))
+        result = self.execute(api)
+        self.assertEqual([event["point"] for event in api.quartz.posted], [(240, 315)] * 3)
+        self.assertEqual((result["clicks"][0]["x"], result["clicks"][0]["y"]), (240, 315))
+        self.assertEqual([type(result["clicks"][0]["x"])], [int])
+
+    def test_same_window_receipt_is_the_same_identity(self):
+        api = self.api(self.tree())
+        result = self.execute(api)
+        self.assertEqual(result["clicks"][0]["window"], hex(WINDOW_RAW["id"]))
+        self.assertEqual(api.focus_reads, [WINDOW_RAW["id"], WINDOW_RAW["id"]])
+
+    def test_changed_fractional_frame_refuses_before_input(self):
+        # The control is read at the authorising frame; it then moves to a
+        # changed frame (fractional, or the same pixel as an integer) and the
+        # strict control identity re-resolves it before the click, so it must
+        # refuse with no input posted.
+        for changed in ({"x": 200.75, "y": 300.25, "width": 80.5, "height": 30.5},
+                        {"x": 200.5, "y": 300.25, "width": 80.5, "height": 30.501},
+                        {"x": 200.5, "y": 300.25, "width": 81, "height": 30},
+                        {"x": 200.5, "y": 300.25, "width": 81.0, "height": 31.0}):
+            with self.subTest(changed=changed):
+                api = self.api(self.tree())
+                target = api.selected["children"][0]
+                current = {"frame": dict(FRACTIONAL_CONTROL)}
+                probe = api.hit_test_control
+
+                def frame_of(element):
+                    if element is target:
+                        return dict(current["frame"])
+                    return macos.QuartzApi.frame(api, element)
+
+                def move_then_probe(window, label, rect, x, y):
+                    current["frame"] = dict(changed)
+                    return probe(window, label, rect, x, y)
+
+                api.frame = frame_of
+                api.hit_test_control = move_then_probe
+                with self.assertRaises(contract.ContractError) as error:
+                    self.execute(api)
+                self.assertEqual(error.exception.code, "control-hit")
+                self.assertEqual(api.quartz.posted, [])
+
+    def test_sibling_overlay_at_fractional_centre_refuses_before_input(self):
+        # A transparent group drawn above the control at the same fractional
+        # bounds: it is the element under the centre and never reaches the
+        # selected control.
+        window = self.tree()[0]
+        overlay = {"role": "AXGroup", "title": "", "parent": window, "children": [],
+                   "frame": dict(FRACTIONAL_CONTROL)}
+        window["children"].append(overlay)
+        api = self.api([window], hit=overlay)
+        with self.assertRaises(contract.ContractError) as error:
+            self.execute(api)
+        self.assertEqual(error.exception.code, "control-hit")
+        self.assertEqual(api.quartz.posted, [])
+        # A second unique-labelled button at the same frame is ambiguous.
+        twin = {"role": "AXButton", "title": LABEL, "enabled": True, "hidden": False,
+                "parent": window, "children": [], "frame": dict(FRACTIONAL_CONTROL)}
+        window["children"].append(twin)
+        api = self.api([window])
+        with self.assertRaises(contract.ContractError) as error:
+            self.execute(api)
+        self.assertEqual(error.exception.code, "control-ambiguous")
+        self.assertEqual(api.quartz.posted, [])
+
+    def test_control_outside_the_window_refuses_with_fractions(self):
+        for control, code in (
+                ({"x": 1110.5, "y": 300.25, "width": 20.0, "height": 10.0}, "control-offscreen"),
+                ({"x": 1100.5, "y": 300.25, "width": 0.0, "height": 10.0}, "control-geometry"),
+                # Inside the window horizontally, but past its bottom edge.
+                ({"x": 400.5, "y": 900.25, "width": 20.0, "height": 10.0}, "control-offscreen")):
+            with self.subTest(control=control):
+                api = self.api(self.tree(control=control))
+                with self.assertRaises(contract.ContractError) as error:
+                    self.execute(api)
+                self.assertEqual(error.exception.code, code)
+                self.assertEqual(api.quartz.posted, [])
+
+    def test_nonfinite_bool_and_subclass_geometry_refuses(self):
+        class SubFloat(float):
+            def __float__(self):
+                raise AssertionError("float() dispatch on hostile AX geometry")
+
+        for value in (True, False, float("nan"), float("inf"), float("-inf"),
+                      SubFloat(80.5), "80.5", None):
+            for key in ("x", "width"):
+                with self.subTest(value=value, key=key):
+                    control = dict(FRACTIONAL_CONTROL, **{key: value})
+                    api = self.api(self.tree(control=control))
+                    with self.assertRaises(macos.AxValueUnavailable):
+                        api.frame(api.selected["children"][0])
+                    with self.assertRaises(contract.ContractError) as error:
+                        self.execute(api)
+                    self.assertEqual(error.exception.code, "control-geometry")
+                    self.assertEqual(api.quartz.posted, [])
+
+    def test_window_frame_with_fractional_offset_refuses_binding(self):
+        # A fractional AX window origin/size is genuine geometry now, but the
+        # binding still demands the exact CG frame or the exact canonical
+        # integer border inset, so the shared window stays unbound.
+        for frame in (dict(MEASURED_AX, x=314.5), dict(MEASURED_AX, width=1100.5),
+                      dict(MEASURED_CG, x=313.5)):
+            with self.subTest(frame=frame):
+                api = self.api(self.tree(window=frame))
+                self.assertEqual(api.window_list[0]["bounds"], dict(MEASURED_CG))
+                self.assertEqual(api.selected["frame"], frame)
+                self.assertIsNone(api._relation(api.selected, api.window_list[0]))
+
+
+class Win32IntegerGeometryTests(unittest.TestCase):
+    """Win32 receives explicit integers; a fractional point is never truncated."""
+
+    def test_screen_int_accepts_integral_values_and_converts_before_the_call(self):
+        self.assertEqual(windows.screen_int(240.0), 240)
+        self.assertIs(type(windows.screen_int(240.0)), int)
+
+        class IntSubclass(int):
+            def __int__(self):
+                raise AssertionError("int() dispatch in screen_int")
+
+        self.assertEqual(windows.screen_int(IntSubclass(240)), 240)
+        self.assertIs(type(windows.screen_int(IntSubclass(240))), int)
+
+    def test_screen_int_refuses_fractional_nonfinite_bool_and_nonnumeric(self):
+        for value in (240.5, True, False, float("nan"), float("inf"), "240", None,
+                      -2 ** 31 - 1, 2 ** 31):
+            with self.subTest(value=value):
+                with self.assertRaises(contract.ContractError) as error:
+                    windows.screen_int(value)
+                self.assertEqual(error.exception.code, "control-offscreen")
+
+    def test_click_converts_to_integers_before_sending_win32_input(self):
+        class Recording(windows.Win32Api):
+            def __init__(self):
+                self.sent = []
+
+            def screen_bounds(self):
+                return {"x": 0, "y": 0, "width": 1920, "height": 1080}
+
+            def _send(self, events):
+                self.sent.append(events)
+                return {"input": True}
+
+        api = Recording()
+        with patch.object(contract, "monotonic", return_value=0):
+            api.click(240.0, 315)
+        self.assertEqual(len(api.sent), 1)
+        for point in ((240.5, 315), (240, 315.5)):
+            with self.subTest(point=point):
+                with self.assertRaises(contract.ContractError) as error:
+                    api.click(*point)
+                self.assertEqual(error.exception.code, "control-offscreen")
+        self.assertEqual(len(api.sent), 1)

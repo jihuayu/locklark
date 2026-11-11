@@ -904,3 +904,209 @@ class OutputSafetyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HostileFloat(float):
+    """A float subclass whose every conversion would be visible to a test."""
+
+    def __float__(self):
+        raise AssertionError("float() dispatch on hostile geometry")
+
+    def __int__(self):
+        raise AssertionError("int() dispatch on hostile geometry")
+
+
+class HostileInt(int):
+    """An int subclass whose every conversion would be visible to a test."""
+
+    def __float__(self):
+        raise AssertionError("float() dispatch on hostile geometry")
+
+    def __int__(self):
+        raise AssertionError("int() dispatch on hostile geometry")
+
+
+FRACTIONAL = {"x": 200.5, "y": 300.25, "width": 81.0, "height": 31.5}
+
+
+class GeometryValidationTests(unittest.TestCase):
+    """Shared rectangles: plain ints or finite built-in floats, nothing else."""
+
+    def window_with(self, value, key="width"):
+        # The adapter's own normalisation passes a hostile value through
+        # unchanged only when it is already a plain int/float; a hostile
+        # adapter must still never get it accepted by the shared contract.
+        window = dict(WINDOW, bounds=dict(WINDOW["bounds"], **{key: value}))
+        adapter = SpyAdapter(windows=[window])
+        adapter.list_windows = lambda: [dict(window)]
+        return adapter
+
+    def test_window_and_control_accept_finite_fractional_floats(self):
+        window = dict(WINDOW, bounds={"x": 100.5, "y": 99.75, "width": 800.0, "height": 600.5})
+        self.assertTrue(contract.rect_positive(window["bounds"]))
+        self.assertTrue(contract.rect_within(FRACTIONAL, window["client"]))
+        adapter = SpyAdapter(windows=[window], controls=[control(LABEL, bounds=dict(FRACTIONAL))])
+        result = self.executed(adapter)
+        self.assertEqual(self.clicks(adapter), [("click", 241.0, 316.0)])
+        self.assertEqual((result["clicks"][0]["x"], result["clicks"][0]["y"]), (241.0, 316.0))
+        self.assertEqual(adapter.control_hits,
+                         [(WINDOW["id"], LABEL, dict(FRACTIONAL), 241.0, 316.0)])
+
+    def test_window_integral_float_and_int_subclass_values_are_safely_normalised(self):
+        for value, expected in ((800.0, 800), (HostileInt(800), 800)):
+            with self.subTest(value=value):
+                self.executed(self.window_with(value))
+                self.assertEqual(contract.geometry_value(value), expected)
+                if type(value) is not float:
+                    self.assertIs(type(contract.geometry_value(value)), int)
+                # Already-plain geometry is handed back unconverted.
+                self.assertEqual(contract.integer_rect(dict(WINDOW["bounds"])), WINDOW["bounds"])
+
+    def test_geometry_rejects_bool_nonfinite_subclass_and_nonnumeric_values(self):
+        malformed = [True, False, float("nan"), float("inf"), float("-inf"),
+                     HostileFloat(1.0), "1", None, [1], object()]
+        for value in malformed:
+            for key in ("x", "y", "width", "height"):
+                with self.subTest(value=value, key=key):
+                    rect = dict(WINDOW["bounds"], **{key: value})
+                    self.assertIsNone(contract.geometry_value(value))
+                    self.assertFalse(contract.rect_positive(rect))
+                    with self.assertRaises(contract.ContractError) as error:
+                        self.executed(self.window_with(value, key))
+                    self.assertEqual(error.exception.code, "window-geometry")
+
+    def test_control_geometry_rejects_every_non_plain_nonfinite_and_subclass_value(self):
+        for value in (True, float("nan"), float("inf"), "80", None,
+                      HostileFloat(80.0), HostileInt(81)):
+            with self.subTest(value=value):
+                adapter = SpyAdapter(controls=[control(LABEL, bounds=dict(FRACTIONAL, width=value))])
+                self.assert_refused(adapter, "control-geometry")
+        self.assert_refused(SpyAdapter(controls=[control(LABEL, bounds={})]), "control-geometry")
+
+    def test_fractional_rect_must_still_fit_inside_the_window_client(self):
+        rect = {"x": 890.5, "y": 400.25, "width": 10.0, "height": 10.0}
+        self.assertFalse(contract.rect_within(rect, WINDOW["client"]))
+        self.assert_refused(SpyAdapter(controls=[control(LABEL, bounds=rect)]), "control-offscreen")
+        # The exact integer limits are unchanged.
+        edge = {"x": 880, "y": 690, "width": 10, "height": 10}
+        self.assertTrue(contract.rect_within(edge, WINDOW["client"]))
+        overflow = dict(edge, x=881)
+        self.assertFalse(contract.rect_within(overflow, WINDOW["client"]))
+        self.assert_refused(SpyAdapter(controls=[control(LABEL, bounds=overflow)]),
+                            "control-offscreen")
+
+    def test_control_and_observation_limits_are_unchanged(self):
+        filler = [control(OTHER_LABEL, bounds={"x": 200 + index, "y": 400,
+                                                "width": 10, "height": 10})
+                  for index in range(contract.MAX_CONTROLS)]
+        at_limit = SpyAdapter(controls=[control(LABEL)] + filler[:contract.MAX_CONTROLS - 1])
+        self.executed(at_limit)  # exactly MAX_CONTROLS is still accepted
+        over = SpyAdapter(controls=[control(LABEL)] + filler)
+        self.assert_refused(over, "control-overrun")
+
+    def test_click_receipt_keeps_the_exact_fraction_passed_to_the_adapter(self):
+        for rect, point in ((FRACTIONAL, (241.0, 316.0)),
+                            ({"x": 200.25, "y": 300.5, "width": 0.5, "height": 0.25},
+                             (200.5, 300.625))):
+            with self.subTest(rect=rect):
+                adapter = SpyAdapter(controls=[control(LABEL, bounds=rect)])
+                result = self.executed(adapter)
+                self.assertEqual(self.clicks(adapter), [("click", point[0], point[1])])
+                recorded = (result["clicks"][0]["x"], result["clicks"][0]["y"])
+                self.assertEqual(recorded, point)
+                for value in recorded:
+                    self.assertIs(type(value), float)
+
+    def test_receipt_refuses_a_point_that_is_not_the_clicked_geometry(self):
+        window = dict(WINDOW)
+        fractional = {"x": 200.5, "y": 300.25, "width": 80.5, "height": 30.5}
+        for x, y in ((True, 315.5), (281.5, 315.5), (float("nan"), 315.5),
+                     ("240", 315.5), (240.5, float("inf"))):
+            with self.subTest(point=(x, y)):
+                with self.assertRaises(contract.ContractError) as error:
+                    contract.click_record(window, LABEL, x, y, None, rect=fractional)
+                self.assertEqual(error.exception.code, "control-hit")
+        # No rectangle: only integer geometry is the provable click geometry.
+        self.assertEqual(contract.click_record(window, LABEL, 240, 315, None)["x"], 240)
+        with self.assertRaises(contract.ContractError):
+            contract.click_record(window, LABEL, 240.5, 315.25, None)
+        recorded = contract.click_record(window, LABEL, 240.5, 315.25, None, rect=fractional)
+        self.assertEqual((recorded["x"], recorded["y"]), (240.5, 315.25))
+
+    def test_pointer_offset_preserves_fractional_client_geometry(self):
+        adapter = SpyAdapter(windows=[dict(WINDOW, client={"x": 110.5, "y": 140.25,
+                                                            "width": 780, "height": 560})])
+        result = self.executed(adapter, actions=[{"click": [10, 20]}])
+        self.assertEqual(self.clicks(adapter), [("click", 120.5, 160.25)])
+        self.assertEqual((result["clicks"][0]["x"], result["clicks"][0]["y"]), (120.5, 160.25))
+
+    def executed(self, adapter, **overrides):
+        return ExecutionGuardTests.execute(self, adapter, **overrides)
+
+    def clicks(self, adapter):
+        return [call for call in adapter.calls if isinstance(call, tuple)]
+
+    def assert_refused(self, adapter, code):
+        with self.assertRaises(contract.ContractError) as error:
+            self.executed(adapter)
+        self.assertEqual(error.exception.code, code)
+        self.assertEqual(self.clicks(adapter), [])
+        self.assertEqual(adapter.control_hits, [])
+
+
+class IntegerGeometryRegressionTests(unittest.TestCase):
+    """X11/Windows keep the historical integer behaviour, odd sizes included."""
+
+    INTEGRAL_ADAPTERS = ("linux", "windows")
+
+    def strategy(self, adapter, **overrides):
+        plan = contract.parse_request(request(**overrides))
+        with patch.object(contract, "monotonic", return_value=0), patch.object(contract, "sleep"):
+            return contract.execute(plan, adapter)
+
+    def test_integer_odd_and_even_centres_are_unchanged_for_x11_and_windows(self):
+        for platform in self.INTEGRAL_ADAPTERS:
+            for rect, point in (
+                    ({"x": 200, "y": 300, "width": 81, "height": 31}, (240, 315)),
+                    ({"x": 200, "y": 300, "width": 80, "height": 30}, (240, 315)),
+                    ({"x": 200, "y": 300, "width": 79, "height": 29}, (239, 314)),
+                    ({"x": 201, "y": 301, "width": 81, "height": 35}, (241, 318))):
+                with self.subTest(platform=platform, rect=rect):
+                    adapter = SpyAdapter(controls=[control(LABEL, bounds=dict(rect))])
+                    adapter.platform = platform
+                    adapter.input_evidence = "accepted"
+                    adapter.click_ack = {"move": True, "down": True, "up": True}  # acknowledged
+                    result = self.strategy(adapter)
+                    self.assertEqual([call for call in adapter.calls if isinstance(call, tuple)],
+                                     [("click", point[0], point[1])])
+                    recorded = result["clicks"][0]
+                    self.assertEqual((recorded["x"], recorded["y"]), point)
+                    for value in (recorded["x"], recorded["y"]):
+                        self.assertIs(type(value), int)
+                    self.assertEqual(recorded["ack"], adapter.click_ack)
+                    self.assertEqual(recorded["evidence"], "accepted")
+
+    def test_integer_window_limits_and_refusals_are_unchanged(self):
+        limits = {"x": 0, "y": 0, "width": 1920, "height": 1080}
+        for platform in ("linux", "windows"):
+            with self.subTest(platform=platform):
+                screen = SpyAdapter(screen=dict(limits))
+                screen.platform = platform
+                result = self.strategy(screen)
+                self.assertEqual(result["clicks"][0]["x"], 240)
+                outside = SpyAdapter(screen={"x": 0, "y": 0, "width": 100, "height": 100})
+                outside.platform = platform
+                with self.assertRaises(contract.ContractError) as error:
+                    self.strategy(outside)
+                self.assertEqual(error.exception.code, "control-offscreen")
+                self.assertEqual([call for call in outside.calls if isinstance(call, tuple)], [])
+
+    def test_integer_control_center_helper_is_bit_for_bit_unchanged(self):
+        for rect in ({"x": 200, "y": 300, "width": 81, "height": 31},
+                     {"x": 200, "y": 300, "width": 80, "height": 30},
+                     {"x": -15, "y": -7, "width": 3, "height": 5}):
+            with self.subTest(rect=rect):
+                expected = (rect["x"] + rect["width"] // 2, rect["y"] + rect["height"] // 2)
+                point = contract._center(rect)
+                self.assertEqual(point, expected)
+                self.assertEqual(tuple(type(value) for value in point), (int, int))
