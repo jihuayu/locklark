@@ -54,21 +54,26 @@ import java.util.concurrent.RejectedExecutionException
  * never builds a Dataset.
  *
  * Nothing here is persisted: no saved state, prefs, logs or extras of factors,
- * credentials, handoff or approval. Every exit invalidates the gate, requests a
- * lock immediately, zeroes factor inputs and owned buffers, and closes the
- * fresh vault exactly once on the single serialized worker. onStop is a
- * terminal exit for this one-use handoff: nothing is reopened or reused.
+ * credentials, handoff or approval. Every exit invalidates the gate and, for an
+ * already-installed vault, requests its lock synchronously on the main thread
+ * before queueing exactly one close on the single serialized worker behind any
+ * in-flight open, unlock, list or reveal. The vault is never closed on main:
+ * the only off-worker case is a worker that already shut down, which can run no
+ * native call, so only the lock is requested. onStop is a terminal exit for
+ * this one-use handoff: nothing is reopened or reused. A missing database is a
+ * fixed unavailable state that later onStart never opens, and an unopenable
+ * vault ends the handoff the same way.
  */
 class AutofillAuthActivity : Activity() {
     private val gate = ForegroundGate()
     private val worker: ExecutorService = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
     private val freshVault = FreshVaultGate()
+    // Main thread only. A terminal exit is never undone, not even by onStart.
+    private val lifecycle = LifecycleState()
 
     // Set on the worker by a gate-accepted install; read on the worker by close.
     @Volatile private var vault: Vault? = null
-    // Main thread only. A terminal exit is never undone, not even by onStart.
-    private var closed = false
     private var structureMatches = false
     private var target: AutofillTarget? = null
     private var masterPassword: EditText? = null
@@ -107,7 +112,9 @@ class AutofillAuthActivity : Activity() {
             return
         }
         if (!database.isFile) {
-            // Nothing to unlock here; never offer a nonfunctional factors form.
+            // Nothing to unlock here; never offer a nonfunctional factors form,
+            // and never open later: onStart keeps this unavailable state.
+            lifecycle.markDatabaseMissing()
             showUnavailable()
             return
         }
@@ -136,7 +143,13 @@ class AutofillAuthActivity : Activity() {
 
     override fun onStart() {
         super.onStart()
-        if (closed || isFinishing || isDestroyed) return
+        if (lifecycle.isTerminal || isFinishing || isDestroyed) return
+        if (lifecycle.databaseMissing) {
+            // Fixed unavailable: no fresh open, factors UI or row UI, ever.
+            gate.start()
+            showUnavailable()
+            return
+        }
         gate.start()
         if (!structureMatches || target == null) {
             failClosed()
@@ -145,17 +158,18 @@ class AutofillAuthActivity : Activity() {
         // Normally onStop already ended this handoff. A return without onStop
         // never resumes an earlier session: the open is one-shot.
         if (!freshVault.beginOpen()) {
-            showUnavailable()
+            gate.invalidate()
+            refuseUnavailable()
             return
         }
         openFreshVault()
     }
 
     /**
-     * Backgrounding is a terminal exit for this one-use handoff: gate and vault
-     * are invalidated immediately, factors, approval and views are wiped, the
-     * vault is closed once on the worker, and the Activity reports cancellation
-     * and finishes.
+     * Backgrounding is a terminal exit for this one-use handoff: the gate is
+     * invalidated and an installed vault is locked synchronously, one close is
+     * queued on the worker, factors, approval and views are wiped, and the
+     * Activity reports cancellation and finishes.
      */
     override fun onStop() {
         exitConsumed()
@@ -163,11 +177,16 @@ class AutofillAuthActivity : Activity() {
     }
 
     override fun onDestroy() {
-        // Idempotent after onStop. A destroyed worker cannot run a queued close,
-        // so any vault still installed is closed synchronously here.
+        // Idempotent after onStop. A close queued by the first exit still runs
+        // on the worker; shutdown lets it and every already-queued call finish.
         exitConsumed()
         worker.shutdown()
         super.onDestroy()
+    }
+
+    override fun onTrimMemory(level: Int) {
+        if (level >= TRIM_MEMORY_UI_HIDDEN) exitConsumed()
+        super.onTrimMemory(level)
     }
 
     override fun onSaveInstanceState(outState: Bundle) { /* Never persist factors, rows, handoff or approval. */ }
@@ -182,48 +201,32 @@ class AutofillAuthActivity : Activity() {
     // ---- lifecycle/secret cleanup -------------------------------------------------
 
     /**
-     * Terminal, idempotent cleanup for the one-use handoff. Invalidates the gate
-     * first so no queued callback can pass [ForegroundGate.accepts], then wipes
-     * widgets and factor buffers on the main thread. [FreshVaultGate.exit]
-     * makes exactly one caller responsible for locking and closing the vault
-     * on the worker, even though this method may run again on destroy.
+     * Terminal, idempotent cleanup for the one-use handoff, safe to call from
+     * onStop, onDestroy, back, cancel, a failed decision and a rejected enqueue
+     * in any order. The gate is invalidated first so no queued callback can pass
+     * [ForegroundGate.accepts]. An already-installed vault is then requested to
+     * lock synchronously on this main thread (outside the worker queue, so
+     * pending unlock/list/reveal work cannot delay it) and exactly one close is
+     * queued on the serialized worker. Widgets and factor buffers are wiped, and
+     * the first call reports RESULT_CANCELED and finishes.
      */
     private fun exitConsumed() {
         gate.invalidate()
-        if (freshVault.exit()) closeFreshVault()
-        wipeUiSecrets()
-        if (!closed) {
-            closed = true
+        if (freshVault.exit()) {
+            val installed = vault
+            if (installed != null) {
+                freshVault.release(installed, worker, { current ->
+                    runCatching { current.requestLock() }
+                }, { current ->
+                    vault = null
+                    runCatching { current.close() }
+                })
+            }
+        }
+        if (lifecycle.end(LifecycleState.Terminal.CANCELLED)) {
+            wipeUiSecrets()
             setResult(RESULT_CANCELED)
             if (!isFinishing) finish()
-        }
-    }
-
-    /**
-     * Runs on the serialized worker behind any in-flight native call. No late
-     * [Mobilecore.open] result can install afterwards: [FreshVaultGate.install]
-     * rejects it and that worker closes the vault itself.
-     */
-    private fun closeFreshVault() {
-        try {
-            worker.execute {
-                val current = vault
-                vault = null
-                if (current != null) {
-                    // requestLock first and immediately, then the single close.
-                    runCatching { current.requestLock() }
-                    runCatching { current.close() }
-                }
-            }
-        } catch (_: RejectedExecutionException) {
-            // onDestroy already shut the worker down; any installed vault was
-            // closed by the final open attempt or is closed here.
-            val current = vault
-            vault = null
-            if (current != null) {
-                runCatching { current.requestLock() }
-                runCatching { current.close() }
-            }
         }
     }
 
@@ -248,6 +251,16 @@ class AutofillAuthActivity : Activity() {
     /** Fails closed without any user progress; same terminal path as every exit. */
     private fun failClosed() {
         exitConsumed()
+    }
+
+    /**
+     * Fails closed but stays on screen showing the fixed unavailable state, like
+     * a missing database: no fresh open, factors UI or row UI afterwards.
+     */
+    private fun refuseUnavailable() {
+        if (!lifecycle.markDatabaseMissing()) return
+        exitConsumed()
+        if (!isFinishing && !isDestroyed) showUnavailable()
     }
 
     // ---- worker -----------------------------------------------------------------
@@ -297,14 +310,14 @@ class AutofillAuthActivity : Activity() {
                 ) {
                     Log.i("LocklarkAutofill", "stage=$tag " + NativeFailures.diagnostic(failure))
                 }
-                main.post { if (!closed) failClosed() }
+                main.post { if (!lifecycle.isTerminal) failClosed() }
                 return@enqueue
             }
             main.post {
-                if (gate.accepts(stamp, target) && !closed) done(result) else {
+                if (gate.accepts(stamp, target) && !lifecycle.isTerminal) done(result) else {
                     // Never shown after foreground loss; zeroize before cancel.
                     (result as? ApprovedAutofillResult)?.clear()
-                    if (!closed) failClosed()
+                    if (!lifecycle.isTerminal) failClosed()
                 }
             }
         }
@@ -318,8 +331,10 @@ class AutofillAuthActivity : Activity() {
     private fun openFreshVault() {
         val stamp = stampOrNull()
         if (stamp == null) {
-            freshVault.openFailed()
-            showUnavailable()
+            // No open was enqueued, so nothing can install later: refuse now
+            // rather than leave an "opening" page a later onStart could reopen.
+            gate.invalidate()
+            refuseUnavailable()
             return
         }
         enqueue({}) {
@@ -328,10 +343,11 @@ class AutofillAuthActivity : Activity() {
             } catch (error: Exception) {
                 val failure = NativeCallFailure(NativePhase.OPERATION, NativeFailures.classify(error))
                 main.post {
-                    if (gate.accepts(stamp) && !closed) {
+                    if (gate.accepts(stamp) && !lifecycle.isTerminal) {
                         Log.i("LocklarkAutofill", "stage=open " + NativeFailures.diagnostic(failure))
-                        freshVault.openFailed()
-                        showUnavailable()
+                        // Nothing is installed, so a late success has no gate to
+                        // pass; this refusal is terminal and reopens nothing.
+                        refuseUnavailable()
                     }
                 }
                 return@enqueue
@@ -340,7 +356,7 @@ class AutofillAuthActivity : Activity() {
                 // Late result after stop/destroy, or superseded: never installed.
                 runCatching { opened.requestLock() }
                 runCatching { opened.close() }
-                main.post { if (!closed && gate.isForeground()) showUnavailable() }
+                main.post { if (gate.accepts(stamp) && !lifecycle.isTerminal) refuseUnavailable() }
                 return@enqueue
             }
             if (worker.isShutdown) {
@@ -350,7 +366,7 @@ class AutofillAuthActivity : Activity() {
             }
             vault = opened
             main.post {
-                if (gate.accepts(stamp) && !closed) showFactorsPage()
+                if (gate.accepts(stamp) && !lifecycle.isTerminal) showFactorsPage()
             }
         }
     }
@@ -474,7 +490,7 @@ class AutofillAuthActivity : Activity() {
         minimumHeight = dp(40)
         filterTouchesWhenObscured = true
         if (primary) setTypeface(typeface, Typeface.BOLD)
-        setOnClickListener { if (!closed) action() }
+        setOnClickListener { if (!lifecycle.isTerminal) action() }
         buttons.add(this)
         add(this)
     }
@@ -501,7 +517,7 @@ class AutofillAuthActivity : Activity() {
      * obsolete stamp, zeroes them.
      */
     private fun startUnlock() {
-        if (closed) return
+        if (lifecycle.isTerminal) return
         val passwordField = masterPassword ?: return
         val keyField = secretKey ?: return
         val password = CharArray(passwordField.text?.length ?: 0)
@@ -596,7 +612,7 @@ class AutofillAuthActivity : Activity() {
     private fun addRowButton(index: Int, login: ActiveLogin, approve: Button) {
         var row: Button? = null
         val created: Button = button(login.shownTitle, R.id.autofill_auth_row, primary = false) {
-            if (closed) return@button
+            if (lifecycle.isTerminal) return@button
             // A new selection invalidates any earlier approval.
             approval?.clear()
             approval = null
@@ -614,7 +630,7 @@ class AutofillAuthActivity : Activity() {
     // ---- explicit approval --------------------------------------------------------
 
     private fun startApprove() {
-        if (closed || approval != null) return
+        if (lifecycle.isTerminal || approval != null) return
         val chosen = selected ?: return
         val expected = target ?: return
         val owner = vault ?: return

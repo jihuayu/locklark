@@ -1,5 +1,11 @@
 package org.locklark.android.autofill
 
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executor
+import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.TimeUnit
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -58,5 +64,107 @@ class FreshVaultGateTest {
         assertFalse("a failed open never installs", gate.install())
         assertTrue("exit still schedules the worker teardown", gate.exit())
         assertFalse(gate.exit())
+    }
+}
+
+/** A terminal release, modeled on the vault's observable calls. */
+class FreshVaultReleaseTest {
+    private class FakeVault {
+        val calls = mutableListOf<String>()
+
+        fun requestLock() {
+            calls += "lock"
+        }
+
+        fun close() {
+            calls += "close"
+        }
+    }
+
+    private fun gate(): FreshVaultGate = FreshVaultGate().apply {
+        assertTrue(beginOpen())
+        assertTrue(install())
+    }
+
+    @Test
+    fun lockIsSynchronousAndCloseRunsOnceOnTheWorker() {
+        val gate = gate()
+        val vault = FakeVault()
+        val worker = Executor { it.run() }
+        gate.release(vault, worker, { it.requestLock() }, { it.close() })
+        assertEquals(listOf("lock", "close"), vault.calls)
+        assertEquals(CloseAction.WORKER_CLOSE, gate.closeDecision())
+        // onStop already owned the exit; onDestroy/back/cancel release nothing.
+        assertTrue(gate.exit())
+        assertFalse("only the first exit releases", gate.exit())
+    }
+
+    @Test
+    fun refusedWorkerNeverClosesOnTheCallingThread() {
+        val gate = gate()
+        val vault = FakeVault()
+        val shutDown = Executor { throw RejectedExecutionException("shut down") }
+        gate.release(vault, shutDown, { it.requestLock() }, { it.close() })
+        assertEquals("the lock is requested, the close is not run off-worker", listOf("lock"), vault.calls)
+        assertEquals(CloseAction.LOCK_ONLY, gate.closeDecision())
+    }
+
+    @Test
+    fun closeWaitsBehindAlreadyQueuedWorkButTheLockDoesNot() {
+        val base = Executors.newSingleThreadExecutor()
+        try {
+            val gate = gate()
+            val vault = FakeVault()
+            val queued = CountDownLatch(1)
+            val releaseQueued = CountDownLatch(1)
+            base.execute {
+                queued.countDown()
+                releaseQueued.await()
+            }
+            assertTrue(queued.await(5, TimeUnit.SECONDS))
+            gate.release(vault, base, { it.requestLock() }, { it.close() })
+            assertEquals("the lock never waits for queued work", listOf("lock"), vault.calls)
+            releaseQueued.countDown()
+            base.shutdown()
+            assertTrue(base.awaitTermination(5, TimeUnit.SECONDS))
+            assertEquals("the close stays on the serialized worker", listOf("lock", "close"), vault.calls)
+        } finally {
+            base.shutdownNow()
+        }
+    }
+}
+
+/**
+ * The main-thread handoff state: a terminal exit is one-shot, and a missing
+ * database latches so a later onStart can never open or show the factors UI.
+ */
+class LifecycleStateTest {
+    @Test
+    fun missingDatabaseIsFixedUnavailableOnLaterStarts() {
+        val state = LifecycleState()
+        assertTrue(state.markDatabaseMissing())
+        assertTrue(state.databaseMissing)
+        assertFalse("no exit latched yet", state.isTerminal)
+        // A later onStart consults databaseMissing, never beginOpen.
+        assertTrue(state.markDatabaseMissing())
+    }
+
+    @Test
+    fun terminalExitWinsOverLateEventsExactlyOnce() {
+        val state = LifecycleState()
+        assertTrue(state.end(LifecycleState.Terminal.CANCELLED))
+        assertTrue(state.isTerminal)
+        assertFalse("onDestroy/back/cancel never re-finish", state.end(LifecycleState.Terminal.UNAVAILABLE))
+        assertFalse("a later onStart never reopens", state.markDatabaseMissing())
+        assertEquals(LifecycleState.Terminal.CANCELLED, state.terminal)
+    }
+
+    @Test
+    fun missingDatabaseRefusalEndsTheHandoff() {
+        val state = LifecycleState()
+        assertTrue(state.markDatabaseMissing())
+        assertTrue(state.end(LifecycleState.Terminal.UNAVAILABLE))
+        assertTrue(state.isTerminal)
+        assertEquals(LifecycleState.Terminal.UNAVAILABLE, state.terminal)
     }
 }
