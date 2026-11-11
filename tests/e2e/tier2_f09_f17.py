@@ -16,6 +16,7 @@ from .support import (
     assert_audit_chain,
     audit_events,
     card_fill_explicit_authorization_component,
+    checkout_native_acceptance,
     checklist_rows,
     cli_profiles,
     cli_supports,
@@ -324,6 +325,22 @@ def t2_f11_05(ctx):
         min_passed=2,
     )
     assert counts["pass"] >= 2, counts
+
+
+@e2e_test(
+    "T2_F11_06",
+    2,
+    ["F11"],
+    "Real Chromium checkout approval, deny, cancel, navigation and lock journey",
+    coverage_kind="functional",
+)
+def t2_f11_06(ctx):
+    # One row for the existing multi-case native journey.  It consumes a
+    # previously produced sanitized manifest when explicitly pointed at one,
+    # otherwise it runs the real journey once with LOCKLARK_E2E_CHECKOUT_NATIVE=1
+    # and reuses the cached result for any later F11 row in this process.
+    evidence = checkout_native_acceptance(ctx)
+    ctx.record_evidence(evidence)
 
 
 # ---------------------------------------------------------------------------
