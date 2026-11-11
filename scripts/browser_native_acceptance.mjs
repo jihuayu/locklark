@@ -832,6 +832,26 @@ try {
       ]);
       input([{ click_label: "确认连接此扩展" }]);
     },
+    // Explicit quick pairing for non-destructive Passkey metadata: disconnect
+    // the current session, reopen the popup, unlock and physically choose the
+    // real quick-fill pairing control. Nothing is approved implicitly.
+    reconnectQuickFill: async () => {
+      let popup = await openPopup();
+      await popup.click("#disconnect");
+      input([], true, { wait_absent: true });
+      popup = await openPopup();
+      await popup.click("#connect");
+      input([
+        { click_label: "金库文件" },
+        { text: fixture.Path },
+        { click_label: "主密码" },
+        { text: fixture.Password },
+        { click_label: "Secret Key" },
+        { text: fixture.Secret },
+        { click_label: "解锁" },
+      ]);
+      input([{ click_label: "连接并启用快捷填充" }]);
+    },
     root,
     state,
     env,
@@ -853,6 +873,7 @@ try {
     phase,
     observe: acceptanceDriver.observe,
     reconnect: acceptanceDriver.reconnect,
+    reconnectQuickFill: acceptanceDriver.reconnectQuickFill,
   });
   assert(
     !logs.some((s) =>

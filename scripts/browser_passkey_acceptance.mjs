@@ -17,6 +17,7 @@ export async function acceptBrowserPasskey({
   phase,
   observe,
   reconnect,
+  reconnectQuickFill,
 }) {
   phase("quick-pair");
   let popup = await openPopup();
@@ -342,6 +343,16 @@ export async function acceptBrowserPasskey({
       page, cdp, origin, first: created.json, inlineClick,
       eventually, observe, phase,
     });
+  }
+  // The conditional cleanup above intentionally re-pairs in normal mode
+  // (确认连接此扩展); that case stays unchanged. Non-destructive Passkey
+  // metadata opens still need an explicit quick pairing, so re-pair here with
+  // the real quick-fill control before signals/management inspect it. Item-get
+  // rows are never approved on the normal path.
+  if (process.env.LOCKLARK_TEST_PASSKEY_SIGNALS === "1" ||
+      process.env.LOCKLARK_TEST_PASSKEY_MANAGEMENT === "1") {
+    phase("passkey-metadata:explicit-quick-repair");
+    await reconnectQuickFill();
   }
   if (process.env.LOCKLARK_TEST_PASSKEY_SIGNALS === "1") {
     await acceptPasskeySignals({
