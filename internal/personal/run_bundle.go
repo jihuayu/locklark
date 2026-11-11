@@ -444,9 +444,10 @@ func (s *Session) PrepareBrokeredRun(ctx context.Context, targets []BundleTarget
 // already created, so it can bind exactly that root in the one-shot scope, plus
 // the exact request and targets that RunBrokeredBundle committed to and will
 // render, so the callback never has to capture caller-owned data that could
-// diverge from the runner's clones. Both snapshots are independent deep copies:
-// the callback may mutate them freely and is expected to clear or drop them
-// after use, and neither mutation can change what the runner signs, renders or
+// diverge from the runner's clones. Both snapshots are independent deep copies,
+// separate from the runner's own: the callback may mutate them freely, and
+// bindBrokeredRunPreparation clears their mutable containers after the callback
+// returns. Neither mutation can change what the runner signs, renders or
 // executes.
 //
 // It returns the preparation receipt plus the exact per-slot values.
@@ -510,24 +511,50 @@ func runBrokeredBundle(ctx context.Context, targets []BundleTarget, request RunB
 }
 
 // bindBrokeredRunPreparation hands the callback the exact request and targets
-// snapshots the runner will render, as fresh deep copies. The copies are
-// zeroized after the callback returns, including on panic, so the callback's
-// environment and passthrough names do not outlive their use. The runner's own
-// snapshots are never passed, so no mutation through these copies can reach
-// them.
+// snapshots the runner will render, as fresh deep copies. After the callback
+// returns, including on panic, every mutable container of that callback-owned
+// copy is cleared: Args and HelperPath elements, the Passthrough map entries,
+// each Spec slice (Slots, Files, Dirs, PassthroughEnv), the Spec Env map
+// entries, every nested DenyArgs slice, and every target element. Clearing a
+// container overwrites its pointers or zeroes its element slots; it cannot
+// erase the string bytes those elements pointed at, because Go strings are
+// immutable and may be shared, so callers must not treat this as a secure
+// wipe of string data. The runner's own snapshots are separate and are never
+// passed, so no mutation through these copies can reach them.
 func bindBrokeredRunPreparation(ctx context.Context, s *runBundleStoreRequest, prepare BrokeredRunPreparer) (receipt RunBundlePreparationReceipt, values map[string][]byte, err error) {
 	request := cloneRunBundleRequest(s.request)
 	targets := cloneBundleTargets(s.targets)
-	defer func() {
-		clear(request.HelperPath)
-		for name := range request.Passthrough {
-			delete(request.Passthrough, name)
-		}
-		for i := range targets {
-			targets[i] = BundleTarget{}
-		}
-	}()
+	defer clearBrokeredRunRequestCopy(&request, targets)
 	return prepare(ctx, s.root, request, targets)
+}
+
+// clearBrokeredRunRequestCopy clears the mutable containers of a
+// callback-owned request copy and its target slice. It zeroes element slots
+// and entry pointers only; string contents are not and cannot be erased here.
+func clearBrokeredRunRequestCopy(request *RunBundleRequest, targets []BundleTarget) {
+	if request == nil {
+		return
+	}
+	clear(request.Args)
+	clear(request.HelperPath)
+	for name := range request.Passthrough {
+		delete(request.Passthrough, name)
+	}
+	clear(request.Spec.Slots)
+	clear(request.Spec.Files)
+	clear(request.Spec.Dirs)
+	clear(request.Spec.PassthroughEnv)
+	for name := range request.Spec.Env {
+		delete(request.Spec.Env, name)
+	}
+	for i := range request.Spec.DenyArgs {
+		clear(request.Spec.DenyArgs[i])
+		request.Spec.DenyArgs[i] = nil
+	}
+	clear(request.Spec.DenyArgs)
+	for i := range targets {
+		targets[i] = BundleTarget{}
+	}
 }
 
 // brokeredRunStore adapts the desktop preparation callback to the local

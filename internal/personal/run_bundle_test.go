@@ -1414,6 +1414,45 @@ func assertBrokeredValuesCleared(t *testing.T, values, buffers map[string][]byte
 	}
 }
 
+// assertBrokeredCallbackCopyCleared checks that every element, entry and
+// nested container of the callback-owned request copy was zeroed. Clearing
+// cannot erase string contents, so string elements must be empty rather than
+// inspected for absence.
+func assertBrokeredCallbackCopyCleared(t *testing.T, request *RunBundleRequest, targets []BundleTarget) {
+	t.Helper()
+	for _, values := range [][]string{request.Args, request.HelperPath, request.Spec.Dirs, request.Spec.PassthroughEnv} {
+		for i, value := range values {
+			if value != "" {
+				t.Errorf("callback request container not cleared at %d: %q", i, value)
+			}
+		}
+	}
+	for name, value := range request.Passthrough {
+		t.Errorf("callback Passthrough entry not cleared: %q=%q", name, value)
+	}
+	for name, value := range request.Spec.Env {
+		t.Errorf("callback Spec.Env entry not cleared: %q=%q", name, value)
+	}
+	for i, slot := range request.Spec.Slots {
+		if slot != (cliprofile.Slot{}) {
+			t.Errorf("callback Spec.Slots[%d] not cleared: %+v", i, slot)
+		}
+	}
+	for i, file := range request.Spec.Files {
+		if file != (cliprofile.FileSpec{}) {
+			t.Errorf("callback Spec.Files[%d] not cleared: %+v", i, file)
+		}
+	}
+	if len(request.Spec.DenyArgs) > 0 && request.Spec.DenyArgs[0] != nil {
+		t.Errorf("callback Spec.DenyArgs[0] not released: %+v", request.Spec.DenyArgs[0])
+	}
+	for i, target := range targets {
+		if target != (BundleTarget{}) {
+			t.Errorf("callback target %d not cleared: %+v", i, target)
+		}
+	}
+}
+
 func assertBrokeredRootsRemoved(t *testing.T, roots []string) {
 	t.Helper()
 	if len(roots) == 0 {
@@ -1507,8 +1546,11 @@ func TestRunBrokeredBundlePreparationReceivesExactSnapshot(t *testing.T) {
 	buffers := brokeredValueBuffers(values)
 	create, roots := testBundleTempCreatorTracked(t)
 	prepared, executed := 0, 0
+	var retainedRunBundleRequest RunBundleRequest
+	var retainedBundleTargets []BundleTarget
 	receipt, err := runBrokeredBundle(context.Background(), targets, request, func(_ context.Context, root string, gotRequest RunBundleRequest, gotTargets []BundleTarget) (RunBundlePreparationReceipt, map[string][]byte, error) {
 		prepared++
+		retainedRunBundleRequest, retainedBundleTargets = gotRequest, gotTargets
 		if !reflect.DeepEqual(gotRequest, wantRequest) {
 			t.Errorf("preparation request differs from the committed request: %+v", gotRequest)
 		}
@@ -1533,6 +1575,10 @@ func TestRunBrokeredBundlePreparationReceivesExactSnapshot(t *testing.T) {
 		for i := range gotRequest.Spec.PassthroughEnv {
 			gotRequest.Spec.PassthroughEnv[i] = "mutated"
 		}
+		for name := range gotRequest.Spec.Env {
+			gotRequest.Spec.Env[name] = "mutated"
+		}
+		gotRequest.Spec.DenyArgs = append(gotRequest.Spec.DenyArgs, []string{"auth", "login"})
 		for i := range gotRequest.Args {
 			gotRequest.Args[i] = "mutated"
 		}
@@ -1542,15 +1588,16 @@ func TestRunBrokeredBundlePreparationReceivesExactSnapshot(t *testing.T) {
 			gotTargets[i] = BundleTarget{Slot: "mutated", ID: "mutated", Revision: "mutated", Field: "mutated"}
 		}
 		gotTargets = append(gotTargets, BundleTarget{Slot: "extra"})
-		if err := os.RemoveAll(root); err != nil {
-			t.Errorf("removing the private root inside the callback: %v", err)
-		}
 		return wantReceipt, values, nil
 	}, create, os.RemoveAll, func(_ context.Context, req RunBundleRequest, root string, rendered cliprofile.RenderedBundle) (int, error) {
 		executed++
+		if info, err := os.Stat(root); err != nil || !info.IsDir() {
+			t.Errorf("private root %q not a directory at execution start: %v", root, err)
+		}
 		if !reflect.DeepEqual(req, wantRequest) {
 			t.Errorf("execution request changed after preparation: %+v", req)
 		}
+		assertBrokeredCallbackCopyCleared(t, &retainedRunBundleRequest, retainedBundleTargets)
 		for name, want := range map[string]string{
 			"GH_TOKEN":              bundleTestPassword,
 			"BUNDLE_TEST_REGION":    "test-region",
