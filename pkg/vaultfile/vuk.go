@@ -76,8 +76,9 @@ var errVUKNilWriter = errors.New("vaultfile: age.Encrypt returned a nil writer w
 // (age.ParseX25519Recipient plus the recipient's own canonical string form).
 // The returned slot has DeviceID and Recipient exactly as given.
 //
-// The caller-supplied buffers and strings are not retained after the call.
-// The package-owned envelope plaintext (VUK included) is cleared on every
+// The caller's VUK input buffer is not retained after the call, but the
+// returned DeviceSlot contains DeviceID and Recipient exactly as given. The
+// package-owned envelope plaintext (VUK included) is cleared on every
 // path, success and failure. age.Encrypt keeps its own unexported copy of the
 // plaintext until Close and exposes no way to clear it.
 //
