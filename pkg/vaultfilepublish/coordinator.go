@@ -89,8 +89,11 @@ type ConditionalBackend interface {
 // the expected revision and the sealed proposal bytes). Its contract is to
 // authenticate both the base and the candidate against the caller's external
 // pin and to verify that the candidate is authorized and directly based on
-// exactly the expected revision R. The coordinator cannot check any of that
-// itself; it checks only that opaque slices and revisions agree internally.
+// exactly the expected revision R. The revision is only the opaque one the
+// base bytes were read at, not an authenticated reading of the proposal, so
+// "directly based on R" is a claim the verifier itself must establish. The
+// coordinator cannot check any of that itself; it checks only that opaque
+// slices and revisions agree internally.
 //
 // The base is always R, the operation's original state base: the snapshot of
 // State.BaseBytes and State.RemoteRevision loaded when the operation began
@@ -365,14 +368,14 @@ func (c *Coordinator) ResumePrepared(ctx context.Context, currentPulled Pulled, 
 // result alone. The prepared record is preserved unless the Ack succeeds.
 //
 // For a nil, ErrUnknown or ErrConflict result the readback goes through
-// ReadPulled with pullVerifier. A read failure is returned as is (nothing is
-// acknowledged). Otherwise:
+// ReadPulled with pullVerifier. A read failure is returned together with the
+// write result (nothing is acknowledged). Otherwise:
 //
 //   - readback bytes equal to the prepared proposal and a valid revision are
 //     revalidated with the proposal verifier against R and then acknowledged
 //     with the readback revision (Ack keeps a newer working generation, so a
 //     local edit made during the write survives). Nothing is acknowledged if
-//     the verifier rejects the readback;
+//     the verifier rejects the readback or the Ack fails;
 //   - an exact original base after ErrUnknown returns ErrUnknownWrite, which
 //     matches vaultfilebackend.ErrUnknown, so a later ResumePrepared can retry
 //     the same operation;
@@ -382,6 +385,12 @@ func (c *Coordinator) ResumePrepared(ctx context.Context, currentPulled Pulled, 
 //     stored version did not advance, so success must not be inferred from the
 //     write response;
 //   - any other readback returns ErrUnknownReview.
+//
+// Whenever reconciliation does not verify and Ack the exact proposal, an
+// ErrUnknown write result is never lost: the specific outcome error (the
+// readback error, ErrVerification, the Ack error or ErrUnknownReview) is
+// returned wrapped around writeErr, so errors.Is finds both that specific
+// error and vaultfilebackend.ErrUnknown. Only a successful Ack returns nil.
 //
 // In every case the prepared record is preserved unless the Ack succeeded.
 func (c *Coordinator) reconcile(ctx context.Context, base vaultfilejournal.State, pp vaultfilejournal.PreparedProposal, writeErr error, pullVerifier PullVerifier) error {
@@ -403,13 +412,15 @@ func (c *Coordinator) reconcile(ctx context.Context, base vaultfilejournal.State
 
 	current, readErr := ReadPulled(ctx, c.backend, c.name, pullVerifier)
 	if readErr != nil {
-		return readErr
+		// Nothing was acknowledged. An ErrUnknown write is otherwise
+		// unobservable, so keep it discoverable next to the readback error.
+		return c.unknownWrite(writeErr, readErr)
 	}
 	if equalBytes(current.data, pp.Proposal.Bytes) {
 		if err := c.verifyProposal(ctx, base, pp.Proposal); err != nil {
-			return err
+			return c.unknownWrite(writeErr, err)
 		}
-		return c.ack(pp, current.revision)
+		return c.unknownWrite(writeErr, c.ack(pp, current.revision))
 	}
 
 	conflict := errors.Is(writeErr, vaultfilebackend.ErrConflict)
@@ -419,7 +430,7 @@ func (c *Coordinator) reconcile(ctx context.Context, base vaultfilejournal.State
 	// writeErr is never enough on its own.
 	if current.revision == base.RemoteRevision && equalBytes(current.data, base.BaseBytes) {
 		if unknown {
-			return fmt.Errorf("%w: %q: remote still shows the original base: %w", ErrUnknownWrite, c.name, writeErr)
+			return c.unknownWrite(writeErr, fmt.Errorf("%w: %q: remote still shows the original base", ErrUnknownWrite, c.name))
 		}
 		if conflict {
 			return c.conflict(writeErr)
@@ -434,7 +445,19 @@ func (c *Coordinator) reconcile(ctx context.Context, base vaultfilejournal.State
 		// exact readback of the proposal is a success.
 		return fmt.Errorf("%w: %q: write reported success but the remote shows a different version", ErrUnknownReview, c.name)
 	}
-	return fmt.Errorf("%w: %q: remote version is neither the prepared proposal nor the original base", ErrUnknownReview, c.name)
+	return c.unknownWrite(writeErr, fmt.Errorf("%w: %q: remote version is neither the prepared proposal nor the original base", ErrUnknownReview, c.name))
+}
+
+// unknownWrite returns outcome, wrapping an ErrUnknown write result so that
+// errors.Is still reaches vaultfilebackend.ErrUnknown. A nil outcome is
+// returned as is: the proposal was verified and acknowledged. Outcome is the
+// specific reconciliation error, never a conflict, so the wrapped write result
+// stays just a discoverable cause next to it and is not reclassified.
+func (c *Coordinator) unknownWrite(writeErr, outcome error) error {
+	if outcome == nil || !errors.Is(writeErr, vaultfilebackend.ErrUnknown) {
+		return outcome
+	}
+	return fmt.Errorf("%q: %w: write outcome unknown: %w", c.name, outcome, writeErr)
 }
 
 // writeErrIsNil reports whether the CAS reported no error at all.

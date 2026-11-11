@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -1156,6 +1157,158 @@ func readStateRecord(t *testing.T, dbPath string) (bucket string, raw []byte) {
 		t.Fatal("journal db has no state record")
 	}
 	return bucket, raw
+}
+
+func TestUnknownWritePreservedThroughFailedReconciliation(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name string
+		// setup installs the write behaviour and the remote state the readback
+		// will observe. It runs before the base is pulled back for
+		// PrepareAndPublish, so a setup must not break that Read.
+		setup func(t *testing.T, f *fixture) PullVerifier
+		// breakAck closes the fixture journal after the write, so the
+		// exact-proposal Ack fails on a real ErrClosed.
+		breakAck bool
+		// want is the specific error or sentinel that must remain reachable.
+		want error
+	}{
+		{
+			name: "readback error",
+			setup: func(t *testing.T, f *fixture) PullVerifier {
+				f.backend.onReplace = func(b *fakeBackend, _ vaultfilebackend.Revision, _ []byte) error {
+					b.set(own(proposalData), readbackRevision)
+					// Only the readback fails.
+					b.readErr = errBackendInjected
+					return vaultfilebackend.ErrUnknown
+				}
+				return anyPull
+			},
+			want: errBackendInjected,
+		},
+		{
+			name: "exact bytes rejected by the proposal verifier",
+			setup: func(t *testing.T, f *fixture) PullVerifier {
+				f.backend.onReplace = applyThenFail(proposalData, readbackRevision, vaultfilebackend.ErrUnknown)
+				// Accept the pre-write check, reject the readback check.
+				var checks int
+				base := f.verifier()
+				f.newCoord(t, func(ctx context.Context, b []byte, rev vaultfilebackend.Revision, p vaultfilejournal.Proposal) error {
+					checks++
+					// Both calls are recorded; only the readback one rejects.
+					_ = base(ctx, b, rev, p)
+					if checks > 1 {
+						return errProposalRejected
+					}
+					return nil
+				})
+				return anyPull
+			},
+			want: ErrVerification,
+		},
+		{
+			name: "different successor",
+			setup: func(t *testing.T, f *fixture) PullVerifier {
+				f.backend.onReplace = func(b *fakeBackend, _ vaultfilebackend.Revision, _ []byte) error {
+					b.set(successorData, successorRevision)
+					return vaultfilebackend.ErrUnknown
+				}
+				return f.pinPullVerifier(successorData)
+			},
+			want: ErrUnknownReview,
+		},
+		{
+			// The write committed the exact proposal but its response was
+			// lost; closing the real journal after Prepare makes the Ack fail
+			// deterministically, after the readback and the verifier accepted.
+			name: "exact proposal but Ack fails",
+			setup: func(t *testing.T, f *fixture) PullVerifier {
+				var closeErr error
+				f.backend.onReplace = func(b *fakeBackend, _ vaultfilebackend.Revision, _ []byte) error {
+					// Prepare has committed by now; the prepared record must
+					// already be on disk before the journal is closed.
+					if _, err := f.j.LoadPrepared(); err != nil {
+						closeErr = fmt.Errorf("prepared record missing at write: %w", err)
+						return vaultfilebackend.ErrUnknown
+					}
+					b.set(own(proposalData), readbackRevision)
+					closeErr = f.j.Close()
+					return vaultfilebackend.ErrUnknown
+				}
+				t.Cleanup(func() {
+					if closeErr != nil {
+						t.Errorf("close real journal after Prepare: %v", closeErr)
+					}
+				})
+				return anyPull
+			},
+			breakAck: true,
+			want:     vaultfilejournal.ErrClosed,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFixture(t)
+			pullVerifier := tt.setup(t, f)
+			// Pulled before the write, like a real caller that read the base
+			// it is publishing against.
+			pulled := f.pull(t)
+
+			err := f.coord.PrepareAndPublish(ctx, pulled, f.proposal, pullVerifier)
+			if err == nil {
+				t.Fatalf("PrepareAndPublish = nil, want a reconciliation failure")
+			}
+			if !errors.Is(err, vaultfilebackend.ErrUnknown) {
+				t.Fatalf("err = %v, want vaultfilebackend.ErrUnknown preserved", err)
+			}
+			if tt.want != nil && !errors.Is(err, tt.want) {
+				t.Fatalf("err = %v, want %v preserved alongside ErrUnknown", err, tt.want)
+			}
+			if errors.Is(err, vaultfilebackend.ErrConflict) || errors.Is(err, ErrConflict) {
+				t.Fatalf("ErrUnknown write misclassified as a definite conflict: %v", err)
+			}
+			if tt.breakAck {
+				if !bytes.Contains([]byte(err.Error()), []byte("ack")) {
+					t.Fatalf("err = %q, want the Ack error", err)
+				}
+			}
+			if f.backend.replaces != 1 || f.backend.reads != 1 {
+				t.Fatalf("replaces=%d reads=%d, want 1 and 1", f.backend.replaces, f.backend.reads)
+			}
+			if tt.breakAck {
+				// The journal the coordinator Acked is closed; reopen it from
+				// disk to prove the prepared record and state survived.
+				f.j = openJournal(t, f.dir)
+			}
+			assertPrepared(t, loadPrepared(t, f.j), f.prepared)
+			assertState(t, loadState(t, f.j), f.initial)
+			if tt.breakAck {
+				// The exact proposal was read back and verified, so the error
+				// is the Ack failure, not a review of the remote outcome.
+				if errors.Is(err, ErrVerification) || errors.Is(err, ErrUnknownReview) || errors.Is(err, ErrUnknownWrite) {
+					t.Fatalf("Ack failure misclassified: %v", err)
+				}
+				if f.numChecks != 2 {
+					t.Fatalf("proposal verifier calls = %d, want 2 (before prepare and before ack)", f.numChecks)
+				}
+				assertBaseCalls(t, f.checks, f.initial, f.proposal)
+			}
+		})
+	}
+}
+
+// rejectAfterFirstCheck returns the fixture verifier for its first ok checks
+// (the pre-write verification) and errProposalRejected afterwards.
+func rejectAfterFirstCheck(f *fixture, ok int) ProposalVerifier {
+	base := f.verifier()
+	return func(ctx context.Context, b []byte, rev vaultfilebackend.Revision, p vaultfilejournal.Proposal) error {
+		if f.numChecks >= ok {
+			f.numChecks++
+			f.checks = append(f.checks, check{base: own(b), revision: rev, proposal: p})
+			return errProposalRejected
+		}
+		return base(ctx, b, rev, p)
+	}
 }
 
 func TestResumePreparedRejectedProposalWritesAndAcksNothing(t *testing.T) {
