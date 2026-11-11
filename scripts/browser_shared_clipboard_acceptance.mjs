@@ -491,8 +491,16 @@ async function connectedPopup(context) {
       (await popup.disabled("#connect")) === false,
     "Shared popup controls are unavailable",
   );
-  assert.equal(await popup.disabled("#connect"), true,
-    "Shared popup lost its live desktop binding");
+  let last = {};
+  await context.eventually(
+    async () => {
+      last = await popupPairState(popup);
+      return last.connectDisabled === true && last.refreshDisabled === false;
+    },
+    "Shared popup did not bind the live desktop session",
+  ).catch(() => {
+    assert.fail("Shared popup lost its live desktop binding " + JSON.stringify(last));
+  });
   return popup;
 }
 
@@ -514,46 +522,82 @@ function assertNoBrokerPairPrompt(context, desktop, reason) {
 // field copy for 15 minutes. Normal per-operation consent is never clicked and
 // no other label is substituted; consent is never inferred from status text.
 async function pairSharedSession(context, desktop, step) {
-  // Native desktop inspection raises its window and closes the action popup, so
-  // it runs only while no popup is open. Every popup handle is discarded before
-  // an inspection; any later failure must not touch a closed target.
-  let popup = null;
-
   // 1. Refusal on the actual broker prompt: no popup is open, no pending prompt.
   step("shared-clipboard:pair-connect");
-  assertNoBrokerPairPrompt(context, desktop, "before the user requested a connection");
-  popup = await context.openPopup();
-  await assertPopupUnpaired(context, popup);
-  await popup.click("#connect");
-  popup = null;
-  desktopInput(context, desktop, [
-    { wait_label: REFUSE_CONSENT_LABEL },
-    { click_label: REFUSE_CONSENT_LABEL },
-  ]);
-  // The refusal click focused the desktop; the former handle is stale.
-  await context.delay(300);
+  await requestRefusal(context, desktop);
 
   // 2. The prompt is gone and a fresh popup still observes an unpaired session.
   step("shared-clipboard:pair-refused-state");
   assertNoBrokerPairPrompt(context, desktop, "after the user refused the connection");
-  popup = await context.openPopup();
-  await assertPopupUnpaired(context, popup);
+  await assertRefusedUnpaired(context);
 
   // 3. New real connection approved only by the fixed quick-consent label.
-  // No desktop inspection may run while this popup holds focus.
   step("shared-clipboard:pair-quick-consent");
+  return reconnectQuickConsent(context, desktop, step);
+}
+
+// Refusal proof on the initial session: no pending prompt before the request,
+// one physical #connect, then the real refusal label natively clicked.
+async function requestRefusal(context, desktop) {
+  // Native desktop inspection raises its window and closes the action popup, so
+  // it runs only while no popup is open. The handle is dropped before the click.
+  assertNoBrokerPairPrompt(context, desktop, "before the user requested a connection");
+  await requestPairing(context);
+  desktopInput(context, desktop, [
+    { wait_label: REFUSE_CONSENT_LABEL },
+    { click_label: REFUSE_CONSENT_LABEL },
+  ]);
+}
+
+// A fresh popup is proven unpaired, its real #connect is clicked exactly once
+// and the handle is discarded at once: the native click focuses the desktop and
+// may close the popup. Never called again for the same request.
+async function requestPairing(context) {
+  const popup = await context.openPopup();
+  await assertPopupUnpaired(context, popup);
   await popup.click("#connect");
-  popup = null;
+}
+
+// The refusal click focused the desktop; a fresh popup is opened only after the
+// request settled. No retry: the same DOM is read until it observes the state.
+async function assertRefusedUnpaired(context) {
+  await context.delay(300);
+  const popup = await context.openPopup();
+  let last = {};
+  await context.eventually(
+    async () => {
+      last = await popupPairState(popup);
+      return last.connectDisabled === false && last.refreshDisabled === true;
+    },
+    "Shared popup is paired although the desktop refused the connection",
+  ).catch(() => {
+    try {
+      return popup.dismiss();
+    } finally {
+      assert.fail("Shared popup is not observably unpaired after refusal " +
+        JSON.stringify(last));
+    }
+  });
+  await popup.dismiss().catch(() => {});
+}
+
+// Re-pair after a desktop lock+unlock: the old browser capability of that bound
+// session is gone. Open a fresh popup, prove it is unpaired with connect enabled,
+// click its real #connect exactly once, discard the handle, then wait for and
+// physically click the exact quick-consent label. Consent is never inferred from
+// text or state; only a reopened popup observing the live binding proves it.
+async function reconnectQuickConsent(context, desktop, step) {
+  // No desktop inspection may run while this popup holds focus.
+  step("shared-clipboard:repair-connect");
+  await requestPairing(context);
+  step("shared-clipboard:repair-quick-consent");
   desktopInput(context, desktop, [
     { wait_label: QUICK_CONSENT_LABEL },
     { click_label: QUICK_CONSENT_LABEL },
   ]);
-
-  // The native click moves focus to the desktop and may close the popup, so a
-  // stale handle is discarded; a fresh popup must prove the actual binding.
-  step("shared-clipboard:pair-verify");
+  step("shared-clipboard:repair-verify");
   await context.delay(300);
-  popup = await context.openPopup();
+  const popup = await context.openPopup();
   await assertPopupPaired(context, popup);
   return popup;
 }
@@ -827,7 +871,13 @@ export async function acceptSharedClipboard(context) {
     // ordinary external process orchestration, not an authentication hook.
     step("shared-clipboard:late-prepare-unlock");
     unlockDesktop(context, desktop);
-    popup = await connectedPopup(context);
+    // Locking ended the old browser session: its capability is disconnected, so
+    // the binding must be re-established by a real new quick consent.
+    popup = await reconnectQuickConsent(context, desktop, step);
+    receipts.late_prepare_repair_quick_consent_bound = true;
+    receipts.late_prepare_repair_connect_once = true;
+    receipts.late_prepare_old_capability_repaired = true;
+    receipts.late_prepare_live_binding_reopened = true;
     popup = await openSyntheticDetail(context, popup, step);
     const lateMarker = "Shared acceptance late marker " + randomBytes(16).toString("hex");
     owner = new ForeignOwner(context, lateMarker);
