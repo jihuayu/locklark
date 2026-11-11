@@ -15,7 +15,10 @@ Guarantees:
   stop and remove call uses that exact name; other containers are never
   inspected, stopped or removed.
 - The certificate and credentials are generated into a private 0700 temp
-  directory with 0600 files.
+  directory with 0600 files; the synthetic root credentials live there as
+  ``minio-credentials.env`` (0600). Docker reads that file with
+  ``--env-file`` and the Go test reads it with ``-credential-file``; only the
+  file path appears on a command line. No credential value is printed.
 - No AWS environment, config or credential files are read: ``AWS_*``
   variables are dropped from the test environment. ``HOME`` is neither set
   nor overwritten, no AWS CLI is used, and nothing is written into the
@@ -293,6 +296,15 @@ def main() -> int:
         cert, key = generate_certificate(temp_dir)
         verify = temp_dir / "verify.crt"
         write_private(verify, cert.read_bytes())
+        # The only place the synthetic root credentials are stored. Docker
+        # reads them with --env-file (path only on the command line), and the
+        # Go test reads the same file with -credential-file; the values never
+        # appear in an argv or in this process's environment.
+        credentials = temp_dir / "minio-credentials.env"
+        write_private(
+            credentials,
+            f"MINIO_ROOT_USER={access}\nMINIO_ROOT_PASSWORD={secret}\n".encode(),
+        )
         write_private(
             temp_dir / "minio.env",
             f"MINIO_SMOKE_CONTAINER={container}\n".encode(),
@@ -321,7 +333,9 @@ def main() -> int:
                 "--security-opt",
                 "no-new-privileges",
                 # The image's empty credential-file defaults make MinIO read
-                # its root credentials from these variables instead.
+                # its root credentials from the generated env file instead.
+                "--env-file",
+                str(credentials),
                 "--env",
                 "MINIO_ROOT_USER_FILE=",
                 "--env",
@@ -334,10 +348,6 @@ def main() -> int:
                 "MINIO_BROWSER=off",
                 "--env",
                 "MINIO_UPDATE=off",
-                "--env",
-                "MINIO_ROOT_USER=" + access,
-                "--env",
-                "MINIO_ROOT_PASSWORD=" + secret,
                 "--mount",
                 f"type=bind,source={cert},destination={CERTS_DIR}/public.crt,readonly",
                 "--mount",
@@ -375,11 +385,22 @@ def main() -> int:
                 "MINIO_SMOKE_ENABLE": "1",
                 "MINIO_SMOKE_ENDPOINT": endpoint,
                 "MINIO_SMOKE_CA_FILE": str(verify),
-                "MINIO_SMOKE_ACCESS_KEY": access,
-                "MINIO_SMOKE_SECRET_KEY": secret,
+                "MINIO_SMOKE_CREDENTIALS_FILE": str(credentials),
             }
         )
-        command = [args.go, "test", "-count=1", "-v", "-run", f"^{GO_TEST}$", TEST_PACKAGE]
+        # Test flags are parsed by package flag.Parse, so they follow the
+        # package: the Go test reads the credentials file itself.
+        command = [
+            args.go,
+            "test",
+            "-count=1",
+            "-v",
+            "-run",
+            f"^{GO_TEST}$",
+            TEST_PACKAGE,
+            "-credential-file",
+            str(credentials),
+        ]
         log("running " + " ".join(command))
         test = run(command, env=env, timeout=GO_TEST_TIMEOUT_SEC, what="go test")
         output = redacted(text(test), secret)
