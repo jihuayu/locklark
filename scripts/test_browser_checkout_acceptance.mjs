@@ -1975,7 +1975,23 @@ test("route per-field copy uses physical input, exact native labels and the priv
   );
   assert.match(adapter, /const route = await attachPopup\(target\);/);
   assert.match(adapter, /click: \(selector\) => route\.click\(selector\),/);
+  // count/text forward the existing popup readers; the copy proof waits on
+  // the rendered row count and the fixed toast text through them.
+  assert.match(adapter, /count: \(selector\) => route\.count\(selector\),/);
+  assert.match(adapter, /text: \(selector\) => route\.text\(selector\),/);
+  assert.match(adapter, /evaluate: \(expression\) => route\.evaluate\(expression\),/);
+  assert.match(adapter, /close: \(\) => route\.close\(\),/);
   assert.doesNotMatch(adapter, /dispatchEvent|\.evaluate\([^)]*click/);
+  // Closed world: the adapter exposes exactly these five methods and the
+  // checkpoint only calls those, so a missing forward cannot slip through.
+  const exposed = [...adapter.matchAll(/^\s{8}([a-zA-Z]+): /gm)]
+    .map((match) => match[1])
+    .sort();
+  assert.deepEqual(exposed, ["click", "close", "count", "evaluate", "text"]);
+  const called = new Set(
+    [...checkpoint.matchAll(/\broute\.([a-zA-Z]+)\(/g)].map((match) => match[1]),
+  );
+  assert.deepEqual([...called].sort(), exposed);
   // The forwarded method is the real mouse wrapper: visibility and hit-test
   // first, then one CDP mousePressed/mouseReleased pair.
   const popupFrom = source.indexOf("async function attachPopup(target) {");
