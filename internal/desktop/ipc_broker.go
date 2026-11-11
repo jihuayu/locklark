@@ -30,9 +30,13 @@ func (p *browserPairPending) choose(decision browserhost.BrowserPairDecision) {
 }
 
 type cliRunPending struct {
-	id       string
-	peer     browserhost.Peer
-	request  browserhost.BrokerCLIRequest
+	id      string
+	peer    browserhost.Peer
+	request browserhost.BrokerCLIRequest
+	// session and epoch are the exact broker generation this request was
+	// published under. A decision is only valid while both are still current.
+	session  *personal.Session
+	epoch    uint64
 	decision chan bool
 	once     sync.Once
 	decided  bool
@@ -44,6 +48,13 @@ func (p *cliRunPending) choose(approved bool) {
 		return
 	}
 	p.once.Do(func() { p.decision <- true })
+}
+
+// brokerCurrent reports whether s at epoch is still the unlocked broker session.
+func (a *App) brokerCurrent(s *personal.Session, epoch uint64) bool {
+	a.brokerMu.Lock()
+	defer a.brokerMu.Unlock()
+	return s != nil && s.Unlocked() && a.brokerSession == s && a.brokerEpoch == epoch
 }
 
 // browserBrokerCallbacks builds the desktop side of the IPC contract. It is a
@@ -184,6 +195,9 @@ func (a *App) handleCLIRun(ctx context.Context, peer browserhost.Peer, req brows
 		if e != nil {
 			return browserhost.BrokerCLIResponse{}, errCLIRunRefused
 		}
+		if ok && !a.brokerCurrent(s, epoch) {
+			return browserhost.BrokerCLIResponse{}, errCLIRunRefused
+		}
 		approved = ok
 	}
 	if !approved {
@@ -197,7 +211,7 @@ func (a *App) handleCLIRun(ctx context.Context, peer browserhost.Peer, req brows
 }
 
 func (a *App) requestCLIRunApproval(ctx context.Context, peer browserhost.Peer, req browserhost.BrokerCLIRequest, session *personal.Session, epoch uint64) (bool, error) {
-	p := &cliRunPending{peer: peer, request: req, decision: make(chan bool, 1)}
+	p := &cliRunPending{peer: peer, request: req, session: session, epoch: epoch, decision: make(chan bool, 1)}
 	var b [16]byte
 	if _, e := rand.Read(b[:]); e != nil {
 		return false, errCLIRunRefused
@@ -219,17 +233,23 @@ func (a *App) requestCLIRunApproval(ctx context.Context, peer browserhost.Peer, 
 	})
 	select {
 	case approved := <-p.decision:
+		// Retire the summary under the same lock that revalidates the
+		// binding, so a stale approve can never retire a newer pending.
 		a.brokerMu.Lock()
 		if a.cliPending == p {
 			a.cliPending = nil
 		}
+		current := approved && session != nil && session.Unlocked() && a.brokerSession == session && a.brokerEpoch == epoch
 		a.brokerMu.Unlock()
 		a.dispatch(func() {
 			if a.win != nil {
 				a.win.Invalidate()
 			}
 		})
-		return approved, nil
+		if !current {
+			return false, errCLIRunRefused
+		}
+		return true, nil
 	case <-ctx.Done():
 		a.brokerMu.Lock()
 		if a.cliPending == p {
@@ -240,15 +260,21 @@ func (a *App) requestCLIRunApproval(ctx context.Context, peer browserhost.Peer, 
 	}
 }
 
-// ApproveCLIRun is called from the native approval view exactly once.
+// ApproveCLIRun is called from the native approval view exactly once. A native
+// approval only counts while the pending request's exact session and broker
+// epoch are still current and unlocked; any mismatch is recorded as a refusal.
 func (a *App) approveCLIRun(approved bool) {
 	a.brokerMu.Lock()
 	p := a.cliPending
-	a.brokerMu.Unlock()
 	if p == nil || p.decided {
+		a.brokerMu.Unlock()
 		return
 	}
 	p.decided = true
+	if approved && (p.session == nil || !p.session.Unlocked() || a.brokerSession != p.session || a.brokerEpoch != p.epoch) {
+		approved = false
+	}
+	a.brokerMu.Unlock()
 	p.choose(approved)
 }
 
