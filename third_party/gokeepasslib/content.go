@@ -267,15 +267,18 @@ func writeToInnerHeader(w io.Writer, id uint8, data []byte) error {
 }
 
 // writeToBounded appends the InnerHeader in encodedSize bytes to dst, which
-// receives it directly: no item is staged and no buffer is copied. When the
-// append grows dst's capacity, the budget is checked before the allocation,
-// so dst of capacity size receives nothing on a budget error.
+// receives it directly: no item is staged and no complete header is copied.
+// The budget is checked before dst grows, so a zero-capacity dst receives
+// nothing on a budget error. dst then reserves the exact capacity and the
+// header is appended into it in place; committing that available slice with
+// Write only advances dst's length.
 func (ih *InnerHeader) writeToBounded(dst *bytes.Buffer, size, max int64) error {
 	if max > 0 && int64(dst.Len())+size > max {
 		return errPlaintextBudget()
 	}
-	// The slice is captured once: dst must not be copied by value after its
-	// buffer is written.
+	// Reserve first so appendTo writes into dst's own allocation rather than
+	// growing a zero-capacity slice that Write would then copy.
+	dst.Grow(int(size))
 	buf := ih.appendTo(dst.AvailableBuffer())
 	if _, err := dst.Write(buf); err != nil {
 		return err

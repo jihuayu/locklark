@@ -1067,7 +1067,7 @@ the encoder's opt-in `Encoder.EncodeWithLimits` measures the serialized KDBX4
 plaintext (the InnerHeader followed by the XML document, after the encoder's
 normalization and protected-entry ordering) and enforces `MaxPlaintextBytes`
 on its writes before gzip compression and encryption. The XML document is
-streamed into that budgeted collector as one write, with no whole-document
+streamed on writes through that budgeted collector, with no whole-document
 buffer. A body over it, such as
 a highly compressible value that still expands the document past the budget,
 is `kdbx_payload_too_large` with no output. The encoder keeps its established

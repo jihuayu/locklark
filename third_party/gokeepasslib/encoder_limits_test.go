@@ -335,8 +335,9 @@ func TestEncodeWithLimitsCollectsWithoutOneExtraByte(t *testing.T) {
 }
 
 // TestEncodeWithLimitsInnerHeaderBoundary pins the InnerHeader's exact
-// over-budget boundary: it is one append into its destination buffer, and a
-// budget one byte under its encoded size rejects it without retaining a byte.
+// over-budget boundary: it reserves and appends into its destination buffer,
+// and a budget one byte under its encoded size rejects it without retaining a
+// byte.
 func TestEncodeWithLimitsInnerHeaderBoundary(t *testing.T) {
 	ih := binaryInnerHeader(t, 64)
 	size := ih.encodedSize()
@@ -374,6 +375,34 @@ func TestEncodeWithLimitsInnerHeaderBoundary(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestInnerHeaderWriteToBoundedDestinationAllocation checks that a
+// zero-capacity destination makes at most one allocation: writeToBounded
+// reserves dst's capacity before appending, so no complete header is staged in
+// a temporary slice and copied in by Write.
+func TestInnerHeaderWriteToBoundedDestinationAllocation(t *testing.T) {
+	ih := binaryInnerHeader(t, 64)
+	size := ih.encodedSize()
+	want := innerHeaderBytes(t, ih)
+
+	allocs := testing.AllocsPerRun(100, func() {
+		var dst bytes.Buffer
+		if err := ih.writeToBounded(&dst, size, 0); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if allocs > 1 {
+		t.Fatalf("writeToBounded made %v allocations, want at most 1", allocs)
+	}
+
+	var dst bytes.Buffer
+	if err := ih.writeToBounded(&dst, size, size); err != nil {
+		t.Fatalf("exact budget: %v", err)
+	}
+	if !bytes.Equal(dst.Bytes(), want) {
+		t.Fatal("InnerHeader bytes differ from writeTo")
 	}
 }
 
