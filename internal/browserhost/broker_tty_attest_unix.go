@@ -2,12 +2,7 @@
 
 package browserhost
 
-import (
-	"os"
-	"path/filepath"
-	"strings"
-	"syscall"
-)
+import "os"
 
 // devUnit has no verified encoding on this platform.
 func devUnit(uint64) (uint32, bool) { return 0, false }
