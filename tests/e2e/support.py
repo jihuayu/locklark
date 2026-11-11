@@ -1810,6 +1810,14 @@ def card_fill_explicit_authorization_component(
     origin and a wrong category are refused without touching a control, and
     that one valid intent writes the card controls once.  Returns ``None``
     when no built bundle carries the entrypoint.
+
+    The component's sixth argument is the worker's already-consumed
+    ``userAuthorized`` boolean, so the harness passes ``true`` exactly where
+    the shipped ``cardSandbox`` adapter would.  This harness receives that
+    flag as input; it does not mint or validate the worker's v2 nonce proof
+    and does not exercise real gesture/background wiring.  The background
+    tests own the v2 one-time proof behavior.  Missing/``false`` auth is
+    covered only as a component-level negative control.
     """
 
     node = shutil.which("node")
@@ -1950,17 +1958,24 @@ const data = {
 const beforeAuthorization = values();
 const rejected = {};
 const afterRejects = {};
+// Each scoped negative control carries `true` for the sixth `userAuthorized`
+// argument (what the `cardSandbox` adapter passes after the worker consumed a
+// gesture), so it must be refused for its named condition alone.  This harness
+// only receives that already-consumed flag; it does not mint or validate the
+// worker's v2 nonce proof — the background tests own that behavior.
 const rejects = {
-  expired: () => [location.origin, data, clock - 1, false, "credit_card"],
-  stale_window: () => [location.origin, data, clock + 60000, false, "credit_card"],
-  wrong_origin: () => ["https://evil.example.test", data, clock + 1500, false, "credit_card"],
-  wrong_category: () => [location.origin, data, clock + 1500, false, "identity"],
+  missing_auth: () => [location.origin, data, clock + 1500, false, "credit_card"],
+  unauthorized: () => [location.origin, data, clock + 1500, false, "credit_card", false],
+  expired: () => [location.origin, data, clock - 1, false, "credit_card", true],
+  stale_window: () => [location.origin, data, clock + 60000, false, "credit_card", true],
+  wrong_origin: () => ["https://evil.example.test", data, clock + 1500, false, "credit_card", true],
+  wrong_category: () => [location.origin, data, clock + 1500, false, "identity", true],
 };
 for (const [name, args] of Object.entries(rejects)) {
   rejected[name] = fill(...args());
   afterRejects[name] = values();
 }
-const authorized = fill(location.origin, data, clock + 1500, false, "credit_card");
+const authorized = fill(location.origin, data, clock + 1500, false, "credit_card", true);
 process.stdout.write(JSON.stringify({
   beforeAuthorization,
   afterRejects,
