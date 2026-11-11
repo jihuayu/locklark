@@ -22,23 +22,35 @@
 //     ErrUninitializedChannel.
 //   - ExportBinding(context) derives the fixed-length (ChannelBindingSize)
 //     channel binding for the connection. It runs Check and rejects an empty
-//     context with ErrEmptyContext.
+//     context with ErrEmptyContext. The context is opaque: the caller's bytes
+//     are used verbatim as the exporter context and are not parsed, decoded
+//     or canonicalized; the method returns a freshly derived binding, not the
+//     context.
 //   - VerifyBinding(context, expected) recomputes the binding on this
-//     connection and compares it with expected in constant time, returning
-//     ErrBindingMismatch on mismatch.
+//     connection with the same verbatim, opaque context bytes and compares it
+//     with expected in constant time, returning ErrBindingMismatch on
+//     mismatch.
 //   - ExportBindingContext(ctx) and VerifyBindingContext(ctx, expected) are
 //     the typed forms of the two methods above. They canonical-encode a
 //     pkg/remoteunlock.ChannelBindingContext with
 //     remoteunlock.EncodeChannelBindingContext and delegate to
 //     ExportBinding / VerifyBinding with those bytes; an invalid ctx returns
-//     the public codec error (wrapping remoteunlock.ErrInvalidContext) and
-//     otherwise every Channel refusal is unchanged.
+//     the public codec error (wrapping remoteunlock.ErrInvalidContext), and
+//     for a valid ctx they raise exactly the Channel errors described for
+//     the opaque methods, including the length check on expected.
 //
-// Close marks the Channel closed before closing the underlying connection. A
-// closed Channel cannot export or verify bindings: although a closed TLS
-// connection retains the exporter inputs of its completed handshake, Check,
-// ExportBinding and VerifyBinding fail with ErrChannelClosed. Closing again
-// returns net.ErrClosed; data reads and writes carry no remote-unlock
+// Close marks the Channel closed before closing the underlying connection.
+// After Close, Check returns ErrChannelClosed. The binding methods also
+// refuse a closed Channel, but each validates some arguments before
+// consulting the Channel, so a pre-Channel argument or codec error can take
+// precedence over ErrChannelClosed. Opaque VerifyBinding checks the length of
+// expected first. The typed methods encode and validate the context first,
+// and typed VerifyBindingContext also checks the length of expected before
+// the Channel is reached. For valid inputs, including a correctly sized
+// expected value on a closed Channel, each of these methods returns
+// ErrChannelClosed. Although a closed TLS connection retains the exporter
+// inputs of its completed handshake, no binding is derived from it. Closing
+// again returns net.ErrClosed; data reads and writes carry no remote-unlock
 // semantics and keep their plain connection behaviour.
 //
 // Guarantees:
@@ -68,14 +80,17 @@
 // request state or one-shot consumption, vault-key (VUK) handling or any
 // decryption, nor the rest of the full #127 integration, and it makes no claim
 // that #127 is complete. The context passed to ExportBinding and
-// VerifyBinding is opaque to this package and is used as raw bytes. The typed
+// VerifyBinding is opaque to this package: the caller's bytes are used
+// verbatim as the exporter context and are not parsed, decoded or
+// canonicalized here. The typed
 // ExportBindingContext and VerifyBindingContext do not define an encoding
 // either: they only call the public pkg/remoteunlock canonical codec and pass
 // its bytes to the opaque methods, so encoding is implemented in exactly one
 // place. A binding is only meaningful for the connection it was derived from,
 // so a verifier must recompute it on the channel that carried the request.
 // Even then, a binding (typed or opaque) only ties context bytes to this
-// connection: it does not verify the request, device identity, signatures,
-// pairing, membership or policy, does not check the deadline or expiry,
-// does not consume one-shot request state, and does not handle VUK delivery.
+// connection: it is not an authorization and does not verify or authorize
+// the request, device identity, signatures, pairing, membership or policy,
+// does not check the deadline or expiry, does not consume one-shot request
+// state, and does not handle VUK delivery or authorize VUK use.
 package remoteunlocktls

@@ -30,9 +30,12 @@ const probeContext = "locklark/remote-unlock-tls/v1/handshake-probe"
 // Data reads and writes are plain delegation to the underlying connection and
 // carry no remote-unlock semantics.
 //
-// Once Close has been called the Channel is permanently closed: the binding
-// methods fail with ErrChannelClosed even though closing TLS does not discard
-// the exporter inputs of the completed handshake.
+// Once Close has been called the Channel is permanently closed: Check, and
+// every binding method for valid inputs, fails with ErrChannelClosed even
+// though closing TLS does not discard the exporter inputs of the completed
+// handshake. Errors detected before the Channel check (a wrongly sized
+// expected value, an invalid typed context or an uninitialized Channel) may
+// take precedence over ErrChannelClosed.
 type Channel struct {
 	conn   *tls.Conn
 	pin    PeerSPKIPin
@@ -148,11 +151,15 @@ func (c *Channel) Check() error {
 // completed, non-resumed TLS 1.3 handshake with the pinned peer, and an empty
 // context.
 //
-// context is opaque to this package; these methods accept and return raw
-// bytes unchanged. Callers that hold a remoteunlock.ChannelBindingContext
-// should use ExportBindingContext, which passes the canonical public codec
-// output to this method. Because the context is mandatory, a binding for an
-// empty context can never be produced silently.
+// context is opaque to this package: the caller's bytes are used verbatim as
+// the exporter context and are not parsed, decoded or canonicalized here, so
+// both peers must supply byte-identical context. ExportBinding returns a
+// freshly derived binding of exactly ChannelBindingSize bytes; it does not
+// echo or return context. Callers that hold a
+// remoteunlock.ChannelBindingContext should use ExportBindingContext, which
+// passes the canonical public codec output to this method. Because the
+// context is mandatory, a binding for an empty context can never be produced
+// silently.
 //
 // A binding is only meaningful for the connection it was derived from. A
 // verifier must recompute it on the channel that carried the request (see
@@ -173,9 +180,17 @@ func (c *Channel) ExportBinding(context []byte) ([]byte, error) {
 }
 
 // VerifyBinding checks that expected equals the channel binding derived for
-// context on this channel. It returns ErrBindingMismatch on mismatch,
-// ErrChannelClosed on a closed channel, and the other channel/context
-// refusals of ExportBinding.
+// context on this channel. As with ExportBinding, context is opaque: the
+// caller's bytes are used verbatim as the exporter context and are not
+// parsed, decoded or canonicalized here.
+//
+// Error ordering: an expected value that is not exactly ChannelBindingSize
+// bytes is rejected with a length error before the Channel is consulted. On
+// a closed channel, a valid expected value reaches the Channel check and
+// returns ErrChannelClosed; likewise an empty context on an open channel
+// returns ErrEmptyContext. Otherwise it returns ErrBindingMismatch on
+// mismatch, or the other channel refusals of ExportBinding (for example
+// ErrUninitializedChannel).
 func (c *Channel) VerifyBinding(context, expected []byte) error {
 	if len(expected) != ChannelBindingSize {
 		return fmt.Errorf("remoteunlocktls: expected binding must be %d bytes", ChannelBindingSize)
