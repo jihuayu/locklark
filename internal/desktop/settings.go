@@ -117,8 +117,10 @@ func parseDesktopArgs(args []string) (settingsPath string, err error) {
 	}
 }
 
-// validateSettingsFilePath accepts exactly one absolute, clean, existing
-// directory or regular file path without NUL bytes.
+// validateSettingsFilePath accepts exactly one absolute, clean path without
+// NUL bytes. An existing path must be a regular file (checked with Lstat so a
+// symlink or special file such as a FIFO or device cannot disguise a
+// non-regular path); a path that does not exist yet is allowed.
 func validateSettingsFilePath(path string) (string, error) {
 	switch {
 	case path == "" || strings.ContainsRune(path, 0):
@@ -132,7 +134,13 @@ func validateSettingsFilePath(path string) (string, error) {
 		// A filesystem root cannot be a settings file.
 		return "", ErrSettingsPath
 	}
-	if info, err := os.Stat(path); err == nil && info.IsDir() {
+	info, err := os.Lstat(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return path, nil
+	case err != nil:
+		return "", ErrSettingsPath
+	case !info.Mode().IsRegular():
 		return "", ErrSettingsPath
 	}
 	return path, nil
