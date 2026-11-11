@@ -517,17 +517,32 @@ jobs:
           LOCKLARK_TEST_PASSKEY_CONDITIONAL: "1"
           LOCKLARK_TEST_OTHER_PROVIDER: "1"
           LOCKLARK_TEST_PASSKEY_SIGNALS: "1"
-      - name: Test checkout iframe approvals and stale-context refusals
+      - name: Test normal-runner checkout acceptance on Chromium
         if: ${{ matrix.browser == 'chromium' }}
-        timeout-minutes: 10
-        run: dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' node scripts/browser_native_acceptance.mjs
+        # The native journey enforces a 900s budget and wraps itself in
+        # dbus-run-session/xvfb-run, so only the runner gets an outer timeout.
+        timeout-minutes: 20
+        run: |
+          python3 scripts/e2e_runner.py --id T2_F11_06 --skip-build --strict \
+            --bin-dir "$RUNNER_TEMP/locklark-bin" \
+            --json-out "$RUNNER_TEMP/locklark-checkout-e2e-report.json"
+          test -s "$RUNNER_TEMP/locklark-checkout-e2e-report.json"
+          test -s "$RUNNER_TEMP/locklark-checkout-evidence.json"
         env:
+          LOCKLARK_E2E_CHECKOUT_NATIVE: '1'
+          LOCKLARK_E2E_CHECKOUT_EVIDENCE_OUT: ${{ runner.temp }}/locklark-checkout-evidence.json
           LOCKLARK_TEST_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
           LOCKLARK_GO: go
-          LOCKLARK_BROWSER_HOST: ${{ runner.temp }}/locklark-bin/locklark-browser-${{ matrix.browser }}
-          LOCKLARK_BROWSER_REGISTER: ${{ runner.temp }}/locklark-bin/locklark-browser-register
-          LOCKLARK_BROWSER_FIXTURE: ${{ runner.temp }}/locklark-bin/browser-acceptance-fixture
-          LOCKLARK_TEST_CHECKOUT_FRAMES: "1"
+      - name: Preserve checkout acceptance report and evidence
+        if: ${{ always() && matrix.browser == 'chromium' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: locklark-checkout-acceptance
+          path: |
+            ${{ runner.temp }}/locklark-checkout-e2e-report.json
+            ${{ runner.temp }}/locklark-checkout-evidence.json
+          if-no-files-found: warn
+          retention-days: 14
       - name: Test Firefox native approval, fill, save, OTP and Passkey
         if: ${{ matrix.browser == 'firefox' }}
         timeout-minutes: 10
