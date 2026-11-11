@@ -105,7 +105,7 @@ func newCPChain(t *testing.T, k *cpKeys) *cpChain {
 	draft.Header.AuthorDeviceID = "device-1"
 	draft.SignedPolicyProofs = []SignedPolicy{
 		{Document: docFor(p0), Policy: *clonePolicy(p0), SignerID: "owner-root-01", Alg: PolicySigAlgEd25519, Sig: pf(0x7f, 64)},
-		{Document: docFor(p1), Policy: *clonePolicy(p1), SignerID: "owner-root-01"},
+		{Document: docFor(p1), Policy: *clonePolicy(p1), SignerID: "owner-root-01", Alg: PolicySigAlgEd25519, Sig: pf(0x60, ed25519.SignatureSize)},
 	}
 	// Continuations chain to PolicyDigest of the carried document, which is
 	// PolicyDigest of the re-parsed policy.
@@ -126,12 +126,15 @@ func newCPChain(t *testing.T, k *cpKeys) *cpChain {
 
 // append adds p as the next current policy, signed by signer with priv. p
 // must already chain to the digest of the newest carried document; a nil priv
-// leaves the signature unset for the caller to stamp in a mutation.
+// leaves a 64-byte placeholder signature for the caller to stamp in a
+// mutation. Either way the proof stays structurally valid.
 func (c *cpChain) append(t *testing.T, p *Policy, signer string, priv ed25519.PrivateKey) {
 	t.Helper()
-	sp := SignedPolicy{Document: docFor(p), Policy: *clonePolicy(p), SignerID: signer}
+	sp := SignedPolicy{Document: docFor(p), Policy: *clonePolicy(p), SignerID: signer, Alg: PolicySigAlgEd25519}
 	if priv != nil {
 		signPolicyProof(&sp, priv)
+	} else {
+		sp.Sig = pf(0x60, ed25519.SignatureSize)
 	}
 	c.f.SignedPolicyProofs = append(c.f.SignedPolicyProofs, sp)
 	c.policies = append(c.policies, p)
@@ -146,12 +149,17 @@ func (c *cpChain) replaceProof(i int, p *Policy, signer string) {
 }
 
 // rebind rewrites proof i's document and policy from c.policies[i] and sets
-// its signer, leaving the signature for finalize.
+// its signer, leaving a shaped signature for finalize. The anchor (proof 0)
+// keeps 64-byte placeholder sig bytes that finalize never rewrites; later
+// proofs get the 0x60 placeholder finalize stamps with the root signature.
+// The proof stays structurally valid (alg and 64-byte sig) either way.
 func (c *cpChain) rebind(i int, signer string) {
 	p := c.policies[i]
-	sp := SignedPolicy{Document: docFor(p), Policy: *clonePolicy(p), SignerID: signer}
+	sp := SignedPolicy{Document: docFor(p), Policy: *clonePolicy(p), SignerID: signer, Alg: PolicySigAlgEd25519}
 	if i > 0 {
-		sp.Sig = pf(0x60, 64)
+		sp.Sig = pf(0x60, ed25519.SignatureSize)
+	} else {
+		sp.Sig = pf(0x7f, ed25519.SignatureSize)
 	}
 	c.f.SignedPolicyProofs[i] = sp
 }
@@ -166,14 +174,8 @@ func (c *cpChain) finalize(t *testing.T, k *cpKeys, mutate ...func()) {
 		m()
 	}
 	last := len(c.f.SignedPolicyProofs) - 1
-	switch {
-	case bytes.Equal(c.f.SignedPolicyProofs[last].Sig, pf(0x60, 64)):
+	if bytes.Equal(c.f.SignedPolicyProofs[last].Sig, pf(0x60, ed25519.SignatureSize)) {
 		signPolicyProof(&c.f.SignedPolicyProofs[last], k.rootPriv)
-	case last > 0 && c.f.SignedPolicyProofs[last].Sig == nil:
-		signPolicyProof(&c.f.SignedPolicyProofs[last], k.rootPriv)
-		for i := 1; i < last; i++ {
-			signPolicyProof(&c.f.SignedPolicyProofs[i], k.rootPriv)
-		}
 	}
 	c.f.Header.PolicySeq = c.policies[last].PolicySeq
 	c.f.Header.AuthorDeviceID = "device-1"
@@ -462,7 +464,17 @@ func TestVerifyPolicyCheckpointNegative(t *testing.T) {
 	})
 
 	t.Run("cross-vault anchor", func(t *testing.T) {
+		// The positive baseline: the same-shaped root-A chain with no vault
+		// change verifies, so each negative below fails on the vault, not on
+		// a malformed fixture.
 		c := newCPChain(t, k)
+		if err := ValidateFile(c.f); err != nil {
+			t.Fatalf("baseline fixture is not structurally valid: %v", err)
+		}
+		if err := VerifyPolicyCheckpoint(c.f, c.anchor); err != nil {
+			t.Fatalf("baseline root-A chain rejected: %v", err)
+		}
+
 		a := c.pin(c.anchor.PolicyDigest, c.anchor.PolicySeq)
 		a.VaultID = "vault-02"
 		wantCodeAt(t, VerifyPolicyCheckpoint(c.f, a), CodePolicyCheckpointFailed, "")
@@ -481,19 +493,40 @@ func TestVerifyPolicyCheckpointNegative(t *testing.T) {
 		}
 		wantCodeAt(t, VerifyPolicyCheckpoint(c.f, c.anchor), CodePolicyCheckpointFailed, "")
 
-		// A proof from another vault is rejected even when the header keeps
-		// the pinned vault and a later proof returns to it.
+		// A file with one carried proof from another vault is rejected by
+		// ValidateFile as a header mismatch before the checkpoint API runs.
+		// The checkpoint API surfaces the same structural code; it never
+		// reaches CodePolicyCheckpointFailed, which is the vault-independent
+		// pin above.
+		// finalize cannot build this fixture: its validated content preimage
+		// rejects the mixed-vault policy before any assertion runs. Bind the
+		// header to the current proof by hand and use the validating-free
+		// preimage instead.
 		c = newCPChain(t, k)
 		mid := clonePolicy(c.policies[1])
 		mid.VaultID = "vault-02"
 		c.replaceProof(1, mid, "owner-root-01")
-		// The content preimage requires the header digest to name the carried
-		// mid policy, which ValidateFile itself then reject as a vault
-		// mismatch; bind the revision directly so the sealed state is reached.
-		c.finalize(t, k)
-		c.f.Header.VaultID = "vault-01"
+		last := len(c.f.SignedPolicyProofs) - 1
+		cur := &c.f.SignedPolicyProofs[last]
+		signPolicyProof(cur, k.rootPriv)
+		c.f.Header.PolicySeq = cur.Policy.PolicySeq
+		c.f.Header.PolicyDigest = policyDigest(cur)
+		c.f.Header.RevisionID = ""
+		msg, err := contentSigningBytes(c.f, false)
+		if err != nil {
+			t.Fatalf("mixed-vault content preimage: %v", err)
+		}
+		cs := append([]byte(DomainContentSignature+"\x00"), msg...)
+		c.f.ContentSignature = Signature{SignerID: "device-1", Alg: SigAlgEd25519, Sig: ed25519.Sign(k.dev1Priv, cs)}
 		sealNegativeFixture(t, c.f)
-		wantCodeAt(t, VerifyPolicyCheckpoint(c.f, c.anchor), CodePolicyCheckpointFailed, "")
+		if g := c.f.Header.VaultID; g != "vault-01" {
+			t.Fatalf("header vault = %q, want vault-01", g)
+		}
+		if g := c.f.SignedPolicyProofs[last].Policy.VaultID; g != "vault-02" {
+			t.Fatalf("current proof vault = %q, want vault-02", g)
+		}
+		wantCodeAt(t, ValidateFile(c.f), CodeHeaderMismatch, "")
+		wantCodeAt(t, VerifyPolicyCheckpoint(c.f, c.anchor), CodeHeaderMismatch, "")
 	})
 
 	t.Run("revoked author", func(t *testing.T) {
@@ -617,10 +650,8 @@ func TestVerifyPolicyCheckpointAnchorRootBinding(t *testing.T) {
 	bAnchor := clonePolicy(c.policies[0])
 	bAnchor.OwnerRoot.PublicKey = bytes.Clone(k.otherRoot)
 	c.replaceProof(0, bAnchor, "owner-root-01")
-	// rebind clears the anchor alg and sig for the caller to stamp; finalize
-	// leaves the anchor alone, so the trust API never sees them.
-	c.f.SignedPolicyProofs[0].Alg = PolicySigAlgEd25519
-	c.f.SignedPolicyProofs[0].Sig = pf(0x7f, ed25519.SignatureSize)
+	// rebind leaves the anchor with a 64-byte placeholder sig; finalize never
+	// rewrites the anchor, so the trust API only ever sees shaped bytes.
 	bDigest := policyDigest(&c.f.SignedPolicyProofs[0])
 	if bytes.Equal(bDigest, c.anchor.PolicyDigest) {
 		t.Fatal("replaced anchor digest did not change")
