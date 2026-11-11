@@ -145,6 +145,119 @@ test("full PAN and raw, JSON-escaped or percent-encoded long factors still fail 
   }
 });
 
+// Independent 8-digit fixture used only by the regression cases below. The
+// existing fixture keeps its historical short values, so both shapes stay
+// covered without changing the scanner.
+const eightDigitFixture = {
+  ...syntheticFixture(),
+  CardVerification: "93716428",
+  CardPIN: "85172936",
+};
+
+// Raw Buffer content with non-UTF8 delimiter bytes on both boundaries. The
+// bytes are passed unchanged to assertPrivateArtifacts so its original
+// raw-byte token scan is what rejects them.
+function rawDelimited(value) {
+  return Buffer.concat([
+    Buffer.from([0xff]),
+    Buffer.from(value, "utf8"),
+    Buffer.from([0xfe]),
+  ]);
+}
+
+test("historical 3-digit verification and 4-digit PIN fail text and raw byte scanning", async () => {
+  const { assertPrivateText, assertPrivateArtifacts } = await loadSaveAcceptance();
+  const fixture = syntheticFixture();
+  for (const key of ["CardVerification", "CardPIN"]) {
+    const value = fixture[key];
+    for (const text of [
+      value,
+      `"${value}"`,
+      `{"${key}":"${value}"}`,
+      `${key}: ${value}\n`,
+      `\u0000${value}\u0000`,
+      `--${value}--`,
+      `\u00ff${value}\u00fe`,
+    ]) {
+      assert.throws(
+        () => assertPrivateText(text, fixture),
+        /card verification or PIN/,
+        "historical short card token in text was not rejected",
+      );
+    }
+    // The raw byte scan has its own "...persisted in diagnostics" message;
+    // matching it exactly proves the bytes, not the decoded-text fallback,
+    // were what assertPrivateArtifacts rejected.
+    withArtifacts({ "diagnostics.log": rawDelimited(value) }, (state) => {
+      assert.throws(
+        () => assertPrivateArtifacts(state, fixture),
+        /card verification or PIN token persisted in diagnostics/,
+        "raw byte scan did not reject historical short card token",
+      );
+    });
+  }
+});
+
+test("8-digit verification and PIN fail text, serialized and raw byte scanning", async () => {
+  const { assertPrivateText, assertPrivateArtifacts } = await loadSaveAcceptance();
+  for (const key of ["CardVerification", "CardPIN"]) {
+    const value = eightDigitFixture[key];
+    for (const text of [
+      value,
+      `"${value}"`,
+      `{"${key}":"${value}"}`,
+      `${key}: ${value}\n`,
+    ]) {
+      assert.throws(
+        () => assertPrivateText(text, eightDigitFixture),
+        /card verification or PIN/,
+        "8-digit card token in text was not rejected",
+      );
+    }
+    // Each extension gets its own tree because assertPrivateArtifacts stops at
+    // the first rejected file; sharing a directory would only prove the first.
+    withArtifacts({ "diagnostics.json": `{"${key}":"${value}"}` }, (state) => {
+      assert.throws(
+        () => assertPrivateArtifacts(state, eightDigitFixture),
+        /card verification or PIN/,
+        "serialized 8-digit card token in JSON was not rejected",
+      );
+    });
+    withArtifacts({ "diagnostics.log": `${key} ${value}\n` }, (state) => {
+      assert.throws(
+        () => assertPrivateArtifacts(state, eightDigitFixture),
+        /card verification or PIN/,
+        "serialized 8-digit card token in LOG was not rejected",
+      );
+    });
+    // The raw byte scan has its own "...persisted in diagnostics" message;
+    // matching it exactly proves the bytes, not the decoded-text fallback,
+    // were what assertPrivateArtifacts rejected.
+    withArtifacts({ "diagnostics.log": rawDelimited(value) }, (state) => {
+      assert.throws(
+        () => assertPrivateArtifacts(state, eightDigitFixture),
+        /card verification or PIN token persisted in diagnostics/,
+        "raw byte scan did not reject 8-digit card token",
+      );
+    });
+  }
+});
+
+test("unrelated short metadata stays protected only by the short fixture canaries", async () => {
+  const { assertPrivateArtifacts } = await loadSaveAcceptance();
+  const contents = { "metadata.json": '{"count":317,"port":8642}' };
+  withArtifacts(contents, (state) => {
+    assert.equal(assertPrivateArtifacts(state, eightDigitFixture), 1);
+  });
+  withArtifacts(contents, (state) => {
+    assert.throws(
+      () => assertPrivateArtifacts(state, syntheticFixture()),
+      /card verification or PIN/,
+      "short fixture canary was not rejected",
+    );
+  });
+});
+
 test("checkout stages never allow screenshots", async () => {
   const { browserScreenshotsAllowed } = await loadSaveAcceptance();
   for (const stage of [
