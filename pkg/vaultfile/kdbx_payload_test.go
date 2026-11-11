@@ -164,6 +164,92 @@ func TestKDBXPayloadSealOpenRoundTrip(t *testing.T) {
 	}
 }
 
+// payloadDropRootWriter collects an encoding and, on its first Write, which
+// the legacy encoder makes after its cleanup, normalization and header work
+// and before XML marshaling, drops db's root data. The encoder then emits an
+// authenticated KDBX 4.1 document without <Root>.
+type payloadDropRootWriter struct {
+	db   *kdbx.Database
+	out  bytes.Buffer
+	drop bool
+}
+
+func (w *payloadDropRootWriter) Write(p []byte) (int, error) {
+	if !w.drop {
+		w.drop = true
+		w.db.Content.Root = nil
+	}
+	return w.out.Write(p)
+}
+
+// TestKDBXPayloadOpenRejectsNilRoot checks that Open rejects an authenticated
+// KDBX 4.1 document without <Root> before unlocking protected entries. A
+// normal sealed fixture is the positive control. The negative is a real
+// ciphertext from the unbounded legacy encoder, whose writer drops the root
+// after encoding has normalized it: the file, header HMAC and content are
+// otherwise valid, as the unbounded decode proves, and only Root is nil.
+func TestKDBXPayloadOpenRejectsNilRoot(t *testing.T) {
+	cek := payloadFixtureCEK(t)
+	cekCopy := bytes.Clone(cek)
+	defer clear(cekCopy)
+
+	// Positive control: a normal sealed fixture opens.
+	opened, err := OpenKDBXPayload(sealedFixture(t, payloadFixtureDB(t), cek), cekCopy)
+	if err != nil {
+		t.Fatalf("Open of a valid fixture: %v", err)
+	}
+	if opened.Content == nil || opened.Content.Root == nil || len(opened.Content.Root.Groups) != 1 {
+		t.Fatal("valid fixture did not open with one root group")
+	}
+
+	db := payloadFixtureDB(t)
+	if db.Content.Root == nil {
+		t.Fatal("fixture has no root before encoding")
+	}
+	db.Credentials = nil
+	key, err := installKDBXKey(db, cekCopy)
+	if err != nil {
+		t.Fatalf("installing CEK copy: %v", err)
+	}
+	defer clear(key)
+	defer func() { db.Credentials = nil }()
+	if err := configureKDBXProfile(db); err != nil {
+		t.Fatalf("configuring profile: %v", err)
+	}
+	if err := db.LockProtectedEntries(); err != nil {
+		t.Fatalf("locking fixture: %v", err)
+	}
+	w := &payloadDropRootWriter{db: db}
+	if err := kdbx.NewEncoder(w).Encode(db); err != nil {
+		t.Fatalf("legacy encode: %v", err)
+	}
+	sealed := w.out.Bytes()
+	defer clear(sealed)
+	if !w.drop {
+		t.Fatal("encoder wrote no bytes, so the root was never dropped")
+	}
+	if db.Content.Root != nil {
+		t.Fatal("writer did not drop the non-nil root")
+	}
+
+	// The ciphertext is genuine: the unbounded decode authenticates it and
+	// reaches the target condition, a document without root data.
+	stripped := openUnbounded(t, sealed, cekCopy)
+	if stripped.Content == nil {
+		t.Fatal("unbounded decode returned no content")
+	}
+	if stripped.Content.Root != nil {
+		t.Fatal("unbounded decode recovered a root, so the document has one")
+	}
+
+	// The bounded Open rejects it instead of panicking on the nil root.
+	bounded, err := OpenKDBXPayload(sealed, cekCopy)
+	wantPayloadCode(t, err, CodeKDBXPayloadInvalid)
+	if bounded != nil {
+		t.Fatal("Open of a rootless document returned a database")
+	}
+}
+
 // openUnbounded decodes sealed with no limit, which keeps its content as the
 // encoder wrote it: the logical body followed by its PKCS#7 cipher padding.
 func openUnbounded(t *testing.T, sealed, cek []byte) *kdbx.Database {

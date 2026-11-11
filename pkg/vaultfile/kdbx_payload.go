@@ -324,8 +324,10 @@ func SealKDBXPayload(db *kdbx.Database, cek []byte) (encoded []byte, err error) 
 // MaxPlaintextBytes; CodeKDBXPayloadInvalid for every other rejection,
 // including an empty input, a non-KDBX-4.1 signature, a CEK of the wrong
 // length, a wrong CEK, a modified byte in authenticated content, a malformed
-// KDBX file, an unsupported KDF and an authentication failure. A non-nil error
-// always comes with a nil Database.
+// KDBX file, an unsupported KDF, an authentication failure, and a decrypted
+// document without content or without <Root>, which is rejected before
+// protected entries are unlocked. A non-nil error always comes with a nil
+// Database.
 func OpenKDBXPayload(ciphertext, cek []byte) (db *kdbx.Database, err error) {
 	if int64(len(ciphertext)) > MaxKDBXCiphertextBytes {
 		return nil, errKDBXPayloadTooLarge()
@@ -346,6 +348,13 @@ func OpenKDBXPayload(ciphertext, cek []byte) (db *kdbx.Database, err error) {
 		if errors.Is(err, kdbx.ErrDecodeLimitExceeded) {
 			return nil, errKDBXPayloadTooLarge()
 		}
+		return nil, errKDBXPayloadInvalid()
+	}
+	// The decoder replaces Content with a fresh DBContent and accepts a
+	// document without <Root> (or an empty Content), so a nil Root fails only
+	// here, before UnlockProtectedEntries dereferences it.
+	if opened.Content == nil || opened.Content.Root == nil {
+		opened.Credentials = nil
 		return nil, errKDBXPayloadInvalid()
 	}
 	if err := opened.UnlockProtectedEntries(); err != nil {
