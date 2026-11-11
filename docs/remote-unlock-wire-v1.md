@@ -642,7 +642,14 @@ this document defines. It is issued by the vault owner root alone: there is no
 restricted admin delegation path, no request-digest preimage semantics, no
 durable replay or restart anti-rollback, and no VUK decryption, wrapping or
 delivery. A nil return from its verifier means exactly what that section states
-and nothing more.
+and nothing more. `VerifyOwnerRootAuthorization` is not an end-to-end verifier.
+It does not itself compute or verify a TLS exporter or channel binding, and it
+does not match a live peer SPKI. Those are separate APIs documented earlier —
+the binding [context codec](#encoding-rules), the [stable device transport
+binding](#stable-device-transport-binding-v1) verifier, and the [peer-channel
+check](#peer-binding-over-an-established-channel) against an established TLS
+channel — and callers must compose them themselves; none of those checks is
+integrated into the owner-root verifier.
 
 This context codec alone proves no authorization, requester identity, device
 identity, pairing, membership, policy, signature, request freshness or
