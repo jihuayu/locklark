@@ -734,7 +734,9 @@ try {
         );
         recordRouteObservation(lastRouteObservation);
       } finally {
-        await initial.close().catch(() => {});
+        try {
+          await initial.close();
+        } catch {}
       }
     } catch {}
     mark("route:popup-closed");
