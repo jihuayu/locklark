@@ -153,6 +153,25 @@ export async function acceptPasskeyManagement({
     assert(String(await popup.text("#passkey-detail")).includes(rp), "Stored RP metadata missing");
     return popup;
   };
+  // passkey-remove always needs the native owner review, even outside quick
+  // fill. Both decisions must be the exact fixed controls; only approval is
+  // clicked, and nothing may commit before that physical click.
+  const approveRemove = "批准删除 Passkey", rejectRemove = "拒绝删除 Passkey";
+  const nativeRemove = async before => {
+    const controls = input([], true, { inspect: true }).controls || {};
+    for (const label of [approveRemove, rejectRemove]) {
+      assert(controls[label]?.present === true && controls[label]?.showing === true,
+        "Exact native " + label + " control missing");
+    }
+    assert.equal(observe().snapshot_digest, before.snapshot_digest,
+      "Passkey removed before native owner approval");
+    input([{ click_label: approveRemove }]);
+    await eventually(() => {
+      const after = input([], true, { inspect: true }).controls || {};
+      return !after[approveRemove]?.showing && !after[rejectRemove]?.showing &&
+        observe().snapshot_digest !== before.snapshot_digest;
+    }, "Approved Passkey removal did not persist", 30000);
+  };
   let popup;
   phase("passkey-management:add-same-login-credential");
   const beforeSibling = observe();
@@ -261,10 +280,18 @@ export async function acceptPasskeyManagement({
   await popup.click("#passkey-remove");
   await eventually(async () => await popup.visible("#passkey-remove-confirm"),
     "Sibling removal confirmation missing");
+  const beforeSiblingRemoval = observe();
   await popup.click("#passkey-remove-confirm");
-  await eventually(async () => await popup.visible("#passkey-detail") &&
-    await popup.count("#passkey-select option") === 0,
+  await nativeRemove(beforeSiblingRemoval);
+  // Only a fresh popup is trusted after the removal: refetch the affected login.
+  popup = await keys();
+  await eventually(async () => await popup.count(row(firstID)) === 1,
+    "First account missing after sibling removal");
+  await popup.click(row(firstID));
+  await eventually(async () => await popup.visible("#passkey-detail"),
     "Removing the second sibling did not leave exactly the first credential", 30000);
+  assert.equal(await popup.count("#passkey-select option"), 0,
+    "Removing the second sibling did not leave exactly the first credential");
   assert.equal(await popup.text("#passkey-credential-hint"), passkeyPopupHint(first.id),
     "First credential hint did not remain after sibling removal");
   phase("passkey-management:deleted-sibling-unavailable");
@@ -328,9 +355,19 @@ export async function acceptPasskeyManagement({
   popup = await openFirst();
   await popup.click("#passkey-remove");
   await eventually(async () => await popup.visible("#passkey-remove-confirm"), "Removal confirmation missing");
+  const beforeFinalRemoval = observe();
   await popup.click("#passkey-remove-confirm");
-  await eventually(async () => !(await popup.visible("#passkey-detail")), "Passkey removal did not persist", 30000);
+  await nativeRemove(beforeFinalRemoval);
   assert(observe().rows.some(item => item.id === firstID), "Removing a Passkey deleted its login");
+  // The final removal must leave the login and its password/notes intact, so
+  // refetch that exact login from a fresh popup before revealing the fields.
+  popup = await keys();
+  await popup.click('#filter-tabs [data-filter="all"]');
+  await eventually(async () => await popup.count(row(firstID)) === 1,
+    "Passkey removal did not persist");
+  await popup.click(row(firstID));
+  await eventually(async () => !(await popup.visible("#passkey-detail")) &&
+    await popup.visible('[data-field-id="password"]'), "Passkey removal did not persist", 30000);
   for (const [name, value] of [["password", fixture.Value], ["notes", fixture.UpdateValue]]) {
     const field = '[data-field-id="' + name + '"]';
     await popup.click(field + ' [data-action="toggle-reveal"]');
