@@ -833,6 +833,88 @@ func TestVerifyPolicyChainRootChain(t *testing.T) {
 	wantCodeAt(t, err, CodeInvalidValue, "")
 }
 
+// TestVerifyPolicyChainPinnedCurrent pins the case where the caller pin is
+// already the file's current policy: the anchor is the tip and no proof
+// follows it. The chain must verify, return the current policy (not the
+// earlier carried one the header no longer selects) and return an independent
+// snapshot of it, even though the verification loop copies nothing on this
+// path.
+func TestVerifyPolicyChainPinnedCurrent(t *testing.T) {
+	k := newCPKeys(t)
+	c := newCPChain(t, k)
+	// Carry a third proof, s+2, as the current policy, so the file has earlier
+	// proofs ahead of the one the caller pins.
+	cur := clonePolicy(c.policies[1])
+	cur.PolicySeq = 7
+	cur.PrevPolicyDigest = bytes.Clone(policyDigest(&c.f.SignedPolicyProofs[1]))
+	c.append(t, cur, "owner-root-01", k.rootPriv)
+	c.finalize(t, k)
+	if err := ValidateFile(c.f); err != nil {
+		t.Fatalf("fixture is not structurally valid: %v", err)
+	}
+	last := len(c.f.SignedPolicyProofs) - 1
+	if last != 2 || c.f.SignedPolicyProofs[last].Policy.PolicySeq != c.f.Header.PolicySeq {
+		t.Fatal("fixture does not carry an earlier anchor plus the current tip")
+	}
+
+	// The caller pins the current tip: its sequence and digest.
+	tip := &c.f.SignedPolicyProofs[last]
+	pin := c.pin(policyDigest(tip), tip.Policy.PolicySeq)
+	if !bytes.Equal(pin.PolicyDigest, policyDigest(tip)) || pin.PolicySeq != tip.Policy.PolicySeq {
+		t.Fatal("fixture's pin does not name the current proof")
+	}
+
+	if err := VerifyPolicyCheckpoint(c.f, pin); err != nil {
+		t.Fatalf("current-tip pin rejected: %v", err)
+	}
+	got, err := verifyPolicyChain(c.f.Header, c.f.SignedPolicyProofs, pin)
+	if err != nil {
+		t.Fatalf("current-tip chain rejected: %v", err)
+	}
+	if got == nil {
+		t.Fatal("verifyPolicyChain returned a nil policy for a current-tip pin")
+	}
+	if got.PolicySeq != tip.Policy.PolicySeq || !bytes.Equal(PolicyDigest(got), policyDigest(tip)) {
+		t.Fatalf("returned policy seq = %d, want the pinned current policy seq %d", got.PolicySeq, tip.Policy.PolicySeq)
+	}
+	gotDoc, err := EncodePolicyDocument(got)
+	if err != nil {
+		t.Fatalf("returned policy does not encode: %v", err)
+	}
+	wantDoc := bytes.Clone(tip.Document)
+	if !bytes.Equal(gotDoc, wantDoc) {
+		t.Fatal("returned policy document differs from the pinned current policy")
+	}
+
+	// Mutate nested mutable data in the source current proof after the call:
+	// the returned policy and its document must stay unchanged.
+	tip.Policy.PrevPolicyDigest[0] ^= 0xff
+	tip.Policy.OwnerRoot.PublicKey[0] ^= 0xff
+	tip.Policy.OwnerRoot.Owners[0].Label = "mutated-owner"
+	tip.Policy.Readers[0].Label = "mutated-reader"
+	tip.Policy.Writers = nil
+	tip.Policy.Admins[0].Label = "mutated-admin"
+	tip.Policy.Devices[0].ContentSigningKey.PublicKey[0] ^= 0xff
+	tip.Policy.Devices[0].AgeEncryptionKey = "age1mutated"
+	tip.Sig[0] ^= 0xff
+	if bytes.Equal(got.PrevPolicyDigest, tip.Policy.PrevPolicyDigest) ||
+		bytes.Equal(got.OwnerRoot.PublicKey, tip.Policy.OwnerRoot.PublicKey) ||
+		got.OwnerRoot.Owners[0].Label == tip.Policy.OwnerRoot.Owners[0].Label ||
+		got.Readers[0].Label == tip.Policy.Readers[0].Label ||
+		got.Writers == nil ||
+		got.Admins[0].Label == tip.Policy.Admins[0].Label ||
+		bytes.Equal(got.Devices[0].ContentSigningKey.PublicKey, tip.Policy.Devices[0].ContentSigningKey.PublicKey) ||
+		got.Devices[0].AgeEncryptionKey == tip.Policy.Devices[0].AgeEncryptionKey {
+		t.Fatal("returned policy aliases the pinned current proof")
+	}
+	if tip.Policy.PolicySeq != c.f.Header.PolicySeq {
+		t.Fatal("fixture no longer holds the source current proof at the header's sequence")
+	}
+	if after, err := EncodePolicyDocument(got); err != nil || !bytes.Equal(after, gotDoc) || !bytes.Equal(after, wantDoc) {
+		t.Fatal("returned policy document changed when the source current proof was mutated")
+	}
+}
+
 // TestVerifyPolicyChainDocumentPolicyBinding pins that the shared chain helper
 // is safe for a direct draft caller that never ran validateStructure: the
 // policy it authenticates and returns is the one bound to the signed Document

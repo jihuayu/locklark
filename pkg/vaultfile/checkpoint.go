@@ -305,9 +305,11 @@ func verifyPolicyChain(header Header, proofs []SignedPolicy, c *PolicyCheckpoint
 	}
 
 	// The digest of the newest policy established as trusted, and the
-	// authenticated body of that policy. The anchor is trusted by the caller
-	// digest; without it there is no predecessor body, so the first proof
-	// must be root-signed.
+	// authenticated predecessor body a delegated continuation is authorized
+	// by. The anchor is trusted by the caller digest; without it there is no
+	// predecessor body, so the first proof must be root-signed. The returned
+	// snapshot is cloned from the current proof separately and never aliases
+	// this body.
 	trusted := bytes.Clone(c.PolicyDigest)
 	trustedPolicy := (*Policy)(nil)
 	prevSeq := c.PolicySeq
@@ -354,11 +356,10 @@ func verifyPolicyChain(header Header, proofs []SignedPolicy, c *PolicyCheckpoint
 	// The chain is authenticated through the header's current policy. The
 	// anchor is trusted by the caller digest alone and the current proof by
 	// nothing but the chain that reaches it, so the current body itself is
-	// copied: it is returned, never pointed into proofs.
-	if trustedPolicy == nil {
-		trustedPolicy = clonePolicySnapshot(&proofs[anchor].Policy)
-	}
-	return trustedPolicy, nil
+	// always copied: it is returned, never pointed into proofs. This holds
+	// when the pin is the current tip too (anchor == last, no continuation),
+	// whose proof was never re-copied by the loop.
+	return clonePolicySnapshot(&proofs[len(proofs)-1].Policy), nil
 }
 
 // delegatedInviteReadersAuthorized reports whether prev, an already
