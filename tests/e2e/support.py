@@ -2287,8 +2287,7 @@ CHECKOUT_CASES = (
         (
             "checkout-cross-site:navigation",
             "checkout-cross-site:picker",
-            "checkout-cross-site:excluded",
-            "checkout-cross-site:native-review",
+            "checkout-cross-site:refused",
         ),
     ),
     (
@@ -2341,9 +2340,30 @@ CHECKOUT_CASES = (
     ),
 )
 CHECKOUT_CASE_IDS = tuple(case_id for case_id, _ in CHECKOUT_CASES)
-_CHECKOUT_STAGE_LABELS = tuple(
-    stage for _, stages in CHECKOUT_CASES for stage in stages
+# The cross-site case has two mutually exclusive outcomes.  Both branch markers
+# are allowlisted, but a run executes exactly one of them: the native review
+# for a listed cross-site child, or its exclusion from the picker.  Both wait
+# for the same `checkout-cross-site:refused` completion, so only that common
+# stage may be required by every run.
+CHECKOUT_BRANCH_CASE_ID = "checkout-cross-site"
+_CHECKOUT_BRANCH_STAGES = {
+    "checkout-cross-site": (
+        "checkout-cross-site:excluded",
+        "checkout-cross-site:native-review",
+    ),
+}
+CHECKOUT_OPTIONAL_STAGES = tuple(
+    stage for stages in _CHECKOUT_BRANCH_STAGES.values() for stage in stages
 )
+CHECKOUT_REQUIRED_STAGES = tuple(
+    stage
+    for _, stages in CHECKOUT_CASES
+    for stage in stages
+    if stage not in CHECKOUT_OPTIONAL_STAGES
+)
+# Every fixed stage the native script may emit for a case, branch markers
+# included.  The parser allowlists these and nothing else.
+_CHECKOUT_STAGE_LABELS = CHECKOUT_REQUIRED_STAGES + CHECKOUT_OPTIONAL_STAGES
 _CHECKOUT_STAGE_PREFIX = "Native browser stage: "
 CHECKOUT_PASS_SUMMARY = (
     "PASS: real Chromium checkout same-origin child approval (profile review) "
@@ -2638,10 +2658,44 @@ def _checkout_tool_metadata(
     }
 
 
-def _checkout_cases_evidence() -> list[dict[str, Any]]:
+def _checkout_branch_stage(case_id: str, stages: set[str]) -> str | None:
+    """Return the one branch marker observed for ``case_id``, if any.
+
+    The branch markers are mutually exclusive: a case that reports both is
+    malformed evidence, never resolved by picking one.
+    """
+
+    markers = _CHECKOUT_BRANCH_STAGES.get(case_id, ())
+    observed = [stage for stage in markers if stage in stages]
+    if len(observed) > 1:
+        raise AssertionError("checkout evidence is malformed")
+    return observed[0] if observed else None
+
+
+def _checkout_case_stages(
+    case_id: str, observed: set[str] | None = None
+) -> list[str]:
+    """Stages recorded for one case: its required stages plus its branch.
+
+    Without ``observed`` output the branch is unknown and no marker is
+    claimed.  Otherwise only markers seen in that output are included, so
+    evidence never names a branch that did not run.
+    """
+
+    required = next(stages for case, stages in CHECKOUT_CASES if case == case_id)
+    stages = list(required)
+    branch = _checkout_branch_stage(case_id, observed or set())
+    if branch is not None:
+        stages.append(branch)
+    return stages
+
+
+def _checkout_cases_evidence(
+    observed_stages: set[str] | None = None,
+) -> list[dict[str, Any]]:
     return [
-        {"case_id": case_id, "stages": list(stages)}
-        for case_id, stages in CHECKOUT_CASES
+        {"case_id": case_id, "stages": _checkout_case_stages(case_id, observed_stages)}
+        for case_id in CHECKOUT_CASE_IDS
     ]
 
 
@@ -2702,7 +2756,15 @@ def _checkout_evidence_structure(evidence: Any) -> list[dict[str, Any]]:
             "checkout evidence is missing an expected checkout case"
         )
     for case_id, expected_stages in CHECKOUT_CASES:
-        if by_id[case_id]["stages"] != list(expected_stages):
+        stages = by_id[case_id]["stages"]
+        # Unknown, duplicated or foreign stages are never part of the contract.
+        if len(set(stages)) != len(stages) or any(
+            stage not in _CHECKOUT_STAGE_LABELS for stage in stages
+        ):
+            raise AssertionError("checkout evidence is malformed")
+        # The mutually exclusive branches cannot both have run.
+        _checkout_branch_stage(case_id, set(stages))
+        if not set(expected_stages) <= set(stages):
             raise AssertionError(
                 "checkout evidence is missing an expected checkout stage"
             )
@@ -2903,9 +2965,19 @@ def _checkout_run(
             )
         missing = [
             stage
-            for stage in _CHECKOUT_STAGE_LABELS
+            for stage in CHECKOUT_REQUIRED_STAGES
             if stage not in observed_stages
         ]
+        branch = _checkout_branch_stage(CHECKOUT_BRANCH_CASE_ID, observed_stages)
+        if branch is None:
+            # A cross-site run must prove exactly one outcome: either the
+            # child was excluded or it reached the native review.  Name only
+            # the fixed branch IDs, which are already allowlisted.
+            missing.extend(
+                stage
+                for stage in _CHECKOUT_BRANCH_STAGES[CHECKOUT_BRANCH_CASE_ID]
+                if stage not in missing
+            )
         if missing:
             # Name only fixed allowlisted stage IDs; captured output never leaks.
             raise AssertionError(
@@ -2919,7 +2991,7 @@ def _checkout_run(
             "schema_version": CHECKOUT_EVIDENCE_VERSION,
             "journey": CHECKOUT_JOURNEY_ID,
             "status": "PASS",
-            "cases": _checkout_cases_evidence(),
+            "cases": _checkout_cases_evidence(observed_stages),
             "source": source_identity,
             "artifacts": artifact_hashes,
             "tools": _checkout_tool_metadata(artifacts, env),
@@ -3117,10 +3189,13 @@ __all__ = [
     "local_hibp_range_server",
     "HIBP_NETWORK_PROMPT",
     "CHECKOUT_BINARY_ROLES",
+    "CHECKOUT_BRANCH_CASE_ID",
     "CHECKOUT_CASE_IDS",
     "CHECKOUT_CASES",
     "CHECKOUT_EVIDENCE_SCHEMA",
+    "CHECKOUT_OPTIONAL_STAGES",
     "CHECKOUT_PASS_SUMMARY",
+    "CHECKOUT_REQUIRED_STAGES",
     "CHECKOUT_SOURCE_FILES",
     "card_fill_explicit_authorization_component",
     "checkout_native_acceptance",

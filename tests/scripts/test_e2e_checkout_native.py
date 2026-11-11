@@ -51,17 +51,39 @@ class FakeContext:
         self.evidence = evidence
 
 
-def _checkout_stage_labels() -> list[str]:
+CROSS_SITE_EXCLUDED = "checkout-cross-site:excluded"
+CROSS_SITE_NATIVE_REVIEW = "checkout-cross-site:native-review"
+CROSS_SITE_BRANCHES = (CROSS_SITE_EXCLUDED, CROSS_SITE_NATIVE_REVIEW)
+
+
+def _case_stages(branch: str) -> list[str]:
+    """The real stages one run records for the cross-site case on ``branch``."""
+
+    return support._checkout_case_stages(
+        support.CHECKOUT_BRANCH_CASE_ID, {branch}
+    )
+
+
+def _run_stages(branch: str) -> list[str]:
+    """The real stage list one native acceptance run emits for ``branch``."""
+
     return [
         stage
-        for _, stages in support.CHECKOUT_CASES
-        for stage in stages
+        for case_id, _ in support.CHECKOUT_CASES
+        for stage in (
+            _case_stages(branch)
+            if case_id == support.CHECKOUT_BRANCH_CASE_ID
+            else support._checkout_case_stages(case_id)
+        )
     ]
 
 
-def _pass_stdout(extra_lines: tuple[str, ...] = ()) -> str:
+def _pass_stdout(
+    branch: str = CROSS_SITE_NATIVE_REVIEW,
+    extra_lines: tuple[str, ...] = (),
+) -> str:
     lines = [
-        "Native browser stage: " + stage for stage in _checkout_stage_labels()
+        "Native browser stage: " + stage for stage in _run_stages(branch)
     ]
     lines.extend(extra_lines)
     lines.append(support.CHECKOUT_PASS_SUMMARY)
@@ -146,7 +168,7 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
         output.parent.mkdir()
         os.environ["LOCKLARK_E2E_CHECKOUT_NATIVE"] = "1"
         os.environ["LOCKLARK_E2E_CHECKOUT_EVIDENCE_OUT"] = str(output)
-        evidence, calls = self._run_and_capture(_pass_stdout())
+        evidence, calls = self._run_and_capture(_pass_stdout(CROSS_SITE_NATIVE_REVIEW))
         self.assertEqual(len(calls), 1)
         self.assertTrue(output.is_file())
         support._CHECKOUT_JOURNEY_CACHE.clear()
@@ -274,7 +296,10 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
             captured["runtime_mode"] = stat.S_IMODE(
                 Path(env["XDG_RUNTIME_DIR"]).stat().st_mode
             )
-            return 0, _pass_stdout(("synthetic-canary-value",)), ""
+            return 0, _pass_stdout(
+                CROSS_SITE_NATIVE_REVIEW,
+                extra_lines=("synthetic-canary-value",),
+            ), ""
 
         with mock.patch.object(
             support, "_invoke_checkout_journey", side_effect=fake_invoke
@@ -331,7 +356,7 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
                 for case in evidence["cases"]
                 for stage in case["stages"]
             ],
-            _checkout_stage_labels(),
+            _run_stages(CROSS_SITE_NATIVE_REVIEW),
         )
         self.assertEqual(
             set(evidence["artifacts"]), set(support.CHECKOUT_BINARY_ROLES)
@@ -364,7 +389,7 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
             with mock.patch.object(
                 support,
                 "_invoke_checkout_journey",
-                return_value=(7, _pass_stdout(), "secret diagnostics"),
+                return_value=(7, _pass_stdout(CROSS_SITE_NATIVE_REVIEW), "secret diagnostics"),
             ):
                 with self.assertRaises(AssertionError) as raised:
                     support.checkout_native_acceptance(self._ctx())
@@ -383,7 +408,7 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
             with mock.patch.object(
                 support,
                 "_invoke_checkout_journey",
-                return_value=(0, _pass_stdout().replace(
+                return_value=(0, _pass_stdout(CROSS_SITE_NATIVE_REVIEW).replace(
                     support.CHECKOUT_PASS_SUMMARY, "untrusted output"
                 ), ""),
             ):
@@ -393,7 +418,7 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
                     support.checkout_native_acceptance(self._ctx())
 
         with self.subTest("missing expected stage"):
-            output = _pass_stdout().replace(
+            output = _pass_stdout(CROSS_SITE_NATIVE_REVIEW).replace(
                 "Native browser stage: checkout-lock-review:status\n", ""
             )
             with mock.patch.object(
@@ -424,11 +449,15 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
             "checkout-lock-review:status",
         )
         stages, summary = support._parse_checkout_stdout(
-            _pass_stdout(("synthetic-canary-value",))
+            _pass_stdout(extra_lines=("synthetic-canary-value",))
         )
-        self.assertEqual(set(stages), set(support._CHECKOUT_STAGE_LABELS))
+        # Every fixed stage of this branch parses, and only this branch marker.
+        self.assertEqual(set(stages), set(_run_stages(CROSS_SITE_NATIVE_REVIEW)))
+        self.assertNotIn(CROSS_SITE_EXCLUDED, stages)
+        for stage in support.CHECKOUT_REQUIRED_STAGES:
+            self.assertIn(stage, stages)
         self.assertTrue(summary)
-        lines = _pass_stdout(("synthetic-canary-value",)).splitlines()
+        lines = _pass_stdout(extra_lines=("synthetic-canary-value",)).splitlines()
         stdout = "\n".join(
             line
             for line in lines
@@ -455,6 +484,205 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
         self.assertNotIn("forged-stage", message)
         self.assertNotIn(support.CHECKOUT_PASS_SUMMARY, message)
 
+    def _cross_site_recorded(self, evidence: dict) -> list[str]:
+        case = next(
+            entry
+            for entry in evidence["cases"]
+            if entry["case_id"] == support.CHECKOUT_BRANCH_CASE_ID
+        )
+        return case["stages"]
+
+    def _run_branch(self, stdout: str) -> dict:
+        """Run one explicit native journey from ``stdout`` with no evidence file."""
+
+        os.environ["LOCKLARK_E2E_CHECKOUT_NATIVE"] = "1"
+        # Each branch model is its own journey: no earlier success is reused.
+        support._CHECKOUT_JOURNEY_CACHE.clear()
+        with mock.patch.object(
+            support, "_invoke_checkout_journey", return_value=(0, stdout, "")
+        ) as invoke:
+            evidence = support.checkout_native_acceptance(self._ctx())
+        self.assertEqual(invoke.call_count, 1)
+        return evidence
+
+    def test_each_cross_site_branch_is_recorded_as_the_one_that_ran(self):
+        # The script emits exactly one branch marker; evidence records only
+        # that marker plus the stages every run must prove.
+        for branch in CROSS_SITE_BRANCHES:
+            with self.subTest(branch=branch):
+                evidence = self._run_branch(_pass_stdout(branch))
+                self.assertEqual(
+                    self._cross_site_recorded(evidence), _case_stages(branch)
+                )
+                other = next(
+                    marker for marker in CROSS_SITE_BRANCHES if marker != branch
+                )
+                self.assertNotIn(
+                    other,
+                    [stage for case in evidence["cases"] for stage in case["stages"]],
+                )
+                for stage in (
+                    "checkout-cross-site:navigation",
+                    "checkout-cross-site:picker",
+                    "checkout-cross-site:refused",
+                ):
+                    self.assertIn(stage, self._cross_site_recorded(evidence))
+                # Every other case keeps its exact required stage list.
+                for case_id, required in support.CHECKOUT_CASES:
+                    if case_id == support.CHECKOUT_BRANCH_CASE_ID:
+                        continue
+                    recorded = next(
+                        entry["stages"]
+                        for entry in evidence["cases"]
+                        if entry["case_id"] == case_id
+                    )
+                    self.assertEqual(recorded, list(required))
+
+    def test_missing_common_refused_stage_fails_even_with_a_branch_marker(self):
+        # A branch marker alone never stands in for the common completion.
+        for branch in CROSS_SITE_BRANCHES:
+            with self.subTest(branch=branch):
+                output = _pass_stdout(branch).replace(
+                    "Native browser stage: checkout-cross-site:refused\n", ""
+                )
+                os.environ["LOCKLARK_E2E_CHECKOUT_NATIVE"] = "1"
+                with mock.patch.object(
+                    support,
+                    "_invoke_checkout_journey",
+                    return_value=(0, output, "private diagnostic body"),
+                ):
+                    with self.assertRaises(AssertionError) as raised:
+                        support.checkout_native_acceptance(self._ctx())
+                message = str(raised.exception)
+                self.assertIn(
+                    "expected checkout stage(s): checkout-cross-site:refused",
+                    message,
+                )
+                self.assertNotIn(branch, message)
+                self.assertNotIn("private diagnostic body", message)
+
+    def test_missing_cross_site_navigation_or_picker_fails(self):
+        for stage_name in ("navigation", "picker"):
+            stage = "checkout-cross-site:" + stage_name
+            with self.subTest(stage=stage):
+                output = _pass_stdout(CROSS_SITE_EXCLUDED).replace(
+                    "Native browser stage: " + stage + "\n", ""
+                )
+                os.environ["LOCKLARK_E2E_CHECKOUT_NATIVE"] = "1"
+                with mock.patch.object(
+                    support,
+                    "_invoke_checkout_journey",
+                    return_value=(0, output, ""),
+                ):
+                    with self.assertRaises(AssertionError) as raised:
+                        support.checkout_native_acceptance(self._ctx())
+                self.assertIn(
+                    "expected checkout stage(s): " + stage,
+                    str(raised.exception),
+                )
+
+    def test_a_run_without_any_branch_marker_fails_and_claims_neither(self):
+        stages = [
+            stage for stage in _run_stages(CROSS_SITE_EXCLUDED)
+            if stage not in CROSS_SITE_BRANCHES
+        ]
+        output = "\n".join(
+            ["Native browser stage: " + stage for stage in stages]
+            + [support.CHECKOUT_PASS_SUMMARY]
+        ) + "\n"
+        os.environ["LOCKLARK_E2E_CHECKOUT_NATIVE"] = "1"
+        with mock.patch.object(
+            support,
+            "_invoke_checkout_journey",
+            return_value=(0, output, ""),
+        ):
+            with self.assertRaises(AssertionError) as raised:
+                support.checkout_native_acceptance(self._ctx())
+        message = str(raised.exception)
+        self.assertIn(
+            "expected checkout stage(s): "
+            + ", ".join(CROSS_SITE_BRANCHES),
+            message,
+        )
+
+    def test_evidence_rejects_unknown_and_duplicate_stages(self):
+        evidence = self._run_branch(_pass_stdout(CROSS_SITE_EXCLUDED))
+        with self.subTest("unknown stage"):
+            payload = json.loads(json.dumps(evidence))
+            self._cross_site_recorded(payload).append(
+                "checkout-cross-site:refused-again"
+            )
+            with self.assertRaisesRegex(AssertionError, "malformed"):
+                support._checkout_evidence_structure(payload)
+        with self.subTest("duplicate stage"):
+            payload = json.loads(json.dumps(evidence))
+            self._cross_site_recorded(payload).append(
+                "checkout-cross-site:picker"
+            )
+            with self.assertRaisesRegex(AssertionError, "malformed"):
+                support._checkout_evidence_structure(payload)
+
+    def test_evidence_rejects_both_cross_site_branch_markers(self):
+        evidence = self._run_branch(_pass_stdout(CROSS_SITE_NATIVE_REVIEW))
+        payload = json.loads(json.dumps(evidence))
+        self._cross_site_recorded(payload).append(CROSS_SITE_EXCLUDED)
+        with self.assertRaisesRegex(AssertionError, "malformed"):
+            support._checkout_evidence_structure(payload)
+        with self.assertRaisesRegex(AssertionError, "malformed"):
+            support._checkout_case_stages(
+                support.CHECKOUT_BRANCH_CASE_ID, set(CROSS_SITE_BRANCHES)
+            )
+
+    def test_evidence_missing_the_common_or_baseline_stage_fails(self):
+        evidence = self._run_branch(_pass_stdout(CROSS_SITE_EXCLUDED))
+        for stage in (
+            "checkout-cross-site:refused",
+            "checkout-cross-site:navigation",
+            "checkout-cross-site:picker",
+        ):
+            with self.subTest(stage=stage):
+                payload = json.loads(json.dumps(evidence))
+                stages = self._cross_site_recorded(payload)
+                stages.remove(stage)
+                with self.assertRaisesRegex(
+                    AssertionError, "missing an expected checkout stage"
+                ):
+                    support._checkout_evidence_structure(payload)
+
+    def test_evidence_without_a_branch_marker_is_never_filled_in(self):
+        # The excluded run observed no native review. Removing its own marker
+        # must leave the record branch-free: validation never fills in the
+        # branch that was not observed, neither its own nor the other one.
+        evidence = self._run_branch(_pass_stdout(CROSS_SITE_EXCLUDED))
+        payload = json.loads(json.dumps(evidence))
+        self._cross_site_recorded(payload).remove(CROSS_SITE_EXCLUDED)
+        support._checkout_evidence_structure(payload)
+        self.assertFalse(
+            set(self._cross_site_recorded(payload)) & set(CROSS_SITE_BRANCHES)
+        )
+
+    def test_evidence_records_no_branch_when_none_was_observed(self):
+        # Without observed output the case records its required stages only.
+        cases = support._checkout_cases_evidence()
+        recorded = next(
+            entry["stages"]
+            for entry in cases
+            if entry["case_id"] == support.CHECKOUT_BRANCH_CASE_ID
+        )
+        self.assertEqual(
+            recorded,
+            [
+                "checkout-cross-site:navigation",
+                "checkout-cross-site:picker",
+                "checkout-cross-site:refused",
+            ],
+        )
+        for case_id, required in support.CHECKOUT_CASES:
+            with self.subTest(case=case_id):
+                self.assertEqual(
+                    support._checkout_case_stages(case_id), list(required)
+                )
+
     def test_cache_reuses_one_validated_journey(self):
         os.environ["LOCKLARK_E2E_CHECKOUT_NATIVE"] = "1"
         calls = 0
@@ -462,7 +690,7 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
         def fake_invoke(command, *, env, cwd, timeout):
             nonlocal calls
             calls += 1
-            return 0, _pass_stdout(), ""
+            return 0, _pass_stdout(CROSS_SITE_NATIVE_REVIEW), ""
 
         with mock.patch.object(
             support, "_invoke_checkout_journey", side_effect=fake_invoke
@@ -497,7 +725,7 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
         with mock.patch.object(
             support,
             "_invoke_checkout_journey",
-            return_value=(0, _pass_stdout(), ""),
+            return_value=(0, _pass_stdout(CROSS_SITE_NATIVE_REVIEW), ""),
         ) as invoke:
             first = support.checkout_native_acceptance(self._source_ctx())
             self.assertEqual(invoke.call_count, 1)
@@ -531,7 +759,7 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
         with mock.patch.object(
             support,
             "_invoke_checkout_journey",
-            return_value=(0, _pass_stdout(), ""),
+            return_value=(0, _pass_stdout(CROSS_SITE_NATIVE_REVIEW), ""),
         ) as invoke:
             first = support.checkout_native_acceptance(self._source_ctx())
             self.assertEqual(

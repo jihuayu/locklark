@@ -820,13 +820,23 @@ async function runCrossSiteJourney(driver, card, topOrigin) {
   const popup = await openPopup();
   await openCardDetail(popup, card, eventually);
   phase("checkout-cross-site:picker");
-  const selected = await chooseChildOrigin(
+  // `chooseChildOrigin` reports a present child only by its returned
+  // `selected` boolean. The result object is always truthy, so branch on the
+  // field itself: a truthiness check would claim a selection for an excluded
+  // child.
+  const choice = await chooseChildOrigin(
     popup,
     topOrigin,
     frameOrigin,
     eventually,
   );
-  if (!selected) {
+  assert(
+    choice !== null &&
+      typeof choice === "object" &&
+      typeof choice.selected === "boolean",
+    "Checkout cross-site choice must report a boolean selection",
+  );
+  if (choice.selected === false) {
     phase("checkout-cross-site:excluded");
     assert(
       ((await popup.text("#checkout-status")) || "").includes("不会自动选择"),
@@ -843,26 +853,36 @@ async function runCrossSiteJourney(driver, card, topOrigin) {
       frameOrigin,
       "Excluded cross-site checkout wrote a value",
     );
-    return;
+  } else {
+    phase("checkout-cross-site:native-review");
+    // A same-site card listing is allowed, so the cross-site proposal reaches
+    // the native host and must be refused there without an approval dialog.
+    // Wait for the popup's public terminal status first: a still-pending native
+    // review would not reach one of these fixed outcomes.
+    await eventually(
+      async () => {
+        const status = String((await popup.text("#status")) || "");
+        return (
+          status.includes("未完成") ||
+          status.includes("拒绝") ||
+          status.includes("已取消") ||
+          status.includes("已变化")
+        );
+      },
+      "Cross-site checkout refusal did not finish",
+      8000,
+    );
+    assertNoNativeApproval(input, POPUP_OPEN);
+    await assertBothBlank(
+      page,
+      frameOrigin,
+      "Cross-site checkout received a value without approval",
+    );
   }
-  phase("checkout-cross-site:native-review");
-  // A same-site card listing is allowed, so the cross-site proposal reaches
-  // the native host and must be refused there without an approval dialog.
-  // Wait for the popup's public terminal status first: a still-pending native
-  // review would not reach one of these fixed outcomes.
-  await eventually(
-    async () => {
-      const status = String((await popup.text("#status")) || "");
-      return (
-        status.includes("未完成") ||
-        status.includes("拒绝") ||
-        status.includes("已取消") ||
-        status.includes("已变化")
-      );
-    },
-    "Cross-site checkout refusal did not finish",
-    8000,
-  );
+  // Both outcomes must prove the same refusal: no cross-site value and no
+  // native approval. This common stage is emitted only after the branch that
+  // actually ran passed its assertions, so it never claims the other branch.
+  phase("checkout-cross-site:refused");
   assertNoNativeApproval(input, POPUP_OPEN);
   await assertBothBlank(
     page,

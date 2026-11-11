@@ -18,7 +18,8 @@ import {
 } from "./browser_checkout_acceptance.mjs";
 
 const TOP_ORIGIN = "https://login.locklark.test:8443";
-const CARD_ORIGIN = "https://checkout.locklark.test:8443";
+const CARD_ORIGIN = TOP_ORIGIN;
+const DEFAULT_CARD_ORIGIN = "https://checkout.locklark.test:8443";
 const OTHER_ORIGIN = "https://checkout.other.test:8443";
 const TOP_LABEL = TOP_ORIGIN + "（当前页面）";
 const FRAME_SUFFIX = "（页面中的表单框架）";
@@ -654,7 +655,7 @@ test("native absence probes fail closed on an unavailable snapshot", async () =>
       goto: async () => assert.fail("journey navigated past the probe"),
       frames: () => [
         {
-          url: () => CARD_ORIGIN + "/card",
+          url: () => DEFAULT_CARD_ORIGIN + "/card",
           evaluate: async () => visibleFormState(),
         },
       ],
@@ -708,18 +709,32 @@ test("native absence probes fail closed on an unavailable snapshot", async () =>
   }
 });
 
-// Source of one journey, bounded by the next journey's comment block.
+// Source of one journey, bounded by the next journey's leading comment block.
+// The boundary is searched from this journey's own end, so it can never match
+// the declaration it is looking for.
 function journeySource(name) {
   const source = readFileSync(
     new URL("./browser_checkout_acceptance.mjs", import.meta.url),
     "utf8",
   );
+  assert.match(name, /^async function \w+$/, "journey name");
   const start = source.indexOf(name);
   assert.ok(start >= 0, name + " missing");
-  const rest = source.slice(start + name.length);
-  const end = rest.indexOf("\n// The same-origin variant embeds its child");
-  assert.ok(end > 0, "Journey source end not found");
-  return rest.slice(0, end);
+  const tail = source.slice(start + name.length);
+  // Each journey ends right before the next journey's leading comment.
+  const ends = [
+    "\n// `sandbox=\"allow-scripts\"`",
+    "\n// The valid child was selected and its native approval was visible.",
+    "\n// The fixed public statuses that only a finished native review can set.",
+    "\n// The valid child was explicitly chosen and its real cross-origin native",
+    "\n// The same-origin variant embeds its child on the exact top origin",
+    "\n// A fresh same-site cross-origin checkout page",
+    "\n// The last journey, because it locks the session.",
+  ]
+    .map((marker) => tail.indexOf(marker))
+    .filter((index) => index > 0);
+  assert.ok(ends.length > 0, "Journey source end not found");
+  return source.slice(start, start + name.length + Math.min(...ends));
 }
 
 test("navigating the top tab never acts on the stale native approval", () => {
@@ -821,9 +836,11 @@ test("lock during a pending cross-origin review is ordered, clicked physically a
   const page = {
     url: () => (locked ? TOP_ORIGIN + "/" : TOP_ORIGIN + "/checkout"),
     goto: async (url) => log.push(["goto", url]),
+    // The lock journey derives its child from the top origin: the default
+    // same-site card frame on the server's own HTTPS port.
     frames: () => [
       {
-        url: () => CARD_ORIGIN + "/card",
+        url: () => DEFAULT_CARD_ORIGIN + "/card",
         evaluate: async () => blankFormState(),
       },
     ],
@@ -863,15 +880,9 @@ test("lock during a pending cross-origin review is ordered, clicked physically a
     }
     return actions.length === 0 ? { controls: reviewControls() } : {};
   };
-  const labels = [TOP_LABEL, CARD_ORIGIN + FRAME_SUFFIX];
-  const controls = {
-    candidate: (selector) =>
-      selector.startsWith('#checkout-choices button[data-action="checkout-select"]')
-        ? 2
-        : 0,
-    // The popup is the reviewed picker popup: its cancel row is present.
-    cancelVisible: () => true,
-  };
+  const labels = [TOP_LABEL, DEFAULT_CARD_ORIGIN + FRAME_SUFFIX];
+  // The popup is the reviewed picker popup: every listed row is a candidate
+  // and its cancel row is present.
   const popup = {
     clicked: [],
     async disabled(selector) {
@@ -882,7 +893,8 @@ test("lock during a pending cross-origin review is ordered, clicked physically a
       if (selector === '#filter-tabs [data-filter="credit_card"]') return 1;
       if (selector === cardRow) return 1;
       // Like the real adapter, an unmatched row reports 0 instead of null.
-      if (controls.candidate(selector)) return controls.candidate(selector);
+      if (selector.startsWith('#checkout-choices button[data-action="checkout-select"]'))
+        return labels.length;
       if (selector === "#checkout-cancel") return 1;
       return 0;
     },
@@ -909,10 +921,10 @@ test("lock during a pending cross-origin review is ordered, clicked physically a
       if (match) return labels[Number(match[1]) - 1];
       return "";
     },
+    // The fill control is a visible detail action, not a picker candidate.
     async visible(selector) {
       if (selector === "#checkout-picker") return true;
-      if (selector === "#checkout-cancel") return true;
-      return controls.candidate(selector) === 1;
+      return selector === "#checkout-cancel" || selector === "#detail-fill";
     },
   };
   const phases = [];
@@ -942,7 +954,9 @@ test("lock during a pending cross-origin review is ordered, clicked physically a
   // The initial popup opens before any native review, the reopened one only
   // after the lock.
   assert.deepEqual(opens, [1, 4]);
-  // The exact child origin is chosen, never the top origin.
+  // The exact child origin is chosen, never the top origin. The helper's
+  // result object itself is asserted by the picker-cancel test below, whose
+  // opening check is the helper's own `visible("#checkout-picker")` read.
   assert.ok(
     log.some(
       ([kind, value]) =>
@@ -1001,4 +1015,106 @@ test("acceptCheckoutFrames returns an explicit locked result only after the lock
     harness,
     /const checkout = await acceptCheckoutFrames\([\s\S]*?if \(checkout\?\.locked !== true\) \{[\s\S]*?popup\.click\("#disconnect"\)/,
   );
+});
+
+test("the cross-site branch reads the boolean and never the result object", () => {
+  // `chooseChildOrigin` always resolves to an object; only `selected` carries
+  // the outcome. Source contract of the journey that drives the real helper.
+  const journey = journeySource("async function runCrossSiteJourney");
+  // Exactly one branch decision, and it compares the boolean field.
+  assert.match(journey, /if \(choice\.selected === false\) \{/);
+  assert.equal(countMatches(journey, /\bif \(/g), 1);
+  // A returned object, a missing result or a non-boolean is refused instead of
+  // being read as a selection.
+  assert.match(
+    journey,
+    /typeof choice\.selected === "boolean",\s*"Checkout cross-site choice must report a boolean selection"/,
+  );
+  // Object truthiness in any form would claim a native review for an
+  // excluded child. None of these may appear as a branch or value test.
+  for (const pattern of [
+    /\bif \(!choice\)/,
+    /\bif \(!selected\)/,
+    /\bif \(choice\)/,
+    /\bif \(selected\)/,
+    /\?\.selected\b/,
+    /\bchoice\.selected\s*(?:\|\||&&|\?\?)/,
+    /Boolean\(\s*choice/,
+    /!!\s*choice/,
+    /\bnot\s+selected\b/,
+  ])
+    assert.doesNotMatch(journey, pattern);
+  assert.equal(countMatches(journey, /\.selected\b/g), 2);
+
+  // Each branch claims only its own marker; the common refusal is emitted once
+  // after the branch that ran passed every assertion.
+  const excluded = journey.indexOf('phase("checkout-cross-site:excluded");');
+  const review = journey.indexOf('phase("checkout-cross-site:native-review");');
+  const refused = journey.indexOf('phase("checkout-cross-site:refused");');
+  assert.ok(excluded > 0 && review > excluded);
+  assert.ok(refused > review);
+  for (const marker of [
+    "navigation",
+    "picker",
+    "excluded",
+    "native-review",
+    "refused",
+  ])
+    assert.equal(
+      countMatches(
+        journey,
+        new RegExp(`checkout-cross-site:${marker}"`, "g"),
+      ),
+      1,
+      marker,
+    );
+  // The branch bodies close before the common stage and neither exits early,
+  // so a branch that passed can never skip the common refusal proof.
+  const close = journey.indexOf("  }\n  // Both outcomes must prove");
+  assert.ok(close > review && close < refused);
+  for (const line of journey.slice(excluded, close + 1).split("\n"))
+    assert.ok(
+      !/^ {2,4}return\b/.test(line),
+      "a cross-site branch must not exit before the common refusal stage",
+    );
+
+  // Both outcomes keep the privacy proofs: no native approval and no value.
+  const branch = journey.slice(excluded, close + 1);
+  assert.match(branch, /Excluded checkout origin must not be auto-selected/);
+  assert.match(branch, /await popup\.click\("#checkout-cancel"\)/);
+  assert.match(branch, /"Cross-site checkout refusal did not finish"/);
+  assert.match(branch, /"Excluded cross-site checkout wrote a value"/);
+  assert.match(branch, /"Cross-site checkout received a value without approval"/);
+  assert.ok(countMatches(branch, /assertNoNativeApproval\(input, POPUP_OPEN\)/g) >= 2);
+  assert.ok(countMatches(branch, /assertBothBlank\(/g) >= 2);
+  // The common stage re-proves both after the branch passed.
+  const common = journey.slice(refused);
+  assert.match(common, /assertNoNativeApproval\(input, POPUP_OPEN\)/);
+  assert.match(common, /"Cross-site checkout received a value without approval"/);
+  assert.doesNotMatch(journey, /input\(\[/);
+});
+
+test("both helper outcomes are asserted through the actual result object", () => {
+  // The helper always resolves to an object, so `selected` is the only signal
+  // that distinguishes a chosen child from an excluded one. Existing helper
+  // callers assert that field for both outcomes rather than re-encoding the
+  // browser cases here.
+  const testSource = readFileSync(
+    new URL("./test_browser_checkout_acceptance.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.ok(
+    countMatches(testSource, /\{ selected: true \},/g) >= 3,
+    "selected:true result must be asserted at its call sites",
+  );
+  assert.ok(
+    countMatches(testSource, /\{ selected: false \},/g) >= 3,
+    "selected:false result must be asserted at its call sites",
+  );
+  // The result is a plain object with the boolean field, never a bare boolean.
+  for (const branch of ["true", "false"])
+    assert.doesNotMatch(
+      testSource,
+      new RegExp(`chooseChildOrigin\\([^)]*\\)\\s*,\\s*${branch}\\)`),
+    );
 });
