@@ -295,17 +295,24 @@ func SealKDBXPayload(db *kdbx.Database, cek []byte) (encoded []byte, err error) 
 // MaxKDBXCiphertextBytes as the encoded-input budget and MaxPlaintextBytes as
 // the plaintext budget.
 //
+// KDF guard. Open accepts a KDBX4 header whose KDF is Argon2d or Argon2id with
+// version 0x13, iterations 1..10, parallelism 1..8, and memory from
+// parallelism*8 KiB through 128 MiB inclusive that is a multiple of 1024
+// bytes, and no SecretKey or associated data. Open does not require the exact
+// profile SealKDBXPayload writes (see Seal); its guard only bounds the
+// parameters. Any other KDF, version, iteration or parallelism count, memory
+// value, SecretKey or associated data is rejected before any Argon2
+// allocation.
+//
 // Decode timing. The input budget is enforced while the input is read and
 // before the KDBX header is parsed. The header hash is checked before the
-// existing KDF guard, which rejects an unsupported KDF algorithm, version,
-// iterations, parallelism, memory, secret key or associated data before any
-// Argon2 allocation; a non-KDBX4 header is rejected before any legacy AES
+// KDF guard above; a non-KDBX4 header is rejected before any legacy AES
 // round. The header HMAC is checked before content decryption. The plaintext
 // budget can only be evaluated after key derivation and content decryption:
 // it is enforced on the decrypted content, on its gzip expansion and on the
 // aggregate InnerHeader binary bytes, in each case before XML decoding or
 // before an over-budget binary is copied. Those later checks bound memory and
-// CPU after the fixed Argon2id cost, not before it.
+// CPU after the validated, bounded Argon2d/Argon2id derivation, not before it.
 //
 // The returned Database is in the natural unlocked state that
 // SealKDBXPayload accepts. Its Credentials are always set to an empty value:

@@ -1085,16 +1085,11 @@ func TestKDBXPayloadOpenRejectsWrongCEK(t *testing.T) {
 
 // payloadFirstContentBlock is the offset of the first byte of the first KDBX
 // content block, which is its 32-byte HMAC. KDBX4 blocks are laid out as
-// HMAC(32) | length(4) | data and start right after the 32-byte header SHA-256
-// and the 32-byte header HMAC. For every other header field except the KDF
-// parameters the field is 13 bytes: 1-byte type, 4-byte length and 8-byte
-// value (the 2-byte Comment length and the 16-byte EncryptionIV included). The
-// KDF parameters are this profile's three Argon2id groups: `$argon2id`
-// (13 + 9), `M` memory (13 + 8), `P` parallelism (13 + 4), `I` iterations
-// (13 + 8), `S` salt (13 + 32), `V` version (13 + 8); 60 bytes plus one
-// AjIV lifetime record (5 + 8) and two 36-byte group terminators. The block
-// offset is therefore 12 + 196 + 4*13 + 33 + 60 + 13 + 72 + 64 = 489.
-const payloadFirstContentBlock = 489
+// HMAC(32) | length(4) | data and start right after the header. The payload
+// fixture's Seal output has a 249-byte KDBX header followed by the 32-byte
+// header SHA-256 and the 32-byte header HMAC, so the first content-block HMAC
+// starts at byte 249 + 32 + 32 = 313.
+const payloadFirstContentBlock = 313
 
 func TestKDBXPayloadOpenRejectsTamperedContent(t *testing.T) {
 	cek := payloadFixtureCEK(t)
