@@ -1754,6 +1754,16 @@ test("route worker trace keeps only allowlisted fixed lifecycle labels", () => {
   // Exact prefix plus allowlisted label is kept, and only the enum comes back.
   for (const name of [
     "activation-startup",
+    "activation-target-confirmed",
+    "activation-target-mismatch",
+    "route-tab-url-mismatch",
+    "source-loading",
+    "source-url-mismatch",
+    "route-tab-removed",
+    "source-tab-removed",
+    "route-create-not-owned",
+    "route-expired",
+    "routes-revoked-all",
     "boot-bind-bound",
     "port-ready-sent",
     "port-refused",
@@ -1773,6 +1783,29 @@ test("route worker trace keeps only allowlisted fixed lifecycle labels", () => {
     null,
   ])
     assert.equal(run("event(" + JSON.stringify(args) + ")"), null);
+
+  // The harness and the worker must allow exactly the same fixed labels.
+  const background = readFileSync(
+    new URL("../browser-extension/background.js", import.meta.url),
+    "utf8",
+  );
+  const eventsBetween = (text, start, end) =>
+    [...text.slice(text.indexOf(start), text.indexOf(end, text.indexOf(start)))
+      .matchAll(/"([a-z-]+)"/g)].map((match) => match[1]);
+  const harnessList = eventsBetween(
+    source,
+    "const ROUTE_WORKER_DIAG_EVENTS = [",
+    "\n];",
+  );
+  assert.ok(harnessList.length > 30, "harness allowlist must be complete");
+  assert.deepEqual(
+    eventsBetween(
+      background,
+      "const ROUTE_LIFECYCLE_DIAG_EVENTS = new Set([",
+      "]);",
+    ),
+    harnessList,
+  );
 
   // The trace is bounded at 32 entries and unknown entries are filtered.
   const many = run(

@@ -301,6 +301,12 @@ const ROUTE_WORKER_DIAG_EVENTS = [
   "port-sender-mismatch", "port-invalid-grant-or-tab",
   "port-anchor-mismatch", "port-ready-sent",
   "port-disconnected", "port-refused",
+  "activation-target-confirmed", "activation-target-missing",
+  "activation-target-mismatch", "route-tab-url-mismatch",
+  "source-loading", "source-url-mismatch", "route-tab-removed",
+  "source-tab-removed", "route-create-failed", "route-create-invalid-tab",
+  "route-create-not-owned", "route-create-tab-mismatch",
+  "route-expired", "routes-revoked-all",
 ];
 let routeWorkerTrace = null,
   routeWorkerTraceSocket = null,

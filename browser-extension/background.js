@@ -3396,6 +3396,12 @@ if (typeof importScripts === "function") importScripts("core.js");
     "port-sender-mismatch", "port-invalid-grant-or-tab",
     "port-anchor-mismatch", "port-ready-sent",
     "port-disconnected", "port-refused",
+    "activation-target-confirmed", "activation-target-missing",
+    "activation-target-mismatch", "route-tab-url-mismatch",
+    "source-loading", "source-url-mismatch", "route-tab-removed",
+    "source-tab-removed", "route-create-failed", "route-create-invalid-tab",
+    "route-create-not-owned", "route-create-tab-mismatch",
+    "route-expired", "routes-revoked-all",
   ]);
   const ROUTE_LIFECYCLE_DIAG_LEAVES = ["activation-startup", "activation-late"];
   function routeLifecycleDiag(event) {
@@ -3446,7 +3452,11 @@ if (typeof importScripts === "function") importScripts("core.js");
     boot.initialLoad = {};
     routeTabAt(tabId, boot.routeURL).then((tab) => {
       if (routeTabs.get(tabId) !== boot) return;
-      if (tab && tab.windowId === boot.windowId) return;
+      if (tab && tab.windowId === boot.windowId) {
+        routeLifecycleDiag("activation-target-confirmed");
+        return;
+      }
+      routeLifecycleDiag(tab ? "activation-target-mismatch" : "activation-target-missing");
       revokeRoute(boot);
       cancelContext();
     }, () => {});
@@ -3481,7 +3491,8 @@ if (typeof importScripts === "function") importScripts("core.js");
     clearCheckoutPicker();
     updateBadge();
     rebuildContextMenus();
-    // Bounded to the fixed recorder values; anything else is dropped.
+    // Fixed kind first (startup vs switch), then the explicit late leaf.
+    activationKind = kind === "startup" ? "activation-startup" : "activation-switch";
     if (
       activationKind === "activation-switch" &&
       ROUTE_LIFECYCLE_DIAG_LEAVES.includes(routeActivationLeaf)
@@ -3509,6 +3520,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     }
     if (!grant) return;
     if ("url" in change && change.url !== grant.routeURL) {
+      if (routeTabUpdateInside) routeTabUpdateLabel = "route-tab-url-mismatch";
       revokeRoute(grant);
       return;
     }
@@ -3525,13 +3537,42 @@ if (typeof importScripts === "function") importScripts("core.js");
     if (!hasURL && change.status !== "loading") return;
     for (const grant of new Set([...routeGrants.values(), ...routeTabs.values()])) {
       if (grant.source.tabId !== tabId) continue;
-      if (change.status === "loading" || (hasURL && change.url !== grant.source.url))
+      if (change.status === "loading" || (hasURL && change.url !== grant.source.url)) {
         revokeRoute(grant);
+      }
+    }
+  }
+  // Route lifecycle diagnostic only: the branch routeTabUpdated() took for
+  // this update event, recorded only while the listener is calling it.
+  let routeTabUpdateInside = false;
+  let routeTabUpdateLabel = null;
+  function routeTabUpdatedForUpdateEvent(tabId, change) {
+    routeTabUpdateInside = true;
+    try {
+      return routeTabUpdated(tabId, change);
+    } finally {
+      routeTabUpdateInside = false;
     }
   }
   api.tabs.onUpdated.addListener((tabId, change) => {
-    routeTabUpdated(tabId, change || {});
+    const sourceRoutes = new Set([...routeGrants.values(), ...routeTabs.values()].filter((grant) => grant.source.tabId === tabId));
+    routeTabUpdateLabel = null;
+    routeTabUpdatedForUpdateEvent(tabId, change || {});
     routeSourceUpdated(tabId, change || {});
+    // Route lifecycle diagnostic only, read after the handler: the source
+    // branch routeSourceUpdated() took for these exact grants, if any.
+    const event = change || {};
+    const hasSourceURL = "url" in event && event.url !== undefined;
+    const sourceLoading = event.status === "loading";
+    if (
+      sourceRoutes.size &&
+      (hasSourceURL || sourceLoading) &&
+      [...sourceRoutes].some((grant) =>
+        sourceLoading || (hasSourceURL && event.url !== grant.source.url),
+      )
+    )
+      routeLifecycleDiag(sourceLoading ? "source-loading" : "source-url-mismatch");
+    if (routeTabUpdateLabel) routeLifecycleDiag(routeTabUpdateLabel);
     const session = multiStepSessions.get(tabId);
     if (session && "url" in change) {
       try {
@@ -3561,10 +3602,19 @@ if (typeof importScripts === "function") importScripts("core.js");
     void processOpenAndFill(tabId, change);
   });
   api.tabs.onRemoved?.addListener((tabId) => {
-    for (const boot of [...routeBoots]) if (boot.tabId === tabId) revokeRoute(boot);
-    if (routeTabs.has(tabId)) revokeRoute(routeTabs.get(tabId));
+    for (const boot of [...routeBoots]) if (boot.tabId === tabId) {
+      routeLifecycleDiag("route-tab-removed");
+      revokeRoute(boot);
+    }
+    if (routeTabs.has(tabId)) {
+      routeLifecycleDiag("route-tab-removed");
+      revokeRoute(routeTabs.get(tabId));
+    }
     for (const grant of [...routeGrants.values()])
-      if (grant.source.tabId === tabId) revokeRoute(grant);
+      if (grant.source.tabId === tabId) {
+        routeLifecycleDiag("source-tab-removed");
+        revokeRoute(grant);
+      }
     if (checkoutPicker?.tabId === tabId) clearCheckoutPicker();
     multiStepSessions.delete(tabId);
     clearConditionalIntentsForTab(tabId);
@@ -4651,6 +4701,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     if (known) grant.state = "revoked";
   }
   function revokeAllRoutes() {
+    routeLifecycleDiag("routes-revoked-all");
     const grants = new Set([...routeGrants.values(), ...routeTabs.values()]);
     for (const grant of grants) revokeRoute(grant);
     routeGrants.clear();
@@ -4658,7 +4709,10 @@ if (typeof importScripts === "function") importScripts("core.js");
   }
   function pruneRoutes() {
     for (const grant of new Set([...routeGrants.values(), ...routeTabs.values()]))
-      if (grant.expiresAt <= Date.now()) revokeRoute(grant);
+      if (grant.expiresAt <= Date.now()) {
+        routeLifecycleDiag("route-expired");
+        revokeRoute(grant);
+      }
   }
   // Every grant counts toward ROUTE_LIMIT, whether its tab is bound or its
   // tabs.create() is still pending: a pending create holds a route slot.
@@ -4946,10 +5000,12 @@ if (typeof importScripts === "function") importScripts("core.js");
         windowId: sourceTab.windowId,
       });
     } catch {
+      routeLifecycleDiag("route-create-failed");
       revokeRoute(grant);
       throw Error("refused");
     }
     if (!created || !Number.isSafeInteger(created.id) || created.id < 1) {
+      routeLifecycleDiag("route-create-invalid-tab");
       revokeRoute(grant);
       throw Error("refused");
     }
@@ -4974,6 +5030,7 @@ if (typeof importScripts === "function") importScripts("core.js");
           (grant.tabId !== 0 && routeTabs.get(grant.tabId) === grant))) ||
         adoptedByPort);
     if (!stillOwned) {
+      routeLifecycleDiag("route-create-not-owned");
       revokeRoute(grant);
       throw Error("refused");
     }
@@ -4983,6 +5040,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       // every claim, copy and read through routeAnchors()).
       bindRouteTab(grant, created.id, created.windowId);
     } else if (grant.tabId !== created.id) {
+      routeLifecycleDiag("route-create-tab-mismatch");
       revokeRoute(grant);
       throw Error("refused");
     } else {
