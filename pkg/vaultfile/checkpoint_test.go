@@ -1469,6 +1469,65 @@ func TestVerifyPolicyCheckpointInviteReaders(t *testing.T) {
 		wantCodeAt(t, VerifyPolicyCheckpoint(x.c.f, x.pin()), CodeSignatureVerifyFailed, "signed_policy_proofs[1]")
 	})
 
+	t.Run("forbidden role promotion for delegate", func(t *testing.T) {
+		// The predecessor is the trusted p5 itself: alice's device-1 is an
+		// owner and admin with its real pinned policy key and an active
+		// InviteReaders grant. The successor adds dave as a reader, dave's
+		// device and dave as a Writer - the role addition is the only
+		// forbidden delta - and the current proof is really signed by
+		// device-1 with the authorized delegate's key. Only the pure
+		// predicate rejects it, so this pins the verifier's integration of
+		// the predicate: authority and signature both succeed and the diff
+		// alone fails the transition.
+		x := newDelegatedCP(t, k, nil, nil)
+		c := x.c
+		next := clonePolicy(x.p5)
+		next.PolicySeq = x.p5.PolicySeq + 1
+		next.PrevPolicyDigest = bytes.Clone(PolicyDigest(x.p5))
+		addDave(next)
+		daveSigner, _, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		next.Devices = append(next.Devices, Device{
+			DeviceID:          "device-dave",
+			PrincipalID:       "dave",
+			Label:             "Dave laptop",
+			ContentSigningKey: PublicKey{Alg: SigAlgEd25519, PublicKey: daveSigner},
+			AgeEncryptionKey:  ageRecipient(clientKey("device-dave")),
+		})
+		next.Writers = append(next.Writers, Member{PrincipalID: "dave", Label: "Dave"})
+		slices.SortFunc(next.Writers, func(a, b Member) int { return strings.Compare(a.PrincipalID, b.PrincipalID) })
+		if err := ValidatePolicy(next); err != nil {
+			t.Fatalf("forbidden-diff successor invalid: %v", err)
+		}
+		x.s = next
+		c.replaceProof(1, next, "device-1")
+		// Dave is a reader, so the successor must wrap the VUK for his device.
+		c.f.VUKDeviceSlots = append(c.f.VUKDeviceSlots, DeviceSlot{
+			DeviceID:   "device-dave",
+			Recipient:  next.Devices[2].AgeEncryptionKey,
+			WrappedVUK: []byte("synthetic-age-wrapped-vuk-dave"),
+		})
+		x.seal(t, k, "device-1", x.priv)
+
+		dev := findDevice(x.p5, "device-1")
+		if dev == nil || dev.PrincipalID != "alice" || !x.p5.hasRole("alice", RoleAdmin, RoleOwner) ||
+			dev.PolicySigningKey == nil || !bytes.Equal(dev.PolicySigningKey.PublicKey, x.pub) {
+			t.Fatal("predecessor delegate is not the admin/owner with its pinned policy key")
+		}
+		if !verifies(t, x, x.pub) {
+			t.Fatal("current proof is not signed by device-1's pinned policy key")
+		}
+		if member, ok := memberByID(next.Writers, "dave"); !ok || member.Label != "Dave" {
+			t.Fatal("fixture successor does not add dave as a writer")
+		}
+		if inviteReadersPolicyDiff(x.p5, x.s) {
+			t.Fatal("forbidden writer addition was accepted by the pure diff")
+		}
+		wantCodeAt(t, VerifyPolicyCheckpoint(c.f, x.pin()), CodePolicyCheckpointFailed, "")
+	})
+
 	t.Run("omitted anchor root then delegate", func(t *testing.T) {
 		// The first carried proof establishes seq 6 root-signed from the
 		// checkpoint's predecessor digest; its policy then authorizes
@@ -1523,17 +1582,15 @@ func TestVerifyPolicyCheckpointInviteReaders(t *testing.T) {
 
 	t.Run("omitted anchor admin first proof", func(t *testing.T) {
 		// The successor has the otherwise approved reader addition and is
-		// correctly signed by device-1's policy key. Its signer is named by a
-		// delegation carried in the successor itself, but an omitted anchor
-		// leaves no authenticated predecessor body to authorize it: the first
-		// carried proof must be root-signed, and its own delegation cannot
-		// stand in for the root. The carried successor publishes no other
-		// policy key, so the file stays structurally valid.
+		// correctly signed by device-1's real pinned policy key, and it
+		// still carries device-1's InviteReaders delegation itself. Only the
+		// anchor is omitted, so there is no authenticated predecessor body
+		// to authorize that signer: the first carried proof must be
+		// root-signed, and the successor's own grant and key cannot stand in
+		// for the predecessor. An implementation that read authority from
+		// the successor would accept this file.
 		x := newDelegatedCP(t, k, nil, addDave)
 		c := x.c
-		for i := range x.s.Devices {
-			x.s.Devices[i].PolicySigningKey = nil
-		}
 		c.policies[1] = x.s
 		c.rebind(1, "device-1")
 		signPolicyProof(&c.f.SignedPolicyProofs[1], x.priv)
@@ -1552,6 +1609,24 @@ func TestVerifyPolicyCheckpointInviteReaders(t *testing.T) {
 			!ed25519.Verify(x.pub, append([]byte(DomainPolicyDocumentSignature+"\x00"), c.f.SignedPolicyProofs[0].Document...), c.f.SignedPolicyProofs[0].Sig) {
 			t.Fatal("first carried proof is not device-1's correctly signed policy")
 		}
+		// The carried successor is exactly what would authorize itself: the
+		// device-1 key its proof verifies under and its own live
+		// InviteReaders grant. With no predecessor body, neither counts.
+		carried := &c.f.SignedPolicyProofs[0].Policy
+		if dev := findDevice(carried, "device-1"); dev == nil || dev.PolicySigningKey == nil ||
+			!bytes.Equal(dev.PolicySigningKey.PublicKey, x.pub) {
+			t.Fatal("carried successor lost device-1's policy key")
+		}
+		selfFull := false
+		for _, d := range carried.AdminDelegations {
+			if d.DelegateDevice == "device-1" && d.Scope.InviteReaders && d.ExpiresPolicySeq > carried.PolicySeq {
+				selfFull = true
+			}
+		}
+		if !selfFull {
+			t.Fatal("carried successor lost its own active InviteReaders grant")
+		}
+		// The only failure left is the missing authenticated predecessor.
 		wantCodeAt(t, VerifyPolicyCheckpoint(c.f, p), CodePolicyCheckpointFailed, "")
 	})
 }
