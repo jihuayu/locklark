@@ -344,6 +344,117 @@ function routeStateProbe(title) {
     };
   })()`;
 }
+// Route status trace. A visible-DOM MutationObserver on the exact route page
+// records each observable status/state change from the moment the target is
+// discovered, so a status written and overwritten before the next poll is not
+// lost. Each status childList record is classified here, in the page, against
+// only the fixed literals below; the added node's text is never stored. The
+// trace keeps at most ROUTE_STATUS_TRACE_LIMIT entries, dropping consecutive
+// repeats, of fixed view/status/detail/title enums only.
+const ROUTE_STATUS_TRACE_LIMIT = 8;
+const ROUTE_STATUS_TRACE_CHANNELS = ["status", "view", "detailShown", "titleKind"];
+const ROUTE_TITLE_KINDS = ["fixture", "other"];
+const ROUTE_CLOSED_STATUS = "已关闭此条目";
+// Returns the page-side expression that installs the observer and exposes one
+// read-only function returning the current sanitized trace as JSON.
+function routeStatusTraceProbe(title) {
+  return `(()=>{
+    if(globalThis.__locklarkRouteStatusTrace)return true;
+    const LIMIT=${ROUTE_STATUS_TRACE_LIMIT};
+    const VIEWS=${JSON.stringify(ROUTE_VIEWS)};
+    const FIXTURE_TITLE=${JSON.stringify(title)};
+    const current={view:'other',statusKind:'other',detailShown:false,titleKind:'other'};
+    const entries=[];
+    const kindOf=(text)=>text===${JSON.stringify(ROUTE_CLAIM_PENDING_STATUS)}?'native-pending':text===${JSON.stringify(ROUTE_CLAIM_FAILED_STATUS)}?'claim-failed':text===${JSON.stringify(ROUTE_REVOKED_STATUS)}?'route-revoked':text===${JSON.stringify(ROUTE_CLOSED_STATUS)}?'closed':text?'other':'empty';
+    const push=(channel,value)=>{
+      current[channel]=value;
+      const last=entries[entries.length-1];
+      if(last&&last.channel===channel&&last.value===value)return;
+      if(entries.length<LIMIT)entries.push({channel,value});
+    };
+    const body=document.body;
+    const statusEl=document.querySelector('#status');
+    const detailEl=document.querySelector('#detail-view');
+    const titleEl=document.querySelector('#detail-title');
+    const observe=()=>{
+      const view=()=>VIEWS.includes(body?.dataset?.view)?body.dataset.view:'other';
+      const shown=()=>detailEl?detailEl.hidden!==true:false;
+      const titleKind=()=>titleEl?(String(titleEl.textContent||'')===FIXTURE_TITLE?'fixture':'other'):'other';
+      const statusKind=()=>statusEl?kindOf(String(statusEl.textContent||'').trim()):'other';
+      current.view=view();current.statusKind=statusKind();current.detailShown=shown();current.titleKind=titleKind();
+      push('status',current.statusKind);
+      const observer=new MutationObserver((records)=>{
+        for(const record of records){
+          if(record.type==='characterData')push('status',kindOf(String(record.target?.data||'').trim()));
+          else if(record.type==='attributes')push('view',view());
+          else for(const node of record.addedNodes){
+            if(node===statusEl)push('status',statusKind());
+            else if(node.nodeType===3&&node.parentNode===statusEl)push('status',kindOf(String(node.data||'').trim()));
+            else if(node===detailEl||detailEl?.contains?.(node))push('detailShown',shown());
+            else if(node===titleEl||titleEl?.contains?.(node))push('titleKind',titleKind());
+          }
+        }
+      });
+      observer.observe(body,{attributes:true,attributeFilter:['data-view'],childList:true,subtree:true,characterData:true});
+    };
+    if(body&&body.dataset)observe();
+    else if(!body)for(const type of ['DOMContentLoaded','pageshow'])globalThis.addEventListener?.(type,function once(){observe();globalThis.removeEventListener?.(type,once);},{once:true});
+    globalThis.__locklarkRouteStatusTrace=()=>JSON.stringify(entries);
+    return true;
+  })()`;
+}
+// Sanitized again at the boundary: unknown channels, enums or shapes are
+// dropped and the entry cap is enforced here as well.
+function sanitizeRouteStatusTrace(value) {
+  if (!Array.isArray(value)) return null;
+  const trace = [];
+  for (const entry of value.slice(0, ROUTE_STATUS_TRACE_LIMIT)) {
+    const channel = entry?.channel;
+    const allowed =
+      channel === "status"
+        ? ROUTE_STATUS_KINDS.concat("closed", "empty")
+        : channel === "view"
+          ? ROUTE_VIEWS.concat("other")
+          : channel === "titleKind"
+            ? ROUTE_TITLE_KINDS
+            : channel === "detailShown"
+              ? [true, false]
+              : [];
+    if (!ROUTE_STATUS_TRACE_CHANNELS.includes(channel)) continue;
+    if (!allowed.includes(entry?.value)) continue;
+    trace.push({ channel, value: entry.value });
+  }
+  return trace;
+}
+let routeStatusTrace = null;
+let routeStatusTraceInstalled = false;
+// Read-only: one evaluation over CDP, no wait and no gate.
+async function readRouteStatusTrace(connection) {
+  try {
+    routeStatusTrace = sanitizeRouteStatusTrace(
+      JSON.parse(
+        await connection.evaluate(
+          "globalThis.__locklarkRouteStatusTrace?.() ?? '[]'",
+        ),
+      ),
+    );
+  } catch {}
+}
+async function refreshRouteStatusTrace(attach, target, uninstall = false) {
+  if (!routeStatusTraceInstalled) return;
+  let connection = null;
+  try {
+    connection = await attach(target);
+    await readRouteStatusTrace(connection);
+    if (!uninstall) return;
+    // Stop observing in the page (diagnostic hook only).
+    await connection.evaluate("delete globalThis.__locklarkRouteStatusTrace; true");
+  } catch {} finally {
+    try {
+      await connection?.close();
+    } catch {}
+  }
+}
 function phase(value) {
   stage = value;
   console.log("Native browser stage: " + value);
@@ -901,8 +1012,14 @@ try {
     // CDP connection with no added wait or timeout, and any failure is
     // swallowed so no acceptance step can fail or skip because of it.
     try {
+      // Diagnostics only: install the visible-DOM status trace on this exact
+      // route document in this same earliest connection, before any
+      // popup-closed wait, so a fast overwrite or disconnect is still recorded.
       const initial = await attach(opened);
       try {
+        await initial.evaluate(routeStatusTraceProbe(fixture.Title));
+        routeStatusTraceInstalled = true;
+        await readRouteStatusTrace(initial);
         lastRouteObservation = sanitizeRouteObservation(
           await initial.evaluate(routeStateProbe(fixture.Title)),
         );
@@ -930,6 +1047,7 @@ try {
     try {
       const afterClose = await attach(opened);
       try {
+        await readRouteStatusTrace(afterClose);
         routeAfterPopupClose = sanitizeRouteObservation(
           await afterClose.evaluate(routeStateProbe(fixture.Title)),
         );
@@ -981,6 +1099,7 @@ try {
       // state; it cannot make the wait pass.
       const observeRouteState = async () => {
         try {
+          await readRouteStatusTrace(route);
           lastRouteObservation = sanitizeRouteObservation(
             await route.evaluate(routeStateProbe(fixture.Title)),
           );
@@ -1067,6 +1186,10 @@ try {
       try {
         await route.close();
       } catch {}
+      // Diagnostics only: one final read, then stop observing in the page where
+      // it is still reachable; a closed page fails this read and the trace
+      // stays as last observed.
+      await refreshRouteStatusTrace(attach, opened, true);
     }
     } finally {
       // Diagnostics only: the lifecycle socket never outlives this checkpoint.
@@ -1609,6 +1732,11 @@ try {
                     routeTargetAfterPopupClose.routeTargetStillRoute === true,
                 },
               }
+            : {}),
+          // Present only once the visible-DOM status trace recorded at least
+          // one entry: fixed channel/value enums only, at most eight entries.
+          ...(routeStatusTrace
+            ? { routeStatusTrace: sanitizeRouteStatusTrace(routeStatusTrace) }
             : {}),
           // Present only once the direct route-target observer connected or
           // saw a main-frame event; fixed booleans and capped per-kind counts

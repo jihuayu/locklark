@@ -1502,3 +1502,109 @@ test("route probe maps the fixed claim-pending status to native-pending", () => 
   assert.equal(kindFor("条目已失效，请重新从金库打开"), "route-revoked");
   assert.equal(kindFor(""), "other");
 });
+
+test("route status trace maps fixed pending records and stays a bounded enum trace", () => {
+  // A status written and overwritten before the next poll must still show.
+  // Only fixed channel/value enums leave the page: no status or title text,
+  // URL, token or other arbitrary string, and at most eight entries.
+  const source = readFileSync(
+    new URL("./browser_native_acceptance.mjs", import.meta.url),
+    "utf8",
+  );
+  const start = source.search(/^const ROUTE_VIEWS = /m);
+  const stop = source.indexOf("\nfunction phase(", start);
+  assert.ok(start >= 0 && stop > start, "route trace helpers must stay top-level");
+  const code = source.slice(start, stop);
+  assert.match(code, /^const ROUTE_STATUS_TRACE_LIMIT = 8;$/m);
+  const deliveries = [];
+  class FakeObserver {
+    constructor(callback) {
+      this.callback = callback;
+      FakeObserver.last = this;
+    }
+    observe() {}
+    takeRecords() {
+      return deliveries.splice(0);
+    }
+  }
+  const context = vm.createContext({ MutationObserver: FakeObserver });
+  vm.runInContext(code + "\nthis.probe = routeStatusTraceProbe;this.clean = sanitizeRouteStatusTrace;", context);
+  const status = { textContent: "" };
+  const body = { dataset: { view: "vault" } };
+  const title = { textContent: "", contains: (node) => node === title };
+  const detail = { hidden: true, contains: (node) => node === detail };
+  context.document = {
+    body,
+    querySelector: (selector) =>
+      ({ "#status": status, "#detail-view": detail, "#detail-title": title }[selector] ?? null),
+  };
+  vm.runInContext(
+    "eval(" + JSON.stringify(vm.runInContext("probe('FIXTURE')", context)) + ")",
+    context,
+  );
+  const trace = () => JSON.parse(vm.runInContext("__locklarkRouteStatusTrace()", context));
+  const mutate = (records) => {
+    deliveries.push(...records);
+    FakeObserver.last.callback(FakeObserver.last.takeRecords());
+  };
+  const added = (data) => ({ nodeType: 3, data, parentNode: status });
+
+  // One JS task: pending written, then overwritten by the close text.
+  status.textContent = "正在请求桌面审批…";
+  mutate([{ type: "childList", addedNodes: [added("正在请求桌面审批…")], target: status }]);
+  status.textContent = "已关闭此条目";
+  body.dataset.view = "closed";
+  mutate([
+    { type: "childList", addedNodes: [added("已关闭此条目")], target: status },
+    { type: "attributes", target: body },
+  ]);
+  const entries = trace();
+  assert.deepEqual(entries.slice(1), [
+    { channel: "status", value: "native-pending" },
+    { channel: "status", value: "closed" },
+    { channel: "view", value: "closed" },
+  ]);
+
+  // Unknown status text is retained only as the fixed "other" enum.
+  status.textContent = "SECRET-STATUS-TEXT";
+  mutate([{ type: "characterData", target: { data: "SECRET-STATUS-TEXT" } }]);
+  assert.deepEqual(trace().at(-1), { channel: "status", value: "other" });
+
+  // Hostile or long input is capped and dropped at the boundary too.
+  const capped = trace();
+  for (let index = 0; index < 30; index++)
+    mutate([
+      { type: "childList", addedNodes: [added(index % 2 ? "无法打开此条目" : "正在请求桌面审批…")], target: status },
+    ]);
+  const serialized = JSON.stringify(trace());
+  assert.equal(trace().length, 8);
+  assert.ok(capped.length <= 8);
+  assert.doesNotMatch(serialized, /SECRET|FIXTURE|正在请求|无法打开|已关闭|http|#route=/);
+  for (const entry of trace()) {
+    assert.deepEqual(Object.keys(entry).sort(), ["channel", "value"]);
+    assert.equal(typeof entry.value !== "string" || entry.value.length <= 16, true);
+  }
+  // Dropped enums are never copied; the boundary keeps a fixed hard maximum.
+  const cleaned = JSON.parse(
+    vm.runInContext(
+      "JSON.stringify(clean([{channel:'status',value:'native-pending'},{channel:'status',value:'SECRET'}," +
+        "{channel:'url',value:'https://x'},{channel:'detailShown',value:true}]" +
+        ".concat(Array.from({length:20},()=>({channel:'view',value:'closed'})))))",
+      context,
+    ),
+  );
+  assert.ok(cleaned.length <= 8);
+  assert.deepEqual(cleaned.slice(0, 3), [
+    { channel: "status", value: "native-pending" },
+    { channel: "detailShown", value: true },
+    { channel: "view", value: "closed" },
+  ]);
+  assert.doesNotMatch(JSON.stringify(cleaned), /SECRET|https/);
+  const overLimit = JSON.parse(
+    vm.runInContext(
+      "JSON.stringify(clean(Array.from({length:20},()=>({channel:'view',value:'closed'}))))",
+      context,
+    ),
+  );
+  assert.equal(overLimit.length, 8);
+});
