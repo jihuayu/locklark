@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"slices"
+	"strings"
 	"testing"
 )
 
@@ -795,4 +797,442 @@ func TestVerifyPolicyCheckpointAnchorRootBinding(t *testing.T) {
 		t.Fatal("pin does not carry root A")
 	}
 	wantCodeAt(t, VerifyPolicyCheckpoint(c.f, pin), CodePolicyCheckpointFailed, "")
+}
+
+// inviteKeys holds real generated key material for the InviteReaders diff
+// tests: the owner-root signing key, two generated policy signing keys, one
+// content signing key per device id and the age recipients of those ids.
+type inviteKeys struct {
+	root      ed25519.PublicKey
+	prv       ed25519.PrivateKey
+	policyKey ed25519.PublicKey
+	adminKey  ed25519.PublicKey
+	dev       map[string]ed25519.PublicKey
+	ageOf     map[string]string
+}
+
+func newInviteKeys(t *testing.T) *inviteKeys {
+	t.Helper()
+	k := &inviteKeys{dev: map[string]ed25519.PublicKey{}, ageOf: map[string]string{}}
+	pub, prv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k.root, k.prv = pub, prv
+	pub, _, err = ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k.policyKey = pub
+	pub, _, err = ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k.adminKey = pub
+	for _, id := range []string{"device-0", "device-a0", "device-a1", "device-a2", "device-a3", "device-a4", "device-b0", "device-z0"} {
+		pub, _, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		k.dev[id] = pub
+		k.ageOf[id] = ageRecipient(clientKey("invite-" + id))
+	}
+	return k
+}
+
+func (k *inviteKeys) device(t *testing.T, id, principal, label string) Device {
+	t.Helper()
+	pub, ok := k.dev[id]
+	if !ok {
+		t.Fatalf("no generated key for %s", id)
+	}
+	return Device{
+		DeviceID:          id,
+		PrincipalID:       principal,
+		Label:             label,
+		ContentSigningKey: PublicKey{Alg: SigAlgEd25519, PublicKey: bytes.Clone(pub)},
+		AgeEncryptionKey:  k.ageOf[id],
+	}
+}
+
+// inviteOldPolicy is a structurally valid predecessor: seq 5, alice owner
+// and root owner; alice and bob admins; bob and carol readers; device-a0 for
+// alice, device-a1 for bob and device-a2 for carol, all sorting after both
+// reader ids. Bob's device-a1 carries a generated policy signing key and is
+// the delegate of the active grant, which invites readers until 20; Carol's
+// device-a2 is the delegate of the grant that expires at policy seq 7, after
+// the successor seq 6.
+func inviteOldPolicy(t *testing.T, k *inviteKeys) *Policy {
+	t.Helper()
+	p := &Policy{
+		Format:           Format,
+		Version:          Version,
+		VaultID:          "vault-01",
+		PolicySeq:        5,
+		PrevPolicyDigest: digest("policy-4"),
+		OwnerRoot: OwnerRoot{
+			KeyID:     "owner-root-01",
+			Alg:       PolicySigAlgEd25519,
+			PublicKey: bytes.Clone(k.root),
+			Owners:    []Principal{{PrincipalID: "alice", Label: "Alice"}},
+		},
+		Readers: []Member{{PrincipalID: "bob", Label: "Bob"}, {PrincipalID: "carol", Label: "Carol"}},
+		Admins:  []Member{{PrincipalID: "alice", Label: "Alice"}, {PrincipalID: "bob", Label: "Bob"}},
+		Owners:  []Member{{PrincipalID: "alice", Label: "Alice"}},
+		AdminDelegations: []AdminDelegation{
+			{DelegationID: "deleg-active", DelegateDevice: "device-a1", GrantedBy: "owner-root-01",
+				Scope: DelegationScope{InviteReaders: true}, ScopeNote: "readers only", ExpiresPolicySeq: 20},
+			{DelegationID: "deleg-expiring", DelegateDevice: "device-a2", GrantedBy: "owner-root-01",
+				Scope: DelegationScope{InviteReaders: true, RemoveMembers: true}, ScopeNote: "ends later", ExpiresPolicySeq: 7},
+		},
+		Devices: []Device{
+			k.device(t, "device-a0", "alice", "Alice laptop"),
+			k.withPolicyKey(k.device(t, "device-a1", "bob", "Bob phone"), k.adminKey),
+			k.device(t, "device-a2", "carol", "Carol desktop"),
+		},
+	}
+	return p
+}
+
+// withPolicyKey returns d carrying a generated policy signing key, as an
+// admin-capable delegate device does.
+func (k *inviteKeys) withPolicyKey(d Device, pub ed25519.PublicKey) Device {
+	d.PolicySigningKey = &PublicKey{Alg: PolicySigAlgEd25519, PublicKey: bytes.Clone(pub)}
+	return d
+}
+
+// inviteNext derives a valid successor of old: seq+1 linked to old's digest,
+// with next applied and the sorted arrays re-frozen. next receives a deep
+// copy of old and mutates only the roles, devices, delegations or seq it
+// means to change; the root and digest are left to this helper. Like a real
+// admin client, the helper drops every grant that expires at the successor
+// seq, because ValidatePolicy rejects a grant carried at its own expiry; it
+// does so after next, for whatever seq next ends at.
+func inviteNext(old *Policy, next func(p *Policy)) *Policy {
+	p := clonePolicy(old)
+	p.PolicySeq = old.PolicySeq + 1
+	p.PrevPolicyDigest = bytes.Clone(PolicyDigest(old))
+	next(p)
+	p.AdminDelegations = slices.DeleteFunc(p.AdminDelegations, func(d AdminDelegation) bool {
+		return d.ExpiresPolicySeq == p.PolicySeq
+	})
+	slices.SortFunc(p.Readers, func(a, b Member) int { return strings.Compare(a.PrincipalID, b.PrincipalID) })
+	slices.SortFunc(p.Devices, func(a, b Device) int { return strings.Compare(a.DeviceID, b.DeviceID) })
+	slices.SortFunc(p.AdminDelegations, func(a, b AdminDelegation) int { return strings.Compare(a.DelegationID, b.DelegationID) })
+	return p
+}
+
+func inviteReader(id, label string) Member { return Member{PrincipalID: id, Label: label} }
+
+// TestInviteReadersPolicyDiff pins the InviteReaders old-to-new predicate.
+// Every policy handed to it - the predecessor old and the successor next of
+// every case, positive or negative - must pass ValidatePolicy first, so each
+// negative below fails only on the diff itself and not on any structural or
+// order rule. Each negative changes exactly one target relative to the
+// approved transition built by newReaders (plus, where a new reader is needed
+// for the target to be representable at all, exactly that reader addition).
+func TestInviteReadersPolicyDiff(t *testing.T) {
+	k := newInviteKeys(t)
+	old := inviteOldPolicy(t, k)
+
+	// newReaders adds ann, dan and zed: ann and dan sort before every old
+	// reader id, zed after, so the ids interleave with the old ones.
+	newReaders := func(p *Policy) {
+		p.Readers = append(p.Readers, inviteReader("ann", "Ann"), inviteReader("dan", "Dan"), inviteReader("zed", "Zed"))
+	}
+	// newDevices gives ann two devices - device-b0 sorts after the old
+	// devices and device-0 sorts before every old device id - and dan one
+	// (device-a3 sorts among the old devices). zed gets none.
+	newDevices := func(p *Policy) {
+		p.Devices = append(p.Devices,
+			k.device(t, "device-b0", "ann", "Ann phone"),
+			k.device(t, "device-0", "ann", "Ann laptop"),
+			k.device(t, "device-a3", "dan", "Dan laptop"))
+	}
+	// withoutDevice removes the device with id from p, if present.
+	withoutDevice := func(p *Policy, id string) {
+		p.Devices = slices.DeleteFunc(p.Devices, func(d Device) bool { return d.DeviceID == id })
+	}
+	// readerRemovalOld is the case-specific predecessor of the reader-removal
+	// negative: carol is still an old reader, but with no device and no
+	// delegation to device-a2, so removing her leaves next fully valid.
+	readerRemovalOld := func() *Policy {
+		p := clonePolicy(old)
+		withoutDevice(p, "device-a2")
+		p.AdminDelegations = slices.DeleteFunc(p.AdminDelegations, func(d AdminDelegation) bool {
+			return d.DelegationID == "deleg-expiring"
+		})
+		return p
+	}
+	// exactExpiryOld is the case-specific predecessor of the exact-expiry
+	// pair: deleg-expiring now expires exactly at the successor seq 6, while
+	// old itself stays valid.
+	exactExpiryOld := func() *Policy {
+		p := clonePolicy(old)
+		for i := range p.AdminDelegations {
+			if p.AdminDelegations[i].DelegationID == "deleg-expiring" {
+				p.AdminDelegations[i].ExpiresPolicySeq = 6
+			}
+		}
+		return p
+	}
+	// expiringGrant returns old's deleg-expiring grant, restated with expiry.
+	expiringGrant := func(expiry uint64) AdminDelegation {
+		for _, d := range old.AdminDelegations {
+			if d.DelegationID == "deleg-expiring" {
+				d.ExpiresPolicySeq = expiry
+				return d
+			}
+		}
+		t.Fatal("old fixture has no deleg-expiring grant")
+		return AdminDelegation{}
+	}
+
+	type inviteCase struct {
+		name string
+		// setup, when set, derives a case-specific old from the shared
+		// predecessor before next is built from it.
+		setup func() *Policy
+		next  func(p *Policy)
+	}
+
+	positives := []inviteCase{
+		{name: "one reader no devices", next: func(p *Policy) {
+			p.Readers = append(p.Readers, inviteReader("ann", "Ann"))
+		}},
+		{name: "multiple readers no devices", next: newReaders},
+		{name: "multiple readers with devices for each", next: func(p *Policy) {
+			newReaders(p)
+			newDevices(p)
+		}},
+		{name: "devices only for some new readers", next: func(p *Policy) {
+			// ann has two devices and dan one, zed none: the approved device
+			// count per new reader is 0..N.
+			newReaders(p)
+			newDevices(p)
+		}},
+		{name: "exact-expiry cleanup keeps active grant", next: func(p *Policy) {
+			newReaders(p)
+			newDevices(p)
+		}},
+		{name: "delegation dropped exactly at its expiry", setup: exactExpiryOld, next: func(p *Policy) {
+			// The helper drops deleg-expiring because it expires at next's
+			// own seq 6; the active grant is carried unchanged.
+			newReaders(p)
+			newDevices(p)
+		}},
+	}
+
+	negatives := []inviteCase{
+		{name: "no reader addition", next: func(p *Policy) {}},
+		{name: "new device for old principal", next: func(p *Policy) {
+			newReaders(p)
+			p.Devices = append(p.Devices, k.device(t, "device-b0", "bob", "Bob tablet"))
+		}},
+		{name: "writer role for new reader", next: func(p *Policy) {
+			newReaders(p)
+			p.Writers = []Member{inviteReader("ann", "Ann")}
+		}},
+		{name: "admin role for new reader", next: func(p *Policy) {
+			newReaders(p)
+			p.Admins = append(p.Admins, inviteReader("dan", "Dan"))
+		}},
+		{name: "owner role for new reader", next: func(p *Policy) {
+			newReaders(p)
+			p.Owners = append(p.Owners, inviteReader("zed", "Zed"))
+		}},
+		{name: "root owner for new reader", next: func(p *Policy) {
+			newReaders(p)
+			p.OwnerRoot.Owners = append(p.OwnerRoot.Owners, Principal{PrincipalID: "zed", Label: "Zed"})
+		}},
+		{name: "existing reader label changed", next: func(p *Policy) {
+			newReaders(p)
+			p.Readers[0].Label = "Robert"
+		}},
+		{name: "existing reader label rewritten after sorting", next: func(p *Policy) {
+			// ann sorts first, so the changed bob entry is no longer at the
+			// old index: the diff must match readers by principal ID.
+			newReaders(p)
+			for i := range p.Readers {
+				if p.Readers[i].PrincipalID == "bob" {
+					p.Readers[i].Label = "Bobby"
+				}
+			}
+		}},
+		{name: "reader removed", setup: readerRemovalOld, next: func(p *Policy) {
+			// carol, a reader with no device and no delegation, is removed:
+			// no replacement reader is added and the remaining old devices
+			// are untouched.
+			for _, d := range p.Devices {
+				if d.PrincipalID == "carol" {
+					t.Fatalf("reader-removal old has a device for carol: %s", d.DeviceID)
+				}
+			}
+			newReaders(p)
+			p.Readers = slices.DeleteFunc(p.Readers, func(m Member) bool { return m.PrincipalID == "carol" })
+		}},
+		{name: "existing device label mutated", next: func(p *Policy) {
+			newReaders(p)
+			for i := range p.Devices {
+				if p.Devices[i].DeviceID == "device-a1" {
+					p.Devices[i].Label = "Bob's other phone"
+				}
+			}
+		}},
+		{name: "existing device content key mutated", next: func(p *Policy) {
+			newReaders(p)
+			for i := range p.Devices {
+				if p.Devices[i].DeviceID == "device-a2" {
+					p.Devices[i].ContentSigningKey.PublicKey[0] ^= 0xff
+				}
+			}
+		}},
+		{name: "existing device age key mutated", next: func(p *Policy) {
+			newReaders(p)
+			for i := range p.Devices {
+				if p.Devices[i].DeviceID == "device-a0" {
+					p.Devices[i].AgeEncryptionKey = k.ageOf["device-b0"]
+				}
+			}
+		}},
+		{name: "existing device removed", next: func(p *Policy) {
+			// device-a0 is named by no delegation, so this isolates removal.
+			newReaders(p)
+			withoutDevice(p, "device-a0")
+		}},
+		{name: "existing device moved to a new reader", next: func(p *Policy) {
+			// Same device id and keys, now ann's: old devices are never
+			// re-owned or edited.
+			newReaders(p)
+			for i := range p.Devices {
+				if p.Devices[i].DeviceID == "device-a2" {
+					p.Devices[i].PrincipalID = "ann"
+				}
+			}
+		}},
+		{name: "existing device policy key added", next: func(p *Policy) {
+			newReaders(p)
+			for i := range p.Devices {
+				if p.Devices[i].DeviceID == "device-a0" {
+					p.Devices[i].PolicySigningKey = &PublicKey{Alg: PolicySigAlgEd25519, PublicKey: bytes.Clone(k.policyKey)}
+				}
+			}
+		}},
+		{name: "new device for old principal among new device owners", next: func(p *Policy) {
+			// ann and dan get devices; carol, an old reader, gets one too,
+			// sorted next to them.
+			newReaders(p)
+			newDevices(p)
+			p.Devices = append(p.Devices, k.device(t, "device-a4", "carol", "Carol tablet"))
+		}},
+		{name: "root key mutated", next: func(p *Policy) {
+			newReaders(p)
+			p.OwnerRoot.PublicKey[0] ^= 0xff
+		}},
+		{name: "root owners mutated", next: func(p *Policy) {
+			newReaders(p)
+			p.OwnerRoot.Owners[0].Label = "Alicia"
+		}},
+		{name: "wrong next seq skips ahead", next: func(p *Policy) {
+			// deleg-expiring expires at 7, so the helper drops it and next
+			// stays structurally valid; the sequence gap is the only defect.
+			newReaders(p)
+			p.PolicySeq = 7
+		}},
+		{name: "old policy seq reused", next: func(p *Policy) {
+			// seq 5 is old's own seq, which also makes it a non-genesis
+			// policy whose prev digest must still be a digest.
+			newReaders(p)
+			p.PolicySeq = 5
+		}},
+		{name: "wrong prev digest", next: func(p *Policy) {
+			newReaders(p)
+			p.PrevPolicyDigest = digest("policy-4")
+		}},
+		{name: "active delegation dropped", next: func(p *Policy) {
+			newReaders(p)
+			p.AdminDelegations = slices.DeleteFunc(p.AdminDelegations, func(d AdminDelegation) bool {
+				return d.DelegationID == "deleg-active"
+			})
+		}},
+		{name: "active delegation scope changed", next: func(p *Policy) {
+			newReaders(p)
+			for i := range p.AdminDelegations {
+				if p.AdminDelegations[i].DelegationID == "deleg-active" {
+					p.AdminDelegations[i].Scope.RemoveMembers = true
+				}
+			}
+		}},
+		{name: "active delegation expiry changed", next: func(p *Policy) {
+			newReaders(p)
+			for i := range p.AdminDelegations {
+				if p.AdminDelegations[i].DelegationID == "deleg-active" {
+					p.AdminDelegations[i].ExpiresPolicySeq = 21
+				}
+			}
+		}},
+		{name: "delegation added", next: func(p *Policy) {
+			newReaders(p)
+			p.AdminDelegations = append(p.AdminDelegations, AdminDelegation{
+				DelegationID: "deleg-new", DelegateDevice: "device-a0", GrantedBy: "owner-root-01",
+				Scope: DelegationScope{InviteReaders: true}, ScopeNote: "readers only",
+			})
+		}},
+		{name: "expiring delegation edited instead of dropped", setup: exactExpiryOld, next: func(p *Policy) {
+			// deleg-expiring expires exactly at next's seq 6. The edit below
+			// runs after the helper's drop and re-extends it to 20, so next
+			// stays structurally valid and only the edit is forbidden.
+			newReaders(p)
+			p.AdminDelegations = append(p.AdminDelegations, expiringGrant(20))
+		}},
+	}
+
+	run := func(t *testing.T, tc inviteCase) (*Policy, *Policy) {
+		t.Helper()
+		prev := old
+		if tc.setup != nil {
+			prev = tc.setup()
+		}
+		if err := ValidatePolicy(prev); err != nil {
+			t.Fatalf("%s: old policy invalid: %v", tc.name, err)
+		}
+		next := inviteNext(prev, tc.next)
+		if err := ValidatePolicy(next); err != nil {
+			t.Fatalf("%s: next policy invalid: %v", tc.name, err)
+		}
+		return prev, next
+	}
+
+	for _, tc := range positives {
+		t.Run(tc.name, func(t *testing.T) {
+			prev, next := run(t, tc)
+			if !inviteReadersPolicyDiff(prev, next) {
+				t.Errorf("approved transition rejected")
+			}
+		})
+	}
+	for _, tc := range negatives {
+		t.Run(tc.name, func(t *testing.T) {
+			prev, next := run(t, tc)
+			if tc.name == "wrong next seq skips ahead" {
+				// The only rejected rule is the sequence gap: next is at 7,
+				// the expiring grant was dropped exactly there, and the
+				// active grant is still carried unchanged.
+				if next.PolicySeq != 7 {
+					t.Fatalf("skip-ahead next seq = %d, want 7", next.PolicySeq)
+				}
+				for _, d := range next.AdminDelegations {
+					if d.ExpiresPolicySeq <= next.PolicySeq {
+						t.Fatalf("delegation %s expires at %d in next seq %d", d.DelegationID, d.ExpiresPolicySeq, next.PolicySeq)
+					}
+				}
+				if len(next.AdminDelegations) != 1 || next.AdminDelegations[0] != prev.AdminDelegations[0] {
+					t.Fatal("skip-ahead next does not carry the active grant unchanged")
+				}
+			}
+			if inviteReadersPolicyDiff(prev, next) {
+				t.Errorf("forbidden transition accepted")
+			}
+		})
+	}
 }

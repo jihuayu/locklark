@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"math"
+	"slices"
 )
 
 // CodePolicyCheckpointFailed is reported by VerifyPolicyCheckpoint when the
@@ -235,4 +236,193 @@ func VerifyPolicyCheckpoint(f *File, c *PolicyCheckpoint) error {
 		return Err("", CodeSignatureVerifyFailed)
 	}
 	return nil
+}
+
+// inviteReadersPolicyDiff reports whether next is exactly the approved
+// InviteReaders transition from the authenticated predecessor old. Both
+// policies must already pass ValidatePolicy; this predicate is a pure,
+// side-effect-free check of the old-to-new delta alone and does not inspect
+// any proof, signer, signature or delegation scope. Arrays are compared by
+// identifier, never by position: the frozen wire order is a property of each
+// policy, so a newly added id may sort before an existing one.
+//
+// old and next must carry the same format, version, VaultID and complete
+// owner root (key ID, algorithm, public key bytes and OwnerRoot.Owners), with
+// next.PolicySeq == old.PolicySeq+1 and next.PrevPolicyDigest equal to
+// PolicyDigest(old).
+//
+// The only permitted member change is an addition of between one and
+// MaxPolicyArrayItems readers, and at least one reader must be new. Every old
+// reader must appear unchanged by principal ID (same label) somewhere in next
+// Readers, and every next reader that is not an old reader is a new reader
+// which must be absent from old Readers, Writers, Admins, Owners and
+// OwnerRoot.Owners. New readers must be absent from the next policy's other
+// roles and root owners as well, which forbids promotions and role changes.
+// Writers, Admins and Owners are unchanged exactly.
+//
+// Devices may be added, 0..MaxArrayItems of them, but every old device must
+// appear unchanged by DeviceID in next Devices, and no old device may be
+// removed or edited. A new device may sit anywhere in the sorted next array
+// and must belong to a newly added reader; the root may add zero devices for
+// a new reader.
+//
+// AdminDelegations may not be added or modified. Every old delegation is
+// carried unchanged, except that a delegation which expires at
+// next.PolicySeq is omitted: ValidatePolicy rejects a grant carried at its
+// own expiry sequence, so this one boundary is the only permitted removal.
+// No unexpired grant may be removed and no scope or expiry may change.
+//
+// Exhaustion of the policy sequence, or an unrepresentable count of new
+// readers, fails. Any other delta fails. Structural validity, array order and
+// key uniqueness remain ValidatePolicy's job; inputs are only read.
+func inviteReadersPolicyDiff(old, next *Policy) bool {
+	if old == nil || next == nil ||
+		old.Format != next.Format || old.Version != next.Version ||
+		old.VaultID != next.VaultID || old.PolicySeq == math.MaxUint64 ||
+		next.PolicySeq != old.PolicySeq+1 {
+		return false
+	}
+	if !bytes.Equal(next.PrevPolicyDigest, PolicyDigest(old)) {
+		return false
+	}
+	if old.OwnerRoot.KeyID != next.OwnerRoot.KeyID ||
+		old.OwnerRoot.Alg != next.OwnerRoot.Alg ||
+		!bytes.Equal(old.OwnerRoot.PublicKey, next.OwnerRoot.PublicKey) ||
+		!slices.Equal(old.OwnerRoot.Owners, next.OwnerRoot.Owners) {
+		return false
+	}
+	// Every role other than readers is exactly unchanged: no additions, no
+	// removals and no label edits.
+	if !slices.Equal(old.Writers, next.Writers) ||
+		!slices.Equal(old.Admins, next.Admins) ||
+		!slices.Equal(old.Owners, next.Owners) {
+		return false
+	}
+
+	// Readers may only grow, and only by new principals. Membership is
+	// matched by principal ID, so a new reader may sort before an old one.
+	if len(next.Readers) <= len(old.Readers) || len(next.Readers) > MaxPolicyArrayItems {
+		return false
+	}
+	oldReader := memberSet(old.Readers)
+	for id, label := range oldReader {
+		m, ok := memberByID(next.Readers, id)
+		if !ok || m != label {
+			return false
+		}
+	}
+	inRole := map[string]bool{}
+	for _, ms := range [][]Member{old.Readers, old.Writers, old.Admins, old.Owners, next.Writers, next.Admins, next.Owners} {
+		for _, m := range ms {
+			inRole[m.PrincipalID] = true
+		}
+	}
+	for _, pr := range old.OwnerRoot.Owners {
+		inRole[pr.PrincipalID] = true
+	}
+	for _, pr := range next.OwnerRoot.Owners {
+		inRole[pr.PrincipalID] = true
+	}
+	added := map[string]bool{}
+	for _, m := range next.Readers {
+		if _, ok := oldReader[m.PrincipalID]; ok {
+			continue
+		}
+		if inRole[m.PrincipalID] {
+			return false
+		}
+		added[m.PrincipalID] = true
+	}
+
+	// Every old device is carried unchanged, wherever it sorts; every new
+	// device belongs to a newly added reader. Devices are never removed.
+	if len(next.Devices) < len(old.Devices) || len(next.Devices) > MaxArrayItems {
+		return false
+	}
+	for i := range old.Devices {
+		dev, ok := lookupDevice(next.Devices, old.Devices[i].DeviceID)
+		if !ok || !equalDevice(&old.Devices[i], dev) {
+			return false
+		}
+	}
+	for i := range next.Devices {
+		d := &next.Devices[i]
+		if _, ok := lookupDevice(old.Devices, d.DeviceID); ok {
+			continue
+		}
+		if !added[d.PrincipalID] {
+			return false
+		}
+	}
+
+	// No delegation is added or modified. Each old delegation is either
+	// carried unchanged or, when it expires exactly at next.PolicySeq, is not
+	// carried at all.
+	want := make(map[string]AdminDelegation, len(old.AdminDelegations))
+	for _, d := range old.AdminDelegations {
+		want[d.DelegationID] = d
+	}
+	for _, d := range next.AdminDelegations {
+		prev, ok := want[d.DelegationID]
+		if !ok || prev != d {
+			return false
+		}
+		delete(want, d.DelegationID)
+	}
+	for _, d := range want {
+		if d.ExpiresPolicySeq != next.PolicySeq {
+			return false
+		}
+	}
+	return true
+}
+
+// memberSet indexes members by principal ID and label.
+func memberSet(ms []Member) map[string]Member {
+	set := make(map[string]Member, len(ms))
+	for _, m := range ms {
+		set[m.PrincipalID] = m
+	}
+	return set
+}
+
+// memberByID returns the member with principal ID id, wherever it sorts.
+func memberByID(ms []Member, id string) (Member, bool) {
+	for _, m := range ms {
+		if m.PrincipalID == id {
+			return m, true
+		}
+	}
+	return Member{}, false
+}
+
+// lookupDevice returns the device with device ID id, wherever it sorts.
+func lookupDevice(ds []Device, id string) (*Device, bool) {
+	for i := range ds {
+		if ds[i].DeviceID == id {
+			return &ds[i], true
+		}
+	}
+	return nil, false
+}
+
+// equalDevice reports whether a and b are the same device in every field,
+// including the optional policy signing key and the bytes of every key.
+func equalDevice(a, b *Device) bool {
+	if a.DeviceID != b.DeviceID || a.PrincipalID != b.PrincipalID || a.Label != b.Label ||
+		!equalPublicKey(&a.ContentSigningKey, &b.ContentSigningKey) ||
+		!equalPublicKey(a.PolicySigningKey, b.PolicySigningKey) ||
+		a.AgeEncryptionKey != b.AgeEncryptionKey {
+		return false
+	}
+	return true
+}
+
+// equalPublicKey reports whether both nil or both non-nil keys with equal
+// algorithm and public key bytes.
+func equalPublicKey(a, b *PublicKey) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Alg == b.Alg && bytes.Equal(a.PublicKey, b.PublicKey)
 }
