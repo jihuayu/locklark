@@ -18,12 +18,15 @@ func TestWindowsBrokerHandshakeOrderingAndDialBudget(t *testing.T) {
 		t.Fatal("peerAfterHello must select Windows read-before-auth mode")
 	}
 
-	start := time.Now()
+	// dialBudget adds its 300ms inside the call, so bound the deadline by the
+	// call interval instead of a single start timestamp.
+	before := time.Now()
 	ctx, cancel := dialBudget(context.Background())
+	after := time.Now()
 	defer cancel()
 	deadline, ok := ctx.Deadline()
-	if !ok || deadline.Sub(start) > 300*time.Millisecond {
-		t.Fatalf("default dial budget: %v", deadline)
+	if !ok || deadline.Before(before.Add(300*time.Millisecond)) || deadline.After(after.Add(300*time.Millisecond)) {
+		t.Fatalf("default dial budget: %v, want within [%v, %v]", deadline, before.Add(300*time.Millisecond), after.Add(300*time.Millisecond))
 	}
 
 	shorter := time.Now().Add(20 * time.Millisecond)
