@@ -121,88 +121,133 @@ class PrivacyTests(unittest.TestCase):
 
 
 class PrivacyStageTests(unittest.TestCase):
-    class Controller:
-        """Deterministic stand-in whose privacy stage performs the real scan."""
+    primary_canary = "PrivatePrimaryCanary-" + "b" * 48
+    privacy_canary = "PrivatePrivacyCanary-" + "c" * 48
+    # Seeded by the controller's diagnosis: main() records the primary first
+    # and only then diagnoses, so this line is primary unless privacy replaced
+    # it, which the post-privacy cases below assert against.
+    sentinel_line = 4242
 
-        def __init__(self, root, primary_error, disclosure, verified_line=777):
-            self.root, self.primary_error, self.disclosure = root, primary_error, disclosure
-            self.verified_line = verified_line
+    class Controller:
+        """Fake controller whose privacy stage is the production method."""
+
+        # Unbound production method, so the real stage, scan and failure run.
+        privacy = acceptance.Acceptance.privacy
+
+        def __init__(self, root, primary=None):
+            self.root, self.primary = root, primary
             self.stage, self.step, self.operation, self.reason = "slow-frame", "none", "approve", "none"
-            self.checks, self.control_diagnostic = [], {}
+            self.checks, self.control_diagnostic, self.secret_bytes = [], {}, []
             self.runtime_endpoint_bytes, self.runtime_owned, self.runtime_cleaned = 40, True, True
             self.error_class, self.error_line, self.privacy_error_class = "none", 0, "none"
-            self.cli = mock.Mock(counter=0, logs=[], values=[])
+            self.cli = mock.Mock(counter=0, logs=[(root / "desktop.stdout-stderr", set())], values=[])
             self.cli.write = mock.Mock()
             self.last_command = {"category": "native-observe", "state": "completed", "exit_code": 0, "elapsed_ms": 5}
 
         def run(self):
-            if self.primary_error:
-                raise self.primary_error
+            if self.primary:
+                raise self.primary
             self.stage = "lock"
 
         def diagnose(self):
-            # Real diagnosis runs the native inspector; nothing it does is
-            # evaluated by these tests.
-            self.error_line = self.verified_line
+            # main() runs diagnosis after it records the failure's source line,
+            # so the primary line here is final whatever raised the failure.
+            self.error_line = PrivacyStageTests.sentinel_line
 
         def close(self):
             self.last_command = {"category": "native-observe", "state": "completed", "exit_code": 0, "elapsed_ms": 5}
 
-        def privacy(self):
-            # Same fixed disclosure check as Acceptance.privacy, over one log.
-            path = self.root / "desktop.stdout-stderr"
-            self.cli.logs.append((path, set()))
-            scan(path.read_bytes(), [self.disclosure] if self.disclosure is not None else [])
+        def mark(self, name):
+            self.checks.append(name)
 
-    def run_main(self, primary_error, disclosure, verified_line=777):
-        canary = "PrivatePrivacyStageCanary-" + "a" * 48
+    def fail(self, canary):
+        # Raised from a callee, as production privacy() raises after scan.
+        def disclose():
+            error = acceptance.AcceptanceFailure("privacy-canary-disclosed")
+            error.args = (canary,)
+            self.assertEqual(str(error), canary)
+            raise error
+        try:
+            disclose()
+        except acceptance.AcceptanceFailure as error:
+            return error
+
+    def run_main(self, primary=None, privacy=None):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            (root / "desktop.stdout-stderr").write_bytes(canary.encode() if disclosure else b"public evidence only\n")
-            fake = self.Controller(root, primary_error, canary, verified_line)
+            (root / "desktop.stdout-stderr").write_bytes(b"public evidence only\n")
+            if primary is not None:
+                primary = self.fail(self.primary_canary)
+            fake = self.Controller(root, primary)
+            calls, stages, real_scan = [], [], acceptance.scan
+            def scan(raw, values):
+                calls.append(values)
+                stages.append(fake.stage)
+                if privacy is not None:
+                    raise privacy
+                return real_scan(raw, values)
             out = io.StringIO()
-            with mock.patch.object(acceptance, "Acceptance", return_value=fake), contextlib.redirect_stdout(out):
+            with mock.patch.object(acceptance, "Acceptance", return_value=fake), \
+                    mock.patch.object(acceptance, "scan", scan), \
+                    contextlib.redirect_stdout(out):
                 status = acceptance.main(["--host", "/unused", "--cli", "/unused", "--peer", "/unused"])
             path, result = fake.cli.write.call_args.args
             self.assertEqual(path, root / "ssh-result.json")
-        # The private evidence path is the only intended output; the canary
-        # and the root are checked against the diagnostic and result only.
-        for value in (canary, "PrivatePrivacyStageCanary"):
-            self.assertNotIn(value, out.getvalue() + json.dumps(result))
-        self.assertNotIn(str(root), json.dumps(result))
-        return status, result, out.getvalue()
+        # Neither exception message's canary may reach stdout (FAIL line and
+        # diagnostic) or the serialized result. The only private path in output
+        # is the intended evidence line; the result must not carry it at all.
+        serialized = json.dumps(result)
+        for value in (self.primary_canary, self.privacy_canary):
+            self.assertNotIn(value, out.getvalue() + serialized)
+        for value in (str(root), "desktop.stdout-stderr", "/tmp/"):
+            self.assertNotIn(value, serialized)
+        self.assertEqual(len(calls), 1)
+        # Called from privacy()'s scan loop, after it sets the stage.
+        self.assertEqual(stages, ["privacy"])
+        return root, status, result, out.getvalue(), fake, stages
 
     def test_earlier_slow_frame_failure_stays_primary_when_privacy_also_fails(self):
-        # Any verified line would pass below, so the reported source line must
-        # come from the earlier failure rather than from this test's setup.
-        status, result, output = self.run_main(acceptance.AcceptanceFailure("invariant"), disclosure=True, verified_line=4242)
-        self.assertEqual(status, 1)
-        self.assertEqual((result["stage"], result["diagnostic"]["stage"]), ("slow-frame", "slow-frame"))
-        self.assertEqual(result["error_class"], "assertion")
-        self.assertEqual((result["source_line"], result["diagnostic"]["source_line"]), (4242, 4242))
-        self.assertEqual((result["privacy_error_class"], result["diagnostic"]["privacy_error_class"]), ("assertion", "assertion"))
-        self.assertIn("FAIL: SSH acceptance at slow-frame", output)
+        root, status, result, output, fake, stages = self.run_main(primary=True, privacy=self.fail(self.privacy_canary))
+        # privacy() set the stage while it ran; only the result keeps the
+        # earlier primary stage.
+        assert root and stages == ["privacy"] and fake.checks == []
+        assert status == 1
+        # The earlier stage, class and source line stay primary.
+        assert result["stage"] == "slow-frame" and result["diagnostic"]["stage"] == "slow-frame"
+        assert result["error_class"] == "assertion" and result["diagnostic"]["error_class"] == "assertion"
+        assert result["source_line"] == self.sentinel_line
+        assert result["diagnostic"]["source_line"] == self.sentinel_line
+        # The privacy failure is reported separately as a fixed class.
+        assert result["privacy_error_class"] == "assertion"
+        assert result["diagnostic"]["privacy_error_class"] == "assertion"
+        assert "FAIL: SSH acceptance at slow-frame" in output
 
     def test_privacy_only_failure_reports_privacy_stage(self):
-        status, result, output = self.run_main(primary_error=None, disclosure=True)
-        self.assertEqual(status, 1)
-        self.assertEqual((result["stage"], result["diagnostic"]["stage"]), ("privacy", "privacy"))
-        self.assertEqual(result["error_class"], "none")
-        self.assertEqual(result["source_line"], 0)
-        self.assertEqual((result["privacy_error_class"], result["diagnostic"]["privacy_error_class"]), ("assertion", "assertion"))
-        self.assertIn("FAIL: SSH acceptance at privacy", output)
+        _root, status, result, output, fake, stages = self.run_main(privacy=self.fail(self.privacy_canary))
+        assert stages == ["privacy"] and fake.stage == "privacy" and status == 1
+        # No primary failure, so privacy keeps the stage and its fixed class.
+        assert result["stage"] == "privacy" and result["diagnostic"]["stage"] == "privacy"
+        assert result["error_class"] == "none" and result["diagnostic"]["error_class"] == "none"
+        assert result["privacy_error_class"] == "assertion"
+        assert result["diagnostic"]["privacy_error_class"] == "assertion"
+        assert "FAIL: SSH acceptance at privacy" in output
 
-    def test_clean_privacy_scan_completes_with_no_privacy_class(self):
-        status, result, _output = self.run_main(primary_error=None, disclosure=False)
-        self.assertEqual(status, 0)
-        self.assertEqual((result["stage"], result["privacy_error_class"]), ("complete", "none"))
+    def test_clean_privacy_scan_reports_complete_with_no_privacy_class(self):
+        _root, status, result, output, fake, stages = self.run_main()
+        assert status == 0
+        assert result["stage"] == "complete" and result["diagnostic"]["stage"] == "complete"
+        assert result["privacy_error_class"] == "none" and result["diagnostic"]["privacy_error_class"] == "none"
+        assert fake.checks == ["full_public_outputs_and_observed_agent_wire_contain_no_factors_or_private_seed"]
+        assert "PASS: SSH acceptance at complete" in output
 
     def test_privacy_failure_class_is_a_fixed_value_never_exception_text(self):
-        canary = "PrivatePrivacyClassCanary-" + "c" * 48
-        for error, expected in ((ValueError(canary), "value"), (KeyError(canary), "key"), (RuntimeError(canary), "unexpected"),
+        canary = "PrivatePrivacyClassCanary-" + "d" * 48
+        value, key = ValueError(canary), KeyError(canary)
+        unwanted = RuntimeError(canary)
+        for error, expected in ((value, "value"), (key, "key"), (unwanted, "unexpected"),
                                 (acceptance.AcceptanceFailure("privacy-canary-disclosed"), "assertion"),
                                 (subprocess.TimeoutExpired([canary], 1), "timeout"), (OSError(canary), "os")):
-            self.assertEqual(acceptance.error_class(error), expected)
+            self.assertTrue(acceptance.error_class(error) == expected)
         runner = mock.Mock(privacy_error_class=canary)
         self.assertEqual(acceptance.public_diagnostic(runner)["privacy_error_class"], "unexpected")
 
