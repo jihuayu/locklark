@@ -1093,7 +1093,33 @@ func executeCLIAuthenticated(tool string, binding clibinding.ToolBinding, spec c
 	if err := request.Validate(targets); err != nil {
 		return cliUsage
 	}
-	controlInput, controlOutput, err := openRunCLIConsole()
+	return executeCLIAuthenticatedWithBroker(tool, binding, targets, request)
+}
+
+// executeCLIAuthenticatedWithBroker attempts the audited desktop broker path
+// on Darwin only. The existing local-factor path runs exactly once and only
+// after the exact browserhost.ErrBrokerUnavailable outcome; every other broker
+// outcome is returned without falling back.
+func executeCLIAuthenticatedWithBroker(tool string, binding clibinding.ToolBinding, targets []personal.BundleTarget, request personal.RunBundleRequest) error {
+	if cliRunBrokerEnabled() {
+		receipt, err := cliRunBrokerCall{Binding: binding, Targets: targets, Request: request}.run(context.Background())
+		if err = cliRunBrokerFailure(err); err != errCLIRunBrokerAbsent {
+			if err != nil {
+				return err
+			}
+			if receipt.ExitCode != 0 {
+				return &childExitStatus{code: receipt.ExitCode}
+			}
+			return nil
+		}
+	}
+	return executeCLILocalAuthenticated(tool, binding, targets, request)
+}
+
+// executeCLILocalAuthenticated is the existing local-factor path: it prompts
+// on the controlling terminal, records the local intent, and runs the child.
+func executeCLILocalAuthenticated(tool string, binding clibinding.ToolBinding, targets []personal.BundleTarget, request personal.RunBundleRequest) error {
+	controlInput, controlOutput, err := cliLocalConsoleOpen()
 	if err != nil {
 		return errRunCLIConsole
 	}

@@ -1635,6 +1635,49 @@ func TestRunBrokeredBundlePreparationReceivesExactSnapshot(t *testing.T) {
 	assertBrokeredValuesCleared(t, values, buffers)
 }
 
+// TestRunBrokeredBundleCallbackCopyOwnsItsStorage proves the preparation
+// callback receives no storage shared with the runner or the caller. The
+// callback's containers are cleared once it returns, before the runner renders
+// and executes, so a shallow copy would blank the runner's args, helper paths,
+// passthrough values, or targets. runBundle shares each of those with its
+// caller, so the caller's own values must survive too.
+func TestRunBrokeredBundleCallbackCopyOwnsItsStorage(t *testing.T) {
+	f := newBundleTestFixture(t)
+	targets := bundleTestTargets(f)
+	request := bundleTestRequest(t, f)
+	wantRequest := cloneBundleRequest(request)
+	wantTargets := append([]BundleTarget(nil), targets...)
+	create, roots := testBundleTempCreatorTracked(t)
+	executed := 0
+	receipt, err := runBrokeredBundle(context.Background(), targets, request, func(_ context.Context, _ string, gotRequest RunBundleRequest, gotTargets []BundleTarget) (RunBundlePreparationReceipt, map[string][]byte, error) {
+		if len(gotRequest.Args) == 0 || len(gotRequest.HelperPath) == 0 || len(gotRequest.Passthrough) == 0 || len(gotTargets) == 0 {
+			t.Fatal("preparation copy was empty before the callback ran")
+		}
+		return brokeredTestReceipt(), bundleTestValues(), nil
+	}, create, os.RemoveAll, func(_ context.Context, req RunBundleRequest, _ string, rendered cliprofile.RenderedBundle) (int, error) {
+		executed++
+		if !reflect.DeepEqual(req, wantRequest) {
+			t.Errorf("execution request was cleared by the callback copy's cleanup: %+v", req)
+		}
+		for name, want := range map[string]string{"GH_TOKEN": bundleTestPassword, "BUNDLE_TEST_REGION": "test-region", "NO_COLOR": "1"} {
+			if got, ok := bundleEnvValue(rendered, name); !ok || got != want {
+				t.Errorf("rendered environment %s was cleared by the callback copy's cleanup", name)
+			}
+		}
+		return 0, nil
+	})
+	if err != nil || executed != 1 {
+		t.Fatalf("brokered run: %v executed: %d", err, executed)
+	}
+	if receipt.Session != brokeredTestReceipt().Session {
+		t.Fatalf("receipt: %+v", receipt)
+	}
+	if !reflect.DeepEqual(request, cloneBundleRequest(wantRequest)) || !reflect.DeepEqual(targets, wantTargets) {
+		t.Fatal("caller request or targets were cleared through the callback copy")
+	}
+	assertBrokeredRootsRemoved(t, roots())
+}
+
 func TestRunBrokeredBundleRefusesMalformedPreparation(t *testing.T) {
 	f := newBundleTestFixture(t)
 	targets := bundleTestTargets(f)

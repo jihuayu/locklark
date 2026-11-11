@@ -505,9 +505,25 @@ func runBrokeredBundle(ctx context.Context, targets []BundleTarget, request RunB
 	if prepare == nil {
 		return RunReceipt{}, ErrRunTarget
 	}
-	return runBundle(ctx, targets, request, create, func(s *runBundleStoreRequest) (result, error) {
+	return runDetachedBundle(ctx, targets, request, create, func(s *runBundleStoreRequest) (result, error) {
 		return brokeredRunStore(ctx, s, prepare)
 	}, execute, remove)
+}
+
+// runDetachedBundle is runBundle over committed request and target storage the
+// runner owns exclusively. It is the brokered variant: the preparation
+// callback receives shallow copies of these snapshots and clears them in
+// place when it returns, before the runner renders and executes, so nothing
+// shared with the caller may back them. The plain runBundle shares the
+// caller's element and map storage through its shallow clones, which its own
+// read-only prepare never mutates.
+func runDetachedBundle(ctx context.Context, targets []BundleTarget, request RunBundleRequest, createTemp func() (string, error), prepare func(*runBundleStoreRequest) (result, error), execute func(context.Context, RunBundleRequest, string, cliprofile.RenderedBundle) (int, error), remove func(string) error) (RunReceipt, error) {
+	if ctx == nil {
+		return RunReceipt{}, ErrRunTarget
+	}
+	targets = append(make([]BundleTarget, 0, len(targets)), targets...)
+	request = detachRunBundleRequest(request)
+	return runBundle(ctx, targets, request, createTemp, prepare, execute, remove)
 }
 
 // bindBrokeredRunPreparation hands the callback the exact request and targets
@@ -521,11 +537,30 @@ func runBrokeredBundle(ctx context.Context, targets []BundleTarget, request RunB
 // immutable and may be shared, so callers must not treat this as a secure
 // wipe of string data. The runner's own snapshots are separate and are never
 // passed, so no mutation through these copies can reach them.
+//
+// The callback's copy must not share any backing array or map with the
+// runner's snapshots, because the clear runs when the callback returns, while
+// the runner still has to render the profile, sign the binding, and execute
+// the child. The runner's targets share their backing array with the caller's
+// slice (runBundle only copies the slice header), and runBundle clones the
+// request shallowly, so both are deep-copied here: a plain append(nil, ...)
+// or cloneRunBundleRequest would hand out the very storage that is cleared.
 func bindBrokeredRunPreparation(ctx context.Context, s *runBundleStoreRequest, prepare BrokeredRunPreparer) (receipt RunBundlePreparationReceipt, values map[string][]byte, err error) {
-	request := cloneRunBundleRequest(s.request)
-	targets := cloneBundleTargets(s.targets)
+	request := detachRunBundleRequest(s.request)
+	targets := append(make([]BundleTarget, 0, len(s.targets)), s.targets...)
 	defer clearBrokeredRunRequestCopy(&request, targets)
 	return prepare(ctx, s.root, request, targets)
+}
+
+// detachRunBundleRequest copies every mutable container of a run request into
+// fresh storage, so clearing the copy cannot reach the source. CloneSpec
+// already deep-copies the spec, including its nested deny-argument slices.
+func detachRunBundleRequest(request RunBundleRequest) RunBundleRequest {
+	request.Args = append(make([]string, 0, len(request.Args)), request.Args...)
+	request.HelperPath = append(make([]string, 0, len(request.HelperPath)), request.HelperPath...)
+	request.Passthrough = cloneStringMap(request.Passthrough)
+	request.Spec = cliprofile.CloneSpec(request.Spec)
+	return request
 }
 
 // clearBrokeredRunRequestCopy clears the mutable containers of a
