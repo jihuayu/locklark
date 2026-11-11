@@ -61,17 +61,18 @@ func cliRunTTYAttestedPlatform() bool { return true }
 // descriptor table, not its controlling terminal.
 //
 // A tty_nr is only a devpts major/minor, and separate devpts mounts in
-// different mount namespaces can reuse it, so the peer's mount namespace must
-// be this broker's before tty_nr names this broker's /dev/pts/N. The namespace
-// identity is compared before and after reading stat, so a peer that changes
-// mount namespace while it is looked up is rejected rather than resolved
-// against either namespace.
+// different mount namespaces, or in one mount namespace, can reuse it, so the
+// peer's mount namespace must be this broker's and the peer's mountinfo must
+// name exactly one devpts mount before tty_nr names this broker's /dev/pts/N.
+// The namespace identity and the mountinfo read are compared before and after
+// reading stat, so a peer that changes mount namespace or mounts while it is
+// looked up is rejected rather than resolved against either view.
 func peerControllingTerminal(pid int) (path string, rdev uint64, unit uint32, ok bool) {
 	if pid <= 0 {
 		return "", 0, 0, false
 	}
 	base := "/proc/" + strconv.Itoa(pid)
-	mnt, ok := mountNamespacePath(base + "/ns/mnt")
+	before, ok := peerDevptsMounts(base)
 	if !ok {
 		return "", 0, 0, false
 	}
@@ -79,7 +80,8 @@ func peerControllingTerminal(pid int) (path string, rdev uint64, unit uint32, ok
 	if e != nil {
 		return "", 0, 0, false
 	}
-	if after, ok := mountNamespacePath(base + "/ns/mnt"); !ok || !os.SameFile(mnt, after) {
+	after, ok := peerDevptsMounts(base)
+	if !ok || !after.equal(before) {
 		return "", 0, 0, false
 	}
 	// tty_nr is field 7 (1-based). Fields after the parenthesised command
@@ -131,6 +133,99 @@ func peerControllingTerminal(pid int) (path string, rdev uint64, unit uint32, ok
 	}
 	minor, _ := devUnit(dev)
 	return path, dev, minor, true
+}
+
+// devptsMount is the identity of the one devpts mount a peer's mountinfo may
+// name: the mount ID and mount point of PTS 9. Every other field of a devpts
+// record is kernel-owned mount state and can change after a remount, so it is
+// not compared.
+type devptsMount struct {
+	id   string
+	path string
+}
+
+// equal reports whether two reads observe the same single devpts mount.
+func (d devptsMount) equal(other devptsMount) bool {
+	return d.id != "" && d == other
+}
+
+// peerDevptsMounts verifies that base's process shares this broker's mount
+// namespace and names exactly one devpts mount in /proc/PID/mountinfo, and
+// returns that mount's identity. A read error, a namespace mismatch, any
+// malformed mountinfo line, no devpts record, or more than one devpts record
+// (for example a bind mount or a second devpts instance in one namespace) is
+// ambiguous and returns false.
+func peerDevptsMounts(base string) (devptsMount, bool) {
+	if _, ok := mountNamespacePath(base + "/ns/mnt"); !ok {
+		return devptsMount{}, false
+	}
+	data, e := os.ReadFile(base + "/mountinfo")
+	if e != nil {
+		return devptsMount{}, false
+	}
+	return parseSingleDevptsMount(data)
+}
+
+// parseSingleDevptsMount parses /proc/PID/mountinfo and returns the identity of
+// its single devpts mount. Each line is split on whitespace (spaces, tabs and
+// newlines inside paths and sources are kernel-escaped, so they never split a
+// field) and must be one well-formed record: mount ID, parent ID,
+// major:minor, root, mount point and mount options, then exactly one "-"
+// separator, then filesystem type, mount source and super options. The IDs and
+// major:minor must parse as integers. The optional fields between mount
+// options and the separator are zero or more tag[:value] tokens; unknown tags
+// are ignored, as the kernel's documentation requires. The filesystem type is
+// the first field after "-". Any malformed line rejects the whole input, so
+// no listing is ever trusted partially.
+func parseSingleDevptsMount(data []byte) (devptsMount, bool) {
+	var found devptsMount
+	count := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		sep := -1
+		for i, field := range fields {
+			if field == "-" {
+				sep = i
+				break
+			}
+		}
+		if sep < 6 || len(fields) < sep+3 {
+			return devptsMount{}, false
+		}
+		if !decimalUint(fields[0]) || !decimalUint(fields[1]) || !majorMinor(fields[2]) {
+			return devptsMount{}, false
+		}
+		if fields[sep+1] == "devpts" {
+			count++
+			found = devptsMount{id: fields[0], path: fields[4]}
+		}
+	}
+	if count != 1 {
+		return devptsMount{}, false
+	}
+	return found, true
+}
+
+// decimalUint reports whether s is one or more decimal digits.
+func decimalUint(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// majorMinor reports whether s is one decimal major:minor pair.
+func majorMinor(s string) bool {
+	major, minor, ok := strings.Cut(s, ":")
+	return ok && decimalUint(major) && decimalUint(minor)
 }
 
 // mountNamespacePath stats one /proc/PID/ns/mnt link and accepts it only when

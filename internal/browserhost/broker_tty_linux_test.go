@@ -7,7 +7,10 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 // otherTTYDev returns another devpts minor than dev, so a declared terminal
@@ -212,17 +215,146 @@ func TestLinuxMountNamespacePathIdentity(t *testing.T) {
 	}
 }
 
-// TestLinuxSelfMountNamespaceAttestation checks that this process's own
-// controlling terminal is still attested when peer and broker share one mount
-// namespace; a process without a controlling terminal fails closed.
+// TestLinuxSelfMountNamespaceAttestation checks self-attestation when peer and
+// broker share one mount namespace. A process without a controlling terminal
+// must yield the empty unavailable result and nothing else; only a positive
+// result has a path and unit to check. This is not positive TTY coverage: see
+// TestLinuxCurrentTTYIdentityRealPTY.
 func TestLinuxSelfMountNamespaceAttestation(t *testing.T) {
 	path, dev, unit, ok := peerControllingTerminal(os.Getpid())
 	if !ok {
+		if path != "" || dev != 0 || unit != 0 {
+			t.Fatalf("unavailable self attestation = %q 0x%x %d, want empty", path, dev, unit)
+		}
 		if path, _, _, selfOK := peerControllingTerminal(os.Getpid()); selfOK {
 			t.Fatalf("inconsistent self attestations: %q", path)
 		}
+		return
 	}
 	if want := "/dev/pts/" + strconv.FormatUint(uint64(devMinor(dev)), 10); path != want || unit != devMinor(dev) {
 		t.Fatalf("self attestation = %q unit %d want %q", path, unit, want)
 	}
+}
+
+// mountinfoFixture returns a mountinfo listing with one root, one proc, and the
+// given extra records, in the kernel's field order: mount ID, parent ID,
+// major:minor, root, mount point, mount options, zero or more optional
+// tag[:value] fields, "-", filesystem type, mount source, super options.
+func mountinfoFixture(extra ...string) string {
+	lines := []string{
+		"22 1 8:1 / / rw,relatime shared:1 - ext4 /dev/sda1 rw",
+		"23 22 0:52 / /proc rw,nosuid,nodev,noexec,relatime shared:5 - proc proc rw",
+	}
+	return strings.Join(append(lines, extra...), "\n") + "\n"
+}
+
+// TestLinuxParseSingleDevptsMount pins the pure mountinfo parser: exactly one
+// devpts record is accepted, zero or duplicate (bind) records are rejected as
+// ambiguous, and a malformed listing rejects the whole input. Optional fields
+// follow the kernel grammar (tag[:value]), and unknown tags are ignored.
+func TestLinuxParseSingleDevptsMount(t *testing.T) {
+	devpts := "108 27 0:47 / /dev/pts rw,nosuid,noexec,relatime shared:50 master:27 - devpts devpts rw,gid=5,mode=620,ptmxmode=000"
+	unbindable := "108 27 0:47 / /dev/pts rw,nosuid,noexec,relatime unbindable - devpts devpts rw,gid=5,mode=620,ptmxmode=000"
+	unknown := "108 27 0:47 / /dev/pts rw,nosuid,noexec,relatime readonly future_tag - devpts devpts rw,gid=5,mode=620,ptmxmode=000"
+	noOptional := "108 27 0:47 / /dev/pts rw,nosuid,noexec,relatime - devpts devpts rw,gid=5,mode=620,ptmxmode=000"
+	bindA := "109 27 0:47 / /srv/pty-bind rw,nosuid,noexec,relatime shared:50 master:27 - devpts devpts rw,gid=5,mode=620,ptmxmode=000"
+	bindB := "110 27 0:48 / /dev/pts-2 rw,nosuid,noexec,relatime - devpts devpts rw,gid=5,mode=620,ptmxmode=000"
+	optional := "111 22 0:53 / /sys/fs/cgroup rw,nosuid,nodev,noexec,relatime shared:7 master:1 propagate_from:2 - cgroup2 cgroup2 rw,nsdelegate"
+
+	for _, tc := range []struct {
+		name   string
+		data   string
+		id     string
+		path   string
+		accept bool
+	}{
+		{"exactly one devpts", mountinfoFixture(devpts, optional), "108", "/dev/pts", true},
+		{"devpts only", devpts + "\n", "108", "/dev/pts", true},
+		{"devpts with unbindable optional", mountinfoFixture(unbindable), "108", "/dev/pts", true},
+		{"devpts with unknown optional tag", mountinfoFixture(unknown), "108", "/dev/pts", true},
+		{"devpts with no optional fields", mountinfoFixture(noOptional), "108", "/dev/pts", true},
+		{"devpts with tab separated fields", strings.ReplaceAll(noOptional, " ", "\t") + "\n", "108", "/dev/pts", true},
+		{"no devpts", mountinfoFixture(optional), "", "", false},
+		{"empty input", "", "", "", false},
+		{"two bind devpts records", mountinfoFixture(devpts, bindA), "", "", false},
+		{"two devpts instances", mountinfoFixture(devpts, bindB), "", "", false},
+		{"devpts named as mount source only", mountinfoFixture("120 22 0:54 / /srv/pts rw - tmpfs devpts rw"), "", "", false},
+		{"missing filesystem type", mountinfoFixture("121 22 0:55 / /dev/pts rw - "), "", "", false},
+		{"missing mount source", mountinfoFixture("121 22 0:55 / /dev/pts rw - devpts"), "", "", false},
+		{"missing separator", mountinfoFixture("122 22 0:56 / /dev/pts rw devpts devpts rw"), "", "", false},
+		{"two separators", mountinfoFixture("122 22 0:56 / /dev/pts rw - - devpts rw"), "", "", false},
+		{"too few fields before separator", mountinfoFixture("123 22 0:57 / - devpts devpts rw"), "", "", false},
+		{"non-numeric mount id", mountinfoFixture("x23 22 0:57 / /dev/pts rw - devpts devpts rw"), "", "", false},
+		{"non-numeric parent id", mountinfoFixture("123 p22 0:57 / /dev/pts rw - devpts devpts rw"), "", "", false},
+		{"devpts mount major:minor without colon", mountinfoFixture("126 22 047 / /dev/pts rw - devpts devpts rw"), "", "", false},
+		{"non-numeric major", mountinfoFixture("126 22 0x:47 / /dev/pts rw - devpts devpts rw"), "", "", false},
+		{"malformed line beside valid devpts", mountinfoFixture(devpts, "garbage"), "", "", false},
+		{"lone separator beside valid devpts", mountinfoFixture(devpts, "-"), "", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := parseSingleDevptsMount([]byte(tc.data))
+			if ok != tc.accept {
+				t.Fatalf("accept = %v, want %v", ok, tc.accept)
+			}
+			if got.id != tc.id || got.path != tc.path {
+				t.Fatalf("mount = %+v, want id %q path %q", got, tc.id, tc.path)
+			}
+			if !ok && got != (devptsMount{}) {
+				t.Fatalf("rejected input returned %+v", got)
+			}
+		})
+	}
+}
+
+// TestLinuxPeerDevptsMounts checks the read side of the devpts check against
+// this process's own /proc entry: it accepts only when this process's real
+// mountinfo parses to exactly one devpts mount, and always with that record's
+// identity. A path with no mountinfo is unavailable.
+func TestLinuxPeerDevptsMounts(t *testing.T) {
+	base := "/proc/" + strconv.Itoa(os.Getpid())
+	want, wantOK := parseSingleDevptsMount(mustReadMountinfo(t, base+"/mountinfo"))
+	got, ok := peerDevptsMounts(base)
+	if ok != wantOK || got != want {
+		t.Fatalf("peerDevptsMounts(self) = %+v,%v want %+v,%v", got, ok, want, wantOK)
+	}
+	t.Logf("self mountinfo single devpts %+v ok=%v", want, wantOK)
+	if _, ok := peerDevptsMounts(t.TempDir()); ok {
+		t.Fatal("directory without mountinfo accepted")
+	}
+}
+
+// mustReadMountinfo reads one real mountinfo file, failing the test if this
+// host does not expose it.
+func mustReadMountinfo(t *testing.T, path string) []byte {
+	t.Helper()
+	data, e := os.ReadFile(path)
+	if e != nil {
+		t.Fatalf("read %s: %v", path, e)
+	}
+	return data
+}
+
+// TestLinuxCurrentTTYIdentityRealPTY is the Linux client-side smoke test: the
+// test binary's own controlling pty is attested through the devpts mount check
+// and identified through the production CurrentTTYIdentity path. It skips only
+// when the process truly has no controlling terminal (and fails instead under
+// the PTY smoke fixture).
+func TestLinuxCurrentTTYIdentityRealPTY(t *testing.T) {
+	node, nodeDev := trustableTTYNode(t)
+	name, peerID, e := CurrentTTYIdentity()
+	if e != nil {
+		t.Fatalf("CurrentTTYIdentity: %v", e)
+	}
+	unit, _ := devUnit(nodeDev)
+	if name != node || peerID != encodeTTYPeerID(unit) {
+		t.Fatalf("identity %q %q, want %q %q", name, peerID, node, encodeTTYPeerID(unit))
+	}
+	if got, ok := parseTTYPeerID(peerID); !ok || got != unit {
+		t.Fatalf("peer id %q does not round trip to unit %d", peerID, unit)
+	}
+	var info unix.Stat_t
+	if e := unix.Stat(name, &info); e != nil || uint64(info.Rdev) != nodeDev {
+		t.Fatalf("stat %s does not confirm 0x%08x: %v", name, nodeDev, e)
+	}
+	t.Logf("attested controlling terminal %s dev=0x%08x unit=%d peer_id=%s", name, nodeDev, unit, peerID)
 }
