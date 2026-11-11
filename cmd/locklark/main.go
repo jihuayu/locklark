@@ -64,6 +64,10 @@ PERSONAL VAULT (locklark personal <action> --file PATH ...)
     personal passkey-plan                             --file PATH --invitation FILE --packet FILE --source-pin HEX64
     personal passkey-import                           --file PATH --invitation FILE --packet FILE --source-pin HEX64 --digest HEX64 --mapping PRIVATE_JSON
 
+  OneDrive OAuth (OS credential store, refresh token only)
+    personal onedrive login                           --client-id ID --tenant TENANT --scopes SCOPE_LIST
+    personal onedrive status|logout                   --client-id ID --tenant TENANT
+
 CLI WRAPPERS (locklark cli <command> ...)
   cli profiles
   cli list       [--binding PATH]
@@ -118,6 +122,7 @@ SYNTHETIC GATEWAY PREVIEW & MCP BRIDGE
 
 NOTES
   - Passwords, Secret Keys, search queries, and consent phrases are read only from an interactive hidden terminal.
+  - onedrive login|status|logout store only a OneDrive refresh token, in the OS credential store, never a plaintext fallback.
   - Run "locklark <personal|cli|team|plugin> --help" for detailed group help.
   - The metadata request command accepts only ` + preview.FixtureRef + `.
   - request records a pending request. It cannot release any credential.

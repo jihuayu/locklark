@@ -332,6 +332,16 @@ func (c *Callback) stopListening() {
 	})
 }
 
+// Close finalizes the flow, with an abort when no outcome was settled yet, and
+// releases the listener, so a caller that is done with the callback, on success,
+// failure or cancellation, needs no further cleanup. It is idempotent, never
+// blocks on an HTTP shutdown, and always returns nil: the only outcome that
+// remains after it is the settled one, which Wait returns.
+func (c *Callback) Close() error {
+	c.close()
+	return nil
+}
+
 // close finalizes the flow with an abort if no outcome was settled yet, then
 // releases the server in the background. It is idempotent and never blocks on
 // an HTTP shutdown.
