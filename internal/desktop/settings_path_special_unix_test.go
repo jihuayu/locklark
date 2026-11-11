@@ -13,9 +13,11 @@ import (
 
 // TestValidateSettingsFilePathRejectsSpecialFiles proves that an existing
 // non-regular settings path (a FIFO that would block LoadSettings, or a device
-// such as /dev/zero that would read unbounded data) fails closed before
-// startup with the fixed ErrSettingsPath. It never touches the GUI or the
-// per-user settings file.
+// such as /dev/zero that would read unbounded data) fails closed with the
+// fixed ErrSettingsPath. It only exercises validateSettingsFilePath: handing
+// these paths to RunWithSettingsPath would start the GUI if validation
+// regressed. RunWithSettingsPath's pre-startup rejection is covered by
+// TestValidateSettingsFilePath in settings_args_test.go.
 func TestValidateSettingsFilePathRejectsSpecialFiles(t *testing.T) {
 	dir := t.TempDir()
 	fifo := filepath.Join(dir, "settings.fifo")
@@ -38,9 +40,6 @@ func TestValidateSettingsFilePathRejectsSpecialFiles(t *testing.T) {
 		got, err := validateSettingsFilePath(path)
 		if got != "" || !errors.Is(err, ErrSettingsPath) || strings.Contains(err.Error(), path) {
 			t.Errorf("%s: validateSettingsFilePath(%q) = %q, %v; want path-free ErrSettingsPath", name, path, got, err)
-		}
-		if err := RunWithSettingsPath(path); !errors.Is(err, ErrSettingsPath) {
-			t.Errorf("%s: RunWithSettingsPath did not refuse the path before startup: %v", name, err)
 		}
 	}
 	if got, err := validateSettingsFilePath(regular); err != nil || got != regular {
