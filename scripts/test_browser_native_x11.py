@@ -1,7 +1,10 @@
 """Pure readiness tests; no X server, native values, or approval actions."""
 import unittest
+import io
 import json
 import ctypes
+import os
+import tempfile
 import types
 from unittest.mock import Mock, patch
 
@@ -310,6 +313,457 @@ class WindowViewabilityTests(unittest.TestCase):
                     input()
                 input.assert_not_called()
         native.check_x_target_errors([(3,9)],5)  # Other popup destruction only.
+
+
+def owner_request(**overrides):
+    # Synthetic fixture values exist only inside this process; no test prints
+    # them and the driver never echoes them.
+    request = {
+        "owner": True,
+        "title": "chooser-probe-title",
+        "title_prefix": "chooser-probe-title",
+        "chooser_title_prefix": "chooser-prefix.",
+        "owner_title_prefix": "manager-prefix",
+        "user_data_dir": "/synthetic/profile-1",
+        "executable": "/synthetic/edge",
+        "preserve_focus": True,
+        "owner_pid": 101,
+        "actions": [{"text": "-none"}],
+    }
+    request.update(overrides)
+    return request
+
+
+def probe_request(**overrides):
+    # The exact zero-action attribution shape used for the real chooser.
+    request = {
+        "ownership_probe": True,
+        "owner_title_prefix": "Extensions",
+        "chooser_title_prefix": "Select the extension directory.",
+        "user_data_dir": "/synthetic/profile-1",
+        "executable": "/opt/microsoft/msedge/microsoft-edge",
+    }
+    request.update(overrides)
+    return request
+
+
+class ChooserContractTests(unittest.TestCase):
+    def test_exact_owner_profile_and_actions_are_accepted(self):
+        parsed = native.parse_owner_request(owner_request())
+        self.assertEqual(set(parsed), set(native.OWNER_FIELDS) | {"owner_pid", "probe"})
+        self.assertEqual(parsed["owner_pid"], 101)
+        self.assertIs(parsed["probe"], False)
+
+    def test_zero_action_probe_derives_its_own_pid(self):
+        parsed = native.parse_owner_request(probe_request())
+        self.assertEqual(set(parsed), set(native.OWNER_FIELDS) | {"probe"})
+        self.assertIs(parsed["probe"], True)
+        self.assertNotIn("owner_pid", parsed)
+        self.assertEqual(parsed["owner_title_prefix"], "Extensions")
+        self.assertEqual(parsed["chooser_title_prefix"], "Select the extension directory.")
+        # No actions at all, or an explicitly empty list, is the zero-action
+        # probe; preserve_focus is irrelevant and may be absent or true.
+        for request in (probe_request(actions=[]), probe_request(preserve_focus=True)):
+            with self.subTest(request=request):
+                self.assertEqual(native.parse_owner_request(request)["probe"], True)
+
+    def test_unrelated_or_malformed_fields_are_rejected(self):
+        cases = {
+            "other profile": owner_request(user_data_dir="/synthetic/profile-2/"),
+            "relative profile": owner_request(user_data_dir="relative/profile"),
+            "profile newline": owner_request(user_data_dir="/synthetic/a\nb"),
+            "other executable": owner_request(executable="edge.bin"),
+            "other title": owner_request(chooser_title_prefix=""),
+            "non-ascii title": owner_request(owner_title_prefix="管理器"),
+            "focus not preserved": owner_request(preserve_focus=False),
+            "unrelated title prefix": owner_request(title_prefix="other-prefix"),
+            "pid string": owner_request(owner_pid="101"),
+            "pid root": owner_request(owner_pid=1),
+            "no actions": owner_request(actions=[]),
+            "unknown action field": owner_request(actions=[{"click": [1, 2]}]),
+            "non-ascii text": owner_request(actions=[{"text": "路径"}]),
+            "escape key": owner_request(actions=[{"key": "a+b+c"}]),
+            "owner mapping": owner_request(owner={"x": 1}),
+            "owner false": owner_request(owner=False),
+            "unknown field": owner_request(extra="x"),
+            "missing mode marker": {key: value for key, value in owner_request().items()
+                                    if key != "owner"},
+            "probe false": probe_request(ownership_probe=False),
+            "probe actions": probe_request(actions=[{"key": "Return"}]),
+            "probe caller pid": probe_request(owner_pid=101),
+            "probe title": probe_request(title="chooser-probe-title"),
+            "probe unknown field": probe_request(extra="x"),
+            "probe focus false": probe_request(preserve_focus=False),
+            "probe missing executable": probe_request(executable=None),
+            "both modes": probe_request(owner=True),
+            "input also probe": owner_request(ownership_probe=True),
+        }
+        for name, request in cases.items():
+            with self.subTest(name):
+                self.assertIsNone(native.parse_owner_request(request))
+        # Printable spaces are legal in a title prefix and in an absolute path.
+        self.assertIsNotNone(native.parse_owner_request(
+            owner_request(user_data_dir="/synthetic/a b")))
+        self.assertIsNone(native.parse_owner_request([]))
+
+    def test_safe_owner_record_has_only_fixed_classes(self):
+        for relation in ("transient-leader", "process-parent"):
+            self.assertEqual(native.safe_owner_record({"owned": True, "relation": relation}),
+                             {"owned": True, "relation": relation})
+        self.assertEqual(native.safe_owner_record({"owned": False, "relation": "none"}),
+                         {"owned": False, "relation": "none"})
+        # Raw title/pid/path/cmdline/property values are never copied through.
+        self.assertEqual(
+            native.safe_owner_record({"owned": True, "relation": "transient-leader",
+                                      "title": "secret", "pid": 101, "path": "/p",
+                                      "cmdline": "c", "property": [1, 2]}),
+            {"owned": True, "relation": "transient-leader"})
+        for value in (None, {}, {"owned": True, "relation": "other"}, {"owned": "yes"},
+                      {"owned": False, "relation": "process-parent"}):
+            self.assertIsNone(native.safe_owner_record(value))
+
+    def test_probe_output_has_only_the_fixed_class(self):
+        record = {"owned": True, "relation": "process-parent",
+                  "title": "secret", "pid": 101, "cmdline": "c", "property": [1]}
+        self.assertEqual(native.probe_output(record),
+                         {"ownership": {"owned": True, "relation": "process-parent"}})
+        self.assertIsNone(native.probe_output(None))
+        self.assertIsNone(native.probe_output({"owned": True, "relation": "other"}))
+
+    def test_title_matches_is_minimal_and_fixed(self):
+        self.assertTrue(native.title_matches("Extensions - Profile", "Extensions"))
+        self.assertFalse(native.title_matches("extensions", "Extensions"))
+        self.assertFalse(native.title_matches("Extensions", ""))
+        self.assertFalse(native.title_matches("Extensions", None))
+        self.assertFalse(native.title_matches(None, "Extensions"))
+        self.assertFalse(native.title_matches("bad\n", "bad"))
+
+
+class ChooserRelationTests(unittest.TestCase):
+    def properties(self, overrides=None):
+        values = {("WM_TRANSIENT_FOR", None): [11],
+                  ("WM_TRANSIENT_FOR", 11): [11],
+                  ("WM_CLIENT_LEADER", None): [11],
+                  ("_NET_WM_PID", None): [101],
+                  ("_NET_WM_PID", 101): [101],
+                  ("_NET_WM_PID", 11): [101],
+                  ("WM_CLIENT_LEADER", 11): [11],
+                  ("WM_CLIENT_LEADER", 101): [11]}
+        values.update(overrides or {})
+        return lambda name, window: ({"status": "missing"} if values[(name, window)] is None
+                                     else {"status": "ok", "values": values[(name, window)]})
+
+    def test_linked_chooser_and_exact_profile_process_are_accepted(self):
+        prop = self.properties()
+        self.assertIsNone(native.check_chooser_relations(prop, 11, 101))
+        record, reason = native.prove_chooser_ownership("wm", prop, 101, 11, 11, None)
+        self.assertIsNone(reason)
+        self.assertEqual(record, {"owned": True, "relation": "transient-leader"})
+        process = self.properties({("_NET_WM_PID", None): [211]})
+        self.assertEqual(native.prove_chooser_ownership("process", process, 101, 11, 211,
+                                                        lambda owner, pid: (owner, pid) == (101, 211)),
+                         ({"owned": True, "relation": "process-parent"}, None))
+
+    def test_missing_owner_leader_falls_back_to_the_exact_same_process(self):
+        # Edge 157 does not set WM_CLIENT_LEADER on the Extensions window; the
+        # chooser is still transient of it and carries the exact same PID.
+        prop = self.properties({("WM_CLIENT_LEADER", 11): None,
+                                ("_NET_WM_PID", None): [101]})
+        self.assertIsNotNone(native.check_chooser_relations(prop, 11, 101))
+        self.assertIsNone(native.prove_chooser_ownership(
+            "wm", prop, 101, 11, 101, None)[0])
+        record, reason = native.prove_chooser_ownership(
+            "process", prop, 101, None, 101,
+            lambda owner, pid: owner == pid == 101)
+        self.assertEqual(record, {"owned": True, "relation": "process-parent"})
+        self.assertIsNone(reason)
+
+    def test_property_single_int_never_treats_a_record_as_values(self):
+        self.assertEqual(native.property_single_int({"status": "ok", "values": [101]}), 101)
+        for record in ({"status": "ok", "values": [101, 102]}, {"status": "missing"},
+                       {"status": "malformed"}, {"status": "ok", "values": ["101"]},
+                       {"status": "ok", "values": [0x100000000]}, None, []):
+            with self.subTest(record=record):
+                self.assertIsNone(native.property_single_int(record))
+
+    def test_unlinked_chooser_is_rejected(self):
+        cases = (
+            {("WM_TRANSIENT_FOR", None): None},
+            {("WM_TRANSIENT_FOR", None): [0]},
+            {("WM_TRANSIENT_FOR", None): [11, 11]},
+            {("WM_CLIENT_LEADER", None): None},
+            {("WM_CLIENT_LEADER", None): [12]},
+            {("WM_CLIENT_LEADER", None): [11, 11]},
+            {("WM_CLIENT_LEADER", None): [11, 12]},
+            {("WM_CLIENT_LEADER", 11): None},
+            {("WM_CLIENT_LEADER", 11): [12]},
+            {("_NET_WM_PID", 11): None},
+            {("_NET_WM_PID", 11): [102]},
+            {("_NET_WM_PID", 11): [101, 102]},
+        )
+        for override in cases:
+            with self.subTest(override=list(override)):
+                prop = self.properties(override)
+                self.assertIsNotNone(native.check_chooser_relations(prop, 11, 101))
+                self.assertIsNone(native.prove_chooser_ownership("wm", prop, 101, 11, 11, None)[0])
+        refused = lambda name, window: {"status": "refused"}
+        self.assertIsNone(native.prove_chooser_ownership("wm", refused, 101, 11, 11, None)[0])
+        self.assertIsNone(native.prove_chooser_ownership("wm", self.properties(), 101, 0, 11, None)[0])
+
+    def test_process_mode_requires_the_actual_owner_pid(self):
+        prop = self.properties()
+        for owner, candidate, relation in ((101, 202, False), (101, 101, False),
+                                           (101, 202, None), (101, 102, True),
+                                           (0, 202, True), (101, "202", True)):
+            with self.subTest(owner=owner, candidate=candidate):
+                self.assertIsNone(native.prove_chooser_ownership(
+                    "process", prop, owner, 11, candidate, lambda _o, _p, r=relation: r)[0])
+        self.assertIsNone(native.prove_chooser_ownership("other", prop, 101, 11, 11, None)[0])
+
+    def proc_stat(self, parents):
+        def open_proc(path, mode):
+            pid = int(path.split("/")[2])
+            if pid not in parents:
+                raise FileNotFoundError
+            text = b"1 (name with ) paren) S " + str(parents[pid]).encode() + b" rest"
+            return io.BytesIO(text)
+        return open_proc
+
+    def test_unrelated_process_parent_chain_is_rejected(self):
+        for parents, owner, candidate in (
+            ({211: 2}, 101, 211),
+            ({211: 303, 303: 2}, 101, 211),
+            ({211: 212, 212: 213, 213: 211}, 101, 211),  # Cycle never reaches the owner.
+            ({211: 101}, 101, 0),
+        ):
+            with self.subTest(owner=owner, candidate=candidate), \
+                    patch("builtins.open", side_effect=self.proc_stat(parents)):
+                self.assertFalse(native.chooser_pid_relation(owner, candidate))
+        self.assertFalse(native.chooser_pid_relation("101", 211))
+        self.assertFalse(native.chooser_pid_relation(101, "211"))
+
+    def test_actual_bounded_parent_chain_is_accepted(self):
+        self.assertTrue(native.chooser_pid_relation(101, 101))
+        parents = {211: 101, 212: 211}
+        with patch("builtins.open", side_effect=self.proc_stat(parents)):
+            self.assertTrue(native.chooser_pid_relation(101, 211))
+            self.assertTrue(native.chooser_pid_relation(101, 212))
+        deep = {pid: pid - 1 for pid in range(2, 20)}
+        with patch("builtins.open", side_effect=self.proc_stat(deep)):
+            self.assertFalse(native.chooser_pid_relation(1, 19))
+
+    def test_owner_process_requires_exact_executable_and_profile(self):
+        def fake_readlink(link):
+            return {"/proc/101/exe": "/synthetic/edge",
+                    "/proc/102/exe": "/synthetic/edge-helper"}[link]
+        owner = native.parse_owner_request(owner_request())
+        cmdline = lambda path, mode: io.BytesIO(
+            b"/synthetic/edge\0--user-data-dir=/synthetic/profile-1\0--headless\0")
+        with patch.object(native.os, "readlink", side_effect=fake_readlink), \
+                patch("builtins.open", side_effect=cmdline):
+            self.assertEqual(native.owner_process_matches(101, owner), 101)
+            self.assertIsNone(native.owner_process_matches(102, owner))
+            other = native.parse_owner_request(owner_request(user_data_dir="/synthetic/profile-2"))
+            self.assertIsNone(native.owner_process_matches(101, other))
+            with patch.object(native.os, "readlink", side_effect=OSError):
+                self.assertIsNone(native.owner_process_matches(101, owner))
+        # A duplicate exact profile switch is never a second match.
+        duplicate = lambda path, mode: io.BytesIO(
+            b"/synthetic/edge\0--user-data-dir=/synthetic/profile-1\0"
+            b"--user-data-dir=/synthetic/profile-1\0")
+        with patch.object(native.os, "readlink", side_effect=fake_readlink), \
+                patch("builtins.open", side_effect=duplicate):
+            self.assertIsNone(native.owner_process_matches(101, owner))
+        # A command line without its terminating NUL is truncated; so is an
+        # over-limit read. Both refuse instead of matching a prefix token.
+        for truncated in (
+            b"/synthetic/edge\0--user-data-dir=/synthetic/profile-1",
+            b"--user-data-dir=/synthetic/profile-1\0" + b"a" * native.CMDLINE_MAX,
+        ):
+            with self.subTest(size=len(truncated)), \
+                    patch.object(native.os, "readlink", side_effect=fake_readlink), \
+                    patch("builtins.open", side_effect=lambda p, m, data=truncated:
+                          io.BytesIO(data)):
+                self.assertIsNone(native.owner_process_matches(101, owner))
+        with patch.object(native.os, "readlink", side_effect=fake_readlink), \
+                patch("builtins.open", side_effect=FileNotFoundError):
+            self.assertIsNone(native.owner_process_matches(101, owner))
+
+    def test_owner_process_compares_the_real_executable_image(self):
+        with tempfile.TemporaryDirectory() as directory:
+            real = os.path.join(directory, "edge-real")
+            link = os.path.join(directory, "edge")
+            other = os.path.join(directory, "edge-other")
+            for path in (real, other):
+                with open(path, "w"):
+                    pass
+            os.symlink(real, link)
+            owner = native.parse_owner_request(owner_request(executable=link))
+            cmdline = lambda path, mode: io.BytesIO(
+                ("/synthetic/edge\0--user-data-dir=" + owner["user_data_dir"] + "\0").encode())
+            # Patch the /proc link read, not os.readlink: realpath itself uses
+            # os.readlink to resolve the symlink under test.
+            with patch.object(native, "read_proc_link", return_value=real), \
+                    patch("builtins.open", side_effect=cmdline):
+                self.assertEqual(native.owner_process_matches(101, owner), 101)
+            with patch.object(native, "read_proc_link", return_value=other), \
+                    patch("builtins.open", side_effect=cmdline):
+                self.assertIsNone(native.owner_process_matches(101, owner))
+
+
+class ChooserOwnerChainTests(unittest.TestCase):
+    def test_owner_chain_requires_unique_linked_terminal(self):
+        owner = (11, 101, True)
+        # The unique owner window itself is the normal transient terminal.
+        self.assertTrue(native.window_chain_ok(owner, [11], [11]))
+        self.assertTrue(native.window_chain_ok(owner, [11], [12]))
+        self.assertFalse(native.window_chain_ok(owner, [11], [0]))
+        self.assertFalse(native.window_chain_ok(owner, [11], [11, 11]))
+        for bad in ((owner, [11, 12], [11]), (owner, [12], [11]), ((11, 0, True), [11], [11]),
+                    ((11, 101, False), [11], [11]), ((11, 101, True), [], [11]),
+                    (owner, [11], []), (owner, [11], [11, 11]), (owner, [11], [12, 13]),
+                    (None, [11], [11])):
+            with self.subTest(bad=bad):
+                self.assertFalse(native.window_chain_ok(*bad))
+
+
+class ChooserXlibTests(unittest.TestCase):
+    def test_children_come_from_loaded_xlib_functions(self):
+        calls = []
+
+        array = (ctypes.c_ulong * 2)(21, 22)
+
+        class Lib:
+            def XQueryTree(self, display, parent, root_out, parent_out, result_out, count_out):
+                calls.append((display, parent))
+                # ctypes gives a plain python callable fresh CArgObject
+                # wrappers; the scratch array is written through its address.
+                ctypes.cast(result_out, ctypes.POINTER(ctypes.c_void_p))[0] = ctypes.addressof(array)
+                count_out._obj.value = 2
+                return 1
+
+            def XFree(self, pointer):
+                calls.append("free")
+
+        self.assertEqual(native.query_children(Lib(), "display", 5), [21, 22])
+        self.assertEqual(calls, [("display", 5), "free"])
+
+    def test_refused_tree_query_fails_closed(self):
+        class Lib:
+            def XQueryTree(self, *args):
+                return 0
+
+        with self.assertRaisesRegex(RuntimeError, "X window query refused"):
+            native.query_children(Lib(), "display", 5)
+        with self.assertRaises(RuntimeError):
+            native.query_children(Lib(), "display", 0)
+
+    def property_lib(self, values, status=0, actual=7, fmt=32, remaining=0):
+        kept = []
+        class Lib:
+            def XInternAtom(self, display, name, only_if_exists):
+                return 7
+
+            def XGetWindowProperty(self, display, window, atom, offset, length,
+                                   delete, request, actual_out, format_out,
+                                   count_out, remaining_out, data_out):
+                array = (ctypes.c_ulong * max(1, len(values)))(*values)
+                if status == 0 and values:
+                    kept.append(array)
+                    data_out._obj.value = ctypes.addressof(array)
+                actual_out._obj.value = actual
+                format_out._obj.value = fmt
+                count_out._obj.value = len(values)
+                remaining_out._obj.value = remaining
+                return status
+
+            def XFree(self, pointer):
+                return None
+
+        return Lib()
+
+    def test_transient_parents_are_distinct_and_well_formed(self):
+        lib = self.property_lib([31, 31])
+        self.assertEqual(native.distinct_transients(lib, "display", 5), [31])
+        self.assertEqual(native.distinct_transients(self.property_lib([31, 32]), "d", 5), [31, 32])
+        for lib in (self.property_lib([], status=0),
+                    self.property_lib([31], status=1),
+                    self.property_lib([31], fmt=8),
+                    self.property_lib([31], remaining=1),
+                    # FORMAT 32 is not enough: the actual type must be WINDOW.
+                    self.property_lib([31], actual=8)):
+            with self.subTest(lib=lib):
+                self.assertIsNone(native.distinct_transients(lib, "display", 5))
+
+    def typed_property_lib(self, name_atom, type_atom, actual_type, values, calls=None):
+        kept = []
+
+        class Lib:
+            def XInternAtom(self, display, name, only_if_exists):
+                if calls is not None:
+                    calls.append(name)
+                return type_atom if name in (b"WINDOW", b"CARDINAL") else name_atom
+
+            def XGetWindowProperty(self, display, window, atom, offset, length,
+                                   delete, request, actual_out, format_out,
+                                   count_out, remaining_out, data_out):
+                array = (ctypes.c_ulong * max(1, len(values)))(*values)
+                if values:
+                    kept.append(array)
+                    data_out._obj.value = ctypes.addressof(array)
+                actual_out._obj.value = actual_type
+                format_out._obj.value = 32
+                count_out._obj.value = len(values)
+                remaining_out._obj.value = 0
+                return 0
+
+            def XFree(self, pointer):
+                return None
+
+        return Lib()
+
+    def test_property_actual_type_is_window_or_cardinal(self):
+        self.assertEqual(native.PROPERTY_TYPES, {
+            "WM_TRANSIENT_FOR": "WINDOW",
+            "WM_CLIENT_LEADER": "WINDOW",
+            "_NET_WM_PID": "CARDINAL",
+        })
+        for name in ("WM_TRANSIENT_FOR", "WM_CLIENT_LEADER"):
+            with self.subTest(name=name):
+                ok = self.typed_property_lib(70, 33, 33, [11])
+                self.assertEqual(native.property_record(ok, "display", 5, name),
+                                 {"status": "ok", "values": [11]})
+                # A 32-bit CARDINAL is not a WINDOW id.
+                wrong = self.typed_property_lib(70, 33, 6, [11])
+                self.assertEqual(native.property_record(wrong, "display", 5, name),
+                                 {"status": "malformed"})
+        ok = self.typed_property_lib(71, 6, 6, [101])
+        self.assertEqual(native.property_record(ok, "display", 5, "_NET_WM_PID"),
+                         {"status": "ok", "values": [101]})
+        # A WINDOW id is not a CARDINAL process id.
+        wrong = self.typed_property_lib(71, 6, 33, [101])
+        self.assertEqual(native.property_record(wrong, "display", 5, "_NET_WM_PID"),
+                         {"status": "malformed"})
+        calls = []
+        unknown = self.typed_property_lib(70, 33, 33, [11], calls)
+        self.assertEqual(native.property_record(unknown, "display", 5, "TITLE"),
+                         {"status": "malformed"})
+        self.assertEqual(calls, [])
+
+    def test_x_property_rejects_a_mismatched_actual_type(self):
+        lib = self.property_lib([31], actual=7)
+        self.assertEqual(native.x_property(lib, "d", 5, 7, 7), ("ok", [31]))
+        self.assertEqual(native.x_property(lib, "d", 5, 7, 8), ("malformed", []))
+        self.assertEqual(native.x_property(lib, "d", 5, 0, 7), ("malformed", []))
+
+    def test_fake_xlib_records_do_not_leak_raw_values(self):
+        lib = self.typed_property_lib(71, 6, 6, [101])
+        record = native.property_record(lib, "display", 5, "_NET_WM_PID")
+        self.assertEqual(set(record), {"status", "values"})
+        self.assertEqual(
+            native.probe_output({"owned": True, "relation": "process-parent",
+                                 "values": [101], "title": "t", "pid": 101}),
+            {"ownership": {"owned": True, "relation": "process-parent"}})
 
 
 if __name__ == "__main__":

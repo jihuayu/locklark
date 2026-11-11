@@ -89,7 +89,457 @@ FAILURE_REASONS = {
     "Acceptance keyboard mapping unavailable": "keyboard-mapping",
     "Acceptance shortcut unavailable": "shortcut-mapping",
     "Native acceptance X input failed": "x-input",
+    "Chooser ownership request required": "chooser-request",
+    "Chooser owner window unavailable": "chooser-owner",
+    "Chooser owner window must be unique": "chooser-owner-ambiguous",
+    "Chooser must be a WM transient of the owner": "chooser-leader",
+    "Chooser must share the owner client leader": "chooser-leader",
+    "Chooser must belong to the owner browser process": "chooser-process",
+    "X window query refused": "x-query",
 }
+
+
+# Fixed, request-carried attribution contract. Everything is ASCII: the
+# chooser title prefix, the exact --user-data-dir switch and the executable.
+OWNER_FIELDS = ("owner_title_prefix", "chooser_title_prefix", "user_data_dir", "executable")
+# The actual X property type is part of every proof: a 32-bit value of the
+# wrong type is not a WINDOW id and not a process id.
+PROPERTY_TYPES = {
+    "WM_TRANSIENT_FOR": "WINDOW",
+    "WM_CLIENT_LEADER": "WINDOW",
+    "_NET_WM_PID": "CARDINAL",
+}
+PROPERTY_LIMIT = 256
+PID_LIMIT = 4194304
+TREE_BUDGET = 4096
+PARENT_DEPTH = 8
+PROC_LINK_MAX = 4096
+CMDLINE_MAX = PROC_LINK_MAX * 4
+PROBE_KEYS = frozenset(OWNER_FIELDS) | {"actions", "ownership_probe", "preserve_focus"}
+INPUT_KEYS = frozenset(OWNER_FIELDS) | {
+    "actions", "owner", "owner_pid", "preserve_focus", "title", "title_prefix",
+}
+
+
+def x_property(x, display, candidate, atom, expected_type):
+    """One real XGetWindowProperty read with Xlib's own argument handling.
+
+    Returns ("ok", values) for an un-truncated 32-bit property of exactly
+    `expected_type` (the WINDOW or CARDINAL atom), ("missing", []) for an
+    absent property and ("malformed", []) for a wrong type, wrong format, a
+    truncated value or anything else. The data pointer is always released
+    through the loaded Xlib XFree.
+    """
+    if type(atom) is not int or atom <= 0 or type(expected_type) is not int or expected_type <= 0:
+        return "malformed", []
+    actual, count, remaining = C.c_ulong(), C.c_ulong(), C.c_ulong()
+    fmt, data = C.c_int(), C.c_void_p()
+    try:
+        status = x.XGetWindowProperty(display, candidate, atom, 0, PROPERTY_LIMIT, 0, 0,
+                                      C.byref(actual), C.byref(fmt), C.byref(count),
+                                      C.byref(remaining), C.byref(data))
+    except Exception:
+        return "malformed", []
+    if status != 0:
+        return "malformed", []
+    if not data.value:
+        return "missing", []
+    try:
+        # Xlib returns None for an absent type; only FORMAT 32, the exact
+        # requested actual type, an exact count and no trailing values count.
+        if fmt.value != 32 or remaining.value or count.value > 4:
+            return "malformed", []
+        if int(actual.value) != expected_type:
+            return "malformed", []
+        return "ok", [int(C.cast(data, C.POINTER(C.c_ulong))[index])
+                      for index in range(count.value)]
+    finally:
+        x.XFree(data)
+
+
+def property_record(x, display, candidate, name):
+    """One fixed property read as a status/values record, or malformed."""
+    actual = PROPERTY_TYPES.get(name)
+    if actual is None:
+        return {"status": "malformed"}
+    try:
+        atom = x.XInternAtom(display, name.encode("ascii"), 0)
+        expected = x.XInternAtom(display, actual.encode("ascii"), 0)
+    except Exception:
+        return {"status": "malformed"}
+    status, values = x_property(x, display, candidate, atom, expected)
+    return {"status": status, "values": values} if status == "ok" else {"status": status}
+
+
+def assert_chooser_text(text):
+    """The X key path is printable-ASCII only; refuse before any input."""
+    if type(text) is not str or any(ord(char) < 32 or ord(char) > 126 for char in text):
+        raise RuntimeError("Acceptance input must be ASCII")
+    return text
+
+
+def ascii_text(value):
+    """One non-empty printable-ASCII token without whitespace, or None."""
+    if type(value) is not str or not value:
+        return None
+    if any(ord(char) < 33 or ord(char) > 126 for char in value):
+        return None
+    return value
+
+
+def ascii_line(value):
+    """One non-empty printable-ASCII line (spaces allowed), or None."""
+    if type(value) is not str or not value:
+        return None
+    if any(ord(char) < 32 or ord(char) > 126 for char in value):
+        return None
+    return value
+
+
+def ascii_path(value):
+    """One absolute printable-ASCII path without trailing slash, or None."""
+    if ascii_line(value) is None or not value.startswith("/") or value == "/":
+        return None
+    if value.endswith("/") and len(value) > 1:
+        return None
+    return value
+
+
+def title_matches(title, prefix):
+    """Fixed, non-empty title prefix match; control/None input never matches."""
+    return (type(title) is str and title != "" and ascii_line(prefix) is not None
+            and not any(ord(char) < 32 for char in title)
+            and title.startswith(prefix))
+
+
+def query_children(x, display, parent):
+    """Actual Xlib XQueryTree of one window; every child in tree order.
+
+    XQueryTree returns Status and fills the child array, released through the
+    loaded XFree. A refused query stops the probe instead of being read as an
+    empty tree.
+    """
+    if type(parent) is not int or parent <= 0:
+        raise RuntimeError("X window query refused")
+    root_return, parent_return, count = C.c_ulong(), C.c_ulong(), C.c_uint()
+    result = C.POINTER(C.c_ulong)()
+    ok = x.XQueryTree(display, parent, C.byref(root_return), C.byref(parent_return),
+                      C.byref(result), C.byref(count))
+    if not ok:
+        raise RuntimeError("X window query refused")
+    try:
+        if count.value > TREE_BUDGET or (count.value and not result):
+            raise RuntimeError("X window query refused")
+        return [int(result[index]) for index in range(count.value)]
+    finally:
+        if result:
+            x.XFree(result)
+
+
+def distinct_transients(x, display, candidate):
+    """Distinct WM_TRANSIENT_FOR parents of the candidate, or None if malformed."""
+    try:
+        atom = x.XInternAtom(display, b"WM_TRANSIENT_FOR", 0)
+        window_type = x.XInternAtom(display, b"WINDOW", 0)
+    except Exception:
+        return None
+    status, values = x_property(x, display, candidate, atom, window_type)
+    if status != "ok" or not 1 <= len(values) <= 4:
+        return None
+    return sorted(set(values))
+
+
+def parse_owner_request(request):
+    """Exact fixed attribution contract of the native chooser mode.
+
+    Two shapes exist. `ownership_probe: true` is the zero-action probe: the
+    driver derives the owner PID from the unique real owner window and returns
+    only the fixed ownership class. `owner: true` is the input shape and keeps
+    the caller's verified owner PID plus already-validated text/key actions.
+    Only the chooser title, the title prefix of the real Edge manager window,
+    the requester's exact private --user-data-dir and the Edge executable are
+    accepted. None of these values is ever printed.
+    """
+    if type(request) is not dict:
+        return None
+    probe = request.get("ownership_probe")
+    input_mode = request.get("owner")
+    if probe is not None and probe is not True:
+        return None
+    if input_mode is not None and input_mode is not True:
+        return None
+    if (probe is True) == (input_mode is True):
+        return None
+    if probe is True:
+        if set(request) - PROBE_KEYS:
+            return None
+        if request.get("actions") not in (None, []):
+            return None
+        if "owner_pid" in request:
+            return None
+        if request.get("preserve_focus", True) is not True:
+            return None
+        normalized = {key: request[key] for key in OWNER_FIELDS}
+        normalized["probe"] = True
+    else:
+        if set(request) - INPUT_KEYS:
+            return None
+        if request.get("title_prefix") != request.get("title"):
+            return None
+        if ascii_line(request.get("title")) is None:
+            return None
+        if request.get("preserve_focus") is not True:
+            return None
+        if type(request.get("owner_pid")) is not int or not 1 < request["owner_pid"] <= PID_LIMIT:
+            return None
+        actions = request.get("actions")
+        if type(actions) is not list or not actions:
+            return None
+        for action in actions:
+            if type(action) is not dict:
+                return None
+            if "key" in action:
+                parts = action["key"].split("+") if type(action["key"]) is str else []
+                if not 1 <= len(parts) <= 2 or not all(ascii_text(part) for part in parts):
+                    return None
+            if set(action) - {"text", "key"} or not {"key", "text"} & set(action):
+                return None
+            if "text" in action:
+                try:
+                    assert_chooser_text(action["text"])
+                except RuntimeError:
+                    return None
+        normalized = {key: request[key] for key in OWNER_FIELDS + ("owner_pid",)}
+        normalized["probe"] = False
+    if ascii_line(normalized["owner_title_prefix"]) is None or \
+            ascii_line(normalized["chooser_title_prefix"]) is None:
+        return None
+    if ascii_path(normalized["user_data_dir"]) is None or \
+            ascii_path(normalized["executable"]) is None:
+        return None
+    return normalized
+
+
+def safe_owner_record(result):
+    """Only the fixed ownership class and relation type; never raw values."""
+    if type(result) is not dict:
+        return None
+    if result.get("owned") is False and result.get("relation") == "none":
+        return {"owned": False, "relation": "none"}
+    relation = result.get("relation")
+    if result.get("owned") is True and relation in ("transient-leader", "process-parent"):
+        return {"owned": True, "relation": relation}
+    return None
+
+
+def probe_output(record):
+    """Zero-action probe output: only the fixed ownership class, nothing else."""
+    safe = safe_owner_record(record)
+    return None if safe is None else {"ownership": safe}
+
+
+def window_chain_ok(owner, owners, transients):
+    """One owner X window with exactly one chooser WM_TRANSIENT_FOR target.
+
+    owner: (window, pid, pid_viewable) for the real manager window.
+    owners: every viewable window whose title starts with the owner prefix.
+    transients: every distinct WM_TRANSIENT_FOR parent of the chooser
+    candidate. A malformed, zero, duplicate or ambiguous value refuses. The
+    terminal may be the owner window itself: that is the normal parent link
+    and the detailed WM_TRANSIENT_FOR/WM_CLIENT_LEADER proof follows.
+    """
+    if type(owner) is not tuple or len(owner) != 3:
+        return False
+    window, pid, viewable = owner
+    if type(window) is not int or window <= 0 or not 1 < pid <= PID_LIMIT or viewable is not True:
+        return False
+    if type(owners) is not list or owners.count(window) != 1 or len(owners) != 1:
+        return False
+    if type(transients) is not list or len(transients) != 1 or \
+            type(transients[0]) is not int:
+        return False
+    # Exactly one terminal WM_TRANSIENT_FOR target; the caller proves it is
+    # the owner's own client window through the WM chain.
+    return transients[0] != 0
+
+
+def read_proc_link(pid, name):
+    """Read one /proc/<pid>/ link only; a missing or unreadable link is None."""
+    if type(pid) is not int or not 1 < pid <= PID_LIMIT:
+        return None
+    try:
+        value = os.readlink("/proc/" + str(pid) + "/" + name)
+    except OSError:
+        return None
+    return value if value and len(value) <= PROC_LINK_MAX else None
+
+
+def owner_process_matches(pid, owner):
+    """Exact requested executable image and exact requester profile switch.
+
+    /proc/<pid>/exe must resolve (realpath) to the requested executable image
+    and /proc/<pid>/cmdline must carry the exact --user-data-dir=<profile>
+    token exactly once. A truncated command line, a missing terminator or a
+    duplicate switch is refused. Values are compared, never returned.
+    """
+    if type(pid) is not int or not 1 < pid <= PID_LIMIT or type(owner) is not dict:
+        return None
+    executable = owner.get("executable")
+    profile = owner.get("user_data_dir")
+    if ascii_path(executable) is None or ascii_path(profile) is None:
+        return None
+    actual = read_proc_link(pid, "exe")
+    if actual is None:
+        return None
+    try:
+        if os.path.realpath(actual) != os.path.realpath(executable):
+            return None
+    except (OSError, ValueError):
+        return None
+    try:
+        with open("/proc/" + str(pid) + "/cmdline", "rb") as cmdline:
+            data = cmdline.read(CMDLINE_MAX + 1)
+    except OSError:
+        return None
+    # /proc/<pid>/cmdline is NUL terminated. A full read, a missing final NUL
+    # or an empty command line means truncation or a race: refuse it.
+    if not data or len(data) > CMDLINE_MAX or not data.endswith(b"\0"):
+        return None
+    switch = b"--user-data-dir=" + os.fsencode(profile)
+    # Only the one exact requester switch counts; duplicate or truncated
+    # profile switches are refused.
+    return pid if data.split(b"\0").count(switch) == 1 else None
+
+
+def chooser_pid_relation(owner_pid, chooser_pid):
+    """Bounded, actual OS parent chain back to the exact verified Edge PID.
+
+    Only /proc/<pid>/stat parent ids are followed; the chain stops at the
+    owner. The exact owner PID itself is a direct match. It is never a
+    same-uid or executable-basename guess.
+    """
+    def parent(pid):
+        try:
+            with open("/proc/" + str(pid) + "/stat", "rb") as stat:
+                fields = stat.read(PROC_LINK_MAX).rsplit(b")", 1)
+        except UnicodeDecodeError:
+            return None
+        except Exception:
+            return None
+        if len(fields) != 2:
+            return None
+        parts = fields[1].split()
+        # After the command name: state ppid ...
+        if len(parts) < 2:
+            return None
+        return int(parts[1])
+
+    if type(owner_pid) is not int or type(chooser_pid) is not int:
+        return False
+    if not 1 < owner_pid <= PID_LIMIT or not 1 < chooser_pid <= PID_LIMIT:
+        return False
+    if chooser_pid == owner_pid:
+        return True
+    pid = chooser_pid
+    for _ in range(PARENT_DEPTH):
+        try:
+            pid = parent(pid)
+        except (OSError, IndexError, ValueError):
+            return False
+        if pid is None:
+            return False
+        if pid == owner_pid:
+            return True
+        if pid <= 1:
+            return False
+    return False
+
+
+def _single_int(values):
+    if type(values) is not list or len(values) != 1:
+        return None
+    value = values[0]
+    return value if type(value) is int and 0 <= value <= 0xFFFFFFFF else None
+
+
+def _unique(values):
+    if type(values) is not list or not values or any(type(value) is not int for value in values):
+        return False
+    return len(set(values)) == 1
+
+
+def _ok_values(record):
+    """Values of an actual, type-checked property record, else None."""
+    if type(record) is not dict or record.get("status") != "ok":
+        return None
+    return record.get("values")
+
+
+def property_single_int(record):
+    """One 32-bit value of a status/values record; never the record itself."""
+    return _single_int(_ok_values(record))
+
+
+def check_chooser_relations(prop, expected_client, owner_pid):
+    """Fail-closed ownership proof for the one chooser candidate.
+
+    prop(name, window) returns {"status": "ok", "values": [...]} from the
+    actual, type-checked XGetWindowProperty, {"status": "missing"} when the
+    property is absent or {"status": "malformed"} otherwise (including a
+    WINDOW property whose actual type is not WINDOW). The chooser is owned
+    only when it is a WM transient of the owner's sole viewable client window
+    and shares its WM_CLIENT_LEADER; both ends must carry the verified owner
+    _NET_WM_PID. Returns a fixed failure message or None when owned.
+    """
+    if type(owner_pid) is not int or not 1 < owner_pid <= PID_LIMIT:
+        return "Chooser owner window unavailable"
+    expected_client = expected_client if type(expected_client) is int else None
+    client_pid = property_single_int(prop("_NET_WM_PID", expected_client)) \
+        if expected_client else None
+    if expected_client is None or client_pid != owner_pid:
+        return "Chooser must belong to the owner browser process"
+    client_leader = property_single_int(prop("WM_CLIENT_LEADER", expected_client))
+    if not client_leader:
+        return "Chooser must share the owner client leader"
+    transient = prop("WM_TRANSIENT_FOR", None)
+    transient_values = _ok_values(transient)
+    if transient_values is None or not _unique(transient_values):
+        return "Chooser must be a WM transient of the owner"
+    if transient_values != [expected_client]:
+        return "Chooser must be a WM transient of the owner"
+    # Exactly the client's leader: one WINDOW value, equal, and non-zero.
+    leader_values = _ok_values(prop("WM_CLIENT_LEADER", None))
+    if _single_int(leader_values) != client_leader:
+        return "Chooser must share the owner client leader"
+    return None
+
+
+def prove_chooser_ownership(mode, prop, owner_pid, client, candidate_pid, parent_relation):
+    """Choose exactly one proof mode; no physical action happens here.
+
+    mode "wm": WM_TRANSIENT_FOR/WM_CLIENT_LEADER chain from the candidate to
+    the sole owner client window `client`, whose _NET_WM_PID must be
+    `owner_pid`. mode "process": actual bounded OS parent chain from the
+    candidate's _NET_WM_PID to the exact owner PID. The caller has already
+    verified the owner's executable and exact --user-data-dir. Returns a fixed
+    safe record, or a fixed failure message as the second element.
+    """
+    if mode == "wm":
+        if type(client) is not int or client <= 0:
+            return None, "Chooser client window of the owner is unavailable"
+        reason = check_chooser_relations(prop, client, owner_pid)
+        return (None, reason) if reason else ({"owned": True, "relation": "transient-leader"}, None)
+    if mode == "process":
+        if type(owner_pid) is not int or type(candidate_pid) is not int or candidate_pid <= 0:
+            return None, "Chooser must belong to the owner browser process"
+        record = prop("_NET_WM_PID", None)
+        pid = property_single_int(record)
+        if pid is None or pid != candidate_pid:
+            return None, "Chooser must belong to the owner browser process"
+        if parent_relation(owner_pid, pid) is not True:
+            return None, "Chooser must belong to the owner browser process"
+        return {"owned": True, "relation": "process-parent"}, None
+    return None, "Chooser ownership request required"
 
 
 class AccessibilityQueryUnavailable(RuntimeError):
@@ -455,15 +905,22 @@ def main():
             return title
         return ""
 
+    def window_property(candidate, name):
+        """One real, actual-type-checked X property read as a record."""
+        return property_record(x, display, candidate, name)
+
+    def attributes_of(candidate):
+        attributes = Attributes()
+        if not x.XGetWindowAttributes(display, candidate, C.byref(attributes)):
+            return None
+        return attributes
+
+    def normal_viewable(window):
+        attributes = attributes_of(window)
+        return attributes is not None and attributes.map_state == 2 and not attributes.override_redirect
+
     def children(parent):
-        root_return, parent_return, count = window(), window(), C.c_uint()
-        result = C.POINTER(window)()
-        if not x.XQueryTree(display, parent, C.byref(root_return), C.byref(parent_return), C.byref(result), C.byref(count)):
-            return []
-        found = [result[i] for i in range(count.value)]
-        if result:
-            x.XFree(result)
-        return found
+        return query_children(x, display, parent)
 
     def find(parent, depth=0):
         if depth > 3:
@@ -475,6 +932,29 @@ def main():
                 matches.append(candidate)
             matches.extend(find(candidate, depth+1))
         return matches
+
+    def collect_titles(prefix, parent=root, depth=0):
+        """Bounded title-prefix traversal with no executable filter.
+
+        Used only by the owner/probe contract so a GTK helper dialog is
+        discoverable before attribution; every candidate is still proven
+        through the real WM chain or the bounded /proc parent chain before
+        any input.
+        """
+        if depth > 3:
+            return []
+        found = []
+        for candidate in children(parent):
+            if title_matches(window_title(candidate), prefix):
+                found.append(candidate)
+            found.extend(collect_titles(prefix, candidate, depth + 1))
+        return found
+
+    owner = None
+    if request.get("owner") or request.get("ownership_probe"):
+        owner = parse_owner_request(request)
+        if owner is None or request.get("wait_absent") or request.get("inspect"):
+            raise RuntimeError("Chooser ownership request required")
 
     if request.get("wait_absent"):
         if not request.get("title") or not request.get("executable") or request.get("actions"):
@@ -493,7 +973,13 @@ def main():
     target = None
     discovery_deadline = time.monotonic()+5
     while time.monotonic() < discovery_deadline:
-        matches=find(root)
+        if owner is not None:
+            # Fixed chooser title prefix only; the exact Edge executable filter
+            # is deliberately not applied before the ownership proof.
+            matches = [candidate for candidate in collect_titles(owner["chooser_title_prefix"])
+                       if normal_viewable(candidate)]
+        else:
+            matches=find(root)
         if len(matches)>1:
             raise RuntimeError("Native acceptance window must be unique")
         if matches:
@@ -502,6 +988,73 @@ def main():
         time.sleep(0.05)
     if not target:
         raise RuntimeError("Native acceptance window unavailable")
+
+    ownership = None
+    if owner is not None:
+        # Fixed attribution only: one real manager window of this private
+        # profile, its exact verified process and the chooser ownership proof.
+        # Every request field, every owner fact and the chooser proof are
+        # checked before the first physical input; failures stay fixed classes.
+        prior_errors = list(errors)
+        errors.clear()
+        try:
+            if not title_matches(window_title(target), owner["chooser_title_prefix"]):
+                raise RuntimeError("Native acceptance window unavailable")
+            manager = [candidate for candidate in collect_titles(owner["owner_title_prefix"])
+                       if normal_viewable(candidate)]
+            if len(manager) != 1:
+                raise RuntimeError("Chooser owner window must be unique" if manager
+                                   else "Chooser owner window unavailable")
+            owner_window = manager[0]
+            owner_pid = property_single_int(window_property(owner_window, "_NET_WM_PID"))
+            if type(owner_pid) is not int or not 1 < owner_pid <= PID_LIMIT:
+                raise RuntimeError("Chooser owner window unavailable")
+            # The owner PID is bound by the unique real manager window itself.
+            # Probe mode derives it here; the input shape must match its request.
+            if owner.get("probe") is False and owner_pid != owner["owner_pid"]:
+                raise RuntimeError("Chooser owner window unavailable")
+            # Exact real executable image and exactly one exact private profile
+            # switch; a duplicate profile switch is never a second match.
+            if owner_process_matches(owner_pid, owner) != owner_pid:
+                raise RuntimeError("Chooser owner window unavailable")
+            # None selects the chooser; the owner window is used for
+            # the owner-side _NET_WM_PID/WM_CLIENT_LEADER reads.
+            chooser_props = lambda name, candidate: window_property(
+                target if candidate is None else candidate, name)
+            chooser_parents = distinct_transients(x, display, target)
+            record, reason = None, None
+            # WM_TRANSIENT_FOR/WM_CLIENT_LEADER chain first; the unique owner
+            # window is the only valid transient terminal, so a separate helper
+            # cannot substitute itself. Then the bounded, actual /proc parent
+            # chain back to the exact verified PID. Edge may omit
+            # WM_CLIENT_LEADER on the owner window; the process proof then
+            # accepts the exact same PID or a real bounded parent chain.
+            if window_chain_ok((owner_window, owner_pid, True), manager, chooser_parents):
+                record, reason = prove_chooser_ownership(
+                    "wm", chooser_props, owner_pid, owner_window, window_pid(target), None)
+            if record is None:
+                record, reason = prove_chooser_ownership(
+                    "process", chooser_props, owner_pid, None, window_pid(target),
+                    chooser_pid_relation)
+            # Re-prove the owner process identity immediately before trusting
+            # the relation result.
+            if record is None or owner_process_matches(owner_pid, owner) != owner_pid:
+                raise RuntimeError(reason or "Chooser owner window unavailable")
+            ownership = safe_owner_record(record)
+            if ownership is None or any(code != 3 for code, _resource in errors) or \
+                    any(code != 3 for code, _resource in prior_errors):
+                raise RuntimeError("Native acceptance X query failed")
+            if owner["probe"]:
+                # Zero-action probe: only the fixed ownership class is ever
+                # emitted, and it returns before focus/geometry/XTest.
+                output = probe_output(record)
+                if output is None:
+                    raise RuntimeError("Chooser owner window unavailable")
+                print(json.dumps(output))
+                x.XCloseDisplay(display)
+                return
+        finally:
+            errors.clear()
 
     def selected_map_state():
         attributes = Attributes()
@@ -553,7 +1106,16 @@ def main():
     native = None
     if request.get("inspect") or any("click_label" in a or "wait_label" in a for a in request.get("actions", [])):
         native = NativeControls(request["title"],window_pid(target) if request.get("executable") else None)
-    for index, action in enumerate(request.get("actions", [])):
+    actions = request.get("actions", [])
+    if type(actions) is not list or not all(type(action) is dict for action in actions):
+        raise RuntimeError("Native acceptance X query failed")
+    # Every typed value is validated before the first physical input, so a
+    # refused directory can never arrive after a shortcut was emitted.
+    for action in actions:
+        if "text" in action and (type(action["text"]) is not str or
+                                 any(ord(char) < 32 or ord(char) > 126 for char in action["text"])):
+            raise RuntimeError("Acceptance input must be ASCII")
+    for index, action in enumerate(actions):
         previous_clicks = len(clicks)
         FAILURE_CONTEXT["index"] = index
         FAILURE_CONTEXT["action"] = (
@@ -570,11 +1132,12 @@ def main():
             dx, dy = action["click"]
             click(px.value+dx,py.value+dy,"pointer")
         if "text" in action:
+            if type(action["text"]) is not str:
+                raise RuntimeError("Acceptance input must be ASCII")
+            assert_chooser_text(action["text"])
             shift = named("Shift_L")
             for char in action["text"]:
                 symbol = ord(char)
-                if symbol < 32 or symbol > 126:
-                    raise RuntimeError("Acceptance input must be ASCII")
                 code = x.XKeysymToKeycode(display, symbol)
                 if not code:
                     raise RuntimeError("Acceptance keyboard mapping unavailable")
@@ -602,6 +1165,10 @@ def main():
         for emitted in clicks[previous_clicks:]:
             emitted["after"] = input_state()
     result = {"window": target, "x": px.value, "y": py.value,"clicks":[safe_click_record(click) for click in clicks]}
+    if ownership is not None:
+        # Probe mode: only the fixed ownership class and relation type; no
+        # window, title, path, command line, PID or arbitrary property.
+        result = {"ownership": ownership, "clicks": len(clicks)}
     if request.get("inspect"):
         FAILURE_CONTEXT["action"] = "snapshot"
         snapshot = native.snapshot()
