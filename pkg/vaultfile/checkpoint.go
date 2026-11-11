@@ -40,7 +40,8 @@ type PolicyCheckpoint struct {
 //     c.VaultID, and c.VaultID, c.OwnerRootKeyID, a 32-byte
 //     c.OwnerRootPublicKey and a 32-byte c.PolicyDigest must be valid;
 //   - the anchor proof is located in the carried proofs and its digest must
-//     equal c.PolicyDigest; proofs before it are ignored. A file whose proofs
+//     equal c.PolicyDigest, and its owner root (key_id, alg and public key)
+//     must equal c; proofs before it are ignored. A file whose proofs
 //     begin after c.PolicySeq must begin exactly at c.PolicySeq+1 with that
 //     proof's prev_policy_digest equal to c.PolicyDigest. Proofs are strictly
 //     increasing and end at the current policy (header policy_seq), so a
@@ -131,10 +132,19 @@ func VerifyPolicyCheckpoint(f *File, c *PolicyCheckpoint) error {
 		if proofs[i].Policy.PolicySeq != c.PolicySeq {
 			continue
 		}
-		if bytes.Equal(policyDigest(&proofs[i]), c.PolicyDigest) {
-			anchor = i
-			break
+		if !bytes.Equal(policyDigest(&proofs[i]), c.PolicyDigest) {
+			continue
 		}
+		// The anchor policy's owner root must be the caller-pinned root:
+		// the digest alone does not bind it, and a later proof that names
+		// the pinned root would otherwise accept a foreign root transition.
+		if proofs[i].Policy.OwnerRoot.KeyID != c.OwnerRootKeyID ||
+			proofs[i].Policy.OwnerRoot.Alg != PolicySigAlgEd25519 ||
+			!bytes.Equal(proofs[i].Policy.OwnerRoot.PublicKey, c.OwnerRootPublicKey) {
+			return Err("", CodePolicyCheckpointFailed)
+		}
+		anchor = i
+		break
 	}
 	if anchor < 0 {
 		switch {

@@ -583,3 +583,76 @@ func TestVerifyPolicyCheckpointNegative(t *testing.T) {
 		}
 	})
 }
+
+// TestVerifyPolicyCheckpointAnchorRootBinding pins the anchor policy's owner
+// root to the caller checkpoint. A carried anchor whose digest is pinned may
+// name another root B while the next policy links to it and returns to the
+// pinned root A, signed by A: the file is structurally valid and its tail is
+// root-A-signed, but the A -> B -> A transition at the anchor was never
+// authorized by the caller's pin.
+func TestVerifyPolicyCheckpointAnchorRootBinding(t *testing.T) {
+	k := newCPKeys(t)
+
+	// The original root-A fixture is the baseline: valid and accepted.
+	c := newCPChain(t, k)
+	if err := ValidateFile(c.f); err != nil {
+		t.Fatalf("baseline fixture is not structurally valid: %v", err)
+	}
+	if err := VerifyPolicyCheckpoint(c.f, c.anchor); err != nil {
+		t.Fatalf("baseline root-A chain rejected: %v", err)
+	}
+
+	// Replace the carried anchor policy's root with generated root B and
+	// recompute its canonical document. The anchor signature is not verified
+	// by the trust API; it stays 64-byte shaped data.
+	c = newCPChain(t, k)
+	bAnchor := clonePolicy(c.policies[0])
+	bAnchor.OwnerRoot.PublicKey = bytes.Clone(k.otherRoot)
+	c.replaceProof(0, bAnchor, "owner-root-01")
+	// rebind clears the anchor alg and sig for the caller to stamp; finalize
+	// leaves the anchor alone, so the trust API never sees them.
+	c.f.SignedPolicyProofs[0].Alg = PolicySigAlgEd25519
+	c.f.SignedPolicyProofs[0].Sig = pf(0x7f, ed25519.SignatureSize)
+	bDigest := policyDigest(&c.f.SignedPolicyProofs[0])
+	if bytes.Equal(bDigest, c.anchor.PolicyDigest) {
+		t.Fatal("replaced anchor digest did not change")
+	}
+
+	// The successor at s+1 links to the root-B anchor digest, returns to root
+	// A, and is really signed by root A over the frozen policy domain.
+	succ := clonePolicy(c.policies[1])
+	succ.OwnerRoot.PublicKey = bytes.Clone(k.root)
+	succ.PrevPolicyDigest = bytes.Clone(bDigest)
+	c.replaceProof(1, succ, "owner-root-01")
+	c.finalize(t, k)
+	if err := ValidateFile(c.f); err != nil {
+		t.Fatalf("inconsistent-root fixture is not structurally valid: %v", err)
+	}
+	if !bytes.Equal(c.f.SignedPolicyProofs[0].Sig, pf(0x7f, ed25519.SignatureSize)) {
+		t.Fatal("anchor signature was rewritten")
+	}
+	for i := 1; i < len(c.f.SignedPolicyProofs); i++ {
+		sp := &c.f.SignedPolicyProofs[i]
+		msg := append([]byte(DomainPolicyDocumentSignature+"\x00"), sp.Document...)
+		if !ed25519.Verify(k.root, msg, sp.Sig) {
+			t.Fatalf("proof %d is not signed by root A", i)
+		}
+	}
+	cur := &c.f.SignedPolicyProofs[len(c.f.SignedPolicyProofs)-1]
+	if !bytes.Equal(c.f.Header.PolicyDigest, policyDigest(cur)) {
+		t.Fatal("header does not name the successor policy")
+	}
+	cmsg := append([]byte(DomainContentSignature+"\x00"), mustContentSigning(t, c.f)...)
+	if !ed25519.Verify(k.dev1, cmsg, c.f.ContentSignature.Sig) {
+		t.Fatal("content is not signed by device-1's key")
+	}
+
+	// The caller still pins root A, now together with the root-B anchor
+	// digest: the anchor root differs from the pin, so the digest is not
+	// trusted and the chain fails closed.
+	pin := c.pin(bDigest, c.anchor.PolicySeq)
+	if !bytes.Equal(pin.OwnerRootPublicKey, k.root) {
+		t.Fatal("pin does not carry root A")
+	}
+	wantCodeAt(t, VerifyPolicyCheckpoint(c.f, pin), CodePolicyCheckpointFailed, "")
+}
