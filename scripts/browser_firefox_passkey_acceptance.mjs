@@ -412,6 +412,7 @@ export async function acceptFirefoxPasskey(driver) {
     viewportOrigin,
     dismissPopup,
     reconnect,
+    reconnectQuickFill,
     pause,
   } = driver;
   const rp = new URL(origin).hostname;
@@ -739,6 +740,12 @@ export async function acceptFirefoxPasskey(driver) {
     });
   }
   if (process.env.LOCKLARK_TEST_PASSKEY_MANAGEMENT === "1") {
+    // Passkey metadata and destructive removals need explicit quick fill, so
+    // re-pair through the real quick-fill control after the conditional cleanup.
+    assert.equal(typeof reconnectQuickFill, "function",
+      "Passkey driver hook missing: reconnectQuickFill");
+    phase("firefox-passkey-management:quick-pair");
+    await reconnectQuickFill();
     await acceptPasskeyManagement({
       origin, fixture, first: created.result.json,
       openPopup: driver.openPopup, observe: driver.observe, reconnect,
