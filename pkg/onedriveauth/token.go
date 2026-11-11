@@ -179,9 +179,6 @@ func (r TokenResult) AccessToken() string {
 	if r.owned.closed || len(r.owned.access) == 0 {
 		return ""
 	}
-	// This conversion returns the only copy of the owned bytes made for this
-	// call; hoisting it to a variable would allocate a second copy.
-	//nolint:gocritic // ptrToRefParam: the direct conversion avoids an extra copy.
 	return string(r.owned.access)
 }
 
@@ -698,21 +695,18 @@ func decodeTokenJSON(body []byte) (res TokenResult, err error) {
 // earlier bytes survive. Any other value, an unterminated string, or a token
 // escape sequence that is not a printable ASCII byte marks invalid and stores
 // nothing in dst. Escape sequences the token grammar cannot produce are skipped
-// safely, and so is invalid UTF-8, which the JSON syntax allows and which the
-// ASCII check rejects. It reads the decoder-supplied bytes of one value and does
-// not modify or retain them.
+// safely, and so is invalid UTF-8, which encoding/json's syntax scanner accepts
+// for custom UnmarshalJSON input but which visibleASCII rejects. It reads the
+// decoder-supplied bytes of one value and does not modify or retain them.
 func tokenStringDecoder(dst *[]byte, invalid *bool) json.Unmarshaler {
 	return &tokenStringValue{dst: dst, invalid: invalid}
 }
 
-// tokenStringValue is the json.Unmarshaler behind tokenStringDecoder.
+// tokenStringValue is the json.Unmarshaler behind tokenStringDecoder. It is
+// created for a single Decode and used once, so it holds no reusable state.
 type tokenStringValue struct {
 	dst     *[]byte
 	invalid *bool
-	// buf is the output buffer kept between calls, so a sequence of
-	// rejected tokens on one stream reuses it instead of allocating each
-	// time.
-	buf []byte
 }
 
 // UnmarshalJSON implements json.Unmarshaler.
@@ -722,11 +716,16 @@ func (v *tokenStringValue) UnmarshalJSON(data []byte) error {
 		*v.invalid = true
 		return nil
 	}
-	// The JSON syntax has already rejected raw control characters and
-	// invalid UTF-8, so every byte left raw here is at least 0x20, and the
+	// encoding/json's syntax scanner has already rejected raw control
+	// characters and JSON syntax errors before this call, but it accepts raw
+	// invalid UTF-8 inside a custom UnmarshalJSON input. The visibleASCII
 	// check after the loop rejects anything outside visible ASCII, including
-	// raw bytes >= 0x80.
-	out := v.buf[:0]
+	// raw bytes >= 0x80 and their invalid UTF-8.
+	//
+	// out is allocated once at the largest decoded size (each byte of the
+	// string body yields at most one output byte) so no growth-prefix
+	// backing arrays keep copies of token bytes.
+	out := make([]byte, 0, len(data)-2)
 	valid := true
 	for i := 1; i < len(data)-1 && valid; i++ {
 		if data[i] != '\\' {
@@ -741,11 +740,11 @@ func (v *tokenStringValue) UnmarshalJSON(data []byte) error {
 	}
 	if !valid || len(out) == 0 || len(out) > maxCodeLen || !visibleASCII(out) {
 		clear(out)
-		v.buf = v.buf[:0]
 		*v.invalid = true
 		return nil
 	}
-	v.buf = out
+	// Success transfers the whole allocation, including its spare capacity,
+	// to dst; the caller may clear up to cap and release it.
 	*v.dst = out
 	return nil
 }
