@@ -424,6 +424,37 @@ Validation is shape only:
   whether a signer's principal currently holds the role it claims, are sync
   and authorization decisions outside this codec.
 
+## Pinned-key content signature check
+
+`ValidateFile` stays shape only and introduces no trust anchor. One separate
+primitive performs the only signature check implemented in this package:
+
+```
+VerifyContentSignature(f *File, signerDeviceID string, publicKey ed25519.PublicKey) error
+```
+
+- It runs `ValidateFile` first and returns any structural error unchanged.
+- The caller pins `signerDeviceID` and `publicKey` out of band. They must
+  equal `header.author_device_id` / `content_signature.signer_id` and the
+  content signing key recorded for that device in the carried policy; the key
+  is never taken from the unsigned/unverified `signed_policy_proofs` as a
+  trust anchor.
+- It verifies, with `crypto/ed25519`, exactly
+  `"locklark.vault-file/v1/content-signature" || 0x00 ||
+  ContentSigningBytes(f)` against `content_signature.sig`. The preimage is
+  not hashed further and not altered.
+- A signer mismatch, a `publicKey` that is not 32 bytes, a key that differs
+  from the carried policy key, or a signature that does not verify are all
+  `signature_verify_failed`, a caller-pinned-trust failure. Each is a trust
+  decision, not a structural defect; the file itself may still pass
+  `ValidateFile`.
+
+This primitive alone does **not** establish that a vault or file is trusted
+or verified. It does not verify policy proof signatures
+(`signed_policy_proofs[].sig`), any signature chain from the owner root or
+admin delegations, policy continuity through `prev_policy_digest`, or that
+the signer is authorized by a verified policy. Those are unimplemented.
+
 ## Budgets
 
 | Limit                                                  | Value    |
@@ -495,7 +526,8 @@ non-canonical `document` is rejected, before any policy binding is considered.
 
 ## Out of scope
 
-This schema revision does not include signature verification, permission
-checks, key or digest crypto beyond the definitions above, migration/import or
-product wiring. Encoding and validation are shape-only and have not been
-reviewed for cryptographic correctness.
+This schema revision includes only the pinned-key content signature check
+described above, not policy proof or signature-chain verification,
+authorization, permission checks, key or digest crypto beyond the definitions,
+migration/import, encryption or product wiring. Encoding, validation and every
+option are shape-only, and the pinned-key check establishes no vault trust.
