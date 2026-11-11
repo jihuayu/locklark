@@ -597,8 +597,11 @@ try {
     );
     mark("route:popup");
     const action = await openActionPopup();
+    // The ready control is the vault search field, not the refresh match.
+    // Waiting on #refresh here would consume the wait before the ordinary
+    // match step below, even though the popup already rendered vault status.
     await wait(
-      async () => (await action.disabled("#refresh")) === false,
+      async () => (await action.disabled("#search-input")) === false,
       "Paired popup not ready",
     );
     // The worker binds a route only to a source document captured by the
@@ -744,6 +747,15 @@ try {
       );
       assert.equal(routes.length, 1, "Route target was replaced");
       assert.equal(routes[0].id, routeTarget, "Route target was replaced");
+      // The same console canary checks the ordinary native journeys apply
+      // before this checkpoint may claim a pass. Logs are never printed.
+      assert(
+        !logs.some((s) =>
+          fixtureCanaries(fixture).some((value) => s.includes(value)),
+        ),
+        "Synthetic secret found in browser console output",
+      );
+      for (const line of logs) assertPrivateText(line, fixture);
       console.log(
         "PASS: real popup exact row opened one persistent route tab; native approval kept the same tab's detail without revealing values",
       );
