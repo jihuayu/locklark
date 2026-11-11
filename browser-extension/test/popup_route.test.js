@@ -379,6 +379,38 @@ test("a malformed route fragment fails closed without ordinary behavior", async 
   }
 });
 
+// ---- 2a. the visible status proves the page entered its claim ----
+test("route claim shows one fixed pending status until a valid reply", async () => {
+  const PENDING = "正在请求桌面审批…";
+  const h = harness({ hash: "#route=" + TOKEN });
+  await h.flush();
+  // Nothing is claimed before the lifecycle is ready, so nothing is shown.
+  assert.equal(h.el("#status").textContent, "");
+  h.lifecyclePorts[0].emit({ type: "route-ready", token: TOKEN });
+  await h.flush();
+  // The claim left this page with the fixed pending text already visible.
+  assert.equal(h.requests[0].message.type, "route-claim");
+  assert.equal(h.el("#status").textContent, PENDING);
+  assert.equal(h.body.dataset.view, "vault");
+  h.requests[0].resolve(claimedReply());
+  await h.flush();
+  // A valid reply clears the pending text before the detail renders.
+  assert.equal(h.el("#status").textContent, "");
+  assert.equal(h.el("#detail-title").textContent, "Route Target");
+  assert.equal(h.body.dataset.view, "detail");
+});
+
+test("a rejected route claim keeps its fixed failure status, never the pending text", async () => {
+  const h = harness({ hash: "#route=" + TOKEN });
+  await h.flush();
+  h.lifecyclePorts[0].emit({ type: "route-ready", token: TOKEN });
+  await h.flush();
+  h.requests[0].resolve({ error: "refused" });
+  await h.flush();
+  assert.equal(h.el("#status").textContent, "无法打开此条目");
+  assert.equal(h.body.dataset.view, "closed");
+});
+
 // ---- 3. field copy keeps native approval; legacy uses route-copy-field ----
 test("route native field copy keeps the exact native lease selector", async () => {
   const h = await openRoutePage();

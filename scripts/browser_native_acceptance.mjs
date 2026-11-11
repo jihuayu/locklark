@@ -307,7 +307,13 @@ function popupStatusKind(value) {
 // Only fixed enums and booleans ever leave the page: never text, titles,
 // field values, URLs, tokens, ids or hidden application state.
 const ROUTE_VIEWS = ["locked", "vault", "detail", "closed", "editor"];
-const ROUTE_STATUS_KINDS = ["claim-failed", "route-revoked", "other"];
+const ROUTE_STATUS_KINDS = [
+  "native-pending",
+  "claim-failed",
+  "route-revoked",
+  "other",
+];
+const ROUTE_CLAIM_PENDING_STATUS = "正在请求桌面审批…";
 const ROUTE_CLAIM_FAILED_STATUS = "无法打开此条目";
 const ROUTE_REVOKED_STATUS = "条目已失效，请重新从金库打开";
 function sanitizeRouteObservation(value) {
@@ -334,7 +340,7 @@ function routeStateProbe(title) {
       view:${JSON.stringify(ROUTE_VIEWS)}.includes(view)?view:'other',
       detailShown:!!detail&&!detail.hidden,
       titleMatchesFixture:!!heading&&String(heading.textContent||'')===${JSON.stringify(title)},
-      statusKind:statusText===${JSON.stringify(ROUTE_CLAIM_FAILED_STATUS)}?'claim-failed':statusText===${JSON.stringify(ROUTE_REVOKED_STATUS)}?'route-revoked':'other'
+      statusKind:statusText===${JSON.stringify(ROUTE_CLAIM_PENDING_STATUS)}?'native-pending':statusText===${JSON.stringify(ROUTE_CLAIM_FAILED_STATUS)}?'claim-failed':statusText===${JSON.stringify(ROUTE_REVOKED_STATUS)}?'route-revoked':'other'
     };
   })()`;
 }

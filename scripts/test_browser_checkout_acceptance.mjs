@@ -1450,3 +1450,55 @@ test("route label inspect preserves focus and the approval click stays physical"
     1,
   );
 });
+
+test("route probe maps the fixed claim-pending status to native-pending", () => {
+  // The visible route status is the only proof that the page entered its
+  // claim before pagehide. Exactly the fixed text maps to a fixed enum, and
+  // no status text or other DOM content leaves the page.
+  const source = readFileSync(
+    new URL("./browser_native_acceptance.mjs", import.meta.url),
+    "utf8",
+  );
+  // Anchored at the real declaration: `ROUTE_VIEWS` also appears inside the
+  // probe's own template text.
+  const start = source.search(/^const ROUTE_VIEWS = /m);
+  const stop = source.indexOf("\nfunction phase(", start);
+  assert.ok(start >= 0 && stop > start, "route probe must stay top-level");
+  const context = vm.createContext({});
+  vm.runInContext(
+    source.slice(start, stop) + "\nthis.probe = routeStateProbe;",
+    context,
+  );
+  const kindFor = (statusText) => {
+    context.document = {
+      body: { dataset: { view: "closed" } },
+      querySelector(selector) {
+        if (selector === "#status") return { textContent: statusText };
+        if (selector === "#detail-view") return { hidden: true };
+        return null;
+      },
+    };
+    // The probe returns the page-side expression string; evaluate it against
+    // the fake document exactly as the harness sends it to Runtime.evaluate.
+    const expression = vm.runInContext("probe('fixture')", context);
+    const probed = vm.runInContext(
+      "JSON.stringify(eval(" + JSON.stringify(expression) + "))",
+      context,
+    );
+    const value = JSON.parse(probed);
+    assert.deepEqual(Object.keys(value).sort(), [
+      "detailShown",
+      "statusKind",
+      "titleMatchesFixture",
+      "view",
+    ]);
+    assert.ok(!probed.includes(statusText) || statusText === "");
+    return value.statusKind;
+  };
+  assert.equal(kindFor("正在请求桌面审批…"), "native-pending");
+  assert.equal(kindFor("正在请求桌面审批"), "other");
+  assert.equal(kindFor("正在请求桌面审批… "), "native-pending");
+  assert.equal(kindFor("无法打开此条目"), "claim-failed");
+  assert.equal(kindFor("条目已失效，请重新从金库打开"), "route-revoked");
+  assert.equal(kindFor(""), "other");
+});

@@ -1555,6 +1555,12 @@
       sent?.catch?.(() => {});
     } catch {}
   }
+  // One fixed status string, or "" to clear it. Only these literals ever
+  // reach #status from the route path.
+  function showRouteStatus(message) {
+    if (els?.status) els.status.textContent = message;
+  }
+
   // Back, Escape and pagehide all end the route page's view exactly once.
   // The browser tab itself is never closed, and no detail is kept.
   function closeRouteView(message = "已关闭此条目") {
@@ -1633,6 +1639,9 @@
   // its already-approved detail is the only thing rendered.
   async function claimRoute() {
     if (!routeLifecycleReady || routeClosed) return;
+    // Visible proof that this page reached its claim. Nothing else changes:
+    // the same token, protocol and native request go out below.
+    showRouteStatus("正在请求桌面审批…");
     let reply = null;
     try {
       reply = await api.runtime.sendMessage({
@@ -1647,6 +1656,7 @@
       failRoute();
       return;
     }
+    showRouteStatus("");
     const detail = reply.detail;
     lastState = {
       connected: true,
@@ -4148,6 +4158,7 @@
       checkoutChoices: q("#checkout-choices"),
       checkoutCancel: q("#checkout-cancel"),
       checkoutStatus: q("#checkout-status"),
+      status: q("#status"),
     };
     if (routeRequested) {
       initRoutePage();
