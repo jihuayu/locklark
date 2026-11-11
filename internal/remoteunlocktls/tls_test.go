@@ -12,6 +12,8 @@ import (
 	"errors"
 	"math/big"
 	"net"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -699,5 +701,139 @@ func TestFailClosedAPIs(t *testing.T) {
 	}
 	if serverCfg.VerifyConnection == nil {
 		t.Error("server pin verifier is not installed")
+	}
+}
+
+// testBindingFixture is the single test-only exporter context of
+// TestBindingRejectsContextMutation. Every field is independently variable so
+// that the test can mutate exactly one of them at a time.
+//
+// The serialization in testBindingFixture.Context is TEST DATA ONLY. It is a
+// deliberately trivial "key=value;" line chosen to be easy to mutate; it is
+// NOT the remote-unlock wire format, NOT a canonical/authorization encoding,
+// and nothing may depend on it. This test proves only the TLS
+// exporter context-binding property: on one established connection, a
+// binding derived for one context does not verify for any context that
+// differs in a single field. The synthetic test certificates below are
+// anonymous test keys only; they are not registered device identities, not
+// policy proofs, and this is not a production relay handshake.
+type testBindingFixture struct {
+	requestSummaryDigest string
+	lockGeneration       uint64
+	pairGeneration       uint64
+	vaultID              string
+	epoch                uint64
+	policySequence       uint64
+	deadline             time.Time
+}
+
+// Context serializes the fixture. It is a fixture format, not a wire format;
+// see the doc comment on testBindingFixture.
+func (f testBindingFixture) Context() []byte {
+	return []byte(strings.Join([]string{
+		"request-summary-sha256=" + f.requestSummaryDigest,
+		"lock-generation=" + strconv.FormatUint(f.lockGeneration, 10),
+		"pair-generation=" + strconv.FormatUint(f.pairGeneration, 10),
+		"vault-id=" + f.vaultID,
+		"epoch=" + strconv.FormatUint(f.epoch, 10),
+		"policy-sequence=" + strconv.FormatUint(f.policySequence, 10),
+		"deadline-rfc3339nano=" + f.deadline.UTC().Format(time.RFC3339Nano),
+	}, ";"))
+}
+
+// TestBindingRejectsContextMutation runs one real loopback TCP TLS 1.3
+// mutual-authenticated handshake with the synthetic in-memory test CA, derives
+// the channel binding for testBindingFixture's context, and then, for every
+// single-field mutation, asserts that VerifyBinding on BOTH peers rejects the
+// original binding with ErrBindingMismatch, while the unchanged context still
+// validates on the opposite peer.
+func TestBindingRejectsContextMutation(t *testing.T) {
+	ca := newTestCA(t)
+	serverCert, serverPin := ca.issue(t, 2, "server", []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, []string{testServerName})
+	clientCert, clientPin := ca.issue(t, 3, "client", []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, nil)
+
+	clientGot, serverGot := runHandshakes(t,
+		ClientOptions{
+			ServerName:  testServerName,
+			Roots:       ca.pool,
+			Certificate: clientCert,
+			ServerPin:   serverPin,
+		},
+		ServerOptions{
+			Roots:       ca.pool,
+			Certificate: serverCert,
+			ClientPin:   clientPin,
+		},
+	)
+	client := mustChannel(t, "ClientHandshake", clientGot)
+	server := mustChannel(t, "ServerHandshake", serverGot)
+
+	// Fixture contexts are test data only; see testBindingFixture.
+	base := testBindingFixture{
+		requestSummaryDigest: "6f1c2a9b4d8e0f3a5c7b9d1e2f406182a3b4c5d6e7f8091a2b3c4d5e6f708192",
+		lockGeneration:       11,
+		pairGeneration:       3,
+		vaultID:              "vault-vector-test",
+		epoch:                5,
+		policySequence:       8,
+		deadline:             time.Date(2026, 11, 11, 12, 0, 0, 123456789, time.UTC),
+	}
+	baseCtx := base.Context()
+
+	clientBinding, err := client.ExportBinding(baseCtx)
+	if err != nil {
+		t.Fatalf("client ExportBinding: %v", err)
+	}
+	serverBinding, err := server.ExportBinding(baseCtx)
+	if err != nil {
+		t.Fatalf("server ExportBinding: %v", err)
+	}
+	if !bytes.Equal(clientBinding, serverBinding) {
+		t.Fatal("peers derived different bindings for the same context")
+	}
+
+	mutations := []struct {
+		name   string
+		mutate func(*testBindingFixture)
+	}{
+		{"request-summary-digest", func(f *testBindingFixture) { f.requestSummaryDigest = "00" + f.requestSummaryDigest[2:] }},
+		{"lock-generation", func(f *testBindingFixture) { f.lockGeneration++ }},
+		{"pair-generation", func(f *testBindingFixture) { f.pairGeneration++ }},
+		{"vault-id", func(f *testBindingFixture) { f.vaultID += "-other" }},
+		{"epoch", func(f *testBindingFixture) { f.epoch++ }},
+		{"policy-sequence", func(f *testBindingFixture) { f.policySequence++ }},
+		{"deadline", func(f *testBindingFixture) { f.deadline = f.deadline.Add(time.Nanosecond) }},
+	}
+
+	for _, tc := range mutations {
+		t.Run(tc.name, func(t *testing.T) {
+			mutated := base
+			tc.mutate(&mutated)
+			mutatedCtx := mutated.Context()
+			if bytes.Equal(mutatedCtx, baseCtx) {
+				t.Fatalf("%s mutation did not change the fixture context", tc.name)
+			}
+
+			// Each peer verifies the binding exported by the other, so every
+			// assertion crosses the actual TLS connection.
+			for _, peer := range []struct {
+				name string
+				ch   *Channel
+				got  []byte
+			}{
+				{name: "client", ch: client, got: serverBinding},
+				{name: "server", ch: server, got: clientBinding},
+			} {
+				if err := peer.ch.VerifyBinding(mutatedCtx, peer.got); !errors.Is(err, ErrBindingMismatch) {
+					t.Errorf("%s VerifyBinding(%s-mutated context, peer binding) = %v, want ErrBindingMismatch", peer.name, tc.name, err)
+				}
+				// The original binding still validates for the unchanged
+				// context on this same channel: the rejection above is due to
+				// the mutated context, not connection state.
+				if err := peer.ch.VerifyBinding(baseCtx, peer.got); err != nil {
+					t.Errorf("%s VerifyBinding(unchanged context, peer binding) = %v, want nil", peer.name, err)
+				}
+			}
+		})
 	}
 }
