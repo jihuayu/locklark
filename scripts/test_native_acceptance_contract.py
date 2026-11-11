@@ -415,7 +415,11 @@ class ExecutionGuardTests(unittest.TestCase):
                                 ({"bounds": {"x": 0, "y": 0, "width": 0, "height": 0}}, "window-geometry"),
                                 ({"secure": True}, "secure-desktop"),
                                 ({"trusted": False}, "process-untrusted"),
-                                ({"executable": "/opt/other/browser"}, "process-untrusted"),
+                                # A wrong-executable title match is not a candidate for an
+                                # executable-scoped request: the target is absent, never selected,
+                                # so with the frozen clock the bounded poll budget ends discovery.
+                                # (The zero-timeout refusal is covered by ExecutableScopedDiscoveryTests.)
+                                ({"executable": "/opt/other/browser"}, "observe-overrun"),
                                 ({"pid": 0}, "process-ambiguous")):
             with self.subTest(code=code):
                 self.assert_refused(SpyAdapter(windows=[dict(WINDOW, **overrides)]), code)
@@ -533,6 +537,64 @@ class ExecutionGuardTests(unittest.TestCase):
         self.assertEqual(result["controls"][OTHER_LABEL],
                          {"present": True, "enabled": False, "showing": True})
         self.assertNotIn(PRIVATE, json.dumps(result))
+
+
+class ExecutableScopedDiscoveryTests(unittest.TestCase):
+    """Title collisions from other executables never make the request ambiguous."""
+
+    def setUp(self):
+        self.clock = FakeClock()
+        for name in ("monotonic", "sleep"):
+            patcher = patch.object(contract, name, getattr(self.clock, name))
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def clicks(self, adapter):
+        return [call for call in adapter.calls if isinstance(call, tuple)]
+
+    def test_foreign_same_title_window_plus_target_selects_only_target(self):
+        # The other process owns an exact-title window with its own PID and id.
+        foreign = dict(WINDOW, id=0x500001, pid=5150, executable="/opt/other/locklark")
+        adapter = ChurningAdapter([[foreign], [foreign, dict(WINDOW)]])
+        result = contract.execute(contract.parse_request(request()), adapter)
+        self.assertEqual(result["window"], hex(WINDOW["id"]))
+        self.assertEqual(adapter.lists, 2)
+        self.assertEqual(self.clicks(adapter), [("click", 240, 315)])
+        self.assertEqual([hit[0] for hit in adapter.control_hits], [WINDOW["id"]])
+
+    def test_two_exact_title_windows_from_requested_executable_still_ambiguous(self):
+        # Same executable, distinct PID and window ids: still two candidates.
+        for sibling in (dict(WINDOW, id=0x200004),
+                        dict(WINDOW, id=0x200004, pid=4243)):
+            with self.subTest(sibling=sibling):
+                adapter = SpyAdapter(windows=[dict(WINDOW), sibling])
+                with self.assertRaises(contract.ContractError) as error:
+                    contract.execute(contract.parse_request(request()), adapter)
+                self.assertEqual(error.exception.code, "window-ambiguous")
+                self.assertEqual(self.clicks(adapter), [])
+
+    def test_wrong_executable_only_snapshot_is_absent_and_never_selected(self):
+        foreign = dict(WINDOW, id=0x500001, pid=5150, executable="/opt/other/locklark")
+        adapter = ChurningAdapter([[foreign]])
+        plan = contract.parse_request(request())
+        with patch.object(contract, "DISCOVER_TIMEOUT", -1):
+            with self.assertRaises(contract.ContractError) as error:
+                contract.execute(plan, adapter)
+        self.assertEqual(error.exception.code, "window-timeout")
+        self.assertEqual(adapter.lists, 1)
+        self.assertEqual(self.clicks(adapter), [])
+        self.assertNotIn("read_controls", adapter.calls)
+        self.assertNotIn("hit_test", adapter.calls)
+        self.assertNotIn("focus_state", adapter.calls)
+        self.assertEqual(adapter.activations, 0)
+
+    def test_no_executable_request_keeps_title_only_ambiguity(self):
+        foreign = dict(WINDOW, id=0x500001, pid=5150, executable="/opt/other/locklark")
+        adapter = SpyAdapter(windows=[dict(WINDOW), foreign])
+        with self.assertRaises(contract.ContractError) as error:
+            contract.execute(contract.parse_request(request(executable=None)), adapter)
+        self.assertEqual(error.exception.code, "window-ambiguous")
+        self.assertEqual(self.clicks(adapter), [])
 
 
 class FakeClock:

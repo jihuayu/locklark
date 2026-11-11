@@ -423,13 +423,23 @@ def check_window(plan, window, platform="linux"):
     return window
 
 
+def window_candidate(plan, window, platform="linux"):
+    """A title match that also belongs to the requested executable, when given."""
+    if not title_matches(plan, window):
+        return False
+    if plan["executable"] is None:
+        return True
+    return same_executable(plan["executable"], window.get("executable"), platform)
+
+
 def find_window(plan, adapter, budget):
     """Bounded discovery of exactly one visible, on-screen, canonical window."""
     deadline = monotonic() + DISCOVER_TIMEOUT
     while True:
         windows = adapter.list_windows()
         budget.charge_windows(windows)
-        matches = [window for window in windows if title_matches(plan, window)]
+        matches = [window for window in windows
+                   if window_candidate(plan, window, adapter.platform)]
         if len(matches) > 1:
             raise ContractError("window-ambiguous", {"matches": len(matches)})
         if matches:
