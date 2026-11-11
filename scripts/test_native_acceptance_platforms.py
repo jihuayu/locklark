@@ -970,6 +970,10 @@ class MacCapabilityTests(unittest.TestCase):
         self.assertEqual(api.clicks, [])
 
 
+class NativeNSString(str):
+    """Stand-in for objc.pyobjc_unicode: a str subclass, not an exact str."""
+
+
 class MacAdapterTests(unittest.TestCase):
     def test_one_physical_click_after_focus_verification(self):
         api = FakeMacApi()
@@ -1001,6 +1005,38 @@ class MacAdapterTests(unittest.TestCase):
             execute(macos.MacAdapter(api=api), document())
         self.assertEqual(error.exception.code, "a11y-query")
 
+    def test_native_string_title_is_normalised_to_exact_str(self):
+        # objc.pyobjc_unicode stand-in: a str subclass equality accepts but
+        # type() does not. Shared title_matches must keep demanding exact str.
+        native = NativeNSString(TITLE)
+        self.assertEqual(native, TITLE)
+        self.assertIs(type(native), NativeNSString)
+        self.assertFalse(contract.title_matches({"title": TITLE, "title_prefix": None},
+                                                {"title": native}))
+        window = macos.MacAdapter(api=FakeMacApi())._normalise(dict(WINDOW_RAW, title=native))
+        self.assertIs(type(window["title"]), str)
+        self.assertEqual(window["title"], TITLE)
+        self.assertTrue(contract.title_matches({"title": TITLE, "title_prefix": None}, window))
+        result = execute(macos.MacAdapter(
+            api=FakeMacApi(windows_list=[dict(WINDOW_RAW, title=native)])), document())
+        self.assertEqual(result["window"], "0x200003")
+
+    def test_non_string_native_title_keeps_safe_empty_title(self):
+        class Hostile(object):
+            def __str__(self):
+                raise AssertionError("arbitrary str() was called")
+
+            def __eq__(self, other):
+                raise AssertionError("hostile title was compared")
+
+        adapter = macos.MacAdapter(api=FakeMacApi())
+        for value in (Hostile(), None, 7, b"Locklark", ["Locklark"]):
+            with self.subTest(value=type(value).__name__):
+                window = adapter._normalise(dict(WINDOW_RAW, title=value, executable=value))
+                self.assertEqual(window["title"], "")
+                self.assertIs(type(window["title"]), str)
+                self.assertEqual(window["executable"], "")
+                self.assertFalse(contract.title_matches({"title": TITLE, "title_prefix": None}, window))
 
     def test_same_pid_other_ax_window_refused(self):
         api = FakeMacApi(focus_window=0x200004)

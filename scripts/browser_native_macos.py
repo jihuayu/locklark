@@ -662,13 +662,31 @@ class MacAdapter:
     def list_windows(self):
         return [self._normalise(raw) for raw in self.api.list_windows()]
 
+    @staticmethod
+    def _native_title(value):
+        """Exact built-in ``str`` title, or "" for anything not string-compatible.
+
+        PyObjC surfaces Quartz/AX NSString titles as ``objc.pyobjc_unicode``,
+        a ``str`` subclass that compares equal to the expected title but fails
+        the shared contract's ``type(title) is str`` check. Only genuine string
+        instances are copied into an exact ``str`` via ``str.__str__`` (which
+        never dispatches to a subclass override); every other value keeps a
+        safe empty title and arbitrary ``str()`` is never called.
+        """
+        if isinstance(value, str):
+            return str.__str__(value)
+        return ""
+
     def _normalise(self, raw):
+        def text(value):
+            return MacAdapter._native_title(value)
+
         def rect(value):
             return {key: (value or {}).get(key) for key in ("x", "y", "width", "height")}
 
         return {
             "id": raw.get("id"), "pid": raw.get("pid"),
-            "title": raw.get("title") or "", "executable": raw.get("executable") or "",
+            "title": text(raw.get("title")), "executable": text(raw.get("executable")),
             "trusted": raw.get("trusted") is True,
             "visible": raw.get("visible") is True,
             "onscreen": raw.get("onscreen") is not False,
