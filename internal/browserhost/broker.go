@@ -437,23 +437,55 @@ var cliRunTTYGate = verifyCLIRunTTY
 // so a client that closes (EOF) or sends an unexpected extra byte at any point
 // cancels the callback instead of leaving a native approval pending after the
 // CLI has exited.
+//
+// The callback never sees the broker's parsed request. Before it runs, the
+// requested target identities are captured in an immutable expectedTargets
+// slot snapshot that no callback-reachable value aliases, and the callback
+// receives a deep request copy it owns outright: the scope is copied by
+// CLIRunScope.Clone and the targets slice is freshly allocated. A callback that
+// mutates, reorders, or clears anything in its copy therefore changes neither
+// the broker's parsed request nor the slots the returned PreparedValues are
+// bound to.
 func (b *Broker) handleCLIRunConn(conn net.Conn, peer Peer, req CLIRunBrokerRequest, resp *CLIRunBrokerResponse) {
+	// The snapshot is captured from req and never handed out. Its slot names
+	// are owned string copies, so nothing the callback (or the broker clearing
+	// req later) does to another slice reaches it. The callback request is a
+	// distinct allocation for the targets slice, a clone for the scope, and
+	// independent copies for every derived slice and map. Both are cleared on
+	// every return; Go strings cannot be securely wiped, only the containers.
+	expectedTargets := make([]personal.CLIBrokerTarget, len(req.Targets))
+	for i, target := range req.Targets {
+		expectedTargets[i] = personal.CLIBrokerTarget{
+			Slot:     string([]byte(target.Slot)),
+			ID:       string([]byte(target.ID)),
+			Revision: string([]byte(target.Revision)),
+			Field:    string([]byte(target.Field)),
+		}
+	}
+	callbackReq := CLIRunBrokerRequest{
+		V:         req.V,
+		VaultPath: string([]byte(req.VaultPath)),
+		Scope:     req.Scope.Clone(),
+		Targets:   make([]personal.CLIBrokerTarget, len(expectedTargets)),
+	}
+	copy(callbackReq.Targets, expectedTargets)
+	defer clearCLIRunTargets(expectedTargets)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	stop := make(chan struct{})
 	go watchCLIRunConn(conn, cancel, stop, cliRunMonitorIdle)
-	out, err := b.callbacks.HandleCLIRun(ctx, peer, req)
+	out, err := b.callbacks.HandleCLIRun(ctx, peer, callbackReq)
 	// Everything the callback returned that is not transferred is cleared on
 	// every exit. Only a successful callback hands its prepared bytes over to
 	// resp; an error, a legacy-only or otherwise unaudited reply, and a reply
 	// the writer rejects all leave the callback's buffers to be zeroed below.
 	//
-	// The callback's PreparedValues are bound to the exact req.Targets before
-	// the reply is encoded: the served reply must carry exactly one non-nil
-	// buffer per requested slot and nothing else, and it is encoded here
-	// rather than left to the writer's unbound generic check. A missing, extra,
-	// nil, or legacy-only reply is the fixed refusal. Every callback buffer is
-	// zeroed here on every exit, whichever of the above happened.
+	// The callback's PreparedValues are bound to the expectedTargets snapshot
+	// before the reply is encoded: the served reply must carry exactly one
+	// non-nil buffer per requested slot and nothing else, and it is encoded
+	// here rather than left to the writer's unbound generic check. A missing,
+	// extra, nil, or legacy-only reply is the fixed refusal. Every callback
+	// buffer is zeroed here on every exit, whichever of the above happened.
 	transferred := false
 	bound, bindErr := []byte(nil), error(errCLIRunResponse)
 	defer func() {
@@ -464,6 +496,11 @@ func (b *Broker) handleCLIRunConn(conn net.Conn, peer Peer, req CLIRunBrokerRequ
 		clearCLIRunValueMap(out.PreparedValues)
 		clearCLIRunValues(out.Values)
 		out.PreparedValues, out.Values = nil, nil
+		// The callback's request containers are cleared on every return,
+		// whatever the callback did to them; Go strings are not wiped.
+		callbackReq.Scope.Clear()
+		clearCLIRunTargets(callbackReq.Targets)
+		callbackReq.Targets = nil
 	}()
 	// Only the exact transport/service-unavailable sentinel may select the
 	// explicit unavailable token; a wrapped copy of it (errors.Is), a refusal,
@@ -471,10 +508,11 @@ func (b *Broker) handleCLIRunConn(conn net.Conn, peer Peer, req CLIRunBrokerRequ
 	switch {
 	case err == nil:
 		// Only the audited pair crosses: prepared bytes plus the canonical
-		// receipt, and only when the slots are exactly the requested ones.
+		// receipt, and only when the slots are exactly the requested ones as
+		// captured before the callback, never as the callback left them.
 		// The legacy Values map is never taken, so an unaudited reply is
 		// replaced by the fixed refusal by the writer.
-		if validCLIRunValues(req.Targets, out.PreparedValues) {
+		if validCLIRunValues(expectedTargets, out.PreparedValues) {
 			bound, bindErr = marshalCLIRunValues(out.PreparedValues, out.Receipt)
 		}
 		if bindErr == nil {
@@ -495,7 +533,8 @@ func (b *Broker) handleCLIRunConn(conn net.Conn, peer Peer, req CLIRunBrokerRequ
 	// wire. Whatever it rejects stays callback-owned and is cleared above;
 	// whatever it writes is cleared by the caller. A transferred success is
 	// written from the already slot-bound encoding, so the bytes that were
-	// checked against req.Targets are exactly the bytes that go out.
+	// checked against the expected target snapshot are exactly the bytes that
+	// go out.
 	if transferred && bindErr == nil {
 		writeCLIRunRaw(conn, bound)
 	} else {

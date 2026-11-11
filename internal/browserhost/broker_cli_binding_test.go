@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -31,6 +32,13 @@ var cliRunExchangeID atomic.Uint64
 // installed only for this test.
 func cliRunBoundReply(t *testing.T, gate func(Peer, string, string, string) error, callbacks BrokerCallbacks) string {
 	t.Helper()
+	return cliRunBoundReplyRequest(t, gate, callbacks, cliRunFixtureRequest)
+}
+
+// cliRunBoundReplyRequest is cliRunBoundReply with a per-exchange request
+// builder, so a test can choose the requested targets that cross the wire.
+func cliRunBoundReplyRequest(t *testing.T, gate func(Peer, string, string, string) error, callbacks BrokerCallbacks, build func() CLIRunBrokerRequest) string {
+	t.Helper()
 	oldGate := cliRunTTYGate
 	cliRunTTYGate = gate
 	t.Cleanup(func() { cliRunTTYGate = oldGate })
@@ -40,7 +48,7 @@ func cliRunBoundReply(t *testing.T, gate func(Peer, string, string, string) erro
 	if e := client.SetDeadline(deadline); e != nil {
 		t.Fatal(e)
 	}
-	req := cliRunFixtureRequest()
+	req := build()
 	req.Scope.Nonce = fmt.Sprintf("%064x", cliRunExchangeID.Add(1))
 	frame, e := json.Marshal(req)
 	if e != nil {
@@ -135,6 +143,89 @@ func TestCLIRunCallbackSlotsBoundToRequestedTargets(t *testing.T) {
 	})
 	if got != cliRunAuditedReply("token", "ZXhhY3Q=") {
 		t.Fatalf("bound reply wrote %s", got)
+	}
+}
+
+// TestCLIRunCallbackCannotRewriteRequestedSlots proves the served validation
+// binds PreparedValues to the target snapshot captured before the callback.
+// Through a real serveCLIRun/net.Pipe exchange the client requests the npm
+// "token" password slot; the callback rewrites only its private target copy to
+// the npm "registry" url slot and returns PreparedValues keyed "registry".
+//
+// The rewritten target set is valid (token is satisfied by registry's real url
+// slot), so the pre-fix shared-slice path accepts that exact reply, which the
+// oracle below demonstrates. With the immutable snapshot the same exchange is
+// the exact fixed refusal, and the callback-owned buffer is zeroed.
+func TestCLIRunCallbackCannotRewriteRequestedSlots(t *testing.T) {
+	// oldSharedReply is the pre-fix serving path, kept as an oracle only: it
+	// runs the callback with the broker's parsed request (the same targets
+	// slice) and then validates and encodes exactly as the code did before the
+	// immutable snapshot. It is never wired into an assertion about the
+	// served reply.
+	oldSharedReply := func(callback func(context.Context, Peer, CLIRunBrokerRequest) (BrokerCLIResponse, error)) string {
+		req := cliRunFixtureRequest()
+		out, e := callback(context.Background(), Peer{User: "UID 501"}, req)
+		if e != nil || !validCLIRunValues(req.Targets, out.PreparedValues) {
+			return `{"v":1,"error":"refused"}`
+		}
+		bound, e := marshalCLIRunValues(out.PreparedValues, out.Receipt)
+		if e != nil {
+			return `{"v":1,"error":"refused"}`
+		}
+		return string(bound)
+	}
+	receipt := cliRunReceiptFromFixture(t)
+	value := []byte("callback-registry-value")
+	callback := func(_ context.Context, _ Peer, req CLIRunBrokerRequest) (BrokerCLIResponse, error) {
+		req.Targets[0].Slot, req.Targets[0].Field = "registry", "url"
+		return BrokerCLIResponse{V: 1, PreparedValues: map[string][]byte{"registry": value}, Receipt: receipt}, nil
+	}
+	// Oracle: the shared-slice validation accepts this exact rewrite, so the
+	// pre-fix path would have disclosed a slot the client never requested.
+	if got := oldSharedReply(callback); !strings.Contains(got, `"registry":"`) || strings.Contains(got, `"error"`) {
+		t.Fatalf("pre-fix oracle did not accept the rewritten slot: %s", got)
+	}
+
+	// The served exchange refuses it. The reply and the received target are
+	// captured synchronously in the callback; the invocation flag is checked
+	// after the exchange completes, so nothing waits on an unbounded channel.
+	invoked := false
+	received := ""
+	got := cliRunBoundReplyRequest(t, cliRunPassingGate, BrokerCallbacks{
+		HandleCLIRun: func(ctx context.Context, peer Peer, req CLIRunBrokerRequest) (BrokerCLIResponse, error) {
+			received = req.Targets[0].Slot + "/" + req.Targets[0].Field
+			out, e := callback(ctx, peer, req)
+			invoked = true
+			return out, e
+		},
+	}, cliRunFixtureRequest)
+	if !invoked {
+		t.Fatal("callback was not invoked")
+	}
+	if received != "token/password" {
+		t.Fatalf("callback received %q, want the requested token/password target", received)
+	}
+	if got != `{"v":1,"error":"refused"}` {
+		t.Fatalf("rewritten request wrote %s", got)
+	}
+	if bytes.Contains([]byte(got), value) || bytes.Contains([]byte(got), []byte("Y2FsbGJhY2st")) {
+		t.Fatal("refused reply carried callback bytes")
+	}
+	if !bytes.Equal(value, make([]byte, len(value))) {
+		t.Fatalf("callback value not zeroed: %q", value)
+	}
+
+	// The exact requested set still succeeds: the callback reads the original
+	// token slot, mutates its own copy afterwards, and returns the token value.
+	got = cliRunBoundReplyRequest(t, cliRunPassingGate, BrokerCallbacks{
+		HandleCLIRun: func(_ context.Context, _ Peer, req CLIRunBrokerRequest) (BrokerCLIResponse, error) {
+			slot := req.Targets[0].Slot
+			req.Targets[0].Slot, req.Targets[0].Field = "registry", "url"
+			return BrokerCLIResponse{V: 1, PreparedValues: map[string][]byte{slot: []byte("exact")}, Receipt: receipt}, nil
+		},
+	}, cliRunFixtureRequest)
+	if got != cliRunAuditedReply("token", "ZXhhY3Q=") {
+		t.Fatalf("exact requested slot reply wrote %s", got)
 	}
 }
 
