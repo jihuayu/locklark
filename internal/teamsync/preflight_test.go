@@ -2,6 +2,7 @@ package teamsync
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"io"
 	"net/http"
@@ -103,6 +104,78 @@ func budgetBetween(t *testing.T, f *syncFixture, fullLen int) int {
 		t.Fatalf("capacity refusal (%d bytes) and full response (%d bytes) leave no separating budget", capacityLen, fullLen)
 	}
 	return budget
+}
+
+// readyRequest returns the signed query of r without consuming its body.
+func readyRequest(t *testing.T, r *http.Request) request {
+	t.Helper()
+	raw, e := io.ReadAll(r.Body)
+	if e != nil {
+		t.Fatal(e)
+	}
+	r.Body = io.NopCloser(bytes.NewReader(raw))
+	var q request
+	if decode(raw, &q) != nil {
+		t.Fatal("undecodable preflight request")
+	}
+	return q
+}
+
+// preparedLen returns the exact encoded length prepare would give out for this
+// request under budget: the signed envelope itself when it fits, otherwise the
+// signed capacity refusal that replaces it.
+func preparedLen(t *testing.T, s *server, q request, out response, budget int) int {
+	t.Helper()
+	if !s.prepare(context.Background(), q, &out, budget) {
+		t.Fatal("budget cannot carry even a signed capacity refusal")
+	}
+	return len(encode(out))
+}
+
+// publicationProjection measures, on a pristine fixture, the exact signed
+// envelopes its first publication would produce: the projected committed
+// receipt answer and the projected full read of the history that commit would
+// leave. It mirrors server.handle: one ReadTrusted at the persisted anchor for
+// that request's proof anchor, the equal-length receipt projection, and
+// ProjectHistory over the same candidate snapshot. Nothing is committed and the
+// anchor does not move. The returned request is left readable for handle.
+func publicationProjection(t *testing.T, f *syncFixture, s *server, pub *publication) (int, int, *http.Request) {
+	t.Helper()
+	r := lifecycleRequest(f, pub)
+	q := readyRequest(t, r)
+	anchor := serverAnchor(t, f)
+	trusted, e := directory.ReadTrusted(f.path, f.cfg, anchor, q.Proof.Anchor)
+	if e != nil {
+		t.Fatal("cannot read the target directory", e)
+	}
+	head := trusted.Checkpoint()
+	if head != q.Publication.Proposal.Parent {
+		t.Fatal("target publication does not extend the target head")
+	}
+	projection := directory.Receipt{Proposal: q.Publication.Proposal, Signature: make([]byte, ed25519.SignatureSize)}
+	projection.Proposal.Epoch = head.Version + 1
+	projection.Proposal.Scope = strings.Repeat("0", len(f.cfg.Genesis().Scope))
+	if head.Version > 0 {
+		projection.Proposal.Parent.Hash = strings.Repeat("0", 64)
+	}
+	projected := response{Status: "committed", Head: projection.Checkpoint(), Receipt: &projection}
+	committedLen := preparedLen(t, s, q, projected, MaxResponseBytes)
+	if projected.Status != "committed" || projected.Receipt == nil {
+		t.Fatal("receipt projection does not fit MaxResponseBytes")
+	}
+	h, e := trusted.ProjectHistory(projection, q.Publication.Snapshot)
+	if e != nil {
+		t.Fatal("cannot project the post-commit history", e)
+	}
+	full := response{Status: "current", Head: projection.Checkpoint(), History: &h}
+	readLen := preparedLen(t, s, q, full, MaxResponseBytes)
+	if full.Status != "current" || full.History == nil {
+		t.Fatal("projected post-commit read does not fit MaxResponseBytes")
+	}
+	if cp := serverAnchor(t, f); cp != anchor {
+		t.Fatal("publication projection moved the anchor")
+	}
+	return committedLen, readLen, r
 }
 
 func ownedPublication(t *testing.T, f *syncFixture) *publication {
@@ -230,91 +303,65 @@ func TestReadPreflightSerializesConcurrentReads(t *testing.T) {
 // TestPublishPreflightRefusesCapacityBeforeCommitOrAdvance pins that an
 // oversize projected commit response is refused as signed capacity without
 // calling directory.Commit and without touching the database or the anchor,
-// and that the same publication then commits under a budget that also fits the
-// complete post-commit read.
+// and that the same publication then commits under MaxResponseBytes and reads
+// back the complete post-commit history.
 func TestPublishPreflightRefusesCapacityBeforeCommitOrAdvance(t *testing.T) {
-	probe, probeServer := lifecycleFixture(t)
-	pub := ownedPublication(t, probe)
-	var probeCommits atomic.Int32
-	probeServer.hooks = &serverLifecycleHooks{afterCommitGrant: func() { probeCommits.Add(1) }}
-	fullRequest := lifecycleRequest(probe, pub)
-	full := preflight(t, probeServer, fullRequest, MaxResponseBytes)
-	if full.Status != "committed" || full.Receipt == nil {
-		t.Fatalf("full publish preflight status = %q", full.Status)
+	target, targetServer := lifecycleFixture(t)
+	initial := serverAnchor(t, target)
+	before := databaseBytes(t, target)
+	pub := ownedPublication(t, target)
+	committedLen, readLen, smallRequest := publicationProjection(t, target, targetServer, pub)
+	if committedLen <= 400 || readLen <= committedLen {
+		t.Fatalf("committed projection (%d bytes) and read projection (%d bytes) do not separate", committedLen, readLen)
 	}
-	if probeCommits.Load() != 1 || serverAnchor(t, probe) != full.Head {
-		t.Fatal("in-budget publish did not commit and advance the probe anchor")
-	}
-	assertSignedEnvelope(t, probe, fullRequest, full, MaxResponseBytes)
-	projectedLen := len(encode(full))
-	if projectedLen <= 400 {
-		t.Fatalf("full committed envelope is only %d bytes", projectedLen)
-	}
-	// The probe's post-commit read is the exact full read envelope; its length is
-	// the fitting budget for the target, which must admit both.
-	readRequest := lifecycleRequest(probe, nil)
-	probeRead := preflight(t, probeServer, readRequest, MaxResponseBytes)
-	if probeRead.Status != "current" || probeRead.History == nil || probeRead.Head != full.Head || len(probeRead.History.Receipts) != 2 {
-		t.Fatalf("probe post-commit read status = %q", probeRead.Status)
-	}
-	assertSignedEnvelope(t, probe, readRequest, probeRead, MaxResponseBytes)
-	fitting := len(encode(probeRead))
-	if fitting < projectedLen {
-		t.Fatalf("post-commit read (%d bytes) is shorter than the receipt projection (%d bytes)", fitting, projectedLen)
-	}
-	budget := budgetBetween(t, probe, projectedLen)
+	budget := budgetBetween(t, target, committedLen)
 
-	f, s := lifecycleFixture(t)
-	initial := serverAnchor(t, f)
-	before := databaseBytes(t, f)
-	pub = ownedPublication(t, f)
 	var commits atomic.Int32
-	s.hooks = &serverLifecycleHooks{afterCommitGrant: func() { commits.Add(1) }}
+	targetServer.hooks = &serverLifecycleHooks{afterCommitGrant: func() { commits.Add(1) }}
 
-	smallRequest := lifecycleRequest(f, pub)
-	small := preflight(t, s, smallRequest, budget)
+	small := preflight(t, targetServer, smallRequest, budget)
 	assertCapacity(t, small)
-	assertSignedEnvelope(t, f, smallRequest, small, budget)
+	assertSignedEnvelope(t, target, smallRequest, small, budget)
 	if commits.Load() != 0 {
 		t.Fatal("oversize publish reached the commit")
 	}
-	if cp := serverAnchor(t, f); cp != initial {
+	if cp := serverAnchor(t, target); cp != initial {
 		t.Fatalf("oversize publish advanced the anchor to version %d", cp.Version)
 	}
-	if !bytes.Equal(before, databaseBytes(t, f)) {
+	if !bytes.Equal(before, databaseBytes(t, target)) {
 		t.Fatal("oversize publish mutated the database")
 	}
-	view, e := directory.Read(f.path, f.cfg, f.cfg.Genesis())
-	if e != nil || view.Receipt.Checkpoint() != f.first.Checkpoint() {
+	view, e := directory.Read(target.path, target.cfg, target.cfg.Genesis())
+	if e != nil || view.Receipt.Checkpoint() != target.first.Checkpoint() {
 		t.Fatal("oversize publish moved the committed head", e)
 	}
 
-	// The same publication commits once both its response and the complete
-	// post-commit read fit, and the actual serialized receipt envelope is
-	// exactly as long as the projection.
-	exactRequest := lifecycleRequest(f, pub)
-	exact := preflight(t, s, exactRequest, fitting)
-	if exact.Status != "committed" || exact.Receipt == nil || exact.Head.Version != 2 {
-		t.Fatalf("fitting publish status = %q", exact.Status)
+	// The same publication commits under MaxResponseBytes: a receipt-only
+	// fitting budget is no longer sufficient because the post-commit read must
+	// fit too. Its actual receipt envelope and its actual post-commit read are
+	// exactly as long as measured before the commit.
+	exactRequest := lifecycleRequest(target, pub)
+	exact := preflight(t, targetServer, exactRequest, MaxResponseBytes)
+	if exact.Status != "committed" || exact.Receipt == nil || exact.Head.Version != 2 || commits.Load() != 1 {
+		t.Fatalf("MaxResponseBytes publish status = %q", exact.Status)
 	}
-	assertSignedEnvelope(t, f, exactRequest, exact, fitting)
-	if commits.Load() != 1 {
-		t.Fatal("fitting publish did not reach the commit exactly once")
+	assertSignedEnvelope(t, target, exactRequest, exact, MaxResponseBytes)
+	if got := len(encode(exact)); got != committedLen {
+		t.Fatalf("actual committed envelope is %d bytes, projection %d", got, committedLen)
 	}
-	if got := len(encode(exact)); got != projectedLen {
-		t.Fatalf("actual committed envelope is %d bytes, projection %d", got, projectedLen)
-	}
-	if cp := serverAnchor(t, f); cp != exact.Head {
+	if cp := serverAnchor(t, target); cp != exact.Head {
 		t.Fatal("committed publish did not advance the anchor to the new head")
 	}
-	// The resulting history reads back within that budget.
-	readRequest = lifecycleRequest(f, nil)
-	read := preflight(t, s, readRequest, fitting)
+	readRequest := lifecycleRequest(target, nil)
+	read := preflight(t, targetServer, readRequest, MaxResponseBytes)
 	if read.Status != "current" || read.History == nil || read.Head != exact.Head || len(read.History.Receipts) != 2 {
 		t.Fatalf("post-commit read status = %q", read.Status)
 	}
-	assertSignedEnvelope(t, f, readRequest, read, fitting)
-	if cp := serverAnchor(t, f); cp != exact.Head {
+	assertSignedEnvelope(t, target, readRequest, read, MaxResponseBytes)
+	if got := len(encode(read)); got != readLen {
+		t.Fatalf("actual post-commit read is %d bytes, projection %d", got, readLen)
+	}
+	if cp := serverAnchor(t, target); cp != exact.Head {
 		t.Fatal("post-commit read did not advance the anchor to the new head")
 	}
 }
@@ -325,44 +372,30 @@ func TestPublishPreflightRefusesCapacityBeforeCommitOrAdvance(t *testing.T) {
 // not. Such a commit would be acknowledged and then leave the retained history
 // unreadable as capacity.
 //
-// The probe measures the real full envelopes with lifecycleRequest: the
-// committed receipt answer and the read of that commit's history. The low
-// budget is halfway between them, and must fit the signed capacity refusal.
-// The guard is checked under that private budget seam, exactly as ServeHTTP
-// passes MaxResponseBytes; it is not a product limit.
+// The target candidate is measured exactly before handle runs, through the same
+// ReadTrusted, equal-length receipt projection and ProjectHistory the server
+// uses. The low budget fits the receipt projection but not the projected read,
+// and must also fit the signed capacity refusal. The guard is checked under
+// that private budget seam, exactly as ServeHTTP passes MaxResponseBytes; it is
+// not a product limit.
 func TestPublishPreflightRefusesFullReadCapacityBeforeCommitOrAdvance(t *testing.T) {
-	probe, probeServer := lifecycleFixture(t)
-	probePub := ownedPublication(t, probe)
-	probeRequest := lifecycleRequest(probe, probePub)
-	committed := preflight(t, probeServer, probeRequest, MaxResponseBytes)
-	if committed.Status != "committed" || committed.Receipt == nil || committed.Head.Version != 2 {
-		t.Fatalf("probe publish status = %q", committed.Status)
-	}
-	assertSignedEnvelope(t, probe, probeRequest, committed, MaxResponseBytes)
-	readRequest := lifecycleRequest(probe, nil)
-	full := preflight(t, probeServer, readRequest, MaxResponseBytes)
-	if full.Status != "current" || full.History == nil || full.Head != committed.Head || len(full.History.Receipts) != 2 {
-		t.Fatalf("probe post-commit read status = %q", full.Status)
-	}
-	assertSignedEnvelope(t, probe, readRequest, full, MaxResponseBytes)
-
-	receiptLen, fullLen := len(encode(committed)), len(encode(full))
-	capacityLen := len(encode(response{Status: "capacity", Protocol: protocol, RequestDigest: strings.Repeat("0", 64), Nonce: strings.Repeat("0", 64), Signature: make([]byte, ed25519.SignatureSize)}))
-	budget := (receiptLen + fullLen) / 2
-	if capacityLen >= budget || receiptLen > budget || budget >= fullLen {
-		t.Fatalf("budget %d does not separate capacity (%d), receipt (%d) and read (%d)", budget, capacityLen, receiptLen, fullLen)
-	}
-
-	// The target's first publication projects a receipt answer that fits the
-	// low budget, but its post-commit read would not. It is refused as signed
-	// capacity before the commit hook, with no database or anchor change.
 	target, targetServer := lifecycleFixture(t)
 	initial := serverAnchor(t, target)
 	before := databaseBytes(t, target)
 	pub := ownedPublication(t, target)
+	committedLen, readLen, smallRequest := publicationProjection(t, target, targetServer, pub)
+
+	capacityLen := len(encode(response{Status: "capacity", Protocol: protocol, RequestDigest: strings.Repeat("0", 64), Nonce: strings.Repeat("0", 64), Signature: make([]byte, ed25519.SignatureSize)}))
+	budget := (committedLen + readLen) / 2
+	if capacityLen >= budget || committedLen > budget || budget >= readLen {
+		t.Fatalf("budget %d does not separate capacity (%d), receipt projection (%d) and read projection (%d)", budget, capacityLen, committedLen, readLen)
+	}
+
 	var commits atomic.Int32
 	targetServer.hooks = &serverLifecycleHooks{afterCommitGrant: func() { commits.Add(1) }}
-	smallRequest := lifecycleRequest(target, pub)
+
+	// The same target request under the low budget is refused as signed
+	// capacity before the commit hook, with no database or anchor change.
 	small := preflight(t, targetServer, smallRequest, budget)
 	assertCapacity(t, small)
 	assertSignedEnvelope(t, target, smallRequest, small, budget)
@@ -379,30 +412,28 @@ func TestPublishPreflightRefusesFullReadCapacityBeforeCommitOrAdvance(t *testing
 		t.Fatal("capacity-refused publish moved the committed head", e)
 	}
 
-	// The same publication commits under MaxResponseBytes. Its receipt answer
-	// fits the low budget and its post-commit read does not, as on the probe,
-	// and the history reads back. Snapshots are randomized, so lengths are
-	// compared against the budget, not against the probe's exact bytes.
+	// The same publication commits under MaxResponseBytes, and the actual
+	// post-commit read is exactly as long as the measured projection.
 	normalRequest := lifecycleRequest(target, pub)
 	normal := preflight(t, targetServer, normalRequest, MaxResponseBytes)
 	if normal.Status != "committed" || normal.Receipt == nil || normal.Head.Version != 2 || commits.Load() != 1 {
 		t.Fatalf("MaxResponseBytes publish status = %q", normal.Status)
 	}
 	assertSignedEnvelope(t, target, normalRequest, normal, MaxResponseBytes)
-	if got := len(encode(normal)); got > budget {
-		t.Fatalf("committed receipt answer is %d bytes, over the %d byte budget", got, budget)
+	if got := len(encode(normal)); got != committedLen {
+		t.Fatalf("actual committed envelope is %d bytes, projection %d", got, committedLen)
 	}
 	if cp := serverAnchor(t, target); cp != normal.Head {
 		t.Fatal("committed publish did not advance the anchor to the new head")
 	}
-	readRequest = lifecycleRequest(target, nil)
+	readRequest := lifecycleRequest(target, nil)
 	read := preflight(t, targetServer, readRequest, MaxResponseBytes)
 	if read.Status != "current" || read.History == nil || read.Head != normal.Head || len(read.History.Receipts) != 2 || len(read.History.Snapshot.Database) == 0 {
 		t.Fatal("committed publish left no readable post-commit history")
 	}
 	assertSignedEnvelope(t, target, readRequest, read, MaxResponseBytes)
-	if got := len(encode(read)); got <= budget {
-		t.Fatalf("post-commit read is %d bytes, within the %d byte budget", got, budget)
+	if got := len(encode(read)); got != readLen {
+		t.Fatalf("actual post-commit read is %d bytes, projection %d", got, readLen)
 	}
 	if view, e := directory.AssembleHistory(target.cfg, target.cfg.Genesis(), normal.Head, *read.History); e != nil || view.Receipt.Checkpoint() != normal.Head {
 		t.Fatal("post-commit read is not the committed history", e)
