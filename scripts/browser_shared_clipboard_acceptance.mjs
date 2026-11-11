@@ -622,11 +622,12 @@ async function openSyntheticDetail(context, desktop, popup, step) {
 // approves it with real native input, the giving handle is dropped, and a fresh
 // popup must show the same visible copy confirmation and automatic-cleanup
 // toast. The fresh popup never clicks copy again, so only one native prepare
-// can ever reach the desktop. The returned timestamp predates the approval and
-// therefore only makes the later TTL wait more conservative.
+// can ever reach the desktop. The returned timestamp is taken only after that
+// native approval and the fresh popup's copy confirmation, because product
+// starts its lease when the approved copyValue executes; the later TTL wait
+// must anchor there, not before the approval.
 async function copyConcealedPassword(context, desktop, popup) {
   await popup.click(COPY_CONFIRM_SELECTOR);
-  const copiedAt = Date.now();
   // The review prompt is the desktop window: focus it before the native click.
   popup = null;
   desktopInput(context, desktop, [
@@ -651,11 +652,14 @@ async function copyConcealedPassword(context, desktop, popup) {
       "Popup did not announce the native automatic-cleanup lease");
     assert(!toast.includes("无法保证自动清除"),
       "Popup used the legacy manual browser-copy wording");
+    // Lease anchor: the native approval already executed copyValue and the
+    // fresh popup confirmed it, so the product's TTL starts from here.
+    const copiedAt = Date.now();
+    return { popup: observed, copiedAt };
   } catch (error) {
     await observed.dismiss().catch(() => {});
     throw error;
   }
-  return { popup: observed, copiedAt };
 }
 
 async function copyIsPasteable(context, clipboard) {
