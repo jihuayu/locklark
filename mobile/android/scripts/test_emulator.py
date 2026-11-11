@@ -40,7 +40,7 @@ def scan_output(raw, values):
                 raise RuntimeFailure()
 
 
-def complete_pass(returncode, raw, expected_tests=4):
+def complete_pass(returncode, raw, expected_tests=5):
     counts = re.findall(rb"OK \(([0-9]+) tests?\)", raw)
     summaries = re.findall(rb"(?<![\w.!])(?:OK \(([0-9]+) tests?\)|FAILURES!!! Tests run: ([0-9]+))", raw)
     return (returncode == 0 and counts == [str(expected_tests).encode()] and
@@ -56,7 +56,7 @@ def safe_diagnostic(raw):
     exception = "unknown"
     for name in ("java.lang.AssertionError", "junit.framework.AssertionFailedError", "java.lang.IllegalStateException", "java.lang.UnsatisfiedLinkError", "java.lang.NullPointerException", "android.os.DeadObjectException", "android.system.ErrnoException", "java.lang.RuntimeException"):
         if name.encode() in raw: exception = name; break
-    lines = re.findall(rb"(?:OfflineVaultTest|BoundOperationTest)\.kt:([0-9]{1,5})\)", raw)
+    lines = re.findall(rb"(?:OfflineVaultTest|BoundOperationTest|AutofillHandoffTest)\.kt:([0-9]{1,5})\)", raw)
     waits = re.findall(rb"INSTRUMENTATION_STATUS: locklark_wait=([a-z-]+)", raw)
     allowed_waits = {"initial-create", "account-key", "new-vault-list", "native-control", "native-visible", "ime-hidden", "native-input", "native-input-focus", "native-input-exact", "login-metadata", "detail", "editor", "saved-list", "disclosure", "empty-username", "empty-notes", "platform-auth-refusal", "background-lock", "explicit-lock", "late-unlock", "other"}
     wait = waits[-1].decode() if waits and waits[-1].decode() in allowed_waits else "unknown"
@@ -64,7 +64,7 @@ def safe_diagnostic(raw):
     allowed_status = {"operation-refused", "outcome-unknown", "backup-ack-required", "empty", "other"}
     status = statuses[-1].decode() if statuses and statuses[-1].decode() in allowed_status else "unknown"
     empty_context = {key:"unknown" for key in ("step", "wait", "ui_status", "core_phase", "core_error", "inputs_intact", "fs_owned", "fs_link", "fs_errno",
-                                              "control", "control_phase", "ime", "ime_hide_requested", "window_focus", "control_visible", "control_enabled", "control_present", "control_focused", "input_active", "activity")}
+                                              "control", "control_phase", "ime", "ime_hide_requested", "window_focus", "control_visible", "control_enabled", "control_present", "control_focused", "input_active", "activity", "autofill_stage")}
     context = empty_context.copy()
     failures = []
     fields = ((b"INSTRUMENTATION_STATUS: locklark_stage=", "step", allowed_steps),
@@ -86,7 +86,8 @@ def safe_diagnostic(raw):
               (b"INSTRUMENTATION_STATUS: locklark_control_present=", "control_present", {"true", "false"}),
               (b"INSTRUMENTATION_STATUS: locklark_control_focused=", "control_focused", {"true", "false"}),
               (b"INSTRUMENTATION_STATUS: locklark_input_active=", "input_active", {"true", "false"}),
-              (b"INSTRUMENTATION_STATUS: locklark_activity=", "activity", {"DESTROYED", "INITIALIZED", "CREATED", "STARTED", "RESUMED"}))
+              (b"INSTRUMENTATION_STATUS: locklark_activity=", "activity", {"DESTROYED", "INITIALIZED", "CREATED", "STARTED", "RESUMED"}),
+              (b"INSTRUMENTATION_STATUS: locklark_autofill_stage=", "autofill_stage", {"preconditions", "target-launch", "fill-request", "presentation-visible", "presentation-clicked", "auth-resumed", "auth-canceled", "fields-empty"}))
     for line in raw.splitlines():
         for prefix, key, allowed in fields:
             if line.startswith(prefix):
@@ -106,6 +107,7 @@ def safe_diagnostic(raw):
             "fs_owned": failures[0]["fs_owned"] if failures else context["fs_owned"],
             "fs_link": failures[0]["fs_link"] if failures else context["fs_link"],
             "fs_errno": failures[0]["fs_errno"] if failures else context["fs_errno"],
+            "autofill_stage": failures[0]["autofill_stage"] if failures else context["autofill_stage"],
             "tests_run": int(counts[-1]) if counts else 0,
             "process_crashed": b"Process crashed" in raw, "runner_aborted": b"INSTRUMENTATION_ABORTED" in raw}
 
@@ -139,8 +141,47 @@ def main():
     if os.environ.get("LOCKLARK_ANDROID_TEST_RESET") != "1":
         raise RuntimeFailure()
     command(["shell", "pm", "clear", package]); command(["shell", "pm", "clear", test_package])
+    autofill_service = package + "/" + package + ".autofill.AutofillAuthService"
+    def secure_setting(arguments):
+        setting = subprocess.run(
+            adb + ["shell", "settings"] + arguments,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60,
+        )
+        if setting.returncode:
+            raise RuntimeFailure()
+        return setting.stdout.strip()
+    prior_autofill = secure_setting(["get", "secure", "autofill_service"])
+    if prior_autofill in (b"", b"null"):
+        prior_autofill = b""
+    try:
+        STAGE = "autofill-setting"
+        secure_setting(["put", "secure", "autofill_service", autofill_service])
+        if secure_setting(["get", "secure", "autofill_service"]) != autofill_service.encode():
+            raise RuntimeFailure()
+        run_gate(state, adb, root, package, test_package, log)
+    finally:
+        STAGE = "autofill-setting-restore"
+        if prior_autofill:
+            secure_setting(["put", "secure", "autofill_service", prior_autofill.decode("ascii")])
+        else:
+            secure_setting(["delete", "secure", "autofill_service"])
+        if secure_setting(["get", "secure", "autofill_service"]) != prior_autofill:
+            raise RuntimeFailure()
+    print("PASS: Android native offline UI instrumentation, real OS autofill authentication handoff; controller/logcat canary scan")
+    print("Private Android runtime evidence: " + str(state))
+
+
+def run_gate(state, adb, root, package, test_package, log):
+    global STAGE, DIAGNOSTIC
     runtime = (state / "runtime.log").open("xb")
     os.chmod(runtime.name, 0o600)
+    def command(arguments, *, private=False, timeout=60, required=True):
+        result = subprocess.run(adb + arguments, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+        if not private:
+            log.write(result.stdout); log.write(result.stderr); log.flush()
+        if required and result.returncode:
+            raise RuntimeFailure()
+        return result
     logger = subprocess.Popen(adb + ["logcat", "-v", "brief"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     log_failed = threading.Event()
     def capture():
@@ -158,7 +199,7 @@ def main():
     STAGE = "instrumentation"
     result = None
     try:
-        result = command(["shell", "am", "instrument", "-w", "-r", "-e", "class", "org.locklark.android.BoundOperationTest,org.locklark.android.OfflineVaultTest", test_package + "/androidx.test.runner.AndroidJUnitRunner"], timeout=900, required=False)
+        result = command(["shell", "am", "instrument", "-w", "-r", "-e", "class", "org.locklark.android.BoundOperationTest,org.locklark.android.OfflineVaultTest,org.locklark.android.AutofillHandoffTest", test_package + "/androidx.test.runner.AndroidJUnitRunner"], timeout=900, required=False)
     except subprocess.TimeoutExpired as error:
         for data in (error.stdout, error.stderr):
             if data: log.write(data)
@@ -186,8 +227,6 @@ def main():
     if result is None or not complete_pass(result.returncode, result.stdout):
         raise RuntimeFailure()
     command(["shell", "run-as", package, "rm", "cache/instrumentation-canaries.json"], private=True)
-    print("PASS: Android native offline UI instrumentation; controller/logcat canary scan")
-    print("Private Android runtime evidence: " + str(state))
 
 
 if __name__ == "__main__":

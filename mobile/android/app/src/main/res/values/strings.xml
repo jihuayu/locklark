@@ -17,4 +17,9 @@
     <string name="edit_field_guidance">新值将从空白开始输入。查看旧值需单独发起授权；取消操作不会改动现有凭据。</string>
     <string name="regenerate_password_guidance">仅更新此金库内保存的本地密码，不会自动同步修改对应网站的账户密码。</string>
     <string name="empty_login_list">暂无匹配的登录凭据。可点击上方「新建登录」添加受保护条目。</string>
+    <string name="autofill_service_label">Locklark 登录授权（认证移交）</string>
+    <string name="autofill_auth_presentation">解锁或批准条目（尚未填充字段）</string>
+    <string name="autofill_challenge_title">需要解锁或批准条目</string>
+    <string name="autofill_challenge_body">尚未填充任何字段。取消或返回会关闭此验证，不会写入或填充任何内容。此检查点仅完成认证移交，不提供自动填充。</string>
+    <string name="autofill_challenge_cancel">取消</string>
 </resources>

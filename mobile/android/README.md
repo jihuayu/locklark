@@ -21,7 +21,7 @@ JAVA_HOME=/path/to/jdk21 ANDROID_HOME=/path/to/android-sdk \
 
 The default tasks run JVM policy tests and build the debug app and separate
 instrumentation APK. On a disposable, running emulator, the normal gate selects
-the two mandatory native UI/core tests and privately scans their logs:
+the three mandatory native UI/core/autofill tests and privately scans their logs:
 
 ```sh
 ANDROID_HOME=/path/to/android-sdk ANDROID_SERIAL=emulator-5554 \
@@ -56,5 +56,30 @@ An auth-per-operation AES-GCM key remains in Android Keystore. Ciphertext and it
 per-install alias metadata live under `noBackupFilesDir`. Unsupported or cancelled
 OS authentication fails closed. Cloud backup and device-to-device transfer rules
 exclude all app data; no local key or capsule is a transferable recovery method.
-System autofill, credential providers and Passkey functionality are separate
-work and are not declared here.
+
+## Autofill authentication-handoff checkpoint
+
+This is a narrow handoff checkpoint, not a complete autofill implementation. The
+registered `AutofillAuthService` inspects only the newest OS `AssistStructure` and
+accepts only one explicitly hinted username/email field followed by one password
+field. It refuses unhinted, ambiguous, OTP, card, hidden, disabled or malformed
+input, and it never reads field values, saved values or vault data. A matching
+request creates a process-local random one-use record bound to the target package
+and exact AutofillIds for at most 60 seconds; restart, expiry, replay and cancel
+fail closed.
+
+The returned `FillResponse` contains an authentication challenge, not a Dataset.
+The OS launches the explicit, non-exported auth Activity through an app-private
+mutable one-shot `PendingIntent`; the Activity revalidates the OS-attached
+structure, package, AutofillIds, client-state nonce and handoff token before
+showing the challenge. Cancel or back closes it with `RESULT_CANCELED` and the
+framework fills nothing. API 33+ uses `Presentations.Builder.setMenuPresentation`;
+API 30-32 uses the RemoteViews authentication overload. Both remain supported at
+minSdk 30.
+
+The instrumentation smoke uses only a synthetic test-APK target, causes a real OS
+FillRequest, selects the Locklark authentication presentation, observes the real
+AuthActivity, cancels it, and asserts both fields remain empty. It is part of the
+private-log/canary gate, which sets and restores the emulator autofill service
+and does not claim that full autofill, save support, credential providers or
+Passkey functionality is complete.

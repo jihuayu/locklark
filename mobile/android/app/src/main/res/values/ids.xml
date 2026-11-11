@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <item name="autofill_auth_title" type="id" />
+    <item name="autofill_auth_body" type="id" />
+    <item name="autofill_auth_cancel" type="id" />
+</resources>
