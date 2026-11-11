@@ -23,9 +23,10 @@ import (
 // KDBX ciphertext only: they do not inspect or accept a proposal's own roster
 // as trust, do not verify policy proofs, do not check a caller-pinned owner
 // root, revision or signature chain, and do not authenticate that the payload
-// belongs to any particular file or revision. A trusted full-file open, which
-// pins caller state and verifies the policy checkpoint before VUK/CEK
-// decryption, is a later checkpoint. See docs/vaultfile-wire-v1.md.
+// belongs to any particular file or revision. OpenAuthenticatedFile is the
+// caller-pinned full-file open path that verifies the policy checkpoint before
+// VUK/CEK decryption and only then calls OpenKDBXPayload. See
+// docs/vaultfile-wire-v1.md.
 
 // Error codes reported by SealKDBXPayload and OpenKDBXPayload. Like every
 // *Error in this package, the message never embeds input data or key bytes.
@@ -323,8 +324,9 @@ func SealKDBXPayload(db *kdbx.Database, cek []byte) (encoded []byte, err error) 
 //
 // Untrusted, KDBX only. Open decrypts KDBX only. It does not authenticate a
 // file: it does not pin caller trust, verify policy proofs or a policy chain,
-// VUK slots, a file revision or digest or any signature. A trusted full-file
-// open is a later checkpoint.
+// VUK slots, a file revision or digest or any signature. Use
+// OpenAuthenticatedFile for the caller-pinned full-file path that
+// authenticates the file and its keys before calling this function.
 //
 // Errors are fresh *Error values: CodeKDBXPayloadTooLarge for an input above
 // MaxKDBXCiphertextBytes or a decoded or expanded body above

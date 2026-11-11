@@ -45,8 +45,9 @@ import (
 //
 // This file implements the VUK envelope only. It does not generate, load or
 // rotate the VUK or key epoch, does not scope CEK epoch rotation, does not
-// integrate with KDBX content or a full file, does not authenticate a policy
-// itself and has no trusted full-file open path. See
+// authenticate a policy itself and does not open KDBX content or a full file.
+// OpenAuthenticatedFile is the caller-pinned full-file open path that
+// authenticates the current policy before calling this primitive. See
 // docs/vaultfile-wire-v1.md.
 
 // CodeVUKEnvelopeFailed is reported by OpenVUKForDevice for every envelope
