@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -37,8 +38,8 @@ const (
 )
 
 // redactedToken is the only text TokenResult ever formats to. It must not
-// contain, name or hint at the access token.
-const redactedToken = "onedriveauth.TokenResult{access_token:redacted}"
+// contain, name or hint at the access or refresh token.
+const redactedToken = "onedriveauth.TokenResult{access_token:redacted, refresh_token:redacted}"
 
 // Token exchange sentinels. Each one is a fixed text with no detail, so none
 // can carry the client ID, tenant, scopes, redirect URI, code, verifier,
@@ -105,29 +106,106 @@ type TokenExchangeConfig struct {
 	Scopes []string
 }
 
-// TokenResult is the transient outcome of one successful exchange: the bearer
-// access token and its positive, bounded lifetime as a time.Duration. It
-// carries nothing else. The refresh_token, id_token, ext_expires_in and any
-// other response member are discarded, and there is no way to obtain them
-// from this package.
+// TokenResult is the transient, in-memory outcome of one successful exchange:
+// the bearer access token, its positive and bounded lifetime as a
+// time.Duration, and, when the provider returned one, the refresh token. The
+// provider returns a refresh_token only when the authorization request asked
+// for offline_access; this package adds no scope by itself and never requires
+// one, so the refresh token may be absent. The id_token, ext_expires_in and
+// every other response member are discarded, and there is no way to obtain
+// them from this package.
 //
-// The access token is a credential held in an unexported field. It is readable
-// only through AccessToken and is not persisted by this package; the caller
-// holds it in memory only, for as long as it is needed. String and GoString
-// exist so the common fmt verbs print a fixed placeholder instead of the
-// token. Reflection-based marshallers are outside that guarantee, so callers
-// must not marshal the result into logs.
+// The tokens are credentials held in unexported byte buffers. Every copy of a
+// TokenResult, including the value returned to the caller, shares one owner: a
+// mutex and the buffers it guards. AccessToken returns a string copy,
+// RefreshToken returns a []byte copy, and Close zeroizes the shared buffers
+// under their mutex; after Close both accessors return empty values. An accessor
+// can never race Close, and closing any copy closes every copy, because they
+// share the same owner. Close is idempotent, and it is the caller's lifecycle
+// step: as soon as the tokens are no longer needed, call Close.
+//
+// Owned buffers. The owned token bytes are decoded straight from the response
+// by the package's own token parser, and raw non-ASCII bytes, invalid UTF-8 and
+// escaped characters that are not visible ASCII are rejected rather than
+// replaced: a value that is not visible ASCII is never stored. This package
+// cannot prove how the JSON
+// decoder or the runtime handle internal copies of the response, so zeroizing
+// the owned buffers is best effort: it clears what this package holds, not
+// every copy that may exist in memory.
+//
+// The copies returned by the accessors are owned by the caller and are not
+// cleared by Close; the caller must clear them. A []byte copy from RefreshToken
+// can be cleared in place with clear. A Go string copy, such as the one
+// AccessToken must return, cannot be modified in place, so it cannot be
+// zeroized and can only be dropped by the caller. Nothing is persisted by this
+// package.
+//
+// String and GoString exist so the common fmt verbs print a fixed placeholder
+// instead of either token. Reflection-based marshallers are outside that
+// guarantee, so callers must not marshal the result into logs.
 type TokenResult struct {
-	// token is never exported: an exported field would be printed verbatim
-	// by %v and %+v.
-	token     string
+	// owned is the shared, mutex-protected token material. It is the only
+	// place the token bytes live, and every value copied from the result
+	// points to the same owner, so Close reaches all of them.
+	owned     *tokenMaterial
 	expiresIn time.Duration
 }
 
-// AccessToken returns the bearer access token. Treat the returned value as a
-// credential: do not log it, and do not place it in errors or files.
+// tokenMaterial is the mutex-protected token state shared by every copy of one
+// TokenResult. The token buffers are never exported: an exported field would be
+// printed verbatim by %v and %+v. Owned bytes are used because a string cannot
+// be zeroized in place.
+type tokenMaterial struct {
+	mu      sync.Mutex
+	access  []byte
+	refresh []byte
+	closed  bool
+}
+
+// AccessToken returns a copy of the bearer access token, or "" once Close was
+// called or the exchange carried none. The signature is kept for compatibility.
+//
+// The string is the only copy this call makes: the owned bytes are copied
+// directly into it while the owner's mutex is held. A string cannot be zeroized,
+// so the returned value is owned by the caller, is not cleared by Close, and can
+// only be dropped. Treat it as a credential: do not log it, and do not place it
+// in errors or files.
 func (r TokenResult) AccessToken() string {
-	return r.token
+	if r.owned == nil {
+		return ""
+	}
+	r.owned.mu.Lock()
+	defer r.owned.mu.Unlock()
+	if r.owned.closed || len(r.owned.access) == 0 {
+		return ""
+	}
+	// This conversion returns the only copy of the owned bytes made for this
+	// call; hoisting it to a variable would allocate a second copy.
+	//nolint:gocritic // ptrToRefParam: the direct conversion avoids an extra copy.
+	return string(r.owned.access)
+}
+
+// RefreshToken returns a defensive []byte copy of the OAuth refresh token the
+// provider returned. It is nil when the response carried none (it is present
+// only when the authorization request included offline_access) or once Close was
+// called; a refresh_token that is present but not a well-formed token is an
+// error, not an absence.
+//
+// Treat the returned copy as a credential: it is owned by the caller, is not
+// cleared by Close, and must be cleared by the caller (with clear) once it is no
+// longer needed. It must not be logged, persisted or placed in errors or files.
+func (r TokenResult) RefreshToken() []byte {
+	if r.owned == nil {
+		return nil
+	}
+	r.owned.mu.Lock()
+	defer r.owned.mu.Unlock()
+	if r.owned.closed || len(r.owned.refresh) == 0 {
+		return nil
+	}
+	copied := make([]byte, len(r.owned.refresh))
+	copy(copied, r.owned.refresh)
+	return copied
 }
 
 // ExpiresIn returns the positive access token lifetime the provider reported.
@@ -135,12 +213,42 @@ func (r TokenResult) ExpiresIn() time.Duration {
 	return r.expiresIn
 }
 
-// String implements fmt.Stringer and masks the access token.
+// Close zeroizes the access and refresh token buffers shared by every copy of
+// this result, after which both accessors return empty values. It is idempotent
+// and safe on a nil or zero TokenResult. It does not clear copies already
+// returned by AccessToken or RefreshToken; the caller must clear those itself.
+func (r *TokenResult) Close() {
+	if r == nil || r.owned == nil {
+		return
+	}
+	r.owned.mu.Lock()
+	defer r.owned.mu.Unlock()
+	clear(r.owned.access)
+	clear(r.owned.refresh)
+	// Release the buffers so no token bytes stay reachable through the
+	// owner.
+	r.owned.access = nil
+	r.owned.refresh = nil
+	r.owned.closed = true
+}
+
+// isClosed reports whether Close was called on this result or any value copied
+// from it. A zero TokenResult has no owner and is not closed.
+func (r TokenResult) isClosed() bool {
+	if r.owned == nil {
+		return false
+	}
+	r.owned.mu.Lock()
+	defer r.owned.mu.Unlock()
+	return r.owned.closed
+}
+
+// String implements fmt.Stringer and masks both tokens.
 func (r TokenResult) String() string {
 	return redactedToken
 }
 
-// GoString implements fmt.GoStringer and masks the access token even for %#v.
+// GoString implements fmt.GoStringer and masks both tokens even for %#v.
 func (r TokenResult) GoString() string {
 	return redactedToken
 }
@@ -172,7 +280,18 @@ func (r TokenResult) GoString() string {
 // All inputs are validated before any request; every failure is one of the
 // package's fixed sentinels, so it never contains the provider's body,
 // identifiers, URLs, code, verifier or tokens. A success returns only the
-// transient TokenResult with the access token; nothing is persisted.
+// transient TokenResult with the access token, its lifetime and, if the
+// provider sent one, the refresh token; nothing is persisted. The bounded
+// response body buffer and the temporary json.RawMessage buffers used for
+// members other than the tokens are cleared before the call returns, on success
+// and on every parse failure alike. The access_token and refresh_token are
+// decoded by the package's byte Unmarshaler straight into owned buffers, which
+// Close zeroizes; internal copies made by encoding/json or the runtime are not
+// guaranteed to be wiped. The result keeps the tokens in
+// memory until the caller calls TokenResult.Close, which zeroizes them, and
+// every copy the accessors return is owned and must be cleared by the caller;
+// a RefreshToken []byte can be cleared, an AccessToken string can only be
+// dropped.
 func ExchangeCode(ctx context.Context, cfg TokenExchangeConfig, redirectURI, code, verifier string, timeout time.Duration) (TokenResult, error) {
 	return exchangeCode(ctx, cfg, redirectURI, code, verifier, timeout, nil, nil)
 }
@@ -409,12 +528,14 @@ func noRedirect(*http.Request, []*http.Request) error {
 
 // readTokenResponse validates one token endpoint answer and returns only the
 // transient result. The response body is always drained within the bound and
-// closed; nothing from it reaches an error.
+// closed, and the bounded body buffer is wiped before this function returns on
+// success and on every failure; nothing from it reaches an error.
 func readTokenResponse(resp *http.Response) (TokenResult, error) {
 	defer resp.Body.Close()
 	// Read one byte past the limit, so an oversized body is detected
 	// without reading all of it; the connection is not reused anyway.
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxTokenResponseBytes+1))
+	defer clear(body)
 	switch {
 	case err != nil:
 		return TokenResult{}, wrap(ErrOutcomeUnknown, err)
@@ -437,42 +558,103 @@ func readTokenResponse(resp *http.Response) (TokenResult, error) {
 // decodeTokenJSON decodes the strict object form of a token response: exactly
 // one JSON object of syntactically valid members with no member name repeated,
 // nothing after the object, exactly one token_type equal to "bearer", one
-// access_token and one expires_in. It keeps nothing but the access token and
-// lifetime; every other member (refresh_token, id_token, ext_expires_in, error
-// details, unknown names) is discarded unexamined apart from its JSON syntax.
-func decodeTokenJSON(body []byte) (TokenResult, error) {
+// access_token and one expires_in. It keeps only the access token, the lifetime
+// and, when present, the refresh_token; every other member (id_token,
+// ext_expires_in, error details, unknown names) is discarded unexamined apart
+// from its JSON syntax.
+//
+// access_token and refresh_token must be JSON strings that decode to a
+// non-empty, bounded visible-ASCII token. Their string escapes are decoded
+// straight into owned []byte buffers, without an intermediate Go string. A
+// malformed access_token, or a refresh_token present with any other type or an
+// invalid value, is ErrTokenResponse; only an absent refresh_token is allowed
+// to mean absence.
+//
+// access_token and refresh_token are decoded by the custom byte Unmarshaler
+// (tokenStringDecoder) straight into owned bytes. Every other member goes
+// through a temporary json.RawMessage that is cleared on every path out of its
+// case. A failure mid-object wipes the body, any partially decoded token bytes
+// and every owned token buffer already taken. The decoder's own internal copies
+// of the response are outside this function's reach and are not wiped here.
+//
+// Every failure return must go through fail so no owned token bytes outlive the
+// error.
+func decodeTokenJSON(body []byte) (res TokenResult, err error) {
+	owned := &tokenMaterial{}
+	// fail wipes the body and every owned token buffer before returning the
+	// fixed sentinel: no parse failure keeps token bytes.
+	fail := func(sentinel error) (TokenResult, error) {
+		clear(body)
+		owned.mu.Lock()
+		clear(owned.access)
+		clear(owned.refresh)
+		owned.access, owned.refresh = nil, nil
+		owned.closed = true
+		owned.mu.Unlock()
+		return TokenResult{}, sentinel
+	}
+	jsonErr := wrap(ErrTokenResponse, nil)
 	dec := json.NewDecoder(bytes.NewReader(body))
 	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
-		return TokenResult{}, wrap(ErrTokenResponse, nil)
+		return fail(jsonErr)
 	}
 	seen := make(map[string]bool)
 	var (
-		token      string
 		expiresIn  time.Duration
 		hasBearer  bool
 		hasToken   bool
+		hasRefresh bool
 		hasExpires bool
+		// tokenBytes and tokenInvalid are the decode results of the
+		// access or refresh member of the current iteration.
+		tokenBytes   []byte
+		tokenInvalid bool
 	)
 	for dec.More() {
 		t, err := dec.Token()
 		key, ok := t.(string)
 		if err != nil || !ok || seen[key] {
-			return TokenResult{}, wrap(ErrTokenResponse, nil)
+			return fail(jsonErr)
 		}
 		seen[key] = true
+		keyErr := error(nil)
+		switch key {
+		case "access_token", "refresh_token":
+			// The string is decoded straight from the stream into
+			// owned bytes; a non-string value is drained and
+			// rejected without being retained.
+			tokenBytes, tokenInvalid = nil, false
+			if err := dec.Decode(tokenStringDecoder(&tokenBytes, &tokenInvalid)); err != nil {
+				keyErr = jsonErr
+			}
+			if keyErr == nil && tokenInvalid {
+				clear(tokenBytes)
+				keyErr = jsonErr
+			}
+			if key == "access_token" {
+				hasToken = true
+				clear(owned.access)
+				owned.access = tokenBytes
+			} else {
+				hasRefresh = true
+				clear(owned.refresh)
+				owned.refresh = tokenBytes
+			}
+			tokenBytes = nil
+			if keyErr != nil {
+				return fail(keyErr)
+			}
+			continue
+		}
+		// Every other member goes through a temporary RawMessage, which
+		// stays intact while the switch parses it; the clear below
+		// covers every path out of it.
 		var value json.RawMessage
 		if err := dec.Decode(&value); err != nil {
-			return TokenResult{}, wrap(ErrTokenResponse, nil)
+			clear(value)
+			return fail(jsonErr)
 		}
 		switch key {
-		case "access_token":
-			hasToken = true
-			var s string
-			if json.Unmarshal(value, &s) == nil && validAccessToken(s) {
-				token = s
-			}
-			// An empty or ill-formed value is not retained; the
-			// fixed outcome below is the same as for an absent one.
 		case "expires_in":
 			hasExpires = true
 			if secs, err := expiresSeconds(value); err == nil && secs > 0 && secs <= maxExpiresInSeconds {
@@ -481,21 +663,150 @@ func decodeTokenJSON(body []byte) (TokenResult, error) {
 		case "token_type":
 			var s string
 			if json.Unmarshal(value, &s) != nil || !strings.EqualFold(s, "bearer") {
-				return TokenResult{}, wrap(ErrTokenMissing, nil)
+				keyErr = wrap(ErrTokenMissing, nil)
+			} else {
+				hasBearer = true
 			}
-			hasBearer = true
+		}
+		clear(value)
+		if keyErr != nil {
+			return fail(keyErr)
 		}
 	}
 	if t, err := dec.Token(); err != nil || t != json.Delim('}') {
-		return TokenResult{}, wrap(ErrTokenResponse, nil)
+		return fail(jsonErr)
 	}
 	if _, err := dec.Token(); err != io.EOF {
-		return TokenResult{}, wrap(ErrTokenResponse, nil)
+		return fail(jsonErr)
 	}
-	if !hasBearer || !hasToken || token == "" || !hasExpires || expiresIn == 0 {
-		return TokenResult{}, wrap(ErrTokenMissing, nil)
+	if !hasBearer || !hasToken || len(owned.access) == 0 || !hasExpires || expiresIn == 0 {
+		return fail(wrap(ErrTokenMissing, nil))
 	}
-	return TokenResult{token: token, expiresIn: expiresIn}, nil
+	if !hasRefresh {
+		// No refresh token was sent: offline_access was not requested
+		// or the provider chose not to issue one.
+		clear(owned.refresh)
+		owned.refresh = nil
+	}
+	clear(body)
+	return TokenResult{owned: owned, expiresIn: expiresIn}, nil
+}
+
+// tokenStringDecoder returns a json.Unmarshaler that decodes one JSON value
+// straight into dst as visible-ASCII bytes, without an intermediate Go string:
+// a JSON string and its escapes are written to dst, and dst is wiped first so no
+// earlier bytes survive. Any other value, an unterminated string, or a token
+// escape sequence that is not a printable ASCII byte marks invalid and stores
+// nothing in dst. Escape sequences the token grammar cannot produce are skipped
+// safely, and so is invalid UTF-8, which the JSON syntax allows and which the
+// ASCII check rejects. It reads the decoder-supplied bytes of one value and does
+// not modify or retain them.
+func tokenStringDecoder(dst *[]byte, invalid *bool) json.Unmarshaler {
+	return &tokenStringValue{dst: dst, invalid: invalid}
+}
+
+// tokenStringValue is the json.Unmarshaler behind tokenStringDecoder.
+type tokenStringValue struct {
+	dst     *[]byte
+	invalid *bool
+	// buf is the output buffer kept between calls, so a sequence of
+	// rejected tokens on one stream reuses it instead of allocating each
+	// time.
+	buf []byte
+}
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (v *tokenStringValue) UnmarshalJSON(data []byte) error {
+	*v.dst, *v.invalid = nil, false
+	if len(data) < 2 || data[0] != '"' || data[len(data)-1] != '"' {
+		*v.invalid = true
+		return nil
+	}
+	// The JSON syntax has already rejected raw control characters and
+	// invalid UTF-8, so every byte left raw here is at least 0x20, and the
+	// check after the loop rejects anything outside visible ASCII, including
+	// raw bytes >= 0x80.
+	out := v.buf[:0]
+	valid := true
+	for i := 1; i < len(data)-1 && valid; i++ {
+		if data[i] != '\\' {
+			// A raw quote is the final one handled above; bytes >=
+			// 0x80 are raw UTF-8, which the ASCII check rejects
+			// below, and their exact value does not matter because
+			// the buffer is wiped.
+			out = append(out, data[i])
+			continue
+		}
+		out, i, valid = appendTokenEscape(out, data, i)
+	}
+	if !valid || len(out) == 0 || len(out) > maxCodeLen || !visibleASCII(out) {
+		clear(out)
+		v.buf = v.buf[:0]
+		*v.invalid = true
+		return nil
+	}
+	v.buf = out
+	*v.dst = out
+	return nil
+}
+
+// appendTokenEscape decodes the JSON escape introduced by data[i] (an unescaped
+// backslash), whose rendered byte is appended to out, and returns the index of
+// its last byte. A token escape must denote a visible ASCII byte: \u0041 is
+// accepted, while \n, \u00e9 or a surrogate escape is not, so a token is never
+// decoded from control or non-ASCII characters. ok is false for such escapes
+// and for malformed ones, which are skipped safely.
+func appendTokenEscape(out, data []byte, i int) (out2 []byte, last int, ok bool) {
+	if i+1 >= len(data)-1 {
+		return out, i, false
+	}
+	switch e := data[i+1]; e {
+	case '"', '\\', '/':
+		// These escapes are always visible ASCII bytes.
+		return append(out, e), i + 1, true
+	case 'u':
+		if i+6 > len(data)-1 {
+			return out, i + 5, false
+		}
+		r, ok := hex4(data[i+2 : i+6])
+		if !ok || r < 0x21 || r > 0x7e {
+			return out, i + 5, false
+		}
+		return append(out, byte(r)), i + 5, true
+	case 'b', 'f', 'n', 'r', 't':
+		// A valid JSON escape that yields a control character.
+		return out, i + 1, false
+	default:
+		return out, i, false
+	}
+}
+
+// visibleASCII reports whether every byte is a visible ASCII byte, 0x21 to 0x7e.
+func visibleASCII(b []byte) bool {
+	for _, c := range b {
+		if c < 0x21 || c > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+// hex4 parses four hexadecimal digits.
+func hex4(b []byte) (rune, bool) {
+	var r rune
+	for _, c := range b {
+		switch {
+		case c >= '0' && c <= '9':
+			r = r<<4 | rune(c-'0')
+		case c >= 'a' && c <= 'f':
+			r = r<<4 | rune(c-'a'+10)
+		case c >= 'A' && c <= 'F':
+			r = r<<4 | rune(c-'A'+10)
+		default:
+			return 0, false
+		}
+	}
+	return r, true
 }
 
 // expiresSeconds reads an integral JSON number; the caller checks its bounds.
@@ -512,21 +823,6 @@ func expiresSeconds(raw json.RawMessage) (int64, error) {
 // maxExpiresInSeconds bounds a reported lifetime to about a year and keeps the
 // conversion to time.Duration far from overflow.
 const maxExpiresInSeconds = 366 * 24 * 60 * 60
-
-// validAccessToken accepts a non-empty, bounded visible-ASCII token without
-// spaces or control characters.
-func validAccessToken(s string) bool {
-	if s == "" || len(s) > maxCodeLen {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c < 0x21 || c > 0x7e {
-			return false
-		}
-	}
-	return true
-}
 
 // transportOf returns the transport of the test-only client, if any.
 func transportOf(c *http.Client) http.RoundTripper {
