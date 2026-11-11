@@ -80,7 +80,48 @@ internal class FreshVaultGate {
         }
     }
 
-    /** How the first [exit] released an installed vault; [CloseAction.NONE] before it. */
+    /**
+     * The exit winner's single serialized cleanup, safe even when the volatile
+     * Activity vault was still null when exit won. [published] is the vault
+     * this main thread observed; when non-null it is locked synchronously here,
+     * before the cleanup is queued. [take] runs on [worker] after any
+     * currently-running open task has finished, atomically removes and returns
+     * the Activity-owned vault (nulling it), and is the only place that slot is
+     * inspected again. A vault the open task publishes after [published] was
+     * read is therefore found, locked and closed on that worker, never on main.
+     *
+     * The queued task closes at most one vault. A late rejected open never
+     * reaches [take]: its worker locks and closes that unowned vault itself, so
+     * this cleanup cannot double-close it. If [worker] rejects the cleanup, it
+     * is already shut down and can run no native call at all; only a [published]
+     * vault is locked without a close, and the worker that owns a late open
+     * closes it on its own shutdown path.
+     */
+    @Synchronized fun <V : Any> releaseAfterOpen(
+        worker: Executor,
+        published: V?,
+        take: () -> V?,
+        lock: (V) -> Unit,
+        close: (V) -> Unit,
+    ) {
+        closeAction = CloseAction.WORKER_CLOSE
+        if (published != null) lock(published)
+        try {
+            worker.execute {
+                val current = take() ?: return@execute
+                // Only a vault that missed the exit read still needs the lock;
+                // a published one was locked synchronously above.
+                if (current !== published) lock(current)
+                close(current)
+            }
+        } catch (_: RejectedExecutionException) {
+            // Never close from this (main) thread. A shut-down worker also runs
+            // no later open, so only an already-published vault needs the lock.
+            closeAction = if (published != null) CloseAction.LOCK_ONLY else CloseAction.NONE
+        }
+    }
+
+    /** How the first [exit] scheduled its cleanup; [CloseAction.NONE] before it. */
     @Synchronized fun closeDecision(): CloseAction = closeAction
 
     override fun toString(): String = synchronized(lock) {
@@ -88,12 +129,12 @@ internal class FreshVaultGate {
     }
 }
 
-/** How [FreshVaultGate.release] releases a vault that was already installed. */
+/** How the first [FreshVaultGate.exit] scheduled its vault cleanup. */
 internal enum class CloseAction {
     /** Nothing installed yet; a late open result is dropped on the worker itself. */
     NONE,
 
-    /** Installed on the worker: the single close runs there as its next task. */
+    /** The exit winner queued the single cleanup close on the serialized worker. */
     WORKER_CLOSE,
 
     /** Installed, but the worker already shut down: lock requested, never closed off-worker. */

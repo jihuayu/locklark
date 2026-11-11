@@ -1,12 +1,17 @@
 package org.locklark.android.autofill
 
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -70,7 +75,7 @@ class FreshVaultGateTest {
 /** A terminal release, modeled on the vault's observable calls. */
 class FreshVaultReleaseTest {
     private class FakeVault {
-        val calls = mutableListOf<String>()
+        val calls = CopyOnWriteArrayList<String>()
 
         fun requestLock() {
             calls += "lock"
@@ -97,6 +102,59 @@ class FreshVaultReleaseTest {
         // onStop already owned the exit; onDestroy/back/cancel release nothing.
         assertTrue(gate.exit())
         assertFalse("only the first exit releases", gate.exit())
+    }
+
+    @Test
+    fun installThatExitsBeforePublicationIsClosedOnceByTheQueuedWorkerCleanup() {
+        val gate = FreshVaultGate()
+        assertTrue(gate.beginOpen())
+        val worker = Executors.newSingleThreadExecutor()
+        val installed = CountDownLatch(1)
+        val publish = CountDownLatch(1)
+        val vault = FakeVault()
+        val owner = AtomicReference<FakeVault?>()
+        val workerThread = AtomicReference<Thread>()
+        val lockThread = AtomicReference<Thread>()
+        val closeThread = AtomicReference<Thread>()
+        try {
+            worker.execute {
+                // The gate accepts the install, but `vault = opened` has not run.
+                assertTrue(gate.install())
+                workerThread.set(Thread.currentThread())
+                installed.countDown()
+                assertTrue(publish.await(5, TimeUnit.SECONDS))
+                owner.set(vault)
+            }
+            assertTrue(installed.await(5, TimeUnit.SECONDS))
+
+            // onStop wins after install() but before the worker publishes.
+            assertTrue(gate.exit())
+            gate.releaseAfterOpen(
+                worker = worker,
+                published = owner.get(),
+                take = { owner.getAndSet(null) },
+                lock = { lockThread.set(Thread.currentThread()); it.requestLock() },
+                close = { closeThread.set(Thread.currentThread()); it.close() },
+            )
+            assertTrue("the exit never closes on the calling thread", vault.calls.isEmpty())
+
+            publish.countDown()
+            worker.shutdown()
+            assertTrue(worker.awaitTermination(5, TimeUnit.SECONDS))
+
+            assertEquals("exactly one close", 1, vault.calls.count { it == "close" })
+            assertEquals(listOf("lock", "close"), vault.calls)
+            assertSame("the late publication is locked on the worker", workerThread.get(), lockThread.get())
+            assertSame("the late publication is closed on the worker", workerThread.get(), closeThread.get())
+            assertNotEquals("the late publication is never closed on main", Thread.currentThread(), closeThread.get())
+            assertNull("the cleanup cleared the Activity-owned vault", owner.get())
+            assertEquals(CloseAction.WORKER_CLOSE, gate.closeDecision())
+            assertFalse("a second exit queues no second close", gate.exit())
+            assertFalse("an install after exit is rejected", gate.install())
+        } finally {
+            publish.countDown()
+            worker.shutdownNow()
+        }
     }
 
     @Test

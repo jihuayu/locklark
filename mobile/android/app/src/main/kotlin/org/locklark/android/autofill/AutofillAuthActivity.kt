@@ -54,15 +54,17 @@ import java.util.concurrent.RejectedExecutionException
  * never builds a Dataset.
  *
  * Nothing here is persisted: no saved state, prefs, logs or extras of factors,
- * credentials, handoff or approval. Every exit invalidates the gate and, for an
- * already-installed vault, requests its lock synchronously on the main thread
- * before queueing exactly one close on the single serialized worker behind any
- * in-flight open, unlock, list or reveal. The vault is never closed on main:
- * the only off-worker case is a worker that already shut down, which can run no
- * native call, so only the lock is requested. onStop is a terminal exit for
- * this one-use handoff: nothing is reopened or reused. A missing database is a
- * fixed unavailable state that later onStart never opens, and an unopenable
- * vault ends the handoff the same way.
+ * credentials, handoff or approval. Every exit invalidates the gate and queues
+ * exactly one cleanup on the single serialized worker behind any in-flight
+ * open, unlock, list or reveal. A vault already published at exit time is
+ * requested to lock synchronously on the main thread; a vault whose install
+ * lands after that read is rechecked, locked and closed by the queued worker
+ * task. The vault is never closed on main: the only off-worker case is a
+ * worker that already shut down, which can run no native call, so only the
+ * lock is requested. onStop is a terminal exit for this one-use handoff:
+ * nothing is reopened or reused. A missing database is a fixed unavailable
+ * state that later onStart never opens, and an unopenable vault ends the
+ * handoff the same way.
  */
 class AutofillAuthActivity : Activity() {
     private val gate = ForegroundGate()
@@ -72,7 +74,8 @@ class AutofillAuthActivity : Activity() {
     // Main thread only. A terminal exit is never undone, not even by onStart.
     private val lifecycle = LifecycleState()
 
-    // Set on the worker by a gate-accepted install; read on the worker by close.
+    // Set on the worker by a gate-accepted install; read on main for the
+    // synchronous lock and cleared on the worker by the exit cleanup.
     @Volatile private var vault: Vault? = null
     private var structureMatches = false
     private var target: AutofillTarget? = null
@@ -204,24 +207,27 @@ class AutofillAuthActivity : Activity() {
      * Terminal, idempotent cleanup for the one-use handoff, safe to call from
      * onStop, onDestroy, back, cancel, a failed decision and a rejected enqueue
      * in any order. The gate is invalidated first so no queued callback can pass
-     * [ForegroundGate.accepts]. An already-installed vault is then requested to
-     * lock synchronously on this main thread (outside the worker queue, so
-     * pending unlock/list/reveal work cannot delay it) and exactly one close is
-     * queued on the serialized worker. Widgets and factor buffers are wiped, and
-     * the first call reports RESULT_CANCELED and finishes.
+     * [ForegroundGate.accepts]. The exit winner then queues exactly one worker
+     * cleanup. An already-published vault is requested to lock synchronously on
+     * this main thread (outside the worker queue, so pending unlock/list/reveal
+     * work cannot delay it) before that cleanup closes it; a vault that only
+     * publishes after the exit read is rechecked, locked and closed on the
+     * serialized worker. A late rejected open is closed by the worker that
+     * opened it and never reaches this cleanup, so no vault is closed twice.
+     * Widgets and factor buffers are wiped, and the first call reports
+     * RESULT_CANCELED and finishes.
      */
     private fun exitConsumed() {
         gate.invalidate()
         if (freshVault.exit()) {
-            val installed = vault
-            if (installed != null) {
-                freshVault.release(installed, worker, { current ->
-                    runCatching { current.requestLock() }
-                }, { current ->
-                    vault = null
-                    runCatching { current.close() }
-                })
-            }
+            val published = vault
+            freshVault.releaseAfterOpen(
+                worker = worker,
+                published = published,
+                take = { vault.also { vault = null } },
+                lock = { current -> runCatching { current.requestLock() } },
+                close = { current -> runCatching { current.close() } },
+            )
         }
         if (lifecycle.end(LifecycleState.Terminal.CANCELLED)) {
             wipeUiSecrets()
