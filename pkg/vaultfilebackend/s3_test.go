@@ -50,8 +50,27 @@ type s3Mock struct {
 	// Hook controls behavior per request; nil means normal handling.
 	Hook func(w http.ResponseWriter, r *http.Request) bool
 
+	// PutPreflight, when set, is consulted by every PUT after its body has
+	// been read and before the atomic conditional check. It receives the
+	// current status of the key as observed outside the critical section; that
+	// snapshot is only for the hook's observation and is never consulted to
+	// decide the PUT. The commit re-reads the state under the mutex.
+	PutPreflight func(obs s3PutObservation)
+
 	// addressed records request URLs seen by recordingTransport.
 	addressed []url.URL
+}
+
+// s3PutObservation is the key's state passed to s3Mock.PutPreflight. It is an
+// observation for test coordination, not a precondition snapshot: the mock
+// never commits based on it.
+type s3PutObservation struct {
+	Method      string
+	Key         string
+	Exists      bool
+	ETag        string
+	IfNoneMatch string
+	IfMatch     string
 }
 
 func newS3Mock(t *testing.T) *s3Mock {
@@ -110,14 +129,39 @@ func (m *s3Mock) setHook(hook func(w http.ResponseWriter, r *http.Request) bool)
 	m.mu.Unlock()
 }
 
-// reset clears the recording and the hook; hook must not be assigned
-// directly because the server may read it concurrently.
+// setPutPreflight installs the PUT preflight observation hook, read under the
+// same mutex for the same reason as Hook.
+func (m *s3Mock) setPutPreflight(fn func(obs s3PutObservation)) {
+	m.mu.Lock()
+	m.PutPreflight = fn
+	m.mu.Unlock()
+}
+
+// observePut reports the key's current status to the installed preflight
+// hook. The snapshot and the hook are taken under m.mu; the hook itself runs
+// after it is released, so the PUT path never holds the mutex while the hook
+// waits. A hook installed with setPutPreflight after the snapshot was taken is
+// never called with a stale observation.
+func (m *s3Mock) observePut(obs s3PutObservation) {
+	m.mu.Lock()
+	_, obs.Exists = m.objects[obs.Key]
+	obs.ETag = m.etags[obs.Key]
+	fn := m.PutPreflight
+	m.mu.Unlock()
+	if fn != nil {
+		fn(obs)
+	}
+}
+
+// reset clears the recording and the hooks; hooks must not be assigned
+// directly because the server may read them concurrently.
 func (m *s3Mock) reset() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.requests = nil
 	m.putHeaders = nil
 	m.Hook = nil
+	m.PutPreflight = nil
 }
 
 // bucketAndKey parses both path-style and virtual-hosted requests. The mock
@@ -173,35 +217,46 @@ func (m *s3Mock) serve(w http.ResponseWriter, r *http.Request) {
 			s3ErrorResponse(w, 500, "InternalError")
 			return
 		}
+		// The observation hook runs here, outside m.mu and only to let a test
+		// coordinate concurrent PUTs; the verdict below is taken under m.mu.
+		m.observePut(s3PutObservation{
+			Method:      r.Method,
+			Key:         key,
+			IfNoneMatch: r.Header.Get("If-None-Match"),
+			IfMatch:     r.Header.Get("If-Match"),
+		})
+		if inm := r.Header.Get("If-None-Match"); inm != "" && inm != "*" {
+			m.t.Errorf("If-None-Match = %q, mock only implements *", inm)
+		}
 		m.mu.Lock()
 		m.putHeaders = append(m.putHeaders, putHeaders)
+		// Check every precondition against the state at commit time and, when
+		// they all hold, commit the body in the same critical section. Two
+		// concurrent conditional PUTs can therefore never both observe the
+		// same old state and both succeed.
 		_, exists := m.objects[key]
 		curETag := m.etags[key]
-		m.mu.Unlock()
-		if inm := r.Header.Get("If-None-Match"); inm != "" {
-			if inm != "*" {
-				m.t.Errorf("If-None-Match = %q, mock only implements *", inm)
-			}
-			if exists {
-				s3ErrorResponse(w, 412, "PreconditionFailed")
-				return
-			}
+		var status int
+		var code string
+		var etag string
+		switch {
+		case r.Header.Get("If-None-Match") != "" && exists:
+			status, code = 412, "PreconditionFailed"
+		case r.Header.Get("If-Match") != "" && !exists:
+			status, code = 404, "NoSuchKey"
+		case r.Header.Get("If-Match") != "" && r.Header.Get("If-Match") != curETag:
+			status, code = 412, "PreconditionFailed"
+		default:
+			etag = m.nextETag(body)
+			m.objects[key] = body
+			m.etags[key] = etag
 		}
-		if im := r.Header.Get("If-Match"); im != "" {
-			if !exists {
-				s3ErrorResponse(w, 404, "NoSuchKey")
-				return
-			}
-			if im != curETag {
-				s3ErrorResponse(w, 412, "PreconditionFailed")
-				return
-			}
-		}
-		m.mu.Lock()
-		etag := m.nextETag(body)
-		m.objects[key] = body
-		m.etags[key] = etag
 		m.mu.Unlock()
+		// No response I/O while m.mu is held.
+		if code != "" {
+			s3ErrorResponse(w, status, code)
+			return
+		}
 		w.Header().Set("ETag", etag)
 		w.WriteHeader(http.StatusOK)
 		abortIfClientGone(w, r)
@@ -488,6 +543,180 @@ func TestS3ConditionalOneWinner(t *testing.T) {
 	const writers = 8
 	t.Run("replace", func(t *testing.T) { singleWinner(t, writers, "replace") })
 	t.Run("create", func(t *testing.T) { singleWinner(t, writers, "create") })
+}
+
+// putBarrier holds every PUT handler at a fixed point until all of them have
+// arrived there. It is never used while the mock holds m.mu: the handler
+// reports its observation, releases the mutex, and only then waits.
+type putBarrier struct {
+	participants int
+	arrived      sync.WaitGroup // counts participants reaching the barrier
+	release      chan struct{}
+	once         sync.Once
+
+	obsMu sync.Mutex
+	obs   []s3PutObservation
+}
+
+func newPutBarrier(participants int) *putBarrier {
+	b := &putBarrier{participants: participants, release: make(chan struct{})}
+	b.arrived.Add(participants)
+	return b
+}
+
+// wait records obs and blocks until every participant has arrived, then
+// releases all of them together.
+func (b *putBarrier) wait(obs s3PutObservation) {
+	b.obsMu.Lock()
+	b.obs = append(b.obs, obs)
+	b.obsMu.Unlock()
+	b.arrived.Done()
+	b.arrived.Wait()
+	b.once.Do(func() { close(b.release) })
+	<-b.release
+}
+
+// observations returns the initial state every participant saw.
+func (b *putBarrier) observations() []s3PutObservation {
+	b.obsMu.Lock()
+	defer b.obsMu.Unlock()
+	return append([]s3PutObservation(nil), b.obs...)
+}
+
+// TestS3MockConditionalPutIsAtomic pins the mock's conditional PUT: every
+// precondition check and the commit it guards happen in one critical section.
+//
+// writers conditional PUTs are parked at the mock's preflight observation until
+// all have arrived and each has seen the same initial state; only then are
+// they released together. Exactly one may commit, every other must get
+// ErrConflict, and the stored bytes and ETag must be the winner's. An
+// implementation that decides from an earlier snapshot, releases the mutex and
+// writes later lets several writers pass and fails here deterministically.
+func TestS3MockConditionalPutIsAtomic(t *testing.T) {
+	const (
+		writers = 8
+		key     = testS3Prefix + "/atomic"
+	)
+	cases := []struct {
+		name   string
+		seed   []byte // nil: the key starts absent
+		absent bool
+	}{
+		{name: "conditional_create", absent: true},
+		{name: "conditional_replace", seed: []byte("base")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newS3Mock(t)
+			baseETag := ""
+			if !tc.absent {
+				baseETag = m.seed(key, tc.seed)
+			}
+			m.reset()
+			barrier := newPutBarrier(writers)
+			m.setPutPreflight(barrier.wait)
+			b := newMockBackend(t, m)
+
+			bodies := make([][]byte, writers)
+			errs := make([]error, writers)
+			var start, done sync.WaitGroup
+			start.Add(1)
+			for i := range writers {
+				bodies[i] = []byte(fmt.Sprintf("%s-writer-%d", tc.name, i))
+				done.Add(1)
+				go func(i int) {
+					defer done.Done()
+					start.Wait()
+					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					defer cancel()
+					if tc.absent {
+						errs[i] = b.CreateIfAbsent(ctx, "atomic", bodies[i])
+					} else {
+						errs[i] = b.ReplaceIfVersion(ctx, "atomic", Revision(baseETag), bodies[i])
+					}
+				}(i)
+			}
+			start.Done()
+			done.Wait()
+
+			// Every participant must have reached the barrier and seen the
+			// same initial precondition state, or the race was not exercised.
+			if n := len(barrier.observations()); n != writers {
+				t.Fatalf("%d PUTs reached the preflight barrier, want %d", n, writers)
+			}
+			for _, obs := range barrier.observations() {
+				want := s3PutObservation{
+					Method: http.MethodPut,
+					Key:    key,
+					Exists: !tc.absent,
+					ETag:   baseETag,
+				}
+				if tc.absent {
+					want.IfNoneMatch = "*"
+				} else {
+					want.IfMatch = baseETag
+				}
+				if obs != want {
+					t.Fatalf("preflight observation = %+v, want every writer to see %+v", obs, want)
+				}
+			}
+
+			wins, conflicts := []int(nil), []int(nil)
+			for i, err := range errs {
+				switch {
+				case err == nil:
+					wins = append(wins, i)
+				case errors.Is(err, ErrConflict):
+					conflicts = append(conflicts, i)
+				default:
+					t.Errorf("writer %d = %v, want nil or ErrConflict", i, err)
+				}
+			}
+			if len(wins) != 1 || len(conflicts) != writers-1 {
+				t.Fatalf("wins=%v conflicts=%v, want exactly one winner and %d ErrConflict", wins, conflicts, writers-1)
+			}
+			winner := wins[0]
+			body, etag, ok := m.get(key)
+			if !ok || string(body) != string(bodies[winner]) {
+				t.Fatalf("stored = %q (exists %v), want winner %d's %q", body, ok, winner, bodies[winner])
+			}
+			if tc.absent && etag == "" {
+				t.Fatal("winner left no ETag")
+			}
+			if !tc.absent && etag == baseETag {
+				t.Fatal("committed replace did not change the ETag")
+			}
+			got, err := b.Read(context.Background(), "atomic")
+			if err != nil || string(got.Bytes) != string(bodies[winner]) || got.Revision != Revision(etag) {
+				t.Fatalf("read back = %q %q, %v; want winner %d's bytes and ETag %q", got.Bytes, got.Revision, err, winner, etag)
+			}
+
+			// Conditional semantics hold after the race: a create conflicts
+			// and a replace from the base ETag conflicts.
+			m.reset()
+			if err := b.CreateIfAbsent(context.Background(), "atomic", []byte("late")); !errors.Is(err, ErrConflict) {
+				t.Fatalf("create after race = %v, want ErrConflict", err)
+			}
+			if !tc.absent {
+				if err := b.ReplaceIfVersion(context.Background(), "atomic", Revision(baseETag), []byte("stale")); !errors.Is(err, ErrConflict) {
+					t.Fatalf("replace from base ETag after race = %v, want ErrConflict", err)
+				}
+			} else if err := b.ReplaceIfVersion(context.Background(), "atomic", Revision(etag), []byte("next")); err != nil {
+				t.Fatalf("replace from winner ETag = %v", err)
+			}
+			// Each post-race call is a single conditional PUT: no HEAD, no
+			// unconditional write, no retry.
+			reqs, headers := m.recorded()
+			if len(reqs) != 2 || len(headers) != 2 {
+				t.Fatalf("requests = %v (%d PUTs), want exactly two conditional PUTs", reqs, len(headers))
+			}
+			for i, req := range reqs {
+				if req != "PUT "+key {
+					t.Fatalf("post-race request %d = %q, want a conditional PUT", i, req)
+				}
+			}
+		})
+	}
 }
 
 func TestS3ErrorClassification(t *testing.T) {
