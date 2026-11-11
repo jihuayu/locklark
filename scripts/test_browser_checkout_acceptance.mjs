@@ -2,12 +2,19 @@
 // These run without a browser, native host or private vault fixture.
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   checkoutTopHTML,
   checkoutCardHTML,
   checkoutFrameOrigin,
+  checkoutSameOrigin,
   checkoutRouteCase,
   chooseChildOrigin,
+  openCheckoutPicker,
+  assertProgrammaticClickRefused,
+  acceptCheckoutFrames,
+  runLockDuringReviewJourney,
+  CHECKOUT_LOCKED,
 } from "./browser_checkout_acceptance.mjs";
 
 const TOP_ORIGIN = "https://login.locklark.test:8443";
@@ -18,6 +25,23 @@ const FRAME_SUFFIX = "（页面中的表单框架）";
 
 function countMatches(text, pattern) {
   return (text.match(pattern) || []).length;
+}
+
+// A present, fully visible and blank form for both the top and child page.
+function blankFormState() {
+  const state = {
+    formPresent: true,
+    values: {},
+    visible: {},
+    tags: {},
+    submits: 0,
+  };
+  for (const key of ["name", "number", "month", "year", "csc", "pin"]) {
+    state.values[key] = "";
+    state.visible[key] = true;
+    state.tags[key] = key === "month" || key === "year" ? "SELECT" : "INPUT";
+  }
+  return state;
 }
 
 test("default checkout fixture keeps the original host and no sandbox", () => {
@@ -78,6 +102,47 @@ test("variant options and ephemeral ports are strictly bounded", () => {
   );
 });
 
+test("same-origin variant embeds the exact top origin and port", () => {
+  const html = checkoutTopHTML(8443, { host: "login.locklark.test" });
+  assert.match(html, /src="https:\/\/login\.locklark\.test:8443\/card"/);
+  assert.equal(
+    countMatches(html, /https:\/\/login\.locklark\.test:8443/g),
+    1,
+    "only the embedded child may reference the top origin",
+  );
+  assert.doesNotMatch(html, /checkout\.(locklark|other)\.test/);
+  assert.equal(countMatches(html, /sandbox=/g), 0);
+  assert.throws(
+    () => checkoutTopHTML(8443, { host: "login.locklark.test", sandbox: true }),
+    /Same-origin checkout variant cannot be sandboxed/,
+  );
+  // The child is still the shared card document with its own PIN selector.
+  assert.match(checkoutCardHTML(), /id="checkout-card-frame-form"/);
+  assert.match(checkoutCardHTML(), /id="card-pin" name="card-pin"/);
+});
+
+test("same-origin frame origin must equal the exact allowlisted top origin", () => {
+  assert.equal(checkoutSameOrigin(TOP_ORIGIN), TOP_ORIGIN);
+  assert.equal(
+    checkoutFrameOrigin(TOP_ORIGIN, { host: "login.locklark.test" }),
+    TOP_ORIGIN,
+  );
+  for (const bad of [
+    "https://login.locklark.test",
+    "https://login.locklark.test:8443/checkout",
+    "https://login.locklark.test:8443/",
+    "http://login.locklark.test:8443",
+    "https://checkout.locklark.test:8443",
+    "https://evil.test:8443",
+    "https://login.locklark.test.evil:8443",
+  ])
+    assert.throws(
+      () => checkoutSameOrigin(bad),
+      /Unsupported checkout card host|ephemeral HTTPS origin|exact top origin/,
+    );
+  assert.throws(() => checkoutSameOrigin(""), /ephemeral HTTPS origin/);
+});
+
 test("fixture routing accepts only the known checkout query cases", () => {
   assert.deepEqual(checkoutRouteCase("/checkout"), {
     kind: "checkout",
@@ -96,48 +161,97 @@ test("fixture routing accepts only the known checkout query cases", () => {
     kind: "checkout",
     options: { sandbox: true },
   });
+  assert.deepEqual(checkoutRouteCase("/checkout?variant=same-origin"), {
+    kind: "checkout",
+    options: { host: "login.locklark.test" },
+  });
+  // The fresh-page picker cancellation journey rides the allowed default
+  // route (`/checkout?case=deny`); an invented "picker-cancel" variant is
+  // still refused.
+  // The route variant genuinely renders the same-origin child; a route that
+  // returned an option the HTML ignored would silently test the wrong page.
+  const route = checkoutRouteCase("/checkout?variant=same-origin");
+  assert.match(
+    checkoutTopHTML(8443, route.options),
+    /src="https:\/\/login\.locklark\.test:8443\/card"/,
+  );
+  assert.match(
+    checkoutTopHTML(8443, checkoutRouteCase("/checkout").options),
+    /src="https:\/\/checkout\.locklark\.test:8443\/card"/,
+  );
   assert.deepEqual(checkoutRouteCase("/card"), { kind: "card" });
   assert.deepEqual(checkoutRouteCase("/card?changed"), { kind: "card" });
   assert.deepEqual(checkoutRouteCase("/login"), { kind: "other" });
   for (const bad of [
     "/checkout?variant=hidden",
     "/checkout?variant=cross-site&variant=sandbox",
+    "/checkout?variant=same-origin&variant=sandbox",
     "/checkout?case=approve",
+    "/checkout?case=same-origin",
     "/checkout?variant=sandbox&case=deny",
+    "/checkout?variant=picker-cancel&extra=1",
+    "/checkout?variant=same-origin&extra=1",
     "/card?other",
     "/checkout?variant=cross-site&extra=1",
   ])
     assert.throws(() => checkoutRouteCase(bad), /checkout/i);
 });
 
-function pickerPopup(labels) {
+// `options.status` is the popup's bounded public status line read after the
+// trusted fill click. `options.noPicker` models a popup that never shows the
+// picker after that one click, while the cancel control still "exists" in the
+// markup so a harness that skips the picker wait would press it.
+function pickerPopup(labels, options = {}) {
+  const state = { open: options.noPicker !== true };
+  const count = (selector) =>
+    selector.includes('button[data-action="checkout-select"]')
+      ? state.open
+        ? labels.length
+        : 0
+      : selector === "#checkout-cancel"
+        ? 1
+        : 0;
   return {
     clicked: [],
+    canceled: 0,
     async click(selector) {
       this.clicked.push(selector);
+      if (selector === "#checkout-cancel") {
+        this.canceled++;
+        if (options.refuseCancel !== true) state.open = false;
+      }
     },
     async visible(selector) {
-      return selector === "#checkout-picker";
+      if (selector === "#checkout-picker") return state.open;
+      return count(selector) === 1;
+    },
+    async disabled(selector) {
+      return selector === "#checkout-cancel" && options.cancelDisabled === true;
     },
     async text(selector) {
       if (selector === "#checkout-current-page")
         return "当前页面来源：" + TOP_ORIGIN;
       if (selector === "#checkout-status")
         return "请选择一个结账表单来源；不会自动选择，也不会自动提交";
+      if (selector === "#status")
+        return options.status === undefined ? "已连接" : options.status;
       const match = selector.match(/:nth-child\((\d+)\)$/);
       if (match) return labels[Number(match[1]) - 1];
       return "";
     },
     async count(selector) {
-      return selector.includes('button[data-action="checkout-select"]')
-        ? labels.length
-        : 0;
+      return count(selector);
     },
   };
 }
 
-const eventually = async (check) => {
-  assert.equal(await check(), true);
+// The real driver throws its message when the predicate never becomes true;
+// the stub does exactly one attempt so module failures stay observable.
+// A fulfilled `false` keeps the exact message a real missing picker would
+// report here; a bare `assert.equal(result, true)` would compare a Promise.
+const eventually = async (check, message) => {
+  const result = await check();
+  assert.equal(result, true, message);
 };
 
 test("physical choice uses the exact public origin label, not an ordinal", async () => {
@@ -146,9 +260,9 @@ test("physical choice uses the exact public origin label, not an ordinal", async
     CARD_ORIGIN + FRAME_SUFFIX,
     OTHER_ORIGIN + FRAME_SUFFIX,
   ]);
-  assert.equal(
+  assert.deepEqual(
     await chooseChildOrigin(popup, TOP_ORIGIN, OTHER_ORIGIN, eventually),
-    true,
+    { selected: true },
   );
   assert.deepEqual(popup.clicked, [
     "#detail-fill",
@@ -162,9 +276,9 @@ test("physical choice uses the exact public origin label, not an ordinal", async
     OTHER_ORIGIN + FRAME_SUFFIX,
     CARD_ORIGIN + FRAME_SUFFIX,
   ]);
-  assert.equal(
+  assert.deepEqual(
     await chooseChildOrigin(reordered, TOP_ORIGIN, OTHER_ORIGIN, eventually),
-    true,
+    { selected: true },
   );
   assert.deepEqual(reordered.clicked, [
     "#detail-fill",
@@ -172,11 +286,61 @@ test("physical choice uses the exact public origin label, not an ordinal", async
   ]);
 });
 
+test("same-origin child is chosen while the top origin is never chosen", async () => {
+  // The same-origin variant lists the top origin twice: as "（当前页面）" and
+  // as the embedded card frame. Only the exact frame label may be selected.
+  const popup = pickerPopup([TOP_LABEL, TOP_ORIGIN + FRAME_SUFFIX]);
+  assert.deepEqual(
+    await chooseChildOrigin(popup, TOP_ORIGIN, TOP_ORIGIN, eventually),
+    { selected: true },
+  );
+  assert.deepEqual(popup.clicked, [
+    "#detail-fill",
+    '#checkout-choices button[data-action="checkout-select"]:nth-child(2)',
+  ]);
+  assert.ok(!popup.clicked.includes("#checkout-cancel"));
+
+  // Two same-origin frame candidates are ambiguous even though the exact top
+  // origin is being chosen: the first duplicate is never picked, and the
+  // refusal happens before a cancel control is even pressed.
+  const sameOriginAmbiguous = pickerPopup([
+    TOP_LABEL,
+    TOP_ORIGIN + FRAME_SUFFIX,
+    TOP_ORIGIN + FRAME_SUFFIX,
+  ]);
+  await assert.rejects(
+    () =>
+      chooseChildOrigin(
+        sameOriginAmbiguous,
+        TOP_ORIGIN,
+        TOP_ORIGIN,
+        eventually,
+      ),
+    /Expected exactly one explicit checkout child origin/,
+  );
+  assert.deepEqual(sameOriginAmbiguous.clicked, ["#detail-fill"]);
+
+  // A duplicated label on any other origin stays ambiguous and is refused
+  // before a cancel control is even pressed.
+  const ambiguous = pickerPopup([
+    TOP_LABEL,
+    CARD_ORIGIN + FRAME_SUFFIX,
+    CARD_ORIGIN + FRAME_SUFFIX,
+  ]);
+  await assert.rejects(
+    () => chooseChildOrigin(ambiguous, TOP_ORIGIN, CARD_ORIGIN, eventually),
+    /Expected exactly one explicit checkout child origin/,
+  );
+  assert.deepEqual(ambiguous.clicked, ["#detail-fill"]);
+});
+
 test("missing or duplicate public origins are never guessed or forced", async () => {
+  // A missing origin is reported without a click; the journey that proves
+  // exclusion cancels through the picker's own control.
   const missing = pickerPopup([TOP_LABEL, CARD_ORIGIN + FRAME_SUFFIX]);
-  assert.equal(
+  assert.deepEqual(
     await chooseChildOrigin(missing, TOP_ORIGIN, OTHER_ORIGIN, eventually),
-    false,
+    { selected: false },
   );
   assert.deepEqual(missing.clicked, ["#detail-fill"]);
 
@@ -190,4 +354,651 @@ test("missing or duplicate public origins are never guessed or forced", async ()
     /Expected exactly one explicit checkout child origin/,
   );
   assert.deepEqual(duplicate.clicked, ["#detail-fill"]);
+});
+
+test("the picker is requested by exactly one trusted fill click", async () => {
+  const popup = pickerPopup([TOP_LABEL, CARD_ORIGIN + FRAME_SUFFIX]);
+  await openCheckoutPicker(popup, eventually);
+  assert.deepEqual(popup.clicked, ["#detail-fill"]);
+
+  // The cancel path reuses the same request: no second request opens a
+  // different picker before the user cancels the first one.
+  const cancel = pickerPopup([TOP_LABEL, CARD_ORIGIN + FRAME_SUFFIX]);
+  await chooseChildOrigin(cancel, TOP_ORIGIN, CARD_ORIGIN, eventually, {
+    cancel: true,
+  });
+  assert.deepEqual(cancel.clicked, ["#detail-fill", "#checkout-cancel"]);
+});
+
+test("a picker that never appears is never reported as cancelled", async () => {
+  // A fixed public status is carried on the same bounded reason so the red
+  // stage stays diagnosable, while an unrecognised status is never echoed.
+  for (const [line, shown] of [
+    ["请选择要填充的结账表单来源；不会自动选择", "不会自动选择"],
+    ["当前原生宿主或浏览器不支持选择结账表单", "不支持选择结账表单"],
+    ["无法列出当前页面的结账表单", "无法列出当前页面的结账表单"],
+    ["本次请求被拒绝", "other (unrecognised public status)"],
+    [undefined, "other (unrecognised public status)"],
+    ["", "unavailable"],
+  ]) {
+    await assert.rejects(
+      () =>
+        chooseChildOrigin(
+          pickerPopup([TOP_LABEL], { status: line, noPicker: true }),
+          TOP_ORIGIN,
+          CARD_ORIGIN,
+          eventually,
+          { cancel: true },
+        ),
+      new RegExp(
+        "^Error: Checkout origin picker missing: popup status " +
+          shown.replace(/[()]/g, "\\$&") +
+          "$",
+      ),
+    );
+  }
+
+  // The unreadable popup status must not hide the bounded reason either.
+  const unreadable = pickerPopup([TOP_LABEL], { noPicker: true });
+  unreadable.text = async (selector) => {
+    if (selector === "#status") throw Error("Popup inspection failed");
+    return "";
+  };
+  await assert.rejects(
+    () => openCheckoutPicker(unreadable, eventually),
+    /^Error: Checkout origin picker missing: popup status unavailable$/,
+  );
+  // No cancel control may be pressed when the picker never appeared.
+  assert.deepEqual(unreadable.clicked, ["#detail-fill"]);
+});
+
+test("picker cancellation presses only the real cancel control", async () => {
+  const popup = pickerPopup([TOP_LABEL, CARD_ORIGIN + FRAME_SUFFIX]);
+  assert.deepEqual(
+    await chooseChildOrigin(popup, TOP_ORIGIN, CARD_ORIGIN, eventually, {
+      cancel: true,
+    }),
+    { selected: false },
+  );
+  assert.deepEqual(popup.clicked, ["#detail-fill", "#checkout-cancel"]);
+  assert.ok(
+    popup.clicked.every(
+      (selector) => !selector.includes('data-action="checkout-select"'),
+    ),
+  );
+
+  // No candidate at all (e.g. a refused page): cancel is still the only
+  // action that may close the picker.
+  const excluded = pickerPopup([TOP_LABEL]);
+  assert.deepEqual(
+    await chooseChildOrigin(excluded, TOP_ORIGIN, OTHER_ORIGIN, eventually, {
+      cancel: true,
+    }),
+    { selected: false },
+  );
+  assert.deepEqual(excluded.clicked, ["#detail-fill", "#checkout-cancel"]);
+
+  // A picker that does not close fails instead of reporting a cancel.
+  const stuck = pickerPopup([TOP_LABEL, CARD_ORIGIN + FRAME_SUFFIX], {
+    refuseCancel: true,
+  });
+  await assert.rejects(
+    () =>
+      chooseChildOrigin(stuck, TOP_ORIGIN, CARD_ORIGIN, eventually, {
+        cancel: true,
+      }),
+    /Checkout picker cancel did not close/,
+  );
+
+  const disabled = pickerPopup([TOP_LABEL, CARD_ORIGIN + FRAME_SUFFIX], {
+    cancelDisabled: true,
+  });
+  await assert.rejects(
+    () =>
+      chooseChildOrigin(disabled, TOP_ORIGIN, CARD_ORIGIN, eventually, {
+        cancel: true,
+      }),
+    /Checkout picker cancel control unavailable/,
+  );
+  assert.deepEqual(disabled.clicked, ["#detail-fill"]);
+});
+
+// Models the real popup for the programmatic-click refusal. `evaluate` runs
+// the bounded expression in the popup and records it; `click` models only the
+// physical Input.dispatch path. A DOM click is received as untrusted and
+// refused. Only a received `false` counts as that proof; a missing receipt is
+// a failure, never a silent pass.
+function programmaticPopup() {
+  const state = {
+    pickerOpen: false,
+    status: "已连接",
+    trusted: null,
+    evaluated: [],
+    clicked: [],
+  };
+  return {
+    state,
+    async evaluate(expression) {
+      state.evaluated.push(expression);
+      state.trusted = false;
+      return false;
+    },
+    async click(selector) {
+      state.clicked.push(selector);
+      state.pickerOpen = true;
+    },
+    async visible(selector) {
+      if (selector === "#checkout-picker") return state.pickerOpen;
+      return selector === "#checkout-cancel";
+    },
+    async disabled() {
+      return false;
+    },
+    async text(selector) {
+      return selector === "#status" ? state.status : "";
+    },
+    async count() {
+      // Candidate markup belongs to the picker panel and is rendered only
+      // while that panel is open.
+      return state.pickerOpen ? 1 : 0;
+    },
+  };
+}
+
+test("programmatic fill click must be received untrusted and refused", async () => {
+  const popup = programmaticPopup();
+  await assertProgrammaticClickRefused(popup, eventually);
+  // Exactly one DOM click, evaluated in the popup and not through the physical
+  // input path; the physical "#detail-fill" click is left to the caller.
+  assert.equal(popup.state.evaluated.length, 1);
+  assert.match(popup.state.evaluated[0], /#detail-fill/);
+  assert.match(popup.state.evaluated[0], /\.click\(\)/);
+  assert.match(popup.state.evaluated[0], /isTrusted/);
+  assert.deepEqual(popup.state.clicked, []);
+  assert.equal(popup.state.trusted, false);
+  assert.equal(popup.state.pickerOpen, false);
+  assert.equal(popup.state.status, "已连接");
+});
+
+test("a popup that acts on a programmatic click is never reported as refusing it", async () => {
+  // A DOM click that is somehow received as trusted yields no evidence of
+  // refusal, and no physical click is made on its behalf.
+  const trusted = programmaticPopup();
+  trusted.evaluate = async (expression) => {
+    trusted.state.evaluated.push(expression);
+    trusted.state.trusted = true;
+    return true;
+  };
+  await assert.rejects(
+    () => assertProgrammaticClickRefused(trusted, eventually),
+    /Programmatic checkout fill click must be received as untrusted/,
+  );
+  assert.deepEqual(trusted.state.clicked, []);
+
+  // A DOM click that is refused yet still shows the picker is an exposure
+  // even though the received click was untrusted.
+  const accepted = programmaticPopup();
+  accepted.evaluate = async (expression) => {
+    accepted.state.evaluated.push(expression);
+    accepted.state.trusted = false;
+    accepted.state.pickerOpen = true;
+    return false;
+  };
+  await assert.rejects(
+    () => assertProgrammaticClickRefused(accepted, eventually),
+    /Programmatic checkout fill click opened the picker/,
+  );
+  assert.deepEqual(accepted.state.clicked, []);
+
+  // A popup that reports the click as untrusted yet still renders a candidate
+  // is caught by the panel check as well, even if the panel is hidden.
+  const shown = programmaticPopup();
+  shown.visible = async (selector) => selector !== "#detail-fill";
+  shown.count = async () => 1;
+  await assert.rejects(
+    () => assertProgrammaticClickRefused(shown, eventually),
+    /Checkout picker must be absent before the programmatic click/,
+  );
+
+  // A refused click that still moves a bounded public status line is a
+  // failure: the unchanged status is the proof no frame listing started.
+  const noisy = programmaticPopup();
+  noisy.evaluate = async (expression) => {
+    noisy.state.evaluated.push(expression);
+    noisy.state.status =
+      "请选择一个结账表单来源；不会自动选择，也不会自动提交";
+    return false;
+  };
+  await assert.rejects(
+    () => assertProgrammaticClickRefused(noisy, eventually),
+    /Programmatic checkout fill click changed the popup status/,
+  );
+});
+
+test("a picker already open cannot be proven refused programmatically", async () => {
+  const popup = programmaticPopup();
+  popup.state.pickerOpen = true;
+  await assert.rejects(
+    () => assertProgrammaticClickRefused(popup, eventually),
+    /Checkout picker must be absent before the programmatic click/,
+  );
+  assert.equal(popup.state.evaluated.length, 0);
+});
+
+test("the real popup adapter exposes CDP evaluation", () => {
+  // The picker-cancel journey dispatches a DOM `.click()` through the popup's
+  // own CDP Runtime. Dropping that adapter must fail here instead of silently
+  // skipping the real-browser proof. The journey sends no physical Escape:
+  // closing the action popup would disconnect the same CDP target.
+  const source = readFileSync(
+    new URL("./browser_native_acceptance.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /^\s*evaluate,$/m);
+  assert.doesNotMatch(source, /pressEscape/);
+});
+
+test("native absence probes preserve popup focus across the journey", () => {
+  // Default callers ask for the plain inspect request, which raises and
+  // focuses the native window. Every popup-stage probe must instead use the
+  // X11 helper's documented `preserve_focus` + `title_prefix` form: focusing
+  // the native window closes the Chromium action popup that is still to be
+  // clicked, which is exactly the "Popup control must be available" failure.
+  const source = readFileSync(
+    new URL("./browser_checkout_acceptance.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.doesNotMatch(source, /assertNoNative(Approval|ProfileReview)\(input\)/);
+  // Every native absence probe the picker-cancel journey makes uses the
+  // focus-preserving form while its popup stays open.
+  const journey = source.slice(
+    source.indexOf("async function runPickerCancelJourney"),
+    source.indexOf("export async function acceptCheckoutFrames"),
+  );
+  assert.equal(
+    countMatches(journey, /assertNoNative(?:Approval|ProfileReview)\(input, POPUP_OPEN\)/g),
+    countMatches(journey, /assertNoNative(?:Approval|ProfileReview)\(/g),
+  );
+  assert.ok(countMatches(journey, /assertNoNative(?:Approval|ProfileReview)\(/g) >= 6);
+  assert.match(
+    source,
+    /title_prefix: NATIVE_TITLE_PREFIX,\n\s+preserve_focus: true,\n\s+inspect: true,/,
+  );
+  assert.match(source, /const NATIVE_TITLE_PREFIX = "Locklark";/);
+  // The journey never sends a physical Escape to its popup: closing the action
+  // popup would leave the held CDP object disconnected.
+  assert.doesNotMatch(journey, /pressEscape|checkout-picker-cancel:withdraw/);
+});
+
+test("native absence probes fail closed on an unavailable snapshot", async () => {
+  // A failed native probe observed no native UI, so it must fail the journey
+  // instead of reading as "both native decisions absent". The default journey
+  // probes its first popup before reading any card detail or picker state, so
+  // the popup is a bare object: any progress past the probe fails on a missing
+  // popup method, never inside the probe.
+  const fixture = {
+    CardID: "0".repeat(32),
+    CardRevision: "a".repeat(64),
+    CardTitle: "Synthetic checkout card",
+    CardNumber: "4111111111111111",
+    CardHolder: "Synthetic Holder",
+    CardVerification: "123",
+    CardExpiry: "2030-01",
+    CardPIN: "1234",
+  };
+  const visibleFormState = blankFormState;
+  const probes = [];
+  const driver = (probe) => ({
+    page: {
+      url: () => TOP_ORIGIN + "/checkout",
+      goto: async () => assert.fail("journey navigated past the probe"),
+      frames: () => [
+        {
+          url: () => CARD_ORIGIN + "/card",
+          evaluate: async () => visibleFormState(),
+        },
+      ],
+      evaluate: async () => visibleFormState(),
+    },
+    origin: TOP_ORIGIN,
+    fixture,
+    input: (_actions, _native, options) => {
+      probes.push(options);
+      return probe();
+    },
+    openPopup: async () => ({}),
+    phase: () => {},
+    eventually: async (check, message) => {
+      if (!(await check())) throw Error(message);
+    },
+  });
+
+  // A thrown probe error propagates unchanged: it is never swallowed into a
+  // null snapshot and then read as "both controls absent".
+  const failed = Error(
+    "Native acceptance input failed [native-window-unavailable]",
+  );
+  await assert.rejects(
+    () =>
+      acceptCheckoutFrames(
+        driver(() => {
+          throw failed;
+        }),
+      ),
+    (error) => {
+      assert.deepEqual(probes, [
+        {
+          title_prefix: "Locklark",
+          preserve_focus: true,
+          inspect: true,
+        },
+      ]);
+      return error === failed;
+    },
+  );
+
+  // A probe that succeeds without a control object is an unavailable
+  // snapshot and fails closed instead of marking both controls absent.
+  const unavailable = ["x", null, {}, [], { controls: null }, { controls: [] }];
+  for (const result of unavailable) {
+    await assert.rejects(
+      () => acceptCheckoutFrames(driver(() => result)),
+      { message: "Native control snapshot unavailable" },
+    );
+  }
+});
+
+// Source of one journey, bounded by the next journey's comment block.
+function journeySource(name) {
+  const source = readFileSync(
+    new URL("./browser_checkout_acceptance.mjs", import.meta.url),
+    "utf8",
+  );
+  const start = source.indexOf(name);
+  assert.ok(start >= 0, name + " missing");
+  const rest = source.slice(start + name.length);
+  const end = rest.indexOf("\n// The same-origin variant embeds its child");
+  assert.ok(end > 0, "Journey source end not found");
+  return rest.slice(0, end);
+}
+
+test("navigating the top tab never acts on the stale native approval", () => {
+  const journey = journeySource("async function runDenyNavigationJourney");
+  // The stale review is only observed: no native action of any kind is sent
+  // while it is visible, before, during or after the top navigation. The one
+  // native request is the explicit selection wait that surfaces the review.
+  assert.doesNotMatch(journey, /click_label|key:/);
+  assert.equal(countMatches(journey, /wait_label/g), 1);
+  assert.match(
+    journey,
+    /input\(\[\{ wait_label: CHECKOUT_APPROVE_LABEL \}\]\)/,
+  );
+  // Only the top tab navigates, to a fresh default-route document; the child
+  // frame is of that new document and is never navigated by this journey.
+  assert.equal(countMatches(journey, /page\.goto\(/g), 2);
+  assert.match(journey, /page\.goto\(topOrigin \+ "\/checkout\?case=deny"\)/);
+  assert.doesNotMatch(journey, /frame\.goto|goto\(frameOrigin/);
+  // The popup-preserving probe only guards the reopened, live popup.
+  const reopen = journey.indexOf("const reopened = await openPopup();");
+  assert.ok(reopen > 0);
+  assert.doesNotMatch(journey.slice(0, reopen), /POPUP_OPEN/);
+  assert.match(
+    journey.slice(reopen),
+    /assertNoNativeApproval\(input, POPUP_OPEN\)/,
+  );
+});
+
+test("fixed PASS summary names the top-navigation and pending-review lock", () => {
+  const source = readFileSync(
+    new URL("./browser_native_acceptance.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /checkout same-origin child approval \(profile review\) and picker cancellation, cross-origin approval\/refusal, cross-site, opaque sandbox, changed-document and top-navigation rejection, and lock while cross-origin card review is pending`/,
+  );
+});
+
+test("a stale approval that stays available fails instead of being read as absent", () => {
+  // The bounded wait proves the review finished before the popup is reopened:
+  // any still-available approve or refuse control fails the check with a
+  // public control-name reason, and the popup open comes only after the wait.
+  const journey = journeySource("async function runDenyNavigationJourney");
+  const wait = journey.indexOf(
+    "Native checkout review did not finish after top navigation",
+  );
+  const reopen = journey.indexOf("const reopened = await openPopup();");
+  assert.ok(wait > 0 && reopen > wait);
+  assert.match(
+    journey.slice(0, reopen),
+    /available\.length === 0,\s*"Native checkout review still available after top navigation: "/,
+  );
+  // Both decisions are part of the requirement, each from a default probe.
+  assert.equal(
+    countMatches(journey.slice(0, reopen), /nativeControls\(input\)/g),
+    2,
+  );
+  assert.doesNotMatch(journey.slice(0, reopen), /POPUP_OPEN/);
+});
+
+test("checkout choice options are strictly bounded", async () => {
+  const popup = pickerPopup([TOP_LABEL, CARD_ORIGIN + FRAME_SUFFIX]);
+  await assert.rejects(
+    () => chooseChildOrigin(popup, TOP_ORIGIN, CARD_ORIGIN, eventually, null),
+    /Checkout choice options must be an object/,
+  );
+  await assert.rejects(
+    () =>
+      chooseChildOrigin(popup, TOP_ORIGIN, CARD_ORIGIN, eventually, {
+        force: true,
+      }),
+    /Unsupported checkout choice option/,
+  );
+  await assert.rejects(
+    () =>
+      chooseChildOrigin(popup, TOP_ORIGIN, CARD_ORIGIN, eventually, {
+        cancel: "yes",
+      }),
+    /Checkout cancel must be boolean/,
+  );
+  assert.deepEqual(popup.clicked, []);
+});
+
+test("lock during a pending cross-origin review is ordered, clicked physically and never decided", async () => {
+  const fixture = {
+    CardID: "0".repeat(32),
+    CardRevision: "a".repeat(64),
+    CardTitle: "Synthetic checkout card",
+    CardNumber: "4111111111111111",
+    CardHolder: "Synthetic Holder",
+    CardVerification: "123",
+    CardExpiry: "2030-01",
+    CardPIN: "1234",
+  };
+  const cardRow = '#vault-list [data-item-id="' + fixture.CardID + '"]';
+  let locked = false;
+  const log = [];
+  const page = {
+    url: () => (locked ? TOP_ORIGIN + "/" : TOP_ORIGIN + "/checkout"),
+    goto: async (url) => log.push(["goto", url]),
+    frames: () => [
+      {
+        url: () => CARD_ORIGIN + "/card",
+        evaluate: async () => blankFormState(),
+      },
+    ],
+    // The page-side form reader needs a DOM; returning a blank top form keeps
+    // the ordering test focused on native actions and popup clicks.
+    evaluate: async () => blankFormState(),
+  };
+  const reviewControls = () => {
+    const controls = {};
+    for (const label of [
+      "批准本次跨源银行卡填充",
+      "拒绝本次跨源银行卡填充",
+      "立即锁定",
+    ])
+      controls[label] = { present: true, enabled: !locked, showing: !locked };
+    controls["解锁"] = { present: locked, enabled: locked, showing: locked };
+    return controls;
+  };
+  const input = (actions, native, inspect) => {
+    const options = typeof inspect === "object" ? inspect : { inspect };
+    // Native label actions and the inspected probe both target the native
+    // window; only the harness key/pointer helper may pass a false flag.
+    assert.equal(actions.length > 0 || options.inspect === true, true);
+    assert.equal(options.preserve_focus, undefined);
+    log.push(["native", actions, options]);
+    for (const action of actions) {
+      assert.ok(
+        Object.prototype.hasOwnProperty.call(action, "click_label") ||
+          Object.prototype.hasOwnProperty.call(action, "wait_label") ||
+          Object.keys(action).length === 0,
+        "only native label actions or read-only probes",
+      );
+      if (action.click_label === "立即锁定") locked = true;
+      assert.notEqual(action.click_label, "批准本次跨源银行卡填充");
+      assert.notEqual(action.click_label, "拒绝本次跨源银行卡填充");
+      assert.notEqual(action.click_label, "解锁");
+    }
+    return actions.length === 0 ? { controls: reviewControls() } : {};
+  };
+  const labels = [TOP_LABEL, CARD_ORIGIN + FRAME_SUFFIX];
+  const controls = {
+    candidate: (selector) =>
+      selector.startsWith('#checkout-choices button[data-action="checkout-select"]')
+        ? 2
+        : 0,
+    // The popup is the reviewed picker popup: its cancel row is present.
+    cancelVisible: () => true,
+  };
+  const popup = {
+    clicked: [],
+    async disabled(selector) {
+      if (selector === "#refresh") return locked;
+      return false;
+    },
+    async count(selector) {
+      if (selector === '#filter-tabs [data-filter="credit_card"]') return 1;
+      if (selector === cardRow) return 1;
+      // Like the real adapter, an unmatched row reports 0 instead of null.
+      if (controls.candidate(selector)) return controls.candidate(selector);
+      if (selector === "#checkout-cancel") return 1;
+      return 0;
+    },
+    async click(selector) {
+      this.clicked.push(selector);
+      assert.equal(locked, false, "locked popup must not be clicked");
+      log.push(["popup", selector]);
+    },
+    async attribute(selector, name) {
+      if (name === "data-item-revision") return fixture.CardRevision;
+      if (name === "data-category") return "credit_card";
+      if (name === "data-checkout") return "1";
+      return null;
+    },
+    async text(selector) {
+      if (selector === "#detail-title") return fixture.CardTitle;
+      if (selector === "#detail-fill") return "选择结账表单并填充";
+      if (selector === "#status")
+        return locked ? "原生金库已锁定，请重新连接并配对" : "已连接";
+      if (selector === "#checkout-current-page")
+        return "当前页面来源：" + TOP_ORIGIN;
+      if (selector === "#checkout-status") return "不会自动选择";
+      const match = selector.match(/:nth-child\((\d+)\)$/);
+      if (match) return labels[Number(match[1]) - 1];
+      return "";
+    },
+    async visible(selector) {
+      if (selector === "#checkout-picker") return true;
+      if (selector === "#checkout-cancel") return true;
+      return controls.candidate(selector) === 1;
+    },
+  };
+  const phases = [];
+  const opens = [];
+  const driver = {
+    page,
+    input,
+    phase: (value) => phases.push(value),
+    openPopup: async () => {
+      opens.push(phases.length);
+      return popup;
+    },
+    eventually: async (check, message) => {
+      if (!(await check())) throw Error(message);
+    },
+  };
+  await runLockDuringReviewJourney(driver, fixture, TOP_ORIGIN);
+
+  // Fresh exact /checkout first; popup opened and picker used afterwards.
+  assert.deepEqual(log[0], ["goto", TOP_ORIGIN + "/checkout"]);
+  assert.deepEqual(phases, [
+    "checkout-lock-review:navigation",
+    "checkout-lock-review:native-review",
+    "checkout-lock-review:lock",
+    "checkout-lock-review:status",
+  ]);
+  // The initial popup opens before any native review, the reopened one only
+  // after the lock.
+  assert.deepEqual(opens, [1, 4]);
+  // The exact child origin is chosen, never the top origin.
+  assert.ok(
+    log.some(
+      ([kind, value]) =>
+        kind === "popup" &&
+        value === '#checkout-choices button[data-action="checkout-select"]:nth-child(2)',
+    ),
+  );
+  // Native grammar: review wait, read-only review probes, then exactly one
+  // physical lock followed by the unlock-screen wait. Nothing else is clicked,
+  // and the native window is never focused again while a popup is pending.
+  const nativeCalls = log.filter(([kind]) => kind === "native");
+  assert.deepEqual(
+    nativeCalls.map(([, actions]) => actions),
+    [
+      [{ wait_label: "批准本次跨源银行卡填充" }],
+      [],
+      [],
+      [{ click_label: "立即锁定" }, { wait_label: "解锁" }],
+      [],
+    ],
+  );
+  const lock = nativeCalls[3][1];
+  assert.deepEqual(lock, [
+    { click_label: "立即锁定" },
+    { wait_label: "解锁" },
+  ]);
+});
+
+
+test("acceptCheckoutFrames returns an explicit locked result only after the lock journey", () => {
+  const source = readFileSync(
+    new URL("./browser_checkout_acceptance.mjs", import.meta.url),
+    "utf8",
+  );
+  const accept = source.slice(source.indexOf("export async function acceptCheckoutFrames"));
+  const lock = accept.indexOf("await runLockDuringReviewJourney(driver, card, topOrigin);");
+  const result = accept.indexOf("return CHECKOUT_LOCKED;");
+  assert.ok(lock > 0 && result > lock);
+  for (const name of [
+    "runDefaultJourneys",
+    "runCrossSiteJourney",
+    "runSandboxJourney",
+    "runStaleDocumentJourney",
+    "runDenyNavigationJourney",
+    "runSameOriginJourney",
+    "runPickerCancelJourney",
+  ])
+    assert.ok(accept.indexOf("await " + name + "(") < lock, name);
+  assert.deepEqual(CHECKOUT_LOCKED, { locked: true });
+  // The harness skips its final popup disconnect only for that result.
+  const harness = readFileSync(
+    new URL("./browser_native_acceptance.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    harness,
+    /const checkout = await acceptCheckoutFrames\([\s\S]*?if \(checkout\?\.locked !== true\) \{[\s\S]*?popup\.click\("#disconnect"\)/,
+  );
 });
