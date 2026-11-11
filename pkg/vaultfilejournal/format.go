@@ -122,6 +122,12 @@ func recordDigestOf(body []byte) [sha256.Size]byte {
 // decodeRecord validates raw completely and returns the stored proposal with a
 // freshly allocated copy of the bytes. Any deviation from the exact layout is
 // ErrCorrupt.
+//
+// Every declared length is kept in its unsigned wire type and checked against
+// its fixed cap, the zero-length rules and the exact total length computed in
+// uint64 before any of them is converted to int. On a 32-bit platform a
+// proposal length near MaxUint32 would otherwise wrap negative and let the
+// total-length check pass; nothing is sliced until every check has passed.
 func decodeRecord(raw []byte) (Proposal, error) {
 	var p Proposal
 	if len(raw) < recordOverhead || len(raw) > maxRecordLen {
@@ -134,15 +140,19 @@ func decodeRecord(raw []byte) (Proposal, error) {
 		return p, ErrCorrupt
 	}
 	// Validate every declared length against its cap before using any of them.
-	n1 := int(raw[14])
-	n2 := int(binary.BigEndian.Uint16(raw[15:17]))
-	n3 := int(binary.BigEndian.Uint32(raw[17:21]))
-	if n1 == 0 || n1 > MaxOperationIDBytes ||
-		n2 > MaxExpectedRevisionBytes ||
-		n3 == 0 || n3 > MaxProposalBytes ||
-		recordOverhead+n1+n2+n3 != len(raw) {
+	u1 := uint(raw[14])
+	u2 := uint(binary.BigEndian.Uint16(raw[15:17]))
+	u3 := uint64(binary.BigEndian.Uint32(raw[17:21]))
+	if u1 == 0 || u1 > MaxOperationIDBytes ||
+		u2 > MaxExpectedRevisionBytes ||
+		u3 == 0 || u3 > MaxProposalBytes {
 		return p, ErrCorrupt
 	}
+	want := uint64(recordOverhead) + uint64(u1) + uint64(u2) + u3
+	if want != uint64(len(raw)) {
+		return p, ErrCorrupt
+	}
+	n1, n2, n3 := int(u1), int(u2), int(u3)
 	body := raw[:len(raw)-recordDigest]
 	sum := recordDigestOf(body)
 	if !bytes.Equal(sum[:], raw[len(raw)-recordDigest:]) {

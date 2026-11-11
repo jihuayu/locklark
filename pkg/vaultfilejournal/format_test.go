@@ -193,6 +193,66 @@ func TestDecodeBoundsBeforeAllocation(t *testing.T) {
 	}
 }
 
+// hostileWrappedLengthRecord builds a 54-byte, checksum-valid LLVJ v1 record
+// whose header declares operation ID length 1, expected revision length 1 and
+// proposal length math.MaxUint32, so the declared lengths sum to -1 once
+// converted to a 32-bit int. The domain-separated digest is computed over the
+// exact bytes written, so the only defect is the impossible declared total.
+func hostileWrappedLengthRecord() []byte {
+	raw := make([]byte, recordOverhead+1+1-1)
+	copy(raw[0:4], recordMagic)
+	binary.BigEndian.PutUint16(raw[4:6], formatVersion)
+	binary.BigEndian.PutUint64(raw[6:14], 1)
+	setLengths(raw, 1, 1, math.MaxUint32)
+	// Fill the whole body with the last byte of the declared window, so the
+	// writer never slices past the record end.
+	for i := recordPrefix; i < len(raw)-recordDigest; i++ {
+		raw[i] = 'a'
+	}
+	// Pin the exact wire shape: 54 bytes total, 22-byte prefix, 32-byte digest.
+	if len(raw) != 54 {
+		panic("vaultfilejournal: hostile record shape is not minimal")
+	}
+	return reseal(raw)
+}
+
+// TestDecodeRecordWrappedLengthRejected is the exact regression for a 32-bit
+// int conversion of the proposal length: n1=1, n2=1, n3=MaxUint32 made
+// recordOverhead+n1+n2+n3 wrap to the real 54-byte length, so the record
+// passed the total-length check and then sliced out of range. The decoder must
+// return ErrCorrupt and a zero Proposal on every architecture without
+// panicking.
+func TestDecodeRecordWrappedLengthRejected(t *testing.T) {
+	raw := hostileWrappedLengthRecord()
+	// The digest itself is valid over the body that was written.
+	body := raw[:len(raw)-recordDigest]
+	if sum := recordDigestOf(body); !bytes.Equal(sum[:], raw[len(raw)-recordDigest:]) {
+		t.Fatal("hostile record digest is not self-consistent")
+	}
+
+	p, err := decodeRecord(bytes.Clone(raw))
+	if !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("decodeRecord wrapped length = %v, want ErrCorrupt", err)
+	}
+	if !sameProposal(p, Proposal{}) {
+		t.Fatalf("decodeRecord wrapped length returned a partial proposal: %+v", p)
+	}
+
+	// The same record one byte shorter and one byte longer is still rejected,
+	// so neither the under- nor the overflow-length route is accepted.
+	for _, delta := range []int{-1, 1} {
+		alt := bytes.Clone(raw)
+		if delta > 0 {
+			alt = append(alt, 0)
+		} else {
+			alt = alt[:len(alt)-1]
+		}
+		if p, err := decodeRecord(alt); !errors.Is(err, ErrCorrupt) || !sameProposal(p, Proposal{}) {
+			t.Fatalf("decodeRecord len%+d = %v, want ErrCorrupt and zero proposal", delta, err)
+		}
+	}
+}
+
 // TestLoadCorruptRecord proves an altered stored record is reported as
 // ErrCorrupt through the public API and is never silently replaced.
 func TestLoadCorruptRecord(t *testing.T) {
