@@ -632,35 +632,67 @@ func TestVerifyPolicyCheckpointNegative(t *testing.T) {
 	})
 
 	t.Run("admin-signed transition", func(t *testing.T) {
-		// The base current policy carries a valid admin delegation to
-		// device-2; its continuation s+2 is signed by device-2, not the root.
+		// device-2 gets its own policy signing key, distinct from the root
+		// and content keys, recorded in every carried policy.
+		dev2Pub, dev2Priv, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dev2PolicyKey := &PublicKey{Alg: PolicySigAlgEd25519, PublicKey: dev2Pub}
+
+		// The predecessor at seq 6 is edited and root-signed so its digest
+		// changes: device-2's principal bob is an admin and the owner root
+		// grants device-2 the frozen InviteReaders scope, unexpired.
 		c := newCPChain(t, k)
-		cur := clonePolicy(c.policies[1])
-		cur.PolicySeq = 7
-		cur.PrevPolicyDigest = bytes.Clone(policyDigest(&c.f.SignedPolicyProofs[1]))
-		cur.PrevPolicyDigest = bytes.Clone(policyDigest(&c.f.SignedPolicyProofs[1]))
-		cur.AdminDelegations = []AdminDelegation{{
+		pre := clonePolicy(c.policies[1])
+		for i := range pre.Devices {
+			if pre.Devices[i].DeviceID == "device-2" {
+				pre.Devices[i].PolicySigningKey = dev2PolicyKey
+			}
+		}
+		pre.Admins = []Member{{PrincipalID: "alice", Label: "Alice"}, {PrincipalID: "bob", Label: "Bob"}}
+		pre.AdminDelegations = []AdminDelegation{{
 			DelegationID:     "deleg-01",
 			DelegateDevice:   "device-2",
 			GrantedBy:        "owner-root-01",
-			Scope:            DelegationScope{InviteReaders: true, RemoveMembers: true},
-			ScopeNote:        "restricted",
+			Scope:            DelegationScope{InviteReaders: true},
+			ScopeNote:        "invite readers only",
 			ExpiresPolicySeq: 10,
 		}}
-		c.append(t, cur, "device-2", nil)
-		// The delegated scope is well-formed; this package has no mapping from
-		// scope flags to an allowed policy diff, so only the signer counts.
-		sp := &c.f.SignedPolicyProofs[2]
-		sp.Sig = ed25519.Sign(k.dev2Priv, append([]byte(DomainPolicyDocumentSignature+"\x00"), sp.Document...))
+		c.replaceProof(1, pre, "owner-root-01")
+		signPolicyProof(&c.f.SignedPolicyProofs[1], k.rootPriv)
+		c.finalize(t, k)
+
+		// The successor at seq 7 links to exactly that predecessor digest,
+		// carries the unexpired delegation forward and invites one reader,
+		// which matches the delegated InviteReaders scope.
+		succ := clonePolicy(pre)
+		succ.PolicySeq = 7
+		succ.PrevPolicyDigest = bytes.Clone(policyDigest(&c.f.SignedPolicyProofs[1]))
+		succ.Readers = append(succ.Readers, Member{PrincipalID: "dave", Label: "Dave"})
+		c.append(t, succ, "device-2", dev2Priv)
 		c.finalize(t, k)
 		if err := ValidateFile(c.f); err != nil {
 			t.Fatalf("admin-signed fixture is not structurally valid: %v", err)
 		}
+		// The successor proves are really signed by device-2's policy key.
+		sp := &c.f.SignedPolicyProofs[2]
+		if !ed25519.Verify(pre.Devices[1].PolicySigningKey.PublicKey,
+			append([]byte(DomainPolicyDocumentSignature+"\x00"), sp.Document...), sp.Sig) {
+			t.Fatal("successor proof is not signed by device-2's policy key")
+		}
+		// The delegation is well-formed and the diff matches its scope, but
+		// the package has no scope-to-diff rule: only the signer counts.
 		wantCodeAt(t, VerifyPolicyCheckpoint(c.f, c.anchor), CodePolicyCheckpointFailed, "")
 
-		// The same transition signed by the root is accepted: the rejection
-		// above is the delegated signer, not the policy change.
-		c.finalize(t, k, func() { signPolicyProof(&c.f.SignedPolicyProofs[2], k.rootPriv) })
+		// The same transition signed by the pinned root is accepted: the
+		// rejection above is the delegated signer, not the policy change.
+		c.replaceProof(2, succ, "owner-root-01")
+		signPolicyProof(&c.f.SignedPolicyProofs[2], k.rootPriv)
+		c.finalize(t, k)
+		if err := ValidateFile(c.f); err != nil {
+			t.Fatalf("root-signed fixture is not structurally valid: %v", err)
+		}
 		if err := VerifyPolicyCheckpoint(c.f, c.anchor); err != nil {
 			t.Fatalf("root-signed transition rejected: %v", err)
 		}
