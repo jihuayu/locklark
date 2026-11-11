@@ -15,6 +15,12 @@
 // so without passing the record through the vaultfilebackend MaxValueSize cap
 // as part of a larger metadata envelope.
 //
+// Alongside the proposal record the journal stores one independent local file
+// state record (see state.go) holding the sealed remote base, its opaque
+// revision, the sealed working file and a local generation. That generation is
+// a local compare-and-swap counter only; it says nothing about whether a remote
+// publication succeeded.
+//
 // Every record carries an unkeyed SHA-256 checksum over its exact bytes. It
 // detects malformed or accidentally corrupted local state; it is not a
 // signature and does not stop a deliberate attacker who can also rewrite the
@@ -60,6 +66,17 @@ var (
 	ErrStaleGeneration = errors.New("vault file journal: stale generation")
 	// ErrClosed reports use of a journal after Close.
 	ErrClosed = errors.New("vault file journal: closed")
+	// ErrStateExists reports an InitializeState call whose state differs from
+	// the one already stored. The stored state is unchanged.
+	ErrStateExists = errors.New("vault file journal: state already initialized")
+	// ErrStateGenerationMismatch reports an UpdateWorking call whose
+	// expectedGeneration does not equal the stored local generation (a stale
+	// or speculative CAS attempt). The stored state is unchanged. The full
+	// detail is carried by a *StateCASMismatchError.
+	ErrStateGenerationMismatch = errors.New("vault file journal: state generation mismatch")
+	// ErrStateGenerationOverflow reports an UpdateWorking call at generation
+	// MaxUint64, which cannot be incremented. The stored state is unchanged.
+	ErrStateGenerationOverflow = errors.New("vault file journal: state generation overflow")
 	// ErrLocked reports that Open could not take the database's exclusive
 	// file lock within the lock timeout, for example because another
 	// process (or another Journal in this process) holds it. It also matches
@@ -92,6 +109,8 @@ type Journal struct {
 
 	// afterPut, when non-nil, runs inside the Save transaction after the
 	// bucket Put and before commit. It exists only for fault-injection tests.
+	// State updates take their hook explicitly (updateWorkingWithHook) so this
+	// field only ever affects the proposal record.
 	afterPut func() error
 }
 
