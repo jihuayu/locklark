@@ -5,6 +5,7 @@ package browserhost
 import (
 	"errors"
 	"os"
+	"runtime"
 	"testing"
 )
 
@@ -20,8 +21,26 @@ func withTTYSeams(t *testing.T, terminal string, dev uint64, peerOK bool, handle
 // count as able to attest, so the committed fail-closed path can run natively.
 func withTTYSeamsPlatform(t *testing.T, terminal string, dev uint64, peerOK bool, handle func(string) (*os.File, error), platform bool) {
 	t.Helper()
+	withTTYSeamsCounted(t, terminal, dev, peerOK, handle, platform, nil)
+}
+
+// withTTYSeamsCounting is withTTYSeams with a fixture kernel lookup that
+// records every call in *calls, so a test can prove the peer attestation seam
+// is never reached.
+func withTTYSeamsCounting(t *testing.T, terminal string, dev uint64, peerOK bool, calls *int) {
+	t.Helper()
+	withTTYSeamsCounted(t, terminal, dev, peerOK, nil, true, calls)
+}
+
+// withTTYSeamsCounted is withTTYSeamsPlatform plus an optional call counter
+// for the fixture kernel lookup (when calls is not nil).
+func withTTYSeamsCounted(t *testing.T, terminal string, dev uint64, peerOK bool, handle func(string) (*os.File, error), platform bool, calls *int) {
+	t.Helper()
 	oldAttest, oldOpen, oldPlatform := peerTTYAttestor, currentTTYNodeOpener, attestationPlatformDisabled
 	peerTTYAttestor = func(pid int) (string, uint64, uint32, bool) {
+		if calls != nil {
+			*calls++
+		}
 		if !peerOK || pid <= 0 {
 			return "", 0, 0, false
 		}
@@ -218,6 +237,29 @@ func TestCurrentTTYIdentityRejectsChangedAttestation(t *testing.T) {
 // terminal, and refuses every declared value that only looks right.
 func TestVerifyCLIRunTTYMatchesAuthenticatedPeer(t *testing.T) {
 	peer := Peer{User: "UID 501", PID: 991, Process: "/fixture/bin/locklark"}
+	if runtime.GOOS == "linux" {
+		// Linux has no kernel-backed association proving that a peer's CTTY is
+		// this broker's terminal object, so the broker fails closed before any
+		// lookup: both entry points are explicitly unavailable (not a refusal)
+		// and the peer attestation seam is never called. No PTY is needed.
+		t.Run("linux peer attestation unavailable", func(t *testing.T) {
+			if peerTTYAttestationAvailable {
+				t.Fatal("linux build has peer attestation enabled")
+			}
+			calls := 0
+			withTTYSeamsCounting(t, "/dev/pts/7", brokerTTYForeignDev(), true, &calls)
+			if attested, e := AttestCLIRunTTY(peer); !errors.Is(e, errCLIRunUnavailable) || errors.Is(e, errCLIRunInvalid) || attested != (CLIRunTTYAttestation{}) {
+				t.Fatalf("attest: %#v %v", attested, e)
+			}
+			if e := verifyCLIRunTTY(peer, "/dev/pts/7", CLIRunTTYPlatform(), ""); !errors.Is(e, errCLIRunUnavailable) || errors.Is(e, errCLIRunInvalid) {
+				t.Fatalf("verify: %v", e)
+			}
+			if calls != 0 {
+				t.Fatalf("peer attestation seam called %d times on Linux, want 0", calls)
+			}
+		})
+		return
+	}
 	node, dev := trustableTTYNode(t)
 	withTTYSeams(t, node, dev, true, nil)
 	platform := CLIRunTTYPlatform()

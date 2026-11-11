@@ -23,16 +23,21 @@ const CLIRunMaxTTYIdentity = 1024
 //     never authority. A declared device number (peer ID) is deliberately not
 //     sent: it would prove nothing, so the client does not send one.
 //   - The peer's real controlling terminal is read by the broker from the
-//     kernel for Peer.PID (AttestCLIRunTTY): kinfo_proc.e_tdev on Darwin,
-//     tty_nr in /proc/PID/stat on Linux. Only the broker can do that.
+//     kernel for Peer.PID (AttestCLIRunTTY): kinfo_proc.e_tdev on Darwin. Only
+//     the broker can do that. On Linux no kernel-backed association proves that
+//     a peer's tty_nr is this broker's terminal object, so the broker's peer
+//     attestation is unavailable there and every CLI-run is unavailable on
+//     Linux; the client helper is only request/display data.
 //
 // Before native approval the declared name's stat device must equal the
 // kernel-attested controlling-terminal device, and the attested node is
 // stat'ed again to confirm the kernel value. A failure to establish either
 // identity is reported as unavailable, never refused; a disagreement between
 // two established identities is refused. A platform without an attestation
-// implementation makes every brokered CLI-run unavailable, so a declared
-// string is never treated as authenticated.
+// implementation, or without a proof of which terminal the peer attests,
+// makes every brokered CLI-run unavailable, so a declared string is never
+// treated as authenticated. On Linux the client helper still describes its
+// own terminal, but that description is only request/display data.
 //
 // peerTTYAttestor is the broker-side kernel lookup, and currentTTYNodeOpener
 // the client-side node handle. Both are unexported seams for tests only; no
@@ -97,6 +102,14 @@ func cliRunTTYAttestationEnabled() bool {
 	return cliRunTTYAttestedPlatform() && !attestationPlatformDisabled
 }
 
+// cliRunTTYPeerAttestationAvailable reports whether this build can prove that
+// the kernel-reported controlling terminal of another process is the terminal
+// object the broker inspects. It is false on Linux, whose tty_nr lookup names
+// a device number that does not identify one terminal object; a peer is then
+// unavailable before any lookup runs. It gates only the peer side, so the
+// client's CurrentTTYIdentity keeps working.
+func cliRunTTYPeerAttestationAvailable() bool { return peerTTYAttestationAvailable }
+
 // selfTTY is the kernel view of this process's controlling terminal.
 type selfTTY struct {
 	path string
@@ -151,8 +164,18 @@ type CLIRunTTYAttestation struct {
 // Only the peer's real CTTY qualifies: a peer without a controlling terminal
 // (for example a daemon or a test process started without a tty) is
 // unavailable, never "any tty it happens to hold open".
+//
+// Linux is explicitly unavailable before any lookup: no kernel interface
+// available to the broker proves that the tty_nr device of a peer is the same
+// terminal object this broker inspects. A device number alone names a
+// major/minor, which distinct terminal instances can reuse, so a peer's
+// declared or kernel-reported name cannot stand in for that proof. That makes
+// every brokered CLI-run unavailable on Linux until such an association
+// exists, so no native approval or lease authority is issued there. The
+// Linux client helper (CurrentTTYIdentity) still describes its own terminal,
+// but only as request/display data; it is never authority.
 func AttestCLIRunTTY(peer Peer) (CLIRunTTYAttestation, error) {
-	if !cliRunTTYAttestationEnabled() || peer.PID == 0 {
+	if !cliRunTTYPeerAttestationAvailable() || !cliRunTTYAttestationEnabled() || peer.PID == 0 {
 		return CLIRunTTYAttestation{}, errCLIRunUnavailable
 	}
 	path, dev, unit, ok := peerTTYAttestor(int(peer.PID))

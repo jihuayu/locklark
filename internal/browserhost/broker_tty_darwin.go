@@ -15,6 +15,12 @@ import (
 // controlling terminal. Every CLI-run is unavailable when it cannot.
 func cliRunTTYAttestedPlatform() bool { return true }
 
+// peerTTYAttestationAvailable reports whether this build can prove, from the
+// kernel, that a peer's controlling terminal is the terminal object this
+// broker inspects. kinfo_proc.e_tdev names the peer's session controlling
+// terminal, and the matching /dev/ttysNNN node is stat'ed against it.
+const peerTTYAttestationAvailable = true
+
 // ttyCharDevice is the Darwin S_IFCHR file type.
 const ttyCharDevice = unix.S_IFCHR
 

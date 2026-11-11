@@ -11,6 +11,9 @@ func devUnit(uint64) (uint32, bool) { return 0, false }
 // controlling terminal. Every CLI-run is unavailable when it cannot.
 func cliRunTTYAttestedPlatform() bool { return false }
 
+// peerTTYAttestationAvailable is false: there is no peer-CTTY association.
+const peerTTYAttestationAvailable = false
+
 // peerControllingTerminal has no safe implementation on this platform: there
 // is no verified kernel view of another process's controlling terminal here.
 func peerControllingTerminal(int) (string, uint64, uint32, bool) { return "", 0, 0, false }

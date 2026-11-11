@@ -54,6 +54,14 @@ func handleTTYIdentity(attestedDev, handleDev uint64, charDevice bool) (uint32, 
 // controlling terminal. Every CLI-run is unavailable when it cannot.
 func cliRunTTYAttestedPlatform() bool { return true }
 
+// peerTTYAttestationAvailable reports whether this build can prove, from the
+// kernel, that a peer's controlling terminal is the terminal object this
+// broker inspects. Linux cannot: tty_nr names only a devpts major/minor, and
+// nothing available to the broker distinguishes two terminal instances that
+// reuse it. AttestCLIRunTTY returns unavailable without reading tty_nr, so no
+// brokered CLI-run on Linux is ever treated as authenticated.
+const peerTTYAttestationAvailable = false
+
 // peerControllingTerminal returns the kernel-reported controlling terminal of
 // one live process: field 7 (tty_nr) of /proc/PID/stat, encoded with the
 // kernel's own dev_t encoding (new_encode_dev). Nothing the peer writes can
@@ -67,6 +75,11 @@ func cliRunTTYAttestedPlatform() bool { return true }
 // The namespace identity and the mountinfo read are compared before and after
 // reading stat, so a peer that changes mount namespace or mounts while it is
 // looked up is rejected rather than resolved against either view.
+//
+// This lookup supports only the client's self-description
+// (CurrentTTYIdentity). It is not a peer-CTTY association and is never used
+// as authority: the broker's peer attestation is unavailable on Linux
+// (peerTTYAttestationAvailable).
 func peerControllingTerminal(pid int) (path string, rdev uint64, unit uint32, ok bool) {
 	if pid <= 0 {
 		return "", 0, 0, false
