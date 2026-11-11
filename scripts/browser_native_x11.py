@@ -103,6 +103,7 @@ FAILURE_REASONS = {
     "Chooser must keep the measured geometry": "folder-geometry",
     "Chooser folder point is not inside the chooser": "folder-point",
     "Chooser folder pointer is not at the measured point": "folder-pointer",
+    "Chooser folder pointer is not over the owned chooser": "folder-overlay",
     "Chooser folder input failed": "folder-input",
 }
 
@@ -203,6 +204,133 @@ def chooser_geometry(attributes):
     if attributes.width <= 0 or attributes.height <= 0:
         return None
     return attributes.width, attributes.height
+
+
+# The pointer's real XQueryTree parent path to the root is bounded
+# independently of the title discovery depth.
+POINTER_PATH_DEPTH = 16
+
+
+def window_ancestry(parent_of, window, root, max_depth=POINTER_PATH_DEPTH):
+    """The actual XQueryTree parent chain window -> root, or None.
+
+    `parent_of(child)` returns the real XQueryTree parent of one window.
+    The walk refuses a non-positive window, a broken link, a cycle or a chain
+    deeper than `max_depth`; it never guesses. The root is never queried.
+    """
+    if type(window) is not int or type(root) is not int or window <= 0 or root <= 0 or \
+            type(max_depth) is not int or max_depth <= 0:
+        return None
+    chain = [window]
+    for _ in range(max_depth):
+        parent = parent_of(chain[-1])
+        if type(parent) is not int or parent <= 0 or parent in chain:
+            return None
+        chain.append(parent)
+        if parent == root:
+            return chain
+    return None
+
+
+def pointer_containment(parent_of, root, pointer_state, chain, expected_root, point, geometry):
+    """Exact pointer position and the actual X tree on the pointer's path.
+
+    `pointer_state` is (qroot, qchild, root_x, root_y, win_x, win_y, mask),
+    the real XQueryPointer(root) result. `chain` is the window_ancestry of the
+    chooser (chooser first, root last), `expected_root` is the chooser's root
+    origin, `point` is the only permitted point in the chooser's own
+    coordinates and `geometry` is its measured (width, height). A press is
+    accepted only when:
+      - the query root is the display root (the pointer is not inside a query)
+        and qchild is a positive non-root window;
+      - the pointer's window-relative position is exactly `point`, its root
+        position is exactly `expected_root` + point, and the point lies inside
+        the measured chooser;
+      - every hop of the chooser's actual parent chain to the root matches;
+      - qchild, the root child that would receive the press, is the chooser
+        itself, an ancestor of it, or a child of the chooser (strictly inside).
+    Any other root child (an overlay), a stale chain, a child on no known path
+    or any malformed value returns False. Nothing here emits input, reads
+    Xlib or exposes a window or coordinate.
+    """
+    if type(pointer_state) is not tuple or len(pointer_state) != 7:
+        return False
+    qroot, qchild, root_x, root_y, win_x, win_y, mask = pointer_state
+    if type(chain) is not list or len(chain) < 2 or \
+            type(chain[0]) is not int or chain[0] <= 0 or chain[-1] != root:
+        return False
+    for value in (qroot, qchild, root_x, root_y, win_x, win_y, mask):
+        if type(value) is not int or value < 0:
+            return False
+    if type(expected_root) is not tuple or len(expected_root) != 2 or \
+            type(expected_root[0]) is not int or type(expected_root[1]) is not int:
+        return False
+    if type(point) is not tuple or len(point) != 2 or \
+            type(point[0]) is not int or type(point[1]) is not int:
+        return False
+    if type(geometry) is not tuple or len(geometry) != 2 or \
+            folder_point(*geometry) is None:
+        return False
+    if qroot != root or qchild <= 0 or qchild == root:
+        return False
+    if (win_x, win_y) != point:
+        return False
+    if (root_x, root_y) != (expected_root[0] + point[0], expected_root[1] + point[1]):
+        return False
+    if not 0 <= point[0] < geometry[0] or not 0 <= point[1] < geometry[1]:
+        return False
+    # The chooser's own ancestors, chooser up to but excluding the root, must
+    # be exactly the actual parent chain: no cycle, no extra or missing hop.
+    if len(chain) - 1 > POINTER_PATH_DEPTH:
+        return False
+    try:
+        node = chain[0]
+        for ancestor in chain[1:]:
+            if parent_of(node) != ancestor:
+                return False
+            node = ancestor
+        if qchild in chain[:-1]:
+            return True
+        return parent_of(qchild) == chain[0]
+    except Exception:
+        # Any refused or malformed XQueryTree hop is a failed proof.
+        return False
+
+
+def move_and_prove_pointer(io, parent_of, root, target, expected_root, point, geometry,
+                           require_motion=True):
+    """Motion to the derived point, then the owned-qchild proof; no button.
+
+    io is a fixed record of the caller's real Xlib/XTest functions:
+    flush(), sync(), queried() -> XQueryPointer(root) tuple, and
+    motion(root_x, root_y) -> truth value. `expected_root` is the chooser's
+    root origin; the only motion is to expected_root + point.
+    After flush/sync the pointer must be at exactly that root point with its
+    XQueryPointer root child (qchild) on the chooser's actual XQueryTree path
+    and the chooser chain unchanged. A refused motion/flush/sync, any query
+    exception or any non-true answer raises the fixed folder-pointer message,
+    so no button can be pressed; nothing here is emitted or printed. With
+    require_motion False only the exact position/path proof is run, for the
+    re-proof immediately before the button pair.
+    """
+    try:
+        if require_motion:
+            if not io.motion(expected_root[0] + point[0],
+                             expected_root[1] + point[1]):
+                raise RuntimeError("Chooser folder input failed")
+            io.flush()
+            io.sync()
+        chain = window_ancestry(parent_of, target, root)
+        if chain is None:
+            raise RuntimeError("Chooser folder pointer is not over the owned chooser")
+        if not pointer_containment(parent_of, root, io.queried(), chain,
+                                   expected_root, point, geometry):
+            raise RuntimeError("Chooser folder pointer is not over the owned chooser")
+        return chain
+    except RuntimeError:
+        raise
+    except Exception:
+        raise RuntimeError("Chooser folder pointer is not over the owned chooser")
 
 
 def folder_output(click_count):
@@ -1192,19 +1320,52 @@ def main():
         finally:
             errors.clear()
 
-    def find_chooser():
-        """The same unique chooser: exact title, bounded tree, re-read title.
+    def window_parent(candidate):
+        """The real XQueryTree parent of one window; a refused query raises."""
+        root_return, parent_return, count = window(), window(), C.c_uint()
+        result = C.POINTER(C.c_ulong)()
+        if not x.XQueryTree(display, candidate, C.byref(root_return),
+                            C.byref(parent_return), C.byref(result), C.byref(count)):
+            raise RuntimeError("X window query refused")
+        try:
+            if count.value > TREE_BUDGET or (count.value and not result):
+                raise RuntimeError("X window query refused")
+            return int(parent_return.value)
+        finally:
+            if result:
+                x.XFree(result)
 
-        Returns its (width, height) only when it is mapped, not
+    def normal_viewable_tree():
+        """Every viewable non-override-redirect window in one real tree walk.
+
+        Unlike a title-prefix search this never stops early on a title, so a
+        viewable override-redirect/pop-up overlay stays an extra root child of
+        the click path and is never read as our chooser or ignored.
+        """
+        found, stack = [], [root]
+        while stack:
+            parent = stack.pop()
+            if len(found) > TREE_BUDGET:
+                raise RuntimeError("X window query refused")
+            for candidate in children(parent):
+                stack.append(candidate)
+                if normal_viewable(candidate):
+                    found.append(candidate)
+        return found
+
+    def find_chooser():
+        """The same unique chooser: exact title, whole real tree, geometry.
+
+        Returns its (width, height) only when exactly one viewable chooser
+        carries the fixed title, it is still `target`, mapped, not
         override-redirect and exactly the measured client size.
         """
-        if window_title(target) != EDGE_CHOOSER_TITLE:
-            raise RuntimeError("Chooser must keep the requested title")
-        same = [candidate for candidate in collect_titles(EDGE_CHOOSER_TITLE)
-                if normal_viewable(candidate)]
+        same = [candidate for candidate in normal_viewable_tree()
+                if window_title(candidate) == EDGE_CHOOSER_TITLE]
+        if not same:
+            raise RuntimeError("Native acceptance window unavailable")
         if same != [target]:
-            raise RuntimeError("Native acceptance window must be unique" if same
-                               else "Native acceptance window unavailable")
+            raise RuntimeError("Native acceptance window must be unique")
         if window_title(target) != EDGE_CHOOSER_TITLE:
             raise RuntimeError("Chooser must keep the requested title")
         geometry = chooser_geometry(attributes_of(target))
@@ -1229,6 +1390,46 @@ def main():
         if window_pid(target) != owner_now:
             raise RuntimeError("Chooser must belong to the owner browser process")
 
+    def chooser_chain_now():
+        """The chooser's actual XQueryTree chain to root; ambiguity refuses."""
+        chain = window_ancestry(window_parent, target, root)
+        if chain is None:
+            raise RuntimeError("Chooser folder pointer is not over the owned chooser")
+        return chain
+
+    def folder_io():
+        class FolderIO:
+            def motion(self, root_x, root_y):
+                # XTest returns a Status; only a nonzero value is success.
+                return xt.XTestFakeMotionEvent(display, -1, root_x, root_y, 0) != 0
+
+            def flush(self):
+                x.XFlush(display)
+
+            def sync(self):
+                x.XSync(display, 0)
+
+            def queried(self):
+                qroot, qchild = window(), window()
+                rx, ry, wx, wy = C.c_int(), C.c_int(), C.c_int(), C.c_int()
+                mask = C.c_uint()
+                if not x.XQueryPointer(display, root, C.byref(qroot), C.byref(qchild),
+                                       C.byref(rx), C.byref(ry), C.byref(wx),
+                                       C.byref(wy), C.byref(mask)):
+                    raise RuntimeError("Chooser folder pointer is not over the owned chooser")
+                return (qroot.value, qchild.value, rx.value, ry.value,
+                        wx.value, wy.value, mask.value)
+
+        return FolderIO()
+
+    def translate_chooser():
+        """Root-relative origin of the chooser; a refused translate raises."""
+        px, py, child = C.c_int(), C.c_int(), window()
+        if not x.XTranslateCoordinates(display, target, root, 0, 0, C.byref(px),
+                                       C.byref(py), C.byref(child)):
+            raise RuntimeError("Chooser must keep the measured geometry")
+        return px.value, py.value
+
     def read_only(step, failure="Chooser folder input failed"):
         """One read-only Xlib step; a refused or erroring query refuses input."""
         errors.clear()
@@ -1244,39 +1445,41 @@ def main():
         return value
 
     def click_folder(owner_record):
-        # Every check below runs before the request batch that queues the
-        # click. Chooser and owner proofs alternate so state must stay
-        # identical across them, ending with the owner re-read immediately
-        # before the single XTest button down/up pair.
+        # 1. The first proof fixes the unique chooser identity, its owner and
+        # the measured geometry; no caller value is used.
         geometry = read_only(find_chooser, "Native acceptance X query failed")
         read_only(lambda: prove_folder_owner(owner_record), "Native acceptance X query failed")
         if read_only(find_chooser, "Native acceptance X query failed") != geometry:
             raise RuntimeError("Chooser must keep the measured geometry")
-        point = folder_point(*geometry)
-        if point is None:
+        point_xy = folder_point(*geometry)
+        if point_xy is None:
             raise RuntimeError("Chooser folder point is not inside the chooser")
-        read_only(lambda: prove_folder_owner(owner_record), "Native acceptance X query failed")
-        # Last identity/geometry re-read immediately before the click.
+        # 2. Only (width-62,height-69), expressed as an exact root point.
+        origin = read_only(translate_chooser, "Native acceptance X query failed")
+        expected_root = (origin[0] + point_xy[0], origin[1] + point_xy[1])
+        if expected_root[0] < 0 or expected_root[1] < 0:
+            raise RuntimeError("Chooser folder point is not inside the chooser")
+        chooser_chain = read_only(chooser_chain_now, "Native acceptance X query failed")
+        # 3./4. XTest motion to the derived point, flush/sync, then the exact
+        # pointer position and the qchild's actual tree path. An unrelated
+        # overlay or an ambiguous path refuses before the button pair.
+        read_only(lambda: move_and_prove_pointer(
+            folder_io(), window_parent, root, target, expected_root, point_xy,
+            geometry), "Native acceptance X query failed")
+        # 5. All state that authorized the click must still be exact: the
+        # same chooser chain, the exact pointer point over the owned qchild,
+        # and the unique chooser identity/geometry, unchanged since step 1.
+        if read_only(chooser_chain_now, "Native acceptance X query failed") != chooser_chain:
+            raise RuntimeError("Chooser folder pointer is not over the owned chooser")
+        read_only(lambda: move_and_prove_pointer(
+            folder_io(), window_parent, root, target, expected_root, point_xy,
+            geometry, require_motion=False), "Native acceptance X query failed")
         if read_only(find_chooser, "Native acceptance X query failed") != geometry:
             raise RuntimeError("Chooser must keep the measured geometry")
-        # The click lands at the one derived point only when the chooser's root
-        # origin plus that point is exactly the current pointer position. No
-        # motion is emitted; the pointer stays where the reviewed probe left it.
-        px, py, child = C.c_int(), C.c_int(), window()
-        if not x.XTranslateCoordinates(display, target, root, 0, 0, C.byref(px),
-                                       C.byref(py), C.byref(child)):
-            raise RuntimeError("Chooser must keep the measured geometry")
-        qroot, qchild = window(), window()
-        rx, ry, wx, wy, mask = C.c_int(), C.c_int(), C.c_int(), C.c_int(), C.c_uint()
-        if not x.XQueryPointer(display, root, C.byref(qroot), C.byref(qchild),
-                               C.byref(rx), C.byref(ry), C.byref(wx), C.byref(wy),
-                               C.byref(mask)):
-            raise RuntimeError("Chooser folder pointer is not at the measured point")
-        if (rx.value, ry.value) != (px.value + point[0], py.value + point[1]):
-            raise RuntimeError("Chooser folder pointer is not at the measured point")
-        x.XSync(display, 0)
-        if errors:
-            raise RuntimeError("Native acceptance X query failed")
+        # The owner is re-proven last: the unique owner window, its exact PID,
+        # executable image and private profile, and the chooser's exact owner
+        # PID, all unchanged since the first proof.
+        read_only(lambda: prove_folder_owner(owner_record), "Native acceptance X query failed")
         down = xt.XTestFakeButtonEvent(display, 1, 1, 0)
         up = xt.XTestFakeButtonEvent(display, 1, 0, 0)
         if not down or not up:
