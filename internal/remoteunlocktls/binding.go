@@ -26,9 +26,11 @@ import (
 //     this comparison.
 //  3. remoteunlock.VerifyDeviceTransportBindingForContext(binding, bindingCtx,
 //     expectedDeviceID, callerPinnedKey). Its errors are returned unchanged and
-//     wrap remoteunlock.ErrInvalidBinding (or remoteunlock.ErrInvalidContext
-//     for a context the canonical codec rejects). This package neither
-//     duplicates nor relaxes its signature or context validation.
+//     always wrap remoteunlock.ErrInvalidBinding; this includes a bindingCtx
+//     the canonical codec rejects, which the public verifier maps to an
+//     ErrInvalidBinding error rather than returning the codec's
+//     remoteunlock.ErrInvalidContext. This package neither duplicates nor
+//     relaxes its signature or context validation.
 //
 // callerPinnedKey is supplied by the caller from authenticated state, such as
 // pinned vault policy for the expected device; it is never resolved from the
