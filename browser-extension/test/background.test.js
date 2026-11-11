@@ -566,11 +566,11 @@ test("an ordinary route opens its own tab and claims the approved detail", async
   let routeTab = null;
   const h = harness({
     onRequest: (r) => {
-      // The native V2 reply type the route read consumes. Using it here keeps
-      // this checkpoint isolated from the popup's later type/alias mapping.
+      // The real native vault-search reply type; the route validates it
+      // directly rather than through the popup's type/alias mapping.
       if (r.type === "vault-search")
         return {
-          v: 1, id: r.id, type: "items", vaults: [],
+          v: 1, id: r.id, type: "vault-items",
           items: [{ id: ITEM_ID, revision: ITEM_REV, category: "login", title: "Target" }],
         };
       if (r.type === "item-get")
@@ -745,7 +745,7 @@ async function openRouteFixture() {
     onRequest: (r) => {
       if (r.type === "vault-search")
         return {
-          v: 1, id: r.id, type: "items", vaults: [],
+          v: 1, id: r.id, type: "vault-items",
           items: [{ id: ITEM_ID, revision: ITEM_REV, category: "login", title: "Target" }],
         };
       if (r.type === "item-get")
@@ -787,18 +787,18 @@ async function openRouteFixture() {
     setSource(next) {
       sourceTab = { ...sourceTab, ...next };
     },
-    claim: () =>
-      h.send(
-        { type: "route-claim", token: reply.routeCreated.token },
-        {
-          id: "fixed",
-          url: routeTab.url,
-          origin: "chrome-extension://fixed",
-          frameId: 0,
-          documentId: "route-doc",
-          tab: { id: ROUTE_TAB, url: routeTab.url, windowId: 1 },
-        },
-      ),
+    sendAsRoute: (message) =>
+      h.send(message, {
+        id: "fixed",
+        url: routeTab.url,
+        origin: "chrome-extension://fixed",
+        frameId: 0,
+        documentId: "route-doc",
+        tab: { id: ROUTE_TAB, url: routeTab.url, windowId: 1 },
+      }),
+    claim() {
+      return this.sendAsRoute({ type: "route-claim", token: reply.routeCreated.token });
+    },
     nativeReads: () => h.sent.filter((r) => r.type === "vault-search" || r.type === "item-get"),
   };
 }
@@ -859,6 +859,52 @@ test("source navigation events revoke the route itself", async () => {
   assert.equal(updates({ url: "https://example.test/account/settings" }), 1);
   assert.equal(updates({ status: "loading" }), 1);
   assert.equal(updates({ status: "complete" }), 0);
+});
+
+test("a route claim is one-shot and a raw route item-get reads nothing", async () => {
+  const route = await openRouteFixture();
+  const first = await route.claim();
+  assert.equal(first?.type, "route-claimed");
+  // Only the captured target may come back.
+  assert.equal(first.item_id, route.ITEM_ID);
+  assert.equal(first.revision, route.ITEM_REV);
+  assert.equal(first.detail.id, route.ITEM_ID);
+  assert.equal(first.detail.revision, route.ITEM_REV);
+  assert.equal(first.token, route.token);
+  assert.deepEqual(route.nativeReads().map((r) => r.type), ["vault-search", "item-get"]);
+  const read = route.nativeReads()[1];
+  assert.equal(read.item_id, route.ITEM_ID);
+  assert.equal(read.revision, route.ITEM_REV);
+
+  // The same claim again must be refused and must not re-read.
+  const again = await route.claim();
+  assert.ok(!again || again.error === "refused", "a route was claimed twice");
+  assert.equal(again?.detail, undefined);
+  assert.equal(route.nativeReads().length, 2, "duplicate claim started a read");
+
+  // A raw route-tab item-get is never a second approved read.
+  const raw = await route.sendAsRoute({
+    type: "item-get",
+    id: route.ITEM_ID,
+    revision: route.ITEM_REV,
+  });
+  assert.ok(!raw || raw.error === "refused", "raw route item-get was served");
+  assert.equal(raw?.detail, undefined);
+  assert.equal(route.nativeReads().length, 2, "raw route item-get started a read");
+  await route.h.send({ type: "disconnect" });
+});
+
+test("concurrent route claims start exactly one read", async () => {
+  const route = await openRouteFixture();
+  const [left, right] = await Promise.all([route.claim(), route.claim()]);
+  const claimed = [left, right].filter((reply) => reply?.detail);
+  assert.equal(claimed.length, 1, "more than one concurrent claim succeeded");
+  const refused = [left, right].find((reply) => !reply?.detail);
+  assert.ok(!refused || refused.error === "refused");
+  assert.equal(route.nativeReads().length, 2, "a concurrent claim started another read");
+  assert.equal(claimed[0].item_id, route.ITEM_ID);
+  assert.equal(claimed[0].revision, route.ITEM_REV);
+  await route.h.send({ type: "disconnect" });
 });
 
 test("page sender cannot connect or choose a field", async () => {

@@ -4792,15 +4792,9 @@ if (typeof importScripts === "function") importScripts("core.js");
       message.token !== grant.token
     )
       throw Error("refused");
-    if (grant.state === "claimed") {
-      // Exactly one claim per route. A reload of the same already approved
-      // route may still re-read the approved detail and nothing else.
-      if (!routeLive(grant)) {
-        revokeRoute(grant);
-        throw Error("refused");
-      }
-      return routeApprovedDetail(grant);
-    }
+    // The state transition below is synchronous, so a concurrent second claim
+    // sees "claimed" and neither claim can start a second read. There is no
+    // re-read path: a duplicate claim is refused outright.
     if (grant.state !== "open") throw Error("refused");
     grant.state = "claimed";
     return routeApprovedDetail(grant);
@@ -4828,7 +4822,9 @@ if (typeof importScripts === "function") importScripts("core.js");
       requestEpoch !== epoch ||
       requestCapability !== capability ||
       !list ||
-      list.type !== "items" ||
+      // The native host answers vault-search with "vault-items"; the full DTO
+      // and the exact row are still validated below.
+      list.type !== "vault-items" ||
       !core.validResponse(list)
     )
       throw Error("refused");
@@ -6548,6 +6544,12 @@ if (typeof importScripts === "function") importScripts("core.js");
         const copy = await routeFieldValue(message, grant, true);
         return { copiedField: copy };
       }
+      // The one approved read happens inside the claim. A route tab may not
+      // spend a second native item-get, so this branch never starts one. The
+      // ordinary action-popup item-get path is a different listener and is
+      // unchanged.
+      case "item-get":
+        throw Error("refused");
       // The remaining allowed actions only exist in the action popup or need
       // a page to target. A route tab is never a fill target and keeps fill,
       // OTP and open-and-fill disabled in this checkpoint: fail closed.
@@ -6559,10 +6561,8 @@ if (typeof importScripts === "function") importScripts("core.js");
         revokeRoute(grant);
         throw Error("refused");
       default:
-        // `item-get` falls back to the approved route read below.
-        if (grant.state !== "claimed") throw Error("refused");
-        await revalidateRoute(grant);
-        return routeApprovedDetail(grant);
+        // No route message ever falls back to an approved-detail read.
+        throw Error("refused");
     }
   }
   api.runtime.onMessage.addListener((message, sender, sendResponse) => {
