@@ -3,6 +3,7 @@
 package browserhost
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -30,8 +31,14 @@ func TestCLIRunScope_ValidateInvalid(t *testing.T) {
 		"program-sha-bad":  func(s *CLIRunScope) { s.ProgramSH = strings.Repeat("A", CLIRunMaxProgramSHA256) },
 		"args-too-many":    func(s *CLIRunScope) { s.Args = eight(CLIRunMaxArgs + 1) },
 		"args-too-long":    func(s *CLIRunScope) { s.Args = []string{tooLong("a", CLIRunMaxArgBytes+1)} },
+		// Five individually valid 4095-byte args (the fixture keeps 5 more
+		// bytes, so the total is 20480): no per-argument violation, but the
+		// total exceeds the aggregate bound.
 		"args-bytes-huge": func(s *CLIRunScope) {
-			s.Args = []string{tooLong("a", CLIRunMaxArgBytes), tooLong("b", CLIRunMaxArgBytes)}
+			s.Args = make([]string, 5)
+			for i := range s.Args {
+				s.Args[i] = strings.Repeat("a", CLIRunMaxArgBytes-1)
+			}
 		},
 		"helper-too-many": func(s *CLIRunScope) { s.Helper = eight(CLIRunMaxHelperPath + 1) },
 		"helper-relative": func(s *CLIRunScope) { s.Helper = []string{"relative-helper"} },
@@ -133,8 +140,32 @@ func TestCLIRunScope_Clear(t *testing.T) {
 
 const passthruFixture = "fixture-passthrough"
 
+// argsBytesExact is a scope whose args total exactly CLIRunMaxArgsBytes and
+// whose every argument is at most CLIRunMaxArgBytes, so it is refused only if
+// the aggregate bound regresses.
+func argsBytesExact() CLIRunScope {
+	s := cliRunFixtureScope()
+	s.Args = nil
+	for total := 0; total < CLIRunMaxArgsBytes; total += CLIRunMaxArgBytes {
+		n := min(CLIRunMaxArgBytes, CLIRunMaxArgsBytes-total)
+		s.Args = append(s.Args, strings.Repeat(string(rune('a'+len(s.Args))), n))
+	}
+	sum := 0
+	for _, arg := range s.Args {
+		if len(arg) > CLIRunMaxArgBytes {
+			panic("argsBytesExact: argument exceeds the per-argument bound")
+		}
+		sum += len(arg)
+	}
+	if sum != CLIRunMaxArgsBytes || len(s.Args) != 4 {
+		panic("argsBytesExact: total is not exactly the aggregate bound")
+	}
+	return s
+}
+
 // TestCLIRunScope_Valid proves the fixture scope and its boundary variants are
-// accepted, and a zero scope is not.
+// accepted, including an args total of exactly CLIRunMaxArgsBytes, and a zero
+// scope is not.
 func TestCLIRunScope_Valid(t *testing.T) {
 	if err := ValidateCLIRunScope(cliRunFixtureScope()); err != nil {
 		t.Fatalf("fixture scope rejected: %v", err)
@@ -146,6 +177,9 @@ func TestCLIRunScope_Valid(t *testing.T) {
 		"program-pinned":      pinned,
 		"minimal-collections": func() CLIRunScope { s := cliRunFixtureScope(); s.Args, s.Helper, s.Passthru = nil, nil, nil; return s }(),
 		"max-args":            func() CLIRunScope { s := cliRunFixtureScope(); s.Args = make([]string, CLIRunMaxArgs); return s }(),
+		// Exactly CLIRunMaxArgsBytes of individually valid 4095/4096-byte args
+		// is the last accepted total; each one passes the per-argument bound.
+		"args-bytes-exact": argsBytesExact(),
 		"max-helper": func() CLIRunScope {
 			s := cliRunFixtureScope()
 			s.Helper = make([]string, CLIRunMaxHelperPath)
@@ -279,6 +313,70 @@ func TestCLIRunScope_DecodeRejectsMore(t *testing.T) {
 	// The duplicate key is rejected before any field decode.
 	if _, err := DecodeCLIRunScope([]byte(`{"profile":"gh","profile":"gh"}`)); !errors.Is(err, errCLIRunScopeJSON) {
 		t.Fatalf("duplicate key: %v", err)
+	}
+}
+
+// TestCLIRunScope_DecodeRejectsDuplicatePassthrough proves a duplicate name
+// nested inside passthrough_env is refused. Go would otherwise accept it and
+// keep the last value. The scope around it is otherwise valid, so only the
+// nested scan can reject it; omission and null stay accepted, as Validate
+// intends.
+func TestCLIRunScope_DecodeRejectsDuplicatePassthrough(t *testing.T) {
+	fixture := cliRunFixtureScope()
+	const validPassthru = "fixture-passthrough-value"
+	fixture.Passthru = map[string]string{"GH_HOST": validPassthru}
+	valid, e := json.Marshal(fixture)
+	if e != nil {
+		t.Fatal(e)
+	}
+	// withPassthru replaces the whole passthrough_env member; nested keeps it
+	// an object and replaces only its body, so a duplicate can be spliced in.
+	withPassthru := func(member string) []byte {
+		return []byte(strings.Replace(string(valid), `"passthrough_env":{"GH_HOST":"`+validPassthru+`"}`, member, 1))
+	}
+	nested := func(body string) []byte {
+		return withPassthru(`"passthrough_env":{` + body + `}`)
+	}
+	dup := nested(`"GH_HOST":"first","GH_HOST":"second"`)
+	if !bytes.Contains(dup, []byte(`"GH_HOST":"first","GH_HOST":"second"`)) {
+		t.Fatalf("fixture splice failed: %s", dup)
+	}
+	got, err := DecodeCLIRunScope(dup)
+	if !errors.Is(err, errCLIRunScopeJSON) {
+		t.Fatalf("want generic scope error, got %v", err)
+	}
+	if got.Profile != "" || got.Nonce != "" || got.Args != nil || got.Helper != nil || got.Passthru != nil {
+		t.Fatalf("returned a scope on error: %+v", got)
+	}
+	for _, sentinel := range []string{"first", "second", validPassthru, passthruFixture} {
+		if strings.Contains(err.Error(), sentinel) {
+			t.Fatalf("error echoed %q: %q", sentinel, err)
+		}
+	}
+
+	omitted := []byte(strings.Replace(string(valid),
+		`,"passthrough_env":{"GH_HOST":"`+validPassthru+`"}`, "", 1))
+	if bytes.Contains(omitted, []byte("passthrough_env")) {
+		t.Fatalf("fixture splice failed: %s", omitted)
+	}
+	for name, tc := range map[string]struct {
+		raw      []byte
+		passthru map[string]string
+	}{
+		"omitted":      {omitted, nil},
+		"null":         {withPassthru(`"passthrough_env":null`), nil},
+		"empty-object": {withPassthru(`"passthrough_env":{}`), map[string]string{}},
+		"single-value": {nested(`"GH_HOST":"` + validPassthru + `"`), map[string]string{"GH_HOST": validPassthru}},
+	} {
+		scope, err := DecodeCLIRunScope(tc.raw)
+		if err != nil {
+			t.Fatalf("%s: rejected intended passthrough shape: %v\nraw=%s", name, err, tc.raw)
+		}
+		if len(scope.Passthru) != len(tc.passthru) {
+			scope.Clear()
+			t.Fatalf("%s: passthrough %q, want %q", name, scope.PassthroughNames(), tc.passthru)
+		}
+		scope.Clear()
 	}
 }
 

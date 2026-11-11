@@ -268,7 +268,9 @@ var errCLIRunTrailing = errors.New("desktop browser broker scope has trailing da
 
 // DecodeCLIRunScope strictly parses the raw scope object of a CLI-run request.
 // It rejects duplicate or unknown fields, non-object roots (including null),
-// trailing data, and any scope that fails ValidateCLIRunScope.
+// trailing data, and any scope that fails ValidateCLIRunScope. Duplicate names
+// nested inside passthrough_env are rejected too: encoding/json would silently
+// keep only the last value of a duplicate map key.
 //
 // The decoder writes the Args, Helper, and Passthru fields from scratch and
 // never appends to or merges into an existing collection, so the returned
@@ -285,7 +287,24 @@ func DecodeCLIRunScope(raw []byte) (CLIRunScope, error) {
 	if !ok || !scopeKeysOnly(keys) {
 		return CLIRunScope{}, errCLIRunScopeJSON
 	}
+	if !scopePassthroughStrict(copies["passthrough_env"]) {
+		return CLIRunScope{}, errCLIRunScopeJSON
+	}
 	return decodeCLIRunScopeFields(raw)
+}
+
+// scopePassthroughStrict reports whether the raw passthrough_env value is
+// absent (no bytes), JSON null, or one object without duplicate names. The
+// scan reuses strictJSONObject, so a non-object value is refused here exactly
+// as encoding/json would refuse it during the field decode. Any raw copy the
+// scan retains is cleared before returning.
+func scopePassthroughStrict(raw json.RawMessage) bool {
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return true
+	}
+	_, nested, ok := strictJSONObject(raw)
+	defer clearCLIRunRawMessages(nested) // every nested value raw copy
+	return ok
 }
 
 // decodeCLIRunScopeFields strictly decodes one scope object.
