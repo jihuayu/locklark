@@ -301,6 +301,8 @@ class Budget:
 
     def __init__(self):
         self.counts = {"windows": 0, "controls": 0, "observations": 0}
+        # Distinct (pid, window id) identities observed so far in this request.
+        self.identities = set()
 
     def charge(self, kind, amount=1, code="observe-overrun"):
         self.counts["observations"] += 1
@@ -312,6 +314,31 @@ class Budget:
         if self.counts["observations"] > MAX_OBSERVATIONS:
             raise ContractError("observe-overrun", dict(self.counts))
         del code
+
+    def charge_windows(self, windows):
+        """Charge one window snapshot against both hard window limits.
+
+        Each individual snapshot is bounded by MAX_WINDOWS.  Separately, the
+        distinct (pid, window id) identities observed across the request are
+        bounded by MAX_WINDOWS, but an identity already observed is not
+        counted again: fast polling of a stable desktop must not exhaust the
+        shared cap before the discovery timeout.  The ``windows`` count is the
+        larger of the current snapshot size and the distinct identity total,
+        so a genuinely churning set of windows still refuses.
+        """
+        size = _size(windows)
+        if size > MAX_WINDOWS:
+            raise ContractError("window-overrun", {"windows": size})
+        self.counts["observations"] += 1
+        for window in windows:
+            pid = window.get("pid") if type(window) is dict else None
+            identifier = window.get("id") if type(window) is dict else None
+            self.identities.add((pid, identifier))
+        self.counts["windows"] = max(size, len(self.identities))
+        if self.counts["windows"] > MAX_WINDOWS:
+            raise ContractError("window-overrun", dict(self.counts))
+        if self.counts["observations"] > MAX_OBSERVATIONS:
+            raise ContractError("observe-overrun", dict(self.counts))
 
 
 def canonical_path(value, platform="linux"):
@@ -378,7 +405,7 @@ def find_window(plan, adapter, budget):
     deadline = monotonic() + DISCOVER_TIMEOUT
     while True:
         windows = adapter.list_windows()
-        budget.charge("windows", _size(windows))
+        budget.charge_windows(windows)
         matches = [window for window in windows if title_matches(plan, window)]
         if len(matches) > 1:
             raise ContractError("window-ambiguous", {"matches": len(matches)})
@@ -620,7 +647,7 @@ def await_absent(plan, adapter, budget):
     deadline = monotonic() + CONTROL_TIMEOUT
     while True:
         windows = adapter.list_windows()
-        budget.charge("windows", _size(windows))
+        budget.charge_windows(windows)
         if not [w for w in windows
                 if title_matches(plan, w) and same_executable(plan["executable"], w.get("executable"), adapter.platform)]:
             return {"absent": True}

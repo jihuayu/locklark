@@ -404,6 +404,170 @@ class ExecutionGuardTests(unittest.TestCase):
         self.assertNotIn(PRIVATE, json.dumps(result))
 
 
+class FakeClock:
+    """Deterministic monotonic/sleep aliases for the discovery deadline."""
+
+    def __init__(self):
+        self.now = 0.0
+        self.sleeps = []
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+def background_window(index):
+    """A visible foreign window that shares no title or executable with the target.
+
+    Even indices compress onto one small tile, so many distinct identities can
+    be folded into a single snapshot that still stays under the 512 cap.
+    """
+    w, h = divmod(0x300000 + index, 600)
+    tiled = index % 2 == 0
+    return dict(WINDOW, id=0x300000 + 0x200 * index, pid=100000 + index,
+                title=f"background {index}", executable=f"/usr/bin/other-{index}",
+                bounds=({"x": 0, "y": 0, "width": 20, "height": 20} if tiled else
+                        {"x": (w % 10) * 200, "y": h * 120, "width": 180, "height": 100}),
+                client={"x": 110, "y": 140, "width": 780, "height": 560})
+
+
+class RepeatingAdapter(SpyAdapter):
+    """Replays one snapshot per discovery poll, then the exact target."""
+
+    def __init__(self, repeated, target, target_poll):
+        super().__init__(windows=repeated)
+        self.target = target
+        self.target_poll = target_poll
+        self.lists = 0
+
+    def list_windows(self):
+        self.lists += 1
+        if self.lists > self.target_poll:
+            self.windows = [self.target]
+        return super().list_windows()
+
+
+class ChurningAdapter(SpyAdapter):
+    """Serves a per-poll sequence of window snapshots."""
+
+    def __init__(self, snapshots):
+        super().__init__(windows=snapshots[0])
+        self.snapshots = snapshots
+        self.lists = 0
+
+    def list_windows(self):
+        self.windows = self.snapshots[min(self.lists, len(self.snapshots) - 1)]
+        self.lists += 1
+        return super().list_windows()
+
+
+class WindowSnapshotBudgetTests(unittest.TestCase):
+    """A stable desktop is charged once; unbounded window churn still refuses."""
+
+    def setUp(self):
+        self.clock = FakeClock()
+        for name in ("monotonic", "sleep"):
+            patcher = patch.object(contract, name, getattr(self.clock, name))
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def run_plan(self, adapter, **overrides):
+        return contract.execute(contract.parse_request(request(**overrides)), adapter)
+
+    def test_stable_background_polls_then_exact_target_succeeds(self):
+        background = [background_window(index) for index in range(20)]
+        # 80 background polls is 4.0s of the 5.0s discovery window.
+        adapter = RepeatingAdapter(background, dict(WINDOW), target_poll=80)
+        result = self.run_plan(adapter)
+        self.assertEqual(adapter.lists, 81)
+        self.assertLess(self.clock.now, contract.DISCOVER_TIMEOUT)
+        self.assertEqual(len(self.clock.sleeps), 80)
+        self.assertEqual(result["window"], hex(WINDOW["id"]))
+        self.assertEqual([call for call in adapter.calls if isinstance(call, tuple)],
+                         [("click", 240, 315)])
+
+    def test_stable_background_never_overruns_and_still_times_out(self):
+        background = [background_window(index) for index in range(400)]
+        adapter = RepeatingAdapter(background, dict(WINDOW), target_poll=10 ** 6)
+        with self.assertRaises(contract.ContractError) as error:
+            self.run_plan(adapter)
+        self.assertEqual(error.exception.code, "window-timeout")
+        self.assertGreaterEqual(self.clock.now, contract.DISCOVER_TIMEOUT)
+        self.assertEqual([call for call in adapter.calls if isinstance(call, tuple)], [])
+
+    def test_single_snapshot_over_limit_refuses(self):
+        over = [background_window(index) for index in range(contract.MAX_WINDOWS + 1)]
+        adapter = ChurningAdapter([over, [dict(WINDOW)]])
+        with self.assertRaises(contract.ContractError) as error:
+            self.run_plan(adapter)
+        self.assertEqual(error.exception.code, "window-overrun")
+        self.assertEqual(adapter.lists, 1)
+        self.assertEqual([call for call in adapter.calls if isinstance(call, tuple)], [])
+
+    def test_snapshot_at_limit_is_accepted(self):
+        exact = [background_window(index) for index in range(contract.MAX_WINDOWS - 1)]
+        adapter = ChurningAdapter([exact + [dict(WINDOW)]])
+        self.assertEqual(self.run_plan(adapter)["window"], hex(WINDOW["id"]))
+        self.assertEqual(adapter.lists, 1)
+
+    def test_repeated_identities_are_deduplicated(self):
+        budget = contract.Budget()
+        background = [background_window(index) for index in range(20)]
+        for _ in range(10):
+            budget.charge_windows([dict(window) for window in background])
+        self.assertEqual(budget.counts["windows"], 20)
+        self.assertEqual(budget.counts["observations"], 10)
+        budget.charge_windows([background_window(0), dict(WINDOW)])
+        self.assertEqual(budget.counts["windows"], 21)
+
+    def test_same_window_id_under_other_pid_is_distinct(self):
+        budget = contract.Budget()
+        budget.charge_windows([background_window(0)])
+        budget.charge_windows([dict(background_window(0), pid=777)])
+        self.assertEqual(budget.counts["windows"], 2)
+        self.assertEqual(budget.identities, {(100000, background_window(0)["id"]),
+                                             (777, background_window(0)["id"])})
+
+    def test_more_than_limit_distinct_identities_across_snapshots_refuses(self):
+        # Fold many distinct identities into a small snapshot under the
+        # per-snapshot cap: 0..499, then 55..451 (all repeats), then 500..512
+        # for the first time.  The distinct cap must catch what the per-snapshot
+        # cap misses even though no single snapshot exceeds MAX_WINDOWS.
+        identities = [background_window(index) for index in range(contract.MAX_WINDOWS + 1)]
+        budget = contract.Budget()
+        budget.charge_windows([dict(window) for window in identities[:500]])
+        repeats = identities[55:452]
+        budget.charge_windows([dict(window) for window in repeats])
+        self.assertEqual(budget.counts["windows"], 500)  # repeats deduplicated
+        final = identities[500:513]
+        self.assertLessEqual(len(final), contract.MAX_WINDOWS)
+        with self.assertRaises(contract.ContractError) as error:
+            budget.charge_windows(final)
+        self.assertEqual(error.exception.code, "window-overrun")
+        self.assertEqual(budget.counts["windows"], contract.MAX_WINDOWS + 1)
+
+    def test_distinct_identity_churn_before_target_refuses(self):
+        churn = [[background_window(index * 512 + step) for step in range(512)]
+                 for index in range(2)]
+        adapter = ChurningAdapter(churn + [[dict(WINDOW)]])
+        with self.assertRaises(contract.ContractError) as error:
+            self.run_plan(adapter)
+        self.assertEqual(error.exception.code, "window-overrun")
+        self.assertEqual(adapter.lists, 2)
+        self.assertEqual([call for call in adapter.calls if isinstance(call, tuple)], [])
+
+    def test_absence_polling_of_stable_desktop_does_not_overrun(self):
+        # A background-only desktop stays stable for 120 absence polls, then
+        # the foreign snapshot vanishes; a repeated snapshot is never recharged.
+        adapter = RepeatingAdapter([dict(WINDOW)], [], target_poll=120)
+        result = self.run_plan(adapter, actions=None, wait_absent=True)
+        self.assertEqual(result, {"absent": True})
+        self.assertLess(self.clock.now, contract.CONTROL_TIMEOUT)
+
+
 class _Hookless(SpyAdapter):
     """An adapter that never implemented the strict control-hit hook."""
 
