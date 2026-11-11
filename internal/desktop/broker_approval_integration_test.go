@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -79,19 +78,6 @@ func startBrokerFrameClient(t *testing.T) *brokerFrameClient {
 		_ = outR.Close()
 	})
 	return c
-}
-
-func desktopBrokerSocket(t *testing.T) string {
-	t.Helper()
-	dir, e := os.MkdirTemp("/tmp", "llb-desktop-")
-	if e != nil {
-		t.Fatal(e)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	if os.Chmod(dir, 0700) != nil {
-		t.Fatal("private test directory")
-	}
-	return filepath.Join(dir, "b.sock")
 }
 
 func brokeredDesktopFixture(t *testing.T) (*App, *personal.Session, *brokerFrameClient, *browserhost.Connection, string) {

@@ -127,10 +127,10 @@ func TestDesktopIPCBrokerUnlockLockAndCLIRun(t *testing.T) {
 	}
 	defer a.stopBrowserBroker()
 
-	// Use the standard sticky temp root explicitly: some CI TMPDIR ancestors
-	// are not private enough for localpath, and this test must exercise the
-	// real socket entrypoint rather than silently falling back.
-	dir, e := os.MkdirTemp("/tmp", "llb-")
+	// Some CI temp ancestors are not private enough for localpath, so this
+	// test must exercise the real socket entrypoint rather than silently
+	// falling back.
+	dir, e := desktopBrokerTempRoot(t)
 	if e != nil {
 		t.Fatal(e)
 	}
