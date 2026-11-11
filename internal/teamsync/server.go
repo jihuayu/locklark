@@ -350,17 +350,46 @@ func (s *server) handle(r *http.Request, q request, budget int) (response, error
 	if projected.Status == "capacity" {
 		return projected, nil
 	}
-	key, granted := s.commitKey(r.Context())
-	if !granted {
-		return fail(ErrTransport)
-	}
-	receipt, e := func() (directory.Receipt, error) {
+	// A commit whose receipt response fits must not leave a history no read can
+	// return. Before anything is durable, project the exact post-commit read
+	// response from the history this pass already verified, the projected
+	// receipt and the candidate snapshot, and subject it to the same per-call
+	// budget. The projected read is signed as an answer to this request: its
+	// request digest and nonce, and its own history digest with no receipt.
+	// Over budget its signed capacity refusal is returned, never the earlier
+	// signed committed receipt answer. A signed capacity refusal, or a
+	// projection that cannot be prepared, reaches neither directory.Commit nor
+	// the anchor; an error after commitKey was granted is still an unknown,
+	// durable outcome.
+	var receipt directory.Receipt
+	var fullRefusal response
+	e = func() error {
+		h, e := trusted.ProjectHistory(projection, p.Snapshot)
+		if e != nil {
+			return mapDirectoryError(e)
+		}
+		full := response{Status: "current", Head: projection.Checkpoint(), History: &h}
+		if !s.prepare(r.Context(), q, &full, budget) {
+			return ErrTransport
+		}
+		if full.Status == "capacity" {
+			fullRefusal = full
+			return nil
+		}
+		key, granted := s.commitKey(r.Context())
+		if !granted {
+			return ErrTransport
+		}
 		defer clear(key)
 		if s.hooks != nil && s.hooks.afterCommitGrant != nil {
 			s.hooks.afterCommitGrant()
 		}
-		return directory.Commit(s.path, s.config, key, p.Proposal, p.Snapshot)
+		receipt, e = directory.Commit(s.path, s.config, key, p.Proposal, p.Snapshot)
+		return e
 	}()
+	if fullRefusal.Status == "capacity" {
+		return fullRefusal, nil // No commit: the anchor stays where it was.
+	}
 	if e != nil {
 		if errors.Is(e, directory.ErrStorage) {
 			return fail(ErrUnknown)

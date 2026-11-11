@@ -294,3 +294,129 @@ func TestPublishPreflightRefusesCapacityBeforeCommitOrAdvance(t *testing.T) {
 		t.Fatal("committed publish did not advance the anchor to the new head")
 	}
 }
+
+// TestPublishPreflightRefusesFullReadCapacityBeforeCommitOrAdvance pins the gap
+// the receipt preflight alone leaves open: a projected publish receipt response
+// that fits the call's budget, whose projected post-commit read response does
+// not. Such a commit would be acknowledged and then leave the retained history
+// unreadable as capacity.
+//
+// The probe measures the real full envelopes with lifecycleRequest: the
+// committed receipt answer and the read of that commit's history. The low
+// budget is halfway between them, and must fit the signed capacity refusal.
+// The guard is checked under that private budget seam, exactly as ServeHTTP
+// passes MaxResponseBytes; it is not a product limit.
+func TestPublishPreflightRefusesFullReadCapacityBeforeCommitOrAdvance(t *testing.T) {
+	probe, probeServer := lifecycleFixture(t)
+	probePub := ownedPublication(t, probe)
+	probeRequest := lifecycleRequest(probe, probePub)
+	committed := preflight(t, probeServer, probeRequest, MaxResponseBytes)
+	if committed.Status != "committed" || committed.Receipt == nil || committed.Head.Version != 2 {
+		t.Fatalf("probe publish status = %q", committed.Status)
+	}
+	assertSignedEnvelope(t, probe, probeRequest, committed, MaxResponseBytes)
+	readRequest := lifecycleRequest(probe, nil)
+	full := preflight(t, probeServer, readRequest, MaxResponseBytes)
+	if full.Status != "current" || full.History == nil || full.Head != committed.Head || len(full.History.Receipts) != 2 {
+		t.Fatalf("probe post-commit read status = %q", full.Status)
+	}
+	assertSignedEnvelope(t, probe, readRequest, full, MaxResponseBytes)
+
+	receiptLen, fullLen := len(encode(committed)), len(encode(full))
+	capacityLen := len(encode(response{Status: "capacity", Protocol: protocol, RequestDigest: strings.Repeat("0", 64), Nonce: strings.Repeat("0", 64), Signature: make([]byte, ed25519.SignatureSize)}))
+	budget := (receiptLen + fullLen) / 2
+	if capacityLen >= budget || receiptLen > budget || budget >= fullLen {
+		t.Fatalf("budget %d does not separate capacity (%d), receipt (%d) and read (%d)", budget, capacityLen, receiptLen, fullLen)
+	}
+
+	// The target's first publication projects a receipt answer that fits the
+	// low budget, but its post-commit read would not. It is refused as signed
+	// capacity before the commit hook, with no database or anchor change.
+	target, targetServer := lifecycleFixture(t)
+	initial := serverAnchor(t, target)
+	before := databaseBytes(t, target)
+	pub := ownedPublication(t, target)
+	var commits atomic.Int32
+	targetServer.hooks = &serverLifecycleHooks{afterCommitGrant: func() { commits.Add(1) }}
+	smallRequest := lifecycleRequest(target, pub)
+	small := preflight(t, targetServer, smallRequest, budget)
+	assertCapacity(t, small)
+	assertSignedEnvelope(t, target, smallRequest, small, budget)
+	if commits.Load() != 0 {
+		t.Fatal("capacity-refused publish reached the commit")
+	}
+	if cp := serverAnchor(t, target); cp != initial {
+		t.Fatalf("capacity-refused publish advanced the anchor to version %d", cp.Version)
+	}
+	if !bytes.Equal(before, databaseBytes(t, target)) {
+		t.Fatal("capacity-refused publish mutated the database")
+	}
+	if view, e := directory.Read(target.path, target.cfg, target.cfg.Genesis()); e != nil || view.Receipt.Checkpoint() != target.first.Checkpoint() {
+		t.Fatal("capacity-refused publish moved the committed head", e)
+	}
+
+	// The same publication commits under MaxResponseBytes. Its receipt answer
+	// fits the low budget and its post-commit read does not, as on the probe,
+	// and the history reads back. Snapshots are randomized, so lengths are
+	// compared against the budget, not against the probe's exact bytes.
+	normalRequest := lifecycleRequest(target, pub)
+	normal := preflight(t, targetServer, normalRequest, MaxResponseBytes)
+	if normal.Status != "committed" || normal.Receipt == nil || normal.Head.Version != 2 || commits.Load() != 1 {
+		t.Fatalf("MaxResponseBytes publish status = %q", normal.Status)
+	}
+	assertSignedEnvelope(t, target, normalRequest, normal, MaxResponseBytes)
+	if got := len(encode(normal)); got > budget {
+		t.Fatalf("committed receipt answer is %d bytes, over the %d byte budget", got, budget)
+	}
+	if cp := serverAnchor(t, target); cp != normal.Head {
+		t.Fatal("committed publish did not advance the anchor to the new head")
+	}
+	readRequest = lifecycleRequest(target, nil)
+	read := preflight(t, targetServer, readRequest, MaxResponseBytes)
+	if read.Status != "current" || read.History == nil || read.Head != normal.Head || len(read.History.Receipts) != 2 || len(read.History.Snapshot.Database) == 0 {
+		t.Fatal("committed publish left no readable post-commit history")
+	}
+	assertSignedEnvelope(t, target, readRequest, read, MaxResponseBytes)
+	if got := len(encode(read)); got <= budget {
+		t.Fatalf("post-commit read is %d bytes, within the %d byte budget", got, budget)
+	}
+	if view, e := directory.AssembleHistory(target.cfg, target.cfg.Genesis(), normal.Head, *read.History); e != nil || view.Receipt.Checkpoint() != normal.Head {
+		t.Fatal("post-commit read is not the committed history", e)
+	}
+	if cp := serverAnchor(t, target); cp != normal.Head {
+		t.Fatal("post-commit read did not advance the anchor to the new head")
+	}
+
+	// Legacy boundary: the committed history already reads over the low budget,
+	// so read returns signed capacity under it and moves nothing.
+	legacyRequest := lifecycleRequest(target, nil)
+	legacy := preflight(t, targetServer, legacyRequest, budget)
+	assertCapacity(t, legacy)
+	assertSignedEnvelope(t, target, legacyRequest, legacy, budget)
+	if cp := serverAnchor(t, target); cp != normal.Head {
+		t.Fatalf("capacity-refused read moved the anchor to version %d", cp.Version)
+	}
+	// A valid publication extending that history is refused the same way,
+	// before the commit hook, with no database or anchor change.
+	legacyBefore := databaseBytes(t, target)
+	legacyProposal, legacySnapshot, e := directory.Build(target.cfg, target.owner, target.publisher, normal.Head, target.members, target.items)
+	if e != nil {
+		t.Fatal("cannot build legacy publication", e)
+	}
+	legacyPublishRequest := lifecycleRequest(target, &publication{Proposal: legacyProposal, Snapshot: legacySnapshot})
+	legacyPublish := preflight(t, targetServer, legacyPublishRequest, budget)
+	assertCapacity(t, legacyPublish)
+	assertSignedEnvelope(t, target, legacyPublishRequest, legacyPublish, budget)
+	if commits.Load() != 1 {
+		t.Fatal("publish extending an unreadable history reached the commit")
+	}
+	if cp := serverAnchor(t, target); cp != normal.Head {
+		t.Fatalf("publish extending an unreadable history moved the anchor to version %d", cp.Version)
+	}
+	if !bytes.Equal(legacyBefore, databaseBytes(t, target)) {
+		t.Fatal("publish extending an unreadable history mutated the database")
+	}
+	if view, e := directory.Read(target.path, target.cfg, normal.Head); e != nil || view.Receipt.Checkpoint() != normal.Head {
+		t.Fatal("publish extending an unreadable history moved the committed head", e)
+	}
+}

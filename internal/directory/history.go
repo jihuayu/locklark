@@ -244,6 +244,27 @@ func (t TrustedRead) History() (History, error) {
 	return h, nil
 }
 
+// ProjectHistory returns the History a read of a directory whose head is the
+// trusted head succeeded by receipt, carrying snapshot, would return: every
+// receipt this pass already verified, receipt, and that one head snapshot.
+// It runs no verification and this pass proved no such successor: it checks
+// only what a commit of receipt would store (record size, version capacity and
+// the retained History budget), so a caller can size the post-commit read
+// before the commit exists. The copy is independent of the sealed evidence.
+func (t TrustedRead) ProjectHistory(receipt Receipt, snapshot vault.Snapshot) (History, error) {
+	if !t.trusted() || len(t.receipts)+1 > maxVersions {
+		return History{}, ErrInvalid
+	}
+	if _, e := retainedHistorySize(t.receipts, receipt, snapshot, MaxHistoryBytes); e != nil {
+		return History{}, e
+	}
+	h := History{Receipts: append(cloneReceipts(t.receipts), cloneReceipts([]Receipt{receipt})...), Snapshot: cloneSnapshot(snapshot)}
+	if _, e := h.storageSize(); e != nil {
+		return History{}, e
+	}
+	return h, nil
+}
+
 // chainAdvanceObserver is set only by package tests to count stored-chain
 // advance steps; nil in production.
 var chainAdvanceObserver func()
