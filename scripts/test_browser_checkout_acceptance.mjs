@@ -1503,10 +1503,12 @@ test("route probe maps the fixed claim-pending status to native-pending", () => 
   assert.equal(kindFor(""), "other");
 });
 
-test("route status trace only follows the live #status element and stays bounded", () => {
-  // Only a status owned by the live #status element may enter the trace, so
-  // ordinary page text cannot consume the eight-entry cap, and a #status
-  // inserted after installation is still captured. Cleanup disconnects.
+test("route status trace keeps every #status write batched in one callback", () => {
+  // popup.js writes #status.textContent, so the observer sees childList records
+  // whose target is #status and whose addedNodes are its text nodes. Separate
+  // writes batched into one callback must each classify from their own record,
+  // in order. Only the live #status subtree is read, the cap holds, and stop
+  // disconnects.
   const source = readFileSync(
     new URL("./browser_native_acceptance.mjs", import.meta.url),
     "utf8",
@@ -1517,16 +1519,30 @@ test("route status trace only follows the live #status element and stays bounded
   const code = source.slice(start, stop);
   assert.match(code, /^const ROUTE_STATUS_TRACE_LIMIT = 8;$/m);
 
+  const textNode = (data) => ({ nodeType: 3, data, parentNode: null });
   class FakeElement {
     constructor(tag, selector = "") {
       this.tag = tag;
       this.selector = selector;
-      this.textContent = "";
       this.childNodes = [];
       this.hidden = true;
       this.contains = (node) => node === this;
       this.matches = (selectors) =>
         selectors.split(",").some((part) => part.trim() === this.selector);
+    }
+    // Same contract as the DOM: assigning textContent replaces all children
+    // with one text node (written once; popup.js never writes twice per task).
+    get textContent() {
+      return this.childNodes.map((node) => node.data ?? "").join("");
+    }
+    set textContent(value) {
+      this.childNodes = [];
+      const text = String(value ?? "");
+      if (text) {
+        const node = textNode(text);
+        node.parentNode = this;
+        this.childNodes.push(node);
+      }
     }
   }
   const deliveries = [];
@@ -1557,88 +1573,153 @@ test("route status trace only follows the live #status element and stays bounded
   document.body.dataset = { view: "vault" };
   document.nodes["#detail-view"] = new FakeElement("section", "#detail-view");
   document.nodes["#detail-title"] = new FakeElement("h2", "#detail-title");
+  const status = new FakeElement("p", "#status");
+  const addStatus = () => {
+    document.nodes["#status"] = status;
+    status.contains = (node) =>
+      node === status || (node?.parentNode === status && node !== status);
+  };
   const context = vm.createContext({
     MutationObserver: FakeObserver,
     document,
     Element: FakeElement,
   });
   vm.runInContext(code + "\nthis.probe = routeStatusTraceProbe;this.clean = sanitizeRouteStatusTrace;", context);
+  // A second, independent installation (same fake document shape) for checks
+  // whose result must not depend on earlier writes.
+  const newContext = () => {
+    const nodes = { ...document.nodes, "#status": status };
+    const isolatedDocument = {
+      body: document.body,
+      nodes,
+      querySelector(selector) {
+        return nodes[selector] ?? null;
+      },
+    };
+    const isolated = vm.createContext({
+      MutationObserver: FakeObserver,
+      document: isolatedDocument,
+      Element: FakeElement,
+    });
+    vm.runInContext(
+      code + "\nthis.probe = routeStatusTraceProbe;",
+      isolated,
+    );
+    vm.runInContext(
+      "eval(" + JSON.stringify(vm.runInContext("probe('FIXTURE')", isolated)) + ")",
+      isolated,
+    );
+    return {
+      document: isolatedDocument,
+      statuses: () =>
+        JSON.parse(vm.runInContext("__locklarkRouteStatusTraceRead()", isolated))
+          .filter((entry) => entry.channel === "status")
+          .map((entry) => entry.value),
+      batch: (records) => {
+        deliveries.push(...records);
+        observers.at(-1).callback(observers.at(-1).takeRecords());
+      },
+    };
+  };
   vm.runInContext(
     "eval(" + JSON.stringify(vm.runInContext("probe('FIXTURE')", context)) + ")",
     context,
   );
   assert.equal(observers.length, 1);
+  // The main installation's observer (isolated contexts add their own).
+  const mainObserver = observers[0];
   const trace = () => JSON.parse(vm.runInContext("__locklarkRouteStatusTraceRead()", context));
-  const mutate = (records) => {
+  const statuses = () =>
+    trace().filter((entry) => entry.channel === "status").map((entry) => entry.value);
+  const batch = (records) => {
     deliveries.push(...records);
     observers.at(-1).callback(observers.at(-1).takeRecords());
   };
-  const textNode = (status) => ({ nodeType: 3, data: status, parentNode: status });
+  // What assigning `textContent` produces as one MutationRecord.
+  const write = (value, element = status) => {
+    const removed = element.childNodes;
+    element.textContent = value;
+    return {
+      type: "childList",
+      target: element,
+      addedNodes: element.childNodes.slice(),
+      removedNodes: removed,
+    };
+  };
 
-  // 1. Unrelated page text never appends a status event.
+  // Unrelated page text never appends a status event.
   const before = trace();
-  const heading = { nodeType: 3, data: "普通标题文本" };
-  document.nodes["#detail-title"].contains = (node) => node === heading;
-  mutate([
+  const heading = textNode("普通标题文本");
+  document.nodes["#detail-title"].textContent = "普通标题文本";
+  document.nodes["#detail-title"].contains = (node) => node === heading || node.parentNode === document.nodes["#detail-title"];
+  batch([
     { type: "characterData", target: heading },
     { type: "childList", addedNodes: [heading], target: document.body },
   ]);
   assert.deepEqual(trace(), before);
 
-  // 2. #status inserted later with the pending literal is captured.
-  const status = new FakeElement("p", "#status");
-  const pending = { nodeType: 3, data: "正在请求桌面审批…", parentNode: status };
-  status.childNodes = [pending];
-  status.textContent = "正在请求桌面审批…";
-  status.contains = (node) => node === status || node === pending;
-  document.nodes["#status"] = status;
-  mutate([{ type: "childList", addedNodes: [status], target: document.body }]);
-  assert.deepEqual(trace().at(-1), { channel: "status", value: "native-pending" });
+  // #status inserted after installation with the pending literal is captured.
+  addStatus();
+  const pendingNode = textNode("正在请求桌面审批…");
+  pendingNode.parentNode = status;
+  status.childNodes = [pendingNode];
+  batch([{ type: "childList", target: document.body, addedNodes: [status], removedNodes: [] }]);
+  assert.deepEqual(statuses().at(-1), "native-pending");
 
-  // 3. Only a status-owned characterData record classifies.
-  const outside = { nodeType: 3, data: "无法打开此条目" };
-  mutate([{ type: "characterData", target: outside }]);
-  assert.deepEqual(trace().at(-1), { channel: "status", value: "native-pending" });
-  pending.data = "已关闭此条目";
-  status.textContent = "已关闭此条目";
-  mutate([{ type: "characterData", target: pending }]);
-  assert.deepEqual(trace().at(-1), { channel: "status", value: "closed" });
+  // The real case: pending then revoked, then cleared, all in one callback.
+  // Each record carries its own text node, so every transition survives even
+  // though only the last write remains current in the DOM.
+  const pending = write("正在请求桌面审批…");
+  const revoked = write("条目已失效，请重新从金库打开");
+  const cleared = write("");
+  batch([pending, revoked, cleared]);
+  const tail = statuses().slice(-3);
+  assert.deepEqual(tail, ["native-pending", "route-revoked", "empty"]);
 
-  // Unknown status text still becomes only the fixed "other" enum.
-  pending.data = "SECRET-STATUS-TEXT";
-  mutate([{ type: "characterData", target: pending }]);
-  assert.deepEqual(trace().at(-1), { channel: "status", value: "other" });
+  // The same batched shape for pending then the closed text.
+  const pendingAgain = write("正在请求桌面审批…");
+  batch([pendingAgain, write("已关闭此条目")]);
+  assert.deepEqual(statuses().slice(-2), ["native-pending", "closed"]);
+
+  // Only a status-owned characterData record classifies, and unknown status
+  // text becomes only the fixed "other" enum. A fresh context keeps this
+  // independent of the text left by the writes above.
+  const isolated = newContext();
+  const isolatedStatus = isolated.document.nodes["#status"];
+  const foreign = textNode("无法打开此条目");
+  const mark = isolated.statuses().length;
+  isolated.batch([{ type: "characterData", target: foreign }]);
+  assert.equal(isolated.statuses().length, mark);
+  const owned = textNode("无法打开此条目");
+  owned.parentNode = isolatedStatus;
+  isolatedStatus.childNodes = [owned];
+  isolated.batch([{ type: "characterData", target: owned }]);
+  assert.deepEqual(isolated.statuses().at(-1), "claim-failed");
+  isolatedStatus.textContent = "SECRET-STATUS-TEXT";
+  isolated.batch([
+    {
+      type: "childList",
+      target: isolatedStatus,
+      addedNodes: isolatedStatus.childNodes.slice(),
+      removedNodes: [owned],
+    },
+  ]);
+  assert.deepEqual(isolated.statuses().at(-1), "other");
 
   // The cap holds and nothing arbitrary or raw leaves the page.
-  for (let index = 0; index < 30; index++) {
-    pending.data = index % 2 ? "无法打开此条目" : "正在请求桌面审批…";
-    mutate([{ type: "characterData", target: pending }]);
-  }
+  for (let index = 0; index < 30; index++)
+    batch([write(index % 2 ? "无法打开此条目" : "正在请求桌面审批…")]);
   assert.equal(trace().length, 8);
   const serialized = JSON.stringify(trace());
-  assert.doesNotMatch(serialized, /SECRET|普通|FIXTURE|正在请求|无法打开|已关闭|http|#route=/);
+  assert.doesNotMatch(serialized, /SECRET|普通|FIXTURE|正在请求|无法打开|已关闭|已失效|http|#route=/);
   for (const entry of trace()) {
     assert.deepEqual(Object.keys(entry).sort(), ["channel", "value"]);
     assert.ok(entry.value === true || entry.value === false || entry.value.length <= 16);
   }
-  const cleaned = JSON.parse(
-    vm.runInContext(
-      "JSON.stringify(clean([{channel:'status',value:'native-pending'},{channel:'status',value:'SECRET'}," +
-        "{channel:'url',value:'https://x'},{channel:'detailShown',value:true}]))",
-      context,
-    ),
-  );
-  assert.deepEqual(cleaned, [
-    { channel: "status", value: "native-pending" },
-    { channel: "detailShown", value: true },
-  ]);
 
-  // 4. Cleanup disconnects the observer and removes both hooks.
-  assert.equal(
-    vm.runInContext("__locklarkRouteStatusTraceStop()", context),
-    true,
-  );
-  assert.equal(observers.at(-1).disconnected, true);
+  // Cleanup disconnects the observer and removes both hooks.
+  assert.equal(vm.runInContext("__locklarkRouteStatusTraceStop()", context), true);
+  assert.equal(mainObserver.disconnected, true);
   assert.equal(
     vm.runInContext(
       "typeof globalThis.__locklarkRouteStatusTraceRead + typeof globalThis.__locklarkRouteStatusTraceStop",

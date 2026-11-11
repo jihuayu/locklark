@@ -378,16 +378,28 @@ function routeStatusTraceProbe(title) {
       if(entries.length<LIMIT)entries.push(last);
     };
     const q=(selector)=>document.querySelector(selector);
+    const toArray=(list)=>list?Array.prototype.slice.call(list):[];
     const view=()=>VIEWS.includes(document.body?.dataset?.view)?document.body.dataset.view:'other';
     const shown=()=>{const el=q('#detail-view');return el?el.hidden!==true:false;};
     const titleKind=()=>{const el=q('#detail-title');return el?(String(el.textContent||'')===FIXTURE_TITLE?'fixture':'other'):'other';};
     const statusKind=(statusEl)=>statusEl?kindOf(String(statusEl.textContent||'').trim()):'other';
-    const sync=()=>{push('status',statusKind(q('#status')));push('view',view());push('detailShown',shown());push('titleKind',titleKind());};
-    const statusText=(statusEl)=>{
-      if(statusEl&&statusEl.childNodes)
-        for(const child of statusEl.childNodes)
-          if(child.nodeType===3)push('status',kindOf(String(child.data||'').trim()));
-      push('status',statusKind(statusEl));
+    // Seed state without inventing a status: absence is not an empty status,
+    // and the first real #status write must stay the first status event.
+    const sync=()=>{const statusEl=q('#status');if(statusEl)push('status',statusKind(statusEl));push('view',view());push('detailShown',shown());push('titleKind',titleKind());};
+    // A childList record wholly inside the live #status element (or one that
+    // inserted it) is one textContent/append write. Its own added text nodes
+    // are classified in order and a write leaving it without text as 'empty',
+    // so separate writes batched into one callback keep every transition.
+    // Only the mounted #status subtree or a newly inserted #status element
+    // reaches this path; unrelated nodes and text are never read.
+    const statusWrite=(statusEl,record)=>{
+      if(record.target!==statusEl)return false;
+      const added=record.addedNodes?[...record.addedNodes]:[],removed=record.removedNodes?[...record.removedNodes]:[];
+      const texts=[];
+      for(const node of added)if(node?.nodeType===3&&String(node.data||'').trim())texts.push(String(node.data||'').trim());
+      if(texts.length)for(const text of texts)push('status',kindOf(text));
+      else if(added.length||removed.length)push('status',kindOf(String(statusEl.textContent||'').trim()));
+      return true;
     };
     const handle=(record)=>{
       const statusEl=q('#status');
@@ -400,15 +412,11 @@ function routeStatusTraceProbe(title) {
         if(record.target===document.body)push('view',view());
         return;
       }
-      if(!record.addedNodes)return;
-      let statusChanged=false;
-      for(const node of record.addedNodes){
-        if(statusEl&&(node===statusEl||node.contains?.(statusEl))){
-          statusText(statusEl);
-          statusChanged=true;
-        }
-      }
-      if(statusChanged)return;
+      if(!record.addedNodes&&!record.removedNodes)return;
+      const current=q('#status');
+      if(current&&current!==seenStatus)detectStatus();
+      const live=q('#status');
+      if(live&&(live.contains?.(record.target)&&statusWrite(live,record)))return;
       for(const node of record.addedNodes){
         if(node instanceof Element&&node.matches?.('#detail-view'))push('detailShown',node.hidden!==true);
         if(node instanceof Element&&node.matches?.('#detail-title, #detail-title *'))push('titleKind',titleKind());
@@ -421,7 +429,17 @@ function routeStatusTraceProbe(title) {
       observer.observe(observing,{attributes:true,attributeFilter:['data-view','hidden'],childList:true,subtree:true,characterData:true});
       sync();
     };
+    // Route target discovery can precede body parsing or the #status node, so
+    // any mutation can be the one that makes #status live: record it then.
+    let seenStatus=null;
+    const detectStatus=()=>{
+      const statusEl=q('#status');
+      if(!statusEl||statusEl===seenStatus)return;
+      seenStatus=statusEl;
+      push('status',statusKind(statusEl));
+    };
     start();
+    detectStatus();
     for(const type of['DOMContentLoaded','pageshow'])globalThis.addEventListener?.(type,start,{once:true});
     globalThis.__locklarkRouteStatusTraceRead=()=>JSON.stringify(entries);
     globalThis.__locklarkRouteStatusTraceStop=()=>{
