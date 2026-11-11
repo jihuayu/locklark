@@ -809,7 +809,9 @@ try {
         "PASS: real popup exact row opened one persistent route tab; native approval kept the same tab's detail without revealing values",
       );
     } finally {
-      await route.close().catch(() => {});
+      try {
+        await route.close();
+      } catch {}
     }
   }
   async function blank() {
