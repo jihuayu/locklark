@@ -93,6 +93,28 @@ func NewContent(options ...DBContentOption) *DBContent {
 
 // readFrom reads the InnerHeader from an io.Reader
 func (ih *InnerHeader) readFrom(r io.Reader) error {
+	return ih.parse(r, 0)
+}
+
+// readFromWithLimits reads the InnerHeader from an io.Reader in bounded mode.
+// The aggregate bytes of every InnerHeaderBinary payload, memory protection
+// flag included, are charged against maxBinaryBytes, and a binary field which
+// cannot fit the remaining budget is rejected with ErrDecodeLimitExceeded
+// before any of it is copied.
+//
+// Bounded mode also rejects malformed fields which the unbounded parser
+// tolerates: a binary field of 0 or 1 bytes (no flag, or a flag without
+// content) and negative lengths. Unbounded readFrom keeps its original
+// behavior exactly.
+func (ih *InnerHeader) readFromWithLimits(r io.Reader, maxBinaryBytes int64) error {
+	return ih.parse(r, maxBinaryBytes)
+}
+
+// parse reads the InnerHeader from r. With maxBinaryBytes positive the
+// aggregate binary bytes are charged against it before each binary is read.
+func (ih *InnerHeader) parse(r io.Reader, maxBinaryBytes int64) error {
+	aggregate := int64(0) // Aggregate binary bytes, flag included
+	bounded := maxBinaryBytes > 0
 	binaryCount := 0 // Var used to count and index every binary
 ForLoop:
 	for {
@@ -104,6 +126,13 @@ ForLoop:
 		}
 		if err := binary.Read(r, binary.LittleEndian, &length); err != nil {
 			return err
+		}
+		if bounded && headerType == InnerHeaderBinary {
+			n := uint32(length)
+			if n < 2 || int64(n) > maxBinaryBytes-aggregate {
+				return fmt.Errorf("%w: inner header binary budget exceeded", ErrDecodeLimitExceeded)
+			}
+			aggregate += int64(n)
 		}
 		data, err := readBytes(r, int64(length))
 		if err != nil {
