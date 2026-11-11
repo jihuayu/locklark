@@ -100,6 +100,7 @@ let stage = "fixture",
   lastPopup = null,
   lastRouteObservation = null,
   routeAfterPopupClose = null,
+  routeTargetAfterPopupClose = null,
   routeObservationHistory = [],
   nativeInput = null;
 // Diagnostics only: keep at most ROUTE_HISTORY_LIMIT sanitized observations,
@@ -766,6 +767,18 @@ try {
         } catch {}
       }
     } catch {}
+    // Diagnostics only: the same targets() list, read once, answers whether
+    // the exact captured route target still exists and still carries the route
+    // URL at this checkpoint. Only these two fixed booleans are kept; any
+    // failure leaves the checkpoint absent and cannot affect acceptance.
+    try {
+      const live = await targets();
+      const route = live.find((target) => target.id === routeTarget);
+      routeTargetAfterPopupClose = {
+        routeTargetExists: !!route,
+        routeTargetStillRoute: !!route && ROUTE_PAGE.test(route.url),
+      };
+    } catch {}
     // The route tab is the only new browser page: every non-extension page
     // present now must be one of the controlled-login pages seen before.
     const pagesAfter = context
@@ -1397,6 +1410,18 @@ try {
                 routeAfterPopupClose: sanitizeRouteObservation(
                   routeAfterPopupClose,
                 ),
+              }
+            : {}),
+          // Present only once the post-popup-close target checkpoint was read;
+          // two fixed booleans, never an id, URL, fragment, token or count.
+          ...(routeTargetAfterPopupClose
+            ? {
+                routeTargetAfterPopupClose: {
+                  routeTargetExists:
+                    routeTargetAfterPopupClose.routeTargetExists === true,
+                  routeTargetStillRoute:
+                    routeTargetAfterPopupClose.routeTargetStillRoute === true,
+                },
               }
             : {}),
         }
