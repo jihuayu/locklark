@@ -42,9 +42,9 @@ const abortGrace = 500 * time.Millisecond
 const redacted = "onedriveauth.CallbackResult{code:redacted}"
 
 // CallbackResult is the outcome of one validated authorization callback. It is
-// the only carrier of the authorization code: the next, separate step (token
-// exchange, not implemented here) takes Code together with the verifier whose
-// S256 challenge was sent in the authorization request.
+// the only carrier of the authorization code: the next, separate step
+// (ExchangeCode) takes Code together with the redirect URI Start returned and
+// the verifier whose S256 challenge was sent in the authorization request.
 //
 // The code is a credential held in an unexported field. It is readable only
 // through Code(), and String/GoString exist so that the common fmt verbs (%v,
