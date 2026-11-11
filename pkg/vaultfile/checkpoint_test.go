@@ -434,10 +434,27 @@ func TestVerifyPolicyCheckpointNegative(t *testing.T) {
 		a.OwnerRootKeyID = "owner-root-02"
 		wantCodeAt(t, VerifyPolicyCheckpoint(c.f, a), CodePolicyCheckpointFailed, "")
 
-		// A continuation signed with a non-root key fails the signature.
+		// A continuation named by the pinned root id, linked exactly and
+		// signed by the pinned root verifies on a three-proof chain.
 		c = newCPChain(t, k)
 		cur = clonePolicy(c.policies[1])
 		cur.PolicySeq = 7
+		cur.PrevPolicyDigest = bytes.Clone(policyDigest(&c.f.SignedPolicyProofs[1]))
+		c.append(t, cur, "owner-root-01", nil)
+		c.finalize(t, k)
+		if err := ValidateFile(c.f); err != nil {
+			t.Fatalf("positive continuation fixture is not structurally valid: %v", err)
+		}
+		if err := VerifyPolicyCheckpoint(c.f, c.anchor); err != nil {
+			t.Fatalf("root-signed continuation rejected: %v", err)
+		}
+
+		// The identical continuation, signed with a non-root key, fails the
+		// signature rather than the link.
+		c = newCPChain(t, k)
+		cur = clonePolicy(c.policies[1])
+		cur.PolicySeq = 7
+		cur.PrevPolicyDigest = bytes.Clone(policyDigest(&c.f.SignedPolicyProofs[1]))
 		c.append(t, cur, "owner-root-01", k.otherRootPrv)
 		c.finalize(t, k)
 		wantCodeAt(t, VerifyPolicyCheckpoint(c.f, c.anchor), CodeSignatureVerifyFailed, "signed_policy_proofs[2]")
