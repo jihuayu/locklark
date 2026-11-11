@@ -123,38 +123,59 @@ function recordRouteObservation(observation) {
   ].slice(-ROUTE_HISTORY_LIMIT);
 }
 // Route lifecycle diagnostics. From the moment the exact route target is
-// found, one best-effort browser-CDP websocket to that same target records
-// which main-frame lifecycle events its exact target received, so a
-// route-detail failure can tell "the main frame was replaced or detached" (a
-// reload or navigation) apart from "the frame stayed and only the UI
-// differed". Page events are accepted only when they arrive on the session id
-// this observer generated (a page can never supply that session id) while its
-// enable reply (its own fixed request id) ends event intake; the root-target
-// session is never attached, and child sessions/OOPIFs are released at once
-// and never counted. Frame, target, document and loader ids
-// stay inside this closure and are never copied into the retained record, no
-// raw protocol payload is retained, and every failure is swallowed. A detached
-// main frame can no longer be followed, so detach is terminal.
+// found, one best-effort websocket to that target's own
+// webSocketDebuggerUrl (a direct page-target session: no Target.* usage, no
+// invented session ids, no page code) records which real Page lifecycle
+// events its main frame received. A route-detail failure can then tell "the
+// route document was reloaded, navigated or detached" apart from "the same
+// document stayed and only the UI differed". Only main-frame events count:
+// Page.frameNavigated with no parent frame is the root document (and
+// re-identifies the main frame after a navigation),
+// Page.frameRequestedNavigation proves a not-yet-committed main-frame
+// navigation, and other events are matched transiently against
+// Page.getFrameTree's main-frame id. The retained record holds only fixed
+// booleans and capped per-kind counts; frame and loader ids live only in this
+// closure. The socket only acknowledges Page.enable (the captured page keeps
+// running; intake is never gated on a reply) and stays open until the
+// checkpoint's finally path closes it. Every CDP failure is swallowed.
 const ROUTE_LIFECYCLE_EVENTS = [
   "frameStartedLoading",
   "frameStoppedLoading",
-  "documentUpdated",
+  "frameNavigated",
+  "frameRequestedNavigation",
   "navigatedWithinDocument",
-  "detached",
+  "frameDetached",
 ];
 const ROUTE_LIFECYCLE_LIMIT = 16;
-let routeLifecycleObservation = null,
-  routeLifecycleSocket = null;
+let routeLifecycleObservation = null;
+// Per-observation connection state (main-frame id, socket). It is reachable
+// both from the event handlers and from the checkpoint's finally path, and is
+// cleared on close. Nothing in it is ever reported.
+let routeLifecycleState = null;
+// Event method and params to the transient main-frame id, or an explicit
+// undefined for "not a main-frame event".
+function routeLifecycleFrame(method, params, mainFrame) {
+  if (
+    method === "Page.frameNavigated" &&
+    params?.frame?.parentId === undefined &&
+    typeof params.frame?.id === "string"
+  )
+    return params.frame.id;
+  return mainFrame !== undefined && params?.frameId === mainFrame
+    ? mainFrame
+    : undefined;
+}
 // Fixed allowlisted shape only: unknown events, extra keys and non-boolean
 // values are dropped, so malformed input can never widen what is reported.
 function sanitizeRouteLifecycle(value) {
   const counts = value?.eventCounts;
   return {
-    pageOpened: value?.pageOpened === true,
+    enabled: value?.enabled === true,
     mainFrame: value?.mainFrame === true,
     loadingStarted: value?.loadingStarted === true,
     loadingStopped: value?.loadingStopped === true,
-    documentReplaced: value?.documentReplaced === true,
+    navigated: value?.navigated === true,
+    navigationRequested: value?.navigationRequested === true,
     sameDocumentNavigation: value?.sameDocumentNavigation === true,
     mainFrameDetached: value?.mainFrameDetached === true,
     eventCounts: Object.fromEntries(
@@ -167,8 +188,8 @@ function sanitizeRouteLifecycle(value) {
     ),
   };
 }
-// One fixed event kind; the retained record never exceeds ROUTE_LIFECYCLE_LIMIT
-// counted events in total.
+// One fixed event kind of the main frame; the record never exceeds
+// ROUTE_LIFECYCLE_LIMIT counted events in total.
 function recordRouteLifecycle(kind) {
   const current = sanitizeRouteLifecycle(routeLifecycleObservation);
   if (!ROUTE_LIFECYCLE_EVENTS.includes(kind)) return;
@@ -179,97 +200,85 @@ function recordRouteLifecycle(kind) {
   if (total >= ROUTE_LIFECYCLE_LIMIT) return;
   routeLifecycleObservation = sanitizeRouteLifecycle({
     ...current,
-    pageOpened: true,
-    mainFrame: current.mainFrame || kind === "frameStartedLoading",
+    mainFrame: true,
     loadingStarted: current.loadingStarted || kind === "frameStartedLoading",
     loadingStopped: current.loadingStopped || kind === "frameStoppedLoading",
-    documentReplaced: current.documentReplaced || kind === "documentUpdated",
+    navigated: current.navigated || kind === "frameNavigated",
+    navigationRequested:
+      current.navigationRequested || kind === "frameRequestedNavigation",
     sameDocumentNavigation:
       current.sameDocumentNavigation || kind === "navigatedWithinDocument",
-    mainFrameDetached: current.mainFrameDetached || kind === "detached",
+    mainFrameDetached: current.mainFrameDetached || kind === "frameDetached",
     eventCounts: { ...current.eventCounts, [kind]: current.eventCounts[kind] + 1 },
   });
 }
 function closeRouteLifecycle() {
+  const state = routeLifecycleState;
+  routeLifecycleState = null;
   try {
-    routeLifecycleSocket?.close();
+    if (state) state.ws.close();
   } catch {}
-  routeLifecycleSocket = null;
 }
-// Best effort: any connection, enabling or event failure leaves the record as
-// it was and cannot reach any caller. Only two fixed commands go out on a
-// locally generated session id, never injected page code or runtime
-// messaging; only the transient session id and child session ids are read
-// from replies. Once Page.enable is answered the record exists and the socket
-// closes on the next turn.
+// Best effort only: the caller never awaits it, and any failure leaves the
+// record as it was. Exactly two fixed, read-only commands go out on ordinary
+// request ids; page events are counted regardless of when (or whether) their
+// replies arrive.
 function observeRouteLifecycle(target) {
   try {
     if (typeof target?.webSocketDebuggerUrl !== "string") return;
-    const ws = new WebSocket(target.webSocketDebuggerUrl);
-    routeLifecycleSocket = ws;
-    const session = "route-lifecycle-" + Math.random().toString(36).slice(2);
-    let onTargets = false;
-    const send = (id, method, params, sessionId) => {
-      try {
-        ws.send(JSON.stringify({ id, method, params, sessionId }));
-      } catch {}
+    const state = {
+      ws: new WebSocket(target.webSocketDebuggerUrl),
+      // Transient only: the main frame's id for this observation.
+      mainFrame: undefined,
     };
-    const onMessage = (event) => {
+    routeLifecycleState = state;
+    const { ws } = state;
+    ws.addEventListener("message", (event) => {
       let message;
       try {
         message = JSON.parse(event.data);
       } catch {
         return;
       }
-      if (message?.method === "Target.attachedToTarget") {
-        // A child session (e.g. an OOPIF) is released at once, never counted.
-        const child = message.params?.sessionId;
-        if (onTargets && typeof child === "string")
-          send(100, "Runtime.runIfWaitingForDebugger", {}, child);
+      // Commands must never be mistaken for page events.
+      if (typeof message?.method === "string") {
+        if (!message.method.startsWith("Page.")) return;
+        const frame = routeLifecycleFrame(
+          message.method,
+          message.params,
+          state.mainFrame,
+        );
+        if (frame === undefined) return;
+        // A main-frame navigation (re-)identifies the main frame; any other
+        // main-frame event confirms the one already known.
+        if (typeof frame === "string") state.mainFrame = frame;
+        recordRouteLifecycle(message.method.slice("Page.".length));
         return;
       }
       if (message?.id === 1) {
-        // The auto-attach reply: the root session is never enabled, so only
-        // the dedicated observer session can yield page lifecycle events.
-        onTargets = true;
-        send(2, "Page.enable", {}, session);
-        return;
-      }
-      // Command replies carry a null session id here, so the enable reply is
-      // matched by its own fixed request id; page events by the session.
-      if (message?.id === 2) {
         routeLifecycleObservation = {
           ...sanitizeRouteLifecycle(routeLifecycleObservation),
-          pageOpened: true,
+          enabled: true,
         };
-        setTimeout(() => {
-          try {
-            if (routeLifecycleSocket === ws) routeLifecycleSocket = null;
-            ws.close();
-          } catch {}
-        }, 0);
         return;
       }
-      if (message?.sessionId !== session) return;
-      const kind = String(message.method || "");
-      if (!kind.startsWith("Page.")) return;
-      recordRouteLifecycle(kind.slice("Page.".length));
-      if (kind === "Page.frameDetached") closeRouteLifecycle();
-    };
-    ws.addEventListener("message", onMessage);
-    ws.addEventListener("error", () => {});
-    ws.addEventListener("close", () => {
-      ws.removeEventListener("message", onMessage);
-      if (routeLifecycleSocket === ws) routeLifecycleSocket = null;
+      if (message?.id === 2) {
+        const main = message.result?.frameTree?.frame?.id;
+        if (typeof main === "string" && state.mainFrame === undefined) {
+          state.mainFrame = main;
+          routeLifecycleObservation = {
+            ...sanitizeRouteLifecycle(routeLifecycleObservation),
+            mainFrame: true,
+          };
+        }
+      }
     });
+    ws.addEventListener("error", () => {});
     ws.addEventListener("open", () => {
-      // `root: null` returns a fresh session that is never enabled; page
-      // events can therefore only arrive on the observer's own session.
-      send(1, "Target.setAutoAttach", {
-        autoAttach: true,
-        waitForDebuggerOnStart: false,
-        flatten: true,
-      });
+      try {
+        ws.send(JSON.stringify({ id: 1, method: "Page.enable" }));
+        ws.send(JSON.stringify({ id: 2, method: "Page.getFrameTree" }));
+      } catch {}
     });
   } catch {}
 }
@@ -1585,9 +1594,10 @@ try {
                 },
               }
             : {}),
-          // Present only once the lifecycle observer saw the route document
-          // load; fixed booleans/enums and capped per-kind counts only, never
-          // an id, URL, fragment, token, text, value or protocol payload.
+          // Present only once the direct route-target observer connected or
+          // saw a main-frame event; fixed booleans and capped per-kind counts
+          // only, never an id, URL, fragment, token, text, value or protocol
+          // payload.
           ...(routeLifecycleObservation
             ? {
                 routeTargetLifecycle: sanitizeRouteLifecycle(

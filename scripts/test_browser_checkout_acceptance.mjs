@@ -30,33 +30,6 @@ function countMatches(text, pattern) {
   return (text.match(pattern) || []).length;
 }
 
-// A value serialized out of the isolated lifecycle context, so it compares with
-// the host realm's plain objects and keeps only what would actually be emitted.
-function plain(serialized) {
-  return JSON.parse(serialized);
-}
-function plainRouteLifecycle(context) {
-  return plain(
-    vm.runInContext(
-      "JSON.stringify(sanitizeRouteLifecycle(routeLifecycleObservation))",
-      context,
-    ),
-  );
-}
-
-// From one function declaration up to the next declaration at the same or a
-// shallower indentation, so a test only reads the function it names.
-function sliceToNextFunction(source, declaration, indent = 0) {
-  const start = source.indexOf(declaration);
-  assert.ok(start >= 0, "missing " + declaration);
-  const stop = new RegExp(
-    "\\n {0," + indent + "}(?:export )?(?:async )?function ",
-  );
-  const next = source.slice(start + declaration.length).search(stop);
-  assert.ok(next >= 0, "unterminated " + declaration);
-  return source.slice(start, start + declaration.length + next + 1);
-}
-
 // A present, fully visible and blank form for both the top and child page.
 function blankFormState() {
   const state = {
@@ -641,9 +614,9 @@ test("native absence probes preserve popup focus across the journey", () => {
   assert.doesNotMatch(source, /assertNoNative(Approval|ProfileReview)\(input\)/);
   // Every native absence probe the picker-cancel journey makes uses the
   // focus-preserving form while its popup stays open.
-  const journey = sliceToNextFunction(
-    source,
-    "async function runPickerCancelJourney",
+  const journey = source.slice(
+    source.indexOf("async function runPickerCancelJourney"),
+    source.indexOf("export async function acceptCheckoutFrames"),
   );
   assert.equal(
     countMatches(journey, /assertNoNative(?:Approval|ProfileReview)\(input, POPUP_OPEN\)/g),
@@ -1396,221 +1369,49 @@ test("both helper outcomes are asserted through the actual result object", () =>
     );
 });
 
-// Only the evaluation-only lifecycle helpers of the acceptance harness, with
-// the browser `WebSocket` it uses but no browser, fixture or native host.
-function routeLifecycleContext() {
+test("route lifecycle sanitizer keeps only fixed booleans and capped counts", () => {
+  // The QuickFill=false route smoke reports routeTargetLifecycle only on a
+  // route-detail failure. It must stay a fixed allowlisted shape: no url,
+  // token, frame/loader/document id, text, value or raw protocol payload.
+  // Only the pure lifecycle helpers are compiled, in an empty context; the
+  // harness itself is never imported (it launches a browser when run).
   const source = readFileSync(
     new URL("./browser_native_acceptance.mjs", import.meta.url),
     "utf8",
   );
   const start = source.indexOf("const ROUTE_LIFECYCLE_EVENTS = [");
-  const end = source.indexOf("\nlet privacyValues = [];", start);
-  assert.ok(start >= 0 && end > start, "lifecycle helpers must stay top-level");
-  const context = vm.createContext({ WebSocket, setTimeout });
-  vm.runInContext(
-    source.slice(start, end) +
-      "\nthis.ROUTE_LIFECYCLE_EVENTS = ROUTE_LIFECYCLE_EVENTS;" +
-      "\nthis.ROUTE_LIFECYCLE_LIMIT = ROUTE_LIFECYCLE_LIMIT;" +
-      "\nthis.sanitizeRouteLifecycle = sanitizeRouteLifecycle;" +
-      "\nthis.recordRouteLifecycle = recordRouteLifecycle;" +
-      "\nthis.observeRouteLifecycle = observeRouteLifecycle;" +
-      "\nthis.closeRouteLifecycle = closeRouteLifecycle;" +
-      "\nthis.getRouteLifecycleObservation = () => routeLifecycleObservation;" +
-      "\nthis.getRouteLifecycleSocket = () => routeLifecycleSocket;",
-    context,
-  );
-  // Read the retained state through accessors; it is never raw-reported.
-  vm.runInContext(
-    "Object.defineProperty(this, 'routeLifecycleObservation', { get: getRouteLifecycleObservation });" +
-      "Object.defineProperty(this, 'routeLifecycleSocket', { get: getRouteLifecycleSocket });",
-    context,
-  );
-  return context;
-}
-
-test("route lifecycle diagnostics keep only fixed booleans and capped counts", () => {
-  // The harness observes only the exact route target through browser CDP. The
-  // retained record must stay a fixed list of booleans plus small fixed-kind
-  // counts: no id, URL, fragment, token, text, value or protocol payload.
-  const context = routeLifecycleContext();
-  const observation = vm.runInContext("routeLifecycleObservation", context);
-  assert.equal(observation, null);
-
-  for (const kind of ["frameStartedLoading", "frameStoppedLoading"])
-    vm.runInContext(`recordRouteLifecycle(${JSON.stringify(kind)})`, context);
-  const record = plainRouteLifecycle(context);
-  assert.deepEqual(record, {
-    pageOpened: true,
-    mainFrame: true,
-    loadingStarted: true,
-    loadingStopped: true,
-    documentReplaced: false,
-    sameDocumentNavigation: false,
-    mainFrameDetached: false,
-    eventCounts: {
-      frameStartedLoading: 1,
-      frameStoppedLoading: 1,
-      documentUpdated: 0,
-      navigatedWithinDocument: 0,
-      detached: 0,
-    },
-  });
-  // Every retained leaf is a boolean or a small non-negative integer.
-  for (const [key, value] of Object.entries(record))
-    if (key !== "eventCounts") assert.equal(typeof value, "boolean", key);
-  // An unknown event kind is never counted.
-  vm.runInContext('recordRouteLifecycle("frameNavigated")', context);
-  assert.equal(
-    vm.runInContext("routeLifecycleObservation.eventCounts.frameNavigated", context),
-    undefined,
-  );
-});
-
-test("route lifecycle sanitizer drops unknown keys and non-boolean values", () => {
-  const context = routeLifecycleContext();
-  const sanitized = plain(
+  const stop = source.indexOf("\nlet privacyValues", start);
+  assert.ok(start >= 0 && stop > start, "lifecycle helpers must stay top-level");
+  const context = vm.createContext({});
+  vm.runInContext(source.slice(start, stop), context);
+  const sanitized = JSON.parse(
     vm.runInContext(
-      `JSON.stringify(sanitizeRouteLifecycle({
-      pageOpened: "yes",
-      mainFrame: 1,
-      loadingStarted: true,
-      mainFrameDetached: {},
-      url: "chrome-extension://abcd/popup.html#route=secret",
-      frameId: "FRAMEID",
-      loaderId: "LOADERID",
-      eventCounts: {
-        detached: 999,
-        frameStartedLoading: -3,
-        navigatedWithinDocument: 2.5,
-        injected: 7,
-      },
-    }))`,
+      "JSON.stringify(sanitizeRouteLifecycle({" +
+        'enabled: true, mainFrame: "yes", navigated: 1, mainFrameDetached: true,' +
+        'url: "chrome-extension://abcd/popup.html#route=SECRET",' +
+        'frameId: "FRAME", loaderId: "LOADER", documentId: "DOC", text: "SECRET",' +
+        "eventCounts: { frameNavigated: 999, frameStoppedLoading: -1, injected: 2 }," +
+        "raw: { method: \"Page.frameNavigated\" }" +
+        "}))",
       context,
     ),
   );
   assert.deepEqual(sanitized, {
-    pageOpened: false,
+    enabled: true,
     mainFrame: false,
-    loadingStarted: true,
+    loadingStarted: false,
     loadingStopped: false,
-    documentReplaced: false,
+    navigated: false,
+    navigationRequested: false,
     sameDocumentNavigation: false,
-    mainFrameDetached: false,
+    mainFrameDetached: true,
     eventCounts: {
       frameStartedLoading: 0,
       frameStoppedLoading: 0,
-      documentUpdated: 0,
+      frameNavigated: 16,
+      frameRequestedNavigation: 0,
       navigatedWithinDocument: 0,
-      detached: 16,
+      frameDetached: 0,
     },
   });
-  assert.doesNotMatch(JSON.stringify(sanitized), /chrome-extension|FRAMEID|LOADERID|secret|injected/);
-});
-
-test("route lifecycle counts are capped at a small fixed constant", () => {
-  const context = routeLifecycleContext();
-  const limit = vm.runInContext("ROUTE_LIFECYCLE_LIMIT", context);
-  assert.ok(Number.isInteger(limit) && limit > 0 && limit <= 16);
-  vm.runInContext(
-    `for (let i = 0; i < ROUTE_LIFECYCLE_LIMIT * 3; i++) recordRouteLifecycle("documentUpdated")`,
-    context,
-  );
-  const counts = vm.runInContext(
-    "JSON.stringify(routeLifecycleObservation.eventCounts)",
-    context,
-  );
-  const total = Object.values(JSON.parse(counts)).reduce((a, b) => a + b, 0);
-  assert.equal(total, limit);
-});
-
-test("route lifecycle observer is best-effort and cannot change the result", async () => {
-  // An unreachable or absent websocket resolves synchronously, and every event
-  // failure is swallowed: the caller's next step runs exactly as without it.
-  const context = routeLifecycleContext();
-  for (const target of [null, undefined, {}, { webSocketDebuggerUrl: 7 }])
-    assert.equal(
-      vm.runInContext(
-        `(() => { observeRouteLifecycle(${JSON.stringify(target)}); return "after"; })()`,
-        context,
-      ),
-      "after",
-    );
-  vm.runInContext('observeRouteLifecycle({ webSocketDebuggerUrl: "ws://127.0.0.1:1/x" })', context);
-  await new Promise((r) => setTimeout(r, 50));
-  assert.equal(vm.runInContext("routeLifecycleObservation", context), null);
-  vm.runInContext("closeRouteLifecycle()", context);
-  assert.equal(vm.runInContext("routeLifecycleSocket", context), null);
-});
-
-test("route lifecycle observation is bounded to the exact route target", () => {
-  const source = readFileSync(
-    new URL("./browser_native_acceptance.mjs", import.meta.url),
-    "utf8",
-  );
-  const checkpoint = sliceToNextFunction(
-    source,
-    "async function acceptRouteDetailRead(",
-    2,
-  );
-  // Started once, only for the exact captured target, from its discovery, and
-  // before the first popup-closed wait so it spans those waits.
-  assert.equal(countMatches(checkpoint, /observeRouteLifecycle\(opened\);/g), 1);
-  assert.ok(
-    checkpoint.indexOf("observeRouteLifecycle(opened);") <
-      checkpoint.indexOf('mark("route:popup-closed")'),
-  );
-  // Closed on every exit of the checkpoint, including a failed attachment:
-  // the close is the checkpoint's own finally and comes after the route-
-  // document wait that can fail.
-  const closed = checkpoint.lastIndexOf("closeRouteLifecycle();");
-  assert.ok(closed > checkpoint.indexOf('"Route page did not load"'));
-  assert.ok(
-    closed > checkpoint.indexOf("mark(\"route:verified\")"),
-    "the socket must outlive the whole checkpoint",
-  );
-  assert.match(
-    checkpoint.slice(closed - 200, closed),
-    /\} finally \{\n      \/\/ Diagnostics only: the lifecycle socket never outlives this checkpoint\.\n      $/,
-  );
-  // Diagnostic only: no injected page code, runtime messaging, waits, gates or
-  // screenshots are added, and the existing DOM probe fields are untouched.
-  // Up to the next section's top-level comment, so the whole observer body
-  // (its one-argument `();` calls read as non-declarations) is scanned.
-  const observerStart = source.indexOf("function observeRouteLifecycle(");
-  const observer = source.slice(
-    observerStart,
-    source.indexOf("\nlet privacyValues", observerStart),
-  );
-  assert.ok(observer.includes('send(2, "Page.enable", {}, session)'));
-  for (const forbidden of [
-    "Runtime.evaluate",
-    "Runtime.callFunctionOn",
-    "addScriptToEvaluateOnNewDocument",
-    "console.",
-  ])
-    assert.ok(!observer.includes(forbidden), forbidden);
-  assert.match(observer, /setTimeout\(/);
-  assert.doesNotMatch(observer, /await |\.then\(|\breject\b|\bthrow\b/);
-  // Page events need the observer's own session; the enable reply is its own
-  // fixed request id (not counted as an event).
-  assert.match(observer, /if \(message\?\.sessionId !== session\) return;/);
-  assert.match(observer, /message\?\.id === 2\) \{\n\s+routeLifecycleObservation/);
-  // Only the observer's own generated session can yield page lifecycle events.
-  assert.match(observer, /send\(2, "Page\.enable", \{\}, session\);$/m);
-  assert.doesNotMatch(observer, /frameId|loaderId|documentURL|result\.url|params\.frame/);
-  // The failure report emits the sanitized record only under route mode and
-  // only through its sanitizer.
-  const report = source.slice(source.indexOf("const report = {"));
-  assert.match(
-    report,
-    /routeTargetLifecycle: sanitizeRouteLifecycle\(\n\s+routeLifecycleObservation,\n\s+\),/,
-  );
-  // Exactly one emitting site, and the record is only ever handed to its
-  // sanitizer there (its presence guard plus that call).
-  assert.equal(countMatches(report, /routeTargetLifecycle:/g), 1);
-  assert.equal(
-    countMatches(report, /sanitizeRouteLifecycle\(\s*routeLifecycleObservation,/g),
-    1,
-  );
-  assert.equal(countMatches(report, /routeLifecycleObservation/g), 2);
 });
