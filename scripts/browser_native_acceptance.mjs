@@ -585,7 +585,7 @@ try {
   input([
     {
       click_label:
-        process.env.LOCKLARK_TEST_POPUP_VAULT === "1"
+        process.env.LOCKLARK_TEST_POPUP_VAULT === "1" || checkoutFrames
           ? "连接并启用快捷填充"
           : "确认连接此扩展",
     },
