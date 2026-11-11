@@ -263,6 +263,213 @@ func TestKDBXPayloadSealOpenNoCompressionRoundTrip(t *testing.T) {
 	}
 }
 
+// payloadBudgetTitle returns an ASCII Title of exactly n bytes made of random
+// letters and digits only. Such a value needs no XML escaping, so each extra
+// Title byte grows its element by exactly one byte.
+func payloadBudgetTitle(t *testing.T, n int) string {
+	t.Helper()
+	const letters = "abcdefghijklmnopqrstuvwxyz" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ" + "0123456789"
+	if n < 1 {
+		t.Fatalf("title of %d bytes", n)
+	}
+	raw := make([]byte, n)
+	if _, err := rand.Read(raw); err != nil {
+		t.Fatal(err)
+	}
+	title := make([]byte, n)
+	for i, b := range raw {
+		title[i] = letters[int(b)%len(letters)]
+	}
+	return string(title)
+}
+
+// payloadBudgetFixture returns a fresh unlocked fixture in the payloadFixtureDB
+// shape with the selected cipher, an IV of exactly that cipher's length,
+// NoCompressionFlag and the given Title.
+func payloadBudgetFixture(t *testing.T, cipherID []byte, ivLen int, title string) *kdbx.Database {
+	t.Helper()
+	db := payloadFixtureDB(t)
+	db.Header.FileHeaders.CompressionFlags = kdbx.NoCompressionFlag
+	db.Header.FileHeaders.CipherID = bytes.Clone(cipherID)
+	db.Header.FileHeaders.EncryptionIV = make([]byte, ivLen)
+	for i := range db.Header.FileHeaders.EncryptionIV {
+		db.Header.FileHeaders.EncryptionIV[i] = byte(i + 1)
+	}
+	db.Content.Root.Groups[0].Entries[0].Values[0].Value.Content = title
+	return db
+}
+
+// encodeUnboundedLegacy writes db the way SealKDBXPayload does, but with the
+// legacy gokeepasslib encoder, whose Encode has no plaintext budget: the
+// Locklark profile, a copied CEK installed as key credentials and protected
+// entries locked the way Seal leaves them. The caller's cek is not modified,
+// db.Credentials is cleared again and the encoder's key copy is cleared. db
+// is left with protected entries locked.
+func encodeUnboundedLegacy(t *testing.T, db *kdbx.Database, cek []byte) []byte {
+	t.Helper()
+	db.Credentials = nil
+	key, err := installKDBXKey(db, cek)
+	if err != nil {
+		t.Fatalf("installing CEK copy: %v", err)
+	}
+	defer clear(key)
+	defer func() { db.Credentials = nil }()
+	if err := configureKDBXProfile(db); err != nil {
+		t.Fatalf("configuring profile: %v", err)
+	}
+	if err := db.LockProtectedEntries(); err != nil {
+		t.Fatalf("locking fixture: %v", err)
+	}
+	var out bytes.Buffer
+	if err := kdbx.NewEncoder(&out).Encode(db); err != nil {
+		t.Fatalf("unbounded legacy encode: %v", err)
+	}
+	return out.Bytes()
+}
+
+// payloadAssertRoundTrip checks that opened carries the fixture's Title,
+// protected Password and attachment.
+func payloadAssertRoundTrip(t *testing.T, opened *kdbx.Database, title string) {
+	t.Helper()
+	entry := &opened.Content.Root.Groups[0].Entries[0]
+	if got := entry.GetContent("Title"); got != title {
+		t.Fatalf("title of %d bytes did not round trip: got %d bytes", len(title), len(got))
+	}
+	if got := entry.GetContent("Password"); got != payloadProtectedSecret {
+		t.Fatalf("protected value = %q, want the sealed value", got)
+	}
+	if !entry.Values[1].Value.Protected.Bool {
+		t.Fatal("protected flag lost")
+	}
+	if len(entry.Binaries) != 1 || entry.Binaries[0].Name != payloadAttachmentName {
+		t.Fatalf("binary references = %+v", entry.Binaries)
+	}
+	binary := opened.FindBinary(entry.Binaries[0].Value.ID)
+	if binary == nil || !bytes.Equal(binary.Content, payloadAttachmentBytes) {
+		t.Fatalf("attachment bytes did not round trip: %v", binary)
+	}
+}
+
+// TestKDBXPayloadSealOpenNonAESBudgetBoundary covers the public payload API at
+// the plaintext budget boundary of the two supported non-AES ciphers:
+// ChaCha20 (12-byte IV) and Twofish (16-byte IV). With NoCompressionFlag Open
+// retains and counts the legacy writer's 1..16 padding bytes for both, so Seal
+// admits at most floor(MaxPlaintextBytes/16)*16-1 bytes of serialized body.
+// For each cipher the test seals and opens a valid baseline, grows its ASCII
+// Title to that exact-boundary positive, checks the positive's full padded
+// RawData and values, and then checks, on the same fixture plus one Title byte,
+// both Seal's and Open's CodeKDBXPayloadTooLarge. The over-budget ciphertext
+// comes from the unbounded legacy encoder and is a valid KDBX, not a malformed
+// file: only its decrypted content crosses the budget.
+func TestKDBXPayloadSealOpenNonAESBudgetBoundary(t *testing.T) {
+	cek := payloadFixtureCEK(t)
+	ciphers := []struct {
+		name  string
+		id    []byte
+		ivLen int
+	}{
+		{"chacha20", kdbx.CipherChaCha20, 12},
+		{"twofish", kdbx.CipherTwoFish, 16},
+	}
+	// A body of maxBody bytes carries one byte of writer padding, so its
+	// padded content is exactly paddedLimit, at or below MaxPlaintextBytes.
+	paddedLimit := int64(MaxPlaintextBytes / 16 * 16)
+	maxBody := paddedLimit - 1
+
+	for _, c := range ciphers {
+		t.Run(c.name, func(t *testing.T) {
+			cekCopy := bytes.Clone(cek)
+			defer clear(cekCopy)
+			newFixture := func(title string) *kdbx.Database {
+				return payloadBudgetFixture(t, c.id, c.ivLen, title)
+			}
+
+			// A small valid baseline, opened without a budget, gives the
+			// fixture's logical body for this cipher's framing and IV.
+			baseline := openUnbounded(t, sealedFixture(t, newFixture("fixture"), cekCopy), cekCopy)
+			if got := baseline.Header.FileHeaders.CipherID; !bytes.Equal(got, c.id) {
+				t.Fatalf("sealed baseline cipher = %x, want %x", got, c.id)
+			}
+			if iv := baseline.Header.FileHeaders.EncryptionIV; len(iv) != c.ivLen {
+				t.Fatalf("sealed baseline IV of %d bytes, want %d", len(iv), c.ivLen)
+			}
+			raw := baseline.Content.RawData
+			bodyLen := int64(len(raw) - trailingCipherPadding(raw))
+			grow := maxBody - bodyLen
+			if grow <= 0 {
+				t.Fatalf("baseline body of %d bytes already reaches the %d-byte boundary", bodyLen, maxBody)
+			}
+			// An ASCII Title of grow more bytes grows the serialized body by
+			// exactly grow bytes.
+			title := payloadBudgetTitle(t, len("fixture")+int(grow))
+
+			// Positive: the exact boundary seals and opens under the budget.
+			sealed := sealedFixture(t, newFixture(title), cekCopy)
+			opened, err := OpenKDBXPayload(sealed, cekCopy)
+			if err != nil {
+				t.Fatalf("Open of a %d-byte body: %v", maxBody, err)
+			}
+			if got := opened.Header.FileHeaders.CipherID; !bytes.Equal(got, c.id) {
+				t.Fatalf("opened cipher = %x, want %x", got, c.id)
+			}
+			// Open keeps every decrypted byte of non-AES content, so its
+			// RawData is the logical body followed by the writer's padding.
+			raw = opened.Content.RawData
+			pad := trailingCipherPadding(raw)
+			if got := int64(len(raw) - pad); got != maxBody {
+				t.Fatalf("opened logical body of %d bytes, want %d", got, maxBody)
+			}
+			if int64(len(raw)) != paddedLimit || pad != 1 || raw[len(raw)-1] != 1 {
+				t.Fatalf("opened RawData of %d bytes ending in %d padding bytes, want one 0x01 byte after %d",
+					len(raw), pad, maxBody)
+			}
+			if int64(len(raw)) > MaxPlaintextBytes {
+				t.Fatalf("opened RawData of %d bytes exceeds MaxPlaintextBytes", len(raw))
+			}
+			payloadAssertRoundTrip(t, opened, title)
+
+			// The same fixture plus one Title byte is one more body byte,
+			// which Seal rejects before returning any output.
+			overTitle := title + "a"
+			out, err := SealKDBXPayload(newFixture(overTitle), cekCopy)
+			wantPayloadCode(t, err, CodeKDBXPayloadTooLarge)
+			if out != nil {
+				t.Fatalf("Seal of a %d-byte body returned %d bytes", maxBody+1, len(out))
+			}
+
+			// The same one-byte-over fixture through the unbounded legacy
+			// encoder is a valid KDBX: its body is paddedLimit bytes and the
+			// writer appends a full 16-byte block, so RawData is
+			// paddedLimit+16 bytes. The public Open must reject exactly those
+			// bytes as too large and return no database.
+			over := encodeUnboundedLegacy(t, newFixture(overTitle), cekCopy)
+			defer clear(over)
+			legacy := openUnbounded(t, over, cekCopy)
+			if got := legacy.Header.FileHeaders.CipherID; !bytes.Equal(got, c.id) {
+				t.Fatalf("legacy fixture cipher = %x, want %x", got, c.id)
+			}
+			if got := legacy.Content.Root.Groups[0].Entries[0].GetContent("Title"); got != overTitle {
+				t.Fatalf("legacy fixture title of %d bytes did not survive: got %d", len(overTitle), len(got))
+			}
+			legacyRaw := legacy.Content.RawData
+			legacyPad := trailingCipherPadding(legacyRaw)
+			if got := int64(len(legacyRaw) - legacyPad); got != paddedLimit {
+				t.Fatalf("legacy fixture logical body of %d bytes, want %d", got, paddedLimit)
+			}
+			if legacyPad != 16 || int64(len(legacyRaw)) != paddedLimit+16 ||
+				int64(len(legacyRaw)) <= MaxPlaintextBytes {
+				t.Fatalf("legacy fixture RawData of %d bytes ending in %d padding bytes, want %d",
+					len(legacyRaw), legacyPad, paddedLimit+16)
+			}
+			opened, err = OpenKDBXPayload(over, cekCopy)
+			wantPayloadCode(t, err, CodeKDBXPayloadTooLarge)
+			if opened != nil {
+				t.Fatalf("Open of a %d-byte RawData returned a database", len(legacyRaw))
+			}
+		})
+	}
+}
+
 // TestKDBXPayloadSealOpenEmptyBinary checks the empty attachment round trip
 // through the public API: AddBinary([]byte{}) stores a flag-only inner-header
 // binary (no content bytes), which Seal emits and Open's bounded decoder must
