@@ -75,7 +75,7 @@ class AutofillAuthService : AutofillService() {
         val pendingIntent = authenticationIntent(handoff)
         val ids: Array<AutofillId> = form.ids
         val builder = FillResponse.Builder()
-        if (Build.VERSION.SDK_INT >= AutofillPresentationLevel.PRESENTATIONS_API) {
+        if (AutofillPresentationLevel.usesPresentations(Build.VERSION.SDK_INT)) {
             // Isolated class: API 30-32 never loads Presentations.
             AutofillPresentationsApi33.setAuthentication(
                 builder,
