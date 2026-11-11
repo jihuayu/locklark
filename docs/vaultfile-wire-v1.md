@@ -965,7 +965,13 @@ OpenKDBXPayload(ciphertext, cek []byte) (db *kdbx.Database, err error)
 
 Seal sets one profile on the header before encoding, replacing any prior KDF
 settings. Open accepts whatever the bounded decoder and its KDF guard accept;
-it does not require this exact profile.
+it does not require this exact profile. The guard accepts a KDBX4 header whose
+KDF is Argon2d or Argon2id with version `0x13`, iterations 1..10, parallelism
+1..8, and memory from `parallelism*8 KiB` through 128 MiB inclusive that is a
+multiple of 1024 bytes, with no SecretKey or associated data. It rejects every
+other KDF, version, iteration or parallelism count, memory value, SecretKey or
+associated data before any Argon2 allocation. The Seal profile below is one
+point in that range, not a requirement for Open.
 
 | Member | Value |
 | ------ | ----- |
@@ -1035,16 +1041,16 @@ The committed bounded decoder (`Decoder.DecodeWithLimits`) then runs with
 | encoded input | read at most `MaxKDBXCiphertextBytes + 1` bytes; over it is rejected before the header is parsed |
 | KDBX version | a header that is not KDBX 4 (such as KDBX 3.1) is rejected right after parsing and before any legacy AES round |
 | header hash | the header SHA-256 is checked before key derivation |
-| KDF guard | the credentials KDF check rejects an unsupported KDF algorithm, version, iterations, parallelism, memory, secret key or associated data before any Argon2 allocation |
+| KDF guard | the credentials KDF check accepts only KDBX4 Argon2d or Argon2id, version `0x13`, iterations 1..10, parallelism 1..8 and memory from `parallelism*8 KiB` through 128 MiB inclusive and divisible by 1024 bytes, with no SecretKey or associated data; any other value is rejected before any Argon2 allocation. It does not require the fixed Seal profile |
 | header HMAC | checked before content decryption |
 | content blocks | bounded by the encoded budget; each block HMAC is verified |
 | decrypted/gzip body | the decrypted content, or its gzip expansion, is rejected after key derivation and decryption but before XML decoding. The budget is cipher-specific. With `NoCompressionFlag` and AES, a valid 1..16-byte PKCS#7 suffix (including a full 16-byte block) is removed from the end of the decrypted content and excluded from the budget; with `NoCompressionFlag` and ChaCha20 or Twofish, every decrypted byte is kept and counted, including the 1..16 repeated-count bytes the legacy writer appends for them; the decoder removes a valid suffix only for AES. Gzip content is budgeted by its expansion only; trailing block padding is read by neither and is excluded |
 | InnerHeader binaries | the aggregate binary bytes (protection flag included) are bounded by `MaxPlaintextBytes` and rejected before an over-budget binary is copied, after key derivation and decryption |
 
-The last two budgets can only be evaluated after the fixed Argon2id cost;
-they bound memory and CPU after derivation, not before it. A successful Open
-returns protected values unlocked (the state Seal accepts), with
-`Credentials` set to an empty value. Open clears its CEK copy; temporaries
+The last two budgets can only be evaluated after the validated, bounded
+Argon2d/Argon2id derivation; they bound memory and CPU after it, not before
+the derivation. A successful Open returns protected values unlocked (the state
+Seal accepts), with `Credentials` set to an empty value. Open clears its CEK copy; temporaries
 allocated inside the vendored crypto, gzip and XML code are opaque and cannot
 be cleared through its public API.
 
