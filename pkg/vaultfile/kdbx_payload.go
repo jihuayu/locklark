@@ -38,8 +38,10 @@ const (
 	// corrupted content.
 	CodeKDBXPayloadInvalid = "kdbx_payload_invalid"
 	// CodeKDBXPayloadTooLarge is reported when the input or the encoded
-	// output exceeds MaxKDBXCiphertextBytes, or a decoded or gzip-expanded
-	// body or the aggregate inner-header binaries exceed MaxPlaintextBytes.
+	// output exceeds MaxKDBXCiphertextBytes, a sealed plaintext body (the
+	// KDBX4 InnerHeader plus XML, before compression) exceeds
+	// MaxPlaintextBytes, or a decoded or gzip-expanded body or the aggregate
+	// inner-header binaries exceed MaxPlaintextBytes.
 	CodeKDBXPayloadTooLarge = "kdbx_payload_too_large"
 )
 
@@ -214,16 +216,30 @@ func configureKDBXProfile(db *kdbx.Database) error {
 // keys, XML, compressed and encrypted content) that this API cannot reach or
 // clear.
 //
-// Size. The returned bytes are at most MaxKDBXCiphertextBytes. The encoder
-// writes into a bounded collector, so at most that cap is retained; an
-// encoding that would exceed it is reported as CodeKDBXPayloadTooLarge and no
-// output is returned.
+// Size. Seal enforces both size budgets Open enforces, so a payload it
+// produces is one Open's budgets accept. First, the encoder's opt-in
+// Encoder.EncodeWithLimits bounds the serialized KDBX4 plaintext body, the
+// InnerHeader followed by the XML document, after the encoder's normalization
+// and protected-entry ordering and before gzip compression or encryption: a
+// body above MaxPlaintextBytes is reported as CodeKDBXPayloadTooLarge and is
+// never compressed or encrypted. The budget is enforced on the body's writes,
+// so nothing beyond it is retained. A plaintext value that is large but
+// compresses well is therefore rejected rather than sealed into a payload
+// Open would reject for its expanded size. The encoder keeps its established
+// write order, so by then the KDBX header and hashes have been written into
+// the output collector; that collector is bounded by MaxKDBXCiphertextBytes
+// and is released on every error, so an encoding rejected after that header
+// is reported as CodeKDBXPayloadTooLarge and no output is returned. Second, a
+// returned payload never exceeds MaxKDBXCiphertextBytes: a larger encoding is
+// reported as CodeKDBXPayloadTooLarge and its collected bytes are released.
+// No output is returned for any error.
 //
 // Errors are fresh *Error values: CodeKDBXPayloadInvalid when a shape field is
 // nil or malformed, for a header that is not KDBX 4.1, a cek of the wrong
-// length, a crypto/rand failure or any encoder failure; CodeKDBXPayloadTooLarge
-// when the encoded output exceeds MaxKDBXCiphertextBytes. A nil error always
-// comes with non-nil bytes; on error the bytes are nil.
+// length, a crypto/rand failure or any other encoder failure;
+// CodeKDBXPayloadTooLarge when the plaintext body exceeds MaxPlaintextBytes or
+// the encoded output exceeds MaxKDBXCiphertextBytes. A nil error always comes
+// with non-nil bytes; on error the bytes are nil.
 func SealKDBXPayload(db *kdbx.Database, cek []byte) (encoded []byte, err error) {
 	if len(cek) != CEKSize || !validKDBX41PackageShape(db) {
 		return nil, errKDBXPayloadInvalid()
@@ -248,13 +264,13 @@ func SealKDBXPayload(db *kdbx.Database, cek []byte) (encoded []byte, err error) 
 	}
 
 	out := &boundedKDBXBuffer{max: MaxKDBXCiphertextBytes}
-	writeErr := kdbx.NewEncoder(out).Encode(db)
-	if out.exceeded {
-		out.release()
+	defer out.release()
+	limits := kdbx.EncodeLimits{MaxPlaintextBytes: MaxPlaintextBytes}
+	writeErr := kdbx.NewEncoder(out).EncodeWithLimits(db, limits)
+	if out.exceeded || errors.Is(writeErr, kdbx.ErrEncodeLimitExceeded) {
 		return nil, errKDBXPayloadTooLarge()
 	}
 	if writeErr != nil {
-		out.release()
 		return nil, errKDBXPayloadInvalid()
 	}
 	return out.detach(), nil

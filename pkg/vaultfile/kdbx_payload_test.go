@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"errors"
+	"strings"
 	"testing"
 
 	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
@@ -793,23 +794,28 @@ func payloadFixtureOversized(t *testing.T, db *kdbx.Database) {
 	payloadFixtureReference(db, "huge.bin", payloadIncompressible(t, payloadOversizeBinaryBytes))
 }
 
+// TestKDBXPayloadOpenRejectsExpandedBodyOverBudget documents the bounded
+// decoder's expanded-body budget through the public API. Seal now bounds the
+// plaintext body Open expands, so a payload over MaxPlaintextBytes by a
+// registered attachment can no longer be sealed: Seal reports
+// CodeKDBXPayloadTooLarge with nil output instead. The decoder's own
+// expanded-body rejection is covered by the vendored decoder tests.
 func TestKDBXPayloadOpenRejectsExpandedBodyOverBudget(t *testing.T) {
 	cek := payloadFixtureCEK(t)
 	db := payloadFixtureDB(t)
-	// A referenced raw binary one byte over MaxPlaintextBytes makes the
-	// decrypted aggregate InnerHeader binary bytes over budget. The encoder
-	// gzip-stores it, and incompressible content keeps that under
-	// MaxKDBXCiphertextBytes, so Open passes the encoded-input budget and
-	// fails at the aggregate binary budget.
+	// An attachment just past MaxPlaintextBytes makes the InnerHeader plus
+	// document plaintext over budget; its incompressible content would have
+	// gzipped stored it well under MaxKDBXCiphertextBytes.
 	payloadFixtureReference(db, "large.bin", payloadIncompressible(t, MaxPlaintextBytes+1))
-	sealed := sealedFixture(t, db, cek)
-	if !isKDBX41(sealed) || len(sealed) > MaxKDBXCiphertextBytes {
-		t.Fatalf("payload of %d bytes does not pass the prechecks", len(sealed))
-	}
-	opened, err := OpenKDBXPayload(sealed, cek)
+	prior := kdbx.NewPasswordCredentials("prior password")
+	db.Credentials = prior
+	out, err := SealKDBXPayload(db, cek)
 	wantPayloadCode(t, err, CodeKDBXPayloadTooLarge)
-	if opened != nil {
-		t.Fatal("failed Open returned a database")
+	if out != nil {
+		t.Fatalf("over-budget Seal returned %d bytes", len(out))
+	}
+	if db.Credentials != prior {
+		t.Fatal("Seal did not restore the prior credentials after the plaintext budget")
 	}
 }
 
@@ -827,4 +833,47 @@ func TestKDBXPayloadSealRejectsOversizedOutput(t *testing.T) {
 	if db.Credentials != prior {
 		t.Fatal("Seal did not restore the prior credentials after the cap")
 	}
+}
+
+// TestKDBXPayloadSealRejectsCompressiblePlaintextOverBudget is the regression
+// for the plaintext budget: a valid, unprotected Notes value of
+// MaxPlaintextBytes-2 bytes makes the KDBX4 plaintext body (InnerHeader plus
+// XML) exceed MaxPlaintextBytes, while the old Encode gzipped that body to a
+// few dozen kilobytes and wrote it. Seal must report CodeKDBXPayloadTooLarge
+// with nil bytes before it compresses or encrypts that body.
+func TestKDBXPayloadSealRejectsCompressiblePlaintextOverBudget(t *testing.T) {
+	cek := payloadFixtureCEK(t)
+	db := payloadFixtureDB(t)
+	notes := payloadAlternatingASCII(MaxPlaintextBytes - 2)
+	db.Content.Root.Groups[0].Entries[0].Values = append(
+		db.Content.Root.Groups[0].Entries[0].Values, kdbx.ValueData{Key: "Notes", Value: kdbx.V{Content: notes}},
+	)
+	// The same fixture with a small Notes value is accepted, so the budget
+	// rejects only the over-budget body.
+	plain := payloadFixtureDB(t)
+	plain.Content.Root.Groups[0].Entries[0].Values = append(
+		plain.Content.Root.Groups[0].Entries[0].Values, kdbx.ValueData{Key: "Notes", Value: kdbx.V{Content: "compact value"}},
+	)
+
+	out, err := SealKDBXPayload(db, cek)
+	wantPayloadCode(t, err, CodeKDBXPayloadTooLarge)
+	if out != nil {
+		t.Fatalf("over-budget Seal returned %d bytes", len(out))
+	}
+	// The comparison fixture is accepted, so the budget rejects only the
+	// expanded document.
+	if _, err := SealKDBXPayload(plain, cek); err != nil {
+		t.Fatalf("fixture within budget rejected: %v", err)
+	}
+}
+
+// payloadAlternatingASCII returns n bytes alternating "ab", a valid string
+// value that gzip shrinks to about a thousandth of its size.
+func payloadAlternatingASCII(n int) string {
+	var b strings.Builder
+	b.Grow(n)
+	for i := 0; i < n; i++ {
+		b.WriteByte("ab"[i%2])
+	}
+	return b.String()
 }

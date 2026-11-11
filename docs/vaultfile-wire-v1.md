@@ -1053,13 +1053,25 @@ be cleared through its public API.
 | Code | Meaning |
 | ---- | ------- |
 | `kdbx_payload_invalid` | every rejected input and every KDBX failure: a nil or malformed database, a header that is not KDBX 4.1, a CEK of the wrong length, a wrong CEK, tampered or malformed bytes, an unsupported KDF, a block or header authentication failure |
-| `kdbx_payload_too_large` | input above `MaxKDBXCiphertextBytes`; a decoded or gzip-expanded body above `MaxPlaintextBytes`; aggregate InnerHeader binary bytes above `MaxPlaintextBytes`; an encoded output above `MaxKDBXCiphertextBytes` |
+| `kdbx_payload_too_large` | input above `MaxKDBXCiphertextBytes`; a sealed plaintext body above `MaxPlaintextBytes`; a decoded or gzip-expanded body above `MaxPlaintextBytes`; aggregate InnerHeader binary bytes above `MaxPlaintextBytes`; an encoded output above `MaxKDBXCiphertextBytes` |
 
 Both are `*Error` values created per call. The invalid code is intentionally
 one code for all failures so a caller cannot distinguish a wrong key from
 corrupted content; neither error embeds input data or key bytes. Seal returns
 bytes only with a nil error and nil bytes on error; Open returns a database
 only with a nil error and nil on error.
+
+The decoder's expanded-body budget would otherwise let Seal produce a payload
+that Open rejects. Seal therefore also bounds the encoder's plaintext body:
+the encoder's opt-in `Encoder.EncodeWithLimits` measures the serialized KDBX4
+plaintext (the InnerHeader followed by the XML document, after the encoder's
+normalization and protected-entry ordering) and enforces `MaxPlaintextBytes`
+on its writes before gzip compression and encryption. A body over it, such as
+a highly compressible value that still expands the document past the budget,
+is `kdbx_payload_too_large` with no output. The encoder keeps its established
+write order, so by then the KDBX header and hashes have already been written to
+Seal's collector; the collector is bounded and released on every error, so no
+output is returned.
 
 Seal collects output in a bounded buffer: at most `MaxKDBXCiphertextBytes` is
 retained, and an encoding that would exceed it is `kdbx_payload_too_large`

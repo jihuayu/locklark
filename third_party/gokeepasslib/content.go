@@ -192,7 +192,40 @@ ForLoop:
 	return nil
 }
 
-// writeTo the InnerHeader to the given io.Writer
+// innerHeaderItemSize is the exact size writeToInnerHeader writes for one
+// inner header item: its 1-byte type, 4-byte value length and value, or zero
+// for an empty value, which writes no item.
+func innerHeaderItemSize(dataLen int) int64 {
+	if dataLen == 0 {
+		return 0
+	}
+	return int64(1 + 4 + dataLen)
+}
+
+const (
+	// innerHeaderItemHeaderSize is the size of the type and length fields
+	// that writeToInnerHeader writes before an item's data.
+	innerHeaderItemHeaderSize = 1 + 4
+	// innerHeaderTerminatorSize is the size of the inner header terminator.
+	innerHeaderTerminatorSize = 1 + 4
+)
+
+// encodedSize returns the exact number of bytes writeTo writes for the
+// InnerHeader, without serializing it.
+func (ih *InnerHeader) encodedSize() int64 {
+	size := int64(innerHeaderTerminatorSize)
+	size += innerHeaderItemSize(4)
+	size += innerHeaderItemSize(len(ih.InnerRandomStreamKey))
+	for _, item := range ih.Binaries {
+		size += innerHeaderItemSize(1 + len(item.Content))
+	}
+	return size
+}
+
+// writeTo the InnerHeader to the given io.Writer. Every item and the
+// terminator are written with one write of exactly their encoded size, so a
+// bounded writer sees the exact size of each and can enforce a size limit
+// without retaining a byte beyond it.
 func (ih *InnerHeader) writeTo(w io.Writer) error {
 	irsID := make([]byte, 4)
 	binary.LittleEndian.PutUint32(irsID, ih.InnerRandomStreamID)
@@ -213,22 +246,19 @@ func (ih *InnerHeader) writeTo(w io.Writer) error {
 		}
 	}
 	// End inner header
-	if err := binary.Write(w, binary.LittleEndian, InnerHeaderTerminator); err != nil {
-		return err
-	}
-	return binary.Write(w, binary.LittleEndian, uint32(0))
+	_, err := w.Write(binary.LittleEndian.AppendUint32([]byte{InnerHeaderTerminator}, 0))
+	return err
 }
 
-// writeToInnerHeader is an helper to write an inner header item to the given io.Writer
+// writeToInnerHeader is an helper to write an inner header item to the given
+// io.Writer, in one write of the item's exact size.
 func writeToInnerHeader(w io.Writer, id uint8, data []byte) error {
 	if len(data) > 0 {
-		if err := binary.Write(w, binary.LittleEndian, id); err != nil {
-			return err
-		}
-		if err := binary.Write(w, binary.LittleEndian, uint32(len(data))); err != nil {
-			return err
-		}
-		if err := binary.Write(w, binary.LittleEndian, data); err != nil {
+		item := make([]byte, 0, innerHeaderItemSize(len(data)))
+		item = append(item, id)
+		item = binary.LittleEndian.AppendUint32(item, uint32(len(data)))
+		item = append(item, data...)
+		if _, err := w.Write(item); err != nil {
 			return err
 		}
 	}
