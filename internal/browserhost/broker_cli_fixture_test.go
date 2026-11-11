@@ -14,8 +14,9 @@ import "runtime"
 // native approval summary; the token variable stays unset because the
 // canonical gh spec does not enable a dynamic token.
 //
-// The nonce is fixed per fixture and the replay cache is process-wide, so a
-// fixture that must reach the broker takes a fresh nonce.
+// The nonce is fixed per fixture and the replay cache is process-wide
+// (consumed before the TTY check, too), so a test that must reach the broker
+// takes a fresh nonce.
 func cliRunFixtureScope() CLIRunScope {
 	return CLIRunScope{
 		Profile:     "gh",

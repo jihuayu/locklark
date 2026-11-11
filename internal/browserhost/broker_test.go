@@ -5,8 +5,10 @@ package browserhost
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -269,7 +271,10 @@ func TestBrokerCLIRunApprovalAndFallback(t *testing.T) {
 	defer broker.Close()
 
 	req := cliRunFixtureRequest()
-	req.VaultPath = "placeholder"
+	// A valid absolute path that no session under test uses: it passes the
+	// client's scope check, so the callback sees it with no session yet and
+	// answers with the explicit, non-fallback unavailable.
+	req.VaultPath = "/fixture/no-session-vault.ll"
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if _, e := RequestCLIRun(ctx, req); !errors.Is(e, ErrBrokerUnavailable) {
@@ -281,9 +286,9 @@ func TestBrokerCLIRunApprovalAndFallback(t *testing.T) {
 	session = s
 	mu.Unlock()
 	req.VaultPath = s.VaultPath()
-	req.Targets = []personal.CLIBrokerTarget{{Slot: "LOGIN_PASSWORD", ID: row.ID, Revision: row.Revision, Field: "password"}}
+	req.Targets = []personal.CLIBrokerTarget{{Slot: "token", ID: row.ID, Revision: row.Revision, Field: "password"}}
 	resp, e := RequestCLIRun(ctx, req)
-	if e != nil || resp.Values["LOGIN_PASSWORD"] != "broker-password" {
+	if e != nil || resp.Values["token"] != "broker-password" {
 		t.Fatalf("approved CLI run: %v %#v", e, resp)
 	}
 	events, e := s.Audit()
@@ -310,7 +315,7 @@ func TestBrokerCLIRunApprovalAndFallback(t *testing.T) {
 	approved = true
 	mu.Unlock()
 	bad := req
-	bad.Targets = []personal.CLIBrokerTarget{{Slot: "LOGIN_PASSWORD", ID: row.ID, Revision: reqID(9) + reqID(10), Field: "password"}}
+	bad.Targets = []personal.CLIBrokerTarget{{Slot: "token", ID: row.ID, Revision: reqID(9) + reqID(10), Field: "password"}}
 	if _, e := RequestCLIRun(ctx, bad); e == nil {
 		t.Fatal("stale revision disclosed values")
 	}
@@ -510,12 +515,15 @@ func TestWatchCLIRunConnIdleTimeoutsDoNotCancel(t *testing.T) {
 	}
 }
 
+// cliRunFixtureScope sits in broker_fixture_test.go, which has no build tag.
+
 // cliRunFixtureRequest is a valid CLI-run request for outcome classification.
 func cliRunFixtureRequest() CLIRunBrokerRequest {
 	return CLIRunBrokerRequest{
 		V:         1,
 		VaultPath: "/fixture/vault.ll",
-		Targets:   []personal.CLIBrokerTarget{{Slot: "LOGIN_PASSWORD", ID: reqID(1), Revision: reqID(2), Field: "password"}},
+		Scope:     cliRunFixtureScope(),
+		Targets:   []personal.CLIBrokerTarget{{Slot: "token", ID: reqID(1), Revision: reqRevision(2), Field: "password"}},
 	}
 }
 
@@ -581,7 +589,9 @@ func TestCLIRunExplicitUnavailableIsUnavailable(t *testing.T) {
 
 func TestCLIRunRefusalIsNonUnavailableWithoutLeakage(t *testing.T) {
 	req := cliRunFixtureRequest()
-	req.Targets[0].ID = "leak-target-" + reqID(3)
+	// A distinct, canonical 32-hex target ID that still passes client-side
+	// validation, so the scripted server is actually reached.
+	req.Targets[0].ID = "1ea7c0de000000000000000000000003"
 	// The exact protocol refusal maps to the stable generic error and never
 	// echoes request material.
 	sent := cliRunScriptedServer(t, cliRunReplyPayload(`{"v":1,"error":"refused"}`))
@@ -781,11 +791,20 @@ func TestCLIRunDeadlineWhileAwaitingResponse(t *testing.T) {
 
 func TestCLIRunInvalidRequestIsNotFallbackEligible(t *testing.T) {
 	brokerTestSocket(t) // even a reachable endpoint must not turn bad input into unavailability
+	valid := cliRunFixtureRequest()
 	cases := []CLIRunBrokerRequest{
-		{V: 2, VaultPath: "/fixture/vault.ll", Targets: cliRunFixtureRequest().Targets},
-		{V: 1, Targets: cliRunFixtureRequest().Targets},
-		{V: 1, VaultPath: "/fixture/vault.ll"},
-		{V: 1, VaultPath: "/fixture/vault.ll", Targets: make([]personal.CLIBrokerTarget, 17)},
+		{V: 2, VaultPath: valid.VaultPath, Scope: valid.Scope, Targets: valid.Targets},
+		{V: 1, Scope: valid.Scope, Targets: valid.Targets},
+		{V: 1, VaultPath: valid.VaultPath, Scope: valid.Scope},
+		{V: 1, VaultPath: valid.VaultPath, Scope: valid.Scope, Targets: make([]personal.CLIBrokerTarget, 17)},
+		// The scope is mandatory and must validate on the client too.
+		{V: 1, VaultPath: valid.VaultPath, Targets: valid.Targets},
+		{V: 1, VaultPath: valid.VaultPath, Scope: CLIRunScope{}, Targets: valid.Targets},
+		{V: 1, VaultPath: "relative/vault.ll", Scope: valid.Scope, Targets: valid.Targets},
+		{V: 1, VaultPath: valid.VaultPath, Scope: valid.Scope, Targets: []personal.CLIBrokerTarget{{Slot: "", ID: reqID(1), Revision: reqRevision(2), Field: "password"}}},
+		{V: 1, VaultPath: valid.VaultPath, Scope: valid.Scope, Targets: []personal.CLIBrokerTarget{{Slot: "token", ID: reqID(1), Revision: reqRevision(2), Field: "password"}, {Slot: "token", ID: reqID(3), Revision: reqRevision(4), Field: "password"}}},
+		{V: 1, VaultPath: valid.VaultPath, Scope: valid.Scope, Targets: []personal.CLIBrokerTarget{{Slot: "elsewhere", ID: reqID(1), Revision: reqRevision(2), Field: "password"}}},
+		{V: 1, VaultPath: valid.VaultPath, Scope: valid.Scope, Targets: []personal.CLIBrokerTarget{{Slot: "token", ID: reqID(1), Revision: reqRevision(2), Field: "username"}}},
 	}
 	for i, req := range cases {
 		_, e := RequestCLIRun(context.Background(), req)
@@ -1066,15 +1085,12 @@ func TestClearCLIRunRawMessagesRejectPathsZeroNamedCollection(t *testing.T) {
 }
 
 func TestCLIRunResponsesClearRawCopiesWithoutAlteringValues(t *testing.T) {
-	// Success: the decoded map[string]string reaches the caller intact and is
-	// the exact value the reply carried.
+	// A legacy map[string]string success is unaudited: it is refused with no
+	// value returned.
 	sent := cliRunScriptedServer(t, cliRunReplyPayload(`{"v":1,"values":{"slot-7":"pw-exact"}}`))
 	resp, e := RequestCLIRun(context.Background(), cliRunFixtureRequest())
-	if e != nil {
-		t.Fatal(e)
-	}
-	if len(resp.Values) != 1 || resp.Values["slot-7"] != "pw-exact" {
-		t.Fatalf("values altered: %q", resp.Values)
+	if !errors.Is(e, errCLIRunResponse) || resp.Values != nil || resp.PreparedValues != nil {
+		t.Fatalf("legacy values reply: %v %#v", e, resp)
 	}
 	if !<-sent {
 		t.Fatal("server did not receive the request frame")
@@ -1093,5 +1109,194 @@ func TestCLIRunResponsesClearRawCopiesWithoutAlteringValues(t *testing.T) {
 			}
 			<-sent
 		})
+	}
+}
+
+// cliRunReceiptJSON is a canonical receipt for the fixture request: a 32-hex
+// session and two 64-hex digests.
+func cliRunReceiptJSON() string {
+	return `{"status":"` + personal.RunBundlePreparationStatus + `","session":"` + reqID(70) + `","intent":"` + reqRevision(71) + `","target_digest":"` + reqRevision(72) + `"}`
+}
+
+// cliRunReceiptFromFixture decodes cliRunReceiptJSON into the receipt value.
+func cliRunReceiptFromFixture(t *testing.T) personal.RunBundlePreparationReceipt {
+	t.Helper()
+	receipt, ok := decodeCLIRunReceipt(json.RawMessage(cliRunReceiptJSON()))
+	if !ok {
+		t.Fatal("receipt fixture is not canonical")
+	}
+	return receipt
+}
+
+// cliRunAuditedReply is the exact audited success frame: raw base64 slot
+// values plus the canonical receipt.
+func cliRunAuditedReply(slot, b64 string) string {
+	return `{"v":1,"values_b64":{"` + slot + `":"` + b64 + `"},"receipt":` + cliRunReceiptJSON() + `}`
+}
+
+// TestCLIRunWireExactBytesAndReceipt proves the audited reply is canonical on
+// the wire, round-trips byte-exact in both directions, accepts empty bytes,
+// and refuses every malformed, null, partial, non-canonical or escaped base64
+// value and every non-canonical raw receipt without returning a value.
+func TestCLIRunWireExactBytesAndReceipt(t *testing.T) {
+	slot := "token"
+	exact := []byte("line\nwith\t\x00 and \xff bytes")
+	values := map[string][]byte{slot: exact}
+	raw, e := marshalCLIRunResponse(CLIRunBrokerResponse{V: 1, PreparedValues: values, Receipt: cliRunReceiptFromFixture(t)})
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer clear(raw)
+	want := cliRunAuditedReply(slot, base64.StdEncoding.EncodeToString(exact))
+	if string(raw) != want {
+		t.Fatalf("wire %q, want %q", raw, want)
+	}
+	if bytes.Contains(raw, []byte(`"values"`)) {
+		t.Fatal("legacy values member on the wire")
+	}
+	resp, e := decodeCLIRunResponse(raw, cliRunFixtureRequest().Targets)
+	if e != nil {
+		t.Fatalf("canonical reply refused: %v", e)
+	}
+	defer clearCLIRunResponse(&resp)
+	if !bytes.Equal(resp.PreparedValues[slot], exact) || len(resp.PreparedValues) != 1 {
+		t.Fatalf("round trip altered the bytes: %q", resp.PreparedValues)
+	}
+	if resp.Receipt != cliRunReceiptFromFixture(t) {
+		t.Fatalf("round trip altered the receipt: %#v", resp.Receipt)
+	}
+	// Empty bytes are exact bytes: accepted, non-nil, and encoded as "".
+	empty, e := marshalCLIRunResponse(CLIRunBrokerResponse{V: 1, PreparedValues: map[string][]byte{slot: {}}, Receipt: cliRunReceiptFromFixture(t)})
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer clear(empty)
+	if decoded, e := decodeCLIRunResponse(empty, cliRunFixtureRequest().Targets); e != nil || decoded.PreparedValues[slot] == nil || len(decoded.PreparedValues[slot]) != 0 {
+		t.Fatalf("empty bytes: %q %v", decoded.PreparedValues, e)
+	}
+	// The writer refuses a legacy map, values with an error, values without a
+	// canonical receipt, and a nil buffer instead of writing them.
+	for name, bad := range map[string]CLIRunBrokerResponse{
+		"legacy-values":    {V: 1, Values: map[string]string{slot: "legacy"}},
+		"values-and-error": {V: 1, PreparedValues: values, Receipt: cliRunReceiptFromFixture(t), Error: "refused"},
+		"no-receipt":       {V: 1, PreparedValues: values},
+		"nil-value":        {V: 1, PreparedValues: map[string][]byte{slot: nil}, Receipt: cliRunReceiptFromFixture(t)},
+	} {
+		if got, e := marshalCLIRunResponse(bad); e == nil {
+			t.Fatalf("%s: wrote %q", name, got)
+		}
+	}
+	// Every malformed reply is a generic, non-fallback error with no value.
+	receipt := cliRunReceiptJSON()
+	withValues := func(v string) string { return `{"v":1,"values_b64":` + v + `,"receipt":` + receipt + `}` }
+	for name, reply := range map[string]string{
+		"null-value":            withValues(`{"token":null}`),
+		"values-null":           withValues(`null`),
+		"invalid-partial-b64":   withValues(`{"token":"cHctc2VjcmV0*"}`),
+		"invalid-partial-b64-2": withValues(`{"token":"cHctc2VjcmV0AB"}`),
+		// eB== and eHh= decode to x and xx but carry non-zero pad bits, so
+		// only the exact re-encode check refuses them.
+		"noncanonical-pad-bits":   withValues(`{"token":"eB=="}`),
+		"noncanonical-pad-bits-2": withValues(`{"token":"eHh="}`),
+		"noncanonical-space":      withValues(`{"token":"cHctc2VjcmV0 "}`),
+		"noncanonical-extra-pad":  withValues(`{"token":"cHctc2VjcmV0=="}`),
+		"noncanonical-url":        withValues(`{"token":"___="}`),
+		"noncanonical-alphabet":   withValues(`{"token":"cHctc2VjcmV0-_"}`),
+		"noncanonical-receipt":    `{"v":1,"values_b64":{"token":"cA=="},"receipt":{"session":"` + reqID(70) + `","status":"intent-recorded","intent":"` + reqRevision(71) + `","target_digest":"` + reqRevision(72) + `"}}`,
+		"receipt-null":            `{"v":1,"values_b64":{"token":"cA=="},"receipt":null}`,
+		"legacy-values":           `{"v":1,"values":{"token":"pw"}}`,
+	} {
+		resp, e := decodeCLIRunResponse([]byte(reply), cliRunFixtureRequest().Targets)
+		if !errors.Is(e, errCLIRunResponse) || errors.Is(e, ErrBrokerUnavailable) || errors.Is(e, ErrCLIRunRefused) {
+			t.Fatalf("%s: %v", name, e)
+		}
+		if resp.PreparedValues != nil || resp.Receipt != (personal.RunBundlePreparationReceipt{}) {
+			t.Fatalf("%s returned a partial response: %#v", name, resp)
+		}
+	}
+}
+
+// TestCLIRunBrokerRefusalAndCleanup proves the broker's own write path never
+// emits a legacy, unaudited, wrapped-unavailable or malformed reply, that an
+// unsupported peer TTY is a fixed refusal, and that callback-owned buffers are
+// zeroed on error.
+func TestCLIRunBrokerRefusalAndCleanup(t *testing.T) {
+	receipt := cliRunReceiptFromFixture(t)
+	own := []byte("callback-owned-secret")
+	wrote := func(reply func() (BrokerCLIResponse, error)) string {
+		t.Helper()
+		server, client := net.Pipe()
+		defer client.Close()
+		b := NewBroker(BrokerCallbacks{HandleCLIRun: func(context.Context, Peer, CLIRunBrokerRequest) (BrokerCLIResponse, error) {
+			return reply()
+		}})
+		got := make(chan []byte, 1)
+		go func() { raw, _ := readFrame(client, MaxOutput); got <- raw }()
+		b.handleCLIRunConn(server, Peer{User: "UID 501"}, cliRunFixtureRequest(), &CLIRunBrokerResponse{V: 1})
+		raw := <-got
+		if raw == nil {
+			t.Fatal("no broker reply")
+		}
+		defer clear(raw)
+		return string(raw)
+	}
+	if got := wrote(func() (BrokerCLIResponse, error) {
+		return BrokerCLIResponse{V: 1, Values: map[string]string{"token": "legacy-secret"}}, nil
+	}); got != `{"v":1,"error":"refused"}` {
+		t.Fatalf("legacy reply wrote %s", got)
+	}
+	// A partial byte map with a callback error is refused, its bytes are
+	// zeroed, and nothing of it is written.
+	if got := wrote(func() (BrokerCLIResponse, error) {
+		return BrokerCLIResponse{V: 1, PreparedValues: map[string][]byte{"token": own}}, errors.New("refused")
+	}); got != `{"v":1,"error":"refused"}` || !bytes.Equal(own, make([]byte, len(own))) {
+		t.Fatalf("error reply wrote %s, buffer %q", got, own)
+	}
+	// Only the exact sentinel is unavailable; a wrapped copy is a refusal.
+	if got := wrote(func() (BrokerCLIResponse, error) { return BrokerCLIResponse{}, ErrBrokerUnavailable }); got != `{"v":1,"error":"unavailable"}` {
+		t.Fatalf("exact sentinel wrote %s", got)
+	}
+	if got := wrote(func() (BrokerCLIResponse, error) {
+		return BrokerCLIResponse{}, fmt.Errorf("wrapped: %w", ErrBrokerUnavailable)
+	}); got != `{"v":1,"error":"refused"}` {
+		t.Fatalf("wrapped sentinel wrote %s", got)
+	}
+	// The audited pair is the only success written.
+	if got := wrote(func() (BrokerCLIResponse, error) {
+		return BrokerCLIResponse{V: 1, PreparedValues: map[string][]byte{"token": []byte("x")}, Receipt: receipt}, nil
+	}); got != cliRunAuditedReply("token", "eA==") {
+		t.Fatalf("audited reply wrote %s", got)
+	}
+	// An unsupported peer TTY attestation is the fixed refusal, and the
+	// callback never runs.
+	oldGate := cliRunTTYGate
+	cliRunTTYGate = func(Peer, string, string, string) error { return errCLIRunUnavailable }
+	t.Cleanup(func() { cliRunTTYGate = oldGate })
+	endpoint := brokerTestSocket(t)
+	ran := false
+	b := NewBroker(BrokerCallbacks{HandleCLIRun: func(context.Context, Peer, CLIRunBrokerRequest) (BrokerCLIResponse, error) {
+		ran = true
+		return BrokerCLIResponse{}, nil
+	}})
+	if e := b.Start(endpoint); e != nil {
+		t.Fatal(e)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	conn, e := net.Dial("unix", endpoint)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer conn.Close()
+	req := cliRunFixtureRequest()
+	req.Scope.Nonce = reqID(73)
+	body, _ := json.Marshal(req)
+	_ = writeFrame(conn, []byte(`{"v":1,"mode":"cli-run"}`))
+	_ = writeFrame(conn, body)
+	reply, e := readFrame(conn, MaxOutput)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if string(reply) != `{"v":1,"error":"refused"}` || ran {
+		t.Fatalf("unsupported TTY wrote %s, callback ran=%v", reply, ran)
 	}
 }

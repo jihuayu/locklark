@@ -51,18 +51,35 @@ type BrowserPairDecision struct {
 	QuickFill bool
 }
 
-// CLIRunBrokerRequest asks the desktop broker for pinned secret values.
+// CLIRunBrokerRequest asks the desktop broker for pinned secret values. Scope
+// is the immutable, bounded execution scope shown in native approval; Targets
+// are the immutable vault slots/revisions/fields. Nothing else crosses the wire.
 type CLIRunBrokerRequest struct {
 	V         int                        `json:"v"`
 	VaultPath string                     `json:"vault_path"`
+	Scope     CLIRunScope                `json:"scope"`
 	Targets   []personal.CLIBrokerTarget `json:"targets"`
 }
 
-// CLIRunBrokerResponse carries disclosed values back to the CLI client.
+// CLIRunBrokerResponse is the audited one-shot reply of the desktop broker.
+//
+// PreparedValues are the exact per-slot bytes PrepareBrokeredRun prepared,
+// after the matching item.run.bundle intent was committed, and Receipt names
+// that intent. They are the only success payload that can reach the wire, as
+// the values_b64 and receipt members (broker_response.go), and a success must
+// carry both or the broker writes a fixed refusal.
+//
+// Values is the legacy, unaudited payload an older callback returns from
+// ExtractCLIBrokerTargets. It is retained only so that source stays
+// compatible; it is never encoded, never decoded, and never decoded back into
+// this field, so it cannot disclose a value between checkpoints. A success
+// with only Values is replaced by the fixed refusal.
 type CLIRunBrokerResponse struct {
-	V      int               `json:"v"`
-	Values map[string]string `json:"values,omitempty"`
-	Error  string            `json:"error,omitempty"`
+	V              int                                  `json:"v"`
+	Values         map[string]string                    `json:"-"`
+	PreparedValues map[string][]byte                    `json:"-"`
+	Receipt        personal.RunBundlePreparationReceipt `json:"-"`
+	Error          string                               `json:"error,omitempty"`
 }
 
 // BrokerCallbacks are implemented by the desktop App. Callbacks must not block
@@ -343,31 +360,67 @@ func (b *Broker) serveCLIRun(conn net.Conn, peer Peer) {
 		return
 	}
 	_ = conn.SetReadDeadline(time.Time{})
-	defer clear(raw)
-	var req CLIRunBrokerRequest
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	if dec.Decode(&req) != nil || req.V != 1 || len(req.Targets) < 1 || len(req.Targets) > 16 || len(req.VaultPath) == 0 || len(req.VaultPath) > 4096 {
+	// The decoded scope is the only copy kept: it stays alive through native
+	// approval and the callback and is cleared, with the raw request frame and
+	// the decoded targets, once the response is written.
+	req, ok := decodeCLIRunBrokerRequest(raw)
+	if !ok {
+		clear(raw)
 		writeCLIResponse(conn, CLIRunBrokerResponse{V: 1, Error: "refused"})
 		return
 	}
+	defer func() {
+		clear(raw)
+		req.Scope.Clear()
+		clearCLIRunTargets(req.Targets)
+	}()
 	resp := CLIRunBrokerResponse{V: 1}
-	if b.callbacks.HandleCLIRun != nil {
-		// The request frame is fully read and validated; the callback still
-		// runs with an OS-authenticated peer. Monitor the now-idle connection
-		// while it waits: a client that closes, or sends an unexpected extra
-		// byte, cancels the callback instead of leaving a native approval
-		// prompt pending after the CLI exited. Context values stay nil; only
-		// cancellation is propagated.
-		b.handleCLIRunConn(conn, peer, req, &resp)
-	} else {
+	if b.callbacks.HandleCLIRun == nil {
 		resp.Error = "unavailable"
 		writeCLIResponse(conn, resp)
+		return
 	}
-	for k := range resp.Values {
-		resp.Values[k] = ""
+	// Authorization checkpoint, both before native approval:
+	//
+	//  1. The nonce is consumed now, at most once, and stays consumed for
+	//     every later outcome: refused, cancelled, timed out, or never
+	//     delivered. A replay or a full cache is refused before approval, and
+	//     before the terminal check, so neither can be used to probe it.
+	//  2. The declared terminal must be the OS peer-attested controlling
+	//     terminal of this authenticated process. No declared string is
+	//     authority. Every attestation failure is a fixed refusal, including
+	//     errCLIRunUnavailable / unsupported: a platform without peer
+	//     attestation (Linux), a peer without a controlling terminal, and a
+	//     declared name that does not match the attested terminal all write
+	//     "refused". After a valid request only the exact
+	//     ErrBrokerUnavailable callback sentinel may select "unavailable"
+	//     (handleCLIRunConn), so no TTY outcome can be fallback-eligible.
+	if consumeCLIRunNonce(peer, req.Scope.Nonce) != nil {
+		writeCLIResponse(conn, CLIRunBrokerResponse{V: 1, Error: "refused"})
+		return
 	}
+	if cliRunTTYGate(peer, req.Scope.TTY, req.Scope.TTYPlatform, req.Scope.TTYPeerID) != nil {
+		writeCLIResponse(conn, CLIRunBrokerResponse{V: 1, Error: "refused"})
+		return
+	}
+	// The request frame is fully read, validated, terminal-attested, and its
+	// nonce consumed; the callback still runs with an OS-authenticated peer.
+	// Monitor the now-idle connection while it waits: a client that closes,
+	// or sends an unexpected extra byte, cancels the callback instead of
+	// leaving a native approval prompt pending after the CLI exited. Context
+	// values stay nil; only cancellation is propagated.
+	b.handleCLIRunConn(conn, peer, req, &resp)
+	// The wire encoding already went out; every byte slice of the broker's own
+	// copy is zeroed in place here.
+	clearCLIRunResponse(&resp)
 }
+
+// cliRunTTYGate is the peer terminal check serveCLIRun runs after the nonce is
+// consumed and before the callback. Its verdict has exactly two outcomes
+// here: nil proceeds, anything else is the fixed refusal. Production always
+// uses verifyCLIRunTTY; the tests replace it to prove that an unsupported or
+// no-proof peer terminal (errCLIRunUnavailable) is refused, not unavailable.
+var cliRunTTYGate = verifyCLIRunTTY
 
 // handleCLIRunConn runs HandleCLIRun with a cancelable context, writes the
 // single classified response, and only then closes conn. The close is what
@@ -383,14 +436,41 @@ func (b *Broker) handleCLIRunConn(conn net.Conn, peer Peer, req CLIRunBrokerRequ
 	stop := make(chan struct{})
 	go watchCLIRunConn(conn, cancel, stop, cliRunMonitorIdle)
 	out, err := b.callbacks.HandleCLIRun(ctx, peer, req)
+	// Everything the callback returned that is not transferred is cleared on
+	// every exit. Only a successful callback hands its prepared bytes over to
+	// resp; an error, a legacy-only or otherwise unaudited reply, and a reply
+	// the writer rejects all leave the callback's buffers to be zeroed below.
+	transferred := false
+	defer func() {
+		if !transferred {
+			resp.PreparedValues = nil
+			resp.Receipt = personal.RunBundlePreparationReceipt{}
+		}
+		clearCLIRunValueMap(out.PreparedValues)
+		clearCLIRunValues(out.Values)
+		out.PreparedValues, out.Values = nil, nil
+	}()
+	// Only the exact transport/service-unavailable sentinel may select the
+	// explicit unavailable token; a wrapped copy of it (errors.Is), a refusal,
+	// a cancellation, a deadline, or any other callback error is a refusal.
 	switch {
 	case err == nil:
-		resp.Values = out.Values
-	case errors.Is(err, ErrBrokerUnavailable):
+		// Only the audited pair crosses: prepared bytes plus the canonical
+		// receipt. The legacy Values map is never taken, so an unaudited
+		// reply is replaced by the fixed refusal by writeCLIResponse.
+		resp.PreparedValues, resp.Receipt = out.PreparedValues, out.Receipt
+		out.PreparedValues = nil
+		transferred = true
+	case err == ErrBrokerUnavailable:
 		resp.Error = "unavailable"
 	default:
 		resp.Error = "refused"
 	}
+	// writeCLIResponse neither modifies nor takes ownership of resp: it
+	// re-checks the response pair first, so values with an error, values
+	// without a canonical receipt, and the legacy map can never reach the
+	// wire. Whatever it rejects stays callback-owned and is cleared above;
+	// whatever it writes is cleared by the caller.
 	writeCLIResponse(conn, *resp)
 	// Closing unblocks the monitor if it is still reading; the close of stop
 	// tells it a lost monitor is expected rather than a client cancellation.
@@ -443,14 +523,159 @@ func cliRunMonitorTimeout(e error) bool {
 // observed when the CLI later disconnects or sends an extra byte.
 const cliRunMonitorIdle = time.Minute
 
-func writeCLIResponse(conn net.Conn, resp CLIRunBrokerResponse) {
-	raw, e := json.Marshal(resp)
+// maxCLIRunFieldBytes bounds every top-level value of a CLI-run request except
+// the scope object itself, whose fields are bounded individually.
+const maxCLIRunFieldBytes = 16 << 10
+
+// decodeCLIRunBrokerRequest strictly validates one CLI-run request frame. The
+// frame must be a single object without duplicate or unknown keys; the vault
+// path and targets are bounded, and the scope is decoded by DecodeCLIRunScope.
+//
+// Any defect returns false and leaves nothing decoded behind: the local scope,
+// the local targets, and every raw copy of the frame are cleared on every
+// path. The decoded scope and targets are returned only to the caller that
+// owns them; serveCLIRun clears them once the callback and the response are
+// done.
+func decodeCLIRunBrokerRequest(raw []byte) (CLIRunBrokerRequest, bool) {
+	keys, values, parsed := strictJSONObject(raw)
+	defer clearCLIRunRawMessages(values) // every raw byte, scope included
+	if !parsed {
+		return CLIRunBrokerRequest{}, false
+	}
+	keysAllowed := map[string]struct{}{"v": {}, "vault_path": {}, "scope": {}, "targets": {}}
+	for key, value := range values {
+		if _, allowed := keysAllowed[key]; !allowed {
+			return CLIRunBrokerRequest{}, false
+		}
+		if key != "scope" && len(value) > maxCLIRunFieldBytes {
+			return CLIRunBrokerRequest{}, false
+		}
+	}
+	if _, present := keys["scope"]; !present {
+		return CLIRunBrokerRequest{}, false
+	}
+	// The locals below are what the cleanup closure sees; returning a zero
+	// request does not reset them before it runs.
+	var (
+		vaultPath string
+		targets   []personal.CLIBrokerTarget
+		scope     CLIRunScope
+		valid     bool
+	)
+	defer func() {
+		if !valid {
+			scope.Clear()
+			clearCLIRunTargets(targets)
+		}
+	}()
+	var v int
+	if json.Unmarshal(values["v"], &v) != nil || v != 1 {
+		return CLIRunBrokerRequest{}, false
+	}
+	if json.Unmarshal(values["vault_path"], &vaultPath) != nil {
+		return CLIRunBrokerRequest{}, false
+	}
+	// The scope and the target list are decoded only after the small fields,
+	// and the full shared request check, including profile and target
+	// validation, runs before anything is returned or approved.
+	decoded, e := DecodeCLIRunScope(values["scope"])
 	if e != nil {
-		return
+		return CLIRunBrokerRequest{}, false
+	}
+	scope = decoded
+	if json.Unmarshal(values["targets"], &targets) != nil || !validCLIRunRequest(v, vaultPath, scope, targets) {
+		return CLIRunBrokerRequest{}, false
+	}
+	valid = true
+	return CLIRunBrokerRequest{V: 1, VaultPath: vaultPath, Scope: scope, Targets: targets}, true
+}
+
+// CanonicalCLIRunTargets converts the wire targets to the exact RunBundle
+// target values, in wire order. The copies are fresh, so the caller owns them.
+func CanonicalCLIRunTargets(targets []personal.CLIBrokerTarget) []personal.BundleTarget {
+	out := make([]personal.BundleTarget, len(targets))
+	for i, target := range targets {
+		out[i] = personal.BundleTarget{Slot: target.Slot, ID: target.ID, Revision: target.Revision, Field: target.Field}
+	}
+	return out
+}
+
+// CanonicalCLIRunRequest reconstructs the exact RunBundleRequest for a
+// validated CLI-run scope: the profile is resolved to its built-in cliprofile
+// spec, every other component is taken verbatim from the scope (never from a
+// request field the desktop did not review), and TempRoot must be exactly the
+// scope's private run root. An invalid scope, an unknown profile, or a
+// mismatched root is refused with the generic request error, so the caller can
+// never prepare or render a request that differs from what was approved.
+func CanonicalCLIRunRequest(scope CLIRunScope, tempRoot string) (personal.RunBundleRequest, error) {
+	if ValidateCLIRunScope(scope) != nil || tempRoot == "" || tempRoot != scope.TempRoot {
+		return personal.RunBundleRequest{}, errCLIRunInvalid
+	}
+	spec, e := bindProfile(scope.Profile)
+	if e != nil {
+		return personal.RunBundleRequest{}, errCLIRunInvalid
+	}
+	request := personal.RunBundleRequest{
+		Program:        scope.Program,
+		Args:           append([]string(nil), scope.Args...),
+		Directory:      scope.CWD,
+		TimeoutSeconds: scope.Timeout,
+		HelperPath:     append([]string(nil), scope.Helper...),
+		Passthrough:    make(map[string]string, len(scope.Passthru)),
+		TokenEnvName:   scope.TokenEnv,
+		Spec:           spec,
+	}
+	for name, value := range scope.Passthru {
+		request.Passthrough[name] = value
+	}
+	return request, nil
+}
+
+// validCLIRunRequest is the shared request check used by both the CLI before
+// transmission and the broker on receipt, so a caller cannot bypass it.
+//
+// It requires a valid scope and a bounded absolute vault path, resolves the
+// named profile to the built-in cliprofile spec (an unknown profile is
+// refused), and holds the whole request to exactly the RunBundle rules via
+// personal.RunBundleRequest.Validate with that canonical spec: program,
+// working directory, arguments against the profile's denied sequences, helper
+// directories, the profile's own timeout bound, the dynamic token variable,
+// the passthrough environment names, and every target slot, field, item ID,
+// and revision. All of it is checked before native approval is ever requested;
+// the profile spec itself never crosses the wire.
+func validCLIRunRequest(v int, vaultPath string, scope CLIRunScope, targets []personal.CLIBrokerTarget) bool {
+	if v != 1 || ValidateCLIRunScope(scope) != nil || !scopeAbsPath(vaultPath) {
+		return false
+	}
+	// Only the scope's own slices and map are read, so this shared check never
+	// copies secret values, and the request value never escapes it. The
+	// canonical builder is the same one the desktop later prepares and renders,
+	// so a request that passes here is exactly a RunBundle request.
+	request, e := CanonicalCLIRunRequest(scope, scope.TempRoot)
+	if e != nil {
+		return false
+	}
+	bundleTargets := CanonicalCLIRunTargets(targets)
+	defer clearCLIRunBundleTargets(bundleTargets)
+	return len(targets) > 0 && request.Validate(bundleTargets) == nil
+}
+
+// writeCLIResponse writes exactly one classified reply. A response that pairs
+// values with an error, or values without a canonical receipt, never reaches
+// the wire: it is replaced by the explicit refusal. An oversized reply is also
+// replaced by the refusal; a marshal failure writes nothing.
+func writeCLIResponse(conn net.Conn, resp CLIRunBrokerResponse) {
+	raw, e := marshalCLIRunResponse(resp)
+	if e != nil {
+		raw, e = marshalCLIRunResponse(CLIRunBrokerResponse{Error: "refused"})
+		if e != nil {
+			return
+		}
 	}
 	defer clear(raw)
 	if len(raw) > MaxOutput {
-		raw, _ = json.Marshal(CLIRunBrokerResponse{V: 1, Error: "refused"})
+		clear(raw)
+		raw, _ = marshalCLIRunResponse(CLIRunBrokerResponse{Error: "refused"})
 	}
 	_ = writeFrame(conn, raw)
 }
@@ -703,7 +928,7 @@ func RequestCLIRun(ctx context.Context, req CLIRunBrokerRequest) (CLIRunBrokerRe
 	if ctx == nil {
 		return CLIRunBrokerResponse{}, errCLIRunInvalid
 	}
-	if req.V != 1 || len(req.VaultPath) == 0 || len(req.Targets) < 1 || len(req.Targets) > 16 {
+	if !validCLIRunRequest(req.V, req.VaultPath, req.Scope, req.Targets) {
 		// Invalid input is a caller bug, not proof the broker is absent.
 		return CLIRunBrokerResponse{}, errCLIRunInvalid
 	}
@@ -790,14 +1015,17 @@ func cliRunExchange(ctx context.Context, conn net.Conn, req CLIRunBrokerRequest)
 		return CLIRunBrokerResponse{}, errCLIRunDisconnected
 	}
 	defer clear(respRaw)
-	return classifyCLIRunResponse(ctx, respRaw)
+	return classifyCLIRunResponse(ctx, respRaw, req.Targets)
 }
 
 // classifyCLIRunResponse accepts exactly one JSON object with unique keys and
 // no trailing data. Only {"v":1,"error":"unavailable"} is fallback-eligible;
-// only {"v":1,"error":"refused"} maps to ErrCLIRunRefused. A value reply is
-// accepted only without an "error" key and with at least one slot.
-func classifyCLIRunResponse(ctx context.Context, raw []byte) (CLIRunBrokerResponse, error) {
+// only {"v":1,"error":"refused"} maps to ErrCLIRunRefused. A values reply is
+// accepted only through decodeCLIRunResponse: no error member, a canonical
+// receipt, and base64 values with exactly the requested target slots. A reply
+// mixing success and error, an unknown token, or any malformed shape is a
+// generic, non-fallback error.
+func classifyCLIRunResponse(ctx context.Context, raw []byte, targets []personal.CLIBrokerTarget) (CLIRunBrokerResponse, error) {
 	if ce := ctx.Err(); ce != nil {
 		return CLIRunBrokerResponse{}, cliRunContextError(ce)
 	}
@@ -805,13 +1033,16 @@ func classifyCLIRunResponse(ctx context.Context, raw []byte) (CLIRunBrokerRespon
 	if !ok {
 		return CLIRunBrokerResponse{}, errCLIRunResponse
 	}
-	// The raw copies carry sensitive values; clear them on every return. The
-	// caller-owned decoded map[string]string is returned and stays intact.
+	// The raw copies carry sensitive values and base64 strings; clear them on
+	// every return. The caller-owned decoded byte slices are returned intact.
 	defer clearCLIRunRawMessages(values)
 	if _, hasError := keys["error"]; !hasError {
-		return cliRunValuesResponse(keys, values)
+		return decodeCLIRunResponse(raw, targets)
 	}
-	if _, hasValues := keys["values"]; hasValues {
+	if _, hasValues := keys[cliRunValuesField]; hasValues {
+		return CLIRunBrokerResponse{}, errCLIRunResponse
+	}
+	if _, hasReceipt := keys[cliRunReceiptField]; hasReceipt {
 		return CLIRunBrokerResponse{}, errCLIRunResponse
 	}
 	var errorText string
@@ -833,50 +1064,6 @@ func classifyCLIRunResponse(ctx context.Context, raw []byte) (CLIRunBrokerRespon
 	return CLIRunBrokerResponse{}, errCLIRunResponse
 }
 
-// cliRunValuesResponse maps a disclosed-values reply {"v":1,"values":{...}}.
-// The body is re-encoded from the already duplicate-free top-level object and
-// decoded with DisallowUnknownFields; on any defect every decoded value is
-// cleared and a generic error is returned.
-func cliRunValuesResponse(keys map[string]struct{}, values map[string]json.RawMessage) (CLIRunBrokerResponse, error) {
-	if len(keys) != 2 || !json.Valid(values["values"]) {
-		return CLIRunBrokerResponse{}, errCLIRunResponse
-	}
-	var slotKeys map[string]json.RawMessage
-	// Clear nested raw copies even if Unmarshal fails partway through. The
-	// closure reads slotKeys when it runs, after the map is populated; a
-	// deferred call would capture the nil map at registration.
-	defer func() { clearCLIRunRawMessages(slotKeys) }()
-	if err := json.Unmarshal(values["values"], &slotKeys); err != nil {
-		return CLIRunBrokerResponse{}, errCLIRunResponse
-	}
-	if len(slotKeys) == 0 {
-		return CLIRunBrokerResponse{}, errCLIRunResponse
-	}
-	for slot := range slotKeys {
-		if slot == "" {
-			return CLIRunBrokerResponse{}, errCLIRunResponse
-		}
-	}
-	var body struct {
-		V      int               `json:"v"`
-		Values map[string]string `json:"values"`
-	}
-	dec := json.NewDecoder(bytes.NewReader(values["values"]))
-	dec.DisallowUnknownFields()
-	if json.Unmarshal(values["v"], &body.V) != nil || body.V != 1 ||
-		dec.Decode(&body.Values) != nil || len(body.Values) != len(slotKeys) {
-		clearCLIRunValues(body.Values)
-		return CLIRunBrokerResponse{}, errCLIRunResponse
-	}
-	for _, value := range body.Values {
-		if value == "" {
-			clearCLIRunValues(body.Values)
-			return CLIRunBrokerResponse{}, errCLIRunResponse
-		}
-	}
-	return CLIRunBrokerResponse{V: 1, Values: body.Values}, nil
-}
-
 // clearCLIRunRawMessages zeroes the bytes of every raw value in raws, releasing
 // intermediate copies of sensitive values that were decoded only for
 // validation.
@@ -886,11 +1073,30 @@ func clearCLIRunRawMessages(raws map[string]json.RawMessage) {
 	}
 }
 
-// clearCLIRunValues clears decoded (and duplicated) secret strings on refusal
-// paths so they are not retained by returned errors.
+// clearCLIRunValues blanks and deletes every entry of the legacy
+// map[string]string payload, so a callback that returned one leaves no secret
+// string behind, whether or not it was transferred (it never is).
 func clearCLIRunValues(values map[string]string) {
 	for slot := range values {
 		values[slot] = ""
+		delete(values, slot)
+	}
+}
+
+// clearCLIRunBundleTargets zeroes the temporary personal.BundleTarget copies
+// built for one request check; the caller's CLIBrokerTarget values mirror them.
+func clearCLIRunBundleTargets(targets []personal.BundleTarget) {
+	for i := range targets {
+		targets[i] = personal.BundleTarget{}
+	}
+}
+
+// clearCLIRunTargets zeroes decoded target fields (slot names, IDs, revisions)
+// on rejection paths. IDs and revisions are not secrets, but the request is
+// discarded wholesale so a rejected frame leaves nothing inspectable behind.
+func clearCLIRunTargets(targets []personal.CLIBrokerTarget) {
+	for i := range targets {
+		targets[i] = personal.CLIBrokerTarget{}
 	}
 }
 
