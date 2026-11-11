@@ -7,12 +7,56 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 )
 
 var (
 	errInvalidHMACKey          = errors.New("Wrong password? HMAC-SHA256 of header mismatching")
 	errDatabaseIntegrityFailed = errors.New("Wrong password? Database integrity check failed")
 )
+
+// ErrDecodeLimitExceeded is returned by DecodeWithLimits when the input or a
+// decoded body exceeds a DecodeLimits budget. The error never embeds input
+// data.
+var ErrDecodeLimitExceeded = errors.New("gokeepasslib: database exceeds decode limits")
+
+// DecodeLimits bounds the input and the decoded bodies of DecodeWithLimits.
+// Both fields must be positive and below MaxInt64.
+type DecodeLimits struct {
+	// MaxEncodedBytes bounds the total KDBX input: header, hashes and
+	// content blocks alike. The reader is read at most MaxEncodedBytes+1
+	// bytes, so an over-limit input is rejected before the header is parsed
+	// and before any key derivation runs.
+	MaxEncodedBytes int64
+	// MaxPlaintextBytes bounds the decrypted content (the KDBX4 InnerHeader
+	// followed by the XML document) and, within it, the aggregate bytes of
+	// every KDBX4 InnerHeader binary, memory protection flag included.
+	//
+	// This budget can only be evaluated after key derivation and content
+	// decryption, so it is not checked before key derivation. It is enforced
+	// on the verified and decrypted content blocks and, when gzip is
+	// selected, on the expansion (reading at most the budget plus one byte)
+	// before XML decoding starts.
+	//
+	// With NoCompressionFlag the budget counts the decrypted bytes, with one
+	// cipher-specific exception: for an AES content, the valid 1..16-byte
+	// PKCS#7 suffix at the end of the decrypted content is removed first and
+	// excluded from the budget. No non-AES content is ever trimmed: every
+	// decrypted byte of ChaCha20 or Twofish content is retained and counts
+	// toward the budget, including the 1..16 repeated-count bytes the legacy
+	// writer appends to that content. When content is not compressed both
+	// bounds apply to the same bytes, so the aggregate binary budget can
+	// only take effect for a binary inside an expanded body.
+	MaxPlaintextBytes int64
+}
+
+func (l DecodeLimits) validate() error {
+	if l.MaxEncodedBytes <= 0 || l.MaxPlaintextBytes <= 0 ||
+		l.MaxEncodedBytes == math.MaxInt64 || l.MaxPlaintextBytes == math.MaxInt64 {
+		return fmt.Errorf("%w: every limit must be positive and below MaxInt64", ErrDecodeLimitExceeded)
+	}
+	return nil
+}
 
 // Decoder stores a reader which is expected to be in kdbx format
 type Decoder struct {
@@ -24,12 +68,124 @@ func NewDecoder(r io.Reader) *Decoder {
 	return &Decoder{r: r}
 }
 
-// Decode populates given database with the data of Decoder reader
+// Decode populates given database with the data of Decoder reader.
+//
+// Decode reads the whole input and the whole decompressed content without a
+// size budget. Use DecodeWithLimits for untrusted input.
 func (d *Decoder) Decode(db *Database) error {
+	return d.decode(db, decodeBudget{})
+}
+
+// DecodeWithLimits populates db from the Decoder reader under limits. It
+// shares the parser, block and decryption path with Decode, and additionally:
+//
+//  1. reads the input at most limits.MaxEncodedBytes+1 bytes and rejects an
+//     over-limit input with ErrDecodeLimitExceeded before the KDBX header is
+//     parsed and before key derivation; a header that is not KDBX 4 is
+//     rejected with ErrCorruptedDatabase right after parsing;
+//  2. bounds the verified and decrypted content blocks by
+//     limits.MaxEncodedBytes, so a damaged block length cannot allocate more
+//     than the input budget admits;
+//  3. bounds the content handed on for parsing (the decrypted content, or
+//     its gzip expansion when the header selects gzip) by
+//     limits.MaxPlaintextBytes, detected with one extra byte, and rejects an
+//     over-budget body with ErrDecodeLimitExceeded before XML decoding.
+//     A cipher suffix is not part of the budget for AES only: without
+//     compression a valid 1..16-byte PKCS#7 suffix of an AES content is
+//     removed before the limit is applied. ChaCha20 and Twofish content is
+//     never trimmed; every decrypted byte of it is retained and counts toward
+//     the limit, including the bytes the legacy writer appends, and gzip is
+//     budgeted by its expansion;
+//  4. parses the KDBX4 InnerHeader in bounded mode, which rejects a binary
+//     that would bring the aggregate binary bytes (protection flags
+//     included) over limits.MaxPlaintextBytes before copying it. A one-byte
+//     binary is a valid empty binary: its protection flag alone, with no
+//     content, and that flag byte is charged against the budget. A binary
+//     without a protection flag (length 0) or a negative binary length is
+//     malformed and rejected with ErrCorruptedDatabase.
+//
+// The key derivation function stays guarded by the DBCredentials KDF check,
+// which rejects unsupported algorithms and parameters before any Argon2
+// allocation. The plaintext budgets of points 3 and 4 can only be evaluated
+// after key derivation and content decryption, never before it.
+//
+// DecodeLimits with a non-positive or MaxInt64 limit is reported as
+// ErrDecodeLimitExceeded. Errors never embed input data.
+func (d *Decoder) DecodeWithLimits(db *Database, limits DecodeLimits) error {
+	if err := limits.validate(); err != nil {
+		return err
+	}
+	return d.decode(db, decodeBudget{
+		bounded:   true,
+		encoded:   limits.MaxEncodedBytes,
+		plaintext: limits.MaxPlaintextBytes,
+	})
+}
+
+// decodeBudget is the active budget of one decode. With bounded unset every
+// read is unbounded, which is the Decode behavior.
+type decodeBudget struct {
+	bounded   bool
+	encoded   int64
+	plaintext int64
+}
+
+// readAtMost reads r until EOF, at most max+1 bytes, without preallocating
+// them, so memory only grows with the data actually read. Exactly max bytes
+// are accepted; one more byte rejects the input with ErrDecodeLimitExceeded.
+func readAtMost(r io.Reader, max int64, what string) ([]byte, error) {
+	var data []byte
+	var buf [32 << 10]byte
+	for {
+		remaining := max + 1 - int64(len(data))
+		if remaining <= 0 {
+			return nil, fmt.Errorf("%w: %s budget exceeded", ErrDecodeLimitExceeded, what)
+		}
+		chunk := int64(len(buf))
+		if remaining < chunk {
+			chunk = remaining
+		}
+		k, err := r.Read(buf[:chunk])
+		data = append(data, buf[:k]...)
+		if int64(len(data)) > max {
+			return nil, fmt.Errorf("%w: %s budget exceeded", ErrDecodeLimitExceeded, what)
+		}
+		if err == io.EOF {
+			return data, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+}
+
+// decode is the single decode path of Decode and DecodeWithLimits. An
+// unbounded Decode reads its input with io.ReadAll, as before.
+func (d *Decoder) decode(db *Database, budget decodeBudget) error {
+	r := d.r
+	if budget.bounded {
+		// Read at most the encoded limit plus one byte, so an over-limit
+		// input is rejected before the header is parsed and before the
+		// key derivation runs.
+		input, err := readAtMost(d.r, budget.encoded, "encoded input")
+		if err != nil {
+			return err
+		}
+		r = bytes.NewReader(input)
+	}
+
 	// Read header
 	db.Header = new(DBHeader)
-	if err := db.Header.readFrom(d.r); err != nil {
+	if err := db.Header.readFrom(r); err != nil {
 		return err
+	}
+
+	// The bounded path only decodes KDBX4 content. KDBX 3.1 key derivation
+	// runs an AES loop over the header TransformRounds, which untrusted input
+	// can set to an unbounded value, so it is rejected before the header
+	// hash is read and before any key derivation.
+	if budget.bounded && !db.Header.IsKdbx4() {
+		return fmt.Errorf("%w: bounded decoding supports KDBX 4 only", ErrCorruptedDatabase)
 	}
 
 	// Read hashes and validate the header hash (Kdbx v4)
@@ -37,7 +193,7 @@ func (d *Decoder) Decode(db *Database) error {
 	// key derivation never runs on the parameters of a corrupted header
 	if db.Header.IsKdbx4() {
 		db.Hashes = new(DBHashes)
-		err := db.Hashes.readFrom(d.r)
+		err := db.Hashes.readFrom(r)
 		if err != nil {
 			return err
 		}
@@ -68,12 +224,14 @@ func (d *Decoder) Decode(db *Database) error {
 	}
 
 	// Decode raw content
-	rawContent, err := io.ReadAll(d.r)
+	// A bounded input was already limited to the encoded budget, and the
+	// content cannot exceed it.
+	rawContent, err := io.ReadAll(r)
 	if err != nil {
 		return err
 	}
 
-	if err := decodeRawContent(db, rawContent, transformedKey); err != nil {
+	if err := decodeRawContent(db, rawContent, transformedKey, budget); err != nil {
 		return err
 	}
 
@@ -82,7 +240,11 @@ func (d *Decoder) Decode(db *Database) error {
 	// Read InnerHeader (Kdbx v4)
 	if db.Header.IsKdbx4() {
 		db.Content.InnerHeader = new(InnerHeader)
-		err = db.Content.InnerHeader.readFrom(contentReader)
+		if budget.bounded {
+			err = db.Content.InnerHeader.readFromWithLimits(contentReader, budget.plaintext)
+		} else {
+			err = db.Content.InnerHeader.readFrom(contentReader)
+		}
 		if err != nil {
 			return err
 		}
@@ -111,7 +273,7 @@ func readBytes(r io.Reader, length int64) ([]byte, error) {
 	return data, nil
 }
 
-func decodeRawContent(db *Database, content []byte, transformedKey []byte) error {
+func decodeRawContent(db *Database, content []byte, transformedKey []byte, budget decodeBudget) error {
 	var err error
 	// Initialize content
 	db.Content = new(DBContent)
@@ -131,6 +293,10 @@ func decodeRawContent(db *Database, content []byte, transformedKey []byte) error
 		if err != nil {
 			return err
 		}
+	}
+
+	if budget.bounded && int64(len(content)) > budget.encoded {
+		return fmt.Errorf("%w: decrypted content budget exceeded", ErrDecodeLimitExceeded)
 	}
 
 	// Decrypt content
@@ -191,12 +357,57 @@ func decodeRawContent(db *Database, content []byte, transformedKey []byte) error
 		// is followed by its padding, which must not be read as another stream
 		r.Multistream(false)
 
-		decryptedContent, err = io.ReadAll(r)
+		if budget.bounded {
+			// Reading in small chunks keeps every allocation proportional
+			// to the data actually inflated, so a compression bomb is
+			// detected with one byte over the budget instead of being
+			// allocated first.
+			decryptedContent, err = readAtMost(r, budget.plaintext, "decompressed content")
+		} else {
+			decryptedContent, err = io.ReadAll(r)
+		}
 		if err != nil {
 			return err
+		}
+	} else if budget.bounded {
+		// Without compression the decrypted content is the plaintext body
+		// optionally followed by a cipher suffix. The bounded decoder
+		// removes a valid suffix for AES content only: a valid 1..16-byte
+		// PKCS#7 suffix of an AES content is dropped before it is measured.
+		// Every decrypted byte of ChaCha20 and Twofish content is retained
+		// and counted, including the 1..16 repeated-count bytes the legacy
+		// writer appends to that content. Any suffix considered here is
+		// derived from the authenticated decrypted bytes only. An
+		// over-budget body is rejected before it is handed on for parsing.
+		if bytes.Equal(db.Header.FileHeaders.CipherID, CipherAES) && db.Header.IsKdbx4() {
+			decryptedContent = trimPKCS7Padding(decryptedContent)
+		}
+		if int64(len(decryptedContent)) > budget.plaintext {
+			return fmt.Errorf("%w: decrypted content budget exceeded", ErrDecodeLimitExceeded)
 		}
 	}
 
 	db.Content.RawData = decryptedContent
 	return nil
+}
+
+// trimPKCS7Padding removes the trailing PKCS#7 padding from the decrypted
+// content of an uncompressed AES KDBX4 file: 1..16 bytes that each hold the
+// padding length, appended by encodeRawContent before encryption. Content without a valid
+// suffix is returned unchanged. It is called for AES content only: every
+// decrypted byte of ChaCha20 and Twofish content is retained.
+func trimPKCS7Padding(content []byte) []byte {
+	if len(content) == 0 {
+		return content
+	}
+	n := int(content[len(content)-1])
+	if n < 1 || n > 16 || n > len(content) {
+		return content
+	}
+	for _, b := range content[len(content)-n:] {
+		if int(b) != n {
+			return content
+		}
+	}
+	return content[:len(content)-n]
 }

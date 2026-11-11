@@ -36,6 +36,12 @@ InviteReaders](#admin-delegated-invitereaders-transitions); every other
 delegated scope, invite-writer addition, removal, role change and key or root
 change remains unsupported.
 
+The package also implements the low-level KDBX payload pair
+[`SealKDBXPayload`/`OpenKDBXPayload`](#kdbx-payload-sealing-and-opening), which
+encrypts one unlocked KDBX 4.1 database under the per-snapshot CEK with a fixed
+Argon2id profile and opens it through the bounded decoder. It binds no file and
+is not a trusted full-file open.
+
 The package also implements two key-wrapping primitives. The per-snapshot CEK
 envelope, [`SealCEK`/`OpenCEK`](#cek-sealing-and-opening), wraps a fresh random
 32-byte CEK under the epoch VUK; a wrapping proves only that a CEK slot is
@@ -45,9 +51,12 @@ caller-supplied 32-byte VUK to one device with standard age X25519 in the
 existing `vuk_device_slots` entries (`DeviceSlot.WrappedVUK`); its caller
 verified expected recipient comes from an already authenticated policy. Neither
 primitive generates or rotates a VUK or key epoch. Wrapping of the invitation
-and epoch keys, KDBX content encryption/serialization, opening a KDBX content
-with the CEK, a trusted full-file open/decrypt path, content history through
+and epoch keys, a trusted full-file open/decrypt path, content history through
 `prev_digest`, server freshness and overall vault trust are not implemented.
+KDBX content serialization and opening with the CEK are implemented only as
+the low-level payload APIs of
+[KDBX payload sealing and opening](#kdbx-payload-sealing-and-opening), which
+bind no file and authenticate no policy.
 This document describes the wire format and the frozen v1 preimages; it makes
 no cryptographic correctness claim and grants no migration or product
 permission.
@@ -933,6 +942,167 @@ does not scope CEK epoch rotation, and does not serialize, encrypt or decrypt
 KDBX content or provide a trusted full-file open path. `ValidateFile` treats
 `wrapped_vuk` as opaque bytes.
 
+## KDBX payload sealing and opening
+
+Each content snapshot's KDBX content is one KDBX 4.1 database encrypted with
+the snapshot's 32-byte CEK as its key credential. Two functions implement
+exactly that payload, using the vendored gokeepasslib encoder and its bounded
+decoder (no custom cryptography or parser):
+
+```
+SealKDBXPayload(db *kdbx.Database, cek []byte) (encoded []byte, err error)
+OpenKDBXPayload(ciphertext, cek []byte) (db *kdbx.Database, err error)
+```
+
+- `cek` is exactly 32 bytes (`CEKSize`); the package neither generates nor
+  loads it. Seal never modifies the caller's `cek`; Open copies it and clears
+  that package-owned copy on every return.
+- `pkg/vaultfile` imports only the vendored `gokeepasslib` public API for
+  this: no internal package, no vendored-internal import, no unsafe or
+  linkname code.
+
+### Fixed KDBX profile
+
+Seal sets one profile on the header before encoding, replacing any prior KDF
+settings. Open accepts whatever the bounded decoder and its KDF guard accept;
+it does not require this exact profile.
+
+| Member | Value |
+| ------ | ----- |
+| Signature | KDBX 4.1 (`DefaultKDBX41Sig`) required on input and kept |
+| KDF | Argon2id (`KdfArgon2id`) |
+| KDF version `V` | `0x13` |
+| Memory `M` | 16 MiB |
+| Iterations `I` | 3 |
+| Parallelism `P` | 2 |
+| Rounds `R` | 0 |
+| Secret key `K`, associated data `A` | absent |
+| Salt `S` | the header's existing random 32-byte salt; an all-zero or absent salt receives a fresh `crypto/rand` 32-byte salt |
+| Header cipher | the header's cipher (vendored default ChaCha20), unchanged |
+| Compression | the header's flag (vendored default gzip), unchanged |
+
+`*kdbx.Database` values are opaque buffers owned by the caller, so how the
+caller obtained one and whether its header matches the file or revision it is
+sealed under is outside this API. Seal does not copy `db` or its content,
+backs no durable bytes up, and cannot roll back a failed encode.
+
+### Seal: input state, locking and mutation
+
+Seal's accepted input is an unlocked/plaintext database in the state Open
+returns and the internal writer (`writeItems`) produces: `Value.Protected` set,
+protected values in plaintext. It does not accept a pre-locked database.
+
+- Seal rejects a nil database, a nil `Header`, `Signature`, `FileHeaders`,
+  `Hashes`, `Content`, `Meta`, `Root` or `InnerHeader`, a signature that is
+  not KDBX 4.1, a root without exactly one group, a missing inner random
+  stream key, and a `cek` of any length other than 32, all as
+  `kdbx_payload_invalid` before the database is modified. `Hashes` is
+  required because the KDBX4 encoder dereferences it.
+- Seal copies `cek` into package-owned storage, builds a key credential from
+  that copy and installs it as `db.Credentials` for the duration of the call,
+  calls `db.LockProtectedEntries()` exactly once on the plaintext protected
+  values, and only then calls the encoder. The encoder assumes protected
+  values are already locked and unlocks and relocks them under its own
+  established contract. This is the same lock-before-encode flow the existing
+  snapshot and export callers use.
+- Any prior `db.Credentials` value (nil, password, key, Windows, or a
+  credential for another key) is accepted. The exact prior pointer and its
+  bytes are restored on every return, success and error alike; the
+  package-owned key copy is cleared.
+- The database is mutated: header KDF parameters, KDBX metadata, timestamps,
+  header hashes and binary cleanup/renumbering change, and protected entries
+  are left locked at the current inner-stream position (Seal's lock, then the
+  encoder's unlock and relock). The mutation happens even when the output cap
+  rejects the encoding. Callers must have exclusive use of `db` for the call.
+  On error `db` may be partially modified and locked.
+- After Seal the database is locked; callers that need it in plaintext again
+  unlock it themselves.
+
+### Open: prechecks, decode limits and timing
+
+Prechecks run before any decoding. An input longer than
+`MaxKDBXCiphertextBytes` (16 MiB + 64 KiB, the plaintext budget plus the
+64 KiB envelope overhead) is `kdbx_payload_too_large`. An empty input, one
+without the exact KDBX 4.1 signature, or a `cek` that is not 32 bytes is
+`kdbx_payload_invalid`.
+
+The committed bounded decoder (`Decoder.DecodeWithLimits`) then runs with
+`MaxEncodedBytes = MaxKDBXCiphertextBytes` and
+`MaxPlaintextBytes = MaxPlaintextBytes`:
+
+| Stage | Bound and where it applies |
+| ----- | -------------------------- |
+| encoded input | read at most `MaxKDBXCiphertextBytes + 1` bytes; over it is rejected before the header is parsed |
+| KDBX version | a header that is not KDBX 4 (such as KDBX 3.1) is rejected right after parsing and before any legacy AES round |
+| header hash | the header SHA-256 is checked before key derivation |
+| KDF guard | the credentials KDF check rejects an unsupported KDF algorithm, version, iterations, parallelism, memory, secret key or associated data before any Argon2 allocation |
+| header HMAC | checked before content decryption |
+| content blocks | bounded by the encoded budget; each block HMAC is verified |
+| decrypted/gzip body | the decrypted content, or its gzip expansion, is rejected after key derivation and decryption but before XML decoding. The budget is cipher-specific. With `NoCompressionFlag` and AES, a valid 1..16-byte PKCS#7 suffix (including a full 16-byte block) is removed from the end of the decrypted content and excluded from the budget; with `NoCompressionFlag` and ChaCha20 or Twofish, every decrypted byte is kept and counted, including the 1..16 repeated-count bytes the legacy writer appends for them; the decoder removes a valid suffix only for AES. Gzip content is budgeted by its expansion only; trailing block padding is read by neither and is excluded |
+| InnerHeader binaries | the aggregate binary bytes (protection flag included) are bounded by `MaxPlaintextBytes` and rejected before an over-budget binary is copied, after key derivation and decryption |
+
+The last two budgets can only be evaluated after the fixed Argon2id cost;
+they bound memory and CPU after derivation, not before it. A successful Open
+returns protected values unlocked (the state Seal accepts), with
+`Credentials` set to an empty value. Open clears its CEK copy; temporaries
+allocated inside the vendored crypto, gzip and XML code are opaque and cannot
+be cleared through its public API.
+
+### Errors, size and ownership
+
+| Code | Meaning |
+| ---- | ------- |
+| `kdbx_payload_invalid` | every rejected input and every KDBX failure: a nil or malformed database, a header that is not KDBX 4.1, a CEK of the wrong length, a wrong CEK, tampered or malformed bytes, an unsupported KDF, a block or header authentication failure |
+| `kdbx_payload_too_large` | input above `MaxKDBXCiphertextBytes`; a sealed plaintext body above `MaxPlaintextBytes`; a decoded or gzip-expanded body above `MaxPlaintextBytes`; aggregate InnerHeader binary bytes above `MaxPlaintextBytes`; an encoded output above `MaxKDBXCiphertextBytes` |
+
+Both are `*Error` values created per call. The invalid code is intentionally
+one code for all failures so a caller cannot distinguish a wrong key from
+corrupted content; neither error embeds input data or key bytes. Seal returns
+bytes only with a nil error and nil bytes on error; Open returns a database
+only with a nil error and nil on error.
+
+The decoder's expanded-body budget would otherwise let Seal produce a payload
+that Open rejects. Seal therefore also bounds the encoder's plaintext body:
+the encoder's opt-in `Encoder.EncodeWithLimits` measures the serialized KDBX4
+plaintext (the InnerHeader followed by the XML document, after the encoder's
+normalization and protected-entry ordering) and enforces `MaxPlaintextBytes`
+on its writes before gzip compression and encryption. The encoded bytes are
+unchanged: the legacy writer always appends 1..16 repeated-count padding
+bytes before encryption, for every cipher. With `NoCompressionFlag` and AES a
+body of exactly `MaxPlaintextBytes` still seals and opens, because Open removes
+the PKCS#7 suffix; with `NoCompressionFlag` and ChaCha20 or Twofish the budget
+also reserves those writer padding bytes, since Open retains and counts every
+non-AES decrypted byte, so an encode at budget `M` admits a
+body of at most `floor(M/16)*16-1` bytes and its output opens under the same
+`MaxPlaintextBytes` with the padded decrypted bytes intact; `M` below 16 is
+rejected. Gzip content is budgeted as before. The XML streams into that
+bounded collector, so no separate full XML slice from `xml.MarshalIndent` is
+built before the budget is enforced; the collector itself retains the serialized
+document up to its budget. A body over it, such as
+a highly compressible value that still expands the document past the budget,
+is `kdbx_payload_too_large` with no output. The encoder keeps its established
+write order, so by then the KDBX header and hashes have already been written to
+Seal's collector; the collector is bounded and released on every error, so no
+output is returned.
+
+Seal collects output in a bounded buffer: at most `MaxKDBXCiphertextBytes` is
+retained, and an encoding that would exceed it is `kdbx_payload_too_large`
+with no output (collected bytes are cleared). The returned bytes are
+caller-owned.
+
+### Trust boundary
+
+These are low-level payload APIs, not a trusted full-file open. They establish
+only that the bytes are a KDBX 4.1 database sealed under the caller-supplied
+CEK, that its header and content blocks authenticate under that key, and that
+its blocks and bodies stay within the budgets above. They do not authenticate
+a file: they do not pin vault, revision, `content_seq`, `op_id` or digest,
+verify the content signature, policy proofs or a `PolicyCheckpoint`, unwrap or
+authorize the VUK or CEK slot, or establish freshness. The CEK used as the KDBX
+key is bound to no wire field. A trusted full-file open that pins caller
+state, verifies the policy checkpoint, then opens the CEK slot and only then
+calls `OpenKDBXPayload` remains a later checkpoint.
+
 ## Limits
 
 Neither API establishes overall vault trust beyond its caller-supplied anchor.
@@ -981,6 +1151,12 @@ authorization is implemented. In particular:
   rotate or prove the freshness or uniqueness of a VUK or epoch, do not
   authenticate the policy the expected recipient came from, do not authorize a
   device or a file, and do not open a file.
+- `SealKDBXPayload`/`OpenKDBXPayload` establish only that the bytes are a
+  KDBX 4.1 database sealed under, and opened by, the caller-supplied CEK and
+  within the payload budgets. They bind no vault, revision, digest or
+  signature, do not verify a policy or checkpoint, do not unwrap a CEK slot
+  or VUK, and are not a trusted full-file open (see [KDBX payload sealing and
+  opening](#kdbx-payload-sealing-and-opening)).
 
 ## Budgets
 
@@ -1063,10 +1239,12 @@ envelope](#vuk-device-slot-envelope) negative.
 This schema revision includes the two verification APIs described above,
 `VerifyContentSignature` (narrow, caller-pinned content key) and
 `VerifyPolicyCheckpoint` (from a caller-supplied `PolicyCheckpoint` forward),
-and two key-wrapping primitives, `SealCEK`/`OpenCEK`
+two key-wrapping primitives, `SealCEK`/`OpenCEK`
 ([CEK sealing and opening](#cek-sealing-and-opening)) and
 `SealVUKForDevice`/`OpenVUKForDevice` ([VUK device-slot
-envelope](#vuk-device-slot-envelope)).
+envelope](#vuk-device-slot-envelope)), and the low-level
+`SealKDBXPayload`/`OpenKDBXPayload` payload pair ([KDBX payload sealing and
+opening](#kdbx-payload-sealing-and-opening)).
 `ValidateFile`, parsing, encoding and preimage derivation remain shape-only.
 
 It does not establish or create the trustworthiness or provenance of the
@@ -1085,10 +1263,10 @@ delegated diff it implements no other policy proof, signature-chain or
 authorization verification and no permission checks. It also leaves the
 provenance of the caller's root outside its scope, key or digest crypto
 beyond the definitions, content history through `prev_digest`, server
-freshness, migration/import, encryption or decryption, VUK and epoch
-generation or rotation, the invitation and epoch rewrap workflow that would
-drive `SealVUKForDevice` for changed device sets or epochs, KDBX
-encryption/serialization or opening with the CEK, a trusted full-file open
-path, or product wiring. The VUK device-slot envelope of [VUK device-slot
+freshness, migration/import, file-level encryption or decryption beyond the
+low-level KDBX payload pair, VUK and epoch generation or rotation, the
+invitation and epoch rewrap workflow that would drive `SealVUKForDevice` for
+changed device sets or epochs, a trusted full-file open path, or product
+wiring. The VUK device-slot envelope of [VUK device-slot
 envelope](#vuk-device-slot-envelope) wraps only the caller-supplied VUK; it
 authenticates no policy and opens no file.
