@@ -27,8 +27,29 @@ import {
   prepareSharedEnvironment,
 } from "./browser_shared_clipboard_acceptance.mjs";
 import { acceptCheckoutFrames, checkoutTopHTML, checkoutCardHTML, checkoutRouteCase } from "./browser_checkout_acceptance.mjs";
-
 const checkoutFrames = process.env.LOCKLARK_TEST_CHECKOUT_FRAMES === "1";
+// Explicit opt-in: a QuickFill=false action row opens one persistent route tab
+// and its native per-operation approval, instead of the long default journeys.
+const routeDetailRead = process.env.LOCKLARK_TEST_ROUTE_DETAIL_READ === "1";
+// Route pages are the fixed extension popup document plus exactly one 64-hex
+// token fragment. Action popups are that same document with no fragment.
+const ROUTE_PAGE = /^chrome-extension:\/\/[a-p]{32}\/popup\.html#route=[a-f0-9]{64}$/;
+const ACTION_POPUP = /^chrome-extension:\/\/[a-p]{32}\/popup\.html$/;
+// The route checkpoint is the only requested journey in this mode, so every
+// mode that would change what pairing, fill or checkout mean is refused before
+// anything is launched.
+function routeModeCompatible() {
+  const off = (name) => !process.env[name];
+  return (
+    off("LOCKLARK_TEST_SHARED_CLIPBOARD") &&
+    off("LOCKLARK_TEST_POPUP_VAULT") &&
+    off("LOCKLARK_TEST_CHECKOUT_FRAMES") &&
+    off("LOCKLARK_TEST_BROWSER_PARITY") &&
+    off("LOCKLARK_TEST_FAILURE_STAGE") &&
+    (process.env.LOCKLARK_TEST_BROWSER === undefined ||
+      process.env.LOCKLARK_TEST_BROWSER === "chromium")
+  );
+}
 const POPUP_CLOSED = ["Popup closed", "Popup CDP closed", "Popup CDP timed out"];
 function popupClosed(error) {
   return POPUP_CLOSED.includes(error?.message);
@@ -49,6 +70,10 @@ const browserName = process.env.LOCKLARK_TEST_BROWSER === "edge" ? "edge" : "chr
 const browserExecutable = process.env.LOCKLARK_TEST_BROWSER_EXECUTABLE;
 if (browserName === "edge")
   assert(browserExecutable && browserExecutable.startsWith("/"), "Edge requires an explicit absolute executable path");
+if (routeDetailRead) {
+  assert(routeModeCompatible(), "Route detail mode is incompatible");
+  assert(browserName === "chromium", "Route detail mode requires Chromium");
+}
 if (register)
   assert(existsSync(register), "LOCKLARK_BROWSER_REGISTER must name a built executable");
 assert(
@@ -514,6 +539,207 @@ try {
     );
     return popup;
   }
+  // Rendered vault rows only: identity, title and hit-test visibility. Field
+  // values, revisions and item URLs are never read here.
+  const VAULT_ROWS =
+    "[...document.querySelectorAll('#vault-list .vault-item')]" +
+    ".map(row=>({id:row.dataset.itemId||''," +
+    "title:row.querySelector('.vault-item-title')?.textContent??null," +
+    "visible:row.getClientRects().length>0}))";
+  // The route detail surface as rendered: view, visible title, concealed
+  // password control, and one boolean secret-substring check. Page text,
+  // values, identity, URL and token never leave the page.
+  function routeSurfaceProbe(title, password) {
+    return `(()=>{
+      const detail=document.querySelector('#detail-view');
+      const heading=document.querySelector('#detail-title');
+      const fields=document.querySelector('#detail-fields');
+      const values=fields?[...fields.querySelectorAll('.field-value')]:[];
+      const concealed=!!(
+        fields?.querySelector('[data-field-type="password"],[data-field-type="concealed"],.concealed,[data-concealed="true"],input[type="password"]') ||
+        values.some(value=>/^[\u2022\u25cf*]+$/.test(String(value.textContent||'').trim()))
+      );
+      return {
+        view:document.body?.dataset?.view||'',
+        detailShown:!!detail&&!detail.hidden,
+        title:heading?heading.textContent:null,
+        concealed,
+        passwordRendered:document.body?String(document.body.innerText).includes(${JSON.stringify(password)}):true
+      };
+    })()`;
+  }
+  // Fixed findings only; never text, ids, revisions, URLs or tokens.
+  function verifyRouteSurface(surface, title) {
+    if (surface?.detailShown !== true) return "route-detail-view-missing";
+    if (surface.view !== "detail") return "route-detail-view-missing";
+    if (surface.title !== title) return "route-detail-title-mismatch";
+    if (surface.concealed !== true) return "route-concealed-control-missing";
+    if (surface.passwordRendered !== false) return "route-password-rendered";
+    return "";
+  }
+  async function acceptRouteDetailRead(driver) {
+    const {
+      browser: context,
+      fixture,
+      phase: mark,
+      eventually: wait,
+      openPopup: openActionPopup,
+      extensionTargets: targets,
+      attachRoute: attach,
+    } = driver;
+    assert(
+      typeof fixture.SeedID === "string" && /^[a-f0-9]{32}$/.test(fixture.SeedID),
+      "Synthetic seed item identity missing",
+    );
+    assert(
+      typeof fixture.Title === "string" && fixture.Title.length > 0,
+      "Synthetic fixture title missing",
+    );
+    mark("route:popup");
+    const action = await openActionPopup();
+    await wait(
+      async () => (await action.disabled("#refresh")) === false,
+      "Paired popup not ready",
+    );
+    mark("route:vault-open");
+    await action.click('#filter-tabs [data-filter="all"]');
+    await wait(
+      async () =>
+        (await action.evaluate("document.readyState")) === "complete" &&
+        (await action.count("#vault-list .vault-item")) > 0,
+      "Vault rows missing",
+    );
+    mark("route:exact-row");
+    // Exactly one rendered vault row, the fixture's seed item, its title.
+    const rows = await action.evaluate(VAULT_ROWS);
+    assert(
+      Array.isArray(rows) &&
+        rows.length === 1 &&
+        rows[0].id === fixture.SeedID &&
+        rows[0].title === fixture.Title &&
+        rows[0].visible === true,
+      "Exact synthetic vault row missing",
+    );
+    const rowSelector =
+      '#vault-list .vault-item[data-item-id="' + fixture.SeedID + '"]';
+    const before = new Set((await targets()).map((target) => target.id));
+    const pagesBefore = new Set(
+      context
+        .pages()
+        .filter((entry) => !/^chrome-extension:\/\//.test(entry.url())),
+    );
+    mark("route:row-click");
+    // Exactly one real CDP mouse press/release through the popup wrapper.
+    await action.click(rowSelector);
+    mark("route:page-opened");
+    let opened;
+    await wait(async () => {
+      const candidates = (await targets()).filter(
+        (target) =>
+          !before.has(target.id) &&
+          ROUTE_PAGE.test(target.url) &&
+          (target.type === "page" || target.type === "tab"),
+      );
+      if (candidates.length > 1) throw Error("Route page must be unique");
+      opened = candidates[0];
+      return !!opened;
+    }, "Route page did not open");
+    const routeTarget = opened.id;
+    assert.equal(
+      (await targets()).filter((target) => ROUTE_PAGE.test(target.url)).length,
+      1,
+      "Route page must be unique",
+    );
+    mark("route:popup-closed");
+    await wait(async () => !(await action.ready()), "Action popup stayed open");
+    await wait(
+      async () =>
+        !(await targets()).some((target) => ACTION_POPUP.test(target.url)),
+      "Action popup target stayed open",
+    );
+    // The route tab is the only new browser page: every non-extension page
+    // present now must be one of the controlled-login pages seen before.
+    const pagesAfter = context
+      .pages()
+      .filter((entry) => !/^chrome-extension:\/\//.test(entry.url()));
+    assert(
+      pagesAfter.length === pagesBefore.size &&
+        pagesAfter.every((entry) => pagesBefore.has(entry)),
+      "Unexpected page opened",
+    );
+    mark("route:attached");
+    const route = await attach(opened);
+    try {
+      await wait(
+        async () =>
+          (await route.evaluate("document.readyState")) === "complete",
+        "Route page did not load",
+      );
+      // The route claim starts the same native V2 item-get review the action
+      // popup would have used, so the real per-operation approval appears only
+      // after this tab exists. A missing window/label is retried inside the
+      // bounded wait; no inspect output is retained or logged.
+      mark("route:native-label");
+      const approveLabel = () => {
+        try {
+          const control = input([], true, true).controls?.["批准本次操作"];
+          return control?.present === true && control?.showing === true;
+        } catch {
+          return false;
+        }
+      };
+      await wait(approveLabel, "Native route approval label missing");
+      assert.equal(
+        (await targets()).filter((target) => ROUTE_PAGE.test(target.url))
+          .length,
+        1,
+        "Route page must be unique",
+      );
+      mark("route:native-approve");
+      // Exactly one real X11 pointer click on the native allowlisted label.
+      input([{ click_label: "批准本次操作" }]);
+      mark("route:approved");
+      let finding = "";
+      const verified = async () => {
+        const live = await targets();
+        const routes = live.filter((target) => ROUTE_PAGE.test(target.url));
+        assert(
+          routes.length === 1 && routes[0].id === routeTarget,
+          "Route target was replaced",
+        );
+        assert(
+          !live.some((target) => ACTION_POPUP.test(target.url)),
+          "Action popup reopened",
+        );
+        finding = verifyRouteSurface(
+          await route.evaluate(
+            routeSurfaceProbe(fixture.Title, fixture.Value),
+          ),
+          fixture.Title,
+        );
+        return finding === "";
+      };
+      try {
+        await wait(verified, "Route detail did not survive native approval");
+      } catch (error) {
+        // Only the fixed allowlisted finding id leaves this checkpoint.
+        if (finding) throw Error(finding);
+        throw error;
+      }
+      mark("route:verified");
+      // The same target id is still the one route page, after approval.
+      const routes = (await targets()).filter((target) =>
+        ROUTE_PAGE.test(target.url),
+      );
+      assert.equal(routes.length, 1, "Route target was replaced");
+      assert.equal(routes[0].id, routeTarget, "Route target was replaced");
+      console.log(
+        "PASS: real popup exact row opened one persistent route tab; native approval kept the same tab's detail without revealing values",
+      );
+    } finally {
+      await route.close().catch(() => {});
+    }
+  }
   async function blank() {
     assert(
       (await page.locator("#username").inputValue()) === "",
@@ -593,7 +819,42 @@ try {
           : "确认连接此扩展",
     },
   ]);
-  if (checkoutFrames) {
+  if (routeDetailRead) {
+    // The route checkpoint reuses the existing action-popup CDP wrapper and
+    // the real native X11 helper. It never navigates, messages the worker or
+    // injects a page hook: only the rendered popup/route UI is observed.
+    async function extensionTargets() {
+      const port = readFileSync(
+        join(profile, "DevToolsActivePort"),
+        "utf8",
+      ).split("\n")[0];
+      const targets = await (
+        await fetch("http://127.0.0.1:" + port + "/json/list")
+      ).json();
+      return targets.filter((target) =>
+        target.url.startsWith(
+          "chrome-extension://geldnhjapnackobgknocomedmjgphnpe/popup.html",
+        ),
+      );
+    }
+    async function attachRoute(target) {
+      const route = await attachPopup(target);
+      return {
+        evaluate: (expression) => route.evaluate(expression),
+        close: () => route.close(),
+      };
+    }
+    await acceptRouteDetailRead({
+      browser,
+      input,
+      fixture,
+      phase,
+      eventually,
+      openPopup,
+      extensionTargets,
+      attachRoute,
+    });
+  } else if (checkoutFrames) {
     await page.goto(origin + "/checkout");
     const checkout = await acceptCheckoutFrames({ page, origin, input, fixture, openPopup, phase, eventually });
     // The final lock journey already invalidated/cleaned up the session; only
@@ -954,6 +1215,28 @@ try {
     "Locked host still allowed matching",
     "Lock status missing",
     "Locked checkout approval received a value",
+    "Route detail mode is incompatible",
+    "Route detail mode requires Chromium",
+    "Paired popup not ready",
+    "Vault rows missing",
+    "Exact synthetic vault row missing",
+    "Synthetic seed item identity missing",
+    "Synthetic fixture title missing",
+    "Route page did not open",
+    "Route page must be unique",
+    "Action popup stayed open",
+    "Action popup target stayed open",
+    "Unexpected page opened",
+    "Route page did not load",
+    "Route detail did not render",
+    "Native route approval label missing",
+    "Route detail did not survive native approval",
+    "Route target was replaced",
+    "Action popup reopened",
+    "route-detail-view-missing",
+    "route-detail-title-mismatch",
+    "route-concealed-control-missing",
+    "route-password-rendered",
   ];
   const report = {
     reason: safeReasons.includes(error?.message)
@@ -1021,6 +1304,8 @@ console.log(
     ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} extension shared Locklark desktop native clipboard lease, private OS reads, foreign-owner TTL preservation, lock clearing and hidden-popup prepare cancellation`
     : checkoutFrames
     ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} checkout same-origin child approval (profile review) and picker cancellation, cross-origin approval/refusal, cross-site, opaque sandbox, changed-document and top-navigation rejection, and lock while cross-origin card review is pending`
+    : routeDetailRead
+    ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} QuickFill=false action row opened exactly one persistent route tab, the native per-operation approval kept that same tab, and its rendered detail matched the synthetic fixture without revealing a value`
     : process.env.LOCKLARK_TEST_BROWSER_PARITY
     ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} quick pairing, inline fill, automatic sign-in, Passkey creation/assertion, relying-party signature verification and abort`
     : `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} fill/save/update/OTP and Passkey with native approval and private diagnostics`,
