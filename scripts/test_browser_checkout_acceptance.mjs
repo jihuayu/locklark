@@ -1964,6 +1964,36 @@ test("route per-field copy uses physical input, exact native labels and the priv
   assert.match(checkpoint, /routePasswordRowProbe\(fixture\.Value\)/);
   assert.match(checkpoint, /rowBefore\?\.masked, true/);
   assert.match(checkpoint, /rowBefore\?\.leaked, false/);
+  // The checkpoint drives the real adapter: attachRoute must forward the
+  // existing popup mouse wrapper, not just evaluate/close, and that wrapper is
+  // the reviewed CDP input path (no DOM event dispatch anywhere).
+  const adapterFrom = source.indexOf("async function attachRoute(target) {");
+  assert.ok(adapterFrom > 0, "missing attachRoute adapter");
+  const adapter = source.slice(
+    adapterFrom,
+    source.indexOf("\n    }\n", adapterFrom) + "\n    }\n".length,
+  );
+  assert.match(adapter, /const route = await attachPopup\(target\);/);
+  assert.match(adapter, /click: \(selector\) => route\.click\(selector\),/);
+  assert.doesNotMatch(adapter, /dispatchEvent|\.evaluate\([^)]*click/);
+  // The forwarded method is the real mouse wrapper: visibility and hit-test
+  // first, then one CDP mousePressed/mouseReleased pair.
+  const popupFrom = source.indexOf("async function attachPopup(target) {");
+  assert.ok(popupFrom > 0, "missing attachPopup wrapper");
+  const popup = source.slice(popupFrom, source.indexOf("\n  }\n", popupFrom));
+  const clickFrom = popup.indexOf("click: async (selector) => {");
+  assert.ok(clickFrom > 0, "attachPopup has no click method");
+  const wrapper = popup.slice(clickFrom, popup.indexOf("\n      },", clickFrom));
+  assert.match(wrapper, /document\.visibilityState!=="visible"/);
+  assert.match(wrapper, /document\.elementFromPoint/);
+  assert.match(wrapper, /type: "mousePressed"/);
+  assert.match(wrapper, /type: "mouseReleased"/);
+  assert.doesNotMatch(wrapper, /dispatchEvent/);
+  // The route journey calls that forwarded method, not a local substitute.
+  assert.match(
+    checkpoint,
+    /await route\.click\(ROUTE_COPY_FIELD_SELECTOR\);/,
+  );
   // The private-pipe reader is the shared one, exported without behavior change.
   const shared = readFileSync(
     new URL("./browser_shared_clipboard_acceptance.mjs", import.meta.url),

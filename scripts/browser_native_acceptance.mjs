@@ -1571,6 +1571,9 @@ try {
       const route = await attachPopup(target);
       return {
         evaluate: (expression) => route.evaluate(expression),
+        // The reviewed real CDP mouse wrapper (visibility/hit-test, then
+        // mousePressed/mouseReleased). No second click path exists here.
+        click: (selector) => route.click(selector),
         close: () => route.close(),
       };
     }
