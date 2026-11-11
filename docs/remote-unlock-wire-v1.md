@@ -1067,9 +1067,11 @@ evidence that a VUK was authorized or delivered.
 ## Loopback composition smoke (test-only)
 
 `internal/remoteunlocktls/composition_test.go` carries one isolated positive
-composition checkpoint, `TestLoopbackPositiveCompositionSmoke`. It is a test,
-not a production integration, and it does not change any frame, byte, member or
-verification rule in this document.
+composition checkpoint, `TestLoopbackPositiveCompositionSmoke`, and
+`internal/remoteunlocktls/rejection_test.go` carries one separate, equally
+narrow rejection checkpoint described below. Both are tests, not a production
+integration, and they do not change any frame, byte, member or verification
+rule in this document.
 
 The test performs a real concurrent `ClientHandshake`/`ServerHandshake` over an
 owned `127.0.0.1:0` loopback TCP pair, requires TLS 1.3 without resumption and
@@ -1110,9 +1112,57 @@ memory-only: the test claims no restart or durable anti-rollback behavior.
 The length-prefixed request, approval and VUK frames used by this test are
 private test-only helpers. They are not a product wire protocol and must not be
 implemented as one; the v1 production framing contract above is unchanged.
-This smoke has no failure matrix (no wrong key, SPKI, device, member, context,
-expiry, cancellation, restart, stale policy or replay case) and is not evidence
-that #127, #129 or #130 is complete.
+
+### Narrow rejection checkpoint (test-only)
+
+`internal/remoteunlocktls/rejection_test.go` reuses the same synthetic fixture,
+test-only framing helpers, real `127.0.0.1:0` mTLS harness (`runHandshakes`,
+TLS 1.3, no resumption, no session tickets), canonical public codecs and public
+verification APIs, with deterministic caller-supplied protocol times and bounded
+I/O deadlines. It covers exactly two rejections and nothing more:
+
+1. **Stale exporter replayed on another TLS channel**
+   (`TestLoopbackStaleExporterOnSecondChannelRejected`). One request is accepted
+   on channel 1. A second fresh TLS 1.3 mTLS handshake uses the same synthetic
+   CA and leaf certificates, so both endpoint SPKI pins are unchanged and the
+   channel-2 source and target peer bindings still verify. On channel 2 the
+   same context, source/target bindings and delegated-admin authorization still
+   pass `VerifyPeerDeviceTransportBinding` and
+   `VerifyAdminRemoteUnlockAuthorization`, and channel 2's own exporter
+   verifies, but channel 2 derives a different exporter. Replaying channel 1's
+   exporter makes the server-side channel-2 `VerifyBindingContext` fail with
+   `ErrBindingMismatch` before any approval, `vaultfile.SealVUKForDevice` call
+   or VUK frame. The test asserts that error, zero sealed VUKs, zero VUK frames
+   and no reply bytes. It deliberately does not change certificates or any
+   policy, signature or key, so the rejection is attributable to the stale
+   exporter alone.
+2. **Late response to a locally cancelled request**
+   (`TestLoopbackCancelledRequestDoesNotConsumeLateVUK`). A distinct fresh
+   context (new request identifier, request digest and lock generation) with a
+   valid delegated-admin authorization travels over one real loopback TLS 1.3
+   mTLS channel against the caller-pinned current file and checkpoint. The
+   server verifies the exporter, source peer binding and authorization, approves
+   and pauses at a synchronization point. The client then cancels its
+   process-local `RequestLifecycle` before releasing the server, which sends one
+   genuine age-wrapped VUK. The client reads the late envelope but never calls
+   `vaultfile.OpenVUKForDevice`; so no plaintext VUK buffer exists. `Confirm`
+   and `Receive` stay rejected with `ErrLifecycleTransition`, the status stays
+   `cancelled`, the plaintext VUK is absent from the envelope, and the
+   caller-owned ciphertext buffer is cleared. This API has no locked state, so
+   only `Cancel` is covered.
+
+Cancellation in case 2 is **local and in-memory only**. It does not revoke the
+authorization, notify the server, prevent remote delivery, survive a restart,
+or provide durable anti-replay protection. The test demonstrates that no local
+lifecycle consumption occurs; it does not claim remote cancellation, system-wide
+key revocation, or that the server withheld the late VUK.
+
+These are two covered rejections, not a failure matrix: no wrong SPKI, key,
+device, member, context, expiry, restart, stale policy or tampering case is
+exercised, and they are not evidence that #127, #129 or #130 is complete. The
+test-only frames remain private to the tests (bounded request, approval, control
+and VUK frames, and two 1-byte control sections appended to the request packet)
+and are still not a product wire protocol.
 
 ## Scope boundary
 

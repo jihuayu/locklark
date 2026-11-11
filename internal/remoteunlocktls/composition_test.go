@@ -14,10 +14,12 @@ package remoteunlocktls
 // session protocol, and not a production frame, relay or VUK service. The v1
 // production framing contract in docs/remote-unlock-wire-v1.md is unchanged.
 //
-// This test proves one positive flow only. It has no failure matrix: it does
-// not exercise a wrong SPKI, key, device, member, context, expiry,
-// cancellation, restart, stale policy or replay packet. It makes no claim that
-// #127, #129 or #130 is complete.
+// This test proves one positive flow only and has no failure matrix of its
+// own: it does not exercise a wrong SPKI, key, device, member, context, expiry,
+// restart or stale policy. Exactly two narrow rejections are covered separately
+// in rejection_test.go (a stale channel-1 exporter replayed on a second TLS
+// channel, and a locally cancelled request receiving a late VUK); neither file
+// makes any claim that #127, #129 or #130 is complete.
 
 import (
 	"bytes"
