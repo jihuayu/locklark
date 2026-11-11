@@ -484,15 +484,23 @@ var (
 )
 
 // browserCommandForOS names the native opener of this OS. The URL is one
-// argument and never passes through a shell. Only macOS and Windows have an
-// opener among the build targets; elsewhere the command fails closed instead of
-// guessing a shell command.
+// argument and never passes through a shell. An OS without an opener among the
+// build targets fails closed instead of guessing a shell command.
 func browserCommandForOS(rawURL string) (program string, args []string, ok bool) {
-	switch runtime.GOOS {
+	return browserCommandFor(rawURL, runtime.GOOS)
+}
+
+// browserCommandFor is the pure OS selection behind browserCommandForOS. Linux
+// desktops open the system browser through xdg-open; other Unix-like systems
+// have no single opener and are refused.
+func browserCommandFor(rawURL, goos string) (program string, args []string, ok bool) {
+	switch goos {
 	case "darwin":
 		return "/usr/bin/open", []string{rawURL}, true
 	case "windows":
 		return `C:\Windows\System32\rundll32.exe`, []string{"url.dll,FileProtocolHandler", rawURL}, true
+	case "linux":
+		return "xdg-open", []string{rawURL}, true
 	}
 	return "", nil, false
 }

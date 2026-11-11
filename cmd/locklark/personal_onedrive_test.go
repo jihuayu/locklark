@@ -324,3 +324,16 @@ func TestOnedriveExchangeErrorClassification(t *testing.T) {
 		}
 	}
 }
+
+// TestBrowserCommandForLinux keeps the Linux opener a direct xdg-open call whose
+// single argument is the URL exactly as given, shell metacharacters included.
+func TestBrowserCommandForLinux(t *testing.T) {
+	const rawURL = "https://login.example/authorize?client_id=a%26b&state=x;y|z$(id)`id`'" + "&redirect_uri=http%3A%2F%2F127.0.0.1%3A8080%2Foauth%2Fcallback"
+	program, args, ok := browserCommandFor(rawURL, "linux")
+	if !ok || program != "xdg-open" || len(args) != 1 || args[0] != rawURL {
+		t.Fatalf("linux browser = (%q, %q, %v)", program, args, ok)
+	}
+	if _, _, ok := browserCommandFor(rawURL, "plan9"); ok {
+		t.Fatal("an OS without an opener must fail closed")
+	}
+}
