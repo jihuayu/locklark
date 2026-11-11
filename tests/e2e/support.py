@@ -2352,8 +2352,10 @@ _CHECKOUT_BRANCH_STAGES = {
         "checkout-cross-site:native-review",
     ),
 }
+# A branch marker belongs, as an optional stage, only to the case that owns
+# it; evidence never records one case's marker under another case.
 CHECKOUT_OPTIONAL_STAGES = tuple(
-    stage for stages in _CHECKOUT_BRANCH_STAGES.values() for stage in stages
+    stage for markers in _CHECKOUT_BRANCH_STAGES.values() for stage in markers
 )
 CHECKOUT_REQUIRED_STAGES = tuple(
     stage
@@ -2672,6 +2674,17 @@ def _checkout_branch_stage(case_id: str, stages: set[str]) -> str | None:
     return observed[0] if observed else None
 
 
+def _checkout_allowed_stages(case_id: str) -> frozenset[str]:
+    """Stages ``case_id`` may record: its own fixed stages and branch markers.
+
+    The allowlist is per case, so one case can never borrow another case's
+    stage to satisfy its required set.
+    """
+
+    required = next(stages for case, stages in CHECKOUT_CASES if case == case_id)
+    return frozenset(required) | frozenset(_CHECKOUT_BRANCH_STAGES.get(case_id, ()))
+
+
 def _checkout_case_stages(
     case_id: str, observed: set[str] | None = None
 ) -> list[str]:
@@ -2757,14 +2770,17 @@ def _checkout_evidence_structure(evidence: Any) -> list[dict[str, Any]]:
         )
     for case_id, expected_stages in CHECKOUT_CASES:
         stages = by_id[case_id]["stages"]
+        observed = set(stages)
+        # A case may record only its own fixed stages plus its own optional
+        # branch markers.  The global allowlist alone would let, say, a
+        # cross-site exclusion stand in for a missing approve stage.
+        allowed = _checkout_allowed_stages(case_id)
         # Unknown, duplicated or foreign stages are never part of the contract.
-        if len(set(stages)) != len(stages) or any(
-            stage not in _CHECKOUT_STAGE_LABELS for stage in stages
-        ):
+        if len(observed) != len(stages) or not observed <= allowed:
             raise AssertionError("checkout evidence is malformed")
         # The mutually exclusive branches cannot both have run.
-        _checkout_branch_stage(case_id, set(stages))
-        if not set(expected_stages) <= set(stages):
+        _checkout_branch_stage(case_id, observed)
+        if not set(expected_stages) <= observed:
             raise AssertionError(
                 "checkout evidence is missing an expected checkout stage"
             )

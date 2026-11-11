@@ -14,6 +14,7 @@ import {
   assertProgrammaticClickRefused,
   acceptCheckoutFrames,
   runLockDuringReviewJourney,
+  runCrossSiteJourney,
   CHECKOUT_LOCKED,
 } from "./browser_checkout_acceptance.mjs";
 
@@ -1087,11 +1088,259 @@ test("the cross-site branch reads the boolean and never the result object", () =
   assert.match(branch, /"Cross-site checkout received a value without approval"/);
   assert.ok(countMatches(branch, /assertNoNativeApproval\(input, POPUP_OPEN\)/g) >= 2);
   assert.ok(countMatches(branch, /assertBothBlank\(/g) >= 2);
-  // The common stage re-proves both after the branch passed.
-  const common = journey.slice(refused);
-  assert.match(common, /assertNoNativeApproval\(input, POPUP_OPEN\)/);
-  assert.match(common, /"Cross-site checkout received a value without approval"/);
   assert.doesNotMatch(journey, /input\(\[/);
+});
+
+// Executes the real cross-site journey through its driver interface. `page`,
+// `input` and `openPopup` are the existing stubs above; only the cross-site
+// outcomes the browser chooses between are modelled here.
+function crossSiteDriver(options = {}) {
+  const fixture = {
+    CardID: "0".repeat(32),
+    CardRevision: "a".repeat(64),
+    CardTitle: "Synthetic checkout card",
+    CardNumber: "4111111111111111",
+    CardHolder: "Synthetic Holder",
+    CardVerification: "123",
+    CardExpiry: "2030-01",
+    CardPIN: "1234",
+  };
+  const cardRow = '#vault-list [data-item-id="' + fixture.CardID + '"]';
+  const state = {
+    // A listed cross-site child means the helper selects it (selected:true)
+    // and the native host must refuse it (native-review branch); an omitted
+    // one means the picker excludes it (selected:false, excluded branch).
+    listed: options.listed === true,
+    pickerOpen: false,
+    // The top form reads blank for the first `topFilledAfterReads` reads and
+    // carries a value afterwards. The journey reads the top form before its
+    // first blank check and, for the excluded branch, again for the branch's
+    // own check, so a value can appear exactly between that branch check and
+    // the shared one.
+    topFilledAfterReads: options.topFilledAfterReads ?? Infinity,
+    topReads: 0,
+    // The excluded branch waits for the picker panel to close after cancel.
+    // The journey's check reads the panel itself, so the stub models that
+    // panel, not the adapter's per-origin `visible` (which never reports it).
+    cancelCloses: options.cancelCloses !== false,
+    popupStatus: options.popupStatus || "已连接",
+    phases: [],
+    log: [],
+    controls: {},
+  };
+  const filledTopForm = () => {
+    const value = blankFormState();
+    value.values.number = fixture.CardNumber;
+    return value;
+  };
+  const labels = state.listed
+    ? [TOP_LABEL, OTHER_ORIGIN + FRAME_SUFFIX]
+    : [TOP_LABEL, CARD_ORIGIN + FRAME_SUFFIX];
+  const page = {
+    url: () => TOP_ORIGIN + "/checkout?variant=cross-site",
+    goto: async (url) => state.log.push(["goto", url]),
+    frames: () => [
+      {
+        url: () => OTHER_ORIGIN + "/card",
+        evaluate: async () => blankFormState(),
+      },
+    ],
+    evaluate: async () => {
+      state.topReads += 1;
+      return state.topReads > state.topFilledAfterReads
+        ? filledTopForm()
+        : blankFormState();
+    },
+  };
+  // Read-only native probe, like `assertNoNativeApproval` expects: no native
+  // action is ever sent by this journey.
+  const input = (actions, native, inspect) => {
+    const probe = typeof inspect === "object" ? inspect : { inspect };
+    assert.deepEqual(actions, [], "the cross-site journey sends no native action");
+    assert.equal(native, true);
+    assert.equal(probe.preserve_focus, true);
+    state.log.push(["native", state.phases.length]);
+    return { controls: state.controls };
+  };
+  const text = async (selector) => {
+    if (selector === "#checkout-current-page")
+      return "当前页面来源：" + TOP_ORIGIN;
+    if (selector === "#checkout-status")
+      return "请选择一个结账表单来源；不会自动选择，也不会自动提交";
+    if (selector === "#status") return state.popupStatus;
+    if (selector === "#detail-title") return fixture.CardTitle;
+    if (selector === "#detail-fill") return "选择结账表单并填充";
+    const match = selector.match(/:nth-child\((\d+)\)$/);
+    if (match) return labels[Number(match[1]) - 1];
+    return "";
+  };
+  const count = async (selector) => {
+    if (selector === '#filter-tabs [data-filter="credit_card"]') return 1;
+    if (selector === cardRow) return 1;
+    if (selector.startsWith('#checkout-choices button[data-action="checkout-select"]'))
+      return state.pickerOpen ? labels.length : 0;
+    if (selector === "#checkout-cancel") return 1;
+    return 0;
+  };
+  const visible = async (selector) => {
+    if (selector === "#checkout-picker") return state.pickerOpen;
+    return selector === "#checkout-cancel";
+  };
+  const popup = {
+    async disabled() {
+      return false;
+    },
+    async count(selector) {
+      return count(selector);
+    },
+    async visible(selector) {
+      return visible(selector);
+    },
+    async text(selector) {
+      return text(selector);
+    },
+    async attribute(selector, name) {
+      // The card detail's picker control is marked as checkout-capable.
+      if (selector === "#detail-fill") return name === "data-checkout" ? "1" : null;
+      if (selector !== cardRow) return null;
+      if (name === "data-item-revision") return fixture.CardRevision;
+      if (name === "data-category") return "credit_card";
+      return null;
+    },
+    async click(selector) {
+      state.log.push(["popup", selector]);
+      if (selector === "#detail-fill") state.pickerOpen = true;
+      if (selector === "#checkout-cancel" && state.cancelCloses)
+        state.pickerOpen = false;
+      if (
+        selector.includes('data-action="checkout-select"') &&
+        selector.endsWith(":nth-child(2)")
+      )
+        // The native host refuses the cross-site proposal, and the popup then
+        // reports one of its fixed terminal statuses.
+        state.popupStatus = "原生宿主机已拒绝：跨站来源不允许自动填充";
+    },
+  };
+  const driver = {
+    page,
+    input,
+    openPopup: async () => popup,
+    phase: (value) => state.phases.push(value),
+    eventually: async (check, message) => {
+      if (!(await check())) throw Error(message);
+    },
+  };
+  return { driver, fixture, state, popup };
+}
+
+test("cross-site journey records the excluded branch marker and refuses last", async () => {
+  const { driver, fixture, state, popup } = crossSiteDriver({ listed: false });
+  await runCrossSiteJourney(driver, fixture, TOP_ORIGIN);
+  assert.deepEqual(state.phases, [
+    "checkout-cross-site:navigation",
+    "checkout-cross-site:picker",
+    "checkout-cross-site:excluded",
+    "checkout-cross-site:refused",
+  ]);
+  // The excluded child was absent from the listing: the card detail was
+  // opened, then only its own cancel control was pressed, never a candidate.
+  assert.deepEqual(
+    state.log
+      .filter(([kind]) => kind === "popup")
+      .map(([, selector]) => selector)
+      .filter((selector) => selector === "#detail-fill" ||
+        selector === "#checkout-cancel" ||
+        selector.includes('data-action="checkout-select"')),
+    ["#detail-fill", "#checkout-cancel"],
+  );
+  // The top form stayed blank throughout; the native stub received probes
+  // only and this journey never sent a native action.
+  assert.ok(
+    state.log
+      .filter(([kind]) => kind === "popup")
+      .every(([, selector]) => !selector.includes("data-action=\"checkout-select\"")),
+  );
+});
+
+test("cross-site journey records the native-review branch marker and refuses last", async () => {
+  const { driver, fixture, state } = crossSiteDriver({ listed: true });
+  await runCrossSiteJourney(driver, fixture, TOP_ORIGIN);
+  assert.deepEqual(state.phases, [
+    "checkout-cross-site:navigation",
+    "checkout-cross-site:picker",
+    "checkout-cross-site:native-review",
+    "checkout-cross-site:refused",
+  ]);
+  // The listed child was selected physically; then no value and no approval
+  // were written.
+  assert.ok(
+    state.log.some(
+      ([kind, selector]) =>
+        kind === "popup" &&
+        selector ===
+          '#checkout-choices button[data-action="checkout-select"]:nth-child(2)',
+    ),
+  );
+});
+
+test("cross-site markers are mutually exclusive and only the branch that ran appears", async () => {
+  const branches = {
+    excluded: { listed: false, own: "checkout-cross-site:excluded" },
+    "native-review": { listed: true, own: "checkout-cross-site:native-review" },
+  };
+  const markers = Object.values(branches).map((branch) => branch.own);
+  for (const [name, branch] of Object.entries(branches)) {
+    const { driver, fixture, state } = crossSiteDriver({ listed: branch.listed });
+    await runCrossSiteJourney(driver, fixture, TOP_ORIGIN);
+    const observed = state.phases.filter((phase) => markers.includes(phase));
+    assert.deepEqual(observed, [branch.own], name);
+    assert.equal(state.phases.at(-1), "checkout-cross-site:refused", name);
+  }
+});
+
+test("a shared privacy failure never emits the refused completion", async () => {
+  // The excluded journey reads the top form twice during navigation (control
+  // check, then blank check) and once more for its own branch blank check. A
+  // value appearing after the third read leaves the branch assertion passing
+  // and its marker emitted, so only the shared check catches it. The
+  // completion marker follows that check.
+  const { driver, fixture, state } = crossSiteDriver({
+    listed: false,
+    topFilledAfterReads: 3,
+  });
+  await assert.rejects(
+    () => runCrossSiteJourney(driver, fixture, TOP_ORIGIN),
+    /Cross-site checkout received a value without approval/,
+  );
+  assert.deepEqual(state.phases, [
+    "checkout-cross-site:navigation",
+    "checkout-cross-site:picker",
+    "checkout-cross-site:excluded",
+  ]);
+  // A branch marker without the common completion is partial evidence that
+  // the parser must still reject.
+  assert.ok(!state.phases.includes("checkout-cross-site:refused"));
+  assert.equal(state.topReads, 4);
+});
+
+test("a failed native proof never emits the refused completion", async () => {
+  // An unavailable native snapshot fails closed. The listed branch first
+  // reaches it in the shared check, the excluded branch in its own check, and
+  // neither run may print the completion marker after that failure.
+  for (const listed of [false, true]) {
+    const { driver, fixture, state } = crossSiteDriver({ listed });
+    state.controls = null;
+    await assert.rejects(
+      () => runCrossSiteJourney(driver, fixture, TOP_ORIGIN),
+      /Native control snapshot unavailable/,
+    );
+    assert.ok(!state.phases.includes("checkout-cross-site:refused"));
+    // The branch itself had already finished, so dropping the completion is
+    // what keeps this run from passing as a complete cross-site proof.
+    assert.equal(state.phases.at(-1), listed
+      ? "checkout-cross-site:native-review"
+      : "checkout-cross-site:excluded");
+  }
 });
 
 test("both helper outcomes are asserted through the actual result object", () => {

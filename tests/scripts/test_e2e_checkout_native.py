@@ -622,6 +622,62 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, "malformed"):
                 support._checkout_evidence_structure(payload)
 
+    def test_evidence_validates_stages_against_the_case_not_the_global_allowlist(
+        self,
+    ):
+        # A branch marker is optional only for the case that owns it. Attaching
+        # either cross-site marker to another case must be rejected as
+        # malformed even though both markers are globally allowlisted, and even
+        # when the borrowed marker would otherwise "fill in" a missing stage.
+        evidence = self._run_branch(_pass_stdout(CROSS_SITE_NATIVE_REVIEW))
+        approve_id = "checkout-approve"
+        approve_required = next(
+            stages for case, stages in support.CHECKOUT_CASES if case == approve_id
+        )
+        for marker in CROSS_SITE_BRANCHES:
+            with self.subTest(marker=marker, mode="appended"):
+                payload = json.loads(json.dumps(evidence))
+                recorded = next(
+                    entry["stages"]
+                    for entry in payload["cases"]
+                    if entry["case_id"] == approve_id
+                )
+                recorded.append(marker)
+                with self.assertRaisesRegex(AssertionError, "malformed"):
+                    support._checkout_evidence_structure(payload)
+            with self.subTest(marker=marker, mode="replacing a required stage"):
+                payload = json.loads(json.dumps(evidence))
+                recorded = next(
+                    entry["stages"]
+                    for entry in payload["cases"]
+                    if entry["case_id"] == approve_id
+                )
+                recorded.remove(approve_required[-1])
+                recorded.append(marker)
+                with self.assertRaisesRegex(AssertionError, "malformed"):
+                    support._checkout_evidence_structure(payload)
+        # The same markers remain accepted on their own case, so the rejection
+        # is the per-case ownership, not a blanket refusal.
+        for branch in CROSS_SITE_BRANCHES:
+            with self.subTest(own_case=branch):
+                support._checkout_evidence_structure(
+                    self._run_branch(_pass_stdout(branch))
+                )
+        # Each case's allowlist is exactly its required stages plus its own
+        # branch markers, never any other case's stages.
+        for case_id, required in support.CHECKOUT_CASES:
+            with self.subTest(case=case_id):
+                allowed = support._checkout_allowed_stages(case_id)
+                self.assertEqual(
+                    allowed,
+                    frozenset(required)
+                    | frozenset(
+                        marker
+                        for marker in CROSS_SITE_BRANCHES
+                        if case_id == support.CHECKOUT_BRANCH_CASE_ID
+                    ),
+                )
+
     def test_evidence_rejects_both_cross_site_branch_markers(self):
         evidence = self._run_branch(_pass_stdout(CROSS_SITE_NATIVE_REVIEW))
         payload = json.loads(json.dumps(evidence))

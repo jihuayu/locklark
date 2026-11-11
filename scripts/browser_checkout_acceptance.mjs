@@ -799,7 +799,8 @@ async function runDefaultJourneys(driver, card, topOrigin, frameOrigin) {
 // browser's public frame metadata. The native PSL policy must refuse it before
 // any approval window, or the picker policy must omit it; either way no card
 // value, PIN or submission may appear and an available picker is cancelled.
-async function runCrossSiteJourney(driver, card, topOrigin) {
+// Exported so its unit test can execute it through the real driver interface.
+export async function runCrossSiteJourney(driver, card, topOrigin) {
   const { page, input, openPopup, phase, eventually } = driver;
   const frameOrigin = checkoutFrameOrigin(topOrigin, {
     host: CHECKOUT_CROSS_SITE_HOST,
@@ -880,15 +881,17 @@ async function runCrossSiteJourney(driver, card, topOrigin) {
     );
   }
   // Both outcomes must prove the same refusal: no cross-site value and no
-  // native approval. This common stage is emitted only after the branch that
-  // actually ran passed its assertions, so it never claims the other branch.
-  phase("checkout-cross-site:refused");
+  // native approval. These common checks run before the completion marker is
+  // emitted, so a run whose privacy proof fails never records the branch as
+  // completed. The marker is last, after the branch that actually ran passed
+  // its own assertions.
   assertNoNativeApproval(input, POPUP_OPEN);
   await assertBothBlank(
     page,
     frameOrigin,
     "Cross-site checkout received a value without approval",
   );
+  phase("checkout-cross-site:refused");
 }
 
 // `sandbox="allow-scripts"` (without allow-same-origin) makes the child an
