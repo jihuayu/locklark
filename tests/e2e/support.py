@@ -2360,6 +2360,29 @@ CHECKOUT_SOURCE_FILES = (
     "scripts/browser_save_acceptance.mjs",
     "scripts/browser_native_x11.py",
     "browser-extension/build.js",
+    # Current chromium build inputs (build.js ``files`` plus release version).
+    "browser-extension/core.js",
+    "browser-extension/content.js",
+    "browser-extension/webauthn.js",
+    "browser-extension/background.js",
+    "browser-extension/popup.html",
+    "browser-extension/popup.css",
+    "browser-extension/popup.js",
+    "browser-extension/options.html",
+    "browser-extension/options.css",
+    "browser-extension/options.js",
+    "browser-extension/release-version.json",
+    # Every direct and transitive local ES module imported by the journey.
+    "scripts/browser_passkey_acceptance.mjs",
+    "scripts/browser_passkey_management_acceptance.mjs",
+    "scripts/browser_conditional_passkey_acceptance.mjs",
+    "scripts/browser_other_provider_acceptance.mjs",
+    "scripts/browser_firefox_passkey_acceptance.mjs",
+    "scripts/browser_passkey_signal_acceptance.mjs",
+    "scripts/browser_otp_acceptance.mjs",
+    "scripts/browser_popup_vault_acceptance.mjs",
+    "scripts/browser_popup_completion_acceptance.mjs",
+    "scripts/browser_shared_clipboard_acceptance.mjs",
     "scripts/e2e_runner.py",
     "tests/e2e/harness.py",
     "tests/e2e/support.py",
@@ -2884,8 +2907,10 @@ def _checkout_run(
             if stage not in observed_stages
         ]
         if missing:
+            # Name only fixed allowlisted stage IDs; captured output never leaks.
             raise AssertionError(
-                "native checkout acceptance omitted an expected checkout stage"
+                "native checkout acceptance omitted expected checkout stage(s): "
+                + ", ".join(missing)
             )
         source_identity = _checkout_source_identity(ctx.repo_root)
         artifact_hashes = _checkout_artifact_hashes(artifacts)
@@ -2930,6 +2955,30 @@ def _write_checkout_evidence(path: Path, evidence: dict[str, Any]) -> None:
         ) from None
 
 
+def _revalidate_checkout_cache_hit(
+    ctx: E2EContext, cached: dict[str, Any], evidence_raw: str, mode: str
+) -> None:
+    """Recheck every bound input before a cached proof may be returned.
+
+    A cached proof is only reused when the consumed evidence (in evidence
+    mode) or the cached success proof (in native mode) still matches the
+    current source identity and binary hashes.  The journey never reruns here.
+    """
+
+    if mode == "evidence":
+        if not evidence_raw:
+            raise AssertionError("checkout evidence could not be read or parsed")
+        proof = _load_checkout_evidence(Path(evidence_raw))
+    else:
+        proof = cached
+    _checkout_evidence_structure(proof)
+    _checkout_evidence_matches(
+        proof,
+        _checkout_source_identity(ctx.repo_root),
+        _checkout_artifact_hashes(_resolve_checkout_artifacts(ctx)),
+    )
+
+
 def checkout_native_acceptance(
     ctx: E2EContext, *, timeout: float = _CHECKOUT_TIMEOUT
 ) -> dict[str, Any]:
@@ -2960,6 +3009,7 @@ def checkout_native_acceptance(
     cache_key = (repo_key, bin_key, evidence_raw, mode)
     cached = _CHECKOUT_JOURNEY_CACHE.get(cache_key)
     if cached is not None:
+        _revalidate_checkout_cache_hit(ctx, cached, evidence_raw, mode)
         if mode == "native":
             output = (
                 os.environ.get("LOCKLARK_E2E_CHECKOUT_EVIDENCE_OUT") or ""

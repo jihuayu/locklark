@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -400,10 +401,59 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
                 "_invoke_checkout_journey",
                 return_value=(0, output, ""),
             ):
-                with self.assertRaisesRegex(
-                    AssertionError, "expected checkout stage"
-                ):
+                with self.assertRaises(AssertionError) as raised:
                     support.checkout_native_acceptance(self._ctx())
+            message = str(raised.exception)
+            self.assertIn(
+                "expected checkout stage(s): checkout-lock-review:status",
+                message,
+            )
+            self.assertNotIn("untrusted", message)
+            self.assertEqual(
+                [
+                    stage
+                    for stage in support._CHECKOUT_STAGE_LABELS
+                    if stage in message
+                ],
+                ["checkout-lock-review:status"],
+            )
+
+    def test_missing_stage_reports_only_safe_allowlisted_ids(self):
+        missing = (
+            "checkout-picker-cancel:picker",
+            "checkout-lock-review:status",
+        )
+        stages, summary = support._parse_checkout_stdout(
+            _pass_stdout(("synthetic-canary-value",))
+        )
+        self.assertEqual(set(stages), set(support._CHECKOUT_STAGE_LABELS))
+        self.assertTrue(summary)
+        lines = _pass_stdout(("synthetic-canary-value",)).splitlines()
+        stdout = "\n".join(
+            line
+            for line in lines
+            if not any(
+                line == "Native browser stage: " + stage for stage in missing
+            )
+        ) + "\n"
+        # A non-allowlisted fabricated stage line must not be echoed.
+        stdout += "Native browser stage: forged-stage:leak\n"
+        os.environ["LOCKLARK_E2E_CHECKOUT_NATIVE"] = "1"
+        with mock.patch.object(
+            support,
+            "_invoke_checkout_journey",
+            return_value=(0, stdout, "private diagnostic body"),
+        ):
+            with self.assertRaises(AssertionError) as raised:
+                support.checkout_native_acceptance(self._ctx())
+        message = str(raised.exception)
+        self.assertIn(
+            "expected checkout stage(s): " + ", ".join(missing), message
+        )
+        self.assertNotIn("synthetic-canary-value", message)
+        self.assertNotIn("private diagnostic body", message)
+        self.assertNotIn("forged-stage", message)
+        self.assertNotIn(support.CHECKOUT_PASS_SUMMARY, message)
 
     def test_cache_reuses_one_validated_journey(self):
         os.environ["LOCKLARK_E2E_CHECKOUT_NATIVE"] = "1"
@@ -416,11 +466,155 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
 
         with mock.patch.object(
             support, "_invoke_checkout_journey", side_effect=fake_invoke
-        ):
+        ) as invoke:
             first = support.checkout_native_acceptance(self._ctx())
             second = support.checkout_native_acceptance(self._ctx())
+            self.assertEqual(invoke.call_count, 1)
         self.assertEqual(calls, 1)
         self.assertEqual(first, second)
+
+    def _mutating_source(self) -> tuple[Path, bytes]:
+        relative = "browser-extension/core.js"
+        path = self.temp_repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = b"product source\n"
+        path.write_bytes(data)
+        return path, data
+
+    def _source_ctx(self) -> FakeContext:
+        return FakeContext(self.temp_repo, self.bin_dir)
+
+    def _copy_sources_repo(self) -> None:
+        self.temp_repo = self.temp / "repo"
+        for relative in support.CHECKOUT_SOURCE_FILES:
+            target = self.temp_repo / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ROOT / relative, target)
+
+    def _assert_native_cache_hit_fails(self, mutate, pattern):
+        path, original = self._mutating_source()
+        os.environ["LOCKLARK_E2E_CHECKOUT_NATIVE"] = "1"
+        with mock.patch.object(
+            support,
+            "_invoke_checkout_journey",
+            return_value=(0, _pass_stdout(), ""),
+        ) as invoke:
+            first = support.checkout_native_acceptance(self._source_ctx())
+            self.assertEqual(invoke.call_count, 1)
+            self.assertEqual(
+                support.checkout_native_acceptance(self._source_ctx()), first
+            )
+            self.assertEqual(invoke.call_count, 1)
+            mutate(path, original)
+            with self.assertRaisesRegex(AssertionError, pattern):
+                support.checkout_native_acceptance(self._source_ctx())
+            self.assertEqual(invoke.call_count, 1)
+
+    def test_native_cache_hit_fails_after_source_mutation_without_rerun(self):
+        self._copy_sources_repo()
+        self._assert_native_cache_hit_fails(
+            lambda path, original: path.write_bytes(original + b"# edit\n"),
+            "stale for the current source",
+        )
+
+    def test_native_cache_hit_fails_after_source_deletion_without_rerun(self):
+        self._copy_sources_repo()
+        self._assert_native_cache_hit_fails(
+            lambda path, original: path.unlink(),
+            "checkout evidence source is unavailable",
+        )
+
+    def test_native_cache_hit_fails_after_binary_mutation_without_rerun(self):
+        self._copy_sources_repo()
+        self._mutating_source()
+        os.environ["LOCKLARK_E2E_CHECKOUT_NATIVE"] = "1"
+        with mock.patch.object(
+            support,
+            "_invoke_checkout_journey",
+            return_value=(0, _pass_stdout(), ""),
+        ) as invoke:
+            first = support.checkout_native_acceptance(self._source_ctx())
+            self.assertEqual(
+                support.checkout_native_acceptance(self._source_ctx()), first
+            )
+            self.artifacts["chromium"].write_bytes(b"different chromium")
+            with self.assertRaisesRegex(
+                AssertionError, "does not match the current binaries"
+            ):
+                support.checkout_native_acceptance(self._source_ctx())
+            self.assertEqual(invoke.call_count, 1)
+
+    def test_evidence_cache_hit_revalidates_consumed_evidence(self):
+        self._copy_sources_repo()
+        self._mutating_source()
+        output = self.temp / "evidence" / "checkout.json"
+        output.parent.mkdir()
+        self._generate_evidence_into(output)
+        os.environ["LOCKLARK_E2E_CHECKOUT_EVIDENCE"] = str(output)
+        with mock.patch.object(
+            support,
+            "_invoke_checkout_journey",
+            side_effect=AssertionError("browser must not run"),
+        ) as invoke:
+            first = support.checkout_native_acceptance(self._source_ctx())
+            self.assertEqual(
+                support.checkout_native_acceptance(self._source_ctx()), first
+            )
+            invoke.assert_not_called()
+
+            with self.subTest("consumed evidence mutated"):
+                output.write_text(
+                    output.read_text(encoding="utf-8").replace(
+                        "\"PASS\"", "\"FAIL\""
+                    ),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(
+                    AssertionError, "not PASS"
+                ):
+                    support.checkout_native_acceptance(self._source_ctx())
+                self._generate_evidence_into(output)
+
+            with self.subTest("consumed evidence deleted"):
+                output.unlink()
+                with self.assertRaisesRegex(
+                    AssertionError, "could not be read or parsed"
+                ):
+                    support.checkout_native_acceptance(self._source_ctx())
+                self._generate_evidence_into(output)
+
+            with self.subTest("source mutated"):
+                path = self.temp_repo / "browser-extension/core.js"
+                path.write_bytes(path.read_bytes() + b"# edit\n")
+                with self.assertRaisesRegex(
+                    AssertionError, "stale for the current source"
+                ):
+                    support.checkout_native_acceptance(self._source_ctx())
+                path.write_bytes(b"product source\n")
+
+            with self.subTest("binary mutated"):
+                self.artifacts["fixture"].write_bytes(b"different fixture")
+                with self.assertRaisesRegex(
+                    AssertionError, "does not match the current binaries"
+                ):
+                    support.checkout_native_acceptance(self._source_ctx())
+
+            invoke.assert_not_called()
+
+    def _generate_evidence_into(self, output: Path) -> None:
+        """Rewrite a valid PASS manifest for the current source, no journey."""
+
+        evidence = {
+            "schema": support.CHECKOUT_EVIDENCE_SCHEMA,
+            "schema_version": support.CHECKOUT_EVIDENCE_VERSION,
+            "journey": support.CHECKOUT_JOURNEY_ID,
+            "status": "PASS",
+            "cases": support._checkout_cases_evidence(),
+            "source": support._checkout_source_identity(self.temp_repo),
+            "artifacts": support._checkout_artifact_hashes(self.artifacts),
+            "tools": support._checkout_tool_metadata(self.artifacts),
+        }
+        support._write_checkout_evidence(output, evidence)
 
 
 RUNNER_GLUE_SOURCES = (
@@ -431,6 +625,24 @@ RUNNER_GLUE_SOURCES = (
 )
 
 
+def _local_module_graph(entry: Path) -> set[str]:
+    """Relative-to-ROOT local module specifiers reachable from ``entry``."""
+
+    pending = [entry]
+    seen: set[Path] = set()
+    while pending:
+        module = pending.pop().resolve()
+        if module in seen:
+            continue
+        seen.add(module)
+        text = module.read_text(encoding="utf-8")
+        for from_match, dynamic_match in re.findall(
+            r"""\bfrom\s*["'](\.{1,2}/[^"']+)["']|\bimport\s*\(\s*["'](\.{1,2}/[^"']+)["']""", text
+        ):
+            pending.append(module.parent / (from_match or dynamic_match))
+    return {str(path.relative_to(ROOT)) for path in seen}
+
+
 class CheckoutSourceIdentityTests(unittest.TestCase):
     def setUp(self):
         self.temp = Path(tempfile.mkdtemp(prefix="lk-checkout-source-"))
@@ -439,6 +651,7 @@ class CheckoutSourceIdentityTests(unittest.TestCase):
             path = self.temp / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(f"placeholder {index}\n", encoding="utf-8")
+        self._baseline = self._identity()
 
     def _identity(self) -> str:
         return support._checkout_source_identity(self.temp)["source_sha256"]
@@ -469,6 +682,69 @@ class CheckoutSourceIdentityTests(unittest.TestCase):
                 self.assertNotEqual(self._identity(), baseline)
                 path.write_bytes(original)
                 self.assertEqual(self._identity(), baseline)
+
+    def test_current_build_inputs_are_bound_and_changes_fail_closed(self):
+        root = ROOT
+        build = (root / "browser-extension" / "build.js").read_text(
+            encoding="utf-8"
+        )
+        listed = re.findall(r'^\s+"([A-Za-z0-9_-]+\.(?:js|html|css))",$', build, re.M)
+        expected = [
+            f"browser-extension/{name}"
+            for name in listed
+        ] + ["browser-extension/release-version.json"]
+        self.assertIn("browser-extension/core.js", expected)
+        self.assertIn("browser-extension/webauthn.js", expected)
+        for relative in expected:
+            with self.subTest(source=relative):
+                self.assertIn(relative, support.CHECKOUT_SOURCE_FILES)
+                path = self.temp / relative
+                original = path.read_bytes()
+                path.write_bytes(original + b"\n// dirty build input\n")
+                changed = self._identity()
+                self.assertNotEqual(changed, self._baseline)
+                with self.assertRaisesRegex(
+                    AssertionError, "checkout evidence source is unavailable"
+                ):
+                    path.unlink()
+                    support._checkout_source_identity(self.temp)
+                path.write_bytes(original)
+                self.assertEqual(self._identity(), self._baseline)
+
+    def test_journey_module_graph_is_fully_bound(self):
+        root = ROOT
+        graph = _local_module_graph(
+            root / "scripts" / "browser_native_acceptance.mjs"
+        )
+        for relative in (
+            "scripts/browser_native_acceptance.mjs",
+            "scripts/browser_passkey_acceptance.mjs",
+            "scripts/browser_otp_acceptance.mjs",
+            "scripts/browser_popup_vault_acceptance.mjs",
+            "scripts/browser_shared_clipboard_acceptance.mjs",
+        ):
+            self.assertIn(relative, graph)
+        for relative in graph:
+            self.assertIn(relative, support.CHECKOUT_SOURCE_FILES)
+        fixtures = {
+            relative
+            for relative in support.CHECKOUT_SOURCE_FILES
+            if "fixture" in Path(relative).name
+        }
+        self.assertFalse(fixtures & graph)
+        for relative in sorted(graph - set(RUNNER_GLUE_SOURCES)):
+            with self.subTest(source=relative):
+                path = self.temp / relative
+                original = path.read_bytes()
+                path.write_bytes(original + b"\n// dirty module\n")
+                self.assertNotEqual(self._identity(), self._baseline)
+                with self.assertRaisesRegex(
+                    AssertionError, "checkout evidence source is unavailable"
+                ):
+                    path.unlink()
+                    support._checkout_source_identity(self.temp)
+                path.write_bytes(original)
+                self.assertEqual(self._identity(), self._baseline)
 
     def test_missing_runner_glue_source_is_rejected(self):
         for relative in RUNNER_GLUE_SOURCES:
