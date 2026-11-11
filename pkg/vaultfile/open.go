@@ -17,7 +17,10 @@ import (
 // The order is fixed and is the security boundary:
 //
 //  1. ParseFile performs the bounded canonical structural validation only; it
-//     performs no decryption. Its error is returned unchanged.
+//     performs no decryption. Its error is returned unchanged. ValidateFile
+//     requires vuk_device_slots to be exactly the current policy's
+//     read-capable device set, so a missing required slot is already rejected
+//     here as invalid_value at "" and never reaches steps 3 and 4.
 //  2. VerifyPolicyCheckpoint authenticates the caller-pinned root and policy
 //     continuation and the content signature. The policy and slot roster
 //     carried in the file are untrusted until this succeeds. Its error is
@@ -32,9 +35,11 @@ import (
 //  4. OpenVUKForDevice opens the caller device's VUK slot with the pinned
 //     checkpoint vault id, the authenticated header key epoch and the caller
 //     device id and identity, and the expected recipient from the
-//     authenticated current policy. A missing slot or any envelope/context
-//     failure is CodeVUKEnvelopeFailed at "vuk_device_slot"; a nil identity or
-//     malformed caller input is an invalid_value from OpenVUKForDevice.
+//     authenticated current policy. Step 3 already proved the device has a
+//     slot, so once a present, authenticated device slot reaches
+//     OpenVUKForDevice only its envelope/context failures remain: those are
+//     CodeVUKEnvelopeFailed at "vuk_device_slot". A nil identity or malformed
+//     caller input is an invalid_value from OpenVUKForDevice.
 //  5. OpenCEK opens the CEK with the authenticated header and the file's CEK
 //     slot; any envelope failure is CodeCEKEnvelopeFailed at "cek_slot".
 //  6. OpenKDBXPayload opens the KDBX payload with that CEK; its error is
@@ -70,9 +75,12 @@ func OpenAuthenticatedFile(encoded []byte, checkpoint *PolicyCheckpoint, deviceI
 	if dev == nil || !current.hasRole(dev.PrincipalID, RoleReader, RoleWriter, RoleAdmin, RoleOwner) {
 		return nil, nil, Err("device_id", CodeInvalidValue)
 	}
+	// Defensive invariant only: ParseFile already rejected a slot roster that
+	// is not exactly the current policy's read-capable device set, so the
+	// fallback agrees with that structural rejection.
 	slot := findDeviceSlot(f, deviceID)
 	if slot == nil {
-		return nil, nil, Err("vuk_device_slot", CodeVUKEnvelopeFailed)
+		return nil, nil, Err("", CodeInvalidValue)
 	}
 
 	vuk, err := OpenVUKForDevice(*slot, checkpoint.VaultID, f.Header.KeyEpoch, deviceID, dev.AgeEncryptionKey, identity)

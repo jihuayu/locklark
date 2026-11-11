@@ -1133,7 +1133,11 @@ path. It returns both the parsed sealed `*File` and the unlocked
 returns `nil, nil, err`.
 
 1. `ParseFile(encoded)` performs the bounded canonical structural validation
-   and no decryption. A structural error is returned unchanged.
+   and no decryption. A structural error is returned unchanged. `ValidateFile`
+   requires `vuk_device_slots` to be exactly the current policy's read-capable
+   device set, so a missing required slot is structurally rejected here as
+   `invalid_value` at the empty path, before any checkpoint verification or
+   VUK unwrapping.
 2. `VerifyPolicyCheckpoint(f, checkpoint)` authenticates the caller-pinned
    root and policy continuation and the content signature. The policy and slot
    roster carried in the file are untrusted until this succeeds. Its error is
@@ -1150,9 +1154,12 @@ returns `nil, nil, err`.
    vault id is the caller's pinned id, the epoch is from the authenticated
    header, and the device id and recipient are from the authenticated current
    policy; the slot's own device and recipient fields must match those inputs.
-   A missing slot or any envelope/context failure is `vuk_envelope_failed` at
-   `vuk_device_slot`; a nil identity or malformed caller input is an
-   `invalid_value` from `OpenVUKForDevice`.
+   Step 1 already rejected a missing required slot and step 3 already rejected
+   a caller device absent from the authenticated policy or without a read
+   role, so only a present, authenticated device slot reaches this call: its
+   envelope/context failures are `vuk_envelope_failed` at `vuk_device_slot`.
+   A nil identity or malformed caller input is an `invalid_value` from
+   `OpenVUKForDevice`.
 5. `OpenCEK(vuk, f.Header, f.CEKSlot)` opens the CEK with the authenticated
    header and the file's CEK slot; any envelope failure is
    `cek_envelope_failed` at `cek_slot`.

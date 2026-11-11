@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"filippo.io/age"
+
+	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
 )
 
 // openFixture is a genuine sealed file for the full-file open path. Its
@@ -123,16 +125,86 @@ func TestOpenAuthenticatedFileRoundTrip(t *testing.T) {
 	}
 }
 
+// openFixtureDevice unwraps the open fixture's VUK and CEK independently of
+// OpenAuthenticatedFile, so a test can prove what KDBX decryption alone does
+// with a given ciphertext. The caller clears both returned keys.
+func openFixtureDevice(t *testing.T, fx *openFixture) (vuk, cek []byte) {
+	t.Helper()
+	f := fx.chain.f
+	cur := &f.SignedPolicyProofs[len(f.SignedPolicyProofs)-1].Policy
+	dev := findDevice(cur, "device-1")
+	if dev == nil || !cur.hasRole(dev.PrincipalID, RoleReader, RoleWriter, RoleAdmin, RoleOwner) {
+		t.Fatal("fixture current policy does not name read-capable device-1")
+	}
+	slot := findDeviceSlot(f, dev.DeviceID)
+	if slot == nil {
+		t.Fatal("fixture has no device-1 VUK slot")
+	}
+	vuk, err := OpenVUKForDevice(*slot, fx.chain.anchor.VaultID, f.Header.KeyEpoch, dev.DeviceID, dev.AgeEncryptionKey, fx.identity)
+	if err != nil {
+		t.Fatalf("unwrapping fixture VUK: %v", err)
+	}
+	cek, err = OpenCEK(vuk, f.Header, f.CEKSlot)
+	if err != nil {
+		clear(vuk)
+		t.Fatalf("unwrapping fixture CEK: %v", err)
+	}
+	return vuk, cek
+}
+
 // TestOpenAuthenticatedFileNegativeOrder pins the required order. Both
 // negatives are structurally valid and canonically encoded files; each target
 // is the only stale input, so the asserted code identifies the step that
-// caught it. The tampered-ciphertext case would be kdbx_payload_invalid if
-// KDBX decryption ran before the content signature check.
+// caught it.
+//
+// The stale-signature case tampers with the first authenticated KDBX content
+// block HMAC, inside what the KDBX decoder reads, not with the trailing
+// cipher padding after it. The valid fixture's VUK and CEK establish that
+// OpenKDBXPayload rejects those exact ciphertext bytes with
+// kdbx_payload_invalid, so OpenAuthenticatedFile reporting
+// signature_verify_failed on the same bytes proves KDBX decryption did not run
+// before the file-level content signature check.
 func TestOpenAuthenticatedFileNegativeOrder(t *testing.T) {
 	t.Run("stale content signature", func(t *testing.T) {
 		fx := newOpenFixture(t)
+
+		// Positive first: the untouched fixture opens through the full path.
+		f, db, err := OpenAuthenticatedFile(fx.encoded, fx.chain.anchor, "device-1", fx.identity)
+		if err != nil || f == nil || db == nil {
+			t.Fatalf("untouched fixture open = %v/%v/%v, want file, database and nil error", f, db, err)
+		}
+
 		tampered := deepCopyFile(fx.chain.f)
-		tampered.KDBXCiphertext[len(tampered.KDBXCiphertext)-1] ^= 0xff
+		if len(tampered.KDBXCiphertext) <= payloadFirstContentBlock {
+			t.Fatalf("fixture ciphertext of %d bytes has no first content block", len(tampered.KDBXCiphertext))
+		}
+		tampered.KDBXCiphertext[payloadFirstContentBlock] ^= 0x01
+		changed := 0
+		for i := range tampered.KDBXCiphertext {
+			if tampered.KDBXCiphertext[i] != fx.chain.f.KDBXCiphertext[i] {
+				changed++
+			}
+		}
+		if changed != 1 {
+			t.Fatalf("tampered ciphertext changed %d bytes, want exactly 1", changed)
+		}
+
+		// The fixture profile seals through the same writer, so the offset is
+		// the first content-block HMAC here too. The keys are test-owned and
+		// cleared before the full-file open below.
+		payloadErr := func() (err error) {
+			vuk, cek := openFixtureDevice(t, fx)
+			defer clear(cek)
+			defer clear(vuk)
+			var mutatedDB *kdbx.Database
+			mutatedDB, err = OpenKDBXPayload(tampered.KDBXCiphertext, cek)
+			if mutatedDB != nil {
+				t.Fatal("KDBX open of tampered ciphertext returned a database")
+			}
+			return err
+		}()
+		wantPayloadCode(t, payloadErr, CodeKDBXPayloadInvalid)
+
 		// Re-derive the revision id for the tampered ciphertext but keep the
 		// old content signature: ParseFile still accepts the canonical file,
 		// and VerifyPolicyCheckpoint must be the step that rejects it.
@@ -141,8 +213,11 @@ func TestOpenAuthenticatedFileNegativeOrder(t *testing.T) {
 		if err != nil {
 			t.Fatalf("encoding tampered fixture: %v", err)
 		}
+		if _, err := ParseFile(encoded); err != nil {
+			t.Fatalf("tampered fixture is not structurally valid: %v", err)
+		}
 
-		f, db, err := OpenAuthenticatedFile(encoded, fx.chain.anchor, "device-1", fx.identity)
+		f, db, err = OpenAuthenticatedFile(encoded, fx.chain.anchor, "device-1", fx.identity)
 		wantCodeAt(t, err, CodeSignatureVerifyFailed, "")
 		if f != nil || db != nil {
 			t.Fatalf("failed open returned file/database = %v/%v, want both nil", f, db)
