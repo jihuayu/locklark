@@ -127,23 +127,18 @@ func validKDBX41PackageShape(db *kdbx.Database) bool {
 }
 
 // installKDBXKey copies cek (which must be exactly CEKSize bytes) and installs
-// an API-owned key-data credential built from that copy as db.Credentials.
+// an API-owned key credential built from that copy as db.Credentials.
 // The caller's slice is never retained or modified. The returned key is the
 // copy to clear; the credential references it rather than holding further
-// key material. On failure nothing is installed and the copy is cleared.
+// key material.
+//
+// Every exactly CEKSize-byte CEK is raw key material, so the credential is
+// constructed directly. kdbx.NewKeyDataCredentials is not used: it parses its
+// input as a keyfile first, and would reject a CEK that happens to be a
+// well-formed XML keyfile document instead of treating it as raw key bytes.
 func installKDBXKey(db *kdbx.Database, cek []byte) (key []byte, err error) {
 	key = bytes.Clone(cek)
-	// ParseKeyData returns this exact slice for a 32-byte input, so the
-	// credential references key and nothing else.
-	creds, err := kdbx.NewKeyDataCredentials(key)
-	if err != nil || !bytes.Equal(creds.Key, key) {
-		if creds != nil {
-			clear(creds.Key)
-		}
-		clear(key)
-		return nil, errKDBXPayloadInvalid()
-	}
-	db.Credentials = creds
+	db.Credentials = &kdbx.DBCredentials{Key: key}
 	return key, nil
 }
 

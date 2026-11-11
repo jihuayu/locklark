@@ -279,6 +279,47 @@ func TestKDBXPayloadSealReplacesAndRestoresKeyCredentials(t *testing.T) {
 	}
 }
 
+// TestKDBXPayloadXMLShapedCEKIsRawKeyMaterial proves that a CEK whose exact
+// 32 bytes are a valid XML document is treated as raw key material, not parsed
+// as a keyfile: Seal and Open round-trip under those exact bytes.
+func TestKDBXPayloadXMLShapedCEKIsRawKeyMaterial(t *testing.T) {
+	cek := xmlShapedCEK(t)
+	cekCopy := bytes.Clone(cek)
+
+	sealed := sealedFixture(t, payloadFixtureDB(t), cek)
+	if !bytes.Equal(cek, cekCopy) {
+		t.Fatal("Seal modified the caller's XML-shaped CEK")
+	}
+
+	opened, err := OpenKDBXPayload(sealed, cek)
+	if err != nil {
+		t.Fatalf("Open with XML-shaped CEK: %v", err)
+	}
+	if got := opened.Content.Root.Groups[0].Entries[0].GetContent("Password"); got != payloadProtectedSecret {
+		t.Fatalf("opened protected value = %q", got)
+	}
+	if !bytes.Equal(cek, cekCopy) {
+		t.Fatal("Open modified the caller's XML-shaped CEK")
+	}
+}
+
+// xmlShapedCEK returns the bytes of "<KeyFile></KeyFile>" padded with XML
+// whitespace to exactly CEKSize bytes. It is a syntactically valid XML
+// document, so gokeepasslib's keyfile parse tries and rejects it.
+func xmlShapedCEK(t *testing.T) []byte {
+	t.Helper()
+	const doc = "<KeyFile></KeyFile>"
+	cek := make([]byte, CEKSize)
+	n := copy(cek, doc)
+	for ; n < len(cek); n++ {
+		cek[n] = ' '
+	}
+	if _, err := kdbx.ParseKeyData(cek); err == nil {
+		t.Fatal("fixture CEK is not rejected by keyfile parsing")
+	}
+	return cek
+}
+
 func TestKDBXPayloadSealRestoresCredentialsOnError(t *testing.T) {
 	cek := payloadFixtureCEK(t)
 	cases := map[string]struct {
