@@ -192,6 +192,21 @@ func (c *cpChain) finalize(t *testing.T, k *cpKeys, mutate ...func()) {
 	*c.f = *sealFile(t, c.f, &c.f.ContentSignature)
 }
 
+// seal binds proof index cur as the header's current policy, signs the
+// content as device-1 and seals with SealFile, which validates. Unlike
+// finalize it accepts a header whose current policy is not the final proof,
+// which is how a caller checkpoint whose anchor is omitted is represented.
+func (c *cpChain) seal(t *testing.T, k *cpKeys, cur int) {
+	t.Helper()
+	c.f.Header.PolicySeq = c.f.SignedPolicyProofs[cur].Policy.PolicySeq
+	c.f.Header.PolicyDigest = policyDigest(&c.f.SignedPolicyProofs[cur])
+	c.f.Header.RevisionID = ""
+	c.f.Header.AuthorDeviceID = "device-1"
+	cs := append([]byte(DomainContentSignature+"\x00"), mustContentSigning(t, c.f)...)
+	c.f.ContentSignature = Signature{SignerID: "device-1", Alg: SigAlgEd25519, Sig: ed25519.Sign(k.dev1Priv, cs)}
+	*c.f = *sealFile(t, c.f, &c.f.ContentSignature)
+}
+
 func (c *cpChain) pin(digest []byte, seq uint64) *PolicyCheckpoint {
 	a := *c.anchor
 	a.OwnerRootPublicKey = bytes.Clone(a.OwnerRootPublicKey)
@@ -677,15 +692,18 @@ func TestVerifyPolicyCheckpointNegative(t *testing.T) {
 		if err := ValidateFile(c.f); err != nil {
 			t.Fatalf("admin-signed fixture is not structurally valid: %v", err)
 		}
-		// The successor proves are really signed by device-2's policy key.
+		// The successor proof is really signed by device-2's policy key.
 		sp := &c.f.SignedPolicyProofs[2]
-		if !ed25519.Verify(pre.Devices[1].PolicySigningKey.PublicKey,
+		if sp.SignerID != "device-2" || !ed25519.Verify(pre.Devices[1].PolicySigningKey.PublicKey,
 			append([]byte(DomainPolicyDocumentSignature+"\x00"), sp.Document...), sp.Sig) {
 			t.Fatal("successor proof is not signed by device-2's policy key")
 		}
-		// The delegation is well-formed and the diff matches its scope, but
-		// the package has no scope-to-diff rule: only the signer counts.
-		wantCodeAt(t, VerifyPolicyCheckpoint(c.f, c.anchor), CodePolicyCheckpointFailed, "")
+		// The predecessor authorizes device-2 for exactly this diff: an
+		// admin principal, an active InviteReaders grant and a policy key.
+		// The transition is accepted.
+		if err := VerifyPolicyCheckpoint(c.f, c.anchor); err != nil {
+			t.Fatalf("authorized admin InviteReaders transition rejected: %v", err)
+		}
 
 		// The same transition signed by the pinned root is accepted: the
 		// rejection above is the delegated signer, not the policy change.
@@ -1236,4 +1254,304 @@ func TestInviteReadersPolicyDiff(t *testing.T) {
 			}
 		})
 	}
+}
+
+// delegatedCP is one checkpoint fixture around the newCPChain base policies.
+// Its predecessor p5 at seq 5 carries root Alice's InviteReaders grant to
+// device-1 (Alice's device, an owner and admin) and to device-2 (Bob's
+// device), while Bob, device-2's principal, is only a reader. Its successor
+// is clonePolicy(p5) with p5.PolicySeq+1 as seq, linked to PolicyDigest(p5),
+// with next applied and distinct real policy keys recorded on the devices.
+// They are the two leading proofs of the file. The current proof is the
+// successor signed by signer with the matching private key. The content is
+// authored from device-1 and signed with its real content key. An extra
+// function, when set, edits the sealed file before it is validated.
+type delegatedCP struct {
+	c     *cpChain
+	p5    *Policy
+	s     *Policy
+	priv  ed25519.PrivateKey // device-1's policy key: alice is admin/owner
+	pub   ed25519.PublicKey
+	priv2 ed25519.PrivateKey // device-2's policy key: bob is only a reader
+	pub2  ed25519.PublicKey
+	extra func(t *testing.T)
+}
+
+// newDelegatedCP builds the fixture. pre, when set, edits p5 before it is
+// validated; next, when set, edits the successor. The successor must pass
+// ValidatePolicy even when the case intends a forbidden delta, so every case
+// changes the policy rather than its structure. Nothing is signed here.
+func newDelegatedCP(t *testing.T, k *cpKeys, pre, next func(p *Policy)) *delegatedCP {
+	t.Helper()
+	x := &delegatedCP{c: newCPChain(t, k)}
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	x.pub, x.priv = pub, priv
+	pub2, priv2, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	x.pub2, x.priv2 = pub2, priv2
+	x.p5 = clonePolicy(x.c.policies[0])
+	x.p5.Devices[0].PolicySigningKey = &PublicKey{Alg: PolicySigAlgEd25519, PublicKey: x.pub}
+	x.p5.Devices[1].PolicySigningKey = &PublicKey{Alg: PolicySigAlgEd25519, PublicKey: x.pub2}
+	x.p5.AdminDelegations = []AdminDelegation{
+		{DelegationID: "deleg-1", DelegateDevice: "device-1", GrantedBy: "owner-root-01",
+			Scope: DelegationScope{InviteReaders: true}, ScopeNote: "readers only", ExpiresPolicySeq: 10},
+		{DelegationID: "deleg-2", DelegateDevice: "device-2", GrantedBy: "owner-root-01",
+			Scope: DelegationScope{InviteReaders: true}, ScopeNote: "readers only", ExpiresPolicySeq: 10},
+	}
+	if pre != nil {
+		pre(x.p5)
+	}
+	if err := ValidatePolicy(x.p5); err != nil {
+		t.Fatalf("delegated predecessor invalid: %v", err)
+	}
+	x.s = clonePolicy(x.p5)
+	x.s.PolicySeq = x.p5.PolicySeq + 1
+	x.s.PrevPolicyDigest = bytes.Clone(PolicyDigest(x.p5))
+	if next != nil {
+		next(x.s)
+	}
+	if err := ValidatePolicy(x.s); err != nil {
+		t.Fatalf("delegated successor invalid: %v", err)
+	}
+	x.c.replaceProof(0, x.p5, "owner-root-01")
+	x.c.replaceProof(1, x.s, "owner-root-01")
+	return x
+}
+
+// seal makes the successor - proof 1, placed by newDelegatedCP - the current
+// proof really signed by signer with priv, with a nil priv leaving the
+// placeholder root signature, then finalizes, applies extra and requires the
+// result to pass ValidateFile. The carrier proof is really signed by the root
+// in every case, so no negative hinges on the root signature.
+func (x *delegatedCP) seal(t *testing.T, k *cpKeys, signer string, priv ed25519.PrivateKey) {
+	t.Helper()
+	x.c.rebind(1, signer)
+	if priv != nil {
+		signPolicyProof(&x.c.f.SignedPolicyProofs[1], priv)
+	}
+	signPolicyProof(&x.c.f.SignedPolicyProofs[0], k.rootPriv)
+	x.c.finalize(t, k)
+	if x.extra != nil {
+		x.extra(t)
+		x.c.finalize(t, k)
+	}
+	if err := ValidateFile(x.c.f); err != nil {
+		t.Fatalf("fixture is not structurally valid: %v", err)
+	}
+}
+
+// pin is the caller checkpoint at the predecessor p5. The file carries p5's
+// canonical document, so its digest is PolicyDigest(p5).
+func (x *delegatedCP) pin() *PolicyCheckpoint {
+	return &PolicyCheckpoint{
+		VaultID:            x.p5.VaultID,
+		OwnerRootKeyID:     x.p5.OwnerRoot.KeyID,
+		OwnerRootPublicKey: bytes.Clone(x.p5.OwnerRoot.PublicKey),
+		PolicySeq:          x.p5.PolicySeq,
+		PolicyDigest:       bytes.Clone(PolicyDigest(x.p5)),
+	}
+}
+
+// addDave is dave's addition as a reader with one device: itself. It needs
+// no key material, because dave never signs anything here.
+func addDave(p *Policy) {
+	p.Readers = append(p.Readers, Member{PrincipalID: "dave", Label: "Dave"})
+	slices.SortFunc(p.Readers, func(a, b Member) int { return strings.Compare(a.PrincipalID, b.PrincipalID) })
+}
+
+// TestVerifyPolicyCheckpointInviteReaders pins the delegated InviteReaders
+// boundary of VerifyPolicyCheckpoint with real Ed25519 signatures. Every
+// fixture passes ValidateFile before it is verified. The carrier proof is
+// always really root-signed; a delegated current proof is presented with a
+// correct signature by the delegate's pinned device key unless a case is
+// about the signature itself, so each negative is decided by exactly one
+// authorization rule, and each positive by none.
+func TestVerifyPolicyCheckpointInviteReaders(t *testing.T) {
+	k := newCPKeys(t)
+
+	// verifies reports whether the current proof's signature verifies under
+	// pub over exactly the frozen policy-document preimage.
+	verifies := func(t *testing.T, x *delegatedCP, pub ed25519.PublicKey) bool {
+		t.Helper()
+		sp := &x.c.f.SignedPolicyProofs[len(x.c.f.SignedPolicyProofs)-1]
+		return sp.SignerID == "device-1" && ed25519.Verify(pub, append([]byte(DomainPolicyDocumentSignature+"\x00"), sp.Document...), sp.Sig)
+	}
+
+	t.Run("authorized delegate accepted", func(t *testing.T) {
+		x := newDelegatedCP(t, k, nil, addDave)
+		x.seal(t, k, "device-1", x.priv)
+		if !verifies(t, x, x.pub) {
+			t.Fatal("current proof is not signed by device-1's pinned policy key")
+		}
+		if !inviteReadersPolicyDiff(x.p5, x.s) {
+			t.Fatal("fixture transition is not an approved InviteReaders diff")
+		}
+		if err := VerifyPolicyCheckpoint(x.c.f, x.pin()); err != nil {
+			t.Fatalf("authorized delegated InviteReaders transition rejected: %v", err)
+		}
+
+		// The same transition root-signed is accepted as before.
+		x = newDelegatedCP(t, k, nil, addDave)
+		x.seal(t, k, "owner-root-01", nil)
+		if err := VerifyPolicyCheckpoint(x.c.f, x.pin()); err != nil {
+			t.Fatalf("root-signed InviteReaders transition rejected: %v", err)
+		}
+	})
+
+	t.Run("grant without InviteReaders scope", func(t *testing.T) {
+		x := newDelegatedCP(t, k, func(p *Policy) {
+			p.AdminDelegations[0].Scope = DelegationScope{RemoveMembers: true}
+		}, addDave)
+		x.seal(t, k, "device-1", x.priv)
+		if !verifies(t, x, x.pub) {
+			t.Fatal("current proof is not signed by device-1's pinned policy key")
+		}
+		wantCodeAt(t, VerifyPolicyCheckpoint(x.c.f, x.pin()), CodePolicyCheckpointFailed, "")
+	})
+
+	t.Run("delegate principal not admin", func(t *testing.T) {
+		// device-2, bob's device, is the delegate: its pinned policy key is
+		// x.pub2, really signed with x.priv2, and deleg-2 grants it
+		// InviteReaders. Bob is only a reader, never an admin or owner, so the
+		// predecessor role check is the sole reason for rejection.
+		x := newDelegatedCP(t, k, nil, addDave)
+		x.seal(t, k, "device-2", x.priv2)
+		sp := &x.c.f.SignedPolicyProofs[1]
+		if sp.SignerID != "device-2" ||
+			!ed25519.Verify(x.pub2, append([]byte(DomainPolicyDocumentSignature+"\x00"), sp.Document...), sp.Sig) {
+			t.Fatal("current proof is not signed by device-2's pinned policy key")
+		}
+		if dev := findDevice(x.p5, "device-2"); dev == nil || dev.PrincipalID != "bob" ||
+			!x.p5.hasRole("bob", RoleReader, RoleWriter) || x.p5.hasRole("bob", RoleAdmin, RoleOwner) {
+			t.Fatal("fixture delegate principal is not a non-admin writer")
+		}
+		if !inviteReadersPolicyDiff(x.p5, x.s) {
+			t.Fatal("fixture transition is not an approved InviteReaders diff")
+		}
+		wantCodeAt(t, VerifyPolicyCheckpoint(x.c.f, x.pin()), CodePolicyCheckpointFailed, "")
+	})
+
+	t.Run("zero expiry grant accepted", func(t *testing.T) {
+		// ValidatePolicy reads a zero expiry as unbounded, so deleg-1 stays
+		// active and authorizes the otherwise approved transition.
+		x := newDelegatedCP(t, k, func(p *Policy) {
+			p.AdminDelegations[0].ExpiresPolicySeq = 0
+		}, addDave)
+		x.seal(t, k, "device-1", x.priv)
+		if !verifies(t, x, x.pub) {
+			t.Fatal("current proof is not signed by device-1's pinned policy key")
+		}
+		if !inviteReadersPolicyDiff(x.p5, x.s) {
+			t.Fatal("fixture transition is not an approved InviteReaders diff")
+		}
+		if err := VerifyPolicyCheckpoint(x.c.f, x.pin()); err != nil {
+			t.Fatalf("zero-expiry InviteReaders grant rejected: %v", err)
+		}
+	})
+
+	t.Run("wrong key signature", func(t *testing.T) {
+		_, otherPriv, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		x := newDelegatedCP(t, k, nil, addDave)
+		x.seal(t, k, "device-1", otherPriv)
+		if verifies(t, x, x.pub) {
+			t.Fatal("current proof verifies under device-1's pinned key")
+		}
+		// The signer is otherwise fully authorized, so the failure is the
+		// signature and is reported at the current proof's index.
+		wantCodeAt(t, VerifyPolicyCheckpoint(x.c.f, x.pin()), CodeSignatureVerifyFailed, "signed_policy_proofs[1]")
+	})
+
+	t.Run("omitted anchor root then delegate", func(t *testing.T) {
+		// The first carried proof establishes seq 6 root-signed from the
+		// checkpoint's predecessor digest; its policy then authorizes
+		// device-1's seq 7 InviteReaders transition.
+		x := newDelegatedCP(t, k, nil, addDave)
+		c := x.c
+		base := clonePolicy(x.p5)
+		base.PrevPolicyDigest = digest("policy-4")
+		root := clonePolicy(x.p5)
+		root.PolicySeq = 6
+		root.PrevPolicyDigest = bytes.Clone(PolicyDigest(base))
+		c.policies[1] = root
+		c.replaceProof(1, root, "owner-root-01")
+		signPolicyProof(&c.f.SignedPolicyProofs[1], k.rootPriv)
+		c.finalize(t, k)
+		// The file as seq 6 stood, exactly what a caller at the base
+		// checkpoint last trusted. next then adds dave, chains to it and
+		// drops the seq 6 proof, and seal signs the content at seq 7. The
+		// revision id is part of the content preimage, so the proof is gone
+		// before any signature is computed. The header is then sealed on the
+		// actual current proof, the delegated seq 7; the root-signed seq 6 is
+		// only the first continuation.
+		mid := clonePolicy(x.s)
+		mid.PolicySeq = 7
+		mid.PrevPolicyDigest = bytes.Clone(PolicyDigest(root))
+		c.f.SignedPolicyProofs = c.f.SignedPolicyProofs[1:]
+		c.f.Header.PolicySeq = root.PolicySeq
+		c.append(t, mid, "device-1", x.priv)
+		c.seal(t, k, 1)
+		if err := ValidateFile(c.f); err != nil {
+			t.Fatalf("anchor-dropped fixture is not structurally valid: %v", err)
+		}
+		pf := c.f.SignedPolicyProofs
+		if len(pf) != 2 || pf[0].SignerID != "owner-root-01" || pf[0].Policy.PolicySeq != 6 ||
+			!ed25519.Verify(k.root, append([]byte(DomainPolicyDocumentSignature+"\x00"), pf[0].Document...), pf[0].Sig) {
+			t.Fatal("first carried proof is not the root-signed seq 6 policy")
+		}
+		if pf[1].SignerID != "device-1" || !ed25519.Verify(x.pub,
+			append([]byte(DomainPolicyDocumentSignature+"\x00"), pf[1].Document...), pf[1].Sig) {
+			t.Fatal("second carried proof is not signed by device-1's policy key")
+		}
+		if !inviteReadersPolicyDiff(&pf[0].Policy, &pf[1].Policy) {
+			t.Fatal("second carried proof is not an approved InviteReaders diff")
+		}
+		p := x.pin()
+		p.PolicySeq = 5
+		p.PolicyDigest = bytes.Clone(pf[0].Policy.PrevPolicyDigest)
+		if err := VerifyPolicyCheckpoint(c.f, p); err != nil {
+			t.Fatalf("root-signed first proof followed by delegated transition rejected: %v", err)
+		}
+	})
+
+	t.Run("omitted anchor admin first proof", func(t *testing.T) {
+		// The successor has the otherwise approved reader addition and is
+		// correctly signed by device-1's policy key. Its signer is named by a
+		// delegation carried in the successor itself, but an omitted anchor
+		// leaves no authenticated predecessor body to authorize it: the first
+		// carried proof must be root-signed, and its own delegation cannot
+		// stand in for the root. The carried successor publishes no other
+		// policy key, so the file stays structurally valid.
+		x := newDelegatedCP(t, k, nil, addDave)
+		c := x.c
+		for i := range x.s.Devices {
+			x.s.Devices[i].PolicySigningKey = nil
+		}
+		c.policies[1] = x.s
+		c.rebind(1, "device-1")
+		signPolicyProof(&c.f.SignedPolicyProofs[1], x.priv)
+		signPolicyProof(&c.f.SignedPolicyProofs[0], k.rootPriv)
+		// The header names the carried policy itself; the missing anchor is
+		// only in the caller checkpoint.
+		c.f.SignedPolicyProofs = c.f.SignedPolicyProofs[1:]
+		c.seal(t, k, 0)
+		p := x.pin()
+		p.PolicySeq = 5
+		p.PolicyDigest = bytes.Clone(c.f.SignedPolicyProofs[0].Policy.PrevPolicyDigest)
+		if err := ValidateFile(c.f); err != nil {
+			t.Fatalf("anchor-dropped fixture is not structurally valid: %v", err)
+		}
+		if len(c.f.SignedPolicyProofs) != 1 || c.f.SignedPolicyProofs[0].SignerID != "device-1" ||
+			!ed25519.Verify(x.pub, append([]byte(DomainPolicyDocumentSignature+"\x00"), c.f.SignedPolicyProofs[0].Document...), c.f.SignedPolicyProofs[0].Sig) {
+			t.Fatal("first carried proof is not device-1's correctly signed policy")
+		}
+		wantCodeAt(t, VerifyPolicyCheckpoint(c.f, p), CodePolicyCheckpointFailed, "")
+	})
 }

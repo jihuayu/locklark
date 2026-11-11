@@ -12,18 +12,20 @@ import (
 // different vault, an anchor at the checkpoint sequence with a different
 // digest or a foreign owner root, a stale or rolled-back tip, a chain gap, a
 // prev_policy_digest that does not name the previous trusted digest, a
-// continuation signed by any signer other than the pinned owner root or
-// naming a different owner root, or, when and only when the anchor is
-// omitted, a carried chain that does not begin exactly at the checkpoint
-// sequence + 1 with a prev_policy_digest equal to the checkpoint digest.
-// Omitting the anchor is not a failure on its own: such a file is accepted
-// when its first proof is exactly the checkpoint sequence + 1 linked to the
-// checkpoint digest. The carried anchor is the proof at the checkpoint
-// sequence; every accepted proof after it carries exactly the previous
-// sequence + 1, and proofs before the anchor may be carried and are ignored.
-// A continuation whose crypto/ed25519 signature does not verify is not this
-// code; it is CodeSignatureVerifyFailed. Each case is a caller trust
-// decision, not a structural defect of the file.
+// continuation naming a different owner root, a non-root signer that the
+// authenticated predecessor policy does not authorize for an InviteReaders
+// transition, or, when and only when the anchor is omitted, a carried chain
+// that does not begin exactly at the checkpoint sequence + 1 with a
+// prev_policy_digest equal to the checkpoint digest, or whose first proof is
+// not root-signed, because no predecessor body is then authenticated to
+// authorize a delegated signer. Omitting the anchor is not a failure on its
+// own: such a file is accepted when its first proof is exactly the
+// checkpoint sequence + 1 linked to the checkpoint digest. The carried anchor
+// is the proof at the checkpoint sequence; every accepted proof after it
+// carries exactly the previous sequence + 1, and proofs before the anchor may
+// be carried and are ignored. A continuation whose crypto/ed25519 signature
+// does not verify is not this code; it is CodeSignatureVerifyFailed. Each
+// case is a caller trust decision, not a structural defect of the file.
 const CodePolicyCheckpointFailed = "policy_checkpoint_failed"
 
 // PolicyCheckpoint is the caller's already-trusted policy state: the policy
@@ -66,10 +68,20 @@ type PolicyCheckpoint struct {
 //   - the anchor proof is trusted by the caller-supplied digest alone: its
 //     signer_id, alg and sig are not examined again. Every later proof must
 //     carry exactly the previous sequence + 1, prev_policy_digest equal to
-//     the previous trusted digest, the owner root equal to c (key_id and
-//     public key), SignerID equal to c.OwnerRootKeyID, and a crypto/ed25519
-//     signature over exactly DomainPolicyDocumentSignature || 0x00 ||
-//     SignedPolicy.Document, the frozen v1 policy-document preimage;
+//     the previous trusted digest and the owner root equal to c (key_id and
+//     public key), and a crypto/ed25519 signature over exactly
+//     DomainPolicyDocumentSignature || 0x00 || SignedPolicy.Document, the
+//     frozen v1 policy-document preimage. A proof whose SignerID is
+//     c.OwnerRootKeyID is root-signed and is unrestricted by the policy diff.
+//     Any other SignerID must name a device in the authenticated predecessor
+//     policy whose principal is an Admin or Owner there, that carries an
+//     Ed25519 PolicySigningKey, and that an active AdminDelegation in that
+//     same predecessor (a zero expiry, unbounded, or an expiry after the
+//     predecessor sequence) names with Scope.InviteReaders true; the proof
+//     must verify under exactly that
+//     device's PolicySigningKey, and inviteReadersPolicyDiff(predecessor, next)
+//     must accept the old-to-new delta. Authority is never read from the
+//     successor's own delegation;
 //   - having authenticated the chain, the content signature is verified
 //     with the content signing key recorded for header.author_device_id in
 //     the authenticated current policy, over DomainContentSignature || 0x00
@@ -77,16 +89,19 @@ type PolicyCheckpoint struct {
 //     proof, and ValidateFile has already required the author's principal to
 //     be a writer, admin or owner of the current policy.
 //
-// Admin-signed transitions are not supported. A policy continuation must be
-// signed by the pinned owner root; a proof signed by any other device,
-// including one holding an AdminDelegation, is rejected even though the
-// delegation scopes define no frozen mapping from invited, removed, promoted
-// or demoted members and devices to the allowed old-to-new policy diff. There
-// is no reinterpretation of a delegated transition as a root-signed one.
+// The only admin-signed transition supported is the InviteReaders one
+// described above: adding readers, with optionally their devices, and nothing
+// else that inviteReadersPolicyDiff forbids. Every DelegationScope other than
+// InviteReaders, reader removal or edits, role changes, device edits and
+// delegation changes are not delegated by this API and must be root-signed.
+// When the anchor is omitted, the first proof has no authenticated
+// predecessor body and must be root-signed; the policy it establishes may
+// then authorize a later delegated InviteReaders transition. There is no
+// reinterpretation of a delegated transition as a root-signed one.
 //
 // A nil return means only that the current content signature is authorized
-// under this caller-pinned checkpoint and the root-signed continuation that
-// leads from it. It does not prove server freshness, content-history
+// under this caller-pinned checkpoint and the root- or InviteReaders-signed
+// continuation that leads from it. It does not prove server freshness, content-history
 // continuity through prev_digest, encryption or wrapping correctness, or
 // overall vault trust. VerifyContentSignature is unchanged and remains the
 // narrower pinned-key check.
@@ -109,8 +124,11 @@ type PolicyCheckpoint struct {
 //     identifier, whose root public key is not 32 bytes or whose digest is
 //     not 32 bytes, is an invalid_value: the supplied anchor itself is
 //     malformed;
-//   - vault, anchor, tip, gap, link, root or admin-transition failures are
-//     *Error with Code CodePolicyCheckpointFailed and an empty path;
+//   - vault, anchor, tip, gap, link, root or delegated-transition
+//     authorization failures (a missing predecessor for a non-root proof, or
+//     an unauthorized, missing-role, missing-delegation, missing-scope,
+//     missing-key or forbidden-diff transition) are *Error with Code
+//     CodePolicyCheckpointFailed and an empty path;
 //   - a policy proof signature that does not verify is *Error with Code
 //     CodeSignatureVerifyFailed and path signed_policy_proofs[i];
 //   - a content signature that does not verify is *Error with Code
@@ -186,14 +204,18 @@ func VerifyPolicyCheckpoint(f *File, c *PolicyCheckpoint) error {
 		}
 	}
 
-	// The digest of the newest policy established as trusted. The anchor is
-	// trusted by the caller digest; every later proof is root-signed.
+	// The digest of the newest policy established as trusted, and the
+	// authenticated body of that policy. The anchor is trusted by the caller
+	// digest; without it there is no predecessor body, so the first proof
+	// must be root-signed.
 	trusted := bytes.Clone(c.PolicyDigest)
+	trustedPolicy := (*Policy)(nil)
 	prevSeq := c.PolicySeq
 	first := 0
 	if anchor >= 0 {
 		// The anchor is trusted by c.PolicyDigest; its sig is unused.
 		first = anchor + 1
+		trustedPolicy = &proofs[anchor].Policy
 	}
 	for i := first; i < len(proofs); i++ {
 		sp := &proofs[i]
@@ -202,18 +224,30 @@ func VerifyPolicyCheckpoint(f *File, c *PolicyCheckpoint) error {
 			!bytes.Equal(sp.Policy.PrevPolicyDigest, trusted) ||
 			sp.Policy.OwnerRoot.KeyID != c.OwnerRootKeyID ||
 			!bytes.Equal(sp.Policy.OwnerRoot.PublicKey, c.OwnerRootPublicKey) ||
-			sp.Policy.OwnerRoot.Alg != PolicySigAlgEd25519 ||
-			sp.SignerID != c.OwnerRootKeyID {
+			sp.Policy.OwnerRoot.Alg != PolicySigAlgEd25519 {
 			return Err("", CodePolicyCheckpointFailed)
+		}
+		key := ed25519.PublicKey(c.OwnerRootPublicKey)
+		if sp.SignerID != c.OwnerRootKeyID {
+			// A non-root signer is authorized only by the authenticated
+			// predecessor policy, never by the successor's own delegation.
+			if trustedPolicy == nil || !delegatedInviteReadersAuthorized(trustedPolicy, sp.SignerID, &sp.Policy) {
+				return Err("", CodePolicyCheckpointFailed)
+			}
+			key = ed25519.PublicKey(findDevice(trustedPolicy, sp.SignerID).PolicySigningKey.PublicKey)
 		}
 		msg := make([]byte, 0, len(DomainPolicyDocumentSignature)+1+len(sp.Document))
 		msg = append(msg, DomainPolicyDocumentSignature...)
 		msg = append(msg, 0)
 		msg = append(msg, sp.Document...)
-		if !ed25519.Verify(ed25519.PublicKey(c.OwnerRootPublicKey), msg, sp.Sig) {
+		if !ed25519.Verify(key, msg, sp.Sig) {
 			return Err(pathIndex(fieldSignedPolicyProofs, i), CodeSignatureVerifyFailed)
 		}
 		trusted = policyDigest(sp)
+		// The caller may share policy bytes between proofs, so the
+		// authenticated body is copied, never pointed into the proofs, and
+		// the copy is what authorizes the next proof.
+		trustedPolicy = clonePolicy(&sp.Policy)
 		prevSeq = seq
 	}
 
@@ -236,6 +270,38 @@ func VerifyPolicyCheckpoint(f *File, c *PolicyCheckpoint) error {
 		return Err("", CodeSignatureVerifyFailed)
 	}
 	return nil
+}
+
+// delegatedInviteReadersAuthorized reports whether prev, an already
+// authenticated predecessor policy, authorizes the non-root device signer to
+// sign next as an InviteReaders transition: signer must name a device in prev
+// whose principal is an Admin or Owner in prev, that device must carry an
+// Ed25519 PolicySigningKey, an active AdminDelegation in prev (a zero expiry,
+// which ValidatePolicy treats as unbounded, or an expiry after
+// prev.PolicySeq) must name that device with InviteReaders in its scope, and
+// inviteReadersPolicyDiff(prev, next) must accept. The successor is inspected
+// only through the diff, never for delegation.
+func delegatedInviteReadersAuthorized(prev *Policy, signer string, next *Policy) bool {
+	dev := findDevice(prev, signer)
+	if dev == nil || prev.PolicySeq == math.MaxUint64 ||
+		!prev.hasRole(dev.PrincipalID, RoleAdmin, RoleOwner) ||
+		dev.PolicySigningKey == nil ||
+		dev.PolicySigningKey.Alg != PolicySigAlgEd25519 ||
+		!validEd25519Key(dev.PolicySigningKey.PublicKey) {
+		return false
+	}
+	// ValidatePolicy rejects only a non-zero expiry at or before the policy
+	// sequence, so a zero expiry is unbounded and stays active here.
+	delegated := false
+	for _, d := range prev.AdminDelegations {
+		if d.DelegateDevice == dev.DeviceID &&
+			(d.ExpiresPolicySeq == 0 || d.ExpiresPolicySeq > prev.PolicySeq) &&
+			d.Scope.InviteReaders {
+			delegated = true
+			break
+		}
+	}
+	return delegated && inviteReadersPolicyDiff(prev, next)
 }
 
 // inviteReadersPolicyDiff reports whether next is exactly the approved
