@@ -22,6 +22,19 @@ const (
 	cliRunReceiptField = "receipt"
 )
 
+// The only error tokens that may ever be encoded. Both are fixed, secret-free
+// classifications; anything else a callback or caller supplies is refused.
+const (
+	cliRunErrorRefused     = "refused"
+	cliRunErrorUnavailable = "unavailable"
+)
+
+// validCLIRunError reports whether token is exactly one of the two fixed
+// error classifications.
+func validCLIRunError(token string) bool {
+	return token == cliRunErrorRefused || token == cliRunErrorUnavailable
+}
+
 // cliRunResponseWire is the concrete success reply. Its tag names are the
 // exact wire names; every field is canonicalized before encoding.
 type cliRunResponseWire struct {
@@ -33,14 +46,15 @@ type cliRunResponseWire struct {
 // marshalCLIRunResponse encodes one error reply, or one audited values reply
 // with its canonical receipt. It refuses anything else with the generic
 // response error: the legacy Values payload in any combination, an error
-// alongside values, values without a canonical receipt, an empty slot name, or
-// a nil value. The caller-owned response is not modified.
+// alongside values, any error token other than the exact refused or
+// unavailable classification, values without a canonical receipt, an empty
+// slot name, or a nil value. The caller-owned response is not modified.
 func marshalCLIRunResponse(resp CLIRunBrokerResponse) ([]byte, error) {
 	if len(resp.Values) != 0 {
 		return nil, errCLIRunResponse
 	}
 	if resp.Error != "" {
-		if len(resp.PreparedValues) != 0 || resp.Receipt != (personal.RunBundlePreparationReceipt{}) {
+		if !validCLIRunError(resp.Error) || len(resp.PreparedValues) != 0 || resp.Receipt != (personal.RunBundlePreparationReceipt{}) {
 			return nil, errCLIRunResponse
 		}
 		return json.Marshal(cliRunReply{V: 1, Error: resp.Error})
@@ -48,12 +62,22 @@ func marshalCLIRunResponse(resp CLIRunBrokerResponse) ([]byte, error) {
 	if resp.V != 1 || len(resp.PreparedValues) == 0 || !validCLIRunReceipt(resp.Receipt) {
 		return nil, errCLIRunResponse
 	}
-	for slot, value := range resp.PreparedValues {
+	return marshalCLIRunValues(resp.PreparedValues, resp.Receipt)
+}
+
+// marshalCLIRunValues encodes one values_b64 success reply after checking every
+// slot name and buffer, so the bound path used by the serving callback cannot
+// reach the wire with an unaudited value shape.
+func marshalCLIRunValues(values map[string][]byte, receipt personal.RunBundlePreparationReceipt) ([]byte, error) {
+	if len(values) == 0 || !validCLIRunReceipt(receipt) {
+		return nil, errCLIRunResponse
+	}
+	for slot, value := range values {
 		if slot == "" || value == nil {
 			return nil, errCLIRunResponse
 		}
 	}
-	return json.Marshal(cliRunResponseWire{V: 1, Values: resp.PreparedValues, Receipt: resp.Receipt})
+	return json.Marshal(cliRunResponseWire{V: 1, Values: values, Receipt: receipt})
 }
 
 // clearCLIRunResponse zeroes every decoded value buffer of resp, blanks the
