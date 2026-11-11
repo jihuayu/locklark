@@ -339,11 +339,20 @@ function unlockDesktop(context, desktop) {
   ]);
 }
 
+// Exact broker consent labels of the desktop pairing prompt
+// (internal/desktop/ipc_broker.go). Normal consent is the fixed per-operation
+// approval label; quick consent must never be used by this shared journey.
+const NORMAL_CONSENT_LABEL = "确认连接（每次敏感操作需批准）";
+const QUICK_CONSENT_LABEL = "连接并启用快捷填充";
+const REFUSE_CONSENT_LABEL = "拒绝连接";
+
 // Only fixed public control labels and their boolean state may be reported.
+// 确认连接此扩展 is a different standalone host prompt, not broker consent.
 const PUBLIC_CONTROLS = [
   "金库文件", "主密码", "Secret Key", "解锁", "新建登录", "立即锁定",
   "显示密码", "复制密码", "金库", "安全设置", "全部", "归档", "回收站",
-  "搜索 / 刷新", "确认连接此扩展", "连接并启用快捷填充", "拒绝连接",
+  "搜索 / 刷新", "确认连接此扩展", NORMAL_CONSENT_LABEL, QUICK_CONSENT_LABEL,
+  REFUSE_CONSENT_LABEL,
 ];
 
 function sanitizeControls(controls) {
@@ -402,16 +411,67 @@ function fixedErrorFrames(error) {
   return frames.slice(0, 8);
 }
 
+// Before any action popup exists, no broker pairing prompt may be pending: the
+// desktop was only started and unlocked, and no popup has requested a connection
+// yet. This check runs BEFORE the popup because focusing the desktop closes it.
 function assertNoNativePairUi(context, desktop) {
   const view = desktopInspect(context, desktop);
-  for (const label of ["确认连接此扩展", "连接并启用快捷填充", "拒绝连接"]) {
+  for (const label of [NORMAL_CONSENT_LABEL, QUICK_CONSENT_LABEL, REFUSE_CONSENT_LABEL]) {
     const control = view.controls?.[label];
     assert(!control || control.present !== true,
-      "Shared desktop must not ask for a native quick-pair confirmation");
+      "Shared desktop shows a pending broker pairing prompt before any popup connect");
   }
-  return true;
+  // Kept separately observable: the standalone host prompt is a different UI
+  // and must not be conflated with broker consent.
+  const standalone = view.controls?.["确认连接此扩展"];
+  return !standalone || standalone.present !== true;
 }
 
+// Paired shared session: connect is unavailable and refresh is available.
+async function assertPopupPaired(context, popup) {
+  await context.eventually(
+    async () =>
+      (await popup.disabled("#connect")) === true &&
+      (await popup.disabled("#refresh")) === false,
+    "Shared popup did not bind the live desktop session",
+  );
+}
+
+// One settled read: connect disabled? refresh disabled? A closed popup (a later
+// retry of an error-swallowing eventually) reads as "not observable".
+async function popupPairState(popup) {
+  try {
+    return {
+      // Ancestor selectors do not exist in the popup; undefined is "not paired".
+      connectDisabled: await popup.disabled(":root #connect"),
+      refreshDisabled: await popup.disabled(":root #refresh"),
+    };
+  } catch {
+    return {};
+  }
+}
+
+// Refused pairing must leave the shared session unpaired: connect still
+// available and refresh still unavailable. Retries only read the same DOM.
+async function assertPopupUnpaired(context, popup) {
+  let last = {};
+  await context.eventually(
+    async () => {
+      last = await popupPairState(popup);
+      return last.connectDisabled === false && last.refreshDisabled === true;
+    },
+    "Shared popup is paired although the desktop refused the connection",
+  ).catch(() => {
+    // The Firefox eventually swallows errors; report the settled state.
+    assert.fail(
+      "Shared popup is not observably unpaired after refusal " + JSON.stringify(last),
+    );
+  });
+}
+
+// Later copies reuse the already bound live shared session. This never pairs:
+// if the popup lost its binding it is a stale-session bug in that phase, not a
+// reason to click #connect again.
 async function connectedPopup(context) {
   const popup = await context.openPopup();
   await context.eventually(
@@ -420,13 +480,62 @@ async function connectedPopup(context) {
       (await popup.disabled("#connect")) === false,
     "Shared popup controls are unavailable",
   );
-  // A live shared session may already be bound; only an unbound popup pairs.
-  if ((await popup.disabled("#connect")) === false) await popup.click("#connect");  await context.eventually(
-    async () =>
-      (await popup.disabled("#connect")) === true &&
-      (await popup.disabled("#refresh")) === false,
-    "Shared popup did not bind the live desktop session",
+  assert.equal(await popup.disabled("#connect"), true,
+    "Shared popup lost its live desktop binding");
+  return popup;
+}
+
+// No broker pairing prompt may be pending while the action popup holds focus.
+function assertNoBrokerPairPrompt(context, desktop, reason) {
+  const view = desktopInspect(context, desktop);
+  for (const label of [NORMAL_CONSENT_LABEL, QUICK_CONSENT_LABEL, REFUSE_CONSENT_LABEL]) {
+    const control = view.controls?.[label];
+    assert(!control || control.present !== true,
+      "Shared desktop shows a broker pairing prompt " + reason);
+  }
+  return true;
+}
+
+// First real Chromium pairing through actual broker consent. Normal consent is
+// the only acceptance path: refusal is proven physically first, then a fresh
+// connection is approved with the fixed per-operation label. Quick consent is
+// never clicked and no other label is substituted.
+async function pairSharedSession(context, desktop, step) {
+  // 1. Refusal on the actual broker prompt.
+  step("shared-clipboard:pair-connect");
+  // openPopup may dismiss the previous handle; any later failure must not touch
+  // a closed target.
+  let popup = null;
+  await context.eventually(
+    async () => (await popup.disabled("#connect")) === false,
+    "Shared popup connect control is unavailable",
   );
+  assertNoBrokerPairPrompt(context, desktop, "before the user requested a connection");
+  popup = await context.openPopup();
+  desktopInput(context, desktop, [{ click_label: REFUSE_CONSENT_LABEL }]);
+  await assertPopupUnpaired(context, popup);
+  await popup.dismiss();
+  popup = null;
+  await context.delay(300);
+
+  // 2. A fresh popup must still observe an unpaired shared session.
+  step("shared-clipboard:pair-refused-state");
+  popup = await context.openPopup();
+  await assertPopupUnpaired(context, popup);
+
+  // 3. New real connection approved only by the fixed normal-consent label.
+  step("shared-clipboard:pair-normal-consent");
+  assertNoBrokerPairPrompt(context, desktop, "while the fresh popup had focus");
+  await popup.click("#connect");
+  desktopInput(context, desktop, [{ click_label: NORMAL_CONSENT_LABEL }]);
+
+  // The native click moves focus to the desktop and may close the popup, so a
+  // stale handle is discarded; a fresh popup must prove the actual binding.
+  step("shared-clipboard:pair-verify");
+  popup = null;
+  await context.delay(300);
+  popup = await context.openPopup();
+  await assertPopupPaired(context, popup);
   return popup;
 }
 
@@ -575,10 +684,13 @@ export async function acceptSharedClipboard(context) {
     step("shared-clipboard:native-pair-ui");
     receipts.native_pair_ui_absent = assertNoNativePairUi(context, desktop);
     receipts.native_pair_ui_checked_before_popup = true;
+    receipts.broker_consent_labels_checked = true;
 
     step("shared-clipboard:connect");
-    popup = await connectedPopup(context);
+    popup = await pairSharedSession(context, desktop, step);
     receipts.popup_connected_shared = true;
+    receipts.pair_refused_unpaired = true;
+    receipts.pair_normal_consent_bound = true;
 
     step("shared-clipboard:detail");
     await openSyntheticDetail(context, popup, step);

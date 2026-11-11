@@ -14,7 +14,8 @@ import time
 
 CONTROL_LABELS = (
     "连接并启用快捷填充", "验证主密码", "验证 Secret Key", "创建新登录并保存 Passkey",
-    "取消 / 使用其他验证器", "登录：login.locklark.test · passkey-test · passkey-test",
+    "取消 / 使用其他验证器", "确认连接（每次敏感操作需批准）",
+    "登录：login.locklark.test · passkey-test · passkey-test",
     "登录：login.locklark.test · passkey-other · passkey-other",
     "登录：login.locklark.test · signal-one · signal-one",
     "登录：login.locklark.test · signal-two · signal-two",
