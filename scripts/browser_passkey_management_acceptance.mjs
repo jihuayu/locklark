@@ -158,6 +158,7 @@ export async function acceptPasskeyManagement({
   // clicked, and nothing may commit before that physical click.
   const approveRemove = "批准删除 Passkey", rejectRemove = "拒绝删除 Passkey";
   const nativeRemove = async before => {
+    input([{ wait_label: approveRemove }]);
     const controls = input([], true, { inspect: true }).controls || {};
     for (const label of [approveRemove, rejectRemove]) {
       assert(controls[label]?.present === true && controls[label]?.showing === true,
