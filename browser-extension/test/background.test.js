@@ -1225,6 +1225,58 @@ test("route clipboard port is bound to the claimed exact route", async () => {
   await route.h.send({ type: "disconnect" });
 });
 
+test("a route port opened after the claim keeps the approved field binding", async () => {
+  // The real popup opens native-clipboard only when the user clicks Copy,
+  // i.e. after the route has already been claimed.
+  const route = await fieldRouteFixture();
+  assert.equal((await route.claim())?.type, "route-claimed");
+  const port = route.h.emitPort("native-clipboard", route.sender());
+  await port.waitReady();
+  assert.equal(port.disconnected, false, "the late route port was not admitted");
+  // A field outside the approved detail is refused before native prepare.
+  port.post({ type: "prepare", request_id: hexId(1), item_id: ROUTE_ITEM_ID, revision: ROUTE_ITEM_REV, field: "notes" });
+  assert.equal((await port.waitFor((m) => m.type === "refused", "foreign field")).unknown, false);
+  assert.equal(route.nativeCount("prepare-copy-field"), 0, "a foreign field reached native");
+  // The approved field reaches native prepare and commit.
+  port.post({ type: "prepare", request_id: hexId(2), item_id: ROUTE_ITEM_ID, revision: ROUTE_ITEM_REV, field: "password" });
+  const prepared = await port.waitFor((m) => m.type === "prepared", "approved field prepare");
+  assert.equal(prepared.copy_ticket, COPY_TICKET);
+  const prepare = route.h.sent.find((r) => r.type === "prepare-copy-field");
+  assert.deepEqual([prepare.item_id, prepare.revision, prepare.field],
+    [ROUTE_ITEM_ID, ROUTE_ITEM_REV, "password"]);
+  port.post({
+    type: "commit", request_id: hexId(3), item_id: ROUTE_ITEM_ID,
+    revision: ROUTE_ITEM_REV, field: "password", copy_ticket: COPY_TICKET,
+  });
+  await waitFor(() => route.nativeCount("commit-copy-field") === 1, "approved field commit");
+  await route.h.send({ type: "disconnect" });
+});
+
+test("revoked routes hold no clipboard selectors", async () => {
+  // Real production text: a route's approved selector state lives on the
+  // grant and on its ports, and revoking the route must clear both so nothing
+  // it held can later authorize a prepare or commit.
+  const source = fs.readFileSync(path.join(__dirname, "../background.js"), "utf8");
+  // Only the revokeRoute body: stop at the next top-level function.
+  const start = source.indexOf("  function revokeRoute(grant) {");
+  const body = source.slice(start, source.indexOf("\n  function revokeAllRoutes(", start));
+  const routeDetail = { id: ROUTE_ITEM_ID, revision: ROUTE_ITEM_REV, fields: ["username"] };
+  const grant = { token: "f".repeat(64), tabId: 7, state: "claimed", routeDetail, clients: new Set() };
+  const port = { routeDetail, grant: null, preparing: null, timer: null };
+  grant.clients.add(port);
+  const grants = new Map([[grant.token, grant]]);
+  const tabs = new Map([[7, grant]]);
+  const run = new Function(
+    "routeGrants", "routeTabs", "routeBoots", "clipboardDropGrant",
+    '"use strict";' + body + "\nreturn revokeRoute;",
+  )(grants, tabs, new Set(), () => {});
+  run(grant);
+  assert.equal(grant.routeDetail, null, "the grant kept approved selectors");
+  assert.equal(port.routeDetail, null, "an admitted port kept approved selectors");
+  assert.equal(grants.has(grant.token), false);
+  assert.equal(tabs.has(7), false);
+});
+
 test("route clipboard port admission needs the route's exact tab and URL", async () => {
   const route = await fieldRouteFixture();
   const routeTab = { ...route.sender().tab };

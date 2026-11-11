@@ -4575,8 +4575,14 @@ if (typeof importScripts === "function") importScripts("core.js");
     routeGrants.delete(grant.token);
     routeBoots.delete(grant);
     if ((routeTabs.get(grant.tabId) || null) === grant) routeTabs.delete(grant.tabId);
-    for (const state of grant.clients) clipboardDropGrant(state, true);
+    // Every route port loses its unused native grant and the approved field
+    // selectors; nothing it still holds can authorize a prepare or commit.
+    for (const state of grant.clients) {
+      clipboardDropGrant(state, true);
+      state.routeDetail = null;
+    }
     grant.clients.clear();
+    grant.routeDetail = null;
     if (known) grant.state = "revoked";
   }
   function revokeAllRoutes() {
@@ -4897,18 +4903,10 @@ if (typeof importScripts === "function") importScripts("core.js");
       scrubDetail(detail);
       throw Error("refused");
     }
-    // Field selectors of the approved detail, for this route's own clipboard
-    // port only. No field value is retained.
-    const approvedFields = core
-      .flattenItemFields(detail)
-      .map((entry) => entry.id);
-    for (const client of grant.clients) {
-      client.routeDetail = {
-        id: detail.id,
-        revision: detail.revision,
-        fields: approvedFields,
-      };
-    }
+    // Field selectors of the approved detail, kept on the grant so this
+    // route's own clipboard ports get them whether they were admitted before
+    // or after the claim. No field value is retained.
+    setRouteDetail(grant, detail);
     return {
       type: "route-claimed",
       token: grant.token,
@@ -4920,6 +4918,16 @@ if (typeof importScripts === "function") importScripts("core.js");
       ),
       detail,
     };
+  }
+  // The route-scoped selector binding: item id, revision and field ids only.
+  // A route port gets it at admission and on claim, and loses it on revoke.
+  function setRouteDetail(grant, detail) {
+    grant.routeDetail = {
+      id: detail.id,
+      revision: detail.revision,
+      fields: core.flattenItemFields(detail).map((entry) => entry.id),
+    };
+    for (const client of grant.clients) client.routeDetail = grant.routeDetail;
   }
   // Only a projectable value may leave a route: the public detail projection
   // with anything the user has not asked to see blanked in place.
@@ -5417,7 +5425,12 @@ if (typeof importScripts === "function") importScripts("core.js");
       route,
     };
     clipboardPorts.add(state);
-    if (route) route.clients.add(state);
+    if (route) {
+      route.clients.add(state);
+      // Opened after the claim (the popup's Copy click): start with the
+      // grant's approved selectors; an open/unclaimed grant has none.
+      if (route.routeDetail) state.routeDetail = route.routeDetail;
+    }
     port.onMessage.addListener((message) => {
       clipboardPortMessage(state, message)
         .then((reply) => {
