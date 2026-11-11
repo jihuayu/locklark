@@ -10,8 +10,13 @@ import (
 // fixed by this schema and are part of its public protocol.
 //
 // Labels are defined here only; this package does not sign or derive
-// anything. It wraps and unwraps only the per-snapshot CEK under the epoch VUK
-// (DomainCEKWrapping); it does not wrap other keys. VerifyContentSignature
+// anything. It wraps and unwraps exactly two keys: the per-snapshot CEK under
+// the epoch VUK (DomainCEKWrapping, SealCEK/OpenCEK) and the per-library,
+// per-epoch VUK to one device in an age X25519 envelope
+// (DomainVUKDeviceWrapping, SealVUKForDevice/OpenVUKForDevice, carried in
+// DeviceSlot.WrappedVUK). SealCEK generates a fresh per-snapshot CEK; the VUK
+// envelope wraps a caller-supplied VUK. Neither generates or rotates a VUK or
+// key epoch, and neither authenticates a policy. VerifyContentSignature
 // checks one content signature against a caller-pinned key, without
 // authenticating policy proofs or current authorization. VerifyPolicyCheckpoint is a separate checkpoint-scoped API:
 // it establishes checkpoint-scoped root continuation verification, the current
@@ -34,7 +39,9 @@ const (
 	// Restricted admin delegations issued by the owner root.
 	DomainAdminDelegation = "locklark.vault-file/v1/admin-delegation"
 
-	// age wrapping of the VUK to a device encryption key (vuk_device_slots).
+	// age wrapping of the VUK to a device encryption key (vuk_device_slots):
+	// the first plaintext bytes, followed by one NUL and the fixed context
+	// (SealVUKForDevice/OpenVUKForDevice).
 	DomainVUKDeviceWrapping = "locklark.vault-file/v1/vuk-device-wrapping"
 
 	// Wrapping of the per-snapshot CEK by the epoch VUK (cek_slot).

@@ -150,9 +150,11 @@ func TestVUKPlaintextLayout(t *testing.T) {
 }
 
 // TestVUKRejectsWrongContext covers every context member: one expected value
-// differs from the sealed ones while the slot still matches the caller, so
-// every case passes the slot binding and the plaintext-size check and fails
-// only on the authenticated prefix.
+// differs from the sealed ones. The wrong-vault, wrong-epoch and same-length
+// wrong-device-context cases pass the slot metadata check and the
+// plaintext-size check and fail only on the authenticated-prefix comparison.
+// The separate "wrong device in slot only" case fails the slot metadata check
+// before decryption.
 func TestVUKRejectsWrongContext(t *testing.T) {
 	fx := newVUKFixture(t, "device-vuk-1")
 	slot := sealVUK(t, fx)
@@ -300,12 +302,17 @@ func TestVUKRejectsMalformedCiphertext(t *testing.T) {
 	}
 }
 
-// TestVUKRejectsNonConformingPlaintext covers envelopes that carry the wrong
-// device's identity: too-short and too-long authenticated plaintexts, a wrong
-// domain prefix, and a missing NUL after the purpose label. The wrong-domain
-// and missing-NUL cases keep the sealed plaintext length, so they pass the
-// size check and reach the authenticated-prefix comparison; the VUK and
-// domain cases are valid same-length substitutions.
+// TestVUKRejectsNonConformingPlaintext covers envelopes whose plaintext is
+// not the conforming domain label, NUL separator, context and VUK layout. Its
+// fixtures are short VUK (the VUK one byte short of CEKSize), long VUK (the
+// conforming plaintext plus one extra trailing zero byte), context-only
+// plaintext (the domain label, NUL and context with no VUK), wrong domain (an
+// equal-length purpose label replaced in place), missing NUL (the separator
+// byte replaced in place by 'x') and no domain (the context and VUK with no
+// domain label or separator). Only the wrong-domain and missing-NUL cases
+// preserve the plaintext length and reach the authenticated-prefix comparison;
+// the short-VUK, long-VUK, context-only and no-domain cases intentionally
+// reach plaintext-size rejection instead.
 func TestVUKRejectsNonConformingPlaintext(t *testing.T) {
 	fx := newVUKFixture(t, "device-vuk-1")
 	sealVUK(t, fx)
