@@ -1538,6 +1538,66 @@ test("the route lifecycle port connects before the route tab is announced and ca
   await route.h.send({ type: "disconnect" });
 });
 
+// Chrome documents Port.sender as a getter, so it is not required to return
+// the same object twice. This port hands out a fresh but structurally
+// identical sender on every read, which must be admitted exactly like the
+// reference-identical one.
+function openLifecyclePortFreshSender(h, sender) {
+  let onMessage = null, onDisconnect = null;
+  const port = {
+    name: "route-lifecycle",
+    received: [],
+    disconnected: false,
+    onMessage: { addListener: (f) => (onMessage = f) },
+    onDisconnect: { addListener: (f) => (onDisconnect = f) },
+    postMessage: (m) => port.received.push(m),
+    disconnect() { port.disconnected = true; onDisconnect?.(); },
+  };
+  // A new object each access, with a new tab object as well: equal fields,
+  // never equal identity.
+  Object.defineProperty(port, "sender", {
+    get: () => ({ ...sender, tab: { ...sender.tab } }),
+    enumerable: true,
+  });
+  assert.notEqual(port.sender, port.sender, "the sender must be a fresh object");
+  for (const listen of h.connectListeners()) listen(port, sender);
+  return port;
+}
+
+test("a fresh Port.sender object still admits the early route and its claim", async () => {
+  const route = await earlyRouteStartupFixture();
+  const opened = route.h.send({ type: "open-route", id: route.ITEM_ID, revision: "c".repeat(64) });
+  await waitFor(() => route.route(), "browser-created route tab");
+  assert.equal(route.pending(), true, "tabs.create resolved before the port connected");
+  const token = route.h.routeToken(route.route().url);
+  assert.equal(token.length, 64);
+  // The route document connects first, before activation/update and create,
+  // and its Port.sender is never the same object reference twice.
+  const port = openLifecyclePortFreshSender(route.h, route.routeSender());
+  const ready = await waitFor(() => route.routeReady(port), "route-ready before activation");
+  assert.deepEqual([ready.type, ready.token], ["route-ready", token]);
+  assert.equal(port.disconnected, false, "a fresh but identical sender was refused");
+  // The exact approved detail is still the only read, through the unchanged
+  // native vault-search then item-get sequence.
+  const claim = await route.claim(token);
+  assert.equal(claim?.type, "route-claimed", "the fresh-sender route could not claim");
+  assert.equal(claim.item_id, route.ITEM_ID);
+  assert.equal(claim.detail.id, route.ITEM_ID);
+  assert.equal(claim.detail.revision, "c".repeat(64));
+  assert.equal(claim.detail.title, "Target");
+  assert.deepEqual(route.nativeReads().map((r) => r.type), ["vault-search", "item-get"]);
+  const read = route.nativeReads()[1];
+  assert.equal(read.item_id, route.ITEM_ID);
+  assert.equal(read.revision, "c".repeat(64));
+  // The browser's own startup events and create continuation still land.
+  route.finishStartup();
+  const openedReply = await opened;
+  assert.ok(openedReply?.routeCreated, "the route create was refused");
+  await tick();
+  assert.equal(port.received.filter((m) => m.type === "route-revoked").length, 0);
+  await route.h.send({ type: "disconnect" });
+});
+
 test("an early route lifecycle port never admits a forged or unrelated page", async () => {
   const route = await earlyRouteStartupFixture();
   const opened = route.h.send({ type: "open-route", id: route.ITEM_ID, revision: "c".repeat(64) });

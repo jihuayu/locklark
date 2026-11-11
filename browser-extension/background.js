@@ -4624,7 +4624,9 @@ if (typeof importScripts === "function") importScripts("core.js");
       !!boot &&
       routeBoots.has(boot) &&
       routeGrants.get(boot.token) === boot &&
-      (boot.tabId === 0 || routeTabs.get(boot.tabId) !== boot) &&
+      // Only an unbound create is a boot: bindRouteTab() moves it to
+      // routeTabs and clears routeBoots in the same step.
+      boot.tabId === 0 &&
       boot.state === "open" &&
       boot.expiresAt > Date.now() &&
       boot.capability !== "" &&
@@ -4636,10 +4638,10 @@ if (typeof importScripts === "function") importScripts("core.js");
   // reports its activation or initial load and before tabs.create() resolves.
   // The exact pending boot is recognised before routeMessage() can revoke it,
   // and is verified only against the browser's own report of the created tab.
-  async function bindEarlyRouteTab(port, sender) {
+  // The sender is only ever compared structurally: Port.sender is a getter
+  // that need not return the same object reference twice.
+  async function bindEarlyRouteTab(sender) {
     if (
-      !port?.sender ||
-      port.sender !== sender ||
       !sender?.tab ||
       sender.id !== api.runtime.id ||
       sender.frameId !== 0 ||
@@ -5519,7 +5521,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     // that call is refused and would revoke the grant first. This boot is
     // browser-verified already, so its port may arrive before the create
     // continuation binds it; that path never revokes.
-    const early = await bindEarlyRouteTab(port, sender);
+    const early = await bindEarlyRouteTab(sender);
     let grant = early ? early.boot : null;
     if (!grant) {
       try {
