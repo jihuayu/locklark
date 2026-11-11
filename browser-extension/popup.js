@@ -26,6 +26,10 @@
     nativeClipboardClient = null,
     nativeCopyBusy = false,
     routeClosed = false,
+    // True only while a route copy the user clicked while the page was
+    // visible is still in flight. It lets that one operation survive the
+    // desktop V2 approval bringing its window forward and hiding the browser.
+    routeCopyInFlight = false,
     generatedPassword = "",
     generatedProfile = null,
     generatedDataWiped = false,
@@ -1551,6 +1555,7 @@
   function closeRouteView(message = "已关闭此条目") {
     if (!routeRequested || routeClosed) return;
     routeClosed = true;
+    routeCopyInFlight = false;
     wipeDetail();
     clearRevealedSecrets();
     if (els?.detailView) els.detailView.hidden = true;
@@ -1562,6 +1567,7 @@
   function failRoute() {
     if (routeClosed) return;
     routeClosed = true;
+    routeCopyInFlight = false;
     wipeDetail();
     if (els?.detailView) els.detailView.hidden = true;
     if (els?.vaultView) els.vaultView.hidden = true;
@@ -2531,6 +2537,10 @@
   if (typeof document !== "undefined")
     document.addEventListener?.("visibilitychange", () => {
       if (document.visibilityState !== "hidden") return;
+      // The route's already-started native copy may outlive this focus shift;
+      // wiping here would close its port before prepare/commit. Everything
+      // else (and every ordinary popup) is cleared exactly as before.
+      if (routeRequested && routeCopyInFlight) return;
       clearRevealedSecrets();
       clearCheckoutPickerView();
     });
@@ -2562,8 +2572,15 @@
     return secret;
   }
   function detailLeaseLive(detail, generation) {
+    // A route copy that began while visible stays live while desktop approval
+    // hides the page. No other operation gets that allowance, and a hidden
+    // route can never start one (routeCopyInFlight is only set by a click that
+    // already passed the visible check below).
+    const routeFocus =
+      routeRequested && routeCopyInFlight === true;
     return generation === secretGeneration && !popupInactive &&
-      document.visibilityState !== "hidden" && lastState?.connected === true &&
+      (routeFocus || document.visibilityState !== "hidden") &&
+      lastState?.connected === true &&
       document.body?.dataset?.view === "detail" && lastDetail === detail;
   }
   async function revealSecret(field, detail) {
@@ -2713,6 +2730,9 @@
     const generation = secretGeneration;
     if (!detailLeaseLive(detail, generation) || nativeCopyBusy) return;
     nativeCopyBusy = true;
+    // Only this one user-clicked route copy may continue while hidden.
+    if (routeRequested && document.visibilityState !== "hidden")
+      routeCopyInFlight = true;
     const key = field.id || field.label;
     try {
       const client = openNativeClipboard();
@@ -2786,6 +2806,7 @@
       if (detailLeaseLive(detail, generation))
         toast("复制结果未确认，请核实剪贴板后再操作");
     } finally {
+      routeCopyInFlight = false;
       closeNativeClipboard();
       nativeCopyBusy = false;
     }

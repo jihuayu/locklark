@@ -204,6 +204,12 @@ function harness(options = {}) {
       for (const callback of windowListeners.get("pageshow") || []) callback();
       await h.flush();
     },
+    async visibility(state) {
+      document.visibilityState = state;
+      for (const callback of documentListeners.get("visibilitychange") || [])
+        callback();
+      await h.flush();
+    },
     keydown(key) {
       const event = { key, preventDefault() {} };
       for (const callback of documentListeners.get("keydown") || []) callback(event);
@@ -434,6 +440,127 @@ test("route legacy field copy uses route-copy-field only and scrubs the value", 
   assert.deepEqual(h.clipboardWrites, ["legacy-secret", "ada"]);
   assert.equal(h.types().includes("copy-field"), false);
   assert.equal(h.types().includes("reveal-field"), false);
+});
+
+// ---- 3b. native copy survives the desktop approval focus transition ----
+test("route native copy survives the page being hidden for approval", async () => {
+  const h = await openRoutePage();
+  const button = h.detailButton("password", "copy-field");
+  button.listeners.get("click")();
+  await h.flush();
+  const port = h.ports[0];
+  port.emit({ type: "ready", native: true });
+  await h.flush();
+  assert.equal(port.messages[0].type, "prepare");
+  // Desktop V2 approval brings its own window forward and hides the browser.
+  await h.visibility("hidden");
+  assert.equal(port.disconnected, false, "the route copy was cancelled by focus");
+  assert.equal(port.messages.some((message) => message.type === "cancel"), false);
+  assert.equal(h.types().includes("route-close"), false);
+  port.emit({
+    type: "prepared", request_id: port.messages[0].request_id,
+    item_id: ITEM_ID, revision: ITEM_REV, field: "password",
+    copy_ticket: "f".repeat(64), expires_in_seconds: 15, cleanup_ttl_seconds: 30,
+  });
+  await h.flush();
+  const commit = port.messages.find((message) => message.type === "commit");
+  assert.ok(commit, "commit was not sent while hidden");
+  assert.deepEqual(
+    { item_id: commit.item_id, revision: commit.revision,
+      field: commit.field, copy_ticket: commit.copy_ticket },
+    { item_id: ITEM_ID, revision: ITEM_REV, field: "password", copy_ticket: "f".repeat(64) },
+  );
+  port.emit({
+    type: "result", request_id: commit.request_id,
+    copy_ticket: "f".repeat(64), state: "confirmed", copied: true,
+    cleanup_ttl_seconds: 30,
+  });
+  await h.flush();
+  assert.deepEqual(h.clipboardWrites, [], "native path wrote the JS clipboard");
+  assert.equal(h.types().includes("route-copy-field"), false);
+});
+
+test("a route hidden before the click does not authorize a new copy", async () => {
+  const h = await openRoutePage();
+  await h.visibility("hidden");
+  const button = h.detailButton("password", "copy-field");
+  button.listeners.get("click")();
+  await h.flush();
+  assert.deepEqual(h.ports, [], "a hidden route opened a native clipboard port");
+  assert.equal(h.types().includes("route-copy-field"), false);
+});
+
+test("pagehide while hidden cancels and a late prepare cannot commit", async () => {
+  const h = await openRoutePage();
+  const button = h.detailButton("password", "copy-field");
+  button.listeners.get("click")();
+  await h.flush();
+  const port = h.ports[0];
+  port.emit({ type: "ready", native: true });
+  await h.flush();
+  await h.visibility("hidden");
+  assert.equal(port.disconnected, false);
+  await h.pagehide();
+  assert.equal(port.disconnected, true, "pagehide kept the native port open");
+  assert.deepEqual(h.el("#detail-fields").children, []);
+  assert.equal(h.take("route-close").message.token, TOKEN);
+  // A late preparation must never become a commit.
+  port.emit({
+    type: "prepared", request_id: port.messages[0].request_id,
+    item_id: ITEM_ID, revision: ITEM_REV, field: "password",
+    copy_ticket: "f".repeat(64), expires_in_seconds: 15, cleanup_ttl_seconds: 30,
+  });
+  await h.flush();
+  assert.equal(port.messages.some((message) => message.type === "commit"), false);
+  assert.deepEqual(h.clipboardWrites, []);
+});
+
+test("Back while hidden cancels the in-flight route copy", async () => {
+  const h = await openRoutePage();
+  const button = h.detailButton("password", "copy-field");
+  button.listeners.get("click")();
+  await h.flush();
+  const port = h.ports[0];
+  port.emit({ type: "ready", native: true });
+  await h.flush();
+  await h.visibility("hidden");
+  h.click("#detail-back");
+  await h.flush();
+  assert.equal(port.disconnected, true, "Back kept the native port open");
+  assert.equal(h.take("route-close").message.token, TOKEN);
+  port.emit({
+    type: "prepared", request_id: port.messages[0].request_id,
+    item_id: ITEM_ID, revision: ITEM_REV, field: "password",
+    copy_ticket: "f".repeat(64), expires_in_seconds: 15, cleanup_ttl_seconds: 30,
+  });
+  await h.flush();
+  assert.equal(port.messages.some((message) => message.type === "commit"), false);
+  assert.deepEqual(h.clipboardWrites, []);
+});
+
+test("a revoked route cannot commit or show copy success", async () => {
+  const h = await openRoutePage();
+  const button = h.detailButton("password", "copy-field");
+  button.listeners.get("click")();
+  await h.flush();
+  const port = h.ports[0];
+  port.emit({ type: "ready", native: true });
+  await h.flush();
+  await h.visibility("hidden");
+  // The background revoked the route (tab switch/source change): its port is
+  // told and must not proceed to commit.
+  port.emit({ type: "revoked" });
+  await h.flush();
+  assert.equal(port.disconnected, true);
+  port.emit({
+    type: "prepared", request_id: port.messages[0].request_id,
+    item_id: ITEM_ID, revision: ITEM_REV, field: "password",
+    copy_ticket: "f".repeat(64), expires_in_seconds: 15, cleanup_ttl_seconds: 30,
+  });
+  await h.flush();
+  assert.equal(port.messages.some((message) => message.type === "commit"), false);
+  assert.deepEqual(h.clipboardWrites, []);
+  assert.notEqual(button.textContent, "已复制 ✓");
 });
 
 // ---- 4. Back/Escape/pagehide close the route once ----
