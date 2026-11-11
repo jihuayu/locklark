@@ -759,6 +759,20 @@ func TestPreparedRecordRoundTrip(t *testing.T) {
 	}
 }
 
+// encodePreparedRaw wraps an already encoded LLVJ v1 record verbatim and seals
+// the outer digest, so tests can embed a deliberately malformed inner record.
+func encodePreparedRaw(workingGeneration uint64, inner []byte) []byte {
+	buf := make([]byte, preparedOverhead+len(inner))
+	copy(buf[0:4], preparedMagic)
+	binary.BigEndian.PutUint16(buf[4:6], preparedVersion)
+	binary.BigEndian.PutUint64(buf[6:14], workingGeneration)
+	binary.BigEndian.PutUint32(buf[14:18], uint32(len(inner)))
+	copy(buf[preparedPrefix:], inner)
+	sum := preparedDigestOf(buf[:preparedPrefix+len(inner)])
+	copy(buf[preparedPrefix+len(inner):], sum[:])
+	return buf
+}
+
 // TestPreparedRejectsCorruptRecords mutates stored wrappers and requires a
 // strict ErrCorrupt from load, with no repair: the raw value stays as written.
 func TestPreparedRejectsCorruptRecords(t *testing.T) {
@@ -805,6 +819,18 @@ func TestPreparedRejectsCorruptRecords(t *testing.T) {
 	}
 	if !bytes.Equal(rawKey(t, j, preparedKey), corrupt) {
 		t.Fatal("a corrupt prepared record was rewritten")
+	}
+
+	// A wrapper whose length, checksum and inner digest are all valid but
+	// whose inner record declares proposal length math.MaxUint32 with the
+	// hostile 54-byte shape must be rejected by the inner decoder.
+	wrapped := encodePreparedRaw(3, hostileWrappedLengthRecord())
+	pp, err := decodePrepared(bytes.Clone(wrapped))
+	if !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("wrapped hostile inner record = %v, want ErrCorrupt", err)
+	}
+	if !samePrepared(pp, PreparedProposal{}) {
+		t.Fatalf("wrapped hostile inner record returned a partial result: %+v", pp)
 	}
 }
 
