@@ -39,8 +39,10 @@ import (
 // between building it and sealing it without that draft ever being a wire
 // record: ParseFile, EncodeFile and exported ValidateFile all reject it.
 //
-// This package computes hashes only. Nothing returned here is a signature and
-// nothing here verifies one.
+// The functions here compute hashes and preimages only. Nothing returned here
+// is a signature, and none of them verifies one; VerifyContentSignature is the
+// only function in this package that verifies a signature, and it checks a
+// content signature against a caller-pinned key, not the policy proofs.
 
 // RevisionID returns the derived revision identity of f: lowercase hex
 // SHA-256 of DomainRevision, a NUL, and the canonical file with

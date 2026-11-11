@@ -7,9 +7,13 @@
 // VUK wrapping slots, the CEK slot protected by the VUK and the content
 // signature. It is not a reference to content stored elsewhere.
 //
-// This package deliberately contains no signature verification, no
-// migration/import and no product wiring. It validates only wire structure,
-// canonical encoding and size/length budgets. See docs/vaultfile-wire-v1.md.
+// This package deliberately contains no migration/import and no product
+// wiring. Validation (ValidateFile and every other validation path) is
+// shape-only: it checks wire structure, canonical encoding and size/length
+// budgets and never verifies a signature. The separate VerifyContentSignature
+// verifies one file content signature against a caller-pinned Ed25519 key, and
+// establishes no vault trust: policy proof signatures, signature chains and
+// authorization are not verified or implemented. See docs/vaultfile-wire-v1.md.
 package vaultfile
 
 // Size and length budgets fixed by this schema. Every one of them is checked

@@ -1,9 +1,13 @@
 # locklark.vault-file/v1 Wire Schema
 
-Status: draft. Implemented in `pkg/vaultfile` (structure, canonical codec and
-preimage derivation only). This document describes the wire format and the
-frozen v1 preimages; it makes no cryptographic correctness claim and grants no
-migration or product permission.
+Status: draft. Implemented in `pkg/vaultfile`: structure, canonical codec,
+preimage derivation, and one pinned-key content signature check
+(`VerifyContentSignature`; see [Pinned-key content signature
+check](#pinned-key-content-signature-check)). Policy proof signatures, chains,
+authorization, key wrapping and vault trust are not verified or implemented.
+This document describes the wire format and the frozen v1 preimages; it makes
+no cryptographic correctness claim and grants no migration or product
+permission.
 
 ## Background
 
@@ -53,8 +57,11 @@ revision or file-digest preimage):
 - `/key/device-content-signing`, `/key/device-policy-signing`,
   `/key/age-x25519`, `/policy-document`
 
-Labels are identification and purpose separators only. This package neither
-signs, verifies, wraps nor derives any key.
+Labels are identification and purpose separators only. This package does not
+sign, wrap or derive any key. The only verification it performs is
+`VerifyContentSignature`, which checks one file content signature against a
+caller-pinned Ed25519 key using the `/content-signature` label; policy proof
+signatures and chains are not verified.
 
 ## Documents
 
@@ -242,8 +249,10 @@ grammar is bounded by its own limit:
 | `owner_root.key_id`, delegation `granted_by`        | `MaxKeyIDLength` (64)     |
 
 `signed_policy_proofs[].signer_id` and `content_signature.signer_id` are bounded
-structurally at `MaxDeviceIDLength` (128); cryptographic verification of either
-signature is not implemented in this schema revision.
+structurally at `MaxDeviceIDLength` (128). Cryptographic verification of
+`content_signature` is available only through `VerifyContentSignature` with a
+caller-pinned key; verification of `signed_policy_proofs[].signer_id` /
+`[].sig` (policy proof signatures) is not implemented in this schema revision.
 
 Several wire values that look like identifiers are deliberately **not**
 ordinary identifiers:
@@ -415,8 +424,11 @@ revision id, so a file is resealed after reordering.
 
 Validation is shape only:
 
-- signature bytes are checked for presence, length and encoding, never
-  verified; the package computes no signature and accepts none;
+- signature bytes are checked for presence, length and encoding only; neither
+  `ValidateFile` nor any validation path verifies a signature, and the package
+  computes no signature. The separate `VerifyContentSignature` checks the
+  content signature against a caller-pinned key; policy proof signatures and
+  signature chains are never verified;
 - `revision_id` is checked to equal `RevisionID`; it is not a signature;
 - wrapped-key bytes are checked for presence and size, never unwrapped;
 - public keys and age recipients are parsed for shape only;

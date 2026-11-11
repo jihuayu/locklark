@@ -9,8 +9,10 @@ import (
 // produced for one purpose must never be accepted for another. Labels are
 // fixed by this schema and are part of its public protocol.
 //
-// Labels are defined here only; this package does not sign, verify, wrap or
-// derive anything.
+// Labels are defined here only; this package does not sign, wrap or derive
+// anything. VerifyContentSignature is the only verification: it checks one
+// content signature against a caller-pinned key. Policy proof signatures and
+// chains are not verified.
 const (
 	// Content signatures over ContentSigningBytes.
 	DomainContentSignature = "locklark.vault-file/v1/content-signature"
