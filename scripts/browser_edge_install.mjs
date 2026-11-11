@@ -9,8 +9,8 @@
 // mouse input:
 //
 //   1. the unique visible Developer mode switch (fluent-switch); its real
-//      aria-checked state is read, and it is clicked only when it is false,
-//      then the same visible switch must report true. Browser-chrome
+//      boolean checked property is read, and it is clicked only when it is
+//      false, then the same visible switch must report true. Browser-chrome
 //      Extensions menu state is never required.
 //   2. the unique visible Load unpacked control (fluent-button[title=...]);
 //      physically clicked at its measured box.
@@ -204,19 +204,20 @@ async function realClick(page, box) {
   }
 }
 
-// The real aria-checked state of the unique visible switch, read from the
-// exact element handle Playwright's visible locator resolved (a document
-// lookup cannot see open shadow roots, and another copy is never consulted).
+// The real checked state of the unique visible switch, read from the exact
+// element handle Playwright's visible locator resolved (a document lookup
+// cannot see open shadow roots, and another copy is never consulted). The real
+// Edge fluent-switch exposes no aria-checked and no accessible checked state;
+// its visible component itself publishes a boolean `checked` property. Only
+// that strict boolean is accepted: a missing, null or non-boolean value fails
+// closed and is never treated as unchecked.
 async function visibleSwitchState(locator) {
   const handle = await locator.first().elementHandle({ timeout: 5000 });
   if (!handle) throw Error("developer-switch");
   try {
-    const checked = await handle.evaluate(
-      (element) => element.getAttribute("aria-checked"),
-    );
-    if (checked === "true") return "checked";
-    if (checked === "false") return "unchecked";
-    throw Error("developer-switch");
+    const checked = await handle.evaluate((element) => element.checked);
+    if (typeof checked !== "boolean") throw Error("developer-switch");
+    return checked ? "checked" : "unchecked";
   } finally {
     await handle.dispose();
   }
@@ -262,8 +263,8 @@ export async function installEdgeExtensionThroughManager({
       .locator(EDGE_DEVELOPER_SWITCH_SELECTOR)
       .filter({ visible: true });
     const { box } = await uniqueVisible(switchLocator, eventually);
-    // Toggle only when this same visible switch reports aria-checked=false,
-    // then require the same switch to report true.
+    // Toggle only when this same visible switch reports checked=false, then
+    // require the same switch to report true.
     if ((await visibleSwitchState(switchLocator)) !== "checked")
       await realClick(page, box);
     await eventually(
