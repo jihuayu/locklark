@@ -50,10 +50,6 @@ var (
 	cliRunBrokerDescribe = describeCLIRunBrokerRequest
 )
 
-// cliRunBrokerNonces records the nonce of every broker request this process
-// actually made. It exists so tests can prove each request drew a fresh one.
-var cliRunBrokerNonces []string
-
 // cliRunBrokerCall is one brokered attempt. It carries the same caller-owned
 // binding, targets, and request that runCLIRun already derived and validated,
 // so the broker request is built from exactly those values.
@@ -79,15 +75,19 @@ func (c cliRunBrokerCall) prepare(ctx context.Context, root string, request pers
 	if e != nil {
 		return personal.RunBundlePreparationReceipt{}, nil, e
 	}
-	// Clear blanks Args, Helper, and Passthru in place, so the request gets
-	// its own clone: the scope and the request never share those storage
-	// arrays, and clearing one never empties the other.
-	defer scope.Clear()
+	// scope and targets are this callback's own clones. They are cloned into
+	// the request, blanked in place, and dropped on every return path after
+	// describe and request: each Args and Helper element, every Passthru
+	// entry, and every target element. Clear alone only drops its own
+	// references, so the element blanks are explicit. The request belongs to
+	// the transport and never aliases these containers.
 	req := browserhost.CLIRunBrokerRequest{V: 1, VaultPath: c.Binding.VaultPath, Scope: scope.Clone(), Targets: make([]personal.CLIBrokerTarget, len(targets))}
 	for i, target := range targets {
 		req.Targets[i] = personal.CLIBrokerTarget{Slot: target.Slot, ID: target.ID, Revision: target.Revision, Field: target.Field}
 	}
-	cliRunBrokerNonces = append(cliRunBrokerNonces, scope.Nonce)
+	want := len(targets)
+	clearCLIRunBrokerCallScope(&scope)
+	clear(targets)
 	fmt.Fprint(os.Stderr, cliRunBrokerDescribe(req))
 	resp, e := cliRunBrokerRequest(ctx, req)
 	if e != nil {
@@ -95,7 +95,7 @@ func (c cliRunBrokerCall) prepare(ctx context.Context, root string, request pers
 		// fallback gate; it never surfaces to the owner as-is.
 		return personal.RunBundlePreparationReceipt{}, nil, e
 	}
-	if resp.V != 1 || resp.Receipt.Status != personal.RunBundlePreparationStatus || len(resp.PreparedValues) != len(targets) {
+	if resp.V != 1 || resp.Receipt.Status != personal.RunBundlePreparationStatus || len(resp.PreparedValues) != want {
 		// A reply without the audited receipt and exactly one value per
 		// requested slot is never trusted. RunBrokeredBundle zeroes any
 		// partial value set it receives with this error.
@@ -191,6 +191,22 @@ func cliRunBrokerNonce() (string, error) {
 	return hex.EncodeToString(b[:]), nil
 }
 
+// clearCLIRunBrokerCallScope blanks a callback-owned scope in place, then
+// drops its references through Clear: every argument, every helper directory,
+// and every passthrough entry is overwritten before the container is released.
+func clearCLIRunBrokerCallScope(scope *browserhost.CLIRunScope) {
+	if scope == nil {
+		return
+	}
+	for i := range scope.Args {
+		scope.Args[i] = ""
+	}
+	for i := range scope.Helper {
+		scope.Helper[i] = ""
+	}
+	scope.Clear()
+}
+
 // clearCLIRunBrokerValues zeroes an unusable value set the client rejected.
 func clearCLIRunBrokerValues(values map[string][]byte) {
 	for slot := range values {
@@ -241,8 +257,12 @@ func (e cliRunBrokerFailedError) Is(target error) bool {
 // cliRunBrokerFailure is the single fallback gate: only the exact
 // browserhost.ErrBrokerUnavailable value, compared with == and never with
 // errors.Is, selects the once-only existing local-factor path. Every other
-// outcome, including a wrapped copy of the sentinel, is terminal.
+// outcome, including a wrapped copy of the sentinel, is terminal. A nil
+// error, meaning the brokered run succeeded, passes through as nil.
 func cliRunBrokerFailure(err error) error {
+	if err == nil {
+		return nil
+	}
 	if err == browserhost.ErrBrokerUnavailable {
 		return errCLIRunBrokerAbsent
 	}

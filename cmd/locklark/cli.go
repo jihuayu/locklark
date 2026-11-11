@@ -1093,16 +1093,43 @@ func executeCLIAuthenticated(tool string, binding clibinding.ToolBinding, spec c
 	if err := request.Validate(targets); err != nil {
 		return cliUsage
 	}
-	return executeCLIAuthenticatedWithBroker(tool, binding, targets, request)
+	return executeCLIAuthenticatedWithBroker(context.Background(), tool, binding, targets, request)
+}
+
+// cliRunBrokerSignals is the cancellation channel source for one brokered run.
+// It is a seam for tests only; production subscribes to the same
+// Interrupt/SIGTERM/SIGHUP set the local-factor path listens for.
+var cliRunBrokerSignals = func(c chan<- os.Signal) {
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 }
 
 // executeCLIAuthenticatedWithBroker attempts the audited desktop broker path
 // on Darwin only. The existing local-factor path runs exactly once and only
 // after the exact browserhost.ErrBrokerUnavailable outcome; every other broker
 // outcome is returned without falling back.
-func executeCLIAuthenticatedWithBroker(tool string, binding clibinding.ToolBinding, targets []personal.BundleTarget, request personal.RunBundleRequest) error {
+//
+// The broker request and the child it prepares share one signal-aware context:
+// Interrupt, SIGTERM, or SIGHUP cancels both, exactly as the local factor path
+// cancels its child. A cancelled broker request is terminal and never selects
+// the fallback, even if the transport reports absence while it unwinds.
+func executeCLIAuthenticatedWithBroker(parent context.Context, tool string, binding clibinding.ToolBinding, targets []personal.BundleTarget, request personal.RunBundleRequest) error {
 	if cliRunBrokerEnabled() {
-		receipt, err := cliRunBrokerCall{Binding: binding, Targets: targets, Request: request}.run(context.Background())
+		signals := make(chan os.Signal, 1)
+		cliRunBrokerSignals(signals)
+		defer signal.Stop(signals)
+		ctx, cancel := context.WithCancel(parent)
+		defer cancel()
+		done := make(chan struct{})
+		defer close(done)
+		go func() {
+			select {
+			case <-signals:
+				cancel()
+			case <-ctx.Done():
+			case <-done:
+			}
+		}()
+		receipt, err := cliRunBrokerCall{Binding: binding, Targets: targets, Request: request}.run(ctx)
 		if err = cliRunBrokerFailure(err); err != errCLIRunBrokerAbsent {
 			if err != nil {
 				return err
@@ -1111,6 +1138,9 @@ func executeCLIAuthenticatedWithBroker(tool string, binding clibinding.ToolBindi
 				return &childExitStatus{code: receipt.ExitCode}
 			}
 			return nil
+		}
+		if ctx.Err() != nil {
+			return cliRunBrokerFailedError{cause: ctx.Err()}
 		}
 	}
 	return executeCLILocalAuthenticated(tool, binding, targets, request)

@@ -19,19 +19,22 @@ import (
 const cliBrokerFixturePassword = "fixture-run-cli-password"
 
 // installCLIRunBrokerSeams replaces the Darwin gate and every broker seam for
-// one test, and restores the production defaults afterwards.
+// one test, and restores the production defaults afterwards. The signal seam
+// is replaced with one that subscribes to nothing, so no test ever delivers a
+// signal to the test process; a test that needs cancellation uses
+// cliRunBrokerSignalsAction.
 func installCLIRunBrokerSeams(t *testing.T, enabled bool) {
 	t.Helper()
 	originalEnabled, originalTTY, originalRequest := cliRunBrokerEnabled, cliRunBrokerTTY, cliRunBrokerRequest
-	originalRandom, originalDescribe, originalNonces := cliRunBrokerRandom, cliRunBrokerDescribe, cliRunBrokerNonces
+	originalRandom, originalDescribe, originalSignals := cliRunBrokerRandom, cliRunBrokerDescribe, cliRunBrokerSignals
 	t.Cleanup(func() {
 		cliRunBrokerEnabled, cliRunBrokerTTY, cliRunBrokerRequest = originalEnabled, originalTTY, originalRequest
-		cliRunBrokerRandom, cliRunBrokerDescribe, cliRunBrokerNonces = originalRandom, originalDescribe, originalNonces
+		cliRunBrokerRandom, cliRunBrokerDescribe, cliRunBrokerSignals = originalRandom, originalDescribe, originalSignals
 	})
 	cliRunBrokerEnabled = func() bool { return enabled }
 	cliRunBrokerTTY = func() (string, string, error) { return "/dev/ttys-fixture", "fixture-peer", nil }
 	cliRunBrokerDescribe = func(browserhost.CLIRunBrokerRequest) string { return "" }
-	cliRunBrokerNonces = nil
+	cliRunBrokerSignals = func(chan<- os.Signal) {}
 }
 
 // installCLIRunLocalConsole replaces the local-factor controlling console for
@@ -43,17 +46,28 @@ func installCLIRunLocalConsole(t *testing.T, open func() (*os.File, *os.File, er
 	cliLocalConsoleOpen = open
 }
 
+// cliRunBrokerSignalsAction lets a test act when the dispatcher subscribes
+// for signals, without any signal reaching the test process. act runs in the
+// installing goroutine of the dispatcher, at the exact point where the
+// production seam would start subscribing.
+func cliRunBrokerSignalsAction(t *testing.T, act func()) {
+	t.Helper()
+	cliRunBrokerSignals = func(chan<- os.Signal) {
+		if act != nil {
+			act()
+		}
+	}
+}
+
 // cliBrokerFixture is one validated CLI run whose binding points at a real
 // vault, so the committed request is exactly what runCLIRun derives.
 type cliBrokerFixture struct {
-	binding     clibinding.ToolBinding
-	request     personal.RunBundleRequest
-	targets     []personal.BundleTarget
-	slotID      string
-	slotRev     string
-	field       string
-	passthruKey string
-	passthruVal string
+	binding clibinding.ToolBinding
+	request personal.RunBundleRequest
+	targets []personal.BundleTarget
+	slotID  string
+	slotRev string
+	field   string
 }
 
 func newCLIBrokerFixture(t *testing.T) cliBrokerFixture {
@@ -95,7 +109,7 @@ func newCLIBrokerFixture(t *testing.T) cliBrokerFixture {
 	if err = request.Validate(targets); err != nil {
 		t.Fatal("request fixture invalid:", err)
 	}
-	return cliBrokerFixture{binding: binding, request: request, targets: targets, slotID: cliTestID, slotRev: cliTestRevision, field: "password", passthruKey: "NO_COLOR", passthruVal: "1"}
+	return cliBrokerFixture{binding: binding, request: request, targets: targets, slotID: cliTestID, slotRev: cliTestRevision, field: "password"}
 }
 
 // call replays the exact values runCLIRun hands the dispatcher.
@@ -109,7 +123,7 @@ func (f cliBrokerFixture) call() cliRunBrokerCall {
 
 // dispatchCLIRunWithBroker is the production dispatcher for a fixture.
 func dispatchCLIRunWithBroker(f cliBrokerFixture) error {
-	return executeCLIAuthenticatedWithBroker("brokertool", f.binding, f.targets, f.call().Request)
+	return executeCLIAuthenticatedWithBroker(context.Background(), "brokertool", f.binding, f.targets, f.call().Request)
 }
 
 func cloneCLIRunBrokerPassthru(in map[string]string) map[string]string {
@@ -146,32 +160,32 @@ func isFreshNonce(value string) bool {
 	return true
 }
 
-// cloneCLIRunBrokerTestRequest copies a request for comparison.
+// cloneCLIRunBrokerTestRequest copies every mutable container of a request,
+// so a request the lifecycle cleared after capture can still be compared.
 func cloneCLIRunBrokerTestRequest(r personal.RunBundleRequest) personal.RunBundleRequest {
 	r.Args = append([]string(nil), r.Args...)
 	r.HelperPath = append([]string(nil), r.HelperPath...)
 	r.Passthrough = cloneCLIRunBrokerPassthru(r.Passthrough)
+	r.Spec = cliprofile.CloneSpec(r.Spec)
 	return r
 }
 
-// TestCLIRunBrokerScopeBindsCommittedRunAndFreshNonce drives the real audited
+// TestCLIRunBrokerScopeBindsCommittedRun drives the real audited
 // RunBrokeredBundle callback and inspects exactly what would be sent: the
 // complete scope bound to the callback snapshots and the binding, the exact
-// vault path and target slot/id/revision/field, a fresh 32-byte nonce, and
-// the exact private root, which exists when the request is made.
-func TestCLIRunBrokerScopeBindsCommittedRunAndFreshNonce(t *testing.T) {
+// vault path and target slot/id/revision/field, and the exact private root,
+// which exists when the request is made.
+func TestCLIRunBrokerScopeBindsCommittedRun(t *testing.T) {
 	f := newCLIBrokerFixture(t)
 	installCLIRunBrokerSeams(t, true)
-	// Capture the fixture's own values first: runBundle clears the caller's
-	// cloned containers once the run returns.
-	wantArgs, wantHelper, wantPassthru := append([]string(nil), f.request.Args...), append([]string(nil), f.request.HelperPath...), cloneCLIRunBrokerPassthru(f.request.Passthrough)
-	callRequests := f.call().Request
+	callRequests := cloneCLIRunBrokerTestRequest(f.call().Request)
 	var sent []browserhost.CLIRunBrokerRequest
 	cliRunBrokerRequest = func(_ context.Context, req browserhost.CLIRunBrokerRequest) (browserhost.CLIRunBrokerResponse, error) {
 		if info, err := os.Stat(req.Scope.TempRoot); err != nil || !info.IsDir() {
 			t.Error("broker request was made before the exact private run root existed")
 		}
 		req.Scope = req.Scope.Clone()
+		req.Targets = append([]personal.CLIBrokerTarget(nil), req.Targets...)
 		sent = append(sent, req)
 		return browserhost.CLIRunBrokerResponse{}, browserhost.ErrCLIRunRefused
 	}
@@ -193,9 +207,9 @@ func TestCLIRunBrokerScopeBindsCommittedRunAndFreshNonce(t *testing.T) {
 		ProgramSH:   f.binding.ProgramSHA256,
 		CWD:         callRequests.Directory,
 		TempRoot:    req.Scope.TempRoot,
-		Args:        wantArgs,
-		Helper:      wantHelper,
-		Passthru:    wantPassthru,
+		Args:        callRequests.Args,
+		Helper:      callRequests.HelperPath,
+		Passthru:    callRequests.Passthrough,
 		Timeout:     10,
 		TokenEnv:    "LOCKLARK_TEST_TOKEN",
 	}
@@ -221,8 +235,9 @@ func TestCLIRunBrokerScopeBindsCommittedRunAndFreshNonce(t *testing.T) {
 }
 
 // TestCLIRunBrokerNonceIsFreshPerRequest proves every actual request draws
-// its own fresh 32-byte crypto-random nonce, and that a nonce generator
-// failure is terminal.
+// its own fresh 32-byte crypto-random nonce, observed only through the
+// captured RequestCLIRun arguments, and that a nonce generator failure is
+// terminal and sends nothing.
 func TestCLIRunBrokerNonceIsFreshPerRequest(t *testing.T) {
 	set := map[string]bool{}
 	for i := 0; i < 64; i++ {
@@ -235,34 +250,94 @@ func TestCLIRunBrokerNonceIsFreshPerRequest(t *testing.T) {
 
 	f := newCLIBrokerFixture(t)
 	installCLIRunBrokerSeams(t, true)
-	cliRunBrokerRequest = func(context.Context, browserhost.CLIRunBrokerRequest) (browserhost.CLIRunBrokerResponse, error) {
+	var nonces []string
+	cliRunBrokerRequest = func(_ context.Context, req browserhost.CLIRunBrokerRequest) (browserhost.CLIRunBrokerResponse, error) {
+		nonces = append(nonces, req.Scope.Nonce)
 		return browserhost.CLIRunBrokerResponse{}, browserhost.ErrCLIRunRefused
 	}
 	for i := 0; i < 2; i++ {
-		if _, err := f.call().run(context.Background()); err != browserhost.ErrCLIRunRefused {
-			t.Fatalf("run %d: %v", i, err)
+		if err := dispatchCLIRunWithBroker(f); err == nil {
+			t.Fatalf("run %d: refusal reported as success", i)
 		}
 	}
-	if len(cliRunBrokerNonces) != 2 || cliRunBrokerNonces[0] == cliRunBrokerNonces[1] || !isFreshNonce(cliRunBrokerNonces[0]) || !isFreshNonce(cliRunBrokerNonces[1]) {
-		t.Fatalf("per-request nonces are not fresh: %q", cliRunBrokerNonces)
+	if len(nonces) != 2 || nonces[0] == nonces[1] || !isFreshNonce(nonces[0]) || !isFreshNonce(nonces[1]) {
+		t.Fatalf("per-request nonces are not fresh: %q", nonces)
 	}
 
-	requests := len(cliRunBrokerNonces)
+	requests := len(nonces)
 	cliRunBrokerRandom = func([]byte) (int, error) { return 0, errors.New("fixture entropy failure") }
-	_, err := f.call().run(context.Background())
+	err := dispatchCLIRunWithBroker(f)
 	var nonceFailure cliRunBrokerNonceError
-	if !errors.As(cliRunBrokerFailure(err), &nonceFailure) || len(cliRunBrokerNonces) != requests {
-		t.Fatalf("nonce failure not terminal or still sent: %v", cliRunBrokerFailure(err))
+	if !errors.As(err, &nonceFailure) || len(nonces) != requests {
+		t.Fatalf("nonce failure not terminal or still sent: %v (requests=%d)", err, len(nonces))
+	}
+}
+
+// dispatchCLIRunBrokerShim runs one brokered run of a shim child that exits
+// with code through the production dispatcher. The broker seam returns the
+// audited reply and captures the exact scope that was sent.
+func dispatchCLIRunBrokerShim(t *testing.T, code int) (sent browserhost.CLIRunScope, err error) {
+	t.Helper()
+	f := newCLIBrokerFixture(t)
+	installCLIRunBrokerSeams(t, true)
+	shim := filepath.Join(t.TempDir(), "locklark.test")
+	if e := os.WriteFile(shim, []byte(fmt.Sprintf("#!/bin/sh\nexit %d\n", code)), 0700); e != nil {
+		t.Fatal("shim program unavailable")
+	}
+	f.request.Program, f.request.Args = shim, nil
+	t.Setenv("LOCKLARK_TEST_TOKEN", "")
+	requests := 0
+	cliRunBrokerRequest = func(_ context.Context, req browserhost.CLIRunBrokerRequest) (browserhost.CLIRunBrokerResponse, error) {
+		requests++
+		sent = req.Scope.Clone()
+		return auditedReply("token", cliBrokerFixturePassword), nil
+	}
+	installCLIRunLocalConsole(t, func() (*os.File, *os.File, error) {
+		t.Error("local console opened after a brokered run")
+		return nil, nil, errRunCLIConsole
+	})
+	err = dispatchCLIRunWithBroker(f)
+	if requests != 1 || !isFreshNonce(sent.Nonce) {
+		t.Fatalf("broker request skipped: requests=%d", requests)
+	}
+	if _, statErr := os.Stat(sent.TempRoot); !os.IsNotExist(statErr) {
+		t.Fatal("private run root survived the brokered run")
+	}
+	return sent, err
+}
+
+// TestCLIRunBrokerDispatcherSuccess proves a successful brokered child
+// returns nil through the production dispatcher, after the request was sent
+// once for a real private root, and that the local console is never opened.
+func TestCLIRunBrokerDispatcherSuccess(t *testing.T) {
+	if err := cliRunBrokerFailure(nil); err != nil {
+		t.Fatalf("nil passthrough returned %v", err)
+	}
+	sent, err := dispatchCLIRunBrokerShim(t, 0)
+	if err != nil {
+		t.Fatalf("brokered success returned %v", err)
+	}
+	if sent.Nonce == "" || sent.Program == "" {
+		t.Fatalf("scope not sent: %#v", sent)
+	}
+}
+
+// TestCLIRunBrokerDispatcherChildExitStatus proves a brokered child's real
+// exit status reaches the dispatcher as childExitStatus and that the local
+// console is never opened.
+func TestCLIRunBrokerDispatcherChildExitStatus(t *testing.T) {
+	_, err := dispatchCLIRunBrokerShim(t, 7)
+	status, ok := err.(*childExitStatus)
+	if !ok || status.code != 7 {
+		t.Fatalf("brokered exit status lost: %v", err)
 	}
 }
 
 // TestCLIRunBrokerSuccessRendersAndExecutes proves a brokered success runs
 // through the audited lifecycle: the callback receives the private root, the
 // brokered value is rendered into the token environment of a directly
-// executed child, the receipt is returned, and the root is removed.
+// executed child, and the receipt is returned.
 func TestCLIRunBrokerSuccessRendersAndExecutes(t *testing.T) {
-	// The token environment reaches the executed child, not this test binary:
-	// a shim program is executed in place of the pinned one.
 	f := newCLIBrokerFixture(t)
 	installCLIRunBrokerSeams(t, true)
 	shim := filepath.Join(t.TempDir(), "locklark.test")
@@ -272,12 +347,11 @@ func TestCLIRunBrokerSuccessRendersAndExecutes(t *testing.T) {
 	f.request.Program, f.request.Args = shim, nil
 	t.Setenv("LOCKLARK_TEST_TOKEN", "")
 	var root string
-	var gotScope browserhost.CLIRunScope
 	cliRunBrokerRequest = func(_ context.Context, req browserhost.CLIRunBrokerRequest) (browserhost.CLIRunBrokerResponse, error) {
 		if info, err := os.Stat(req.Scope.TempRoot); err != nil || !info.IsDir() {
 			t.Error("broker request was made before the exact private run root existed")
 		}
-		root, gotScope = req.Scope.TempRoot, req.Scope
+		root = req.Scope.TempRoot
 		return auditedReply("token", cliBrokerFixturePassword), nil
 	}
 	receipt, err := f.call().run(context.Background())
@@ -287,12 +361,103 @@ func TestCLIRunBrokerSuccessRendersAndExecutes(t *testing.T) {
 	if receipt.ExitCode != 0 || receipt.Status != "process-exited" || receipt.Session != strings.Repeat("1", 32) || receipt.Intent != strings.Repeat("2", 64) || receipt.TargetDigest != strings.Repeat("3", 64) {
 		t.Fatalf("brokered receipt lost: %#v", receipt)
 	}
-	if root != gotScope.TempRoot || !filepath.IsAbs(root) || !strings.HasPrefix(filepath.Base(root), "locklark-run-cli-") || len(cliRunBrokerNonces) != 1 {
-		t.Fatalf("callback or nonce skipped: root=%q nonces=%d", root, len(cliRunBrokerNonces))
+	if !filepath.IsAbs(root) || !strings.HasPrefix(filepath.Base(root), "locklark-run-cli-") {
+		t.Fatalf("callback root invalid: %q", root)
 	}
 	if _, err := os.Stat(root); !os.IsNotExist(err) {
 		t.Fatal("private run root survived the successful run")
 	}
+}
+
+// TestCLIRunBrokerRequestSurvivesCallbackClear proves the request the
+// transport receives is whole on every reply path: the callback clears its
+// own scope and targets before the request is shown, described, and sent, so
+// the request's element copies are the only thing that can still hold them.
+func TestCLIRunBrokerRequestSurvivesCallbackClear(t *testing.T) {
+	type replyFunc func() (browserhost.CLIRunBrokerResponse, error)
+	for name, reply := range map[string]replyFunc{
+		"success": func() (browserhost.CLIRunBrokerResponse, error) {
+			return auditedReply("token", cliBrokerFixturePassword), nil
+		},
+		"refused": func() (browserhost.CLIRunBrokerResponse, error) {
+			return browserhost.CLIRunBrokerResponse{}, browserhost.ErrCLIRunRefused
+		},
+		"malformed": func() (browserhost.CLIRunBrokerResponse, error) {
+			return browserhost.CLIRunBrokerResponse{V: 0}, nil
+		},
+		"transport": func() (browserhost.CLIRunBrokerResponse, error) {
+			return browserhost.CLIRunBrokerResponse{}, errors.New("fixture transport failure")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newCLIBrokerFixture(t)
+			installCLIRunBrokerSeams(t, true)
+			shim := filepath.Join(t.TempDir(), "locklark.test")
+			if err := os.WriteFile(shim, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+				t.Fatal("shim program unavailable")
+			}
+			// A positional argument and a helper directory make both element
+			// arrays observable.
+			f.request.Program, f.request.Args = shim, []string{"--fixture-arg"}
+			f.request.HelperPath = []string{t.TempDir()}
+			if err := f.request.Validate(f.targets); err != nil {
+				t.Fatal("request fixture invalid:", err)
+			}
+			t.Setenv("LOCKLARK_TEST_TOKEN", "")
+			var described browserhost.CLIRunBrokerRequest
+			var sent browserhost.CLIRunBrokerRequest
+			cliRunBrokerDescribe = func(req browserhost.CLIRunBrokerRequest) string {
+				described = req
+				return ""
+			}
+			cliRunBrokerRequest = func(_ context.Context, req browserhost.CLIRunBrokerRequest) (browserhost.CLIRunBrokerResponse, error) {
+				sent = req
+				return reply()
+			}
+			_, _ = f.call().run(context.Background())
+			wantTargets := []personal.CLIBrokerTarget{{Slot: "token", ID: f.slotID, Revision: f.slotRev, Field: f.field}}
+			for label, req := range map[string]browserhost.CLIRunBrokerRequest{"described": described, "sent": sent} {
+				scope := req.Scope
+				if req.V != 1 || req.VaultPath != f.binding.VaultPath || scope.Program != shim || !reflect.DeepEqual(scope.Args, []string{"--fixture-arg"}) ||
+					!reflect.DeepEqual(scope.Helper, f.request.HelperPath) || !reflect.DeepEqual(scope.Passthru, map[string]string{"NO_COLOR": "1"}) ||
+					!isFreshNonce(scope.Nonce) || !reflect.DeepEqual(req.Targets, wantTargets) {
+					t.Fatalf("%s request not whole: %#v %#v", label, scope, req.Targets)
+				}
+			}
+		})
+	}
+}
+
+// TestCLIRunBrokerClearCallbackScope proves the helper the callback runs after
+// describe/request blanks every argument, every helper directory, and every
+// passthrough value in place before dropping the containers and metadata.
+func TestCLIRunBrokerClearCallbackScope(t *testing.T) {
+	scope := browserhost.CLIRunScope{
+		Profile:  "token",
+		TTY:      "/dev/ttys-fixture",
+		Nonce:    strings.Repeat("a", 64),
+		Program:  "/bin/sh",
+		CWD:      "/tmp",
+		TempRoot: "/tmp/locklark-run-cli-fixture",
+		Args:     []string{"--one", "--two"},
+		Helper:   []string{"/opt/helper"},
+		Passthru: map[string]string{"NO_COLOR": "1", "TERM": "dumb"},
+		Timeout:  10,
+		TokenEnv: "LOCKLARK_TEST_TOKEN",
+	}
+	// Copies of the values do not share the element slots that are cleared.
+	wantArgs, wantHelper := append([]string(nil), scope.Args...), append([]string(nil), scope.Helper...)
+	passthru := scope.Passthru
+	clearCLIRunBrokerCallScope(&scope)
+	if scope.Profile != "" || scope.TTY != "" || scope.Nonce != "" || scope.Program != "" || scope.CWD != "" ||
+		scope.TempRoot != "" || scope.TokenEnv != "" || scope.Timeout != 0 {
+		t.Fatalf("scope metadata not cleared: %#v", scope)
+	}
+	// Every element is blanked, then the container references are dropped.
+	if len(wantArgs) != 2 || len(wantHelper) != 1 || len(passthru) != 0 || len(scope.Args) != 0 || len(scope.Helper) != 0 || len(scope.Passthru) != 0 {
+		t.Fatalf("scope containers not dropped: args=%v helper=%v passthru=%v", scope.Args, scope.Helper, scope.Passthru)
+	}
+	clearCLIRunBrokerCallScope(nil)
 }
 
 // TestCLIRunBrokerMalformedSuccessIsTerminal proves a success reply without
@@ -342,12 +507,15 @@ func TestCLIRunBrokerExactUnavailableFallsBackOnce(t *testing.T) {
 	if err := dispatchCLIRunWithBroker(f); err != errRunCLIConsole {
 		t.Fatalf("local path error changed: %v", err)
 	}
-	if requests != 1 || opens != 1 || len(cliRunBrokerNonces) != 1 {
-		t.Fatalf("fallback did not run exactly once: requests=%d opens=%d nonces=%d", requests, opens, len(cliRunBrokerNonces))
+	if requests != 1 || opens != 1 {
+		t.Fatalf("fallback did not run exactly once: requests=%d opens=%d", requests, opens)
 	}
 
-	// The gate itself: only the exact value is eligible; wrapped, joined, and
-	// double-wrapped copies are not, and neither is a success.
+	// The gate itself: a success stays a success, and only the exact value is
+	// eligible; wrapped, joined, and double-wrapped copies are not.
+	if err := cliRunBrokerFailure(nil); err != nil {
+		t.Fatalf("nil passthrough returned %v", err)
+	}
 	for _, tc := range []struct {
 		name string
 		err  error
@@ -356,7 +524,6 @@ func TestCLIRunBrokerExactUnavailableFallsBackOnce(t *testing.T) {
 		{"joined", errors.Join(browserhost.ErrBrokerUnavailable)},
 		{"double-wrapped", fmt.Errorf("outer: %w", fmt.Errorf("inner: %w", browserhost.ErrBrokerUnavailable))},
 		{"refused", browserhost.ErrCLIRunRefused},
-		{"nil", nil},
 	} {
 		if cliRunBrokerFailure(tc.err) == errCLIRunBrokerAbsent {
 			t.Fatalf("%s was fallback-eligible", tc.name)
@@ -367,10 +534,120 @@ func TestCLIRunBrokerExactUnavailableFallsBackOnce(t *testing.T) {
 	}
 }
 
+// TestCLIRunBrokerCancellationIsTerminal proves signal-aware cancellation
+// reaches both the broker request and the prepared child, and that the
+// dispatcher treats the cancelled broker result as terminal instead of
+// falling back to the local console, even if the transport reports absence
+// while it unwinds.
+func TestCLIRunBrokerCancellationIsTerminal(t *testing.T) {
+	cases := map[string]struct {
+		cancelAtSubscribe bool
+		unavailable       bool
+		started           chan struct{}
+	}{
+		// Cancelled before the request is made: no request is sent.
+		"before-request": {cancelAtSubscribe: true},
+		// Cancelled while the request is in flight; the transport observes it,
+		// but its absence report still wins the gate.
+		"in-flight": {started: make(chan struct{}), unavailable: true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newCLIBrokerFixture(t)
+			installCLIRunBrokerSeams(t, true)
+			requests, opens := 0, 0
+			cliRunBrokerRequest = func(ctx context.Context, _ browserhost.CLIRunBrokerRequest) (browserhost.CLIRunBrokerResponse, error) {
+				requests++
+				switch {
+				case tc.started == nil:
+					// The context was already cancelled at subscription.
+				default:
+					close(tc.started)
+					<-ctx.Done()
+				}
+				if tc.unavailable {
+					return browserhost.CLIRunBrokerResponse{}, browserhost.ErrBrokerUnavailable
+				}
+				return browserhost.CLIRunBrokerResponse{}, ctx.Err()
+			}
+			installCLIRunLocalConsole(t, func() (*os.File, *os.File, error) {
+				opens++
+				return nil, nil, errRunCLIConsole
+			})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			cliRunBrokerSignalsAction(t, func() {
+				if tc.cancelAtSubscribe {
+					cancel()
+					return
+				}
+				go func() {
+					<-tc.started
+					cancel()
+				}()
+			})
+			err := executeCLIAuthenticatedWithBroker(ctx, "brokertool", f.binding, f.targets, f.call().Request)
+			if err == nil || err == errCLIRunBrokerAbsent || err == errRunCLIConsole {
+				t.Fatalf("cancellation fell back to the local factor: %v", err)
+			}
+			if tc.started != nil && !errors.Is(err, context.Canceled) {
+				t.Fatalf("cancellation cause lost: %v", err)
+			}
+			if opens != 0 {
+				t.Fatalf("local console opened after cancellation: %d", opens)
+			}
+			want := map[bool]int{true: 0, false: 1}[tc.started == nil]
+			if requests != want {
+				t.Fatalf("requests sent: %d", requests)
+			}
+		})
+	}
+}
+
+// TestCLIRunBrokerChildCancelledBySignal proves the same signal-aware context
+// cancels a prepared child: after a successful preparation, the signal cancels
+// the run and the dispatcher returns a terminal cancellation without falling
+// back.
+func TestCLIRunBrokerChildCancelledBySignal(t *testing.T) {
+	f := newCLIBrokerFixture(t)
+	installCLIRunBrokerSeams(t, true)
+	shim := filepath.Join(t.TempDir(), "locklark.test")
+	if err := os.WriteFile(shim, []byte("#!/bin/sh\nsleep 600\n"), 0700); err != nil {
+		t.Fatal("shim program unavailable")
+	}
+	f.request.Program, f.request.Args = shim, nil
+	t.Setenv("LOCKLARK_TEST_TOKEN", "")
+	requested := make(chan struct{})
+	cliRunBrokerRequest = func(context.Context, browserhost.CLIRunBrokerRequest) (browserhost.CLIRunBrokerResponse, error) {
+		close(requested)
+		return auditedReply("token", cliBrokerFixturePassword), nil
+	}
+	opens := 0
+	installCLIRunLocalConsole(t, func() (*os.File, *os.File, error) {
+		opens++
+		return nil, nil, errRunCLIConsole
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cliRunBrokerSignalsAction(t, func() {
+		go func() {
+			<-requested
+			cancel()
+		}()
+	})
+	err := executeCLIAuthenticatedWithBroker(ctx, "brokertool", f.binding, f.targets, f.call().Request)
+	if err == nil || err == errCLIRunBrokerAbsent || err == errRunCLIConsole || opens != 0 {
+		t.Fatalf("cancelled child fell back to the local factor: %v opens=%d", err, opens)
+	}
+	if _, ok := err.(*childExitStatus); ok {
+		t.Fatalf("cancelled child reported an exit status: %v", err)
+	}
+}
+
 // TestCLIRunBrokerFailuresNeverFallBack proves refused, unknown, malformed,
-// cancellation, deadline, TTY, dial, and disconnected outcomes are all
-// terminal through the production dispatcher: one request, no local path,
-// and no local factor disclosed.
+// deadline, TTY, dial, and disconnected outcomes are all terminal through the
+// production dispatcher: the expected request count, no local path, and no
+// local factor disclosed.
 func TestCLIRunBrokerFailuresNeverFallBack(t *testing.T) {
 	type outcome struct {
 		tty     func() (string, string, error)
@@ -379,7 +656,6 @@ func TestCLIRunBrokerFailuresNeverFallBack(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		outcome outcome
-		ctx     context.Context
 		check   func(t *testing.T, err error)
 	}{
 		{name: "refused", outcome: outcome{request: func(browserhost.CLIRunBrokerRequest) (browserhost.CLIRunBrokerResponse, error) {
@@ -402,7 +678,7 @@ func TestCLIRunBrokerFailuresNeverFallBack(t *testing.T) {
 				t.Fatalf("deadline cause lost: %v", err)
 			}
 		}},
-		{name: "ttY-error", outcome: outcome{tty: func() (string, string, error) {
+		{name: "tty-error", outcome: outcome{tty: func() (string, string, error) {
 			return "", "", errors.New("no controlling terminal")
 		}}},
 		{name: "tty-empty", outcome: outcome{tty: func() (string, string, error) {
@@ -433,13 +709,7 @@ func TestCLIRunBrokerFailuresNeverFallBack(t *testing.T) {
 				opens++
 				return nil, nil, errRunCLIConsole
 			})
-			var err error
-			if tc.ctx != nil {
-				_, err = f.call().run(tc.ctx)
-				err = cliRunBrokerFailure(err)
-			} else {
-				err = dispatchCLIRunWithBroker(f)
-			}
+			err := dispatchCLIRunWithBroker(f)
 			if err == nil || err == errCLIRunBrokerAbsent || err == errRunCLIConsole || opens != 0 {
 				t.Fatalf("fell back to the local factor: %v opens=%d", err, opens)
 			}
@@ -453,13 +723,14 @@ func TestCLIRunBrokerFailuresNeverFallBack(t *testing.T) {
 	}
 }
 
-// TestCLIRunBrokerGateProvesNonDarwinLocalPath proves the gate never leaves
-// the reconcilable Darwin attempt enabled on non-Darwin, and that with it
-// disabled the existing local-factor path runs directly.
+// TestCLIRunBrokerDispatcherDisabledRunsLocalOnce proves that with the gate
+// disabled (the non-Darwin behavior) the existing local-factor path runs
+// directly and no broker request is made or subscribed.
 func TestCLIRunBrokerDispatcherDisabledRunsLocalOnce(t *testing.T) {
 	f := newCLIBrokerFixture(t)
 	installCLIRunBrokerSeams(t, false)
-	requests, opens := 0, 0
+	requests, opens, subscriptions := 0, 0, 0
+	cliRunBrokerSignalsAction(t, func() { subscriptions++ })
 	cliRunBrokerRequest = func(context.Context, browserhost.CLIRunBrokerRequest) (browserhost.CLIRunBrokerResponse, error) {
 		requests++
 		return browserhost.CLIRunBrokerResponse{}, browserhost.ErrBrokerUnavailable
@@ -468,7 +739,7 @@ func TestCLIRunBrokerDispatcherDisabledRunsLocalOnce(t *testing.T) {
 		opens++
 		return nil, nil, errRunCLIConsole
 	})
-	if err := dispatchCLIRunWithBroker(f); err != errRunCLIConsole || requests != 0 || opens != 1 {
-		t.Fatalf("non-Darwin path changed: err=%v requests=%d opens=%d", err, requests, opens)
+	if err := dispatchCLIRunWithBroker(f); err != errRunCLIConsole || requests != 0 || opens != 1 || subscriptions != 0 {
+		t.Fatalf("non-Darwin path changed: err=%v requests=%d opens=%d subscriptions=%d", err, requests, opens, subscriptions)
 	}
 }
