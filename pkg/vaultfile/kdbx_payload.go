@@ -273,7 +273,9 @@ func SealKDBXPayload(db *kdbx.Database, cek []byte) (encoded []byte, err error) 
 	if writeErr != nil {
 		return nil, errKDBXPayloadInvalid()
 	}
-	return out.detach(), nil
+	// take marks the collector released, so the deferred release on return
+	// leaves the bytes handed to the caller alone.
+	return out.take(), nil
 }
 
 // OpenKDBXPayload decrypts the KDBX 4.1 payload ciphertext with the 32-byte
@@ -395,6 +397,7 @@ type boundedKDBXBuffer struct {
 	max      int64
 	kept     int64
 	exceeded bool
+	released bool
 }
 
 func (b *boundedKDBXBuffer) Write(p []byte) (int, error) {
@@ -411,16 +414,24 @@ func (b *boundedKDBXBuffer) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// detach hands the collected bytes to the caller, dropping the buffer's
-// reusable capacity behind them.
-func (b *boundedKDBXBuffer) detach() []byte {
+// take hands the collected bytes to the caller, dropping the buffer's
+// reusable capacity behind them, and marks the collector released so that a
+// later release leaves them alone. Every byte written within max is returned,
+// exactly max included.
+func (b *boundedKDBXBuffer) take() []byte {
 	data := b.buf.Bytes()
 	b.buf = bytes.Buffer{}
+	b.kept = 0
+	b.released = true
 	return data
 }
 
-// release clears and empties the collected bytes.
+// release clears and empties the collected bytes. Bytes already taken by the
+// caller are never cleared.
 func (b *boundedKDBXBuffer) release() {
+	if b.released {
+		return
+	}
 	clear(b.buf.Bytes())
 	b.buf.Reset()
 }

@@ -17,10 +17,6 @@ var xmlHeader = []byte(`<?xml version="1.0" encoding="utf-8" standalone="yes"?>`
 // Encoder is used to automaticaly encrypt and write a database to a file, network, etc
 type Encoder struct {
 	w io.Writer
-
-	// measure, when set, receives the exact plaintext size of the content
-	// once it has been serialized within budget.
-	measure func(int64)
 }
 
 // NewEncoder creates a new encoder with writer w, identical to gokeepasslib.Encoder{w}
@@ -37,11 +33,9 @@ var ErrEncodeLimitExceeded = errors.New("gokeepasslib: database exceeds encode l
 type EncodeLimits struct {
 	// MaxPlaintextBytes bounds the plaintext content: the InnerHeader
 	// followed by the XML document, exactly as it is compressed and
-	// encrypted. It is enforced on the plaintext collector's writes before a
-	// byte beyond it is retained. The XML document is marshaled as a whole
-	// before the budget applies to it, so the budget cannot prevent a large
-	// database from being marshaled; it rejects the database before its
-	// content is compressed, padded or encrypted.
+	// encrypted. It is enforced on every write of the plaintext collector,
+	// the InnerHeader's and the streaming XML document's alike, so a write
+	// that would cross it is rejected before a byte beyond it is retained.
 	MaxPlaintextBytes int64
 }
 
@@ -148,24 +142,19 @@ func (e *Encoder) encode(db *Database, maxPlaintext int64) error {
 		db.Content.Meta.HeaderHash = base64.StdEncoding.EncodeToString(hash[:])
 	}
 
-	// Encode xml and the InnerHeader (Kdbx v4) through one plaintext
-	// collector: both are serialized exactly once, and a bounded encode
-	// charges both against one plaintext budget before the content is
-	// compressed.
-	raw := newPlaintextContent(db.Header.IsKdbx4(), maxPlaintext > 0, maxPlaintext)
-	if err = raw.writeDocument(db.Content); err != nil {
+	// Serialize the InnerHeader (Kdbx v4) and then the XML document, each
+	// once, through the plaintext collector: a bounded encode charges both
+	// against one plaintext budget before the content is compressed.
+	plaintext, err := newPlaintextContent(db.Content.InnerHeader, db.Header.IsKdbx4(), maxPlaintext)
+	if err != nil {
 		return err
 	}
-	if err = raw.writeInnerHeader(db.Content.InnerHeader); err != nil {
+	if err = plaintext.writeDocument(db.Content); err != nil {
 		return err
-	}
-
-	if e.measure != nil {
-		e.measure(raw.measure)
 	}
 
 	// Encode raw content
-	encodedContent, err := encodeRawContent(db, raw.reader(), transformedKey)
+	encodedContent, err := encodeRawContent(db, plaintext.reader(), transformedKey)
 	if err != nil {
 		return err
 	}
@@ -176,123 +165,90 @@ func (e *Encoder) encode(db *Database, maxPlaintext int64) error {
 }
 
 // plaintextContent is the plaintext of one encode: the KDBX4 InnerHeader
-// followed by the XML document. A positive max is a plaintext budget, which is
-// enforced on writes before a byte beyond it is retained.
+// followed by the XML document, each collected once. A positive max is a
+// plaintext budget, enforced on every write of either before a byte beyond it
+// is retained.
 type plaintextContent struct {
 	headers  bytes.Buffer
 	document bytes.Buffer
-	isKdbx4  bool
+	written  int64
 	max      int64
-	measure  int64
-	exceeded bool
 }
 
-func newPlaintextContent(isKdbx4, bounded bool, max int64) *plaintextContent {
-	if !bounded {
-		max = 0
+// newPlaintextContent creates the collector of one encode and writes the
+// InnerHeader into it, before the document is serialized, so a budget smaller
+// than the InnerHeader is reported without serializing the document.
+func newPlaintextContent(innerHeader *InnerHeader, isKdbx4 bool, max int64) (*plaintextContent, error) {
+	c := &plaintextContent{max: max}
+	if !isKdbx4 || innerHeader == nil {
+		return c, nil
 	}
-	return &plaintextContent{isKdbx4: isKdbx4, max: max}
-}
-
-// Write collects p. A write that would bring the collected length above max
-// fails before any of its bytes are retained.
-func (c *plaintextContent) Write(p []byte) (int, error) {
-	if c.max > 0 && c.measure+int64(len(p)) > c.max {
-		c.exceeded = true
-		return 0, c.limitError()
+	// The InnerHeader's bytes go straight into the destination buffer, which
+	// receives them within the same budget as the document.
+	size := innerHeader.encodedSize()
+	if err := innerHeader.writeToBounded(&c.headers, size, max); err != nil {
+		return nil, err
 	}
-	c.measure += int64(len(p))
-	return c.document.Write(p)
+	if int64(c.headers.Len()) != size {
+		return nil, fmt.Errorf("gokeepasslib: inner header of %d bytes, want %d", c.headers.Len(), size)
+	}
+	c.written = size
+	return c, nil
 }
 
-// writeDocument marshals the XML document exactly as marshalXMLContent did,
-// the XML header included.
+// writeDocument writes the XML header and then the document with one
+// streaming xml.Encoder into the collector. The encoder is configured exactly
+// as xml.MarshalIndent(content, "", "\t") configures it, so the bytes are the
+// same, but they reach the collector as they are produced: the collector
+// rejects a write that would cross the budget before retaining any of it, and
+// the encoder stops at that write, so nothing beyond the budget is written.
 func (c *plaintextContent) writeDocument(content *DBContent) error {
-	rawContent, err := xml.MarshalIndent(content, "", "\t")
-	if err != nil {
+	dst := &limitedWriter{w: &c.document, max: c.max, written: &c.written}
+	if _, err := dst.Write(xmlHeader); err != nil {
 		return err
 	}
-	if _, err = c.Write(xmlHeader); err != nil {
-		return c.checkErr(err)
-	}
-	if _, err = c.Write(rawContent); err != nil {
-		return c.checkErr(err)
-	}
-	return c.check()
-}
-
-// writeInnerHeader places the KDBX4 InnerHeader in front of the document. It
-// is charged against the budget as a whole, from its encoded size, before any
-// of it is retained.
-func (c *plaintextContent) writeInnerHeader(ih *InnerHeader) error {
-	if !c.isKdbx4 {
-		return nil
-	}
-	if err := c.reserve(ih.encodedSize()); err != nil {
+	enc := xml.NewEncoder(dst)
+	enc.Indent("", "\t")
+	// Encode flushes the encoder before it returns, and Close flushes it
+	// again and reports a write error, exactly as MarshalIndent does.
+	if err := enc.Encode(content); err != nil {
 		return err
 	}
-	// The InnerHeader is written through a wrapper, whose bytes are copied
-	// back: a bytes.Buffer must not be copied by value once written.
-	header := &boundedContentBuffer{max: c.max, limit: c.limitError}
-	err := ih.writeTo(header)
-	c.headers.Write(header.buf.Bytes())
-	if err != nil {
-		return c.checkErr(err)
-	}
-	return c.check()
+	return enc.Close()
 }
 
-// reader returns the collected InnerHeader followed by the document as one
-// body, without copying the document when there is no InnerHeader.
+// reader returns the InnerHeader followed by the document as one stream, over
+// the two collected buffers: neither is copied or concatenated with the
+// other. The gzip path streams that reader, and the no-compression path makes
+// the single full plaintext allocation its encryptor needs.
 func (c *plaintextContent) reader() io.Reader {
-	document := c.document.Bytes()
-	if c.headers.Len() == 0 {
-		return bytes.NewReader(document)
-	}
-	payload := make([]byte, 0, c.headers.Len()+len(document))
-	payload = append(payload, c.headers.Bytes()...)
-	return bytes.NewReader(append(payload, document...))
+	return io.MultiReader(&c.headers, &c.document)
 }
 
-// reserve charges n bytes that are about to be collected as a whole.
-func (c *plaintextContent) reserve(n int64) error {
-	if c.max > 0 && c.measure+n > c.max {
-		c.exceeded = true
-		return c.limitError()
-	}
-	c.measure += n
-	return nil
+// limitedWriter appends writes to w within a positive max, counting every
+// collected byte in written. A write that would bring the collected length
+// above max fails before any of its bytes are written, so neither the
+// collector nor its budget ever holds a byte beyond max.
+type limitedWriter struct {
+	w       io.Writer
+	max     int64
+	written *int64
 }
 
-// checkErr prefers the budget error once a write was rejected over budget.
-func (c *plaintextContent) checkErr(err error) error {
-	if c.exceeded {
-		return c.limitError()
+func (l *limitedWriter) Write(p []byte) (int, error) {
+	if l.max > 0 && *l.written+int64(len(p)) > l.max {
+		return 0, errPlaintextBudget()
 	}
-	return err
+	n, err := l.w.Write(p)
+	*l.written += int64(n)
+	if err == nil && n != len(p) {
+		return n, io.ErrShortWrite
+	}
+	return n, err
 }
 
-// check reports the budget error once a write was rejected over budget.
-func (c *plaintextContent) check() error { return c.checkErr(nil) }
-
-func (c *plaintextContent) limitError() error {
+func errPlaintextBudget() error {
 	return fmt.Errorf("%w: plaintext budget exceeded", ErrEncodeLimitExceeded)
-}
-
-// boundedContentBuffer collects writes in buf up to a positive max. A write
-// that would bring the collected length above max fails before any of its
-// bytes are retained.
-type boundedContentBuffer struct {
-	buf   bytes.Buffer
-	max   int64
-	limit func() error
-}
-
-func (b *boundedContentBuffer) Write(p []byte) (int, error) {
-	if b.max > 0 && int64(b.buf.Len())+int64(len(p)) > b.max {
-		return 0, b.limit()
-	}
-	return b.buf.Write(p)
 }
 
 // encodeRawContent compresses, pads and encrypts the plaintext content read

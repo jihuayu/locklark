@@ -211,7 +211,8 @@ const (
 )
 
 // encodedSize returns the exact number of bytes writeTo writes for the
-// InnerHeader, without serializing it.
+// InnerHeader, without serializing it: the 4-byte inner random stream id item,
+// the inner random stream key item, one item per binary and the terminator.
 func (ih *InnerHeader) encodedSize() int64 {
 	size := int64(innerHeaderTerminatorSize)
 	size += innerHeaderItemSize(4)
@@ -263,6 +264,63 @@ func writeToInnerHeader(w io.Writer, id uint8, data []byte) error {
 		}
 	}
 	return nil
+}
+
+// writeToBounded appends the InnerHeader in encodedSize bytes to dst, which
+// receives it directly: no item is staged and no buffer is copied. When the
+// append grows dst's capacity, the budget is checked before the allocation,
+// so dst of capacity size receives nothing on a budget error.
+func (ih *InnerHeader) writeToBounded(dst *bytes.Buffer, size, max int64) error {
+	if max > 0 && int64(dst.Len())+size > max {
+		return errPlaintextBudget()
+	}
+	// The slice is captured once: dst must not be copied by value after its
+	// buffer is written.
+	buf := ih.appendTo(dst.AvailableBuffer())
+	if _, err := dst.Write(buf); err != nil {
+		return err
+	}
+	return nil
+}
+
+// appendTo appends the InnerHeader's encoding to buf, one item at a time,
+// without staging an item in its own buffer.
+func (ih *InnerHeader) appendTo(buf []byte) []byte {
+	var irsID [4]byte
+	binary.LittleEndian.PutUint32(irsID[:], ih.InnerRandomStreamID)
+
+	buf = appendInnerHeaderItem(buf, InnerHeaderIRSID, irsID[:])
+	buf = appendInnerHeaderItem(buf, InnerHeaderIRSKey, ih.InnerRandomStreamKey)
+	for _, item := range ih.Binaries {
+		// A binary is always written, its protection flag alone for an
+		// empty one, as writeTo writes it.
+		buf = appendInnerHeaderItemHeader(buf, InnerHeaderBinary, 1+len(item.Content))
+		buf = append(buf, item.MemoryProtection)
+		buf = append(buf, item.Content...)
+	}
+	return appendInnerHeaderTerminator(buf)
+}
+
+// appendInnerHeaderItem appends one item, the same bytes writeToInnerHeader
+// writes for it.
+func appendInnerHeaderItem(buf []byte, id uint8, data []byte) []byte {
+	if len(data) == 0 {
+		return buf
+	}
+	buf = appendInnerHeaderItemHeader(buf, id, len(data))
+	return append(buf, data...)
+}
+
+// appendInnerHeaderItemHeader appends an item's type and length fields.
+func appendInnerHeaderItemHeader(buf []byte, id uint8, dataLen int) []byte {
+	buf = append(buf, id)
+	return binary.LittleEndian.AppendUint32(buf, uint32(dataLen))
+}
+
+// appendInnerHeaderTerminator appends the type and length fields of the
+// terminator, which writeTo writes as one 5-byte write.
+func appendInnerHeaderTerminator(buf []byte) []byte {
+	return binary.LittleEndian.AppendUint32(append(buf, InnerHeaderTerminator), 0)
 }
 
 func (ih InnerHeader) String() string {

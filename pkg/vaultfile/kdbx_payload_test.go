@@ -819,6 +819,12 @@ func TestKDBXPayloadOpenRejectsExpandedBodyOverBudget(t *testing.T) {
 	}
 }
 
+// TestKDBXPayloadSealRejectsOversizedOutput checks Seal's end-to-end rejection
+// of a fixture whose annotated output would exceed MaxKDBXCiphertextBytes.
+// With the plaintext budget in force this incompressible attachment now
+// exceeds MaxPlaintextBytes first, so this test fails on the plaintext limit
+// and does not reach the ciphertext collector: that cap is proven directly by
+// TestBoundedKDBXBufferCiphertextCap.
 func TestKDBXPayloadSealRejectsOversizedOutput(t *testing.T) {
 	cek := payloadFixtureCEK(t)
 	db := payloadFixtureDB(t)
@@ -835,6 +841,74 @@ func TestKDBXPayloadSealRejectsOversizedOutput(t *testing.T) {
 	}
 }
 
+// TestBoundedKDBXBufferCiphertextCap proves Seal's output collector directly,
+// at exactly its cap and one byte over. An over-cap Seal cannot reach the
+// collector through the public API any more: an incompressible attachment
+// large enough to overflow it exceeds MaxPlaintextBytes first, as
+// TestKDBXPayloadSealRejectsOversizedOutput now fails on the plaintext limit.
+// The collector is therefore exercised on the writer Seal uses, with a small
+// cap: every byte within the cap is retained, exactly the cap included, and a
+// write crossing it clears what was retained and is then accepted and
+// discarded with every later byte.
+func TestBoundedKDBXBufferCiphertextCap(t *testing.T) {
+	// Three chunk-sized writes are the cap, so the cap lands on a write
+	// boundary; the over-cap stream adds one more chunk.
+	const (
+		capBytes     = 3 * kdbxChunkBytes
+		overCapBytes = capBytes + kdbxChunkBytes
+	)
+	data := make([]byte, overCapBytes)
+	for i := range data {
+		data[i] = byte(i)
+	}
+	// writeAll feeds n bytes in encoder-sized writes.
+	writeAll := func(b *boundedKDBXBuffer, n int) {
+		t.Helper()
+		for off := 0; off < n; off += kdbxChunkBytes {
+			end := min(off+kdbxChunkBytes, n)
+			if got, err := b.Write(data[off:end]); err != nil || got != end-off {
+				t.Fatalf("write returned %d, %v; want %d, nil", got, err, end-off)
+			}
+		}
+	}
+
+	t.Run("exact limit", func(t *testing.T) {
+		b := &boundedKDBXBuffer{max: capBytes}
+		writeAll(b, capBytes)
+		if b.exceeded || b.kept != capBytes {
+			t.Fatalf("kept %d bytes, exceeded %v, want exactly %d", b.kept, b.exceeded, capBytes)
+		}
+		// Seal takes the bytes on success and still releases the collector
+		// on return: the returned bytes must survive that release.
+		got := b.take()
+		b.release()
+		if !bytes.Equal(got, data[:capBytes]) {
+			t.Fatalf("collector returned %d bytes that differ from the %d written", len(got), capBytes)
+		}
+	})
+
+	t.Run("one byte over", func(t *testing.T) {
+		b := &boundedKDBXBuffer{max: capBytes - 1}
+		writeAll(b, capBytes)
+		if !b.exceeded || b.kept != capBytes {
+			t.Fatalf("kept %d bytes, exceeded %v, want the cap crossed", b.kept, b.exceeded)
+		}
+		if n := b.buf.Len(); n != 0 {
+			t.Fatalf("over-cap collector retains %d bytes", n)
+		}
+		// Later writes are still accepted and discarded without reviving
+		// the buffer.
+		writeAll(b, overCapBytes)
+		if b.buf.Len() != 0 || b.kept != capBytes+overCapBytes {
+			t.Fatalf("after the cap collector retains %d bytes of %d", b.buf.Len(), b.kept)
+		}
+		b.release()
+		if got := b.take(); len(got) != 0 {
+			t.Fatalf("over-cap collector returned %d bytes", len(got))
+		}
+	})
+}
+
 // TestKDBXPayloadSealRejectsCompressiblePlaintextOverBudget is the regression
 // for the plaintext budget: a valid, unprotected Notes value of
 // MaxPlaintextBytes-2 bytes makes the KDBX4 plaintext body (InnerHeader plus
@@ -848,21 +922,24 @@ func TestKDBXPayloadSealRejectsCompressiblePlaintextOverBudget(t *testing.T) {
 	db.Content.Root.Groups[0].Entries[0].Values = append(
 		db.Content.Root.Groups[0].Entries[0].Values, kdbx.ValueData{Key: "Notes", Value: kdbx.V{Content: notes}},
 	)
-	// The same fixture with a small Notes value is accepted, so the budget
-	// rejects only the over-budget body.
-	plain := payloadFixtureDB(t)
-	plain.Content.Root.Groups[0].Entries[0].Values = append(
-		plain.Content.Root.Groups[0].Entries[0].Values, kdbx.ValueData{Key: "Notes", Value: kdbx.V{Content: "compact value"}},
-	)
-
+	prior := kdbx.NewPasswordCredentials("prior password")
+	db.Credentials = prior
 	out, err := SealKDBXPayload(db, cek)
 	wantPayloadCode(t, err, CodeKDBXPayloadTooLarge)
 	if out != nil {
 		t.Fatalf("over-budget Seal returned %d bytes", len(out))
 	}
-	// The comparison fixture is accepted, so the budget rejects only the
-	// expanded document.
-	if _, err := SealKDBXPayload(plain, cek); err != nil {
+	if db.Credentials != prior {
+		t.Fatal("Seal did not restore the prior credentials after the plaintext budget")
+	}
+
+	// The same fixture with a small Notes value is accepted, so the budget
+	// rejects only the expanded document.
+	plain := payloadFixtureDB(t)
+	plain.Content.Root.Groups[0].Entries[0].Values = append(
+		plain.Content.Root.Groups[0].Entries[0].Values, kdbx.ValueData{Key: "Notes", Value: kdbx.V{Content: "compact value"}},
+	)
+	if sealed, err := SealKDBXPayload(plain, cek); err != nil || sealed == nil {
 		t.Fatalf("fixture within budget rejected: %v", err)
 	}
 }
