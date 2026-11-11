@@ -9,10 +9,11 @@ import (
 // produced for one purpose must never be accepted for another. Labels are
 // fixed by this schema and are part of its public protocol.
 //
-// Labels are defined here only; this package does not sign, wrap or derive
-// anything. VerifyContentSignature checks one content signature against a
-// caller-pinned key, without authenticating policy proofs or current
-// authorization. VerifyPolicyCheckpoint is a separate checkpoint-scoped API:
+// Labels are defined here only; this package does not sign or derive
+// anything. It wraps and unwraps only the per-snapshot CEK under the epoch VUK
+// (DomainCEKWrapping); it does not wrap other keys. VerifyContentSignature
+// checks one content signature against a caller-pinned key, without
+// authenticating policy proofs or current authorization. VerifyPolicyCheckpoint is a separate checkpoint-scoped API:
 // it establishes checkpoint-scoped root continuation verification, the current
 // policy's author role requirement, and content signature verification under
 // the current policy's device key.

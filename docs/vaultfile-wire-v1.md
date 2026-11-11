@@ -1,7 +1,8 @@
 # locklark.vault-file/v1 Wire Schema
 
 Status: draft. Implemented in `pkg/vaultfile`: structure, canonical codec,
-preimage derivation, and two separate verification APIs (see [Verification
+preimage derivation, the CEK envelope (`SealCEK`/`OpenCEK`, see [CEK sealing and
+opening](#cek-sealing-and-opening)), and two separate verification APIs (see [Verification
 APIs](#verification-apis)):
 
 - `VerifyContentSignature`, the narrow check: `ValidateFile` plus the file's
@@ -31,11 +32,19 @@ authorizes anything, and only the narrow transition described in
 [Admin-delegated
 InviteReaders](#admin-delegated-invitereaders-transitions); every other
 delegated scope, invite-writer addition, removal, role change and key or root
-change remains unsupported. Key wrapping (including rewrap of the invitation
-and epoch keys), encryption/decryption, content history through `prev_digest`,
-server freshness and overall vault trust are not implemented. This document
-describes the wire format and the frozen v1 preimages; it makes no
-cryptographic correctness claim and grants no migration or product permission.
+change remains unsupported.
+
+The package also implements one key-wrapping primitive, the per-snapshot CEK
+envelope: [`SealCEK`/`OpenCEK`](#cek-sealing-and-opening) wrap a fresh random
+32-byte CEK under the epoch VUK. A wrapping proves only that a CEK slot is
+authentic for the VUK and the bound header. age wrapping of
+the VUK to devices (`vuk_device_slots`), wrapping of the invitation and epoch
+keys, KDBX content encryption/serialization, opening a KDBX content with the
+CEK, a trusted full-file open/decrypt path, content history through
+`prev_digest`, server freshness and overall vault trust are not implemented.
+This document describes the wire format and the frozen v1 preimages; it makes
+no cryptographic correctness claim and grants no migration or product
+permission.
 
 ## Background
 
@@ -86,7 +95,10 @@ revision or file-digest preimage):
   `/key/age-x25519`, `/policy-document`
 
 Labels are identification and purpose separators only. This package does not
-sign, wrap or derive any key. The only authorization it checks is
+sign, generate a VUK or derive any key. It wraps and unwraps only the
+per-snapshot CEK under the epoch VUK (`/cek-wrapping`, see [CEK sealing and
+opening](#cek-sealing-and-opening)); it does not wrap the VUK itself. The only
+authorization it checks is
 checkpoint-scoped: under a caller-supplied checkpoint, whether the author may
 author the authenticated current policy. It has no trust anchor of its own. A
 policy transition it accepts is either root-signed by the pinned owner root or
@@ -474,7 +486,8 @@ package computes no signature.
 
 - signature bytes are checked for presence, length, algorithm and encoding
   only; `ValidateFile` does not verify any signature. Cryptography lives only
-  in the two explicit APIs of [Verification APIs](#verification-apis): the
+  in the two explicit APIs of [Verification APIs](#verification-apis) and in
+  the CEK envelope of [CEK sealing and opening](#cek-sealing-and-opening): the
   content signature is verified by `VerifyContentSignature` (pinned key) and by
   `VerifyPolicyCheckpoint` (current policy key), and policy proof signatures
   are cryptographically verified only by `VerifyPolicyCheckpoint`, only for the
@@ -500,7 +513,9 @@ package computes no signature.
 `ValidateFile` stays shape only and introduces no trust anchor: it never
 verifies a signature, authenticates a policy proof or authorizes a policy.
 Two separate exported APIs add cryptography on top of it, and they answer
-different questions:
+different questions (the separate `SealCEK`/`OpenCEK` envelope of
+[CEK sealing and opening](#cek-sealing-and-opening) is not a verification API
+and authorizes nothing):
 
 | API | Input it trusts | What it establishes |
 | --- | ------------------- | ------------------- |
@@ -697,13 +712,103 @@ owner-root key and the rule that a later policy names exactly one 32-byte
 `ValidatePolicy` and `ValidateFile` rules; the diff only constrains the delta.
 The diff changes no wire field and no preimage.
 
+## CEK sealing and opening
+
+Each content snapshot has one fresh random 32-byte CEK, used as the KDBX key
+credential of its `kdbx_ciphertext`. The CEK is never carried in the clear: it
+travels only inside `cek_slot.wrapped_cek`, wrapped by the 32-byte VUK of
+`Header.key_epoch`. Two functions implement exactly that envelope:
+
+```
+SealCEK(vuk []byte, header Header) (cek []byte, slot CEKSlot, err error)
+OpenCEK(vuk []byte, header Header, slot CEKSlot) ([]byte, error)
+```
+
+- `vuk` is exactly 32 bytes (`CEKSize`). The package neither generates nor
+  loads the VUK.
+- `SealCEK` generates a fresh random 32-byte CEK with `crypto/rand`, wraps it
+  and returns the CEK together with a slot whose `key_epoch` equals
+  `header.key_epoch`. The returned `cek` is caller-owned: use it as the KDBX
+  key credential, then clear it once the KDBX content has been encrypted.
+  `OpenCEK` returns the unwrapped CEK, which is caller-owned in the same way
+  and must be cleared after KDBX use. Neither function retains a caller
+  buffer (`vuk`, `header`, a returned `cek`) after it returns; the caller
+  keeps its buffers stable while a call runs.
+- `header` must pass `ValidateHeader` and carry a non-zero `key_epoch`; a zero
+  epoch is an `invalid_value` at `key_epoch`. A `vuk` of any other length is
+  an `invalid_value` at `""`.
+- A failure of `crypto/rand` inside `SealCEK` is returned as the underlying
+  operational error, not as a validation code, after the generated CEK buffer
+  is cleared.
+
+The wrap is AES-256-GCM from `crypto/cipher.NewGCMWithRandomNonce` (standard
+library only), keyed by the VUK. Implementation: `aead.Seal(nil, nil, CEK,
+aad)`; the AEAD generates the nonce and prepends it, and the standard `Seal`
+output already ends with the tag:
+
+```
+aad         = "locklark.vault-file/v1/cek-wrapping" || 0x00
+              || canonicalHeaderWithoutRevisionID(header)
+
+wrapped_cek = nonce_prefix(12) || ciphertext(32) || tag(16)
+```
+
+A valid `wrapped_cek` is exactly 60 bytes: 12-byte nonce prefix, 32-byte CEK
+ciphertext, 16-byte tag (well within `MaxWrappedKeyLength`); no second tag is
+appended. The `NewGCMWithRandomNonce` output is already the nonce prefix
+followed by the ciphertext and tag; no other nonce scheme, cipher, KDF or
+wrapper is used.
+
+Key usage limit: with `NewGCMWithRandomNonce`, a given VUK must not be used
+for more than 2^32 (2**32) encryptions; beyond that, nonce collisions and
+forgery risks are no longer negligible (see the `crypto/cipher`
+documentation). Each `SealCEK` call performs exactly one encryption with that
+VUK. `SealCEK` is stateless and cannot track per-key usage, so the caller must
+count `SealCEK` calls per VUK and rotate to a new VUK and key epoch before any
+VUK reaches 2^32 encryptions.
+
+`canonicalHeaderWithoutRevisionID` is exactly the schema order of the
+canonical header with the `revision_id` member absent entirely, not empty:
+
+```
+{"vault_id":…,"key_epoch":…,"content_seq":…,"prev_digest":…,"op_id":…,
+ "policy_seq":…,"policy_digest":…,"author_device_id":…}
+```
+
+It binds every header member except `revision_id`. `revision_id` is excluded
+because it is derived: `RevisionID` hashes the file carrying `wrapped_cek`, so
+including the derived id here would make sealing circular. The result is that
+the CEK can be sealed before the revision id is derived, the same wrapping
+opens under a draft header without a revision id and under the sealed header,
+and a different but valid-shaped `revision_id` neither changes the
+authenticated data nor the open result. The final content signature still
+binds the final revision id and the complete file.
+
+`OpenCEK` reports one generic failure code for every envelope failure:
+`cek_envelope_failed`, an `*Error` with that `Code` at `cek_slot`. It covers a
+slot `key_epoch` different from the header, nil/empty or wrong-length
+`wrapped_cek`, a wrong VUK, and any authentication or tamper failure; a
+caller cannot tell a wrong VUK from corrupted bytes. Structural failures (an
+invalid header or VUK length) are returned as above instead. On any error the
+returned CEK is nil and any plaintext produced before the failure is cleared;
+`SealCEK` clears its generated CEK buffer when `crypto/rand` fails and
+returns that error as is.
+
+This primitive does not authorize a file and does not open a file. It does not
+derive the VUK, wrap the VUK to devices (`vuk_device_slots`), serialize,
+encrypt or decrypt KDBX content with the CEK, or provide a trusted full-file
+open path. `ValidateFile` still treats `wrapped_cek` as opaque bytes and never
+unwraps it.
+
 ## Limits
 
 Neither API establishes overall vault trust beyond its caller-supplied anchor.
 Neither verifies content history through `prev_digest`, server freshness or
-ordering across snapshots, encryption or decryption, CEK or VUK key wrapping
-(including rewrap of the invitation and epoch keys for newly invited readers),
-or the authenticity of anything the caller did not pin. Neither cryptographically
+ordering across snapshots, encryption or decryption, VUK key wrapping or the
+CEK envelope (including the age rewrap of the invitation and epoch keys for
+newly invited readers; CEK sealing/opening is only the separate primitive of
+[CEK sealing and opening](#cek-sealing-and-opening), which authorizes no
+file), or the authenticity of anything the caller did not pin. Neither cryptographically
 reverifies the carried anchor proof's signature; that signature is trusted only
 through the caller's checkpoint digest. The chain does authenticate the
 delegation fields (`owner_root`, `admin_delegations` and its `scope`) carried in
@@ -730,6 +835,11 @@ authorization is implemented. In particular:
   provenance of the checkpoint, the owner root or its key, does not perform
   the invitation or key rewrap a new reader would need, and does not accept
   any other admin-signed transition.
+- `SealCEK`/`OpenCEK` establish only that a CEK slot was wrapped under, and
+  opens with, a caller-supplied VUK and the bound header. They do not
+  authenticate a policy, signature or revision id (`revision_id` is not
+  bound), do not prove freshness or uniqueness of a VUK, do not bind a CEK to
+  KDBX bytes, and do not open a file.
 
 ## Budgets
 
@@ -802,9 +912,11 @@ non-canonical `document` is rejected, before any policy binding is considered.
 
 ## Out of scope
 
-This schema revision includes only the two verification APIs described above:
+This schema revision includes the two verification APIs described above,
 `VerifyContentSignature` (narrow, caller-pinned content key) and
-`VerifyPolicyCheckpoint` (from a caller-supplied `PolicyCheckpoint` forward).
+`VerifyPolicyCheckpoint` (from a caller-supplied `PolicyCheckpoint` forward),
+and one key-wrapping primitive, `SealCEK`/`OpenCEK`
+([CEK sealing and opening](#cek-sealing-and-opening)).
 `ValidateFile`, parsing, encoding and preimage derivation remain shape-only.
 
 It does not establish or create the trustworthiness or provenance of the
@@ -823,5 +935,7 @@ delegated diff it implements no other policy proof, signature-chain or
 authorization verification and no permission checks. It also leaves the
 provenance of the caller's root outside its scope, key or digest crypto
 beyond the definitions, content history through `prev_digest`, server
-freshness, migration/import, encryption or decryption, key wrapping or product
-wiring.
+freshness, migration/import, encryption or decryption, age VUK device
+wrapping (`vuk_device_slots`) and epoch/VUK generation, KDBX
+encryption/serialization or opening with the CEK, a trusted full-file open
+path, or product wiring.
