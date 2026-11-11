@@ -8,7 +8,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,13 +20,15 @@ import (
 )
 
 // Access masks. Right groups are UNIX-style bundles; a grant of any bundled
-// right counts as a request for every right in it.
+// right counts as a request for every right in it. MAXIMUM_ALLOWED (0x02000000)
+// is deliberately absent: it is a desired-access flag for an access *request*,
+// not a right an ACE can grant (see AccessCheck in MS-DTYP), so it can never
+// appear in a DACL mask and naming it in a forbidden mask would be dead.
 const (
 	genericRead     = 0x80000000
 	genericWrite    = 0x40000000
 	genericExecute  = 0x20000000
 	genericAll      = 0x10000000
-	maximumAllowed  = 0x02000000
 	deleteChildMask = 0x0040
 	// aceFlagsInheritOnly marks an ACE that applies only to children.
 	aceFlagsInheritOnly = 0x8
@@ -41,7 +42,7 @@ const (
 	// fileWriteRights let a holder replace the journal content or metadata.
 	fileWriteRights = windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA |
 		windows.FILE_WRITE_EA | windows.FILE_WRITE_ATTRIBUTES |
-		genericWrite | genericAll | windows.DELETE | maximumAllowed
+		genericWrite | genericAll | windows.DELETE
 	// fileDestructiveRights additionally let a holder re-permission or
 	// re-own the journal.
 	fileDestructiveRights = fileWriteRights | windows.WRITE_DAC | windows.WRITE_OWNER
@@ -55,7 +56,7 @@ const (
 	// it readable or writable.
 	dirChildRights = windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA |
 		windows.FILE_WRITE_EA | windows.FILE_WRITE_ATTRIBUTES | deleteChildMask |
-		genericWrite | genericAll | maximumAllowed
+		genericWrite | genericAll
 	// dirDestructiveRights additionally let a holder replace, re-permission or
 	// re-own the directory entry itself.
 	dirDestructiveRights = dirChildRights | windows.DELETE | windows.WRITE_DAC |
@@ -75,7 +76,7 @@ const (
 	// rights cannot redirect or replace the journal's own path.
 	dirAncestorForbidden = windows.FILE_WRITE_EA | windows.FILE_WRITE_ATTRIBUTES |
 		windows.DELETE | deleteChildMask | windows.WRITE_DAC | windows.WRITE_OWNER |
-		genericWrite | genericAll | maximumAllowed
+		genericWrite | genericAll
 
 	// journalTempPrefix names this package's uniquely named publication files.
 	journalTempPrefix = ".locklark-vaultfilejournal-"
@@ -334,79 +335,116 @@ func lstatNoFollow(path string) (uint32, error) {
 }
 
 // checkDBPath requires path to name a regular, non-reparse file with a private
-// DACL, or nothing. A missing file is reported missing=true; it is not
-// created here.
+// DACL, or no file at all. A missing (or dangling-link) name is reported
+// missing=true; nothing is created here. An existing file must pass the same
+// handle validation that openExistingDatabase applies, so a symlinked
+// database name is rejected before publication or bbolt.
 func checkDBPath(path string) (missing bool, err error) {
-	if _, statErr := os.Lstat(path); errors.Is(statErr, fs.ErrNotExist) {
-		return true, nil
-	} else if statErr != nil {
-		return false, fmt.Errorf("%w: database file: %v", ErrInvalid, statErr)
+	file, _, missing, err := openValidatedDB(path)
+	if file != nil {
+		_ = file.Close()
 	}
-	if _, err := openValidatedDB(path); err != nil {
-		return false, err
-	}
-	return false, nil
+	return missing, err
 }
 
-// openValidatedDB opens an existing database path for validation through a
-// handle and requires a regular, non-reparse, singly linked file with a
-// private DACL. The validated identity is returned so the bbolt open can be
-// checked against it.
-func openValidatedDB(path string) (windows.ByHandleFileInformation, error) {
-	var info windows.ByHandleFileInformation
-	handle, err := openDBHandle(path)
-	if err != nil {
-		return info, err
-	}
-	defer func() { _ = syscall.CloseHandle(syscall.Handle(handle)) }()
-	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
-		return info, fmt.Errorf("%w: database file %s: %v", ErrInvalid, path, err)
-	}
-	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 ||
-		info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
-		return info, fmt.Errorf("%w: database path %s is not a regular file", ErrInvalid, path)
-	}
-	if info.NumberOfLinks > 1 {
-		return info, fmt.Errorf("%w: database file %s has multiple hard links", ErrInvalid, path)
-	}
-	scope, err := currentSIDs()
-	if err != nil {
-		return info, fmt.Errorf("%w: %v", ErrInvalid, err)
-	}
-	sd, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT,
-		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
-	if err != nil {
-		return info, fmt.Errorf("%w: cannot read the security of %s: %v", ErrInvalid, path, err)
-	}
-	if err := scope.checkFileACL(path, sd); err != nil {
-		return info, err
-	}
-	return info, nil
-}
-
+// openDBHandle opens path for bbolt. It must not follow a file reparse point:
+// FILE_FLAG_OPEN_REPARSE_POINT plus OPEN_EXISTING makes the handle name the
+// link itself, never its target, so a symlinked database cannot be validated
+// in place of, or initialized or locked through, another file. OPEN_EXISTING
+// is sufficient because Open has already published or located the file.
+// The share mode keeps bbolt's read/write and mapping compatibility
+// (FILE_SHARE_READ|FILE_SHARE_WRITE, so no conflicting open is refused) but
+// withholds FILE_SHARE_DELETE, so the name cannot be deleted or renamed away
+// while this handle is open: no replacement can appear at the path, and a
+// delete-pending name (which a fresh open would resolve to the same file)
+// surfaces as an access error here instead of being followed.
 func openDBHandle(path string) (windows.Handle, error) {
 	wide, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return 0, fmt.Errorf("%w: %s: %v", ErrInvalid, path, err)
 	}
-	handle, err := windows.CreateFile(wide, windows.READ_CONTROL|windows.FILE_READ_ATTRIBUTES,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
-		windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	handle, err := windows.CreateFile(wide, windows.GENERIC_READ|windows.GENERIC_WRITE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_EXISTING,
+		windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 	if err != nil {
-		return 0, fmt.Errorf("%w: database file %s: %v", ErrInvalid, path, err)
+		return 0, fmt.Errorf("%w: database file %s: %w", ErrInvalid, path, err)
 	}
 	return handle, nil
 }
 
-// verifyDBFile requires path to still name exactly the file identified by
-// before (a swap of the name cannot hide behind the earlier validation).
-func verifyDBFile(path string, before windows.ByHandleFileInformation) error {
-	after, err := openValidatedDB(path)
+// openValidatedDB opens the existing file at path through one handle, without
+// following a final-component reparse point, and requires a regular,
+// non-reparse, singly linked file with a trusted owner and a private DACL.
+// It returns the opened file for bbolt to use directly, the handle identity,
+// and whether the name was absent. A missing name is missing=true with no
+// error; a dangling link is missing=true because its link alone is not a
+// database and is never followed.
+func openValidatedDB(path string) (file *os.File, info windows.ByHandleFileInformation, missing bool, err error) {
+	handle, err := openDBHandle(path)
 	if err != nil {
+		if errors.Is(err, syscall.ERROR_FILE_NOT_FOUND) || errors.Is(err, syscall.ERROR_PATH_NOT_FOUND) {
+			return nil, info, true, nil
+		}
+		return nil, info, false, err
+	}
+	defer func() {
+		if file == nil {
+			_ = syscall.CloseHandle(syscall.Handle(handle))
+		}
+	}()
+	if err := validateDBHandle(path, handle, &info); err != nil {
+		return nil, info, false, err
+	}
+	// Wrap the validated descriptor rather than reopening by name: bbolt
+	// receives exactly the handle inspected above.
+	return os.NewFile(uintptr(handle), path), info, false, nil
+}
+
+// validateDBHandle applies the database file rules to one open handle: a
+// regular, non-reparse, singly linked file whose owner and DACL are trusted.
+func validateDBHandle(path string, handle windows.Handle, info *windows.ByHandleFileInformation) error {
+	if err := windows.GetFileInformationByHandle(handle, info); err != nil {
+		return fmt.Errorf("%w: database file %s: %v", ErrInvalid, path, err)
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 ||
+		info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
+		return fmt.Errorf("%w: database path %s is not a regular file", ErrInvalid, path)
+	}
+	if info.NumberOfLinks > 1 {
+		return fmt.Errorf("%w: database file %s has multiple hard links", ErrInvalid, path)
+	}
+	scope, err := currentSIDs()
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalid, err)
+	}
+	sd, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return fmt.Errorf("%w: cannot read the security of %s: %v", ErrInvalid, path, err)
+	}
+	if err := scope.checkFileACL(path, sd); err != nil {
 		return err
 	}
-	if before.VolumeSerialNumber != after.VolumeSerialNumber ||
-		before.FileIndexHigh != after.FileIndexHigh || before.FileIndexLow != after.FileIndexLow {
+	return nil
+}
+
+// verifyDBPathIdentity requires path, opened once more without following a
+// reparse point, to still name exactly the file identified by info. The name
+// cannot have been deleted or renamed while the bbolt handle is open (it
+// withholds FILE_SHARE_DELETE) and the handle above is where the data lives;
+// this check catches a swap of the name before that handle was taken.
+func verifyDBPathIdentity(path string, info windows.ByHandleFileInformation) error {
+	handle, err := openDBHandle(path)
+	if err != nil {
+		return fmt.Errorf("%w: database file %s changed during open: %v", ErrInvalid, path, err)
+	}
+	defer func() { _ = syscall.CloseHandle(syscall.Handle(handle)) }()
+	var after windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &after); err != nil {
+		return fmt.Errorf("%w: database file %s: %v", ErrInvalid, path, err)
+	}
+	if info.VolumeSerialNumber != after.VolumeSerialNumber ||
+		info.FileIndexHigh != after.FileIndexHigh || info.FileIndexLow != after.FileIndexLow {
 		return fmt.Errorf("%w: database file %s changed during open", ErrInvalid, path)
 	}
 	return nil
@@ -416,11 +454,13 @@ var tempCounter atomic.Uint64
 
 // openDatabase opens the journal database after the path checks. A missing
 // database is published as a fully initialized, privately secured file; any
-// other path is opened in place. Windows has no supported user-mode directory
-// flush, so a new name becomes durable through the file sync inside
-// publishNewDatabase followed by MoveFileEx(MOVEFILE_WRITE_THROUGH). That is
-// the supported initial-file publication mechanism; it is not a general
-// directory-flush or power-loss guarantee.
+// other path is opened in place. A missingHint merely records what Open saw:
+// the name is looked up afresh here, because openValidatedDB never creates it.
+// Windows has no supported user-mode directory flush, so a new name becomes
+// durable through the file sync inside publishNewDatabase followed by
+// MoveFileEx(MOVEFILE_WRITE_THROUGH). That is the supported initial-file
+// publication mechanism; it is not a general directory-flush or power-loss
+// guarantee.
 func openDatabase(path, parent string, missingHint bool) (*Journal, error) {
 	if missingHint {
 		// Publish only when the name is genuinely absent; when another opener
@@ -433,23 +473,54 @@ func openDatabase(path, parent string, missingHint bool) (*Journal, error) {
 	return openExistingDatabase(path)
 }
 
-// openExistingDatabase opens an existing database with bbolt and verifies,
-// after the open, that its path still names the same file that was validated
-// as a regular, singly linked, privately secured file, and that its DACL is
-// still private (a newly published file included).
+// openExistingDatabase opens an existing database with bbolt through the one
+// handle that was validated as a regular, singly linked, privately secured,
+// non-reparse file. There is no window between validation and bbolt in which
+// the path could be redirected: bbolt receives the validated descriptor via
+// Options.OpenFile and never resolves the name itself. After bbolt has locked
+// the file, the name is checked once more to still identify that same file.
 func openExistingDatabase(path string) (*Journal, error) {
-	before, err := openValidatedDB(path)
+	file, info, missing, err := openValidatedDB(path)
 	if err != nil {
 		return nil, err
 	}
-	db, err := bolt.Open(path, 0o600, &bolt.Options{NoSync: false, Timeout: lockTimeout})
+	if missing {
+		return nil, fmt.Errorf("%w: database file %s does not exist", ErrInvalid, path)
+	}
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			_ = file.Close()
+		}
+	}()
+	db, err := bolt.Open(path, 0o600, &bolt.Options{
+		NoSync:  false,
+		Timeout: lockTimeout,
+		OpenFile: func(name string, flag int, perm os.FileMode) (*os.File, error) {
+			// bbolt opens the located database once, read-write. The
+			// validated handle already names that file, so any other name is
+			// a bug, never a fallback to a fresh name lookup. bbolt in write
+			// mode always adds O_CREATE to O_RDWR; here it is declarative
+			// only, because the file exists and this returns it unchanged
+			// rather than creating or resolving a second handle. A truncate
+			// request is rejected.
+			if name != path || flag&os.O_TRUNC != 0 || flag&(os.O_WRONLY|os.O_RDWR) != os.O_RDWR {
+				return nil, fmt.Errorf("%w: database file %s: unexpected reopen %q with flags 0x%x",
+					ErrInvalid, path, name, flag)
+			}
+			handedOff = true
+			return file, nil
+		},
+	})
 	if err != nil {
+		// A handing-off OpenFile has already given ownership to bbolt, which
+		// closes the file itself when it gives up.
 		if errors.Is(err, bolt.ErrTimeout) {
 			return nil, fmt.Errorf("%w: %w", ErrLocked, err)
 		}
 		return nil, fmt.Errorf("vault file journal: open: %w", err)
 	}
-	if err := verifyDBFile(path, before); err != nil {
+	if err := verifyDBPathIdentity(path, info); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
