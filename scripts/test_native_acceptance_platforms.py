@@ -1021,6 +1021,83 @@ class MacAdapterTests(unittest.TestCase):
             api=FakeMacApi(windows_list=[dict(WINDOW_RAW, title=native)])), document())
         self.assertEqual(result["window"], "0x200003")
 
+    def real_quartz_api(self, ax_value):
+        """Real QuartzApi.list_windows over fake CG entries and one AX window.
+
+        The CG window has an empty CGWindowName, so list_windows must take its
+        AX fallback (QuartzApi._ax_title -> QuartzApi.title), whose raw AXTitle
+        is ``ax_value``.
+        """
+        cg_entry = {"layer": 0, "pid": WINDOW_RAW["pid"], "number": WINDOW_RAW["id"],
+                    "name": "", "bounds": {"X": 100, "Y": 100, "Width": 800, "Height": 600}}
+        ax_window = {"title": ax_value}
+        queried = []
+
+        def copy_attribute(element, name, out):
+            queried.append(name)
+            if name in ("AXValue", "AXSelectedText", "AXRole", "AXChildren"):
+                raise AssertionError("forbidden accessibility attribute requested: " + name)
+            if name == "AXWindows":
+                return 0, [ax_window]
+            return 0, {"AXTitle": ax_window["title"]}.get(name)
+
+        quartz = types.SimpleNamespace(
+            kCGWindowListOptionOnScreenOnly=1, kCGWindowListExcludeDesktopElements=16,
+            kCGNullWindowID=0, kCGWindowLayer="layer", kCGWindowOwnerPID="pid",
+            kCGWindowNumber="number", kCGWindowBounds="bounds", kCGWindowName="name",
+            CGWindowListCopyWindowInfo=lambda options, identifier: [dict(cg_entry)])
+        ax = types.SimpleNamespace(
+            kAXWindowsAttribute="AXWindows",
+            AXUIElementCreateApplication=lambda pid: ax_window,
+            AXUIElementCopyAttributeValue=copy_attribute)
+        api = macos.QuartzApi(quartz=quartz, appkit=types.SimpleNamespace(), ax=ax)
+        api.process = lambda pid: (WINDOW_RAW["executable"], True)
+        return api, queried
+
+    def test_ax_fallback_title_is_exact_str_for_exact_find_window(self):
+        native = NativeNSString(TITLE)
+        api, queried = self.real_quartz_api(native)
+        # The raw AX (and raw CG fallback) title is the native subclass only.
+        self.assertIs(type(api.title(api.windows(WINDOW_RAW["pid"])[0])), str)
+        raw = api.list_windows()
+        self.assertEqual(len(raw), 1)
+        self.assertIs(type(raw[0]["title"]), str)
+        self.assertEqual(raw[0]["title"], TITLE)
+        self.assertEqual(set(queried), {"AXWindows", "AXTitle"},
+                         "only the AX window list and its AXTitle are read")
+        adapter = macos.MacAdapter(api=api)
+        window = contract.find_window({"title": TITLE, "title_prefix": None, "executable": EXE},
+                                      adapter, contract.Budget())
+        self.assertIs(type(window["title"]), str)
+        self.assertEqual(window["executable"], EXE)
+        self.assertEqual((window["id"], window["pid"]), (WINDOW_RAW["id"], WINDOW_RAW["pid"]))
+
+    def test_non_string_ax_fallback_fails_closed_at_real_list_windows(self):
+        class HostileValue(object):
+            def __str__(self):
+                raise AssertionError("arbitrary str() was called")
+
+            def __eq__(self, other):
+                raise AssertionError("hostile AX value was compared")
+
+            def __bool__(self):
+                raise AssertionError("hostile AX value was tested for truth")
+
+        for value in (HostileValue(), 7, b"Locklark", ["Locklark"], None):
+            with self.subTest(value=type(value).__name__):
+                api, _ = self.real_quartz_api(value)
+                adapter = macos.MacAdapter(api=api)
+                windows_seen = adapter.list_windows()
+                self.assertEqual(windows_seen[0]["title"], "")
+                self.assertIs(type(windows_seen[0]["title"]), str)
+                self.assertFalse(contract.title_matches({"title": TITLE, "title_prefix": None},
+                                                        windows_seen[0]))
+                with patch.object(contract, "DISCOVER_TIMEOUT", 0):
+                    with self.assertRaises(contract.ContractError) as error:
+                        contract.find_window({"title": TITLE, "title_prefix": None,
+                                              "executable": EXE}, adapter, contract.Budget())
+                self.assertEqual(error.exception.code, "window-timeout")
+
     def test_non_string_native_title_keeps_safe_empty_title(self):
         class Hostile(object):
             def __str__(self):

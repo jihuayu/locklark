@@ -82,6 +82,21 @@ class AxValueUnavailable(Exception):
     """AX returned no usable geometry; the caller must fail closed."""
 
 
+def _native_text(value):
+    """Exact built-in ``str`` copy of a string-compatible value, else "".
+
+    PyObjC surfaces Quartz/AX NSString titles as ``objc.pyobjc_unicode``, a
+    ``str`` subclass that compares equal to the expected title but fails the
+    shared contract's ``type(title) is str`` check. Only genuine string
+    instances are copied into an exact ``str`` via ``str.__str__`` (which never
+    dispatches to a subclass override); every other value keeps a safe empty
+    string and arbitrary ``str()`` is never called.
+    """
+    if isinstance(value, str):
+        return str.__str__(value)
+    return ""
+
+
 class QuartzApi:
     """Real ApplicationServices (AX) + CoreGraphics (Quartz) access on macOS.
 
@@ -185,10 +200,16 @@ class QuartzApi:
         return list(value) if value else []
 
     def title(self, element):
+        """Exact built-in ``str`` AX title/description; never a native subclass.
+
+        A native string-compatible value is copied to exact ``str`` before it
+        is returned so the ``list_windows`` AX fallback reaches MacAdapter
+        already type-exact. Anything else is dropped, not coerced.
+        """
         for name in ("AXTitle", "AXDescription"):
-            value = self.attribute(element, name)
-            if type(value) is str and value:
-                return value
+            text = _native_text(self.attribute(element, name))
+            if text:
+                return text
         return ""
 
     # -- widget walk --------------------------------------------------------
@@ -664,18 +685,8 @@ class MacAdapter:
 
     @staticmethod
     def _native_title(value):
-        """Exact built-in ``str`` title, or "" for anything not string-compatible.
-
-        PyObjC surfaces Quartz/AX NSString titles as ``objc.pyobjc_unicode``,
-        a ``str`` subclass that compares equal to the expected title but fails
-        the shared contract's ``type(title) is str`` check. Only genuine string
-        instances are copied into an exact ``str`` via ``str.__str__`` (which
-        never dispatches to a subclass override); every other value keeps a
-        safe empty title and arbitrary ``str()`` is never called.
-        """
-        if isinstance(value, str):
-            return str.__str__(value)
-        return ""
+        """Exact built-in ``str`` title, or "" for anything not string-compatible."""
+        return _native_text(value)
 
     def _normalise(self, raw):
         def text(value):
