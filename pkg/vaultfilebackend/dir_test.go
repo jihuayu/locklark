@@ -2005,6 +2005,17 @@ func TestDirHelperProcess(t *testing.T) {
 			fmt.Printf("error:%v\n", err)
 			os.Exit(3)
 		}
+	case "create":
+		err := d.CreateIfAbsent(ctx, name, value)
+		switch {
+		case err == nil:
+			fmt.Printf("win:%s\n", value)
+		case errors.Is(err, ErrConflict):
+			fmt.Println("conflict")
+		default:
+			fmt.Printf("error:%v\n", err)
+			os.Exit(3)
+		}
 	case "stage-crash":
 		f, release, err := d.lockHandle(ctx)
 		if err != nil {
@@ -2410,6 +2421,60 @@ func TestDirCrossProcessReplaceSingleWinner(t *testing.T) {
 	}
 	if err := b.ReplaceIfVersion(ctx, "n", cur.Revision, []byte("stale")); !errors.Is(err, ErrConflict) {
 		t.Fatalf("stale revision after race = %v, want ErrConflict", err)
+	}
+}
+
+// Separate processes race CreateIfAbsent for one name that is absent from the
+// same directory: exactly one commits its own bytes, every other must see
+// ErrConflict, and the committed bytes and revision are the winner's. A create
+// retried after the race conflicts and cannot overwrite what was committed.
+func TestDirCrossProcessCreateIfAbsentSingleWinner(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	b := openAt(t, root).(*Dir)
+	if _, err := b.Read(ctx, "n"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("read of the absent name = %v, want ErrNotFound", err)
+	}
+
+	const writers = 6
+	procs := make([]*helperProc, writers)
+	for i := range procs {
+		procs[i] = startDirHelper(t, "create", root, "n", "", fmt.Sprintf("created-by-%d", i))
+	}
+	wins := 0
+	winner := ""
+	for i, p := range procs {
+		line := p.line(t)
+		switch {
+		case line == "conflict":
+		case strings.HasPrefix(line, "win:"):
+			wins++
+			winner = strings.TrimPrefix(line, "win:")
+			if want := fmt.Sprintf("created-by-%d", i); winner != want {
+				t.Fatalf("helper %d reported %q, want %q", i, winner, want)
+			}
+		default:
+			t.Fatalf("helper %d line = %q", i, line)
+		}
+	}
+	for _, p := range procs {
+		p.finish(t)
+	}
+	if wins != 1 {
+		t.Fatalf("wins = %d, want exactly 1", wins)
+	}
+	got := mustRead(t, b, "n")
+	if string(got.Bytes) != winner {
+		t.Fatalf("committed = %q, want winner %q", got.Bytes, winner)
+	}
+	if got.Revision == "" || !validExpectedRevision(got.Revision) {
+		t.Fatalf("committed revision = %q, want a non-zero revision", got.Revision)
+	}
+	if err := b.CreateIfAbsent(ctx, "n", []byte("retry")); !errors.Is(err, ErrConflict) {
+		t.Fatalf("create retry after race = %v, want ErrConflict", err)
+	}
+	if after := mustRead(t, b, "n"); string(after.Bytes) != winner || after.Revision != got.Revision {
+		t.Fatalf("retry changed the committed version: %q rev-changed=%v", after.Bytes, after.Revision != got.Revision)
 	}
 }
 
