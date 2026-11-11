@@ -26,6 +26,13 @@
 //   - VerifyBinding(context, expected) recomputes the binding on this
 //     connection and compares it with expected in constant time, returning
 //     ErrBindingMismatch on mismatch.
+//   - ExportBindingContext(ctx) and VerifyBindingContext(ctx, expected) are
+//     the typed forms of the two methods above. They canonical-encode a
+//     pkg/remoteunlock.ChannelBindingContext with
+//     remoteunlock.EncodeChannelBindingContext and delegate to
+//     ExportBinding / VerifyBinding with those bytes; an invalid ctx returns
+//     the public codec error (wrapping remoteunlock.ErrInvalidContext) and
+//     otherwise every Channel refusal is unchanged.
 //
 // Close marks the Channel closed before closing the underlying connection. A
 // closed Channel cannot export or verify bindings: although a closed TLS
@@ -61,10 +68,14 @@
 // request state or one-shot consumption, vault-key (VUK) handling or any
 // decryption, nor the rest of the full #127 integration, and it makes no claim
 // that #127 is complete. The context passed to ExportBinding and
-// VerifyBinding is opaque to this package; it is expected to carry the
-// canonical encoding of the request summary, pair/lock generation,
-// vault/epoch/policy and deadline, but that encoding is defined by the caller,
-// not here. A binding is only meaningful for the connection it was derived
-// from, so a verifier must recompute it on the channel that carried the
-// request.
+// VerifyBinding is opaque to this package and is used as raw bytes. The typed
+// ExportBindingContext and VerifyBindingContext do not define an encoding
+// either: they only call the public pkg/remoteunlock canonical codec and pass
+// its bytes to the opaque methods, so encoding is implemented in exactly one
+// place. A binding is only meaningful for the connection it was derived from,
+// so a verifier must recompute it on the channel that carried the request.
+// Even then, a binding (typed or opaque) only ties context bytes to this
+// connection: it does not verify the request, device identity, signatures,
+// pairing, membership or policy, does not check the deadline or expiry,
+// does not consume one-shot request state, and does not handle VUK delivery.
 package remoteunlocktls

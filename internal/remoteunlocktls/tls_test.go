@@ -16,6 +16,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jihuayu/locklark/pkg/remoteunlock"
 )
 
 const (
@@ -835,5 +837,246 @@ func TestBindingRejectsContextMutation(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// typedTestContext is a synthetic in-memory binding context for the typed
+// convenience-method tests. It is TEST DATA ONLY: it names no real request,
+// pairing, member, vault or policy, and the test certificates used alongside
+// it are anonymous synthetic keys. A valid encoding or a matching binding
+// proves nothing about identity, membership, policy or authorization.
+func typedTestContext() remoteunlock.ChannelBindingContext {
+	var requestDigest, policyDigest [remoteunlock.DigestSize]byte
+	for i := range requestDigest {
+		requestDigest[i] = byte(i)
+		policyDigest[i] = byte(remoteunlock.DigestSize - 1 - i)
+	}
+	return remoteunlock.ChannelBindingContext{
+		RequestID:      "req-typed-test",
+		RequestDigest:  requestDigest,
+		PairID:         "pair-typed-test",
+		PairGeneration: 0, // explicit genesis
+		LockGeneration: 4,
+		MemberID:       "member-typed-test",
+		SourceDeviceID: "device-source-test",
+		TargetDeviceID: "device-target-test",
+		VaultID:        "vault-typed-test",
+		KeyEpoch:       3,
+		PolicySeq:      0, // explicit genesis
+		PolicyDigest:   policyDigest,
+		DeadlineUnixMS: 1800000000000,
+	}
+}
+
+// typedTestChannels performs one loopback mTLS handshake with the synthetic
+// in-memory PKI and returns both Channels.
+func typedTestChannels(t *testing.T) (client, server *Channel) {
+	t.Helper()
+	ca := newTestCA(t)
+	serverCert, serverPin := ca.issue(t, 2, "server", []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, []string{testServerName})
+	clientCert, clientPin := ca.issue(t, 3, "client", []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, nil)
+	clientGot, serverGot := runHandshakes(t,
+		ClientOptions{
+			ServerName:  testServerName,
+			Roots:       ca.pool,
+			Certificate: clientCert,
+			ServerPin:   serverPin,
+		},
+		ServerOptions{
+			Roots:       ca.pool,
+			Certificate: serverCert,
+			ClientPin:   clientPin,
+		},
+	)
+	return mustChannel(t, "ClientHandshake", clientGot), mustChannel(t, "ServerHandshake", serverGot)
+}
+
+// TestExportBindingContextMatchesOpaqueMethods asserts the typed methods encode
+// with the public canonical codec and delegate unchanged to the opaque
+// methods: client and server typed exports for the same synthetic context
+// match across peers, each peer verifies the other's typed export, and the
+// typed and opaque bindings are byte-identical.
+func TestExportBindingContextMatchesOpaqueMethods(t *testing.T) {
+	client, server := typedTestChannels(t)
+	ctx := typedTestContext()
+
+	encoded, err := remoteunlock.EncodeChannelBindingContext(ctx)
+	if err != nil {
+		t.Fatalf("EncodeChannelBindingContext: %v", err)
+	}
+
+	clientTyped, err := client.ExportBindingContext(ctx)
+	if err != nil {
+		t.Fatalf("client ExportBindingContext: %v", err)
+	}
+	serverTyped, err := server.ExportBindingContext(ctx)
+	if err != nil {
+		t.Fatalf("server ExportBindingContext: %v", err)
+	}
+	if len(clientTyped) != ChannelBindingSize {
+		t.Fatalf("client typed export length = %d, want %d", len(clientTyped), ChannelBindingSize)
+	}
+	if !bytes.Equal(clientTyped, serverTyped) {
+		t.Fatal("client and server typed exports for the same context differ")
+	}
+
+	// Cross-peer verification in both directions.
+	if err := server.VerifyBindingContext(ctx, clientTyped); err != nil {
+		t.Fatalf("server VerifyBindingContext of client typed export: %v", err)
+	}
+	if err := client.VerifyBindingContext(ctx, serverTyped); err != nil {
+		t.Fatalf("client VerifyBindingContext of server typed export: %v", err)
+	}
+
+	// The typed methods delegate to the opaque ones with the canonical bytes,
+	// so the two spellings are interchangeable on the same connection.
+	for name, ch := range map[string]*Channel{"client": client, "server": server} {
+		opaque, err := ch.ExportBinding(encoded)
+		if err != nil {
+			t.Fatalf("%s ExportBinding(canonical bytes): %v", name, err)
+		}
+		if !bytes.Equal(opaque, clientTyped) {
+			t.Errorf("%s ExportBinding(canonical bytes) differs from ExportBindingContext", name)
+		}
+		if err := ch.VerifyBinding(encoded, clientTyped); err != nil {
+			t.Errorf("%s VerifyBinding(canonical bytes, typed export): %v", name, err)
+		}
+		if err := ch.VerifyBindingContext(ctx, opaque); err != nil {
+			t.Errorf("%s VerifyBindingContext(opaque export): %v", name, err)
+		}
+	}
+}
+
+// TestVerifyBindingContextRejectsMutation derives the typed binding for a
+// synthetic context and asserts that changing exactly one field rejects the
+// old binding with ErrBindingMismatch on both peers, while the unchanged
+// context still verifies.
+func TestVerifyBindingContextRejectsMutation(t *testing.T) {
+	client, server := typedTestChannels(t)
+	base := typedTestContext()
+
+	clientBinding, err := client.ExportBindingContext(base)
+	if err != nil {
+		t.Fatalf("client ExportBindingContext: %v", err)
+	}
+	serverBinding, err := server.ExportBindingContext(base)
+	if err != nil {
+		t.Fatalf("server ExportBindingContext: %v", err)
+	}
+
+	var otherDigest [remoteunlock.DigestSize]byte
+	otherDigest[0] = 0xff
+
+	mutations := []struct {
+		name   string
+		mutate func(*remoteunlock.ChannelBindingContext)
+	}{
+		{"request_id", func(c *remoteunlock.ChannelBindingContext) { c.RequestID += "-other" }},
+		{"request_digest", func(c *remoteunlock.ChannelBindingContext) { c.RequestDigest = otherDigest }},
+		{"pair_id", func(c *remoteunlock.ChannelBindingContext) { c.PairID += "-other" }},
+		{"pair_generation", func(c *remoteunlock.ChannelBindingContext) { c.PairGeneration++ }},
+		{"lock_generation", func(c *remoteunlock.ChannelBindingContext) { c.LockGeneration++ }},
+		{"member_id", func(c *remoteunlock.ChannelBindingContext) { c.MemberID += "-other" }},
+		{"source_device_id", func(c *remoteunlock.ChannelBindingContext) { c.SourceDeviceID += "-other" }},
+		{"target_device_id", func(c *remoteunlock.ChannelBindingContext) { c.TargetDeviceID += "-other" }},
+		{"vault_id", func(c *remoteunlock.ChannelBindingContext) { c.VaultID += "-other" }},
+		{"key_epoch", func(c *remoteunlock.ChannelBindingContext) { c.KeyEpoch++ }},
+		{"policy_seq", func(c *remoteunlock.ChannelBindingContext) { c.PolicySeq++ }},
+		{"policy_digest", func(c *remoteunlock.ChannelBindingContext) { c.PolicyDigest = otherDigest }},
+		{"deadline_unix_ms", func(c *remoteunlock.ChannelBindingContext) { c.DeadlineUnixMS++ }},
+	}
+
+	for _, tc := range mutations {
+		t.Run(tc.name, func(t *testing.T) {
+			mutated := base
+			tc.mutate(&mutated)
+			if mutated == base {
+				t.Fatalf("%s mutation did not change the context", tc.name)
+			}
+			if b, err := client.ExportBindingContext(mutated); err != nil {
+				t.Fatalf("ExportBindingContext(mutated %s) = (%d bytes, %v), want a distinct binding", tc.name, len(b), err)
+			}
+
+			for _, peer := range []struct {
+				name string
+				ch   *Channel
+				got  []byte
+			}{
+				{name: "client", ch: client, got: serverBinding},
+				{name: "server", ch: server, got: clientBinding},
+			} {
+				if err := peer.ch.VerifyBindingContext(mutated, peer.got); !errors.Is(err, ErrBindingMismatch) {
+					t.Errorf("%s VerifyBindingContext(%s-mutated, peer binding) = %v, want ErrBindingMismatch", peer.name, tc.name, err)
+				}
+				if err := peer.ch.VerifyBindingContext(base, peer.got); err != nil {
+					t.Errorf("%s VerifyBindingContext(unchanged, peer binding) = %v, want nil", peer.name, err)
+				}
+			}
+		})
+	}
+}
+
+// TestBindingContextInvalidRejectedByCodec asserts an invalid typed context is
+// refused with the public codec error, wrapped so errors.Is finds
+// remoteunlock.ErrInvalidContext, before the Channel is consulted.
+func TestBindingContextInvalidRejectedByCodec(t *testing.T) {
+	client, server := typedTestChannels(t)
+	valid := typedTestContext()
+
+	invalid := []struct {
+		name   string
+		mutate func(*remoteunlock.ChannelBindingContext)
+	}{
+		{"empty_request_id", func(c *remoteunlock.ChannelBindingContext) { c.RequestID = "" }},
+		{"zero_key_epoch", func(c *remoteunlock.ChannelBindingContext) { c.KeyEpoch = 0 }},
+		{"zero_deadline", func(c *remoteunlock.ChannelBindingContext) { c.DeadlineUnixMS = 0 }},
+		{"negative_deadline", func(c *remoteunlock.ChannelBindingContext) { c.DeadlineUnixMS = -1 }},
+		{"invalid_identifier", func(c *remoteunlock.ChannelBindingContext) { c.VaultID = "Vault With Spaces" }},
+	}
+
+	var zero Channel
+	for _, tc := range invalid {
+		t.Run(tc.name, func(t *testing.T) {
+			bad := valid
+			tc.mutate(&bad)
+			_, wantErr := remoteunlock.EncodeChannelBindingContext(bad)
+			if !errors.Is(wantErr, remoteunlock.ErrInvalidContext) {
+				t.Fatalf("test setup: codec error = %v, want remoteunlock.ErrInvalidContext", wantErr)
+			}
+
+			for name, ch := range map[string]*Channel{"client": client, "server": server, "zero": &zero} {
+				if b, err := ch.ExportBindingContext(bad); !errors.Is(err, remoteunlock.ErrInvalidContext) {
+					t.Errorf("%s ExportBindingContext = (%d bytes, %v), want remoteunlock.ErrInvalidContext", name, len(b), err)
+				} else if err.Error() != wantErr.Error() {
+					t.Errorf("%s ExportBindingContext error = %q, want the codec error %q", name, err, wantErr)
+				}
+				if err := ch.VerifyBindingContext(bad, make([]byte, ChannelBindingSize)); !errors.Is(err, remoteunlock.ErrInvalidContext) {
+					t.Errorf("%s VerifyBindingContext = %v, want remoteunlock.ErrInvalidContext", name, err)
+				} else if err.Error() != wantErr.Error() {
+					t.Errorf("%s VerifyBindingContext error = %q, want the codec error %q", name, err, wantErr)
+				}
+			}
+		})
+	}
+}
+
+// TestBindingContextClosedChannel asserts the typed methods share the opaque
+// methods' closed-channel refusal on an otherwise valid context.
+func TestBindingContextClosedChannel(t *testing.T) {
+	client, server := typedTestChannels(t)
+	ctx := typedTestContext()
+
+	binding, err := server.ExportBindingContext(ctx)
+	if err != nil {
+		t.Fatalf("server ExportBindingContext: %v", err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("client Close: %v", err)
+	}
+	if b, err := client.ExportBindingContext(ctx); !errors.Is(err, ErrChannelClosed) {
+		t.Fatalf("client ExportBindingContext after Close = (%d bytes, %v), want ErrChannelClosed", len(b), err)
+	}
+	if err := client.VerifyBindingContext(ctx, binding); !errors.Is(err, ErrChannelClosed) {
+		t.Fatalf("client VerifyBindingContext after Close = %v, want ErrChannelClosed", err)
 	}
 }

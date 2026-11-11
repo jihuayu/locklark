@@ -148,11 +148,11 @@ func (c *Channel) Check() error {
 // completed, non-resumed TLS 1.3 handshake with the pinned peer, and an empty
 // context.
 //
-// context is opaque to this package. It is reserved for the future canonical
-// encoding of the request summary, pair/lock generation, vault/epoch/policy
-// and deadline; that encoding is defined by the caller, not here. Because the
-// context is mandatory, a binding for an empty context can never be produced
-// silently.
+// context is opaque to this package; these methods accept and return raw
+// bytes unchanged. Callers that hold a remoteunlock.ChannelBindingContext
+// should use ExportBindingContext, which passes the canonical public codec
+// output to this method. Because the context is mandatory, a binding for an
+// empty context can never be produced silently.
 //
 // A binding is only meaningful for the connection it was derived from. A
 // verifier must recompute it on the channel that carried the request (see
@@ -191,7 +191,8 @@ func (c *Channel) VerifyBinding(context, expected []byte) error {
 }
 
 // Close marks the Channel closed and then closes the underlying connection.
-// After a successful Close, Check, ExportBinding and VerifyBinding fail with
+// After a successful Close, Check, ExportBinding, VerifyBinding,
+// ExportBindingContext and VerifyBindingContext fail with
 // ErrChannelClosed even though the closed TLS connection would still allow
 // keying material to be exported. Closing an already closed (or
 // uninitialized) Channel returns net.ErrClosed.
