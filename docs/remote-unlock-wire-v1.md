@@ -1064,6 +1064,56 @@ proves no signed identity or policy, authorizes no VUK use, and delivers, stores
 or exposes no key material. A `received` status is a local bookkeeping fact, not
 evidence that a VUK was authorized or delivered.
 
+## Loopback composition smoke (test-only)
+
+`internal/remoteunlocktls/composition_test.go` carries one isolated positive
+composition checkpoint, `TestLoopbackPositiveCompositionSmoke`. It is a test,
+not a production integration, and it does not change any frame, byte, member or
+verification rule in this document.
+
+The test performs a real concurrent `ClientHandshake`/`ServerHandshake` over an
+owned `127.0.0.1:0` loopback TCP pair, requires TLS 1.3 without resumption and
+passes `Channel.Check` on both sides. It builds a synthetic but structurally
+valid sealed `vaultfile.File` whose caller-pinned current `PolicyCheckpoint`
+passes `vaultfile.VerifyPolicyCheckpoint`; the policy lists the requester with
+its existing reader role, an admin delegate device, and the requester's source
+and target endpoint devices. All owner-root, content-signing and policy-signing
+Ed25519 keys and all per-device age X25519 identities are independently
+generated synthetic values, and the source and target bindings carry the actual
+verified peer leaf SPKIs from the live handshake.
+
+One canonical reusable `OwnerRootAdminRemoteUnlockDelegation` is signed by the
+synthetic owner root exactly once and reused byte-identically for two fresh
+request contexts that differ in `request_id`, `request_digest` and
+`lock_generation`. The delegated admin device's policy signing key -- not the
+owner root and not its content signing key -- signs a fresh
+`AdminRemoteUnlockAuthorization` for each context. Over the established channel,
+the server parses the public codecs, verifies the request exporter with
+`VerifyBindingContext`, verifies the source peer binding against the channel's
+verified peer SPKI with the current-policy content key through
+`VerifyPeerDeviceTransportBinding`, and calls
+`VerifyAdminRemoteUnlockAuthorization`; the client performs the matching target
+peer binding check. Both requests pass under the one root grant without a
+second root signing step.
+
+For the first request only, the server then uses `vaultfile.SealVUKForDevice`
+with the source PC's policy-bound age recipient and writes exactly that bounded
+ciphertext to the channel; the source PC reads it and opens it with
+`vaultfile.OpenVUKForDevice` using independent expected vault, epoch,
+source-device and recipient inputs and the source identity, compares all 32 VUK
+bytes, and clears the caller-owned plaintext/VUK buffers. The second request
+receives no VUK. The requester's process-local lifecycle moves requested →
+confirmed → received on the first request, and a second local `Receive` is
+rejected with `ErrLifecycleTransition` with no VUK bytes. That lifecycle is
+memory-only: the test claims no restart or durable anti-rollback behavior.
+
+The length-prefixed request, approval and VUK frames used by this test are
+private test-only helpers. They are not a product wire protocol and must not be
+implemented as one; the v1 production framing contract above is unchanged.
+This smoke has no failure matrix (no wrong key, SPKI, device, member, context,
+expiry, cancellation, restart, stale policy or replay case) and is not evidence
+that #127, #129 or #130 is complete.
+
 ## Scope boundary
 
 This document defines two owner-root-signed objects -- the per-request
