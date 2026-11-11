@@ -2397,11 +2397,9 @@ class SourceHygieneTests(unittest.TestCase):
                                      "%s contains %s" % (module.__name__, token))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
-FRACTIONAL_CONTROL = {"x": 200.5, "y": 300.25, "width": 80.5, "height": 30.5}
+# Wholly inside MEASURED_CG (x 313..1415, y 75..897), as the real QuartzApi
+# reports a control: fractional, non-integral origin and extent.
+FRACTIONAL_CONTROL = {"x": 400.5, "y": 300.25, "width": 80.5, "height": 30.5}
 
 
 class MacFractionalGeometryTests(unittest.TestCase):
@@ -2412,7 +2410,13 @@ class MacFractionalGeometryTests(unittest.TestCase):
     receipt must both be the exact geometric centre of the control.
     """
 
-    CENTRE = (240.75, 315.5)  # 200.5 + 80.5 / 2, 300.25 + 30.5 / 2 (true division)
+    CENTRE = (440.75, 315.5)  # 400.5 + 80.5 / 2, 300.25 + 30.5 / 2 (true division)
+
+    @staticmethod
+    def window():
+        # The fake window client is the actual CG bounds the identity is
+        # proved against: QuartzApi.list_windows makes client a copy of bounds.
+        return measured_window(bounds=dict(MEASURED_CG), client=dict(MEASURED_CG))
 
     def tree(self, control=None, window=None):
         selected = ax_window(frame=MEASURED_AX, focused=True)
@@ -2426,7 +2430,7 @@ class MacFractionalGeometryTests(unittest.TestCase):
 
     def api(self, tree_windows, hit=None):
         fixture = self.fixture = MacWindowIdentityTests()  # fresh per graph
-        api = fixture.identity_api(list(tree_windows), measured_window())
+        api = fixture.identity_api(list(tree_windows), self.window())
         api.quartz = FakeQuartzEvents()
         # The shared fixture stubs input on the graph; the real QuartzApi
         # methods must run instead, with the real posting loop bound to this
@@ -2491,6 +2495,20 @@ class MacFractionalGeometryTests(unittest.TestCase):
 
     def test_fractional_control_fits_the_window_and_clicks_its_exact_centre(self):
         api = self.api(self.tree())
+        window = api.window_list[0]
+        # The fake window client is the exact CG bounds used for identity and
+        # the fractional control lies wholly inside those bounds.
+        self.assertEqual(window["bounds"], dict(MEASURED_CG))
+        self.assertEqual(window["client"], dict(MEASURED_CG))
+        self.assertEqual(macos._frame_relation(api.selected["frame"], window["bounds"]), "border-inset")
+        left, top = window["client"]["x"], window["client"]["y"]
+        right = left + window["client"]["width"]
+        bottom = top + window["client"]["height"]
+        self.assertTrue(left <= FRACTIONAL_CONTROL["x"] and
+                        top <= FRACTIONAL_CONTROL["y"] and
+                        FRACTIONAL_CONTROL["x"] + FRACTIONAL_CONTROL["width"] <= right and
+                        FRACTIONAL_CONTROL["y"] + FRACTIONAL_CONTROL["height"] <= bottom)
+        self.assertTrue(contract.rect_within(FRACTIONAL_CONTROL, window["client"]))
         result = self.execute(api)
         self.assertEqual(api.control_rects, [FRACTIONAL_CONTROL])
         # The window-root hit test and the strict control hit test both query
@@ -2504,22 +2522,31 @@ class MacFractionalGeometryTests(unittest.TestCase):
                           FakeQuartzEvents.kCGEventLeftMouseUp])
         recorded = result["clicks"][0]
         self.assertEqual((recorded["x"], recorded["y"]), self.CENTRE)
-        self.assertEqual(recorded["x"], 200.5 + 80.5 / 2)  # exact fraction, no floor
+        self.assertEqual(recorded["x"], 400.5 + 80.5 / 2)  # exact fraction, no floor
+        self.assertEqual(recorded["y"], 300.25 + 30.5 / 2)
+        self.assertIs(type(recorded["x"]), float)
+        self.assertEqual(recorded["label"], LABEL)
+        self.assertEqual(recorded["window"], hex(WINDOW_RAW["id"]))
         self.assertEqual(recorded["evidence"], "posted")
+        self.assertEqual(recorded["ack"], {"move": True, "down": True, "up": True})
         self.assertEqual(result["window"], hex(WINDOW_RAW["id"]))
+        # The real root/hit walks and the real identity check ran for it.
+        self.assertEqual(api.focus_reads, [WINDOW_RAW["id"], WINDOW_RAW["id"]])
+        self.assertIs(api.window_element(dict(window)), api.selected)
 
     def test_fractional_odd_and_non_quarter_bounds_are_not_rounded(self):
         cases = (
+            # Every control lies wholly inside MEASURED_CG.
             ("integral-origin-fractional-extent",
-             {"x": 200.0, "y": 300.0, "width": 80.5, "height": 30.5}, (240.25, 315.25)),
+             {"x": 400.0, "y": 300.0, "width": 80.5, "height": 30.5}, (440.25, 315.25)),
             ("integral-floats-even-extent",
-             {"x": 200.0, "y": 300.0, "width": 80.0, "height": 30.0}, (240, 315)),
+             {"x": 400.0, "y": 300.0, "width": 80.0, "height": 30.0}, (440, 315)),
             ("fractional-origin-odd-extent",
-             {"x": 200.25, "y": 300.25, "width": 81.0, "height": 31.0}, (240.75, 315.75)),
+             {"x": 400.25, "y": 300.25, "width": 81.0, "height": 31.0}, (440.75, 315.75)),
             ("quarter-extents",
-             {"x": 200.25, "y": 300.75, "width": 80.5, "height": 30.5}, (240.5, 316.0)),
+             {"x": 400.25, "y": 300.75, "width": 80.5, "height": 30.5}, (440.5, 316.0)),
             ("eighth-centre",
-             {"x": 200.5, "y": 300.25, "width": 81.5, "height": 31.25}, (241.25, 315.875)))
+             {"x": 400.5, "y": 300.25, "width": 81.5, "height": 31.25}, (441.25, 315.875)))
         for name, control, centre in cases:
             with self.subTest(case=name):
                 api = self.api(self.tree(control=control))
@@ -2533,11 +2560,24 @@ class MacFractionalGeometryTests(unittest.TestCase):
                 self.assertEqual([type(value).__name__ for value in recorded], kinds)
 
     def test_integer_geometry_still_clicks_the_integer_centre(self):
-        api = self.api(self.tree(control=CONTROL["bounds"]))
+        # Plain ints wholly inside the measured CG client (x 313..1415,
+        # y 75..897) keep the historical odd-size floor centre.
+        api = self.api(self.tree(control={"x": 400, "y": 300, "width": 81, "height": 31}))
         result = self.execute(api)
-        self.assertEqual([event["point"] for event in api.quartz.posted], [(240, 315)] * 3)
-        self.assertEqual((result["clicks"][0]["x"], result["clicks"][0]["y"]), (240, 315))
+        self.assertEqual([event["point"] for event in api.quartz.posted], [(440, 315)] * 3)
+        self.assertEqual((result["clicks"][0]["x"], result["clicks"][0]["y"]), (440, 315))
         self.assertEqual([type(result["clicks"][0]["x"])], [int])
+
+    def test_integer_geometry_outside_the_measured_client_refuses(self):
+        # CONTROL["bounds"] {200,300,80,30} lies left of the measured CG client
+        # (x 313..1415), so a faithful window refuses it as off screen.
+        api = self.api(self.tree(control=dict(CONTROL["bounds"])))
+        self.assertFalse(contract.rect_within(api.selected["children"][0]["frame"],
+                                              api.window_list[0]["client"]))
+        with self.assertRaises(contract.ContractError) as error:
+            self.execute(api)
+        self.assertEqual(error.exception.code, "control-offscreen")
+        self.assertEqual(api.quartz.posted, [])
 
     def test_same_window_receipt_is_the_same_identity(self):
         api = self.api(self.tree())
@@ -2601,9 +2641,11 @@ class MacFractionalGeometryTests(unittest.TestCase):
 
     def test_control_outside_the_window_refuses_with_fractions(self):
         for control, code in (
-                ({"x": 1110.5, "y": 300.25, "width": 20.0, "height": 10.0}, "control-offscreen"),
-                ({"x": 1100.5, "y": 300.25, "width": 0.0, "height": 10.0}, "control-geometry"),
-                # Inside the window horizontally, but past its bottom edge.
+                # Past the CG right edge (313 + 1102 = 1415).
+                ({"x": 1410.5, "y": 300.25, "width": 20.0, "height": 10.0}, "control-offscreen"),
+                ({"x": 1400.5, "y": 300.25, "width": 0.0, "height": 10.0}, "control-geometry"),
+                # Inside the window horizontally, but past its bottom edge
+                # (75 + 822 = 897).
                 ({"x": 400.5, "y": 900.25, "width": 20.0, "height": 10.0}, "control-offscreen")):
             with self.subTest(control=control):
                 api = self.api(self.tree(control=control))
@@ -2687,3 +2729,7 @@ class Win32IntegerGeometryTests(unittest.TestCase):
                     api.click(*point)
                 self.assertEqual(error.exception.code, "control-offscreen")
         self.assertEqual(len(api.sent), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

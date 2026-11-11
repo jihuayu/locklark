@@ -385,20 +385,16 @@ def geometry_value(value):
 
     A plain ``int`` is kept as is.  A genuine built-in ``float`` must be finite;
     it is preserved exactly so a fractional macOS (CGFloat) coordinate is never
-    truncated into a near match.  A safe ``int`` subclass (for example a ctypes
-    field) is normalised with ``int.__int__``, which never dispatches to an
-    override.  ``bool``, every ``float`` subclass, any other numeric or hostile
-    subclass, strings and non-numeric values are not geometry.
+    truncated into a near match.  The built-in type check is exact: ``bool``,
+    every ``int``/``float`` subclass (whose comparison, addition or conversion
+    overrides could run later in ``rect_within`` or the click paths), strings
+    and non-numeric values are not geometry, and no method on them is called.
     """
     kind = type(value)
-    if kind is bool:
-        return None
     if kind is int:
         return value
     if kind is float:
         return value if math.isfinite(value) else None
-    if isinstance(value, int):
-        return int.__int__(value)
     return None
 
 
@@ -410,26 +406,33 @@ def _geometry(rect):
 
 
 def rect_positive(rect):
+    """True only for a rectangle of four plain ints/finite floats with positive extents."""
     values = _geometry(rect)
-    return (values is not None and
-            all(value is not None for value in values) and
-            values[2] > 0 and values[3] > 0)
+    if values is None or not all(type(value) in (int, float) for value in values):
+        return False
+    return values[2] > 0 and values[3] > 0
 
 
 def integer_rect(rect):
-    """The same rectangle with each value an exact plain ``int``, else None.
+    """The same rectangle as exact plain ``int`` values, else None.
 
-    Used only to hand geometry to APIs that require integers; every value must
-    already be integral (an integer or an integral finite float), and the int
-    conversion happens here, before the call.
+    Used only to hand geometry to APIs that require integers.  Every field must
+    be an exact built-in ``int`` or an integral finite built-in ``float``; a
+    fractional float is REFUSED (None) and is never truncated into a near match.
     """
     values = _geometry(rect)
-    if (values is None or not all(value is not None for value in values) or
-            values[2] <= 0 or values[3] <= 0):
+    if values is None or not all(type(value) in (int, float) for value in values):
         return None
-    if not all(type(value) is float or value == int(value) for value in values):
+    if values[2] <= 0 or values[3] <= 0:
         return None
-    return {key: int(value) for key, value in zip(("x", "y", "width", "height"), values)}
+    result = {}
+    for key, value in zip(("x", "y", "width", "height"), values):
+        if type(value) is float:
+            if not value.is_integer():
+                return None
+            value = int(value)
+        result[key] = value
+    return result
 
 
 def rect_within(inner, outer):
@@ -538,10 +541,9 @@ def select_control(adapter, window, label, budget):
         raise ContractError("control-hidden")
     rect = control.get("bounds")
     # The authorising rectangle carries only plain ints or finite built-in
-    # floats: its values feed the click-point arithmetic, so an int subclass
-    # is never used even though a window rectangle may be normalised.
-    if not rect_positive(rect) or any(type(rect.get(key)) not in (int, float)
-                                      for key in ("x", "y", "width", "height")):
+    # floats (rect_positive is exact-type), whose values feed the click-point
+    # arithmetic and the receipt.
+    if not rect_positive(rect):
         raise ContractError("control-geometry")
     frame = window.get("client") if rect_positive(window.get("client")) else window.get("bounds")
     if not rect_within(rect, frame):

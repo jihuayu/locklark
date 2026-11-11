@@ -902,40 +902,138 @@ class OutputSafetyTests(unittest.TestCase):
         self.assertIn("action=setup", line)
 
 
-if __name__ == "__main__":
-    unittest.main()
+HOSTILE_CALLS = []
 
 
-class HostileFloat(float):
-    """A float subclass whose every conversion would be visible to a test."""
+class HostileMixin:
+    """Every comparison, arithmetic, conversion or representation is recorded.
 
-    def __float__(self):
-        raise AssertionError("float() dispatch on hostile geometry")
+    If the contract ever used these values as geometry (normalising them into a
+    plain int, comparing or adding them in ``rect_within`` or the click
+    arithmetic), one of these methods would run; the tests assert none does.
+    """
 
-    def __int__(self):
-        raise AssertionError("int() dispatch on hostile geometry")
-
-
-class HostileInt(int):
-    """An int subclass whose every conversion would be visible to a test."""
-
-    def __float__(self):
-        raise AssertionError("float() dispatch on hostile geometry")
+    def __bool__(self):
+        HOSTILE_CALLS.append("__bool__")
+        return True
 
     def __int__(self):
-        raise AssertionError("int() dispatch on hostile geometry")
+        HOSTILE_CALLS.append("__int__")
+        return int.__int__(self)
+
+    def __index__(self):
+        HOSTILE_CALLS.append("__index__")
+        return int.__index__(self)
+
+    def __float__(self):
+        HOSTILE_CALLS.append("__float__")
+        return float.__float__(self)
+
+    def __complex__(self):
+        HOSTILE_CALLS.append("__complex__")
+        return complex(self)
+
+    def __trunc__(self):
+        HOSTILE_CALLS.append("__trunc__")
+        return int(self)
+
+    def __round__(self, ndigits=None):
+        HOSTILE_CALLS.append("__round__")
+        return 0
+
+    def __eq__(self, other):
+        HOSTILE_CALLS.append("__eq__")
+        return NotImplemented
+
+    def __ne__(self, other):
+        HOSTILE_CALLS.append("__ne__")
+        return NotImplemented
+
+    def __lt__(self, other):
+        HOSTILE_CALLS.append("__lt__")
+        return NotImplemented
+
+    def __le__(self, other):
+        HOSTILE_CALLS.append("__le__")
+        return NotImplemented
+
+    def __gt__(self, other):
+        HOSTILE_CALLS.append("__gt__")
+        return NotImplemented
+
+    def __ge__(self, other):
+        HOSTILE_CALLS.append("__ge__")
+        return NotImplemented
+
+    def __add__(self, other):
+        HOSTILE_CALLS.append("__add__")
+        return NotImplemented
+
+    def __radd__(self, other):
+        HOSTILE_CALLS.append("__radd__")
+        return NotImplemented
+
+    def __sub__(self, other):
+        HOSTILE_CALLS.append("__sub__")
+        return NotImplemented
+
+    def __rsub__(self, other):
+        HOSTILE_CALLS.append("__rsub__")
+        return NotImplemented
+
+    def __mul__(self, other):
+        HOSTILE_CALLS.append("__mul__")
+        return NotImplemented
+
+    def __floordiv__(self, other):
+        HOSTILE_CALLS.append("__floordiv__")
+        return NotImplemented
+
+    def __truediv__(self, other):
+        HOSTILE_CALLS.append("__truediv__")
+        return NotImplemented
+
+    def __hash__(self):
+        HOSTILE_CALLS.append("__hash__")
+        return 0
+
+    def __repr__(self):
+        HOSTILE_CALLS.append("__repr__")
+        return "Hostile"
+
+
+class HostileInt(HostileMixin, int):
+    """A positive integral int subclass with overridden comparison/addition."""
+
+
+class HostileIntNegative(HostileInt):
+    def __new__(cls, value):
+        return int.__new__(cls, -value)
+
+
+class HostileFloat(HostileMixin, float):
+    """A finite float subclass with overridden comparison/addition."""
 
 
 FRACTIONAL = {"x": 200.5, "y": 300.25, "width": 81.0, "height": 31.5}
 
 
 class GeometryValidationTests(unittest.TestCase):
-    """Shared rectangles: plain ints or finite built-in floats, nothing else."""
+    """Shared rectangles: exact built-in ints or finite built-in floats only."""
+
+    def setUp(self):
+        del HOSTILE_CALLS[:]
+
+    def hostile(self):
+        # Hostile int and float subclasses (positive, zero and negative
+        # ints, finite fractional and integral floats).
+        return [HostileInt(800), HostileInt(1), HostileInt(0), HostileIntNegative(800),
+                HostileFloat(800.5), HostileFloat(1.0), HostileFloat(0.0)]
 
     def window_with(self, value, key="width"):
-        # The adapter's own normalisation passes a hostile value through
-        # unchanged only when it is already a plain int/float; a hostile
-        # adapter must still never get it accepted by the shared contract.
+        # A hostile adapter hands the hostile value through unchanged (``dict``
+        # copies references, so no method of the value runs); the shared
+        # contract must still refuse it.
         window = dict(WINDOW, bounds=dict(WINDOW["bounds"], **{key: value}))
         adapter = SpyAdapter(windows=[window])
         adapter.list_windows = lambda: [dict(window)]
@@ -952,19 +1050,15 @@ class GeometryValidationTests(unittest.TestCase):
         self.assertEqual(adapter.control_hits,
                          [(WINDOW["id"], LABEL, dict(FRACTIONAL), 241.0, 316.0)])
 
-    def test_window_integral_float_and_int_subclass_values_are_safely_normalised(self):
-        for value, expected in ((800.0, 800), (HostileInt(800), 800)):
+    def test_geometry_value_is_exactly_the_builtin_value(self):
+        for value, expected in ((800, 800), (800.0, 800.0)):
             with self.subTest(value=value):
-                self.executed(self.window_with(value))
                 self.assertEqual(contract.geometry_value(value), expected)
-                if type(value) is not float:
-                    self.assertIs(type(contract.geometry_value(value)), int)
-                # Already-plain geometry is handed back unconverted.
-                self.assertEqual(contract.integer_rect(dict(WINDOW["bounds"])), WINDOW["bounds"])
+                self.assertIs(type(contract.geometry_value(value)), type(value))
 
     def test_geometry_rejects_bool_nonfinite_subclass_and_nonnumeric_values(self):
         malformed = [True, False, float("nan"), float("inf"), float("-inf"),
-                     HostileFloat(1.0), "1", None, [1], object()]
+                     "1", None, [1], object()] + self.hostile()
         for value in malformed:
             for key in ("x", "y", "width", "height"):
                 with self.subTest(value=value, key=key):
@@ -974,14 +1068,118 @@ class GeometryValidationTests(unittest.TestCase):
                     with self.assertRaises(contract.ContractError) as error:
                         self.executed(self.window_with(value, key))
                     self.assertEqual(error.exception.code, "window-geometry")
+        self.assertEqual(HOSTILE_CALLS, [])
+
+    def test_int_subclass_window_geometry_is_rejected_at_every_field(self):
+        for value in self.hostile():
+            for key in ("x", "y", "width", "height"):
+                with self.subTest(value=value, key=key):
+                    adapter = self.window_with(value, key)
+                    with self.assertRaises(contract.ContractError) as error:
+                        self.executed(adapter)
+                    self.assertEqual(error.exception.code, "window-geometry")
+                    self.assertEqual(self.clicks(adapter), [])
+        self.assertEqual(HOSTILE_CALLS, [])
 
     def test_control_geometry_rejects_every_non_plain_nonfinite_and_subclass_value(self):
-        for value in (True, float("nan"), float("inf"), "80", None,
-                      HostileFloat(80.0), HostileInt(81)):
+        for value in [True, float("nan"), float("inf"), float("-inf"), "80", None] + self.hostile():
             with self.subTest(value=value):
                 adapter = SpyAdapter(controls=[control(LABEL, bounds=dict(FRACTIONAL, width=value))])
                 self.assert_refused(adapter, "control-geometry")
         self.assert_refused(SpyAdapter(controls=[control(LABEL, bounds={})]), "control-geometry")
+        self.assertEqual(HOSTILE_CALLS, [])
+
+    def test_int_subclass_control_geometry_never_reaches_rect_within_or_click(self):
+        # A fractional control whose fields compare/add cleanly as plain values
+        # but whose subclass methods are hostile: a normalised copy would pass
+        # rect_within and the click path, so the exact-type check must refuse
+        # first, before any comparison, addition or conversion runs.
+        for value in self.hostile():
+            for key in ("x", "y", "width", "height"):
+                with self.subTest(value=value, key=key):
+                    adapter = SpyAdapter(controls=[control(LABEL, bounds=dict(FRACTIONAL, **{key: value}))])
+                    self.assert_refused(adapter, "control-geometry")
+                    self.assertNotIn("hit_test", adapter.calls)
+                    self.assertNotIn("hit_test_control", adapter.calls)
+        self.assertEqual(HOSTILE_CALLS, [])
+
+    def test_hostile_window_bounds_are_rejected_before_discovery(self):
+        # A hostile window-bound field is never geometry: discovery refuses.
+        for value in self.hostile():
+            for key in ("x", "y", "width", "height"):
+                with self.subTest(value=value, key=key):
+                    adapter = self.window_with(value, key)
+                    with self.assertRaises(contract.ContractError) as error:
+                        self.executed(adapter)
+                    self.assertEqual(error.exception.code, "window-geometry")
+                    self.assertEqual(self.clicks(adapter), [])
+        self.assertEqual(HOSTILE_CALLS, [])
+
+    def test_hostile_window_client_is_never_used_as_geometry(self):
+        # A hostile client rectangle is not geometry: rect_positive and
+        # rect_within refuse it, so the click paths fall back to the plain
+        # window bounds and never offset by the hostile value.
+        for value in self.hostile():
+            with self.subTest(value=value):
+                client = {"x": value, "y": 140, "width": 780, "height": 560}
+                self.assertFalse(contract.rect_positive(client))
+                self.assertFalse(contract.rect_within(FRACTIONAL, client))
+        self.assertEqual(HOSTILE_CALLS, [])
+        # The selected pointer click then reports the plain-bounds offset.
+        window = dict(WINDOW, client={"x": HostileInt(110), "y": 140,
+                                      "width": 780, "height": 560})
+        adapter = SpyAdapter(windows=[window])
+        result = self.executed(adapter, actions=[{"click": [10, 20]}])
+        self.assertEqual(self.clicks(adapter), [("click", 110, 120)])
+        self.assertEqual((result["clicks"][0]["x"], result["clicks"][0]["y"]), (110, 120))
+        # And no comparison, addition or conversion on the hostile value ran
+        # during discovery, authorisation, input or the receipt.
+        self.assertEqual(HOSTILE_CALLS, [])
+
+    def test_integer_rect_accepts_integral_and_rejects_fractional_values(self):
+        # Exact ints are handed back as ints; integral finite floats convert.
+        self.assertEqual(contract.integer_rect(dict(WINDOW["bounds"])), WINDOW["bounds"])
+        for key in ("x", "y", "width", "height"):
+            self.assertIs(type(contract.integer_rect(dict(WINDOW["bounds"]))[key]), int)
+        integral = {"x": 100.0, "y": 200.0, "width": 800.0, "height": 600.0}
+        result = contract.integer_rect(integral)
+        self.assertEqual(result, {"x": 100, "y": 200, "width": 800, "height": 600})
+        self.assertEqual([type(value) for value in result.values()], [int, int, int, int])
+        mixed = {"x": 100, "y": 200.0, "width": 801.0, "height": 600}
+        self.assertEqual(contract.integer_rect(mixed),
+                         {"x": 100, "y": 200, "width": 801, "height": 600})
+        # A fractional coordinate or extent is refused, never truncated.
+        for key in ("x", "y"):
+            with self.subTest(fractional=key):
+                rect = dict(integral, **{key: 100.5})
+                self.assertTrue(contract.rect_positive(rect))
+                self.assertIsNone(contract.integer_rect(rect))
+        for key in ("width", "height"):
+            with self.subTest(fractional=key):
+                rect = dict(integral, **{key: 800.25})
+                self.assertTrue(contract.rect_positive(rect))
+                self.assertIsNone(contract.integer_rect(rect))
+        # Non-positive extents and unusable values are refused too.
+        self.assertIsNone(contract.integer_rect(dict(integral, width=0.0)))
+        self.assertIsNone(contract.integer_rect(dict(integral, height=-1)))
+        for value in [True, float("nan"), float("inf"), "1", None] + self.hostile():
+            with self.subTest(value=value):
+                self.assertIsNone(contract.integer_rect(dict(integral, width=value)))
+        self.assertIsNone(contract.integer_rect(None))
+        self.assertEqual(HOSTILE_CALLS, [])
+
+    def test_int_subclass_window_rect_is_refused_by_rect_within_directly(self):
+        # rect_within compares the ORIGINAL dict fields, so an int subclass
+        # must be refused there even without going through discovery.
+        inner = dict(FRACTIONAL)
+        self.assertTrue(contract.rect_within(inner, WINDOW["client"]))
+        for key in ("x", "y", "width", "height"):
+            with self.subTest(key=key):
+                self.assertFalse(contract.rect_within(dict(inner, **{key: HostileInt(1)}),
+                                                      WINDOW["client"]))
+                outer = dict(WINDOW["client"], **{key: HostileInt(1)})
+                self.assertFalse(contract.rect_within(inner, outer))
+        self.assertEqual(HOSTILE_CALLS, [])
 
     def test_fractional_rect_must_still_fit_inside_the_window_client(self):
         rect = {"x": 890.5, "y": 400.25, "width": 10.0, "height": 10.0}
@@ -1110,3 +1308,7 @@ class IntegerGeometryRegressionTests(unittest.TestCase):
                 point = contract._center(rect)
                 self.assertEqual(point, expected)
                 self.assertEqual(tuple(type(value) for value in point), (int, int))
+
+
+if __name__ == "__main__":
+    unittest.main()
