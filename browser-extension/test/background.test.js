@@ -396,6 +396,7 @@ function harness(options = {}) {
   );
   const sender = { id: "fixed", url: "chrome-extension://fixed/popup.html" };
   return {
+    connectListeners: () => connectListeners,
     api,
     docId: () => doc,
     routeToken: (url) => /#route=([a-f0-9]{64})$/.exec(String(url || ""))?.[1] || "",
@@ -778,11 +779,20 @@ async function openRouteFixture() {
   const reply = await h.send({ type: "open-route", id: ITEM_ID, revision: ITEM_REV });
   assert.ok(reply?.routeCreated, "route was refused: " + reply?.status);
   h.listeners.updated(ROUTE_TAB, { status: "complete" });
+  const routeSender = () => ({
+    id: "fixed",
+    url: routeTab.url,
+    origin: "chrome-extension://fixed",
+    frameId: 0,
+    documentId: "route-doc",
+    tab: { id: ROUTE_TAB, url: routeTab.url, windowId: 1 },
+  });
   return {
     h,
     token: reply.routeCreated.token,
     ITEM_ID,
     ITEM_REV,
+    sender: routeSender,
     source: () => ({ ...sourceTab }),
     setSource(next) {
       sourceTab = { ...sourceTab, ...next };
@@ -1318,6 +1328,85 @@ test("a route revoked during native prepare cancels the late offer", async () =>
   port.post({ type: "commit", request_id: hexId(2), item_id: ROUTE_ITEM_ID, revision: ROUTE_ITEM_REV, field: "password", copy_ticket: COPY_TICKET });
   await tick();
   assert.equal(route.nativeCount("commit-copy-field"), 0);
+  await route.h.send({ type: "disconnect" });
+});
+
+// A route tab's lifecycle port: distinct from native-clipboard, opened by the
+// browser's sender identity only.
+function openLifecyclePort(h, sender) {
+  let onMessage = null, onDisconnect = null;
+  const port = {
+    name: "route-lifecycle",
+    sender,
+    received: [],
+    disconnected: false,
+    onMessage: { addListener: (f) => (onMessage = f) },
+    onDisconnect: { addListener: (f) => (onDisconnect = f) },
+    postMessage: (m) => port.received.push(m),
+    disconnect() { port.disconnected = true; onDisconnect?.(); },
+  };
+  for (const listen of h.connectListeners()) listen(port, sender);
+  return port;
+}
+
+test("a browser tab switch revokes the route on its own lifecycle port", async () => {
+  const route = await openRouteFixture();
+  assert.equal((await route.claim())?.type, "route-claimed");
+  const port = openLifecyclePort(route.h, route.sender());
+  await tick();
+  assert.equal(port.disconnected, false, "the route lifecycle port was not admitted");
+  assert.deepEqual(
+    port.received.map((message) => [message.type, message.token]),
+    [["route-ready", route.token]],
+  );
+  // Production path: the browser activates another ordinary tab.
+  route.h.listeners.active({ tabId: 2, windowId: 1 });
+  await tick();
+  assert.deepEqual(
+    port.received.slice(1).map((message) => [message.type, message.token]),
+    [["route-revoked", route.token]],
+  );
+  assert.equal(port.disconnected, true, "a revoked route kept its lifecycle port");
+  // No detail or value ever travels on the lifecycle port.
+  assert.equal(JSON.stringify(port.received).includes('"detail"'), false);
+  await route.h.send({ type: "disconnect" });
+});
+
+test("lifecycle port admission needs the live exact route page", async () => {
+  const route = await openRouteFixture();
+  // Another tab id, a wrong token, and a non-route page never get a port.
+  for (const sender of [
+    { ...route.sender(), tab: { ...route.sender().tab, id: 99 } },
+    {
+      ...route.sender(),
+      url: "chrome-extension://fixed/popup.html#route=" + "d".repeat(64),
+      tab: {
+        ...route.sender().tab,
+        url: "chrome-extension://fixed/popup.html#route=" + "d".repeat(64),
+      },
+    },
+    {
+      ...route.sender(),
+      url: "chrome-extension://fixed/popup.html",
+      tab: { ...route.sender().tab, url: "chrome-extension://fixed/popup.html" },
+    },
+  ]) {
+    const port = openLifecyclePort(route.h, sender);
+    await tick();
+    assert.equal(port.disconnected, true, "a foreign sender kept a lifecycle port");
+    assert.deepEqual(port.received, []);
+  }
+  const ok = openLifecyclePort(route.h, route.sender());
+  await tick();
+  assert.equal(ok.disconnected, false);
+  // Explicit route close carries the same cleanup.
+  await route.h.send({ type: "route-close", token: route.token }, route.sender());
+  await tick();
+  assert.deepEqual(
+    (({ type, token }) => [type, token])(ok.received.at(-1)),
+    ["route-revoked", route.token],
+  );
+  assert.equal(ok.disconnected, true);
   await route.h.send({ type: "disconnect" });
 });
 

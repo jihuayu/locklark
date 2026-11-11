@@ -11,6 +11,9 @@
   const routeRequested = /^#route(?:=|$)/.test(initialHash);
   const routeToken = /^#route=([a-f0-9]{64})$/.exec(initialHash)?.[1] || "";
   const routeMode = routeToken !== "";
+  // Kept separate from the per-copy native clipboard port: this channel only
+  // carries this route's token and tells the page when the worker revoked it.
+  const ROUTE_LIFECYCLE_PORT_NAME = "route-lifecycle";
   let busy = false,
     renderedCandidates = "",
     renderedHistory = "",
@@ -30,6 +33,8 @@
     // visible is still in flight. It lets that one operation survive the
     // desktop V2 approval bringing its window forward and hiding the browser.
     routeCopyInFlight = false,
+    routeLifecyclePort = null,
+    routeLifecycleReady = false,
     generatedPassword = "",
     generatedProfile = null,
     generatedDataWiped = false,
@@ -1562,6 +1567,34 @@
     if (els?.vaultView) els.vaultView.hidden = true;
     if (document.body) document.body.dataset.view = "closed";
     if (els?.status) els.status.textContent = message;
+    const port = routeLifecyclePort;
+    routeLifecyclePort = null;
+    routeLifecycleReady = false;
+    try {
+      port?.disconnect();
+    } catch {}
+    routeReportClose();
+  }
+  // A real worker revocation (tab switch, source move, lock, close, expiry)
+  // reaches this page on the lifecycle port. Cancel any in-flight native copy
+  // before wiping so a late prepared/result can never commit or show success.
+  function revokeRouteView() {
+    if (!routeRequested || routeClosed) return;
+    routeClosed = true;
+    routeCopyInFlight = false;
+    routeLifecycleReady = false;
+    closeNativeClipboard();
+    const port = routeLifecyclePort;
+    routeLifecyclePort = null;
+    wipeDetail();
+    clearRevealedSecrets();
+    if (els?.detailView) els.detailView.hidden = true;
+    if (els?.vaultView) els.vaultView.hidden = true;
+    if (document.body) document.body.dataset.view = "closed";
+    if (els?.status) els.status.textContent = "条目已失效，请重新从金库打开";
+    try {
+      port?.disconnect();
+    } catch {}
     routeReportClose();
   }
   function failRoute() {
@@ -1573,6 +1606,12 @@
     if (els?.vaultView) els.vaultView.hidden = true;
     if (document.body) document.body.dataset.view = "closed";
     if (els?.status) els.status.textContent = "无法打开此条目";
+    const port = routeLifecyclePort;
+    routeLifecyclePort = null;
+    routeLifecycleReady = false;
+    try {
+      port?.disconnect();
+    } catch {}
     routeReportClose();
   }
   function validRouteClaim(reply) {
@@ -1593,6 +1632,7 @@
   // The route page has no action-popup state: the claim is the only read and
   // its already-approved detail is the only thing rendered.
   async function claimRoute() {
+    if (!routeLifecycleReady || routeClosed) return;
     let reply = null;
     try {
       reply = await api.runtime.sendMessage({
@@ -3966,6 +4006,42 @@
     "#watchtower-refresh", "#watchtower-run-hibp", "#watchtower-hibp-optin",
     "#toast",
   ];
+  function openRouteLifecycle() {
+    if (typeof api.runtime.connect !== "function") {
+      failRoute();
+      return;
+    }
+    let port = null;
+    try {
+      port = api.runtime.connect({ name: ROUTE_LIFECYCLE_PORT_NAME });
+    } catch {
+      failRoute();
+      return;
+    }
+    routeLifecyclePort = port;
+    port.onMessage.addListener((message) => {
+      if (
+        routeClosed ||
+        !message ||
+        typeof message !== "object" ||
+        message.token !== routeToken
+      )
+        return;
+      if (message.type === "route-ready") {
+        // Exactly one claim, and only for this route's matching ready.
+        if (routeLifecycleReady) return;
+        routeLifecycleReady = true;
+        void claimRoute();
+        return;
+      }
+      if (message.type === "route-revoked") revokeRouteView();
+    });
+    port.onDisconnect.addListener(() => {
+      void api.runtime.lastError;
+      // Losing the channel before an explicit close fails the page closed.
+      if (!routeClosed) revokeRouteView();
+    });
+  }
   function initRoutePage() {
     for (const selector of ROUTE_HIDDEN_SELECTORS) {
       const node = document.querySelector?.(selector);
@@ -3986,7 +4062,7 @@
       failRoute();
       return;
     }
-    void claimRoute();
+    openRouteLifecycle();
   }
   function initVault() {
     els = {

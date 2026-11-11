@@ -91,6 +91,7 @@ function harness(options = {}) {
   const elements = new Map();
   const requests = [];
   const ports = [];
+  const lifecyclePorts = [];
   const clipboardWrites = [];
   const intervals = [];
   const windowListeners = new Map();
@@ -140,8 +141,10 @@ function harness(options = {}) {
             requests.push({ message, resolve, reject, taken: false });
           });
         },
-        connect() {
+        connect(options = {}) {
           const port = fakePort();
+          port.name = options.name || "";
+          if (port.name === "route-lifecycle") lifecyclePorts.push(port);
           ports.push(port);
           return port;
         },
@@ -170,6 +173,8 @@ function harness(options = {}) {
     elements,
     requests,
     ports,
+    lifecyclePorts,
+    nativePorts: () => ports.filter((port) => port.name !== "route-lifecycle"),
     clipboardWrites,
     intervals,
     context,
@@ -279,6 +284,10 @@ function claimedReply(overrides = {}) {
 async function openRoutePage(reply = claimedReply()) {
   const h = harness({ hash: "#route=" + TOKEN });
   await h.flush();
+  const lifecycle = h.lifecyclePorts[0];
+  assert.ok(lifecycle, "route lifecycle port was not opened");
+  lifecycle.emit({ type: "route-ready", token: TOKEN });
+  await h.flush();
   const claim = h.take("route-claim");
   assert.equal(claim.message.token, TOKEN);
   claim.resolve(reply);
@@ -324,6 +333,10 @@ test("QuickFill true keeps the direct detail path", async () => {
 test("route page sends exactly one claim and renders only the exact reply", async () => {
   const h = harness({ hash: "#route=" + TOKEN });
   await h.flush();
+  assert.deepEqual(h.types(), [], "the claim preceded the lifecycle ready");
+  assert.equal(h.lifecyclePorts.length, 1, "route lifecycle port missing");
+  h.lifecyclePorts[0].emit({ type: "route-ready", token: TOKEN });
+  await h.flush();
   assert.deepEqual(h.types(), ["route-claim"]);
   h.requests[0].resolve(claimedReply());
   await h.flush();
@@ -344,6 +357,8 @@ test("mismatched or rejected claims never render and report close", async () => 
   ];
   for (const reply of cases) {
     const h = harness({ hash: "#route=" + TOKEN });
+    await h.flush();
+    h.lifecyclePorts[0].emit({ type: "route-ready", token: TOKEN });
     await h.flush();
     h.requests[0].resolve(reply);
     await h.flush();
@@ -370,7 +385,7 @@ test("route native field copy keeps the exact native lease selector", async () =
   const button = h.detailButton("password", "copy-field");
   button.listeners.get("click")();
   await h.flush();
-  const port = h.ports[0];
+  const port = h.nativePorts()[0];
   assert.ok(port, "native clipboard port not opened");
   port.emit({ type: "ready", native: true });
   await h.flush();
@@ -402,7 +417,7 @@ test("route legacy field copy uses route-copy-field only and scrubs the value", 
   const button = h.detailButton("password", "copy-field");
   button.listeners.get("click")();
   await h.flush();
-  const port = h.ports[0];
+  const port = h.nativePorts()[0];
   port.emit({ type: "ready", native: false });
   await h.flush();
   const legacy = h.take("route-copy-field").message;
@@ -442,13 +457,80 @@ test("route legacy field copy uses route-copy-field only and scrubs the value", 
   assert.equal(h.types().includes("reveal-field"), false);
 });
 
+// ---- 2b. real route lifecycle port wipes the page on revocation ----
+test("a route-revoked lifecycle message wipes detail and cancels a prepare", async () => {
+  const h = await openRoutePage();
+  const button = h.detailButton("password", "copy-field");
+  button.listeners.get("click")();
+  await h.flush();
+  const native = h.ports.find((port) => port.name !== "route-lifecycle");
+  native.emit({ type: "ready", native: true });
+  await h.flush();
+  assert.equal(native.messages[0].type, "prepare");
+  const lifecycle = h.lifecyclePorts[0];
+  // The background's real revoke path sends only the token.
+  lifecycle.emit({ type: "route-revoked", token: TOKEN });
+  await h.flush();
+  assert.equal(native.disconnected, true, "the native clipboard lease survived revocation");
+  assert.equal(h.body.dataset.view === "detail", false);
+  assert.deepEqual(h.el("#detail-fields").children, []);
+  assert.equal(h.take("route-close").message.token, TOKEN);
+  assert.equal(lifecycle.disconnected, true);
+  // A late preparation can no longer commit.
+  native.emit({
+    type: "prepared", request_id: native.messages[0].request_id,
+    item_id: ITEM_ID, revision: ITEM_REV, field: "password",
+    copy_ticket: "f".repeat(64), expires_in_seconds: 15, cleanup_ttl_seconds: 30,
+  });
+  await h.flush();
+  assert.equal(native.messages.some((message) => message.type === "commit"), false);
+  assert.deepEqual(h.clipboardWrites, []);
+  // No ordinary reads or second claim are attempted after revocation.
+  assert.deepEqual(h.types(), ["route-claim", "route-close"]);
+});
+
+test("a wrong-token or wrong-type lifecycle message is ignored", async () => {
+  const h = await openRoutePage();
+  const lifecycle = h.lifecyclePorts[0];
+  lifecycle.emit({ type: "route-revoked", token: "d".repeat(64) });
+  lifecycle.emit({ type: "route-ready", token: TOKEN });
+  lifecycle.emit({ type: "something", token: TOKEN });
+  await h.flush();
+  assert.equal(h.body.dataset.view, "detail");
+  assert.equal(h.el("#detail-title").textContent, "Route Target");
+  assert.deepEqual(h.types(), ["route-claim"]);
+});
+
+test("a lifecycle port disconnect fails the route page closed", async () => {
+  const h = await openRoutePage();
+  const lifecycle = h.lifecyclePorts[0];
+  lifecycle.disconnect();
+  await h.flush();
+  assert.equal(h.body.dataset.view === "detail", false);
+  assert.deepEqual(h.el("#detail-fields").children, []);
+  assert.equal(h.take("route-close").message.token, TOKEN);
+});
+
+test("the claim waits for a matching lifecycle ready", async () => {
+  const h = harness({ hash: "#route=" + TOKEN });
+  await h.flush();
+  const lifecycle = h.lifecyclePorts[0];
+  // A ready for another token is not this route's readiness.
+  lifecycle.emit({ type: "route-ready", token: "d".repeat(64) });
+  await h.flush();
+  assert.deepEqual(h.types(), [], "claim sent before a matching ready");
+  lifecycle.emit({ type: "route-ready", token: TOKEN });
+  await h.flush();
+  assert.deepEqual(h.types(), ["route-claim"]);
+});
+
 // ---- 3b. native copy survives the desktop approval focus transition ----
 test("route native copy survives the page being hidden for approval", async () => {
   const h = await openRoutePage();
   const button = h.detailButton("password", "copy-field");
   button.listeners.get("click")();
   await h.flush();
-  const port = h.ports[0];
+  const port = h.nativePorts()[0];
   port.emit({ type: "ready", native: true });
   await h.flush();
   assert.equal(port.messages[0].type, "prepare");
@@ -486,7 +568,7 @@ test("a route hidden before the click does not authorize a new copy", async () =
   const button = h.detailButton("password", "copy-field");
   button.listeners.get("click")();
   await h.flush();
-  assert.deepEqual(h.ports, [], "a hidden route opened a native clipboard port");
+  assert.deepEqual(h.nativePorts(), [], "a hidden route opened a native clipboard port");
   assert.equal(h.types().includes("route-copy-field"), false);
 });
 
@@ -495,7 +577,7 @@ test("pagehide while hidden cancels and a late prepare cannot commit", async () 
   const button = h.detailButton("password", "copy-field");
   button.listeners.get("click")();
   await h.flush();
-  const port = h.ports[0];
+  const port = h.nativePorts()[0];
   port.emit({ type: "ready", native: true });
   await h.flush();
   await h.visibility("hidden");
@@ -520,7 +602,7 @@ test("Back while hidden cancels the in-flight route copy", async () => {
   const button = h.detailButton("password", "copy-field");
   button.listeners.get("click")();
   await h.flush();
-  const port = h.ports[0];
+  const port = h.nativePorts()[0];
   port.emit({ type: "ready", native: true });
   await h.flush();
   await h.visibility("hidden");
@@ -543,13 +625,13 @@ test("a revoked route cannot commit or show copy success", async () => {
   const button = h.detailButton("password", "copy-field");
   button.listeners.get("click")();
   await h.flush();
-  const port = h.ports[0];
+  const port = h.nativePorts()[0];
   port.emit({ type: "ready", native: true });
   await h.flush();
   await h.visibility("hidden");
-  // The background revoked the route (tab switch/source change): its port is
-  // told and must not proceed to commit.
-  port.emit({ type: "revoked" });
+  // The background revoked the route (tab switch/source change) and says so
+  // on the route lifecycle port, which must cancel the native lease.
+  h.lifecyclePorts[0].emit({ type: "route-revoked", token: TOKEN });
   await h.flush();
   assert.equal(port.disconnected, true);
   port.emit({

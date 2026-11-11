@@ -4583,6 +4583,19 @@ if (typeof importScripts === "function") importScripts("core.js");
     }
     grant.clients.clear();
     grant.routeDetail = null;
+    // Tell this route's own page that it is dead, then close the channel. No
+    // detail or value ever travels here: only the token.
+    const lifecycle = [...(grant.lifecyclePorts || [])];
+    grant.lifecyclePorts?.clear();
+    for (const state of lifecycle) {
+      routeLifecyclePorts.delete(state);
+      try {
+        state.port.postMessage({ type: "route-revoked", token: grant.token });
+      } catch {}
+      try {
+        state.port.disconnect();
+      } catch {}
+    }
     if (known) grant.state = "revoked";
   }
   function revokeAllRoutes() {
@@ -4765,6 +4778,7 @@ if (typeof importScripts === "function") importScripts("core.js");
       state: "open",
       expiresAt: Date.now() + ROUTE_TTL,
       clients: new Set(),
+      lifecyclePorts: new Set(),
     };
     grant.routeURL = routeURL(token);
     grant.windowId = sourceTab.windowId;
@@ -5061,6 +5075,12 @@ if (typeof importScripts === "function") importScripts("core.js");
   // at most one outstanding grant, and every message carries fresh bounded
   // selectors: the background never borrows another popup's grant.
   const NATIVE_CLIPBOARD_PORT_NAME = "native-clipboard";
+  // A route tab's own lifetime signal. It carries only the route token; it is
+  // how a real worker revocation reaches the persistent page that still holds
+  // the already-approved detail.
+  const ROUTE_LIFECYCLE_PORT_NAME = "route-lifecycle";
+  const ROUTE_LIFECYCLE_MAX_PORTS = 8;
+  const routeLifecyclePorts = new Set();
   const NATIVE_CLIPBOARD_MAX_PORTS = 4;
   const NATIVE_CLIPBOARD_MAX_REQUEST_IDS = 32;
   const NATIVE_CLIPBOARD_MAX_GRANT_SECONDS = 15;
@@ -5381,6 +5401,57 @@ if (typeof importScripts === "function") importScripts("core.js");
       return null;
     }
     return grant;
+  }
+  // A route lifecycle port is bound by the browser's sender identity to one
+  // live route: same extension, top frame, exact tab and exact route URL with
+  // the exact token. It is opened before the claim and carries no data except
+  // that token.
+  async function openRouteLifecyclePort(port, sender) {
+    const reject = () => {
+      try {
+        port?.disconnect?.();
+      } catch {}
+    };
+    if (
+      !port ||
+      port.name !== ROUTE_LIFECYCLE_PORT_NAME ||
+      !sender?.tab ||
+      sender.id !== api.runtime.id ||
+      sender.frameId !== 0 ||
+      routeLifecyclePorts.size >= ROUTE_LIFECYCLE_MAX_PORTS
+    )
+      return reject();
+    let grant = null;
+    try {
+      grant = await routeMessage(sender);
+    } catch {}
+    // Compare the browser-attached sender structurally; a Port getter is not
+    // guaranteed to return the same object reference twice.
+    const bound = port?.sender;
+    if (
+      !bound ||
+      bound.id !== sender.id ||
+      bound.url !== sender.url ||
+      bound.frameId !== sender.frameId ||
+      bound.tab?.id !== sender.tab.id ||
+      bound.tab?.url !== sender.tab.url
+    )
+      return reject();
+    if (!grant || !routeLive(grant) || sender.tab.id !== grant.tabId)
+      return reject();
+    const state = { port, grant };
+    grant.lifecyclePorts.add(state);
+    routeLifecyclePorts.add(state);
+    port.onDisconnect.addListener(() => {
+      grant.lifecyclePorts.delete(state);
+      routeLifecyclePorts.delete(state);
+      void api.runtime.lastError;
+    });
+    try {
+      port.postMessage({ type: "route-ready", token: grant.token });
+    } catch {
+      revokeRoute(grant);
+    }
   }
   function openClipboardPort(port, sender) {
     if (
@@ -6553,6 +6624,14 @@ if (typeof importScripts === "function") importScripts("core.js");
   // Private popup runtime port. Only the extension's own popup page may open
   // it, and only the native host can make the capability available.
   api.runtime.onConnect?.addListener((port) => {
+    if (port?.name === ROUTE_LIFECYCLE_PORT_NAME) {
+      openRouteLifecyclePort(port, port?.sender).catch(() => {
+        try {
+          port.disconnect();
+        } catch {}
+      });
+      return;
+    }
     openClipboardPort(port, port?.sender);
   });
   // A route tab is admitted only by the browser's sender identity: the exact
