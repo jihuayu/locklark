@@ -62,7 +62,7 @@ var (
 	// ErrTooManyItems reports a branch with more than vault.MaxItems items, or
 	// a merged result that would exceed vault.MaxItems and could not be
 	// persisted. In both cases the result is zero.
-	ErrTooManyItems = errors.New("vaultmerge: merged item count exceeds limit")
+	ErrTooManyItems = errors.New("vaultmerge: item count exceeds limit")
 )
 
 // maxIDLength is the strict model limit enforced by vault.validItems when an
@@ -90,6 +90,10 @@ type Conflict struct {
 
 // Result is the deterministic outcome of a merge. Items and Conflicts are both
 // sorted by exact ID; a conflicted ID never appears in Items.
+//
+// On success both slices are non-nil, so an empty merge yields []vault.Item{}
+// and []Conflict{} rather than nil; vault.ValidateItems accepts the former and
+// rejects a nil item slice. Every error return is the zero Result{}.
 type Result struct {
 	Items     []vault.Item
 	Conflicts []Conflict
@@ -133,7 +137,9 @@ func Merge(base *Branch, local, remote Branch) (Result, error) {
 	}
 	sort.Strings(ids)
 
-	var out Result
+	// Successful results always carry non-nil slices: vault.ValidateItems
+	// rejects a nil item slice even when it is semantically empty.
+	out := Result{Items: []vault.Item{}, Conflicts: []Conflict{}}
 	for _, id := range ids {
 		b, inBase := baseIdx[id]
 		l, inLocal := localIdx[id]

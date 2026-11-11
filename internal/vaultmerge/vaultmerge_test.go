@@ -113,6 +113,9 @@ func TestMergeErrors(t *testing.T) {
 				if !reflect.DeepEqual(res, Result{}) {
 					t.Fatalf("result on error is not zero: %#v", res)
 				}
+				if res.Items != nil || res.Conflicts != nil {
+					t.Fatalf("error result has non-nil slices: %#v", res)
+				}
 				return
 			}
 			if err != nil {
@@ -127,7 +130,7 @@ func TestMergeSameIDInDifferentBranchesIsNotDuplicate(t *testing.T) {
 	a := item("x", "X", "p")
 	res := mustMerge(t, base(a), branch(a), branch(withPassword(a, "q")))
 	mustEqual(t, res.Items, []vault.Item{withPassword(a, "q")}, "one-sided edit")
-	mustEqual(t, res.Conflicts, []Conflict(nil), "conflicts")
+	mustEqual(t, res.Conflicts, []Conflict{}, "conflicts")
 }
 
 // Error text must never echo item contents.
@@ -208,8 +211,47 @@ func TestMergeResultOverflow(t *testing.T) {
 func TestMergeEmptyBranches(t *testing.T) {
 	// An empty but present base is valid; empty everywhere gives empty output.
 	res := mustMerge(t, &Branch{KeyEpoch: epoch}, branch(), Branch{KeyEpoch: epoch, Items: []vault.Item{}})
-	mustEqual(t, res.Items, []vault.Item(nil), "items")
-	mustEqual(t, res.Conflicts, []Conflict(nil), "conflicts")
+	mustEqual(t, res.Items, []vault.Item{}, "items")
+	mustEqual(t, res.Conflicts, []Conflict{}, "conflicts")
+}
+
+// A successful merge with no unconflicted items must return a non-nil empty
+// item slice, because vault.ValidateItems rejects nil even when semantically
+// empty.
+func TestMergeEmptyResultIsValid(t *testing.T) {
+	t.Run("empty branches", func(t *testing.T) {
+		res := mustMerge(t, base(), branch(), branch())
+		if res.Items == nil {
+			t.Fatal("successful empty merge returned nil Items")
+		}
+		mustEqual(t, res.Items, []vault.Item{}, "items")
+		if err := vault.ValidateItems(nil, res.Items); err != nil {
+			t.Fatalf("ValidateItems rejected empty result: %v", err)
+		}
+	})
+
+	t.Run("all deleted on both sides", func(t *testing.T) {
+		b := item("x", "X", "p")
+		res := mustMerge(t, base(b), branch(), branch())
+		if res.Items == nil {
+			t.Fatal("delete-all merge returned nil Items")
+		}
+		mustEqual(t, res.Items, []vault.Item{}, "items")
+		mustEqual(t, res.Conflicts, []Conflict{}, "conflicts")
+		if err := vault.ValidateItems(nil, res.Items); err != nil {
+			t.Fatalf("ValidateItems rejected delete-all result: %v", err)
+		}
+	})
+
+	t.Run("conflict only leaves empty valid items", func(t *testing.T) {
+		b := item("x", "X", "base")
+		res := mustMerge(t, base(b), branch(withPassword(b, "l")), branch(withPassword(b, "r")))
+		mustEqual(t, res.Items, []vault.Item{}, "items")
+		mustEqual(t, len(res.Conflicts), 1, "conflicts")
+		if err := vault.ValidateItems(nil, res.Items); err != nil {
+			t.Fatalf("ValidateItems rejected conflict-only result: %v", err)
+		}
+	})
 }
 
 // Titles never identify items; IDs match exactly and case-sensitively.
@@ -263,7 +305,7 @@ func TestMergeSameIDDivergentEditConflict(t *testing.T) {
 	loc := withPassword(b, "local")
 	rem := withPassword(b, "remote")
 	res := mustMerge(t, base(b), branch(loc), branch(rem))
-	mustEqual(t, res.Items, []vault.Item(nil), "no items")
+	mustEqual(t, res.Items, []vault.Item{}, "no items")
 	mustEqual(t, conflictIDs(res.Conflicts), []string{"x"}, "conflicts")
 	c := res.Conflicts[0]
 	mustEqual(t, *c.Base, b, "base")
