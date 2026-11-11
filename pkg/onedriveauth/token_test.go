@@ -72,7 +72,7 @@ func newTokenPeer(t *testing.T, handler func(http.ResponseWriter, *http.Request)
 // exchange runs one exchange against the peer through the unexported seam.
 func (p *tokenPeer) exchange(t *testing.T, ctx context.Context, timeout time.Duration) (TokenResult, error) {
 	t.Helper()
-	return exchangeCode(ctx, tokenTestConfig(), tokenTestRedirect, tokenTestCode, tokenTestVerifier, timeout, p.url, p.srv.Client())
+	return exchangeCode(ctx, tokenTestConfig(), tokenTestRedirect, tokenTestCode, tokenTestVerifier, timeout, p.url, p.srv.Client(), nil)
 }
 
 func tokenTestConfig() TokenExchangeConfig {
@@ -238,7 +238,7 @@ func TestExchangeCodeValidatesBeforeAnyRequest(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := exchangeCode(context.Background(), tc.cfg, tc.redirect, tc.code, tc.verifier, time.Second, p.url, p.srv.Client())
+			_, err := exchangeCode(context.Background(), tc.cfg, tc.redirect, tc.code, tc.verifier, time.Second, p.url, p.srv.Client(), nil)
 			assertTokenFailure(t, err, tc.want)
 		})
 	}
@@ -251,7 +251,7 @@ func TestExchangeCodeValidatesBeforeAnyRequest(t *testing.T) {
 		{Scheme: "https", Host: p.url.Host, User: url.UserPassword("u", "p")},
 	}
 	for i, endpoint := range badEndpoints {
-		_, err := exchangeCode(context.Background(), good, tokenTestRedirect, tokenTestCode, tokenTestVerifier, time.Second, endpoint, p.srv.Client())
+		_, err := exchangeCode(context.Background(), good, tokenTestRedirect, tokenTestCode, tokenTestVerifier, time.Second, endpoint, p.srv.Client(), nil)
 		assertTokenFailure(t, err, ErrRequest)
 		if got := p.hits.Load(); got != 0 {
 			t.Fatalf("invalid endpoint %d reached the peer", i)
@@ -377,6 +377,141 @@ func TestExchangeCodeCancelledAfterSend(t *testing.T) {
 	}
 	if got := p.hits.Load(); got != 1 {
 		t.Fatalf("cancelled exchange made %d requests, want exactly one", got)
+	}
+}
+
+// tokenScriptedTransport is a synthetic in-process round tripper for the
+// deterministic late-answer test. The endpoint is HTTPS on the reserved
+// .invalid name, so nothing panics about an unknown scheme and nothing leaves
+// the process; instead of a peer it hands the client a fixed JSON token answer.
+type tokenScriptedTransport struct {
+	hits atomic.Int32
+	body string
+}
+
+// RoundTrip answers each request with a 200 JSON body and no network access.
+func (s *tokenScriptedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	s.hits.Add(1)
+	return &http.Response{
+		Status:        "200 OK",
+		StatusCode:    http.StatusOK,
+		Proto:         "HTTP/1.1",
+		ProtoMajor:    1,
+		ProtoMinor:    1,
+		Header:        http.Header{"Content-Type": []string{"application/json"}},
+		Body:          io.NopCloser(strings.NewReader(s.body)),
+		ContentLength: int64(len(s.body)),
+		Request:       req,
+	}, nil
+}
+
+// TestExchangeCodeCancelledBeforeLateAnswerClosesResult checks that a token
+// result which arrives after the exchange already gave up on cancellation is
+// closed before the fixed ErrOutcomeUnknown is returned.
+//
+// The parser is the real readTokenResponse, wrapped so that it stores its
+// successful result, reports it through parsed, and then holds it until the
+// parser is released. The exchange therefore always reaches its cancellation
+// branch first, which the stalled hook observes only after abort. After the
+// release, the worker sends the late answer, the exchange closes that answer,
+// and only then does the exchange return.
+func TestExchangeCodeCancelledBeforeLateAnswerClosesResult(t *testing.T) {
+	tr := &tokenScriptedTransport{body: `{"token_type":"Bearer","access_token":"` + tokenTestAccess +
+		`","expires_in":3600,"refresh_token":"` + tokenTestRefresh + `"}`}
+
+	parsed := make(chan TokenResult, 1)
+	held := make(chan struct{})
+	stalled := make(chan struct{})
+
+	// release ends the parser's hold exactly once. It is registered with
+	// t.Cleanup so every early failure path releases the parser and lets
+	// the worker finish, and a normal release makes that cleanup a no-op.
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(held) }) }
+	t.Cleanup(release)
+
+	hooks := &exchangeHooks{
+		parse: func(resp *http.Response) (TokenResult, error) {
+			res, err := readTokenResponse(resp)
+			if err != nil {
+				return res, err
+			}
+			parsed <- res
+			<-held
+			return res, nil
+		},
+		stalled: func() { close(stalled) },
+	}
+
+	endpoint := &url.URL{Scheme: "https", Host: "token.invalid", Path: "/oauth2/v2.0/token"}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	type outcome struct {
+		res TokenResult
+		err error
+	}
+	returned := make(chan outcome, 1)
+	go func() {
+		res, err := exchangeCode(ctx, tokenTestConfig(), tokenTestRedirect, tokenTestCode, tokenTestVerifier, 5*time.Second, endpoint, &http.Client{Transport: tr}, hooks)
+		returned <- outcome{res: res, err: err}
+	}()
+
+	// The real parser produced a successful result; hold it before done.
+	var late TokenResult
+	select {
+	case late = <-parsed:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("the wrapped parser did not produce a result")
+	}
+
+	// Cancel first, and observe from stalled that the cancellation branch
+	// was selected and abort had run. The worker is still holding the
+	// answer.
+	cancel()
+	select {
+	case <-stalled:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("the exchange did not reach the cancellation branch")
+	}
+
+	// The exchange is now blocked on the worker, which is blocked until the
+	// release, so the result cannot yet be closed.
+	if late.owned == nil {
+		t.Fatalf("the late result has no shared owner")
+	}
+	late.owned.mu.Lock()
+	heldOpen := !late.owned.closed
+	late.owned.mu.Unlock()
+	if !heldOpen {
+		t.Fatalf("the late result was closed while the worker still held it")
+	}
+
+	// Release the worker: it sends the late answer, the exchange closes it,
+	// and only then returns.
+	release()
+	var got outcome
+	select {
+	case got = <-returned:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("the exchange did not return after the parser was released")
+	}
+
+	assertTokenFailure(t, got.err, ErrOutcomeUnknown)
+	assertTokenResultCleared(t, got.res)
+	if got := tr.hits.Load(); got != 1 {
+		t.Fatalf("the exchange made %d requests, want exactly one (no retry)", got)
+	}
+
+	// The captured late result must have been closed by the exchange, not
+	// merely abandoned.
+	assertTokenResultCleared(t, late)
+	if late.AccessToken() != "" {
+		t.Fatalf("the discarded late access token was not cleared")
+	}
+	if refresh := late.RefreshToken(); refresh != nil {
+		clear(refresh)
+		t.Fatalf("the discarded late refresh token was not cleared")
 	}
 }
 

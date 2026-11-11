@@ -290,15 +290,32 @@ func (r TokenResult) GoString() string {
 // a RefreshToken []byte can be cleared, an AccessToken string can only be
 // dropped.
 func ExchangeCode(ctx context.Context, cfg TokenExchangeConfig, redirectURI, code, verifier string, timeout time.Duration) (TokenResult, error) {
-	return exchangeCode(ctx, cfg, redirectURI, code, verifier, timeout, nil, nil)
+	return exchangeCode(ctx, cfg, redirectURI, code, verifier, timeout, nil, nil, nil)
+}
+
+// exchangeHooks are the test-only seams of exchangeCode. Production passes nil:
+// hooks are nil and read is readTokenResponse.
+type exchangeHooks struct {
+	// parse replaces readTokenResponse for the answer the worker read.
+	parse func(*http.Response) (TokenResult, error)
+	// stalled, when non-nil, is called once the cancellation or bound
+	// branch was selected and abort was called, before the worker is
+	// awaited.
+	stalled func()
 }
 
 // exchangeCode is ExchangeCode with the test seam: endpoint redirects the
-// request to a local synthetic HTTPS peer and supplies base to newTokenClient,
-// whose transport trusts that peer. Both are nil in production, where the
-// request goes to the derived Microsoft URL over the default transport. A
-// non-nil endpoint must still pass validEndpoint.
-func exchangeCode(ctx context.Context, cfg TokenExchangeConfig, redirectURI, code, verifier string, timeout time.Duration, endpoint *url.URL, client *http.Client) (TokenResult, error) {
+// request to a synthetic peer and client supplies base to newTokenClient, whose
+// transport trusts that peer. Both are nil in production, where the request goes
+// to the derived Microsoft URL over the default transport. A non-nil endpoint
+// must still pass validEndpoint. hooks is nil in production.
+func exchangeCode(ctx context.Context, cfg TokenExchangeConfig, redirectURI, code, verifier string, timeout time.Duration, endpoint *url.URL, client *http.Client, hooks *exchangeHooks) (TokenResult, error) {
+	parse := readTokenResponse
+	if hooks != nil {
+		if hooks.parse != nil {
+			parse = hooks.parse
+		}
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -372,7 +389,7 @@ func exchangeCode(ctx context.Context, cfg TokenExchangeConfig, redirectURI, cod
 			done <- answer{err: ErrOutcomeUnknown}
 			return
 		}
-		res, err := readTokenResponse(resp)
+		res, err := parse(resp)
 		if err != nil {
 			// An answer was observed, so the code was presented; the
 			// error is the fixed sentinel for its kind.
@@ -397,7 +414,15 @@ func exchangeCode(ctx context.Context, cfg TokenExchangeConfig, redirectURI, cod
 	// unknown and never retried. Abort waits for the request to unwind, so
 	// no transport work outlives the returned error.
 	abort()
-	<-done
+	if hooks != nil && hooks.stalled != nil {
+		hooks.stalled()
+	}
+	// The discarded answer is awaited, so no worker outlives this call. A
+	// token result it carries is never returned, so it must be closed here
+	// exactly like any other result the caller would own; Close is safe on
+	// an empty result.
+	a := <-done
+	a.res.Close()
 	return TokenResult{}, wrap(ErrOutcomeUnknown, <-who)
 }
 
