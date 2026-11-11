@@ -624,3 +624,135 @@ test("a response from another frame or document is not trusted or retried", asyn
   assert.match(final.status, /登录填充结果未确认/);
 });
 
+// Same-site HTTPS sibling origins: the browser-observed identity, not the
+// popup, binds the opaque choice to the exact frame/document/origin.
+const SIBLING_TOP_ORIGIN = "https://shop.example.test";
+const SIBLING_FRAME_ORIGIN = "https://pay.example.test";
+const SIBLING_TOP_DOC = "shop-top-doc";
+const SIBLING_FRAME_DOC = "pay-frame-doc";
+const SIBLING_FRAME_SPARE_DOC = "pay-frame-spare-doc";
+const siblingHarness = (options = {}) =>
+  harness({
+    ...options,
+    tabUrl: SIBLING_TOP_ORIGIN + "/checkout",
+    frames: options.frames || [
+      frame(0, SIBLING_TOP_DOC, SIBLING_TOP_ORIGIN, true),
+      frame(7, SIBLING_FRAME_DOC, SIBLING_FRAME_ORIGIN, false),
+      frame(8, SIBLING_FRAME_SPARE_DOC, SIBLING_FRAME_ORIGIN, false),
+    ],
+  });
+
+test("a same-site sibling checkout child fills only its captured document", async () => {
+  const h = siblingHarness();
+  await connect(h);
+  // A minted nonce alone is not a gesture: without one no picker exists.
+  const ungestured = await h.send({
+    type: "checkout-frames",
+    id: CARD_ID,
+    revision: CARD_REV,
+  });
+  assert.equal(ungestured.checkoutPicker, undefined);
+  assert.equal(h.probes.length, 0, "no enumeration without a fresh gesture");
+
+  const picker = await openPicker(h);
+  assert.equal(picker.topOrigin, SIBLING_TOP_ORIGIN);
+  assert.equal(keys(picker), '["candidates","expiresAt","nonce","topOrigin"]');
+  assert.equal(
+    json([...picker.candidates].map((entry) => entry.top)),
+    json([true, false, false]),
+  );
+  const publicJSON = JSON.stringify(picker);
+  for (const documentId of [
+    SIBLING_TOP_DOC,
+    SIBLING_FRAME_DOC,
+    SIBLING_FRAME_SPARE_DOC,
+  ])
+    assert.equal(publicJSON.includes(documentId), false, "document ids stay private");
+
+  const child = picker.candidates.find(
+    (entry) => entry.top === false && entry.origin === SIBLING_FRAME_ORIGIN,
+  );
+  // Choosing the sibling child never exposes the other same-origin child.
+  assert.equal(keys(child), '["choice","frameId","origin","top"]');
+  assert.equal(h.sent.filter((r) => r.type === "match-profiles").length, 0);
+
+  const state = await select(h, picker, child.choice);
+  assert.equal(state.checkoutStarted, true);
+  await settle();
+
+  const match = h.sent.find((r) => r.type === "match-profiles");
+  assert.ok(match, "native profile request expected");
+  assert.equal(match.origin, SIBLING_FRAME_ORIGIN, "ordinary child origin");
+  assert.equal(match.document_id, SIBLING_FRAME_DOC, "ordinary child document");
+  assert.equal(match.profile_kind, "credit_card");
+  assert.equal(
+    json(match.checkout),
+    json({
+      top_origin: SIBLING_TOP_ORIGIN,
+      top_document_id: SIBLING_TOP_DOC,
+      frame_id: 7,
+    }),
+  );
+
+  const fill = h.sent.find((r) => r.type === "fill-profile");
+  assert.ok(fill, "native fill request expected");
+  assert.equal(fill.origin, SIBLING_FRAME_ORIGIN);
+  assert.equal(fill.document_id, SIBLING_FRAME_DOC);
+  assert.equal(fill.item_id, CARD_ID);
+  assert.equal(fill.revision, CARD_REV);
+  assert.equal(json(fill.checkout), json(match.checkout));
+  assert.equal(
+    JSON.stringify(fill.checkout).includes(SIBLING_FRAME_DOC),
+    false,
+    "the child document id is not smuggled through the checkout object",
+  );
+
+  assert.equal(h.injections.length, 1);
+  const injection = h.injections[0];
+  assert.equal(injection.func, core.fillCheckoutCardDocument);
+  assert.equal(keys(injection.target), '["documentIds","tabId"]');
+  assert.equal(json(injection.target.documentIds), json([SIBLING_FRAME_DOC]));
+  assert.equal(injection.target.allFrames, undefined);
+  assert.equal(injection.target.frameIds, undefined);
+  assert.equal(injection.args[0], SIBLING_FRAME_ORIGIN);
+  assert.equal(injection.args[3], false);
+
+  const final = await h.send({ type: "state" });
+  assert.match(final.status, /已请求填充结账表单/);
+});
+
+test("a sibling child replaced after capture fails closed by document and origin", async () => {
+  // The picked frame id is reused by a fresh document of the sibling origin;
+  // the other same-origin child keeps its own identity throughout.
+  for (const replacement of [
+    { documentId: "pay-frame-doc-2", origin: SIBLING_FRAME_ORIGIN },
+    { documentId: SIBLING_FRAME_DOC, origin: SIBLING_TOP_ORIGIN },
+  ]) {
+    const h = siblingHarness();
+    await connect(h);
+    const picker = await openPicker(h);
+    const child = picker.candidates.find(
+      (entry) => entry.frameId === 7 && entry.origin === SIBLING_FRAME_ORIGIN,
+    );
+    h.setFrames([
+      frame(0, SIBLING_TOP_DOC, SIBLING_TOP_ORIGIN, true),
+      frame(7, replacement.documentId, replacement.origin, false),
+      frame(8, SIBLING_FRAME_SPARE_DOC, SIBLING_FRAME_ORIGIN, false),
+    ]);
+    const state = await select(h, picker, child.choice);
+    assert.equal(state.checkoutStarted, true, "the choice itself was accepted");
+    let final = null;
+    for (let i = 0; i < 40; i++) {
+      final = await h.send({ type: "state" });
+      if (final.pending === false && /未完成|拒绝|已变化/.test(final.status)) break;
+      await settle(2);
+    }
+    assert.ok(final && final.pending === false, "the intent must settle");
+    assert.match(final.status, /未完成|拒绝|已变化/);
+    // Nothing native and nothing injected reaches the replaced sibling page.
+    assert.equal(h.sent.filter((r) => r.type === "match-profiles").length, 0);
+    assert.equal(h.sent.filter((r) => r.type === "fill-profile").length, 0);
+    assert.equal(h.injections.length, 0);
+  }
+});
+

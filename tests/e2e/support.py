@@ -9,6 +9,7 @@ package or inspects private in-memory state.
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
 import os
@@ -20,6 +21,7 @@ import ssl
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import zipfile
@@ -30,6 +32,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from .harness import (
     CLIResult,
     E2EContext,
+    FeatureNotImplementedError,
     PTYResult,
     owned_gui_command,
     terminate_process_group,
@@ -2250,6 +2253,879 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+# ---------------------------------------------------------------------------
+# Native Chromium checkout journey (F11)
+# ---------------------------------------------------------------------------
+
+CHECKOUT_EVIDENCE_SCHEMA = "locklark.e2e.checkout-native"
+CHECKOUT_EVIDENCE_VERSION = 1
+CHECKOUT_JOURNEY_ID = "chromium-native-checkout"
+
+# Each stable case ID maps to the fixed stage labels the existing native script
+# emits for that case.  The script remains the source of truth; this allowlist
+# only lets the E2E runner prove that every case actually ran without copying
+# any captured output into the report.
+CHECKOUT_CASES = (
+    (
+        "checkout-approve",
+        (
+            "checkout-approve:blank",
+            "checkout-approve:native-review",
+            "checkout-approve:approve",
+        ),
+    ),
+    (
+        "checkout-deny",
+        (
+            "checkout-deny:navigation",
+            "checkout-deny:native-review",
+            "checkout-deny:refuse",
+        ),
+    ),
+    (
+        "checkout-cross-site",
+        (
+            "checkout-cross-site:navigation",
+            "checkout-cross-site:picker",
+            "checkout-cross-site:refused",
+        ),
+    ),
+    (
+        "checkout-sandbox",
+        ("checkout-sandbox:navigation", "checkout-sandbox:picker"),
+    ),
+    (
+        "checkout-stale",
+        (
+            "checkout-stale:navigation",
+            "checkout-stale:native-review",
+            "checkout-stale:child-navigation",
+            "checkout-stale:old-approval",
+        ),
+    ),
+    (
+        "checkout-deny-navigation",
+        (
+            "checkout-deny-navigation:navigation",
+            "checkout-deny-navigation:native-review",
+            "checkout-deny-navigation:top-navigation",
+            "checkout-deny-navigation:status",
+        ),
+    ),
+    (
+        "checkout-same-origin",
+        (
+            "checkout-same-origin:navigation",
+            "checkout-same-origin:blank",
+            "checkout-same-origin:native-review",
+            "checkout-same-origin:approve",
+        ),
+    ),
+    (
+        "checkout-picker-cancel",
+        (
+            "checkout-picker-cancel:navigation",
+            "checkout-picker-cancel:programmatic-refused",
+            "checkout-picker-cancel:picker",
+        ),
+    ),
+    (
+        "checkout-lock-review",
+        (
+            "checkout-lock-review:navigation",
+            "checkout-lock-review:native-review",
+            "checkout-lock-review:lock",
+            "checkout-lock-review:status",
+        ),
+    ),
+)
+CHECKOUT_CASE_IDS = tuple(case_id for case_id, _ in CHECKOUT_CASES)
+# The cross-site case has two mutually exclusive outcomes.  Both branch markers
+# are allowlisted, but a run executes exactly one of them: the native review
+# for a listed cross-site child, or its exclusion from the picker.  Both wait
+# for the same `checkout-cross-site:refused` completion, so only that common
+# stage may be required by every run.
+CHECKOUT_BRANCH_CASE_ID = "checkout-cross-site"
+_CHECKOUT_BRANCH_STAGES = {
+    "checkout-cross-site": (
+        "checkout-cross-site:excluded",
+        "checkout-cross-site:native-review",
+    ),
+}
+# A branch marker belongs, as an optional stage, only to the case that owns
+# it; evidence never records one case's marker under another case.
+CHECKOUT_OPTIONAL_STAGES = tuple(
+    stage for markers in _CHECKOUT_BRANCH_STAGES.values() for stage in markers
+)
+CHECKOUT_REQUIRED_STAGES = tuple(
+    stage
+    for _, stages in CHECKOUT_CASES
+    for stage in stages
+    if stage not in CHECKOUT_OPTIONAL_STAGES
+)
+# Every fixed stage the native script may emit for a case, branch markers
+# included.  The parser allowlists these and nothing else.
+_CHECKOUT_STAGE_LABELS = CHECKOUT_REQUIRED_STAGES + CHECKOUT_OPTIONAL_STAGES
+_CHECKOUT_STAGE_PREFIX = "Native browser stage: "
+CHECKOUT_PASS_SUMMARY = (
+    "PASS: real Chromium checkout same-origin child approval (profile review) "
+    "and picker cancellation, cross-origin approval/refusal, cross-site, "
+    "opaque sandbox, changed-document and top-navigation rejection, and lock "
+    "while cross-origin card review is pending"
+)
+
+# Relevant source bytes that must still match consumed evidence.  The git
+# revision is bound as well when this checkout has one.
+CHECKOUT_SOURCE_FILES = (
+    "scripts/browser_native_acceptance.mjs",
+    "scripts/browser_checkout_acceptance.mjs",
+    "scripts/browser_save_acceptance.mjs",
+    "scripts/browser_native_x11.py",
+    "browser-extension/build.js",
+    # Current chromium build inputs (build.js ``files`` plus release version).
+    "browser-extension/core.js",
+    "browser-extension/content.js",
+    "browser-extension/webauthn.js",
+    "browser-extension/background.js",
+    "browser-extension/popup.html",
+    "browser-extension/popup.css",
+    "browser-extension/popup.js",
+    "browser-extension/options.html",
+    "browser-extension/options.css",
+    "browser-extension/options.js",
+    "browser-extension/release-version.json",
+    # Every direct and transitive local ES module imported by the journey.
+    "scripts/browser_passkey_acceptance.mjs",
+    "scripts/browser_passkey_management_acceptance.mjs",
+    "scripts/browser_conditional_passkey_acceptance.mjs",
+    "scripts/browser_other_provider_acceptance.mjs",
+    "scripts/browser_firefox_passkey_acceptance.mjs",
+    "scripts/browser_passkey_signal_acceptance.mjs",
+    "scripts/browser_otp_acceptance.mjs",
+    "scripts/browser_popup_vault_acceptance.mjs",
+    "scripts/browser_popup_completion_acceptance.mjs",
+    "scripts/browser_shared_clipboard_acceptance.mjs",
+    "scripts/e2e_runner.py",
+    "tests/e2e/harness.py",
+    "tests/e2e/support.py",
+    "tests/e2e/tier2_f09_f17.py",
+)
+
+CHECKOUT_BINARY_ROLES = (
+    "chromium_host",
+    "browser_register",
+    "fixture",
+    "chromium",
+)
+_CHECKOUT_HEX64_RE = re.compile(r"^[a-f0-9]{64}$")
+_CHECKOUT_GIT_REVISION_RE = re.compile(r"^[a-f0-9]{40}(?:[a-f0-9]{24})?$")
+_CHECKOUT_TOOL_VERSIONS = {
+    "node": re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+$"),
+    "playwright": re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$"),
+    "chromium": re.compile(r"^(?:Chromium|Chrome) [0-9]+(?:\.[0-9]+){1,3}$"),
+}
+
+_CHECKOUT_TIMEOUT = 900.0
+_CHECKOUT_EVIDENCE_MAX_BYTES = 1_000_000
+_CHECKOUT_JOURNEY_CACHE: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+
+
+def _checkout_pending(detail: str) -> FeatureNotImplementedError:
+    return FeatureNotImplementedError(
+        f"[PROGRESSIVE_UNIMPLEMENTED: F11] {detail}"
+    )
+
+
+def _executable_path(path: Path | str | None) -> Path | None:
+    if not path:
+        return None
+    candidate = Path(path)
+    try:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate.resolve()
+    except OSError:
+        return None
+    return None
+
+
+def _checkout_source_identity(repo_root: Path) -> dict[str, Any]:
+    repo_root = Path(repo_root)
+    digest = hashlib.sha256()
+    for relative in CHECKOUT_SOURCE_FILES:
+        source = repo_root / relative
+        try:
+            data = source.read_bytes()
+        except OSError:
+            raise AssertionError(
+                "checkout evidence source is unavailable"
+            ) from None
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(hashlib.sha256(data).digest())
+    revision: str | None = None
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo_root), "rev-parse", "--verify", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        proc = None
+    if proc is not None and proc.returncode == 0:
+        value = (proc.stdout or "").strip()
+        if _CHECKOUT_GIT_REVISION_RE.fullmatch(value):
+            revision = value
+    return {"git_revision": revision, "source_sha256": digest.hexdigest()}
+
+
+def _checkout_playwright_path(ctx: E2EContext) -> Path | None:
+    raw = (os.environ.get("LOCKLARK_TEST_PLAYWRIGHT") or "").strip()
+    candidates: list[Path] = []
+    if raw:
+        candidates.append(Path(raw))
+    candidates.append(Path(ctx.repo_root) / "web" / "node_modules" / "playwright")
+    for candidate in candidates:
+        try:
+            if candidate.is_dir():
+                if (candidate / "package.json").is_file():
+                    return candidate.resolve()
+            elif candidate.is_file():
+                return candidate.resolve()
+        except OSError:
+            continue
+    return None
+
+
+def _checkout_chromium_executable(playwright: Path | None) -> Path | None:
+    explicit = _executable_path(
+        os.environ.get("LOCKLARK_TEST_BROWSER_EXECUTABLE")
+    )
+    if explicit is not None:
+        return explicit
+    node = shutil.which("node")
+    if node is None or playwright is None:
+        return None
+    script = (
+        "const p=require(process.argv[1]);"
+        "const e=p.chromium.executablePath();"
+        "if(!e)process.exit(2);"
+        "process.stdout.write(e);"
+    )
+    try:
+        proc = subprocess.run(
+            [node, "-e", script, str(playwright)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    value = (proc.stdout or "").strip()
+    if not value or "\n" in value:
+        return None
+    return _executable_path(value)
+
+
+def _resolve_checkout_artifacts(ctx: E2EContext) -> dict[str, Any]:
+    """Resolve the real host/register/fixture/Chromium binaries for a journey."""
+
+    host = _executable_path(getattr(ctx, "browser_chromium_bin", None))
+    register = _executable_path(getattr(ctx, "browser_register_bin", None))
+    fixture = _executable_path(
+        os.environ.get("LOCKLARK_BROWSER_FIXTURE")
+    ) or _executable_path(Path(ctx.bin_dir) / "browser-acceptance-fixture")
+    playwright = _checkout_playwright_path(ctx)
+    chromium = _checkout_chromium_executable(playwright)
+    if host is None:
+        raise _checkout_pending(
+            "native checkout prerequisites are absent: Chromium native host"
+        )
+    if register is None:
+        raise _checkout_pending(
+            "native checkout prerequisites are absent: native host register"
+        )
+    if fixture is None:
+        raise _checkout_pending(
+            "native checkout prerequisites are absent: acceptance fixture"
+        )
+    if chromium is None:
+        raise _checkout_pending(
+            "native checkout prerequisites are absent: Chromium executable"
+        )
+    return {
+        "chromium_host": host,
+        "browser_register": register,
+        "fixture": fixture,
+        "chromium": chromium,
+        "playwright": playwright,
+        "node": _executable_path(shutil.which("node")),
+    }
+
+
+def _checkout_artifact_hashes(artifacts: dict[str, Any]) -> dict[str, str]:
+    hashes: dict[str, str] = {}
+    for role in CHECKOUT_BINARY_ROLES:
+        path = _executable_path(artifacts.get(role))
+        if path is None:
+            raise AssertionError(
+                "checkout evidence binary is unavailable"
+            ) from None
+        hashes[role] = sha256_file(path)
+    return hashes
+
+
+def _checkout_execution_environment(artifacts: dict[str, Any]) -> None:
+    if not sys.platform.startswith("linux"):
+        raise _checkout_pending(
+            "native checkout acceptance requires a Linux X11/dbus runtime"
+        )
+    for tool in ("dbus-run-session", "xvfb-run", "node", "python3", "openssl"):
+        if shutil.which(tool) is None:
+            raise _checkout_pending(
+                f"native checkout acceptance requires {tool}"
+            )
+    if artifacts.get("node") is None:
+        raise _checkout_pending(
+            "native checkout prerequisites are absent: node runtime"
+        )
+    if artifacts.get("playwright") is None:
+        raise _checkout_pending(
+            "native checkout prerequisites are absent: Playwright module"
+        )
+
+
+def _checkout_version(
+    command: list[str], pattern: re.Pattern[str], env: dict[str, str] | None = None
+) -> str | None:
+    try:
+        proc = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            env=env,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    value = (proc.stdout or "").strip()
+    match = pattern.search(value)
+    return match.group(0) if match else None
+
+
+def _checkout_tool_metadata(
+    artifacts: dict[str, Any], env: dict[str, str] | None = None
+) -> dict[str, str | None]:
+    node = artifacts.get("node")
+    playwright = artifacts.get("playwright")
+    chromium = artifacts.get("chromium")
+    node_version = (
+        _checkout_version([str(node), "--version"], re.compile(r"^v[0-9.]+$"), env)
+        if node is not None
+        else None
+    )
+    playwright_version: str | None = None
+    if playwright is not None:
+        package = Path(playwright)
+        if package.is_file():
+            package = package.parent
+        try:
+            payload = json.loads(
+                (package / "package.json").read_text(encoding="utf-8")
+            )
+            version = payload.get("version")
+            if isinstance(version, str) and _CHECKOUT_TOOL_VERSIONS[
+                "playwright"
+            ].fullmatch(version):
+                playwright_version = version
+        except (OSError, ValueError, TypeError):
+            playwright_version = None
+    chromium_version = (
+        _checkout_version(
+            [str(chromium), "--version"],
+            re.compile(r"^(?:Chromium|Chrome) [0-9]+(?:\.[0-9]+){1,3}$"),
+            env,
+        )
+        if chromium is not None
+        else None
+    )
+    return {
+        "node": node_version,
+        "playwright": playwright_version,
+        "chromium": chromium_version,
+    }
+
+
+def _checkout_branch_stage(case_id: str, stages: set[str]) -> str | None:
+    """Return the one branch marker observed for ``case_id``, if any.
+
+    The branch markers are mutually exclusive: a case that reports both is
+    malformed evidence, never resolved by picking one.
+    """
+
+    markers = _CHECKOUT_BRANCH_STAGES.get(case_id, ())
+    observed = [stage for stage in markers if stage in stages]
+    if len(observed) > 1:
+        raise AssertionError("checkout evidence is malformed")
+    return observed[0] if observed else None
+
+
+def _checkout_allowed_stages(case_id: str) -> frozenset[str]:
+    """Stages ``case_id`` may record: its own fixed stages and branch markers.
+
+    The allowlist is per case, so one case can never borrow another case's
+    stage to satisfy its required set.
+    """
+
+    required = next(stages for case, stages in CHECKOUT_CASES if case == case_id)
+    return frozenset(required) | frozenset(_CHECKOUT_BRANCH_STAGES.get(case_id, ()))
+
+
+def _checkout_case_stages(
+    case_id: str, observed: set[str] | None = None
+) -> list[str]:
+    """Stages recorded for one case: its required stages plus its branch.
+
+    Without ``observed`` output the branch is unknown and no marker is
+    claimed.  Otherwise only markers seen in that output are included, so
+    evidence never names a branch that did not run.
+    """
+
+    required = next(stages for case, stages in CHECKOUT_CASES if case == case_id)
+    stages = list(required)
+    branch = _checkout_branch_stage(case_id, observed or set())
+    if branch is not None:
+        stages.append(branch)
+    return stages
+
+
+def _checkout_cases_evidence(
+    observed_stages: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    return [
+        {"case_id": case_id, "stages": _checkout_case_stages(case_id, observed_stages)}
+        for case_id in CHECKOUT_CASE_IDS
+    ]
+
+
+def _checkout_evidence_is_mapping(value: Any) -> bool:
+    return isinstance(value, dict)
+
+
+def _checkout_evidence_structure(evidence: Any) -> list[dict[str, Any]]:
+    """Validate the fixed schema without consulting current binaries/source."""
+
+    if not _checkout_evidence_is_mapping(evidence):
+        raise AssertionError("checkout evidence is malformed")
+    if set(evidence) != {
+        "schema",
+        "schema_version",
+        "journey",
+        "status",
+        "cases",
+        "source",
+        "artifacts",
+        "tools",
+    }:
+        raise AssertionError("checkout evidence is malformed")
+    if evidence.get("schema") != CHECKOUT_EVIDENCE_SCHEMA:
+        raise AssertionError("checkout evidence is malformed")
+    if (
+        type(evidence.get("schema_version")) is not int
+        or evidence.get("schema_version") != CHECKOUT_EVIDENCE_VERSION
+    ):
+        raise AssertionError("checkout evidence is malformed")
+    if evidence.get("journey") != CHECKOUT_JOURNEY_ID:
+        raise AssertionError("checkout evidence is malformed")
+    if evidence.get("status") != "PASS":
+        raise AssertionError("checkout evidence is not PASS")
+
+    cases = evidence.get("cases")
+    if not isinstance(cases, list):
+        raise AssertionError("checkout evidence is malformed")
+    seen: set[str] = set()
+    by_id: dict[str, dict[str, Any]] = {}
+    for entry in cases:
+        if not isinstance(entry, dict) or set(entry) != {"case_id", "stages"}:
+            raise AssertionError("checkout evidence is malformed")
+        case_id = entry.get("case_id")
+        stages = entry.get("stages")
+        if not isinstance(case_id, str) or case_id not in CHECKOUT_CASE_IDS:
+            raise AssertionError("checkout evidence is malformed")
+        if case_id in seen:
+            raise AssertionError("checkout evidence is malformed")
+        if not isinstance(stages, list) or not all(
+            isinstance(stage, str) for stage in stages
+        ):
+            raise AssertionError("checkout evidence is malformed")
+        seen.add(case_id)
+        by_id[case_id] = entry
+    if seen != set(CHECKOUT_CASE_IDS):
+        raise AssertionError(
+            "checkout evidence is missing an expected checkout case"
+        )
+    for case_id, expected_stages in CHECKOUT_CASES:
+        stages = by_id[case_id]["stages"]
+        observed = set(stages)
+        # A case may record only its own fixed stages plus its own optional
+        # branch markers.  The global allowlist alone would let, say, a
+        # cross-site exclusion stand in for a missing approve stage.
+        allowed = _checkout_allowed_stages(case_id)
+        # Unknown, duplicated or foreign stages are never part of the contract.
+        if len(observed) != len(stages) or not observed <= allowed:
+            raise AssertionError("checkout evidence is malformed")
+        # The mutually exclusive branches cannot both have run.
+        _checkout_branch_stage(case_id, observed)
+        if not set(expected_stages) <= observed:
+            raise AssertionError(
+                "checkout evidence is missing an expected checkout stage"
+            )
+
+    source = evidence.get("source")
+    if (
+        not isinstance(source, dict)
+        or set(source) != {"git_revision", "source_sha256"}
+    ):
+        raise AssertionError("checkout evidence is malformed")
+    if "git_revision" in source:
+        revision = source["git_revision"]
+        if revision is not None and (
+            not isinstance(revision, str)
+            or _CHECKOUT_GIT_REVISION_RE.fullmatch(revision) is None
+        ):
+            raise AssertionError("checkout evidence is malformed")
+    if "source_sha256" in source:
+        source_hash = source["source_sha256"]
+        if not isinstance(
+            source_hash, str
+        ) or not _CHECKOUT_HEX64_RE.fullmatch(source_hash):
+            raise AssertionError("checkout evidence is malformed")
+
+    artifacts = evidence.get("artifacts")
+    if not isinstance(artifacts, dict) or set(artifacts) != set(
+        CHECKOUT_BINARY_ROLES
+    ):
+        raise AssertionError("checkout evidence is malformed")
+    for role in CHECKOUT_BINARY_ROLES:
+        value = artifacts.get(role)
+        if not isinstance(value, str) or not _CHECKOUT_HEX64_RE.fullmatch(value):
+            raise AssertionError("checkout evidence is malformed")
+
+    tools = evidence.get("tools")
+    if not isinstance(tools, dict) or set(tools) != set(
+        _CHECKOUT_TOOL_VERSIONS
+    ):
+        raise AssertionError("checkout evidence is malformed")
+    for name, pattern in _CHECKOUT_TOOL_VERSIONS.items():
+        value = tools.get(name)
+        if value is None:
+            continue
+        if not isinstance(value, str) or pattern.fullmatch(value) is None:
+            raise AssertionError("checkout evidence is malformed")
+    return cases
+
+
+def _checkout_evidence_matches(
+    evidence: dict[str, Any],
+    source_identity: dict[str, Any],
+    artifact_hashes: dict[str, str],
+) -> None:
+    source = evidence.get("source")
+    if not isinstance(source, dict) or any(
+        source_identity.get(key) != value for key, value in source.items()
+    ):
+        raise AssertionError(
+            "checkout evidence is stale for the current source"
+        )
+    if evidence.get("artifacts") != artifact_hashes:
+        raise AssertionError(
+            "checkout evidence does not match the current binaries"
+        )
+
+
+def _parse_checkout_stdout(stdout: str) -> tuple[set[str], bool]:
+    """Extract only the fixed stage allowlist and the fixed PASS summary."""
+
+    allowed = set(_CHECKOUT_STAGE_LABELS)
+    stages: set[str] = set()
+    summary = False
+    for raw in str(stdout or "").splitlines():
+        line = raw.rstrip("\r")
+        if line.startswith(_CHECKOUT_STAGE_PREFIX):
+            label = line[len(_CHECKOUT_STAGE_PREFIX) :]
+            if label in allowed:
+                stages.add(label)
+        elif line == CHECKOUT_PASS_SUMMARY:
+            summary = True
+    return stages, summary
+
+
+def _checkout_child_umask() -> None:
+    os.umask(0o077)
+
+
+def _invoke_checkout_journey(
+    command: list[str],
+    *,
+    env: dict[str, str],
+    cwd: Path,
+    timeout: float,
+) -> tuple[int, str, str]:
+    """Run the native script with captured output; output never leaves memory."""
+
+    proc = subprocess.Popen(
+        command,
+        cwd=str(cwd),
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        start_new_session=True,
+        preexec_fn=_checkout_child_umask,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        terminate_process_group(proc, grace=5.0, owned_group=proc.pid)
+        try:
+            stdout, stderr = proc.communicate(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            stdout, stderr = "", ""
+        raise
+    return proc.returncode, stdout or "", stderr or ""
+
+
+def _checkout_run(
+    ctx: E2EContext, artifacts: dict[str, Any], timeout: float
+) -> dict[str, Any]:
+    _checkout_execution_environment(artifacts)
+    node = artifacts.get("node")
+    if node is None:
+        raise _checkout_pending(
+            "native checkout prerequisites are absent: node runtime"
+        )
+    private = Path(tempfile.mkdtemp(prefix="lk-", dir="/tmp"))
+    try:
+        os.chmod(private, 0o700)
+        for name in ("cache", "config", "data", "state", "runtime"):
+            directory = private / name
+            directory.mkdir(mode=0o700)
+        env = dict(os.environ)
+        for stale in (
+            "LOCKLARK_TEST_SHARED_CLIPBOARD",
+            "LOCKLARK_TEST_FAILURE_STAGE",
+            "LOCKLARK_TEST_BROWSER_PARITY",
+        ):
+            env.pop(stale, None)
+        env.update(
+            {
+                "TMPDIR": str(private),
+                "XDG_CACHE_HOME": str(private / "cache"),
+                "XDG_CONFIG_HOME": str(private / "config"),
+                "XDG_DATA_HOME": str(private / "data"),
+                "XDG_STATE_HOME": str(private / "state"),
+                "XDG_RUNTIME_DIR": str(private / "runtime"),
+                "LOCKLARK_TEST_CHECKOUT_FRAMES": "1",
+                "LOCKLARK_TEST_BROWSER": "chromium",
+                "LOCKLARK_BROWSER_HOST": str(artifacts["chromium_host"]),
+                "LOCKLARK_BROWSER_REGISTER": str(
+                    artifacts["browser_register"]
+                ),
+                "LOCKLARK_BROWSER_FIXTURE": str(artifacts["fixture"]),
+                "LOCKLARK_TEST_BROWSER_EXECUTABLE": str(
+                    artifacts["chromium"]
+                ),
+            }
+        )
+        if artifacts.get("playwright") is not None:
+            env["LOCKLARK_TEST_PLAYWRIGHT"] = str(artifacts["playwright"])
+        go = shutil.which("go") or (os.environ.get("LOCKLARK_GO") or "").strip()
+        if go:
+            env["LOCKLARK_GO"] = go
+        command = [
+            "dbus-run-session",
+            "--",
+            "xvfb-run",
+            "-a",
+            "-s",
+            "-screen 0 1280x900x24",
+            str(node),
+            "scripts/browser_native_acceptance.mjs",
+        ]
+        try:
+            returncode, stdout, _stderr = _invoke_checkout_journey(
+                command,
+                env=env,
+                cwd=Path(ctx.repo_root),
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            raise AssertionError(
+                "native checkout acceptance timed out"
+            ) from None
+        if returncode != 0:
+            raise AssertionError(
+                f"native checkout acceptance exited with status {returncode}"
+            )
+        observed_stages, summary = _parse_checkout_stdout(stdout)
+        if not summary:
+            raise AssertionError(
+                "native checkout acceptance did not emit the expected PASS summary"
+            )
+        missing = [
+            stage
+            for stage in CHECKOUT_REQUIRED_STAGES
+            if stage not in observed_stages
+        ]
+        branch = _checkout_branch_stage(CHECKOUT_BRANCH_CASE_ID, observed_stages)
+        if branch is None:
+            # A cross-site run must prove exactly one outcome: either the
+            # child was excluded or it reached the native review.  Name only
+            # the fixed branch IDs, which are already allowlisted.
+            missing.extend(
+                stage
+                for stage in _CHECKOUT_BRANCH_STAGES[CHECKOUT_BRANCH_CASE_ID]
+                if stage not in missing
+            )
+        if missing:
+            # Name only fixed allowlisted stage IDs; captured output never leaks.
+            raise AssertionError(
+                "native checkout acceptance omitted expected checkout stage(s): "
+                + ", ".join(missing)
+            )
+        source_identity = _checkout_source_identity(ctx.repo_root)
+        artifact_hashes = _checkout_artifact_hashes(artifacts)
+        evidence = {
+            "schema": CHECKOUT_EVIDENCE_SCHEMA,
+            "schema_version": CHECKOUT_EVIDENCE_VERSION,
+            "journey": CHECKOUT_JOURNEY_ID,
+            "status": "PASS",
+            "cases": _checkout_cases_evidence(observed_stages),
+            "source": source_identity,
+            "artifacts": artifact_hashes,
+            "tools": _checkout_tool_metadata(artifacts, env),
+        }
+        _checkout_evidence_structure(evidence)
+        _checkout_evidence_matches(evidence, source_identity, artifact_hashes)
+        return evidence
+    finally:
+        shutil.rmtree(private, ignore_errors=True)
+
+
+def _load_checkout_evidence(path: Path) -> dict[str, Any]:
+    try:
+        if path.stat().st_size > _CHECKOUT_EVIDENCE_MAX_BYTES:
+            raise AssertionError("checkout evidence is malformed")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except AssertionError:
+        raise
+    except (OSError, ValueError, TypeError):
+        raise AssertionError("checkout evidence could not be read or parsed") from None
+    _checkout_evidence_structure(payload)
+    return payload
+
+
+def _write_checkout_evidence(path: Path, evidence: dict[str, Any]) -> None:
+    text = json.dumps(evidence, ensure_ascii=False, sort_keys=True, indent=2)
+    try:
+        path.write_text(text + "\n", encoding="utf-8")
+        os.chmod(path, 0o600)
+    except OSError:
+        raise AssertionError(
+            "checkout evidence output could not be written"
+        ) from None
+
+
+def _revalidate_checkout_cache_hit(
+    ctx: E2EContext, cached: dict[str, Any], evidence_raw: str, mode: str
+) -> None:
+    """Recheck every bound input before a cached proof may be returned.
+
+    A cached proof is only reused when the consumed evidence (in evidence
+    mode) or the cached success proof (in native mode) still matches the
+    current source identity and binary hashes.  The journey never reruns here.
+    """
+
+    if mode == "evidence":
+        if not evidence_raw:
+            raise AssertionError("checkout evidence could not be read or parsed")
+        proof = _load_checkout_evidence(Path(evidence_raw))
+    else:
+        proof = cached
+    _checkout_evidence_structure(proof)
+    _checkout_evidence_matches(
+        proof,
+        _checkout_source_identity(ctx.repo_root),
+        _checkout_artifact_hashes(_resolve_checkout_artifacts(ctx)),
+    )
+
+
+def checkout_native_acceptance(
+    ctx: E2EContext, *, timeout: float = _CHECKOUT_TIMEOUT
+) -> dict[str, Any]:
+    """Return validated sanitized evidence for the native Chromium checkout.
+
+    Enablement is explicit: an existing evidence manifest is consumed when
+    ``LOCKLARK_E2E_CHECKOUT_EVIDENCE`` is set, otherwise the real journey runs
+    only with ``LOCKLARK_E2E_CHECKOUT_NATIVE=1``.  A missing opt-in or runtime
+    prerequisite is PENDING_FEATURE; any attempted journey or evidence failure
+    is an AssertionError (FAIL).  Only fixed case/stage labels, hashes, the git
+    revision and safe version metadata are returned or written.
+    """
+
+    evidence_raw = (
+        os.environ.get("LOCKLARK_E2E_CHECKOUT_EVIDENCE") or ""
+    ).strip()
+    native_enabled = (
+        os.environ.get("LOCKLARK_E2E_CHECKOUT_NATIVE") or ""
+    ).strip() == "1"
+    if not evidence_raw and not native_enabled:
+        raise _checkout_pending(
+            "native Chromium checkout acceptance is not enabled"
+        )
+
+    repo_key = str(Path(ctx.repo_root).resolve())
+    bin_key = str(Path(ctx.bin_dir).resolve())
+    mode = "evidence" if evidence_raw else "native"
+    cache_key = (repo_key, bin_key, evidence_raw, mode)
+    cached = _CHECKOUT_JOURNEY_CACHE.get(cache_key)
+    if cached is not None:
+        _revalidate_checkout_cache_hit(ctx, cached, evidence_raw, mode)
+        if mode == "native":
+            output = (
+                os.environ.get("LOCKLARK_E2E_CHECKOUT_EVIDENCE_OUT") or ""
+            ).strip()
+            if output:
+                _write_checkout_evidence(Path(output), cached)
+        return copy.deepcopy(cached)
+
+    if evidence_raw:
+        evidence = _load_checkout_evidence(Path(evidence_raw))
+        source_identity = _checkout_source_identity(ctx.repo_root)
+        artifacts = _resolve_checkout_artifacts(ctx)
+        artifact_hashes = _checkout_artifact_hashes(artifacts)
+        _checkout_evidence_matches(evidence, source_identity, artifact_hashes)
+        result = evidence
+    else:
+        artifacts = _resolve_checkout_artifacts(ctx)
+        result = _checkout_run(ctx, artifacts, timeout)
+        output = (
+            os.environ.get("LOCKLARK_E2E_CHECKOUT_EVIDENCE_OUT") or ""
+        ).strip()
+        if output:
+            _write_checkout_evidence(Path(output), result)
+
+    _CHECKOUT_JOURNEY_CACHE[cache_key] = copy.deepcopy(result)
+    return copy.deepcopy(result)
+
+
 def checklist_rows(text: str) -> list[list[str]]:
     """Parse simple markdown table rows (header separators excluded)."""
 
@@ -2328,7 +3204,17 @@ __all__ = [
     "f13_cli_hibp_range_lookups",
     "local_hibp_range_server",
     "HIBP_NETWORK_PROMPT",
+    "CHECKOUT_BINARY_ROLES",
+    "CHECKOUT_BRANCH_CASE_ID",
+    "CHECKOUT_CASE_IDS",
+    "CHECKOUT_CASES",
+    "CHECKOUT_EVIDENCE_SCHEMA",
+    "CHECKOUT_OPTIONAL_STAGES",
+    "CHECKOUT_PASS_SUMMARY",
+    "CHECKOUT_REQUIRED_STAGES",
+    "CHECKOUT_SOURCE_FILES",
     "card_fill_explicit_authorization_component",
+    "checkout_native_acceptance",
     "f13_cli_hibp_opt_in",
     "HEX32_RE",
     "F14_REQUIRED_PROFILES",

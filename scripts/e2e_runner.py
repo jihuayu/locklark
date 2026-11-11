@@ -268,6 +268,8 @@ def run_tests(specs: list[Any], bin_dir: Path, start_all: float) -> dict[str, An
             "duration_sec": round(duration, 6),
             "message": message,
         }
+        if ctx is not None and ctx.evidence is not None:
+            record["evidence"] = ctx.evidence
         results.append(record)
         _count_status(by_tier[str(spec.tier)], status)
         for feature in spec.features:
