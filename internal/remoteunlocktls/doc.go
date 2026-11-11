@@ -38,6 +38,20 @@
 //     the public codec error (wrapping remoteunlock.ErrInvalidContext), and
 //     for a valid ctx they raise exactly the Channel errors described for
 //     the opaque methods, including the length check on expected.
+//   - VerifyPeerDeviceTransportBinding(binding, ctx, expectedDeviceID,
+//     callerPinnedKey) checks that a stable pkg/remoteunlock
+//     .DeviceTransportBinding names this channel's peer and verifies under a
+//     caller-pinned Ed25519 key. It runs, in this exact order: (1) Check, so
+//     an uninitialized, closed, incomplete, non-TLS-1.3, resumed, unverified
+//     or wrongly pinned channel is refused before anything else is read; (2)
+//     the SPKI comparison, PeerSPKIPinOf of the actual verified peer leaf
+//     (VerifiedChains[0][0]) against binding.SPKISHA256, returning
+//     ErrDeviceTransportBindingSPKIMismatch on mismatch before the context,
+//     device ID, key or signature are inspected; then (3)
+//     remoteunlock.VerifyDeviceTransportBindingForContext(binding, ctx,
+//     expectedDeviceID, callerPinnedKey) with its errors returned unchanged.
+//     The signing key must come from the caller's authenticated state, never
+//     from the binding or the channel.
 //
 // Close marks the Channel closed before closing the underlying connection.
 // After Close, Check returns ErrChannelClosed. The binding methods also
@@ -48,8 +62,11 @@
 // and typed VerifyBindingContext also checks the length of expected before
 // the Channel is reached. For valid inputs, including a correctly sized
 // expected value on a closed Channel, each of these methods returns
-// ErrChannelClosed. Although a closed TLS connection retains the exporter
-// inputs of its completed handshake, no binding is derived from it. Closing
+// ErrChannelClosed. VerifyPeerDeviceTransportBinding calls Check before
+// looking at any of its other arguments, so a closed Channel always yields
+// ErrChannelClosed there. Although a closed TLS connection retains the
+// exporter inputs of its completed handshake, no binding is derived from it.
+// Closing
 // again returns net.ErrClosed; data reads and writes carry no remote-unlock
 // semantics and keep their plain connection behaviour.
 //
@@ -93,4 +110,14 @@
 // the request, device identity, signatures, pairing, membership or policy,
 // does not check the deadline or expiry, does not consume one-shot request
 // state, and does not handle VUK delivery or authorize VUK use.
+//
+// VerifyPeerDeviceTransportBinding is likewise a narrow overlap check, not an
+// unlock. On this already-verified channel it proves only that the peer
+// certificate SPKI equals the digest signed inside the binding, and that the
+// caller-pinned key verifies that stable binding consistently with the
+// supplied context claims and expected device identifier. It authenticates
+// neither key's provenance nor the context, and it claims no enrollment,
+// policy, pairing, request freshness, digest or deadline correctness,
+// one-shotness, exporter or request binding, VUK access or delivery, or
+// completion of #127.
 package remoteunlocktls

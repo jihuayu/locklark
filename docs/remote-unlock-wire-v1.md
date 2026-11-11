@@ -5,6 +5,9 @@ request lifecycle. The package `pkg/remoteunlock` implements exactly these
 encodings, the binding signature check in
 [Stable device transport binding v1](#stable-device-transport-binding-v1), and
 the lifecycle in [Process-local request lifecycle](#process-local-request-lifecycle).
+`internal/remoteunlocktls` additionally exposes a narrow channel-side check of a
+peer binding against the verified TLS peer certificate
+([Peer binding over an established channel](#peer-binding-over-an-established-channel)).
 The vectors below are synthetic and demonstrate the codecs only.
 
 ## Scope
@@ -297,6 +300,39 @@ following, and this checkpoint must not be cited as doing so:
 
 Those properties require separate authenticated policy lookup, channel binding,
 authorization, pairing, replay and VUK controls outside this package.
+
+### Peer binding over an established channel
+
+`internal/remoteunlocktls.Channel` adds one explicit check,
+`VerifyPeerDeviceTransportBinding(binding, c, expectedDeviceID, callerPinnedKey)`.
+It does not change the wire bytes above. It runs, in exactly this order:
+
+1. `c.Check()` on the established `Channel`: a zero or uninitialized channel
+   returns `ErrUninitializedChannel`, a closed one returns `ErrChannelClosed`,
+   and an incomplete, non-TLS-1.3, resumed or unverified handshake, or a
+   verified leaf that no longer matches the handshake pin, returns the
+   corresponding `Check` error. None of the binding, context, device ID, key or
+   signature is read before this passes.
+2. `PeerSPKIPinOf(c.conn.ConnectionState().VerifiedChains[0][0])` — the SHA-256
+   SPKI pin of the **actual verified peer leaf** — is compared with
+   `binding.spki_sha256`. A mismatch returns
+   `remoteunlocktls.ErrDeviceTransportBindingSPKIMismatch` before the context,
+   device ID, key or signature is inspected.
+3. Only then, `remoteunlock.VerifyDeviceTransportBindingForContext(binding, c,
+   expectedDeviceID, callerPinnedKey)` is called, with its errors (normally
+   wrapping `ErrInvalidBinding`) returned unchanged. Its member, vault, pair
+   generation, endpoint and signature rules are not duplicated here.
+
+`callerPinnedKey` is supplied independently by the caller from authenticated
+state such as pinned vault policy; it is never resolved from the binding or the
+channel. A nil return proves only that this already verified TLS channel's peer
+certificate SPKI matches the signed `spki_sha256` and that the caller's pinned
+key verifies that stable binding consistently with the context claims and the
+expected device identifier. It claims none of the following: enrollment,
+provenance or trust of either key, `remote_unlock` authorization, pairing
+approval, request freshness, request or policy digest correctness, deadline
+validity, one-shot consumption, exporter/request binding, authentication of the
+context claims, VUK access or delivery, or a complete mobile unlock.
 
 ## Process-local request lifecycle
 

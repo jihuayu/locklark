@@ -57,6 +57,12 @@ var (
 	// keeps the exporter inputs of its completed handshake, so bindings must
 	// not be derived or verified on it.
 	ErrChannelClosed = errors.New("remoteunlocktls: channel is closed")
+	// ErrDeviceTransportBindingSPKIMismatch is returned by
+	// Channel.VerifyPeerDeviceTransportBinding when the SPKI digest inside
+	// the device transport binding does not equal the SPKI pin of the
+	// verified peer certificate on this channel. It is checked before the
+	// binding signature or context, which are not inspected.
+	ErrDeviceTransportBindingSPKIMismatch = errors.New("remoteunlocktls: device transport binding SPKI does not match the verified peer certificate")
 )
 
 // ClientOptions configures the initiator role.
