@@ -16,6 +16,11 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// peerBeforeHello is true on Windows: ImpersonateNamedPipeClient authenticates
+// the security context of the last message read from the pipe, so the broker
+// reads the bounded hello first and only then queries the client identity.
+const peerBeforeHello = true
+
 var brokerImpersonate = windows.NewLazySystemDLL("advapi32.dll").NewProc("ImpersonateNamedPipeClient")
 
 func ownerSID() (string, error) {
@@ -74,17 +79,25 @@ func listenLocal(path string) (net.Listener, error) {
 }
 
 func dialLocal(ctx context.Context, endpoint string) (net.Conn, error) {
-	timeout := 300 * time.Millisecond
-	if deadline, ok := ctx.Deadline(); ok {
-		if remaining := time.Until(deadline); remaining > 0 && remaining < timeout {
-			timeout = remaining
-		}
-	}
-	conn, e := winio.DialPipe(endpoint, &timeout)
+	ctx, cancel := dialBudget(ctx)
+	defer cancel()
+	// Identification is the least privilege that still lets the broker's
+	// OpenThreadToken(TOKEN_QUERY) read the client SID. go-winio's other
+	// DialPipe paths open with SECURITY_ANONYMOUS, which cannot be queried.
+	conn, e := winio.DialPipeAccessImpLevel(ctx, endpoint, windows.GENERIC_READ|windows.GENERIC_WRITE, winio.PipeImpLevelIdentification)
 	if e != nil {
 		return nil, ErrBrokerUnavailable
 	}
 	return conn, nil
+}
+
+// dialBudget bounds a local dial to 300ms and inherits any shorter or already
+// canceled caller context.
+func dialBudget(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithTimeout(ctx, 300*time.Millisecond)
 }
 
 func authenticatedPeer(conn net.Conn) (Peer, error) {

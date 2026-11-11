@@ -244,18 +244,52 @@ func (b *Broker) neverOrigins() []string {
 	return out
 }
 
-func (b *Broker) serve(conn net.Conn) {
-	defer conn.Close()
-	peer, e := authenticatedPeer(conn)
-	if e != nil {
-		return
+// handshake reads the bounded hello and authenticates the OS peer before any
+// hello byte is decoded or any side effect is dispatched. peerBeforeHello
+// is false on Unix, which takes the peer identity from already-connected
+// socket credentials before reading (unchanged); it is true on Windows, where
+// ImpersonateNamedPipeClient authenticates the security context of the last
+// message read, so the hello must be the first read and the peer is resolved
+// from that same pipe handle before parsing. Every step fails closed with a
+// nil frame and no peer.
+func (b *Broker) handshake(conn net.Conn) (Peer, []byte) {
+	if !peerBeforeHello {
+		peer, e := authenticatedPeer(conn)
+		if e != nil {
+			return Peer{}, nil
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		raw, e := readFrame(conn, 4096)
+		if e != nil {
+			clear(raw)
+			return Peer{}, nil
+		}
+		_ = conn.SetReadDeadline(time.Time{})
+		return peer, raw
 	}
+	// Clear the read deadline before impersonating: the identity query issues
+	// overlapped I/O on the same pipe handle the deadline timer would close.
 	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	raw, e := readFrame(conn, 4096)
+	_ = conn.SetReadDeadline(time.Time{})
 	if e != nil {
+		clear(raw)
+		return Peer{}, nil
+	}
+	peer, e := authenticatedPeer(conn)
+	if e != nil {
+		clear(raw)
+		return Peer{}, nil
+	}
+	return peer, raw
+}
+
+func (b *Broker) serve(conn net.Conn) {
+	defer conn.Close()
+	peer, raw := b.handshake(conn)
+	if raw == nil {
 		return
 	}
-	_ = conn.SetReadDeadline(time.Time{})
 	var hello BrokerHello
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
