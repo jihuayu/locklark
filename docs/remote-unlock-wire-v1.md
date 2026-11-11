@@ -1154,11 +1154,17 @@ I/O deadlines. It covers exactly two rejections and nothing more:
    test-only approval and one genuine age-wrapped VUK over the real TLS
    channel, and its test result proves it actually sealed and sent one VUK. The
    client reads both after cancellation but never calls
-   `vaultfile.OpenVUKForDevice`, so no plaintext VUK buffer exists; `Confirm`
-   and `Receive` stay rejected with `ErrLifecycleTransition`, the status stays
-   `cancelled`, the plaintext VUK is absent from the envelope, and the
-   caller-owned ciphertext buffer is cleared. This API has no locked state, so
-   only `Cancel` is covered.
+   `vaultfile.OpenVUKForDevice`: it never unpacks the late ciphertext and so
+   derives no client-side plaintext VUK from that response, and it clears the
+   caller-owned ciphertext buffer with a zero-buffer assertion. The server, by
+   contrast, must hold the synthetic plaintext VUK to seal its response with
+   `vaultfile.SealVUKForDevice` and clears its source buffer. The test does not
+   claim the server never held plaintext, and it makes no bytewise comparison
+   against the VUK, so it does not claim the VUK is absent from the envelope
+   bytes; it only checks that the device age recipient is not carried in
+   plaintext. `Confirm` and `Receive` stay rejected with
+   `ErrLifecycleTransition` and the status stays `cancelled`. This API has no
+   locked state, so only `Cancel` is covered.
 
 Cancellation in case 2 is **local and in-memory only**. It does not revoke the
 authorization, notify the server, stop the server from delivering the late

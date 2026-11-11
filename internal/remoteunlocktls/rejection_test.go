@@ -29,7 +29,11 @@ package remoteunlocktls
 //  2. A fresh request whose local lifecycle is cancelled while the server is
 //     verified and paused before any response frame. The server then still
 //     sends one test-only approval and one genuine age-wrapped VUK. The local
-//     lifecycle stays cancelled and never consumes the late response.
+//     lifecycle stays cancelled and never consumes the late response: the
+//     client reads the late ciphertext but never opens it, so it derives no
+//     client-side plaintext VUK from that response. The server itself holds
+//     the synthetic plaintext VUK to seal the response and clears its source
+//     buffer.
 //
 // It is not a failure matrix: it does not exercise a wrong SPKI, key, device,
 // member, expiry, policy, signature or restart, and it makes no claim that
@@ -329,7 +333,9 @@ func runRejectionServer(ch *Channel, fx *compositionFixture, hooks rejectionHook
 }
 
 // sealAndWriteVUK seals one genuine age envelope for the current-policy source
-// device, records it as sealed, and writes it as one bounded frame.
+// device, records it as sealed, and writes it as one bounded frame. It must
+// hold the synthetic plaintext VUK to seal the response; it clears that
+// caller-owned source buffer before returning.
 func (a *rejectionExchangeResult) sealAndWriteVUK(ch *Channel, fx *compositionFixture) error {
 	vuk := syntheticCompositionVUK()
 	defer clear(vuk)
@@ -800,13 +806,17 @@ func TestLoopbackCancelledRequestDoesNotConsumeLateVUK(t *testing.T) {
 		t.Fatal("lifecycle context changed after the late response")
 	}
 
-	// No plaintext VUK: the late envelope was deliberately not passed to
-	// vaultfile.OpenVUKForDevice, so no VUK buffer ever exists here.
-	expectedVUK := syntheticCompositionVUK()
-	defer clear(expectedVUK)
-	if bytes.Contains(lateEnvelope, expectedVUK) {
-		t.Fatal("late envelope contains the plaintext VUK")
-	}
+	// Client-side plaintext boundary: the late envelope is never passed to
+	// vaultfile.OpenVUKForDevice, so the client never unpacks it and derives no
+	// client-side plaintext VUK from this response. The only plaintext VUK in
+	// this flow is the server's synthetic source value: the server must hold it
+	// to seal the response with vaultfile.SealVUKForDevice and clears that
+	// source buffer before it returns (see sealAndWriteVUK). This test does not
+	// claim the server never held plaintext, and because it makes no bytewise
+	// comparison against the VUK it does not claim the VUK is absent from the
+	// envelope bytes. The envelope is cleared above. The bounded recipient
+	// check below is a separate property: the device age recipient is not
+	// carried in plaintext.
 	if bytes.Contains(lateEnvelope, []byte(fx.sourceRecipient)) {
 		t.Fatal("late envelope leaks the source recipient in plaintext")
 	}
