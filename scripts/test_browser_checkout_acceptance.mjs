@@ -1980,6 +1980,7 @@ test("route per-field copy uses physical input, exact native labels and the priv
   assert.match(adapter, /count: \(selector\) => route\.count\(selector\),/);
   assert.match(adapter, /text: \(selector\) => route\.text\(selector\),/);
   assert.match(adapter, /evaluate: \(expression\) => route\.evaluate\(expression\),/);
+  assert.match(adapter, /bringToFront: \(\) => route\.bringToFront\(\),/);
   assert.match(adapter, /close: \(\) => route\.close\(\),/);
   assert.doesNotMatch(adapter, /dispatchEvent|\.evaluate\([^)]*click/);
   // Closed world: the adapter exposes exactly these five methods and the
@@ -1987,11 +1988,23 @@ test("route per-field copy uses physical input, exact native labels and the priv
   const exposed = [...adapter.matchAll(/^\s{8}([a-zA-Z]+): /gm)]
     .map((match) => match[1])
     .sort();
-  assert.deepEqual(exposed, ["click", "close", "count", "evaluate", "text"]);
+  assert.deepEqual(exposed, [
+    "bringToFront",
+    "click",
+    "close",
+    "count",
+    "evaluate",
+    "text",
+  ]);
   const called = new Set(
     [...checkpoint.matchAll(/\broute\.([a-zA-Z]+)\(/g)].map((match) => match[1]),
   );
   assert.deepEqual([...called].sort(), exposed);
+  // The forwarded bringToFront is exactly one CDP Page.bringToFront call.
+  assert.equal(
+    countMatches(source, /bringToFront: \(\) => call\("Page\.bringToFront"\),/g),
+    1,
+  );
   // The forwarded method is the real mouse wrapper: visibility and hit-test
   // first, then one CDP mousePressed/mouseReleased pair.
   const popupFrom = source.indexOf("async function attachPopup(target) {");
@@ -2005,6 +2018,24 @@ test("route per-field copy uses physical input, exact native labels and the priv
   assert.match(wrapper, /type: "mousePressed"/);
   assert.match(wrapper, /type: "mouseReleased"/);
   assert.doesNotMatch(wrapper, /dispatchEvent/);
+  // Focus is restored and proven (visible and focused) immediately before the
+  // one physical click, never by a DOM or synthesized bypass.
+  const focusStage = checkpoint.indexOf('mark("route:copy-focus")');
+  const bringCall = checkpoint.indexOf("await route.bringToFront();");
+  const focusProof = checkpoint.indexOf(
+    'document.visibilityState === "visible" && document.hasFocus() === true',
+  );
+  const clickCall = checkpoint.indexOf(
+    "await route.click(ROUTE_COPY_FIELD_SELECTOR);",
+  );
+  assert.ok(focusStage > 0 && bringCall > focusStage, "focus stage/order");
+  assert.ok(focusProof > bringCall, "focus proof must follow bringToFront");
+  assert.ok(clickCall > focusProof, "click must follow the focus proof");
+  assert.match(
+    checkpoint.slice(bringCall, clickCall),
+    /Route page did not return to the foreground/,
+  );
+  assert.doesNotMatch(checkpoint, /document\.hasFocus =|\.focus\(\)/);
   // The route journey calls that forwarded method, not a local substitute.
   assert.match(
     checkpoint,

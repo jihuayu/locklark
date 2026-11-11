@@ -925,6 +925,8 @@ try {
             type, key: "a", code: "KeyA", modifiers: 2, windowsVirtualKeyCode: 65,
           });
       },
+      // Focus the attached page itself through CDP; no other side effect.
+      bringToFront: () => call("Page.bringToFront"),
       targetId: target.id,
       close: () => ws.close(),
       dismiss: async () => {
@@ -1358,6 +1360,18 @@ try {
       assert.equal(routes[0].id, routeTarget, "Route target was replaced");
       // Per-field copy proof. The harness only performs mouse input and reads
       // fixed labels/booleans; it never dispatches DOM events or messages.
+      mark("route:copy-focus");
+      // The native read approval leaves the desktop app in front, so the
+      // route tab must be returned to the foreground as an ordinary user
+      // would. The reviewed mouse wrapper only clicks a visible, focused page.
+      await route.bringToFront();
+      await wait(
+        async () =>
+          (await route.evaluate(
+            'document.visibilityState === "visible" && document.hasFocus() === true',
+          )) === true,
+        "Route page did not return to the foreground",
+      );
       mark("route:copy-field");
       assert.equal(
         await route.count(ROUTE_COPY_FIELD_SELECTOR),
@@ -1573,6 +1587,7 @@ try {
         evaluate: (expression) => route.evaluate(expression),
         count: (selector) => route.count(selector),
         text: (selector) => route.text(selector),
+        bringToFront: () => route.bringToFront(),
         // The reviewed real CDP mouse wrapper (visibility/hit-test, then
         // mousePressed/mouseReleased). No second click path exists here.
         click: (selector) => route.click(selector),
@@ -1974,6 +1989,7 @@ try {
     "route-detail-title-mismatch",
     "route-concealed-control-missing",
     "route-password-rendered",
+    "Route page did not return to the foreground",
     "Route password copy control missing",
     "Route password is not concealed",
     "Route displayed the password",
