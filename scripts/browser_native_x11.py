@@ -254,8 +254,11 @@ def parse_owner_request(request):
 
     Two shapes exist. `ownership_probe: true` is the zero-action probe: the
     driver derives the owner PID from the unique real owner window and returns
-    only the fixed ownership class. `owner: true` is the input shape and keeps
-    the caller's verified owner PID plus already-validated text/key actions.
+    only the fixed ownership class. `owner: true` is the input shape: the
+    driver derives the owner PID from the same unique real owner window, then
+    checks the exact executable image, the single exact private
+    --user-data-dir switch and the chooser attribution before any input. An
+    optional caller PID is validated and must equal the derived PID exactly.
     Only the chooser title, the title prefix of the real Edge manager window,
     the requester's exact private --user-data-dir and the Edge executable are
     accepted. None of these values is ever printed.
@@ -279,6 +282,8 @@ def parse_owner_request(request):
             return None
         if request.get("preserve_focus", True) is not True:
             return None
+        if not all(key in request for key in OWNER_FIELDS):
+            return None
         normalized = {key: request[key] for key in OWNER_FIELDS}
         normalized["probe"] = True
     else:
@@ -290,10 +295,19 @@ def parse_owner_request(request):
             return None
         if request.get("preserve_focus") is not True:
             return None
-        if type(request.get("owner_pid")) is not int or not 1 < request["owner_pid"] <= PID_LIMIT:
-            return None
+        # The owner PID is derived from the unique real manager window, exactly
+        # as in the zero-action probe. A caller-supplied PID is optional; when
+        # present it must be a well-formed value and equal the derived one.
+        validated_pid = None
+        if "owner_pid" in request:
+            supplied = request["owner_pid"]
+            if type(supplied) is not int or not 1 < supplied <= PID_LIMIT:
+                return None
+            validated_pid = supplied
         actions = request.get("actions")
         if type(actions) is not list or not actions:
+            return None
+        if not all(key in request for key in OWNER_FIELDS):
             return None
         for action in actions:
             if type(action) is not dict:
@@ -309,7 +323,8 @@ def parse_owner_request(request):
                     assert_chooser_text(action["text"])
                 except RuntimeError:
                     return None
-        normalized = {key: request[key] for key in OWNER_FIELDS + ("owner_pid",)}
+        normalized = {key: request[key] for key in OWNER_FIELDS}
+        normalized["caller_pid"] = validated_pid
         normalized["probe"] = False
     if ascii_line(normalized["owner_title_prefix"]) is None or \
             ascii_line(normalized["chooser_title_prefix"]) is None:
@@ -318,6 +333,27 @@ def parse_owner_request(request):
             ascii_path(normalized["executable"]) is None:
         return None
     return normalized
+
+
+def derived_owner_pid(owner, owner_pid):
+    """The unique manager window's own PID, bound again to an optional request.
+
+    `owner_pid` is the _NET_WM_PID of the single viewable manager window whose
+    title carries the owner prefix, exactly as the zero-action probe reads it.
+    An input request may also carry a caller PID; it must be a well-formed
+    value (parse_owner_request) and equal the derived PID. The derived value is
+    returned only when the binding holds, else None. Values are never printed.
+    """
+    if type(owner) is not dict or type(owner_pid) is not int or not 1 < owner_pid <= PID_LIMIT:
+        return None
+    caller = owner.get("caller_pid")
+    if owner.get("probe") is True:
+        return owner_pid
+    if owner.get("probe") is not False:
+        return None
+    if caller is not None and (type(caller) is not int or caller != owner_pid):
+        return None
+    return owner_pid
 
 
 def safe_owner_record(result):
@@ -1009,9 +1045,10 @@ def main():
             owner_pid = property_single_int(window_property(owner_window, "_NET_WM_PID"))
             if type(owner_pid) is not int or not 1 < owner_pid <= PID_LIMIT:
                 raise RuntimeError("Chooser owner window unavailable")
-            # The owner PID is bound by the unique real manager window itself.
-            # Probe mode derives it here; the input shape must match its request.
-            if owner.get("probe") is False and owner_pid != owner["owner_pid"]:
+            # The owner PID is bound by the unique real manager window itself in
+            # both shapes. A caller-supplied input PID must equal it exactly;
+            # it is never trusted on its own.
+            if derived_owner_pid(owner, owner_pid) != owner_pid:
                 raise RuntimeError("Chooser owner window unavailable")
             # Exact real executable image and exactly one exact private profile
             # switch; a duplicate profile switch is never a second match.

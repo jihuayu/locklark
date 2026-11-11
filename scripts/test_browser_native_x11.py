@@ -347,12 +347,55 @@ def probe_request(**overrides):
     return request
 
 
+def input_request(**overrides):
+    # The reviewed input shape without any caller-supplied owner PID: the
+    # driver derives the PID from the unique real manager window.
+    request = owner_request()
+    del request["owner_pid"]
+    request.update(overrides)
+    return request
+
+
 class ChooserContractTests(unittest.TestCase):
     def test_exact_owner_profile_and_actions_are_accepted(self):
         parsed = native.parse_owner_request(owner_request())
-        self.assertEqual(set(parsed), set(native.OWNER_FIELDS) | {"owner_pid", "probe"})
-        self.assertEqual(parsed["owner_pid"], 101)
+        self.assertEqual(set(parsed), set(native.OWNER_FIELDS) | {"caller_pid", "probe"})
+        self.assertEqual(parsed["caller_pid"], 101)
         self.assertIs(parsed["probe"], False)
+
+    def test_input_shape_derives_the_owner_pid_without_a_caller_value(self):
+        parsed = native.parse_owner_request(input_request())
+        self.assertEqual(set(parsed), set(native.OWNER_FIELDS) | {"caller_pid", "probe"})
+        self.assertIs(parsed["probe"], False)
+        self.assertIsNone(parsed["caller_pid"])
+        # Optional PID absent and present use the same fixed attribution keys.
+        self.assertEqual(set(parsed), set(native.parse_owner_request(owner_request())))
+        self.assertEqual(parsed["owner_title_prefix"], "manager-prefix")
+        self.assertEqual(parsed["chooser_title_prefix"], "chooser-prefix.")
+        self.assertEqual(parsed["user_data_dir"], "/synthetic/profile-1")
+        self.assertEqual(parsed["executable"], "/synthetic/edge")
+
+    def test_input_pid_is_bound_to_the_unique_manager_window(self):
+        derived = 101
+        no_pid = native.parse_owner_request(input_request())
+        self.assertEqual(native.derived_owner_pid(no_pid, derived), derived)
+        matching = native.parse_owner_request(owner_request(owner_pid=derived))
+        self.assertEqual(native.derived_owner_pid(matching, derived), derived)
+        mismatched = native.parse_owner_request(owner_request(owner_pid=202))
+        self.assertIsNone(native.derived_owner_pid(mismatched, derived))
+        # Probe mode derives its own PID and never carries a caller value.
+        probe = native.parse_owner_request(probe_request())
+        self.assertEqual(native.derived_owner_pid(probe, derived), derived)
+        # A malformed derived PID can never authorize input.
+        for bad in (None, 0, 1, -1, "101", 101.0, native.PID_LIMIT + 1):
+            with self.subTest(bad=bad):
+                self.assertIsNone(native.derived_owner_pid(no_pid, bad))
+        self.assertIsNone(native.derived_owner_pid(None, derived))
+        self.assertIsNone(native.derived_owner_pid({"probe": "no"}, derived))
+        for caller in (bool(1), True, 101.0, "101"):
+            with self.subTest(caller=caller):
+                self.assertIsNone(native.derived_owner_pid(
+                    {"probe": False, "caller_pid": caller}, derived))
 
     def test_zero_action_probe_derives_its_own_pid(self):
         parsed = native.parse_owner_request(probe_request())
@@ -379,6 +422,39 @@ class ChooserContractTests(unittest.TestCase):
             "unrelated title prefix": owner_request(title_prefix="other-prefix"),
             "pid string": owner_request(owner_pid="101"),
             "pid root": owner_request(owner_pid=1),
+            "input pid string": input_request(owner_pid="101"),
+            "input pid null": input_request(owner_pid=None),
+            "input pid float": input_request(owner_pid=101.0),
+            "input pid bool": input_request(owner_pid=True),
+            "input pid zero": input_request(owner_pid=0),
+            "input pid negative": input_request(owner_pid=-101),
+            "input pid over limit": input_request(owner_pid=native.PID_LIMIT + 1),
+            "input no actions": input_request(actions=[]),
+            "input actions missing": input_request(actions=None),
+            "input actions mapping": input_request(actions={"text": "x"}),
+            "input action string": input_request(actions=["x"]),
+            "input action empty": input_request(actions=[{}]),
+            "input action key empty": input_request(actions=[{"key": ""}]),
+            "input action text non-ascii": input_request(actions=[{"text": "路径"}]),
+            "input action text newline": input_request(actions=[{"text": "/a\nb"}]),
+            "input unknown action field": input_request(actions=[{"click_label": "解锁"}]),
+            "input unknown field": input_request(extra="x"),
+            "input focus false": input_request(preserve_focus=False),
+            "input focus absent": {k: v for k, v in input_request().items()
+                                   if k != "preserve_focus"},
+            "input title differs": input_request(title="other-title"),
+            "input title absent": {k: v for k, v in input_request().items() if k != "title"},
+            "input profile trailing slash": input_request(user_data_dir="/synthetic/profile-1/"),
+            "input profile newline": input_request(user_data_dir="/synthetic/a\nb"),
+            "input chooser prefix empty": input_request(chooser_title_prefix=""),
+            "input missing user data dir": {k: v for k, v in input_request().items()
+                                            if k != "user_data_dir"},
+            "input missing executable": {k: v for k, v in input_request().items()
+                                         if k != "executable"},
+            "input profile relative": input_request(user_data_dir="relative/profile"),
+            "input executable relative": input_request(executable="msedge"),
+            "input manager title non-ascii": input_request(owner_title_prefix="管理器"),
+            "input both modes": input_request(ownership_probe=True),
             "no actions": owner_request(actions=[]),
             "unknown action field": owner_request(actions=[{"click": [1, 2]}]),
             "non-ascii text": owner_request(actions=[{"text": "路径"}]),
@@ -405,6 +481,32 @@ class ChooserContractTests(unittest.TestCase):
         self.assertIsNotNone(native.parse_owner_request(
             owner_request(user_data_dir="/synthetic/a b")))
         self.assertIsNone(native.parse_owner_request([]))
+        # Without a caller PID only the fixed attribution values decide, so a
+        # different private profile is a well-formed input request; the driver
+        # still proves that exact profile against the real owner process.
+        self.assertIsNotNone(native.parse_owner_request(
+            input_request(user_data_dir="/synthetic/profile-2")))
+
+    def test_parser_never_raises_on_malformed_requests(self):
+        base = input_request()
+        # Only the optional caller PID may be absent; every fixed attribution
+        # field is required and any missing one is refused.
+        for key in base:
+            with self.subTest(removed=key):
+                request = {k: v for k, v in base.items() if k != key}
+                self.assertIsNone(native.parse_owner_request(request))
+        for value in (None, 1, "x", [], [{}], {"owner": True}, True):
+            with self.subTest(value=value):
+                self.assertIsNone(native.parse_owner_request(value))
+        # "/" is a legal one-character ASCII title prefix but not a path.
+        for key in native.OWNER_FIELDS:
+            for value in (None, 1, "", "a b\tc", "a\nb", ["x"]):
+                with self.subTest(key=key, value=value):
+                    self.assertIsNone(native.parse_owner_request(input_request(**{key: value})))
+        for key in ("user_data_dir", "executable"):
+            for value in ("/", "/a/"):
+                with self.subTest(key=key, value=value):
+                    self.assertIsNone(native.parse_owner_request(input_request(**{key: value})))
 
     def test_safe_owner_record_has_only_fixed_classes(self):
         for relation in ("transient-leader", "process-parent"):
