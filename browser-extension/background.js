@@ -1144,8 +1144,6 @@ if (typeof importScripts === "function") importScripts("core.js");
     });
     const timer = setTimeout(() => {
       calls.delete(requestId);
-      // This call never received a reply: its fixed no-reply phase.
-      routeRequestDiag(type, "no-reply");
       const error = Error("refused");
       error.timeout = true;
       reject(error);
@@ -1154,21 +1152,11 @@ if (typeof importScripts === "function") importScripts("core.js");
     calls.set(requestId, { resolve, reject, timer, type });
     return promise;
   }
-  // Route lifecycle diagnostic only. This observes the shared native request
-  // helper, so it labels only the vault-search and item-get request types that
-  // the route claim also uses, by the fixed phase given; it cannot name the
-  // caller. No fields, reply or error text is ever logged.
-  function routeRequestDiag(type, phase) {
-    if (type === "vault-search" || type === "item-get")
-      routeLifecycleDiag("request-" + type + "-" + phase);
-  }
   function request(type, fields = {}, timeout = 35000, requestId = id()) {
     if (!port) {
-      routeRequestDiag(type, "no-port");
       return Promise.reject(Error("refused"));
     }
     const promise = startCall(type, requestId, timeout);
-    routeRequestDiag(type, "sent");
     try {
       port.postMessage({ v: 1, id: requestId, type, ...fields });
     } catch {
@@ -1178,7 +1166,6 @@ if (typeof importScripts === "function") importScripts("core.js");
         calls.delete(requestId);
         call.reject(Error("refused"));
       }
-      routeRequestDiag(type, "post-failed");
     } finally {
       if (Object.hasOwn(fields, "username")) fields.username = "";
       if (Object.hasOwn(fields, "password")) fields.password = "";
@@ -3394,47 +3381,6 @@ if (typeof importScripts === "function") importScripts("core.js");
     updateBadge();
     rebuildContextMenus();
   }
-  // Route lifecycle diagnostic (temporary). One hardcoded event label per
-  // branch, so an acceptance run can tell which admission/anchor branch was
-  // reached without any URL, token, tab/window/frame id, user data, secret,
-  // native payload or exception text. Branches and return values are
-  // unchanged: every call site keeps its own if/return structure.
-  const ROUTE_LIFECYCLE_DIAG_PREFIX = "[locklark-route-lifecycle] ";
-  const ROUTE_LIFECYCLE_DIAG_EVENTS = new Set([
-    "activation-startup", "activation-late", "activation-switch",
-    "boot-bind-browser-tab-missing", "boot-bind-page-mismatch",
-    "boot-bind-no-unique-boot", "boot-bind-wrong-window",
-    "boot-bind-inactive-tab", "boot-bind-bound",
-    "fallback-no-grant", "fallback-not-live", "fallback-wrong-tab",
-    "fallback-anchor-mismatch", "fallback-accepted",
-    "port-admit-started", "port-admit-early", "port-admit-fallback",
-    "port-sender-mismatch", "port-invalid-grant-or-tab",
-    "port-anchor-mismatch", "port-ready-sent",
-    "port-disconnected", "port-refused",
-    "activation-target-confirmed", "activation-target-missing",
-    "activation-target-pending", "activation-target-identity-mismatch",
-    "activation-target-url-mismatch", "route-tab-url-mismatch",
-    "source-loading", "source-url-mismatch", "route-tab-removed",
-    "source-tab-removed", "route-create-failed", "route-create-invalid-tab",
-    "route-create-not-owned", "route-create-tab-mismatch",
-    "route-expired", "routes-revoked-all",
-    "claim-message-refused", "claim-not-open", "claim-started",
-    "claim-search-rejected", "claim-list-invalid", "claim-row-missing",
-    "claim-anchors-rejected", "claim-item-get-rejected", "claim-revoked",
-    "claim-response-invalid", "claim-detail-invalid", "claim-unsettled",
-    "claim-completed", "claim-search-done", "claim-anchors-done",
-    "claim-item-get-done", "claim-settled", "request-vault-search-no-port",
-    "request-vault-search-sent", "request-vault-search-post-failed", "request-vault-search-no-reply",
-    "request-item-get-no-port", "request-item-get-sent", "request-item-get-post-failed",
-    "request-item-get-no-reply",
-  ]);
-  const ROUTE_LIFECYCLE_DIAG_LEAVES = ["activation-startup", "activation-late"];
-  function routeLifecycleDiag(event) {
-    if (!ROUTE_LIFECYCLE_DIAG_EVENTS.has(event)) return;
-    try {
-      console.info(ROUTE_LIFECYCLE_DIAG_PREFIX + event);
-    } catch {}
-  }
   // A route survives only while its tab stays the active tab of its window.
   // The one exception is the route's own startup: the browser activates the
   // tab it just opened before tabs.create() resolves, and that activation must
@@ -3446,16 +3392,12 @@ if (typeof importScripts === "function") importScripts("core.js");
     routeBoots.delete(grant);
     routeTabs.set(tabId, grant);
   }
-  // Route lifecycle diagnostic only: the leaf branch routeActivation() took,
-  // already as its final activation label so no other literal is emitted.
-  let routeActivationLeaf = null;
   // Returns "startup" for the route's own first activation and "switch" for
   // anything else (including a later re-activation of an already open route).
   function routeActivation(tabId, windowId) {
     for (const grant of new Set([...routeGrants.values(), ...routeTabs.values()])) {
       if (grant.tabId !== tabId) continue;
       if (grant.startupActivation === true) {
-        if (activationInside) routeActivationLeaf = "activation-late";
         revokeRoute(grant);
         return "switch";
       }
@@ -3470,7 +3412,6 @@ if (typeof importScripts === "function") importScripts("core.js");
       (grant) => !Number.isSafeInteger(windowId) || grant.windowId === windowId,
     );
     if (!boot) return "switch";
-    if (activationInside) routeActivationLeaf = "activation-startup";
     bindRouteTab(boot, tabId, windowId);
     boot.startupActivation = true;
     boot.activated = true;
@@ -3488,25 +3429,20 @@ if (typeof importScripts === "function") importScripts("core.js");
       if (routeTabs.get(tabId) !== boot) return;
       if (!tab) {
         boot.startupActivation = false;
-        routeLifecycleDiag("activation-target-missing");
         return;
       }
       if (tab.id !== tabId || tab.windowId !== boot.windowId) {
-        routeLifecycleDiag("activation-target-identity-mismatch");
         revokeRoute(boot);
         cancelContext();
         return;
       }
       if (typeof tab.url === "string" && tab.url === boot.routeURL) {
-        routeLifecycleDiag("activation-target-confirmed");
         return;
       }
       if (tab.pendingUrl === boot.routeURL) {
         boot.startupActivation = false;
-        routeLifecycleDiag("activation-target-pending");
         return;
       }
-      routeLifecycleDiag("activation-target-url-mismatch");
       revokeRoute(boot);
       cancelContext();
     };
@@ -3519,24 +3455,9 @@ if (typeof importScripts === "function") importScripts("core.js");
     }
     return "startup";
   }
-  // Route lifecycle diagnostic only: `routeActivationLeaf` is only recorded
-  // while onActivated is inside this function (see `activationInside`), so a
-  // later unrelated call cannot overwrite the activation event's own leaf.
-  let activationKind = "activation-switch";
-  let activationInside = false;
-  function routeActivationForActivationEvent(tabId, windowId) {
-    activationInside = true;
-    try {
-      return routeActivation(tabId, windowId);
-    } finally {
-      activationInside = false;
-    }
-  }
   api.tabs.onActivated.addListener((info) => {
-    activationKind = "activation-switch";
-    routeActivationLeaf = null;
     const kind = Number.isSafeInteger(info?.tabId)
-      ? routeActivationForActivationEvent(info.tabId, info.windowId)
+      ? routeActivation(info.tabId, info.windowId)
       : "switch";
     for (const grant of new Set([...routeGrants.values(), ...routeTabs.values()])) {
       // Only the tab that was just activated may keep a route; every other
@@ -3548,14 +3469,6 @@ if (typeof importScripts === "function") importScripts("core.js");
     clearCheckoutPicker();
     updateBadge();
     rebuildContextMenus();
-    // Fixed kind first (startup vs switch), then the explicit late leaf.
-    activationKind = kind === "startup" ? "activation-startup" : "activation-switch";
-    if (
-      activationKind === "activation-switch" &&
-      ROUTE_LIFECYCLE_DIAG_LEAVES.includes(routeActivationLeaf)
-    )
-      activationKind = routeActivationLeaf;
-    routeLifecycleDiag(activationKind);
   });
   // Only the route tab's initial loading of its own exact URL is accepted;
   // any other URL change on it is a navigation and revokes. The source page
@@ -3577,7 +3490,6 @@ if (typeof importScripts === "function") importScripts("core.js");
     }
     if (!grant) return;
     if ("url" in change && change.url !== grant.routeURL) {
-      if (routeTabUpdateInside) routeTabUpdateLabel = "route-tab-url-mismatch";
       revokeRoute(grant);
       return;
     }
@@ -3599,37 +3511,9 @@ if (typeof importScripts === "function") importScripts("core.js");
       }
     }
   }
-  // Route lifecycle diagnostic only: the branch routeTabUpdated() took for
-  // this update event, recorded only while the listener is calling it.
-  let routeTabUpdateInside = false;
-  let routeTabUpdateLabel = null;
-  function routeTabUpdatedForUpdateEvent(tabId, change) {
-    routeTabUpdateInside = true;
-    try {
-      return routeTabUpdated(tabId, change);
-    } finally {
-      routeTabUpdateInside = false;
-    }
-  }
   api.tabs.onUpdated.addListener((tabId, change) => {
-    const sourceRoutes = new Set([...routeGrants.values(), ...routeTabs.values()].filter((grant) => grant.source.tabId === tabId));
-    routeTabUpdateLabel = null;
-    routeTabUpdatedForUpdateEvent(tabId, change || {});
+    routeTabUpdated(tabId, change || {});
     routeSourceUpdated(tabId, change || {});
-    // Route lifecycle diagnostic only, read after the handler: the source
-    // branch routeSourceUpdated() took for these exact grants, if any.
-    const event = change || {};
-    const hasSourceURL = "url" in event && event.url !== undefined;
-    const sourceLoading = event.status === "loading";
-    if (
-      sourceRoutes.size &&
-      (hasSourceURL || sourceLoading) &&
-      [...sourceRoutes].some((grant) =>
-        sourceLoading || (hasSourceURL && event.url !== grant.source.url),
-      )
-    )
-      routeLifecycleDiag(sourceLoading ? "source-loading" : "source-url-mismatch");
-    if (routeTabUpdateLabel) routeLifecycleDiag(routeTabUpdateLabel);
     const session = multiStepSessions.get(tabId);
     if (session && "url" in change) {
       try {
@@ -3659,19 +3543,10 @@ if (typeof importScripts === "function") importScripts("core.js");
     void processOpenAndFill(tabId, change);
   });
   api.tabs.onRemoved?.addListener((tabId) => {
-    for (const boot of [...routeBoots]) if (boot.tabId === tabId) {
-      routeLifecycleDiag("route-tab-removed");
-      revokeRoute(boot);
-    }
-    if (routeTabs.has(tabId)) {
-      routeLifecycleDiag("route-tab-removed");
-      revokeRoute(routeTabs.get(tabId));
-    }
+    for (const boot of [...routeBoots]) if (boot.tabId === tabId) revokeRoute(boot);
+    if (routeTabs.has(tabId)) revokeRoute(routeTabs.get(tabId));
     for (const grant of [...routeGrants.values()])
-      if (grant.source.tabId === tabId) {
-        routeLifecycleDiag("source-tab-removed");
-        revokeRoute(grant);
-      }
+      if (grant.source.tabId === tabId) revokeRoute(grant);
     if (checkoutPicker?.tabId === tabId) clearCheckoutPicker();
     multiStepSessions.delete(tabId);
     clearConditionalIntentsForTab(tabId);
@@ -4758,7 +4633,6 @@ if (typeof importScripts === "function") importScripts("core.js");
     if (known) grant.state = "revoked";
   }
   function revokeAllRoutes() {
-    routeLifecycleDiag("routes-revoked-all");
     const grants = new Set([...routeGrants.values(), ...routeTabs.values()]);
     for (const grant of grants) revokeRoute(grant);
     routeGrants.clear();
@@ -4766,10 +4640,7 @@ if (typeof importScripts === "function") importScripts("core.js");
   }
   function pruneRoutes() {
     for (const grant of new Set([...routeGrants.values(), ...routeTabs.values()]))
-      if (grant.expiresAt <= Date.now()) {
-        routeLifecycleDiag("route-expired");
-        revokeRoute(grant);
-      }
+      if (grant.expiresAt <= Date.now()) revokeRoute(grant);
   }
   // Every grant counts toward ROUTE_LIMIT, whether its tab is bound or its
   // tabs.create() is still pending: a pending create holds a route slot.
@@ -4822,17 +4693,14 @@ if (typeof importScripts === "function") importScripts("core.js");
     // never from the sender's own claim.
     const tab = await routeTabAt(sender.tab.id, sender.tab.url);
     if (!tab) {
-      routeLifecycleDiag("boot-bind-browser-tab-missing");
       return null;
     }
     const pageURL = routePageURL(sender, tab);
     if (!pageURL || pageURL !== tab.url) {
-      routeLifecycleDiag("boot-bind-page-mismatch");
       return null;
     }
     const token = routeTokenFromPage(pageURL);
     if (!token) {
-      routeLifecycleDiag("boot-bind-page-mismatch");
       return null;
     }
     const boots = [...routeBoots].filter(
@@ -4849,7 +4717,6 @@ if (typeof importScripts === "function") importScripts("core.js");
       // revoked, bound by the browser's own event or claimed meanwhile.
       !routeBootLive(boot)
     ) {
-      routeLifecycleDiag("boot-bind-no-unique-boot");
       return null;
     }
     // The browser's own tab must carry the exact route URL, sit in the source
@@ -4860,13 +4727,6 @@ if (typeof importScripts === "function") importScripts("core.js");
       sender.tab.windowId !== tab.windowId
     ) {
       // A replaced, moved or inactive tab is not this route any more.
-      routeLifecycleDiag(
-        tab.windowId !== boot.windowId
-          ? "boot-bind-wrong-window"
-          : tab.active !== true
-            ? "boot-bind-inactive-tab"
-            : "boot-bind-page-mismatch",
-      );
       revokeRoute(boot);
       return null;
     }
@@ -4875,7 +4735,6 @@ if (typeof importScripts === "function") importScripts("core.js");
     bindRouteTab(boot, tab.id, tab.windowId);
     boot.activated = true;
     boot.initialLoad = null;
-    routeLifecycleDiag("boot-bind-bound");
     return { boot, tabId: tab.id, windowId: tab.windowId };
   }
   async function routeTabAt(tabId, expectedURL) {
@@ -5057,12 +4916,10 @@ if (typeof importScripts === "function") importScripts("core.js");
         windowId: sourceTab.windowId,
       });
     } catch {
-      routeLifecycleDiag("route-create-failed");
       revokeRoute(grant);
       throw Error("refused");
     }
     if (!created || !Number.isSafeInteger(created.id) || created.id < 1) {
-      routeLifecycleDiag("route-create-invalid-tab");
       revokeRoute(grant);
       throw Error("refused");
     }
@@ -5087,7 +4944,6 @@ if (typeof importScripts === "function") importScripts("core.js");
           (grant.tabId !== 0 && routeTabs.get(grant.tabId) === grant))) ||
         adoptedByPort);
     if (!stillOwned) {
-      routeLifecycleDiag("route-create-not-owned");
       revokeRoute(grant);
       throw Error("refused");
     }
@@ -5097,7 +4953,6 @@ if (typeof importScripts === "function") importScripts("core.js");
       // every claim, copy and read through routeAnchors()).
       bindRouteTab(grant, created.id, created.windowId);
     } else if (grant.tabId !== created.id) {
-      routeLifecycleDiag("route-create-tab-mismatch");
       revokeRoute(grant);
       throw Error("refused");
     } else {
@@ -5115,19 +4970,13 @@ if (typeof importScripts === "function") importScripts("core.js");
       !grant ||
       Object.keys(message).sort().join(",") !== "token,type" ||
       message.token !== grant.token
-    ) {
-      routeLifecycleDiag("claim-message-refused");
+    )
       throw Error("refused");
-    }
     // The state transition below is synchronous, so a concurrent second claim
     // sees "claimed" and neither claim can start a second read. There is no
     // re-read path: a duplicate claim is refused outright.
-    if (grant.state !== "open") {
-      routeLifecycleDiag("claim-not-open");
-      throw Error("refused");
-    }
+    if (grant.state !== "open") throw Error("refused");
     grant.state = "claimed";
-    routeLifecycleDiag("claim-started");
     return routeApprovedDetail(grant);
   }
   // The same native V2 `item-get` the action popup used, under a fresh native
@@ -5147,15 +4996,6 @@ if (typeof importScripts === "function") importScripts("core.js");
           state: "all",
         },
         12000,
-      ).then(
-        (value) => {
-          routeLifecycleDiag("claim-search-done");
-          return value;
-        },
-        (error) => {
-          routeLifecycleDiag("claim-search-rejected");
-          throw error;
-        },
       );
     requireRoute(grant);
     if (
@@ -5167,10 +5007,8 @@ if (typeof importScripts === "function") importScripts("core.js");
       // core.validResponse and the exact row is still matched below.
       (list.type !== "items" && list.type !== "vault-items") ||
       !core.validResponse(list)
-    ) {
-      routeLifecycleDiag("claim-list-invalid");
+    )
       throw Error("refused");
-    }
     const row = list.items.find(
       (item) =>
         item &&
@@ -5178,13 +5016,8 @@ if (typeof importScripts === "function") importScripts("core.js");
         item.id === grant.itemId &&
         item.revision === grant.revision,
     );
-    if (!row) {
-      routeLifecycleDiag("claim-row-missing");
-      throw Error("refused");
-    }
-    const claimAnchors = await routeAnchors(grant);
-    routeLifecycleDiag(claimAnchors ? "claim-anchors-done" : "claim-anchors-rejected");
-    if (!claimAnchors) throw Error("refused");
+    if (!row) throw Error("refused");
+    if (!(await routeAnchors(grant))) throw Error("refused");
     requireRoute(grant);
     const response = await request(
       "item-get",
@@ -5194,22 +5027,12 @@ if (typeof importScripts === "function") importScripts("core.js");
         revision: grant.revision,
       },
       12000,
-    ).then(
-      (value) => {
-        routeLifecycleDiag("claim-item-get-done");
-        return value;
-      },
-      (error) => {
-        routeLifecycleDiag("claim-item-get-rejected");
-        throw error;
-      },
     );
     const live = routeLive(grant);
     if (!live) {
       // A late approval for a revoked or locked route is scrubbed here.
       if (response && typeof response === "object") response.item = null;
       revokeRoute(grant);
-      routeLifecycleDiag("claim-revoked");
       throw Error("refused");
     }
     if (
@@ -5217,32 +5040,25 @@ if (typeof importScripts === "function") importScripts("core.js");
       requestCapability !== capability ||
       !core.validResponse(response) ||
       response.type !== "item-detail"
-    ) {
-      routeLifecycleDiag("claim-response-invalid");
+    )
       throw Error("refused");
-    }
     const detail = publicDetail(response.item);
     if (
       !detail ||
       detail.id !== grant.itemId ||
       detail.revision !== grant.revision ||
       (detail.readOnly === true || detail.unavailable)
-    ) {
-      routeLifecycleDiag("claim-detail-invalid");
+    )
       throw Error("refused");
-    }
     await routeSettled(grant);
-    routeLifecycleDiag("claim-settled");
     if (!routeLive(grant)) {
       scrubDetail(detail);
-      routeLifecycleDiag("claim-unsettled");
       throw Error("refused");
     }
     // Field selectors of the approved detail, kept on the grant so this
     // route's own clipboard ports get them whether they were admitted before
     // or after the claim. No field value is retained.
     setRouteDetail(grant, detail);
-    routeLifecycleDiag("claim-completed");
     return {
       type: "route-claimed",
       token: grant.token,
@@ -5729,9 +5545,7 @@ if (typeof importScripts === "function") importScripts("core.js");
   // the exact token. It is opened before the claim and carries no data except
   // that token.
   async function openRouteLifecyclePort(port, sender) {
-    routeLifecycleDiag("port-admit-started");
     const reject = () => {
-      routeLifecycleDiag("port-refused");
       try {
         port?.disconnect?.();
       } catch {}
@@ -5744,7 +5558,6 @@ if (typeof importScripts === "function") importScripts("core.js");
     if (routeLifecyclePorts.size >= ROUTE_LIFECYCLE_MAX_PORTS) return reject();
     routeLifecyclePorts.add(state);
     port.onDisconnect?.addListener?.(() => {
-      routeLifecycleDiag("port-disconnected");
       state.grant?.lifecyclePorts.delete(state);
       routeLifecyclePorts.delete(state);
       void api.runtime.lastError;
@@ -5753,10 +5566,8 @@ if (typeof importScripts === "function") importScripts("core.js");
       routeLifecyclePorts.delete(state);
       return reject();
     };
-    if (!sender?.tab || sender.id !== api.runtime.id || sender.frameId !== 0) {
-      routeLifecycleDiag("port-sender-mismatch");
+    if (!sender?.tab || sender.id !== api.runtime.id || sender.frameId !== 0)
       return drop();
-    }
     // The pending boot is adopted before routeMessage(): for an unbound boot
     // that call is refused and would revoke the grant first. This boot is
     // browser-verified already, so its port may arrive before the create
@@ -5764,11 +5575,10 @@ if (typeof importScripts === "function") importScripts("core.js");
     const early = await bindEarlyRouteTab(sender);
     let grant = early ? early.boot : null;
     if (!grant) {
-      routeLifecycleDiag("port-admit-fallback");
       try {
         grant = await routeMessage(sender);
       } catch {}
-    } else routeLifecycleDiag("port-admit-early");
+    }
     // Compare the browser-attached sender structurally; a Port getter is not
     // guaranteed to return the same object reference twice.
     const bound = port?.sender;
@@ -5779,30 +5589,18 @@ if (typeof importScripts === "function") importScripts("core.js");
       bound.frameId !== sender.frameId ||
       bound.tab?.id !== sender.tab.id ||
       bound.tab?.url !== sender.tab.url
-    ) {
-      routeLifecycleDiag("port-sender-mismatch");
+    )
       return drop();
-    }
     // bindEarlyRouteTab() has already validated the pending boot against the
     // browser's own report of the created tab and adopted it exactly as the
     // create continuation would, so from here on it is an ordinary bound
     // route and the unchanged liveness and anchor checks apply.
-    if (!grant || !routeLive(grant) || sender.tab.id !== grant.tabId) {
-      routeLifecycleDiag("port-invalid-grant-or-tab");
-      return drop();
-    }
+    if (!grant || !routeLive(grant) || sender.tab.id !== grant.tabId) return drop();
     // The route just adopted must pass the ordinary anchor checks once more,
     // after every await, before its port is admitted. A mismatch ends it.
     if (early) {
       const anchors = await routeAnchors(grant);
       if (!routeLive(grant) || sender.tab.id !== grant.tabId || !anchors) {
-        routeLifecycleDiag(
-          !routeLive(grant)
-            ? "port-invalid-grant-or-tab"
-            : sender.tab.id !== grant.tabId
-              ? "port-invalid-grant-or-tab"
-              : "port-anchor-mismatch",
-        );
         revokeRoute(grant);
         return drop();
       }
@@ -5812,7 +5610,6 @@ if (typeof importScripts === "function") importScripts("core.js");
     grant.lifecyclePorts.add(state);
     try {
       port.postMessage({ type: "route-ready", token: grant.token });
-      routeLifecycleDiag("port-ready-sent");
     } catch {
       revokeRoute(grant);
     }
@@ -7020,19 +6817,9 @@ if (typeof importScripts === "function") importScripts("core.js");
       sender.tab.id !== grant.tabId ||
       !(await routeAnchors(grant))
     ) {
-      routeLifecycleDiag(
-        !grant
-          ? "fallback-no-grant"
-          : !routeLive(grant)
-            ? "fallback-not-live"
-            : sender.tab.id !== grant.tabId
-              ? "fallback-wrong-tab"
-              : "fallback-anchor-mismatch",
-      );
       revokeRoute(grant);
       throw Error("refused");
     }
-    routeLifecycleDiag("fallback-accepted");
     return grant;
   }
   function validRouteRequest(message) {

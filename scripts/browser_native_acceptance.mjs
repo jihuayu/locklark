@@ -283,117 +283,6 @@ function observeRouteLifecycle(target) {
     });
   } catch {}
 }
-// Route worker lifecycle trace. The extension's background worker reports one
-// hardcoded branch label per lifecycle path on console.info with this exact
-// prefix. A direct websocket to the worker's own webSocketDebuggerUrl with
-// only Runtime.enable captures the labels; any other console argument, and
-// any text not exactly matching the prefix plus an allowlisted label, is
-// dropped. Nothing else from the worker is retained.
-const ROUTE_WORKER_TRACE_LIMIT = 32;
-const ROUTE_WORKER_DIAG_PREFIX = "[locklark-route-lifecycle] ";
-const ROUTE_WORKER_DIAG_EVENTS = [
-  "activation-startup", "activation-late", "activation-switch",
-  "boot-bind-browser-tab-missing", "boot-bind-page-mismatch",
-  "boot-bind-no-unique-boot", "boot-bind-wrong-window",
-  "boot-bind-inactive-tab", "boot-bind-bound",
-  "fallback-no-grant", "fallback-not-live", "fallback-wrong-tab",
-  "fallback-anchor-mismatch", "fallback-accepted",
-  "port-admit-started", "port-admit-early", "port-admit-fallback",
-  "port-sender-mismatch", "port-invalid-grant-or-tab",
-  "port-anchor-mismatch", "port-ready-sent",
-  "port-disconnected", "port-refused",
-  "activation-target-confirmed", "activation-target-missing",
-  "activation-target-pending", "activation-target-identity-mismatch",
-  "activation-target-url-mismatch", "route-tab-url-mismatch",
-  "source-loading", "source-url-mismatch", "route-tab-removed",
-  "source-tab-removed", "route-create-failed", "route-create-invalid-tab",
-  "route-create-not-owned", "route-create-tab-mismatch",
-  "route-expired", "routes-revoked-all",
-  "claim-message-refused", "claim-not-open", "claim-started",
-  "claim-search-rejected", "claim-list-invalid", "claim-row-missing",
-  "claim-anchors-rejected", "claim-item-get-rejected", "claim-revoked",
-  "claim-response-invalid", "claim-detail-invalid", "claim-unsettled",
-  "claim-completed", "claim-search-done", "claim-anchors-done",
-  "claim-item-get-done", "claim-settled", "request-vault-search-no-port",
-  "request-vault-search-sent", "request-vault-search-post-failed", "request-vault-search-no-reply",
-  "request-item-get-no-port", "request-item-get-sent", "request-item-get-post-failed",
-  "request-item-get-no-reply",
-];
-let routeWorkerTrace = null,
-  routeWorkerTraceSocket = null,
-  routeWorkerLastEvent = null;
-function sanitizeRouteWorkerTrace(value) {
-  if (!Array.isArray(value)) return null;
-  return value
-    .filter((event) => ROUTE_WORKER_DIAG_EVENTS.includes(event))
-    .slice(0, ROUTE_WORKER_TRACE_LIMIT);
-}
-// The console arg payload to one allowlisted label, or null; never the text.
-function routeWorkerTraceEvent(args) {
-  const [first, extra] = Array.isArray(args) ? args : [];
-  if (extra !== undefined) return null;
-  const value = first?.type === "string" ? first.value : undefined;
-  if (typeof value !== "string" || !value.startsWith(ROUTE_WORKER_DIAG_PREFIX))
-    return null;
-  const event = value.slice(ROUTE_WORKER_DIAG_PREFIX.length);
-  return ROUTE_WORKER_DIAG_EVENTS.includes(event) ? event : null;
-}
-function closeRouteWorkerTrace() {
-  const ws = routeWorkerTraceSocket;
-  routeWorkerTraceSocket = null;
-  try {
-    ws?.close();
-  } catch {}
-}
-// Best effort: a failure to find or open the worker target leaves the trace
-// absent. No wait beyond the target list, no retry and no gate.
-async function observeRouteWorker(profile) {
-  try {
-    const port = readFileSync(join(profile, "DevToolsActivePort"), "utf8")
-      .split("\n")[0];
-    const targets = await (
-      await fetch("http://127.0.0.1:" + port + "/json/list")
-    ).json();
-    const worker = targets.find(
-      (target) =>
-        target.type === "service_worker" &&
-        typeof target.webSocketDebuggerUrl === "string" &&
-        String(target.url).startsWith(
-          "chrome-extension://geldnhjapnackobgknocomedmjgphnpe/",
-        ),
-    );
-    if (!worker) return;
-    const ws = new WebSocket(worker.webSocketDebuggerUrl);
-    routeWorkerTraceSocket = ws;
-    routeWorkerTrace = [];
-    let enabled = false;
-    ws.addEventListener("message", (event) => {
-      let message;
-      try {
-        message = JSON.parse(event.data);
-      } catch {
-        return;
-      }
-      if (message?.id === 1) {
-        enabled = true;
-        return;
-      }
-      if (!enabled || message?.method !== "Runtime.consoleAPICalled")
-        return;
-      const label = routeWorkerTraceEvent(message.params?.args);
-      if (!label) return;
-      routeWorkerLastEvent = label;
-      if (routeWorkerTrace.length >= ROUTE_WORKER_TRACE_LIMIT) return;
-      routeWorkerTrace.push(label);
-    });
-    ws.addEventListener("error", () => {});
-    ws.addEventListener("open", () => {
-      try {
-        ws.send(JSON.stringify({ id: 1, method: "Runtime.enable" }));
-      } catch {}
-    });
-  } catch {}
-}
 let privacyValues = [];
 let observedFixture = null;
 function popupStatusKind(value) {
@@ -1169,9 +1058,6 @@ try {
         .pages()
         .filter((entry) => !/^chrome-extension:\/\//.test(entry.url())),
     );
-    // Diagnostics only: capture the worker's fixed lifecycle labels before the
-    // row click that opens the route. Best effort, no wait and no gate.
-    await observeRouteWorker(profile);
     mark("route:row-click");
     // Exactly one real CDP mouse press/release through the popup wrapper.
     await action.click(rowSelector);
@@ -1485,9 +1371,8 @@ try {
       await refreshRouteStatusTrace(attach, opened, true);
     }
     } finally {
-      // Diagnostics only: neither diagnostic socket outlives this checkpoint.
+      // Diagnostics only: the lifecycle socket never outlives this checkpoint.
       closeRouteLifecycle();
-      closeRouteWorkerTrace();
     }
   }
   async function blank() {
@@ -2045,10 +1930,6 @@ try {
           // one entry: fixed channel/value enums only, at most eight entries.
           ...(routeStatusTrace
             ? { routeStatusTrace: sanitizeRouteStatusTrace(routeStatusTrace) }
-            : {}),
-          // Worker lifecycle labels only: fixed enums, at most 32.
-          ...(routeWorkerTrace
-            ? { routeWorkerTrace: sanitizeRouteWorkerTrace(routeWorkerTrace) }
             : {}),
           // Present only once the direct route-target observer connected or
           // saw a main-frame event; fixed booleans and capped per-kind counts
