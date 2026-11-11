@@ -1378,3 +1378,275 @@ func TestExecuteActiveClearsBundleValuesOnLock(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Desktop-prepared (brokered) bundle runner
+// ---------------------------------------------------------------------------
+
+func brokeredTestReceipt() RunBundlePreparationReceipt {
+	return RunBundlePreparationReceipt{
+		Status:       RunBundlePreparationStatus,
+		Session:      strings.Repeat("a", 32),
+		Intent:       strings.Repeat("b", 64),
+		TargetDigest: strings.Repeat("c", 64),
+	}
+}
+
+func brokeredValueBuffers(values map[string][]byte) map[string][]byte {
+	buffers := make(map[string][]byte, len(values))
+	for name, value := range values {
+		buffers[name] = value
+	}
+	return buffers
+}
+
+func assertBrokeredValuesCleared(t *testing.T, values, buffers map[string][]byte) {
+	t.Helper()
+	if len(values) != 0 {
+		t.Fatalf("prepared values were not released: %d entries", len(values))
+	}
+	for _, name := range sortedKeys(buffers) {
+		for i, b := range buffers[name] {
+			if b != 0 {
+				t.Fatalf("slot %q byte %d survived cleanup", name, i)
+			}
+		}
+	}
+}
+
+func assertBrokeredRootsRemoved(t *testing.T, roots []string) {
+	t.Helper()
+	if len(roots) == 0 {
+		t.Fatal("no temporary root was created")
+	}
+	for _, root := range roots {
+		if _, err := os.Stat(root); !os.IsNotExist(err) {
+			t.Fatalf("temporary root %q survived", root)
+		}
+	}
+}
+
+func TestRunBrokeredBundleRendersPreparedValues(t *testing.T) {
+	f := newBundleTestFixture(t)
+	targets := bundleTestTargets(f)
+	request := bundleTestRequest(t, f)
+	wantReceipt := brokeredTestReceipt()
+	values, buffers := func() (map[string][]byte, map[string][]byte) {
+		v := bundleTestValues()
+		return v, brokeredValueBuffers(v)
+	}()
+	create, roots := testBundleTempCreatorTracked(t)
+	prepared, executed := 0, 0
+	preparedRoot, executeRoot := "", ""
+	receipt, err := runBrokeredBundle(context.Background(), targets, request, func(ctx context.Context, root string) (RunBundlePreparationReceipt, map[string][]byte, error) {
+		prepared++
+		preparedRoot = root
+		if ctx == nil {
+			t.Error("preparation callback lost the context")
+		}
+		info, statErr := os.Stat(root)
+		if statErr != nil || !info.IsDir() {
+			t.Errorf("private root not created before preparation: %v", statErr)
+		} else if runtime.GOOS != "windows" && info.Mode().Perm() != 0700 {
+			t.Errorf("private root mode: %v", info.Mode().Perm())
+		}
+		for _, name := range []string{"home", "gh", "config", "cache", "data", "tmp", "kube"} {
+			info, statErr = os.Stat(filepath.Join(root, name))
+			if statErr != nil || !info.IsDir() {
+				t.Errorf("bundle directory %q missing before preparation: %v", name, statErr)
+			}
+		}
+		return wantReceipt, values, nil
+	}, create, os.RemoveAll, func(_ context.Context, _ RunBundleRequest, root string, rendered cliprofile.RenderedBundle) (int, error) {
+		executed++
+		executeRoot = root
+		for name, want := range map[string]string{
+			"GH_TOKEN":              bundleTestPassword,
+			"DOCKER_CONFIG":         filepath.Join(root, "docker"),
+			"NPM_CONFIG_USERCONFIG": filepath.Join(root, "npm", "npmrc"),
+			"GIT_ASKPASS":           filepath.Join(root, "git", "askpass.sh"),
+		} {
+			if got, ok := bundleEnvValue(rendered, name); !ok || got != want {
+				t.Errorf("rendered environment %s missing or wrong", name)
+			}
+		}
+		if file, ok := bundleRenderedFile(rendered, "kube/config"); !ok || string(file.Content) != bundleTestAttachment {
+			t.Error("rendered kubeconfig missing")
+		}
+		return 3, nil
+	})
+	if err != nil {
+		t.Fatalf("brokered run: %v", err)
+	}
+	if prepared != 1 || executed != 1 {
+		t.Fatalf("prepared: %d executed: %d", prepared, executed)
+	}
+	if preparedRoot == "" || preparedRoot != executeRoot {
+		t.Fatalf("prepared root %q execution root %q", preparedRoot, executeRoot)
+	}
+	want := RunReceipt{Status: "process-exited", Session: wantReceipt.Session, Intent: wantReceipt.Intent, TargetDigest: wantReceipt.TargetDigest, ExitCode: 3}
+	if !reflect.DeepEqual(receipt, want) {
+		t.Fatalf("receipt: %+v want: %+v", receipt, want)
+	}
+	assertBrokeredRootsRemoved(t, roots())
+	assertBrokeredValuesCleared(t, values, buffers)
+}
+
+func TestRunBrokeredBundleRefusesMalformedPreparation(t *testing.T) {
+	f := newBundleTestFixture(t)
+	targets := bundleTestTargets(f)
+	request := bundleTestRequest(t, f)
+	cases := []struct {
+		name    string
+		prepare func() (RunBundlePreparationReceipt, map[string][]byte)
+	}{
+		{"status", func() (RunBundlePreparationReceipt, map[string][]byte) {
+			r := brokeredTestReceipt()
+			r.Status = "prepared"
+			return r, bundleTestValues()
+		}},
+		{"session", func() (RunBundlePreparationReceipt, map[string][]byte) {
+			r := brokeredTestReceipt()
+			r.Session = "not-a-canonical-item-id"
+			return r, bundleTestValues()
+		}},
+		{"intent", func() (RunBundlePreparationReceipt, map[string][]byte) {
+			r := brokeredTestReceipt()
+			r.Intent = strings.Repeat("B", 64)
+			return r, bundleTestValues()
+		}},
+		{"target-digest", func() (RunBundlePreparationReceipt, map[string][]byte) {
+			r := brokeredTestReceipt()
+			r.TargetDigest = strings.Repeat("c", 63)
+			return r, bundleTestValues()
+		}},
+		{"missing-slot", func() (RunBundlePreparationReceipt, map[string][]byte) {
+			v := bundleTestValues()
+			delete(v, "kubeconfig")
+			return brokeredTestReceipt(), v
+		}},
+		{"extra-slot", func() (RunBundlePreparationReceipt, map[string][]byte) {
+			v := bundleTestValues()
+			v["extra"] = []byte("extra secret")
+			return brokeredTestReceipt(), v
+		}},
+		{"nil-value", func() (RunBundlePreparationReceipt, map[string][]byte) {
+			v := bundleTestValues()
+			v["token"] = nil
+			return brokeredTestReceipt(), v
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			create, roots := testBundleTempCreatorTracked(t)
+			values := map[string][]byte(nil)
+			buffers := map[string][]byte(nil)
+			prepared, executed := 0, 0
+			receipt, err := runBrokeredBundle(context.Background(), targets, request, func(context.Context, string) (RunBundlePreparationReceipt, map[string][]byte, error) {
+				prepared++
+				gotReceipt, gotValues := tc.prepare()
+				values = gotValues
+				buffers = brokeredValueBuffers(gotValues)
+				return gotReceipt, gotValues, nil
+			}, create, os.RemoveAll, func(context.Context, RunBundleRequest, string, cliprofile.RenderedBundle) (int, error) {
+				executed++
+				return 0, nil
+			})
+			if !errors.Is(err, ErrRunCredential) || !reflect.DeepEqual(receipt, RunReceipt{}) {
+				t.Fatalf("malformed preparation accepted: %v %+v", err, receipt)
+			}
+			if prepared != 1 || executed != 0 {
+				t.Fatalf("prepared: %d executed: %d", prepared, executed)
+			}
+			assertBrokeredRootsRemoved(t, roots())
+			assertBrokeredValuesCleared(t, values, buffers)
+		})
+	}
+}
+
+func TestRunBrokeredBundlePropagatesPreparationError(t *testing.T) {
+	f := newBundleTestFixture(t)
+	targets := bundleTestTargets(f)
+	request := bundleTestRequest(t, f)
+	// A future Darwin caller must be able to fall back only on the exact
+	// sentinel, so the runner may not translate or wrap this error.
+	unavailable := errors.New("desktop browser broker is unavailable")
+	values := bundleTestValues()
+	buffers := brokeredValueBuffers(values)
+	create, roots := testBundleTempCreatorTracked(t)
+	prepared, executed := 0, 0
+	receipt, err := runBrokeredBundle(context.Background(), targets, request, func(context.Context, string) (RunBundlePreparationReceipt, map[string][]byte, error) {
+		prepared++
+		return brokeredTestReceipt(), values, unavailable
+	}, create, os.RemoveAll, func(context.Context, RunBundleRequest, string, cliprofile.RenderedBundle) (int, error) {
+		executed++
+		return 0, nil
+	})
+	if err != unavailable || !errors.Is(err, unavailable) {
+		t.Fatalf("preparation error changed: %v", err)
+	}
+	if !reflect.DeepEqual(receipt, RunReceipt{}) || prepared != 1 || executed != 0 {
+		t.Fatalf("failed preparation reached execution: %+v prepared: %d executed: %d", receipt, prepared, executed)
+	}
+	assertBrokeredRootsRemoved(t, roots())
+	assertBrokeredValuesCleared(t, values, buffers)
+}
+
+func TestRunBrokeredBundleCancelledAfterPreparation(t *testing.T) {
+	f := newBundleTestFixture(t)
+	targets := bundleTestTargets(f)
+	request := bundleTestRequest(t, f)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	values := bundleTestValues()
+	buffers := brokeredValueBuffers(values)
+	create, roots := testBundleTempCreatorTracked(t)
+	prepared, executed := 0, 0
+	receipt, err := runBrokeredBundle(ctx, targets, request, func(context.Context, string) (RunBundlePreparationReceipt, map[string][]byte, error) {
+		prepared++
+		cancel()
+		return brokeredTestReceipt(), values, nil
+	}, create, os.RemoveAll, func(context.Context, RunBundleRequest, string, cliprofile.RenderedBundle) (int, error) {
+		executed++
+		return 0, nil
+	})
+	if !errors.Is(err, ErrRunCancelled) || !reflect.DeepEqual(receipt, RunReceipt{}) {
+		t.Fatalf("cancellation not enforced: %v %+v", err, receipt)
+	}
+	if prepared != 1 || executed != 0 {
+		t.Fatalf("prepared: %d executed: %d", prepared, executed)
+	}
+	assertBrokeredRootsRemoved(t, roots())
+	assertBrokeredValuesCleared(t, values, buffers)
+}
+
+func TestRunBrokeredBundleValidatesScopeBeforePreparation(t *testing.T) {
+	f := newBundleTestFixture(t)
+	targets := bundleTestTargets(f)
+	request := bundleTestRequest(t, f)
+
+	t.Run("invalid-root", func(t *testing.T) {
+		called := 0
+		_, err := brokeredRunStore(context.Background(), &runBundleStoreRequest{targets: targets, request: request, root: "relative"}, func(context.Context, string) (RunBundlePreparationReceipt, map[string][]byte, error) {
+			called++
+			return brokeredTestReceipt(), bundleTestValues(), nil
+		})
+		if !errors.Is(err, ErrRunTarget) || called != 0 {
+			t.Fatalf("invalid scope prepared: %v called: %d", err, called)
+		}
+	})
+
+	t.Run("nil-callback", func(t *testing.T) {
+		created, executed := 0, 0
+		_, err := runBrokeredBundle(context.Background(), targets, request, nil, func() (string, error) {
+			created++
+			return "", errors.New("must not create")
+		}, os.RemoveAll, func(context.Context, RunBundleRequest, string, cliprofile.RenderedBundle) (int, error) {
+			executed++
+			return 0, nil
+		})
+		if !errors.Is(err, ErrRunTarget) || created != 0 || executed != 0 {
+			t.Fatalf("nil callback accepted: %v created: %d executed: %d", err, created, executed)
+		}
+	})
+}

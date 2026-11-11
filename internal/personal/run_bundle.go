@@ -439,6 +439,104 @@ func (s *Session) PrepareBrokeredRun(ctx context.Context, targets []BundleTarget
 	}, values, nil
 }
 
+// BrokeredRunPreparer is the desktop-broker preparation step for
+// RunBrokeredBundle. It receives the private run root RunBrokeredBundle has
+// already created, so it can bind exactly that root in the one-shot scope, and
+// returns the preparation receipt plus the exact per-slot values.
+//
+// On success, ownership of every returned byte slice transfers to
+// RunBrokeredBundle: the existing runBundle cleanup zeroes them after the
+// profile is rendered and the child has exited. On a callback error, a
+// malformed receipt or an invalid value set, the returned buffers are zeroed
+// immediately instead. The callback error itself is preserved unchanged so a
+// caller of RunBrokeredBundle can fall back only on an exact sentinel (for
+// example browserhost.ErrBrokerUnavailable); no error is translated here.
+type BrokeredRunPreparer func(ctx context.Context, privateTempRoot string) (RunBundlePreparationReceipt, map[string][]byte, error)
+
+func validBrokeredRunReceipt(receipt RunBundlePreparationReceipt) bool {
+	return receipt.Status == RunBundlePreparationStatus && idOK(receipt.Session) &&
+		digestOK(receipt.Intent) && digestOK(receipt.TargetDigest)
+}
+
+// brokeredRunValuesValid requires exactly one non-nil value per requested slot
+// and nothing else. Values are never trimmed or re-keyed here.
+func brokeredRunValuesValid(targets []BundleTarget, values map[string][]byte) bool {
+	if len(values) != len(targets) {
+		return false
+	}
+	for _, target := range targets {
+		value, ok := values[target.Slot]
+		if !ok || value == nil {
+			return false
+		}
+	}
+	return true
+}
+
+// brokeredRunPreparation zeroes every returned buffer, including any partial
+// set a failed callback handed back, and releases the map. It also redacts a
+// receipt that does not carry canonical metadata, and replaces a refused
+// value set with nil before rendering sees it.
+func brokeredRunPreparation(targets []BundleTarget, receipt RunBundlePreparationReceipt, values map[string][]byte, err error) (RunBundlePreparationReceipt, map[string][]byte, error) {
+	if err != nil {
+		// Preserve the callback error exactly; only the partial secrets are
+		// dropped so a caller can still fall back on an exact sentinel.
+		clearBundleValues(values)
+		return RunBundlePreparationReceipt{}, nil, err
+	}
+	if !validBrokeredRunReceipt(receipt) || !brokeredRunValuesValid(targets, values) {
+		clearBundleValues(values)
+		return RunBundlePreparationReceipt{}, nil, ErrRunCredential
+	}
+	return receipt, values, nil
+}
+
+// runBrokeredBundle is RunBrokeredBundle with the private-root creator, value
+// cleanup and child executor injected so tests stay deterministic.
+func runBrokeredBundle(ctx context.Context, targets []BundleTarget, request RunBundleRequest, prepare BrokeredRunPreparer, create func() (string, error), remove func(string) error, execute func(context.Context, RunBundleRequest, string, cliprofile.RenderedBundle) (int, error)) (RunReceipt, error) {
+	if prepare == nil {
+		return RunReceipt{}, ErrRunTarget
+	}
+	return runBundle(ctx, targets, request, create, func(s *runBundleStoreRequest) (result, error) {
+		return brokeredRunStore(ctx, s, prepare)
+	}, execute, remove)
+}
+
+// brokeredRunStore adapts the desktop preparation callback to the local
+// store boundary. The callback runs only after runBundle created root and the
+// profile bundle directories, so it receives the exact private root.
+func brokeredRunStore(ctx context.Context, s *runBundleStoreRequest, prepare BrokeredRunPreparer) (result, error) {
+	if s == nil || s.validate() != nil {
+		// Never let the callback bind or disclose anything for a scope the
+		// local RunBundle lifecycle would refuse.
+		return result{}, ErrRunTarget
+	}
+	receipt, values, err := prepare(ctx, s.root)
+	receipt, values, err = brokeredRunPreparation(s.targets, receipt, values, err)
+	if err != nil {
+		return result{}, err
+	}
+	return result{values: values, session: receipt.Session, intent: receipt.Intent, destinationDigest: receipt.TargetDigest}, nil
+}
+
+// RunBrokeredBundle executes values that the desktop broker already prepared
+// and audited for exactly targets and request. It shares the local RunBundle
+// lifecycle: it validates the request, creates the private run root first,
+// passes that root to prepare, accepts only a canonical preparation receipt
+// and a value set with exactly one entry per target slot, then renders the
+// profile and starts the direct child through executeRunBundle.
+//
+// A nil prepare, a malformed receipt or an invalid value set fails closed with
+// ErrRunTarget or ErrRunCredential before any credential is rendered. A
+// preparation error is returned unchanged; values are zeroed and the root is
+// removed on every path, on success only after execution. The caller owns
+// targets and request and may reuse them; their slices are cloned before use.
+func RunBrokeredBundle(ctx context.Context, targets []BundleTarget, request RunBundleRequest, prepare BrokeredRunPreparer) (RunReceipt, error) {
+	return runBrokeredBundle(ctx, targets, request, prepare, createRunCLITemp, os.RemoveAll, func(ctx context.Context, req RunBundleRequest, root string, rendered cliprofile.RenderedBundle) (int, error) {
+		return executeRunBundle(ctx, req, root, rendered, runCLIStreams{os.Stdin, os.Stdout, os.Stderr})
+	})
+}
+
 func makeBundleDirs(root string, extra []string) error {
 	names := make([]string, 0, 6+len(extra))
 	names = append(names, "home", "gh", "config", "cache", "data", "tmp")
