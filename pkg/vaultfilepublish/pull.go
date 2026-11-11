@@ -57,8 +57,10 @@ var (
 	// contract: empty or oversize bytes, or an empty or oversize revision. The
 	// verifier is not called and no Pulled value is returned.
 	ErrBackendResult = errors.New("vault file publish: invalid backend result")
-	// ErrVerification reports that the caller's PullVerifier rejected the pull.
-	// Its error remains discoverable through errors.Is and errors.As.
+	// ErrVerification reports that a caller-supplied verifier rejected: the
+	// PullVerifier rejected a pull, or the ProposalVerifier rejected a
+	// prepared proposal. Its error remains discoverable through errors.Is and
+	// errors.As.
 	ErrVerification = errors.New("vault file publish: verification failed")
 )
 

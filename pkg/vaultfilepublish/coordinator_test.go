@@ -973,6 +973,134 @@ func TestResumePreparedRejectsInconsistentBaseRevision(t *testing.T) {
 	}
 }
 
+func TestResumePreparedRejectsCrossRecordInconsistencyBeforeAnyWork(t *testing.T) {
+	tests := []struct {
+		name               string
+		preparedGeneration uint64
+		state              func(*fixture) vaultfilejournal.State
+		check              func(*testing.T, vaultfilejournal.State, vaultfilejournal.PreparedProposal)
+	}{
+		{
+			name:               "prepared generation is greater than state generation",
+			preparedGeneration: 1,
+			state: func(*fixture) vaultfilejournal.State {
+				// The state rolled back to generation 0 while the prepared
+				// record still carries the generation it was prepared at.
+				return vaultfilejournal.State{
+					BaseBytes:      own(baseData),
+					RemoteRevision: baseRevision,
+					WorkingBytes:   own(proposalData),
+					Generation:     0,
+				}
+			},
+			check: func(t *testing.T, s vaultfilejournal.State, pp vaultfilejournal.PreparedProposal) {
+				t.Helper()
+				if pp.WorkingGeneration <= s.Generation {
+					t.Fatalf("prepared generation %d is not newer than state generation %d", pp.WorkingGeneration, s.Generation)
+				}
+			},
+		},
+		{
+			name:               "equal generations but state working bytes differ",
+			preparedGeneration: 0,
+			state: func(*fixture) vaultfilejournal.State {
+				// Same generation, but the working file no longer matches the
+				// proposal the prepared record would Ack.
+				return vaultfilejournal.State{
+					BaseBytes:      own(baseData),
+					RemoteRevision: baseRevision,
+					WorkingBytes:   own(localEditData),
+					Generation:     0,
+				}
+			},
+			check: func(t *testing.T, s vaultfilejournal.State, pp vaultfilejournal.PreparedProposal) {
+				t.Helper()
+				if pp.WorkingGeneration != s.Generation {
+					t.Fatalf("prepared generation %d != state generation %d", pp.WorkingGeneration, s.Generation)
+				}
+				if bytes.Equal(s.WorkingBytes, pp.Proposal.Bytes) {
+					t.Fatal("state working bytes still equal the prepared proposal bytes")
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			f := newFixture(t)
+
+			// Each record is written through its public codec: Prepare only
+			// sees a consistent state, then the state is transplanted to the
+			// valid but cross-record-inconsistent value under test.
+			dir := newJournalDir(t)
+			j := openJournal(t, dir)
+			seed := vaultfilejournal.State{
+				BaseBytes:      own(baseData),
+				RemoteRevision: baseRevision,
+				WorkingBytes:   own(proposalData),
+				Generation:     0,
+			}
+			if err := j.InitializeState(seed); err != nil {
+				t.Fatalf("InitializeState: %v", err)
+			}
+			// InitializeState only accepts generation 0; reach the prepared
+			// generation through the valid CAS API.
+			for gen := uint64(0); gen < tt.preparedGeneration; gen++ {
+				if err := j.UpdateWorking(gen, own(proposalData)); err != nil {
+					t.Fatalf("UpdateWorking(%d): %v", gen, err)
+				}
+			}
+			if err := j.Prepare(tt.preparedGeneration, f.proposal); err != nil {
+				t.Fatalf("Prepare: %v", err)
+			}
+			inconsistent := tt.state(f)
+			if err := j.Close(); err != nil {
+				t.Fatalf("close seeded journal: %v", err)
+			}
+			transplantState(t, filepath.Join(dir, "journal.db"), inconsistent)
+			j = openJournal(t, dir)
+			coord, err := NewCoordinator(f.backend, j, coordName, f.verifier())
+			if err != nil {
+				t.Fatalf("NewCoordinator: %v", err)
+			}
+			beforeState := loadState(t, j)
+			beforePrepared := loadPrepared(t, j)
+			tt.check(t, beforeState, beforePrepared)
+
+			for _, remote := range []struct {
+				name string
+				data []byte
+				rev  vaultfilebackend.Revision
+			}{
+				{name: "remote holds the prepared proposal", data: proposalData, rev: readbackRevision},
+				{name: "remote holds R", data: baseData, rev: baseRevision},
+			} {
+				t.Run(remote.name, func(t *testing.T) {
+					f.backend.set(remote.data, remote.rev)
+					current := f.pull(t)
+					f.backend.reads, f.backend.replaces = 0, 0
+					checks := f.numChecks
+
+					err := coord.ResumePrepared(ctx, current, anyPull)
+					if !errors.Is(err, ErrStaleBase) {
+						t.Fatalf("err = %v, want ErrStaleBase", err)
+					}
+					if f.numChecks != checks {
+						t.Fatal("proposal verifier called on cross-record-inconsistent records")
+					}
+					if f.backend.reads != 0 || f.backend.replaces != 0 {
+						t.Fatalf("backend I/O on inconsistent records: reads=%d replaces=%d", f.backend.reads, f.backend.replaces)
+					}
+					// Ack would rewrite the state and delete the prepared
+					// record; both surviving intact proves no Ack happened.
+					assertState(t, loadState(t, j), beforeState)
+					assertPrepared(t, loadPrepared(t, j), beforePrepared)
+				})
+			}
+		})
+	}
+}
+
 // transplantState replaces the journal's state record at dbPath with the exact
 // record encoding of state, taken from a donor journal initialized with it.
 func transplantState(t *testing.T, dbPath string, state vaultfilejournal.State) {

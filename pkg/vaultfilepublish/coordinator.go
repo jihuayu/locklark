@@ -275,7 +275,9 @@ func (c *Coordinator) PrepareAndPublish(ctx context.Context, pulledBase Pulled, 
 
 // ResumePrepared continues the durably prepared proposal after a restart.
 // It loads the prepared proposal and the original base state and requires the
-// prepared proposal's ExpectedRevision to be that stored base revision; an
+// prepared proposal's ExpectedRevision to be that stored base revision,
+// WorkingGeneration not to be greater than the state Generation, and, when the
+// generations are equal, the state WorkingBytes to equal the proposal bytes; an
 // inconsistent record is ErrStaleBase before anything is written or
 // acknowledged. currentPulled (obtained from ReadPulled) must then be either:
 //
@@ -318,6 +320,15 @@ func (c *Coordinator) ResumePrepared(ctx context.Context, currentPulled Pulled, 
 	}
 	if len(base.BaseBytes) == 0 || pp.Proposal.ExpectedRevision != base.RemoteRevision {
 		return fmt.Errorf("%w: prepared proposal expected revision is not the stored base revision", ErrStaleBase)
+	}
+	// These are the cross-record conditions Journal.Ack re-checks in its own
+	// transaction. Reject them before any verifier, CAS or Ack so a resume
+	// cannot write a proposal that Ack would then refuse to acknowledge.
+	if pp.WorkingGeneration > base.Generation {
+		return fmt.Errorf("%w: prepared generation %d is newer than state generation %d", ErrStaleBase, pp.WorkingGeneration, base.Generation)
+	}
+	if pp.WorkingGeneration == base.Generation && !equalBytes(base.WorkingBytes, pp.Proposal.Bytes) {
+		return fmt.Errorf("%w: state working bytes do not match the prepared proposal", ErrStaleBase)
 	}
 
 	switch {
