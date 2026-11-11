@@ -108,10 +108,12 @@ const lockTimeout = 2 * time.Second
 // permission bits; an existing database with such bits is rejected, never
 // chmodded. On Windows it is a local fixed-drive path whose whole component
 // chain is free of reparse points, is owned by a trusted principal and whose
-// DACL grants no untrusted principal the rights to traverse it, list it,
-// write it, replace a component or rewrite an ACL; an existing database must
-// be a regular, non-reparse file whose DACL grants no untrusted principal
-// read, write, delete or ACL access.
+// DACL grants no untrusted principal the rights to delete or replace a
+// component, rewrite an ACL or write metadata, and whose immediate parent
+// additionally grants no untrusted principal list, read, traverse, add-child,
+// delete or ACL access; an existing database must be a regular, non-reparse
+// file whose DACL grants no untrusted principal read, write, delete or ACL
+// access.
 //
 // Open holds an exclusive lock on the file for the lifetime of the Journal; a
 // concurrent opener of the same path fails with ErrLocked after the bbolt lock

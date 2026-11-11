@@ -66,13 +66,16 @@ const (
 	dirImmediateForbidden = dirDestructiveRights | windows.FILE_READ_DATA |
 		windows.FILE_READ_EA | windows.FILE_EXECUTE | windows.READ_CONTROL
 	// dirAncestorForbidden is what an ancestor must not grant an untrusted
-	// principal: traverse into the next component, replace the component, or
-	// rewrite the component's ACL.
-	dirAncestorForbidden = windows.FILE_READ_DATA | windows.FILE_EXECUTE |
-		windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA |
-		windows.FILE_WRITE_EA | windows.FILE_WRITE_ATTRIBUTES |
-		windows.DELETE | windows.WRITE_DAC | windows.WRITE_OWNER |
-		genericRead | genericWrite | genericExecute | genericAll | maximumAllowed
+	// principal: delete or replace a child entry, re-permission or re-own the
+	// ancestor, or hold write, metadata or generic-write powers on it.
+	// Ordinary read, list, traverse (FILE_READ_DATA/FILE_EXECUTE) and
+	// add-new-child (FILE_WRITE_DATA/FILE_APPEND_DATA) are allowed: a
+	// relative open resolves the next component from the ancestor and is
+	// then gated by that component and the strict immediate parent, so these
+	// rights cannot redirect or replace the journal's own path.
+	dirAncestorForbidden = windows.FILE_WRITE_EA | windows.FILE_WRITE_ATTRIBUTES |
+		windows.DELETE | deleteChildMask | windows.WRITE_DAC | windows.WRITE_OWNER |
+		genericWrite | genericAll | maximumAllowed
 
 	// journalTempPrefix names this package's uniquely named publication files.
 	journalTempPrefix = ".locklark-vaultfilejournal-"
@@ -83,10 +86,11 @@ const (
 )
 
 // sidScope is the set of principals trusted to own or administer the local
-// journal: this process user, LocalSystem, Administrators, TrustedInstaller
-// and Protected Users.
+// journal: this process user, LocalSystem, Administrators and
+// TrustedInstaller. Other built-in groups (for example Protected Users) are
+// not administrators of this user's files and stay untrusted.
 type sidScope struct {
-	user, system, admins, trustedInstaller, protectedUsers *windows.SID
+	user, system, admins, trustedInstaller *windows.SID
 }
 
 func currentSIDs() (*sidScope, error) {
@@ -107,7 +111,6 @@ func currentSIDs() (*sidScope, error) {
 		system:           text("S-1-5-18"),
 		admins:           text("S-1-5-32-544"),
 		trustedInstaller: text("S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"),
-		protectedUsers:   text("S-1-5-52"),
 	}, nil
 }
 
@@ -115,7 +118,7 @@ func (s *sidScope) trusted(sid *windows.SID) bool {
 	if sid == nil {
 		return false
 	}
-	for _, t := range []*windows.SID{s.user, s.system, s.admins, s.trustedInstaller, s.protectedUsers} {
+	for _, t := range []*windows.SID{s.user, s.system, s.admins, s.trustedInstaller} {
 		if t != nil && t.Equals(sid) {
 			return true
 		}
@@ -275,8 +278,9 @@ func directoryChain(dir string) []string {
 	return chain
 }
 
-// localDriveRejection reports why path is not an absolute local-drive path on
-// the current drive, or "" when it is.
+// localDriveRejection reports why path is not an absolute local-drive path,
+// or "" when it is. Any absolute drive-letter path is valid here; the drive's
+// type (fixed, RAM disk, network, removable) is checked separately.
 func localDriveRejection(path string) string {
 	clean := filepath.Clean(path)
 	if !filepath.IsAbs(clean) {
@@ -292,13 +296,6 @@ func localDriveRejection(path string) string {
 	if len(volume) != 2 || volume[1] != ':' || !isDriveLetter(volume[0]) ||
 		len(clean) < 3 || clean[2] != '\\' {
 		return "path does not start with a local drive letter"
-	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "working directory is unavailable"
-	}
-	if !strings.EqualFold(filepath.VolumeName(cwd), volume) {
-		return "path is not on the current drive"
 	}
 	return ""
 }
@@ -473,39 +470,37 @@ func publishNewDatabase(name, parent string) (published bool, err error) {
 	if err != nil {
 		return false, err
 	}
-	// handle is closed exactly once (after bbolt replaces it, or here on
-	// failure); temp is removed unless it has been published.
-	handleOpen := true
-	closeHandle := func() {
-		if handleOpen {
-			_ = syscall.CloseHandle(syscall.Handle(handle))
-			handleOpen = false
-		}
-	}
+	// The creation handle was opened without sharing, so it is the only way
+	// to reach the file until it is closed. temp is removed unless published.
 	defer func() {
-		closeHandle()
 		if !published {
 			_ = removeOwnFile(temp)
 		}
 	}()
 
-	// Only this call can reach this unique name, so a lock timeout here is an
-	// error rather than a competing writer. Keep the database open until it
-	// has been synced explicitly instead of relying on bbolt's fsync alone.
+	// Verify the DACL actually applied at creation through that handle, then
+	// close it before anything else opens the path by name.
+	if err := verifyTempSecurity(temp, handle); err != nil {
+		_ = syscall.CloseHandle(syscall.Handle(handle))
+		return false, err
+	}
+	if err := syscall.CloseHandle(syscall.Handle(handle)); err != nil {
+		return false, fmt.Errorf("vault file journal: close creation handle: %w", err)
+	}
+
+	// Only this call reaches this unique name, so a lock timeout here is an
+	// error, not a competing writer. NoSync stays false, and the file is
+	// synced again after bbolt's own close.
 	db, err := bolt.Open(temp, 0o600, &bolt.Options{NoSync: false, Timeout: lockTimeout})
 	if err != nil {
 		return false, fmt.Errorf("vault file journal: initialize database: %w", err)
 	}
-	if err := syncFile(temp); err != nil {
-		_ = db.Close()
-		return false, fmt.Errorf("vault file journal: sync database: %w", err)
-	}
 	if err := db.Close(); err != nil {
 		return false, fmt.Errorf("vault file journal: close database: %w", err)
 	}
-	// bbolt replaced our empty creation handle with its own and closed it with
-	// the database; release the original handle now.
-	closeHandle()
+	if err := syncFile(temp); err != nil {
+		return false, fmt.Errorf("vault file journal: sync database: %w", err)
+	}
 
 	from, err := windows.UTF16PtrFromString(temp)
 	if err != nil {
@@ -527,6 +522,29 @@ func publishNewDatabase(name, parent string) (published bool, err error) {
 	}
 	published = true
 	return true, nil
+}
+
+// verifyTempSecurity requires the freshly created temporary to have a
+// protected DACL that grants no untrusted principal read, write, delete or
+// ACL access. It fails closed if the DACL cannot be read through handle.
+func verifyTempSecurity(temp string, handle windows.Handle) error {
+	scope, err := currentSIDs()
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalid, err)
+	}
+	sd, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return fmt.Errorf("%w: cannot read the security of new database %s: %v", ErrInvalid, temp, err)
+	}
+	if err := scope.checkFileACL(temp, sd); err != nil {
+		return err
+	}
+	control, _, err := sd.Control()
+	if err != nil || control&windows.SE_DACL_PROTECTED == 0 {
+		return fmt.Errorf("%w: new database %s has no protected DACL", ErrInvalid, temp)
+	}
+	return nil
 }
 
 // privateFileSecurity returns a descriptor owned by the current user with a

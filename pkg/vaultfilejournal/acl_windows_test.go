@@ -271,3 +271,140 @@ func describeACL(t *testing.T, path string) string {
 	}
 	return sd.String()
 }
+
+// TestWindowsReadableAncestorAcceptedStrictParentEnforced proves an ordinary
+// ancestor that grants an untrusted principal read, list, traverse and
+// add-new-child rights (like a user profile) is accepted, while the strict
+// immediate parent rules still reject such a grant on the journal's own
+// parent, and an ancestor DELETE right is still rejected.
+func TestWindowsReadableAncestorAcceptedStrictParentEnforced(t *testing.T) {
+	dir := privateDir(t)
+	journalParent := filepath.Join(dir, "journal")
+	if err := os.Mkdir(journalParent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	defaultACL := describeACL(t, journalParent)
+	t.Cleanup(func() { mustSetDACLString(t, journalParent, defaultACL) })
+
+	everyone, err := windows.StringToSid("S-1-1-0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaultUserACE := sidRule(everyone, windows.FILE_GENERIC_READ|windows.FILE_GENERIC_EXECUTE, 0)
+
+	// An ordinary readable/traversable ancestor is not part of the secret.
+	for _, entries := range [][]windows.EXPLICIT_ACCESS{
+		{defaultUserACE},
+		{sidRule(everyone, windows.FILE_GENERIC_READ|windows.FILE_GENERIC_EXECUTE|
+			windows.FILE_WRITE_DATA|windows.FILE_APPEND_DATA, 0)},
+	} {
+		if err := checkDirRulesForTest(t, journalParent, entries, false); err != nil {
+			t.Fatalf("ancestor readable/traversable rules rejected: %v", err)
+		}
+	}
+
+	// The same rules on the immediate parent are rejected: it must not let an
+	// untrusted principal list, traverse, write, delete or change its ACL.
+	for name, mask := range map[string]windows.ACCESS_MASK{
+		"read-list":      windows.FILE_GENERIC_READ,
+		"traverse":       windows.FILE_EXECUTE,
+		"add-child":      windows.FILE_APPEND_DATA,
+		"delete-child":   deleteChildMask,
+		"rewrite-acl":    windows.WRITE_DAC,
+		"rewrite-owner":  windows.WRITE_OWNER,
+		"delete-folder":  windows.DELETE,
+		"write-metadata": windows.FILE_WRITE_ATTRIBUTES,
+	} {
+		if err := checkDirRulesForTest(t, journalParent, []windows.EXPLICIT_ACCESS{sidRule(everyone, mask, 0)}, true); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("immediate parent rule %s = %v, want ErrInvalid", name, err)
+		}
+	}
+
+	// Ancestors may not be replaceable or re-permissionable.
+	for name, mask := range map[string]windows.ACCESS_MASK{
+		"delete":              windows.DELETE,
+		"delete-child":        deleteChildMask,
+		"rewrite-acl":         windows.WRITE_DAC,
+		"rewrite-owner":       windows.WRITE_OWNER,
+		"write-metadata":      windows.FILE_WRITE_ATTRIBUTES,
+		"generic-write":       windows.GENERIC_WRITE,
+		"generic-all":         windows.GENERIC_ALL,
+		"maximum-allowed":     maximumAllowed,
+		"write-ext-attribute": windows.FILE_WRITE_EA,
+	} {
+		if err := checkDirRulesForTest(t, journalParent, []windows.EXPLICIT_ACCESS{sidRule(everyone, mask, 0)}, false); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("ancestor rule %s = %v, want ErrInvalid", name, err)
+		}
+	}
+
+	// Protected Users is not an administrator of this user's files.
+	scope, err := currentSIDs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	protectedUsers, err := windows.StringToSid("S-1-5-52")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scope.trusted(protectedUsers) {
+		t.Fatal("Protected Users must not be a trusted principal")
+	}
+}
+
+// checkDirRulesForTest compiles entries into a protected DACL on dir and runs
+// the same directory rule check Open uses, restoring dir's DACL afterwards.
+func checkDirRulesForTest(t *testing.T, dir string, entries []windows.EXPLICIT_ACCESS, immediate bool) error {
+	t.Helper()
+	sd, err := resetDACL(entries)
+	if err != nil {
+		return err
+	}
+	saved := describeACL(t, dir)
+	mustSetDACL(t, dir, sd)
+	defer mustSetDACLString(t, dir, saved)
+	scope, err := currentSIDs()
+	if err != nil {
+		return err
+	}
+	current, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return err
+	}
+	forbidden := uint32(dirAncestorForbidden)
+	if immediate {
+		forbidden = dirImmediateForbidden
+	}
+	return scope.checkDirACL(dir, current, forbidden)
+}
+
+func mustSetDACLString(t *testing.T, path, sddl string) {
+	t.Helper()
+	sd, err := windows.SecurityDescriptorFromString(sddl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustSetDACL(t, path, sd)
+}
+
+// TestWindowsAnyLocalDriveAccepted proves the drive rule is lexical: any
+// absolute local drive letter is accepted, independent of the current drive.
+func TestWindowsAnyLocalDriveAccepted(t *testing.T) {
+	for _, path := range []string{
+		`D:\dir\journal.db`,
+		`Q:\a\b\journal.db`,
+		`c:\dir\journal.db`,
+	} {
+		if why := localDriveRejection(path); why != "" {
+			t.Fatalf("%q rejected lexically: %s", path, why)
+		}
+	}
+	// Only the drive-type probe may refuse a drive letter that is not a local
+	// fixed or RAM-disk volume (for example a disconnected mapped drive).
+	for _, path := range []string{`Z:\dir\journal.db`, `Y:\dir\journal.db`} {
+		err := checkLocalDrive(path)
+		if err != nil && !errors.Is(err, ErrInvalid) {
+			t.Fatalf("checkLocalDrive(%q) = %v, want nil or ErrInvalid", path, err)
+		}
+	}
+}

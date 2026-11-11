@@ -72,6 +72,15 @@ func openDatabase(path, parent string, missingHint bool) (*Journal, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	// Re-check the permission bits now that the file is open, so the
+	// no-group-or-other promise covers the read boundary too. A file widened
+	// in between is rejected as is, never chmodded.
+	if !missingHint {
+		if err := checkExistingDBFile(path); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+	}
 	return &Journal{db: db}, nil
 }
 
