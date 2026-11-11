@@ -600,7 +600,6 @@ try {
     await wait(
       async () => (await action.disabled("#refresh")) === false,
       "Paired popup not ready",
-    "Exact-origin match missing",
     );
     // The worker binds a route only to a source document captured by the
     // ordinary match the user starts from this popup. One physical refresh
@@ -772,7 +771,6 @@ try {
     await eventually(
       async () => (await popup.disabled("#refresh")) === false,
       "Paired popup not ready",
-    "Exact-origin match missing",
     );
     await popup.click("#refresh");
     await eventually(
