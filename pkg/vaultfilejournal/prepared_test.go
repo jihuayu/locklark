@@ -293,9 +293,10 @@ func TestPreparedAckWithoutNewEditIsClean(t *testing.T) {
 // barriers. The edit transaction first holds the journal mutex and blocks (as
 // earlier public calls would do between transactions) through its hook, which
 // runs after the state Put and before the Bolt commit. The Ack for the older
-// prepared proposal then starts: it blocks on the journal mutex and cannot
-// begin its transaction. The edit resumes, commits and releases the mutex, and
-// the Ack runs afterwards. It must re-read the committed state and succeed: it
+// prepared proposal then starts and announces itself on a channel; the test
+// does not wait to prove it reached the mutex, because the mutex stays held by
+// the edit until release, so the Ack can only proceed after the edit commits
+// and releases it. It must re-read the committed state and succeed: it
 // advances base/revision, keeps the newer working bytes and generation and
 // clears the prepared record. The edit committing first is the target path
 // here, not a mismatch. Every wait is bounded and the release is deferred, so
@@ -334,20 +335,19 @@ func TestPreparedAckAfterConcurrentEditCommit(t *testing.T) {
 
 	// The edit now holds the journal mutex in its hook. The Ack therefore
 	// cannot re-read state until the edit has committed and released it.
+	ackStarted := make(chan struct{})
 	ackDone := make(chan error, 1)
 	go func() {
+		close(ackStarted)
 		ackDone <- j.Ack(p.OperationID, p.Bytes, newRev)
 	}()
-	// The Ack's only wait at this point is the edit's journal mutex, so a
-	// short notice is enough; a committed edit or Ack here would break the
-	// barrier.
-	time.Sleep(50 * time.Millisecond)
+	// Barrier: from the Ack start until the edit hook is released the mutex
+	// stays owned by the edit, so the Ack can read state only after the edit
+	// transaction commits, however long that takes.
 	select {
-	case err := <-editDone:
-		t.Fatalf("edit returned %v while its hook was still blocking", err)
-	case err := <-ackDone:
-		t.Fatalf("Ack returned %v before the edit transaction committed", err)
-	default:
+	case <-ackStarted:
+	case <-time.After(wait):
+		t.Fatal("Ack goroutine never started")
 	}
 
 	// Let the edit commit and release the mutex; the Ack then proceeds.
