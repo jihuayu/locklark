@@ -73,7 +73,8 @@ func (d *Decoder) Decode(db *Database) error {
 //
 //  1. reads the input at most limits.MaxEncodedBytes+1 bytes and rejects an
 //     over-limit input with ErrDecodeLimitExceeded before the KDBX header is
-//     parsed and before key derivation;
+//     parsed and before key derivation; a header that is not KDBX 4 is
+//     rejected with ErrCorruptedDatabase right after parsing;
 //  2. bounds the verified and decrypted content blocks by
 //     limits.MaxEncodedBytes, so a damaged block length cannot allocate more
 //     than the input budget admits;
@@ -160,6 +161,14 @@ func (d *Decoder) decode(db *Database, budget decodeBudget) error {
 	db.Header = new(DBHeader)
 	if err := db.Header.readFrom(r); err != nil {
 		return err
+	}
+
+	// The bounded path only decodes KDBX4 content. KDBX 3.1 key derivation
+	// runs an AES loop over the header TransformRounds, which untrusted input
+	// can set to an unbounded value, so it is rejected before the header
+	// hash is read and before any key derivation.
+	if budget.bounded && !db.Header.IsKdbx4() {
+		return fmt.Errorf("%w: bounded decoding supports KDBX 4 only", ErrCorruptedDatabase)
 	}
 
 	// Read hashes and validate the header hash (Kdbx v4)

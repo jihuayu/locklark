@@ -104,8 +104,9 @@ func (ih *InnerHeader) readFrom(r io.Reader) error {
 //
 // Bounded mode also rejects malformed fields which the unbounded parser
 // tolerates: a binary field of 0 or 1 bytes (no flag, or a flag without
-// content) and negative lengths. Unbounded readFrom keeps its original
-// behavior exactly.
+// content), an inner random stream id field which is not exactly 4 bytes, and
+// over-budget or negative binary lengths. Unbounded readFrom keeps its
+// original behavior exactly.
 func (ih *InnerHeader) readFromWithLimits(r io.Reader, maxBinaryBytes int64) error {
 	return ih.parse(r, maxBinaryBytes)
 }
@@ -126,6 +127,11 @@ ForLoop:
 		}
 		if err := binary.Read(r, binary.LittleEndian, &length); err != nil {
 			return err
+		}
+		if bounded && headerType == InnerHeaderIRSID && length != 4 {
+			// The inner random stream id is read as a uint32 and must not
+			// reach that conversion with a short payload.
+			return fmt.Errorf("%w: inner random stream id of %d bytes", ErrCorruptedDatabase, int64(length))
 		}
 		if bounded && headerType == InnerHeaderBinary {
 			n := uint32(length)

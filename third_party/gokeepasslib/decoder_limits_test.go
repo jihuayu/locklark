@@ -3,10 +3,12 @@ package gokeepasslib
 import (
 	"bytes"
 	"compress/gzip"
+	"encoding/binary"
 	"errors"
 	"io"
 	"math"
 	"testing"
+	"time"
 )
 
 // limitTestKDF is a valid Argon2id profile with the smallest memory and
@@ -410,6 +412,102 @@ func TestInnerHeaderUnboundedCompatibility(t *testing.T) {
 		if ih.InnerRandomStreamID != ChaChaStreamID || len(ih.InnerRandomStreamKey) != 19 ||
 			len(ih.Binaries) != 1 || ih.Binaries[0].MemoryProtection != 1 || !bytes.Equal(ih.Binaries[0].Content, bytes.Repeat([]byte{0xA5}, 8)) {
 			t.Fatalf("%s: header = %v", name, ih)
+		}
+	}
+}
+
+// kdbx31HeaderOnly is a well-formed KDBX 3.1 file header (signature and
+// file header fields through the header terminator) with the given
+// TransformRounds, followed by a little content.
+func kdbx31HeaderOnly(t *testing.T, transformRounds uint64) []byte {
+	t.Helper()
+	fh := NewKDBX3FileHeaders()
+	fh.TransformRounds = transformRounds
+	sig := DefaultKDBX3Sig
+	var out bytes.Buffer
+	if err := binary.Write(&out, binary.LittleEndian, sig); err != nil {
+		t.Fatal(err)
+	}
+	if err := fh.writeTo31(&out); err != nil {
+		t.Fatal(err)
+	}
+	return append(out.Bytes(), make([]byte, 64)...)
+}
+
+func TestDecodeWithLimitsRejectsKDBX3BeforeKeyDerivation(t *testing.T) {
+	// A tiny in-budget KDBX 3.1 header with the maximum AES transform
+	// rounds: the bounded path must reject it right after parsing, before
+	// the unbounded rounds loop of the KDBX 3.1 key derivation.
+	encoded := kdbx31HeaderOnly(t, math.MaxUint64)
+	inputs := map[string]io.Reader{
+		"byte slice": bytes.NewReader(encoded),
+		"generic":    &countReader{r: bytes.NewReader(encoded)},
+	}
+	for name, input := range inputs {
+		db := newLimitTestDatabase()
+		db.Credentials = limitTestCredentials(t)
+		done := make(chan error, 1)
+		go func() {
+			done <- NewDecoder(input).DecodeWithLimits(db, DecodeLimits{
+				MaxEncodedBytes:   int64(len(encoded)),
+				MaxPlaintextBytes: 1 << 20,
+			})
+		}()
+		select {
+		case err := <-done:
+			if !errors.Is(err, ErrCorruptedDatabase) {
+				t.Fatalf("%s: err = %v, want ErrCorruptedDatabase", name, err)
+			}
+			if db.Header == nil || db.Header.FileHeaders == nil ||
+				db.Header.FileHeaders.TransformRounds != math.MaxUint64 {
+				t.Fatalf("%s: header was not the parsed fixture", name)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("%s: over-budget TransformRounds reached key derivation", name)
+		}
+	}
+
+	// The unbounded Decode keeps its KDBX 3.1 compatibility: a normal file
+	// with low transform rounds decodes.
+	db := limitTestDatabase(t)
+	lowRounds := NewDatabase(WithDatabaseKDBXVersion3())
+	lowRounds.Header.FileHeaders.TransformRounds = 16
+	lowRounds.Credentials = db.Credentials
+	lowRounds.Content = db.Content
+	lowEncoded := encodeLimitTestDatabase(t, lowRounds)
+	opened := NewDatabase(WithDatabaseKDBXVersion3())
+	opened.Credentials = limitTestCredentials(t)
+	if err := NewDecoder(bytes.NewReader(lowEncoded)).Decode(opened); err != nil {
+		t.Fatalf("unbounded KDBX 3.1 decode: %v", err)
+	}
+	if got := opened.Content.Root.Groups[0].Entries[0].GetContent("Title"); got != "roundtrip" {
+		t.Fatalf("title = %q", got)
+	}
+}
+
+// rawKDBX41WithContent assembles a valid KDBX 4.1 file around an arbitrary
+// decrypted content, so it passes the header, KDF, HMAC and block checks.
+func rawKDBX41WithContent(t *testing.T, content []byte) ([]byte, []byte) {
+	t.Helper()
+	key := limitTestKey()
+	return rawKDBX41(t, limitTestKDF(), key, content), key
+}
+
+func TestDecodeWithLimitsRejectsShortInnerRandomStreamID(t *testing.T) {
+	// Each fixture reaches the InnerHeader parser: the header, KDF, HMAC
+	// and content blocks are valid and the body fits the budget.
+	for n := 0; n <= 3; n++ {
+		body := append([]byte{InnerHeaderIRSID, byte(n), 0, 0, 0}, make([]byte, n)...)
+		body = append(body, "<KeePassFile/>"...)
+		encoded, key := rawKDBX41WithContent(t, body)
+
+		db := newLimitTestDatabase()
+		err := decodeWithLimits(db, encoded, key, DecodeLimits{
+			MaxEncodedBytes:   int64(len(encoded)),
+			MaxPlaintextBytes: int64(len(encoded)),
+		})
+		if !errors.Is(err, ErrCorruptedDatabase) {
+			t.Fatalf("length %d: err = %v, want ErrCorruptedDatabase", n, err)
 		}
 	}
 }
