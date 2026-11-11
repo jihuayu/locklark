@@ -1948,7 +1948,39 @@ test("route per-field copy uses physical input, exact native labels and the priv
   assert.match(checkpoint, /Native field disclosure did not appear/);
   assert.match(checkpoint, /Native field disclosure did not follow its review/);
   // Fixed UI feedback, never a page-computed success.
-  assert.match(source, /^const ROUTE_COPY_FEEDBACK = \["已启用自动清理", "自动清理已关闭"\];$/m);
+  // All three fixed success variants: both native-lease lines and the
+  // legacy manual-copy line. Pending/refusal/unknown text is absent.
+  assert.match(
+    source,
+    /^const ROUTE_COPY_FEEDBACK = \[\n  "已启用自动清理",\n  "自动清理已关闭",\n  "已复制；浏览器无法保证自动清除，请按需手动清理",\n\];$/m,
+  );
+  const feedbackList = source.slice(
+    source.indexOf("const ROUTE_COPY_FEEDBACK = ["),
+    source.indexOf("];", source.indexOf("const ROUTE_COPY_FEEDBACK = [")) + 2,
+  );
+  for (const text of ["已启用自动清理", "自动清理已关闭", "已复制；浏览器无法保证自动清除，请按需手动清理"])
+    assert.ok(feedbackList.includes(text), "missing success feedback " + text);
+  assert.equal(countMatches(feedbackList, /已复制；/g), 1);
+  for (const failure of ["复制失败", "复制结果未确认", "复制已取消或被拒绝"])
+    assert.ok(!feedbackList.includes(failure), "failure text accepted: " + failure);
+  // The legacy line is the real popup success feedback after writeText,
+  // not an invented string: it appears in writeClipboard -> copiedFeedback.
+  const popupSource = readFileSync(
+    new URL("../browser-extension/popup.js", import.meta.url),
+    "utf8",
+  );
+  const writeFrom = popupSource.indexOf("async function writeClipboard(value, button) {");
+  assert.ok(writeFrom > 0, "missing writeClipboard");
+  const writeBody = popupSource.slice(
+    writeFrom,
+    popupSource.indexOf("\n  }\n", writeFrom),
+  );
+  assert.match(
+    writeBody,
+    /await globalThis\.navigator\.clipboard\.writeText\(value\);\n    \} catch \{\n      toast\("复制失败"\);\n      return;\n    \}\n    copiedFeedback\(button, "已复制；浏览器无法保证自动清除，请按需手动清理"\);/,
+  );
+  // Success is only ever the feedback text; the clipboard match below
+  // stays mandatory.
   assert.match(checkpoint, /ROUTE_COPY_FEEDBACK\.some/);
   // Private-pipe comparison; no success without a matching clipboard.
   assert.match(checkpoint, /new PrivateClipboard\(\{ root, state, env \}\)/);

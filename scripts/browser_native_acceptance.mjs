@@ -628,8 +628,14 @@ const ROUTE_COPY_FIELD_SELECTOR =
   '[data-field-id="password"] [data-action="copy-field"]';
 const ROUTE_COPY_REVIEW_LABEL = "批准本次操作";
 const ROUTE_COPY_DISCLOSURE_LABEL = "批准本次字段披露";
-// Both fixed successful-copy feedback lines copiedFeedback() can render.
-const ROUTE_COPY_FEEDBACK = ["已启用自动清理", "自动清理已关闭"];
+// Both native-lease success lines and the legacy manual-copy success line
+// (popup.js writeClipboard -> copiedFeedback). Pending, refusal, unknown
+// outcome and missing feedback are never accepted.
+const ROUTE_COPY_FEEDBACK = [
+  "已启用自动清理",
+  "自动清理已关闭",
+  "已复制；浏览器无法保证自动清除，请按需手动清理",
+];
 // The concealed row's revealed value is masked, never a copy of the secret.
 function routePasswordRowProbe(password) {
   return `(()=>{
