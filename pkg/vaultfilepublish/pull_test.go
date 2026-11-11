@@ -12,8 +12,9 @@ import (
 
 var errVerifyRejected = errors.New("verifier rejected")
 
-// fakeBackend is a ReadBackend that records calls and returns a fixed result.
-type fakeBackend struct {
+// readOnlyFakeBackend is a ReadBackend that records calls and returns a fixed
+// result.
+type readOnlyFakeBackend struct {
 	calls  int
 	gotCtx context.Context
 	gotNam string
@@ -21,7 +22,7 @@ type fakeBackend struct {
 	err    error
 }
 
-func (f *fakeBackend) Read(ctx context.Context, name string) (vaultfilebackend.ReadResult, error) {
+func (f *readOnlyFakeBackend) Read(ctx context.Context, name string) (vaultfilebackend.ReadResult, error) {
 	f.calls++
 	f.gotCtx = ctx
 	f.gotNam = name
@@ -34,7 +35,7 @@ func mustResult(t *testing.T, data []byte, revision string) vaultfilebackend.Rea
 }
 
 func TestReadPulledRequiresVerifier(t *testing.T) {
-	backend := &fakeBackend{result: mustResult(t, []byte("ciphertext"), `"etag-1"`)}
+	backend := &readOnlyFakeBackend{result: mustResult(t, []byte("ciphertext"), `"etag-1"`)}
 
 	got, err := ReadPulled(context.Background(), backend, "file.kdbx", nil)
 	if !errors.Is(err, ErrInvalidArgument) {
@@ -59,10 +60,10 @@ func TestReadPulledRejectsInvalidArguments(t *testing.T) {
 		verifier PullVerifier
 		want     string
 	}{
-		{name: "nil context", ctx: nil, backend: &fakeBackend{}, fileName: "f", verifier: verifier, want: "nil context"},
+		{name: "nil context", ctx: nil, backend: &readOnlyFakeBackend{}, fileName: "f", verifier: verifier, want: "nil context"},
 		{name: "nil backend", ctx: context.Background(), backend: nil, fileName: "f", verifier: verifier, want: "nil backend"},
-		{name: "nil verifier", ctx: context.Background(), backend: &fakeBackend{}, fileName: "f", verifier: nil, want: "nil verifier"},
-		{name: "empty name", ctx: context.Background(), backend: &fakeBackend{}, fileName: "", verifier: verifier, want: "empty name"},
+		{name: "nil verifier", ctx: context.Background(), backend: &readOnlyFakeBackend{}, fileName: "f", verifier: nil, want: "nil verifier"},
+		{name: "empty name", ctx: context.Background(), backend: &readOnlyFakeBackend{}, fileName: "", verifier: verifier, want: "empty name"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -73,7 +74,7 @@ func TestReadPulledRejectsInvalidArguments(t *testing.T) {
 			if !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("err = %q, want mention of %q", err, tt.want)
 			}
-			if fb, ok := tt.backend.(*fakeBackend); ok && fb.calls != 0 {
+			if fb, ok := tt.backend.(*readOnlyFakeBackend); ok && fb.calls != 0 {
 				t.Fatalf("backend read %d times, want 0", fb.calls)
 			}
 		})
@@ -86,7 +87,7 @@ func TestReadPulledPreservesBytesAndOpaqueRevision(t *testing.T) {
 	const revision = `W/"9a4c5b0f3e2d1c"`
 
 	ctx := context.Background()
-	backend := &fakeBackend{result: mustResult(t, data, revision)}
+	backend := &readOnlyFakeBackend{result: mustResult(t, data, revision)}
 
 	var verifiedBytes []byte
 	var verifiedRevision vaultfilebackend.Revision
@@ -119,7 +120,7 @@ func TestReadPulledPreservesBytesAndOpaqueRevision(t *testing.T) {
 
 func TestReadPulledMutationIsolation(t *testing.T) {
 	original := []byte("original-ciphertext")
-	backend := &fakeBackend{result: mustResult(t, original, "rev-1")}
+	backend := &readOnlyFakeBackend{result: mustResult(t, original, "rev-1")}
 
 	var pullInput []byte
 	verifier := func(_ context.Context, got []byte, _ vaultfilebackend.Revision) error {
@@ -181,7 +182,7 @@ func TestReadPulledRejectsInvalidBackendResult(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			backend := &fakeBackend{result: tt.result}
+			backend := &readOnlyFakeBackend{result: tt.result}
 			verifierCalls := 0
 			verifier := func(context.Context, []byte, vaultfilebackend.Revision) error {
 				verifierCalls++
@@ -201,7 +202,7 @@ func TestReadPulledRejectsInvalidBackendResult(t *testing.T) {
 
 func TestReadPulledAcceptsBoundarySizes(t *testing.T) {
 	result := mustResult(t, make([]byte, MaxPulledBytes), strings.Repeat("r", MaxPulledRevisionSize))
-	backend := &fakeBackend{result: result}
+	backend := &readOnlyFakeBackend{result: result}
 	verifier := func(context.Context, []byte, vaultfilebackend.Revision) error { return nil }
 
 	pulled, err := ReadPulled(context.Background(), backend, "v.kdbx", verifier)
@@ -214,7 +215,7 @@ func TestReadPulledAcceptsBoundarySizes(t *testing.T) {
 }
 
 func TestReadPulledPropagatesBackendError(t *testing.T) {
-	backend := &fakeBackend{err: vaultfilebackend.ErrNotFound}
+	backend := &readOnlyFakeBackend{err: vaultfilebackend.ErrNotFound}
 	verifierCalls := 0
 	verifier := func(context.Context, []byte, vaultfilebackend.Revision) error {
 		verifierCalls++
@@ -234,7 +235,7 @@ func TestReadPulledPropagatesBackendError(t *testing.T) {
 }
 
 func TestReadPulledPropagatesVerifierError(t *testing.T) {
-	backend := &fakeBackend{result: mustResult(t, []byte("ciphertext"), "rev-2")}
+	backend := &readOnlyFakeBackend{result: mustResult(t, []byte("ciphertext"), "rev-2")}
 	verifier := func(_ context.Context, data []byte, rev vaultfilebackend.Revision) error {
 		if !bytes.Equal(data, []byte("ciphertext")) || rev != "rev-2" {
 			t.Fatalf("verifier saw (%q, %q), want exact backend result", data, rev)
@@ -255,7 +256,7 @@ func TestReadPulledPropagatesVerifierError(t *testing.T) {
 }
 
 func TestReadPulledGenericVerifierError(t *testing.T) {
-	backend := &fakeBackend{result: mustResult(t, []byte("ciphertext"), "rev-3")}
+	backend := &readOnlyFakeBackend{result: mustResult(t, []byte("ciphertext"), "rev-3")}
 	verifier := func(context.Context, []byte, vaultfilebackend.Revision) error { return errVerifyRejected }
 
 	_, err := ReadPulled(context.Background(), backend, "v.kdbx", verifier)
