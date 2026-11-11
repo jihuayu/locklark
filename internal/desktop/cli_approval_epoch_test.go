@@ -53,7 +53,7 @@ func TestCLIRunApprovalRefusedAfterEpochAdvance(t *testing.T) {
 	a.brokerMu.Unlock()
 	result := make(chan cliRunApprovalResult, 1)
 	go func() {
-		approved, err := a.requestCLIRunApproval(context.Background(), browserhost.Peer{}, browserhost.BrokerCLIRequest{}, s, epoch)
+		approved, err := a.requestCLIRunApproval(context.Background(), browserhost.Peer{}, "/fixture/vault.ll", browserhost.CLIRunScope{}, nil, s, epoch)
 		result <- cliRunApprovalResult{approved: approved, err: err}
 	}()
 	p := waitCLIRunApprovalPending(t, a)
@@ -71,7 +71,7 @@ func TestCLIRunApprovalRefusedAfterEpochAdvance(t *testing.T) {
 		t.Fatal("epoch advance disturbed the session or pending review")
 	}
 
-	a.approveCLIRun(true)
+	a.approveCLIRun(p, true)
 	r := waitCLIRunApprovalResult(t, result)
 	if r.approved || !errors.Is(r.err, errCLIRunRefused) {
 		t.Fatal("stale approve published an approval")
@@ -94,12 +94,12 @@ func TestCLIRunApprovalRefusedLockedSession(t *testing.T) {
 	a.brokerMu.Unlock()
 	result := make(chan cliRunApprovalResult, 1)
 	go func() {
-		approved, err := a.requestCLIRunApproval(context.Background(), browserhost.Peer{}, browserhost.BrokerCLIRequest{}, s, epoch)
+		approved, err := a.requestCLIRunApproval(context.Background(), browserhost.Peer{}, "/fixture/vault.ll", browserhost.CLIRunScope{}, nil, s, epoch)
 		result <- cliRunApprovalResult{approved: approved, err: err}
 	}()
-	waitCLIRunApprovalPending(t, a)
+	p := waitCLIRunApprovalPending(t, a)
 	s.Lock()
-	a.approveCLIRun(true)
+	a.approveCLIRun(p, true)
 	r := waitCLIRunApprovalResult(t, result)
 	if r.approved || !errors.Is(r.err, errCLIRunRefused) {
 		t.Fatal("locked session approved a pending disclosure")
