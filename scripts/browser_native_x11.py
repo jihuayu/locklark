@@ -232,26 +232,30 @@ def window_ancestry(parent_of, window, root, max_depth=POINTER_PATH_DEPTH):
     return None
 
 
-def pointer_containment(parent_of, root, pointer_state, chain, expected_root, point, geometry):
+def pointer_containment(parent_of, root, pointer_state, chain, expected_root, geometry):
     """Exact pointer position and the actual X tree on the pointer's path.
 
-    `pointer_state` is (qroot, qchild, root_x, root_y, win_x, win_y, mask),
-    the real XQueryPointer(root) result. `chain` is the window_ancestry of the
-    chooser (chooser first, root last), `expected_root` is the chooser's root
-    origin, `point` is the only permitted point in the chooser's own
-    coordinates and `geometry` is its measured (width, height). A press is
-    accepted only when:
-      - the query root is the display root (the pointer is not inside a query)
-        and qchild is a positive non-root window;
-      - the pointer's window-relative position is exactly `point`, its root
-        position is exactly `expected_root` + point, and the point lies inside
-        the measured chooser;
-      - every hop of the chooser's actual parent chain to the root matches;
-      - qchild, the root child that would receive the press, is the chooser
-        itself, an ancestor of it, or a child of the chooser (strictly inside).
-    Any other root child (an overlay), a stale chain, a child on no known path
-    or any malformed value returns False. Nothing here emits input, reads
-    Xlib or exposes a window or coordinate.
+    This encodes XQueryPointer(display, root, ...): with the root as the
+    query window, `qroot` is the root itself, `qchild` is the root's child
+    containing the pointer (or 0 when the pointer is on the root directly),
+    and both (root_x, root_y) and (win_x, win_y) are relative to the root.
+
+    `pointer_state` is the real (qroot, qchild, root_x, root_y, win_x, win_y,
+    mask) result, `chain` is the window_ancestry of the chooser (chooser
+    first, root last) and `expected_root` is the chooser's root origin. The
+    only permitted point is derived from `geometry`, the measured chooser
+    (width, height): point = geometry + FOLDER_POINT_OFFSETS, strictly inside.
+    A press is accepted only when:
+      - the query root is the display root, qchild is a positive non-root
+        window on the chooser's actual chain, and no button is held;
+      - both the root-relative win position and the root position are exactly
+        expected_root + point (root-relative values cannot be chooser-local);
+      - every hop of the chooser's actual parent chain to the root matches the
+        verified chain, so the tree that gave qchild is not stale.
+    Any other root child (an overlay), a stale or ambiguous chain, a
+    window-relative value that is not the root point, or any malformed value
+    returns False. Nothing here emits input, reads Xlib or exposes a window or
+    coordinate.
     """
     if type(pointer_state) is not tuple or len(pointer_state) != 7:
         return False
@@ -263,57 +267,70 @@ def pointer_containment(parent_of, root, pointer_state, chain, expected_root, po
         if type(value) is not int or value < 0:
             return False
     if type(expected_root) is not tuple or len(expected_root) != 2 or \
-            type(expected_root[0]) is not int or type(expected_root[1]) is not int:
+            type(expected_root[0]) is not int or type(expected_root[1]) is not int or \
+            expected_root[0] < 0 or expected_root[1] < 0:
         return False
-    if type(point) is not tuple or len(point) != 2 or \
-            type(point[0]) is not int or type(point[1]) is not int:
+    if type(geometry) is not tuple or len(geometry) != 2:
         return False
-    if type(geometry) is not tuple or len(geometry) != 2 or \
-            folder_point(*geometry) is None:
+    point = folder_point(*geometry)
+    if point is None:
         return False
+    expected_point = (expected_root[0] + point[0], expected_root[1] + point[1])
     if qroot != root or qchild <= 0 or qchild == root:
         return False
-    if (win_x, win_y) != point:
+    # Mask 0: no modifier (Shift/Ctrl/Alt/Meta) and no button held before the
+    # press, so the click cannot turn into a chord, drag or altered event.
+    if mask != 0:
         return False
-    if (root_x, root_y) != (expected_root[0] + point[0], expected_root[1] + point[1]):
+    # A root-window query reports root-relative values in both the win and
+    # the root slots; a chooser-local win position is a mismatch, not a pass.
+    if (root_x, root_y) != expected_point or (win_x, win_y) != expected_point:
         return False
-    if not 0 <= point[0] < geometry[0] or not 0 <= point[1] < geometry[1]:
-        return False
-    # The chooser's own ancestors, chooser up to but excluding the root, must
-    # be exactly the actual parent chain: no cycle, no extra or missing hop.
+    # The verified chain must be a real path whose last hop is a child of the
+    # root, never longer than the bounded ancestry walk.
     if len(chain) - 1 > POINTER_PATH_DEPTH:
         return False
     try:
+        # The actual tree must still give exactly this chain: chooser to root,
+        # no cycle, no extra or missing hop (a stale chain refuses).
         node = chain[0]
         for ancestor in chain[1:]:
             if parent_of(node) != ancestor:
                 return False
             node = ancestor
-        if qchild in chain[:-1]:
-            return True
-        return parent_of(qchild) == chain[0]
+        # qchild of a root query is a root child: the chooser itself or one of
+        # its actual ancestors below the root. A child of the chooser can only
+        # be reported for a query window of the chooser, never for root.
+        return qchild in chain[:-1]
     except Exception:
         # Any refused or malformed XQueryTree hop is a failed proof.
         return False
 
 
-def move_and_prove_pointer(io, parent_of, root, target, expected_root, point, geometry,
+def move_and_prove_pointer(io, parent_of, root, target, expected_root, geometry,
                            require_motion=True):
     """Motion to the derived point, then the owned-qchild proof; no button.
 
     io is a fixed record of the caller's real Xlib/XTest functions:
     flush(), sync(), queried() -> XQueryPointer(root) tuple, and
     motion(root_x, root_y) -> truth value. `expected_root` is the chooser's
-    root origin; the only motion is to expected_root + point.
-    After flush/sync the pointer must be at exactly that root point with its
-    XQueryPointer root child (qchild) on the chooser's actual XQueryTree path
-    and the chooser chain unchanged. A refused motion/flush/sync, any query
-    exception or any non-true answer raises the fixed folder-pointer message,
-    so no button can be pressed; nothing here is emitted or printed. With
-    require_motion False only the exact position/path proof is run, for the
-    re-proof immediately before the button pair.
+    root origin; the point is derived from `geometry` and the only motion is
+    to expected_root + point.
+    After flush/sync the pointer must be at exactly that root point, its
+    XQueryPointer root child (qchild) must be on the chooser's actual
+    XQueryTree chain, and that chain must be unchanged. A refused
+    motion/flush/sync, any query exception or any non-true answer raises the
+    fixed folder-pointer message, so no button can be pressed; nothing here
+    is emitted or printed. A query that raises the pointer refusal (for
+    example XQueryPointer returning False) is not swallowed as input failure;
+    it keeps its own fixed reason. With require_motion False only the exact
+    position/path proof is run, for the re-proof immediately before the
+    button pair.
     """
     try:
+        point = folder_point(*geometry)
+        if point is None:
+            raise RuntimeError("Chooser folder pointer is not over the owned chooser")
         if require_motion:
             if not io.motion(expected_root[0] + point[0],
                              expected_root[1] + point[1]):
@@ -323,8 +340,8 @@ def move_and_prove_pointer(io, parent_of, root, target, expected_root, point, ge
         chain = window_ancestry(parent_of, target, root)
         if chain is None:
             raise RuntimeError("Chooser folder pointer is not over the owned chooser")
-        if not pointer_containment(parent_of, root, io.queried(), chain,
-                                   expected_root, point, geometry):
+        state = io.queried()
+        if not pointer_containment(parent_of, root, state, chain, expected_root, geometry):
             raise RuntimeError("Chooser folder pointer is not over the owned chooser")
         return chain
     except RuntimeError:
@@ -1417,6 +1434,9 @@ def main():
                                        C.byref(rx), C.byref(ry), C.byref(wx),
                                        C.byref(wy), C.byref(mask)):
                     raise RuntimeError("Chooser folder pointer is not over the owned chooser")
+                # A missing query window slot is not a zero window: refuse.
+                if qroot.value is None or qchild.value is None:
+                    raise RuntimeError("Chooser folder pointer is not over the owned chooser")
                 return (qroot.value, qchild.value, rx.value, ry.value,
                         wx.value, wy.value, mask.value)
 
@@ -1454,17 +1474,19 @@ def main():
         point_xy = folder_point(*geometry)
         if point_xy is None:
             raise RuntimeError("Chooser folder point is not inside the chooser")
-        # 2. Only (width-62,height-69), expressed as an exact root point.
+        # 2. Only the origin; the point (width-62,height-69) is re-derived from
+        # the measured geometry inside the proof, never passed by the caller.
         origin = read_only(translate_chooser, "Native acceptance X query failed")
-        expected_root = (origin[0] + point_xy[0], origin[1] + point_xy[1])
-        if expected_root[0] < 0 or expected_root[1] < 0:
+        if origin[0] < 0 or origin[1] < 0 or \
+                origin[0] + point_xy[0] < 0 or origin[1] + point_xy[1] < 0:
             raise RuntimeError("Chooser folder point is not inside the chooser")
         chooser_chain = read_only(chooser_chain_now, "Native acceptance X query failed")
-        # 3./4. XTest motion to the derived point, flush/sync, then the exact
-        # pointer position and the qchild's actual tree path. An unrelated
-        # overlay or an ambiguous path refuses before the button pair.
+        # 3./4. XTest motion to the derived root point, flush/sync, then the
+        # exact root-relative XQueryPointer(root) position and the qchild's
+        # actual tree path. An unrelated overlay or an ambiguous path refuses
+        # before the button pair.
         read_only(lambda: move_and_prove_pointer(
-            folder_io(), window_parent, root, target, expected_root, point_xy,
+            folder_io(), window_parent, root, target, origin,
             geometry), "Native acceptance X query failed")
         # 5. All state that authorized the click must still be exact: the
         # same chooser chain, the exact pointer point over the owned qchild,
@@ -1472,7 +1494,7 @@ def main():
         if read_only(chooser_chain_now, "Native acceptance X query failed") != chooser_chain:
             raise RuntimeError("Chooser folder pointer is not over the owned chooser")
         read_only(lambda: move_and_prove_pointer(
-            folder_io(), window_parent, root, target, expected_root, point_xy,
+            folder_io(), window_parent, root, target, origin,
             geometry, require_motion=False), "Native acceptance X query failed")
         if read_only(find_chooser, "Native acceptance X query failed") != geometry:
             raise RuntimeError("Chooser must keep the measured geometry")

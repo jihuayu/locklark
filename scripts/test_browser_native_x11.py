@@ -1049,9 +1049,22 @@ class PointerIO:
         self.calls.append("query")
         if self.query_error:
             raise RuntimeError("Chooser folder pointer is not at the measured point")
-        state = self.state or (ROOT, self.qchild, EXPECTED_ROOT[0], EXPECTED_ROOT[1],
-                               POINT[0], POINT[1], 0)
+        # A real XQueryPointer(root) result: root_x/root_y and win_x/win_y
+        # are both root-relative, so the win slot is the root point too.
+        state = self.state or root_query(self.qchild)
         return state
+
+
+def root_query(qchild, point=EXPECTED_ROOT, window_point=None, mask=0, qroot=ROOT):
+    """One real XQueryPointer(display, root, ...) tuple.
+
+    The query window is the root, so qroot is the root, qchild is the root's
+    child under the pointer and both the win and the root coordinates are
+    relative to the root.
+    """
+    if window_point is None:
+        window_point = point
+    return (qroot, qchild, point[0], point[1], window_point[0], window_point[1], mask)
 
 
 class PointerContainmentTests(unittest.TestCase):
@@ -1061,21 +1074,21 @@ class PointerContainmentTests(unittest.TestCase):
         self.assertEqual(self.chain, [20, 10, ROOT])
         self.assertEqual(native.folder_point(*GEOMETRY), POINT)
 
-    def judgement(self, io_parent=OWNED_TREE, state=None, point=POINT, geometry=GEOMETRY,
-                  chain=None, qchild=CHOOSER, root_point=EXPECTED_ROOT, window_point=POINT,
-                  qroot=ROOT):
+    def judgement(self, io_parent=OWNED_TREE, state=None, geometry=GEOMETRY,
+                  chain=None, qchild=CHOOSER, root_point=EXPECTED_ROOT, window_point=None,
+                  qroot=ROOT, mask=0):
         parent_of = tree_parents(io_parent)
         if chain is None:
             chain = native.window_ancestry(parent_of, CHOOSER, ROOT)
         if state is None:
-            state = (qroot, qchild, root_point[0], root_point[1],
-                     window_point[0], window_point[1], 0)
-        return native.pointer_containment(parent_of, ROOT, state, chain, ORIGIN, point, geometry)
+            state = root_query(qchild, root_point, window_point, mask, qroot)
+        return native.pointer_containment(parent_of, ROOT, state, chain, ORIGIN, geometry)
 
     def test_true_owned_ancestry_children_are_accepted(self):
-        # qchild is the chooser itself, one of its ancestors (the root child
-        # 10 down to the chooser), or a child strictly inside the chooser.
-        for qchild in (CHOOSER, OUTER, FRAME):
+        # qchild of a root query is a root child: the chooser itself or one of
+        # its actual ancestors below the root (10). A child of the chooser
+        # (21) can never be reported by XQueryPointer(root).
+        for qchild in (CHOOSER, OUTER):
             with self.subTest(qchild=qchild):
                 self.assertIs(self.judgement(qchild=qchild), True)
         # The chooser itself as an X tree leaf is the simplest owned path.
@@ -1084,7 +1097,8 @@ class PointerContainmentTests(unittest.TestCase):
 
     def test_false_overlay_on_another_root_child_is_refused(self):
         # A viewable overlay is another root child: it would take the press.
-        for qchild in (OVERLAY, OVERLAY_CHILD, 99, ROOT, 0):
+        # The chooser's own descendants cannot be a root query's qchild.
+        for qchild in (OVERLAY, OVERLAY_CHILD, FRAME, BUTTON, 99, ROOT, 0):
             with self.subTest(qchild=qchild):
                 self.assertIs(self.judgement(qchild=qchild), False)
         # The pointer query root is not the display root (inside a query).
@@ -1105,20 +1119,43 @@ class PointerContainmentTests(unittest.TestCase):
                                      chain=self.chain), False)
 
     def test_false_pointer_coordinates_are_refused(self):
+        # Both root slots must be the chooser origin plus the derived point.
         for dx, dy in ((1, 0), (0, 1), (-1, 0), (0, -1), (62, 69), (-1062, -753)):
+            point = (EXPECTED_ROOT[0] + dx, EXPECTED_ROOT[1] + dy)
+            # Root-coordinate ints are never negative: a drifting probe there
+            # is malformed anyway.
+            if point[0] < 0 or point[1] < 0:
+                continue
             with self.subTest(dx=dx, dy=dy):
-                self.assertIs(self.judgement(
-                    root_point=(EXPECTED_ROOT[0] + dx, EXPECTED_ROOT[1] + dy)), False)
-        # The window-relative position must be exactly the derived point.
-        for dx, dy in ((1, 0), (0, 1), (-1, 0), (0, -1), (62, 69)):
-            with self.subTest(wdx=dx, wdy=dy):
-                self.assertIs(self.judgement(
-                    window_point=(POINT[0] + dx, POINT[1] + dy)), False)
-        # A different point is not the measured point.
-        for point in ((1061, 753), (1062, 754), (0, 0), (1124, 822), None, (1062,)):
-            with self.subTest(point=point):
-                self.assertIs(self.judgement(point=point), False)
-        # Only the exact measured geometry is allowed.
+                self.assertIs(self.judgement(root_point=point), False)
+                self.assertIs(self.judgement(window_point=point), False)
+        # A chooser at the root origin needs the derived point in both slots.
+        with self.subTest(origin=(0, 0)):
+            parent_of = tree_parents(OWNED_TREE)
+            chain = native.window_ancestry(parent_of, CHOOSER, ROOT)
+            self.assertIs(native.pointer_containment(
+                parent_of, ROOT, root_query(CHOOSER, POINT), chain, (0, 0), GEOMETRY), True)
+            self.assertIs(native.pointer_containment(
+                parent_of, ROOT, root_query(CHOOSER, EXPECTED_ROOT), chain, (0, 0),
+                GEOMETRY), False)
+        # The old syntheses are refused: chooser-local win coordinates
+        # (the measured point itself) and root coordinates in a chooser-local
+        # slot cannot both come from one XQueryPointer(root).
+        for window_point in (POINT, (POINT[0] + 1, POINT[1]), (POINT[0], POINT[1] + 1),
+                             (ORIGIN[0], ORIGIN[1]), (0, 0)):
+            with self.subTest(window_point=window_point):
+                self.assertIs(self.judgement(window_point=window_point), False)
+        # A held button or modifier before the press (Button1Mask=0x100,
+        # ShiftMask=0x1, ControlMask=0x4) refuses.
+        for mask in (0x100, 0x1, 0x4, 0x8, 0x2000):
+            with self.subTest(mask=mask):
+                self.assertIs(self.judgement(mask=mask), False)
+        # The query must be for the display root itself.
+        for qroot in (0, CHOOSER, OUTER, OVERLAY, ROOT + 1):
+            with self.subTest(qroot=qroot):
+                self.assertIs(self.judgement(qroot=qroot), False)
+        # The point is derived from the geometry: only the exact measured
+        # 1124x822 chooser is accepted, never a caller-supplied point.
         for geometry in ((1123, 822), (1124, 821), (822, 1124), (0, 0), None, (1124,)):
             with self.subTest(geometry=geometry):
                 self.assertIs(self.judgement(geometry=geometry), False)
@@ -1127,8 +1164,8 @@ class PointerContainmentTests(unittest.TestCase):
         # The pointer's qchild sits on a different tree: never on our path.
         other = tree_parents({20: 10, 10: ROOT, 30: ROOT, 31: 30, ROOT: ROOT})
         self.assertIs(native.pointer_containment(
-            other, ROOT, (ROOT, 31, EXPECTED_ROOT[0], EXPECTED_ROOT[1], 1062, 753, 0),
-            native.window_ancestry(other, 20, ROOT), ORIGIN, POINT, GEOMETRY), False)
+            other, ROOT, root_query(31),
+            native.window_ancestry(other, 20, ROOT), ORIGIN, GEOMETRY), False)
         # An ambiguous chain (never reaching the root) has no ancestry.
         self.assertIsNone(native.window_ancestry(
             tree_parents({20: 10, 10: 11, 11: 12, 12: 11}), 20, ROOT))
@@ -1143,26 +1180,40 @@ class PointerContainmentTests(unittest.TestCase):
                 self.assertIs(self.judgement(chain=chain), False)
         # A window with no known parent is off the path, not a descendant.
         self.assertIs(self.judgement(qchild=99), False)
+        # qchild 10 is on the verified chain, but the live tree re-parented
+        # the chooser under 40 by the time of the proof: the chain is stale,
+        # so the matching qchild alone must not authorize the press.
+        moved = dict(OWNED_PARENT)
+        moved[CHOOSER] = 40
+        moved[40] = ROOT
+        self.assertIs(self.judgement(io_parent=moved, qchild=OUTER,
+                                     chain=self.chain), False)
 
     def test_false_query_failure_is_refused(self):
-        state = (ROOT, CHOOSER, EXPECTED_ROOT[0], EXPECTED_ROOT[1], 1062, 753, 0)
+        state = root_query(CHOOSER)
 
         def raising(_child):
             raise RuntimeError("X window query refused")
 
         self.assertIsNone(native.window_ancestry(lambda _c: None, CHOOSER, ROOT))
         self.assertIs(native.pointer_containment(
-            lambda _c: None, ROOT, state, [CHOOSER, OUTER, ROOT], ORIGIN, POINT, GEOMETRY),
+            lambda _c: None, ROOT, state, [CHOOSER, OUTER, ROOT], ORIGIN, GEOMETRY),
             False)
         self.assertIs(native.pointer_containment(
-            raising, ROOT, state, [CHOOSER, OUTER, ROOT], ORIGIN, POINT, GEOMETRY), False)
-        for value in (None, [], (ROOT, CHOOSER, EXPECTED_ROOT[0], EXPECTED_ROOT[1], 1062, 753),
-                      (ROOT, CHOOSER, str(EXPECTED_ROOT[0]), EXPECTED_ROOT[1], 1062, 753, 0),
-                      (ROOT, CHOOSER, EXPECTED_ROOT[0], EXPECTED_ROOT[1], 1062, 753, None),
-                      (ROOT, "20", EXPECTED_ROOT[0], EXPECTED_ROOT[1], 1062, 753, 0)):
+            raising, ROOT, state, [CHOOSER, OUTER, ROOT], ORIGIN, GEOMETRY), False)
+        for value in (None, [], (ROOT, CHOOSER, EXPECTED_ROOT[0], EXPECTED_ROOT[1],
+                                 EXPECTED_ROOT[0], EXPECTED_ROOT[1]),
+                      (ROOT, CHOOSER, str(EXPECTED_ROOT[0]), EXPECTED_ROOT[1],
+                       EXPECTED_ROOT[0], EXPECTED_ROOT[1], 0),
+                      (ROOT, CHOOSER, EXPECTED_ROOT[0], EXPECTED_ROOT[1],
+                       EXPECTED_ROOT[0], EXPECTED_ROOT[1], None),
+                      (ROOT, "20", EXPECTED_ROOT[0], EXPECTED_ROOT[1],
+                       EXPECTED_ROOT[0], EXPECTED_ROOT[1], 0),
+                      (ROOT, CHOOSER, -1, EXPECTED_ROOT[1],
+                       EXPECTED_ROOT[0], EXPECTED_ROOT[1], 0)):
             with self.subTest(value=value):
                 self.assertIs(native.pointer_containment(
-                    raising, ROOT, value, [CHOOSER, OUTER, ROOT], ORIGIN, POINT, GEOMETRY),
+                    raising, ROOT, value, [CHOOSER, OUTER, ROOT], ORIGIN, GEOMETRY),
                     False)
 
     def test_path_depth_is_bounded(self):
@@ -1182,7 +1233,7 @@ class PointerDriverTests(unittest.TestCase):
 
     def run_driver(self, io, require_motion=True):
         return native.move_and_prove_pointer(
-            io, tree_parents(OWNED_TREE), ROOT, CHOOSER, ORIGIN, POINT, GEOMETRY,
+            io, tree_parents(OWNED_TREE), ROOT, CHOOSER, ORIGIN, GEOMETRY,
             require_motion)
 
     def test_only_the_derived_point_is_moved_then_proven(self):
@@ -1197,11 +1248,14 @@ class PointerDriverTests(unittest.TestCase):
         self.assertEqual(io.calls, [("motion", *EXPECTED_ROOT), "flush", "sync", "query"])
 
     def test_pointer_drift_or_refused_query_refuses(self):
-        drift = (ROOT, CHOOSER, EXPECTED_ROOT[0] + 1, EXPECTED_ROOT[1], POINT[0], POINT[1], 0)
-        moved_chooser = (ROOT, CHOOSER, EXPECTED_ROOT[0], EXPECTED_ROOT[1],
-                         1062, 752, 0)
+        drift = root_query(CHOOSER, (EXPECTED_ROOT[0] + 1, EXPECTED_ROOT[1]))
+        moved_chooser = root_query(CHOOSER, EXPECTED_ROOT,
+                                   (POINT[0], POINT[1] - 1))
+        chooser_local = root_query(CHOOSER, EXPECTED_ROOT, POINT)
         for io in (PointerIO(CHOOSER, state=drift),
                    PointerIO(CHOOSER, state=moved_chooser),
+                   PointerIO(CHOOSER, state=chooser_local),
+                   PointerIO(FRAME),
                    PointerIO(ROOT)):
             with self.subTest(state=io.state):
                 with self.assertRaisesRegex(RuntimeError, "not over the owned chooser"):
