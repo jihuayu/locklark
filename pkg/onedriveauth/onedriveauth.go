@@ -18,16 +18,62 @@
 //   - A successful callback writes the fixed success page and only then closes
 //     the listener, so the page reaches the browser before the port goes away.
 //     A cancellation or timeout closes the listener before Wait returns.
+//   - AuthorizationURL builds the public-client v2 /authorize URL for one run
+//     from the caller's client ID, tenant, explicit scopes and verifier, and
+//     the redirect URI and state read from that same Callback. It never
+//     contains a client secret, verifier or token, and the caller must not
+//     log it.
+//   - ExchangeCode redeems that code once: one POST of the authorization-code
+//     form (client_id, scope, code, redirect_uri, grant_type and
+//     code_verifier, never a client secret) to
+//     https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token with the
+//     exact loopback redirect URI Start captured. It returns only a transient
+//     TokenResult (redacted when formatted) holding the access token and its
+//     lifetime and, when the provider returned one, the refresh token; that
+//     token exists only when the caller's explicit scopes include
+//     offline_access, so no scope is added by default. id_token and every other
+//     response member are discarded. Cancellation before sending is reported
+//     as ErrCancelled with no request. After sending, a transport error,
+//     cancellation or timeout is ErrOutcomeUnknown, and each response failure
+//     has its own fixed sentinel; all of them say the code may be consumed, and
+//     nothing is retried.
+//   - RefreshAccessToken performs one refresh-token grant against the same
+//     fixed, bounded token endpoint, using the caller's client ID, tenant,
+//     optional explicit scopes and old refresh token. There are no default
+//     scopes: when none are given, the scope field is omitted. A successful
+//     answer may carry a replacement refresh token, which the caller keeps in
+//     place of its old one; on any error and when no replacement is returned,
+//     the caller keeps its old refresh token. Nothing is retried, and the
+//     package persists nothing.
 //
-// Scope. This package only receives and validates the callback. It does not
-// build or open authorization URLs, perform token exchange or refresh, call
-// Microsoft Graph, Opendal or any account, upload or share files, and makes no
-// account-capability claims. The authorization code is returned to the caller
-// as data for a later, separate token exchange; it is never logged by this
-// package and is absent from every error and HTTP response. Because the code
-// lives in an unexported field, the common fmt formatting verbs print a fixed
-// redacted placeholder; the caller must still avoid exporting or marshalling
-// it into logs.
+// Scope. This package receives and validates the callback, builds the
+// authorization URL, but never opens it, performs at most one authorization-code
+// exchange or refresh grant per call, and supports RefreshAccessToken for the
+// refresh-token grant, which uses the same fixed, bounded token endpoint. Scopes
+// are always the caller's explicit choice, with no defaults: the authorization
+// request carries the caller's explicit scopes, and the refresh grant sends its
+// optional scopes only when the caller supplies them. The caller keeps its old
+// refresh token on any refresh error and when no replacement is returned. This
+// package does not persist or store tokens or the code, does not reuse them,
+// does not call Microsoft Graph, Opendal or any account, does not upload or
+// share files, and makes no account-capability claims. There is no default
+// tenant, account or scope configuration: the caller supplies the client ID,
+// tenant and explicit scopes. TokenResult may retain the access and refresh
+// tokens in memory only, until the caller calls TokenResult.Close, which
+// zeroizes the buffers shared by every copy of the result, as far as this
+// package holds them; copies returned by its accessors are owned by the caller
+// and must be cleared or dropped by it (a RefreshToken []byte can be cleared; an
+// AccessToken string cannot be zeroized and can only be dropped). Before
+// a token request returns, on success and on every parse failure, it clears the
+// bounded response body buffer and the temporary json.RawMessage buffers used
+// for members other than the tokens; the token members are decoded by the
+// package's byte Unmarshaler into owned buffers, and internal copies made by
+// encoding/json or the runtime are not guaranteed to be wiped.
+// The authorization code and the tokens are returned to the caller as data and
+// are never logged, persisted or included in any error or HTTP response by this
+// package. Because they live in unexported fields, the common fmt formatting
+// verbs print a fixed redacted placeholder; the caller must still avoid
+// exporting or marshalling them into logs.
 //
 // The callback validation rules follow RFC 8252 (OAuth 2.0 for Native Apps):
 // the redirect uses a literal loopback IP address, a dynamic port, and the
@@ -79,6 +125,19 @@ var (
 	// ErrTimeout reports that the context was cancelled or the wait expired
 	// before a valid callback arrived.
 	ErrTimeout = errors.New("onedrive auth: callback not received in time")
+	// ErrClientID reports an empty or malformed ClientID passed to
+	// AuthorizationURL.
+	ErrClientID = errors.New("onedrive auth: invalid client ID")
+	// ErrTenant reports an empty or malformed Tenant, or one that is unsafe
+	// as an authorization endpoint path segment.
+	ErrTenant = errors.New("onedrive auth: invalid tenant")
+	// ErrScope reports missing, too many, or malformed explicit Scopes.
+	ErrScope = errors.New("onedrive auth: invalid scope")
+	// ErrVerifier reports a verifier that is not well formed.
+	ErrVerifier = errors.New("onedrive auth: invalid PKCE verifier")
+	// ErrCallback reports a missing or unusable Callback passed to
+	// AuthorizationURL.
+	ErrCallback = errors.New("onedrive auth: callback unavailable")
 )
 
 // Start binds a fresh IPv4 loopback listener for one authorization request and

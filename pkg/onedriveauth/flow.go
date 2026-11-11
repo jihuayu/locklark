@@ -42,9 +42,9 @@ const abortGrace = 500 * time.Millisecond
 const redacted = "onedriveauth.CallbackResult{code:redacted}"
 
 // CallbackResult is the outcome of one validated authorization callback. It is
-// the only carrier of the authorization code: the next, separate step (token
-// exchange, not implemented here) takes Code together with the verifier whose
-// S256 challenge was sent in the authorization request.
+// the only carrier of the authorization code: the next, separate step
+// (ExchangeCode) takes Code together with the redirect URI Start returned and
+// the verifier whose S256 challenge was sent in the authorization request.
 //
 // The code is a credential held in an unexported field. It is readable only
 // through Code(), and String/GoString exist so that the common fmt verbs (%v,
@@ -330,6 +330,16 @@ func (c *Callback) stopListening() {
 		c.mu.Unlock()
 		_ = c.listener.Close()
 	})
+}
+
+// Close finalizes the flow, with an abort when no outcome was settled yet, and
+// releases the listener, so a caller that is done with the callback, on success,
+// failure or cancellation, needs no further cleanup. It is idempotent, never
+// blocks on an HTTP shutdown, and always returns nil: the only outcome that
+// remains after it is the settled one, which Wait returns.
+func (c *Callback) Close() error {
+	c.close()
+	return nil
 }
 
 // close finalizes the flow with an abort if no outcome was settled yet, then
