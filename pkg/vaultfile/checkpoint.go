@@ -247,7 +247,7 @@ func VerifyPolicyCheckpoint(f *File, c *PolicyCheckpoint) error {
 		// The caller may share policy bytes between proofs, so the
 		// authenticated body is copied, never pointed into the proofs, and
 		// the copy is what authorizes the next proof.
-		trustedPolicy = clonePolicy(&sp.Policy)
+		trustedPolicy = clonePolicySnapshot(&sp.Policy)
 		prevSeq = seq
 	}
 
