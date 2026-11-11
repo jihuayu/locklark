@@ -21,6 +21,11 @@
 // a local compare-and-swap counter only; it says nothing about whether a remote
 // publication succeeded.
 //
+// A third record (see prepared.go) stores the proposal prepared against one
+// state generation, and an Ack promotes it to the local base while preserving
+// any newer working edit. It, too, records only local durable state: verifying a
+// remote acknowledgement is the caller's job outside this package.
+//
 // Every record carries an unkeyed SHA-256 checksum over its exact bytes. It
 // detects malformed or accidentally corrupted local state; it is not a
 // signature and does not stop a deliberate attacker who can also rewrite the
@@ -77,6 +82,17 @@ var (
 	// ErrStateGenerationOverflow reports an UpdateWorking call at generation
 	// MaxUint64, which cannot be incremented. The stored state is unchanged.
 	ErrStateGenerationOverflow = errors.New("vault file journal: state generation overflow")
+	// ErrPreparedExists reports a Prepare for a different proposal while
+	// another prepared proposal is outstanding. The prepared record is never
+	// overwritten. An exact replay of the outstanding proposal is a no-op and
+	// does not return this error.
+	ErrPreparedExists = errors.New("vault file journal: a different proposal is already prepared")
+	// ErrPreparedMismatch reports a Prepare or Ack whose inputs do not agree
+	// with the stored state generation, remote revision, working bytes or
+	// prepared record, or a prepared proposal that is still based on an
+	// earlier base than the state's. The stored records are unchanged. The
+	// full detail is carried by an unexported error matching this sentinel.
+	ErrPreparedMismatch = errors.New("vault file journal: prepared proposal mismatch")
 	// ErrLocked reports that Open could not take the database's exclusive
 	// file lock within the lock timeout, for example because another
 	// process (or another Journal in this process) holds it. It also matches
