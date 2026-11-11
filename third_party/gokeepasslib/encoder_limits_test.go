@@ -483,15 +483,21 @@ func TestEncodeWithLimitsAcceptsExactAndLargerBudget(t *testing.T) {
 }
 
 // TestEncodeWithLimitsUncompressedDecodesAtExactBudget pins the plaintext
-// budget of an uncompressed KDBX4 encoding: EncodeWithLimits measures the
-// logical body before the encoder appends its 1..16 repeated-count block
-// padding, and the bounded decoder budgets that logical body, not the padded
-// one. The exact-size bounded decode therefore succeeds with the padding
-// removed from RawData, and one byte less rejects it before RawData is kept.
-// This covers the AES cipher; the ChaCha20 case is the next test.
+// budget of an uncompressed KDBX4 AES encoding: EncodeWithLimits measures the
+// logical body before the encoder appends its cipher padding, and the bounded
+// decoder removes the valid PKCS#7 suffix of AES content only, so it budgets
+// that logical body, not the padded one. The exact-size bounded decode
+// therefore succeeds with the padding removed from RawData, and one byte less
+// rejects it before RawData is kept. This covers the AES cipher; the ChaCha20
+// case is the next test.
 func TestEncodeWithLimitsUncompressedDecodesAtExactBudget(t *testing.T) {
 	db := lockEncoderLimitFixture(t, encoderLimitTestDatabase(t))
 	db.Header.FileHeaders.CompressionFlags = NoCompressionFlag
+	db.Header.FileHeaders.CipherID = CipherAES
+	db.Header.FileHeaders.EncryptionIV = make([]byte, 16)
+	if _, err := rand.Read(db.Header.FileHeaders.EncryptionIV); err != nil {
+		t.Fatal(err)
+	}
 	logical := int64(encoderLimitTestPlaintext(t, db))
 
 	var out bytes.Buffer
@@ -522,7 +528,8 @@ func TestEncodeWithLimitsUncompressedDecodesAtExactBudget(t *testing.T) {
 		return db, err
 	}
 
-	// The exact logical size is accepted: the padding is not body.
+	// The exact logical size is accepted: AES PKCS#7 padding is not body,
+	// and a full 16-byte padding block is removed like any other.
 	opened, err := decode(logical)
 	if err != nil {
 		t.Fatalf("decode at the exact logical body size %d: %v", logical, err)
@@ -547,55 +554,75 @@ func TestEncodeWithLimitsUncompressedDecodesAtExactBudget(t *testing.T) {
 	}
 }
 
-// TestEncodeWithLimitsUncompressedChaChaDecodesAtExactBudget is the ChaCha20
-// counterpart of TestEncodeWithLimitsUncompressedDecodesAtExactBudget: the
-// KDBX 4 spec leaves ChaCha20 content unpadded, so the writer's 1..16
-// repeated-count padding for it is legacy output that the bounded decoder
-// must still recognize and remove. An EncodeWithLimits NoCompressionFlag
-// ChaCha20 output, encoded with a 12-byte nonce for a body of exactly its
-// budget, decodes with DecodeWithLimits at that budget and keeps exactly the
-// logical body in RawData.
-func TestEncodeWithLimitsUncompressedChaChaDecodesAtExactBudget(t *testing.T) {
-	db := lockEncoderLimitFixture(t, encoderLimitTestDatabase(t))
-	db.Header.FileHeaders.CompressionFlags = NoCompressionFlag
-	iv := make([]byte, 12)
-	if _, err := rand.Read(iv); err != nil {
-		t.Fatal(err)
+// TestEncodeWithLimitsUncompressedChaChaCountsWriterPadding is the ChaCha20
+// counterpart of TestEncodeWithLimitsUncompressedDecodesAtExactBudget. The
+// KDBX 4 format leaves ChaCha20 content unpadded, but the legacy writer
+// still appends 1..16 repeated-count bytes to it. The bounded decoder keeps
+// and counts those bytes, so EncodeWithLimits budgets the actual post-padding
+// decrypted content: an output sealed with exactly that budget opens under
+// DecodeWithLimits and keeps the full padded decrypted bytes in RawData,
+// while one byte less is rejected by both the encoder and the decoder for the
+// same real output. Encoded bytes are those of the unbounded writer.
+func TestEncodeWithLimitsUncompressedChaChaCountsWriterPadding(t *testing.T) {
+	newChaChaFixture := func() *Database {
+		db := lockEncoderLimitFixture(t, encoderLimitTestDatabase(t))
+		db.Header.FileHeaders.CompressionFlags = NoCompressionFlag
+		iv := make([]byte, 12)
+		if _, err := rand.Read(iv); err != nil {
+			t.Fatal(err)
+		}
+		db.Header.FileHeaders.CipherID = CipherChaCha20
+		db.Header.FileHeaders.EncryptionIV = iv
+		return db
 	}
-	db.Header.FileHeaders.CipherID = CipherChaCha20
-	db.Header.FileHeaders.EncryptionIV = iv
+	// The fixture carries a random nonce, so the key, master seed and IV are
+	// cloned from the unbounded writer's input to encode the same content.
+	db := newChaChaFixture()
 	logical := int64(encoderLimitTestPlaintext(t, db))
 
-	var out bytes.Buffer
-	if err := NewEncoder(&out).EncodeWithLimits(db, EncodeLimits{MaxPlaintextBytes: logical}); err != nil {
-		t.Fatalf("EncodeWithLimits at exactly the logical body size: %v", err)
+	// The unbounded writer gives the real decrypted content: the logical
+	// body followed by the 1..16 repeated-count bytes the writer appended.
+	unboundedInput := *db
+	var full bytes.Buffer
+	if err := NewEncoder(&full).Encode(&unboundedInput); err != nil {
+		t.Fatalf("Encode: %v", err)
 	}
-	encoded := out.Bytes()
-
-	// The writer still pads every cipher, so the decoded content carries
-	// the logical body followed by 1..16 padding bytes.
 	unbounded := NewDatabase()
 	unbounded.Credentials = limitTestCredentials(t)
-	if err := NewDecoder(bytes.NewReader(encoded)).Decode(unbounded); err != nil {
+	if err := NewDecoder(bytes.NewReader(full.Bytes())).Decode(unbounded); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	if pad := int64(len(unbounded.Content.RawData)) - logical; pad < 1 || pad > 16 {
-		t.Fatalf("decoded %d bytes for a %d-byte body, want 1..16 cipher padding bytes after it",
-			len(unbounded.Content.RawData), logical)
+	raw := unbounded.Content.RawData
+	pad := int64(len(raw)) - logical
+	if pad < 1 || pad > 16 {
+		t.Fatalf("decoded %d bytes for a %d-byte body, want 1..16 writer padding bytes after it", len(raw), logical)
+	}
+	if full := raw[logical:]; !bytes.Equal(full, bytes.Repeat([]byte{byte(pad)}, int(pad))) {
+		t.Fatalf("writer padding of %d bytes is %v, want its repeated count", pad, full)
 	}
 	if iv := unbounded.Header.FileHeaders.EncryptionIV; len(iv) != 12 {
 		t.Fatalf("encoded header carries a %d-byte IV, want the 12-byte ChaCha20 nonce", len(iv))
 	}
 
+	boundedInput := *db
+	var out bytes.Buffer
+	if err := NewEncoder(&out).EncodeWithLimits(&boundedInput, EncodeLimits{MaxPlaintextBytes: int64(len(raw))}); err != nil {
+		t.Fatalf("EncodeWithLimits at the full padded content size: %v", err)
+	}
+	encoded := out.Bytes()
+	if !bytes.Equal(encoded, full.Bytes()) {
+		t.Fatal("bounded encode bytes differ from Encode")
+	}
+
 	opened := newLimitTestDatabase()
 	if err := decodeWithLimits(opened, encoded, limitTestKey(), DecodeLimits{
 		MaxEncodedBytes:   int64(len(encoded)),
-		MaxPlaintextBytes: logical,
+		MaxPlaintextBytes: int64(len(raw)),
 	}); err != nil {
-		t.Fatalf("decode at the exact logical body size %d: %v", logical, err)
+		t.Fatalf("decode at the %d-byte padded content size: %v", len(raw), err)
 	}
-	if got := int64(len(opened.Content.RawData)); got != logical {
-		t.Fatalf("RawData of %d bytes, want the %d-byte logical body without padding", got, logical)
+	if !bytes.Equal(opened.Content.RawData, raw) {
+		t.Fatalf("RawData of %d bytes, want the %d padded ChaCha20 bytes", len(opened.Content.RawData), len(raw))
 	}
 	manager, err := opened.GetStreamManager()
 	if err != nil {
@@ -603,6 +630,125 @@ func TestEncodeWithLimitsUncompressedChaChaDecodesAtExactBudget(t *testing.T) {
 	}
 	manager.UnlockProtectedGroups(opened.Content.Root.Groups)
 	assertEncoderLimitEntry(t, opened.Content.Root.Groups[0].Entries[0])
+
+	// The logical body size alone does not hold this real output: its
+	// padding counts, so both entry points reject it one byte under.
+	oneUnder := int64(len(raw)) - 1
+	rejectedInput := *db
+	var rejectedOut countWriter
+	err = NewEncoder(&rejectedOut).EncodeWithLimits(&rejectedInput, EncodeLimits{MaxPlaintextBytes: oneUnder})
+	if !errors.Is(err, ErrEncodeLimitExceeded) {
+		t.Fatalf("encode one byte under: err = %v, want ErrEncodeLimitExceeded", err)
+	}
+	rejected := newLimitTestDatabase()
+	err = decodeWithLimits(rejected, encoded, limitTestKey(), DecodeLimits{
+		MaxEncodedBytes:   int64(len(encoded)),
+		MaxPlaintextBytes: oneUnder,
+	})
+	if !errors.Is(err, ErrDecodeLimitExceeded) {
+		t.Fatalf("decode one byte under: err = %v, want ErrDecodeLimitExceeded", err)
+	}
+	if rejected.Content == nil || rejected.Content.RawData != nil {
+		t.Fatalf("over-budget decode retained %d RawData bytes", len(rejected.Content.RawData))
+	}
+}
+
+// TestEncodeWithLimitsReservesLegacyWriterPadding pins the reserved padding
+// budget of a KDBX4 NoCompressionFlag ChaCha20 or Twofish content: for a
+// maximum decrypted-output limit M the collector admits a serialized body of
+// floor(M/16)*16-1 bytes, whose writer padding reaches exactly M, and rejects
+// one byte more. AES content reserves nothing, since the decoder removes its
+// PKCS#7 suffix. A reserved budget below 16 admits no padded content and is
+// reported as ErrEncodeLimitExceeded before any content is serialized.
+//
+// The fixture grows its body to an exact size, so no fixed fixture size is
+// assumed. It uses a fixed IV: encoding a Twofish header in place bumps the
+// format version and renews its random master seed, which would otherwise
+// make the size of a fresh fixture vary with the seed value. Keys are not
+// measured.
+func TestEncodeWithLimitsReservesLegacyWriterPadding(t *testing.T) {
+	ciphers := []struct {
+		name     string
+		id       []byte
+		ivLen    int
+		reserved bool
+	}{
+		{"chacha20", CipherChaCha20, 12, true},
+		{"twofish", CipherTwoFish, 16, true},
+		{"aes", CipherAES, 16, false},
+	}
+	// newFixture creates an unlocked fixture. It is locked once the test
+	// has set its HeaderHash, the way the encoder expects its direct
+	// callers to be prepared.
+	newFixture := func(id []byte, ivLen int) *Database {
+		t.Helper()
+		db := limitTestDatabase(t)
+		db.Header.FileHeaders.CompressionFlags = NoCompressionFlag
+		db.Header.FileHeaders.CipherID = id
+		db.Header.FileHeaders.EncryptionIV = make([]byte, ivLen)
+		for i := range db.Header.FileHeaders.EncryptionIV {
+			db.Header.FileHeaders.EncryptionIV[i] = byte(i + 1)
+		}
+		return db
+	}
+	plaintextOf := func(db *Database) int64 { return int64(encoderLimitTestPlaintext(t, db)) }
+	// bodyOf returns a fresh fixture whose body has exactly size bytes,
+	// growing its unprotected "Pad" value from empty. size must reach the
+	// bare fixture's size.
+	bodyOf := func(id []byte, ivLen int, size int64) *Database {
+		t.Helper()
+		db := newFixture(id, ivLen)
+		entry := &db.Content.Root.Groups[0].Entries[0]
+		entry.Values = append(entry.Values, ValueData{Key: "Pad", Value: V{Content: ""}})
+		last := &entry.Values[len(entry.Values)-1]
+		grow := size - plaintextOf(db)
+		if grow < 0 {
+			t.Fatalf("fixture without Pad already has %d bytes, want %d", size-grow, size)
+		}
+		last.Value.Content = strings.Repeat("p", int(grow))
+		if got := plaintextOf(db); got != size {
+			t.Fatalf("fixture body of %d bytes, want %d", got, size)
+		}
+		return db
+	}
+	encode := func(db *Database, budget int64) ([]byte, error) {
+		t.Helper()
+		var out bytes.Buffer
+		err := NewEncoder(&out).EncodeWithLimits(lockEncoderLimitFixture(t, db), EncodeLimits{MaxPlaintextBytes: budget})
+		return out.Bytes(), err
+	}
+
+	for _, c := range ciphers {
+		t.Run(c.name, func(t *testing.T) {
+			// The maximum admitted body is accepted and one byte more
+			// is rejected under the same decoded-output budget.
+			for _, budget := range []int64{3072, 3073, 4096} {
+				max := budget
+				if c.reserved {
+					max = budget/16*16 - 1
+				}
+				if _, err := encode(bodyOf(c.id, c.ivLen, max), budget); err != nil {
+					t.Fatalf("budget %d: body of %d bytes rejected: %v", budget, max, err)
+				}
+				if _, err := encode(bodyOf(c.id, c.ivLen, max+1), budget); !errors.Is(err, ErrEncodeLimitExceeded) {
+					t.Fatalf("budget %d: body of %d bytes: err = %v, want ErrEncodeLimitExceeded", budget, max+1, err)
+				}
+			}
+		})
+	}
+
+	// Below 16 the reservation would be nonpositive, which the collector
+	// treats as unbounded. It must be rejected as such instead, before the
+	// collector is created.
+	for _, c := range ciphers[:2] {
+		var out countWriter
+		err := NewEncoder(&out).EncodeWithLimits(lockEncoderLimitFixture(t, newFixture(c.id, c.ivLen)),
+			EncodeLimits{MaxPlaintextBytes: 15})
+		if !errors.Is(err, ErrEncodeLimitExceeded) ||
+			strings.Contains(err.Error(), "plaintext budget exceeded") {
+			t.Fatalf("%s budget 15: err = %v, want the reserved budget rejected before the collector", c.name, err)
+		}
+	}
 }
 
 // TestEncodeAndEncodeWithLimitsSharePipeline checks that both entry points

@@ -32,13 +32,30 @@ var ErrEncodeLimitExceeded = errors.New("gokeepasslib: database exceeds encode l
 // EncodeLimits bounds the plaintext a bounded encode may serialize.
 type EncodeLimits struct {
 	// MaxPlaintextBytes bounds the plaintext content: the InnerHeader
-	// followed by the XML document, exactly as it is compressed and
-	// encrypted, but without the cipher block padding the encoder appends
-	// before encryption (1..16 bytes, also with NoCompressionFlag), so a
-	// body whose padded plaintext is up to 16 bytes longer still fits. It
-	// is enforced on every write of the plaintext collector, the
-	// InnerHeader's and the streaming XML document's alike, so a write that
-	// would cross it is rejected before a byte beyond it is retained.
+	// followed by the XML document, exactly as it is serialized, before it
+	// is compressed, padded or encrypted. It is enforced on every write of
+	// the plaintext collector, the InnerHeader's and the streaming XML
+	// document's alike, so a write that would cross it is rejected before a
+	// byte beyond it is retained.
+	//
+	// The encoder always appends 1..16 repeated-count padding bytes before
+	// encryption, for every cipher and also with NoCompressionFlag, and
+	// keeps the encoded bytes unchanged. The budget is chosen so that the
+	// same value also bounds what Decoder.DecodeWithLimits opens under it:
+	//
+	//   - an AES or gzip content is measured as it is; a gzip content's
+	//     binding budget is its expansion, and the trailing block padding is
+	//     not part of that expansion. With NoCompressionFlag an AES content
+	//     of exactly MaxPlaintextBytes still opens under the same budget,
+	//     because the decoder removes the PKCS#7 suffix before it applies
+	//     the budget;
+	//   - a KDBX4 NoCompressionFlag ChaCha20 or Twofish content additionally
+	//     reserves the writer's actual 1..16 padding bytes, because the
+	//     decoder keeps and counts them. The encoder pads to the next
+	//     16-byte boundary, and by a whole block when the content already
+	//     ends on one, so a budget M admits a serialized body of at most
+	//     floor(M/16)*16-1 bytes. A budget below 16 therefore admits no
+	//     content and is reported as ErrEncodeLimitExceeded.
 	MaxPlaintextBytes int64
 }
 
@@ -60,11 +77,12 @@ func (e *Encoder) Encode(db *Database) error {
 // The content is measured after the same normalization as Encode (binary
 // cleanup, format version, protected entry unlock and relock order, header
 // and hash updates) and before it is compressed, padded or encrypted. The
-// budget is the logical body and excludes the cipher block padding the
-// encoder always appends, so a NoCompressionFlag body of exactly
-// limits.MaxPlaintextBytes still decodes with DecodeWithLimits and the same
-// budget when its padded content is 16-byte aligned, as every writer output
-// is.
+// encoded bytes are exactly those of Encode; only the budget differs by
+// cipher. The budget bounds the serialized body except for a KDBX4
+// NoCompressionFlag ChaCha20 or Twofish content, where it also reserves the
+// writer's actual 1..16 padding bytes: the decoder keeps those bytes and
+// counts them, so the output still opens under DecodeWithLimits with the same
+// budget. See EncodeLimits.MaxPlaintextBytes.
 //
 // The content is serialized exactly as Encode serializes it, and its budget
 // is enforced on the plaintext collector's writes before a byte beyond the
@@ -82,6 +100,20 @@ func (e *Encoder) EncodeWithLimits(db *Database, limits EncodeLimits) error {
 		return err
 	}
 	return e.encode(db, limits.MaxPlaintextBytes)
+}
+
+// hasLegacyWriterPaddingBudget reports whether encodeRawContent's 1..16
+// repeated-count padding of this database reaches DecodeWithLimits' plaintext
+// budget. That holds for a KDBX4 NoCompressionFlag ChaCha20 or Twofish
+// content: the decoder keeps and counts every decrypted byte of it. AES
+// content ends in PKCS#7, which the decoder removes, and a gzip content is
+// budgeted by its expansion.
+func hasLegacyWriterPaddingBudget(db *Database) bool {
+	if !db.Header.IsKdbx4() || db.Header.FileHeaders.CompressionFlags == GzipCompressionFlag {
+		return false
+	}
+	cipherID := db.Header.FileHeaders.CipherID
+	return bytes.Equal(cipherID, CipherChaCha20) || bytes.Equal(cipherID, CipherTwoFish)
 }
 
 // encode is the ordered encode pipeline shared by Encode and EncodeWithLimits.
@@ -153,6 +185,17 @@ func (e *Encoder) encode(db *Database, maxPlaintext int64) error {
 	// Serialize the InnerHeader (Kdbx v4) and then the XML document, each
 	// once, through the plaintext collector: a bounded encode charges both
 	// against one plaintext budget before the content is compressed.
+	if maxPlaintext > 0 && hasLegacyWriterPaddingBudget(db) {
+		// The decoder keeps this content's 1..16 writer padding bytes and
+		// counts them, so reserve them: the collector admits a body of at
+		// most this size, whose padding brings it to at most
+		// maxPlaintext.
+		maxPlaintext = maxPlaintext/16*16 - 1
+		if maxPlaintext <= 0 {
+			return fmt.Errorf("%w: plaintext budget below 16 bytes cannot hold any padded content",
+				ErrEncodeLimitExceeded)
+		}
+	}
 	plaintext, err := newPlaintextContent(db.Content.InnerHeader, db.Header.IsKdbx4(), maxPlaintext)
 	if err != nil {
 		return err
@@ -302,9 +345,11 @@ func encodeRawContent(
 	}
 
 	// Always add padding, so that decoders that check for the last bytes can work correctly.
-	// This is PKCS#7 for the CBC ciphers, while the KDBX 4 spec leaves
-	// ChaCha20 unpadded; the writer appends it for every cipher anyway, so
-	// writer output is always 16-byte aligned.
+	// For AES this is the PKCS#7 the CBC encrypter would add anyway; for
+	// Twofish and ChaCha20 the KDBX 4 format does not pad, yet this legacy
+	// writer appends the same 1..16 repeated-count bytes for every cipher.
+	// The bounded decoder keeps those non-AES bytes and counts them, which
+	// is why EncodeWithLimits reserves them for this content.
 	padding := make([]byte, 16-(len(content)%16))
 	for i := range len(padding) {
 		padding[i] = byte(len(padding))

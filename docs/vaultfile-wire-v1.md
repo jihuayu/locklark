@@ -1038,7 +1038,7 @@ The committed bounded decoder (`Decoder.DecodeWithLimits`) then runs with
 | KDF guard | the credentials KDF check rejects an unsupported KDF algorithm, version, iterations, parallelism, memory, secret key or associated data before any Argon2 allocation |
 | header HMAC | checked before content decryption |
 | content blocks | bounded by the encoded budget; each block HMAC is verified |
-| decrypted/gzip body | the decrypted content, or its gzip expansion, is rejected after key derivation and decryption but before XML decoding; cipher padding is not part of the budget: without compression a 16-byte-aligned content ending in the writer's valid 1..16-byte repeated-count trailing pattern is recognized as legacy writer padding and removed before the logical-body limit is applied, and any other content is left unchanged. A spec-valid unpadded body (ChaCha20 content is unpadded) whose total length is aligned and which ends in that repeated whitespace pattern is inherently indistinguishable from the padding on the wire and loses up to 16 trailing XML whitespace bytes, which does not change parsed XML values |
+| decrypted/gzip body | the decrypted content, or its gzip expansion, is rejected after key derivation and decryption but before XML decoding. The budget is cipher-specific. With `NoCompressionFlag` and AES, a valid 1..16-byte PKCS#7 suffix (including a full 16-byte block) is removed from the end of the decrypted content and excluded from the budget; with `NoCompressionFlag` and ChaCha20 or Twofish, every decrypted byte is kept and counted, including the 1..16 repeated-count bytes the legacy writer appends for them, since that is not PKCS#7 and is not trimmed. Gzip content is budgeted by its expansion only; trailing block padding is read by neither and is excluded |
 | InnerHeader binaries | the aggregate binary bytes (protection flag included) are bounded by `MaxPlaintextBytes` and rejected before an over-budget binary is copied, after key derivation and decryption |
 
 The last two budgets can only be evaluated after the fixed Argon2id cost;
@@ -1065,12 +1065,16 @@ The decoder's expanded-body budget would otherwise let Seal produce a payload
 that Open rejects. Seal therefore also bounds the encoder's plaintext body:
 the encoder's opt-in `Encoder.EncodeWithLimits` measures the serialized KDBX4
 plaintext (the InnerHeader followed by the XML document, after the encoder's
-normalization and protected-entry ordering, and excluding the cipher block
-padding the encoder appends before encryption) and enforces `MaxPlaintextBytes`
-on its writes before gzip compression and encryption, so with
-`NoCompressionFlag` a body of exactly `MaxPlaintextBytes`, plus the 1..16
-padding bytes the writer always appends for every cipher (ChaCha20 included),
-still seals and opens. The XML streams into that
+normalization and protected-entry ordering) and enforces `MaxPlaintextBytes`
+on its writes before gzip compression and encryption. The encoded bytes are
+unchanged: the legacy writer always appends 1..16 repeated-count padding
+bytes before encryption, for every cipher. With `NoCompressionFlag` and AES a
+body of exactly `MaxPlaintextBytes` still seals and opens, because Open removes
+the PKCS#7 suffix; with `NoCompressionFlag` and ChaCha20 or Twofish the budget
+also reserves those writer padding bytes, so an encode at budget `M` admits a
+body of at most `floor(M/16)*16-1` bytes and its output opens under the same
+`MaxPlaintextBytes` with the padded decrypted bytes intact; `M` below 16 is
+rejected. Gzip content is budgeted as before. The XML streams into that
 bounded collector, so no separate full XML slice from `xml.MarshalIndent` is
 built before the budget is enforced; the collector itself retains the serialized
 document up to its budget. A body over it, such as

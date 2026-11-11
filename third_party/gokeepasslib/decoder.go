@@ -29,21 +29,24 @@ type DecodeLimits struct {
 	// and before any key derivation runs.
 	MaxEncodedBytes int64
 	// MaxPlaintextBytes bounds the decrypted content (the KDBX4 InnerHeader
-	// followed by the XML document), not counting cipher padding, and,
-	// within it, the aggregate bytes of every KDBX4 InnerHeader binary,
-	// memory protection flag included.
+	// followed by the XML document) and, within it, the aggregate bytes of
+	// every KDBX4 InnerHeader binary, memory protection flag included.
 	//
 	// This budget can only be evaluated after key derivation and content
 	// decryption, so it is not checked before key derivation. It is enforced
 	// on the verified and decrypted content blocks and, when gzip is
 	// selected, on the expansion (reading at most the budget plus one byte)
-	// before XML decoding starts. With NoCompressionFlag a 16-byte-aligned
-	// content ending in the writer's valid 1..16-byte repeated-count
-	// trailing pattern is recognized as legacy writer padding and removed
-	// before the logical-body limit is applied; any other content is left
-	// unchanged. When content is not compressed both bounds apply to the
-	// same bytes, so the aggregate binary budget can only take effect for
-	// a binary inside an expanded body.
+	// before XML decoding starts.
+	//
+	// With NoCompressionFlag the budget counts the decrypted bytes, with one
+	// cipher-specific exception: for an AES content, the valid 1..16-byte
+	// PKCS#7 suffix at the end of the decrypted content is removed first and
+	// excluded from the budget. No non-AES content is ever trimmed: every
+	// decrypted byte of ChaCha20 or Twofish content counts toward the
+	// budget, and the legacy writer appends 1..16 repeated-count bytes to
+	// both, so those bytes count too. When content is not compressed both
+	// bounds apply to the same bytes, so the aggregate binary budget can
+	// only take effect for a binary inside an expanded body.
 	MaxPlaintextBytes int64
 }
 
@@ -87,11 +90,11 @@ func (d *Decoder) Decode(db *Database) error {
 //     its gzip expansion when the header selects gzip) by
 //     limits.MaxPlaintextBytes, detected with one extra byte, and rejects an
 //     over-budget body with ErrDecodeLimitExceeded before XML decoding.
-//     Cipher padding is not part of the budget: without compression a
-//     16-byte-aligned content ending in the writer's valid 1..16-byte
-//     repeated-count trailing pattern is recognized as legacy writer
-//     padding and removed before the logical-body limit is applied, and any
-//     other content is left unchanged;
+//     Cipher padding is not part of the budget: without compression a valid
+//     1..16-byte PKCS#7 suffix of an AES content is removed before the limit
+//     is applied. ChaCha20 and Twofish content is never trimmed; every
+//     decrypted byte of it counts toward the limit, and gzip is budgeted by
+//     its expansion;
 //  4. parses the KDBX4 InnerHeader in bounded mode, which rejects a binary
 //     that would bring the aggregate binary bytes (protection flags
 //     included) over limits.MaxPlaintextBytes before copying it. A one-byte
@@ -367,12 +370,17 @@ func decodeRawContent(db *Database, content []byte, transformedKey []byte, budge
 		}
 	} else if budget.bounded {
 		// Without compression the decrypted content is the plaintext body
-		// followed by the cipher block padding the writer appends. The
-		// budget is the logical body, so a 16-byte-aligned content ending
-		// in the writer's valid 1..16-byte trailing pattern is treated as
-		// legacy writer padding and dropped before it is measured, and an
-		// over-budget body is rejected before it is handed on for parsing.
-		decryptedContent = trimCipherPadding(decryptedContent)
+		// followed by the cipher padding. Only AES content ends in PKCS#7
+		// padding, so only a valid PKCS#7 suffix of an AES content is
+		// dropped before it is measured. ChaCha20 content is unpadded and
+		// stays byte for byte; Twofish and ChaCha20 content the legacy
+		// writer produced carries its 1..16 repeated-count bytes, which are
+		// not PKCS#7 and are counted too. Cipher padding is derived from
+		// the authenticated decrypted bytes only. An over-budget body is
+		// rejected before it is handed on for parsing.
+		if bytes.Equal(db.Header.FileHeaders.CipherID, CipherAES) && db.Header.IsKdbx4() {
+			decryptedContent = trimPKCS7Padding(decryptedContent)
+		}
 		if int64(len(decryptedContent)) > budget.plaintext {
 			return fmt.Errorf("%w: decrypted content budget exceeded", ErrDecodeLimitExceeded)
 		}
@@ -382,21 +390,13 @@ func decodeRawContent(db *Database, content []byte, transformedKey []byte, budge
 	return nil
 }
 
-// trimCipherPadding removes the trailing cipher block padding from an
-// uncompressed KDBX4 content, which is the body followed by 1..16 bytes that
-// each hold the padding length, as encodeRawContent appends them. The writer
-// appends that pattern for every cipher and always leaves the content a
-// multiple of 16 bytes, so a 16-byte-aligned content that ends in a valid
-// 1..16-byte pattern is recognized as legacy writer padding. Content that is
-// not 16-byte aligned or does not end in such a pattern is returned unchanged.
-//
-// A spec-valid unpadded body whose total length is aligned and which ends in
-// the same repeated whitespace pattern is inherently indistinguishable from
-// that padding on the wire. Such a body loses up to 16 trailing XML
-// whitespace bytes here; that whitespace does not change any parsed XML
-// value. Every other unpadded body keeps its bytes.
-func trimCipherPadding(content []byte) []byte {
-	if len(content) == 0 || len(content)%16 != 0 {
+// trimPKCS7Padding removes the trailing PKCS#7 padding from the decrypted
+// content of an uncompressed AES KDBX4 file: 1..16 bytes that each hold the
+// padding length, as the CBC encrypter adds them. Content without a valid
+// suffix is returned unchanged. It is called for AES content only: ChaCha20
+// and Twofish content keeps every decrypted byte.
+func trimPKCS7Padding(content []byte) []byte {
+	if len(content) == 0 {
 		return content
 	}
 	n := int(content[len(content)-1])

@@ -165,7 +165,7 @@ func TestKDBXPayloadSealOpenRoundTrip(t *testing.T) {
 }
 
 // openUnbounded decodes sealed with no limit, which keeps its content as the
-// encoder wrote it: the logical body followed by its cipher padding.
+// encoder wrote it: the logical body followed by its PKCS#7 cipher padding.
 func openUnbounded(t *testing.T, sealed, cek []byte) *kdbx.Database {
 	t.Helper()
 	opened := kdbx.NewDatabase()
@@ -196,16 +196,25 @@ func trailingCipherPadding(raw []byte) int {
 }
 
 // TestKDBXPayloadSealOpenNoCompressionRoundTrip checks that the plaintext
-// budget of a NoCompressionFlag payload counts the logical body and not the
-// cipher padding the encoder appends after it. A body of exactly
-// MaxPlaintextBytes (plus 1..16 padding bytes) seals and opens, one byte more
-// is rejected by Seal, and both values round-trip.
+// budget of a NoCompressionFlag AES payload counts the logical body and not
+// the PKCS#7 cipher padding the encoder appends after it. A body of exactly
+// MaxPlaintextBytes seals and opens with the padding removed, one byte more is
+// rejected by Seal, and both values round-trip.
 func TestKDBXPayloadSealOpenNoCompressionRoundTrip(t *testing.T) {
 	cek := payloadFixtureCEK(t)
 
+	// The exact-MaxPlaintextBytes boundary is pinned with AES, whose PKCS#7
+	// suffix Open removes before applying the budget. The KDBX 4 default
+	// header is ChaCha20, for which the writer padding counts, so the
+	// fixture selects AES and its 16-byte IV explicitly.
 	withTitle := func(title string) *kdbx.Database {
 		db := payloadFixtureDB(t)
 		db.Header.FileHeaders.CompressionFlags = kdbx.NoCompressionFlag
+		db.Header.FileHeaders.CipherID = kdbx.CipherAES
+		db.Header.FileHeaders.EncryptionIV = make([]byte, 16)
+		for i := range db.Header.FileHeaders.EncryptionIV {
+			db.Header.FileHeaders.EncryptionIV[i] = byte(i + 1)
+		}
 		db.Content.Root.Groups[0].Entries[0].Values[0].Value.Content = title
 		return db
 	}
@@ -227,6 +236,9 @@ func TestKDBXPayloadSealOpenNoCompressionRoundTrip(t *testing.T) {
 	}
 	title := strings.Repeat("a", grow+len("fixture"))
 	sealed := sealedFixture(t, withTitle(title), cek)
+	if cipher := openUnbounded(t, sealed, cek).Header.FileHeaders.CipherID; !bytes.Equal(cipher, kdbx.CipherAES) {
+		t.Fatalf("sealed payload cipher = %x, want AES", cipher)
+	}
 	opened, err := OpenKDBXPayload(sealed, cek)
 	if err != nil {
 		t.Fatalf("Open of a %d-byte body: %v", MaxPlaintextBytes, err)

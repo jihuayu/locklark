@@ -317,24 +317,85 @@ func TestDecodeWithLimitsRejectsUncompressedBodyOverBudget(t *testing.T) {
 }
 
 // TestDecodeWithLimitsKeepsUnpaddedChaChaBody is the regression for a
-// spec-valid unpadded ChaCha20 body that ends in ten line feeds: the KDBX 4
-// spec leaves ChaCha20 content unpadded (PKCS#7 applies to the CBC ciphers
-// only), so an unpadded body followed by '\n' bytes is indistinguishable from
-// legacy writer padding by its suffix alone. The bounded decoder recognizes
-// legacy writer padding only in 16-byte-aligned content, as the writer always
-// produces, and must keep this 62-byte body, which is not aligned, byte for
-// byte.
+// spec-valid unpadded ChaCha20 content that ends in ten line feeds. The KDBX
+// 4 format leaves ChaCha20 content unpadded (PKCS#7 applies to AES only), so
+// the bounded decoder removes a cipher suffix for AES only and keeps every
+// ChaCha20 byte: a non-aligned body and a 16-byte-aligned body that ends in
+// the same ten line feeds are both preserved byte for byte, even though the
+// aligned one ends in a repeated-count pattern, and both count toward the
+// budget. XML whitespace is never treated as padding.
 func TestDecodeWithLimitsKeepsUnpaddedChaChaBody(t *testing.T) {
-	body := append(innerHeaderBytes(t, testInnerHeader()), "<KeePassFile/>"...)
-	body = append(body, bytes.Repeat([]byte{'\n'}, 10)...)
-	if len(body)%16 == 0 {
-		t.Fatalf("fixture body of %d bytes is 16-byte aligned", len(body))
+	base := append(innerHeaderBytes(t, testInnerHeader()), "<KeePassFile/>"...)
+	// The aligned body appends the fewest line feeds beyond the ten that
+	// leave the whole content 16-byte aligned, so it still ends in ten line
+	// feeds and also ends in a repeated-count-shaped suffix.
+	alignedLF := 10 + (16-(len(base)+10)%16)%16
+	bodies := map[string][]byte{
+		"nonaligned": append(bytes.Clone(base), bytes.Repeat([]byte{'\n'}, 10)...),
+		"aligned":    append(bytes.Clone(base), bytes.Repeat([]byte{'\n'}, alignedLF)...),
+	}
+	if len(bodies["nonaligned"])%16 == 0 {
+		t.Fatalf("nonaligned fixture of %d bytes is 16-byte aligned", len(bodies["nonaligned"]))
+	}
+	if len(bodies["aligned"])%16 != 0 {
+		t.Fatalf("aligned fixture of %d bytes is not 16-byte aligned", len(bodies["aligned"]))
+	}
+	if !bytes.HasSuffix(bodies["aligned"], bytes.Repeat([]byte{'\n'}, 10)) {
+		t.Fatal("aligned fixture does not end in ten line feeds")
 	}
 	// A 12-byte IV is ChaCha20's, not a CBC cipher block.
 	iv := make([]byte, 12)
-	rand.Read(iv)
+	if _, err := rand.Read(iv); err != nil {
+		t.Fatal(err)
+	}
 	key := limitTestKey()
-	encoded := rawKDBX41Cipher(t, limitTestKDF(), key, NoCompressionFlag, CipherChaCha20, iv, body)
+	for name, body := range bodies {
+		encoded := rawKDBX41Cipher(t, limitTestKDF(), key, NoCompressionFlag, CipherChaCha20, iv, body)
+		db := newLimitTestDatabase()
+		if err := decodeWithLimits(db, encoded, key, DecodeLimits{
+			MaxEncodedBytes:   int64(len(encoded)),
+			MaxPlaintextBytes: int64(len(body)),
+		}); err != nil {
+			t.Fatalf("%s body of %d bytes within budget: %v", name, len(body), err)
+		}
+		if !bytes.Equal(db.Content.RawData, body) {
+			t.Fatalf("%s RawData of %d bytes differs from the %d-byte unpadded body",
+				name, len(db.Content.RawData), len(body))
+		}
+
+		// One byte under the full ChaCha20 content rejects: the line feeds
+		// are content, not padding.
+		db = newLimitTestDatabase()
+		err := decodeWithLimits(db, encoded, key, DecodeLimits{
+			MaxEncodedBytes:   int64(len(encoded)),
+			MaxPlaintextBytes: int64(len(body)) - 1,
+		})
+		if !errors.Is(err, ErrDecodeLimitExceeded) {
+			t.Fatalf("%s body one byte under: err = %v, want ErrDecodeLimitExceeded", name, err)
+		}
+		if db.Content.RawData != nil {
+			t.Fatalf("%s over-budget decode retained %d RawData bytes", name, len(db.Content.RawData))
+		}
+	}
+}
+
+// TestDecodeWithLimitsKeepsTwofishWriterPadding is the Twofish counterpart:
+// Twofish content is not PKCS#7-trimmed either, so the 1..16 repeated-count
+// bytes the legacy writer appends to it count toward the budget and stay in
+// RawData. Exactly that padded content is accepted; one byte less rejects.
+func TestDecodeWithLimitsKeepsTwofishWriterPadding(t *testing.T) {
+	body := append(innerHeaderBytes(t, testInnerHeader()), "<KeePassFile/>"...)
+	pad := 16 - len(body)%16
+	body = append(body, bytes.Repeat([]byte{byte(pad)}, pad)...)
+	if len(body)%16 != 0 {
+		t.Fatalf("fixture of %d bytes is not 16-byte aligned", len(body))
+	}
+	iv := make([]byte, 16)
+	if _, err := rand.Read(iv); err != nil {
+		t.Fatal(err)
+	}
+	key := limitTestKey()
+	encoded := rawKDBX41Cipher(t, limitTestKDF(), key, NoCompressionFlag, CipherTwoFish, iv, body)
 
 	db := newLimitTestDatabase()
 	if err := decodeWithLimits(db, encoded, key, DecodeLimits{
@@ -344,7 +405,19 @@ func TestDecodeWithLimitsKeepsUnpaddedChaChaBody(t *testing.T) {
 		t.Fatalf("within budget: %v", err)
 	}
 	if !bytes.Equal(db.Content.RawData, body) {
-		t.Fatalf("RawData of %d bytes differs from the %d-byte unpadded body", len(db.Content.RawData), len(body))
+		t.Fatalf("RawData of %d bytes differs from the %d-byte padded content", len(db.Content.RawData), len(body))
+	}
+
+	db = newLimitTestDatabase()
+	err := decodeWithLimits(db, encoded, key, DecodeLimits{
+		MaxEncodedBytes:   int64(len(encoded)),
+		MaxPlaintextBytes: int64(len(body)) - 1,
+	})
+	if !errors.Is(err, ErrDecodeLimitExceeded) {
+		t.Fatalf("one byte under: err = %v, want ErrDecodeLimitExceeded", err)
+	}
+	if db.Content.RawData != nil {
+		t.Fatalf("over-budget decode retained %d RawData bytes", len(db.Content.RawData))
 	}
 }
 
