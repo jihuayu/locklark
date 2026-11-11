@@ -1064,6 +1064,124 @@ proves no signed identity or policy, authorizes no VUK use, and delivers, stores
 or exposes no key material. A `received` status is a local bookkeeping fact, not
 evidence that a VUK was authorized or delivered.
 
+## Loopback composition smoke (test-only)
+
+`internal/remoteunlocktls/composition_test.go` carries one isolated positive
+composition checkpoint, `TestLoopbackPositiveCompositionSmoke`, and
+`internal/remoteunlocktls/rejection_test.go` carries one separate, equally
+narrow rejection checkpoint described below. Both are tests, not a production
+integration, and they do not change any frame, byte, member or verification
+rule in this document.
+
+The test performs a real concurrent `ClientHandshake`/`ServerHandshake` over an
+owned `127.0.0.1:0` loopback TCP pair, requires TLS 1.3 without resumption and
+passes `Channel.Check` on both sides. It builds a synthetic but structurally
+valid sealed `vaultfile.File` whose caller-pinned current `PolicyCheckpoint`
+passes `vaultfile.VerifyPolicyCheckpoint`; the policy lists the requester with
+its existing reader role, an admin delegate device, and the requester's source
+and target endpoint devices. All owner-root, content-signing and policy-signing
+Ed25519 keys and all per-device age X25519 identities are independently
+generated synthetic values, and the source and target bindings carry the actual
+verified peer leaf SPKIs from the live handshake.
+
+One canonical reusable `OwnerRootAdminRemoteUnlockDelegation` is signed by the
+synthetic owner root exactly once and reused byte-identically for two fresh
+request contexts that differ in `request_id`, `request_digest` and
+`lock_generation`. The delegated admin device's policy signing key -- not the
+owner root and not its content signing key -- signs a fresh
+`AdminRemoteUnlockAuthorization` for each context. Over the established channel,
+the server parses the public codecs, verifies the request exporter with
+`VerifyBindingContext`, verifies the source peer binding against the channel's
+verified peer SPKI with the current-policy content key through
+`VerifyPeerDeviceTransportBinding`, and calls
+`VerifyAdminRemoteUnlockAuthorization`; the client performs the matching target
+peer binding check. Both requests pass under the one root grant without a
+second root signing step.
+
+For the first request only, the server then uses `vaultfile.SealVUKForDevice`
+with the source PC's policy-bound age recipient and writes exactly that bounded
+ciphertext to the channel; the source PC reads it and opens it with
+`vaultfile.OpenVUKForDevice` using independent expected vault, epoch,
+source-device and recipient inputs and the source identity, compares all 32 VUK
+bytes, and clears the caller-owned plaintext/VUK buffers. The second request
+receives no VUK. The requester's process-local lifecycle moves requested →
+confirmed → received on the first request, and a second local `Receive` is
+rejected with `ErrLifecycleTransition` with no VUK bytes. That lifecycle is
+memory-only: the test claims no restart or durable anti-rollback behavior.
+
+The length-prefixed request, approval and VUK frames used by this test are
+private test-only helpers. They are not a product wire protocol and must not be
+implemented as one; the v1 production framing contract above is unchanged.
+
+### Narrow rejection checkpoint (test-only)
+
+`internal/remoteunlocktls/rejection_test.go` reuses the same synthetic fixture,
+test-only framing helpers, real `127.0.0.1:0` mTLS harness (`runHandshakes`,
+TLS 1.3, no resumption, no session tickets), canonical public codecs and public
+verification APIs, with deterministic caller-supplied protocol times and bounded
+I/O deadlines. It covers exactly two rejections and nothing more:
+
+1. **Stale exporter replayed on another TLS channel**
+   (`TestLoopbackStaleExporterOnSecondChannelRejected`). One request is accepted
+   on channel 1. A second fresh TLS 1.3 mTLS handshake uses the same synthetic
+   CA and leaf certificates, so both endpoint SPKI pins are unchanged and the
+   channel-2 source and target peer bindings still verify. On channel 2 the
+   same context, source/target bindings and delegated-admin authorization still
+   pass `VerifyPeerDeviceTransportBinding` and
+   `VerifyAdminRemoteUnlockAuthorization`, and channel 2's own exporter
+   verifies, but channel 2 derives a different exporter. Replaying channel 1's
+   exporter makes the server-side channel-2 `VerifyBindingContext` fail with
+   `ErrBindingMismatch` before any approval, `vaultfile.SealVUKForDevice` call
+   or VUK frame. The test asserts that error, zero sealed VUKs, zero VUK frames
+   and no reply bytes. It deliberately does not change certificates or any
+   policy, signature or key, so the rejection is attributable to the stale
+   exporter alone.
+2. **Late response to a locally cancelled request**
+   (`TestLoopbackCancelledRequestDoesNotConsumeLateVUK`). A distinct fresh
+   context (new request identifier, request digest and lock generation) with a
+   valid delegated-admin authorization travels over one real loopback TLS 1.3
+   mTLS channel against the caller-pinned current file and checkpoint. The
+   client creates the request's process-local `RequestLifecycle` (status
+   `requested`) before it sends the request. The server verifies the real
+   channel exporter, source peer binding and delegated-admin authorization,
+   then pauses **before sending any response frame**. It signals that
+   verified-and-paused point to the test goroutine only through a bounded,
+   buffered test-only Go synchronization channel; nothing is signalled through
+   the TLS channel or a protocol frame, and no approval is sent yet. While the
+   server is paused, a bounded client read must observe no bytes on the TLS
+   channel. After that signal the client calls `Cancel`, verifies the status is
+   `cancelled`, and only then releases the server. The server then sends a
+   test-only approval and one genuine age-wrapped VUK over the real TLS
+   channel, and its test result proves it actually sealed and sent one VUK. The
+   client reads both after cancellation but never calls
+   `vaultfile.OpenVUKForDevice`: it never unpacks the late ciphertext and so
+   derives no client-side plaintext VUK from that response, and it clears the
+   caller-owned ciphertext buffer with a zero-buffer assertion. The server, by
+   contrast, must hold the synthetic plaintext VUK to seal its response with
+   `vaultfile.SealVUKForDevice` and clears its source buffer. The test does not
+   claim the server never held plaintext, and it makes no bytewise comparison
+   against the VUK, so it does not claim the VUK is absent from the envelope
+   bytes; it only checks that the device age recipient is not carried in
+   plaintext. `Confirm` and `Receive` stay rejected with
+   `ErrLifecycleTransition` and the status stays `cancelled`. This API has no
+   locked state, so only `Cancel` is covered.
+
+Cancellation in case 2 is **local and in-memory only**. It does not revoke the
+authorization, notify the server, stop the server from delivering the late
+response, survive a restart, or provide durable anti-replay protection. The
+test demonstrates that cancellation precedes the complete late response and that
+no local lifecycle consumption occurs; it does not claim remote cancellation,
+system-wide key revocation, or that the server withheld the late VUK.
+
+These are two covered rejections, not a failure matrix: no wrong SPKI, key,
+device, member, context, expiry, restart, stale policy or tampering case is
+exercised, and they are not evidence that #127, #129 or #130 is complete. The
+test-only frames remain private to the tests: one bounded request frame whose
+packet ends with two 1-byte control sections (`send_vuk`, `pause_before_response`),
+one bounded approval frame and one bounded VUK frame. There are no other frames;
+the verification pause is signalled over Go channels only. None of this is a
+product wire protocol.
+
 ## Scope boundary
 
 This document defines two owner-root-signed objects -- the per-request
