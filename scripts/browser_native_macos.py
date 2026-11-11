@@ -300,7 +300,19 @@ class QuartzApi:
         return _frame_relation(frame, window.get("bounds"))
 
     def _identity_matches(self, element, window):
-        return self._relation(element, window) is not None
+        """True only for the UNIQUE exact-title AX window this CGWindow binds.
+
+        The observed focused/hit AX element is resolved through
+        ``window_element`` first, so a duplicated same-title AX window refuses
+        ``window-ambiguous`` here exactly as it does for a control read, and the
+        exact frame or canonical inset relation stays mandatory.  The element
+        must then be the very same AXUIElement as that unique selection under
+        ``CFEqual`` (``_same_element``): a twin window with the same title and
+        frame that merely looks identical is never accepted.  ``window_element``
+        uses ``_relation`` directly, so this never recurses.
+        """
+        selected = self.window_element(window)
+        return self._same_element(element, selected)
 
     def window_element(self, window):
         """Bind the UNIQUE AX window to this exact CGWindow identity.
@@ -619,12 +631,14 @@ class QuartzApi:
         return int(front.processIdentifier()) if front is not None else None
 
     def focus_state(self, window=None):
-        """AXFocusedWindow must bind to the exact window; AXMainWindow only adds.
+        """AXFocusedWindow must be the unique exact window; AXMainWindow only adds.
 
         A frontmost PID is never enough and AXMainWindow is never a fallback:
-        when AXFocusedWindow is missing or binds to any other window, no window
-        identity is reported and the shared contract refuses input. When the OS
-        also exposes AXMainWindow it is only an additional consistency check.
+        when AXFocusedWindow is missing, a same-title duplicate exists or the
+        focused element is not the unique selected AXUIElement (CFEqual), no
+        window identity is reported and the shared contract refuses input
+        before any control read. When the OS also exposes AXMainWindow it is
+        only an additional consistency check under the same identity.
         """
         front = self.foreground_pid()
         if window is None or type(front) is not int or front != window["pid"]:
@@ -639,7 +653,12 @@ class QuartzApi:
         return {"pid": front, "window": window["id"]}
 
     def root_at(self, window, x, y):
-        """The AX element under the point must belong to the bound window."""
+        """The AXWindow above the point must BE the unique bound AX window.
+
+        The ancestor must satisfy the same uniqueness and ``CFEqual`` identity
+        as ``_identity_matches``; a duplicate same-title window refuses here
+        too, and any failure fails closed with no hit.
+        """
         application = self.application(window["pid"])
         if application is None:
             return False

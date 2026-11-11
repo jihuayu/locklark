@@ -206,6 +206,14 @@ cannot be opened read-only.
   private API or window-number attribute is used. The first AX window sharing a
   title is never used, and `AXStaticText` is not treated as an
   editable/clickable control.
+* Focus/hit identity: `AXFocusedWindow` and the `AXWindow` above the point are
+  checked by `_identity_matches`, which first resolves the same unique
+  exact-title AX window through `window_element` (so a duplicate refuses
+  `window-ambiguous` on every input path, including a first `text`/`key`
+  action that never reads controls) and then requires the observed
+  `AXUIElement` to be that element under `CFEqual` - a same-title, same-frame
+  twin that is not the selected element never passes. Exact frame or the
+  canonical inset, same PID/executable and CG uniqueness remain mandatory.
 * Widgets: bounded AX walk (4096 nodes, depth 12) reading `AXRole`,
   `AXTitle`/`AXDescription`, `AXEnabled`, `AXHidden`, `AXPosition`/`AXSize`.
   `AXEnabled`/`AXHidden` must be real booleans; a missing or unknown value
@@ -214,8 +222,8 @@ cannot be opened read-only.
   read.
 * Focus: `NSWorkspace.frontmostApplication().processIdentifier()` must equal the
   target PID and `AXFocusedWindow` must bind to the exact selected window
-  before input; a missing or differently bound focused window refuses even when
-  `AXMainWindow` matches. `AXMainWindow` is only an additional consistency
+  before input under the focus/hit identity above; a missing or differently
+  bound focused window refuses even when `AXMainWindow` matches. `AXMainWindow` is only an additional consistency
   check when the OS exposes it, never a fallback. With
   `preserve_focus` the driver never activates anything — if the target is not
   frontmost it refuses with `preserve-focus-lost` instead of silently stealing
