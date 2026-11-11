@@ -1066,9 +1066,10 @@ that Open rejects. Seal therefore also bounds the encoder's plaintext body:
 the encoder's opt-in `Encoder.EncodeWithLimits` measures the serialized KDBX4
 plaintext (the InnerHeader followed by the XML document, after the encoder's
 normalization and protected-entry ordering) and enforces `MaxPlaintextBytes`
-on its writes before gzip compression and encryption. The XML document is
-streamed on writes through that budgeted collector, with no whole-document
-buffer. A body over it, such as
+on its writes before gzip compression and encryption. The XML streams into that
+bounded collector, so no separate full XML slice from `xml.MarshalIndent` is
+built before the budget is enforced; the collector itself retains the serialized
+document up to its budget. A body over it, such as
 a highly compressible value that still expands the document past the budget,
 is `kdbx_payload_too_large` with no output. The encoder keeps its established
 write order, so by then the KDBX header and hashes have already been written to
