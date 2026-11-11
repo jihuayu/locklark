@@ -8,12 +8,17 @@
 // signature. It is not a reference to content stored elsewhere.
 //
 // This package deliberately contains no migration/import and no product
-// wiring. Validation (ValidateFile and every other validation path) is
-// shape-only: it checks wire structure, canonical encoding and size/length
-// budgets and never verifies a signature. The separate VerifyContentSignature
-// verifies one file content signature against a caller-pinned Ed25519 key, and
-// establishes no vault trust: policy proof signatures, signature chains and
-// authorization are not verified or implemented. See docs/vaultfile-wire-v1.md.
+// wiring. Validation (ValidateFile, the codec and the preimage functions) is
+// structural or preimage-only: it checks wire structure, canonical encoding and
+// size/length budgets and never cryptographically verifies a signature.
+// VerifyContentSignature checks one content signature against a caller-pinned
+// Ed25519 key, without authenticating policy proofs or current authorization.
+// VerifyPolicyCheckpoint is a separate checkpoint-scoped API: it establishes
+// checkpoint-scoped root continuation verification, the current policy's
+// author role requirement, and content signature verification under the
+// current policy's device key. The caller supplies the checkpoint and root
+// trust out of band; admin-signed policy transitions and scope-to-policy-diff
+// authorization remain unsupported. See docs/vaultfile-wire-v1.md.
 package vaultfile
 
 // Size and length budgets fixed by this schema. Every one of them is checked

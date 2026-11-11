@@ -10,9 +10,12 @@ import (
 // fixed by this schema and are part of its public protocol.
 //
 // Labels are defined here only; this package does not sign, wrap or derive
-// anything. VerifyContentSignature is the only verification: it checks one
-// content signature against a caller-pinned key. Policy proof signatures and
-// chains are not verified.
+// anything. VerifyContentSignature checks one content signature against a
+// caller-pinned key, without authenticating policy proofs or current
+// authorization. VerifyPolicyCheckpoint is a separate checkpoint-scoped API:
+// it establishes checkpoint-scoped root continuation verification, the current
+// policy's author role requirement, and content signature verification under
+// the current policy's device key.
 const (
 	// Content signatures over ContentSigningBytes.
 	DomainContentSignature = "locklark.vault-file/v1/content-signature"
