@@ -221,18 +221,20 @@ func (a *App) handleCLIRun(ctx context.Context, peer browserhost.Peer, req brows
 		scope.Clear()
 		clearDesktopCLITargets(callbackTargets)
 	}()
-	// Entry state: the exact currently unlocked broker session and its epoch,
-	// read under one lock, so approval and preparation are bound to one
-	// generation.
+	// Entry state: the exact broker session, its epoch, its vault path, and
+	// whether it is unlocked, all read under one brokerMu section, so
+	// approval and preparation are bound to one generation. Only this
+	// snapshot admits the unavailable sentinel. Once a session is captured,
+	// every later check is brokerCurrent: a lock start, a session lock, or an
+	// epoch change after this point is the fixed refusal, never unavailable.
 	a.brokerMu.Lock()
-	s := a.brokerSession
-	epoch := a.brokerEpoch
-	path := ""
+	s, epoch := a.brokerSession, a.brokerEpoch
+	path, unlocked := "", false
 	if s != nil {
-		path = s.VaultPath()
+		path, unlocked = s.VaultPath(), s.Unlocked()
 	}
 	a.brokerMu.Unlock()
-	if s == nil || !s.Unlocked() || path == "" {
+	if s == nil || path == "" || !unlocked {
 		return browserhost.BrokerCLIResponse{}, browserhost.ErrBrokerUnavailable
 	}
 	if path != req.VaultPath || browserhost.ValidateCLIRunScope(scope) != nil {

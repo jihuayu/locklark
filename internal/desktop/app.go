@@ -345,7 +345,25 @@ func (a *App) armIdleTimer() {
 		})
 	})
 }
+
+// lockStart is the linearization point of App.Lock. Under brokerMu it advances
+// App.generation and revokes the broker authority in the same critical section,
+// so no broker handler can read a new generation while the previous session or
+// epoch is still bound: a broker-run request that captured the binding before
+// this point sees the revoked binding at its next check, and one that enters
+// after it captures no unlocked session. It must be called exactly once, first,
+// by Lock.
+func (a *App) lockStart() {
+	a.brokerMu.Lock()
+	a.generation++
+	a.brokerSession = nil
+	a.brokerEpoch = a.generation
+	a.brokerMu.Unlock()
+}
+
 func (a *App) Lock() {
+	// Revoke all session/broker authority before any other lock work.
+	a.lockStart()
 	a.stopSSHAgent()
 	a.sshRows = nil
 	a.sshSelected = nil
@@ -358,8 +376,6 @@ func (a *App) Lock() {
 		}
 	}
 	a.operation = nil
-	// Revoke all session/UI authority before native clipboard metadata calls.
-	a.generation++
 	a.stopIdleTimer()
 	a.clearNotesEditor()
 	a.closeQuickSearch()
