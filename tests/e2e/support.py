@@ -2683,8 +2683,7 @@ def _checkout_evidence_structure(evidence: Any) -> list[dict[str, Any]]:
     source = evidence.get("source")
     if (
         not isinstance(source, dict)
-        or not source
-        or not set(source) <= {"git_revision", "source_sha256"}
+        or set(source) != {"git_revision", "source_sha256"}
     ):
         raise AssertionError("checkout evidence is malformed")
     if "git_revision" in source:

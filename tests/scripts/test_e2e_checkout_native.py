@@ -242,6 +242,22 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
             ):
                 support.checkout_native_acceptance(self._ctx())
 
+    def test_source_with_current_revision_but_omitted_hash_is_rejected(self):
+        generated, output = self._generate_evidence()
+        payload = json.loads(json.dumps(generated))
+        payload["source"]["git_revision"] = support._checkout_source_identity(
+            ROOT
+        )["git_revision"]
+        self.assertIsNotNone(payload["source"]["git_revision"])
+        del payload["source"]["source_sha256"]
+        incomplete = self.temp / "evidence" / "incomplete-source.json"
+        incomplete.write_text(json.dumps(payload), encoding="utf-8")
+        os.environ["LOCKLARK_E2E_CHECKOUT_EVIDENCE"] = str(incomplete)
+        support._CHECKOUT_JOURNEY_CACHE.clear()
+        with self.assertRaisesRegex(AssertionError, "malformed"):
+            support.checkout_native_acceptance(self._ctx())
+        self.assertTrue(output.is_file())
+
     def test_explicit_run_executes_once_with_private_runtime_and_evidence(self):
         output = self.temp / "evidence" / "out.json"
         output.parent.mkdir()
