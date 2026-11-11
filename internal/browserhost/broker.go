@@ -270,12 +270,18 @@ func (b *Broker) handshake(conn net.Conn) (Peer, []byte) {
 		_ = conn.SetReadDeadline(time.Time{})
 		return peer, raw
 	}
-	// Clear the read deadline immediately after the successful bounded frame,
-	// then authenticate the peer on this same handle.
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	// A deadline that cannot be set leaves the read unbounded: fail closed.
+	if conn.SetReadDeadline(time.Now().Add(2*time.Second)) != nil {
+		return Peer{}, nil
+	}
 	raw, e := readFrame(conn, 4096)
-	_ = conn.SetReadDeadline(time.Time{})
 	if e != nil {
+		clear(raw)
+		return Peer{}, nil
+	}
+	// Clear the deadline before authenticating the peer on this same handle; a
+	// deadline that cannot be cleared aborts the hello unparsed.
+	if conn.SetReadDeadline(time.Time{}) != nil {
 		clear(raw)
 		return Peer{}, nil
 	}
