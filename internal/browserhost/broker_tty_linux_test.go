@@ -240,6 +240,7 @@ func TestLinuxSelfMountNamespaceAttestation(t *testing.T) {
 // given extra records, in the kernel's field order: mount ID, parent ID,
 // major:minor, root, mount point, mount options, zero or more optional
 // tag[:value] fields, "-", filesystem type, mount source, super options.
+// Each record must carry exactly those three fields after "-".
 func mountinfoFixture(extra ...string) string {
 	lines := []string{
 		"22 1 8:1 / / rw,relatime shared:1 - ext4 /dev/sda1 rw",
@@ -281,6 +282,8 @@ func TestLinuxParseSingleDevptsMount(t *testing.T) {
 		{"devpts named as mount source only", mountinfoFixture("120 22 0:54 / /srv/pts rw - tmpfs devpts rw"), "", "", false},
 		{"missing filesystem type", mountinfoFixture("121 22 0:55 / /dev/pts rw - "), "", "", false},
 		{"missing mount source", mountinfoFixture("121 22 0:55 / /dev/pts rw - devpts"), "", "", false},
+		{"missing super options", mountinfoFixture("121 22 0:55 / /dev/pts rw - devpts devpts"), "", "", false},
+		{"extra field after super options", mountinfoFixture("121 22 0:55 / /dev/pts rw - devpts devpts rw extra"), "", "", false},
 		{"missing separator", mountinfoFixture("122 22 0:56 / /dev/pts rw devpts devpts rw"), "", "", false},
 		{"two separators", mountinfoFixture("122 22 0:56 / /dev/pts rw - - devpts rw"), "", "", false},
 		{"too few fields before separator", mountinfoFixture("123 22 0:57 / - devpts devpts rw"), "", "", false},

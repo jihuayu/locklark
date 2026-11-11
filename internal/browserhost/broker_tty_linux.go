@@ -171,8 +171,8 @@ func peerDevptsMounts(base string) (devptsMount, bool) {
 // newlines inside paths and sources are kernel-escaped, so they never split a
 // field) and must be one well-formed record: mount ID, parent ID,
 // major:minor, root, mount point and mount options, then exactly one "-"
-// separator, then filesystem type, mount source and super options. The IDs and
-// major:minor must parse as integers. The optional fields between mount
+// separator, then exactly filesystem type, mount source and super options. The
+// IDs and major:minor must parse as integers. The optional fields between mount
 // options and the separator are zero or more tag[:value] tokens; unknown tags
 // are ignored, as the kernel's documentation requires. The filesystem type is
 // the first field after "-". Any malformed line rejects the whole input, so
@@ -192,7 +192,10 @@ func parseSingleDevptsMount(data []byte) (devptsMount, bool) {
 				break
 			}
 		}
-		if sep < 6 || len(fields) < sep+3 {
+		// After "-" the kernel writes exactly three fields: filesystem type,
+		// mount source and super options. A record with fewer or more fields is
+		// incomplete or contrary to the documented format and is rejected.
+		if sep < 6 || len(fields) != sep+4 {
 			return devptsMount{}, false
 		}
 		if !decimalUint(fields[0]) || !decimalUint(fields[1]) || !majorMinor(fields[2]) {
