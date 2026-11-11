@@ -215,6 +215,25 @@ class ClickMetadataTests(unittest.TestCase):
         self.assertEqual(result["label"],"pointer")
 
 
+class AllowlistTests(unittest.TestCase):
+    def test_v2_approval_labels_are_exact_literals(self):
+        for label in ("批准本次操作", "拒绝本次操作"):
+            self.assertIn(label, native.CONTROL_LABELS)
+            self.assertTrue(native.control_label_allowed(label))
+        # Nearby variants are never allowlisted; matching stays by full equality.
+        for label in ("批准本次操作 ", "批准本次操作。", "拒绝本次操作。", "批准操作",
+                      "批准本次动作", "确认本次操作", "批 准本次操作", ""):
+            with self.subTest(label=label):
+                self.assertFalse(native.control_label_allowed(label))
+
+    def test_quick_fill_status_text_is_not_allowlisted(self):
+        # The fixed host status line is absent from the native AT-SPI snapshot.
+        for label in ("快捷填充已启用：在浏览器选择账号即可继续。自动登录设置由扩展管理。",
+                      "快捷填充已启用"):
+            with self.subTest(label=label):
+                self.assertFalse(native.control_label_allowed(label))
+
+
 class WindowViewabilityTests(unittest.TestCase):
     def test_unmapped_and_unviewable_wait_until_viewable(self):
         read = Mock(side_effect=[0,1,2])

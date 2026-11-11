@@ -29,6 +29,10 @@ import {
 import { acceptCheckoutFrames, checkoutTopHTML, checkoutCardHTML, checkoutRouteCase } from "./browser_checkout_acceptance.mjs";
 
 const checkoutFrames = process.env.LOCKLARK_TEST_CHECKOUT_FRAMES === "1";
+const POPUP_CLOSED = ["Popup closed", "Popup CDP closed", "Popup CDP timed out"];
+function popupClosed(error) {
+  return POPUP_CLOSED.includes(error?.message);
+}
 
 const scanController = captureControllerOutput();
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -280,6 +284,7 @@ try {
     const ws = new WebSocket(target.webSocketDebuggerUrl),
       calls = new Map();
     let seq = 0;
+    const closed = (error) => popupClosed(error) || ws.readyState !== WebSocket.OPEN;
     ws.addEventListener("message", (event) => {
       const response = JSON.parse(event.data);
       if (response.method === "Runtime.consoleAPICalled")
@@ -380,10 +385,16 @@ try {
         await call("Page.close").catch(() => {});
         ws.close();
       },
-      ready: () =>
-        evaluate(
-          'document.readyState === "complete" && document.visibilityState === "visible" && document.hasFocus() && document.querySelector("#status")?.textContent.length > 0',
-        ),
+      ready: async () => {
+        try {
+          return await evaluate(
+            'document.readyState === "complete" && document.visibilityState === "visible" && document.hasFocus() && document.querySelector("#status")?.textContent.length > 0',
+          );
+        } catch (error) {
+          if (closed(error)) return false;
+          throw error;
+        }
+      },
       text: (selector) =>
         evaluate(
           "document.querySelector(" + JSON.stringify(selector) + ")?.innerText",
@@ -468,7 +479,9 @@ try {
     const previous = new Set((await popupTargets()).map((target) => target.id));
     if (lastPopup) {
       previous.add(lastPopup.targetId);
-      await lastPopup.dismiss();
+      // Chrome closes the action popup itself after a request that needs the
+      // native window, so dismissing an already-closed target is expected.
+      await lastPopup.dismiss().catch(() => {});
       lastPopup = null;
     }
     await page.bringToFront();
@@ -566,7 +579,17 @@ try {
     { click_label: "解锁" },
   ]);
   phase("native-pair");
-  input([{ click_label: "确认连接此扩展" }]);
+  // The popup-vault run pairs with the real quick-fill choice; no host status
+  // text is observable in the native accessibility tree, so the successful
+  // popup-vault commits below are the only pairing proof needed.
+  input([
+    {
+      click_label:
+        process.env.LOCKLARK_TEST_POPUP_VAULT === "1"
+          ? "连接并启用快捷填充"
+          : "确认连接此扩展",
+    },
+  ]);
   if (checkoutFrames) {
     await page.goto(origin + "/checkout");
     await acceptCheckoutFrames({ page, origin, input, fixture, openPopup, phase, eventually });
@@ -587,9 +610,9 @@ try {
     await downloadSession.send("Browser.setDownloadBehavior", {
       behavior: "allow", downloadPath: downloadDirectory,
     });
-    await acceptPopupVault({
-      openPopup, fixture, phase, eventually,
-      observe: vaultObserver({ go, root, env, state }),
+    const observe = vaultObserver({ go, root, env, state });
+    const { didCommit } = await acceptPopupVault({
+      openPopup, input, fixture, phase, eventually, observe,
       attachment: {
         sourcePath, fileName,
         downloaded: () => {
@@ -599,6 +622,72 @@ try {
       },
     });
     await downloadSession.detach();
+    // acceptPopupVault dismisses its popup in `finally`, so that target is
+    // closed by the time it returns. Open a fresh, currently-open target before
+    // physically clicking disconnect; the observer already proved the commits.
+    assert(didCommit, "Popup vault commits are the quick-fill pairing proof");
+    phase("native-disconnect");
+    popup = await openPopup();
+    await popup.click("#disconnect");
+    input([], true, { wait_absent: true });
+    phase("native-reconnect");
+    popup = await openPopup();
+    await popup.click("#connect");
+    input([
+      { click_label: "金库文件" },
+      { text: fixture.Path },
+      { click_label: "主密码" },
+      { text: fixture.Password },
+      { click_label: "Secret Key" },
+      { text: fixture.Secret },
+      { click_label: "解锁" },
+    ]);
+    input([{ click_label: "确认连接此扩展" }]);
+    // Native re-pair closes the popup that requested it; only openPopup returns
+    // the focused, visible action popup again, so discard the stale handle.
+    popup = await openPopup();
+    await eventually(async () => await popup.disabled("#search-input") === false,
+      "Normal-mode vault refresh did not settle");
+    // In normal mode an item-get needs the native V2 review. Rejecting it
+    // proves the refusal path without approving or disclosing the item.
+    phase("post-repair:item-get-observe");
+    const edited = observe().rows.find((item) => item.title === "Popup native contract edited");
+    assert(edited, "Synthetic edited item missing after normal re-pair");
+    phase("post-repair:item-get-open");
+    const target = '#vault-list [data-item-id="' + edited.id + '"]';
+    await popup.click('#filter-tabs [data-filter="all"]');
+    await eventually(async () => await popup.count(target) === 1,
+      "Edited item row absent");
+    phase("post-repair:item-get-click");
+    // The physical row click starts one native item-get review.
+    await popup.click(target);
+    phase("post-repair:item-get-refusal");
+    input([{ wait_label: "批准本次操作" }]);
+    const refusal = input([], true, true).controls;
+    for (const label of ["批准本次操作", "拒绝本次操作"]) {
+      assert(refusal[label]?.present === true && refusal[label]?.showing === true,
+        "Exact native item-get control missing");
+    }
+    input([{ click_label: "拒绝本次操作" }]);
+    phase("post-repair:item-get-refetched");
+    // A fresh popup is the only trusted view after the refusal; the rejected
+    // detail must never render.
+    popup = await openPopup();
+    await eventually(async () => await popup.disabled("#search-input") === false,
+      "Refused popup not ready");
+    assert.equal(await popup.count("#detail-view:not([hidden])"), 0,
+      "Refused item-get opened the detail view");
+    // No detail is rendered, so only the visible body text could disclose.
+    const body = String(await popup.text("body"));
+    for (const [name, value] of [
+      ["password", fixture.Value],
+      ["note", fixture.SaveValue],
+      ["update", fixture.UpdateValue],
+    ]) {
+      assert(!body.includes(value), "Refused item-get disclosed a synthetic " + name);
+    }
+    phase("post-repair:item-get-refused");
+    console.log("PASS: real popup native item-get refusal disclosed nothing");
   }
   await blank();
   popup = await openPopup();

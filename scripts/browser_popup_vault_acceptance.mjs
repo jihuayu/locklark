@@ -2,8 +2,12 @@
 import assert from "node:assert/strict";
 import { acceptPopupCompletion } from "./browser_popup_completion_acceptance.mjs";
 
-export async function acceptPopupVault({ openPopup, fixture, phase, observe, eventually, attachment }) {
+export async function acceptPopupVault({ openPopup, input, fixture, phase, observe, eventually, attachment }) {
   const popup = await openPopup();
+  let lastPopup = popup;
+  // The vault observer saw the item-create commit; the native item-edit commit
+  // is proven by the edited title below. No native action was approved here.
+  let didCommit = false;
   const fill = async (name, value) => {
     phase("popup-vault:field-" + name);
     await popup.click(
@@ -33,6 +37,7 @@ export async function acceptPopupVault({ openPopup, fixture, phase, observe, eve
       row = observe().rows.find((item) => item.title === "Popup native contract login");
       return !!row;
     }, "Popup native save did not commit");
+    didCommit = true;
     await eventually(async () => await popup.disabled("#editor-save") === false,
       "Save did not finish");
     await popup.click('#filter-tabs [data-filter="all"]');
@@ -73,12 +78,39 @@ export async function acceptPopupVault({ openPopup, fixture, phase, observe, eve
     await eventually(async () => await popup.text(notes + " .field-value") === fixture.SaveValue,
       "Editing metadata lost notes");
     await popup.click(notes + ' [data-action="toggle-reveal"]');
-    if (attachment) await acceptPopupCompletion({ popup, fixture, phase, eventually, attachment, itemID: row.id });
+    if (attachment)
+      await acceptPopupCompletion({
+        popup, input, fixture, phase, eventually, attachment, itemID: row.id,
+        refresh: async () => {
+          // A fresh popup is the only trusted view after the native approval.
+          const fresh = await openPopup();
+          lastPopup = fresh;
+          await eventually(async () => await fresh.disabled("#search-input") === false,
+            "Refreshed popup not ready");
+          // Only the vault filter tab re-reads the vault list; #refresh
+          // re-reads current-site candidates.
+          await fresh.click('#filter-tabs [data-filter="all"]');
+          await eventually(async () => await fresh.disabled("#search-input") === false,
+            "Vault list refresh did not settle");
+          const target = '#vault-list [data-item-id="' + row.id + '"]';
+          await eventually(async () => await fresh.count(target) === 1,
+            "Removed attachment item is not listed");
+          await fresh.click(target);
+          await eventually(async () => await fresh.count('#detail-view:not([hidden])') === 1 &&
+            await fresh.text("#detail-title") === "Popup native contract edited",
+          "Refetched item detail did not open", 30000);
+          return fresh;
+        },
+      });
     phase("popup-vault:complete");
     console.log("PASS: real popup create, native masked detail, audited reveal, metadata edit and preserved password/notes");
+    return { didCommit };
   } catch (error) {
-    const toast = await popup.text("#toast").catch(() => "");
-    const attachmentStatus = await popup.text("#attachment-status").catch(() => "");
+    // The native attachment request may already have closed this popup; never
+    // query the old target again, and never replace the original failure.
+    const text = (selector) => popup.text(selector).catch(() => "");
+    const toast = await text("#toast");
+    const attachmentStatus = await text("#attachment-status");
     console.log("Popup vault diagnostic:", JSON.stringify({
       attachmentRefused: attachmentStatus === "附件下载未完成",
       attachmentDelivered: attachmentStatus === "附件已交给浏览器保存",
@@ -89,6 +121,7 @@ export async function acceptPopupVault({ openPopup, fixture, phase, observe, eve
     }));
     throw error;
   } finally {
-    await popup.dismiss().catch(() => {});
+    // Dismiss whichever popup is current; the original target may be gone.
+    await (lastPopup || popup).dismiss().catch(() => {});
   }
 }
