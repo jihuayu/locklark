@@ -7,6 +7,7 @@ import io
 import json
 import os
 import pathlib
+import socket
 import stat
 import struct
 import subprocess
@@ -136,6 +137,7 @@ class PrivacyStageTests(unittest.TestCase):
             self.root, self.primary = root, primary
             self.stage, self.step, self.operation, self.reason = "slow-frame", "none", "approve", "none"
             self.checks, self.control_diagnostic, self.secret_bytes = [], {}, []
+            self.locked_failure = b""
             self.runtime_endpoint_bytes, self.runtime_owned, self.runtime_cleaned = 40, True, True
             self.error_class, self.error_line, self.privacy_error_class = "none", 0, "none"
             self.cli = mock.Mock(counter=0, logs=[(root / "desktop.stdout-stderr", set())], values=[])
@@ -613,6 +615,188 @@ class RuntimeAndDiagnosticTests(unittest.TestCase):
             self.assertEqual(runner.reason, "external-timeout")
             self.assertEqual(len(runner.cli.logs), 2)
             self.assertTrue(all(path.read_bytes() == canary.encode() for path, _allowed in runner.cli.logs))
+
+
+
+
+class LockedFailureFrameTests(unittest.TestCase):
+    """Deterministic units for the locked pending-reply reader and the private
+    correlation of its capture. Only in-memory socket pairs and temp files are
+    used. The forced Go checkpoint only shows an injected ordering can end the
+    reply after the canonical header; it is not evidence of CI's actual bytes."""
+
+    canonical = acceptance.frame(bytes([5]))
+    mark = "full_public_outputs_and_observed_agent_wire_contain_no_factors_or_private_seed"
+
+    def reply(self, *parts, close=True):
+        """Feed parts through an in-memory socket pair, then EOF or stall."""
+        server, client = socket.socketpair()
+        self.addCleanup(server.close)
+        self.addCleanup(client.close)
+        for part in parts:
+            client.sendall(part)
+        server.settimeout(0.1)
+        if close:
+            client.shutdown(socket.SHUT_WR)
+        return server
+
+    def read(self, *parts, close=True):
+        return acceptance.read_cancelled_failure(self.reply(*parts, close=close))
+
+    def rejected(self, *parts, close=True):
+        try:
+            self.read(*parts, close=close)
+        except acceptance.AcceptanceFailure:
+            return
+        self.fail("reply became a partial failure frame")
+
+    def signed_reply(self):
+        signature = b"\x0e" + acceptance.ssh_string(acceptance.ssh_string(b"ssh-ed25519") + acceptance.ssh_string(bytes(64)))
+        return acceptance.frame(signature)
+
+    def runner(self, root, observed, values=()):
+        """Minimal Acceptance whose privacy stage is the production method."""
+        runner = acceptance.Acceptance.__new__(acceptance.Acceptance)
+        runner.root, runner.relay = root, None
+        runner.locked_failure, runner.secret_bytes = observed, []
+        runner.cli = mock.Mock(values=list(values), logs=[])
+        runner.checks = []
+        runner.mark = runner.checks.append
+        log = root / "desktop.stdout-stderr"
+        log.write_bytes(b"public evidence\n")
+        runner.cli.logs.append((log, set()))
+        return runner
+
+    def cannot_parse(self, message, response, observed):
+        try:
+            self.privacy(response, observed)
+        except acceptance.AcceptanceFailure:
+            return
+        self.fail(message)
+
+    def privacy(self, response, observed):
+        """Run the privacy stage over one response capture and a CLI log."""
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = pathlib.Path(directory.name)
+        (root / "agent-wire-0.response").write_bytes(response)
+        self.runner(root, observed).privacy()
+
+    def test_empty_eof_of_a_pending_reply_is_accepted(self):
+        self.assertEqual(self.read(), b"")
+
+    def test_full_canonical_failure_is_accepted(self):
+        self.assertEqual(self.read(self.canonical), self.canonical)
+        # Split deliveries still assemble the same frame within the bound.
+        self.assertEqual(self.read(self.canonical[:4], self.canonical[4:]), self.canonical)
+
+    def test_each_strict_canonical_prefix_followed_by_eof_is_accepted(self):
+        for size in range(1, len(self.canonical)):
+            self.assertEqual(self.read(self.canonical[:size]), self.canonical[:size])
+
+    def test_noncanonical_header_prefix_is_rejected(self):
+        for raw in (b"\x01", self.canonical[:2] + b"\x02", self.canonical[:3] + b"\x07"):
+            self.rejected(raw)
+
+    def test_identities_or_signature_commands_are_rejected(self):
+        identities_reply = acceptance.frame(b"\x0c" + bytes(4))
+        for data in (identities_reply, self.signed_reply()):
+            for size in (5, 6, 8, 11, len(data) - 1, len(data)):
+                self.rejected(data[:size])
+
+    def test_a_timeout_after_a_prefix_never_passes_as_a_partial(self):
+        for size in range(1, len(self.canonical)):
+            self.rejected(self.canonical[:size], close=False)
+
+    def test_exact_stays_strict_for_an_empty_eof(self):
+        with self.assertRaises(acceptance.AcceptanceFailure):
+            acceptance.exact(_Closed(), 1)
+
+    def test_privacy_accepts_the_correlated_canonical_suffix(self):
+        # A header-only capture, the forced ordering's observable suffix, and
+        # wire that is exactly the observed bytes, including from offset zero.
+        for observed in (self.canonical[:size] for size in range(1, len(self.canonical))):
+            self.privacy(observed, observed)
+        # A complete frame, then its normal same-size reply, then the partial.
+        wire = self.canonical * 2 + self.canonical[:4]
+        self.privacy(wire, self.canonical[:4])
+        # The locked reply completed in full: nothing may stay partial.
+        self.privacy(self.canonical, self.canonical)
+
+    def test_privacy_rejects_any_other_or_inconsistent_partial_capture(self):
+        canonical = self.canonical
+        identities_reply = acceptance.frame(b"\x0c" + bytes(4))
+        cannot = "the capture may not keep this as a partial"
+        cases = ((canonical[:4], canonical[:3]),        # suffix differs from observed
+                 (canonical[:3], canonical[:2]),        # shorter observed than suffix
+                 (b"", canonical[:3]),                  # nothing observed, no header parsed
+                 (canonical[:4], canonical),            # a complete reply when a partial was seen
+                 (canonical, canonical[:4]),            # a partial when the reply completed
+                 (canonical[:4], canonical * 2 + canonical[:2]),  # a second partial
+                 (canonical[:2], canonical[:2] + b"\x00\x00\x00\x02"),  # incomplete header
+                 (canonical[:3], canonical[:3] + identities_reply[:6]))   # partial signature
+        for observed, response in cases:
+            self.cannot_parse(cannot, response, observed)
+        # Later bytes after the observed prefix are not that prefix.
+        self.cannot_parse(cannot, canonical[:4] + b"\x00", canonical[:4])
+
+    def test_privacy_never_treats_a_signed_reply_as_a_failure_prefix(self):
+        signed = self.signed_reply()
+        # The signed frame shares only its leading zero bytes with the
+        # canonical header, so no short remainder of it is that header.
+        for observed in (self.canonical[:1], self.canonical[:2], self.canonical[:3]):
+            self.cannot_parse("a signed reply is not a failure prefix", signed, observed)
+
+    def captures(self, *responses):
+        """Run the privacy stage over separate captures and one CLI log."""
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = pathlib.Path(directory.name)
+        for index, response in enumerate(responses):
+            (root / ("agent-wire-" + str(index) + ".response")).write_bytes(response)
+        return self.runner(root, self.canonical[:4])
+
+    def test_privacy_accepts_one_correlated_locked_prefix_among_separate_complete_captures(self):
+        # Separate captures: the ordinary failure, identities and signature
+        # replies must each still be parsed, beside the one lock capture that
+        # ends at the observed four-byte canonical length header.
+        identities_reply = acceptance.frame(b"\x0c" + bytes(4))
+        runner = self.captures(self.canonical, identities_reply, self.signed_reply(), self.canonical[:4])
+        runner.privacy()
+        self.assertEqual(runner.checks, [self.mark])
+
+    def test_privacy_rejects_two_captures_ending_in_the_correlated_locked_prefix(self):
+        runner = self.captures(self.canonical, self.canonical[:4], self.signed_reply(), self.canonical[:4])
+        with self.assertRaises(acceptance.AcceptanceFailure):
+            runner.privacy()
+        self.assertEqual(runner.checks, [])
+
+    def test_privacy_still_scans_the_log_and_response_without_enriching_diagnostics(self):
+        # The run has no locked failure, so the response must parse in full.
+        wire = self.canonical + acceptance.frame(b"\x0c" + bytes(4))
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = pathlib.Path(directory.name)
+        (root / "agent-wire-0.response").write_bytes(wire)
+        # A foreign value present in neither file must not stop either scan.
+        runner = self.runner(root, b"", ["PublicFixtureValue-" + "f" * 32])
+        seen, real = [], acceptance.scan
+        with mock.patch.object(acceptance, "scan", lambda raw, values: seen.append((raw, list(values))) or real(raw, values)):
+            runner.privacy()
+        self.assertEqual([raw for raw, _values in seen], [b"public evidence\n", wire])
+        self.assertEqual(runner.checks, [self.mark])
+        runner.stage, runner.step, runner.operation = "privacy", "none", "none"
+        runner.error_class, runner.error_line, runner.reason = "none", 0, "none"
+        runner.last_command, runner.control_diagnostic = {}, {}
+        runner.runtime_endpoint_bytes, runner.runtime_owned, runner.runtime_cleaned = 40, True, True
+        self.assertNotIn("locked_failure", repr(acceptance.public_diagnostic(runner)))
+
+
+class _Closed:
+    """A reader already at end of stream."""
+
+    def recv(self, size):
+        return b""
 
 
 if __name__ == "__main__":
