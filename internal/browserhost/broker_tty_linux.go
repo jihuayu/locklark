@@ -157,7 +157,7 @@ func mountNamespacePath(path string) (os.FileInfo, bool) {
 // ttyNrDev decodes field 7 (tty_nr) of /proc/PID/stat into a dev_t. The kernel
 // formats tty_nr as a signed int holding new_encode_dev(): minors above the
 // low 8 bits set the 32-bit sign bit (e.g. minor 524288 is 0x80008800, printed
-// as -2147454976), so the value is taken modulo 2^32 without sign extension.
+// as -2147448832), so the value is taken modulo 2^32 without sign extension.
 // Zero means no controlling terminal, and a value outside int32 cannot be a
 // kernel tty_nr; both are rejected rather than guessed at.
 func ttyNrDev(tty int64) (uint64, bool) {

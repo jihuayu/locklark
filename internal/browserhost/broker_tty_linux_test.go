@@ -56,7 +56,7 @@ func brokerTTYForeignDev() uint64 { return linuxDev(4, 1) }
 // sign-extended uint64. Zero and impossible (out of int32) values fail closed.
 func TestLinuxTTYNrSignedDecoding(t *testing.T) {
 	// Sign-bit encoding for devpts major 136, minor 524288.
-	signed := int64(-2147454976)
+	signed := int64(-2147448832)
 	dev, ok := ttyNrDev(signed)
 	if !ok || dev != 0x80008800 {
 		t.Fatalf("ttyNrDev(%d) = 0x%x,%v want 0x80008800,true", signed, dev, ok)
@@ -68,7 +68,7 @@ func TestLinuxTTYNrSignedDecoding(t *testing.T) {
 		t.Fatalf("devUnit(0x%x) = %d,%v want 524288,true", dev, unit, unitOK)
 	}
 	// The unsigned 32-bit word encodes the same device, and sign extension
-	// (uint64(-2147454976)) must not have been used.
+	// (uint64(-2147448832)) must not have been used.
 	if dev != uint64(uint32(0x80008800)) || dev == uint64(signed) {
 		t.Fatalf("decoded 0x%x is not the unsigned 32-bit word", dev)
 	}
@@ -175,23 +175,20 @@ func TestLinuxMountNamespacePathIdentity(t *testing.T) {
 		t.Fatalf("returned identity is not the self namespace: %v", err)
 	}
 
-	// A distinct identity: another namespace object when one is visible, else
-	// a regular file, which differs from the namespace in type and inode.
+	// A distinct identity: a temporary regular file, reached through a
+	// symlink. PID 1 often shares the caller's mount namespace, so it cannot
+	// stand in for a different one; a regular file has its own inode and mode
+	// and so is deterministically not the self namespace under os.SameFile.
+	regular := filepath.Join(dir, "regular")
+	if err := os.WriteFile(regular, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	other := filepath.Join(dir, "other")
-	if _, err := os.Stat("/proc/1/ns/mnt"); err == nil {
-		if err := os.Symlink("/proc/1/ns/mnt", other); err != nil {
-			t.Fatal(err)
-		}
-	} else {
-		// A regular file has a different inode and mode; it is a distinct
-		// identity even where no second namespace is visible.
-		regular := filepath.Join(dir, "regular")
-		if err := os.WriteFile(regular, nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Symlink(regular, other); err != nil {
-			t.Fatal(err)
-		}
+	if err := os.Symlink(regular, other); err != nil {
+		t.Fatal(err)
+	}
+	if otherInfo, err := os.Stat(other); err != nil || os.SameFile(self, otherInfo) {
+		t.Fatalf("distinct fixture is not a distinct identity: %v", err)
 	}
 	if _, ok := mountNamespacePath(other); ok {
 		t.Fatalf("distinct namespace identity %s accepted", other)
