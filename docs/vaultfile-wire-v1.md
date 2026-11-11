@@ -12,21 +12,30 @@ APIs](#verification-apis)):
   public key, policy sequence and digest), which it treats as caller-owned,
   does not retain after the call and whose digest it clones internally, it
   binds the file to that vault,
-  authenticates the policy continuation from the pinned digest with
-  root-signed proofs (or, with no anchor carried, a first proof exactly at
-  checkpoint seq+1 linked to the pinned digest), requires the author's role in
+  authenticates the policy continuation from the pinned digest with root-signed
+  or delegated `InviteReaders` proofs (or, with no anchor carried, a first
+  root-signed proof exactly at checkpoint seq+1 linked to the pinned digest),
+  requires the author's role in
   the current policy to be writer, admin or owner, then verifies the content
   signature with the current policy's device key. A carried anchor proof is
   trusted through the caller's digest alone; its own signature is not
-  cryptographically reverified.
+  cryptographically reverified. A continuation is root-signed by the pinned
+  owner root, or is a delegated **InviteReaders** transition whose signer an
+  active `InviteReaders` `AdminDelegation` in the authenticated predecessor
+  policy names (see [Admin-delegated
+  InviteReaders](#admin-delegated-invitereaders-transitions)).
 
 Neither API establishes the trustworthiness or provenance of the caller's
-checkpoint, root or pinned key; admin-delegated policy transitions (no
-scope-to-policy-diff validation is implemented), key wrapping,
-encryption/decryption, content history through `prev_digest`, server freshness
-and overall vault trust are not implemented. This document describes the wire
-format and the frozen v1 preimages; it makes no cryptographic correctness
-claim and grants no migration or product permission.
+checkpoint, root or pinned key. Of the delegated scopes, only `invite_readers`
+authorizes anything, and only the narrow transition described in
+[Admin-delegated
+InviteReaders](#admin-delegated-invitereaders-transitions); every other
+delegated scope, invite-writer addition, removal, role change and key or root
+change remains unsupported. Key wrapping (including rewrap of the invitation
+and epoch keys), encryption/decryption, content history through `prev_digest`,
+server freshness and overall vault trust are not implemented. This document
+describes the wire format and the frozen v1 preimages; it makes no
+cryptographic correctness claim and grants no migration or product permission.
 
 ## Background
 
@@ -79,17 +88,22 @@ revision or file-digest preimage):
 Labels are identification and purpose separators only. This package does not
 sign, wrap or derive any key. The only authorization it checks is
 checkpoint-scoped: under a caller-supplied checkpoint, whether the author may
-author the authenticated current policy. It has no trust anchor of its own and
-does not check delegated authority. It performs signature checks in
-exactly two places, both described in [Verification APIs](#verification-apis):
+author the authenticated current policy. It has no trust anchor of its own. A
+policy transition it accepts is either root-signed by the pinned owner root or
+a delegated `InviteReaders` transition authorized by the authenticated
+predecessor policy; it checks no other delegated authority. It performs
+signature checks in exactly two places, both described in [Verification
+APIs](#verification-apis):
 
 - `VerifyContentSignature` checks one file content signature under the
   `/content-signature` label against a caller-pinned Ed25519 key. It does not
   authenticate policy proofs or authorize the current policy.
 - `VerifyPolicyCheckpoint` checks, only relative to a caller-supplied
   `PolicyCheckpoint`, the `/policy-document-signature` proofs that continue the
-  pinned digest, each against the pinned owner-root key, and then the
-  `/content-signature` signature against the current policy's device key.
+  pinned digest, each either against the pinned owner-root key or, for a
+  delegated `InviteReaders` transition, against the predecessor device's
+  `PolicySigningKey`, and then the `/content-signature` signature against the
+  current policy's device key.
 
 ## Documents
 
@@ -281,9 +295,10 @@ structurally at `MaxDeviceIDLength` (128). The codec never verifies either
 signature. `VerifyContentSignature` checks `content_signature` only against a
 caller-pinned key; `VerifyPolicyCheckpoint` checks the proof
 `signed_policy_proofs[].signer_id` / `[].sig` only from a caller-supplied
-checkpoint forward, each root-signed by the pinned owner-root key (see
-[Verification APIs](#verification-apis)). No other policy proof verification
-exists in this schema revision.
+checkpoint forward, each either root-signed by the pinned owner-root key or,
+for a delegated `InviteReaders` transition, signed by the predecessor device's
+`PolicySigningKey` (see [Verification APIs](#verification-apis)). No other
+policy proof verification exists in this schema revision.
 
 Several wire values that look like identifiers are deliberately **not**
 ordinary identifiers:
@@ -490,7 +505,7 @@ different questions:
 | API | Input it trusts | What it establishes |
 | --- | ------------------- | ------------------- |
 | `VerifyContentSignature` | caller-pinned device id and content key | the sealed file's content signature, for the author device the caller names, under that caller-pinned key |
-| `VerifyPolicyCheckpoint` | caller-supplied `PolicyCheckpoint` (vault id, owner-root key id and public key, policy seq and digest) | the file and its proofs belong to that vault, the policy continuation from the pinned digest is signed by the pinned owner root, the author's role in the authenticated current policy is writer/admin/owner, and the content signature verifies under the current policy's device key |
+| `VerifyPolicyCheckpoint` | caller-supplied `PolicyCheckpoint` (vault id, owner-root key id and public key, policy seq and digest) | the file and its proofs belong to that vault, the policy continuation from the pinned digest is signed by the pinned owner root or is a delegated `InviteReaders` transition authorized by the authenticated predecessor policy, the author's role in the authenticated current policy is writer/admin/owner, and the content signature verifies under the current policy's device key |
 
 Neither API establishes or creates the trustworthiness or provenance of what
 the caller supplies. `VerifyContentSignature` does not authenticate policy
@@ -522,8 +537,9 @@ VerifyContentSignature(f *File, signerDeviceID string, publicKey ed25519.PublicK
 
 This API does **not** verify policy proof signatures
 (`signed_policy_proofs[].sig`), any signature chain from the owner root or
-admin delegations, policy continuity through `prev_policy_digest`, or that
-the signer is authorized by an authenticated policy. It is a narrower check
+admin delegations (including delegated `InviteReaders` transitions), policy
+continuity through `prev_policy_digest`, or that the signer is authorized by an
+authenticated policy. It is a narrower check
 than `VerifyPolicyCheckpoint`; use that API when the current policy itself
 must be authenticated.
 
@@ -570,23 +586,37 @@ stable while the call runs.
 - **No carried anchor**: for a continuation the file carries no proof of, the
   carried proofs must begin exactly at `checkpoint.PolicySeq+1`, and that first
   proof must carry `prev_policy_digest` equal to `checkpoint.PolicyDigest` and
-  be root-signed exactly as in the next bullet. A file that carries
-  `checkpoint.PolicySeq` with a different digest is rejected rather than treated
-  as a continuation.
+  be root-signed, with its Ed25519 signature over the policy-document preimage
+  verifying under the pinned owner-root public key. No predecessor policy body
+  is then authenticated, so the first continuation cannot be a delegated
+  transition. A later root-signed proof may establish a predecessor policy
+  whose delegation then authorizes a following delegated `InviteReaders`
+  transition; the first proof can never be the delegated one. A file that
+  carries `checkpoint.PolicySeq` with a different digest is rejected rather
+  than treated as a continuation.
 - **Continuations**: every later proof must carry exactly the previous trusted
   sequence plus one, `prev_policy_digest` equal to the previous trusted
-  digest, the pinned owner root and `signer_id` equal to
-  `checkpoint.OwnerRootKeyID`, and a `crypto/ed25519` signature,
-  over `"locklark.vault-file/v1/policy-document-signature" || 0x00 ||
-  SignedPolicy.document`, that verifies under the pinned owner-root public
-  key. A failing proof signature is `signature_verify_failed` at
-  `signed_policy_proofs[i]`.
+  digest and the pinned owner root (`key_id`, `alg` and public key). Its
+  `signer_id` is then either
+  `checkpoint.OwnerRootKeyID` — a root-signed proof, verified with a
+  `crypto/ed25519` signature over
+  `"locklark.vault-file/v1/policy-document-signature" || 0x00 ||
+  SignedPolicy.document` that verifies under the pinned owner-root public key
+  and **not** restricted by the policy diff — or a device in the
+  authenticated predecessor policy that satisfies every condition of
+  [Admin-delegated InviteReaders](#admin-delegated-invitereaders-transitions),
+  in which case the same preimage is verified under exactly that device's
+  `PolicySigningKey`. Any other signer is `policy_checkpoint_failed` with an
+  empty path. A failing proof signature, root- or device-signed, is
+  `signature_verify_failed` at `signed_policy_proofs[i]`.
 - A file whose current policy is behind `checkpoint.PolicySeq` is stale, and
   a carried sequence equal to `checkpoint.PolicySeq` with a different digest
-  is a mismatch; vault, anchor, tip, gap, link, root and admin-transition
-  failures are `policy_checkpoint_failed`.
-- **Authorize and check content**: having authenticated the chain to the
-  current policy, the author's principal must be a writer, admin or owner of
+  is a mismatch; vault, anchor, tip, gap, link, root and delegated-transition
+  authorization failures are `policy_checkpoint_failed` with an empty path.
+- **Authorize and check content**: the same current-author role requirement
+  applies however the chain was signed (root or delegated). Having
+  authenticated the chain to the current policy, the author's principal must
+  be a writer, admin or owner of
   that current policy. A reader author, an author whose device is missing from
   the current policy, or a demoted or removed author fails before the
   sealed-state check as `invalid_value` with an empty path, because
@@ -606,36 +636,100 @@ stable while the call runs.
   does not verify is `signature_verify_failed` at
   `signed_policy_proofs[i]`.
 
-Admin-delegated policy transitions are **not** supported. A continuation must
-be signed by the pinned owner root; a proof signed by any other device is
-rejected even when it carries an `AdminDelegation`, because there is no
-implemented validation of an admin's `scope` against the old-to-new policy and
-delegation diff. A delegated transition is never reinterpreted as a root-signed
-one.
+### Admin-delegated InviteReaders transitions
+
+The only admin-delegated policy transition `VerifyPolicyCheckpoint` accepts is
+`InviteReaders`. Every other delegated transition stays unsupported. Within the
+continuation loop, a proof whose `signer_id` is not
+`checkpoint.OwnerRootKeyID` is accepted only when **all** of the following
+hold, and is otherwise `policy_checkpoint_failed`. The authority is read only
+from the predecessor policy the chain has already authenticated:
+
+- the signer names a device in the authenticated predecessor policy whose
+  principal is Admin or Owner **in that predecessor policy**;
+- that device carries an Ed25519 `PolicySigningKey` (non-nil, `alg`
+  `ed25519`, 32-byte key), and the proof's signature verifies under exactly
+  that key, over the same
+  `"locklark.vault-file/v1/policy-document-signature" || 0x00 ||
+  SignedPolicy.document` preimage (a failure here is
+  `signature_verify_failed` at `signed_policy_proofs[i]`);
+- an active `AdminDelegation` in that same predecessor names the device
+  (`delegate_device_id`) with `scope.invite_readers` `true`; a delegation is
+  active when its `expires_policy_seq` is `0` (unbounded; `ValidatePolicy`
+  rejects only a non-zero expiry at or before the policy's own sequence) or
+  later than the predecessor's `policy_seq`;
+- `inviteReadersPolicyDiff(predecessor, next)` accepts the old-to-new delta
+  below.
+
+The successor's own `admin_delegations` are never consulted for authority, the
+predecessor's other scope flags and `scope_note` grant nothing, and a delegated
+transition is never reinterpreted as a root-signed one. A root-signed
+transition remains allowed under the pinned owner-root key and is **not**
+restricted by `inviteReadersPolicyDiff`, so the root may still make other
+changes it already could make.
+
+`inviteReadersPolicyDiff` accepts only this delta, comparing arrays by
+identifier rather than position:
+
+- `format`, `version`, `vault_id` unchanged, `next.policy_seq` exactly
+  `old.policy_seq+1`, `next.prev_policy_digest` equal to `policy_digest` of the
+  predecessor, and the complete `owner_root` (key id, algorithm, public key
+  and `owners`) unchanged; the sequence must not be exhausted at `2^64-1`;
+- `readers` grows by only entirely new principals, at least one and up to
+  `MaxPolicyArrayItems` (64), each carrying a new `principal_id` that is
+  absent from the predecessor's `readers`, `writers`, `admins`, `owners` and
+  `owner_root.owners` (and from the successor's `writers`, `admins`, `owners`
+  and `owner_root.owners`); every existing reader is carried unchanged;
+- `devices` gains 0 up to `MaxArrayItems` (128) entries, each owned by a newly
+  added reader, for any subset of the new readers; every existing device is
+  carried unchanged, so no device is removed or edited;
+- `writers`, `admins` and `owners` are exactly unchanged, so no removal,
+  promotion, demotion or relabel happens;
+- `admin_delegations` is never added or edited: every existing delegation is
+  carried unchanged, except that a delegation whose `expires_policy_seq`
+  equals `next.policy_seq` may be omitted (carrying it would fail
+  `ValidatePolicy`, which rejects a grant at its own expiry); a delegation
+  that is not expiring at `next.policy_seq` is never removed.
+
+Structural validity, frozen array order, key uniqueness, the unchanged
+owner-root key and the rule that a later policy names exactly one 32-byte
+`prev_policy_digest` (linked to its immediate predecessor) remain
+`ValidatePolicy` and `ValidateFile` rules; the diff only constrains the delta.
+The diff changes no wire field and no preimage.
 
 ## Limits
 
 Neither API establishes overall vault trust beyond its caller-supplied anchor.
 Neither verifies content history through `prev_digest`, server freshness or
-ordering across snapshots, encryption or decryption, CEK or VUK key wrapping,
+ordering across snapshots, encryption or decryption, CEK or VUK key wrapping
+(including rewrap of the invitation and epoch keys for newly invited readers),
 or the authenticity of anything the caller did not pin. Neither cryptographically
 reverifies the carried anchor proof's signature; that signature is trusted only
 through the caller's checkpoint digest. The chain does authenticate the
 delegation fields (`owner_root`, `admin_delegations` and its `scope`) carried in
-root-signed policy documents, but neither API authorizes delegation: admin-signed
-policy transitions and scope-to-policy-diff authorization are unsupported, so
-a delegated transition is never accepted. Beyond that checkpoint-scoped
-current-author check, no authorization is implemented. In particular:
+the authenticated policy documents. The only delegated authority it exercises
+is `invite_readers`, and only through the narrow
+`inviteReadersPolicyDiff` transition of [Admin-delegated
+InviteReaders](#admin-delegated-invitereaders-transitions), which is checked in
+the authenticated predecessor policy, never in the successor. Every other
+delegated scope (`invite_writers`, `remove_members`, `remove_devices`,
+`promote_admin`; `promote_owner` and `replace_root` are forbidden by
+`ValidatePolicy`), invite-writer addition, removal or role change, and any
+key or root change remains unsupported and must be root-signed. Beyond that
+checkpoint-scoped current-author check and the InviteReaders diff, no
+authorization is implemented. In particular:
 
 - `VerifyContentSignature` does not authenticate policy proofs or authorize
   the current policy; it proves only that a caller-pinned key signed this
   file's content.
 - `VerifyPolicyCheckpoint` proves only that the file and its proofs continue a
-  checkpoint and root the caller already trusts, and that the content was
-  signed by a device of a writer, admin or owner of the authenticated current
-  policy. It does not establish the trustworthiness or provenance of the
-  checkpoint, the owner root or its key, and it does not support admin-signed
-  transitions.
+  checkpoint and root the caller already trusts, that each continuation is
+  root-signed or an authorized delegated `InviteReaders` transition, and that
+  the content was signed by a device of a writer, admin or owner of the
+  authenticated current policy. It does not establish the trustworthiness or
+  provenance of the checkpoint, the owner root or its key, does not perform
+  the invitation or key rewrap a new reader would need, and does not accept
+  any other admin-signed transition.
 
 ## Budgets
 
@@ -716,12 +810,18 @@ This schema revision includes only the two verification APIs described above:
 It does not establish or create the trustworthiness or provenance of the
 caller's checkpoint, owner root or pinned key, and it does not
 cryptographically reverify the anchor proof's signature. The authenticated
-chain does cover the delegation fields carried in root-signed policy documents,
-but the package does not authorize delegation: admin-signed policy transitions
-and scope-to-policy-diff authorization are unsupported (so an `AdminDelegation`
-never authorizes a transition), and beyond the checkpoint-scoped current-author
-check it implements no other policy proof, signature-chain or authorization
-verification and no permission checks. It also leaves key or digest crypto
-beyond the definitions, content
-history through `prev_digest`, server freshness, migration/import, encryption
-or decryption, key wrapping or product wiring.
+chain does cover the delegation fields carried in the authenticated policy
+documents, but the only authorization it implements is the delegated
+`InviteReaders` transition of [Admin-delegated
+InviteReaders](#admin-delegated-invitereaders-transitions): adding readers and
+their devices under an active `invite_readers` grant in the authenticated
+predecessor. Every other scope mapping (invite writers, remove members or
+devices, promote admin) and every removal, role change, key or root change is
+unsupported and out of scope, and a full invitation or epoch key rewrap is not
+performed. Beyond the checkpoint-scoped current-author check and that one
+delegated diff it implements no other policy proof, signature-chain or
+authorization verification and no permission checks. It also leaves the
+provenance of the caller's root outside its scope, key or digest crypto
+beyond the definitions, content history through `prev_digest`, server
+freshness, migration/import, encryption or decryption, key wrapping or product
+wiring.
