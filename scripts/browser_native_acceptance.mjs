@@ -720,6 +720,23 @@ try {
       1,
       "Route page must be unique",
     );
+    // Diagnostics only: take one best-effort visible-DOM snapshot right after
+    // the exact route target is found and verified, before any popup-closed
+    // wait, so a later failure can distinguish a route that was still locked
+    // from one that was already closed at first sight. It uses a short-lived
+    // CDP connection with no added wait or timeout, and any failure is
+    // swallowed so no acceptance step can fail or skip because of it.
+    try {
+      const initial = await attach(opened);
+      try {
+        lastRouteObservation = sanitizeRouteObservation(
+          await initial.evaluate(routeStateProbe(fixture.Title)),
+        );
+        recordRouteObservation(lastRouteObservation);
+      } finally {
+        await initial.close().catch(() => {});
+      }
+    } catch {}
     mark("route:popup-closed");
     await wait(async () => !(await action.ready()), "Action popup stayed open");
     await wait(
