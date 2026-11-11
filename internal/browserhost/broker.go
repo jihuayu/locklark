@@ -244,19 +244,19 @@ func (b *Broker) neverOrigins() []string {
 	return out
 }
 
-// peerBeforeHello picks the handshake order at compile time. On Windows it is
+// peerAfterHello picks the handshake order at compile time. On Windows it is
 // true: ImpersonateNamedPipeClient authenticates the security context of the
 // last message read from the pipe, so the broker reads the bounded hello first
 // and only then queries the client identity from that same pipe handle. Every
 // other build is false: the peer identity comes from already-connected socket
 // credentials before any read.
-const peerBeforeHello = runtime.GOOS == "windows"
+const peerAfterHello = runtime.GOOS == "windows"
 
 // handshake reads the bounded hello and authenticates the OS peer before any
 // hello byte is decoded or any side effect is dispatched. Every step fails
 // closed with a nil frame and no peer.
 func (b *Broker) handshake(conn net.Conn) (Peer, []byte) {
-	if !peerBeforeHello {
+	if !peerAfterHello {
 		peer, e := authenticatedPeer(conn)
 		if e != nil {
 			return Peer{}, nil

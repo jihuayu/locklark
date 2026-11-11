@@ -10,12 +10,12 @@ import (
 
 // The real named pipe end-to-end path is covered through the desktop broker
 // tests. This unit regression pins the two properties they do not state:
-// the Windows ordering constant is the read-before-auth mode, and the least
+// the Windows ordering constant selects read-before-auth, and the least
 // privileged dial budget keeps a 300ms cap while inheriting shorter and
 // canceled caller contexts.
 func TestWindowsBrokerHandshakeOrderingAndDialBudget(t *testing.T) {
-	if !peerBeforeHello {
-		t.Fatal("peerBeforeHello must select Windows read-before-auth mode")
+	if !peerAfterHello {
+		t.Fatal("peerAfterHello must select Windows read-before-auth mode")
 	}
 
 	start := time.Now()
