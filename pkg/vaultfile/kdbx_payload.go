@@ -83,20 +83,39 @@ func isKDBX41(data []byte) bool {
 	return sig == kdbx.DefaultKDBX41Sig
 }
 
+// kdbxCipherIVLength reports the exact content-encryption IV length of a
+// cipher ID the vendored KDBX4 encoder supports, or false for any other ID.
+// AES and Twofish run in CBC mode, whose setup panics on an IV that is not one
+// block (16 bytes); ChaCha20 takes a 12-byte nonce.
+func kdbxCipherIVLength(cipherID []byte) (int, bool) {
+	switch {
+	case bytes.Equal(cipherID, kdbx.CipherAES), bytes.Equal(cipherID, kdbx.CipherTwoFish):
+		return 16, true
+	case bytes.Equal(cipherID, kdbx.CipherChaCha20):
+		return 12, true
+	default:
+		return 0, false
+	}
+}
+
 // validKDBX41PackageShape reports whether db is shaped so that the encoder
 // can write it without panicking: a KDBX 4.1 header with file headers and
-// hashes (the KDBX4 encoder writes both), and content with metadata, an inner
-// header with its random stream key and exactly one root group, so that
-// binary cleanup has a single group to walk. A missing KDF parameter
-// dictionary is shaped here and receives the profile in configureKDBXProfile.
-// Credentials are not part of the shape: Seal replaces them for the duration
-// of the call.
+// hashes (the KDBX4 encoder writes both), a supported cipher ID with an IV of
+// exactly that cipher's length, and content with metadata, an inner header
+// with its random stream key and exactly one root group, so that binary
+// cleanup has a single group to walk. A missing KDF parameter dictionary is
+// shaped here and receives the profile in configureKDBXProfile. Credentials
+// are not part of the shape: Seal replaces them for the duration of the call.
 func validKDBX41PackageShape(db *kdbx.Database) bool {
 	if db == nil || db.Header == nil || db.Header.Signature == nil ||
 		db.Header.FileHeaders == nil || db.Hashes == nil {
 		return false
 	}
 	if *db.Header.Signature != kdbx.DefaultKDBX41Sig {
+		return false
+	}
+	ivLen, ok := kdbxCipherIVLength(db.Header.FileHeaders.CipherID)
+	if !ok || len(db.Header.FileHeaders.EncryptionIV) != ivLen {
 		return false
 	}
 	content := db.Content
@@ -161,10 +180,14 @@ func configureKDBXProfile(db *kdbx.Database) error {
 // signature, file headers and hashes, metadata, inner header with its random
 // stream key, and a root with exactly one group) in the natural state
 // OpenKDBXPayload returns and the internal vault writer produces: protected
-// values in plaintext, with Value.Protected set, not pre-locked. cek must be
-// exactly CEKSize (32) bytes. A nil or malformed db (including a missing
-// Hashes) or a wrong-length cek is rejected with CodeKDBXPayloadInvalid before
-// the database is modified. db.Credentials is irrelevant: Seal accepts nil
+// values in plaintext, with Value.Protected set, not pre-locked. The header's
+// cipher must be one the vendored KDBX4 encoder supports (AES, Twofish or
+// ChaCha20) and its EncryptionIV must be exactly the length of that cipher's
+// IV: 16 bytes for AES and Twofish in CBC mode, 12 bytes for ChaCha20. cek
+// must be exactly CEKSize (32) bytes. A nil or malformed db (including a
+// missing Hashes), an unknown cipher ID, a missing or wrong-length IV or a
+// wrong-length cek is rejected with CodeKDBXPayloadInvalid before the database
+// is modified. db.Credentials is irrelevant: Seal accepts nil
 // credentials and any prior password, key or Windows value, because it
 // installs its own for the duration of the call.
 //

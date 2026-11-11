@@ -415,6 +415,148 @@ func TestKDBXPayloadSealRejectsNilAndMalformedShape(t *testing.T) {
 	}
 }
 
+// cipherForIVLength returns the supported cipher IDs and the exact IV length
+// each requires.
+var supportedCipherIVLengths = map[string]struct {
+	id    []byte
+	ivLen int
+}{
+	"aes":      {id: kdbx.CipherAES, ivLen: 16},
+	"twofish":  {id: kdbx.CipherTwoFish, ivLen: 16},
+	"chacha20": {id: kdbx.CipherChaCha20, ivLen: 12},
+}
+
+func TestKDBXPayloadSealRejectsInvalidCipherIV(t *testing.T) {
+	cek := payloadFixtureCEK(t)
+
+	// The reported reproducer: an AES cipher ID with a missing IV used to
+	// panic in CBC setup inside the encoder.
+	t.Run("reproducer AES with missing IV", func(t *testing.T) {
+		payloadAssertSealRejectedUnmodified(t, cek, func(db *kdbx.Database) {
+			db.Header.FileHeaders.CipherID = bytes.Clone(kdbx.CipherAES)
+			db.Header.FileHeaders.EncryptionIV = nil
+		})
+	})
+
+	cases := map[string]struct {
+		cipherID []byte
+		iv       []byte
+	}{
+		"nil cipher ID":       {nil, payloadIV(12)},
+		"unknown cipher ID":   {payloadUnknownCipherID(), payloadIV(16)},
+		"aes nil IV":          {kdbx.CipherAES, nil},
+		"aes 12-byte IV":      {kdbx.CipherAES, payloadIV(12)},
+		"aes 15-byte IV":      {kdbx.CipherAES, payloadIV(15)},
+		"aes 17-byte IV":      {kdbx.CipherAES, payloadIV(17)},
+		"twofish nil IV":      {kdbx.CipherTwoFish, nil},
+		"twofish 12-byte IV":  {kdbx.CipherTwoFish, payloadIV(12)},
+		"twofish 32-byte IV":  {kdbx.CipherTwoFish, payloadIV(32)},
+		"chacha20 nil IV":     {kdbx.CipherChaCha20, nil},
+		"chacha20 8-byte IV":  {kdbx.CipherChaCha20, payloadIV(8)},
+		"chacha20 16-byte IV": {kdbx.CipherChaCha20, payloadIV(16)},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			cipherID, iv := c.cipherID, c.iv
+			payloadAssertSealRejectedUnmodified(t, cek, func(db *kdbx.Database) {
+				db.Header.FileHeaders.CipherID = bytes.Clone(cipherID)
+				db.Header.FileHeaders.EncryptionIV = bytes.Clone(iv)
+			})
+		})
+	}
+
+	// Exact IV lengths are accepted, so the table above rejects only
+	// genuinely invalid inputs.
+	for name, c := range supportedCipherIVLengths {
+		t.Run("accepts "+name, func(t *testing.T) {
+			db := payloadFixtureDB(t)
+			db.Header.FileHeaders.CipherID = bytes.Clone(c.id)
+			db.Header.FileHeaders.EncryptionIV = payloadIV(c.ivLen)
+			sealed, err := SealKDBXPayload(db, cek)
+			if err != nil {
+				t.Fatalf("Seal: %v", err)
+			}
+			opened, err := OpenKDBXPayload(sealed, cek)
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			if got := opened.Content.Root.Groups[0].Entries[0].GetContent("Password"); got != payloadProtectedSecret {
+				t.Fatalf("protected value = %q, want round trip", got)
+			}
+		})
+	}
+}
+
+func payloadIV(n int) []byte {
+	iv := make([]byte, n)
+	if _, err := rand.Read(iv); err != nil {
+		panic(err)
+	}
+	return iv
+}
+
+func payloadUnknownCipherID() []byte {
+	return []byte{
+		0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+		0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+	}
+}
+
+// payloadAssertSealRejectedUnmodified mutates a fresh fixture with mutate,
+// seals it and asserts the generic invalid error with nil output and a
+// database left exactly as it was: prior credential pointer, header values
+// and protected plaintext.
+func payloadAssertSealRejectedUnmodified(t *testing.T, cek []byte, mutate func(*kdbx.Database)) {
+	t.Helper()
+	db := payloadFixtureDB(t)
+	prior := kdbx.NewPasswordCredentials("prior password")
+	db.Credentials = prior
+	mutate(db)
+
+	headers := db.Header.FileHeaders
+	cipherID := bytes.Clone(headers.CipherID)
+	iv := bytes.Clone(headers.EncryptionIV)
+	kdf := *headers.KdfParameters
+	salt := kdf.Salt
+	signature := *db.Header.Signature
+
+	entry := db.Content.Root.Groups[0].Entries[0]
+	if got := entry.GetContent("Password"); got != payloadProtectedSecret {
+		t.Fatalf("fixture is not in unlocked state: %q", got)
+	}
+
+	out, err := SealKDBXPayload(db, cek)
+	wantPayloadCode(t, err, CodeKDBXPayloadInvalid)
+	if out != nil {
+		t.Fatalf("rejected Seal returned %d bytes", len(out))
+	}
+
+	if db.Credentials != prior {
+		t.Fatal("rejected Seal changed the prior credentials pointer")
+	}
+	if got := headers.CipherID; !bytes.Equal(got, cipherID) {
+		t.Fatalf("rejected Seal changed CipherID to %x", got)
+	}
+	if !bytes.Equal(headers.EncryptionIV, iv) {
+		t.Fatal("rejected Seal changed EncryptionIV")
+	}
+	if p := headers.KdfParameters; p == nil || !bytes.Equal(p.UUID, kdf.UUID) ||
+		p.Version != kdf.Version || p.Memory != kdf.Memory ||
+		p.Iterations != kdf.Iterations || p.Parallelism != kdf.Parallelism ||
+		p.Rounds != kdf.Rounds || p.Salt != salt {
+		t.Fatalf("rejected Seal changed KDF parameters: %+v", p)
+	}
+	if *db.Header.Signature != signature {
+		t.Fatal("rejected Seal changed the header signature")
+	}
+	if got := entry.GetContent("Password"); got != payloadProtectedSecret {
+		t.Fatalf("rejected Seal changed the protected plaintext to %q", got)
+	}
+	if !entry.Values[1].Value.Protected.Bool {
+		t.Fatal("rejected Seal cleared the protected flag")
+	}
+}
+
 func TestKDBXPayloadSealRejectsWrongVersionAndCEK(t *testing.T) {
 	cek := payloadFixtureCEK(t)
 	for name, cek := range map[string][]byte{"nil": nil, "empty": {}, "short": make([]byte, 31), "long": make([]byte, 33)} {
