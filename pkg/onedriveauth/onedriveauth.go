@@ -37,20 +37,34 @@
 //     cancellation or timeout is ErrOutcomeUnknown, and each response failure
 //     has its own fixed sentinel; all of them say the code may be consumed, and
 //     nothing is retried.
+//   - RefreshAccessToken performs one refresh-token grant against the same
+//     fixed, bounded token endpoint, using the caller's client ID, tenant,
+//     optional explicit scopes and old refresh token. There are no default
+//     scopes: when none are given, the scope field is omitted. A successful
+//     answer may carry a replacement refresh token, which the caller keeps in
+//     place of its old one; on any error and when no replacement is returned,
+//     the caller keeps its old refresh token. Nothing is retried, and the
+//     package persists nothing.
 //
 // Scope. This package receives and validates the callback, builds the
-// authorization URL, but never opens it, and performs at most one token
-// exchange per call. It does not refresh tokens, persist, store or reuse tokens
-// or the code, call Microsoft Graph, Opendal or any account, upload or share
-// files, and makes no account-capability claims. There is no default tenant,
-// account or scope configuration: the caller supplies the client ID, tenant and
-// explicit scopes. TokenResult may retain the access and refresh tokens in
-// memory only, until the caller calls TokenResult.Close, which zeroizes the
-// buffers shared by every copy of the result, as far as this package holds
-// them; copies returned by its accessors are owned by the caller and must be
-// cleared or dropped by it (a RefreshToken []byte can be cleared; an
+// authorization URL, but never opens it, performs at most one authorization-code
+// exchange or refresh grant per call, and supports RefreshAccessToken for the
+// refresh-token grant, which uses the same fixed, bounded token endpoint. Scopes
+// are always the caller's explicit choice, with no defaults: the authorization
+// request carries the caller's explicit scopes, and the refresh grant sends its
+// optional scopes only when the caller supplies them. The caller keeps its old
+// refresh token on any refresh error and when no replacement is returned. This
+// package does not persist or store tokens or the code, does not reuse them,
+// does not call Microsoft Graph, Opendal or any account, does not upload or
+// share files, and makes no account-capability claims. There is no default
+// tenant, account or scope configuration: the caller supplies the client ID,
+// tenant and explicit scopes. TokenResult may retain the access and refresh
+// tokens in memory only, until the caller calls TokenResult.Close, which
+// zeroizes the buffers shared by every copy of the result, as far as this
+// package holds them; copies returned by its accessors are owned by the caller
+// and must be cleared or dropped by it (a RefreshToken []byte can be cleared; an
 // AccessToken string cannot be zeroized and can only be dropped). Before
-// ExchangeCode returns, on success and on every parse failure, it clears the
+// a token request returns, on success and on every parse failure, it clears the
 // bounded response body buffer and the temporary json.RawMessage buffers used
 // for members other than the tokens; the token members are decoded by the
 // package's byte Unmarshaler into owned buffers, and internal copies made by

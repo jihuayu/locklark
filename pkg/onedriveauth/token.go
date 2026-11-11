@@ -30,8 +30,9 @@ const (
 // the caller and how many bytes its answer can cost. They are backstops, not
 // security parameters.
 const (
-	// TokenExchangeTimeout is the maximum duration of one exchange. A
-	// shorter context deadline or positive timeout takes precedence.
+	// TokenExchangeTimeout is the maximum duration of one token endpoint
+	// request, for the authorization-code exchange and the refresh grant
+	// alike. A shorter context deadline or positive timeout takes precedence.
 	TokenExchangeTimeout = 30 * time.Second
 	// maxTokenResponseBytes is the most response body an exchange reads.
 	maxTokenResponseBytes = 64 << 10
@@ -106,14 +107,17 @@ type TokenExchangeConfig struct {
 	Scopes []string
 }
 
-// TokenResult is the transient, in-memory outcome of one successful exchange:
-// the bearer access token, its positive and bounded lifetime as a
-// time.Duration, and, when the provider returned one, the refresh token. The
-// provider returns a refresh_token only when the authorization request asked
-// for offline_access; this package adds no scope by itself and never requires
-// one, so the refresh token may be absent. The id_token, ext_expires_in and
-// every other response member are discarded, and there is no way to obtain
-// them from this package.
+// TokenResult is the transient, in-memory outcome of one successful token
+// request, either an authorization-code exchange or a refresh-token grant: the
+// bearer access token, its positive and bounded lifetime as a time.Duration,
+// and, when the provider returned one, the refresh token. An authorization-code
+// response includes a refresh_token only when the authorization request asked
+// for offline_access; a refresh-grant response may include a replacement
+// refresh token. In both grants the provider may omit the refresh token: this
+// package adds no scope by itself and never requires one, so it may be absent,
+// and the caller then keeps the refresh token it already has. The id_token,
+// ext_expires_in and every other response member are discarded, and there is no
+// way to obtain them from this package.
 //
 // The tokens are credentials held in unexported byte buffers. Every copy of a
 // TokenResult, including the value returned to the caller, shares one owner: a
@@ -183,10 +187,12 @@ func (r TokenResult) AccessToken() string {
 }
 
 // RefreshToken returns a defensive []byte copy of the OAuth refresh token the
-// provider returned. It is nil when the response carried none (it is present
-// only when the authorization request included offline_access) or once Close was
-// called; a refresh_token that is present but not a well-formed token is an
-// error, not an absence.
+// provider returned. It is nil when the response carried none, which both grants
+// allow: an authorization-code response carries one only when offline_access was
+// requested, and a refresh-grant response may omit the replacement, in which
+// case the caller keeps the refresh token it already has. It is also nil once
+// Close was called; a refresh_token that is present but not a well-formed token
+// is an error, not an absence.
 //
 // Treat the returned copy as a credential: it is owned by the caller, is not
 // cleared by Close, and must be cleared by the caller (with clear) once it is no
@@ -293,10 +299,37 @@ func ExchangeCode(ctx context.Context, cfg TokenExchangeConfig, redirectURI, cod
 	return exchangeCode(ctx, cfg, redirectURI, code, verifier, timeout, nil, nil, nil)
 }
 
-// exchangeHooks are the test-only seams of exchangeCode. Production passes nil:
-// hooks are nil and read is readTokenResponse.
+// exchangeCode is ExchangeCode with the test seam: endpoint redirects the
+// request to a synthetic peer and client supplies base to newTokenClient, whose
+// transport trusts that peer. Both are nil in production, where the request goes
+// to the derived Microsoft URL over the default transport. A non-nil endpoint
+// must still pass validEndpoint. hooks is nil in production.
+func exchangeCode(ctx context.Context, cfg TokenExchangeConfig, redirectURI, code, verifier string, timeout time.Duration, endpoint *url.URL, client *http.Client, hooks *exchangeHooks) (TokenResult, error) {
+	form, err := tokenForm(cfg, redirectURI, code, verifier)
+	if err != nil {
+		return TokenResult{}, err
+	}
+	return tokenRun(ctx, cfg.Tenant, form, timeout, endpoint, client, hooks, nil)
+}
+
+// classifyTokenError is how tokenRun maps one failure, and returns it with the
+// zero result. It receives every failure exactly once, in its original form: the
+// base classification sentinel wrapped over the reason, or for an injected
+// parser the error it returned. kind(base) returns base when the received error
+// is base, classified exactly as errors.Is would, and nil otherwise. Without a
+// classifier the authorization-code exchange keeps the base classification,
+// so ExchangeCode returns its public sentinels unchanged. A classifier is the
+// one place a grant rewords a failure, so each failure is mapped exactly once
+// there; it must keep the original error in the chain whenever the base kind
+// must still match. Returning err unchanged keeps the base error.
+type classifyTokenError func(err error, kind func(error) error) error
+
+// exchangeHooks are the test-only seams of tokenRun. Production passes nil:
+// parse is readTokenResponse.
 type exchangeHooks struct {
-	// parse replaces readTokenResponse for the answer the worker read.
+	// parse replaces readTokenResponse for the answer the worker read. Its
+	// error is classified like the base parser's, but only by the matching
+	// base sentinel.
 	parse func(*http.Response) (TokenResult, error)
 	// stalled, when non-nil, is called once the cancellation or bound
 	// branch was selected and abort was called, before the worker is
@@ -304,32 +337,43 @@ type exchangeHooks struct {
 	stalled func()
 }
 
-// exchangeCode is ExchangeCode with the test seam: endpoint redirects the
-// request to a synthetic peer and client supplies base to newTokenClient, whose
-// transport trusts that peer. Both are nil in production, where the request goes
-// to the derived Microsoft URL over the default transport. A non-nil endpoint
-// must still pass validEndpoint. hooks is nil in production.
-func exchangeCode(ctx context.Context, cfg TokenExchangeConfig, redirectURI, code, verifier string, timeout time.Duration, endpoint *url.URL, client *http.Client, hooks *exchangeHooks) (TokenResult, error) {
+// tokenRun is the one token request runner of this package, shared by the
+// authorization-code exchange and the refresh grant: one bounded POST of the
+// already validated and built form, never retried, over verified TLS to the
+// fixed official host, with redirects, proxies and HTTP/2 refused by the
+// request client and the answer read by the bounded parser. endpoint and client
+// are the test-only seam described on exchangeCode; both are nil in production.
+// classify maps every failure exactly once, from its original base
+// classification; nil keeps the base sentinels (the exchange).
+func tokenRun(ctx context.Context, tenant, form string, timeout time.Duration, endpoint *url.URL, client *http.Client, hooks *exchangeHooks, classify classifyTokenError) (TokenResult, error) {
 	parse := readTokenResponse
-	if hooks != nil {
-		if hooks.parse != nil {
-			parse = hooks.parse
+	if hooks != nil && hooks.parse != nil {
+		parse = hooks.parse
+	}
+	// fail maps the original error through classify exactly once, so no
+	// pre-mapped sentinel reaches a classifier and no error is reworded
+	// twice.
+	fail := func(err error) (TokenResult, error) {
+		if classify != nil {
+			return TokenResult{}, classify(err, func(base error) error {
+				if errors.Is(err, base) {
+					return base
+				}
+				return nil
+			})
 		}
+		return TokenResult{}, err
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	form, err := tokenForm(cfg, redirectURI, code, verifier)
+	target, err := tokenURL(tenant)
 	if err != nil {
-		return TokenResult{}, err
-	}
-	target, err := tokenURL(cfg.Tenant)
-	if err != nil {
-		return TokenResult{}, err
+		return fail(err)
 	}
 	if endpoint != nil {
 		if !validEndpoint(endpoint) {
-			return TokenResult{}, wrap(ErrRequest, nil)
+			return fail(wrap(ErrRequest, nil))
 		}
 		target = endpoint
 	}
@@ -341,10 +385,11 @@ func exchangeCode(ctx context.Context, cfg TokenExchangeConfig, redirectURI, cod
 
 	// This is the only place ErrCancelled is returned, and the one step
 	// that decides the error that was observed before any request. The form
-	// (and with it the code and verifier) is sent only past it.
+	// (and with it the code, verifier or refresh token) is sent only past
+	// it.
 	early := ctx.Err()
 	if early != nil {
-		return TokenResult{}, wrap(ErrCancelled, early)
+		return fail(wrap(ErrCancelled, early))
 	}
 	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < timeout {
 		timeout = time.Until(deadline)
@@ -356,7 +401,7 @@ func exchangeCode(ctx context.Context, cfg TokenExchangeConfig, redirectURI, cod
 
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, target.String(), strings.NewReader(form))
 	if err != nil {
-		return TokenResult{}, wrap(ErrRequest, err)
+		return fail(wrap(ErrRequest, err))
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
@@ -383,8 +428,14 @@ func exchangeCode(ctx context.Context, cfg TokenExchangeConfig, redirectURI, cod
 	go func() {
 		resp, err := httpClient.Do(req)
 		if err != nil {
-			// The request was sent: the provider may have consumed
-			// the code whether or not it answered.
+			// The request was sent: the provider may have processed
+			// the credential or request (consumed the authorization
+			// code or rotated the refresh token) whether or not it
+			// answered. The raw transport error is intentionally
+			// discarded and the fixed ErrOutcomeUnknown sentinel is
+			// returned directly: the refresh classifier still reads
+			// the base classification, while both provider and local
+			// transport details stay redacted from the error text.
 			note(early)
 			done <- answer{err: ErrOutcomeUnknown}
 			return
@@ -404,7 +455,10 @@ func exchangeCode(ctx context.Context, cfg TokenExchangeConfig, redirectURI, cod
 	defer bound.Stop()
 	select {
 	case a := <-done:
-		return a.res, a.err
+		if a.err != nil {
+			return fail(a.err)
+		}
+		return a.res, nil
 	case <-ctx.Done():
 		note(ctx.Err())
 	case <-bound.C:
@@ -423,7 +477,7 @@ func exchangeCode(ctx context.Context, cfg TokenExchangeConfig, redirectURI, cod
 	// an empty result.
 	a := <-done
 	a.res.Close()
-	return TokenResult{}, wrap(ErrOutcomeUnknown, <-who)
+	return fail(wrap(ErrOutcomeUnknown, <-who))
 }
 
 // tokenForm builds the authorization-code form and validates every input
