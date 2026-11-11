@@ -48,33 +48,61 @@ func promptControlTerminal(ctx context.Context, stdin, stdout *os.File, prompt s
 }
 
 // promptControlSave puts one control terminal in raw mode and returns the
-// function that restores its previous mode and open-file flags. MakeRaw does not
-// set O_NONBLOCK, so it is added here with the previous flags recorded: it keeps
-// every read and drain from blocking, and the waits stay bounded polls.
+// function that restores it and the cached descriptor all prompt I/O uses.
+//
+// The descriptor is obtained once through control.SyscallConn().Control, which,
+// unlike (*os.File).Fd, does not hand it to the os package's SetBlocking and so
+// never undoes the nonblocking mode set here. It is then duplicated atomically
+// close-on-exec with F_DUPFD_CLOEXEC: the duplicate shares the terminal, so
+// termios set through it applies to the control terminal, while all flags
+// changed here are set through F_SETFL on the duplicate. The prompt therefore never calls Fd again, and it
+// stays correct even if a caller already made the original descriptor blocking.
+// MakeRaw does not set O_NONBLOCK, so it is added here with the previous flags
+// recorded: it keeps every read and drain from blocking, and the waits stay
+// bounded polls. Restore puts back the terminal mode and the flags, then closes
+// the duplicate, on every path.
 //
 // Cancellation reaches the prompt in two ways, neither of which needs O_ASYNC:
 // in raw mode ISIG is off, so the terminal delivers Ctrl-C as byte 0x03 and the
 // line reader cancels on it; a SIGINT delivered to the process cancels the
 // signal.NotifyContext of runPersonalOnedrive, whose ctx is checked at every
 // poll.
-func promptControlSave(control *os.File) (restore func(), err error) {
-	fd := int(control.Fd())
+func promptControlSave(control *os.File) (restore func(), controlFD int, err error) {
+	conn, err := control.SyscallConn()
+	if err != nil {
+		return nil, 0, errOnedriveTerminal
+	}
+	fd := -1
+	var dupErr error
+	if rawErr := conn.Control(func(orig uintptr) {
+		fd, dupErr = unix.FcntlInt(orig, unix.F_DUPFD_CLOEXEC, 0)
+	}); rawErr != nil || dupErr != nil {
+		if fd >= 0 {
+			_ = unix.Close(fd)
+		}
+		return nil, 0, errOnedriveTerminal
+	}
+	closeDup := func() { _ = unix.Close(fd) }
 	flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFL, 0)
 	if err != nil {
-		return nil, errOnedriveTerminal
+		closeDup()
+		return nil, 0, errOnedriveTerminal
 	}
 	if _, err := unix.FcntlInt(uintptr(fd), unix.F_SETFL, flags|unix.O_NONBLOCK); err != nil {
-		return nil, errOnedriveTerminal
+		closeDup()
+		return nil, 0, errOnedriveTerminal
 	}
 	state, err := term.MakeRaw(fd)
 	if err != nil {
 		_, _ = unix.FcntlInt(uintptr(fd), unix.F_SETFL, flags)
-		return nil, errOnedriveTerminal
+		closeDup()
+		return nil, 0, errOnedriveTerminal
 	}
 	return func() {
 		_ = term.Restore(fd, state)
 		_, _ = unix.FcntlInt(uintptr(fd), unix.F_SETFL, flags)
-	}, nil
+		closeDup()
+	}, fd, nil
 }
 
 // promptControlWait wakes the line reader to attempt one nonblocking read. It
@@ -100,7 +128,7 @@ func promptControlWait(p labelPrompt) (bool, error) {
 	if p.ctx.Err() != nil {
 		return false, errOnedriveTerminal
 	}
-	pfd := []unix.PollFd{{Fd: int32(p.control.Fd()), Events: unix.POLLIN}}
+	pfd := []unix.PollFd{{Fd: int32(p.controlFD), Events: unix.POLLIN}}
 	n, err := unix.Poll(pfd, int(controlPollInterval/time.Millisecond))
 	if err != nil && !errors.Is(err, syscall.EINTR) {
 		return false, errOnedriveTerminal
@@ -157,7 +185,7 @@ func sleepContext(ctx context.Context, d time.Duration) bool {
 // and 0 on a read error.
 func promptControlRead(p labelPrompt) (byte, int) {
 	var buf [1]byte
-	n, err := unix.Read(int(p.control.Fd()), buf[:])
+	n, err := unix.Read(p.controlFD, buf[:])
 	if n == 1 {
 		if buf[0] > 0x7f {
 			return 0, -2
@@ -176,7 +204,7 @@ func promptControlRead(p labelPrompt) (byte, int) {
 // the hidden line, so a stray CR cannot echo once echo returns. It runs only
 // while echo is still off.
 func dismissControlInput(p labelPrompt) {
-	discardControlInput(p.control)
+	discardControlInput(p.controlFD)
 	_, _ = io.WriteString(p.stderr, "\r\n")
 }
 
@@ -184,11 +212,11 @@ func dismissControlInput(p labelPrompt) {
 // descriptor is nonblocking, so queued bytes are read and dropped until the
 // queue is empty; this never waits for new input and never blocks on a signal,
 // because every read is nonblocking and an interrupted one simply retries.
-func discardControlInput(control *os.File) {
+func discardControlInput(fd int) {
 	var buf [256]byte
 	dropped := 0
 	for dropped < controlDiscardBuffer {
-		n, err := unix.Read(int(control.Fd()), buf[:])
+		n, err := unix.Read(fd, buf[:])
 		if n > 0 {
 			dropped += n
 			continue

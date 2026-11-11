@@ -60,14 +60,15 @@ func promptControlTerminal(ctx context.Context, stdin, stdout *os.File, prompt s
 
 // promptControlSave puts the console input in raw mode, with echo, line input
 // and processed input off, and returns the function that restores its previous
-// mode.
-func promptControlSave(control *os.File) (restore func(), err error) {
+// mode plus the console handle every prompt I/O uses. The handle is taken from
+// Fd once, here, and cached for the prompt's lifetime.
+func promptControlSave(control *os.File) (restore func(), controlFD int, err error) {
 	fd := int(control.Fd())
 	state, err := term.MakeRaw(fd)
 	if err != nil {
-		return nil, errOnedriveTerminal
+		return nil, 0, errOnedriveTerminal
 	}
-	return func() { _ = term.Restore(fd, state) }, nil
+	return func() { _ = term.Restore(fd, state) }, fd, nil
 }
 
 // waitTimeout is WAIT_TIMEOUT as WaitForSingleObject returns it in its uint32
@@ -103,7 +104,7 @@ func promptControlWait(p labelPrompt) (bool, error) {
 		if ms == 0 {
 			ms = 1
 		}
-		event, err := windows.WaitForSingleObject(windows.Handle(p.control.Fd()), ms)
+		event, err := windows.WaitForSingleObject(windows.Handle(p.controlFD), ms)
 		if err != nil {
 			return false, errOnedriveTerminal
 		}
@@ -115,7 +116,7 @@ func promptControlWait(p labelPrompt) (bool, error) {
 			// guaranteed, so a read could block.
 			return false, errOnedriveTerminal
 		}
-		rec, ok := readConsoleInput(p.control)
+		rec, ok := readConsoleInput(windows.Handle(p.controlFD))
 		if !ok {
 			return false, errOnedriveTerminal
 		}
@@ -163,10 +164,10 @@ func dismissControlInput(p labelPrompt) {
 	deadline := time.Now().Add(controlDrainWait)
 	for time.Now().Before(deadline) {
 		var n uint32
-		if err := getNumberOfConsoleInputEvents(p.control, &n); err != nil || n == 0 {
+		if err := getNumberOfConsoleInputEvents(windows.Handle(p.controlFD), &n); err != nil || n == 0 {
 			break
 		}
-		if _, ok := readConsoleInput(p.control); !ok {
+		if _, ok := readConsoleInput(windows.Handle(p.controlFD)); !ok {
 			break
 		}
 	}
@@ -174,10 +175,10 @@ func dismissControlInput(p labelPrompt) {
 }
 
 // readConsoleInput removes and returns one queued console event.
-func readConsoleInput(control *os.File) (consoleRecord, bool) {
+func readConsoleInput(handle windows.Handle) (consoleRecord, bool) {
 	var rec consoleRecord
 	var n uint32
-	if err := readConsoleInputRaw(windows.Handle(control.Fd()), &rec, &n); err != nil || n != 1 {
+	if err := readConsoleInputRaw(handle, &rec, &n); err != nil || n != 1 {
 		return consoleRecord{}, false
 	}
 	return rec, true
@@ -238,8 +239,8 @@ var procGetNumberOfConsoleInputEvents = syscall.NewLazyDLL("kernel32.dll").NewPr
 
 // getNumberOfConsoleInputEvents is GetNumberOfConsoleInputEvents: how many events
 // are queued, including key-up and non-key events.
-func getNumberOfConsoleInputEvents(console *os.File, n *uint32) error {
-	r1, _, e1 := procGetNumberOfConsoleInputEvents.Call(console.Fd(), uintptr(unsafe.Pointer(n)))
+func getNumberOfConsoleInputEvents(console windows.Handle, n *uint32) error {
+	r1, _, e1 := procGetNumberOfConsoleInputEvents.Call(uintptr(console), uintptr(unsafe.Pointer(n)))
 	if r1 == 0 {
 		if e1 != syscall.Errno(0) {
 			return e1
