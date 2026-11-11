@@ -340,17 +340,18 @@ function unlockDesktop(context, desktop) {
 }
 
 // Exact broker consent labels of the desktop pairing prompt
-// (internal/desktop/ipc_broker.go). Normal consent is the fixed per-operation
-// approval label; quick consent must never be used by this shared journey.
+// (internal/desktop/ipc_broker.go). This shared journey clicks only the quick
+// consent label: its native text explicitly authorizes V2 detail and field copy
+// for this bounded connection without a per-operation window (each native
+// approval would close the action popup). Normal per-operation consent is never
+// clicked here. Refusal remains a real pre-check.
 const NORMAL_CONSENT_LABEL = "确认连接（每次敏感操作需批准）";
 const QUICK_CONSENT_LABEL = "连接并启用快捷填充";
 const REFUSE_CONSENT_LABEL = "拒绝连接";
 
 // Exact per-operation V2 review labels of normal mode
-// (internal/desktop/browser.go). The popup row click requests item-get, which
-// keeps the generic review label; the concealed-field copy requests
-// item-copy-field, which uses the field-disclosure label. Only these fixed
-// literals are ever clicked; they are never derived from UI text.
+// (internal/desktop/browser.go). Quick mode must never surface these; they are
+// still allowlisted so a diagnostic inspection reports their absence.
 const GET_APPROVE_LABEL = "批准本次操作";
 const COPY_FIELD_APPROVE_LABEL = "批准本次字段披露";
 const COPY_FIELD_REFUSE_LABEL = "拒绝本次字段披露";
@@ -507,10 +508,11 @@ function assertNoBrokerPairPrompt(context, desktop, reason) {
   return true;
 }
 
-// First real Chromium pairing through actual broker consent. Normal consent is
-// the only acceptance path: refusal is proven physically first, then a fresh
-// connection is approved with the fixed per-operation label. Quick consent is
-// never clicked and no other label is substituted.
+// First real Chromium pairing through actual broker consent. Refusal is proven
+// physically first, then a fresh connection is approved only with the fixed
+// quick-consent label, whose native text explicitly authorizes V2 detail and
+// field copy for 15 minutes. Normal per-operation consent is never clicked and
+// no other label is substituted; consent is never inferred from status text.
 async function pairSharedSession(context, desktop, step) {
   // Native desktop inspection raises its window and closes the action popup, so
   // it runs only while no popup is open. Every popup handle is discarded before
@@ -537,14 +539,14 @@ async function pairSharedSession(context, desktop, step) {
   popup = await context.openPopup();
   await assertPopupUnpaired(context, popup);
 
-  // 3. New real connection approved only by the fixed normal-consent label.
+  // 3. New real connection approved only by the fixed quick-consent label.
   // No desktop inspection may run while this popup holds focus.
-  step("shared-clipboard:pair-normal-consent");
+  step("shared-clipboard:pair-quick-consent");
   await popup.click("#connect");
   popup = null;
   desktopInput(context, desktop, [
-    { wait_label: NORMAL_CONSENT_LABEL },
-    { click_label: NORMAL_CONSENT_LABEL },
+    { wait_label: QUICK_CONSENT_LABEL },
+    { click_label: QUICK_CONSENT_LABEL },
   ]);
 
   // The native click moves focus to the desktop and may close the popup, so a
@@ -556,12 +558,10 @@ async function pairSharedSession(context, desktop, step) {
   return popup;
 }
 
-// The row click requests the item detail (item-get), which normal mode reviews
-// with the generic per-operation label. The user approves it with real native
-// input; the desktop click moves focus away, so the given handle is dropped
-// and the detail assertions always read a fresh popup. The opened detail is
-// returned through that fresh popup, never through the stale handle.
-async function openSyntheticDetail(context, desktop, popup, step) {
+// The row click requests the item detail (item-get). Quick consent explicitly
+// covers V2 detail, so no native per-operation window appears and the action
+// popup keeps its in-memory detail view. The same handle must show the detail.
+async function openSyntheticDetail(context, popup, step) {
   assert(/^[a-f0-9]{32}$/.test(context.fixture.SeedID || ""),
     "Synthetic fixture item id is required");
   const row = '#vault-list [data-item-id="' + context.fixture.SeedID + '"]';
@@ -584,59 +584,37 @@ async function openSyntheticDetail(context, desktop, popup, step) {
     "Synthetic login row title mismatch");
   step("shared-clipboard:detail-row");
   await popup.click(row);
-  // The review prompt is the desktop window: focus it before the native click.
-  popup = null;
-  step("shared-clipboard:detail-approve");
-  desktopInput(context, desktop, [
-    { wait_label: GET_APPROVE_LABEL },
-    { click_label: GET_APPROVE_LABEL },
-  ], 60000);
-  // The native approval focused the desktop and closed the focus-losing popup.
-  await context.delay(300);
-  // A fresh popup observes the approved detail with the same assertions. It
-  // never re-clicks the row, so it cannot trigger a second item-get review.
   step("shared-clipboard:detail-view");
-  const opened = await context.openPopup();
   try {
     await context.eventually(
-      async () => (await opened.text("#detail-title")) === context.fixture.Title,
+      async () => (await popup.text("#detail-title")) === context.fixture.Title,
       "Shared vault detail did not open",
       20000,
     );
     step("shared-clipboard:detail-password-controls");
-    assert.equal(await opened.count('[data-field-id="password"]'), 1,
+    assert.equal(await popup.count('[data-field-id="password"]'), 1,
       "Concealed password field is missing");
-    assert.equal(await opened.count('[data-field-id="password"] [data-action="toggle-reveal"]'), 1,
+    assert.equal(await popup.count('[data-field-id="password"] [data-action="toggle-reveal"]'), 1,
       "Password field is not concealed and revealable");
-    assert.equal(await opened.count(COPY_CONFIRM_SELECTOR), 1,
+    assert.equal(await popup.count(COPY_CONFIRM_SELECTOR), 1,
       "Concealed password copy control is missing");
   } catch (error) {
-    await opened.dismiss().catch(() => {});
+    await popup.dismiss().catch(() => {});
     throw error;
   }
-  return opened;
+  return popup;
 }
 
-// Exactly one real copy click: the concealed password copy is item-copy-field,
-// reviewed in normal mode with the fixed field-disclosure label. The user
-// approves it with real native input, the giving handle is dropped, and a fresh
-// popup must show the same visible copy confirmation and automatic-cleanup
-// toast. The fresh popup never clicks copy again, so only one native prepare
-// can ever reach the desktop. The returned timestamp is taken only after that
-// native approval and the fresh popup's copy confirmation, because product
-// starts its lease when the approved copyValue executes; the later TTL wait
-// must anchor there, not before the approval.
-async function copyConcealedPassword(context, desktop, popup) {
+// Exactly one real copy click in the same action popup holding the synthetic
+// detail. The concealed password copy (item-copy-field) is explicitly covered
+// by quick consent, so no native per-operation window is awaited. The popup
+// must show the visible copy confirmation and automatic-cleanup toast, and it
+// is never clicked again. The returned timestamp is taken only after that
+// confirmed success, because product starts its lease when copyValue executes;
+// the later TTL wait must anchor there, not before the confirmation.
+async function copyConcealedPassword(context, popup) {
   await popup.click(COPY_CONFIRM_SELECTOR);
-  // The review prompt is the desktop window: focus it before the native click.
-  popup = null;
-  desktopInput(context, desktop, [
-    { wait_label: COPY_FIELD_APPROVE_LABEL },
-    { click_label: COPY_FIELD_APPROVE_LABEL },
-  ], 60000);
-  // The native approval focused the desktop and closed the focus-losing popup.
-  await context.delay(300);
-  const observed = await context.openPopup();
+  const observed = popup;
   try {
     await context.eventually(
       async () => {
@@ -652,8 +630,8 @@ async function copyConcealedPassword(context, desktop, popup) {
       "Popup did not announce the native automatic-cleanup lease");
     assert(!toast.includes("无法保证自动清除"),
       "Popup used the legacy manual browser-copy wording");
-    // Lease anchor: the native approval already executed copyValue and the
-    // fresh popup confirmed it, so the product's TTL starts from here.
+    // Lease anchor: the confirmed copy already executed copyValue, so the
+    // product's TTL starts from here.
     const copiedAt = Date.now();
     return { popup: observed, copiedAt };
   } catch (error) {
@@ -755,20 +733,21 @@ export async function acceptSharedClipboard(context) {
     popup = await pairSharedSession(context, desktop, step);
     receipts.popup_connected_shared = true;
     receipts.pair_refused_unpaired = true;
-    receipts.pair_normal_consent_bound = true;
+    receipts.pair_quick_consent_bound = true;
 
     step("shared-clipboard:detail");
-    popup = await openSyntheticDetail(context, desktop, popup, step);
+    popup = await openSyntheticDetail(context, popup, step);
     receipts.synthetic_row_listed = true;
     receipts.detail_opened = true;
-    receipts.detail_native_approval = true;
+    receipts.quick_consent_accepted = true;
+    receipts.detail_popup_retained = true;
 
     step("shared-clipboard:native-copy");
     await clipboard.start();
-    const copied = await copyConcealedPassword(context, desktop, popup);
+    const copied = await copyConcealedPassword(context, popup);
     popup = copied.popup;
     const copiedAt = copied.copiedAt;
-    receipts.copy_field_native_approval = true;
+    receipts.popup_copy_in_quick_detail = true;
     receipts.concealed_password_copy = true;
     receipts.dom_copied_confirmed = true;
     receipts.native_autocleanup_wording = true;
@@ -810,8 +789,8 @@ export async function acceptSharedClipboard(context) {
     // A fresh real copy is owned by the app, so locking must clear exactly it.
     step("shared-clipboard:fresh-copy");
     popup = await connectedPopup(context);
-    popup = await openSyntheticDetail(context, desktop, popup, step);
-    popup = (await copyConcealedPassword(context, desktop, popup)).popup;
+    popup = await openSyntheticDetail(context, popup, step);
+    popup = (await copyConcealedPassword(context, popup)).popup;
     receipts.fresh_native_copy = await copyIsPasteable(context, clipboard);
     await popup.dismiss();
     popup = null;
@@ -849,7 +828,7 @@ export async function acceptSharedClipboard(context) {
     step("shared-clipboard:late-prepare-unlock");
     unlockDesktop(context, desktop);
     popup = await connectedPopup(context);
-    popup = await openSyntheticDetail(context, desktop, popup, step);
+    popup = await openSyntheticDetail(context, popup, step);
     const lateMarker = "Shared acceptance late marker " + randomBytes(16).toString("hex");
     owner = new ForeignOwner(context, lateMarker);
     await owner.start();
