@@ -730,6 +730,113 @@ func TestCLIRunBrokerChildCancelledBySignal(t *testing.T) {
 	}
 }
 
+// TestCLIRunBrokerQueuedSignalBeforeUnavailableIsTerminal is the no-sleep
+// dispatcher regression for the handoff race: SIGINT is queued in the broker
+// channel as the transport returns the exact browserhost.ErrBrokerUnavailable.
+// The watcher consumes it, so the derived context is already cancelled and the
+// stop joins a cancelled attempt: the local console is never opened, and a
+// consumed signal is never handled again. The still-buffered branch is proved
+// by TestCLIRunBrokerWatchStopJoinsAndDrains and
+// TestCLIRunBrokerHandoffCausesAreTerminal. Nothing here sends an OS signal to
+// the test process.
+func TestCLIRunBrokerQueuedSignalBeforeUnavailableIsTerminal(t *testing.T) {
+	f := newCLIBrokerFixture(t)
+	installCLIRunBrokerSeams(t, true)
+	// The broker subscribes the test's channel; the request queues one signal
+	// in it before it returns, exactly as the process handler would have.
+	signals := make(chan chan<- os.Signal, 1)
+	brokerSignals := cliRunBrokerSignals
+	t.Cleanup(func() { cliRunBrokerSignals = brokerSignals })
+	cliRunBrokerSignals = func(ch chan<- os.Signal) { signals <- ch }
+	requests, opens := 0, 0
+	cliRunBrokerRequest = func(ctx context.Context, _ browserhost.CLIRunBrokerRequest) (browserhost.CLIRunBrokerResponse, error) {
+		requests++
+		broker := <-signals
+		broker <- os.Interrupt
+		// Either the watcher consumed the signal and cancelled ctx, or the
+		// stop drains it; both branches are terminal, and this wait makes the
+		// queue state at the handoff deterministic without a sleep.
+		<-ctx.Done()
+		return browserhost.CLIRunBrokerResponse{}, browserhost.ErrBrokerUnavailable
+	}
+	installCLIRunLocalConsole(t, func() (*os.File, *os.File, error) {
+		opens++
+		return nil, nil, errRunCLIConsole
+	})
+	err := executeCLIAuthenticatedWithBroker(context.Background(), "brokertool", f.binding, f.targets, f.call().Request)
+	if requests != 1 || opens != 0 {
+		t.Fatalf("queued signal selected the local factor: requests=%d opens=%d", requests, opens)
+	}
+	if _, ok := err.(cliRunBrokerFailedError); !ok {
+		t.Fatalf("queued signal returned %T, want the fixed terminal broker failure", err)
+	}
+}
+
+// TestCLIRunBrokerWatchStopJoinsAndDrains proves the stop itself: a signal
+// queued before it is drained exactly once and reused by later stops, the
+// unsubscribe happens once, and a signal the watcher consumed is never drained
+// again. It is deterministic through channel barriers, not scheduling.
+func TestCLIRunBrokerWatchStopJoinsAndDrains(t *testing.T) {
+	// The watcher has already returned on its context, so a signal queued
+	// now stays buffered for the stop's drain: the join is the barrier, and
+	// no scheduling decides which side sees the signal.
+	exited, cancelExited := context.WithCancel(context.Background())
+	cancelExited()
+	w := newCLIRunBrokerWatch(exited, func() {}, func(chan<- os.Signal) {})
+	<-w.done
+	w.signals <- os.Interrupt
+	unsubscribed := 0
+	w.stopFn = func(chan<- os.Signal) { unsubscribed++ }
+	if sig, consumed := w.stop(); sig != os.Interrupt || consumed {
+		t.Fatalf("drained stop = %v, %v", sig, consumed)
+	}
+	if sig, consumed := w.stop(); sig != os.Interrupt || consumed || unsubscribed != 1 {
+		t.Fatalf("repeated stop = %v, %v unsubscribed=%d", sig, consumed, unsubscribed)
+	}
+
+	// A watcher that took the signal itself cancels and leaves nothing to
+	// drain.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	taken := newCLIRunBrokerWatch(ctx, cancel, func(chan<- os.Signal) {})
+	taken.signals <- os.Interrupt
+	<-ctx.Done()
+	if sig, consumed := taken.stop(); sig != nil || !consumed {
+		t.Fatalf("consumed stop = %v, %v", sig, consumed)
+	}
+}
+
+// TestCLIRunBrokerHandoffCausesAreTerminal proves each cause the pure handoff
+// distinguishes, including the buffered branch: a consumed signal is
+// cancellation, a still-buffered signal is terminal on its own, and only an
+// empty queue with live contexts lets the local path run; either cancelled
+// context is terminal.
+func TestCLIRunBrokerHandoffCausesAreTerminal(t *testing.T) {
+	live := context.Background()
+	done, cancel := context.WithCancel(live)
+	cancel()
+	for _, tc := range []struct {
+		name     string
+		pending  os.Signal
+		consumed bool
+		parent   context.Context
+		ctx      context.Context
+		want     cliRunBrokerHandled
+	}{
+		{name: "consumed", consumed: true, parent: live, ctx: done, want: cliRunBrokerCancelled},
+		{name: "buffered", pending: os.Interrupt, parent: live, ctx: live, want: cliRunBrokerSignal},
+		{name: "empty-live", parent: live, ctx: live, want: cliRunBrokerNoSignal},
+		{name: "parent-cancelled", parent: done, ctx: live, want: cliRunBrokerCancelled},
+		{name: "derived-cancelled", parent: live, ctx: done, want: cliRunBrokerCancelled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := handoffBrokerSignal(tc.pending, tc.consumed, tc.parent, tc.ctx); got != tc.want {
+				t.Fatalf("handoff = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestCLIRunBrokerFailuresNeverFallBack proves refused, unknown, malformed,
 // deadline, TTY, dial, and disconnected outcomes are all terminal through the
 // production dispatcher: the expected request count, no local path, and no
