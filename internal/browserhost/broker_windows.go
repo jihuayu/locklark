@@ -16,11 +16,6 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// peerBeforeHello is true on Windows: ImpersonateNamedPipeClient authenticates
-// the security context of the last message read from the pipe, so the broker
-// reads the bounded hello first and only then queries the client identity.
-const peerBeforeHello = true
-
 var brokerImpersonate = windows.NewLazySystemDLL("advapi32.dll").NewProc("ImpersonateNamedPipeClient")
 
 func ownerSID() (string, error) {

@@ -15,7 +15,7 @@ import (
 // canceled caller contexts.
 func TestWindowsBrokerHandshakeOrderingAndDialBudget(t *testing.T) {
 	if !peerBeforeHello {
-		t.Fatal("Windows must read the hello before impersonating the client")
+		t.Fatal("peerBeforeHello must select Windows read-before-auth mode")
 	}
 
 	start := time.Now()
