@@ -1060,14 +1060,16 @@ func TestInviteReadersPolicyDiff(t *testing.T) {
 			}
 		}},
 		{name: "reader removed", setup: readerRemovalOld, next: func(p *Policy) {
-			// carol, a reader with no device and no delegation, is removed:
-			// no replacement reader is added and the remaining old devices
-			// are untouched.
+			// The approved newReaders additions are present, so next still
+			// grows its reader count past the generic growth check; carol, a
+			// reader with no device and no delegation, is removed as the sole
+			// forbidden delta, and all devices stay unchanged.
 			for _, d := range p.Devices {
 				if d.PrincipalID == "carol" {
 					t.Fatalf("reader-removal old has a device for carol: %s", d.DeviceID)
 				}
 			}
+			newReaders(p)
 			p.Readers = slices.DeleteFunc(p.Readers, func(m Member) bool { return m.PrincipalID == "carol" })
 		}},
 		{name: "existing device label mutated", next: func(p *Policy) {
