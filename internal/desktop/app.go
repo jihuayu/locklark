@@ -1107,8 +1107,33 @@ func (a *App) transferView(c *ui.Context) {
 		})
 	})
 }
+
+// Run starts the desktop application with the per-user default settings file.
 func Run() error {
+	return runDesktop()
+}
+
+// RunWithSettingsPath starts the desktop application with an explicit,
+// absolute settings file instead of SettingsPath(). The path is validated
+// before any GUI state is created; an empty path selects Run().
+func RunWithSettingsPath(path string) error {
+	if path == "" {
+		return Run()
+	}
+	clean, err := validateSettingsFilePath(path)
+	if err != nil {
+		return err
+	}
+	return runDesktop(clean)
+}
+
+// runDesktop runs the native application. Optional settings paths were
+// already validated by RunWithSettingsPath.
+func runDesktop(settingsPaths ...string) error {
 	a := New()
+	if len(settingsPaths) == 1 {
+		a.settingsPath = settingsPaths[0]
+	}
 	if e := a.LoadSettings(); e != nil {
 		a.status = "安全设置文件无法读取；已使用默认值"
 	}

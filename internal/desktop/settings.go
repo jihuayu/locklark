@@ -85,6 +85,70 @@ func DefaultSettings() Settings {
 	return s.normalized()
 }
 
+// UsageError reports invalid desktop command-line arguments. Its message is
+// the fixed usage text and never includes the offending argument or path.
+type UsageError struct{}
+
+func (*UsageError) Error() string { return desktopSettingsUsage }
+
+// desktopSettingsUsage is the only command-line syntax the desktop accepts.
+const desktopSettingsUsage = "usage: locklark-desktop [--settings ABSOLUTE_PATH]"
+
+// ErrSettingsPath is returned for an unusable explicit settings path. The
+// error never includes the path itself.
+var ErrSettingsPath = errors.New("desktop: settings path must be one absolute, clean file path")
+
+// parseDesktopArgs parses the desktop command line. Only a single
+// "--settings ABSOLUTE_PATH" option pair is accepted; no arguments means the
+// default SettingsPath(). A "--settings=" form is rejected so the option has
+// one spelling.
+func parseDesktopArgs(args []string) (settingsPath string, err error) {
+	switch {
+	case len(args) == 0:
+		return "", nil
+	case len(args) == 2 && args[0] == "--settings":
+		clean, err := validateSettingsFilePath(args[1])
+		if err != nil {
+			return "", err
+		}
+		return clean, nil
+	default:
+		return "", &UsageError{}
+	}
+}
+
+// validateSettingsFilePath accepts exactly one absolute, clean, existing
+// directory or regular file path without NUL bytes.
+func validateSettingsFilePath(path string) (string, error) {
+	switch {
+	case path == "" || strings.ContainsRune(path, 0):
+		return "", ErrSettingsPath
+	case !filepath.IsAbs(path):
+		return "", ErrSettingsPath
+	case filepath.Clean(path) != path:
+		return "", ErrSettingsPath
+	}
+	if filepath.Dir(path) == path {
+		// A filesystem root cannot be a settings file.
+		return "", ErrSettingsPath
+	}
+	if info, err := os.Stat(path); err == nil && info.IsDir() {
+		return "", ErrSettingsPath
+	}
+	return path, nil
+}
+
+// RunDesktopArgs validates the desktop command line and starts the
+// application with the selected settings path. Invalid arguments return a
+// *UsageError before any GUI state is created; no arguments run Run().
+func RunDesktopArgs(args []string) error {
+	path, err := parseDesktopArgs(args)
+	if err != nil {
+		return err
+	}
+	return RunWithSettingsPath(path)
+}
+
 // SettingsPath returns the per-user non-secret settings path. The containing
 // directory is created with 0700 and the file is written with 0600.
 func SettingsPath() string {
