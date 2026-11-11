@@ -4897,6 +4897,18 @@ if (typeof importScripts === "function") importScripts("core.js");
       scrubDetail(detail);
       throw Error("refused");
     }
+    // Field selectors of the approved detail, for this route's own clipboard
+    // port only. No field value is retained.
+    const approvedFields = core
+      .flattenItemFields(detail)
+      .map((entry) => entry.id);
+    for (const client of grant.clients) {
+      client.routeDetail = {
+        id: detail.id,
+        revision: detail.revision,
+        fields: approvedFields,
+      };
+    }
     return {
       type: "route-claimed",
       token: grant.token,
@@ -5128,7 +5140,20 @@ if (typeof importScripts === "function") importScripts("core.js");
       routeLive(grant) &&
       grant.state === "claimed" &&
       message.item_id === grant.itemId &&
-      message.revision === grant.revision
+      message.revision === grant.revision &&
+      fieldAllowedByRouteDetail(state, message)
+    );
+  }
+  // A route port may only ask native to prepare or copy a field the route's
+  // own approved detail actually has. The remembered detail holds selectors
+  // only (id/revision/field ids), never a field value.
+  function fieldAllowedByRouteDetail(state, message) {
+    const detail = state.routeDetail;
+    return (
+      !!detail &&
+      detail.id === message.item_id &&
+      detail.revision === message.revision &&
+      detail.fields.includes(message.field)
     );
   }
   function clipboardRefused(requestId) {

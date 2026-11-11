@@ -1044,6 +1044,231 @@ test("a route revoked while tabs.create is pending fails closed", async () => {
   await h.send({ type: "disconnect" });
 });
 
+// ---- Persistent route field-copy boundary (native clipboard lease) ----
+const ROUTE_ITEM_ID = "b".repeat(32);
+const ROUTE_ITEM_REV = "c".repeat(64);
+const ROUTE_DETAIL = {
+  id: ROUTE_ITEM_ID, revision: ROUTE_ITEM_REV, category: "login", title: "Target",
+  username: "ada", has_password: true,
+};
+
+// A live route in front of the captured source tab. The claim's own V2
+// item-get carries the same item_id/revision as a fallback copy read, so the
+// phase is tracked explicitly: while `phase.claiming` is true every item-get
+// is answered with ROUTE_DETAIL; afterwards each test answers through `reply`.
+async function fieldRouteFixture(options = {}) {
+  const ROUTE_TAB = 7;
+  const reply = { current: null };
+  const phase = { claiming: false };
+  const h = harness({ capabilities: [CLIPBOARD_CAP], ...options,
+    onRequest: (r) => {
+      if (r.type === "vault-search")
+        return {
+          v: 1, id: r.id, type: "vault-items",
+          items: [{ id: ROUTE_ITEM_ID, revision: ROUTE_ITEM_REV, category: "login", title: "Target" }],
+        };
+      if (r.type === "item-get" && phase.claiming)
+        return { v: 1, id: r.id, type: "item-detail", item: { ...ROUTE_DETAIL } };
+      const answer = reply.current ? reply.current(r) : undefined;
+      if (answer) queueMicrotask(() => deliverNow(r.id, answer));
+      return undefined;
+    },
+  });
+  await ready(h);
+  // The native transports keep their reply dispatcher in the harness scope.
+  const deliverNow = (id, message) => h.deliver({ v: 1, id, ...message });
+  let sourceTab = { id: 1, windowId: 1, active: true, url: "https://example.test/login" };
+  let routeTab = null;
+  h.api.tabs.get = async (tabId) =>
+    tabId === sourceTab.id ? { ...sourceTab } : tabId === ROUTE_TAB && routeTab ? { ...routeTab } : null;
+  h.api.scripting.executeScript = async (options) =>
+    options.target.tabId === sourceTab.id
+      ? [{ frameId: 0, documentId: h.docId(), result: { top: true, origin: "https://example.test" } }]
+      : [{ frameId: 0, documentId: "route-doc", result: { top: true, origin: "chrome-extension://fixed" } }];
+  h.api.tabs.create = (options) => {
+    sourceTab = { ...sourceTab, active: false };
+    routeTab = { id: ROUTE_TAB, windowId: sourceTab.windowId, active: true, url: options.url };
+    h.listeners.active({ tabId: ROUTE_TAB, windowId: sourceTab.windowId });
+    h.listeners.updated(ROUTE_TAB, { status: "loading" });
+    h.listeners.updated(ROUTE_TAB, { url: options.url });
+    return { id: ROUTE_TAB, windowId: sourceTab.windowId, status: "loading" };
+  };
+  const opened = await h.send({ type: "open-route", id: ROUTE_ITEM_ID, revision: ROUTE_ITEM_REV });
+  assert.ok(opened?.routeCreated, "route was refused: " + opened?.status);
+  h.listeners.updated(ROUTE_TAB, { status: "complete" });
+  const sender = () => ({
+    id: "fixed", url: routeTab.url, origin: "chrome-extension://fixed",
+    frameId: 0, documentId: "route-doc",
+    tab: { id: ROUTE_TAB, url: routeTab.url, windowId: 1 },
+  });
+  const route = {
+    h,
+    reply,
+    sender,
+    token: opened.routeCreated.token,
+    async claim() {
+      phase.claiming = true;
+      try {
+        return await h.send({ type: "route-claim", token: opened.routeCreated.token }, sender());
+      } finally {
+        phase.claiming = false;
+      }
+    },
+    copy: (field, target = {}) =>
+      h.send(
+        {
+          type: "route-copy-field", token: opened.routeCreated.token,
+          item_id: ROUTE_ITEM_ID, revision: ROUTE_ITEM_REV, field, ...target,
+        },
+        sender(),
+      ),
+    nativeCount: (type) => h.sent.filter((r) => r.type === type).length,
+  };
+  return route;
+}
+
+test("route field copy is refused for a mismatched or foreign field", async () => {
+  const reads = [];
+  const route = await fieldRouteFixture();
+  const claimed = await route.claim();
+  assert.equal(claimed?.type, "route-claimed");
+  // Any fallback read on the exact target returns the approved detail.
+  route.reply.current = (r) => {
+    reads.push(r);
+    return { v: 1, id: r.id, type: "item-detail", item: { ...ROUTE_DETAIL } };
+  };
+  // Another item or revision never reaches a native read or copy.
+  for (const [field, target] of [
+    ["username", { item_id: "d".repeat(32) }],
+    ["username", { revision: "e".repeat(64) }],
+  ]) {
+    const refused = await route.copy(field, target);
+    assert.ok(!refused || refused.error === "refused", field + " was copied");
+  }
+  assert.equal(reads.length, 0, "a mismatched target reached the fresh read");
+  assert.equal(route.nativeCount("item-copy-field"), 0);
+  await route.h.send({ type: "disconnect" });
+});
+
+test("route field copy needs the exact fresh detail to carry the field", async () => {
+  const route = await fieldRouteFixture();
+  await route.claim();
+  // The fresh read must carry the field; when it does not, no native field
+  // copy may be requested at all.
+  route.reply.current = (r) => ({
+    v: 1, id: r.id, type: "item-detail",
+    item: { ...ROUTE_DETAIL, has_password: false },
+  });
+  const refused = await route.copy("password");
+  assert.ok(!refused || refused.error === "refused");
+  assert.equal(refused?.copiedField, undefined);
+  assert.deepEqual(route.h.sent.filter((r) => r.type === "item-copy-field"), []);
+  // The field the approved detail has proceeds, but without a native answer
+  // no value may escape.
+  route.reply.current = (r) => ({
+    v: 1, id: r.id, type: "item-detail", item: { ...ROUTE_DETAIL },
+  });
+  const value = await route.copy("username");
+  assert.ok(!value || value.error === "refused");
+  assert.equal(value?.copiedField, undefined);
+  const sent = route.h.sent.filter((r) => r.type === "item-copy-field");
+  assert.deepEqual(sent.map((r) => [r.item_id, r.revision, r.field]),
+    [[ROUTE_ITEM_ID, ROUTE_ITEM_REV, "username"]]);
+  await route.h.send({ type: "disconnect" });
+});
+
+test("route fallback copy scrubs a late field reply after close", async () => {
+  const route = await fieldRouteFixture();
+  await route.claim();
+  route.reply.current = (r) => ({ v: 1, id: r.id, type: "item-detail", item: { ...ROUTE_DETAIL } });
+  const pending = route.copy("username");
+  await waitFor(() => route.nativeCount("item-copy-field") === 1, "final copy");
+  const sent = route.h.sent.find((r) => r.type === "item-copy-field");
+  assert.deepEqual([sent.item_id, sent.revision, sent.field], [ROUTE_ITEM_ID, ROUTE_ITEM_REV, "username"]);
+  await route.h.send({ type: "route-close", token: route.token }, route.sender());
+  route.h.deliver({
+    v: 1, id: sent.id, type: "field-value", item_id: ROUTE_ITEM_ID,
+    revision: ROUTE_ITEM_REV, field: "username", value: "late-secret",
+    copied: true, expires_in_seconds: 30,
+  });
+  const late = await pending;
+  assert.ok(!late || late.error === "refused", "a late field value escaped");
+  assert.equal(late?.copiedField, undefined);
+  assert.doesNotMatch(JSON.stringify(late || {}), /late-secret/);
+  await route.h.send({ type: "disconnect" });
+});
+
+test("route clipboard port is bound to the claimed exact route", async () => {
+  const route = await fieldRouteFixture();
+  const portSender = { ...route.sender() };
+  const port = route.h.emitPort("native-clipboard", portSender);
+  await port.waitReady();
+  assert.equal(port.disconnected, false, "the route tab's port was not admitted");
+  // Before the claim nothing may prepare.
+  port.post({ type: "prepare", request_id: hexId(1), item_id: ROUTE_ITEM_ID, revision: ROUTE_ITEM_REV, field: "password" });
+  assert.equal((await port.waitFor((m) => m.type === "refused")).unknown, false);
+  assert.equal(route.nativeCount("prepare-copy-field"), 0);
+  assert.equal((await route.claim())?.type, "route-claimed");
+  // After the claim: wrong target and a field outside the approved detail are
+  // refused, the exact field reaches native prepare.
+  port.post({ type: "prepare", request_id: hexId(2), item_id: "d".repeat(32), revision: ROUTE_ITEM_REV, field: "password" });
+  await waitFor(() => port.received.filter((m) => m.type === "refused").length >= 2, "wrong target");
+  port.post({ type: "prepare", request_id: hexId(3), item_id: ROUTE_ITEM_ID, revision: ROUTE_ITEM_REV, field: "notes" });
+  await waitFor(() => port.received.filter((m) => m.type === "refused").length >= 3, "foreign field");
+  assert.equal(route.nativeCount("prepare-copy-field"), 0);
+  port.post({ type: "prepare", request_id: hexId(4), item_id: ROUTE_ITEM_ID, revision: ROUTE_ITEM_REV, field: "password" });
+  const prepared = await port.waitFor((m) => m.type === "prepared");
+  assert.equal(prepared.copy_ticket, COPY_TICKET);
+  // Commit is bound to the same selector.
+  port.post({ type: "commit", request_id: hexId(5), item_id: ROUTE_ITEM_ID, revision: ROUTE_ITEM_REV, field: "password", copy_ticket: COPY_TICKET });
+  await waitFor(() => route.nativeCount("commit-copy-field") === 1, "commit");
+  await route.h.send({ type: "disconnect" });
+});
+
+test("route clipboard port admission needs the route's exact tab and URL", async () => {
+  const route = await fieldRouteFixture();
+  const routeTab = { ...route.sender().tab };
+  // Another tab id carrying the route URL is not the route.
+  const foreign = route.h.emitPort("native-clipboard", {
+    ...route.sender(),
+    tab: { ...routeTab, id: 99 },
+  });
+  await tick();
+  assert.equal(foreign.disconnected, true, "a foreign tab kept a route port");
+  assert.deepEqual(foreign.received, []);
+  const admitted = route.h.emitPort("native-clipboard", {
+    ...route.sender(),
+    tab: routeTab,
+  });
+  await admitted.waitReady();
+  assert.equal(admitted.disconnected, false);
+  await route.h.send({ type: "disconnect" });
+});
+
+test("a route revoked during native prepare cancels the late offer", async () => {
+  const route = await fieldRouteFixture();
+  const port = route.h.emitPort("native-clipboard", route.sender());
+  await port.waitReady();
+  await route.claim();
+  port.post({ type: "prepare", request_id: hexId(1), item_id: ROUTE_ITEM_ID, revision: ROUTE_ITEM_REV, field: "password" });
+  const prepare = await waitFor(() => route.h.sent.find((r) => r.type === "prepare-copy-field"), "prepare");
+  // The source page reloads: the route is revoked with a prepare in flight.
+  route.h.listeners.updated(1, { status: "loading" });
+  route.h.deliver({
+    v: 1, id: prepare.id, type: "copy-prepared", item_id: ROUTE_ITEM_ID,
+    revision: ROUTE_ITEM_REV, field: "password", copy_mode: "native",
+    copy_ticket: COPY_TICKET, expires_in_seconds: 10, cleanup_ttl_seconds: 30,
+  });
+  await tick();
+  await tick();
+  assert.equal(port.received.filter((m) => m.type === "prepared").length, 0, "late offer escaped");
+  assert.equal(port.received.filter((m) => m.type === "revoked").length, 1);
+  port.post({ type: "commit", request_id: hexId(2), item_id: ROUTE_ITEM_ID, revision: ROUTE_ITEM_REV, field: "password", copy_ticket: COPY_TICKET });
+  await tick();
+  assert.equal(route.nativeCount("commit-copy-field"), 0);
+  await route.h.send({ type: "disconnect" });
+});
+
 test("page sender cannot connect or choose a field", async () => {
   const h = harness();
   assert.equal(
