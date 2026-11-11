@@ -381,12 +381,10 @@ func TestEncodeWithLimitsInnerHeaderBoundary(t *testing.T) {
 // TestInnerHeaderWriteToBoundedDestinationAllocation checks that a
 // zero-capacity destination makes at most two allocations: writeToBounded
 // reserves dst's capacity before appending, so no complete header is staged in
-// a temporary slice and copied in by Write. The count is two rather than one
-// because the race detector's shadow state accounts for one allocation of its
-// own on a race build; a normal build makes one. Without the Grow, the header
-// is staged in a temporary slice and copied in, so the destination itself is
-// two more allocations on top of the same constant: five on a normal build and
-// six on a race build, both above this bound.
+// a temporary slice and copied in by Write. With the current Go toolchain the
+// test observes one allocation on a normal build and two on a race build.
+// Without the Grow, it observes five on a normal build and six on a race build,
+// both above this bound.
 func TestInnerHeaderWriteToBoundedDestinationAllocation(t *testing.T) {
 	ih := binaryInnerHeader(t, 64)
 	size := ih.encodedSize()
@@ -398,7 +396,7 @@ func TestInnerHeaderWriteToBoundedDestinationAllocation(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	// A normal build makes one allocation and a race build two, so the bound
+	// One allocation on a normal build and two on a race build, so the bound
 	// is two in both, as the test's comment explains.
 	if allocs > 2 {
 		t.Fatalf("writeToBounded made %v allocations, want at most 2", allocs)
