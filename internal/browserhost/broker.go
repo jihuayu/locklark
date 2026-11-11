@@ -8,8 +8,11 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,6 +33,22 @@ type BrokerHello struct {
 	Mode    string  `json:"mode,omitempty"`
 	Browser Browser `json:"browser,omitempty"`
 	Origin  string  `json:"origin,omitempty"`
+}
+
+// BrowserPairRequest is the native review of one local browser-host peer. The
+// Browser and Origin fields are asserted by the client and are display-only;
+// the OS-authenticated Peer and the user's decision are the authority.
+type BrowserPairRequest struct {
+	Peer    Peer
+	Browser Browser
+	Origin  string
+}
+
+// BrowserPairDecision is the explicit native pairing result. QuickFill is a
+// separate user gesture, never inferred from a browser-supplied field.
+type BrowserPairDecision struct {
+	Approved  bool
+	QuickFill bool
 }
 
 // CLIRunBrokerRequest asks the desktop broker for pinned secret values.
@@ -55,6 +74,10 @@ type BrokerCallbacks struct {
 	NotifyChanged      func()
 	ApproveCLIRun      func(context.Context, Peer, CLIRunBrokerRequest) (bool, error)
 	HandleCLIRun       func(context.Context, Peer, CLIRunBrokerRequest) (CLIRunBrokerResponse, error)
+	// ApproveBrowserPair is the explicit browser pairing gate. It is required
+	// for every brokered browser connection; a nil callback refuses pairing.
+	// The callback may block while the native owner decides.
+	ApproveBrowserPair func(context.Context, BrowserPairRequest) (BrowserPairDecision, error)
 	// NewClipboard is the only native-clipboard-lease-v1 capability source.
 	// It returns one manager and one immutable clear TTL per connection; a
 	// zero TTL disables automatic clearing. Without this callback the browser
@@ -148,8 +171,24 @@ func (b *Broker) dropConn(c *Connection) {
 	b.mu.Unlock()
 }
 
-// NotifyUnlocked binds the shared desktop session to all connected clients.
-func (b *Broker) NotifyUnlocked(s *personal.Session, epoch uint64, quickFill bool) {
+// Connections returns a stable copy of the active browser connections. The
+// desktop UI uses it to surface and route native approvals to the exact
+// originating connection; it never grants authority by itself.
+func (b *Broker) Connections() []*Connection {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]*Connection, 0, len(b.conns))
+	for c := range b.conns {
+		out = append(out, c)
+	}
+	return out
+}
+
+// NotifyUnlocked publishes the newly unlocked session to the connections that
+// sent hello before it was unlocked. It never grants authority by itself: those
+// hellos are only offered to the explicit native pairing approval, and a
+// connection without a pending hello waits for its next one.
+func (b *Broker) NotifyUnlocked(s *personal.Session, epoch uint64) {
 	if s == nil || !s.Unlocked() {
 		return
 	}
@@ -160,10 +199,9 @@ func (b *Broker) NotifyUnlocked(s *personal.Session, epoch uint64, quickFill boo
 	}
 	b.mu.Unlock()
 	for _, c := range conns {
-		_ = c.BindDesktopSession(s, epoch, quickFill)
-	}
-	if b.callbacks.NotifyChanged != nil {
-		b.callbacks.NotifyChanged()
+		if c.offerBrowserSession(s, epoch) && b.callbacks.NotifyChanged != nil {
+			b.callbacks.NotifyChanged()
+		}
 	}
 }
 
@@ -206,18 +244,61 @@ func (b *Broker) neverOrigins() []string {
 	return out
 }
 
-func (b *Broker) serve(conn net.Conn) {
-	defer conn.Close()
-	peer, e := authenticatedPeer(conn)
-	if e != nil {
-		return
+// peerAfterHello picks the handshake order at compile time. On Windows it is
+// true: ImpersonateNamedPipeClient authenticates the security context of the
+// last message read from the pipe, so the broker reads the bounded hello first
+// and only then queries the client identity from that same pipe handle. Every
+// other build is false: the peer identity comes from already-connected socket
+// credentials before any read.
+const peerAfterHello = runtime.GOOS == "windows"
+
+// handshake reads the bounded hello and authenticates the OS peer before any
+// hello byte is decoded or any side effect is dispatched. Every step fails
+// closed with a nil frame and no peer.
+func (b *Broker) handshake(conn net.Conn) (Peer, []byte) {
+	if !peerAfterHello {
+		peer, e := authenticatedPeer(conn)
+		if e != nil {
+			return Peer{}, nil
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		raw, e := readFrame(conn, 4096)
+		if e != nil {
+			clear(raw)
+			return Peer{}, nil
+		}
+		_ = conn.SetReadDeadline(time.Time{})
+		return peer, raw
 	}
-	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	// A deadline that cannot be set leaves the read unbounded: fail closed.
+	if conn.SetReadDeadline(time.Now().Add(2*time.Second)) != nil {
+		return Peer{}, nil
+	}
 	raw, e := readFrame(conn, 4096)
 	if e != nil {
+		clear(raw)
+		return Peer{}, nil
+	}
+	// Clear the deadline before authenticating the peer on this same handle; a
+	// deadline that cannot be cleared aborts the hello unparsed.
+	if conn.SetReadDeadline(time.Time{}) != nil {
+		clear(raw)
+		return Peer{}, nil
+	}
+	peer, e := authenticatedPeer(conn)
+	if e != nil {
+		clear(raw)
+		return Peer{}, nil
+	}
+	return peer, raw
+}
+
+func (b *Broker) serve(conn net.Conn) {
+	defer conn.Close()
+	peer, raw := b.handshake(conn)
+	if raw == nil {
 		return
 	}
-	_ = conn.SetReadDeadline(time.Time{})
 	var hello BrokerHello
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
@@ -264,7 +345,7 @@ func validHelloForOS(hello BrokerHello, goos string) bool {
 }
 
 func (b *Broker) serveBrowser(conn net.Conn, peer Peer, hello BrokerHello) {
-	if !validHello(hello) {
+	if !validHello(hello) || !peerProcessAllowed(peer) {
 		return
 	}
 	writer := NewNativeWriter(conn, 250*time.Millisecond, func() { _ = conn.Close() })
@@ -274,6 +355,7 @@ func (b *Broker) serveBrowser(conn net.Conn, peer Peer, hello BrokerHello) {
 		}
 	})
 	c.SetBroker(b)
+	c.setBrokerPeer(peer, hello)
 	if !b.addConn(c) {
 		return
 	}
@@ -281,11 +363,8 @@ func (b *Broker) serveBrowser(conn net.Conn, peer Peer, hello BrokerHello) {
 		b.dropConn(c)
 		c.Close()
 	}()
-	if b.callbacks.CurrentSession != nil {
-		if s, epoch, quick := b.callbacks.CurrentSession(); s != nil && s.Unlocked() {
-			_ = c.bindDesktopSession(s, epoch, quick, false)
-		}
-	}
+	// No session authority is granted here. A browser connection must send
+	// "hello" and pass ApproveBrowserPair before any capability is issued.
 	for {
 		req, e := ReadRequest(conn)
 		if e != nil {
@@ -380,6 +459,74 @@ func writeFrame(w io.Writer, raw []byte) error {
 		frame = frame[n:]
 	}
 	return nil
+}
+
+// peerProcessAllowed checks the OS-authenticated executable path. It is a
+// defence in depth on top of same-UID socket credentials, not a code-signing
+// claim: a same-UID process that can replace a trusted path is still stopped by
+// the explicit native pairing prompt. The request's declared Browser/Origin
+// never participate. The on-disk owner/permission check is platform-specific
+// (see peer_exec_*.go); it refuses a host binary writable by anyone but its
+// owner.
+func peerProcessAllowed(peer Peer) bool {
+	if peer.PID == 0 || peer.User == "" {
+		return false
+	}
+	self, e := os.Executable()
+	if e != nil {
+		return false
+	}
+	return peerProcessAllowedFor(peer, self, runtime.GOOS)
+}
+
+// peerProcessAllowedFor is the pure policy used by tests. The process must be
+// the desktop's own canonical executable or one exact Locklark browser host
+// name at any absolute installation directory. The directory is deliberately
+// not constrained: native-host registration accepts any absolute --host path.
+// What binds the peer is the OS-authenticated canonical path, its exact
+// basename, and the owner/permission trust of the file on disk. The user's
+// declared Browser/Origin never participate.
+func peerProcessAllowedFor(peer Peer, selfPath, goos string) bool {
+	if peer.PID == 0 || peer.User == "" {
+		return false
+	}
+	process, ok := canonicalExecutablePath(peer.Process)
+	if !ok {
+		return false
+	}
+	if self, ok := canonicalExecutablePath(selfPath); ok && process == self {
+		return true
+	}
+	if !trustedBrowserHostName(filepath.Base(process), goos) {
+		return false
+	}
+	return trustedPeerExecutable(process, peer.User, goos)
+}
+
+func canonicalExecutablePath(path string) (string, bool) {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path || strings.ContainsAny(path, "\x00\r\n") {
+		return "", false
+	}
+	resolved, e := filepath.EvalSymlinks(path)
+	if e != nil {
+		return "", false
+	}
+	resolved = filepath.Clean(resolved)
+	if !filepath.IsAbs(resolved) {
+		return "", false
+	}
+	return resolved, true
+}
+
+func trustedBrowserHostName(name, goos string) bool {
+	if goos == "windows" {
+		name = strings.TrimSuffix(name, ".exe")
+	}
+	switch name {
+	case "locklark-browser-chromium", "locklark-browser-firefox", "locklark-browser-safari":
+		return true
+	}
+	return false
 }
 
 // RelayStdio dials the desktop broker and relays framed native messages.

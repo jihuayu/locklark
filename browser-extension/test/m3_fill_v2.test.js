@@ -930,6 +930,47 @@ test("M3 identity fill permits only same-origin subframes", () => {
   );
 });
 
+test("M3 sameSite treats sibling subdomains as one site", () => {
+  // Component contract for the shipped sameSite/siteKey helper.  This is not a
+  // page, subframe or browser journey: it calls the exported helper directly.
+  assert.equal(typeof core.sameSite, "function");
+  assert.equal(typeof core.siteKey, "function");
+
+  // Sibling subdomains of one registrable domain are same-site.
+  assert.equal(
+    core.sameSite("https://app.example.com/login", "https://www.example.com/pay"),
+    true,
+  );
+  assert.equal(
+    core.sameSite("https://shop.example.co.uk/a", "https://www.example.co.uk/b"),
+    true,
+  );
+  assert.equal(core.siteKey("https://app.example.com/login"), "example.com");
+  assert.equal(core.siteKey("https://shop.example.co.uk/a"), "example.co.uk");
+
+  // Unrelated registrable domains (including a different TLD of the same
+  // label) are not same-site.
+  assert.equal(
+    core.sameSite("https://app.example.com/login", "https://evil.example.net/pay"),
+    false,
+  );
+  assert.equal(core.sameSite("https://example.com", "https://example.org"), false);
+  assert.equal(core.sameSite("https://example.co.uk", "https://example.com"), false);
+
+  // Sibling hosts directly under the ``co.uk`` public suffix do not share a
+  // registrable domain.
+  assert.equal(core.sameSite("https://a.co.uk", "https://b.co.uk"), false);
+  assert.equal(core.siteKey("https://a.co.uk"), "a.co.uk");
+
+  // Invalid or non-HTTPS input is refused rather than evaluated as same-site.
+  assert.throws(() =>
+    core.sameSite("http://app.example.com", "https://app.example.com"),
+  );
+  assert.throws(() => core.sameSite("not a url", "https://app.example.com"));
+  assert.throws(() => core.sameSite("", "https://app.example.com"));
+  assert.throws(() => core.siteKey("http://app.example.com"));
+});
+
 test("M3 OTP fill permits only same-origin subframes", () => {
   const sameOrigin = otpSandbox(6, { frame: true });
   assert.equal(

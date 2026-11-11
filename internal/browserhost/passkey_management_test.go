@@ -153,7 +153,7 @@ func TestPasskeyPendingApprovalBlocksRemovalSameConnection(t *testing.T) {
 	if c.Snapshot().Passkey != nil {
 		t.Fatal("cancel left the approval pending")
 	}
-	removed := v2Handle(t, c, out, map[string]any{"v": 1, "id": reqID(63), "type": "passkey-remove", "capability": capability, "item_id": itemID, "revision": revision, "credential_id": credential})
+	removed := destructiveCall(t, c, out, map[string]any{"v": 1, "id": reqID(63), "type": "passkey-remove", "capability": capability, "item_id": itemID, "revision": revision, "credential_id": credential})
 	if removed.Type != "passkey-removed" || removed.ItemID != itemID || removed.CredentialID != credential || removed.Revision == "" || removed.Revision == revision {
 		t.Fatalf("remove response: %#v", removed)
 	}
@@ -188,7 +188,7 @@ func TestPasskeyEpochSuppressesQueuedSignatureAcrossConnections(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- c1.ApprovePasskey(get.ID, pending.Choices[0].ID, nil, nil) }()
 	waitForQueuedPasskey(t, c1)
-	removed := v2Handle(t, c2, out2, map[string]any{"v": 1, "id": reqID(71), "type": "passkey-remove", "capability": cap2, "item_id": itemID, "revision": revision, "credential_id": credential})
+	removed := destructiveCall(t, c2, out2, map[string]any{"v": 1, "id": reqID(71), "type": "passkey-remove", "capability": cap2, "item_id": itemID, "revision": revision, "credential_id": credential})
 	if removed.Type != "passkey-removed" {
 		t.Fatalf("cross-connection removal: %#v", removed)
 	}
@@ -224,7 +224,8 @@ func TestPasskeyPendingApprovalBlocksRemovalAcrossConnections(t *testing.T) {
 	if err := c1.Handle(cancel); err != nil {
 		t.Fatal(err)
 	}
-	removed := v2Handle(t, c2, out2, map[string]any{"v": 1, "id": reqID(83), "type": "passkey-remove", "capability": cap2, "item_id": itemID, "revision": revision, "credential_id": credential})
+	removal := map[string]any{"v": 1, "id": reqID(83), "type": "passkey-remove", "capability": cap2, "item_id": itemID, "revision": revision, "credential_id": credential}
+	removed := destructiveCall(t, c2, out2, removal)
 	if removed.Type != "passkey-removed" {
 		t.Fatalf("cross-connection removal: %#v", removed)
 	}
@@ -235,6 +236,135 @@ func TestPasskeyPendingApprovalBlocksRemovalAcrossConnections(t *testing.T) {
 	}
 }
 
+// removalReviewFixture is a passkey removal review opened on one connection
+// while a second connection shares the same Session.
+type removalReviewFixture struct {
+	c, other               *Connection
+	out, otherOut          *memoryPipe
+	cap, otherCap          string
+	s                      *personal.Session
+	itemID, revision, cred string
+}
+
+func (f *removalReviewFixture) frame(n int) map[string]any {
+	return map[string]any{"v": 1, "id": reqID(n), "type": "passkey-remove", "capability": f.cap, "item_id": f.itemID, "revision": f.revision, "credential_id": f.cred}
+}
+
+// review sends the removal, asserts no answer was sent before native approval
+// and returns its exact native review.
+func (f *removalReviewFixture) review(t *testing.T, n int) *V2ApprovalView {
+	t.Helper()
+	before := len(f.out.responses(t))
+	v2Send(t, f.c, f.frame(n))
+	if got := len(f.out.responses(t)); got != before {
+		t.Fatal("passkey-remove answered before native approval")
+	}
+	v := f.c.Snapshot().V2
+	if v == nil || v.Type != "passkey-remove" || v.ID != reqID(n) {
+		t.Fatalf("no exact native review: %#v", v)
+	}
+	return v
+}
+
+// pending shows the removal's native review without answering it and proves a
+// second connection cannot reach the Session while that review holds the slot.
+func (f *removalReviewFixture) pending(t *testing.T, n int) {
+	t.Helper()
+	f.review(t, n)
+	busy := v2Handle(t, f.other, f.otherOut, map[string]any{"v": 1, "id": reqID(n + 1), "type": "passkey-remove", "capability": f.otherCap, "item_id": f.itemID, "revision": f.revision, "credential_id": f.cred})
+	if busy.Type != "error" || f.other.Snapshot().V2 != nil {
+		t.Fatalf("pending removal review did not hold the mutation slot: %#v", busy)
+	}
+}
+
+func newRemovalReviewFixture(t *testing.T) *removalReviewFixture {
+	t.Helper()
+	c, out, s, capability, itemID, revision, credential := fixturePasskey(t)
+	t.Cleanup(c.Close)
+	other, otherOut, otherCap := pairedToSession(t, s)
+	t.Cleanup(other.Close)
+	return &removalReviewFixture{c: c, out: out, s: s, cap: capability, itemID: itemID, revision: revision, cred: credential, other: other, otherOut: otherOut, otherCap: otherCap}
+}
+
+// TestPasskeyRemovalReviewTimerUsesCapabilityDeadline proves the review, its
+// passive timer and its exact gate share one deadline that never outlives a
+// short-lived capability: once the capability lapses the timer alone clears the
+// review, and the still-unlocked shared Session accepts a new registration.
+func TestPasskeyRemovalReviewTimerUsesCapabilityDeadline(t *testing.T) {
+	f := newRemovalReviewFixture(t)
+	// A shared desktop connection keeps the test Session unlocked when its own
+	// capability lapses; only the timer may release the reservation.
+	f.c.desktopShared = true
+	f.c.mu.Lock()
+	f.c.until = time.Now().Add(100 * time.Millisecond)
+	f.c.mu.Unlock()
+	review := f.review(t, 120)
+	if limit := time.Now().Add(100 * time.Millisecond); review.Deadline.After(limit) {
+		t.Fatalf("review deadline %v outlived the capability %v", review.Deadline, limit)
+	}
+	// No Snapshot/Handle on the owning connection: only the passive timer may
+	// clear it.
+	until := time.Now().Add(2 * time.Second)
+	for {
+		probe := personal.NewMutationGate(time.Now().Add(time.Minute))
+		if err := f.s.RegisterMutation(probe); err == nil {
+			f.s.ReleaseMutation(probe)
+			break
+		}
+		if time.Now().After(until) {
+			t.Fatal("capability expiry left the removal reservation in the Session")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !f.s.Unlocked() {
+		t.Fatal("the shared Session locked instead of just releasing the review")
+	}
+	f.c.mu.Lock()
+	pending := f.c.v2pending
+	f.c.mu.Unlock()
+	if pending != nil {
+		t.Fatal("timer did not clear the expired review")
+	}
+}
+
+// expectSlotReleased proves the shared Session can take a fresh registration,
+// so the ended review left no mutation slot behind.
+func expectSlotReleased(t *testing.T, s *personal.Session, label string) {
+	t.Helper()
+	probe := personal.NewMutationGate(time.Now().Add(time.Minute))
+	if err := s.RegisterMutation(probe); err != nil {
+		t.Fatalf("%s: review left the mutation slot occupied: %v", label, err)
+	}
+	s.ReleaseMutation(probe)
+}
+
+func TestPasskeyRemovalReviewRejectReleasesMutationSlot(t *testing.T) {
+	f := newRemovalReviewFixture(t)
+	f.pending(t, 100)
+	if err := f.c.RejectV2(reqID(100)); err != nil {
+		t.Fatal(err)
+	}
+	if v := f.c.Snapshot(); v.V2 != nil || !v.Paired {
+		t.Fatalf("reject left a review or revoked pairing: %#v", v)
+	}
+	expectSlotReleased(t, f.s, "reject")
+}
+
+// TestPasskeyRemovalReviewInvalidateReleasesSharedSessionSlot covers a
+// brokered connection: Invalidate detaches its own Session pointer before it
+// clears the review, so only the Session captured at reservation can give the
+// shared mutation slot back.
+func TestPasskeyRemovalReviewInvalidateReleasesSharedSessionSlot(t *testing.T) {
+	f := newRemovalReviewFixture(t)
+	f.c.desktopShared = true
+	f.pending(t, 110)
+	f.c.Invalidate()
+	if v := f.c.Snapshot(); v.V2 != nil || v.Paired || f.c.session.Load() != nil {
+		t.Fatalf("invalidate left a review or session: %#v", v)
+	}
+	expectSlotReleased(t, f.s, "invalidate")
+}
+
 func pairedToSession(t *testing.T, s *personal.Session) (*Connection, *memoryPipe, string) {
 	t.Helper()
 	out := &memoryPipe{}
@@ -242,7 +372,7 @@ func pairedToSession(t *testing.T, s *personal.Session) (*Connection, *memoryPip
 	if err := c.Handle(Request{V: 1, ID: reqID(90), Type: "hello"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.ApprovePair(s); err != nil {
+	if err := c.ApproveQuickPair(s); err != nil {
 		t.Fatal(err)
 	}
 	return c, out, out.responses(t)[0].Capability

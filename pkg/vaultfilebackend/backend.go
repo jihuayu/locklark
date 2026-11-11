@@ -49,12 +49,18 @@ var (
 	// the current platform, configuration or filesystem (for example List, or
 	// a platform without a local directory driver). Nothing was written.
 	ErrUnsupported = errors.New("vault file backend: unsupported")
-	// ErrUnknown reports that a mutating call may or may not have committed:
-	// the durable publication step started but its outcome could not be
-	// confirmed (I/O error, or cancellation/timeout during publication). The
-	// stored version is intact either way; callers resolve it with Read and
-	// retry with the observed revision. CreateIfAbsent never returns ErrUnknown
-	// after a successful link-based publication step.
+	// ErrUnknown reports that the call completed without a reliably known
+	// outcome:
+	//   - For a mutating call, it may or may not have committed: the durable
+	//     publication step started but its outcome could not be confirmed
+	//     (I/O error, or cancellation/timeout during publication). The stored
+	//     version is intact either way; callers resolve it with Read and retry
+	//     with the observed revision. CreateIfAbsent never returns ErrUnknown
+	//     after a successful link-based publication step.
+	//   - For Read, the bytes and revision were not reliably obtained (for
+	//     example a timeout, a 5xx, or an ambiguous response whose body could
+	//     not be trusted). No write was performed and the stored state is
+	//     unchanged; the caller may simply retry Read.
 	ErrUnknown = errors.New("vault file backend: outcome unknown")
 	// ErrCorrupt reports that stored state exists but cannot be trusted: a
 	// malformed or zero stored revision, a truncated or tampered record, or a body whose bytes do

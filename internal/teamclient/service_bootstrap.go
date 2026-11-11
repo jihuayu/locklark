@@ -57,7 +57,7 @@ func exactInitialization(r profileRecord, c *directory.Config, a BootstrapArtifa
 	if r.Init == nil {
 		return directory.Receipt{}, ErrProfile
 	}
-	h, e := directory.ExportHistory(r.Init.Directory, c, c.Genesis())
+	_, h, e := directory.ReadHistory(r.Init.Directory, c, c.Genesis())
 	if e != nil {
 		return directory.Receipt{}, ErrBootstrapUnknown
 	}

@@ -52,18 +52,22 @@ type Request struct {
 	Category       string `json:"category,omitempty"`
 	IncludeHIBP    bool   `json:"include_hibp,omitempty"`
 	payload        *savePayload
-	WindowID       int64  `json:"window_id,omitempty"`
-	RequestID      string `json:"request_id,omitempty"`
-	Nonce          string `json:"nonce,omitempty"`
-	V              int    `json:"v"`
-	ID             string `json:"id"`
-	Type           string `json:"type"`
-	Capability     string `json:"capability,omitempty"`
-	Origin         string `json:"origin,omitempty"`
-	TabID          int64  `json:"tab_id,omitempty"`
-	DocumentID     string `json:"document_id,omitempty"`
-	ItemID         string `json:"item_id,omitempty"`
-	Revision       string `json:"revision,omitempty"`
+	// v2Reserved is the Session mutation slot a destructive removal's native
+	// review reserved. ApproveV2 sets it on the stored request only; it is not
+	// part of the wire protocol and valid() never consults it.
+	v2Reserved *personal.MutationGate
+	WindowID   int64  `json:"window_id,omitempty"`
+	RequestID  string `json:"request_id,omitempty"`
+	Nonce      string `json:"nonce,omitempty"`
+	V          int    `json:"v"`
+	ID         string `json:"id"`
+	Type       string `json:"type"`
+	Capability string `json:"capability,omitempty"`
+	Origin     string `json:"origin,omitempty"`
+	TabID      int64  `json:"tab_id,omitempty"`
+	DocumentID string `json:"document_id,omitempty"`
+	ItemID     string `json:"item_id,omitempty"`
+	Revision   string `json:"revision,omitempty"`
 	// Attachment transport (capability attachments-v1). Size is a pointer so a
 	// zero-length file is distinguishable from an omitted field.
 	FileName          string `json:"file_name,omitempty"`
@@ -407,32 +411,32 @@ type StagedSave struct {
 }
 
 type Response struct {
-	Credential        string             `json:"credential,omitempty"`
-	CredentialID      string             `json:"credential_id,omitempty"`
-	QuickFill         bool               `json:"quick_fill,omitempty"`
-	Code              string             `json:"code,omitempty"`
-	Nonce             string             `json:"nonce,omitempty"`
-	ItemID            string             `json:"item_id,omitempty"`
-	Revision          string             `json:"revision,omitempty"`
-	V                 int                `json:"v"`
-	ID                string             `json:"id,omitempty"`
-	Type              string             `json:"type"`
-	Capability        string             `json:"capability,omitempty"`
-	GeneratedPassword string             `json:"generated_password,omitempty"`
-	HistoryID         string             `json:"history_id,omitempty"`
+	Credential        string                `json:"credential,omitempty"`
+	CredentialID      string                `json:"credential_id,omitempty"`
+	QuickFill         bool                  `json:"quick_fill,omitempty"`
+	Code              string                `json:"code,omitempty"`
+	Nonce             string                `json:"nonce,omitempty"`
+	ItemID            string                `json:"item_id,omitempty"`
+	Revision          string                `json:"revision,omitempty"`
+	V                 int                   `json:"v"`
+	ID                string                `json:"id,omitempty"`
+	Type              string                `json:"type"`
+	Capability        string                `json:"capability,omitempty"`
+	GeneratedPassword string                `json:"generated_password,omitempty"`
+	HistoryID         string                `json:"history_id,omitempty"`
 	History           []BrowserHistoryEntry `json:"entries,omitempty"`
-	Candidates        []personal.Row     `json:"candidates,omitempty"`
-	Capabilities      []string           `json:"capabilities,omitempty"`
-	NeverOrigins      []string           `json:"never_origins,omitempty"`
-	Identity          map[string]string  `json:"identity,omitempty"`
-	Card              map[string]string  `json:"card,omitempty"`
-	Category          string             `json:"category,omitempty"`
-	Profile           *GeneratedProfile  `json:"profile,omitempty"`
-	Staged            *StagedSave        `json:"staged_save,omitempty"`
-	Watchtower        *watchtower.Report `json:"watchtower,omitempty"`
-	Username          string             `json:"username,omitempty"`
-	Password          string             `json:"password,omitempty"`
-	Error             string             `json:"error,omitempty"`
+	Candidates        []personal.Row        `json:"candidates,omitempty"`
+	Capabilities      []string              `json:"capabilities,omitempty"`
+	NeverOrigins      []string              `json:"never_origins,omitempty"`
+	Identity          map[string]string     `json:"identity,omitempty"`
+	Card              map[string]string     `json:"card,omitempty"`
+	Category          string                `json:"category,omitempty"`
+	Profile           *GeneratedProfile     `json:"profile,omitempty"`
+	Staged            *StagedSave           `json:"staged_save,omitempty"`
+	Watchtower        *watchtower.Report    `json:"watchtower,omitempty"`
+	Username          string                `json:"username,omitempty"`
+	Password          string                `json:"password,omitempty"`
+	Error             string                `json:"error,omitempty"`
 
 	DesktopConnected bool   `json:"desktop_connected,omitempty"`
 	Unlocked         bool   `json:"unlocked,omitempty"`

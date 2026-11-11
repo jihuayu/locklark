@@ -318,6 +318,7 @@ export async function acceptBrowserOTP(driver) {
   assert(await empty(), "Unconfigured OTP was filled");
   configure(6);
   stage = "otp:original-window-exhausted";
+  await clearWindow();
   await page("normal");
   await pending();
   step("window-boundary");

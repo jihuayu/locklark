@@ -296,6 +296,7 @@ function input(actions, native = true, options = {}) {
           "Secret Key",
           "解锁",
           "确认连接此扩展",
+          "连接并启用快捷填充",
           "拒绝连接",
           "批准本次填充",
           "拒绝本次填充",
@@ -309,6 +310,8 @@ function input(actions, native = true, options = {}) {
           "拒绝更新登录",
           "验证主密码",
           "验证 Secret Key",
+          "批准删除 Passkey",
+          "拒绝删除 Passkey",
         ];
         const controls = Object.fromEntries(
           labels.map((label) => {
@@ -1422,6 +1425,29 @@ try {
         progress("native-pair");
         input([{ click_label: "确认连接此扩展" }]);
       },
+      // Explicit quick pairing for non-destructive Passkey metadata: disconnect
+      // the current session, wait for the old native host window to disappear,
+      // reopen the popup, unlock and physically choose the real quick-fill
+      // pairing control. Nothing is approved implicitly.
+      reconnectQuickFill: async () => {
+        await openPopup();
+        await popupClick("#disconnect");
+        input([], true, { wait_absent: true });
+        await openPopup();
+        await popupClick("#connect");
+        progress("native-unlock");
+        input([
+          { click_label: "金库文件" },
+          { text: fixture.Path },
+          { click_label: "主密码" },
+          { text: fixture.Password },
+          { click_label: "Secret Key" },
+          { text: fixture.Secret },
+          { click_label: "解锁" },
+        ]);
+        progress("native-quick-pair");
+        input([{ click_label: "连接并启用快捷填充" }]);
+      },
       root,
       state,
       env,
@@ -1470,6 +1496,7 @@ try {
         viewportOrigin: pageViewportOrigin,
         dismissPopup: () => input([{ key: "Escape" }], false),
         reconnect: passkeyOnly ? passkeyPair : acceptanceDriver.reconnect,
+        reconnectQuickFill: acceptanceDriver.reconnectQuickFill,
         openPopup: acceptanceDriver.openPopup,
         observe: acceptanceDriver.observe,
         navigate: acceptanceDriver.navigate,

@@ -185,7 +185,7 @@ func TestStorageFailuresNeverReturnReceipt(t *testing.T) {
 			}
 			return fmt.Errorf("injected private storage detail")
 		})
-	}, f.cfg, f.sequencer, p, s, false)
+	}, f.cfg, f.sequencer, p, s, false, MaxHistoryBytes)
 	db.Close()
 	if err != ErrStorage || !reflect.DeepEqual(r, Receipt{}) {
 		t.Fatal("rollback receipt", err)
@@ -197,7 +197,7 @@ func TestStorageFailuresNeverReturnReceipt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r, err = commitWithClose(func() (Receipt, error) { return commitWithUpdate(db.Update, f.cfg, f.sequencer, p, s, false) }, func() error {
+	r, err = commitWithClose(func() (Receipt, error) { return commitWithUpdate(db.Update, f.cfg, f.sequencer, p, s, false, MaxHistoryBytes) }, func() error {
 		if err := db.Close(); err != nil {
 			return err
 		}
@@ -294,7 +294,7 @@ func TestFrozenRollbackAndSnapshotTampering(t *testing.T) {
 			}
 			return fmt.Errorf("rollback freeze")
 		})
-	}, f.cfg, f.sequencer, p, vault.Snapshot{}, false)
+	}, f.cfg, f.sequencer, p, vault.Snapshot{}, false, MaxHistoryBytes)
 	db.Close()
 	if err != ErrStorage || !reflect.DeepEqual(r, Receipt{}) {
 		t.Fatal("freeze rollback receipt", err)

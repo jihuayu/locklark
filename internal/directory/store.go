@@ -66,22 +66,30 @@ func canonical(raw []byte, v any) bool {
 	return len(raw) > 0 && json.Unmarshal(raw, v) == nil && bytes.Equal(raw, encoded(v))
 }
 
-func load(tx *bolt.Tx, c *Config, anchor Checkpoint) (View, *evolution, error) {
-	var out View
+// loaded is one verified committed state: the head view and its evolution,
+// plus the decoded receipts from the single verified chain pass. A commit's
+// projected History sizing may serialize them.
+type loaded struct {
+	view     View
+	state    *evolution
+	receipts []Receipt
+}
+
+func load(tx *bolt.Tx, c *Config, anchor Checkpoint) (out loaded, err error) {
 	if !c.validCheckpoint(anchor) {
-		return out, nil, ErrInvalid
+		return loaded{}, ErrInvalid
 	}
 	b := tx.Bucket(bucket)
 	if b == nil {
-		return out, nil, ErrInvalid
+		return loaded{}, ErrInvalid
 	}
 	records := b.Bucket(recordsKey)
 	if records == nil {
-		return out, nil, ErrInvalid
+		return loaded{}, ErrInvalid
 	}
 	verifier, err := newHistoryVerifier(c, anchor)
 	if err != nil {
-		return View{}, nil, err
+		return loaded{}, err
 	}
 	err = records.ForEach(func(k, raw []byte) error {
 		if len(k) != 8 || verifier.current.Version >= maxVersions || binary.BigEndian.Uint64(k) != verifier.current.Version+1 || len(raw) > maxRecord {
@@ -91,25 +99,118 @@ func load(tx *bolt.Tx, c *Config, anchor Checkpoint) (View, *evolution, error) {
 		if !canonical(raw, &receipt) || verifier.advance(receipt) != nil {
 			return ErrInvalid
 		}
-		out.Receipt = receipt
+		out.receipts = append(out.receipts, receipt)
 		return nil
 	})
 	if err != nil || verifier.current.Version == 0 || !verifier.matched {
-		return View{}, nil, ErrInvalid
+		return loaded{}, ErrInvalid
 	}
+	out.view.Receipt = out.receipts[len(out.receipts)-1]
+	// The raw snapshot is only needed inside this transaction to decode and
+	// verify into out.view.Snapshot.
 	raw := b.Get(snapshotKey)
-	if out.Receipt.Proposal.Mode == "active" {
-		if len(raw) > 12<<20 || !canonical(raw, &out.Snapshot) || c.verifySnapshot(out.Receipt.Proposal, out.Snapshot) != nil {
-			return View{}, nil, ErrInvalid
+	if out.view.Receipt.Proposal.Mode == "active" {
+		if len(raw) > 12<<20 || !canonical(raw, &out.view.Snapshot) || c.verifySnapshot(out.view.Receipt.Proposal, out.view.Snapshot) != nil {
+			return loaded{}, ErrInvalid
 		}
 	} else if raw != nil {
-		return View{}, nil, ErrInvalid
+		return loaded{}, ErrInvalid
 	}
-	out, err = verifier.finish(out.Snapshot)
+	out.view, err = verifier.finish(out.view.Snapshot)
 	if err != nil {
-		return View{}, nil, ErrInvalid
+		return loaded{}, ErrInvalid
 	}
-	return out, verifier.state, nil
+	out.state = verifier.state
+	return out, nil
+}
+
+// readRequest narrows one store read. A nil value is a plain Read. A non-nil
+// value also proves a detached proof anchor on the same pass and returns the
+// sealed evidence behind it.
+type readRequest struct{ proof Checkpoint }
+
+// checkedView performs the single hash-chain pass for one request. Receipts and
+// the head snapshot are re-verified from their stored canonical bytes. A plain
+// read returns only the head view; a readRequest also returns every retained
+// receipt, once both the persistent anchor and the requested proof anchor have
+// been proven by that same pass.
+func checkedView(tx *bolt.Tx, c *Config, anchor Checkpoint, req *readRequest) (res readResult, err error) {
+	// A trusted single pass may pass the zero minimum NewHandler is constructed
+	// with; any other anchor must be a canonical checkpoint.
+	zeroMin := req != nil && anchor == (Checkpoint{})
+	b := tx.Bucket(bucket)
+	if b == nil || c == nil || !zeroMin && !c.validCheckpoint(anchor) {
+		return readResult{}, ErrInvalid
+	}
+	records := b.Bucket(recordsKey)
+	if records == nil {
+		return readResult{}, ErrInvalid
+	}
+	v, err := newHistoryVerifier(c, anchor)
+	if err != nil {
+		return readResult{}, err
+	}
+	// The proof anchor is an additional constraint on the same pass, checked in
+	// the same loop that advances the chain; the persistent anchor still decides
+	// rollback exactly as Read does. A plain read has no proof anchor to match.
+	// A proof anchor this configuration could not have issued is unsatisfiable on
+	// this chain and is known before the pass; it never widens any check.
+	proof, proofMatched := Checkpoint{}, true
+	if req != nil {
+		proof, proofMatched = req.proof, c.valid() && req.proof == c.Genesis()
+	}
+	var receipts []Receipt
+	err = records.ForEach(func(k, raw []byte) error {
+		if len(k) != 8 || len(raw) > maxRecord || v.current.Version >= maxVersions || binary.BigEndian.Uint64(k) != v.current.Version+1 {
+			return ErrInvalid
+		}
+		var receipt Receipt
+		if !canonical(raw, &receipt) || v.advance(receipt) != nil {
+			return ErrInvalid
+		}
+		res.view.Receipt = receipt
+		receipts = append(receipts, receipt)
+		proofMatched = proofMatched || receipt.Checkpoint() == proof
+		return nil
+	})
+	if err != nil || len(receipts) == 0 || !v.matched || !proofMatched {
+		return readResult{}, ErrInvalid
+	}
+	raw := tx.Bucket(bucket).Get(snapshotKey)
+	if len(raw) > 12<<20 {
+		return readResult{}, ErrInvalid
+	}
+	var snapshot vault.Snapshot
+	if res.view.Receipt.Proposal.Mode == "active" {
+		if !canonical(raw, &snapshot) || c.verifySnapshot(res.view.Receipt.Proposal, snapshot) != nil {
+			return readResult{}, ErrInvalid
+		}
+	} else if raw != nil {
+		return readResult{}, ErrInvalid
+	}
+	if res.view, err = v.finish(snapshot); err != nil {
+		return readResult{}, ErrInvalid
+	}
+	if req != nil {
+		res.trusted = TrustedRead{valid: true, head: res.view.Receipt, receipts: receipts, snapshot: snapshot, signer: res.view.SnapshotSigner, proof: proof}
+	}
+	return res, nil
+}
+
+func cloneReceipts(in []Receipt) []Receipt {
+	out := make([]Receipt, len(in))
+	for i, r := range in {
+		out[i] = r
+		out[i].Proposal.Parent = r.Proposal.Parent
+		out[i].Proposal.Members = cloneMembers(r.Proposal.Members)
+		out[i].Proposal.Admissions = cloneAdmissions(r.Proposal.Admissions)
+		out[i].Signature = bytes.Clone(r.Signature)
+	}
+	return out
+}
+
+func cloneSnapshot(s vault.Snapshot) vault.Snapshot {
+	return vault.Snapshot{Epoch: s.Epoch, Database: bytes.Clone(s.Database), Envelope: bytes.Clone(s.Envelope), Signature: bytes.Clone(s.Signature)}
 }
 func open(path string, readOnly, initial bool) (*bolt.DB, error) {
 	return bolt.Open(path, 0600, &bolt.Options{ReadOnly: readOnly, Timeout: 10 * time.Second, OpenFile: func(name string, flags int, mode os.FileMode) (*os.File, error) {
@@ -169,7 +270,9 @@ func commit(path string, c *Config, sequencer ed25519.PrivateKey, p Proposal, s 
 	if err != nil {
 		return Receipt{}, ErrStorage
 	}
-	return commitWithClose(func() (Receipt, error) { return commitWithUpdate(db.Update, c, sequencer, p, s, initial) }, db.Close)
+	return commitWithClose(func() (Receipt, error) {
+		return commitWithUpdate(db.Update, c, sequencer, p, s, initial, MaxHistoryBytes)
+	}, db.Close)
 }
 func commitWithClose(run func() (Receipt, error), closeDB func() error) (out Receipt, err error) {
 	defer func() {
@@ -180,7 +283,11 @@ func commitWithClose(run func() (Receipt, error), closeDB func() error) (out Rec
 	}()
 	return run()
 }
-func commitWithUpdate(update func(func(*bolt.Tx) error) error, c *Config, sequencer ed25519.PrivateKey, p Proposal, s vault.Snapshot, initial bool) (Receipt, error) {
+
+// commitWithUpdate runs the whole commit transaction through update and checks
+// the retained History it would leave against budget before writing. Production
+// always passes MaxHistoryBytes; budget is a per-call value, never package state.
+func commitWithUpdate(update func(func(*bolt.Tx) error) error, c *Config, sequencer ed25519.PrivateKey, p Proposal, s vault.Snapshot, initial bool, budget int) (Receipt, error) {
 	if err := authorized(c, sequencer, p, s); err != nil {
 		return Receipt{}, err
 	}
@@ -192,6 +299,7 @@ func commitWithUpdate(update func(func(*bolt.Tx) error) error, c *Config, sequen
 	err := update(func(tx *bolt.Tx) error {
 		var b *bolt.Bucket
 		var state *evolution
+		var retained loaded
 		current := c.Genesis()
 		if initial {
 			if tx.Bucket(bucket) != nil || p.Parent != current || p.Mode != "active" {
@@ -207,12 +315,12 @@ func commitWithUpdate(update func(func(*bolt.Tx) error) error, c *Config, sequen
 			}
 			state = newEvolution()
 		} else {
-			view, e, err := load(tx, c, c.Genesis())
-			if err != nil {
+			var err error
+			if retained, err = load(tx, c, c.Genesis()); err != nil {
 				return err
 			}
-			current = view.Receipt.Checkpoint()
-			state = e
+			current = retained.view.Receipt.Checkpoint()
+			state = retained.state
 			b = tx.Bucket(bucket)
 		}
 		if current.Version >= maxVersions {
@@ -230,6 +338,19 @@ func commitWithUpdate(update func(func(*bolt.Tx) error) error, c *Config, sequen
 		if len(raw) > maxRecord {
 			return ErrInvalid
 		}
+		snapshot := []byte(nil)
+		if p.Mode != "frozen" {
+			if snapshot = encoded(s); len(snapshot) > 12<<20 {
+				return ErrInvalid
+			}
+		}
+		// Refuse the whole publication, inside this transaction, when the
+		// retained History it would leave behind (every stored receipt, this
+		// receipt and the one head snapshot) exceeds budget. Otherwise a valid
+		// commit could make every later read and publish fail.
+		if _, err := retainedHistorySize(retained.receipts, out, s, budget); err != nil {
+			return err
+		}
 		if err := b.Bucket(recordsKey).Put(binary.BigEndian.AppendUint64(nil, p.Epoch), raw); err != nil {
 			return ErrStorage
 		}
@@ -237,14 +358,8 @@ func commitWithUpdate(update func(func(*bolt.Tx) error) error, c *Config, sequen
 			if err := b.Delete(snapshotKey); err != nil {
 				return ErrStorage
 			}
-		} else {
-			raw = encoded(s)
-			if len(raw) > 12<<20 {
-				return ErrInvalid
-			}
-			if err := b.Put(snapshotKey, raw); err != nil {
-				return ErrStorage
-			}
+		} else if err := b.Put(snapshotKey, snapshot); err != nil {
+			return ErrStorage
 		}
 		return nil
 	})
@@ -263,23 +378,40 @@ func commitWithUpdate(update func(func(*bolt.Tx) error) error, c *Config, sequen
 // retained anchor to be an ancestor (or the exact head). A genesis anchor has no
 // rollback protection. Read from the trusted sequencer's local storage only;
 // an untrusted relay can withhold a newer valid head.
-func Read(path string, c *Config, anchor Checkpoint) (out View, err error) {
-	if !c.validCheckpoint(anchor) {
-		return View{}, ErrInvalid
-	}
-	db, err := open(path, true, false)
-	if err != nil {
-		return View{}, ErrStorage
-	}
-	defer func() {
-		if closeErr := db.Close(); closeErr != nil && err == nil {
-			out = View{}
-			err = ErrStorage
-		}
-	}()
-	err = db.View(func(tx *bolt.Tx) error { var e error; out, _, e = load(tx, c, anchor); return e })
+func Read(path string, c *Config, anchor Checkpoint) (View, error) {
+	res, err := readStore(path, c, anchor, nil)
 	if err != nil {
 		return View{}, err
 	}
-	return out, nil
+	return res.view, nil
+}
+
+// readStore opens the trusted local directory once and performs one hash-chain
+// pass. A non-nil readRequest additionally proves its proof anchor on the same
+// pass and receives the sealed evidence behind it.
+func readStore(path string, c *Config, anchor Checkpoint, req *readRequest) (res readResult, err error) {
+	if c == nil || !c.validCheckpoint(anchor) {
+		return readResult{}, ErrInvalid
+	}
+	db, err := open(path, true, false)
+	if err != nil {
+		return readResult{}, ErrStorage
+	}
+	var txn readResult
+	err = db.View(func(tx *bolt.Tx) (e error) {
+		txn, e = checkedView(tx, c, anchor, req)
+		return e
+	})
+	if closeErr := db.Close(); closeErr != nil && err == nil {
+		return readResult{}, ErrStorage
+	}
+	if err != nil {
+		return readResult{}, err
+	}
+	return txn, nil
+}
+
+type readResult struct {
+	view    View
+	trusted TrustedRead
 }

@@ -277,7 +277,7 @@ jobs:
           test -x "$LOCKLARK_TEST_OPENSSH_BIN"
           go test ./internal/sshagent ./internal/localpath -count=1
           go test ./internal/personal ./cmd/locklark -run '^TestRunCLI' -count=1
-  web:
+  web-core:
     needs: [linux-build]
     runs-on: ubuntu-latest
     env:
@@ -360,12 +360,6 @@ jobs:
         run: |
           sudo apt-get install -y --no-install-recommends libxtst6 xvfb xauth imagemagick at-spi2-core libatspi2.0-0 libnss3-tools xfwm4 openssh-client openssh-server
           sudo install -d -o root -g root -m 0755 /run/sshd
-      - name: Install pinned geckodriver
-        timeout-minutes: 10
-        run: |
-          curl --fail --location --silent --show-error --output "$RUNNER_TEMP/geckodriver.tar.gz" https://github.com/mozilla/geckodriver/releases/download/v0.36.0/geckodriver-v0.36.0-linux64.tar.gz
-          printf '%s  %s\n' '0bde38707eb0a686a20c6bd50f4adcc7d60d4f73c60eb83ee9e0db8f65823e04' "$RUNNER_TEMP/geckodriver.tar.gz" | sha256sum --check --status
-          tar -xzf "$RUNNER_TEMP/geckodriver.tar.gz" -C "$RUNNER_TEMP" geckodriver
       - name: Test reconciled E2E gates and component contracts
         timeout-minutes: 10
         run: |
@@ -449,10 +443,64 @@ jobs:
           path: ${{ runner.temp }}/locklark-ui-acceptance/
           if-no-files-found: error
           retention-days: 14
+  web-browsers:
+    needs: [linux-build]
+    runs-on: ubuntu-latest
+    env:
+      LOCKLARK_DESKTOP_LAYOUT: classic
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Download Linux primary binaries
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: locklark-linux-bin
+          path: ${{ runner.temp }}/locklark-bin
+      - name: Make Linux binaries executable
+        run: chmod +x "$RUNNER_TEMP"/locklark-bin/*
+      - run: npm ci
+        working-directory: web
+      - name: Configure Ubuntu package downloads
+        run: |
+          # GitHub's mirror lists can prefer the slow Azure HTTP mirror.
+          sources=(/etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources /etc/apt/apt-mirrors*.txt)
+          for source in "${sources[@]}"; do
+            if [[ -f "$source" ]]; then
+              sudo sed -i -E 's@http://azure\.archive\.ubuntu\.com/ubuntu([/[:space:]]|$)@https://archive.ubuntu.com/ubuntu\1@g' "$source"
+            fi
+          done
+          printf '%s\n' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' 'Acquire::Retries "2";' |
+            sudo tee /etc/apt/apt.conf.d/99locklark-playwright-network >/dev/null
+      - name: Install Playwright browser and dependencies
+        timeout-minutes: 10
+        run: npx playwright install --with-deps ${{ matrix.browser }}
+        working-directory: web
+      - name: Install native GUI acceptance tools
+        timeout-minutes: 10
+        run: sudo apt-get install -y --no-install-recommends libxtst6 xvfb dbus-x11 xauth imagemagick at-spi2-core libatspi2.0-0 libnss3-tools
+      - name: Install pinned geckodriver
+        if: ${{ matrix.browser == 'firefox' }}
+        timeout-minutes: 10
+        run: |
+          curl --fail --location --silent --show-error --output "$RUNNER_TEMP/geckodriver.tar.gz" https://github.com/mozilla/geckodriver/releases/download/v0.36.0/geckodriver-v0.36.0-linux64.tar.gz
+          printf '%s  %s\n' '0bde38707eb0a686a20c6bd50f4adcc7d60d4f73c60eb83ee9e0db8f65823e04' "$RUNNER_TEMP/geckodriver.tar.gz" | sha256sum --check --status
+          tar -xzf "$RUNNER_TEMP/geckodriver.tar.gz" -C "$RUNNER_TEMP" geckodriver
       - name: Install independent WebAuthn verifier
         timeout-minutes: 3
         run: npm install --prefix "$RUNNER_TEMP/locklark-webauthn-peer" --ignore-scripts --no-audit --no-fund @simplewebauthn/server@14.0.3
       - name: Test native browser approval, popup editing, fill, save and OTP
+        if: ${{ matrix.browser == 'chromium' }}
         timeout-minutes: 10
         run: |
           dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' node scripts/browser_native_acceptance.mjs
@@ -461,7 +509,7 @@ jobs:
           LOCKLARK_TEST_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
           LOCKLARK_TEST_WEBAUTHN_SERVER: ${{ runner.temp }}/locklark-webauthn-peer/node_modules/@simplewebauthn/server
           LOCKLARK_GO: go
-          LOCKLARK_BROWSER_HOST: ${{ runner.temp }}/locklark-bin/locklark-browser-chromium
+          LOCKLARK_BROWSER_HOST: ${{ runner.temp }}/locklark-bin/locklark-browser-${{ matrix.browser }}
           LOCKLARK_BROWSER_REGISTER: ${{ runner.temp }}/locklark-bin/locklark-browser-register
           LOCKLARK_BROWSER_FIXTURE: ${{ runner.temp }}/locklark-bin/browser-acceptance-fixture
           LOCKLARK_TEST_POPUP_VAULT: "1"
@@ -470,16 +518,18 @@ jobs:
           LOCKLARK_TEST_OTHER_PROVIDER: "1"
           LOCKLARK_TEST_PASSKEY_SIGNALS: "1"
       - name: Test checkout iframe approvals and stale-context refusals
+        if: ${{ matrix.browser == 'chromium' }}
         timeout-minutes: 10
         run: dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' node scripts/browser_native_acceptance.mjs
         env:
           LOCKLARK_TEST_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
           LOCKLARK_GO: go
-          LOCKLARK_BROWSER_HOST: ${{ runner.temp }}/locklark-bin/locklark-browser-chromium
+          LOCKLARK_BROWSER_HOST: ${{ runner.temp }}/locklark-bin/locklark-browser-${{ matrix.browser }}
           LOCKLARK_BROWSER_REGISTER: ${{ runner.temp }}/locklark-bin/locklark-browser-register
           LOCKLARK_BROWSER_FIXTURE: ${{ runner.temp }}/locklark-bin/browser-acceptance-fixture
           LOCKLARK_TEST_CHECKOUT_FRAMES: "1"
       - name: Test Firefox native approval, fill, save, OTP and Passkey
+        if: ${{ matrix.browser == 'firefox' }}
         timeout-minutes: 10
         run: |
           dbus-run-session -- xvfb-run -a -s '-screen 0 1280x900x24' node scripts/browser_firefox_native_acceptance.mjs
@@ -487,7 +537,7 @@ jobs:
         env:
           LOCKLARK_TEST_PLAYWRIGHT: ${{ github.workspace }}/web/node_modules/playwright
           LOCKLARK_GO: go
-          LOCKLARK_BROWSER_HOST: ${{ runner.temp }}/locklark-bin/locklark-browser-firefox
+          LOCKLARK_BROWSER_HOST: ${{ runner.temp }}/locklark-bin/locklark-browser-${{ matrix.browser }}
           LOCKLARK_BROWSER_REGISTER: ${{ runner.temp }}/locklark-bin/locklark-browser-register
           LOCKLARK_BROWSER_FIXTURE: ${{ runner.temp }}/locklark-bin/browser-acceptance-fixture
           LOCKLARK_GECKODRIVER: ${{ runner.temp }}/geckodriver
@@ -495,3 +545,18 @@ jobs:
           LOCKLARK_TEST_PASSKEY_MANAGEMENT: "1"
           LOCKLARK_TEST_PASSKEY_CONDITIONAL: "1"
           LOCKLARK_TEST_WEBAUTHN_SERVER: ${{ runner.temp }}/locklark-webauthn-peer/node_modules/@simplewebauthn/server
+  web:
+    name: web
+    needs: [web-core, web-browsers]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every Web check to succeed
+        env:
+          WEB_CORE_RESULT: ${{ needs.web-core.result }}
+          WEB_BROWSERS_RESULT: ${{ needs.web-browsers.result }}
+        run: |
+          if [ "$WEB_CORE_RESULT" != success ] || [ "$WEB_BROWSERS_RESULT" != success ]; then
+            echo "web-core=$WEB_CORE_RESULT web-browsers=$WEB_BROWSERS_RESULT"
+            exit 1
+          fi

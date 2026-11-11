@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/jihuayu/locklark/internal/browserhost"
-	"github.com/jihuayu/locklark/internal/localpath"
 	"github.com/jihuayu/locklark/internal/personal"
 )
 
@@ -118,11 +117,27 @@ func TestDesktopIPCBrokerUnlockLockAndCLIRun(t *testing.T) {
 		defer mu.Unlock()
 		return approved, nil
 	}
+	a.browserPairApprover = func(ctx context.Context, req browserhost.BrowserPairRequest) (browserhost.BrowserPairDecision, error) {
+		if req.Peer.PID == 0 || req.Peer.User == "" {
+			t.Errorf("browser pair request without OS peer: %#v", req)
+		}
+		return browserhost.BrowserPairDecision{Approved: true, QuickFill: true}, nil
+	}
 	defer a.stopBrowserBroker()
 
-	dir := t.TempDir()
-	if _, e := localpath.TrustedTemporaryParent(dir); e == nil {
-		t.Setenv("LOCKLARK_BROWSER_SOCKET", filepath.Join(dir, "b.sock"))
+	// The endpoint is the platform's real broker socket: an absolute socket
+	// path under the private /tmp on Unix, and a unique safe token driving the
+	// per-user named pipe on Windows. Windows never applies the Unix temporary
+	// root guard to a token, so it is always trusted and must exercise the real
+	// named pipe; there is no skip or fallback there.
+	endpoint := desktopBrokerSocket(t)
+	if e := desktopBrokerTrusted(endpoint); e == nil {
+		t.Setenv("LOCKLARK_BROWSER_SOCKET", endpoint)
+		// On Unix the trusted endpoint is also the listening path. On Windows
+		// it is only the safe token: DefaultBrokerEndpoint appends it to the
+		// per-user pipe name, so the two differ by design. Both the broker and
+		// the relay derive that name from the same env token, and the real
+		// start/dial below proves they agree; do not compare them directly.
 		// The relay dials once; start its listener before launching the client.
 		a.startBrowserBroker()
 		if a.broker == nil {
@@ -159,15 +174,11 @@ func TestDesktopIPCBrokerUnlockLockAndCLIRun(t *testing.T) {
 		if a.session == nil {
 			t.Fatal("desktop did not unlock")
 		}
-		unlocked := client.recvType(t, "unlocked")
-		capability, _ := unlocked["capability"].(string)
-		if !desktopCapabilityOK(capability) || unlocked["quick_fill"] != true {
-			t.Fatalf("unlocked push: %#v", unlocked)
-		}
 		client.send(t, map[string]any{"v": 1, "id": reqIDDesktop(2), "type": "hello"})
 		paired := client.recvType(t, "paired")
-		if paired["capability"] != capability {
-			t.Fatalf("pair: %#v", paired)
+		capability, _ := paired["capability"].(string)
+		if !desktopCapabilityOK(capability) || paired["quick_fill"] != true {
+			t.Fatalf("explicit pair: %#v", paired)
 		}
 		a.Lock()
 		client.recvType(t, "locked")
@@ -184,7 +195,15 @@ func TestDesktopIPCBrokerUnlockLockAndCLIRun(t *testing.T) {
 		if a.session == nil {
 			t.Fatal("desktop did not re-unlock")
 		}
-		client.recvType(t, "unlocked")
+		// Lock revokes the existing browser consent, so re-unlock must not
+		// revive the old connection's capability. The extension has to send a
+		// fresh hello and pass native pairing review again.
+		client.send(t, map[string]any{"v": 1, "id": reqIDDesktop(3), "type": "hello"})
+		repaired := client.recvType(t, "paired")
+		capability, _ = repaired["capability"].(string)
+		if !desktopCapabilityOK(capability) || repaired["quick_fill"] != true {
+			t.Fatalf("re-pair after unlock: %#v", repaired)
+		}
 		rows, e := a.session.List("active")
 		if e != nil {
 			t.Fatal(e)

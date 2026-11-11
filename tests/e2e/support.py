@@ -13,14 +13,19 @@ import hashlib
 import json
 import os
 import re
+import select
 import shutil
 import socket
+import ssl
 import stat
 import subprocess
+import sys
+import threading
 import time
 import zipfile
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from .harness import (
     CLIResult,
@@ -474,16 +479,124 @@ def reveal_login(
         password=vault["password"],
         secret=vault["secret"],
         extra=[("输入 SHOW 确认显示", "SHOW")],
+        timeout=180,
+        # The disclosed JSON is the last terminal write; keep a bounded drain
+        # window so a loaded runner does not assert on a truncated transcript.
+        drain_after_exit=2.0,
     )
     if result.returncode != 0:
         raise AssertionError(
             f"reveal-login failed (rc={result.returncode}): {result.transcript[-800:]}"
         )
+    receipt = result.json()
+    if receipt.get("status") != "written-to-terminal":
+        raise AssertionError(f"reveal-login did not write to the terminal: {receipt!r}")
     # The disclosed JSON string is written to the terminal, not stdout.
     match = re.search(r'\r?\n("(?:[^"\\]|\\.)*")\s*$', result.transcript)
     if not match:
         raise AssertionError(f"reveal-login did not disclose JSON: {result.transcript[-400:]!r}")
-    return json.loads(match.group(1)), result.transcript
+    value = json.loads(match.group(1))
+    if value:
+        # The receipt and stdout must never carry the disclosed value.
+        ctx.assert_no_canary_leak(value, result.stdout, json.dumps(receipt))
+    return value, result.transcript
+
+
+PYKEEPASS_ENV = "LOCKLARK_TEST_PYKEEPASS"
+
+_PYKEEPASS_READER = r"""
+import json
+import sys
+from pykeepass import PyKeePass
+
+request = json.load(sys.stdin)
+db = PyKeePass(sys.argv[1], password=request["password"])
+print(json.dumps([
+    {
+        "title": entry.title or "",
+        "username": entry.username or "",
+        "password": entry.password or "",
+        "url": entry.url or "",
+        "notes": entry.notes or "",
+    }
+    for entry in db.entries
+], ensure_ascii=False))
+"""
+
+
+def pykeepass_peer() -> str | None:
+    """Return an interpreter that can import PyKeePass, if one is installed.
+
+    CI installs ``pykeepass==4.2.0`` into a peer virtualenv and points
+    ``LOCKLARK_TEST_PYKEEPASS`` at it.  The current interpreter is probed as a
+    local fallback; when neither works the export content cannot be read
+    independently and the caller must report a blocked assertion, never pass.
+    """
+
+    configured = os.environ.get(PYKEEPASS_ENV)
+    candidates = [configured, sys.executable]
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            probe = subprocess.run(
+                [candidate, "-c", "import pykeepass"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if probe.returncode == 0:
+            return candidate
+    return None
+
+
+def read_kdbx_entries(
+    path: Path,
+    password: str,
+    *,
+    peer: str | None = None,
+) -> list[dict[str, str]]:
+    """Read an exported KDBX with PyKeePass, independently of the product.
+
+    The export password travels over stdin, never argv.  Only the projection
+    used for content assertions is returned; no vault credential is read.
+    """
+
+    interpreter = peer or pykeepass_peer()
+    if interpreter is None:
+        raise AssertionError(
+            "validation blocked: an independent PyKeePass reader is unavailable; "
+            f"install pykeepass==4.2.0 or point {PYKEEPASS_ENV} at a peer interpreter"
+        )
+    proc = subprocess.run(
+        [interpreter, "-c", _PYKEEPASS_READER, str(path)],
+        input=json.dumps({"password": password}).encode("utf-8"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=180,
+    )
+    if proc.returncode != 0:
+        raise AssertionError(
+            "PyKeePass could not open the exported KDBX (rc=%d): %s"
+            % (proc.returncode, proc.stderr.decode("utf-8", "replace")[-600:])
+        )
+    try:
+        entries = json.loads(proc.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise AssertionError(f"PyKeePass returned invalid JSON: {exc}") from exc
+    if not isinstance(entries, list) or not all(
+        isinstance(entry, dict)
+        and set(entry) == {"title", "username", "password", "url", "notes"}
+        and all(isinstance(value, str) for value in entry.values())
+        for entry in entries
+    ):
+        raise AssertionError(f"PyKeePass returned an unexpected projection: {entries!r}")
+    return entries
 
 
 def edit_url(
@@ -828,10 +941,15 @@ def source_files(ctx: E2EContext, relative_glob: str) -> list[Path]:
     return [path for path in ctx.repo_root.glob(relative_glob) if path.is_file()]
 
 
-def cli_help(ctx: E2EContext) -> str:
-    result = ctx.run_cli(["help"])
+def cli_help(ctx: E2EContext, args: Sequence[Any] = ("help",)) -> str:
+    """Run the real CLI help surface (``locklark help`` by default)."""
+
+    result = ctx.run_cli(list(args))
     if result.returncode != 0:
-        raise AssertionError(f"locklark help failed (rc={result.returncode}): {result.stderr}")
+        raise AssertionError(
+            f"locklark {' '.join(str(arg) for arg in args)} failed "
+            f"(rc={result.returncode}): {result.stderr}"
+        )
     return result.stdout + "\n" + result.stderr
 
 
@@ -1232,10 +1350,641 @@ def f12_parity_doc(ctx: E2EContext) -> Path | None:
 
 
 def f13_cli_health_flags(ctx: E2EContext) -> bool:
-    """Opt-in HIBP flags on the CLI ``health`` command (a separate surface)."""
+    """Opt-in HIBP surface on ``personal health`` (a separate CLI surface).
 
-    help_text = cli_help(ctx)
-    return "--check-breached" in help_text or "--hibp-endpoint" in help_text
+    The landed contract is the strict literal pair ``--hibp true`` (``--hibp
+    false``, ``--check-breached`` and ``--hibp-endpoint`` are all refused).
+    This only looks for the advertised option; whether the opted-in run really
+    reaches the range client is decided by :func:`f13_cli_hibp_opt_in`
+    against the real binary.
+    """
+
+    # Read every help surface and match the literal option pair.  `personal
+    # help` and `personal health --help` are read as text without requiring
+    # exit 0: this probe only locates the advertised pair, while behaviour is
+    # asserted by :func:`f13_cli_hibp_opt_in` on the real binary.
+    help_text = [cli_help(ctx)]
+    for surface in (
+        ["personal", "help"],
+        ["personal", "health", "--help"],
+        ["personal", "health"],
+    ):
+        result = ctx.run_cli(surface)
+        help_text.append(result.stdout + "\n" + result.stderr)
+    return any("--hibp true" in chunk for chunk in help_text)
+
+
+def f13_cli_hibp_opt_in(ctx: E2EContext, vault: dict[str, Any]) -> dict[str, Any]:
+    """Exercise the real ``personal health --hibp true`` opt-in contract.
+
+    Everything happens on the synthetic vault through the compiled CLI and the
+    hidden NETWORK consent; no endpoint is contacted.  A declined consent is a
+    real failure (never a clean result), so the strict checks raise here:
+
+    - the CLI exits non-zero and the terminal shows the fixed cancellation
+      error verbatim, with no stdio receipt;
+    - the audit chain gains no event at all, i.e. no unlock and no
+      ``vault.health.hibp`` intent.
+
+    Returns the option-surface observations for the caller:
+
+    - ``flags``: ``--hibp true`` is advertised by the ``personal`` help
+      surfaces;
+    - ``bad_pair_refused``: free-form spellings (``--hibp false``,
+      ``--hibp endpoint``) are rejected with the fixed usage refusal;
+    - ``audit_delta``: audit actions appended across the refusal, excluding the
+      observation's own ``audit.list`` disclosure event (always empty here,
+      re-checked even on a failure path).
+    """
+
+    path = str(vault["path"])
+    flags = f13_cli_health_flags(ctx)
+    bad_pairs = [
+        ctx.run_cli(["personal", "health", "--file", path, "--hibp", value])
+        for value in ("false", "endpoint")
+    ]
+    before = audit_events(ctx, vault)
+    # Interactive commands default to a 20s PTY timeout; a full vault unlock on
+    # a slower machine must not turn a real refusal into a timeout error.
+    declined = pty(
+        ctx,
+        ["personal", "health", "--file", path, "--hibp", "true"],
+        password=vault["password"],
+        secret=vault["secret"],
+        extra=[(HIBP_NETWORK_PROMPT, "DECLINE")],
+        timeout=180,
+    )
+    after = audit_events(ctx, vault)
+    # ``personal audit`` appends one ``audit.list`` disclosure event of its own.
+    # Drop only that observation noise so the delta still proves the declined
+    # run wrote no unlock, no local health report and no HIBP intent.
+    delta = [
+        event.get("action")
+        for event in after[len(before) :]
+        if event.get("action") != "audit.list"
+    ]
+    # The fixed refusal is what the cancellation error maps to on the CLI
+    # (cmd/locklark prints it as its error line); an accepted decline would
+    # instead finish rc=0 with a JSON receipt.
+    cancelled_error = "HIBP network check cancelled"
+    observations = {
+        "flags": flags,
+        "bad_pair_refused": all(
+            result.returncode != 0
+            and "usage: locklark personal" in result.stderr
+            for result in bad_pairs
+        ),
+        "declined_rc": declined.returncode,
+        "declined_error": (
+            cancelled_error
+            if cancelled_error in declined.stdout + declined.transcript
+            else "missing"
+        ),
+        "audit_delta": delta,
+    }
+    ctx.require_feature(
+        "F13",
+        declined.returncode != 0
+        and cancelled_error in declined.stdout + declined.transcript
+        and not declined.stdout.strip(),
+        "FEATURE_NOT_YET_LANDED: F13 - a declined NETWORK consent did not stop "
+        "with the fixed cancellation error before any network access "
+        f"(rc={declined.returncode}, stdout={declined.stdout[:120]!r})",
+    )
+    assert delta == [], (
+        "a declined NETWORK consent wrote audit events (no unlock / no "
+        f"vault.health.hibp intent allowed): {delta}"
+    )
+    return observations
+
+
+# The hidden consent prompt emitted by ``personal health --hibp true`` before
+# any unlock or network access (cmd/locklark/personal_health_hibp.go).
+HIBP_NETWORK_PROMPT = "输入 NETWORK 确认联网查询泄露前缀"
+
+
+HIBP_RANGE_SEGMENT = "/range/"
+HIBP_FIXED_HOST = "api.pwnedpasswords.com"
+HIBP_HTTPS_PORT = 443
+HIBP_PREFIX_RE = re.compile(r"^[0-9A-F]{5}$")
+
+
+def local_hibp_range_proxy(
+    ctx: E2EContext,
+    responses: Mapping[str, Sequence[tuple[str, int]]],
+) -> "LocalHIBPRangeProxy":
+    """Start a loopback HTTPS CONNECT proxy in front of a local range server.
+
+    The shipped HIBP client is built with an empty ``http.Client`` (nil
+    ``Transport``), so its requests use Go's default transport and honour
+    ``HTTPS_PROXY`` through ``ProxyFromEnvironment``.  The product endpoint
+    stays the fixed ``https://api.pwnedpasswords.com/range/`` and there is no
+    endpoint/proxy/client override; this proxy is reached only because a
+    child process with a private environment supplies ``HTTPS_PROXY``.  It
+    accepts exactly that one CONNECT target, ``api.pwnedpasswords.com:443``,
+    and relays it to a local TLS server with a throwaway certificate for that
+    hostname (installed as the child's only trust anchor through
+    ``SSL_CERT_FILE``/``SSL_CERT_DIR``).  Every other target is refused;
+    system DNS and hosts files are untouched and nothing listens on port 443.
+
+    ``responses`` maps each expected five-hex prefix to its own independent
+    ``(suffix, count)`` lines.  The caller owns the synthetic passwords, so it
+    can supply the one suffix that really belongs to each prefix; the SUT only
+    ever sends the prefix.  A zero-count padding line is appended to every
+    response, exactly like the real provider.
+    """
+
+    return LocalHIBPRangeProxy(ctx, responses)
+
+
+def _normalise_hibp_responses(
+    responses: Mapping[str, Sequence[tuple[str, int]]],
+) -> dict[str, tuple[tuple[str, int], ...]]:
+    """Validate the synthetic per-prefix range answers before serving them."""
+
+    normalised: dict[str, tuple[tuple[str, int], ...]] = {}
+    for raw_prefix, raw_lines in responses.items():
+        prefix = str(raw_prefix).upper()
+        if not HIBP_PREFIX_RE.fullmatch(prefix):
+            raise AssertionError(f"synthetic HIBP prefix is not five hex: {raw_prefix!r}")
+        if prefix in normalised:
+            raise AssertionError(f"duplicate synthetic HIBP prefix: {prefix}")
+        lines: list[tuple[str, int]] = []
+        for raw_suffix, raw_count in raw_lines:
+            suffix = str(raw_suffix).upper()
+            if not re.fullmatch(r"[0-9A-F]{35}", suffix):
+                raise AssertionError(
+                    f"synthetic HIBP suffix is not 35 hex: {raw_suffix!r}"
+                )
+            if not isinstance(raw_count, int) or isinstance(raw_count, bool) or raw_count <= 0:
+                raise AssertionError(f"synthetic HIBP count is not positive: {raw_count!r}")
+            lines.append((suffix, raw_count))
+        normalised[prefix] = tuple(lines)
+    return normalised
+
+
+class LocalHIBPRangeProxy:
+    """Loopback CONNECT proxy with a mock range server behind it.
+
+    Each requested five-hex prefix receives only the lines the caller supplied
+    for that prefix (plus zero-count padding).  The answers are therefore
+    independent: the test asserts what each prefix received and that the SUT
+    matched its own full-hash suffix rather than a shared canned response.
+    """
+
+    def __init__(
+        self,
+        ctx: E2EContext,
+        responses: Mapping[str, Sequence[tuple[str, int]]],
+    ) -> None:
+        self.responses = _normalise_hibp_responses(responses)
+        work = ctx.temp_dir / "hibp-proxy"
+        work.mkdir(mode=0o700, exist_ok=True)
+        self.cert = work / "range.pem"
+        key = work / "range.key"
+        subprocess.run(
+            [
+                "openssl",
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-days",
+                "2",
+                "-subj",
+                f"/CN={HIBP_FIXED_HOST}",
+                "-addext",
+                f"subjectAltName=DNS:{HIBP_FIXED_HOST}",
+                "-keyout",
+                str(key),
+                "-out",
+                str(self.cert),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=60,
+        )
+        os.chmod(key, 0o600)
+        os.chmod(self.cert, 0o600)
+        self._trust = work / "trust"
+        self._trust.mkdir(mode=0o700, exist_ok=True)
+
+        self.requests: list[dict[str, Any]] = []
+        self.refused: list[str] = []
+        self.connections: list[str] = []
+
+        proxy = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.0"
+
+            def do_CONNECT(self) -> None:  # noqa: N802 - http.server API
+                target = self.path or ""
+                proxy.connections.append(target)
+                if target != f"{HIBP_FIXED_HOST}:{HIBP_HTTPS_PORT}":
+                    proxy.refused.append(target)
+                    self.send_error(403, "refused target")
+                    return
+                # The only upstream is the local range server; no DNS lookup
+                # and no other destination is ever opened.
+                upstream = socket.create_connection(("127.0.0.1", proxy.port), timeout=10)
+                try:
+                    self.send_response(200, "Connection Established")
+                    self.end_headers()
+                    self._relay(self.connection, upstream)
+                finally:
+                    for stream in (upstream, self.connection):
+                        try:
+                            stream.close()
+                        except OSError:
+                            pass
+                    self.close_connection = True
+
+            def do_GET(self) -> None:  # noqa: N802 - http.server API
+                proxy.refused.append(self.path or "")
+                self.send_error(403, "refused")
+
+            def _relay(self, client: socket.socket, upstream: socket.socket) -> None:
+                # Forward bytes both ways.  A TLS close_notify is relayed as a
+                # half-close so the peer still sees the EOF, while the other
+                # direction keeps draining until it ends too.
+                sockets = [client, upstream]
+
+                def peer(stream: socket.socket) -> socket.socket:
+                    return upstream if stream is client else client
+
+                try:
+                    while sockets:
+                        ready, _, _ = select.select(sockets, [], [], 15)
+                        if not ready:
+                            return
+                        for source in ready:
+                            data = source.recv(65536)
+                            if not data:
+                                sockets.remove(source)
+                                try:
+                                    peer(source).shutdown(socket.SHUT_WR)
+                                except OSError:
+                                    return
+                                continue
+                            peer(source).sendall(data)
+                except OSError:
+                    return
+
+            def log_message(self, *_: Any) -> None:
+                return
+
+        class RangeHandler(BaseHTTPRequestHandler):
+            # HTTP/1.1 with an explicit length; the answer stays plain text
+            # even when the client advertises gzip (which it does by default).
+            protocol_version = "HTTP/1.1"
+
+            def do_GET(self) -> None:  # noqa: N802 - http.server API
+                record: dict[str, Any] = {
+                    "path": self.path,
+                    "headers": dict(self.headers),
+                }
+                proxy.requests.append(record)
+                prefix = (
+                    self.path[len(HIBP_RANGE_SEGMENT) :]
+                    if self.path.startswith(HIBP_RANGE_SEGMENT)
+                    else ""
+                )
+                record["prefix"] = prefix
+                if not HIBP_PREFIX_RE.fullmatch(prefix):
+                    # Never answer an unexpected path: it would prove that
+                    # something other than a five-hex prefix left the process.
+                    record["refused"] = True
+                    self.send_response(400)
+                    self.end_headers()
+                    self.close_connection = True
+                    return
+                lines = proxy.responses.get(prefix)
+                record["unknown_prefix"] = lines is None
+                lines = lines or ()
+                record["suffixes"] = [
+                    {"suffix": suffix, "count": count} for suffix, count in lines
+                ]
+                body = "".join(
+                    f"{suffix}:{count}\r\n" for suffix, count in lines
+                ) + "0" * 35 + ":0\r\n"
+                record["body"] = body
+                payload = body.encode("ascii")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(payload)
+                self.wfile.flush()
+                self.close_connection = True
+
+            def log_message(self, *_: Any) -> None:
+                return
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), RangeHandler)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(str(self.cert), str(key))
+        self._server.socket = context.wrap_socket(self._server.socket, server_side=True)
+        self._server_thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._server_thread.start()
+        self.port = self._server.server_address[1]
+
+        self._proxy = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._proxy_thread = threading.Thread(target=self._proxy.serve_forever, daemon=True)
+        self._proxy_thread.start()
+        self.proxy_port = self._proxy.server_address[1]
+
+    @property
+    def env(self) -> dict[str, str]:
+        """Private child environment: loopback proxy + synthetic trust only."""
+
+        proxy = f"http://127.0.0.1:{self.proxy_port}"
+        return {
+            "HTTPS_PROXY": proxy,
+            "https_proxy": proxy,
+            "NO_PROXY": "",
+            "no_proxy": "",
+            "SSL_CERT_FILE": str(self.cert),
+            "SSL_CERT_DIR": str(self._trust),
+        }
+
+    def close(self) -> None:
+        for server, thread in (
+            (self._proxy, self._proxy_thread),
+            (self._server, self._server_thread),
+        ):
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+
+def f13_cli_hibp_range_lookups(
+    ctx: E2EContext,
+    vault: dict[str, Any],
+    responses: Mapping[str, Sequence[tuple[str, int]]],
+) -> dict[str, Any]:
+    """Run one consented ``--hibp true`` check routed to the local mock.
+
+    ``responses`` maps the five-hex SHA-1 prefixes the test expects the CLI to
+    derive from the synthetic passwords to that prefix's own answer lines.
+    Outcomes:
+
+    - ``"ran"``: the proxy accepted the CLI's CONNECT.  This only establishes
+      the route; the caller still asserts requests, range bodies, payload and
+      audit.  A TLS handshake failure after CONNECT returns ``"ran"`` with no
+      requests and usually a non-zero CLI result, so the caller hard-fails.
+      It is never downgraded to pending and never treated as green;
+    - ``"pending"``: no CONNECT ever arrived (local proxy/CA startup failed,
+      or the CLI never used the proxy), so nothing was validated.  This is a
+      PENDING_FEATURE outcome, never PASS.
+    """
+
+    try:
+        proxy = local_hibp_range_proxy(ctx, responses)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"status": "pending", "reason": f"local proxy/CA unavailable: {exc}"}
+    try:
+        result = ctx.run_pty_cli(
+            ["personal", "health", "--file", str(vault["path"]), "--hibp", "true"],
+            prompts=[
+                ("主密码", vault["password"]),
+                ("Secret Key", vault["secret"]),
+                (HIBP_NETWORK_PROMPT, "NETWORK"),
+            ],
+            env=proxy.env,
+            timeout=180,
+        )
+        connections = list(proxy.connections)
+        requests = list(proxy.requests)
+        refused = list(proxy.refused)
+    finally:
+        proxy.close()
+    if not connections:
+        return {
+            "status": "pending",
+            "reason": "the CLI never reached the loopback proxy (route not established)",
+            "connections": connections,
+            "requests": requests,
+            "refused": refused,
+            "returncode": result.returncode,
+            "stdout": result.stdout,
+            "transcript": result.transcript,
+        }
+    payload: Any = None
+    if result.returncode == 0:
+        try:
+            payload = result.json()
+        except ValueError as exc:
+            raise AssertionError(f"personal health --hibp true printed invalid JSON: {exc}")
+    return {
+        "status": "ran",
+        "returncode": result.returncode,
+        "payload": payload,
+        "expected_prefixes": set(proxy.responses),
+        "connections": connections,
+        "requests": requests,
+        "refused": refused,
+        "stdout": result.stdout,
+        "transcript": result.transcript,
+    }
+
+
+def card_fill_explicit_authorization_component(
+    ctx: E2EContext, core_path: Path | None = None
+) -> dict[str, Any] | None:
+    """Execute the shipped card fill under explicit-authorization inputs.
+
+    T2_F11_05 is a **component contract**, not a page-load wiring test.  The
+    shipped artifact has two layers: ``content.js`` runs on HTTPS pages and
+    decides when to inject the sandboxed fill, while ``core.fillCardDocument``
+    is the function that may write only for a short-lived explicit
+    ``(expectedOrigin, expiresAt, category)`` intent.
+
+    This runs the *built* bundle's ``core.js`` in a W3C-shaped synthetic
+    checkout page (one card form, no extension runtime) and calls the
+    component directly.  It does not exercise ``content.js``/background
+    injection, a real browser gesture, or native approval.  It reports that
+    no values exist before authorization, that expired/stale intents, a wrong
+    origin and a wrong category are refused without touching a control, and
+    that one valid intent writes the card controls once.  Returns ``None``
+    when no built bundle carries the entrypoint.
+
+    The component's sixth argument is the worker's already-consumed
+    ``userAuthorized`` boolean, so the harness passes ``true`` exactly where
+    the shipped ``cardSandbox`` adapter would.  This harness receives that
+    flag as input; it does not mint or validate the worker's v2 nonce proof
+    and does not exercise real gesture/background wiring.  The background
+    tests own the v2 one-time proof behavior.  Missing/``false`` auth is
+    covered only as a component-level negative control.
+    """
+
+    node = shutil.which("node")
+    if node is None:
+        raise AssertionError("node is required for extension E2E checks")
+    candidates = (
+        [Path(core_path)]
+        if core_path is not None
+        else [directory / "core.js" for directory in built_extension(ctx)]
+    )
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        script = ctx.temp_dir / "card_fill_explicit_authorization.cjs"
+        script.write_text(_CARD_FILL_AUTHORIZATION_HARNESS, encoding="utf-8")
+        result = ctx.run_cli(
+            [str(script), str(candidate)],
+            binary=node,
+            cwd=ctx.repo_root,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            raise AssertionError(
+                f"gesture-only card fill harness failed (rc={result.returncode}):\n"
+                f"{result.stdout[-2000:]}\n{result.stderr[-2000:]}"
+            )
+        return json.loads(result.stdout)
+    return None
+
+
+_CARD_FILL_AUTHORIZATION_HARNESS = r"""
+"use strict";
+// Synthetic W3C-shaped checkout page: one card form, no extension runtime.
+const vm = require("node:vm");
+const core = require(process.argv[2]);
+const events = [];
+class Target {
+  constructor() { this.listeners = {}; }
+  addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
+  dispatchEvent(event) {
+    for (const fn of this.listeners[event.type] || []) fn(event);
+    return true;
+  }
+}
+class Element extends Target {
+  constructor(tag, attrs) {
+    super();
+    this.tagName = tag;
+    this.attrs = attrs;
+    this.isConnected = true;
+    this.disabled = false;
+    this.readOnly = false;
+    this.hidden = false;
+    this._value = "";
+  }
+  getAttribute(name) {
+    return Object.hasOwn(this.attrs, name) ? this.attrs[name] : null;
+  }
+  hasAttribute(name) { return Object.hasOwn(this.attrs, name); }
+  matches() { return false; }
+  closest() { return null; }
+  getRootNode() { return this.ownerDocument; }
+  getBoundingClientRect() { return { width: 240, height: 28 }; }
+  getClientRects() { return [{}]; }
+  focus() {}
+  get labels() { return []; }
+}
+class HtmlInput extends Element {
+  constructor(attrs) {
+    super("INPUT", attrs);
+    this.type = attrs.type || "text";
+    this.name = attrs.name || "";
+    this.id = attrs.id || "";
+    this.placeholder = attrs.placeholder || "";
+    this.autocomplete = attrs.autocomplete || "";
+    this.maxLength = Number(attrs.maxlength || -1);
+  }
+}
+Object.defineProperty(HtmlInput.prototype, "value", {
+  get() { return this._value; },
+  set(value) {
+    this._value = String(value);
+    if (this._touched) events.push(this.id);
+  },
+});
+const form = new Target();
+const controls = [
+  new HtmlInput({ id: "holder", autocomplete: "cc-name", "aria-label": "Cardholder" }),
+  new HtmlInput({ id: "number", autocomplete: "cc-number", type: "tel", placeholder: "1234 5678 9012 3456" }),
+  new HtmlInput({ id: "exp", autocomplete: "cc-exp", maxlength: "5", placeholder: "MM/YY" }),
+  new HtmlInput({ id: "csc", autocomplete: "cc-csc", "aria-label": "Security code" }),
+];
+for (const control of controls) control.form = form;
+form.querySelectorAll = (selector) =>
+  selector === 'input[type="password"]' ? [] : controls.slice();
+const documentElement = new Target();
+const document = new Target();
+Object.assign(document, {
+  documentElement,
+  baseURI: "https://shop.example.test/pay",
+  querySelectorAll: () => controls.slice(),
+  querySelector: () => controls[0],
+  getElementById: (id) => controls.find((c) => c.id === id) || null,
+});
+for (const control of controls) control.ownerDocument = document;
+const location = {
+  origin: "https://shop.example.test",
+  protocol: "https:",
+  href: "https://shop.example.test/pay",
+};
+const clock = 1_700_000_000_000;
+const context = {
+  document, location, Event, URL,
+  getComputedStyle: () => ({ display: "block", visibility: "visible", opacity: "1" }),
+  CSS: { escape: (value) => String(value) },
+  Element, HTMLInputElement: HtmlInput,
+  Date: { now: () => clock },
+  performance: { timeOrigin: 1, now: () => 50 },
+  console: {},
+};
+context.window = context;
+context.top = context;
+const fill = vm.runInNewContext(
+  "(" + core.fillCardDocument.toString() + ")",
+  context,
+);
+const values = () => controls.map((control) => control.value);
+// Record every write from here on.  No document-load event is dispatched:
+// this harness calls the fill component directly and proves only the
+// explicit-authorization contract, not page-load wiring.
+for (const control of controls) control._touched = true;
+const data = {
+  cardholder_name: "Ada Lovelace",
+  number: "4242424242424242",
+  exp: "12/29",
+  cvv: "123",
+};
+const beforeAuthorization = values();
+const rejected = {};
+const afterRejects = {};
+// Each scoped negative control carries `true` for the sixth `userAuthorized`
+// argument (what the `cardSandbox` adapter passes after the worker consumed a
+// gesture), so it must be refused for its named condition alone.  This harness
+// only receives that already-consumed flag; it does not mint or validate the
+// worker's v2 nonce proof — the background tests own that behavior.
+const rejects = {
+  missing_auth: () => [location.origin, data, clock + 1500, false, "credit_card"],
+  unauthorized: () => [location.origin, data, clock + 1500, false, "credit_card", false],
+  expired: () => [location.origin, data, clock - 1, false, "credit_card", true],
+  stale_window: () => [location.origin, data, clock + 60000, false, "credit_card", true],
+  wrong_origin: () => ["https://evil.example.test", data, clock + 1500, false, "credit_card", true],
+  wrong_category: () => [location.origin, data, clock + 1500, false, "identity", true],
+};
+for (const [name, args] of Object.entries(rejects)) {
+  rejected[name] = fill(...args());
+  afterRejects[name] = values();
+}
+const authorized = fill(location.origin, data, clock + 1500, false, "credit_card", true);
+process.stdout.write(JSON.stringify({
+  beforeAuthorization,
+  afterRejects,
+  rejects: rejected,
+  authorized,
+  written: events.slice(),
+  afterAuthorization: values(),
+}));
+"""
 
 
 def f13_hibp_client_ready(ctx: E2EContext) -> bool:
@@ -1569,6 +2318,18 @@ class TrapListener:
 
 
 __all__ = [
+    "HIBP_FIXED_HOST",
+    "HIBP_HTTPS_PORT",
+    "HIBP_PREFIX_RE",
+    "HIBP_RANGE_SEGMENT",
+    "LocalHIBPRangeProxy",
+    "HIBP_RANGE_SEGMENT",
+    "LocalHIBPRangeServer",
+    "f13_cli_hibp_range_lookups",
+    "local_hibp_range_server",
+    "HIBP_NETWORK_PROMPT",
+    "card_fill_explicit_authorization_component",
+    "f13_cli_hibp_opt_in",
     "HEX32_RE",
     "F14_REQUIRED_PROFILES",
     "HEX32_RE",
@@ -1643,6 +2404,8 @@ __all__ = [
     "node_eval",
     "node_test",
     "pty",
+    "pykeepass_peer",
+    "read_kdbx_entries",
     "require_hex32",
     "require_hex64",
     "reveal_login",

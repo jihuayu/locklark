@@ -531,18 +531,15 @@ func (a *App) restoreHistory(index int) error {
 	id, revision := a.v2.detail.ID, a.v2.detail.Revision
 	filter := a.currentFilter()
 	query := a.currentV2Query()
-	var opErr error
 	var saved personal.ItemDetail
 	var snap v2Snapshot
 	ok := a.runNative(func(g *personal.MutationGate) nativeResult {
 		newRevision, err := s.RestoreHistory(id, revision, index, g)
 		if err != nil {
-			opErr = err
 			return nativeResult{err: err}
 		}
 		saved, err = s.GetItemDetail(id, newRevision, false)
 		if err != nil {
-			opErr = err
 			return nativeResult{err: err}
 		}
 		snap = a.captureV2(s, filter)
@@ -558,12 +555,11 @@ func (a *App) restoreHistory(index int) error {
 		a.status = "条目历史已还原"
 	})
 	if !ok {
-		if opErr == nil {
-			opErr = personal.ErrMutationRefused
-		}
-		return opErr
+		return personal.ErrMutationRefused
 	}
-	return opErr
+	// The restore is asynchronous; its failure is reported through a.status by
+	// the dispatcher, never by a value read across goroutines here.
+	return nil
 }
 
 func (a *App) RestoreHistory(index int) error { return a.restoreHistory(index) }

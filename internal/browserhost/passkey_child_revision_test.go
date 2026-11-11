@@ -236,7 +236,7 @@ func TestPasskeyRemoveWithChildRevision(t *testing.T) {
 	second, _ := attachPasskey(t, s, itemID, "dXNlcjE", "second-account", "Second Account")
 	revisions := childRevisions(t, s, itemID)
 	parent := revisionOf(t, s, itemID)
-	stale := v2Handle(t, c, out, map[string]any{"v": 1, "id": reqID(340), "type": "passkey-remove", "capability": capability, "item_id": itemID, "revision": parent, "credential_id": first, "credential_revision": revisions[second]})
+	stale := destructiveCall(t, c, out, map[string]any{"v": 1, "id": reqID(340), "type": "passkey-remove", "capability": capability, "item_id": itemID, "revision": parent, "credential_id": first, "credential_revision": revisions[second]})
 	if stale.Type != "error" {
 		t.Fatalf("stale child remove: %#v", stale)
 	}
@@ -244,7 +244,7 @@ func TestPasskeyRemoveWithChildRevision(t *testing.T) {
 	if detail.Item == nil || len(detail.Item.Passkeys) != 2 {
 		t.Fatalf("stale child remove mutated: %#v", detail.Item)
 	}
-	removed := v2Handle(t, c, out, map[string]any{"v": 1, "id": reqID(342), "type": "passkey-remove", "capability": capability, "item_id": itemID, "revision": parent, "credential_id": first, "credential_revision": revisions[first]})
+	removed := destructiveCall(t, c, out, map[string]any{"v": 1, "id": reqID(342), "type": "passkey-remove", "capability": capability, "item_id": itemID, "revision": parent, "credential_id": first, "credential_revision": revisions[first]})
 	if removed.Type != "passkey-removed" || removed.CredentialID != first || removed.Revision == "" {
 		t.Fatalf("exact child remove: %#v", removed)
 	}
@@ -252,7 +252,7 @@ func TestPasskeyRemoveWithChildRevision(t *testing.T) {
 	if detail.Item == nil || len(detail.Item.Passkeys) != 1 || detail.Item.Passkeys[0].CredentialID != second || detail.Item.Passkey == nil || detail.Item.Passkey.CredentialID != second || detail.Item.Passkey.CredentialRevision != revisions[second] {
 		t.Fatalf("sibling after child remove: %#v", detail.Item)
 	}
-	legacy := v2Handle(t, c, out, map[string]any{"v": 1, "id": reqID(344), "type": "passkey-remove", "capability": capability, "item_id": itemID, "revision": removed.Revision, "credential_id": second})
+	legacy := destructiveCall(t, c, out, map[string]any{"v": 1, "id": reqID(344), "type": "passkey-remove", "capability": capability, "item_id": itemID, "revision": removed.Revision, "credential_id": second})
 	if legacy.Type != "passkey-removed" {
 		t.Fatalf("legacy remove: %#v", legacy)
 	}
