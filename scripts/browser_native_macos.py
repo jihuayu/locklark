@@ -5,6 +5,11 @@ public window metadata, then ONE physical CGEventPost batch. It never reads an
 accessibility value, never performs an accessibility action (no press or
 invoke), never touches the clipboard and never injects an approval.
 
+A separate activation-only request names one exact (pid, executable): the
+adapter proves that live pid/path/uid with the process identity helpers and
+makes exactly one NSRunningApplication activation. It lists no window, reads
+no title/control and emits no input.
+
 Accessibility trust is required and started by the human in System Settings >
 Privacy & Security > Accessibility. `AXIsProcessTrusted()` is only queried; this
 module NEVER prompts for or grants TCC permission -- an untrusted process gets
@@ -552,6 +557,27 @@ class QuartzApi:
             return False
         return bool(running.activateWithOptions_(1))
 
+    def activate_process(self, pid, executable):
+        """Identity-proofed, once-only activation of ONE already-known pid.
+
+        Only ``process(pid)`` (proc_pidpath + proc_pidinfo pid/uid) is read:
+        no window is listed, no AX element is created and no title, control or
+        foreground content is queried. The path must equal the requested
+        canonical executable exactly and the live uid must be ours. The
+        activation hook supplied by the adapter is then called exactly once
+        and its verdict is returned verbatim; nothing here retries.
+        """
+        if type(pid) is not int or pid <= 1:
+            raise contract.ContractError("activation-invalid")
+        path, trusted = self.process(pid)
+        if not path:
+            raise contract.ContractError("activation-failed")
+        if not contract.same_executable(executable, path, PLATFORM):
+            raise contract.ContractError("process-untrusted")
+        if trusted is not True:
+            raise contract.ContractError("process-untrusted")
+        return self.activate(pid)
+
     def _post(self, events):
         """Post an already complete, already validated event list exactly once.
 
@@ -683,6 +709,12 @@ class MacAdapter:
     def activate(self, window):
         if not self.api.activate(window["pid"]):
             raise contract.ContractError("focus-lost")
+
+    def activate_process(self, pid, executable):
+        """Activation-only mode: strict literal True, never a truthy value."""
+        if self.api.activate_process(pid, executable) is not True:
+            raise contract.ContractError("activation-failed")
+        return True
 
     def click(self, x, y):
         return self.api.click(x, y)

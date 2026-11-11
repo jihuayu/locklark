@@ -40,6 +40,8 @@ except ImportError:  # pragma: no cover - Windows has no pty module
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 DRIVER = ROOT / "scripts" / "native_acceptance_driver.py"
+# The only result an activation-only driver request may report.
+ACTIVATION_RESULT = {"activated": True}
 
 TITLE = "Locklark · 本地金库"
 APPROVE_LABEL = "仅批准本次 CLI 请求"
@@ -693,6 +695,10 @@ class Acceptance:
             "actions": actions,
             "inspect": False,
         }).encode()
+        return self.run_driver(request)
+
+    def run_driver(self, request):
+        """One bounded driver invocation; saves owner-only stdout/stderr."""
         try:
             result = subprocess.run(
                 [sys.executable, str(DRIVER), "--platform", "macos"],
@@ -734,8 +740,33 @@ class Acceptance:
         finally:
             os.close(log)
         os.chmod(self.fixture.logs / "desktop.log", 0o600)
+        self.activate_desktop()
         self.wait_unlock_fields()
         self.mark("real_desktop_started_with_explicit_settings_socket")
+
+    def activation_request(self):
+        """Activation-only request for the exact pid this harness launched.
+
+        Only the PID and the already validated canonical executable are named;
+        there is no title, action, inspect or window field. A native refusal is
+        an acceptance failure, never retried.
+        """
+        process = self.desktop_process
+        require(process is not None and process.poll() is None)
+        require(type(process.pid) is int and process.pid > 0)
+        require(self.desktop is not None and os.path.isabs(str(self.desktop)))
+        return json.dumps({
+            "activate_pid": process.pid,
+            "executable": str(self.desktop),
+        }).encode()
+
+    def activate_desktop(self):
+        """Ask once for activation before any window title is observed.
+
+        Title, executable, unique-window and control readiness are still
+        re-proved by the normal ``wait_unlock_fields`` driver flow afterwards.
+        """
+        require(self.run_driver(self.activation_request()) == ACTIVATION_RESULT)
 
     def wait_unlock_fields(self):
         retry_deadline = min(self.deadline, time.monotonic() + 45)

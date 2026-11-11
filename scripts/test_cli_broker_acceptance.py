@@ -407,6 +407,98 @@ class CommandShapeTests(unittest.TestCase):
         self.assertNotIn(token, init)
 
 
+class ActivationOrderTests(unittest.TestCase):
+    """The harness activates its own launched PID once, before any window wait."""
+
+    def acceptance(self, desktop):
+        base = temporary_base(self)
+        args = __import__("argparse").Namespace(
+            cli=str(desktop), desktop=str(desktop), timeout=240)
+        instance = acceptance.Acceptance(args)
+        instance.fixture = acceptance.Fixture(base)
+        self.addCleanup(shutil.rmtree, instance.fixture.root, ignore_errors=True)
+        instance.settings = instance.fixture.settings
+        instance.desktop = desktop
+        return instance
+
+    def launch(self, instance, stdout=b'{"activated": true}\n', returncode=0):
+        """Drive one start_desktop with every OS touch replaced by a recorder."""
+        calls = []
+
+        def run_driver(request):
+            calls.append(("driver", json.loads(request)))
+            if returncode:
+                raise acceptance.AcceptanceFailure()
+            return json.loads(stdout)
+
+        instance.run_driver = run_driver
+        instance.wait_unlock_fields = lambda: calls.append(("wait_unlock_fields",))
+        instance.mark = lambda name: calls.append(("mark", name))
+        with mock.patch.object(acceptance.subprocess, "Popen", _FakePopen), \
+                contextlib.redirect_stdout(io.StringIO()):
+            instance.start_desktop()
+        return calls
+
+    def test_activation_names_the_launched_pid_and_exact_executable_first(self):
+        desktop = pathlib.Path("/build/bin/locklark-desktop").resolve()
+        instance = self.acceptance(desktop)
+        calls = self.launch(instance)
+        self.assertEqual([call[0] for call in calls],
+                         ["driver", "wait_unlock_fields", "mark"])
+        request = calls[0][1]
+        self.assertEqual(request, {"activate_pid": _FakePopen.pid,
+                                   "executable": str(desktop)})
+        self.assertEqual(set(request), {"activate_pid", "executable"})
+        self.assertIs(type(request["activate_pid"]), int)
+        self.assertIs(type(request["executable"]), str)
+        self.assertNotIn(acceptance.TITLE, json.dumps(request))
+        self.assertNotIn("actions", request)
+
+    def test_activation_request_is_validated_by_the_real_contract(self):
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import native_acceptance_contract as contract
+        desktop = pathlib.Path("/build/bin/locklark-desktop").resolve()
+        instance = self.acceptance(desktop)
+        instance.desktop_process = _FakePopen(None)
+        plan = contract.parse_request(instance.activation_request())
+        self.assertEqual(plan["activation"], {"pid": _FakePopen.pid,
+                                              "executable": str(desktop)})
+
+    def test_activation_refusal_stops_before_any_window_wait(self):
+        desktop = pathlib.Path("/build/bin/locklark-desktop").resolve()
+        instance = self.acceptance(desktop)
+        with self.assertRaises(acceptance.AcceptanceFailure):
+            self.launch(instance, returncode=1)
+
+    def test_anything_other_than_the_fixed_result_is_refused(self):
+        desktop = pathlib.Path("/build/bin/locklark-desktop").resolve()
+        for stdout in (b'{"activated": false}\n', b'{"activated": true, "window": "0x1"}\n',
+                       b"{}\n"):
+            with self.subTest(stdout=stdout):
+                instance = self.acceptance(desktop)
+                with self.assertRaises(acceptance.AcceptanceFailure):
+                    self.launch(instance, stdout=stdout)
+
+    def test_exited_desktop_is_never_asked_to_activate(self):
+        desktop = pathlib.Path("/build/bin/locklark-desktop").resolve()
+        instance = self.acceptance(desktop)
+        instance.desktop_process = _FakePopen(exit_code=0)
+        with self.assertRaises(acceptance.AcceptanceFailure):
+            instance.activation_request()
+
+
+class _FakePopen:
+    pid = 54321
+
+    def __init__(self, *arguments, exit_code=None, **keywords):
+        self.arguments = arguments
+        self.keywords = keywords
+        self.exit_code = exit_code
+
+    def poll(self):
+        return self.exit_code
+
+
 class UnavailableTests(unittest.TestCase):
     def test_non_darwin_is_a_fixed_unavailable_result(self):
         output = io.StringIO()

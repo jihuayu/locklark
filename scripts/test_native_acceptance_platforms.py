@@ -753,7 +753,7 @@ class FakeMacApi:
         self.clicks = []
         self.typed = []
         self.chords = []
-
+        # Activation-only surface: exactly one pre-verified identity.
     def capability(self):
         if not self.trusted:
             raise contract.ContractError("capability-unavailable")
@@ -795,6 +795,159 @@ class FakeMacApi:
     def press_chord(self, parts):
         self.chords.append(tuple(parts))
         return {"move": True, "down": True, "up": True}
+
+
+class FakeRunningApplication:
+    def __init__(self, verdict=True):
+        self.verdict = verdict
+        self.options = []
+
+    def activateWithOptions_(self, options):
+        self.options.append(options)
+        if isinstance(self.verdict, Exception):
+            raise self.verdict
+        return self.verdict
+
+
+class FakeWorkspaceAppKit:
+    """Strict AppKit stand-in: only the one NSRunningApplication lookup exists."""
+
+    def __init__(self, running=None):
+        self.running = running
+        self.lookups = []
+        self.our_appkit = self
+
+        class NSRunningApplication(object):
+            pass
+
+        @staticmethod
+        def by_pid(pid):
+            self.lookups.append(pid)
+            return self.running
+
+        NSRunningApplication.runningApplicationWithProcessIdentifier_ = by_pid
+        self.NSRunningApplication = NSRunningApplication
+
+    def __getattr__(self, name):
+        raise AssertionError("activation touched AppKit symbol " + name)
+
+
+def activation_api(path="/opt/locklark/locklark-desktop", uid=None, running=None):
+    """QuartzApi with ONLY process identity and one AppKit activation bound.
+
+    Any other attribute (windows, AX elements, titles, controls, foreground,
+    event posting) fails the test if the activation-only path touches it.
+    """
+    uid = os.getuid() if uid is None else uid
+    api = macos.QuartzApi.__new__(macos.QuartzApi)
+    api.process = lambda pid: (path, uid == os.getuid())
+    api.appkit = FakeWorkspaceAppKit(running)
+    return api
+
+
+class MacActivationOnlyTests(unittest.TestCase):
+    PID = 4242
+    EXE = "/opt/locklark/locklark-desktop"
+
+    def run_driver(self, api):
+        """Real MacAdapter + driver dispatch on an injected activation-only API."""
+        raw = json.dumps({"activate_pid": self.PID, "executable": self.EXE}).encode()
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(macos.MacAdapter, "__init__",
+                          lambda self, *a, **k: setattr(self, "api", api)):
+            status = driver.main(argv=["--platform", "macos"], stdin=io.BytesIO(raw),
+                                 stdout=stdout, stderr=stderr)
+        return status, stdout.getvalue(), stderr.getvalue()
+
+    def test_success_is_one_fixed_result_after_exactly_one_activation(self):
+        running = FakeRunningApplication(True)
+        api = activation_api(running=running)
+        self.assertEqual(self.run_driver(api), (0, '{"activated": true}\n', ""))
+        self.assertEqual(api.appkit.lookups, [self.PID])
+        self.assertEqual(running.options, [1])
+
+    def test_trusted_real_api_path_checks_pid_path_and_uid_before_one_activation(self):
+        requested = macos.QuartzApi.activate_process
+        api = macos.QuartzApi.__new__(macos.QuartzApi)
+        running = FakeRunningApplication(True)
+        api.appkit = FakeWorkspaceAppKit(running)
+        looked_up = []
+
+        def process(pid):
+            looked_up.append(pid)
+            return self.EXE, True
+
+        api.process = process
+        self.assertIs(requested(api, self.PID, self.EXE), True)
+        self.assertEqual(looked_up, [self.PID])
+        self.assertEqual(api.appkit.lookups, [self.PID])
+        self.assertEqual(running.options, [1])
+
+    def test_identity_refusals_never_activate(self):
+        # (process() answer, expected refusal). "" means the pid is absent.
+        cases = (
+            (("/opt/locklark/other-desktop", True), "process-untrusted"),
+            ((self.EXE + "-copy", True), "process-untrusted"),
+            (("", False), "activation-failed"),
+            ((self.EXE, False), "process-untrusted"),
+        )
+        for answer, code in cases:
+            with self.subTest(answer=answer), \
+                    patch.object(macos.os, "stat", side_effect=AssertionError("file owner used")):
+                running = FakeRunningApplication(True)
+                api = activation_api(running=running)
+                api.process = lambda pid, answer=answer: answer
+                status, stdout, stderr = self.run_driver(api)
+                self.assertEqual((status, stdout), (1, ""))
+                self.assertIn("code=%s action=activate" % code, stderr)
+                self.assertEqual(api.appkit.lookups, [])
+                self.assertEqual(running.options, [])
+
+    def test_absent_application_or_failed_activation_is_a_refusal(self):
+        for running in (None, FakeRunningApplication(False)):
+            with self.subTest(running=running):
+                api = activation_api(running=running)
+                status, stdout, stderr = self.run_driver(api)
+                self.assertEqual((status, stdout), (1, ""))
+                self.assertIn("code=activation-failed", stderr)
+                self.assertNotIn(self.EXE, stderr)
+                if running is not None:
+                    self.assertEqual(running.options, [1])
+
+    def test_activation_exception_is_one_refusal_and_no_retry(self):
+        running = FakeRunningApplication(RuntimeError("boom"))
+        api = activation_api(running=running)
+        status, stdout, stderr = self.run_driver(api)
+        self.assertEqual((status, stdout), (1, ""))
+        self.assertIn("code=activation-failed", stderr)
+        self.assertEqual(running.options, [1])
+
+    def test_process_without_an_activation_hook_never_claims_success(self):
+        api = activation_api(running=FakeRunningApplication(True))
+
+        class Hookless(object):
+            supports_activation = True
+
+        plan = contract.parse_request(json.dumps(
+            {"activate_pid": self.PID, "executable": self.EXE}))
+        with self.assertRaises(contract.ContractError) as error:
+            contract.execute(plan, Hookless())
+        self.assertEqual(error.exception.code, "activation-unsupported")
+        self.assertEqual(api.appkit.lookups, [])
+
+    def test_non_macos_adapter_does_not_claim_activation_success(self):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        win32 = FakeWin32()
+        injected = windows.WindowsAdapter(api=win32, uia=FakeUia())
+        with patch.object(windows.WindowsAdapter, "__init__",
+                          lambda self: self.__dict__.update(injected.__dict__)):
+            status = driver.main(argv=["--platform", "windows"],
+                                 stdin=io.BytesIO(json.dumps(
+                                     {"activate_pid": self.PID, "executable": EXE}).encode()),
+                                 stdout=stdout, stderr=stderr)
+        self.assertEqual((status, stdout.getvalue()), (1, ""))
+        self.assertIn("code=activation-unsupported", stderr.getvalue())
+        self.assertEqual((win32.activations, win32.clicks), (0, []))
 
 
 class MacCapabilityTests(unittest.TestCase):

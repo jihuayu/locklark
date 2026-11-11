@@ -9,7 +9,9 @@ The platform drivers (browser_native_windows.py, browser_native_macos.py) are
 ordinary external input agents: they observe public window/accessibility
 metadata, then emit ONE physical pointer/keyboard batch through the OS input
 queue. They never use product hooks, accessibility value/invoke patterns or
-approval injection.
+approval injection. A disjoint request form carries no title and no action: it
+only asks the adapter to activate ONE exact (pid, executable) process after its
+own identity proof, and observes no window and emits no input.
 
 Importing this module must not initialise X11, COM, UIA or AppKit. Only the
 existing X11 driver's literal label tuple is imported; that module defines
@@ -41,7 +43,7 @@ WIDGET_FIELDS = ("role", "name", "enabled", "visible", "bounds")
 
 PLATFORMS = ("linux", "windows", "macos", "unknown")
 ACTIONS = ("setup", "discover", "reference", "label-click", "label-wait",
-           "text-entry", "key", "pointer", "snapshot", "absence")
+           "text-entry", "key", "pointer", "snapshot", "absence", "activate")
 
 MAX_REQUEST_BYTES = 65536
 MAX_ACTIONS = 64
@@ -61,6 +63,9 @@ REQUEST_KEYS = frozenset({"title", "title_prefix", "executable", "actions",
                           "inspect", "wait_absent", "preserve_focus"})
 ACTION_KEYS = frozenset({"click_label", "wait_label", "click", "text", "key"})
 ABSENCE_KEYS = frozenset({"title", "executable", "actions", "wait_absent"})
+# Activation-only form: exact {pid, executable} and nothing else. It is disjoint
+# from every normal request above and authorises no observation or input.
+ACTIVATION_KEYS = frozenset({"activate_pid", "executable"})
 
 # Fixed code -> fixed message. Nothing here is ever formatted with request data.
 ERROR_MESSAGES = {
@@ -70,6 +75,8 @@ ERROR_MESSAGES = {
     "a11y-tree-limit": "Native accessibility tree limit",
     "a11y-unavailable": "Native accessibility unavailable",
     "absence-invalid": "Exact native-window absence request required",
+    "activation-invalid": "Exact native-process activation request required",
+    "activation-failed": "Native process activation not proved",
     "activation-unsupported": "Native window activation unsupported",
     "action-invalid": "Native acceptance action invalid",
     "action-unsupported": "Native acceptance action unsupported",
@@ -217,6 +224,20 @@ def _action(index, value):
     return action
 
 
+def _activation_plan(document):
+    """Exactly {activate_pid: positive plain int, executable: absolute path}."""
+    if set(document) != ACTIVATION_KEYS:
+        raise ContractError("activation-invalid")
+    pid = document["activate_pid"]
+    if type(pid) is not int or pid <= 0:
+        raise ContractError("activation-invalid")
+    if not _absolute_path(document["executable"]):
+        raise ContractError("executable-invalid")
+    return {"activation": {"pid": pid, "executable": document["executable"]},
+            "title": None, "title_prefix": None, "executable": None, "actions": (),
+            "inspect": False, "wait_absent": False, "preserve_focus": False}
+
+
 def parse_request(raw):
     """Strictly validate one bounded request document; return a normalised plan."""
     if type(raw) is str:
@@ -233,6 +254,8 @@ def parse_request(raw):
         raise ContractError("request-invalid")
     if type(document) is not dict:
         raise ContractError("request-invalid")
+    if "activate_pid" in document:
+        return _activation_plan(document)
     if [key for key in document if key not in REQUEST_KEYS]:
         raise ContractError("request-unknown-key")
     plan = {
@@ -656,6 +679,39 @@ def await_absent(plan, adapter, budget):
         sleep(POLL)
 
 
+# -------------------------------------------------------------- activation ----
+
+# The only result an activation-only request can produce. It claims nothing
+# about windows, focus, foreground content or product effect.
+ACTIVATION_RESULT = {"activated": True}
+FAILURE_CONTEXT = {"action": "setup", "index": -1}
+
+
+def execute_activation(plan, adapter):
+    """One identity-proved NSRunningApplication activation; no observation.
+
+    The adapter's ``activate_process(pid, executable)`` must itself prove the
+    exact pid/executable/uid identity and perform exactly one OS activation.
+    It returns the literal ``True`` only after that one call reported success.
+    Any other verdict, a raised error or a missing hook fails closed; nothing
+    is retried, no window is listed and no input is emitted.
+    """
+    FAILURE_CONTEXT["action"], FAILURE_CONTEXT["index"] = "activate", -1
+    request = plan["activation"]
+    hook = getattr(adapter, "activate_process", None)
+    if hook is None or getattr(adapter, "supports_activation", False) is not True:
+        raise ContractError("activation-unsupported")
+    try:
+        verdict = hook(request["pid"], request["executable"])
+    except ContractError:
+        raise
+    except Exception:
+        raise ContractError("activation-failed")
+    if verdict is not True:
+        raise ContractError("activation-failed")
+    return dict(ACTIVATION_RESULT)
+
+
 # ----------------------------------------------------------------- execute ----
 
 def _center(rect):
@@ -671,13 +727,13 @@ def _offset_click(fresh, point):
     return x, y
 
 
-FAILURE_CONTEXT = {"action": "setup", "index": -1}
-
-
 def execute(plan, adapter):
     """Run one validated plan against a platform adapter and return safe JSON."""
     budget = Budget()
     check = getattr(adapter, "check_capability", None)
+    if plan.get("activation") is not None:
+        # Activation-only: no capability prompt and no accessibility query.
+        return execute_activation(plan, adapter)
     if check is not None:
         check()
     if plan["wait_absent"]:

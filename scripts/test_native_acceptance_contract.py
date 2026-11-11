@@ -241,6 +241,137 @@ class RequestValidationTests(unittest.TestCase):
         self.assertEqual(int(done.stdout.strip()), len(contract.KNOWN_SYNTHETIC_LABELS))
 
 
+def activation(pid=4242, executable=EXE):
+    return json.dumps({"activate_pid": pid, "executable": executable})
+
+
+class ActivationRequestTests(unittest.TestCase):
+    def test_exact_pid_and_executable_form_is_accepted(self):
+        plan = contract.parse_request(activation())
+        self.assertEqual(plan["activation"], {"pid": 4242, "executable": EXE})
+        self.assertEqual(plan["actions"], ())
+        self.assertIsNone(plan["title"])
+        self.assertFalse(plan["inspect"] or plan["wait_absent"] or plan["preserve_focus"])
+
+    def test_pid_must_be_a_positive_plain_int(self):
+        for pid in (True, False, 0, -1, 1.0, "4242", None, [4242]):
+            with self.subTest(pid=pid):
+                with self.assertRaises(contract.ContractError) as error:
+                    contract.parse_request(activation(pid=pid))
+                self.assertEqual(error.exception.code, "activation-invalid")
+        self.assertEqual(contract.parse_request(activation(pid=2))["activation"]["pid"], 2)
+
+    def test_executable_must_be_absolute_and_exact(self):
+        for executable in ("locklark-desktop", "", "/opt//locklark", None, ["/opt/x"]):
+            with self.subTest(executable=executable):
+                with self.assertRaises(contract.ContractError) as error:
+                    contract.parse_request(activation(executable=executable))
+                self.assertEqual(error.exception.code, "executable-invalid")
+        with self.assertRaises(contract.ContractError) as error:
+            contract.parse_request(json.dumps({"activate_pid": 4242}))
+        self.assertEqual(error.exception.code, "activation-invalid")
+
+    def test_title_action_inspect_and_window_fields_are_rejected(self):
+        extras = ({"title": TITLE}, {"title_prefix": "Locklark"},
+                  {"actions": [{"click_label": LABEL}]}, {"inspect": False},
+                  {"wait_absent": True}, {"preserve_focus": True},
+                  {"window": 0x200003}, {"value": PRIVATE})
+        for extra in extras:
+            with self.subTest(extra=sorted(extra)):
+                raw = json.dumps(dict({"activate_pid": 4242, "executable": EXE}, **extra))
+                with self.assertRaises(contract.ContractError) as error:
+                    contract.parse_request(raw)
+                self.assertEqual(error.exception.code, "activation-invalid")
+                self.assertNotIn(PRIVATE, contract.failure_line(error.exception, "activate", -1, "macos"))
+
+    def test_duplicate_key_and_oversize_keep_their_fixed_refusals(self):
+        with self.assertRaises(contract.ContractError) as error:
+            contract.parse_request('{"activate_pid":4242,"activate_pid":4242,"executable":"%s"}' % EXE)
+        self.assertEqual(error.exception.code, "request-duplicate-key")
+        with self.assertRaises(contract.ContractError) as error:
+            contract.parse_request(activation(executable="/" + "a" * contract.MAX_REQUEST_BYTES))
+        self.assertEqual(error.exception.code, "request-oversize")
+
+    def test_normal_requests_keep_their_matching_and_input_authorisation(self):
+        plan = contract.parse_request(request(inspect=True))
+        self.assertNotIn("activation", plan)
+        adapter = SpyAdapter()
+        budget = contract.Budget()
+        window = contract.find_window(plan, adapter, budget)
+        self.assertEqual(window["id"], WINDOW["id"])
+        self.assertEqual(adapter.calls, ["list_windows"])
+        self.assertEqual(adapter.activations, 0)
+
+    def test_activation_only_request_never_observes_or_inputs(self):
+        adapter = SpyAdapter()
+
+        def activate_process(pid, executable):
+            adapter.calls.append(("activate_process", pid, executable))
+            return True
+
+        adapter.activate_process = activate_process
+        result = contract.execute(contract.parse_request(activation()), adapter)
+        self.assertEqual(result, {"activated": True})
+        self.assertEqual(adapter.calls, [("activate_process", 4242, EXE)])
+        self.assertEqual(adapter.activations, 0)
+
+    def test_activation_refusals_are_fixed_without_request_values(self):
+        class Refusing(SpyAdapter):
+            def activate_process(self, pid, executable):
+                raise contract.ContractError("process-untrusted")
+
+        plan = contract.parse_request(activation())
+        with self.assertRaises(contract.ContractError) as error:
+            contract.execute(plan, Refusing())
+        line = contract.failure_line(error.exception, "activate", -1, "macos")
+        self.assertEqual(line, "Native acceptance input failed [code=process-untrusted "
+                               "action=activate index=-1 platform=macos]")
+        self.assertNotIn(EXE, line)
+
+    def test_only_a_literal_true_activation_result_succeeds(self):
+        for verdict, code in ((True, None), (1, "activation-failed"), (None, "activation-failed"),
+                              ("yes", "activation-failed")):
+            with self.subTest(verdict=verdict):
+                class Verdict(SpyAdapter):
+                    def activate_process(self, pid, executable):
+                        self.activations += 1
+                        return verdict
+
+                plan = contract.parse_request(activation())
+                if code is None:
+                    self.assertEqual(contract.execute(plan, Verdict()), {"activated": True})
+                else:
+                    with self.assertRaises(contract.ContractError) as error:
+                        contract.execute(plan, Verdict())
+                    self.assertEqual(error.exception.code, code)
+
+    def test_run_stdin_reports_fixed_activation_result_and_failure(self):
+        def stdin_adapter(verdict):
+            class Adapter(SpyAdapter):
+                def activate_process(self, pid, executable):
+                    self.calls.append(("activate_process", pid, executable))
+                    if isinstance(verdict, Exception):
+                        raise verdict
+                    return verdict
+            return Adapter()
+
+        adapter = stdin_adapter(True)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        status = contract.run_stdin(adapter, "macos", stdin=io.BytesIO(activation().encode()),
+                                    stdout=stdout, stderr=stderr)
+        self.assertEqual((status, stdout.getvalue(), stderr.getvalue()),
+                         (0, '{"activated": true}\n', ""))
+        self.assertEqual(adapter.calls, [("activate_process", 4242, EXE)])
+        adapter = stdin_adapter(OSError(PRIVATE))
+        stdout, stderr = io.StringIO(), io.StringIO()
+        status = contract.run_stdin(adapter, "macos", stdin=io.BytesIO(activation().encode()),
+                                    stdout=stdout, stderr=stderr)
+        self.assertEqual((status, stdout.getvalue()), (1, ""))
+        self.assertEqual(stderr.getvalue(), "Native acceptance input failed [code=activation-failed "
+                                            "action=activate index=-1 platform=macos]\n")
+        self.assertNotIn(PRIVATE, stderr.getvalue())
+
+
 class ExecutionGuardTests(unittest.TestCase):
     def execute(self, adapter, **overrides):
         plan = contract.parse_request(request(**overrides))
