@@ -79,12 +79,16 @@ func (c cliRunBrokerCall) prepare(ctx context.Context, root string, request pers
 	// the request, blanked in place, and dropped on every return path after
 	// describe and request: each Args and Helper element, every Passthru
 	// entry, and every target element. Clear alone only drops its own
-	// references, so the element blanks are explicit. The request belongs to
-	// the transport and never aliases these containers.
+	// references, so the element blanks are explicit.
 	req := browserhost.CLIRunBrokerRequest{V: 1, VaultPath: c.Binding.VaultPath, Scope: scope.Clone(), Targets: make([]personal.CLIBrokerTarget, len(targets))}
 	for i, target := range targets {
 		req.Targets[i] = personal.CLIBrokerTarget{Slot: target.Slot, ID: target.ID, Revision: target.Revision, Field: target.Field}
 	}
+	// browserhost.RequestCLIRun never clears caller-owned request containers,
+	// so the request's own Scope and Targets copies are blanked in place as
+	// well once describe and request have returned. PreparedValues are never
+	// touched here: a success returns them to RunBrokeredBundle.
+	defer clearCLIRunBrokerCallRequest(&req)
 	want := len(targets)
 	clearCLIRunBrokerCallScope(&scope)
 	clear(targets)
@@ -205,6 +209,24 @@ func clearCLIRunBrokerCallScope(scope *browserhost.CLIRunScope) {
 		scope.Helper[i] = ""
 	}
 	scope.Clear()
+}
+
+// clearCLIRunBrokerCallRequest blanks a request this callback built once it is
+// no longer needed: every Scope Args and Helper element, every Passthru entry,
+// and every target element is overwritten in place before the containers are
+// dropped. It only touches the request's own copies, never the transport's.
+func clearCLIRunBrokerCallRequest(req *browserhost.CLIRunBrokerRequest) {
+	if req == nil {
+		return
+	}
+	clearCLIRunBrokerCallScope(&req.Scope)
+	req.Scope = browserhost.CLIRunScope{}
+	clear(req.Targets)
+	for i := range req.Targets {
+		req.Targets[i] = personal.CLIBrokerTarget{}
+	}
+	req.Targets = nil
+	req.VaultPath = ""
 }
 
 // clearCLIRunBrokerValues zeroes an unusable value set the client rejected.

@@ -373,6 +373,9 @@ func TestCLIRunBrokerSuccessRendersAndExecutes(t *testing.T) {
 // transport receives is whole on every reply path: the callback clears its
 // own scope and targets before the request is shown, described, and sent, so
 // the request's element copies are the only thing that can still hold them.
+// Those copies are themselves blanked once prepare returns (covered by
+// TestCLIRunBrokerRequestClearedAfterReturn), so each seam captures its own
+// copies of the containers it must inspect later.
 func TestCLIRunBrokerRequestSurvivesCallbackClear(t *testing.T) {
 	type replyFunc func() (browserhost.CLIRunBrokerResponse, error)
 	for name, reply := range map[string]replyFunc{
@@ -404,25 +407,108 @@ func TestCLIRunBrokerRequestSurvivesCallbackClear(t *testing.T) {
 				t.Fatal("request fixture invalid:", err)
 			}
 			t.Setenv("LOCKLARK_TEST_TOKEN", "")
-			var described browserhost.CLIRunBrokerRequest
+			var describedScope browserhost.CLIRunScope
+			var describedTargets []personal.CLIBrokerTarget
 			var sent browserhost.CLIRunBrokerRequest
+			var sentScope browserhost.CLIRunScope
+			var sentTargets []personal.CLIBrokerTarget
 			cliRunBrokerDescribe = func(req browserhost.CLIRunBrokerRequest) string {
-				described = req
+				// The callback blanks its own request copy after describe
+				// returns, so capture independent copies of the containers.
+				describedScope = req.Scope.Clone()
+				describedTargets = append([]personal.CLIBrokerTarget(nil), req.Targets...)
 				return ""
 			}
 			cliRunBrokerRequest = func(_ context.Context, req browserhost.CLIRunBrokerRequest) (browserhost.CLIRunBrokerResponse, error) {
-				sent = req
+				// Likewise after request returns; only the scalars can be
+				// inspected from the original copy afterwards.
+				sent, sentScope = req, req.Scope.Clone()
+				sentTargets = append([]personal.CLIBrokerTarget(nil), req.Targets...)
 				return reply()
 			}
 			_, _ = f.call().run(context.Background())
 			wantTargets := []personal.CLIBrokerTarget{{Slot: "token", ID: f.slotID, Revision: f.slotRev, Field: f.field}}
-			for label, req := range map[string]browserhost.CLIRunBrokerRequest{"described": described, "sent": sent} {
-				scope := req.Scope
-				if req.V != 1 || req.VaultPath != f.binding.VaultPath || scope.Program != shim || !reflect.DeepEqual(scope.Args, []string{"--fixture-arg"}) ||
-					!reflect.DeepEqual(scope.Helper, f.request.HelperPath) || !reflect.DeepEqual(scope.Passthru, map[string]string{"NO_COLOR": "1"}) ||
-					!isFreshNonce(scope.Nonce) || !reflect.DeepEqual(req.Targets, wantTargets) {
-					t.Fatalf("%s request not whole: %#v %#v", label, scope, req.Targets)
+			whole := func(scope browserhost.CLIRunScope, targets []personal.CLIBrokerTarget) bool {
+				return scope.Program == shim && reflect.DeepEqual(scope.Args, []string{"--fixture-arg"}) &&
+					reflect.DeepEqual(scope.Helper, f.request.HelperPath) && reflect.DeepEqual(scope.Passthru, map[string]string{"NO_COLOR": "1"}) &&
+					isFreshNonce(scope.Nonce) && reflect.DeepEqual(targets, wantTargets)
+			}
+			if describedScope.Program == "" || !whole(describedScope, describedTargets) {
+				t.Fatalf("described request not whole: %#v %#v", describedScope, describedTargets)
+			}
+			if sent.V != 1 || !whole(sentScope, sentTargets) {
+				t.Fatalf("sent request not whole: %#v %#v", sentScope, sentTargets)
+			}
+		})
+	}
+}
+
+// TestCLIRunBrokerRequestClearedAfterReturn proves the request copy the
+// transport receives is blanked on every reply path once prepare returns:
+// the sent Args and Helper elements, passthrough entries, and target elements
+// are cleared in place through the captured backing containers. A successful
+// PreparedValues set is still returned to RunBrokeredBundle untouched.
+func TestCLIRunBrokerRequestClearedAfterReturn(t *testing.T) {
+	type replyFunc func() (browserhost.CLIRunBrokerResponse, error)
+	for name, reply := range map[string]replyFunc{
+		"success": func() (browserhost.CLIRunBrokerResponse, error) {
+			return auditedReply("token", cliBrokerFixturePassword), nil
+		},
+		"refused": func() (browserhost.CLIRunBrokerResponse, error) {
+			return browserhost.CLIRunBrokerResponse{}, browserhost.ErrCLIRunRefused
+		},
+		"malformed": func() (browserhost.CLIRunBrokerResponse, error) {
+			return browserhost.CLIRunBrokerResponse{V: 0}, nil
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newCLIBrokerFixture(t)
+			installCLIRunBrokerSeams(t, true)
+			shim := filepath.Join(t.TempDir(), "locklark.test")
+			if err := os.WriteFile(shim, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+				t.Fatal("shim program unavailable")
+			}
+			f.request.Program, f.request.Args = shim, []string{"--fixture-arg", "--fixture-arg-two"}
+			f.request.HelperPath = []string{t.TempDir(), filepath.Dir(shim)}
+			f.request.Passthrough = map[string]string{"NO_COLOR": "1", "TERM": "dumb"}
+			if err := f.request.Validate(f.targets); err != nil {
+				t.Fatal("request fixture invalid:", err)
+			}
+			t.Setenv("LOCKLARK_TEST_TOKEN", "")
+			var args, helper []string
+			var slot, id, revision, field *string
+			var passthru map[string]string
+			cliRunBrokerRequest = func(_ context.Context, req browserhost.CLIRunBrokerRequest) (browserhost.CLIRunBrokerResponse, error) {
+				// Capture the backing containers only; no deep clones.
+				args, helper, passthru = req.Scope.Args, req.Scope.Helper, req.Scope.Passthru
+				for i := range req.Targets {
+					if i == 0 {
+						slot, id, revision, field = &req.Targets[i].Slot, &req.Targets[i].ID, &req.Targets[i].Revision, &req.Targets[i].Field
+					}
 				}
+				if len(args) != 2 || len(helper) != 2 || len(passthru) != 2 || len(req.Targets) != 1 {
+					t.Fatalf("captured request incomplete: args=%v helper=%v passthru=%v targets=%v", args, helper, passthru, req.Targets)
+				}
+				return reply()
+			}
+			_, _ = f.call().run(context.Background())
+			for i, arg := range args {
+				if arg != "" {
+					t.Fatalf("sent argument %d not cleared: %q", i, arg)
+				}
+			}
+			for i, directory := range helper {
+				if directory != "" {
+					t.Fatalf("sent helper %d not cleared: %q", i, directory)
+				}
+			}
+			for key, value := range passthru {
+				if key != "" || value != "" {
+					t.Fatalf("sent passthrough entry not cleared: %q=%q", key, value)
+				}
+			}
+			if slot == nil || *slot != "" || *id != "" || *revision != "" || *field != "" {
+				t.Fatalf("sent target element not cleared: %q %q %q %q", *slot, *id, *revision, *field)
 			}
 		})
 	}
