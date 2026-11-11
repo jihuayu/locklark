@@ -8,11 +8,19 @@
 // https://graph.microsoft.com/v1.0; the endpoint and HTTP client seams used by
 // the tests are unexported and are nil in production.
 //
-// Read fetches item metadata before and after the content. Both metadata
-// responses must describe the same file: the requested item ID, a file facet,
-// a non-empty bounded opaque ETag, and a size between zero and
-// vaultfilebackend.MaxValueSize. The ETag is returned byte-for-byte as the
-// Revision; it is never parsed, quoted, unquoted or otherwise normalized.
+// FetchCandidate observes item metadata before and after the content. Both
+// metadata responses must describe the same file: the requested item ID, a
+// file facet, a non-empty bounded opaque eTag, and a size between zero and
+// vaultfilebackend.MaxValueSize. The observed eTag is returned byte-for-byte;
+// it is never parsed, quoted, unquoted or otherwise normalized.
+//
+// The result is deliberately a candidate, not a verified snapshot. Graph has
+// no atomic metadata-plus-content read, so the before/after observations are
+// change detection only: an A -> B -> A change between them is undetectable,
+// and equal eTags never prove that the bytes belong to the observed version.
+// The package therefore exposes no backend, no ReadResult, no Revision and no
+// verified-snapshot API; FetchCandidate's observed metadata must not be used
+// as a conditional-write revision.
 //
 // The /content route is requested from the fixed Graph item. Exactly one 302
 // redirect is accepted and is followed manually: the Location must be an
@@ -23,7 +31,7 @@
 // the access token is sent only to the fixed Graph endpoint, never to the
 // pre-authenticated download host.
 //
-// Read is a read-only backend operation. Its errors wrap only fixed
+// FetchCandidate is a read-only transport operation. Its errors wrap only fixed
 // vaultfilebackend sentinels and the package's fixed sentinels; transport,
 // JSON, token-source and provider errors are deliberately not placed in the
 // error chain, because their messages can contain a token, a provider body, a
@@ -89,7 +97,8 @@ var (
 
 // AccessTokenSource is the narrow token seam. AccessToken must return a
 // short-lived access token held only in memory. A Reader calls it once per
-// Read and never stores or logs the result. An error is not wrapped by Read.
+// FetchCandidate and never stores or logs the result. The source's error is
+// not wrapped by FetchCandidate.
 type AccessTokenSource interface {
 	AccessToken(ctx context.Context) (string, error)
 }
@@ -119,7 +128,7 @@ type ReaderConfig struct {
 	DriveID string
 	// ItemID is the Graph drive item to read. It must identify a file.
 	ItemID string
-	// Tokens supplies the in-memory access token for each Read.
+	// Tokens supplies the in-memory access token for each FetchCandidate.
 	Tokens AccessTokenSource
 }
 
@@ -160,74 +169,112 @@ func newReader(cfg ReaderConfig, endpoint *url.URL, client *http.Client) (*Reade
 	return r, nil
 }
 
-// Read obtains one access token, reads the item metadata, downloads the
-// content through the documented /content route, and reads the metadata again.
-// It returns the downloaded bytes and the exact ETag of the version that both
-// metadata reads agree on.
+// FetchCandidate obtains one access token, observes the item metadata,
+// downloads the content through the documented /content route, and observes
+// the metadata again.
+//
+// The returned FetchCandidate is an explicitly non-atomic transport result. It
+// does not prove that Bytes belong to ObservedGraphETag or
+// ObservedGraphSize: the two metadata observations bracket the download, but
+// they cannot detect an A -> B -> A change in which both observations see A
+// while the download returned B. Equal observations are therefore not a
+// version proof.
+//
+// A disagreement between the two observations (ETag or size) is treated as
+// change detection only and fails with ErrUnknown; it is never a success.
 //
 // Error mapping:
-//   - A cancelled context is ErrDenied and keeps the context cause in the
-//     chain.
+//   - A nil or cancelled context is ErrDenied and keeps the context cause in
+//     the chain.
 //   - A token-source failure is ErrAccessToken and ErrDenied; the source error
 //     is not retained.
 //   - A missing item is ErrNotFound. Other 4xx responses are ErrDenied. 429,
-//     5xx, unexpected statuses, transport failures and a version that changes
-//     between the two metadata reads are ErrUnknown.
+//     5xx, unexpected statuses, transport failures and a metadata change
+//     between the two observations are ErrUnknown.
 //   - Missing/invalid metadata is ErrCorrupt and ErrInvalidMetadata. A missing
 //     file facet is ErrUnsupported and ErrInvalidMetadata.
-//   - Content larger than MaxValueSize, or content whose declared or actual
-//     length disagrees with metadata, is ErrCorrupt.
+//   - Metadata or content larger than its bound, or content whose declared or
+//     actual length disagrees with metadata, is ErrCorrupt.
 //   - A malformed, non-HTTPS, userinfo-bearing, fragment-bearing or oversize
 //     Location, and any redirect after the accepted one, is ErrUnsafeRedirect
 //     and ErrDenied.
-func (r *Reader) Read(ctx context.Context) (vaultfilebackend.ReadResult, error) {
+func (r *Reader) FetchCandidate(ctx context.Context) (FetchCandidate, error) {
+	if ctx == nil {
+		return FetchCandidate{}, deniedContext(context.Canceled)
+	}
 	if err := ctx.Err(); err != nil {
-		return vaultfilebackend.ReadResult{}, deniedContext(err)
+		return FetchCandidate{}, deniedContext(err)
 	}
 
 	token, err := r.tokens.AccessToken(ctx)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return vaultfilebackend.ReadResult{}, deniedContext(ctxErr)
+			return FetchCandidate{}, deniedContext(ctxErr)
 		}
-		return vaultfilebackend.ReadResult{}, fmt.Errorf("%w: %w", vaultfilebackend.ErrDenied, ErrAccessToken)
+		return FetchCandidate{}, fmt.Errorf("%w: %w", vaultfilebackend.ErrDenied, ErrAccessToken)
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return vaultfilebackend.ReadResult{}, deniedContext(ctxErr)
+		return FetchCandidate{}, deniedContext(ctxErr)
 	}
 	if !validAccessToken(token) {
-		return vaultfilebackend.ReadResult{}, fmt.Errorf("%w: %w", vaultfilebackend.ErrDenied, ErrAccessToken)
+		return FetchCandidate{}, fmt.Errorf("%w: %w", vaultfilebackend.ErrDenied, ErrAccessToken)
 	}
 
 	before, err := r.readMetadata(ctx, token)
 	if err != nil {
-		return vaultfilebackend.ReadResult{}, err
+		return FetchCandidate{}, err
 	}
 
 	data, err := r.readContent(ctx, token, before.size)
 	if err != nil {
-		return vaultfilebackend.ReadResult{}, err
+		return FetchCandidate{}, err
 	}
 	if err := ctx.Err(); err != nil {
-		return vaultfilebackend.ReadResult{}, deniedContext(err)
+		return FetchCandidate{}, deniedContext(err)
 	}
 
 	after, err := r.readMetadata(ctx, token)
 	if err != nil {
-		return vaultfilebackend.ReadResult{}, err
+		return FetchCandidate{}, err
 	}
 	if before.etag != after.etag || before.size != after.size {
-		// The bytes and the metadata no longer describe one committed version.
-		// Read is side-effect free, so the caller may simply retry.
-		return vaultfilebackend.ReadResult{}, fmt.Errorf("%w: item changed while it was being read", vaultfilebackend.ErrUnknown)
+		// Change detection only: the observations disagree, so nothing
+		// candidate-shaped is returned. The inverse does not hold; agreement
+		// does not prove that Bytes match the observed version.
+		return FetchCandidate{}, fmt.Errorf("%w: item changed while it was being fetched", vaultfilebackend.ErrUnknown)
 	}
 	if int64(len(data)) != after.size {
-		return vaultfilebackend.ReadResult{}, fmt.Errorf("%w: content length does not match the final metadata size", vaultfilebackend.ErrCorrupt)
+		return FetchCandidate{}, fmt.Errorf("%w: content length does not match the final metadata size", vaultfilebackend.ErrCorrupt)
 	}
 	if err := ctx.Err(); err != nil {
-		return vaultfilebackend.ReadResult{}, deniedContext(err)
+		return FetchCandidate{}, deniedContext(err)
 	}
-	return vaultfilebackend.ReadResult{Bytes: data, Revision: vaultfilebackend.Revision(before.etag)}, nil
+	return FetchCandidate{
+		Bytes:             data,
+		ObservedGraphETag: after.etag,
+		ObservedGraphSize: after.size,
+	}, nil
+}
+
+// FetchCandidate is the result of Reader.FetchCandidate: downloaded bytes
+// together with metadata observed immediately before and after the download.
+//
+// It is not a verified snapshot and not a vaultfilebackend.Revision. The
+// observed metadata is not a verified version token, is not a
+// compare-and-swap revision, and must not be passed to a backend conditional
+// write such as ReplaceIfVersion. The observations cannot exclude a change
+// that reverted to the observed value between them, so Bytes may belong to a
+// different version than ObservedGraphETag describes. Callers that need a
+// verified version must authenticate the content and verify the version by a
+// mechanism that does not rely on these observations.
+type FetchCandidate struct {
+	// Bytes is a private copy of the downloaded content.
+	Bytes []byte
+	// ObservedGraphETag is the opaque Graph eTag observed by both metadata
+	// reads, byte-for-byte as received. It is neither parsed nor normalized.
+	ObservedGraphETag string
+	// ObservedGraphSize is the size in bytes reported by Graph.
+	ObservedGraphSize int64
 }
 
 type itemMetadata struct {
@@ -269,7 +316,7 @@ func (r *Reader) readMetadata(ctx context.Context, token string) (validatedMetad
 	if resp.ContentLength > maxMetadataJSONSize {
 		return validatedMetadata{}, invalidMetadata("metadata body is too large")
 	}
-	body, err := readCapped(ctx, resp.Body, maxMetadataJSONSize)
+	body, err := readCapped(resp.Body, maxMetadataJSONSize)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return validatedMetadata{}, deniedContext(ctxErr)
@@ -278,6 +325,11 @@ func (r *Reader) readMetadata(ctx context.Context, token string) (validatedMetad
 	}
 	if err := ctx.Err(); err != nil {
 		return validatedMetadata{}, deniedContext(err)
+	}
+	// encoding/json replaces invalid UTF-8 in strings with U+FFFD, which would
+	// silently alter an opaque eTag or ID. Reject the body before that happens.
+	if !utf8.Valid(body) {
+		return validatedMetadata{}, invalidMetadata("metadata body is not valid UTF-8")
 	}
 
 	var md itemMetadata
@@ -373,7 +425,7 @@ func readContentResponse(ctx context.Context, resp *http.Response, expectedSize 
 	if resp.ContentLength >= 0 && resp.ContentLength != expectedSize {
 		return nil, fmt.Errorf("%w: declared content length does not match metadata", vaultfilebackend.ErrCorrupt)
 	}
-	data, err := readCapped(ctx, resp.Body, int64(vaultfilebackend.MaxValueSize))
+	data, err := readCapped(resp.Body, int64(vaultfilebackend.MaxValueSize))
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, deniedContext(ctxErr)
@@ -408,18 +460,35 @@ func (r *Reader) itemURL(metadata bool) (string, error) {
 	return raw, nil
 }
 
+// httpClient returns a fresh client for one request. The transport is also
+// fresh so that no pooled connection or state is shared between calls, and any
+// injected redirect policy is replaced: redirects are handled exactly once and
+// manually, never by net/http.
 func (r *Reader) httpClient() *http.Client {
-	base := r.client
-	if base == nil {
-		base = &http.Client{}
+	c := http.Client{}
+	if r.client != nil {
+		c = *r.client
+		c.Transport = freshTransport(r.client.Transport)
 	}
-	c := *base
-	// Override any injected policy: redirects are handled exactly once and
-	// manually, never by net/http.
 	c.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
 	return &c
+}
+
+func freshTransport(rt http.RoundTripper) http.RoundTripper {
+	switch t := rt.(type) {
+	case nil:
+		return &http.Transport{}
+	case *http.Transport:
+		fresh := t.Clone()
+		if fresh.TLSClientConfig != nil {
+			fresh.TLSClientConfig = fresh.TLSClientConfig.Clone()
+		}
+		return fresh
+	default:
+		return rt
+	}
 }
 
 func validEndpoint(u *url.URL) bool {
@@ -540,11 +609,14 @@ func deniedContext(err error) error {
 // errTooLarge is internal only; its message is never returned directly.
 var errTooLarge = errors.New("body larger than limit")
 
-// readCapped reads at most limit bytes and fails with errTooLarge as soon as
-// the body is longer. The caller maps the error to a fixed sentinel, so a
-// transport or provider error is never exposed.
-func readCapped(ctx context.Context, body io.Reader, limit int64) ([]byte, error) {
-	data, err := io.ReadAll(io.LimitReader(&contextReader{ctx: ctx, r: body}, limit+1))
+// readCapped reads at most limit bytes synchronously and fails with
+// errTooLarge as soon as the body is longer. It does not wrap the reader in a
+// goroutine: the request context cancels and closes the response body, which
+// unblocks the read, so no abandoned goroutine can write into a returned
+// buffer. The caller maps the error to a fixed sentinel, so a transport or
+// provider error is never exposed.
+func readCapped(body io.Reader, limit int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(body, limit+1))
 	if err != nil {
 		return nil, err
 	}
@@ -552,33 +624,4 @@ func readCapped(ctx context.Context, body io.Reader, limit int64) ([]byte, error
 		return nil, errTooLarge
 	}
 	return data, nil
-}
-
-// contextReader makes a body read observe the caller's cancellation even when
-// the underlying reader does not. The response body is closed by the caller,
-// which unblocks an abandoned read.
-type contextReader struct {
-	ctx context.Context
-	r   io.Reader
-}
-
-func (c *contextReader) Read(p []byte) (int, error) {
-	if err := c.ctx.Err(); err != nil {
-		return 0, err
-	}
-	type result struct {
-		n   int
-		err error
-	}
-	done := make(chan result, 1)
-	go func() {
-		n, err := c.r.Read(p)
-		done <- result{n: n, err: err}
-	}()
-	select {
-	case res := <-done:
-		return res.n, res.err
-	case <-c.ctx.Done():
-		return 0, c.ctx.Err()
-	}
 }

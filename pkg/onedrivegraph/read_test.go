@@ -424,7 +424,7 @@ func TestNewReaderValidationAndFixedProductionEndpoint(t *testing.T) {
 	}
 }
 
-func TestReadSuccessPreservesExactETagAndOmitsAuthorizationOnDownload(t *testing.T) {
+func TestFetchCandidateSuccessPreservesExactETagAndOmitsAuthorizationOnDownload(t *testing.T) {
 	f := newGraphFixture(t)
 	f.setConfig(func(c *fixtureConfig) {
 		c.content = []byte("synthetic encrypted vault file body")
@@ -432,15 +432,18 @@ func TestReadSuccessPreservesExactETagAndOmitsAuthorizationOnDownload(t *testing
 		c.etag = testETag
 	})
 
-	result, err := f.reader(t, nil).Read(context.Background())
+	result, err := f.reader(t, nil).FetchCandidate(context.Background())
 	if err != nil {
-		t.Fatalf("Read: %v", err)
+		t.Fatalf("FetchCandidate: %v", err)
 	}
 	if string(result.Bytes) != "synthetic encrypted vault file body" {
 		t.Fatalf("bytes = %q", result.Bytes)
 	}
-	if string(result.Revision) != testETag {
-		t.Fatalf("Revision = %q, want exact opaque ETag %q", result.Revision, testETag)
+	if result.ObservedGraphETag != testETag {
+		t.Fatalf("ObservedGraphETag = %q, want exact opaque eTag %q", result.ObservedGraphETag, testETag)
+	}
+	if result.ObservedGraphSize != int64(len(result.Bytes)) {
+		t.Fatalf("ObservedGraphSize = %d, want %d", result.ObservedGraphSize, len(result.Bytes))
 	}
 
 	requests := f.recordedRequests()
@@ -480,23 +483,97 @@ func TestReadSuccessPreservesExactETagAndOmitsAuthorizationOnDownload(t *testing
 	}
 }
 
-func TestReadAcceptsDirectContentResponse(t *testing.T) {
+func TestFetchCandidateAcceptsDirectContentResponse(t *testing.T) {
 	f := newGraphFixture(t)
 	f.setConfig(func(c *fixtureConfig) {
 		c.contentStatus = http.StatusOK
 		c.content = []byte("direct synthetic body")
 		c.size = int64(len(c.content))
 	})
-	result, err := f.reader(t, nil).Read(context.Background())
+	result, err := f.reader(t, nil).FetchCandidate(context.Background())
 	if err != nil {
-		t.Fatalf("Read: %v", err)
+		t.Fatalf("FetchCandidate: %v", err)
 	}
-	if string(result.Bytes) != "direct synthetic body" || string(result.Revision) != testETag {
+	if string(result.Bytes) != "direct synthetic body" || result.ObservedGraphETag != testETag {
 		t.Fatalf("result = %+v", result)
 	}
 }
 
-func TestReadRejectsMetadataChangedDuringRead(t *testing.T) {
+// TestFetchCandidateABARaceReturnsOnlyUnverifiedCandidate demonstrates the
+// documented limit of the transport: when Graph changes A -> B -> A around the
+// download, both metadata observations report A while the downloaded bytes are
+// B. The API returns an unverified FetchCandidate, carrying no revision and no
+// verified backend result. It does not claim that Bytes match the observed
+// eTag merely because the observations agree.
+func TestFetchCandidateABARaceReturnsOnlyUnverifiedCandidate(t *testing.T) {
+	const (
+		etagA   = `"synthetic,etag:A"`
+		etagB   = `"synthetic,etag:B"`
+		content = "/content"
+
+		// Equal-size bodies, so equal observations can only come from the
+		// eTag and a race cannot show up as a size mismatch.
+		bodyA = "synthetic version A"
+		bodyB = "synthetic version B"
+	)
+	f := newGraphFixture(t)
+	f.setConfig(func(c *fixtureConfig) {
+		c.etag = etagA
+		c.content = []byte(bodyA)
+		c.size = int64(len(bodyA))
+	})
+	f.setMetadataHook(func(call int, w http.ResponseWriter, r *http.Request) bool {
+		// Both observations see version A.
+		writeJSONResponse(w, generatedMetadata(fixtureConfig{
+			itemID: testItemID,
+			etag:   etagA,
+			size:   int64(len(bodyA)),
+			file:   true,
+		}))
+		return true
+	})
+	// Between the two observations the item advances to B, and the download
+	// serves B even though version A has been restored by the time of the
+	// second observation.
+	f.setDownloadHook(func(w http.ResponseWriter, r *http.Request) bool {
+		writeBodyResponse(w, []byte(bodyB), -1)
+		return true
+	})
+
+	// Compile-time demonstration that the API yields only the candidate type:
+	// the static type is FetchCandidate, so there is no revision or backend
+	// result reachable from it, and FetchCandidate has no Read or revision-
+	// bearing method.
+	var candidate FetchCandidate
+	candidate, err := f.reader(t, nil).FetchCandidate(context.Background())
+	if err != nil {
+		t.Fatalf("FetchCandidate: %v", err)
+	}
+	requests := f.recordedRequests()
+	if len(requests) != 4 ||
+		requests[0].path != testItemPath() ||
+		requests[1].path != testItemPath()+content ||
+		requests[2].path != "/download/"+testLocationSecret ||
+		requests[3].path != testItemPath() {
+		t.Fatalf("requests = %+v, want metadata, content, download, metadata", requests)
+	}
+	if got := string(candidate.Bytes); got != bodyB {
+		t.Fatalf("candidate bytes = %q, want the raced %q", got, bodyB)
+	}
+	if candidate.ObservedGraphETag != etagA {
+		t.Fatalf("ObservedGraphETag = %q, want %q", candidate.ObservedGraphETag, etagA)
+	}
+	if candidate.ObservedGraphSize != int64(len(bodyB)) {
+		t.Fatalf("ObservedGraphSize = %d, want %d", candidate.ObservedGraphSize, len(bodyB))
+	}
+	// The observations agree, yet the bytes are from a different version. The
+	// returned value is only a candidate; it has no version token.
+	if candidate.ObservedGraphETag == etagB {
+		t.Fatalf("observed eTag must not be derived from the downloaded bytes")
+	}
+}
+
+func TestFetchCandidateRejectsMetadataChangedDuringRead(t *testing.T) {
 	base := newGraphFixture(t)
 	baseCfg := base.config()
 	cases := []struct {
@@ -523,13 +600,13 @@ func TestReadRejectsMetadataChangedDuringRead(t *testing.T) {
 				}))
 				return true
 			})
-			_, err := f.reader(t, nil).Read(context.Background())
+			_, err := f.reader(t, nil).FetchCandidate(context.Background())
 			assertErrorIs(t, err, vaultfilebackend.ErrUnknown)
 		})
 	}
 }
 
-func TestReadRejectsInvalidMetadata(t *testing.T) {
+func TestFetchCandidateRejectsInvalidMetadata(t *testing.T) {
 	overlongJSON := []byte(fmt.Sprintf(
 		`{"id":%q,"eTag":%q,"size":1,"file":{},"padding":"%s"}`,
 		testItemID, testETag, strings.Repeat("a", maxMetadataJSONSize),
@@ -598,12 +675,23 @@ func TestReadRejectsInvalidMetadata(t *testing.T) {
 			mutate: func(c *fixtureConfig) { c.metadataJSON = overlongJSON },
 			want:   []error{vaultfilebackend.ErrCorrupt, ErrInvalidMetadata},
 		},
+		{
+			// encoding/json would replace the invalid byte with U+FFFD and
+			// silently change the opaque ID. The body must be rejected before
+			// that, even though the resulting JSON would otherwise parse and
+			// match the configured item once the replacement happened.
+			name: "invalid utf8 in id",
+			mutate: func(c *fixtureConfig) {
+				c.metadataJSON = []byte(`{"id":"` + testItemID + "\xff" + `","eTag":` + strconv.Quote(testETag) + `,"size":1,"file":{}}`)
+			},
+			want: []error{vaultfilebackend.ErrCorrupt, ErrInvalidMetadata},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newGraphFixture(t)
 			f.setConfig(tc.mutate)
-			_, err := f.reader(t, nil).Read(context.Background())
+			_, err := f.reader(t, nil).FetchCandidate(context.Background())
 			assertErrorIs(t, err, tc.want...)
 			if got := contentRequestCount(f.recordedRequests()); got != 0 {
 				t.Errorf("content requests = %d, want 0 for invalid metadata", got)
@@ -622,7 +710,7 @@ func contentRequestCount(requests []fixtureRequest) int {
 	return count
 }
 
-func TestReadRejectsBodySizeProblems(t *testing.T) {
+func TestFetchCandidateRejectsBodySizeProblems(t *testing.T) {
 	cases := []struct {
 		name   string
 		mutate func(*fixtureConfig)
@@ -653,13 +741,13 @@ func TestReadRejectsBodySizeProblems(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newGraphFixture(t)
 			f.setConfig(tc.mutate)
-			_, err := f.reader(t, nil).Read(context.Background())
+			_, err := f.reader(t, nil).FetchCandidate(context.Background())
 			assertErrorIs(t, err, vaultfilebackend.ErrCorrupt)
 		})
 	}
 }
 
-func TestReadRejectsNon200Statuses(t *testing.T) {
+func TestFetchCandidateRejectsNon200Statuses(t *testing.T) {
 	cases := []struct {
 		name   string
 		mutate func(*fixtureConfig)
@@ -740,14 +828,14 @@ func TestReadRejectsNon200Statuses(t *testing.T) {
 				c.downloadErrorBody = testProviderBodySecret
 				tc.mutate(c)
 			})
-			_, err := f.reader(t, nil).Read(context.Background())
+			_, err := f.reader(t, nil).FetchCandidate(context.Background())
 			assertErrorIs(t, err, tc.want)
 			assertNoSecrets(t, err, testProviderBodySecret, testToken)
 		})
 	}
 }
 
-func TestReadRejectsUnsafeRedirectLocations(t *testing.T) {
+func TestFetchCandidateRejectsUnsafeRedirectLocations(t *testing.T) {
 	validLocation := func(f *graphFixture) string { return f.server.URL + "/download/" + testLocationSecret }
 	cases := []struct {
 		name     string
@@ -776,7 +864,7 @@ func TestReadRejectsUnsafeRedirectLocations(t *testing.T) {
 				c.location = tc.location(f)
 				c.locationCount = tc.count
 			})
-			_, err := f.reader(t, nil).Read(context.Background())
+			_, err := f.reader(t, nil).FetchCandidate(context.Background())
 			assertErrorIs(t, err, ErrUnsafeRedirect, vaultfilebackend.ErrDenied)
 			assertNoSecrets(t, err, testLocationSecret, "user:pass")
 			if got := downloadRequestCount(f.recordedRequests()); got != 0 {
@@ -786,7 +874,7 @@ func TestReadRejectsUnsafeRedirectLocations(t *testing.T) {
 	}
 }
 
-func TestReadRejectsFurtherRedirects(t *testing.T) {
+func TestFetchCandidateRejectsFurtherRedirects(t *testing.T) {
 	cases := []struct {
 		name   string
 		mutate func(*fixtureConfig)
@@ -810,7 +898,7 @@ func TestReadRejectsFurtherRedirects(t *testing.T) {
 					c.location = f.server.URL + "/download/" + testLocationSecret + "-loop"
 				}
 			})
-			_, err := f.reader(t, nil).Read(context.Background())
+			_, err := f.reader(t, nil).FetchCandidate(context.Background())
 			assertErrorIs(t, err, ErrUnsafeRedirect, vaultfilebackend.ErrDenied)
 			wantDownloads := 0
 			if tc.loop {
@@ -833,13 +921,26 @@ func downloadRequestCount(requests []fixtureRequest) int {
 	return count
 }
 
-func TestReadHonoursCancellation(t *testing.T) {
+func TestFetchCandidateHonoursCancellation(t *testing.T) {
+	t.Run("nil context", func(t *testing.T) {
+		f := newGraphFixture(t)
+		source := &testTokenSource{token: testToken}
+		_, err := f.reader(t, source).FetchCandidate(nil)
+		assertErrorIs(t, err, vaultfilebackend.ErrDenied, context.Canceled)
+		if source.callCount() != 0 {
+			t.Errorf("token source calls = %d, want 0", source.callCount())
+		}
+		if got := len(f.recordedRequests()); got != 0 {
+			t.Errorf("requests = %d, want 0", got)
+		}
+	})
+
 	t.Run("before token", func(t *testing.T) {
 		f := newGraphFixture(t)
 		source := &testTokenSource{token: testToken}
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		_, err := f.reader(t, source).Read(ctx)
+		_, err := f.reader(t, source).FetchCandidate(ctx)
 		assertErrorIs(t, err, vaultfilebackend.ErrDenied, context.Canceled)
 		if source.callCount() != 0 {
 			t.Errorf("token source calls = %d, want 0", source.callCount())
@@ -858,7 +959,7 @@ func TestReadHonoursCancellation(t *testing.T) {
 			<-source.started
 			cancel()
 		}()
-		_, err := f.reader(t, source).Read(ctx)
+		_, err := f.reader(t, source).FetchCandidate(ctx)
 		assertErrorIs(t, err, vaultfilebackend.ErrDenied, context.Canceled)
 		if got := len(f.recordedRequests()); got != 0 {
 			t.Errorf("requests = %d, want 0", got)
@@ -882,19 +983,19 @@ func TestReadHonoursCancellation(t *testing.T) {
 			<-started
 			cancel()
 		}()
-		_, err := f.reader(t, nil).Read(ctx)
+		_, err := f.reader(t, nil).FetchCandidate(ctx)
 		assertErrorIs(t, err, vaultfilebackend.ErrDenied, context.Canceled)
 	})
 }
 
-func TestReadErrorsDoNotLeakSecrets(t *testing.T) {
+func TestFetchCandidateErrorsDoNotLeakSecrets(t *testing.T) {
 	t.Run("token source error", func(t *testing.T) {
 		f := newGraphFixture(t)
 		source := &testTokenSource{
 			token: testToken,
 			err:   errors.New("token source included " + testToken),
 		}
-		_, err := f.reader(t, source).Read(context.Background())
+		_, err := f.reader(t, source).FetchCandidate(context.Background())
 		assertErrorIs(t, err, ErrAccessToken, vaultfilebackend.ErrDenied)
 		assertNoSecrets(t, err, testToken)
 	})
@@ -902,7 +1003,7 @@ func TestReadErrorsDoNotLeakSecrets(t *testing.T) {
 	t.Run("invalid token", func(t *testing.T) {
 		f := newGraphFixture(t)
 		source := &testTokenSource{token: "synthetic token with a space"}
-		_, err := f.reader(t, source).Read(context.Background())
+		_, err := f.reader(t, source).FetchCandidate(context.Background())
 		assertErrorIs(t, err, ErrAccessToken, vaultfilebackend.ErrDenied)
 		assertNoSecrets(t, err, "synthetic token with a space")
 	})
@@ -913,7 +1014,7 @@ func TestReadErrorsDoNotLeakSecrets(t *testing.T) {
 			c.metadataStatus = http.StatusInternalServerError
 			c.metadataErrorBody = testProviderBodySecret
 		})
-		_, err := f.reader(t, nil).Read(context.Background())
+		_, err := f.reader(t, nil).FetchCandidate(context.Background())
 		assertNoSecrets(t, err, testProviderBodySecret, testToken)
 	})
 
@@ -922,7 +1023,7 @@ func TestReadErrorsDoNotLeakSecrets(t *testing.T) {
 		f.setConfig(func(c *fixtureConfig) {
 			c.metadataJSON = []byte(`{"id":"` + testItemID + `","leak":"` + testProviderBodySecret + `"`)
 		})
-		_, err := f.reader(t, nil).Read(context.Background())
+		_, err := f.reader(t, nil).FetchCandidate(context.Background())
 		assertErrorIs(t, err, ErrInvalidMetadata, vaultfilebackend.ErrCorrupt)
 		assertNoSecrets(t, err, testProviderBodySecret, testToken)
 	})
@@ -935,7 +1036,7 @@ func TestReadErrorsDoNotLeakSecrets(t *testing.T) {
 			c.location = location
 			c.locationCount = 1
 		})
-		_, err := f.reader(t, nil).Read(context.Background())
+		_, err := f.reader(t, nil).FetchCandidate(context.Background())
 		assertErrorIs(t, err, ErrUnsafeRedirect)
 		assertNoSecrets(t, err, location, testLocationSecret, testToken)
 	})
@@ -946,7 +1047,7 @@ func TestReadErrorsDoNotLeakSecrets(t *testing.T) {
 			c.downloadStatus = http.StatusInternalServerError
 			c.downloadErrorBody = testProviderBodySecret
 		})
-		_, err := f.reader(t, nil).Read(context.Background())
+		_, err := f.reader(t, nil).FetchCandidate(context.Background())
 		assertErrorIs(t, err, vaultfilebackend.ErrUnknown)
 		assertNoSecrets(t, err, testProviderBodySecret, testLocationSecret, testToken)
 	})
@@ -954,7 +1055,7 @@ func TestReadErrorsDoNotLeakSecrets(t *testing.T) {
 	t.Run("transport request URL", func(t *testing.T) {
 		f := newGraphFixture(t)
 		f.server.Close()
-		_, err := f.reader(t, nil).Read(context.Background())
+		_, err := f.reader(t, nil).FetchCandidate(context.Background())
 		assertErrorIs(t, err, vaultfilebackend.ErrUnknown)
 		assertNoSecrets(t, err, f.server.URL, testToken)
 	})
