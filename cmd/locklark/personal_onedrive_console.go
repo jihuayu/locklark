@@ -13,10 +13,15 @@ import (
 // no byte ready yet with n == -1, a non-ASCII byte that cancels now with n == -2,
 // and a failed read with n == 0 (also fatal).
 type labelPrompt struct {
-	ctx        context.Context
-	control    *os.File // controlling terminal, never a redirected std stream
-	stderr     *os.File // where the prompt and the terminating line break go
-	text       string
+	ctx     context.Context
+	control *os.File // controlling terminal, never a redirected std stream
+	stderr  *os.File // where the prompt and the terminating line break go
+	text    string
+	// controlFD is the raw terminal descriptor or console handle, obtained
+	// once by promptControlSave for the whole prompt. Every poll, read and
+	// drain uses it: calling (*os.File).Fd again would let the os package
+	// put the descriptor back in blocking mode before a raw read.
+	controlFD  int
 	pending    *byte // Windows only: key-down character taken from the queue
 	hasPending *bool // Windows only: whether pending holds a character
 }
@@ -34,11 +39,12 @@ type labelPrompt struct {
 // terminal write or mode change; no read ever runs concurrently with the
 // restore.
 func promptControl(p labelPrompt) ([]byte, error) {
-	restore, err := promptControlSave(p.control)
+	restore, controlFD, err := promptControlSave(p.control)
 	if err != nil {
 		return nil, err
 	}
 	defer restore()
+	p.controlFD = controlFD
 	if _, err := fmt.Fprint(p.stderr, p.text+": "); err != nil {
 		return nil, errOnedriveTerminal
 	}

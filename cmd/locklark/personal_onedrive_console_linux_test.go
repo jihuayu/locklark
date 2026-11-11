@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -75,23 +76,58 @@ func writeTTY(t *testing.T, master *os.File, s string) {
 }
 
 // readTTYEcho reads what the test's own end of the terminal echoes, so it only
-// returns echo even though echo is off for the prompt.
+// returns echo even though echo is off for the prompt. It returns within a fixed
+// deadline, empty when nothing echoed. The deadline is enforced with poll on a
+// raw nonblocking descriptor: (*os.File).SetReadDeadline does not apply once the
+// descriptor came through Fd, as it does for the PTY master here.
 func readTTYEcho(t *testing.T, master *os.File) string {
 	t.Helper()
-	if err := master.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+	fd := int(master.Fd())
+	flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFL, 0)
+	if err != nil {
 		t.Fatal(err)
 	}
-	var buf [256]byte
+	if _, err := unix.FcntlInt(uintptr(fd), unix.F_SETFL, flags|unix.O_NONBLOCK); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = unix.FcntlInt(uintptr(fd), unix.F_SETFL, flags) }()
 	var out bytes.Buffer
+	pfd := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+	deadline := time.Now().Add(100 * time.Millisecond)
 	for {
-		n, err := master.Read(buf[:])
-		out.Write(buf[:n])
-		if err != nil {
-			break
+		left := time.Until(deadline)
+		if left <= 0 {
+			return out.String()
+		}
+		n, err := unix.Poll(pfd, int(left/time.Millisecond)+1)
+		if err != nil && !errors.Is(err, syscall.EINTR) {
+			t.Fatal(err)
+		}
+		if n <= 0 {
+			continue
+		}
+		if pfd[0].Revents&unix.POLLIN == 0 {
+			t.Fatalf("master poll revents = %#x without POLLIN", pfd[0].Revents)
+		}
+	readLoop:
+		for {
+			var buf [256]byte
+			read, err := unix.Read(fd, buf[:])
+			switch {
+			case read > 0:
+				out.Write(buf[:read])
+			case err != nil && (errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK)):
+				// Nothing more to echo now; poll for it.
+				break readLoop
+			case err != nil && errors.Is(err, syscall.EINTR):
+				// Retry the read.
+			case err != nil:
+				t.Fatalf("master read: %v", err)
+			default:
+				t.Fatalf("master read returned 0 bytes without an error")
+			}
 		}
 	}
-	_ = master.SetReadDeadline(time.Time{})
-	return out.String()
 }
 
 func openFileFlags(t *testing.T, f *os.File) int {
@@ -295,5 +331,37 @@ func TestPromptNonASCIIByteCancels(t *testing.T) {
 	}
 	if flags := openFileFlags(t, slave); flags != beforeFlags {
 		t.Fatalf("open-file flags after the prompt = %#x; want %#x", flags, beforeFlags)
+	}
+}
+
+// TestPromptSurvivesBlockingOriginal verifies that an external caller making the
+// original control descriptor blocking, as (*os.File).Fd does, cannot undo the
+// prompt's nonblocking cached descriptor: a typed label is still read.
+func TestPromptSurvivesBlockingOriginal(t *testing.T) {
+	master, slave := openTestPTY(t)
+	// Force a blocking original descriptor, as os.File.Fd would.
+	if err := unix.SetNonblock(int(slave.Fd()), false); err != nil {
+		t.Fatal(err)
+	}
+	stderr, err := os.CreateTemp(t.TempDir(), "prompt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stderr.Close()
+	done := make(chan []byte, 1)
+	go func() {
+		label, _ := promptControl(labelPrompt{ctx: context.Background(), control: slave, stderr: stderr, text: "label"})
+		done <- label
+	}()
+	time.Sleep(150 * time.Millisecond)
+	writeTTY(t, master, "blocking-label\r")
+	select {
+	case label := <-done:
+		if string(label) != "blocking-label" {
+			t.Fatalf("label = %q", label)
+		}
+		clear(label)
+	case <-time.After(10 * time.Second):
+		t.Fatal("prompt did not return")
 	}
 }
