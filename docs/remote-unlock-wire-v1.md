@@ -1,7 +1,9 @@
 # Remote unlock wire v1: canonical binding context
 
-Status: codec definition. The package `pkg/remoteunlock` implements exactly this
-encoding. The vector below is synthetic and demonstrates the codec only.
+Status: codec definition plus a process-local request lifecycle. The package
+`pkg/remoteunlock` implements exactly this encoding and the lifecycle in
+[Process-local request lifecycle](#process-local-request-lifecycle). The vector
+below is synthetic and demonstrates the codec only.
 
 ## Scope
 
@@ -178,6 +180,76 @@ Parsing rejects, among other things:
 
 Errors identify the failing member or structural rule with a static message;
 they never include a field value or digest bytes.
+
+## Process-local request lifecycle
+
+`pkg/remoteunlock/lifecycle.go` defines `RequestLifecycle`, an in-memory status
+machine for one remote unlock request. It is a local state transition primitive
+and is not part of the wire format: it adds no bytes, field, frame, or message.
+
+Statuses are frozen as the strings `requested`, `confirmed`, `received`,
+`unknown`, `cancelled` and `expired` (`StatusRequested` … `StatusExpired`).
+
+| From | Event | To |
+|------|-------|----|
+| `requested` | `Confirm` while the current phase is active | `confirmed` |
+| `confirmed` | `Receive` while the current phase is active; consumes the request once | `received` |
+| `requested`, `confirmed` | `MarkUnknown` while the current phase is active | `unknown` |
+| `requested`, `confirmed` | `Cancel` while the current phase is active | `cancelled` |
+| `requested`, `confirmed` | any observation at or after the current phase deadline or the absolute deadline | `expired` |
+
+`received`, `unknown`, `cancelled` and `expired` are terminal and never
+transition again. A received request cannot be retroactively cancelled, and an
+expired lifecycle cannot confirm, receive, be marked unknown or be cancelled.
+Rejected transitions return a static `ErrLifecycleTransition` error.
+
+### Timing
+
+All timing uses caller-supplied Unix-millisecond values. The lifecycle never
+reads the system clock, normalizes time, or waits.
+
+- The default overall request TTL is `DefaultRequestTTLMS` = `120000` ms (two
+  minutes). `DefaultRequestDeadlineUnixMS(nowUnixMS)` returns
+  `nowUnixMS + 120000`; it rejects a non-positive `nowUnixMS` and any sum that
+  overflows `int64`. The helper only computes a value; it does not clamp or
+  rewrite a context.
+- The maximum length of each active phase is `MaxActivePhaseMS` = `30000` ms.
+- The constructor requires a positive `nowUnixMS` and a context that the
+  canonical codec accepts whose `deadline_unix_ms` is strictly after
+  `nowUnixMS`. The context is stored unchanged; its deadline is never clamped,
+  extended, or rewritten.
+- The active phase deadline is
+  `min(nowUnixMS + MaxActivePhaseMS, deadline_unix_ms)` and is recalculated as
+  `min(confirmUnixMS + MaxActivePhaseMS, deadline_unix_ms)` on
+  `requested -> confirmed`.
+- A lifecycle whose active phase is not yet terminal expires at
+  `nowUnixMS >= phaseDeadline`. Because the phase deadline is already bounded
+  by the absolute context deadline, this is the earlier of the two. Expiry is
+  latched by `StatusAt` or by the first attempted transition at or after the
+  boundary; all methods apply the same check under the mutex.
+
+### Concurrency and state
+
+A mutex serializes every transition, so concurrent `Receive` calls consume a
+confirmed lifecycle at most once. The lifecycle holds only the binding context
+claims and its status; it adds no secret payload, key buffer, or VUK bytes.
+
+### Scope
+
+`RequestLifecycle` is in-memory and non-restorable. It does not implement
+cross-process durable replay protection and does not prove that a restart was
+prevented. A fresh instance always starts in `requested` and does not recognize
+any prior in-memory state; it cannot tell that an earlier instance already
+received, cancelled, or expired the same request. A caller must therefore issue
+fresh request state, with a fresh request identifier and digest, and rely on the
+existing real TLS exporter/channel binding to reject old channel-bound packets.
+
+The lifecycle verifies no identity, signature, pairing, membership, or policy,
+does not check the request digest preimage, does not contact a relay, and does
+not cancel anything remotely. `Cancel` changes only local state. The lifecycle
+proves no signed identity or policy, authorizes no VUK use, and delivers, stores,
+or exposes no key material. A `received` status is a local bookkeeping fact, not
+evidence that a VUK was authorized or delivered.
 
 ## Scope boundary
 
