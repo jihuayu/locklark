@@ -92,41 +92,96 @@ func assertUnchanged(t *testing.T, j *Journal, before snapshot) {
 
 // TestAckLegacyOperationIDRejectedKeepsPrepared is the real-file regression
 // where the legacy proposal record and the prepared proposal are different
-// operations with different generations. Acking with the legacy operation ID
-// and the legacy proposal bytes must be ErrPreparedMismatch and leave state,
-// prepared and legacy raw bytes exactly as they were; LoadPrepared still
-// returns the prepared operation and Load still returns the legacy one
-// verbatim. Acknowledging the prepared operation with its own sealed bytes
-// then succeeds and still leaves the legacy record untouched.
+// operations with different generations. It runs on a real temporary database
+// through restarts:
+//
+//  1. a legacy LLVJ v1 proposal is saved under recordKey and state is
+//     initialized;
+//  2. the other proposal is prepared under preparedKey;
+//  3. all three raw records are captured, the journal is closed and the same
+//     file reopened: Load returns the exact legacy proposal, LoadPrepared the
+//     exact prepared operation, and the legacy raw bytes are unchanged;
+//  4. replaying Save(legacy) exactly is a no-op and touches nothing;
+//  5. Ack with the legacy operation ID and legacy sealed bytes is
+//     ErrPreparedMismatch and leaves all three raw records and decoded values
+//     byte-exact;
+//  6. Ack with the prepared operation ID and its exact sealed bytes succeeds:
+//     prepared becomes empty, the state base/revision advance to the prepared
+//     proposal, and the legacy record stays byte-exact, including after
+//     another close/reopen.
 func TestAckLegacyOperationIDRejectedKeepsPrepared(t *testing.T) {
 	dir := privateDir(t)
 	j := openAt(t, dir)
 
+	// 1. Legacy proposal, distinct from the prepared one in operation ID and
+	// generation, and with its own expected revision.
 	legacy := baseProposal()
+	legacy.ExpectedRevision = vaultfilebackend.Revision(`"legacy-base-etag"`)
 	mustSave(t, j, legacy)
 
+	// 2. State, then the other proposal, prepared against it.
 	s, p := preparedState()
+	s.RemoteRevision = vaultfilebackend.Revision(`"state-base-etag"`)
+	p.ExpectedRevision = s.RemoteRevision
 	p.OperationID = "op-2026-11-11:prepared.2"
 	p.Generation = legacy.Generation + 5
-	mustInitialize(t, j, s)
-	mustPrepare(t, j, 0, p)
-	if legacy.OperationID == p.OperationID || legacy.Generation == p.Generation {
+	if legacy.OperationID == p.OperationID ||
+		legacy.Generation == p.Generation ||
+		legacy.ExpectedRevision == p.ExpectedRevision {
 		t.Fatal("fixture must keep the legacy and prepared operations distinct")
 	}
+	mustInitialize(t, j, s)
 
+	// Capture the records that exist before the new proposal (no prepared).
+	preparedNone := snapshotNoPrepared(t, j)
+	assertProposal(t, preparedNone.proposal, legacy)
+	// A v1 record starts with its own magic and is never the prepared wrapper.
+	if !bytes.HasPrefix(preparedNone.rawProposal, []byte(recordMagic)) ||
+		bytes.HasPrefix(preparedNone.rawProposal, []byte(preparedMagic)) {
+		t.Fatalf("legacy record is not a plain LLVJ v1 record: %x", preparedNone.rawProposal[:min(4, len(preparedNone.rawProposal))])
+	}
+
+	mustPrepare(t, j, 0, p)
+	wantPrepared := PreparedProposal{WorkingGeneration: 0, Proposal: p}
+
+	// 3. All three raw records, then restart on the same file.
 	before := takeSnapshot(t, j)
+	assertState(t, before.state, s)
 	assertProposal(t, before.proposal, legacy)
-	assertPrepared(t, before.prepared, PreparedProposal{WorkingGeneration: 0, Proposal: p})
+	assertPrepared(t, before.prepared, wantPrepared)
+	if !bytes.Equal(before.rawProposal, preparedNone.rawProposal) ||
+		!bytes.Equal(before.rawState, preparedNone.rawState) {
+		t.Fatal("Prepare changed the legacy proposal or state record")
+	}
+	mustClose(t, j)
 
+	j = openAt(t, dir)
+	reopened := takeSnapshot(t, j)
+	assertState(t, reopened.state, s)
+	assertProposal(t, reopened.proposal, legacy)
+	assertPrepared(t, reopened.prepared, wantPrepared)
+	if !bytes.Equal(reopened.rawProposal, before.rawProposal) ||
+		!bytes.Equal(reopened.rawState, before.rawState) ||
+		!bytes.Equal(reopened.rawPrepared, before.rawPrepared) {
+		t.Fatal("reopening changed a raw record")
+	}
+
+	// 4. An exact replay of the legacy Save is a no-op.
+	mustSave(t, j, legacy)
+	assertUnchanged(t, j, before)
+	assertProposal(t, mustLoad(t, j), legacy)
+	assertPrepared(t, mustLoadPrepared(t, j), wantPrepared)
+
+	// 5. The legacy ack is refused and changes nothing.
 	if err := j.Ack(legacy.OperationID, legacy.Bytes, `"legacy-ack"`); !errors.Is(err, ErrPreparedMismatch) {
 		t.Fatalf("Ack(legacy op, legacy bytes) = %v, want ErrPreparedMismatch", err)
 	}
 	assertUnchanged(t, j, before)
 	// Neither record was replaced by the other.
-	assertPrepared(t, mustLoadPrepared(t, j), PreparedProposal{WorkingGeneration: 0, Proposal: p})
+	assertPrepared(t, mustLoadPrepared(t, j), wantPrepared)
 	assertProposal(t, mustLoad(t, j), legacy)
 
-	// The correct prepared operation is still acknowledged afterwards.
+	// 6. The prepared operation is still acknowledged with its own bytes.
 	newRev := vaultfilebackend.Revision(`"prepared-ack"`)
 	if err := j.Ack(p.OperationID, p.Bytes, newRev); err != nil {
 		t.Fatalf("Ack(prepared op, prepared bytes): %v", err)
@@ -135,28 +190,35 @@ func TestAckLegacyOperationIDRejectedKeepsPrepared(t *testing.T) {
 		t.Fatalf("LoadPrepared after Ack = %v, want ErrEmpty", err)
 	}
 	got := mustLoadState(t, j)
-	if !bytes.Equal(got.BaseBytes, p.Bytes) || got.RemoteRevision != newRev ||
-		!bytes.Equal(got.WorkingBytes, p.Bytes) || got.Generation != 0 {
-		t.Fatalf("acked state = rev %q gen %d base %d working %d",
-			got.RemoteRevision, got.Generation, len(got.BaseBytes), len(got.WorkingBytes))
+	want := State{
+		BaseBytes:      p.Bytes,
+		RemoteRevision: newRev,
+		WorkingBytes:   s.WorkingBytes,
+		Generation:     s.Generation,
 	}
+	assertState(t, got, want)
 	// The legacy record is still exactly the legacy operation on disk.
 	assertProposal(t, mustLoad(t, j), legacy)
 	if !bytes.Equal(rawKey(t, j, recordKey), before.rawProposal) {
 		t.Fatal("Ack changed the legacy proposal record")
 	}
-	if err := j.Close(); err != nil {
-		t.Fatal(err)
-	}
+	mustClose(t, j)
 
-	j2 := openAt(t, dir)
-	assertState(t, mustLoadState(t, j2), got)
-	if _, err := j2.LoadPrepared(); !errors.Is(err, ErrEmpty) {
+	j = openAt(t, dir)
+	assertState(t, mustLoadState(t, j), want)
+	if _, err := j.LoadPrepared(); !errors.Is(err, ErrEmpty) {
 		t.Fatalf("reopened LoadPrepared = %v, want ErrEmpty", err)
 	}
-	assertProposal(t, mustLoad(t, j2), legacy)
-	if !bytes.Equal(rawKey(t, j2, recordKey), before.rawProposal) {
+	assertProposal(t, mustLoad(t, j), legacy)
+	if !bytes.Equal(rawKey(t, j, recordKey), before.rawProposal) {
 		t.Fatal("reopened legacy proposal record changed")
+	}
+}
+
+func mustClose(t *testing.T, j *Journal) {
+	t.Helper()
+	if err := j.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
 	}
 }
 
