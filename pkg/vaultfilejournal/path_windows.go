@@ -335,7 +335,7 @@ func lstatNoFollow(path string) (uint32, error) {
 }
 
 // checkDBPath requires path to name a regular, non-reparse file with a private
-// DACL, or no file at all. A missing (or dangling-link) name is reported
+// DACL, or no file at all. Only a genuinely absent name is reported
 // missing=true; nothing is created here. An existing file must pass the same
 // handle validation that openExistingDatabase applies, so a symlinked
 // database name is rejected before publication or bbolt.
@@ -376,9 +376,11 @@ func openDBHandle(path string) (windows.Handle, error) {
 // following a final-component reparse point, and requires a regular,
 // non-reparse, singly linked file with a trusted owner and a private DACL.
 // It returns the opened file for bbolt to use directly, the handle identity,
-// and whether the name was absent. A missing name is missing=true with no
-// error; a dangling link is missing=true because its link alone is not a
-// database and is never followed.
+// and whether the name was absent. Only a genuinely absent final name is
+// missing=true with no error. With FILE_FLAG_OPEN_REPARSE_POINT and
+// OPEN_EXISTING, a final-component reparse point that already exists (even a
+// dangling link) is opened as the reparse point itself, never followed, and
+// validateDBHandle rejects it as not a regular file.
 func openValidatedDB(path string) (file *os.File, info windows.ByHandleFileInformation, missing bool, err error) {
 	handle, err := openDBHandle(path)
 	if err != nil {
