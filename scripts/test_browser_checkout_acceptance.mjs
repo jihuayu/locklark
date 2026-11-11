@@ -1415,3 +1415,38 @@ test("route lifecycle sanitizer keeps only fixed booleans and capped counts", ()
     },
   });
 });
+
+test("route label inspect preserves focus and the approval click stays physical", () => {
+  // The native-label wait only reads the route page's approval state. It must
+  // use the helper's focus-preserving form (partial title, no raise/focus), or
+  // the idle native window can cover the route page before any approval
+  // exists. The later approval stays one ordinary physical click.
+  const source = readFileSync(
+    new URL("./browser_native_acceptance.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /inspect: true,\n\s+title_prefix: "Locklark · 浏览器原生确认",\n\s+preserve_focus: true,/,
+  );
+  assert.match(source, /input\(\[\], true, ROUTE_LABEL_INSPECT\)\.controls\?\.\["批准本次操作"\]/);
+  // The raising/focusing positional form never appears in the route
+  // checkpoint; it remains only for the unconditional-fill journeys.
+  assert.ok(countMatches(source, /input\(\[\], true, true\)/g) > 0);
+  const checkpoint = source.slice(
+    source.indexOf("async function acceptRouteDetailRead"),
+    source.indexOf("async function blank()"),
+  );
+  assert.doesNotMatch(checkpoint, /input\(\[\], true, true\)/);
+  assert.equal(
+    countMatches(checkpoint, /input\(\[\], true, ROUTE_LABEL_INSPECT\)/g),
+    1,
+  );
+  assert.equal(
+    countMatches(
+      source,
+      /^\s*input\(\[\{ click_label: "批准本次操作" \}\]\);$/gm,
+    ),
+    1,
+  );
+});
