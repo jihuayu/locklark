@@ -1438,7 +1438,7 @@ func TestRunBrokeredBundleRendersPreparedValues(t *testing.T) {
 	create, roots := testBundleTempCreatorTracked(t)
 	prepared, executed := 0, 0
 	preparedRoot, executeRoot := "", ""
-	receipt, err := runBrokeredBundle(context.Background(), targets, request, func(ctx context.Context, root string) (RunBundlePreparationReceipt, map[string][]byte, error) {
+	receipt, err := runBrokeredBundle(context.Background(), targets, request, func(ctx context.Context, root string, _ RunBundleRequest, _ []BundleTarget) (RunBundlePreparationReceipt, map[string][]byte, error) {
 		prepared++
 		preparedRoot = root
 		if ctx == nil {
@@ -1487,6 +1487,102 @@ func TestRunBrokeredBundleRendersPreparedValues(t *testing.T) {
 	want := RunReceipt{Status: "process-exited", Session: wantReceipt.Session, Intent: wantReceipt.Intent, TargetDigest: wantReceipt.TargetDigest, ExitCode: 3}
 	if !reflect.DeepEqual(receipt, want) {
 		t.Fatalf("receipt: %+v want: %+v", receipt, want)
+	}
+	assertBrokeredRootsRemoved(t, roots())
+	assertBrokeredValuesCleared(t, values, buffers)
+}
+
+// TestRunBrokeredBundlePreparationReceivesExactSnapshot pins that the
+// preparation callback sees the exact committed request and targets, and that
+// its mutation of those copies, of the private root and of the prepared values
+// cannot change the request or rendered bundle the execute callback receives.
+func TestRunBrokeredBundlePreparationReceivesExactSnapshot(t *testing.T) {
+	f := newBundleTestFixture(t)
+	targets := bundleTestTargets(f)
+	request := bundleTestRequest(t, f)
+	wantRequest := cloneBundleRequest(request)
+	wantTargets := append([]BundleTarget(nil), targets...)
+	wantReceipt := brokeredTestReceipt()
+	values := bundleTestValues()
+	buffers := brokeredValueBuffers(values)
+	create, roots := testBundleTempCreatorTracked(t)
+	prepared, executed := 0, 0
+	receipt, err := runBrokeredBundle(context.Background(), targets, request, func(_ context.Context, root string, gotRequest RunBundleRequest, gotTargets []BundleTarget) (RunBundlePreparationReceipt, map[string][]byte, error) {
+		prepared++
+		if !reflect.DeepEqual(gotRequest, wantRequest) {
+			t.Errorf("preparation request differs from the committed request: %+v", gotRequest)
+		}
+		if !reflect.DeepEqual(gotTargets, wantTargets) {
+			t.Errorf("preparation targets differ from the committed targets: %+v", gotTargets)
+		}
+		for i := range gotRequest.HelperPath {
+			gotRequest.HelperPath[i] = "/mutated/helper"
+		}
+		for name := range gotRequest.Passthrough {
+			gotRequest.Passthrough[name] = "mutated"
+		}
+		for i := range gotRequest.Spec.Slots {
+			gotRequest.Spec.Slots[i].Name = "mutated"
+		}
+		for i := range gotRequest.Spec.Files {
+			gotRequest.Spec.Files[i].RelPath = "mutated"
+		}
+		for i := range gotRequest.Spec.Dirs {
+			gotRequest.Spec.Dirs[i] = "mutated"
+		}
+		for i := range gotRequest.Spec.PassthroughEnv {
+			gotRequest.Spec.PassthroughEnv[i] = "mutated"
+		}
+		for i := range gotRequest.Args {
+			gotRequest.Args[i] = "mutated"
+		}
+		gotRequest.Program = "/mutated/program"
+		gotRequest.Directory = "/mutated/directory"
+		for i := range gotTargets {
+			gotTargets[i] = BundleTarget{Slot: "mutated", ID: "mutated", Revision: "mutated", Field: "mutated"}
+		}
+		gotTargets = append(gotTargets, BundleTarget{Slot: "extra"})
+		if err := os.RemoveAll(root); err != nil {
+			t.Errorf("removing the private root inside the callback: %v", err)
+		}
+		return wantReceipt, values, nil
+	}, create, os.RemoveAll, func(_ context.Context, req RunBundleRequest, root string, rendered cliprofile.RenderedBundle) (int, error) {
+		executed++
+		if !reflect.DeepEqual(req, wantRequest) {
+			t.Errorf("execution request changed after preparation: %+v", req)
+		}
+		for name, want := range map[string]string{
+			"GH_TOKEN":              bundleTestPassword,
+			"BUNDLE_TEST_REGION":    "test-region",
+			"NO_COLOR":              "1",
+			"DOCKER_CONFIG":         filepath.Join(root, "docker"),
+			"NPM_CONFIG_USERCONFIG": filepath.Join(root, "npm", "npmrc"),
+			"GIT_ASKPASS":           filepath.Join(root, "git", "askpass.sh"),
+		} {
+			if got, ok := bundleEnvValue(rendered, name); !ok || got != want {
+				t.Errorf("rendered environment %s missing or mutated", name)
+			}
+		}
+		if file, ok := bundleRenderedFile(rendered, "kube/config"); !ok || string(file.Content) != bundleTestAttachment {
+			t.Error("rendered kubeconfig missing or mutated")
+		}
+		if file, ok := bundleRenderedFile(rendered, "git/askpass.sh"); !ok || string(file.Content) != bundleAskpassScript {
+			t.Error("rendered askpass helper missing or mutated")
+		}
+		return 4, nil
+	})
+	if err != nil {
+		t.Fatalf("brokered run: %v", err)
+	}
+	if prepared != 1 || executed != 1 {
+		t.Fatalf("prepared: %d executed: %d", prepared, executed)
+	}
+	want := RunReceipt{Status: "process-exited", Session: wantReceipt.Session, Intent: wantReceipt.Intent, TargetDigest: wantReceipt.TargetDigest, ExitCode: 4}
+	if !reflect.DeepEqual(receipt, want) {
+		t.Fatalf("receipt: %+v want: %+v", receipt, want)
+	}
+	if !reflect.DeepEqual(request, cloneBundleRequest(wantRequest)) || !reflect.DeepEqual(targets, wantTargets) {
+		t.Fatal("caller request or targets were mutated")
 	}
 	assertBrokeredRootsRemoved(t, roots())
 	assertBrokeredValuesCleared(t, values, buffers)
@@ -1542,7 +1638,7 @@ func TestRunBrokeredBundleRefusesMalformedPreparation(t *testing.T) {
 			values := map[string][]byte(nil)
 			buffers := map[string][]byte(nil)
 			prepared, executed := 0, 0
-			receipt, err := runBrokeredBundle(context.Background(), targets, request, func(context.Context, string) (RunBundlePreparationReceipt, map[string][]byte, error) {
+			receipt, err := runBrokeredBundle(context.Background(), targets, request, func(context.Context, string, RunBundleRequest, []BundleTarget) (RunBundlePreparationReceipt, map[string][]byte, error) {
 				prepared++
 				gotReceipt, gotValues := tc.prepare()
 				values = gotValues
@@ -1575,7 +1671,7 @@ func TestRunBrokeredBundlePropagatesPreparationError(t *testing.T) {
 	buffers := brokeredValueBuffers(values)
 	create, roots := testBundleTempCreatorTracked(t)
 	prepared, executed := 0, 0
-	receipt, err := runBrokeredBundle(context.Background(), targets, request, func(context.Context, string) (RunBundlePreparationReceipt, map[string][]byte, error) {
+	receipt, err := runBrokeredBundle(context.Background(), targets, request, func(context.Context, string, RunBundleRequest, []BundleTarget) (RunBundlePreparationReceipt, map[string][]byte, error) {
 		prepared++
 		return brokeredTestReceipt(), values, unavailable
 	}, create, os.RemoveAll, func(context.Context, RunBundleRequest, string, cliprofile.RenderedBundle) (int, error) {
@@ -1602,7 +1698,7 @@ func TestRunBrokeredBundleCancelledAfterPreparation(t *testing.T) {
 	buffers := brokeredValueBuffers(values)
 	create, roots := testBundleTempCreatorTracked(t)
 	prepared, executed := 0, 0
-	receipt, err := runBrokeredBundle(ctx, targets, request, func(context.Context, string) (RunBundlePreparationReceipt, map[string][]byte, error) {
+	receipt, err := runBrokeredBundle(ctx, targets, request, func(context.Context, string, RunBundleRequest, []BundleTarget) (RunBundlePreparationReceipt, map[string][]byte, error) {
 		prepared++
 		cancel()
 		return brokeredTestReceipt(), values, nil
@@ -1627,7 +1723,7 @@ func TestRunBrokeredBundleValidatesScopeBeforePreparation(t *testing.T) {
 
 	t.Run("invalid-root", func(t *testing.T) {
 		called := 0
-		_, err := brokeredRunStore(context.Background(), &runBundleStoreRequest{targets: targets, request: request, root: "relative"}, func(context.Context, string) (RunBundlePreparationReceipt, map[string][]byte, error) {
+		_, err := brokeredRunStore(context.Background(), &runBundleStoreRequest{targets: targets, request: request, root: "relative"}, func(context.Context, string, RunBundleRequest, []BundleTarget) (RunBundlePreparationReceipt, map[string][]byte, error) {
 			called++
 			return brokeredTestReceipt(), bundleTestValues(), nil
 		})

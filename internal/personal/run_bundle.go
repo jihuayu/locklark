@@ -441,8 +441,15 @@ func (s *Session) PrepareBrokeredRun(ctx context.Context, targets []BundleTarget
 
 // BrokeredRunPreparer is the desktop-broker preparation step for
 // RunBrokeredBundle. It receives the private run root RunBrokeredBundle has
-// already created, so it can bind exactly that root in the one-shot scope, and
-// returns the preparation receipt plus the exact per-slot values.
+// already created, so it can bind exactly that root in the one-shot scope, plus
+// the exact request and targets that RunBrokeredBundle committed to and will
+// render, so the callback never has to capture caller-owned data that could
+// diverge from the runner's clones. Both snapshots are independent deep copies:
+// the callback may mutate them freely and is expected to clear or drop them
+// after use, and neither mutation can change what the runner signs, renders or
+// executes.
+//
+// It returns the preparation receipt plus the exact per-slot values.
 //
 // On success, ownership of every returned byte slice transfers to
 // RunBrokeredBundle: the existing runBundle cleanup zeroes them after the
@@ -451,7 +458,7 @@ func (s *Session) PrepareBrokeredRun(ctx context.Context, targets []BundleTarget
 // immediately instead. The callback error itself is preserved unchanged so a
 // caller of RunBrokeredBundle can fall back only on an exact sentinel (for
 // example browserhost.ErrBrokerUnavailable); no error is translated here.
-type BrokeredRunPreparer func(ctx context.Context, privateTempRoot string) (RunBundlePreparationReceipt, map[string][]byte, error)
+type BrokeredRunPreparer func(ctx context.Context, privateTempRoot string, request RunBundleRequest, targets []BundleTarget) (RunBundlePreparationReceipt, map[string][]byte, error)
 
 func validBrokeredRunReceipt(receipt RunBundlePreparationReceipt) bool {
 	return receipt.Status == RunBundlePreparationStatus && idOK(receipt.Session) &&
@@ -502,16 +509,38 @@ func runBrokeredBundle(ctx context.Context, targets []BundleTarget, request RunB
 	}, execute, remove)
 }
 
+// bindBrokeredRunPreparation hands the callback the exact request and targets
+// snapshots the runner will render, as fresh deep copies. The copies are
+// zeroized after the callback returns, including on panic, so the callback's
+// environment and passthrough names do not outlive their use. The runner's own
+// snapshots are never passed, so no mutation through these copies can reach
+// them.
+func bindBrokeredRunPreparation(ctx context.Context, s *runBundleStoreRequest, prepare BrokeredRunPreparer) (receipt RunBundlePreparationReceipt, values map[string][]byte, err error) {
+	request := cloneRunBundleRequest(s.request)
+	targets := cloneBundleTargets(s.targets)
+	defer func() {
+		clear(request.HelperPath)
+		for name := range request.Passthrough {
+			delete(request.Passthrough, name)
+		}
+		for i := range targets {
+			targets[i] = BundleTarget{}
+		}
+	}()
+	return prepare(ctx, s.root, request, targets)
+}
+
 // brokeredRunStore adapts the desktop preparation callback to the local
 // store boundary. The callback runs only after runBundle created root and the
-// profile bundle directories, so it receives the exact private root.
+// profile bundle directories, so it receives the exact private root together
+// with the exact committed request and targets.
 func brokeredRunStore(ctx context.Context, s *runBundleStoreRequest, prepare BrokeredRunPreparer) (result, error) {
 	if s == nil || s.validate() != nil {
 		// Never let the callback bind or disclose anything for a scope the
 		// local RunBundle lifecycle would refuse.
 		return result{}, ErrRunTarget
 	}
-	receipt, values, err := prepare(ctx, s.root)
+	receipt, values, err := bindBrokeredRunPreparation(ctx, s, prepare)
 	receipt, values, err = brokeredRunPreparation(s.targets, receipt, values, err)
 	if err != nil {
 		return result{}, err
@@ -522,7 +551,8 @@ func brokeredRunStore(ctx context.Context, s *runBundleStoreRequest, prepare Bro
 // RunBrokeredBundle executes values that the desktop broker already prepared
 // and audited for exactly targets and request. It shares the local RunBundle
 // lifecycle: it validates the request, creates the private run root first,
-// passes that root to prepare, accepts only a canonical preparation receipt
+// passes that root, the committed request and the committed targets to prepare
+// as independent deep copies, accepts only a canonical preparation receipt
 // and a value set with exactly one entry per target slot, then renders the
 // profile and starts the direct child through executeRunBundle.
 //
