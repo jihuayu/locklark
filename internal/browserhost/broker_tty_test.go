@@ -5,7 +5,6 @@ package browserhost
 import (
 	"errors"
 	"os"
-	"runtime"
 	"testing"
 )
 
@@ -237,15 +236,14 @@ func TestCurrentTTYIdentityRejectsChangedAttestation(t *testing.T) {
 // terminal, and refuses every declared value that only looks right.
 func TestVerifyCLIRunTTYMatchesAuthenticatedPeer(t *testing.T) {
 	peer := Peer{User: "UID 501", PID: 991, Process: "/fixture/bin/locklark"}
-	if runtime.GOOS == "linux" {
-		// Linux has no kernel-backed association proving that a peer's CTTY is
-		// this broker's terminal object, so the broker fails closed before any
-		// lookup: both entry points are explicitly unavailable (not a refusal)
-		// and the peer attestation seam is never called. No PTY is needed.
-		t.Run("linux peer attestation unavailable", func(t *testing.T) {
-			if peerTTYAttestationAvailable {
-				t.Fatal("linux build has peer attestation enabled")
-			}
+	if !peerTTYAttestationAvailable {
+		// A platform without a peer-CTTY proof (Linux, Android on the Linux
+		// build, and unsupported platforms) has no kernel-backed association
+		// proving that a peer's CTTY is this broker's terminal object, so the
+		// broker fails closed before any lookup: both entry points are
+		// explicitly unavailable (not a refusal) and the peer attestation seam
+		// is never called. No PTY is needed.
+		t.Run("peer attestation unavailable", func(t *testing.T) {
 			calls := 0
 			withTTYSeamsCounting(t, "/dev/pts/7", brokerTTYForeignDev(), true, &calls)
 			if attested, e := AttestCLIRunTTY(peer); !errors.Is(e, errCLIRunUnavailable) || errors.Is(e, errCLIRunInvalid) || attested != (CLIRunTTYAttestation{}) {
@@ -255,7 +253,7 @@ func TestVerifyCLIRunTTYMatchesAuthenticatedPeer(t *testing.T) {
 				t.Fatalf("verify: %v", e)
 			}
 			if calls != 0 {
-				t.Fatalf("peer attestation seam called %d times on Linux, want 0", calls)
+				t.Fatalf("peer attestation seam called %d times without a peer proof, want 0", calls)
 			}
 		})
 		return
