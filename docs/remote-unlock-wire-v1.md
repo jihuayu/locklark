@@ -1,4 +1,4 @@
-# Remote unlock wire v1: canonical binding context
+# Remote unlock wire v1: binding context, device binding, owner-root authorization and lifecycle
 
 Status: context and stable per-device binding codecs, the independent
 owner-root authorization object and its checkpoint-scoped verifier, plus a
@@ -15,16 +15,33 @@ The vectors below are synthetic and demonstrate the codecs only.
 
 ## Scope
 
-This document defines the bytes of the TLS exporter binding context for remote
-unlock v1, and nothing else.
+This document defines the remote unlock v1 artifacts described in the status
+above, and nothing else:
+
+- the canonical TLS exporter binding context encoding and parsing, specified
+  from [Encoding rules](#encoding-rules);
+- the [stable device transport binding](#stable-device-transport-binding-v1)
+  wire format and its state-free device-signature verification;
+- the [owner-root authorization](#owner-root-authorization-v1) wire format and
+  the [verification boundaries](#verification-procedure-and-boundary) of its
+  checkpoint-scoped verifier — not a general authorization system;
+- the [process-local request lifecycle](#process-local-request-lifecycle) state
+  machine; and
+- the internal [peer-channel check](#peer-binding-over-an-established-channel)
+  of a peer binding against the verified TLS peer certificate.
+
+Each section defines its own limits, and those limits remain in force. This
+document defines no relay protocol, no VUK delivery, no durable replay defense
+and no complete mobile unlock flow.
 
 Encoding or parsing a context proves only that the bytes are the canonical
 encoding of syntactically valid claims. It does **not** prove authorization,
 requester or device identity, pairing, membership, policy, request freshness,
 one-shot consumption, signatures, a TLS handshake, or delivery of a vault unlock
-key (VUK). This codec does not create or inspect TLS connections and does not
-verify any field. A caller that relies on these claims must verify them through
-separate mechanisms, including a TLS exporter binding on the actual connection.
+key (VUK). The context codec does not create or inspect TLS connections and does
+not verify any field. A caller that relies on these claims must verify them
+through separate mechanisms, including a TLS exporter binding on the actual
+connection.
 
 ## Encoding rules
 
@@ -622,10 +639,10 @@ evidence that a VUK was authorized or delivered.
 
 The owner-root authorization section above is the only signed authorization
 this document defines. It is issued by the vault owner root alone: there is no
-restricted admin delegation path, no request-digest preimage semantics, no TLS
-exporter or live peer verification, no durable replay or restart anti-rollback,
-and no VUK decryption, wrapping or delivery. A nil return from its verifier
-means exactly what that section states and nothing more.
+restricted admin delegation path, no request-digest preimage semantics, no
+durable replay or restart anti-rollback, and no VUK decryption, wrapping or
+delivery. A nil return from its verifier means exactly what that section states
+and nothing more.
 
 This context codec alone proves no authorization, requester identity, device
 identity, pairing, membership, policy, signature, request freshness or
