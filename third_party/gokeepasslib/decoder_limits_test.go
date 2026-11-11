@@ -385,6 +385,30 @@ func TestInnerHeaderBoundedEmptyBinary(t *testing.T) {
 	double.Binaries = append(Binaries{{ID: 1, MemoryProtection: 0, isKDBX4: true}}, double.Binaries...)
 	header = innerHeaderBytes(t, double)
 	payload = 2 // two protection flag bytes
+	// Walk the field records (type byte, 4-byte length, payload) to find
+	// where the second binary's protection flag starts: its record offset plus
+	// the 5 framing bytes. The header opens with the stream id and key fields,
+	// so the first binary is identified by counting records, not offsets.
+	secondFlag := -1
+	binaries := 0
+	for off := 0; off+5 <= len(header); {
+		id := header[off]
+		length := int(binary.LittleEndian.Uint32(header[off+1 : off+5]))
+		if id == InnerHeaderTerminator {
+			break
+		}
+		if id == InnerHeaderBinary {
+			binaries++
+			if binaries == 2 {
+				secondFlag = off + 5
+				break
+			}
+		}
+		off += 5 + length
+	}
+	if secondFlag < 0 {
+		t.Fatalf("second binary flag offset not found in %d bytes", len(header))
+	}
 	src := &countReader{r: bytes.NewReader(header)}
 	ih = new(InnerHeader)
 	if err := ih.readFromWithLimits(src, payload-1); !errors.Is(err, ErrDecodeLimitExceeded) {
@@ -393,8 +417,8 @@ func TestInnerHeaderBoundedEmptyBinary(t *testing.T) {
 	if len(ih.Binaries) != 1 || len(ih.Binaries[0].Content) != 0 {
 		t.Fatalf("binaries = %v, want only the within-budget empty binary", ih.Binaries)
 	}
-	if got, want := int64(src.saw), int64(len(header))-payload; got > want {
-		t.Fatalf("read %d bytes, want at most %d: the over-budget flag was read", got, want)
+	if src.saw != secondFlag {
+		t.Fatalf("read %d bytes, want exactly %d: the reader must stop at the over-budget flag", src.saw, secondFlag)
 	}
 
 	// The flag byte also counts in an aggregate shared with another binary.
