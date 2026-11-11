@@ -164,6 +164,93 @@ func TestKDBXPayloadSealOpenRoundTrip(t *testing.T) {
 	}
 }
 
+// openUnbounded decodes sealed with no limit, which keeps its content as the
+// encoder wrote it: the logical body followed by its cipher padding.
+func openUnbounded(t *testing.T, sealed, cek []byte) *kdbx.Database {
+	t.Helper()
+	opened := kdbx.NewDatabase()
+	opened.Credentials = &kdbx.DBCredentials{Key: bytes.Clone(cek)}
+	if err := kdbx.NewDecoder(bytes.NewReader(sealed)).Decode(opened); err != nil {
+		t.Fatalf("unbounded decode of a sealed payload: %v", err)
+	}
+	return opened
+}
+
+// trailingCipherPadding reports the length of the 1..16-byte repeated-count
+// cipher padding that ends raw, as the encoder appends it, or 0 when raw does
+// not end with such a sequence.
+func trailingCipherPadding(raw []byte) int {
+	if len(raw) == 0 {
+		return 0
+	}
+	n := int(raw[len(raw)-1])
+	if n < 1 || n > 16 || n > len(raw) {
+		return 0
+	}
+	for _, b := range raw[len(raw)-n:] {
+		if int(b) != n {
+			return 0
+		}
+	}
+	return n
+}
+
+// TestKDBXPayloadSealOpenNoCompressionRoundTrip checks that the plaintext
+// budget of a NoCompressionFlag payload counts the logical body and not the
+// cipher padding the encoder appends after it. A body of exactly
+// MaxPlaintextBytes (plus 1..16 padding bytes) seals and opens, one byte more
+// is rejected by Seal, and both values round-trip.
+func TestKDBXPayloadSealOpenNoCompressionRoundTrip(t *testing.T) {
+	cek := payloadFixtureCEK(t)
+
+	withTitle := func(title string) *kdbx.Database {
+		db := payloadFixtureDB(t)
+		db.Header.FileHeaders.CompressionFlags = kdbx.NoCompressionFlag
+		db.Content.Root.Groups[0].Entries[0].Values[0].Value.Content = title
+		return db
+	}
+
+	// One baseline Seal gives the fixture's logical body length, and one
+	// gives the serialized size of an unprotected ASCII value. The XML
+	// document ends each value with its own tag, so a Title of grow more
+	// bytes than "fixture" grows the logical body by grow.
+	baseline := withTitle("fixture")
+	raw := openUnbounded(t, sealedFixture(t, baseline, cek), cek).Content.RawData
+	pad := trailingCipherPadding(raw)
+	if pad == 0 {
+		t.Fatalf("baseline RawData of %d bytes does not end with cipher padding", len(raw))
+	}
+	bodyLen := len(raw) - pad
+	grow := int(MaxPlaintextBytes) - bodyLen
+	if grow <= 0 {
+		t.Fatalf("baseline body of %d bytes already reaches MaxPlaintextBytes", bodyLen)
+	}
+	title := strings.Repeat("a", grow+len("fixture"))
+	sealed := sealedFixture(t, withTitle(title), cek)
+	opened, err := OpenKDBXPayload(sealed, cek)
+	if err != nil {
+		t.Fatalf("Open of a %d-byte body: %v", MaxPlaintextBytes, err)
+	}
+	if got := opened.Content.RawData; int64(len(got)) != MaxPlaintextBytes ||
+		trailingCipherPadding(got) != 0 {
+		t.Fatalf("opened RawData of %d bytes, want %d without padding", len(got), MaxPlaintextBytes)
+	}
+	entry := &opened.Content.Root.Groups[0].Entries[0]
+	if got := entry.GetContent("Password"); got != payloadProtectedSecret {
+		t.Fatalf("protected value = %q, want the sealed value", got)
+	}
+	if got := entry.GetContent("Title"); got != title {
+		t.Fatalf("title of %d bytes did not round trip: got %d", len(title), len(got))
+	}
+
+	// One byte more is rejected before any output is returned.
+	out, err := SealKDBXPayload(withTitle(title+"a"), cek)
+	wantPayloadCode(t, err, CodeKDBXPayloadTooLarge)
+	if out != nil {
+		t.Fatalf("Seal of a %d-byte body returned %d bytes", MaxPlaintextBytes+1, len(out))
+	}
+}
+
 // TestKDBXPayloadSealOpenEmptyBinary checks the empty attachment round trip
 // through the public API: AddBinary([]byte{}) stores a flag-only inner-header
 // binary (no content bytes), which Seal emits and Open's bounded decoder must
@@ -910,15 +997,16 @@ func TestBoundedKDBXBufferCiphertextCap(t *testing.T) {
 }
 
 // TestKDBXPayloadSealRejectsCompressiblePlaintextOverBudget is the regression
-// for the plaintext budget: a valid, unprotected Notes value of
-// MaxPlaintextBytes-2 bytes makes the KDBX4 plaintext body (InnerHeader plus
-// XML) exceed MaxPlaintextBytes, while the old Encode gzipped that body to a
-// few dozen kilobytes and wrote it. Seal must report CodeKDBXPayloadTooLarge
-// with nil bytes before it compresses or encrypts that body.
+// for the plaintext budget: a valid, unprotected Notes value one byte over
+// what a MaxPlaintextBytes body holds makes the KDBX4 plaintext body
+// (InnerHeader plus XML, cipher padding excluded) exceed MaxPlaintextBytes,
+// while the old Encode gzipped that body to a few dozen kilobytes and wrote
+// it. Seal must report CodeKDBXPayloadTooLarge with nil bytes before it
+// compresses or encrypts that body.
 func TestKDBXPayloadSealRejectsCompressiblePlaintextOverBudget(t *testing.T) {
 	cek := payloadFixtureCEK(t)
 	db := payloadFixtureDB(t)
-	notes := payloadAlternatingASCII(MaxPlaintextBytes - 2)
+	notes := payloadAlternatingASCII(MaxPlaintextBytes - 1)
 	db.Content.Root.Groups[0].Entries[0].Values = append(
 		db.Content.Root.Groups[0].Entries[0].Values, kdbx.ValueData{Key: "Notes", Value: kdbx.V{Content: notes}},
 	)

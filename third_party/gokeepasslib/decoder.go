@@ -29,16 +29,20 @@ type DecodeLimits struct {
 	// and before any key derivation runs.
 	MaxEncodedBytes int64
 	// MaxPlaintextBytes bounds the decrypted content (the KDBX4 InnerHeader
-	// followed by the XML document) and, within it, the aggregate bytes of
-	// every KDBX4 InnerHeader binary, memory protection flag included.
+	// followed by the XML document), not counting cipher padding, and,
+	// within it, the aggregate bytes of every KDBX4 InnerHeader binary,
+	// memory protection flag included.
 	//
 	// This budget can only be evaluated after key derivation and content
 	// decryption, so it is not checked before key derivation. It is enforced
 	// on the verified and decrypted content blocks and, when gzip is
 	// selected, on the expansion (reading at most the budget plus one byte)
-	// before XML decoding starts. When content is not compressed both bounds
-	// apply to the same bytes, so the aggregate binary budget can only take
-	// effect for a binary inside an expanded body.
+	// before XML decoding starts. With NoCompressionFlag a valid 1..16-byte
+	// repeated-count cipher padding that the writer emitted is removed
+	// before the logical-body limit is applied; content without such a
+	// sequence is left unchanged. When content is not compressed both
+	// bounds apply to the same bytes, so the aggregate binary budget can
+	// only take effect for a binary inside an expanded body.
 	MaxPlaintextBytes int64
 }
 
@@ -81,7 +85,11 @@ func (d *Decoder) Decode(db *Database) error {
 //  3. bounds the content handed on for parsing (the decrypted content, or
 //     its gzip expansion when the header selects gzip) by
 //     limits.MaxPlaintextBytes, detected with one extra byte, and rejects an
-//     over-budget body with ErrDecodeLimitExceeded before XML decoding;
+//     over-budget body with ErrDecodeLimitExceeded before XML decoding.
+//     Cipher padding is not part of the budget: without compression a valid
+//     1..16-byte repeated-count padding that the writer emitted is removed
+//     before the logical-body limit is applied, and content without such a
+//     sequence is left unchanged;
 //  4. parses the KDBX4 InnerHeader in bounded mode, which rejects a binary
 //     that would bring the aggregate binary bytes (protection flags
 //     included) over limits.MaxPlaintextBytes before copying it. A one-byte
@@ -355,12 +363,39 @@ func decodeRawContent(db *Database, content []byte, transformedKey []byte, budge
 		if err != nil {
 			return err
 		}
-	} else if budget.bounded && int64(len(decryptedContent)) > budget.plaintext {
-		// Without compression the decrypted content is the whole plaintext
-		// body; reject it before it is handed on for parsing.
-		return fmt.Errorf("%w: decrypted content budget exceeded", ErrDecodeLimitExceeded)
+	} else if budget.bounded {
+		// Without compression the decrypted content is the plaintext body
+		// followed by the cipher block padding the writer appends. The
+		// budget is the logical body, so a valid writer-emitted padding
+		// sequence is dropped before it is measured, and an over-budget
+		// body is rejected before it is handed on for parsing.
+		decryptedContent = trimCipherPadding(decryptedContent)
+		if int64(len(decryptedContent)) > budget.plaintext {
+			return fmt.Errorf("%w: decrypted content budget exceeded", ErrDecodeLimitExceeded)
+		}
 	}
 
 	db.Content.RawData = decryptedContent
 	return nil
+}
+
+// trimCipherPadding removes the trailing cipher block padding from an
+// uncompressed KDBX4 content, which is the body followed by 1..16 bytes that
+// each hold the padding length, as encodeRawContent appends them. Content
+// without such a sequence is returned unchanged, so a file that carries none
+// keeps its bytes.
+func trimCipherPadding(content []byte) []byte {
+	if len(content) == 0 {
+		return content
+	}
+	n := int(content[len(content)-1])
+	if n < 1 || n > 16 || n > len(content) {
+		return content
+	}
+	for _, b := range content[len(content)-n:] {
+		if int(b) != n {
+			return content
+		}
+	}
+	return content[:len(content)-n]
 }

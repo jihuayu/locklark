@@ -33,9 +33,12 @@ var ErrEncodeLimitExceeded = errors.New("gokeepasslib: database exceeds encode l
 type EncodeLimits struct {
 	// MaxPlaintextBytes bounds the plaintext content: the InnerHeader
 	// followed by the XML document, exactly as it is compressed and
-	// encrypted. It is enforced on every write of the plaintext collector,
-	// the InnerHeader's and the streaming XML document's alike, so a write
-	// that would cross it is rejected before a byte beyond it is retained.
+	// encrypted, but without the cipher block padding the encoder appends
+	// before encryption (1..16 bytes, also with NoCompressionFlag), so a
+	// body whose padded plaintext is up to 16 bytes longer still fits. It
+	// is enforced on every write of the plaintext collector, the
+	// InnerHeader's and the streaming XML document's alike, so a write that
+	// would cross it is rejected before a byte beyond it is retained.
 	MaxPlaintextBytes int64
 }
 
@@ -56,7 +59,10 @@ func (e *Encoder) Encode(db *Database) error {
 // document) larger than limits.MaxPlaintextBytes with ErrEncodeLimitExceeded.
 // The content is measured after the same normalization as Encode (binary
 // cleanup, format version, protected entry unlock and relock order, header
-// and hash updates) and before it is compressed, padded or encrypted.
+// and hash updates) and before it is compressed, padded or encrypted. The
+// budget is the logical body and excludes the optional cipher block padding,
+// so a NoCompressionFlag body of exactly limits.MaxPlaintextBytes still
+// decodes with DecodeWithLimits and the same budget.
 //
 // The content is serialized exactly as Encode serializes it, and its budget
 // is enforced on the plaintext collector's writes before a byte beyond the

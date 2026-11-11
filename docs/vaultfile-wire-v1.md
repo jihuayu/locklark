@@ -1038,7 +1038,7 @@ The committed bounded decoder (`Decoder.DecodeWithLimits`) then runs with
 | KDF guard | the credentials KDF check rejects an unsupported KDF algorithm, version, iterations, parallelism, memory, secret key or associated data before any Argon2 allocation |
 | header HMAC | checked before content decryption |
 | content blocks | bounded by the encoded budget; each block HMAC is verified |
-| decrypted/gzip body | the decrypted content, or its gzip expansion, is rejected after key derivation and decryption but before XML decoding |
+| decrypted/gzip body | the decrypted content, or its gzip expansion, is rejected after key derivation and decryption but before XML decoding; cipher padding is not part of the budget: without compression a valid 1..16-byte repeated-count padding that the writer emitted is removed before the logical-body limit is applied, and content without such a sequence is left unchanged |
 | InnerHeader binaries | the aggregate binary bytes (protection flag included) are bounded by `MaxPlaintextBytes` and rejected before an over-budget binary is copied, after key derivation and decryption |
 
 The last two budgets can only be evaluated after the fixed Argon2id cost;
@@ -1065,8 +1065,11 @@ The decoder's expanded-body budget would otherwise let Seal produce a payload
 that Open rejects. Seal therefore also bounds the encoder's plaintext body:
 the encoder's opt-in `Encoder.EncodeWithLimits` measures the serialized KDBX4
 plaintext (the InnerHeader followed by the XML document, after the encoder's
-normalization and protected-entry ordering) and enforces `MaxPlaintextBytes`
-on its writes before gzip compression and encryption. The XML streams into that
+normalization and protected-entry ordering, and excluding the cipher block
+padding the encoder appends before encryption) and enforces `MaxPlaintextBytes`
+on its writes before gzip compression and encryption, so with
+`NoCompressionFlag` a body of exactly `MaxPlaintextBytes` plus its padding
+still seals and opens. The XML streams into that
 bounded collector, so no separate full XML slice from `xml.MarshalIndent` is
 built before the budget is enforced; the collector itself retains the serialized
 document up to its budget. A body over it, such as

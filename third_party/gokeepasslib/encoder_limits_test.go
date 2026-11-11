@@ -481,6 +481,68 @@ func TestEncodeWithLimitsAcceptsExactAndLargerBudget(t *testing.T) {
 	}
 }
 
+// TestEncodeWithLimitsUncompressedDecodesAtExactBudget pins the plaintext
+// budget of an uncompressed KDBX4 encoding: EncodeWithLimits measures the
+// logical body before the encoder appends its 1..16 repeated-count block
+// padding, and the bounded decoder budgets that logical body, not the padded
+// one. The exact-size bounded decode therefore succeeds with the padding
+// removed from RawData, and one byte less rejects it before RawData is kept.
+func TestEncodeWithLimitsUncompressedDecodesAtExactBudget(t *testing.T) {
+	db := lockEncoderLimitFixture(t, encoderLimitTestDatabase(t))
+	db.Header.FileHeaders.CompressionFlags = NoCompressionFlag
+	logical := int64(encoderLimitTestPlaintext(t, db))
+
+	var out bytes.Buffer
+	if err := NewEncoder(&out).EncodeWithLimits(db, EncodeLimits{MaxPlaintextBytes: logical}); err != nil {
+		t.Fatalf("EncodeWithLimits at exactly the logical body size: %v", err)
+	}
+	encoded := out.Bytes()
+
+	// The encoder always pads, so the decoded content carries the logical
+	// body followed by this test's guard against a vacuous fixture.
+	unbounded := NewDatabase()
+	unbounded.Credentials = limitTestCredentials(t)
+	if err := NewDecoder(bytes.NewReader(encoded)).Decode(unbounded); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if raw := unbounded.Content.RawData; len(raw) <= int(logical) || int64(len(raw))-logical >= 16 {
+		t.Fatalf("decoded %d bytes for a %d-byte body, want cipher padding after it", len(raw), logical)
+	}
+
+	decode := func(budget int64) (*Database, error) {
+		db := newLimitTestDatabase()
+		err := decodeWithLimits(db, encoded, limitTestKey(), DecodeLimits{
+			MaxEncodedBytes:   int64(len(encoded)),
+			MaxPlaintextBytes: budget,
+		})
+		return db, err
+	}
+
+	// The exact logical size is accepted: the padding is not body.
+	opened, err := decode(logical)
+	if err != nil {
+		t.Fatalf("decode at the exact logical body size %d: %v", logical, err)
+	}
+	if got := int64(len(opened.Content.RawData)); got != logical {
+		t.Fatalf("RawData of %d bytes, want the %d-byte logical body without padding", got, logical)
+	}
+	manager, err := opened.GetStreamManager()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.UnlockProtectedGroups(opened.Content.Root.Groups)
+	assertEncoderLimitEntry(t, opened.Content.Root.Groups[0].Entries[0])
+
+	// One byte less is rejected before the body is retained.
+	rejected, err := decode(logical - 1)
+	if !errors.Is(err, ErrDecodeLimitExceeded) {
+		t.Fatalf("decode one byte under: err = %v, want ErrDecodeLimitExceeded", err)
+	}
+	if rejected.Content == nil || rejected.Content.RawData != nil {
+		t.Fatalf("over-budget decode retained %d RawData bytes", len(rejected.Content.RawData))
+	}
+}
+
 // TestEncodeAndEncodeWithLimitsSharePipeline checks that both entry points
 // write the established normalized output: a decodable payload whose
 // Meta.HeaderHash was cleared before the XML document was serialized, whether
