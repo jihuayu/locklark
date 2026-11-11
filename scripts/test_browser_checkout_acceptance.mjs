@@ -1728,3 +1728,60 @@ test("route status trace keeps every #status write batched in one callback", () 
     "undefinedundefined",
   );
 });
+
+test("route worker trace keeps only allowlisted fixed lifecycle labels", () => {
+  // The worker reports one fixed label per branch. Only the prefix plus an
+  // allowlisted label is kept, at most 32 entries; dynamic text, other
+  // console arguments and unknown events never enter the trace.
+  const source = readFileSync(
+    new URL("./browser_native_acceptance.mjs", import.meta.url),
+    "utf8",
+  );
+  const start = source.search(/^const ROUTE_WORKER_TRACE_LIMIT = /m);
+  const stop = source.indexOf("\n// Best effort: a failure to find or open", start);
+  assert.ok(start >= 0 && stop > start, "worker trace helpers must stay top-level");
+  const context = vm.createContext({});
+  vm.runInContext(
+    source.slice(start, stop) +
+      "\nthis.event = routeWorkerTraceEvent;this.clean = sanitizeRouteWorkerTrace;",
+    context,
+  );
+  const run = (expression) =>
+    JSON.parse(vm.runInContext("JSON.stringify(" + expression + ")", context));
+  const literal = (value) => ({ type: "string", value });
+  const label = (name) => "[" + "locklark-route-lifecycle] " + name;
+
+  // Exact prefix plus allowlisted label is kept, and only the enum comes back.
+  for (const name of [
+    "activation-startup",
+    "boot-bind-bound",
+    "port-ready-sent",
+    "port-refused",
+  ])
+    assert.equal(run("event(" + JSON.stringify([literal(label(name))]) + ")"), name);
+
+  // Unknown labels, dynamic text, extra args and non-string args are dropped.
+  for (const args of [
+    [literal(label("port-admit-started ") + "https://secret.example/#route=abc")],
+    [literal(label("unknown-branch"))],
+    [literal("port-ready-sent")],
+    [literal("route-lifecycle port-ready-sent")],
+    [literal(label("port-ready-sent")), literal("extra")],
+    [{ type: "number", value: 7 }],
+    [{ type: "string", value: "TOKEN-0123456789abcdef" }],
+    [],
+    null,
+  ])
+    assert.equal(run("event(" + JSON.stringify(args) + ")"), null);
+
+  // The trace is bounded at 32 entries and unknown entries are filtered.
+  const many = run(
+    "clean(Array.from({length:50},()=>'port-ready-sent'))",
+  );
+  assert.equal(many.length, 32);
+  assert.deepEqual(run("clean(['port-ready-sent','SECRET-TEXT','https://x','port-refused'])"), [
+    "port-ready-sent",
+    "port-refused",
+  ]);
+  assert.equal(run("clean('not-an-array')"), null);
+});
