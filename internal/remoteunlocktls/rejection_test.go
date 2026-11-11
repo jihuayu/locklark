@@ -12,11 +12,12 @@ package remoteunlocktls
 // TEST-ONLY FRAMING. The 4-byte big-endian length-prefixed frames and the
 // request/approval section layout are the private, bounded helpers of
 // composition_test.go. This file defines no product frame. It reuses those
-// helpers and only adds: two 1-byte control sections appended to the end of the
-// same request packet (so the packet stays one bounded frame), and two 1-byte
-// control frames ("blocked" after the pause, "done" at the end) with no
-// payload. All are private to these tests and bounded. They define no product
-// wire protocol and are not the remote-unlock v1 wire format.
+// helpers and only adds two 1-byte control sections appended to the end of the
+// same request packet (send_vuk and pause_before_response), so the packet stays
+// one bounded frame. The verification pause is signalled to the test goroutine
+// only through buffered Go channels, never through the TLS channel or any
+// protocol frame. All of this is private to these tests and bounded. It
+// defines no product wire protocol and is not the remote-unlock v1 wire format.
 //
 // This file covers exactly two rejections:
 //
@@ -25,15 +26,17 @@ package remoteunlocktls
 //     channel with channel-1's exporter. The server's channel-2
 //     VerifyBindingContext rejects the stale exporter with ErrBindingMismatch
 //     before any further check, approval, VUK sealing or VUK frame.
-//  2. A cancelled fresh request whose server still delivers one genuine
-//     age-wrapped VUK response. The local lifecycle stays cancelled and never
-//     consumes the late response.
+//  2. A fresh request whose local lifecycle is cancelled while the server is
+//     verified and paused before any response frame. The server then still
+//     sends one test-only approval and one genuine age-wrapped VUK. The local
+//     lifecycle stays cancelled and never consumes the late response.
 //
 // It is not a failure matrix: it does not exercise a wrong SPKI, key, device,
 // member, expiry, policy, signature or restart, and it makes no claim that
 // #127, #129 or #130 is complete. Cancellation here is process-local and
-// in-memory only: it does not revoke authorization, notify the server, prevent
-// remote delivery, survive a restart or provide durable anti-replay protection.
+// in-memory only: it does not revoke authorization, notify the server, stop the
+// server's delivery, survive a restart or provide durable anti-replay
+// protection.
 
 import (
 	"bytes"
@@ -55,17 +58,9 @@ import (
 const testNoBytesWindow = 250 * time.Millisecond
 
 // Rejection request frames carry the canonical positive packet plus two
-// 1-byte test-only control sections (send_vuk, block_after_approval), so the
+// 1-byte test-only control sections (send_vuk, pause_before_response), so the
 // maximum grows by two bounded sections only.
 const rejectionRequestFrameMax = compositionRequestFrameMax + 2*(compositionFrameHeaderSize+1)
-
-// Test-only 1-byte control frames sent server-to-client: a "blocked" notice
-// after the paused verification, and an end-of-exchange "done" notice.
-const (
-	rejectionControlFrameMax = 64
-	rejectionControlBlocked  = compositionApprovalMagic
-	rejectionControlDone     = compositionApprovalMagic - 1
-)
 
 // ---------------------------------------------------------------------------
 // TEST-ONLY request packet extension.
@@ -74,25 +69,26 @@ const (
 // two more 1-byte-bounded sections, each using the shared helper:
 //   - send_vuk: 1 => the server, after a successful verification, seals and
 //     writes one genuine age VUK frame; 0 => no VUK frame.
-//   - block_after_approval: the server verifies the exporter, source peer
-//     binding and authorization, sends the approval, then pauses on a
-//     synchronization point. After release it writes one "blocked" control
-//     notice, one VUK frame when send_vuk is 1, and one "done" notice.
+//   - pause_before_response: the server verifies the exporter, source peer
+//     binding and authorization, signals that verified-and-paused point over a
+//     buffered Go channel without sending any response frame, and waits for
+//     the test to release it. Only after release does it write the approval
+//     (whose VUK flag is 1) and, when send_vuk is 1, exactly one VUK frame.
 type rejectionRequest struct {
 	compositionRequest
-	sendVUK            bool
-	blockAfterApproval bool
+	sendVUK          bool
+	pauseBeforeFrame bool
 }
 
 // encodeCompositionRejectionRequest appends the two control sections to an
 // already encoded positive request packet and checks the total bound.
-func encodeCompositionRejectionRequest(packet []byte, sendVUK, blockAfterApproval bool) ([]byte, error) {
+func encodeCompositionRejectionRequest(packet []byte, sendVUK, pauseBeforeFrame bool) ([]byte, error) {
 	flags := []struct {
 		name  string
 		value bool
 	}{
 		{"send_vuk", sendVUK},
-		{"block_after_approval", blockAfterApproval},
+		{"pause_before_response", pauseBeforeFrame},
 	}
 	out := append([]byte(nil), packet...)
 	for _, flag := range flags {
@@ -180,24 +176,8 @@ func parseCompositionRejectionRequest(buf []byte) (rejectionRequest, error) {
 	}
 	out.exporter = append([]byte(nil), exporter...)
 	out.sendVUK = control[0]
-	out.blockAfterApproval = control[1]
+	out.pauseBeforeFrame = control[1]
 	return out, nil
-}
-
-func encodeRejectionControlFrame(kind byte) []byte {
-	return []byte{kind}
-}
-
-func parseRejectionControlFrame(payload []byte) (byte, error) {
-	if len(payload) != 1 {
-		return 0, fmt.Errorf("remoteunlocktls test-only control: length %d, want 1", len(payload))
-	}
-	switch payload[0] {
-	case rejectionControlBlocked, rejectionControlDone:
-		return payload[0], nil
-	default:
-		return 0, errors.New("remoteunlocktls test-only control: unknown kind")
-	}
 }
 
 func encodeCompositionRequestFor(fx *compositionFixture, c remoteunlock.ChannelBindingContext, authorization []byte, exporter []byte) ([]byte, error) {
@@ -226,9 +206,12 @@ func encodeCompositionRequestFor(fx *compositionFixture, c remoteunlock.ChannelB
 type rejectionExchangeResult struct {
 	vukSealed int
 	vukFrames int
-	// blocked records that the server sent its post-pause "blocked" notice,
-	// i.e. that it reached the VUK stage.
-	blocked bool
+	// verified records that the server passed the exporter, source peer
+	// binding and authorization checks.
+	verified bool
+	// paused records that the server reached its verified-and-paused point and
+	// sent no response frame before the test released it.
+	paused bool
 	// exporterRejected records that the channel exporter check itself failed.
 	exporterRejected bool
 	// verifyErr is the first failed TLS-identity, peer-binding or
@@ -238,6 +221,15 @@ type rejectionExchangeResult struct {
 	err error
 }
 
+// rejectionHooks are the test-only Go synchronization points of one server run.
+// Neither is a protocol frame. verified is optional: when non-nil the server
+// sends one signal after it has verified the request and is about to pause, and
+// release must then be non-nil.
+type rejectionHooks struct {
+	verified chan<- struct{}
+	release  <-chan struct{}
+}
+
 // runRejectionServer is the test-only server side for the two cases below. It
 // reuses the positive server's verification order and composition: the channel
 // exporter first, then the source peer binding against the channel's verified
@@ -245,12 +237,12 @@ type rejectionExchangeResult struct {
 // verified request only) the VUK delivery with the current-policy source
 // recipient.
 //
-// Frame sequence after any verification failure: nothing.
-// With block_after_approval=0: the approval (whose VUK flag is send_vuk).
-// With block_after_approval=1: the approval (VUK flag 1), the pause, then one
-// "blocked" notice, then (send_vuk=1) exactly one VUK frame and the "done"
-// notice; with send_vuk=0, only the "done" notice.
-func runRejectionServer(ch *Channel, fx *compositionFixture, release <-chan struct{}) rejectionExchangeResult {
+// Response-frame order. After any verification failure: no frame at all.
+// With pause_before_response=0: the approval (whose VUK flag is send_vuk).
+// With pause_before_response=1: no frame until the test releases the server;
+// then the approval (whose VUK flag is 1) and, when send_vuk is 1, exactly one
+// VUK frame.
+func runRejectionServer(ch *Channel, fx *compositionFixture, hooks rejectionHooks) rejectionExchangeResult {
 	var a rejectionExchangeResult
 	fail := func(format string, err error) rejectionExchangeResult {
 		a.err = fmt.Errorf(format+": %w", err)
@@ -291,58 +283,79 @@ func runRejectionServer(ch *Channel, fx *compositionFixture, release <-chan stru
 		a.verifyErr = err
 		return a
 	}
+	a.verified = true
 
-	vukFollows := request.sendVUK || request.blockAfterApproval
-	if !writeFrame(encodeCompositionApproval(vukFollows), compositionApprovalFrameMax, "approval") {
-		return a
-	}
-	if !request.blockAfterApproval {
-		return a
-	}
-
-	// Approved, then paused at the synchronization point before any VUK.
-	if release != nil {
-		select {
-		case <-release:
-		case <-time.After(testHandshakeLimit):
-			a.err = errors.New("timed out waiting for the synchronization point release")
+	if !request.pauseBeforeFrame {
+		if !writeFrame(encodeCompositionApproval(request.sendVUK), compositionApprovalFrameMax, "approval") {
 			return a
 		}
-	}
-	a.blocked = true
-	if !writeFrame(encodeRejectionControlFrame(rejectionControlBlocked), rejectionControlFrameMax, "blocked notice") {
+		if request.sendVUK {
+			if err := a.sealAndWriteVUK(ch, fx); err != nil {
+				return fail("deliver VUK", err)
+			}
+		}
 		return a
 	}
-	if !request.sendVUK {
-		writeFrame(encodeRejectionControlFrame(rejectionControlDone), rejectionControlFrameMax, "done notice")
+
+	// Verified and paused: no response frame has been written. The signal is a
+	// buffered Go channel, not a frame.
+	if hooks.release == nil {
+		return fail("pause requested without a release channel", errors.New("invalid hooks"))
+	}
+	if hooks.verified != nil {
+		select {
+		case hooks.verified <- struct{}{}:
+		case <-time.After(testHandshakeLimit):
+			return fail("signal verified-and-paused point", errors.New("timed out"))
+		}
+	}
+	a.paused = true
+	select {
+	case <-hooks.release:
+	case <-time.After(testHandshakeLimit):
+		return fail("wait for release", errors.New("timed out waiting for the synchronization point release"))
+	}
+
+	// Released: send the late approval, then the genuine age VUK if requested.
+	if !writeFrame(encodeCompositionApproval(true), compositionApprovalFrameMax, "approval") {
 		return a
 	}
+	if request.sendVUK {
+		if err := a.sealAndWriteVUK(ch, fx); err != nil {
+			return fail("deliver late VUK", err)
+		}
+	}
+	return a
+}
+
+// sealAndWriteVUK seals one genuine age envelope for the current-policy source
+// device, records it as sealed, and writes it as one bounded frame.
+func (a *rejectionExchangeResult) sealAndWriteVUK(ch *Channel, fx *compositionFixture) error {
 	vuk := syntheticCompositionVUK()
 	defer clear(vuk)
 	recipient, err := compositionPolicyAgeRecipient(fx.file, compositionSourceDeviceID)
 	if err != nil {
-		return fail("resolve source recipient", err)
+		return fmt.Errorf("resolve source recipient: %w", err)
 	}
 	slot, err := vaultfile.SealVUKForDevice(vuk, fx.file.Header.VaultID,
 		fx.file.Header.KeyEpoch, compositionSourceDeviceID, recipient)
 	if err != nil {
-		return fail("seal VUK for the source device", err)
+		return fmt.Errorf("seal VUK for the source device: %w", err)
 	}
 	a.vukSealed++
-	if !writeFrame(slot.WrappedVUK, vaultfile.MaxWrappedKeyLength, "VUK frame") {
-		return a
+	if err := writeTestOnlyFrame(ch, slot.WrappedVUK, vaultfile.MaxWrappedKeyLength); err != nil {
+		return fmt.Errorf("write test-only VUK frame: %w", err)
 	}
 	a.vukFrames++
-	writeFrame(encodeRejectionControlFrame(rejectionControlDone), rejectionControlFrameMax, "done notice")
-	return a
+	return nil
 }
 
 // startRejectionServer runs runRejectionServer in its own goroutine. Harness
 // failures are returned to the test goroutine instead of failing inside it.
-func startRejectionServer(ch *Channel, fx *compositionFixture, release <-chan struct{}) <-chan rejectionExchangeResult {
+func startRejectionServer(ch *Channel, fx *compositionFixture, hooks rejectionHooks) <-chan rejectionExchangeResult {
 	done := make(chan rejectionExchangeResult, 1)
 	go func() {
-		done <- runRejectionServer(ch, fx, release)
+		done <- runRejectionServer(ch, fx, hooks)
 	}()
 	return done
 }
@@ -516,7 +529,7 @@ func TestLoopbackStaleExporterOnSecondChannelRejected(t *testing.T) {
 	}
 	// Channel 1 delivers the request synchronously (no pause, no VUK) so this
 	// request is already verified and approved on its own channel.
-	server1Done := startRejectionServer(server1, fx, nil)
+	server1Done := startRejectionServer(server1, fx, rejectionHooks{})
 	channel1Packet, err := encodeCompositionRejectionRequest(replayPacket, false, false)
 	if err != nil {
 		t.Fatalf("extend channel-1 packet: %v", err)
@@ -528,9 +541,12 @@ func TestLoopbackStaleExporterOnSecondChannelRejected(t *testing.T) {
 	if server1Result.verifyErr != nil {
 		t.Fatalf("channel 1 rejected the valid request: %v", server1Result.verifyErr)
 	}
-	if server1Result.vukSealed != 0 || server1Result.vukFrames != 0 || server1Result.blocked {
-		t.Fatalf("channel 1 sealed %d / wrote %d / blocked %v, want none (send_vuk=false)",
-			server1Result.vukSealed, server1Result.vukFrames, server1Result.blocked)
+	if !server1Result.verified || server1Result.paused {
+		t.Fatalf("channel 1 verified=%v paused=%v, want verified without a pause", server1Result.verified, server1Result.paused)
+	}
+	if server1Result.vukSealed != 0 || server1Result.vukFrames != 0 {
+		t.Fatalf("channel 1 sealed %d / wrote %d VUKs, want none (send_vuk=false)",
+			server1Result.vukSealed, server1Result.vukFrames)
 	}
 	approvalPayload, err := readTestOnlyFrame(client1, compositionApprovalFrameMax)
 	if err != nil {
@@ -603,7 +619,7 @@ func TestLoopbackStaleExporterOnSecondChannelRejected(t *testing.T) {
 		t.Fatalf("channel 2 own exporter on channel 2 (client): %v", err)
 	}
 
-	server2Done := startRejectionServer(server2, fx, nil)
+	server2Done := startRejectionServer(server2, fx, rejectionHooks{})
 	// Replay the exact channel-1 packet bytes, plus the two test-only control
 	// sections (send_vuk=0, no pause).
 	replayed, err := encodeCompositionRejectionRequest(replayPacket, false, false)
@@ -623,13 +639,12 @@ func TestLoopbackStaleExporterOnSecondChannelRejected(t *testing.T) {
 	if server2Result.vukFrames != 0 {
 		t.Fatalf("channel 2 wrote %d VUK frames, want 0", server2Result.vukFrames)
 	}
-	if server2Result.blocked {
-		t.Fatal("channel 2 reached the VUK stage despite the stale exporter")
+	if server2Result.verified || server2Result.paused {
+		t.Fatal("channel 2 reached a later stage despite the stale exporter")
 	}
-	// Nothing was approved or delivered to channel 2's client: the server was
-	// instructed to write no approval, no notice and no VUK, and it then
-	// blocks on its next (absent) request. A short bounded read must observe
-	// no bytes.
+	// Nothing was approved or delivered to channel 2's client: after the
+	// exporter rejection the server writes no frame at all and then blocks on
+	// its next (absent) request. A short bounded read must observe no bytes.
 	if err := client2.SetReadDeadline(time.Now().Add(testNoBytesWindow)); err != nil {
 		t.Fatalf("channel 2 SetReadDeadline: %v", err)
 	}
@@ -695,54 +710,71 @@ func TestLoopbackCancelledRequestDoesNotConsumeLateVUK(t *testing.T) {
 		t.Fatalf("extend test-only request: %v", err)
 	}
 
-	release := make(chan struct{})
-	serverDone := startRejectionServer(server, fx, release)
-	if err := writeTestOnlyFrame(client, packet, rejectionRequestFrameMax); err != nil {
-		t.Fatalf("write test-only request: %v", err)
-	}
-
-	// The server approved after verifying exporter, source peer binding and
-	// authorization; it is paused before sealing anything.
-	approvalPayload, err := readTestOnlyFrame(client, compositionApprovalFrameMax)
-	if err != nil {
-		t.Fatalf("read approval: %v", err)
-	}
-	if vukFollows, err := parseCompositionApproval(approvalPayload); err != nil {
-		t.Fatalf("parse approval: %v", err)
-	} else if !vukFollows {
-		t.Fatal("approval does not promise the late VUK")
-	}
-
-	// The requester cancels its process-local lifecycle. This is local only.
+	// The requester's process-local lifecycle exists before the request is
+	// sent. This is an in-memory state machine: it is local to this process.
 	lifecycle, err := remoteunlock.NewRequestLifecycle(ctx, compositionNowUnixMS)
 	if err != nil {
 		t.Fatalf("NewRequestLifecycle: %v", err)
 	}
+	assertLifecycleStatus(t, lifecycle, compositionNowUnixMS, remoteunlock.StatusRequested)
+
+	verified := make(chan struct{}, 1)
+	release := make(chan struct{})
+	// Signal-before-write proof: while the server is verified-and-paused it has
+	// written no response frame, so reading now must time out.
+	if err := client.SetReadDeadline(time.Now().Add(testNoBytesWindow)); err != nil {
+		t.Fatalf("client SetReadDeadline: %v", err)
+	}
+	serverDone := startRejectionServer(server, fx, rejectionHooks{verified: verified, release: release})
+	if err := writeTestOnlyFrame(client, packet, rejectionRequestFrameMax); err != nil {
+		t.Fatalf("write test-only request: %v", err)
+	}
+
+	// Wait for the bounded Go signal that the server verified the exporter,
+	// source peer binding and authorization and is paused before any response.
+	select {
+	case <-verified:
+	case <-time.After(testHandshakeLimit):
+		t.Fatal("timed out waiting for the server's verified-and-paused signal")
+	}
+	var one [1]byte
+	if n, readErr := client.Read(one[:]); n != 0 || !errors.Is(readErr, os.ErrDeadlineExceeded) {
+		t.Fatalf("server wrote %d bytes (err %v) before the verified pause was released", n, readErr)
+	}
+
+	// The requester cancels its local lifecycle, then releases the server.
 	cancelAt := compositionNowUnixMS + 1_500
 	lateAt := compositionNowUnixMS + 2_500
 	if err := lifecycle.Cancel(cancelAt); err != nil {
 		t.Fatalf("lifecycle Cancel: %v", err)
 	}
 	assertLifecycleStatus(t, lifecycle, cancelAt, remoteunlock.StatusCancelled)
-
-	// Release the server: approve already sent, now one genuine age VUK.
+	if err := client.SetDeadline(time.Now().Add(testHandshakeLimit)); err != nil {
+		t.Fatalf("client SetDeadline: %v", err)
+	}
 	close(release)
+
 	serverResult := awaitRejectionServer(t, serverDone, "late VUK")
 	if serverResult.verifyErr != nil {
 		t.Fatalf("server rejected the authorized request: %v", serverResult.verifyErr)
+	}
+	if !serverResult.verified || !serverResult.paused {
+		t.Fatalf("server verified=%v paused=%v, want both", serverResult.verified, serverResult.paused)
 	}
 	if serverResult.vukSealed != 1 || serverResult.vukFrames != 1 {
 		t.Fatalf("server sealed %d / wrote %d VUK frames, want 1 / 1", serverResult.vukSealed, serverResult.vukFrames)
 	}
 
-	// The client reads the late bytes: first the server's post-pause "blocked"
-	// notice, then the genuine age-wrapped VUK. It never opens the envelope.
-	blockedPayload, err := readTestOnlyFrame(client, rejectionControlFrameMax)
+	// The client reads the late approval and VUK after cancellation. It never
+	// opens the envelope.
+	approvalPayload, err := readTestOnlyFrame(client, compositionApprovalFrameMax)
 	if err != nil {
-		t.Fatalf("read blocked notice: %v", err)
+		t.Fatalf("read late approval: %v", err)
 	}
-	if kind, err := parseRejectionControlFrame(blockedPayload); err != nil || kind != rejectionControlBlocked {
-		t.Fatalf("expected the blocked notice, got %x: %v", blockedPayload, err)
+	if vukFollows, err := parseCompositionApproval(approvalPayload); err != nil {
+		t.Fatalf("parse late approval: %v", err)
+	} else if !vukFollows {
+		t.Fatal("late approval does not promise the VUK")
 	}
 	lateEnvelope, err := readTestOnlyFrame(client, vaultfile.MaxWrappedKeyLength)
 	if err != nil {
@@ -764,6 +796,9 @@ func TestLoopbackCancelledRequestDoesNotConsumeLateVUK(t *testing.T) {
 		t.Fatalf("late Receive = %v, want ErrLifecycleTransition", err)
 	}
 	assertLifecycleStatus(t, lifecycle, lateAt+2, remoteunlock.StatusCancelled)
+	if lifecycle.Context() != ctx {
+		t.Fatal("lifecycle context changed after the late response")
+	}
 
 	// No plaintext VUK: the late envelope was deliberately not passed to
 	// vaultfile.OpenVUKForDevice, so no VUK buffer ever exists here.
@@ -774,18 +809,6 @@ func TestLoopbackCancelledRequestDoesNotConsumeLateVUK(t *testing.T) {
 	}
 	if bytes.Contains(lateEnvelope, []byte(fx.sourceRecipient)) {
 		t.Fatal("late envelope leaks the source recipient in plaintext")
-	}
-
-	// The server wrote its end-of-exchange notice right after the VUK frame.
-	if !serverResult.blocked {
-		t.Fatal("server did not reach the post-release synchronization point")
-	}
-	donePayload, err := readTestOnlyFrame(client, rejectionControlFrameMax)
-	if err != nil {
-		t.Fatalf("read done notice: %v", err)
-	}
-	if kind, err := parseRejectionControlFrame(donePayload); err != nil || kind != rejectionControlDone {
-		t.Fatalf("expected the done notice, got %x: %v", donePayload, err)
 	}
 }
 

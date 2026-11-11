@@ -1141,28 +1141,40 @@ I/O deadlines. It covers exactly two rejections and nothing more:
    context (new request identifier, request digest and lock generation) with a
    valid delegated-admin authorization travels over one real loopback TLS 1.3
    mTLS channel against the caller-pinned current file and checkpoint. The
-   server verifies the exporter, source peer binding and authorization, approves
-   and pauses at a synchronization point. The client then cancels its
-   process-local `RequestLifecycle` before releasing the server, which sends one
-   genuine age-wrapped VUK. The client reads the late envelope but never calls
-   `vaultfile.OpenVUKForDevice`; so no plaintext VUK buffer exists. `Confirm`
+   client creates the request's process-local `RequestLifecycle` (status
+   `requested`) before it sends the request. The server verifies the real
+   channel exporter, source peer binding and delegated-admin authorization,
+   then pauses **before sending any response frame**. It signals that
+   verified-and-paused point to the test goroutine only through a bounded,
+   buffered test-only Go synchronization channel; nothing is signalled through
+   the TLS channel or a protocol frame, and no approval is sent yet. While the
+   server is paused, a bounded client read must observe no bytes on the TLS
+   channel. After that signal the client calls `Cancel`, verifies the status is
+   `cancelled`, and only then releases the server. The server then sends a
+   test-only approval and one genuine age-wrapped VUK over the real TLS
+   channel, and its test result proves it actually sealed and sent one VUK. The
+   client reads both after cancellation but never calls
+   `vaultfile.OpenVUKForDevice`, so no plaintext VUK buffer exists; `Confirm`
    and `Receive` stay rejected with `ErrLifecycleTransition`, the status stays
    `cancelled`, the plaintext VUK is absent from the envelope, and the
    caller-owned ciphertext buffer is cleared. This API has no locked state, so
    only `Cancel` is covered.
 
 Cancellation in case 2 is **local and in-memory only**. It does not revoke the
-authorization, notify the server, prevent remote delivery, survive a restart,
-or provide durable anti-replay protection. The test demonstrates that no local
-lifecycle consumption occurs; it does not claim remote cancellation, system-wide
-key revocation, or that the server withheld the late VUK.
+authorization, notify the server, stop the server from delivering the late
+response, survive a restart, or provide durable anti-replay protection. The
+test demonstrates that cancellation precedes the complete late response and that
+no local lifecycle consumption occurs; it does not claim remote cancellation,
+system-wide key revocation, or that the server withheld the late VUK.
 
 These are two covered rejections, not a failure matrix: no wrong SPKI, key,
 device, member, context, expiry, restart, stale policy or tampering case is
 exercised, and they are not evidence that #127, #129 or #130 is complete. The
-test-only frames remain private to the tests (bounded request, approval, control
-and VUK frames, and two 1-byte control sections appended to the request packet)
-and are still not a product wire protocol.
+test-only frames remain private to the tests: one bounded request frame whose
+packet ends with two 1-byte control sections (`send_vuk`, `pause_before_response`),
+one bounded approval frame and one bounded VUK frame. There are no other frames;
+the verification pause is signalled over Go channels only. None of this is a
+product wire protocol.
 
 ## Scope boundary
 
