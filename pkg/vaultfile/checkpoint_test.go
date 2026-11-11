@@ -746,6 +746,90 @@ func TestVerifyPolicyCheckpointNegative(t *testing.T) {
 	})
 }
 
+// TestVerifyPolicyChainRootChain pins the shared chain helper's success path:
+// it returns the authenticated current policy, not the pin and not the
+// anchor, as an independent copy of the proof it authenticated. The anchor
+// proof carries garbage sig bytes and the current proof is root-signed, so
+// the chain really is authenticated by the caller digest plus a real
+// signature. A wrong checkpoint fails closed with the existing code and no
+// policy.
+func TestVerifyPolicyChainRootChain(t *testing.T) {
+	k := newCPKeys(t)
+	c := newCPChain(t, k)
+	if err := ValidateFile(c.f); err != nil {
+		t.Fatalf("fixture is not structurally valid: %v", err)
+	}
+	if !bytes.Equal(c.f.SignedPolicyProofs[0].Sig, pf(0x7f, 64)) {
+		t.Fatal("fixture anchor proof no longer carries garbage sig bytes")
+	}
+
+	got, err := verifyPolicyChain(c.f.Header, c.f.SignedPolicyProofs, c.anchor)
+	if err != nil {
+		t.Fatalf("root-signed chain rejected: %v", err)
+	}
+	if got == nil {
+		t.Fatal("verifyPolicyChain returned a nil policy on success")
+	}
+	// The authenticated current policy is c.policies[1] (seq 6), the one the
+	// header names, not the pinned anchor (seq 5).
+	last := len(c.f.SignedPolicyProofs) - 1
+	want := &c.f.SignedPolicyProofs[last].Policy
+	if got.PolicySeq != c.f.Header.PolicySeq || got.PolicySeq != want.PolicySeq {
+		t.Fatalf("returned policy seq = %d, want header/current seq %d", got.PolicySeq, c.f.Header.PolicySeq)
+	}
+	if !bytes.Equal(PolicyDigest(got), policyDigest(&c.f.SignedPolicyProofs[last])) {
+		t.Fatal("returned policy is not the authenticated current policy")
+	}
+	gotDoc, err := EncodePolicyDocument(got)
+	if err != nil {
+		t.Fatalf("returned policy does not encode: %v", err)
+	}
+	if wantDoc, err := EncodePolicyDocument(want); err != nil {
+		t.Fatalf("current proof policy does not encode: %v", err)
+	} else if !bytes.Equal(gotDoc, wantDoc) {
+		t.Fatal("returned policy document differs from the authenticated current policy")
+	}
+
+	// The returned policy is an independent snapshot: mutating nested
+	// mutable data in the source proof leaves it unchanged.
+	src := &c.f.SignedPolicyProofs[last]
+	src.Policy.PrevPolicyDigest[0] ^= 0xff
+	src.Policy.OwnerRoot.PublicKey[0] ^= 0xff
+	src.Policy.Readers[0].Label = "mutated-reader"
+	src.Policy.Writers = nil
+	src.Policy.Admins[0].Label = "mutated-admin"
+	src.Policy.Devices[0].ContentSigningKey.PublicKey[0] ^= 0xff
+	src.Policy.Devices[0].AgeEncryptionKey = "age1mutated"
+	src.Sig[0] ^= 0xff
+	if bytes.Equal(got.PrevPolicyDigest, src.Policy.PrevPolicyDigest) ||
+		bytes.Equal(got.OwnerRoot.PublicKey, src.Policy.OwnerRoot.PublicKey) ||
+		got.Readers[0].Label == src.Policy.Readers[0].Label ||
+		got.Writers == nil ||
+		got.Admins[0].Label == src.Policy.Admins[0].Label ||
+		bytes.Equal(got.Devices[0].ContentSigningKey.PublicKey, src.Policy.Devices[0].ContentSigningKey.PublicKey) ||
+		got.Devices[0].AgeEncryptionKey == src.Policy.Devices[0].AgeEncryptionKey {
+		t.Fatal("returned policy aliases the source proof")
+	}
+	if after, err := EncodePolicyDocument(got); err != nil || !bytes.Equal(after, gotDoc) {
+		t.Fatal("returned policy changed when the source proof was mutated")
+	}
+
+	// A wrong checkpoint fails closed with the existing precise code and no
+	// policy.
+	a := c.pin(c.anchor.PolicyDigest, c.anchor.PolicySeq)
+	a.PolicyDigest[0] ^= 0xff
+	bad, err := verifyPolicyChain(c.f.Header, c.f.SignedPolicyProofs, a)
+	if bad != nil {
+		t.Fatal("verifyPolicyChain returned a policy for a wrong checkpoint")
+	}
+	wantCodeAt(t, err, CodePolicyCheckpointFailed, "")
+	bad, err = verifyPolicyChain(c.f.Header, c.f.SignedPolicyProofs, nil)
+	if bad != nil {
+		t.Fatal("verifyPolicyChain returned a policy for a nil checkpoint")
+	}
+	wantCodeAt(t, err, CodeInvalidValue, "")
+}
+
 // TestVerifyPolicyCheckpointAnchorRootBinding pins the anchor policy's owner
 // root to the caller checkpoint. A carried anchor whose digest is pinned may
 // name another root B while the next policy links to it and returns to the
