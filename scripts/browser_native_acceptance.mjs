@@ -98,6 +98,7 @@ const sharedEnvironment =
 const diagnostics = mkdtempSync(join(state, "diagnostics-"));
 let stage = "fixture",
   lastPopup = null,
+  lastRouteObservation = null,
   nativeInput = null;
 let privacyValues = [];
 let observedFixture = null;
@@ -119,6 +120,41 @@ function popupStatusKind(value) {
   if (text.includes("Watchtower")) return "watchtower";
   if (text.includes("已填充") || text.includes("填充完成")) return "filled";
   return "other";
+}
+// Read-only observation of the attached route page for the failure report.
+// Only fixed enums and booleans ever leave the page: never text, titles,
+// field values, URLs, tokens, ids or hidden application state.
+const ROUTE_VIEWS = ["locked", "vault", "detail", "closed", "editor"];
+const ROUTE_STATUS_KINDS = ["claim-failed", "route-revoked", "other"];
+const ROUTE_CLAIM_FAILED_STATUS = "无法打开此条目";
+const ROUTE_REVOKED_STATUS = "条目已失效，请重新从金库打开";
+function sanitizeRouteObservation(value) {
+  return {
+    view: ROUTE_VIEWS.includes(value?.view) ? value.view : "other",
+    detailShown: value?.detailShown === true,
+    titleMatchesFixture: value?.titleMatchesFixture === true,
+    statusKind: ROUTE_STATUS_KINDS.includes(value?.statusKind)
+      ? value.statusKind
+      : "other",
+  };
+}
+// Visible DOM only: body[data-view], the detail section, its heading and the
+// status line. The fixture comparison and the status categorisation happen
+// inside the page; only their fixed outcomes are returned.
+function routeStateProbe(title) {
+  return `(()=>{
+    const view=(document.body&&document.body.dataset.view)||'';
+    const detail=document.querySelector('#detail-view');
+    const heading=document.querySelector('#detail-title');
+    const status=document.querySelector('#status');
+    const statusText=status?String(status.textContent||'').trim():'';
+    return {
+      view:${JSON.stringify(ROUTE_VIEWS)}.includes(view)?view:'other',
+      detailShown:!!detail&&!detail.hidden,
+      titleMatchesFixture:!!heading&&String(heading.textContent||'')===${JSON.stringify(title)},
+      statusKind:statusText===${JSON.stringify(ROUTE_CLAIM_FAILED_STATUS)}?'claim-failed':statusText===${JSON.stringify(ROUTE_REVOKED_STATUS)}?'route-revoked':'other'
+    };
+  })()`;
 }
 function phase(value) {
   stage = value;
@@ -694,7 +730,20 @@ try {
       // after this tab exists. A missing window/label is retried inside the
       // bounded wait; no inspect output is retained or logged.
       mark("route:native-label");
-      const approveLabel = () => {
+      // Read-only visible-DOM observation refreshed on every bounded attempt,
+      // so a failure can say whether this page never left startup, closed
+      // after a rejected claim, or reached its detail. It never reads a
+      // runtime message and retains no text, value, URL, token or hidden
+      // state; it cannot make the wait pass.
+      const observeRouteState = async () => {
+        try {
+          lastRouteObservation = sanitizeRouteObservation(
+            await route.evaluate(routeStateProbe(fixture.Title)),
+          );
+        } catch {}
+      };
+      const approveLabel = async () => {
+        await observeRouteState();
         try {
           const control = input([], true, true).controls?.["批准本次操作"];
           return control?.present === true && control?.showing === true;
@@ -1181,6 +1230,7 @@ try {
   // Deliberately omit fixture files and exception/command bodies. The only
   // inspection text is the trusted popup's bounded status; native metadata is
   // a fixed control-name allowlist and never asks accessibility for values.
+  // The route page contributes only its fixed view/status enums and booleans.
   const safeReasons = [
     "Action popup did not open",
     "Previous action popup did not close",
@@ -1271,6 +1321,11 @@ try {
         ? error.stack.match(/browser_(?:native|checkout|passkey_management|conditional_passkey|passkey)_acceptance\.mjs:[0-9]+:[0-9]+/g)
         : [],
     stage,
+    // Latest fixed-enum route-page observation from the bounded native-label
+    // wait. It only ever contains the four sanitized fields below.
+    ...(routeDetailRead
+      ? { routePage: sanitizeRouteObservation(lastRouteObservation) }
+      : {}),
     popup: { available: false },
     native: { available: false },
   };
