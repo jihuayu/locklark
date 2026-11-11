@@ -423,6 +423,66 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
         self.assertEqual(first, second)
 
 
+RUNNER_GLUE_SOURCES = (
+    "scripts/e2e_runner.py",
+    "tests/e2e/harness.py",
+    "tests/e2e/support.py",
+    "tests/e2e/tier2_f09_f17.py",
+)
+
+
+class CheckoutSourceIdentityTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = Path(tempfile.mkdtemp(prefix="lk-checkout-source-"))
+        self.addCleanup(shutil.rmtree, self.temp, ignore_errors=True)
+        for index, relative in enumerate(support.CHECKOUT_SOURCE_FILES):
+            path = self.temp / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"placeholder {index}\n", encoding="utf-8")
+
+    def _identity(self) -> str:
+        return support._checkout_source_identity(self.temp)["source_sha256"]
+
+    def test_runner_glue_sources_are_bound_after_native_journeys(self):
+        self.assertEqual(
+            support.CHECKOUT_SOURCE_FILES[-len(RUNNER_GLUE_SOURCES):],
+            RUNNER_GLUE_SOURCES,
+        )
+        self.assertEqual(
+            support.CHECKOUT_SOURCE_FILES[:5],
+            (
+                "scripts/browser_native_acceptance.mjs",
+                "scripts/browser_checkout_acceptance.mjs",
+                "scripts/browser_save_acceptance.mjs",
+                "scripts/browser_native_x11.py",
+                "browser-extension/build.js",
+            ),
+        )
+
+    def test_changing_each_runner_glue_source_changes_identity(self):
+        baseline = self._identity()
+        for relative in RUNNER_GLUE_SOURCES:
+            with self.subTest(source=relative):
+                path = self.temp / relative
+                original = path.read_bytes()
+                path.write_bytes(original + b"# dirty edit\n")
+                self.assertNotEqual(self._identity(), baseline)
+                path.write_bytes(original)
+                self.assertEqual(self._identity(), baseline)
+
+    def test_missing_runner_glue_source_is_rejected(self):
+        for relative in RUNNER_GLUE_SOURCES:
+            with self.subTest(source=relative):
+                path = self.temp / relative
+                original = path.read_bytes()
+                path.unlink()
+                with self.assertRaisesRegex(
+                    AssertionError, "checkout evidence source is unavailable"
+                ):
+                    support._checkout_source_identity(self.temp)
+                path.write_bytes(original)
+
+
 class CheckoutRowRegistrationTests(unittest.TestCase):
     def test_functional_row_is_registered_and_old_components_are_preserved(self):
         from tests.e2e import tier2_f09_f17

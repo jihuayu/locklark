@@ -2360,6 +2360,10 @@ CHECKOUT_SOURCE_FILES = (
     "scripts/browser_save_acceptance.mjs",
     "scripts/browser_native_x11.py",
     "browser-extension/build.js",
+    "scripts/e2e_runner.py",
+    "tests/e2e/harness.py",
+    "tests/e2e/support.py",
+    "tests/e2e/tier2_f09_f17.py",
 )
 
 CHECKOUT_BINARY_ROLES = (
