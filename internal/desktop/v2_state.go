@@ -646,11 +646,9 @@ func (a *App) createVault(name, description, icon string) (vault.VaultMeta, erro
 	if !ok {
 		return vault.VaultMeta{}, personal.ErrMutationRefused
 	}
-	if a.status != "已创建金库："+created.Name {
-		// runNative already recorded the concrete error.
-		return vault.VaultMeta{}, personal.ErrMutationRefused
-	}
-	return created, nil
+	// The create is asynchronous; the concrete meta and any failure reach the UI
+	// through the applied snapshot and a.status, never through this frame.
+	return vault.VaultMeta{}, nil
 }
 
 // CreateVault is the exported alias used by external callers.
@@ -701,7 +699,8 @@ func (a *App) moveSelectedToVault(targetVaultID string, copyItem bool) (string, 
 	if !ok {
 		return "", "", personal.ErrMutationRefused
 	}
-	return newID, newRevision, nil
+	// The move is asynchronous; its new ids are selected by the apply closure.
+	return "", "", nil
 }
 
 func (a *App) MoveItemToVault(targetVaultID string, copyItem bool) (string, string, error) {
@@ -788,14 +787,15 @@ func (a *App) emptyTrash(olderThan *time.Duration) (int, error) {
 		return 0, personal.ErrSessionLocked
 	}
 	s := a.session
-	purged, err := 0, error(nil)
+	var purged int
 	var snap v2Snapshot
 	filter, query := a.currentFilter(), a.currentV2Query()
 	ok := a.runNative(func(g *personal.MutationGate) nativeResult {
-		purged, err = s.EmptyTrash(olderThan, g)
+		count, err := s.EmptyTrash(olderThan, g)
 		if err != nil {
 			return nativeResult{err: err}
 		}
+		purged = count
 		snap = a.captureV2(s, filter)
 		snap.query = query
 		return nativeResult{err: snap.err}
@@ -805,10 +805,12 @@ func (a *App) emptyTrash(olderThan *time.Duration) (int, error) {
 		}
 		a.status = fmt.Sprintf("已永久删除 %d 个回收站条目", purged)
 	})
-	if !ok || err != nil {
-		return 0, err
+	if !ok {
+		return 0, personal.ErrMutationRefused
 	}
-	return purged, nil
+	// The purge is asynchronous; its count and any failure are reported by the
+	// apply closure and a.status, never through this frame.
+	return 0, nil
 }
 
 // PurgeExpiredTrash removes trashed items older than the 30-day retention.

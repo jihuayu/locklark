@@ -443,7 +443,18 @@ func removeOwnedAttachment(attachments []vault.AttachmentMeta, attID string) []v
 
 // Both write commands and native read-only revalidation use this complete
 // slot, signed snapshot, schema and full history authentication path.
-func authenticateState(tx *bolt.Tx, pw string, key []byte, action string, unlocked *Session) (out *authenticatedState, err error) {
+func authenticateState(tx *bolt.Tx, pw string, key []byte, action string, unlocked *Session) (*authenticatedState, error) {
+	return authenticateStateItems(tx, pw, key, action, unlocked, true)
+}
+
+// itemDecryptObserver is a test seam that counts full vault payload decryptions.
+// It is nil in production.
+var itemDecryptObserver func()
+
+// authenticateStateItems is authenticateState with an explicit choice about
+// decrypting item payloads. Audit-only phases pass false: they still verify the
+// snapshot, audit chain and revisions, but cannot observe plaintext items.
+func authenticateStateItems(tx *bolt.Tx, pw string, key []byte, action string, unlocked *Session, withItems bool) (out *authenticatedState, err error) {
 	var opened []byte
 	var i identity
 	var items []vault.Item
@@ -564,14 +575,15 @@ func authenticateState(tx *bolt.Tx, pw string, key []byte, action string, unlock
 	if unlocked != nil {
 		nextCache = &auditCache{slotDigest: slotSum, auditPub: pubHash, count: tip.Count, last: tip.Last, origin: tip.Origin, prefix: full, revisions: cloneRevisions(revisions), archiveDigest: archiveSum, archiveValid: true, hashedBytes: hashed}
 	}
-	if action != "audit.list" {
+	if withItems {
+		if itemDecryptObserver != nil {
+			itemDecryptObserver()
+		}
 		var meta []byte
 		meta, items, e = vault.OpenItems(s, device, signer.Public().(ed25519.PublicKey), tip.Epoch)
 		if e != nil || items == nil || string(meta) != schema {
 			return nil, invalid
 		}
-	}
-	if action != "audit.list" {
 		if len(items) != len(revisions) {
 			return nil, invalid
 		}
@@ -699,7 +711,10 @@ func commandWithUpdate(update func(func(*bolt.Tx) error) error, pw string, key [
 	var capacity bool
 	var auditCandidate *auditCache
 	e := update(func(tx *bolt.Tx) (err error) {
-		auth, e := authenticateState(tx, pw, key, action, option.unlocked)
+		// The pre-network HIBP intent commits only a linked audit event, so it
+		// must not decrypt the item payload just to discard it.
+		withItems := action != "audit.list" && !(action == hibpAction && option.hibp != nil && option.hibp.intent)
+		auth, e := authenticateStateItems(tx, pw, key, action, option.unlocked, withItems)
 		if e != nil {
 			return e
 		}

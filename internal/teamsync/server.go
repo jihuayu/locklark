@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -175,35 +176,29 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.refuse(ctx, w, http.StatusBadRequest)
 		return
 	}
-	out := s.handle(r, q)
+	// The response this request returns, capacity refusal included, is decided
+	// and signed while the handler still holds s.mu: only then does an anchor
+	// advance know the caller will receive the full committed answer.
+	out, e := s.handle(r, q, MaxResponseBytes)
 	if !s.live(ctx) {
 		return
 	}
-	out.Protocol, out.RequestDigest, out.Nonce = protocol, digest("request", q), q.Proof.Nonce
-	if out.History != nil {
-		out.HistoryDigest = digest("history", out.History)
-	}
-	if out.Receipt != nil {
-		out.ReceiptDigest = digest("receipt", out.Receipt)
-	}
-	if !s.signResponse(ctx, &out) {
+	if e != nil {
+		// Not even the capacity refusal fits its budget: no writable answer is
+		// possible, and no anchor moved.
+		s.refuse(ctx, w, http.StatusServiceUnavailable)
 		return
 	}
-	encoded := encode(out)
-	if len(encoded) > MaxResponseBytes {
-		out = response{Protocol: protocol, RequestDigest: out.RequestDigest, Nonce: out.Nonce, Status: "capacity"}
-		if !s.signResponse(ctx, &out) {
-			return
-		}
-		encoded = encode(out)
-	}
+	// The preflighted decision is final: handle signed and measured this exact
+	// envelope under s.mu, and no later size check may turn it into a refusal
+	// after an anchor moved.
 	if !s.grantWrite(ctx) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	_, _ = w.Write(encoded) // A lost write is unknown to a publisher; never retry it.
+	_, _ = w.Write(encode(out)) // A lost write is unknown to a publisher; never retry it.
 }
 
 func authorize(c *directory.Config, q request, view directory.View) error {
@@ -237,13 +232,26 @@ func authorize(c *directory.Config, q request, view directory.View) error {
 	}
 	return nil
 }
-func (s *server) handle(r *http.Request, q request) response {
+
+// handle validates, decides the complete signed response within budget, and
+// only then advances the persistent anchor, all under s.mu. budget is the
+// per-call limit on the exact encoded signed envelope: ServeHTTP always passes
+// MaxResponseBytes and only package tests pass a smaller one. A non-nil error
+// means no response may be granted; it never follows an anchor advance.
+func (s *server) handle(r *http.Request, q request, budget int) (response, error) {
 	if !s.live(r.Context()) {
-		return response{Status: errorStatus(ErrTransport)}
+		return response{Status: errorStatus(ErrTransport)}, ErrTransport
+	}
+	// Every answer, refusal included, is measured against this call's budget.
+	fail := func(e error) (response, error) {
+		out := response{Status: errorStatus(e)}
+		if !s.prepare(r.Context(), q, &out, budget) {
+			return response{}, ErrTransport
+		}
+		return out, nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	fail := func(e error) response { return response{Status: errorStatus(e)} }
 	if !s.live(r.Context()) {
 		return fail(ErrTransport)
 	}
@@ -260,58 +268,87 @@ func (s *server) handle(r *http.Request, q request) response {
 	if !s.live(r.Context()) {
 		return fail(ErrTransport)
 	}
-	view, e := directory.Read(s.path, s.config, anchor)
+	// One BoltDB read advances every receipt once and requires both the
+	// persistent rollback anchor and this request's proof anchor on that chain.
+	// The sealed result is this request's only evidence: nothing re-verifies it.
+	trusted, e := directory.ReadTrusted(s.path, s.config, anchor, q.Proof.Anchor)
+	if s.hooks != nil && s.hooks.afterRead != nil {
+		s.hooks.afterRead()
+	}
 	if !s.live(r.Context()) {
 		return fail(ErrTransport)
 	}
 	if e != nil {
 		return fail(mapDirectoryError(e))
 	}
-	if e = authorize(s.config, q, view); e != nil {
+	headView, e := trusted.HeadView()
+	if e != nil {
+		return fail(ErrInvalid)
+	}
+	if e = authorize(s.config, q, headView); e != nil {
 		return fail(e)
 	}
-	h, e := directory.ExportHistory(s.path, s.config, anchor)
+	// The proof anchor was proven on the same pass. Its view keeps head
+	// authority: it authorizes against the head receipt, exactly like the
+	// former AssembleHistory head view, not against ancestor membership.
+	proofView, e := trusted.ProvenAnchorView(q.Proof.Anchor)
+	if e != nil {
+		return fail(ErrInvalid)
+	}
+	if e = authorize(s.config, q, proofView); e != nil {
+		return fail(e)
+	}
 	if !s.live(r.Context()) {
 		return fail(ErrTransport)
 	}
+	// Every read and publish answers from the retained history, so the one
+	// ReadHistory size budget applies to both sides before anything moves: an
+	// oversized chain leaves the anchor and the database exactly as they were.
+	h, e := trusted.History()
 	if e != nil {
 		return fail(mapDirectoryError(e))
 	}
-	view, e = directory.VerifyHistory(s.config, s.minimum, h)
-	if e != nil {
-		return fail(ErrInvalid)
-	}
-	if !s.live(r.Context()) {
-		return fail(ErrTransport)
-	}
-	if _, e = directory.VerifyHistory(s.config, q.Proof.Anchor, h); e != nil {
-		return fail(ErrInvalid)
-	}
-	if !s.live(r.Context()) {
-		return fail(ErrTransport)
-	}
-	if e = authorize(s.config, q, view); e != nil {
-		return fail(e)
-	}
-	if !s.live(r.Context()) {
-		return fail(ErrTransport)
-	}
-	head := view.Receipt.Checkpoint()
-	if head != anchor {
-		if s.anchors.Advance(anchor, head) != nil {
+	head := trusted.Checkpoint()
+	if q.Proof.Action == "read" {
+		// The exact signed envelope, fixed-size signature included, is decided
+		// before the anchor moves: a caller told capacity never saw progress.
+		out := response{Status: "current", Head: head, History: &h}
+		if !s.prepare(r.Context(), q, &out, budget) {
+			return fail(ErrTransport)
+		}
+		if out.Status == "capacity" {
+			return out, nil
+		}
+		if anchor != head && s.anchors.Advance(anchor, head) != nil {
 			return fail(ErrAnchor)
 		}
-		anchor = head
-	}
-	if !s.live(r.Context()) {
-		return fail(ErrTransport)
-	}
-	if q.Proof.Action == "read" {
-		return response{Status: "current", Head: head, History: &h}
+		return out, nil
 	}
 	p := q.Publication
 	if p.Proposal.Parent != head {
 		return fail(ErrConflict)
+	}
+	// Project the committed response before the anchor moves or anything is
+	// written. Commit stores the proposal verbatim and the sequencer signs the
+	// receipt, not the proposal, so digests and signatures have fixed lengths.
+	// Only values whose serialized length depends on the outcome are replaced:
+	// the epoch that Commit derives from the parent, the scope and the
+	// versioned parent hash of the stored receipt. Equal-length placeholders
+	// predict the serialized envelope length; they are not the real parent.
+	// The projection still carries the real snapshot and names the parent the
+	// commit must extend.
+	projection := directory.Receipt{Proposal: p.Proposal, Signature: make([]byte, ed25519.SignatureSize)}
+	projection.Proposal.Epoch = head.Version + 1
+	projection.Proposal.Scope = strings.Repeat("0", len(s.config.Genesis().Scope))
+	if head.Version > 0 {
+		projection.Proposal.Parent.Hash = strings.Repeat("0", 64)
+	}
+	projected := response{Status: "committed", Head: projection.Checkpoint(), Receipt: &projection}
+	if !s.prepare(r.Context(), q, &projected, budget) {
+		return fail(ErrTransport)
+	}
+	if projected.Status == "capacity" {
+		return projected, nil
 	}
 	key, granted := s.commitKey(r.Context())
 	if !granted {
@@ -333,8 +370,50 @@ func (s *server) handle(r *http.Request, q request) response {
 	if !s.live(r.Context()) {
 		return fail(ErrUnknown)
 	}
+	// The commit is durable: from here on the only answer is the signed actual
+	// result: neither a length mismatch nor an unexpected capacity refusal from
+	// prepare may tell the caller that the commit hit a budget. Either way the
+	// answer is the small signed unknown error and the anchor does not move.
+	out := response{Status: "committed", Head: receipt.Checkpoint(), Receipt: &receipt}
+	if len(receipt.Proposal.Scope) != len(projection.Proposal.Scope) || receipt.Proposal.Epoch != projection.Proposal.Epoch || len(receipt.Proposal.Parent.Hash) != len(projection.Proposal.Parent.Hash) || !s.prepare(r.Context(), q, &out, budget) {
+		return fail(ErrUnknown)
+	}
+	if out.Status == "capacity" {
+		// prepare replaced out with a signed capacity refusal, which must never
+		// tell the caller that a durable commit hit a budget. Return the small
+		// signed unknown error instead and leave the anchor where it was.
+		return fail(ErrUnknown)
+	}
 	if s.anchors.Advance(anchor, receipt.Checkpoint()) != nil {
 		return fail(ErrUnknown)
 	}
-	return response{Status: "committed", Head: receipt.Checkpoint(), Receipt: &receipt}
+	return out, nil
+}
+
+// prepare fills the fixed response metadata, computes the digests of the
+// history or receipt it carries and signs it. Over budget, out becomes the
+// signed capacity refusal instead and is reported with success when that
+// refusal fits: callers must check for that status before advancing the anchor
+// or committing. It reports false only when no response may be signed any
+// more, including a capacity refusal that itself exceeds budget.
+func (s *server) prepare(ctx context.Context, q request, out *response, budget int) bool {
+	out.Protocol, out.RequestDigest, out.Nonce = protocol, digest("request", q), q.Proof.Nonce
+	out.HistoryDigest, out.ReceiptDigest, out.Signature = "", "", nil
+	if out.History != nil {
+		out.HistoryDigest = digest("history", out.History)
+	}
+	if out.Receipt != nil {
+		out.ReceiptDigest = digest("receipt", out.Receipt)
+	}
+	if !s.signResponse(ctx, out) {
+		return false
+	}
+	if len(encode(*out)) <= budget {
+		return true
+	}
+	*out = response{Protocol: protocol, RequestDigest: out.RequestDigest, Nonce: out.Nonce, Status: "capacity"}
+	if !s.signResponse(ctx, out) {
+		return false
+	}
+	return len(encode(*out)) <= budget
 }

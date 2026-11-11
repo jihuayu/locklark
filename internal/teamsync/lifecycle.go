@@ -21,6 +21,8 @@ type serverLifecycleHooks struct {
 	beforeRead, beforeCommitGrant, afterCommitGrant func()
 	beforeSign, afterSign                           func()
 	beforeWriteGrant                                func()
+	// afterRead counts BoltDB directory reads performed by one request.
+	afterRead func()
 }
 
 func (s *server) live(ctx context.Context) bool {

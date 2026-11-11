@@ -2,7 +2,11 @@
 // It has no disk fallback and no web / IPC bindings.
 package osunlock
 
-import "errors"
+import (
+	"errors"
+	"sync"
+	"time"
+)
 
 var (
 	// ErrUnavailable is the fixed fallback for a platform failure that the
@@ -31,6 +35,37 @@ var (
 	// not enabled quick unlock yet, or it was disabled.
 	ErrNotFound = errors.New("system quick unlock is not enrolled")
 )
+
+// capabilityCache memoizes a platform capability probe for a bounded window, so
+// a capability change (lid opened from clamshell mode, Magic Keyboard with
+// Touch ID attached) is observed without a process restart while render paths
+// do not probe native frameworks on every frame.
+type capabilityCache struct {
+	mu      sync.Mutex
+	value   string
+	checked time.Time
+}
+
+func (c *capabilityCache) get(now time.Time, ttl time.Duration, probe func() string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.checked.IsZero() || now.Before(c.checked) || now.Sub(c.checked) >= ttl {
+		c.value, c.checked = probe(), now
+	}
+	return c.value
+}
+
+// deleteBoth removes a native credential and its wrapped secret. Both removals
+// are attempted even when the first fails, so a refused credential delete can
+// never leave a usable secret behind.
+func deleteBoth(deleteCredential, deleteSecret func() error) error {
+	credentialErr := deleteCredential()
+	secretErr := deleteSecret()
+	if credentialErr != nil || secretErr != nil {
+		return ErrUnavailable
+	}
+	return nil
+}
 
 type Store interface {
 	Store(string, []byte) error
