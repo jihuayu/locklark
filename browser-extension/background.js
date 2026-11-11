@@ -4616,6 +4616,80 @@ if (typeof importScripts === "function") importScripts("core.js");
   function routeGrantCount() {
     return routeGrantSet().size;
   }
+  // A pending create is not yet an ordinary routeTabs entry, so routeLive()
+  // is necessarily false for it; its state is checked directly. Child fields
+  // are read only after the object identity of this exact boot is confirmed.
+  function routeBootLive(boot) {
+    return (
+      !!boot &&
+      routeBoots.has(boot) &&
+      routeGrants.get(boot.token) === boot &&
+      (boot.tabId === 0 || routeTabs.get(boot.tabId) !== boot) &&
+      boot.state === "open" &&
+      boot.expiresAt > Date.now() &&
+      boot.capability !== "" &&
+      boot.capability === capability &&
+      boot.epoch === epoch
+    );
+  }
+  // The route document may connect its lifecycle port before the browser
+  // reports its activation or initial load and before tabs.create() resolves.
+  // The exact pending boot is recognised before routeMessage() can revoke it,
+  // and is verified only against the browser's own report of the created tab.
+  async function bindEarlyRouteTab(port, sender) {
+    if (
+      !port?.sender ||
+      port.sender !== sender ||
+      !sender?.tab ||
+      sender.id !== api.runtime.id ||
+      sender.frameId !== 0 ||
+      !Number.isSafeInteger(sender.tab.id) ||
+      sender.tab.id < 1 ||
+      typeof sender.url !== "string" ||
+      sender.url !== sender.tab.url
+    )
+      return null;
+    const token = routeTokenFromPage(sender.tab.url);
+    if (!token) return null;
+    const boots = [...routeBoots].filter(
+      (candidate) => candidate.token === token,
+    );
+    // Equal tokens cannot share this set, so a single match is the routed
+    // grant: safe to hand to a revoking check before it is re-verified.
+    const boot = boots.length === 1 ? boots[0] : null;
+    if (
+      !boot ||
+      boot.routeURL !== sender.tab.url ||
+      boot.routeURL !== routeURL(boot.token) ||
+      !routeBootLive(boot)
+    )
+      return null;
+    const expectedWindow = boot.windowId;
+    // The browser's own tab must be the tab the sender identifies, carry the
+    // exact route URL, sit in the source window and be the active tab.
+    const tab = await routeTabAt(sender.tab.id, boot.routeURL);
+    if (!tab || tab.windowId !== expectedWindow || tab.active !== true) {
+      // A replaced, moved or inactive tab is not this route any more.
+      revokeRoute(boot);
+      return null;
+    }
+    // Every mutable field is re-read after the await: the boot may have been
+    // revoked, bound by the browser's own event or claimed meanwhile.
+    if (
+      !routeBootLive(boot) ||
+      boot.windowId !== expectedWindow ||
+      boot.routeURL !== tab.url ||
+      boot.token !== routeTokenFromPage(tab.url) ||
+      sender.tab.id !== tab.id
+    )
+      return null;
+    // Bind exactly as the create continuation would once tabs.create()
+    // resolves; onActivated still consumes the one permitted startup switch.
+    bindRouteTab(boot, tab.id, tab.windowId);
+    boot.activated = true;
+    boot.initialLoad = null;
+    return { boot, tabId: tab.id, windowId: tab.windowId };
+  }
   async function routeTabAt(tabId, expectedURL) {
     if (!Number.isSafeInteger(tabId) || tabId < 1 || !expectedURL) return null;
     try {
@@ -4801,11 +4875,22 @@ if (typeof importScripts === "function") importScripts("core.js");
     // this grant while tabs.create() was in flight. The browser may already
     // have opened the tab, so fail closed without binding, returning or
     // closing it.
+    // A lifecycle port admitted from this still-pending boot has already
+    // bound the very tab the browser returns: that is the same route, not a
+    // second one. The page may also have claimed its single read already, so
+    // "claimed" is this same live route; revocation sets "revoked" and still
+    // fails closed here.
+    const adoptedByPort =
+      grant.tabId === created.id &&
+      routeTabs.get(grant.tabId) === grant &&
+      (grant.state === "open" || grant.state === "claimed") &&
+      [...grant.lifecyclePorts].some((state) => state.early === true);
     const stillOwned =
       routeGrants.get(grant.token) === grant &&
-      grant.state === "open" &&
-      ((grant.tabId === 0 && routeBoots.has(grant)) ||
-        (grant.tabId !== 0 && routeTabs.get(grant.tabId) === grant));
+      ((grant.state === "open" &&
+        ((grant.tabId === 0 && routeBoots.has(grant)) ||
+          (grant.tabId !== 0 && routeTabs.get(grant.tabId) === grant))) ||
+        adoptedByPort);
     if (!stillOwned) {
       revokeRoute(grant);
       throw Error("refused");
@@ -5412,19 +5497,35 @@ if (typeof importScripts === "function") importScripts("core.js");
         port?.disconnect?.();
       } catch {}
     };
-    if (
-      !port ||
-      port.name !== ROUTE_LIFECYCLE_PORT_NAME ||
-      !sender?.tab ||
-      sender.id !== api.runtime.id ||
-      sender.frameId !== 0 ||
-      routeLifecyclePorts.size >= ROUTE_LIFECYCLE_MAX_PORTS
-    )
+    if (!port || port.name !== ROUTE_LIFECYCLE_PORT_NAME) return reject();
+    // One slot is taken before the first await, so an unverified port cannot
+    // open more than the cap. Until admission a refusal only frees the slot:
+    // the route itself is untouched by a sender that has not been verified.
+    const state = { port, grant: null, early: false };
+    if (routeLifecyclePorts.size >= ROUTE_LIFECYCLE_MAX_PORTS) return reject();
+    routeLifecyclePorts.add(state);
+    port.onDisconnect?.addListener?.(() => {
+      state.grant?.lifecyclePorts.delete(state);
+      routeLifecyclePorts.delete(state);
+      void api.runtime.lastError;
+    });
+    const drop = () => {
+      routeLifecyclePorts.delete(state);
       return reject();
-    let grant = null;
-    try {
-      grant = await routeMessage(sender);
-    } catch {}
+    };
+    if (!sender?.tab || sender.id !== api.runtime.id || sender.frameId !== 0)
+      return drop();
+    // The pending boot is adopted before routeMessage(): for an unbound boot
+    // that call is refused and would revoke the grant first. This boot is
+    // browser-verified already, so its port may arrive before the create
+    // continuation binds it; that path never revokes.
+    const early = await bindEarlyRouteTab(port, sender);
+    let grant = early ? early.boot : null;
+    if (!grant) {
+      try {
+        grant = await routeMessage(sender);
+      } catch {}
+    }
     // Compare the browser-attached sender structurally; a Port getter is not
     // guaranteed to return the same object reference twice.
     const bound = port?.sender;
@@ -5436,23 +5537,31 @@ if (typeof importScripts === "function") importScripts("core.js");
       bound.tab?.id !== sender.tab.id ||
       bound.tab?.url !== sender.tab.url
     )
-      return reject();
-    if (!grant || !routeLive(grant) || sender.tab.id !== grant.tabId)
-      return reject();
-    const state = { port, grant };
+      return drop();
+    // bindEarlyRouteTab() has already validated the pending boot against the
+    // browser's own report of the created tab and adopted it exactly as the
+    // create continuation would, so from here on it is an ordinary bound
+    // route and the unchanged liveness and anchor checks apply.
+    if (!grant || !routeLive(grant) || sender.tab.id !== grant.tabId) return drop();
+    // The route just adopted must pass the ordinary anchor checks once more,
+    // after every await, before its port is admitted. A mismatch ends it.
+    if (early) {
+      const anchors = await routeAnchors(grant);
+      if (!routeLive(grant) || sender.tab.id !== grant.tabId || !anchors) {
+        revokeRoute(grant);
+        return drop();
+      }
+    }
+    state.grant = grant;
+    state.early = !!early;
     grant.lifecyclePorts.add(state);
-    routeLifecyclePorts.add(state);
-    port.onDisconnect.addListener(() => {
-      grant.lifecyclePorts.delete(state);
-      routeLifecyclePorts.delete(state);
-      void api.runtime.lastError;
-    });
     try {
       port.postMessage({ type: "route-ready", token: grant.token });
     } catch {
       revokeRoute(grant);
     }
   }
+
   function openClipboardPort(port, sender) {
     if (
       sender &&
