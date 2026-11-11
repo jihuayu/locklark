@@ -20,7 +20,10 @@ import (
 //     performs no decryption. Its error is returned unchanged. ValidateFile
 //     requires vuk_device_slots to be exactly the current policy's
 //     read-capable device set, so a missing required slot is already rejected
-//     here as invalid_value at "" and never reaches steps 3 and 4.
+//     here as invalid_value at "" and never reaches steps 3 and 4. Likewise a
+//     listed device whose principal holds no read-capable role makes the
+//     policy structurally invalid, so ParseFile rejects it here as
+//     invalid_value at "" and it never reaches step 3.
 //  2. VerifyPolicyCheckpoint authenticates the caller-pinned root and policy
 //     continuation and the content signature. The policy and slot roster
 //     carried in the file are untrusted until this succeeds. Its error is
@@ -29,9 +32,11 @@ import (
 //  3. Only after step 2, the caller's device is resolved in the authenticated
 //     current policy, together with its expected age recipient
 //     (Device.AgeEncryptionKey). The carried proposal roster and
-//     DeviceSlot.Recipient are never the trust source. A device absent from
-//     the authenticated current policy, or whose principal has no read role,
-//     is an invalid_value at "device_id".
+//     DeviceSlot.Recipient are never the trust source. An unknown caller
+//     device ID, absent from the authenticated current policy, is an
+//     invalid_value at "device_id". A device in a valid parsed policy already
+//     necessarily has reader-or-stronger access, because step 1 rejects any
+//     policy device whose principal lacks a read-capable role.
 //  4. OpenVUKForDevice opens the caller device's VUK slot with the pinned
 //     checkpoint vault id, the authenticated header key epoch and the caller
 //     device id and identity, and the expected recipient from the

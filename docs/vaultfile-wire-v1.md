@@ -1137,7 +1137,10 @@ returns `nil, nil, err`.
    requires `vuk_device_slots` to be exactly the current policy's read-capable
    device set, so a missing required slot is structurally rejected here as
    `invalid_value` at the empty path, before any checkpoint verification or
-   VUK unwrapping.
+   VUK unwrapping. `ValidatePolicy` likewise requires every listed device's
+   principal to hold a read-capable role, so a policy device whose principal has
+   no such role is also structurally rejected here as `invalid_value` at the
+   empty path and never reaches step 3.
 2. `VerifyPolicyCheckpoint(f, checkpoint)` authenticates the caller-pinned
    root and policy continuation and the content signature. The policy and slot
    roster carried in the file are untrusted until this succeeds. Its error is
@@ -1146,17 +1149,19 @@ returns `nil, nil, err`.
 3. Only after step 2, the caller's device is resolved in the authenticated
    current policy, together with its expected age recipient
    (`Device.AgeEncryptionKey`). Neither the carried proposal roster nor
-   `DeviceSlot.Recipient` is a trust source. A device absent from the
-   authenticated current policy, or whose principal has no read role, is
-   `invalid_value` at `device_id`.
+   `DeviceSlot.Recipient` is a trust source. An unknown caller device ID,
+   absent from the authenticated current policy, is `invalid_value` at
+   `device_id`. A device in a valid parsed policy already necessarily has
+   reader-or-stronger access, because step 1 rejects any policy device whose
+   principal lacks a read-capable role.
 4. `OpenVUKForDevice(slot, checkpoint.VaultID, f.Header.KeyEpoch, deviceID,
    authenticatedRecipient, identity)` opens the caller device's VUK slot. The
    vault id is the caller's pinned id, the epoch is from the authenticated
    header, and the device id and recipient are from the authenticated current
    policy; the slot's own device and recipient fields must match those inputs.
    Step 1 already rejected a missing required slot and step 3 already rejected
-   a caller device absent from the authenticated policy or without a read
-   role, so only a present, authenticated device slot reaches this call: its
+   a caller device absent from the authenticated policy, so only a present,
+   authenticated device slot reaches this call: its
    envelope/context failures are `vuk_envelope_failed` at `vuk_device_slot`.
    A nil identity or malformed caller input is an `invalid_value` from
    `OpenVUKForDevice`.
