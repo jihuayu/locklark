@@ -1,13 +1,17 @@
-# Remote unlock wire v1: binding context, device binding, owner-root authorization and lifecycle
+# Remote unlock wire v1: binding context, device binding, owner-root authorization, reusable admin delegation and lifecycle
 
 Status: context and stable per-device binding codecs, the independent
-owner-root authorization object and its checkpoint-scoped verifier, plus a
-process-local request lifecycle. The package `pkg/remoteunlock` implements
-exactly these encodings, the binding signature check in
-[Stable device transport binding v1](#stable-device-transport-binding-v1), the
+owner-root authorization object and its checkpoint-scoped verifier, a reusable
+owner-root-signed admin remote-unlock delegation with its current-policy
+verifier, plus a process-local request lifecycle. The package
+`pkg/remoteunlock` implements exactly these encodings, the binding signature
+check in [Stable device transport binding v1](#stable-device-transport-binding-v1), the
 owner-root authorization in
-[Owner-root authorization v1](#owner-root-authorization-v1), and the lifecycle
-in [Process-local request lifecycle](#process-local-request-lifecycle).
+[Owner-root authorization v1](#owner-root-authorization-v1), the reusable
+delegation in
+[Reusable owner-root admin delegation v1](#reusable-owner-root-admin-delegation-v1),
+and the lifecycle in
+[Process-local request lifecycle](#process-local-request-lifecycle).
 `internal/remoteunlocktls` additionally exposes a narrow channel-side check of a
 peer binding against the verified TLS peer certificate
 ([Peer binding over an established channel](#peer-binding-over-an-established-channel)).
@@ -25,6 +29,10 @@ above, and nothing else:
 - the [owner-root authorization](#owner-root-authorization-v1) wire format and
   the [verification boundaries](#verification-procedure-and-boundary) of its
   checkpoint-scoped verifier — not a general authorization system;
+- the [reusable owner-root admin
+  delegation](#reusable-owner-root-admin-delegation-v1) wire format and the
+  current-policy boundary of its verifier, which grants scope but authorizes
+  no request by itself;
 - the [process-local request lifecycle](#process-local-request-lifecycle) state
   machine; and
 - the internal [peer-channel check](#peer-binding-over-an-established-channel)
@@ -549,6 +557,227 @@ wrong size or spelling; input over 1024 bytes; and any spelling that does not
 re-encode to the identical bytes. Errors name the failing member with a static
 message and never include a value, key or signature byte.
 
+## Reusable owner-root admin delegation v1
+
+`OwnerRootAdminRemoteUnlockDelegation` is an **independent** canonical object,
+not a per-request authorization. The vault owner root signs it **once** to
+delegate remote-unlock scope to one named current admin or owner device for one
+named requester's stable endpoints. The same signed grant covers any number of
+unlock requests until its explicit expiry, provided the vault's authenticated
+**current policy is still exactly the policy it was issued against**.
+
+It deliberately carries **no** `request_id`, `request_digest`,
+`lock_generation` or request `deadline_unix_ms`. A per-request authorization
+for a concrete request is a separate, later checkpoint; it must reference this
+grant and verify the request's own bindings.
+
+```
+format, version, kind,
+owner_root_key_id, delegate_member_id, delegate_device_id,
+delegate_policy_signing_key, vault_id, requester_member_id,
+source_device_id, target_device_id,
+source_binding_sha256, target_binding_sha256,
+pair_generation, key_epoch, policy_seq, policy_digest,
+not_before_unix_ms, expires_unix_ms,
+signature
+```
+
+### Delegation schema
+
+| # | Member | Type | Constraint |
+|---|--------|------|------------|
+| 1 | `format` | string | constant `locklark.remote-unlock` |
+| 2 | `version` | integer | constant `1` |
+| 3 | `kind` | string | constant `owner-admin-delegation` |
+| 4 | `owner_root_key_id` | string | identifier |
+| 5 | `delegate_member_id` | string | identifier; delegated current policy principal |
+| 6 | `delegate_device_id` | string | identifier; delegated current policy device |
+| 7 | `delegate_policy_signing_key` | string | exactly 32 bytes Ed25519, unpadded base64url |
+| 8 | `vault_id` | string | identifier |
+| 9 | `requester_member_id` | string | identifier; must hold an existing read role |
+| 10 | `source_device_id` | string | identifier |
+| 11 | `target_device_id` | string | identifier; must differ from member 10 |
+| 12 | `source_binding_sha256` | string | exactly 32 bytes, unpadded base64url |
+| 13 | `target_binding_sha256` | string | exactly 32 bytes, unpadded base64url |
+| 14 | `pair_generation` | unsigned integer | uint64; `0` is explicit genesis |
+| 15 | `key_epoch` | unsigned integer | uint64, strictly greater than zero |
+| 16 | `policy_seq` | unsigned integer | uint64; the current-policy grant anchor |
+| 17 | `policy_digest` | string | exactly 32 bytes, the exact current policy digest |
+| 18 | `not_before_unix_ms` | integer | int64, strictly greater than zero |
+| 19 | `expires_unix_ms` | integer | int64, strictly greater than member 18 |
+| 20 | `signature` | string | exactly 64 bytes Ed25519, unpadded base64url |
+
+Members appear exactly once, in this order; members 1..19 are signed.
+Identifier, canonical-string, integer, digest and all-or-nothing parsing rules
+are those of the context. `delegate_policy_signing_key` is a fixed-width
+32-byte key, and members 12, 13 and 17 are 32-byte digests.
+
+`source_binding_sha256` and `target_binding_sha256` are
+`DeviceTransportBindingDigest` of the **complete signed** source and target
+bindings, signature included. Each pair of endpoint identifiers must be
+distinct. The grant records this scope only: the verifier in this checkpoint
+does not read or verify any binding.
+
+The encoded size cap is `MaxAdminDelegationSize` = 2048 bytes; larger input is
+rejected before interpretation. With seven 128-byte identifiers, three
+uint64 maxima, `not_before_unix_ms` = 1 and `expires_unix_ms` = `2^63 - 1`, the
+maximum legal encoding is **1675 bytes**, well under the cap. The canonical
+synthetic vector below is 810 bytes.
+
+### Delegation domain and preimage
+
+The owner root signs the following bytes, with no length prefix and no
+newline:
+
+```
+locklark.remote-unlock/v1/admin-delegation\x00
+```
+
+followed immediately by the canonical JSON object containing members 1 through
+19 in order and **without** the `signature` member. The `\x00` is one literal
+NUL byte. `AdminDelegationSigningBytes` returns exactly this preimage.
+
+The domain is distinct from the owner-root authorization domain
+(`locklark.remote-unlock/v1/owner-authorization\x00`) and from the device
+binding domain (`locklark.remote-unlock/v1/device-transport-binding\x00`); a
+signature made for one never verifies for another.
+
+`AdminDelegationDigest` returns `SHA-256` of the separate domain
+`locklark.remote-unlock/v1/admin-delegation-digest\x00` followed by the complete
+canonical encoding of the delegation, `signature` member included, so any
+change to a claim or to the signature changes the digest. It is a stable
+reference for a later signed request, not a signature and not an
+authorization.
+
+### Current-policy anchor and invalidation
+
+The delegation pins the current policy by both `policy_seq` and
+`policy_digest`, together with `vault_id` and `key_epoch`. The verifier
+requires the authenticated current policy, and the file header, to match them
+exactly. Consequently:
+
+- **Any policy update invalidates the delegation.** Adding or removing a
+  member or device, changing a role, rotating any key, changing a delegation,
+  or advancing the policy sequence changes the policy digest. The old grant
+  simply stops verifying, and the owner root must issue a new one.
+- A later policy can never revive a removed, demoted or re-added delegate or
+  requester endpoint under an earlier grant. There is no lookup of, or fallback
+  to, an older proof; only the last carried, checkpoint-authenticated policy is
+  read.
+- The grant is reusable only within the same policy and the same validity
+  interval. It is not a durable permission across policy transitions, and it
+  cannot be re-anchored by a non-root party.
+
+### Verification procedure and boundary
+
+`VerifyOwnerRootAdminRemoteUnlockDelegation(f, checkpoint, d, nowUnixMS)`
+returns on the first failure, in this order:
+
+1. `nowUnixMS > 0`; the delegation is canonical-valid, including a positive
+   `key_epoch`, a distinct source and target, and
+   `not_before_unix_ms < expires_unix_ms`.
+2. `d.not_before_unix_ms <= nowUnixMS < d.expires_unix_ms`. The interval is
+   **inclusive at its start and exclusive at its end**, and only the
+   caller-supplied `nowUnixMS` is used; there is no hidden system clock.
+3. `vaultfile.VerifyPolicyCheckpoint(f, checkpoint)` must succeed **before any
+   carried policy claim is trusted**; its error is returned wrapped with
+   `ErrInvalidAdminDelegation`.
+4. The authenticated current policy is the **exact anchor**: the file header and
+   the last carried policy must match the grant's `vault_id`, `key_epoch`,
+   `policy_seq` and `policy_digest`, and `vaultfile.PolicyDigest` of that policy
+   must equal the grant digest. Any other policy fails.
+5. `d.owner_root_key_id` equals the caller-pinned checkpoint root key ID and
+   the authenticated policy root key ID and algorithm, and the checkpoint root
+   public key equals the authenticated policy root public key.
+6. The delegate device resolves by ID in the authenticated current policy, its
+   `principal_id` equals `delegate_member_id`, that principal currently holds
+   the **admin or owner** role (a reader- or writer-only principal is
+   rejected), and that exact device carries a non-nil Ed25519
+   `policy_signing_key` whose bytes equal `delegate_policy_signing_key`.
+7. `requester_member_id` holds an existing read role (reader, writer, admin or
+   owner, by the vault file's role order), and `source_device_id` and
+   `target_device_id` both resolve in the authenticated policy and belong to
+   that requester.
+8. The owner-root signature verifies under exactly
+   `checkpoint.OwnerRootPublicKey` over the delegation preimage.
+
+No role is asserted by the caller, read from an unauthenticated or older proof,
+synthesized, or mutated. `vaultfile.AdminDelegation` is **not** interpreted as
+remote-unlock authority; no vaultfile byte, type or schema changes here.
+
+A nil return proves only that the caller-pinned owner root issued this reusable
+scope for this exact policy anchor and validity interval, and that the
+authenticated current policy still lists the delegate, its policy key, the
+requester's read role and both scoped endpoints as required. It does **not**
+authorize a concrete request, and it does **not** verify a request binding. In
+particular it does not prove:
+
+- that any request's bindings match members 12 and 13, or that those bindings
+  have valid device signatures or the policy recipient keys — that is the next
+  per-request authorization checkpoint's job;
+- the `request_digest` preimage, request freshness, or one-shot use;
+- the actual TLS exporter value, handshake, or the live peer's SPKI (the
+  internal TLS adapter's separate check);
+- that either device holds its private keys, or real device identity and
+  enrollment;
+- durable replay defense, restart safety, or policy-history continuity beyond
+  the checkpoint;
+- VUK decryption, wrapping or delivery, or a complete mobile unlock.
+
+### Synthetic delegation vector
+
+All keys, identities, policies and file bytes are synthetic; the Ed25519 keys
+come from declared deterministic seed spans and every signature is real output
+over the documented preimage, but none belongs to a production root, device,
+member or vault. The fixture's current policy is at `policy_seq` 2, its
+`policy_digest` is below, the requester is `member-0001` with the fixed
+`device-source` and `device-target` bindings, and the delegate is `carol` on
+`device-outsider` with the synthetic policy signing key shown.
+
+```
+policy_digest         = j5HDbfdIdI5sDh0y6NAxn7XZ6vPiGNXlZefjJ9dV4vY
+delegate_policy_key   = bw8O6z-_-SXGbQPhnc5I1e3J_-5RzSaucd055W9_3aI
+source_binding_sha256 = H8uXANZqikFmCmZPEJo8AWtzmBn3xPH4D1wVj5rez_U
+target_binding_sha256 = yHvjY7BX-EVeru1GBSe5EBd4xIlk0dHfAjK8DFYBRKM
+```
+
+Signed JSON (members 1..19), followed immediately by the domain
+`locklark.remote-unlock/v1/admin-delegation\x00` and nothing else:
+
+```json
+{"format":"locklark.remote-unlock","version":1,"kind":"owner-admin-delegation","owner_root_key_id":"owner-root-0001","delegate_member_id":"carol","delegate_device_id":"device-outsider","delegate_policy_signing_key":"bw8O6z-_-SXGbQPhnc5I1e3J_-5RzSaucd055W9_3aI","vault_id":"vault-0001","requester_member_id":"member-0001","source_device_id":"device-source","target_device_id":"device-target","source_binding_sha256":"H8uXANZqikFmCmZPEJo8AWtzmBn3xPH4D1wVj5rez_U","target_binding_sha256":"yHvjY7BX-EVeru1GBSe5EBd4xIlk0dHfAjK8DFYBRKM","pair_generation":0,"key_epoch":7,"policy_seq":2,"policy_digest":"j5HDbfdIdI5sDh0y6NAxn7XZ6vPiGNXlZefjJ9dV4vY","not_before_unix_ms":1799999900000,"expires_unix_ms":1800000001000}
+```
+
+The synthetic owner-root public key is
+`Kay64UG8yvCyLhqU000LxzYeUm0L_hlLIl5S8kyKWbdc`; the complete canonical
+delegation is 810 bytes:
+
+```json
+{"format":"locklark.remote-unlock","version":1,"kind":"owner-admin-delegation","owner_root_key_id":"owner-root-0001","delegate_member_id":"carol","delegate_device_id":"device-outsider","delegate_policy_signing_key":"bw8O6z-_-SXGbQPhnc5I1e3J_-5RzSaucd055W9_3aI","vault_id":"vault-0001","requester_member_id":"member-0001","source_device_id":"device-source","target_device_id":"device-target","source_binding_sha256":"H8uXANZqikFmCmZPEJo8AWtzmBn3xPH4D1wVj5rez_U","target_binding_sha256":"yHvjY7BX-EVeru1GBSe5EBd4xIlk0dHfAjK8DFYBRKM","pair_generation":0,"key_epoch":7,"policy_seq":2,"policy_digest":"j5HDbfdIdI5sDh0y6NAxn7XZ6vPiGNXlZefjJ9dV4vY","not_before_unix_ms":1799999900000,"expires_unix_ms":1800000001000,"signature":"7zsUu-9zDLf7LNOMKpGFBk1tqhqZgctUzNBQFFd6S4A8GO2-WAUpRKwXSx_ejkkxI7Snk3fmSa9Qymz1n90UDg"}
+```
+
+`AdminDelegationDigest` of that complete encoding is
+`BqJKqhv9FaINZWmGD_eRraFGFosPn6ZfocLgr0mZZZU`.
+
+These bytes are pinned literally in the package tests, which recompute the
+preimage, signature and digest from the declared seeds and verify them against
+a real synthetic vault file authored by an independent writer.
+
+### Rejected delegation spellings
+
+Parsing a delegation rejects missing, unknown, duplicate and reordered members;
+any per-request member such as `request_id`, `request_digest`, `lock_generation`
+or `deadline_unix_ms`; wrong constants, types and versions; surrounding
+whitespace, trailing data and malformed structure; invalid UTF-8 and JSON
+escapes; integer signs, leading zeros, fractions, exponents and overflow; a zero
+`key_epoch`; a zero, negative or overflowing timestamp; an expiry at or before
+`not_before_unix_ms`; a `delegate_policy_signing_key` of the wrong size or
+spelling; identifiers that break the grammar; digests of the wrong size, padded,
+in the standard base64 alphabet or with non-canonical trailing bits; a signature
+of the wrong size or spelling; input over 2048 bytes; and any spelling that does
+not re-encode to the identical bytes. Errors name the failing member with a
+static message and never include a value, key, digest or signature byte.
+
 ## Process-local request lifecycle
 
 `pkg/remoteunlock/lifecycle.go` defines `RequestLifecycle`, an in-memory status
@@ -637,11 +866,13 @@ evidence that a VUK was authorized or delivered.
 
 ## Scope boundary
 
-The owner-root authorization section above is the only signed authorization
-this document defines. It is issued by the vault owner root alone: there is no
-restricted admin delegation path, no request-digest preimage semantics, no
-durable replay or restart anti-rollback, and no VUK decryption, wrapping or
-delivery. A nil return from its verifier means exactly what that section states
+This document defines two owner-root-signed objects: the per-request owner-root
+authorization and the reusable admin delegation. Both are issued by the vault
+owner root alone. The delegation grants reusable scope to a current admin or
+owner device but authorizes no request by itself and verifies no binding; the
+per-request owner-root authorization authorizes one request and its two
+bindings. Neither provides request-digest preimage semantics, durable replay or
+restart anti-rollback, or VUK decryption, wrapping or delivery. A nil return from its verifier means exactly what that section states
 and nothing more. `VerifyOwnerRootAuthorization` is not an end-to-end verifier.
 It does not itself compute or verify a TLS exporter or channel binding, and it
 does not match a live peer SPKI. Those are separate APIs documented earlier,
