@@ -603,6 +603,8 @@ test("an ordinary route opens its own tab and claims the approved detail", async
       options.url,
       "chrome-extension://fixed/popup.html#route=" + h.routeToken(options.url),
     );
+    // The route opens in the captured source tab's own window.
+    assert.equal(options.windowId, sourceTab.windowId);
     // Browser ordering: activation and the initial load of the new route tab
     // arrive before tabs.create resolves.
     sourceTab = { ...sourceTab, active: false };

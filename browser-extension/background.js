@@ -4868,7 +4868,12 @@ if (typeof importScripts === "function") importScripts("core.js");
     routeBoots.add(grant);
     let created;
     try {
-      created = await api.tabs.create({ url: routeURL(token), active: true });
+      // The route must stay in the captured source tab's window.
+      created = await api.tabs.create({
+        url: routeURL(token),
+        active: true,
+        windowId: sourceTab.windowId,
+      });
     } catch {
       revokeRoute(grant);
       throw Error("refused");
