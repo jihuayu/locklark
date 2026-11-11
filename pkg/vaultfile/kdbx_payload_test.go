@@ -997,16 +997,15 @@ func TestBoundedKDBXBufferCiphertextCap(t *testing.T) {
 }
 
 // TestKDBXPayloadSealRejectsCompressiblePlaintextOverBudget is the regression
-// for the plaintext budget: a valid, unprotected Notes value one byte over
-// what a MaxPlaintextBytes body holds makes the KDBX4 plaintext body
-// (InnerHeader plus XML, cipher padding excluded) exceed MaxPlaintextBytes,
-// while the old Encode gzipped that body to a few dozen kilobytes and wrote
-// it. Seal must report CodeKDBXPayloadTooLarge with nil bytes before it
-// compresses or encrypts that body.
+// for the plaintext budget: a valid, unprotected Notes value of
+// MaxPlaintextBytes-2 bytes makes the KDBX4 plaintext body (InnerHeader plus
+// XML) exceed MaxPlaintextBytes, while the old Encode gzipped that body to a
+// few dozen kilobytes and wrote it. Seal must report CodeKDBXPayloadTooLarge
+// with nil bytes before it compresses or encrypts that body.
 func TestKDBXPayloadSealRejectsCompressiblePlaintextOverBudget(t *testing.T) {
 	cek := payloadFixtureCEK(t)
 	db := payloadFixtureDB(t)
-	notes := payloadAlternatingASCII(MaxPlaintextBytes - 1)
+	notes := payloadAlternatingASCII(MaxPlaintextBytes - 2)
 	db.Content.Root.Groups[0].Entries[0].Values = append(
 		db.Content.Root.Groups[0].Entries[0].Values, kdbx.ValueData{Key: "Notes", Value: kdbx.V{Content: notes}},
 	)

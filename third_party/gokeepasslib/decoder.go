@@ -37,12 +37,13 @@ type DecodeLimits struct {
 	// decryption, so it is not checked before key derivation. It is enforced
 	// on the verified and decrypted content blocks and, when gzip is
 	// selected, on the expansion (reading at most the budget plus one byte)
-	// before XML decoding starts. With NoCompressionFlag a valid 1..16-byte
-	// repeated-count cipher padding that the writer emitted is removed
-	// before the logical-body limit is applied; content without such a
-	// sequence is left unchanged. When content is not compressed both
-	// bounds apply to the same bytes, so the aggregate binary budget can
-	// only take effect for a binary inside an expanded body.
+	// before XML decoding starts. With NoCompressionFlag a 16-byte-aligned
+	// content ending in the writer's valid 1..16-byte repeated-count
+	// trailing pattern is recognized as legacy writer padding and removed
+	// before the logical-body limit is applied; any other content is left
+	// unchanged. When content is not compressed both bounds apply to the
+	// same bytes, so the aggregate binary budget can only take effect for
+	// a binary inside an expanded body.
 	MaxPlaintextBytes int64
 }
 
@@ -86,10 +87,11 @@ func (d *Decoder) Decode(db *Database) error {
 //     its gzip expansion when the header selects gzip) by
 //     limits.MaxPlaintextBytes, detected with one extra byte, and rejects an
 //     over-budget body with ErrDecodeLimitExceeded before XML decoding.
-//     Cipher padding is not part of the budget: without compression a valid
-//     1..16-byte repeated-count padding that the writer emitted is removed
-//     before the logical-body limit is applied, and content without such a
-//     sequence is left unchanged;
+//     Cipher padding is not part of the budget: without compression a
+//     16-byte-aligned content ending in the writer's valid 1..16-byte
+//     repeated-count trailing pattern is recognized as legacy writer
+//     padding and removed before the logical-body limit is applied, and any
+//     other content is left unchanged;
 //  4. parses the KDBX4 InnerHeader in bounded mode, which rejects a binary
 //     that would bring the aggregate binary bytes (protection flags
 //     included) over limits.MaxPlaintextBytes before copying it. A one-byte
@@ -366,9 +368,10 @@ func decodeRawContent(db *Database, content []byte, transformedKey []byte, budge
 	} else if budget.bounded {
 		// Without compression the decrypted content is the plaintext body
 		// followed by the cipher block padding the writer appends. The
-		// budget is the logical body, so a valid writer-emitted padding
-		// sequence is dropped before it is measured, and an over-budget
-		// body is rejected before it is handed on for parsing.
+		// budget is the logical body, so a 16-byte-aligned content ending
+		// in the writer's valid 1..16-byte trailing pattern is treated as
+		// legacy writer padding and dropped before it is measured, and an
+		// over-budget body is rejected before it is handed on for parsing.
 		decryptedContent = trimCipherPadding(decryptedContent)
 		if int64(len(decryptedContent)) > budget.plaintext {
 			return fmt.Errorf("%w: decrypted content budget exceeded", ErrDecodeLimitExceeded)
@@ -381,11 +384,19 @@ func decodeRawContent(db *Database, content []byte, transformedKey []byte, budge
 
 // trimCipherPadding removes the trailing cipher block padding from an
 // uncompressed KDBX4 content, which is the body followed by 1..16 bytes that
-// each hold the padding length, as encodeRawContent appends them. Content
-// without such a sequence is returned unchanged, so a file that carries none
-// keeps its bytes.
+// each hold the padding length, as encodeRawContent appends them. The writer
+// appends that pattern for every cipher and always leaves the content a
+// multiple of 16 bytes, so a 16-byte-aligned content that ends in a valid
+// 1..16-byte pattern is recognized as legacy writer padding. Content that is
+// not 16-byte aligned or does not end in such a pattern is returned unchanged.
+//
+// A spec-valid unpadded body whose total length is aligned and which ends in
+// the same repeated whitespace pattern is inherently indistinguishable from
+// that padding on the wire. Such a body loses up to 16 trailing XML
+// whitespace bytes here; that whitespace does not change any parsed XML
+// value. Every other unpadded body keeps its bytes.
 func trimCipherPadding(content []byte) []byte {
-	if len(content) == 0 {
+	if len(content) == 0 || len(content)%16 != 0 {
 		return content
 	}
 	n := int(content[len(content)-1])

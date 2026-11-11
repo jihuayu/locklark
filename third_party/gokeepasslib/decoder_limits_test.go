@@ -3,6 +3,7 @@ package gokeepasslib
 import (
 	"bytes"
 	"compress/gzip"
+	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -69,9 +70,28 @@ func rawKDBX41(t *testing.T, kdf *KdfParameters, key, decrypted []byte) []byte {
 
 func rawKDBX41Flags(t *testing.T, kdf *KdfParameters, key []byte, flags uint32, decrypted []byte) []byte {
 	t.Helper()
+	return rawKDBX41Cipher(t, kdf, key, flags, nil, nil, decrypted)
+}
+
+// rawKDBX41Cipher is rawKDBX41Flags with an optional explicit cipher ID and
+// IV. A nil cipherID keeps the builder's default AES cipher and its IV; a
+// non-nil one is used as given, with the IV of its cipher (iv must then be
+// non-nil, 12 bytes for ChaCha20).
+func rawKDBX41Cipher(
+	t *testing.T, kdf *KdfParameters, key []byte, flags uint32, cipherID, iv, decrypted []byte,
+) []byte {
+	t.Helper()
 	db := NewDatabase(WithDatabaseKDBXVersion41())
 	db.Header.FileHeaders.KdfParameters = kdf
 	db.Header.FileHeaders.CompressionFlags = flags
+	if cipherID != nil {
+		// The KDBX 4 default header is ChaCha20 with a 12-byte IV.
+		db.Header = NewKDBX41Header()
+		db.Header.FileHeaders.KdfParameters = kdf
+		db.Header.FileHeaders.CompressionFlags = flags
+		db.Header.FileHeaders.CipherID = cipherID
+		db.Header.FileHeaders.EncryptionIV = iv
+	}
 	db.Credentials, _ = NewKeyDataCredentials(key)
 	transformedKey, err := db.getTransformedKey()
 	if err != nil {
@@ -293,6 +313,38 @@ func TestDecodeWithLimitsRejectsUncompressedBodyOverBudget(t *testing.T) {
 		MaxPlaintextBytes: int64(len(whole)),
 	}); err != nil {
 		t.Fatalf("within budget: %v", err)
+	}
+}
+
+// TestDecodeWithLimitsKeepsUnpaddedChaChaBody is the regression for a
+// spec-valid unpadded ChaCha20 body that ends in ten line feeds: the KDBX 4
+// spec leaves ChaCha20 content unpadded (PKCS#7 applies to the CBC ciphers
+// only), so an unpadded body followed by '\n' bytes is indistinguishable from
+// legacy writer padding by its suffix alone. The bounded decoder recognizes
+// legacy writer padding only in 16-byte-aligned content, as the writer always
+// produces, and must keep this 62-byte body, which is not aligned, byte for
+// byte.
+func TestDecodeWithLimitsKeepsUnpaddedChaChaBody(t *testing.T) {
+	body := append(innerHeaderBytes(t, testInnerHeader()), "<KeePassFile/>"...)
+	body = append(body, bytes.Repeat([]byte{'\n'}, 10)...)
+	if len(body)%16 == 0 {
+		t.Fatalf("fixture body of %d bytes is 16-byte aligned", len(body))
+	}
+	// A 12-byte IV is ChaCha20's, not a CBC cipher block.
+	iv := make([]byte, 12)
+	rand.Read(iv)
+	key := limitTestKey()
+	encoded := rawKDBX41Cipher(t, limitTestKDF(), key, NoCompressionFlag, CipherChaCha20, iv, body)
+
+	db := newLimitTestDatabase()
+	if err := decodeWithLimits(db, encoded, key, DecodeLimits{
+		MaxEncodedBytes:   int64(len(encoded)),
+		MaxPlaintextBytes: int64(len(body)),
+	}); err != nil {
+		t.Fatalf("within budget: %v", err)
+	}
+	if !bytes.Equal(db.Content.RawData, body) {
+		t.Fatalf("RawData of %d bytes differs from the %d-byte unpadded body", len(db.Content.RawData), len(body))
 	}
 }
 

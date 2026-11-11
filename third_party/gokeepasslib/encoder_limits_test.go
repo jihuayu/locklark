@@ -2,6 +2,7 @@ package gokeepasslib
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/xml"
 	"errors"
 	"io"
@@ -487,6 +488,7 @@ func TestEncodeWithLimitsAcceptsExactAndLargerBudget(t *testing.T) {
 // padding, and the bounded decoder budgets that logical body, not the padded
 // one. The exact-size bounded decode therefore succeeds with the padding
 // removed from RawData, and one byte less rejects it before RawData is kept.
+// This covers the AES cipher; the ChaCha20 case is the next test.
 func TestEncodeWithLimitsUncompressedDecodesAtExactBudget(t *testing.T) {
 	db := lockEncoderLimitFixture(t, encoderLimitTestDatabase(t))
 	db.Header.FileHeaders.CompressionFlags = NoCompressionFlag
@@ -499,14 +501,16 @@ func TestEncodeWithLimitsUncompressedDecodesAtExactBudget(t *testing.T) {
 	encoded := out.Bytes()
 
 	// The encoder always pads, so the decoded content carries the logical
-	// body followed by this test's guard against a vacuous fixture.
+	// body followed by this test's guard against a vacuous fixture: a
+	// writer appends 1..16 padding bytes, so 16 is also a valid length.
 	unbounded := NewDatabase()
 	unbounded.Credentials = limitTestCredentials(t)
 	if err := NewDecoder(bytes.NewReader(encoded)).Decode(unbounded); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	if raw := unbounded.Content.RawData; len(raw) <= int(logical) || int64(len(raw))-logical >= 16 {
-		t.Fatalf("decoded %d bytes for a %d-byte body, want cipher padding after it", len(raw), logical)
+	if pad := int64(len(unbounded.Content.RawData)) - logical; pad < 1 || pad > 16 {
+		t.Fatalf("decoded %d bytes for a %d-byte body, want 1..16 cipher padding bytes after it",
+			len(unbounded.Content.RawData), logical)
 	}
 
 	decode := func(budget int64) (*Database, error) {
@@ -541,6 +545,64 @@ func TestEncodeWithLimitsUncompressedDecodesAtExactBudget(t *testing.T) {
 	if rejected.Content == nil || rejected.Content.RawData != nil {
 		t.Fatalf("over-budget decode retained %d RawData bytes", len(rejected.Content.RawData))
 	}
+}
+
+// TestEncodeWithLimitsUncompressedChaChaDecodesAtExactBudget is the ChaCha20
+// counterpart of TestEncodeWithLimitsUncompressedDecodesAtExactBudget: the
+// KDBX 4 spec leaves ChaCha20 content unpadded, so the writer's 1..16
+// repeated-count padding for it is legacy output that the bounded decoder
+// must still recognize and remove. An EncodeWithLimits NoCompressionFlag
+// ChaCha20 output, encoded with a 12-byte nonce for a body of exactly its
+// budget, decodes with DecodeWithLimits at that budget and keeps exactly the
+// logical body in RawData.
+func TestEncodeWithLimitsUncompressedChaChaDecodesAtExactBudget(t *testing.T) {
+	db := lockEncoderLimitFixture(t, encoderLimitTestDatabase(t))
+	db.Header.FileHeaders.CompressionFlags = NoCompressionFlag
+	iv := make([]byte, 12)
+	if _, err := rand.Read(iv); err != nil {
+		t.Fatal(err)
+	}
+	db.Header.FileHeaders.CipherID = CipherChaCha20
+	db.Header.FileHeaders.EncryptionIV = iv
+	logical := int64(encoderLimitTestPlaintext(t, db))
+
+	var out bytes.Buffer
+	if err := NewEncoder(&out).EncodeWithLimits(db, EncodeLimits{MaxPlaintextBytes: logical}); err != nil {
+		t.Fatalf("EncodeWithLimits at exactly the logical body size: %v", err)
+	}
+	encoded := out.Bytes()
+
+	// The writer still pads every cipher, so the decoded content carries
+	// the logical body followed by 1..16 padding bytes.
+	unbounded := NewDatabase()
+	unbounded.Credentials = limitTestCredentials(t)
+	if err := NewDecoder(bytes.NewReader(encoded)).Decode(unbounded); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if pad := int64(len(unbounded.Content.RawData)) - logical; pad < 1 || pad > 16 {
+		t.Fatalf("decoded %d bytes for a %d-byte body, want 1..16 cipher padding bytes after it",
+			len(unbounded.Content.RawData), logical)
+	}
+	if iv := unbounded.Header.FileHeaders.EncryptionIV; len(iv) != 12 {
+		t.Fatalf("encoded header carries a %d-byte IV, want the 12-byte ChaCha20 nonce", len(iv))
+	}
+
+	opened := newLimitTestDatabase()
+	if err := decodeWithLimits(opened, encoded, limitTestKey(), DecodeLimits{
+		MaxEncodedBytes:   int64(len(encoded)),
+		MaxPlaintextBytes: logical,
+	}); err != nil {
+		t.Fatalf("decode at the exact logical body size %d: %v", logical, err)
+	}
+	if got := int64(len(opened.Content.RawData)); got != logical {
+		t.Fatalf("RawData of %d bytes, want the %d-byte logical body without padding", got, logical)
+	}
+	manager, err := opened.GetStreamManager()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.UnlockProtectedGroups(opened.Content.Root.Groups)
+	assertEncoderLimitEntry(t, opened.Content.Root.Groups[0].Entries[0])
 }
 
 // TestEncodeAndEncodeWithLimitsSharePipeline checks that both entry points

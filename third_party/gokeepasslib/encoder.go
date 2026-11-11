@@ -60,9 +60,11 @@ func (e *Encoder) Encode(db *Database) error {
 // The content is measured after the same normalization as Encode (binary
 // cleanup, format version, protected entry unlock and relock order, header
 // and hash updates) and before it is compressed, padded or encrypted. The
-// budget is the logical body and excludes the optional cipher block padding,
-// so a NoCompressionFlag body of exactly limits.MaxPlaintextBytes still
-// decodes with DecodeWithLimits and the same budget.
+// budget is the logical body and excludes the cipher block padding the
+// encoder always appends, so a NoCompressionFlag body of exactly
+// limits.MaxPlaintextBytes still decodes with DecodeWithLimits and the same
+// budget when its padded content is 16-byte aligned, as every writer output
+// is.
 //
 // The content is serialized exactly as Encode serializes it, and its budget
 // is enforced on the plaintext collector's writes before a byte beyond the
@@ -299,7 +301,10 @@ func encodeRawContent(
 		content = append(db.Header.FileHeaders.StreamStartBytes, blocks.Bytes()...)
 	}
 
-	// Always add padding, so that decoders that check for the last bytes can work correctly
+	// Always add padding, so that decoders that check for the last bytes can work correctly.
+	// This is PKCS#7 for the CBC ciphers, while the KDBX 4 spec leaves
+	// ChaCha20 unpadded; the writer appends it for every cipher anyway, so
+	// writer output is always 16-byte aligned.
 	padding := make([]byte, 16-(len(content)%16))
 	for i := range len(padding) {
 		padding[i] = byte(len(padding))
