@@ -2,8 +2,10 @@
 
 Status: draft. Implemented in `pkg/vaultfile`: structure, canonical codec,
 preimage derivation, the CEK envelope (`SealCEK`/`OpenCEK`, see [CEK sealing and
-opening](#cek-sealing-and-opening)), and two separate verification APIs (see [Verification
-APIs](#verification-apis)):
+opening](#cek-sealing-and-opening)), the per-device VUK envelope
+(`SealVUKForDevice`/`OpenVUKForDevice`, see [VUK device-slot
+envelope](#vuk-device-slot-envelope)), and two separate verification APIs (see
+[Verification APIs](#verification-apis)):
 
 - `VerifyContentSignature`, the narrow check: `ValidateFile` plus the file's
   content signature against a caller-pinned device key. It does not
@@ -34,13 +36,17 @@ InviteReaders](#admin-delegated-invitereaders-transitions); every other
 delegated scope, invite-writer addition, removal, role change and key or root
 change remains unsupported.
 
-The package also implements one key-wrapping primitive, the per-snapshot CEK
-envelope: [`SealCEK`/`OpenCEK`](#cek-sealing-and-opening) wrap a fresh random
-32-byte CEK under the epoch VUK. A wrapping proves only that a CEK slot is
-authentic for the VUK and the bound header. age wrapping of
-the VUK to devices (`vuk_device_slots`), wrapping of the invitation and epoch
-keys, KDBX content encryption/serialization, opening a KDBX content with the
-CEK, a trusted full-file open/decrypt path, content history through
+The package also implements two key-wrapping primitives. The per-snapshot CEK
+envelope, [`SealCEK`/`OpenCEK`](#cek-sealing-and-opening), wraps a fresh random
+32-byte CEK under the epoch VUK; a wrapping proves only that a CEK slot is
+authentic for the VUK and the bound header. The per-device VUK envelope,
+[`SealVUKForDevice`/`OpenVUKForDevice`](#vuk-device-slot-envelope), wraps a
+caller-supplied 32-byte VUK to one device with standard age X25519 in the
+existing `vuk_device_slots` entries (`DeviceSlot.WrappedVUK`); its caller
+verified expected recipient comes from an already authenticated policy. Neither
+primitive generates or rotates a VUK or key epoch. Wrapping of the invitation
+and epoch keys, KDBX content encryption/serialization, opening a KDBX content
+with the CEK, a trusted full-file open/decrypt path, content history through
 `prev_digest`, server freshness and overall vault trust are not implemented.
 This document describes the wire format and the frozen v1 preimages; it makes
 no cryptographic correctness claim and grants no migration or product
@@ -85,7 +91,8 @@ Purpose domains (each prefixes exactly one preimage, followed by `0x00`):
 
 - `/content-signature`, `/revision`, `/file-digest`
 - `/policy-document-signature`, `/admin-delegation`
-- `/vuk-device-wrapping`, `/cek-wrapping`
+- `/vuk-device-wrapping` (the first bytes of a VUK device-slot plaintext),
+  `/cek-wrapping` (the first bytes of a CEK wrap's AAD)
 
 Identification usage labels (fingerprints only; they never appear in a signing,
 revision or file-digest preimage):
@@ -95,9 +102,12 @@ revision or file-digest preimage):
   `/key/age-x25519`, `/policy-document`
 
 Labels are identification and purpose separators only. This package does not
-sign, generate a VUK or derive any key. It wraps and unwraps only the
-per-snapshot CEK under the epoch VUK (`/cek-wrapping`, see [CEK sealing and
-opening](#cek-sealing-and-opening)); it does not wrap the VUK itself. The only
+sign, generate a VUK or derive any key. It wraps and unwraps exactly two keys:
+the per-snapshot CEK under the epoch VUK (`/cek-wrapping`, see [CEK sealing and
+opening](#cek-sealing-and-opening)) and the per-device VUK envelope
+(`/vuk-device-wrapping`, see [VUK device-slot
+envelope](#vuk-device-slot-envelope)), whose plaintext begins with that label
+and one `0x00`. It authenticates no policy of its own. The only
 authorization it checks is
 checkpoint-scoped: under a caller-supplied checkpoint, whether the author may
 author the authenticated current policy. It has no trust anchor of its own. A
@@ -473,10 +483,14 @@ The VUK slots are exactly the approved devices whose principal has read
 access (reader, writer, admin or owner): every such device has one slot in the
 set and no other device has any, so no device without a read role is wrapped
 the VUK and no read-capable device is left without it. A slot must name a
-policy device and carry that device's age recipient. Slots are ordered strictly
-ascending by `device_id` (see [Set-like arrays](#set-like-arrays)); there is no
-other slot order. Moving a slot changes the revision input and therefore the
-revision id, so a file is resealed after reordering.
+policy device and carry that device's age recipient. `ValidateFile` checks
+`wrapped_vuk` only for presence and the `MaxWrappedKeyLength` size; it is
+neither opened nor bound to the policy or header by any structural rule
+(opening is the separate caller-trusted primitive of [VUK device-slot
+envelope](#vuk-device-slot-envelope)). Slots are ordered strictly ascending by
+`device_id` (see [Set-like arrays](#set-like-arrays)); there is no other slot
+order. Moving a slot changes the revision input and therefore the revision id,
+so a file is resealed after reordering.
 
 ## Validation scope
 
@@ -486,8 +500,10 @@ package computes no signature.
 
 - signature bytes are checked for presence, length, algorithm and encoding
   only; `ValidateFile` does not verify any signature. Cryptography lives only
-  in the two explicit APIs of [Verification APIs](#verification-apis) and in
-  the CEK envelope of [CEK sealing and opening](#cek-sealing-and-opening): the
+  in the two explicit APIs of [Verification APIs](#verification-apis), in
+  the CEK envelope of [CEK sealing and opening](#cek-sealing-and-opening) and
+  in the VUK envelope of [VUK device-slot
+  envelope](#vuk-device-slot-envelope): the
   content signature is verified by `VerifyContentSignature` (pinned key) and by
   `VerifyPolicyCheckpoint` (current policy key), and policy proof signatures
   are cryptographically verified only by `VerifyPolicyCheckpoint`, only for the
@@ -497,6 +513,8 @@ package computes no signature.
   shape;
 - `revision_id` is checked to equal `RevisionID`; it is not a signature;
 - wrapped-key bytes are checked for presence and size, never unwrapped;
+  `vuk_device_slots` entries with a valid age X25519 recipient are not opened
+  by any structural path;
 - public keys and age recipients are parsed for shape only;
 - in `ValidateFile`, the author's principal is required to be a writer, admin
   or owner of the current policy by membership in the carried, unverified
@@ -514,8 +532,10 @@ package computes no signature.
 verifies a signature, authenticates a policy proof or authorizes a policy.
 Two separate exported APIs add cryptography on top of it, and they answer
 different questions (the separate `SealCEK`/`OpenCEK` envelope of
-[CEK sealing and opening](#cek-sealing-and-opening) is not a verification API
-and authorizes nothing):
+[CEK sealing and opening](#cek-sealing-and-opening) and the
+`SealVUKForDevice`/`OpenVUKForDevice` envelope of [VUK device-slot
+envelope](#vuk-device-slot-envelope) are not verification APIs and authorize
+nothing):
 
 | API | Input it trusts | What it establishes |
 | --- | ------------------- | ------------------- |
@@ -795,20 +815,135 @@ returned CEK is nil and any plaintext produced before the failure is cleared;
 returns that error as is.
 
 This primitive does not authorize a file and does not open a file. It does not
-derive the VUK, wrap the VUK to devices (`vuk_device_slots`), serialize,
-encrypt or decrypt KDBX content with the CEK, or provide a trusted full-file
-open path. `ValidateFile` still treats `wrapped_cek` as opaque bytes and never
-unwraps it.
+derive, generate or rotate the VUK (wrapping the VUK to one device is the
+separate envelope of [VUK device-slot
+envelope](#vuk-device-slot-envelope)), serialize, encrypt or decrypt KDBX
+content with the CEK, or provide a trusted full-file open path. `ValidateFile`
+still treats `wrapped_cek` as opaque bytes and never unwraps it.
+
+## VUK device-slot envelope
+
+Each approved read-capable device carries the epoch VUK in one existing
+`vuk_device_slots[i].wrapped_vuk` (`DeviceSlot.WrappedVUK`). The VUK is one
+per-library, per-epoch 32-byte value (`CEKSize`) chosen by the caller; it is
+not derived from any password, root key or device key. Two functions implement
+exactly that envelope:
+
+```
+SealVUKForDevice(vuk []byte, vaultID string, keyEpoch uint64, deviceID, recipient string) (DeviceSlot, error)
+OpenVUKForDevice(slot DeviceSlot, expectedVaultID string, expectedKeyEpoch uint64, expectedDeviceID, expectedRecipient string, identity *age.X25519Identity) ([]byte, error)
+```
+
+- `vuk` is exactly 32 bytes. `vaultID` must be a `validID` value of at most
+  `MaxIDLength` (64), `keyEpoch` must be positive, `deviceID` a `validID` value
+  of at most `MaxDeviceIDLength` (128), and `recipient` a canonical age X25519
+  recipient. All of them are caller inputs.
+- `SealVUKForDevice` returns the `DeviceSlot` with `device_id` and `recipient`
+  exactly as given and `wrapped_vuk` the age envelope of the plaintext below.
+  It clears the envelope plaintext (VUK included) on every path. No other
+  `DeviceSlot` field, wire member or vector changes.
+- `OpenVUKForDevice` returns the 32-byte VUK, caller-owned; the caller clears
+  it after use.
+
+The envelope is a standard age file produced by `age.Encrypt` for exactly one
+`age.X25519Recipient` and opened by `age.DecryptReaderAt` with exactly one
+`age.X25519Identity`. The plaintext is a fixed, unambiguous byte layout:
+
+```
+plaintext = "locklark.vault-file/v1/vuk-device-wrapping" || 0x00
+            || uint16_be(len(vault_id))   || vault_id
+            || uint64_be(key_epoch)
+            || uint16_be(len(device_id))  || device_id
+            || vuk(32)
+```
+
+The purpose label is `DomainVUKDeviceWrapping` followed by exactly one NUL, as
+in `DomainSeparated`. The two length fields are unsigned 16-bit big-endian
+values; the ID limits above keep both within a `uint16`. The epoch is an
+unsigned 64-bit big-endian positive value in the wire `key_epoch` domain. age
+has no associated-data parameter, so the label and context travel inside the
+age-authenticated plaintext and are checked after the envelope opens. No
+custom crypto, key derivation, extra dependency or second recipient is used.
+
+The context binds the vault, key epoch and device. It deliberately contains no
+content sequence and no `op_id`: one device slot is reused by every content
+snapshot of the same epoch, so adding them would force a rewrap per snapshot.
+Changing the key epoch (and any new VUK for it) requires a new wrap for every
+device.
+
+**Trust boundary.** The expected vault id, epoch, device id and recipient
+passed to `OpenVUKForDevice` are independent caller inputs; the expected
+recipient must come from an already authenticated policy (for example the
+current policy authenticated by `VerifyPolicyCheckpoint`). `slot.device_id` and
+`slot.recipient` are never the trust source. The call requires:
+
+- `slot.device_id == expectedDeviceID`;
+- `slot.recipient == expectedRecipient`;
+- `expectedRecipient == identity.Recipient().String()`;
+
+and then, after the envelope opens, the decrypted label and context compared
+in constant time against all expected values. Only then is the VUK returned.
+
+The read is bounded and authenticated: an empty or over-`MaxWrappedKeyLength`
+`wrapped_vuk` is rejected before any decryption, `age.DecryptReaderAt` receives
+exactly `len(wrapped_vuk)`, the decrypted length must equal the exact expected
+label, context and VUK length and exactly that many bytes are read, and any
+appended trailing ciphertext fails the age final-chunk authentication.
+
+| Argument                  | Rejected with                                    |
+| ------------------------- | ------------------------------------------------ |
+| `vuk` not 32 bytes        | `invalid_value` at `""`                          |
+| `vault_id`, `key_epoch` or `device_id` invalid | `invalid_value` at `vault_id`, `key_epoch` or `device_id` |
+| `recipient` not canonical age X25519 | `invalid_value` at `recipient`         |
+| nil identity (open only)  | `invalid_value` at `identity`                    |
+
+Every envelope or context failure of `OpenVUKForDevice` is the one code
+`vuk_envelope_failed`, an `*Error` at `vuk_device_slot`: slot device or
+recipient mismatch, identity recipient mismatch, a wrong caller expectation, a
+malformed, empty, oversized or tampered envelope, appended bytes, a
+non-matching decrypted label or context, and a wrong plaintext length. A
+caller cannot tell a wrong recipient from a wrong context or tampering. On any
+error the returned VUK is nil.
+
+**Zeroization.** Both functions clear the package-owned buffers on every path,
+success and failure: `SealVUKForDevice` clears its envelope plaintext (VUK
+included), and `OpenVUKForDevice` clears the plaintext it reads (VUK included)
+and the expected-context buffer. This is an honest limitation, not a full wipe:
+`age.DecryptReaderAt` authenticates and decrypts the final chunk inside its
+cached reader and retains that plaintext for the life of the reader; the public
+age API exposes no method to clear it, so this package cannot clear that
+internal age copy. No custom crypto or unsafe code is used to attempt it.
+
+**Errors.** Any age error, such as a short write of the header or plaintext to
+the output, is returned as is, not as a validation `*Error`. On error
+`SealVUKForDevice` returns the zero `DeviceSlot` and a non-nil error. If
+`age.Encrypt` unexpectedly returns a nil writer with a nil error, the function
+returns an explicit operational error, never a nil error with a zero slot. age
+v1.3.2 does not report a `crypto/rand` failure that way: that nil-writer guard
+covers an undocumented contract violation, not a known failure mode.
+
+**Size.** At `MaxIDLength` (64) and `MaxDeviceIDLength` (128) the plaintext is
+`42 + 1 + (2 + 64 + 8 + 2 + 128) + 32 = 279` bytes, which fits one age chunk;
+the envelope is well within `MaxWrappedKeyLength` (512).
+
+This primitive does not generate, load or rotate the VUK or key epoch, does
+not perform an invitation or epoch rewrap workflow, does not authenticate a
+policy itself (the expected recipient is trusted only as the caller's input),
+does not scope CEK epoch rotation, and does not serialize, encrypt or decrypt
+KDBX content or provide a trusted full-file open path. `ValidateFile` treats
+`wrapped_vuk` as opaque bytes.
 
 ## Limits
 
 Neither API establishes overall vault trust beyond its caller-supplied anchor.
 Neither verifies content history through `prev_digest`, server freshness or
-ordering across snapshots, encryption or decryption, VUK key wrapping or the
-CEK envelope (including the age rewrap of the invitation and epoch keys for
-newly invited readers; CEK sealing/opening is only the separate primitive of
-[CEK sealing and opening](#cek-sealing-and-opening), which authorizes no
-file), or the authenticity of anything the caller did not pin. Neither cryptographically
+ordering across snapshots, encryption or decryption, the VUK device-slot
+envelope or the CEK envelope, or the age rewrap of the invitation and epoch
+keys for newly invited readers (CEK sealing/opening and VUK device wrapping
+are only the separate primitives of [CEK sealing and
+opening](#cek-sealing-and-opening) and [VUK device-slot
+envelope](#vuk-device-slot-envelope), which authorize no file and authenticate
+no policy), or the authenticity of anything the caller did not pin. Neither cryptographically
 reverifies the carried anchor proof's signature; that signature is trusted only
 through the caller's checkpoint digest. The chain does authenticate the
 delegation fields (`owner_root`, `admin_delegations` and its `scope`) carried in
@@ -840,6 +975,12 @@ authorization is implemented. In particular:
   authenticate a policy, signature or revision id (`revision_id` is not
   bound), do not prove freshness or uniqueness of a VUK, do not bind a CEK to
   KDBX bytes, and do not open a file.
+- `SealVUKForDevice`/`OpenVUKForDevice` establish only that a device slot
+  carries a VUK authentically wrapped for the caller's expected vault, epoch,
+  device and recipient under the caller's identity. They do not generate,
+  rotate or prove the freshness or uniqueness of a VUK or epoch, do not
+  authenticate the policy the expected recipient came from, do not authorize a
+  device or a file, and do not open a file.
 
 ## Budgets
 
@@ -910,13 +1051,22 @@ equivalent string escape are each rejected as `non_canonical`.
 `TestProofWithNonCanonicalDocumentRejected` pins that a proof carrying a
 non-canonical `document` is rejected, before any policy binding is considered.
 
+`TestVUKPlaintextLayout` and `TestVUKMaxIdentifierBoundary` in
+`pkg/vaultfile/vuk_test.go` pin the exact VUK envelope plaintext and the
+`MaxIDLength` / `MaxDeviceIDLength` size boundary; the remaining `TestVUK*`
+tests use real generated `age.X25519Identity` values and real age ciphertext for
+the round trip and each [VUK device-slot
+envelope](#vuk-device-slot-envelope) negative.
+
 ## Out of scope
 
 This schema revision includes the two verification APIs described above,
 `VerifyContentSignature` (narrow, caller-pinned content key) and
 `VerifyPolicyCheckpoint` (from a caller-supplied `PolicyCheckpoint` forward),
-and one key-wrapping primitive, `SealCEK`/`OpenCEK`
-([CEK sealing and opening](#cek-sealing-and-opening)).
+and two key-wrapping primitives, `SealCEK`/`OpenCEK`
+([CEK sealing and opening](#cek-sealing-and-opening)) and
+`SealVUKForDevice`/`OpenVUKForDevice` ([VUK device-slot
+envelope](#vuk-device-slot-envelope)).
 `ValidateFile`, parsing, encoding and preimage derivation remain shape-only.
 
 It does not establish or create the trustworthiness or provenance of the
@@ -935,7 +1085,10 @@ delegated diff it implements no other policy proof, signature-chain or
 authorization verification and no permission checks. It also leaves the
 provenance of the caller's root outside its scope, key or digest crypto
 beyond the definitions, content history through `prev_digest`, server
-freshness, migration/import, encryption or decryption, age VUK device
-wrapping (`vuk_device_slots`) and epoch/VUK generation, KDBX
+freshness, migration/import, encryption or decryption, VUK and epoch
+generation or rotation, the invitation and epoch rewrap workflow that would
+drive `SealVUKForDevice` for changed device sets or epochs, KDBX
 encryption/serialization or opening with the CEK, a trusted full-file open
-path, or product wiring.
+path, or product wiring. The VUK device-slot envelope of [VUK device-slot
+envelope](#vuk-device-slot-envelope) wraps only the caller-supplied VUK; it
+authenticates no policy and opens no file.
