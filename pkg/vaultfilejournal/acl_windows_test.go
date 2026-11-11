@@ -250,16 +250,51 @@ func TestWindowsReparsePointRejected(t *testing.T) {
 		t.Fatalf("Open through a reparse point created a database: %v", err)
 	}
 
+	// A regular, privately secured file under a symlinked database name is a
+	// valid bbolt database: were the link followed, Open would succeed on the
+	// target. It must instead be rejected before any target byte changes.
 	dir := privateDir(t)
 	target := filepath.Join(dir, "target")
-	if err := os.WriteFile(target, []byte("x"), 0o600); err != nil {
+	targetBytes := seedDatabaseBytes(t, filepath.Join(privateDir(t), "seed.db"))
+	if err := os.WriteFile(target, targetBytes, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	makeDBPrivate(t, target)
-	mustLinkFile(t, target, filepath.Join(dir, "journal.db"))
-	if _, err := openBounded(t, filepath.Join(dir, "journal.db"), 10*time.Second); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("Open(link db) = %v, want ErrInvalid", err)
+	dbLink := filepath.Join(dir, "journal.db")
+	mustLinkFile(t, target, dbLink)
+	aclBefore := describeACL(t, target)
+
+	j, err := openBounded(t, dbLink, 10*time.Second)
+	if j != nil || !errors.Is(err, ErrInvalid) {
+		if j != nil {
+			_ = j.Close()
+		}
+		t.Fatalf("Open(link db) = %v, %v; want ErrInvalid", j, err)
 	}
+	if got := mustReadFile(t, target); !bytes.Equal(got, targetBytes) {
+		t.Fatal("Open through a reparse point changed the link target's bytes")
+	}
+	if got := describeACL(t, target); got != aclBefore {
+		t.Fatalf("Open through a reparse point changed the link target's DACL:\n%s\n%s", aclBefore, got)
+	}
+	if _, err := os.Lstat(dbLink); err != nil || errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rejected Open removed the link: %v", err)
+	}
+}
+
+// seedDatabaseBytes returns the bytes of a real, privately secured bbolt
+// database, closed before use, for fixtures that must be valid if followed.
+func seedDatabaseBytes(t *testing.T, path string) []byte {
+	t.Helper()
+	j, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustSave(t, j, baseProposal())
+	if err := j.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return mustReadFile(t, path)
 }
 
 func describeACL(t *testing.T, path string) string {
@@ -320,7 +355,15 @@ func TestWindowsReadableAncestorAcceptedStrictParentEnforced(t *testing.T) {
 		}
 	}
 
-	// Ancestors may not be replaceable or re-permissionable.
+	// Ancestors may not be replaceable or re-permissionable. MAXIMUM_ALLOWED
+	// is not a case here: Microsoft documents it as a desired-access flag for
+	// an access *request* ("The MAXIMUM_ALLOWED access right ... indicates
+	// that the requested access rights are the maximum rights ... permitted";
+	// MS-DTYP 2.4.3, AccessCheck). It is not a right an ACE grants, so an ACE
+	// whose mask is MAXIMUM_ALLOWED is an invalid fixture, not a DACL grant:
+	// it cannot demonstrate that the rule under test rejects a real grant.
+	// Generic read/write, metadata, delete, WRITE_DAC and WRITE_OWNER cover
+	// what an ACE can actually grant here.
 	for name, mask := range map[string]windows.ACCESS_MASK{
 		"delete":              windows.DELETE,
 		"delete-child":        deleteChildMask,
@@ -329,7 +372,6 @@ func TestWindowsReadableAncestorAcceptedStrictParentEnforced(t *testing.T) {
 		"write-metadata":      windows.FILE_WRITE_ATTRIBUTES,
 		"generic-write":       windows.GENERIC_WRITE,
 		"generic-all":         windows.GENERIC_ALL,
-		"maximum-allowed":     maximumAllowed,
 		"write-ext-attribute": windows.FILE_WRITE_EA,
 	} {
 		if err := checkDirRulesForTest(t, journalParent, []windows.EXPLICIT_ACCESS{sidRule(everyone, mask, 0)}, false); !errors.Is(err, ErrInvalid) {
