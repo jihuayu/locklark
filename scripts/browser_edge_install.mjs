@@ -14,11 +14,15 @@
 //      Extensions menu state is never required.
 //   2. the unique visible Load unpacked control (fluent-button[title=...]);
 //      physically clicked at its measured box.
-//   3. the native chooser, driven by scripts/browser_native_x11.py with the
-//      exact owner request: the actual ASCII page title as the manager prefix,
-//      the exact private --user-data-dir, the real Edge image and owner: true.
-//      The driver derives the owner PID from the unique real manager window
-//      and proves the chooser's ownership before any XTest input.
+//   3. the native chooser, driven by scripts/browser_native_x11.py in two
+//      guarded requests carrying the actual ASCII page title as the manager
+//      prefix, the exact private --user-data-dir and the real Edge image:
+//      first the purpose-bound folder action {"select_folder": true}, whose
+//      privacy-safe answer must be exactly one select_folder click, then the
+//      unchanged keyboard/path owner request, which must be owned. The driver
+//      derives the owner PID from the unique real manager window and proves
+//      the chooser's ownership before any XTest input; neither request is
+//      replayed.
 //   4. the fixed extension target and exactly the expected background.js
 //      service worker.
 //
@@ -75,6 +79,10 @@ export const EDGE_CHOOSER_TITLE_PREFIX = "Select the extension directory.";
 // browser-chrome "Extensions menu" is not required: the Developer mode switch
 // is already visible on edge://extensions.
 export const EDGE_PAGE_TITLE_PREFIX = "Extensions";
+// The exact real Edge manager title the reviewed folder-action driver accepts.
+// It is not manufactured: the request may carry only the page.title() the
+// caller just observed, and that observation must equal this literal.
+export const EDGE_MANAGER_TITLE = "Extensions";
 export const EDGE_FORBIDDEN_FLAGS = [
   "--load-extension",
   "--disable-extensions-except",
@@ -167,6 +175,71 @@ export function edgeChooserX11Request({ extensionDir, executable, profile, title
     preserve_focus: true,
     actions: [{ key: "Control_L+l" }, { text: extensionDir }, { key: "Return" }],
   }, title);
+}
+
+// The complete closed key set of the folder request.
+export const EDGE_FOLDER_ACTION_KEYS = Object.freeze([
+  "chooser_title_prefix",
+  "chooser_action",
+  "executable",
+  "owner",
+  "owner_title_prefix",
+  "title",
+  "title_prefix",
+  "user_data_dir",
+]);
+
+// The only purpose-bound folder request: exactly `{"select_folder": true}` and
+// no keyboard, path or coordinate action. It is a closed schema: `title` is the
+// actual page.title() observed by the caller, `title`, `title_prefix` and
+// `owner_title_prefix` are all that same exact real Edge manager title (which
+// must equal EDGE_MANAGER_TITLE), the chooser title is the fixed literal, and
+// the exact private profile and Edge executable are carried unchanged. A missing, altered, partial or generic
+// title, an empty or non-ASCII path and any extra field are refused. The
+// driver binds the manager window, derives the owner PID and the click point
+// itself; nothing here is derived from the Load unpacked click.
+export function edgeFolderActionRequest({ executable, profile, title }) {
+  assert(typeof title === "string" && title !== "", "actual page title required");
+  assert(printableAsciiLine(title), "actual page title must be printable ASCII");
+  assert(!/^\s|\s$/.test(title), "actual page title must be trimmed");
+  assert.equal(title, EDGE_MANAGER_TITLE,
+    "actual page title must be the exact Edge manager title");
+  assert(typeof executable === "string" && executable.startsWith("/"),
+    "absolute Edge executable required");
+  assert(typeof profile === "string" && profile.startsWith("/"),
+    "absolute profile required");
+  assert(!profile.endsWith("/"), "profile must not end with a slash");
+  for (const value of [executable, profile])
+    assert(printableAsciiLine(value), "chooser input must be printable ASCII");
+  const request = {
+    owner: true,
+    title,
+    title_prefix: title,
+    chooser_title_prefix: EDGE_CHOOSER_TITLE_PREFIX,
+    owner_title_prefix: title,
+    user_data_dir: profile,
+    executable,
+    chooser_action: { select_folder: true },
+  };
+  assert.deepEqual(Object.keys(request).sort(), [...EDGE_FOLDER_ACTION_KEYS].sort());
+  return request;
+}
+
+// The privacy-safe folder output is exactly the fixed select_folder action with
+// exactly one click. Anything else, including a zero-click or expanded record,
+// is refused.
+export function isEdgeFolderActionOutput(output) {
+  return (
+    typeof output === "object" &&
+    output !== null &&
+    !Array.isArray(output) &&
+    Object.getPrototypeOf(output) === Object.prototype &&
+    Object.keys(output).length === 2 &&
+    Object.hasOwn(output, "chooser_action") &&
+    Object.hasOwn(output, "clicks") &&
+    output.chooser_action === "select_folder" &&
+    output.clicks === 1
+  );
 }
 
 // Exactly one visible copy, judged only by Playwright's visibility filter; no
@@ -280,12 +353,27 @@ export async function installEdgeExtensionThroughManager({
     );
     await realClick(page, box);
   });
-  // The reviewed helper waits for the chooser itself before any XTest input,
-  // so exactly one guarded request is issued. A failed child never reaches the
-  // fixed proof check, and nothing is replayed after possible input.
+  // The real Load unpacked click opened the chooser. The title observed here is
+  // the actual manager page title and is carried unchanged into both guarded
+  // requests. The driver waits for the owned chooser itself before any input,
+  // so each request is issued exactly once: the fixed folder action first,
+  // then the keyboard/path request. Nothing is replayed after possible input,
+  // and a failed request never reaches the installation proof.
+  const title = await page.title();
+  phase("edge-chooser-folder");
+  await step("edge-chooser", async () => {
+    const folder = inputRequest(edgeFolderActionRequest({
+      executable: edgeExecutable,
+      profile,
+      title,
+    }));
+    if (!isEdgeFolderActionOutput(folder))
+      throw new EdgeInstallError("edge-chooser");
+  });
+  // The unchanged keyboard/path request selects the package directory and must
+  // return the owned proof; a failed request never reaches the install proof.
   await step("edge-chooser", async () => {
     phase("edge-chooser");
-    const title = await page.title();
     const chosen = inputRequest(edgeChooserX11Request({
       extensionDir,
       executable: edgeExecutable,
