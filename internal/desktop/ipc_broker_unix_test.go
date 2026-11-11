@@ -3,13 +3,16 @@
 package desktop
 
 import (
-	"os"
-	"testing"
+	"path/filepath"
+
+	"github.com/jihuayu/locklark/internal/localpath"
 )
 
-// desktopBrokerTempRoot creates the socket's parent directory under the
-// standard sticky /tmp explicitly, even when TMPDIR points elsewhere.
-func desktopBrokerTempRoot(t *testing.T) (string, error) {
-	t.Helper()
-	return os.MkdirTemp("/tmp", "llb-")
+// desktopBrokerTrusted reports whether endpoint is a socket path whose parent
+// directory passes localpath.TrustedTemporaryParent, the guard the Unix broker
+// applies in listenLocal. A non-nil error means the real listener would refuse
+// this endpoint and the caller must use the explicit fallback.
+func desktopBrokerTrusted(endpoint string) error {
+	_, e := localpath.TrustedTemporaryParent(filepath.Dir(endpoint))
+	return e
 }

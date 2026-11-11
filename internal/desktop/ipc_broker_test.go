@@ -7,14 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/jihuayu/locklark/internal/browserhost"
-	"github.com/jihuayu/locklark/internal/localpath"
 	"github.com/jihuayu/locklark/internal/personal"
 )
 
@@ -127,19 +125,19 @@ func TestDesktopIPCBrokerUnlockLockAndCLIRun(t *testing.T) {
 	}
 	defer a.stopBrowserBroker()
 
-	// Some CI temp ancestors are not private enough for localpath, so this
-	// test must exercise the real socket entrypoint rather than silently
-	// falling back.
-	dir, e := desktopBrokerTempRoot(t)
-	if e != nil {
-		t.Fatal(e)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	if os.Chmod(dir, 0700) != nil {
-		t.Fatal("private test directory")
-	}
-	if _, e := localpath.TrustedTemporaryParent(dir); e == nil {
-		t.Setenv("LOCKLARK_BROWSER_SOCKET", filepath.Join(dir, "b.sock"))
+	// The endpoint is the platform's real broker socket: an absolute socket
+	// path under the private /tmp on Unix, and a unique safe token driving the
+	// per-user named pipe on Windows. Windows never applies the Unix temporary
+	// root guard to a token, so it is always trusted and must exercise the real
+	// named pipe; there is no skip or fallback there.
+	endpoint := desktopBrokerSocket(t)
+	if e := desktopBrokerTrusted(endpoint); e == nil {
+		t.Setenv("LOCKLARK_BROWSER_SOCKET", endpoint)
+		// On Unix the trusted endpoint is also the listening path. On Windows
+		// it is only the safe token: DefaultBrokerEndpoint appends it to the
+		// per-user pipe name, so the two differ by design. Both the broker and
+		// the relay derive that name from the same env token, and the real
+		// start/dial below proves they agree; do not compare them directly.
 		// The relay dials once; start its listener before launching the client.
 		a.startBrowserBroker()
 		if a.broker == nil {
