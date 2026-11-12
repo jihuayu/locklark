@@ -128,11 +128,22 @@ PROBE_KEYS = frozenset(OWNER_FIELDS) | {"actions", "ownership_probe", "preserve_
 INPUT_KEYS = frozenset(OWNER_FIELDS) | {
     "actions", "owner", "owner_pid", "preserve_focus", "title", "title_prefix",
 }
-# The real Edge manager page title observed in the probe. The folder action
-# carries it as the observed `title`, and `title`, `title_prefix` and
-# owner_title_prefix must all equal it exactly: a prefix such as "Ext" would
-# match a different Edge window and is never the manager page title.
+# The real Edge manager page title; the folder-action request must keep
+# carrying exactly this title (Playwright page.title() remains "Extensions").
 EDGE_MANAGER_TITLE = "Extensions"
+# The exact native X11 manager window titles of official Edge 157, rechecked
+# against the same unique manager XID, its exact owner PID, exact Edge
+# executable/private profile and the chooser PID before reading: the plain
+# page title and, on the manager window itself, the profile-prefixed form whose
+# U+200B sits exactly between "Microsoft" and " Edge". Only these literals are
+# native-window titles; the folder-action request itself stays exactly
+# EDGE_MANAGER_TITLE.
+EDGE_MANAGER_NATIVE_TITLES = (
+    EDGE_MANAGER_TITLE,
+    "Extensions - Profile 1 - Microsoft\u200b Edge",
+)
+# The manager window literal itself: unique to the one real manager X window.
+EDGE_MANAGER_WINDOW_TITLE = EDGE_MANAGER_NATIVE_TITLES[1]
 # One purpose-bound folder action, separate from the keyboard/coordinate input
 # shape. The chooser title must equal this exact literal, the manager window
 # must equal the observed manager title and the chooser must keep the measured
@@ -148,8 +159,12 @@ FOLDER_POINT_OFFSETS = (("width", -62), ("height", -69))
 
 
 def folder_manager_title_matches(title):
-    """True only for the exact observed Edge manager title, never a prefix."""
-    return type(title) is str and title == EDGE_MANAGER_TITLE
+    """True only for an exact native Edge manager title literal, never a prefix.
+
+    Exact string equality against the two verified literals: no prefix/suffix
+    match and no Unicode or whitespace normalization.
+    """
+    return type(title) is str and title in EDGE_MANAGER_NATIVE_TITLES
 
 
 def parse_folder_action_request(request):
@@ -157,10 +172,12 @@ def parse_folder_action_request(request):
 
     The request is never the keyboard/coordinate shape: there is no `actions`,
     no focus or geometry value and no click coordinate. The observed manager
-    title is required and `title`, `title_prefix` and owner_title_prefix must
-    all equal the exact Edge manager title; an absent, mismatched, generic
-    or altered title is refused. The chooser title is the fixed literal and
-    the optional caller PID is bound exactly as in the owner input shape.
+    X title is required and `title`, `title_prefix` and owner_title_prefix
+    must all equal exactly the native manager window title literal; an absent,
+    mismatched, generic or altered title is refused. The plain page title is
+    never a substitute for the native manager window title literal. The
+    chooser title is the fixed literal and the optional caller PID is bound
+    exactly as in the owner input shape.
     Only the fixed attribution values are returned; values are never printed.
     """
     if type(request) is not dict or set(request) - FOLDER_ACTION_KEYS:
@@ -175,7 +192,7 @@ def parse_folder_action_request(request):
     # The same exact real manager window binding as the keyboard request: the
     # observed title is carried unchanged and is both of its own prefixes.
     title = request["title"]
-    if not folder_manager_title_matches(title) or \
+    if title != EDGE_MANAGER_WINDOW_TITLE or \
             request["title_prefix"] != title or request["owner_title_prefix"] != title:
         return None
     if request.get("chooser_title_prefix") != EDGE_CHOOSER_TITLE:
@@ -472,6 +489,21 @@ def title_matches(title, prefix):
     return (type(title) is str and title != "" and ascii_line(prefix) is not None
             and not any(ord(char) < 32 for char in title)
             and title.startswith(prefix))
+
+
+def is_native_manager_title(title):
+    """True only for one of the verified native manager window title literals."""
+    return type(title) is str and title in EDGE_MANAGER_NATIVE_TITLES
+
+
+def is_manager_prefix(prefix):
+    """True only for the verified manager window title literal.
+
+    A folder-action request must carry the native manager window title
+    exactly; the plain page title "Extensions" is still a native title but is
+    never used for manager-window discovery.
+    """
+    return type(prefix) is str and prefix == EDGE_MANAGER_WINDOW_TITLE
 
 
 def query_children(x, display, parent):
@@ -1282,7 +1314,8 @@ def main():
         matches=[]
         for candidate in children(parent):
             title = window_title(candidate)
-            if (request.get("title") == title or (request.get("title_prefix") and title.startswith(request["title_prefix"]))) and expected_process(candidate):
+            if (request.get("title") in EDGE_MANAGER_NATIVE_TITLES and
+                    title == request.get("title")) and expected_process(candidate):
                 matches.append(candidate)
             matches.extend(find(candidate, depth+1))
         return matches
@@ -1293,13 +1326,15 @@ def main():
         Used only by the owner/probe contract so a GTK helper dialog is
         discoverable before attribution; every candidate is still proven
         through the real WM chain or the bounded /proc parent chain before
-        any input.
+        any input. The manager prefix is one exact native manager title
+        literal, so only that title is discovered and a look-alike window
+        never is.
         """
-        if depth > 3:
+        if depth > 3 or not is_manager_prefix(prefix):
             return []
         found = []
         for candidate in children(parent):
-            if title_matches(window_title(candidate), prefix):
+            if title_matches(ascii_line(window_title(candidate)), prefix):
                 found.append(candidate)
             found.extend(collect_titles(prefix, candidate, depth + 1))
         return found
@@ -1467,14 +1502,16 @@ def main():
     def prove_folder_owner(owner_record):
         """Owner window, title, PID, executable and profile, re-read before the click."""
         current = [candidate for candidate in collect_titles(owner["owner_title_prefix"])
-                   if normal_viewable(candidate)]
+                   if is_native_manager_title(window_title(candidate))
+                   and normal_viewable(candidate)]
         if current != [owner_window]:
             raise RuntimeError("Chooser owner window must be unique" if current
                                else "Chooser owner window unavailable")
         # The exact observed manager title the caller carried is still the
         # real manager window's title. A generic prefix is not used here, so an
         # unrelated Edge window named "Ext..." can never stand in for it.
-        if not folder_manager_title_matches(window_title(owner_window)):
+        if not folder_manager_title_matches(window_title(owner_window)) or \
+                window_title(owner_window) != owner["owner_title_prefix"]:
             raise RuntimeError("Chooser owner window unavailable")
         owner_now = property_single_int(window_property(owner_window, "_NET_WM_PID"))
         if type(owner_now) is not int or owner_now != owner_pid:

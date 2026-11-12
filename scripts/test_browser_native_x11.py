@@ -539,6 +539,8 @@ class ChooserContractTests(unittest.TestCase):
         self.assertFalse(native.title_matches("Extensions", None))
         self.assertFalse(native.title_matches(None, "Extensions"))
         self.assertFalse(native.title_matches("bad\n", "bad"))
+        # A prefix longer than the title never matches.
+        self.assertFalse(native.title_matches("Extensions", "Extensions" + "x"))
 
 
 class ChooserRelationTests(unittest.TestCase):
@@ -715,18 +717,19 @@ class ChooserRelationTests(unittest.TestCase):
 
 _ABSENT = object()
 
+# The exact native manager X title captured for official Edge 157: U+200B sits
+# exactly between "Microsoft" and " Edge".
+NATIVE_TITLE = "Extensions - Profile 1 - Microsoft\u200b Edge"
 
-def folder_request(**overrides):
-    # The exact purpose-bound folder action shape. The chooser title is the
-    # fixed reviewed literal and the manager title is the observed real Edge
-    # manager page title, carried unchanged in all three title slots.
+
+def title_request(title, **overrides):
     request = {
         "owner": True,
         "chooser_action": {"select_folder": True},
         "chooser_title_prefix": "Select the extension directory.",
-        "title": "Extensions",
-        "title_prefix": "Extensions",
-        "owner_title_prefix": "Extensions",
+        "title": title,
+        "title_prefix": title,
+        "owner_title_prefix": title,
         "user_data_dir": "/synthetic/profile-1",
         "executable": "/synthetic/edge",
     }
@@ -736,13 +739,23 @@ def folder_request(**overrides):
     return request
 
 
+def folder_request(**overrides):
+    # The exact purpose-bound folder action shape: the fixed reviewed chooser
+    # title and the exact native manager window title carried unchanged in all
+    # three title slots.
+    request = dict(overrides)
+    request.setdefault("title", NATIVE_TITLE)
+    return title_request(**request)
+
+
 class FolderActionTests(unittest.TestCase):
     def test_exact_semantic_action_is_the_only_accepted_shape(self):
         self.assertEqual(native.EDGE_MANAGER_TITLE, "Extensions")
+        self.assertEqual(native.EDGE_MANAGER_WINDOW_TITLE, NATIVE_TITLE)
         parsed = native.parse_folder_action_request(folder_request())
-        self.assertEqual(parsed, {"owner_title_prefix": "Extensions",
-                                  "title": "Extensions",
-                                  "title_prefix": "Extensions",
+        self.assertEqual(parsed, {"owner_title_prefix": NATIVE_TITLE,
+                                  "title": NATIVE_TITLE,
+                                  "title_prefix": NATIVE_TITLE,
                                   "chooser_title_prefix": "Select the extension directory.",
                                   "user_data_dir": "/synthetic/profile-1",
                                   "executable": "/synthetic/edge",
@@ -750,41 +763,110 @@ class FolderActionTests(unittest.TestCase):
         self.assertEqual(set(parsed), set(native.OWNER_FIELDS) |
                          set(native.FOLDER_MANAGER_FIELDS) | {"caller_pid", "probe"})
 
-    def test_manager_title_must_be_the_exact_observed_manager_title(self):
-        # The exact observed title is the only accepted value, never a
-        # prefix, a generic prefix, a case variant or an altered title.
-        self.assertTrue(native.folder_manager_title_matches("Extensions"))
-        for value in ("Ext", "Extension", "Extensions - Profile 1", "Extensions - "
-                      "Profile 1 - Microsoft Edge", " extensions", "Extensions ",
-                      "extensions", "EXTENSIONS", "Extensionss", "Extensions.",
-                      "Edge Extensions", "", None, 1, True, ["Extensions"]):
+    def test_native_manager_titles_accept_exactly_two_literals(self):
+        # Official Edge 157: exactly the two native manager X title literals,
+        # the plain page title and the profile-prefixed form. Both are accepted
+        # by exact equality only.
+        self.assertEqual(native.EDGE_MANAGER_NATIVE_TITLES,
+                         ("Extensions", "Extensions - Profile 1 - Microsoft\u200b Edge"))
+        self.assertEqual(native.EDGE_MANAGER_NATIVE_TITLES[1], NATIVE_TITLE)
+        self.assertEqual(native.EDGE_MANAGER_TITLE, "Extensions")
+        self.assertEqual(NATIVE_TITLE.index("\u200b"),
+                         len("Extensions - Profile 1 - Microsoft"))
+        self.assertEqual(NATIVE_TITLE[NATIVE_TITLE.index("\u200b") + 1], " ")
+        self.assertEqual(NATIVE_TITLE.replace("\u200b", ""),
+                         "Extensions - Profile 1 - Microsoft Edge")
+        for value in ("Extensions", NATIVE_TITLE):
+            with self.subTest(accepted=value):
+                self.assertTrue(native.folder_manager_title_matches(value))
+                self.assertTrue(native.is_native_manager_title(value))
+        # Only the unique manager window literal opens a folder action.
+        self.assertTrue(native.is_manager_prefix(NATIVE_TITLE))
+        self.assertFalse(native.is_manager_prefix("Extensions"))
+
+    def test_native_manager_title_near_misses_are_rejected(self):
+        # No prefix/suffix match and no Unicode/whitespace/case normalization.
+        near_misses = (
+            "Extensions - Profile 1 - Microsoft Edge",
+            "Extensions - Profile 1 - Microsoft Edge\u200b",
+            "Extensions - Profile 1 - Microsoft \u200bEdge",
+            "Extensions - Profile 1 - Microsoft\u200b\u200b Edge",
+            "Extensions - Profile 1 - Microsoft\u200b\u200bEdge",
+            "Extensions - Profile 1 -  Microsoft\u200b Edge",
+            "Extensions - Profile 1 - Microsoft\u200b  Edge",
+            "Extensions - Profile 1 - Microsoft\u200bEdge",
+            "Extensions - Profile 1 - Microsoft\u200bEdge ",
+            "Extensions - Profile 1 - Microsoft\u200b Edge ",
+            " Extensions - Profile 1 - Microsoft\u200b Edge",
+            "Extensions - Profile 0 - Microsoft\u200b Edge",
+            "Extensions - Profile 2 - Microsoft\u200b Edge",
+            "Extensions - Profile 01 - Microsoft\u200b Edge",
+            "Extensions - Profile 1 - Microsoft\u200b edge",
+            "Extensions - Profile 1 - microsoft\u200b Edge",
+            "extensions - Profile 1 - Microsoft\u200b Edge",
+            "Extensions - profile 1 - Microsoft\u200b Edge",
+            "Extensions - Profile  1 - Microsoft\u200b Edge",
+            "Extensions - Profile 1 - Microsoft\u00a0Edge",
+            "Extensions - Profile 1 - Microsoft\u200c Edge",
+            "Extensions - Profile 1 - Microsoft\u200b",
+            "Extensions - Profile 1",
+            "Extensions\n- Profile 1 - Microsoft\u200b Edge",
+            NATIVE_TITLE + " - 1 tab",
+            "x " + NATIVE_TITLE,
+            "Ext",
+            "Extension",
+            "Extensionss",
+            "\u200bExtensions",
+            "",
+            None,
+            1,
+            True,
+            ["Extensions"],
+        )
+        for value in near_misses:
             with self.subTest(value=value):
                 self.assertFalse(native.folder_manager_title_matches(value))
+                self.assertFalse(native.is_manager_prefix(value))
+        for value in ("Extension", NATIVE_TITLE[:-1], NATIVE_TITLE + " ",
+                      NATIVE_TITLE.replace("\u200b", ""), "Extensions - Profile 1"):
+            with self.subTest(prefix=value):
+                self.assertFalse(native.is_manager_prefix(value))
+
+    def test_manager_title_request_must_be_exact_and_never_a_prefix(self):
+        # The request carries one exact native manager title literal, never a
+        # prefix, a generic prefix, a case variant or an altered title.
         cases = {
-            "generic owner prefix": folder_request(owner_title_prefix="Ext",
-                                                   title_prefix="Ext", title="Ext"),
+            "generic owner prefix": title_request("Ext"),
             "generic prefix only": folder_request(owner_title_prefix="Ext"),
+            "plain page title only": title_request("Extensions",
+                                                   title_prefix="Extension"),
             "absent title": folder_request(title=_ABSENT),
             "absent title prefix": folder_request(title_prefix=_ABSENT),
             "absent owner title prefix": folder_request(owner_title_prefix=_ABSENT),
             "null title": folder_request(title=None),
-            "title mismatch": folder_request(title="Extensions - Profile 1",
-                                             title_prefix="Extensions - Profile 1",
-                                             owner_title_prefix="Extensions - Profile 1"),
+            "other native title in one slot": folder_request(owner_title_prefix="Extensions"),
             "title_prefix differs": folder_request(title_prefix="Extension"),
             "owner prefix is only a prefix": folder_request(owner_title_prefix="Extension"),
-            "owner prefix longer": folder_request(owner_title_prefix="Extensions - Profile 1"),
+            "owner prefix is the plain title": folder_request(owner_title_prefix="Extensions"),
+            "owner prefix longer": folder_request(
+                owner_title_prefix=NATIVE_TITLE + " - 1 tab"),
             "title differs from prefix": folder_request(title="Extensions",
                                                         title_prefix="Extension"),
-            "case altered": folder_request(title="extensions", title_prefix="extensions",
-                                           owner_title_prefix="extensions"),
-            "suffixed": folder_request(title="Extensions - Profile 1 - Microsoft Edge",
-                                       title_prefix="Extensions - Profile 1 - Microsoft Edge",
-                                       owner_title_prefix="Extensions - Profile 1 - Microsoft Edge"),
-            "padded": folder_request(title=" Extensions", title_prefix=" Extensions",
-                                     owner_title_prefix=" Extensions"),
-            "non-ascii": folder_request(title="扩展", title_prefix="扩展",
-                                        owner_title_prefix="扩展"),
+            "case altered": folder_request(title=NATIVE_TITLE.lower(),
+                                           title_prefix=NATIVE_TITLE.lower(),
+                                           owner_title_prefix=NATIVE_TITLE.lower()),
+            "ascii near miss": title_request(
+                "Extensions - Profile 1 - Microsoft Edge"),
+            "other profile": title_request("Extensions - Profile 2 - Microsoft\u200b Edge"),
+            "moved zero-width space": title_request(
+                "Extensions - Profile 1 - Microsoft\u200bEdge"),
+            "padded": folder_request(title=" " + NATIVE_TITLE,
+                                     title_prefix=" " + NATIVE_TITLE,
+                                     owner_title_prefix=" " + NATIVE_TITLE),
+            "suffixed": folder_request(title=NATIVE_TITLE + " - 1 tab",
+                                       title_prefix=NATIVE_TITLE + " - 1 tab",
+                                       owner_title_prefix=NATIVE_TITLE + " - 1 tab"),
+            "non-ascii": title_request("扩展"),
             "non-string": folder_request(title=1, title_prefix=1, owner_title_prefix=1),
         }
         for name, request in cases.items():
