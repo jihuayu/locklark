@@ -2405,6 +2405,7 @@ CHECKOUT_SOURCE_FILES = (
     "scripts/browser_popup_vault_acceptance.mjs",
     "scripts/browser_popup_completion_acceptance.mjs",
     "scripts/browser_shared_clipboard_acceptance.mjs",
+    "scripts/browser_edge_install.mjs",
     "scripts/e2e_runner.py",
     "tests/e2e/harness.py",
     "tests/e2e/support.py",
