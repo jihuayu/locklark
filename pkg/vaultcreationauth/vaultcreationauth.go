@@ -1,17 +1,23 @@
 // Package vaultcreationauth defines the locklark.vault-creation/v1 identity
 // proof: the canonical codec and signing preimage for the proof a creator
-// device presents when asking a backend to create a new vault.
+// device presents when asking a backend to create a new vault. It also defines
+// CreationPlanDigest, the canonical digest of the creation plan a proof may
+// carry as its creation_plan_sha256.
 //
 // Encode, SigningBytes and Parse are a codec: they validate shapes and
 // canonical spelling and build the exact bytes a signer signs. Verify checks
 // one proof against a caller-supplied expected context, a registered Ed25519
 // identity key and the caller's clock.
 //
-// Verify verifies only the identity proof. It does not recompute the opaque
-// creation-plan digest (see below), check root authorization or content
-// signatures, persist or consume a challenge or enforce single use, and it
-// does no HTTP. A caller with a valid Verify result still has to run those
-// steps itself before approving a vault creation.
+// Verify verifies only the identity proof. It treats the expected plan digest
+// as opaque: it compares the proof's creation_plan_sha256 with the expected
+// one byte for byte and authenticates those bytes with the identity signature,
+// but it never recomputes the digest and never establishes what the digest
+// describes. CreationPlanDigest, defined in this package, is the only
+// derivation offered here, and Verify does not call it. Verify does not check
+// root authorization or content signatures, persist or consume a challenge or
+// enforce single use, and it does no HTTP. A caller with a valid Verify result
+// still has to run those steps itself before approving a vault creation.
 //
 // # Proof
 //
@@ -53,39 +59,65 @@
 // user_id, device_id and inside challenge id, nonce, deadline_unix_ms. The
 // context appears identically in the proof and in the preimage.
 //
-// # Plan digest is opaque
+// # Plan digest
 //
-// PlanDigest is an opaque 32-byte value carried by the caller. This package
-// only carries and compares it byte for byte: it never computes it, and the
-// signature over the context authenticates only its bytes, not what they
-// describe.
+// Context.PlanDigest (creation_plan_sha256) is a 32-byte value. Verify treats
+// it as opaque: it compares it with the expected digest byte for byte and, as
+// part of the signed context, the identity signature authenticates those
+// bytes. That says the identity signed a context naming those bytes; it says
+// nothing about what the bytes describe. Verify never recomputes them from a
+// plan.
 //
-// A caller approves a vault creation only after independently deriving its
-// own expected plan digest, passing it to Verify as expected.PlanDigest (which
-// requires it to equal the proof's) and deriving the rest of expected from
-// its own database, session and immutable challenge state. That derivation
-// must cover, at minimum:
+// CreationPlanDigest computes the canonical digest of a CreationPlan instead:
 //
-//   - the exact raw genesis bytes the plan would create, hashed as they are,
-//     not a re-serialized form;
-//   - the caller's pinned owner root;
-//   - the backend locator, slug and name the vault would be created under.
+//	SHA-256( CreationPlanDomain || 0x00 ||
+//	  u32be(len(GenesisBytes)) || GenesisBytes ||
+//	  u32be(len(VaultID)) || VaultID ||
+//	  u32be(len(OwnerRootKeyID)) || OwnerRootKeyID ||
+//	  OwnerRootPublicKey[32] ||
+//	  PolicySeq[8] ||              (uint64, big-endian)
+//	  PolicyDigest[32] ||
+//	  u32be(len(BackendLocator)) || BackendLocator ||
+//	  u32be(len(Slug)) || Slug ||
+//	  u32be(len(Name)) || Name )
 //
-// No value produced by this package authenticates the plan, the genesis
-// bytes, the root pin or the backend target.
+// where CreationPlanDomain is "locklark.vault-creation-plan/v1". GenesisBytes
+// is hashed as the exact bytes supplied, never parsed or re-encoded. Nothing
+// is concatenated into a full preimage: the hash is fed field by field. Only
+// fresh vaults are digested: PolicySeq must be zero.
+//
+// A caller approves a vault creation only after deriving its own expected
+// plan digest, passing it to Verify as expected.PlanDigest (which requires it
+// to equal the proof's) and deriving the rest of expected from its own
+// database, session and immutable challenge state. The future server must
+// derive the raw genesis bytes, the complete root pin, the backend locator
+// and the slug and name from its own durable database, session, backend
+// configuration and immutable creation plan, never from the proof. The proof
+// only carries the digest, and it carries nothing the digest covers, so a
+// proof value is never a source for any plan field.
+//
+// The digest binds the exact bytes of one CreationPlan; it does not prove
+// that BackendLocator resolves to actual storage, that the genesis bytes are a
+// well-formed vault file, or that the caller approved creating the vault.
 package vaultcreationauth
 
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"regexp"
 	"strconv"
+	"strings"
+	"unicode"
 	"unicode/utf8"
+
+	"github.com/jihuayu/locklark/pkg/vaultfile"
 )
 
 // Wire constants fixed by this schema. They are part of the protocol.
@@ -146,8 +178,10 @@ type Challenge struct {
 	DeadlineUnixMS int64    `json:"deadline_unix_ms"`
 }
 
-// Context is the signed part of a proof. PlanDigest is opaque: this package
-// neither computes nor authenticates it (see the package comment).
+// Context is the signed part of a proof. Verify treats PlanDigest as opaque:
+// it compares and signature-authenticates its bytes but does not establish
+// what they describe. CreationPlanDigest is the canonical derivation of a
+// plan into such a digest; Verify does not call it (see the package comment).
 type Context struct {
 	Scope      Scope     `json:"scope"`
 	Challenge  Challenge `json:"challenge"`
@@ -208,6 +242,16 @@ var (
 	// ErrInvalidIdentityKey reports a registered identity key that is not a
 	// 32-byte Ed25519 public key.
 	ErrInvalidIdentityKey = errors.New("vaultcreationauth: invalid identity key")
+
+	// ErrInvalidCreationPlan reports a creation plan that CreationPlanDigest
+	// refuses: a genesis outside 1..vaultfile.MaxFileBytes; a root pin
+	// whose VaultID or OwnerRootKeyID is not a vaultfile ID of 1..64 bytes,
+	// whose OwnerRootPublicKey is not exactly 32 bytes, whose PolicySeq is
+	// not zero or whose PolicyDigest is not exactly 32 bytes; a
+	// BackendLocator outside 1..MaxBackendLocatorBytes bytes, not UTF-8 or
+	// holding a Unicode control character; a Slug outside its ASCII
+	// grammar; or a Name outside the service directory-name rule.
+	ErrInvalidCreationPlan = errors.New("vaultcreationauth: invalid creation plan")
 )
 
 // SigningBytes returns the exact signing preimage of c:
@@ -308,10 +352,13 @@ func Parse(data []byte) (Proof, error) {
 //
 // expected must be built by the caller from its own database, session and
 // immutable challenge state, never from proof: it carries the exact scope,
-// challenge ID, nonce and deadline and creation plan digest, including the
-// one the caller derived in place of the opaque plan digest. A proof with a
-// different context in any field is refused, but checking a proof against a
-// context copied from that same proof proves nothing.
+// challenge ID, nonce and deadline and the creation plan digest the caller
+// derived itself. Verify does not recompute the plan digest; CreationPlanDigest
+// is this package's derivation from a CreationPlan, and the plan fields behind
+// the expected digest must come from the caller's own durable sources, not
+// from proof. A proof with a different context in any field is refused, but
+// checking a proof against a context copied from that same proof proves
+// nothing.
 //
 // registeredIdentity is the Ed25519 public key registered for
 // expected.Scope.DeviceID; it must be exactly 32 bytes. proof.Signature must
@@ -322,7 +369,7 @@ func Parse(data []byte) (Proof, error) {
 // nowUnixMS is the caller's current Unix time in milliseconds; a challenge is
 // expired when now >= expected.Challenge.DeadlineUnixMS (ErrChallengeExpired).
 //
-// Verify verifies only the identity proof. It does not recompute the opaque
+// Verify verifies only the identity proof. It does not recompute the
 // creation-plan digest, check root authorization or content signatures,
 // persist or consume the challenge or enforce single use, and does no HTTP.
 func Verify(proof Proof, expected Context, registeredIdentity ed25519.PublicKey, nowUnixMS int64) error {
@@ -349,6 +396,188 @@ func Verify(proof Proof, expected Context, registeredIdentity ed25519.PublicKey,
 		return ErrInvalidSignature
 	}
 	return nil
+}
+
+// Creation plan digest constants and budgets. They are part of the schema.
+const (
+	// CreationPlanDomain is the domain bytes CreationPlanDigest hashes before
+	// the plan fields. The 0x00 that follows it in the preimage is not a part
+	// of this string.
+	CreationPlanDomain = "locklark.vault-creation-plan/v1"
+
+	// MaxCreationPlanIDBytes is the maximum length in bytes of
+	// RootPin.VaultID and RootPin.OwnerRootKeyID. It is the public
+	// vaultfile identifier bound.
+	MaxCreationPlanIDBytes = 64
+	// MaxBackendLocatorBytes is the maximum length in bytes of
+	// CreationPlan.BackendLocator.
+	MaxBackendLocatorBytes = 4096
+	// MaxCreationPlanSlugBytes is the maximum length in bytes of
+	// CreationPlan.Slug.
+	MaxCreationPlanSlugBytes = 63
+	// MaxCreationPlanNameBytes is the maximum length in bytes of
+	// CreationPlan.Name.
+	MaxCreationPlanNameBytes = 256
+)
+
+// CreationPlan is the plan of one fresh vault creation, as CreationPlanDigest
+// binds it.
+//
+// GenesisBytes are the exact raw genesis bytes the vault would be created
+// with, at most vaultfile.MaxFileBytes; they are hashed as supplied and never
+// parsed or re-encoded here. RootPin is the complete vaultfile.PolicyCheckpoint
+// of a fresh vault: its PolicySeq must be zero and every one of its other
+// fields is bound. BackendLocator is an opaque, non-secret canonical
+// identifier of the backend the vault would be created on; the future caller
+// must derive it independently from its server backend configuration, and
+// this package neither resolves it nor validates that it maps to actual
+// storage. Slug and Name are the vault's directory values, bound exactly, not
+// trimmed, folded or normalized.
+type CreationPlan struct {
+	GenesisBytes   []byte
+	RootPin        vaultfile.PolicyCheckpoint
+	BackendLocator string
+	Slug           string
+	Name           string
+}
+
+// CreationPlanDigest returns the canonical SHA-256 digest of plan (see the
+// package comment for the exact preimage). It validates every field before
+// writing anything to the hash, then feeds the domain and each field, with its
+// fixed-length encoding, to the hash in small pieces: no full preimage is ever
+// built, so the genesis's vaultfile.MaxFileBytes budget costs no extra memory.
+//
+// The digest binds the exact bytes of plan. It does not prove that
+// BackendLocator resolves to any storage, that the genesis bytes are a valid
+// vault file, or that the plan came from the caller's own sources.
+//
+// A plan with any invalid field returns the zero digest and exactly
+// ErrInvalidCreationPlan.
+func CreationPlanDigest(plan CreationPlan) ([32]byte, error) {
+	if err := validCreationPlan(plan); err != nil {
+		return [32]byte{}, err
+	}
+	h := sha256.New()
+	h.Write([]byte(CreationPlanDomain))
+	h.Write([]byte{DomainSeparator})
+	creationPlanHash(h, plan.GenesisBytes)
+	creationPlanHash(h, []byte(plan.RootPin.VaultID))
+	creationPlanHash(h, []byte(plan.RootPin.OwnerRootKeyID))
+	h.Write(plan.RootPin.OwnerRootPublicKey)
+	var seq [8]byte
+	binary.BigEndian.PutUint64(seq[:], plan.RootPin.PolicySeq)
+	h.Write(seq[:])
+	h.Write(plan.RootPin.PolicyDigest)
+	creationPlanHash(h, []byte(plan.BackendLocator))
+	creationPlanHash(h, []byte(plan.Slug))
+	creationPlanHash(h, []byte(plan.Name))
+	var out [32]byte
+	h.Sum(out[:0])
+	return out, nil
+}
+
+// creationPlanHash feeds b to h behind its uint32 big-endian byte length. b is
+// already bounded by validCreationPlan, so the length fits uint32.
+func creationPlanHash(h io.Writer, b []byte) {
+	var n [4]byte
+	binary.BigEndian.PutUint32(n[:], uint32(len(b)))
+	h.Write(n[:])
+	h.Write(b)
+}
+
+// validCreationPlan checks every field of plan without touching a hash.
+func validCreationPlan(plan CreationPlan) error {
+	if len(plan.GenesisBytes) == 0 || len(plan.GenesisBytes) > vaultfile.MaxFileBytes {
+		return ErrInvalidCreationPlan
+	}
+	pin := plan.RootPin
+	if !validCreationPlanID(pin.VaultID) || !validCreationPlanID(pin.OwnerRootKeyID) {
+		return ErrInvalidCreationPlan
+	}
+	if len(pin.OwnerRootPublicKey) != ed25519.PublicKeySize ||
+		pin.PolicySeq != 0 ||
+		len(pin.PolicyDigest) != sha256.Size {
+		return ErrInvalidCreationPlan
+	}
+	if !validBackendLocator(plan.BackendLocator) || !validCreationPlanSlug(plan.Slug) ||
+		!validCreationPlanName(plan.Name) {
+		return ErrInvalidCreationPlan
+	}
+	return nil
+}
+
+// validCreationPlanID applies the public vaultfile identifier rule: 1 to
+// MaxCreationPlanIDBytes bytes of lowercase ASCII a-z, 0-9, '-', '_', '.'
+// and ':'.
+func validCreationPlanID(s string) bool {
+	if len(s) == 0 || len(s) > MaxCreationPlanIDBytes {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == ':' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// validBackendLocator reports whether s is a non-empty locator of at most
+// MaxBackendLocatorBytes bytes of UTF-8 without Unicode control characters
+// (which include NUL, C1 controls and the bidi and other format controls).
+// Nothing is trimmed, case-folded or normalized.
+func validBackendLocator(s string) bool {
+	if len(s) == 0 || len(s) > MaxBackendLocatorBytes || !utf8.ValidString(s) {
+		return false
+	}
+	return !strings.ContainsFunc(s, unicode.IsControl)
+}
+
+// validCreationPlanSlug reports whether s is exactly [a-z0-9][a-z0-9-]{0,62}
+// ASCII: it has no normalization, so uppercase, '_', '.', ':' or any other
+// byte is refused.
+func validCreationPlanSlug(s string) bool {
+	if len(s) == 0 || len(s) > MaxCreationPlanSlugBytes {
+		return false
+	}
+	if c := s[0]; (c < 'a' || c > 'z') && (c < '0' || c > '9') {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// validCreationPlanName mirrors, without importing any internal server
+// package, the tenantauth.validDirectoryName rule shared by directory and
+// vault names (fixed at locklark-server commit
+// 1a5167bbc4ec53334817b289f35eb54f84fb1d96): non-empty, at most
+// MaxCreationPlanNameBytes bytes of UTF-8, no control character, no Unicode Zl
+// or Zp, and no Cf except U+200C ZWNJ and U+200D ZWJ, with at least one rune
+// that unicode.IsSpace reports false. Ordinary spaces, inner or outer, are
+// allowed when some visible rune exists. Callers must keep this rule aligned
+// with the service validator: if the service changes it, this copy is stale.
+func validCreationPlanName(s string) bool {
+	if len(s) == 0 || len(s) > MaxCreationPlanNameBytes || !utf8.ValidString(s) {
+		return false
+	}
+	hasVisible := false
+	for _, r := range s {
+		if unicode.IsControl(r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) ||
+			(unicode.Is(unicode.Cf, r) && r != '\u200c' && r != '\u200d') {
+			return false
+		}
+		if !unicode.IsSpace(r) {
+			hasVisible = true
+		}
+	}
+	return hasVisible
 }
 
 // wireProof mirrors the schema with every binary member carried as its
