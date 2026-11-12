@@ -36,11 +36,34 @@ func TestOnedriveParse(t *testing.T) {
 		"client secret":     append(login("offline_access"), "--client-secret", "x"),
 		"no offline_access": login("Files.Read"),
 		"empty value":       {"status", "--client-id=", "--tenant", testTenant},
+
+		"refresh missing scopes": reg("refresh"),
+		"refresh empty list":     append(reg("refresh"), "--scopes", " , "),
+		"refresh profile flag":   append(append(reg("refresh"), "--scopes", "Files.Read"), "--profile", testLabel),
+		"refresh label position": append(append(reg("refresh"), "--scopes", "Files.Read"), testLabel),
+		"refresh client secret":  append(append(reg("refresh"), "--scopes", "Files.Read"), "--client-secret", "x"),
 	} {
 		if _, err := parseOnedrive(args); err != personalUsage {
 			t.Fatalf("%s: parseOnedrive(%q) = %v, want personalUsage", name, args, err)
 		}
 	}
+	// Refresh scopes are explicit and required but offline_access is neither
+	// required nor added: the parsed list is exactly what the caller gave.
+	refreshWant := onedriveRequest{
+		action: "refresh",
+		config: onedriveauth.AuthorizeConfig{
+			ClientID: testClientID,
+			Tenant:   testTenant,
+			Scopes:   []string{"Files.Read", "Files.ReadWrite"},
+		},
+	}
+	refreshArgs := []string{"refresh", "--tenant=" + testTenant, "--scopes=Files.Read\tFiles.ReadWrite", "--client-id=" + testClientID}
+	if got, err := parseOnedrive(refreshArgs); err != nil || !reflect.DeepEqual(got, refreshWant) {
+		t.Fatalf("refresh parse = (%+v, %v), want %+v", got, err, refreshWant)
+	} else if hasScope(got.config.Scopes, "offline_access") {
+		t.Fatalf("refresh parse added offline_access: %q", got.config.Scopes)
+	}
+
 	// A tenant alias is not special-cased: any tenant-shaped value is kept
 	// literally, exactly as validTenant returned it.
 	for _, tenant := range []string{"organizations", "common", "consumers"} {
@@ -68,7 +91,7 @@ func TestOnedriveParse(t *testing.T) {
 
 func TestOnedriveHelp(t *testing.T) {
 	texts := map[string]string{"main": onedriveHelpText}
-	for _, action := range []string{"login", "status", "logout"} {
+	for _, action := range []string{"login", "refresh", "status", "logout"} {
 		var out bytes.Buffer
 		if err := runPersonalOnedrive([]string{action, "--help"}, &out); err != nil {
 			t.Fatalf("%s --help: %v", action, err)
@@ -91,6 +114,20 @@ func TestOnedriveHelp(t *testing.T) {
 		if !strings.Contains(text, "no default") {
 			t.Fatalf("%s help omits the no-default statement", name)
 		}
+	}
+	// Refresh help requires the explicit scopes but never requires
+	// offline_access, and both top-level usage texts list the new action.
+	if !strings.Contains(texts["refresh"], "--scopes SCOPE_LIST") {
+		t.Fatalf("refresh help omits the required scopes flag: %q", texts["refresh"])
+	}
+	if strings.Contains(texts["refresh"], "must include offline_access") {
+		t.Fatalf("refresh help requires offline_access: %q", texts["refresh"])
+	}
+	if !strings.Contains(personalHelpText, "onedrive login|refresh") {
+		t.Fatalf("personal usage omits refresh: %q", personalHelpText)
+	}
+	if !strings.Contains(usage, "personal onedrive login|refresh") {
+		t.Fatalf("top-level usage omits refresh: %q", usage)
 	}
 	// The identity caveat is a sentence of the top-level command help and may
 	// be wrapped across lines there, so compare it with white space collapsed.
@@ -154,6 +191,43 @@ func withOnedriveSeams(t *testing.T, store onedriveStore, labels ...string) {
 	newOnedriveStore = func() (onedriveStore, error) { return store, nil }
 }
 
+// fakeOnedriveRefreshSource is the injected refresh source of the CLI tests. It
+// records the one AccessToken call and Close calls; it never touches the network
+// or the credential store.
+type fakeOnedriveRefreshSource struct {
+	token  string
+	err    error
+	calls  int
+	closes int
+}
+
+func (s *fakeOnedriveRefreshSource) AccessToken(context.Context) (string, error) {
+	s.calls++
+	return s.token, s.err
+}
+
+func (s *fakeOnedriveRefreshSource) Close() { s.closes++ }
+
+// withOnedriveRefreshSeams serves one hidden label and one fake source through
+// the production factory seam, recording the config the CLI hands the factory.
+// t.Cleanup restores both seams.
+func withOnedriveRefreshSeams(t *testing.T, src *fakeOnedriveRefreshSource, seen *onedriveauth.RefreshSourceConfig) {
+	t.Helper()
+	prompt, factory := promptProfileLabel, newOnedriveRefreshSource
+	t.Cleanup(func() { promptProfileLabel, newOnedriveRefreshSource = prompt, factory })
+	promptProfileLabel = func(context.Context) ([]byte, error) { return []byte(testLabel), nil }
+	newOnedriveRefreshSource = func(cfg onedriveauth.RefreshSourceConfig) (onedriveRefreshSource, error) {
+		if seen != nil {
+			// The command clears its hidden label after the factory returns,
+			// so record the bytes as the production factory would receive them.
+			*seen = cfg
+			seen.Profile = append([]byte(nil), cfg.Profile...)
+			seen.Scopes = append([]string(nil), cfg.Scopes...)
+		}
+		return src, nil
+	}
+}
+
 func mustParseOnedrive(t *testing.T, action string) []string {
 	t.Helper()
 	args := []string{action, "--client-id", testClientID, "--tenant", testTenant}
@@ -182,6 +256,159 @@ func TestOnedriveStatusLogoutReuseCompositeKey(t *testing.T) {
 	}
 	if !reflect.DeepEqual(store.keys, []string{want, want, want}) || len(store.items) != 0 || store.deletes != 1 {
 		t.Fatalf("store keys = %q, items = %d, deletes = %d", store.keys, len(store.items), store.deletes)
+	}
+}
+
+func TestOnedriveRefreshWiringAndReceipt(t *testing.T) {
+	const accessToken = "canary-access-token"
+	src := &fakeOnedriveRefreshSource{token: accessToken}
+	var seen onedriveauth.RefreshSourceConfig
+	withOnedriveRefreshSeams(t, src, &seen)
+	args := []string{"refresh", "--client-id", testClientID, "--tenant", testTenant, "--scopes", "Files.Read Files.ReadWrite"}
+	var out bytes.Buffer
+	if err := runPersonalOnedrive(args, &out); err != nil {
+		t.Fatalf("refresh = %v", err)
+	}
+	wantScopes := []string{"Files.Read", "Files.ReadWrite"}
+	if seen.ClientID != testClientID || seen.Tenant != testTenant || string(seen.Profile) != testLabel {
+		t.Fatalf("factory config = (%q, %q, %q), want (%q, %q, %q)", seen.ClientID, seen.Tenant, string(seen.Profile), testClientID, testTenant, testLabel)
+	}
+	if !reflect.DeepEqual(seen.Scopes, wantScopes) {
+		t.Fatalf("factory scopes = %q, want %q", seen.Scopes, wantScopes)
+	}
+	if hasScope(seen.Scopes, "offline_access") {
+		t.Fatalf("factory scopes added offline_access: %q", seen.Scopes)
+	}
+	if seen.Timeout != 0 {
+		t.Fatalf("factory timeout = %v, want the zero value", seen.Timeout)
+	}
+	if src.calls != 1 || src.closes != 1 {
+		t.Fatalf("source calls = %d, closes = %d, want 1 and 1", src.calls, src.closes)
+	}
+	if got := out.String(); got != onedriveRefreshDone {
+		t.Fatalf("refresh output = %q, want %q", got, onedriveRefreshDone)
+	}
+	for _, secret := range []string{accessToken, testLabel, testClientID, testTenant, "Files.Read", "Files.ReadWrite", "offline_access", "verified", "Graph"} {
+		if strings.Contains(out.String(), secret) {
+			t.Fatalf("refresh output leaks %q: %q", secret, out.String())
+		}
+	}
+}
+
+func TestOnedriveRefreshErrorMappings(t *testing.T) {
+	const leak = "canary-provider-body canary-access-token canary-refresh-token canary-label canary-client-id canary.example Files.Read https://login.example/token"
+	cases := []struct {
+		name     string
+		err      error
+		want     error
+		retained error
+		not      []error
+	}{
+		{
+			name:     "pre-send cancellation",
+			err:      errors.Join(onedriveauth.ErrRefreshCancelled, errors.New(leak)),
+			want:     errOnedriveRefreshPre,
+			retained: onedriveauth.ErrRefreshCancelled,
+			not:      []error{errOnedriveRefreshUnknown, errOnedriveRefreshStoreUnknown},
+		},
+		{
+			name:     "post-send outcome unknown",
+			err:      errors.Join(onedriveauth.ErrRefreshOutcomeUnknown, errors.New(leak)),
+			want:     errOnedriveRefreshUnknown,
+			retained: onedriveauth.ErrRefreshOutcomeUnknown,
+			not:      []error{errOnedriveRefreshPre, errOnedriveRefreshStoreUnknown},
+		},
+		{
+			name: "caller cancellation after starting",
+			err:  context.Canceled,
+			want: errOnedriveRefreshUnknown,
+			not:  []error{errOnedriveRefreshPre, errOnedriveRefreshStoreUnknown},
+		},
+		{
+			name:     "validated replacement save unknown",
+			err:      errors.Join(onedriveauth.ErrSourceStoreUnknown, errors.New(leak)),
+			want:     errOnedriveRefreshStoreUnknown,
+			retained: onedriveauth.ErrSourceStoreUnknown,
+			not:      []error{errOnedriveRefreshPre, errOnedriveRefreshUnknown},
+		},
+		{
+			name:     "provider status",
+			err:      errors.Join(onedriveauth.ErrRefreshStatus, errors.New(leak)),
+			want:     errOnedriveRefreshFailed,
+			retained: onedriveauth.ErrRefreshStatus,
+			not:      []error{errOnedriveRefreshPre, errOnedriveRefreshUnknown, errOnedriveRefreshStoreUnknown},
+		},
+		{
+			name: "arbitrary source failure",
+			err:  errors.New(leak),
+			want: errOnedriveRefreshFailed,
+			not:  []error{errOnedriveRefreshPre, errOnedriveRefreshUnknown, errOnedriveRefreshStoreUnknown},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := &fakeOnedriveRefreshSource{err: tc.err}
+			withOnedriveRefreshSeams(t, src, nil)
+			args := []string{"refresh", "--client-id", testClientID, "--tenant", testTenant, "--scopes", "Files.Read"}
+			var out bytes.Buffer
+			err := runPersonalOnedrive(args, &out)
+			if err == nil || !errors.Is(err, tc.want) {
+				t.Fatalf("refresh with %v = %v, want %v", tc.err, err, tc.want)
+			}
+			if tc.retained != nil && !errors.Is(err, tc.retained) {
+				t.Fatalf("refresh with %v = %v, does not retain %v", tc.err, err, tc.retained)
+			}
+			for _, other := range tc.not {
+				if errors.Is(err, other) {
+					t.Fatalf("refresh with %v = %v, unexpectedly reports %v", tc.err, err, other)
+				}
+			}
+			for _, secret := range []string{"canary-provider-body", "canary-access-token", "canary-refresh-token", "canary-label", "canary-client-id", "canary.example", "Files.Read", "https://login.example/token"} {
+				if strings.Contains(err.Error(), secret) {
+					t.Fatalf("refresh with %v error leaks %q: %q", tc.err, secret, err.Error())
+				}
+			}
+			if out.Len() != 0 {
+				t.Fatalf("refresh output = %q, want empty", out.String())
+			}
+			if src.calls != 1 || src.closes != 1 {
+				t.Fatalf("source calls = %d, closes = %d, want 1 and 1", src.calls, src.closes)
+			}
+		})
+	}
+}
+
+func TestOnedriveRefreshCancelledBeforeStart(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	old := newOnedriveRefreshSource
+	t.Cleanup(func() { newOnedriveRefreshSource = old })
+	called := false
+	newOnedriveRefreshSource = func(onedriveauth.RefreshSourceConfig) (onedriveRefreshSource, error) {
+		called = true
+		return &fakeOnedriveRefreshSource{}, nil
+	}
+	receipt, err := onedriveRefresh(ctx, onedriveauth.AuthorizeConfig{
+		ClientID: testClientID,
+		Tenant:   testTenant,
+		Scopes:   []string{"Files.Read"},
+	}, []byte(testLabel))
+	if receipt != "" {
+		t.Fatalf("cancelled refresh receipt = %q, want empty", receipt)
+	}
+	if !errors.Is(err, errOnedriveRefreshPre) || !errors.Is(err, onedriveauth.ErrRefreshCancelled) {
+		t.Fatalf("cancelled refresh = %v, want %v and %v", err, errOnedriveRefreshPre, onedriveauth.ErrRefreshCancelled)
+	}
+	if errors.Is(err, errOnedriveRefreshUnknown) || errors.Is(err, errOnedriveRefreshStoreUnknown) {
+		t.Fatalf("pre-send cancellation reports an unknown outcome: %v", err)
+	}
+	if called {
+		t.Fatal("a refresh cancelled before start invoked the source factory")
+	}
+	for _, secret := range []string{testLabel, testClientID, testTenant, "Files.Read"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("pre-send cancellation error leaks %q: %q", secret, err.Error())
+		}
 	}
 }
 
