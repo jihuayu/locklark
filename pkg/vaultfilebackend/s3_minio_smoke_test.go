@@ -163,11 +163,17 @@ func (e minioSmokeEnv) sdkClient() *s3.Client {
 // constructor with the same explicit credentials and CA pool.
 func (e minioSmokeEnv) newBackend(t *testing.T, bucket string) Backend {
 	t.Helper()
+	return e.newBackendAt(t, bucket, "smoke")
+}
+
+// newBackendAt builds a bridge backend over one bucket and prefix.
+func (e minioSmokeEnv) newBackendAt(t *testing.T, bucket, prefix string) Backend {
+	t.Helper()
 	b, err := NewS3(S3Config{
 		Endpoint:     e.endpoint,
 		Region:       minioSmokeRegion,
 		Bucket:       bucket,
-		Prefix:       "smoke",
+		Prefix:       prefix,
 		Credentials:  e.credentials,
 		UsePathStyle: true,
 		HTTPClient:   e.httpClient,
@@ -326,4 +332,19 @@ func TestS3MinioTLSSmoke(t *testing.T) {
 		t.Fatalf("final version: bytes %q revision %q, want %q / %q",
 			final.Bytes, final.Revision, won.val, afterRace.Revision)
 	}
+}
+
+// TestS3MinioTLSConformance runs the shared contract suite against the real
+// local MinIO over TLS. open and reopen each build a fresh NewS3 instance over
+// the same bucket and prefix with the explicit static credentials and CA
+// transport, so the suite's durable reopen cases exercise real stored state.
+func TestS3MinioTLSConformance(t *testing.T) {
+	env := requireMinioSmoke(t)
+	bucket := provisionMinioSmokeBucket(t, env)
+	const prefix = "conformance-smoke"
+	RunConformance(
+		t,
+		func(t *testing.T) Backend { return env.newBackendAt(t, bucket, prefix) },
+		func(t *testing.T) Backend { return env.newBackendAt(t, bucket, prefix) },
+	)
 }
