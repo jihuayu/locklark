@@ -18,18 +18,13 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
-      - name: Build CLI once before primary artifacts
+      - name: Build CLI and primary artifacts once
         timeout-minutes: 10
         run: |
           bin="$RUNNER_TEMP/locklark-bin"
           mkdir -p "$bin"
           go build -trimpath -o "$bin/locklark" ./cmd/locklark
-      - name: Smoke test real CLI before acceptance
-        run: python3 scripts/cli_smoke.py --cli "$RUNNER_TEMP/locklark-bin/locklark"
-      - name: Build remaining primary artifacts once
-        timeout-minutes: 10
-        run: |
-          bin="$RUNNER_TEMP/locklark-bin"
+          python3 scripts/cli_smoke.py --cli "$bin/locklark"
           go build -trimpath -o "$bin/locklark-desktop" ./cmd/locklark-desktop
           go build -trimpath -o "$bin/locklark-browser-chromium" ./cmd/locklark-browser-chromium
           go build -trimpath -o "$bin/locklark-browser-firefox" ./cmd/locklark-browser-firefox
