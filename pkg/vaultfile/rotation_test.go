@@ -764,12 +764,31 @@ func TestRotateAuthenticatedFileFreshRandomVUK(t *testing.T) {
 // binary the encoder's cleanup removes from db.Content.InnerHeader.Binaries
 // before the release runs is still cleared through the reference captured
 // before the seal, and so is a binary the InnerHeader still carries.
+//
+// payloadFixtureDB stores payloadAttachmentBytes itself, so the test first
+// replaces the content of every binary it carries with a private copy. The
+// release clears those buffers in place, and it must never reach the global
+// fixture canary that every other payload fixture shares.
 func TestOwnInnerHeaderBinariesClearsRemovedBinary(t *testing.T) {
 	db := payloadFixtureDB(t)
 	entry := &db.Content.Root.Groups[0].Entries[0]
 	referenced := db.FindBinary(entry.Binaries[0].Value.ID)
 	if referenced == nil || len(referenced.Content) == 0 {
 		t.Fatalf("fixture has no referenced attachment: %v", referenced)
+	}
+	if !bytes.Equal(referenced.Content, payloadAttachmentBytes) {
+		t.Fatalf("fixture attachment content = %x, want the shared canary", referenced.Content)
+	}
+	snapshot := bytes.Clone(payloadAttachmentBytes)
+	// Detach every InnerHeader binary, including the referenced attachment,
+	// from the global canary: clearing this test's database must not zero
+	// bytes that other payload fixtures share.
+	for i := range db.Content.InnerHeader.Binaries {
+		db.Content.InnerHeader.Binaries[i].Content = bytes.Clone(db.Content.InnerHeader.Binaries[i].Content)
+	}
+	referenced = db.FindBinary(entry.Binaries[0].Value.ID)
+	if referenced == nil || &referenced.Content[0] == &payloadAttachmentBytes[0] {
+		t.Fatal("the referenced attachment still shares the global fixture canary")
 	}
 	// An unreferenced binary the encoder drops before the release.
 	unreferenced := payloadFixtureRawBinary(db, []byte("unreferenced inner header secret"), 0)
@@ -805,6 +824,11 @@ func TestOwnInnerHeaderBinariesClearsRemovedBinary(t *testing.T) {
 	// reached the same underlying arrays.
 	if !allZero(db.Content.InnerHeader.Binaries[0].Content) {
 		t.Fatalf("InnerHeader binary content = %x, want zero after release", db.Content.InnerHeader.Binaries[0].Content)
+	}
+	// The cleanup is owned by the released database only: the shared global
+	// fixture canary still equals its pre-test snapshot.
+	if !bytes.Equal(payloadAttachmentBytes, snapshot) {
+		t.Fatalf("global fixture canary = %x after release, want its pre-test snapshot %x", payloadAttachmentBytes, snapshot)
 	}
 }
 

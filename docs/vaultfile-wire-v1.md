@@ -1269,8 +1269,11 @@ generated, wrapped or encrypted before every check in steps 1 to 5 passes.
    nextDraft.signed_policy_proofs, checkpoint)` authenticates the next chain
    under the same pin, so it must be root-signed or an authorized delegated
    `InviteReaders` transition from the checkpoint (see [Admin-delegated
-   InviteReaders](#admin-delegated-invitereaders-transitions)). The draft is
-   not structurally validated as a sealed file: it has exactly the builder
+   InviteReaders](#admin-delegated-invitereaders-transitions)). A next header
+   whose `vault_id` differs from `checkpoint.VaultID` is rejected here as
+   `policy_checkpoint_failed` at the empty path, before the explicit vault
+   equality check in step 4 is reached. The draft is not structurally
+   validated as a sealed file: it has exactly the builder
    contract of the `File` the seal takes, and its carried `vuk_device_slots`,
    `cek_slot`, `kdbx_ciphertext`, `revision_id` and `content_signature` are
    allowed to be nil or stale and are ignored. In the authenticated next policy the
@@ -1281,8 +1284,10 @@ generated, wrapped or encrypted before every check in steps 1 to 5 passes.
    `age_encryption_key` must equal `sourceIdentity.Recipient()`'s string
    (`invalid_value` at `device_id`).
 4. **Exact immediate continuation.** Against the authenticated old header the
-   draft must carry the same `vault_id` (`invalid_value` at `vault_id`),
-   `key_epoch` exactly old + 1 and `content_seq` exactly old + 1, with no
+   draft must carry the same `vault_id` (`invalid_value` at `vault_id`; a
+   draft of another vault has already failed in step 3 as
+   `policy_checkpoint_failed` at the empty path), `key_epoch` exactly old + 1
+   and `content_seq` exactly old + 1, with no
    64-bit wrap (`key_epoch`, `content_seq`), `prev_digest` equal to the raw 32
    bytes of `FileDigest(old)` (`prev_digest`), and a different `op_id`
    (`op_id`). A missing, stale, skipped or wrapped transition is

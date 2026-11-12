@@ -115,7 +115,10 @@ func ownInnerHeaderBinaries(db *kdbx.Database) func() {
 //  3. Next policy. verifyPolicyChain(nextDraft.Header, nextDraft.SignedPolicyProofs,
 //     checkpoint) authenticates the next chain against the same caller pin;
 //     the draft is not structurally validated as a sealed file, because it is
-//     a builder value. Then, in the authenticated next policy:
+//     a builder value. It also rejects a next header whose VaultID differs
+//     from the checkpoint: that is CodePolicyCheckpointFailed at "", and it is
+//     returned here, before the explicit vault equality guard in step 4 ever
+//     runs. Then, in the authenticated next policy:
 //     the author device must be a writer, admin or owner whose Ed25519 content
 //     signing key passes validatedAuthorKey with authorPrivateKey (otherwise
 //     CodeAuthorSigningKeyMismatch at "content_signature"); the source device
@@ -124,9 +127,12 @@ func ownInnerHeaderBinaries(db *kdbx.Database) func() {
 //     sourceIdentity.Recipient().String() (otherwise invalid_value at
 //     "device_id"). The new VUK is returned only to a device that remains
 //     authorized, so a device this rotation removes cannot receive it.
-//  4. Continuation. errNew.Header.VaultID must equal the old vault id
-//     ("vault_id"), its KeyEpoch must be exactly old + 1 and its ContentSeq
-//     exactly old + 1, with no 64-bit wrap ("key_epoch", "content_seq"); its
+//  4. Continuation. The next header's VaultID must equal the old vault id
+//     ("vault_id"); that guard is reached only after step 3, so a next draft
+//     of another vault has already failed in step 3 as
+//     CodePolicyCheckpointFailed at "". Its KeyEpoch must be exactly old + 1
+//     and its ContentSeq exactly old + 1, with no 64-bit wrap ("key_epoch",
+//     "content_seq"); its
 //     PrevDigest must equal the raw 32 FileDigest bytes of the authenticated
 //     old file ("prev_digest"); and its OpID must differ from the old op id
 //     ("op_id"). Every failure is invalid_value at the naming path. This is an
