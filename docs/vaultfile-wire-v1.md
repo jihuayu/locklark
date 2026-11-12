@@ -1227,12 +1227,101 @@ learned. If that same VUK is reused, the device can
 still use the low-level [`OpenCEK`](#cek-sealing-and-opening) with the new
 `cek_slot` to recover the new per-snapshot CEK, and then
 [`OpenKDBXPayload`](#kdbx-payload-sealing-and-opening) to decrypt the new
-payload. Cryptographic reader revocation requires a separate rotation to a
+payload. Cryptographic reader withdrawal requires a separate rotation to a
 fresh VUK, together with a protocol epoch advance, so that new envelopes and
-CEK slots are bound to a key the removed device never held. This API does not
-implement that rotation: after a device removal it produces a file that binds
-the current policy, not one from which the removed device's knowledge of the
-VUK has been cryptographically withdrawn.
+CEK slots are bound to a key the removed device never held.
+`SealAuthenticatedFile` does not implement that rotation: after a device
+removal it produces a file that binds the current policy, not one from which
+the removed device's knowledge of the VUK has been cryptographically
+withdrawn. [`RotateAuthenticatedFile`](#caller-pinned-epoch-rotation) is the
+separate caller-pinned rotation that produces such a successor from one
+complete old authenticated file, without recalling an old VUK a device has
+already learned.
+
+## Caller-pinned epoch rotation
+
+```
+RotateAuthenticatedFile(oldEncoded []byte, checkpoint *PolicyCheckpoint, sourceDeviceID string, sourceIdentity *age.X25519Identity, nextDraft *File, authorPrivateKey ed25519.PrivateKey) (newEncoded []byte, newVUK []byte, err error)
+```
+
+`RotateAuthenticatedFile` produces one complete next-epoch baseline file from
+one specified old authenticated whole file, and returns the new epoch VUK only
+to the caller whose source device remains authorized. It is the only API in
+this schema revision that generates a VUK. `checkpoint` is the caller's
+already-trusted `PolicyCheckpoint` and the only trust anchor; `nextDraft` is a
+builder `File` whose policy chain already continues that checkpoint.
+
+The order is fixed and is the security boundary. Nothing is decrypted,
+generated, wrapped or encrypted before every check in steps 1 to 5 passes.
+
+1. **Basic inputs.** A nil `nextDraft`, `checkpoint`, `sourceIdentity` or
+   author key, an empty `sourceDeviceID`, and a draft `format` or `version`
+   other than the protocol's are `invalid_value` at the empty path;
+   `content_encoding` must be empty (the protocol value) or `kdbx`, else
+   `invalid_value` at `content_encoding`.
+2. **Old file.** The old bytes are parsed and authenticated exactly as
+   [`OpenAuthenticatedFile`](#trusted-full-file-open) does, by the shared
+   parse-and-verify steps: `ParseFile`, then `VerifyPolicyCheckpoint` against
+   the caller's pin. Every error is returned unchanged, and no old-file field
+   is read as an input before this succeeds. The old file's own carried
+   roster is never a trust source.
+3. **Next policy.** `verifyPolicyChain(nextDraft.header,
+   nextDraft.signed_policy_proofs, checkpoint)` authenticates the next chain
+   under the same pin, so it must be root-signed or an authorized delegated
+   `InviteReaders` transition from the checkpoint (see [Admin-delegated
+   InviteReaders](#admin-delegated-invitereaders-transitions)). The header,
+   content encoding and sealed-state shape of the draft are then checked with
+   the verifier's structural rules. In the authenticated next policy the
+   author device must be a writer, admin or owner whose Ed25519 content
+   signing key matches `authorPrivateKey` (`author_signing_key_mismatch` at
+   `content_signature`, the same check the seal performs); the
+   `sourceDeviceID` device must be listed with a read-capable role, and its
+   `age_encryption_key` must equal `sourceIdentity.Recipient()`'s string
+   (`invalid_value` at `device_id`).
+4. **Exact immediate continuation.** Against the authenticated old header the
+   draft must carry the same `vault_id` (`invalid_value` at `vault_id`),
+   `key_epoch` exactly old + 1 and `content_seq` exactly old + 1, with no
+   64-bit wrap (`key_epoch`, `content_seq`), `prev_digest` equal to the raw 32
+   bytes of `FileDigest(old)` (`prev_digest`), and a different `op_id`
+   (`op_id`). A missing, stale, skipped or wrapped transition is
+   `invalid_value` at its field path.
+5. **Seal preconditions.** The successor epoch must be positive
+   (`invalid_value` at `key_epoch`).
+6. **Open.** The old full database is opened through the authenticated open's
+   ordered device, VUK, CEK and KDBX steps for `sourceDeviceID` and
+   `sourceIdentity`; their errors are returned unchanged.
+7. **Fresh VUK.** A fresh random 32-byte epoch VUK is drawn with
+   `crypto/rand`.
+8. **Seal.** `SealAuthenticatedFile(nextDraft, db, checkpoint, newVUK,
+   authorPrivateKey)` seals the new baseline: it derives a VUK envelope for
+   every read-capable device of the authenticated next policy only, generates
+   a fresh per-snapshot CEK and a fresh CEK slot, encrypts the opened
+   database and signs the content. No old VUK, CEK or CEK slot is reused.
+
+On success `newEncoded` is the sealed successor and `newVUK` is a caller-owned
+32-byte value the caller must clear. On every error both are nil and the
+package-owned new VUK buffer is cleared. The caller's old bytes, checkpoint,
+draft, identity and author key are never modified or retained. The opened
+database is owned by the call and never returned; the content of its
+InnerHeader binaries is cleared in place after sealing on success and error,
+which is a minimum cleanup only: decrypted XML, protected values, Go strings
+and library temporaries are not claimed to be securely zeroed.
+
+**Scope and limits.** This produces one complete next-epoch baseline from the
+specified old authenticated file, and requires the next policy chain to be
+already root- or delegation-authorized under the caller's pin. It is not
+server freshness and not compare-and-swap: `prev_digest` and
+`content_seq + 1` are checked against this one old file only, nothing proves a
+backend holds the same baseline, and two callers may rotate the same old file
+into different successors. It does not create policies, invitations or device
+keys, does not perform device-key generation or restore roots, does not recover
+old plaintext the caller could not already open, and cannot recall an old VUK
+an already-authorized device learned. A device removed by this rotation is
+rejected by the next policy and receives no new VUK; a device is rotated by
+another device that stays authorized. The fresh epoch VUK makes the old VUK
+unable to open the next CEK, so the removed device cannot read the successor
+through the ordinary open path; prior plaintext is not erased from old copies
+the device already holds.
 
 ## Trusted full-file open
 
@@ -1370,6 +1459,16 @@ authorization is implemented. In particular:
   generating or rotating them, creates no policy change or invitation, and
   establishes nothing about the provenance or freshness of the checkpoint or
   content history through `prev_digest`.
+- `RotateAuthenticatedFile` proves only the ordered result of [Caller-pinned
+  epoch rotation](#caller-pinned-epoch-rotation): one specified old file is
+  authenticated under the caller's pin, the next draft's chain continues the
+  same pin and its author and source device are authorized there, the draft is
+  an exact `content_seq + 1` / `key_epoch + 1` continuation of that old file,
+  and a complete successor is sealed under a fresh random epoch VUK. It is not
+  server freshness, compare-and-swap or a sync protocol, does not create
+  policies, invitations, device keys or roots, does not recover old plaintext,
+  and does not revoke a VUK an already-authorized device learned from an old
+  copy.
 
 ## Budgets
 
@@ -1454,7 +1553,9 @@ This schema revision includes the two verification APIs described above,
 `VerifyPolicyCheckpoint` (from a caller-supplied `PolicyCheckpoint` forward),
 the caller-pinned full-file seal `SealAuthenticatedFile` ([Trusted full-file
 seal](#trusted-full-file-seal)) and open `OpenAuthenticatedFile` ([Trusted
-full-file open](#trusted-full-file-open)), two key-wrapping primitives,
+full-file open](#trusted-full-file-open)), the caller-pinned complete-file
+epoch rotation `RotateAuthenticatedFile` ([Caller-pinned epoch
+rotation](#caller-pinned-epoch-rotation)), two key-wrapping primitives,
 `SealCEK`/`OpenCEK`
 ([CEK sealing and opening](#cek-sealing-and-opening)) and
 `SealVUKForDevice`/`OpenVUKForDevice` ([VUK device-slot
@@ -1479,13 +1580,17 @@ delegated diff it implements no other policy proof, signature-chain or
 authorization verification and no permission checks. It also leaves the
 provenance of the caller's root outside its scope, key or digest crypto
 beyond the definitions, content history through `prev_digest`, server
-freshness, migration/import, VUK and epoch generation or rotation, the
-invitation and epoch rewrap workflow that would produce a new VUK or epoch for
-changed device sets, or product wiring. `SealAuthenticatedFile` seals under an
-existing signed chain with a caller-supplied VUK and epoch, and
+freshness, migration/import, any VUK or epoch rotation beyond the single
+caller-pinned one described below, the invitation workflow, or product wiring.
+`SealAuthenticatedFile` seals under an existing signed chain with a
+caller-supplied VUK and epoch,
+`RotateAuthenticatedFile` advances the epoch by exactly one for one specified
+old file under an already authorized next chain, and
 `OpenAuthenticatedFile` is only the ordered caller-pinned open above:
 it does not claim server freshness, complete content history through
 `prev_digest`, checkpoint provenance, epoch/key generation or an invitation
-flow. The VUK device-slot envelope of [VUK device-slot
-envelope](#vuk-device-slot-envelope) wraps only the caller-supplied VUK; it
-authenticates no policy and opens no file.
+flow. `RotateAuthenticatedFile` creates no policy, invitation, device key or
+root, is neither server freshness nor compare-and-swap, and does not revoke a
+VUK already learned from an old copy. The VUK device-slot envelope of [VUK
+device-slot envelope](#vuk-device-slot-envelope) wraps only the caller-supplied
+VUK; it authenticates no policy and opens no file.

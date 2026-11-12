@@ -1,0 +1,273 @@
+package vaultfile
+
+import (
+	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/hex"
+	"math"
+
+	"filippo.io/age"
+
+	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
+)
+
+// deriveFileDigestBytes returns the raw 32 bytes of FileDigest(f): the SHA-256
+// digest the lowercase-hex FileDigest names. f must already be a validated
+// sealed file; the derivation itself is FileDigest's, never a second one.
+func deriveFileDigestBytes(f *File) ([]byte, error) {
+	hexDigest, err := FileDigest(f)
+	if err != nil {
+		return nil, err
+	}
+	return hex.DecodeString(hexDigest)
+}
+
+// readCapableDevice returns the authenticated policy's entry for deviceID when
+// its principal holds a read-capable role there, and nil otherwise.
+func readCapableDevice(current *Policy, deviceID string) *Device {
+	dev := findDevice(current, deviceID)
+	if dev == nil || !current.hasRole(dev.PrincipalID, RoleReader, RoleWriter, RoleAdmin, RoleOwner) {
+		return nil
+	}
+	return dev
+}
+
+// clearInnerHeaderBinaries clears, in place, the content buffer of every
+// binary the database's InnerHeader carries. It is the rotation's minimum
+// cleanup of the database it owns; it makes no claim about the XML document,
+// protected values or Go strings. It tolerates a missing content or inner
+// header.
+func clearInnerHeaderBinaries(db *kdbx.Database) {
+	if db == nil || db.Content == nil || db.Content.InnerHeader == nil {
+		return
+	}
+	for i := range db.Content.InnerHeader.Binaries {
+		clear(db.Content.InnerHeader.Binaries[i].Content)
+	}
+}
+
+// RotateAuthenticatedFile is the package's caller-pinned complete-file epoch
+// rotation primitive. It authenticates the caller's old file and an already
+// authorized next draft against the same PolicyCheckpoint, opens the old
+// full KDBX database through the authenticated open path, generates a fresh
+// random 32-byte epoch VUK and seals a complete next-epoch baseline of that
+// content under the next draft through SealAuthenticatedFile. The rotation
+// returns the sealed successor bytes and the new VUK only to the caller whose
+// source device remains read-capable in the authenticated next policy.
+//
+// oldEncoded is one complete sealed file. checkpoint is the caller's
+// already-trusted pin and the only trust anchor: every accepted policy here
+// continues it. nextDraft is a builder File exactly as SealAuthenticatedFile
+// takes it: protocol format and version, the header, and signed policy proofs
+// whose chain already continues the checkpoint (root-signed, or an authorized
+// delegated InviteReaders transition). Its carried roster, ciphertext, CEK
+// slot, revision id and content signature are never trust inputs.
+// sourceDeviceID and sourceIdentity identify the rotating device, and
+// authorPrivateKey must be the content signing key the authenticated next
+// policy records for nextDraft's author device.
+//
+// The order is fixed and is the security boundary. Steps 1 to 5 are pure
+// checks: nothing is decrypted, generated, wrapped or encrypted until they
+// pass.
+//
+//  1. Basic inputs. A nil draft, checkpoint, identity, author key or
+//     sourceIdentity.Recipient(), or an empty sourceDeviceID, is an
+//     invalid_value at "". A draft format or version other than the
+//     protocol's is an invalid_value at ""; a non-empty ContentEncoding other
+//     than the protocol's is an invalid_value at "content_encoding".
+//  2. Old file. errOld, oldCurrent := verifyParsedAuthenticatedFile(oldEncoded,
+//     checkpoint): ParseFile, then VerifyPolicyCheckpoint, with exactly
+//     OpenAuthenticatedFile's order and errors. The old file is authenticated
+//     before any of its fields are read as an input, and its carried roster is
+//     never a trust source.
+//  3. Next policy. verifyPolicyChain(nextDraft.Header, nextDraft.SignedPolicyProofs,
+//     checkpoint) authenticates the next chain against the same caller pin,
+//     and validateStructure nextDraft checks its format, version, header,
+//     content encoding and sealed-state CEK and roster shapes with the
+//     verifier's structural rules. Then, in the authenticated next policy:
+//     the author device must be a writer, admin or owner whose Ed25519 content
+//     signing key passes validatedAuthorKey with authorPrivateKey (otherwise
+//     CodeAuthorSigningKeyMismatch at "content_signature"); the source device
+//     must be present and read-capable (otherwise invalid_value at
+//     "device_id"); and the source device's AgeEncryptionKey must equal
+//     sourceIdentity.Recipient().String() (otherwise invalid_value at
+//     "device_id"). The new VUK is returned only to a device that remains
+//     authorized, so a device this rotation removes cannot receive it.
+//  4. Continuation. errNew.Header.VaultID must equal the old vault id
+//     ("vault_id"), its KeyEpoch must be exactly old + 1 and its ContentSeq
+//     exactly old + 1, with no 64-bit wrap ("key_epoch", "content_seq"); its
+//     PrevDigest must equal the raw 32 FileDigest bytes of the authenticated
+//     old file ("prev_digest"); and its OpID must differ from the old op id
+//     ("op_id"). Every failure is invalid_value at the naming path. This is an
+//     exact immediate continuation in content_seq, not a freshness or
+//     compare-and-swap check against any server.
+//  5. Preconditions for the fresh baseline. nextDraft.Header.KeyEpoch must be
+//     positive ("key_epoch"), so SealAuthenticatedFile can bind it into the
+//     new envelopes and CEK slot.
+//  6. Open. openVerifiedFile(*errOld, oldCurrent, checkpoint, sourceDeviceID,
+//     sourceIdentity) runs steps 3 to 6 of OpenAuthenticatedFile: the source
+//     device is resolved in the authenticated old policy, its VUK slot is
+//     opened, the CEK slot is opened and the KDBX payload is decrypted.
+//  7. Fresh VUK. 32 random bytes are drawn with crypto/rand. A crypto/rand
+//     failure is returned as its operational error with nil outputs.
+//  8. Seal. SealAuthenticatedFile(nextDraft, db, checkpoint, newVUK,
+//     authorPrivateKey) authenticates the next chain again, derives every
+//     per-device VUK slot only from the authenticated next policy, generates
+//     a fresh per-snapshot CEK and its fresh slot, encrypts db and signs the
+//     content. Its error is returned unchanged.
+//
+// On success newEncoded is the sealed successor and newVUK is the
+// caller-owned 32-byte epoch VUK the caller must clear after use. On every
+// error both are nil and the package-owned new VUK buffer is cleared.
+// nextDraft, oldEncoded, checkpoint, sourceIdentity and authorPrivateKey are
+// never modified and never retained.
+//
+// Ownership of the opened database. The function owns the db it opened and
+// never returns it. The content buffer of every InnerHeader binary it carries
+// is cleared in place after sealing, on success and on every error, including
+// the SealAuthenticatedFile error path. This is a minimum cleanup only: the
+// decrypted XML, protected values and Go string fields of the database are
+// not claimed to be securely zeroed, and gokeepasslib's opaque crypto,
+// decompression and XML temporaries remain beyond reach exactly as
+// OpenKDBXPayload documents.
+//
+// Fresh keys. The new VUK is independent of the old one and no old VUK, CEK
+// or CEK slot is reused: the successor carries a fresh CEK under the new VUK
+// and a fresh envelope per authenticated next-policy device. A holder of the
+// old VUK can still read the old plaintext wherever an old copy or old
+// ciphertext exists, but it cannot open the successor's CEK slot, so a fresh
+// epoch VUK keeps the old VUK from decrypting the new CEK. Prior plaintext is
+// not erased from old copies.
+//
+// Trust limits:
+//   - The checkpoint is the only trust anchor; it is scope only. Freshness,
+//     provenance and CAS are not checked. Content-seq + 1 and prev_digest are
+//     enforced against the specified old file only, so no server or replica is
+//     known to hold the same baseline, and nothing prevents two callers from
+//     rotating the same old file into two different successors.
+//   - The next policy chain must already be authorized (root-signed, or an
+//     authorized delegated InviteReaders transition) under the same
+//     checkpoint. This function creates no policy, invitation, device key,
+//     device-key generation, restore root or delegation.
+//   - It recovers no old plaintext beyond the KDBX content the caller can
+//     already open, and it cannot recall or revoke an old VUK a removed device
+//     already learned. Rotation is performed by a device that stays
+//     authorized; a device removed by this rotation is rejected by the next
+//     policy and receives no new VUK.
+//   - It does not bump generation counters, timestamps or backend revisions,
+//     and it is not a sync protocol.
+//
+// Errors are the unchanged structural and verification errors of the old
+// file, chain verification and structural validation errors of the next
+// draft, CodeAuthorSigningKeyMismatch for the author key, invalid_value at
+// the naming path for continuation and source-device failures, the unchanged
+// errors of the authenticated open, a crypto/rand operational error, and the
+// unchanged error of SealAuthenticatedFile. Every error returns nil, nil.
+func RotateAuthenticatedFile(oldEncoded []byte, checkpoint *PolicyCheckpoint, sourceDeviceID string, sourceIdentity *age.X25519Identity, nextDraft *File, authorPrivateKey ed25519.PrivateKey) (newEncoded []byte, newVUK []byte, err error) {
+	// 1. Basic inputs.
+	if nextDraft == nil || checkpoint == nil || sourceIdentity == nil || sourceIdentity.Recipient() == nil ||
+		len(authorPrivateKey) == 0 || sourceDeviceID == "" {
+		return nil, nil, Err("", CodeInvalidValue)
+	}
+	if nextDraft.Format != Format || nextDraft.Version != Version {
+		return nil, nil, Err("", CodeInvalidValue)
+	}
+	if nextDraft.ContentEncoding != "" && nextDraft.ContentEncoding != ContentEncoding {
+		return nil, nil, Err("content_encoding", CodeInvalidValue)
+	}
+
+	// 2. The old file, authenticated under the caller pin exactly as
+	// OpenAuthenticatedFile authenticates it.
+	oldFile, oldCurrent, err := verifyParsedAuthenticatedFile(oldEncoded, checkpoint)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// 3. The next policy chain under the same pin, and its author and source
+	// device in the authenticated next policy.
+	nextCurrent, err := verifyPolicyChain(nextDraft.Header, nextDraft.SignedPolicyProofs, checkpoint)
+	if err != nil {
+		return nil, nil, err
+	}
+	if _, err := validateStructure(nextDraft); err != nil {
+		return nil, nil, err
+	}
+	author := findDevice(nextCurrent, nextDraft.Header.AuthorDeviceID)
+	if author == nil || !nextCurrent.hasRole(author.PrincipalID, RoleWriter, RoleAdmin, RoleOwner) ||
+		author.ContentSigningKey.Alg != SigAlgEd25519 ||
+		!validEd25519Key(author.ContentSigningKey.PublicKey) ||
+		len(authorPrivateKey) != ed25519.PrivateKeySize {
+		return nil, nil, Err("content_signature", CodeAuthorSigningKeyMismatch)
+	}
+	authorKey, ok := validatedAuthorKey(authorPrivateKey, author.ContentSigningKey.PublicKey)
+	if !ok {
+		return nil, nil, Err("content_signature", CodeAuthorSigningKeyMismatch)
+	}
+	defer clear(authorKey)
+	source := readCapableDevice(nextCurrent, sourceDeviceID)
+	if source == nil || source.AgeEncryptionKey != sourceIdentity.Recipient().String() {
+		return nil, nil, Err("device_id", CodeInvalidValue)
+	}
+
+	// 4. The exact immediate continuation of the authenticated old file.
+	h := &nextDraft.Header
+	old := &oldFile.Header
+	if h.VaultID != old.VaultID {
+		return nil, nil, Err("vault_id", CodeInvalidValue)
+	}
+	if old.KeyEpoch == math.MaxUint64 || h.KeyEpoch != old.KeyEpoch+1 {
+		return nil, nil, Err("key_epoch", CodeInvalidValue)
+	}
+	if old.ContentSeq == math.MaxUint64 || h.ContentSeq != old.ContentSeq+1 {
+		return nil, nil, Err("content_seq", CodeInvalidValue)
+	}
+	prevDigest, err := deriveFileDigestBytes(oldFile)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !bytes.Equal(h.PrevDigest, prevDigest) {
+		return nil, nil, Err("prev_digest", CodeInvalidValue)
+	}
+	if h.OpID == old.OpID {
+		return nil, nil, Err("op_id", CodeInvalidValue)
+	}
+
+	// 5. The successor epoch must be sealable. ContentEncoding was already
+	// constrained in step 1, so no successor with a foreign encoding reaches
+	// step 8.
+	if h.KeyEpoch == 0 {
+		return nil, nil, Err("key_epoch", CodeInvalidValue)
+	}
+
+	// 6. Open the old full database through the authenticated open path.
+	_, db, err := openVerifiedFile(oldFile, oldCurrent, checkpoint, sourceDeviceID, sourceIdentity)
+	if err != nil {
+		return nil, nil, err
+	}
+	// The opened database is owned by this function. Its InnerHeader binary
+	// content buffers are cleared after sealing on every path.
+	defer clearInnerHeaderBinaries(db)
+
+	// 7. A fresh epoch VUK. It stays package-owned and is cleared on every
+	// error path; only a successful seal hands it to the caller.
+	newVUK = make([]byte, CEKSize)
+	if _, err := rand.Read(newVUK); err != nil {
+		clear(newVUK)
+		return nil, nil, err
+	}
+	defer func() {
+		if err != nil {
+			clear(newVUK)
+			newVUK = nil
+		}
+	}()
+
+	// 8. The complete next-epoch baseline: fresh CEK, fresh per-device
+	// envelopes from the authenticated next policy, fresh signature.
+	encoded, err := SealAuthenticatedFile(nextDraft, db, checkpoint, newVUK, authorPrivateKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	return encoded, newVUK, nil
+}
