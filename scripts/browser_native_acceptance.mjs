@@ -673,6 +673,35 @@ function routeWiped(value) {
     ROUTE_REVOKE_STATUS_KINDS.includes(value?.statusKind)
   );
 }
+// Diagnostics only for the default QuickFill=false post-repair refusal. The
+// route probe's fixed booleans/enums and the physical close proof are kept
+// verbatim in shape; no title, value, URL, token, text, id or canary is stored
+// or reported.
+let postRepairRouteRefusal = null;
+let postRepairRouteClose = null;
+function sanitizePostRepairRouteRefusal(value) {
+  return {
+    visible: value?.visible === true,
+    closed: value?.closed === true,
+    detailHidden: value?.detailHidden === true,
+    titleEmpty: value?.titleEmpty === true,
+    fieldsEmpty: value?.fieldsEmpty === true,
+    copyAbsent: value?.copyAbsent === true,
+    fixtureAbsent: value?.fixtureAbsent === true,
+    statusKind: ROUTE_REVOKE_STATUS_KINDS.includes(value?.statusKind)
+      ? value.statusKind
+      : "other",
+  };
+}
+function sanitizePostRepairRouteClose(value) {
+  return {
+    routeGone: value?.routeGone === true,
+    routesAbsent: value?.routesAbsent === true,
+    sourceSame: value?.sourceSame === true,
+    sourceVisible: value?.sourceVisible === true,
+    sourceIntact: value?.sourceIntact === true,
+  };
+}
 // Route field-copy acceptance. The concealled password row's own Copy control
 // is clicked physically; the worker then re-reads the value under the same
 // native V2 approval, so either the field-disclosure review appears directly
@@ -1454,6 +1483,23 @@ try {
       (target) =>
         target.url ===
         "chrome-extension://geldnhjapnackobgknocomedmjgphnpe/popup.html",
+    );
+  }
+  // The persistent QuickFill=false route tabs, found only by the fixed
+  // extension page plus one 64-hex fragment. Action popups have no fragment
+  // and never match here.
+  async function routeTargets() {
+    const port = readFileSync(
+      join(profile, "DevToolsActivePort"),
+      "utf8",
+    ).split("\n")[0];
+    const targets = await (
+      await fetch("http://127.0.0.1:" + port + "/json/list")
+    ).json();
+    return targets.filter(
+      (target) =>
+        (target.type === "page" || target.type === "tab") &&
+        ROUTE_PAGE.test(target.url),
     );
   }
   async function attachPopup(target) {
@@ -2519,46 +2565,219 @@ try {
     popup = await openPopup();
     await eventually(async () => await popup.disabled("#search-input") === false,
       "Normal-mode vault refresh did not settle");
-    // In normal mode an item-get needs the native V2 review. Rejecting it
-    // proves the refusal path without approving or disclosing the item.
-    phase("post-repair:item-get-observe");
+    // disconnect()->clear() dropped the source context that the original
+    // QuickFill pairing captured. In normal (QuickFill=false) mode the next
+    // vault-row click is therefore an open-route request, and the worker
+    // refuses it until the user physically refreshes the popup. One real click
+    // on the existing #refresh control is the only context seed here: no
+    // runtime message, hidden state or fabricated match is used.
+    phase("post-repair:route-match");
+    // The original controlled HTTPS tab by reference only; its path is used
+    // solely to read the fixed source-page predicate.
+    const postRepairSourcePath = new URL(page.url()).pathname;
+    assert.equal(
+      sourcePageIntact(
+        await page.evaluate(sourcePageProbe(postRepairSourcePath)),
+      ),
+      true,
+      "Original source tab missing",
+    );
+    await popup.click("#refresh");
+    await eventually(
+      async () =>
+        String(await popup.text("#status")).includes("个当前网站") &&
+        (await popup.disabled("#refresh")) === false,
+      "Exact-origin match missing",
+    );
+    // The match may only settle on this original controlled source tab, still
+    // visible and showing its exact login path and form.
+    await eventually(async () => {
+      const state = await page.evaluate(
+        sourcePageProbe(postRepairSourcePath),
+      );
+      return state?.visible === true && sourcePageIntact(state);
+    }, "Original source tab missing");
+    phase("post-repair:route-observe");
     const edited = observe().rows.find((item) => item.title === "Popup native contract edited");
     assert(edited, "Synthetic edited item missing after normal re-pair");
-    phase("post-repair:item-get-open");
+    phase("post-repair:route-open");
     const target = '#vault-list [data-item-id="' + edited.id + '"]';
     await popup.click('#filter-tabs [data-filter="all"]');
     await eventually(async () => await popup.count(target) === 1,
       "Edited item row absent");
-    phase("post-repair:item-get-click");
-    // The physical row click starts one native item-get review.
+    const routeIdsBefore = new Set(
+      (await routeTargets()).map((candidate) => candidate.id),
+    );
+    const pagesBefore = new Set(
+      browser
+        .pages()
+        .filter((entry) => !/^chrome-extension:\/\//.test(entry.url())),
+    );
+    phase("post-repair:route-click");
+    // The physical row click starts the actual normal QuickFill=false route
+    // path: one persistent route tab, never a popup item-get.
     await popup.click(target);
-    phase("post-repair:item-get-refusal");
-    input([{ wait_label: "批准本次操作" }]);
-    const refusal = input([], true, true).controls;
-    for (const label of ["批准本次操作", "拒绝本次操作"]) {
-      assert(refusal[label]?.present === true && refusal[label]?.showing === true,
-        "Exact native item-get control missing");
+    let opened;
+    await eventually(async () => {
+      const candidates = (await routeTargets()).filter(
+        (candidate) => !routeIdsBefore.has(candidate.id),
+      );
+      if (candidates.length > 1) throw Error("Route page must be unique");
+      opened = candidates[0];
+      return !!opened;
+    }, "Route page did not open");
+    const routeTarget = opened.id;
+    assert.equal(
+      (await routeTargets()).length,
+      1,
+      "Route page must be unique",
+    );
+    phase("post-repair:route-popup-closed");
+    await eventually(async () => !(await popup.ready()), "Action popup stayed open");
+    await eventually(
+      async () => (await popupTargets()).length === 0,
+      "Action popup target stayed open",
+    );
+    // The route tab is the only new browser page; the controlled source tab
+    // stays the one non-extension page it was.
+    const pagesAfter = browser
+      .pages()
+      .filter((entry) => !/^chrome-extension:\/\//.test(entry.url()));
+    assert(
+      pagesAfter.length === pagesBefore.size &&
+        pagesAfter.every((entry) => pagesBefore.has(entry)),
+      "Unexpected page opened",
+    );
+    // Attach to the exact new route target before any native UI wait, so the
+    // refusal detail is read from that page and not from a transient popup.
+    phase("post-repair:route-attached");
+    let route = null;
+    try {
+      route = await attachPopup(opened);
+      await eventually(
+        async () =>
+          (await route.evaluate("document.readyState")) === "complete",
+        "Route page did not load",
+      );
+      // Real visible native V2 gate. Both allowlisted controls must be present
+      // and showing before the one physical rejection. Nothing approves this
+      // request, switches QuickFill on or sends a direct item-get.
+      phase("post-repair:route-native");
+      const reviewShowing = async () => {
+        try {
+          const controls = nativeInspection();
+          return ["批准本次操作", "拒绝本次操作"].every(
+            (label) =>
+              controls?.[label]?.present === true &&
+              controls?.[label]?.showing === true,
+          );
+        } catch {
+          return false;
+        }
+      };
+      await eventually(
+        reviewShowing,
+        "Exact native route refusal control missing",
+      );
+      const review = nativeInspection();
+      for (const label of ["批准本次操作", "拒绝本次操作"]) {
+        assert(
+          review[label]?.present === true &&
+            review[label]?.showing === true,
+          "Exact native route refusal control missing",
+        );
+      }
+      assert.equal(
+        (await routeTargets()).filter(
+          (candidate) => candidate.id === routeTarget,
+        ).length,
+        1,
+        "Route target was replaced",
+      );
+      phase("post-repair:route-reject");
+      input([{ click_label: "拒绝本次操作" }]);
+      // Read-only DOM evaluation of the same route page after the rejection:
+      // visible failed/closed state, no rendered detail/title, and no fixture
+      // canary anywhere in the page text. Only fixed booleans/enums are kept.
+      phase("post-repair:route-refused");
+      await eventually(async () => {
+        const observation = await route.evaluate(
+          routeRevokedProbe(
+            fixture.Title,
+            fixture.Value,
+            fixtureCanaries(fixture),
+          ),
+        );
+        postRepairRouteRefusal =
+          sanitizePostRepairRouteRefusal(observation);
+        return observation?.visible === true && routeWiped(observation);
+      }, "Rejected route did not fail closed");
+      // Exactly one physical Ctrl+W addressed to the active route tab by its
+      // exact title prefix. The adapter client is disconnected first; the tab
+      // itself is closed only by this real key.
+      phase("post-repair:route-close");
+      await route.close();
+      browserKey(ROUTE_IDLE_CLOSE_STALE, ROUTE_TITLE_PREFIX);
+      // The rejected target is gone and the original controlled source page is
+      // back, present, visible and intact. Fixed booleans only.
+      await eventually(async () => {
+        const live = await routeTargets();
+        const current = browser
+          .pages()
+          .find((entry) => !/^chrome-extension:\/\//.test(entry.url()));
+        const sourceSame = current === page;
+        const state = sourceSame
+          ? await page.evaluate(sourcePageProbe(postRepairSourcePath))
+          : null;
+        const routeGone = !live.some(
+          (candidate) => candidate.id === routeTarget,
+        );
+        const routesAbsent = !live.some((candidate) =>
+          ROUTE_PAGE.test(candidate.url),
+        );
+        const sourceVisible = state?.visible === true;
+        const sourceIntact = sourcePageIntact(state);
+        postRepairRouteClose = sanitizePostRepairRouteClose({
+          routeGone,
+          routesAbsent,
+          sourceSame,
+          sourceVisible,
+          sourceIntact,
+        });
+        return (
+          routeGone &&
+          routesAbsent &&
+          sourceSame &&
+          sourceVisible &&
+          sourceIntact
+        );
+      }, "Rejected route tab was not closed");
+    } finally {
+      // Disconnecting an already disconnected adapter client is harmless.
+      try {
+        await route?.close();
+      } catch {}
     }
-    input([{ click_label: "拒绝本次操作" }]);
-    phase("post-repair:item-get-refetched");
+    phase("post-repair:route-refetched");
     // A fresh popup is the only trusted view after the refusal; the rejected
     // detail must never render.
     popup = await openPopup();
     await eventually(async () => await popup.disabled("#search-input") === false,
       "Refused popup not ready");
     assert.equal(await popup.count("#detail-view:not([hidden])"), 0,
-      "Refused item-get opened the detail view");
+      "Refused route opened the detail view");
     // No detail is rendered, so only the visible body text could disclose.
     const body = String(await popup.text("body"));
-    for (const [name, value] of [
-      ["password", fixture.Value],
-      ["note", fixture.SaveValue],
-      ["update", fixture.UpdateValue],
+    for (const value of [
+      fixture.Value,
+      fixture.SaveValue,
+      fixture.UpdateValue,
     ]) {
-      assert(!body.includes(value), "Refused item-get disclosed a synthetic " + name);
+      assert(!body.includes(value),
+        "Refused route disclosed a synthetic fixture value");
     }
-    phase("post-repair:item-get-refused");
-    console.log("PASS: real popup native item-get refusal disclosed nothing");
+    phase("post-repair:route-refused");
+    console.log("PASS: real popup refresh re-anchored the normal QuickFill=false route and its native refusal disclosed nothing");
   }
   await blank();
   popup = await openPopup();
@@ -2825,9 +3044,12 @@ try {
       "Route detail mode is incompatible",
       "Route detail mode requires Chromium",
       "Paired popup not ready",
+      "Normal-mode vault refresh did not settle",
       "Exact-origin match missing",
       "Vault rows missing",
       "Exact synthetic vault row missing",
+      "Synthetic edited item missing after normal re-pair",
+      "Edited item row absent",
       "Synthetic seed item identity missing",
       "Synthetic fixture title missing",
       "Route page did not open",
@@ -2838,6 +3060,12 @@ try {
       "Route page did not load",
       "Route detail did not render",
       "Native route approval label missing",
+      "Exact native route refusal control missing",
+      "Rejected route did not fail closed",
+      "Rejected route tab was not closed",
+      "Refused popup not ready",
+      "Refused route opened the detail view",
+      "Refused route disclosed a synthetic fixture value",
       "Route detail did not survive native approval",
       "Route target was replaced",
       "Action popup reopened",
@@ -2957,6 +3185,24 @@ try {
                   ),
                 }
               : {}),
+          }
+        : {}),
+      // Present only once the default post-repair QuickFill=false route was
+      // inspected after its native rejection: fixed booleans/enums only.
+      ...(postRepairRouteRefusal
+        ? {
+            postRepairRouteRefusal: sanitizePostRepairRouteRefusal(
+              postRepairRouteRefusal,
+            ),
+          }
+        : {}),
+      // Present only once the physical Ctrl+W close proof completed: five
+      // fixed booleans, never a target, tab, token, URL, title or page text.
+      ...(postRepairRouteClose
+        ? {
+            postRepairRouteClose: sanitizePostRepairRouteClose(
+              postRepairRouteClose,
+            ),
           }
         : {}),
       popup: { available: false },

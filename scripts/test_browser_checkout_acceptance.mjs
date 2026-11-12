@@ -2377,17 +2377,20 @@ test("route revocation checkpoint switches, wipes, reloads and never prompts", (
     assert.equal(countMatches(source, call), 1, literal);
   }
   // The default revocation checkpoint sends exactly its three physical keys;
-  // the opt-in idle journey owns the one extra close key.
+  // the post-repair refusal and the opt-in idle journey each own one physical
+  // Ctrl+W close.
   assert.equal(countMatches(checkpoint, /browserKey\(/g), 3);
   assert.doesNotMatch(checkpoint, /ROUTE_IDLE_CLOSE_STALE/);
-  assert.equal(countMatches(source, /browserKey\(ROUTE_IDLE_CLOSE_STALE, ROUTE_TITLE_PREFIX\);/g), 1);
-  // The whole harness inventory: the default route keys plus exactly one
-  // physical Ctrl+W of the stale tab, owned by the opt-in idle journey.
+  assert.equal(countMatches(source, /browserKey\(ROUTE_IDLE_CLOSE_STALE, ROUTE_TITLE_PREFIX\);/g), 2);
+  // The whole harness inventory: the default route keys plus exactly two
+  // physical Ctrl+W closes, one for the rejected post-repair route and one
+  // for the opt-in idle stale tab.
   const browserCalls = [...source.matchAll(/browserKey\((\[[^\n]*?\]|ROUTE_\w+), (\w+)\);/g)]
     .map((match) => match[1] + " -> " + match[2]);
   assert.deepEqual(browserCalls.sort((a, b) => a.localeCompare(b)), [
     "[{ key: \"Control_L+Shift_L+y\" }] -> SOURCE_TITLE_PREFIX",
     "[{ key: \"Escape\" }] -> SOURCE_TITLE_PREFIX",
+    "ROUTE_IDLE_CLOSE_STALE -> ROUTE_TITLE_PREFIX",
     "ROUTE_IDLE_CLOSE_STALE -> ROUTE_TITLE_PREFIX",
     "ROUTE_RELOAD -> ROUTE_TITLE_PREFIX",
     "ROUTE_RETURN -> SOURCE_TITLE_PREFIX",
@@ -2479,7 +2482,7 @@ test("route revocation checkpoint switches, wipes, reloads and never prompts", (
   const helpers = routeRevocationHelpers(source).code;
   const probes = helpers.slice(
     helpers.indexOf("const ROUTE_PAGE_STATE ="),
-    helpers.indexOf("// Route field-copy acceptance."),
+    helpers.indexOf("// Diagnostics only for the default QuickFill=false post-repair refusal."),
   );
   const returned = new Set(
     [...probes.matchAll(/^\s{4,6}([a-zA-Z]+):/gm)].map((match) => match[1]),
@@ -2511,6 +2514,81 @@ test("route revocation checkpoint switches, wipes, reloads and never prompts", (
   assert.match(copyProof, /OS clipboard did not receive the approved field/);
   assert.match(copyProof, /Native field disclosure did not appear/);
   assert.match(copyProof, /Route detail did not survive native approval/);
+});
+
+test("post-repair QuickFill=false refusal refreshes the source, rejects the route and closes it physically", () => {
+  const source = readFileSync(
+    new URL("./browser_native_acceptance.mjs", import.meta.url),
+    "utf8",
+  );
+  const start = source.indexOf('phase("post-repair:route-match");');
+  const stop = source.indexOf(
+    'console.log("PASS: real popup refresh re-anchored',
+    start,
+  );
+  assert.ok(start > 0 && stop > start, "post-repair route block must exist");
+  const block = source.slice(start, stop);
+  const at = (needle) => {
+    const index = block.indexOf(needle);
+    assert.ok(index >= 0, "post-repair block is missing " + needle);
+    return index;
+  };
+  // The only context seed is one physical refresh click on the original
+  // controlled source tab; no worker message, hidden state or direct item-get
+  // shortcut is used.
+  const refresh = at('await popup.click("#refresh");');
+  const sourceGate = at("sourcePageProbe(postRepairSourcePath)");
+  const match = at('"Exact-origin match missing"');
+  assert.ok(sourceGate < refresh && refresh < match);
+  assert.doesNotMatch(
+    block,
+    /sendMessage|runtime\.message|type: "item-get"|type: "match"/,
+  );
+  // The exact synthetic row is clicked physically, then one unique route tab
+  // is discovered and attached before any native UI wait.
+  const rowClick = at("await popup.click(target);");
+  const unique = at('throw Error("Route page must be unique");');
+  const attach = at("route = await attachPopup(opened);");
+  const native = at("const reviewShowing = async () => {");
+  assert.ok(refresh < rowClick && rowClick < unique && unique < attach);
+  assert.ok(attach < native);
+  // Both real native controls are inspected; only the rejection is clicked.
+  assert.match(
+    block,
+    /\["批准本次操作", "拒绝本次操作"\]\.every\(/,
+  );
+  assert.match(block, /input\(\[\{ click_label: "拒绝本次操作" \}\]\);/);
+  assert.doesNotMatch(block, /click_label: "批准本次操作"/);
+  assert.doesNotMatch(block, /quick_fill|QuickFill=true/);
+  // The same route page is inspected read-only after rejection with the full
+  // fixed probe; visible failed/closed state and every fixture canary absent.
+  const refused = at("routeRevokedProbe(");
+  assert.match(
+    block,
+    /routeRevokedProbe\(\n\s+fixture\.Title,\n\s+fixture\.Value,\n\s+fixtureCanaries\(fixture\),\n\s+\)/,
+  );
+  assert.match(
+    block,
+    /observation\?\.visible === true && routeWiped\(observation\)/,
+  );
+  // One exact-title physical Ctrl+W closes the rejected tab; the captured
+  // target is gone and the original controlled source page remains visible.
+  const close = at(
+    "browserKey(ROUTE_IDLE_CLOSE_STALE, ROUTE_TITLE_PREFIX);",
+  );
+  assert.ok(refused < close);
+  assert.match(block, /const sourceSame = current === page;/);
+  assert.match(block, /routeGone &&\n\s+routesAbsent &&\n\s+sourceSame &&\n\s+sourceVisible &&\n\s+sourceIntact/);
+  // The existing fresh-popup no-detail/no-canary checks still follow the
+  // close, before the approved-fill journeys resume.
+  const reopen = block.indexOf("popup = await openPopup();", close);
+  const noDetail = at(
+    '"Refused route opened the detail view"',
+  );
+  const noCanary = at(
+    '"Refused route disclosed a synthetic fixture value"',
+  );
+  assert.ok(reopen > close && noDetail > reopen && noCanary > noDetail);
 });
 
 // Read once at module load, before any test text exists, so anchor-count
