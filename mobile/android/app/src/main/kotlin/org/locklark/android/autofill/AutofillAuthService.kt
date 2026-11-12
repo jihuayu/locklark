@@ -187,9 +187,13 @@ internal object AutofillServiceState {
     }
 
     /**
-     * Remembers [response] unless it cannot be measured. An unmeasured parcel
+     * Remembers [response] unless it cannot be measured, is measured
+     * negatively, or is larger than [REVIEWED_CAPACITY]. An unmeasured parcel
      * is never assumed to be zero bytes under [REVIEWED_CAPACITY]: it is not
-     * cached, so the Activity finds no reviewed response and fails closed.
+     * cached and any stale response under [key] is dropped, so the Activity
+     * finds no reviewed response and fails closed. Oldest entries are evicted
+     * until both [MAX_REVIEWED] and the aggregate [reviewedBytes] admit the
+     * new response.
      */
     fun remember(
         key: String,
@@ -197,17 +201,19 @@ internal object AutofillServiceState {
         now: Long = android.os.SystemClock.elapsedRealtime(),
         measure: (FillResponse) -> Int? = ::measuredSize,
     ) {
-        val size = measure(response) ?: return
+        val size = measure(response)
         synchronized(reviewed) {
             pruneLocked(now)
+            // A duplicate replaces the entry under its own size; a stale entry
+            // never evicts another key, even when the new one is uncacheable.
             reviewed.remove(key)?.let { reviewedBytes -= it.size }
-            if (size > REVIEWED_CAPACITY) {
+            if (size == null || size < 0 || size > REVIEWED_CAPACITY) {
                 // Uncacheable: the Activity will find no reviewed response and
                 // fails closed without ever offering a fill.
                 return
             }
-            while (reviewed.size >= MAX_REVIEWED && reviewed.isNotEmpty()) {
-                reviewedBytes -= reviewed.remove(reviewed.keys.first())!!.size
+            while (!fitsLocked(size)) {
+                evictOldestLocked()
             }
             reviewed[key] = Entry(response, size, now)
             reviewedBytes += size
@@ -237,6 +243,17 @@ internal object AutofillServiceState {
     }
 
     fun count(): Int = synchronized(reviewed) { reviewed.size }
+
+    /** The total parceled size of every cached response, never above capacity. */
+    fun bytes(): Int = synchronized(reviewed) { reviewedBytes }
+
+    private fun fitsLocked(size: Int): Boolean =
+        size <= REVIEWED_CAPACITY && reviewed.size < MAX_REVIEWED && reviewedBytes + size <= REVIEWED_CAPACITY
+
+    private fun evictOldestLocked() {
+        val oldest = reviewed.keys.firstOrNull() ?: return
+        reviewed.remove(oldest)?.let { reviewedBytes -= it.size }
+    }
 
     private fun pruneLocked(now: Long) {
         val iterator = reviewed.values.iterator()
