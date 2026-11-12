@@ -360,26 +360,6 @@ func TestCallbackRejectedRequestsDoNotConsume(t *testing.T) {
 	// The Host header is what the handler checks, independent of the address
 	// dialed: the bound host:port is admitted, anything else is rejected.
 	goodQuery := CallbackPath + "?" + good.Encode()
-	if status, _, err := getDirect(t, hostPort, goodQuery, hostPort); err != nil {
-		t.Fatalf("direct request failed to complete")
-	} else if status != http.StatusBadRequest && status != http.StatusOK {
-		t.Fatalf("direct request returned an unexpected status %d", status)
-	}
-	// The admitted direct request above may have settled the flow with
-	// the real code; if it did, the pending wait must now hold that code,
-	// so the remaining checks start over with a fresh flow below.
-	select {
-	case r := <-ch:
-		if r.err != nil || r.res.Code() != testCode {
-			t.Fatalf("direct admitted request settled with an unexpected outcome")
-		}
-		if status := probeStatusCode(t, hostPort); status != 0 && status != http.StatusOK {
-			t.Fatalf("probe of a settled flow returned an unexpected status %d", status)
-		}
-		return
-	default:
-	}
-
 	for _, hostHeader := range []string{"example.invalid:" + port, "localhost:" + port, LoopbackHost + ":1"} {
 		status, body, err := getDirect(t, hostPort, goodQuery, hostHeader)
 		if err != nil {
@@ -389,14 +369,19 @@ func TestCallbackRejectedRequestsDoNotConsume(t *testing.T) {
 			t.Fatalf("wrong Host header (case %d) returned status %d", len(hostHeader), status)
 		}
 		assertHidden(t, "wrong Host page", body, testCode, state)
+		assertStillPending(t, ch)
 	}
-	assertStillPending(t, ch)
 
-	// After every rejection the real callback still succeeds.
-	status, body := get(t, withQuery(t, base, good))
-	if status != http.StatusOK || body != pageAuthorized {
-		t.Fatalf("legitimate callback after rejections returned status %d", status)
+	// Only after every rejection does the legitimate direct callback over real
+	// TCP succeed and settle the flow with the real code.
+	status, body, err := getDirect(t, hostPort, goodQuery, hostPort)
+	if err != nil {
+		t.Fatalf("legitimate direct callback failed to complete")
 	}
+	if status != http.StatusOK || body != pageAuthorized {
+		t.Fatalf("legitimate direct callback returned status %d with an unexpected page", status)
+	}
+	assertHidden(t, "authorized page", body, testCode, state)
 	res, err := recv(t, ch, time.Second)
 	if err != nil {
 		t.Fatalf("Wait returned error %v", err)
