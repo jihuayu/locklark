@@ -104,6 +104,10 @@ type UploadSession struct {
 	etag      string
 	uploadURL string
 	expiresAt time.Time
+
+	// state is shared by every value copy of the session so that the one-use
+	// upload gate cannot be bypassed by copying the struct.
+	state *uploadSessionState
 }
 
 // Format writes a fixed, redacted representation. It exists so that ordinary
@@ -351,6 +355,7 @@ func (u *ConditionalUploader) createSession(ctx context.Context, token, expected
 		etag:      expectedETag,
 		uploadURL: capability,
 		expiresAt: expiresAt,
+		state:     &uploadSessionState{},
 	}, nil
 }
 
