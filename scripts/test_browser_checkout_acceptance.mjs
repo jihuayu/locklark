@@ -2351,7 +2351,7 @@ test("route revocation checkpoint switches, wipes, reloads and never prompts", (
   //    single-shot action list. No prefix form or popup key remains.
   assert.match(
     source,
-    /const chromiumExecutable = realpathSync\(chromium\.executablePath\(\)\);/,
+    /const launchedExecutable =\n\s+typeof source === "string" \? source : source\.executablePath\(\);\n\s+const chromiumExecutable = realpathSync\(launchedExecutable\);/,
   );
   assert.match(
     source,

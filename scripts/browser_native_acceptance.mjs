@@ -1652,10 +1652,11 @@ try {
   // The one browserKey the whole script shares, initialized before the
   // managed-install branch: the install helper's openPopup() sends the real
   // Escape and Ctrl+Shift+Y during edge-activate, so any later declaration
-  // would be read inside its temporal dead zone. Edge names the executable it
-  // was launched with, Chromium keeps Playwright's own.
+  // would be read inside its temporal dead zone. Both browsers name the exact
+  // executable the launch above used: the explicit LOCKLARK_TEST_BROWSER_EXECUTABLE
+  // when given (Edge always requires it), otherwise Playwright's own default.
   const browserKey = browserKeyFor(
-    browserName === "edge"
+    browserExecutable
       ? { executablePath: () => browserExecutable }
       : chromium,
   );
@@ -1730,13 +1731,15 @@ try {
   nativeInput = input;
   // Browser-tab keys are real XTest input to the exact launched window. The
   // realpath comes from the launched browser, never from an environment
-  // guess: Edge uses the explicit executable it was launched with, while
-  // Chromium keeps Playwright's own executable. Only these two fixed title
-  // prefixes are accepted, and the request is always the helper's
-  // exact-title-prefix form: no native window title, no inspection and no
-  // other request options.
-  function browserKeyFor(chromium) {
-    const chromiumExecutable = realpathSync(chromium.executablePath());
+  // guess: the source is the explicit executable the launch used when given
+  // (Edge always; Chromium when its registry default is empty or overridden),
+  // otherwise Playwright's own default. Only these two fixed title prefixes
+  // are accepted, and the request is always the helper's exact-title-prefix
+  // form: no native window title, no inspection and no other request options.
+  function browserKeyFor(source) {
+    const launchedExecutable =
+      typeof source === "string" ? source : source.executablePath();
+    const chromiumExecutable = realpathSync(launchedExecutable);
     return function browserKey(actions, titlePrefix) {
       assert(
         titlePrefix === ROUTE_TITLE_PREFIX ||

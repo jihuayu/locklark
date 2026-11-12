@@ -5,7 +5,14 @@
 // printed here.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1412,88 +1419,109 @@ test("pair/disconnect has separate success labels and fixed failure text", () =>
   assert.doesNotMatch(PAIR_FUNCTION, /error\.|\.stack|\.message/);
 });
 
-test("browser keys use Edge's launched executable and Playwright's Chromium", () => {
-  // Execute the acceptance script's own assignment and browserKey helper with
-  // synthetic resolvers, so this proves the actual owner selection rather than
-  // a copied expectation. No file, browser, X server or real path is touched.
-  const factorySource =
-    "function browserKeyFor(chromium) " +
-    sourceBlock(nativeSource, "function browserKeyFor(chromium)") +
-    ";\n";
+// The acceptance script's own browserKeyFor helper and browserKey assignment,
+// returned as source so a behavioral test can run the actual owner selection.
+function browserKeyFactorySource() {
   const assignmentStart = nativeSource.indexOf(
     "  const browserKey = browserKeyFor(",
   );
   assert.notEqual(assignmentStart, -1, "browserKey assignment");
   const assignmentEnd = nativeSource.indexOf("  );", assignmentStart);
   assert.notEqual(assignmentEnd, -1, "browserKey assignment end");
-  const assignmentSource = nativeSource.slice(
-    assignmentStart,
-    assignmentEnd + "  );".length,
+  return (
+    "function browserKeyFor(source) " +
+    sourceBlock(nativeSource, "function browserKeyFor(source)") +
+    ";\n" +
+    nativeSource.slice(assignmentStart, assignmentEnd + "  );".length) +
+    "\nreturn browserKey;"
   );
-  const requests = (browserName) => {
-    const resolved = {
-      [PRIVATE.executable]: "/resolved/edge",
-      [PRIVATE.chromium]: "/resolved/chromium",
+}
+
+test("browser keys use the explicit launched executable, else Playwright's", () => {
+  // The script's own assignment and helper run over a real temporary file
+  // system: an explicit Chromium executable whose Playwright registry is
+  // empty must still resolve to the launched file, exactly as under CI.
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), "locklark-key-")));
+  try {
+    const selected = join(directory, "chromium");
+    const edge = join(directory, "msedge");
+    const fallback = join(directory, "playwright-chromium");
+    for (const file of [selected, edge, fallback]) writeFileSync(file, "");
+    // A missing default really throws ENOENT, as it does in the CI private XDG.
+    const missing = join(directory, "missing", "chromium");
+    // The default is the registry resolver: present for the default case,
+    // missing (ENOENT) exactly where the CI registry is, so the explicit cases
+    // would fail if the helper ever consulted it.
+    const resolved = (defaultExecutable) => (browserName, browserExecutable) => {
+      const captured = [];
+      const key = new Function(
+        "realpathSync",
+        "chromium",
+        "browserName",
+        "browserExecutable",
+        "assert",
+        "execFileSync",
+        "join",
+        "root",
+        "env",
+        "ROUTE_TITLE_PREFIX",
+        "SOURCE_TITLE_PREFIX",
+        browserKeyFactorySource(),
+      )(
+        realpathSync,
+        { executablePath: () => defaultExecutable },
+        browserName,
+        browserExecutable,
+        assert,
+        (command, args, options) => {
+          assert.equal(command, "python3");
+          assert.deepEqual(args, ["/root/scripts/browser_native_x11.py"]);
+          captured.push(JSON.parse(options.input));
+          return Buffer.from("{}");
+        },
+        (...parts) => parts.join("/"),
+        "/root",
+        {},
+        "route-title",
+        "source-title",
+      );
+      return { send: () => (key([{ key: "Escape" }], "route-title"), captured) };
     };
-    const captured = [];
-    const browserKey = new Function(
-      "realpathSync",
-      "chromium",
-      "browserName",
-      "browserExecutable",
-      "assert",
-      "execFileSync",
-      "join",
-      "root",
-      "env",
-      "ROUTE_TITLE_PREFIX",
-      "SOURCE_TITLE_PREFIX",
-      factorySource + assignmentSource + "return browserKey;",
-    )(
-      (value) => {
-        assert.ok(value in resolved, "Unexpected realpath input");
-        return resolved[value];
-      },
-      { executablePath: () => PRIVATE.chromium },
-      browserName,
-      PRIVATE.executable,
-      assert,
-      (command, args, options) => {
-        assert.equal(command, "python3");
-        assert.deepEqual(args, ["/root/scripts/browser_native_x11.py"]);
-        captured.push(JSON.parse(options.input));
-        return Buffer.from("{}");
-      },
-      (...parts) => parts.join("/"),
-      "/root",
-      {},
-      "route-title",
-      "source-title",
-    );
-    browserKey([{ key: "Escape" }], "route-title");
-    browserKey([{ key: "Control_L+Shift_L+y" }], "source-title");
-    return captured;
-  };
-  const expected = (executable) => [
-    {
+    const uses = (executable) => [{
       title_prefix: "route-title",
       executable,
       actions: [{ key: "Escape" }],
-    },
-    {
-      title_prefix: "source-title",
-      executable,
-      actions: [{ key: "Control_L+Shift_L+y" }],
-    },
-  ];
-  // Edge ignores the Playwright executable for its explicit launched one.
-  assert.deepEqual(requests("edge"), expected("/resolved/edge"));
-  // Chromium keeps Playwright's executable even with an explicit Edge path.
-  assert.deepEqual(requests("chromium"), expected("/resolved/chromium"));
+    }];
+    // Chromium with the explicit launched executable and no registry default:
+    // the request names the realpath of the selected file, not the default.
+    assert.deepEqual(resolved(missing)("chromium", selected).send(), [{
+      title_prefix: "route-title",
+      executable: realpathSync(selected),
+      actions: [{ key: "Escape" }],
+    }]);
+    // Chromium without an override keeps Playwright's own default.
+    assert.deepEqual(
+      resolved(fallback)("chromium", undefined).send(),
+      uses(realpathSync(fallback)),
+    );
+    // Edge names its explicit launched executable.
+    assert.deepEqual(
+      resolved(missing)("edge", edge).send(),
+      uses(realpathSync(edge)),
+    );
+    // An invalid explicit executable refuses with the real file-system error
+    // (the CI ENOENT) and never falls back to Playwright's default.
+    for (const browserName of ["chromium", "edge"]) {
+      assert.throws(
+        () => resolved(fallback)(browserName, join(directory, "absent")),
+        (error) => error?.code === "ENOENT"
+          && !String(error.message).includes("playwright-chromium"),
+      );
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
-
-
-
 
 
 // Executes the acceptance script's own source — the single
