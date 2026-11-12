@@ -1328,11 +1328,11 @@ try {
       // Ready-label polling is read-only. It must never raise or focus the
       // native window: doing so can hide the route page behind the idle native
       // window before any approval exists. The focus-preserving inspect form
-      // (same exact native title and executable, empty action list) keeps the
-      // window where it is, exactly like the popup-stage absence probes.
+      // (same exact native title and executable supplied by `input`, no prefix
+      // form, empty action list) keeps the window where it is, exactly like
+      // the popup-stage absence probes.
       const ROUTE_LABEL_INSPECT = Object.freeze({
         inspect: true,
-        title_prefix: "Locklark · 浏览器原生确认",
         preserve_focus: true,
       });
       const approveLabel = async () => {
@@ -1423,7 +1423,6 @@ try {
           return (
             input([], true, {
               inspect: true,
-              title_prefix: "Locklark · 浏览器原生确认",
               preserve_focus: true,
             }).controls?.[label] ?? null
           );

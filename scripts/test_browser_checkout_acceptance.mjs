@@ -1418,17 +1418,19 @@ test("route lifecycle sanitizer keeps only fixed booleans and capped counts", ()
 
 test("route label inspect preserves focus and the approval click stays physical", () => {
   // The native-label wait only reads the route page's approval state. It must
-  // use the helper's focus-preserving form (partial title, no raise/focus), or
-  // the idle native window can cover the route page before any approval
-  // exists. The later approval stays one ordinary physical click.
+  // use the helper's focus-preserving inspect form (no raise/focus), or the
+  // idle native window can cover the route page before any approval exists.
+  // The exact native title and executable come from `input`; the parser
+  // refuses a request that also carries `title_prefix`.
   const source = readFileSync(
     new URL("./browser_native_acceptance.mjs", import.meta.url),
     "utf8",
   );
   assert.match(
     source,
-    /inspect: true,\n\s+title_prefix: "Locklark · 浏览器原生确认",\n\s+preserve_focus: true,/,
+    /const ROUTE_LABEL_INSPECT = Object\.freeze\(\{\n\s+inspect: true,\n\s+preserve_focus: true,\n\s+\}\);/,
   );
+  assert.doesNotMatch(source, /title_prefix: ROUTE_NATIVE_TITLE/);
   assert.match(source, /input\(\[\], true, ROUTE_LABEL_INSPECT\)\.controls\?\.\["批准本次操作"\]/);
   // The raising/focusing positional form never appears in the route
   // checkpoint; it remains only for the unconditional-fill journeys.
@@ -1776,11 +1778,13 @@ test("route per-field copy uses physical input, exact native labels and the priv
       ),
       "unexpected native click label " + match[1],
     );
-  // Focus-preserving inspect only for the approval waits.
+  // Focus-preserving inspect only for the approval waits, with the exact
+  // title/executable from `input` and never the redundant `title_prefix`.
   assert.match(
     checkpoint,
-    /inspect: true,\n\s+title_prefix: "Locklark · 浏览器原生确认",\n\s+preserve_focus: true,/,
+    /input\(\[\], true, \{\n\s+inspect: true,\n\s+preserve_focus: true,\n\s+\}\)\.controls\?\.\[label\]/,
   );
+  assert.doesNotMatch(checkpoint, /title_prefix/);
   assert.doesNotMatch(checkpoint, /input\(\[\], true, true\)/);
   // The disclosure is always required, even after a legacy review.
   assert.match(checkpoint, /Native field disclosure did not appear/);
