@@ -739,7 +739,81 @@ func TestRotateAuthenticatedFileFreshRandomVUK(t *testing.T) {
 	if bytes.Equal(first.vuk, fx.vuk) || bytes.Equal(second.vuk, fx.vuk) {
 		t.Fatal("a rotation returned the old VUK")
 	}
-	if _, err := OpenCEK(fx.vuk, second.f.Header, second.f.CEKSlot); err == nil {
-		t.Fatal("the old VUK opened the successor CEK")
+	// The positive: the returned fresh VUK opens the successor's own CEK.
+	for name, out := range map[string]*rotationOutputs{"first": first, "second": second} {
+		cek, err := OpenCEK(out.vuk, out.f.Header, out.f.CEKSlot)
+		if err != nil {
+			t.Fatalf("%s successor: the returned fresh VUK cannot open its CEK: %v", name, err)
+		}
+		clear(cek)
 	}
+
+	// The negative is exact: the old VUK against the successor's own header
+	// and CEK slot is a CEK envelope failure at cek_slot and nothing else, so
+	// only the key epoch VUK fails authentication and the successor is not
+	// rejected for a wrong header, AAD or slot shape.
+	staleCEK, err := OpenCEK(fx.vuk, second.f.Header, second.f.CEKSlot)
+	wantCodeAt(t, err, CodeCEKEnvelopeFailed, "cek_slot")
+	if staleCEK != nil {
+		t.Fatalf("old VUK returned CEK bytes on failure: %x", staleCEK)
+	}
+}
+
+// TestOwnInnerHeaderBinariesClearsRemovedBinary proves the capture-and-clear
+// mechanism that owns an opened database's InnerHeader binary content: a
+// binary the encoder's cleanup removes from db.Content.InnerHeader.Binaries
+// before the release runs is still cleared through the reference captured
+// before the seal, and so is a binary the InnerHeader still carries.
+func TestOwnInnerHeaderBinariesClearsRemovedBinary(t *testing.T) {
+	db := payloadFixtureDB(t)
+	entry := &db.Content.Root.Groups[0].Entries[0]
+	referenced := db.FindBinary(entry.Binaries[0].Value.ID)
+	if referenced == nil || len(referenced.Content) == 0 {
+		t.Fatalf("fixture has no referenced attachment: %v", referenced)
+	}
+	// An unreferenced binary the encoder drops before the release.
+	unreferenced := payloadFixtureRawBinary(db, []byte("unreferenced inner header secret"), 0)
+	if len(db.Content.InnerHeader.Binaries) != 2 {
+		t.Fatalf("fixture InnerHeader carries %d binaries, want 2", len(db.Content.InnerHeader.Binaries))
+	}
+
+	release := ownInnerHeaderBinaries(db)
+	// Before the release the data is intact.
+	if !bytes.Equal(unreferenced.Content, []byte("unreferenced inner header secret")) {
+		t.Fatal("the capture modified the binary content")
+	}
+
+	// Simulate the encoder's cleanupBinaries: drop the unreferenced binary from
+	// the InnerHeader. Every slice header is a copy, so the dropped buffer is
+	// still reachable through the local references above but no longer through
+	// the database before the release runs.
+	db.Content.InnerHeader.Binaries = []kdbx.Binary{*referenced}
+	db.Content.InnerHeader.Binaries[0].ID = 0
+	if got := db.Content.InnerHeader.Binaries; len(got) != 1 || len(got[0].Content) == len(unreferenced.Content) && &got[0].Content[0] == &unreferenced.Content[0] {
+		t.Fatal("simulated cleanup did not remove the unreferenced binary from the InnerHeader")
+	}
+
+	release()
+
+	if !allZero(unreferenced.Content) {
+		t.Fatalf("removed binary content = %x, want zero after release", unreferenced.Content)
+	}
+	if !allZero(referenced.Content) {
+		t.Fatalf("retained binary content = %x, want zero after release", referenced.Content)
+	}
+	// The buffers were cleared in place, not replaced, and both cleanups
+	// reached the same underlying arrays.
+	if !allZero(db.Content.InnerHeader.Binaries[0].Content) {
+		t.Fatalf("InnerHeader binary content = %x, want zero after release", db.Content.InnerHeader.Binaries[0].Content)
+	}
+}
+
+// allZero reports whether every byte of b is zero.
+func allZero(b []byte) bool {
+	for _, v := range b {
+		if v != 0 {
+			return false
+		}
+	}
+	return true
 }

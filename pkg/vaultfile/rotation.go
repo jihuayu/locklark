@@ -33,17 +33,46 @@ func readCapableDevice(current *Policy, deviceID string) *Device {
 	return dev
 }
 
-// clearInnerHeaderBinaries clears, in place, the content buffer of every
-// binary the database's InnerHeader carries. It is the rotation's minimum
-// cleanup of the database it owns; it makes no claim about the XML document,
-// protected values or Go strings. It tolerates a missing content or inner
-// header.
-func clearInnerHeaderBinaries(db *kdbx.Database) {
+// innerHeaderBinaryContents returns the content buffer of every binary the
+// database's InnerHeader carries, without copying the contents. It is the
+// capture step of the rotation's ownership of an opened database: the
+// gokeepasslib encoder removes an unreferenced binary from
+// db.Content.InnerHeader.Binaries during SealAuthenticatedFile, and the bytes
+// it removed stay reachable only through a reference captured before the seal.
+// It tolerates a missing content or inner header.
+func innerHeaderBinaryContents(db *kdbx.Database) [][]byte {
 	if db == nil || db.Content == nil || db.Content.InnerHeader == nil {
-		return
+		return nil
 	}
-	for i := range db.Content.InnerHeader.Binaries {
-		clear(db.Content.InnerHeader.Binaries[i].Content)
+	binaries := db.Content.InnerHeader.Binaries
+	contents := make([][]byte, 0, len(binaries))
+	for i := range binaries {
+		contents = append(contents, binaries[i].Content)
+	}
+	return contents
+}
+
+// clearBinaryContents clears, in place, every content buffer in contents. It
+// is the release half of innerHeaderBinaryContents and is safe to call more
+// than once over overlapping captures.
+func clearBinaryContents(contents [][]byte) {
+	for _, content := range contents {
+		clear(content)
+	}
+}
+
+// ownInnerHeaderBinaries takes ownership of the InnerHeader binary content
+// buffers of the opened database db and returns a release function that clears
+// exactly those captured before the seal and any binary the InnerHeader still
+// carries afterwards, so a binary the encoder removed is cleared as well. The
+// caller defers the release. It is a minimum cleanup only: it makes no claim
+// about the XML document, protected values, Go strings or any library
+// temporary.
+func ownInnerHeaderBinaries(db *kdbx.Database) func() {
+	captured := innerHeaderBinaryContents(db)
+	return func() {
+		clearBinaryContents(captured)
+		clearBinaryContents(innerHeaderBinaryContents(db))
 	}
 }
 
@@ -126,13 +155,19 @@ func clearInnerHeaderBinaries(db *kdbx.Database) {
 // never modified and never retained.
 //
 // Ownership of the opened database. The function owns the db it opened and
-// never returns it. The content buffer of every InnerHeader binary it carries
-// is cleared in place after sealing, on success and on every error, including
-// the SealAuthenticatedFile error path. This is a minimum cleanup only: the
-// decrypted XML, protected values and Go string fields of the database are
-// not claimed to be securely zeroed, and gokeepasslib's opaque crypto,
-// decompression and XML temporaries remain beyond reach exactly as
-// OpenKDBXPayload documents.
+// never returns it. Before sealing it captures, without copying, the content
+// buffer of every InnerHeader binary the opened database carries; after
+// sealing, on success and on every error including the SealAuthenticatedFile
+// error path, it clears those captured buffers in place and also the content
+// buffers of every binary the InnerHeader still carries. The capture is
+// required because the gokeepasslib encoder removes an unreferenced binary
+// from db.Content.InnerHeader.Binaries before that cleanup runs, and clearing
+// only the remaining binaries would leave the removed one's plaintext behind.
+// This is a minimum cleanup only: the decrypted XML, protected values and Go
+// string fields of the database are not claimed to be securely zeroed, and
+// gokeepasslib's opaque crypto, decompression and XML temporaries, including
+// any content buffer the encoder itself allocated, remain beyond reach
+// exactly as OpenKDBXPayload documents.
 //
 // Fresh keys. The new VUK is independent of the old one and no old VUK, CEK
 // or CEK slot is reused: the successor carries a fresh CEK under the new VUK
@@ -245,8 +280,10 @@ func RotateAuthenticatedFile(oldEncoded []byte, checkpoint *PolicyCheckpoint, so
 		return nil, nil, err
 	}
 	// The opened database is owned by this function. Its InnerHeader binary
-	// content buffers are cleared after sealing on every path.
-	defer clearInnerHeaderBinaries(db)
+	// content buffers are captured here and cleared after sealing on every
+	// path, including the binaries SealAuthenticatedFile's encoder removes
+	// from the InnerHeader before the cleanup runs.
+	defer ownInnerHeaderBinaries(db)()
 
 	// 7. A fresh epoch VUK. freshVUK is the exact package-owned allocation
 	// below; this local, not the named result, is what the defer clears, so
