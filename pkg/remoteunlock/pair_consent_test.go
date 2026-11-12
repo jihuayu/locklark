@@ -1,0 +1,825 @@
+package remoteunlock
+
+import (
+	"bytes"
+	"crypto/ed25519"
+	"encoding/base64"
+	"errors"
+	"strings"
+	"testing"
+)
+
+// The pair-consent vectors below are synthetic codec fixtures. The two Ed25519
+// keys are derived from the deterministic private seeds 0x40..0x5f (device a)
+// and 0x60..0x7f (device b); the signatures are real Ed25519 output over the
+// documented preimage. No key belongs to a real device, tenant, user, pair or
+// challenge, nothing was enrolled, and no human pairing ceremony or scan took
+// place. They demonstrate the codec, both signature checks and the exact
+// binding-digest inputs only.
+
+const (
+	// pairConsentSignedJSON is the exact signed tuple both endpoints sign.
+	pairConsentSignedJSON = `{"format":"locklark.remote-unlock","version":1,"kind":"pair-consent","tenant_id":"tenant-0001","user_id":"user-0001","pair_id":"pair-0001","pair_generation":0,"device_a_id":"device-a","device_a_binding_sha256":"04j4HDckmNyhhu0e6qXkMVIZdIwHoYmBiTFJsIydS60","device_b_id":"device-b","device_b_binding_sha256":"NWsOrEOFKW0A-0SPZgRjLTeYnpgfwWY_MbK32NapFW0","challenge_id":"challenge-0001","deadline_unix_ms":1800000000000}`
+	pairConsentJSON       = `{"format":"locklark.remote-unlock","version":1,"kind":"pair-consent","tenant_id":"tenant-0001","user_id":"user-0001","pair_id":"pair-0001","pair_generation":0,"device_a_id":"device-a","device_a_binding_sha256":"04j4HDckmNyhhu0e6qXkMVIZdIwHoYmBiTFJsIydS60","device_b_id":"device-b","device_b_binding_sha256":"NWsOrEOFKW0A-0SPZgRjLTeYnpgfwWY_MbK32NapFW0","challenge_id":"challenge-0001","deadline_unix_ms":1800000000000,"device_a_signature":"G36fzZrYecSw2HPsvE55MLiyCBXCYuZrvSlA1wm2lwayHS1ior7cq4lYn9B0k7TFAUknpWfD4DKF-oPGB9rADg","device_b_signature":"7FRtNu1r5aifdyzhpsfiXsqodAM77YdSlr1cBzzSVzN3CZNQhgS1GPUT4HGBBGo3BWBOZ13jZYKk7ff_WNUlAw"}`
+
+	pairConsentKeyA = "JUO5L_EJVRFHatyDadtt3JM2ZaEZeN2hQE7hBmypVZ0"
+	pairConsentKeyB = "F0VTtFbd38aQjsqxwQH-arIeK6oGF3lbfUOmNIKZP9U"
+
+	pairConsentNow        = int64(1799999900000)
+	pairConsentDeadline   = int64(1800000000000)
+	pairConsentGeneration = uint64(0)
+)
+
+func pairConsentSeedA() ed25519.PrivateKey {
+	seed := make([]byte, ed25519.SeedSize)
+	for i := range seed {
+		seed[i] = byte(0x40 + i)
+	}
+	return ed25519.NewKeyFromSeed(seed)
+}
+
+func pairConsentSeedB() ed25519.PrivateKey {
+	seed := make([]byte, ed25519.SeedSize)
+	for i := range seed {
+		seed[i] = byte(0x60 + i)
+	}
+	return ed25519.NewKeyFromSeed(seed)
+}
+
+func pairConsentPubA() ed25519.PublicKey { return pairConsentSeedA().Public().(ed25519.PublicKey) }
+func pairConsentPubB() ed25519.PublicKey { return pairConsentSeedB().Public().(ed25519.PublicKey) }
+
+// pairConsentFixtureKey derives an arbitrary synthetic identity key from one
+// seed byte. It is a test fixture only.
+func pairConsentFixtureKey(seed byte) ed25519.PrivateKey { return seedKey(seed) }
+
+func pairConsentKeys() DeviceIDSignerKeys {
+	return DeviceIDSignerKeys{DeviceAKey: pairConsentPubA(), DeviceBKey: pairConsentPubB()}
+}
+
+// pairConsentVectorBindings returns the two complete, signed synthetic
+// DeviceTransportBinding objects the vector consents to, device a first.
+func pairConsentVectorBindings(t *testing.T) (DeviceTransportBinding, DeviceTransportBinding) {
+	t.Helper()
+	// A synthetic 32-byte SPKI digest for the bindings whose complete signed
+	// bytes are digested; the consent itself never carries it.
+	spki := ascendingDigest()
+	for i := range spki {
+		spki[i]++
+	}
+	binding := func(deviceID string, key ed25519.PrivateKey) DeviceTransportBinding {
+		b := DeviceTransportBinding{
+			MemberID:           "member-0001",
+			DeviceID:           deviceID,
+			InstallID:          "install-" + deviceID,
+			VaultID:            "vault-0001",
+			PairGeneration:     0,
+			SPKISHA256:         spki,
+			RecipientPublicKey: "age12avp6cfclu3g432g8lhp6hyyhd5q78qjntxafudl2wnusnnprdwsqfy4ea",
+		}
+		msg, err := SigningBytes(b)
+		if err != nil {
+			t.Fatalf("SigningBytes(%s): %v", deviceID, err)
+		}
+		copy(b.Signature[:], ed25519.Sign(key, msg))
+		return b
+	}
+	return binding("device-a", pairConsentSeedA()), binding("device-b", pairConsentSeedB())
+}
+
+// pairConsentVectorInput is the unsigned vector consent. Its two binding
+// digests are DeviceTransportBindingDigest of the complete signed synthetic
+// bindings, so the vector itself shows how the digests are derived.
+func pairConsentVectorInput(t *testing.T) PairConsent {
+	t.Helper()
+	bindingA, bindingB := pairConsentVectorBindings(t)
+	digestA, err := DeviceTransportBindingDigest(bindingA)
+	if err != nil {
+		t.Fatalf("DeviceTransportBindingDigest(a): %v", err)
+	}
+	digestB, err := DeviceTransportBindingDigest(bindingB)
+	if err != nil {
+		t.Fatalf("DeviceTransportBindingDigest(b): %v", err)
+	}
+	return PairConsent{
+		TenantID:             "tenant-0001",
+		UserID:               "user-0001",
+		PairID:               "pair-0001",
+		PairGeneration:       pairConsentGeneration,
+		DeviceAID:            "device-a",
+		DeviceABindingSHA256: digestA,
+		DeviceBID:            "device-b",
+		DeviceBBindingSHA256: digestB,
+		ChallengeID:          "challenge-0001",
+		DeadlineUnixMS:       pairConsentDeadline,
+	}
+}
+
+// signPairConsent signs the current fields with the synthetic identity keys,
+// device a then device b. It is a test helper, not a production key path.
+func signPairConsent(t *testing.T, c PairConsent) PairConsent {
+	t.Helper()
+	msg, err := PairConsentSigningBytes(c)
+	if err != nil {
+		t.Fatalf("PairConsentSigningBytes: %v", err)
+	}
+	c.DeviceASignature = [PairConsentSignatureSize]byte{}
+	c.DeviceBSignature = [PairConsentSignatureSize]byte{}
+	copy(c.DeviceASignature[:], ed25519.Sign(pairConsentSeedA(), msg))
+	copy(c.DeviceBSignature[:], ed25519.Sign(pairConsentSeedB(), msg))
+	return c
+}
+
+func pairConsentVector(t *testing.T) PairConsent {
+	t.Helper()
+	return signPairConsent(t, pairConsentVectorInput(t))
+}
+
+func mustEncodePairConsent(t *testing.T, c PairConsent) []byte {
+	t.Helper()
+	encoded, err := EncodePairConsent(c)
+	if err != nil {
+		t.Fatalf("EncodePairConsent: %v", err)
+	}
+	return encoded
+}
+
+// verifyPairConsentVector verifies c against the canonical vector scope.
+func verifyPairConsentVector(c PairConsent, keys DeviceIDSignerKeys, now int64) error {
+	return VerifyPairConsent(c, "tenant-0001", "user-0001", "pair-0001", pairConsentGeneration, "challenge-0001", pairConsentDeadline, "device-a", "device-b", keys, now)
+}
+
+func requirePairConsentField(t *testing.T, err error, field string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("expected an error naming %q, got nil", field)
+	}
+	var fe *PairConsentFieldError
+	if !errors.As(err, &fe) {
+		t.Fatalf("error is not a *PairConsentFieldError: %v", err)
+	}
+	if fe.Field != field {
+		t.Fatalf("PairConsentFieldError.Field = %q, want %q (%v)", fe.Field, field, err)
+	}
+}
+
+// TestPairConsentFixedSyntheticVector pins the exact canonical bytes, the exact
+// shared signature preimage and the deterministic keys, and checks that both
+// fixed signatures verify under the caller-pinned keys.
+func TestPairConsentFixedSyntheticVector(t *testing.T) {
+	c := pairConsentVector(t)
+
+	if got := base64.RawURLEncoding.EncodeToString(pairConsentPubA()); got != pairConsentKeyA {
+		t.Fatalf("deterministic device a public key = %q, want %q", got, pairConsentKeyA)
+	}
+	if got := base64.RawURLEncoding.EncodeToString(pairConsentPubB()); got != pairConsentKeyB {
+		t.Fatalf("deterministic device b public key = %q, want %q", got, pairConsentKeyB)
+	}
+
+	encoded := mustEncodePairConsent(t, c)
+	if string(encoded) != pairConsentJSON {
+		t.Fatalf("canonical encoding mismatch\n got: %s\nwant: %s", encoded, pairConsentJSON)
+	}
+	if len(encoded) != 638 || len(encoded) > MaxPairConsentSize {
+		t.Fatalf("vector uses %d bytes, want 638 within budget %d", len(encoded), MaxPairConsentSize)
+	}
+
+	parsed, err := ParsePairConsent([]byte(pairConsentJSON))
+	if err != nil {
+		t.Fatalf("ParsePairConsent: %v", err)
+	}
+	if parsed != c {
+		t.Fatalf("parsed consent mismatch\n got: %+v\nwant: %+v", parsed, c)
+	}
+	if !bytes.Equal(mustEncodePairConsent(t, parsed), encoded) {
+		t.Fatal("parse then encode is not byte-identical")
+	}
+
+	preimage, err := PairConsentSigningBytes(c)
+	if err != nil {
+		t.Fatalf("PairConsentSigningBytes: %v", err)
+	}
+	wantPreimage := PairConsentSignatureDomain + pairConsentSignedJSON
+	if string(preimage) != wantPreimage {
+		t.Fatalf("signature preimage mismatch\n got: %q\nwant: %q", preimage, wantPreimage)
+	}
+	if len(preimage) != 457 {
+		t.Fatalf("preimage length = %d, want 457", len(preimage))
+	}
+	// Both endpoints signed the one preimage; the signatures must be real
+	// Ed25519 outputs distinct from each other.
+	if !ed25519.Verify(pairConsentPubA(), preimage, c.DeviceASignature[:]) {
+		t.Fatal("device a signature does not verify over the shared preimage")
+	}
+	if !ed25519.Verify(pairConsentPubB(), preimage, c.DeviceBSignature[:]) {
+		t.Fatal("device b signature does not verify over the shared preimage")
+	}
+	if bytes.Equal(c.DeviceASignature[:], c.DeviceBSignature[:]) {
+		t.Fatal("the two synthetic signatures are identical")
+	}
+
+	if err := verifyPairConsentVector(c, pairConsentKeys(), pairConsentNow); err != nil {
+		t.Fatalf("VerifyPairConsent: %v", err)
+	}
+
+	// The JSON and stream APIs must not diverge.
+	marshaled, err := c.MarshalJSON()
+	if err != nil || !bytes.Equal(marshaled, encoded) {
+		t.Fatalf("MarshalJSON = %s, %v; want %s, nil", marshaled, err, encoded)
+	}
+	var decoded PairConsent
+	if err := decoded.UnmarshalJSON(encoded); err != nil {
+		t.Fatalf("UnmarshalJSON: %v", err)
+	}
+	if decoded != c {
+		t.Fatalf("UnmarshalJSON consent mismatch\n got: %+v\nwant: %+v", decoded, c)
+	}
+}
+
+// TestPairConsentGenerationZeroIsExplicitAndRequired pins that an explicit
+// canonical zero round-trips while a missing pair_generation never parses.
+func TestPairConsentGenerationZeroIsExplicitAndRequired(t *testing.T) {
+	c := pairConsentVector(t)
+	if c.PairGeneration != 0 {
+		t.Fatalf("fixture pair_generation = %d, want explicit 0", c.PairGeneration)
+	}
+	parsed, err := ParsePairConsent([]byte(pairConsentJSON))
+	if err != nil || parsed.PairGeneration != 0 {
+		t.Fatalf("explicit zero: ParsePairConsent = %d, %v", parsed.PairGeneration, err)
+	}
+
+	// A zero other than the canonical "0" never parses.
+	for _, zero := range []string{"00", "-0", "+0", "0.0", "0e0", "0E+1"} {
+		data := strings.Replace(pairConsentJSON, `"pair_generation":0,`, `"pair_generation":`+zero+`,`, 1)
+		if data == pairConsentJSON {
+			t.Fatal("mutation did not apply")
+		}
+		if _, err := ParsePairConsent([]byte(data)); !errors.Is(err, ErrInvalidPairConsentEncoding) {
+			t.Fatalf("pair_generation %q: err = %v, want encoding rejection", zero, err)
+		}
+	}
+
+	// Missing pair_generation fails, both in the middle and at its position.
+	missing := strings.Replace(pairConsentJSON, `"pair_generation":0,`, "", 1)
+	_, err = ParsePairConsent([]byte(missing))
+	if !errors.Is(err, ErrInvalidPairConsentEncoding) {
+		t.Fatalf("missing pair_generation: err = %v, want encoding rejection", err)
+	}
+	requirePairConsentField(t, err, "pair_generation")
+
+	// A non-zero generation is a different, still canonical consent.
+	nonZero := strings.Replace(pairConsentJSON, `"pair_generation":0,`, `"pair_generation":1,`, 1)
+	if _, err := ParsePairConsent([]byte(nonZero)); err != nil {
+		t.Fatalf("pair_generation 1 should be canonical-valid: %v", err)
+	}
+}
+
+func TestEncodePairConsentRejectsInvalidFields(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*PairConsent)
+		field  string
+	}{
+		{"tenant id empty", func(c *PairConsent) { c.TenantID = "" }, "tenant_id"},
+		{"user id empty", func(c *PairConsent) { c.UserID = "" }, "user_id"},
+		{"pair id too long", func(c *PairConsent) { c.PairID = strings.Repeat("a", MaxIdentifierLen+1) }, "pair_id"},
+		{"device a uppercase", func(c *PairConsent) { c.DeviceAID = "DEVICE-A" }, "device_a_id"},
+		{"device b non ascii", func(c *PairConsent) { c.DeviceBID = "device-bé" }, "device_b_id"},
+		{"challenge id slash", func(c *PairConsent) { c.ChallengeID = "challenge/0001" }, "challenge_id"},
+		{"identical endpoints", func(c *PairConsent) { c.DeviceBID = c.DeviceAID }, "device_b_id"},
+		{"reversed endpoints", func(c *PairConsent) { c.DeviceAID, c.DeviceBID = c.DeviceBID, c.DeviceAID }, "device_b_id"},
+		{"zero deadline", func(c *PairConsent) { c.DeadlineUnixMS = 0 }, "deadline_unix_ms"},
+		{"negative deadline", func(c *PairConsent) { c.DeadlineUnixMS = -1 }, "deadline_unix_ms"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := pairConsentVector(t)
+			tt.mutate(&c)
+			_, err := EncodePairConsent(c)
+			if !errors.Is(err, ErrInvalidPairConsent) {
+				t.Fatalf("error does not wrap ErrInvalidPairConsent: %v", err)
+			}
+			requirePairConsentField(t, err, tt.field)
+		})
+	}
+}
+
+func TestPairConsentMaximumLegalEncoding(t *testing.T) {
+	id := strings.Repeat("a", MaxIdentifierLen)
+	c := PairConsent{
+		TenantID:       id,
+		UserID:         id,
+		PairID:         id,
+		PairGeneration: ^uint64(0),
+		DeviceAID:      "a" + strings.Repeat("a", MaxIdentifierLen-1),
+		DeviceBID:      "b" + strings.Repeat("a", MaxIdentifierLen-1),
+		ChallengeID:    id,
+		DeadlineUnixMS: int64(^uint64(0) >> 1),
+	}
+	c.DeviceABindingSHA256 = ascendingDigest()
+	c.DeviceBBindingSHA256 = descendingDigest()
+	for i := range c.DeviceASignature {
+		c.DeviceASignature[i] = 0xff
+		c.DeviceBSignature[i] = 0xff
+	}
+	encoded, err := EncodePairConsent(c)
+	if err != nil {
+		t.Fatalf("EncodePairConsent(maximum): %v", err)
+	}
+	// 6 identifiers x 128 + uint64 maximum (20) + int64 maximum (19) +
+	// 2 digests x 43 + 2 signatures x 86 + 307 bytes of constant schema text.
+	const maxLegal = 6*128 + 20 + 19 + 2*43 + 2*86 + 307
+	if maxLegal != 1372 || len(encoded) != maxLegal || maxLegal > MaxPairConsentSize {
+		t.Fatalf("maximum encoding is %d bytes, want %d within %d", len(encoded), maxLegal, MaxPairConsentSize)
+	}
+	parsed, err := ParsePairConsent(encoded)
+	if err != nil {
+		t.Fatalf("ParsePairConsent(maximum): %v", err)
+	}
+	if parsed != c {
+		t.Fatal("maximum consent did not round-trip")
+	}
+	// The signed tuple alone stays well inside the same bound.
+	preimage, err := PairConsentSigningBytes(c)
+	if err != nil || len(preimage) != 1191 {
+		t.Fatalf("PairConsentSigningBytes = %d bytes, %v; want 1191", len(preimage), err)
+	}
+}
+
+// consentRenameMember rewrites one top-level member name, so tests can probe
+// unknown and reordered members without touching values.
+func consentRenameMember(json, from, to string) string {
+	return strings.Replace(json, `"`+from+`":`, `"`+to+`":`, 1)
+}
+
+func consentDropMember(json, member string) string {
+	key := `"` + member + `":`
+	i := strings.Index(json, key)
+	if i < 0 {
+		return json
+	}
+	j := strings.IndexByte(json[i:], ',')
+	if j < 0 {
+		return json
+	}
+	if i > 0 && json[i-1] == ',' {
+		return json[:i-1] + json[i+j:]
+	}
+	return json[:i] + json[i+j+1:]
+}
+
+func TestPairConsentParseRejectsNonCanonicalInput(t *testing.T) {
+	// The last base64url character of the device a signature ("g") carries
+	// only four significant bits, so "4".."f", "A".."F" and "g" all decode to
+	// the same 64 bytes. Any other character in that class is a
+	// non-canonical spelling of the same signature.
+	mutatedSigA := strings.Replace(pairConsentJSON, `PGB9rADg"`, `PGB9rAD8"`, 1)
+	tests := []struct {
+		name  string
+		input string
+		field string
+	}{
+		{"empty", "", ""},
+		{"whitespace only", " ", ""},
+		{"not an object", "[]", ""},
+		{"leading whitespace", " " + pairConsentJSON, ""},
+		{"trailing whitespace", pairConsentJSON + " ", ""},
+		{"trailing newline", pairConsentJSON + "\n", ""},
+		{"trailing second object", pairConsentJSON + pairConsentJSON, ""},
+		{"missing closing brace", strings.TrimSuffix(pairConsentJSON, "}"), ""},
+		{"missing final member and brace", pairConsentJSON[:strings.Index(pairConsentJSON, `,"device_b_signature"`)] + "}", "device_b_signature"},
+		{"reordered members", consentRenameMember(consentRenameMember(pairConsentJSON, "pair_id", "pair-beta"), "user_id", "pair_id"), "user_id"},
+		{"device b placed before device a", strings.Replace(strings.Replace(pairConsentJSON,
+			`"device_a_id":"device-a","device_a_binding_sha256":`,
+			`"device_b_id":"device-b","device_a_binding_sha256":`, 1),
+			`"device_b_binding_sha256":`, `"device_a_id":"device-a","device_b_binding_sha256":`, 1), "device_a_id"},
+		{"missing comma", strings.Replace(pairConsentJSON, `"pair_generation":0,"device_a_id"`, `"pair_generation":0 "device_a_id"`, 1), "device_a_id"},
+		{"missing colon", strings.Replace(pairConsentJSON, `"pair_id":"pair-0001"`, `"pair_id" "pair-0001"`, 1), "pair_id"},
+		{"unknown member", strings.Replace(pairConsentJSON, `"kind":"pair-consent",`, `"kind":"pair-consent","vault_id":"vault-0001",`, 1), ""},
+		{"duplicate member", strings.Replace(pairConsentJSON, `"pair_id":"pair-0001",`, `"pair_id":"pair-0001","pair_id":"pair-0001",`, 1), "pair_id"},
+		{"duplicate trailing member", pairConsentJSON[:len(pairConsentJSON)-1] + `,"device_b_signature":"` + strings.Repeat("_", 86) + `"}`, ""},
+		{"unknown trailing member", pairConsentJSON[:len(pairConsentJSON)-1] + `,"vault_id":"vault-0001"}`, ""},
+		{"missing tenant", consentDropMember(pairConsentJSON, "tenant_id"), "tenant_id"},
+		{"missing generation", consentDropMember(pairConsentJSON, "pair_generation"), "pair_generation"},
+		{"missing device a digest", consentDropMember(pairConsentJSON, "device_a_binding_sha256"), "device_a_binding_sha256"},
+		{"wrong kind", strings.Replace(pairConsentJSON, `"kind":"pair-consent"`, `"kind":"channel-binding-context"`, 1), "kind"},
+		{"wrong format", strings.Replace(pairConsentJSON, `"format":"locklark.remote-unlock"`, `"format":"locklark.remote-unlock2"`, 1), "format"},
+		{"version 2", strings.Replace(pairConsentJSON, `"version":1`, `"version":2`, 1), "version"},
+		{"version string", strings.Replace(pairConsentJSON, `"version":1`, `"version":"1"`, 1), "version"},
+		{"generation leading zero", strings.Replace(pairConsentJSON, `"pair_generation":0`, `"pair_generation":00`, 1), "pair_generation"},
+		{"generation fraction", strings.Replace(pairConsentJSON, `"pair_generation":0`, `"pair_generation":0.0`, 1), "pair_generation"},
+		{"generation negative", strings.Replace(pairConsentJSON, `"pair_generation":0`, `"pair_generation":-1`, 1), "pair_generation"},
+		{"generation exponent", strings.Replace(pairConsentJSON, `"pair_generation":0`, `"pair_generation":1e0`, 1), "pair_generation"},
+		{"generation overflow", strings.Replace(pairConsentJSON, `"pair_generation":0`, `"pair_generation":18446744073709551616`, 1), "pair_generation"},
+		{"generation string", strings.Replace(pairConsentJSON, `"pair_generation":0`, `"pair_generation":"0"`, 1), "pair_generation"},
+		{"deadline zero", strings.Replace(pairConsentJSON, `"deadline_unix_ms":1800000000000`, `"deadline_unix_ms":0`, 1), "deadline_unix_ms"},
+		{"deadline negative", strings.Replace(pairConsentJSON, `"deadline_unix_ms":1800000000000`, `"deadline_unix_ms":-1800000000000`, 1), "deadline_unix_ms"},
+		{"deadline leading zero", strings.Replace(pairConsentJSON, `"deadline_unix_ms":1800000000000`, `"deadline_unix_ms":01800000000000`, 1), "deadline_unix_ms"},
+		{"deadline fraction", strings.Replace(pairConsentJSON, `"deadline_unix_ms":1800000000000`, `"deadline_unix_ms":1800000000000.0`, 1), "deadline_unix_ms"},
+		{"deadline overflow", strings.Replace(pairConsentJSON, `"deadline_unix_ms":1800000000000`, `"deadline_unix_ms":9223372036854775808`, 1), "deadline_unix_ms"},
+		{"deadline quoted", strings.Replace(pairConsentJSON, `"deadline_unix_ms":1800000000000`, `"deadline_unix_ms":"1800000000000"`, 1), "deadline_unix_ms"},
+		{"identical endpoints", strings.Replace(pairConsentJSON, `"device_b_id":"device-b"`, `"device_b_id":"device-a"`, 1), "device_b_id"},
+		{"reversed endpoints", strings.Replace(strings.Replace(pairConsentJSON, `"device_a_id":"device-a"`, `"device_a_id":"device-z"`, 1), `"device_b_id":"device-b"`, `"device_b_id":"device-y"`, 1), "device_b_id"},
+		{"device a digest short", strings.Replace(pairConsentJSON, `"device_a_binding_sha256":"04j4HDckmNyhhu0e6qXkMVIZdIwHoYmBiTFJsIydS60"`, `"device_a_binding_sha256":"04j4HDckmNyhhu0e6qXkMVIZdIwHoYmBiTFJsIydS6"`, 1), "device_a_binding_sha256"},
+		{"device b digest long", strings.Replace(pairConsentJSON, `"device_b_binding_sha256":"NWsOrEOFKW0A-0SPZgRjLTeYnpgfwWY_MbK32NapFW0"`, `"device_b_binding_sha256":"NWsOrEOFKW0A-0SPZgRjLTeYnpgfwWY_MbK32NapFW0AA"`, 1), "device_b_binding_sha256"},
+		{"device a digest padded", strings.Replace(pairConsentJSON, `"device_a_binding_sha256":"04j4HDckmNyhhu0e6qXkMVIZdIwHoYmBiTFJsIydS60"`, `"device_a_binding_sha256":"04j4HDckmNyhhu0e6qXkMVIZdIwHoYmBiTFJsIydS60="`, 1), "device_a_binding_sha256"},
+		{"device b digest standard alphabet", strings.Replace(pairConsentJSON, `"device_b_binding_sha256":"NWsOrEOFKW0A-0SPZgRjLTeYnpgfwWY_MbK32NapFW0"`, `"device_b_binding_sha256":"NWsOrEOFKW0A-0SPZgRjLTeYnpgfwWY_MbK32NapFW+/"`, 1), "device_b_binding_sha256"},
+		{"device a signature short", strings.Replace(pairConsentJSON, `"device_a_signature":"G36fzZrYecSw2HPsvE55MLiyCBXCYuZrvSlA1wm2lwayHS1ior7cq4lYn9B0k7TFAUknpWfD4DKF-oPGB9rADg"`, `"device_a_signature":"G36fzZrYecSw2HPsvE55MLiyCBXCYuZrvSlA1wm2lwayHS1ior7cq4lYn9B0k7TFAUknpWfD4DKF-oPGB9rAD"`, 1), "device_a_signature"},
+		{"device a signature long", strings.Replace(pairConsentJSON, `"device_a_signature":"G36fzZrYecSw2HPsvE55MLiyCBXCYuZrvSlA1wm2lwayHS1ior7cq4lYn9B0k7TFAUknpWfD4DKF-oPGB9rADg"`, `"device_a_signature":"G36fzZrYecSw2HPsvE55MLiyCBXCYuZrvSlA1wm2lwayHS1ior7cq4lYn9B0k7TFAUknpWfD4DKF-oPGB9rADgAA"`, 1), "device_a_signature"},
+		{"non-zero trailing bits", mutatedSigA, "device_a_signature"},
+		{"trailing comma", strings.Replace(pairConsentJSON, `"device_b_signature":`, `"device_b_signature":"",`, 1), "device_b_signature"},
+		{"escaped device id", strings.Replace(pairConsentJSON, `"device_a_id":"device-a"`, `"device_a_id":"device\u002da"`, 1), "device_a_id"},
+		{"empty tenant", strings.Replace(pairConsentJSON, `"tenant_id":"tenant-0001"`, `"tenant_id":""`, 1), "tenant_id"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.input == pairConsentJSON {
+				t.Fatalf("mutation %q did not change the vector", tt.name)
+			}
+			_, err := ParsePairConsent([]byte(tt.input))
+			if !errors.Is(err, ErrInvalidPairConsentEncoding) {
+				t.Fatalf("ParsePairConsent(%q) err = %v, want ErrInvalidPairConsentEncoding", tt.name, err)
+			}
+			requirePairConsentField(t, err, tt.field)
+		})
+	}
+}
+
+func TestPairConsentParseRejectsStructuralDamage(t *testing.T) {
+	valid := []byte(pairConsentJSON)
+	inputs := map[string][]byte{
+		"invalid utf8":        []byte("{\"format\":\"\xff\xfe\"}"),
+		"single quote keys":   []byte(strings.Replace(pairConsentJSON, `"format":`, `'format':`, 1)),
+		"nul after value":     append([]byte(pairConsentJSON), 0x00),
+		"tab between members": bytes.Replace(valid, []byte(`,"kind"`), []byte(",\t\"kind\""), 1),
+		"null member value":   []byte(strings.Replace(pairConsentJSON, `"challenge_id":"challenge-0001"`, `"challenge_id":null`, 1)),
+		"array digest":        []byte(strings.Replace(pairConsentJSON, `"device_a_binding_sha256":"04j4HDckmNyhhu0e6qXkMVIZdIwHoYmBiTFJsIydS60"`, `"device_a_binding_sha256":[]`, 1)),
+		"uppercase id":        []byte(strings.Replace(pairConsentJSON, `"pair_id":"pair-0001"`, `"pair_id":"PAIR-0001"`, 1)),
+	}
+	for name, in := range inputs {
+		t.Run(name, func(t *testing.T) {
+			if !errors.Is(mustErr(ParsePairConsent(in)), ErrInvalidPairConsentEncoding) {
+				t.Fatalf("%s: not rejected as an encoding error", name)
+			}
+		})
+	}
+}
+
+func mustErr[T any](_ T, err error) error { return err }
+
+func TestPairConsentParseRejectsOversizedInput(t *testing.T) {
+	oversized := make([]byte, MaxPairConsentSize+1)
+	copy(oversized, pairConsentJSON)
+	for i := len(pairConsentJSON); i < len(oversized); i++ {
+		oversized[i] = ' '
+	}
+	_, err := ParsePairConsent(oversized)
+	if !errors.Is(err, ErrInvalidPairConsentEncoding) {
+		t.Fatalf("oversized input err = %v, want ErrInvalidPairConsentEncoding", err)
+	}
+	requirePairConsentField(t, err, "")
+	// A 2048-byte input is not rejected for its size; it is still rejected
+	// as trailing data or a malformed member at its first bad byte.
+	atBudget := make([]byte, MaxPairConsentSize)
+	copy(atBudget, pairConsentJSON)
+	if _, err := ParsePairConsent(atBudget); !errors.Is(err, ErrInvalidPairConsentEncoding) {
+		t.Fatalf("2048-byte input err = %v, want ErrInvalidPairConsentEncoding", err)
+	}
+	// The exact canonical bytes pass.
+	if _, err := ParsePairConsent([]byte(pairConsentJSON)); err != nil {
+		t.Fatalf("canonical vector rejected: %v", err)
+	}
+}
+
+func TestPairConsentErrorsNeverContainValues(t *testing.T) {
+	c := pairConsentVector(t)
+	encoded := mustEncodePairConsent(t, c)
+	secrets := []string{
+		"tenant-0001", "user-0001", "pair-0001", "device-a", "device-b", "challenge-0001",
+		base64.RawURLEncoding.EncodeToString(c.DeviceABindingSHA256[:]),
+		base64.RawURLEncoding.EncodeToString(c.DeviceBBindingSHA256[:]),
+		base64.RawURLEncoding.EncodeToString(c.DeviceASignature[:]),
+		base64.RawURLEncoding.EncodeToString(c.DeviceBSignature[:]),
+	}
+	check := func(t *testing.T, err error) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("expected an error")
+		}
+		msg := err.Error()
+		for _, s := range secrets {
+			if strings.Contains(msg, s) {
+				t.Fatalf("error leaks a member value: %v", err)
+			}
+		}
+		if strings.Contains(msg, string(encoded)) {
+			t.Fatalf("error leaks the encoding: %v", err)
+		}
+	}
+
+	_, err := ParsePairConsent([]byte(strings.Replace(pairConsentJSON, `"device_a_signature":"G36fzZrYecSw2HPsvE55MLiyCBXCYuZrvSlA1wm2lwayHS1ior7cq4lYn9B0k7TFAUknpWfD4DKF-oPGB9rADg"`, `"device_a_signature":"0DvVrOuuYtJfLYFbfmseG2NA_OI1aTfAuRYLEHBPkirdneF6dC2wHzPfNmJuyMae6lbLehncTFcb_W1gvySxBx"`, 1)))
+	check(t, err)
+	_, err = ParsePairConsent([]byte(strings.Replace(pairConsentJSON, `"kind":"pair-consent"`, `"kind":"pair-consent-x"`, 1)))
+	check(t, err)
+	_, err = EncodePairConsent(PairConsent{})
+	check(t, err)
+	bad := c
+	bad.DeviceASignature[0] ^= 0xff
+	check(t, verifyPairConsentVector(bad, pairConsentKeys(), pairConsentNow))
+	check(t, verifyPairConsentVector(c, DeviceIDSignerKeys{DeviceAKey: pairConsentPubB(), DeviceBKey: pairConsentPubA()}, pairConsentNow))
+}
+
+// TestVerifyPairConsentPositiveDualSignature pins that exactly the two
+// caller-pinned registered identity keys, each for its own endpoint, accept.
+func TestVerifyPairConsentPositiveDualSignature(t *testing.T) {
+	c := pairConsentVector(t)
+	if err := verifyPairConsentVector(c, pairConsentKeys(), pairConsentNow); err != nil {
+		t.Fatalf("VerifyPairConsent: %v", err)
+	}
+	// A copy of the same key bytes is accepted: only the bytes are pinned,
+	// and this package holds no key store.
+	keys := DeviceIDSignerKeys{
+		DeviceAKey: append(ed25519.PublicKey(nil), pairConsentPubA()...),
+		DeviceBKey: append(ed25519.PublicKey(nil), pairConsentPubB()...),
+	}
+	if err := verifyPairConsentVector(c, keys, pairConsentNow); err != nil {
+		t.Fatalf("VerifyPairConsent(copied keys): %v", err)
+	}
+
+	// The consent is a pure signature check: the same bytes verify again.
+	if err := verifyPairConsentVector(c, pairConsentKeys(), pairConsentNow); err != nil {
+		t.Fatalf("VerifyPairConsent(replay): %v", err)
+	}
+}
+
+func TestVerifyPairConsentRejectsKeyMutations(t *testing.T) {
+	c := pairConsentVector(t)
+	otherA := pairConsentFixtureKey(0x10).Public().(ed25519.PublicKey)
+	otherB := pairConsentFixtureKey(0x30).Public().(ed25519.PublicKey)
+	tests := []struct {
+		name  string
+		keys  DeviceIDSignerKeys
+		field string
+	}{
+		{"wrong device a key", DeviceIDSignerKeys{DeviceAKey: otherA, DeviceBKey: pairConsentPubB()}, "device_a_signature"},
+		{"wrong device b key", DeviceIDSignerKeys{DeviceAKey: pairConsentPubA(), DeviceBKey: otherB}, "device_b_signature"},
+		{"both keys wrong", DeviceIDSignerKeys{DeviceAKey: otherA, DeviceBKey: otherB}, "device_a_signature"},
+		{"device a and b keys swapped", DeviceIDSignerKeys{DeviceAKey: pairConsentPubB(), DeviceBKey: pairConsentPubA()}, "device_a_signature"},
+		{"same key for both endpoints", DeviceIDSignerKeys{DeviceAKey: pairConsentPubA(), DeviceBKey: pairConsentPubA()}, "identity_key"},
+		{"nil device a key", DeviceIDSignerKeys{DeviceBKey: pairConsentPubB()}, "identity_key"},
+		{"nil device b key", DeviceIDSignerKeys{DeviceAKey: pairConsentPubA()}, "identity_key"},
+		{"short device a key", DeviceIDSignerKeys{DeviceAKey: pairConsentPubA()[:31], DeviceBKey: pairConsentPubB()}, "identity_key"},
+		{"long device b key", DeviceIDSignerKeys{DeviceAKey: pairConsentPubA(), DeviceBKey: append(append(ed25519.PublicKey{}, pairConsentPubB()...), 0)}, "identity_key"},
+		{"device a key bit flip", DeviceIDSignerKeys{DeviceAKey: flippedKey(pairConsentPubA()), DeviceBKey: pairConsentPubB()}, "device_a_signature"},
+		{"device b key bit flip", DeviceIDSignerKeys{DeviceAKey: pairConsentPubA(), DeviceBKey: flippedKey(pairConsentPubB())}, "device_b_signature"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := verifyPairConsentVector(c, tt.keys, pairConsentNow)
+			if !errors.Is(err, ErrInvalidPairConsent) {
+				t.Fatalf("error does not wrap ErrInvalidPairConsent: %v", err)
+			}
+			requirePairConsentField(t, err, tt.field)
+		})
+	}
+}
+
+// zeroSignature returns c with one signature replaced by 64 zero bytes. A
+// real Ed25519 signature is never all zero, and the verifier must still run.
+func zeroSignature(c PairConsent, deviceA bool) PairConsent {
+	if deviceA {
+		c.DeviceASignature = [PairConsentSignatureSize]byte{}
+		return c
+	}
+	c.DeviceBSignature = [PairConsentSignatureSize]byte{}
+	return c
+}
+
+func flippedKey(k ed25519.PublicKey) ed25519.PublicKey {
+	out := append(ed25519.PublicKey(nil), k...)
+	out[0] ^= 0x01
+	return out
+}
+
+// TestVerifyPairConsentRejectsSwappedDeviceAssociation pins that the key pinned
+// for a device is never accepted for the other device, in either direction, and
+// that one key is never accepted for both endpoints.
+func TestVerifyPairConsentRejectsSwappedDeviceAssociation(t *testing.T) {
+	c := pairConsentVector(t)
+
+	// Sign device a with b's key and device b with a's key, keeping the
+	// canonical tuple. Only a verifier that ignores the device-to-key
+	// association could accept this.
+	msg, err := PairConsentSigningBytes(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	swapped := c
+	copy(swapped.DeviceASignature[:], ed25519.Sign(pairConsentSeedB(), msg))
+	copy(swapped.DeviceBSignature[:], ed25519.Sign(pairConsentSeedA(), msg))
+	if bytes.Equal(swapped.DeviceASignature[:], c.DeviceASignature[:]) || bytes.Equal(swapped.DeviceBSignature[:], c.DeviceBSignature[:]) {
+		t.Fatal("the crossed signatures are not distinct from the vector signatures")
+	}
+	requirePairConsentField(t, verifyPairConsentVector(swapped, pairConsentKeys(), pairConsentNow), "device_a_signature")
+	// A caller that pins each registered key to exactly its own endpoint
+	// accepts the crossed tuple only under the crossed pins, which pin b's
+	// key to device-a. That is a caller mistake the API cannot detect; it is
+	// pinned here so the association rule is explicit and one key is never
+	// used for both endpoints.
+	mixed := DeviceIDSignerKeys{DeviceAKey: pairConsentPubB(), DeviceBKey: pairConsentPubB()}
+	requirePairConsentField(t, verifyPairConsentVector(swapped, mixed, pairConsentNow), "identity_key")
+	crossedPins := DeviceIDSignerKeys{DeviceAKey: pairConsentPubB(), DeviceBKey: pairConsentPubA()}
+	if err := verifyPairConsentVector(swapped, crossedPins, pairConsentNow); err != nil {
+		t.Fatalf("crossed tuple under crossed pins: %v", err)
+	}
+	if err := verifyPairConsentVector(c, crossedPins, pairConsentNow); !errors.Is(err, ErrInvalidPairConsent) {
+		t.Fatalf("vector under crossed pins = %v, want rejection", err)
+	}
+
+	// Reversing the expected endpoints while keeping the same expectation keys
+	// pins a's key to device-b, which cannot match.
+	swappedExpect := func() error {
+		return VerifyPairConsent(c, "tenant-0001", "user-0001", "pair-0001", pairConsentGeneration, "challenge-0001", pairConsentDeadline, "device-b", "device-a", pairConsentKeys(), pairConsentNow)
+	}
+	requirePairConsentField(t, swappedExpect(), "expected")
+}
+
+// TestVerifyPairConsentRejectsConsentMutations covers scope, pair, generation,
+// device, digest, challenge and deadline changes. Every mutation is re-signed
+// with both of the same synthetic identity keys, so only the binding of the
+// tuple to the caller's expectations can reject it.
+func TestVerifyPairConsentRejectsConsentMutations(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*PairConsent)
+		field  string
+	}{
+		{"tenant", func(c *PairConsent) { c.TenantID = "tenant-0002" }, "tenant_id"},
+		{"user", func(c *PairConsent) { c.UserID = "user-0002" }, "user_id"},
+		{"pair", func(c *PairConsent) { c.PairID = "pair-0002" }, "pair_id"},
+		{"pair related pair", func(c *PairConsent) { c.PairID = "pair-0001-2" }, "pair_id"},
+		{"generation", func(c *PairConsent) { c.PairGeneration = 1 }, "pair_generation"},
+		{"generation max", func(c *PairConsent) { c.PairGeneration = ^uint64(0) }, "pair_generation"},
+		{"device a", func(c *PairConsent) { c.DeviceAID = "device-0" }, "device_a_id"},
+		{"device b", func(c *PairConsent) { c.DeviceBID = "device-c" }, "device_b_id"},
+		{"challenge", func(c *PairConsent) { c.ChallengeID = "challenge-0002" }, "challenge_id"},
+		{"deadline extended", func(c *PairConsent) { c.DeadlineUnixMS++ }, "deadline_unix_ms"},
+		{"deadline shortened", func(c *PairConsent) { c.DeadlineUnixMS-- }, "deadline_unix_ms"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := pairConsentVector(t)
+			tt.mutate(&c)
+			signed := signPairConsent(t, c)
+			err := verifyPairConsentVector(signed, pairConsentKeys(), pairConsentNow)
+			if !errors.Is(err, ErrInvalidPairConsent) {
+				t.Fatalf("mutated consent verified: %v", err)
+			}
+			requirePairConsentField(t, err, tt.field)
+		})
+	}
+}
+
+// TestVerifyPairConsentRejectsSignatureMutations covers a changed, truncated
+// or reordered signature.
+func TestVerifyPairConsentRejectsSignatureMutations(t *testing.T) {
+	c := pairConsentVector(t)
+	aFlipped := c
+	aFlipped.DeviceASignature[7] ^= 1
+	bFlipped := c
+	bFlipped.DeviceBSignature[7] ^= 1
+	crossed := c
+	crossed.DeviceASignature = c.DeviceBSignature
+	crossed.DeviceBSignature = c.DeviceASignature
+	for _, tc := range []struct {
+		name  string
+		c     PairConsent
+		field string
+	}{
+		{"device a bit flip", aFlipped, "device_a_signature"},
+		{"device b bit flip", bFlipped, "device_b_signature"},
+		{"signatures crossed", crossed, "device_a_signature"},
+		{"device a zero", zeroSignature(c, true), "device_a_signature"},
+		{"device b zero", zeroSignature(c, false), "device_b_signature"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requirePairConsentField(t, verifyPairConsentVector(tc.c, pairConsentKeys(), pairConsentNow), tc.field)
+		})
+	}
+}
+
+// TestVerifyPairConsentDeadlineBoundary pins that the original challenge
+// deadline is exclusive: now strictly before it passes, now at or after it
+// fails, and the deadline is never extended.
+func TestVerifyPairConsentDeadlineBoundary(t *testing.T) {
+	c := pairConsentVector(t)
+	for name, tc := range map[string]struct {
+		now   int64
+		ok    bool
+		field string
+	}{
+		"zero now":             {0, false, ""},
+		"negative now":         {-1, false, ""},
+		"one ms before":        {pairConsentDeadline - 1, true, ""},
+		"at deadline":          {pairConsentDeadline, false, "deadline_unix_ms"},
+		"one ms after":         {pairConsentDeadline + 1, false, "deadline_unix_ms"},
+		"far after deadline":   {pairConsentDeadline * 2, false, "deadline_unix_ms"},
+		"at extended deadline": {pairConsentDeadline + 60000, false, "deadline_unix_ms"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := verifyPairConsentVector(c, pairConsentKeys(), tc.now)
+			if tc.ok {
+				if err != nil {
+					t.Fatalf("VerifyPairConsent(now=%d): %v", tc.now, err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrInvalidPairConsent) {
+				t.Fatalf("VerifyPairConsent(now=%d) = %v, want rejection", tc.now, err)
+			}
+			requirePairConsentField(t, err, tc.field)
+		})
+	}
+
+	// The consent's own deadline is exclusive. A consent signed over an
+	// extended deadline is still only usable before that extended instant,
+	// and it never matches a caller still pinning the original deadline.
+	extended := c
+	extended.DeadlineUnixMS = pairConsentDeadline + 60000
+	extended = signPairConsent(t, extended)
+	expectExtended := func(now int64) error {
+		return VerifyPairConsent(extended, "tenant-0001", "user-0001", "pair-0001", pairConsentGeneration, "challenge-0001", pairConsentDeadline+60000, "device-a", "device-b", pairConsentKeys(), now)
+	}
+	if err := expectExtended(pairConsentDeadline - 1); err != nil {
+		t.Fatalf("extended consent before its own deadline: %v", err)
+	}
+	requirePairConsentField(t, expectExtended(pairConsentDeadline+60000), "deadline_unix_ms")
+	requirePairConsentField(t, verifyPairConsentVector(extended, pairConsentKeys(), pairConsentNow), "deadline_unix_ms")
+}
+
+// TestPairConsentDeviceOrder pins the strict bytewise order of the endpoints.
+func TestPairConsentDeviceOrder(t *testing.T) {
+	in := pairConsentVectorInput(t)
+	identical := in
+	identical.DeviceAID, identical.DeviceBID = "device-a", "device-a"
+	_, err := EncodePairConsent(identical)
+	if !errors.Is(err, ErrInvalidPairConsent) {
+		t.Fatalf("identical endpoints err = %v, want rejection", err)
+	}
+	requirePairConsentField(t, err, "device_b_id")
+
+	reversed := in
+	reversed.DeviceAID, reversed.DeviceBID = "device-b", "device-a"
+	reversed.DeviceABindingSHA256, reversed.DeviceBBindingSHA256 = reversed.DeviceBBindingSHA256, reversed.DeviceABindingSHA256
+	_, err = EncodePairConsent(reversed)
+	if !errors.Is(err, ErrInvalidPairConsent) {
+		t.Fatalf("reversed endpoints err = %v, want rejection", err)
+	}
+	requirePairConsentField(t, err, "device_b_id")
+
+	// Case and bytewise order: "device-A" < "device-a" because uppercase sorts
+	// first, but uppercase is outside the identifier grammar.
+	upper := in
+	upper.DeviceAID = "device-A"
+	requirePairConsentField(t, mustErr(EncodePairConsent(upper)), "device_a_id")
+
+	// A bytewise-ordered pair with a common prefix is canonical.
+	ordered := in
+	ordered.DeviceBID = "device-a0"
+	signed := signPairConsent(t, ordered)
+	if err := VerifyPairConsent(signed, "tenant-0001", "user-0001", "pair-0001", pairConsentGeneration, "challenge-0001", pairConsentDeadline, "device-a", "device-a0", pairConsentKeys(), pairConsentNow); err != nil {
+		t.Fatalf("ordered common-prefix pair: %v", err)
+	}
+
+	// A caller-pinned expectation that is reversed, equal or malformed can never
+	// be satisfied.
+	c := pairConsentVector(t)
+	invocations := map[string]error{
+		"reversed expectation":           VerifyPairConsent(c, "tenant-0001", "user-0001", "pair-0001", pairConsentGeneration, "challenge-0001", pairConsentDeadline, "device-b", "device-a", pairConsentKeys(), pairConsentNow),
+		"equal expectation":              VerifyPairConsent(c, "tenant-0001", "user-0001", "pair-0001", pairConsentGeneration, "challenge-0001", pairConsentDeadline, "device-a", "device-a", pairConsentKeys(), pairConsentNow),
+		"empty expectation":              VerifyPairConsent(c, "", "user-0001", "pair-0001", pairConsentGeneration, "challenge-0001", pairConsentDeadline, "device-a", "device-b", pairConsentKeys(), pairConsentNow),
+		"uppercase expectation":          VerifyPairConsent(c, "TENANT", "user-0001", "pair-0001", pairConsentGeneration, "challenge-0001", pairConsentDeadline, "device-a", "device-b", pairConsentKeys(), pairConsentNow),
+		"non-positive expected deadline": VerifyPairConsent(c, "tenant-0001", "user-0001", "pair-0001", pairConsentGeneration, "challenge-0001", 0, "device-a", "device-b", pairConsentKeys(), pairConsentNow),
+	}
+	for name, err := range invocations {
+		if !errors.Is(err, ErrInvalidPairConsent) {
+			t.Fatalf("%s: = %v, want rejection", name, err)
+		}
+		requirePairConsentField(t, err, "expected")
+	}
+}
+
+// TestVerifyPairConsentRejectsInvalidConsent pins that a consent whose own
+// values are invalid never verifies, even with valid signatures over it.
+func TestVerifyPairConsentRejectsInvalidConsent(t *testing.T) {
+	c := pairConsentVector(t)
+	zeroDeadline := c
+	zeroDeadline.DeadlineUnixMS = 0
+	// A signature over a tuple with a reversed device order cannot be
+	// produced through PairConsentSigningBytes, and the verifier rejects the
+	// values before any signature.
+	reversed := c
+	reversed.DeviceAID, reversed.DeviceBID = "device-b", "device-a"
+	requirePairConsentField(t, verifyPairConsentVector(reversed, pairConsentKeys(), pairConsentNow), "device_b_id")
+	requirePairConsentField(t, verifyPairConsentVector(zeroDeadline, pairConsentKeys(), pairConsentNow), "deadline_unix_ms")
+}
