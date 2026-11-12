@@ -530,9 +530,11 @@ func TestSealAuthenticatedFileWrongPin(t *testing.T) {
 // TestSealAuthenticatedFileWrongAuthorKey proves the author key check sits
 // between the chain and the VUK/CEK/KDBX work. The current policy authorizes
 // the header's author device, but each key below is not that device's
-// authenticated content signing key. The sentinel database reports
-// CodeKDBXPayloadInvalid inside SealKDBXPayload when the seal does reach it,
-// so an author-key error on the same database proves the seal stopped earlier.
+// authenticated content signing key, including the seed-only key whose public
+// half is exactly the authorized one but whose seed does not derive it. The
+// sentinel database reports CodeKDBXPayloadInvalid inside SealKDBXPayload when
+// the seal does reach it, so an author-key error on the same database proves
+// the seal stopped earlier.
 func TestSealAuthenticatedFileWrongAuthorKey(t *testing.T) {
 	fx := newSealFixture(t)
 	cases := map[string]ed25519.PrivateKey{
@@ -545,6 +547,13 @@ func TestSealAuthenticatedFileWrongAuthorKey(t *testing.T) {
 			k[ed25519.PrivateKeySize-1] ^= 0x01
 			return k
 		}(),
+		// Only a seed byte changes; the trailing public half, which
+		// PrivateKey.Public copies, still names the authorized device key.
+		"seed-only mutation": func() ed25519.PrivateKey {
+			k := bytes.Clone(fx.keys.dev1Priv)
+			k[0] ^= 0x01
+			return k
+		}(),
 	}
 	for name, key := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -552,7 +561,13 @@ func TestSealAuthenticatedFileWrongAuthorKey(t *testing.T) {
 			db, cred := sentinelDB(t)
 			draft := fx.draft()
 			before := deepCopyFile(draft)
+			// The caller's key is an input like the draft and VUK: the seal
+			// must not modify it, whatever it decides about it.
+			keyBefore := bytes.Clone(key)
 			out, err := SealAuthenticatedFile(draft, db, fx.chain.anchor, fx.vuk, key)
+			if key != nil && !bytes.Equal(key, keyBefore) {
+				t.Fatal("SealAuthenticatedFile modified the caller's author private key")
+			}
 			e, ok := AsError(err)
 			if !ok || e.Code != CodeAuthorSigningKeyMismatch || e.Path != "content_signature" {
 				t.Fatalf("err = %v, want %s at content_signature", err, CodeAuthorSigningKeyMismatch)

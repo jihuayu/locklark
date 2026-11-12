@@ -1,8 +1,8 @@
 package vaultfile
 
 import (
-	"bytes"
 	"crypto/ed25519"
+	"crypto/subtle"
 	"sort"
 
 	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
@@ -53,8 +53,12 @@ const CodeAuthorSigningKeyMismatch = "author_signing_key_mismatch"
 //     current policy and its principal must be a writer, admin or owner. The
 //     policy's content signing key for that device must be Ed25519, and
 //     authorPrivateKey must be exactly ed25519.PrivateKeySize bytes whose
-//     public key equals it; any failure is CodeAuthorSigningKeyMismatch at
-//     content_signature. No candidate roster or key from the draft is used.
+//     final public-key half equals it. It must also be internally consistent:
+//     the public key derived by ed25519.NewKeyFromSeed from its first
+//     ed25519.SeedSize bytes must equal both that half and the policy key,
+//     because PrivateKey.Public copies those trailing bytes without deriving
+//     them. Any failure is CodeAuthorSigningKeyMismatch at content_signature.
+//     No candidate roster or key from the draft is used.
 //  4. Epoch. The header's KeyEpoch must be positive (invalid_value at
 //     key_epoch). The VUK length was checked in step 1.
 //  5. VUK slots. On a deep local copy of draft, VUKDeviceSlots is replaced by
@@ -69,7 +73,9 @@ const CodeAuthorSigningKeyMismatch = "author_signing_key_mismatch"
 //  7. Signature and file. ContentSigningBytes of the completed draft is
 //     signed with authorPrivateKey over DomainContentSignature || 0x00 ||
 //     those bytes, SealFile binds the revision id and content signature, and
-//     the result is parsed with ParseFile.
+//     the result is parsed with ParseFile. The signature is made with the
+//     package-owned key derived from the validated seed, never with the
+//     caller's slice.
 //  8. Final verification. VerifyPolicyCheckpoint(sealed, checkpoint) must
 //     accept the finished file with the caller's checkpoint before its bytes
 //     are returned. This final check does not replace step 2.
@@ -127,16 +133,22 @@ func SealAuthenticatedFile(draft *File, db *kdbx.Database, checkpoint *PolicyChe
 		return nil, err
 	}
 
-	// 3. The author device and its content signing key, in that policy.
+	// 3. The author device and its content signing key, in that policy. The
+	// signing key is the package-owned key derived from the caller key's
+	// seed; the defer clears it on every return path, error or success.
 	author := draft.Header.AuthorDeviceID
 	dev := findDevice(current, author)
 	if dev == nil || !current.hasRole(dev.PrincipalID, RoleWriter, RoleAdmin, RoleOwner) ||
 		dev.ContentSigningKey.Alg != SigAlgEd25519 ||
 		!validEd25519Key(dev.ContentSigningKey.PublicKey) ||
-		len(authorPrivateKey) != ed25519.PrivateKeySize ||
-		!bytes.Equal(authorPrivateKey.Public().(ed25519.PublicKey), dev.ContentSigningKey.PublicKey) {
+		len(authorPrivateKey) != ed25519.PrivateKeySize {
 		return nil, Err("content_signature", CodeAuthorSigningKeyMismatch)
 	}
+	signingKey, ok := validatedAuthorKey(authorPrivateKey, dev.ContentSigningKey.PublicKey)
+	if !ok {
+		return nil, Err("content_signature", CodeAuthorSigningKeyMismatch)
+	}
+	defer clear(signingKey)
 
 	// 4. Sealing state. A positive KeyEpoch was required in step 1
 	// (ValidateHeader and the explicit check above) and a 32-byte VUK before
@@ -178,7 +190,7 @@ func SealAuthenticatedFile(draft *File, db *kdbx.Database, checkpoint *PolicyChe
 	msg = append(msg, DomainContentSignature...)
 	msg = append(msg, 0)
 	msg = append(msg, preimage...)
-	sig := Signature{SignerID: author, Alg: SigAlgEd25519, Sig: ed25519.Sign(authorPrivateKey, msg)}
+	sig := Signature{SignerID: author, Alg: SigAlgEd25519, Sig: ed25519.Sign(signingKey, msg)}
 	encoded, err := SealFile(sealed, &sig)
 	if err != nil {
 		return nil, err
@@ -193,6 +205,35 @@ func SealAuthenticatedFile(draft *File, db *kdbx.Database, checkpoint *PolicyChe
 		return nil, err
 	}
 	return encoded, nil
+}
+
+// validatedAuthorKey checks that the caller's 64-byte Ed25519 private key is
+// internally consistent and is the key of policyKey, and returns a
+// package-owned signing key derived from its seed when it is. ok is false for
+// any malformed, inconsistent or foreign key, and then no key is returned.
+//
+// ed25519.PrivateKey.Public only copies the trailing public-key half; it does
+// not derive it, so a key with this policy's public half and any other seed
+// would pass a public-half comparison and produce invalid signatures only at
+// final verification. Deriving with ed25519.NewKeyFromSeed makes the
+// first-half seed the single source of the returned key, which must reproduce
+// both the caller key's public half and the authenticated policy key.
+//
+// The caller's key is never modified or retained. On failure nothing is
+// returned, so there is no derived copy to clear; on success the caller owns
+// the returned slice and the function retains no other copy.
+func validatedAuthorKey(privateKey ed25519.PrivateKey, policyKey ed25519.PublicKey) (ed25519.PrivateKey, bool) {
+	if len(privateKey) != ed25519.PrivateKeySize || !validEd25519Key(policyKey) {
+		return nil, false
+	}
+	derived := ed25519.NewKeyFromSeed(privateKey[:ed25519.SeedSize])
+	public := derived.Public().(ed25519.PublicKey)
+	if subtle.ConstantTimeCompare(privateKey[ed25519.SeedSize:], public) != 1 ||
+		subtle.ConstantTimeCompare(public, policyKey) != 1 {
+		clear(derived)
+		return nil, false
+	}
+	return derived, true
 }
 
 // sealDraftCopy returns a deep local copy of the draft's builder state that
