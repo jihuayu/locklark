@@ -487,6 +487,175 @@ class ActivationOrderTests(unittest.TestCase):
             instance.activation_request()
 
 
+def inspect_controls(present=True, showing=True, new_login=False):
+    """One synthetic existing label-keyed controls map with fixed records."""
+    labels = ("金库文件", "主密码", "Secret Key", "解锁")
+    controls = {
+        label: {"present": present, "enabled": False, "showing": showing}
+        for label in labels
+    }
+    controls["新建登录"] = {
+        "present": new_login, "enabled": False, "showing": new_login,
+    }
+    return controls
+
+
+def inspect_result(present=True, showing=True, new_login=False):
+    """One synthetic inspect result carrying only the two fixed boolean maps."""
+    return {
+        "controls": inspect_controls(present, showing, new_login),
+        "status": {
+            "available": True,
+            "generic_unlock_error": False,
+            "secret_key_format_error": False,
+            "processing": True,
+        },
+    }
+
+
+class InspectSummaryTests(unittest.TestCase):
+    """The inspect parser publishes only seven fixed built-in booleans."""
+
+    def test_valid_maps_classify_without_echoing_extra_control_labels(self):
+        result = inspect_result()
+        result["controls"]["仅批准本次 CLI 请求"] = {
+            "present": True, "enabled": True, "showing": True,
+        }
+        summary = acceptance.inspect_summary(result)
+        self.assertEqual(set(summary), {
+            "snapshot_available", "locked_present", "locked_showing",
+            "new_login_present", "generic_unlock_error",
+            "secret_key_format_error", "processing",
+        })
+        self.assertTrue(all(type(value) is bool for value in summary.values()))
+        self.assertEqual(summary, {
+            "snapshot_available": True,
+            "locked_present": True,
+            "locked_showing": True,
+            "new_login_present": False,
+            "generic_unlock_error": False,
+            "secret_key_format_error": False,
+            "processing": True,
+        })
+
+    def test_unlocked_controls_and_new_login_presence_are_reported(self):
+        summary = acceptance.inspect_summary(
+            inspect_result(present=True, showing=False, new_login=True))
+        self.assertTrue(summary["locked_present"])
+        self.assertFalse(summary["locked_showing"])
+        self.assertTrue(summary["new_login_present"])
+
+    def test_status_flags_and_available_are_exact_passthrough_booleans(self):
+        result = inspect_result()
+        result["status"] = {
+            "available": False,
+            "generic_unlock_error": True,
+            "secret_key_format_error": True,
+            "processing": False,
+        }
+        summary = acceptance.inspect_summary(result)
+        self.assertEqual(summary, {
+            "snapshot_available": False,
+            "locked_present": True,
+            "locked_showing": True,
+            "new_login_present": False,
+            "generic_unlock_error": True,
+            "secret_key_format_error": True,
+            "processing": False,
+        })
+
+    def test_malformed_status_or_controls_collapse_to_all_false(self):
+        empty = acceptance.empty_inspect_summary()
+        statuses = (
+            None,
+            [],
+            {"available": True},
+            {"available": True, "generic_unlock_error": False,
+             "secret_key_format_error": False},
+            {"available": True, "generic_unlock_error": False,
+             "secret_key_format_error": False, "processing": True, "text": "private"},
+            {"available": 1, "generic_unlock_error": False,
+             "secret_key_format_error": False, "processing": True},
+            {"available": "true", "generic_unlock_error": False,
+             "secret_key_format_error": False, "processing": True},
+            {"available": True, "generic_unlock_error": None,
+             "secret_key_format_error": False, "processing": True},
+        )
+        for status in statuses:
+            with self.subTest(status=status):
+                result = inspect_result()
+                if status is None:
+                    del result["status"]
+                else:
+                    result["status"] = status
+                self.assertEqual(acceptance.inspect_summary(result), empty)
+
+        controls = (
+            None,
+            [],
+            {},
+            {label: {"present": True, "enabled": False, "showing": True}
+             for label in ("金库文件", "主密码", "Secret Key")},
+        )
+        for value in controls:
+            with self.subTest(controls=value):
+                result = inspect_result()
+                if value is None:
+                    del result["controls"]
+                else:
+                    result["controls"] = value
+                self.assertEqual(acceptance.inspect_summary(result), empty)
+
+    def test_bad_record_shapes_and_private_fields_collapse_without_echo(self):
+        empty = acceptance.empty_inspect_summary()
+        secret = "LL1-" + "B" * 26
+        records = (
+            {"present": True, "enabled": False, "showing": True, "value": secret},
+            {"present": True, "enabled": False, "showing": True, "text": secret},
+            {"present": 1, "enabled": False, "showing": True},
+            {"present": True, "enabled": False, "showing": "true"},
+            {"present": True, "enabled": False},
+            {},
+            "private",
+            None,
+        )
+        for label in ("金库文件", "主密码", "Secret Key", "解锁", "新建登录"):
+            for record in records:
+                with self.subTest(label=label, record=record):
+                    result = inspect_result()
+                    result["controls"][label] = record
+                    summary = acceptance.inspect_summary(result)
+                    self.assertEqual(summary, empty)
+                    self.assertNotIn(secret, repr(summary))
+                    self.assertNotIn(secret, acceptance.inspect_summary_line(summary))
+
+    def test_result_stdout_and_unknown_top_level_fields_are_never_read(self):
+        secret = "LL1-" + "C" * 26
+        result = inspect_result()
+        result["stdout"] = secret
+        result["stderr"] = "private exception detail"
+        result["private"] = {"raw": secret}
+        summary = acceptance.inspect_summary(result)
+        self.assertEqual(summary, acceptance.inspect_summary(inspect_result()))
+        self.assertNotIn(secret, repr(summary))
+        self.assertNotIn("exception", repr(summary))
+
+    def test_diagnostic_line_has_only_fixed_names_and_zero_one_values(self):
+        summary = acceptance.inspect_summary(inspect_result())
+        line = acceptance.inspect_summary_line(summary)
+        self.assertTrue(line.startswith("DIAG: cli-broker unlock_inspect "))
+        tokens = line.split()[3:]
+        self.assertEqual(tokens, [
+            field + "=" + ("1" if summary[field] else "0")
+            for field in acceptance.INSPECT_SUMMARY_FIELDS
+        ])
+        self.assertNotIn("{", line)
+        self.assertNotIn("/", line)
+        self.assertTrue(all(token.split("=")[0] in acceptance.INSPECT_SUMMARY_FIELDS
+                            for token in tokens))
+        self.assertTrue(all(token.split("=")[1] in ("0", "1") for token in tokens))
+
+
 class UnlockPlanTests(unittest.TestCase):
     """The fixed nine unlock actions are split across fresh bounded requests."""
 
@@ -585,6 +754,102 @@ class UnlockPlanTests(unittest.TestCase):
 
         self.assertEqual([request["actions"] for request in requests],
                          expected_plans[:3])
+        self.assertEqual(len(requests), 3)
+        self.assertFalse(any(request["actions"] == [] for request in requests))
+        self.assertEqual(instance.output_lines, [])
+        self.assertNotIn("native_unlock_fields_and_button", instance.checks)
+
+    def test_earlier_retryable_failure_never_inspects(self):
+        instance = self.acceptance()
+        expected_plans = self.expected_plans(instance)
+        requests = []
+
+        def run_driver(request):
+            requests.append(json.loads(request))
+            if len(requests) == 1:
+                raise acceptance.DriverRetry("control-missing")
+            return {}
+
+        instance.run_driver = run_driver
+        with contextlib.redirect_stdout(io.StringIO()), \
+                self.assertRaises(acceptance.DriverRetry):
+            instance.unlock()
+
+        self.assertEqual([request["actions"] for request in requests],
+                         expected_plans[:1])
+        self.assertIs(requests[0]["inspect"], False)
+        self.assertEqual(instance.output_lines, [])
+        self.assertNotIn("native_unlock_fields_and_button", instance.checks)
+
+    def test_terminal_wait_failure_issues_one_inspect_and_keeps_failure(self):
+        instance = self.acceptance()
+        expected_plans = self.expected_plans(instance)
+        requests = []
+        result = inspect_result()
+
+        def run_driver(request):
+            parsed = json.loads(request)
+            requests.append(parsed)
+            if len(requests) == len(expected_plans):
+                raise acceptance.DriverRetry("control-missing")
+            if len(requests) == len(expected_plans) + 1:
+                return result
+            return {}
+
+        instance.run_driver = run_driver
+        with contextlib.redirect_stdout(io.StringIO()), \
+                self.assertRaises(acceptance.DriverRetry) as caught:
+            instance.unlock()
+
+        self.assertEqual(caught.exception.code, "control-missing")
+        self.assertEqual([request["actions"] for request in requests[:len(expected_plans)]],
+                         expected_plans)
+        self.assertEqual(len(requests), len(expected_plans) + 1)
+        inspect_request = requests[-1]
+        self.assertEqual(set(inspect_request), {"title", "executable", "actions", "inspect"})
+        self.assertEqual(inspect_request["title"], acceptance.TITLE)
+        self.assertEqual(inspect_request["executable"], str(instance.desktop))
+        self.assertEqual(inspect_request["actions"], [])
+        self.assertIs(inspect_request["inspect"], True)
+        self.assertEqual([action for request in requests[:len(expected_plans)]
+                          for action in request["actions"]],
+                         self.original_actions(instance))
+        self.assertEqual(instance.unlock_inspect_summary,
+                         acceptance.inspect_summary(result))
+        self.assertEqual(len(instance.output_lines), 1)
+        self.assertEqual(instance.output_lines[0],
+                         acceptance.inspect_summary_line(instance.unlock_inspect_summary))
+        self.assertNotIn("native_unlock_fields_and_button", instance.checks)
+
+    def test_failed_terminal_inspect_stores_all_false_and_keeps_failure(self):
+        instance = self.acceptance()
+        expected_plans = self.expected_plans(instance)
+        requests = []
+
+        def run_driver(request):
+            parsed = json.loads(request)
+            requests.append(parsed)
+            if len(requests) == len(expected_plans):
+                raise acceptance.DriverRetry("control-missing")
+            if len(requests) == len(expected_plans) + 1:
+                raise acceptance.AcceptanceFailure()
+            return {}
+
+        instance.run_driver = run_driver
+        with contextlib.redirect_stdout(io.StringIO()), \
+                self.assertRaises(acceptance.DriverRetry) as caught:
+            instance.unlock()
+
+        self.assertEqual(caught.exception.code, "control-missing")
+        self.assertEqual(len(requests), len(expected_plans) + 1)
+        self.assertEqual(requests[-1]["actions"], [])
+        self.assertIs(requests[-1]["inspect"], True)
+        self.assertEqual(instance.unlock_inspect_summary,
+                         acceptance.empty_inspect_summary())
+        self.assertEqual(len(instance.output_lines), 1)
+        self.assertEqual(
+            instance.output_lines[0].split()[-len(acceptance.INSPECT_SUMMARY_FIELDS):],
+            [field + "=0" for field in acceptance.INSPECT_SUMMARY_FIELDS])
         self.assertNotIn("native_unlock_fields_and_button", instance.checks)
 
 

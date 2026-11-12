@@ -49,6 +49,74 @@ UNLOCK_FIELDS = ("金库文件", "主密码", "Secret Key")
 UNLOCK_LABEL = "解锁"
 UNLOCKED_LABEL = "新建登录"
 
+# Optional read-only inspect diagnostic after the terminal unlock wait. Only
+# these fixed labels and fixed control record fields are read; every value must
+# be a built-in boolean. The status object is exactly four built-in booleans.
+LOCKED_CONTROLS = ("金库文件", "主密码", "Secret Key", UNLOCK_LABEL)
+CONTROL_RECORD_FIELDS = ("present", "enabled", "showing")
+STATUS_FIELDS = ("available", "generic_unlock_error",
+                 "secret_key_format_error", "processing")
+INSPECT_SUMMARY_FIELDS = (
+    "snapshot_available", "locked_present", "locked_showing",
+    "new_login_present", "generic_unlock_error", "secret_key_format_error",
+    "processing",
+)
+
+
+def empty_inspect_summary():
+    """The fixed all-false inspect summary: exactly seven built-in booleans."""
+    return {field: False for field in INSPECT_SUMMARY_FIELDS}
+
+
+def inspect_summary(result):
+    """Strictly classify one inspect result into a fixed boolean summary.
+
+    Only the five expected label records are read, each with exactly the fixed
+    ``present``/``enabled``/``showing`` built-in booleans, and ``status`` with
+    exactly the four fixed built-in booleans. Unknown labels, fields, text,
+    exception details, stdout and stderr are never read or echoed. Any bad
+    shape returns the fixed all-false summary.
+    """
+    summary = empty_inspect_summary()
+    if type(result) is not dict:
+        return summary
+    controls = result.get("controls")
+    status = result.get("status")
+    if type(controls) is not dict or type(status) is not dict:
+        return summary
+    if set(status) != set(STATUS_FIELDS):
+        return summary
+    if any(type(status[field]) is not bool for field in STATUS_FIELDS):
+        return summary
+    records = {}
+    for label in LOCKED_CONTROLS + (UNLOCKED_LABEL,):
+        if label not in controls:
+            return summary
+        record = controls[label]
+        if type(record) is not dict or set(record) != set(CONTROL_RECORD_FIELDS):
+            return summary
+        if any(type(record[field]) is not bool for field in CONTROL_RECORD_FIELDS):
+            return summary
+        records[label] = record
+    summary["snapshot_available"] = status["available"]
+    summary["locked_present"] = all(
+        records[label]["present"] is True for label in LOCKED_CONTROLS)
+    summary["locked_showing"] = all(
+        records[label]["showing"] is True for label in LOCKED_CONTROLS)
+    summary["new_login_present"] = records[UNLOCKED_LABEL]["present"] is True
+    for field in STATUS_FIELDS[1:]:
+        summary[field] = status[field]
+    return summary
+
+
+def inspect_summary_line(summary):
+    """One fixed diagnostic line: only summary field names and 0/1 values."""
+    values = []
+    for field in INSPECT_SUMMARY_FIELDS:
+        value = summary.get(field) if type(summary) is dict else None
+        values.append(field + "=" + ("1" if value is True else "0"))
+    return "DIAG: cli-broker unlock_inspect " + " ".join(values)
+
 
 def unlock_plans(vault, master, secret):
     """Fixed synthetic unlock actions split into bounded driver plans.
@@ -596,6 +664,7 @@ class Acceptance:
         self.secret = None
         self.item_id = None
         self.revision = None
+        self.unlock_inspect_summary = empty_inspect_summary()
         self.values.extend([self.master, self.token])
         self.deadline = time.monotonic() + int(args.timeout)
 
@@ -798,10 +867,51 @@ class Acceptance:
                 require(self.desktop_process.poll() is None)
                 time.sleep(0.5)
 
+    def inspect_request(self):
+        """One read-only inspect of the already-owned app window.
+
+        It carries no action, text, key, click or wait: the same title and the
+        exact already-validated executable bind the existing window, and
+        ``inspect`` asks only for the existing controls/status boolean maps.
+        """
+        require(self.desktop is not None and os.path.isabs(str(self.desktop)))
+        return json.dumps({
+            "title": TITLE,
+            "executable": str(self.desktop),
+            "actions": [],
+            "inspect": True,
+        }).encode()
+
+    def inspect_unlock_wait_failure(self):
+        """One inspect for the terminal final wait; never retries or replays.
+
+        Any request failure stores the fixed all-false summary. Exactly one
+        fixed diagnostic line is emitted and added to the existing private
+        fixture scan, so no driver output, JSON, label or path is ever echoed.
+        """
+        try:
+            result = self.run_driver(self.inspect_request())
+            summary = inspect_summary(result)
+        except Exception:
+            summary = empty_inspect_summary()
+        self.unlock_inspect_summary = summary
+        line = inspect_summary_line(summary)
+        self.output_lines.append(line)
+        print(line, flush=True)
+
     def unlock(self):
         self.stage_code("unlock")
-        for actions in unlock_plans(self.fixture.vault, self.master, self.secret):
-            self.driver(list(actions), "unlock")
+        plans = unlock_plans(self.fixture.vault, self.master, self.secret)
+        for index, actions in enumerate(plans):
+            try:
+                self.driver(list(actions), "unlock")
+            except DriverRetry:
+                if index == len(plans) - 1:
+                    try:
+                        self.inspect_unlock_wait_failure()
+                    except Exception:
+                        pass
+                raise
         self.mark("native_unlock_fields_and_button")
 
     def approve(self):
