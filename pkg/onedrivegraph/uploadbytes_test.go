@@ -3,11 +3,17 @@ package onedrivegraph
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -48,8 +54,9 @@ type uploadBytesResponse struct {
 }
 
 type uploadBytesFixture struct {
-	t      *testing.T
-	server *httptest.Server
+	t       *testing.T
+	server  *httptest.Server
+	rootCAs *x509.CertPool
 
 	mu       sync.Mutex
 	response uploadBytesResponse
@@ -67,9 +74,81 @@ func newUploadBytesFixture(t *testing.T) *uploadBytesFixture {
 			body:   uploadBytesAckJSON(time.Now().Add(time.Hour).UTC().Truncate(time.Second), []string{"0-"}),
 		},
 	}
-	f.server = httptest.NewTLSServer(http.HandlerFunc(f.serve))
+	serverCertificate, rootCAs := newUploadBytesTLSMaterial(t)
+	f.rootCAs = rootCAs
+	f.server = httptest.NewUnstartedServer(http.HandlerFunc(f.serve))
+	f.server.TLS = &tls.Config{
+		Certificates: []tls.Certificate{serverCertificate},
+		MinVersion:   tls.VersionTLS12,
+	}
+	f.server.StartTLS()
 	t.Cleanup(f.server.Close)
 	return f
+}
+
+// newUploadBytesTLSMaterial builds a private test root and a leaf certificate
+// whose only DNS SAN is the allowlisted capability host. The returned pool
+// contains only the test root, so the standard Go chain and hostname checks
+// exercise the same path as production.
+func newUploadBytesTLSMaterial(t *testing.T) (tls.Certificate, *x509.CertPool) {
+	t.Helper()
+	now := time.Now()
+	rootKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate test root key: %v", err)
+	}
+	rootTemplate := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "locklark synthetic upload test root"},
+		NotBefore:             now.Add(-time.Hour),
+		NotAfter:              now.Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		MaxPathLen:            0,
+		MaxPathLenZero:        true,
+	}
+	rootDER, err := x509.CreateCertificate(rand.Reader, rootTemplate, rootTemplate, &rootKey.PublicKey, rootKey)
+	if err != nil {
+		t.Fatalf("create test root certificate: %v", err)
+	}
+	rootCertificate, err := x509.ParseCertificate(rootDER)
+	if err != nil {
+		t.Fatalf("parse test root certificate: %v", err)
+	}
+
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate test leaf key: %v", err)
+	}
+	leafTemplate := &x509.Certificate{
+		SerialNumber:          big.NewInt(2),
+		Subject:               pkix.Name{CommonName: uploadCapabilityHost},
+		NotBefore:             now.Add(-time.Hour),
+		NotAfter:              now.Add(time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		DNSNames:              []string{uploadCapabilityHost},
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTemplate, rootCertificate, &leafKey.PublicKey, rootKey)
+	if err != nil {
+		t.Fatalf("create test leaf certificate: %v", err)
+	}
+	leafCertificate, err := x509.ParseCertificate(leafDER)
+	if err != nil {
+		t.Fatalf("parse test leaf certificate: %v", err)
+	}
+	if len(leafCertificate.DNSNames) != 1 || leafCertificate.DNSNames[0] != uploadCapabilityHost {
+		t.Fatalf("test leaf DNS SANs = %q, want exactly %q", leafCertificate.DNSNames, uploadCapabilityHost)
+	}
+
+	rootCAs := x509.NewCertPool()
+	rootCAs.AddCert(rootCertificate)
+	return tls.Certificate{
+		Certificate: [][]byte{leafDER, rootDER},
+		PrivateKey:  leafKey,
+	}, rootCAs
 }
 
 func uploadBytesAckJSON(expiration time.Time, ranges []string) []byte {
@@ -139,22 +218,26 @@ func (f *uploadBytesFixture) serve(w http.ResponseWriter, r *http.Request) {
 }
 
 // client returns a TLS client that resolves the allowlisted capability host
-// only to this fixture's loopback listener.
+// only to this fixture's loopback listener and verifies the fixture's private
+// test chain using ordinary Go certificate and hostname checks.
 func (f *uploadBytesFixture) client() *http.Client {
+	f.t.Helper()
+	return f.clientWithRootCAs(f.rootCAs)
+}
+
+// clientWithRootCAs is the client constructor used by the negative TLS test
+// with an empty, untrusted pool.
+func (f *uploadBytesFixture) clientWithRootCAs(rootCAs *x509.CertPool) *http.Client {
 	f.t.Helper()
 	base, ok := f.server.Client().Transport.(*http.Transport)
 	if !ok {
 		f.t.Fatalf("httptest client transport is not *http.Transport")
 	}
 	transport := base.Clone()
-	if transport.TLSClientConfig == nil {
-		transport.TLSClientConfig = &tls.Config{}
-	} else {
-		transport.TLSClientConfig = transport.TLSClientConfig.Clone()
+	transport.TLSClientConfig = &tls.Config{
+		RootCAs:    rootCAs,
+		MinVersion: tls.VersionTLS12,
 	}
-	// The certificate is issued for the httptest peer, not the synthetic
-	// allowlisted name. This is a loopback-only test client.
-	transport.TLSClientConfig.InsecureSkipVerify = true
 	transport.Proxy = nil
 	address := f.server.Listener.Addr().String()
 	transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
@@ -300,6 +383,35 @@ func TestConditionalUploaderUploadBytesContract(t *testing.T) {
 	}
 	if tokens.callCount() != 0 {
 		t.Errorf("token source calls after reuse = %d, want 0", tokens.callCount())
+	}
+}
+
+func TestConditionalUploaderUploadBytesRejectsUntrustedTLSRoot(t *testing.T) {
+	f := newUploadBytesFixture(t)
+	tokens := &testTokenSource{token: uploadToken}
+	session := uploadBytesSession(time.Now().Add(time.Hour))
+	u := f.uploader(t, tokens, f.clientWithRootCAs(x509.NewCertPool()))
+
+	_, err := u.UploadBytes(context.Background(), session, []byte("synthetic-payload"))
+	assertErrorIs(t, err, vaultfilebackend.ErrUnknown)
+	if errors.Is(err, vaultfilebackend.ErrDenied) {
+		t.Errorf("TLS verification failure was mapped to ErrDenied: %v", err)
+	}
+	assertUploadBytesSecretsAbsent(t, err)
+	if !session.state.attempted.Load() {
+		t.Errorf("TLS verification failure left the one-use session unconsumed")
+	}
+	// The handshake must fail before net/http can deliver a request to the
+	// handler, so the fixture still observes no upload attempt.
+	assertUploadBytesNoRequest(t, f)
+
+	copied := *session
+	if _, err := u.UploadBytes(context.Background(), &copied, []byte("synthetic-payload")); !errors.Is(err, vaultfilebackend.ErrDenied) {
+		t.Errorf("retry error = %v, want ErrDenied", err)
+	}
+	assertUploadBytesNoRequest(t, f)
+	if tokens.callCount() != 0 {
+		t.Errorf("token source calls = %d, want 0", tokens.callCount())
 	}
 }
 
