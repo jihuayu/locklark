@@ -283,6 +283,14 @@ func RunBundle(ctx context.Context, path, pw string, key []byte, targets []Bundl
 	}, os.RemoveAll)
 }
 
+func cloneRunBundleRequest(request RunBundleRequest) RunBundleRequest {
+	request.Args = append([]string(nil), request.Args...)
+	request.HelperPath = append([]string(nil), request.HelperPath...)
+	request.Passthrough = cloneStringMap(request.Passthrough)
+	request.Spec = cliprofile.CloneSpec(request.Spec)
+	return request
+}
+
 func cloneStringMap(values map[string]string) map[string]string {
 	if values == nil {
 		return nil
@@ -355,6 +363,235 @@ func runBundle(ctx context.Context, targets []BundleTarget, request RunBundleReq
 		return RunReceipt{}, ErrRunResult
 	}
 	return RunReceipt{Status: "process-exited", Session: r.session, Intent: r.intent, TargetDigest: r.destinationDigest, ExitCode: code}, nil
+}
+
+// RunBundlePreparationStatus is the explicit lifecycle state of a prepared
+// brokered run. "intent-recorded" means the session committed the same signed
+// item.run.bundle binding RunBundle would commit before rendering credentials.
+const RunBundlePreparationStatus = "intent-recorded"
+
+// RunBundlePreparationReceipt is the non-secret metadata returned with a
+// prepared run. It carries no program, directory, helper or credential value.
+type RunBundlePreparationReceipt struct {
+	Status       string `json:"status"`
+	Session      string `json:"session"`
+	Intent       string `json:"intent"`
+	TargetDigest string `json:"target_digest"`
+}
+
+// cloneBundleTargets deep-owns caller target data before any validation or
+// transaction so a concurrent caller mutation cannot change what was signed.
+func cloneBundleTargets(targets []BundleTarget) []BundleTarget {
+	return append([]BundleTarget(nil), targets...)
+}
+
+// PrepareBrokeredRun validates the exact request, targets and private temporary
+// root, then commits the RunBundle intent through the session transaction so
+// session lock/epoch and audit logic apply. It returns the all-or-nothing slot
+// values with the receipt; it never starts a child or creates bundle files. A
+// cancelled context clears any extracted values and commits no intent.
+func (s *Session) PrepareBrokeredRun(ctx context.Context, targets []BundleTarget, request RunBundleRequest, root string) (receipt RunBundlePreparationReceipt, values map[string][]byte, err error) {
+	if ctx == nil || s == nil {
+		return RunBundlePreparationReceipt{}, nil, ErrRunTarget
+	}
+	if ctx.Err() != nil {
+		return RunBundlePreparationReceipt{}, nil, ErrRunCancelled
+	}
+	targets = cloneBundleTargets(targets)
+	request = cloneRunBundleRequest(request)
+	if (&runBundleStoreRequest{targets: targets, request: request, root: root}).validate() != nil {
+		return RunBundlePreparationReceipt{}, nil, ErrRunTarget
+	}
+	if ctx.Err() != nil {
+		return RunBundlePreparationReceipt{}, nil, ErrRunCancelled
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, e := s.execute(runBundleAction, vault.Item{}, nil, commandOption{runBundle: &runBundleStoreRequest{targets: targets, request: request, root: root}})
+	defer func() {
+		if err != nil {
+			// Never hand back a partial set, and never leave extracted bytes
+			// in scope after a failed or cancelled preparation.
+			clearBundleValues(r.values)
+			clearBundleValues(values)
+			values, receipt = nil, RunBundlePreparationReceipt{}
+		}
+	}()
+	// Recheck cancellation after the transaction: the intent may already be
+	// committed, but no value may cross the boundary.
+	if ctx.Err() != nil {
+		return RunBundlePreparationReceipt{}, nil, ErrRunCancelled
+	}
+	if e != nil {
+		return RunBundlePreparationReceipt{}, nil, e
+	}
+	if r.session == "" || r.intent == "" || r.destinationDigest == "" || len(r.values) != len(targets) {
+		return RunBundlePreparationReceipt{}, nil, ErrRunCredential
+	}
+	values = r.values
+	r.values = nil
+	return RunBundlePreparationReceipt{
+		Status:       RunBundlePreparationStatus,
+		Session:      r.session,
+		Intent:       r.intent,
+		TargetDigest: r.destinationDigest,
+	}, values, nil
+}
+
+// BrokeredRunPreparer is the desktop-broker preparation step for
+// RunBrokeredBundle. It receives the private run root RunBrokeredBundle has
+// already created, so it can bind exactly that root in the one-shot scope, plus
+// the exact request and targets that RunBrokeredBundle committed to and will
+// render, so the callback never has to capture caller-owned data that could
+// diverge from the runner's clones. Both snapshots are independent deep copies,
+// separate from the runner's own: the callback may mutate them freely, and
+// bindBrokeredRunPreparation clears their mutable containers after the callback
+// returns. Neither mutation can change what the runner signs, renders or
+// executes.
+//
+// It returns the preparation receipt plus the exact per-slot values.
+//
+// On success, ownership of every returned byte slice transfers to
+// RunBrokeredBundle: the existing runBundle cleanup zeroes them after the
+// profile is rendered and the child has exited. On a callback error, a
+// malformed receipt or an invalid value set, the returned buffers are zeroed
+// immediately instead. The callback error itself is preserved unchanged so a
+// caller of RunBrokeredBundle can fall back only on an exact sentinel (for
+// example browserhost.ErrBrokerUnavailable); no error is translated here.
+type BrokeredRunPreparer func(ctx context.Context, privateTempRoot string, request RunBundleRequest, targets []BundleTarget) (RunBundlePreparationReceipt, map[string][]byte, error)
+
+func validBrokeredRunReceipt(receipt RunBundlePreparationReceipt) bool {
+	return receipt.Status == RunBundlePreparationStatus && idOK(receipt.Session) &&
+		digestOK(receipt.Intent) && digestOK(receipt.TargetDigest)
+}
+
+// brokeredRunValuesValid requires exactly one non-nil value per requested slot
+// and nothing else. Values are never trimmed or re-keyed here.
+func brokeredRunValuesValid(targets []BundleTarget, values map[string][]byte) bool {
+	if len(values) != len(targets) {
+		return false
+	}
+	for _, target := range targets {
+		value, ok := values[target.Slot]
+		if !ok || value == nil {
+			return false
+		}
+	}
+	return true
+}
+
+// brokeredRunPreparation zeroes every returned buffer, including any partial
+// set a failed callback handed back, and releases the map. It also redacts a
+// receipt that does not carry canonical metadata, and replaces a refused
+// value set with nil before rendering sees it.
+func brokeredRunPreparation(targets []BundleTarget, receipt RunBundlePreparationReceipt, values map[string][]byte, err error) (RunBundlePreparationReceipt, map[string][]byte, error) {
+	if err != nil {
+		// Preserve the callback error exactly; only the partial secrets are
+		// dropped so a caller can still fall back on an exact sentinel.
+		clearBundleValues(values)
+		return RunBundlePreparationReceipt{}, nil, err
+	}
+	if !validBrokeredRunReceipt(receipt) || !brokeredRunValuesValid(targets, values) {
+		clearBundleValues(values)
+		return RunBundlePreparationReceipt{}, nil, ErrRunCredential
+	}
+	return receipt, values, nil
+}
+
+// runBrokeredBundle is RunBrokeredBundle with the private-root creator, value
+// cleanup and child executor injected so tests stay deterministic.
+func runBrokeredBundle(ctx context.Context, targets []BundleTarget, request RunBundleRequest, prepare BrokeredRunPreparer, create func() (string, error), remove func(string) error, execute func(context.Context, RunBundleRequest, string, cliprofile.RenderedBundle) (int, error)) (RunReceipt, error) {
+	if prepare == nil {
+		return RunReceipt{}, ErrRunTarget
+	}
+	return runBundle(ctx, targets, request, create, func(s *runBundleStoreRequest) (result, error) {
+		return brokeredRunStore(ctx, s, prepare)
+	}, execute, remove)
+}
+
+// bindBrokeredRunPreparation hands the callback the exact request and targets
+// snapshots the runner will render, as fresh deep copies. After the callback
+// returns, including on panic, every mutable container of that callback-owned
+// copy is cleared: Args and HelperPath elements, the Passthrough map entries,
+// each Spec slice (Slots, Files, Dirs, PassthroughEnv), the Spec Env map
+// entries, every nested DenyArgs slice, and every target element. Clearing a
+// container overwrites its pointers or zeroes its element slots; it cannot
+// erase the string bytes those elements pointed at, because Go strings are
+// immutable and may be shared, so callers must not treat this as a secure
+// wipe of string data. The runner's own snapshots are separate and are never
+// passed, so no mutation through these copies can reach them.
+func bindBrokeredRunPreparation(ctx context.Context, s *runBundleStoreRequest, prepare BrokeredRunPreparer) (receipt RunBundlePreparationReceipt, values map[string][]byte, err error) {
+	request := cloneRunBundleRequest(s.request)
+	targets := cloneBundleTargets(s.targets)
+	defer clearBrokeredRunRequestCopy(&request, targets)
+	return prepare(ctx, s.root, request, targets)
+}
+
+// clearBrokeredRunRequestCopy clears the mutable containers of a
+// callback-owned request copy and its target slice. It zeroes element slots
+// and entry pointers only; string contents are not and cannot be erased here.
+func clearBrokeredRunRequestCopy(request *RunBundleRequest, targets []BundleTarget) {
+	if request == nil {
+		return
+	}
+	clear(request.Args)
+	clear(request.HelperPath)
+	for name := range request.Passthrough {
+		delete(request.Passthrough, name)
+	}
+	clear(request.Spec.Slots)
+	clear(request.Spec.Files)
+	clear(request.Spec.Dirs)
+	clear(request.Spec.PassthroughEnv)
+	for name := range request.Spec.Env {
+		delete(request.Spec.Env, name)
+	}
+	for i := range request.Spec.DenyArgs {
+		clear(request.Spec.DenyArgs[i])
+		request.Spec.DenyArgs[i] = nil
+	}
+	clear(request.Spec.DenyArgs)
+	for i := range targets {
+		targets[i] = BundleTarget{}
+	}
+}
+
+// brokeredRunStore adapts the desktop preparation callback to the local
+// store boundary. The callback runs only after runBundle created root and the
+// profile bundle directories, so it receives the exact private root together
+// with the exact committed request and targets.
+func brokeredRunStore(ctx context.Context, s *runBundleStoreRequest, prepare BrokeredRunPreparer) (result, error) {
+	if s == nil || s.validate() != nil {
+		// Never let the callback bind or disclose anything for a scope the
+		// local RunBundle lifecycle would refuse.
+		return result{}, ErrRunTarget
+	}
+	receipt, values, err := bindBrokeredRunPreparation(ctx, s, prepare)
+	receipt, values, err = brokeredRunPreparation(s.targets, receipt, values, err)
+	if err != nil {
+		return result{}, err
+	}
+	return result{values: values, session: receipt.Session, intent: receipt.Intent, destinationDigest: receipt.TargetDigest}, nil
+}
+
+// RunBrokeredBundle executes values that the desktop broker already prepared
+// and audited for exactly targets and request. It shares the local RunBundle
+// lifecycle: it validates the request, creates the private run root first,
+// passes that root, the committed request and the committed targets to prepare
+// as independent deep copies, accepts only a canonical preparation receipt
+// and a value set with exactly one entry per target slot, then renders the
+// profile and starts the direct child through executeRunBundle.
+//
+// A nil prepare, a malformed receipt or an invalid value set fails closed with
+// ErrRunTarget or ErrRunCredential before any credential is rendered. A
+// preparation error is returned unchanged; values are zeroed and the root is
+// removed on every path, on success only after execution. The caller owns
+// targets and request and may reuse them; their slices are cloned before use.
+func RunBrokeredBundle(ctx context.Context, targets []BundleTarget, request RunBundleRequest, prepare BrokeredRunPreparer) (RunReceipt, error) {
+	return runBrokeredBundle(ctx, targets, request, prepare, createRunCLITemp, os.RemoveAll, func(ctx context.Context, req RunBundleRequest, root string, rendered cliprofile.RenderedBundle) (int, error) {
+		return executeRunBundle(ctx, req, root, rendered, runCLIStreams{os.Stdin, os.Stdout, os.Stderr})
+	})
 }
 
 func makeBundleDirs(root string, extra []string) error {
