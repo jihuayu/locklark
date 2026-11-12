@@ -136,8 +136,10 @@ type Scope struct {
 
 // Challenge is the single request a proof answers. ID is an opaque
 // identifier; Nonce is exactly NonceBytes; DeadlineUnixMS is a positive Unix
-// time in milliseconds. This package only checks the deadline's shape: it
-// never compares it with a clock and never enforces single use.
+// time in milliseconds. Encode and Parse only check the deadline's shape (a
+// positive int64); they never read a clock. Verify does compare the caller's
+// nowUnixMS with the expected challenge's DeadlineUnixMS and refuses at or
+// after it, but no function here consumes a challenge or enforces single use.
 type Challenge struct {
 	ID             string   `json:"id"`
 	Nonce          [32]byte `json:"nonce"`
@@ -153,8 +155,10 @@ type Context struct {
 }
 
 // Proof is one complete locklark.vault-creation/v1 identity proof. Signature
-// is exactly SignatureBytes of bytes in the shape of an Ed25519 signature;
-// this package never verifies it.
+// is exactly SignatureBytes. Encode and Parse only check its wire shape (the
+// exact unpadded base64url of SignatureBytes); Parse never verifies it. Verify
+// does verify it with ed25519.Verify against SigningBytes of the caller's
+// independently built expected context and the registered identity key.
 type Proof struct {
 	Context   Context `json:"context"`
 	Signature []byte  `json:"signature"`
