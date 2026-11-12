@@ -23,6 +23,7 @@ import {
   EDGE_CHOOSER_TITLE_PREFIX,
   EDGE_DEVELOPER_SWITCH_SELECTOR,
   EDGE_EXTENSION_ID,
+  EDGE_INSTALL_PASS,
   EDGE_LOAD_UNPACKED_SELECTOR,
   EDGE_MANAGER_TITLE,
   EDGE_MANAGER_URL,
@@ -44,6 +45,7 @@ const FIXED_ID = "geldnhjapnackobgknocomedmjgphnpe";
 const PRIVATE = {
   profile: "/tmp/locklark-private-profile",
   executable: "/opt/microsoft/msedge/msedge",
+  chromium: "/opt/playwright/chromium",
   extensionDir: "/tmp/locklark-private-extension/chromium",
   title: "Extensions",
 };
@@ -1096,4 +1098,606 @@ test("install failures are fixed classifications, never raw errors", () => {
   for (const [stage, message] of Object.entries(reasons))
     assert.equal(new EdgeInstallError(stage).message, message);
   assert.deepEqual(Object.keys(EDGE_INSTALL_REASONS), Object.keys(reasons).slice(0, -1));
+});
+
+// The opt-in pair/disconnect checkpoint is defined in the official acceptance
+// script itself. That script starts a browser at import time, so these tests
+// inspect only its reviewed source blocks; they never launch Edge, open a
+// popup, read the X server or print a path/title/fixture value.
+const NATIVE_ACCEPTANCE = fileURLToPath(
+  new URL("./browser_native_acceptance.mjs", import.meta.url),
+);
+const nativeSource = readFileSync(NATIVE_ACCEPTANCE, "utf8");
+
+// The literal block that starts at `marker`, including its balanced braces.
+// A missing or unterminated block is a test failure, never an empty match.
+function sourceBlock(source, marker) {
+  const start = source.indexOf(marker);
+  assert.notEqual(start, -1, marker);
+  const open = source.indexOf("{", start);
+  let depth = 0;
+  for (let index = open; index < source.length; index++) {
+    if (source[index] === "{") depth += 1;
+    else if (source[index] === "}") {
+      depth -= 1;
+      if (depth === 0) return source.slice(open, index + 1);
+    }
+  }
+  throw Error("unterminated source block: " + marker);
+}
+
+const PAIR_GUARD = sourceBlock(nativeSource, "if (edgePairDisconnect) {");
+const PAIR_FUNCTION = sourceBlock(
+  nativeSource,
+  "async function acceptEdgePairDisconnect(driver) {",
+);
+const MANAGED_BRANCH = nativeSource.slice(
+  nativeSource.indexOf("    // Visible manager UI only."),
+  nativeSource.indexOf('  await page.goto(origin + "/login");'),
+);
+const PAIR_STAGES = nativeSource.slice(
+  nativeSource.indexOf("const EDGE_PAIR_STAGES ="),
+  nativeSource.indexOf("]);", nativeSource.indexOf("const EDGE_PAIR_STAGES =")) + 3,
+);
+const SAFE_REASONS = nativeSource.slice(
+  nativeSource.indexOf("    const safeReasons = ["),
+  nativeSource.indexOf("    ];", nativeSource.indexOf("    const safeReasons = [")),
+);
+
+test("pair/disconnect mode is opt-in, Edge-only, absolute and mutually exclusive", () => {
+  assert.match(
+    nativeSource,
+    /const edgePairDisconnect = process\.env\.LOCKLARK_TEST_EDGE_PAIR_DISCONNECT === "1";/,
+  );
+  // The route checkpoint refuses this mode exactly like every other journey
+  // that would change what pairing, fill or checkout mean.
+  const routeFunction =
+    "function routeModeCompatible() " +
+    sourceBlock(nativeSource, "function routeModeCompatible()");
+  const compatible = (env) =>
+    new Function("process", routeFunction + "; return routeModeCompatible;")({
+      env,
+    })();
+  assert.equal(compatible({}), true);
+  assert.equal(
+    compatible({ LOCKLARK_TEST_EDGE_PAIR_DISCONNECT: "1" }),
+    false,
+  );
+  assert.equal(compatible({ LOCKLARK_TEST_EDGE_INSTALL_ONLY: "1" }), false);
+  // Execute the actual guard block with a synthetic Edge launch context and
+  // the same assert implementation it uses in production.
+  const guard = (env, browser, executable) =>
+    new Function(
+      "assert",
+      "process",
+      "browserName",
+      "browserExecutable",
+      "edgePairDisconnect",
+      PAIR_GUARD,
+    )(assert, { env }, browser, executable, true);
+  const absolute = "/opt/microsoft/msedge/msedge";
+  guard({ LOCKLARK_TEST_EDGE_PAIR_DISCONNECT: "1" }, "edge", absolute);
+  assert.throws(
+    () => guard({ LOCKLARK_TEST_EDGE_PAIR_DISCONNECT: "1" }, "chromium", absolute),
+    /requires LOCKLARK_TEST_BROWSER=edge/,
+  );
+  assert.throws(
+    () => guard({ LOCKLARK_TEST_EDGE_PAIR_DISCONNECT: "1" }, "edge", "msedge"),
+    /requires an explicit absolute executable path/,
+  );
+  const forbidden = [
+    "LOCKLARK_TEST_EDGE_INSTALL_ONLY",
+    "LOCKLARK_TEST_CHECKOUT_FRAMES",
+    "LOCKLARK_TEST_SHARED_CLIPBOARD",
+    "LOCKLARK_TEST_POPUP_VAULT",
+    "LOCKLARK_TEST_ROUTE_DETAIL_READ",
+    "LOCKLARK_TEST_ROUTE_IDLE_TTL",
+    "LOCKLARK_TEST_FAILURE_STAGE",
+    "LOCKLARK_TEST_BROWSER_PARITY",
+    "LOCKLARK_TEST_PASSKEY_MANAGEMENT",
+    "LOCKLARK_TEST_PASSKEY_CONDITIONAL",
+    "LOCKLARK_TEST_OTHER_PROVIDER",
+    "LOCKLARK_TEST_PASSKEY_SIGNALS",
+  ];
+  for (const name of forbidden)
+    assert.throws(
+      () =>
+        guard(
+          { ...{ [name]: "1" } },
+          "edge",
+          absolute,
+        ),
+      /cannot be combined with another acceptance mode/,
+      name,
+    );
+  // Empty workflow-materialized values and explicit 0 never select a mode.
+  const inert = Object.fromEntries(forbidden.map((name) => [name, "0"]));
+  inert.LOCKLARK_TEST_EDGE_PAIR_DISCONNECT = "1";
+  guard(inert, "edge", absolute);
+  const empty = Object.fromEntries(forbidden.map((name) => [name, ""]));
+  empty.LOCKLARK_TEST_EDGE_PAIR_DISCONNECT = "1";
+  guard(empty, "edge", absolute);
+  // Install-only's own list gained exactly this mutual-exclusion name.
+  const installGuard = sourceBlock(nativeSource, "if (edgeInstallOnly) {");
+  assert.match(installGuard, /"LOCKLARK_TEST_EDGE_PAIR_DISCONNECT"/);
+  guard({ LOCKLARK_TEST_EDGE_PAIR_DISCONNECT: "1" }, "edge", absolute);
+  // Both guards run before launch: no browser can start for a refused pair.
+  assert.ok(
+    nativeSource.indexOf("if (edgePairDisconnect) {") <
+      nativeSource.indexOf("chromium.launchPersistentContext("),
+  );
+});
+
+test("the strict install identity and worker proofs run before any pair action", () => {
+  const order = [
+    "installEdgeExtensionThroughManager({",
+    "assert.deepEqual(identity,",
+    "assert.equal(browser.serviceWorkers().length, 1",
+    "if (edgeInstallOnly) {",
+    "throw EDGE_INSTALL_COMPLETE;",
+    "await acceptEdgePairDisconnect({",
+    "throw EDGE_PAIR_COMPLETE;",
+  ];
+  let previous = -1;
+  for (const marker of order) {
+    const index = MANAGED_BRANCH.indexOf(marker);
+    assert.ok(index > previous, marker);
+    previous = index;
+  }
+  // The install-only fork is unchanged and never reaches the pair journey.
+  const pairAt = MANAGED_BRANCH.indexOf("await acceptEdgePairDisconnect({");
+  const installOnlyAt = MANAGED_BRANCH.indexOf("if (edgeInstallOnly) {");
+  const installCompleteAt = MANAGED_BRANCH.indexOf("throw EDGE_INSTALL_COMPLETE;");
+  assert.ok(installOnlyAt < installCompleteAt);
+  assert.ok(installCompleteAt < pairAt);
+  // The same real visible manager helper is called with exactly its existing
+  // options; no pair-only preload, extension flag, storage write or second
+  // harness is introduced.
+  const helperCall = sourceBlock(MANAGED_BRANCH, "installEdgeExtensionThroughManager({");
+  for (const option of [
+    "browser",
+    "page",
+    "extensionDir: extension",
+    "edgeExecutable: browserExecutable",
+    "profile",
+    "origin",
+    "inputRequest:",
+    "openPopup",
+    "eventually",
+    "phase",
+  ])
+    assert.match(helperCall, new RegExp("\\b" + option.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  // Pair mode shares the install-only launch exactly: the one existing
+  // non-managed branch keeps the load switches, while the managed branch
+  // selects no switches and no pair-only launch hook is added.
+  assert.match(
+    managedLaunchSource(),
+    /\.\.\.\(edgeManagerInstall\s*\? \[\]\s*:\s*\["--disable-extensions-except=" \+ extension, "--load-extension=" \+ extension\]\)/,
+  );
+  assert.doesNotMatch(
+    MANAGED_BRANCH + PAIR_FUNCTION,
+    /--load-extension|--disable-extensions-except|addInitScript|setInputFiles|filechooser/,
+  );
+});
+
+// The shared managed-install launch block, from the launch arguments through
+// the persistent context options. Only its reviewed shape is inspected.
+function managedLaunchSource() {
+  return nativeSource.slice(
+    nativeSource.indexOf("  const launchArguments = ["),
+    nativeSource.indexOf("  browser = await chromium.launchPersistentContext("),
+  ) + nativeSource.slice(
+    nativeSource.indexOf("  browser = await chromium.launchPersistentContext("),
+    nativeSource.indexOf("  browser.on(\"console\""),
+  );
+}
+
+test("pair/disconnect uses the exact physical popup and native X11 controls", () => {
+  // The real install-helper popup is what gets clicked; #connect is the
+  // popup's actual control, never a synthetic event or a second popup.
+  assert.equal(
+    PAIR_FUNCTION.match(/installedPopup\.click\("#connect"\)/g)?.length,
+    1,
+  );
+  assert.match(PAIR_FUNCTION, /await installedPopup\.count\("#connect"\)/);
+  // Only the generated synthetic fixture vault path, password and Secret Key
+  // reach the existing native X11 helper before the exact approval. No quick
+  // pairing control is ever chosen.
+  const native = [
+    '{ click_label: "金库文件" }',
+    "{ text: fixture.Path }",
+    '{ click_label: "主密码" }',
+    "{ text: fixture.Password }",
+    '{ click_label: "Secret Key" }',
+    "{ text: fixture.Secret }",
+    '{ click_label: "解锁" }',
+    '{ click_label: "确认连接此扩展" }',
+  ];
+  let previous = -1;
+  for (const marker of native) {
+    const index = PAIR_FUNCTION.indexOf(marker);
+    assert.ok(index > previous, marker);
+    previous = index;
+  }
+  assert.doesNotMatch(PAIR_FUNCTION, /连接并启用快捷填充/);
+  assert.deepEqual(
+    [...PAIR_FUNCTION.matchAll(/fixture\.([A-Za-z]+)/g)].map((match) => match[1]),
+    ["Path", "Password", "Secret"],
+  );
+  // No page fill, clipboard, credential-value inspection or added journey.
+  assert.doesNotMatch(
+    PAIR_FUNCTION,
+    /\.fill\(|inputValue|textContent|innerText|clipboard|Clipboard|localStorage|sessionStorage|setInputFiles|filechooser|fill-value|approve-fill/i,
+  );
+  // The exact disconnect control and the existing wait_absent contract.
+  assert.equal(PAIR_FUNCTION.match(/popup\.click\("#disconnect"\)/g)?.length, 1);
+  assert.match(PAIR_FUNCTION, /input\(\[\], true, \{ wait_absent: true \}\)/);
+});
+
+test("pair proof is followed by disconnect and a fresh disconnected popup proof", () => {
+  const compact = PAIR_FUNCTION.replace(/\s+/g, " ");
+  const steps = [
+    'popupStatusKind(await popup.text("#status")) === "paired"',
+    '(await popup.disabled("#refresh")) === false',
+    '(await popup.disabled("#connect")) === true',
+    'popup.click("#disconnect")',
+    "input([], true, { wait_absent: true })",
+    'popupStatusKind(await popup.text("#status")) === "disconnected"',
+    '(await popup.disabled("#connect")) === false',
+    '(await popup.disabled("#refresh")) === true',
+  ];
+  let previous = -1;
+  for (const marker of steps) {
+    const index = compact.indexOf(marker);
+    assert.ok(index > previous, marker);
+    previous = index;
+  }
+  // Exactly two fresh physical popup opens: one for the paired proof and one
+  // after the exact native window disappeared for the disconnected proof.
+  assert.equal(PAIR_FUNCTION.match(/await openPopup\(\)/g)?.length, 2);
+  assert.match(
+    PAIR_FUNCTION,
+    /input\(\[\], true, \{ wait_absent: true \}\);\s*mark\("edge-pair-disconnected"\);\s*popup = await openPopup\(\);/,
+  );
+});
+
+test("pair/disconnect has separate success labels and fixed failure text", () => {
+  const labelStart = nativeSource.indexOf("const EDGE_PAIR_DISCONNECT_PASS =");
+  const labelEnd = nativeSource.indexOf(";", labelStart) + 1;
+  const pairLabel = new Function(
+    nativeSource.slice(labelStart, labelEnd) +
+      "; return EDGE_PAIR_DISCONNECT_PASS;",
+  )();
+  assert.equal(typeof pairLabel, "string");
+  assert.ok(pairLabel.startsWith("PASS: real Edge extension installed"));
+  assert.match(pairLabel, /physically disconnected and re-proven disconnected/);
+  assert.notEqual(pairLabel, EDGE_INSTALL_PASS);
+  // The final dispatch has install-only, then pair/disconnect, then the
+  // general browser journey; pair mode never prints the other two labels.
+  const labelsAt = nativeSource.indexOf("if (edgeInstallOnly) {\n  console.log(EDGE_INSTALL_PASS);");
+  assert.ok(labelsAt > 0);
+  assert.match(
+    nativeSource.slice(labelsAt),
+    /if \(edgeInstallOnly\) \{\n  console\.log\(EDGE_INSTALL_PASS\);\n\} else if \(edgePairDisconnect\) \{\n  console\.log\(EDGE_PAIR_DISCONNECT_PASS\);\n\} else \{/,
+  );
+  assert.match(nativeSource, /const EDGE_PAIR_COMPLETE = Object\.freeze/);
+  assert.doesNotMatch(nativeSource, /const EDGE_PAIR_COMPLETE = EDGE_INSTALL_COMPLETE/);
+  // Both fixed success sentinels are swallowed by the failure handler; pair
+  // success never writes a diagnostic.
+  assert.match(
+    nativeSource,
+    /!\(edgeInstallOnly && error === EDGE_INSTALL_COMPLETE\) &&\s*!\(edgePairDisconnect && error === EDGE_PAIR_COMPLETE\)/,
+  );
+  // Every pair stage is from the fixed allowlist and is masked otherwise.
+  for (const match of PAIR_FUNCTION.matchAll(/mark\("([^"]+)"\)/g))
+    assert.match(PAIR_STAGES, new RegExp('"' + match[1] + '"'), match[1]);
+  assert.match(
+    nativeSource,
+    /edgePairDisconnect && !EDGE_PAIR_STAGES\.has\(value\) && "edge-pair"/,
+  );
+  // Pair failures classify only through fixed literals and allowlisted text.
+  const pairReasons = [
+    "Edge pair popup unavailable",
+    "Edge pair connect control unavailable",
+    "Edge pair status not paired",
+    "Edge pair refresh unavailable",
+    "Edge pair disconnect control unavailable",
+    "Edge pair connect control remained enabled",
+    "Edge pair status not disconnected",
+    "Edge pair refresh remained enabled after disconnect",
+  ];
+  for (const reason of pairReasons) assert.ok(SAFE_REASONS.includes(reason), reason);
+  assert.match(nativeSource, /edgePairDisconnect\s*\n?\s*\? "edge-pair-unclassified"/);
+  assert.doesNotMatch(PAIR_GUARD, /\$\{/);
+  assert.doesNotMatch(PAIR_FUNCTION, /error\.|\.stack|\.message/);
+});
+
+test("browser keys use Edge's launched executable and Playwright's Chromium", () => {
+  // Execute the acceptance script's own assignment and browserKey helper with
+  // synthetic resolvers, so this proves the actual owner selection rather than
+  // a copied expectation. No file, browser, X server or real path is touched.
+  const factorySource =
+    "function browserKeyFor(chromium) " +
+    sourceBlock(nativeSource, "function browserKeyFor(chromium)") +
+    ";\n";
+  const assignmentStart = nativeSource.indexOf(
+    "  const browserKey = browserKeyFor(",
+  );
+  assert.notEqual(assignmentStart, -1, "browserKey assignment");
+  const assignmentEnd = nativeSource.indexOf("  );", assignmentStart);
+  assert.notEqual(assignmentEnd, -1, "browserKey assignment end");
+  const assignmentSource = nativeSource.slice(
+    assignmentStart,
+    assignmentEnd + "  );".length,
+  );
+  const requests = (browserName) => {
+    const resolved = {
+      [PRIVATE.executable]: "/resolved/edge",
+      [PRIVATE.chromium]: "/resolved/chromium",
+    };
+    const captured = [];
+    const browserKey = new Function(
+      "realpathSync",
+      "chromium",
+      "browserName",
+      "browserExecutable",
+      "assert",
+      "execFileSync",
+      "join",
+      "root",
+      "env",
+      "ROUTE_TITLE_PREFIX",
+      "SOURCE_TITLE_PREFIX",
+      factorySource + assignmentSource + "return browserKey;",
+    )(
+      (value) => {
+        assert.ok(value in resolved, "Unexpected realpath input");
+        return resolved[value];
+      },
+      { executablePath: () => PRIVATE.chromium },
+      browserName,
+      PRIVATE.executable,
+      assert,
+      (command, args, options) => {
+        assert.equal(command, "python3");
+        assert.deepEqual(args, ["/root/scripts/browser_native_x11.py"]);
+        captured.push(JSON.parse(options.input));
+        return Buffer.from("{}");
+      },
+      (...parts) => parts.join("/"),
+      "/root",
+      {},
+      "route-title",
+      "source-title",
+    );
+    browserKey([{ key: "Escape" }], "route-title");
+    browserKey([{ key: "Control_L+Shift_L+y" }], "source-title");
+    return captured;
+  };
+  const expected = (executable) => [
+    {
+      title_prefix: "route-title",
+      executable,
+      actions: [{ key: "Escape" }],
+    },
+    {
+      title_prefix: "source-title",
+      executable,
+      actions: [{ key: "Control_L+Shift_L+y" }],
+    },
+  ];
+  // Edge ignores the Playwright executable for its explicit launched one.
+  assert.deepEqual(requests("edge"), expected("/resolved/edge"));
+  // Chromium keeps Playwright's executable even with an explicit Edge path.
+  assert.deepEqual(requests("chromium"), expected("/resolved/chromium"));
+});
+
+
+
+
+
+// Executes the acceptance script's own source — the single
+// `const browserKey = browserKeyFor(...)`, the managed-install branch, and the
+// real openPopup() — with the real installEdgeExtensionThroughManager. Every
+// other collaborator is a fake supplied through this one seam object. The
+// browserKey stays the script's own const: openPopup reads that exact binding,
+// so reordering it after the branch produces the real TDZ ReferenceError and
+// no test-local key can stand in. No browser, X server, chooser or private
+// path is used.
+function edgeInstallKeySeam(browserName, { keyAfterBranch = false } = {}) {
+  const H = "chrome-extension://" + EDGE_EXTENSION_ID + "/";
+  const source = nativeSource;
+  const start = source.indexOf(
+    "  // The one browserKey the whole script shares, initialized before the",
+  );
+  assert.ok(
+    start > 0,
+    "the managed-install branch must be preceded by the script's single browserKey",
+  );
+  const slice = source.slice(start, source.indexOf("  // Read-only exact-title inspection", start));
+  assert.equal(slice.match(/const browserKey = /g)?.length, 1, "one browserKey");
+  const keyStart = slice.indexOf("const browserKey = ");
+  const keyEnd = slice.indexOf("\n  );\n", keyStart) + "\n  );\n".length;
+  const keyDeclaration = slice.slice(keyStart, keyEnd);
+  const branchStart = slice.indexOf("  if (edgeManagerInstall) {");
+  const branchEnd = slice.indexOf("    if (edgeInstallOnly) {", branchStart);
+  assert.ok(keyEnd <= branchStart && branchStart < branchEnd, "key, then managed branch");
+  assert.match(keyDeclaration, /\n  \);\n$/, "declaration closes before the branch");
+  assert.ok(slice.indexOf("        openPopup,\n") > branchStart, "helper receives openPopup");
+  // The branch slice ends one `{` short of balanced: it closes the branch but
+  // not the script's enclosing try.
+  const branch = slice.slice(branchStart, branchEnd);
+  const balance = [...branch].reduce((n, c) => n + (c === "{" ? 1 : c === "}" ? -1 : 0), 0);
+  assert.equal(balance, 1, "one enclosing try");
+  const bodyStart = source.indexOf("  async function openPopup() {");
+  const bodyEnd = source.indexOf("  // Rendered vault rows only", bodyStart);
+  // openPopup's exact body, closed by its own brace.
+  const openPopupSource = source.slice(bodyStart, bodyEnd) + "  }\n";
+
+  const events = [];
+  const requests = [];
+  const popup = { targetId: "popup", ready: async () => true };
+  let opened = false;
+  const scope = {
+    browserName,
+    SOURCE_TITLE_PREFIX: "Locklark acceptance",
+    ROUTE_TITLE_PREFIX: "Locklark",
+    // The script's fixed closed-popup predicate, with its three messages.
+    popupClosed: (error) =>
+      ["Popup closed", "Popup CDP closed", "Popup CDP timed out"].includes(error?.message),
+    logs: [],
+    assert,
+    EDGE_EXTENSION_ID,
+    EDGE_BACKGROUND_URL,
+    EdgeInstallError,
+    JSON,
+    join,
+    root: "/synthetic/root",
+    env: {},
+    // The branch's own chooser transport (execFileSync -> JSON.parse), fed by
+    // the two closed acknowledgements in order.
+    execFileSync: (command, args, options) => {
+      const request = JSON.parse(options.input);
+      const step = Object.hasOwn(request, "extension_dir") ? "navigate" : "open";
+      events.push("chooser:" + step);
+      return Buffer.from(JSON.stringify(answer(step)));
+    },
+    // The script's browserKeyFor shape with its two guarded title prefixes;
+    // every request records the executable it names.
+    browserKeyFor: (chromium) => {
+      const executable = chromium.executablePath();
+      events.push("browserKeyFor:" + executable);
+      return function browserKey(actions, titlePrefix) {
+        if (actions[0].key === "Control_L+Shift_L+y") opened = true;
+        assert.ok(
+          titlePrefix === "Locklark acceptance" || titlePrefix === "Locklark",
+          "title prefix",
+        );
+        events.push("key:" + actions[0].key);
+        requests.push({ executable, titlePrefix, actions });
+        return {};
+      };
+    },
+    edgeManagerInstall: true,
+    edgePairDisconnect: false,
+    edgeInstallOnly: false,
+    browserExecutable: "/synthetic/edge",
+    // The real built package, so the manifest-derived fixed ID is really checked.
+    extension: fileURLToPath(new URL("../browser-extension/dist/chromium", import.meta.url)),
+    profile: "/synthetic/profile",
+    origin: "https://origin.test",
+    stage: "fixture",
+    nativeInput: null,
+    browser: {
+      pages: () => [{ url: () => "http://127.0.0.1/" }],
+      serviceWorkers: () => (events.push("serviceWorkers"), [{ url: () => H + "background.js" }]),
+      waitForEvent: async () => {},
+      newCDPSession: async () => ({
+        send: async () => ({ targetInfos: [{ type: "service_worker", url: H + "background.js" }] }),
+        detach: async () => {},
+      }),
+    },
+    page: {
+      bringToFront: async () => {},
+      goto: async () => (events.push("goto"), {}),
+      title: async () => EDGE_MANAGER_TITLE,
+      locator: () => {
+        const locator = {
+          filter: () => locator,
+          count: async () => 1,
+          first: () => locator,
+          boundingBox: async () => ({ x: 0, y: 0, width: 1, height: 1 }),
+          elementHandle: async () => ({ evaluate: async () => true, dispose: async () => {} }),
+        };
+        return locator;
+      },
+      context: () => ({ newCDPSession: async () => ({ send: async () => {}, detach: async () => {} }) }),
+    },
+    input: () => ({ ownership: { owned: true } }),
+    eventually: async (predicate, message) => {
+      events.push("eventually:" + message);
+      if (!(await predicate())) throw Error(message);
+    },
+    phase: (name) => events.push("phase:" + name),
+    // The real popup-target source openPopup() reads; a target exists only once
+    // the exact Ctrl+Shift+Y went out through the script's own browserKey.
+    popupTargets: async () => (opened ? [{ id: "popup" }] : []),
+    attachPopup: async () => (opened ? popup : null),
+    acceptEdgePairDisconnect: async () => events.push("pair"),
+    EDGE_INSTALL_COMPLETE: { edgeInstallComplete: true },
+    EDGE_PAIR_COMPLETE: { edgePairDisconnectComplete: true },
+  };
+  // The real install helper runs unchanged. It receives the slice's own
+  // openPopup binding; that is recorded before the call.
+  let passedToHelper = null;
+  const helper = (request) => {
+    passedToHelper = request.openPopup;
+    events.push("helper-entered");
+    return installEdgeExtensionThroughManager(request);
+  };
+  // A bare block closes the truncated branch; openPopup's own declaration
+  // follows in the same function scope and is hoisted, so the branch can pass
+  // it to the helper exactly as the script does.
+  const runSource =
+    // The script's module-level popup state, in the generated function's scope.
+    "let lastPopup = null;\n" +
+    "return (async () => {\n" +
+    (keyAfterBranch ? "" : keyDeclaration) +
+    branch +
+    "\n  \n" +
+    (keyAfterBranch ? keyDeclaration : "") +
+    openPopupSource +
+    "  })();";
+  const run = new Function(
+    Object.keys(scope).join(",") + ", installEdgeExtensionThroughManager",
+    runSource,
+  );
+  return async () => {
+    opened = false;
+    events.length = 0;
+    requests.length = 0;
+    passedToHelper = null;
+    await run(...Object.values(scope), helper).catch((error) => {
+      throw Object.assign(error, { seamEvents: events.slice() });
+    });
+    return { events, requests, passedToHelper };
+  };
+}
+
+test("the Edge install branch opens its popup through the script's own browserKey", async () => {
+  const result = await edgeInstallKeySeam("edge")();
+  assert.equal(typeof result.passedToHelper, "function", "helper received the opener");
+  const at = (event) => result.events.indexOf(event);
+  // The one browserKey is built before the helper runs, so the popup it opens
+  // in edge-activate reads an initialized binding.
+  assert.ok(at("browserKeyFor:/synthetic/edge") >= 0, "key built");
+  assert.ok(at("browserKeyFor:/synthetic/edge") < at("helper-entered"), "key before helper");
+  assert.ok(at("helper-entered") < at("phase:edge-activate"), "helper ran");
+  assert.ok(at("phase:edge-activate") < at("key:Escape"), "popup opened in edge-activate");
+  assert.deepEqual(result.requests.map((request) => request.actions[0].key), [
+    "Escape",
+    "Control_L+Shift_L+y",
+  ]);
+  assert.deepEqual(new Set(result.requests.map((request) => request.executable)),
+    new Set(["/synthetic/edge"]));
+  assert.deepEqual(new Set(result.requests.map((request) => request.titlePrefix)),
+    new Set(["Locklark acceptance"]));
+  // The popup the real openPopup() found was then the one the helper kept open.
+  assert.ok(at("eventually:Action popup did not open") > at("key:Control_L+Shift_L+y"));
+  assert.ok(at("phase:edge-installed") > at("eventually:Action popup did not open"));
+  assert.ok(at("serviceWorkers") > at("phase:edge-installed"), "worker proof after the open");
+});
+
+test("a key declared after the branch is read inside its temporal dead zone", async () => {
+  // Negative control: the same executed source with the real declaration moved
+  // after the branch. openPopup then reads the real const browserKey before
+  // initialization; the branch's catch reports its fixed edge-activate class.
+  const outcome = await edgeInstallKeySeam("edge", { keyAfterBranch: true })()
+    .then(() => ({ ok: true }), (error) => ({ ok: false, error }));
+  assert.equal(outcome.ok, false, "install must fail");
+  assert.ok(outcome.error instanceof EdgeInstallError);
+  assert.equal(outcome.error.message, EDGE_INSTALL_REASONS["edge-activate"]);
+  // The popup never opened: openPopup threw on its real browserKey read.
+  assert.equal(outcome.error.seamEvents.includes("key:Escape"), false);
+  assert.ok(outcome.error.seamEvents.includes("phase:edge-activate"));
 });

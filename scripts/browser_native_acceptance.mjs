@@ -75,6 +75,7 @@ function routeModeCompatible() {
     off("LOCKLARK_TEST_BROWSER_PARITY") &&
     off("LOCKLARK_TEST_FAILURE_STAGE") &&
     off("LOCKLARK_TEST_EDGE_INSTALL_ONLY") &&
+    off("LOCKLARK_TEST_EDGE_PAIR_DISCONNECT") &&
     (process.env.LOCKLARK_TEST_BROWSER === undefined ||
       process.env.LOCKLARK_TEST_BROWSER === "chromium")
   );
@@ -105,6 +106,26 @@ const edgeInstallOnly = process.env.LOCKLARK_TEST_EDGE_INSTALL_ONLY === "1";
 // Fixed install-only success signal: it carries no page text, title, path,
 // PID or driver output and is recognised only by identity.
 const EDGE_INSTALL_COMPLETE = Object.freeze({ edgeInstallComplete: true });
+// Strict opt-in on top of the same real manager install: after the manifest ID
+// and background.js worker proofs pass, the real popup the install helper left
+// open is physically paired and then physically disconnected. It never chooses
+// quick pairing, never fills a page and never changes install-only.
+const edgePairDisconnect = process.env.LOCKLARK_TEST_EDGE_PAIR_DISCONNECT === "1";
+// Both managed-install modes share exactly the visible manager install launch:
+// no extension load switches, the default --disable-extensions dropped and the
+// real window size. Nothing pair-specific is added to that launch.
+const edgeManagerInstall = edgeInstallOnly || edgePairDisconnect;
+// Fixed pair/disconnect success signal: like install-only it carries no page
+// text, title, path, fixture value or driver output and is recognised only by
+// identity.
+const EDGE_PAIR_COMPLETE = Object.freeze({ edgePairDisconnectComplete: true });
+// Fixed pair/disconnect success label, separate from EDGE_INSTALL_PASS and the
+// general browser acceptance PASS.
+const EDGE_PAIR_DISCONNECT_PASS =
+  "PASS: real Edge extension installed through the visible edge://extensions " +
+  "manager, physically paired through its actual #connect control, synthetic " +
+  "native unlock and the exact 确认连接此扩展 approval, then physically " +
+  "disconnected and re-proven disconnected";
 if (browserName === "edge")
   assert(browserExecutable && browserExecutable.startsWith("/"), "Edge requires an explicit absolute executable path");
 if (routeDetailRead) {
@@ -127,10 +148,43 @@ if (edgeInstallOnly) {
     "LOCKLARK_TEST_PASSKEY_CONDITIONAL",
     "LOCKLARK_TEST_OTHER_PROVIDER",
     "LOCKLARK_TEST_PASSKEY_SIGNALS",
+    "LOCKLARK_TEST_EDGE_PAIR_DISCONNECT",
   ])
     assert(
       [undefined, "", "0"].includes(process.env[name]),
       "Edge install-only cannot be combined with another acceptance mode",
+    );
+}
+// The pair/disconnect checkpoint is opt-in, Edge-only and refuses every mode
+// that would change what pairing, fill or checkout mean before anything (and
+// in particular any browser) is launched. Install-only is the only managed
+// install mode of its own and is mutually exclusive with this one.
+if (edgePairDisconnect) {
+  assert(
+    browserName === "edge",
+    "Edge pair/disconnect requires LOCKLARK_TEST_BROWSER=edge",
+  );
+  assert(
+    browserExecutable && browserExecutable.startsWith("/"),
+    "Edge pair/disconnect requires an explicit absolute executable path",
+  );
+  for (const name of [
+    "LOCKLARK_TEST_EDGE_INSTALL_ONLY",
+    "LOCKLARK_TEST_CHECKOUT_FRAMES",
+    "LOCKLARK_TEST_SHARED_CLIPBOARD",
+    "LOCKLARK_TEST_POPUP_VAULT",
+    "LOCKLARK_TEST_ROUTE_DETAIL_READ",
+    "LOCKLARK_TEST_ROUTE_IDLE_TTL",
+    "LOCKLARK_TEST_FAILURE_STAGE",
+    "LOCKLARK_TEST_BROWSER_PARITY",
+    "LOCKLARK_TEST_PASSKEY_MANAGEMENT",
+    "LOCKLARK_TEST_PASSKEY_CONDITIONAL",
+    "LOCKLARK_TEST_OTHER_PROVIDER",
+    "LOCKLARK_TEST_PASSKEY_SIGNALS",
+  ])
+    assert(
+      [undefined, "", "0"].includes(process.env[name]),
+      "Edge pair/disconnect cannot be combined with another acceptance mode",
     );
 }
 if (register)
@@ -740,6 +794,20 @@ const EDGE_INSTALL_STAGES = new Set([
   "edge-load-unpacked", "edge-chooser", "edge-activate", "edge-installed",
   "edge-service-worker", "continue",
 ]);
+// Pair/disconnect exposes only these fixed labels; the install helper's own
+// labels above are reused unchanged, and nothing else can reach the stage or
+// the diagnostic. Never a selector, title, path, PID, fixture value or raw
+// exception text.
+const EDGE_PAIR_STAGES = new Set([
+  ...EDGE_INSTALL_STAGES,
+  "edge-pair-connect",
+  "edge-pair-unlock",
+  "edge-pair-approve",
+  "edge-pair-paired",
+  "edge-pair-disconnect",
+  "edge-pair-disconnected",
+  "edge-pair-complete",
+]);
 // Read-only inspection of the exact page the harness itself controls: its own
 // pathname and form controls. Only fixed booleans leave the page.
 function sourcePageProbe(pathname) {
@@ -793,10 +861,10 @@ const ROUTE_IDLE_WIPE_LIMIT = 150000;
 const ROUTE_IDLE_POLL = 2000;
 function phase(value) {
   stage = value;
-  console.log(
-    "Native browser stage: " +
-      (edgeInstallOnly && !EDGE_INSTALL_STAGES.has(value) ? "edge-install" : value),
-  );
+  const masked = edgeInstallOnly
+    ? !EDGE_INSTALL_STAGES.has(value) && "edge-install"
+    : edgePairDisconnect && !EDGE_PAIR_STAGES.has(value) && "edge-pair";
+  console.log("Native browser stage: " + (masked || value));
 }
 const key = join(state, "tls.key"),
   cert = join(state, "tls.crt");
@@ -1285,7 +1353,103 @@ async function eventually(check, message, limit = 10000) {
   }
   throw Error(message);
 }
-if (edgeInstallOnly) phase("fixture");
+// Strict pair/disconnect checkpoint, opt-in only through
+// LOCKLARK_TEST_EDGE_PAIR_DISCONNECT=1. It starts only after the visible
+// manager install helper returned the manifest-derived fixed ID and exactly
+// the real background.js worker, and it reuses the popup that helper left open
+// through the existing physical Ctrl+Shift+Y flow. Every action is real: the
+// popup's own #connect control, the existing native X11 helper for only the
+// synthetic fixture vault path/password/Secret Key and unlock, the exact
+// 确认连接此扩展 approval (never quick pairing), a fresh physical popup whose
+// public state must be paired, the popup's own #disconnect, the existing
+// wait_absent X11 contract, and one more physical popup whose public state
+// must be disconnected with its real connect control available. No page fill,
+// clipboard read, credential-value inspection, hidden UI or added journey.
+async function acceptEdgePairDisconnect(driver) {
+  const {
+    installedPopup,
+    input,
+    fixture,
+    openPopup,
+    eventually: wait,
+    phase: mark,
+  } = driver;
+  mark("edge-pair-connect");
+  assert(
+    installedPopup &&
+      typeof installedPopup.click === "function" &&
+      typeof installedPopup.count === "function",
+    "Edge pair popup unavailable",
+  );
+  assert.equal(
+    await installedPopup.count("#connect"),
+    1,
+    "Edge pair connect control unavailable",
+  );
+  await installedPopup.click("#connect");
+  mark("edge-pair-unlock");
+  // Only the generated synthetic fixture values, through the existing native
+  // X11 helper; no quick-pairing control and no page value is touched.
+  input([
+    { click_label: "金库文件" },
+    { text: fixture.Path },
+    { click_label: "主密码" },
+    { text: fixture.Password },
+    { click_label: "Secret Key" },
+    { text: fixture.Secret },
+    { click_label: "解锁" },
+  ]);
+  mark("edge-pair-approve");
+  input([{ click_label: "确认连接此扩展" }]);
+  mark("edge-pair-paired");
+  let popup = await openPopup();
+  await wait(
+    async () => popupStatusKind(await popup.text("#status")) === "paired",
+    "Edge pair status not paired",
+  );
+  await wait(
+    async () => (await popup.disabled("#refresh")) === false,
+    "Edge pair refresh unavailable",
+  );
+  assert.equal(
+    await popup.count("#disconnect"),
+    1,
+    "Edge pair disconnect control unavailable",
+  );
+  assert.equal(
+    await popup.disabled("#disconnect"),
+    false,
+    "Edge pair disconnect control unavailable",
+  );
+  await wait(
+    async () => (await popup.disabled("#connect")) === true,
+    "Edge pair connect control remained enabled",
+  );
+  mark("edge-pair-disconnect");
+  await popup.click("#disconnect");
+  input([], true, { wait_absent: true });
+  mark("edge-pair-disconnected");
+  popup = await openPopup();
+  await wait(
+    async () => popupStatusKind(await popup.text("#status")) === "disconnected",
+    "Edge pair status not disconnected",
+  );
+  await wait(
+    async () => (await popup.disabled("#connect")) === false,
+    "Edge pair connect control unavailable",
+  );
+  assert.equal(
+    await popup.count("#connect"),
+    1,
+    "Edge pair connect control unavailable",
+  );
+  await wait(
+    async () => (await popup.disabled("#refresh")) === true,
+    "Edge pair refresh remained enabled after disconnect",
+  );
+  mark("edge-pair-complete");
+}
+if (edgeManagerInstall) phase("fixture");
 try {
   // LOCKLARK_BROWSER_FIXTURE reuses one prebuilt fixture for this run, its
   // vault observers and the checkout step; otherwise the fixture is built.
@@ -1323,14 +1487,14 @@ try {
     cwd: root,
   });
   const extension = join(root, "browser-extension/dist/chromium");
-  // Edge ignores the deprecated extension switches: install-only never passes
-  // them and loads the package only through the visible manager UI.
-  if (edgeInstallOnly)
+  // Edge ignores the deprecated extension switches: both managed-install modes
+  // never pass them and load the package only through the visible manager UI.
+  if (edgeManagerInstall)
     assert.equal(manifestExtensionId(extension), EDGE_EXTENSION_ID,
       "The built package must carry the fixed Locklark identity");
   const launchArguments = [
     "--no-sandbox",
-    ...(edgeInstallOnly
+    ...(edgeManagerInstall
       ? []
       : ["--disable-extensions-except=" + extension, "--load-extension=" + extension]),
     checkoutFrames
@@ -1341,27 +1505,56 @@ try {
     "--window-size=1200,850",
     "--remote-debugging-port=0",
   ];
-  if (edgeInstallOnly) {
+  if (edgeManagerInstall) {
     assertEdgeLaunchArguments(launchArguments);
     phase("edge-launch");
   }
   browser = await chromium.launchPersistentContext(profile, {
     headless: false,
     // Playwright injects --disable-extensions, which disables the extension
-    // system itself. Install-only drops that one default so the visible
-    // manager UI can install the package; no load switch is added.
-    ...(edgeInstallOnly ? { ignoreDefaultArgs: ["--disable-extensions"] } : {}),
+    // system itself. Both managed-install modes drop that one default so the
+    // visible manager UI can install the package; no load switch is added.
+    ...(edgeManagerInstall ? { ignoreDefaultArgs: ["--disable-extensions"] } : {}),
     channel: browserName === "edge" ? undefined : "chromium",
     ...(browserExecutable ? { executablePath: browserExecutable } : {}),
     // Edge 157 lays the manager view out at zero size when Playwright
-    // overrides the viewport, so install-only uses the real window size.
-    ...(edgeInstallOnly ? {} : { viewport: { width: 1100, height: 700 } }),
+    // overrides the viewport, so managed install uses the real window size.
+    ...(edgeManagerInstall ? {} : { viewport: { width: 1100, height: 700 } }),
     ...(sharedEnvironment ? { env: sharedEnvironment } : {}),
     args: launchArguments,
   });
   browser.on("console", (msg) => logs.push(msg.text()));
   const page = browser.pages()[0] || (await browser.newPage());
-  if (edgeInstallOnly) {
+  // Native-window form only. Browser-tab keys go through browserKey below,
+  // which always names the Chromium window itself. Defined before the managed
+  // install branch so pair/disconnect reuses this exact helper, unchanged.
+  function input(actions, native = true, inspect = false) {
+    assert(native !== false, "Native window input only");
+    const options = typeof inspect === "object" ? inspect : { inspect };
+    const request = {
+      title: "Locklark · 浏览器原生确认",
+      executable: resolve(host),
+      actions,
+      ...options,
+    };
+    return JSON.parse(
+      execFileSync("python3", [join(root, "scripts/browser_native_x11.py")], {
+        input: JSON.stringify(request),
+        env,
+      }).toString(),
+    );
+  }
+  // The one browserKey the whole script shares, initialized before the
+  // managed-install branch: the install helper's openPopup() sends the real
+  // Escape and Ctrl+Shift+Y during edge-activate, so any later declaration
+  // would be read inside its temporal dead zone. Edge names the executable it
+  // was launched with, Chromium keeps Playwright's own.
+  const browserKey = browserKeyFor(
+    browserName === "edge"
+      ? { executablePath: () => browserExecutable }
+      : chromium,
+  );
+  if (edgeManagerInstall) {
     // Visible manager UI only. The driver waits for the owned native chooser
     // before any XTest input; failures stay fixed classes.
     let identity = null;
@@ -1394,9 +1587,28 @@ try {
       workerUrl: EDGE_BACKGROUND_URL,
     }, "edge-service-worker");
     assert.equal(browser.serviceWorkers().length, 1, "edge-service-worker");
-    // The ordinary journey never starts; the fixed success signal passes
-    // through the failure handler (no diagnostic) into the existing finally.
-    throw EDGE_INSTALL_COMPLETE;
+    if (edgeInstallOnly) {
+      // The ordinary journey never starts; the fixed success signal passes
+      // through the failure handler (no diagnostic) into the existing finally.
+      throw EDGE_INSTALL_COMPLETE;
+    }
+    // Pair/disconnect begins only after the fixed manifest ID and exactly the
+    // actual background.js worker were proven above. The popup the helper left
+    // open is the same real Ctrl+Shift+Y action popup; no second harness, no
+    // preload, no extension load switch and no storage write exists here.
+    nativeInput = input;
+    await acceptEdgePairDisconnect({
+      installedPopup: lastPopup,
+      input,
+      fixture,
+      openPopup,
+      eventually,
+      phase,
+    });
+    // Both native pair and disconnect proofs passed; the fixed success signal
+    // passes through the failure handler (no diagnostic) into the existing
+    // finally, and the general browser acceptance PASS is never reached.
+    throw EDGE_PAIR_COMPLETE;
   }
   await page.goto(origin + "/login");
   const worker =
@@ -1407,47 +1619,33 @@ try {
       "chrome-extension://geldnhjapnackobgknocomedmjgphnpe/background.js",
     "Actual fixed extension identity required",
   );
-  // Native-window form only. Browser-tab keys go through browserKey below,
-  // which always names the Chromium window itself.
-  function input(actions, native = true, inspect = false) {
-    assert(native !== false, "Native window input only");
-    const options = typeof inspect === "object" ? inspect : { inspect };
-    const request = {
-      title: "Locklark · 浏览器原生确认",
-      executable: resolve(host),
-      actions,
-      ...options,
-    };
-    return JSON.parse(
-      execFileSync("python3", [join(root, "scripts/browser_native_x11.py")], {
-        input: JSON.stringify(request),
-        env,
-      }).toString(),
-    );
-  }
   // Raw JSON to the guarded X11 driver, for requests that are not native
   // accessibility actions (the Edge directory chooser, which stays a typed
   // XTest input). The single action array goes to the driver's top level.
   nativeInput = input;
-  // Browser-tab keys are real XTest input to the exact Chromium window. The
+  // Browser-tab keys are real XTest input to the exact launched window. The
   // realpath comes from the launched browser, never from an environment
-  // guess. Only these two fixed title prefixes are accepted, and the request
-  // is always the helper's exact-title-prefix form: no native window title,
-  // no inspection and no other request options.
-  const chromiumExecutable = realpathSync(chromium.executablePath());
-  function browserKey(actions, titlePrefix) {
-    assert(
-      titlePrefix === ROUTE_TITLE_PREFIX ||
-        titlePrefix === SOURCE_TITLE_PREFIX,
-      "Unsupported browser key target",
-    );
-    const request = { title_prefix: titlePrefix, executable: chromiumExecutable, actions };
-    return JSON.parse(
-      execFileSync("python3", [join(root, "scripts/browser_native_x11.py")], {
-        input: JSON.stringify(request),
-        env,
-      }).toString(),
-    );
+  // guess: Edge uses the explicit executable it was launched with, while
+  // Chromium keeps Playwright's own executable. Only these two fixed title
+  // prefixes are accepted, and the request is always the helper's
+  // exact-title-prefix form: no native window title, no inspection and no
+  // other request options.
+  function browserKeyFor(chromium) {
+    const chromiumExecutable = realpathSync(chromium.executablePath());
+    return function browserKey(actions, titlePrefix) {
+      assert(
+        titlePrefix === ROUTE_TITLE_PREFIX ||
+          titlePrefix === SOURCE_TITLE_PREFIX,
+        "Unsupported browser key target",
+      );
+      const request = { title_prefix: titlePrefix, executable: chromiumExecutable, actions };
+      return JSON.parse(
+        execFileSync("python3", [join(root, "scripts/browser_native_x11.py")], {
+          input: JSON.stringify(request),
+          env,
+        }).toString(),
+      );
+    };
   }
   // Read-only exact-title inspection of the native window that preserves
   // focus: no raise, focus or click. It never swallows a failure, so a missing
@@ -2980,9 +3178,13 @@ try {
   // Deliberately omit fixture files and exception/command bodies. The only
   // inspection text is the trusted popup's bounded status; native metadata is
   // a fixed control-name allowlist and never asks accessibility for values.
-  // Install-only success: no diagnostic is written; finally still closes the
-  // browser, checks private artifacts and scans controller output.
-  if (!(edgeInstallOnly && error === EDGE_INSTALL_COMPLETE)) {
+  // Install-only and pair/disconnect success: no diagnostic is written;
+  // finally still closes the browser, checks private artifacts and scans
+  // controller output.
+  if (
+    !(edgeInstallOnly && error === EDGE_INSTALL_COMPLETE) &&
+    !(edgePairDisconnect && error === EDGE_PAIR_COMPLETE)
+  ) {
     // The route page contributes only its fixed view/status enums and booleans.
     const safeReasons = [
       "Action popup did not open",
@@ -3100,6 +3302,14 @@ try {
       "Idle route detail did not expire",
       "Route page text unavailable",
       "Popup template unavailable",
+      "Edge pair popup unavailable",
+      "Edge pair connect control unavailable",
+      "Edge pair status not paired",
+      "Edge pair refresh unavailable",
+      "Edge pair disconnect control unavailable",
+      "Edge pair connect control remained enabled",
+      "Edge pair status not disconnected",
+      "Edge pair refresh remained enabled after disconnect",
     ];
     const report = {
       reason: safeReasons.includes(error?.message)
@@ -3208,12 +3418,15 @@ try {
       popup: { available: false },
       native: { available: false },
     };
-    // Edge install-only classifies only through a fixed literal; no page text,
-    // selector error, window title, path, PID or driver output is echoed.
-    if (edgeInstallOnly)
+    // Edge managed-install modes classify only through a fixed literal; no page
+    // text, selector error, window title, path, fixture value, PID or driver
+    // output is echoed. Pair/disconnect keeps its own separate literal.
+    if (edgeInstallOnly || edgePairDisconnect)
       report.classification = error instanceof EdgeInstallError
         ? error.message
-        : "edge-install-unclassified";
+        : edgePairDisconnect
+          ? "edge-pair-unclassified"
+          : "edge-install-unclassified";
     if (lastPopup) {
       try {
         report.popup = {
@@ -3264,10 +3477,13 @@ try {
     scanController(observedFixture);
   }
 }
-// Install-only ends here with its own fixed label; the ordinary journeys'
-// labels are never printed in that mode.
+// Install-only and pair/disconnect end here with their own fixed labels; the
+// ordinary journeys' labels and the general acceptance PASS are never printed
+// in either managed-install mode.
 if (edgeInstallOnly) {
   console.log(EDGE_INSTALL_PASS);
+} else if (edgePairDisconnect) {
+  console.log(EDGE_PAIR_DISCONNECT_PASS);
 } else {
   console.log(
     process.env.LOCKLARK_TEST_SHARED_CLIPBOARD === "1"
