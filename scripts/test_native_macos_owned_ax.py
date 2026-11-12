@@ -36,10 +36,24 @@ FORBIDDEN = ("AXWindowNumber", "AXValue", "AXSelectedText", "AXLabel")
 
 
 class Node:
-    """One opaque fake AXUIElement (identity is Python object identity)."""
+    """One fake AXUIElement backed by a plain attribute dict."""
 
     def __init__(self, **attributes):
         self.attributes = attributes
+
+
+class OpaqueHandle:
+    """An AXUIElement stand-in that is UNHASHABLE and NOT weak-referenceable.
+
+    A real native element need satisfy neither property, so the retained
+    handle must never depend on hashing, weak references or Python ``id``.
+    """
+
+    __slots__ = ("node",)
+    __hash__ = None
+
+    def __init__(self, node):
+        self.node = node
 
 
 class Point:
@@ -108,22 +122,27 @@ class FakeFrameworks:
         self.requests.append(("getpid", element))
         if self.getpid is not None:
             return self.getpid(element)
-        return (0, element.attributes["_pid"])
+        return (0, self._node(element).attributes["_pid"])
 
     def AXUIElementCopyAttributeValue(self, element, name, out):
         self.requests.append(("copy", element, name))
         if name in FORBIDDEN:
             raise AssertionError("forbidden attribute requested: " + name)
+        element = self._node(element)
         application = element.attributes.get("_application")
         if application is not None:
             if name == "AXWindows":
                 return (0, [w for w in self.windows
-                            if w.attributes["_pid"] == application])
+                            if self._node(w).attributes["_pid"] == application])
             if name == "AXFocusedWindow":
                 return (0, self.focused) if self.focused is not None else (NO_VALUE, None)
             return (NO_VALUE, None)
         value = element.attributes.get(name)
         return (NO_VALUE, None) if value is None else (0, value)
+
+    @staticmethod
+    def _node(element):
+        return element.node if isinstance(element, OpaqueHandle) else element
 
     def AXUIElementCopyElementAtPosition(self, application, x, y, out):
         self.requests.append(("at", application, x, y))
@@ -206,6 +225,8 @@ class _Libproc:
         return size
 
 
+
+
 def api_for(frameworks):
     api = macos.QuartzApi.__new__(macos.QuartzApi)
     api.ax = frameworks
@@ -252,18 +273,24 @@ class ScopedDiscoveryTests(unittest.TestCase):
         api, _ = scoped([])
         self.assertEqual(api.owned_discovery(TITLE), ([], False))
 
-    def test_multiple_owned_windows_are_ambiguous(self):
+    def test_multiple_owned_windows_are_ambiguous_at_discovery(self):
         first, _ = owned_window()
         second, _ = owned_window(title=OTHER_TITLE)
         api, frameworks = scoped([first, second])
-        self.assertEqual(api.owned_discovery(TITLE), ([], False))
-        # Ambiguity never reads a title of any owned window.
+        with self.assertRaises(contract.ContractError) as error:
+            api.owned_discovery(TITLE)
+        self.assertEqual(error.exception.code, "window-ambiguous")
+        # Every PID is proven, but ambiguity never reads any window title.
         self.assertNotIn("AXTitle", frameworks.names())
+        self.assertEqual(len([r for r in frameworks.requests if r[0] == "getpid"]),
+                         len(api.owned_windows(OWNED_PID)))
 
-    def test_title_mismatch_is_not_ready(self):
+    def test_title_mismatch_refuses_at_discovery(self):
         window, _ = owned_window(title=OTHER_TITLE)
         api, _ = scoped([window])
-        self.assertEqual(api.owned_discovery(TITLE), ([], False))
+        with self.assertRaises(contract.ContractError) as error:
+            api.owned_discovery(TITLE)
+        self.assertEqual(error.exception.code, "window-changed")
 
     def test_foreign_window_never_satisfies_the_owned_pid(self):
         window, _ = owned_window(pid=OTHER_PID)
@@ -309,35 +336,161 @@ class ScopedReobserveTests(unittest.TestCase):
         api.owned_discovery(TITLE)
         return api, frameworks, window, control
 
-    def test_reobserve_the_same_handle_never_enumerates_or_uses_cg(self):
+    def test_reobserve_re_enumerates_only_the_owned_windows(self):
         api, frameworks, window, _ = self.discovered()
         before = len(frameworks.requests)
         raw = api.owned_window(window)
         self.assertIs(raw["id"], window)
         after = frameworks.requests[before:]
-        # No AXWindows enumeration at all: the retained handle is re-proven.
-        self.assertNotIn("AXWindows", [request[2] for request in after if request[0] == "copy"])
+        # It MUST re-enumerate the owned PID's AXWindows (no CG, no shortcut)...
+        self.assertIn("AXWindows", [r[2] for r in after if r[0] == "copy"])
+        # ...prove the PID before any title/frame, then match the handle.
+        kinds = [r[0] if r[0] != "copy" else r[2] for r in after]
+        self.assertLess(kinds.index("getpid"), kinds.index("AXTitle"))
         self.assertIn(("getpid", window), after)
 
     def test_foreign_handle_and_same_looking_clone_are_refused(self):
-        api, _, _, _ = self.discovered()
+        api, _, window, _ = self.discovered()
         other, _ = owned_window(title=OTHER_TITLE)
         clone, _ = owned_window()
-        self.assertIsNone(api.owned_window(other))
-        self.assertIsNone(api.owned_window(clone))
+        for foreign in (other, clone, None):
+            with self.subTest(foreign=foreign):
+                with self.assertRaises(contract.ContractError) as error:
+                    api.owned_window(foreign)
+                self.assertEqual(error.exception.code, "window-changed")
 
     def test_handle_whose_pid_changed_is_refused(self):
         window, _ = owned_window()
         api, frameworks = scoped([window], getpid=lambda element: (0, OTHER_PID))
-        api._owned_scope_pid = OWNED_PID  # scope set directly; GetPid is foreign
-        api._owned_handles.add(window)
-        self.assertIsNone(api.owned_window(window))
+        api.scope_to_owned_pid(OWNED_PID)
+        api._owned_handles.append(window)  # retained, but GetPid now answers foreign
+        with self.assertRaises(contract.ContractError) as error:
+            api.owned_window(window)
+        self.assertEqual(error.exception.code, "a11y-query")
 
     def test_identity_equal_uses_real_cf_equal_semantics(self):
         api, _, window, _ = self.discovered()
         clone, _ = owned_window()
         self.assertIs(api.identity_equal(window, window), True)
         self.assertIs(api.identity_equal(window, clone), False)
+
+
+class PostDiscoveryChangeTests(unittest.TestCase):
+    """A change AFTER discovery must refuse before any input, on every path."""
+
+    def discovered(self):
+        window, control = owned_window()
+        api, frameworks = scoped([window], focused=window, hit=control)
+        api.owned_discovery(TITLE)
+        return api, frameworks, window
+
+    def paths(self, api, window):
+        """Every scoped path that could authorise input, as callables."""
+        chosen = {"id": window, "pid": OWNED_PID}
+        return {
+            "read_window": lambda: api.owned_window(window),
+            "controls": lambda: api.owned_element_controls(window),
+            "focus_state": lambda: api.focus_state(chosen),
+            "focus_identity": lambda: api.focus_identity(
+                chosen, {"pid": OWNED_PID, "window": window}),
+            "hit_test": lambda: api.hit_test_control(
+                chosen, LABEL, dict(CONTROL_FRAME), 440, 515),
+            "activate": lambda: api.activate_owned(chosen),
+        }
+
+    @staticmethod
+    def assert_not_authorised(test, call):
+        """A path refuses or reports no window identity; never authorises."""
+        try:
+            result = call()
+        except contract.ContractError:
+            return
+        if type(result) is dict:
+            test.assertIsNone(result.get("window"))
+        elif result is not None:
+            test.assertIs(result, False)
+
+    def test_second_owned_window_after_discovery_refuses_everywhere(self):
+        api, frameworks, window = self.discovered()
+        frameworks.windows.append(owned_window(title=OTHER_TITLE)[0])
+        for name, call in self.paths(api, window).items():
+            with self.subTest(path=name):
+                self.assert_not_authorised(self, call)
+        self.assertEqual(frameworks.activations, [])
+        self.assertFalse([r for r in frameworks.requests if r[0] == "at"])
+
+    def test_title_change_after_discovery_refuses_everywhere(self):
+        api, frameworks, window = self.discovered()
+        window.attributes["AXTitle"] = "Locklark · 改了标题"
+        for name, call in self.paths(api, window).items():
+            with self.subTest(path=name):
+                self.assert_not_authorised(self, call)
+        self.assertEqual(frameworks.activations, [])
+        self.assertFalse([r for r in frameworks.requests if r[0] == "at"])
+
+    def test_window_disappearing_after_discovery(self):
+        api, frameworks, window = self.discovered()
+        frameworks.windows.clear()
+        self.assertIsNone(api.owned_window(window))
+        with self.assertRaises(contract.ContractError):
+            api.owned_element_controls(window)
+
+    def test_replaced_handle_after_discovery_is_refused(self):
+        api, frameworks, window = self.discovered()
+        replacement, _ = owned_window()
+        frameworks.windows[:] = [replacement]
+        with self.assertRaises(contract.ContractError) as error:
+            api.owned_window(window)
+        self.assertEqual(error.exception.code, "window-changed")
+
+
+class RetainedHandleTests(unittest.TestCase):
+    def test_unhashable_and_non_weakref_handle_is_retained_and_proven(self):
+        window, _ = owned_window()
+        handle = OpaqueHandle(window)
+        import weakref
+        with self.assertRaises(TypeError):
+            weakref.ref(handle)
+        with self.assertRaises(TypeError):
+            hash(handle)
+        frameworks = FakeFrameworks([handle])
+        api = api_for(frameworks)
+        api.scope_to_owned_pid(OWNED_PID)
+        windows, unique = api.owned_discovery(TITLE)
+        self.assertTrue(unique)
+        self.assertIs(windows[0]["id"], handle)
+        # Re-observation re-enumerates and matches by CFEqual, not by hash.
+        self.assertIs(api.owned_window(handle)["id"], handle)
+        self.assertTrue(api.owned_element_controls(handle))
+
+    def test_retained_list_is_strong_and_bounded(self):
+        window, _ = owned_window()
+        api, _ = scoped([window])
+        api.owned_discovery(TITLE)
+        self.assertEqual(len(api._owned_handles), 1)
+        self.assertIs(api._owned_handles[0], window)
+        self.assertNotIsInstance(api._owned_handles, (set, frozenset))
+
+    def test_release_clears_title_and_retained_handles(self):
+        window, _ = owned_window()
+        api, _ = scoped([window])
+        api.owned_discovery(TITLE)
+        self.assertEqual(api.owned_scope_title(), TITLE)
+        self.assertEqual(len(api._owned_handles), 1)
+        api.unscope_owned_pid()
+        self.assertIsNone(api.owned_pid_scope())
+        self.assertIsNone(api.owned_scope_title())
+        self.assertIsNone(api._owned_handles)
+        with self.assertRaises(contract.ContractError):
+            api.owned_window(window)
+
+    def test_scope_title_cannot_be_repointed(self):
+        window, _ = owned_window()
+        api, _ = scoped([window])
+        api.owned_discovery(TITLE)
+        with self.assertRaises(contract.ContractError) as error:
+            api.set_owned_scope_title(OTHER_TITLE)
+        self.assertEqual(error.exception.code, "window-changed")
 
 
 class ScopedFocusAndActivationTests(unittest.TestCase):

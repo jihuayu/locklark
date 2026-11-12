@@ -33,7 +33,6 @@ import ctypes
 import inspect
 import math
 import os
-import weakref
 
 import native_acceptance_contract as contract
 
@@ -693,9 +692,6 @@ class QuartzApi:
             if not _exact_status(owner) or owner != pid:
                 raise _a11y_query()
             handles.append(element)
-        retain = self._owned_handles_set()
-        if retain is not None:
-            retain.update(handles)
         return handles
 
     # -- owned-PID AX path (no CoreGraphics window inventory) ----------------
@@ -709,84 +705,76 @@ class QuartzApi:
         if not _exact_status(pid) or pid <= 0:
             raise _a11y_query()
         self._owned_scope_pid = pid
-        # Weak free-list of the opaque AX handles issued for this request.
-        self._owned_handles = weakref.WeakSet()
+        self._owned_scope_title = None
+        # Strong, bounded, per-instance list (not a set: a native AXUIElement
+        # need not be hashable, weak-referenceable or stable under Python
+        # ``id``). Membership is CFEqual only, never hash/identity.
+        self._owned_handles = []
 
     def unscope_owned_pid(self):
-        """Drop this instance's owned-PID scope; the CG path applies again."""
-        self._owned_scope_pid, self._owned_handles = None, None
+        """Drop the scope AND every retained handle; the CG path applies again."""
+        self._owned_scope_pid, self._owned_scope_title = None, None
+        self._owned_handles = None
 
     def owned_pid_scope(self):
         """The validated scoped PID, or None for the unscoped CG path."""
         pid = getattr(self, "_owned_scope_pid", None)
         return pid if _exact_status(pid) and pid > 0 else None
 
-    def _owned_handles_set(self):
-        handles = getattr(self, "_owned_handles", None)
-        if handles is None:
-            return None
-        return handles
-
     def owned_discovery(self, title):
         """``([], False)`` while absent, ``([window], True)`` once unique.
 
-        Every AX window of the scoped PID is proven to belong to it (GetPid)
-        BEFORE any other attribute is read, exactly like ``owned_windows``.
-        Zero windows is not ready; several windows are ambiguous (never the
-        first one); one window must carry exactly the requested public title.
-        The returned window is the public shape of that AXUIElement with global
-        AXPosition/AXSize bounds; the opaque element itself is the identity.
+        Enumerates ONLY the scoped PID's AX windows, probes GetPid for EVERY
+        window before any other attribute, then requires exactly one window
+        that IS the retained handle (CFEqual) and carries exactly ``title``.
+        The first discovery adopts that handle; nothing else is retained.
+        """
+        if type(title) is not str or not title:
+            raise _a11y_query()
+        scope_title = getattr(self, "_owned_scope_title", None)
+        if scope_title is not None and scope_title != title:
+            # The title is fixed for the whole scope; a later request for a
+            # different title must never re-point at a later-owned window.
+            raise contract.ContractError("window-changed")
+        self._owned_scope_title = title
+        expect = self._retained_handle()
+        raw = self._enumerate_owned_window(title, expect)
+        if raw is None:
+            return [], False
+        self._adopt_handle(raw["id"])
+        return [raw], True
+
+    def _enumerate_owned_window(self, title, expect):
+        """Re-enumerate ONLY the owned AX windows and prove the ONE window.
+
+        Shared by discovery, re-observation, controls, hit tests, focus and
+        activation, so every one of them refuses on a second owned window or a
+        title change AFTER discovery. Order is mandatory: every listed window
+        is proven with GetPid FIRST, then the list must hold exactly one, then
+        that window must equal the requested retained handle under CFEqual and
+        carry exactly the requested title, and only then are its frame and
+        process identity read. Returns the public record, or None when the
+        owned process simply has no window yet (never a refusal).
         """
         pid = self.owned_pid_scope()
         if pid is None:
             raise _a11y_query()
+        if type(title) is not str or not title:
+            raise _a11y_query()
         elements = self.owned_windows(pid)
         if not elements:
-            return [], False
-        if len(elements) > 1:
-            return [], False
+            return None
+        if len(elements) != 1:
+            # A second owned window is ambiguous: never the first one.
+            raise contract.ContractError("window-ambiguous", {"ax": len(elements)})
         element = elements[0]
         if self._proven_pid(element) != pid:
             raise _a11y_query()
+        if expect is not None and not self._same_element(element, expect):
+            raise contract.ContractError("window-changed")
         name = self.title(element)
         if not name or name != title:
-            return [], False
-        raw = self._owned_window_record(pid, element)
-        if raw is None:
-            return [], False
-        self._retain_handle(element)
-        return [raw], True
-
-    def _retain_handle(self, element):
-        handles = self._owned_handles_set()
-        if handles is not None:
-            handles.add(element)
-
-    def _proven_pid(self, element):
-        """The proven owner PID of one AX element, or None (fail closed)."""
-        try:
-            answer = self.ax.AXUIElementGetPid(element, None)
-        except Exception:
-            raise _a11y_query()
-        decoded = _ax_result(answer)
-        if decoded is None or decoded[0] != 0:
-            raise _a11y_query()
-        owner = decoded[1]
-        if not _exact_status(owner) or owner <= 0:
-            raise _a11y_query()
-        return owner
-
-    def _owned_window_record(self, pid, element):
-        """Public window fields of one proven owned AX window, or None.
-
-        Reads only AXTitle/AXDescription (via ``title``), AXPosition/AXSize
-        (global display coordinates, via ``frame``) and the process identity.
-        Any unreadable title/frame refuses ``a11y-query``; a missing title is
-        simply not the requested window.
-        """
-        name = self.title(element)
-        if not name:
-            return None
+            raise contract.ContractError("window-changed")
         try:
             bounds = self.frame(element)
         except AxValueUnavailable:
@@ -802,30 +790,89 @@ class QuartzApi:
             "bounds": dict(bounds), "client": dict(bounds),
         }
 
-    def owned_window(self, element):
-        """Re-observe ONE retained opaque AX handle of the scoped PID, or None.
+    def set_owned_scope_title(self, title):
+        """Fix the exact requested title for this scope (validated plain text)."""
+        if self.owned_pid_scope() is None or type(title) is not str or not title \
+                or len(title) > contract.MAX_TITLE:
+            raise _a11y_query()
+        current = self.owned_scope_title()
+        if current is not None and current != title:
+            raise contract.ContractError("window-changed")
+        self._owned_scope_title = title
 
-        The handle must be one this instance issued (weak free-list), the live
-        scoped PID must be provable for it and the current title/frame are read
-        fresh. Nothing is enumerated and no CoreGraphics inventory is touched;
-        a foreign, released or unprovable handle is None, never a guess.
+    def owned_scope_title(self):
+        """The exact title this scope was discovered with, or None."""
+        title = getattr(self, "_owned_scope_title", None)
+        return title if type(title) is str and title else None
+
+    def _retained_handles(self):
+        handles = getattr(self, "_owned_handles", None)
+        return handles if type(handles) is list else None
+
+    def _retained_handle(self):
+        """The ONE retained handle, or None when this request holds none."""
+        handles = self._retained_handles()
+        if not handles:
+            return None
+        return handles[0]
+
+    def _adopt_handle(self, element):
+        """Retain this request's single handle (bounded; release clears it)."""
+        handles = self._retained_handles()
+        if handles is None:
+            raise _a11y_query()
+        if len(handles) >= MAX_AX_WINDOWS:
+            raise contract.ContractError("a11y-overrun")
+        if not handles:
+            handles.append(element)
+
+    def _holds_handle(self, element):
+        """True when ``element`` IS the request's retained handle (CFEqual)."""
+        handle = self._retained_handle()
+        if handle is None or element is None:
+            return False
+        return self._same_element(handle, element)
+
+    def _proven_pid(self, element):
+        """The proven owner PID of one AX element (fail closed)."""
+        try:
+            answer = self.ax.AXUIElementGetPid(element, None)
+        except Exception:
+            raise _a11y_query()
+        decoded = _ax_result(answer)
+        if decoded is None or decoded[0] != 0:
+            raise _a11y_query()
+        owner = decoded[1]
+        if not _exact_status(owner) or owner <= 0:
+            raise _a11y_query()
+        return owner
+
+    def _current_owned_window(self, element, title=None):
+        """Re-enumerate and prove THIS request's retained owned window.
+
+        Returns the fresh public record, or None when the window is gone. A
+        foreign/mismatched handle, a second owned window or a title change
+        refuses (``window-ambiguous``/``window-changed``/``a11y-query``)
+        before anything else about it is read.
         """
-        pid = self.owned_pid_scope()
-        handles = self._owned_handles_set()
-        if pid is None or handles is None or element not in handles:
-            return None
-        if self._proven_pid(element) != pid:
-            return None
-        return self._owned_window_record(pid, element)
+        if not self._holds_handle(element):
+            raise contract.ContractError("window-changed")
+        expected = self.owned_scope_title()
+        if expected is None:
+            raise _a11y_query()
+        if title is not None and title != expected:
+            raise contract.ContractError("window-changed")
+        return self._enumerate_owned_window(expected, element)
+
+    def owned_window(self, element):
+        """Re-observe the retained owned AX window by re-enumerating its PID."""
+        return self._current_owned_window(element)
 
     def owned_element_controls(self, element):
-        """The bounded public control walk over one retained owned AX window."""
-        pid = self.owned_pid_scope()
-        handles = self._owned_handles_set()
-        if pid is None or handles is None or element not in handles:
-            raise _a11y_query()
-        if self._proven_pid(element) != pid:
-            raise _a11y_query()
+        """Controls of the retained owned AX window, re-proven first."""
+        raw = self._current_owned_window(element)
+        if raw is None:
+            raise contract.ContractError("window-changed")
         return self._labeled(None, element)
 
     def title(self, element):
@@ -1120,14 +1167,22 @@ class QuartzApi:
         AXFocusedWindow under CFEqual. A same-PID different window refuses.
         """
         pid = self.owned_pid_scope()
-        handles = self._owned_handles_set()
         handle = window.get("id") if type(window) is dict else None
-        if pid is None or handles is None or handle not in handles:
+        if pid is None or handle is None or not self._holds_handle(handle):
             return False
         if window.get("pid") != pid or state.get("pid") != pid:
             return False
         if state.get("window") is not handle:
             return False
+        try:
+            # Re-enumerate the owned windows FIRST: a second window or a title
+            # change after discovery must refuse, never authorise input.
+            if self._current_owned_window(handle) is None:
+                return False
+        except contract.ContractError as error:
+            if error.code in ("window-changed", "window-ambiguous"):
+                return False
+            raise
         try:
             application = self.application(pid)
             if application is None:
@@ -1229,7 +1284,7 @@ class QuartzApi:
 
     def _owned_selected(self, window, element, label, rect):
         """The selected control of ONE retained owned AX handle; else refuse."""
-        if element is None or self.owned_window(element) is None:
+        if element is None or self._current_owned_window(element) is None:
             raise contract.ContractError("a11y-query")
         rows = [(row, record) for row, record in self._labeled(window, element)
                 if record.get("name") == label and record.get("role") in contract.CONTROL_ROLES]
@@ -1476,8 +1531,14 @@ class QuartzApi:
         """Scoped focus: the retained handle must be AXFocusedWindow (CFEqual)."""
         pid = self.owned_pid_scope()
         handle = window.get("id") if type(window) is dict else None
-        if front != pid or window.get("pid") != pid or handle is None \
-                or self.owned_window(handle) is None:
+        if front != pid or window.get("pid") != pid or handle is None:
+            return {"pid": front, "window": None}
+        try:
+            if self._current_owned_window(handle) is None:
+                return {"pid": front, "window": None}
+        except contract.ContractError as error:
+            if error.code != "window-changed":
+                raise
             return {"pid": front, "window": None}
         try:
             application = self.application(pid)
@@ -1496,7 +1557,7 @@ class QuartzApi:
     def _owned_root_at(self, window, pid, x, y):
         """Scoped window-root hit test over the retained owned AX handle."""
         handle = window.get("id") if type(window) is dict else None
-        if handle is None or self.owned_window(handle) is None:
+        if handle is None or self._current_owned_window(handle) is None:
             raise contract.ContractError("a11y-query")
         if window.get("pid") != pid:
             raise contract.ContractError("a11y-query")
@@ -1555,9 +1616,17 @@ class QuartzApi:
         """
         pid = self.owned_pid_scope()
         handle = window.get("id") if type(window) is dict else None
-        if pid is None or handle is None or self.owned_window(handle) is None:
+        if pid is None or handle is None or window.get("pid") != pid:
             raise contract.ContractError("focus-lost")
-        if window.get("pid") != pid or not self.activate(pid):
+        # Re-enumerate and prove the owned window BEFORE any activation.
+        try:
+            if self._current_owned_window(handle) is None:
+                raise contract.ContractError("focus-lost")
+        except contract.ContractError as error:
+            if error.code not in ("focus-lost", "window-changed", "window-ambiguous"):
+                raise
+            raise contract.ContractError("focus-lost")
+        if not self.activate(pid):
             raise contract.ContractError("focus-lost")
         state = self.focus_state(window)
         if self.focus_identity(window, state) is not True:
@@ -1691,16 +1760,26 @@ class MacAdapter:
         return callable(reader) and reader() is not None
 
     def observe_plan(self, plan):
-        """Keep the exact requested title for the scoped owned-window match.
+        """Hand the exact requested title to a scoped API before discovery.
 
-        Per-instance only, and only for a scoped discover request; the title is
-        the already validated request title and is never written anywhere else.
+        The title lives on the API's per-request scope (cleared on release), so
+        every later re-enumeration proves the same exact title. Unscoped
+        adapters keep no title at all.
         """
+        if not self._scoped():
+            return
         title = plan.get("title") if type(plan) is dict else None
-        self._scope_title = title if self._scoped() and type(title) is str else None
+        setter = getattr(self.api, "set_owned_scope_title", None)
+        if not callable(setter) or type(title) is not str:
+            raise contract.ContractError("a11y-query")
+        setter(title)
 
     def scope_owned_process(self, pid):
-        """Scope discovery to one owned PID; the returned release drops it."""
+        """Scope discovery to one owned PID; the returned release drops it.
+
+        Releasing also clears the retained handle(s) and the exact scope title,
+        so nothing about this request survives it.
+        """
         setter = getattr(self.api, "scope_to_owned_pid", None)
         clearer = getattr(self.api, "unscope_owned_pid", None)
         if not callable(setter) or not callable(clearer):
@@ -1725,7 +1804,7 @@ class MacAdapter:
     def list_windows(self):
         """Scoped: the owned PID's AX windows only (never the CG inventory)."""
         if self._scoped():
-            title = getattr(self, "_scope_title", None)
+            title = self.api.owned_scope_title()
             if type(title) is not str:
                 raise contract.ContractError("a11y-query")
             windows, unique = self.api.owned_discovery(title)
