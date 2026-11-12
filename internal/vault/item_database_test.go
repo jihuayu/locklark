@@ -149,8 +149,8 @@ func TestItemDatabaseNewIsUnlockedSnapshotProfile(t *testing.T) {
 		t.Fatalf("NewItemDatabase: %v", err)
 	}
 
-	if db.Header == nil || db.Header.Signature == nil || !db.Header.IsKdbx41() {
-		t.Fatal("adapter database is not KDBX 4.1")
+	if db.Header == nil || db.Header.Signature == nil || *db.Header.Signature != kdbx.DefaultKDBX41Sig {
+		t.Fatal("adapter database is not exactly KDBX 4.1")
 	}
 	if db.Credentials != nil && (db.Credentials.Passphrase != nil || db.Credentials.Key != nil || db.Credentials.Windows != nil) {
 		t.Fatal("adapter set credentials")
@@ -244,6 +244,34 @@ func TestItemDatabaseRoundTrip(t *testing.T) {
 	}
 }
 
+// TestItemDatabasePasskeyCollectionRoundTrip proves the v2 Passkeys collection
+// survives the adapter's real KDBX encode, decode and unlock in order.
+func TestItemDatabasePasskeyCollectionRoundTrip(t *testing.T) {
+	a, b := testPasskeyRecord(t), testPasskeyRecord(t)
+	want := Item{ID: "login-passkeys", Kind: "login", Title: "Passkeys", Username: "user", Password: "pw", CreatedAt: 1700000000, UpdatedAt: 1700000000, Passkeys: [][]byte{a, b}}
+	metadata := []byte("meta")
+	if err := ValidateItems(metadata, []Item{want}); err != nil {
+		t.Fatalf("fixture item is invalid: %v", err)
+	}
+	db, err := NewItemDatabase(metadata, []Item{want})
+	if err != nil {
+		t.Fatalf("NewItemDatabase: %v", err)
+	}
+	gotMetadata, got, err := ReadItemDatabase(itemDatabaseRoundTrip(t, db))
+	if err != nil {
+		t.Fatalf("ReadItemDatabase: %v", err)
+	}
+	if !bytes.Equal(gotMetadata, metadata) || len(got) != 1 {
+		t.Fatalf("read %q, %d items", gotMetadata, len(got))
+	}
+	if len(got[0].Passkeys) != 2 || !bytes.Equal(got[0].Passkeys[0], a) || !bytes.Equal(got[0].Passkeys[1], b) {
+		t.Fatalf("passkey collection = %d records; want both records in order", len(got[0].Passkeys))
+	}
+	if len(got[0].Passkey) != 0 {
+		t.Fatal("collection round trip also set the legacy single record")
+	}
+}
+
 // v2LayoutDropsURLNotes reports item entries whose URL and Notes slots the
 // established layout never writes.
 func v2LayoutDropsURLNotes(it Item) bool {
@@ -286,7 +314,9 @@ func TestItemDatabaseNewRejectsInvalidInput(t *testing.T) {
 		metadata []byte
 		items    []Item
 	}{
-		"nil items":     {[]byte{}, nil},
+		"nil items": {[]byte{}, nil},
+		// Deliberate API contract: ValidateItems (and so SealItems) accepts nil
+		// metadata, but this adapter requires non-nil metadata.
 		"nil metadata":  {nil, []Item{valid[0]}},
 		"oversize meta": {make([]byte, MaxPayload+1), []Item{}},
 		"at bound":      {make([]byte, MaxPayload), []Item{valid[0]}},
@@ -337,6 +367,49 @@ func TestItemDatabaseNewRejectsLegacyReadOnlyValues(t *testing.T) {
 	}
 }
 
+// TestItemDatabaseReadPreservesLegacyValues is the regression for Read applying
+// the strict write validation on top of readItems: a legacy item that OpenItems
+// preserves was rejected by the adapter, even though a real KDBX roundtrip of
+// it is intact. Read must return it unchanged, and NewItemDatabase must still
+// refuse to write it back.
+func TestItemDatabaseReadPreservesLegacyValues(t *testing.T) {
+	metadata := []byte("legacy")
+	want := legacyControlItem("legacy-ctrl", "login")
+	if validItems([]Item{want}, len(metadata)) || !validLegacyItems([]Item{want}, len(metadata)) {
+		t.Fatal("legacyControlItem is not legacy-read-only")
+	}
+
+	// Actual KDBX encode, decode and unlock of the legacy item.
+	opened := itemDatabaseRoundTrip(t, mustItemDatabase(t, metadata, []Item{CloneItem(want)}))
+	if opened.Header == nil || !opened.Header.IsKdbx41() {
+		t.Fatal("legacy fixture did not survive as KDBX 4.1")
+	}
+	gotMetadata, got, err := ReadItemDatabase(opened)
+	if err != nil {
+		t.Fatalf("ReadItemDatabase: %v", err)
+	}
+	if !bytes.Equal(gotMetadata, metadata) || len(got) != 1 {
+		t.Fatalf("read %q, %d items", gotMetadata, len(got))
+	}
+	// Every legacy control value is preserved byte for byte, and the whole item
+	// is equal to the source.
+	if g := got[0]; g.Sections[0].Fields[0].Value != legacyControlText ||
+		g.CreditCard.CardholderName != legacyControlText ||
+		g.Identity.FirstName != legacyControlText ||
+		g.History[0].Title != legacyControlText || g.History[0].Notes != legacyControlText ||
+		g.History[0].Sections[0].Fields[0].Value != legacyControlText {
+		t.Fatalf("legacy control value not preserved byte for byte: %+v", g)
+	}
+	if !reflect.DeepEqual(want, got[0]) {
+		t.Fatalf("legacy item changed:\nwant %+v\ngot  %+v", want, got[0])
+	}
+
+	// The read value still cannot be written back silently.
+	if db, err := NewItemDatabase([]byte{}, got); !errors.Is(err, ErrSnapshot) || db != nil {
+		t.Fatalf("NewItemDatabase(legacy read) = %v, %v; want nil, ErrSnapshot", db, err)
+	}
+}
+
 func TestItemDatabaseReadRejectsUnsupportedInput(t *testing.T) {
 	items := []Item{CloneItem(v2FixtureItems(t)[0]), CloneItem(v2FixtureItems(t)[3])}
 	newOpened := func(t *testing.T) *kdbx.Database {
@@ -370,6 +443,18 @@ func TestItemDatabaseReadRejectsUnsupportedInput(t *testing.T) {
 		"nil sig":      func(t *testing.T) *kdbx.Database { d := newOpened(t); d.Header.Signature = nil; return d },
 		"nil files":    func(t *testing.T) *kdbx.Database { d := newOpened(t); d.Header.FileHeaders = nil; return d },
 		"not kdbx 4.1": func(t *testing.T) *kdbx.Database { d := newOpened(t); d.Header.Signature.MajorVersion = 3; return d },
+		"kdbx 4.0": func(t *testing.T) *kdbx.Database {
+			d := newOpened(t)
+			*d.Header.Signature = kdbx.DefaultKDBX40Sig
+			return d
+		},
+		"kdbx 4.2": func(t *testing.T) *kdbx.Database {
+			d := newOpened(t)
+			sig := *d.Header.Signature
+			sig.MinorVersion = 2
+			d.Header.Signature = &sig
+			return d
+		},
 		"rootless": func(t *testing.T) *kdbx.Database {
 			d := newOpened(t)
 			d.Content.Root.Groups = nil
@@ -424,15 +509,6 @@ func TestItemDatabaseReadRejectsUnsupportedInput(t *testing.T) {
 			d.Content.InnerHeader.Binaries = append(d.Content.InnerHeader.Binaries, kdbx.Binary{ID: n, Content: []byte("orphan")})
 			return d
 		},
-		"legacy-read-only value": func(t *testing.T) *kdbx.Database {
-			return itemDatabaseRoundTrip(t, mustItemDatabase(t, auxiliaryMetadata, []Item{legacyControlItem("legacy-ctrl", "login")}))
-		},
-		"legacy-read-only value after document": func(t *testing.T) *kdbx.Database {
-			// The document entry is decoded (and its binary read) before the
-			// legacy item fails the strict final check.
-			d := itemDatabaseRoundTrip(t, mustItemDatabase(t, auxiliaryMetadata, []Item{legacyControlItem("legacy-ctrl", ""), items[1]}))
-			return d
-		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			supplied := db(t)
@@ -451,18 +527,21 @@ func TestItemDatabaseReadRejectsUnsupportedInput(t *testing.T) {
 	}
 
 	// Fail after every binary was decoded, then prove no source buffer was
-	// zeroed by the failure cleanup.
+	// zeroed by the failure cleanup. The second item is genuinely malformed: it
+	// decodes fully but its entry UUID no longer matches its ID.
 	d := itemDatabaseRoundTrip(t, mustItemDatabase(t, auxiliaryMetadata, []Item{items[1]}))
-	legacyDB := mustItemDatabase(t, auxiliaryMetadata, []Item{legacyControlItem("legacy-ctrl", "")})
+	malformedDB := mustItemDatabase(t, auxiliaryMetadata, []Item{CloneItem(items[0])})
 	g := itemDatabaseGroup(t, d)
-	g.Entries = append(g.Entries, legacyDB.Content.Root.Groups[0].Entries[1:]...)
+	badEntry := malformedDB.Content.Root.Groups[0].Entries[1]
+	badEntry.UUID = itemUUID("other-id")
+	g.Entries = append(g.Entries, badEntry)
 	before := fingerprint(d)
 	binaryCount := len(d.Content.InnerHeader.Binaries)
 	if binaryCount == 0 {
 		t.Fatal("fixture has no binaries")
 	}
 	if metadata, got, err := ReadItemDatabase(d); !errors.Is(err, ErrSnapshot) || metadata != nil || got != nil {
-		t.Fatalf("mixed read = %d items, %v", len(got), err)
+		t.Fatalf("mixed read = %d items, %v; want nil, nil, ErrSnapshot", len(got), err)
 	}
 	if after := fingerprint(d); !bytes.Equal(before, after) {
 		t.Fatal("failed read mutated the supplied database content")

@@ -29,12 +29,15 @@ import (
 // (SetKDBXv4Binary), which this adapter deliberately does not apply. It does
 // not alias the caller's items, metadata or binary bytes.
 //
-// Input is validated exactly like SealItems: a nil metadata or item slice,
-// metadata above MaxPayload, more than MaxItems items, a value that only the
-// legacy read path accepts, or anything else ValidateItems rejects returns
-// ErrSnapshot. Metadata must be non-nil (empty metadata is non-nil empty). A
-// non-nil empty item slice is valid and round-trips as a non-nil empty result.
-// Values are never normalized or repaired.
+// Input is validated by the strict ValidateItems rules that SealItems also
+// applies: metadata above MaxPayload, more than MaxItems items, a nil item
+// slice, a value that only the legacy read path accepts, or anything else
+// ValidateItems rejects returns ErrSnapshot. On top of that this adapter
+// deliberately rejects nil metadata by API contract, so callers pass
+// non-nil empty metadata instead; ValidateItems alone (and SealItems, which
+// only calls it) does not reject nil metadata. A non-nil empty item slice is
+// valid and round-trips as a non-nil empty result. Values are never
+// normalized or repaired.
 func NewItemDatabase(metadata []byte, items []Item) (*kdbx.Database, error) {
 	if metadata == nil || items == nil || len(metadata) > MaxPayload || ValidateItems(metadata, items) != nil {
 		return nil, ErrSnapshot
@@ -61,12 +64,24 @@ func NewItemDatabase(metadata []byte, items []Item) (*kdbx.Database, error) {
 // unlocking the file (Decode, then UnlockProtectedEntries). This function
 // verifies no file signature, credentials, epoch, encryption or
 // authorization; it does not mutate db. It enforces only
-// the supported in-memory shape: a non-nil header, signature, file header, KDF
-// parameters, content, meta, root and inner header, exactly one root group
-// named "Locklark items v1", and exactly the entry, value and binary layout
-// that readItems enforces. A nil, rootless, multi-group, wrong-group,
-// malformed or legacy "Locklark" preview database, nil metadata, or an item
-// carrying a legacy-read-only value returns ErrSnapshot with nil outputs.
+// the supported in-memory shape: a non-nil header whose signature is exactly
+// KDBX 4.1 (kdbx.DefaultKDBX41Sig, the format OpenItems dispatches), file
+// header, KDF parameters, content, meta, root and inner header, exactly one
+// root group named "Locklark items v1", the metadata entry readItems requires,
+// and exactly the entry, value and binary layout that readItems enforces. A
+// nil, non-4.1, rootless, multi-group, wrong-group, malformed or legacy
+// "Locklark" preview database returns ErrSnapshot with nil outputs.
+//
+// The metadata entry is required and the returned metadata is bounded by
+// readItems. The entry stores metadata as a Base64 value, so a KDBX empty
+// value decodes to empty metadata and cannot distinguish a source nil from an
+// empty metadata slice; Read does not and cannot detect nil metadata.
+//
+// The result follows the established legacy read rules: an item carrying a
+// value that only the legacy read path accepts (JSON-only control
+// characters) is returned unchanged, exactly as OpenItems preserves it.
+// NewItemDatabase remains strict, so such an item cannot be written back
+// through this adapter without being repaired first.
 //
 // Returned metadata, attachment, provenance and passkey buffers are fresh
 // copies that alias neither db nor each other, so the caller owns them.
@@ -74,38 +89,24 @@ func ReadItemDatabase(db *kdbx.Database) ([]byte, []Item, error) {
 	if !openedItemDatabase(db) {
 		return nil, nil, ErrSnapshot
 	}
-	metadata, items, err := readItems(db, db.Content.Root.Groups[0])
-	if err != nil {
-		return nil, nil, ErrSnapshot
-	}
-	// readItems applies the legacy read rules; the result must also survive the
-	// strict write path, otherwise a caller could only fail on the next write.
-	if ValidateItems(metadata, items) != nil {
-		clearReadItemDatabase(metadata, items)
-		return nil, nil, ErrSnapshot
-	}
-	return metadata, items, nil
+	// readItems applies the legacy read rules, which accept JSON-only control
+	// values that a new write rejects. Return them unchanged: Read must expose
+	// exactly what OpenItems preserves. NewItemDatabase stays strict, so an
+	// item read here cannot be written back silently.
+	return readItems(db, db.Content.Root.Groups[0])
 }
 
-// openedItemDatabase reports whether db is a non-nil, opened KDBX 4.1 database
-// with a single root group named like the item layout. It only reads db.
+// openedItemDatabase reports whether db is a non-nil, opened database whose
+// signature is exactly KDBX 4.1, with a single root group named like the item
+// layout. Every signature field must match, so a 4.0, 4.2 or newer header is
+// refused just as OpenItems refuses any other file signature. It only reads db.
 func openedItemDatabase(db *kdbx.Database) bool {
 	if db == nil || db.Header == nil || db.Header.Signature == nil ||
-		!db.Header.IsKdbx4() || !db.Header.IsKdbx41() ||
+		*db.Header.Signature != kdbx.DefaultKDBX41Sig ||
 		db.Header.FileHeaders == nil || db.Header.FileHeaders.KdfParameters == nil ||
 		db.Content == nil || db.Content.Meta == nil || db.Content.Root == nil ||
 		db.Content.InnerHeader == nil || db.Content.InnerHeader.InnerRandomStreamKey == nil {
 		return false
 	}
 	return len(db.Content.Root.Groups) == 1 && db.Content.Root.Groups[0].Name == itemGroup
-}
-
-// clearReadItemDatabase zeroes a refused read. These buffers are fresh copies
-// owned by the read, never buffers referenced by db or its entries.
-func clearReadItemDatabase(metadata []byte, items []Item) {
-	for n := range items {
-		clearSensitiveItemBuffers(&items[n])
-		items[n].ClearPasskeys()
-	}
-	clear(metadata)
 }
