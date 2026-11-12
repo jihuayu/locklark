@@ -1348,6 +1348,11 @@ def execute(plan, adapter):
         FAILURE_CONTEXT["action"] = "absence"
         return await_absent(plan, adapter, budget)
     FAILURE_CONTEXT["action"] = "discover"
+    # Platforms scoped to one owned process need the exact requested title to
+    # match the owned AX window; nothing else about the plan is shared.
+    observe = getattr(adapter, "observe_plan", None)
+    if callable(observe):
+        observe(plan)
     window = find_window(plan, adapter, budget)
     clicks = []
     for index, action in enumerate(plan["actions"]):
