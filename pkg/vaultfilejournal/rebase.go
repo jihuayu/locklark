@@ -284,23 +284,42 @@ func decodeRebaseAudit(raw []byte) (RebaseAudit, error) {
 // validateAuditEntries fails closed on any malformed audit key or value. It
 // never rewrites anything.
 func validateAuditEntries(ab *bolt.Bucket) error {
-	return ab.ForEach(func(k, v []byte) error {
-		if len(k) != 8 {
-			return ErrCorrupt
-		}
-		if v == nil || ab.Bucket(k) != nil {
-			// A nested bucket where an audit record belongs.
-			return ErrCorrupt
-		}
-		a, err := decodeRebaseAudit(v)
-		if err != nil {
-			return err
-		}
-		if a.NewGeneration != binary.BigEndian.Uint64(k) {
-			return ErrCorrupt
-		}
-		return nil
+	err := ab.ForEach(func(k, v []byte) error {
+		return checkAuditEntry(ab, k, v, true)
 	})
+	if err != nil && !errors.Is(err, ErrCorrupt) {
+		return fmt.Errorf("%w: audit scan: %v", ErrCorrupt, err)
+	}
+	return err
+}
+
+// checkAuditEntry validates one audit entry in place. A malformed key, a nested
+// bucket where a record belongs, an undecodable value or a value whose recorded
+// new generation disagrees with its key is ErrCorrupt; the returned error
+// describes the defect without echoing any stored byte. When wantKey is true
+// the key must equal the 8-byte big-endian generation of the record.
+func checkAuditEntry(ab *bolt.Bucket, k, v []byte, wantKey bool) error {
+	if v == nil || ab.Bucket(k) != nil {
+		// A nested bucket where an audit record belongs.
+		return auditCorrupt("nested bucket where an audit record belongs")
+	}
+	if len(k) != 8 {
+		return auditCorrupt(fmt.Sprintf("audit key is %d bytes, want 8", len(k)))
+	}
+	a, err := decodeRebaseAudit(v)
+	if err != nil {
+		return auditCorrupt("malformed audit record")
+	}
+	if wantKey && a.NewGeneration != binary.BigEndian.Uint64(k) {
+		return auditCorrupt("audit key does not match the recorded generation")
+	}
+	return nil
+}
+
+// auditCorrupt builds an ErrCorrupt error describing an audit defect. It never
+// includes stored bytes, IDs or revisions.
+func auditCorrupt(what string) error {
+	return fmt.Errorf("%w: %s", ErrCorrupt, what)
 }
 
 // checkNoPendingRecords refuses a legacy proposal or prepared proposal record,

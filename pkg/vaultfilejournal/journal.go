@@ -142,6 +142,11 @@ type Journal struct {
 	// State updates take their hook explicitly (updateWorkingWithHook) so this
 	// field only ever affects the proposal record.
 	afterPut func() error
+
+	// syncFn, when non-nil, replaces the bbolt database Sync call that
+	// ReconcileRebaseAndPrepare issues. It exists only for fault-injection
+	// tests and adds no public hook.
+	syncFn func() error
 }
 
 // lockTimeout bounds how long Open waits for another writer's lock. It is
