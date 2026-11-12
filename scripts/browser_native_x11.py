@@ -468,11 +468,15 @@ def chooser_navigation(x, display, path):
     The plan is exactly one modifier chord keyed on Ctrl+L (keys holds
     (Control_L, down), (l, down), (l, up), (Control_L, up): Control_L is held
     while l is pressed and only released after), then each character of `path`
-    and finally Return. A character is a plain key when its first-level keysym
-    is already that character and a Shift_L chord otherwise; a keycode of 0 is
-    a fixed mapping refusal. Every keycode is validated before the caller
-    emits anything. The plan is returned in emission order and raises a fixed
-    message instead; nothing is sent here. `x` is the caller's loaded Xlib.
+    and finally Return. The named keys are resolved through XStringToKeysym;
+    a path character is resolved through the numeric ASCII keysym ord(char),
+    as the generic text driver does, because XStringToKeysym does not map
+    punctuation like '/' or '-'. A character is a plain key when its
+    first-level keysym is already that character and a Shift_L chord
+    otherwise; a keycode of 0 is a fixed mapping refusal. Every keycode is
+    validated before the caller emits anything. The plan is returned in
+    emission order and raises a fixed message instead; nothing is sent here.
+    `x` is the caller's loaded Xlib.
     """
     if ascii_path(path) is None:
         raise RuntimeError("Chooser navigation path required")
@@ -482,7 +486,10 @@ def chooser_navigation(x, display, path):
         raise RuntimeError("Chooser shortcut unavailable")
     typed = []
     for char in path:
-        keycode = code(char)
+        # Path characters use the numeric ASCII keysym exactly as the generic
+        # text driver does: XStringToKeysym(char) does not resolve to the
+        # punctuation ('/' and '-') that XKeysymToKeycode(ord(char)) does.
+        keycode = x.XKeysymToKeycode(display, ord(char))
         if not keycode:
             raise RuntimeError("Acceptance keyboard mapping unavailable")
         produces = x.XKeycodeToKeysym(display, keycode, 0) == ord(char)

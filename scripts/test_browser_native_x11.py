@@ -1897,6 +1897,60 @@ class ChooserNavigationTests(unittest.TestCase):
         self.assertEqual(plan[1:], [((code[ord(char)], None), "path")
                                     for char in path] + [((36, None), "return")])
 
+    def test_path_punctuation_uses_numeric_ascii_keysyms(self):
+        # As observed in the Edge container/Xvfb: XStringToKeysym('/') and '-'
+        # do not resolve to those characters, while the numeric ASCII keysym
+        # does, so every path character must take the generic driver's route.
+        path = "/opt/edge-linux_amd64/package"
+        self.assertTrue({"/", "-", "_"} <= set(path))
+        # The named shortcut keys live on XKeysyms the path never uses, so a
+        # named and a numeric keysym can never alias in this fixture.
+        named_keys = {0x100: 37, 0xE06C: 46, 0xFF: 36, 0x400: 50}
+        numeric = {ord(char): 100 + index for index, char in enumerate(dict.fromkeys(path))}
+        code = {**named_keys, **numeric}
+        inverse = {value: key for key, value in code.items()}
+        string_calls, keysym_calls = [], []
+
+        def string_to_keysym(name):
+            string_calls.append(name)
+            named = {"Control_L": 0x100, "Shift_L": 0x400, "Return": 0xFF, "l": 0xE06C}
+            if name in (b"/", b"-", b"_"):
+                return 0
+            return named.get(name.decode("ascii"), ord(name.decode("ascii"))
+                             if len(name) == 1 else 0)
+
+        def keysym_to_keycode(display, keysym):
+            keysym_calls.append(keysym)
+            return code.get(keysym, 0)
+
+        xlib = types.SimpleNamespace(
+            XStringToKeysym=string_to_keysym,
+            XKeysymToKeycode=keysym_to_keycode,
+            XKeycodeToKeysym=lambda display, keycode, index: inverse.get(keycode, 0),
+        )
+        plan = native.chooser_navigation(xlib, "display", path)
+        # Only the named shortcut/modifier keys go through XStringToKeysym, and
+        # in the existing order; no path character, punctuation included, is
+        # ever looked up by name.
+        self.assertEqual(string_calls, [b"Shift_L", b"Control_L", b"l", b"Return"])
+        # Every path character is mapped by its numeric ASCII keysym only.
+        self.assertEqual(sorted(keysym_calls),
+                         sorted([0x400, 0x100, 0xE06C, 0xFF] + [ord(char) for char in path]))
+        self.assertTrue({ord("/"), ord("-"), ord("_")} <= set(keysym_calls))
+        # The named keys use the keysym XStringToKeysym returns for their name,
+        # never their first ASCII byte ('C' of "Control_L", 'S' of "Shift_L").
+        for keysym in (0x100, 0xE06C, 0xFF, 0x400):
+            with self.subTest(keysym=keysym):
+                self.assertIn(keysym, keysym_calls)
+        self.assertNotIn(ord("C"), keysym_calls)
+        self.assertNotIn(ord("S"), keysym_calls)
+        self.assertNotIn(ord("R"), keysym_calls)
+        # And the exact plan is unchanged: chord, the path, then Return.
+        self.assertEqual(plan, [(((37, True), (46, True), (46, False),
+                                  (37, False)), "chord")] +
+                         [((code[ord(char)], None), "path") for char in path] +
+                         [((36, None), "return")])
+
     def test_shifted_symbols_are_shift_chords(self):
         code = {0x100: 37, ord("l"): 46, 0xFF: 36, 0x400: 50, ord("/"): 61,
                 ord("Q"): 24, ord("e"): 26}
