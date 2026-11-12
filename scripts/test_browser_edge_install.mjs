@@ -1419,6 +1419,37 @@ test("pair/disconnect has separate success labels and fixed failure text", () =>
   assert.doesNotMatch(PAIR_FUNCTION, /error\.|\.stack|\.message/);
 });
 
+// The acceptance script's own top-level Edge explicit-executable assertion,
+// executed unchanged with injected scope. A relative or missing path must be
+// refused here, before anything that resolves a browser key is reached.
+function edgeExecutableGuard() {
+  // The top-level guard is the first unindented Edge condition; the managed
+  // install and pair guards are nested inside their branches.
+  const lines = nativeSource.split("\n");
+  const start = lines.findIndex((text) =>
+    text.startsWith('if (browserName === "edge")'),
+  );
+  assert.notEqual(start, -1, "the Edge explicit executable guard");
+  // The whole statement spans that line plus its assertion and semicolon.
+  let end = start;
+  while (!lines[end].trimEnd().endsWith(";")) end += 1;
+  assert.ok(end - start <= 3, "a single guarded assertion");
+  const statement = lines
+    .slice(start, end + 1)
+    .join("\n")
+    .replace(/;\s*$/, "");
+  // The guard's whole body is that one assertion; it reaches no browser key.
+  assert.doesNotMatch(statement, /browserKeyFor|realpathSync/);
+  // The module's "if (...)" wrapper and the assert stay exactly as production
+  // writes them; only the semicolon is dropped for the function body.
+  return new Function(
+    "browserName",
+    "browserExecutable",
+    "assert",
+    statement,
+  );
+}
+
 // The acceptance script's own browserKeyFor helper and browserKey assignment,
 // returned as source so a behavioral test can run the actual owner selection.
 function browserKeyFactorySource() {
@@ -1436,6 +1467,21 @@ function browserKeyFactorySource() {
     "\nreturn browserKey;"
   );
 }
+
+test("a relative or missing Edge executable is refused before any key", () => {
+  const refuseEdge = edgeExecutableGuard();
+  // The script's own fixed message; no path is echoed.
+  for (const browserExecutable of [undefined, "", "msedge", "./msedge"]) {
+    assert.throws(
+      () => refuseEdge("edge", browserExecutable, assert),
+      (error) => error?.message === "Edge requires an explicit absolute executable path",
+    );
+  }
+  // An absolute path passes this guard, and Chromium never enters it.
+  refuseEdge("edge", "/opt/microsoft/msedge/msedge", assert);
+  refuseEdge("chromium", "msedge", assert);
+  refuseEdge("chromium", undefined, assert);
+});
 
 test("browser keys use the explicit launched executable, else Playwright's", () => {
   // The script's own assignment and helper run over a real temporary file
