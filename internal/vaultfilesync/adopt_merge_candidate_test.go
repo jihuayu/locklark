@@ -3,17 +3,22 @@ package vaultfilesync
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
+
+	"filippo.io/age"
 
 	"github.com/jihuayu/locklark/internal/vault"
 	"github.com/jihuayu/locklark/internal/vaultmerge"
 	"github.com/jihuayu/locklark/pkg/vaultfile"
 	"github.com/jihuayu/locklark/pkg/vaultfilebackend"
 	"github.com/jihuayu/locklark/pkg/vaultfilejournal"
+	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -33,30 +38,30 @@ func adoptOpID(mark byte) string {
 	return string(out)
 }
 
-// adoptFixture is one clean preview candidate over a real journal. The remote
-// backend serves the exact R that the journal base records, so the candidate
-// is adoptable until a test damages it.
+// adoptFixture is one clean preview candidate over a real journal. The journal
+// keeps its original B/L/old-revision/G state after the build (no rebinding),
+// and the remote backend serves R, which differs from B.
 type adoptFixture struct {
-	f            *fixture
-	journal      *vaultfilejournal.Journal
-	candidate    MergeCandidate
-	base         []byte
-	local        []byte
-	remote       []byte
-	remoteResult vaultfilebackend.ReadResult
-	// recorded is the exact state the accepted adoption must replace.
+	f         *fixture
+	journal   *vaultfilejournal.Journal
+	candidate MergeCandidate
+	base      []byte
+	local     []byte
+	remote    []byte
+	// recorded is the exact original B/L/old-revision/G state that
+	// RebaseAndPrepare must replace.
 	recorded vaultfilejournal.State
 }
 
 // adoptBuildFixture creates a conflict-free candidate:
 //
-//	B (journal lineage base) = A base, B base            seq 2
-//	L (working)              = A local, B + local only   seq 3
-//	R (remote)               = A base, B remote, remote  seq 4
+//	B (journal base) = A base, B base            seq 2
+//	L (working)      = A local, B + local only   seq 3
+//	R (remote)       = A base, B remote, remote  seq 4
 //
-// The build runs with B recorded as the journal base, then the candidate's own
-// R pair is recorded as the journal base: that pair is the precondition
-// RebaseAndPrepare replaces. No remote write is involved. The clean merge is
+// The build runs with B recorded as the journal base, and that exact state is
+// left untouched afterwards. The candidate's source binding therefore names the
+// original state, R differs from B, and the clean merge is
 // {A local, B remote, local only, remote only}.
 func adoptBuildFixture(t *testing.T) *adoptFixture {
 	t.Helper()
@@ -78,13 +83,14 @@ func adoptBuildFixture(t *testing.T) *adoptFixture {
 		mergeCandidateLogin("item-b", "B remote"),
 		mergeCandidateLogin("item-remote", "Remote only"),
 	})
-	remoteResult := mergeCandidateUseRemote(t, f, remote)
+	mergeCandidateUseRemote(t, f, remote)
 	j := f.openJournal(t)
-	if err := j.InitializeState(vaultfilejournal.State{
+	recorded := vaultfilejournal.State{
 		BaseBytes:      base,
-		RemoteRevision: "adopt-lineage-rev-1",
+		RemoteRevision: "adopt-old-rev-1",
 		WorkingBytes:   local,
-	}); err != nil {
+	}
+	if err := j.InitializeState(recorded); err != nil {
 		t.Fatalf("InitializeState: %v", err)
 	}
 
@@ -92,31 +98,24 @@ func adoptBuildFixture(t *testing.T) *adoptFixture {
 	if err != nil {
 		t.Fatalf("BuildMergeCandidate: %v", err)
 	}
-	if candidate.MergedBytes == nil || (candidate.Conflicts != nil && len(candidate.Conflicts) != 0) {
+	if candidate.MergedBytes == nil || len(candidate.Conflicts) != 0 {
 		t.Fatal("fixture candidate is not a clean merge")
 	}
-	fx := &adoptFixture{
-		f:            f,
-		journal:      j,
-		candidate:    candidate,
-		base:         base,
-		local:        local,
-		remote:       remote,
-		remoteResult: remoteResult,
+	if bytes.Equal(recorded.BaseBytes, candidate.RemoteBytes) {
+		t.Fatal("fixture needs R to differ from the journal base B")
 	}
-	recorded := vaultfilejournal.State{
-		BaseBytes:      candidate.RemoteBytes,
-		RemoteRevision: candidate.RemoteRevision,
-		WorkingBytes:   local,
-		Generation:     candidate.ExpectedGeneration,
+	if candidate.sourceBinding != mergeCandidateSourceBinding(recorded) {
+		t.Fatal("candidate source binding does not name the original journal state")
 	}
-	adoptReplaceState(t, fx, recorded)
-	fx.recorded = recorded
-	// Rebind the candidate to the recorded state exactly as a build over that
-	// state would: the private bindings are recomputed, the outputs are not.
-	fx.candidate.sourceBinding = mergeCandidateSourceBinding(recorded)
-	fx.candidate.resultBinding = mergeCandidateResultBinding(fx.candidate.sourceBinding, fx.candidate.RemoteBytes, fx.candidate.MergedBytes, fx.candidate.RemoteRevision, fx.candidate.ExpectedGeneration)
-	return fx
+	return &adoptFixture{
+		f:         f,
+		journal:   j,
+		candidate: candidate,
+		base:      base,
+		local:     local,
+		remote:    remote,
+		recorded:  recorded,
+	}
 }
 
 // adoptReplaceState rewrites the journal's stored state record directly. The
@@ -149,6 +148,13 @@ func adoptReopen(t *testing.T, fx *adoptFixture, path string) {
 	journalPathsMu.Lock()
 	journalPaths[reopened] = path
 	journalPathsMu.Unlock()
+}
+
+// adoptFixturePolicy returns the static fixture policy for extra seals.
+func adoptFixturePolicy(t *testing.T) *vaultfile.Policy {
+	t.Helper()
+	policy, _, _ := fixtureInputs(t)
+	return policy
 }
 
 // adoptSnapshot closes the open journal, records every raw journal key (nested
@@ -262,9 +268,21 @@ func adoptEncodeState(s vaultfilejournal.State) []byte {
 func TestAdoptMergeCandidateDurableSuccess(t *testing.T) {
 	fx := adoptBuildFixture(t)
 	c := fx.candidate
+	// The original journal state is untouched B/L/old-revision/G, and R is a
+	// different file, so success proves adoption targets R rather than B.
+	if !bytes.Equal(fx.recorded.BaseBytes, fx.base) || !bytes.Equal(fx.recorded.WorkingBytes, fx.local) ||
+		fx.recorded.RemoteRevision != "adopt-old-rev-1" || fx.recorded.Generation != c.ExpectedGeneration {
+		t.Fatal("fixture journal state is not the original B/L/old revision/G state")
+	}
+	if bytes.Equal(c.RemoteBytes, fx.recorded.BaseBytes) {
+		t.Fatal("test needs R to differ from the journal base B")
+	}
+	if source := mergeCandidateSourceBinding(fx.recorded); c.sourceBinding != source {
+		t.Fatal("candidate source binding is not the original journal state")
+	}
 	before := adoptSnapshot(fx)(t)
 
-	if err := AdoptMergeCandidate(context.Background(), fx.journal, c, fx.f.pin); err != nil {
+	if err := AdoptMergeCandidate(context.Background(), fx.journal, c, fx.f.pin, fixtureDeviceID, fx.f.id); err != nil {
 		t.Fatalf("AdoptMergeCandidate: %v", err)
 	}
 	mergeCandidateAssertBackendUnchanged(t, fx.f, before.backend)
@@ -290,8 +308,8 @@ func TestAdoptMergeCandidateDurableSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadPrepared: %v", err)
 	}
-	if prepared.WorkingGeneration != 1 {
-		t.Fatalf("prepared generation = %d, want 1", prepared.WorkingGeneration)
+	if prepared.WorkingGeneration != c.ExpectedGeneration+1 {
+		t.Fatalf("prepared generation = %d, want %d", prepared.WorkingGeneration, c.ExpectedGeneration+1)
 	}
 	if prepared.Proposal.ExpectedRevision != c.RemoteRevision || !bytes.Equal(prepared.Proposal.Bytes, c.MergedBytes) {
 		t.Fatal("prepared proposal is not the exact candidate Rrev/M")
@@ -300,28 +318,34 @@ func TestAdoptMergeCandidateDurableSuccess(t *testing.T) {
 	if prepared.Proposal.OperationID != mergedFile.Header.OpID {
 		t.Fatal("prepared operation ID is not the authenticated M OpID")
 	}
-	// The journal generation is a local CAS counter; the proposal generation
-	// is an independent caller field, so only its positivity is required.
-	if prepared.Proposal.Generation == 0 {
-		t.Fatal("prepared proposal generation is zero")
+	// The proposal generation is the G+1 hint, independent of M's content
+	// sequence; the journal generation remains a local CAS counter.
+	if prepared.Proposal.Generation != c.ExpectedGeneration+1 {
+		t.Fatalf("proposal generation = %d, want the G+1 hint %d", prepared.Proposal.Generation, c.ExpectedGeneration+1)
 	}
 
 	if legacy, err := fx.journal.Load(); !errors.Is(err, vaultfilejournal.ErrEmpty) {
 		t.Fatalf("legacy record after adoption = %+v, %v; want ErrEmpty", legacy, err)
 	}
 
-	audit, err := fx.journal.LoadRebaseAudit(1)
+	audit, err := fx.journal.LoadRebaseAudit(c.ExpectedGeneration + 1)
 	if err != nil {
-		t.Fatalf("LoadRebaseAudit(1): %v", err)
+		t.Fatalf("LoadRebaseAudit(%d): %v", c.ExpectedGeneration+1, err)
 	}
-	if audit.NewGeneration != 1 {
-		t.Fatalf("audit new generation = %d, want 1", audit.NewGeneration)
+	if audit.NewGeneration != c.ExpectedGeneration+1 {
+		t.Fatalf("audit new generation = %d, want %d", audit.NewGeneration, c.ExpectedGeneration+1)
 	}
 	if !reflect.DeepEqual(audit.OldState, fx.recorded) {
 		t.Fatalf("audit old state does not equal the exact pre-adoption journal state (got generation %d)", audit.OldState.Generation)
 	}
 	if !bytes.Equal(audit.RemoteBase, c.RemoteBytes) || audit.RemoteRevision != c.RemoteRevision {
 		t.Fatal("audit remote pair is not the exact candidate R/Rrev")
+	}
+	if bytes.Equal(audit.RemoteBase, fx.recorded.BaseBytes) {
+		t.Fatal("audit recorded B instead of the target R")
+	}
+	if !bytes.Equal(audit.Proposal.Bytes, c.MergedBytes) || audit.Proposal.OperationID != mergedFile.Header.OpID {
+		t.Fatal("audit proposal is not the exact target M")
 	}
 	if !reflect.DeepEqual(audit.Proposal, prepared.Proposal) {
 		t.Fatal("audit proposal differs from the prepared proposal")
@@ -344,7 +368,7 @@ func TestAdoptMergeCandidateDurableSuccess(t *testing.T) {
 	// A second adoption of the same candidate is a definite rejection: the
 	// journal now holds the prepared record written by the first adoption.
 	after := adoptSnapshot(fx)(t)
-	err = AdoptMergeCandidate(context.Background(), fx.journal, fx.candidate, fx.f.pin)
+	err = AdoptMergeCandidate(context.Background(), fx.journal, fx.candidate, fx.f.pin, fixtureDeviceID, fx.f.id)
 	adoptAssertRejected(t, err, ErrMergeCandidateAdoptPending)
 	adoptAssertUnchanged(t, fx, after)
 }
@@ -357,14 +381,19 @@ func TestAdoptMergeCandidateDurableSuccess(t *testing.T) {
 func TestAdoptMergeCandidateRejectsSameGenerationAck(t *testing.T) {
 	fx := adoptBuildFixture(t)
 	c := fx.candidate
-	path := journalPath(t, fx.journal)
-	closeNow(t, fx.journal)
+	// A newer working L2 at the same generation: an Ack that moved the base
+	// and revision while the local working file changed would leave this.
+	l2 := mergeCandidateSeal(t, fx.f.pin, adoptFixturePolicy(t), 1, 5, adoptOpID(5), mergeCandidatePrevious(5), mergeCandidateTestVUK(t), []vault.Item{
+		mergeCandidateLogin("item-a", "A local v2"),
+	})
 	acked := vaultfilejournal.State{
-		BaseBytes:      fx.base,
+		BaseBytes:      fx.local,
 		RemoteRevision: "revision-after-ack",
-		WorkingBytes:   fx.local,
+		WorkingBytes:   l2,
 		Generation:     c.ExpectedGeneration,
 	}
+	path := journalPath(t, fx.journal)
+	closeNow(t, fx.journal)
 	if err := openRaw(t, path, func(tx *bolt.Tx) error {
 		return tx.Bucket([]byte("journal")).Put([]byte("state"), adoptEncodeState(acked))
 	}); err != nil {
@@ -379,14 +408,15 @@ func TestAdoptMergeCandidateRejectsSameGenerationAck(t *testing.T) {
 	if state.Generation != c.ExpectedGeneration {
 		t.Fatalf("test needs the same generation: got %d want %d", state.Generation, c.ExpectedGeneration)
 	}
-	if bytes.Equal(state.BaseBytes, c.RemoteBytes) || state.RemoteRevision == c.RemoteRevision {
-		t.Fatal("test needs the Ack to change the base and revision")
+	if bytes.Equal(state.BaseBytes, fx.recorded.BaseBytes) || bytes.Equal(state.WorkingBytes, fx.recorded.WorkingBytes) ||
+		state.RemoteRevision == fx.recorded.RemoteRevision {
+		t.Fatal("test needs the Ack to change the base, working file and revision")
 	}
 	if c.sourceBinding == mergeCandidateSourceBinding(state) {
 		t.Fatal("stale candidate source binding still matches the post-Ack state")
 	}
 
-	err = AdoptMergeCandidate(context.Background(), fx.journal, fx.candidate, fx.f.pin)
+	err = AdoptMergeCandidate(context.Background(), fx.journal, fx.candidate, fx.f.pin, fixtureDeviceID, fx.f.id)
 	adoptAssertRejected(t, err, ErrMergeCandidateAdoptRejected)
 	adoptAssertUnchanged(t, fx, before)
 	if state, err := fx.journal.LoadState(); err != nil || !reflect.DeepEqual(state, acked) {
@@ -396,8 +426,7 @@ func TestAdoptMergeCandidateRejectsSameGenerationAck(t *testing.T) {
 
 // TestAdoptMergeCandidateRejectsBAndRevisionReplacement replaces the journal
 // base and/or the remote revision while keeping the generation and working
-// file. A forged source binding that matches the replaced state is also
-// rejected because the candidate's own R/M/revision must still agree.
+// file, so the stale candidate's source binding no longer names the state.
 func TestAdoptMergeCandidateRejectsBAndRevisionReplacement(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -412,11 +441,11 @@ func TestAdoptMergeCandidateRejectsBAndRevisionReplacement(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fx := adoptBuildFixture(t)
 			c := fx.candidate
-			newBase := fx.remote
+			newBase := fx.recorded.BaseBytes
 			if tc.base {
-				newBase = fx.base
+				newBase = fx.local
 			}
-			newRevision := vaultfilebackend.Revision("adopt-remote-rev-1")
+			newRevision := fx.recorded.RemoteRevision
 			if tc.revision {
 				newRevision = "adopt-remote-rev-replaced"
 			}
@@ -439,7 +468,7 @@ func TestAdoptMergeCandidateRejectsBAndRevisionReplacement(t *testing.T) {
 			}
 
 			before := adoptSnapshot(fx)(t)
-			err := AdoptMergeCandidate(context.Background(), fx.journal, fx.candidate, fx.f.pin)
+			err := AdoptMergeCandidate(context.Background(), fx.journal, fx.candidate, fx.f.pin, fixtureDeviceID, fx.f.id)
 			adoptAssertRejected(t, err, ErrMergeCandidateAdoptRejected)
 			adoptAssertUnchanged(t, fx, before)
 			if state, err := fx.journal.LoadState(); err != nil || !reflect.DeepEqual(state, replaced) {
@@ -526,7 +555,7 @@ func TestAdoptMergeCandidateRejectsConflictAndDamagedCandidates(t *testing.T) {
 			tc.mutate(t, fx, &bad)
 			fx.candidate = bad
 			before := adoptCapture(t, fx)
-			err := AdoptMergeCandidate(context.Background(), fx.journal, bad, fx.f.pin)
+			err := AdoptMergeCandidate(context.Background(), fx.journal, bad, fx.f.pin, fixtureDeviceID, fx.f.id)
 			want := ErrMergeCandidateAdoptRejected
 			if tc.sentinel != nil {
 				want = tc.sentinel
@@ -538,8 +567,8 @@ func TestAdoptMergeCandidateRejectsConflictAndDamagedCandidates(t *testing.T) {
 	}
 }
 
-// TestAdoptMergeCandidateRejectsNilInputs covers nil context, journal and pin
-// and a canceled context; none may report success.
+// TestAdoptMergeCandidateRejectsNilInputs covers nil context, journal, pin and
+// identity, an empty device, and a canceled context; none may report success.
 func TestAdoptMergeCandidateRejectsNilInputs(t *testing.T) {
 	fx := adoptBuildFixture(t)
 	before := adoptSnapshot(fx)(t)
@@ -552,16 +581,20 @@ func TestAdoptMergeCandidateRejectsNilInputs(t *testing.T) {
 		ctx      context.Context
 		journal  *vaultfilejournal.Journal
 		pin      *vaultfile.PolicyCheckpoint
+		deviceID string
+		identity *age.X25519Identity
 		sentinel error
 	}{
-		{name: "nil_context", ctx: nil, journal: fx.journal, pin: fx.f.pin, sentinel: ErrMergeCandidateAdoptRejected},
-		{name: "nil_journal", ctx: ctx, journal: nil, pin: fx.f.pin, sentinel: ErrMergeCandidateAdoptRejected},
-		{name: "nil_pin", ctx: ctx, journal: fx.journal, pin: nil, sentinel: ErrMergeCandidateAdoptRejected},
-		{name: "canceled_context", ctx: canceled, journal: fx.journal, pin: fx.f.pin, sentinel: context.Canceled},
+		{name: "nil_context", ctx: nil, journal: fx.journal, pin: fx.f.pin, deviceID: fixtureDeviceID, identity: fx.f.id, sentinel: ErrMergeCandidateAdoptRejected},
+		{name: "nil_journal", ctx: ctx, journal: nil, pin: fx.f.pin, deviceID: fixtureDeviceID, identity: fx.f.id, sentinel: ErrMergeCandidateAdoptRejected},
+		{name: "nil_pin", ctx: ctx, journal: fx.journal, pin: nil, deviceID: fixtureDeviceID, identity: fx.f.id, sentinel: ErrMergeCandidateAdoptRejected},
+		{name: "nil_identity", ctx: ctx, journal: fx.journal, pin: fx.f.pin, deviceID: fixtureDeviceID, sentinel: ErrMergeCandidateAdoptRejected},
+		{name: "empty_device", ctx: ctx, journal: fx.journal, pin: fx.f.pin, identity: fx.f.id, sentinel: ErrMergeCandidateAdoptRejected},
+		{name: "canceled_context", ctx: canceled, journal: fx.journal, pin: fx.f.pin, deviceID: fixtureDeviceID, identity: fx.f.id, sentinel: context.Canceled},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := AdoptMergeCandidate(tc.ctx, tc.journal, fx.candidate, tc.pin)
+			err := AdoptMergeCandidate(tc.ctx, tc.journal, fx.candidate, tc.pin, tc.deviceID, tc.identity)
 			adoptAssertRejected(t, err, tc.sentinel)
 			adoptAssertUnchanged(t, fx, before)
 			adoptAssertNoPreparedOrAudit(t, fx)
@@ -585,7 +618,7 @@ func TestAdoptMergeCandidateRejectsPendingRecords(t *testing.T) {
 			t.Fatalf("Save legacy: %v", err)
 		}
 		before := adoptSnapshot(fx)(t)
-		err := AdoptMergeCandidate(context.Background(), fx.journal, fx.candidate, fx.f.pin)
+		err := AdoptMergeCandidate(context.Background(), fx.journal, fx.candidate, fx.f.pin, fixtureDeviceID, fx.f.id)
 		adoptAssertRejected(t, err, ErrMergeCandidateAdoptPending)
 		adoptAssertUnchanged(t, fx, before)
 		if got, err := fx.journal.Load(); err != nil || !reflect.DeepEqual(got, legacy) {
@@ -612,7 +645,7 @@ func TestAdoptMergeCandidateRejectsPendingRecords(t *testing.T) {
 			t.Fatalf("LoadPrepared: %v", err)
 		}
 		before := adoptSnapshot(fx)(t)
-		err = AdoptMergeCandidate(context.Background(), fx.journal, fx.candidate, fx.f.pin)
+		err = AdoptMergeCandidate(context.Background(), fx.journal, fx.candidate, fx.f.pin, fixtureDeviceID, fx.f.id)
 		adoptAssertRejected(t, err, ErrMergeCandidateAdoptPending)
 		adoptAssertUnchanged(t, fx, before)
 		if got, err := fx.journal.LoadPrepared(); err != nil || !reflect.DeepEqual(got, want) {
@@ -639,7 +672,7 @@ func TestAdoptMergeCandidateRejectsCorruptPendingRecord(t *testing.T) {
 			}
 			adoptReopen(t, fx, path)
 			before := adoptSnapshot(fx)(t)
-			err := AdoptMergeCandidate(context.Background(), fx.journal, fx.candidate, fx.f.pin)
+			err := AdoptMergeCandidate(context.Background(), fx.journal, fx.candidate, fx.f.pin, fixtureDeviceID, fx.f.id)
 			adoptAssertRejected(t, err, nil)
 			if !errors.Is(err, vaultfilejournal.ErrCorrupt) {
 				t.Fatalf("corrupt pending record error = %v, want ErrCorrupt reachable", err)
@@ -718,7 +751,7 @@ func TestAdoptMergeCandidateRejectsUnverifiableM(t *testing.T) {
 			fx.candidate = forged
 			before := adoptSnapshot(fx)(t)
 
-			err = AdoptMergeCandidate(context.Background(), fx.journal, forged, tc.pin(fx))
+			err = AdoptMergeCandidate(context.Background(), fx.journal, forged, tc.pin(fx), fixtureDeviceID, fx.f.id)
 			adoptAssertRejected(t, err, ErrMergeCandidateAdoptVerify)
 			if !errors.Is(err, ErrContentProposalRejected) && !errors.Is(err, ErrMergeCandidateAdoptVerify) {
 				t.Fatalf("verification error = %v, want ErrMergeCandidateAdoptVerify", err)
@@ -729,12 +762,146 @@ func TestAdoptMergeCandidateRejectsUnverifiableM(t *testing.T) {
 	}
 }
 
+// adoptSealWithDatabase seals one real file under the caller's pin from an
+// explicit item database, so a fixture can vary only the inner KDBX header.
+func adoptSealWithDatabase(t *testing.T, pin *vaultfile.PolicyCheckpoint, policy *vaultfile.Policy, seq uint64, opID string, vuk []byte, db *kdbx.Database) []byte {
+	t.Helper()
+	doc, err := vaultfile.EncodePolicyDocument(policy)
+	if err != nil {
+		t.Fatalf("EncodePolicyDocument: %v", err)
+	}
+	draft := &vaultfile.File{
+		Format:  vaultfile.Format,
+		Version: vaultfile.Version,
+		Header: vaultfile.Header{
+			VaultID:        policy.VaultID,
+			KeyEpoch:       1,
+			ContentSeq:     seq,
+			PrevDigest:     mergeCandidatePrevious(seq),
+			OpID:           opID,
+			PolicySeq:      policy.PolicySeq,
+			PolicyDigest:   vaultfile.PolicyDigest(policy),
+			AuthorDeviceID: fixtureDeviceID,
+		},
+		SignedPolicyProofs: []vaultfile.SignedPolicy{{
+			Document: doc,
+			Policy:   *policy,
+			SignerID: policy.OwnerRoot.KeyID,
+			Alg:      vaultfile.PolicySigAlgEd25519,
+			Sig:      make([]byte, ed25519.SignatureSize),
+		}},
+	}
+	_, _, signingKey := fixtureInputs(t)
+	encoded, err := vaultfile.SealAuthenticatedFile(draft, db, pin, vuk, signingKey)
+	if err != nil {
+		t.Fatalf("SealAuthenticatedFile: %v", err)
+	}
+	return encoded
+}
+
+// adoptDifferentHeaderDatabase returns a real item database whose inner KDBX
+// header differs from the fixture's (a different master salt), so it can only
+// be decrypted under a second, incompatible VUK. Everything else matches.
+func adoptDifferentHeaderDatabase(t *testing.T) (*kdbx.Database, []byte) {
+	t.Helper()
+	original, err := vault.NewItemDatabase(mergeCandidateMetadata(), []vault.Item{
+		mergeCandidateLogin("item-a", "A local"),
+		mergeCandidateLogin("item-b", "B remote"),
+		mergeCandidateLogin("item-local", "Local only"),
+		mergeCandidateLogin("item-remote", "Remote only"),
+	})
+	if err != nil {
+		t.Fatalf("NewItemDatabase: %v", err)
+	}
+	defer releaseDatabase(original)
+	if original.Header == nil || original.Header.FileHeaders == nil || original.Header.FileHeaders.KdfParameters == nil {
+		t.Fatal("fixture database has no KDF parameters")
+	}
+	kdf := *original.Header.FileHeaders.KdfParameters
+	for i := range kdf.Salt {
+		kdf.Salt[i] ^= 0xa5
+	}
+	kdf.RawData = nil
+	// Rebuild the header around the mutated KDF so the encoded file is
+	// consistent with it.
+	doc := original.Header.FileHeaders
+	clone := *original.Header
+	headers := *doc
+	headers.KdfParameters = &kdf
+	clone.FileHeaders = &headers
+	modified := &kdbx.Database{
+		Options:     original.Options,
+		Credentials: &kdbx.DBCredentials{Key: bytes.Clone(original.Credentials.Key)},
+		Header:      &clone,
+		Hashes:      original.Hashes,
+		Content:     original.Content,
+	}
+	original.Credentials = nil
+	original.Content = nil
+	pin := fixturePin(t, adoptFixturePolicy(t))
+	encoded := adoptSealWithDatabase(t, pin, adoptFixturePolicy(t), 5, adoptOpID(5), mergeCandidateTestVUK(t), modified)
+	releaseDatabase(modified)
+	return modified, encoded
+}
+
+// TestAdoptMergeCandidateRejectsWrongCallerIdentity proves R and M are opened
+// under exactly the caller's identity: a different identity cannot decrypt the
+// candidate files and is a definite verification rejection that writes nothing.
+func TestAdoptMergeCandidateRejectsWrongCallerIdentity(t *testing.T) {
+	fx := adoptBuildFixture(t)
+	other, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatalf("GenerateX25519Identity: %v", err)
+	}
+	before := adoptSnapshot(fx)(t)
+	err = AdoptMergeCandidate(context.Background(), fx.journal, fx.candidate, fx.f.pin, fixtureDeviceID, other)
+	adoptAssertRejected(t, err, ErrMergeCandidateAdoptVerify)
+	adoptAssertUnchanged(t, fx, before)
+	adoptAssertNoPreparedOrAudit(t, fx)
+	if state, err := fx.journal.LoadState(); err != nil || !reflect.DeepEqual(state, fx.recorded) {
+		t.Fatalf("journal state changed on a wrong caller identity (err=%v)", err)
+	}
+}
+
+// TestAdoptMergeCandidateRejectsDifferentEpochVUK proves R and M must share one
+// same-epoch VUK: an M sealed under a second, incompatible VUK that still opens
+// under the caller pin is rejected on the constant-time VUK comparison.
+func TestAdoptMergeCandidateRejectsDifferentEpochVUK(t *testing.T) {
+	fx := adoptBuildFixture(t)
+	_, foreignM := adoptDifferentHeaderDatabase(t)
+	if bytes.Equal(foreignM, fx.candidate.MergedBytes) {
+		t.Fatal("foreign M equals the fixture's M")
+	}
+	forged := adoptCloneCandidate(fx.candidate)
+	forged.MergedBytes = foreignM
+	forged.resultBinding = mergeCandidateResultBinding(forged.sourceBinding, forged.RemoteBytes, forged.MergedBytes, forged.RemoteRevision, forged.ExpectedGeneration)
+	// The forged M must itself be fully openable under the caller pin, so the
+	// rejection can come only from key continuity.
+	foreignFile, foreignDB, err := vaultfile.OpenAuthenticatedFile(foreignM, fx.f.pin, fixtureDeviceID, fx.f.id)
+	if err != nil {
+		t.Fatalf("foreign M does not open under the caller pin: %v", err)
+	}
+	releaseDatabase(foreignDB)
+	releaseFile(foreignFile)
+	fx.candidate = forged
+	before := adoptSnapshot(fx)(t)
+	err = AdoptMergeCandidate(context.Background(), fx.journal, forged, fx.f.pin, fixtureDeviceID, fx.f.id)
+	adoptAssertRejected(t, err, ErrMergeCandidateAdoptVerify)
+	// The forgery is openable, so the rejection must be the key-continuity
+	// check rather than an earlier authentication failure.
+	if !strings.Contains(err.Error(), "share one epoch VUK") {
+		t.Fatalf("rejection %v is not the epoch VUK comparison", err)
+	}
+	adoptAssertUnchanged(t, fx, before)
+	adoptAssertNoPreparedOrAudit(t, fx)
+}
+
 // TestAdoptMergeCandidateMissingState proves an uninitialized journal is a
 // definite rejection.
 func TestAdoptMergeCandidateMissingState(t *testing.T) {
 	fx := adoptBuildFixture(t)
 	j := openNewJournal(t)
-	err := AdoptMergeCandidate(context.Background(), j, fx.candidate, fx.f.pin)
+	err := AdoptMergeCandidate(context.Background(), j, fx.candidate, fx.f.pin, fixtureDeviceID, fx.f.id)
 	adoptAssertRejected(t, err, ErrMergeCandidateAdoptRejected)
 	wantEmptyJournal(t, j)
 }
@@ -783,7 +950,7 @@ func TestAdoptMergeCandidateCancellationLate(t *testing.T) {
 	ctx := &adoptGatedContext{Context: context.Background()}
 
 	ctx.armed = true
-	err := AdoptMergeCandidate(ctx, fx.journal, fx.candidate, fx.f.pin)
+	err := AdoptMergeCandidate(ctx, fx.journal, fx.candidate, fx.f.pin, fixtureDeviceID, fx.f.id)
 	adoptAssertRejected(t, err, context.Canceled)
 	adoptAssertUnchanged(t, fx, before)
 	adoptAssertNoPreparedOrAudit(t, fx)

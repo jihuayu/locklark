@@ -3,20 +3,26 @@ package vaultfilesync
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"math"
 
+	"filippo.io/age"
+
+	"github.com/jihuayu/locklark/internal/vault"
 	"github.com/jihuayu/locklark/pkg/vaultfile"
 	"github.com/jihuayu/locklark/pkg/vaultfilejournal"
+	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
 )
 
 // This file adds the single narrow adoption step for a BuildMergeCandidate
 // result: it durably adopts one conflict-free candidate into the local journal
 // with one atomic Journal.RebaseAndPrepare. It is one code checkpoint. It adds
 // no UI, no generic callback, no state machine, no remote write, no local
-// acknowledgement, no clearing of any pending record and no publication. It
-// does not implement #111 as a whole.
+// acknowledgement, no clearing of any pending record, no publication and no
+// transaction-unknown reconciliation. It does not implement #111 as a whole.
 //
 // Trust boundary. The caller-supplied vaultfile.PolicyCheckpoint is the only
 // trust input. The candidate is never trusted as a value: it is copied into
@@ -79,39 +85,70 @@ var (
 // AdoptMergeCandidate durably adopts one conflict-free BuildMergeCandidate
 // result. It is not generic and exposes no callback.
 //
-// Inputs. journal is an open local vaultfilejournal.Journal and is read with
-// exactly one LoadState call; checkpoint is the caller's trusted pin; candidate
-// is the value BuildMergeCandidate returned for this same journal, pin and
-// source bytes. candidate is read but never mutated or cleared: its fields are
-// copied into private storage for the duration of the call.
+// Inputs. ctx is checked at entry, after each authenticated open and full read,
+// before and after verification, and immediately before the transaction.
+// journal is an open
+// local vaultfilejournal.Journal and is read with exactly one LoadState call.
+// checkpoint is the caller's trusted pin and is snapshotted (including owned
+// copies of both byte fields) at entry, so later caller mutation cannot change
+// what this call trusts. deviceID and identity select the caller device and
+// age key used to open and decrypt R and M. candidate is the value
+// BuildMergeCandidate returned for this same journal, pin and source bytes.
+// candidate is read but never mutated or cleared: its byte slices are
+// snapshotted into owned storage for the duration of the call.
 //
-// Rejections. A nil ctx, journal or checkpoint, a canceled ctx, a nil
-// MergedBytes (conflict result or incomplete candidate), a missing or
-// oversized RemoteRevision, an absent (zero) source or result binding, a
-// RemoteBytes length or nilness that disagrees with the binding, a missing
-// journal state, or a source binding that does not match the exact full state
-// (an Ack that preserves the generation but changes BaseBytes, WorkingBytes or
-// RemoteRevision is rejected) returns ErrMergeCandidateAdoptRejected. A present legacy or prepared record returns
-// ErrMergeCandidateAdoptPending and its contents are cleared, never claimed and
-// never consumed; a corrupt or unknown error while loading either record is
-// propagated (classified as ErrMergeCandidateAdoptPendingCorrupt) and adoption
-// is refused. R and M are then revalidated with
-// NewContentProposalVerifier under exactly the caller pin and an exact Proposal
-// {Generation, OperationID, ExpectedRevision, Bytes} derived from the
-// authenticated M header; any rejection returns ErrMergeCandidateAdoptVerify
-// without inheriting any claim. A context error observed before the
-// transaction returns the context error itself and never success.
+// Bindings. The exact existing full-state rule is kept. The single LoadState
+// must match the candidate's ExpectedGeneration and its mergeCandidateSourceBinding
+// (BaseBytes, WorkingBytes, RemoteRevision, Generation). An initial generation
+// of 0 is allowed. R is independent from the journal base: the builder has
+// already authenticated R as a descendant of B, so adoption requires only the
+// source binding to match the original state, never candidate.RemoteBytes to
+// equal state.BaseBytes.
+//
+// Re-authentication. R and M are fully opened with
+// vaultfile.OpenAuthenticatedFile under exactly the caller pin, deviceID and
+// identity, then read with vault.ReadItemDatabase so both files are readable
+// end to end. Each authenticated current policy is derived with
+// workingCurrentPolicy; R and M must share the same vault, key epoch and exact
+// current signed policy proof (sameMergeCandidateCurrentPolicy). Their
+// same-epoch VUKs are recovered with workingEpochVUK and compared in constant
+// time. R's author must hold a current writer, admin or owner role in R's
+// policy. M's author authorization is derived only from R's authenticated
+// current policy through NewContentProposalVerifier; M's own roster is never
+// consulted as authority.
+//
+// Rejections. A nil ctx, journal, checkpoint, identity, empty deviceID or
+// canceled ctx, a non-empty Conflict list, a nil MergedBytes, a missing or
+// oversized RemoteRevision, an absent (zero) source or result binding, or a
+// journal state that disagrees with the generation or source binding returns
+// ErrMergeCandidateAdoptRejected. A present legacy or prepared record returns
+// ErrMergeCandidateAdoptPending and is never consumed; a corrupt record is
+// ErrMergeCandidateAdoptPendingCorrupt. Any authentication, policy, VUK, author
+// or content-proposal failure returns ErrMergeCandidateAdoptVerify. A context
+// error observed before the transaction returns the context error itself.
 //
 // Commit. Journal.RebaseAndPrepare is called with the exact full expected
-// State, the candidate R and Rrev, and the M proposal. It performs the
-// full-state CAS, the pending-record recheck, the audit append, the state
+// State, the candidate R and Rrev, and the M proposal, whose Generation is the
+// local G+1 hint and whose OperationID is M's authenticated OpID. It performs
+// the full-state CAS, the pending-record recheck, the audit append, the state
 // rebase and the prepared record in one transaction. AdoptMergeCandidate
 // returns nil only when that call returns nil. Any error is returned and never
 // treated as success.
 //
+// Secret cleanup. Every owned snapshot, opened File, opened database, recovered
+// VUK, metadata and item buffer, and the proposal is cleared with the existing
+// release helpers on every path, including every rejection.
+//
 // Errors. No error string contains item values, metadata, plaintext, age
 // identity or signing keys.
-func AdoptMergeCandidate(ctx context.Context, journal *vaultfilejournal.Journal, candidate MergeCandidate, checkpoint *vaultfile.PolicyCheckpoint) error {
+func AdoptMergeCandidate(
+	ctx context.Context,
+	journal *vaultfilejournal.Journal,
+	candidate MergeCandidate,
+	checkpoint *vaultfile.PolicyCheckpoint,
+	deviceID string,
+	identity *age.X25519Identity,
+) error {
 	if ctx == nil {
 		return fmt.Errorf("%w: nil context", ErrMergeCandidateAdoptRejected)
 	}
@@ -121,13 +158,22 @@ func AdoptMergeCandidate(ctx context.Context, journal *vaultfilejournal.Journal,
 	if checkpoint == nil {
 		return fmt.Errorf("%w: nil policy checkpoint", ErrMergeCandidateAdoptRejected)
 	}
+	if identity == nil {
+		return fmt.Errorf("%w: nil age identity", ErrMergeCandidateAdoptRejected)
+	}
+	if deviceID == "" {
+		return fmt.Errorf("%w: empty device ID", ErrMergeCandidateAdoptRejected)
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
-	// Private snapshot of the exact source tuple. The sealed bytes are owned
-	// copies so a concurrent caller mutation of the candidate cannot change
-	// what is verified or committed, and the candidate itself is untouched.
+	// Owned snapshots. R and M are copied, and the pin's byte fields are
+	// cloned, so neither depends on the caller after this line. The caller's
+	// candidate and checkpoint are never mutated or cleared.
+	pin := adoptSnapshotCheckpoint(checkpoint)
+	defer clearSlice(pin.OwnerRootPublicKey)
+	defer clearSlice(pin.PolicyDigest)
 	remoteBytes := bytes.Clone(candidate.RemoteBytes)
 	defer clearSlice(remoteBytes)
 	mergedBytes := bytes.Clone(candidate.MergedBytes)
@@ -151,6 +197,9 @@ func AdoptMergeCandidate(ctx context.Context, journal *vaultfilejournal.Journal,
 	}
 	if candidate.Conflicts == nil {
 		return fmt.Errorf("%w: candidate is incomplete and carries no conflict result", ErrMergeCandidateAdoptRejected)
+	}
+	if len(candidate.Conflicts) != 0 {
+		return fmt.Errorf("%w: candidate carries conflicts", ErrMergeCandidateAdoptRejected)
 	}
 	if candidate.MergedBytes == nil {
 		return fmt.Errorf("%w: candidate has no merged result (conflict result)", ErrMergeCandidateAdoptRejected)
@@ -202,7 +251,8 @@ func AdoptMergeCandidate(ctx context.Context, journal *vaultfilejournal.Journal,
 	}
 	// The source binding covers BaseBytes, WorkingBytes, RemoteRevision and
 	// the generation, so an Ack that kept the generation but replaced the base,
-	// the working file or the recorded remote revision is rejected here.
+	// the working file or the recorded remote revision is rejected here. R is
+	// deliberately independent from B: only the original state is bound.
 	if sourceBinding != mergeCandidateSourceBinding(state) {
 		return fmt.Errorf("%w: candidate source binding does not match the journal state", ErrMergeCandidateAdoptRejected)
 	}
@@ -210,19 +260,69 @@ func AdoptMergeCandidate(ctx context.Context, journal *vaultfilejournal.Journal,
 		return err
 	}
 
-	// Revalidate the exact R and M under the caller pin. The proposal is derived
-	// from the authenticated M header, so the verifier enforces the R-authorized
-	// writer, the same vault/epoch/current policy, M sequence exactly R+1,
-	// PrevDigest exactly FileDigest(R) and OperationID exactly M's OpID.
-	verify, err := NewContentProposalVerifier(checkpoint)
+	// Fully open, decrypt and read both sealed files under the caller pin.
+	remoteFile, remoteDB, err := adoptOpenFile(ctx, remoteBytes, &pin, deviceID, identity)
+	if err != nil {
+		return err
+	}
+	defer releaseDatabase(remoteDB)
+	defer releaseFile(remoteFile)
+	mergedFile, mergedDB, err := adoptOpenFile(ctx, mergedBytes, &pin, deviceID, identity)
+	if err != nil {
+		return err
+	}
+	defer releaseDatabase(mergedDB)
+	defer releaseFile(mergedFile)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	// Authority and key continuity come only from the authenticated files.
+	remoteCurrent, err := adoptCurrentPolicy(remoteFile)
+	if err != nil {
+		return err
+	}
+	mergedCurrent, err := adoptCurrentPolicy(mergedFile)
+	if err != nil {
+		return err
+	}
+	if remoteFile.Header.VaultID != mergedFile.Header.VaultID ||
+		remoteFile.Header.KeyEpoch != mergedFile.Header.KeyEpoch {
+		return fmt.Errorf("%w: vault or key epoch differs between R and M", ErrMergeCandidateAdoptVerify)
+	}
+	if !sameMergeCandidateCurrentPolicy(remoteFile, remoteCurrent, mergedFile, mergedCurrent) {
+		return fmt.Errorf("%w: current signed policy proof differs between R and M", ErrMergeCandidateAdoptVerify)
+	}
+	// R's author is authorized only by R's own authenticated current policy.
+	if !mergeCandidateAuthorCanWrite(remoteCurrent, remoteFile.Header.AuthorDeviceID) {
+		return fmt.Errorf("%w: remote author is not an authorized current writer", ErrMergeCandidateAdoptVerify)
+	}
+	// One epoch VUK per vault: equal headers alone do not prove it, so recover
+	// both from their authenticated current policies and compare exactly. R's
+	// policy is the authority for both recoveries.
+	remoteVUK, err := adoptEpochVUK(remoteFile, remoteCurrent, deviceID, identity)
+	if err != nil {
+		return err
+	}
+	defer clear(remoteVUK)
+	mergedVUK, err := adoptEpochVUK(mergedFile, remoteCurrent, deviceID, identity)
+	if err != nil {
+		return err
+	}
+	defer clear(mergedVUK)
+	if subtle.ConstantTimeCompare(remoteVUK, mergedVUK) != 1 {
+		return fmt.Errorf("%w: R and M do not share one epoch VUK", ErrMergeCandidateAdoptVerify)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	// M's author role is authorized only from R's current policy, by the
+	// existing caller-pinned verifier. The proposal binds M's own OpID, the
+	// target revision and G+1 as a hint.
+	verify, err := NewContentProposalVerifier(&pin)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrMergeCandidateAdoptVerify, err)
-	}
-	// The candidate base file is opaque to this checkpoint; wiring it to a key
-	// epoch policy is a later step.
-	mergedFile, err := vaultfile.ParseFile(mergedBytes)
-	if err != nil {
-		return fmt.Errorf("%w: merge candidate does not parse", ErrMergeCandidateAdoptVerify)
 	}
 	proposal := vaultfilejournal.Proposal{
 		Generation:       state.Generation + 1,
@@ -230,6 +330,7 @@ func AdoptMergeCandidate(ctx context.Context, journal *vaultfilejournal.Journal,
 		ExpectedRevision: remoteRevision,
 		Bytes:            mergedBytes,
 	}
+	defer clearSlice(proposal.Bytes)
 	if err := verify(ctx, remoteBytes, remoteRevision, proposal); err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
@@ -244,6 +345,71 @@ func AdoptMergeCandidate(ctx context.Context, journal *vaultfilejournal.Journal,
 		return classifyAdoptCommitError(err)
 	}
 	return nil
+}
+
+// adoptSnapshotCheckpoint copies every trust-relevant field of the caller pin
+// into owned storage. The clone never shares a byte slice with the caller, so
+// caller mutation after entry cannot change what this call authenticates.
+func adoptSnapshotCheckpoint(checkpoint *vaultfile.PolicyCheckpoint) vaultfile.PolicyCheckpoint {
+	return vaultfile.PolicyCheckpoint{
+		VaultID:            checkpoint.VaultID,
+		OwnerRootKeyID:     checkpoint.OwnerRootKeyID,
+		OwnerRootPublicKey: append(ed25519.PublicKey(nil), checkpoint.OwnerRootPublicKey...),
+		PolicySeq:          checkpoint.PolicySeq,
+		PolicyDigest:       append([]byte(nil), checkpoint.PolicyDigest...),
+	}
+}
+
+// adoptOpenFile authenticates, decrypts and fully reads one sealed file under
+// exactly the caller pin, device and identity. The returned File and database
+// are owned by the caller and must be released; the metadata and items are
+// cleared here on every path.
+func adoptOpenFile(ctx context.Context, sealed []byte, pin *vaultfile.PolicyCheckpoint, deviceID string, identity *age.X25519Identity) (*vaultfile.File, *kdbx.Database, error) {
+	file, db, err := vaultfile.OpenAuthenticatedFile(sealed, pin, deviceID, identity)
+	if err != nil {
+		releaseDatabase(db)
+		releaseFile(file)
+		return nil, nil, fmt.Errorf("%w: %w", ErrMergeCandidateAdoptVerify, err)
+	}
+	if err := ctx.Err(); err != nil {
+		releaseDatabase(db)
+		releaseFile(file)
+		return nil, nil, err
+	}
+	metadata, items, err := vault.ReadItemDatabase(db)
+	releasePlaintext(metadata, items)
+	if err != nil {
+		releaseDatabase(db)
+		releaseFile(file)
+		return nil, nil, fmt.Errorf("%w: %w", ErrMergeCandidateAdoptVerify, err)
+	}
+	if err := ctx.Err(); err != nil {
+		releaseDatabase(db)
+		releaseFile(file)
+		return nil, nil, err
+	}
+	return file, db, nil
+}
+
+// adoptCurrentPolicy derives the file's authenticated current policy and
+// classifies any failure as a verification rejection.
+func adoptCurrentPolicy(file *vaultfile.File) (*vaultfile.Policy, error) {
+	current, err := workingCurrentPolicy(file)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrMergeCandidateAdoptVerify, err)
+	}
+	return current, nil
+}
+
+// adoptEpochVUK recovers one same-epoch VUK and classifies any failure as a
+// verification rejection. The returned key is owned by the caller.
+func adoptEpochVUK(file *vaultfile.File, current *vaultfile.Policy, deviceID string, identity *age.X25519Identity) ([]byte, error) {
+	vuk, err := workingEpochVUK(file, current, deviceID, identity)
+	if err != nil {
+		clear(vuk)
+		return nil, fmt.Errorf("%w: %w", ErrMergeCandidateAdoptVerify, err)
+	}
+	return vuk, nil
 }
 
 // adoptCompleteState reports whether a loaded state carries every field a
