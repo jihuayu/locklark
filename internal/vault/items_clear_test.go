@@ -51,7 +51,13 @@ func TestReadItemsFailureZeroesDecodedAttachment(t *testing.T) {
 	if err != ErrSnapshot || metadata != nil || items != nil {
 		t.Fatalf("readItems = %v, %v, %v", metadata, items, err)
 	}
-	if !bytes.Equal(marker, make([]byte, len(marker))) {
-		t.Fatalf("decoded attachment retained %q on failure", marker)
+	// The decoded item owns a private copy of the attachment, so failure
+	// cleanup may zero only that copy. The database binary and the caller's
+	// original bytes must stay intact: a read must never mutate its source.
+	if !bytes.Equal(marker, []byte("synthetic-decoded-attachment")) {
+		t.Fatalf("caller attachment mutated by failure cleanup: %q", marker)
+	}
+	if b := db.FindBinary(group.Entries[1].Binaries[0].Value.ID); b == nil || !bytes.Equal(b.Content, marker) {
+		t.Fatal("source database binary mutated by failure cleanup")
 	}
 }

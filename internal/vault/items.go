@@ -363,18 +363,20 @@ type binaryKey struct {
 	protected bool
 }
 
-// binaryRef deduplicates raw bytes into KDBX InnerHeader.Binaries.
-func binaryRef(db *kdbx.Database, refs map[binaryKey]int, content []byte, protected bool) int {
+// binaryRef deduplicates raw bytes into KDBX InnerHeader.Binaries. Binaries
+// that share content share one copy, which is intentionally borrowed from the
+// caller; a writer that must not alias its input replaces it with owned copies.
+func binaryRef(content []byte, protected bool, refs map[binaryKey]int, binaries *[]kdbx.Binary) int {
 	k := binaryKey{sha256.Sum256(content), protected}
 	if ref, ok := refs[k]; ok {
 		return ref
 	}
-	ref := len(db.Content.InnerHeader.Binaries)
+	ref := len(*binaries)
 	b := kdbx.Binary{ID: ref, Content: content}
 	if protected {
 		b.MemoryProtection = 1
 	}
-	db.Content.InnerHeader.Binaries = append(db.Content.InnerHeader.Binaries, b)
+	*binaries = append(*binaries, b)
 	refs[k] = ref
 	return ref
 }
@@ -387,6 +389,7 @@ func writeItems(db *kdbx.Database, metadata []byte, items []Item) error {
 	m.Values = []kdbx.ValueData{slot("Title", "Locklark metadata v1", false), slot("Notes", base64.StdEncoding.EncodeToString(metadata), true)}
 	g.Entries = []kdbx.Entry{m}
 	refs := map[binaryKey]int{}
+	binaries := (*[]kdbx.Binary)(&db.Content.InnerHeader.Binaries)
 	for _, it := range items {
 		e := kdbx.NewEntry()
 		e.UUID = itemUUID(it.ID)
@@ -429,7 +432,7 @@ func writeItems(db *kdbx.Database, metadata []byte, items []Item) error {
 			} else if it.Kind == "ssh-key" {
 				e.Values = append(e.Values, slot("Locklark.SSHSeed", base64.StdEncoding.EncodeToString(it.SSHSeed), true), slot("Locklark.SSHPublicKey", base64.StdEncoding.EncodeToString(it.SSHPublicKey), false))
 			} else {
-				ref := binaryRef(db, refs, it.Attachment, it.AttachmentProtected)
+				ref := binaryRef(it.Attachment, it.AttachmentProtected, refs, binaries)
 				e.Binaries = []kdbx.BinaryReference{kdbx.NewBinaryReference(it.Filename, ref)}
 			}
 			g.Entries = append(g.Entries, e)
@@ -442,7 +445,7 @@ func writeItems(db *kdbx.Database, metadata []byte, items []Item) error {
 			e.Values = append(e.Values, slot("Locklark.SSHSeed", base64.StdEncoding.EncodeToString(it.SSHSeed), true), slot("Locklark.SSHPublicKey", base64.StdEncoding.EncodeToString(it.SSHPublicKey), false))
 		case cat == CategoryDocument:
 			if it.Filename != "" || it.Attachment != nil {
-				ref := binaryRef(db, refs, it.Attachment, it.AttachmentProtected)
+				ref := binaryRef(it.Attachment, it.AttachmentProtected, refs, binaries)
 				e.Binaries = append(e.Binaries, kdbx.NewBinaryReference(it.Filename, ref))
 			}
 		default:
@@ -483,7 +486,7 @@ func writeItems(db *kdbx.Database, metadata []byte, items []Item) error {
 		}
 		e.Values = append(e.Values, slot(itemV2Slot, base64.StdEncoding.EncodeToString(raw), true))
 		for _, att := range it.Attachments {
-			ref := binaryRef(db, refs, att.Content, att.Protected)
+			ref := binaryRef(att.Content, att.Protected, refs, binaries)
 			e.Binaries = append(e.Binaries, kdbx.NewBinaryReference(attachmentRefPrefix+att.ID+"/"+att.FileName, ref))
 		}
 		g.Entries = append(g.Entries, e)
@@ -497,11 +500,11 @@ func supportedTimes(t kdbx.TimeData) bool {
 	return !t.Expires.Bool && t.ExpiryTime == nil && t.UsageCount == 0
 }
 func supportedGroup(g kdbx.Group) bool {
-	return supportedTimes(g.Times) && g.Notes == "" && g.Tags == "" && len(g.CustomData) == 0 && g.IconID == 0 && g.CustomIconUUID.IsZero() && g.PreviousParentGroup == nil && g.DefaultAutoTypeSequence == "" && g.EnableAutoType == wrappers.NewNullableBoolWrapper(true) && g.EnableSearching == wrappers.NewNullableBoolWrapper(true)
+	return supportedTimes(g.Times) && g.Notes == "" && g.Tags == "" && len(g.CustomData) == 0 && g.IconID == 0 && g.CustomIconUUID.IsZero() && g.PreviousParentGroup == nil && g.DefaultAutoTypeSequence == "" && g.EnableAutoType == wrappers.NewNullableBoolWrapper(true) && g.EnableSearching == wrappers.NewNullableBoolWrapper(true) && g.LastTopVisibleEntry == kdbx.ZeroUUIDText
 }
 func supportedEntry(e kdbx.Entry) bool {
 	a := e.AutoType
-	return supportedTimes(e.Times) && len(e.Histories) == 0 && len(e.CustomData) == 0 && e.Tags == "" && e.OverrideURL == "" && e.IconID == 0 && e.CustomIconUUID.IsZero() && e.ForegroundColor == "" && e.BackgroundColor == "" && e.PreviousParentGroup == nil && e.QualityCheck == nil && !a.Enabled.Bool && a.DataTransferObfuscation == 0 && a.DefaultSequence == "" && len(a.Associations) == 0
+	return e.UUID != kdbx.UUID{} && supportedTimes(e.Times) && len(e.Histories) == 0 && len(e.CustomData) == 0 && e.Tags == "" && e.OverrideURL == "" && e.IconID == 0 && e.CustomIconUUID.IsZero() && e.ForegroundColor == "" && e.BackgroundColor == "" && e.PreviousParentGroup == nil && e.QualityCheck == nil && !a.Enabled.Bool && a.DataTransferObfuscation == 0 && a.DefaultSequence == "" && len(a.Associations) == 0
 }
 
 func decodeItemV2Envelope(content string) (itemV2Envelope, error) {
@@ -710,7 +713,8 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 				// KDBX 4 inner-header binaries are raw octets, even when their
 				// content happens to be valid base64 text.
 				it.AttachmentProtected = b.MemoryProtection == 1
-				it.Attachment = b.Content
+				// Decoded items own their binary bodies: never alias db.
+				it.Attachment = append([]byte(nil), b.Content...)
 				it.Filename = ref.Name
 				used[ref.Value.ID] = true
 			default:
@@ -816,7 +820,8 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 				return nil, nil, ErrSnapshot
 			}
 			it.AttachmentProtected = b.MemoryProtection == 1
-			it.Attachment = b.Content
+			// Decoded items own their binary bodies: never alias db.
+			it.Attachment = append([]byte(nil), b.Content...)
 			it.Filename = ref.Name
 			used[ref.Value.ID] = true
 			delete(refsByName, ref.Name)

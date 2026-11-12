@@ -59,6 +59,19 @@ func Seal(payload []byte, epoch uint64, recipients []*age.X25519Recipient, signe
 	return seal(payload, nil, epoch, recipients, signer)
 }
 
+// newSnapshotDatabase returns an unlocked KDBX 4.1 database carrying the exact
+// established personal snapshot KDF profile: Argon2id, 16 MiB, 3 iterations
+// and the library default parallelism. It is the only place that profile is
+// set, so the sealed snapshot and every adapter built from it cannot drift.
+func newSnapshotDatabase() *kdbx.Database {
+	db := kdbx.NewDatabase(kdbx.WithDatabaseKDBXVersion41())
+	// This transforms a random per-epoch file key, not an account password.
+	db.Header.FileHeaders.KdfParameters.UUID = kdbx.KdfArgon2id
+	db.Header.FileHeaders.KdfParameters.Memory = 16 << 20
+	db.Header.FileHeaders.KdfParameters.Iterations = 3
+	return db
+}
+
 func seal(payload []byte, items []Item, epoch uint64, recipients []*age.X25519Recipient, signer ed25519.PrivateKey) (Snapshot, error) {
 	if epoch == 0 || len(recipients) == 0 || len(recipients) > 64 || len(payload) > MaxPayload || len(signer) != ed25519.PrivateKeySize {
 		return Snapshot{}, ErrSnapshot
@@ -77,11 +90,7 @@ func seal(payload []byte, items []Item, epoch uint64, recipients []*age.X25519Re
 		return Snapshot{}, err
 	}
 	defer clear(key)
-	db := kdbx.NewDatabase(kdbx.WithDatabaseKDBXVersion41())
-	// This transforms a random per-epoch file key, not an account password.
-	db.Header.FileHeaders.KdfParameters.UUID = kdbx.KdfArgon2id
-	db.Header.FileHeaders.KdfParameters.Memory = 16 << 20
-	db.Header.FileHeaders.KdfParameters.Iterations = 3
+	db := newSnapshotDatabase()
 	var err error
 	db.Credentials, err = kdbx.NewKeyDataCredentials(key)
 	if err != nil {
@@ -148,6 +157,9 @@ func VerifySnapshot(s Snapshot, authority ed25519.PublicKey, expectedEpoch uint6
 func Open(s Snapshot, id *age.X25519Identity, authority ed25519.PublicKey, expectedEpoch uint64) ([]byte, error) {
 	data, items, err := OpenItems(s, id, authority, expectedEpoch)
 	if err == nil && items != nil {
+		if data == nil {
+			data = []byte{}
+		}
 		clear(data)
 		return nil, ErrSnapshot
 	}
