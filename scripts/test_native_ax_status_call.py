@@ -98,15 +98,55 @@ class StatusCallHookTests(unittest.TestCase):
         self.assertIsNone(diagnostic)
         self.assertEqual(status, dict(EMPTY, available=True, generic_unlock_error=True))
 
-    def test_direct_read_status_still_raises_the_sanitized_refusal(self):
+    def test_direct_read_status_never_raises_and_returns_four_booleans(self):
         leaf = static(macos.STATUS_TEXT[0][1])
         root = Element("AXWindow", [leaf], AXTitle=TITLE)
-        adapter_, _ = adapter(root, {(leaf, "AXChildren"): (UNSUPPORTED, None)})
-        with self.assertRaises(contract.ContractError) as caught:
-            adapter_.read_status(WINDOW, locked_view())
-        self.assertEqual(contract.ax_diagnostic(caught.exception),
-                         {"operation": "status-walk",
-                          "attribute": "AXChildren", "error": UNSUPPORTED})
+        cases = (("unsupported-children", {(leaf, "AXChildren"): (UNSUPPORTED, None)}),
+                 ("no-value-role", {(leaf, "AXRole"): (NO_VALUE, None)}),
+                 ("raising-attribute", {(leaf, "AXRole"): OSError("private AX text")}),
+                 ("malformed-tuple", {(leaf, "AXChildren"): 0}))
+        for name, script in cases:
+            with self.subTest(case=name):
+                adapter_, fake = adapter(root, script)
+                for controls in (locked_view(), None):
+                    status = adapter_.read_status(WINDOW, controls)
+                    self.assertEqual(status, EMPTY)
+                    self.assertEqual(set(status), set(contract.STATUS_FIELDS))
+                    self.assertTrue(all(type(value) is bool for value in status.values()))
+                api = adapter_.api
+                self.assertEqual(api.status(WINDOW, locked_view()), EMPTY)
+                self.assertEqual(api.read_status(WINDOW, locked_view()), EMPTY)
+                self.assertNotIn("AXValue", fake.requests)
+
+    def test_status_calls_never_share_a_diagnostic(self):
+        leaf = static(macos.STATUS_TEXT[0][1])
+        root = Element("AXWindow", [leaf], AXTitle=TITLE)
+        adapter_, fake = adapter(root, {(leaf, "AXChildren"): (UNSUPPORTED, None)})
+        failing = (EMPTY, {"operation": "status-walk",
+                           "attribute": "AXChildren", "error": UNSUPPORTED})
+        self.assertEqual(contract.status_snapshot(adapter_, WINDOW, locked_view()), failing)
+        # The very same adapter, now clean, reports no earlier failure.
+        fake.script.clear()
+        self.assertEqual(contract.status_snapshot(adapter_, WINDOW, locked_view()),
+                         (dict(EMPTY, available=True, generic_unlock_error=True), None))
+        # And a direct call on the same adapter reports nothing either.
+        self.assertEqual(adapter_.read_status(WINDOW, locked_view()),
+                         dict(EMPTY, available=True, generic_unlock_error=True))
+        fake.script[(leaf, "AXChildren")] = (UNSUPPORTED, None)
+        self.assertEqual(adapter_.read_status(WINDOW, locked_view()), EMPTY)
+        self.assertEqual(contract.status_snapshot(adapter_, WINDOW, locked_view()), failing)
+
+    def test_per_call_results_are_independent(self):
+        first, second = contract._AxCall(), contract._AxCall()
+        first.record(contract.ContractError(
+            "a11y-query", {"operation": "status-walk", "attribute": "AXRole",
+                           "error": NO_VALUE}))
+        first.record(contract.ContractError(
+            "a11y-query", {"operation": "status-walk", "attribute": "AXChildren",
+                           "error": UNSUPPORTED}))
+        self.assertEqual(first.recorded(), {"operation": "status-walk",
+                                            "attribute": "AXRole", "error": NO_VALUE})
+        self.assertIsNone(second.recorded())
 
     def test_unsupported_description_with_call_stays_available(self):
         leaf = static("ignored")

@@ -1016,10 +1016,10 @@ def status_snapshot(adapter, window, controls):
     the fixed all-false status without failing the surfaces snapshot.
 
     The hook receives an explicit per-call ``_AxCall`` result so a sanitized
-    refusal is reported for exactly THIS call (a hook that records it still
-    returns the non-raising all-false status); a hook that raises is also
-    fail-closed and its sanitized refusal is reported. No state is kept
-    between calls.
+    refusal is reported for exactly THIS call; the shipped hooks record it and
+    still return the non-raising all-false status. Any hook that raises is also
+    fail-closed and its sanitized refusal is reported in the same per-call
+    result. No state is kept between calls or in any global.
     """
     try:
         reader = getattr(adapter, "read_status", None)
@@ -1031,8 +1031,10 @@ def status_snapshot(adapter, window, controls):
     try:
         value = reader(window, controls, call)
     except TypeError:
-        # Only an older two-argument hook is retried without the per-call
-        # result; a TypeError raised by its own body still fails closed.
+        # A TypeError is never a contract refusal (ContractError derives from
+        # RuntimeError), so it only signals an older two-argument hook; that
+        # hook is retried without the per-call result and a refusal it still
+        # raises is reported for this call.
         try:
             value = reader(window, controls)
         except Exception as error:
@@ -1058,10 +1060,29 @@ class _AxCall:
         self.status = None
         self._diagnostic = None
 
+    def report(self, diagnostic):
+        """Record an already-sanitized ``{operation, attribute, error}`` once.
+
+        Only an exact three-key allowlisted triple is kept (re-sanitized through
+        ``ax_diagnostic`` so nothing else can ride along); later reports for the
+        same call are ignored.
+        """
+        if self._diagnostic is not None or type(diagnostic) is not dict:
+            return
+        self._diagnostic = ax_diagnostic(ContractError("a11y-query", diagnostic))
+
     def record(self, error):
-        """Record the first ``a11y-query`` refusal; later ones are ignored."""
-        if self._diagnostic is None:
-            self._diagnostic = ax_diagnostic(error)
+        """Record the first ``a11y-query`` refusal; later ones are ignored.
+
+        A hook may also hand back its already sanitized refusal mapping (see
+        ``report``) instead of raising a ``ContractError`` to be caught.
+        """
+        if self._diagnostic is not None:
+            return
+        if type(error) is dict:
+            self.report(error)
+            return
+        self._diagnostic = ax_diagnostic(error)
 
     def recorded(self):
         """This call's sanitized diagnostic, or None when it recorded none."""

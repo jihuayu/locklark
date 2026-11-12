@@ -79,16 +79,23 @@ class StatusDiagnosticTests(unittest.TestCase):
         return controls
 
     def probe(self, root, script=None):
-        """The real hook once: (fixed status, allowlisted diagnostic, fake)."""
+        """The real hook once: (fixed status, per-call diagnostic, fake).
+
+        The diagnostic comes only from the explicit per-call result of this
+        one ``status_snapshot`` call; the direct reader itself runs first, must
+        never raise, and hands back exactly the four booleans. The fake's read
+        log is reset between the calls so it describes the snapshot call only.
+        """
         fake = FakeAx(root, script)
         api = macos.QuartzApi.__new__(macos.QuartzApi)
         api.ax, api.frame = fake.ax, lambda node: dict(node.frame)
-        try:
-            return macos.MacAdapter(api=api).read_status(WINDOW, self.locked_view()), None, fake
-        except contract.ContractError as error:
-            self.assertEqual(error.code, "a11y-query")
-            self.assertEqual(set(error.guard), {"operation", "attribute", "error"})
-            return macos._empty_status(), contract.ax_diagnostic(error), fake
+        adapter = macos.MacAdapter(api=api)
+        direct = adapter.read_status(WINDOW, self.locked_view())
+        self.assertEqual(set(direct), set(contract.STATUS_FIELDS))
+        self.assertTrue(all(type(value) is bool for value in direct.values()))
+        fake.requests = []
+        status, diagnostic = contract.status_snapshot(adapter, WINDOW, self.locked_view())
+        return status, diagnostic, fake
 
     def test_children_no_value_is_a_leaf_not_a_diagnostic(self):
         leaf = element("AXStaticText", AXDescription=macos.STATUS_TEXT[2][1])
