@@ -384,7 +384,13 @@ class Budget:
     def __init__(self):
         self.counts = {"windows": 0, "controls": 0, "observations": 0}
         # Distinct (pid, window id) identities observed so far in this request.
+        # OS int ids dedup on their exact (pid, int) pair. Opaque handles are
+        # RETAINED here and deduped only through the trusted adapter's semantic
+        # identity (``identity_equal``), never through Python hash/``id``: the
+        # strong reference keeps every handle alive for the whole request, so
+        # a recycled ``id()`` can never merge two different windows.
         self.identities = set()
+        self.opaque_identities = []
 
     def charge(self, kind, amount=1, code="observe-overrun"):
         self.counts["observations"] += 1
@@ -397,7 +403,7 @@ class Budget:
             raise ContractError("observe-overrun", dict(self.counts))
         del code
 
-    def charge_windows(self, windows):
+    def charge_windows(self, windows, adapter=None):
         """Charge one window snapshot against both hard window limits.
 
         Each individual snapshot is bounded by MAX_WINDOWS.  Separately, the
@@ -407,6 +413,14 @@ class Budget:
         shared cap before the discovery timeout.  The ``windows`` count is the
         larger of the current snapshot size and the distinct identity total,
         so a genuinely churning set of windows still refuses.
+
+        An OS int id dedups on the exact historical ``(pid, int)`` pair. An
+        opaque handle dedups ONLY through the trusted adapter identity
+        (``identity_equal``, e.g. native ``CFEqual``), so two distinct wrapper
+        objects naming the same OS window count once while genuinely different
+        windows never merge. The ``(pid, handle)`` pairs are retained for the
+        whole request so an unhashable handle can never be recycled into a
+        different window's identity.
         """
         size = _size(windows)
         if size > MAX_WINDOWS:
@@ -415,13 +429,32 @@ class Budget:
         for window in windows:
             pid = window.get("pid") if type(window) is dict else None
             identity = window_identity(window)
-            if identity is not None:
-                self.identities.add((pid, identity_key(identity)))
-        self.counts["windows"] = max(size, len(self.identities))
+            if identity is None:
+                continue
+            if identity[0] == "id":
+                self.identities.add((pid, identity[1]))
+            else:
+                self.observe_handle(pid, identity[1], adapter)
+        self.counts["windows"] = max(size, len(self.identities),
+                                     len(self.identities) + len(self.opaque_identities))
         if self.counts["windows"] > MAX_WINDOWS:
             raise ContractError("window-overrun", dict(self.counts))
         if self.counts["observations"] > MAX_OBSERVATIONS:
             raise ContractError("observe-overrun", dict(self.counts))
+
+    def observe_handle(self, pid, handle, adapter):
+        """Record one opaque ``(pid, handle)`` identity; dedup by trusted equality.
+
+        The handle is stored (retained) whether or not it is new. Two handles
+        are the same window only when the trusted adapter answers an exact
+        ``True`` under the same pid; a different window is a separate identity,
+        and an unprovable verdict (``window-changed``) fails the whole
+        observation closed instead of guessing.
+        """
+        for kept_pid, kept in self.opaque_identities:
+            if kept_pid == pid and identity_equal(adapter, kept, handle):
+                return  # the same window: already counted once
+        self.opaque_identities.append((pid, handle))
 
 
 def canonical_path(value, platform="linux"):
@@ -492,15 +525,16 @@ def window_identity(window):
     return ("opaque", identifier)
 
 
-def same_identity(adapter, first, second):
-    """Trusted adapter equality of two opaque handles; never value equality.
+def identity_equal(adapter, first, second):
+    """The trusted adapter's equality verdict for two handles.
 
     The adapter owns equality of the objects it produced. It may supply an
     ``identity_equal(first, second)`` hook (native ``CFEqual`` for AX
     elements); without one, only the very same object is the same window, so a
     distinct object with an equal-looking value is never accepted. A hook that
-    raises or answers anything but the exact built-in ``True`` is not proof
-    and refuses the fixed ``window-changed``.
+    raises, is not callable, or answers anything but an exact built-in
+    ``bool`` is not proof: it refuses the fixed ``window-changed`` rather than
+    being read as "different".
     """
     equals = getattr(adapter, "identity_equal", None)
     if equals is None:
@@ -514,27 +548,21 @@ def same_identity(adapter, first, second):
             raise
         except Exception:
             raise ContractError("window-changed")
-    if type(verdict) is not bool or verdict is not True:
+    if type(verdict) is not bool:
+        raise ContractError("window-changed")
+    return verdict
+
+
+def same_identity(adapter, first, second):
+    """Proof that two handles are the SAME window, or refuse ``window-changed``.
+
+    Used where identity must be proven (re-observation, focus): a trusted
+    ``False`` verdict means the window changed, and every other unprovable
+    verdict refuses too.
+    """
+    if identity_equal(adapter, first, second) is not True:
         raise ContractError("window-changed")
     return True
-
-
-def identity_key(identity):
-    """The budget-dedup key of a real identity; never a serialized handle.
-
-    An OS id keeps the exact historical ``(pid, int)`` budget identity. An
-    opaque handle dedups on the handle OBJECT: a hashable one is keyed by the
-    handle, and an unhashable one by its object identity, so two distinct
-    objects never merge into one identity and no handle is ever stringified.
-    """
-    if identity[0] == "id":
-        return identity[1]
-    handle = identity[1]
-    try:
-        hash(handle)
-    except Exception:
-        return ("opaque-object", id(handle))
-    return ("opaque", handle)
 
 
 def _receipt_window(identity):
@@ -624,7 +652,7 @@ def find_window(plan, adapter, budget):
     deadline = monotonic() + DISCOVER_TIMEOUT
     while True:
         windows = adapter.list_windows()
-        budget.charge_windows(windows)
+        budget.charge_windows(windows, adapter)
         matches = [window for window in windows
                    if window_candidate(plan, window, adapter.platform)]
         if len(matches) > 1:
@@ -1241,7 +1269,7 @@ def await_absent(plan, adapter, budget):
     deadline = monotonic() + CONTROL_TIMEOUT
     while True:
         windows = adapter.list_windows()
-        budget.charge_windows(windows)
+        budget.charge_windows(windows, adapter)
         if not [w for w in windows
                 if title_matches(plan, w) and same_executable(plan["executable"], w.get("executable"), adapter.platform)]:
             return {"absent": True}

@@ -12,6 +12,7 @@ OS window id:
 * the window budget dedups real identities and stays bounded;
 * a receipt never serializes or fake-hexes a handle.
 """
+import gc
 import json
 import os
 import sys
@@ -47,12 +48,16 @@ class Handle:
 
 
 class UnhashableHandle:
-    """An opaque handle that is unhashable and not equal to itself by value."""
+    """An opaque handle that is unhashable; each instance is its own window."""
 
     __hash__ = None
 
-    def equals(self, left, right):
-        return left is right
+    def __init__(self, name):
+        self.name = name
+
+    @staticmethod
+    def equals(first, second):
+        return first is second
 
 
 def _opaque_focus(window, state):
@@ -263,38 +268,136 @@ class OpaqueFocusTests(unittest.TestCase):
         self.assertFalse(contract.focus_matches(adapter, window(handle), contract.Budget()))
 
 
-class IdentityBudgetTests(unittest.TestCase):
-    def test_budget_dedups_real_identities(self):
-        budget = contract.Budget()
-        first, second = Handle("a"), Handle("b")
-        # Re-observing the SAME handle never consumes new identity budget.
-        for _ in range(contract.MAX_OBSERVATIONS - 1):
-            budget.charge_windows([window(first)])
-        self.assertEqual(len(budget.identities), 1)
-        self.assertEqual(budget.counts["windows"], 1)
-        budget.charge_windows([window(first), window(second)])
-        self.assertEqual(len(budget.identities), 2)
+class Wrapper:
+    """A DISTINCT Python object per observation naming one semantic window.
 
-    def test_distinct_handles_cannot_exceed_the_window_cap(self):
+    Two wrappers of the same window are different objects with no equal hash
+    or value; only the trusted adapter (``CFEqual``-like) knows they are the
+    same window. Default (untrusted) Python equality never merges them.
+    """
+
+    __hash__ = None
+
+    def __init__(self, name):
+        self.name = name
+
+
+class SemanticAdapter:
+    """A trusted adapter that proves wrapper equality by the window's name."""
+
+    def __init__(self, trusted=True):
+        self.trusted = trusted
+        self.equal_calls = 0
+
+    def identity_equal(self, first, second):
+        self.equal_calls += 1
+        if first is second:
+            return True
+        return (self.trusted and type(first) is type(second)
+                and getattr(first, "name", None) == getattr(second, "name", None))
+
+
+class IdentityBudgetTests(unittest.TestCase):
+    def test_distinct_wrappers_of_one_window_dedup_once(self):
+        adapter = SemanticAdapter()
+        budget = contract.Budget()
+        for _ in range(contract.MAX_OBSERVATIONS - 1):
+            # A NEW wrapper object each poll, same semantic window.
+            budget.charge_windows([window(Wrapper("main"))], adapter)
+        self.assertEqual(budget.counts["windows"], 1)
+        self.assertEqual(len(budget.opaque_identities), 1)
+        self.assertEqual(adapter.equal_calls, contract.MAX_OBSERVATIONS - 2)
+        # Dedup is by semantic identity, not Python hash/id: the retained
+        # handle is the FIRST wrapper, and every later one compared equal.
+        self.assertIsInstance(budget.opaque_identities[0][1], Wrapper)
+
+    def test_genuinely_different_windows_never_dedup(self):
+        adapter = SemanticAdapter()
+        budget = contract.Budget()
+        budget.charge_windows([window(Wrapper("a"))], adapter)
+        budget.charge_windows([window(Wrapper("b"))], adapter)
+        self.assertEqual(budget.counts["windows"], 2)
+        self.assertEqual(len(budget.opaque_identities), 2)
+        # An adapter that cannot prove equality does not merge anything.
+        budget.charge_windows([window(Wrapper("a"))], SemanticAdapter(trusted=False))
+        self.assertEqual(budget.counts["windows"], 3)
+
+    def test_untrusted_equality_never_merges_distinct_objects(self):
+        # An adapter that cannot prove equality: distinct wrappers never merge.
+        budget = contract.Budget()
+        budget.charge_windows([window(Wrapper("a"))], SemanticAdapter(trusted=False))
+        budget.charge_windows([window(Wrapper("a"))], SemanticAdapter(trusted=False))
+        self.assertEqual(len(budget.opaque_identities), 2)
+
+    def test_no_identity_hook_compares_only_the_same_object(self):
+        class Plain:
+            pass
+
+        budget = contract.Budget()
+        handle = Plain()
+        # No identity_equal hook: the same object and only it is one window.
+        budget.charge_windows([window(handle)], Plain())
+        budget.charge_windows([window(handle)], Plain())
+        budget.charge_windows([window(Plain())], Plain())
+        self.assertEqual(len(budget.opaque_identities), 2)
+        self.assertIs(budget.opaque_identities[0][1], handle)
+
+    def test_unhashable_handles_are_retained_across_gc_and_not_recycled(self):
+        adapter = SemanticAdapter()
+        budget = contract.Budget()
+        yielded = []
+        for index in range(3):
+            handle = UnhashableHandle(index)
+            yielded.append(handle)
+            # Drop every external reference; only the budget may retain it.
+            budget.charge_windows([window(handle)], adapter)
+            del handle
+            if index == 0:
+                first = budget.opaque_identities[0][1]
+                budget._first = first  # keep one for the assertion below
+                del first
+            gc.collect()
+        retained = [handle for _, handle in budget.opaque_identities]
+        # Each distinct unhashable window is retained for the request, so a
+        # recycled id()/hash could never merge two different windows.
+        self.assertEqual(len(retained), 3)
+        self.assertTrue(all(handle is yielded[index] for index, handle in enumerate(retained)))
+        self.assertIs(budget._first, yielded[0])
+        self.assertEqual(budget.counts["windows"], 3)
+
+    def test_semantic_dedup_survives_gc_of_each_wrapper(self):
+        adapter = SemanticAdapter()
+        budget = contract.Budget()
+        for _ in range(50):
+            budget.charge_windows([window(Wrapper("main"))], adapter)
+            gc.collect()
+        self.assertEqual(len(budget.opaque_identities), 1)
+        self.assertEqual(budget.counts["windows"], 1)
+
+    def test_identity_cap_still_bounded_at_max_windows(self):
+        adapter = SemanticAdapter()
         budget = contract.Budget()
         with self.assertRaises(contract.ContractError) as error:
             for index in range(contract.MAX_WINDOWS + 1):
                 budget.counts["observations"] = 0  # isolate the identity cap
-                budget.charge_windows([window(Handle(index))])
+                budget.charge_windows([window(Wrapper(index))], adapter)
         self.assertEqual(error.exception.code, "window-overrun")
         self.assertEqual(budget.counts["windows"], contract.MAX_WINDOWS + 1)
+
+    def test_observation_cap_unchanged(self):
+        budget = contract.Budget()
+        with self.assertRaises(contract.ContractError) as error:
+            for _ in range(contract.MAX_OBSERVATIONS + 1):
+                budget.charge_windows([window(Wrapper("main"))], SemanticAdapter())
+        self.assertEqual(error.exception.code, "observe-overrun")
+        self.assertEqual(budget.counts["observations"], contract.MAX_OBSERVATIONS + 1)
 
     def test_one_snapshot_above_the_cap_is_refused(self):
         budget = contract.Budget()
         with self.assertRaises(contract.ContractError) as error:
-            budget.charge_windows([window(Handle(i)) for i in range(contract.MAX_WINDOWS + 1)])
+            budget.charge_windows([window(Wrapper(i)) for i in range(contract.MAX_WINDOWS + 1)],
+                                  SemanticAdapter())
         self.assertEqual(error.exception.code, "window-overrun")
-
-    def test_unhashable_handles_dedup_by_object_not_by_type(self):
-        budget = contract.Budget()
-        handles = [UnhashableHandle() for _ in range(3)]
-        budget.charge_windows([window(handle) for handle in handles])
-        self.assertEqual(len(budget.identities), 3)
 
 
 if __name__ == "__main__":
