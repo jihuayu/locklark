@@ -833,11 +833,14 @@ async function acceptRouteIdleExpiry(driver) {
   routeStatusTrace = null;
   routeIdleCloseStaleObservation = null;
   // The controlled source page by reference only: never by URL, id or index.
-  const sourcePath = new URL(origin).pathname;
   const sourcePage = context
     .pages()
     .find((entry) => !/^chrome-extension:\/\//.test(entry.url()));
   assert(sourcePage, "Original source tab missing");
+  // The expected path is this exact controlled page's own pathname (opened at
+  // origin + "/login"), not the bare origin's "/" path. The synthetic URL is
+  // used only here to derive it and is never retained or reported.
+  const sourcePath = new URL(sourcePage.url()).pathname;
   // The stale (closed/revoked) route left by the default checkpoint, found
   // through the fixed route fragment pattern. Its tab and token stay here.
   const staleRoutes = (await targets()).filter((target) =>

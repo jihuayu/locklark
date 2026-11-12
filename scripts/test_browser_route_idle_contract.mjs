@@ -90,6 +90,23 @@ function idleHelper() {
   return SOURCE.slice(start, next);
 }
 
+// The actual source-form/path gate, so the synthetic driver test can execute
+// the expression the helper generates instead of a stand-in.
+function sourceProbeHelper() {
+  const start = SOURCE.indexOf("function sourcePageProbe(pathname) {");
+  const stop = SOURCE.indexOf("\n// Diagnostics only:", start);
+  assert.ok(start > 0 && stop > start, "source page probe must exist");
+  return SOURCE.slice(start, stop);
+}
+
+// The actual six-boolean sanitizer the stale-close wait stores through.
+function closeStaleSanitizer() {
+  const start = SOURCE.indexOf("function sanitizeRouteIdleCloseStale(value) {");
+  const stop = SOURCE.indexOf("\n}", start) + 2;
+  assert.ok(start > 0 && stop > start, "stale-close sanitizer must exist");
+  return SOURCE.slice(start, stop);
+}
+
 // Every needle must appear once, in order, inside `text`.
 function assertOrder(text, needles) {
   let previous = -1;
@@ -265,15 +282,21 @@ test("the idle helper takes every outer-block local from the driver", () => {
   );
 });
 
-test("the idle helper reaches the ready and visible gates, then invokes only the supplied browser key", async () => {
+test("the idle helper reaches the stale-close wait and the actual /login source gate before the next popup", async () => {
   const staleRouteURL =
     "chrome-extension://" + "a".repeat(32) + "/popup.html#route=" + "b".repeat(64);
-  const sourcePageURL = "https://login.locklark.test:8443/acceptance";
+  // The real driver keeps the origin bare and opens the controlled source page
+  // at origin + "/login"; the helper must derive the path from that page, not
+  // from the origin (whose pathname is "/").
+  const originURL = "https://login.locklark.test:8443";
+  const sourcePageURL = originURL + "/login";
   const closeKey = Object.freeze([{ key: "Control_L+w" }]);
-  const stop = new Error("stop after the injected browser key");
+  const stop = new Error("stop at the next action-popup call");
   const events = [];
   const keyCalls = [];
   const evaluateCalls = [];
+  const probeExpressions = [];
+  let staleClosed = false;
   // The stale route is a real browser/CDP dependency only. Its two
   // prerequisite reads answer like the production stale route: ready and the
   // active tab; no other page expression is reached before the key.
@@ -294,11 +317,31 @@ test("the idle helper reaches the ready and visible gates, then invokes only the
     },
   };
   const staleTarget = { id: "stale-route", url: staleRouteURL };
-  const sourcePage = { url: () => sourcePageURL };
+  // The smallest controlled source page: only the form controls and pathname
+  // the generated probe reads. Its location is the real /login page.
+  const password = { type: "password" };
+  const form = { contains: (value) => value === password };
+  const username = { form, type: "text" };
+  const probeContext = vm.createContext({
+    location: { pathname: "/login" },
+    document: {
+      visibilityState: "visible",
+      getElementById: (id) =>
+        id === "username" ? username : id === "password" ? password : null,
+    },
+  });
+  const sourcePage = {
+    url: () => sourcePageURL,
+    evaluate: async (expression) => {
+      events.push("sourceProbe");
+      probeExpressions.push(expression);
+      return vm.runInContext(expression, probeContext);
+    },
+  };
   const context = vm.createContext({
     URL,
     assert,
-    origin: sourcePageURL,
+    origin: originURL,
     ROUTE_PAGE: /^chrome-extension:\/\/[a-p]{32}\/popup\.html#route=[a-f0-9]{64}$/,
     ACTION_POPUP: /^chrome-extension:\/\/[a-p]{32}\/popup\.html$/,
     ROUTE_TITLE_PREFIX: "Locklark",
@@ -309,7 +352,13 @@ test("the idle helper reaches the ready and visible gates, then invokes only the
     routeStatusTrace: null,
   });
   vm.runInContext(
-    idleHelper() + "\nthis.acceptRouteIdleExpiry = acceptRouteIdleExpiry;",
+    sourceProbeHelper() +
+      "\n" +
+      closeStaleSanitizer() +
+      "\n" +
+      idleHelper() +
+      "\nthis.acceptRouteIdleExpiry = acceptRouteIdleExpiry;" +
+      "\nthis.sourcePageProbe = sourcePageProbe;",
     context,
   );
   // There is deliberately no browserKey global: the only one the helper can
@@ -334,9 +383,12 @@ test("the idle helper reaches the ready and visible gates, then invokes only the
       assert.equal(await check(), true, message);
     },
     openPopup: async () => {
-      throw new Error("popup must not be reached before the key");
+      events.push("openPopup");
+      throw stop;
     },
-    extensionTargets: async () => [staleTarget],
+    // Before the key the stale route is still live; after it the close key
+    // removes exactly that target.
+    extensionTargets: async () => (staleClosed ? [] : [staleTarget]),
     attachRoute: async (target) => {
       events.push("attach");
       assert.equal(target, staleTarget);
@@ -346,7 +398,7 @@ test("the idle helper reaches the ready and visible gates, then invokes only the
     browserKey: (actions, titlePrefix) => {
       events.push("browserKey");
       keyCalls.push([actions, titlePrefix]);
-      throw stop;
+      staleClosed = true;
     },
     labelInspect: Object.freeze({ inspect: true, preserve_focus: true }),
     vaultRows: "synthetic-vault-rows",
@@ -354,8 +406,8 @@ test("the idle helper reaches the ready and visible gates, then invokes only the
     verifyRouteSurface: () => "",
     nativeInspection: () => ({}),
   };
-  // The synthetic wait stops at the first key, so the 120-second journey is
-  // never run here.
+  // The synthetic wait runs the stale-close predicate for real, then stops at
+  // the next action-popup call, so the 120-second journey is never run here.
   await assert.rejects(
     context.acceptRouteIdleExpiry(driver),
     (error) => error === stop,
@@ -367,6 +419,23 @@ test("the idle helper reaches the ready and visible gates, then invokes only the
     "document.readyState",
     'document.visibilityState === "visible" && document.hasFocus() === true',
   ]);
+  // The stale-close wait and the post-wait gate both executed the actual
+  // generated expression with the corrected /login path, not the origin's "/".
+  assert.equal(probeExpressions.length, 2);
+  for (const expression of probeExpressions)
+    assert.equal(expression, context.sourcePageProbe("/login"));
+  // All six stale-close predicates are true before the next popup is reached.
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(context.routeIdleCloseStaleObservation)),
+    {
+      staleIdAbsent: true,
+      routesAbsent: true,
+      popupAbsent: true,
+      sourceSame: true,
+      sourceVisible: true,
+      sourceIntact: true,
+    },
+  );
   assert.deepEqual(events, [
     "attach",
     "wait:Route page did not load",
@@ -375,7 +444,12 @@ test("the idle helper reaches the ready and visible gates, then invokes only the
     "mark:route:idle-close-stale",
     "closeAdapter",
     "browserKey",
+    "wait:Stale route tab was not closed",
+    "sourceProbe",
     "closeAdapter",
+    "sourceProbe",
+    "mark:route:idle-source",
+    "openPopup",
   ]);
   assert.equal(keyCalls.length, 1);
   assert.equal(keyCalls[0][0], closeKey);
@@ -418,6 +492,13 @@ test("the idle journey closes only the stale route tab with one physical key", (
     '"Stale route tab was not closed"',
   ])
     assert.ok(afterClose.includes(needle), needle);
+  // The expected path comes from the exact controlled source page (opened at
+  // origin + "/login"), never from the bare origin whose pathname is "/".
+  assertOrder(body, [
+    'assert(sourcePage, "Original source tab missing");',
+    "const sourcePath = new URL(sourcePage.url()).pathname;",
+  ]);
+  assert.ok(!body.includes("new URL(origin).pathname"));
   // The source probe returns fixed booleans only.
   assert.match(
     SOURCE,
@@ -683,9 +764,14 @@ test("the idle journey keeps output privacy and reports only fixed booleans", ()
   assert.doesNotMatch(consoleLines[0], /fixture|target|token|url|template|baseline/i);
   // No target id, token URL or clipboard content is read in the host: the
   // targets list only ever matches the fixed route and popup patterns by
-  // `target.url`/`entry.url()`, exactly like the default journeys.
+  // `target.url`/`entry.url()`, exactly like the default journeys. The one
+  // further URL read is the controlled source page's own pathname, used only
+  // to derive the expected /login path and never retained or reported.
   assert.doesNotMatch(body, /webSocketDebuggerUrl|DevToolsActivePort|fetch\(/);
-  const offPattern = body.replace(/\.test\(entry\.url\(\)\)/g, "").replace(/\.test\(target\.url\)/g, "");
+  const offPattern = body
+    .replace(/\.test\(entry\.url\(\)\)/g, "")
+    .replace(/\.test\(target\.url\)/g, "")
+    .replace("const sourcePath = new URL(sourcePage.url()).pathname;", "");
   assert.doesNotMatch(offPattern, /\.url\b/);
   // No secret value or clipboard content is read in the host: the two probes
   // receive only the non-secret title/value pair and the canary lists.
