@@ -397,6 +397,67 @@ class ChooserContractTests(unittest.TestCase):
                 self.assertIsNone(native.derived_owner_pid(
                     {"probe": False, "caller_pid": caller}, derived))
 
+    def test_folder_request_is_the_owner_process_request_shape(self):
+        # The parsed folder request closed over in main() is what the folder
+        # re-proof hands to derived_owner_pid/owner_process_matches: it carries
+        # probe, caller_pid, the exact executable and the exact private
+        # profile. The fixed {owned, relation} ownership record is a different
+        # type and can never satisfy either check.
+        derived = 101
+        for parse, request in ((native.parse_folder_action_request, folder_request()),
+                               (native.parse_folder_action_request, open_request())):
+            parsed = parse(request)
+            self.assertEqual(parsed["probe"], False)
+            self.assertEqual(parsed["executable"], "/synthetic/edge")
+            self.assertEqual(parsed["user_data_dir"], "/synthetic/profile-1")
+            self.assertEqual(native.derived_owner_pid(parsed, derived), derived)
+        ownership = native.safe_owner_record({"owned": True, "relation": "process-parent"})
+        self.assertEqual(ownership, {"owned": True, "relation": "process-parent"})
+        self.assertIsNone(native.derived_owner_pid(ownership, derived))
+        self.assertIsNone(native.derived_owner_pid({"owned": True, "relation": "none"}, derived))
+
+        def fake_readlink(link):
+            return {"/proc/101/exe": "/synthetic/edge",
+                    "/proc/102/exe": "/synthetic/edge-helper"}.get(link)
+
+        def cmdline(path, mode):
+            pid = path.split("/")[2]
+            data = b"/synthetic/edge\0--user-data-dir=/synthetic/profile-1\0"
+            return io.BytesIO(data if pid in ("101", "202") else b"")
+
+        parsed = native.parse_folder_action_request(folder_request())
+        with patch.object(native.os, "readlink", side_effect=fake_readlink), \
+                patch("builtins.open", side_effect=cmdline):
+            # Exact executable plus exact private profile both proofs hold.
+            self.assertEqual(native.owner_process_matches(101, parsed), 101)
+            self.assertEqual(native.derived_owner_pid(parsed, 101), 101)
+            self.assertTrue(native.owner_process_verified(parsed, 101))
+            # The fixed ownership record is not the owner-process request: it
+            # carries neither executable, profile nor probe, so both checks
+            # refuse even when the real owner process is the exact one.
+            self.assertEqual(ownership, {"owned": True, "relation": "process-parent"})
+            self.assertIsNone(native.owner_process_matches(101, ownership))
+            self.assertFalse(native.owner_process_verified(ownership, 101))
+            self.assertFalse(native.owner_process_verified({"owned": True, "relation": "none"}, 101))
+            # Another executable image, other private profile, other PID refuse.
+            self.assertFalse(native.owner_process_verified(
+                native.parse_folder_action_request(folder_request(executable="/synthetic/edge-helper")),
+                101))
+            self.assertFalse(native.owner_process_verified(
+                native.parse_folder_action_request(
+                    folder_request(user_data_dir="/synthetic/profile-2")), 101))
+            self.assertFalse(native.owner_process_verified(parsed, 102))
+            self.assertFalse(native.owner_process_verified(parsed, 202))
+        # A caller PID must equal the derived owner PID exactly.
+        for owner_pid, expected in ((101, True), (202, False)):
+            with patch.object(native, "owner_process_matches",
+                              side_effect=lambda pid, owner: pid), \
+                    patch.object(native, "derived_owner_pid",
+                                 wraps=native.derived_owner_pid):
+                self.assertEqual(native.owner_process_verified(
+                    native.parse_folder_action_request(folder_request(owner_pid=owner_pid)), 101),
+                    expected)
+
     def test_zero_action_probe_derives_its_own_pid(self):
         parsed = native.parse_owner_request(probe_request())
         self.assertEqual(set(parsed), set(native.OWNER_FIELDS) | {"probe"})

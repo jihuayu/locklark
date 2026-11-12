@@ -898,6 +898,21 @@ def owner_process_matches(pid, owner):
     return pid if data.split(b"\0").count(switch) == 1 else None
 
 
+def owner_process_verified(owner, owner_pid):
+    """Both owner-process proofs against one parsed request and owner PID.
+
+    `owner` is the parsed owner/folder request carrying `probe`, `caller_pid`,
+    `executable` and `user_data_dir`; it is never the fixed {owned, relation}
+    ownership record, which fails both checks and is proven only through
+    prove_chooser_ownership. True only when the request binds the derived
+    owner PID and the owner process is that exact executable image with
+    exactly one exact --user-data-dir switch.
+    """
+    if derived_owner_pid(owner, owner_pid) != owner_pid:
+        return False
+    return owner_process_matches(owner_pid, owner) == owner_pid
+
+
 def chooser_pid_relation(owner_pid, chooser_pid):
     """Bounded, actual OS parent chain back to the exact verified Edge PID.
 
@@ -1500,11 +1515,9 @@ def main():
             # The owner PID is bound by the unique real manager window itself in
             # both shapes. A caller-supplied input PID must equal it exactly;
             # it is never trusted on its own.
-            if derived_owner_pid(owner, owner_pid) != owner_pid:
-                raise RuntimeError("Chooser owner window unavailable")
             # Exact real executable image and exactly one exact private profile
             # switch; a duplicate profile switch is never a second match.
-            if owner_process_matches(owner_pid, owner) != owner_pid:
+            if not owner_process_verified(owner, owner_pid):
                 raise RuntimeError("Chooser owner window unavailable")
             # None selects the chooser; the owner window is used for
             # the owner-side _NET_WM_PID/WM_CLIENT_LEADER reads.
@@ -1527,7 +1540,7 @@ def main():
                     chooser_pid_relation)
             # Re-prove the owner process identity immediately before trusting
             # the relation result.
-            if record is None or owner_process_matches(owner_pid, owner) != owner_pid:
+            if record is None or not owner_process_verified(owner, owner_pid):
                 raise RuntimeError(reason or "Chooser owner window unavailable")
             ownership = safe_owner_record(record)
             if ownership is None or any(code != 3 for code, _resource in errors) or \
@@ -1593,8 +1606,14 @@ def main():
             raise RuntimeError("Chooser must keep the measured geometry")
         return geometry
 
-    def prove_folder_owner(owner_record):
-        """Owner window, title, PID, executable and profile, re-read before input."""
+    def prove_folder_owner():
+        """Owner window, title, PID, executable and profile, re-read before input.
+
+        The parsed folder request closed over from `main()` (already the
+        verified `owner`) is the only owner-process request; the fixed
+        {owned, relation} ownership record cannot satisfy it and stays the
+        separate argument of prove_chooser_owner().
+        """
         current = [candidate for candidate in collect_titles(owner["owner_title_prefix"])
                    if normal_viewable(candidate)]
         if current != [owner_window]:
@@ -1608,21 +1627,22 @@ def main():
         owner_now = property_single_int(window_property(owner_window, "_NET_WM_PID"))
         if type(owner_now) is not int or owner_now != owner_pid:
             raise RuntimeError("Chooser owner window unavailable")
-        if derived_owner_pid(owner_record, owner_now) != owner_now:
+        if derived_owner_pid(owner, owner_now) != owner_now:
             raise RuntimeError("Chooser owner window unavailable")
-        if owner_process_matches(owner_now, owner_record) != owner_now:
+        if owner_process_matches(owner_now, owner) != owner_now:
             raise RuntimeError("Chooser owner window unavailable")
         if window_pid(target) != owner_now:
             raise RuntimeError("Chooser must belong to the owner browser process")
 
-    def prove_chooser_owner(owner_record):
-        """The chooser ownership record and its exact owner PID, re-read.
+    def prove_chooser_owner(ownership_record):
+        """The fixed {owned, relation} record and its exact owner PID, re-read.
 
         The record proven from the actual WM/proc chain must be the fixed
         owned class, and the chooser must still carry the exact owner PID.
+        This fixed record is never the owner-process request shape.
         """
-        if safe_owner_record(owner_record) is None or \
-                safe_owner_record(owner_record)["owned"] is not True:
+        if safe_owner_record(ownership_record) is None or \
+                safe_owner_record(ownership_record)["owned"] is not True:
             raise RuntimeError("Chooser must belong to the owner browser process")
         if window_pid(target) != owner_pid:
             raise RuntimeError("Chooser must belong to the owner browser process")
@@ -1684,11 +1704,11 @@ def main():
             raise RuntimeError(failure)
         return value
 
-    def click_folder(owner_record):
+    def click_folder(ownership_record):
         # 1. The first proof fixes the unique chooser identity, its owner and
         # the measured geometry; no caller value is used.
         geometry = read_only(find_chooser, "Native acceptance X query failed")
-        read_only(lambda: prove_folder_owner(owner_record), "Native acceptance X query failed")
+        read_only(prove_folder_owner, "Native acceptance X query failed")
         if read_only(find_chooser, "Native acceptance X query failed") != geometry:
             raise RuntimeError("Chooser must keep the measured geometry")
         point_xy = folder_point(*geometry)
@@ -1722,8 +1742,9 @@ def main():
         # The owner is re-proven last: the unique owner window, its exact PID,
         # executable image and private profile, and the chooser ownership
         # record with its exact owner PID, all unchanged since the first proof.
-        read_only(lambda: prove_folder_owner(owner_record), "Native acceptance X query failed")
-        read_only(lambda: prove_chooser_owner(owner_record), "Native acceptance X query failed")
+        read_only(prove_folder_owner, "Native acceptance X query failed")
+        read_only(lambda: prove_chooser_owner(ownership_record),
+                  "Native acceptance X query failed")
         down = xt.XTestFakeButtonEvent(display, 1, 1, 0)
         up = xt.XTestFakeButtonEvent(display, 1, 0, 0)
         if not down or not up:
@@ -1741,14 +1762,15 @@ def main():
         if shift is not None:
             xt.XTestFakeKeyEvent(display, shift, 0, 0)
 
-    def navigate(owner_record):
+    def navigate(ownership_record):
         # 1. The same unique chooser identity, owner, ownership record and the
         # exact measured 1124x822 client geometry as the Open action; no value
         # comes from the caller except the one package directory. The shortcut
         # and every path character are mapped before any input.
         geometry = read_only(find_chooser, "Native acceptance X query failed")
-        read_only(lambda: prove_folder_owner(owner_record), "Native acceptance X query failed")
-        read_only(lambda: prove_chooser_owner(owner_record), "Native acceptance X query failed")
+        read_only(prove_folder_owner, "Native acceptance X query failed")
+        read_only(lambda: prove_chooser_owner(ownership_record),
+                  "Native acceptance X query failed")
         if geometry != FOLDER_CHOOSER_SIZE:
             raise RuntimeError("Chooser must keep the measured geometry")
         try:
