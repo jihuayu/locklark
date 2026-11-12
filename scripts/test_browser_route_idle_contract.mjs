@@ -77,7 +77,7 @@ function idleJourney() {
   const start = SOURCE.indexOf("async function acceptRouteIdleExpiry(driver) {");
   const next = SOURCE.indexOf("\nasync function eventually(", start);
   assert.ok(start > 0 && next > start, "idle journey must be a top-level function");
-  const header = SOURCE.lastIndexOf("// One second ordinary route journey", start);
+  const header = SOURCE.lastIndexOf("// One ordinary route journey", start);
   assert.ok(header > 0, "idle journey must keep its comment header");
   return SOURCE.slice(header, next);
 }
@@ -225,7 +225,12 @@ test("the default physical revoke stages stay present and precede the opt-in jou
   // passed explicitly; the production callback stays the main try's local.
   assert.match(
     driver.slice(call),
-    /\n\s+closeAdapter: \(client\) => client\.close\(\),\n\s+browserKey,\n\s+labelInspect: ROUTE_LABEL_INSPECT,\n\s+vaultRows: VAULT_ROWS,\n\s+\}\);/,
+    /\n\s+closeAdapter: \(client\) => client\.close\(\),\n\s+browserKey,\n\s+labelInspect: ROUTE_LABEL_INSPECT,\n\s+vaultRows: VAULT_ROWS,/,
+  );
+  // The tested probe/verifier and the native inspection are block locals too.
+  assert.match(
+    driver.slice(call),
+    /\n\s+routeSurfaceProbe,\n\s+verifyRouteSurface,\n\s+nativeInspection,\n\s+\}\);/,
   );
   // The opt-in journey lives in its own function: the route driver mentions it
   // exactly once, in the guarded call, and never declares it.
@@ -238,12 +243,16 @@ test("the idle helper takes every outer-block local from the driver", () => {
   const body = idleHelper();
   assert.match(
     body,
-    /^  const \{\n\s+browser: context,\n\s+input,\n\s+fixture,\n\s+phase: mark,\n\s+eventually: wait,\n\s+openPopup: openActionPopup,\n\s+extensionTargets: targets,\n\s+attachRoute: attach,\n\s+closeAdapter,\n\s+browserKey,\n\s+labelInspect,\n\s+vaultRows,\n\s+\} = driver;/m,
+    /^  const \{\n\s+browser: context,\n\s+input,\n\s+fixture,\n\s+phase: mark,\n\s+eventually: wait,\n\s+openPopup: openActionPopup,\n\s+extensionTargets: targets,\n\s+attachRoute: attach,\n\s+closeAdapter,\n\s+browserKey,\n\s+labelInspect,\n\s+vaultRows,\n/m,
   );
   // These names are block locals in the main try/route checkpoint and must
   // not be resolved implicitly from the module-level helper.
   assert.doesNotMatch(body, /\bROUTE_LABEL_INSPECT\b|\bVAULT_ROWS\b/);
   assert.doesNotMatch(body, /\b(?:const|let|var|function)\s+browserKey\b/);
+  assert.match(
+    body,
+    /\n\s+routeSurfaceProbe,\n\s+verifyRouteSurface,\n\s+nativeInspection,\n\s+\} = driver;/,
+  );
   // The one physical stale-route key goes through the supplied callback.
   assert.match(body, /browserKey\(ROUTE_IDLE_CLOSE_STALE, ROUTE_TITLE_PREFIX\);/);
   // The local callback and the audited outer locals are passed explicitly at
@@ -340,6 +349,9 @@ test("the idle helper reaches the ready and visible gates, then invokes only the
     },
     labelInspect: Object.freeze({ inspect: true, preserve_focus: true }),
     vaultRows: "synthetic-vault-rows",
+    routeSurfaceProbe: () => "synthetic-surface-probe",
+    verifyRouteSurface: () => "",
+    nativeInspection: () => ({}),
   };
   // The synthetic wait stops at the first key, so the 120-second journey is
   // never run here.
@@ -427,6 +439,8 @@ test("the idle journey reuses the ordinary popup, match, row and approval path",
     'await action.click(\'#filter-tabs [data-filter="all"]\');',
     "const rows = await action.evaluate(vaultRows);",
     "rows[0].id === fixture.SeedID &&",
+    'mark("route:idle-row-click")',
+    "const idleStart = Date.now();",
     "await action.click(rowSelector);",
     "Route page did not open",
     "Route page must be unique",
@@ -449,39 +463,65 @@ test("the idle journey reuses the ordinary popup, match, row and approval path",
   assert.doesNotMatch(body, /bringToFront[^\n]*\n(?:[^\n]*\n){0,3}[^\n]*input\(/);
 });
 
-test("the idle journey proves the approved detail, then wipes only by its TTL", () => {
+test("the idle journey proves the tested surface, then wipes only after the full TTL", () => {
   const body = idleJourney();
-  assert.match(SOURCE, /^const ROUTE_IDLE_LIVE_OBSERVATION = 10000;$/m);
+  assert.match(SOURCE, /^const ROUTE_IDLE_TTL = 120000;$/m);
   assert.match(SOURCE, /^const ROUTE_IDLE_WIPE_LIMIT = 150000;$/m);
-  // The detail is verified by the fixed visible-DOM/concealment probe and
-  // against popup.html's own markup, read read-only through the adapter.
-  assert.match(body, /return routeIdleLive\(await fresh\.evaluate\(liveProbe\)\);/);
-  assert.match(body, /await fresh\.evaluate\(ROUTE_TEMPLATE_READ\)/);
-  assert.match(body, /routeBaselineProbe\(fixtureCanaries\(fixture\)\)/);
-  // The initial observation precedes the bounded wipe window.
-  const live = body.indexOf('mark("route:idle-live")');
-  const wiped = body.indexOf('mark("route:idle-wiped")');
-  const observation = body.indexOf("await delay(ROUTE_IDLE_LIVE_OBSERVATION);");
-  const waitMark = body.indexOf('mark("route:idle-wait")');
-  const limit = body.indexOf("Date.now() + ROUTE_IDLE_WIPE_LIMIT");
-  assert.ok(live > 0 && live < observation && observation < waitMark);
-  assert.ok(waitMark < limit && limit < wiped && wiped < body.length);
-  assert.match(body, /"Idle route detail did not stay live"/);
-  assert.match(body, /"Idle route detail did not expire"/);
-  // The wipe poll is the shared full wipe probe, and the same target must
-  // still be the one route page between polls.
-  const poll = body.slice(waitMark, wiped);
-  assert.match(
-    poll,
-    /routeWiped\(\n\s+await fresh\.evaluate\(\n\s+routeRevokedProbe\(fixture\.Title, fixture\.Value\),/,
-  );
-  assert.match(poll, /target\.id === routeTarget && ROUTE_PAGE\.test\(target\.url\)/);
-  assert.match(poll, /Date\.now\(\) >= deadline/);
-  // Once the approved detail is shown, nothing but read-only probes runs
-  // until the wipe is complete: no observer, key, pointer, CDP input or
-  // action.
+  assert.match(SOURCE, /^const ROUTE_IDLE_POLL = 2000;$/m);
+  // The recursive template/baseline machinery, popup.html read and its text
+  // policy are gone; the approved detail is the tested route surface probe.
   assert.doesNotMatch(
-    body.slice(live, wiped),
+    SOURCE,
+    /templateShaped|ROUTE_TEMPLATE_READ|routeBaselineProbe|routeIdleLiveProbe|routeIdleLive\(|ROUTE_DETAIL_DYNAMIC_CONTAINERS|routeDetailPrivacyPolicy/,
+  );
+  assert.match(
+    body,
+    /const liveProbe = routeSurfaceProbe\(\n\s+fixture\.Title,\n\s+fixture\.Value,\n\s+routeForbiddenCanaries\(fixture\),\n\s+\);/,
+  );
+  // The TTL journey starts immediately before the physical row click.
+  assertOrder(body, [
+    'mark("route:idle-row-click")',
+    "const idleStart = Date.now();",
+    "await action.click(rowSelector);",
+  ]);
+  // The minimum wipe is the worker's full two minutes from that click; the
+  // overall wipe bound is the existing 150 seconds from the same click.
+  assertOrder(body, [
+    'mark("route:idle-live")',
+    'mark("route:idle-wait")',
+    "const minimumWipe = idleStart + ROUTE_IDLE_TTL;",
+    "const wipeDeadline = idleStart + ROUTE_IDLE_WIPE_LIMIT;",
+  ]);
+  // A wipe before the minimum is a failure; every other pre-minimum probe must
+  // still satisfy the tested surface and stay visible.
+  assert.match(
+    body,
+    /if \(now < minimumWipe\) \{\n\s+\/\/ A wipe before the full original TTL is a contract failure, and any\n\s+\/\/ other non-wiped probe must still show the approved surface\.\n\s+assert\.equal\(wiped, false, "Idle route detail did not stay live"\);\n\s+const surface = await fresh\.evaluate\(liveProbe\);\n\s+assert\.equal\(\n\s+surface\?\.visible,\n\s+true,\n\s+"Idle route detail left the foreground",\n\s+\);\n\s+const finding = verifyRouteSurface\(surface, fixture\.Title\);/,
+  );
+  // The wipe poll uses the shared full wipe probe with every fixture canary.
+  assert.match(
+    body,
+    /routeWiped\(\n\s+await fresh\.evaluate\(\n\s+routeRevokedProbe\(\n\s+fixture\.Title,\n\s+fixture\.Value,\n\s+fixtureCanaries\(fixture\),\n\s+\),\n\s+\),\n\s+\);/,
+  );
+  assert.match(body, /if \(Date\.now\(\) >= wipeDeadline\)\n\s+throw Error\("Idle route detail did not expire"\);/);
+  // After the wipe, both existing native approval labels must be absent in a
+  // bounded read-only inspection; the callback throws when unobservable.
+  const nativeAbsent = body.indexOf('mark("route:idle-native-absent")');
+  const wipedMark = body.indexOf('mark("route:idle-wiped")');
+  assert.ok(nativeAbsent > 0 && wipedMark > nativeAbsent);
+  const inspection = body.slice(nativeAbsent, wipedMark);
+  assertOrder(inspection, [
+    "const controls = nativeInspection();",
+    "[ROUTE_COPY_REVIEW_LABEL, ROUTE_COPY_DISCLOSURE_LABEL].some(",
+    "control?.present === true &&",
+    "(control.enabled === true || control.showing === true)",
+    'throw Error("Idle route native prompt is still present")',
+  ]);
+  // Once the detail is shown, nothing but read-only probes runs: no observer,
+  // key, pointer, CDP page input or action.
+  const live = body.indexOf('mark("route:idle-live")');
+  assert.doesNotMatch(
+    body.slice(live, wipedMark),
     /browserKey|input\(|\.click\(|dispatchEvent|addInitScript|MutationObserver|bringToFront|sendMessage/,
   );
   // A dedicated fixed stage label and one fixed safe PASS line.
@@ -497,13 +537,14 @@ test("the idle journey proves the approved detail, then wipes only by its TTL", 
     "route:idle-foreground",
     "route:idle-live",
     "route:idle-wait",
+    "route:idle-native-absent",
     "route:idle-wiped",
     "route:idle-passed",
   ])
     assert.ok(stages.includes(stage), stage);
   assert.ok(
     body.includes(
-      '"PASS: an idle second route tab kept its approved detail without input, stayed live through the initial observation and was fully wiped by its own two-minute route TTL"',
+      '"PASS: an idle second route tab kept its approved detail without input, stayed live through its full two-minute route TTL and was fully wiped without a native prompt"',
     ),
   );
   // The whole-run summaries name the opt-in mode and the default order.
@@ -535,11 +576,12 @@ test("the idle journey keeps output privacy and reports only fixed booleans", ()
   assert.doesNotMatch(body, /webSocketDebuggerUrl|DevToolsActivePort|fetch\(/);
   const offPattern = body.replace(/\.test\(entry\.url\(\)\)/g, "").replace(/\.test\(target\.url\)/g, "");
   assert.doesNotMatch(offPattern, /\.url\b/);
-  // No secret value or clipboard content is read in the host: the one shared
-  // full-wipe probe receives only the non-secret title and note canary.
+  // No secret value or clipboard content is read in the host: the two probes
+  // receive only the non-secret title/value pair and the canary lists.
   assert.doesNotMatch(body, /fixture\.Password|fixture\.Secret/);
-  assert.equal(countMatches(body, /fixture\.Value/g), 1);
-  assert.match(body, /routeWiped\(\n\s+await fresh\.evaluate\(\n\s+routeRevokedProbe\(fixture\.Title, fixture\.Value\),/);
+  assert.equal(countMatches(body, /fixture\.Value/g), 2);
+  assert.match(body, /routeForbiddenCanaries\(fixture\)/);
+  assert.match(body, /routeRevokedProbe\(\n\s+fixture\.Title,\n\s+fixture\.Value,\n\s+fixtureCanaries\(fixture\),/);
   assert.doesNotMatch(body, /clipboard|readText/);
   // The same console canary and private-text checks the ordinary journeys
   // apply still decide the pass.
@@ -552,374 +594,289 @@ test("the idle journey keeps output privacy and reports only fixed booleans", ()
   );
   for (const reason of [
     "Stale route tab was not closed",
+    "Idle route probes missing",
     "Idle route detail did not survive native approval",
     "Idle route detail did not stay live",
+    "Idle route detail left the foreground",
     "Idle route detail did not expire",
-    "Route page text unavailable",
-    "Popup template unavailable",
+    "Idle route native prompt is still present",
   ])
     assert.ok(SOURCE.includes('"' + reason + '"'), reason);
 });
 
-test("the idle live probe compares fixed booleans inside the page", () => {
-  const start = SOURCE.indexOf(
-    "function routeIdleLiveProbe(title, texts, forbidden, detailTemplateHTML, baselineText) {",
-  );
-  const stop = SOURCE.indexOf("\nfunction routeIdleLive(", start);
-  assert.ok(start > 0 && stop > start);
-  // The selector split helper and the text policy the probe embeds are the
-  // only harness functions/constants it uses.
-  const context = vm.createContext({
-    ROUTE_COPY_FIELD_SELECTOR: ROUTE_COPY_FIELD_SELECTOR_VALUE,
-    ROUTE_DETAIL_DYNAMIC_CONTAINERS: dynamicContainersSource(),
-  });
-  vm.runInContext(policySource() + "\n" + SOURCE.slice(start, stop) + "\nthis.probe = routeIdleLiveProbe;", context);
-  const expression = context.routeIdleLiveProbe(
-    "Fixture title",
-    ["Fixture title", "canary"],
-    ["canary"],
-    '<body><section id="detail-view"></section></body>',
-    ["static"],
-  );
-  assert.equal(typeof expression, "string");
-  // Only fixed keys and per-condition booleans leave the page: the probe's
-  // final return object (the embedded policy only feeds the page).
-  const returns = expression.lastIndexOf("    return {");
-  assert.ok(returns > 0);
-  const keys = [...expression.slice(returns).matchAll(/^\s{6}([a-zA-Z]+):/gm)].map((m) => m[1]);
-  assert.deepEqual(keys.sort(), [
-    "copyControl",
-    "detailShown",
-    "fixtureAbsent",
-    "fixtureOnly",
-    "masked",
-    "titleMatchesFixture",
-    "view",
-    "visible",
-  ]);
-  // The expected value only ever accepts the fixed true/known values.
-  const verifierSrc = SOURCE.slice(stop, SOURCE.indexOf("\nfunction phase(", stop));
-  vm.runInContext(verifierSrc + "\nthis.live = routeIdleLive;", context);
-  const live = context.live;
-  const good = {
-    visible: true,
-    view: "detail",
-    detailShown: true,
-    titleMatchesFixture: true,
-    copyControl: true,
-    masked: true,
-    fixtureAbsent: true,
-    fixtureOnly: true,
-  };
-  assert.equal(live(good), true);
-  for (const key of Object.keys(good)) {
-    assert.equal(live({ ...good, [key]: false }), false, key);
-    assert.equal(live({ ...good, [key]: undefined }), false, key);
-  }
-  assert.equal(live(null), false);
-  assert.equal(live({ ...good, view: "other" }), false);
-});
-
-// The harness's route detail text policy, as its own source.
-function policySource() {
-  const start = SOURCE.indexOf("function routeDetailPrivacyPolicy(texts, forbidden) {");
-  const stop = SOURCE.indexOf("\n// The route's own tab switch", start);
-  assert.ok(start > 0 && stop > start, "the text policy must exist");
-  return SOURCE.slice(start, stop);
-}
-
-// A wholly synthetic login: Title and Username are visible fixture text,
-// every other canary must stay off the page. No real fixture value is used.
-const SYNTHETIC = Object.freeze({
+// A wholly synthetic login: Title and Username are visible fixture text, every
+// other canary must stay off the page. No real fixture value is used.
+const FIXTURE = Object.freeze({
   Title: "Synthetic title",
   Username: "synthetic-user",
   Password: "SyntheticPass",
-  Secret: "SyntheticSeed",
   Value: "SyntheticPass-value",
-  OTPSeed: "SyntheticOTPSeed",
+  Secret: "SyntheticSeed",
 });
-const SYNTHETIC_KEYS = [
-  "Password", "Secret", "Username", "Value", "SaveUsername", "SaveValue",
-  "UpdateUsername", "UpdateValue", "RejectedUsername", "RejectedValue",
-  "OTPSeed", "OTPURI", "CardNumber", "CardHolder", "CardVerification",
-  "CardExpiry", "CardPIN",
-];
-const VISIBLE_KEYS = ["Username"];
-const allTexts = () => SYNTHETIC_KEYS.map((key) => SYNTHETIC[key]).filter((v) => typeof v === "string" && v);
-const forbiddenTexts = () => allTexts().filter((v) => !VISIBLE_KEYS.map((key) => SYNTHETIC[key]).includes(v));
+// The harness's fixture canaries exclude the non-secret Title.
+const CANARY_KEYS = Object.freeze(["Password", "Username", "Value", "Secret"]);
+const ALL_CANARIES = Object.freeze(CANARY_KEYS.map((key) => FIXTURE[key]));
+const FORBIDDEN_CANARIES = Object.freeze(
+  ALL_CANARIES.filter((value) => value !== FIXTURE.Username),
+);
 
 // The harness's forbidden-canary filter, given a synthetic canary function.
 function forbiddenFor(fixture) {
-  const context = vm.createContext({ fixtureCanaries: allTexts });
+  const start = SOURCE.indexOf("const ROUTE_DETAIL_VISIBLE_FIXTURE_KEYS =");
+  const stop = SOURCE.indexOf("\n// The route's own tab switch", start);
+  assert.ok(start > 0 && stop > start, "the forbidden-canary filter must exist");
+  const context = vm.createContext({ fixtureCanaries: () => ALL_CANARIES });
   vm.runInContext(
-    SOURCE.slice(
-      SOURCE.indexOf("const ROUTE_DETAIL_VISIBLE_FIXTURE_KEYS ="),
-      SOURCE.indexOf("\n// The route detail's text policy"),
-    ) + "\nthis.filter = routeForbiddenCanaries;",
+    SOURCE.slice(start, stop) + "\nthis.filter = routeForbiddenCanaries;",
     context,
   );
   return [...context.filter(fixture)];
 }
 
-function policyScreen(overrides = {}) {
-  return {
-    title: SYNTHETIC.Title,
-    headingText: SYNTHETIC.Title,
-    detailText: [SYNTHETIC.Title, "用户名", SYNTHETIC.Username, "密码", "••••••••"].join("\n"),
-    pageText: [SYNTHETIC.Title, SYNTHETIC.Username, "••••••••", "static note"].join("\n"),
-    noteTexts: [SYNTHETIC.Username],
-    staticLines: ["用户名", "密码", "••••••••", "static note"],
-    ...overrides,
-  };
-}
-
-function runPolicy(overrides) {
-  const context = vm.createContext({});
-  vm.runInContext(policySource() + "\nthis.policy = routeDetailPrivacyPolicy;", context);
-  return { ...context.policy(allTexts(), forbiddenTexts())(policyScreen(overrides)) };
-}
-
-test("the route text policy allows the verified Username and every secret stays forbidden", () => {
-  // Only the verified Username is excluded from the forbidden set.
-  assert.deepEqual(forbiddenFor(SYNTHETIC), forbiddenTexts());
-  assert.equal(forbiddenFor(SYNTHETIC).includes(SYNTHETIC.Username), false);
-  // The allowed title, Username and static text all pass.
-  assert.deepEqual(runPolicy(), {
-    forbiddenAbsent: true,
-    titleMatchesFixture: true,
-    detailOnlyKnown: true,
-    notesOnlyFixture: true,
-  });
-  // Any leaked Password, Secret, Value or OTP value fails the absence check
-  // even when it would otherwise be fixture-supplied detail text.
-  for (const key of ["Password", "Secret", "Value", "OTPSeed"]) {
-    const leaked = runPolicy({
-      pageText: [policyScreen().pageText, SYNTHETIC[key]].join("\n"),
-    });
-    assert.equal(leaked.forbiddenAbsent, false, key);
-  }
-});
-
-test("the route text policy refuses text that is neither template nor fixture text", () => {
-  // An unknown detail line and an unknown note fail their known-text checks.
-  assert.equal(runPolicy({ detailText: "unrelated detail text" }).detailOnlyKnown, false);
-  assert.equal(runPolicy({ noteTexts: ["unrelated note"] }).notesOnlyFixture, false);
-  // A heading that is not the fixture title fails too.
-  assert.equal(runPolicy({ headingText: "Other title" }).titleMatchesFixture, false);
-  // A missing note still fails closed, and a non-array note list fails closed.
-  assert.equal(runPolicy({ noteTexts: null }).notesOnlyFixture, false);
-});
-
-test("the idle live probe embeds the shared text policy with both canary inputs", () => {
-  const probe = SOURCE.slice(
-    SOURCE.indexOf("function routeIdleLiveProbe(title, texts, forbidden, detailTemplateHTML, baselineText) {"),
-    SOURCE.indexOf("\nfunction routeIdleLive("),
-  );
-  // The page probe embeds the policy's self-contained factory (never its
-  // returned closure) and calls it with both serialized arrays.
-  assert.match(probe, /const policyFactory = routeDetailPrivacyPolicy\.toString\(\);/);
-  assert.match(probe, /const forbiddenTexts=\$\{JSON\.stringify\(forbidden\)\};/);
-  assert.match(
-    probe,
-    /const privacy=\$\{policyFactory\}\(\$\{JSON\.stringify\(texts\)\},\$\{JSON\.stringify\(forbidden\)\}\);/,
-  );
-  assert.match(probe, /fixtureAbsent:privacyVerdict\.forbiddenAbsent,/);
-  // The call passes all fixture canaries for known text and only the
-  // non-displayable ones as forbidden.
-  assert.match(
-    idleJourney(),
-    /routeIdleLiveProbe\(\n\s+fixture\.Title,\n\s+fixtureCanaries\(fixture\),\n\s+routeForbiddenCanaries\(fixture\),\n/,
-  );
-  assert.match(SOURCE, /^const ROUTE_DETAIL_VISIBLE_FIXTURE_KEYS = Object\.freeze\(\["Username"\]\);$/m);
-});
-
-// The smallest read-only document the generated probe reads: the page text,
-// the detail section/title/fields and the notes. Built by generated code inside
-// the page context itself; no writes, hooks or events exist.
-const MINIMAL_DOCUMENT_SOURCE = `function (pageText, heading, username) {
-  const empty = { children: [], childNodes: [], querySelector: () => null,
-    querySelectorAll: () => [], getAttribute: () => null, hidden: true,
-    textContent: "" };
-  const text = (value) => ({ children: [], childNodes: [{ nodeType: 3, data: value }],
-    querySelector: () => null, querySelectorAll: () => [],
-    getAttribute: () => null, hidden: false, textContent: value });
-  const nodes = {
-    "#detail-view": { ...empty, hidden: false },
-    "#detail-title": text(heading),
-    "#detail-fields": empty,
-    "#detail-notes": text(username),
-  };
-  return {
-    body: { dataset: { view: "detail" }, innerText: pageText,
-      childNodes: [], children: [] },
-    visibilityState: "visible",
-    querySelector: (selector) => nodes[selector] ?? null,
-    implementation: { createHTMLDocument: () => ({ body: {}, querySelector: () => null }) },
-  };
-}`;
-
-// The harness's detail-owned dynamic containers, evaluated by the harness.
-function dynamicContainersSource() {
-  const start = SOURCE.indexOf("const ROUTE_DETAIL_DYNAMIC_CONTAINERS =");
-  const end = SOURCE.indexOf("]);\n", start);
-  assert.ok(start > 0 && end > start, "the dynamic containers must exist");
-  const stop = end + "]);".length;
+// The actual generated routeSurfaceProbe/verifyRouteSurface source, evaluated
+// with no harness imports. Only the page document is supplied at call time.
+function surfaceHarness() {
+  const start = SOURCE.indexOf("  function routeSurfaceProbe(");
+  const stop = SOURCE.indexOf("\n  async function acceptRouteDetailRead(", start);
+  assert.ok(start > 0 && stop > start, "route surface probe must exist");
   const context = vm.createContext({});
   vm.runInContext(
-    SOURCE.slice(start, stop) + "\nthis.list = ROUTE_DETAIL_DYNAMIC_CONTAINERS;",
+    SOURCE.slice(start, stop) +
+      "\nthis.routeSurfaceProbe = routeSurfaceProbe;" +
+      "\nthis.verifyRouteSurface = verifyRouteSurface;",
     context,
   );
-  return context.list;
+  return context;
 }
 
-// The harness's own probe generator, loaded with synthetic inputs only.
-function harnessProbe() {
-  const start = SOURCE.indexOf("const ROUTE_DETAIL_VISIBLE_FIXTURE_KEYS =");
-  const stop = SOURCE.indexOf("// The route's own tab switch", start);
-  const probeStart = SOURCE.indexOf("function routeIdleLiveProbe(");
-  const probeStop = SOURCE.indexOf("\nfunction routeIdleLive(", probeStart);
-  assert.ok(start > 0 && stop > start && probeStart > 0 && probeStop > probeStart);
-  const harness = vm.createContext({
-    ROUTE_COPY_FIELD_SELECTOR: ROUTE_COPY_FIELD_SELECTOR_VALUE,
-    ROUTE_DETAIL_DYNAMIC_CONTAINERS: dynamicContainersSource(),
-  });
-  vm.runInContext(SOURCE.slice(start, stop) + "\n" + SOURCE.slice(probeStart, probeStop), harness);
-  return harness;
-}
-
-// Generate the expression with that probe, compile it as one page script, and
-// run it on the synthetic page text. Only fixed booleans leave the page.
-function runGeneratedProbe(innerText) {
-  const harness = harnessProbe();
-  const expression = harness.routeIdleLiveProbe(
-    SYNTHETIC.Title,
-    allTexts(),
-    forbiddenFor(SYNTHETIC),
-    ROUTE_IDLE_PAGE_TEMPLATE,
-    [],
-  );
-  assert.equal(typeof expression, "string");
-  const page = vm.createContext({
-    pageText: innerText,
-    heading: SYNTHETIC.Title,
-    username: SYNTHETIC.Username,
-  });
-  // The fake document builder runs inside the page context.
-  new vm.Script(
-    "this.document = (" + MINIMAL_DOCUMENT_SOURCE + ")(pageText, heading, username);" +
-      "this.result = (function (observed) {" +
-      " return { forbiddenAbsent: observed.fixtureAbsent," +
-      " titleMatchesFixture: observed.titleMatchesFixture," +
-      " fixtureOnly: observed.fixtureOnly };" +
-      "})((0, " + expression + "));",
-  ).runInContext(page);
-  // Only one fixed number leaves the page: bit 0 is the forbidden-absence
-  // verdict, bit 1 the title match, bit 2 the fixture-only verdict.
-  const bits = vm.runInContext(
-    "((result.forbiddenAbsent === true ? 1 : 0) |" +
-      "(result.titleMatchesFixture === true ? 2 : 0) |" +
-      "(result.fixtureOnly === true ? 4 : 0))",
-    page,
-  );
-  return bits;
-}
-
-const ROUTE_IDLE_PAGE_TEMPLATE = '<body><section id="detail-view"></section></body>';
-
-test("the generated page expression compiles and enforces the text policy", () => {
-  // The visible synthetic Username is allowed and the title is the fixture's.
-  const allowed = runGeneratedProbe([SYNTHETIC.Title, SYNTHETIC.Username].join("\n"));
-  assert.equal((allowed & 1) === 1, true, "visible Username must not be forbidden");
-  assert.equal(allowed & 2, 2, "title must match the fixture");
-  // Any forbidden canary in the page text fails closed.
-  for (const key of ["Password", "Secret", "Value", "OTPSeed"]) {
-    const leaked = runGeneratedProbe(
-      [SYNTHETIC.Title, SYNTHETIC.Username, SYNTHETIC[key]].join("\n"),
-    );
-    assert.equal(leaked % 2, 0, key);
-  }
-});
-
-// A synthetic page for the generated shape check. The template (static
-// popup.html skeleton) leaves the four detail-owned containers empty; the live
-// page has the same fixed skeleton filled with obtainable field and URL rows.
-// Only the nodes the probe reads exist; nothing is written or hooked.
-function shapedPage(live, options = {}) {
-  const node = (tag, id = "", children = [], text = "") => ({
-    tagName: tag.toUpperCase(), id, children, childNodes: text ? [{ nodeType: 3, data: text }] : [],
-    attributes: id ? [{ name: "id" }] : [], textContent: text, hidden: false,
-    getAttribute: () => null, querySelector: () => null, querySelectorAll: () => [],
-  });
-  // The copy proof's password row: its masked value and one Copy control.
-  const value = node("SPAN", "", [], "••••••••");
-  value.attributes = [{ name: "class" }];
-  value.getAttribute = (name) => (name === "class" ? "field-value" : null);
-  const copy = node("BUTTON", "", [], "复制");
-  copy.getAttribute = (name) => (name === "data-action" ? "copy-field" : null);
-  const row = node("DIV", "password", [value, copy]);
-  row.getAttribute = (name) => (name === "data-field-id" ? "password" : null);
-  row.querySelector = (selector) => (selector === ".field-value" ? value : null);
-  row.querySelectorAll = (selector) =>
-    selector === '[data-action="copy-field"]' ? [copy] : [];
-  const heading = node("H2", "detail-title", [], live ? SYNTHETIC.Title : "");
-  const rows = [
-    heading,
-    node("DIV", "detail-fields", live ? [row] : []),
-    node("DIV", "detail-urls", live ? [node("DIV", "", [node("SPAN", "", [], "synthetic.example")])] : []),
-    node("DIV", "detail-tags"),
-    node("DIV", "attachment-list"),
-    node("P", "detail-notes", [], live ? SYNTHETIC.Username : ""),
-  ];
-  // An extra outer child breaks the fixed detail skeleton.
-  if (options.extraOuterChild) rows.push(node("P", "note", [], "extra"));
-  const detail = node("SECTION", "detail-view", rows);
-  const fields = detail.children[1];
-  fields.querySelector = (selector) =>
-    selector === '[data-field-id="password"]' ? (live ? row : null) : null;
-  const byId = {
-    "#detail-view": detail,
-    "#detail-title": heading,
-    "#detail-fields": fields,
-    "#detail-notes": detail.children[5],
-  };
+// The smallest read-only page the generated surface probe reads. It has only
+// the queried nodes; no product code or full popup DOM is fabricated.
+function surfacePage(overrides = {}) {
+  const {
+    title = FIXTURE.Title,
+    titleNode = true,
+    detail = true,
+    view = "detail",
+    visible = true,
+    fields = true,
+    concealed = true,
+    bodyText = [FIXTURE.Title, FIXTURE.Username].join("\n"),
+  } = overrides;
+  const value = { textContent: concealed ? "••••••••" : FIXTURE.Value };
+  const fieldsNode = fields
+    ? { querySelector: () => null, querySelectorAll: () => [value] }
+    : null;
   return {
-    body: { dataset: { view: "detail" }, childNodes: [], children: [], innerText: [SYNTHETIC.Title, SYNTHETIC.Username].join("\n") },
-    visibilityState: "visible",
-    querySelector: (selector) => byId[selector] ?? null,
-    implementation: {
-      // The static page's own detail tree, as parsed from popup.html: the same
-      // fixed skeleton, its containers empty and its title carrying no text.
-      createHTMLDocument: () => {
-        const template = shapedPage(false).querySelector("#detail-view");
-        template.querySelector = (selector) =>
-          selector === "#detail-title" ? template.children[0] : null;
-        return {
-          body: {},
-          querySelector: (selector) => (selector === "#detail-view" ? template : null),
-        };
-      },
+    visibilityState: visible ? "visible" : "hidden",
+    body: { dataset: { view }, innerText: bodyText },
+    querySelector: (selector) => {
+      if (selector === "#detail-view") return detail ? { hidden: false } : null;
+      if (selector === "#detail-title") return titleNode ? { textContent: title } : null;
+      if (selector === "#detail-fields") return fieldsNode;
+      return null;
     },
   };
 }
 
-test("the generated probe accepts a filled detail whose skeleton matches", () => {
-  const harness = harnessProbe();
-  const expression = harness.routeIdleLiveProbe(
-    SYNTHETIC.Title, allTexts(), forbiddenFor(SYNTHETIC), "<static popup.html detail>", []);
-  const result = new vm.Script("(" + expression + ")").runInContext(
-    vm.createContext({ document: shapedPage(true) }),
+function runSurface(overrides) {
+  const harness = surfaceHarness();
+  const expression = harness.routeSurfaceProbe(
+    FIXTURE.Title,
+    FIXTURE.Value,
+    FORBIDDEN_CANARIES,
   );
-  assert.equal(result.fixtureOnly, true);
-  assert.equal(result.fixtureAbsent, true);
+  assert.equal(typeof expression, "string");
+  const page = vm.createContext({ document: surfacePage(overrides) });
+  const surface = new vm.Script("(" + expression + ")").runInContext(page);
+  return { surface, finding: harness.verifyRouteSurface(surface, FIXTURE.Title) };
+}
+
+// The actual generated routeRevokedProbe/routeWiped source, with only the
+// fixed selector/status literals it reads from the harness.
+function revocationHarness() {
+  const statusStart = SOURCE.indexOf("const ROUTE_CLAIM_FAILED_STATUS =");
+  const revokedAt = SOURCE.indexOf("const ROUTE_REVOKED_STATUS =");
+  const statusStop = SOURCE.indexOf("\n", revokedAt) + 1;
+  const kindsStart = SOURCE.indexOf("const ROUTE_REVOKE_STATUS_KINDS =");
+  const kindsStop = SOURCE.indexOf("\n", kindsStart) + 1;
+  const start = SOURCE.indexOf("function routeRevokedProbe(");
+  const stop = SOURCE.indexOf("\n// Route field-copy acceptance", start);
+  assert.ok(
+    statusStart > 0 && revokedAt > statusStart && statusStop > revokedAt,
+    "revocation status literals must exist",
+  );
+  assert.ok(kindsStart > 0 && kindsStop > kindsStart, "revocation kinds must exist");
+  assert.ok(start > 0 && stop > start, "route revocation probe must exist");
+  const context = vm.createContext({});
+  vm.runInContext(
+    "const ROUTE_COPY_FIELD_SELECTOR=" +
+      JSON.stringify(ROUTE_COPY_FIELD_SELECTOR_VALUE) +
+      ";\n" +
+      SOURCE.slice(statusStart, statusStop) +
+      SOURCE.slice(kindsStart, kindsStop) +
+      SOURCE.slice(start, stop) +
+      "\nthis.routeRevokedProbe = routeRevokedProbe;" +
+      "\nthis.routeWiped = routeWiped;" +
+      "\nthis.ROUTE_REVOKED_STATUS = ROUTE_REVOKED_STATUS;" +
+      "\nthis.ROUTE_CLAIM_FAILED_STATUS = ROUTE_CLAIM_FAILED_STATUS;",
+    context,
+  );
+  return context;
+}
+
+// The smallest read-only wiped page the generated revocation probe reads.
+function revocationPage(overrides = {}) {
+  const {
+    view = "closed",
+    detailHidden = true,
+    title = "",
+    fields = 0,
+    status,
+    bodyText = "",
+    copy = 0,
+    visible = true,
+    body = true,
+    missing = [],
+  } = overrides;
+  const nodes = {
+    "#detail-view": { hidden: detailHidden },
+    "#detail-title": { textContent: title },
+    "#detail-fields": { childElementCount: fields },
+    "#status": { textContent: status ?? revocationHarness().ROUTE_REVOKED_STATUS },
+  };
+  return {
+    visibilityState: visible ? "visible" : "hidden",
+    body: body ? { dataset: { view }, innerText: bodyText } : null,
+    querySelector: (selector) =>
+      missing.includes(selector) ? null : (nodes[selector] ?? null),
+    querySelectorAll: () => Array.from({ length: copy }, () => ({})),
+  };
+}
+
+function runRevoked(overrides = {}, canaries) {
+  const harness = revocationHarness();
+  const expression = harness.routeRevokedProbe(
+    FIXTURE.Title,
+    FIXTURE.Value,
+    canaries,
+  );
+  const page = vm.createContext({ document: revocationPage(overrides) });
+  const value = new vm.Script("(" + expression + ")").runInContext(page);
+  return { value, wiped: harness.routeWiped(value), harness };
+}
+
+test("routeForbiddenCanaries allows only the verified Username", () => {
+  const forbidden = forbiddenFor(FIXTURE);
+  assert.deepEqual(forbidden, FORBIDDEN_CANARIES);
+  assert.equal(forbidden.includes(FIXTURE.Username), false);
+  assert.equal(forbidden.includes(FIXTURE.Password), true);
+  assert.equal(forbidden.includes(FIXTURE.Value), true);
 });
 
-test("the generated probe still refuses a static outer-structure mismatch", () => {
-  const harness = harnessProbe();
-  const expression = harness.routeIdleLiveProbe(
-    SYNTHETIC.Title, allTexts(), forbiddenFor(SYNTHETIC), "<static popup.html detail>", []);
-  const page = shapedPage(true, { extraOuterChild: true });
-  const result = new vm.Script("(" + expression + ")").runInContext(
-    vm.createContext({ document: page }),
+test("the generated surface expression accepts a masked, username-only detail", () => {
+  const good = runSurface();
+  assert.equal(good.finding, "");
+  assert.equal(good.surface.visible, true);
+  assert.equal(good.surface.view, "detail");
+  assert.equal(good.surface.detailShown, true);
+  assert.equal(good.surface.title, FIXTURE.Title);
+  assert.equal(good.surface.concealed, true);
+  assert.equal(good.surface.passwordRendered, false);
+  assert.equal(good.surface.forbiddenCanaryRendered, false);
+  // The verified Username is visible and is not a forbidden canary.
+  assert.match(good.surface.title, new RegExp(FIXTURE.Title));
+  assert.equal(FORBIDDEN_CANARIES.includes(FIXTURE.Username), false);
+});
+
+test("the generated surface expression fails private/forbidden text and missing nodes", () => {
+  // A forbidden canary and the private password value both fail closed.
+  assert.equal(
+    runSurface({
+      bodyText: [FIXTURE.Title, FIXTURE.Username, FIXTURE.Password].join("\n"),
+    }).finding,
+    "route-forbidden-canary-rendered",
   );
-  assert.equal(result.fixtureOnly, false);
+  assert.equal(
+    runSurface({
+      bodyText: [FIXTURE.Title, FIXTURE.Username, FIXTURE.Value].join("\n"),
+    }).finding,
+    "route-password-rendered",
+  );
+  // Missing, hidden or unobservable required nodes fail closed.
+  assert.equal(runSurface({ title: "Other" }).finding, "route-detail-title-mismatch");
+  assert.equal(runSurface({ titleNode: false }).finding, "route-detail-title-mismatch");
+  assert.equal(runSurface({ detail: false }).finding, "route-detail-view-missing");
+  assert.equal(runSurface({ view: "locked" }).finding, "route-detail-view-missing");
+  assert.equal(runSurface({ fields: false }).finding, "route-concealed-control-missing");
+  assert.equal(runSurface({ concealed: false }).finding, "route-concealed-control-missing");
+  // The generated expression is a real page script: without the page document
+  // it throws instead of reporting a surface.
+  const expression = surfaceHarness().routeSurfaceProbe(
+    FIXTURE.Title,
+    FIXTURE.Value,
+    FORBIDDEN_CANARIES,
+  );
+  assert.throws(
+    () => new vm.Script("(" + expression + ")").runInContext(vm.createContext({})),
+    /document is not defined/,
+  );
+});
+
+test("the generated revoked expression keeps the existing two-argument contract", () => {
+  // A complete wipe passes with the title/value pair alone.
+  assert.equal(runRevoked().wiped, true);
+  // Existing callers only forbid the title/value pair: another fixture canary
+  // in the body text does not change their result.
+  const ignored = runRevoked({ bodyText: FIXTURE.Password });
+  assert.equal(ignored.value.fixtureAbsent, true);
+  assert.equal(ignored.wiped, true);
+});
+
+test("the generated revoked expression requires every fixture canary absent", () => {
+  for (const status of [
+    revocationHarness().ROUTE_REVOKED_STATUS,
+    revocationHarness().ROUTE_CLAIM_FAILED_STATUS,
+  ]) {
+    const clean = runRevoked({ status }, ALL_CANARIES);
+    assert.equal(clean.wiped, true, status);
+  }
+  // Every canary, including the Username, must be gone after the TTL wipe.
+  for (const canary of ALL_CANARIES) {
+    const leaked = runRevoked({ bodyText: canary }, ALL_CANARIES);
+    assert.equal(leaked.value.fixtureAbsent, false, canary);
+    assert.equal(leaked.wiped, false, canary);
+  }
+});
+
+test("the generated revoked expression fails any remaining title, field, copy, status or node", () => {
+  const cases = [
+    ["remaining title", { title: FIXTURE.Title }],
+    ["remaining field", { fields: 1 }],
+    ["remaining copy", { copy: 1 }],
+    ["visible detail", { detailHidden: false }],
+    ["still open", { view: "detail" }],
+    ["unknown status", { status: "other" }],
+    ["missing status", { missing: ["#status"] }],
+    ["missing title", { missing: ["#detail-title"] }],
+    ["missing fields", { missing: ["#detail-fields"] }],
+    ["missing detail", { missing: ["#detail-view"] }],
+    ["missing body", { body: false }],
+  ];
+  for (const [name, overrides] of cases)
+    assert.equal(
+      runRevoked(overrides, ALL_CANARIES).wiped,
+      false,
+      name,
+    );
+  // The generated expression throws when its page is unobservable; it can
+  // never be read as a complete wipe.
+  const expression = revocationHarness().routeRevokedProbe(
+    FIXTURE.Title,
+    FIXTURE.Value,
+    ALL_CANARIES,
+  );
+  assert.throws(
+    () => new vm.Script("(" + expression + ")").runInContext(vm.createContext({})),
+    /document is not defined/,
+  );
 });

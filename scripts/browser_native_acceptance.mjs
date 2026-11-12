@@ -33,10 +33,11 @@ const checkoutFrames = process.env.LOCKLARK_TEST_CHECKOUT_FRAMES === "1";
 // and its native per-operation approval, instead of the long default journeys.
 const routeDetailRead = process.env.LOCKLARK_TEST_ROUTE_DETAIL_READ === "1";
 // Opt-in on top of the route detail mode only: after every existing physical
-// route switch/reload/no-prompt assertion has passed, one second ordinary route
-// journey is left idle to prove its two-minute TTL wipes the live detail. It
-// never changes what the default route mode runs, and any value other than the
-// exactly paired flags fails closed at import, before anything is launched.
+// route switch/reload/no-prompt assertion has passed, one ordinary route
+// journey is left idle through its full two-minute route TTL and must then be
+// fully wiped. It never changes what the default route mode runs, and any
+// value other than the exactly paired flags fails closed at import, before
+// anything is launched.
 const routeIdleValue = process.env.LOCKLARK_TEST_ROUTE_IDLE_TTL;
 const routeIdleTtl = routeIdleValue === "1";
 assert(
@@ -551,46 +552,6 @@ function routeForbiddenCanaries(fixture) {
   const displayable = ROUTE_DETAIL_VISIBLE_FIXTURE_KEYS.map((key) => fixture?.[key]);
   return fixtureCanaries(fixture).filter((value) => !displayable.includes(value));
 }
-// The detail-owned containers popup.html ships empty and popup.js fills from
-// the approved record: #detail-fields and #detail-urls with their rows,
-// #detail-tags with tag spans, #attachment-list with attachments (all
-// `replaceChildren` of appended children). Only their children are dynamic;
-// the outer detail skeleton and every other element keep their shape, and no
-// URL value is read here.
-const ROUTE_DETAIL_DYNAMIC_CONTAINERS = Object.freeze([
-  "detail-fields",
-  "detail-urls",
-  "detail-tags",
-  "attachment-list",
-]);
-// The route detail's text policy, shared verbatim by the live probe. `texts`
-// are the fixture's synthetic strings that may supply detail text (the
-// verified Username included); `forbidden` are the ones that must not appear
-// in the page text at all. A detail line is known when it is static text the
-// route showed before approval or text the fixture supplies; the title must be
-// the fixture title and each note line fixture text. Returns fixed booleans.
-function routeDetailPrivacyPolicy(texts, forbidden) {
-  const known = (value) => typeof value === "string" && value.length > 0;
-  const supplied = texts.filter(known);
-  const hidden = forbidden.filter(known);
-  return (screen) => {
-    const title = String(screen.title || "");
-    const heading = String(screen.headingText || "");
-    const suppliedText = (text) => supplied.some((value) => value.includes(text));
-    const staticLines = Array.isArray(screen.staticLines) ? screen.staticLines : [];
-    const lines = String(screen.detailText || "")
-      .replaceAll(title, "").replaceAll(heading, "")
-      .split("\n").map((line) => line.trim()).filter(Boolean);
-    const pageText = String(screen.pageText || "").replaceAll(title, "");
-    return {
-      forbiddenAbsent: !hidden.some((value) => pageText.includes(value)),
-      titleMatchesFixture: title.length > 0 && heading === title,
-      detailOnlyKnown: lines.every((line) => staticLines.includes(line) || suppliedText(line)),
-      notesOnlyFixture: Array.isArray(screen.noteTexts) &&
-        screen.noteTexts.every((text) => suppliedText(text)),
-    };
-  };
-}
 // The route's own tab switch, return and reload; each is one real XTest key
 // batch sent with the exact-title-prefix form (never the native-window form)
 // and addressed to the title of the tab that is ACTIVE when the key is sent:
@@ -623,14 +584,17 @@ const ROUTE_PAGE_STATE = `(()=>{
 // The first tab switch away uses the fixed read-only page state as its
 // bounded host-side poll; no page observer is installed.
 const ROUTE_SWITCH_PROBE = ROUTE_PAGE_STATE;
-// The full wipe contract after the return to the route tab and after the stale
-// reload: the same fixed page state (including its `visible` boolean) plus the
-// two fixed revocation outcomes, the closed detail, the absent Copy control and
-// one boolean for whether the fixture title or value is anywhere in the body
-// text. The comparison happens in the page. The route-return wait and the stale
-// reload both use this one probe, so neither can pass the incomplete page state
-// to routeWiped().
-function routeRevokedProbe(title, value) {
+// The full wipe contract after the return to the route tab, after the stale
+// reload and after the idle TTL: the same fixed page state (including its
+// `visible` boolean) plus the two fixed revocation outcomes, the closed detail,
+// the absent Copy control and one boolean for whether any supplied canary is
+// anywhere in the body text. The comparison happens in the page. The
+// route-return wait and the stale reload both call it with the title/value
+// pair, unchanged; the idle expiry passes every fixture canary. Both waits use
+// this one probe, so neither can pass the incomplete page state to
+// routeWiped().
+function routeRevokedProbe(title, value, canaries) {
+  const absent = canaries === undefined ? [title, value] : [...new Set([title, value, ...canaries])];
   return `(()=>{
     const body=document.body;
     const detail=document.querySelector('#detail-view');
@@ -639,6 +603,7 @@ function routeRevokedProbe(title, value) {
     const status=document.querySelector('#status');
     const text=status?String(status.textContent||'').trim():'';
     const bodyText=body?String(body.innerText):'';
+    const canaries=${JSON.stringify(absent)};
     return {
       visible:document.visibilityState==='visible',
       closed:!!body&&body.dataset.view==='closed',
@@ -646,7 +611,7 @@ function routeRevokedProbe(title, value) {
       titleEmpty:!!heading&&String(heading.textContent||'')==='',
       fieldsEmpty:!!fields&&fields.childElementCount===0,
       copyAbsent:document.querySelectorAll(${JSON.stringify(ROUTE_COPY_FIELD_SELECTOR)}).length===0,
-      fixtureAbsent:!bodyText.includes(${JSON.stringify(title)})&&!bodyText.includes(${JSON.stringify(value)}),
+      fixtureAbsent:canaries.every((value)=>!bodyText.includes(value)),
       statusKind:text===${JSON.stringify(ROUTE_REVOKED_STATUS)}?'route-revoked':text===${JSON.stringify(ROUTE_CLAIM_FAILED_STATUS)}?'claim-failed':'other'
     };
   })()`;
@@ -682,38 +647,6 @@ const ROUTE_LABEL_INSPECT = Object.freeze({
   inspect: true,
   preserve_focus: true,
 });
-// Read-only package read of the fixed popup document: the rendered detail is
-// compared against its own markup, so an element or text the product never
-// renders cannot pass as an approved detail. A route page can read its own
-// packaged document exactly like any other same-origin resource.
-const ROUTE_TEMPLATE_READ =
-  "new Promise((resolve,reject)=>{const request=new XMLHttpRequest();" +
-  "request.open('GET',chrome.runtime.getURL('popup.html'));" +
-  "request.onload=()=>resolve(request.responseText);" +
-  "request.onerror=()=>reject(new Error('Popup template read failed'));" +
-  "request.send();})";
-const ROUTE_BASELINE_LINE_LIMIT = 512;
-// The route page's own visible text before the fixture is rendered: every
-// static line the approved detail may still show. Only lines that quote no
-// fixture canary are kept; the application's own strings never become
-// canaries, and the list is computed here and never printed.
-function routeBaselineProbe(canaries) {
-  const fixtureTexts = JSON.stringify(canaries);
-  return `(()=>{
-    const fixtureTexts=${fixtureTexts};
-    const parts=[];
-    const walk=(node)=>{
-      for(const child of node.childNodes){
-        if(child.nodeType===3)parts.push(String(child.data||''));
-        else if(child.nodeType===1)walk(child);
-      }
-    };
-    if(document.body)walk(document.body);
-    const lines=parts.map((line)=>line.trim()).filter((line)=>line.length>0&&!fixtureTexts.some((known)=>known.length>0&&line.includes(known)));
-    // Bounded: a runaway page cannot feed an oversized probe.
-    return lines.slice(0,${ROUTE_BASELINE_LINE_LIMIT});
-  })()`;
-}
 // Both native-lease success lines and the legacy manual-copy success line
 // (popup.js writeClipboard -> copiedFeedback). Pending, refusal, unknown
 // outcome and missing feedback are never accepted.
@@ -730,22 +663,6 @@ function routePasswordRowProbe(password) {
     return {masked:!!value&&/^[\u2022\u25cf*]+$/.test(String(value.textContent||"").trim()),leaked:!!document.body&&String(document.body.innerText).includes(${JSON.stringify(password)})};
   })()`;
 }
-// Optional idle-expiry journey (LOCKLARK_TEST_ROUTE_IDLE_TTL=1 in route detail
-// mode). It starts only after all of the default route switch/reload/
-// no-prompt/mouse-rejected assertions have passed, then runs one second
-// ordinary route journey and leaves it idle: exactly one physical Ctrl+W
-// addressed to the stale route tab, an exact proof that the source page is back
-// and that route target is gone, the ordinary action popup, match, exact
-// synthetic row and physical row click, one physical 批准本次操作 click, and
-// then no input at all until the worker's own two-minute TTL revokes the new
-// route and its rendered detail wipes. Every page read is a read-only CDP DOM
-// inspection by fixed booleans/enums; nothing navigates, messages the worker,
-// dispatches DOM events or installs a hook. Secret values, tokens, URLs and raw
-// logs never leave the page, a helper or this closure.
-const ROUTE_IDLE_CLOSE_STALE = Object.freeze([{ key: "Control_L+w" }]);
-const ROUTE_IDLE_LIVE_OBSERVATION = 10000;
-const ROUTE_IDLE_WIPE_LIMIT = 150000;
-const ROUTE_IDLE_POLL = 2000;
 // Read-only inspection of the exact page the harness itself controls: its own
 // pathname and form controls. Only fixed booleans leave the page.
 function sourcePageProbe(pathname) {
@@ -763,129 +680,25 @@ function sourcePageProbe(pathname) {
 function sourcePageIntact(value) {
   return value?.form === true && value?.path === true;
 }
-// The live approved route detail for the idle journey, with the same fixed
-// concealment check as the copy proof. The rendered detail must match
-// popup.html's own markup, parsed in the page into an inert document: the same
-// elements and attributes (the detail-owned content containers keep their
-// element and attributes but not their filled children), with hidden children
-// ignored, and only text the route already showed before approval (static
-// template text) or the fixture itself may appear. `texts` are all of the
-// fixture's synthetic strings that may supply detail text, the verified
-// Username included; `forbidden` are the ones the page text must not contain.
-// Neither leaves the page, and the comparison happens there.
-function routeIdleLiveProbe(title, texts, forbidden, detailTemplateHTML, baselineText) {
-  // The page gets the policy's whole factory, not its returned closure, and
-  // calls it with its own serialized arrays: a closure would refer to captured
-  // identifiers that do not exist in the page expression.
-  const policyFactory = routeDetailPrivacyPolicy.toString();
-  return `(()=>{
-    const fixtureTexts=${JSON.stringify(texts)};
-    const forbiddenTexts=${JSON.stringify(forbidden)};
-    const privacy=${policyFactory}(${JSON.stringify(texts)},${JSON.stringify(forbidden)});
-    const baseline=new Set(${JSON.stringify(baselineText)});
-    // The detail-owned containers popup.html leaves empty and popup.js fills
-    // from the approved record: their own children are content, not skeleton.
-    const dynamicContainers=new Set(${JSON.stringify([...ROUTE_DETAIL_DYNAMIC_CONTAINERS])});
-    const body=document.body;
-    const detail=document.querySelector('#detail-view');
-    const heading=document.querySelector('#detail-title');
-    const fields=document.querySelector('#detail-fields');
-    const row=fields?fields.querySelector(${JSON.stringify(ROUTE_COPY_FIELD_SELECTOR.split(" ")[0])}):null;
-    const fieldValue=row?row.querySelector('.field-value'):null;
-    const inert=document.implementation.createHTMLDocument('');
-    inert.body.innerHTML=${JSON.stringify(detailTemplateHTML)};
-    const visible=(node)=>!node.hidden&&node.getAttribute('aria-hidden')!=='true';
-    const children=(node)=>Array.from(node.children).filter(visible);
-    const getId=(node)=>String(node.id||node.getAttribute?.('id')||'');
-    const templateShaped=(live,template)=>{
-      if(!live||!template||live.tagName!==template.tagName)return false;
-      const attrs=(node)=>Array.from(node.attributes).map((attribute)=>attribute.name).sort().join(',');
-      if(attrs(live)!==attrs(template))return false;
-      if(live.tagName==='INPUT'||live.tagName==='SELECT'||live.tagName==='TEXTAREA')
-        return String(live.value||'')===String(template.value||'');
-      // popup.html ships these detail-owned containers empty and popup.js
-      // fills them from the approved record (field rows, URL rows, tags,
-      // attachments), so their element and attributes are still compared but
-      // their own children are content, not skeleton.
-      if(dynamicContainers.has(getId(live))||dynamicContainers.has(getId(template)))return true;
-      const a=children(live),b=children(template);
-      if(a.length!==b.length)return false;
-      for(let index=0;index<a.length;index++)if(!templateShaped(a[index],b[index]))return false;
-      return true;
-    };
-    const ownText=(node)=>Array.from(node.childNodes||[])
-      .filter((child)=>child.nodeType===3)
-      .map((child)=>String(child.data||'').trim()).filter(Boolean);
-    // The detail's text in document order. Its two region headings are
-    // siblings after it, and the detail section has no own innerText.
-    const detailText=(()=>{
-      if(!body||!detail)return '';
-      const parts=[];
-      const walk=(node)=>{
-        for(const child of node.childNodes){
-          if(child===detail){
-            const collect=(current)=>{
-              for(const inner of current.childNodes){
-                if(inner.nodeType===3)parts.push(String(inner.data||''));
-                else if(inner.nodeType===1)collect(inner);
-              }
-            };
-            collect(child);
-          }else if(child.nodeType===1)walk(child);
-        }
-      };
-      walk(body);
-      return parts.join('\\n');
-    })();
-    // The title may only quote the fixture; the note line only the fixture too.
-    const notes=document.querySelector('#detail-notes');
-    // The shared policy decides the page text: every forbidden canary stays
-    // off the page, while the allowed fixture text (the verified Username) may
-    // supply detail and note lines.
-    const privacyVerdict=privacy({
-      title:${JSON.stringify(title)},
-      headingText:String(heading?.textContent||''),
-      detailText,
-      pageText:body?String(body.innerText):'',
-      noteTexts:notes?ownText(notes):null,
-      staticLines:[...baseline]
-    });
-    const titleOK=privacyVerdict.titleMatchesFixture;
-    const detailOnlyKnown=privacyVerdict.detailOnlyKnown;
-    const notesOK=privacyVerdict.notesOnlyFixture;
-    // The template's own title is empty: no static title text is expected.
-    const template=inert.querySelector('#detail-view');
-    const templateTitle=template?template.querySelector('#detail-title'):null;
-    const titleStatic=!Array.from(templateTitle?.childNodes||[]).some((child)=>child.nodeType===3&&String(child.data||'').trim());
-    const detailShape=templateShaped(detail,template)&&templateShaped(heading,templateTitle)&&titleStatic;
-    return {
-      visible:document.visibilityState==='visible',
-      view:body?.dataset?.view||'',
-      detailShown:!!detail&&detail.hidden!==true,
-      titleMatchesFixture:titleOK,
-      copyControl:!!row&&row.querySelectorAll('[data-action="copy-field"]').length===1,
-      masked:!!fieldValue&&/^[\u2022\u25cf*]+$/.test(String(fieldValue.textContent||'').trim()),
-      fixtureAbsent:privacyVerdict.forbiddenAbsent,
-      fixtureOnly:detailShape&&detailOnlyKnown&&titleOK&&notesOK
-    };
-  })()`;
-}
-function routeIdleLive(value) {
-  const fixed = {
-    visible: true,
-    view: "detail",
-    detailShown: true,
-    titleMatchesFixture: true,
-    copyControl: true,
-    masked: true,
-    // The password row's protected value is never read out, so no fixture
-    // canary may appear in the page text besides the one accepted match.
-    fixtureAbsent: true,
-    // The rendered detail holds only template or fixture text.
-    fixtureOnly: true,
-  };
-  return Object.entries(fixed).every(([key, expected]) => value?.[key] === expected);
-}
+// Optional idle-expiry journey (LOCKLARK_TEST_ROUTE_IDLE_TTL=1 in route detail
+// mode). It starts only after all of the default route switch/reload/
+// no-prompt/mouse-rejected assertions have passed, then runs one ordinary route
+// journey and leaves it idle: exactly one physical Ctrl+W addressed to the
+// stale route tab, an exact proof that the source page is back and that route
+// target is gone, the ordinary action popup, match, exact synthetic row and
+// physical row click, one physical 批准本次操作 click, and then no input at all
+// until the worker's own two-minute TTL revokes the new route and its rendered
+// detail wipes. Every page read is a read-only CDP DOM inspection by fixed
+// booleans/enums; nothing navigates, messages the worker, dispatches DOM events
+// or installs a hook. Secret values, tokens, URLs and raw logs never leave the
+// page, a helper or this closure.
+const ROUTE_IDLE_CLOSE_STALE = Object.freeze([{ key: "Control_L+w" }]);
+// The worker's fixed route lifetime: the live detail must survive this long
+// after the physical row click before any wipe may be accepted.
+const ROUTE_IDLE_TTL = 120000;
+// Bounded overall wipe window, measured from that same physical row click.
+const ROUTE_IDLE_WIPE_LIMIT = 150000;
+const ROUTE_IDLE_POLL = 2000;
 function phase(value) {
   stage = value;
   console.log("Native browser stage: " + value);
@@ -963,13 +776,14 @@ let browser;
 const logs = [];
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// One second ordinary route journey, then idle until the worker's own route
-// TTL expires. It runs only in the opt-in route idle mode, after every default
+// One ordinary route journey, then idle through the worker's full two-minute
+// route TTL. It runs only in the opt-in route idle mode, after every default
 // route assertion passed. Every action is real (the XTest key, the native
 // pointer helper, the popup mouse wrapper); nothing messages the worker,
-// navigates, dispatches DOM events or installs a hook. Only fixed booleans and
-// enums leave each page, and secrets, tokens, URLs and raw logs are never read
-// out or printed. It returns three fixed booleans for the failure report.
+// navigates, dispatches DOM events, installs a hook or advances a synthetic
+// clock. Only fixed booleans and enums leave each page, and secrets, tokens,
+// URLs and raw logs are never read out or printed. It returns three fixed
+// booleans for the failure report.
 async function acceptRouteIdleExpiry(driver) {
   const {
     browser: context,
@@ -984,7 +798,18 @@ async function acceptRouteIdleExpiry(driver) {
     browserKey,
     labelInspect,
     vaultRows,
+    // The already-tested approved-detail probe/verifier and the read-only
+    // native no-prompt inspection are locals of the main acceptance block.
+    routeSurfaceProbe,
+    verifyRouteSurface,
+    nativeInspection,
   } = driver;
+  assert(
+    typeof routeSurfaceProbe === "function" &&
+      typeof verifyRouteSurface === "function" &&
+      typeof nativeInspection === "function",
+    "Idle route probes missing",
+  );
   const idle = { approvedDetail: false, liveObserved: false, wipeCompleted: false };
   routeIdleObservation = idle;
   // Diagnostics only: records of earlier routes are already closed; the fresh
@@ -1094,6 +919,14 @@ async function acceptRouteIdleExpiry(driver) {
   );
   const rowSelector =
     '#vault-list .vault-item[data-item-id="' + fixture.SeedID + '"]';
+  // The approved-detail probe: the tested route surface check with every
+  // non-displayable fixture canary forbidden. The verified Username is the only
+  // canary that may appear, and the masked password value may not.
+  const liveProbe = routeSurfaceProbe(
+    fixture.Title,
+    fixture.Value,
+    routeForbiddenCanaries(fixture),
+  );
   const before = new Set((await targets()).map((target) => target.id));
   const pagesBefore = new Set(
     context
@@ -1101,6 +934,8 @@ async function acceptRouteIdleExpiry(driver) {
       .filter((entry) => !/^chrome-extension:\/\//.test(entry.url())),
   );
   mark("route:idle-row-click");
+  // The TTL is measured from this physical row click, immediately before it.
+  const idleStart = Date.now();
   // Exactly one real CDP mouse press/release through the popup wrapper.
   await action.click(rowSelector);
   mark("route:idle-page-opened");
@@ -1151,17 +986,10 @@ async function acceptRouteIdleExpiry(driver) {
     );
     // The route claim starts the same native V2 item-get review. Read-only,
     // focus-preserving inspections only; no label is clicked until it shows.
-    // The page's own static text is captured on the first observation, before
-    // any approved detail is rendered.
-    let baseline = null;
-    let templateHTML = null;
     mark("route:idle-native-label");
     await wait(async () => {
       lastRouteObservation = sanitizeRouteObservation(
         await fresh.evaluate(routeStateProbe(fixture.Title)),
-      );
-      baseline ??= await fresh.evaluate(
-        routeBaselineProbe(fixtureCanaries(fixture)),
       );
       try {
         const control =
@@ -1182,26 +1010,6 @@ async function acceptRouteIdleExpiry(driver) {
     // Exactly one real X11 pointer click on the native allowlisted label.
     input([{ click_label: ROUTE_COPY_REVIEW_LABEL }]);
     mark("route:idle-approved");
-    // The rendered detail is compared against popup.html's own markup, read
-    // once here from the extension package and never printed.
-    try {
-      assert(Array.isArray(baseline), "route text");
-      templateHTML = String(await fresh.evaluate(ROUTE_TEMPLATE_READ));
-      assert(templateHTML.includes('id="detail-view"'), "route text");
-    } catch {
-      throw Error("Route page text unavailable");
-    }
-    const liveProbe = routeIdleLiveProbe(
-      fixture.Title,
-      fixtureCanaries(fixture),
-      routeForbiddenCanaries(fixture),
-      templateHTML,
-      baseline.filter((line) => typeof line === "string" && line.length > 0),
-    );
-    assert(
-      baseline.length <= ROUTE_BASELINE_LINE_LIMIT,
-      "Route page text unavailable",
-    );
     // The same target is still the only route page and no popup reopened.
     const exactRoute = async () => {
       const routes = (await targets()).filter((target) =>
@@ -1227,49 +1035,89 @@ async function acceptRouteIdleExpiry(driver) {
         (await fresh.evaluate("document.visibilityState")) === "visible",
       "Route page did not return to the foreground",
     );
-    // The approved detail: exact rendered title, the concealed password row
-    // with its Copy control present (never clicked), and only fixture text.
+    // The approved detail: the tested surface probe/verifier proves the route
+    // is visible, shows the exact fixture title and keeps its password field
+    // concealed; the page text contains no forbidden fixture canary.
     await wait(async () => {
       await exactRoute();
-      return routeIdleLive(await fresh.evaluate(liveProbe));
+      const surface = await fresh.evaluate(liveProbe);
+      return (
+        surface?.visible === true &&
+        verifyRouteSurface(surface, fixture.Title) === ""
+      );
     }, "Idle route detail did not survive native approval");
     idle.approvedDetail = true;
     proven = true;
     // Nothing is touched from here: no key, pointer, CDP input or action.
-    // The initial observation proves the detail stays live, then bounded
-    // read-only polling must see the full wipe within the fixed window.
+    // Every probe before the worker's full two-minute TTL must confirm the
+    // approved surface exactly, or fail; a wipe seen any earlier is a failure.
     mark("route:idle-live");
-    await delay(ROUTE_IDLE_LIVE_OBSERVATION);
-    await exactRoute();
-    assert.equal(
-      routeIdleLive(await fresh.evaluate(liveProbe)),
-      true,
-      "Idle route detail did not stay live",
-    );
-    idle.liveObserved = true;
     mark("route:idle-wait");
-    const deadline = Date.now() + ROUTE_IDLE_WIPE_LIMIT;
+    const minimumWipe = idleStart + ROUTE_IDLE_TTL;
+    const wipeDeadline = idleStart + ROUTE_IDLE_WIPE_LIMIT;
     for (;;) {
+      // The same target id is still the one route page between polls.
+      await exactRoute();
       let wiped = false;
       try {
         wiped = routeWiped(
           await fresh.evaluate(
-            routeRevokedProbe(fixture.Title, fixture.Value),
+            routeRevokedProbe(
+              fixture.Title,
+              fixture.Value,
+              fixtureCanaries(fixture),
+            ),
           ),
         );
       } catch (error) {
         if (popupClosed(error)) throw Error("Route page was replaced");
         throw error;
       }
-      // The same target id is still the one route page between polls.
-      const routes = (await targets()).filter(
-        (target) => target.id === routeTarget && ROUTE_PAGE.test(target.url),
-      );
-      if (routes.length !== 1) throw Error("Route target was replaced");
-      if (wiped) break;
-      if (Date.now() >= deadline)
+      const now = Date.now();
+      if (now < minimumWipe) {
+        // A wipe before the full original TTL is a contract failure, and any
+        // other non-wiped probe must still show the approved surface.
+        assert.equal(wiped, false, "Idle route detail did not stay live");
+        const surface = await fresh.evaluate(liveProbe);
+        assert.equal(
+          surface?.visible,
+          true,
+          "Idle route detail left the foreground",
+        );
+        const finding = verifyRouteSurface(surface, fixture.Title);
+        assert.equal(
+          finding,
+          "",
+          finding || "Idle route detail did not stay live",
+        );
+      } else if (wiped) {
+        idle.liveObserved = true;
+        break;
+      }
+      if (Date.now() >= wipeDeadline)
         throw Error("Idle route detail did not expire");
-      await delay(Math.min(ROUTE_IDLE_POLL, deadline - Date.now()));
+      await delay(Math.min(ROUTE_IDLE_POLL, wipeDeadline - Date.now()));
+    }
+    // Bounded read-only inspection of the real native approval window after
+    // the wipe. Either existing approval label offered means the trust prompt
+    // is still there. An unobservable inspection throws and fails; it is never
+    // read as "no prompt".
+    mark("route:idle-native-absent");
+    const promptDeadline = Date.now() + ROUTE_NATIVE_ABSENT_LIMIT;
+    for (;;) {
+      const controls = nativeInspection();
+      const offered = [ROUTE_COPY_REVIEW_LABEL, ROUTE_COPY_DISCLOSURE_LABEL].some(
+        (label) => {
+          const control = controls?.[label];
+          return (
+            control?.present === true &&
+            (control.enabled === true || control.showing === true)
+          );
+        },
+      );
+      if (offered) throw Error("Idle route native prompt is still present");
+      if (Date.now() >= promptDeadline) break;
+      await delay(200);
     }
     idle.wipeCompleted = true;
     mark("route:idle-wiped");
@@ -1309,7 +1157,7 @@ async function acceptRouteIdleExpiry(driver) {
   for (const line of logs) assertPrivateText(line, fixture);
   mark("route:idle-passed");
   console.log(
-    "PASS: an idle second route tab kept its approved detail without input, stayed live through the initial observation and was fully wiped by its own two-minute route TTL",
+    "PASS: an idle second route tab kept its approved detail without input, stayed live through its full two-minute route TTL and was fully wiped without a native prompt",
   );
   return idle;
 }
@@ -1707,11 +1555,15 @@ try {
     ".map(row=>({id:row.dataset.itemId||''," +
     "title:row.querySelector('.vault-item-title')?.textContent??null," +
     "visible:row.getClientRects().length>0}))";
-  // The route detail surface as rendered: view, visible title, concealed
-  // password control, and one boolean secret-substring check. Page text,
-  // values, identity, URL and token never leave the page.
-  function routeSurfaceProbe(title, password) {
+  // The route detail surface as rendered: visibility, view, visible title,
+  // concealed password control, one private-value substring check and the same
+  // check for every supplied forbidden canary. Callers that pass only the
+  // title/value pair keep their exact previous gate (the private value). Page
+  // text, values, identity, URL and token never leave the page.
+  function routeSurfaceProbe(title, password, forbidden = [password]) {
+    const forbiddenTexts = JSON.stringify([...forbidden]);
     return `(()=>{
+      const body=document.body;
       const detail=document.querySelector('#detail-view');
       const heading=document.querySelector('#detail-title');
       const fields=document.querySelector('#detail-fields');
@@ -1720,12 +1572,16 @@ try {
         fields?.querySelector('[data-field-type="password"],[data-field-type="concealed"],.concealed,[data-concealed="true"],input[type="password"]') ||
         values.some(value=>/^[\u2022\u25cf*]+$/.test(String(value.textContent||'').trim()))
       );
+      const bodyText=body?String(body.innerText):'';
+      const forbidden=${forbiddenTexts};
       return {
-        view:document.body?.dataset?.view||'',
+        visible:document.visibilityState==='visible',
+        view:body?.dataset?.view||'',
         detailShown:!!detail&&!detail.hidden,
         title:heading?heading.textContent:null,
         concealed,
-        passwordRendered:document.body?String(document.body.innerText).includes(${JSON.stringify(password)}):true
+        passwordRendered:body?bodyText.includes(${JSON.stringify(password)}):true,
+        forbiddenCanaryRendered:forbidden.some((value)=>bodyText.includes(value))
       };
     })()`;
   }
@@ -1736,6 +1592,8 @@ try {
     if (surface.title !== title) return "route-detail-title-mismatch";
     if (surface.concealed !== true) return "route-concealed-control-missing";
     if (surface.passwordRendered !== false) return "route-password-rendered";
+    if (surface.forbiddenCanaryRendered !== false)
+      return "route-forbidden-canary-rendered";
     return "";
   }
   async function acceptRouteDetailRead(driver) {
@@ -2325,6 +2183,12 @@ try {
         browserKey,
         labelInspect: ROUTE_LABEL_INSPECT,
         vaultRows: VAULT_ROWS,
+        // The approved-detail probe/verifier and the no-prompt inspection are
+        // locals of this main acceptance block, so they cross the module-scope
+        // helper boundary explicitly.
+        routeSurfaceProbe,
+        verifyRouteSurface,
+        nativeInspection,
       });
     }
   }
