@@ -2,13 +2,16 @@
 // proof: the canonical codec and signing preimage for the proof a creator
 // device presents when asking a backend to create a new vault.
 //
-// This package is a codec only. It validates shapes and canonical spelling
-// and builds the exact bytes a signer signs. It does not verify signatures,
-// does not compare a proof's context with expected independently sourced
-// database or session context, does not read a clock or check that a
-// challenge's deadline has not passed, does not consume a challenge or enforce
-// single use, and does not compute or authenticate the opaque plan digest.
-// Approving a proof is the caller's responsibility.
+// Encode, SigningBytes and Parse are a codec: they validate shapes and
+// canonical spelling and build the exact bytes a signer signs. Verify checks
+// one proof against a caller-supplied expected context, a registered Ed25519
+// identity key and the caller's clock.
+//
+// Verify verifies only the identity proof. It does not recompute the opaque
+// creation-plan digest (see below), check root authorization or content
+// signatures, persist or consume a challenge or enforce single use, and it
+// does no HTTP. A caller with a valid Verify result still has to run those
+// steps itself before approving a vault creation.
 //
 // # Proof
 //
@@ -52,14 +55,16 @@
 //
 // # Plan digest is opaque
 //
-// PlanDigest is an opaque 32-byte value carried by the caller. This codec only
-// carries it: it neither computes it nor checks it against anything, and the
+// PlanDigest is an opaque 32-byte value carried by the caller. This package
+// only carries and compares it byte for byte: it never computes it, and the
 // signature over the context authenticates only its bytes, not what they
 // describe.
 //
-// A future caller that approves a vault creation must independently derive
-// its own expected plan digest and compare it with Context.PlanDigest before
-// trusting this proof. That derivation must cover, at minimum:
+// A caller approves a vault creation only after independently deriving its
+// own expected plan digest, passing it to Verify as expected.PlanDigest (which
+// requires it to equal the proof's) and deriving the rest of expected from
+// its own database, session and immutable challenge state. That derivation
+// must cover, at minimum:
 //
 //   - the exact raw genesis bytes the plan would create, hashed as they are,
 //     not a re-serialized form;
@@ -72,6 +77,7 @@ package vaultcreationauth
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -184,6 +190,17 @@ var (
 	// Encode's output. Parse reports it only after the shape of every field
 	// has been checked.
 	ErrNonCanonical = errors.New("vaultcreationauth: non-canonical proof")
+
+	// ErrContextMismatch reports a proof whose context differs from the
+	// caller's expected context in any field: scope, challenge ID, nonce,
+	// deadline or creation plan digest. It is checked before the signature.
+	ErrContextMismatch = errors.New("vaultcreationauth: proof context mismatch")
+	// ErrChallengeExpired reports nowUnixMS at or past the expected
+	// challenge deadline.
+	ErrChallengeExpired = errors.New("vaultcreationauth: challenge expired")
+	// ErrInvalidIdentityKey reports a registered identity key that is not a
+	// 32-byte Ed25519 public key.
+	ErrInvalidIdentityKey = errors.New("vaultcreationauth: invalid identity key")
 )
 
 // SigningBytes returns the exact signing preimage of c:
@@ -276,6 +293,55 @@ func Parse(data []byte) (Proof, error) {
 		return Proof{}, ErrNonCanonical
 	}
 	return p, nil
+}
+
+// Verify checks one identity proof against the expected context, a registered
+// identity key and the caller's clock, and returns nil only when it is a
+// valid, unexpired proof for exactly that context.
+//
+// expected must be built by the caller from its own database, session and
+// immutable challenge state, never from proof: it carries the exact scope,
+// challenge ID, nonce and deadline and creation plan digest, including the
+// one the caller derived in place of the opaque plan digest. A proof with a
+// different context in any field is refused, but checking a proof against a
+// context copied from that same proof proves nothing.
+//
+// registeredIdentity is the Ed25519 public key registered for
+// expected.Scope.DeviceID; it must be exactly 32 bytes. proof.Signature must
+// be exactly SignatureBytes, and is checked with ed25519.Verify over
+// SigningBytes(expected). The context comparison runs first, so a proof for
+// another context is refused as ErrContextMismatch whatever its signature.
+//
+// nowUnixMS is the caller's current Unix time in milliseconds; a challenge is
+// expired when now >= expected.Challenge.DeadlineUnixMS (ErrChallengeExpired).
+//
+// Verify verifies only the identity proof. It does not recompute the opaque
+// creation-plan digest, check root authorization or content signatures,
+// persist or consume the challenge or enforce single use, and does no HTTP.
+func Verify(proof Proof, expected Context, registeredIdentity ed25519.PublicKey, nowUnixMS int64) error {
+	if _, err := marshalContext(expected); err != nil {
+		return err
+	}
+	if proof.Context != expected {
+		return ErrContextMismatch
+	}
+	if nowUnixMS >= expected.Challenge.DeadlineUnixMS {
+		return ErrChallengeExpired
+	}
+	if len(registeredIdentity) != ed25519.PublicKeySize {
+		return ErrInvalidIdentityKey
+	}
+	if len(proof.Signature) != SignatureBytes {
+		return ErrInvalidSignature
+	}
+	pre, err := SigningBytes(expected)
+	if err != nil {
+		return err
+	}
+	if !ed25519.Verify(registeredIdentity, pre, proof.Signature) {
+		return ErrInvalidSignature
+	}
+	return nil
 }
 
 // wireProof mirrors the schema with every binary member carried as its
