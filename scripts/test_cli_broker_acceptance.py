@@ -853,6 +853,165 @@ class UnlockPlanTests(unittest.TestCase):
         self.assertNotIn("native_unlock_fields_and_button", instance.checks)
 
 
+def driver_failure_line(code, action="click", index=0, platform="macos"):
+    """The real fixed-format refusal line the driver writes to stderr."""
+    return ("Native acceptance input failed [code=%s action=%s index=%d platform=%s]\n"
+            % (code, action, index, platform)).encode()
+
+
+class DriverErrorCategoryTests(unittest.TestCase):
+    """One fixed allowlisted driver code in memory; a fake subprocess only."""
+
+    PRIVATE = "LL1-" + "Z" * 26
+    STDERR_TAIL = ('private exception detail title="Locklark · 本地金库" '
+                   'label=仅批准本次 CLI 请求 path=/private/tmp/llcb-DoSX5a\n').encode()
+
+    def acceptance(self):
+        base = temporary_base(self)
+        args = __import__("argparse").Namespace(
+            cli="/build/locklark", desktop="/build/bin/locklark-desktop", timeout=240)
+        instance = acceptance.Acceptance(args)
+        instance.fixture = acceptance.Fixture(base)
+        self.addCleanup(shutil.rmtree, instance.fixture.root, ignore_errors=True)
+        return instance
+
+    def fake(self, instance, returncode, stdout, stderr):
+        result = subprocess.CompletedProcess([], returncode, stdout, stderr)
+        runner = mock.Mock(return_value=result)
+        patcher = mock.patch.object(acceptance.subprocess, "run", runner)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return runner
+
+    def test_allowlist_covers_retry_codes_and_fixed_refusals(self):
+        self.assertTrue(acceptance.RETRY_DRIVER_CODES <= acceptance.DRIVER_ERROR_CATEGORIES)
+        for code in ("window-ambiguous", "capability-unavailable", "a11y-query"):
+            self.assertIn(code, acceptance.DRIVER_ERROR_CATEGORIES)
+        self.assertNotIn("other", acceptance.DRIVER_ERROR_CATEGORIES)
+        self.assertNotIn("unexpected", acceptance.DRIVER_ERROR_CATEGORIES)
+
+    def test_each_allowlisted_code_is_classified_or_refused_as_before(self):
+        cases = (
+            ("window-timeout", acceptance.DriverRetry),
+            ("control-missing", acceptance.DriverRetry),
+            ("control-ready-timeout", acceptance.DriverRetry),
+            ("control-disabled", acceptance.DriverRetry),
+            ("control-hidden", acceptance.DriverRetry),
+            ("window-ambiguous", acceptance.AcceptanceFailure),
+            ("a11y-query", acceptance.AcceptanceFailure),
+        )
+        for code, expected in cases:
+            with self.subTest(code=code):
+                instance = self.acceptance()
+                self.fake(instance, 1, b"", driver_failure_line(code))
+                with self.assertRaises(expected) as caught:
+                    instance.run_driver(b"{}")
+                self.assertEqual(instance.driver_error_category, code)
+                if expected is acceptance.DriverRetry:
+                    self.assertEqual(caught.exception.code, code)
+
+    def test_capability_unavailable_is_classified_and_still_unavailable(self):
+        instance = self.acceptance()
+        self.fake(instance, 1, b"", driver_failure_line("capability-unavailable"))
+        with self.assertRaises(acceptance.Unavailable) as caught:
+            instance.run_driver(b"{}")
+        self.assertEqual(caught.exception.reason, "accessibility")
+        self.assertEqual(instance.driver_error_category, "capability-unavailable")
+
+    def test_unknown_missing_or_off_allowlist_codes_map_to_other(self):
+        variants = (
+            (b"", b"no failure line at all\n"),
+            (1, b"error: could not import driver\n"),
+            (1, driver_failure_line("unexpected")),
+            (1, driver_failure_line("some-new-code")),
+            (1, driver_failure_line("a11y-tree-limit")),
+            (1, b"Native acceptance input failed [code=Not-Allowlisted action=x\n"),
+        )
+        for returncode, stderr in variants:
+            with self.subTest(stderr=stderr):
+                instance = self.acceptance()
+                self.fake(instance, returncode, b"", stderr)
+                with self.assertRaises(acceptance.AcceptanceFailure):
+                    instance.run_driver(b"{}")
+                self.assertEqual(instance.driver_error_category, "other")
+
+    def test_every_category_is_reset_before_each_driver_call(self):
+        instance = self.acceptance()
+        instance.driver_error_category = "a11y-query"
+        runner = self.fake(instance, 0, b'{"activated": true}\n', b"")
+        self.assertEqual(instance.run_driver(b"{}"), {"activated": True})
+        self.assertIsNone(instance.driver_error_category)
+
+        runner.return_value = subprocess.CompletedProcess([], 1, b"",
+                                                          driver_failure_line("control-hidden"))
+        with self.assertRaises(acceptance.DriverRetry):
+            instance.run_driver(b"{}")
+        self.assertEqual(instance.driver_error_category, "control-hidden")
+
+        runner.return_value = subprocess.CompletedProcess([], 0, b"{}\n", b"")
+        instance.run_driver(b"{}")
+        self.assertIsNone(instance.driver_error_category)
+
+    def test_timeout_failure_leaves_the_category_reset(self):
+        instance = self.acceptance()
+        instance.driver_error_category = "control-missing"
+        with mock.patch.object(acceptance.subprocess, "run",
+                               side_effect=subprocess.TimeoutExpired("driver", 40)):
+            with self.assertRaises(acceptance.AcceptanceFailure):
+                instance.run_driver(b"{}")
+        self.assertIsNone(instance.driver_error_category)
+
+    def test_raw_stderr_never_leaks_into_state_or_output(self):
+        instance = self.acceptance()
+        observed = []
+        instance.mark = lambda name: observed.append(name)
+        stderr = driver_failure_line("window-ambiguous") + self.PRIVATE.encode() + self.STDERR_TAIL
+        runner = self.fake(instance, 1, self.PRIVATE.encode(), stderr)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), self.assertRaises(acceptance.AcceptanceFailure):
+            instance.run_driver(b"{}")
+        self.assertEqual(runner.call_count, 1)
+        self.assertEqual(instance.driver_error_category, "window-ambiguous")
+
+        written = b"".join(
+            path.read_bytes() for path in sorted(instance.fixture.logs.iterdir()))
+        canaries = (self.PRIVATE.encode(), "private exception detail".encode(),
+                    acceptance.TITLE.encode(), "仅批准本次 CLI 请求".encode(),
+                    b"/private/tmp/llcb-DoSX5a")
+        for canary in canaries:
+            with self.subTest(canary=canary):
+                self.assertIn(canary, written)  # captured owner-only by design
+        state = repr(instance.driver_error_category + inspect_module_state(instance))
+        for canary in canaries:
+            self.assertNotIn(canary.decode("utf-8", "replace"), state)
+        self.assertEqual(output.getvalue(), "")
+        self.assertEqual(observed, [])
+        self.assertNotIn(self.PRIVATE, repr(instance.__dict__))
+
+    def test_seven_boolean_schema_is_unchanged_and_category_is_not_in_it(self):
+        self.assertEqual(list(acceptance.STATUS_FIELDS), [
+            "available", "generic_unlock_error", "secret_key_format_error", "processing"])
+        self.assertEqual(list(acceptance.INSPECT_SUMMARY_FIELDS), [
+            "snapshot_available", "locked_present", "locked_showing",
+            "new_login_present", "generic_unlock_error", "secret_key_format_error",
+            "processing"])
+        summary = acceptance.empty_inspect_summary()
+        self.assertTrue(all(type(value) is bool for value in summary.values()))
+        instance = self.acceptance()
+        self.fake(instance, 1, b"", driver_failure_line("a11y-query"))
+        with self.assertRaises(acceptance.AcceptanceFailure):
+            instance.run_driver(b"{}")
+        self.assertEqual(instance.driver_error_category, "a11y-query")
+        self.assertNotIn(instance.driver_error_category, summary.values())
+        self.assertEqual(instance.unlock_inspect_summary, summary)
+
+
+def inspect_module_state(instance):
+    """Only the allowlisted-string state an operator smoke might read."""
+    return repr({key: value for key, value in instance.__dict__.items()
+                 if key in ("driver_error_category", "driver_index")})
+
+
 class _FakePopen:
     pid = 54321
 

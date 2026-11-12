@@ -157,8 +157,23 @@ RETRY_DRIVER_CODES = frozenset({
     "control-disabled", "control-hidden",
 })
 DIRECTORY_NAMES = ("vault", "settings", "s", "bin", "run", "logs", "receipt", "state")
+# The code class includes digits so fixed codes such as ``a11y-query`` parse;
+# the trailing ``]`` still anchors it to the driver's fixed four-field line.
 DRIVER_FAILURE = re.compile(
-    rb"Native acceptance input failed \[code=([a-z-]+) action=[a-z-]+ index=-?[0-9]+ platform=[a-z]+\]")
+    rb"Native acceptance input failed \[code=([a-zA-Z0-9-]+) action=[a-z-]+ index=-?[0-9]+ platform=[a-z]+\]")
+
+# One in-memory, fixed driver-failure category for the next no-input smoke
+# triage. It reuses only the code already parsed above; exactly these
+# categories are ever stored, and anything else (including a missing or
+# unexpected code) becomes "other". No stderr, message, path, title, label,
+# control text or other user data is kept, and the seven-boolean inspect
+# summary schema is unchanged.
+DRIVER_ERROR_CATEGORIES = frozenset({
+    "window-timeout", "control-missing", "control-ready-timeout",
+    "control-disabled", "control-hidden",
+    "window-ambiguous", "capability-unavailable", "a11y-query",
+})
+DRIVER_ERROR_OTHER = "other"
 SECRET_PATTERN = re.compile(rb"LL1-[A-Z2-7]{26}")
 
 # The helper is generated into the private fixture. It reads the synthetic
@@ -665,6 +680,7 @@ class Acceptance:
         self.item_id = None
         self.revision = None
         self.unlock_inspect_summary = empty_inspect_summary()
+        self.driver_error_category = None
         self.values.extend([self.master, self.token])
         self.deadline = time.monotonic() + int(args.timeout)
 
@@ -784,7 +800,12 @@ class Acceptance:
         return self.run_driver(request)
 
     def run_driver(self, request):
-        """One bounded driver invocation; saves owner-only stdout/stderr."""
+        """One bounded driver invocation; saves owner-only stdout/stderr.
+
+        Every call starts by resetting the fixed error category; only the
+        allowlisted code below is ever stored, in memory.
+        """
+        self.driver_error_category = None
         try:
             result = subprocess.run(
                 [sys.executable, str(DRIVER), "--platform", "macos"],
@@ -800,6 +821,8 @@ class Acceptance:
         if result.returncode != 0:
             match = DRIVER_FAILURE.search(result.stderr)
             code = match.group(1).decode("ascii") if match else "unexpected"
+            self.driver_error_category = (
+                code if code in DRIVER_ERROR_CATEGORIES else DRIVER_ERROR_OTHER)
             if code == "capability-unavailable":
                 raise Unavailable("accessibility")
             if code in RETRY_DRIVER_CODES:
