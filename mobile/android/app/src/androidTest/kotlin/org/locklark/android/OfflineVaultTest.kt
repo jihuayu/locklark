@@ -650,7 +650,13 @@ class OfflineVaultTest {
         NativePhase.DEVICE_READY.userText + "未完成：" + NativeFailureCode.UNAVAILABLE.userText
 
     private fun assertNoDeviceCapsule(root: File) {
-        val files = if (root.exists()) root.listFiles() else emptyArray<File>()
+        val path = root.toPath()
+        // A symlinked root is not this app's state directory: never follow it.
+        assertFalse("Device authorization root must not be a symbolic link", Files.isSymbolicLink(path))
+        if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) return
+        assertTrue("Device authorization state not inspectable",
+            Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS))
+        val files = root.listFiles()
         assertTrue("Device authorization state not inspectable", files != null)
         assertTrue("Refused device authentication persisted a capsule", files!!.none { it.name.contains(".capsule") })
     }
@@ -666,14 +672,18 @@ class OfflineVaultTest {
     @Test fun realOfflineVaultNativeFlowsAndBackgroundLock() {
         val context = instrumentation.targetContext
         val owned = ownedSyntheticVaultPaths(context.noBackupFilesDir)
-        // The target Activity owns exactly this path. Refuse before launching
+        val deviceUnlockRoot = File(context.noBackupFilesDir, "device-unlock")
+        // The target Activity owns exactly these paths. Refuse before launching
         // unless every path cleanup may remove is absent. NOFOLLOW_LINKS also
         // treats a dangling symlink as present, so it is never overwritten or
-        // deleted by this test.
+        // deleted by this test. Passing this preflight proves `device-unlock`
+        // was absent, so any later entry under it was created by this run.
         for (path in owned) {
             assertFalse("An existing target vault must not be overwritten",
                 Files.exists(path.toPath(), LinkOption.NOFOLLOW_LINKS))
         }
+        assertFalse("An existing device-unlock root must not be reused",
+            Files.exists(deviceUnlockRoot.toPath(), LinkOption.NOFOLLOW_LINKS))
         var failure: Throwable? = null
         try {
             runOfflineVaultFlow(context)
@@ -693,6 +703,11 @@ class OfflineVaultTest {
             } else {
                 runCleanup(failure) {
                     deleteOwnedSyntheticVault(owned, context.noBackupFilesDir)
+                }
+                // Only reached after the preflight proved the root absent, so
+                // an existing root and its files were created by this launch.
+                runCleanup(failure) {
+                    deleteOwnedDeviceUnlock(deviceUnlockRoot, context.noBackupFilesDir)
                 }
             }
         }
@@ -852,5 +867,37 @@ class OfflineVaultTest {
             require(!Files.isDirectory(path.toPath(), LinkOption.NOFOLLOW_LINKS)) { "Owned vault must be a file" }
             if (!Files.deleteIfExists(path.toPath())) throw IOException("Owned vault cleanup failed")
         }
+    }
+
+    /** Exact AtomicFile base, staging and backup names PlatformCapsuleStore may leave. */
+    private val ownedDeviceUnlockEntries = setOf("installation", "installation.new", "installation.bak")
+
+    /**
+     * Removes the `device-unlock` root created by a launch whose preflight saw
+     * it absent, together with the exact AtomicFile base/staging/backup names
+     * of `installation`. Every entry is validated before anything is deleted:
+     * an unknown name (for example a capsule) or a symlink/directory leaves all
+     * contents and the root in place. The root itself is removed only when
+     * empty, by non-recursive directory deletion.
+     */
+    private fun deleteOwnedDeviceUnlock(root: File, parent: File) {
+        val rootPath = root.toPath()
+        if (!Files.exists(rootPath, LinkOption.NOFOLLOW_LINKS)) return
+        require(!Files.isSymbolicLink(rootPath)) { "Device-unlock root must not be a symbolic link" }
+        require(Files.isDirectory(rootPath, LinkOption.NOFOLLOW_LINKS)) { "Device-unlock root must be a directory" }
+        val canonicalRoot = root.canonicalFile
+        require(canonicalRoot.parentFile == parent.canonicalFile) { "Device-unlock root escaped its directory" }
+        val entries = Files.newDirectoryStream(rootPath).use { it.toList() }
+        for (entry in entries) {
+            require(entry.fileName.toString() in ownedDeviceUnlockEntries) { "Unknown device-unlock entry present" }
+            require(!Files.isSymbolicLink(entry)) { "Device-unlock entry must not be a symbolic link" }
+            require(!Files.isDirectory(entry, LinkOption.NOFOLLOW_LINKS)) { "Device-unlock entry must be a file" }
+            require(entry.toFile().canonicalFile.parentFile == canonicalRoot) { "Device-unlock entry escaped its root" }
+        }
+        for (entry in entries) Files.delete(entry)
+        // Non-recursive: a concurrently created entry fails this instead of
+        // being removed with the root.
+        if (!Files.deleteIfExists(rootPath)) throw IOException("Owned device-unlock cleanup failed")
+        require(!Files.exists(rootPath, LinkOption.NOFOLLOW_LINKS)) { "Owned device-unlock cleanup failed" }
     }
 }
