@@ -1,7 +1,4 @@
 name: 原生移动端
-# Artifact names include the run attempt, which is only available to a run's
-# own environment. This unique per-run run-name supplies it without a new job.
-run-name: ${{ github.workflow }} · attempt ${{ github.run_attempt }}
 on:
   push:
     branches: [main]
@@ -51,8 +48,13 @@ jobs:
           test "$(printf '%s\n' "$android_test_apk" | wc -l)" -eq 1
           cp "$android_test_apk" "$receipt_dir/app-debug-androidTest.apk"
           head_sha="$(git rev-parse --verify 'HEAD^{commit}')"
-          tracked_modified=false
-          if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then tracked_modified=true; fi
+          # A failed git status must fail this step, never report a clean tree.
+          status_output="$(git status --porcelain --untracked-files=no)"
+          if [ -z "$status_output" ]; then
+            tracked_modified=false
+          else
+            tracked_modified=true
+          fi
           {
             printf '{"checkout_sha":"%s",' "$head_sha"
             printf '"pull_request_head_sha":"%s",' "${PR_HEAD_SHA:-}"
