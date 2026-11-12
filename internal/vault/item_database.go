@@ -1,6 +1,8 @@
 package vault
 
 import (
+	"bytes"
+
 	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
 )
 
@@ -41,21 +43,14 @@ func NewItemDatabase(metadata []byte, items []Item) (*kdbx.Database, error) {
 	if err := writeItems(db, metadata, items); err != nil {
 		return nil, ErrSnapshot
 	}
-	// writeItems borrows the caller's attachment bytes for the shared KDBX
-	// inner-header binaries. Copy them so the database owns every buffer it
-	// exposes, before any caller observes or encodes it.
-	owned := make([]kdbx.Binary, len(db.Content.InnerHeader.Binaries))
-	seen := make(map[string][]byte, len(owned))
-	for n, b := range db.Content.InnerHeader.Binaries {
-		if content, ok := seen[string(b.Content)]; ok {
-			b.Content = content
-		} else {
-			b.Content = append([]byte(nil), b.Content...)
-			seen[string(b.Content)] = b.Content
-		}
-		owned[n] = b
+	// writeItems borrows the caller's attachment bytes for the KDBX inner-header
+	// binaries. Give every binary its own copy so the database owns every
+	// buffer it exposes, before any caller observes or encodes it. Binaries are
+	// never shared, even when their content is equal: a protected and a clear
+	// binary with the same bytes must stay independent.
+	for n := range db.Content.InnerHeader.Binaries {
+		db.Content.InnerHeader.Binaries[n].Content = bytes.Clone(db.Content.InnerHeader.Binaries[n].Content)
 	}
-	db.Content.InnerHeader.Binaries = owned
 	return db, nil
 }
 

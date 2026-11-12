@@ -363,20 +363,18 @@ type binaryKey struct {
 	protected bool
 }
 
-// binaryRef deduplicates raw bytes into KDBX InnerHeader.Binaries. Binaries
-// that share content share one copy, which is intentionally borrowed from the
-// caller; a writer that must not alias its input replaces it with owned copies.
-func binaryRef(content []byte, protected bool, refs map[binaryKey]int, binaries *[]kdbx.Binary) int {
+// binaryRef deduplicates raw bytes into KDBX InnerHeader.Binaries.
+func binaryRef(db *kdbx.Database, refs map[binaryKey]int, content []byte, protected bool) int {
 	k := binaryKey{sha256.Sum256(content), protected}
 	if ref, ok := refs[k]; ok {
 		return ref
 	}
-	ref := len(*binaries)
+	ref := len(db.Content.InnerHeader.Binaries)
 	b := kdbx.Binary{ID: ref, Content: content}
 	if protected {
 		b.MemoryProtection = 1
 	}
-	*binaries = append(*binaries, b)
+	db.Content.InnerHeader.Binaries = append(db.Content.InnerHeader.Binaries, b)
 	refs[k] = ref
 	return ref
 }
@@ -389,7 +387,6 @@ func writeItems(db *kdbx.Database, metadata []byte, items []Item) error {
 	m.Values = []kdbx.ValueData{slot("Title", "Locklark metadata v1", false), slot("Notes", base64.StdEncoding.EncodeToString(metadata), true)}
 	g.Entries = []kdbx.Entry{m}
 	refs := map[binaryKey]int{}
-	binaries := (*[]kdbx.Binary)(&db.Content.InnerHeader.Binaries)
 	for _, it := range items {
 		e := kdbx.NewEntry()
 		e.UUID = itemUUID(it.ID)
@@ -432,7 +429,7 @@ func writeItems(db *kdbx.Database, metadata []byte, items []Item) error {
 			} else if it.Kind == "ssh-key" {
 				e.Values = append(e.Values, slot("Locklark.SSHSeed", base64.StdEncoding.EncodeToString(it.SSHSeed), true), slot("Locklark.SSHPublicKey", base64.StdEncoding.EncodeToString(it.SSHPublicKey), false))
 			} else {
-				ref := binaryRef(it.Attachment, it.AttachmentProtected, refs, binaries)
+				ref := binaryRef(db, refs, it.Attachment, it.AttachmentProtected)
 				e.Binaries = []kdbx.BinaryReference{kdbx.NewBinaryReference(it.Filename, ref)}
 			}
 			g.Entries = append(g.Entries, e)
@@ -445,7 +442,7 @@ func writeItems(db *kdbx.Database, metadata []byte, items []Item) error {
 			e.Values = append(e.Values, slot("Locklark.SSHSeed", base64.StdEncoding.EncodeToString(it.SSHSeed), true), slot("Locklark.SSHPublicKey", base64.StdEncoding.EncodeToString(it.SSHPublicKey), false))
 		case cat == CategoryDocument:
 			if it.Filename != "" || it.Attachment != nil {
-				ref := binaryRef(it.Attachment, it.AttachmentProtected, refs, binaries)
+				ref := binaryRef(db, refs, it.Attachment, it.AttachmentProtected)
 				e.Binaries = append(e.Binaries, kdbx.NewBinaryReference(it.Filename, ref))
 			}
 		default:
@@ -486,7 +483,7 @@ func writeItems(db *kdbx.Database, metadata []byte, items []Item) error {
 		}
 		e.Values = append(e.Values, slot(itemV2Slot, base64.StdEncoding.EncodeToString(raw), true))
 		for _, att := range it.Attachments {
-			ref := binaryRef(att.Content, att.Protected, refs, binaries)
+			ref := binaryRef(db, refs, att.Content, att.Protected)
 			e.Binaries = append(e.Binaries, kdbx.NewBinaryReference(attachmentRefPrefix+att.ID+"/"+att.FileName, ref))
 		}
 		g.Entries = append(g.Entries, e)

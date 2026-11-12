@@ -488,7 +488,7 @@ func TestItemDatabaseBinaryOwnership(t *testing.T) {
 	if decoded, err := base64.StdEncoding.DecodeString(meta.GetContent("Notes")); err != nil || string(decoded) != "meta" {
 		t.Fatalf("database metadata aliases the caller: %q", decoded)
 	}
-	// Equal database binaries may share one database-owned buffer, but no
+	// Every database binary owns its own buffer, equal bytes included, and no
 	// database buffer may be the caller's.
 	binaries := itemDatabaseBinaries(db)
 
@@ -498,6 +498,11 @@ func TestItemDatabaseBinaryOwnership(t *testing.T) {
 	for n := range binaries {
 		if sharesByte(binaries[n], callerBuffers...) {
 			t.Fatalf("binary %d aliases a caller attachment", n)
+		}
+		for m := n + 1; m < len(binaries); m++ {
+			if sharesByte(binaries[n], binaries[m]) {
+				t.Fatalf("binaries %d and %d share one database buffer", n, m)
+			}
 		}
 	}
 	snapshot := binaryDigests(db)
@@ -592,4 +597,129 @@ func itemDatabaseBinaryFixture(t *testing.T) []Item {
 	t.Helper()
 	fixture := v2FixtureItems(t)
 	return withImportSource([]Item{CloneItem(fixture[0]), CloneItem(fixture[3])}, []byte(`{"source":"synthetic"}`))
+}
+
+// itemDatabaseProtectionItems returns two v2 documents that share the same
+// attachment bytes but carry opposite AttachmentProtected flags, so the write
+// path intentionally creates two binaries holding equal bytes.
+func itemDatabaseProtectionItems(t *testing.T) []Item {
+	t.Helper()
+	if cat, ok := CategoryFromKind("document", ""); !ok || cat != CategoryDocument {
+		t.Fatalf("v2 document fixture is not a document item: %v, %v", cat, ok)
+	}
+	body := "shared attachment body"
+	sha := AttachmentSHA256([]byte(body))
+	items := make([]Item, 2)
+	for n := range items {
+		items[n] = Item{
+			ID:         fmt.Sprintf("doc-%d", n),
+			Kind:       "document",
+			Category:   CategoryDocument,
+			Title:      fmt.Sprintf("Doc %d", n),
+			Filename:   "shared.bin",
+			Attachment: []byte(body),
+			CreatedAt:  1700000000,
+			UpdatedAt:  1700000000,
+		}
+		items[n].AttachmentProtected = n == 0
+		items[n].Attachments = []AttachmentMeta{{ID: "attachment", FileName: "shared.bin", Size: int64(len(body)), MIMEType: "application/octet-stream", SHA256: sha, Protected: n == 1, Content: []byte(body)}}
+	}
+	return items
+}
+
+// itemDatabaseBinariesByProtection indexes the database binaries by their
+// protection bit, which is the identity the equal-bytes test needs.
+func itemDatabaseBinariesByProtection(t *testing.T, db *kdbx.Database) map[byte]*kdbx.Binary {
+	t.Helper()
+	byProtection := map[byte]*kdbx.Binary{}
+	for n := range db.Content.InnerHeader.Binaries {
+		b := &db.Content.InnerHeader.Binaries[n]
+		if other, ok := byProtection[b.MemoryProtection]; ok {
+			t.Fatalf("binaries %d and %d share protection %d", other.ID, b.ID, b.MemoryProtection)
+		}
+		byProtection[b.MemoryProtection] = b
+	}
+	if len(byProtection) != 2 {
+		t.Fatalf("database has %d protection variants, want 2", len(byProtection))
+	}
+	return byProtection
+}
+
+// TestItemDatabaseBinaryProtectionIsolation is the regression for a database
+// whose equal-byte binaries shared one backing slice: locking the protected one
+// also replaced the clear one's content.
+func TestItemDatabaseBinaryProtectionIsolation(t *testing.T) {
+	metadata := []byte("meta")
+	items := itemDatabaseProtectionItems(t)
+	if err := ValidateItems(metadata, items); err != nil {
+		t.Fatalf("fixture items are invalid: %v", err)
+	}
+	body := "shared attachment body"
+	db, err := NewItemDatabase(metadata, items)
+	if err != nil {
+		t.Fatalf("NewItemDatabase: %v", err)
+	}
+
+	// Each database binary has its own backing and is not the caller's.
+	callerBuffers := callerBinaryBuffers(items)
+	binaries := itemDatabaseBinariesByProtection(t, db)
+	for _, b := range binaries {
+		if !bytes.Equal(b.Content, []byte(body)) {
+			t.Fatalf("binary %d content = %q", b.ID, b.Content)
+		}
+		if sharesByte(b.Content, callerBuffers...) {
+			t.Fatalf("binary %d aliases a caller attachment", b.ID)
+		}
+	}
+	if sharesByte(binaries[0].Content, binaries[1].Content) {
+		t.Fatal("protected and clear binaries share one backing slice")
+	}
+	// Nor are the caller's own buffers shared, so mutating one item is visible
+	// only through that item.
+	for n := 1; n < len(callerBuffers); n++ {
+		for m := 0; m < n; m++ {
+			if sharesByte(callerBuffers[n], callerBuffers[m]) {
+				t.Fatalf("caller buffers %d and %d share one backing slice", m, n)
+			}
+		}
+	}
+	items[0].Attachments[0].Content[0] = 'X'
+	items[1].Attachments[0].Content[0] = 'Y'
+	if !bytes.Equal(items[0].Attachment, []byte(body)) || !bytes.Equal(items[1].Attachment, []byte(body)) ||
+		!bytes.Equal(items[0].Attachments[0].Content, []byte("Xhared attachment body")) ||
+		!bytes.Equal(items[1].Attachments[0].Content, []byte("Yhared attachment body")) {
+		t.Fatal("caller items share attachment buffers")
+	}
+	for _, b := range binaries {
+		if !bytes.Equal(b.Content, []byte(body)) {
+			t.Fatalf("binary %d followed a caller mutation: %q", b.ID, b.Content)
+		}
+	}
+
+	// Locking the protected binary, a real encode/decode/unlock cycle and the
+	// read must return both original byte strings with their protection flags.
+	opened := itemDatabaseRoundTrip(t, db)
+	for _, b := range binaries {
+		if !bytes.Equal(b.Content, []byte(body)) {
+			t.Fatalf("binary %d was transformed in place: %q", b.ID, b.Content)
+		}
+	}
+	gotMetadata, got, err := ReadItemDatabase(opened)
+	if err != nil {
+		t.Fatalf("ReadItemDatabase: %v", err)
+	}
+	if !bytes.Equal(gotMetadata, metadata) || len(got) != len(items) {
+		t.Fatalf("read %q, %d items", gotMetadata, len(got))
+	}
+	for n := range items {
+		if got[n].ID != items[n].ID || got[n].AttachmentProtected != items[n].AttachmentProtected {
+			t.Fatalf("item %q: protection = %v, want %v", got[n].ID, got[n].AttachmentProtected, items[n].AttachmentProtected)
+		}
+		if !bytes.Equal(got[n].Attachment, []byte(body)) {
+			t.Fatalf("item %q: attachment = %q, want %q", got[n].ID, got[n].Attachment, body)
+		}
+		if len(got[n].Attachments) != 1 || got[n].Attachments[0].Protected != items[n].Attachments[0].Protected || !bytes.Equal(got[n].Attachments[0].Content, []byte(body)) {
+			t.Fatalf("item %q: attachment metadata = %+v", got[n].ID, got[n].Attachments)
+		}
+	}
 }
