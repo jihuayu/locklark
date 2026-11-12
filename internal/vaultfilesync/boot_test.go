@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -601,8 +602,19 @@ func closeNow(t *testing.T, j *vaultfilejournal.Journal) {
 
 // rawBolt opens the journal database directly for fixtures the public API
 // cannot produce. The journal must not be open at the same time.
+//
+// The database file is first created and initialized by vaultfilejournal.Open,
+// so it carries the production-created file's protected DACL. A bare bbolt
+// creation would instead inherit a default ACL (including a Logon SID on
+// Windows) that the production readback correctly rejects. Raw bbolt then only
+// mutates the record bytes or key shape a case needs.
 func rawBolt(t *testing.T, path string, fn func(tx *bolt.Tx) error) {
 	t.Helper()
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		closeNow(t, openJournalAt(t, path))
+	} else if err != nil {
+		t.Fatalf("journal stat: %v", err)
+	}
 	if err := openRaw(t, path, fn); err != nil {
 		t.Fatalf("raw bolt: %v", err)
 	}
