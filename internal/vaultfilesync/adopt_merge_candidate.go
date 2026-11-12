@@ -13,6 +13,7 @@ import (
 
 	"github.com/jihuayu/locklark/internal/vault"
 	"github.com/jihuayu/locklark/pkg/vaultfile"
+	"github.com/jihuayu/locklark/pkg/vaultfilebackend"
 	"github.com/jihuayu/locklark/pkg/vaultfilejournal"
 	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
 )
@@ -22,7 +23,9 @@ import (
 // with one atomic Journal.RebaseAndPrepare. It is one code checkpoint. It adds
 // no UI, no generic callback, no state machine, no remote write, no local
 // acknowledgement, no clearing of any pending record, no publication and no
-// transaction-unknown reconciliation. It does not implement #111 as a whole.
+// restart recovery. An unknown commit from this call is resolved in place by
+// the existing read-only journal reconciliation; see
+// reconcileMergeCandidateAdopt. It does not implement #111 as a whole.
 //
 // Trust boundary. The caller-supplied vaultfile.PolicyCheckpoint is the only
 // trust input. The candidate is never trusted as a value: it is copied into
@@ -132,8 +135,20 @@ var (
 // local G+1 hint and whose OperationID is M's authenticated OpID. It performs
 // the full-state CAS, the pending-record recheck, the audit append, the state
 // rebase and the prepared record in one transaction. AdoptMergeCandidate
-// returns nil only when that call returns nil. Any error is returned and never
-// treated as success.
+// returns nil only when that call returns nil. A definite rejection is returned
+// unchanged and never treated as success.
+//
+// Unknown commit. Only when the error classifies as
+// ErrMergeCandidateAdoptCommitUnknown is Journal.ReconcileRebaseAndPrepare
+// called immediately, once, with the exact in-memory state, R, Rrev and
+// proposal of this attempt. Only ReconcileApplied proves the commit, by the
+// journal's real Sync and exact target snapshot, and makes adoption return nil.
+// ReconcileNotApplied returns the definite ErrMergeCandidateAdoptCommit without
+// retrying the write. ReconcileReview and ReconcileUnknown stay
+// ErrMergeCandidateAdoptCommitUnknown. The original raw transaction error and
+// the reconciliation classification stay reachable with errors.Is. Every
+// outcome is decided within this call on the caller's open journal; no
+// in-memory candidate is recovered after a restart.
 //
 // Secret cleanup. Every owned snapshot, opened File, opened database, recovered
 // VUK, metadata and item buffer, and the proposal is cleared with the existing
@@ -148,6 +163,28 @@ func AdoptMergeCandidate(
 	checkpoint *vaultfile.PolicyCheckpoint,
 	deviceID string,
 	identity *age.X25519Identity,
+) error {
+	return adoptMergeCandidate(ctx, journal, candidate, checkpoint, deviceID, identity, func(journal *vaultfilejournal.Journal, expected vaultfilejournal.State, remoteBase []byte, remoteRevision vaultfilebackend.Revision, proposal vaultfilejournal.Proposal) error {
+		return journal.RebaseAndPrepare(expected, remoteBase, remoteRevision, proposal)
+	})
+}
+
+// adoptCommitFunc is the single journal transaction AdoptMergeCandidate runs.
+// Production always supplies Journal.RebaseAndPrepare; only file-backed tests
+// pass a replacement that performs that same real transaction and then returns
+// the result it lost.
+type adoptCommitFunc func(journal *vaultfilejournal.Journal, expected vaultfilejournal.State, remoteBase []byte, remoteRevision vaultfilebackend.Revision, proposal vaultfilejournal.Proposal) error
+
+// adoptMergeCandidate is the implementation of AdoptMergeCandidate with its one
+// journal transaction injected per call, never through shared state.
+func adoptMergeCandidate(
+	ctx context.Context,
+	journal *vaultfilejournal.Journal,
+	candidate MergeCandidate,
+	checkpoint *vaultfile.PolicyCheckpoint,
+	deviceID string,
+	identity *age.X25519Identity,
+	commitFn adoptCommitFunc,
 ) error {
 	if ctx == nil {
 		return fmt.Errorf("%w: nil context", ErrMergeCandidateAdoptRejected)
@@ -341,8 +378,16 @@ func AdoptMergeCandidate(
 		return err
 	}
 
-	if err := journal.RebaseAndPrepare(state, remoteBytes, remoteRevision, proposal); err != nil {
-		return classifyAdoptCommitError(err)
+	if err := commitFn(journal, state, remoteBytes, remoteRevision, proposal); err != nil {
+		commitErr := classifyAdoptCommitError(err)
+		if !errors.Is(commitErr, ErrMergeCandidateAdoptCommitUnknown) {
+			return commitErr
+		}
+		// The transaction may have committed before the error surfaced.
+		// Resolve this same attempt from its exact in-memory inputs with one
+		// read-only reconciliation; nothing is retried or written. The
+		// original raw transaction error, not its classification, is the cause.
+		return reconcileMergeCandidateAdopt(journal, state, remoteBytes, remoteRevision, proposal, err)
 	}
 	return nil
 }
@@ -491,4 +536,49 @@ func classifyAdoptCommitError(err error) error {
 	default:
 		return fmt.Errorf("%w: %w", ErrMergeCandidateAdoptCommitUnknown, err)
 	}
+}
+
+// reconcileMergeCandidateAdopt resolves one ErrMergeCandidateAdoptCommitUnknown
+// from Journal.RebaseAndPrepare with the existing read-only
+// Journal.ReconcileRebaseAndPrepare, called once with the exact in-memory
+// inputs of that same attempt. It never retries the write and never closes the
+// journal.
+//
+// Only ReconcileApplied is success, and that nil is the journal method's own
+// proof (real db.Sync and the exact single target snapshot). ReconcileNotApplied
+// is a definite adoption commit failure that does not retry and does not keep
+// the now-obsolete error classification. ReconcileReview and ReconcileUnknown
+// stay ErrMergeCandidateAdoptCommitUnknown, keeping the original transaction
+// shape and the reconciliation classification reachable with errors.Is.
+func reconcileMergeCandidateAdopt(journal *vaultfilejournal.Journal, old vaultfilejournal.State, remoteBase []byte, remoteRevision vaultfilebackend.Revision, proposal vaultfilejournal.Proposal, cause error) error {
+	outcome, reconcileErr := journal.ReconcileRebaseAndPrepare(old, remoteBase, remoteRevision, proposal)
+	switch outcome {
+	case vaultfilejournal.ReconcileApplied:
+		// The journal method, not this function, proves the commit.
+		return nil
+	case vaultfilejournal.ReconcileNotApplied:
+		// A definite failure: the transaction did not commit and nothing is
+		// retried. It carries the original raw transaction error only.
+		return fmt.Errorf("%w: %w", ErrMergeCandidateAdoptCommit, cause)
+	default:
+		// Review and Unknown stay fail-closed as adoption unknown, keeping
+		// both the original transaction error and the reconciliation
+		// classification reachable.
+		return joinAdoptErrors(ErrMergeCandidateAdoptCommitUnknown, cause, reconcileErr)
+	}
+}
+
+// joinAdoptErrors drops nil errors and returns a single error unchanged; only
+// two or more are joined, so each stays reachable with errors.Is.
+func joinAdoptErrors(errs ...error) error {
+	kept := make([]error, 0, len(errs))
+	for _, err := range errs {
+		if err != nil {
+			kept = append(kept, err)
+		}
+	}
+	if len(kept) == 1 {
+		return kept[0]
+	}
+	return errors.Join(kept...)
 }
