@@ -190,13 +190,13 @@ func decodeRebaseAudit(raw []byte) (RebaseAudit, error) {
 	u6 := uint64(binary.BigEndian.Uint32(raw[38:42]))
 	u7 := uint64(binary.BigEndian.Uint16(raw[42:44]))
 	u8 := uint64(binary.BigEndian.Uint16(raw[44:46]))
+	// The old base and old remote revision are non-empty exactly together and
+	// are bounded by the new remote pair check below; the working bytes, new
+	// remote base, new remote revision, proposal bytes and operation ID are
+	// required non-empty by validRebaseAudit's length checks.
 	if u1 > MaxBaseBytes ||
 		u2 > MaxStateRevisionBytes ||
 		u3 == 0 || u3 > MaxWorkingBytes ||
-		u4 == 0 || u4 > MaxBaseBytes ||
-		u5 == 0 || u5 > MaxStateRevisionBytes ||
-		u6 == 0 || u6 > MaxProposalBytes ||
-		u7 == 0 || u7 > MaxOperationIDBytes ||
 		u8 > MaxExpectedRevisionBytes {
 		return a, ErrCorrupt
 	}
@@ -216,37 +216,58 @@ func decodeRebaseAudit(raw []byte) (RebaseAudit, error) {
 	if (n1 == 0) != (n2 == 0) {
 		return a, ErrCorrupt
 	}
+	// Check every remaining semantic invariant against the raw header and
+	// spans before allocating any payload copy.
+	oldGen := binary.BigEndian.Uint64(raw[6:14])
+	newGen := binary.BigEndian.Uint64(raw[14:22])
+	if oldGen == math.MaxUint64 || newGen != oldGen+1 {
+		return a, ErrCorrupt
+	}
+	if binary.BigEndian.Uint64(raw[46:54]) == 0 {
+		return a, ErrCorrupt
+	}
+	if n4 == 0 || n5 == 0 || n6 == 0 || n7 == 0 {
+		return a, ErrCorrupt
+	}
 	off := auditPrefix
-	oldBase := bytes.Clone(raw[off : off+n1])
+	oldBaseRaw := raw[off : off+n1]
 	off += n1
-	oldRev := vaultfilebackend.Revision(string(raw[off : off+n2]))
+	oldRevRaw := raw[off : off+n2]
 	off += n2
-	oldWorking := bytes.Clone(raw[off : off+n3])
+	oldWorkingRaw := raw[off : off+n3]
 	off += n3
-	newBase := bytes.Clone(raw[off : off+n4])
+	newBaseRaw := raw[off : off+n4]
 	off += n4
-	newRev := vaultfilebackend.Revision(string(raw[off : off+n5]))
+	newRevRaw := raw[off : off+n5]
 	off += n5
-	proposalBytes := bytes.Clone(raw[off : off+n6])
+	proposalBytesRaw := raw[off : off+n6]
 	off += n6
-	operationID := string(raw[off : off+n7])
+	operationIDRaw := raw[off : off+n7]
 	off += n7
-	expectedRevision := vaultfilebackend.Revision(string(raw[off : off+n8]))
+	expectedRevRaw := raw[off : off+n8]
+	if !validOperationID(string(operationIDRaw)) {
+		return a, ErrCorrupt
+	}
+	if !bytes.Equal(expectedRevRaw, newRevRaw) {
+		return a, ErrCorrupt
+	}
+	// Every semantic invariant holds, so allocate the owned copies. validRebaseAudit
+	// below re-checks the assembled record as a defense in depth.
 	a = RebaseAudit{
 		OldState: State{
-			BaseBytes:      oldBase,
-			RemoteRevision: oldRev,
-			WorkingBytes:   oldWorking,
-			Generation:     binary.BigEndian.Uint64(raw[6:14]),
+			BaseBytes:      bytes.Clone(oldBaseRaw),
+			RemoteRevision: vaultfilebackend.Revision(string(oldRevRaw)),
+			WorkingBytes:   bytes.Clone(oldWorkingRaw),
+			Generation:     oldGen,
 		},
-		RemoteBase:     newBase,
-		RemoteRevision: newRev,
-		NewGeneration:  binary.BigEndian.Uint64(raw[14:22]),
+		RemoteBase:     bytes.Clone(newBaseRaw),
+		RemoteRevision: vaultfilebackend.Revision(string(newRevRaw)),
+		NewGeneration:  newGen,
 		Proposal: Proposal{
 			Generation:       binary.BigEndian.Uint64(raw[46:54]),
-			OperationID:      operationID,
-			ExpectedRevision: expectedRevision,
-			Bytes:            proposalBytes,
+			OperationID:      string(operationIDRaw),
+			ExpectedRevision: vaultfilebackend.Revision(string(expectedRevRaw)),
+			Bytes:            bytes.Clone(proposalBytesRaw),
 		},
 	}
 	if !validRebaseAudit(a) {
@@ -290,8 +311,11 @@ func checkNoPendingRecords(tb *bolt.Bucket) error {
 }
 
 // LoadRebaseAudit returns the immutable audit record for newGeneration, or
-// ErrEmpty when no audit exists for that generation. A malformed audit bucket,
-// key or value is ErrCorrupt and is never repaired.
+// ErrEmpty when no audit exists for that generation. It returns ErrCorrupt for
+// a malformed top-level audit bucket shape, or for a malformed value stored
+// under, or a nested bucket stored at, the requested generation key; such
+// entries are never repaired. Unrelated sibling entries under the audit bucket
+// are not scanned.
 func (j *Journal) LoadRebaseAudit(newGeneration uint64) (RebaseAudit, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
