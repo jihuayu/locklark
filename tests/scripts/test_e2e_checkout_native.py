@@ -696,12 +696,15 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
             # An oversized prefixed line never leaves the block accepted.
             if oversized_marker(stdout):
                 self.assertEqual(phase, "unknown")
-            # Detection needs no exact state mirror: accepted is present and
-            # rejected is never absent; only a prefix-free capture is absent.
-            if state == "absent":
-                self.assertFalse(_diagnostic_present(stdout, stderr))
-            else:
-                self.assertTrue(_diagnostic_present(stdout, stderr))
+            # Every expected rejected/absent state matches prefix presence
+            # independently, not merely "present"; exact acceptance is
+            # covered by the accepted cases and the startup assertions below.
+            if state != "accepted":
+                self.assertEqual(
+                    state,
+                    "rejected" if _diagnostic_present(stdout, stderr)
+                    else "absent",
+                )
             with self.subTest(case=stdout[-20:] + stderr[:20]):
                 os.environ["LOCKLARK_E2E_CHECKOUT_NATIVE"] = "1"
                 ctx = self._ctx()
@@ -743,14 +746,23 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
         def line(stage):
             return diag + json.dumps({"stage": stage, "reason": "CANARY-9f3a1c"})
 
-        def expected(stage, kind, state):
+        def expected(stage, kind, state, phase=last):
             return {"stage": stage, "kind": kind, "native": None,
-                    "startupPhase": last, "failureRecordState": state,
+                    "startupPhase": phase, "failureRecordState": state,
                     "wrapperFamily": "unknown", "exit": "exited 7"}
 
         startup = prefix + last + "\n"
         accepted = expected("fixture", "acceptance-failure", "accepted")
         rejected = expected("unclassified", "unclassified", "rejected")
+        body = [f"wrapper line {index} " + "x" * 300 for index in range(190)]
+        oversized = (startup + "\n".join(body), "\n".join(body) + "\n"
+                     + line("fixture"))
+        for stream in oversized:
+            self.assertLessEqual(len(stream.encode()), 64 * 1024)
+            self.assertTrue(all(len(raw.encode()) <= 8 * 1024
+                                for raw in stream.splitlines()))
+        self.assertGreater(
+            len((oversized[0] + oversized[1]).encode()), 64 * 1024)
         # (stdout, stderr, expected fixed record); the same line on either
         # stream, or a malformed/duplicate/oversized line on either, is held
         # to the one combined rule.
@@ -763,6 +775,10 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
             (startup + line("fixture") + " " * 9000, "", rejected),
             (startup, line("fixture") + " " * 9000, rejected),
             (startup, line("fixture") + "\n" + line("native-pair"), rejected),
+            # Each stream and each line fits every bound, but the combined
+            # capture exceeds 64 KiB: rejected, never partly trusted (the
+            # startup phase is projected from stdout alone and stays valid).
+            (*oversized, rejected),
         )
         for stdout, stderr, want in cases:
             with self.subTest(case=stdout[-40:] + stderr[:20]):

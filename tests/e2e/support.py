@@ -2991,7 +2991,8 @@ def _parse_checkout_startup(stdout: str, stderr: str) -> dict[str, str]:
 
     # Exact bounded prefix lines; one bad value rejects the whole block.
     phases = [
-        "" if len(line) > 128 else line[len(_CHECKOUT_STARTUP_PREFIX) :]
+        "" if len(line) > 128 else
+        line.rstrip("\r")[len(_CHECKOUT_STARTUP_PREFIX) :]
         for line in str(stdout or "").splitlines()
         if line.startswith(_CHECKOUT_STARTUP_PREFIX)
     ]
