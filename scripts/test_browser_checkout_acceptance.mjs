@@ -2071,8 +2071,21 @@ test("route probes return only fixed booleans and wipe only on a revoked or fail
       "fixtureAbsent",
       "statusKind",
       "titleEmpty",
+      "visible",
     ]);
+    assert.equal(result.visible, true);
     assert.equal(routeWiped(result), true, kind);
+  }
+  // The full probe is the one the route-return wait uses, so it must report
+  // the fixed visibility boolean that wait requires.
+  for (const visible of [true, false]) {
+    const returned = await routeProbeResult(
+      context,
+      routeRevokedProbe(FIXTURE_TITLE, FIXTURE_VALUE),
+      routeFakePage({ visible }),
+    );
+    assert.equal(returned.visible, visible);
+    assert.equal(routeWiped(returned), true);
   }
   // Any other status (pending, empty, closed text) is never a revocation.
   for (const status of ["", notRevoked, "已关闭此条目", "other text"]) {
@@ -2110,8 +2123,8 @@ test("route probes return only fixed booleans and wipe only on a revoked or fail
     ),
   );
   assert.doesNotMatch(withValues, /SYNTHETIC|条目|无法打开/);
-  // The switch/return probe resolves at once with fixed booleans whether the
-  // page is still visible or already hidden; the wait is host-side polling.
+  // The switch-only page state resolves at once with fixed booleans whether
+  // the page is still visible or already hidden; the wait is host-side polling.
   for (const visible of [true, false]) {
     const switched = await routeProbeResult(context, ROUTE_SWITCH_PROBE, routeFakePage({ visible }));
     assert.deepEqual(Object.keys(switched).sort(), [
@@ -2187,15 +2200,32 @@ test("route revocation checkpoint switches, wipes, reloads and never prompts", (
   assert.doesNotMatch(checkpoint, /MutationObserver|ROUTE_HIDDEN_PROBE|routeHiddenProbe/);
   // 2. The return proves the foreground and the same target, still wiped. The
   //    source tab is active when it is sent, so it is addressed by the source
-  //    page's title prefix; the returned-route wait uses the defined probe.
+  //    page's title prefix. The returned-route wait reads the full wipe probe
+  //    (the same one the stale reload uses), never the incomplete page state,
+  //    because routeWiped() also needs copyAbsent, fixtureAbsent and statusKind.
   assert.ok(at("Route page did not return to the foreground") > returnKey);
   const sameTarget = at('1, "Route target was replaced");');
   assert.ok(sameTarget > returnKey);
-  const returnedWait = at("await route.evaluate(ROUTE_SWITCH_PROBE)");
-  assert.ok(returnedWait > returnKey);
+  const foreground = at("Route page did not return to the foreground");
+  const returnedWait = checkpoint.indexOf(
+    "routeRevokedProbe(fixture.Title, fixture.Value)",
+    foreground,
+  );
+  assert.ok(returnedWait > foreground && returnedWait < at('mark("route:reload");'));
   assert.match(
-    checkpoint.slice(returnedWait),
-    /^await route\.evaluate\(ROUTE_SWITCH_PROBE\);\n\s+return returned\?\.visible === true && routeWiped\(returned\);/,
+    checkpoint.slice(checkpoint.lastIndexOf("await wait(async () => {", returnedWait)),
+    /^await wait\(async \(\) => \{\n\s+const returned = await route\.evaluate\(\n\s+routeRevokedProbe\(fixture\.Title, fixture\.Value\),\n\s+\);\n\s+return returned\?\.visible === true && routeWiped\(returned\);\n\s+\}, "Returned route page kept its detail"\);/,
+  );
+  // The full probe result includes the fixed visibility boolean the return wait
+  // requires, and the switch-only page state is never used for the return wait.
+  assert.match(
+    source,
+    /^function routeRevokedProbe\(title, value\) \{\n\s+return `\(\(\)=>\{\n(?:[^\n]*\n)*?\s{6}visible:document\.visibilityState==='visible',$/m,
+  );
+  assert.equal(
+    countMatches(checkpoint, /routeRevokedProbe\(fixture\.Title, fixture\.Value\)/g),
+    4,
+    "the background, return, reload and no-prompt waits share the full probe",
   );
   // No undefined probe name survives in the checkpoint or in the harness.
   assert.doesNotMatch(checkpoint, /routeSwitchProbe/);

@@ -554,12 +554,16 @@ const ROUTE_PAGE_STATE = `(()=>{
     fieldsEmpty:!!fields&&fields.childElementCount===0
   };
 })()`;
-// The switch and return waits use the fixed read-only page state as their
+// The first tab switch away uses the fixed read-only page state as its
 // bounded host-side poll; no page observer is installed.
 const ROUTE_SWITCH_PROBE = ROUTE_PAGE_STATE;
-// The same page plus the two fixed revocation outcomes, the closed detail,
-// the absent Copy control and one boolean for whether the fixture title or
-// value is anywhere in the body text. The comparison happens in the page.
+// The full wipe contract after the return to the route tab and after the stale
+// reload: the same fixed page state (including its `visible` boolean) plus the
+// two fixed revocation outcomes, the closed detail, the absent Copy control and
+// one boolean for whether the fixture title or value is anywhere in the body
+// text. The comparison happens in the page. The route-return wait and the stale
+// reload both use this one probe, so neither can pass the incomplete page state
+// to routeWiped().
 function routeRevokedProbe(title, value) {
   return `(()=>{
     const body=document.body;
@@ -570,6 +574,7 @@ function routeRevokedProbe(title, value) {
     const text=status?String(status.textContent||'').trim():'';
     const bodyText=body?String(body.innerText):'';
     return {
+      visible:document.visibilityState==='visible',
       closed:!!body&&body.dataset.view==='closed',
       detailHidden:!!detail&&detail.hidden===true,
       titleEmpty:!!heading&&String(heading.textContent||'')==='',
@@ -1557,8 +1562,12 @@ try {
           )) === true,
         "Route page did not return to the foreground",
       );
+      // The returned foreground page must still satisfy the full wipe contract,
+      // read by the same full probe as the reload below.
       await wait(async () => {
-        const returned = await route.evaluate(ROUTE_SWITCH_PROBE);
+        const returned = await route.evaluate(
+          routeRevokedProbe(fixture.Title, fixture.Value),
+        );
         return returned?.visible === true && routeWiped(returned);
       }, "Returned route page kept its detail");
       // The captured route target still exists and is still this one route
