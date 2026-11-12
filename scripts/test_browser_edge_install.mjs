@@ -1097,4 +1097,3 @@ test("install failures are fixed classifications, never raw errors", () => {
     assert.equal(new EdgeInstallError(stage).message, message);
   assert.deepEqual(Object.keys(EDGE_INSTALL_REASONS), Object.keys(reasons).slice(0, -1));
 });
-
