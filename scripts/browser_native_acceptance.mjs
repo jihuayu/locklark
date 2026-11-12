@@ -136,8 +136,8 @@ function popupStatusKind(value) {
 // PID or raw stage string.
 const EDGE_INSTALL_STAGES = new Set([
   "fixture", "edge-launch", "edge-manager", "edge-developer-mode",
-  "edge-load-unpacked", "edge-chooser", "edge-installed", "edge-service-worker",
-  "continue",
+  "edge-load-unpacked", "edge-chooser", "edge-activate", "edge-installed",
+  "edge-service-worker", "continue",
 ]);
 function phase(value) {
   stage = value;
@@ -313,12 +313,14 @@ try {
         extensionDir: extension,
         edgeExecutable: browserExecutable,
         profile,
+        origin,
         inputRequest: (request) => JSON.parse(
           execFileSync("python3", [join(root, "scripts/browser_native_x11.py")], {
             input: JSON.stringify(request),
             env,
           }).toString(),
         ),
+        openPopup,
         eventually,
         phase,
       });

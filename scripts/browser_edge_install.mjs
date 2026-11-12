@@ -28,8 +28,14 @@
 //      Open button at the measured point (width-48,height-23) of the measured
 //      1124x822 chooser. Neither request is replayed, and neither answer is
 //      installation success.
-//   4. the fixed extension target and exactly the expected background.js
-//      service worker.
+//   4. the same owned tab is then navigated to the synthetic origin's /login
+//      page and the existing user-facing popup helper (openPopup, the real
+//      Ctrl+Shift+Y action through the guarded X11 driver) is invoked exactly
+//      once. Edge reports the freshly installed extension as (Inactive): no
+//      worker is running, so waiting alone can never observe one. The real
+//      action wakes the background worker; the popup stays open.
+//   5. with the popup open, the fixed extension target and exactly the
+//      expected background.js service worker of the manifest-derived ID.
 //
 // No preload, addInitScript, init script, Extensions.loadUnpacked, extension
 // load switch, direct extension storage/preference write, setInputFiles,
@@ -101,6 +107,7 @@ export const EDGE_INSTALL_REASONS = Object.freeze({
   "edge-developer-mode": "edge-developer-mode-failed",
   "edge-load-unpacked": "edge-load-unpacked-unavailable",
   "edge-chooser": "chooser-not-owned",
+  "edge-activate": "edge-worker-not-activated",
   "edge-installed": "edge-extension-not-installed",
   "edge-service-worker": "edge-service-worker-missing",
 });
@@ -389,10 +396,16 @@ export async function installEdgeExtensionThroughManager({
   extensionDir,
   edgeExecutable,
   profile,
+  origin,
   inputRequest,
+  openPopup,
   eventually,
   phase,
 }) {
+  if (typeof openPopup !== "function")
+    throw new EdgeInstallError("edge-activate");
+  if (typeof origin !== "string" || !/^https?:\/\/[^/\s?#]+$/.test(origin))
+    throw new EdgeInstallError("edge-activate");
   const failed = (stage, error) =>
     error instanceof EdgeInstallError ? error : new EdgeInstallError(stage);
   const step = async (stage, action) => {
@@ -469,6 +482,21 @@ export async function installEdgeExtensionThroughManager({
     if (!isEdgeChooserActionOutput(opened, "open"))
       throw new EdgeInstallError("edge-chooser");
   });
+  // Edge installs the package with its background worker (Inactive): the real
+  // target appears but no worker runs, so waiting alone cannot prove one. The
+  // same owned tab is navigated to the synthetic login origin and the existing
+  // user-facing popup helper is invoked exactly once. It is the real
+  // Ctrl+Shift+Y action through the guarded X11 driver, which wakes the worker.
+  // The returned popup is retained, so it stays open through the target and
+  // worker proofs; the existing finally closes the browser.
+  let popup = null;
+  await step("edge-activate", async () => {
+    phase("edge-activate");
+    await page.goto(origin + "/login");
+    popup = await openPopup();
+    if (!popup || typeof popup !== "object")
+      throw new EdgeInstallError("edge-activate");
+  });
   await step("edge-installed", async () => {
     // The Open click commits asynchronously; observe the real fixed extension
     // target only after both chooser acknowledgements. They are never taken
@@ -484,7 +512,7 @@ export async function installEdgeExtensionThroughManager({
   });
   await step("edge-service-worker", async () => {
     phase("edge-service-worker");
-    // The worker starts asynchronously after the extension target exists.
+    // The action of the open popup starts the worker asynchronously.
     await eventually(
       async () =>
         browser.serviceWorkers().length > 0 ||
@@ -497,6 +525,13 @@ export async function installEdgeExtensionThroughManager({
         })),
       "edge-service-worker",
     );
+  }).catch((error) => {
+    // A worker that never appears after the popup action is the missing
+    // worker itself, never an unreported install failure.
+    if (error instanceof EdgeInstallError &&
+        error.message === EDGE_INSTALL_REASONS["edge-installed"])
+      throw new EdgeInstallError("edge-service-worker");
+    throw error;
   });
   // The manifest-derived ID must be the fixed ID, and exactly one service
   // worker must carry exactly its background.js URL.
@@ -504,6 +539,8 @@ export async function installEdgeExtensionThroughManager({
     throw new EdgeInstallError("edge-installed");
   const identity = extensionWorkerIdentity(browser.serviceWorkers());
   if (identity === null) throw new EdgeInstallError("edge-service-worker");
+  // `popup` stays referenced through both proofs so the popup remains open.
+  void popup;
   phase("continue");
   return identity;
 }

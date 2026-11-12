@@ -5,7 +5,7 @@
 // printed here.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -47,6 +47,8 @@ const PRIVATE = {
   extensionDir: "/tmp/locklark-private-extension/chromium",
   title: "Extensions",
 };
+// The existing synthetic login origin the official harness already serves.
+const SYNTHETIC_ORIGIN = "https://login.locklark.test:8443";
 
 function packageWith(manifest) {
   const directory = mkdtempSync(join(tmpdir(), "locklark-edge-contract-"));
@@ -392,6 +394,8 @@ test("both actions carry exactly the caller's one profile and Edge image", () =>
 // contexts(). No browser, X server or UI is started.
 function installHarness() {
   const shown = [];
+  const goto = [];
+  const popup = { ready: async () => true };
   const locator = {
     filter: () => locator,
     count: async () => 1,
@@ -404,9 +408,13 @@ function installHarness() {
   };
   return {
     shown,
+    goto,
+    popup,
     page: {
       bringToFront: async () => {},
-      goto: async () => {},
+      goto: async (url) => {
+        goto.push(url);
+      },
       title: async () => (shown.push(true), EDGE_MANAGER_TITLE),
       locator: () => locator,
       context: () => ({
@@ -454,6 +462,7 @@ test("install navigates, then opens, then waits for the real target", async () =
   const calls = [];
   const phases = [];
   const harness = installHarness();
+  let popups = 0;
   try {
     // No extension target ever appears, so the final install gate still fails
     // after both actions ran exactly once, in that order.
@@ -463,27 +472,359 @@ test("install navigates, then opens, then waits for the real target", async () =
         extensionDir: directory,
         edgeExecutable: PRIVATE.executable,
         profile: PRIVATE.profile,
+        origin: SYNTHETIC_ORIGIN,
         inputRequest: (value) => {
           const step = chooserStep(value);
           calls.push(step);
           return answer(step);
+        },
+        openPopup: async () => {
+          calls.push("popup");
+          popups += 1;
+          return harness.popup;
         },
         phase: (label) => phases.push(label),
       }),
       (error) => error instanceof EdgeInstallError &&
         error.message === "edge-extension-not-installed",
     );
-    assert.deepEqual(calls, ["navigate", "open"]);
+    assert.deepEqual(calls, ["navigate", "open", "popup"]);
+    assert.equal(popups, 1);
+    assert.deepEqual(harness.goto, [EDGE_MANAGER_URL, SYNTHETIC_ORIGIN + "/login"]);
     // The title was observed at the manager page and once after the Load
     // unpacked click; both actions carried that exact observed title.
     assert.equal(harness.shown.length, 2);
     assert(phases.indexOf("edge-load-unpacked") < phases.indexOf("edge-chooser-navigate"));
     assert(phases.indexOf("edge-chooser-navigate") < phases.indexOf("edge-chooser-open"));
-    assert(phases.indexOf("edge-chooser-open") < phases.indexOf("edge-installed"));
+    assert(phases.indexOf("edge-chooser-open") < phases.indexOf("edge-activate"));
+    assert(phases.indexOf("edge-activate") < phases.indexOf("edge-installed"));
     assert.equal(phases.includes("continue"), false);
     // No menu or dropdown stage remains anywhere in the flow.
     for (const label of phases)
       assert.doesNotMatch(label, /menu|dropdown|folder/i);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+// One shared order log across every observable step of the synthetic harness:
+// chooser requests, title observations, tab navigations, the popup action and
+// the real CDP target query. Only synthetic values are logged.
+function orderedHarness(order) {
+  const harness = installHarness();
+  const bringToFront = harness.page.bringToFront;
+  const title = harness.page.title;
+  const goto = harness.page.goto;
+  harness.page.bringToFront = async () => {
+    order.push("bringToFront");
+    return bringToFront();
+  };
+  harness.page.title = async () => {
+    order.push("title");
+    return title();
+  };
+  harness.page.goto = async (url) => {
+    order.push("goto:" + url);
+    return goto(url);
+  };
+  const send = harness.browser.newCDPSession;
+  harness.browser.newCDPSession = async (...args) => {
+    order.push("targets");
+    return send(...args);
+  };
+  return harness;
+}
+
+function interactiveHooks(harness, order, { extensionDir, popup } = {}) {
+  return {
+    extensionDir,
+    edgeExecutable: PRIVATE.executable,
+    profile: PRIVATE.profile,
+    origin: SYNTHETIC_ORIGIN,
+    inputRequest: (value) => {
+      const step = chooserStep(value);
+      order.push(step);
+      return answer(step);
+    },
+    openPopup: async () => {
+      order.push("popup");
+      return popup === undefined ? harness.popup : popup;
+    },
+    phase: (label) => order.push("phase:" + label),
+  };
+}
+
+test("popup activation runs after chooser_open and before the target proof", async () => {
+  const directory = packageWith({
+    manifest_version: 3,
+    key: Buffer.from("AA==").toString("base64"),
+    background: { service_worker: "background.js" },
+  });
+  try {
+    const order = [];
+    const harness = orderedHarness(order);
+    // No extension target ever appears: the popup action itself never stands
+    // in for the target or worker proof, so the flow still rejects after it.
+    await assert.rejects(
+      installEdgeExtensionThroughManager({
+        ...harness,
+        ...interactiveHooks(harness, order, { extensionDir: directory }),
+      }),
+      (error) => error instanceof EdgeInstallError &&
+        error.message === "edge-extension-not-installed",
+    );
+    const first = (step) => order.indexOf(step);
+    const only = (step) => order.filter((value) => value === step).length === 1;
+    // The separate physical Open action ran exactly once before activation.
+    const openedAt = first("open");
+    assert(openedAt > first("navigate"), order.join(","));
+    // Activation: exactly one navigation to the synthetic login origin and
+    // exactly one user-facing popup action, both after chooser_open.
+    const popupAt = first("popup");
+    const loginAt = first("goto:" + SYNTHETIC_ORIGIN + "/login");
+    assert(only("popup"), order.join(","));
+    assert(only("goto:" + SYNTHETIC_ORIGIN + "/login"), order.join(","));
+    assert(openedAt < loginAt, order.join(","));
+    assert(openedAt < popupAt, order.join(","));
+    assert(loginAt < popupAt, order.join(","));
+    // The manager was still the only page before activation.
+    const managerAt = first("goto:" + EDGE_MANAGER_URL);
+    assert.equal(order.filter((value) => value.startsWith("goto:")).length, 2);
+    assert(managerAt < openedAt);
+    // Target proof happens strictly after activation, through the real
+    // BrowserContext CDP session.
+    assert(popupAt < first("targets"), order.join(","));
+    assert(first("phase:edge-activate") < first("phase:edge-installed"));
+    assert(first("phase:edge-chooser-open") < first("phase:edge-activate"));
+    assert.equal(order.includes("phase:continue"), false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a refused Open answer never activates, navigates or proves a target", async () => {
+  const directory = packageWith({
+    manifest_version: 3,
+    key: Buffer.from("AA==").toString("base64"),
+    background: { service_worker: "background.js" },
+  });
+  try {
+    const order = [];
+    const harness = orderedHarness(order);
+    const hooks = interactiveHooks(harness, order, { extensionDir: directory });
+    await assert.rejects(
+      installEdgeExtensionThroughManager({
+        ...harness,
+        ...hooks,
+        inputRequest: (value) => {
+          const step = chooserStep(value);
+          order.push(step);
+          return step === "open"
+            ? { chooser_action: "chooser_open", clicks: 0 }
+            : answer(step);
+        },
+      }),
+      (error) => error instanceof EdgeInstallError &&
+        error.message === "chooser-not-owned",
+    );
+    assert.equal(order.includes("popup"), false);
+    assert.equal(order.includes("goto:" + SYNTHETIC_ORIGIN + "/login"), false);
+    assert.equal(order.includes("targets"), false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+// A harness context that logs the real BrowserContext CDP target query (through
+// the ordered wrapper) and then answers it with the fixed extension target, and
+// itself reports exactly one background.js worker, so the positive path and the
+// negative controls differ only in the activation step.
+function workerHarness(order) {
+  const harness = orderedHarness(order);
+  const original = harness.browser.newCDPSession;
+  harness.browser.newCDPSession = async (...args) => {
+    await original(...args);
+    return {
+      send: async (method) => {
+        assert.equal(method, "Target.getTargets");
+        return {
+          targetInfos: [{
+            targetId: "synthetic-target",
+            type: "service_worker",
+            url: EDGE_BACKGROUND_URL,
+          }],
+        };
+      },
+      detach: async () => {},
+    };
+  };
+  harness.browser.serviceWorkers = () => [{ url: () => EDGE_BACKGROUND_URL }];
+  harness.browser.waitForEvent = async () => {};
+  return harness;
+}
+
+// The real package is fixed-identity; the synthetic key would be refused by the
+// manifest-derived ID check, so this copies the fixed real manifest only.
+function fixedPackage() {
+  const directory = mkdtempSync(join(tmpdir(), "locklark-edge-contract-"));
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(
+    join(directory, "manifest.json"),
+    readFileSync(
+      fileURLToPath(new URL("../browser-extension/dist/chromium/manifest.json", import.meta.url)),
+    ),
+  );
+  return directory;
+}
+
+test("popup action, target and exactly one worker complete the install", async () => {
+  const directory = fixedPackage();
+  try {
+    const order = [];
+    const harness = workerHarness(order);
+    const identity = await installEdgeExtensionThroughManager({
+      ...harness,
+      ...interactiveHooks(harness, order, { extensionDir: directory }),
+    });
+    assert.deepEqual(identity, {
+      extensionId: FIXED_ID,
+      workerUrl: EDGE_BACKGROUND_URL,
+    });
+    // The popup stayed open (one reference, never re-opened) from activation
+    // through both proofs.
+    assert.equal(order.filter((value) => value === "popup").length, 1);
+    assert(order.indexOf("popup") < order.indexOf("phase:edge-installed"));
+    assert(order.indexOf("popup") < order.indexOf("targets"));
+    assert(order.indexOf("phase:edge-installed") < order.indexOf("phase:edge-service-worker"));
+    assert.equal(order[order.length - 1], "phase:continue");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a missing target is still rejected after popup activation", async () => {
+  const directory = fixedPackage();
+  try {
+    // Worker present but no extension target: never a PASS.
+    for (const context of [
+      // No target list at all.
+      () => ({
+        send: async () => ({ targetInfos: [] }),
+      }),
+      // The manager page target only, never the extension target.
+      () => ({
+        send: async () => ({
+          targetInfos: [{
+            targetId: "synthetic-manager",
+            type: "page",
+            url: EDGE_MANAGER_URL,
+          }],
+        }),
+      }),
+    ]) {
+      const order = [];
+      const harness = workerHarness(order);
+      harness.browser.newCDPSession = async () => {
+        order.push("targets");
+        return { ...context(), detach: async () => {} };
+      };
+      await assert.rejects(
+        installEdgeExtensionThroughManager({
+          ...harness,
+          ...interactiveHooks(harness, order, { extensionDir: directory }),
+        }),
+        (error) => error instanceof EdgeInstallError &&
+          error.message === "edge-extension-not-installed",
+      );
+      assert.equal(order.includes("popup"), true);
+      assert.equal(order.includes("phase:continue"), false);
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a missing background.js worker is still rejected after popup activation", async () => {
+  const directory = fixedPackage();
+  try {
+    for (const workers of [
+      // (Inactive) card: the worker never comes back.
+      () => [],
+      // A different worker is not the fixed background.js worker.
+      () => [{ url: () => "chrome-extension://" + FIXED_ID + "/other.js" }],
+      // A different extension's background.js is not this one.
+      () => [{ url: () => "chrome-extension://" + "a".repeat(32) + "/background.js" }],
+      // More than one worker is never a partial match.
+      () => [
+        { url: () => EDGE_BACKGROUND_URL },
+        { url: () => EDGE_BACKGROUND_URL },
+      ],
+    ]) {
+      const order = [];
+      const harness = workerHarness(order);
+      harness.browser.serviceWorkers = workers;
+      await assert.rejects(
+        installEdgeExtensionThroughManager({
+          ...harness,
+          ...interactiveHooks(harness, order, { extensionDir: directory }),
+        }),
+        (error) => error instanceof EdgeInstallError &&
+          error.message === "edge-service-worker-missing",
+      );
+      assert.equal(order.includes("popup"), true);
+      assert.equal(order.includes("targets"), true);
+      assert.equal(order.includes("phase:continue"), false);
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a failed or missing popup activation fails closed without a target proof", async () => {
+  const directory = fixedPackage();
+  try {
+    for (const popup of [
+      async () => {
+        throw Error("Action popup did not open");
+      },
+      async () => null,
+      async () => undefined,
+    ]) {
+      const order = [];
+      const harness = workerHarness(order);
+      const hooks = interactiveHooks(harness, order, { extensionDir: directory });
+      await assert.rejects(
+        installEdgeExtensionThroughManager({
+          ...harness,
+          ...hooks,
+          openPopup: popup,
+        }),
+        (error) => error instanceof EdgeInstallError &&
+          error.message === "edge-worker-not-activated",
+      );
+      assert.equal(order.includes("phase:edge-installed"), false);
+      assert.equal(order.includes("targets"), false);
+    }
+    // A missing helper or synthetic origin is refused before any manager step.
+    for (const overrides of [
+      { openPopup: undefined },
+      { origin: undefined },
+      { origin: "login.locklark.test" },
+      { origin: "" },
+    ]) {
+      const order = [];
+      const harness = workerHarness(order);
+      await assert.rejects(
+        installEdgeExtensionThroughManager({
+          ...harness,
+          ...interactiveHooks(harness, order, { extensionDir: directory }),
+          ...overrides,
+        }),
+        (error) => error instanceof EdgeInstallError &&
+          error.message === "edge-worker-not-activated",
+      );
+      assert.deepEqual(order, []);
+    }
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -504,6 +845,8 @@ test("the sequencing actions carry the exact observed manager title", async () =
         extensionDir: directory,
         edgeExecutable: PRIVATE.executable,
         profile: PRIVATE.profile,
+        origin: SYNTHETIC_ORIGIN,
+        openPopup: async () => harness.popup,
         inputRequest: (value) => {
           seen.push(value);
           return answer(chooserStep(value));
@@ -599,6 +942,8 @@ test("a navigate answer that is not its fixed acknowledgement stops the flow", a
           extensionDir: directory,
           edgeExecutable: PRIVATE.executable,
           profile: PRIVATE.profile,
+          origin: SYNTHETIC_ORIGIN,
+          openPopup: async () => harness.popup,
           inputRequest: (value) => {
             const step = chooserStep(value);
             calls.push(step);
@@ -642,6 +987,8 @@ test("an Open answer that is not its fixed acknowledgement stops the flow", asyn
           extensionDir: directory,
           edgeExecutable: PRIVATE.executable,
           profile: PRIVATE.profile,
+          origin: SYNTHETIC_ORIGIN,
+          openPopup: async () => harness.popup,
           inputRequest: (value) => {
             const step = chooserStep(value);
             calls.push(step);
@@ -668,6 +1015,12 @@ test("extension targets are queried from the supplied BrowserContext", async () 
     url: EDGE_BACKGROUND_URL,
   }];
   const calls = [];
+  const pages = [
+    { url: () => "edge://extensions/" },
+    { url: () => "http://127.0.0.1/" },
+  ];
+  // One implementation of the CDP stub: it records the attached page and the
+  // actual Target.getTargets method, and its detach.
   const context = {
     // A real BrowserContext has no contexts(); calling it must fail the test.
     contexts: () => {
@@ -676,13 +1029,11 @@ test("extension targets are queried from the supplied BrowserContext", async () 
     },
     pages: () => {
       calls.push("pages");
-      return [
-        { url: () => "edge://extensions/" },
-        { url: () => "http://127.0.0.1/" },
-      ];
+      return pages;
     },
     newCDPSession: async (page) => {
-      calls.push("newCDPSession");
+      assert.equal(pages.includes(page), true);
+      calls.push("newCDPSession:" + page.url());
       return {
         send: async (method) => {
           calls.push(method);
@@ -695,21 +1046,14 @@ test("extension targets are queried from the supplied BrowserContext", async () 
       };
     },
   };
-  // The attached page is the regular http page, not the manager page.
-  const sessionPage = [];
-  context.newCDPSession = async (page) => {
-    calls.push("newCDPSession");
-    sessionPage.push(page.url());
-    return {
-      send: async () => ({ targetInfos }),
-      detach: async () => {},
-    };
-  };
   assert.deepEqual(await extensionTargets(context), targetInfos);
-  assert.deepEqual(sessionPage, ["http://127.0.0.1/"]);
-  assert.equal(calls.includes("contexts"), false);
   // The returned data is exactly what CDP reported, never synthesized.
-  assert.deepEqual(calls.slice(0, 2), ["pages", "newCDPSession"]);
+  assert.deepEqual(calls, [
+    "pages",
+    "newCDPSession:http://127.0.0.1/",
+    "Target.getTargets",
+    "detach",
+  ]);
   // No page in the context is a fixed failure, not fabricated targets.
   await assert.rejects(
     extensionTargets({
@@ -744,6 +1088,7 @@ test("install failures are fixed classifications, never raw errors", () => {
     "edge-developer-mode": "edge-developer-mode-failed",
     "edge-load-unpacked": "edge-load-unpacked-unavailable",
     "edge-chooser": "chooser-not-owned",
+    "edge-activate": "edge-worker-not-activated",
     "edge-installed": "edge-extension-not-installed",
     "edge-service-worker": "edge-service-worker-missing",
     unexpected: "edge-install-unclassified",
