@@ -754,11 +754,14 @@ function sourcePageIntact(value) {
 // ones the page text must not contain. Neither leaves the page, and the
 // comparison happens there.
 function routeIdleLiveProbe(title, texts, forbidden, detailTemplateHTML, baselineText) {
-  const policy = routeDetailPrivacyPolicy(texts, forbidden).toString();
+  // The page gets the policy's whole factory, not its returned closure, and
+  // calls it with its own serialized arrays: a closure would refer to captured
+  // identifiers that do not exist in the page expression.
+  const policyFactory = routeDetailPrivacyPolicy.toString();
   return `(()=>{
     const fixtureTexts=${JSON.stringify(texts)};
     const forbiddenTexts=${JSON.stringify(forbidden)};
-    const privacy=${policy};
+    const privacy=${policyFactory}(${JSON.stringify(texts)},${JSON.stringify(forbidden)});
     const baseline=new Set(${JSON.stringify(baselineText)});
     const body=document.body;
     const detail=document.querySelector('#detail-view');
@@ -803,7 +806,7 @@ function routeIdleLiveProbe(title, texts, forbidden, detailTemplateHTML, baselin
         }
       };
       walk(body);
-      return parts.join('\n');
+      return parts.join('\\n');
     })();
     // The title may only quote the fixture; the note line only the fixture too.
     const notes=document.querySelector('#detail-notes');

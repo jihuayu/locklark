@@ -565,10 +565,14 @@ test("the idle live probe embeds the shared text policy with both canary inputs"
     SOURCE.indexOf("function routeIdleLiveProbe(title, texts, forbidden, detailTemplateHTML, baselineText) {"),
     SOURCE.indexOf("\nfunction routeIdleLive("),
   );
-  // The page probe runs the harness policy itself, over both arrays.
-  assert.match(probe, /const policy = routeDetailPrivacyPolicy\(texts, forbidden\)\.toString\(\);/);
+  // The page probe embeds the policy's self-contained factory (never its
+  // returned closure) and calls it with both serialized arrays.
+  assert.match(probe, /const policyFactory = routeDetailPrivacyPolicy\.toString\(\);/);
   assert.match(probe, /const forbiddenTexts=\$\{JSON\.stringify\(forbidden\)\};/);
-  assert.match(probe, /const privacy=\$\{policy\};/);
+  assert.match(
+    probe,
+    /const privacy=\$\{policyFactory\}\(\$\{JSON\.stringify\(texts\)\},\$\{JSON\.stringify\(forbidden\)\}\);/,
+  );
   assert.match(probe, /fixtureAbsent:privacyVerdict\.forbiddenAbsent,/);
   // The call passes all fixture canaries for known text and only the
   // non-displayable ones as forbidden.
@@ -577,4 +581,93 @@ test("the idle live probe embeds the shared text policy with both canary inputs"
     /routeIdleLiveProbe\(\n\s+fixture\.Title,\n\s+fixtureCanaries\(fixture\),\n\s+routeForbiddenCanaries\(fixture\),\n/,
   );
   assert.match(SOURCE, /^const ROUTE_DETAIL_VISIBLE_FIXTURE_KEYS = Object\.freeze\(\["Username"\]\);$/m);
+});
+
+// The smallest read-only document the generated probe reads: the page text,
+// the detail section/title/fields and the notes. Built by generated code inside
+// the page context itself; no writes, hooks or events exist.
+const MINIMAL_DOCUMENT_SOURCE = `function (pageText, heading, username) {
+  const empty = { children: [], childNodes: [], querySelector: () => null,
+    querySelectorAll: () => [], getAttribute: () => null, hidden: true,
+    textContent: "" };
+  const text = (value) => ({ children: [], childNodes: [{ nodeType: 3, data: value }],
+    querySelector: () => null, querySelectorAll: () => [],
+    getAttribute: () => null, hidden: false, textContent: value });
+  const nodes = {
+    "#detail-view": { ...empty, hidden: false },
+    "#detail-title": text(heading),
+    "#detail-fields": empty,
+    "#detail-notes": text(username),
+  };
+  return {
+    body: { dataset: { view: "detail" }, innerText: pageText,
+      childNodes: [], children: [] },
+    visibilityState: "visible",
+    querySelector: (selector) => nodes[selector] ?? null,
+    implementation: { createHTMLDocument: () => ({ body: {}, querySelector: () => null }) },
+  };
+}`;
+
+// The harness's own probe generator, loaded with synthetic inputs only.
+function harnessProbe() {
+  const start = SOURCE.indexOf("const ROUTE_DETAIL_VISIBLE_FIXTURE_KEYS =");
+  const stop = SOURCE.indexOf("// The route's own tab switch", start);
+  const probeStart = SOURCE.indexOf("function routeIdleLiveProbe(");
+  const probeStop = SOURCE.indexOf("\nfunction routeIdleLive(", probeStart);
+  assert.ok(start > 0 && stop > start && probeStart > 0 && probeStop > probeStart);
+  const harness = vm.createContext({ ROUTE_COPY_FIELD_SELECTOR: ROUTE_COPY_FIELD_SELECTOR_VALUE });
+  vm.runInContext(SOURCE.slice(start, stop) + "\n" + SOURCE.slice(probeStart, probeStop), harness);
+  return harness;
+}
+
+// Generate the expression with that probe, compile it as one page script, and
+// run it on the synthetic page text. Only fixed booleans leave the page.
+function runGeneratedProbe(innerText) {
+  const harness = harnessProbe();
+  const expression = harness.routeIdleLiveProbe(
+    SYNTHETIC.Title,
+    allTexts(),
+    forbiddenFor(SYNTHETIC),
+    ROUTE_IDLE_PAGE_TEMPLATE,
+    [],
+  );
+  assert.equal(typeof expression, "string");
+  const page = vm.createContext({
+    pageText: innerText,
+    heading: SYNTHETIC.Title,
+    username: SYNTHETIC.Username,
+  });
+  new vm.Script(
+    "this.document = (" + MINIMAL_DOCUMENT_SOURCE + ")(pageText, heading, username);" +
+      "this.result = (function (observed) {" +
+      " return { forbiddenAbsent: observed.fixtureAbsent," +
+      " titleMatchesFixture: observed.titleMatchesFixture," +
+      " fixtureOnly: observed.fixtureOnly };" +
+      "})((0, " + expression + "));",
+  ).runInContext(page);
+  // Only one fixed number leaves the page: bit 0 is the forbidden-absence
+  // verdict, bit 1 the title match, bit 2 the fixture-only verdict.
+  const bits = vm.runInContext(
+    "((result.forbiddenAbsent === true ? 1 : 0) |" +
+      "(result.titleMatchesFixture === true ? 2 : 0) |" +
+      "(result.fixtureOnly === true ? 4 : 0))",
+    page,
+  );
+  return bits;
+}
+
+const ROUTE_IDLE_PAGE_TEMPLATE = '<body><section id="detail-view"></section></body>';
+
+test("the generated page expression compiles and enforces the text policy", () => {
+  // The visible synthetic Username is allowed and the title is the fixture's.
+  const allowed = runGeneratedProbe([SYNTHETIC.Title, SYNTHETIC.Username].join("\n"));
+  assert.equal((allowed & 1) === 1, true, "visible Username must not be forbidden");
+  assert.equal(allowed & 2, 2, "title must match the fixture");
+  // Any forbidden canary in the page text fails closed.
+  for (const key of ["Password", "Secret", "Value", "OTPSeed"]) {
+    const leaked = runGeneratedProbe(
+      [SYNTHETIC.Title, SYNTHETIC.Username, SYNTHETIC[key]].join("\n"),
+    );
+    assert.equal(leaked % 2, 0, key);
+  }
 });
