@@ -646,6 +646,9 @@ def main():
     success = False
     failure = "prerequisites"
     diagnostic = {}
+    original_failure = "prerequisites"
+    cleanup_failed = False
+    scan_failed = False
     try:
         require(args.authorize_device_pin_setup and bool(re.fullmatch(r"emulator-[0-9]+",args.serial)))
         require(10 <= args.timeout <= 180)
@@ -662,18 +665,39 @@ def main():
         if acceptance:
             diagnostic = acceptance.failure_metadata()
     finally:
+        # Own the primary outcome before cleanup: a cleanup fault must never
+        # overwrite the original stage or its sanitized diagnosis.
+        original_failure, diagnostic = failure, diagnostic.copy()
         if acceptance:
-            try: acceptance.cleanup_pin()
-            except Exception: success=False; failure="pin-cleanup"
+            primary_success = success
+            try:
+                acceptance.cleanup_pin()
+            except Exception:
+                # Only fixed fields; never exception text, arguments or output.
+                cleanup_failed = True
             try: acceptance.close(); acceptance.scan()
-            except Exception: success=False; failure="private-canary-scan"
-            acceptance.write_private("result.json",{"success":success,"stage":"complete" if success else failure,
+            except Exception: success=False; scan_failed=True
+            if primary_success and not cleanup_failed and not scan_failed:
+                stage = "complete"
+            elif cleanup_failed:
+                stage = "pin-cleanup"
+            elif scan_failed:
+                stage = "private-canary-scan"
+            else:
+                stage = original_failure
+            success = primary_success and not cleanup_failed and not scan_failed
+            acceptance.write_private("result.json",{"success":success,"stage":stage,
+                "original_failure_stage":original_failure,"cleanup_failed":cleanup_failed,"scan_failed":scan_failed,
                 "checks":acceptance.checks,"reported_key_security_level":acceptance.key_level,
                 "physical_hardware_verified":False,"source_fixture_sha256":acceptance.source_hash,"diagnostic":diagnostic})
             print("Private Android OS credential evidence: " + str(acceptance.root))
     if not success:
-        print("FAIL: Android OS credential acceptance at " + failure)
+        print("FAIL: Android OS credential acceptance at " + (stage if acceptance else "prerequisites"))
         print("Android OS credential diagnostic: " + json.dumps(diagnostic, sort_keys=True))
+        if cleanup_failed:
+            print("FAIL: Android OS credential acceptance at pin-cleanup (primary_failure_stage=" + original_failure + ")")
+        if scan_failed:
+            print("FAIL: Android OS credential acceptance at private-canary-scan")
     else: print("PASS: native OS credential opt-in, quick unlock, cancellation and nontransferable device key; private canary scan")
     return 0 if success else 1
 
