@@ -490,14 +490,18 @@ func TestAuthenticatedItemsWrongPin(t *testing.T) {
 }
 
 // TestAuthenticatedItemsInvalidItemsRejected proves that invalid item input is
-// rejected by ValidateItems before any file bytes exist, and that the caller's
-// inputs are untouched.
+// rejected with ErrSnapshot before any file bytes exist, and that the caller's
+// inputs are untouched. NewItemDatabase rejects nil metadata by its own API
+// contract, so the nil metadata cases are included beside the ValidateItems
+// cases.
 func TestAuthenticatedItemsInvalidItemsRejected(t *testing.T) {
 	fx := newAuthItemsFixture(t)
 	metadata := authItemsFixtureMetadata()
 	good := authItemsFixtureItems()
 	cases := map[string]func() ([]byte, []Item){
-		"nil items": func() ([]byte, []Item) { return metadata, nil },
+		"nil metadata":           func() ([]byte, []Item) { return nil, deepCopy(good) },
+		"nil metadata and items": func() ([]byte, []Item) { return nil, nil },
+		"nil items":              func() ([]byte, []Item) { return metadata, nil },
 		"duplicate id": func() ([]byte, []Item) {
 			in := deepCopy(good)
 			in[2].ID = in[0].ID
@@ -533,15 +537,15 @@ func TestAuthenticatedItemsInvalidItemsRejected(t *testing.T) {
 				wantItems = deepCopy(items)
 			}
 			out, err := SealAuthenticatedItems(fx.draft, meta, items, fx.pin, fx.vuk, fx.author)
-			if !errors.Is(err, ErrSnapshot) {
-				t.Fatalf("invalid items: got %v, want ErrSnapshot", err)
+			if err != ErrSnapshot {
+				t.Fatalf("invalid input: got %v, want exactly ErrSnapshot", err)
 			}
 			var ve *vaultfile.Error
 			if errors.As(err, &ve) {
-				t.Fatalf("invalid items reached vaultfile as %v", ve)
+				t.Fatalf("invalid input reached vaultfile as %v", ve)
 			}
 			if out != nil {
-				t.Fatal("invalid items returned file bytes")
+				t.Fatal("invalid input returned file bytes")
 			}
 			if !reflect.DeepEqual(fx.draft, wantDraft) {
 				t.Fatal("invalid-items rejection mutated the draft")
@@ -579,50 +583,5 @@ func TestAuthenticatedItemsSealRequiresKeyEpoch(t *testing.T) {
 	}
 	if zero.Header.KeyEpoch != 0 || fx.draft.Header.KeyEpoch != 1 {
 		t.Fatal("draft inputs were mutated")
-	}
-}
-
-// TestAuthenticatedItemsDBOwnsClones proves the database writer is given
-// package-owned clones of every binary-bearing item byte slice and that the
-// clones, not the caller's buffers, are what the database and its KDBX
-// encoder reference. A whole-call test cannot observe this on its own: the
-// KDBX encoder neither writes into nor clears binary content, so passing caller
-// bytes through would leave the caller's values equal yet still shared.
-func TestAuthenticatedItemsDBOwnsClones(t *testing.T) {
-	items := authItemsFixtureItems()
-	caller := []*byte{&items[1].Attachment[0], &items[0].Attachments[0].Content[0]}
-	db, owned, err := newAuthenticatedItemsDB(authItemsFixtureMetadata(), items)
-	if err != nil {
-		t.Fatalf("newAuthenticatedItemsDB: %v", err)
-	}
-	if len(db.Content.InnerHeader.Binaries) != 2 {
-		t.Fatalf("database has %d binaries, want 2", len(db.Content.InnerHeader.Binaries))
-	}
-	for i, b := range db.Content.InnerHeader.Binaries {
-		if len(b.Content) == 0 || &b.Content[0] == caller[i] || &b.Content[0] == caller[1-i] {
-			t.Fatalf("binary %d shares storage with a caller item slice", i)
-		}
-	}
-	// Every byte the database holds for an item is backed by an owned clone:
-	// clearing those clones must zero every KDBX binary, including any
-	// content a keyed re-encode of the database would read.
-	clearAuthenticatedItemBytes(owned)
-	for i, b := range db.Content.InnerHeader.Binaries {
-		for _, v := range b.Content {
-			if v != 0 {
-				t.Fatalf("binary %d clone was not cleared", i)
-			}
-		}
-	}
-	for i, c := range owned {
-		for _, v := range c {
-			if v != 0 {
-				t.Fatalf("owned clone %d was not cleared", i)
-			}
-		}
-	}
-	if !bytes.Equal(items[1].Attachment, authItemsFixtureItems()[1].Attachment) ||
-		!bytes.Equal(items[0].Attachments[0].Content, authItemsFixtureItems()[0].Attachments[0].Content) {
-		t.Fatal("clearing package-owned clones changed caller item bytes")
 	}
 }

@@ -5,34 +5,33 @@ import (
 
 	"filippo.io/age"
 	"github.com/jihuayu/locklark/pkg/vaultfile"
-	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
 )
 
 // This file is the narrow adapter between the internal vault item model (the
 // Item slice and the opaque metadata bytes) and the public caller-pinned
 // authenticated file format in pkg/vaultfile. It does not change Snapshot,
-// SealItems or OpenItems, and it is not a sync protocol. Its implementation
-// uses only the standard library, age, public pkg/vaultfile and KDBX APIs.
+// SealItems or OpenItems, and it is not a sync protocol. It implements no
+// item↔KDBX boundary of its own: every item representation decision belongs
+// to the shared item-database adapter in item_database.go, and every file-layer
+// decision belongs to public pkg/vaultfile.
 //
-// Exact scope. The adapter owns representation, not protocol state:
+// Exact scope. The adapter owns composition, not protocol state:
 //
-//   - SealAuthenticatedItems validates the items, builds a fresh, empty KDBX
-//     4.1 database and writes the existing internal v1/v2 item-group layout
-//     into it with writeItems. It creates no content sequence, predecessor
-//     digest, operation id, revision or content signature, and no policy,
-//     policy proof, epoch or key.
+//   - SealAuthenticatedItems validates items and constructs the owned KDBX
+//     database only through NewItemDatabase(metadata, items), the shared
+//     item-database API, and then hands that database, unchanged, to public
+//     vaultfile.SealAuthenticatedFile with the caller's draft, checkpoint, VUK
+//     and author key. It never calls writeItems.
 //   - The caller supplies the complete builder draft: its format, version,
 //     header (vault id, key epoch, content_seq, prev_digest, op_id, policy_seq,
 //     policy_digest, author device) and the signed policy proofs. The adapter
-//     never edits the draft; it passes it unchanged, with the database and
-//     the caller's checkpoint, VUK and author key, to
-//     vaultfile.SealAuthenticatedFile, which authenticates the policy chain
-//     against the checkpoint, checks the author device and key, wraps the VUK,
-//     encrypts the database and signs the content.
-//   - OpenAuthenticatedItems calls vaultfile.OpenAuthenticatedFile, which
-//     parses the file, authenticates it against the caller's checkpoint and
-//     only then decrypts the database, and only then reads the item group back
-//     with readItems.
+//     never edits the draft; SealAuthenticatedFile authenticates the policy
+//     chain against the checkpoint, checks the author device and key, wraps
+//     the VUK, encrypts the database and signs the content.
+//   - OpenAuthenticatedItems calls public vaultfile.OpenAuthenticatedFile,
+//     which parses the file, authenticates it against the caller's checkpoint
+//     and only then decrypts the database, and only then reads the item group
+//     back through ReadItemDatabase(db), the shared item-database API.
 //
 // What it deliberately does not do: it does not create content-sequence
 // values, set or check prev_digest for continuity, compare revisions, perform
@@ -47,16 +46,14 @@ import (
 //
 // Ownership. The caller owns the draft, metadata, items, checkpoint, VUK,
 // authorPrivateKey and every Open input. Neither function mutates or retains
-// them. SealAuthenticatedItems hands writeItems package-owned deep clones of
-// the item byte slices (the bytes that become KDBX binaries) and clears
-// exactly those clones on every return path, success and error alike. Within a
-// call the clones outlive the KDBX encoding, because the database still
-// references them until SealAuthenticatedFile has encrypted it. The returned
-// file bytes, metadata bytes and items are owned by the caller.
+// them: NewItemDatabase neither aliases nor clears the caller's items,
+// metadata or binary bytes, and its owned database is package-owned for the
+// duration of the call and never returned. The returned file bytes, metadata
+// bytes and items are owned by the caller.
 
-// SealAuthenticatedItems validates items and metadata, writes them into a new
-// KDBX 4.1 database in the internal item-group layout, and seals that
-// database into a caller-pinned authenticated file.
+// SealAuthenticatedItems validates items and metadata, builds the owned KDBX
+// 4.1 item database with NewItemDatabase and seals that database into a
+// caller-pinned authenticated file with vaultfile.SealAuthenticatedFile.
 //
 // Order:
 //
@@ -68,31 +65,28 @@ import (
 //     invalid_value before any database is built; SealAuthenticatedFile would
 //     reject it anyway, but only after this adapter has done KDBX work. Every
 //     other draft, checkpoint, VUK and author key check stays in
-//     SealAuthenticatedFile.
-//  3. A fresh database from kdbx.NewDatabase(WithDatabaseKDBXVersion41()) is
-//     populated by writeItems, unchanged, with the item-group name, the
-//     metadata entry and one entry per item in caller order. writeItems
-//     stores document attachment bytes and v2 attachment contents as KDBX
-//     binaries, so it is given package-owned deep clones of every item byte
-//     slice (Attachment, ImportSource, SSH seed and public key, legacy and
-//     collection passkey records, and every attachment content). Each clone
-//     lives only as long as the KDBX work that reads it and is cleared before
-//     the call returns, on success and on every error. The caller's items are
-//     never modified or cleared. A writeItems failure, which cannot follow a
-//     successful ValidateItems through caller input, is ErrSnapshot with nil
-//     bytes and nothing handed on to SealAuthenticatedFile.
+//     SealAuthenticatedFile. The code and empty path are the ones
+//     SealAuthenticatedFile reports for the nil draft ("") and the zero epoch
+//     ("key_epoch") cases, and both collapse to the same invalid_value.
+//  3. NewItemDatabase(metadata, items) builds a fresh KDBX 4.1 database in the
+//     shared personal snapshot layout: the item-group name, the metadata entry
+//     and one entry per item in caller order, with a database-owned copy of
+//     every item binary. It re-applies ValidateItems and also rejects nil
+//     metadata by its own contract. Its errors are returned unchanged: an
+//     item-representation failure is ErrSnapshot, before any file bytes exist.
 //  4. vaultfile.SealAuthenticatedFile(draft, db, checkpoint, vuk,
 //     authorPrivateKey) produces the bytes. Its errors are returned
 //     unchanged, so a bad draft, checkpoint, VUK or author key is reported
 //     with the exact vaultfile *Error code and path. Nothing is wrapped or
 //     reinterpreted.
 //
-// metadata is carried verbatim (it is only validated and base64-encoded into
-// the protected metadata entry). Item order is the order of the KDBX entries
-// and is preserved exactly by OpenAuthenticatedItems. draft is used as a
-// builder value exactly as SealAuthenticatedFile documents: it must carry the
-// protocol format and version and a valid header, and SealAuthenticatedFile
-// never mutates it. db is not a caller input and is never returned.
+// metadata is carried verbatim (NewItemDatabase only validates it and stores
+// it base64-encoded into the protected metadata entry). Item order is the
+// order of the KDBX entries and is preserved exactly by
+// OpenAuthenticatedItems. draft is used as a builder value exactly as
+// SealAuthenticatedFile documents: it must carry the protocol format and
+// version and a valid header, and SealAuthenticatedFile never mutates it. db
+// is not a caller input and is never returned.
 //
 // Trust limits: this seals only content under a policy chain the caller's
 // checkpoint already anchors, through SealAuthenticatedFile. It does not
@@ -105,95 +99,17 @@ func SealAuthenticatedItems(draft *vaultfile.File, metadata []byte, items []Item
 	if err := ValidateItems(metadata, items); err != nil {
 		return nil, err
 	}
-	// SealAuthenticatedFile requires a positive key epoch before any
-	// cryptographic work. A nil draft or a draft without one is rejected here
-	// before any database is built; every other draft check stays in
-	// SealAuthenticatedFile. The code and empty path are the ones
-	// SealAuthenticatedFile reports for the nil draft ("") and the zero epoch
-	// ("key_epoch") cases, and both collapse to the same invalid_value.
+	// Cheap precheck kept only to preserve the current error order: reject a
+	// nil draft or a zero key epoch before the database is built. Every other
+	// draft check stays in SealAuthenticatedFile.
 	if draft == nil || draft.Header.KeyEpoch == 0 {
 		return nil, vaultfile.Err("", vaultfile.CodeInvalidValue)
 	}
-	db, owned, err := newAuthenticatedItemsDB(metadata, items)
-	// The clones are cleared after SealAuthenticatedFile returns, never
-	// earlier: the KDBX encoding reads them while it encrypts db. They are
-	// already cleared when writeItems failed, so this is a no-op then.
-	defer clearAuthenticatedItemBytes(owned)
+	db, err := NewItemDatabase(metadata, items)
 	if err != nil {
 		return nil, err
 	}
 	return vaultfile.SealAuthenticatedFile(draft, db, checkpoint, vuk, authorPrivateKey)
-}
-
-// newAuthenticatedItemsDB builds the fresh KDBX 4.1 database SealKDBXPayload
-// accepts and writes metadata and items into it. The item byte slices handed
-// to writeItems are deep clones owned by this package, returned in owned so
-// the caller can clear them on every exit.
-//
-// The only writeItems failures after a successful ValidateItems are internal
-// (JSON encoding of an envelope, passkey collection encoding); they are
-// reported as ErrSnapshot like every other item-representation error, and the
-// clones are cleared before returning so a failed database retains no item
-// bytes.
-func newAuthenticatedItemsDB(metadata []byte, items []Item) (*kdbx.Database, [][]byte, error) {
-	db := kdbx.NewDatabase(kdbx.WithDatabaseKDBXVersion41())
-	var owned [][]byte
-	cloned := make([]Item, len(items))
-	for i, it := range items {
-		cloned[i] = authenticatedItemsClone(it, &owned)
-	}
-	if err := writeItems(db, metadata, cloned); err != nil {
-		clearAuthenticatedItemBytes(owned)
-		return nil, nil, ErrSnapshot
-	}
-	return db, owned, nil
-}
-
-// authenticatedItemsClone returns a copy of it whose every byte slice is a
-// fresh package-owned clone, appended to owned. Strings and the remaining value
-// fields are copied by value and share no mutable storage with it.
-func authenticatedItemsClone(it Item, owned *[][]byte) Item {
-	c := it
-	own := func(b []byte) []byte {
-		cloned := cloneBytes(b)
-		*owned = append(*owned, cloned)
-		return cloned
-	}
-	c.Attachment = own(it.Attachment)
-	c.ImportSource = own(it.ImportSource)
-	c.SSHSeed = own(it.SSHSeed)
-	c.SSHPublicKey = own(it.SSHPublicKey)
-	c.Passkey = own(it.Passkey)
-	if it.Passkeys != nil {
-		c.Passkeys = make([][]byte, len(it.Passkeys))
-		for i := range it.Passkeys {
-			c.Passkeys[i] = own(it.Passkeys[i])
-		}
-	}
-	if it.Attachments != nil {
-		c.Attachments = make([]AttachmentMeta, len(it.Attachments))
-		for i := range it.Attachments {
-			c.Attachments[i] = it.Attachments[i]
-			c.Attachments[i].Content = own(it.Attachments[i].Content)
-		}
-	}
-	return c
-}
-
-// clearAuthenticatedItemBytes clears every package-owned clone.
-func clearAuthenticatedItemBytes(owned [][]byte) {
-	for _, b := range owned {
-		clear(b)
-	}
-}
-
-// authenticatedItemsDB is the database shape readItems requires: content, a
-// root and an inner header that carries the binaries, with the single group
-// readItems will be handed. OpenAuthenticatedFile already guarantees content
-// and root; this guard keeps the reader from dereferencing a shape it does not
-// require, and it checks nothing about the item layout itself.
-func authenticatedItemsDB(db *kdbx.Database) bool {
-	return db != nil && db.Content != nil && db.Content.Root != nil && db.Content.InnerHeader != nil && len(db.Content.Root.Groups) == 1
 }
 
 // OpenAuthenticatedItems opens a file sealed by SealAuthenticatedItems and
@@ -207,33 +123,29 @@ func authenticatedItemsDB(db *kdbx.Database) bool {
 //     unwraps the VUK, opens the CEK and decrypts the KDBX payload. Its errors
 //     are returned unchanged; a wrong checkpoint pin in particular is the
 //     exact vaultfile.CodePolicyCheckpointFailed with an empty path.
-//  2. Only after that succeeds is the decrypted database's item-group layout
-//     validated with readItems, the same strict reader OpenItems uses for
-//     item snapshots: the group name, the single metadata entry, one entry
-//     per item in wire order, the field shapes, the binaries and the full
-//     item schema. A layout that readItems rejects returns ErrSnapshot.
+//  2. Only after that succeeds is the decrypted database read with
+//     ReadItemDatabase(db), the shared item-database API that enforces the
+//     supported database shape (exactly one item group), the group name, the
+//     single metadata entry, one entry per item in wire order, the field
+//     shapes, the binaries and the item schema. A database it rejects returns
+//     ErrSnapshot.
 //
 // On success the returned *vaultfile.File, metadata bytes and []Item are
 // caller-owned; the returned file is the parsed authenticated wire file and
 // the items and metadata are fresh decodes, in the sealed order. On any error
-// all three results are nil.
+// the file, metadata and items are all nil.
 //
-// Trust limits: this is only a caller-pinned authenticated open plus the item
-// layout reader. It performs no sync, CAS or freshness check: it does not
-// compare the header's content sequence or previous digest against any
-// local state, does not prove that the file is the newest one the caller has
-// seen, and does not order or reconcile it with any other file.
+// Trust limits: this is only a caller-pinned authenticated open plus the
+// shared item-database reader. It performs no sync, CAS or freshness check: it
+// does not compare the header's content sequence or previous digest against
+// any local state, does not prove that the file is the newest one the caller
+// has seen, and does not order or reconcile it with any other file.
 func OpenAuthenticatedItems(encoded []byte, checkpoint *vaultfile.PolicyCheckpoint, deviceID string, identity *age.X25519Identity) (*vaultfile.File, []byte, []Item, error) {
 	f, db, err := vaultfile.OpenAuthenticatedFile(encoded, checkpoint, deviceID, identity)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	// OpenAuthenticatedFile returns a database whose content and root are
-	// present; this is a shape guard, not a trust decision.
-	if !authenticatedItemsDB(db) {
-		return nil, nil, nil, ErrSnapshot
-	}
-	metadata, items, err := readItems(db, db.Content.Root.Groups[0])
+	metadata, items, err := ReadItemDatabase(db)
 	if err != nil {
 		return nil, nil, nil, err
 	}
