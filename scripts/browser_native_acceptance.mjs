@@ -551,6 +551,18 @@ function routeForbiddenCanaries(fixture) {
   const displayable = ROUTE_DETAIL_VISIBLE_FIXTURE_KEYS.map((key) => fixture?.[key]);
   return fixtureCanaries(fixture).filter((value) => !displayable.includes(value));
 }
+// The detail-owned containers popup.html ships empty and popup.js fills from
+// the approved record: #detail-fields and #detail-urls with their rows,
+// #detail-tags with tag spans, #attachment-list with attachments (all
+// `replaceChildren` of appended children). Only their children are dynamic;
+// the outer detail skeleton and every other element keep their shape, and no
+// URL value is read here.
+const ROUTE_DETAIL_DYNAMIC_CONTAINERS = Object.freeze([
+  "detail-fields",
+  "detail-urls",
+  "detail-tags",
+  "attachment-list",
+]);
 // The route detail's text policy, shared verbatim by the live probe. `texts`
 // are the fixture's synthetic strings that may supply detail text (the
 // verified Username included); `forbidden` are the ones that must not appear
@@ -747,12 +759,13 @@ function sourcePageIntact(value) {
 // The live approved route detail for the idle journey, with the same fixed
 // concealment check as the copy proof. The rendered detail must match
 // popup.html's own markup, parsed in the page into an inert document: the same
-// elements and attributes, with hidden children ignored, and only text the
-// route already showed before approval (static template text) or the fixture
-// itself may appear. `texts` are all of the fixture's synthetic strings that
-// may supply detail text, the verified Username included; `forbidden` are the
-// ones the page text must not contain. Neither leaves the page, and the
-// comparison happens there.
+// elements and attributes (the detail-owned content containers keep their
+// element and attributes but not their filled children), with hidden children
+// ignored, and only text the route already showed before approval (static
+// template text) or the fixture itself may appear. `texts` are all of the
+// fixture's synthetic strings that may supply detail text, the verified
+// Username included; `forbidden` are the ones the page text must not contain.
+// Neither leaves the page, and the comparison happens there.
 function routeIdleLiveProbe(title, texts, forbidden, detailTemplateHTML, baselineText) {
   // The page gets the policy's whole factory, not its returned closure, and
   // calls it with its own serialized arrays: a closure would refer to captured
@@ -763,6 +776,9 @@ function routeIdleLiveProbe(title, texts, forbidden, detailTemplateHTML, baselin
     const forbiddenTexts=${JSON.stringify(forbidden)};
     const privacy=${policyFactory}(${JSON.stringify(texts)},${JSON.stringify(forbidden)});
     const baseline=new Set(${JSON.stringify(baselineText)});
+    // The detail-owned containers popup.html leaves empty and popup.js fills
+    // from the approved record: their own children are content, not skeleton.
+    const dynamicContainers=new Set(${JSON.stringify([...ROUTE_DETAIL_DYNAMIC_CONTAINERS])});
     const body=document.body;
     const detail=document.querySelector('#detail-view');
     const heading=document.querySelector('#detail-title');
@@ -773,12 +789,18 @@ function routeIdleLiveProbe(title, texts, forbidden, detailTemplateHTML, baselin
     inert.body.innerHTML=${JSON.stringify(detailTemplateHTML)};
     const visible=(node)=>!node.hidden&&node.getAttribute('aria-hidden')!=='true';
     const children=(node)=>Array.from(node.children).filter(visible);
+    const getId=(node)=>String(node.id||node.getAttribute?.('id')||'');
     const templateShaped=(live,template)=>{
       if(!live||!template||live.tagName!==template.tagName)return false;
       const attrs=(node)=>Array.from(node.attributes).map((attribute)=>attribute.name).sort().join(',');
       if(attrs(live)!==attrs(template))return false;
       if(live.tagName==='INPUT'||live.tagName==='SELECT'||live.tagName==='TEXTAREA')
         return String(live.value||'')===String(template.value||'');
+      // popup.html ships these detail-owned containers empty and popup.js
+      // fills them from the approved record (field rows, URL rows, tags,
+      // attachments), so their element and attributes are still compared but
+      // their own children are content, not skeleton.
+      if(dynamicContainers.has(getId(live))||dynamicContainers.has(getId(template)))return true;
       const a=children(live),b=children(template);
       if(a.length!==b.length)return false;
       for(let index=0;index<a.length;index++)if(!templateShaped(a[index],b[index]))return false;

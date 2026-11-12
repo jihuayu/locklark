@@ -422,6 +422,7 @@ test("the idle live probe compares fixed booleans inside the page", () => {
   // only harness functions/constants it uses.
   const context = vm.createContext({
     ROUTE_COPY_FIELD_SELECTOR: ROUTE_COPY_FIELD_SELECTOR_VALUE,
+    ROUTE_DETAIL_DYNAMIC_CONTAINERS: dynamicContainersSource(),
   });
   vm.runInContext(policySource() + "\n" + SOURCE.slice(start, stop) + "\nthis.probe = routeIdleLiveProbe;", context);
   const expression = context.routeIdleLiveProbe(
@@ -608,6 +609,20 @@ const MINIMAL_DOCUMENT_SOURCE = `function (pageText, heading, username) {
   };
 }`;
 
+// The harness's detail-owned dynamic containers, evaluated by the harness.
+function dynamicContainersSource() {
+  const start = SOURCE.indexOf("const ROUTE_DETAIL_DYNAMIC_CONTAINERS =");
+  const end = SOURCE.indexOf("]);\n", start);
+  assert.ok(start > 0 && end > start, "the dynamic containers must exist");
+  const stop = end + "]);".length;
+  const context = vm.createContext({});
+  vm.runInContext(
+    SOURCE.slice(start, stop) + "\nthis.list = ROUTE_DETAIL_DYNAMIC_CONTAINERS;",
+    context,
+  );
+  return context.list;
+}
+
 // The harness's own probe generator, loaded with synthetic inputs only.
 function harnessProbe() {
   const start = SOURCE.indexOf("const ROUTE_DETAIL_VISIBLE_FIXTURE_KEYS =");
@@ -615,7 +630,10 @@ function harnessProbe() {
   const probeStart = SOURCE.indexOf("function routeIdleLiveProbe(");
   const probeStop = SOURCE.indexOf("\nfunction routeIdleLive(", probeStart);
   assert.ok(start > 0 && stop > start && probeStart > 0 && probeStop > probeStart);
-  const harness = vm.createContext({ ROUTE_COPY_FIELD_SELECTOR: ROUTE_COPY_FIELD_SELECTOR_VALUE });
+  const harness = vm.createContext({
+    ROUTE_COPY_FIELD_SELECTOR: ROUTE_COPY_FIELD_SELECTOR_VALUE,
+    ROUTE_DETAIL_DYNAMIC_CONTAINERS: dynamicContainersSource(),
+  });
   vm.runInContext(SOURCE.slice(start, stop) + "\n" + SOURCE.slice(probeStart, probeStop), harness);
   return harness;
 }
@@ -637,6 +655,7 @@ function runGeneratedProbe(innerText) {
     heading: SYNTHETIC.Title,
     username: SYNTHETIC.Username,
   });
+  // The fake document builder runs inside the page context.
   new vm.Script(
     "this.document = (" + MINIMAL_DOCUMENT_SOURCE + ")(pageText, heading, username);" +
       "this.result = (function (observed) {" +
@@ -670,4 +689,88 @@ test("the generated page expression compiles and enforces the text policy", () =
     );
     assert.equal(leaked % 2, 0, key);
   }
+});
+
+// A synthetic page for the generated shape check. The template (static
+// popup.html skeleton) leaves the four detail-owned containers empty; the live
+// page has the same fixed skeleton filled with obtainable field and URL rows.
+// Only the nodes the probe reads exist; nothing is written or hooked.
+function shapedPage(live, options = {}) {
+  const node = (tag, id = "", children = [], text = "") => ({
+    tagName: tag.toUpperCase(), id, children, childNodes: text ? [{ nodeType: 3, data: text }] : [],
+    attributes: id ? [{ name: "id" }] : [], textContent: text, hidden: false,
+    getAttribute: () => null, querySelector: () => null, querySelectorAll: () => [],
+  });
+  // The copy proof's password row: its masked value and one Copy control.
+  const value = node("SPAN", "", [], "••••••••");
+  value.attributes = [{ name: "class" }];
+  value.getAttribute = (name) => (name === "class" ? "field-value" : null);
+  const copy = node("BUTTON", "", [], "复制");
+  copy.getAttribute = (name) => (name === "data-action" ? "copy-field" : null);
+  const row = node("DIV", "password", [value, copy]);
+  row.getAttribute = (name) => (name === "data-field-id" ? "password" : null);
+  row.querySelector = (selector) => (selector === ".field-value" ? value : null);
+  row.querySelectorAll = (selector) =>
+    selector === '[data-action="copy-field"]' ? [copy] : [];
+  const heading = node("H2", "detail-title", [], live ? SYNTHETIC.Title : "");
+  const rows = [
+    heading,
+    node("DIV", "detail-fields", live ? [row] : []),
+    node("DIV", "detail-urls", live ? [node("DIV", "", [node("SPAN", "", [], "synthetic.example")])] : []),
+    node("DIV", "detail-tags"),
+    node("DIV", "attachment-list"),
+    node("P", "detail-notes", [], live ? SYNTHETIC.Username : ""),
+  ];
+  // An extra outer child breaks the fixed detail skeleton.
+  if (options.extraOuterChild) rows.push(node("P", "note", [], "extra"));
+  const detail = node("SECTION", "detail-view", rows);
+  const fields = detail.children[1];
+  fields.querySelector = (selector) =>
+    selector === '[data-field-id="password"]' ? (live ? row : null) : null;
+  const byId = {
+    "#detail-view": detail,
+    "#detail-title": heading,
+    "#detail-fields": fields,
+    "#detail-notes": detail.children[5],
+  };
+  return {
+    body: { dataset: { view: "detail" }, childNodes: [], children: [], innerText: [SYNTHETIC.Title, SYNTHETIC.Username].join("\n") },
+    visibilityState: "visible",
+    querySelector: (selector) => byId[selector] ?? null,
+    implementation: {
+      // The static page's own detail tree, as parsed from popup.html: the same
+      // fixed skeleton, its containers empty and its title carrying no text.
+      createHTMLDocument: () => {
+        const template = shapedPage(false).querySelector("#detail-view");
+        template.querySelector = (selector) =>
+          selector === "#detail-title" ? template.children[0] : null;
+        return {
+          body: {},
+          querySelector: (selector) => (selector === "#detail-view" ? template : null),
+        };
+      },
+    },
+  };
+}
+
+test("the generated probe accepts a filled detail whose skeleton matches", () => {
+  const harness = harnessProbe();
+  const expression = harness.routeIdleLiveProbe(
+    SYNTHETIC.Title, allTexts(), forbiddenFor(SYNTHETIC), "<static popup.html detail>", []);
+  const result = new vm.Script("(" + expression + ")").runInContext(
+    vm.createContext({ document: shapedPage(true) }),
+  );
+  assert.equal(result.fixtureOnly, true);
+  assert.equal(result.fixtureAbsent, true);
+});
+
+test("the generated probe still refuses a static outer-structure mismatch", () => {
+  const harness = harnessProbe();
+  const expression = harness.routeIdleLiveProbe(
+    SYNTHETIC.Title, allTexts(), forbiddenFor(SYNTHETIC), "<static popup.html detail>", []);
+  const page = shapedPage(true, { extraOuterChild: true });
+  const result = new vm.Script("(" + expression + ")").runInContext(
+    vm.createContext({ document: page }),
+  );
+  assert.equal(result.fixtureOnly, false);
 });
