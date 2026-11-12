@@ -33,6 +33,7 @@ import ctypes
 import inspect
 import math
 import os
+import time
 
 import native_acceptance_contract as contract
 
@@ -102,6 +103,15 @@ CLICK_FRACTIONS = (0.2, 0.5, 0.8)
 # (never a bare -25212); kAXErrorSuccess == 0 needs no lookup.  The expected
 # value guards against a substituted or absent constant.
 AX_ERROR_NO_VALUE_EXPECTED = -25212
+# Activation-only readiness for ONE already-known pid. NSRunningApplication
+# registration and finished launching legitimately lag the process itself (the
+# owned da850 diagnosis saw the app absent at t0 and launch-finished by 0.26 s),
+# so the identity proof is re-read and registration/readiness is polled inside
+# this one short bound before the single activation. A dead process or a
+# mismatched path/uid never waits; an absent or not-yet-launched application
+# waits only within the bound and then refuses.
+ACTIVATE_READY_TIMEOUT = 2.0
+ACTIVATE_READY_POLL = 0.02
 
 
 def _frame_relation(frame, bounds):
@@ -1689,18 +1699,15 @@ class QuartzApi:
         return bool(running.activateWithOptions_(
             self.appkit.NSApplicationActivateIgnoringOtherApps))
 
-    def activate_process(self, pid, executable):
-        """Identity-proofed, once-only activation of ONE already-known pid.
+    def _activation_identity(self, pid, executable):
+        """Re-read ONE pid's live path/uid and prove it is the exact request.
 
-        Only ``process(pid)`` (proc_pidpath + proc_pidinfo pid/uid) is read:
-        no window is listed, no AX element is created and no title, control or
-        foreground content is queried. The path must equal the requested
-        canonical executable exactly and the live uid must be ours. The
-        activation hook supplied by the adapter is then called exactly once
-        and its verdict is returned verbatim; nothing here retries.
+        Only ``process(pid)`` (proc_pidpath + proc_pidinfo pid/uid) is read. A
+        dead or unreadable process refuses ``activation-failed``; a path that
+        is not the exact requested canonical executable, or a uid that is not
+        provably ours, refuses ``process-untrusted``. Both are final: the
+        caller never waits or retries after them.
         """
-        if type(pid) is not int or pid <= 1:
-            raise contract.ContractError("activation-invalid")
         path, trusted = self.process(pid)
         if not path:
             raise contract.ContractError("activation-failed")
@@ -1708,6 +1715,76 @@ class QuartzApi:
             raise contract.ContractError("process-untrusted")
         if trusted is not True:
             raise contract.ContractError("process-untrusted")
+
+    def activation_ready(self, pid):
+        """Read-only readiness of THIS pid's NSRunningApplication, or raise.
+
+        Returns ``False`` only while the application is not yet registered
+        (``None``) or registered and not yet finished launching; that is the
+        sole state the caller may wait on. Returns ``True`` only when the
+        registered object confirms this exact pid (``processIdentifier``, when
+        it can be asked) and ``isFinishedLaunching()`` answers the built-in
+        ``True``. A missing/raising AppKit API, an object for a different pid,
+        or any other ``isFinishedLaunching`` answer refuses ``activation-failed``
+        at once - it is never readiness and never a wait.
+        """
+        try:
+            lookup = self.appkit.NSRunningApplication.runningApplicationWithProcessIdentifier_
+            running = lookup(int(pid))
+        except Exception:
+            raise contract.ContractError("activation-failed")
+        if running is None:
+            return False
+        if running is True or running is False:
+            raise contract.ContractError("activation-failed")
+        try:
+            identifier = getattr(running, "processIdentifier", None)
+            if callable(identifier) and int(identifier()) != int(pid):
+                raise contract.ContractError("activation-failed")
+            finished = running.isFinishedLaunching()
+        except contract.ContractError:
+            raise
+        except Exception:
+            raise contract.ContractError("activation-failed")
+        if finished is True:
+            return True
+        if finished is False:
+            return False
+        raise contract.ContractError("activation-failed")
+
+    def activate_process(self, pid, executable):
+        """Identity-proofed, bounded-readiness, once-only activation of ONE known pid.
+
+        Only ``process(pid)`` (proc_pidpath + proc_pidinfo pid/uid) and this
+        pid's own ``NSRunningApplication`` registration/isFinishedLaunching are
+        read: no window is listed, no AX element is created and no title,
+        control or foreground content is queried. The identity (exact
+        executable, our uid, live process) must hold BEFORE the readiness wait
+        (re-read on every poll, so a process that dies or is replaced while
+        waiting refuses) and is re-read once more after readiness and BEFORE
+        the single activation. An absent or not-yet-finished application may
+        only WAIT inside ``ACTIVATE_READY_TIMEOUT``; on expiry the request
+        refuses. A missing or unusable AppKit readiness API is refused at once,
+        without waiting. Exactly one OS activation is then attempted and its
+        verdict returned verbatim; nothing retries after an activation call or
+        a refusal.
+        """
+        if type(pid) is not int or pid <= 1:
+            raise contract.ContractError("activation-invalid")
+        deadline = time.monotonic() + ACTIVATE_READY_TIMEOUT
+        while True:
+            self._activation_identity(pid, executable)
+            ready = self.activation_ready(pid)
+            if ready is True:
+                break
+            # Only a definite "not yet registered / not yet finished" may wait;
+            # an unusable API already raised, and a passed deadline refuses
+            # without ever calling activation.
+            if time.monotonic() < deadline:
+                time.sleep(max(0.0, min(ACTIVATE_READY_POLL, deadline - time.monotonic())))
+                continue
+            raise contract.ContractError("activation-failed")
+        self._activation_identity(pid, executable)
         return self.activate(pid)
 
     def _post(self, events):

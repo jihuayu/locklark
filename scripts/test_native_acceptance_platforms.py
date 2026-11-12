@@ -826,8 +826,13 @@ class FakeMacApi:
 
 
 class FakeRunningApplication:
-    def __init__(self, verdict=True):
+    """One registered, launch-finished NSRunningApplication with a verdict."""
+
+    def __init__(self, verdict=True, finished=True):
         self.verdict = verdict
+        # A real NSRunningApplication may be registered while still launching;
+        # readiness requires the built-in True from isFinishedLaunching().
+        self.finished = finished
         self.options = []
 
     def activateWithOptions_(self, options):
@@ -835,6 +840,10 @@ class FakeRunningApplication:
         if isinstance(self.verdict, Exception):
             raise self.verdict
         return self.verdict
+
+    def isFinishedLaunching(self):
+        result = self.finished()
+        return result
 
 
 class FakeWorkspaceAppKit:
@@ -846,8 +855,20 @@ class FakeWorkspaceAppKit:
 
     def __init__(self, running=None):
         self.running = running
+        # The looked-up application object reports its own registered pid and
+        # readiness; it is never the AppKit module itself.
+        if isinstance(running, FakeRunningApplication):
+            store = running.__dict__
+
+            def finished():
+                value = store["finished"]
+                return value() if callable(value) else value
+
+            running.processIdentifier = lambda: self.registered_pid
+            running.isFinishedLaunching = finished
         self.lookups = []
         self.our_appkit = self
+        self.registered_pid = None
 
         class NSRunningApplication(object):
             pass
@@ -855,6 +876,7 @@ class FakeWorkspaceAppKit:
         @staticmethod
         def by_pid(pid):
             self.lookups.append(pid)
+            self.registered_pid = pid
             return self.running
 
         NSRunningApplication.runningApplicationWithProcessIdentifier_ = by_pid
@@ -875,6 +897,21 @@ def activation_api(path="/opt/locklark/locklark-desktop", uid=None, running=None
     api.process = lambda pid: (path, uid == os.getuid())
     api.appkit = FakeWorkspaceAppKit(running)
     return api
+
+
+class ReadinessClock:
+    """Deterministic ``browser_native_macos.time`` for the readiness bound."""
+
+    def __init__(self):
+        self.now = 1000.0
+        self.sleeps = []
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
 
 
 def assert_named_activation_options(test, api, running):
@@ -902,7 +939,8 @@ class MacActivationOnlyTests(unittest.TestCase):
         running = FakeRunningApplication(True)
         api = activation_api(running=running)
         self.assertEqual(self.run_driver(api), (0, '{"activated": true}\n', ""))
-        self.assertEqual(api.appkit.lookups, [self.PID])
+        # One readiness lookup for this exact PID, then the activation's own.
+        self.assertEqual(api.appkit.lookups, [self.PID, self.PID])
         assert_named_activation_options(self, api, running)
 
     def test_trusted_real_api_path_checks_pid_path_and_uid_before_one_activation(self):
@@ -918,8 +956,9 @@ class MacActivationOnlyTests(unittest.TestCase):
 
         api.process = process
         self.assertIs(requested(api, self.PID, self.EXE), True)
-        self.assertEqual(looked_up, [self.PID])
-        self.assertEqual(api.appkit.lookups, [self.PID])
+        # Pre-readiness proof, post-readiness recheck, then the one activation.
+        self.assertEqual(looked_up, [self.PID, self.PID])
+        self.assertEqual(api.appkit.lookups, [self.PID, self.PID])
         assert_named_activation_options(self, api, running)
 
     def test_identity_refusals_never_activate(self):
@@ -987,6 +1026,248 @@ class MacActivationOnlyTests(unittest.TestCase):
         self.assertEqual((status, stdout.getvalue()), (1, ""))
         self.assertIn("code=activation-unsupported", stderr.getvalue())
         self.assertEqual((win32.activations, win32.clicks), (0, []))
+
+
+class RegisteredApplication:
+    """A registration that appears only on lookup ``appear_at``, then reports
+    ``finished`` for ``finish_after_visible`` more lookups before finishing."""
+
+    def __init__(self, appear_at=0, finish_after_visible=0):
+        self.appear_at = appear_at
+        self.finish_after_visible = finish_after_visible
+
+    def answer(self, lookup):
+        """(present, finished) for the n-th (0-based) lookup of this pid."""
+        if lookup < self.appear_at:
+            return False, False
+        visible = lookup - self.appear_at
+        return True, visible >= self.finish_after_visible
+
+
+class _ReadinessStates:
+    """Strict AppKit stand-in carrying the scripted registration state.
+
+    Like ``FakeWorkspaceAppKit``, any AppKit symbol outside the one lookup and
+    the one exported option raises. ``lookups`` records every single-pid lookup.
+    """
+
+    NSApplicationActivateIgnoringOtherApps = FakeWorkspaceAppKit.NSApplicationActivateIgnoringOtherApps
+
+    def __init__(self, pid):
+        self.lookups = []
+        # The registered object answers from its OWN state only: it never
+        # borrows the module-level readiness stub.
+        self.application = FakeRunningApplication(True)
+        self.application.processIdentifier = lambda: pid
+        appkit = self
+
+        class NSRunningApplication(object):
+            @staticmethod
+            def runningApplicationWithProcessIdentifier_(looked_up):
+                appkit.lookups.append(looked_up)
+
+        self.NSRunningApplication = NSRunningApplication
+
+    def __getattr__(self, name):
+        raise AssertionError("readiness touched AppKit symbol " + name)
+
+
+def _raising():
+    raise AttributeError("no readiness answer")
+
+
+class ActivationReadinessTests(unittest.TestCase):
+    """Bounded read-only readiness BEFORE exactly one OS activation."""
+
+    PID = 4242
+    EXE = "/opt/locklark/locklark-desktop"
+
+    def setUp(self):
+        self.clock = ReadinessClock()
+        patcher = patch.multiple(macos.time, monotonic=self.clock.monotonic,
+                                 sleep=self.clock.sleep)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def api(self, registration, answers=None):
+        """Real QuartzApi.activate_process over a scripted registration/identity.
+
+        ``answers`` is a list of ``process()`` answers consumed per call and
+        then repeated; ``registration`` is a ``RegisteredApplication`` that
+        decides each AppKit lookup by its index.
+        """
+        api = macos.QuartzApi.__new__(macos.QuartzApi)
+        api.appkit = states = _ReadinessStates(self.PID)
+        running = states.application
+        lookups = states.lookups
+
+        def lookup(looked_up):
+            lookups.append(looked_up)
+            present, finished = registration.answer(len(lookups) - 1)
+            if not present:
+                return None
+            # A real object answers this from its own current state.
+            running.finished = lambda: finished
+            return running
+
+        # Bind on the one dedicated class: ``_ReadinessStates.__getattr__`` would
+        # not rebind, and setting on a looked-up stand-in must never happen.
+        running_class = states.__dict__["NSRunningApplication"]
+        running_class.runningApplicationWithProcessIdentifier_ = staticmethod(lookup)
+        calls = []
+        script = list(answers or [(self.EXE, True)])
+
+        def process(process_pid):
+            calls.append(process_pid)
+            return script[min(len(calls), len(script)) - 1]
+
+        api.process = process
+        return api, running, calls
+
+    def activate(self, api):
+        return api.activate_process(self.PID, self.EXE)
+
+    def assert_refused(self, test, api, running, code="activation-failed"):
+        with test.assertRaises(contract.ContractError) as error:
+            test.activate(api)
+        test.assertEqual(error.exception.code, code)
+        test.assertEqual(running.options, [])
+
+    def test_delayed_registration_waits_within_bound_then_activates_once(self):
+        api, running, calls = self.api(RegisteredApplication(appear_at=3))
+        self.assertIs(self.activate(api), True)
+        # Readiness lookup, then the activation's own single-pid lookup.
+        self.assertEqual(len(api.appkit.lookups), 5)
+        # Identity is proven BEFORE every readiness poll and re-read once after
+        # readiness, BEFORE the single activation (4 polls + 1 recheck).
+        self.assertEqual(len(calls), 5)
+        self.assertEqual(set(calls), {self.PID})
+        self.assertEqual(len(self.clock.sleeps), 3)
+        self.assertTrue(all(0 < s <= macos.ACTIVATE_READY_POLL for s in self.clock.sleeps))
+        assert_named_activation_options(self, api, running)
+
+    def test_registered_but_not_finished_waits_then_activates_once(self):
+        api, running, _ = self.api(RegisteredApplication(finish_after_visible=2))
+        self.assertIs(self.activate(api), True)
+        self.assertEqual(len(api.appkit.lookups), 4)
+        assert_named_activation_options(self, api, running)
+
+    def test_already_ready_activates_once_without_waiting(self):
+        api, running, calls = self.api(RegisteredApplication())
+        self.assertIs(self.activate(api), True)
+        # Two identity reads (before readiness, after readiness) and one more
+        # single-pid lookup for registration: no waiting and no extra attempt.
+        self.assertEqual((self.clock.sleeps, len(calls), api.appkit.lookups),
+                         ([], 2, [self.PID, self.PID]))
+        assert_named_activation_options(self, api, running)
+
+    def test_dead_process_refuses_before_any_readiness_or_activation(self):
+        for answer, code in ((("", False), "activation-failed"),
+                             ((self.EXE, False), "process-untrusted"),
+                             (("/opt/locklark/other-desktop", True), "process-untrusted")):
+            with self.subTest(answer=answer):
+                self.clock.sleeps.clear()
+                api, running, calls = self.api(RegisteredApplication(), answers=[answer])
+                self.assert_refused(self, api, running, code=code)
+                self.assertEqual((len(calls), self.clock.sleeps), (1, []))
+
+    def test_identity_lost_while_waiting_refuses_without_activation(self):
+        cases = (
+            (RegisteredApplication(appear_at=5),
+             [(self.EXE, True)] * 3 + [("", False)], "activation-failed", 3),
+            (RegisteredApplication(appear_at=5),
+             [(self.EXE, True)] * 2 + [("/opt/locklark/other-desktop", True)],
+             "process-untrusted", 2),
+            (RegisteredApplication(appear_at=5),
+             [(self.EXE, True)] * 2 + [(self.EXE, False)], "process-untrusted", 2),
+        )
+        for registration, answers, code, lookups in cases:
+            with self.subTest(answers=answers):
+                api, running, _ = self.api(registration, answers=answers)
+                self.assert_refused(self, api, running, code=code)
+
+    def test_identity_rechecked_after_readiness_and_before_activation(self):
+        # Ready immediately, but the path changed between the readiness read
+        # and the pre-activation recheck: refuse, never activate.
+        api, running, calls = self.api(RegisteredApplication(),
+                                       answers=[(self.EXE, True), ("", False)])
+        self.assert_refused(self, api, running)
+        self.assertEqual(len(calls), 2)
+
+    def test_timeout_while_absent_or_unfinished_refuses_without_activation(self):
+        for registration in (RegisteredApplication(appear_at=10 ** 6),
+                             RegisteredApplication(finish_after_visible=10 ** 6)):
+            with self.subTest(registration=vars(registration)):
+                self.clock.now = 1000.0
+                api, running, _ = self.api(registration)
+                with self.assertRaises(contract.ContractError) as error:
+                    self.activate(api)
+                self.assertEqual(error.exception.code, "activation-failed")
+                self.assertEqual(running.options, [])
+                self.assertGreater(len(api.appkit.lookups), 1)
+                self.assertLessEqual(self.clock.now - 1000.0, macos.ACTIVATE_READY_TIMEOUT + macos.ACTIVATE_READY_POLL)
+                self.assertGreaterEqual(self.clock.now - 1000.0, macos.ACTIVATE_READY_TIMEOUT)
+
+    def test_missing_or_unknown_readiness_api_refuses_without_waiting(self):
+        # Every breakage is final: no sleep and never an activation.
+        for breakage in ("lookup", "finished", "wrong_pid"):
+            with self.subTest(breakage=breakage):
+                self.clock.sleeps[:] = []
+                api, running, _ = self.api(RegisteredApplication())
+                if breakage == "lookup":
+                    del api.appkit.NSRunningApplication
+                elif breakage == "finished":
+                    # isFinishedLaunching raises: its result is unusable.
+                    running.isFinishedLaunching = _raising
+                else:
+                    running.processIdentifier = lambda: self.PID + 1
+                self.assert_refused(self, api, running)
+                self.assertEqual(self.clock.sleeps, [])
+                self.assertEqual(running.options, [])
+
+    def test_non_bool_finished_is_never_readiness(self):
+        for value in (1, "yes", None):
+            with self.subTest(value=value):
+                self.clock.sleeps[:] = []
+                api, running, _ = self.api(RegisteredApplication())
+                running.isFinishedLaunching = lambda value=value: value
+                self.assert_refused(self, api, running)
+                self.assertEqual((running.options, self.clock.sleeps), ([], []))
+
+    def test_false_activation_verdict_is_one_activation_and_no_retry(self):
+        api, running, _ = self.api(RegisteredApplication())
+        running.verdict = False
+        self.assertIs(self.activate(api), False)
+        self.assertEqual(len(running.options), 1)
+        self.assertEqual(len(api.appkit.lookups), 2)
+
+    def test_driver_reports_delayed_registration_success_and_timeout_refusal(self):
+        raw = json.dumps({"activate_pid": self.PID, "executable": self.EXE}).encode()
+
+        def run(api):
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with patch.object(macos.MacAdapter, "__init__",
+                              lambda self, *a, **k: setattr(self, "api", api)):
+                status = driver.main(argv=["--platform", "macos"], stdin=io.BytesIO(raw),
+                                     stdout=stdout, stderr=stderr)
+            return status, stdout.getvalue(), stderr.getvalue()
+
+        api, running, _ = self.api(RegisteredApplication(appear_at=2, finish_after_visible=1))
+        self.assertEqual(run(api), (0, '{"activated": true}\n', ""))
+        assert_named_activation_options(self, api, running)
+        api, running, _ = self.api(RegisteredApplication(appear_at=10 ** 6))
+        status, stdout, stderr = run(api)
+        self.assertEqual((status, stdout), (1, ""))
+        self.assertEqual(stderr, "Native acceptance input failed [code=activation-failed "
+                                 "action=activate index=-1 platform=macos]\n")
+        self.assertEqual(running.options, [])
+
+    def test_readiness_never_reads_windows_or_accessibility(self):
+        api, running, _ = self.api(RegisteredApplication(appear_at=1))
+        # Any window/AX/foreground touch is an AttributeError on this bare API.
+        self.assertIs(self.activate(api), True)
+        self.assertFalse(hasattr(api, "ax"))
+        self.assertFalse(hasattr(api, "quartz"))
 
 
 class MacCapabilityTests(unittest.TestCase):

@@ -221,6 +221,12 @@ class _Running:
     def __init__(self, frameworks, pid):
         self.frameworks, self.pid = frameworks, pid
 
+    def processIdentifier(self):
+        return self.pid
+
+    def isFinishedLaunching(self):
+        return True
+
     def activateWithOptions_(self, options):
         self.frameworks.activations.append(self.pid)
         return True
