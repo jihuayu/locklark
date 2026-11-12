@@ -49,8 +49,12 @@ const CHECKOUT_STARTUP_PHASES = [
   "https-ready",
   "journey-entered",
 ];
+// Only a normal checkout run marked. A checkout invocation mixed with
+// route/Edge mode is refused below, so it must never mark anything (not even
+// module-ready) before that refusal.
+let normalCheckoutMode = true;
 function startupMarkup(index) {
-  if (checkoutFrames)
+  if (checkoutFrames && normalCheckoutMode)
     console.log(CHECKOUT_STARTUP_PREFIX + CHECKOUT_STARTUP_PHASES[index]);
 }
 // Explicit opt-in: a QuickFill=false action row opens one persistent route tab
@@ -105,7 +109,6 @@ const require = createRequire(join(root, "web/package.json"));
 const { chromium } = process.env.LOCKLARK_TEST_PLAYWRIGHT
   ? require(process.env.LOCKLARK_TEST_PLAYWRIGHT)
   : require("playwright");
-startupMarkup(0);
 const go = process.env.LOCKLARK_GO || "go";
 const host = process.env.LOCKLARK_BROWSER_HOST;
 const register = process.env.LOCKLARK_BROWSER_REGISTER
@@ -202,6 +205,12 @@ if (edgePairDisconnect) {
       "Edge pair/disconnect cannot be combined with another acceptance mode",
     );
 }
+// After every route/Edge compatibility assertion above: a checkout invocation
+// in any of those modes is refused there, so this is the first point at which
+// a checkout run is known to be a normal one. The launch-boundary markers keep
+// their order; only a refused mixed run loses them.
+normalCheckoutMode = !routeDetailRead && !edgeManagerInstall;
+startupMarkup(0);
 if (register)
   assert(existsSync(register), "LOCKLARK_BROWSER_REGISTER must name a built executable");
 assert(

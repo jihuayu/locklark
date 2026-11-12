@@ -89,6 +89,14 @@ def _pass_stdout(
     lines.append(support.CHECKOUT_PASS_SUMMARY)
     return "\n".join(lines) + "\n"
 
+# Independent of production's own line splitting: a diagnostic is present when
+# ANY stderr line starts with the fixed prefix (Str.splitlines boundaries).
+def _diagnostic_present(stderr: str) -> bool:
+    return any(
+        line.startswith(support._CHECKOUT_DIAGNOSTIC_PREFIX)
+        for line in str(stderr or "").splitlines()
+    )
+
 
 class CheckoutNativeAcceptanceTests(unittest.TestCase):
     def setUp(self):
@@ -563,18 +571,30 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
                 payload["nativeError"] = native
             return "Native browser diagnostic: " + json.dumps(payload)
 
+        def valid_native(code="window-timeout", action="label-wait"):
+            return {"code": code, "action": action}
+
         def cases():
             yield line("checkout-stale:navigation CANARY-9f3a1c", None)
             yield line("passkey-get", None)
-            # Unallowlisted action, out-of-range index and non-string values.
+            # Non-allowlisted action and code, out-of-range x_codes and index,
+            # and non-string values fail closed.
+            yield line("fixture", valid_native(action="CANARY-9f3a1c"))
+            yield line("fixture", valid_native(code="window-frozen"))
+            yield line("fixture", {"code": "window-timeout", "action": "label-wait",
+                                   "x_codes": [3, 0]})
+            yield line("fixture", {"code": "window-timeout", "action": "label-wait",
+                                   "index": -2})
             yield line("fixture", {"code": "window-timeout", "action": "label-wait",
                                    "index": 256})
             yield line("fixture", {"code": ["window-timeout"], "action": "label-wait"})
             yield line("fixture", {"code": "window-timeout", "action": {"x": 1}})
-            yield line("fixture", {"code": "window-timeout", "action": "label-wait"})
-            # Oversized, repeated (even identical) and unparseable prefixes.
+            # Oversized, repeated (identical or otherwise valid) and
+            # unparseable prefixes.
             yield line("fixture", None) + " " * 9000
             yield line("fixture", None) + "\n" + line("fixture", None)
+            yield (line("fixture", None) + "\n"
+                   + line("native-pair", valid_native()))
             yield "Native browser diagnostic: {not json"
             yield "Native browser diagnostic: {not json\n" + line("fixture", None)
             yield line("fixture", None).replace("Native browser diagnostic:", " x")
@@ -588,9 +608,7 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
             "wrapperFamily": "unknown",
         }
         for stderr in cases():
-            # Only an exact line prefix is a present diagnostic; otherwise absent.
-            state = ("rejected" if stderr.startswith(
-                support._CHECKOUT_DIAGNOSTIC_PREFIX) else "absent")
+            state = "rejected" if _diagnostic_present(stderr) else "absent"
             with self.subTest(stderr=stderr[:40]):
                 record, message = self._nonzero(stderr)
                 self._assert_no_canary(record, message)
@@ -603,15 +621,20 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
         def marker_all_but(omit):
             return "".join(prefix + p + "\n" for p in support._CHECKOUT_STARTUP_PHASES
                            if p != omit)
-        # Accepted diagnostic carrying canary text in reason/message.
-        good = support._CHECKOUT_DIAGNOSTIC_PREFIX + json.dumps(
-            {"stage": "fixture", "reason": "CANARY-9f3a1c",
-             "message": "CANARY-9f3a1c /home/runner/x"}
-        )
         https = marker_all_but("journey-entered")
+        # Accepted diagnostic carrying canary text in reason/message.
+        payload = {"stage": "fixture", "reason": "CANARY-9f3a1c",
+                   "message": "CANARY-9f3a1c /home/runner/x"}
+        good = support._CHECKOUT_DIAGNOSTIC_PREFIX + json.dumps(payload)
+        # An invalid record after unrelated stderr: presence is any-line, so the
+        # fixed projection is rejected rather than read as absent.
+        not_first = "private body /home/runner/x\n" + (
+            support._CHECKOUT_DIAGNOSTIC_PREFIX
+            + json.dumps({**payload, "nativeError": {
+                "code": "window-frozen", "action": "label-wait"}}))
         cases = (
             # (stdout, stderr, startupPhase, failureRecordState, wrapperFamily)
-            (marker_all_but("https-ready"), good, "journey-entered", "accepted",
+            (marker_all_but("journey-entered"), good, "https-ready", "accepted",
              "unknown"),
             ("", "", "unknown", "absent", "unknown"),
             ("", "private body", "unknown", "absent", "unknown"),
@@ -632,8 +655,34 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
              "dbus"),
             (https, "SyntaxError: Cannot use import statement CANARY-9f3a1c",
              "https-ready", "absent", "node-loader"),
+            # Per-line startup limit: the longest accepted marker line is
+            # accepted, one more character rejects the whole block.
+            (https + prefix + "module-ready" + " " * 127, "", "unknown",
+             "absent", "unknown"),
+            (https + prefix + "module-ready" + " " * 128, "", "unknown",
+             "absent", "unknown"),
+            # Every marker line is read and only the last valid phase is
+            # projected: an exact repeat keeps it, a repeated invalid value
+            # rejects the whole block, and a different valid line wins.
+            (https + "\n" + prefix + "journey-entered\n"
+             + prefix + "journey-entered\n", "", "journey-entered", "absent",
+             "unknown"),
+            (https + "\n" + prefix + "journey-entered\n"
+             + prefix + "journal-entered\n", "", "unknown", "absent", "unknown"),
+            (https + "\n" + prefix + "journey-entered\n"
+             + prefix + "state-ready\n", "", "state-ready", "absent",
+             "unknown"),
+            (https, "private body /home/runner/x\n" + good, "https-ready",
+             "accepted", "unknown"),
+            (https, not_first, "https-ready", "rejected", "unknown"),
         )
         for stdout, stderr, phase, state, family in cases:
+            # Accepted/rejected/absent must match any-line presence independently.
+            if state == "accepted":
+                self.assertTrue(_diagnostic_present(stderr))
+            else:
+                self.assertEqual(state, "rejected" if _diagnostic_present(stderr)
+                                 else "absent")
             with self.subTest(case=stdout[-20:] + stderr[:20]):
                 os.environ["LOCKLARK_E2E_CHECKOUT_NATIVE"] = "1"
                 ctx = self._ctx()

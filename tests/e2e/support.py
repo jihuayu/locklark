@@ -2999,6 +2999,7 @@ def _parse_checkout_startup(stdout: str, stderr: str) -> dict[str, str]:
     valid = bool(phases) and all(p in _CHECKOUT_STARTUP_PHASES for p in phases)
     # Independent of the markers: no prefix is absent, a present but unusable
     # one is rejected, and only the existing fixed projection is accepted.
+    # Presence is any line (not only the first) with the exact prefix.
     lines = str(stderr or "").splitlines()
     present = any(line.startswith(_CHECKOUT_DIAGNOSTIC_PREFIX) for line in lines)
     diagnostic = _parse_checkout_failure(stderr)
@@ -3031,7 +3032,8 @@ def _parse_checkout_failure(stderr: str) -> dict[str, Any] | None:
         return None
     found: list[dict[str, Any]] = []
     # Counted before parsing, so a malformed first prefix line still makes
-    # any second prefix line ambiguous.
+    # any second prefix line ambiguous. Same split as the presence check in
+    # _parse_checkout_startup: only splitlines() line boundaries count.
     seen = False
     for raw in text.splitlines():
         line = raw.rstrip("\r")
