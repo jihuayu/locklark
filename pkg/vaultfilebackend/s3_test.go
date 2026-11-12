@@ -52,10 +52,12 @@ type s3Mock struct {
 
 	// PutPreflight, when set, is consulted by every PUT after its body has
 	// been read and before the atomic conditional check. It receives the
-	// current status of the key as observed outside the critical section; that
-	// snapshot is only for the hook's observation and is never consulted to
-	// decide the PUT. The commit re-reads the state under the mutex.
-	PutPreflight func(obs s3PutObservation)
+	// current status of the key as observed outside the critical section and
+	// the request context, so a test hook can stop waiting when the caller
+	// gives up; that snapshot is only for the hook's observation and is never
+	// consulted to decide the PUT. The commit re-reads the state under the
+	// mutex, and only if the request context is still live.
+	PutPreflight func(ctx context.Context, obs s3PutObservation)
 
 	// addressed records request URLs seen by recordingTransport.
 	addressed []url.URL
@@ -131,7 +133,7 @@ func (m *s3Mock) setHook(hook func(w http.ResponseWriter, r *http.Request) bool)
 
 // setPutPreflight installs the PUT preflight observation hook, read under the
 // same mutex for the same reason as Hook.
-func (m *s3Mock) setPutPreflight(fn func(obs s3PutObservation)) {
+func (m *s3Mock) setPutPreflight(fn func(context.Context, s3PutObservation)) {
 	m.mu.Lock()
 	m.PutPreflight = fn
 	m.mu.Unlock()
@@ -142,14 +144,14 @@ func (m *s3Mock) setPutPreflight(fn func(obs s3PutObservation)) {
 // after it is released, so the PUT path never holds the mutex while the hook
 // waits. A hook installed with setPutPreflight after the snapshot was taken is
 // never called with a stale observation.
-func (m *s3Mock) observePut(obs s3PutObservation) {
+func (m *s3Mock) observePut(ctx context.Context, obs s3PutObservation) {
 	m.mu.Lock()
 	_, obs.Exists = m.objects[obs.Key]
 	obs.ETag = m.etags[obs.Key]
 	fn := m.PutPreflight
 	m.mu.Unlock()
 	if fn != nil {
-		fn(obs)
+		fn(ctx, obs)
 	}
 }
 
@@ -219,12 +221,18 @@ func (m *s3Mock) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		// The observation hook runs here, outside m.mu and only to let a test
 		// coordinate concurrent PUTs; the verdict below is taken under m.mu.
-		m.observePut(s3PutObservation{
+		m.observePut(r.Context(), s3PutObservation{
 			Method:      r.Method,
 			Key:         key,
 			IfNoneMatch: r.Header.Get("If-None-Match"),
 			IfMatch:     r.Header.Get("If-Match"),
 		})
+		// The hook may have waited for other participants or for the caller.
+		// A request cancelled meanwhile ends here, before any state changes.
+		if r.Context().Err() != nil {
+			abortIfClientGone(w, r)
+			return
+		}
 		if inm := r.Header.Get("If-None-Match"); inm != "" && inm != "*" {
 			m.t.Errorf("If-None-Match = %q, mock only implements *", inm)
 		}
@@ -546,35 +554,46 @@ func TestS3ConditionalOneWinner(t *testing.T) {
 }
 
 // putBarrier holds every PUT handler at a fixed point until all of them have
-// arrived there. It is never used while the mock holds m.mu: the handler
-// reports its observation, releases the mutex, and only then waits.
+// arrived and the test explicitly releases them. It is never used while the
+// mock holds m.mu: the handler reports its observation, releases the mutex,
+// and only then waits.
 type putBarrier struct {
 	participants int
-	arrived      sync.WaitGroup // counts participants reaching the barrier
 	release      chan struct{}
 	once         sync.Once
+
+	arrived chan struct{} // one token per participant reaching the barrier
 
 	obsMu sync.Mutex
 	obs   []s3PutObservation
 }
 
 func newPutBarrier(participants int) *putBarrier {
-	b := &putBarrier{participants: participants, release: make(chan struct{})}
-	b.arrived.Add(participants)
-	return b
+	return &putBarrier{
+		participants: participants,
+		release:      make(chan struct{}),
+		arrived:      make(chan struct{}, participants),
+	}
 }
 
-// wait records obs and blocks until every participant has arrived, then
-// releases all of them together.
-func (b *putBarrier) wait(obs s3PutObservation) {
+// wait records obs and blocks until its request context ends or the test
+// releases the barrier. The request context derives from the shared test
+// context, so cancelling either one unblocks the handler. The last arrival
+// never releases it automatically: only the test decides when the race
+// starts.
+func (b *putBarrier) wait(ctx context.Context, obs s3PutObservation) {
 	b.obsMu.Lock()
 	b.obs = append(b.obs, obs)
 	b.obsMu.Unlock()
-	b.arrived.Done()
-	b.arrived.Wait()
-	b.once.Do(func() { close(b.release) })
-	<-b.release
+	b.arrived <- struct{}{}
+	select {
+	case <-ctx.Done():
+	case <-b.release:
+	}
 }
+
+// releaseAll frees every waiting participant; it is idempotent.
+func (b *putBarrier) releaseAll() { b.once.Do(func() { close(b.release) }) }
 
 // observations returns the initial state every participant saw.
 func (b *putBarrier) observations() []s3PutObservation {
@@ -583,19 +602,153 @@ func (b *putBarrier) observations() []s3PutObservation {
 	return append([]s3PutObservation(nil), b.obs...)
 }
 
+// putBarrierFailure is the typed failure of the barrier tests. It is reported
+// only after the barrier is released and every writer goroutine has exited.
+type putBarrierFailure struct {
+	reason  string
+	arrived int
+	want    int
+	err     error
+}
+
+func (e *putBarrierFailure) Error() string {
+	return fmt.Sprintf("mock PUT barrier: %s (%d/%d arrived; err %v)", e.reason, e.arrived, e.want, e.err)
+}
+
+func (e *putBarrierFailure) Unwrap() error { return e.err }
+
+// writerResult is what one write goroutine reports when it returns.
+type writerResult struct {
+	index int
+	err   error
+}
+
+// writerRun owns the write goroutines of one race. Its fields are touched only
+// by the test goroutine, so no lock is needed. results is buffered for every
+// writer, so a writer never blocks reporting its outcome, even after the test
+// stopped reading early.
+type writerRun struct {
+	results chan writerResult
+	errs    []error
+	pending int
+	exited  sync.WaitGroup
+	reaped  bool // every writer goroutine has exited; test goroutine only
+}
+
+// startWriters starts one goroutine per op and releases them together.
+func startWriters(ops []func() error) *writerRun {
+	r := &writerRun{
+		results: make(chan writerResult, len(ops)),
+		errs:    make([]error, len(ops)),
+		pending: len(ops),
+	}
+	start := make(chan struct{})
+	r.exited.Add(len(ops))
+	for i, op := range ops {
+		go func(i int) {
+			defer r.exited.Done()
+			<-start
+			r.results <- writerResult{index: i, err: op()}
+		}(i)
+	}
+	close(start)
+	return r
+}
+
+// take records one result. Every result must pass through take exactly once,
+// including one observed early while waiting for the barrier; otherwise the
+// drain would wait for a writer that already reported.
+func (r *writerRun) take(res writerResult) writerResult {
+	r.errs[res.index] = res.err
+	r.pending--
+	return res
+}
+
+// complete waits for the remaining results while ctx is live. It reports
+// false when ctx has ended with writers still outstanding, leaving pending
+// intact for stop to drain, and on success waits for the writer goroutines,
+// which have all reported by then. The ctx check at the top of each pass makes
+// an already-ended deadline win over results that happened to arrive with it.
+func (r *writerRun) complete(ctx context.Context) bool {
+	for r.pending > 0 {
+		if ctx.Err() != nil {
+			return false
+		}
+		select {
+		case res := <-r.results:
+			r.take(res)
+		case <-ctx.Done():
+			return false
+		}
+	}
+	r.exited.Wait()
+	r.reaped = true
+	return true
+}
+
+// drain collects every outstanding result and then waits for the writer
+// goroutines to return. The caller must already have cancelled their contexts
+// and released the barrier, so the drain cannot wait forever.
+func (r *writerRun) drain() {
+	for r.pending > 0 {
+		r.take(<-r.results)
+	}
+	r.exited.Wait()
+	r.reaped = true
+}
+
+// stop ends the race: cancel the writers, release the barrier, drain every
+// result, and return the typed failure to report.
+func (r *writerRun) stop(cancel context.CancelFunc, barrier *putBarrier, reason string, cause error) *putBarrierFailure {
+	cancel()
+	barrier.releaseAll()
+	r.drain()
+	return &putBarrierFailure{reason: reason, arrived: len(barrier.observations()), want: len(r.errs), err: cause}
+}
+
+// awaitBarrier waits until every writer is parked at the barrier. It fails
+// fast if a writer returns first, the test context ends, or the bound
+// expires, and always cleans up before returning the typed failure.
+func awaitBarrier(ctx context.Context, cancel context.CancelFunc, barrier *putBarrier, run *writerRun, timeout time.Duration) *putBarrierFailure {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for arrived := 0; arrived < barrier.participants; arrived++ {
+		select {
+		case <-barrier.arrived:
+		case res := <-run.results:
+			run.take(res)
+			return run.stop(cancel, barrier,
+				fmt.Sprintf("writer %d returned before every writer reached the barrier", res.index), res.err)
+		case <-ctx.Done():
+			return run.stop(cancel, barrier, "test context ended before every writer reached the barrier", ctx.Err())
+		case <-timer.C:
+			return run.stop(cancel, barrier, "timeout waiting for every writer to reach the barrier", context.DeadlineExceeded)
+		}
+	}
+	return nil
+}
+
 // TestS3MockConditionalPutIsAtomic pins the mock's conditional PUT: every
 // precondition check and the commit it guards happen in one critical section.
 //
 // writers conditional PUTs are parked at the mock's preflight observation until
-// all have arrived and each has seen the same initial state; only then are
-// they released together. Exactly one may commit, every other must get
+// all have arrived and each has seen the same initial state; the test then
+// releases them together. Exactly one may commit, every other must get
 // ErrConflict, and the stored bytes and ETag must be the winner's. An
 // implementation that decides from an earlier snapshot, releases the mutex and
 // writes later lets several writers pass and fails here deterministically.
+//
+// Every failure cancels the writers, releases the barrier and drains their
+// results, so it is reported in bounded time rather than after a writer's
+// request deadline.
 func TestS3MockConditionalPutIsAtomic(t *testing.T) {
 	const (
 		writers = 8
 		key     = testS3Prefix + "/atomic"
+		// barrierTimeout bounds the wait for all arrivals; raceDeadline bounds
+		// the whole race, including writers that stall after the release.
+		barrierTimeout = 10 * time.Second
+		raceDeadline   = 30 * time.Second
 	)
 	cases := []struct {
 		name   string
@@ -617,52 +770,74 @@ func TestS3MockConditionalPutIsAtomic(t *testing.T) {
 			m.setPutPreflight(barrier.wait)
 			b := newMockBackend(t, m)
 
+			// testCtx is the complete-race deadline; every request context
+			// derives from it, and ending it ends every writer and every
+			// waiting handler.
+			testCtx, cancel := context.WithTimeout(context.Background(), raceDeadline)
+			defer cancel()
+
 			bodies := make([][]byte, writers)
-			errs := make([]error, writers)
-			var start, done sync.WaitGroup
-			start.Add(1)
+			ops := make([]func() error, writers)
 			for i := range writers {
 				bodies[i] = []byte(fmt.Sprintf("%s-writer-%d", tc.name, i))
-				done.Add(1)
-				go func(i int) {
-					defer done.Done()
-					start.Wait()
-					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-					defer cancel()
+				reqCtx, reqCancel := context.WithCancel(testCtx)
+				defer reqCancel()
+				ops[i] = func() error {
 					if tc.absent {
-						errs[i] = b.CreateIfAbsent(ctx, "atomic", bodies[i])
-					} else {
-						errs[i] = b.ReplaceIfVersion(ctx, "atomic", Revision(baseETag), bodies[i])
+						return b.CreateIfAbsent(reqCtx, "atomic", bodies[i])
 					}
-				}(i)
+					return b.ReplaceIfVersion(reqCtx, "atomic", Revision(baseETag), bodies[i])
+				}
 			}
-			start.Done()
-			done.Wait()
+			run := startWriters(ops)
+			// Even an unexpected assertion failure below ends the race and
+			// reaps the writers before the test returns.
+			t.Cleanup(func() {
+				cancel()
+				barrier.releaseAll()
+				run.drain()
+			})
+
+			if fail := awaitBarrier(testCtx, cancel, barrier, run, barrierTimeout); fail != nil {
+				t.Fatal(fail)
+			}
 
 			// Every participant must have reached the barrier and seen the
 			// same initial precondition state, or the race was not exercised.
-			if n := len(barrier.observations()); n != writers {
-				t.Fatalf("%d PUTs reached the preflight barrier, want %d", n, writers)
+			want := s3PutObservation{
+				Method: http.MethodPut,
+				Key:    key,
+				Exists: !tc.absent,
+				ETag:   baseETag,
 			}
-			for _, obs := range barrier.observations() {
-				want := s3PutObservation{
-					Method: http.MethodPut,
-					Key:    key,
-					Exists: !tc.absent,
-					ETag:   baseETag,
-				}
-				if tc.absent {
-					want.IfNoneMatch = "*"
-				} else {
-					want.IfMatch = baseETag
-				}
-				if obs != want {
-					t.Fatalf("preflight observation = %+v, want every writer to see %+v", obs, want)
+			if tc.absent {
+				want.IfNoneMatch = "*"
+			} else {
+				want.IfMatch = baseETag
+			}
+			obs := barrier.observations()
+			if len(obs) != writers {
+				t.Fatal(run.stop(cancel, barrier, "wrong number of preflight observations", nil))
+			}
+			for _, o := range obs {
+				if o != want {
+					t.Fatal(run.stop(cancel, barrier,
+						fmt.Sprintf("preflight observation = %+v, want every writer to see %+v", o, want), nil))
 				}
 			}
 
+			// All eight are parked and agree: release them together and
+			// collect under the complete-race deadline.
+			barrier.releaseAll()
+			if !run.complete(testCtx) {
+				// A writer stalled after the release. Cancel it, reap every
+				// writer, then report; no goroutine outlives this failure.
+				t.Fatal(run.stop(cancel, barrier,
+					"complete-race deadline ended before every released writer returned", testCtx.Err()))
+			}
+
 			wins, conflicts := []int(nil), []int(nil)
-			for i, err := range errs {
+			for i, err := range run.errs {
 				switch {
 				case err == nil:
 					wins = append(wins, i)
@@ -716,6 +891,127 @@ func TestS3MockConditionalPutIsAtomic(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestS3MockPutBarrierUnblocksOnCancel pins the barrier's escape hatches: a
+// handler parked at the barrier must end when its request context or the
+// shared test context is cancelled, without committing the PUT and without
+// leaving a writer goroutine behind.
+func TestS3MockPutBarrierUnblocksOnCancel(t *testing.T) {
+	const key = testS3Prefix + "/atomic"
+	cases := []struct {
+		name        string
+		cancelWhich string // "request" or "test"
+	}{
+		{name: "request_context", cancelWhich: "request"},
+		{name: "test_context", cancelWhich: "test"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newS3Mock(t)
+			m.reset()
+			barrier := newPutBarrier(1)
+			m.setPutPreflight(barrier.wait)
+			b := newMockBackend(t, m)
+
+			testCtx, cancelTest := context.WithCancel(context.Background())
+			reqCtx, cancelReq := context.WithCancel(testCtx)
+			run := startWriters([]func() error{func() error {
+				return b.CreateIfAbsent(reqCtx, "atomic", []byte("cancelled"))
+			}})
+			t.Cleanup(func() {
+				cancelTest()
+				cancelReq()
+				barrier.releaseAll()
+				run.drain()
+			})
+
+			// Wait for the handler to park without reading its result, so the
+			// result channel still holds it for the assertions below.
+			select {
+			case <-barrier.arrived:
+			case res := <-run.results:
+				run.take(res)
+				t.Fatalf("writer returned before reaching the barrier: %v", res.err)
+			case <-testCtx.Done():
+				t.Fatal("test context ended before the handler reached the barrier")
+			}
+
+			if tc.cancelWhich == "request" {
+				cancelReq()
+			} else {
+				cancelTest()
+			}
+
+			select {
+			case res := <-run.results:
+				run.take(res)
+				if res.err == nil {
+					t.Fatal("cancelled conditional PUT reported success")
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal(run.stop(cancelTest, barrier, "writer did not return after cancellation", context.DeadlineExceeded))
+			}
+			// drain waits for the writer goroutine itself, not just its result.
+			run.drain()
+			if _, _, ok := m.get(key); ok {
+				t.Fatal("cancelled conditional PUT committed an object")
+			}
+		})
+	}
+}
+
+// TestS3MockPutBarrierReleasedWriterDeadline covers a writer that stalls after
+// the barrier released it: the complete-race deadline must end the race, and
+// the typed failure must be returned only after that writer was cancelled and
+// reaped. Channels make the stall deterministic; the test signal replaces a
+// real deadline without waiting for one.
+func TestS3MockPutBarrierReleasedWriterDeadline(t *testing.T) {
+	barrier := newPutBarrier(1)
+	raceCtx, endRace := context.WithCancel(context.Background())
+	defer endRace()
+
+	var running atomic.Int32
+	parked := make(chan struct{})
+	ops := []func() error{
+		func() error { return nil },
+		func() error {
+			running.Add(1)
+			defer running.Add(-1)
+			// Released by the barrier, this writer stays inside the request
+			// until the complete-race deadline ends.
+			close(parked)
+			<-raceCtx.Done()
+			return raceCtx.Err()
+		},
+	}
+	run := startWriters(ops)
+	<-parked
+	endRace()
+
+	if run.complete(raceCtx) {
+		t.Fatal("complete reported success after the complete-race deadline ended")
+	}
+	fail := run.stop(endRace, barrier, "complete-race deadline ended before every released writer returned", raceCtx.Err())
+	var typed *putBarrierFailure
+	if !errors.As(fail, &typed) {
+		t.Fatalf("failure is %T, want *putBarrierFailure", fail)
+	}
+	if !errors.Is(fail, context.Canceled) {
+		t.Fatalf("failure cause = %v, want context.Canceled", fail.err)
+	}
+	if typed.want != len(ops) {
+		t.Fatalf("failure counted %d writers, want %d", typed.want, len(ops))
+	}
+	if !run.reaped {
+		t.Fatal("typed failure returned before every writer goroutine exited")
+	}
+	if got := running.Load(); got != 0 {
+		t.Fatalf("%d writer goroutine(s) still running when the typed failure was returned", got)
+	}
+	if run.pending != 0 {
+		t.Fatalf("%d writer result(s) not drained when the typed failure was returned", run.pending)
 	}
 }
 
