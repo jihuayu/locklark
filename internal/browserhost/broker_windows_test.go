@@ -4,6 +4,8 @@ package browserhost
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -46,7 +48,20 @@ func TestWindowsBrokerHandshakeOrderingAndDialBudget(t *testing.T) {
 		t.Fatal("dial budget ignored a canceled caller context")
 	}
 
-	if _, e := dialLocal(context.Background(), `\\.\pipe\Locklark-Browser-missing-test-pipe`); e != ErrBrokerUnavailable {
-		t.Fatalf("missing pipe: %v", e)
+	// A failed dial keeps the platform error wrapped in dialLocalError so the
+	// client can classify absence; the wrapper itself is not the sentinel.
+	_, e := dialLocal(context.Background(), `\\.\pipe\Locklark-Browser-missing-test-pipe`)
+	var dialErr *dialLocalError
+	if !errors.As(e, &dialErr) || dialErr == nil {
+		t.Fatalf("missing pipe must be a *dialLocalError: %T %v", e, e)
+	}
+	if errors.Is(e, ErrBrokerUnavailable) {
+		t.Fatalf("missing pipe leaked the fallback sentinel: %v", e)
+	}
+	if !dialAbsent(e) {
+		t.Fatalf("missing pipe not classified as genuine absence: %v", e)
+	}
+	if strings.Contains(e.Error(), `Locklark-Browser-missing-test-pipe`) {
+		t.Fatalf("dial error echoed the endpoint: %v", e)
 	}
 }
