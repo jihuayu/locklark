@@ -41,6 +41,7 @@ MAX_NODES = 4096
 MAX_DEPTH = 12
 MAX_HIT_PARENTS = 64
 MAX_DISPLAYS = 32
+MAX_AX_WINDOWS = 1024
 
 # Optional read-only inspect diagnostic. The four booleans are the whole
 # public result; the fixed status texts below are compared internally and are
@@ -246,6 +247,26 @@ def _ax_status(ax):
 def _exact_status(code):
     """True only for an exact built-in ``int`` status (never ``bool``/subclass)."""
     return type(code) is int
+
+
+def _ax_result(result):
+    """Decode one documented AX ``(AXError, value)`` answer, or None.
+
+    The real PyObjC contract for an out-argument call (AXUIElementCopyAttributeValue,
+    AXUIElementGetPid) is a two-tuple whose first item is the exact built-in
+    ``int`` AXError. Exact 0 means success and returns ``(code, value)`` with
+    the value verbatim (nil or not, left for the caller to validate); any other
+    exact built-in code returns ``(code, value)`` too, so the caller decides
+    what a nonzero status means. ``False``, a bool, a float, a string, a
+    non-tuple or a tuple of another length is a malformed answer (None), never
+    a success.
+    """
+    if not isinstance(result, tuple) or len(result) != 2:
+        return None
+    code, value = result
+    if not _exact_status(code):
+        return None
+    return code, value
 
 
 def _sequence(value):
@@ -513,20 +534,12 @@ class QuartzApi:
         AXDescription may also answer the built-in kAXErrorAttributeUnsupported
         (-25205), which is likewise read as an absent label; AXRole and
         AXChildren do not accept it and every other status still refuses.
+        The raw ``(AXError, value)`` answer is the exact one ``_ax_value_read``
+        returns for one ``AXUIElementCopyAttributeValue`` call.
         """
+        code, value = self._ax_value_read(element, name)
         status = _ax_status(self.ax)
         if status is None:
-            raise _status_query(name)
-        try:
-            result = self.ax.AXUIElementCopyAttributeValue(element, name, None)
-        except contract.ContractError:
-            raise
-        except Exception:
-            raise _status_query(name)
-        if not isinstance(result, tuple) or len(result) != 2:
-            raise _status_query(name)
-        code, value = result
-        if not _exact_status(code):
             raise _status_query(name)
         if code == status[1]:
             if value is None:
@@ -538,6 +551,25 @@ class QuartzApi:
                 and name in _STATUS_UNSUPPORTED_ATTRIBUTES):
             return _STATUS_NO_VALUE
         raise _status_query(name, code)
+
+    def _ax_value_read(self, element, name):
+        """One raw ``(AXError, value)`` from AXUIElementCopyAttributeValue, or refuse.
+
+        Requires the documented PyObjC out-argument tuple with an exact built-in
+        ``int`` status; a raised call, a ``False`` status or any other shape is
+        the fixed sanitized ``a11y-query`` refusal naming ``name``. The value is
+        returned verbatim (including nil) for the caller to classify.
+        """
+        try:
+            result = self.ax.AXUIElementCopyAttributeValue(element, name, None)
+        except contract.ContractError:
+            raise
+        except Exception:
+            raise _status_query(name)
+        decoded = _ax_result(result)
+        if decoded is None:
+            raise _status_query(name)
+        return decoded
 
     def _geometry(self, element, name, value_type, first, second):
         value = self.attribute(element, name)
@@ -582,6 +614,71 @@ class QuartzApi:
             return []
         value = self.attribute(element, self.ax.kAXWindowsAttribute)
         return list(value) if value else []
+
+    def owned_windows(self, pid):
+        """The opaque AX window handles of exactly this explicit owned PID.
+
+        AXWindows is obtained ONLY from
+        ``ApplicationServices.AXUIElementCreateApplication(pid)`` for the one
+        caller-supplied positive owned PID, through the documented PyObjC
+        out-argument contract. Every returned AX window must then prove its
+        ownership: ``AXUIElementGetPid(element, None)`` must answer the
+        ``(AXError, pid)`` tuple with exact status 0 and an exact built-in
+        ``int`` pid equal to the requested PID. Only the opaque AX handles are
+        returned, in AX order and bounded by ``MAX_AX_WINDOWS``.
+
+        Nothing else is read here: no CoreGraphics window inventory and no AX
+        title, bounds, role, control, value or text attribute. Any malformed
+        PID, creation/list/GetPid shape, nonzero status, mismatched PID or
+        raised native call fails closed with the existing sanitized
+        ``a11y-query`` refusal - never a stringified exception or a payload.
+        """
+        if not _exact_status(pid) or pid <= 0:
+            raise _a11y_query()
+        try:
+            application = self.ax.AXUIElementCreateApplication(pid)
+        except Exception:
+            raise _a11y_query()
+        if application is None:
+            raise _a11y_query()
+        # Every AXWindows answer is classified here as a bare ``a11y-query``:
+        # the status-walk guard of ``_ax_value_read`` is never passed through.
+        try:
+            answer = self.ax.AXUIElementCopyAttributeValue(application, "AXWindows", None)
+        except Exception:
+            raise _a11y_query()
+        decoded = _ax_result(answer)
+        if decoded is None or decoded[0] != 0:
+            raise _a11y_query()
+        listed = _sequence(decoded[1])
+        if listed is None or isinstance(listed, (str, bytes, bytearray)):
+            raise _a11y_query()
+        try:
+            count = len(listed)
+        except Exception:
+            raise _a11y_query()
+        if count > MAX_AX_WINDOWS:
+            raise contract.ContractError("a11y-overrun")
+        handles = []
+        for index in range(count):
+            try:
+                element = listed[index]
+            except Exception:
+                raise _a11y_query()
+            if element is None:
+                raise _a11y_query()
+            try:
+                answer = self.ax.AXUIElementGetPid(element, None)
+            except Exception:
+                raise _a11y_query()
+            decoded = _ax_result(answer)
+            if decoded is None or decoded[0] != 0:
+                raise _a11y_query()
+            owner = decoded[1]
+            if not _exact_status(owner) or owner != pid:
+                raise _a11y_query()
+            handles.append(element)
+        return handles
 
     def title(self, element):
         """Exact built-in ``str`` AX title/description; never a native subclass.
