@@ -1117,6 +1117,27 @@ function jobBlock(name) {
   return { start, lines: WORKFLOW_LINES.slice(start, end) };
 }
 
+// The entries of the single strategy.matrix.browser flow list inside a job
+// slice. The job slice keeps the read scoped to that job's own matrix.
+function matrixBrowsers(job) {
+  const strategy = job.lines.indexOf("    strategy:");
+  assert.ok(strategy > 0, "job must keep a strategy block");
+  const matrix = job.lines.indexOf("      matrix:", strategy);
+  assert.ok(matrix > strategy, "job strategy must keep a matrix block");
+  let entries;
+  for (let index = matrix + 1; index < job.lines.length; index++) {
+    const line = job.lines[index];
+    if (line.trim() === "" || line.trimStart().startsWith("#")) continue;
+    if (!/^ {8}/.test(line)) break;
+    const match = /^ {8}browser:\s*\[(.*)\]\s*$/.exec(line);
+    if (!match) continue;
+    assert.equal(entries, undefined, "the matrix must declare one browser list");
+    entries = match[1].split(",").map((entry) => entry.trim()).filter(Boolean);
+  }
+  assert.ok(entries, "the matrix must declare a browser list");
+  return entries;
+}
+
 // The lines of one six-space step item inside a job slice, from its exact
 // `- name:` line to the next item or job level (a non-blank line indented less
 // than eight spaces). The step must be unique within that job.
@@ -1191,6 +1212,15 @@ function stepRun(block) {
 
 test("CI runs the Chromium route and idle TTL acceptance once, after the unchanged native and OTP journeys", () => {
   const browsers = jobBlock("web-browsers");
+  // The Chromium-only condition below is only meaningful while the job's own
+  // matrix really schedules Chromium: a deleted entry would skip that step
+  // forever while the rest of the matrix still passes.
+  const matrix = matrixBrowsers(browsers);
+  for (const browser of ["chromium", "firefox"])
+    assert.ok(
+      matrix.includes(browser),
+      `the web-browsers matrix must still include ${browser}, got: ${matrix.join(", ")}`,
+    );
   const chromium = stepBlock(browsers, CHROMIUM_NATIVE_STEP);
   // The step is still the Chromium-only, bounded native acceptance step.
   assert.equal(
