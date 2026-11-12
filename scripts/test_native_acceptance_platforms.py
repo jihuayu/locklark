@@ -2530,6 +2530,28 @@ class MacRootAtQueryTests(unittest.TestCase):
         self.refused(self.api(position=(0, "leaf"),
                               attributes={"AXParent": lambda element: element}))
 
+    def test_native_string_axrole_is_normalized_before_strict_validation(self):
+        # objc.pyobjc_unicode is a str subclass, not an exact str: the child
+        # role is traversed and the exact bound window root is accepted.
+        role = NativeNSString("AXButton")
+        self.assertIs(type(role), NativeNSString)
+        self.assertIsNot(type(role), str)
+        api = self.api(position=(0, "leaf"), parent="bound",
+                       attributes={"AXRole": role})
+        bound = api.ax.AXUIElementCopyAttributeValue("leaf", "AXParent", None)[1]
+        self.assertIs(self.root(api), True)
+        self.assertEqual(api.identity, [bound])
+        # An empty or non-string role is not an identity and still refuses.
+        self.refused(self.api(position=(0, "leaf"),
+                              attributes={"AXRole": ""}))
+        for payload in (1, b"AXButton", object()):
+            with self.subTest(payload=payload):
+                self.refused(self.api(position=(0, "leaf"),
+                                      attributes={"AXRole": payload}))
+        # An AX error status on the AXRole read still refuses.
+        self.refused(self.api(position=(0, "leaf"),
+                              attributes={"AXRole": (5, NativeNSString("AXButton"))}))
+
     def test_no_value_status_is_the_documented_no_object_miss(self):
         # ApplicationServices.kAXErrorNoValue ("There is no accessibility
         # object at the specified position") is a query that SUCCEEDED with no

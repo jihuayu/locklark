@@ -820,7 +820,10 @@ class QuartzApi:
         query SUCCEEDED and the point holds no AX object, so it is a miss.
         The same named status on an attribute read means AXRole is unknown
         (refused, as above) and AXParent is absent (the chain ends before the
-        selected AXWindow - a valid ``False`` hit).
+        selected AXWindow - a valid ``False`` hit).  The AXRole string is
+        normalized to an exact built-in ``str`` before validation, so a native
+        ``objc.pyobjc_unicode`` role is read exactly while an empty or
+        non-string role still refuses.
         """
         status = _ax_status(self.ax)
         if status is None:
@@ -859,8 +862,8 @@ class QuartzApi:
         # A raised read or an unreadable role/parent payload is an unknown
         # query and refuses; a walk that never ends refuses too.
         for _ in range(MAX_DEPTH + 1):
-            role = _ax_value(self.ax, element, "AXRole", status)
-            if role is None or type(role) is not str:
+            role = _native_text(_ax_value(self.ax, element, "AXRole", status))
+            if not role:
                 raise contract.ContractError("a11y-query")
             if role == "AXWindow":
                 return self._identity_matches(element, window)
