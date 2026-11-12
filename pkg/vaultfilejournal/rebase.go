@@ -49,13 +49,13 @@ import (
 //	              proposal bytes and proposal operation ID, in that order
 //	last    32    SHA-256 of the magic through the operation ID (domain separated)
 //
-// There are no trailing bytes. The decoder validates the versions, every
-// declared length against its fixed cap and the exact total in uint64 before
-// any conversion to int, the checksum, the base/revision pairings and the
-// decoded invariants (including proposal.ExpectedRevision == remote revision),
-// all before it slices a payload span or allocates the copies it returns. The
-// audit format is independent of LLVJ, LLVS and LLVP, whose layouts are
-// unchanged.
+// There are no trailing bytes. The decoder checks the versions, every declared
+// length against its fixed cap, and the exact total in uint64 before any
+// conversion to int. It checks the checksum before slicing any payload span.
+// It checks the base/revision pairing and all semantic invariants (including
+// proposal.ExpectedRevision == remote revision) before allocating the copies
+// it returns. The audit format is independent of LLVJ, LLVS and LLVP, whose
+// layouts are unchanged.
 const (
 	auditMagic    = "LLVA"
 	auditVersion  = uint16(1)
