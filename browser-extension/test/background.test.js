@@ -1209,6 +1209,27 @@ async function fieldRouteFixture(options = {}) {
         phase.claiming = false;
       }
     },
+    // A route tab may only send ROUTE_MESSAGE_TYPES; a reveal is closed here.
+    reveal: (field, target = {}) =>
+      h.send(
+        {
+          type: "reveal-field", token: opened.routeCreated.token,
+          item_id: ROUTE_ITEM_ID, revision: ROUTE_ITEM_REV, field, ...target,
+        },
+        sender(),
+      ),
+    // Browser-owned tab state for this route: mutate it without delivering
+    // the corresponding browser event, so only a live re-read can see it.
+    setSourceURL(url) {
+      sourceTab = { ...sourceTab, url };
+    },
+    setSourceActive(active) {
+      sourceTab = { ...sourceTab, active };
+    },
+    setRouteActive(active) {
+      if (routeTab) routeTab = { ...routeTab, active };
+    },
+    focus: (windowId) => h.listeners.focus(windowId),
     copy: (field, target = {}) =>
       h.send(
         {
@@ -1290,6 +1311,87 @@ test("route fallback copy scrubs a late field reply after close", async () => {
   assert.ok(!late || late.error === "refused", "a late field value escaped");
   assert.equal(late?.copiedField, undefined);
   assert.doesNotMatch(JSON.stringify(late || {}), /late-secret/);
+  await route.h.send({ type: "disconnect" });
+});
+
+// A held final field reply whose owned buffer must be blanked after refusal.
+function holdFieldReply(route) {
+  const held = { request: null, reply: null };
+  route.reply.current = (r) => {
+    if (r.type === "item-copy-field" || r.type === "item-reveal-field") {
+      held.request = r;
+      return undefined;
+    }
+    if (r.type === "item-get")
+      return { v: 1, id: r.id, type: "item-detail", item: { ...ROUTE_DETAIL } };
+    return undefined;
+  };
+  const deliver = (value) => {
+    held.reply = {
+      v: 1, id: held.request.id, type: "field-value",
+      item_id: ROUTE_ITEM_ID, revision: ROUTE_ITEM_REV,
+      field: held.request.field, value,
+      copied: held.request.type === "item-copy-field",
+      expires_in_seconds: 30,
+    };
+    route.h.deliver(held.reply);
+  };
+  return { held, deliver };
+}
+async function heldRoute(type) {
+  const route = await fieldRouteFixture();
+  assert.equal((await route.claim())?.type, "route-claimed");
+  const pending = type === "copy" ? route.copy("password") : route.reveal("password");
+  const hold = holdFieldReply(route);
+  const request = await waitFor(() => hold.held.request, "final field request");
+  assert.equal(request.type, type === "copy" ? "item-copy-field" : "item-reveal-field");
+  return { route, pending, hold };
+}
+function assertBlankedRefusal(reply, hold, label) {
+  assert.ok(!reply || reply.error === "refused", label + ": the value escaped");
+  assert.equal(reply?.copiedField, undefined, label + ": copiedField escaped");
+  assert.doesNotMatch(JSON.stringify(reply || {}), /final-secret/);
+  assert.equal(hold.held.reply.value, "", label + ": the owned reply buffer kept the value");
+}
+
+test("route copy refuses a final field reply after an undelivered source URL change", async () => {
+  const { route, pending, hold } = await heldRoute("copy");
+  // The source navigated: browser-owned URL changed, its event not yet run.
+  route.setSourceURL("https://example.test/other");
+  hold.deliver("final-secret");
+  assertBlankedRefusal(await pending, hold, "source URL");
+  assert.equal(route.nativeCount("item-get"), 2, "the read path changed");
+  await route.h.send({ type: "disconnect" });
+});
+
+test("route copy refuses a final field reply once the route tab is inactive", async () => {
+  const { route, pending, hold } = await heldRoute("copy");
+  // Another tab became active: the route tab's event has not been delivered.
+  route.setRouteActive(false);
+  hold.deliver("final-secret");
+  assertBlankedRefusal(await pending, hold, "route tab active");
+  await route.h.send({ type: "disconnect" });
+});
+
+test("route reveal request cannot start a field read", async () => {
+  const route = await fieldRouteFixture();
+  assert.equal((await route.claim())?.type, "route-claimed");
+  const refused = await route.reveal("password");
+  assert.ok(!refused || refused.error === "refused");
+  assert.equal(route.nativeCount("item-reveal-field"), 0);
+  await route.h.send({ type: "disconnect" });
+});
+
+test("route copy keeps approving after native window focus loss to WINDOW_ID_NONE", async () => {
+  const { route, pending, hold } = await heldRoute("copy");
+  // Focus leaves the browser; neither the route nor the source anchors moved.
+  // The captured source tab is inactive (the route tab is active) and stays so.
+  route.focus(route.h.api.windows.WINDOW_ID_NONE);
+  hold.deliver("final-secret");
+  const reply = await pending;
+  assert.equal(reply?.copiedField?.value, "final-secret", JSON.stringify(reply));
+  assert.equal(reply.copiedField.field, "password");
+  assert.equal(reply.copiedField.copied, true);
   await route.h.send({ type: "disconnect" });
 });
 

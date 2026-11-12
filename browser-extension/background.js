@@ -5209,6 +5209,16 @@ if (typeof importScripts === "function") importScripts("core.js");
       },
       12000,
     );
+    // The native approval is final: the route and both anchors, and the
+    // request epoch/capability, are re-read before the owned reply may carry
+    // a value. An event already queued for a source or route-tab change must
+    // not let the value leave after the browser anchor moved.
+    await routeSettled(grant);
+    if (requestEpoch !== epoch || requestCapability !== capability) {
+      if (value && typeof value === "object") value.value = "";
+      revokeRoute(grant);
+      throw Error("refused");
+    }
     const live = routeLive(grant);
     if (!live) {
       if (value && typeof value === "object") value.value = "";
