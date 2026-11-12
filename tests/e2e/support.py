@@ -2375,6 +2375,22 @@ _CHECKOUT_STAGE_PREFIX = "Native browser stage: "
 _CHECKOUT_DIAGNOSTIC_PREFIX = "Native browser diagnostic: "
 _CHECKOUT_DIAGNOSTIC_MAX_BYTES = 64 * 1024
 _CHECKOUT_DIAGNOSTIC_MAX_LINE = 8 * 1024
+# Opt-in normal-checkout startup markers printed on stdout; only these and the
+# fixed stderr wrapper signatures below are matched, never copied.
+_CHECKOUT_STARTUP_PREFIX = "Native checkout startup: "
+_CHECKOUT_STARTUP_PHASES = (
+    "module-ready",
+    "state-ready",
+    "tls-ready",
+    "https-ready",
+    "journey-entered",
+)
+_CHECKOUT_WRAPPER_SIGNATURES = (
+    ("dbus", ("Autolaunch error", "Unable to autolaunch", "dbus-launch:")),
+    ("xvfb", ("xvfb-run: error:", "xauth:  file", "_XSERVTransmkdir")),
+    ("node-loader", ("SyntaxError: Cannot use import statement",
+                     "ERR_MODULE_NOT_FOUND", "ERR_REQUIRE_ESM")),
+)
 _CHECKOUT_FAILED_STAGES = frozenset(_CHECKOUT_STAGE_LABELS) | {
     "approved-fill:approve",
     "driver-arguments-failure",
@@ -2970,6 +2986,43 @@ def _checkout_failed_native(value: Any) -> dict[str, Any] | None:
     return native
 
 
+def _parse_checkout_startup(stdout: str, stderr: str) -> dict[str, str]:
+    """Project the fixed startup fields only, never any raw captured text."""
+
+    # Exact bounded prefix lines; one bad value rejects the whole block.
+    phases = [
+        "" if len(line) > 128 else
+        line.rstrip("\r")[len(_CHECKOUT_STARTUP_PREFIX) :]
+        for line in str(stdout or "").splitlines()
+        if line.startswith(_CHECKOUT_STARTUP_PREFIX)
+    ]
+    valid = bool(phases) and all(p in _CHECKOUT_STARTUP_PHASES for p in phases)
+    # Independent of the markers: no prefix is absent, a present but unusable
+    # one is rejected, and only the existing fixed projection is accepted.
+    lines = str(stderr or "").splitlines()
+    present = any(line.startswith(_CHECKOUT_DIAGNOSTIC_PREFIX) for line in lines)
+    diagnostic = _parse_checkout_failure(stderr)
+    usable = diagnostic is not None and (
+        diagnostic["stage"] in _CHECKOUT_FAILED_STAGES
+    )
+    state = "absent" if not present else "accepted" if usable else "rejected"
+    families = [
+        family
+        for family, signatures in _CHECKOUT_WRAPPER_SIGNATURES
+        if any(
+            signature in line
+            for line in lines
+            if not line.startswith(_CHECKOUT_DIAGNOSTIC_PREFIX)
+            for signature in signatures
+        )
+    ]
+    return {
+        "startupPhase": phases[-1] if valid else "unknown",
+        "failureRecordState": state,
+        "wrapperFamily": families[0] if len(families) == 1 else "unknown",
+    }
+
+
 def _parse_checkout_failure(stderr: str) -> dict[str, Any] | None:
     """Reduce the diagnostic line to fixed fields; ``None`` if unusable."""
 
@@ -3012,7 +3065,7 @@ def _parse_checkout_failure(stderr: str) -> dict[str, Any] | None:
 
 
 def _record_checkout_failure(
-    ctx: E2EContext, stderr: str, returncode: int
+    ctx: E2EContext, stdout: str, stderr: str, returncode: int
 ) -> None:
     """Attach the fixed failure record before the existing generic assertion."""
 
@@ -3021,6 +3074,7 @@ def _record_checkout_failure(
         "kind": "unclassified",
         "native": None,
     }
+    record.update(_parse_checkout_startup(stdout, stderr))
     record["exit"] = (
         f"exited {returncode}" if _checkout_bounded(returncode, 1, 255) else "exited"
     )
@@ -3134,7 +3188,7 @@ def _checkout_run(
                 "native checkout acceptance timed out"
             ) from None
         if returncode != 0:
-            _record_checkout_failure(ctx, stderr, returncode)
+            _record_checkout_failure(ctx, stdout, stderr, returncode)
             raise AssertionError(
                 f"native checkout acceptance exited with status {returncode}"
             )

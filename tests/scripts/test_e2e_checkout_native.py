@@ -540,6 +540,9 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
                     "x_codes": [3, 170],
                 },
                 "exit": "exited 7",
+                "startupPhase": "unknown",
+                "failureRecordState": "accepted",
+                "wrapperFamily": "unknown",
             },
         )
         stage = self._nonzero(
@@ -549,7 +552,8 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
         self.assertEqual(
             stage,
             {"stage": "native-unlock", "kind": "acceptance-failure",
-             "native": None, "exit": "exited 7"},
+             "native": None, "exit": "exited 7", "startupPhase": "unknown",
+             "failureRecordState": "accepted", "wrapperFamily": "unknown"},
         )
 
     def test_invalid_checkout_diagnostics_are_unclassified(self):
@@ -559,41 +563,109 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
                 payload["nativeError"] = native
             return "Native browser diagnostic: " + json.dumps(payload)
 
-        cases = (
-            line("checkout-stale:navigation CANARY-9f3a1c", None),
-            line("passkey-get", None),
-            line("fixture", {"code": "setup", "action": "label-wait"}),
-            line("fixture", {"code": "window-timeout", "action": "CANARY"}),
-            line("fixture", {"code": "window-timeout", "action": "label-wait",
-                             "x_codes": [3, 0]}),
-            line("fixture", {"code": "window-timeout", "action": "label-wait",
-                             "index": 256}),
-            # Unhashable, non-string and merely regex-shaped values fail closed.
-            line("fixture", {"code": ["window-timeout"], "action": "label-wait"}),
-            line("fixture", {"code": "window-timeout", "action": {"x": 1}}),
-            line("fixture", {"code": "window-frozen", "action": "label-wait"}),
-            line("fixture", {"code": "window-timeout", "action": "label-wait",
-                             "index": -2}),
-            line("fixture", {"code": "window-timeout", "action": "label-wait"}),
-            # Oversized and repeated (even identical) lines are ambiguous.
-            line("fixture", None) + " " * 9000,
-            line("fixture", None) + "\n" + line("fixture", None),
-            "Native browser diagnostic: {not json",
-            "Native browser diagnostic: {not json" + "\n" + line("fixture", None),
-            line("fixture", None) + "\n" + line("native-pair", None),
-            line("fixture", None).replace("Native browser diagnostic:", " x"),
-        )
+        def cases():
+            yield line("checkout-stale:navigation CANARY-9f3a1c", None)
+            yield line("passkey-get", None)
+            # Unallowlisted action, out-of-range index and non-string values.
+            yield line("fixture", {"code": "window-timeout", "action": "label-wait",
+                                   "index": 256})
+            yield line("fixture", {"code": ["window-timeout"], "action": "label-wait"})
+            yield line("fixture", {"code": "window-timeout", "action": {"x": 1}})
+            yield line("fixture", {"code": "window-timeout", "action": "label-wait"})
+            # Oversized, repeated (even identical) and unparseable prefixes.
+            yield line("fixture", None) + " " * 9000
+            yield line("fixture", None) + "\n" + line("fixture", None)
+            yield "Native browser diagnostic: {not json"
+            yield "Native browser diagnostic: {not json\n" + line("fixture", None)
+            yield line("fixture", None).replace("Native browser diagnostic:", " x")
+
         expected = {
             "stage": "unclassified",
             "kind": "unclassified",
             "native": None,
             "exit": "exited 7",
+            "startupPhase": "unknown",
+            "wrapperFamily": "unknown",
         }
-        for stderr in cases:
+        for stderr in cases():
+            # Only an exact line prefix is a present diagnostic; otherwise absent.
+            state = ("rejected" if stderr.startswith(
+                support._CHECKOUT_DIAGNOSTIC_PREFIX) else "absent")
             with self.subTest(stderr=stderr[:40]):
                 record, message = self._nonzero(stderr)
                 self._assert_no_canary(record, message)
-                self.assertEqual(record, expected)
+                self.assertEqual(record, {**expected, "failureRecordState": state})
+
+    def test_startup_diagnostic_is_a_fixed_projection_only(self):
+        prefix = support._CHECKOUT_STARTUP_PREFIX
+        self.assertEqual(len(support._CHECKOUT_STARTUP_PHASES), 5)
+
+        def marker_all_but(omit):
+            return "".join(prefix + p + "\n" for p in support._CHECKOUT_STARTUP_PHASES
+                           if p != omit)
+        # Accepted diagnostic carrying canary text in reason/message.
+        good = support._CHECKOUT_DIAGNOSTIC_PREFIX + json.dumps(
+            {"stage": "fixture", "reason": "CANARY-9f3a1c",
+             "message": "CANARY-9f3a1c /home/runner/x"}
+        )
+        https = marker_all_but("journey-entered")
+        cases = (
+            # (stdout, stderr, startupPhase, failureRecordState, wrapperFamily)
+            (marker_all_but("https-ready"), good, "journey-entered", "accepted",
+             "unknown"),
+            ("", "", "unknown", "absent", "unknown"),
+            ("", "private body", "unknown", "absent", "unknown"),
+            # The state follows the diagnostic alone; repeated lines are
+            # never partly trusted and keep the existing projection.
+            (https, good + "\n" + good, "https-ready", "rejected", "unknown"),
+            # A valid diagnostic is still accepted with no valid markers.
+            (https + prefix + "CANARY-9f3a1c\n", good, "unknown", "accepted",
+             "unknown"),
+            # A wrapper signature in the excluded diagnostic line is ignored.
+            (https, good.replace("CANARY-9f3a1c", "xvfb-run: error:"),
+             "https-ready", "accepted", "unknown"),
+            # An invalid marker never becomes a phase or leaks raw stdout.
+            (https + prefix + "CANARY-9f3a1c\n", "private body", "unknown",
+             "absent", "unknown"),
+            (https, "xvfb-run: error: CANARY-9f3a1c", "https-ready", "absent", "xvfb"),
+            (https, "Autolaunch error: CANARY-9f3a1c", "https-ready", "absent",
+             "dbus"),
+            (https, "SyntaxError: Cannot use import statement CANARY-9f3a1c",
+             "https-ready", "absent", "node-loader"),
+        )
+        for stdout, stderr, phase, state, family in cases:
+            with self.subTest(case=stdout[-20:] + stderr[:20]):
+                os.environ["LOCKLARK_E2E_CHECKOUT_NATIVE"] = "1"
+                ctx = self._ctx()
+                with mock.patch.object(
+                    support, "_invoke_checkout_journey",
+                    return_value=(7, stdout, stderr),
+                ):
+                    with self.assertRaisesRegex(
+                        AssertionError,
+                        "^native checkout acceptance exited with status 7$",
+                    ):
+                        support.checkout_native_acceptance(ctx)
+                record = ctx.evidence[support.CHECKOUT_FAILURE_EVIDENCE_KEY]
+                self._assert_no_canary(record, "")
+                self.assertIn(record["startupPhase"],
+                              support._CHECKOUT_STARTUP_PHASES + ("unknown",))
+                self.assertIn(record["failureRecordState"],
+                              ("absent", "rejected", "accepted"))
+                self.assertIn(record["wrapperFamily"],
+                              ("dbus", "xvfb", "node-loader", "unknown"))
+                self.assertEqual(
+                    (record["startupPhase"], record["failureRecordState"],
+                     record["wrapperFamily"], record["exit"]),
+                    (phase, state, family, "exited 7"),
+                )
+                # Accepted keeps its existing stage/kind; the others stay
+                # unclassified, all derived from the fixed state above.
+                self.assertEqual(
+                    (record["stage"], record["kind"], record["native"]),
+                    (("fixture", "acceptance-failure", None) if state == "accepted"
+                     else ("unclassified", "unclassified", None)),
+                )
 
     def _cross_site_recorded(self, evidence: dict) -> list[str]:
         case = next(

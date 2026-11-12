@@ -39,6 +39,20 @@ import {
 } from "./browser_edge_install.mjs";
 
 const checkoutFrames = process.env.LOCKLARK_TEST_CHECKOUT_FRAMES === "1";
+// Opt-in normal-checkout startup markers on the existing stdout: a fixed
+// prefix and one fixed phase, printed only at its real launch boundary.
+const CHECKOUT_STARTUP_PREFIX = "Native checkout startup: ";
+const CHECKOUT_STARTUP_PHASES = [
+  "module-ready",
+  "state-ready",
+  "tls-ready",
+  "https-ready",
+  "journey-entered",
+];
+function startupMarkup(index) {
+  if (checkoutFrames)
+    console.log(CHECKOUT_STARTUP_PREFIX + CHECKOUT_STARTUP_PHASES[index]);
+}
 // Explicit opt-in: a QuickFill=false action row opens one persistent route tab
 // and its native per-operation approval, instead of the long default journeys.
 const routeDetailRead = process.env.LOCKLARK_TEST_ROUTE_DETAIL_READ === "1";
@@ -91,6 +105,7 @@ const require = createRequire(join(root, "web/package.json"));
 const { chromium } = process.env.LOCKLARK_TEST_PLAYWRIGHT
   ? require(process.env.LOCKLARK_TEST_PLAYWRIGHT)
   : require("playwright");
+startupMarkup(0);
 const go = process.env.LOCKLARK_GO || "go";
 const host = process.env.LOCKLARK_BROWSER_HOST;
 const register = process.env.LOCKLARK_BROWSER_REGISTER
@@ -219,6 +234,7 @@ let stage = "fixture",
   routeTargetAfterPopupClose = null,
   routeObservationHistory = [],
   nativeInput = null;
+startupMarkup(1);
 // Diagnostics only: keep at most ROUTE_HISTORY_LIMIT sanitized observations,
 // appended only when one of the four fields actually changes, so a failure
 // can show whether the route page ever reached locked/vault/detail first.
@@ -964,6 +980,7 @@ const spki = createHash("sha256")
     }),
   )
   .digest("base64");
+startupMarkup(2);
 const html = `<!doctype html><html><title>${browserWindowTitle}</title><body><h1>Synthetic login</h1><form method="post"><label>User<input id="username" autocomplete="username"></label><label>Password<input id="password" type="password" autocomplete="current-password"></label><button>Submit</button></form><script>window.submits=0;document.querySelector('form').addEventListener('submit',e=>{e.preventDefault();window.submits++;});</script></body></html>`;
 const server = createServer(
   { key: readFileSync(key), cert: readFileSync(cert) },
@@ -998,6 +1015,7 @@ const server = createServer(
   },
 );
 await new Promise((r) => server.listen(0, "127.0.0.1", r));
+startupMarkup(3);
 const origin = "https://login.locklark.test:" + server.address().port;
 let browser;
 const logs = [];
@@ -1514,6 +1532,7 @@ async function acceptEdgePairDisconnect(driver) {
   mark("edge-pair-complete");
 }
 if (edgeManagerInstall) phase("fixture");
+startupMarkup(4);
 try {
   // LOCKLARK_BROWSER_FIXTURE reuses one prebuilt fixture for this run, its
   // vault observers and the checkout step; otherwise the fixture is built.
