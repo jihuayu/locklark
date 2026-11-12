@@ -372,7 +372,10 @@ func (b *cancelAtEOFBody) Read(p []byte) (int, error) {
 func (b *cancelAtEOFBody) Close() error { return nil }
 
 func TestReadContentResponseCancelledAtEOFIsDeniedNotCorrupt(t *testing.T) {
-	const expectedSize = 8
+	// The body is genuinely truncated: fewer bytes are yielded than the
+	// metadata size, so without the cancellation check the length mismatch
+	// would be classified as ErrCorrupt.
+	const expectedSize = 16
 	data := []byte("shortbod")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
