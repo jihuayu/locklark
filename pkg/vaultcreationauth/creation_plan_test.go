@@ -3,6 +3,7 @@ package vaultcreationauth
 import (
 	"crypto/ed25519"
 	"encoding/hex"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -60,7 +61,7 @@ func TestCreationPlanDigestFixedVector(t *testing.T) {
 	//   "locklark.vault-creation-plan/v1" || 0x00
 	//   || u32be(38) || "locklark-creation-plan-vector-genesis\n"
 	//   || u32be(16) || "vault:01j0vector"
-	//   || u32be(13) || "owner-root.0"
+	//   || u32be(12) || "owner-root.0"
 	//   || 0x20,0x21,...,0x3f                          (32 raw bytes)
 	//   || 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00     (PolicySeq 0, u64be)
 	//   || 0x80,0x81,...,0x9f                          (32 raw bytes)
@@ -382,14 +383,27 @@ func TestVerifyBindsCreationPlanDigest(t *testing.T) {
 
 func TestCreationPlanDigestDoesNotAllocatePreimage(t *testing.T) {
 	// A 32 MiB genesis costs no proportional allocations: the digest is fed
-	// the caller's slice directly, field by field.
+	// the caller's slice directly, field by field. Measured as total allocated
+	// bytes around one call, so a single preimage-sized allocation is caught
+	// even though it is only one allocation event.
 	plan := mutatePlan(basePlan(), func(p *CreationPlan) { p.GenesisBytes = make([]byte, vaultfile.MaxFileBytes) })
-	got := testing.AllocsPerRun(1, func() {
+	digestOne := func() {
 		if _, err := CreationPlanDigest(plan); err != nil {
 			t.Fatalf("at-cap plan: %v", err)
 		}
-	})
-	if got > 16 {
-		t.Fatalf("CreationPlanDigest at the genesis cap made %.0f allocations", got)
+	}
+	digestOne() // Warm up: package-level and runtime state is paid here.
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	digestOne()
+	runtime.ReadMemStats(&after)
+	// TotalAlloc counts bytes only: unlike heap stats it cannot move down
+	// when deferred frees run, and no other goroutine of this test package
+	// (the test is not parallel) allocates concurrently. 1 MiB is far below
+	// one preimage at the genesis cap and far above the digest's own slices.
+	const maxAllocatedBytes = 1 << 20
+	if used := after.TotalAlloc - before.TotalAlloc; used > maxAllocatedBytes {
+		t.Fatalf("CreationPlanDigest at the genesis cap allocated %d bytes, want at most %d: a preimage-sized allocation", used, maxAllocatedBytes)
 	}
 }

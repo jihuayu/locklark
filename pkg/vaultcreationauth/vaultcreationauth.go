@@ -524,9 +524,12 @@ func validCreationPlanID(s string) bool {
 }
 
 // validBackendLocator reports whether s is a non-empty locator of at most
-// MaxBackendLocatorBytes bytes of UTF-8 without Unicode control characters
-// (which include NUL, C1 controls and the bidi and other format controls).
-// Nothing is trimmed, case-folded or normalized.
+// MaxBackendLocatorBytes bytes of UTF-8. unicode.IsControl covers the Unicode
+// Cc controls only: NUL, the C0 controls and DEL (U+0000..U+001F, U+007F) and
+// the C1 controls (U+0080..U+009F). Formatting characters in Cf, such as
+// bidi marks and controls, U+200B..U+200D and U+FEFF, are not controls here
+// and are accepted byte for byte. Nothing is trimmed, case-folded or
+// normalized.
 func validBackendLocator(s string) bool {
 	if len(s) == 0 || len(s) > MaxBackendLocatorBytes || !utf8.ValidString(s) {
 		return false
