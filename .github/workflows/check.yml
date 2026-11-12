@@ -684,11 +684,16 @@ jobs:
           go-version-file: go.mod
       - name: Build native iOS application and run simulator acceptance
         run: mobile/ios/scripts/ci.sh
+  # Review rule: when any job is added to this workflow, add it to `needs`
+  # and its <JOB>_RESULT env below in the same change, so this set stays equal
+  # to every other CI job. This is a manual review obligation; no check or
+  # command enforces it.
   ci-required:
     name: ci-required
     needs: [linux-build, go, desktop-macos, web-core, web-browsers, web, android, ios]
     if: ${{ always() }}
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Require every required job to succeed
         env:
