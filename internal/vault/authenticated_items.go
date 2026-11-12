@@ -5,6 +5,7 @@ import (
 
 	"filippo.io/age"
 	"github.com/jihuayu/locklark/pkg/vaultfile"
+	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
 )
 
 // This file is the narrow adapter between the internal vault item model (the
@@ -48,8 +49,9 @@ import (
 // authorPrivateKey and every Open input. Neither function mutates or retains
 // them: NewItemDatabase neither aliases nor clears the caller's items,
 // metadata or binary bytes, and its owned database is package-owned for the
-// duration of the call and never returned. The returned file bytes, metadata
-// bytes and items are owned by the caller.
+// duration of the call and never returned; its database-owned binary-content
+// copies are cleared after sealing, as SealAuthenticatedItems documents. The
+// returned file bytes, metadata bytes and items are owned by the caller.
 
 // SealAuthenticatedItems validates items and metadata, builds the owned KDBX
 // 4.1 item database with NewItemDatabase and seals that database into a
@@ -62,23 +64,33 @@ import (
 //     and rejects a nil item slice. An invalid input returns ErrSnapshot
 //     exactly as SealItems does, with nil bytes.
 //  2. A nil draft or a draft whose header key epoch is zero is rejected with
-//     invalid_value before any database is built; SealAuthenticatedFile would
-//     reject it anyway, but only after this adapter has done KDBX work. Every
-//     other draft, checkpoint, VUK and author key check stays in
-//     SealAuthenticatedFile. The code and empty path are the ones
-//     SealAuthenticatedFile reports for the nil draft ("") and the zero epoch
-//     ("key_epoch") cases, and both collapse to the same invalid_value.
+//     invalid_value at the empty path before any database is built.
+//     SealAuthenticatedFile would reject both too, but only after this adapter
+//     has done KDBX work; the precheck therefore reports invalid_value at ""
+//     for both cases, rather than SealAuthenticatedFile's own
+//     "key_epoch" path for the zero epoch. Every other draft, checkpoint, VUK
+//     and author key check stays in SealAuthenticatedFile.
 //  3. NewItemDatabase(metadata, items) builds a fresh KDBX 4.1 database in the
 //     shared personal snapshot layout: the item-group name, the metadata entry
 //     and one entry per item in caller order, with a database-owned copy of
 //     every item binary. It re-applies ValidateItems and also rejects nil
 //     metadata by its own contract. Its errors are returned unchanged: an
 //     item-representation failure is ErrSnapshot, before any file bytes exist.
-//  4. vaultfile.SealAuthenticatedFile(draft, db, checkpoint, vuk,
-//     authorPrivateKey) produces the bytes. Its errors are returned
-//     unchanged, so a bad draft, checkpoint, VUK or author key is reported
-//     with the exact vaultfile *Error code and path. Nothing is wrapped or
-//     reinterpreted.
+//  4. sealOwnedItemDatabase records the database-owned binary content
+//     buffers and defers clearing them, then calls
+//     vaultfile.SealAuthenticatedFile(draft, db, checkpoint, vuk,
+//     authorPrivateKey). Its errors are returned unchanged, so a bad draft,
+//     checkpoint, VUK or author key is reported with the exact vaultfile
+//     *Error code and path. Nothing is wrapped or reinterpreted.
+//
+// Ownership of the constructed database. NewItemDatabase gives the database
+// its own copies of the caller attachment bytes in InnerHeader.Binaries.
+// Those copies are secret-equivalent and owned by this function alone, so
+// they are zeroed after sealing on every return path, success and error. The
+// buffers recorded before sealing are cleared, and so is every buffer the
+// database's InnerHeader carries after sealing in case encoding replaced the
+// slice or its binaries. The caller's items, metadata and attachment bytes are
+// never cleared.
 //
 // metadata is carried verbatim (NewItemDatabase only validates it and stores
 // it base64-encoded into the protected metadata entry). Item order is the
@@ -109,7 +121,59 @@ func SealAuthenticatedItems(draft *vaultfile.File, metadata []byte, items []Item
 	if err != nil {
 		return nil, err
 	}
+	return sealItemDatabase(draft, db, checkpoint, vuk, authorPrivateKey)
+}
+
+// sealItemDatabase is the helper SealAuthenticatedItems calls for a database
+// from NewItemDatabase. It is a variable so tests can observe the exact
+// database and buffers it receives; outside tests it is always
+// sealOwnedItemDatabase.
+var sealItemDatabase = sealOwnedItemDatabase
+
+// sealOwnedItemDatabase seals db with vaultfile.SealAuthenticatedFile and
+// clears the database-owned binary content buffers on every return path. db
+// must come from NewItemDatabase, whose binaries are database-owned copies;
+// the caller's items are never touched. The buffers present before sealing are
+// recorded and cleared by a deferred callback, and the buffers the database
+// carries after sealing are cleared too, because the encoder may replace the
+// InnerHeader binary slice or its contents.
+func sealOwnedItemDatabase(draft *vaultfile.File, db *kdbx.Database, checkpoint *vaultfile.PolicyCheckpoint, vuk []byte, authorPrivateKey ed25519.PrivateKey) ([]byte, error) {
+	if bin, ok := currentItemBinaries(db); ok {
+		owned := make([][]byte, len(*bin))
+		for i := range owned {
+			owned[i] = (*bin)[i].Content
+		}
+		defer func() {
+			for _, b := range owned {
+				clear(b)
+			}
+			clearOwnedItemBinaries(db)
+		}()
+	}
 	return vaultfile.SealAuthenticatedFile(draft, db, checkpoint, vuk, authorPrivateKey)
+}
+
+// currentItemBinaries returns the database's live InnerHeader binaries. The
+// pointer, not a field copy, is returned: Binaries is a slice of Binary
+// values, so an index taken through a copied InnerHeader would name a
+// temporary disk-backed array and clearing it would not reach the database.
+func currentItemBinaries(db *kdbx.Database) (*kdbx.Binaries, bool) {
+	if db.Content == nil || db.Content.InnerHeader == nil {
+		return nil, false
+	}
+	return &db.Content.InnerHeader.Binaries, true
+}
+
+// clearOwnedItemBinaries zeroes the content of every binary the database's
+// InnerHeader currently carries, in place.
+func clearOwnedItemBinaries(db *kdbx.Database) {
+	bin, ok := currentItemBinaries(db)
+	if !ok {
+		return
+	}
+	for i := range *bin {
+		clear((*bin)[i].Content)
+	}
 }
 
 // OpenAuthenticatedItems opens a file sealed by SealAuthenticatedItems and

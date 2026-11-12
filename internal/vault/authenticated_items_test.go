@@ -11,6 +11,7 @@ import (
 
 	"filippo.io/age"
 	"github.com/jihuayu/locklark/pkg/vaultfile"
+	kdbx "github.com/jihuayu/locklark/third_party/gokeepasslib"
 )
 
 // authItemsFixture is one real caller-pinned vault for the authenticated item
@@ -177,6 +178,8 @@ func deepCopy[T any](x T) T {
 			out[i].Fields = append([]CustomField(nil), s.Fields...)
 		}
 		return any(out).(T)
+	case *kdbx.Database:
+		return any((*kdbx.Database)(nil)).(T)
 	case *vaultfile.File:
 		if v == nil {
 			return any((*vaultfile.File)(nil)).(T)
@@ -213,7 +216,12 @@ func deepCopy[T any](x T) T {
 		out.ContentSignature.Sig = bytes.Clone(v.ContentSignature.Sig)
 		return any(&out).(T)
 	case *vaultfile.PolicyCheckpoint:
+		if v == nil {
+			return any((*vaultfile.PolicyCheckpoint)(nil)).(T)
+		}
 		out := *v
+		out.OwnerRootPublicKey = bytes.Clone(v.OwnerRootPublicKey)
+		out.PolicyDigest = bytes.Clone(v.PolicyDigest)
 		return any(&out).(T)
 	default:
 		panic("deepCopy: unsupported type")
@@ -486,6 +494,196 @@ func TestAuthenticatedItemsWrongPin(t *testing.T) {
 	var ve *vaultfile.Error
 	if !errors.As(err, &ve) || ve.Code != vaultfile.CodePolicyCheckpointFailed || ve.Path != "" || out != nil {
 		t.Fatalf("wrong-pin seal: got %v and %d bytes", err, len(out))
+	}
+}
+
+// callerAttachmentItems returns fresh fixture items whose attachment bytes
+// are unique to this test, so a database binary holding one of them cannot be
+// confused with any other fixture attachment.
+func callerAttachmentItems() []Item {
+	items := authItemsFixtureItems()
+	content := []byte{'d', 'b', 0x00, 0x91, 0xff, 'c', 'o', 'p', 'y'}
+	items[0].Attachments[0].Content = content
+	items[0].Attachments[0].Size = int64(len(content))
+	items[0].Attachments[0].SHA256 = AttachmentSHA256(content)
+	return items
+}
+
+// callerAttachmentBytes returns the caller-owned attachment byte slices of
+// items, in item order.
+func callerAttachmentBytes(items []Item) [][]byte {
+	var out [][]byte
+	for _, it := range items {
+		if it.Attachment != nil {
+			out = append(out, it.Attachment)
+		}
+		for _, a := range it.Attachments {
+			out = append(out, a.Content)
+		}
+	}
+	return out
+}
+
+// allZeros reports whether every byte of b is zero.
+func allZeros(b []byte) bool {
+	for _, c := range b {
+		if c != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// TestAuthenticatedItemsClearsOwnedBinaries proves that SealAuthenticatedItems
+// clears the database-owned binary-content copies it receives from
+// NewItemDatabase, on sealing success and on a wrong-pin failure alike, and
+// never clears the caller's item attachment bytes.
+func TestAuthenticatedItemsClearsOwnedBinaries(t *testing.T) {
+	fx := newAuthItemsFixture(t)
+	metadata := authItemsFixtureMetadata()
+
+	// The helper SealAuthenticatedItems calls is wrapped for the duration of
+	// this test, so the test observes exactly the database and the buffers
+	// the helper receives.
+	original := sealItemDatabase
+	defer func() { sealItemDatabase = original }()
+	var observed int
+	var preSeal, postSeal [][]byte
+	sealItemDatabase = func(draft *vaultfile.File, db *kdbx.Database, checkpoint *vaultfile.PolicyCheckpoint, vuk []byte, authorPrivateKey ed25519.PrivateKey) ([]byte, error) {
+		observed++
+		// The helper clears the database's buffers in place, so the before
+		// state is copied before the real helper runs, and the after state
+		// is required (in checkCleared) to name the same buffers. The
+		// assertions below therefore cover exactly the buffers handed over
+		// for sealing. The caller's bytes are all zero only when the helper
+		// cleared them, because the test clears nothing itself.
+		bin, _ := currentItemBinaries(db)
+		preSeal = make([][]byte, len(*bin))
+		for i := range preSeal {
+			preSeal[i] = (*bin)[i].Content
+		}
+		out, err := original(draft, db, checkpoint, vuk, authorPrivateKey)
+		postSeal = make([][]byte, len(*bin))
+		for i := range postSeal {
+			postSeal[i] = (*bin)[i].Content
+		}
+		return out, err
+	}
+
+	start := observed
+	countObserved := func() int { return observed }
+
+	checkCleared := func(t *testing.T, populated [][]byte) {
+		t.Helper()
+		if len(preSeal) != 2 || len(postSeal) != 2 {
+			t.Fatalf("helper observed %d pre and %d post binaries, want 2 and 2", len(preSeal), len(postSeal))
+		}
+		if len(populated) != 2 {
+			t.Fatalf("caller has %d attachment buffers, want 2", len(populated))
+		}
+		for i := range preSeal {
+			// The before and after states must be the same buffer, so the
+			// cleared bytes are exactly the ones handed over for sealing.
+			if &preSeal[i][0] != &postSeal[i][0] || len(preSeal[i]) != len(postSeal[i]) {
+				t.Fatalf("binary %d was replaced between the helper's before and after states", i)
+			}
+			if !allZeros(preSeal[i]) {
+				t.Fatalf("owned binary %d passed to the helper was not cleared: %x", i, preSeal[i])
+			}
+			if !allZeros(postSeal[i]) {
+				t.Fatalf("owned binary %d present after sealing was not cleared: %x", i, postSeal[i])
+			}
+		}
+		// Each database binary was a database-owned copy of a populated
+		// caller buffer before the helper ran and is zero after it, and every
+		// caller buffer still holds its plaintext.
+		for i := range populated {
+			if len(populated[i]) == 0 || allZeros(populated[i]) {
+				t.Fatalf("caller attachment %d is not populated", i)
+			}
+		}
+	}
+
+	callerUnchanged := func(t *testing.T, items []Item, wantItems []Item, wantBytes [][]byte) {
+		t.Helper()
+		if !reflect.DeepEqual(items, wantItems) {
+			t.Fatal("caller items changed")
+		}
+		got := callerAttachmentBytes(items)
+		if len(got) != len(wantBytes) {
+			t.Fatalf("caller attachment count: got %d want %d", len(got), len(wantBytes))
+		}
+		for i := range wantBytes {
+			if !bytes.Equal(got[i], wantBytes[i]) || len(wantBytes[i]) == 0 || allZeros(wantBytes[i]) {
+				t.Fatalf("caller attachment bytes changed at %d", i)
+			}
+		}
+	}
+
+	t.Run("success", func(t *testing.T) {
+		items := callerAttachmentItems()
+		if err := ValidateItems(metadata, items); err != nil {
+			t.Fatalf("fixture items are invalid: %v", err)
+		}
+		wantItems, wantBytes := deepCopy(items), callerAttachmentBytes(items)
+		populated := make([][]byte, len(wantBytes))
+		for i := range wantBytes {
+			populated[i] = bytes.Clone(wantBytes[i])
+		}
+		preSeal, postSeal = nil, nil
+		before := countObserved()
+		encoded, err := SealAuthenticatedItems(fx.draft, metadata, items, fx.pin, fx.vuk, fx.author)
+		if err != nil {
+			t.Fatalf("SealAuthenticatedItems: %v", err)
+		}
+		if calls := countObserved(); calls != before+1 {
+			t.Fatalf("the helper received %d databases, want 1", calls-before)
+		}
+		if len(encoded) == 0 {
+			t.Fatal("SealAuthenticatedItems returned no bytes and no error")
+		}
+		checkCleared(t, populated)
+		callerUnchanged(t, items, wantItems, wantBytes)
+		// The positive reached the sealer and produced a file carrying the
+		// caller attachment bytes, so the error case below cannot mask it.
+		_, _, got, err := OpenAuthenticatedItems(encoded, fx.pin, "device-1", fx.device)
+		if err != nil {
+			t.Fatalf("sealed file does not open: %v", err)
+		}
+		if !reflect.DeepEqual(got, wantItems) {
+			t.Fatal("sealed file does not carry the caller items")
+		}
+	})
+
+	t.Run("wrong pin", func(t *testing.T) {
+		items := callerAttachmentItems()
+		wantItems, wantBytes := deepCopy(items), callerAttachmentBytes(items)
+		pin := deepCopy(fx.pin)
+		pin.PolicyDigest = bytes.Clone(fx.pin.PolicyDigest)
+		pin.PolicyDigest[0] ^= 0xff
+		populated := make([][]byte, len(wantBytes))
+		for i := range wantBytes {
+			populated[i] = bytes.Clone(wantBytes[i])
+		}
+		preSeal, postSeal = nil, nil
+		before := countObserved()
+		encoded, err := SealAuthenticatedItems(fx.draft, metadata, items, pin, fx.vuk, fx.author)
+		if calls := countObserved(); calls != before+1 {
+			t.Fatalf("the helper received %d databases, want 1", calls-before)
+		}
+		var ve *vaultfile.Error
+		if !errors.As(err, &ve) || ve.Code != vaultfile.CodePolicyCheckpointFailed || ve.Path != "" {
+			t.Fatalf("wrong-pin seal: got %v, want %s at \"\"", err, vaultfile.CodePolicyCheckpointFailed)
+		}
+		if encoded != nil {
+			t.Fatalf("wrong-pin seal returned %d bytes", len(encoded))
+		}
+		checkCleared(t, populated)
+		callerUnchanged(t, items, wantItems, wantBytes)
+	})
+
+	if calls := countObserved(); calls != start+2 {
+		t.Fatalf("the helper was called %d times, want 2", calls-start)
 	}
 }
 
