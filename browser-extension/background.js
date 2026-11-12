@@ -4630,7 +4630,56 @@ if (typeof importScripts === "function") importScripts("core.js");
         state.port.disconnect();
       } catch {}
     }
-    if (known) grant.state = "revoked";
+    if (known) {
+      grant.state = "revoked";
+      routeGrantsChanged();
+    }
+  }
+  // The one deadline timer always follows the grant set now, rather than
+  // waiting for a revoked grant's former deadline. A revoke during
+  // scheduleRouteExpiry()'s own callback leaves the re-arm to pruneRoutes().
+  let routeScheduling = false;
+  function routeGrantsChanged() {
+    if (!routeScheduling) scheduleRouteExpiry();
+  }
+  // The single wake-up for route deadlines. A grant's expiresAt is never
+  // moved: activity on the route is not a renewal, and every re-arm always
+  // targets the earliest original deadline. Firing only runs the ordinary
+  // pruneRoutes() path, so an idle grant is revoked exactly as any other
+  // expiry and its lifecycle ports receive route-revoked. No alarms permission
+  // is involved; the timer lives only as long as the worker does.
+  let routeExpiryTimer = null;
+  function clearRouteExpiryTimer() {
+    if (routeExpiryTimer !== null) clearTimeout(routeExpiryTimer);
+    routeExpiryTimer = null;
+  }
+  function scheduleRouteExpiry() {
+    clearRouteExpiryTimer();
+    const previous = routeScheduling;
+    routeScheduling = true;
+    try {
+      // Bound and still-pending grants alike carry the original deadline.
+      let next = Infinity;
+      for (const grant of new Set([
+        ...routeGrants.values(),
+        ...routeTabs.values(),
+        ...routeBoots,
+      ]))
+        if (Number.isSafeInteger(grant.expiresAt) && grant.expiresAt < next)
+          next = grant.expiresAt;
+      if (!Number.isFinite(next)) return;
+      routeExpiryTimer = setTimeout(fireRouteExpiry, Math.max(0, next - Date.now()));
+      routeExpiryTimer?.unref?.();
+    } finally {
+      routeScheduling = previous;
+    }
+  }
+  // A timer may be delivered a little early. It never revokes on its own:
+  // the ordinary deadline predicate decides, and pruneRoutes() re-arms for
+  // exactly the same absolute deadline (clearing it when no grant is left).
+  function fireRouteExpiry() {
+    routeExpiryTimer = null;
+    pruneRoutes();
   }
   function revokeAllRoutes() {
     const grants = new Set([...routeGrants.values(), ...routeTabs.values()]);
@@ -4638,9 +4687,13 @@ if (typeof importScripts === "function") importScripts("core.js");
     routeGrants.clear();
     routeTabs.clear();
   }
+  // Every grant's original deadline is honoured here, whether its tab is
+  // bound or its create is still pending.
   function pruneRoutes() {
-    for (const grant of new Set([...routeGrants.values(), ...routeTabs.values()]))
-      if (grant.expiresAt <= Date.now()) revokeRoute(grant);
+    for (const grant of routeGrantSet())
+      if (Number.isSafeInteger(grant.expiresAt) && grant.expiresAt <= Date.now())
+        revokeRoute(grant);
+    scheduleRouteExpiry();
   }
   // Every grant counts toward ROUTE_LIMIT, whether its tab is bound or its
   // tabs.create() is still pending: a pending create holds a route slot.
@@ -4958,6 +5011,7 @@ if (typeof importScripts === "function") importScripts("core.js");
     } else {
       routeBoots.delete(grant);
     }
+    scheduleRouteExpiry();
     return {
       type: "route-created",
       token,

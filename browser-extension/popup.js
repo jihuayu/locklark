@@ -14,7 +14,14 @@
   // Kept separate from the per-copy native clipboard port: this channel only
   // carries this route's token and tells the page when the worker revoked it.
   const ROUTE_LIFECYCLE_PORT_NAME = "route-lifecycle";
-  let busy = false,
+  // The worker's route TTL: a claim may never report more than this.
+  const ROUTE_TTL_SECONDS = 120;
+  // The route claim's original deadline stays here if a network round trip or
+  // a callback lets the local timer fire a little early. Re-arming always
+  // uses exactly this instant; it is never restarted from a full TTL.
+  let routeExpiryTimer = null,
+    routeExpiryDeadline = 0,
+    busy = false,
     renderedCandidates = "",
     renderedHistory = "",
     renderedBanner = "",
@@ -1545,6 +1552,41 @@
       finishVaultOperation(operation);
     }
   }
+  function clearRouteDeadline() {
+    if (routeExpiryTimer !== null) clearTimeout(routeExpiryTimer);
+    routeExpiryTimer = null;
+    routeExpiryDeadline = 0;
+  }
+  // The page's own copy of the grant's deadline: one absolute local instant
+  // derived once from the remaining seconds the claim returned. No pageshow,
+  // visibility change or later route message ever re-derives or extends it.
+  function armRouteDeadline(seconds) {
+    clearRouteDeadline();
+    const deadline = Date.now() + seconds * 1000;
+    routeExpiryDeadline = deadline;
+    routeExpiryTimer = setTimeout(
+      fireRouteDeadline,
+      Math.max(0, deadline - Date.now()),
+    );
+  }
+  // Any grant still live but past an authoritative deadline is dead, so the
+  // page fails closed rather than wait for a timer the worker may never fire.
+  function routeDeadlinePassed() {
+    return routeExpiryDeadline > 0 && Date.now() >= routeExpiryDeadline;
+  }
+  // The timer never wipes on its own: it rechecks the same absolute deadline,
+  // so an early delivery re-arms the remaining wait instead of ending a live
+  // route. Reaching the deadline goes through the ordinary revocation path.
+  function fireRouteDeadline() {
+    routeExpiryTimer = null;
+    if (routeClosed || routeExpiryDeadline <= 0) return;
+    const remaining = routeExpiryDeadline - Date.now();
+    if (remaining > 0) {
+      routeExpiryTimer = setTimeout(fireRouteDeadline, remaining);
+      return;
+    }
+    revokeRouteView();
+  }
   function routeReportClose() {
     if (!routeToken) return;
     try {
@@ -1573,6 +1615,7 @@
     if (els?.vaultView) els.vaultView.hidden = true;
     if (document.body) document.body.dataset.view = "closed";
     if (els?.status) els.status.textContent = message;
+    clearRouteDeadline();
     const port = routeLifecyclePort;
     routeLifecyclePort = null;
     routeLifecycleReady = false;
@@ -1589,6 +1632,7 @@
     routeClosed = true;
     routeCopyInFlight = false;
     routeLifecycleReady = false;
+    clearRouteDeadline();
     closeNativeClipboard();
     const port = routeLifecyclePort;
     routeLifecyclePort = null;
@@ -1612,6 +1656,7 @@
     if (els?.vaultView) els.vaultView.hidden = true;
     if (document.body) document.body.dataset.view = "closed";
     if (els?.status) els.status.textContent = "无法打开此条目";
+    clearRouteDeadline();
     const port = routeLifecyclePort;
     routeLifecyclePort = null;
     routeLifecycleReady = false;
@@ -1622,10 +1667,16 @@
   }
   function validRouteClaim(reply) {
     const detail = reply?.detail;
+    const expires = reply?.expires_in_seconds;
     return (
       !!reply &&
       reply.type === "route-claimed" &&
       reply.token === routeToken &&
+      // A positive bounded remainder is required: the page schedules its own
+      // fail-closed wipe from it and never guesses a TTL of its own.
+      Number.isSafeInteger(expires) &&
+      expires >= 1 &&
+      expires <= ROUTE_TTL_SECONDS &&
       !!detail &&
       typeof detail.id === "string" &&
       /^[a-f0-9]{32}$/.test(detail.id) &&
@@ -1656,6 +1707,9 @@
       failRoute();
       return;
     }
+    // Only the remainder the worker returned arms the wipe: the worker never
+    // extends expiresAt, so that remainder is the grant's original deadline.
+    armRouteDeadline(reply.expires_in_seconds);
     showRouteStatus("");
     const detail = reply.detail;
     lastState = {
@@ -2587,9 +2641,16 @@
   if (typeof document !== "undefined")
     document.addEventListener?.("visibilitychange", () => {
       if (document.visibilityState !== "hidden") return;
-      // The route's already-started native copy may outlive this focus shift;
-      // wiping here would close its port before prepare/commit. Everything
-      // else (and every ordinary popup) is cleared exactly as before.
+      // A hidden route past its deadline always wipes, even mid-copy: the
+      // copy's port must not outlive the grant. This only checks the deadline
+      // already armed; it never re-derives or extends it.
+      if (routeRequested && routeDeadlinePassed()) {
+        revokeRouteView();
+        return;
+      }
+      // Otherwise the route's already-started native copy may outlive this
+      // focus shift; wiping here would close its port before prepare/commit.
+      // Everything else (and every ordinary popup) is cleared as before.
       if (routeRequested && routeCopyInFlight) return;
       clearRevealedSecrets();
       clearCheckoutPickerView();
@@ -4038,9 +4099,15 @@
       )
         return;
       if (message.type === "route-ready") {
-        // Exactly one claim, and only for this route's matching ready.
+        // Exactly one claim, and only for this route's matching ready. A ready
+        // that arrives after the armed deadline is a late grant, so the page
+        // fails closed instead of claiming again.
         if (routeLifecycleReady) return;
         routeLifecycleReady = true;
+        if (routeDeadlinePassed()) {
+          revokeRouteView();
+          return;
+        }
         void claimRoute();
         return;
       }

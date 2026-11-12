@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
-const { webcrypto } = require("node:crypto");
+const { webcrypto, randomUUID } = require("node:crypto");
 const core = require("../core.js");
 
 const POPUP = fs.readFileSync(path.join(__dirname, "../popup.js"), "utf8");
@@ -96,6 +96,21 @@ function harness(options = {}) {
   const intervals = [];
   const windowListeners = new Map();
   const documentListeners = new Map();
+  // Virtual page clock and its timer registry. A timer keeps the delay it was
+  // armed with, so a test can fire exactly one still-pending timer (next()).
+  const RealDate = Date;
+  let clock = RealDate.now();
+  let nextTimer = 1;
+  const timers = new Map();
+  class ClockDate extends RealDate {
+    constructor(...args) {
+      if (args.length) super(...args);
+      else super(clock);
+    }
+    static now() {
+      return clock;
+    }
+  }
   let hash = options.hash || "";
   const body = element("body");
   body.dataset.vault = "1";
@@ -156,9 +171,17 @@ function harness(options = {}) {
     Blob,
     Uint8Array,
     TextEncoder,
-    crypto: webcrypto,
-    setTimeout() { return 1; },
-    clearTimeout() {},
+    // The page mints native request ids from randomUUID; the lease cancel
+    // path uses one too.
+    crypto: { ...webcrypto, randomUUID: () => randomUUID() },
+    // The page reads the same clock this harness advances.
+    Date: ClockDate,
+    setTimeout(callback, ms = 0) {
+      const handle = nextTimer++;
+      timers.set(handle, { callback, ms });
+      return handle;
+    },
+    clearTimeout(handle) { timers.delete(handle); },
     setInterval(callback) { intervals.push(callback); return intervals.length; },
     clearInterval() {},
     addEventListener(type, callback) {
@@ -179,6 +202,21 @@ function harness(options = {}) {
     intervals,
     context,
     body,
+    // Timers still pending, in arm order, with the delay each was armed with.
+    pendingTimers: () => [...timers].map(([handle, timer]) => ({ handle, ms: timer.ms })),
+    now: () => clock,
+    advanceClock(ms) { clock += ms; },
+    // Fire the oldest still-pending timer exactly as armed, without moving
+    // the clock, then let its continuations settle.
+    async next() {
+      const first = timers.entries().next();
+      assert.equal(first.done, false, "no pending page timer");
+      const [handle, timer] = first.value;
+      timers.delete(handle);
+      timer.callback();
+      await h.flush();
+      return { handle, ms: timer.ms };
+    },
     setHash(value) { hash = value; },
     el(selector) { return elements.get(selector) || document.querySelector(selector); },
     async flush() {
@@ -211,8 +249,14 @@ function harness(options = {}) {
     },
     async visibility(state) {
       document.visibilityState = state;
+      // Surface a listener's own failure at this call, not as a stalled flow.
       for (const callback of documentListeners.get("visibilitychange") || [])
-        callback();
+        try {
+          callback();
+        } catch (error) {
+          await h.flush();
+          throw error;
+        }
       await h.flush();
     },
     keydown(key) {
@@ -730,4 +774,149 @@ test("route page hides and cannot invoke unsupported actions", async () => {
   assert.equal(h.requests.length, before, "an unsupported control sent a message");
   assert.equal(h.types().includes("route-close"), false);
   assert.equal(h.body.dataset.view, "detail");
+});
+
+// ---- 6. the page's own deadline derived from the claim's remainder ----
+// Every timer the route page leaves pending must be the one deadline it armed
+// from the claim: the page schedules nothing else.
+const pageTimers = (h) => h.pendingTimers();
+function assertWiped(h, label) {
+  assert.notEqual(h.body.dataset.view, "detail", label + " kept the detail view");
+  assert.equal(h.body.dataset.view, "closed", label + " did not close the view");
+  assert.deepEqual(h.el("#detail-fields").children, [], label + " kept field rows");
+  assert.equal(h.el("#detail-title").textContent, "", label + " kept the title");
+}
+// The page derives its one absolute deadline when the claim resolves. Time is
+// always measured from that instant, never from when the harness started.
+async function claimResolvedAt(seconds = 120) {
+  const h = await openRoutePage(claimedReply({ expires_in_seconds: seconds }));
+  const armedAt = h.now();
+  assert.equal(h.body.dataset.view, "detail");
+  return {
+    h,
+    armedAt,
+    // Move the page clock so that `seconds` have elapsed since arming.
+    advanceToElapsed(seconds) {
+      h.advanceClock(seconds * 1000 - (h.now() - armedAt));
+    },
+  };
+}
+
+test("a non-120 remaining claim arms exactly that remaining deadline and wipes at it", async () => {
+  const page = await claimResolvedAt(45);
+  const h = page.h;
+  assert.equal(h.el("#detail-title").textContent, "Route Target");
+  const timers = pageTimers(h);
+  assert.equal(timers.length, 1, "expected exactly the route deadline timer");
+  assert.equal(timers[0].ms, 45 * 1000, "the remainder, not a full TTL, was armed");
+  // A repeated or later route message never re-arms or extends the deadline.
+  h.lifecyclePorts[0].emit({ type: "route-ready", token: TOKEN });
+  h.lifecyclePorts[0].emit({ type: "route-revoked", token: "d".repeat(64) });
+  await h.flush();
+  assert.deepEqual(pageTimers(h), timers, "a route message re-armed the deadline");
+  // pageshow returns early for a route page, and hiding/revealing only checks
+  // the deadline already armed: neither re-derives nor restarts it.
+  await h.pageshow();
+  await h.visibility("hidden");
+  await h.visibility("visible");
+  assert.deepEqual(pageTimers(h), timers, "pageshow/visibility restarted the deadline");
+  assert.deepEqual(h.types(), ["route-claim"]);
+  // At the original deadline the timer wipes through the ordinary revoke path.
+  page.advanceToElapsed(45);
+  const fired = await h.next();
+  assert.equal(fired.ms, 45 * 1000);
+  assertWiped(h, "an expired route");
+  assert.equal(h.el("#status").textContent, "条目已失效，请重新从金库打开");
+  assert.equal(h.lifecyclePorts[0].disconnected, true, "the lifecycle port stayed open");
+  // Wiping reports close exactly once; later close paths are no-ops.
+  await h.pagehide();
+  h.keydown("Escape");
+  h.click("#detail-back");
+  await h.flush();
+  assert.deepEqual(h.types(), ["route-claim", "route-close"], "close was reported twice");
+  assert.equal(h.take("route-close").message.token, TOKEN);
+  assert.deepEqual(h.pendingTimers(), [], "the route deadline survived its own wipe");
+});
+
+test("an early deadline timer rechecks the same absolute deadline and re-arms the remainder", async () => {
+  const page = await claimResolvedAt(30);
+  const h = page.h;
+  assert.equal(pageTimers(h)[0].ms, 30 * 1000);
+  // The callback runs with half the remainder still left: nothing is wiped
+  // and the remaining 15 s of the same deadline is armed.
+  page.advanceToElapsed(15);
+  const early = await h.next();
+  assert.equal(early.ms, 30 * 1000);
+  assert.equal(h.body.dataset.view, "detail", "an early timer wiped a live route");
+  assert.equal(h.el("#detail-fields").children.length > 0, true);
+  assert.deepEqual(pageTimers(h).map((timer) => timer.ms), [15 * 1000]);
+  assert.deepEqual(h.types(), ["route-claim"]);
+  // A second early delivery (1 s left) still only re-arms 1 s.
+  page.advanceToElapsed(29);
+  const again = await h.next();
+  assert.equal(again.ms, 15 * 1000);
+  assert.equal(h.body.dataset.view, "detail");
+  assert.deepEqual(pageTimers(h).map((timer) => timer.ms), [1 * 1000]);
+  page.advanceToElapsed(30);
+  const expiry = await h.next();
+  assert.equal(expiry.ms, 1 * 1000);
+  assertWiped(h, "a route past its deadline");
+  assert.deepEqual(h.types(), ["route-claim", "route-close"]);
+});
+
+test("an invalid, zero or oversized claim expiry never renders", async () => {
+  const cases = [
+    claimedReply({ expires_in_seconds: undefined }),
+    claimedReply({ expires_in_seconds: 0 }),
+    claimedReply({ expires_in_seconds: -5 }),
+    claimedReply({ expires_in_seconds: 121 }),
+    claimedReply({ expires_in_seconds: 3600 }),
+    claimedReply({ expires_in_seconds: 45.5 }),
+    claimedReply({ expires_in_seconds: "45" }),
+    claimedReply({ expires_in_seconds: Number.NaN }),
+  ];
+  for (const reply of cases) {
+    const h = harness({ hash: "#route=" + TOKEN });
+    await h.flush();
+    h.lifecyclePorts[0].emit({ type: "route-ready", token: TOKEN });
+    await h.flush();
+    h.requests[0].resolve(reply);
+    await h.flush();
+    const label = "expires_in_seconds=" + String(reply.expires_in_seconds);
+    assertWiped(h, label);
+    assert.equal(h.el("#detail-title").textContent, "", label + " rendered the title");
+    assert.deepEqual(pageTimers(h), [], label + " armed a deadline");
+    assert.deepEqual(h.types(), ["route-claim", "route-close"], label + " did not report close");
+    assert.equal(h.take("route-close").message.token, TOKEN);
+  }
+});
+
+test("a hidden route past its deadline wipes during an in-flight copy", async () => {
+  const page = await claimResolvedAt(30);
+  const h = page.h;
+  const button = h.detailButton("password", "copy-field");
+  button.listeners.get("click")();
+  await h.flush();
+  const port = h.nativePorts()[0];
+  port.emit({ type: "ready", native: true });
+  await h.flush();
+  assert.equal(port.messages[0].type, "prepare");
+  // The copy is still awaiting approval when the deadline passes and the
+  // browser hides: the copy alone must not keep an expired route alive.
+  page.advanceToElapsed(30);
+  await h.visibility("hidden");
+  assertWiped(h, "an expired hidden route");
+  assert.equal(h.el("#status").textContent, "条目已失效，请重新从金库打开");
+  assert.equal(port.disconnected, true, "the copy's native lease outlived the route");
+  assert.deepEqual(h.take("route-close").message.token, TOKEN);
+  // A late preparation can no longer commit, and no other read follows.
+  port.emit({
+    type: "prepared", request_id: port.messages[0].request_id,
+    item_id: ITEM_ID, revision: ITEM_REV, field: "password",
+    copy_ticket: "f".repeat(64), expires_in_seconds: 15, cleanup_ttl_seconds: 30,
+  });
+  await h.flush();
+  assert.equal(port.messages.some((message) => message.type === "commit"), false);
+  assert.deepEqual(h.clipboardWrites, []);
+  assert.deepEqual(h.types(), ["route-claim", "route-close"]);
 });
