@@ -1089,8 +1089,9 @@ test("the generated revoked expression fails any remaining title, field, copy, s
 // Focused static contract for the Chromium route + idle TTL checkpoint.
 //
 // Only the fixed Chromium and Firefox acceptance steps and the artifact
-// download the Chromium step relies on are read. The workflow layout is known,
-// so this is a line-block extraction rather than a YAML parser.
+// download the Chromium step relies on are read, and only inside the
+// `web-browsers` job that actually runs them. The workflow layout is known, so
+// this is a line-block extraction rather than a YAML parser.
 // ---------------------------------------------------------------------------
 const CHROMIUM_NATIVE_STEP =
   "Test native browser approval, popup editing, fill, save and OTP";
@@ -1104,18 +1105,41 @@ const ROUTE_FLAGS = [
   "LOCKLARK_TEST_ROUTE_IDLE_TTL",
 ];
 
-// The lines of one six-space step item, from its exact `- name:` line to the
-// next item or job level (a non-blank line indented less than eight spaces).
-function stepBlock(name) {
-  const start = WORKFLOW_LINES.indexOf(`      - name: ${name}`);
-  assert.ok(start >= 0, `check.yml must keep the "${name}" step`);
+// The lines of one top-level job, from its exact `  <name>:` line to the next
+// `  <job>:` line. This keeps the browser steps and their artifact download
+// from being satisfied by the same-named steps in another job.
+function jobBlock(name) {
+  const start = WORKFLOW_LINES.indexOf(`  ${name}:`);
+  assert.ok(start >= 0, `check.yml must keep the "${name}" job`);
   let end = start + 1;
-  while (
-    end < WORKFLOW_LINES.length &&
-    (WORKFLOW_LINES[end].trim() === "" || /^ {8,}\S/.test(WORKFLOW_LINES[end]))
-  )
+  while (end < WORKFLOW_LINES.length && !/^  [A-Za-z0-9_-]+:\s*$/.test(WORKFLOW_LINES[end]))
     end++;
   return { start, lines: WORKFLOW_LINES.slice(start, end) };
+}
+
+// The lines of one six-space step item inside a job slice, from its exact
+// `- name:` line to the next item or job level (a non-blank line indented less
+// than eight spaces). The step must be unique within that job.
+function stepBlock(job, name) {
+  const matches = [];
+  for (let index = 0; index < job.lines.length; index++)
+    if (job.lines[index] === `      - name: ${name}`) matches.push(index);
+  assert.equal(
+    matches.length,
+    1,
+    `job must declare exactly one "${name}" step, got ${matches.length}`,
+  );
+  const offset = matches[0];
+  let end = offset + 1;
+  while (
+    end < job.lines.length &&
+    (job.lines[end].trim() === "" || /^ {8,}\S/.test(job.lines[end]))
+  )
+    end++;
+  return {
+    start: job.start + offset,
+    lines: job.lines.slice(offset, end),
+  };
 }
 
 // The value of the single step-level field at eight spaces.
@@ -1166,7 +1190,8 @@ function stepRun(block) {
 }
 
 test("CI runs the Chromium route and idle TTL acceptance once, after the unchanged native and OTP journeys", () => {
-  const chromium = stepBlock(CHROMIUM_NATIVE_STEP);
+  const browsers = jobBlock("web-browsers");
+  const chromium = stepBlock(browsers, CHROMIUM_NATIVE_STEP);
   // The step is still the Chromium-only, bounded native acceptance step.
   assert.equal(
     stepField(chromium.lines, "if"),
@@ -1207,6 +1232,11 @@ test("CI runs the Chromium route and idle TTL acceptance once, after the unchang
       "the original commands must not clear the popup-vault override",
     );
   const env = stepMapping(chromium.lines, "env");
+  assert.equal(
+    env.LOCKLARK_TEST_POPUP_VAULT,
+    "1",
+    "the Chromium step must keep its default popup-vault coverage",
+  );
   for (const flag of ROUTE_FLAGS) {
     assert.ok(!(flag in env), `${flag} must not be a step-level env value`);
     assert.equal(
@@ -1237,7 +1267,7 @@ test("CI runs the Chromium route and idle TTL acceptance once, after the unchang
     },
     "the Chromium step must keep its binaries under $RUNNER_TEMP/locklark-bin",
   );
-  const download = stepBlock(DOWNLOAD_LINUX_BINARIES);
+  const download = stepBlock(browsers, DOWNLOAD_LINUX_BINARIES);
   assert.ok(
     download.start < chromium.start,
     "Download Linux primary binaries must precede the Chromium native step",
@@ -1255,7 +1285,7 @@ test("CI runs the Chromium route and idle TTL acceptance once, after the unchang
 
   // Firefox keeps its original native/OTP scope and never receives the route
   // opt-ins.
-  const firefox = stepBlock(FIREFOX_NATIVE_STEP);
+  const firefox = stepBlock(browsers, FIREFOX_NATIVE_STEP);
   assert.equal(
     stepField(firefox.lines, "if"),
     "${{ matrix.browser == 'firefox' }}",
