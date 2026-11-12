@@ -962,38 +962,94 @@ func TestS3MockPutBarrierUnblocksOnCancel(t *testing.T) {
 	}
 }
 
-// TestS3MockPutBarrierReleasedWriterDeadline covers a writer that stalls after
-// the barrier released it: the complete-race deadline must end the race, and
-// the typed failure must be returned only after that writer was cancelled and
-// reaped. Channels make the stall deterministic; the test signal replaces a
-// real deadline without waiting for one.
+// doneObservedContext wraps a context and closes observed the first time Done
+// is read. A test can cancel the wrapped context only after a waiter reached
+// its select, proving the wait began rather than observing an already-ended
+// context.
+type doneObservedContext struct {
+	context.Context
+	once     sync.Once
+	observed chan struct{}
+}
+
+func (c *doneObservedContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.observed) })
+	return c.Context.Done()
+}
+
+// TestS3MockPutBarrierReleasedWriterDeadline covers a writer that passes the
+// released barrier and then stalls, waiting for its request context: complete
+// must already be waiting on the race context when that deadline ends, and the
+// typed failure must be returned only after the stalled writer was cancelled
+// and reaped. Channels make every step deterministic; there are no sleeps.
 func TestS3MockPutBarrierReleasedWriterDeadline(t *testing.T) {
 	barrier := newPutBarrier(1)
+	// reqCtx is the writer's request context, separate from the race context;
+	// the test cancels it through run.stop.
+	reqCtx, endRequest := context.WithCancel(context.Background())
 	raceCtx, endRace := context.WithCancel(context.Background())
-	defer endRace()
 
 	var running atomic.Int32
 	parked := make(chan struct{})
-	ops := []func() error{
-		func() error { return nil },
-		func() error {
-			running.Add(1)
-			defer running.Add(-1)
-			// Released by the barrier, this writer stays inside the request
-			// until the complete-race deadline ends.
-			close(parked)
-			<-raceCtx.Done()
-			return raceCtx.Err()
-		},
+	run := startWriters([]func() error{func() error {
+		running.Add(1)
+		defer running.Add(-1)
+		// The writer arrives at the barrier like the mock handler does.
+		barrier.wait(reqCtx, s3PutObservation{})
+		// Released by the test, it is now past the barrier and stalls inside
+		// the request until its request context ends.
+		close(parked)
+		<-reqCtx.Done()
+		return reqCtx.Err()
+	}})
+
+	wrapped := &doneObservedContext{Context: raceCtx, observed: make(chan struct{})}
+	completeDone := make(chan bool, 1)
+	completeStarted, completeCollected := false, false
+	t.Cleanup(func() {
+		endRequest()
+		endRace()
+		barrier.releaseAll()
+		if completeStarted && !completeCollected {
+			<-completeDone
+			completeCollected = true
+		}
+		run.drain()
+	})
+
+	// Wait for the writer to reach the barrier, then release it explicitly and
+	// wait until it has passed the barrier and parked on its request context.
+	select {
+	case <-barrier.arrived:
+	case <-time.After(10 * time.Second):
+		t.Fatal("writer did not reach the barrier")
 	}
-	run := startWriters(ops)
-	<-parked
+	barrier.releaseAll()
+	select {
+	case <-parked:
+	case <-time.After(10 * time.Second):
+		t.Fatal("writer did not pass the released barrier")
+	}
+
+	// complete must already be waiting when the race context ends, not receive
+	// a context cancelled beforehand.
+	go func() { completeDone <- run.complete(wrapped) }()
+	completeStarted = true
+	select {
+	case <-wrapped.observed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("complete did not wait on the race context")
+	}
 	endRace()
 
-	if run.complete(raceCtx) {
-		t.Fatal("complete reported success after the complete-race deadline ended")
+	if completed := <-completeDone; completed {
+		completeCollected = true
+		t.Fatal("complete reported success after the race deadline ended")
+	} else {
+		completeCollected = true
 	}
-	fail := run.stop(endRace, barrier, "complete-race deadline ended before every released writer returned", raceCtx.Err())
+
+	fail := run.stop(endRequest, barrier, "race deadline ended before the released writer returned", raceCtx.Err())
 	var typed *putBarrierFailure
 	if !errors.As(fail, &typed) {
 		t.Fatalf("failure is %T, want *putBarrierFailure", fail)
@@ -1001,17 +1057,17 @@ func TestS3MockPutBarrierReleasedWriterDeadline(t *testing.T) {
 	if !errors.Is(fail, context.Canceled) {
 		t.Fatalf("failure cause = %v, want context.Canceled", fail.err)
 	}
-	if typed.want != len(ops) {
-		t.Fatalf("failure counted %d writers, want %d", typed.want, len(ops))
+	if typed.want != 1 {
+		t.Fatalf("failure counted %d writers, want 1", typed.want)
+	}
+	if run.pending != 0 {
+		t.Fatalf("%d writer result(s) not drained when the typed failure was returned", run.pending)
 	}
 	if !run.reaped {
 		t.Fatal("typed failure returned before every writer goroutine exited")
 	}
 	if got := running.Load(); got != 0 {
 		t.Fatalf("%d writer goroutine(s) still running when the typed failure was returned", got)
-	}
-	if run.pending != 0 {
-		t.Fatalf("%d writer result(s) not drained when the typed failure was returned", run.pending)
 	}
 }
 
