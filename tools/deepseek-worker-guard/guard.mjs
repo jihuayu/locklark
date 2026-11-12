@@ -1,9 +1,12 @@
 /**
  * Final guard for direct model tool calls that contain an obvious literal
- * `git stash` invocation.
+ * `git stash` invocation, or that directly read a small fixed set of local
+ * sensitive path forms.
  *
- * This intentionally inspects only the model-facing shell tool names and a
- * string `command`. It is neither a shell parser nor a sandbox.
+ * This intentionally inspects model-facing tool names and string arguments
+ * only. It is neither a shell/Python parser nor a filesystem sandbox: it only
+ * matches literal path text, so computed paths and indirect code are out of
+ * scope.
  */
 
 export const name = 'deepseek-worker-guard'
@@ -11,6 +14,47 @@ export const inject = ['tools']
 
 /** A single fixed reason that contains no execution arguments. */
 export const DENIAL_REASON = 'Direct Git stash commands are denied by the worker guard.'
+
+/** A single fixed sensitive-path reason that contains no paths or filenames. */
+export const SENSITIVE_PATH_DENIAL_REASON =
+  'Direct reads of local sensitive paths are denied by the worker guard.'
+
+/**
+ * Tool names whose direct path argument is `file_path`. Other arguments of
+ * these tools are not path literals and are not inspected.
+ */
+const FILE_PATH_TOOL_NAMES = new Set(['read', 'read_image'])
+
+/** Per-tool argument fields scanned for literal sensitive path text. */
+const FILE_PATH_ARGUMENT_KEYS = new Set(['file_path', 'path', 'paths'])
+const SHELL_ARGUMENT_KEYS = new Set(['command', 'cmd', 'script'])
+
+/** A path boundary: start of text, whitespace, or a literal shell quote. */
+const RELATIVE_START = String.raw`(?:^|\s|["'])`
+/** The end of a quoted relative path is its closing quote or end of text. */
+const QUOTED_END = String.raw`(?=["']|$)`
+/** Optional leading separator for path-bearing forms (absolute or `~/`). */
+const PATH_START = String.raw`(?:^|[/\\~])`
+
+/**
+ * Literal sensitive path forms. The credential path literal must end the
+ * path: it is followed by a delimiter or the end of the scanned string, so
+ * longer names such as `credentials.json.bak` do not match. Matching is
+ * case-insensitive because the host filesystem may be case-insensitive.
+ * Shell token boundaries leave a `cat ".config/...json"` command tokenizable.
+ */
+const CREDENTIAL_LITERAL = String.raw`\.config[/\\]deepseek-subagent[/\\]credentials\.json`
+
+/**
+ * Literal sensitive path forms, each as a quoted relative path
+ * (a `.config/...`-style relative path as its own shell token)
+ * or as an absolute / `~/` path anywhere in the scanned text.
+ */
+const SENSITIVE_PATH_PATTERNS = [
+  new RegExp(String.raw`${CREDENTIAL_LITERAL}(?=$|[^\w.-])|${RELATIVE_START}${CREDENTIAL_LITERAL}${QUOTED_END}`, 'i'),
+  new RegExp(String.raw`${PATH_START}sensitive-quarantine(?=$|[/\\])|${RELATIVE_START}sensitive-quarantine[/\\][^"'*?\n]*${QUOTED_END}`, 'i'),
+  new RegExp(String.raw`serverlab\.psql(?=$|[^\w.-])|${RELATIVE_START}serverlab\.psql${QUOTED_END}`, 'i'),
+]
 
 const SHELL_TOOL_NAMES = new Set(['bash', 'terminal'])
 const GIT_EXECUTABLES = new Set(['git', '/usr/bin/git'])
@@ -212,19 +256,66 @@ export function isGitStashCommand(command) {
 }
 
 /**
+ * Pure detector for literal text mentioning one of the fixed sensitive path
+ * forms. Lexical only: it neither resolves `~`, reads HOME, nor touches disk.
+ * @param {unknown} text
+ * @returns {boolean}
+ */
+export function mentionsSensitivePath(text) {
+  if (typeof text !== 'string' || text.length === 0) return false
+  return SENSITIVE_PATH_PATTERNS.some((pattern) => pattern.test(text))
+}
+
+/**
+ * Walk JSON-shaped argument values recursively and test only their string
+ * values against the sensitive path patterns.
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+function hasSensitivePathValue(value) {
+  if (typeof value === 'string') return mentionsSensitivePath(value)
+  if (Array.isArray(value)) return value.some(hasSensitivePathValue)
+  if (value !== null && typeof value === 'object') {
+    return Object.values(value).some(hasSensitivePathValue)
+  }
+  return false
+}
+
+/** Return only the selected argument fields of one tool call. */
+function scannedArguments(args, keys) {
+  return Object.entries(args)
+    .filter(([key]) => keys.has(key))
+    .map(([, value]) => value)
+}
+
+/**
  * Guard callback registered with `ctx.tools.guard()`.
  * @param {{ name?: unknown, arguments?: unknown } | null | undefined} execution
  * @returns {string | undefined}
  */
 export function guardExecution(execution) {
   if (execution === null || typeof execution !== 'object') return undefined
-  if (!SHELL_TOOL_NAMES.has(execution.name)) return undefined
 
   const args = execution.arguments
-  if (args === null || typeof args !== 'object') return undefined
+  if (args === null || typeof args !== 'object' || Array.isArray(args)) return undefined
 
-  const command = args.command
-  return isGitStashCommand(command) ? DENIAL_REASON : undefined
+  if (SHELL_TOOL_NAMES.has(execution.name)) {
+    const stashCommand = args.command
+    if (isGitStashCommand(stashCommand)) return DENIAL_REASON
+    if (scannedArguments(args, SHELL_ARGUMENT_KEYS).some(hasSensitivePathValue)) {
+      return SENSITIVE_PATH_DENIAL_REASON
+    }
+    return undefined
+  }
+
+  if (FILE_PATH_TOOL_NAMES.has(execution.name)) {
+    if (scannedArguments(args, FILE_PATH_ARGUMENT_KEYS).some(hasSensitivePathValue)) {
+      return SENSITIVE_PATH_DENIAL_REASON
+    }
+    return undefined
+  }
+
+  return undefined
 }
 
 /** Register the guard with the calling Cordis/DSh tools service. */

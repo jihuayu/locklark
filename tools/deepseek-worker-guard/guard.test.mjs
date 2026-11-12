@@ -3,8 +3,10 @@ import test from 'node:test'
 
 import guardPlugin, {
   DENIAL_REASON,
+  SENSITIVE_PATH_DENIAL_REASON,
   guardExecution,
   isGitStashCommand,
+  mentionsSensitivePath,
 } from './guard.mjs'
 
 function capturePluginGuard() {
@@ -248,4 +250,289 @@ test('denial reason is fixed and contains no execution arguments', () => {
   assert.equal(firstReason.includes(sentinel), false)
   assert.equal(firstReason.includes(command), false)
   assert.equal(firstReason.includes('/tmp/'), false)
+})
+
+// ---------------------------------------------------------------------------
+// Sensitive-path guard. Every path below is synthetic (`/tmp/fake-home`,
+// `example.invalid`); no file is read or resolved and no command is run.
+// ---------------------------------------------------------------------------
+
+const CREDENTIAL_SUFFIX = ['.config', 'deepseek-subagent', 'credentials.json'].join('/')
+const QUARANTINE_NAME = ['sensitive', 'quarantine'].join('-')
+const SERVERLAB = ['serverlab', 'psql'].join('.')
+const SERVERLAB_PREFIX = ['not', 'serverlab'].join('')
+const FAKE_HOME = '/tmp/fake-home'
+const CREDENTIAL_TILDE = '~/' + CREDENTIAL_SUFFIX
+const CREDENTIAL_ABSOLUTE = FAKE_HOME + '/' + CREDENTIAL_SUFFIX
+const QUARANTINE_PATH = '/tmp/fake-work/' + QUARANTINE_NAME + '/item.txt'
+const SERVERLAB_PATH = '/tmp/fake-work/' + SERVERLAB
+const QUARANTINE_RELATIVE = QUARANTINE_NAME + '/item.txt'
+const SERVERLAB_RELATIVE = 'fake-work/' + SERVERLAB
+// Synthetic bare relative names only; never a real path.
+const QUARANTINE_ITEM = 'item.txt'
+const CASE_PATHS = [
+  [CREDENTIAL_SUFFIX, CREDENTIAL_SUFFIX.toUpperCase()],
+  [QUARANTINE_RELATIVE, QUARANTINE_RELATIVE.toUpperCase()],
+  [SERVERLAB_RELATIVE, SERVERLAB_RELATIVE.toUpperCase()],
+]
+
+/** Build a synthetic mixed-case variant without touching any real path. */
+function toAlternatingCase(text) {
+  let out = ''
+  for (let index = 0; index < text.length; index += 1) {
+    out += index % 2 === 0 ? text[index].toLowerCase() : text[index].toUpperCase()
+  }
+  return out
+}
+
+function deniedSensitive(execution) {
+  return guardExecution(execution) === SENSITIVE_PATH_DENIAL_REASON
+}
+
+test('sensitive path denial reason is fixed and mentions no path or filename', () => {
+  assert.equal(typeof SENSITIVE_PATH_DENIAL_REASON, 'string')
+  assert.notEqual(SENSITIVE_PATH_DENIAL_REASON, '')
+  assert.notEqual(SENSITIVE_PATH_DENIAL_REASON, DENIAL_REASON)
+  for (const fragment of [
+    'credentials',
+    '.json',
+    'deepseek-subagent',
+    '.config',
+    QUARANTINE_NAME,
+    SERVERLAB,
+    FAKE_HOME,
+    '~',
+    '/',
+  ]) {
+    assert.equal(SENSITIVE_PATH_DENIAL_REASON.includes(fragment), false, fragment)
+  }
+})
+
+test('detects the literal sensitive path forms', () => {
+  const texts = [
+    CREDENTIAL_TILDE,
+    CREDENTIAL_ABSOLUTE,
+    '/Users/fake-home/' + CREDENTIAL_SUFFIX,
+    QUARANTINE_PATH,
+    '/tmp/fake-work/' + SERVERLAB,
+    SERVERLAB_PATH + ':12',
+  ]
+  for (const text of texts) {
+    assert.equal(mentionsSensitivePath(text), true, JSON.stringify(text))
+  }
+})
+
+test('detects quoted relative sensitive paths as separate tokens', () => {
+  const texts = [
+    CREDENTIAL_SUFFIX,
+    '"' + CREDENTIAL_SUFFIX + '"',
+    QUARANTINE_RELATIVE,
+    "'" + QUARANTINE_RELATIVE + "'",
+    SERVERLAB_RELATIVE,
+    '"' + SERVERLAB_RELATIVE + '"',
+  ]
+  for (const text of texts) {
+    assert.equal(mentionsSensitivePath(text), true, JSON.stringify(text))
+  }
+})
+
+test('denies quoted relative sensitive path commands', () => {
+  const commands = [
+    'cat "' + CREDENTIAL_SUFFIX + '"',
+    "cat '" + QUARANTINE_RELATIVE + "'",
+    'sed -n 1p "' + SERVERLAB_RELATIVE + '"',
+  ]
+  for (const command of commands) {
+    assert.equal(
+      deniedSensitive({ name: 'bash', arguments: { command } }),
+      true,
+      JSON.stringify(command),
+    )
+  }
+})
+
+test('detects case variants of every protected path spelling', () => {
+  for (const [lower, upper] of CASE_PATHS) {
+    for (const variant of [upper, toAlternatingCase(lower)]) {
+      for (const text of [variant, FAKE_HOME + '/' + variant, '"' + variant + '"']) {
+        assert.equal(mentionsSensitivePath(text), true, JSON.stringify(text))
+      }
+    }
+  }
+})
+
+test('allows case variants of near-miss path text', () => {
+  // Built from mixed-case host and suffix segments, so near-miss text still
+  // exercises case variants without embedding a protected spelling.
+  const exactHost = toAlternatingCase(SERVERLAB)
+  const notHost = toAlternatingCase(SERVERLAB_PREFIX + SERVERLAB)
+  const credentialHost = ['Deepseek', 'Subagent'].map(toAlternatingCase)
+  const texts = [
+    toAlternatingCase(CREDENTIAL_TILDE) + '.BaK',
+    toAlternatingCase(CREDENTIAL_ABSOLUTE) + '.TmP',
+    '~/.ConFig/' + credentialHost[0] + '/credentials.jsonx',
+    '/tmp/' + QUARANTINE_NAME.toUpperCase() + '-Old/x.txt',
+    '"' + QUARANTINE_NAME.toUpperCase() + '-Old/x.txt"',
+    QUARANTINE_NAME.toUpperCase() + '-Old/' + QUARANTINE_ITEM,
+    notHost + '.Psql',
+    exactHost + '.PsqlX',
+    exactHost + '.Psql.BaK',
+    '/tmp/' + notHost + '.Psql',
+  ]
+  for (const text of texts) {
+    assert.equal(mentionsSensitivePath(text), false, JSON.stringify(text))
+  }
+})
+
+test('allows near-miss and unrelated path text', () => {
+  const texts = [
+    '',
+    '~/.config/deepseek-subagent/credentials.json.bak',
+    '~/.config/deepseek-subagent/credentials.json.tmp',
+    FAKE_HOME + '/.config/other/credentials.json',
+    FAKE_HOME + '/.config/deepseek-subagent/settings.json',
+    '~/.config/deepseek-subagentx/' + 'credentials.json',
+    '/tmp/fake-work/' + QUARANTINE_NAME + '-old/item.txt',
+    '/tmp/fake-work/' + SERVERLAB + '.bak',
+    '/tmp/fake-work/' + SERVERLAB + 'x',
+    '/tmp/fake-work/' + SERVERLAB + '.psql',
+    '/tmp/fake-work/' + 'serverlab',
+    '/tmp/fake-work/ordinary.txt',
+    'credentials.json',
+    'git status',
+  ]
+  for (const text of texts) {
+    assert.equal(mentionsSensitivePath(text), false, JSON.stringify(text))
+  }
+  assert.equal(mentionsSensitivePath(42), false)
+  assert.equal(mentionsSensitivePath(undefined), false)
+})
+
+test('denies direct read and read_image file_path arguments', () => {
+  for (const name of ['read', 'read_image']) {
+    for (const filePath of [CREDENTIAL_TILDE, CREDENTIAL_ABSOLUTE, QUARANTINE_PATH, SERVERLAB_PATH]) {
+      assert.equal(deniedSensitive({ name, arguments: { file_path: filePath } }), true, name + ' ' + filePath)
+    }
+    assert.equal(
+      deniedSensitive({ name, arguments: { file_path: QUARANTINE_PATH + '/nested.png' } }),
+      true,
+    )
+  }
+})
+
+test('allows ordinary file_path arguments on read tools', () => {
+  for (const name of ['read', 'read_image']) {
+    assert.equal(guardExecution({ name, arguments: { file_path: '/tmp/fake-work/README.md' } }), undefined)
+    assert.equal(guardExecution({ name, arguments: {} }), undefined)
+    assert.equal(guardExecution({ name, arguments: { file_path: 7 } }), undefined)
+    assert.equal(guardExecution({ name, arguments: { file_path: FAKE_HOME + '/.config/other/credentials.json' } }), undefined)
+  }
+})
+
+test('denies literal shell commands naming a sensitive path in direct forms', () => {
+  const commands = [
+    'cat ' + CREDENTIAL_TILDE,
+    'cat "' + CREDENTIAL_ABSOLUTE + '"',
+    'sed -n 1,5p ' + CREDENTIAL_ABSOLUTE,
+    "python3 -c 'print(\"" + FAKE_HOME + '/' + CREDENTIAL_SUFFIX + "\")'",
+    'cat ' + QUARANTINE_PATH,
+    'cd /tmp && sed -n 1p ' + QUARANTINE_PATH,
+    "python -c 'open(\"" + QUARANTINE_PATH + "\").read()'",
+    'cat ' + SERVERLAB_PATH,
+    'ls /tmp/fake-work\ncat ' + SERVERLAB_PATH,
+    "python3 - <<'PY'\nopen('" + SERVERLAB_PATH + "').read()\nPY",
+    "bash -c 'cat " + SERVERLAB_PATH + "'",
+  ]
+  for (const name of ['bash', 'terminal']) {
+    for (const command of commands) {
+      assert.equal(deniedSensitive({ name, arguments: { command } }), true, name + ' ' + JSON.stringify(command))
+    }
+  }
+})
+
+test('allows shell commands without a literal sensitive path', () => {
+  const commands = [
+    'cat /tmp/fake-work/README.md',
+    'sed -n 1p /tmp/fake-work/' + SERVERLAB + '.bak',
+    'python3 -c "print(1)"',
+    'git status --short',
+    'echo credentials',
+  ]
+  for (const command of commands) {
+    assert.equal(guardExecution({ name: 'bash', arguments: { command } }), undefined, JSON.stringify(command))
+  }
+})
+
+test('stash denial takes precedence and stash behavior is preserved', () => {
+  assert.equal(
+    guardExecution({ name: 'bash', arguments: { command: 'git stash && cat ' + SERVERLAB_PATH } }),
+    DENIAL_REASON,
+  )
+  assert.equal(isGitStashCommand('git stash'), true)
+  assert.equal(
+    guardExecution({ name: 'read', arguments: { file_path: SERVERLAB_PATH, command: 'git stash' } }),
+    SENSITIVE_PATH_DENIAL_REASON,
+  )
+})
+
+test('sensitive path guard ignores other tool names and unrelated argument keys', () => {
+  for (const name of ['python', 'zsh', 'grep', 'web_fetch', 'write']) {
+    assert.equal(guardExecution({ name, arguments: { command: 'cat ' + SERVERLAB_PATH } }), undefined, name)
+    assert.equal(guardExecution({ name, arguments: { file_path: SERVERLAB_PATH } }), undefined, name)
+  }
+  assert.equal(
+    guardExecution({ name: 'bash', arguments: { description: 'read ' + SERVERLAB_PATH } }),
+    undefined,
+  )
+  assert.equal(
+    guardExecution({ name: 'read', arguments: { command: SERVERLAB_PATH } }),
+    undefined,
+  )
+})
+
+test('sensitive path guard tolerates malformed executions', () => {
+  assert.equal(guardExecution(undefined), undefined)
+  assert.equal(guardExecution(null), undefined)
+  assert.equal(guardExecution({ name: 'read' }), undefined)
+  assert.equal(guardExecution({ name: 'read', arguments: null }), undefined)
+  assert.equal(guardExecution({ name: 'read', arguments: [] }), undefined)
+  assert.equal(
+    guardExecution({ name: 'bash', arguments: Object.assign([], { command: SERVERLAB_PATH }) }),
+    undefined,
+  )
+})
+
+test('recursive scan covers nested array/object path values on covered tools', () => {
+  for (const name of ['bash', 'terminal']) {
+    assert.equal(deniedSensitive({ name, arguments: { command: ['cat ' + SERVERLAB_PATH] } }), true, name)
+    assert.equal(
+      deniedSensitive({ name, arguments: { command: ['echo ok', 'cat ' + QUARANTINE_PATH] } }),
+      true,
+      name,
+    )
+    assert.equal(
+      deniedSensitive({ name, arguments: { script: [{ chunk: CREDENTIAL_TILDE }] } }),
+      true,
+      name,
+    )
+    assert.equal(
+      guardExecution({ name, arguments: { command: ['cat /tmp/fake-work/README.md'] } }),
+      undefined,
+      name,
+    )
+  }
+  assert.equal(
+    deniedSensitive({ name: 'read', arguments: { file_path: [{ path: SERVERLAB_PATH }] } }),
+    true,
+  )
+})
+
+test('sensitive path denial never echoes the execution arguments', () => {
+  const sentinel = 'UNIQUE_PATH_TEXT_4c1e7d2b'
+  const filePath = '/tmp/fake-work/' + sentinel + '/' + QUARANTINE_NAME + '/x'
+  const reason = guardExecution({ name: 'read', arguments: { file_path: filePath } })
+  assert.equal(reason, SENSITIVE_PATH_DENIAL_REASON)
+  assert.equal(reason.includes(sentinel), false)
+  assert.equal(reason.includes(filePath), false)
+  assert.equal(guardExecution({ name: 'bash', arguments: { command: 'cat ' + filePath } }), SENSITIVE_PATH_DENIAL_REASON)
 })
