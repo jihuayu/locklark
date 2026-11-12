@@ -1584,26 +1584,35 @@ try {
   // accessibility actions (the Edge directory chooser, which stays a typed
   // XTest input). The single action array goes to the driver's top level.
   nativeInput = input;
-  // Browser-tab keys are real XTest input to the exact Chromium window. The
+  // Browser-tab keys are real XTest input to the exact launched window. The
   // realpath comes from the launched browser, never from an environment
-  // guess. Only these two fixed title prefixes are accepted, and the request
-  // is always the helper's exact-title-prefix form: no native window title,
-  // no inspection and no other request options.
-  const chromiumExecutable = realpathSync(chromium.executablePath());
-  function browserKey(actions, titlePrefix) {
-    assert(
-      titlePrefix === ROUTE_TITLE_PREFIX ||
-        titlePrefix === SOURCE_TITLE_PREFIX,
-      "Unsupported browser key target",
-    );
-    const request = { title_prefix: titlePrefix, executable: chromiumExecutable, actions };
-    return JSON.parse(
-      execFileSync("python3", [join(root, "scripts/browser_native_x11.py")], {
-        input: JSON.stringify(request),
-        env,
-      }).toString(),
-    );
+  // guess: Edge uses the explicit executable it was launched with, while
+  // Chromium keeps Playwright's own executable. Only these two fixed title
+  // prefixes are accepted, and the request is always the helper's
+  // exact-title-prefix form: no native window title, no inspection and no
+  // other request options.
+  function browserKeyFor(chromium) {
+    const chromiumExecutable = realpathSync(chromium.executablePath());
+    return function browserKey(actions, titlePrefix) {
+      assert(
+        titlePrefix === ROUTE_TITLE_PREFIX ||
+          titlePrefix === SOURCE_TITLE_PREFIX,
+        "Unsupported browser key target",
+      );
+      const request = { title_prefix: titlePrefix, executable: chromiumExecutable, actions };
+      return JSON.parse(
+        execFileSync("python3", [join(root, "scripts/browser_native_x11.py")], {
+          input: JSON.stringify(request),
+          env,
+        }).toString(),
+      );
+    };
   }
+  const browserKey = browserKeyFor(
+    browserName === "edge"
+      ? { executablePath: () => browserExecutable }
+      : chromium,
+  );
   // Read-only exact-title inspection of the native window that preserves
   // focus: no raise, focus or click. It never swallows a failure, so a missing
   // or unobservable window cannot be read as "no prompt".

@@ -45,6 +45,7 @@ const FIXED_ID = "geldnhjapnackobgknocomedmjgphnpe";
 const PRIVATE = {
   profile: "/tmp/locklark-private-profile",
   executable: "/opt/microsoft/msedge/msedge",
+  chromium: "/opt/playwright/chromium",
   extensionDir: "/tmp/locklark-private-extension/chromium",
   title: "Extensions",
 };
@@ -1409,4 +1410,84 @@ test("pair/disconnect has separate success labels and fixed failure text", () =>
   assert.match(nativeSource, /edgePairDisconnect\s*\n?\s*\? "edge-pair-unclassified"/);
   assert.doesNotMatch(PAIR_GUARD, /\$\{/);
   assert.doesNotMatch(PAIR_FUNCTION, /error\.|\.stack|\.message/);
+});
+
+test("browser keys use Edge's launched executable and Playwright's Chromium", () => {
+  // Execute the acceptance script's own assignment and browserKey helper with
+  // synthetic resolvers, so this proves the actual owner selection rather than
+  // a copied expectation. No file, browser, X server or real path is touched.
+  const factorySource =
+    "function browserKeyFor(chromium) " +
+    sourceBlock(nativeSource, "function browserKeyFor(chromium)") +
+    ";\n";
+  const assignmentStart = nativeSource.indexOf(
+    "  const browserKey = browserKeyFor(",
+  );
+  assert.notEqual(assignmentStart, -1, "browserKey assignment");
+  const assignmentEnd = nativeSource.indexOf("  );", assignmentStart);
+  assert.notEqual(assignmentEnd, -1, "browserKey assignment end");
+  const assignmentSource = nativeSource.slice(
+    assignmentStart,
+    assignmentEnd + "  );".length,
+  );
+  const requests = (browserName) => {
+    const resolved = {
+      [PRIVATE.executable]: "/resolved/edge",
+      [PRIVATE.chromium]: "/resolved/chromium",
+    };
+    const captured = [];
+    const browserKey = new Function(
+      "realpathSync",
+      "chromium",
+      "browserName",
+      "browserExecutable",
+      "assert",
+      "execFileSync",
+      "join",
+      "root",
+      "env",
+      "ROUTE_TITLE_PREFIX",
+      "SOURCE_TITLE_PREFIX",
+      factorySource + assignmentSource + "return browserKey;",
+    )(
+      (value) => {
+        assert.ok(value in resolved, "Unexpected realpath input");
+        return resolved[value];
+      },
+      { executablePath: () => PRIVATE.chromium },
+      browserName,
+      PRIVATE.executable,
+      assert,
+      (command, args, options) => {
+        assert.equal(command, "python3");
+        assert.deepEqual(args, ["/root/scripts/browser_native_x11.py"]);
+        captured.push(JSON.parse(options.input));
+        return Buffer.from("{}");
+      },
+      (...parts) => parts.join("/"),
+      "/root",
+      {},
+      "route-title",
+      "source-title",
+    );
+    browserKey([{ key: "Escape" }], "route-title");
+    browserKey([{ key: "Control_L+Shift_L+y" }], "source-title");
+    return captured;
+  };
+  const expected = (executable) => [
+    {
+      title_prefix: "route-title",
+      executable,
+      actions: [{ key: "Escape" }],
+    },
+    {
+      title_prefix: "source-title",
+      executable,
+      actions: [{ key: "Control_L+Shift_L+y" }],
+    },
+  ];
+  // Edge ignores the Playwright executable for its explicit launched one.
+  assert.deepEqual(requests("edge"), expected("/resolved/edge"));
+  // Chromium keeps Playwright's executable even with an explicit Edge path.
+  assert.deepEqual(requests("chromium"), expected("/resolved/chromium"));
 });
