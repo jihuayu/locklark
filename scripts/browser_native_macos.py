@@ -41,6 +41,19 @@ MAX_DEPTH = 12
 MAX_HIT_PARENTS = 64
 MAX_DISPLAYS = 32
 
+# Optional read-only inspect diagnostic. The four booleans are the whole
+# public result; the fixed status texts below are compared internally and are
+# never returned, formatted into an exception, logged or written as a
+# diagnostic. The lock-view proof uses only the already-built controls snapshot.
+STATUS_FIELDS = contract.STATUS_FIELDS
+STATUS_TEXT = (
+    ("generic_unlock_error", "操作未完成。请检查输入、文件权限和当前版本后重试。"),
+    ("secret_key_format_error", "Secret Key 格式不正确"),
+    ("processing", "处理中…"),
+)
+LOCKED_CONTROLS = ("金库文件", "主密码", "Secret Key", "解锁")
+LOCKED_VIEW_ABSENT = "新建登录"
+
 ROLE_MAP = {"AXButton": "push button", "AXTextField": "entry",
             "AXTextArea": "entry"}
 
@@ -227,6 +240,39 @@ def _sequence(value):
     except Exception:
         return None
     return value
+
+
+def _empty_status():
+    """The fixed all-false four-boolean diagnostic; never carries AX text."""
+    return {field: False for field in STATUS_FIELDS}
+
+
+def _status_shape(value):
+    """The exact four-built-in-bool status object, else the all-false one."""
+    empty = _empty_status()
+    if type(value) is not dict or set(value) != set(STATUS_FIELDS):
+        return empty
+    if any(type(value[field]) is not bool for field in STATUS_FIELDS):
+        return empty
+    return {field: value[field] for field in STATUS_FIELDS}
+
+
+def _locked_view(controls):
+    """True only for the exact already-read locked controls snapshot.
+
+    This reads the existing safe ``{present, enabled, showing}`` mapping and
+    never touches AX. ``present`` must be the exact built-in ``True`` for all
+    four locked controls and the exact built-in ``False`` for the new-login
+    control; any missing/malformed record proves nothing and refuses.
+    """
+    if type(controls) is not dict:
+        return False
+    for label in LOCKED_CONTROLS:
+        record = controls.get(label)
+        if type(record) is not dict or record.get("present") is not True:
+            return False
+    record = controls.get(LOCKED_VIEW_ABSENT)
+    return type(record) is dict and record.get("present") is False
 
 
 def _ax_value(ax, element, name, status=None):
@@ -532,6 +578,83 @@ class QuartzApi:
     def controls(self, window):
         """Bounded AX walk of the exactly bound target window; public fields."""
         return [record for _, record in self._labeled(window)]
+
+    def _status_matches(self, target):
+        """Bounded static-text AXLabel comparison for the proved locked view.
+
+        Only AXRole, AXChildren and AXLabel are read here (and never AXValue or
+        AXSelectedText). Every label is compared internally with the fixed
+        STATUS_TEXT strings; an unknown or empty label is discarded and no
+        text is retained, returned or formatted anywhere. The existing
+        MAX_NODES/MAX_DEPTH bounds still refuse rather than truncate, and the
+        caller converts every query/shape refusal to the fixed all-false
+        object.
+        """
+        found = {field: False for field, _ in STATUS_TEXT}
+        nodes = [0]
+
+        def walk(element, depth):
+            nodes[0] += 1
+            if nodes[0] > MAX_NODES:
+                raise contract.ContractError("a11y-overrun")
+            if depth > MAX_DEPTH:
+                raise contract.ContractError("a11y-tree-limit")
+            raw_role = self.attribute(element, "AXRole")
+            if not isinstance(raw_role, str):
+                raise contract.ContractError("a11y-query")
+            role = _native_text(raw_role)
+            if not role:
+                raise contract.ContractError("a11y-query")
+            if role == "AXStaticText":
+                raw_label = self.attribute(element, "AXLabel")
+                if raw_label is not None:
+                    if not isinstance(raw_label, str):
+                        raise contract.ContractError("a11y-query")
+                    label = _native_text(raw_label)
+                    for field, text in STATUS_TEXT:
+                        if label == text:
+                            found[field] = True
+            raw_children = self.attribute(element, "AXChildren")
+            if raw_children is None:
+                return
+            children = _sequence(raw_children)
+            if children is None or isinstance(children, (str, bytes, bytearray)):
+                raise contract.ContractError("a11y-query")
+            for child in children:
+                if child is None:
+                    raise contract.ContractError("a11y-query")
+                walk(child, depth + 1)
+
+        walk(target, 0)
+        return found
+
+    def status(self, window, controls):
+        """Optional locked-view status diagnostic: exactly four booleans.
+
+        The existing controls snapshot is proved locked first, before any AX
+        binding or label read. Only then is the exact already-bound AX window
+        walked and its AXLabel values compared internally. A false/incomplete
+        proof, an unavailable binding, any query/shape error and any traversal
+        overrun all return the same all-false object, so this diagnostic can
+        never fail the already-safe controls snapshot.
+        """
+        empty = _empty_status()
+        if not _locked_view(controls):
+            return empty
+        try:
+            target = self.window_element(window)
+            found = self._status_matches(target)
+        except Exception:
+            return empty
+        result = _empty_status()
+        result["available"] = True
+        for field, _ in STATUS_TEXT:
+            result[field] = found[field]
+        return result
+
+    def read_status(self, window, controls):
+        """Expose the status diagnostic under the adapter-reader spelling."""
+        return self.status(window, controls)
 
     def _selected(self, window, label, rect):
         """Re-resolve the unique selected control and its native AX element.
@@ -1031,6 +1154,26 @@ class MacAdapter:
             if type(control) is not dict or set(control) != set(contract.WIDGET_FIELDS):
                 raise contract.ContractError("a11y-query")
         return controls
+
+    def read_status(self, window, controls):
+        """Optional macOS-only inspect diagnostic; always exactly four bools.
+
+        The proof, binding and AX reads belong to the platform API. Any missing
+        or malformed hook answer is converted to the fixed all-false object, so
+        the optional diagnostic never changes the existing controls snapshot.
+        """
+        for name in ("read_status", "status", "inspect_status"):
+            try:
+                reader = getattr(self.api, name, None)
+            except Exception:
+                continue
+            if not callable(reader):
+                continue
+            try:
+                return _status_shape(reader(window, controls))
+            except Exception:
+                return _empty_status()
+        return _empty_status()
 
     def focus_state(self, window=None):
         return self.api.focus_state(window)

@@ -42,6 +42,12 @@ CONTROL_ROLES = frozenset({"push button", "button", "text", "password text", "en
 # clipboard and invoke accessors are deliberately absent from the protocol.
 WIDGET_FIELDS = ("role", "name", "enabled", "visible", "bounds")
 
+# Optional macOS-only inspect diagnostic. It carries exactly these built-in
+# booleans and no accessibility text; a platform without the optional hook
+# keeps its existing inspect result unchanged.
+STATUS_FIELDS = ("available", "generic_unlock_error",
+                 "secret_key_format_error", "processing")
+
 PLATFORMS = ("linux", "windows", "macos", "unknown")
 ACTIONS = ("setup", "discover", "reference", "label-click", "label-wait",
            "text-entry", "key", "pointer", "snapshot", "absence", "activate")
@@ -950,6 +956,34 @@ def click_record(window, label, x, y, ack, kind="accepted", rect=None):
     }
 
 
+def empty_status():
+    """The fixed all-false diagnostic: exactly four built-in booleans."""
+    return {field: False for field in STATUS_FIELDS}
+
+
+def status_snapshot(adapter, window, controls):
+    """Optional adapter-only status snapshot, or None when unsupported.
+
+    The controls snapshot is already safe and always returned to the caller.
+    This diagnostic is deliberately fail-closed: a missing/raising hook, a
+    malformed shape or any non-boolean field yields the fixed all-false object
+    and never fails the surrounding inspect snapshot. The adapter owns the
+    macOS-only accessibility reads; nothing here interprets or echoes them.
+    """
+    try:
+        reader = getattr(adapter, "read_status", None)
+        if not callable(reader):
+            return None
+        value = reader(window, controls)
+    except Exception:
+        return empty_status()
+    if type(value) is not dict or set(value) != set(STATUS_FIELDS):
+        return empty_status()
+    if any(type(value[field]) is not bool for field in STATUS_FIELDS):
+        return empty_status()
+    return {field: value[field] for field in STATUS_FIELDS}
+
+
 def snapshot(adapter, window, budget):
     controls = read_controls(adapter, window, budget)
     result = {}
@@ -1109,6 +1143,9 @@ def execute(plan, adapter):
     if plan["inspect"]:
         FAILURE_CONTEXT["action"] = "snapshot"
         result["controls"] = snapshot(adapter, window, budget)
+        status = status_snapshot(adapter, window, result["controls"])
+        if status is not None:
+            result["status"] = status
     return result
 
 

@@ -1285,6 +1285,175 @@ class MacAxWalkTests(unittest.TestCase):
         self.refused(self.api(button=button)[0], "control-geometry")
 
 
+class StatusAxApi(FakeMacApi):
+    """Real QuartzApi.status over a tiny synthetic AX tree and safe controls.
+
+    Only AXRole/AXChildren (and AXLabel for static text) are served; AXValue
+    and AXSelectedText are hard failures, so the fixture proves the classifier
+    never requests either. The binding is the already-selected opaque window
+    element, and every attribute name is recorded.
+    """
+
+    _status_matches = macos.QuartzApi._status_matches
+    status = macos.QuartzApi.status
+
+    def __init__(self, graph=None, controls=None, failure=None):
+        FakeMacApi.__init__(self, controls=[] if controls is None else controls)
+        self.graph = {"role": "AXWindow", "children": []} if graph is None else graph
+        self.failure = failure
+        self.reads = []
+        self.bindings = []
+        self.bound = object()
+
+    def window_element(self, window):
+        self.bindings.append(window["id"])
+        if self.failure == "binding":
+            raise OSError("synthetic binding failure")
+        return self.bound
+
+    def attribute(self, element, name):
+        self.reads.append(name)
+        if name in ("AXValue", "AXSelectedText"):
+            raise AssertionError("forbidden accessibility attribute requested: " + name)
+        if self.failure == "attribute":
+            raise OSError("synthetic attribute failure")
+        if element is self.bound:
+            element = self.graph
+        elif not isinstance(element, dict):
+            raise AssertionError("unbound AX element requested")
+        return {"AXRole": element.get("role"), "AXLabel": element.get("label"),
+                "AXChildren": element.get("children")}.get(name)
+
+    def read_status(self, window, controls):
+        return self.status(window, controls)
+
+
+class MacInspectStatusTests(unittest.TestCase):
+    """The optional macOS inspect status is fixed, private and fail-closed."""
+
+    def snapshot_map(self, missing=None, new_login=False):
+        missing = () if missing is None else missing
+        result = {label: {"present": False, "enabled": False, "showing": False}
+                  for label in contract.KNOWN_SYNTHETIC_LABELS}
+        for label in macos.LOCKED_CONTROLS:
+            present = label not in missing
+            result[label] = {"present": present, "enabled": present, "showing": present}
+        result[macos.LOCKED_VIEW_ABSENT] = {
+            "present": new_login, "enabled": new_login, "showing": new_login}
+        return result
+
+    def control_records(self, missing=None, new_login=False):
+        missing = () if missing is None else missing
+        names = [label for label in macos.LOCKED_CONTROLS if label not in missing]
+        if new_login:
+            names.append(macos.LOCKED_VIEW_ABSENT)
+        return [{"role": "push button", "name": name, "enabled": True,
+                 "visible": True, "bounds": {"x": 200, "y": 300,
+                                             "width": 80, "height": 30}}
+                for name in names]
+
+    def tree(self, *labels):
+        return {"role": "AXWindow", "children": [
+            {"role": "AXStaticText", "label": label} for label in labels]}
+
+    def inspect(self, api):
+        return execute(macos.MacAdapter(api=api),
+                       document(actions=[], inspect=True))
+
+    def status(self, label):
+        api = StatusAxApi(self.tree(label), self.control_records())
+        return self.inspect(api)["status"], api
+
+    def test_each_exact_status_class_sets_only_its_own_fixed_boolean(self):
+        for field, text in macos.STATUS_TEXT:
+            with self.subTest(field=field):
+                status, api = self.status(text)
+                expected = {"available": True, "generic_unlock_error": False,
+                            "secret_key_format_error": False, "processing": False}
+                expected[field] = True
+                self.assertEqual(status, expected)
+                self.assertEqual(api.bindings, [WINDOW_RAW["id"]])
+
+    def test_unknown_labels_are_discarded_and_stay_available(self):
+        status, api = self.status("synthetic unknown status label")
+        self.assertEqual(status, {"available": True, "generic_unlock_error": False,
+                                  "secret_key_format_error": False, "processing": False})
+        self.assertEqual(api.bindings, [WINDOW_RAW["id"]])
+
+    def test_lock_view_precondition_refuses_before_any_ax_read(self):
+        cases = [("missing-" + str(index), self.snapshot_map(missing=(label,)))
+                 for index, label in enumerate(macos.LOCKED_CONTROLS)]
+        cases.append(("new-login-present", self.snapshot_map(new_login=True)))
+        cases.append(("controls-not-a-mapping", None))
+        for name, controls in cases:
+            with self.subTest(case=name):
+                api = StatusAxApi(self.tree(macos.STATUS_TEXT[0][1]),
+                                  self.control_records())
+                status = macos.MacAdapter(api=api).read_status(dict(WINDOW_RAW), controls)
+                self.assertEqual(status, macos._empty_status())
+                self.assertEqual(api.reads, [])
+                self.assertEqual(api.bindings, [])
+
+    def test_query_shape_and_bound_errors_fail_closed_but_keep_controls(self):
+        malformed_children = {"role": "AXWindow", "children": 7}
+        malformed_label = {"role": "AXWindow", "children": [
+            {"role": "AXStaticText", "label": 7}]}
+        cases = (("binding", self.tree(macos.STATUS_TEXT[0][1]), "binding"),
+                 ("attribute", self.tree(macos.STATUS_TEXT[0][1]), "attribute"),
+                 ("children", malformed_children, None),
+                 ("label", malformed_label, None))
+        for name, graph, failure in cases:
+            with self.subTest(case=name):
+                api = StatusAxApi(graph, self.control_records(), failure=failure)
+                result = self.inspect(api)
+                self.assertEqual(result["status"], macos._empty_status())
+                self.assertEqual(result["controls"][macos.LOCKED_CONTROLS[0]],
+                                 {"present": True, "enabled": True, "showing": True})
+        with patch.object(macos, "MAX_NODES", 1):
+            result = self.inspect(StatusAxApi(
+                self.tree(macos.STATUS_TEXT[0][1]), self.control_records()))
+            self.assertEqual(result["status"], macos._empty_status())
+            self.assertEqual(result["controls"][macos.LOCKED_CONTROLS[0]]["present"], True)
+        with patch.object(macos, "MAX_DEPTH", 0):
+            result = self.inspect(StatusAxApi(
+                self.tree(macos.STATUS_TEXT[0][1]), self.control_records()))
+            self.assertEqual(result["status"], macos._empty_status())
+            self.assertEqual(result["controls"][macos.LOCKED_CONTROLS[0]]["present"], True)
+
+    def test_status_output_is_only_private_four_boolean_shape(self):
+        api = StatusAxApi(self.tree(macos.STATUS_TEXT[2][1], "ignored label"),
+                          self.control_records())
+        result = self.inspect(api)
+        self.assertEqual(set(result["status"]), set(contract.STATUS_FIELDS))
+        self.assertTrue(all(type(value) is bool for value in result["status"].values()))
+        self.assertEqual(set(result["controls"]), set(contract.KNOWN_SYNTHETIC_LABELS))
+        for value in result["controls"].values():
+            self.assertEqual(set(value), {"present", "enabled", "showing"})
+            self.assertTrue(all(type(flag) is bool for flag in value.values()))
+        payload = json.dumps(result, ensure_ascii=False)
+        self.assertFalse(any(text in payload for _, text in macos.STATUS_TEXT),
+                         "AX status text leaked into result")
+        self.assertEqual(set(api.reads), {"AXRole", "AXChildren", "AXLabel"})
+        self.assertNotIn("AXValue", api.reads)
+        self.assertNotIn("AXSelectedText", api.reads)
+
+    def test_adapter_malformed_or_raising_status_hook_fails_closed(self):
+        class BadStatus(FakeMacApi):
+            def read_status(self, window, controls):
+                return {"available": True, "processing": True}
+
+        class RaisingStatus(FakeMacApi):
+            def read_status(self, window, controls):
+                raise OSError("synthetic status failure")
+
+        for api in (BadStatus(controls=self.control_records()),
+                    RaisingStatus(controls=self.control_records())):
+            with self.subTest(api=type(api).__name__):
+                result = self.inspect(api)
+                self.assertEqual(result["status"], macos._empty_status())
+                self.assertEqual(result["controls"][macos.LOCKED_CONTROLS[0]]["present"], True)
+
+
 # Measured on a real owned app: one CG window and one same-title AXWindow
 # whose frame is exactly one point inside every CG edge, same centre.
 MEASURED_CG = {"x": 313, "y": 75, "width": 1102, "height": 822}
