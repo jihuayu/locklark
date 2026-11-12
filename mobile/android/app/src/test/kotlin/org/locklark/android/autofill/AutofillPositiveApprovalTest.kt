@@ -109,6 +109,15 @@ class AutofillPositiveApprovalTest {
         assertFalse(AutofillHandoff.consume(handoff.token, handoff.clientNonce, null))
         assertNull("a malformed binding argument still retires the record", AutofillHandoff.state(handoff.token))
         assertFalse("it can never be replayed", AutofillHandoff.consume(handoff.token, handoff.clientNonce, form))
+
+        // Without a token a malformed form alone, even with a wrong nonce,
+        // retires only the record that nonce names (none here).
+        val noToken = bound()
+        assertFalse(AutofillHandoff.consume(null, null, null))
+        assertEquals("BOUND", AutofillHandoff.state(noToken.token))
+        assertFalse(AutofillHandoff.consume(null, noToken.clientNonce + "x", null))
+        assertEquals("BOUND", AutofillHandoff.state(noToken.token))
+        assertTrue(AutofillHandoff.consume(null, noToken.clientNonce, form))
     }
 
     @Test
@@ -146,6 +155,80 @@ class AutofillPositiveApprovalTest {
         // Only the exact token then consumes it, once.
         assertTrue(AutofillHandoff.consume(handoff.token, handoff.clientNonce, form))
         assertFalse(AutofillHandoff.consume(handoff.token, handoff.clientNonce, form))
+    }
+
+    @Test
+    fun theExactTokenNonceAndFormConsumeOnce() {
+        val handoff = bound()
+        assertEquals("BOUND", AutofillHandoff.state(handoff.token))
+        assertTrue(AutofillHandoff.consume(handoff.token, handoff.clientNonce, form))
+        assertNull("the exact consume retires the record", AutofillHandoff.state(handoff.token))
+        assertFalse("and no replay with the exact arguments succeeds", AutofillHandoff.consume(handoff.token, handoff.clientNonce, form))
+    }
+
+    @Test
+    fun aCorrectTokenWithAWrongNonceRefusesAndRetires() {
+        val handoff = bound()
+        assertFalse(AutofillHandoff.consume(handoff.token, handoff.clientNonce + "x", form))
+        assertNull("a wrong nonce retires the named record", AutofillHandoff.state(handoff.token))
+        assertFalse("and the record cannot be replayed with the right nonce", AutofillHandoff.consume(handoff.token, handoff.clientNonce, form))
+    }
+
+    @Test
+    fun aCorrectTokenWithAMissingNonceRefusesAndRetires() {
+        val handoff = bound()
+        assertFalse("a missing nonce never succeeds", AutofillHandoff.consume(handoff.token, null, form))
+        assertNull("a missing nonce retires the named record", AutofillHandoff.state(handoff.token))
+        assertFalse("and it cannot be replayed", AutofillHandoff.consume(handoff.token, handoff.clientNonce, form))
+    }
+
+    @Test
+    fun aCorrectTokenAndNonceWithAWrongFormRefusesAndRetires() {
+        val handoff = bound()
+        assertFalse(AutofillHandoff.consume(handoff.token, handoff.clientNonce, form.copy(packageName = "com.example.nativeapp")))
+        assertNull("a wrong form retires the named record", AutofillHandoff.state(handoff.token))
+        assertFalse("and it cannot be replayed", AutofillHandoff.consume(handoff.token, handoff.clientNonce, form))
+
+        val wrongTarget = bound()
+        assertFalse(AutofillHandoff.consume(wrongTarget.token, wrongTarget.clientNonce, null))
+        assertNull("a missing form retires the named record", AutofillHandoff.state(wrongTarget.token))
+    }
+
+    @Test
+    fun anUnknownTokenNeverFallsBackToAValidNonce() {
+        val handoff = bound()
+        assertFalse(AutofillHandoff.consume("unknown-token", handoff.clientNonce, form))
+        assertEquals("an unknown token consumes no other record", "BOUND", AutofillHandoff.state(handoff.token))
+        // A token that names another record is refused with this record's nonce.
+        val other = bound()
+        assertFalse(AutofillHandoff.consume(other.token, handoff.clientNonce, form))
+        assertNull("the named record is retired on the nonce mismatch", AutofillHandoff.state(other.token))
+        assertEquals("the uncalled record stays BOUND", "BOUND", AutofillHandoff.state(handoff.token))
+        assertTrue(AutofillHandoff.consume(handoff.token, handoff.clientNonce, form))
+    }
+
+    @Test
+    fun aMalformedFormNeverLeavesANamedTokenReplayable() {
+        val noForm = bound()
+        assertFalse(AutofillHandoff.consume(noForm.token, null, null))
+        assertNull("a formless launch retires the named token", AutofillHandoff.state(noForm.token))
+        assertFalse(AutofillHandoff.consume(noForm.token, noForm.clientNonce, form))
+
+        val noNonce = bound()
+        assertFalse(AutofillHandoff.consume(noNonce.token, null, null))
+        assertNull(AutofillHandoff.state(noNonce.token))
+        assertFalse(AutofillHandoff.consume(noNonce.token, noNonce.clientNonce, form))
+
+        // The no-token lookup still binds only to the exact BOUND record.
+        val handoff = bound()
+        val unknownNonce = bound()
+        assertFalse(AutofillHandoff.consume(null, "unknown-nonce", null))
+        assertFalse(AutofillHandoff.consume(null, "unknown-nonce", form))
+        assertEquals("BOUND", AutofillHandoff.state(handoff.token))
+        assertEquals("BOUND", AutofillHandoff.state(unknownNonce.token))
+        assertTrue(AutofillHandoff.consume(null, handoff.clientNonce, form))
+        assertNull(AutofillHandoff.state(handoff.token))
+        assertEquals("BOUND", AutofillHandoff.state(unknownNonce.token))
     }
 
     @Test

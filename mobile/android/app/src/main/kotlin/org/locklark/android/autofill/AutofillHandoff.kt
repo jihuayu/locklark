@@ -114,19 +114,24 @@ internal object AutofillHandoff {
 
     /**
      * Retires the BOUND record named by [token] (or, without a token, by the
-     * claimed [clientNonce]) only if it is still unexpired and its exact
-     * package and both OS AutofillIds equal [form]'s. Any call removes the
-     * record whatever the outcome, so a handoff is consumed at most once and a
-     * mismatch (wrong target, ids or expiry) can never be retried.
+     * claimed [clientNonce]) only if it is still unexpired, its exact package
+     * and both OS AutofillIds equal [form]'s and, for a supplied [token], the
+     * supplied [clientNonce] equals the record's in constant time. Any call
+     * removes the record whatever the outcome, so a handoff is consumed at most
+     * once and a mismatch (wrong or missing nonce, target, ids or expiry) can
+     * never be retried.
      *
-     * A missing token or form retires nothing by identity alone. A supplied
-     * [clientNonce] names the BOUND handoff the Activity claimed: a missing
-     * [form] retires exactly that record, so a malformed launch can never leave
-     * a BOUND record usable, while an unknown nonce retires nothing.
+     * A supplied (even unknown) [token] names only that exact record and never
+     * falls back to the nonce lookup. A missing or malformed [form] retires the
+     * named BOUND record by token, so a malformed launch can never leave a
+     * named record replayable; without a token a supplied [clientNonce] retires
+     * merely the BOUND record it names, while an unknown nonce retires nothing.
      */
     fun consume(token: String?, clientNonce: String?, form: LoginForm?): Boolean = synchronized(records) {
         if (form == null) {
-            if (clientNonce != null) {
+            if (token != null) {
+                records[token]?.let { if (it.state == State.BOUND) records.remove(it.token) }
+            } else if (clientNonce != null) {
                 dropLocked { it.state == State.BOUND && constantTimeEquals(it.clientNonce, clientNonce) }
             }
             return@synchronized false
@@ -141,6 +146,8 @@ internal object AutofillHandoff {
         records.remove(record.token)
         record.state == State.BOUND &&
             clock() - record.createdAt <= TTL_MS &&
+            clientNonce != null &&
+            constantTimeEquals(record.clientNonce, clientNonce) &&
             record.packageName == form.packageName &&
             record.usernameId.equals(form.usernameId) &&
             record.passwordId.equals(form.passwordId)
