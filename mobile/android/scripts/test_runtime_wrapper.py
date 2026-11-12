@@ -70,18 +70,21 @@ class RuntimeWrapperTests(unittest.TestCase):
 
     def test_failure_or_partial_instrumentation_cannot_pass(self):
         passed = b"OK (4 tests)\nINSTRUMENTATION_CODE: -1\n"
-        self.assertTrue(complete_pass(0, passed))
-        self.assertTrue(complete_pass(0, b"Time: 12.34\nOK (4 tests)\nINSTRUMENTATION_CODE: -1\n"))
+        self.assertTrue(complete_pass(0, passed, 4))
+        self.assertTrue(complete_pass(0, b"Time: 12.34\nOK (4 tests)\nINSTRUMENTATION_CODE: -1\n", 4))
         for code, raw in ((1, passed), (0,b"INSTRUMENTATION_CODE: -1"), (0,passed+b"FAILURES!!!"), (0,passed+b"Process crashed")):
-            self.assertFalse(complete_pass(code, raw))
+            self.assertFalse(complete_pass(code, raw, 4))
         for count in (0, 2, 3, 5):
             with self.subTest(count=count):
                 partial = passed.replace(b"4 tests", str(count).encode() + b" tests")
-                self.assertFalse(complete_pass(0, partial))
-                self.assertFalse(complete_pass(0, passed + b"OK (" + str(count).encode() + b" tests)\nINSTRUMENTATION_CODE: -1\n"))
-                self.assertFalse(complete_pass(0, passed + b"FAILURES!!! Tests run: " + str(count).encode() + b", Failures: 1\n"))
-                self.assertFalse(complete_pass(0, passed.replace(b"OK (", b"FAILURES!!! Tests run: " + str(count).encode() + b"\nOK (")))
-        self.assertFalse(complete_pass(0, passed.replace(b"OK (4 tests)", b"OK (4 tests)\nFAILURES!!! Tests run: 4, Failures: 1")))
+                self.assertFalse(complete_pass(0, partial, 4))
+                self.assertFalse(complete_pass(0, passed + b"OK (" + str(count).encode() + b" tests)\nINSTRUMENTATION_CODE: -1\n", 4))
+                self.assertFalse(complete_pass(0, passed + b"FAILURES!!! Tests run: " + str(count).encode() + b", Failures: 1\n", 4))
+                self.assertFalse(complete_pass(0, passed.replace(b"OK (", b"FAILURES!!! Tests run: " + str(count).encode() + b"\nOK ("), 4))
+        self.assertFalse(complete_pass(0, passed.replace(b"OK (4 tests)", b"OK (4 tests)\nFAILURES!!! Tests run: 4, Failures: 1"), 4))
+        # The full native suite count is pinned separately from the sample.
+        self.assertFalse(complete_pass(0, b"OK (5 tests)\nINSTRUMENTATION_CODE: -1\n", 6))
+        self.assertTrue(complete_pass(0, b"OK (6 tests)\nINSTRUMENTATION_CODE: -1\n", 6))
 
     def test_diagnostic_returns_only_fixed_classes_steps_and_source_integers(self):
         raw = b"INSTRUMENTATION_STATUS: locklark_stage=create\njava.lang.AssertionError: private-field-contents\nat org.locklark.android.OfflineVaultTest.run(OfflineVaultTest.kt:123)\nTests run: 1"
@@ -131,6 +134,27 @@ class RuntimeWrapperTests(unittest.TestCase):
         self.assertEqual((failure["step"], failure["wait"], failure["control"], failure["control_phase"]),
                          ("search", "native-visible", "back-to-list", "offscreen"))
         self.assertEqual((failure["control_enabled"], failure["control_visible"]), ("true", "false"))
+
+    def test_autofill_fill_stages_are_fixed_and_unknown_ones_redacted(self):
+        raw = (b"INSTRUMENTATION_STATUS: locklark_autofill_stage=dataset-visible\n"
+               b"INSTRUMENTATION_STATUS_CODE: -2\n")
+        self.assertEqual(safe_diagnostic(raw)["autofill_stage"], "dataset-visible")
+        for accepted in ("fixture-create", "unlocked", "row-selected", "approved",
+                         "dataset-clicked", "fields-filled", "no-ui-disclosure"):
+            stage = safe_diagnostic(b"INSTRUMENTATION_STATUS: locklark_autofill_stage=" + accepted.encode() + b"\n")
+            self.assertEqual(stage["autofill_stage"], accepted)
+        invalid = safe_diagnostic(b"INSTRUMENTATION_STATUS: locklark_autofill_stage=synthetic-fixture-value\n")
+        self.assertEqual(invalid["autofill_stage"], "unknown")
+        self.assertNotIn("synthetic-fixture-value", str(invalid))
+
+    def test_autofill_only_gate_counts_two_tests_exactly(self):
+        passed = b"OK (2 tests)\nINSTRUMENTATION_CODE: -1\n"
+        self.assertTrue(complete_pass(0, passed, 2))
+        for code, raw in ((1, passed), (0, passed + b"FAILURES!!!"),
+                          (0, passed + b"Process crashed"),
+                          (0, passed.replace(b"2 tests", b"3 tests")),
+                          (0, passed.replace(b"2 tests", b"1 test"))):
+            self.assertFalse(complete_pass(code, raw, 2))
 
     def test_even_failed_test_output_must_be_scanned(self):
         values = ["master-fixture", "account-fixture", "username-fixture", "password-fixture", "line one private\nline two private"]

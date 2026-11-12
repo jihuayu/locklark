@@ -1,6 +1,8 @@
 package org.locklark.android.autofill
 
 import android.app.assist.AssistStructure
+import android.os.Parcel
+import android.os.Parcelable
 import android.text.InputType
 import android.view.View
 import android.view.ViewStructure
@@ -42,8 +44,30 @@ internal data class LoginForm(
     val packageName: String,
     val usernameId: AutofillId,
     val passwordId: AutofillId,
-) {
+) : Parcelable {
     val ids: Array<AutofillId> get() = arrayOf(usernameId, passwordId)
+
+    private constructor(parcel: Parcel) : this(
+        parcel.readString().orEmpty(),
+        parcel.readParcelable(AutofillId::class.java.classLoader)!!,
+        parcel.readParcelable(AutofillId::class.java.classLoader)!!,
+    )
+
+    override fun describeContents(): Int = 0
+
+    override fun writeToParcel(parcel: Parcel, flags: Int) {
+        parcel.writeString(packageName)
+        parcel.writeParcelable(usernameId, flags)
+        parcel.writeParcelable(passwordId, flags)
+    }
+
+    companion object {
+        @JvmField
+        val CREATOR: Parcelable.Creator<LoginForm> = object : Parcelable.Creator<LoginForm> {
+            override fun createFromParcel(parcel: Parcel): LoginForm = LoginForm(parcel)
+            override fun newArray(size: Int): Array<LoginForm?> = arrayOfNulls(size)
+        }
+    }
 }
 
 internal object LoginFormParser {

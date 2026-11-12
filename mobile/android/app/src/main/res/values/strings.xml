@@ -17,7 +17,7 @@
     <string name="edit_field_guidance">新值将从空白开始输入。查看旧值需单独发起授权；取消操作不会改动现有凭据。</string>
     <string name="regenerate_password_guidance">仅更新此金库内保存的本地密码，不会自动同步修改对应网站的账户密码。</string>
     <string name="empty_login_list">暂无匹配的登录凭据。可点击上方「新建登录」添加受保护条目。</string>
-    <string name="autofill_service_label">Locklark 登录授权（认证移交）</string>
+    <string name="autofill_service_label">Locklark 登录批准与填充</string>
     <string name="autofill_auth_presentation">解锁或批准条目（尚未填充字段）</string>
     <string name="autofill_auth_title">批准登录条目（尚未填充）</string>
     <string name="autofill_auth_target">目标应用：%1$s</string>
@@ -41,4 +41,5 @@
     <string name="autofill_auth_active_count">活动登录：%1$d</string>
     <string name="autofill_auth_empty">没有可批准的活动登录。</string>
     <string name="autofill_auth_empty_title">（空标题）</string>
+    <string name="autofill_dataset_presentation">Locklark 已批准登录</string>
 </resources>

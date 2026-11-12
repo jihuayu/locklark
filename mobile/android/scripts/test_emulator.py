@@ -18,6 +18,14 @@ STAGE = "prerequisites"
 STATE = None
 DIAGNOSTIC = {}
 
+# Narrow real-OS Autofill fill gate: only AutofillHandoffTest, only the owned
+# emulator, API 36, bounded UI timeout, prior autofill_service restored.
+AUTOFILL_ONLY = os.environ.get("LOCKLARK_ANDROID_AUTOFILL_ONLY") == "1"
+AUTOFILL_SERIAL = "emulator-5572"
+AUTOFILL_API = "36"
+AUTOFILL_TESTS = 2
+AUTOFILL_TIMEOUT = 300
+
 
 def scan_output(raw, values):
     if not isinstance(values, list) or len(values) < 5 or any(not isinstance(value, str) or not value for value in values):
@@ -87,7 +95,7 @@ def safe_diagnostic(raw):
               (b"INSTRUMENTATION_STATUS: locklark_control_focused=", "control_focused", {"true", "false"}),
               (b"INSTRUMENTATION_STATUS: locklark_input_active=", "input_active", {"true", "false"}),
               (b"INSTRUMENTATION_STATUS: locklark_activity=", "activity", {"DESTROYED", "INITIALIZED", "CREATED", "STARTED", "RESUMED"}),
-              (b"INSTRUMENTATION_STATUS: locklark_autofill_stage=", "autofill_stage", {"preconditions", "target-launch", "fill-request", "presentation-visible", "presentation-clicked", "auth-resumed", "auth-canceled", "fields-empty"}))
+              (b"INSTRUMENTATION_STATUS: locklark_autofill_stage=", "autofill_stage", {"preconditions", "fixture-create", "target-launch", "fill-request", "presentation-visible", "presentation-clicked", "auth-resumed", "auth-canceled", "fields-empty", "unlocked", "row-selected", "approved", "dataset-visible", "dataset-clicked", "fields-filled", "no-ui-disclosure"}))
     for line in raw.splitlines():
         for prefix, key, allowed in fields:
             if line.startswith(prefix):
@@ -119,6 +127,9 @@ def main():
     serial = os.environ["ANDROID_SERIAL"]
     if not re.fullmatch(r"emulator-[0-9]+", serial):
         raise RuntimeFailure()
+    if AUTOFILL_ONLY and serial != AUTOFILL_SERIAL:
+        # The Autofill-only mode is bound to the one owned AVD and nothing else.
+        raise RuntimeFailure()
     adb = [str(sdk / "platform-tools/adb"), "-s", serial]
     state = STATE = Path(tempfile.mkdtemp(prefix="locklark-android-runtime-"))
     log = (state / "controller.log").open("xb")
@@ -131,6 +142,8 @@ def main():
             raise RuntimeFailure()
         return result
     if command(["shell", "getprop", "ro.kernel.qemu"]).stdout.strip() != b"1" or command(["shell", "getprop", "sys.boot_completed"]).stdout.strip() != b"1":
+        raise RuntimeFailure()
+    if AUTOFILL_ONLY and command(["shell", "getprop", "ro.build.version.sdk"]).stdout.strip() != AUTOFILL_API.encode():
         raise RuntimeFailure()
     if command(["shell", "service", "check", "package"]).stdout.strip() != b"Service package: found":
         raise RuntimeFailure()
@@ -159,24 +172,36 @@ def main():
         secure_setting(["put", "secure", "autofill_service", autofill_service])
         if secure_setting(["get", "secure", "autofill_service"]) != autofill_service.encode():
             raise RuntimeFailure()
-        run_gate(state, adb, root, package, test_package, log)
+        run_gate(state, adb, root, package, test_package, log, autofill_only=AUTOFILL_ONLY)
     finally:
         try:
+            # Restore the exact prior Autofill service first, then clear only
+            # this dedicated emulator's own app/test data.
             if prior_autofill:
                 secure_setting(["put", "secure", "autofill_service", prior_autofill.decode("ascii")])
             else:
                 secure_setting(["delete", "secure", "autofill_service"])
             if normalized_autofill() != prior_autofill:
                 raise RuntimeFailure()
+            if AUTOFILL_ONLY:
+                for cleared in (package, test_package):
+                    try:
+                        subprocess.run(adb + ["shell", "pm", "clear", cleared],
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+                    except subprocess.TimeoutExpired:
+                        pass
         except Exception:
             # Only a failed restore/readback replaces the original failure stage.
             STAGE = "autofill-setting-restore"
             raise
-    print("PASS: Android native offline UI instrumentation, real OS autofill authentication handoff; controller/logcat canary scan")
+    if AUTOFILL_ONLY:
+        print("PASS: Android real OS autofill approve -> Dataset -> exactly two bound fields; controller/logcat canary scan")
+    else:
+        print("PASS: Android native offline UI instrumentation, real OS autofill authentication handoff; controller/logcat canary scan")
     print("Private Android runtime evidence: " + str(state))
 
 
-def run_gate(state, adb, root, package, test_package, log):
+def run_gate(state, adb, root, package, test_package, log, *, autofill_only=False):
     global STAGE, DIAGNOSTIC
     runtime = (state / "runtime.log").open("xb")
     os.chmod(runtime.name, 0o600)
@@ -203,8 +228,14 @@ def run_gate(state, adb, root, package, test_package, log):
     thread.start()
     STAGE = "instrumentation"
     result = None
+    if autofill_only:
+        selected = "org.locklark.android.AutofillHandoffTest"
+        timeout = AUTOFILL_TIMEOUT
+    else:
+        selected = "org.locklark.android.BoundOperationTest,org.locklark.android.OfflineVaultTest,org.locklark.android.AutofillHandoffTest"
+        timeout = 900
     try:
-        result = command(["shell", "am", "instrument", "-w", "-r", "-e", "class", "org.locklark.android.BoundOperationTest,org.locklark.android.OfflineVaultTest,org.locklark.android.AutofillHandoffTest", test_package + "/androidx.test.runner.AndroidJUnitRunner"], timeout=900, required=False)
+        result = command(["shell", "am", "instrument", "-w", "-r", "-e", "class", selected, test_package + "/androidx.test.runner.AndroidJUnitRunner"], timeout=timeout, required=False)
     except subprocess.TimeoutExpired as error:
         for data in (error.stdout, error.stderr):
             if data: log.write(data)
@@ -229,7 +260,9 @@ def run_gate(state, adb, root, package, test_package, log):
     if log_failed.is_set() or thread.is_alive():
         raise RuntimeFailure()
     STAGE = "complete-test-count"
-    if result is None or not complete_pass(result.returncode, result.stdout):
+    # BoundOperationTest 1 + OfflineVaultTest 3 + AutofillHandoffTest 2.
+    expected_tests = AUTOFILL_TESTS if autofill_only else 6
+    if result is None or not complete_pass(result.returncode, result.stdout, expected_tests):
         raise RuntimeFailure()
     command(["shell", "run-as", package, "rm", "cache/instrumentation-canaries.json"], private=True)
 

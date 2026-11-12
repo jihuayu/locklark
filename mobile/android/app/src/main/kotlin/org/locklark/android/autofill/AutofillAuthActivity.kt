@@ -2,10 +2,12 @@ package org.locklark.android.autofill
 
 import android.app.Activity
 import android.app.assist.AssistStructure
+import android.content.Intent
 import android.graphics.Typeface
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.service.autofill.FillResponse
 import android.text.InputType
 import android.util.Log
 import android.util.TypedValue
@@ -41,17 +43,23 @@ import java.util.concurrent.RejectedExecutionException
 /**
  * Explicit approval for one OS Autofill authentication request.
  *
- * Flow: validate the OS-attached structure, package and AutofillIds against the
- * one-use handoff (consumed in the initial intent only) -> once this Activity
- * is foreground, open a NEW [Vault] on the app's own
- * noBackupFilesDir/personal.ll database -> unlock it only with the entered
- * master password and Secret Key -> list active login metadata -> the user
- * selects one visible title and then presses Approve separately -> approval
- * revalidates the exact row ID/revision and reads only that row's
- * username/password into the one-use [ApprovedAutofillResult] held here. No
- * credential value is ever converted to a String, rendered or retained
- * anywhere else. This checkpoint never returns EXTRA_AUTHENTICATION_RESULT and
- * never builds a Dataset.
+ * Flow: claim the one-use handoff against the OS-attached structure, package
+ * and AutofillIds (once, in the initial intent only) -> once this Activity is
+ * foreground, open a NEW [Vault] on the app's own noBackupFilesDir/personal.ll
+ * database -> unlock it only with the entered master password and Secret Key
+ * -> list active login metadata -> the user selects one visible title and then
+ * presses a separate Approve -> approval revalidates the exact row
+ * ID/revision and reads only that row's username/password into the one-use
+ * [ApprovedAutofillResult]. Approve is also the final step: when the
+ * serialized worker delivers the approval, this Activity takes it exactly once
+ * and synchronously builds one Dataset plus the challenge FillResponse into
+ * the terminal RESULT_OK authentication result, wipes every approval/caller
+ * buffer, retires the BOUND handoff for exactly this token, client nonce and
+ * the two OS AutofillIds, requests the fresh vault lock synchronously, queues
+ * its close and finishes. A refused handoff returns no fill at all. Android's
+ * Dataset selection in the target may then fill only the two bound fields. No
+ * credential value is rendered, logged, saved or placed in any extra other
+ * than Android's own autofill result values.
  *
  * Nothing here is persisted: no saved state, prefs, logs or extras of factors,
  * credentials, handoff or approval. Every exit invalidates the gate and queues
@@ -77,12 +85,13 @@ class AutofillAuthActivity : Activity() {
     // Set on the worker by a gate-accepted install; read on main for the
     // synchronous lock and cleared on the worker by the exit cleanup.
     @Volatile private var vault: Vault? = null
+    // Main thread only. Null once anything no longer matches the OS target.
     private var structureMatches = false
     private var target: AutofillTarget? = null
+    // The claimed one-use handoff token; discarded on every exit.
+    private var handoffToken: String? = null
     private var masterPassword: EditText? = null
     private var secretKey: EditText? = null
-    // The only credential-holding object: one-use bytes, zeroized on clear.
-    private var approval: ApprovedAutofillResult? = null
     private var selected: ActiveLogin? = null
     private val buttons = mutableListOf<Button>()
     private val rowButtons = mutableListOf<Pair<Button, ActiveLogin>>()
@@ -103,9 +112,10 @@ class AutofillAuthActivity : Activity() {
                 WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN,
         )
 
-        // The handoff token is consumable exactly once: a recreated Activity or a
-        // second launch never gets another structure to compare against.
-        if (state == null) consumeInitialIntent() else {
+        // The handoff token is claimable exactly once, before any onStart:
+        // onStart never claims, so a recreated Activity (state != null) cannot
+        // bind the one-use handoff again.
+        if (state == null) claimInitialIntent() else {
             structureMatches = false
             target = null
         }
@@ -125,23 +135,56 @@ class AutofillAuthActivity : Activity() {
         showOpening()
     }
 
-    private fun consumeInitialIntent() {
+    private fun claimInitialIntent() {
+        val token = intent?.getStringExtra(AutofillHandoff.EXTRA_HANDOFF)
         @Suppress("DEPRECATION")
         val structure = intent?.getParcelableExtra<AssistStructure>(AutofillManager.EXTRA_ASSIST_STRUCTURE)
-        val clientState = intent?.getBundleExtra(AutofillManager.EXTRA_CLIENT_STATE)
         val form = LoginFormParser.parse(structure)
-        val valid = AutofillHandoff.consume(
-            intent?.getStringExtra(AutofillHandoff.EXTRA_HANDOFF),
-            clientState?.getString(AutofillHandoff.EXTRA_CLIENT_NONCE),
-            form,
-        )
-        if (!valid || form == null) {
+        val clientNonce = clientState()?.getString(AutofillHandoff.EXTRA_CLIENT_NONCE)
+        handoffToken = token
+        if (!AutofillHandoff.claim(token, clientNonce, form) || form == null) {
             structureMatches = false
             target = null
             return
         }
         structureMatches = true
         target = AutofillTarget.from(form)
+    }
+
+    /**
+     * The service client state Android attached to this authentication launch;
+     * it is forwarded unchanged for exactly the request this Activity serves.
+     */
+    private fun clientState(): Bundle? = intent?.getBundleExtra(AutofillManager.EXTRA_CLIENT_STATE)
+
+    /** The nonce of the reviewed challenge this launch was claimed with. */
+    private fun claimedNonce(): String? = AutofillChallenge.fromBundle(clientState())?.clientNonce
+        ?: clientState()?.getString(AutofillHandoff.EXTRA_CLIENT_NONCE)
+
+    /**
+     * Closes the one-use handoff, BOUND or not, on every non-success exit. A
+     * supplied nonce whose malformed form was never bound is retired too.
+     */
+    private fun retireHandoff() {
+        val token = handoffToken
+        if (token != null) {
+            AutofillHandoff.discard(token)
+        } else {
+            AutofillHandoff.consume(null, claimedNonce(), null)
+        }
+    }
+
+    /**
+     * The reviewed challenge for exactly this service request, bound to this
+     * exact target. Its absence fails the approval closed: no other response
+     * can ever be returned.
+     */
+    private fun reviewedChallenge(): FillResponse? {
+        val challenge = AutofillChallenge.fromBundle(clientState()) ?: return null
+        val exactTarget = target ?: return null
+        if (!exactTarget.matches(challenge.form)) return null
+        // One-use: the reviewed challenge is removed before it is returned.
+        return AutofillServiceState.take(challenge.clientNonce)
     }
 
     override fun onStart() {
@@ -169,12 +212,19 @@ class AutofillAuthActivity : Activity() {
     }
 
     /**
-     * Backgrounding is a terminal exit for this one-use handoff: the gate is
-     * invalidated and an installed vault is locked synchronously, one close is
-     * queued on the worker, factors, approval and views are wiped, and the
-     * Activity reports cancellation and finishes.
+     * Backgrounding ends this one-use handoff. After a successful approval this
+     * Activity already delivered its terminal result and finished itself in
+     * [deliverApprovedResult], so onStop must not report anything again. In
+     * every other case it is the terminal exit: the gate is invalidated, an
+     * installed vault is locked synchronously, one close is queued, factors,
+     * approval and views are wiped, and the Activity reports a non-null
+     * canceled result and finishes.
      */
     override fun onStop() {
+        if (lifecycle.isTerminal) {
+            super.onStop()
+            return
+        }
         exitConsumed()
         super.onStop()
     }
@@ -215,10 +265,14 @@ class AutofillAuthActivity : Activity() {
      * serialized worker. A late rejected open is closed by the worker that
      * opened it and never reaches this cleanup, so no vault is closed twice.
      * Widgets and factor buffers are wiped, and the first call reports
-     * RESULT_CANCELED and finishes.
+     * RESULT_CANCELED and finishes. After the one terminal approval exit it only
+     * retires the claimed handoff: the successful result is never overwritten.
      */
     private fun exitConsumed() {
         gate.invalidate()
+        retireHandoff()
+        handoffToken = null
+        if (lifecycle.terminal == LifecycleState.Terminal.APPROVED) return
         if (freshVault.exit()) {
             val published = vault
             freshVault.releaseAfterOpen(
@@ -231,18 +285,21 @@ class AutofillAuthActivity : Activity() {
         }
         if (lifecycle.end(LifecycleState.Terminal.CANCELLED)) {
             wipeUiSecrets()
-            setResult(RESULT_CANCELED)
+            // Android 12+ requires a non-null response Intent with extras.
+            val canceled = AutofillAuthenticationResult.canceled()
+            setResult(canceled.resultCode, canceled.copyData().toIntent())
             if (!isFinishing) finish()
         }
     }
+
+    /** Android 12+ requires the authentication extras Bundle to be non-null. */
+    private fun Bundle.toIntent(): Intent = Intent().putExtras(this)
 
     private fun wipeUiSecrets() {
         masterPassword?.text?.clear()
         secretKey?.text?.clear()
         masterPassword = null
         secretKey = null
-        approval?.clear()
-        approval = null
         selected = null
         if (::content.isInitialized) {
             for (index in 0 until content.childCount) {
@@ -619,9 +676,6 @@ class AutofillAuthActivity : Activity() {
         var row: Button? = null
         val created: Button = button(login.shownTitle, R.id.autofill_auth_row, primary = false) {
             if (lifecycle.isTerminal) return@button
-            // A new selection invalidates any earlier approval.
-            approval?.clear()
-            approval = null
             selected = login
             rowButtons.forEach { (candidate, _) -> candidate.text = candidate.contentDescription }
             row?.text = getString(R.string.autofill_auth_selected_title, login.shownTitle)
@@ -636,7 +690,7 @@ class AutofillAuthActivity : Activity() {
     // ---- explicit approval --------------------------------------------------------
 
     private fun startApprove() {
-        if (lifecycle.isTerminal || approval != null) return
+        if (lifecycle.isTerminal) return
         val chosen = selected ?: return
         val expected = target ?: return
         val owner = vault ?: return
@@ -695,22 +749,119 @@ class AutofillAuthActivity : Activity() {
                 approved
             },
             done = { result ->
-                val approved = result as? ApprovedAutofillResult ?: return@runWork
-                // Held only while it is still this exact selection's approval and
-                // the selection has not changed; otherwise it is zeroized.
-                val sameSelection = selected?.let {
-                    it.rowId == chosen.rowId && it.rowRevision == chosen.rowRevision
-                } == true
-                if (approval == null && approved.target === expected && sameSelection) {
-                    approval = approved
-                    // Metadata only: the selected row's sanitized title.
-                    status.text = getString(R.string.autofill_auth_approved, chosen.shownTitle)
-                } else {
-                    approved.clear()
-                    failClosed()
-                }
+                // The single synchronous delivery: the approval is taken once,
+                // the BOUND handoff is consumed for this token, nonce and the
+                // exact two ids, the result is built, every buffer is wiped and
+                // the terminal result is returned in this same main-thread
+                // callback.
+                deliverApprovedResult(result, expected, chosen)
             },
         )
+    }
+
+    /**
+     * The exact-response step, on main only, after the serialized worker bound,
+     * rechecked and delivered the approval: the target, the selected row and its
+     * revision must still be the same; the reviewed challenge must still be
+     * this request's; the approval is taken exactly once and the two values
+     * become AutofillValues inside a response built synchronously here. Every
+     * approval/caller buffer is wiped before the result is returned. Only then
+     * is the BOUND handoff retired for this token, the challenge's claimed
+     * nonce and exactly the two OS AutofillIds; a refusal there retires the
+     * record and ends in the ordinary cancel path. On success the fresh vault
+     * is requested to lock synchronously and its one close is queued, then the
+     * terminal result is set and the Activity finishes. Any other mismatch
+     * zeroizes and ends in the ordinary cancel path as well.
+     */
+    private fun deliverApprovedResult(result: Any?, expected: AutofillTarget, chosen: ActiveLogin) {
+        var approved = result as? ApprovedAutofillResult
+        var taken: AutofillCredentialBytes? = null
+        var username: CharArray? = null
+        var password: CharArray? = null
+        val response: FillResponse?
+        val exactForm = LoginForm(expected.packageName, expected.usernameId, expected.passwordId)
+        try {
+            val sameTarget = target === expected
+            val sameSelection = selected?.let { it.rowId == chosen.rowId && it.rowRevision == chosen.rowRevision } == true
+            val challenge = AutofillChallenge.fromBundle(clientState())
+            val reviewed = reviewedChallenge()
+            if (!lifecycle.isTerminal && sameTarget && sameSelection && challenge != null && reviewed != null &&
+                challenge.form == exactForm &&
+                approved != null && !approved.isConsumed() && approved.target === expected &&
+                approved.targetMatches(exactForm) &&
+                AutofillFillResult.isFillable(expected)
+            ) {
+                taken = approved.take()
+                if (taken != null) {
+                    username = taken.takeUsername()
+                    password = taken.takePassword()
+                    response = try {
+                        AutofillFillResult.build(
+                            target = expected,
+                            username = username,
+                            password = password,
+                            level = BuildAutofillFieldLevel,
+                            presentation = NativeAutofillServicePort.presentation(packageName),
+                        )
+                    } catch (_: Exception) {
+                        null
+                    }
+                    if (response != null && !AutofillHandoff.consume(handoffToken, challenge.clientNonce, exactForm)) {
+                        // A refused handoff returns no fill at all; the finally
+                        // block then wipes every approval/caller buffer.
+                        failClosed()
+                        return
+                    }
+                } else {
+                    response = null
+                }
+            } else {
+                response = null
+            }
+        } finally {
+            // AutofillFillResult consumed (wiped) the two CharArrays; wipe any
+            // copy left by a refused or throwing path and every other buffer.
+            username?.fill('\u0000')
+            password?.fill('\u0000')
+            taken?.clear()
+            approved?.clear()
+            approved = null
+        }
+        if (response == null) {
+            failClosed()
+            return
+        }
+        // Terminal, once: this sets the only successful result and finishes.
+        if (!lifecycle.end(LifecycleState.Terminal.APPROVED)) {
+            failClosed()
+            return
+        }
+        // Terminal: the gate now rejects any late open (only a free-close
+        // cleanup runs for it), and onStop can no longer cancel this result.
+        freshVault.exit()
+        wipeUiSecrets()
+        val success = AutofillAuthenticationResult.success(response)
+        setResult(success.resultCode, success.copyData().toIntent())
+        // Lock synchronously and queue the one close before finishing.
+        requestLockAfterApproval(vault.also { vault = null })
+        finish()
+    }
+
+    /**
+     * Locks the vault this approval used synchronously on the main thread
+     * before anything else can run on the worker, then queues exactly one close
+     * there. A vault that a late open installs after this read is left to the
+     * open task: [FreshVaultGate.install] already rejected it (the gate exited)
+     * and that same worker locks and closes the unowned vault itself.
+     */
+    private fun requestLockAfterApproval(published: Vault?) {
+        if (published == null) return
+        runCatching { published.requestLock() }
+        try {
+            worker.execute { runCatching { published.close() } }
+        } catch (_: RejectedExecutionException) {
+            // A shut-down worker can run no native call; the lock above stands.
+        }
     }
 
     override fun onPause() {

@@ -147,7 +147,8 @@ internal enum class CloseAction {
  * handoff stays unavailable and is never opened again.
  */
 internal class LifecycleState {
-    enum class Terminal { NONE, CANCELLED, UNAVAILABLE }
+    /** [APPROVED]: the one terminal exit that carries an authentication result. */
+    enum class Terminal { NONE, CANCELLED, UNAVAILABLE, APPROVED }
 
     var terminal: Terminal = Terminal.NONE
         private set

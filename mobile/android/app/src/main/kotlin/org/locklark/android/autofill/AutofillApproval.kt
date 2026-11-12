@@ -161,6 +161,12 @@ internal class AutofillCredentialBytes private constructor(
     fun copyUsername(): ByteArray = username.copyOf()
     fun copyPassword(): ByteArray = password.copyOf()
 
+    /** Hands the private username buffer to the caller (the buffer stays wipeable). */
+    fun takeUsername(): CharArray = decodeUtf8(username)
+
+    /** Hands the private password buffer to the caller (the buffer stays wipeable). */
+    fun takePassword(): CharArray = decodeUtf8(password)
+
     fun clear() {
         username.fill(0)
         password.fill(0)
@@ -175,6 +181,23 @@ internal class AutofillCredentialBytes private constructor(
     companion object {
         internal fun copyOf(username: ByteArray, password: ByteArray): AutofillCredentialBytes =
             AutofillCredentialBytes(username.copyOf(), password.copyOf())
+
+        /**
+         * Strict UTF-8 decode of a caller-owned buffer: the platform's default
+         * replacement decoding is never used for a credential, and malformed
+         * bytes yield an empty array that the response builder refuses.
+         */
+        private fun decodeUtf8(bytes: ByteArray): CharArray {
+            val decoder = Charsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+            return try {
+                val chars = decoder.decode(java.nio.ByteBuffer.wrap(bytes))
+                CharArray(chars.remaining()).also { chars.get(it) }
+            } catch (_: CharacterCodingException) {
+                CharArray(0)
+            }
+        }
     }
 }
 
