@@ -102,10 +102,6 @@ CLICK_FRACTIONS = (0.2, 0.5, 0.8)
 # (never a bare -25212); kAXErrorSuccess == 0 needs no lookup.  The expected
 # value guards against a substituted or absent constant.
 AX_ERROR_NO_VALUE_EXPECTED = -25212
-# The public AX attribute naming a window's CGWindowNumber (kAXWindowNumberAttribute),
-# read ONLY through AXUIElementCopyAttributeValue when a request is scoped to one
-# already-proven owned process instead of the CoreGraphics window inventory.
-AX_WINDOW_NUMBER = "AXWindowNumber"
 
 
 def _frame_relation(frame, bounds):
@@ -697,94 +693,6 @@ class QuartzApi:
                 raise _a11y_query()
             handles.append(element)
         return handles
-
-    # -- owned-process discovery (no CoreGraphics inventory) -----------------
-    def scope_to_owned_process(self, pid):
-        """Scope normal window discovery to ONE already-proven owned PID.
-
-        The PID must be an exact positive built-in ``int``; it is the actual
-        Popen PID of the product this process launched, never a window id and
-        never a title. Nothing is validated lazily: a malformed PID refuses the
-        sanitized ``a11y-query`` now. The scope lives only on this QuartzApi
-        instance and is dropped by ``unscope_owned_process``; there is no
-        module-level registry.
-        """
-        if not _exact_status(pid) or pid <= 0:
-            raise _a11y_query()
-        self._owned_pid = pid
-
-    def unscope_owned_process(self):
-        """Drop this instance's PID scope; normal CG discovery resumes."""
-        self._owned_pid = None
-
-    def owned_process_scope(self):
-        """The validated scoped PID, or None when normal CG discovery applies."""
-        pid = getattr(self, "_owned_pid", None)
-        return pid if _exact_status(pid) and pid > 0 else None
-
-    def discover_owned_windows(self):
-        """Readiness discovery for the scoped owned PID: no CG window inventory.
-
-        Called repeatedly by the bounded readiness loop. Returns
-        ``([], None)`` while the owned process has no window yet, and
-        ``(windows, unique)`` once ``owned_windows`` returned at least one:
-        ``unique`` is True only for exactly one owned window, which is
-        materialised from that same bounded ``owned_windows`` result (one
-        AXWindows read) together with its title, CGWindowNumber and frame.
-        Several owned windows are reported ineligible, never the first one.
-
-        The sanitized ``a11y-query`` refusal (AX unavailable, or the process
-        gone while listing its windows) propagates so the readiness loop can
-        time out instead of looping forever.
-        """
-        pid = self.owned_process_scope()
-        if pid is None:
-            # Never fall back to the CG inventory for an unscoped call.
-            raise _a11y_query()
-        handles = self.owned_windows(pid)
-        if not handles:
-            return [], None
-        if len(handles) != 1:
-            return [], False
-        return [self._owned_window(pid, handles[0])], True
-
-    def _owned_window(self, pid, element):
-        """Only public window fields of one already-proven owned AX window.
-
-        The title is read exactly as ``title()`` reads it elsewhere, and the
-        CGWindowNumber comes from the public AXWindowNumber attribute so every
-        later re-observation, focus and click receipt names this very window.
-        Any failure refuses ``a11y-query``; nothing is read beyond the title,
-        number and frame.
-        """
-        try:
-            answer = self.ax.AXUIElementCopyAttributeValue(element, AX_WINDOW_NUMBER, None)
-        except Exception:
-            raise _a11y_query()
-        decoded = _ax_result(answer)
-        if decoded is None or decoded[0] != 0:
-            raise _a11y_query()
-        identifier = decoded[1]
-        if not _exact_status(identifier) or identifier <= 0:
-            raise _a11y_query()
-        title = self.title(element)
-        if not title:
-            raise _a11y_query()
-        try:
-            bounds = self.frame(element)
-        except AxValueUnavailable:
-            raise _a11y_query()
-        if not contract.rect_positive(bounds):
-            raise _a11y_query()
-        path, trusted = self.process(pid)
-        name = path.rsplit("/", 1)[-1].lower()
-        return {
-            "id": identifier, "pid": pid, "title": title,
-            "executable": path, "trusted": trusted,
-            "visible": True, "onscreen": True,
-            "secure": name in SECURE_PROCESSES,
-            "bounds": dict(bounds), "client": dict(bounds),
-        }
 
     def title(self, element):
         """Exact built-in ``str`` AX title/description; never a native subclass.
@@ -1464,29 +1372,7 @@ class MacAdapter:
     def check_capability(self):
         self.api.capability()
 
-    def scope_owned_process(self, pid):
-        """Scope this adapter's discovery to one owned PID; return its release.
-
-        Only the platform API's instance-local scope is used. The returned
-        release drops it, and the caller (one request) always runs it; a
-        platform API without that support refuses rather than silently falling
-        back to the CoreGraphics window inventory.
-        """
-        setter = getattr(self.api, "scope_to_owned_process", None)
-        clearer = getattr(self.api, "unscope_owned_process", None)
-        if not callable(setter) or not callable(clearer):
-            raise contract.ContractError("a11y-query")
-        setter(pid)
-        return clearer
-
     def list_windows(self):
-        """Owned-process discovery when scoped, else the unchanged CG inventory."""
-        scoped = getattr(self.api, "owned_process_scope", None)
-        if callable(scoped) and scoped() is not None:
-            windows, unique = self.api.discover_owned_windows()
-            if not unique:
-                return []
-            return [self._normalise(raw) for raw in windows]
         return [self._normalise(raw) for raw in self.api.list_windows()]
 
     @staticmethod

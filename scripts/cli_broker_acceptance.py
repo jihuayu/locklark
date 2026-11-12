@@ -788,35 +788,16 @@ class Acceptance:
         self.mark("explicit_one_item_token_binding_created")
 
     # ------------------------------------------------------------- native --
-    def owned_desktop_pid(self):
-        """The actual PID this harness launched for the product under test.
-
-        Only a live, exact positive built-in int ``Popen`` PID qualifies; an
-        exited product refuses before any request is built.
-        """
-        process = self.desktop_process
-        require(process is not None and process.poll() is None)
-        require(type(process.pid) is int and process.pid > 0)
-        return process.pid
-
-    def scoped_request(self, actions, inspect=False):
-        """One normal request scoped to the owned Popen PID (never a CG inventory).
-
-        The exact fixture TITLE and the canonical executable stay mandatory:
-        the PID only narrows discovery to this owned process.
-        """
-        return json.dumps({
-            "title": TITLE,
-            "executable": str(self.desktop),
-            "owned_pid": self.owned_desktop_pid(),
-            "actions": actions,
-            "inspect": inspect,
-        }).encode()
-
     def driver(self, actions, stage):
         if self.stage != stage:
             self.stage_code(stage)
-        return self.run_driver(self.scoped_request(actions))
+        request = json.dumps({
+            "title": TITLE,
+            "executable": str(self.desktop),
+            "actions": actions,
+            "inspect": False,
+        }).encode()
+        return self.run_driver(request)
 
     def run_driver(self, request):
         """One bounded driver invocation; saves owner-only stdout/stderr.
@@ -917,7 +898,12 @@ class Acceptance:
         ``inspect`` asks only for the existing controls/status boolean maps.
         """
         require(self.desktop is not None and os.path.isabs(str(self.desktop)))
-        return self.scoped_request([], inspect=True)
+        return json.dumps({
+            "title": TITLE,
+            "executable": str(self.desktop),
+            "actions": [],
+            "inspect": True,
+        }).encode()
 
     def inspect_unlock_wait_failure(self):
         """One inspect for the terminal final wait; never retries or replays.

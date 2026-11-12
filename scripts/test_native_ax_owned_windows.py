@@ -398,17 +398,13 @@ class OwnedWindowsTests(unittest.TestCase):
             self.assertNotIn(text, repr(error.guard))
         self.assertEqual(error.guard, {})
 
-    def test_helper_is_wired_only_through_scoped_discovery(self):
-        # The helper is reached only from scoped discovery, never from the
-        # CoreGraphics list_windows path.
+    def test_helper_is_additive_and_not_wired(self):
+        # The helper exists but nothing in the module calls it yet.
         self.assertIn("owned_windows", dir(macos.QuartzApi))
         with open(macos.__file__, encoding="utf-8") as handle:
             source = handle.read()
-        self.assertEqual(source.count(".owned_windows("), 1)
-        self.assertIn("handles = self.owned_windows(pid)", source)
-        cg = source[source.index("    def list_windows(self):"):]
-        cg = cg[:cg.index("return windows")]
-        self.assertNotIn("owned_windows", cg)
+        self.assertNotIn("self.owned_windows(", source)
+        self.assertNotIn(".owned_windows(", source)
 
 
 def _Bool(value):
