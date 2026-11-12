@@ -409,6 +409,30 @@ func TestAuthenticatedItemsEndToEnd(t *testing.T) {
 	if !reflect.DeepEqual(gotItems, wantItems) {
 		t.Fatalf("items mismatch:\n got %+v\nwant %+v", gotItems, wantItems)
 	}
+	// The private database is cleaned up before OpenAuthenticatedItems
+	// returns. The returned attachment buffers must still carry exactly the
+	// caller's bytes, not zeroed database copies.
+	gotAttachmentBytes := callerAttachmentBytes(gotItems)
+	wantAttachmentBytes := callerAttachmentBytes(items)
+	if len(gotAttachmentBytes) != len(wantAttachmentBytes) {
+		t.Fatalf("returned attachment count: got %d want %d", len(gotAttachmentBytes), len(wantAttachmentBytes))
+	}
+	for i := range wantAttachmentBytes {
+		if len(gotAttachmentBytes[i]) == 0 || allZeros(gotAttachmentBytes[i]) ||
+			!bytes.Equal(gotAttachmentBytes[i], wantAttachmentBytes[i]) {
+			t.Fatalf("returned attachment %d was not preserved: got %x want %x", i, gotAttachmentBytes[i], wantAttachmentBytes[i])
+		}
+	}
+	// Caller inputs are still unchanged immediately after the open and its
+	// cleanup, before this test mutates any returned result.
+	for i, p := range aliases {
+		if *p != before[i] {
+			t.Fatalf("caller input changed at witness %d after OpenAuthenticatedItems", i)
+		}
+	}
+	if !reflect.DeepEqual(items, wantItems) || !bytes.Equal(metadata, wantMeta) {
+		t.Fatal("OpenAuthenticatedItems mutated caller metadata or items")
+	}
 	// Exact meaningful fields, spelled out independently of DeepEqual.
 	if got := gotItems[0]; got.Password != "synthetic-password" || len(got.History) != 1 ||
 		got.History[0].Password != "synthetic-old-password" || got.History[0].Timestamp != 1_700_000_000 ||
@@ -664,6 +688,134 @@ func TestAuthenticatedItemsClearsOwnedBinaries(t *testing.T) {
 		checkCleared(t, db, dbBinaries, populated, wantBytes)
 		callerUnchanged(t, items, wantBytes)
 	})
+}
+
+// TestAuthenticatedItemsReleasesOpenedItemDatabase calls the local cleanup
+// helper directly on an owned KDBX database carrying InnerHeader binaries,
+// populated credential byte slices and string values. It proves the binary and
+// credential buffers are zeroed and that the database no longer references the
+// decrypted content, while the caller's item bytes remain untouched. The
+// strings themselves are not checked for overwriting: Go strings are immutable
+// and the helper only drops their references.
+func TestAuthenticatedItemsReleasesOpenedItemDatabase(t *testing.T) {
+	metadata := authItemsFixtureMetadata()
+	items := callerAttachmentItems()
+	wantItems := deepCopy(items)
+	wantAttachmentBytes := callerAttachmentBytes(items)
+
+	db, err := NewItemDatabase(metadata, items)
+	if err != nil {
+		t.Fatalf("NewItemDatabase: %v", err)
+	}
+	credentials := &gokeepasslib.DBCredentials{
+		Passphrase: []byte("synthetic passphrase material"),
+		Key:        []byte("synthetic key-file material"),
+		Windows:    []byte("synthetic windows-account material"),
+	}
+	db.Credentials = credentials
+	passphrase, key, windows := credentials.Passphrase, credentials.Key, credentials.Windows
+
+	bin, ok := currentItemBinaries(db)
+	if !ok || len(*bin) == 0 {
+		t.Fatal("owned database carries no InnerHeader binaries")
+	}
+	binaryBuffers := make([][]byte, len(*bin))
+	for i := range *bin {
+		if len((*bin)[i].Content) == 0 || allZeros((*bin)[i].Content) {
+			t.Fatalf("database binary %d is not populated", i)
+		}
+		binaryBuffers[i] = (*bin)[i].Content
+	}
+	content := db.Content
+	if content == nil || content.Root == nil || len(content.Root.Groups) != 1 || len(content.Root.Groups[0].Entries) == 0 {
+		t.Fatal("owned database carries no decrypted string content")
+	}
+	hasString := false
+	for _, v := range content.Root.Groups[0].Entries[0].Values {
+		if v.Value.Content != "" {
+			hasString = true
+			break
+		}
+	}
+	if !hasString {
+		t.Fatal("owned database entry carries no string value")
+	}
+
+	releaseOpenedItemDatabase(db)
+
+	checkZeroed := func(name string, b []byte) {
+		t.Helper()
+		if len(b) == 0 || !allZeros(b) {
+			t.Fatalf("%s was not cleared: %x", name, b)
+		}
+	}
+	for i := range binaryBuffers {
+		checkZeroed("database binary", binaryBuffers[i])
+	}
+	checkZeroed("credentials passphrase", passphrase)
+	checkZeroed("credentials key", key)
+	checkZeroed("credentials windows", windows)
+	if db.Content != nil {
+		t.Fatal("database still references decrypted content")
+	}
+	if db.Credentials != nil {
+		t.Fatal("database still references credentials")
+	}
+	if content.InnerHeader == nil || content.InnerHeader.Binaries != nil {
+		t.Fatal("dropped content still references InnerHeader binaries")
+	}
+
+	if !reflect.DeepEqual(items, wantItems) {
+		t.Fatal("cleanup mutated the caller's items")
+	}
+	gotAttachmentBytes := callerAttachmentBytes(items)
+	if len(gotAttachmentBytes) != len(wantAttachmentBytes) {
+		t.Fatalf("caller attachment count: got %d want %d", len(gotAttachmentBytes), len(wantAttachmentBytes))
+	}
+	for i := range wantAttachmentBytes {
+		if !bytes.Equal(gotAttachmentBytes[i], wantAttachmentBytes[i]) || allZeros(wantAttachmentBytes[i]) {
+			t.Fatalf("cleanup changed caller attachment bytes at %d", i)
+		}
+	}
+}
+
+// TestAuthenticatedItemsUnreadableDatabase opens a real authenticated file
+// whose KDBX passes authentication and decryption but whose item layout
+// ReadItemDatabase rejects: one root group with the wrong name. The adapter
+// must return ErrSnapshot with nil outputs, and its unconditional deferred
+// cleanup covers this error path. The test does not claim to observe the
+// private database buffers; the direct helper test above covers those.
+func TestAuthenticatedItemsUnreadableDatabase(t *testing.T) {
+	fx := newAuthItemsFixture(t)
+	metadata, items := authItemsFixtureMetadata(), callerAttachmentItems()
+	db, err := NewItemDatabase(metadata, items)
+	if err != nil {
+		t.Fatalf("NewItemDatabase: %v", err)
+	}
+	db.Content.Root.Groups[0].Name = itemGroup + " (unreadable)"
+	encoded, err := vaultfile.SealAuthenticatedFile(fx.draft, db, fx.pin, fx.vuk, fx.author)
+	if err != nil {
+		t.Fatalf("seal database with unreadable item layout: %v", err)
+	}
+
+	// Prove the file authenticates and its KDBX payload decrypts: only the
+	// item-database read fails.
+	file, opened, err := vaultfile.OpenAuthenticatedFile(encoded, fx.pin, "device-1", fx.device)
+	if err != nil || file == nil || opened == nil {
+		t.Fatalf("authenticated KDBX open: file=%v database=%v err=%v", file != nil, opened != nil, err)
+	}
+	if gotMeta, gotItems, err := ReadItemDatabase(opened); !errors.Is(err, ErrSnapshot) || gotMeta != nil || gotItems != nil {
+		t.Fatalf("ReadItemDatabase on unreadable layout = %x, %d items, %v; want nil, nil, ErrSnapshot", gotMeta, len(gotItems), err)
+	}
+	releaseOpenedItemDatabase(opened)
+
+	file, gotMeta, gotItems, err := OpenAuthenticatedItems(encoded, fx.pin, "device-1", fx.device)
+	if !errors.Is(err, ErrSnapshot) {
+		t.Fatalf("OpenAuthenticatedItems with unreadable item layout: got %v, want ErrSnapshot", err)
+	}
+	if file != nil || gotMeta != nil || gotItems != nil {
+		t.Fatalf("read failure returned results: file=%v metadata=%v items=%v", file, gotMeta, gotItems)
+	}
 }
 
 // TestAuthenticatedItemsInvalidItemsRejected proves that invalid item input is

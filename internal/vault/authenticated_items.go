@@ -51,7 +51,11 @@ import (
 // metadata or binary bytes, and its owned database is package-owned for the
 // duration of the call and never returned; its database-owned binary-content
 // copies are cleared after sealing, as SealAuthenticatedItems documents. The
-// returned file bytes, metadata bytes and items are owned by the caller.
+// database opened by OpenAuthenticatedItems is likewise package-owned and not
+// returned: its InnerHeader attachment buffers and credential byte slices are
+// cleared and its decrypted content is dropped after ReadItemDatabase, on
+// success and error alike. The returned file bytes, metadata bytes and items
+// are owned by the caller.
 
 // SealAuthenticatedItems validates items and metadata, builds the owned KDBX
 // 4.1 item database with NewItemDatabase and seals that database into a
@@ -172,6 +176,38 @@ func clearOwnedItemBinaries(db *kdbx.Database) {
 	}
 }
 
+// releaseOpenedItemDatabase clears the plaintext retained by the package-owned
+// database OpenAuthenticatedItems opened. It is called only for that database,
+// never for a caller-supplied one.
+//
+// Only InnerHeader.Binaries content is cleared, because that is where the
+// supported KDBX 4.1 item layout keeps the database-owned attachment copies
+// ReadItemDatabase reads. Meta.Binaries is not treated as attachment storage
+// here and its content is deliberately not cleared. Every credential byte
+// slice that is present is zeroed. Afterwards the database's references to the
+// decrypted Content and Credentials are dropped, so the database retains
+// neither. Entry values are Go strings: Go strings cannot be securely
+// overwritten, so they are only released with the dropped Content, never
+// cleared in place.
+func releaseOpenedItemDatabase(db *kdbx.Database) {
+	if db == nil {
+		return
+	}
+	if db.Content != nil {
+		clearOwnedItemBinaries(db)
+		if db.Content.InnerHeader != nil {
+			db.Content.InnerHeader.Binaries = nil
+		}
+	}
+	if db.Credentials != nil {
+		clear(db.Credentials.Passphrase)
+		clear(db.Credentials.Key)
+		clear(db.Credentials.Windows)
+	}
+	db.Content = nil
+	db.Credentials = nil
+}
+
 // OpenAuthenticatedItems opens a file sealed by SealAuthenticatedItems and
 // returns the parsed authenticated file, its metadata and its items.
 //
@@ -189,6 +225,16 @@ func clearOwnedItemBinaries(db *kdbx.Database) {
 //     single metadata entry, one entry per item in wire order, the field
 //     shapes, the binaries and the item schema. A database it rejects returns
 //     ErrSnapshot.
+//  3. The database itself is never returned. A deferred cleanup runs on both
+//     the ReadItemDatabase success and error paths: it zeroes every currently
+//     reachable InnerHeader.Binaries[i].Content buffer and the Passphrase, Key
+//     and Windows credential byte slices if present, then drops the
+//     database's references to its decrypted Content and credentials. The
+//     entry values are Go strings, so they cannot be securely overwritten and
+//     are only dropped for the garbage collector. Meta.Binaries is not
+//     attachment storage in the supported KDBX 4.1 item layout here, so it is
+//     not separately cleared. The returned file, metadata and items, and every
+//     caller input, are never touched.
 //
 // On success the returned *vaultfile.File, metadata bytes and []Item are
 // caller-owned; the returned file is the parsed authenticated wire file and
@@ -205,6 +251,9 @@ func OpenAuthenticatedItems(encoded []byte, checkpoint *vaultfile.PolicyCheckpoi
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	// The database is package-owned and never returned. Release its plaintext
+	// on the ReadItemDatabase success and error paths alike.
+	defer releaseOpenedItemDatabase(db)
 	metadata, items, err := ReadItemDatabase(db)
 	if err != nil {
 		return nil, nil, nil, err
