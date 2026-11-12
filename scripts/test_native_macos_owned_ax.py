@@ -90,10 +90,18 @@ class FakeFrameworks:
     kCGWindowListOptionOnScreenOnly = 1
     kCGWindowListExcludeDesktopElements = 16
     kCGNullWindowID = 0
+    kCGWindowLayer = "layer"
+    kCGWindowOwnerPID = "pid"
+    kCGWindowNumber = "number"
+    kCGWindowBounds = "bounds"
+    kCGWindowName = "name"
 
     def __init__(self, windows, focused=None, front_pid=OWNED_PID, hit=None,
-                 getpid=None):
+                 getpid=None, cg_windows=None):
         self.windows = list(windows)
+        # None keeps the CoreGraphics inventory POISONED (the default);
+        # a list opts the UNSCOPED path into a working CG inventory.
+        self.cg_windows = None if cg_windows is None else list(cg_windows)
         self.focused = focused
         self.front_pid = front_pid
         self.hit = hit
@@ -190,9 +198,11 @@ class FakeFrameworks:
         return _NSWorkspace(self)
 
     def CGWindowListCopyWindowInfo(self, options, identifier):
-        # Only reached on the UNSCOPED path of the one negative test below:
-        # it must be provably the CG inventory, and it still refuses.
-        raise AssertionError("CoreGraphics window inventory touched")
+        self.requests.append(("cg_list",))
+        if self.cg_windows is None:
+            # The default: ANY CoreGraphics inventory touch is a hard failure.
+            raise AssertionError("CoreGraphics window inventory touched")
+        return [dict(entry) for entry in self.cg_windows]
 
     # -- call-log views ----------------------------------------------------
     def names(self):
@@ -747,6 +757,159 @@ class RealEntryPointTests(unittest.TestCase):
         code, out, err = self.entry(api, request)
         # Unscoped macOS keeps its CG inventory path; here it is poisoned.
         self.assertIn("unexpected", err)
+
+
+class AbsenceRegressionTests(unittest.TestCase):
+    """UNSCOPED absence keeps the CG path; SCOPED absence never falls back."""
+
+    @staticmethod
+    def cg_window(title=TITLE, pid=OTHER_PID, number=0x300001):
+        return {"layer": 0, "pid": pid, "number": number,
+                "bounds": {"X": 10, "Y": 20, "Width": 800, "Height": 600},
+                "name": title}
+
+    def entry(self, api, request, clock=None):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        clock = clock or _Clock()
+        with unittest.mock.patch.object(
+                macos.MacAdapter, "__init__",
+                lambda self, *a, **k: setattr(self, "api", api)), \
+                unittest.mock.patch.object(contract, "monotonic", clock.monotonic), \
+                unittest.mock.patch.object(contract, "sleep", clock.sleep):
+            code = macos.main(io.BytesIO(request), stdout, stderr)
+        return code, stdout.getvalue(), stderr.getvalue(), clock
+
+    def test_unscoped_absence_still_uses_the_normal_cg_path(self):
+        # A NON-owned PID's CG window carries the exact title: unscoped absence
+        # must still SEE it (present) and refuse window-changed at the deadline.
+        frameworks = FakeFrameworks([], cg_windows=[self.cg_window()])
+        api = api_for(frameworks)
+        request = json.dumps({"title": TITLE, "executable": EXE,
+                              "wait_absent": True}).encode()
+        code, out, err, clock = self.entry(api, request, _Clock())
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertIn("code=window-changed", err)
+        # It really went through the CG inventory, never the owned hook.
+        self.assertIn(("cg_list",), frameworks.requests)
+        self.assertGreaterEqual(clock.now, contract.CONTROL_TIMEOUT)
+
+    def test_unscoped_absence_reports_absent_from_the_cg_path(self):
+        frameworks = FakeFrameworks([], cg_windows=[self.cg_window(title=OTHER_TITLE)])
+        api = api_for(frameworks)
+        request = json.dumps({"title": TITLE, "executable": EXE,
+                              "wait_absent": True}).encode()
+        code, out, err, clock = self.entry(api, request)
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(json.loads(out), {"absent": True})
+        self.assertIn(("cg_list",), frameworks.requests)
+        self.assertEqual(clock.sleeps, [])
+
+    def test_unscoped_absence_never_calls_the_owned_hook(self):
+        # Even on a SCOPED-CAPABLE adapter object, an unscoped plan uses the
+        # CG path: the owned hook is not consulted merely because it exists.
+        frameworks = FakeFrameworks([], cg_windows=[self.cg_window()])
+
+        class ScopedCapable(macos.MacAdapter):
+            """Has owned absence (via the API) but is NOT scoped here."""
+
+            def scope_owned_process(self, pid):
+                raise AssertionError("unscoped request must not be scoped")
+
+        api = api_for(frameworks)
+        adapter = ScopedCapable(api=api)
+        self.assertIsNone(api.owned_pid_scope())
+        calls = []
+        original = macos.MacAdapter.owned_absence
+
+        def spy(self, plan):
+            calls.append(plan.get("owned_pid"))
+            return original(self, plan)
+
+        plan = contract.parse_request(json.dumps(
+            {"title": TITLE, "executable": EXE, "wait_absent": True}).encode())
+        self.assertTrue(callable(getattr(adapter, "owned_absence", None)))
+        self.assertIsNone(plan["owned_pid"])
+        with unittest.mock.patch.object(macos.MacAdapter, "owned_absence", spy), \
+                unittest.mock.patch.object(contract, "monotonic", _Clock().monotonic), \
+                unittest.mock.patch.object(contract, "sleep", _Clock().sleep):
+            with self.assertRaises(contract.ContractError):
+                contract.execute(plan, adapter)
+        self.assertEqual(calls, [])
+        self.assertIn(("cg_list",), frameworks.requests)
+
+    def test_scoped_absence_never_falls_back_to_cg(self):
+        # The owned hook blows up: the request refuses and NEVER touches CG.
+        window, _ = owned_window(title=TITLE)
+        frameworks = FakeFrameworks([window])
+        api = api_for(frameworks)
+        api.owned_absence = lambda plan: (_ for _ in ()).throw(RuntimeError("private"))
+        request = json.dumps({"title": TITLE, "executable": EXE,
+                              "owned_pid": OWNED_PID, "wait_absent": True}).encode()
+        code, out, err, clock = self.entry(api, request)
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertNotIn(("cg_list",), frameworks.requests)
+        self.assertIsNone(api.owned_pid_scope())
+
+    def test_scoped_absence_without_the_hook_refuses_not_cg(self):
+        window, _ = owned_window()
+        frameworks = FakeFrameworks([window])
+
+        class NoOwnedHook(macos.MacAdapter):
+            """A scoped-capable adapter that simply has no owned absence hook."""
+
+            owned_absence = None
+
+        api = api_for(frameworks)
+        api.owned_absence = None
+        adapter = NoOwnedHook(api=api)
+        plan = contract.parse_request(json.dumps(
+            {"title": TITLE, "executable": EXE, "owned_pid": OWNED_PID,
+             "wait_absent": True}).encode())
+        with unittest.mock.patch.object(contract, "monotonic", _Clock().monotonic), \
+                unittest.mock.patch.object(contract, "sleep", _Clock().sleep):
+            with self.assertRaises(contract.ContractError) as error:
+                contract.execute(plan, adapter)
+        self.assertEqual(error.exception.code, "a11y-query")
+        self.assertNotIn(("cg_list",), frameworks.requests)
+        for release in plan["releases"]:
+            release()
+
+    def test_scoped_absence_matches_the_canonical_executable_path(self):
+        # The owned window's executable is the canonical absolute path; a
+        # non-normalised but equivalent request path must still match.
+        window, _ = owned_window()
+        api, frameworks = scoped([window])
+        variant = "/opt/locklark/./locklark-desktop"
+        request = json.dumps({"title": TITLE, "executable": variant,
+                              "owned_pid": OWNED_PID, "wait_absent": True}).encode()
+        code, out, err, clock = self.entry(api, request, _Clock())
+        # Present via the canonical comparison -> deadline refusal, not absent.
+        self.assertEqual(code, 1)
+        self.assertIn("code=window-changed", err)
+        self.assertGreaterEqual(clock.now, contract.CONTROL_TIMEOUT)
+        self.assertNotIn(("cg_list",), frameworks.requests)
+
+    def test_scoped_absence_reports_absent_for_a_different_executable(self):
+        window, _ = owned_window()
+        api, frameworks = scoped([window])
+        request = json.dumps({"title": TITLE, "executable": "/opt/other/app",
+                              "owned_pid": OWNED_PID, "wait_absent": True}).encode()
+        code, out, err, clock = self.entry(api, request, _Clock())
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(json.loads(out), {"absent": True})
+        self.assertNotIn(("cg_list",), frameworks.requests)
+
+    def test_activation_only_path_never_touches_cg(self):
+        frameworks = FakeFrameworks([])
+        api = api_for(frameworks)
+        request = json.dumps({"activate_pid": OWNED_PID, "executable": EXE}).encode()
+        code, out, err, clock = self.entry(api, request)
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(json.loads(out), {"activated": True})
+        self.assertEqual(frameworks.activations, [OWNED_PID])
+        self.assertNotIn(("cg_list",), frameworks.requests)
 
 
 class _Clock:

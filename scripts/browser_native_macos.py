@@ -1888,12 +1888,17 @@ class MacAdapter:
         expected = self.api.owned_scope_title()
         if title != expected:
             raise contract.ContractError("a11y-query")
+        platform = self.platform
+        requested = plan.get("executable")
         windows = self.owned_process_windows()
         matches = [window for window in windows
                    if window.get("title") == expected
                    and window.get("pid") == self.api.owned_pid_scope()
-                   and (plan.get("executable") is None
-                        or window.get("executable") == plan.get("executable"))]
+                   and (requested is None
+                        # The SAME canonical executable contract as unscoped
+                        # absence, never a raw string equality.
+                        or contract.same_executable(
+                            requested, window.get("executable"), platform))]
         # The fixed absence semantics stay identical: present means the exact
         # unique window; the identity observed is the owned AX handle.
         return {"present": bool(matches),

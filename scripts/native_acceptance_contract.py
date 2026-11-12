@@ -1287,18 +1287,25 @@ def snapshot(adapter, window, budget):
 # ----------------------------------------------------------------- absence ----
 
 def await_absent(plan, adapter, budget):
-    """Bounded absence wait; an owned-PID scope never consults CoreGraphics.
+    """Bounded absence wait: the owned path only when the plan IS scoped.
 
-    A scoped adapter is asked through ``owned_absence`` so it can observe only
-    its owned process's AX windows (and refuse rather than fall back). The
-    result keeps the original fixed semantics: ``{"absent": True}`` as soon as
-    the exact-title window is not present, else ``window-changed`` at the
-    unchanged CONTROL_TIMEOUT.
+    A plan carrying ``owned_pid`` is observed exclusively through the adapter's
+    ``owned_absence`` hook (owned AX windows only); if that hook is missing or
+    fails, the request refuses - it NEVER falls back to the CoreGraphics
+    inventory. Any other plan keeps the original unscoped CG semantics
+    unchanged.
+
+    Both paths keep the fixed result: ``{"absent": True}`` as soon as the
+    exact-title window is not present, else ``window-changed`` at the unchanged
+    CONTROL_TIMEOUT.
     """
     deadline = monotonic() + CONTROL_TIMEOUT
-    probe = getattr(adapter, "owned_absence", None)
+    scoped = plan.get("owned_pid") is not None
+    probe = getattr(adapter, "owned_absence", None) if scoped else None
     while True:
-        if callable(probe):
+        if scoped:
+            if not callable(probe):
+                raise ContractError("a11y-query")
             state = probe(plan)
             if type(state) is not dict or type(state.get("present")) is not bool:
                 raise ContractError("a11y-query")
