@@ -160,14 +160,16 @@ func (e rustfsSmokeEnv) sdkClient() *s3.Client {
 	})
 }
 
-// newBackend builds a fresh instance through the production NewS3 constructor.
-func (e rustfsSmokeEnv) newBackend(t *testing.T, bucket string) Backend {
+// newBackendAt builds a fresh instance through the production NewS3
+// constructor over one bucket and prefix. The caller owns Close; no cleanup is
+// registered here.
+func (e rustfsSmokeEnv) newBackendAt(t *testing.T, bucket, prefix string) Backend {
 	t.Helper()
 	b, err := NewS3(S3Config{
 		Endpoint:     e.endpoint,
 		Region:       rustfsSmokeRegion,
 		Bucket:       bucket,
-		Prefix:       "rustfs-smoke",
+		Prefix:       prefix,
 		Credentials:  e.creds,
 		UsePathStyle: true,
 		HTTPClient:   e.client,
@@ -228,8 +230,13 @@ func TestS3RustFSAllocatorSafetyTLSSmoke(t *testing.T) {
 
 	const name = "allocator.bin"
 	missingETag := Revision(`"00000000000000000000000000000000"`)
-	first := env.newBackend(t, bucket)
-	second := env.newBackend(t, bucket)
+	const prefix = "rustfs-smoke"
+	first := env.newBackendAt(t, bucket, prefix)
+	second := env.newBackendAt(t, bucket, prefix)
+	t.Cleanup(func() {
+		_ = second.Close()
+		_ = first.Close()
+	})
 
 	// (1) ReplaceIfVersion on a missing key is a conflict, and the key stays
 	// absent.
@@ -326,11 +333,12 @@ func TestS3RustFSAllocatorSafetyTLSSmoke(t *testing.T) {
 // the real RustFS endpoint over verified TLS. It provisions its own unique
 // bucket; open and reopen each build a fresh NewS3 instance over the same
 // bucket and prefix with the explicit static credentials and CA transport, so
-// the suite's durable reopen cases exercise real stored state.
+// the suite's durable reopen cases exercise real stored state. RunConformance
+// owns Close of every backend it opens, so no cleanup is registered here.
 func TestS3RustFSTLSConformance(t *testing.T) {
 	env := requireRustFSsmoke(t)
 	bucket := provisionRustFSsmokeBucket(t, env)
 	const prefix = "rustfs-conformance"
-	fresh := func(t *testing.T) Backend { return env.newBackend(t, bucket) }
+	fresh := func(t *testing.T) Backend { return env.newBackendAt(t, bucket, prefix) }
 	RunConformance(t, fresh, fresh)
 }
