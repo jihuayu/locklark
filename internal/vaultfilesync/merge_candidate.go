@@ -396,8 +396,9 @@ func BuildMergeCandidate(
 		return MergeCandidate{}, fmt.Errorf("%w: %w", ErrMergeCandidateVerify, vukErr)
 	}
 	defer clear(remoteVUK)
-	if subtle.ConstantTimeCompare(baseVUK, localVUK) != 1 ||
-		subtle.ConstantTimeCompare(baseVUK, remoteVUK) != 1 {
+	baseLocal := subtle.ConstantTimeCompare(baseVUK, localVUK)
+	baseRemote := subtle.ConstantTimeCompare(baseVUK, remoteVUK)
+	if baseLocal&baseRemote != 1 {
 		return MergeCandidate{}, fmt.Errorf("%w: B, L and R do not share one epoch VUK", ErrMergeCandidateVerify)
 	}
 	if err = mergeCandidateContextError(ctx); err != nil {
