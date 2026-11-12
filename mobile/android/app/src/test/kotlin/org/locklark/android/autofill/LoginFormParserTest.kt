@@ -386,4 +386,3 @@ private class HtmlInfoStub : ViewStructure.HtmlInfo() {
     override fun getTag(): String = "form"
     override fun toString(): String = "[synthetic html info]"
 }
-
