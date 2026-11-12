@@ -675,6 +675,13 @@ function routeWiped(value) {
 // Clipboard bytes travel only on the private pipe; only booleans are kept.
 const ROUTE_COPY_REVIEW_LABEL = "批准本次操作";
 const ROUTE_COPY_DISCLOSURE_LABEL = "批准本次字段披露";
+// The focus-preserving native inspect form shared by the default route
+// approval wait and the opt-in idle journey. It never raises or focuses the
+// native window.
+const ROUTE_LABEL_INSPECT = Object.freeze({
+  inspect: true,
+  preserve_focus: true,
+});
 // Read-only package read of the fixed popup document: the rendered detail is
 // compared against its own markup, so an element or text the product never
 // renders cannot pass as an approved detail. A route page can read its own
@@ -974,6 +981,9 @@ async function acceptRouteIdleExpiry(driver) {
     extensionTargets: targets,
     attachRoute: attach,
     closeAdapter,
+    browserKey,
+    labelInspect,
+    vaultRows,
   } = driver;
   const idle = { approvedDetail: false, liveObserved: false, wipeCompleted: false };
   routeIdleObservation = idle;
@@ -1073,7 +1083,7 @@ async function acceptRouteIdleExpiry(driver) {
     "Vault rows missing",
   );
   mark("route:idle-exact-row");
-  const rows = await action.evaluate(VAULT_ROWS);
+  const rows = await action.evaluate(vaultRows);
   assert(
     Array.isArray(rows) &&
       rows.length === 1 &&
@@ -1155,7 +1165,7 @@ async function acceptRouteIdleExpiry(driver) {
       );
       try {
         const control =
-          input([], true, ROUTE_LABEL_INSPECT).controls?.[
+          input([], true, labelInspect).controls?.[
             ROUTE_COPY_REVIEW_LABEL
           ];
         return control?.present === true && control?.showing === true;
@@ -1930,14 +1940,10 @@ try {
       };
       // Ready-label polling is read-only. It must never raise or focus the
       // native window: doing so can hide the route page behind the idle native
-      // window before any approval exists. The focus-preserving inspect form
-      // (same exact native title and executable supplied by `input`, no prefix
-      // form, empty action list) keeps the window where it is, exactly like
-      // the popup-stage absence probes.
-      const ROUTE_LABEL_INSPECT = Object.freeze({
-        inspect: true,
-        preserve_focus: true,
-      });
+      // window before any approval exists. The shared focus-preserving inspect
+      // form (same exact native title and executable supplied by `input`, no
+      // prefix form, empty action list) keeps the window where it is, exactly
+      // like the popup-stage absence probes.
       const approveLabel = async () => {
         await observeRouteState();
         try {
@@ -2316,6 +2322,9 @@ try {
         // Only the adapter's CDP disconnect; the stale tab itself is closed
         // by the one physical key.
         closeAdapter: (client) => client.close(),
+        browserKey,
+        labelInspect: ROUTE_LABEL_INSPECT,
+        vaultRows: VAULT_ROWS,
       });
     }
   }

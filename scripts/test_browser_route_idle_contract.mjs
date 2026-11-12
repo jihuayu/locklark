@@ -82,6 +82,14 @@ function idleJourney() {
   return SOURCE.slice(header, next);
 }
 
+// The executable helper only, without its comment header.
+function idleHelper() {
+  const start = SOURCE.indexOf("async function acceptRouteIdleExpiry(driver) {");
+  const next = SOURCE.indexOf("\nasync function eventually(", start);
+  assert.ok(start > 0 && next > start, "idle helper must be a top-level function");
+  return SOURCE.slice(start, next);
+}
+
 // Every needle must appear once, in order, inside `text`.
 function assertOrder(text, needles) {
   let previous = -1;
@@ -213,11 +221,152 @@ test("the default physical revoke stages stay present and precede the opt-in jou
     driver.slice(call),
     /^routeIdleObservation = await acceptRouteIdleExpiry\(\{\n\s+browser: context,\n\s+input,\n\s+fixture,\n\s+phase: mark,\n\s+eventually: wait,\n\s+openPopup: openActionPopup,\n\s+extensionTargets: targets,\n\s+attachRoute: attach,/,
   );
+  // The idle helper is module scope, so every outer-block local it uses is
+  // passed explicitly; the production callback stays the main try's local.
+  assert.match(
+    driver.slice(call),
+    /\n\s+closeAdapter: \(client\) => client\.close\(\),\n\s+browserKey,\n\s+labelInspect: ROUTE_LABEL_INSPECT,\n\s+vaultRows: VAULT_ROWS,\n\s+\}\);/,
+  );
   // The opt-in journey lives in its own function: the route driver mentions it
   // exactly once, in the guarded call, and never declares it.
   assert.equal(countMatches(driver, /acceptRouteIdleExpiry/g), 1);
   assert.doesNotMatch(driver, /function acceptRouteIdleExpiry/);
   assert.ok(SOURCE.includes("\nasync function acceptRouteIdleExpiry(driver) {\n"));
+});
+
+test("the idle helper takes every outer-block local from the driver", () => {
+  const body = idleHelper();
+  assert.match(
+    body,
+    /^  const \{\n\s+browser: context,\n\s+input,\n\s+fixture,\n\s+phase: mark,\n\s+eventually: wait,\n\s+openPopup: openActionPopup,\n\s+extensionTargets: targets,\n\s+attachRoute: attach,\n\s+closeAdapter,\n\s+browserKey,\n\s+labelInspect,\n\s+vaultRows,\n\s+\} = driver;/m,
+  );
+  // These names are block locals in the main try/route checkpoint and must
+  // not be resolved implicitly from the module-level helper.
+  assert.doesNotMatch(body, /\bROUTE_LABEL_INSPECT\b|\bVAULT_ROWS\b/);
+  assert.doesNotMatch(body, /\b(?:const|let|var|function)\s+browserKey\b/);
+  // The one physical stale-route key goes through the supplied callback.
+  assert.match(body, /browserKey\(ROUTE_IDLE_CLOSE_STALE, ROUTE_TITLE_PREFIX\);/);
+  // The local callback and the audited outer locals are passed explicitly at
+  // the actual production call site.
+  const call = SOURCE.indexOf("routeIdleObservation = await acceptRouteIdleExpiry({");
+  assert.ok(call > 0);
+  assert.match(
+    SOURCE.slice(call),
+    /\n\s+browserKey,\n\s+labelInspect: ROUTE_LABEL_INSPECT,\n\s+vaultRows: VAULT_ROWS,/,
+  );
+});
+
+test("the idle helper reaches the ready and visible gates, then invokes only the supplied browser key", async () => {
+  const staleRouteURL =
+    "chrome-extension://" + "a".repeat(32) + "/popup.html#route=" + "b".repeat(64);
+  const sourcePageURL = "https://login.locklark.test:8443/acceptance";
+  const closeKey = Object.freeze([{ key: "Control_L+w" }]);
+  const stop = new Error("stop after the injected browser key");
+  const events = [];
+  const keyCalls = [];
+  const evaluateCalls = [];
+  // The stale route is a real browser/CDP dependency only. Its two
+  // prerequisite reads answer like the production stale route: ready and the
+  // active tab; no other page expression is reached before the key.
+  const staleClient = {
+    evaluate: async (expression) => {
+      events.push("evaluate:" + expression);
+      evaluateCalls.push(expression);
+      if (expression === "document.readyState") return "complete";
+      if (
+        expression ===
+        'document.visibilityState === "visible" && document.hasFocus() === true'
+      )
+        return true;
+      throw new Error("Unexpected route evaluate: " + expression);
+    },
+    close: async () => {
+      events.push("closeAdapter");
+    },
+  };
+  const staleTarget = { id: "stale-route", url: staleRouteURL };
+  const sourcePage = { url: () => sourcePageURL };
+  const context = vm.createContext({
+    URL,
+    assert,
+    origin: sourcePageURL,
+    ROUTE_PAGE: /^chrome-extension:\/\/[a-p]{32}\/popup\.html#route=[a-f0-9]{64}$/,
+    ACTION_POPUP: /^chrome-extension:\/\/[a-p]{32}\/popup\.html$/,
+    ROUTE_TITLE_PREFIX: "Locklark",
+    ROUTE_IDLE_CLOSE_STALE: closeKey,
+    routeIdleObservation: null,
+    routeLifecycleObservation: null,
+    routeStatusTrace: null,
+  });
+  vm.runInContext(
+    idleHelper() + "\nthis.acceptRouteIdleExpiry = acceptRouteIdleExpiry;",
+    context,
+  );
+  // There is deliberately no browserKey global: the only one the helper can
+  // see is the callback on the driver.
+  assert.equal(vm.runInContext("typeof browserKey", context), "undefined");
+  const driver = {
+    browser: {
+      pages: () => [
+        { url: () => "chrome-extension://" + "a".repeat(32) + "/popup.html" },
+        sourcePage,
+      ],
+    },
+    input: () => {
+      throw new Error("input must not be reached before the key");
+    },
+    fixture: Object.freeze({ Title: "Synthetic title", SeedID: "synthetic-seed" }),
+    phase: (stage) => {
+      events.push("mark:" + stage);
+    },
+    eventually: async (check, message) => {
+      events.push("wait:" + message);
+      assert.equal(await check(), true, message);
+    },
+    openPopup: async () => {
+      throw new Error("popup must not be reached before the key");
+    },
+    extensionTargets: async () => [staleTarget],
+    attachRoute: async (target) => {
+      events.push("attach");
+      assert.equal(target, staleTarget);
+      return staleClient;
+    },
+    closeAdapter: (client) => client.close(),
+    browserKey: (actions, titlePrefix) => {
+      events.push("browserKey");
+      keyCalls.push([actions, titlePrefix]);
+      throw stop;
+    },
+    labelInspect: Object.freeze({ inspect: true, preserve_focus: true }),
+    vaultRows: "synthetic-vault-rows",
+  };
+  // The synthetic wait stops at the first key, so the 120-second journey is
+  // never run here.
+  await assert.rejects(
+    context.acceptRouteIdleExpiry(driver),
+    (error) => error === stop,
+  );
+  assert.equal(vm.runInContext("typeof browserKey", context), "undefined");
+  // Both prerequisite reads ran before the mark, the adapter disconnect and
+  // the one physical key; the key callback is the supplied one.
+  assert.deepEqual(evaluateCalls, [
+    "document.readyState",
+    'document.visibilityState === "visible" && document.hasFocus() === true',
+  ]);
+  assert.deepEqual(events, [
+    "attach",
+    "wait:Route page did not load",
+    "evaluate:document.readyState",
+    'evaluate:document.visibilityState === "visible" && document.hasFocus() === true',
+    "mark:route:idle-close-stale",
+    "closeAdapter",
+    "browserKey",
+    "closeAdapter",
+  ]);
+  assert.equal(keyCalls.length, 1);
+  assert.equal(keyCalls[0][0], closeKey);
+  assert.equal(keyCalls[0][1], "Locklark");
 });
 
 test("the idle journey closes only the stale route tab with one physical key", () => {
@@ -276,13 +425,13 @@ test("the idle journey reuses the ordinary popup, match, row and approval path",
     'await action.click("#refresh");',
     "个当前网站",
     'await action.click(\'#filter-tabs [data-filter="all"]\');',
-    "const rows = await action.evaluate(VAULT_ROWS);",
+    "const rows = await action.evaluate(vaultRows);",
     "rows[0].id === fixture.SeedID &&",
     "await action.click(rowSelector);",
     "Route page did not open",
     "Route page must be unique",
     'mark("route:idle-native-label")',
-    "ROUTE_LABEL_INSPECT",
+    "labelInspect",
     'mark("route:idle-native-approve")',
     "input([{ click_label: ROUTE_COPY_REVIEW_LABEL }]);",
     'mark("route:idle-approved")',
