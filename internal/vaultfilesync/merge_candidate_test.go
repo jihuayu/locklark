@@ -153,11 +153,13 @@ func mergeCandidateUseRemote(t *testing.T, f *fixture, remote []byte) vaultfileb
 		t.Fatalf("ReplaceIfVersion: %v", err)
 	}
 	f.bytes = remote
+	// Re-read only for the opaque revision, but return the exact bytes that
+	// were replaced so callers can bind fixture state to the served content.
 	res, err := f.remote.Dir.Read(context.Background(), remoteName)
 	if err != nil {
 		t.Fatalf("read replaced remote: %v", err)
 	}
-	return vaultfilebackend.ReadResult{Bytes: bytes.Clone(res.Bytes), Revision: res.Revision}
+	return vaultfilebackend.ReadResult{Bytes: bytes.Clone(remote), Revision: res.Revision}
 }
 
 // mergeCandidateJournalWithState initializes a real journal with base/local and
