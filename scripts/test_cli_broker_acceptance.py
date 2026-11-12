@@ -509,7 +509,7 @@ class UnlockPlanTests(unittest.TestCase):
         """The pre-split nine-action sequence, written independently here."""
         return [
             {"click_label": "金库文件"},
-            {"key": "Control_L+a"},
+            {"key": "Super_L+a"},
             {"text": str(instance.fixture.vault)},
             {"click_label": "主密码"},
             {"text": self.MASTER},
@@ -523,7 +523,7 @@ class UnlockPlanTests(unittest.TestCase):
         return [
             [
                 {"click_label": "金库文件"},
-                {"key": "Control_L+a"},
+                {"key": "Super_L+a"},
                 {"text": str(instance.fixture.vault)},
             ],
             [{"click_label": "主密码"}, {"text": self.MASTER}],

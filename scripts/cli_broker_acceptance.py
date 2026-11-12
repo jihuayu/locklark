@@ -58,7 +58,7 @@ def unlock_plans(vault, master, secret):
     whole unlock flow; a failing plan still stops the sequence.
     """
     return (
-        ({"click_label": "金库文件"}, {"key": "Control_L+a"}, {"text": str(vault)}),
+        ({"click_label": "金库文件"}, {"key": "Super_L+a"}, {"text": str(vault)}),
         ({"click_label": "主密码"}, {"text": master}),
         ({"click_label": "Secret Key"}, {"text": secret}),
         ({"click_label": UNLOCK_LABEL},),
