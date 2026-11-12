@@ -25,10 +25,32 @@ import { acceptPopupVault } from "./browser_popup_vault_acceptance.mjs";
 import {
   acceptSharedClipboard,
   prepareSharedEnvironment,
+  PrivateClipboard,
 } from "./browser_shared_clipboard_acceptance.mjs";
 import { acceptCheckoutFrames, checkoutTopHTML, checkoutCardHTML, checkoutRouteCase } from "./browser_checkout_acceptance.mjs";
-
 const checkoutFrames = process.env.LOCKLARK_TEST_CHECKOUT_FRAMES === "1";
+// Explicit opt-in: a QuickFill=false action row opens one persistent route tab
+// and its native per-operation approval, instead of the long default journeys.
+const routeDetailRead = process.env.LOCKLARK_TEST_ROUTE_DETAIL_READ === "1";
+// Route pages are the fixed extension popup document plus exactly one 64-hex
+// token fragment. Action popups are that same document with no fragment.
+const ROUTE_PAGE = /^chrome-extension:\/\/[a-p]{32}\/popup\.html#route=[a-f0-9]{64}$/;
+const ACTION_POPUP = /^chrome-extension:\/\/[a-p]{32}\/popup\.html$/;
+// The route checkpoint is the only requested journey in this mode, so every
+// mode that would change what pairing, fill or checkout mean is refused before
+// anything is launched.
+function routeModeCompatible() {
+  const off = (name) => !process.env[name];
+  return (
+    off("LOCKLARK_TEST_SHARED_CLIPBOARD") &&
+    off("LOCKLARK_TEST_POPUP_VAULT") &&
+    off("LOCKLARK_TEST_CHECKOUT_FRAMES") &&
+    off("LOCKLARK_TEST_BROWSER_PARITY") &&
+    off("LOCKLARK_TEST_FAILURE_STAGE") &&
+    (process.env.LOCKLARK_TEST_BROWSER === undefined ||
+      process.env.LOCKLARK_TEST_BROWSER === "chromium")
+  );
+}
 const POPUP_CLOSED = ["Popup closed", "Popup CDP closed", "Popup CDP timed out"];
 function popupClosed(error) {
   return POPUP_CLOSED.includes(error?.message);
@@ -49,6 +71,10 @@ const browserName = process.env.LOCKLARK_TEST_BROWSER === "edge" ? "edge" : "chr
 const browserExecutable = process.env.LOCKLARK_TEST_BROWSER_EXECUTABLE;
 if (browserName === "edge")
   assert(browserExecutable && browserExecutable.startsWith("/"), "Edge requires an explicit absolute executable path");
+if (routeDetailRead) {
+  assert(routeModeCompatible(), "Route detail mode is incompatible");
+  assert(browserName === "chromium", "Route detail mode requires Chromium");
+}
 if (register)
   assert(existsSync(register), "LOCKLARK_BROWSER_REGISTER must name a built executable");
 assert(
@@ -73,7 +99,190 @@ const sharedEnvironment =
 const diagnostics = mkdtempSync(join(state, "diagnostics-"));
 let stage = "fixture",
   lastPopup = null,
+  lastRouteObservation = null,
+  routeAfterPopupClose = null,
+  routeTargetAfterPopupClose = null,
+  routeObservationHistory = [],
   nativeInput = null;
+// Diagnostics only: keep at most ROUTE_HISTORY_LIMIT sanitized observations,
+// appended only when one of the four fields actually changes, so a failure
+// can show whether the route page ever reached locked/vault/detail first.
+const ROUTE_HISTORY_LIMIT = 8;
+function recordRouteObservation(observation) {
+  const last = routeObservationHistory[routeObservationHistory.length - 1];
+  if (
+    last &&
+    last.view === observation.view &&
+    last.detailShown === observation.detailShown &&
+    last.titleMatchesFixture === observation.titleMatchesFixture &&
+    last.statusKind === observation.statusKind
+  )
+    return;
+  routeObservationHistory = [
+    ...routeObservationHistory,
+    observation,
+  ].slice(-ROUTE_HISTORY_LIMIT);
+}
+// Route lifecycle diagnostics. From the moment the exact route target is
+// found, one best-effort websocket to that target's own
+// webSocketDebuggerUrl (a direct page-target session: no Target.* usage, no
+// invented session ids, no page code) records which real Page lifecycle
+// events its main frame received. A route-detail failure can then tell "the
+// route document was reloaded, navigated or detached" apart from "the same
+// document stayed and only the UI differed". Only main-frame events count:
+// Page.frameNavigated with no parent frame is the root document (and
+// re-identifies the main frame after a navigation),
+// Page.frameRequestedNavigation proves a not-yet-committed main-frame
+// navigation, and other events are matched transiently against
+// Page.getFrameTree's main-frame id. The retained record holds only fixed
+// booleans and capped per-kind counts; frame and loader ids live only in this
+// closure. The socket only acknowledges Page.enable (the captured page keeps
+// running; intake is never gated on a reply) and stays open until the
+// checkpoint's finally path closes it. Every CDP failure is swallowed.
+const ROUTE_LIFECYCLE_EVENTS = [
+  "frameStartedLoading",
+  "frameStoppedLoading",
+  "frameNavigated",
+  "frameRequestedNavigation",
+  "navigatedWithinDocument",
+  "frameDetached",
+];
+const ROUTE_LIFECYCLE_LIMIT = 16;
+let routeLifecycleObservation = null;
+// Per-observation connection state (main-frame id, socket). It is reachable
+// both from the event handlers and from the checkpoint's finally path, and is
+// cleared on close. Nothing in it is ever reported.
+let routeLifecycleState = null;
+// Event method and params to the transient main-frame id, or an explicit
+// undefined for "not a main-frame event".
+function routeLifecycleFrame(method, params, mainFrame) {
+  if (
+    method === "Page.frameNavigated" &&
+    params?.frame?.parentId === undefined &&
+    typeof params.frame?.id === "string"
+  )
+    return params.frame.id;
+  return mainFrame !== undefined && params?.frameId === mainFrame
+    ? mainFrame
+    : undefined;
+}
+// Fixed allowlisted shape only: unknown events, extra keys and non-boolean
+// values are dropped, so malformed input can never widen what is reported.
+function sanitizeRouteLifecycle(value) {
+  const counts = value?.eventCounts;
+  return {
+    enabled: value?.enabled === true,
+    mainFrame: value?.mainFrame === true,
+    loadingStarted: value?.loadingStarted === true,
+    loadingStopped: value?.loadingStopped === true,
+    navigated: value?.navigated === true,
+    navigationRequested: value?.navigationRequested === true,
+    sameDocumentNavigation: value?.sameDocumentNavigation === true,
+    mainFrameDetached: value?.mainFrameDetached === true,
+    eventCounts: Object.fromEntries(
+      ROUTE_LIFECYCLE_EVENTS.map((kind) => [
+        kind,
+        Number.isInteger(counts?.[kind]) && counts[kind] >= 0
+          ? Math.min(counts[kind], ROUTE_LIFECYCLE_LIMIT)
+          : 0,
+      ]),
+    ),
+  };
+}
+// One fixed event kind of the main frame; the record never exceeds
+// ROUTE_LIFECYCLE_LIMIT counted events in total.
+function recordRouteLifecycle(kind) {
+  const current = sanitizeRouteLifecycle(routeLifecycleObservation);
+  if (!ROUTE_LIFECYCLE_EVENTS.includes(kind)) return;
+  const total = Object.values(current.eventCounts).reduce(
+    (sum, count) => sum + count,
+    0,
+  );
+  if (total >= ROUTE_LIFECYCLE_LIMIT) return;
+  routeLifecycleObservation = sanitizeRouteLifecycle({
+    ...current,
+    mainFrame: true,
+    loadingStarted: current.loadingStarted || kind === "frameStartedLoading",
+    loadingStopped: current.loadingStopped || kind === "frameStoppedLoading",
+    navigated: current.navigated || kind === "frameNavigated",
+    navigationRequested:
+      current.navigationRequested || kind === "frameRequestedNavigation",
+    sameDocumentNavigation:
+      current.sameDocumentNavigation || kind === "navigatedWithinDocument",
+    mainFrameDetached: current.mainFrameDetached || kind === "frameDetached",
+    eventCounts: { ...current.eventCounts, [kind]: current.eventCounts[kind] + 1 },
+  });
+}
+function closeRouteLifecycle() {
+  const state = routeLifecycleState;
+  routeLifecycleState = null;
+  try {
+    if (state) state.ws.close();
+  } catch {}
+}
+// Best effort only: the caller never awaits it, and any failure leaves the
+// record as it was. Exactly two fixed, read-only commands go out on ordinary
+// request ids; page events are counted regardless of when (or whether) their
+// replies arrive.
+function observeRouteLifecycle(target) {
+  try {
+    if (typeof target?.webSocketDebuggerUrl !== "string") return;
+    const state = {
+      ws: new WebSocket(target.webSocketDebuggerUrl),
+      // Transient only: the main frame's id for this observation.
+      mainFrame: undefined,
+    };
+    routeLifecycleState = state;
+    const { ws } = state;
+    ws.addEventListener("message", (event) => {
+      let message;
+      try {
+        message = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      // Commands must never be mistaken for page events.
+      if (typeof message?.method === "string") {
+        if (!message.method.startsWith("Page.")) return;
+        const frame = routeLifecycleFrame(
+          message.method,
+          message.params,
+          state.mainFrame,
+        );
+        if (frame === undefined) return;
+        // A main-frame navigation (re-)identifies the main frame; any other
+        // main-frame event confirms the one already known.
+        if (typeof frame === "string") state.mainFrame = frame;
+        recordRouteLifecycle(message.method.slice("Page.".length));
+        return;
+      }
+      if (message?.id === 1) {
+        routeLifecycleObservation = {
+          ...sanitizeRouteLifecycle(routeLifecycleObservation),
+          enabled: true,
+        };
+        return;
+      }
+      if (message?.id === 2) {
+        const main = message.result?.frameTree?.frame?.id;
+        if (typeof main === "string" && state.mainFrame === undefined) {
+          state.mainFrame = main;
+          routeLifecycleObservation = {
+            ...sanitizeRouteLifecycle(routeLifecycleObservation),
+            mainFrame: true,
+          };
+        }
+      }
+    });
+    ws.addEventListener("error", () => {});
+    ws.addEventListener("open", () => {
+      try {
+        ws.send(JSON.stringify({ id: 1, method: "Page.enable" }));
+        ws.send(JSON.stringify({ id: 2, method: "Page.getFrameTree" }));
+      } catch {}
+    });
+  } catch {}
+}
 let privacyValues = [];
 let observedFixture = null;
 function popupStatusKind(value) {
@@ -94,6 +303,235 @@ function popupStatusKind(value) {
   if (text.includes("Watchtower")) return "watchtower";
   if (text.includes("已填充") || text.includes("填充完成")) return "filled";
   return "other";
+}
+// Read-only observation of the attached route page for the failure report.
+// Only fixed enums and booleans ever leave the page: never text, titles,
+// field values, URLs, tokens, ids or hidden application state.
+const ROUTE_VIEWS = ["locked", "vault", "detail", "closed", "editor"];
+const ROUTE_STATUS_KINDS = [
+  "native-pending",
+  "claim-failed",
+  "route-revoked",
+  "other",
+];
+const ROUTE_CLAIM_PENDING_STATUS = "正在请求桌面审批…";
+const ROUTE_CLAIM_FAILED_STATUS = "无法打开此条目";
+const ROUTE_REVOKED_STATUS = "条目已失效，请重新从金库打开";
+function sanitizeRouteObservation(value) {
+  return {
+    view: ROUTE_VIEWS.includes(value?.view) ? value.view : "other",
+    detailShown: value?.detailShown === true,
+    titleMatchesFixture: value?.titleMatchesFixture === true,
+    statusKind: ROUTE_STATUS_KINDS.includes(value?.statusKind)
+      ? value.statusKind
+      : "other",
+  };
+}
+// Visible DOM only: body[data-view], the detail section, its heading and the
+// status line. The fixture comparison and the status categorisation happen
+// inside the page; only their fixed outcomes are returned.
+function routeStateProbe(title) {
+  return `(()=>{
+    const view=(document.body&&document.body.dataset.view)||'';
+    const detail=document.querySelector('#detail-view');
+    const heading=document.querySelector('#detail-title');
+    const status=document.querySelector('#status');
+    const statusText=status?String(status.textContent||'').trim():'';
+    return {
+      view:${JSON.stringify(ROUTE_VIEWS)}.includes(view)?view:'other',
+      detailShown:!!detail&&!detail.hidden,
+      titleMatchesFixture:!!heading&&String(heading.textContent||'')===${JSON.stringify(title)},
+      statusKind:statusText===${JSON.stringify(ROUTE_CLAIM_PENDING_STATUS)}?'native-pending':statusText===${JSON.stringify(ROUTE_CLAIM_FAILED_STATUS)}?'claim-failed':statusText===${JSON.stringify(ROUTE_REVOKED_STATUS)}?'route-revoked':'other'
+    };
+  })()`;
+}
+// Route status trace. A visible-DOM MutationObserver on the exact route page
+// records each observable status/state change from the moment the target is
+// discovered, so a status written and overwritten before the next poll is not
+// lost. The observer is installed immediately and holds no element references:
+// every relevant mutation resolves the current #status, #detail-view and
+// #detail-title, so nodes inserted after discovery (body parsing can follow
+// target discovery) are still traced. Only records owned by the live #status
+// element classify a status; unrelated page text never touches the trace. Each
+// status record is classified here, in the page, against only the fixed
+// literals below, and the added node's text is never stored. The trace keeps
+// at most ROUTE_STATUS_TRACE_LIMIT entries, dropping consecutive repeats, of
+// fixed view/status/detail/title enums only.
+const ROUTE_STATUS_TRACE_LIMIT = 8;
+const ROUTE_STATUS_TRACE_CHANNELS = ["status", "view", "detailShown", "titleKind"];
+const ROUTE_TITLE_KINDS = ["fixture", "other"];
+const ROUTE_CLOSED_STATUS = "已关闭此条目";
+// Returns the page-side expression that installs the observer and exposes one
+// read-only reader plus one stop function; both diagnostic hooks are removed
+// by the stop function.
+function routeStatusTraceProbe(title) {
+  return `(()=>{
+    if(globalThis.__locklarkRouteStatusTraceRead)return true;
+    const LIMIT=${ROUTE_STATUS_TRACE_LIMIT};
+    const VIEWS=${JSON.stringify(ROUTE_VIEWS)};
+    const FIXTURE_TITLE=${JSON.stringify(title)};
+    const kindOf=(text)=>text===${JSON.stringify(ROUTE_CLAIM_PENDING_STATUS)}?'native-pending':text===${JSON.stringify(ROUTE_CLAIM_FAILED_STATUS)}?'claim-failed':text===${JSON.stringify(ROUTE_REVOKED_STATUS)}?'route-revoked':text===${JSON.stringify(ROUTE_CLOSED_STATUS)}?'closed':text?'other':'empty';
+    const entries=[];
+    let last=null,observing=null;
+    const push=(channel,value)=>{
+      if(last&&last.channel===channel&&last.value===value)return;
+      last={channel,value};
+      if(entries.length<LIMIT)entries.push(last);
+    };
+    const q=(selector)=>document.querySelector(selector);
+    const toArray=(list)=>list?Array.prototype.slice.call(list):[];
+    const view=()=>VIEWS.includes(document.body?.dataset?.view)?document.body.dataset.view:'other';
+    const shown=()=>{const el=q('#detail-view');return el?el.hidden!==true:false;};
+    const titleKind=()=>{const el=q('#detail-title');return el?(String(el.textContent||'')===FIXTURE_TITLE?'fixture':'other'):'other';};
+    const statusKind=(statusEl)=>statusEl?kindOf(String(statusEl.textContent||'').trim()):'other';
+    // Seed state without inventing a status: absence is not an empty status,
+    // and the first real #status write must stay the first status event.
+    const sync=()=>{const statusEl=q('#status');if(statusEl)push('status',statusKind(statusEl));push('view',view());push('detailShown',shown());push('titleKind',titleKind());};
+    // A childList record wholly inside the live #status element (or one that
+    // inserted it) is one textContent/append write. Its own added text nodes
+    // are classified in order and a write leaving it without text as 'empty',
+    // so separate writes batched into one callback keep every transition.
+    // Only the mounted #status subtree or a newly inserted #status element
+    // reaches this path; unrelated nodes and text are never read.
+    const statusWrite=(statusEl,record)=>{
+      if(record.target!==statusEl)return false;
+      const added=record.addedNodes?[...record.addedNodes]:[],removed=record.removedNodes?[...record.removedNodes]:[];
+      const texts=[];
+      for(const node of added)if(node?.nodeType===3&&String(node.data||'').trim())texts.push(String(node.data||'').trim());
+      if(texts.length)for(const text of texts)push('status',kindOf(text));
+      else if(added.length||removed.length)push('status',kindOf(String(statusEl.textContent||'').trim()));
+      return true;
+    };
+    const handle=(record)=>{
+      const statusEl=q('#status');
+      if(record.type==='characterData'){
+        // Only text owned by the live #status element is a status change.
+        if(statusEl&&statusEl.contains?.(record.target))push('status',kindOf(String(record.target.data||'').trim()));
+        return;
+      }
+      if(record.type==='attributes'){
+        if(record.target===document.body)push('view',view());
+        return;
+      }
+      if(!record.addedNodes&&!record.removedNodes)return;
+      const current=q('#status');
+      if(current&&current!==seenStatus)detectStatus();
+      const live=q('#status');
+      if(live&&(live.contains?.(record.target)&&statusWrite(live,record)))return;
+      for(const node of record.addedNodes){
+        if(node instanceof Element&&node.matches?.('#detail-view'))push('detailShown',node.hidden!==true);
+        if(node instanceof Element&&node.matches?.('#detail-title, #detail-title *'))push('titleKind',titleKind());
+      }
+    };
+    const observer=new MutationObserver((records)=>{for(const record of records)handle(record);});
+    const start=()=>{
+      if(observing||!document.body)return;
+      observing=document.body;
+      observer.observe(observing,{attributes:true,attributeFilter:['data-view','hidden'],childList:true,subtree:true,characterData:true});
+      sync();
+    };
+    // Route target discovery can precede body parsing or the #status node, so
+    // any mutation can be the one that makes #status live: record it then.
+    let seenStatus=null;
+    const detectStatus=()=>{
+      const statusEl=q('#status');
+      if(!statusEl||statusEl===seenStatus)return;
+      seenStatus=statusEl;
+      push('status',statusKind(statusEl));
+    };
+    start();
+    detectStatus();
+    for(const type of['DOMContentLoaded','pageshow'])globalThis.addEventListener?.(type,start,{once:true});
+    globalThis.__locklarkRouteStatusTraceRead=()=>JSON.stringify(entries);
+    globalThis.__locklarkRouteStatusTraceStop=()=>{
+      observer.disconnect();
+      for(const type of['DOMContentLoaded','pageshow'])globalThis.removeEventListener?.(type,start);
+      delete globalThis.__locklarkRouteStatusTraceRead;
+      delete globalThis.__locklarkRouteStatusTraceStop;
+      return true;
+    };
+    return true;
+  })()`;
+}
+// Sanitized again at the boundary: unknown channels, enums or shapes are
+// dropped and the entry cap is enforced here as well.
+function sanitizeRouteStatusTrace(value) {
+  if (!Array.isArray(value)) return null;
+  const trace = [];
+  for (const entry of value.slice(0, ROUTE_STATUS_TRACE_LIMIT)) {
+    const channel = entry?.channel;
+    const allowed =
+      channel === "status"
+        ? ROUTE_STATUS_KINDS.concat("closed", "empty")
+        : channel === "view"
+          ? ROUTE_VIEWS.concat("other")
+          : channel === "titleKind"
+            ? ROUTE_TITLE_KINDS
+            : channel === "detailShown"
+              ? [true, false]
+              : [];
+    if (!ROUTE_STATUS_TRACE_CHANNELS.includes(channel)) continue;
+    if (!allowed.includes(entry?.value)) continue;
+    trace.push({ channel, value: entry.value });
+  }
+  return trace;
+}
+let routeStatusTrace = null;
+let routeStatusTraceInstalled = false;
+// Read-only: one evaluation over CDP, no wait and no gate.
+async function readRouteStatusTrace(connection) {
+  try {
+    routeStatusTrace = sanitizeRouteStatusTrace(
+      JSON.parse(
+        await connection.evaluate(
+          "globalThis.__locklarkRouteStatusTraceRead?.() ?? '[]'",
+        ),
+      ),
+    );
+  } catch {}
+}
+async function refreshRouteStatusTrace(attach, target, uninstall = false) {
+  if (!routeStatusTraceInstalled) return;
+  let connection = null;
+  try {
+    connection = await attach(target);
+    await readRouteStatusTrace(connection);
+    if (!uninstall) return;
+    // Stop observing in the page: disconnect and remove both diagnostic hooks.
+    await connection.evaluate(
+      "globalThis.__locklarkRouteStatusTraceStop?.() ?? false",
+    );
+  } catch {} finally {
+    try {
+      await connection?.close();
+    } catch {}
+  }
+}
+// Route field-copy acceptance. The concealled password row's own Copy control
+// is clicked physically; the worker then re-reads the value under the same
+// native V2 approval, so either the field-disclosure review appears directly
+// (native clipboard path) or one ordinary item-get review for this exact item
+// precedes it (legacy path; only the exact route approval label is accepted).
+// Clipboard bytes travel only on the private pipe; only booleans are kept.
+const ROUTE_COPY_FIELD_SELECTOR =
+  '[data-field-id="password"] [data-action="copy-field"]';
+const ROUTE_COPY_REVIEW_LABEL = "批准本次操作";
+const ROUTE_COPY_DISCLOSURE_LABEL = "批准本次字段披露";
+// Both native-lease success lines and the legacy manual-copy success line
+// (popup.js writeClipboard -> copiedFeedback). Pending, refusal, unknown
+// outcome and missing feedback are never accepted.
+const ROUTE_COPY_FEEDBACK = [
+  "已启用自动清理",
+  "自动清理已关闭",
+  "已复制；浏览器无法保证自动清除，请按需手动清理",
+];
+// The concealed row's revealed value is masked, never a copy of the secret.
+function routePasswordRowProbe(password) {
+  return `(()=>{
+    const row=document.querySelector(${JSON.stringify(ROUTE_COPY_FIELD_SELECTOR.split(" ")[0])});
+    const value=row?row.querySelector(".field-value"):null;
+    return {masked:!!value&&/^[\u2022\u25cf*]+$/.test(String(value.textContent||"").trim()),leaked:!!document.body&&String(document.body.innerText).includes(${JSON.stringify(password)})};
+  })()`;
 }
 function phase(value) {
   stage = value;
@@ -382,6 +820,8 @@ try {
             type, key: "a", code: "KeyA", modifiers: 2, windowsVirtualKeyCode: 65,
           });
       },
+      // Focus the attached page itself through CDP; no other side effect.
+      bringToFront: () => call("Page.bringToFront"),
       targetId: target.id,
       close: () => ws.close(),
       dismiss: async () => {
@@ -514,6 +954,427 @@ try {
     );
     return popup;
   }
+  // Rendered vault rows only: identity, title and hit-test visibility. Field
+  // values, revisions and item URLs are never read here.
+  const VAULT_ROWS =
+    "[...document.querySelectorAll('#vault-list .vault-item')]" +
+    ".map(row=>({id:row.dataset.itemId||''," +
+    "title:row.querySelector('.vault-item-title')?.textContent??null," +
+    "visible:row.getClientRects().length>0}))";
+  // The route detail surface as rendered: view, visible title, concealed
+  // password control, and one boolean secret-substring check. Page text,
+  // values, identity, URL and token never leave the page.
+  function routeSurfaceProbe(title, password) {
+    return `(()=>{
+      const detail=document.querySelector('#detail-view');
+      const heading=document.querySelector('#detail-title');
+      const fields=document.querySelector('#detail-fields');
+      const values=fields?[...fields.querySelectorAll('.field-value')]:[];
+      const concealed=!!(
+        fields?.querySelector('[data-field-type="password"],[data-field-type="concealed"],.concealed,[data-concealed="true"],input[type="password"]') ||
+        values.some(value=>/^[\u2022\u25cf*]+$/.test(String(value.textContent||'').trim()))
+      );
+      return {
+        view:document.body?.dataset?.view||'',
+        detailShown:!!detail&&!detail.hidden,
+        title:heading?heading.textContent:null,
+        concealed,
+        passwordRendered:document.body?String(document.body.innerText).includes(${JSON.stringify(password)}):true
+      };
+    })()`;
+  }
+  // Fixed findings only; never text, ids, revisions, URLs or tokens.
+  function verifyRouteSurface(surface, title) {
+    if (surface?.detailShown !== true) return "route-detail-view-missing";
+    if (surface.view !== "detail") return "route-detail-view-missing";
+    if (surface.title !== title) return "route-detail-title-mismatch";
+    if (surface.concealed !== true) return "route-concealed-control-missing";
+    if (surface.passwordRendered !== false) return "route-password-rendered";
+    return "";
+  }
+  async function acceptRouteDetailRead(driver) {
+    const {
+      browser: context,
+      fixture,
+      phase: mark,
+      eventually: wait,
+      openPopup: openActionPopup,
+      extensionTargets: targets,
+      attachRoute: attach,
+    } = driver;
+    assert(
+      typeof fixture.SeedID === "string" && /^[a-f0-9]{32}$/.test(fixture.SeedID),
+      "Synthetic seed item identity missing",
+    );
+    assert(
+      typeof fixture.Title === "string" && fixture.Title.length > 0,
+      "Synthetic fixture title missing",
+    );
+    try {
+    mark("route:popup");
+    const action = await openActionPopup();
+    // The ready control is the vault search field, not the refresh match.
+    // Waiting on #refresh here would consume the wait before the ordinary
+    // match step below, even though the popup already rendered vault status.
+    await wait(
+      async () => (await action.disabled("#search-input")) === false,
+      "Paired popup not ready",
+    );
+    // The worker binds a route only to a source document captured by the
+    // ordinary match the user starts from this popup. One physical refresh
+    // click is that user action; its rendered status proves the capture.
+    mark("route:match");
+    await action.click("#refresh");
+    await wait(
+      async () =>
+        String(await action.text("#status")).includes("个当前网站") &&
+        (await action.disabled("#refresh")) === false,
+      "Exact-origin match missing",
+    );
+    mark("route:vault-open");
+    await action.click('#filter-tabs [data-filter="all"]');
+    await wait(
+      async () =>
+        (await action.evaluate("document.readyState")) === "complete" &&
+        (await action.count("#vault-list .vault-item")) > 0,
+      "Vault rows missing",
+    );
+    mark("route:exact-row");
+    // Exactly one rendered vault row, the fixture's seed item, its title.
+    const rows = await action.evaluate(VAULT_ROWS);
+    assert(
+      Array.isArray(rows) &&
+        rows.length === 1 &&
+        rows[0].id === fixture.SeedID &&
+        rows[0].title === fixture.Title &&
+        rows[0].visible === true,
+      "Exact synthetic vault row missing",
+    );
+    const rowSelector =
+      '#vault-list .vault-item[data-item-id="' + fixture.SeedID + '"]';
+    const before = new Set((await targets()).map((target) => target.id));
+    const pagesBefore = new Set(
+      context
+        .pages()
+        .filter((entry) => !/^chrome-extension:\/\//.test(entry.url())),
+    );
+    mark("route:row-click");
+    // Exactly one real CDP mouse press/release through the popup wrapper.
+    await action.click(rowSelector);
+    mark("route:page-opened");
+    let opened;
+    await wait(async () => {
+      const candidates = (await targets()).filter(
+        (target) =>
+          !before.has(target.id) &&
+          ROUTE_PAGE.test(target.url) &&
+          (target.type === "page" || target.type === "tab"),
+      );
+      if (candidates.length > 1) throw Error("Route page must be unique");
+      opened = candidates[0];
+      return !!opened;
+    }, "Route page did not open");
+    const routeTarget = opened.id;
+    assert.equal(
+      (await targets()).filter((target) => ROUTE_PAGE.test(target.url)).length,
+      1,
+      "Route page must be unique",
+    );
+    // Diagnostics only: from this exact target's discovery on, keep a bounded
+    // main-frame lifecycle record across the popup-close waits and the route
+    // attachment. It adds no wait, gate or behaviour, and any failure stays
+    // swallowed; the socket is closed in this checkpoint's finally path.
+    observeRouteLifecycle(opened);
+    // Diagnostics only: take one best-effort visible-DOM snapshot right after
+    // the exact route target is found and verified, before any popup-closed
+    // wait, so a later failure can distinguish a route that was still locked
+    // from one that was already closed at first sight. It uses a short-lived
+    // CDP connection with no added wait or timeout, and any failure is
+    // swallowed so no acceptance step can fail or skip because of it.
+    try {
+      // Diagnostics only: install the visible-DOM status trace on this exact
+      // route document in this same earliest connection, before any
+      // popup-closed wait, so a fast overwrite or disconnect is still recorded.
+      const initial = await attach(opened);
+      try {
+        await initial.evaluate(routeStatusTraceProbe(fixture.Title));
+        routeStatusTraceInstalled = true;
+        await readRouteStatusTrace(initial);
+        lastRouteObservation = sanitizeRouteObservation(
+          await initial.evaluate(routeStateProbe(fixture.Title)),
+        );
+        recordRouteObservation(lastRouteObservation);
+      } finally {
+        try {
+          await initial.close();
+        } catch {}
+      }
+    } catch {}
+    mark("route:popup-closed");
+    await wait(async () => !(await action.ready()), "Action popup stayed open");
+    await wait(
+      async () =>
+        !(await targets()).some((target) => ACTION_POPUP.test(target.url)),
+      "Action popup target stayed open",
+    );
+    // Diagnostics only: one best-effort visible-DOM snapshot of the same exact
+    // route target right after both popup-closed waits, before the pagesAfter
+    // check and the route attachment, so a route-detail failure can tell
+    // whether the page was still locked or already closed at that point. No
+    // added wait or timeout; any failure is swallowed so no acceptance step
+    // can fail or skip because of it. It is stored separately from
+    // lastRouteObservation and the bounded history.
+    try {
+      const afterClose = await attach(opened);
+      try {
+        await readRouteStatusTrace(afterClose);
+        routeAfterPopupClose = sanitizeRouteObservation(
+          await afterClose.evaluate(routeStateProbe(fixture.Title)),
+        );
+      } finally {
+        try {
+          await afterClose.close();
+        } catch {}
+      }
+    } catch {}
+    // Diagnostics only: the same targets() list, read once, answers whether
+    // the exact captured route target still exists and still carries the route
+    // URL at this checkpoint. Only these two fixed booleans are kept; any
+    // failure leaves the checkpoint absent and cannot affect acceptance.
+    try {
+      const live = await targets();
+      const route = live.find((target) => target.id === routeTarget);
+      routeTargetAfterPopupClose = {
+        routeTargetExists: !!route,
+        routeTargetStillRoute: !!route && ROUTE_PAGE.test(route.url),
+      };
+    } catch {}
+    // The route tab is the only new browser page: every non-extension page
+    // present now must be one of the controlled-login pages seen before.
+    const pagesAfter = context
+      .pages()
+      .filter((entry) => !/^chrome-extension:\/\//.test(entry.url()));
+    assert(
+      pagesAfter.length === pagesBefore.size &&
+        pagesAfter.every((entry) => pagesBefore.has(entry)),
+      "Unexpected page opened",
+    );
+    mark("route:attached");
+    const route = await attach(opened);
+    try {
+      await wait(
+        async () =>
+          (await route.evaluate("document.readyState")) === "complete",
+        "Route page did not load",
+      );
+      // The route claim starts the same native V2 item-get review the action
+      // popup would have used, so the real per-operation approval appears only
+      // after this tab exists. A missing window/label is retried inside the
+      // bounded wait; no inspect output is retained or logged.
+      mark("route:native-label");
+      // Read-only visible-DOM observation refreshed on every bounded attempt,
+      // so a failure can say whether this page never left startup, closed
+      // after a rejected claim, or reached its detail. It never reads a
+      // runtime message and retains no text, value, URL, token or hidden
+      // state; it cannot make the wait pass.
+      const observeRouteState = async () => {
+        try {
+          await readRouteStatusTrace(route);
+          lastRouteObservation = sanitizeRouteObservation(
+            await route.evaluate(routeStateProbe(fixture.Title)),
+          );
+          recordRouteObservation(lastRouteObservation);
+        } catch {}
+      };
+      // Ready-label polling is read-only. It must never raise or focus the
+      // native window: doing so can hide the route page behind the idle native
+      // window before any approval exists. The focus-preserving inspect form
+      // (same exact native title and executable, empty action list) keeps the
+      // window where it is, exactly like the popup-stage absence probes.
+      const ROUTE_LABEL_INSPECT = Object.freeze({
+        inspect: true,
+        title_prefix: "Locklark · 浏览器原生确认",
+        preserve_focus: true,
+      });
+      const approveLabel = async () => {
+        await observeRouteState();
+        try {
+          const control = input([], true, ROUTE_LABEL_INSPECT).controls?.["批准本次操作"];
+          return control?.present === true && control?.showing === true;
+        } catch {
+          return false;
+        }
+      };
+      await wait(approveLabel, "Native route approval label missing");
+      assert.equal(
+        (await targets()).filter((target) => ROUTE_PAGE.test(target.url))
+          .length,
+        1,
+        "Route page must be unique",
+      );
+      mark("route:native-approve");
+      // Exactly one real X11 pointer click on the native allowlisted label.
+      input([{ click_label: "批准本次操作" }]);
+      mark("route:approved");
+      let finding = "";
+      const verified = async () => {
+        const live = await targets();
+        const routes = live.filter((target) => ROUTE_PAGE.test(target.url));
+        assert(
+          routes.length === 1 && routes[0].id === routeTarget,
+          "Route target was replaced",
+        );
+        assert(
+          !live.some((target) => ACTION_POPUP.test(target.url)),
+          "Action popup reopened",
+        );
+        finding = verifyRouteSurface(
+          await route.evaluate(
+            routeSurfaceProbe(fixture.Title, fixture.Value),
+          ),
+          fixture.Title,
+        );
+        return finding === "";
+      };
+      try {
+        await wait(verified, "Route detail did not survive native approval");
+      } catch (error) {
+        // Only the fixed allowlisted finding id leaves this checkpoint.
+        if (finding) throw Error(finding);
+        throw error;
+      }
+      mark("route:verified");
+      // The same target id is still the one route page, after approval.
+      const routes = (await targets()).filter((target) =>
+        ROUTE_PAGE.test(target.url),
+      );
+      assert.equal(routes.length, 1, "Route target was replaced");
+      assert.equal(routes[0].id, routeTarget, "Route target was replaced");
+      // Per-field copy proof. The harness only performs mouse input and reads
+      // fixed labels/booleans; it never dispatches DOM events or messages.
+      mark("route:copy-focus");
+      // The native read approval leaves the desktop app in front, so the
+      // route tab must be returned to the foreground as an ordinary user
+      // would. The reviewed mouse wrapper only clicks a visible, focused page.
+      await route.bringToFront();
+      await wait(
+        async () =>
+          (await route.evaluate(
+            'document.visibilityState === "visible" && document.hasFocus() === true',
+          )) === true,
+        "Route page did not return to the foreground",
+      );
+      mark("route:copy-field");
+      assert.equal(
+        await route.count(ROUTE_COPY_FIELD_SELECTOR),
+        1,
+        "Route password copy control missing",
+      );
+      // The rendered value stays concealed: only the masked marker, and the
+      // raw password is nowhere in the page text.
+      const rowBefore = await route.evaluate(
+        routePasswordRowProbe(fixture.Value),
+      );
+      assert.equal(rowBefore?.masked, true, "Route password is not concealed");
+      assert.equal(rowBefore?.leaked, false, "Route displayed the password");
+      await route.click(ROUTE_COPY_FIELD_SELECTOR);
+      mark("route:field-approval");
+      const nativeControl = (label) => {
+        try {
+          return (
+            input([], true, {
+              inspect: true,
+              title_prefix: "Locklark · 浏览器原生确认",
+              preserve_focus: true,
+            }).controls?.[label] ?? null
+          );
+        } catch {
+          return null;
+        }
+      };
+      const nativeShown = (label) => {
+        const control = nativeControl(label);
+        return control?.present === true && control?.showing === true;
+      };
+      // Only the fixed approval label requested for this field disclosure, or
+      // (legacy fallback) the exact route item-get review, may be accepted.
+      await wait(
+        () => nativeShown(ROUTE_COPY_DISCLOSURE_LABEL) || nativeShown(ROUTE_COPY_REVIEW_LABEL),
+        "Native field disclosure did not appear",
+      );
+      // Legacy fallback: approve the pending item-get review physically once.
+      // A disclosure already present is the native path, never preceded.
+      let approvedReview = false;
+      if (
+        nativeShown(ROUTE_COPY_REVIEW_LABEL) &&
+        !nativeShown(ROUTE_COPY_DISCLOSURE_LABEL)
+      ) {
+        input([{ click_label: ROUTE_COPY_REVIEW_LABEL }]);
+        approvedReview = true;
+      }
+      // The requested field disclosure itself is always approved physically.
+      await wait(
+        () => nativeShown(ROUTE_COPY_DISCLOSURE_LABEL),
+        approvedReview
+          ? "Native field disclosure did not follow its review"
+          : "Native field disclosure did not appear",
+      );
+      mark("route:field-approve");
+      input([{ click_label: ROUTE_COPY_DISCLOSURE_LABEL }]);
+      mark("route:field-approved");
+      // The same UI shows its fixed successful-copy feedback.
+      await wait(
+        async () => {
+          const feedback = await route.text("#toast");
+          return ROUTE_COPY_FEEDBACK.some((text) => String(feedback ?? "").includes(text));
+        },
+        "Route copy feedback missing",
+      );
+      // Independent OS comparison: the expectation travels only on the
+      // private pipe; only the boolean comparison is kept.
+      mark("route:clipboard");
+      const clipboardReader = new PrivateClipboard({ root, state, env });
+      try {
+        await clipboardReader.start();
+        await wait(
+          () => clipboardReader.matches(fixture.Value),
+          "OS clipboard did not receive the approved field",
+        );
+      } finally {
+        clipboardReader.stop();
+      }
+      // The route page is still the same page after the copy.
+      const routesAfterCopy = (await targets()).filter((target) =>
+        ROUTE_PAGE.test(target.url),
+      );
+      assert.equal(routesAfterCopy.length, 1, "Route target was replaced");
+      assert.equal(routesAfterCopy[0].id, routeTarget, "Route target was replaced");
+      // The same console canary checks the ordinary native journeys apply
+      // before this checkpoint may claim a pass. Logs are never printed.
+      assert(
+        !logs.some((s) =>
+          fixtureCanaries(fixture).some((value) => s.includes(value)),
+        ),
+        "Synthetic secret found in browser console output",
+      );
+      for (const line of logs) assertPrivateText(line, fixture);
+      console.log(
+        "PASS: real popup exact row opened one persistent route tab; native approval kept the same tab's detail without revealing values; its concealed field copy was disclosed through native approval and only the independent OS clipboard comparison matched",
+      );
+    } finally {
+      try {
+        await route.close();
+      } catch {}
+      // Diagnostics only: one final read, then stop observing in the page where
+      // it is still reachable; a closed page fails this read and the trace
+      // stays as last observed.
+      await refreshRouteStatusTrace(attach, opened, true);
+    }
+    } finally {
+      // Diagnostics only: the lifecycle socket never outlives this checkpoint.
+      closeRouteLifecycle();
+    }
+  }
   async function blank() {
     assert(
       (await page.locator("#username").inputValue()) === "",
@@ -593,7 +1454,48 @@ try {
           : "确认连接此扩展",
     },
   ]);
-  if (checkoutFrames) {
+  if (routeDetailRead) {
+    // The route checkpoint reuses the existing action-popup CDP wrapper and
+    // the real native X11 helper. It never navigates, messages the worker or
+    // injects a page hook: only the rendered popup/route UI is observed.
+    async function extensionTargets() {
+      const port = readFileSync(
+        join(profile, "DevToolsActivePort"),
+        "utf8",
+      ).split("\n")[0];
+      const targets = await (
+        await fetch("http://127.0.0.1:" + port + "/json/list")
+      ).json();
+      return targets.filter((target) =>
+        target.url.startsWith(
+          "chrome-extension://geldnhjapnackobgknocomedmjgphnpe/popup.html",
+        ),
+      );
+    }
+    async function attachRoute(target) {
+      const route = await attachPopup(target);
+      return {
+        evaluate: (expression) => route.evaluate(expression),
+        count: (selector) => route.count(selector),
+        text: (selector) => route.text(selector),
+        bringToFront: () => route.bringToFront(),
+        // The reviewed real CDP mouse wrapper (visibility/hit-test, then
+        // mousePressed/mouseReleased). No second click path exists here.
+        click: (selector) => route.click(selector),
+        close: () => route.close(),
+      };
+    }
+    await acceptRouteDetailRead({
+      browser,
+      input,
+      fixture,
+      phase,
+      eventually,
+      openPopup,
+      extensionTargets,
+      attachRoute,
+    });
+  } else if (checkoutFrames) {
     await page.goto(origin + "/checkout");
     const checkout = await acceptCheckoutFrames({ page, origin, input, fixture, openPopup, phase, eventually });
     // The final lock journey already invalidated/cleaned up the session; only
@@ -897,6 +1799,7 @@ try {
   // Deliberately omit fixture files and exception/command bodies. The only
   // inspection text is the trusted popup's bounded status; native metadata is
   // a fixed control-name allowlist and never asks accessibility for values.
+  // The route page contributes only its fixed view/status enums and booleans.
   const safeReasons = [
     "Action popup did not open",
     "Previous action popup did not close",
@@ -954,6 +1857,37 @@ try {
     "Locked host still allowed matching",
     "Lock status missing",
     "Locked checkout approval received a value",
+    "Route detail mode is incompatible",
+    "Route detail mode requires Chromium",
+    "Paired popup not ready",
+    "Exact-origin match missing",
+    "Vault rows missing",
+    "Exact synthetic vault row missing",
+    "Synthetic seed item identity missing",
+    "Synthetic fixture title missing",
+    "Route page did not open",
+    "Route page must be unique",
+    "Action popup stayed open",
+    "Action popup target stayed open",
+    "Unexpected page opened",
+    "Route page did not load",
+    "Route detail did not render",
+    "Native route approval label missing",
+    "Route detail did not survive native approval",
+    "Route target was replaced",
+    "Action popup reopened",
+    "route-detail-view-missing",
+    "route-detail-title-mismatch",
+    "route-concealed-control-missing",
+    "route-password-rendered",
+    "Route page did not return to the foreground",
+    "Route password copy control missing",
+    "Route password is not concealed",
+    "Route displayed the password",
+    "Native field disclosure did not appear",
+    "Native field disclosure did not follow its review",
+    "Route copy feedback missing",
+    "OS clipboard did not receive the approved field",
   ];
   const report = {
     reason: safeReasons.includes(error?.message)
@@ -964,6 +1898,52 @@ try {
         ? error.stack.match(/browser_(?:native|checkout|passkey_management|conditional_passkey|passkey)_acceptance\.mjs:[0-9]+:[0-9]+/g)
         : [],
     stage,
+    // Latest fixed-enum route-page observation from the bounded native-label
+    // wait, plus its bounded state-transition history where consecutive
+    // entries differ. Both only ever contain the four sanitized fields.
+    ...(routeDetailRead
+      ? {
+          routePage: sanitizeRouteObservation(lastRouteObservation),
+          routeHistory: routeObservationHistory.map(sanitizeRouteObservation),
+          // Present only once the post-popup-close snapshot was taken, and only
+          // for route-detail failures; same four sanitized fields.
+          ...(routeAfterPopupClose
+            ? {
+                routeAfterPopupClose: sanitizeRouteObservation(
+                  routeAfterPopupClose,
+                ),
+              }
+            : {}),
+          // Present only once the post-popup-close target checkpoint was read;
+          // two fixed booleans, never an id, URL, fragment, token or count.
+          ...(routeTargetAfterPopupClose
+            ? {
+                routeTargetAfterPopupClose: {
+                  routeTargetExists:
+                    routeTargetAfterPopupClose.routeTargetExists === true,
+                  routeTargetStillRoute:
+                    routeTargetAfterPopupClose.routeTargetStillRoute === true,
+                },
+              }
+            : {}),
+          // Present only once the visible-DOM status trace recorded at least
+          // one entry: fixed channel/value enums only, at most eight entries.
+          ...(routeStatusTrace
+            ? { routeStatusTrace: sanitizeRouteStatusTrace(routeStatusTrace) }
+            : {}),
+          // Present only once the direct route-target observer connected or
+          // saw a main-frame event; fixed booleans and capped per-kind counts
+          // only, never an id, URL, fragment, token, text, value or protocol
+          // payload.
+          ...(routeLifecycleObservation
+            ? {
+                routeTargetLifecycle: sanitizeRouteLifecycle(
+                  routeLifecycleObservation,
+                ),
+              }
+            : {}),
+        }
+      : {}),
     popup: { available: false },
     native: { available: false },
   };
@@ -1021,6 +2001,8 @@ console.log(
     ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} extension shared Locklark desktop native clipboard lease, private OS reads, foreign-owner TTL preservation, lock clearing and hidden-popup prepare cancellation`
     : checkoutFrames
     ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} checkout same-origin child approval (profile review) and picker cancellation, cross-origin approval/refusal, cross-site, opaque sandbox, changed-document and top-navigation rejection, and lock while cross-origin card review is pending`
+    : routeDetailRead
+    ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} QuickFill=false action row opened exactly one persistent route tab, the native per-operation approval kept that same tab, and its rendered detail matched the synthetic fixture without revealing a value`
     : process.env.LOCKLARK_TEST_BROWSER_PARITY
     ? `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} quick pairing, inline fill, automatic sign-in, Passkey creation/assertion, relying-party signature verification and abort`
     : `PASS: real ${browserName === "edge" ? "Edge" : "Chromium"} fill/save/update/OTP and Passkey with native approval and private diagnostics`,

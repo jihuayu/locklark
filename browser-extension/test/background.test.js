@@ -396,6 +396,10 @@ function harness(options = {}) {
   );
   const sender = { id: "fixed", url: "chrome-extension://fixed/popup.html" };
   return {
+    connectListeners: () => connectListeners,
+    api,
+    docId: () => doc,
+    routeToken: (url) => /#route=([a-f0-9]{64})$/.exec(String(url || ""))?.[1] || "",
     sent,
     notifications,
     advanceClock: (ms) => (clock += ms),
@@ -537,6 +541,1288 @@ async function ready(h) {
   assert.equal(state.connected, true);
   await h.send({ type: "match" });
 }
+// The exact production text of one top-level function in background.js,
+// cut at its matching closing brace so following listeners never leak in.
+async function waitForSource(header) {
+  const source = fs.readFileSync(path.join(__dirname, "../background.js"), "utf8");
+  const from = source.indexOf(header);
+  assert.ok(from > 0, "missing production function " + header);
+  let at = source.indexOf("{", from);
+  assert.ok(at > 0, "missing body for " + header);
+  let depth = 0;
+  for (; at < source.length; at++) {
+    if (source[at] === "{") depth++;
+    else if (source[at] === "}") {
+      depth--;
+      if (depth === 0) return source.slice(from, at + 1);
+    }
+  }
+  throw Error("unterminated production function " + header);
+}
+test("an ordinary route opens its own tab and claims the approved detail", async () => {
+  const ROUTE_TAB = 7;
+  const ITEM_ID = "b".repeat(32);
+  const ITEM_REV = "c".repeat(64);
+  let sourceTab = null;
+  let routeTab = null;
+  const h = harness({
+    onRequest: (r) => {
+      // The real native vault-search reply type; the route validates it
+      // directly rather than through the popup's type/alias mapping.
+      if (r.type === "vault-search")
+        return {
+          v: 1, id: r.id, type: "vault-items",
+          items: [{ id: ITEM_ID, revision: ITEM_REV, category: "login", title: "Target" }],
+        };
+      if (r.type === "item-get")
+        return {
+          v: 1, id: r.id, type: "item-detail",
+          item: {
+            id: ITEM_ID, revision: ITEM_REV, category: "login", title: "Target",
+            username: "ada", has_password: true,
+          },
+        };
+      return undefined;
+    },
+  });
+  // ready()/match() captures the real source HTTPS tab and top document.
+  await ready(h);
+  // Browser tab state the worker can re-read after every await: the source
+  // keeps its exact URL/document but goes inactive; the route tab is active.
+  sourceTab = { id: 1, windowId: 1, active: true, url: "https://example.test/login" };
+  h.api.tabs.get = async (tabId) =>
+    tabId === sourceTab.id ? { ...sourceTab } : tabId === ROUTE_TAB && routeTab ? { ...routeTab } : null;
+  h.api.scripting.executeScript = async (options) =>
+    options.target.tabId === sourceTab.id
+      ? [{ frameId: 0, documentId: h.docId(), result: { top: true, origin: "https://example.test" } }]
+      : [{ frameId: 0, documentId: "route-doc", result: { top: true, origin: "chrome-extension://fixed" } }];
+  h.api.tabs.create = (options) => {
+    // `options` crosses the vm realm boundary, so compare fields, not identity.
+    assert.equal(options.active, true);
+    assert.equal(
+      options.url,
+      "chrome-extension://fixed/popup.html#route=" + h.routeToken(options.url),
+    );
+    // The route opens in the captured source tab's own window.
+    assert.equal(options.windowId, sourceTab.windowId);
+    // Browser ordering: activation and the initial load of the new route tab
+    // arrive before tabs.create resolves.
+    sourceTab = { ...sourceTab, active: false };
+    routeTab = { id: ROUTE_TAB, windowId: sourceTab.windowId, active: true, url: options.url };
+    h.listeners.active({ tabId: ROUTE_TAB, windowId: sourceTab.windowId });
+    h.listeners.updated(ROUTE_TAB, { status: "loading" });
+    h.listeners.updated(ROUTE_TAB, { url: options.url });
+    return { id: ROUTE_TAB, windowId: sourceTab.windowId, status: "loading" };
+  };
+  // An ordinary (non-QuickFill) click asks for a route, never a popup read.
+  const reply = await h.send({ type: "open-route", id: ITEM_ID, revision: ITEM_REV });
+  assert.ok(reply?.routeCreated, "route was refused: " + reply?.status);
+  assert.equal(reply.routeCreated.token.length, 64);
+  assert.equal(h.sent.filter((r) => r.type === "item-get").length, 0);
+  // The route's own startup must not have advanced the captured epoch.
+  assert.equal(await h.send({ type: "state" }).then((s) => s.candidates.length), 1);
+  h.listeners.updated(ROUTE_TAB, { status: "complete" });
+  // The route tab is now the active tab; the source is still open, exact and
+  // inactive.
+  assert.equal(routeTab.active, true);
+  assert.equal(sourceTab.active, false);
+  assert.equal(sourceTab.url, "https://example.test/login");
+  const routeSender = ({ url = routeTab.url, tabId = ROUTE_TAB } = {}) => ({
+    id: "fixed",
+    url,
+    origin: "chrome-extension://fixed",
+    frameId: 0,
+    documentId: "route-doc",
+    tab: { id: tabId, url, windowId: 1 },
+  });
+  const refused = (reply) =>
+    !reply || (reply.error === "refused" && reply.detail === undefined);
+  const nativeReads = () =>
+    h.sent.filter((r) => r.type === "vault-search" || r.type === "item-get");
+
+  // Exact token: any other token is refused before a native read.
+  assert.ok(refused(await h.send({ type: "route-claim", token: "e".repeat(64) }, routeSender())));
+  // Exact sender tab and URL: another tab id is refused.
+  assert.ok(refused(
+    await h.send(
+      { type: "route-claim", token: reply.routeCreated.token },
+      routeSender({ tabId: 99 }),
+    ),
+  ));
+  // Exact route URL: a different fragment is refused.
+  assert.ok(refused(
+    await h.send(
+      { type: "route-claim", token: reply.routeCreated.token },
+      routeSender({ url: "chrome-extension://fixed/popup.html#route=" + "d".repeat(64) }),
+    ),
+  ));
+  assert.equal(nativeReads().length, 0, "refusals must not reach the native host");
+
+  // --- the two state issues, isolated from the later response-shape fix ---
+  // (a) routeClaim() moves the grant to `claimed` and then starts the approved
+  // read, so routeLive() must accept exactly `open` and `claimed`; anything
+  // else is refused before any native read. This evaluates the real
+  // routeLive() text from background.js.
+  const liveRoute = await waitForSource("function routeLive(grant) {");
+  const routeLife = (state, { registered = true } = {}) => {
+    const token = "f".repeat(64);
+    const grant = {
+      token,
+      tabId: ROUTE_TAB,
+      state,
+      epoch: 3,
+      capability: "a".repeat(32),
+      expiresAt: Date.now() + 60000,
+    };
+    const grants = new Map(registered ? [[token, grant]] : []);
+    const tabs = new Map([[ROUTE_TAB, grant]]);
+    const live = new Function(
+      "routeGrants", "routeTabs", "capability", "epoch", "Date",
+      '"use strict";' + liveRoute + "\nreturn routeLive;",
+    );
+    return live(grants, tabs, grant.capability, 3, Date)(grant);
+  };
+  assert.equal(routeLife("open"), true);
+  assert.equal(routeLife("claimed"), true, "a claimed grant must stay live for its read");
+  assert.equal(routeLife("revoked"), false);
+  assert.equal(routeLife("claimed", { registered: false }), false);
+
+  // (b) Only the route tab must be active. The captured source is inactive
+  // because the route tab was activated, but it is still the same tab in the
+  // same window at the same URL.
+  const anchorsSource = await waitForSource("async function routeAnchors(grant) {");
+  const anchors = (routeAnchor, sourceAnchor) =>
+    new Function(
+      "routeTabAt", "routeSourceAt", "epoch", "capability", "Date",
+      '"use strict";' + anchorsSource + "\nreturn routeAnchors;",
+    )(
+      async () => routeAnchor,
+      async () => sourceAnchor,
+      3,
+      "a".repeat(32),
+      Date,
+    )({ tabId: ROUTE_TAB, windowId: 1, routeURL: "u", source: {}, epoch: 3, capability: "a".repeat(32) });
+  const routeAnchor = { id: ROUTE_TAB, windowId: 1, active: true, url: "u" };
+  const sourceAnchor = { id: 1, windowId: 1, active: false, url: "https://example.test/login" };
+  assert.equal(await anchors(routeAnchor, sourceAnchor), true, "inactive source is fine");
+  assert.equal(await anchors({ ...routeAnchor, active: false }, sourceAnchor), false);
+  assert.equal(await anchors(routeAnchor, null), false);
+
+  // The claim that started the approved native read completes and returns the
+  // target detail, in order: fresh search, then the exact item-get.
+  const claim = await h.send(
+    { type: "route-claim", token: reply.routeCreated.token },
+    routeSender(),
+  );
+  assert.deepEqual(nativeReads().map((r) => r.type), ["vault-search", "item-get"]);
+  const read = nativeReads()[1];
+  assert.equal(read.item_id, ITEM_ID);
+  assert.equal(read.revision, ITEM_REV);
+  assert.equal(claim?.detail?.id, ITEM_ID);
+  assert.equal(claim.detail.revision, ITEM_REV);
+  assert.equal(claim.detail.title, "Target");
+  assert.equal(claim.detail.username, "ada");
+
+  // Switching to a different ordinary tab still cancels and revokes.
+  h.listeners.active({ tabId: 2, windowId: 1 });
+  assert.equal(await h.send({ type: "state" }).then((s) => s.candidates.length), 0);
+  assert.ok(refused(
+    await h.send(
+      { type: "route-claim", token: reply.routeCreated.token },
+      routeSender(),
+    ),
+  ));
+  await h.send({ type: "disconnect" });
+});
+
+// One ordinary route in front of a captured source tab. The source tab's
+// state is the browser's, re-read through tabs.get on every check; tests move
+// it to prove a route dies with its source page.
+async function openRouteFixture(options = {}) {
+  const ROUTE_TAB = 7;
+  const ITEM_ID = "b".repeat(32);
+  const ITEM_REV = "c".repeat(64);
+  let sourceTab = null;
+  let routeTab = null;
+  const h = harness({
+    onRequest: (r) => {
+      // Real V2 "items" by default; a legacy host replies "vault-items".
+      if (r.type === "vault-search" && options.malformedList)
+        return {
+          v: 1, id: r.id, type: "items",
+          items: [{ id: ITEM_ID, revision: ITEM_REV, category: "login", title: "Target" }],
+          vaults: ["not-a-vault"],
+        };
+      if (r.type === "vault-search" && options.legacyList)
+        return {
+          v: 1, id: r.id, type: "vault-items",
+          items: [{ id: ITEM_ID, revision: ITEM_REV, category: "login", title: "Target" }],
+        };
+      if (r.type === "vault-search")
+        return {
+          v: 1, id: r.id, type: "items",
+          items: [{ id: ITEM_ID, revision: ITEM_REV, category: "login", title: "Target" }],
+          vaults: [{ id: "personal", name: "Personal" }],
+        };
+      if (r.type === "item-get")
+        return {
+          v: 1, id: r.id, type: "item-detail",
+          item: {
+            id: ITEM_ID, revision: ITEM_REV, category: "login", title: "Target",
+            username: "ada", has_password: true,
+          },
+        };
+      return undefined;
+    },
+  });
+  await ready(h);
+  sourceTab = { id: 1, windowId: 1, active: true, url: "https://example.test/login" };
+  h.api.tabs.get = async (tabId) =>
+    tabId === sourceTab.id ? { ...sourceTab } : tabId === ROUTE_TAB && routeTab ? { ...routeTab } : null;
+  h.api.scripting.executeScript = async (options) =>
+    options.target.tabId === sourceTab.id
+      ? [{ frameId: 0, documentId: h.docId(), result: { top: true, origin: "https://example.test" } }]
+      : [{ frameId: 0, documentId: "route-doc", result: { top: true, origin: "chrome-extension://fixed" } }];
+  h.api.tabs.create = (options) => {
+    sourceTab = { ...sourceTab, active: false };
+    routeTab = { id: ROUTE_TAB, windowId: sourceTab.windowId, active: true, url: options.url };
+    h.listeners.active({ tabId: ROUTE_TAB, windowId: sourceTab.windowId });
+    h.listeners.updated(ROUTE_TAB, { status: "loading" });
+    h.listeners.updated(ROUTE_TAB, { url: options.url });
+    return { id: ROUTE_TAB, windowId: sourceTab.windowId, status: "loading" };
+  };
+  const reply = await h.send({ type: "open-route", id: ITEM_ID, revision: ITEM_REV });
+  assert.ok(reply?.routeCreated, "route was refused: " + reply?.status);
+  h.listeners.updated(ROUTE_TAB, { status: "complete" });
+  const routeSender = () => ({
+    id: "fixed",
+    url: routeTab.url,
+    origin: "chrome-extension://fixed",
+    frameId: 0,
+    documentId: "route-doc",
+    tab: { id: ROUTE_TAB, url: routeTab.url, windowId: 1 },
+  });
+  return {
+    h,
+    token: reply.routeCreated.token,
+    ITEM_ID,
+    ITEM_REV,
+    sender: routeSender,
+    source: () => ({ ...sourceTab }),
+    setSource(next) {
+      sourceTab = { ...sourceTab, ...next };
+    },
+    sendAsRoute: (message) =>
+      h.send(message, {
+        id: "fixed",
+        url: routeTab.url,
+        origin: "chrome-extension://fixed",
+        frameId: 0,
+        documentId: "route-doc",
+        tab: { id: ROUTE_TAB, url: routeTab.url, windowId: 1 },
+      }),
+    claim() {
+      return this.sendAsRoute({ type: "route-claim", token: reply.routeCreated.token });
+    },
+    nativeReads: () => h.sent.filter((r) => r.type === "vault-search" || r.type === "item-get"),
+  };
+}
+
+test("a route claims both the V2 items list and a legacy vault-items list", async () => {
+  // The real host answers vault-search with "items" plus vaults; older hosts
+  // answer "vault-items". Either shape is accepted only after
+  // core.validResponse and the exact id+revision row match, so an invalid
+  // list is still refused without any native item-get.
+  const v2 = await openRouteFixture();
+  const claimed = await v2.claim();
+  assert.equal(claimed?.type, "route-claimed", "the V2 items list was refused");
+  assert.deepEqual([claimed.item_id, claimed.revision], [v2.ITEM_ID, v2.ITEM_REV]);
+  assert.deepEqual(v2.nativeReads().map((r) => r.type), ["vault-search", "item-get"]);
+  await v2.h.send({ type: "disconnect" });
+  const legacy = await openRouteFixture({ legacyList: true });
+  const legacyClaim = await legacy.claim();
+  assert.equal(legacyClaim?.type, "route-claimed", "a legacy vault-items list was refused");
+  assert.deepEqual([legacyClaim.item_id, legacyClaim.revision], [legacy.ITEM_ID, legacy.ITEM_REV]);
+  assert.deepEqual(legacy.nativeReads().map((r) => r.type), ["vault-search", "item-get"]);
+  await legacy.h.send({ type: "disconnect" });
+  // An "items" list with a malformed vaults entry is still refused by
+  // core.validResponse, so the type fix never skips validation and no
+  // item-get follows the rejected list.
+  const malformed = await openRouteFixture({ malformedList: true });
+  malformed.h.sent.length = 0;
+  const invalid = await malformed.claim();
+  assert.ok(!invalid || invalid.error === "refused", "a malformed list was accepted");
+  assert.equal(invalid?.detail, undefined);
+  assert.deepEqual(malformed.nativeReads().map((r) => r.type), ["vault-search"]);
+  await malformed.h.send({ type: "disconnect" });
+});
+
+test("a same-origin source URL change revokes the open route", async () => {
+  const route = await openRouteFixture();
+  assert.equal(route.nativeReads().length, 0, "opening a route reads nothing");
+  // Same tab, same window, same HTTPS origin: only the path changed. The
+  // browser's re-read must compare the exact captured URL, not just origin.
+  route.setSource({ url: "https://example.test/account/settings" });
+  const claim = await route.claim();
+  assert.ok(!claim || claim.error === "refused", "route survived a source URL change");
+  assert.equal(claim?.detail, undefined);
+  assert.equal(route.nativeReads().length, 0, "no native read after the source changed");
+  await route.h.send({ type: "disconnect" });
+});
+
+test("a same-URL source reload revokes the open route", async () => {
+  const route = await openRouteFixture();
+  // A reload or document replacement keeps the URL but starts a new load.
+  route.h.listeners.updated(1, { status: "loading" });
+  const claim = await route.claim();
+  assert.ok(!claim || claim.error === "refused", "route survived a source reload");
+  assert.equal(claim?.detail, undefined);
+  assert.equal(route.nativeReads().length, 0, "no native read after the source reloaded");
+  await route.h.send({ type: "disconnect" });
+});
+
+test("source navigation events revoke the route itself", async () => {
+  // The route-local handler, evaluated from the real background.js text with
+  // only route state: a same-origin URL change and a same-URL load must both
+  // end the grant, independent of the popup context lifecycle.
+  const sourceUpdate = await waitForSource("function routeSourceUpdated(tabId, change) {");
+  const updates = (change) => {
+    const token = "f".repeat(64);
+    const grant = {
+      token,
+      tabId: 7,
+      source: { tabId: 1, windowId: 1, origin: "https://example.test", url: "https://example.test/login" },
+      epoch: 3,
+      capability: "a".repeat(32),
+      expiresAt: Date.now() + 60000,
+    };
+    const revoked = [];
+    const run = new Function(
+      "routeGrants", "routeTabs", "core", "revokeRoute",
+      '"use strict";' + sourceUpdate +
+        "\nreturn routeSourceUpdated;",
+    );
+    run(
+      new Map([[token, grant]]),
+      new Map([[7, grant]]),
+      core,
+      (candidate) => revoked.push(candidate.token),
+    )(1, change);
+    return revoked.length;
+  };
+  assert.equal(updates({ url: "https://example.test/account/settings" }), 1);
+  assert.equal(updates({ status: "loading" }), 1);
+  assert.equal(updates({ status: "complete" }), 0);
+});
+
+test("a route claim is one-shot and a raw route item-get reads nothing", async () => {
+  const route = await openRouteFixture();
+  const first = await route.claim();
+  assert.equal(first?.type, "route-claimed");
+  // Only the captured target may come back.
+  assert.equal(first.item_id, route.ITEM_ID);
+  assert.equal(first.revision, route.ITEM_REV);
+  assert.equal(first.detail.id, route.ITEM_ID);
+  assert.equal(first.detail.revision, route.ITEM_REV);
+  assert.equal(first.token, route.token);
+  assert.deepEqual(route.nativeReads().map((r) => r.type), ["vault-search", "item-get"]);
+  const read = route.nativeReads()[1];
+  assert.equal(read.item_id, route.ITEM_ID);
+  assert.equal(read.revision, route.ITEM_REV);
+
+  // The same claim again must be refused and must not re-read.
+  const again = await route.claim();
+  assert.ok(!again || again.error === "refused", "a route was claimed twice");
+  assert.equal(again?.detail, undefined);
+  assert.equal(route.nativeReads().length, 2, "duplicate claim started a read");
+
+  // A raw route-tab item-get is never a second approved read.
+  const raw = await route.sendAsRoute({
+    type: "item-get",
+    id: route.ITEM_ID,
+    revision: route.ITEM_REV,
+  });
+  assert.ok(!raw || raw.error === "refused", "raw route item-get was served");
+  assert.equal(raw?.detail, undefined);
+  assert.equal(route.nativeReads().length, 2, "raw route item-get started a read");
+  await route.h.send({ type: "disconnect" });
+});
+
+test("concurrent route claims start exactly one read", async () => {
+  const route = await openRouteFixture();
+  const [left, right] = await Promise.all([route.claim(), route.claim()]);
+  const claimed = [left, right].filter((reply) => reply?.detail);
+  assert.equal(claimed.length, 1, "more than one concurrent claim succeeded");
+  const refused = [left, right].find((reply) => !reply?.detail);
+  assert.ok(!refused || refused.error === "refused");
+  assert.equal(route.nativeReads().length, 2, "a concurrent claim started another read");
+  assert.equal(claimed[0].item_id, route.ITEM_ID);
+  assert.equal(claimed[0].revision, route.ITEM_REV);
+  await route.h.send({ type: "disconnect" });
+});
+
+test("revoking a pending route removes it from the boot set", async () => {
+  // Real production text: revocation must also drop the pending create, or a
+  // later unrelated activation adopts the dead grant as "startup" and
+  // suppresses cancelContext().
+  const revokeSource = await waitForSource("function revokeRoute(grant) {");
+  const bindSource = await waitForSource("function bindRouteTab(grant, tabId, windowId) {");
+  const activationSource = await waitForSource("function routeActivation(tabId, windowId) {");
+  const build = () => {
+    const token = "f".repeat(64);
+    const grant = {
+      token,
+      tabId: 0,
+      windowId: 1,
+      routeURL: "chrome-extension://fixed/popup.html#route=" + token,
+      state: "open",
+      epoch: 3,
+      capability: "a".repeat(32),
+      expiresAt: Date.now() + 60000,
+      clients: new Set(),
+    };
+    const grants = new Map([[token, grant]]);
+    const tabs = new Map();
+    const boots = new Set([grant]);
+    let cancelled = 0;
+    const load = new Function(
+      "routeGrants", "routeTabs", "routeBoots",
+      "clipboardDropGrant", "routeTabAt", "cancelContext", "Date",
+      '"use strict";' + revokeSource + bindSource + activationSource +
+        "\nreturn { revokeRoute, routeActivation };",
+    );
+    const api = load(
+      grants,
+      tabs,
+      boots,
+      () => {},
+      async () => null,
+      () => {
+        cancelled += 1;
+      },
+      Date,
+    );
+    return { grant, grants, tabs, boots, api, cancelled: () => cancelled };
+  };
+  const state = build();
+  state.api.revokeRoute(state.grant);
+  assert.equal(state.boots.has(state.grant), false, "revoked grant stayed in routeBoots");
+  assert.equal(state.api.routeActivation(42, 1), "switch",
+    "a revoked pending grant was adopted as a startup activation");
+  assert.equal(state.cancelled(), 0);
+});
+
+test("pending route grants count toward the route limit", async () => {
+  const background = fs.readFileSync(path.join(__dirname, "../background.js"), "utf8");
+  const limit = Number(/ROUTE_LIMIT = (\d+)/.exec(background)?.[1]);
+  assert.ok(Number.isSafeInteger(limit) && limit > 0, "ROUTE_LIMIT not found");
+  const h = harness();
+  await ready(h);
+  const sourceTab = { id: 1, windowId: 1, active: true, url: "https://example.test/login" };
+  h.api.tabs.get = async (tabId) => (tabId === sourceTab.id ? { ...sourceTab } : null);
+  h.api.scripting.executeScript = async () => [
+    { frameId: 0, documentId: h.docId(), result: { top: true, origin: "https://example.test" } },
+  ];
+  const held = [];
+  let createCalls = 0;
+  h.api.tabs.create = () => {
+    createCalls += 1;
+    return new Promise((resolve) => held.push(resolve));
+  };
+  const sends = [];
+  for (let index = 1; index <= limit + 1; index++)
+    sends.push(
+      h.send({
+        type: "open-route",
+        // Distinct targets so the same-source dedupe never fires.
+        id: index.toString(16).padStart(2, "0").repeat(16),
+        revision: "c".repeat(64),
+      }),
+    );
+  // Deterministic barrier: every create either produced a pending tab or was
+  // refused because the cap already counts pending grants.
+  await waitFor(() => createCalls > limit, "pending route creates");
+  let tabId = 70;
+  while (held.length) held.shift()({ id: tabId++, windowId: 1 });
+  const replies = await Promise.all(sends);
+  const created = replies.filter((reply) => reply?.routeCreated);
+  assert.equal(created.length, limit, "pending grants exceeded the route limit");
+  assert.equal(
+    new Set(created.map((reply) => reply.routeCreated.token)).size,
+    created.length,
+  );
+  await h.send({ type: "disconnect" });
+});
+
+test("a route revoked while tabs.create is pending fails closed", async () => {
+  const h = harness();
+  await ready(h);
+  const sourceTab = { id: 1, windowId: 1, active: true, url: "https://example.test/login" };
+  h.api.tabs.get = async (tabId) => (tabId === sourceTab.id ? { ...sourceTab } : null);
+  h.api.scripting.executeScript = async () => [
+    { frameId: 0, documentId: h.docId(), result: { top: true, origin: "https://example.test" } },
+  ];
+  let release = null;
+  let createCalls = 0;
+  h.api.tabs.create = () => {
+    createCalls += 1;
+    return new Promise((resolve) => (release = resolve));
+  };
+  const ITEM_ID = "b".repeat(32);
+  const send = h.send({ type: "open-route", id: ITEM_ID, revision: "c".repeat(64) });
+  await waitFor(() => createCalls === 1 && release, "pending route create");
+  // The source page reloads while tabs.create() is still pending, which
+  // revokes the grant before its create continuation runs.
+  h.listeners.updated(1, { status: "loading" });
+  release({ id: 7, windowId: 1 });
+  const reply = await send;
+  assert.equal(reply?.routeCreated, undefined, "a revoked pending grant was returned as created");
+  // The browser-created tab must not have turned the dead grant live.
+  const pageURL = "chrome-extension://fixed/popup.html#route=" + "0".repeat(64);
+  const claim = await h.send(
+    { type: "route-claim", token: "0".repeat(64) },
+    {
+      id: "fixed",
+      url: pageURL,
+      origin: "chrome-extension://fixed",
+      frameId: 0,
+      documentId: "route-doc",
+      tab: { id: 7, url: pageURL, windowId: 1 },
+    },
+  );
+  assert.ok(!claim || claim.error === "refused", "a revoked pending grant was claimed");
+  assert.equal(
+    h.sent.filter((r) => r.type === "vault-search" || r.type === "item-get").length,
+    0,
+  );
+  await h.send({ type: "disconnect" });
+});
+
+// ---- Persistent route field-copy boundary (native clipboard lease) ----
+const ROUTE_ITEM_ID = "b".repeat(32);
+const ROUTE_ITEM_REV = "c".repeat(64);
+const ROUTE_DETAIL = {
+  id: ROUTE_ITEM_ID, revision: ROUTE_ITEM_REV, category: "login", title: "Target",
+  username: "ada", has_password: true,
+};
+
+// A live route in front of the captured source tab. The claim's own V2
+// item-get carries the same item_id/revision as a fallback copy read, so the
+// phase is tracked explicitly: while `phase.claiming` is true every item-get
+// is answered with ROUTE_DETAIL; afterwards each test answers through `reply`.
+async function fieldRouteFixture(options = {}) {
+  const ROUTE_TAB = 7;
+  const reply = { current: null };
+  const phase = { claiming: false };
+  const h = harness({ capabilities: [CLIPBOARD_CAP], ...options,
+    onRequest: (r) => {
+      if (r.type === "vault-search")
+        return {
+          v: 1, id: r.id, type: "vault-items",
+          items: [{ id: ROUTE_ITEM_ID, revision: ROUTE_ITEM_REV, category: "login", title: "Target" }],
+        };
+      if (r.type === "item-get" && phase.claiming)
+        return { v: 1, id: r.id, type: "item-detail", item: { ...ROUTE_DETAIL } };
+      const answer = reply.current ? reply.current(r) : undefined;
+      if (answer) queueMicrotask(() => deliverNow(r.id, answer));
+      return undefined;
+    },
+  });
+  await ready(h);
+  // The native transports keep their reply dispatcher in the harness scope.
+  const deliverNow = (id, message) => h.deliver({ v: 1, id, ...message });
+  let sourceTab = { id: 1, windowId: 1, active: true, url: "https://example.test/login" };
+  let routeTab = null;
+  h.api.tabs.get = async (tabId) =>
+    tabId === sourceTab.id ? { ...sourceTab } : tabId === ROUTE_TAB && routeTab ? { ...routeTab } : null;
+  h.api.scripting.executeScript = async (options) =>
+    options.target.tabId === sourceTab.id
+      ? [{ frameId: 0, documentId: h.docId(), result: { top: true, origin: "https://example.test" } }]
+      : [{ frameId: 0, documentId: "route-doc", result: { top: true, origin: "chrome-extension://fixed" } }];
+  h.api.tabs.create = (options) => {
+    sourceTab = { ...sourceTab, active: false };
+    routeTab = { id: ROUTE_TAB, windowId: sourceTab.windowId, active: true, url: options.url };
+    h.listeners.active({ tabId: ROUTE_TAB, windowId: sourceTab.windowId });
+    h.listeners.updated(ROUTE_TAB, { status: "loading" });
+    h.listeners.updated(ROUTE_TAB, { url: options.url });
+    return { id: ROUTE_TAB, windowId: sourceTab.windowId, status: "loading" };
+  };
+  const opened = await h.send({ type: "open-route", id: ROUTE_ITEM_ID, revision: ROUTE_ITEM_REV });
+  assert.ok(opened?.routeCreated, "route was refused: " + opened?.status);
+  h.listeners.updated(ROUTE_TAB, { status: "complete" });
+  const sender = () => ({
+    id: "fixed", url: routeTab.url, origin: "chrome-extension://fixed",
+    frameId: 0, documentId: "route-doc",
+    tab: { id: ROUTE_TAB, url: routeTab.url, windowId: 1 },
+  });
+  const route = {
+    h,
+    reply,
+    sender,
+    token: opened.routeCreated.token,
+    async claim() {
+      phase.claiming = true;
+      try {
+        return await h.send({ type: "route-claim", token: opened.routeCreated.token }, sender());
+      } finally {
+        phase.claiming = false;
+      }
+    },
+    copy: (field, target = {}) =>
+      h.send(
+        {
+          type: "route-copy-field", token: opened.routeCreated.token,
+          item_id: ROUTE_ITEM_ID, revision: ROUTE_ITEM_REV, field, ...target,
+        },
+        sender(),
+      ),
+    nativeCount: (type) => h.sent.filter((r) => r.type === type).length,
+  };
+  return route;
+}
+
+test("route field copy is refused for a mismatched or foreign field", async () => {
+  const reads = [];
+  const route = await fieldRouteFixture();
+  const claimed = await route.claim();
+  assert.equal(claimed?.type, "route-claimed");
+  // Any fallback read on the exact target returns the approved detail.
+  route.reply.current = (r) => {
+    reads.push(r);
+    return { v: 1, id: r.id, type: "item-detail", item: { ...ROUTE_DETAIL } };
+  };
+  // Another item or revision never reaches a native read or copy.
+  for (const [field, target] of [
+    ["username", { item_id: "d".repeat(32) }],
+    ["username", { revision: "e".repeat(64) }],
+  ]) {
+    const refused = await route.copy(field, target);
+    assert.ok(!refused || refused.error === "refused", field + " was copied");
+  }
+  assert.equal(reads.length, 0, "a mismatched target reached the fresh read");
+  assert.equal(route.nativeCount("item-copy-field"), 0);
+  await route.h.send({ type: "disconnect" });
+});
+
+test("route field copy needs the exact fresh detail to carry the field", async () => {
+  const route = await fieldRouteFixture();
+  await route.claim();
+  // The fresh read must carry the field; when it does not, no native field
+  // copy may be requested at all.
+  route.reply.current = (r) => ({
+    v: 1, id: r.id, type: "item-detail",
+    item: { ...ROUTE_DETAIL, has_password: false },
+  });
+  const refused = await route.copy("password");
+  assert.ok(!refused || refused.error === "refused");
+  assert.equal(refused?.copiedField, undefined);
+  assert.deepEqual(route.h.sent.filter((r) => r.type === "item-copy-field"), []);
+  // The field the approved detail has proceeds, but without a native answer
+  // no value may escape.
+  route.reply.current = (r) => ({
+    v: 1, id: r.id, type: "item-detail", item: { ...ROUTE_DETAIL },
+  });
+  const value = await route.copy("username");
+  assert.ok(!value || value.error === "refused");
+  assert.equal(value?.copiedField, undefined);
+  const sent = route.h.sent.filter((r) => r.type === "item-copy-field");
+  assert.deepEqual(sent.map((r) => [r.item_id, r.revision, r.field]),
+    [[ROUTE_ITEM_ID, ROUTE_ITEM_REV, "username"]]);
+  await route.h.send({ type: "disconnect" });
+});
+
+test("route fallback copy scrubs a late field reply after close", async () => {
+  const route = await fieldRouteFixture();
+  await route.claim();
+  route.reply.current = (r) => ({ v: 1, id: r.id, type: "item-detail", item: { ...ROUTE_DETAIL } });
+  const pending = route.copy("username");
+  await waitFor(() => route.nativeCount("item-copy-field") === 1, "final copy");
+  const sent = route.h.sent.find((r) => r.type === "item-copy-field");
+  assert.deepEqual([sent.item_id, sent.revision, sent.field], [ROUTE_ITEM_ID, ROUTE_ITEM_REV, "username"]);
+  await route.h.send({ type: "route-close", token: route.token }, route.sender());
+  route.h.deliver({
+    v: 1, id: sent.id, type: "field-value", item_id: ROUTE_ITEM_ID,
+    revision: ROUTE_ITEM_REV, field: "username", value: "late-secret",
+    copied: true, expires_in_seconds: 30,
+  });
+  const late = await pending;
+  assert.ok(!late || late.error === "refused", "a late field value escaped");
+  assert.equal(late?.copiedField, undefined);
+  assert.doesNotMatch(JSON.stringify(late || {}), /late-secret/);
+  await route.h.send({ type: "disconnect" });
+});
+
+test("route clipboard port is bound to the claimed exact route", async () => {
+  const route = await fieldRouteFixture();
+  const portSender = { ...route.sender() };
+  const port = route.h.emitPort("native-clipboard", portSender);
+  await port.waitReady();
+  assert.equal(port.disconnected, false, "the route tab's port was not admitted");
+  // Before the claim nothing may prepare.
+  port.post({ type: "prepare", request_id: hexId(1), item_id: ROUTE_ITEM_ID, revision: ROUTE_ITEM_REV, field: "password" });
+  assert.equal((await port.waitFor((m) => m.type === "refused")).unknown, false);
+  assert.equal(route.nativeCount("prepare-copy-field"), 0);
+  assert.equal((await route.claim())?.type, "route-claimed");
+  // After the claim: wrong target and a field outside the approved detail are
+  // refused, the exact field reaches native prepare.
+  port.post({ type: "prepare", request_id: hexId(2), item_id: "d".repeat(32), revision: ROUTE_ITEM_REV, field: "password" });
+  await waitFor(() => port.received.filter((m) => m.type === "refused").length >= 2, "wrong target");
+  port.post({ type: "prepare", request_id: hexId(3), item_id: ROUTE_ITEM_ID, revision: ROUTE_ITEM_REV, field: "notes" });
+  await waitFor(() => port.received.filter((m) => m.type === "refused").length >= 3, "foreign field");
+  assert.equal(route.nativeCount("prepare-copy-field"), 0);
+  port.post({ type: "prepare", request_id: hexId(4), item_id: ROUTE_ITEM_ID, revision: ROUTE_ITEM_REV, field: "password" });
+  const prepared = await port.waitFor((m) => m.type === "prepared");
+  assert.equal(prepared.copy_ticket, COPY_TICKET);
+  // Commit is bound to the same selector.
+  port.post({ type: "commit", request_id: hexId(5), item_id: ROUTE_ITEM_ID, revision: ROUTE_ITEM_REV, field: "password", copy_ticket: COPY_TICKET });
+  await waitFor(() => route.nativeCount("commit-copy-field") === 1, "commit");
+  await route.h.send({ type: "disconnect" });
+});
+
+test("a route port opened after the claim keeps the approved field binding", async () => {
+  // The real popup opens native-clipboard only when the user clicks Copy,
+  // i.e. after the route has already been claimed.
+  const route = await fieldRouteFixture();
+  assert.equal((await route.claim())?.type, "route-claimed");
+  const port = route.h.emitPort("native-clipboard", route.sender());
+  await port.waitReady();
+  assert.equal(port.disconnected, false, "the late route port was not admitted");
+  // A field outside the approved detail is refused before native prepare.
+  port.post({ type: "prepare", request_id: hexId(1), item_id: ROUTE_ITEM_ID, revision: ROUTE_ITEM_REV, field: "notes" });
+  assert.equal((await port.waitFor((m) => m.type === "refused", "foreign field")).unknown, false);
+  assert.equal(route.nativeCount("prepare-copy-field"), 0, "a foreign field reached native");
+  // The approved field reaches native prepare and commit.
+  port.post({ type: "prepare", request_id: hexId(2), item_id: ROUTE_ITEM_ID, revision: ROUTE_ITEM_REV, field: "password" });
+  const prepared = await port.waitFor((m) => m.type === "prepared", "approved field prepare");
+  assert.equal(prepared.copy_ticket, COPY_TICKET);
+  const prepare = route.h.sent.find((r) => r.type === "prepare-copy-field");
+  assert.deepEqual([prepare.item_id, prepare.revision, prepare.field],
+    [ROUTE_ITEM_ID, ROUTE_ITEM_REV, "password"]);
+  port.post({
+    type: "commit", request_id: hexId(3), item_id: ROUTE_ITEM_ID,
+    revision: ROUTE_ITEM_REV, field: "password", copy_ticket: COPY_TICKET,
+  });
+  await waitFor(() => route.nativeCount("commit-copy-field") === 1, "approved field commit");
+  await route.h.send({ type: "disconnect" });
+});
+
+test("revoked routes hold no clipboard selectors", async () => {
+  // Real production text: a route's approved selector state lives on the
+  // grant and on its ports, and revoking the route must clear both so nothing
+  // it held can later authorize a prepare or commit.
+  const source = fs.readFileSync(path.join(__dirname, "../background.js"), "utf8");
+  // Only the revokeRoute body: stop at the next top-level function.
+  const start = source.indexOf("  function revokeRoute(grant) {");
+  const body = source.slice(start, source.indexOf("\n  function revokeAllRoutes(", start));
+  const routeDetail = { id: ROUTE_ITEM_ID, revision: ROUTE_ITEM_REV, fields: ["username"] };
+  const grant = { token: "f".repeat(64), tabId: 7, state: "claimed", routeDetail, clients: new Set() };
+  const port = { routeDetail, grant: null, preparing: null, timer: null };
+  grant.clients.add(port);
+  const grants = new Map([[grant.token, grant]]);
+  const tabs = new Map([[7, grant]]);
+  const run = new Function(
+    "routeGrants", "routeTabs", "routeBoots", "clipboardDropGrant",
+    '"use strict";' + body + "\nreturn revokeRoute;",
+  )(grants, tabs, new Set(), () => {});
+  run(grant);
+  assert.equal(grant.routeDetail, null, "the grant kept approved selectors");
+  assert.equal(port.routeDetail, null, "an admitted port kept approved selectors");
+  assert.equal(grants.has(grant.token), false);
+  assert.equal(tabs.has(7), false);
+});
+
+test("route clipboard port admission needs the route's exact tab and URL", async () => {
+  const route = await fieldRouteFixture();
+  const routeTab = { ...route.sender().tab };
+  // Another tab id carrying the route URL is not the route.
+  const foreign = route.h.emitPort("native-clipboard", {
+    ...route.sender(),
+    tab: { ...routeTab, id: 99 },
+  });
+  await tick();
+  assert.equal(foreign.disconnected, true, "a foreign tab kept a route port");
+  assert.deepEqual(foreign.received, []);
+  const admitted = route.h.emitPort("native-clipboard", {
+    ...route.sender(),
+    tab: routeTab,
+  });
+  await admitted.waitReady();
+  assert.equal(admitted.disconnected, false);
+  await route.h.send({ type: "disconnect" });
+});
+
+test("a route revoked during native prepare cancels the late offer", async () => {
+  const route = await fieldRouteFixture();
+  const port = route.h.emitPort("native-clipboard", route.sender());
+  await port.waitReady();
+  await route.claim();
+  port.post({ type: "prepare", request_id: hexId(1), item_id: ROUTE_ITEM_ID, revision: ROUTE_ITEM_REV, field: "password" });
+  const prepare = await waitFor(() => route.h.sent.find((r) => r.type === "prepare-copy-field"), "prepare");
+  // The source page reloads: the route is revoked with a prepare in flight.
+  route.h.listeners.updated(1, { status: "loading" });
+  route.h.deliver({
+    v: 1, id: prepare.id, type: "copy-prepared", item_id: ROUTE_ITEM_ID,
+    revision: ROUTE_ITEM_REV, field: "password", copy_mode: "native",
+    copy_ticket: COPY_TICKET, expires_in_seconds: 10, cleanup_ttl_seconds: 30,
+  });
+  await tick();
+  await tick();
+  assert.equal(port.received.filter((m) => m.type === "prepared").length, 0, "late offer escaped");
+  assert.equal(port.received.filter((m) => m.type === "revoked").length, 1);
+  port.post({ type: "commit", request_id: hexId(2), item_id: ROUTE_ITEM_ID, revision: ROUTE_ITEM_REV, field: "password", copy_ticket: COPY_TICKET });
+  await tick();
+  assert.equal(route.nativeCount("commit-copy-field"), 0);
+  await route.h.send({ type: "disconnect" });
+});
+
+// A route tab's lifecycle port: distinct from native-clipboard, opened by the
+// browser's sender identity only.
+function openLifecyclePort(h, sender) {
+  let onMessage = null, onDisconnect = null;
+  const port = {
+    name: "route-lifecycle",
+    sender,
+    received: [],
+    disconnected: false,
+    onMessage: { addListener: (f) => (onMessage = f) },
+    onDisconnect: { addListener: (f) => (onDisconnect = f) },
+    postMessage: (m) => port.received.push(m),
+    disconnect() { port.disconnected = true; onDisconnect?.(); },
+  };
+  for (const listen of h.connectListeners()) listen(port, sender);
+  return port;
+}
+
+test("a browser tab switch revokes the route on its own lifecycle port", async () => {
+  const route = await openRouteFixture();
+  assert.equal((await route.claim())?.type, "route-claimed");
+  const port = openLifecyclePort(route.h, route.sender());
+  await tick();
+  assert.equal(port.disconnected, false, "the route lifecycle port was not admitted");
+  assert.deepEqual(
+    port.received.map((message) => [message.type, message.token]),
+    [["route-ready", route.token]],
+  );
+  // Production path: the browser activates another ordinary tab.
+  route.h.listeners.active({ tabId: 2, windowId: 1 });
+  await tick();
+  assert.deepEqual(
+    port.received.slice(1).map((message) => [message.type, message.token]),
+    [["route-revoked", route.token]],
+  );
+  assert.equal(port.disconnected, true, "a revoked route kept its lifecycle port");
+  // No detail or value ever travels on the lifecycle port.
+  assert.equal(JSON.stringify(port.received).includes('"detail"'), false);
+  await route.h.send({ type: "disconnect" });
+});
+
+test("lifecycle port admission needs the live exact route page", async () => {
+  const route = await openRouteFixture();
+  // Another tab id, a wrong token, and a non-route page never get a port.
+  for (const sender of [
+    { ...route.sender(), tab: { ...route.sender().tab, id: 99 } },
+    {
+      ...route.sender(),
+      url: "chrome-extension://fixed/popup.html#route=" + "d".repeat(64),
+      tab: {
+        ...route.sender().tab,
+        url: "chrome-extension://fixed/popup.html#route=" + "d".repeat(64),
+      },
+    },
+    {
+      ...route.sender(),
+      url: "chrome-extension://fixed/popup.html",
+      tab: { ...route.sender().tab, url: "chrome-extension://fixed/popup.html" },
+    },
+  ]) {
+    const port = openLifecyclePort(route.h, sender);
+    await tick();
+    assert.equal(port.disconnected, true, "a foreign sender kept a lifecycle port");
+    assert.deepEqual(port.received, []);
+  }
+  const ok = openLifecyclePort(route.h, route.sender());
+  await tick();
+  assert.equal(ok.disconnected, false);
+  // Explicit route close carries the same cleanup.
+  await route.h.send({ type: "route-close", token: route.token }, route.sender());
+  await tick();
+  assert.deepEqual(
+    (({ type, token }) => [type, token])(ok.received.at(-1)),
+    ["route-revoked", route.token],
+  );
+  assert.equal(ok.disconnected, true);
+  await route.h.send({ type: "disconnect" });
+});
+
+// Settles a port that admission refused: background's catch disconnects it.
+async function closedPort(port) {
+  for (let i = 0; i < 50 && !port.disconnected; i++) await tick();
+}
+// The route document may connect its lifecycle port before the browser
+// reports its activation or initial load and before tabs.create() resolves.
+// The port must then be admitted for the browser-verified route tab so the
+// page receives route-ready and can claim.
+async function earlyRouteStartupFixture() {
+  const ROUTE_TAB = 7;
+  const ITEM_ID = "b".repeat(32);
+  const ITEM_REV = "c".repeat(64);
+  let sourceTab = null;
+  let routeTab = null;
+  let release = null;
+  const h = harness({
+    onRequest: (r) => {
+      if (r.type === "vault-search")
+        return {
+          v: 1, id: r.id, type: "vault-items",
+          items: [{ id: ITEM_ID, revision: ITEM_REV, category: "login", title: "Target" }],
+        };
+      if (r.type === "item-get")
+        return {
+          v: 1, id: r.id, type: "item-detail",
+          item: {
+            id: ITEM_ID, revision: ITEM_REV, category: "login", title: "Target",
+            username: "ada", has_password: true,
+          },
+        };
+      return undefined;
+    },
+  });
+  await ready(h);
+  sourceTab = { id: 1, windowId: 1, active: true, url: "https://example.test/login" };
+  h.api.tabs.get = async (tabId) =>
+    tabId === sourceTab.id ? { ...sourceTab } : tabId === ROUTE_TAB && routeTab ? { ...routeTab } : null;
+  h.api.scripting.executeScript = async (options) =>
+    options.target.tabId === sourceTab.id
+      ? [{ frameId: 0, documentId: h.docId(), result: { top: true, origin: "https://example.test" } }]
+      : [{ frameId: 0, documentId: "route-doc", result: { top: true, origin: "chrome-extension://fixed" } }];
+  let routeURL = "";
+  h.api.tabs.create = (options) => {
+    // The browser has opened and activated the route tab, so tabs.get reports
+    // it, but neither onActivated nor onUpdated arrived and the promise is
+    // still pending.
+    routeURL = options.url;
+    sourceTab = { ...sourceTab, active: false };
+    routeTab = { id: ROUTE_TAB, windowId: sourceTab.windowId, active: true, url: routeURL };
+    return new Promise((resolve) => (release = resolve));
+  };
+  return {
+    h,
+    ROUTE_TAB,
+    ITEM_ID,
+    source: () => ({ ...sourceTab }),
+    setSource(next) {
+      sourceTab = { ...sourceTab, ...next };
+    },
+    route: () => (routeTab ? { ...routeTab } : null),
+    setRoute(next) {
+      routeTab = next ? { ...routeTab, ...next } : null;
+    },
+    // Browser sender identity: defaults to the exact route document that
+    // tabs.get reports, never to the caller's own claim.
+    routeSender: (overrides = {}) => {
+      const url = overrides.url ?? routeTab?.url ?? routeURL;
+      return {
+        id: "fixed",
+        url,
+        origin: "chrome-extension://fixed",
+        frameId: 0,
+        documentId: "route-doc",
+        tab: {
+          id: overrides.tabId ?? ROUTE_TAB,
+          url,
+          windowId: overrides.windowId ?? 1,
+        },
+      };
+    },
+    // The browser's own startup events followed by tabs.create() resolving.
+    finishStartup() {
+      h.listeners.active({ tabId: ROUTE_TAB, windowId: 1 });
+      h.listeners.updated(ROUTE_TAB, { status: "loading" });
+      h.listeners.updated(ROUTE_TAB, { url: routeURL });
+      if (!release) return;
+      release({ id: ROUTE_TAB, windowId: 1, status: "loading" });
+      release = null;
+    },
+    routeReady: (port) => port.received.find((m) => m.type === "route-ready"),
+    claim(token, overrides) {
+      return h.send({ type: "route-claim", token }, this.routeSender(overrides));
+    },
+    pending: () => release !== null,
+    nativeReads: () => h.sent.filter((r) => r.type === "vault-search" || r.type === "item-get"),
+  };
+}
+
+test("the route lifecycle port connects before the route tab is announced and can claim", async () => {
+  const route = await earlyRouteStartupFixture();
+  const opened = route.h.send({ type: "open-route", id: route.ITEM_ID, revision: "c".repeat(64) });
+  await waitFor(() => route.route(), "browser-created route tab");
+  assert.equal(route.pending(), true, "tabs.create resolved before the port connected");
+  const token = route.h.routeToken(route.route().url);
+  assert.equal(token.length, 64);
+  // The route document connects first, before activation/update and create.
+  // openRouteLifecyclePort() counts every port ever admitted, so use one.
+  const port = openLifecyclePort(route.h, route.routeSender(), 1);
+  const ready = await waitFor(() => route.routeReady(port), "route-ready before activation");
+  assert.deepEqual([ready.type, ready.token], ["route-ready", token]);
+  assert.equal(port.disconnected, false, "the early route lifecycle port was refused");
+  // The claim is admitted on the same browser-checked identity.
+  const claim = await route.claim(token);
+  assert.equal(claim?.type, "route-claimed", "the early route could not claim");
+  assert.equal(claim.item_id, route.ITEM_ID);
+  assert.equal(claim.detail.title, "Target");
+  assert.deepEqual(route.nativeReads().map((r) => r.type), ["vault-search", "item-get"]);
+  // The browser's own startup events and create continuation still land
+  // without revoking the admitted route.
+  route.finishStartup();
+  const openedReply = await opened;
+  assert.ok(openedReply?.routeCreated, "the route create was refused");
+  await tick();
+  assert.equal(port.received.filter((m) => m.type === "route-revoked").length, 0);
+  assert.equal(port.disconnected, false);
+  await route.h.send({ type: "disconnect" });
+});
+
+test("a transiently missing route tab keeps the startup route for its own activation", async () => {
+  // Production observed routeActivation() binding the boot grant, then a
+  // tabs.get() that transiently reported no tab revoking it before the
+  // lifecycle port could be admitted. Absence is not a mismatch: the exact
+  // binding and the one startup activation must survive, with nothing read
+  // and no synthesized tab data, and the route must still admit exactly its
+  // own approved detail afterwards.
+  const route = await earlyRouteStartupFixture();
+  const opened = route.h.send({ type: "open-route", id: route.ITEM_ID, revision: "c".repeat(64) });
+  await waitFor(() => route.route(), "browser-created route tab");
+  assert.equal(route.pending(), true, "tabs.create resolved before the port connected");
+  const exact = route.route();
+  const token = route.h.routeToken(exact.url);
+  assert.equal(token.length, 64);
+  // The activation arrives while the browser transiently reports no such tab.
+  route.setRoute(null);
+  route.h.listeners.active({ tabId: route.ROUTE_TAB, windowId: 1 });
+  await tick();
+  // The missing lookup revoked nothing and started no native read.
+  assert.deepEqual(route.nativeReads(), [], "the missing lookup read the vault");
+  // The exact route tab is reported again and startup/create completes.
+  route.setRoute({ id: exact.id, windowId: exact.windowId, active: true, url: exact.url });
+  route.finishStartup();
+  const openedReply = await opened;
+  assert.ok(openedReply?.routeCreated, "the startup route create was refused");
+  await tick();
+  assert.deepEqual(route.nativeReads(), [], "startup itself read the vault");
+  // The startup route then admits its own lifecycle port and exactly its own
+  // approved detail: the ordinary vault-search then item-get read.
+  const port = openLifecyclePort(route.h, route.routeSender());
+  const ready = await waitFor(() => route.routeReady(port), "route-ready after transient absence");
+  assert.deepEqual([ready.type, ready.token], ["route-ready", token]);
+  assert.equal(port.disconnected, false, "the startup route port was refused");
+  const claim = await route.claim(token);
+  assert.equal(claim?.type, "route-claimed", "the startup route could not claim");
+  assert.equal(claim.item_id, route.ITEM_ID);
+  assert.equal(claim.detail.title, "Target");
+  assert.deepEqual(route.nativeReads().map((r) => r.type), ["vault-search", "item-get"]);
+  assert.equal(port.received.filter((m) => m.type === "route-revoked").length, 0);
+  assert.equal(port.disconnected, false);
+  await route.h.send({ type: "disconnect" });
+});
+
+test("an initializing route tab URL with the exact pendingUrl keeps startup", async () => {
+  // The browser can report the created tab while its navigation is still
+  // initializing: url is not yet the route, but pendingUrl is exactly it.
+  // That is this route's own startup, not a mismatch, so it must not revoke.
+  // Nothing may be read until the live URL is exact, and then exactly the
+  // ordinary vault-search + item-get happen after route-ready and claim.
+  const route = await earlyRouteStartupFixture();
+  const opened = route.h.send({ type: "open-route", id: route.ITEM_ID, revision: "c".repeat(64) });
+  await waitFor(() => route.route(), "browser-created route tab");
+  assert.equal(route.pending(), true, "tabs.create resolved before the port connected");
+  const exact = route.route();
+  const token = route.h.routeToken(exact.url);
+  assert.equal(token.length, 64);
+  // Activation lookup: exact id/window, initializing current url, exact
+  // browser-reported pendingUrl.
+  route.setRoute({
+    id: exact.id,
+    windowId: exact.windowId,
+    active: true,
+    url: "chrome-extension://fixed/popup.html",
+    pendingUrl: exact.url,
+  });
+  route.h.listeners.active({ tabId: route.ROUTE_TAB, windowId: 1 });
+  await tick();
+  // Startup survived and nothing was read while the URL is not exact.
+  assert.deepEqual(route.nativeReads(), [], "an initializing tab read the vault");
+  // The live URL becomes exact before lifecycle-port admission.
+  route.setRoute({ url: exact.url });
+  route.finishStartup();
+  const openedReply = await opened;
+  assert.ok(openedReply?.routeCreated, "the initializing route create was refused");
+  await tick();
+  assert.deepEqual(route.nativeReads(), [], "startup itself read the vault");
+  const port = openLifecyclePort(route.h, route.routeSender());
+  const ready = await waitFor(() => route.routeReady(port), "route-ready after initializing URL");
+  assert.deepEqual([ready.type, ready.token], ["route-ready", token]);
+  assert.equal(port.disconnected, false, "the initializing route port was refused");
+  assert.deepEqual(route.nativeReads(), [], "admission alone read the vault");
+  const claim = await route.claim(token);
+  assert.equal(claim?.type, "route-claimed", "the initializing route could not claim");
+  assert.equal(claim.item_id, route.ITEM_ID);
+  assert.equal(claim.detail.title, "Target");
+  assert.deepEqual(route.nativeReads().map((r) => r.type), ["vault-search", "item-get"]);
+  assert.equal(port.received.filter((m) => m.type === "route-revoked").length, 0);
+  assert.equal(port.disconnected, false);
+  await route.h.send({ type: "disconnect" });
+});
+
+// Chrome documents Port.sender as a getter, so it is not required to return
+// the same object twice. This port hands out a fresh but structurally
+// identical sender on every read, which must be admitted exactly like the
+// reference-identical one.
+function openLifecyclePortFreshSender(h, sender) {
+  let onMessage = null, onDisconnect = null;
+  const port = {
+    name: "route-lifecycle",
+    received: [],
+    disconnected: false,
+    onMessage: { addListener: (f) => (onMessage = f) },
+    onDisconnect: { addListener: (f) => (onDisconnect = f) },
+    postMessage: (m) => port.received.push(m),
+    disconnect() { port.disconnected = true; onDisconnect?.(); },
+  };
+  // A new object each access, with a new tab object as well: equal fields,
+  // never equal identity.
+  Object.defineProperty(port, "sender", {
+    get: () => ({ ...sender, tab: { ...sender.tab } }),
+    enumerable: true,
+  });
+  assert.notEqual(port.sender, port.sender, "the sender must be a fresh object");
+  for (const listen of h.connectListeners()) listen(port, sender);
+  return port;
+}
+
+test("a fresh Port.sender object still admits the early route and its claim", async () => {
+  const route = await earlyRouteStartupFixture();
+  const opened = route.h.send({ type: "open-route", id: route.ITEM_ID, revision: "c".repeat(64) });
+  await waitFor(() => route.route(), "browser-created route tab");
+  assert.equal(route.pending(), true, "tabs.create resolved before the port connected");
+  const token = route.h.routeToken(route.route().url);
+  assert.equal(token.length, 64);
+  // The route document connects first, before activation/update and create,
+  // and its Port.sender is never the same object reference twice.
+  const port = openLifecyclePortFreshSender(route.h, route.routeSender());
+  const ready = await waitFor(() => route.routeReady(port), "route-ready before activation");
+  assert.deepEqual([ready.type, ready.token], ["route-ready", token]);
+  assert.equal(port.disconnected, false, "a fresh but identical sender was refused");
+  // The exact approved detail is still the only read, through the unchanged
+  // native vault-search then item-get sequence.
+  const claim = await route.claim(token);
+  assert.equal(claim?.type, "route-claimed", "the fresh-sender route could not claim");
+  assert.equal(claim.item_id, route.ITEM_ID);
+  assert.equal(claim.detail.id, route.ITEM_ID);
+  assert.equal(claim.detail.revision, "c".repeat(64));
+  assert.equal(claim.detail.title, "Target");
+  assert.deepEqual(route.nativeReads().map((r) => r.type), ["vault-search", "item-get"]);
+  const read = route.nativeReads()[1];
+  assert.equal(read.item_id, route.ITEM_ID);
+  assert.equal(read.revision, "c".repeat(64));
+  // The browser's own startup events and create continuation still land.
+  route.finishStartup();
+  const openedReply = await opened;
+  assert.ok(openedReply?.routeCreated, "the route create was refused");
+  await tick();
+  assert.equal(port.received.filter((m) => m.type === "route-revoked").length, 0);
+  await route.h.send({ type: "disconnect" });
+});
+
+test("a lagging Port.sender.url still admits the early route and its claim", async () => {
+  const route = await earlyRouteStartupFixture();
+  const opened = route.h.send({ type: "open-route", id: route.ITEM_ID, revision: "c".repeat(64) });
+  await waitFor(() => route.route(), "browser-created route tab");
+  assert.equal(route.pending(), true, "tabs.create resolved before the port connected");
+  const token = route.h.routeToken(route.route().url);
+  assert.equal(token.length, 64);
+  // The documented lag case: sender.url is only the extension page base while
+  // the browser's own tab still carries the exact route token URL.
+  const base = "chrome-extension://fixed/popup.html";
+  const lagged = { ...route.routeSender(), url: base };
+  assert.equal(lagged.url, base);
+  assert.equal(lagged.url.includes("#route="), false);
+  assert.equal(lagged.tab.url, route.route().url);
+  assert.equal(route.h.routeToken(lagged.tab.url), token);
+  // Still a fresh, structurally identical Port.sender object on every read.
+  const port = openLifecyclePortFreshSender(route.h, lagged);
+  const ready = await waitFor(() => route.routeReady(port), "route-ready before activation");
+  assert.deepEqual([ready.type, ready.token], ["route-ready", token]);
+  assert.equal(port.disconnected, false, "a lagging sender.url was refused");
+  // The same lagged sender may claim, and only its own exact detail comes back.
+  const claim = await route.h.send({ type: "route-claim", token }, lagged);
+  assert.equal(claim?.type, "route-claimed", "the lagging-sender route could not claim");
+  assert.equal(claim.item_id, route.ITEM_ID);
+  assert.equal(claim.detail.id, route.ITEM_ID);
+  assert.equal(claim.detail.revision, "c".repeat(64));
+  assert.equal(claim.detail.title, "Target");
+  assert.deepEqual(route.nativeReads().map((r) => r.type), ["vault-search", "item-get"]);
+  const read = route.nativeReads()[1];
+  assert.equal(read.item_id, route.ITEM_ID);
+  assert.equal(read.revision, "c".repeat(64));
+  // The browser's own startup events and create continuation still land.
+  route.finishStartup();
+  const openedReply = await opened;
+  assert.ok(openedReply?.routeCreated, "the route create was refused");
+  await tick();
+  assert.equal(port.received.filter((m) => m.type === "route-revoked").length, 0);
+  await route.h.send({ type: "disconnect" });
+});
+
+test("an early route lifecycle port never admits a forged or unrelated page", async () => {
+  const route = await earlyRouteStartupFixture();
+  const opened = route.h.send({ type: "open-route", id: route.ITEM_ID, revision: "c".repeat(64) });
+  await waitFor(() => route.route(), "browser-created route tab");
+  const token = route.h.routeToken(route.route().url);
+  const otherURL = "chrome-extension://fixed/popup.html#route=" + "d".repeat(64);
+  const cases = [
+    // The exact route URL in another tab is not the browser-created route tab.
+    ["another tab", { tabId: 99 }],
+    // Another route token is not this route.
+    ["another token", { url: otherURL }],
+    // A plain extension page is not the route.
+    ["plain popup page", { url: "chrome-extension://fixed/popup.html" }],
+    // A route URL sender in another window is not the created window.
+    ["another window", { windowId: 2 }],
+  ];
+  for (const [label, overrides] of cases) {
+    const port = openLifecyclePort(route.h, route.routeSender(overrides), 1);
+    await closedPort(port);
+    assert.equal(port.disconnected, true, label + " kept a lifecycle port");
+    assert.deepEqual(port.received, [], label + " received data");
+    const claim = await route.claim(token, overrides);
+    assert.ok(!claim || claim.error === "refused", label + " claimed the route");
+    assert.equal(claim?.detail, undefined);
+    assert.equal(port.disconnected, true, label + " reopened a lifecycle port");
+  }
+  // The browser reports the route tab itself at another route's URL, and the
+  // route tab is not the active tab: neither may be admitted either.
+  route.setRoute({ url: otherURL });
+  const moved = openLifecyclePort(route.h, route.routeSender(), 1);
+  await closedPort(moved);
+  assert.equal(moved.disconnected, true, "a moved route tab kept a lifecycle port");
+  assert.deepEqual(moved.received, []);
+  assert.ok(
+    !(await route.claim(token, { url: otherURL }))?.detail,
+    "a moved route tab claimed through a stale URL",
+  );
+  route.setRoute({ url: route.route().url, active: false });
+  const inactive = openLifecyclePort(route.h, route.routeSender(), 1);
+  await closedPort(inactive);
+  assert.equal(inactive.disconnected, true, "an inactive route tab kept a lifecycle port");
+  assert.deepEqual(inactive.received, []);
+  assert.equal(route.nativeReads().length, 0, "a forged route reached the native host");
+  // Restore the browser's tab and finish the still-pending startup.
+  route.setRoute({ url: route.route().url, active: true });
+  route.finishStartup();
+  await opened;
+  await route.h.send({ type: "disconnect" });
+});
+
 test("page sender cannot connect or choose a field", async () => {
   const h = harness();
   assert.equal(

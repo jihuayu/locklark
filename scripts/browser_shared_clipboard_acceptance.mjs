@@ -101,8 +101,9 @@ class LineWorker {
 }
 
 // Independent OS clipboard reader. The expected bytes are sent as JSON on the
-// helper's private stdin, never in argv, environment or the DOM.
-class PrivateClipboard {
+// helper's private stdin, never in argv, environment or the DOM. Exported so
+// another external journey can reuse exactly this private-pipe reader.
+export class PrivateClipboard {
   constructor(context) {
     this.context = context;
     this.worker = null;

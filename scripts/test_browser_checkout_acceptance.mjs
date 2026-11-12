@@ -3,6 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import vm from "node:vm";
 import {
   checkoutTopHTML,
   checkoutCardHTML,
@@ -1366,4 +1367,566 @@ test("both helper outcomes are asserted through the actual result object", () =>
       testSource,
       new RegExp(`chooseChildOrigin\\([^)]*\\)\\s*,\\s*${branch}\\)`),
     );
+});
+
+test("route lifecycle sanitizer keeps only fixed booleans and capped counts", () => {
+  // The QuickFill=false route smoke reports routeTargetLifecycle only on a
+  // route-detail failure. It must stay a fixed allowlisted shape: no url,
+  // token, frame/loader/document id, text, value or raw protocol payload.
+  // Only the pure lifecycle helpers are compiled, in an empty context; the
+  // harness itself is never imported (it launches a browser when run).
+  const source = readFileSync(
+    new URL("./browser_native_acceptance.mjs", import.meta.url),
+    "utf8",
+  );
+  const start = source.indexOf("const ROUTE_LIFECYCLE_EVENTS = [");
+  const stop = source.indexOf("\nlet privacyValues", start);
+  assert.ok(start >= 0 && stop > start, "lifecycle helpers must stay top-level");
+  const context = vm.createContext({});
+  vm.runInContext(source.slice(start, stop), context);
+  const sanitized = JSON.parse(
+    vm.runInContext(
+      "JSON.stringify(sanitizeRouteLifecycle({" +
+        'enabled: true, mainFrame: "yes", navigated: 1, mainFrameDetached: true,' +
+        'url: "chrome-extension://abcd/popup.html#route=SECRET",' +
+        'frameId: "FRAME", loaderId: "LOADER", documentId: "DOC", text: "SECRET",' +
+        "eventCounts: { frameNavigated: 999, frameStoppedLoading: -1, injected: 2 }," +
+        "raw: { method: \"Page.frameNavigated\" }" +
+        "}))",
+      context,
+    ),
+  );
+  assert.deepEqual(sanitized, {
+    enabled: true,
+    mainFrame: false,
+    loadingStarted: false,
+    loadingStopped: false,
+    navigated: false,
+    navigationRequested: false,
+    sameDocumentNavigation: false,
+    mainFrameDetached: true,
+    eventCounts: {
+      frameStartedLoading: 0,
+      frameStoppedLoading: 0,
+      frameNavigated: 16,
+      frameRequestedNavigation: 0,
+      navigatedWithinDocument: 0,
+      frameDetached: 0,
+    },
+  });
+});
+
+test("route label inspect preserves focus and the approval click stays physical", () => {
+  // The native-label wait only reads the route page's approval state. It must
+  // use the helper's focus-preserving form (partial title, no raise/focus), or
+  // the idle native window can cover the route page before any approval
+  // exists. The later approval stays one ordinary physical click.
+  const source = readFileSync(
+    new URL("./browser_native_acceptance.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /inspect: true,\n\s+title_prefix: "Locklark · 浏览器原生确认",\n\s+preserve_focus: true,/,
+  );
+  assert.match(source, /input\(\[\], true, ROUTE_LABEL_INSPECT\)\.controls\?\.\["批准本次操作"\]/);
+  // The raising/focusing positional form never appears in the route
+  // checkpoint; it remains only for the unconditional-fill journeys.
+  assert.ok(countMatches(source, /input\(\[\], true, true\)/g) > 0);
+  const checkpoint = source.slice(
+    source.indexOf("async function acceptRouteDetailRead"),
+    source.indexOf("async function blank()"),
+  );
+  assert.doesNotMatch(checkpoint, /input\(\[\], true, true\)/);
+  assert.equal(
+    countMatches(checkpoint, /input\(\[\], true, ROUTE_LABEL_INSPECT\)/g),
+    1,
+  );
+  assert.equal(
+    countMatches(
+      source,
+      /^\s*input\(\[\{ click_label: "批准本次操作" \}\]\);$/gm,
+    ),
+    1,
+  );
+});
+
+test("route probe maps the fixed claim-pending status to native-pending", () => {
+  // The visible route status is the only proof that the page entered its
+  // claim before pagehide. Exactly the fixed text maps to a fixed enum, and
+  // no status text or other DOM content leaves the page.
+  const source = readFileSync(
+    new URL("./browser_native_acceptance.mjs", import.meta.url),
+    "utf8",
+  );
+  // Anchored at the real declaration: `ROUTE_VIEWS` also appears inside the
+  // probe's own template text.
+  const start = source.search(/^const ROUTE_VIEWS = /m);
+  const stop = source.indexOf("\nfunction phase(", start);
+  assert.ok(start >= 0 && stop > start, "route probe must stay top-level");
+  const context = vm.createContext({});
+  vm.runInContext(
+    source.slice(start, stop) + "\nthis.probe = routeStateProbe;",
+    context,
+  );
+  const kindFor = (statusText) => {
+    context.document = {
+      body: { dataset: { view: "closed" } },
+      querySelector(selector) {
+        if (selector === "#status") return { textContent: statusText };
+        if (selector === "#detail-view") return { hidden: true };
+        return null;
+      },
+    };
+    // The probe returns the page-side expression string; evaluate it against
+    // the fake document exactly as the harness sends it to Runtime.evaluate.
+    const expression = vm.runInContext("probe('fixture')", context);
+    const probed = vm.runInContext(
+      "JSON.stringify(eval(" + JSON.stringify(expression) + "))",
+      context,
+    );
+    const value = JSON.parse(probed);
+    assert.deepEqual(Object.keys(value).sort(), [
+      "detailShown",
+      "statusKind",
+      "titleMatchesFixture",
+      "view",
+    ]);
+    assert.ok(!probed.includes(statusText) || statusText === "");
+    return value.statusKind;
+  };
+  assert.equal(kindFor("正在请求桌面审批…"), "native-pending");
+  assert.equal(kindFor("正在请求桌面审批"), "other");
+  assert.equal(kindFor("正在请求桌面审批… "), "native-pending");
+  assert.equal(kindFor("无法打开此条目"), "claim-failed");
+  assert.equal(kindFor("条目已失效，请重新从金库打开"), "route-revoked");
+  assert.equal(kindFor(""), "other");
+});
+
+test("route status trace keeps every #status write batched in one callback", () => {
+  // popup.js writes #status.textContent, so the observer sees childList records
+  // whose target is #status and whose addedNodes are its text nodes. Separate
+  // writes batched into one callback must each classify from their own record,
+  // in order. Only the live #status subtree is read, the cap holds, and stop
+  // disconnects.
+  const source = readFileSync(
+    new URL("./browser_native_acceptance.mjs", import.meta.url),
+    "utf8",
+  );
+  const start = source.search(/^const ROUTE_VIEWS = /m);
+  const stop = source.indexOf("\nfunction phase(", start);
+  assert.ok(start >= 0 && stop > start, "route trace helpers must stay top-level");
+  const code = source.slice(start, stop);
+  assert.match(code, /^const ROUTE_STATUS_TRACE_LIMIT = 8;$/m);
+
+  const textNode = (data) => ({ nodeType: 3, data, parentNode: null });
+  class FakeElement {
+    constructor(tag, selector = "") {
+      this.tag = tag;
+      this.selector = selector;
+      this.childNodes = [];
+      this.hidden = true;
+      this.contains = (node) => node === this;
+      this.matches = (selectors) =>
+        selectors.split(",").some((part) => part.trim() === this.selector);
+    }
+    // Same contract as the DOM: assigning textContent replaces all children
+    // with one text node (written once; popup.js never writes twice per task).
+    get textContent() {
+      return this.childNodes.map((node) => node.data ?? "").join("");
+    }
+    set textContent(value) {
+      this.childNodes = [];
+      const text = String(value ?? "");
+      if (text) {
+        const node = textNode(text);
+        node.parentNode = this;
+        this.childNodes.push(node);
+      }
+    }
+  }
+  const deliveries = [];
+  const observers = [];
+  class FakeObserver {
+    constructor(callback) {
+      this.callback = callback;
+      this.disconnected = false;
+      observers.push(this);
+    }
+    observe(target) {
+      this.target = target;
+    }
+    disconnect() {
+      this.disconnected = true;
+    }
+    takeRecords() {
+      return deliveries.splice(0);
+    }
+  }
+  const document = {
+    body: new FakeElement("body"),
+    nodes: {},
+    querySelector(selector) {
+      return this.nodes[selector] ?? null;
+    },
+  };
+  document.body.dataset = { view: "vault" };
+  document.nodes["#detail-view"] = new FakeElement("section", "#detail-view");
+  document.nodes["#detail-title"] = new FakeElement("h2", "#detail-title");
+  const status = new FakeElement("p", "#status");
+  const addStatus = () => {
+    document.nodes["#status"] = status;
+    status.contains = (node) =>
+      node === status || (node?.parentNode === status && node !== status);
+  };
+  const context = vm.createContext({
+    MutationObserver: FakeObserver,
+    document,
+    Element: FakeElement,
+  });
+  vm.runInContext(code + "\nthis.probe = routeStatusTraceProbe;this.clean = sanitizeRouteStatusTrace;", context);
+  // A second, independent installation (same fake document shape) for checks
+  // whose result must not depend on earlier writes.
+  const newContext = () => {
+    const nodes = { ...document.nodes, "#status": status };
+    const isolatedDocument = {
+      body: document.body,
+      nodes,
+      querySelector(selector) {
+        return nodes[selector] ?? null;
+      },
+    };
+    const isolated = vm.createContext({
+      MutationObserver: FakeObserver,
+      document: isolatedDocument,
+      Element: FakeElement,
+    });
+    vm.runInContext(
+      code + "\nthis.probe = routeStatusTraceProbe;",
+      isolated,
+    );
+    vm.runInContext(
+      "eval(" + JSON.stringify(vm.runInContext("probe('FIXTURE')", isolated)) + ")",
+      isolated,
+    );
+    return {
+      document: isolatedDocument,
+      statuses: () =>
+        JSON.parse(vm.runInContext("__locklarkRouteStatusTraceRead()", isolated))
+          .filter((entry) => entry.channel === "status")
+          .map((entry) => entry.value),
+      batch: (records) => {
+        deliveries.push(...records);
+        observers.at(-1).callback(observers.at(-1).takeRecords());
+      },
+    };
+  };
+  vm.runInContext(
+    "eval(" + JSON.stringify(vm.runInContext("probe('FIXTURE')", context)) + ")",
+    context,
+  );
+  assert.equal(observers.length, 1);
+  // The main installation's observer (isolated contexts add their own).
+  const mainObserver = observers[0];
+  const trace = () => JSON.parse(vm.runInContext("__locklarkRouteStatusTraceRead()", context));
+  const statuses = () =>
+    trace().filter((entry) => entry.channel === "status").map((entry) => entry.value);
+  const batch = (records) => {
+    deliveries.push(...records);
+    observers.at(-1).callback(observers.at(-1).takeRecords());
+  };
+  // What assigning `textContent` produces as one MutationRecord.
+  const write = (value, element = status) => {
+    const removed = element.childNodes;
+    element.textContent = value;
+    return {
+      type: "childList",
+      target: element,
+      addedNodes: element.childNodes.slice(),
+      removedNodes: removed,
+    };
+  };
+
+  // Unrelated page text never appends a status event.
+  const before = trace();
+  const heading = textNode("普通标题文本");
+  document.nodes["#detail-title"].textContent = "普通标题文本";
+  document.nodes["#detail-title"].contains = (node) => node === heading || node.parentNode === document.nodes["#detail-title"];
+  batch([
+    { type: "characterData", target: heading },
+    { type: "childList", addedNodes: [heading], target: document.body },
+  ]);
+  assert.deepEqual(trace(), before);
+
+  // #status inserted after installation with the pending literal is captured.
+  addStatus();
+  const pendingNode = textNode("正在请求桌面审批…");
+  pendingNode.parentNode = status;
+  status.childNodes = [pendingNode];
+  batch([{ type: "childList", target: document.body, addedNodes: [status], removedNodes: [] }]);
+  assert.deepEqual(statuses().at(-1), "native-pending");
+
+  // The real case: pending then revoked, then cleared, all in one callback.
+  // Each record carries its own text node, so every transition survives even
+  // though only the last write remains current in the DOM.
+  const pending = write("正在请求桌面审批…");
+  const revoked = write("条目已失效，请重新从金库打开");
+  const cleared = write("");
+  batch([pending, revoked, cleared]);
+  const tail = statuses().slice(-3);
+  assert.deepEqual(tail, ["native-pending", "route-revoked", "empty"]);
+
+  // The same batched shape for pending then the closed text.
+  const pendingAgain = write("正在请求桌面审批…");
+  batch([pendingAgain, write("已关闭此条目")]);
+  assert.deepEqual(statuses().slice(-2), ["native-pending", "closed"]);
+
+  // Only a status-owned characterData record classifies, and unknown status
+  // text becomes only the fixed "other" enum. A fresh context keeps this
+  // independent of the text left by the writes above.
+  const isolated = newContext();
+  const isolatedStatus = isolated.document.nodes["#status"];
+  const foreign = textNode("无法打开此条目");
+  const mark = isolated.statuses().length;
+  isolated.batch([{ type: "characterData", target: foreign }]);
+  assert.equal(isolated.statuses().length, mark);
+  const owned = textNode("无法打开此条目");
+  owned.parentNode = isolatedStatus;
+  isolatedStatus.childNodes = [owned];
+  isolated.batch([{ type: "characterData", target: owned }]);
+  assert.deepEqual(isolated.statuses().at(-1), "claim-failed");
+  isolatedStatus.textContent = "SECRET-STATUS-TEXT";
+  isolated.batch([
+    {
+      type: "childList",
+      target: isolatedStatus,
+      addedNodes: isolatedStatus.childNodes.slice(),
+      removedNodes: [owned],
+    },
+  ]);
+  assert.deepEqual(isolated.statuses().at(-1), "other");
+
+  // The cap holds and nothing arbitrary or raw leaves the page.
+  for (let index = 0; index < 30; index++)
+    batch([write(index % 2 ? "无法打开此条目" : "正在请求桌面审批…")]);
+  assert.equal(trace().length, 8);
+  const serialized = JSON.stringify(trace());
+  assert.doesNotMatch(serialized, /SECRET|普通|FIXTURE|正在请求|无法打开|已关闭|已失效|http|#route=/);
+  for (const entry of trace()) {
+    assert.deepEqual(Object.keys(entry).sort(), ["channel", "value"]);
+    assert.ok(entry.value === true || entry.value === false || entry.value.length <= 16);
+  }
+
+  // Cleanup disconnects the observer and removes both hooks.
+  assert.equal(vm.runInContext("__locklarkRouteStatusTraceStop()", context), true);
+  assert.equal(mainObserver.disconnected, true);
+  assert.equal(
+    vm.runInContext(
+      "typeof globalThis.__locklarkRouteStatusTraceRead + typeof globalThis.__locklarkRouteStatusTraceStop",
+      context,
+    ),
+    "undefinedundefined",
+  );
+});
+
+test("route per-field copy uses physical input, exact native labels and the private pipe", () => {
+  // The route journey's field-copy proof must click the rendered Copy control
+  // with real CDP mouse input, accept only the fixed approval labels, approve
+  // physically, show the fixed feedback and compare the OS clipboard through
+  // the private-pipe reader. Only booleans leave; expected bytes never do.
+  const source = readFileSync(
+    new URL("./browser_native_acceptance.mjs", import.meta.url),
+    "utf8",
+  );
+  const ROUTE_REVIEW_LITERAL = '"批准本次操作"';
+  const helper = (name) => {
+    const from = source.indexOf(name);
+    assert.ok(from > 0, "missing " + name);
+    const body = source.slice(from);
+    const end = body.indexOf("\n  }\n", body.indexOf("async function"));
+    const next = source.indexOf("\n  async function ", from + name.length);
+    const stop = source.indexOf("\n  }\n", next);
+    return source.slice(from, next > 0 && stop > next ? stop : end);
+  };
+  assert.match(source, /^const ROUTE_COPY_FIELD_SELECTOR =\n  '\[data-field-id="password"\] \[data-action="copy-field"\]';$/m);
+  assert.match(source, /^const ROUTE_COPY_REVIEW_LABEL = "批准本次操作";$/m);
+  assert.match(source, /^const ROUTE_COPY_DISCLOSURE_LABEL = "批准本次字段披露";$/m);
+  const checkpoint = helper("async function acceptRouteDetailRead");
+  // One physical click on the exact Copy control through the wrapper.
+  assert.equal(
+    countMatches(checkpoint, /await route\.click\(ROUTE_COPY_FIELD_SELECTOR\);/g),
+    1,
+  );
+  assert.doesNotMatch(checkpoint, /\.evaluate\([^)]*click\(\)|dispatchEvent/);
+  // Only the fixed labels are ever clicked, each through the native helper.
+  assert.match(
+    checkpoint,
+    /input\(\[\{ click_label: ROUTE_COPY_REVIEW_LABEL \}\]\);/,
+  );
+  assert.match(
+    checkpoint,
+    /input\(\[\{ click_label: ROUTE_COPY_DISCLOSURE_LABEL \}\]\);/,
+  );
+  // Every native label click in the checkpoint is one of the two fixed
+  // approval labels (the earlier route review plus the field disclosure).
+  for (const match of checkpoint.matchAll(/click_label: ([^\s}]+)/g))
+    assert.ok(
+      [ROUTE_REVIEW_LITERAL, "ROUTE_COPY_REVIEW_LABEL", "ROUTE_COPY_DISCLOSURE_LABEL"].includes(
+        match[1],
+      ),
+      "unexpected native click label " + match[1],
+    );
+  // Focus-preserving inspect only for the approval waits.
+  assert.match(
+    checkpoint,
+    /inspect: true,\n\s+title_prefix: "Locklark · 浏览器原生确认",\n\s+preserve_focus: true,/,
+  );
+  assert.doesNotMatch(checkpoint, /input\(\[\], true, true\)/);
+  // The disclosure is always required, even after a legacy review.
+  assert.match(checkpoint, /Native field disclosure did not appear/);
+  assert.match(checkpoint, /Native field disclosure did not follow its review/);
+  // Fixed UI feedback, never a page-computed success.
+  // All three fixed success variants: both native-lease lines and the
+  // legacy manual-copy line. Pending/refusal/unknown text is absent.
+  assert.match(
+    source,
+    /^const ROUTE_COPY_FEEDBACK = \[\n  "已启用自动清理",\n  "自动清理已关闭",\n  "已复制；浏览器无法保证自动清除，请按需手动清理",\n\];$/m,
+  );
+  const feedbackList = source.slice(
+    source.indexOf("const ROUTE_COPY_FEEDBACK = ["),
+    source.indexOf("];", source.indexOf("const ROUTE_COPY_FEEDBACK = [")) + 2,
+  );
+  for (const text of ["已启用自动清理", "自动清理已关闭", "已复制；浏览器无法保证自动清除，请按需手动清理"])
+    assert.ok(feedbackList.includes(text), "missing success feedback " + text);
+  assert.equal(countMatches(feedbackList, /已复制；/g), 1);
+  for (const failure of ["复制失败", "复制结果未确认", "复制已取消或被拒绝"])
+    assert.ok(!feedbackList.includes(failure), "failure text accepted: " + failure);
+  // The legacy line is the real popup success feedback after writeText,
+  // not an invented string: it appears in writeClipboard -> copiedFeedback.
+  const popupSource = readFileSync(
+    new URL("../browser-extension/popup.js", import.meta.url),
+    "utf8",
+  );
+  const writeFrom = popupSource.indexOf("async function writeClipboard(value, button) {");
+  assert.ok(writeFrom > 0, "missing writeClipboard");
+  const writeBody = popupSource.slice(
+    writeFrom,
+    popupSource.indexOf("\n  }\n", writeFrom),
+  );
+  assert.match(
+    writeBody,
+    /await globalThis\.navigator\.clipboard\.writeText\(value\);\n    \} catch \{\n      toast\("复制失败"\);\n      return;\n    \}\n    copiedFeedback\(button, "已复制；浏览器无法保证自动清除，请按需手动清理"\);/,
+  );
+  // Success is only ever the feedback text; the clipboard match below
+  // stays mandatory.
+  assert.match(checkpoint, /ROUTE_COPY_FEEDBACK\.some/);
+  // Private-pipe comparison; no success without a matching clipboard.
+  assert.match(checkpoint, /new PrivateClipboard\(\{ root, state, env \}\)/);
+  assert.match(checkpoint, /clipboardReader\.start\(\)/);
+  assert.match(checkpoint, /clipboardReader\.matches\(fixture\.Value\)/);
+  assert.match(checkpoint, /OS clipboard did not receive the approved field/);
+  assert.match(checkpoint, /clipboardReader\.stop\(\)/);
+  // The expected bytes are never passed to input/native helpers or printed.
+  assert.doesNotMatch(checkpoint, /input\([^)]*fixture\.Value/);
+  assert.doesNotMatch(checkpoint, /console\.(log|error)\([^)]*fixture\.Value/);
+  assert.doesNotMatch(checkpoint, /click_label: [^"]*Value/);
+  // Concealment is asserted again right before the copy, as booleans only.
+  assert.match(checkpoint, /routePasswordRowProbe\(fixture\.Value\)/);
+  assert.match(checkpoint, /rowBefore\?\.masked, true/);
+  assert.match(checkpoint, /rowBefore\?\.leaked, false/);
+  // The checkpoint drives the real adapter: attachRoute must forward the
+  // existing popup mouse wrapper, not just evaluate/close, and that wrapper is
+  // the reviewed CDP input path (no DOM event dispatch anywhere).
+  const adapterFrom = source.indexOf("async function attachRoute(target) {");
+  assert.ok(adapterFrom > 0, "missing attachRoute adapter");
+  const adapter = source.slice(
+    adapterFrom,
+    source.indexOf("\n    }\n", adapterFrom) + "\n    }\n".length,
+  );
+  assert.match(adapter, /const route = await attachPopup\(target\);/);
+  assert.match(adapter, /click: \(selector\) => route\.click\(selector\),/);
+  // count/text forward the existing popup readers; the copy proof waits on
+  // the rendered row count and the fixed toast text through them.
+  assert.match(adapter, /count: \(selector\) => route\.count\(selector\),/);
+  assert.match(adapter, /text: \(selector\) => route\.text\(selector\),/);
+  assert.match(adapter, /evaluate: \(expression\) => route\.evaluate\(expression\),/);
+  assert.match(adapter, /bringToFront: \(\) => route\.bringToFront\(\),/);
+  assert.match(adapter, /close: \(\) => route\.close\(\),/);
+  assert.doesNotMatch(adapter, /dispatchEvent|\.evaluate\([^)]*click/);
+  // Closed world: the adapter exposes exactly these five methods and the
+  // checkpoint only calls those, so a missing forward cannot slip through.
+  const exposed = [...adapter.matchAll(/^\s{8}([a-zA-Z]+): /gm)]
+    .map((match) => match[1])
+    .sort();
+  assert.deepEqual(exposed, [
+    "bringToFront",
+    "click",
+    "close",
+    "count",
+    "evaluate",
+    "text",
+  ]);
+  const called = new Set(
+    [...checkpoint.matchAll(/\broute\.([a-zA-Z]+)\(/g)].map((match) => match[1]),
+  );
+  assert.deepEqual([...called].sort(), exposed);
+  // The forwarded bringToFront is exactly one CDP Page.bringToFront call.
+  assert.equal(
+    countMatches(source, /bringToFront: \(\) => call\("Page\.bringToFront"\),/g),
+    1,
+  );
+  // The forwarded method is the real mouse wrapper: visibility and hit-test
+  // first, then one CDP mousePressed/mouseReleased pair.
+  const popupFrom = source.indexOf("async function attachPopup(target) {");
+  assert.ok(popupFrom > 0, "missing attachPopup wrapper");
+  const popup = source.slice(popupFrom, source.indexOf("\n  }\n", popupFrom));
+  const clickFrom = popup.indexOf("click: async (selector) => {");
+  assert.ok(clickFrom > 0, "attachPopup has no click method");
+  const wrapper = popup.slice(clickFrom, popup.indexOf("\n      },", clickFrom));
+  assert.match(wrapper, /document\.visibilityState!=="visible"/);
+  assert.match(wrapper, /document\.elementFromPoint/);
+  assert.match(wrapper, /type: "mousePressed"/);
+  assert.match(wrapper, /type: "mouseReleased"/);
+  assert.doesNotMatch(wrapper, /dispatchEvent/);
+  // Focus is restored and proven (visible and focused) immediately before the
+  // one physical click, never by a DOM or synthesized bypass.
+  const focusStage = checkpoint.indexOf('mark("route:copy-focus")');
+  const bringCall = checkpoint.indexOf("await route.bringToFront();");
+  const focusProof = checkpoint.indexOf(
+    'document.visibilityState === "visible" && document.hasFocus() === true',
+  );
+  const clickCall = checkpoint.indexOf(
+    "await route.click(ROUTE_COPY_FIELD_SELECTOR);",
+  );
+  assert.ok(focusStage > 0 && bringCall > focusStage, "focus stage/order");
+  assert.ok(focusProof > bringCall, "focus proof must follow bringToFront");
+  assert.ok(clickCall > focusProof, "click must follow the focus proof");
+  assert.match(
+    checkpoint.slice(bringCall, clickCall),
+    /Route page did not return to the foreground/,
+  );
+  assert.doesNotMatch(checkpoint, /document\.hasFocus =|\.focus\(\)/);
+  // The route journey calls that forwarded method, not a local substitute.
+  assert.match(
+    checkpoint,
+    /await route\.click\(ROUTE_COPY_FIELD_SELECTOR\);/,
+  );
+  // The private-pipe reader is the shared one, exported without behavior change.
+  const shared = readFileSync(
+    new URL("./browser_shared_clipboard_acceptance.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(shared, /^export class PrivateClipboard \{$/m);
+  assert.match(
+    source,
+    /import \{\n  acceptSharedClipboard,\n  prepareSharedEnvironment,\n  PrivateClipboard,\n\} from "\.\/browser_shared_clipboard_acceptance\.mjs";/,
+  );
+  // Bounded stages exist for click, approval and clipboard comparison.
+  for (const stage of [
+    "route:copy-field",
+    "route:field-approval",
+    "route:field-approve",
+    "route:clipboard",
+  ])
+    assert.ok(source.includes('mark("' + stage + '")'), stage);
 });
