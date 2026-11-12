@@ -69,10 +69,18 @@ DISCOVER_TIMEOUT = 5.0
 CONTROL_TIMEOUT = 10.0
 POLL = 0.05
 
+# Optional process scope on a NORMAL request: the exact Popen PID of the product
+# this caller launched. When present, every window observation (discovery,
+# absence, re-observation, focus, controls) is restricted to that owned process
+# through the adapter's owned-AX path and never the CoreGraphics inventory.
+SCOPE_KEY = "owned_pid"
 REQUEST_KEYS = frozenset({"title", "title_prefix", "executable", "actions",
                           "inspect", "wait_absent", "preserve_focus"})
 ACTION_KEYS = frozenset({"click_label", "wait_label", "click", "text", "key"})
-ABSENCE_KEYS = frozenset({"title", "executable", "actions", "wait_absent"})
+# An absence check may also be scoped to an owned process: it then observes
+# only that process's AX windows. The absence form still forbids actions and
+# inspect, and still requires the exact title and canonical executable.
+ABSENCE_KEYS = frozenset({"title", "executable", "actions", "wait_absent", SCOPE_KEY})
 # Activation-only form: exact {pid, executable} and nothing else. It is disjoint
 # from every normal request above and authorises no observation or input.
 ACTIVATION_KEYS = frozenset({"activate_pid", "executable"})
@@ -288,7 +296,8 @@ def _activation_plan(document):
         raise ContractError("executable-invalid")
     return {"activation": {"pid": pid, "executable": document["executable"]},
             "title": None, "title_prefix": None, "executable": None, "actions": (),
-            "inspect": False, "wait_absent": False, "preserve_focus": False}
+            "inspect": False, "wait_absent": False, "preserve_focus": False,
+            "owned_pid": None}
 
 
 def parse_request(raw):
@@ -309,8 +318,13 @@ def parse_request(raw):
         raise ContractError("request-invalid")
     if "activate_pid" in document:
         return _activation_plan(document)
-    if [key for key in document if key not in REQUEST_KEYS]:
+    if [key for key in document if key not in REQUEST_KEYS | {SCOPE_KEY}]:
         raise ContractError("request-unknown-key")
+    # An owned-PID scope is validated BEFORE anything else can touch AX.
+    if SCOPE_KEY in document:
+        pid = document[SCOPE_KEY]
+        if type(pid) is not int or pid <= 0:
+            raise ContractError("request-invalid", {"field": SCOPE_KEY})
     plan = {
         "title": None, "title_prefix": None, "executable": None, "actions": [],
         "inspect": False, "wait_absent": False, "preserve_focus": False,
@@ -341,6 +355,13 @@ def parse_request(raw):
             raise ContractError("absence-invalid")
     elif plan["preserve_focus"] and plan["title_prefix"] is None:
         raise ContractError("request-invalid", {"field": "preserve_focus"})
+    # A process scope narrows discovery; the exact fixture title and canonical
+    # executable stay mandatory (never waived). An absence check reads every
+    # owned window's title, so it stays the exact-title form too.
+    if SCOPE_KEY in document and (plan["title"] is None
+                                  or plan["executable"] is None):
+        raise ContractError("request-invalid", {"field": SCOPE_KEY})
+    plan["owned_pid"] = document.get(SCOPE_KEY)
     return plan
 
 # --------------------------------------------------------------- observation --
@@ -1266,12 +1287,32 @@ def snapshot(adapter, window, budget):
 # ----------------------------------------------------------------- absence ----
 
 def await_absent(plan, adapter, budget):
+    """Bounded absence wait; an owned-PID scope never consults CoreGraphics.
+
+    A scoped adapter is asked through ``owned_absence`` so it can observe only
+    its owned process's AX windows (and refuse rather than fall back). The
+    result keeps the original fixed semantics: ``{"absent": True}`` as soon as
+    the exact-title window is not present, else ``window-changed`` at the
+    unchanged CONTROL_TIMEOUT.
+    """
     deadline = monotonic() + CONTROL_TIMEOUT
+    probe = getattr(adapter, "owned_absence", None)
     while True:
-        windows = adapter.list_windows()
-        budget.charge_windows(windows, adapter)
-        if not [w for w in windows
-                if title_matches(plan, w) and same_executable(plan["executable"], w.get("executable"), adapter.platform)]:
+        if callable(probe):
+            state = probe(plan)
+            if type(state) is not dict or type(state.get("present")) is not bool:
+                raise ContractError("a11y-query")
+            # One window observation, charged exactly like the unscoped loop.
+            budget.charge_windows([{"pid": state.get("pid"),
+                                    "id": state.get("id")}])
+            present = state["present"]
+        else:
+            windows = adapter.list_windows()
+            budget.charge_windows(windows, adapter)
+            present = bool([w for w in windows
+                            if title_matches(plan, w) and same_executable(
+                                plan["executable"], w.get("executable"), adapter.platform)])
+        if not present:
             return {"absent": True}
         if monotonic() >= deadline:
             raise ContractError("window-changed", {"present": 1})
@@ -1342,6 +1383,19 @@ def execute(plan, adapter):
     if plan.get("activation") is not None:
         # Activation-only: no capability prompt and no accessibility query.
         return execute_activation(plan, adapter)
+    # An owned-PID scope is installed BEFORE capability/observe/discovery, so
+    # no CG inventory or other scope can be observed in between. The release it
+    # returns is kept on THIS plan and always run by run_stdin's finally.
+    plan["releases"] = []
+    scope = plan.get("owned_pid")
+    if scope is not None:
+        scoper = getattr(adapter, "scope_owned_process", None)
+        if not callable(scoper):
+            raise ContractError("a11y-query")
+        release = scoper(scope)
+        if not callable(release):
+            raise ContractError("a11y-query")
+        plan["releases"].append(release)
     if check is not None:
         check()
     if plan["wait_absent"]:
@@ -1423,13 +1477,20 @@ def execute(plan, adapter):
 
 
 def run_stdin(adapter, platform, stdin=None, stdout=None, stderr=None):
-    """Read one request, execute it, and emit either safe JSON or one fixed line."""
+    """Read one request, execute it, and emit either safe JSON or one fixed line.
+
+    Whatever happens - a parse failure, a refusal, an unexpected exception or a
+    timeout - the releases recorded on the parsed plan always run in
+    ``finally``, so an owned-PID scope never outlives this one request.
+    """
     stdin = sys.stdin.buffer if stdin is None else stdin
     stdout = sys.stdout if stdout is None else stdout
     stderr = sys.stderr if stderr is None else stderr
     FAILURE_CONTEXT["action"], FAILURE_CONTEXT["index"] = "setup", -1
+    plan = None
     try:
-        result = execute(parse_request(stdin.read(MAX_REQUEST_BYTES + 1)), adapter)
+        plan = parse_request(stdin.read(MAX_REQUEST_BYTES + 1))
+        result = execute(plan, adapter)
     except ContractError as error:
         stderr.write(failure_line(error, FAILURE_CONTEXT["action"],
                                   FAILURE_CONTEXT["index"], platform) + "\n")
@@ -1438,5 +1499,11 @@ def run_stdin(adapter, platform, stdin=None, stdout=None, stderr=None):
         stderr.write(failure_line(ContractError("unexpected"), FAILURE_CONTEXT["action"],
                                   FAILURE_CONTEXT["index"], platform) + "\n")
         return 1
+    finally:
+        for release in (plan or {}).get("releases", ()):
+            try:
+                release()
+            except Exception:
+                pass
     stdout.write(json.dumps(result) + "\n")
     return 0

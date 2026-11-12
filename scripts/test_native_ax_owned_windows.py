@@ -398,13 +398,17 @@ class OwnedWindowsTests(unittest.TestCase):
             self.assertNotIn(text, repr(error.guard))
         self.assertEqual(error.guard, {})
 
-    def test_helper_is_reached_only_from_scoped_discovery(self):
-        # Step 2 wires the helper into exactly ONE caller: owned discovery.
+    def test_helper_is_reached_only_from_the_scoped_paths(self):
+        # Only scoped owned-AX observations call it: discovery and the
+        # absence-orientated record enumeration. Never the CG path.
         self.assertIn("owned_windows", dir(macos.QuartzApi))
         with open(macos.__file__, encoding="utf-8") as handle:
             source = handle.read()
-        self.assertEqual(source.count(".owned_windows("), 1)
+        self.assertNotIn("self.owned_windows(", source.replace(
+            "elements = self.owned_windows(pid)", "").replace(
+            "for element in self.owned_windows(pid)", ""))
         self.assertIn("elements = self.owned_windows(pid)", source)
+        self.assertIn("for element in self.owned_windows(pid)", source)
         # The unscoped CoreGraphics path never uses it.
         cg = source[source.index("    def list_windows(self):"):]
         cg = cg[:cg.index("def _ax_title")]

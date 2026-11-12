@@ -801,6 +801,39 @@ class QuartzApi:
             "bounds": dict(bounds), "client": dict(bounds),
         }
 
+    def owned_window_records(self):
+        """Public records of EVERY owned AX window (scoped; no CG inventory).
+
+        Discovery and absence both observe through here. Every listed window is
+        proven with GetPid BEFORE its title or frame is read, and a window that
+        does not belong to the scoped PID refuses (never "absent").
+        """
+        pid = self.owned_pid_scope()
+        if pid is None:
+            raise _a11y_query()
+        records = []
+        for element in self.owned_windows(pid):
+            if self._proven_pid(element) != pid:
+                raise _a11y_query()
+            name = self.title(element)
+            if not name:
+                continue
+            try:
+                bounds = self.frame(element)
+            except AxValueUnavailable:
+                raise _a11y_query()
+            if not contract.rect_positive(bounds):
+                raise _a11y_query()
+            path, trusted = self.process(pid)
+            records.append({
+                "id": element, "pid": pid, "title": name,
+                "executable": path, "trusted": trusted,
+                "visible": True, "onscreen": True,
+                "secure": path.rsplit("/", 1)[-1].lower() in SECURE_PROCESSES,
+                "bounds": dict(bounds), "client": dict(bounds),
+            })
+        return records
+
     def set_owned_scope_title(self, title):
         """Fix the exact requested title for this scope (validated plain text)."""
         if self.owned_pid_scope() is None or type(title) is not str or not title \
@@ -1813,7 +1846,11 @@ class MacAdapter:
         return prove(window, state)
 
     def list_windows(self):
-        """Scoped: the owned PID's AX windows only (never the CG inventory)."""
+        """Scoped: the owned PID's AX windows only (never the CG inventory).
+
+        Discovery goes through ``owned_discovery`` so the exact-title match is
+        enforced and the single accepted handle is adopted for later proofs.
+        """
         if self._scoped():
             title = self.api.owned_scope_title()
             if type(title) is not str:
@@ -1821,6 +1858,47 @@ class MacAdapter:
             windows, unique = self.api.owned_discovery(title)
             return [] if not unique else [self._normalise(raw) for raw in windows]
         return [self._normalise(raw) for raw in self.api.list_windows()]
+
+    def owned_process_windows(self):
+        """Public records of ONLY the owned PID's AX windows (absence seam).
+
+        Every observed window is proven with GetPid before its title/frame.
+        This never consults the CoreGraphics inventory.
+        """
+        reader = getattr(self.api, "owned_window_records", None)
+        if not callable(reader):
+            raise contract.ContractError("a11y-query")
+        return reader()
+
+    def owned_absence(self, plan):
+        """Scoped absence state: is ANY owned AX window exactly ``plan``'s?
+
+        Returns ``{"present": bool}``. An absence request has no discovery, so
+        the plan's exact title (already validated by the contract and never
+        waived) fixes the scope title here. An observation that cannot be
+        proven refuses ``a11y-query`` instead of guessing "absent".
+        """
+        title = plan.get("title") if type(plan) is dict else None
+        if type(title) is not str:
+            raise contract.ContractError("a11y-query")
+        setter = getattr(self.api, "set_owned_scope_title", None)
+        if not callable(setter):
+            raise contract.ContractError("a11y-query")
+        setter(title)
+        expected = self.api.owned_scope_title()
+        if title != expected:
+            raise contract.ContractError("a11y-query")
+        windows = self.owned_process_windows()
+        matches = [window for window in windows
+                   if window.get("title") == expected
+                   and window.get("pid") == self.api.owned_pid_scope()
+                   and (plan.get("executable") is None
+                        or window.get("executable") == plan.get("executable"))]
+        # The fixed absence semantics stay identical: present means the exact
+        # unique window; the identity observed is the owned AX handle.
+        return {"present": bool(matches),
+                "pid": self.api.owned_pid_scope(),
+                "id": matches[0]["id"] if matches else None}
 
     @staticmethod
     def _native_title(value):

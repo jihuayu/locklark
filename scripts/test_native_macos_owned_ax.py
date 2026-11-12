@@ -12,6 +12,7 @@ before any title/frame read. The unscoped int-id path and the public
 four-boolean status stay unchanged.
 """
 import ctypes
+import io
 import json
 import os
 import sys
@@ -147,6 +148,28 @@ class FakeFrameworks:
     def AXUIElementCopyElementAtPosition(self, application, x, y, out):
         self.requests.append(("at", application, x, y))
         return (0, self.hit)
+
+    # One active display covering every test rectangle. These are the CG
+    # DISPLAY queries, never the CG window inventory (which stays poisoned).
+    def CGGetActiveDisplayList(self, limit, displays, count):
+        self.requests.append(("display_list",))
+        return (0, [("display", 0)], 1)
+
+    def CGDisplayBounds(self, display):
+        self.requests.append(("display_bounds",))
+        return ((0, 0), (4000, 3000))
+
+    # Inert CG EVENT stubs (physical input, never the window inventory).
+    kCGHIDEventTap = 0
+    kCGEventMouseMoved = 5
+    kCGEventLeftMouseDown = 1
+    kCGEventLeftMouseUp = 2
+
+    def CGEventCreateMouseEvent(self, source, kind, point, button):
+        return ("mouse", kind, tuple(point))
+
+    def CGEventPost(self, tap, event):
+        self.requests.append(("post", event))
 
     def AXValueGetValue(self, value, kind, out):
         return (True, value)
@@ -565,14 +588,11 @@ class ScopedContractFlowTests(unittest.TestCase):
         window, control = owned_window()
         api, frameworks = scoped([window], focused=window, front_pid=OWNED_PID)
         adapter = macos.MacAdapter(api=api)
-        release = adapter.scope_owned_process(OWNED_PID)
         plan = contract.parse_request(json.dumps(
-            {"title": TITLE, "executable": EXE, "actions": [], "inspect": True}).encode())
-        try:
-            with unittest.mock.patch.object(contract, "monotonic", return_value=0):
-                result = contract.execute(plan, adapter)
-        finally:
-            release()
+            {"title": TITLE, "executable": EXE, "actions": [], "inspect": True,
+             "owned_pid": OWNED_PID}).encode())
+        with unittest.mock.patch.object(contract, "monotonic", return_value=0):
+            result = contract.execute(plan, adapter)
         self.assertIsNone(result["window"])
         self.assertEqual(result["pid"], OWNED_PID)
         self.assertEqual(result["x"], WINDOW_FRAME["x"])
@@ -581,7 +601,152 @@ class ScopedContractFlowTests(unittest.TestCase):
         # The opaque handle never reaches the serialized result.
         payload = json.dumps(result)
         self.assertNotIn("Node", payload)
-        self.assertEqual(api.owned_pid_scope(), None)
+        # execute() leaves release to run_stdin (the request boundary)...
+        self.assertEqual(api.owned_pid_scope(), OWNED_PID)
+        for release in plan["releases"]:
+            release()
+        # ...and releasing clears every scoped artifact.
+        self.assertIsNone(api.owned_pid_scope())
+        self.assertIsNone(api.owned_scope_title())
+        self.assertIsNone(api._retained_handle())
+
+
+class RealEntryPointTests(unittest.TestCase):
+    """The REAL nativesmain/run_stdin over a scoped driver, CG fully poisoned."""
+
+    def entry(self, api, request, clock=None):
+        """Run ``browser_native_macos.main`` once, returning (code, result, err)."""
+        stdout, stderr = io.StringIO(), io.StringIO()
+        clock = clock or _Clock()
+        # main() builds MacAdapter() itself; the REAL class is used, only its
+        # api is injected (a class-level patch keeps MacAdapter._native_title).
+        with unittest.mock.patch.object(
+                macos.MacAdapter, "__init__",
+                lambda self, *args, **kwargs: setattr(self, "api", api)), \
+                unittest.mock.patch.object(contract, "monotonic", clock.monotonic), \
+                unittest.mock.patch.object(contract, "sleep", clock.sleep):
+            code = macos.main(io.BytesIO(request), stdout, stderr)
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def scoped_api(self):
+        window, control = owned_window()
+        api, frameworks = scoped([window], focused=window, front_pid=OWNED_PID,
+                                 hit=control)
+        return api, frameworks, window
+
+    def test_real_main_scoped_inspect_has_null_window_and_cleans_up(self):
+        api, frameworks, window = self.scoped_api()
+        request = json.dumps({"title": TITLE, "executable": EXE, "owned_pid": OWNED_PID,
+                              "actions": [{"click_label": LABEL}],
+                              "inspect": True}).encode()
+        code, out, err = self.entry(api, request)
+        self.assertEqual((code, err), (0, ""))
+        result = json.loads(out)
+        self.assertIsNone(result["window"])                  # opaque handle
+        self.assertIsNone(result["clicks"][0]["window"])     # null receipt
+        self.assertEqual(result["pid"], OWNED_PID)
+        self.assertEqual(set(result["status"]), set(contract.STATUS_FIELDS))
+        self.assertTrue(all(type(v) is bool for v in result["status"].values()))
+        # The scope never outlives the request.
+        self.assertIsNone(api.owned_pid_scope())
+        self.assertIsNone(api.owned_scope_title())
+        self.assertIsNone(api._retained_handle())
+        self.assertNotIn("CGWindowList", " ".join(r[0] for r in frameworks.requests))
+
+    def test_real_main_scoped_absence_never_uses_cg(self):
+        api, frameworks, window = self.scoped_api()
+        request = json.dumps({"title": TITLE, "executable": EXE, "owned_pid": OWNED_PID,
+                              "wait_absent": True}).encode()
+        clock = _Clock()
+        code, out, err = self.entry(api, request, clock)
+        # The exact-title window IS present: the bounded wait refuses at the
+        # unchanged deadline as window-changed, never as "absent", and never
+        # through CoreGraphics.
+        self.assertEqual(code, 1)
+        self.assertEqual(out, "")
+        self.assertIn("code=window-changed", err)
+        self.assertGreaterEqual(clock.now, contract.CONTROL_TIMEOUT)
+        self.assertIsNone(api.owned_pid_scope())
+
+    def test_real_main_scoped_absence_reports_absent_for_other_title(self):
+        window, _ = owned_window(title=OTHER_TITLE)
+        api, frameworks = scoped([window])
+        request = json.dumps({"title": TITLE, "executable": EXE, "owned_pid": OWNED_PID,
+                              "wait_absent": True}).encode()
+        code, out, err = self.entry(api, request)
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(json.loads(out), {"absent": True})
+
+    def test_malformed_pid_title_or_executable_refused_before_any_ax(self):
+        cases = (
+            {"title": TITLE, "executable": EXE, "owned_pid": 0},
+            {"title": TITLE, "executable": EXE, "owned_pid": -5},
+            {"title": TITLE, "executable": EXE, "owned_pid": True},
+            {"title": TITLE, "executable": EXE, "owned_pid": 4242.0},
+            {"title": TITLE, "executable": EXE, "owned_pid": "4242"},
+            {"title": TITLE, "executable": EXE, "owned_pid": None},
+            {"executable": EXE, "owned_pid": OWNED_PID},
+            {"title": TITLE, "owned_pid": OWNED_PID},
+            {"title_prefix": "Locklark", "executable": EXE, "owned_pid": OWNED_PID},
+            {"title": TITLE, "executable": "relative/path", "owned_pid": OWNED_PID},
+        )
+        for document in cases:
+            with self.subTest(keys=sorted(document)):
+                window, _ = owned_window()
+                frameworks = FakeFrameworks([window])   # NEVER pre-scoped
+                api = api_for(frameworks)
+                code, out, err = self.entry(api, json.dumps(document).encode())
+                self.assertEqual(code, 1)
+                self.assertEqual(out, "")
+                # NOTHING reached ApplicationServices or CoreGraphics.
+                self.assertEqual(frameworks.requests, [])
+                self.assertEqual(api.owned_pid_scope(), None)
+
+    def test_scope_released_when_execution_raises_after_installing_it(self):
+        # The REAL execute() installs the scope, then the discovery hook blows
+        # up mid-request: the finally must still release it.
+        window, _ = owned_window()
+        api = api_for(FakeFrameworks([window]))
+        adapter = macos.MacAdapter(api=api)
+
+        def explode(title):
+            raise RuntimeError("private mid-request failure")
+
+        api.owned_discovery = explode
+        request = json.dumps({"title": TITLE, "executable": EXE, "owned_pid": OWNED_PID,
+                              "actions": [{"click_label": LABEL}]}).encode()
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with unittest.mock.patch.object(
+                macos.MacAdapter, "__init__",
+                lambda self, *a, **k: setattr(self, "api", api)):
+            code = macos.main(io.BytesIO(request), stdout, stderr)
+        self.assertEqual(code, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("code=unexpected", stderr.getvalue())
+        # The scope was installed and is gone now that the request ended.
+        self.assertIsNone(api.owned_pid_scope())
+        self.assertIsNone(api.owned_scope_title())
+        self.assertIsNone(api._retained_handle())
+        self.assertEqual(api._owned_handles, None)
+
+        # Prove the release really ran by running the same request again: a
+        # leaked scope would make the second scope call see a stale title.
+        api.owned_discovery = lambda title: ([], False)
+        stdout = io.StringIO()
+        with unittest.mock.patch.object(
+                macos.MacAdapter, "__init__",
+                lambda self, *a, **k: setattr(self, "api", api)), \
+                unittest.mock.patch.object(contract, "monotonic", _Clock().monotonic), \
+                unittest.mock.patch.object(contract, "sleep", _Clock().sleep):
+            macos.main(io.BytesIO(request), stdout, io.StringIO())
+        self.assertIsNone(api.owned_pid_scope())
+
+    def test_unscoped_real_main_still_uses_the_cg_path(self):
+        api = api_for(FakeFrameworks([]))
+        request = json.dumps({"title": TITLE, "executable": EXE, "actions": []}).encode()
+        code, out, err = self.entry(api, request)
+        # Unscoped macOS keeps its CG inventory path; here it is poisoned.
+        self.assertIn("unexpected", err)
 
 
 class _Clock:
@@ -603,19 +768,15 @@ class OwnedDiscoveryContractTests(unittest.TestCase):
     """The REAL contract discovery loop over owned-AX fakes."""
 
     def run_plan(self, api, clock, actions=None, inspect=False):
+        """The REAL path: parse an owned_pid request, then execute it."""
         adapter = macos.MacAdapter(api=api)
-        release = adapter.scope_owned_process(OWNED_PID)
-        plan = {"title": TITLE, "title_prefix": None, "executable": EXE,
-                "actions": tuple(actions or ()), "inspect": inspect,
-                "wait_absent": False, "preserve_focus": False,
-                "activation": None, "owned_pid": None}
-        try:
-            with unittest.mock.patch.object(contract, "monotonic", clock.monotonic), \
-                    unittest.mock.patch.object(contract, "sleep", clock.sleep):
-                adapter.observe_plan(plan)
-                return contract.execute(plan, adapter)
-        finally:
-            release()
+        request = json.dumps({"title": TITLE, "executable": EXE,
+                              "owned_pid": OWNED_PID,
+                              "actions": list(actions or ()), "inspect": inspect}).encode()
+        plan = contract.parse_request(request)
+        with unittest.mock.patch.object(contract, "monotonic", clock.monotonic), \
+                unittest.mock.patch.object(contract, "sleep", clock.sleep):
+            return contract.execute(plan, adapter)
 
     def test_wrong_title_polls_until_exact_title_before_the_deadline(self):
         window, _ = owned_window(title=OTHER_TITLE)

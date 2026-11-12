@@ -656,6 +656,15 @@ class InspectSummaryTests(unittest.TestCase):
         self.assertTrue(all(token.split("=")[1] in ("0", "1") for token in tokens))
 
 
+class _LiveDesktop:
+    """A live desktop Popen stand-in: its exact PID scopes every request."""
+
+    pid = 4242
+
+    def poll(self):
+        return None
+
+
 class UnlockPlanTests(unittest.TestCase):
     """The fixed nine unlock actions are split across fresh bounded requests."""
 
@@ -672,6 +681,7 @@ class UnlockPlanTests(unittest.TestCase):
         instance.desktop = pathlib.Path("/build/bin/locklark-desktop").resolve()
         instance.master = self.MASTER
         instance.secret = self.SECRET
+        instance.desktop_process = _LiveDesktop()
         return instance
 
     def original_actions(self, instance):
@@ -726,7 +736,9 @@ class UnlockPlanTests(unittest.TestCase):
         self.assertEqual(len(requests), len(expected_plans))
         for request, plan in zip(requests, expected_plans):
             with self.subTest(actions=plan):
-                self.assertEqual(set(request), {"title", "executable", "actions", "inspect"})
+                self.assertEqual(set(request), {"title", "executable", "actions",
+                                                "inspect", "owned_pid"})
+                self.assertEqual(request["owned_pid"], instance.desktop_process.pid)
                 self.assertEqual(request["title"], acceptance.TITLE)
                 self.assertEqual(request["title"], "Locklark · 本地金库")
                 self.assertEqual(request["executable"], str(instance.desktop))
@@ -806,7 +818,9 @@ class UnlockPlanTests(unittest.TestCase):
                          expected_plans)
         self.assertEqual(len(requests), len(expected_plans) + 1)
         inspect_request = requests[-1]
-        self.assertEqual(set(inspect_request), {"title", "executable", "actions", "inspect"})
+        self.assertEqual(set(inspect_request), {"title", "executable", "actions",
+                                                 "inspect", "owned_pid"})
+        self.assertEqual(inspect_request["owned_pid"], instance.desktop_process.pid)
         self.assertEqual(inspect_request["title"], acceptance.TITLE)
         self.assertEqual(inspect_request["executable"], str(instance.desktop))
         self.assertEqual(inspect_request["actions"], [])

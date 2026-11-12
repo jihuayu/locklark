@@ -788,16 +788,36 @@ class Acceptance:
         self.mark("explicit_one_item_token_binding_created")
 
     # ------------------------------------------------------------- native --
+    def owned_desktop_pid(self):
+        """The actual live PID this harness launched for the product.
+
+        Only an exact positive built-in int Popen PID of a still-running
+        process qualifies; anything else refuses before a request is built.
+        """
+        process = self.desktop_process
+        require(process is not None and process.poll() is None)
+        require(type(process.pid) is int and process.pid > 0)
+        return process.pid
+
+    def scoped_request(self, actions, inspect=False):
+        """One normal macOS request scoped to this harness's own Popen PID.
+
+        The exact fixture TITLE and the canonical executable are always sent;
+        the PID only narrows every window observation to the owned process.
+        """
+        require(self.desktop is not None and os.path.isabs(str(self.desktop)))
+        return json.dumps({
+            "title": TITLE,
+            "executable": str(self.desktop),
+            "owned_pid": self.owned_desktop_pid(),
+            "actions": actions,
+            "inspect": inspect,
+        }).encode()
+
     def driver(self, actions, stage):
         if self.stage != stage:
             self.stage_code(stage)
-        request = json.dumps({
-            "title": TITLE,
-            "executable": str(self.desktop),
-            "actions": actions,
-            "inspect": False,
-        }).encode()
-        return self.run_driver(request)
+        return self.run_driver(self.scoped_request(actions))
 
     def run_driver(self, request):
         """One bounded driver invocation; saves owner-only stdout/stderr.
@@ -897,13 +917,7 @@ class Acceptance:
         exact already-validated executable bind the existing window, and
         ``inspect`` asks only for the existing controls/status boolean maps.
         """
-        require(self.desktop is not None and os.path.isabs(str(self.desktop)))
-        return json.dumps({
-            "title": TITLE,
-            "executable": str(self.desktop),
-            "actions": [],
-            "inspect": True,
-        }).encode()
+        return self.scoped_request([], inspect=True)
 
     def inspect_unlock_wait_failure(self):
         """One inspect for the terminal final wait; never retries or replays.
