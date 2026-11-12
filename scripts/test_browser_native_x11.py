@@ -722,14 +722,20 @@ _ABSENT = object()
 NATIVE_TITLE = "Extensions - Profile 1 - Microsoft\u200b Edge"
 
 
+EXTENSION_DIR = "/synthetic/package/chromium"
+
+
 def folder_request(**overrides):
-    # The exact purpose-bound folder action shape sent by the Edge install
-    # caller: the chooser title is the fixed reviewed literal, while title,
-    # title_prefix and owner_title_prefix carry exactly the observed page title
-    # Playwright reports, never a native X11 decorated form.
+    # The exact purpose-bound chooser action shape sent by the Edge install
+    # caller. By default it is the navigate action, which carries exactly the
+    # one absolute package directory: the chooser title is the fixed reviewed
+    # literal, while title, title_prefix and owner_title_prefix carry exactly
+    # the observed page title Playwright reports, never a native X11 decorated
+    # form.
     request = {
         "owner": True,
-        "chooser_action": {"select_folder": True},
+        "chooser_action": {"chooser_navigate": True},
+        "extension_dir": EXTENSION_DIR,
         "chooser_title_prefix": "Select the extension directory.",
         "title": "Extensions",
         "title_prefix": "Extensions",
@@ -743,6 +749,12 @@ def folder_request(**overrides):
     return request
 
 
+def open_request(**overrides):
+    # The separate Open action: no path, key, focus or coordinate at all.
+    return folder_request(**{"chooser_action": {"chooser_open": True},
+                             "extension_dir": _ABSENT, **overrides})
+
+
 def decorated_request(title=NATIVE_TITLE, **overrides):
     # The same shape with a native (decorated) X title carried in all three
     # request title slots; the parser must refuse it.
@@ -753,6 +765,10 @@ def decorated_request(title=NATIVE_TITLE, **overrides):
 class FolderActionTests(unittest.TestCase):
     def test_exact_semantic_action_is_the_only_accepted_shape(self):
         self.assertEqual(native.EDGE_MANAGER_TITLE, "Extensions")
+        self.assertEqual(native.CHOOSER_ACTIONS, {
+            "navigate": {"chooser_navigate": True},
+            "open": {"chooser_open": True},
+        })
         parsed = native.parse_folder_action_request(folder_request())
         self.assertEqual(parsed, {"owner_title_prefix": "Extensions",
                                   "title": "Extensions",
@@ -760,9 +776,72 @@ class FolderActionTests(unittest.TestCase):
                                   "chooser_title_prefix": "Select the extension directory.",
                                   "user_data_dir": "/synthetic/profile-1",
                                   "executable": "/synthetic/edge",
-                                  "caller_pid": None, "probe": False})
+                                  "caller_pid": None, "probe": False,
+                                  "chooser": "navigate", "navigate_path": EXTENSION_DIR})
         self.assertEqual(set(parsed), set(native.OWNER_FIELDS) |
-                         set(native.FOLDER_MANAGER_FIELDS) | {"caller_pid", "probe"})
+                         set(native.FOLDER_MANAGER_FIELDS) |
+                         {"caller_pid", "probe", "chooser", "navigate_path"})
+        opened = native.parse_folder_action_request(open_request())
+        self.assertEqual(opened["chooser"], "open")
+        self.assertIsNone(opened["navigate_path"])
+        self.assertEqual(set(opened), set(parsed))
+
+    def test_closed_request_shapes_are_exactly_two_actions(self):
+        self.assertEqual(native.FOLDER_ACTION_KEYS, frozenset({
+            "chooser_action", "chooser_title_prefix", "executable", "owner",
+            "owner_pid", "owner_title_prefix", "title", "title_prefix",
+            "user_data_dir",
+        }))
+        # navigate adds exactly the one package directory; open adds nothing.
+        self.assertEqual(native.FOLDER_NAVIGATE_KEYS,
+                         native.FOLDER_ACTION_KEYS | {"extension_dir"})
+        self.assertEqual(native.FOLDER_OPEN_KEYS, native.FOLDER_ACTION_KEYS)
+        self.assertEqual(
+            set(folder_request()) - {"extension_dir", "chooser_action"},
+            set(native.FOLDER_ACTION_KEYS) - {"chooser_action", "owner_pid"})
+        self.assertEqual(set(folder_request()) - set(native.FOLDER_NAVIGATE_KEYS), set())
+        self.assertEqual(set(open_request()) - set(native.FOLDER_OPEN_KEYS), set())
+        for key in ("actions", "preserve_focus", "click", "point", "x", "y",
+                    "width", "height", "label", "click_label", "wait_label",
+                    "key", "text", "path", "owner_pid"):
+            with self.subTest(key=key):
+                self.assertNotIn(key, folder_request())
+                self.assertNotIn(key, open_request())
+        # owner_pid remains the one optional, exactly bound field.
+        self.assertEqual(native.parse_folder_action_request(
+            open_request(owner_pid=101))["caller_pid"], 101)
+
+    def test_navigate_path_must_be_the_existing_absolute_ascii_path(self):
+        self.assertEqual(native.parse_folder_action_request(
+            folder_request())["navigate_path"], EXTENSION_DIR)
+        cases = {
+            "absent": folder_request(extension_dir=_ABSENT),
+            "null": folder_request(extension_dir=None),
+            "empty": folder_request(extension_dir=""),
+            "relative": folder_request(extension_dir="package/chromium"),
+            "root": folder_request(extension_dir="/"),
+            "trailing slash": folder_request(extension_dir=EXTENSION_DIR + "/"),
+            "newline": folder_request(extension_dir=EXTENSION_DIR + "\n"),
+            "return": folder_request(extension_dir="/synthetic/a\rb"),
+            "tab": folder_request(extension_dir="/synthetic/a\tb"),
+            "non-ascii": folder_request(extension_dir="/synthetic/路径"),
+            "nul": folder_request(extension_dir="/synthetic/a\u0000b"),
+            "non-string": folder_request(extension_dir=1),
+            "list": folder_request(extension_dir=[EXTENSION_DIR]),
+        }
+        for name, request in cases.items():
+            with self.subTest(name):
+                self.assertIsNone(native.parse_folder_action_request(request))
+        # The Open action never carries a path, package directory included.
+        for value in (EXTENSION_DIR, "", None):
+            with self.subTest(value=value):
+                self.assertIsNone(native.parse_folder_action_request(
+                    {**open_request(), "extension_dir": value}))
+        # The keyboard/path request keeps its own owner shape with the path in
+        # its actions; it is never the navigate action.
+        self.assertIsNone(native.parse_folder_action_request(input_request()))
+        self.assertIsNone(native.parse_folder_action_request(
+            input_request(chooser_navigate=True)))
 
     def test_manager_title_must_be_the_exact_observed_manager_title(self):
         # The exact observed title is the only accepted value, never a
@@ -903,25 +982,50 @@ class FolderActionTests(unittest.TestCase):
         self.assertIsNotNone(native.parse_folder_action_request(folder_request()))
 
     def test_generic_coordinates_and_unknown_actions_are_rejected(self):
+        # The removed select_folder behaviour is never accepted again: it hit
+        # the chooser's Select folder filter, not the package-directory commit.
+        for shape in ({"select_folder": True}, {"select_folder": False},
+                      {"chooser_open": "true"}, {"chooser_navigate": 1}):
+            with self.subTest(shape=shape):
+                self.assertIsNone(native.parse_folder_action_request(
+                    folder_request(chooser_action=shape)))
+                self.assertIsNone(native.parse_folder_action_request(
+                    open_request(chooser_action=shape)))
+        for request in (folder_request(), open_request()):
+            with self.subTest(action=request["chooser_action"]):
+                request = dict(request)
+                request["chooser_action"] = {**request["chooser_action"], "select_folder": True}
+                self.assertIsNone(native.parse_folder_action_request(request))
         cases = {
-            "false": folder_request(chooser_action={"select_folder": False}),
-            "absent value": folder_request(chooser_action={}),
-            "wrong key": folder_request(chooser_action={"select_directory": True}),
-            "extra action key": folder_request(chooser_action={"select_folder": True,
-                                                               "click": [1062, 753]}),
-            "true string": folder_request(chooser_action={"select_folder": "true"}),
-            "one": folder_request(chooser_action={"select_folder": 1}),
-            "null": folder_request(chooser_action={"select_folder": None}),
-            "action true": folder_request(chooser_action=True),
-            "action list": folder_request(chooser_action=[{"select_folder": True}]),
-            "action null": folder_request(chooser_action=None),
-            "actions": folder_request(actions=[{"click": [1062, 753]}]),
-            "keyboard actions": folder_request(actions=[{"key": "Return"}]),
-            "empty actions": folder_request(actions=[]),
-            "click field": folder_request(click=[1062, 753]),
-            "point field": folder_request(point={"x": 1062, "y": 753}),
-            "screen point": folder_request(x=1144, y=786),
-            "geometry": folder_request(width=1124, height=822),
+            "open false": open_request(chooser_action={"chooser_open": False}),
+            "navigate false": folder_request(chooser_action={"chooser_navigate": False}),
+            "open null": open_request(chooser_action={"chooser_open": None}),
+            "navigate null": folder_request(chooser_action={"chooser_navigate": None}),
+            "open absent value": open_request(chooser_action={}),
+            "both actions": folder_request(chooser_action={"chooser_navigate": True,
+                                                           "chooser_open": True}),
+            "open extra action key": open_request(
+                chooser_action={"chooser_open": True, "click": [1076, 799]}),
+            "navigate extra action key": folder_request(
+                chooser_action={"chooser_navigate": True, "click": [1076, 799]}),
+            "open action true": open_request(chooser_action=True),
+            "open action list": open_request(chooser_action=[{"chooser_open": True}]),
+            "open action null": open_request(chooser_action=None),
+            "unknown key": folder_request(chooser_action={"select_directory": True}),
+            "actions": folder_request(actions=[{"click": [1076, 799]}]),
+            "keyboard actions": open_request(actions=[{"key": "Return"}]),
+            "empty actions": open_request(actions=[]),
+            "click field": open_request(click=[1076, 799]),
+            "point field": open_request(point={"x": 1076, "y": 799}),
+            "label field": open_request(label="Open"),
+            "click_label": open_request(click_label="Open"),
+            "wait_label": open_request(wait_label="Open"),
+            "screen point": open_request(x=1158, y=832),
+            "local point": open_request(x=1076, y=799),
+            "screen origin": open_request(x=82, y=33),
+            "geometry": open_request(width=1124, height=822),
+            "window": open_request(window=20),
+            "target": open_request(target=20),
             "title override": folder_request(title="Other"),
             "title prefix": folder_request(title_prefix="Ext"),
             "focus": folder_request(preserve_focus=True),
@@ -949,19 +1053,42 @@ class FolderActionTests(unittest.TestCase):
         for value in (None, [], "x", True):
             with self.subTest(value=value):
                 self.assertIsNone(native.parse_folder_action_request(value))
-        # The folder key never routes through the generic owner input parser,
-        # and the zero-action probe keeps its own closed shape.
-        self.assertIsNone(native.parse_owner_request(folder_request()))
-        self.assertIsNone(native.parse_owner_request(
-            probe_request(chooser_action={"select_folder": True})))
+        # Neither chooser action ever routes through the generic owner input
+        # parser, and the zero-action probe keeps its own closed shape.
+        for request in (folder_request(), open_request(),
+                        folder_request(actions=[{"key": "Return"}], preserve_focus=False),
+                        open_request(preserve_focus=False),
+                        open_request(click=[1076, 799])):
+            with self.subTest(request=sorted(request)):
+                self.assertIsNone(native.parse_owner_request(request))
+                self.assertIsNone(native.parse_owner_request(
+                    {**probe_request(), **request}))
+        # The generic popup-preserving input mode is not weakened: it still
+        # needs preserve_focus true and never gains a chooser action.
+        for fields in ({"preserve_focus": False}, {"preserve_focus": _ABSENT},
+                       {"preserve_focus": None}, {"preserve_focus": 1}):
+            with self.subTest(fields=fields):
+                self.assertIsNone(native.parse_owner_request(owner_request(**fields)))
+        self.assertIsNotNone(native.parse_owner_request(owner_request()))
+        self.assertIsNotNone(native.parse_owner_request(input_request()))
 
-    def test_only_the_measured_point_is_derived(self):
+    def test_only_the_measured_open_point_is_derived(self):
         self.assertEqual(native.FOLDER_CHOOSER_SIZE, (1124, 822))
-        self.assertEqual(native.folder_point(1124, 822), (1062, 753))
+        self.assertEqual(native.FOLDER_CHOOSER_ORIGIN, (82, 33))
+        self.assertEqual(native.FOLDER_OPEN_LOCAL, (1076, 799))
+        self.assertEqual(native.FOLDER_POINT_OFFSETS, (("width", -48), ("height", -23)))
         width, height = native.FOLDER_CHOOSER_SIZE
-        self.assertTrue(0 < 1062 < width and 0 < 753 < height)
+        self.assertEqual(native.folder_point(1124, 822), (width - 48, height - 23))
+        self.assertEqual((width - 48, height - 23), native.FOLDER_OPEN_LOCAL)
+        self.assertTrue(0 < 1076 < width and 0 < 799 < height)
+        # The measured screen center of the visible Open button.
+        origin = native.FOLDER_CHOOSER_ORIGIN
+        self.assertEqual((origin[0] + 1076, origin[1] + 799), (1158, 832))
+        # The old width-62,height-69 point hit the Select folder filter.
+        self.assertNotEqual(native.folder_point(1124, 822), (1062, 753))
         for shape in ((1123, 822), (1124, 821), (1125, 822), (1124, 823), (1124, 824),
-                      (1120, 822), (1062, 753), (0, 0), (-1124, -822), (2248, 1644)):
+                      (1120, 822), (1062, 753), (0, 0), (-1124, -822), (2248, 1644),
+                      (1076, 799), (1124 - 48, 822 - 24), (1124 - 49, 822 - 23)):
             with self.subTest(size=shape):
                 self.assertIsNone(native.folder_point(*shape))
         for shape in ((1124, 822.0), ("1124", 822), (True, 822), (None, 822), (822, 1124)):
@@ -987,12 +1114,26 @@ class FolderActionTests(unittest.TestCase):
                 self.assertIsNone(native.folder_point(*shape))
 
     def test_output_is_fixed_and_privacy_safe(self):
-        self.assertEqual(native.folder_output(1), {"chooser_action": "select_folder", "clicks": 1})
-        self.assertEqual(native.folder_output(0), {"chooser_action": "select_folder", "clicks": 0})
-        for value in (2, -1, True, None, "1"):
-            with self.subTest(value=value):
-                self.assertIsNone(native.folder_output(value))
-        for message in ("Chooser folder action request required",
+        self.assertEqual(native.folder_output("open", 1),
+                         {"chooser_action": "chooser_open", "clicks": 1})
+        self.assertEqual(native.folder_output("navigate", 0),
+                         {"chooser_action": "chooser_navigate", "clicks": 0})
+        # Only Open clicks; navigate never claims a click and nothing claims an
+        # installation, window, path or coordinate.
+        for action, clicks in (("open", 0), ("open", 2), ("navigate", 1),
+                               ("navigate", 2), ("select_folder", 1), ("", 0),
+                               (None, 0), (True, 1), ("open", True),
+                               ("open", None), ("navigate", -1)):
+            with self.subTest(action=action, clicks=clicks):
+                self.assertIsNone(native.folder_output(action, clicks))
+        for output in (native.folder_output("open", 1),
+                       native.folder_output("navigate", 0)):
+            self.assertEqual(set(output), {"chooser_action", "clicks"})
+        for message in ("Chooser action request required",
+                        "Chooser focus failed",
+                        "Chooser shortcut unavailable",
+                        "Chooser navigation path required",
+                        "Chooser folder point is not inside the chooser",
                         "Chooser must keep the requested title",
                         "Chooser must keep the measured geometry",
                         "Chooser folder point is not inside the chooser",
@@ -1251,7 +1392,7 @@ OWNED_PARENT = {10: ROOT, 20: 10, 21: 20, 22: 21, 30: ROOT, 31: 30}
 OWNED_TREE = {**OWNED_PARENT, ROOT: ROOT}
 CHOOSER, FRAME, BUTTON, OUTER, OVERLAY, OVERLAY_CHILD = 20, 21, 22, 10, 30, 31
 GEOMETRY = (1124, 822)
-POINT = (1062, 753)
+POINT = (1076, 799)
 ORIGIN = (100, 200)
 EXPECTED_ROOT = (ORIGIN[0] + POINT[0], ORIGIN[1] + POINT[1])
 
@@ -1565,6 +1706,95 @@ class PointerDriverTests(unittest.TestCase):
         for value in (str(EXPECTED_ROOT[0]), str(EXPECTED_ROOT[1]), str(OVERLAY),
                       str(CHOOSER), "/"):
             self.assertNotIn(value, text)
+
+
+class ChooserNavigationTests(unittest.TestCase):
+    """The navigate action only maps Ctrl+L, the one path and Return."""
+
+    SHORTCUTS = {"Control_L": 0x100, "Shift_L": 0x400, "Return": 0xFF, "l": ord("l")}
+
+    def xlib(self, code, first_level=None):
+        """A fixed Xlib stand-in: keysym name -> keycode -> first-level keysym."""
+        first_level = first_level or {}
+        inverse = {value: key for key, value in code.items()}
+        return types.SimpleNamespace(
+            # The driver passes one ASCII bytes keysym name, as Xlib expects.
+            XStringToKeysym=lambda name: self.SHORTCUTS.get(
+                name.decode("ascii"), ord(name.decode("ascii"))
+                if len(name) == 1 else 0),
+            XKeysymToKeycode=lambda display, keysym: code.get(keysym, 0),
+            XKeycodeToKeysym=lambda display, keycode, index: first_level.get(
+                keycode, inverse.get(keycode, 0)),
+        )
+
+    def test_exact_plan_is_ctrl_l_path_return(self):
+        path = "/synthetic/package/chromium"
+        code = {0x100: 37, ord("l"): 46, 0xFF: 36, 0x400: 50}
+        code.update({ord(char): 100 + index for index, char in enumerate(path)})
+        plan = native.chooser_navigation(self.xlib(code), "display", path)
+        # Exactly Control_L, l, each path character and Return: no other key.
+        self.assertEqual([keycode for keycode, _shift in plan],
+                         [37, 46] + [code[ord(char)] for char in path] + [36])
+        self.assertEqual(len(plan), len(path) + 3)
+        self.assertTrue(all(shift is None for _keycode, shift in plan))
+
+    def test_shifted_symbols_are_shift_chords(self):
+        code = {0x100: 37, ord("l"): 46, 0xFF: 36, 0x400: 50, ord("/"): 61,
+                ord("Q"): 24, ord("e"): 26}
+        first_level = {24: ord("q"), 26: ord("e"), 61: ord("/")}
+        plan = native.chooser_navigation(self.xlib(code, first_level), "display", "/Qe")
+        self.assertEqual(plan, [(37, None), (46, None), (61, None), (24, 50),
+                                (26, None), (36, None)])
+
+    def test_unmapped_keys_are_refused(self):
+        code = {0x100: 37, ord("l"): 46, 0xFF: 36, 0x400: 50, ord("/"): 61,
+                ord("z"): 52}
+        xlib = self.xlib(code, {61: ord("/"), 52: ord("z")})
+        with self.assertRaisesRegex(RuntimeError,
+                                    "^Acceptance keyboard mapping unavailable$"):
+            native.chooser_navigation(xlib, "display", "/unmapped")
+        for key in (0x100, ord("l"), 0xFF, 0x400):
+            with self.subTest(missing=key):
+                with self.assertRaisesRegex(RuntimeError, "^Chooser shortcut unavailable$"):
+                    native.chooser_navigation(self.xlib({**code, key: 0}), "display", "/z")
+
+    def test_non_ascii_or_relative_path_never_maps_a_key(self):
+        calls = []
+        xlib = types.SimpleNamespace(
+            XStringToKeysym=lambda name: calls.append(name) or 1,
+            XKeysymToKeycode=lambda *args: 1,
+            XKeycodeToKeysym=lambda *args: ord("/"),
+        )
+        for path in ("relative/dir", "", "/", "/tmp/x/", "/路径", "/tmp/a\n",
+                     "/tmp/a\u0000b", None, 1):
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(
+                        RuntimeError, "^Chooser navigation path required$"):
+                    native.chooser_navigation(xlib, "display", path)
+        self.assertEqual(calls, [])
+
+    def test_navigate_answer_is_not_installation_success(self):
+        self.assertEqual(native.folder_output("navigate", 0),
+                         {"chooser_action": "chooser_navigate", "clicks": 0})
+        self.assertEqual(native.folder_output("open", 1),
+                         {"chooser_action": "chooser_open", "clicks": 1})
+        for output in (native.folder_output("navigate", 0),
+                       native.folder_output("open", 1)):
+            self.assertEqual(set(output), {"chooser_action", "clicks"})
+            self.assertNotIn("installed", output)
+            self.assertNotIn("ownership", output)
+
+
+class ChooserOwnershipRecordTests(unittest.TestCase):
+    def test_only_the_owned_record_is_accepted(self):
+        for record in ({"owned": True, "relation": "process-parent"},
+                       {"owned": True, "relation": "transient-leader"}):
+            self.assertEqual(native.safe_owner_record(record)["owned"], True)
+        for record in (None, {}, {"owned": True}, {"owned": True, "relation": "none"},
+                       {"owned": False, "relation": "process-parent"},
+                       {"owned": "true", "relation": "process-parent"}):
+            with self.subTest(record=record):
+                self.assertIsNone(native.safe_owner_record(record))
 
 
 if __name__ == "__main__":

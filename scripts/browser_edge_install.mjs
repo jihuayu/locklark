@@ -15,14 +15,17 @@
 //   2. the unique visible Load unpacked control (fluent-button[title=...]);
 //      physically clicked at its measured box.
 //   3. the native chooser, driven by scripts/browser_native_x11.py in two
-//      guarded requests carrying the actual ASCII page title as the manager
-//      prefix, the exact private --user-data-dir and the real Edge image:
-//      first the purpose-bound folder action {"select_folder": true}, whose
-//      privacy-safe answer must be exactly one select_folder click, then the
-//      unchanged keyboard/path owner request, which must be owned. The driver
-//      derives the owner PID from the unique real manager window and proves
-//      the chooser's ownership before any XTest input; neither request is
-//      replayed.
+//      separate, guarded requests that carry the exact Extensions page title
+//      as the manager prefix, the exact private --user-data-dir and the real
+//      Edge image. First the purpose-bound navigate action
+//      {"chooser_navigate": true} with the one absolute package directory;
+//      the driver focuses and raises the exact owned chooser and sends only
+//      Ctrl+L, that path and Return. Then, as its own request, the Open action
+//      {"chooser_open": true} with no caller coordinate: the driver re-proves
+//      the owner, title, pointer and X tree and emits one XTest click on the
+//      Open button at the measured point (width-48,height-23) of the measured
+//      1124x822 chooser. Neither request is replayed, and neither answer is
+//      installation success.
 //   4. the fixed extension target and exactly the expected background.js
 //      service worker.
 //
@@ -154,8 +157,11 @@ export function assertChooserRequest(request, actualTitle) {
 // observed actual page.title() and is required: the helper re-locates the
 // unique manager window by that exact ASCII prefix, derives its PID from it,
 // proves the exact executable image, the single exact private --user-data-dir
-// switch and the chooser's ownership, then sends Ctrl+L, the absolute package
-// directory and Return. The caller PID is never supplied.
+// switch and the chooser's ownership before any input. The caller PID is never
+// supplied.
+//
+// This reviewed generic owner input shape is not the chooser action: both Edge
+// chooser steps use the closed purpose-bound actions below, never this one.
 export function edgeChooserX11Request({ extensionDir, executable, profile, title }) {
   assert(typeof title === "string" && title !== "", "actual page title required");
   assert(extensionDir.startsWith("/"), "absolute extension directory required");
@@ -177,8 +183,9 @@ export function edgeChooserX11Request({ extensionDir, executable, profile, title
   }, title);
 }
 
-// The complete closed key set of the folder request.
-export const EDGE_FOLDER_ACTION_KEYS = Object.freeze([
+// The complete closed key set of the two chooser actions. navigate carries
+// exactly the one absolute package directory; open carries no path at all.
+export const EDGE_CHOOSER_ACTION_KEYS = Object.freeze([
   "chooser_title_prefix",
   "chooser_action",
   "executable",
@@ -188,29 +195,66 @@ export const EDGE_FOLDER_ACTION_KEYS = Object.freeze([
   "title_prefix",
   "user_data_dir",
 ]);
+export const EDGE_CHOOSER_NAVIGATE_KEYS = Object.freeze([
+  ...EDGE_CHOOSER_ACTION_KEYS,
+  "extension_dir",
+]);
+// The two closed actions, exactly as the reviewed X11 driver accepts them.
+export const EDGE_CHOOSER_NAVIGATE = Object.freeze({ chooser_navigate: true });
+export const EDGE_CHOOSER_OPEN = Object.freeze({ chooser_open: true });
+// The measured real GTK chooser geometry from the owned Edge 157 screenshots:
+// a 1124x822 client at screen origin (82,33) whose visible Open button center
+// is local (1076,799) == (width-48,height-23) == screen (1158,832). AT-SPI
+// wait_label "Open" on the exact chooser title/PID never resolved, so the
+// driver uses this measured geometry, never a generic label or caller box.
+export const EDGE_CHOOSER_SIZE = Object.freeze({ width: 1124, height: 822 });
+export const EDGE_CHOOSER_ORIGIN = Object.freeze({ x: 82, y: 33 });
+export const EDGE_CHOOSER_OPEN_OFFSET = Object.freeze({ width: -48, height: -23 });
+export const EDGE_CHOOSER_OPEN_LOCAL = Object.freeze({
+  x: EDGE_CHOOSER_SIZE.width + EDGE_CHOOSER_OPEN_OFFSET.width,
+  y: EDGE_CHOOSER_SIZE.height + EDGE_CHOOSER_OPEN_OFFSET.height,
+});
+export const EDGE_CHOOSER_OPEN_SCREEN = Object.freeze({
+  x: EDGE_CHOOSER_ORIGIN.x + EDGE_CHOOSER_OPEN_LOCAL.x,
+  y: EDGE_CHOOSER_ORIGIN.y + EDGE_CHOOSER_OPEN_LOCAL.y,
+});
 
-// The only purpose-bound folder request: exactly `{"select_folder": true}` and
-// no keyboard, path or coordinate action. It is a closed schema: `title` is the
-// actual page.title() observed by the caller, `title`, `title_prefix` and
-// `owner_title_prefix` are all that same exact real Edge manager title (which
-// must equal EDGE_MANAGER_TITLE), the chooser title is the fixed literal, and
-// the exact private profile and Edge executable are carried unchanged. A missing, altered, partial or generic
-// title, an empty or non-ASCII path and any extra field are refused. The
-// driver binds the manager window, derives the owner PID and the click point
-// itself; nothing here is derived from the Load unpacked click.
-export function edgeFolderActionRequest({ executable, profile, title }) {
-  assert(typeof title === "string" && title !== "", "actual page title required");
-  assert(printableAsciiLine(title), "actual page title must be printable ASCII");
-  assert(!/^\s|\s$/.test(title), "actual page title must be trimmed");
-  assert.equal(title, EDGE_MANAGER_TITLE,
-    "actual page title must be the exact Edge manager title");
-  assert(typeof executable === "string" && executable.startsWith("/"),
-    "absolute Edge executable required");
-  assert(typeof profile === "string" && profile.startsWith("/"),
-    "absolute profile required");
-  assert(!profile.endsWith("/"), "profile must not end with a slash");
+// The strict attribution carried by both chooser actions: the observed
+// page.title() must be exactly the real Edge manager title EDGE_MANAGER_TITLE
+// ("Extensions", which is also the Extensions title prefix) and is carried
+// unchanged in title, title_prefix and owner_title_prefix; the
+// chooser title is the fixed literal, owner is true, the Edge executable is an
+// absolute printable-ASCII path and the private profile is one absolute
+// printable-ASCII path without a trailing slash. `fields` is the complete key
+// set, so a missing, extra, generic, decorated or empty field is refused. The
+// builders take exactly these named values and nothing else, so a caller
+// coordinate, label, action list, focus flag or PID can never be forwarded.
+function chooserRequest(fields, executable, profile, title) {
+  // Every refusal is a plain Error. assert.* raises ERR_ASSERTION, which
+  // assert.throws(fn) silently treats as an unexpected pass, so a caller-side
+  // check would be bypassed; a plain Error is always detected as a refusal.
+  const refuse = (message) => {
+    throw new Error(message);
+  };
+  if (typeof title !== "string" || title === "")
+    refuse("actual page title required");
+  if (!printableAsciiLine(title))
+    refuse("actual page title must be printable ASCII");
+  if (/^\s|\s$/.test(title))
+    refuse("actual page title must be trimmed");
+  // Exact equality only, never a prefix: EDGE_MANAGER_TITLE starts with the
+  // Extensions manager prefix, so this is the strict page-title contract.
+  if (title !== EDGE_MANAGER_TITLE)
+    refuse("actual page title must be the exact Edge manager title");
+  if (typeof executable !== "string" || !executable.startsWith("/"))
+    refuse("absolute Edge executable required");
+  if (typeof profile !== "string" || !profile.startsWith("/"))
+    refuse("absolute profile required");
+  if (profile.endsWith("/"))
+    refuse("profile must not end with a slash");
   for (const value of [executable, profile])
-    assert(printableAsciiLine(value), "chooser input must be printable ASCII");
+    if (!printableAsciiLine(value))
+      refuse("chooser input must be printable ASCII");
   const request = {
     owner: true,
     title,
@@ -219,17 +263,55 @@ export function edgeFolderActionRequest({ executable, profile, title }) {
     owner_title_prefix: title,
     user_data_dir: profile,
     executable,
-    chooser_action: { select_folder: true },
   };
-  assert.deepEqual(Object.keys(request).sort(), [...EDGE_FOLDER_ACTION_KEYS].sort());
+  const expected = fields
+    .filter((key) => key !== "chooser_action" && key !== "extension_dir")
+    .sort();
+  const actual = Object.keys(request).sort();
+  if (expected.length !== actual.length ||
+      expected.some((key, index) => key !== actual[index]))
+    refuse("chooser request keys");
   return request;
 }
 
-// The privacy-safe folder output is exactly the fixed select_folder action with
-// exactly one click. Anything else, including a zero-click or expanded record,
-// is refused.
-export function isEdgeFolderActionOutput(output) {
+// The navigate action: `{"chooser_navigate": true}` and exactly the existing
+// absolute printable-ASCII package directory. There is no key, action list,
+// focus flag, label or coordinate: the driver itself focuses the owned chooser
+// and sends only Ctrl+L, this path and Return.
+export function edgeChooserNavigateRequest({ extensionDir, executable, profile, title }) {
+  const refuse = (message) => {
+    throw new Error(message);
+  };
+  if (typeof extensionDir !== "string" || !extensionDir.startsWith("/"))
+    refuse("absolute extension directory required");
+  if (!printableAsciiLine(extensionDir))
+    refuse("package directory must be printable ASCII");
+  if (extensionDir.endsWith("/"))
+    refuse("package directory must not end with a slash");
+  return {
+    ...chooserRequest(EDGE_CHOOSER_NAVIGATE_KEYS, executable, profile, title),
+    chooser_action: { chooser_navigate: true },
+    extension_dir: extensionDir,
+  };
+}
+
+// The separate Open action: `{"chooser_open": true}` and nothing else. It has
+// no caller coordinate, action, label or path; the driver clicks the real Open
+// button at the point derived from the measured chooser geometry.
+export function edgeChooserOpenRequest({ executable, profile, title }) {
+  return {
+    ...chooserRequest(EDGE_CHOOSER_ACTION_KEYS, executable, profile, title),
+    chooser_action: { chooser_open: true },
+  };
+}
+
+// The fixed, privacy-safe acknowledgement of one chooser action: exactly
+// navigate with no click, or Open with exactly one click. This acknowledgement
+// is not installation success; the real target, ID and worker gates follow.
+export function isEdgeChooserActionOutput(output, action) {
+  const clicks = action === "navigate" ? 0 : action === "open" ? 1 : null;
   return (
+    clicks !== null &&
     typeof output === "object" &&
     output !== null &&
     !Array.isArray(output) &&
@@ -237,8 +319,8 @@ export function isEdgeFolderActionOutput(output) {
     Object.keys(output).length === 2 &&
     Object.hasOwn(output, "chooser_action") &&
     Object.hasOwn(output, "clicks") &&
-    output.chooser_action === "select_folder" &&
-    output.clicks === 1
+    output.chooser_action === "chooser_" + action &&
+    output.clicks === clicks
   );
 }
 
@@ -356,36 +438,38 @@ export async function installEdgeExtensionThroughManager({
   // The real Load unpacked click opened the chooser. The title observed here is
   // the actual manager page title and is carried unchanged into both guarded
   // requests. The driver waits for the owned chooser itself before any input,
-  // so each request is issued exactly once: the fixed folder action first,
-  // then the keyboard/path request. Nothing is replayed after possible input,
-  // and a failed request never reaches the installation proof.
+  // so each request is issued exactly once: the navigate action first, then
+  // the separate Open action. Nothing is replayed after possible input, and a
+  // failed request never reaches the installation proof.
   const title = await page.title();
-  phase("edge-chooser-folder");
+  phase("edge-chooser-navigate");
   await step("edge-chooser", async () => {
-    const folder = inputRequest(edgeFolderActionRequest({
-      executable: edgeExecutable,
-      profile,
-      title,
-    }));
-    if (!isEdgeFolderActionOutput(folder))
-      throw new EdgeInstallError("edge-chooser");
-  });
-  // The unchanged keyboard/path request selects the package directory and must
-  // return the owned proof; a failed request never reaches the install proof.
-  await step("edge-chooser", async () => {
-    phase("edge-chooser");
-    const chosen = inputRequest(edgeChooserX11Request({
+    const navigated = inputRequest(edgeChooserNavigateRequest({
       extensionDir,
       executable: edgeExecutable,
       profile,
       title,
     }));
-    if (chosen?.ownership?.owned !== true)
+    if (!isEdgeChooserActionOutput(navigated, "navigate"))
+      throw new EdgeInstallError("edge-chooser");
+  });
+  // The location entry now holds the package directory; the separate Open
+  // action commits it with one click on the internally derived Open point and
+  // must return its fixed acknowledgement. No menu or dropdown is clicked.
+  await step("edge-chooser", async () => {
+    phase("edge-chooser-open");
+    const opened = inputRequest(edgeChooserOpenRequest({
+      executable: edgeExecutable,
+      profile,
+      title,
+    }));
+    if (!isEdgeChooserActionOutput(opened, "open"))
       throw new EdgeInstallError("edge-chooser");
   });
   await step("edge-installed", async () => {
-    // The explicit directory selection commits asynchronously; observe the
-    // real fixed extension target only after the owned chooser proof.
+    // The Open click commits asynchronously; observe the real fixed extension
+    // target only after both chooser acknowledgements. They are never taken
+    // as installation success.
     phase("edge-installed");
     await eventually(
       async () =>

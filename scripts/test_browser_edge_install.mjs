@@ -1,7 +1,8 @@
 // Static contract for the real Edge manager install: the fixed manifest-derived
-// identity, the exact guarded folder action, the exact guarded X11 keyboard
-// request and their folder-action-before-keyboard sequencing. No browser, X
-// server, window titles or private paths are used or printed here.
+// identity, the two closed chooser actions (navigate, then Open), no caller
+// coordinate, the measured internal Open point and their navigate-before-Open
+// sequencing. No browser, X server, window titles or private paths are used or
+// printed here.
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -11,6 +12,14 @@ import { fileURLToPath } from "node:url";
 
 import {
   EDGE_BACKGROUND_URL,
+  EDGE_CHOOSER_ACTION_KEYS,
+  EDGE_CHOOSER_NAVIGATE,
+  EDGE_CHOOSER_NAVIGATE_KEYS,
+  EDGE_CHOOSER_OPEN,
+  EDGE_CHOOSER_OPEN_LOCAL,
+  EDGE_CHOOSER_OPEN_SCREEN,
+  EDGE_CHOOSER_ORIGIN,
+  EDGE_CHOOSER_SIZE,
   EDGE_CHOOSER_TITLE_PREFIX,
   EDGE_DEVELOPER_SWITCH_SELECTOR,
   EDGE_EXTENSION_ID,
@@ -21,11 +30,12 @@ import {
   EdgeInstallError,
   assertChooserRequest,
   assertEdgeLaunchArguments,
+  edgeChooserNavigateRequest,
+  edgeChooserOpenRequest,
   edgeChooserX11Request,
-  edgeFolderActionRequest,
   extensionWorkerIdentity,
   installEdgeExtensionThroughManager,
-  isEdgeFolderActionOutput,
+  isEdgeChooserActionOutput,
   manifestExtensionId,
 } from "./browser_edge_install.mjs";
 
@@ -154,9 +164,9 @@ test("chooser request values stay one printable-ASCII line", () => {
   ])
     assert.throws(() => edgeChooserX11Request({ ...PRIVATE, ...overrides }));
 });
-test("folder request is exactly the fixed select_folder action", () => {
-  const request = edgeFolderActionRequest(PRIVATE);
-  assert.deepEqual(request, {
+test("chooser actions are exactly navigate then open, no select_folder", () => {
+  const navigate = edgeChooserNavigateRequest(PRIVATE);
+  assert.deepEqual(navigate, {
     owner: true,
     title: "Extensions",
     title_prefix: "Extensions",
@@ -164,122 +174,207 @@ test("folder request is exactly the fixed select_folder action", () => {
     owner_title_prefix: "Extensions",
     user_data_dir: PRIVATE.profile,
     executable: "/opt/microsoft/msedge/msedge",
-    chooser_action: { select_folder: true },
+    chooser_action: { chooser_navigate: true },
+    extension_dir: PRIVATE.extensionDir,
   });
-  // Exactly these keys, and none of the keyboard/path shape.
-  assert.deepEqual(Object.keys(request).sort(), [
-    "chooser_action",
-    "chooser_title_prefix",
-    "executable",
-    "owner",
-    "owner_title_prefix",
-    "title",
-    "title_prefix",
-    "user_data_dir",
-  ]);
-  for (const absent of [
-    "actions",
-    "preserve_focus",
-    "extension_dir",
-    "owner_pid",
-    "chooser_title",
-    "click",
+  assert.deepEqual(Object.keys(navigate).sort(), [...EDGE_CHOOSER_NAVIGATE_KEYS].sort());
+  assert.deepEqual(navigate.chooser_action, EDGE_CHOOSER_NAVIGATE);
+  const open = edgeChooserOpenRequest(PRIVATE);
+  assert.deepEqual(open, {
+    owner: true,
+    title: "Extensions",
+    title_prefix: "Extensions",
+    chooser_title_prefix: EDGE_CHOOSER_TITLE_PREFIX,
+    owner_title_prefix: "Extensions",
+    user_data_dir: PRIVATE.profile,
+    executable: "/opt/microsoft/msedge/msedge",
+    chooser_action: { chooser_open: true },
+  });
+  assert.deepEqual(Object.keys(open).sort(), [...EDGE_CHOOSER_ACTION_KEYS].sort());
+  assert.deepEqual(open.chooser_action, EDGE_CHOOSER_OPEN);
+  // Neither action has the generic keyboard shape, a focus flag, a label, a
+  // caller coordinate or the removed select_folder behaviour.
+  for (const request of [navigate, open]) {
+    for (const absent of [
+      "actions", "preserve_focus", "owner_pid", "chooser_title", "click",
+      "click_label", "wait_label", "label", "x", "y", "point", "width",
+      "height", "window", "target", "select_folder",
+    ])
+      assert.equal(Object.hasOwn(request, absent), false, absent);
+  }
+  // The Open action never carries the package directory: an extra input is
+  // never forwarded into it.
+  assert.equal(Object.hasOwn(open, "extension_dir"), false);
+  assert.deepEqual(
+    edgeChooserOpenRequest({ ...PRIVATE, extensionDir: PRIVATE.extensionDir }),
+    open,
+  );
+  // The builders destructure exactly the four named values: a caller
+  // coordinate, label, action list, focus flag, PID or attribution override is
+  // not a parameter and can never be forwarded into the request.
+  const signature = (fn) =>
+    fn.toString().match(/^[^(]*(\(\{[^}]*\}\))/)[1];
+  const navigateShape = signature(edgeChooserNavigateRequest);
+  const openShape = signature(edgeChooserOpenRequest);
+  assert.equal(navigateShape, "({ extensionDir, executable, profile, title })");
+  assert.equal(openShape, "({ executable, profile, title })");
+  for (const forbidden of [
+    "click", "actions", "preserve_focus", "owner_pid", "x", "y", "point",
+    "label", "select_folder", "chooser_action",
+  ]) {
+    assert.doesNotMatch(navigateShape, new RegExp("\\b" + forbidden + "\\b"), forbidden);
+    assert.doesNotMatch(openShape, new RegExp("\\b" + forbidden + "\\b"), forbidden);
+  }
+  // A caller's coordinate is never forwarded, even inside the accepted shape.
+  assert.deepEqual(
+    edgeChooserOpenRequest({ ...PRIVATE, x: 1076, y: 799, click: [1076, 799] }),
+    open,
+  );
+  // The navigate path is the existing absolute printable-ASCII directory.
+  for (const extensionDir of [
+    undefined, null, "", "relative/dir", "/", PRIVATE.extensionDir + "/",
+    PRIVATE.extensionDir + "\n", "/tmp/\u8def\u5f84", "/tmp/a\u0000b", 1,
   ])
-    assert.equal(Object.hasOwn(request, absent), false, absent);
-  assert.deepEqual(Object.keys(request.chooser_action), ["select_folder"]);
-  assert.equal(request.chooser_action.select_folder, true);
-  // The existing keyboard/path request keeps its shape and no folder action.
+    assert.throws(() => {
+      edgeChooserNavigateRequest({ ...PRIVATE, extensionDir });
+    });
+  // The reviewed generic owner/keyboard request keeps its shape and is not a
+  // chooser action.
   const keyboard = edgeChooserX11Request(PRIVATE);
-  assert.deepEqual(Object.keys(keyboard).sort(), [
-    "actions",
-    "chooser_title_prefix",
-    "executable",
-    "owner",
-    "owner_title_prefix",
-    "preserve_focus",
-    "title",
-    "title_prefix",
-    "user_data_dir",
-  ]);
   assert.deepEqual(keyboard.actions, [
     { key: "Control_L+l" },
     { text: PRIVATE.extensionDir },
     { key: "Return" },
   ]);
   assert.equal(Object.hasOwn(keyboard, "chooser_action"), false);
+  assert.equal(
+    Object.hasOwn(edgeChooserNavigateRequest(PRIVATE), "actions"),
+    false,
+  );
 });
 
-test("folder output is exactly one select_folder click", () => {
+test("chooser acknowledgement is fixed per action and never success", () => {
   assert.equal(
-    isEdgeFolderActionOutput({ chooser_action: "select_folder", clicks: 1 }),
+    isEdgeChooserActionOutput({ chooser_action: "chooser_navigate", clicks: 0 }, "navigate"),
     true,
   );
-  for (const output of [
-    undefined,
-    null,
+  assert.equal(
+    isEdgeChooserActionOutput({ chooser_action: "chooser_open", clicks: 1 }, "open"),
     true,
-    "select_folder",
-    [],
-    {},
-    { chooser_action: "select_folder", clicks: 0 },
-    { chooser_action: "select_folder", clicks: 2 },
-    { chooser_action: "select_folder", clicks: "1" },
-    { chooser_action: "select_directory", clicks: 1 },
-    { chooser_action: "select_folder", clicks: 1, focus: true },
-    { chooser_action: { select_folder: true }, clicks: 1 },
-    { ownership: { owned: true } },
-    Object.assign(Object.create(null), { chooser_action: "select_folder", clicks: 1 }),
+  );
+  // Crossed actions, counts, expansions and the removed select_folder answer
+  // are all refused.
+  for (const [output, action] of [
+    [{ chooser_action: "chooser_navigate", clicks: 0 }, "open"],
+    [{ chooser_action: "chooser_open", clicks: 1 }, "navigate"],
+    [{ chooser_action: "chooser_navigate", clicks: 1 }, "navigate"],
+    [{ chooser_action: "chooser_open", clicks: 0 }, "open"],
+    [{ chooser_action: "chooser_open", clicks: 2 }, "open"],
+    [{ chooser_action: "chooser_open", clicks: "1" }, "open"],
+    [{ chooser_action: "chooser_open", clicks: true }, "open"],
+    [{ chooser_action: "select_folder", clicks: 1 }, "open"],
+    [{ chooser_action: "chooser_open", clicks: 1, installed: true }, "open"],
+    [{ chooser_action: "chooser_open", clicks: 1, ownership: { owned: true } }, "open"],
+    [{ ownership: { owned: true } }, "open"],
+    [undefined, "open"],
+    [null, "navigate"],
+    [true, "open"],
+    [[], "navigate"],
+    [{}, "navigate"],
+    [Object.assign(Object.create(null), { chooser_action: "chooser_open", clicks: 1 }), "open"],
+    [{ chooser_action: "chooser_open", clicks: 1 }, "select_folder"],
+    [{ chooser_action: "chooser_open", clicks: 1 }, undefined],
   ])
-    assert.equal(isEdgeFolderActionOutput(output), false, String(JSON.stringify(output)));
+    assert.equal(isEdgeChooserActionOutput(output, action), false,
+      String(action) + " " + String(JSON.stringify(output)));
 });
 
-test("folder request carries the actual observed title, never a partial", () => {
-  // The observed page.title() the request carries is exactly the real title.
+test("chooser requests carry exactly the observed Edge manager title", () => {
   assert.equal(EDGE_MANAGER_TITLE, "Extensions");
-  assert.equal(edgeFolderActionRequest(PRIVATE).title, EDGE_MANAGER_TITLE);
-  for (const title of [
-    undefined,
-    null,
-    "",
-    "Exten",
-    "Extensions ",
-    " Extensions",
-    "Extensions - Microsoft Edge",
-    "Extensions - Microsoft\u200b Edge",
-    "edge://extensions",
-    "  ",
-    "Extensions\n",
-    "Extensions\u0000",
-    "Extensions\t",
-    "\u6269\u5c55\u7a0b\u5e8f",
-    "Extensions \u6269\u5c55\u7a0b\u5e8f",
-    "Extensions - real observed manager title",
-    1,
-  ])
-    assert.throws(() => edgeFolderActionRequest({ ...PRIVATE, title }), undefined, String(title));
-  // A missing title is refused even when every other field is present.
-  const { title: _omitted, ...untitled } = PRIVATE;
-  assert.throws(() => edgeFolderActionRequest(untitled));
+  for (const build of [edgeChooserNavigateRequest, edgeChooserOpenRequest]) {
+    assert.equal(build(PRIVATE).title, EDGE_MANAGER_TITLE);
+    for (const title of [
+      undefined,
+      null,
+      "",
+      "Exten",
+      "Ext",
+      "Extension",
+      "Extensions ",
+      " Extensions",
+      "Extensions - Profile 1",
+      "Extensions - Microsoft Edge",
+      "Extensions - Microsoft\u200b Edge",
+      "edge://extensions",
+      "  ",
+      "Extensions\n",
+      "Extensions\u0000",
+      "Extensions\t",
+      "\u6269\u5c55\u7a0b\u5e8f",
+      "Extensions \u6269\u5c55\u7a0b\u5e8f",
+      1,
+    ])
+      assert.throws(() => build({ ...PRIVATE, title }), undefined, String(title));
+    const { title: _omitted, ...untitled } = PRIVATE;
+    assert.throws(() => build(untitled));
+  }
+  // The generic title watchdog keeps its own strict check, and the strict
+  // chooser contract refuses a generic prefix the watchdog would accept.
+  assert.throws(() => assertChooserRequest(edgeChooserOpenRequest(PRIVATE), "Ext"));
+  assert.throws(() => edgeChooserOpenRequest({ ...PRIVATE, title: "Extensions manager" }));
 });
 
-test("folder request refuses altered profile or executable", () => {
-  const request = edgeFolderActionRequest(PRIVATE);
-  assert.equal(request.user_data_dir, PRIVATE.profile);
-  assert.equal(request.executable, PRIVATE.executable);
-  for (const overrides of [
-    { executable: "msedge" },
-    { executable: "" },
-    { executable: "/opt/edge\n" },
-    { executable: "/opt/\u8def\u5f84" },
-    { executable: undefined },
-    { profile: "relative/profile" },
-    { profile: PRIVATE.profile + "/" },
-    { profile: "" },
-    { profile: "/tmp/a\rb" },
-    { profile: "/tmp/\u8def\u5f84" },
-    { profile: undefined },
-  ])
-    assert.throws(() => edgeFolderActionRequest({ ...PRIVATE, ...overrides }));
+test("chooser requests refuse altered profile or executable", () => {
+  const open = edgeChooserOpenRequest(PRIVATE);
+  assert.equal(open.user_data_dir, PRIVATE.profile);
+  assert.equal(open.executable, PRIVATE.executable);
+  const OMIT = Symbol("omit");
+  for (const build of [edgeChooserNavigateRequest, edgeChooserOpenRequest])
+    for (const overrides of [
+      { executable: "msedge" },
+      { executable: "" },
+      { executable: "/opt/edge\n" },
+      { executable: "/opt/\u8def\u5f84" },
+      { executable: OMIT },
+      { profile: "relative/profile" },
+      { profile: PRIVATE.profile + "/" },
+      { profile: "" },
+      { profile: "/tmp/a\rb" },
+      { profile: "/tmp/\u8def\u5f84" },
+      { profile: OMIT },
+    ]) {
+      const input = { ...PRIVATE, ...overrides };
+      for (const key of Object.keys(overrides))
+        if (input[key] === OMIT) delete input[key];
+      assert.throws(() => {
+        build(input);
+      }, undefined, build.name + " " + Object.keys(overrides).join(","));
+    }
+});
+
+test("both actions carry exactly the caller's one profile and Edge image", () => {
+  // The profile and executable are not a driver constant: each request carries
+  // the caller's exact install values unchanged, and neither action derives or
+  // substitutes a different private profile or Edge image.
+  const other = {
+    profile: "/tmp/another-private-profile",
+    executable: "/opt/microsoft/msedge-beta/msedge",
+  };
+  for (const build of [edgeChooserNavigateRequest, edgeChooserOpenRequest]) {
+    const request = build({ ...PRIVATE, ...other });
+    assert.equal(request.user_data_dir, other.profile);
+    assert.equal(request.executable, other.executable);
+    assert.equal(Object.hasOwn(request, "profile"), false);
+    assert.equal(Object.hasOwn(request, "user-data-dir"), false);
+  }
+  assert.deepEqual(
+    edgeChooserOpenRequest({ ...PRIVATE, ...other }),
+    edgeChooserOpenRequest({ ...PRIVATE, ...other, title: "Extensions" }),
+  );
+  assert.notDeepEqual(
+    edgeChooserOpenRequest({ ...PRIVATE, ...other }).user_data_dir,
+    edgeChooserOpenRequest(PRIVATE).user_data_dir,
+  );
 });
 
 // Synthetic manager page and browser for the sequencing contract: the
@@ -327,9 +422,19 @@ function installHarness() {
   };
 }
 
-const isFolder = (value) => Object.hasOwn(value, "chooser_action");
+const chooserStep = (value) =>
+  value?.chooser_action?.chooser_navigate === true
+    ? "navigate"
+    : value?.chooser_action?.chooser_open === true
+      ? "open"
+      : "keyboard";
+const answer = (step) => ({
+  navigate: { chooser_action: "chooser_navigate", clicks: 0 },
+  open: { chooser_action: "chooser_open", clicks: 1 },
+  keyboard: { ownership: { owned: true } },
+})[step];
 
-test("install sends the folder action before the keyboard request", async () => {
+test("install navigates, then opens, then waits for the real target", async () => {
   const directory = packageWith({
     manifest_version: 3,
     key: Buffer.from("synthetic-not-the-locklark-key").toString("base64"),
@@ -340,7 +445,7 @@ test("install sends the folder action before the keyboard request", async () => 
   const harness = installHarness();
   try {
     // No extension target ever appears, so the final install gate still fails
-    // after both requests ran exactly once, in that order.
+    // after both actions ran exactly once, in that order.
     await assert.rejects(
       installEdgeExtensionThroughManager({
         ...harness,
@@ -348,30 +453,32 @@ test("install sends the folder action before the keyboard request", async () => 
         edgeExecutable: PRIVATE.executable,
         profile: PRIVATE.profile,
         inputRequest: (value) => {
-          calls.push(isFolder(value) ? "folder" : "keyboard");
-          return isFolder(value)
-            ? { chooser_action: "select_folder", clicks: 1 }
-            : { ownership: { owned: true } };
+          const step = chooserStep(value);
+          calls.push(step);
+          return answer(step);
         },
         phase: (label) => phases.push(label),
       }),
       (error) => error instanceof EdgeInstallError &&
         error.message === "edge-extension-not-installed",
     );
-    assert.deepEqual(calls, ["folder", "keyboard"]);
+    assert.deepEqual(calls, ["navigate", "open"]);
     // The title was observed at the manager page and once after the Load
-    // unpacked click; both requests carried that exact observed title.
+    // unpacked click; both actions carried that exact observed title.
     assert.equal(harness.shown.length, 2);
-    assert(phases.indexOf("edge-load-unpacked") < phases.indexOf("edge-chooser-folder"));
-    assert(phases.indexOf("edge-chooser-folder") < phases.indexOf("edge-chooser"));
-    assert(phases.indexOf("edge-chooser") < phases.indexOf("edge-installed"));
+    assert(phases.indexOf("edge-load-unpacked") < phases.indexOf("edge-chooser-navigate"));
+    assert(phases.indexOf("edge-chooser-navigate") < phases.indexOf("edge-chooser-open"));
+    assert(phases.indexOf("edge-chooser-open") < phases.indexOf("edge-installed"));
     assert.equal(phases.includes("continue"), false);
+    // No menu or dropdown stage remains anywhere in the flow.
+    for (const label of phases)
+      assert.doesNotMatch(label, /menu|dropdown|folder/i);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
 });
 
-test("the sequencing requests carry the exact observed manager title", async () => {
+test("the sequencing actions carry the exact observed manager title", async () => {
   const directory = packageWith({
     manifest_version: 3,
     key: Buffer.from("AA==").toString("base64"),
@@ -388,9 +495,7 @@ test("the sequencing requests carry the exact observed manager title", async () 
         profile: PRIVATE.profile,
         inputRequest: (value) => {
           seen.push(value);
-          return isFolder(value)
-            ? { chooser_action: "select_folder", clicks: 1 }
-            : { ownership: { owned: true } };
+          return answer(chooserStep(value));
         },
         phase: () => {},
       }),
@@ -404,29 +509,74 @@ test("the sequencing requests carry the exact observed manager title", async () 
       assert.equal(value.chooser_title_prefix, EDGE_CHOOSER_TITLE_PREFIX);
       assert.equal(value.user_data_dir, PRIVATE.profile);
       assert.equal(value.executable, PRIVATE.executable);
+      assert.equal(value.owner, true);
     }
-    // The unchanged keyboard/path request and the fixed folder request.
-    assert.deepEqual(seen[0], edgeFolderActionRequest(PRIVATE));
-    assert.deepEqual(seen[1], edgeChooserX11Request({ ...PRIVATE, extensionDir: directory }));
-    assert.deepEqual(seen[0].chooser_action, { select_folder: true });
+    assert.deepEqual(seen[0], edgeChooserNavigateRequest({ ...PRIVATE, extensionDir: directory }));
+    assert.deepEqual(seen[1], edgeChooserOpenRequest(PRIVATE));
+    assert.deepEqual(seen[0].chooser_action, { chooser_navigate: true });
+    assert.equal(seen[0].extension_dir, directory);
     assert.equal(Object.hasOwn(seen[0], "actions"), false);
-    assert.equal(Object.hasOwn(seen[1], "chooser_action"), false);
+    assert.equal(Object.hasOwn(seen[1], "extension_dir"), false);
+    assert.deepEqual(seen[1].chooser_action, { chooser_open: true });
+    for (const value of seen) {
+      for (const absent of ["click", "x", "y", "point", "click_label", "wait_label", "preserve_focus"])
+        assert.equal(Object.hasOwn(value, absent), false, absent);
+    }
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
 });
 
-test("a folder response that is not one select_folder click stops the flow", async () => {
+test("the Open action clicks only the measured internal point", () => {
+  // Measured on the owned Edge 157 screenshots: the point is never a caller
+  // value and never a generic label lookup.
+  assert.deepEqual(EDGE_CHOOSER_SIZE, { width: 1124, height: 822 });
+  assert.deepEqual(EDGE_CHOOSER_ORIGIN, { x: 82, y: 33 });
+  assert.deepEqual(EDGE_CHOOSER_OPEN_LOCAL, { x: 1076, y: 799 });
+  assert.deepEqual(EDGE_CHOOSER_OPEN_LOCAL, {
+    x: EDGE_CHOOSER_SIZE.width - 48,
+    y: EDGE_CHOOSER_SIZE.height - 23,
+  });
+  assert.deepEqual(EDGE_CHOOSER_OPEN_SCREEN, { x: 1158, y: 832 });
+  // The removed width-62,height-69 point hit the Select folder filter.
+  assert.notDeepEqual(
+    { x: EDGE_CHOOSER_SIZE.width - 62, y: EDGE_CHOOSER_SIZE.height - 69 },
+    EDGE_CHOOSER_OPEN_LOCAL,
+  );
+  // No chooser request builder has a coordinate or label parameter; an
+  // injected one is not forwarded into the closed action.
+  for (const injected of [
+    { x: 1076, y: 799 },
+    { point: { x: 1076, y: 799 } },
+    { click: [1076, 799] },
+    { click_label: "Open" },
+    { actions: [{ click: [1076, 799] }] },
+  ]) {
+    assert.deepEqual(edgeChooserNavigateRequest({ ...PRIVATE, ...injected }),
+      edgeChooserNavigateRequest(PRIVATE));
+    assert.deepEqual(edgeChooserOpenRequest({ ...PRIVATE, ...injected }),
+      edgeChooserOpenRequest(PRIVATE));
+  }
+  // The driver's measured constants are the only source of the Open point.
+  const measured = {
+    x: EDGE_CHOOSER_SIZE.width - 48,
+    y: EDGE_CHOOSER_SIZE.height - 23,
+  };
+  assert.deepEqual(EDGE_CHOOSER_OPEN_LOCAL, measured);
+});
+
+test("a navigate answer that is not its fixed acknowledgement stops the flow", async () => {
   const directory = packageWith({
     manifest_version: 3,
     key: Buffer.from("AA==").toString("base64"),
     background: { service_worker: "background.js" },
   });
   try {
-    for (const folderOutput of [
-      { chooser_action: "select_folder", clicks: 0 },
-      { chooser_action: "select_folder", clicks: 2 },
-      { chooser_action: "select_folder", clicks: 1, owned: true },
+    for (const navigateOutput of [
+      { chooser_action: "chooser_navigate", clicks: 1 },
+      { chooser_action: "chooser_navigate", clicks: 0, owned: true },
+      { chooser_action: "chooser_open", clicks: 1 },
+      { chooser_action: "select_folder", clicks: 1 },
       { ownership: { owned: true } },
       undefined,
     ]) {
@@ -439,35 +589,39 @@ test("a folder response that is not one select_folder click stops the flow", asy
           edgeExecutable: PRIVATE.executable,
           profile: PRIVATE.profile,
           inputRequest: (value) => {
-            calls.push(isFolder(value) ? "folder" : "keyboard");
-            return isFolder(value) ? folderOutput : { ownership: { owned: true } };
+            const step = chooserStep(value);
+            calls.push(step);
+            return step === "navigate" ? navigateOutput : answer(step);
           },
           phase: () => {},
         }),
         (error) => error instanceof EdgeInstallError &&
           error.message === "chooser-not-owned",
-        String(JSON.stringify(folderOutput)),
+        String(JSON.stringify(navigateOutput)),
       );
-      // No retry and no keyboard request after the refused folder answer.
-      assert.deepEqual(calls, ["folder"]);
+      // No retry and no Open click after the refused navigate answer.
+      assert.deepEqual(calls, ["navigate"]);
     }
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
 });
 
-test("a keyboard result that is not owned stops the flow", async () => {
+test("an Open answer that is not its fixed acknowledgement stops the flow", async () => {
   const directory = packageWith({
     manifest_version: 3,
     key: Buffer.from("AA==").toString("base64"),
     background: { service_worker: "background.js" },
   });
   try {
-    for (const keyboardOutput of [
+    for (const openOutput of [
+      { chooser_action: "chooser_open", clicks: 0 },
+      { chooser_action: "chooser_open", clicks: 2 },
+      { chooser_action: "chooser_open", clicks: 1, owned: true },
+      { chooser_action: "chooser_navigate", clicks: 0 },
+      { chooser_action: "select_folder", clicks: 1 },
+      { ownership: { owned: true } },
       undefined,
-      {},
-      { ownership: null },
-      { ownership: { owned: false } },
     ]) {
       const calls = [];
       const harness = installHarness();
@@ -478,24 +632,23 @@ test("a keyboard result that is not owned stops the flow", async () => {
           edgeExecutable: PRIVATE.executable,
           profile: PRIVATE.profile,
           inputRequest: (value) => {
-            calls.push(isFolder(value) ? "folder" : "keyboard");
-            return isFolder(value)
-              ? { chooser_action: "select_folder", clicks: 1 }
-              : keyboardOutput;
+            const step = chooserStep(value);
+            calls.push(step);
+            return step === "open" ? openOutput : answer(step);
           },
           phase: () => {},
         }),
         (error) => error instanceof EdgeInstallError &&
           error.message === "chooser-not-owned",
+        String(JSON.stringify(openOutput)),
       );
-      // One folder request, one keyboard request and no retry.
-      assert.deepEqual(calls, ["folder", "keyboard"]);
+      // One navigate, one Open and no retry.
+      assert.deepEqual(calls, ["navigate", "open"]);
     }
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
 });
-
 
 test("exactly the expected background.js worker is accepted", () => {
   const worker = (url) => ({ url: () => url });

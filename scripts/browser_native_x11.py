@@ -3,8 +3,12 @@
 Reads one JSON request from stdin. Values are never echoed. Requires DISPLAY,
 libX11 and libXtst. Native controls use their real AT-SPI labels, state and
 geometry. Legacy coordinates are relative to the requested real X window.
-The only pointer input is the purpose-bound `chooser_action`
-{"select_folder": true}, derived from the measured chooser geometry.
+The Edge 157 directory chooser has two closed purpose-bound actions:
+`chooser_navigate` carries the package directory and only sends Ctrl+L, that
+path and Return in the focused, raised owned chooser; `chooser_open` only
+commits the real GTK Open button, clicked at the point derived from the
+measured chooser geometry. The chooser request accepts no caller coordinate,
+label or extra action.
 """
 import ctypes as C
 import json
@@ -90,6 +94,7 @@ FAILURE_REASONS = {
     "Acceptance input must be ASCII": "input-charset",
     "Acceptance keyboard mapping unavailable": "keyboard-mapping",
     "Acceptance shortcut unavailable": "shortcut-mapping",
+    "Chooser shortcut unavailable": "shortcut-mapping",
     "Native acceptance X input failed": "x-input",
     "Chooser ownership request required": "chooser-request",
     "Chooser owner window unavailable": "chooser-owner",
@@ -98,13 +103,15 @@ FAILURE_REASONS = {
     "Chooser must share the owner client leader": "chooser-leader",
     "Chooser must belong to the owner browser process": "chooser-process",
     "X window query refused": "x-query",
-    "Chooser folder action request required": "folder-action-request",
+    "Chooser action request required": "chooser-action-request",
+    "Chooser navigation path required": "chooser-navigate-path",
     "Chooser must keep the requested title": "folder-title",
     "Chooser must keep the measured geometry": "folder-geometry",
     "Chooser folder point is not inside the chooser": "folder-point",
     "Chooser folder pointer is not at the measured point": "folder-pointer",
     "Chooser folder pointer is not over the owned chooser": "folder-overlay",
     "Chooser folder input failed": "folder-input",
+    "Chooser focus failed": "chooser-focus",
 }
 
 
@@ -145,18 +152,35 @@ EDGE_MANAGER_NATIVE_TITLES = (
     EDGE_MANAGER_TITLE,
     "Extensions - Profile 1 - Microsoft\u200b Edge",
 )
-# One purpose-bound folder action, separate from the keyboard/coordinate input
-# shape. The chooser title must equal this exact literal, the manager window
-# must equal the observed manager title and the chooser must keep the measured
-# client size; the point is always derived from that geometry.
-FOLDER_ACTION = {"select_folder": True}
+# The two purpose-bound chooser actions, separate from the keyboard/coordinate
+# input shape. The chooser title must equal this exact literal, the manager
+# window must equal the observed manager title and the chooser must keep the
+# measured client size; the Open point is always derived from that geometry.
+# `chooser_navigate` only types the package directory into the GTK location
+# entry and accepts Return; `chooser_open` only clicks the real GTK Open button
+# at the measured point. Neither action accepts a caller coordinate, label,
+# path in the wrong action or any extra key.
+CHOOSER_NAVIGATE = {"chooser_navigate": True}
+CHOOSER_OPEN = {"chooser_open": True}
+CHOOSER_ACTIONS = {"navigate": CHOOSER_NAVIGATE, "open": CHOOSER_OPEN}
 FOLDER_MANAGER_FIELDS = ("title", "title_prefix")
 FOLDER_ACTION_KEYS = frozenset(OWNER_FIELDS) | set(FOLDER_MANAGER_FIELDS) | {
     "chooser_action", "owner", "owner_pid",
 }
+# navigate carries exactly the existing absolute package directory; open
+# carries no path at all.
+FOLDER_NAVIGATE_KEYS = FOLDER_ACTION_KEYS | {"extension_dir"}
+FOLDER_OPEN_KEYS = FOLDER_ACTION_KEYS
 EDGE_CHOOSER_TITLE = "Select the extension directory."
+# The chooser client geometry measured on the owned Edge 157 screenshots: a
+# 1124x822 client at screen origin (82,33). The visible GTK Open button is
+# measured at local (1076,799) == (width-48, height-23), screen (1158,832).
+# That AT-SPI wait_label "Open" never resolved, so the click point is derived
+# from this measured geometry and never from a label or caller value.
 FOLDER_CHOOSER_SIZE = (1124, 822)
-FOLDER_POINT_OFFSETS = (("width", -62), ("height", -69))
+FOLDER_CHOOSER_ORIGIN = (82, 33)
+FOLDER_OPEN_LOCAL = (1076, 799)
+FOLDER_POINT_OFFSETS = (("width", -48), ("height", -23))
 
 
 def folder_manager_title_matches(title):
@@ -169,25 +193,42 @@ def folder_manager_title_matches(title):
 
 
 def parse_folder_action_request(request):
-    """Exact purpose-bound `{"select_folder": true}` chooser request, or None.
+    """Exact `{"chooser_navigate": true}` or `{"chooser_open": true}` request.
 
-    The request is never the keyboard/coordinate shape: there is no `actions`,
-    no focus or geometry value and no click coordinate. The observed page
-    title is required and `title`, `title_prefix` and owner_title_prefix must
-    all equal exactly EDGE_MANAGER_TITLE; an absent, mismatched, generic,
-    decorated (native X11 form) or altered title is refused. The chooser title
-    is the fixed literal and the optional caller PID is bound exactly as in
-    the owner input shape.
+    Returns the fixed attribution record, with `chooser` naming the one action
+    and `navigate_path` the package directory for navigate (None for open), or
+    None. The request is never the keyboard/coordinate shape: there is no
+    `actions`, no focus or geometry value and no click coordinate. The observed
+    page title is required and `title`, `title_prefix` and owner_title_prefix
+    must all equal exactly EDGE_MANAGER_TITLE; an absent, mismatched, generic,
+    decorated (native X11 form) or altered title is refused. Exactly one action
+    key is accepted: navigate carries exactly one absolute printable-ASCII
+    `extension_dir` and open carries none. The chooser title is the fixed
+    literal and the optional caller PID is bound exactly as in the owner input
+    shape.
     Only the fixed attribution values are returned; values are never printed.
     """
-    if type(request) is not dict or set(request) - FOLDER_ACTION_KEYS:
+    if type(request) is not dict:
         return None
     action = request.get("chooser_action")
-    # Strict identity: the value must be the JSON boolean true, not 1 or "true".
-    if request.get("owner") is not True or type(action) is not dict or \
-            set(action) != set(FOLDER_ACTION) or action.get("select_folder") is not True:
+    if type(action) is not dict or len(action) != 1:
         return None
-    if not all(key in request for key in OWNER_FIELDS + FOLDER_MANAGER_FIELDS):
+    key, value = next(iter(action.items()))
+    if key == "chooser_navigate" and value is True:
+        mode, allowed = "navigate", FOLDER_NAVIGATE_KEYS
+    elif key == "chooser_open" and value is True:
+        mode, allowed = "open", FOLDER_OPEN_KEYS
+    else:
+        return None
+    if set(request) - allowed:
+        return None
+    # Strict identity: the value must be the JSON boolean true, not 1 or "true".
+    if request.get("owner") is not True:
+        return None
+    required = OWNER_FIELDS + FOLDER_MANAGER_FIELDS
+    if mode == "navigate":
+        required += ("extension_dir",)
+    if not all(key in request for key in required):
         return None
     # The same exact real manager window binding as the keyboard request: the
     # observed title is carried unchanged and is both of its own prefixes.
@@ -197,6 +238,11 @@ def parse_folder_action_request(request):
         return None
     if request.get("chooser_title_prefix") != EDGE_CHOOSER_TITLE:
         return None
+    navigate_path = None
+    if mode == "navigate":
+        navigate_path = ascii_path(request["extension_dir"])
+        if navigate_path is None:
+            return None
     validated_pid = None
     if "owner_pid" in request:
         supplied = request["owner_pid"]
@@ -210,22 +256,43 @@ def parse_folder_action_request(request):
     normalized.update({key: request[key] for key in FOLDER_MANAGER_FIELDS})
     normalized["caller_pid"] = validated_pid
     normalized["probe"] = False
+    normalized["chooser"] = mode
+    normalized["navigate_path"] = navigate_path
     return normalized
 
 
 def folder_point(width, height):
-    """The only permitted point, (width-62, height-69), or None.
+    """The only permitted chooser-local point, (width-48, height-23), or None.
 
-    Valid only for the exact measured 1124x822 chooser client geometry and
-    only when the derived point is strictly inside that geometry.
+    Valid only for the exact measured 1124x822 chooser client geometry, and
+    only when the derived point equals the measured real GTK Open button
+    center FOLDER_OPEN_LOCAL (1076, 799) and is strictly inside the geometry.
     """
     if type(width) is not int or type(height) is not int or \
             (width, height) != FOLDER_CHOOSER_SIZE:
         return None
     offsets = dict(FOLDER_POINT_OFFSETS)
     x, y = width + offsets["width"], height + offsets["height"]
-    if 0 < x < width and 0 < y < height:
+    if 0 < x < width and 0 < y < height and (x, y) == FOLDER_OPEN_LOCAL:
         return x, y
+    return None
+
+
+def folder_output(action, click_count):
+    """Fixed action acknowledgement: no window, title, path, PID or coordinate.
+
+    `chooser_navigate` acknowledges the one path plus Return with zero clicks;
+    `chooser_open` acknowledges exactly one physical XTest click on the
+    internally derived Open point. This acknowledgement is not installation
+    success: the caller still waits for the real extension target, the
+    manifest-derived ID and the one background.js service worker.
+    """
+    if type(click_count) is not int:
+        return None
+    if action == "navigate" and click_count == 0:
+        return {"chooser_action": "chooser_navigate", "clicks": 0}
+    if action == "open" and click_count == 1:
+        return {"chooser_action": "chooser_open", "clicks": 1}
     return None
 
 
@@ -393,11 +460,34 @@ def move_and_prove_pointer(io, parent_of, root, target, expected_root, geometry,
         raise RuntimeError("Chooser folder pointer is not over the owned chooser")
 
 
-def folder_output(click_count):
-    """Fixed folder-action output: no window, title, path, PID or coordinate."""
-    if type(click_count) is not int or click_count not in (0, 1):
-        return None
-    return {"chooser_action": "select_folder", "clicks": click_count}
+def chooser_navigation(x, display, path):
+    """The only keyboard input of navigate, as a validated [(keycode, shift)].
+
+    The plan is exactly the printable-ASCII shortcut token Control_L+l, then
+    each character of `path` and finally Return. A character is a plain key when
+    its first-level keysym is already that character and a Shift_L chord
+    otherwise; a keycode of 0 is a fixed mapping refusal. Every keycode is
+    validated before the caller emits anything. The plan is returned in
+    emission order and raises a fixed message instead; nothing is sent here.
+    `x` is the caller's loaded Xlib.
+    """
+    if ascii_path(path) is None:
+        raise RuntimeError("Chooser navigation path required")
+    code = lambda name: x.XKeysymToKeycode(display, x.XStringToKeysym(name.encode("ascii")))
+    shift = code("Shift_L")
+    if not shift:
+        raise RuntimeError("Chooser shortcut unavailable")
+    typed = []
+    for char in path:
+        keycode = code(char)
+        if not keycode:
+            raise RuntimeError("Acceptance keyboard mapping unavailable")
+        produces = x.XKeycodeToKeysym(display, keycode, 0) == ord(char)
+        typed.append((keycode, None if produces else shift))
+    ctrl, letter, ret = code("Control_L"), code("l"), code("Return")
+    if not (ctrl and letter and ret):
+        raise RuntimeError("Chooser shortcut unavailable")
+    return [(ctrl, None), (letter, None)] + typed + [(ret, None)]
 
 
 def x_property(x, display, candidate, atom, expected_type):
@@ -1325,12 +1415,14 @@ def main():
     # through the keyboard/coordinate owner input shape.
     folder_mode = "chooser_action" in request
     owner = None
-    if folder_mode or request.get("owner") or request.get("ownership_probe"):
-        owner = parse_folder_action_request(request) if folder_mode \
-            else parse_owner_request(request)
+    if request.get("owner") or request.get("ownership_probe"):
+        owner = parse_owner_request(request)
         if owner is None or request.get("wait_absent") or request.get("inspect"):
-            raise RuntimeError("Chooser folder action request required" if folder_mode
-                               else "Chooser ownership request required")
+            raise RuntimeError("Chooser ownership request required")
+    if folder_mode:
+        owner = parse_folder_action_request(request)
+        if owner is None or request.get("wait_absent") or request.get("inspect"):
+            raise RuntimeError("Chooser action request required")
 
     if request.get("wait_absent"):
         if not request.get("title") or not request.get("executable") or request.get("actions"):
@@ -1482,7 +1574,7 @@ def main():
         return geometry
 
     def prove_folder_owner(owner_record):
-        """Owner window, title, PID, executable and profile, re-read before the click."""
+        """Owner window, title, PID, executable and profile, re-read before input."""
         current = [candidate for candidate in collect_titles(owner["owner_title_prefix"])
                    if normal_viewable(candidate)]
         if current != [owner_window]:
@@ -1501,6 +1593,18 @@ def main():
         if owner_process_matches(owner_now, owner_record) != owner_now:
             raise RuntimeError("Chooser owner window unavailable")
         if window_pid(target) != owner_now:
+            raise RuntimeError("Chooser must belong to the owner browser process")
+
+    def prove_chooser_owner(owner_record):
+        """The chooser ownership record and its exact owner PID, re-read.
+
+        The record proven from the actual WM/proc chain must be the fixed
+        owned class, and the chooser must still carry the exact owner PID.
+        """
+        if safe_owner_record(owner_record) is None or \
+                safe_owner_record(owner_record)["owned"] is not True:
+            raise RuntimeError("Chooser must belong to the owner browser process")
+        if window_pid(target) != owner_pid:
             raise RuntimeError("Chooser must belong to the owner browser process")
 
     def chooser_chain_now():
@@ -1570,8 +1674,9 @@ def main():
         point_xy = folder_point(*geometry)
         if point_xy is None:
             raise RuntimeError("Chooser folder point is not inside the chooser")
-        # 2. Only the origin; the point (width-62,height-69) is re-derived from
-        # the measured geometry inside the proof, never passed by the caller.
+        # 2. Only the origin; the point (width-48,height-23), the measured
+        # real GTK Open button center, is re-derived from the measured
+        # geometry inside the proof, never passed by the caller.
         origin = read_only(translate_chooser, "Native acceptance X query failed")
         if origin[0] < 0 or origin[1] < 0 or \
                 origin[0] + point_xy[0] < 0 or origin[1] + point_xy[1] < 0:
@@ -1595,9 +1700,10 @@ def main():
         if read_only(find_chooser, "Native acceptance X query failed") != geometry:
             raise RuntimeError("Chooser must keep the measured geometry")
         # The owner is re-proven last: the unique owner window, its exact PID,
-        # executable image and private profile, and the chooser's exact owner
-        # PID, all unchanged since the first proof.
+        # executable image and private profile, and the chooser ownership
+        # record with its exact owner PID, all unchanged since the first proof.
         read_only(lambda: prove_folder_owner(owner_record), "Native acceptance X query failed")
+        read_only(lambda: prove_chooser_owner(owner_record), "Native acceptance X query failed")
         down = xt.XTestFakeButtonEvent(display, 1, 1, 0)
         up = xt.XTestFakeButtonEvent(display, 1, 0, 0)
         if not down or not up:
@@ -1607,15 +1713,61 @@ def main():
         if errors:
             raise RuntimeError("Chooser folder input failed")
 
+    def press(keycode, shift=None):
+        if shift is not None:
+            xt.XTestFakeKeyEvent(display, shift, 1, 0)
+        xt.XTestFakeKeyEvent(display, keycode, 1, 0)
+        xt.XTestFakeKeyEvent(display, keycode, 0, 0)
+        if shift is not None:
+            xt.XTestFakeKeyEvent(display, shift, 0, 0)
+
+    def navigate(owner_record):
+        # 1. The same unique chooser identity, owner, ownership record and the
+        # exact measured 1124x822 client geometry as the Open action; no value
+        # comes from the caller except the one package directory. The shortcut
+        # and every path character are mapped before any input.
+        geometry = read_only(find_chooser, "Native acceptance X query failed")
+        read_only(lambda: prove_folder_owner(owner_record), "Native acceptance X query failed")
+        read_only(lambda: prove_chooser_owner(owner_record), "Native acceptance X query failed")
+        if geometry != FOLDER_CHOOSER_SIZE:
+            raise RuntimeError("Chooser must keep the measured geometry")
+        try:
+            plan = chooser_navigation(x, display, owner["navigate_path"])
+        except RuntimeError:
+            raise
+        except Exception:
+            raise RuntimeError("Chooser shortcut unavailable")
+        # 2. Focus and raise the exact owned chooser, then send exactly
+        # Ctrl+L, the one path and Return; no other key is ever emitted.
+        errors.clear()
+        x.XRaiseWindow(display, target)
+        x.XSetInputFocus(display, target, 1, 0)
+        x.XSync(display, 0)
+        if errors:
+            raise RuntimeError("Chooser focus failed")
+        FAILURE_CONTEXT["action"] = "chooser-navigate"
+        for keycode, shift in plan:
+            press(keycode, shift)
+        x.XFlush(display)
+        x.XSync(display, 0)
+        if errors:
+            raise RuntimeError("Chooser folder input failed")
+
     if folder_mode:
         if owner is None:
-            raise RuntimeError("Chooser folder action request required")
+            raise RuntimeError("Chooser action request required")
         errors.clear()
         FAILURE_CONTEXT["index"] = 0
-        FAILURE_CONTEXT["action"] = "folder-action"
-        click_folder(owner)
-        print(json.dumps(folder_output(1)))
+        if owner["chooser"] == "open":
+            FAILURE_CONTEXT["action"] = "chooser-open"
+            click_folder(ownership)
+            x.XCloseDisplay(display)
+            print(json.dumps(folder_output("open", 1)))
+            return
+        FAILURE_CONTEXT["action"] = "chooser-navigate"
+        navigate(ownership)
         x.XCloseDisplay(display)
+        print(json.dumps(folder_output("navigate", 0)))
         return
 
     def selected_map_state():
