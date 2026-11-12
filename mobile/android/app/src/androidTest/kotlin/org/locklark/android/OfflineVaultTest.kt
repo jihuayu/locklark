@@ -24,12 +24,16 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.json.JSONArray
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.locklark.android.security.NativeFailureCode
 import org.locklark.android.security.NativePhase
 import org.junit.runner.RunWith
 import java.io.File
+import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
 import java.security.SecureRandom
@@ -660,6 +664,36 @@ class OfflineVaultTest {
     }
 
     @Test fun realOfflineVaultNativeFlowsAndBackgroundLock() {
+        val context = instrumentation.targetContext
+        val database = File(context.noBackupFilesDir, "personal.ll")
+        // The target Activity owns this path. Refuse before launching so a
+        // pre-existing vault can never be overwritten or deleted by this test.
+        assertFalse("An existing target vault must not be overwritten", database.exists())
+        var failure: Throwable? = null
+        try {
+            runOfflineVaultFlow(context)
+        } catch (error: Throwable) {
+            failure = error
+            throw error
+        } finally {
+            // The owning ActivityScenario is closed before any owned file is
+            // removed; a close failure must not hide an earlier assertion.
+            val closeFailure = runCatching {
+                if (::scenario.isInitialized) scenario.close()
+                instrumentation.waitForIdleSync()
+            }.exceptionOrNull()
+            if (closeFailure != null) {
+                if (failure == null) throw closeFailure
+                failure.addSuppressed(closeFailure)
+            } else {
+                runCleanup(failure) {
+                    deleteOwnedSyntheticVault(database, context.noBackupFilesDir)
+                }
+            }
+        }
+    }
+
+    private fun runOfflineVaultFlow(context: Context) {
         val random = ByteArray(16).also { SecureRandom().nextBytes(it) }.joinToString("") { "%02x".format(it) }
         val master = record("Android-Master-$random")
         val password = record("Android-Password-$random")
@@ -667,8 +701,9 @@ class OfflineVaultTest {
         val username = record("Android-User-$random")
         val notes = record("合成原生备注🔐\n$random\n保留末行  \n")
         val seed = record("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
-        scenario = ActivityScenario.launch(MainActivity::class.java)
+        var flowFailure: Throwable? = null
         try {
+            scenario = ActivityScenario.launch(MainActivity::class.java)
             ensureWindowFocus()
             waitFor("Initial create unavailable") { ready("generate-account-key") }
             scenario.onActivity {
@@ -721,7 +756,6 @@ class OfflineVaultTest {
             click("back-to-list"); select("Android first")
             stage("exact-target"); assertTrue("Regeneration changed wrong target", shown("show-password") == changed)
             click("back-to-list")
-            val context = instrumentation.targetContext
             val noDeviceCredential = !context.getSystemService(KeyguardManager::class.java).isDeviceSecure
             if (noDeviceCredential) {
                 stage("platform-auth-refusal"); click("enable-quick-unlock")
@@ -759,7 +793,16 @@ class OfflineVaultTest {
             ensureWindowFocus()
             waitFor("Late unlock must not reopen backgrounded vault") { ready("unlock") }
             assertTrue("Late callback exposed a secret", text("secret-value").isEmpty())
-        } finally { scenario.close() }
+        } catch (error: Throwable) {
+            flowFailure = error
+            throw error
+        } finally {
+            // Close the final scenario here without masking a body failure; the
+            // caller removes the owned vault only after this close succeeds.
+            runCleanup(flowFailure) {
+                if (::scenario.isInitialized) scenario.close()
+            }
+        }
     }
 
     /** Reports only fixed numeric scroll geometry; no label or entered text. */
@@ -768,5 +811,33 @@ class OfflineVaultTest {
         scenario.onActivity { entries = scrollContext(it, scroll, target) }
         instrumentation.sendStatus(0, android.os.Bundle().apply { putString("locklark_scroll", entries.joinToString(" ")) })
         rememberGeometry(entries)
+    }
+
+    /**
+     * Runs cleanup without masking an earlier test failure. A cleanup failure
+     * is the test failure only when the body did not already fail.
+     */
+    private fun runCleanup(primary: Throwable?, step: () -> Unit) {
+        val cleanupFailure = runCatching(step).exceptionOrNull() ?: return
+        if (primary == null) throw cleanupFailure
+        primary.addSuppressed(cleanupFailure)
+    }
+
+    /**
+     * Deletes only the exact synthetic target vault and its exact temporary
+     * sidecars. The canonical parent and non-symlink checks keep this from
+     * touching `device-unlock`, parent directories or any other shared entry.
+     */
+    private fun deleteOwnedSyntheticVault(path: File, parent: File) {
+        require(path.name == "personal.ll") { "Owned vault name mismatch" }
+        require(!Files.isSymbolicLink(path.toPath())) { "Owned vault must not be a symbolic link" }
+        require(path.canonicalFile.parentFile == parent.canonicalFile) { "Owned vault escaped its directory" }
+        for (owned in listOf(path, File(parent, "personal.ll.new"), File(parent, "personal.ll.bak"))) {
+            require(owned.canonicalFile.parentFile == parent.canonicalFile) { "Owned vault escaped its directory" }
+            require(!Files.isSymbolicLink(owned.toPath())) { "Owned vault must not be a symbolic link" }
+            if (!Files.exists(owned.toPath(), LinkOption.NOFOLLOW_LINKS)) continue
+            require(!Files.isDirectory(owned.toPath(), LinkOption.NOFOLLOW_LINKS)) { "Owned vault must be a file" }
+            if (!Files.deleteIfExists(owned.toPath())) throw IOException("Owned vault cleanup failed")
+        }
     }
 }
