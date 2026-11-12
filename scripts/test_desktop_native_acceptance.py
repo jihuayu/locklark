@@ -302,5 +302,389 @@ class ShowCopyOtpFlowTests(unittest.TestCase):
         acceptance.align.assert_not_called()
 
 
+def record(line):
+    """Parse a diagnostic line, asserting the fixed prefix and bound."""
+    assert line.startswith(desktop.OTP_DIAGNOSTIC_PREFIX), line
+    assert line.isascii() and "\n" not in line, line
+    assert len(line.encode("utf-8")) <= desktop.OTP_DIAGNOSTIC_LIMIT, line
+    return json.loads(line[len(desktop.OTP_DIAGNOSTIC_PREFIX):])
+
+
+PRIVATE = ("Synthetic-Private-OTP-19384756-SeedJBSWY3DPEHPK3PXP-Locklark · 本地金库")
+UNAVAILABLE = {"copy_window_delta":"unavailable", "failure_window_delta":"unavailable",
+               "clipboard_empty":"unavailable"}
+
+
+class OtpDiagnosticProjectionTests(unittest.TestCase):
+    """The projection owns every bound of the printed record."""
+
+    def test_exact_three_field_record(self):
+        self.assertEqual(record(desktop.otp_diagnostic(1, 0, True)),
+                         {"copy_window_delta":1, "failure_window_delta":0, "clipboard_empty":True})
+        self.assertEqual(record(desktop.otp_diagnostic()),
+                         {"copy_window_delta":"unavailable", "failure_window_delta":"unavailable",
+                          "clipboard_empty":"unavailable"})
+
+    def test_exact_delta_bounds_are_kept(self):
+        for value in (-64, -1, 0, 1, 63, 64):
+            with self.subTest(delta=value):
+                self.assertEqual(record(desktop.otp_diagnostic(value, value, False)),
+                                 {"copy_window_delta":value, "failure_window_delta":value,
+                                  "clipboard_empty":False})
+
+    def test_out_of_range_delta_is_unavailable_not_clamped(self):
+        for value in (-65, 65, 10**12, -(10**12)):
+            with self.subTest(delta=value):
+                self.assertEqual(record(desktop.otp_diagnostic(value, value, True)),
+                                 {"copy_window_delta":"unavailable", "failure_window_delta":"unavailable",
+                                  "clipboard_empty":True})
+
+    def test_non_integral_delta_is_unavailable_and_never_echoed(self):
+        # A float window difference, bools and arbitrary objects are not ints.
+        for bad in (1.0, -1.0, 0.5, True, False, "1", "0", [1], {"a":1}, None, object(), PRIVATE, b"1"):
+            with self.subTest(kind=type(bad).__name__, value=bad):
+                line = desktop.otp_diagnostic(bad, bad)
+                self.assertNotIn(PRIVATE, line)
+                self.assertEqual(record(line), {**UNAVAILABLE, "clipboard_empty":"unavailable"})
+
+    def test_clipboard_empty_requires_exact_bool(self):
+        for bad in (1, 0, "true", "false", None, [True], PRIVATE):
+            with self.subTest(kind=type(bad).__name__, value=bad):
+                self.assertEqual(record(desktop.otp_diagnostic(0, 0, bad))["clipboard_empty"], "unavailable")
+        self.assertIs(record(desktop.otp_diagnostic(0, 0, True))["clipboard_empty"], True)
+        self.assertIs(record(desktop.otp_diagnostic(0, 0, False))["clipboard_empty"], False)
+
+    def test_record_has_only_the_three_fixed_keys(self):
+        # No absolute accepted window, raw timestamp, OTP code or seed.
+        for values in ((2, -3, True), (0, 0, False), (None, None, None), (64, -64, True)):
+            with self.subTest(values=values):
+                text = desktop.otp_diagnostic(*values)[len(desktop.OTP_DIAGNOSTIC_PREFIX):]
+                self.assertEqual(set(json.loads(text)),
+                                 {"copy_window_delta", "failure_window_delta", "clipboard_empty"})
+                self.assertRegex(text, r'^\{"copy_window_delta":(?:-?\d{1,2}|"unavailable"),'
+                                       r'"failure_window_delta":(?:-?\d{1,2}|"unavailable"),'
+                                       r'"clipboard_empty":(?:true|false|"unavailable")\}$')
+
+
+class OtpCopyFailureProbeTests(unittest.TestCase):
+    """The catch-time probe: one clipboard read, deltas only, no retry."""
+
+    CODE = "19384756"
+
+    def acceptance(self):
+        acceptance = Acceptance.__new__(Acceptance)
+        acceptance.stage, acceptance.reason, acceptance.native_action = "otp-selection-clears", "acceptance", "click:复制验证码"
+        acceptance.otp_copy, acceptance.otp_diagnostic = None, None
+        acceptance.clipboard = Mock()
+        acceptance.click = Mock()
+        return acceptance
+
+    def await_window(self, walls):
+        clock = FakeClock(walls)
+        with (
+            patch.object(desktop.time, "time", clock.time),
+            patch.object(desktop.time, "monotonic", clock.monotonic),
+            patch.object(desktop.time, "sleep", clock.sleep),
+        ):
+            return Acceptance.await_new_otp_window(Acceptance.__new__(Acceptance))
+
+    def test_float_sample_converts_only_via_otp_window(self):
+        # await_new_otp_window returns a float; the accepted sample is kept
+        # as-is and converted with otp_window only to form the deltas.
+        acceptance = self.acceptance()
+        sample = self.await_window([100.7, 120.3])
+        self.assertEqual((sample, Acceptance.otp_window(sample)), (120.3, 6))
+        # The copy runs within the accepted window, the failure in the next.
+        acceptance.otp_copy = (sample, 121.0)
+        self.assertIsInstance(acceptance.otp_copy[0], float)
+        with patch.object(desktop.time, "time", return_value=140.9), \
+             patch("builtins.print") as output:
+            acceptance.record_otp_copy_failure()
+        acceptance.clipboard.assert_called_once_with()
+        acceptance.click.assert_not_called()
+        self.assertEqual(record(acceptance.otp_diagnostic),
+                         {"copy_window_delta":0, "failure_window_delta":1, "clipboard_empty":False})
+        output.assert_called_once_with(acceptance.otp_diagnostic, flush=True)
+
+    def test_clipboard_read_failure_keeps_other_fields(self):
+        acceptance = self.acceptance()
+        acceptance.otp_copy = (1005 * 20 + 18.0, 1005 * 20 + 19.5)
+        acceptance.clipboard = Mock(side_effect=AcceptanceFailure())
+        with patch.object(desktop.time, "time", return_value=1005 * 20 + 19.9), \
+             patch("builtins.print") as output:
+            acceptance.record_otp_copy_failure()
+        self.assertEqual(record(acceptance.otp_diagnostic),
+                         {"copy_window_delta":0, "failure_window_delta":0, "clipboard_empty":"unavailable"})
+        output.assert_called_once_with(acceptance.otp_diagnostic, flush=True)
+        self.assertEqual((acceptance.stage, acceptance.reason, acceptance.native_action),
+                         ("otp-selection-clears", "acceptance", "click:复制验证码"))
+
+    def test_probe_errors_never_raise_and_restore_state(self):
+        for failure in (RuntimeError(PRIVATE), OSError(PRIVATE), KeyboardInterrupt(), SystemExit(2)):
+            with self.subTest(kind=type(failure).__name__):
+                acceptance = self.acceptance()
+                acceptance.otp_copy = (1005 * 20 + 18.0, 1005 * 20 + 19.5)
+                acceptance.otp_window = Mock(side_effect=failure)
+                with patch("builtins.print") as output:
+                    acceptance.record_otp_copy_failure()
+                self.assertIsNone(acceptance.otp_diagnostic)
+                output.assert_not_called()
+                self.assertEqual((acceptance.stage, acceptance.reason, acceptance.native_action),
+                                 ("otp-selection-clears", "acceptance", "click:复制验证码"))
+
+    def copy_failure(self, acceptance):
+        """Drive show_copy_otp with its real poll and catch-time probe."""
+        acceptance.wait, acceptance.click = Mock(), Mock()
+        acceptance.await_new_otp_window = Mock(return_value=1005 * 20 + 18.0)
+        acceptance.display = Mock(return_value={"matches": [True]})
+        acceptance.otp = Mock(return_value="19384756")
+        # The real poll runs once against the accepted window; it then fails.
+        scoped = []
+
+        def poll(check, timeout=10):
+            if not scoped:
+                scoped.append(check())
+            raise AcceptanceFailure()
+
+        acceptance.eventually = Mock(side_effect=poll)
+        with patch.object(desktop.time, "time", return_value=1005 * 20 + 18.0), \
+             patch.object(desktop.time, "monotonic", SimulatedClock().monotonic), \
+             patch("builtins.print") as output, \
+             self.assertRaises(AcceptanceFailure) as failure:
+            acceptance.show_copy_otp()
+        self.assertEqual(str(failure.exception), "")
+        return output
+
+    def test_state_mutation_during_probe_is_restored_and_not_reused(self):
+        acceptance = self.acceptance()
+        seen = []
+
+        def clipboard(expected=None):
+            seen.append("copy" if expected is not None else "probe")
+            if expected is None:
+                acceptance.stage = "hijacked"
+                acceptance.reason, acceptance.native_action = "otp-copy-window-delta", "none"
+                acceptance.otp_copy = (1, 1)
+            return {"matches": [False]} if expected is not None else {"empty": True}
+
+        acceptance.clipboard = Mock(side_effect=clipboard)
+        output = self.copy_failure(acceptance)
+        # One copy check, one probe read; the probe's mutation is not reused.
+        self.assertEqual(seen, ["copy", "probe"])
+        output.assert_called_once_with(acceptance.otp_diagnostic, flush=True)
+        self.assertEqual((acceptance.stage, acceptance.reason, acceptance.native_action),
+                         ("otp-selection-clears", "acceptance", "click:复制验证码"))
+        self.assertEqual(record(acceptance.otp_diagnostic),
+                         {"copy_window_delta":0, "failure_window_delta":0, "clipboard_empty":True})
+
+    def test_recursive_catch_probes_nothing(self):
+        acceptance = self.acceptance()
+        seen = []
+
+        def clipboard(expected=None):
+            seen.append("copy" if expected is not None else "probe")
+            if expected is not None:
+                if seen.count("copy") == 1:
+                    raise AcceptanceFailure()
+                return {"matches": [False]}
+            acceptance.show_copy_otp()
+            return {"empty": False}
+
+        acceptance.clipboard = Mock(side_effect=clipboard)
+        output = self.copy_failure(acceptance)
+        # The probe reads once, then its re-entrant copy checks once and finds
+        # the probe busy: no second read or nested record, and the outer probe
+        # still emits exactly one fixed line with the empty state unavailable.
+        self.assertEqual(seen, ["copy", "probe", "copy"])
+        output.assert_called_once_with(acceptance.otp_diagnostic, flush=True)
+        self.assertEqual(record(acceptance.otp_diagnostic),
+                         {"copy_window_delta":0, "failure_window_delta":0, "clipboard_empty":"unavailable"})
+        self.assertFalse(acceptance.otp_probe_busy)
+
+    def test_nothing_recorded_without_a_copy_attempt(self):
+        acceptance = self.acceptance()
+        acceptance.record_otp_copy_failure()
+        acceptance.clipboard.assert_not_called()
+        self.assertIsNone(acceptance.otp_diagnostic)
+
+
+class SimulatedClock:
+    STEP = 0.5
+
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        self.now += self.STEP
+        return self.now
+
+
+class OtpCopyFlowIntegrationTests(unittest.TestCase):
+    """show_copy_otp keeps the original flow and records only on failure."""
+
+    CODE = "19384756"
+
+    def acceptance(self, results):
+        acceptance = Acceptance.__new__(Acceptance)
+        acceptance.stage, acceptance.reason, acceptance.native_action = "otp-selection-clears", "acceptance", "click:复制验证码"
+        acceptance.otp_copy, acceptance.otp_diagnostic, acceptance.output_lines = None, None, []
+        acceptance.fixture = {"OTPSeed": "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"}
+        acceptance.wait, acceptance.click = Mock(), Mock()
+        acceptance.await_new_otp_window = Mock(return_value=1005 * 20 + 0.5)
+        acceptance.display = Mock(return_value={"matches": [True]})
+        acceptance.otp = Mock(return_value=self.CODE)
+        copy_result, probe_result = (list(results) + [results[-1]])[:2]
+        def clipboard(expected=None):
+            if expected is None:
+                return probe_result
+            if isinstance(copy_result, BaseException):
+                raise copy_result
+            return copy_result
+        acceptance.clipboard = Mock(side_effect=clipboard)
+
+        def poll(check, timeout=10):
+            # The real poll runs its copy check once, then fails.
+            try:
+                returns = check()
+            except AcceptanceFailure:
+                raise
+            raise AcceptanceFailure()
+        acceptance.eventually = Mock(side_effect=poll)
+        acceptance.emit = lambda message: acceptance.output_lines.append(str(message))
+        return acceptance
+
+    def test_window_rollover_records_failure_without_retrying(self):
+        acceptance = self.acceptance([{"matches": [False]}, {"empty": False}])
+        # The copy click keeps the accepted window; the failure is next.
+        with patch.object(desktop.time, "time", side_effect=[1005 * 20 + 19.5, 1006 * 20 + 0.25]), \
+             patch.object(desktop.time, "monotonic", SimulatedClock().monotonic), \
+             patch("builtins.print"):
+            with self.assertRaises(AcceptanceFailure):
+                acceptance.show_copy_otp()
+        self.assertEqual(acceptance.click.call_args_list, [call("显示验证码"), call("复制验证码")])
+        acceptance.otp.assert_called_with(1005 * 20 + 0.5)
+        self.assertEqual(acceptance.clipboard.call_args_list, [call([self.CODE]), call()])
+        self.assertEqual(acceptance.reason, "acceptance")
+        self.assertEqual(record(acceptance.otp_diagnostic),
+                         {"copy_window_delta":0, "failure_window_delta":1, "clipboard_empty":False})
+        self.assertNotIn(self.CODE, acceptance.otp_diagnostic)
+
+    def test_same_window_failure(self):
+        acceptance = self.acceptance([{"matches": [False]}, {"empty": True}])
+        with patch.object(desktop.time, "time", return_value=1005 * 20 + 12.5), \
+             patch.object(desktop.time, "monotonic", SimulatedClock().monotonic), \
+             patch("builtins.print"):
+            with self.assertRaises(AcceptanceFailure):
+                acceptance.show_copy_otp()
+        self.assertEqual(record(acceptance.otp_diagnostic),
+                         {"copy_window_delta":0, "failure_window_delta":0, "clipboard_empty":True})
+
+    def test_success_records_nothing(self):
+        acceptance = self.acceptance([{"matches": [True]}])
+        acceptance.eventually = lambda check, **_kwargs: True
+        with patch.object(desktop.time, "time", return_value=1005 * 20 + 1.0):
+            acceptance.show_copy_otp()
+        self.assertIsNone(acceptance.otp_diagnostic)
+        self.assertEqual(acceptance.otp_copy, (1005 * 20 + 0.5, 1005 * 20 + 1.0))
+
+    def test_probe_failure_keeps_original_exception_and_emits_no_code(self):
+        acceptance = self.acceptance([{"matches": [False]}, AcceptanceFailure()])
+        with patch.object(desktop.time, "time", side_effect=[1005 * 20 + 19.5, 1006 * 20 + 0.25]), \
+             patch.object(desktop.time, "monotonic", SimulatedClock().monotonic), \
+             patch("builtins.print"):
+            with self.assertRaises(AcceptanceFailure) as failure:
+                acceptance.show_copy_otp()
+        self.assertEqual(str(failure.exception), "")
+        self.assertEqual(acceptance.clipboard.call_args_list, [call([self.CODE]), call()])
+        self.assertEqual(record(acceptance.otp_diagnostic)["clipboard_empty"], "unavailable")
+        self.assertNotIn(self.CODE, acceptance.otp_diagnostic)
+
+
+class OtpDiagnosticIsolationTests(unittest.TestCase):
+    """The outer failure path keeps the original outcome and transcript."""
+
+    FAILURE = "Desktop native acceptance failed at otp-selection-clears [acceptance] action=click:复制验证码"
+    NONE = "Desktop OTP failure diagnostic: none"
+
+    def acceptance(self):
+        root = tempfile.TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        acceptance = Acceptance.__new__(Acceptance)
+        acceptance.state = pathlib.Path(root.name)
+        acceptance.diagnostics = acceptance.state / "diagnostics"
+        acceptance.diagnostics.mkdir()
+        # Transcript log exists; the bound probe is the only log holder.
+        acceptance.fixture_binary = acceptance.state / "fixture-observer"
+        acceptance.env, acceptance.host = {}, pathlib.Path("/synthetic-native-host")
+        acceptance.log = (acceptance.state / "native.log").open("w")
+        self.addCleanup(acceptance.log.close)
+        acceptance.fixture_path = acceptance.state / "fixture.json"
+        acceptance.values, acceptance.codes = set(), set()
+        acceptance.started, acceptance.stage = 0, "otp-selection-clears"
+        acceptance.reason, acceptance.native_action = "acceptance", "click:复制验证码"
+        acceptance.native_failed_index, acceptance.native_x_error_codes = None, []
+        acceptance.native_elapsed_ms, acceptance.probe_read_attempts_max = 0, 0
+        acceptance.probe_operation, acceptance.probe_elapsed_ms = "unsupported", 0
+        acceptance.probe_diagnostic, acceptance.last_native_click = {}, {}
+        acceptance.foreign_observations, acceptance.output_lines = [], []
+        acceptance.otp_copy, acceptance.otp_diagnostic = None, None
+        acceptance.phase = Mock()
+        acceptance.create = Mock(side_effect=AcceptanceFailure())
+        acceptance.setup, acceptance.close = Mock(), Mock()
+        acceptance.probe, acceptance.app = Mock(), Mock()
+        acceptance.observe = Mock(return_value={"items": [], "events": []})
+        acceptance.controls = Mock(return_value={})
+        acceptance.display = Mock(return_value={"present": False, "empty": True})
+        acceptance.otp_acceptance = Mock(side_effect=AcceptanceFailure())
+        acceptance.emit = lambda message: acceptance.output_lines.append(str(message))
+        return acceptance
+
+    def test_record_prints_after_failure_summary_without_artifact(self):
+        acceptance = self.acceptance()
+        acceptance.otp_diagnostic = desktop.otp_diagnostic(0, 1, True)
+        with patch("builtins.print") as output:
+            self.assertEqual(acceptance.run(), 1)
+        lines = [item.args[0] for item in output.call_args_list]
+        self.assertLess(lines.index(self.FAILURE), lines.index(acceptance.otp_diagnostic))
+        self.assertEqual(lines.count(acceptance.otp_diagnostic), 1)
+        self.assertNotIn(self.NONE, lines)
+        self.assertNotIn("PASS", " ".join(lines))
+        self.assertFalse((acceptance.state / "diagnostics" / "otp-failure.json").exists())
+
+    def test_without_record_prints_fixed_none(self):
+        acceptance = self.acceptance()
+        with patch("builtins.print") as output:
+            self.assertEqual(acceptance.run(), 1)
+        lines = [item.args[0] for item in output.call_args_list]
+        self.assertIn(self.FAILURE, lines)
+        self.assertIn(self.NONE, lines)
+        self.assertEqual(lines[-1], self.NONE)
+        self.assertNotIn("PASS", " ".join(lines))
+
+    def test_artifact_failures_keep_summary_and_exit(self):
+        acceptance = self.acceptance()
+        acceptance.otp_diagnostic = desktop.otp_diagnostic(0, 1, True)
+        with patch("builtins.print") as output, \
+             patch.object(pathlib.Path, "write_text", side_effect=OSError(PRIVATE)), \
+             patch.object(desktop.os, "fdopen", side_effect=OSError(PRIVATE)):
+            self.assertEqual(acceptance.run(), 1)
+        lines = [item.args[0] for item in output.call_args_list]
+        # failure.json fails, so the original failure line is not emitted;
+        # the fixed OTP record still is, exactly once, with exit 1.
+        self.assertIn(acceptance.otp_diagnostic, lines)
+        self.assertEqual(lines.count(acceptance.otp_diagnostic), 1)
+
+    def test_file_write_failure_still_projects_record_to_stdout(self):
+        acceptance = self.acceptance()
+        acceptance.otp_diagnostic = desktop.otp_diagnostic(-1, 0, False)
+        acceptance.scan = Mock(return_value=0)
+        with patch("builtins.print") as output, \
+             patch.object(desktop.os, "fdopen", side_effect=OSError(PRIVATE)):
+            self.assertEqual(acceptance.run(), 1)
+        lines = [item.args[0] for item in output.call_args_list]
+        self.assertIn("Desktop native privacy scan failed", lines)
+        self.assertIn(acceptance.otp_diagnostic, lines)
+
+
 if __name__ == "__main__":
     unittest.main()
