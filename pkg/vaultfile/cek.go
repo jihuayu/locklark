@@ -36,7 +36,9 @@ import (
 // wrap the VUK for devices (age VUK device wrapping), does not serialize,
 // encrypt or open KDBX content, and does not authenticate a file.
 // OpenAuthenticatedFile is the caller-pinned full-file open path that
-// authenticates the file before calling this primitive. See
+// authenticates the file before calling this primitive; SealAuthenticatedFile
+// is the caller-pinned full-file seal that wraps its generated CEK through
+// this primitive and encrypts the KDBX payload under it. See
 // docs/vaultfile-wire-v1.md.
 
 const (

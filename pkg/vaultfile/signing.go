@@ -46,6 +46,9 @@ import (
 // checkpoint-scoped API: it establishes checkpoint-scoped root continuation
 // verification, the current policy's author role requirement, and content
 // signature verification under the current policy's device key.
+// SealAuthenticatedFile is the caller-pinned full-file seal: it verifies the
+// draft's chain and author key first, then signs these preimages with the
+// author device key.
 
 // RevisionID returns the derived revision identity of f: lowercase hex
 // SHA-256 of DomainRevision, a NUL, and the canonical file with

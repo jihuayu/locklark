@@ -18,7 +18,11 @@
 // author role requirement, and content signature verification under the
 // current policy's device key. The caller supplies the checkpoint and root
 // trust out of band; admin-signed policy transitions and scope-to-policy-diff
-// authorization remain unsupported. See docs/vaultfile-wire-v1.md.
+// authorization remain unsupported. The two high-level full-file paths compose
+// those checks with the key envelopes: SealAuthenticatedFile authenticates the
+// draft's chain and author key before wrapping and encrypting, and
+// OpenAuthenticatedFile authenticates a sealed file before opening it.
+// See docs/vaultfile-wire-v1.md.
 package vaultfile
 
 // Size and length budgets fixed by this schema. Every one of them is checked

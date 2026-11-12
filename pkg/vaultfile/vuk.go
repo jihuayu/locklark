@@ -47,8 +47,10 @@ import (
 // rotate the VUK or key epoch, does not scope CEK epoch rotation, does not
 // authenticate a policy itself and does not open KDBX content or a full file.
 // OpenAuthenticatedFile is the caller-pinned full-file open path that
-// authenticates the current policy before calling this primitive. See
-// docs/vaultfile-wire-v1.md.
+// authenticates the current policy before calling this primitive, and
+// SealAuthenticatedFile is the caller-pinned full-file seal that calls this
+// primitive for exactly the authenticated current policy's read-capable
+// devices. See docs/vaultfile-wire-v1.md.
 
 // CodeVUKEnvelopeFailed is reported by OpenVUKForDevice for every envelope
 // or context failure: a slot that names another device or recipient, a wrong

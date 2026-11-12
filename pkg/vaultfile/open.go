@@ -60,7 +60,8 @@ import (
 // through prev_digest, the provenance of the checkpoint, or epoch/key
 // generation. It performs no invitation, rewrap or rotation flow and does not
 // claim that the opened KDBX content is otherwise trustworthy. It is not a
-// sealing API.
+// sealing API: SealAuthenticatedFile is the caller-pinned seal that produces
+// the bytes this path accepts.
 func OpenAuthenticatedFile(encoded []byte, checkpoint *PolicyCheckpoint, deviceID string, identity *age.X25519Identity) (*File, *kdbx.Database, error) {
 	f, err := ParseFile(encoded)
 	if err != nil {
