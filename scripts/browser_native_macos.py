@@ -30,6 +30,7 @@ and an exact frame or the single measured one-pixel border inset with the same
 centre (``AX_CG_BORDER_INSET``). No generic tolerance and no private API.
 """
 import ctypes
+import inspect
 import math
 import os
 
@@ -298,6 +299,26 @@ def _status_shape(value):
     if any(type(value[field]) is not bool for field in STATUS_FIELDS):
         return empty
     return {field: value[field] for field in STATUS_FIELDS}
+
+
+def _call_arity(reader):
+    """True when ``reader(window, controls, call)`` is its documented signature.
+
+    The per-call result is passed only to a ``read_status``/``status`` hook that
+    declares a third positional slot (or takes ``*args``); a two-argument hook
+    is called exactly as before.
+    """
+    try:
+        parameters = inspect.signature(reader).parameters.values()
+    except Exception:
+        return False
+    positional = 0
+    for parameter in parameters:
+        if parameter.kind is parameter.VAR_POSITIONAL:
+            return True
+        if parameter.kind in (parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD):
+            positional += 1
+    return positional >= 3
 
 
 def _locked_view(controls):
@@ -723,7 +744,7 @@ class QuartzApi:
         walk(target, 0)
         return found
 
-    def status(self, window, controls):
+    def status(self, window, controls, call=None):
         """Optional locked-view status diagnostic: exactly four booleans.
 
         The existing controls snapshot is proved locked first, before any AX
@@ -732,6 +753,13 @@ class QuartzApi:
         proof, an unavailable binding, any query/shape error and any traversal
         overrun all return the same all-false object, so this diagnostic can
         never fail the already-safe controls snapshot.
+
+        The FIRST failed query carries only the fixed diagnostic triple in our
+        own ``a11y-query`` refusal. With the optional per-call ``call`` result
+        the status is still the non-raising all-false object and the refusal is
+        recorded there instead of raised, so no diagnostic state outlives the
+        call; without it the refusal is raised to the adapter reader exactly as
+        before.
         """
         if type(controls) is not dict or not _locked_view(controls):
             return _empty_status()
@@ -739,21 +767,24 @@ class QuartzApi:
             target = self.window_element(window)
             found = self._status_matches(target)
         except Exception as error:
-            # The FIRST failed query is reported once, as our own a11y-query
-            # refusal carrying only the fixed diagnostic triple; every other
-            # failure (and the refusal itself) leaves the all-false status.
-            if diagnostic_of(error) is not None:
-                raise
-            return _empty_status()
+            # Every other failure (and the refusal itself) leaves the
+            # all-false status.
+            if diagnostic_of(error) is None:
+                return _empty_status()
+            record = getattr(call, "record", None)
+            if call is not None and callable(record):
+                record(error)
+                return _empty_status()
+            raise
         result = _empty_status()
         result["available"] = True
         for field, _ in STATUS_TEXT:
             result[field] = found[field]
         return result
 
-    def read_status(self, window, controls):
+    def read_status(self, window, controls, call=None):
         """Expose the status diagnostic under the adapter-reader spelling."""
-        return self.status(window, controls)
+        return self.status(window, controls, call)
 
     def _selected(self, window, label, rect):
         """Re-resolve the unique selected control and its native AX element.
@@ -1254,12 +1285,16 @@ class MacAdapter:
                 raise contract.ContractError("a11y-query")
         return controls
 
-    def read_status(self, window, controls):
+    def read_status(self, window, controls, call=None):
         """Optional macOS-only inspect diagnostic; always exactly four bools.
 
         The proof, binding and AX reads belong to the platform API. Any missing
         or malformed hook answer is converted to the fixed all-false object, so
         the optional diagnostic never changes the existing controls snapshot.
+        The platform hook receives the explicit per-call ``call`` result only
+        when its signature accepts a third argument, so its matching refusal is
+        recorded there instead of being raised; a two-argument hook is called
+        exactly as before.
         """
         for name in ("read_status", "status", "inspect_status"):
             try:
@@ -1269,7 +1304,10 @@ class MacAdapter:
             if not callable(reader):
                 continue
             try:
-                result = _status_shape(reader(window, controls))
+                if _call_arity(reader):
+                    result = _status_shape(reader(window, controls, call))
+                else:
+                    result = _status_shape(reader(window, controls))
             except Exception as error:
                 if diagnostic_of(error) is not None:
                     raise

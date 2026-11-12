@@ -1014,6 +1014,12 @@ def status_snapshot(adapter, window, controls):
     the allowlisted ``ax_diagnostic`` of the FIRST failure or None. The
     diagnostic is only carried, never interpreted, and a failure still yields
     the fixed all-false status without failing the surfaces snapshot.
+
+    The hook receives an explicit per-call ``_AxCall`` result so a sanitized
+    refusal is reported for exactly THIS call (a hook that records it still
+    returns the non-raising all-false status); a hook that raises is also
+    fail-closed and its sanitized refusal is reported. No state is kept
+    between calls.
     """
     try:
         reader = getattr(adapter, "read_status", None)
@@ -1021,15 +1027,59 @@ def status_snapshot(adapter, window, controls):
         return empty_status(), None
     if not callable(reader):
         return None, None
+    call = _AxCall()
     try:
-        value = reader(window, controls)
+        value = reader(window, controls, call)
+    except TypeError:
+        # Only an older two-argument hook is retried without the per-call
+        # result; a TypeError raised by its own body still fails closed.
+        try:
+            value = reader(window, controls)
+        except Exception as error:
+            return empty_status(), call.failed(error)
     except Exception as error:
-        return empty_status(), ax_diagnostic(error)
-    if type(value) is not dict or set(value) != set(STATUS_FIELDS):
-        return empty_status(), None
-    if any(type(value[field]) is not bool for field in STATUS_FIELDS):
-        return empty_status(), None
-    return {field: value[field] for field in STATUS_FIELDS}, None
+        return empty_status(), call.failed(error)
+    return call.accept(value), call.recorded()
+
+
+class _AxCall:
+    """The explicit per-call result of one ``read_status`` call.
+
+    A status hook that refuses a query records it with ``record`` and still
+    returns its ordinary non-raising answer (the fixed all-false status), so
+    the sanitized diagnostic belongs to exactly this call. Nothing is stored
+    outside this instance: a later call that fails nowhere never sees an
+    earlier failure.
+    """
+
+    __slots__ = ("status", "_diagnostic")
+
+    def __init__(self):
+        self.status = None
+        self._diagnostic = None
+
+    def record(self, error):
+        """Record the first ``a11y-query`` refusal; later ones are ignored."""
+        if self._diagnostic is None:
+            self._diagnostic = ax_diagnostic(error)
+
+    def recorded(self):
+        """This call's sanitized diagnostic, or None when it recorded none."""
+        return self._diagnostic
+
+    def failed(self, error):
+        """The diagnostic of a call that raised ``error``; always fail-closed."""
+        self.record(error)
+        self.status = empty_status()
+        return self._diagnostic
+
+    def accept(self, value):
+        """The exact four-built-in-bool answer, else the fixed all-false one."""
+        if (type(value) is not dict or set(value) != set(STATUS_FIELDS)
+                or any(type(value[field]) is not bool for field in STATUS_FIELDS)):
+            value = empty_status()
+        self.status = {field: value[field] for field in STATUS_FIELDS}
+        return self.status
 
 
 def snapshot(adapter, window, budget):
