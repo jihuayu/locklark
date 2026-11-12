@@ -71,9 +71,10 @@ func TestVerifyRejectsContentKey(t *testing.T) {
 func TestVerifyRejectsContextMismatch(t *testing.T) {
 	expected := baseContext()
 	identityPub := identityKey().Public().(ed25519.PublicKey)
+	// mutate returns expected with exactly one field changed by f, so every
+	// case binds a different field and nothing else.
 	mutate := func(f func(*Context)) Context {
 		c := expected
-		c.Challenge.Nonce = [32]byte{}
 		f(&c)
 		return c
 	}

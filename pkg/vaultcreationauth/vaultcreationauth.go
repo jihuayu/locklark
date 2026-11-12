@@ -173,8 +173,10 @@ var (
 	// ErrInvalidPlanDigest reports a plan digest that is not exactly
 	// PlanDigestBytes of canonical unpadded base64url.
 	ErrInvalidPlanDigest = errors.New("vaultcreationauth: invalid plan digest")
-	// ErrInvalidSignature reports a signature that is not exactly
-	// SignatureBytes of canonical unpadded base64url.
+	// ErrInvalidSignature reports a signature of the wrong wire shape: not
+	// exactly SignatureBytes of canonical unpadded base64url outside a string
+	// token. Verify also returns it for a SignatureBytes-long signature that
+	// fails Ed25519 verification against the registered identity key.
 	ErrInvalidSignature = errors.New("vaultcreationauth: invalid signature")
 	// ErrInvalidDeadline reports a deadline that is not a positive int64.
 	ErrInvalidDeadline = errors.New("vaultcreationauth: invalid deadline")
@@ -186,9 +188,10 @@ var (
 	ErrTooLarge = errors.New("vaultcreationauth: proof too large")
 	// ErrNonCanonical reports input that decodes to a valid proof but is not
 	// the exact canonical encoding of it: whitespace, another member order,
-	// escapes, duplicate or unknown members, or any other difference from
-	// Encode's output. Parse reports it only after the shape of every field
-	// has been checked.
+	// escapes, unknown members, or any other difference from Encode's output.
+	// A duplicate member is ErrMalformed, refused before decoding. Parse
+	// reports ErrNonCanonical only after the shape of every field has been
+	// checked.
 	ErrNonCanonical = errors.New("vaultcreationauth: non-canonical proof")
 
 	// ErrContextMismatch reports a proof whose context differs from the
