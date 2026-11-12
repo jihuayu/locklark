@@ -619,6 +619,9 @@ func TestItemDatabaseBinaryOwnership(t *testing.T) {
 		if len(got[n].ImportSource) == 0 && n < len(fresh) {
 			t.Fatalf("item %q lost its import provenance", got[n].ID)
 		}
+		if n < len(fresh) && !bytes.Equal(got[n].ImportSource, fresh[n].ImportSource) {
+			t.Fatalf("item %q: import provenance = %q, want %q", got[n].ID, got[n].ImportSource, fresh[n].ImportSource)
+		}
 		buffers := [][]byte{got[n].Attachment, got[n].ImportSource, got[n].Passkey}
 		for m := range got[n].Attachments {
 			buffers = append(buffers, got[n].Attachments[m].Content)
@@ -724,9 +727,12 @@ func itemDatabaseBinariesByProtection(t *testing.T, db *kdbx.Database) map[byte]
 	return byProtection
 }
 
-// TestItemDatabaseBinaryProtectionIsolation is the regression for a database
-// whose equal-byte binaries shared one backing slice: locking the protected one
-// also replaced the clear one's content.
+// TestItemDatabaseBinaryProtectionIsolation proves that the database binaries
+// holding equal bytes under different MemoryProtection values are independent
+// mutable buffers: neither aliases the caller's attachment nor the other, so a
+// caller mutation reaches neither. KDBX 4 inner-header binaries are not
+// transformed by LockProtectedEntries, so the test then checks that a real
+// encode/decode roundtrip retains both binaries' content and protection flags.
 func TestItemDatabaseBinaryProtectionIsolation(t *testing.T) {
 	metadata := []byte("meta")
 	items := itemDatabaseProtectionItems(t)
