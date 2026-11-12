@@ -1218,6 +1218,21 @@ and does not establish server freshness or content history through
 rejected the input. The corresponding open path is
 [`OpenAuthenticatedFile`](#trusted-full-file-open).
 
+**VUK reuse after a device removal.** The API accepts a caller-supplied VUK
+and epoch and does not rotate them. Removing a device or slot from the
+authenticated current policy makes the current `OpenAuthenticatedFile` policy
+check reject that device (`invalid_value` at `device_id`), but it does not revoke
+a VUK that device already learned. If that same VUK is reused, the device can
+still use the low-level [`OpenCEK`](#cek-sealing-and-opening) with the new
+`cek_slot` to recover the new per-snapshot CEK, and then
+[`OpenKDBXPayload`](#kdbx-payload-sealing-and-opening) to decrypt the new
+payload. Cryptographic reader revocation requires a separate rotation to a
+fresh VUK, together with a protocol epoch advance, so that new envelopes and
+CEK slots are bound to a key the removed device never held. This API does not
+implement that rotation: after a device removal it produces a file that binds
+the current policy, not one from which the removed device's knowledge of the
+VUK has been cryptographically withdrawn.
+
 ## Trusted full-file open
 
 ```

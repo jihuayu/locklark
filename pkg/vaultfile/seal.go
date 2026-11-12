@@ -103,6 +103,18 @@ const CodeAuthorSigningKeyMismatch = "author_signing_key_mismatch"
 // already anchors. It does not establish the provenance or freshness of the
 // checkpoint, complete content history through prev_digest, or overall vault
 // trust, and it performs no epoch or key rotation, invitation or rewrap flow.
+//
+// The API accepts a caller-supplied VUK and epoch and does not rotate them.
+// Removing a device or slot from a policy makes the current
+// OpenAuthenticatedFile policy check reject that device, but it does not
+// revoke a VUK that device already learned. If that same VUK is reused, the
+// device can still call the low-level OpenCEK with the new CEK slot and
+// OpenKDBXPayload to decrypt the new payload; this seal has no way to know
+// which devices hold the VUK it is given. Cryptographic reader revocation
+// requires a separate rotation to a fresh VUK, together with a protocol epoch
+// advance, before which the old VUK must be treated as still valid by anyone
+// holding it. This API does not implement that rotation, so a sealed file
+// after a device removal is a current-policy decision, not a revocation.
 func SealAuthenticatedFile(draft *File, db *kdbx.Database, checkpoint *PolicyCheckpoint, vuk []byte, authorPrivateKey ed25519.PrivateKey) ([]byte, error) {
 	// 1. Basic inputs. Nothing here wraps, derives or encrypts.
 	if draft == nil || checkpoint == nil || db == nil {

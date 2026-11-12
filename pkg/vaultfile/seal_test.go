@@ -16,11 +16,12 @@ import (
 // fileSealFixture is one caller-pinned vault for the full-file seal tests. The
 // caller's anchor policy (seq 5) is alice owner/admin with device-1, bob as a
 // reader with device-2, and dave as a reader with device-3d. The current
-// policy (seq 6) is a root-signed successor that also makes bob and dave
-// writers, so a device principal with read access still authors content.
-// Every device carries a real generated age X25519 recipient and a distinct
-// real Ed25519 content signing key. A test runs a positive on the untouched
-// fixture before mutating anything.
+// policy (seq 6) is a root-signed successor that also makes bob a writer while
+// dave stays a reader, so a device principal with read access still has a real
+// VUK envelope and device-3d can open the positive file. Every device carries
+// a real generated age X25519 recipient and a distinct real Ed25519 content
+// signing key. A test runs a positive on the untouched fixture before
+// mutating anything.
 type fileSealFixture struct {
 	keys    *cpKeys
 	initial *Policy
@@ -101,7 +102,7 @@ func newSealFixture(t *testing.T) *fileSealFixture {
 	fx.chain = newCPChain(t, k)
 
 	p1 := clonePolicy(p0)
-	p1.Writers = []Member{{PrincipalID: "bob", Label: "Bob"}, {PrincipalID: "dave", Label: "Dave"}}
+	p1.Writers = []Member{{PrincipalID: "bob", Label: "Bob"}}
 	fx.install(t, p1)
 	return fx
 }
@@ -590,34 +591,124 @@ func TestSealAuthenticatedFileWrongAuthorKey(t *testing.T) {
 }
 
 // TestSealAuthenticatedFileRevokedPriorReader seals under a valid root-signed
-// successor that removes a previously authorised reader and device. The old
-// device has a real age identity in the predecessor and a real slot in a file
-// sealed under it, so its revocation is a policy decision, not a missing key.
+// successor, seq 7, that removes a previously authorised reader and device
+// from the already accepted seq 6 policy. The old device has a real age
+// identity in the predecessor and a real slot in a file sealed under it, so
+// the current-policy rejection is a policy decision, not a missing key.
+//
+// The same test then documents the boundary this policy change does not
+// cross. Dave learned the epoch VUK from the seq 6 file; resealing seq 7 with
+// that same VUK and epoch leaves the learned VUK able to open the new CEK and
+// payload through the low-level primitives. The VUK was not cryptographically
+// revoked: the removal makes only the current OpenAuthenticatedFile policy
+// check reject device-3d. A real revocation needs a separate rotation to a
+// fresh VUK and a protocol epoch advance, which SealAuthenticatedFile does not
+// implement.
 func TestSealAuthenticatedFileRevokedPriorReader(t *testing.T) {
 	fx := newSealFixture(t)
+	p0, p1 := fx.chain.policies[0], fx.chain.policies[1]
+	if p0.PolicySeq != 5 || p1.PolicySeq != 6 {
+		t.Fatalf("fixture chain is seq %d then %d, want 5 then 6", p0.PolicySeq, p1.PolicySeq)
+	}
+	if findDevice(p1, "device-3d") == nil || !p1.hasRole("dave", RoleReader) {
+		t.Fatal("the accepted predecessor does not name dave as a reader with device-3d")
+	}
 
-	// Positive first: the predecessor chain names dave, and device-3d opens.
+	// Positive first: the seq 6 chain names dave, and device-3d opens.
 	beforeEnc := sealPositive(t, fx)
 	before, err := ParseFile(beforeEnc)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if findDeviceSlot(before, "device-3d") == nil {
+	if before.Header.PolicySeq != p1.PolicySeq {
+		t.Fatalf("positive sealed policy seq = %d, want %d", before.Header.PolicySeq, p1.PolicySeq)
+	}
+	beforeSlot := findDeviceSlot(before, "device-3d")
+	if beforeSlot == nil {
 		t.Fatal("the positive file carries no device-3d slot before revocation")
 	}
 	if _, _, err := OpenAuthenticatedFile(beforeEnc, fx.chain.anchor, "device-3d", fx.dev3d); err != nil {
 		t.Fatalf("device-3d cannot open before revocation: %v", err)
 	}
 
-	// The successor removes dave from readers and device-3d from devices,
-	// carries bob and carol unchanged, and is root-signed by install.
-	next := clonePolicy(fx.chain.policies[1])
-	next.Readers = []Member{{PrincipalID: "bob", Label: "Bob"}, {PrincipalID: "carol", Label: "Carol"}}
-	if len(next.Devices) != 3 || next.Devices[2].DeviceID != "device-3d" {
-		t.Fatalf("unexpected fixture devices: %+v", next.Devices)
+	// Dave's device learns the epoch VUK and the CEK from that file, using
+	// the authenticated recipient and the file's own epoch and CEK slot.
+	daveVUK, err := OpenVUKForDevice(*beforeSlot, fx.chain.anchor.VaultID, before.Header.KeyEpoch, "device-3d", fx.dev3d.Recipient().String(), fx.dev3d)
+	if err != nil {
+		t.Fatalf("device-3d cannot open its learned VUK: %v", err)
 	}
-	next.Devices = next.Devices[:2]
-	fx.install(t, next)
+	defer clear(daveVUK)
+	if !bytes.Equal(daveVUK, fx.vuk) {
+		t.Fatal("device-3d learned a VUK other than the supplied epoch VUK")
+	}
+	daveCEK, err := OpenCEK(daveVUK, before.Header, before.CEKSlot)
+	if err != nil {
+		t.Fatalf("device-3d cannot open the positive CEK: %v", err)
+	}
+	// The learned VUK is what this test carries forward to the successor; it
+	// is cleared with the CEK it opens there.
+	clear(daveCEK)
+
+	// The successor is a real seq 7: a root-signed continuation appended to
+	// the accepted seq 6 policy, itself linked to p0's digest. It carries
+	// p0 then p1 unchanged, removes dave from readers and device-3d from
+	// devices, and is signed and wired by append and finalize.
+	p2 := clonePolicy(p1)
+	p2.PolicySeq = p1.PolicySeq + 1
+	p2.PrevPolicyDigest = PolicyDigest(p1)
+	p2.Readers = []Member{{PrincipalID: "bob", Label: "Bob"}, {PrincipalID: "carol", Label: "Carol"}}
+	if len(p2.Devices) != 3 || p2.Devices[2].DeviceID != "device-3d" {
+		t.Fatalf("unexpected fixture devices: %+v", p2.Devices)
+	}
+	p2.Devices = p2.Devices[:2]
+	if err := ValidatePolicy(p2); err != nil {
+		t.Fatalf("successor policy is not a valid policy: %v", err)
+	}
+	fx.chain.append(t, p2, "owner-root-01", nil)
+	// finalize seals the chain as it stands, so it must already carry a
+	// structurally valid roster for p2: one opaque slot per p2 device in
+	// ascending order and a CEK slot. These are placeholders; the seal under
+	// test overwrites every one of them from the authenticated policy.
+	p2Roster := make([]DeviceSlot, 0, len(p2.Devices))
+	for _, d := range p2.Devices {
+		p2Roster = append(p2Roster, DeviceSlot{DeviceID: d.DeviceID, Recipient: d.AgeEncryptionKey, WrappedVUK: []byte("fixture")})
+	}
+	keyEpoch := fx.chain.f.Header.KeyEpoch
+	fx.chain.f.VUKDeviceSlots = p2Roster
+	fx.chain.f.CEKSlot = CEKSlot{KeyEpoch: keyEpoch, WrappedCEK: []byte("fixture")}
+	fx.chain.f.KDBXCiphertext = []byte("fixture")
+	fx.chain.f.Header.RevisionID = ""
+	fx.chain.f.ContentSignature = Signature{}
+	fx.chain.finalize(t, fx.keys)
+	if findDeviceSlot(fx.chain.f, "device-3d") != nil {
+		t.Fatal("the finalize roster placeholder still names device-3d")
+	}
+	if got := len(fx.chain.f.SignedPolicyProofs); got != 3 {
+		t.Fatalf("carried proofs = %d, want 3", got)
+	}
+	if !bytes.Equal(PolicyDigest(p0), policyDigest(&fx.chain.f.SignedPolicyProofs[0])) ||
+		!bytes.Equal(PolicyDigest(p1), policyDigest(&fx.chain.f.SignedPolicyProofs[1])) ||
+		!bytes.Equal(PolicyDigest(p2), policyDigest(&fx.chain.f.SignedPolicyProofs[2])) {
+		t.Fatal("the carried chain does not carry exactly p0, p1, p2")
+	}
+	// The seq 5 anchor keeps its pinned placeholder bytes and the carried
+	// seq 6 proof keeps the root signature the positive was sealed with.
+	if !bytes.Equal(fx.chain.f.SignedPolicyProofs[0].Sig, pf(0x7f, ed25519.SignatureSize)) {
+		t.Fatal("the pinned seq 5 anchor proof changed")
+	}
+	if bytes.Equal(fx.chain.f.SignedPolicyProofs[1].Sig, pf(0x60, ed25519.SignatureSize)) ||
+		!bytes.Equal(fx.chain.f.SignedPolicyProofs[1].Sig, before.SignedPolicyProofs[1].Sig) {
+		t.Fatal("the accepted seq 6 proof was not carried unchanged")
+	}
+	if bytes.Equal(fx.chain.f.SignedPolicyProofs[2].Sig, pf(0x60, ed25519.SignatureSize)) {
+		t.Fatal("the seq 7 proof carries a placeholder, not a root signature")
+	}
+	if fx.chain.f.Header.PolicySeq != 7 || !bytes.Equal(fx.chain.f.Header.PolicyDigest, PolicyDigest(p2)) {
+		t.Fatalf("sealed successor header is policy seq %d, want 7 bound to p2", fx.chain.f.Header.PolicySeq)
+	}
+	if err := VerifyPolicyCheckpoint(fx.chain.f, fx.chain.anchor); err != nil {
+		t.Fatalf("successor does not verify under the pinned seq 5 anchor: %v", err)
+	}
 
 	// The old device's slot, recipient, CEK slot and ciphertext are stale
 	// draft state: the seal overwrites every one of them.
@@ -629,30 +720,68 @@ func TestSealAuthenticatedFileRevokedPriorReader(t *testing.T) {
 	}}
 	draft.CEKSlot = CEKSlot{KeyEpoch: draft.Header.KeyEpoch, WrappedCEK: []byte("stale")}
 	draft.KDBXCiphertext = []byte("stale")
-	before = deepCopyFile(draft)
+	draftBefore := deepCopyFile(draft)
+	// The seal is given the same VUK and epoch dave learned: nothing rotates.
 	vukBefore := bytes.Clone(fx.vuk)
 	db, cred := dbWithCredentials(t)
 
-	encoded, err := SealAuthenticatedFile(draft, db, fx.chain.anchor, fx.vuk, fx.keys.dev1Priv)
+	encoded, err := SealAuthenticatedFile(draft, db, fx.chain.anchor, daveVUK, fx.keys.dev1Priv)
 	if err != nil {
 		t.Fatalf("seal under the successor: %v", err)
 	}
-	if !bytes.Equal(fx.vuk, vukBefore) {
+	if !bytes.Equal(daveVUK, vukBefore) {
 		t.Fatal("the seal modified the caller's VUK")
 	}
 	wantCredsRestored(t, db, cred)
-	wantDraftUnchanged(t, before, draft)
+	wantDraftUnchanged(t, draftBefore, draft)
 
-	// The new file carries VUK slots exactly for the current read devices.
+	// The sealed successor is policy seq 7 and carries VUK slots exactly for
+	// the current read devices; device-3d has none.
+	sealed, err := ParseFile(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sealed.Header.PolicySeq != p2.PolicySeq {
+		t.Fatalf("sealed successor policy seq = %d, want %d", sealed.Header.PolicySeq, p2.PolicySeq)
+	}
+	if want := int(p0.PolicySeq) + 2; sealed.Header.PolicySeq != uint64(want) {
+		t.Fatalf("sealed successor policy seq = %d, want %d", sealed.Header.PolicySeq, want)
+	}
 	wantVUKSlots(t, encoded, fx.chain.anchor, map[string]*age.X25519Identity{
 		"device-1": fx.dev1, "device-2": fx.dev2,
 	})
+	if findDeviceSlot(sealed, "device-3d") != nil {
+		t.Fatal("the sealed successor still carries a device-3d slot")
+	}
 
-	// The revoked device is rejected with exactly invalid_value at device_id,
-	// and no handle is returned.
+	// The current-policy check rejects the old device with exactly
+	// invalid_value at device_id, and no handle is returned.
 	got, gdb, err := OpenAuthenticatedFile(encoded, fx.chain.anchor, "device-3d", fx.dev3d)
 	wantCodeAt(t, err, CodeInvalidValue, "device_id")
 	if got != nil || gdb != nil {
 		t.Fatalf("revoked open returned file/database = %v/%v, want both nil", got, gdb)
 	}
+
+	// The boundary this test documents: that rejection is a policy decision,
+	// not revocation of the learned VUK. The VUK device-3d learned from the
+	// seq 6 file still opens the seq 7 CEK slot with the low-level OpenCEK and
+	// then the seq 7 KDBX payload with OpenKDBXPayload, because the seal
+	// reused the same VUK and epoch unchanged.
+	staleCEK, err := OpenCEK(daveVUK, sealed.Header, sealed.CEKSlot)
+	if err != nil {
+		t.Fatalf("the learned VUK cannot open the successor CEK: %v", err)
+	}
+	defer clear(staleCEK)
+	staleDB, err := OpenKDBXPayload(sealed.KDBXCiphertext, staleCEK)
+	if err != nil {
+		t.Fatalf("the learned VUK and CEK cannot open the successor payload: %v", err)
+	}
+	entry := staleDB.Content.Root.Groups[0].Entries[0]
+	if got := entry.GetContent("Title"); got != "fixture" {
+		t.Fatalf("successor payload title = %q, want fixture", got)
+	}
+	if got := entry.GetContent("Password"); got != payloadProtectedSecret {
+		t.Fatalf("successor payload protected value = %q, want %q", got, payloadProtectedSecret)
+	}
+	staleDB.Credentials = nil
 }
