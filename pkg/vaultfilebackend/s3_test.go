@@ -667,8 +667,9 @@ func (r *writerRun) take(res writerResult) writerResult {
 // complete waits for the remaining results while ctx is live. It reports
 // false when ctx has ended with writers still outstanding, leaving pending
 // intact for stop to drain, and on success waits for the writer goroutines,
-// which have all reported by then. The ctx check at the top of each pass makes
-// an already-ended deadline win over results that happened to arrive with it.
+// which have all reported by then. A completed-race deadline wins over a
+// result that arrived with it: the ctx checks after the loop and after the
+// final wait keep an ended race from being reported as a success.
 func (r *writerRun) complete(ctx context.Context) bool {
 	for r.pending > 0 {
 		if ctx.Err() != nil {
@@ -681,7 +682,16 @@ func (r *writerRun) complete(ctx context.Context) bool {
 			return false
 		}
 	}
+	// The last result and ctx.Done can be ready together; select may have
+	// consumed the result and left pending at zero. The deadline still wins.
+	if ctx.Err() != nil {
+		return false
+	}
 	r.exited.Wait()
+	// Cancellation during the final wait is a failed race too.
+	if ctx.Err() != nil {
+		return false
+	}
 	r.reaped = true
 	return true
 }
@@ -1068,6 +1078,44 @@ func TestS3MockPutBarrierReleasedWriterDeadline(t *testing.T) {
 	}
 	if got := running.Load(); got != 0 {
 		t.Fatalf("%d writer goroutine(s) still running when the typed failure was returned", got)
+	}
+}
+
+// TestS3MockPutBarrierCompletedRaceDeadline pins the terminal state: the last
+// writer result and the race deadline can be ready together, and consuming the
+// result down to pending == 0 must not report success for an ended race.
+func TestS3MockPutBarrierCompletedRaceDeadline(t *testing.T) {
+	raceCtx, endRace := context.WithCancel(context.Background())
+	defer endRace()
+
+	run := startWriters([]func() error{func() error { return nil }})
+	// Consume the writer's only result by hand, leaving pending at zero just
+	// as the final result of a race does.
+	res := <-run.results
+	run.take(res)
+	if run.pending != 0 {
+		t.Fatalf("pending = %d, want 0 before the deadline check", run.pending)
+	}
+	// The deadline ends after the last result was recorded.
+	endRace()
+	if run.complete(raceCtx) {
+		t.Fatal("complete reported success after the complete-race deadline ended")
+	}
+
+	barrier := newPutBarrier(1)
+	fail := run.stop(endRace, barrier, "complete-race deadline ended", raceCtx.Err())
+	var typed *putBarrierFailure
+	if !errors.As(fail, &typed) {
+		t.Fatalf("failure is %T, want *putBarrierFailure", fail)
+	}
+	if !errors.Is(fail, context.Canceled) {
+		t.Fatalf("failure cause = %v, want context.Canceled", fail.err)
+	}
+	if !run.reaped {
+		t.Fatal("writer was not reaped after the failed race")
+	}
+	if run.pending != 0 {
+		t.Fatalf("%d writer result(s) not drained after the failed race", run.pending)
 	}
 }
 
