@@ -1722,11 +1722,13 @@ class QuartzApi:
         Returns ``False`` only while the application is not yet registered
         (``None``) or registered and not yet finished launching; that is the
         sole state the caller may wait on. Returns ``True`` only when the
-        registered object confirms this exact pid (``processIdentifier``, when
-        it can be asked) and ``isFinishedLaunching()`` answers the built-in
-        ``True``. A missing/raising AppKit API, an object for a different pid,
-        or any other ``isFinishedLaunching`` answer refuses ``activation-failed``
-        at once - it is never readiness and never a wait.
+        registered object reports the requested pid through a callable
+        ``processIdentifier()`` returning an exact built-in ``int`` equal to
+        ``pid`` (a missing/non-callable/string/float/bool/``int`` subclass
+        answer is refused, never coerced) and ``isFinishedLaunching()`` answers
+        the built-in ``True``. A missing/raising AppKit API, an object for a
+        different pid, or any other answer refuses ``activation-failed`` at
+        once - it is never readiness and never a wait.
         """
         try:
             lookup = self.appkit.NSRunningApplication.runningApplicationWithProcessIdentifier_
@@ -1738,13 +1740,12 @@ class QuartzApi:
         if running is True or running is False:
             raise contract.ContractError("activation-failed")
         try:
-            identifier = getattr(running, "processIdentifier", None)
-            if callable(identifier) and int(identifier()) != int(pid):
-                raise contract.ContractError("activation-failed")
+            identifier = running.processIdentifier
+            reported = identifier() if callable(identifier) else None
             finished = running.isFinishedLaunching()
-        except contract.ContractError:
-            raise
         except Exception:
+            raise contract.ContractError("activation-failed")
+        if type(reported) is not int or reported != pid:
             raise contract.ContractError("activation-failed")
         if finished is True:
             return True

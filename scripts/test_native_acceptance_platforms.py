@@ -1028,6 +1028,20 @@ class MacActivationOnlyTests(unittest.TestCase):
         self.assertEqual((win32.activations, win32.clicks), (0, []))
 
 
+class _MissingIdentifier:
+    """Test-only attribute value meaning "this application has no such API".
+
+    Attribute MISSES it (separate from assigning ``None``); it answers False,
+    so it is never callable and never an int.
+    """
+
+    def __getattr__(self, name):
+        raise AttributeError(name)
+
+
+_MISSING = _MissingIdentifier()
+
+
 class RegisteredApplication:
     """A registration that appears only on lookup ``appear_at``, then reports
     ``finished`` for ``finish_after_visible`` more lookups before finishing."""
@@ -1233,6 +1247,74 @@ class ActivationReadinessTests(unittest.TestCase):
                 running.isFinishedLaunching = lambda value=value: value
                 self.assert_refused(self, api, running)
                 self.assertEqual((running.options, self.clock.sleeps), ([], []))
+
+    def test_process_identifier_must_be_callable_exact_int(self):
+        # A missing/non-callable PID answer is refused, never skipped; only a
+        # callable returning the exact built-in int equal to the request is
+        # accepted. Every coercible impostor is refused WITHOUT int() coercion.
+        class IntSubclass(int):
+            pass
+
+        def returns(value):
+            return lambda: value
+
+        cases = (
+            # Missing: the class fallback would answer the right int, so the
+            # deleted answer must be checked here, not skipped.
+            ("missing", _MISSING),
+            # Non-callable attribute: set explicitly so the stub class method
+            # (a callable) cannot stand in for it.
+            ("noncallable-int", self.PID),
+            ("noncallable-none", None),
+            # Callable but returns a coercible impostor of the same PID.
+            ("returns-string", returns("4242")),
+            ("returns-float", returns(float(self.PID))),
+            ("returns-bool", returns(True)),
+            ("returns-int-subclass", returns(IntSubclass(self.PID))),
+            ("returns-none", returns(None)),
+            ("different-pid", returns(self.PID + 1)),
+            ("raises", _raising),
+        )
+        for name, value in cases:
+            with self.subTest(case=name):
+                self.clock.sleeps[:] = []
+                api, running, _ = self.api(RegisteredApplication())
+                if value is _MISSING:
+                    running.processIdentifier = _MISSING
+                else:
+                    running.processIdentifier = value
+                self.assert_refused(self, api, running)
+                self.assertEqual((running.options, self.clock.sleeps), ([], []))
+
+    def test_noncallable_identifier_attribute_is_not_skipped(self):
+        # Explicit regression for the old ``callable(...) and ...`` skip: a
+        # non-callable attribute installed per lookup must still refuse even
+        # though the class method would have answered the exact int.
+        api, running, _ = self.api(RegisteredApplication())
+        calls = []
+        original = running.processIdentifier
+
+        def lookup(looked_up):
+            calls.append(looked_up)
+            running.processIdentifier = self.PID  # shadow: non-callable
+            return running
+
+        class NSRunningApplication(object):
+            @staticmethod
+            def runningApplicationWithProcessIdentifier_(looked_up):
+                return lookup(looked_up)
+
+        api.appkit.NSRunningApplication = NSRunningApplication
+        self.assert_refused(self, api, running)
+        self.assertEqual((calls, running.options, self.clock.sleeps), ([self.PID], [], []))
+        # The class method itself is the exact-int answer the contract wants.
+        self.assertIs(type(original()), int)
+
+    def test_exact_int_identifier_still_activates_once(self):
+        api, running, _ = self.api(RegisteredApplication())
+        self.assertIs(type(running.processIdentifier()), int)
+        self.assertIs(self.activate(api), True)
+        assert_named_activation_options(self, api, running)
 
     def test_false_activation_verdict_is_one_activation_and_no_retry(self):
         api, running, _ = self.api(RegisteredApplication())
