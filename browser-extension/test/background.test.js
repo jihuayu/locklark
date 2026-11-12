@@ -16,7 +16,11 @@ async function waitFor(pred, label = "condition") {
 }
 function harness(options = {}) {
   const RealDate = Date;
-  let clock = options.clock ?? RealDate.now();
+  // Route-expiry tests start at a virtual instant and advance it themselves;
+  // every other test keeps the real clock.
+  let clock =
+    options.clock ??
+    (options.fakeTimers === true ? 1_700_000_000_000 : RealDate.now());
   class ClockDate extends RealDate {
     constructor(...args) {
       if (args.length) super(...args);
@@ -371,10 +375,16 @@ function harness(options = {}) {
     chrome: api,
     LocklarkCore: core,
     crypto: webcrypto,
-    Date: options.clock === undefined ? RealDate : ClockDate,
+    Date:
+      options.clock === undefined && options.fakeTimers !== true
+        ? RealDate
+        : ClockDate,
+    // Every worker timer is unref'd: a timer still pending at process exit
+    // must never keep the test runner alive for its full delay.
     setTimeout: (fn, ms) => {
       const h = setTimeout(fn, ms);
       h.unref?.();
+      assert.equal(h.hasRef?.() ?? false, false, "a worker timer holds the process");
       timers.set(h, { fn, ms });
       return h;
     },
@@ -406,6 +416,21 @@ function harness(options = {}) {
     // The timer armed for this exact delay, if any (deadline pruning).
     timerFor: (ms) => [...timers].find(([, timer]) => timer.ms === ms),
     pendingDelays: () => [...timers].map(([, timer]) => timer.ms),
+    // Fire every timer armed for this exact delay, as if only it was due.
+    // Each real handle is cleared first, so a fired timer can never keep this
+    // process alive for its full (e.g. two-minute) delay.
+    fireDelay: async function (ms) {
+      const due = [...timers].filter(([, timer]) => timer.ms === ms);
+      for (const [handle, timer] of due) {
+        clearTimeout(handle);
+        timers.delete(handle);
+        timer.fn();
+      }
+      await tick();
+      return due.length;
+    },
+    // Real timers still scheduled (cleared or fired ones are gone).
+    liveTimers: () => timers.size,
     idleInterval: () => idleInterval,
     fireIdle: (state) => idleListener?.(state),
     holdFill: (promise) => (fillWait = promise),
@@ -745,6 +770,11 @@ async function openRouteFixture(options = {}) {
   let sourceTab = null;
   let routeTab = null;
   const h = harness({
+    // Deadline tests run on a virtual clock; settings and capabilities pass
+    // through unchanged.
+    ...(options.fakeTimers ? { fakeTimers: true } : {}),
+    ...(options.settings ? { settings: options.settings } : {}),
+    ...(options.capabilities ? { capabilities: options.capabilities } : {}),
     onRequest: (r) => {
       // Real V2 "items" by default; a legacy host replies "vault-items".
       if (r.type === "vault-search" && options.malformedList)
@@ -987,10 +1017,13 @@ test("revoking a pending route removes it from the boot set", async () => {
     let cancelled = 0;
     const load = new Function(
       "routeGrants", "routeTabs", "routeBoots",
-      "clipboardDropGrant", "routeTabAt", "cancelContext", "Date",
+      "clipboardDropGrant", "routeTabAt", "cancelContext",
+      "routeGrantsChanged", "Date",
       '"use strict";' + revokeSource + bindSource + activationSource +
         "\nreturn { revokeRoute, routeActivation };",
     );
+    // Revoking a grant asks the one deadline to follow the remaining grants.
+    let reschedules = 0;
     const api = load(
       grants,
       tabs,
@@ -1000,13 +1033,21 @@ test("revoking a pending route removes it from the boot set", async () => {
       () => {
         cancelled += 1;
       },
+      () => {
+        reschedules += 1;
+      },
       Date,
     );
-    return { grant, grants, tabs, boots, api, cancelled: () => cancelled };
+    return {
+      grant, grants, tabs, boots, api,
+      cancelled: () => cancelled,
+      reschedules: () => reschedules,
+    };
   };
   const state = build();
   state.api.revokeRoute(state.grant);
   assert.equal(state.boots.has(state.grant), false, "revoked grant stayed in routeBoots");
+  assert.equal(state.reschedules(), 1, "revocation did not re-arm the deadline timer");
   assert.equal(state.api.routeActivation(42, 1), "switch",
     "a revoked pending grant was adopted as a startup activation");
   assert.equal(state.cancelled(), 0);
@@ -1320,10 +1361,12 @@ test("revoked routes hold no clipboard selectors", async () => {
   grant.clients.add(port);
   const grants = new Map([[grant.token, grant]]);
   const tabs = new Map([[7, grant]]);
+  // Revocation only asks the one deadline timer to follow the grant set.
   const run = new Function(
     "routeGrants", "routeTabs", "routeBoots", "clipboardDropGrant",
+    "routeGrantsChanged",
     '"use strict";' + body + "\nreturn revokeRoute;",
-  )(grants, tabs, new Set(), () => {});
+  )(grants, tabs, new Set(), () => {}, () => {});
   run(grant);
   assert.equal(grant.routeDetail, null, "the grant kept approved selectors");
   assert.equal(port.routeDetail, null, "an admitted port kept approved selectors");
@@ -1452,6 +1495,231 @@ test("lifecycle port admission needs the live exact route page", async () => {
   );
   assert.equal(ok.disconnected, true);
   await route.h.send({ type: "disconnect" });
+});
+
+// ---- Route expiry: one active deadline timer for the earliest grant ----
+// A new grant asks the worker to re-arm its single deadline timer (always the
+// earliest original deadline). The route lifecycle is observed only through
+// ports, replies and that one timer: no debug or test-only message exists.
+const ROUTE_TTL_DELAY = 120000;
+// The delay of the one deadline timer the worker currently holds, if any.
+// pendingDelays() is used because timerFor() answers with [handle, timer] and
+// an empty entry would still be truthy.
+function deadlineDelay(h) {
+  return h.pendingDelays().includes(ROUTE_TTL_DELAY)
+    ? ROUTE_TTL_DELAY
+    : undefined;
+}
+// A live route on a virtual clock, with its lifecycle port admitted (the page
+// received route-ready). No deadline fires until a test makes one due.
+async function expiryRoute() {
+  const route = await openRouteFixture({ fakeTimers: true });
+  const port = openLifecyclePort(route.h, route.sender());
+  await waitFor(() => port.received.length === 1, "route-ready");
+  assert.deepEqual(port.received.map((m) => m.type), ["route-ready"]);
+  assert.equal(deadlineDelay(route.h), ROUTE_TTL_DELAY, "no deadline timer was armed");
+  return { route, port };
+}
+// Moves the virtual clock to the armed deadline and fires exactly that timer.
+async function reachDeadline(h) {
+  const armed = h.timerFor(ROUTE_TTL_DELAY);
+  assert.ok(armed, "no deadline timer is armed");
+  h.advanceClock(armed[1].ms);
+  assert.equal(await h.fireDelay(ROUTE_TTL_DELAY), 1, "the deadline timer did not fire");
+}
+
+test("an idle route grant is revoked and its lifecycle port told route-revoked at its original expiry", async () => {
+  const { route, port } = await expiryRoute();
+  const nativeBefore = route.nativeReads().length;
+  // Nothing happens to the route: no request, no tab event, no claim. Only
+  // the worker's own deadline timer is due, at the grant's original expiry.
+  await reachDeadline(route.h);
+  // The ordinary revoke path sends the token only and closes the port.
+  assert.deepEqual(
+    port.received.slice(1).map((message) => [message.type, message.token]),
+    [["route-revoked", route.token]],
+  );
+  assert.deepEqual(Object.keys(port.received.at(-1)).sort(), ["token", "type"]);
+  assert.equal(port.disconnected, true, "a revoked route kept its lifecycle port");
+  assert.equal(route.nativeReads().length, nativeBefore, "expiry started a native read");
+  // The grant is gone, so its page can no longer claim, and no deadline is
+  // left pending.
+  const claim = await route.claim();
+  assert.ok(!claim || claim.error === "refused", "an expired route was claimed");
+  assert.equal(claim?.detail, undefined);
+  assert.equal(route.nativeReads().length, nativeBefore, "a claim after expiry read natively");
+  assert.equal(deadlineDelay(route.h), undefined, "an empty grant set kept a timer");
+  assert.equal(route.h.liveTimers(), 0, "a real timer survived the fake expiry");
+  await route.h.send({ type: "disconnect" });
+});
+
+test("a premature expiry timer does not revoke early and re-arms only the remaining delay", async () => {
+  const { route, port } = await expiryRoute();
+  // Deliver the deadline callback with half the wait still left.
+  route.h.advanceClock(ROUTE_TTL_DELAY / 2);
+  assert.equal(await route.h.fireDelay(ROUTE_TTL_DELAY), 1);
+  assert.deepEqual(port.received.map((m) => m.type), ["route-ready"]);
+  assert.equal(port.disconnected, false, "an early timer revoked a live grant");
+  // The full delay is never re-armed; exactly the remaining half is.
+  const remaining = route.h.timerFor(ROUTE_TTL_DELAY / 2);
+  assert.ok(remaining, "the remaining deadline was not re-armed");
+  assert.equal(deadlineDelay(route.h), undefined, "the full delay was re-armed");
+  // The route is still usable at that point.
+  assert.equal((await route.claim())?.type, "route-claimed");
+  assert.deepEqual(port.received.map((m) => m.type), ["route-ready"]);
+  // The remaining delivery reaches the original deadline and revokes.
+  route.h.advanceClock(remaining[1].ms);
+  assert.equal(await route.h.fireDelay(ROUTE_TTL_DELAY / 2), 1);
+  assert.deepEqual(
+    (({ type, token }) => [type, token])(port.received.at(-1)),
+    ["route-revoked", route.token],
+  );
+  assert.equal(port.disconnected, true);
+  assert.equal(route.h.liveTimers(), 0, "a real timer survived the fake expiry");
+  await route.h.send({ type: "disconnect" });
+});
+
+test("a claimed route keeps its single original deadline and expiry refuses further work", async () => {
+  const { route, port } = await expiryRoute();
+  assert.equal((await route.claim())?.type, "route-claimed");
+  // The claim is activity, never a renewal: the original deadline is still
+  // armed at its full delay and nothing else was armed.
+  assert.deepEqual(route.h.pendingDelays(), [ROUTE_TTL_DELAY]);
+  await reachDeadline(route.h);
+  assert.deepEqual(port.received.map((m) => m.type), ["route-ready", "route-revoked"]);
+  assert.equal(port.disconnected, true);
+  const copy = await route.h.send(
+    {
+      type: "route-copy-field", token: route.token,
+      item_id: route.ITEM_ID, revision: route.ITEM_REV, field: "username",
+    },
+    route.sender(),
+  );
+  assert.ok(!copy || copy.error === "refused", "an expired claimed route kept working");
+  assert.equal(route.h.liveTimers(), 0, "a real timer survived the fake expiry");
+  await route.h.send({ type: "disconnect" });
+});
+
+test("an explicit route close clears the deadline timer", async () => {
+  const { route, port } = await expiryRoute();
+  const reply = await route.h.send(
+    { type: "route-close", token: route.token },
+    route.sender(),
+  );
+  // The reply carries the close type only; the token never comes back.
+  assert.equal(reply?.type, "route-closed");
+  assert.equal(reply.token, undefined, "a close reply returned the token");
+  assert.equal(port.disconnected, true, "a closed route kept its lifecycle port");
+  assert.deepEqual(
+    port.received.map((m) => [m.type, m.token]),
+    [
+      ["route-ready", route.token],
+      ["route-revoked", route.token],
+    ],
+  );
+  // The only grant is gone, so no deadline survives it.
+  assert.equal(deadlineDelay(route.h), undefined, "a closed route kept a deadline timer");
+  assert.equal(route.h.liveTimers(), 0, "a real timer survived the close");
+  assert.equal((await route.claim())?.error, "refused", "a closed route was claimed");
+  await route.h.send({ type: "disconnect" });
+});
+
+test("pruneRoutes on a later open-route revokes the expired idle grant on its port", async () => {
+  const { route, port } = await expiryRoute();
+  // Idle past its deadline, but the worker's timer was not delivered: the
+  // next open-route runs pruneRoutes() first, which must revoke and notify.
+  route.h.advanceClock(ROUTE_TTL_DELAY);
+  assert.deepEqual(port.received.map((m) => m.type), ["route-ready"]);
+  const opened = await route.h.send({
+    type: "open-route",
+    id: "e".repeat(32),
+    revision: "c".repeat(64),
+  });
+  assert.ok(opened?.routeCreated, "the later route was refused");
+  assert.equal(port.disconnected, true, "pruning kept the expired grant's lifecycle port");
+  assert.deepEqual(
+    port.received.map((m) => [m.type, m.token]),
+    [
+      ["route-ready", route.token],
+      ["route-revoked", route.token],
+    ],
+  );
+  // The stale deadline timer was replaced by the new grant's own deadline.
+  assert.equal(route.h.pendingDelays().filter((ms) => ms === ROUTE_TTL_DELAY).length, 1);
+  assert.equal(route.h.liveTimers(), 1, "expected exactly the new grant's deadline timer");
+  assert.equal((await route.claim())?.error, "refused", "an expired route was claimed");
+  await route.h.send({ type: "disconnect" });
+  assert.equal(route.h.liveTimers(), 0);
+});
+
+test("revoke-all (lock, disconnect, un-opted-in idle) clears the deadline timer", async () => {
+  for (const how of ["lock", "disconnect", "idle"]) {
+    const { route, port } = await expiryRoute();
+    if (how === "idle") {
+      // Idle auto-lock is opt-in; the fixture was created without it, so the
+      // idle report must leave the route and its deadline untouched.
+      route.h.fireIdle("idle");
+      await tick();
+      assert.equal(port.disconnected, false, "an un-opted-in idle check revoked");
+      assert.equal(deadlineDelay(route.h), ROUTE_TTL_DELAY);
+      // The ordinary disconnect is the revoke-all for this harness's case.
+      await route.h.send({ type: "disconnect" });
+    } else {
+      await route.h.send({ type: how });
+    }
+    assert.equal(port.disconnected, true, how + " kept the lifecycle port");
+    assert.deepEqual(
+      port.received.map((m) => m.type),
+      ["route-ready", "route-revoked"],
+      how + " did not notify route-revoked",
+    );
+    assert.equal(deadlineDelay(route.h), undefined, how + " kept a deadline timer");
+    assert.equal(route.h.liveTimers(), 0, how + " left a real timer behind");
+  }
+});
+
+test("an opted-in idle auto-lock revokes the route and clears its deadline timer", async () => {
+  const route = await openRouteFixture({ fakeTimers: true });
+  const port = openLifecyclePort(route.h, route.sender());
+  await waitFor(() => port.received.length === 1, "route-ready");
+  assert.equal(deadlineDelay(route.h), ROUTE_TTL_DELAY);
+  // The options page opts into idle auto-lock while the route is open.
+  route.h.listeners.storage(
+    { idleLockMinutes: { newValue: 1 } },
+    "local",
+  );
+  assert.equal(route.h.idleInterval(), 60, "idle auto-lock was not opted in");
+  route.h.fireIdle("idle");
+  await tick();
+  assert.equal(port.disconnected, true, "a locked session kept the lifecycle port");
+  assert.deepEqual(port.received.map((m) => m.type), ["route-ready", "route-revoked"]);
+  assert.equal(deadlineDelay(route.h), undefined, "a locked session kept a deadline timer");
+  assert.equal(route.h.liveTimers(), 0, "a locked session left a real timer behind");
+});
+
+test("a boot is armed as it is registered, before its tab is bound", async () => {
+  const h = harness({ fakeTimers: true });
+  await ready(h);
+  const sourceTab = { id: 1, windowId: 1, active: true, url: "https://example.test/login" };
+  h.api.tabs.get = async (tabId) => (tabId === sourceTab.id ? { ...sourceTab } : null);
+  h.api.scripting.executeScript = async () => [
+    { frameId: 0, documentId: h.docId(), result: { top: true, origin: "https://example.test" } },
+  ];
+  let release = null;
+  h.api.tabs.create = () => new Promise((resolve) => (release = resolve));
+  const send = h.send({ type: "open-route", id: "b".repeat(32), revision: "c".repeat(64) });
+  await waitFor(() => release, "pending route create");
+  // The boot's create is pending: nothing is bound yet.
+  release({ id: 7, windowId: 1 });
+  const reply = await send;
+  assert.ok(reply?.routeCreated, "the bound route was refused: " + reply?.status);
+  // Binding keeps that same single timer at the original TTL.
+  assert.equal(deadlineDelay(h), ROUTE_TTL_DELAY, "the bound route has no deadline timer");
+  // Closing the tab revokes the grant and clears that single deadline.
+  h.listeners.removed(7);
+  assert.equal(deadlineDelay(h), undefined, "a closed route tab kept a deadline timer");
+  assert.equal(h.liveTimers(), 0, "a real timer survived the fake expiry");
+  await h.send({ type: "disconnect" });
 });
 
 // Settles a port that admission refused: background's catch disconnects it.
