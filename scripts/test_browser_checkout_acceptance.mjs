@@ -2235,7 +2235,7 @@ test("route revocation checkpoint switches, wipes, reloads and never prompts", (
   // host-side polling of the fixed read-only DOM probe.
   assert.match(
     checkpoint.slice(hiddenWait, returnKey),
-    /^routeWiped\(\n\s+await route\.evaluate\(routeRevokedProbe\(fixture\.Title, fixture\.Value\)\),\n\s+\);/,
+    /^routeWiped\(\n\s+await revoked\.evaluate\(routeRevokedProbe\(fixture\.Title, fixture\.Value\)\),\n\s+\);/,
   );
   assert.match(checkpoint, /Background revocation did not wipe the route detail/);
   assert.ok(at('recordRouteLifecycle("route-revoked")') > hiddenWait);
@@ -2256,7 +2256,7 @@ test("route revocation checkpoint switches, wipes, reloads and never prompts", (
   assert.ok(returnedWait > foreground && returnedWait < at('mark("route:reload");'));
   assert.match(
     checkpoint.slice(checkpoint.lastIndexOf("await wait(async () => {", returnedWait)),
-    /^await wait\(async \(\) => \{\n\s+const returned = await route\.evaluate\(\n\s+routeRevokedProbe\(fixture\.Title, fixture\.Value\),\n\s+\);\n\s+return returned\?\.visible === true && routeWiped\(returned\);\n\s+\}, "Returned route page kept its detail"\);/,
+    /^await wait\(async \(\) => \{\n\s+const returned = await revoked\.evaluate\(\n\s+routeRevokedProbe\(fixture\.Title, fixture\.Value\),\n\s+\);\n\s+return returned\?\.visible === true && routeWiped\(returned\);\n\s+\}, "Returned route page kept its detail"\);/,
   );
   // The full probe result includes the fixed visibility boolean the return wait
   // requires, and the switch-only page state is never used for the return wait.
@@ -2489,4 +2489,131 @@ test("route revocation checkpoint switches, wipes, reloads and never prompts", (
   assert.match(copyProof, /OS clipboard did not receive the approved field/);
   assert.match(copyProof, /Native field disclosure did not appear/);
   assert.match(copyProof, /Route detail did not survive native approval/);
+});
+
+// Read once at module load, before any test text exists, so anchor-count
+// checks never match this file's own source.
+const ROUTE_JOURNEY_SOURCE = readFileSync(
+  new URL("./browser_native_acceptance.mjs", import.meta.url),
+  "utf8",
+);
+
+test("route revocation reattaches a fresh client after the positive cleanup and closes it in its own finally", () => {
+  const source = ROUTE_JOURNEY_SOURCE;
+  // Each anchor is required to occur exactly once in the harness.
+  const unique = (needle) => {
+    const hits = countMatches(
+      source,
+      new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"),
+    );
+    assert.equal(hits, 1, needle);
+    return source.indexOf(needle);
+  };
+  // From the positive block's cleanup and trace stop through the revoke
+  // checkpoint's own finally.
+  const positiveCleanup = unique("      await refreshRouteStatusTrace(attach, opened, true);");
+  const positiveClientClosed = unique("        await route.close();");
+  assert.ok(positiveClientClosed < positiveCleanup, "the positive client closes before its trace stops");
+  const from = unique("    // Route revocation checkpoint: the same tab and target");
+  assert.ok(from > positiveCleanup, "the revoke checkpoint follows the cleanup");
+  const stop = source.indexOf("\n  async function blank()", from);
+  assert.ok(stop > from, "revocation checkpoint must stay in the route journey");
+  // The cleanup slice alone, then the revoke checkpoint through its finally.
+  const cleanup = source.slice(positiveClientClosed, from);
+  const checkpoint = source.slice(from, stop);
+  const at = (needle) => {
+    const index = checkpoint.indexOf(needle);
+    assert.ok(index >= 0, "checkpoint is missing " + needle);
+    return index;
+  };
+  // 1. The cleanup ends with the page's trace stopped and nothing else; no
+  //    attach happens before the revoke checkpoint begins.
+  assert.match(cleanup, /await route\.close\(\);[\s\S]*await refreshRouteStatusTrace\(attach, opened, true\);\n    \}\n$/);
+  assert.doesNotMatch(cleanup, /\battach\(\s*opened\s*\)|\brevoked\b/);
+  // 2. The fresh attach happens after that cleanup and before the first
+  //    physical tab switch, reusing the captured `opened` target exactly once.
+  const switchKey = at("browserKey(ROUTE_SWITCH_SOURCE, ROUTE_TITLE_PREFIX);");
+  const freshAttach = at("revoked = await attach(opened);");
+  const firstStep = Math.min(
+    ...[
+      checkpoint.indexOf("mark(", freshAttach),
+      checkpoint.indexOf("browserKey(", freshAttach),
+      checkpoint.indexOf("document.visibilityState", freshAttach),
+    ].filter((index) => index > freshAttach),
+  );
+  assert.ok(freshAttach > 0, "the revoke checkpoint must reattach a fresh client");
+  assert.ok(freshAttach < firstStep, "the fresh attach precedes the first revoke step");
+  assert.ok(freshAttach < switchKey, "the fresh attach precedes the first physical tab switch");
+  // Exactly one fresh client is bound for the revocation reads; the stale
+  // client's own later reattach stays as it was.
+  assert.equal(
+    countMatches(checkpoint, /revoked = await attach\(\s*opened\s*\);/g),
+    1,
+    "exactly one fresh revocation client",
+  );
+  assert.equal(countMatches(checkpoint, /\bstale = await attach\(\s*opened\s*\);/g), 1);
+  assert.doesNotMatch(checkpoint, /\broute = await attach\(/);
+  // The captured target is proven still the exact route page by the targets
+  // list immediately before the attach.
+  assert.match(
+    checkpoint.slice(0, freshAttach),
+    /assert\.equal\(\n\s+\(await targets\(\)\)\.filter\(\n\s+\(target\) => target\.id === routeTarget && ROUTE_PAGE\.test\(target\.url\),\n\s+\)\.length,\n\s+1,\n\s+"Route target was replaced",\n\s+\);/,
+  );
+  // A failed attach cannot be read as success: the attach is awaited outside
+  // any try, and its first read is a required readyState gate.
+  assert.doesNotMatch(
+    checkpoint.slice(Math.max(0, freshAttach - 120), freshAttach + 200),
+    /\btry\s*\{|catch|\?\?|\|\|/,
+  );
+  assert.match(
+    checkpoint,
+    /revoked = await attach\(opened\);\n\s+await wait\(\n\s+async \(\) => \(await revoked\.evaluate\("document\.readyState"\)\) === "complete",\n\s+"Route page did not load",\n\s+\);/,
+  );
+  // 3. Every route-page read in the revoke/reload/no-prompt checkpoint uses the
+  //    reattached client, never the closed positive client.
+  const afterAttach = checkpoint.slice(freshAttach);
+  assert.match(afterAttach, /await revoked\.evaluate\(/);
+  assert.doesNotMatch(afterAttach, /\broute\./);
+  // Only the fresh client (from this point) and the pre-existing stale client
+  // are attached; no further connection, and none without the captured target.
+  assert.equal(countMatches(afterAttach, /await attach\(/g), 2);
+  assert.doesNotMatch(afterAttach, /await attach\((?!opened\))/);
+  assert.match(afterAttach, /browserKey\(ROUTE_RETURN, SOURCE_TITLE_PREFIX\);[\s\S]*await revoked\.evaluate\(/);
+  assert.match(afterAttach, /browserKey\(ROUTE_RELOAD, ROUTE_TITLE_PREFIX\);[\s\S]*await revoked\.evaluate\(/);
+  // The bounded no-prompt loop reads the reattached client, not `stale`.
+  const promptLoop = afterAttach.slice(
+    afterAttach.indexOf("for (;;) {"),
+    afterAttach.indexOf("await delay(200);"),
+  );
+  assert.ok(promptLoop.length > 0, "the no-prompt loop must stay bounded");
+  assert.match(promptLoop, /await revoked\.evaluate\(routeRevokedProbe\(/);
+  assert.doesNotMatch(promptLoop, /stale\.evaluate\(routeRevokedProbe/);
+  // The physical keys, read-only probes and native inspection are unchanged.
+  for (const fixed of [
+    /browserKey\(ROUTE_SWITCH_SOURCE, ROUTE_TITLE_PREFIX\);/,
+    /browserKey\(ROUTE_RETURN, SOURCE_TITLE_PREFIX\);/,
+    /browserKey\(ROUTE_RELOAD, ROUTE_TITLE_PREFIX\);/,
+    /nativeInspection\(\)\[ROUTE_COPY_REVIEW_LABEL\]/,
+    /await stale\.count\(ROUTE_COPY_FIELD_SELECTOR\)/,
+    /await stale\.click\(ROUTE_COPY_FIELD_SELECTOR\)/,
+  ])
+    assert.match(checkpoint, fixed);
+  // 4. The fresh client is closed in the revoke checkpoint's own finally, on
+  //    success and failure, alongside the stale client.
+  const finallyAt = checkpoint.lastIndexOf("} finally {\n      try {\n        await stale?.close();");
+  assert.ok(finallyAt > freshAttach, "the revoke finally must follow the attach");
+  const revokeFinally = checkpoint.slice(
+    finallyAt,
+    checkpoint.indexOf("} finally {", finallyAt + 1),
+  );
+  assert.match(revokeFinally, /await stale\?\.close\(\);/);
+  assert.match(revokeFinally, /await revoked\?\.close\(\);/);
+  assert.equal(countMatches(checkpoint, /revoked\?\.close\(\)/g), 1);
+  // Nothing navigates, messages the worker, installs a page hook or clicks
+  // natively inside the revoke checkpoint.
+  assert.doesNotMatch(
+    afterAttach,
+    /\bgoto\b|sendMessage|relayMessage|postMessage|addInitScript|routeStatusTraceProbe|\binput\(|click_label|wait_label/,
+  );
+  assert.match(checkpoint, /^\s+let revoked = null;$/m);
 });

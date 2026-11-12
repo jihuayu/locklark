@@ -1509,10 +1509,30 @@ try {
       await refreshRouteStatusTrace(attach, opened, true);
     }
     // Route revocation checkpoint: the same tab and target, after the copy
-    // proof. The stale page's attach and this finally only reuse the lifecycle
-    // diagnostics; no page or worker hook is added.
+    // proof. The positive block's CDP client and diagnostics trace are already
+    // closed above; the revocation reads use only a fresh client reconnected
+    // to the same captured target.
     let stale = null;
+    let revoked = null;
     try {
+      // The route tab outlived the positive block; only the test's websocket
+      // client was closed. Reattach a fresh client to the same captured
+      // target, proven still to be the exact route page by the targets list
+      // first, and use it for every route-page read below. A failed attach or
+      // a page whose readyState is not complete throws and fails the
+      // checkpoint; it is never read as success.
+      assert.equal(
+        (await targets()).filter(
+          (target) => target.id === routeTarget && ROUTE_PAGE.test(target.url),
+        ).length,
+        1,
+        "Route target was replaced",
+      );
+      revoked = await attach(opened);
+      await wait(
+        async () => (await revoked.evaluate("document.readyState")) === "complete",
+        "Route page did not load",
+      );
       // The route page is still the active tab, so the active window is titled
       // exactly "Locklark". Exactly one XTest key batch, addressed to the
       // Chromium window by the ACTIVE route tab's exact title prefix and
@@ -1520,7 +1540,7 @@ try {
       // to the worker, navigated via CDP or injected.
       mark("route:switch-source");
       assert.equal(
-        await route.evaluate(
+        await revoked.evaluate(
           'document.visibilityState === "visible" && document.hasFocus() === true',
         ),
         true,
@@ -1540,7 +1560,7 @@ try {
       await wait(async () => {
         try {
           return routeWiped(
-            await route.evaluate(routeRevokedProbe(fixture.Title, fixture.Value)),
+            await revoked.evaluate(routeRevokedProbe(fixture.Title, fixture.Value)),
           );
         } catch (error) {
           if (popupClosed(error)) throw Error("Route page was replaced");
@@ -1555,7 +1575,7 @@ try {
       browserKey(ROUTE_RETURN, SOURCE_TITLE_PREFIX);
       await wait(
         async () =>
-          (await route.evaluate(
+          (await revoked.evaluate(
             'document.visibilityState === "visible" && document.hasFocus() === true',
           )) === true,
         "Route page did not return to the foreground",
@@ -1563,7 +1583,7 @@ try {
       // The returned foreground page must still satisfy the full wipe contract,
       // read by the same full probe as the reload below.
       await wait(async () => {
-        const returned = await route.evaluate(
+        const returned = await revoked.evaluate(
           routeRevokedProbe(fixture.Title, fixture.Value),
         );
         return returned?.visible === true && routeWiped(returned);
@@ -1584,7 +1604,7 @@ try {
       browserKey(ROUTE_RELOAD, ROUTE_TITLE_PREFIX);
       await wait(
         async () =>
-          (await route.evaluate(
+          (await revoked.evaluate(
             'document.visibilityState === "visible" && document.hasFocus() === true',
           )) === true,
         "Route tab was not active before reload",
@@ -1616,9 +1636,11 @@ try {
           control?.present === true &&
           (control.enabled === true || control.showing === true);
         if (offered) throw Error("Native route prompt is still present");
+        // The route-page read comes from the revocation client, not the stale
+        // one: a client failure fails here rather than reading as wiped.
         if (
           routeWiped(
-            await stale.evaluate(routeRevokedProbe(fixture.Title, fixture.Value)),
+            await revoked.evaluate(routeRevokedProbe(fixture.Title, fixture.Value)),
           ) !== true
         )
           throw Error("Stale route detail opened after reload");
@@ -1664,6 +1686,11 @@ try {
     } finally {
       try {
         await stale?.close();
+      } catch {}
+      // The revocation client never outlives this checkpoint, on success or
+      // failure. A failed attach leaves it null and nothing is closed.
+      try {
+        await revoked?.close();
       } catch {}
     }
     } finally {
