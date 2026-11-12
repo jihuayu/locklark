@@ -1931,6 +1931,44 @@ test("route per-field copy uses physical input, exact native labels and the priv
     assert.ok(source.includes('mark("' + stage + '")'), stage);
 });
 
+test("route checkpoint passes no outer sourcePage and binds its own real page", () => {
+  // The checkpoint binds the source tab itself from context.pages(); the
+  // caller object and the driver destructuring must not reference it, so a
+  // missing outer binding cannot fail the run before route acceptance.
+  const source = readFileSync(
+    new URL("./browser_native_acceptance.mjs", import.meta.url),
+    "utf8",
+  );
+  const call = source.slice(
+    source.indexOf("await acceptRouteDetailRead({"),
+    source.indexOf("});", source.indexOf("await acceptRouteDetailRead({")),
+  );
+  assert.ok(call.length > 0, "missing acceptRouteDetailRead call");
+  assert.doesNotMatch(call, /\bsourcePage\b/);
+  const start = source.indexOf("async function acceptRouteDetailRead");
+  assert.ok(start > 0, "missing acceptRouteDetailRead");
+  const checkpoint = source.slice(start, source.indexOf("async function blank()"));
+  const destructured = checkpoint.slice(
+    checkpoint.indexOf("const {"),
+    checkpoint.indexOf("} = driver;"),
+  );
+  assert.ok(destructured.length > 0, "missing driver destructuring");
+  assert.doesNotMatch(destructured, /\bsourcePage\b/);
+  // Inside the try, before the physical row click or any tab switch, the
+  // checkpoint resolves exactly one non-extension page and asserts it.
+  const tryFrom = checkpoint.indexOf("    try {\n");
+  assert.ok(tryFrom > 0, "checkpoint must keep its try block");
+  assert.doesNotMatch(checkpoint.slice(0, tryFrom), /context\s*\n?\s*\.pages\(\)/);
+  const binding =
+    /const sourcePage = context\n\s+\.pages\(\)\n\s+\.find\(\(entry\) => !\/\^chrome-extension:\\\/\\\/\/\.test\(entry\.url\(\)\)\);\n\s+assert\(sourcePage, "Original source tab missing"\);/;
+  const bindAt = checkpoint.search(binding);
+  assert.ok(bindAt > tryFrom, "source page must be bound inside the try");
+  const rowClick = checkpoint.indexOf('mark("route:row-click")');
+  const tabSwitch = checkpoint.indexOf("await route.bringToFront();");
+  assert.ok(rowClick > bindAt, "source page must be bound before the row click");
+  assert.ok(tabSwitch > bindAt, "source page must be bound before the tab switch");
+});
+
 // The route-revocation section of the harness, from its fixed constants to the
 // browser block. It contains no import-time side effects, so it can be
 // evaluated like the route probes in an empty context.

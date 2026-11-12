@@ -1134,7 +1134,6 @@ try {
       openPopup: openActionPopup,
       extensionTargets: targets,
       attachRoute: attach,
-      sourcePage,
     } = driver;
     assert(
       typeof fixture.SeedID === "string" && /^[a-f0-9]{32}$/.test(fixture.SeedID),
@@ -1792,7 +1791,6 @@ try {
       openPopup,
       extensionTargets,
       attachRoute,
-      sourcePage,
     });
   } else if (checkoutFrames) {
     await page.goto(origin + "/checkout");
