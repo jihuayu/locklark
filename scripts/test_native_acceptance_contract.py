@@ -135,6 +135,34 @@ class RequestValidationTests(unittest.TestCase):
         self.assertEqual(plan["title_prefix"], "Locklark acceptance")
         self.assertEqual(plan["actions"][0]["key"], ("Escape",))
 
+    def test_exact_title_preserve_focus_is_a_read_only_observation(self):
+        # The route-revocation no-prompt check needs: the exact native title
+        # (never a prefix), no actions, preserve_focus and no inspect. That
+        # combination is the read-only form the X11 adapter implements as an
+        # absent report (no raise, focus or click), so it must stay valid here.
+        plan = contract.parse_request(json.dumps(
+            {"title": TITLE, "executable": EXE, "actions": [],
+             "preserve_focus": True}))
+        self.assertEqual(plan["title"], TITLE)
+        self.assertIsNone(plan["title_prefix"])
+        self.assertEqual(plan["actions"], ())
+        self.assertTrue(plan["preserve_focus"])
+        self.assertFalse(plan["inspect"])
+        self.assertFalse(plan["wait_absent"])
+        # The raising inspect form is a different mode and is unchanged.
+        plain = contract.parse_request(request(inspect=True))
+        self.assertTrue(plain["inspect"])
+        self.assertFalse(plain["preserve_focus"])
+        # The two focus modes can never describe one request.
+        for document in ({"title": TITLE, "inspect": True, "preserve_focus": True},
+                         {"title_prefix": "Locklark", "actions": [{"click_label": LABEL}],
+                          "inspect": True, "preserve_focus": True}):
+            with self.subTest(document=str(sorted(document))):
+                with self.assertRaises(contract.ContractError) as error:
+                    contract.parse_request(json.dumps(document))
+                self.assertEqual(error.exception.code, "request-invalid")
+                self.assertEqual(error.exception.guard, {"field": "inspect"})
+
     def test_unknown_request_and_action_keys_rejected(self):
         for document in ({"title": TITLE, "value": PRIVATE},
                          {"title": TITLE, "actions": [{"click_label": LABEL, "secret": PRIVATE}]}):

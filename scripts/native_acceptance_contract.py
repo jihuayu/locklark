@@ -263,8 +263,9 @@ def parse_request(raw):
         if (set(document) - ABSENCE_KEYS or plan["title"] is None or
                 plan["executable"] is None or plan["actions"] or plan["inspect"]):
             raise ContractError("absence-invalid")
-    elif plan["preserve_focus"] and plan["title_prefix"] is None:
-        raise ContractError("request-invalid", {"field": "preserve_focus"})
+    elif plan["preserve_focus"] and plan["inspect"]:
+        # One request describes one focus mode: raising inspect or preserving it.
+        raise ContractError("request-invalid", {"field": "inspect"})
     return plan
 
 # --------------------------------------------------------------- observation --

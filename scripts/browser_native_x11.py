@@ -3,6 +3,10 @@
 Reads one JSON request from stdin. Values are never echoed. Requires DISPLAY,
 libX11 and libXtst. Native controls use their real AT-SPI labels, state and
 geometry. Legacy coordinates are relative to the requested real X window.
+
+One exact-title request is read-only: preserve_focus with no actions and no
+inspect reports whether the window is absent without raising, focusing or
+clicking anything.
 """
 import ctypes as C
 import json
@@ -489,6 +493,23 @@ def main():
                 return
             time.sleep(0.05)
         raise RuntimeError("Previous native acceptance window did not close")
+
+    # Read-only observation: an exact title with preserve_focus and no
+    # actions or inspect. Nothing is raised, focused or clicked; a missing or
+    # unreadable window is an absent report, not evidence about the UI.
+    if (request.get("preserve_focus") is True and not request.get("actions")
+            and not request.get("inspect")):
+        matches=find(root)
+        x.XSync(display, 0)
+        if errors:
+            raise RuntimeError("Native acceptance X query failed")
+        target = matches[0] if len(matches)==1 else None
+        result = {"absent": target is None}
+        if target is not None:
+            result.update({"window": target, "x": 0, "y": 0, "clicks": []})
+        print(json.dumps(result))
+        x.XCloseDisplay(display)
+        return
 
     target = None
     discovery_deadline = time.monotonic()+5
