@@ -746,6 +746,303 @@ func TestVerifyPolicyCheckpointNegative(t *testing.T) {
 	})
 }
 
+// TestVerifyPolicyChainRootChain pins the shared chain helper's success path:
+// it returns the authenticated current policy, not the pin and not the
+// anchor, as an independent copy of the proof it authenticated. The anchor
+// proof carries garbage sig bytes and the current proof is root-signed, so
+// the chain really is authenticated by the caller digest plus a real
+// signature. A wrong checkpoint fails closed with the existing code and no
+// policy.
+func TestVerifyPolicyChainRootChain(t *testing.T) {
+	k := newCPKeys(t)
+	c := newCPChain(t, k)
+	if err := ValidateFile(c.f); err != nil {
+		t.Fatalf("fixture is not structurally valid: %v", err)
+	}
+	if !bytes.Equal(c.f.SignedPolicyProofs[0].Sig, pf(0x7f, 64)) {
+		t.Fatal("fixture anchor proof no longer carries garbage sig bytes")
+	}
+
+	got, err := verifyPolicyChain(c.f.Header, c.f.SignedPolicyProofs, c.anchor)
+	if err != nil {
+		t.Fatalf("root-signed chain rejected: %v", err)
+	}
+	if got == nil {
+		t.Fatal("verifyPolicyChain returned a nil policy on success")
+	}
+	// The authenticated current policy is c.policies[1] (seq 6), the one the
+	// header names, not the pinned anchor (seq 5).
+	last := len(c.f.SignedPolicyProofs) - 1
+	want := &c.f.SignedPolicyProofs[last].Policy
+	if got.PolicySeq != c.f.Header.PolicySeq || got.PolicySeq != want.PolicySeq {
+		t.Fatalf("returned policy seq = %d, want header/current seq %d", got.PolicySeq, c.f.Header.PolicySeq)
+	}
+	if !bytes.Equal(PolicyDigest(got), policyDigest(&c.f.SignedPolicyProofs[last])) {
+		t.Fatal("returned policy is not the authenticated current policy")
+	}
+	gotDoc, err := EncodePolicyDocument(got)
+	if err != nil {
+		t.Fatalf("returned policy does not encode: %v", err)
+	}
+	if wantDoc, err := EncodePolicyDocument(want); err != nil {
+		t.Fatalf("current proof policy does not encode: %v", err)
+	} else if !bytes.Equal(gotDoc, wantDoc) {
+		t.Fatal("returned policy document differs from the authenticated current policy")
+	}
+
+	// The returned policy is an independent snapshot: mutating nested
+	// mutable data in the source proof leaves it unchanged.
+	src := &c.f.SignedPolicyProofs[last]
+	src.Policy.PrevPolicyDigest[0] ^= 0xff
+	src.Policy.OwnerRoot.PublicKey[0] ^= 0xff
+	src.Policy.Readers[0].Label = "mutated-reader"
+	src.Policy.Writers = nil
+	src.Policy.Admins[0].Label = "mutated-admin"
+	src.Policy.Devices[0].ContentSigningKey.PublicKey[0] ^= 0xff
+	src.Policy.Devices[0].AgeEncryptionKey = "age1mutated"
+	src.Sig[0] ^= 0xff
+	if bytes.Equal(got.PrevPolicyDigest, src.Policy.PrevPolicyDigest) ||
+		bytes.Equal(got.OwnerRoot.PublicKey, src.Policy.OwnerRoot.PublicKey) ||
+		got.Readers[0].Label == src.Policy.Readers[0].Label ||
+		got.Writers == nil ||
+		got.Admins[0].Label == src.Policy.Admins[0].Label ||
+		bytes.Equal(got.Devices[0].ContentSigningKey.PublicKey, src.Policy.Devices[0].ContentSigningKey.PublicKey) ||
+		got.Devices[0].AgeEncryptionKey == src.Policy.Devices[0].AgeEncryptionKey {
+		t.Fatal("returned policy aliases the source proof")
+	}
+	if after, err := EncodePolicyDocument(got); err != nil || !bytes.Equal(after, gotDoc) {
+		t.Fatal("returned policy changed when the source proof was mutated")
+	}
+
+	// A wrong checkpoint fails closed with the existing precise code and no
+	// policy. The anchor proof is used unmutated: the loop above already
+	// corrupted its Policy, and the helper now also requires every proof to
+	// be structurally valid, so the chain check needs a clean fixture.
+	c = newCPChain(t, k)
+	a := c.pin(c.anchor.PolicyDigest, c.anchor.PolicySeq)
+	a.PolicyDigest[0] ^= 0xff
+	bad, err := verifyPolicyChain(c.f.Header, c.f.SignedPolicyProofs, a)
+	if bad != nil {
+		t.Fatal("verifyPolicyChain returned a policy for a wrong checkpoint")
+	}
+	wantCodeAt(t, err, CodePolicyCheckpointFailed, "")
+	bad, err = verifyPolicyChain(c.f.Header, c.f.SignedPolicyProofs, nil)
+	if bad != nil {
+		t.Fatal("verifyPolicyChain returned a policy for a nil checkpoint")
+	}
+	wantCodeAt(t, err, CodeInvalidValue, "")
+}
+
+// TestVerifyPolicyChainPinnedCurrent pins the case where the caller pin is
+// already the file's current policy: the anchor is the tip and no proof
+// follows it. The chain must verify, return the current policy (not the
+// earlier carried one the header no longer selects) and return an independent
+// snapshot of it, even though the verification loop copies nothing on this
+// path.
+func TestVerifyPolicyChainPinnedCurrent(t *testing.T) {
+	k := newCPKeys(t)
+	c := newCPChain(t, k)
+	// Carry a third proof, s+2, as the current policy, so the file has earlier
+	// proofs ahead of the one the caller pins.
+	cur := clonePolicy(c.policies[1])
+	cur.PolicySeq = 7
+	cur.PrevPolicyDigest = bytes.Clone(policyDigest(&c.f.SignedPolicyProofs[1]))
+	c.append(t, cur, "owner-root-01", k.rootPriv)
+	c.finalize(t, k)
+	if err := ValidateFile(c.f); err != nil {
+		t.Fatalf("fixture is not structurally valid: %v", err)
+	}
+	last := len(c.f.SignedPolicyProofs) - 1
+	if last != 2 || c.f.SignedPolicyProofs[last].Policy.PolicySeq != c.f.Header.PolicySeq {
+		t.Fatal("fixture does not carry an earlier anchor plus the current tip")
+	}
+
+	// The caller pins the current tip: its sequence and digest.
+	tip := &c.f.SignedPolicyProofs[last]
+	pin := c.pin(policyDigest(tip), tip.Policy.PolicySeq)
+	if !bytes.Equal(pin.PolicyDigest, policyDigest(tip)) || pin.PolicySeq != tip.Policy.PolicySeq {
+		t.Fatal("fixture's pin does not name the current proof")
+	}
+
+	if err := VerifyPolicyCheckpoint(c.f, pin); err != nil {
+		t.Fatalf("current-tip pin rejected: %v", err)
+	}
+	got, err := verifyPolicyChain(c.f.Header, c.f.SignedPolicyProofs, pin)
+	if err != nil {
+		t.Fatalf("current-tip chain rejected: %v", err)
+	}
+	if got == nil {
+		t.Fatal("verifyPolicyChain returned a nil policy for a current-tip pin")
+	}
+	if got.PolicySeq != tip.Policy.PolicySeq || !bytes.Equal(PolicyDigest(got), policyDigest(tip)) {
+		t.Fatalf("returned policy seq = %d, want the pinned current policy seq %d", got.PolicySeq, tip.Policy.PolicySeq)
+	}
+	gotDoc, err := EncodePolicyDocument(got)
+	if err != nil {
+		t.Fatalf("returned policy does not encode: %v", err)
+	}
+	wantDoc := bytes.Clone(tip.Document)
+	if !bytes.Equal(gotDoc, wantDoc) {
+		t.Fatal("returned policy document differs from the pinned current policy")
+	}
+
+	// Mutate nested mutable data in the source current proof after the call:
+	// the returned policy and its document must stay unchanged.
+	tip.Policy.PrevPolicyDigest[0] ^= 0xff
+	tip.Policy.OwnerRoot.PublicKey[0] ^= 0xff
+	tip.Policy.OwnerRoot.Owners[0].Label = "mutated-owner"
+	tip.Policy.Readers[0].Label = "mutated-reader"
+	tip.Policy.Writers = nil
+	tip.Policy.Admins[0].Label = "mutated-admin"
+	tip.Policy.Devices[0].ContentSigningKey.PublicKey[0] ^= 0xff
+	tip.Policy.Devices[0].AgeEncryptionKey = "age1mutated"
+	tip.Sig[0] ^= 0xff
+	if bytes.Equal(got.PrevPolicyDigest, tip.Policy.PrevPolicyDigest) ||
+		bytes.Equal(got.OwnerRoot.PublicKey, tip.Policy.OwnerRoot.PublicKey) ||
+		got.OwnerRoot.Owners[0].Label == tip.Policy.OwnerRoot.Owners[0].Label ||
+		got.Readers[0].Label == tip.Policy.Readers[0].Label ||
+		got.Writers == nil ||
+		got.Admins[0].Label == tip.Policy.Admins[0].Label ||
+		bytes.Equal(got.Devices[0].ContentSigningKey.PublicKey, tip.Policy.Devices[0].ContentSigningKey.PublicKey) ||
+		got.Devices[0].AgeEncryptionKey == tip.Policy.Devices[0].AgeEncryptionKey {
+		t.Fatal("returned policy aliases the pinned current proof")
+	}
+	if tip.Policy.PolicySeq != c.f.Header.PolicySeq {
+		t.Fatal("fixture no longer holds the source current proof at the header's sequence")
+	}
+	if after, err := EncodePolicyDocument(got); err != nil || !bytes.Equal(after, gotDoc) || !bytes.Equal(after, wantDoc) {
+		t.Fatal("returned policy document changed when the source current proof was mutated")
+	}
+}
+
+// TestVerifyPolicyChainDocumentPolicyBinding pins that the shared chain helper
+// is safe for a direct draft caller that never ran validateStructure: the
+// policy it authenticates and returns is the one bound to the signed Document
+// and to the header, so an untrusted roster cannot diverge from it.
+func TestVerifyPolicyChainDocumentPolicyBinding(t *testing.T) {
+	k := newCPKeys(t)
+	baseline := func(t *testing.T) *cpChain {
+		t.Helper()
+		c := newCPChain(t, k)
+		if err := ValidateFile(c.f); err != nil {
+			t.Fatalf("fixture is not structurally valid: %v", err)
+		}
+		if _, err := verifyPolicyChain(c.f.Header, c.f.SignedPolicyProofs, c.anchor); err != nil {
+			t.Fatalf("baseline chain rejected: %v", err)
+		}
+		return c
+	}
+	chain := func(c *cpChain) (*Policy, error) {
+		return verifyPolicyChain(c.f.Header, c.f.SignedPolicyProofs, c.anchor)
+	}
+
+	t.Run("policy diverges from document", func(t *testing.T) {
+		// A nested roster edit in the current proof's Policy, leaving the
+		// signed Document and every signature untouched, is exactly what an
+		// untrusted roster divergence looks like to a draft caller.
+		for name, mutate := range map[string]func(p *Policy){
+			"reader label":    func(p *Policy) { p.Readers[0].Label = "Mallory" },
+			"writer added":    func(p *Policy) { p.Writers = append(p.Writers, Member{PrincipalID: "dave", Label: "Dave"}) },
+			"admin removed":   func(p *Policy) { p.Admins = nil },
+			"device key":      func(p *Policy) { p.Devices[0].ContentSigningKey.PublicKey[0] ^= 0xff },
+			"root public key": func(p *Policy) { p.OwnerRoot.PublicKey[0] ^= 0xff },
+		} {
+			c := baseline(t)
+			last := len(c.f.SignedPolicyProofs) - 1
+			mutate(&c.f.SignedPolicyProofs[last].Policy)
+			got, err := chain(c)
+			if got != nil {
+				t.Fatalf("%s: verifyPolicyChain returned a policy for a diverged roster", name)
+			}
+			wantCodeAt(t, err, CodePolicyMismatch, "")
+		}
+
+		// The same holds for a proof before the current one: every proof is
+		// validated, not only the one returned.
+		c := baseline(t)
+		c.f.SignedPolicyProofs[0].Policy.Readers[0].Label = "Mallory"
+		got, err := chain(c)
+		if got != nil {
+			t.Fatal("verifyPolicyChain returned a policy for a diverged anchor roster")
+		}
+		wantCodeAt(t, err, CodePolicyMismatch, "")
+	})
+
+	t.Run("bounds and header", func(t *testing.T) {
+		c := baseline(t)
+
+		// An over-MaxArrayItems proof slice is rejected before any proof or
+		// signature is examined.
+		orig := c.f.SignedPolicyProofs
+		c.f.SignedPolicyProofs = make([]SignedPolicy, MaxArrayItems+1)
+		for i := range c.f.SignedPolicyProofs {
+			c.f.SignedPolicyProofs[i] = orig[len(orig)-1]
+		}
+		got, err := chain(c)
+		if got != nil {
+			t.Fatal("verifyPolicyChain returned a policy for an over-long proof slice")
+		}
+		wantCodeAt(t, err, CodeInvalidValue, "")
+		c.f.SignedPolicyProofs = orig
+
+		// A header that fails ValidateHeader is returned unchanged.
+		h := c.f.Header
+		h.OpID = ""
+		got, err = verifyPolicyChain(h, c.f.SignedPolicyProofs, c.anchor)
+		if got != nil {
+			t.Fatal("verifyPolicyChain returned a policy for an invalid header")
+		}
+		wantCodeAt(t, err, CodeInvalidValue, "")
+
+		// A proof in another vault, and a final proof that is not the
+		// policy the header selects, are header mismatches. The vault edit
+		// keeps the proof's Document canonical and in step with its Policy,
+		// so the header check, not the Policy/Document check, rejects it.
+		origVault := c.f.SignedPolicyProofs[0].Policy.VaultID
+		origDoc := c.f.SignedPolicyProofs[0].Document
+		c.f.SignedPolicyProofs[0].Policy.VaultID = "vault-02"
+		c.f.SignedPolicyProofs[0].Document = docFor(&c.f.SignedPolicyProofs[0].Policy)
+		got, err = chain(c)
+		if got != nil {
+			t.Fatal("verifyPolicyChain returned a policy for a foreign-vault proof")
+		}
+		wantCodeAt(t, err, CodeHeaderMismatch, "")
+		c.f.SignedPolicyProofs[0].Policy.VaultID = origVault
+		c.f.SignedPolicyProofs[0].Document = origDoc
+
+		// A final proof whose digest is not the header's is a header
+		// mismatch, not a chain result.
+		origDigest := c.f.Header.PolicyDigest
+		c.f.Header.PolicyDigest = bytes.Clone(policyDigest(&c.f.SignedPolicyProofs[0]))
+		got, err = chain(c)
+		if got != nil {
+			t.Fatal("verifyPolicyChain returned a policy not selected by the header")
+		}
+		wantCodeAt(t, err, CodeHeaderMismatch, "")
+		c.f.Header.PolicyDigest = origDigest
+
+		// A draft header has no revision id and is still accepted here; a
+		// malformed one is not.
+		h = c.f.Header
+		h.RevisionID = ""
+		got, err = verifyPolicyChain(h, c.f.SignedPolicyProofs, c.anchor)
+		if err != nil || got == nil {
+			t.Fatalf("draft header with a valid chain rejected: %v", err)
+		}
+		h.RevisionID = "not-a-digest"
+		got, err = verifyPolicyChain(h, c.f.SignedPolicyProofs, c.anchor)
+		if got != nil {
+			t.Fatal("verifyPolicyChain returned a policy for a malformed revision id")
+		}
+		wantCodeAt(t, err, CodeInvalidValue, "")
+
+		// The untouched proofs are intact: the baseline still verifies.
+		if _, err := chain(c); err != nil {
+			t.Fatalf("bounds negatives altered the good chain: %v", err)
+		}
+	})
+}
+
 // TestVerifyPolicyCheckpointAnchorRootBinding pins the anchor policy's owner
 // root to the caller checkpoint. A carried anchor whose digest is pinned may
 // name another root B while the next policy links to it and returns to the

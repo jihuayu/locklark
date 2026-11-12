@@ -50,7 +50,10 @@ type PolicyCheckpoint struct {
 
 // VerifyPolicyCheckpoint authenticates f against the caller-pinned
 // checkpoint c and then verifies f's content signature with the content
-// signing key of the authenticated current policy.
+// signing key of the authenticated current policy. The chain
+// authentication is verifyPolicyChain, which returns the authenticated
+// current policy; this function only adds the content signature check on
+// top of it.
 //
 // f must pass ValidateFile; any structural or sealed-state error is returned
 // unchanged. Then, in order:
@@ -149,106 +152,9 @@ func VerifyPolicyCheckpoint(f *File, c *PolicyCheckpoint) error {
 	if err := validateSealed(f, current); err != nil {
 		return err
 	}
-	if !validID(c.VaultID, MaxIDLength) || !validID(c.OwnerRootKeyID, MaxKeyIDLength) ||
-		!validEd25519Key(c.OwnerRootPublicKey) || !validDigest(c.PolicyDigest) {
-		return Err("", CodeInvalidValue)
-	}
-	if f.Header.VaultID != c.VaultID {
-		return Err("", CodePolicyCheckpointFailed)
-	}
-	for i := range f.SignedPolicyProofs {
-		if f.SignedPolicyProofs[i].Policy.VaultID != c.VaultID {
-			return Err("", CodePolicyCheckpointFailed)
-		}
-	}
-
-	// Locate the caller's trusted checkpoint. The anchor is the carried
-	// proof at c.PolicySeq whose digest is c.PolicyDigest; proofs before it
-	// are already established and are ignored. When no proof at c.PolicySeq
-	// is carried, the slice must begin exactly at c.PolicySeq+1 and its first
-	// proof must name c.PolicyDigest as its predecessor. A file whose
-	// policies all precede c.PolicySeq is behind the checkpoint (stale).
-	proofs := f.SignedPolicyProofs
-	anchor := -1
-	for i := range proofs {
-		if proofs[i].Policy.PolicySeq != c.PolicySeq {
-			continue
-		}
-		if !bytes.Equal(policyDigest(&proofs[i]), c.PolicyDigest) {
-			continue
-		}
-		// The anchor policy's owner root must be the caller-pinned root:
-		// the digest alone does not bind it, and a later proof that names
-		// the pinned root would otherwise accept a foreign root transition.
-		if proofs[i].Policy.OwnerRoot.KeyID != c.OwnerRootKeyID ||
-			proofs[i].Policy.OwnerRoot.Alg != PolicySigAlgEd25519 ||
-			!bytes.Equal(proofs[i].Policy.OwnerRoot.PublicKey, c.OwnerRootPublicKey) {
-			return Err("", CodePolicyCheckpointFailed)
-		}
-		anchor = i
-		break
-	}
-	if anchor < 0 {
-		switch {
-		case proofs[0].Policy.PolicySeq > c.PolicySeq:
-			if c.PolicySeq == math.MaxUint64 || proofs[0].Policy.PolicySeq != c.PolicySeq+1 ||
-				!bytes.Equal(proofs[0].Policy.PrevPolicyDigest, c.PolicyDigest) {
-				return Err("", CodePolicyCheckpointFailed)
-			}
-		case proofs[len(proofs)-1].Policy.PolicySeq >= c.PolicySeq:
-			// The checkpoint sequence is carried but its digest differs.
-			return Err("", CodePolicyCheckpointFailed)
-		default:
-			// The current policy is behind the checkpoint: a stale file.
-			return Err("", CodePolicyCheckpointFailed)
-		}
-	}
-
-	// The digest of the newest policy established as trusted, and the
-	// authenticated body of that policy. The anchor is trusted by the caller
-	// digest; without it there is no predecessor body, so the first proof
-	// must be root-signed.
-	trusted := bytes.Clone(c.PolicyDigest)
-	trustedPolicy := (*Policy)(nil)
-	prevSeq := c.PolicySeq
-	first := 0
-	if anchor >= 0 {
-		// The anchor is trusted by c.PolicyDigest; its sig is unused.
-		first = anchor + 1
-		trustedPolicy = &proofs[anchor].Policy
-	}
-	for i := first; i < len(proofs); i++ {
-		sp := &proofs[i]
-		seq := sp.Policy.PolicySeq
-		if prevSeq == math.MaxUint64 || seq != prevSeq+1 ||
-			!bytes.Equal(sp.Policy.PrevPolicyDigest, trusted) ||
-			sp.Policy.OwnerRoot.KeyID != c.OwnerRootKeyID ||
-			!bytes.Equal(sp.Policy.OwnerRoot.PublicKey, c.OwnerRootPublicKey) ||
-			sp.Policy.OwnerRoot.Alg != PolicySigAlgEd25519 {
-			return Err("", CodePolicyCheckpointFailed)
-		}
-		key := ed25519.PublicKey(c.OwnerRootPublicKey)
-		if sp.SignerID != c.OwnerRootKeyID {
-			// A non-root signer is authorized only by the authenticated
-			// predecessor policy, never by the successor's own delegation.
-			if trustedPolicy == nil || !delegatedInviteReadersAuthorized(trustedPolicy, sp.SignerID, &sp.Policy) {
-				return Err("", CodePolicyCheckpointFailed)
-			}
-			key = ed25519.PublicKey(findDevice(trustedPolicy, sp.SignerID).PolicySigningKey.PublicKey)
-		}
-		msg := make([]byte, 0, len(DomainPolicyDocumentSignature)+1+len(sp.Document))
-		msg = append(msg, DomainPolicyDocumentSignature...)
-		msg = append(msg, 0)
-		msg = append(msg, sp.Document...)
-		if !ed25519.Verify(key, msg, sp.Sig) {
-			return Err(pathIndex(fieldSignedPolicyProofs, i), CodeSignatureVerifyFailed)
-		}
-		trusted = policyDigest(sp)
-		// The caller may share policy bytes between proofs, so the
-		// authenticated body is copied, never pointed into the proofs, and
-		// the copy is what authorizes the next proof.
-		trustedPolicy = clonePolicySnapshot(&sp.Policy)
-		prevSeq = seq
+	current, err = verifyPolicyChain(f.Header, f.SignedPolicyProofs, c)
+	if err != nil {
+		return err
 	}
 
 	// The chain is authenticated; only now does the current policy decide
@@ -270,6 +176,190 @@ func VerifyPolicyCheckpoint(f *File, c *PolicyCheckpoint) error {
 		return Err("", CodeSignatureVerifyFailed)
 	}
 	return nil
+}
+
+// verifyPolicyChain authenticates the carried policy chain against the
+// caller-pinned checkpoint c and returns an independent deep copy of the
+// authenticated current policy: the policy named by header.PolicyDigest at
+// header.PolicySeq. It is the shared trust step behind
+// VerifyPolicyCheckpoint, whose content signature is then checked against
+// the returned policy, and a later high-level Seal, which authenticates the
+// draft's policy continuation and current reader roster before any encryption
+// or key-wrapping work.
+//
+// header and proofs are the caller-supplied draft state, which a direct caller
+// such as a Seal may pass before wrapping or KDF work. The helper therefore
+// makes no assumption that the caller ran ValidateFile, and it returns a policy
+// only once every proof is structurally valid; it is the checkpoint half of
+// VerifyPolicyCheckpoint's documented validation and error order, and nothing
+// else:
+//
+//   - c must be non-nil and carry a valid vault ID, root key ID, 32-byte root
+//     public key and 32-byte digest, or the result is an invalid_value: the
+//     supplied anchor itself is malformed;
+//   - header must pass ValidateHeader unchanged, so its vault ID, op ID,
+//     author device ID, revision ID shape, content linkage and 32-byte policy
+//     digest are checked; an empty revision ID is allowed, as it is for a
+//     draft;
+//   - header.VaultID must equal c.VaultID;
+//   - proofs must be non-empty and no longer than MaxArrayItems, and must be
+//     strictly increasing in policy_seq (checkPolicyProofOrder), and every
+//     proof must pass validateSignedPolicy, which validates Policy, the
+//     bounded and canonical Document, and that Document and Policy are equal,
+//     keyed signatures and proof bounds included;
+//   - every carried proof's policy vault must equal header.VaultID
+//     (CodeHeaderMismatch), and the last proof must carry header.PolicySeq
+//     with header.PolicyDigest equal to its digest (CodeHeaderMismatch), so
+//     that the authenticated current policy is exactly the one the header
+//     selects and no later policy is carried;
+//   - only then is the chain authenticated: the anchor, link, tip, gap, root
+//     and delegated-transition rules are those documented on
+//     VerifyPolicyCheckpoint, and their failures are CodePolicyCheckpointFailed;
+//     a carried policy-document signature that does not verify is
+//     CodeSignatureVerifyFailed at signed_policy_proofs[i].
+//
+// Every error return is a nil policy. It does not read or check content
+// signatures, and it performs no encryption or decryption. It retains no
+// pointer into header, proofs or c: the returned policy shares no mutable
+// storage with its proof, so later mutation of the caller's proof bytes cannot
+// alter it. Authority and delegations are only ever read from an authenticated
+// predecessor policy, never from a successor.
+func verifyPolicyChain(header Header, proofs []SignedPolicy, c *PolicyCheckpoint) (*Policy, error) {
+	if c == nil {
+		return nil, Err("", CodeInvalidValue)
+	}
+	if !validID(c.VaultID, MaxIDLength) || !validID(c.OwnerRootKeyID, MaxKeyIDLength) ||
+		!validEd25519Key(c.OwnerRootPublicKey) || !validDigest(c.PolicyDigest) {
+		return nil, Err("", CodeInvalidValue)
+	}
+	if err := ValidateHeader(&header); err != nil {
+		return nil, err
+	}
+	if header.VaultID != c.VaultID {
+		return nil, Err("", CodePolicyCheckpointFailed)
+	}
+	// The current policy is the last proof, by header selection. A direct
+	// caller may not have run validateStructure, which is what normally binds
+	// the header to the proofs, so the helper checks that binding itself
+	// before authenticating anything: every proof is structurally valid and
+	// paired with its Document, belongs to the header's vault, and the last
+	// one is exactly the policy the header selects.
+	if len(proofs) == 0 || len(proofs) > MaxArrayItems {
+		return nil, Err("", CodeInvalidValue)
+	}
+	if err := checkPolicyProofOrder(proofs); err != nil {
+		return nil, err
+	}
+	for i := range proofs {
+		if err := validateSignedPolicy(&proofs[i]); err != nil {
+			return nil, err
+		}
+		if proofs[i].Policy.VaultID != header.VaultID {
+			return nil, Err("", CodeHeaderMismatch)
+		}
+	}
+	if last := &proofs[len(proofs)-1]; last.Policy.PolicySeq != header.PolicySeq ||
+		!bytes.Equal(policyDigest(last), header.PolicyDigest) {
+		return nil, Err("", CodeHeaderMismatch)
+	}
+
+	// Locate the caller's trusted checkpoint. The anchor is the carried
+	// proof at c.PolicySeq whose digest is c.PolicyDigest; proofs before it
+	// are already established and are ignored. When no proof at c.PolicySeq
+	// is carried, the slice must begin exactly at c.PolicySeq+1 and its first
+	// proof must name c.PolicyDigest as its predecessor. A file whose
+	// policies all precede c.PolicySeq is behind the checkpoint (stale).
+	anchor := -1
+	for i := range proofs {
+		if proofs[i].Policy.PolicySeq != c.PolicySeq {
+			continue
+		}
+		if !bytes.Equal(policyDigest(&proofs[i]), c.PolicyDigest) {
+			continue
+		}
+		// The anchor policy's owner root must be the caller-pinned root:
+		// the digest alone does not bind it, and a later proof that names
+		// the pinned root would otherwise accept a foreign root transition.
+		if proofs[i].Policy.OwnerRoot.KeyID != c.OwnerRootKeyID ||
+			proofs[i].Policy.OwnerRoot.Alg != PolicySigAlgEd25519 ||
+			!bytes.Equal(proofs[i].Policy.OwnerRoot.PublicKey, c.OwnerRootPublicKey) {
+			return nil, Err("", CodePolicyCheckpointFailed)
+		}
+		anchor = i
+		break
+	}
+	if anchor < 0 {
+		switch {
+		case proofs[0].Policy.PolicySeq > c.PolicySeq:
+			if c.PolicySeq == math.MaxUint64 || proofs[0].Policy.PolicySeq != c.PolicySeq+1 ||
+				!bytes.Equal(proofs[0].Policy.PrevPolicyDigest, c.PolicyDigest) {
+				return nil, Err("", CodePolicyCheckpointFailed)
+			}
+		case proofs[len(proofs)-1].Policy.PolicySeq >= c.PolicySeq:
+			// The checkpoint sequence is carried but its digest differs.
+			return nil, Err("", CodePolicyCheckpointFailed)
+		default:
+			// The current policy is behind the checkpoint: a stale file.
+			return nil, Err("", CodePolicyCheckpointFailed)
+		}
+	}
+
+	// The digest of the newest policy established as trusted, and the
+	// authenticated predecessor body a delegated continuation is authorized
+	// by. The anchor is trusted by the caller digest; without it there is no
+	// predecessor body, so the first proof must be root-signed. The returned
+	// snapshot is cloned from the current proof separately and never aliases
+	// this body.
+	trusted := bytes.Clone(c.PolicyDigest)
+	trustedPolicy := (*Policy)(nil)
+	prevSeq := c.PolicySeq
+	first := 0
+	if anchor >= 0 {
+		// The anchor is trusted by c.PolicyDigest; its sig is unused.
+		first = anchor + 1
+		trustedPolicy = &proofs[anchor].Policy
+	}
+	for i := first; i < len(proofs); i++ {
+		sp := &proofs[i]
+		seq := sp.Policy.PolicySeq
+		if prevSeq == math.MaxUint64 || seq != prevSeq+1 ||
+			!bytes.Equal(sp.Policy.PrevPolicyDigest, trusted) ||
+			sp.Policy.OwnerRoot.KeyID != c.OwnerRootKeyID ||
+			!bytes.Equal(sp.Policy.OwnerRoot.PublicKey, c.OwnerRootPublicKey) ||
+			sp.Policy.OwnerRoot.Alg != PolicySigAlgEd25519 {
+			return nil, Err("", CodePolicyCheckpointFailed)
+		}
+		key := ed25519.PublicKey(c.OwnerRootPublicKey)
+		if sp.SignerID != c.OwnerRootKeyID {
+			// A non-root signer is authorized only by the authenticated
+			// predecessor policy, never by the successor's own delegation.
+			if trustedPolicy == nil || !delegatedInviteReadersAuthorized(trustedPolicy, sp.SignerID, &sp.Policy) {
+				return nil, Err("", CodePolicyCheckpointFailed)
+			}
+			key = ed25519.PublicKey(findDevice(trustedPolicy, sp.SignerID).PolicySigningKey.PublicKey)
+		}
+		msg := make([]byte, 0, len(DomainPolicyDocumentSignature)+1+len(sp.Document))
+		msg = append(msg, DomainPolicyDocumentSignature...)
+		msg = append(msg, 0)
+		msg = append(msg, sp.Document...)
+		if !ed25519.Verify(key, msg, sp.Sig) {
+			return nil, Err(pathIndex(fieldSignedPolicyProofs, i), CodeSignatureVerifyFailed)
+		}
+		trusted = policyDigest(sp)
+		// The caller may share policy bytes between proofs, so the
+		// authenticated body is copied, never pointed into the proofs, and
+		// the copy is what authorizes the next proof.
+		trustedPolicy = clonePolicySnapshot(&sp.Policy)
+		prevSeq = seq
+	}
+
+	// The chain is authenticated through the header's current policy. The
+	// anchor is trusted by the caller digest alone and the current proof by
+	// nothing but the chain that reaches it, so the current body itself is
+	// always copied: it is returned, never pointed into proofs. This holds
+	// when the pin is the current tip too (anchor == last, no continuation),
+	// whose proof was never re-copied by the loop.
+	return clonePolicySnapshot(&proofs[len(proofs)-1].Policy), nil
 }
 
 // delegatedInviteReadersAuthorized reports whether prev, an already
