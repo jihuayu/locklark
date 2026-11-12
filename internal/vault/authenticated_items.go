@@ -121,14 +121,8 @@ func SealAuthenticatedItems(draft *vaultfile.File, metadata []byte, items []Item
 	if err != nil {
 		return nil, err
 	}
-	return sealItemDatabase(draft, db, checkpoint, vuk, authorPrivateKey)
+	return sealOwnedItemDatabase(draft, db, checkpoint, vuk, authorPrivateKey)
 }
-
-// sealItemDatabase is the helper SealAuthenticatedItems calls for a database
-// from NewItemDatabase. It is a variable so tests can observe the exact
-// database and buffers it receives; outside tests it is always
-// sealOwnedItemDatabase.
-var sealItemDatabase = sealOwnedItemDatabase
 
 // sealOwnedItemDatabase seals db with vaultfile.SealAuthenticatedFile and
 // clears the database-owned binary content buffers on every return path. db
@@ -153,10 +147,12 @@ func sealOwnedItemDatabase(draft *vaultfile.File, db *kdbx.Database, checkpoint 
 	return vaultfile.SealAuthenticatedFile(draft, db, checkpoint, vuk, authorPrivateKey)
 }
 
-// currentItemBinaries returns the database's live InnerHeader binaries. The
-// pointer, not a field copy, is returned: Binaries is a slice of Binary
-// values, so an index taken through a copied InnerHeader would name a
-// temporary disk-backed array and clearing it would not reach the database.
+// currentItemBinaries returns a pointer to the database's actual
+// InnerHeader.Binaries field so callers observe and clear the live field. A
+// copied Go slice header still shares its backing array, so indexing through a
+// copy would reach the current elements; the pointer matters because it lets a
+// caller see or update the field's slice header itself if the encoder replaces
+// the slice.
 func currentItemBinaries(db *kdbx.Database) (*kdbx.Binaries, bool) {
 	if db.Content == nil || db.Content.InnerHeader == nil {
 		return nil, false
