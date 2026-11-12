@@ -2999,10 +2999,13 @@ def _parse_checkout_startup(stdout: str, stderr: str) -> dict[str, str]:
     valid = bool(phases) and all(p in _CHECKOUT_STARTUP_PHASES for p in phases)
     # Independent of the markers: no prefix is absent, a present but unusable
     # one is rejected, and only the existing fixed projection is accepted.
+    # The script may emit its fixed line on either captured stream, so both
+    # are read as one sequence under the same single-diagnostic rule.
+    streams = _checkout_diagnostic_streams(stdout, stderr)
+    lines = [line for stream in streams for line in stream.splitlines()]
     # Presence is any line (not only the first) with the exact prefix.
-    lines = str(stderr or "").splitlines()
     present = any(line.startswith(_CHECKOUT_DIAGNOSTIC_PREFIX) for line in lines)
-    diagnostic = _parse_checkout_failure(stderr)
+    diagnostic = _parse_checkout_diagnostic(streams)
     usable = diagnostic is not None and (
         diagnostic["stage"] in _CHECKOUT_FAILED_STAGES
     )
@@ -3025,29 +3028,52 @@ def _parse_checkout_startup(stdout: str, stderr: str) -> dict[str, str]:
 
 
 def _parse_checkout_failure(stderr: str) -> dict[str, Any] | None:
-    """Reduce the diagnostic line to fixed fields; ``None`` if unusable."""
+    """Reduce the diagnostic line on stderr to fixed fields; ``None`` if unusable."""
 
     text = str(stderr or "")
     if len(text.encode("utf-8", "replace")) > _CHECKOUT_DIAGNOSTIC_MAX_BYTES:
+        return None
+    return _parse_checkout_diagnostic((text,))
+
+
+def _checkout_diagnostic_streams(
+    stdout: str, stderr: str
+) -> tuple[str, ...]:
+    """Both captured streams, in order, for one combined parse."""
+
+    return (str(stdout or ""), str(stderr or ""))
+
+
+def _parse_checkout_diagnostic(streams: tuple[str, ...]) -> dict[str, Any] | None:
+    """Reduce the one fixed diagnostic line across ``streams``; ``None`` if unusable."""
+
+    # Duplicates, malformed or oversized prefix lines are rejected across the
+    # whole capture, never one accepted per stream: the byte bound applies to
+    # the combined text and the single-line rule to every prefix line in it.
+    texts = [str(stream or "") for stream in streams]
+    if sum(len(text.encode("utf-8", "replace")) for text in texts) > (
+        _CHECKOUT_DIAGNOSTIC_MAX_BYTES
+    ):
         return None
     found: list[dict[str, Any]] = []
     # Counted before parsing, so a malformed first prefix line still makes
     # any second prefix line ambiguous. Same split as the presence check in
     # _parse_checkout_startup: only splitlines() line boundaries count.
     seen = False
-    for raw in text.splitlines():
-        line = raw.rstrip("\r")
-        if not line.startswith(_CHECKOUT_DIAGNOSTIC_PREFIX):
-            continue
-        if seen or len(line.encode("utf-8", "replace")) > _CHECKOUT_DIAGNOSTIC_MAX_LINE:
-            return None
-        seen = True
-        try:
-            payload = json.loads(line[len(_CHECKOUT_DIAGNOSTIC_PREFIX) :])
-        except (ValueError, TypeError, RecursionError):
-            continue
-        if isinstance(payload, dict):
-            found.append(payload)
+    for text in texts:
+        for raw in text.splitlines():
+            line = raw.rstrip("\r")
+            if not line.startswith(_CHECKOUT_DIAGNOSTIC_PREFIX):
+                continue
+            if seen or len(line.encode("utf-8", "replace")) > _CHECKOUT_DIAGNOSTIC_MAX_LINE:
+                return None
+            seen = True
+            try:
+                payload = json.loads(line[len(_CHECKOUT_DIAGNOSTIC_PREFIX) :])
+            except (ValueError, TypeError, RecursionError):
+                continue
+            if isinstance(payload, dict):
+                found.append(payload)
     if not found:
         return None
     diagnostic = found[0]
@@ -3071,7 +3097,8 @@ def _record_checkout_failure(
 ) -> None:
     """Attach the fixed failure record before the existing generic assertion."""
 
-    record = _parse_checkout_failure(stderr) or {
+    streams = _checkout_diagnostic_streams(stdout, stderr)
+    record = _parse_checkout_diagnostic(streams) or {
         "stage": "unclassified",
         "kind": "unclassified",
         "native": None,
