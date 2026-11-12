@@ -1,7 +1,9 @@
+import ast
 import io
 import json
 import os
 from pathlib import Path
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -545,7 +547,7 @@ class DeviceCredentialMainTests(unittest.TestCase):
                                      failure_metadata=mock.Mock(return_value=original),
                                      cleanup_pin=cleanup, close=close_scan, scan=mock.Mock(),
                                      write_private=lambda name, value: wrote.append((name, value)))
-        with mock.patch.object(__import__("sys"), "argv", self.ARGS), \
+        with mock.patch.object(sys, "argv", self.ARGS), \
              mock.patch.object(auth, "validated_evidence", return_value=(source, {}, [], self.FIXTURE_DIGEST)), \
              mock.patch.object(auth, "DeviceCredentialAcceptance", return_value=acceptance), \
              mock.patch.object(auth, "private_file", return_value=self.FIXTURE), \
@@ -563,7 +565,7 @@ class DeviceCredentialMainTests(unittest.TestCase):
         """Every prerequisite passes except the timeout bound, before acceptance."""
         argv = self.ARGS + ["--timeout", "9"]
         constructor = mock.Mock()
-        with mock.patch.object(__import__("sys"), "argv", argv), \
+        with mock.patch.object(sys, "argv", argv), \
              mock.patch.object(auth, "DeviceCredentialAcceptance", constructor), \
              mock.patch("builtins.print") as printed:
             code = auth.main()
@@ -693,7 +695,7 @@ class DeviceCredentialMainTests(unittest.TestCase):
                                                  failure_metadata=mock.Mock(return_value={}),
                                                  cleanup_pin=mock.Mock(), close=mock.Mock(), scan=mock.Mock(),
                                                  write_private=lambda name, value: wrote.append((name, value)))
-                    with mock.patch.object(__import__("sys"), "argv", self.ARGS), \
+                    with mock.patch.object(sys, "argv", self.ARGS), \
                          mock.patch.object(auth, "validated_evidence", return_value=(acceptance.source, {}, [], self.FIXTURE_DIGEST)), \
                          mock.patch.object(auth, "DeviceCredentialAcceptance", return_value=acceptance), \
                          mock.patch.object(auth, "private_file", side_effect=raise_it), \
@@ -723,18 +725,45 @@ class DeviceCredentialMainTests(unittest.TestCase):
         self.assertEqual(self.primary_stage(output), result["original_failure_stage"])
 
     def test_fault_in_success_window_exactly_after_success_assignment(self):
-        # success = True has executed and the main try has not yet returned;
-        # a caught exception or KeyboardInterrupt here must still fail.
+        # A caught exception or KeyboardInterrupt after success = True must
+        # still fail. main() is traced (test-only, restored in finally) to show
+        # the success assignment runs and the try completes into finally; the
+        # last main step then raises. No production test hook is involved.
+        source = Path(auth.__file__).read_text().splitlines()
+        success_line = next(number for number, line in enumerate(source, 1)
+                            if line == "        success = True")
+        # First statement actually executed in finally, per the AST, which is
+        # also the first line event traced there.
+        try_node = next(node for node in ast.walk(ast.parse("\n".join(source)))
+                        if isinstance(node, ast.Try) and node.finalbody and node.body
+                        and node.body[0].lineno <= success_line <= node.body[-1].end_lineno)
+        entering_finally = try_node.finalbody[0].lineno
+        traced = []
+        def tracer(frame, event, argument):
+            if (event == "line" and frame.f_code.co_filename == auth.__file__
+                    and frame.f_code.co_name == "main" and frame.f_lineno in (success_line, entering_finally)):
+                traced.append(frame.f_lineno)
+            return tracer
+        previous = sys.gettrace()
+        try:
+            sys.settrace(tracer)
+            try:
+                self.run_main(True, mock.Mock())
+            finally:
+                sys.settrace(previous)
+        finally:
+            sys.settrace(previous)
+        self.assertEqual(traced, [success_line, entering_finally])
+        self.assertIs(sys.gettrace(), previous)
         for exception in (AcceptanceFailure("private-exception-body"), KeyboardInterrupt()):
             with self.subTest(exception=type(exception).__name__):
-                hook = mock.Mock(side_effect=exception)
-                with mock.patch.object(auth, "main_flow_step", hook):
-                    code, result, _, output, acceptance = self.run_main(True, mock.Mock())
-                hook.assert_called_once()
+                step = mock.Mock(side_effect=exception)
+                code, result, _, output, acceptance = self.run_main(True, mock.Mock(), step=step)
+                step.assert_called_once()
                 self.assertEqual(code, 1)
                 self.assertFalse(result["success"])
-                # Real acceptance reports its highest reached main stage; the
-                # harness mock reports "enable-prompt" for any main fault.
+                # The mock's stage is unadvanced here, matching a real
+                # acceptance whose highest reached stage is still reported.
                 self.assertEqual(result["original_failure_stage"], "enable-prompt")
                 self.assertEqual(self.primary_stage(output), "enable-prompt")
                 self.assertNotIn("PASS: ", output)

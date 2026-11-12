@@ -639,16 +639,6 @@ def parser():
     return result
 
 
-def main_flow_step(acceptance):
-    """One observable main-flow step; a test seam that can raise.
-
-    Kept as a tiny fixed no-op-side-effecting hook so an exception, including
-    KeyboardInterrupt, can be injected exactly after success = True, the only
-    window where a caught fault could otherwise be mistaken for success.
-    """
-    return None
-
-
 # Fixed sentinel for "the main flow completed" when a secondary stage alone
 # fails. It cannot collide with a real STAGES failure value or a stage name.
 NO_PRIMARY_FAILURE = "none"
@@ -676,7 +666,6 @@ def main():
         acceptance.copy_and_reinstall()
         require(hashlib.sha256(private_file(acceptance.source / "expected-private.json")).hexdigest() == acceptance.source_hash)
         success = True
-        main_flow_step(acceptance)
     except (Exception,KeyboardInterrupt):
         # Any caught main-flow fault, including an interrupt, wins: a later
         # cleanup or scan cannot make this run succeed.
