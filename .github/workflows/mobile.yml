@@ -1,4 +1,7 @@
 name: 原生移动端
+# Artifact names include the run attempt, which is only available to a run's
+# own environment. This unique per-run run-name supplies it without a new job.
+run-name: ${{ github.workflow }} · attempt ${{ github.run_attempt }}
 on:
   push:
     branches: [main]
@@ -36,6 +39,40 @@ jobs:
           go build -o "$RUNNER_TEMP/locklark-mobile-peer" ./cmd/locklark
           python3 -m venv "$RUNNER_TEMP/mobile-kdbx-peer"
           "$RUNNER_TEMP/mobile-kdbx-peer/bin/python" -m pip install 'pykeepass==4.2.0'
+      # Receipt before any runtime step so it can only describe the APKs.
+      - name: Record built APK receipt for reproduction
+        run: |
+          set -euo pipefail
+          receipt_dir="$RUNNER_TEMP/mobile-apk-receipt"
+          install -d -m 700 "$receipt_dir"
+          cp mobile/android/app/build/outputs/apk/debug/app-debug.apk "$receipt_dir/app-debug.apk"
+          android_test_apk="$(find mobile/android/app/build/outputs/apk/androidTest/debug -maxdepth 1 -type f -name '*-androidTest.apk')"
+          test -n "$android_test_apk"
+          test "$(printf '%s\n' "$android_test_apk" | wc -l)" -eq 1
+          cp "$android_test_apk" "$receipt_dir/app-debug-androidTest.apk"
+          head_sha="$(git rev-parse --verify 'HEAD^{commit}')"
+          tracked_modified=false
+          if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then tracked_modified=true; fi
+          {
+            printf '{"checkout_sha":"%s",' "$head_sha"
+            printf '"pull_request_head_sha":"%s",' "${PR_HEAD_SHA:-}"
+            printf '"tracked_worktree_modified":%s,' "$tracked_modified"
+            printf '"app_debug_apk_sha256":"%s",' "$(sha256sum "$receipt_dir/app-debug.apk" | cut -d ' ' -f 1)"
+            printf '"app_debug_android_test_apk_sha256":"%s"}\n' "$(sha256sum "$receipt_dir/app-debug-androidTest.apk" | cut -d ' ' -f 1)"
+          } > "$receipt_dir/apk-receipt.json"
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      - name: Preserve built APKs and receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: locklark-mobile-apk-${{ github.event.pull_request.head.sha || github.sha }}-attempt-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/mobile-apk-receipt/app-debug.apk
+            ${{ runner.temp }}/mobile-apk-receipt/app-debug-androidTest.apk
+            ${{ runner.temp }}/mobile-apk-receipt/apk-receipt.json
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: false
       - name: Enable emulator acceleration
         run: sudo chmod a+rw /dev/kvm
       - name: Run native Android application acceptance
