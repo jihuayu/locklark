@@ -639,6 +639,11 @@ def parser():
     return result
 
 
+# Fixed sentinel for "the main flow completed" when a secondary stage alone
+# fails. It cannot collide with a real STAGES failure value or a stage name.
+NO_PRIMARY_FAILURE = "none"
+
+
 def main():
     args = parser().parse_args()
     os.umask(0o077)
@@ -646,7 +651,7 @@ def main():
     success = False
     failure = "prerequisites"
     diagnostic = {}
-    original_failure = "prerequisites"
+    primary_clean = False
     cleanup_failed = False
     scan_failed = False
     try:
@@ -660,14 +665,18 @@ def main():
         acceptance.copy_and_reinstall()
         require(hashlib.sha256(private_file(acceptance.source / "expected-private.json")).hexdigest() == acceptance.source_hash)
         success = True
+        primary_clean = True
     except (Exception,KeyboardInterrupt):
         failure = acceptance.stage if acceptance else "prerequisites"
         if acceptance:
             diagnostic = acceptance.failure_metadata()
     finally:
         # Own the primary outcome before cleanup: a cleanup fault must never
-        # overwrite the original stage or its sanitized diagnosis.
-        original_failure, diagnostic = failure, diagnostic.copy()
+        # overwrite the original stage or its sanitized diagnosis. Only a clean
+        # main flow yields the no-primary sentinel, never the "prerequisites"
+        # pre-validation default.
+        original_failure = failure if not primary_clean else NO_PRIMARY_FAILURE
+        diagnostic = diagnostic.copy()
         if acceptance:
             primary_success = success
             try:
@@ -692,10 +701,13 @@ def main():
                 "physical_hardware_verified":False,"source_fixture_sha256":acceptance.source_hash,"diagnostic":diagnostic})
             print("Private Android OS credential evidence: " + str(acceptance.root))
     if not success:
-        print("FAIL: Android OS credential acceptance at " + (stage if acceptance else "prerequisites"))
+        print("FAIL: Android OS credential acceptance at " + (stage if acceptance else original_failure))
         print("Android OS credential diagnostic: " + json.dumps(diagnostic, sort_keys=True))
+        if acceptance:
+            # Fixed enum only: a real stage, or the no-primary sentinel.
+            print("Android OS credential primary failure stage: " + original_failure)
         if cleanup_failed:
-            print("FAIL: Android OS credential acceptance at pin-cleanup (primary_failure_stage=" + original_failure + ")")
+            print("FAIL: Android OS credential acceptance at pin-cleanup")
         if scan_failed:
             print("FAIL: Android OS credential acceptance at private-canary-scan")
     else: print("PASS: native OS credential opt-in, quick unlock, cancellation and nontransferable device key; private canary scan")
