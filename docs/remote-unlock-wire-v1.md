@@ -1100,30 +1100,56 @@ safety, an unlock, or VUK delivery. Those remain separate checks.
 
 ### Synthetic consent vector
 
-Both keys, both bindings and both signatures below are synthetic. Nothing was
-enrolled, no tenant, user, pair or challenge exists, and no human pairing
-ceremony or scan took place. The bindings are signed with the same synthetic
-keys and digested with `DeviceTransportBindingDigest`; the consent only carries
-their digests.
+Every key, binding and signature below is synthetic, with two strictly
+separated key roles; nothing was enrolled, no tenant, user, pair or challenge
+exists, and no human pairing ceremony or scan took place.
 
-- device a identity key: `JUO5L_EJVRFHatyDadtt3JM2ZaEZeN2hQE7hBmypVZ0`
-  (private seed bytes `0x40`..`0x5f`)
-- device b identity key: `F0VTtFbd38aQjsqxwQH-arIeK6oGF3lbfUOmNIKZP9U`
-  (private seed bytes `0x60`..`0x7f`)
+- **Consent identity keys** sign the consent preimage only. Device a uses the
+  private seed bytes `0x40`..`0x5f`; device b uses `0x50`..`0x6f`. No seed span
+  is shared, so the two identity keys differ.
+- **Binding signing keys** sign the complete synthetic
+  `DeviceTransportBinding` objects only. Each seed is the SHA-256 expansion of
+  a fixed synthetic label (`pair-consent-binding-a`, `pair-consent-binding-b`),
+  not a seed span. No private seed or public key byte is shared with a consent
+  identity key, and neither is a vault-policy `ContentSigningKey`.
+
+The bindings are digested with `DeviceTransportBindingDigest`; the consent
+carries only their digests, never the binding key or the binding bytes.
+
+- device a consent identity key: `JUO5L_EJVRFHatyDadtt3JM2ZaEZeN2hQE7hBmypVZ0`
+  (seed bytes `0x40`..`0x5f`)
+- device b consent identity key: `P3cI1fXMK8YztZ0rOi7ZLnR5IgxvCK3iCL682FgKuTs`
+  (seed bytes `0x50`..`0x6f`)
+- device a binding signing key: `1fjtECib65ky-u_SQoI3dvB-kPEEm0NLI0UctmCGnjM`
+- device b binding signing key: `tlNSPkAw-DEz27XpdqyyPT4JgyoAuSEIyV_iUeDk4kU`
+
+Device a's complete signed binding (`DeviceTransportBindingDigest`
+`7s5rcAaHfFtwSExBfE3vi-AR6c70t7UWi4_Du9TGbTQ`):
+
+```json
+{"format":"locklark.remote-unlock","version":1,"kind":"device-transport-binding","member_id":"member-0001","device_id":"device-a","install_id":"install-device-a","vault_id":"vault-0001","pair_generation":0,"spki_sha256":"AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA","recipient_public_key":"age12avp6cfclu3g432g8lhp6hyyhd5q78qjntxafudl2wnusnnprdwsqfy4ea","signature":"uoqoeY0yK9mAuLEXv0L05INOZnBMrE2k_HZcdx6Ah9hHSLq_vMq3AAKhwWG7kQKFxCBpY4fwB-jZMsRmRWyWAQ"}
+```
+
+Device b's complete signed binding (digest
+`nV7vqN6zbdnvbr_I2HbyQ2IQPIqZkXGfDyxX0pI6kZU`):
+
+```json
+{"format":"locklark.remote-unlock","version":1,"kind":"device-transport-binding","member_id":"member-0001","device_id":"device-b","install_id":"install-device-b","vault_id":"vault-0001","pair_generation":0,"spki_sha256":"AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA","recipient_public_key":"age12avp6cfclu3g432g8lhp6hyyhd5q78qjntxafudl2wnusnnprdwsqfy4ea","signature":"VQ35nU7y3c3A_5FVwfwPb-GlBXBzddBexv7oaNO0OnO-9Xmsz9xuqSpuRWDZFPxauOKHAT6EhZ5UyBhZXWdNDg"}
+```
 
 Signed preimage (domain shown as `<pair-consent domain>`, one zero byte):
 
 ```
-<pair-consent domain>{"format":"locklark.remote-unlock","version":1,"kind":"pair-consent","tenant_id":"tenant-0001","user_id":"user-0001","pair_id":"pair-0001","pair_generation":0,"device_a_id":"device-a","device_a_binding_sha256":"04j4HDckmNyhhu0e6qXkMVIZdIwHoYmBiTFJsIydS60","device_b_id":"device-b","device_b_binding_sha256":"NWsOrEOFKW0A-0SPZgRjLTeYnpgfwWY_MbK32NapFW0","challenge_id":"challenge-0001","deadline_unix_ms":1800000000000}
+<pair-consent domain>{"format":"locklark.remote-unlock","version":1,"kind":"pair-consent","tenant_id":"tenant-0001","user_id":"user-0001","pair_id":"pair-0001","pair_generation":0,"device_a_id":"device-a","device_a_binding_sha256":"7s5rcAaHfFtwSExBfE3vi-AR6c70t7UWi4_Du9TGbTQ","device_b_id":"device-b","device_b_binding_sha256":"nV7vqN6zbdnvbr_I2HbyQ2IQPIqZkXGfDyxX0pI6kZU","challenge_id":"challenge-0001","deadline_unix_ms":1800000000000}
 ```
 
 Complete canonical consent (638 bytes):
 
 ```json
-{"format":"locklark.remote-unlock","version":1,"kind":"pair-consent","tenant_id":"tenant-0001","user_id":"user-0001","pair_id":"pair-0001","pair_generation":0,"device_a_id":"device-a","device_a_binding_sha256":"04j4HDckmNyhhu0e6qXkMVIZdIwHoYmBiTFJsIydS60","device_b_id":"device-b","device_b_binding_sha256":"NWsOrEOFKW0A-0SPZgRjLTeYnpgfwWY_MbK32NapFW0","challenge_id":"challenge-0001","deadline_unix_ms":1800000000000,"device_a_signature":"G36fzZrYecSw2HPsvE55MLiyCBXCYuZrvSlA1wm2lwayHS1ior7cq4lYn9B0k7TFAUknpWfD4DKF-oPGB9rADg","device_b_signature":"7FRtNu1r5aifdyzhpsfiXsqodAM77YdSlr1cBzzSVzN3CZNQhgS1GPUT4HGBBGo3BWBOZ13jZYKk7ff_WNUlAw"}
+{"format":"locklark.remote-unlock","version":1,"kind":"pair-consent","tenant_id":"tenant-0001","user_id":"user-0001","pair_id":"pair-0001","pair_generation":0,"device_a_id":"device-a","device_a_binding_sha256":"7s5rcAaHfFtwSExBfE3vi-AR6c70t7UWi4_Du9TGbTQ","device_b_id":"device-b","device_b_binding_sha256":"nV7vqN6zbdnvbr_I2HbyQ2IQPIqZkXGfDyxX0pI6kZU","challenge_id":"challenge-0001","deadline_unix_ms":1800000000000,"device_a_signature":"L8Ikqb08SbgTGz796tdRNpvoz-6LMmbfquR9QWdTZeIiqcNQlBci9_yZnROVuhZYCXafzwUsKqoKGTo14T2pAA","device_b_signature":"76y_WIIaEmkkckFtYImSxZWv2T99TSxNFbu2KghriLde6mFNlouiJyRkEnCaZviOhzqUxWHI6cyV7chZv0CeBQ"}
 ```
 
-Both signatures verify over the preimage with the keys above; with
+Both signatures verify over the preimage with the consent identity keys above; with
 `nowUnixMS = 1799999900000` the consent verifies, and with
 `nowUnixMS = 1800000000000` it is expired. The literals are pinned in the
 package tests.

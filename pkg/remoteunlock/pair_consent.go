@@ -23,8 +23,8 @@ const (
 	KindPairConsent = "pair-consent"
 	// PairConsentSignatureDomain separates the pair-consent signature
 	// preimage from every other signed structure. The preimage is this domain
-	// followed by the canonical JSON of members 1..14. Both endpoints sign
-	// exactly these bytes.
+	// followed by the canonical JSON of members 1..13 (format through
+	// deadline_unix_ms). Both endpoints sign exactly these bytes.
 	PairConsentSignatureDomain = "locklark.remote-unlock/v1/pair-consent\x00"
 	// MaxPairConsentSize is the maximum encoded or accepted consent size in
 	// bytes.
@@ -124,8 +124,10 @@ func pairConsentFieldErr(field string, err error) error {
 	return &PairConsentFieldError{Field: field, Err: err}
 }
 
-// pairConsentMembers lists the consent members in their exact required order.
-// The first fourteen are the signed members; both signatures close the object.
+// pairConsentMembers lists the consent members in their exact required order:
+// members 1..13 (indices 0..12) are the signed tuple that both endpoints sign,
+// and members 14 and 15 (device_a_signature, device_b_signature) are excluded
+// from the preimage and close the object.
 var pairConsentMembers = [...]string{
 	"format",
 	"version",
@@ -228,8 +230,9 @@ type DeviceIDSignerKeys struct {
 }
 
 // PairConsentSigningBytes returns the exact bytes both endpoints sign:
-// PairConsentSignatureDomain followed by the canonical JSON of members 1..14
-// (every member except both signatures), in schema order. It accepts the same
+// PairConsentSignatureDomain followed by the canonical JSON of members 1..13
+// (format through deadline_unix_ms), in schema order. The two signature
+// members, 14 and 15, are the only members excluded. It accepts the same
 // values as EncodePairConsent and ignores both signatures.
 //
 // The returned bytes are public and contain no key material. Each platform
