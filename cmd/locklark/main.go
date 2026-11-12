@@ -65,7 +65,7 @@ PERSONAL VAULT (locklark personal <action> --file PATH ...)
     personal passkey-import                           --file PATH --invitation FILE --packet FILE --source-pin HEX64 --digest HEX64 --mapping PRIVATE_JSON
 
   OneDrive OAuth (OS credential store, refresh token only)
-    personal onedrive login                           --client-id ID --tenant TENANT --scopes SCOPE_LIST
+    personal onedrive login|refresh                   --client-id ID --tenant TENANT --scopes SCOPE_LIST
     personal onedrive status|logout                   --client-id ID --tenant TENANT
 
 CLI WRAPPERS (locklark cli <command> ...)

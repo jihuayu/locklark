@@ -80,7 +80,7 @@ MIGRATION, EXPORT & PASSKEY TRANSFER
   passkey-import        --file PATH --invitation FILE --packet FILE --source-pin HEX64 --digest HEX64 --mapping PRIVATE_JSON
 
 ONEDRIVE OAUTH (OS credential store, refresh token only)
-  onedrive login        --client-id ID --tenant TENANT --scopes SCOPE_LIST
+  onedrive login|refresh --client-id ID --tenant TENANT --scopes SCOPE_LIST
   onedrive status|logout --client-id ID --tenant TENANT
   (the local profile label is read hidden from the terminal)
 

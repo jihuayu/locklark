@@ -18,7 +18,7 @@ import (
 // onedriveHelpText is the single-command help of `locklark personal onedrive`.
 // It is also the fixed text printed with a usage refusal, so it names no
 // registration value, profile or credential store item.
-const onedriveHelpText = `usage: locklark personal onedrive <login|status|logout> --client-id ID --tenant TENANT [flags]
+const onedriveHelpText = `usage: locklark personal onedrive <login|refresh|status|logout> --client-id ID --tenant TENANT [flags]
 
 Keep one Microsoft OneDrive OAuth refresh token per local profile in the OS
 credential store, service ` + onedriveauth.StoreNamespace + `.
@@ -32,6 +32,16 @@ environment variable or other fallback store.
       the code is redeemed for. SCOPE_LIST is comma- or space-separated and
       must include offline_access before anything else happens. There is no
       client-secret flag.
+
+  refresh --client-id ID --tenant TENANT --scopes SCOPE_LIST
+      Load the stored refresh token for the hidden profile label and perform
+      one token endpoint refresh with exactly the explicit scopes. SCOPE_LIST
+      is comma- or space-separated and required; it is sent as given, and
+      offline_access is neither required nor added. The access token is
+      discarded and is never printed, returned or stored. A validated rotated
+      refresh token replaces the stored one; a failed refresh does not delete
+      the stored token. This makes no Microsoft Graph request and does not
+      verify account identity.
 
   status  --client-id ID --tenant TENANT
       Report whether a refresh token is stored for the hidden profile label.
@@ -67,11 +77,22 @@ var onedriveScopeFlags = []onedriveFlag{
 	{"scopes", "SCOPE_LIST", "explicit scopes, comma- or space-separated; required, must include offline_access"},
 }
 
+// onedriveRefreshScopeFlags are the explicit scopes of one refresh grant. They
+// are required, sent exactly as given, and offline_access is neither required
+// nor added.
+var onedriveRefreshScopeFlags = []onedriveFlag{
+	{"scopes", "SCOPE_LIST", "explicit scopes, comma- or space-separated; required, no default; sent exactly, offline_access neither required nor added"},
+}
+
 func onedriveFlags(action string) []onedriveFlag {
-	if action == "login" {
-		return append(append([]onedriveFlag{}, onedriveRegistrationFlags...), onedriveScopeFlags...)
+	flags := append([]onedriveFlag{}, onedriveRegistrationFlags...)
+	switch action {
+	case "login":
+		flags = append(flags, onedriveScopeFlags...)
+	case "refresh":
+		flags = append(flags, onedriveRefreshScopeFlags...)
 	}
-	return onedriveRegistrationFlags
+	return flags
 }
 
 // Fixed, redacted CLI errors. None carries a URL, state, code, client ID,
@@ -84,9 +105,19 @@ var (
 	errOnedriveExchangePre    = errors.New("the token exchange was cancelled before any request was sent, so the code was not presented")
 	errOnedriveExchangeUnsure = errors.New("the token exchange did not finish after a request was sent; the authorization code may have been consumed and must not be retried; nothing was saved")
 	errOnedriveExchangeFailed = errors.New("the token endpoint rejected the exchange; the authorization code may have been consumed and must not be retried; nothing was saved")
-	errOnedriveStore          = errors.New("the OneDrive refresh token operation on the OS credential store failed; it may not have been saved or deleted; no plaintext fallback exists")
-	errOnedriveUnsupported    = errors.New("the OS credential store is not available; no refresh token was saved or deleted; no plaintext fallback exists")
-	errOnedriveLabel          = errors.New("invalid profile label; it must be 1-256 printable ASCII bytes")
+
+	// Refresh failures. The pre-send cancellation is distinct from a request
+	// that may have reached the provider, and a failed save of a validated
+	// replacement is distinct from both: the store may hold the old or the new
+	// refresh token.
+	errOnedriveRefreshPre          = errors.New("the OneDrive token endpoint refresh was cancelled before any request was sent; no access token was obtained and the stored refresh token was not changed")
+	errOnedriveRefreshUnknown      = errors.New("the OneDrive token endpoint refresh may have been sent and its outcome is unknown; the provider may have rotated the stored refresh token; do not retry; no access token was printed")
+	errOnedriveRefreshStoreUnknown = errors.New("the OneDrive token endpoint refresh succeeded but the validated replacement refresh token could not be saved; the credential store may hold the old or the new refresh token; do not retry; no access token was printed")
+	errOnedriveRefreshFailed       = errors.New("the OneDrive token endpoint refresh failed; no access token was printed")
+
+	errOnedriveStore       = errors.New("the OneDrive refresh token operation on the OS credential store failed; it may not have been saved or deleted; no plaintext fallback exists")
+	errOnedriveUnsupported = errors.New("the OS credential store is not available; no refresh token was saved or deleted; no plaintext fallback exists")
+	errOnedriveLabel       = errors.New("invalid profile label; it must be 1-256 printable ASCII bytes")
 
 	// errOnedriveNotEnrolled is the fixed status outcome of a profile with
 	// no stored refresh token. It never leaves runPersonalOnedrive.
@@ -101,10 +132,11 @@ const (
 	onedriveLogoutDone        = "OneDrive profile (local label): refresh token record deleted\r\n"
 	onedriveLoginDone         = "OneDrive sign-in complete. Only the refresh token was stored in the OS credential store.\r\n"
 	onedriveLoginNotSaved     = "OneDrive sign-in did not finish. Nothing was saved.\r\n"
+	onedriveRefreshDone       = "OneDrive token endpoint refresh succeeded. The access token was discarded.\r\n"
 )
 
 // onedriveRequest is one parsed command: the action, the explicit public-client
-// registration values, and, for login only, the explicit scopes.
+// registration values, and, for login and refresh, the explicit scopes.
 type onedriveRequest struct {
 	action string
 	config onedriveauth.AuthorizeConfig
@@ -121,6 +153,8 @@ func isOnedriveAction(args []string) bool { return len(args) > 0 && args[0] == "
 //   - every command takes --client-id and --tenant exactly once, nonempty;
 //   - login also takes --scopes exactly once, and that list includes
 //     offline_access;
+//   - refresh also takes --scopes exactly once, nonempty, and neither requires
+//     nor adds offline_access;
 //   - status and logout take nothing else.
 //
 // Flags may appear in any order, as "--name VALUE" or "--name=VALUE". An unknown
@@ -133,7 +167,7 @@ func parseOnedrive(args []string) (onedriveRequest, error) {
 		return req, personalUsage
 	}
 	req.action = args[0]
-	if req.action != "login" && req.action != "status" && req.action != "logout" {
+	if req.action != "login" && req.action != "refresh" && req.action != "status" && req.action != "logout" {
 		return onedriveRequest{}, personalUsage
 	}
 	values, err := parseOnedriveFlags(args[1:], onedriveFlags(req.action))
@@ -146,11 +180,14 @@ func parseOnedrive(args []string) (onedriveRequest, error) {
 		}
 	}
 	req.config = onedriveauth.AuthorizeConfig{ClientID: values["client-id"], Tenant: values["tenant"]}
-	if req.action == "login" {
+	if req.action == "login" || req.action == "refresh" {
 		req.config.Scopes = splitScopes(values["scopes"])
-		if len(req.config.Scopes) == 0 || !hasScope(req.config.Scopes, "offline_access") {
+		if len(req.config.Scopes) == 0 {
 			return onedriveRequest{}, personalUsage
 		}
+	}
+	if req.action == "login" && !hasScope(req.config.Scopes, "offline_access") {
+		return onedriveRequest{}, personalUsage
 	}
 	return req, nil
 }
@@ -233,7 +270,7 @@ func hasScope(scopes []string, scope string) bool {
 func onedriveActionHelp(action string) string {
 	var b strings.Builder
 	b.WriteString("usage: locklark personal onedrive " + action + " --client-id ID --tenant TENANT")
-	if action == "login" {
+	if action == "login" || action == "refresh" {
 		b.WriteString(" --scopes SCOPE_LIST")
 	}
 	b.WriteString("\n\n")
@@ -241,6 +278,9 @@ func onedriveActionHelp(action string) string {
 	case "login":
 		b.WriteString("Read a local profile label hidden from the controlling terminal, then open the system browser for the public-client PKCE authorization flow and store the returned refresh token under that label. The explicit scopes must include offline_access; every flag is required and has no default.\n\n")
 		b.WriteString("The authorization URL, state, code, tokens, profile label and provider errors are never printed. The callback listener uses the fixed http://127.0.0.1:PORT" + onedriveauth.CallbackPath + " redirect and is closed on success, cancellation or timeout. A cancellation before the code is sent is reported apart from any failure after a request was sent, which leaves the code possibly consumed and is never retried.\n\n")
+	case "refresh":
+		b.WriteString("Load the refresh token stored for the hidden local profile label and perform one token endpoint refresh. The explicit scopes are required, sent exactly as given, and offline_access is neither required nor added; every flag is required and has no default.\n\n")
+		b.WriteString("The access token is discarded immediately: it is never printed, returned or stored. The source saves only a validated replacement refresh token and a failed refresh does not delete the stored token; a cancellation before sending is reported apart from a request whose outcome is unknown, and a failed validated save is reported as the store possibly holding the old or the new refresh token. This command makes no Microsoft Graph request and does not verify account identity.\n\n")
 	case "status":
 		b.WriteString("Report whether a refresh token is stored for the hidden local profile label, without reading it out or showing it. The label is a local name chosen by the user, not a verified Microsoft identity; this reports what this machine stored, not who signed in.\n\n")
 	case "logout":
@@ -253,11 +293,11 @@ func onedriveActionHelp(action string) string {
 	return b.String()
 }
 
-// runPersonalOnedrive runs `locklark personal onedrive login|status|logout`. It
-// writes its fixed receipt itself, to out, only when it succeeds.
+// runPersonalOnedrive runs `locklark personal onedrive login|refresh|status|logout`.
+// It writes its fixed receipt itself, to out, only when it succeeds.
 func runPersonalOnedrive(args []string, out io.Writer) error {
 	if len(args) == 2 && (args[1] == "--help" || args[1] == "-h") {
-		if args[0] == "login" || args[0] == "status" || args[0] == "logout" {
+		if args[0] == "login" || args[0] == "refresh" || args[0] == "status" || args[0] == "logout" {
 			_, err := io.WriteString(out, onedriveActionHelp(args[0]))
 			return err
 		}
@@ -293,6 +333,11 @@ func runPersonalOnedrive(args []string, out io.Writer) error {
 		receipt, err = onedriveLogin(ctx, req.config, label)
 		if err != nil {
 			_, _ = io.WriteString(os.Stderr, onedriveLoginNotSaved)
+			return err
+		}
+	case "refresh":
+		receipt, err = onedriveRefresh(ctx, req.config, label)
+		if err != nil {
 			return err
 		}
 	case "logout":
@@ -423,6 +468,87 @@ func onedriveLogin(ctx context.Context, cfg onedriveauth.AuthorizeConfig, label 
 	return onedriveLoginDone, nil
 }
 
+// onedriveRefresh performs one token endpoint refresh with the stored refresh
+// token and discards the access token at once. The source owns refresh-token
+// rotation storage and is closed before the receipt is returned. A context
+// already canceled here is a known pre-send cancellation; every later
+// cancellation is reported conservatively by onedriveRefreshError because the
+// request may already have been sent.
+func onedriveRefresh(ctx context.Context, cfg onedriveauth.AuthorizeConfig, label []byte) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return "", errors.Join(errOnedriveRefreshPre, onedriveauth.ErrRefreshCancelled)
+	}
+	if !onedriveauth.ValidProfileLabel(label) {
+		return "", errOnedriveLabel
+	}
+	source, err := newOnedriveRefreshSource(onedriveauth.RefreshSourceConfig{
+		ClientID: cfg.ClientID,
+		Tenant:   cfg.Tenant,
+		Scopes:   append([]string(nil), cfg.Scopes...),
+		Profile:  label,
+	})
+	if err != nil {
+		if source != nil {
+			source.Close()
+		}
+		return "", onedriveRefreshError(err)
+	}
+	if source == nil {
+		return "", errOnedriveRefreshFailed
+	}
+	// A string cannot be zeroized. The one caller-owned access-token string is
+	// dropped at once through the blank identifier, so it is never kept,
+	// printed, returned or stored. Close runs before any receipt is returned.
+	_, err = source.AccessToken(ctx)
+	source.Close()
+	if err != nil {
+		return "", onedriveRefreshError(err)
+	}
+	return onedriveRefreshDone, nil
+}
+
+// onedriveRefreshError maps a source failure to a fixed CLI error that keeps the
+// package sentinel classifications but never the underlying text. A validated
+// replacement save failure is kept apart from a request whose outcome is
+// unknown, and a caller cancellation after the refresh started is conservatively
+// reported as an unknown outcome, never as a known pre-send cancellation.
+func onedriveRefreshError(err error) error {
+	switch {
+	case errors.Is(err, onedriveauth.ErrSourceStoreUnknown):
+		return errors.Join(errOnedriveRefreshStoreUnknown, onedriveauth.ErrSourceStoreUnknown)
+	case errors.Is(err, onedriveauth.ErrRefreshCancelled):
+		return errors.Join(errOnedriveRefreshPre, onedriveauth.ErrRefreshCancelled)
+	case errors.Is(err, onedriveauth.ErrRefreshOutcomeUnknown):
+		return errors.Join(errOnedriveRefreshUnknown, onedriveauth.ErrRefreshOutcomeUnknown)
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		// AccessToken reports the caller context ending while it waits. The
+		// shared request may already have been sent, so this is not pre-send.
+		return errOnedriveRefreshUnknown
+	case errors.Is(err, onedriveauth.ErrStoreUnsupported) && errors.Is(err, errors.ErrUnsupported):
+		return errors.Join(errOnedriveUnsupported, onedriveauth.ErrStoreUnsupported, errors.ErrUnsupported)
+	case errors.Is(err, onedriveauth.ErrStoreUnsupported):
+		return errors.Join(errOnedriveStore, onedriveauth.ErrStoreUnsupported)
+	case errors.Is(err, onedriveauth.ErrStoreInput):
+		return errors.Join(errOnedriveStore, onedriveauth.ErrStoreInput)
+	case errors.Is(err, onedriveauth.ErrStoreNotFound):
+		return errors.Join(errOnedriveStore, onedriveauth.ErrStoreNotFound)
+	case errors.Is(err, onedriveauth.ErrRefreshStatus):
+		return errors.Join(errOnedriveRefreshFailed, onedriveauth.ErrRefreshStatus)
+	case errors.Is(err, onedriveauth.ErrRefreshResponse):
+		return errors.Join(errOnedriveRefreshFailed, onedriveauth.ErrRefreshResponse)
+	case errors.Is(err, onedriveauth.ErrRefreshInput):
+		return errors.Join(errOnedriveRefreshFailed, onedriveauth.ErrRefreshInput)
+	case errors.Is(err, onedriveauth.ErrRefreshSource):
+		return errors.Join(errOnedriveRefreshFailed, onedriveauth.ErrRefreshSource)
+	default:
+		// Arbitrary failures: fixed message only, no cause text.
+		return errOnedriveRefreshFailed
+	}
+}
+
 // onedriveExchangeError keeps the exchange's own classification, exactly and
 // without detail: a cancellation before sending is reported as such, because no
 // request was made and the code was not presented, while every other failure
@@ -472,15 +598,28 @@ type onedriveStore interface {
 	DeleteRefreshToken(clientID, tenant string, label []byte) error
 }
 
-// Injectable seams. Production uses the system opener of this OS and the real
-// prompt and store; tests replace them so no test opens a browser, the network
-// or the real credential store.
+// onedriveRefreshSource is the smallest source surface the refresh command
+// uses. Its only production implementation is the package RefreshSource, which
+// owns validated refresh-token rotation storage; tests inject an in-memory fake.
+type onedriveRefreshSource interface {
+	AccessToken(ctx context.Context) (string, error)
+	Close()
+}
+
+// Injectable seams. Production uses the system opener of this OS, the real
+// prompt and store, and the real RefreshSource; tests replace them so no test
+// opens a browser, the network or the real credential store.
 var (
 	newBrowserCommand  = browserCommandForOS
 	promptProfileLabel = func(ctx context.Context) ([]byte, error) {
 		return promptControlTerminal(ctx, os.Stdin, os.Stderr, "OneDrive local profile label")
 	}
 	newOnedriveStore = func() (onedriveStore, error) { return onedriveauth.NewRefreshTokenStore(), nil }
+	// newOnedriveRefreshSource is the production factory for the refresh
+	// command. It is a variable only so CLI tests can inject a fake source.
+	newOnedriveRefreshSource = func(cfg onedriveauth.RefreshSourceConfig) (onedriveRefreshSource, error) {
+		return onedriveauth.NewRefreshSource(cfg)
+	}
 )
 
 // browserCommandForOS names the native opener of this OS. The URL is one
