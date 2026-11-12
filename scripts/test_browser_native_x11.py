@@ -2326,7 +2326,8 @@ class WindowTreeRaceTests(unittest.TestCase):
 
     def test_unrelated_exception_identity_is_preserved(self):
         original = RuntimeError("Native acceptance X query failed")
-        errors, codes, started = [(3, 78)], [3], []
+        # Clean live lists: preexisting evidence would fail closed first.
+        errors, codes, started = [], [], []
 
         def scan():
             started.append(1)
@@ -2351,7 +2352,7 @@ class WindowTreeRaceTests(unittest.TestCase):
                 started.append(1)
                 raise failure
             try:
-                native.recover_window_tree(scan, [(3, 78)], [3], self.ROOT,
+                native.recover_window_tree(scan, [], [], self.ROOT,
                                            float("inf"))
             except RuntimeError as error:
                 self.assertIs(error, failure)
@@ -2387,10 +2388,102 @@ class WindowTreeRaceTests(unittest.TestCase):
         self.fails_closed(lambda: self.recover(
             [[(3, 78), 91]] * 5, restarts=1))
         self.assertEqual(self.recover([[(3, 78), 91], [91]])[1], 2)
-        for restarts in (-1, 1.0, True, None):
+        # Any bound above the fixed one is rejected before a scan, so a
+        # caller can never lengthen the retry loop; the fixed value itself is
+        # still accepted.
+        for restarts in (-1, 1.0, True, None,
+                         native.WINDOW_TREE_RESTARTS + 1, 4, 16, 2 ** 31):
             with self.subTest(restarts=restarts):
-                self.fails_closed(lambda: self.recover(
-                    [[91]], restarts=restarts))
+                scan, errors, codes, started = self.tree([[91]])
+                self.fails_closed(lambda: native.recover_window_tree(
+                    scan, errors, codes, self.ROOT, float("inf"),
+                    restarts=restarts))
+                self.assertEqual(started, [])
+        for restarts in (native.WINDOW_TREE_RESTARTS, 0, 2):
+            with self.subTest(restarts=restarts):
+                scan, errors, codes, started = self.tree([[(3, 78), 91]] * 5)
+                with patch.object(native.time, "monotonic", return_value=0):
+                    self.fails_closed(lambda: native.recover_window_tree(
+                        scan, errors, codes, self.ROOT, float("inf"),
+                        restarts=restarts))
+                self.assertEqual(len(started), restarts + 1)
+                # A race that the smaller bound still allows is restarted:
+                # `restarts` races plus the clean scan replacing the next one.
+                self.assertEqual(self.recover(
+                    [[(3, 78), 91]] * restarts + [[91]],
+                    restarts=restarts)[1], restarts + 1)
+
+    def test_preexisting_raw_errors_fail_closed_before_a_scan(self):
+        # An asynchronous BadWindow from before the discovery call is not
+        # proven transient by this call: even a pair that would pass the
+        # predicate, alone or with its diagnostic code, refuses before scan
+        # and leaves the live handler evidence exactly as it was.
+        for preexisting in ([(3, 78)], [(8, 78)], [(3, self.ROOT)],
+                            [(3, 78), (8, 79)]):
+            with self.subTest(preexisting=preexisting):
+                scan, errors, codes, started = self.tree([[91]])
+                errors.extend(preexisting)
+                kept_errors = list(errors)
+                with patch.object(native.time, "monotonic", return_value=0):
+                    self.fails_closed(lambda: native.recover_window_tree(
+                        scan, errors, codes, self.ROOT, float("inf")))
+                self.assertEqual(started, [])
+                self.assertEqual(errors, kept_errors)
+                self.assertEqual(codes, [])
+                # A restart budget of zero or the default changes nothing.
+                for restarts in (0, 1, native.WINDOW_TREE_RESTARTS):
+                    with self.subTest(restarts=restarts):
+                        self.fails_closed(lambda: native.recover_window_tree(
+                            scan, errors, codes, self.ROOT, float("inf"),
+                            restarts=restarts))
+                self.assertEqual(started, [])
+                self.assertEqual(errors, kept_errors)
+                self.assertEqual(codes, [])
+
+    def test_preexisting_diagnostic_codes_fail_closed_before_a_scan(self):
+        # The diagnostic list travels with the raw records: a code left with
+        # no matching raw record is still unproven evidence and refuses
+        # before scan, with both lists preserved.
+        for preexisting in ([3], [8], [3, 1]):
+            with self.subTest(preexisting=preexisting):
+                scan, errors, codes, started = self.tree([[91]])
+                codes.extend(preexisting)
+                kept_codes = list(codes)
+                self.fails_closed(lambda: native.recover_window_tree(
+                    scan, errors, codes, self.ROOT, float("inf")))
+                self.assertEqual(started, [])
+                self.assertEqual(errors, [])
+                self.assertEqual(codes, kept_codes)
+
+    def test_both_preexisting_lists_fail_closed_together(self):
+        scan, errors, codes, started = self.tree([[91]])
+        errors.append((3, 78))
+        codes.append(3)
+        self.fails_closed(lambda: native.recover_window_tree(
+            scan, errors, codes, self.ROOT, float("inf")))
+        self.assertEqual(started, [])
+        self.assertEqual((errors, codes), ([(3, 78)], [3]))
+
+    def test_clear_happens_only_after_a_proven_transient_restart(self):
+        # The restarted scan observes a non-transient error while the proven
+        # transient record is still live: the clear must belong to the
+        # restart alone, so that scan fails closed with the new record kept.
+        scan, errors, codes, started = self.tree(
+            [[(3, 78), "refuse"], [(8, 79), 91]])
+        with self.assertRaises(RuntimeError) as raised:
+            native.recover_window_tree(scan, errors, codes, self.ROOT,
+                                       float("inf"))
+        self.assertEqual(raised.exception.args, ("X window query refused",))
+        self.assertEqual(len(started), 2)
+        self.assertEqual((errors, codes), ([(8, 79)], [8]))
+        # A proven race past the deadline or at the budget leaves that
+        # scan's own records intact instead of clearing them preemptively.
+        scan, errors, codes, started = self.tree([[(3, 78), "refuse"]])
+        with patch.object(native.time, "monotonic", return_value=5):
+            self.fails_closed(lambda: native.recover_window_tree(
+                scan, errors, codes, self.ROOT, 5))
+        self.assertEqual(started, [0])
+        self.assertEqual((errors, codes), ([(3, 78)], [3]))
 
     # The caller's one deadline is never extended.
 

@@ -722,27 +722,36 @@ def recover_window_tree(scan, errors, diagnostic_codes, root, deadline,
     `scan()` runs one entire `find(root)` traversal and returns its matches or
     raises. `errors` is the X error handler's live list of (code, resource)
     records; `diagnostic_codes` is the live list of diagnostic codes that
-    handler appends the same errors to. Both are replaced by `scan()`, so they
-    are cleared before a restart and any settled record past that point
-    belongs to the next scan. A restart is made only when the scan raised the
-    exact `RuntimeError(WINDOW_QUERY_REFUSED)` or completed, and the records it
-    left prove `transient_window_race()`; every one of its results is then
-    discarded and its records and diagnostic codes are cleared before the walk
-    restarts from the root. A clean, complete scan returns its full matches.
-    Any other failure is re-raised unchanged; a scan with errors that are not
-    transient, or a completed scan with any error at all, fails closed with
-    the fixed `RuntimeError(WINDOW_QUERY_REFUSED)`. Restarts are bounded by
-    `restarts` and only ever read the caller's unchanged `deadline`.
+    handler appends the same errors to. The handler only ever appends, so a
+    record left by the previous scan is cleared before the restart it triggers
+    and everything observed afterwards belongs to the next scan. A record
+    already present on entry was not proven transient by this call, so if
+    either live list is non-empty the call fails closed with the fixed
+    `RuntimeError(WINDOW_QUERY_REFUSED)` and leaves both lists untouched,
+    before `scan()` is called at all. A restart is made only when the scan
+    raised the exact `RuntimeError(WINDOW_QUERY_REFUSED)` or completed, and the
+    records it left prove `transient_window_race()`; every one of its results
+    is then discarded, and only here and after the deadline and budget are
+    confirmed are its records and diagnostic codes cleared before the walk
+    restarts from the root. A clean, complete scan must leave both lists empty
+    and returns its full matches. Any other failure is re-raised unchanged; a
+    scan with errors that are not transient, or a completed scan with any
+    error at all, fails closed with the fixed
+    `RuntimeError(WINDOW_QUERY_REFUSED)`. Restarts are bounded by `restarts`,
+    which may only lower the fixed `WINDOW_TREE_RESTARTS`, and only ever read
+    the caller's unchanged `deadline`.
     """
     if not callable(scan) or type(errors) is not list or \
             type(diagnostic_codes) is not list or type(root) is not int:
         raise RuntimeError(WINDOW_QUERY_REFUSED)
-    if type(restarts) is not int or restarts < 0:
+    if type(restarts) is not int or restarts < 0 or \
+            restarts > WINDOW_TREE_RESTARTS:
+        raise RuntimeError(WINDOW_QUERY_REFUSED)
+    if errors or diagnostic_codes:
+        # Preexisting asynchronous X errors: keep the evidence, never scan.
         raise RuntimeError(WINDOW_QUERY_REFUSED)
     restarted = 0
     while True:
-        del errors[:]
-        del diagnostic_codes[:]
         try:
             found = scan()
         except RuntimeError as error:
@@ -751,12 +760,11 @@ def recover_window_tree(scan, errors, diagnostic_codes, root, deadline,
             refused = True
         else:
             refused = False
-        if not errors:
-            # Only a completed scan may be accepted. The records are dropped
-            # here only to prove them; a failed scan has no result to accept.
+        if not errors and not diagnostic_codes:
+            # Only a completed scan may be accepted, and only while both
+            # lists still hold nothing.
             if refused:
                 raise RuntimeError(WINDOW_QUERY_REFUSED)
-            del errors[:]
             return found
         if not transient_window_race(errors, root):
             raise RuntimeError(WINDOW_QUERY_REFUSED)
