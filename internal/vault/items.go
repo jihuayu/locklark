@@ -497,11 +497,11 @@ func supportedTimes(t kdbx.TimeData) bool {
 	return !t.Expires.Bool && t.ExpiryTime == nil && t.UsageCount == 0
 }
 func supportedGroup(g kdbx.Group) bool {
-	return supportedTimes(g.Times) && g.Notes == "" && g.Tags == "" && len(g.CustomData) == 0 && g.IconID == 0 && g.CustomIconUUID.IsZero() && g.PreviousParentGroup == nil && g.DefaultAutoTypeSequence == "" && g.EnableAutoType == wrappers.NewNullableBoolWrapper(true) && g.EnableSearching == wrappers.NewNullableBoolWrapper(true)
+	return supportedTimes(g.Times) && g.Notes == "" && g.Tags == "" && len(g.CustomData) == 0 && g.IconID == 0 && g.CustomIconUUID.IsZero() && g.PreviousParentGroup == nil && g.DefaultAutoTypeSequence == "" && g.EnableAutoType == wrappers.NewNullableBoolWrapper(true) && g.EnableSearching == wrappers.NewNullableBoolWrapper(true) && g.LastTopVisibleEntry == kdbx.ZeroUUIDText
 }
 func supportedEntry(e kdbx.Entry) bool {
 	a := e.AutoType
-	return supportedTimes(e.Times) && len(e.Histories) == 0 && len(e.CustomData) == 0 && e.Tags == "" && e.OverrideURL == "" && e.IconID == 0 && e.CustomIconUUID.IsZero() && e.ForegroundColor == "" && e.BackgroundColor == "" && e.PreviousParentGroup == nil && e.QualityCheck == nil && !a.Enabled.Bool && a.DataTransferObfuscation == 0 && a.DefaultSequence == "" && len(a.Associations) == 0
+	return e.UUID != kdbx.UUID{} && supportedTimes(e.Times) && len(e.Histories) == 0 && len(e.CustomData) == 0 && e.Tags == "" && e.OverrideURL == "" && e.IconID == 0 && e.CustomIconUUID.IsZero() && e.ForegroundColor == "" && e.BackgroundColor == "" && e.PreviousParentGroup == nil && e.QualityCheck == nil && !a.Enabled.Bool && a.DataTransferObfuscation == 0 && a.DefaultSequence == "" && len(a.Associations) == 0
 }
 
 func decodeItemV2Envelope(content string) (itemV2Envelope, error) {
@@ -710,7 +710,8 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 				// KDBX 4 inner-header binaries are raw octets, even when their
 				// content happens to be valid base64 text.
 				it.AttachmentProtected = b.MemoryProtection == 1
-				it.Attachment = b.Content
+				// Decoded items own their binary bodies: never alias db.
+				it.Attachment = append([]byte(nil), b.Content...)
 				it.Filename = ref.Name
 				used[ref.Value.ID] = true
 			default:
@@ -816,7 +817,8 @@ func readItems(db *kdbx.Database, g kdbx.Group) ([]byte, []Item, error) {
 				return nil, nil, ErrSnapshot
 			}
 			it.AttachmentProtected = b.MemoryProtection == 1
-			it.Attachment = b.Content
+			// Decoded items own their binary bodies: never alias db.
+			it.Attachment = append([]byte(nil), b.Content...)
 			it.Filename = ref.Name
 			used[ref.Value.ID] = true
 			delete(refsByName, ref.Name)
