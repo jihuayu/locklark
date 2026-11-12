@@ -729,10 +729,12 @@ def recover_window_tree(scan, errors, diagnostic_codes, root, deadline,
     either live list is non-empty the call fails closed with the fixed
     `RuntimeError(WINDOW_QUERY_REFUSED)` and leaves both lists untouched,
     before `scan()` is called at all. A restart is made only when the scan
-    raised the exact `RuntimeError(WINDOW_QUERY_REFUSED)` or completed, and the
-    records it left prove `transient_window_race()`; every one of its results
-    is then discarded, and only here and after the deadline and budget are
-    confirmed are its records and diagnostic codes cleared before the walk
+    raised the exact built-in `RuntimeError` type with exactly the
+    `(WINDOW_QUERY_REFUSED,)` arguments or completed, and the records it left
+    prove `transient_window_race()`; a `RuntimeError` subclass is re-raised
+    unchanged even with the same text and the same proof. Every one of its
+    results is then discarded, and only here and after the deadline and budget
+    are confirmed are its records and diagnostic codes cleared before the walk
     restarts from the root. A clean, complete scan must leave both lists empty
     and returns its full matches. Any other failure is re-raised unchanged; a
     scan with errors that are not transient, or a completed scan with any
@@ -755,7 +757,10 @@ def recover_window_tree(scan, errors, diagnostic_codes, root, deadline,
         try:
             found = scan()
         except RuntimeError as error:
-            if error.args != (WINDOW_QUERY_REFUSED,):
+            # Only the exact built-in refusal is retryable; a subclass with
+            # the same arguments is never inspected or retried.
+            if type(error) is not RuntimeError or \
+                    error.args != (WINDOW_QUERY_REFUSED,):
                 raise
             refused = True
         else:

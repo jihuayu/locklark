@@ -2360,6 +2360,36 @@ class WindowTreeRaceTests(unittest.TestCase):
                 self.fail("the unrelated failure was swallowed")
             self.assertEqual(len(started), 1)
 
+    def test_runtime_error_subclass_is_never_retried_with_the_race_proof(self):
+        # A subclass whose arguments are exactly the refusal text, raised
+        # after a live (3, non-root) record, looks retryable by arguments
+        # alone: only the exact built-in RuntimeError type may be retried.
+        class Refusal(RuntimeError):
+            pass
+
+        original = Refusal("X window query refused")
+        self.assertIs(type(original), Refusal)
+        self.assertEqual(original.args, ("X window query refused",))
+        errors, codes, started = [], [], []
+
+        def scan():
+            started.append(1)
+            # The live handler shape appends, then the query refuses.
+            errors.append((3, 78))
+            codes.append(3)
+            raise original
+        with patch.object(native.time, "monotonic", return_value=0):
+            try:
+                native.recover_window_tree(scan, errors, codes, self.ROOT,
+                                           float("inf"))
+            except RuntimeError as error:
+                self.assertIs(error, original)
+            else:
+                self.fail("the subclass refusal was swallowed")
+        self.assertEqual(len(started), 1)
+        # The unproven evidence and its diagnostic codes are untouched.
+        self.assertEqual((errors, codes), ([(3, 78)], [3]))
+
     def test_malformed_recovery_arguments_fail_closed(self):
         scan = Mock(return_value=[91])
         for errors, codes, root in (((), [], self.ROOT), ([], None, self.ROOT),
