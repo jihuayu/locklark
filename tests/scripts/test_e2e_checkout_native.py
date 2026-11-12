@@ -810,6 +810,21 @@ class CheckoutNativeAcceptanceTests(unittest.TestCase):
         record, _ = self._nonzero(
             diagnostic(frames=[f"{names[0]}:1:1"] * 16))
         self.assertEqual(len(record["sourceFrames"]), 16)
+        # Exact line bound: 100000 is accepted, 100001 is over the limit.
+        record, _ = self._nonzero(
+            diagnostic(frames=[f"{names[0]}:100000:1"]))
+        self.assertEqual(
+            record["sourceFrames"],
+            [{"file": names[0], "line": 100000, "column": 1}],
+        )
+        record, _ = self._nonzero(
+            diagnostic(frames=[f"{names[0]}:100001:1"]))
+        self.assertEqual(
+            record,
+            {"stage": "unclassified", "kind": "unclassified", "native": None,
+             "exit": "exited 7", "startupPhase": "unknown",
+             "failureRecordState": "rejected", "wrapperFamily": "unknown"},
+        )
 
     def test_fixed_diagnostic_is_read_on_either_captured_stream(self):
         prefix = support._CHECKOUT_STARTUP_PREFIX

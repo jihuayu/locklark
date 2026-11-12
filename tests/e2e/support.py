@@ -3061,7 +3061,7 @@ def _checkout_source_frames(value: Any) -> list[dict[str, Any]] | None:
         if match is None:
             return None
         line, column = _checkout_bounded(
-            int(entry.rsplit(":", 2)[1]), 1, 999999
+            int(entry.rsplit(":", 2)[1]), 1, 100000
         ), _checkout_bounded(int(entry.rsplit(":", 2)[2]), 1, 65535)
         if line is None or column is None:
             return None
