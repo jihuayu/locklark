@@ -525,8 +525,11 @@ const ROUTE_COPY_FIELD_SELECTOR =
 // leave either page: never title, value, text, URL, token, count, target or
 // tab id, which stay in this closure.
 const ROUTE_REVOKE_STATUS_KINDS = Object.freeze(["route-revoked", "claim-failed"]);
-// The route's own tab switch and return; each is one real XTest key batch sent
-// with the exact-title-prefix form (never the native-window form).
+// The route's own tab switch, return and reload; each is one real XTest key
+// batch sent with the exact-title-prefix form (never the native-window form)
+// and addressed to the title of the tab that is ACTIVE when the key is sent:
+// the route tab ("Locklark") for the switch away and the reload, the source tab
+// for the return.
 const ROUTE_SWITCH_SOURCE = Object.freeze([{ key: "Control_L+Shift_L+Tab" }]);
 const ROUTE_RETURN = Object.freeze([{ key: "Control_L+Tab" }]);
 const ROUTE_RELOAD = Object.freeze([{ key: "Control_L+r" }]);
@@ -1507,10 +1510,11 @@ try {
     // diagnostics; no page or worker hook is added.
     let stale = null;
     try {
-      // The route page is still the active tab. Exactly one XTest key batch,
-      // addressed to the Chromium window by the source tab's exact title
-      // prefix and executable, switches to the original source tab. Nothing is
-      // messaged to the worker, navigated via CDP or injected.
+      // The route page is still the active tab, so the active window is titled
+      // exactly "Locklark". Exactly one XTest key batch, addressed to the
+      // Chromium window by the ACTIVE route tab's exact title prefix and
+      // executable, switches to the original source tab. Nothing is messaged
+      // to the worker, navigated via CDP or injected.
       mark("route:switch-source");
       assert.equal(
         await route.evaluate(
@@ -1519,7 +1523,7 @@ try {
         true,
         "Route tab is not the active tab",
       );
-      browserKey(ROUTE_SWITCH_SOURCE, SOURCE_TITLE_PREFIX);
+      browserKey(ROUTE_SWITCH_SOURCE, ROUTE_TITLE_PREFIX);
       // The source tab became visible and focused again.
       await wait(
         async () =>
@@ -1532,17 +1536,20 @@ try {
       // revocation reaches its lifecycle port. Only booleans are read.
       await wait(async () => {
         try {
-          return routeWiped(await route.evaluate(ROUTE_SWITCH_PROBE));
+          return routeWiped(
+            await route.evaluate(routeRevokedProbe(fixture.Title, fixture.Value)),
+          );
         } catch (error) {
           if (popupClosed(error)) throw Error("Route page was replaced");
           throw error;
         }
       }, "Background revocation did not wipe the route detail");
       recordRouteLifecycle("route-revoked");
-      // Back to that same route tab by one physical Control_L+Tab, this time
-      // addressed by the route page's own title prefix.
+      // Back to that same route tab by one physical Control_L+Tab. The source
+      // tab is now the active one, so the key is addressed by the source
+      // page's own title prefix.
       mark("route:return");
-      browserKey(ROUTE_RETURN, ROUTE_TITLE_PREFIX);
+      browserKey(ROUTE_RETURN, SOURCE_TITLE_PREFIX);
       await wait(
         async () =>
           (await route.evaluate(
@@ -1551,7 +1558,7 @@ try {
         "Route page did not return to the foreground",
       );
       await wait(async () => {
-        const returned = await route.evaluate(routeSwitchProbe());
+        const returned = await route.evaluate(ROUTE_SWITCH_PROBE);
         return returned?.visible === true && routeWiped(returned);
       }, "Returned route page kept its detail");
       // The captured route target still exists and is still this one route

@@ -2166,25 +2166,43 @@ test("route revocation checkpoint switches, wipes, reloads and never prompts", (
     assert.ok(index >= 0, "checkpoint is missing " + needle);
     return index;
   };
-  // 1. One physical Control_L+Shift_L+Tab addressed by the source tab's title.
-  const switchKey = at("browserKey(ROUTE_SWITCH_SOURCE, SOURCE_TITLE_PREFIX);");
+  // 1. One physical Control_L+Shift_L+Tab. The route tab is active when it is
+  //    sent, so it is addressed by the active route page's title prefix.
+  const switchKey = at("browserKey(ROUTE_SWITCH_SOURCE, ROUTE_TITLE_PREFIX);");
   const sourceVisible = at("Source tab did not become visible");
-  const hiddenWait = at("routeWiped(await route.evaluate(ROUTE_SWITCH_PROBE))");
-  const returnKey = at("browserKey(ROUTE_RETURN, ROUTE_TITLE_PREFIX);");
+  const hiddenWait = checkpoint.indexOf("routeWiped(", sourceVisible);
+  const returnKey = at("browserKey(ROUTE_RETURN, SOURCE_TITLE_PREFIX);");
   assert.ok(switchKey < sourceVisible && sourceVisible < hiddenWait && hiddenWait < returnKey);
   assert.match(source, /^const ROUTE_SWITCH_SOURCE = Object\.freeze\(\[\{ key: "Control_L\+Shift_L\+Tab" \}\]\);$/m);
   assert.match(source, /^const ROUTE_RETURN = Object\.freeze\(\[\{ key: "Control_L\+Tab" \}\]\);$/m);
   assert.match(source, /^const ROUTE_RELOAD = Object\.freeze\(\[\{ key: "Control_L\+r" \}\]\);$/m);
   // The hidden route page loses its detail on its own before the return, by
   // host-side polling of the fixed read-only DOM probe.
+  assert.match(
+    checkpoint.slice(hiddenWait, returnKey),
+    /^routeWiped\(\n\s+await route\.evaluate\(routeRevokedProbe\(fixture\.Title, fixture\.Value\)\),\n\s+\);/,
+  );
   assert.match(checkpoint, /Background revocation did not wipe the route detail/);
   assert.ok(at('recordRouteLifecycle("route-revoked")') > hiddenWait);
   assert.doesNotMatch(checkpoint, /MutationObserver|ROUTE_HIDDEN_PROBE|routeHiddenProbe/);
-  // 2. The return proves the foreground and the same target, still wiped.
+  // 2. The return proves the foreground and the same target, still wiped. The
+  //    source tab is active when it is sent, so it is addressed by the source
+  //    page's title prefix; the returned-route wait uses the defined probe.
   assert.ok(at("Route page did not return to the foreground") > returnKey);
   const sameTarget = at('1, "Route target was replaced");');
   assert.ok(sameTarget > returnKey);
-  assert.ok(at("await route.evaluate(routeSwitchProbe())") > returnKey);
+  const returnedWait = at("await route.evaluate(ROUTE_SWITCH_PROBE)");
+  assert.ok(returnedWait > returnKey);
+  assert.match(
+    checkpoint.slice(returnedWait),
+    /^await route\.evaluate\(ROUTE_SWITCH_PROBE\);\n\s+return returned\?\.visible === true && routeWiped\(returned\);/,
+  );
+  // No undefined probe name survives in the checkpoint or in the harness.
+  assert.doesNotMatch(checkpoint, /routeSwitchProbe/);
+  assert.doesNotMatch(source, /routeSwitchProbe\b/);
+  // ROUTE_SWITCH_PROBE is a defined fixed DOM expression, not a page hook.
+  assert.match(source, /^const ROUTE_SWITCH_PROBE = ROUTE_PAGE_STATE;$/m);
+  assert.match(source, /^const ROUTE_PAGE_STATE = `\(\(\)=>\{$/m);
   assert.match(checkpoint, /Returned route page kept its detail/);
   // 3. One real XTest Control_L+r to the route tab, only after the captured
   //    target is proven still to be this route page and the route tab is
@@ -2207,8 +2225,11 @@ test("route revocation checkpoint switches, wipes, reloads and never prompts", (
     /route\.evaluate/,
     "the reload target checks stay read-only target lookups",
   );
-  const failClosed = at("routeRevokedProbe(fixture.Title, fixture.Value)");
-  assert.ok(failClosed > reload);
+  const failClosed = checkpoint.indexOf(
+    "routeRevokedProbe(fixture.Title, fixture.Value)",
+    reload,
+  );
+  assert.ok(failClosed > reload, "the stale fragment is probed after the reload");
   assert.match(checkpoint, /Stale route fragment did not fail closed/);
   // The fail-closed DOM probe is read both while waiting and, after the
   // bounded no-prompt observation, right before the Copy assertion; that
@@ -2216,6 +2237,7 @@ test("route revocation checkpoint switches, wipes, reloads and never prompts", (
   const lastWipedProbe = checkpoint.lastIndexOf(
     "routeRevokedProbe(fixture.Title, fixture.Value)",
   );
+  assert.ok(lastWipedProbe > failClosed);
   assert.ok(lastWipedProbe > failClosed);
   const failClosedCopy = checkpoint.indexOf(
     '0,\n        "Stale route page rendered a copy control",',
@@ -2253,18 +2275,30 @@ test("route revocation checkpoint switches, wipes, reloads and never prompts", (
     source.slice(source.indexOf("function input("), source.indexOf("nativeInput = input;")),
     /assert\(native !== false, "Native window input only"\);/,
   );
-  // Route-tab keys use exactly "Locklark"; source-tab keys use the acceptance
-  // title. Every call is a single fixed action array.
+  // Each key is addressed to the title of the tab that is ACTIVE when it is
+  // sent: the active route page ("Locklark") for the switch away and the
+  // Control_L+r reload, the source page for the return and the popup Escape /
+  // open keys. Every call is a single fixed action array, exactly once.
   for (const [key, prefix] of [
-    ["ROUTE_SWITCH_SOURCE", "SOURCE_TITLE_PREFIX"],
-    ["ROUTE_RETURN", "ROUTE_TITLE_PREFIX"],
+    ["ROUTE_SWITCH_SOURCE", "ROUTE_TITLE_PREFIX"],
+    ["ROUTE_RETURN", "SOURCE_TITLE_PREFIX"],
     ["ROUTE_RELOAD", "ROUTE_TITLE_PREFIX"],
     ['[{ key: "Escape" }]', "SOURCE_TITLE_PREFIX"],
     ['[{ key: "Control_L+Shift_L+y" }]', "SOURCE_TITLE_PREFIX"],
   ]) {
-    const call = "browserKey(" + key + ", " + prefix + ");";
-    assert.equal(countMatches(source, new RegExp(call.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g")), 1, call);
+    const literal = "browserKey(" + key + ", " + prefix + ");";
+    const call = new RegExp(literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g");
+    assert.equal(countMatches(source, call), 1, literal);
   }
+  const browserCalls = [...source.matchAll(/browserKey\((\[[^\n]*?\]|ROUTE_\w+), (\w+)\);/g)]
+    .map((match) => match[1] + " -> " + match[2]);
+  assert.deepEqual(browserCalls.sort((a, b) => a.localeCompare(b)), [
+    "[{ key: \"Control_L+Shift_L+y\" }] -> SOURCE_TITLE_PREFIX",
+    "[{ key: \"Escape\" }] -> SOURCE_TITLE_PREFIX",
+    "ROUTE_RELOAD -> ROUTE_TITLE_PREFIX",
+    "ROUTE_RETURN -> SOURCE_TITLE_PREFIX",
+    "ROUTE_SWITCH_SOURCE -> ROUTE_TITLE_PREFIX",
+  ]);
   assert.doesNotMatch(checkpoint, /input\(/);
   // 5. The native no-prompt check is a real, exact-title read-only inspection
   //    of the native window: inspect + preserve_focus, no actions, and it

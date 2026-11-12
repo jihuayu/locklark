@@ -261,11 +261,18 @@ def parse_request(raw):
     plan["actions"] = tuple(_action(index, value) for index, value in enumerate(actions))
     if plan["wait_absent"]:
         if (set(document) - ABSENCE_KEYS or plan["title"] is None or
-                plan["executable"] is None or plan["actions"] or plan["inspect"]):
+                plan["executable"] is None or plan["actions"] or plan["inspect"] or
+                plan["preserve_focus"]):
             raise ContractError("absence-invalid")
     elif plan["preserve_focus"] and plan["inspect"]:
-        # One request describes one focus mode: raising inspect or preserving it.
-        raise ContractError("request-invalid", {"field": "inspect"})
+        # Exactly one read-only form preserves focus: an exact-title,
+        # absolute-executable snapshot with no title prefix and no action.
+        # Nothing is raised, focused or clicked for it; every other
+        # preserve_focus+inspect request (a prefix, a missing title or
+        # executable, or any action) is refused.
+        if (plan["title"] is None or plan["executable"] is None or
+                "title_prefix" in document or plan["actions"]):
+            raise ContractError("request-invalid", {"field": "inspect"})
     return plan
 
 # --------------------------------------------------------------- observation --

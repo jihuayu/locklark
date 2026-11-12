@@ -153,15 +153,73 @@ class RequestValidationTests(unittest.TestCase):
         plain = contract.parse_request(request(inspect=True))
         self.assertTrue(plain["inspect"])
         self.assertFalse(plain["preserve_focus"])
-        # The two focus modes can never describe one request.
-        for document in ({"title": TITLE, "inspect": True, "preserve_focus": True},
-                         {"title_prefix": "Locklark", "actions": [{"click_label": LABEL}],
-                          "inspect": True, "preserve_focus": True}):
-            with self.subTest(document=str(sorted(document))):
+        # A prefix, a missing title or executable, or any action is never the
+        # read-only form. The refusal stays the fixed request-invalid guard.
+        no_prompt = {"title": TITLE, "executable": EXE, "actions": [],
+                     "inspect": True, "preserve_focus": True}
+        for change in ({"title": None, "title_prefix": "Locklark"},
+                       {"title": None},
+                       {"executable": None},
+                       {"executable": "relative/browser"},
+                       {"actions": [{"click_label": LABEL}]},
+                       {"actions": [{"wait_label": LABEL}]},
+                       {"actions": [{"key": "Escape"}]},
+                       {"actions": [{"click": [10, 20]}]},
+                       {"wait_absent": True}):
+            document = {key: value for key, value in {**no_prompt, **change}.items()
+                        if value is not None}
+            with self.subTest(change=str(sorted(change))):
                 with self.assertRaises(contract.ContractError) as error:
                     contract.parse_request(json.dumps(document))
-                self.assertEqual(error.exception.code, "request-invalid")
-                self.assertEqual(error.exception.guard, {"field": "inspect"})
+                self.assertIn(error.exception.code, ("request-invalid", "absence-invalid",
+                                                     "title-invalid", "executable-invalid"))
+                if error.exception.code == "request-invalid":
+                    self.assertEqual(error.exception.guard, {"field": "inspect"})
+
+    def test_exact_title_preserve_focus_inspection_parses_read_only(self):
+        # The route no-prompt check sends exactly this document and reads
+        # result["controls"]; it must parse AND snapshot without naming any
+        # absent-window mode.
+        document = {"title": TITLE, "executable": EXE, "actions": [],
+                    "inspect": True, "preserve_focus": True}
+        plan = contract.parse_request(json.dumps(document))
+        self.assertEqual(plan["title"], TITLE)
+        self.assertIsNone(plan["title_prefix"])
+        self.assertEqual(plan["executable"], EXE)
+        self.assertEqual(plan["actions"], ())
+        self.assertTrue(plan["inspect"])
+        self.assertTrue(plan["preserve_focus"])
+        self.assertFalse(plan["wait_absent"])
+        adapter = SpyAdapter(controls=[control(LABEL)])
+        with patch.object(contract, "monotonic",
+                          side_effect=[0, 0, 0, contract.DISCOVER_TIMEOUT + 1]), \
+                patch.object(contract, "sleep"):
+            result = contract.execute(contract.parse_request(json.dumps(document)), adapter)
+        self.assertNotIn("absent", result)
+        self.assertEqual(result["controls"][LABEL],
+                         {"present": True, "enabled": True, "showing": True})
+        self.assertNotIn("title", result)
+        # It stays a read-only snapshot: no activation and no physical input.
+        self.assertEqual(adapter.activations, 0)
+        self.assertEqual([call for call in adapter.calls if isinstance(call, tuple)], [])
+
+    def test_focus_preserving_inspection_never_absorbs_a_missing_or_ambiguous_window(self):
+        document = {"title": TITLE, "executable": EXE, "actions": [],
+                    "inspect": True, "preserve_focus": True}
+        plan = contract.parse_request(json.dumps(document))
+        for windows, code in (([], "window-timeout"),
+                              ([dict(WINDOW), dict(WINDOW, id=0x200004)], "window-ambiguous"),
+                              ([dict(WINDOW, visible=False)], "window-hidden")):
+            with self.subTest(code=code):
+                adapter = SpyAdapter(windows=windows)
+                with patch.object(contract, "monotonic",
+                                  side_effect=[0, 0, 0, contract.DISCOVER_TIMEOUT + 1]), \
+                        patch.object(contract, "sleep"):
+                    with self.assertRaises(contract.ContractError) as error:
+                        contract.execute(plan, adapter)
+                self.assertEqual(error.exception.code, code)
+                self.assertEqual(adapter.activations, 0)
+                self.assertEqual([call for call in adapter.calls if isinstance(call, tuple)], [])
 
     def test_unknown_request_and_action_keys_rejected(self):
         for document in ({"title": TITLE, "value": PRIVATE},
