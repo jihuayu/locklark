@@ -67,7 +67,9 @@ func mergeCandidateDocument(id, title, body string) vault.Item {
 }
 
 // mergeCandidateSeal builds one real signed file under the caller's policy pin.
-func mergeCandidateSeal(t *testing.T, pin *vaultfile.PolicyCheckpoint, policy *vaultfile.Policy, epoch, seq uint64, opID string, prev []byte, items []vault.Item) []byte {
+// The caller supplies the test VUK explicitly so B, L and R in one epoch can
+// share the protocol's single per-vault, per-epoch key.
+func mergeCandidateSeal(t *testing.T, pin *vaultfile.PolicyCheckpoint, policy *vaultfile.Policy, epoch, seq uint64, opID string, prev, vuk []byte, items []vault.Item) []byte {
 	t.Helper()
 	doc, err := vaultfile.EncodePolicyDocument(policy)
 	if err != nil {
@@ -100,13 +102,20 @@ func mergeCandidateSeal(t *testing.T, pin *vaultfile.PolicyCheckpoint, policy *v
 	}
 	defer releaseDatabase(db)
 	_, _, signingKey := fixtureInputs(t)
-	vuk := makeVUK(t)
-	defer clear(vuk)
 	encoded, err := vaultfile.SealAuthenticatedFile(draft, db, pin, vuk, signingKey)
 	if err != nil {
 		t.Fatalf("SealAuthenticatedFile: %v", err)
 	}
 	return encoded
+}
+
+// mergeCandidateTestVUK returns one real test VUK shared by the files of one
+// vault/key epoch and registers clearing it at test cleanup.
+func mergeCandidateTestVUK(t *testing.T) []byte {
+	t.Helper()
+	vuk := makeVUK(t)
+	t.Cleanup(func() { clear(vuk) })
+	return vuk
 }
 
 // mergeCandidateAlternatePolicy returns a structurally valid policy with the
@@ -304,6 +313,7 @@ func mergeCandidateAssertNoPlaintext(t *testing.T, err error) {
 func TestBuildMergeCandidateMergesIndependentEdits(t *testing.T) {
 	f := newFixture(t)
 	policy, _, _ := fixtureInputs(t)
+	vuk := mergeCandidateTestVUK(t)
 
 	baseItems := []vault.Item{
 		mergeCandidateLogin("item-a", "A base"),
@@ -320,9 +330,9 @@ func TestBuildMergeCandidateMergesIndependentEdits(t *testing.T) {
 		mergeCandidateLogin("item-remote", "Remote only"),
 	}
 
-	base := mergeCandidateSeal(t, f.pin, policy, 1, 2, "op-base-0002", mergeCandidatePrevious(2), baseItems)
-	local := mergeCandidateSeal(t, f.pin, policy, 1, 3, "op-local-0003", mergeCandidatePrevious(3), localItems)
-	remote := mergeCandidateSeal(t, f.pin, policy, 1, 4, "op-remote-0004", mergeCandidatePrevious(4), remoteItems)
+	base := mergeCandidateSeal(t, f.pin, policy, 1, 2, "op-base-0002", mergeCandidatePrevious(2), vuk, baseItems)
+	local := mergeCandidateSeal(t, f.pin, policy, 1, 3, "op-local-0003", mergeCandidatePrevious(3), vuk, localItems)
+	remote := mergeCandidateSeal(t, f.pin, policy, 1, 4, "op-remote-0004", mergeCandidatePrevious(4), vuk, remoteItems)
 	backendBefore := mergeCandidateUseRemote(t, f, remote)
 
 	j, state := mergeCandidateJournalWithState(t, f, base, local, 1)
@@ -355,7 +365,7 @@ func TestBuildMergeCandidateMergesIndependentEdits(t *testing.T) {
 	if candidate.sourceBinding != mergeCandidateSourceBinding(state) {
 		t.Fatal("source binding does not match the exact observed journal state")
 	}
-	if candidate.resultBinding != mergeCandidateResultBinding(candidate.RemoteBytes, candidate.MergedBytes, candidate.RemoteRevision, candidate.ExpectedGeneration) {
+	if candidate.resultBinding != mergeCandidateResultBinding(candidate.sourceBinding, candidate.RemoteBytes, candidate.MergedBytes, candidate.RemoteRevision, candidate.ExpectedGeneration) {
 		t.Fatal("result binding does not match the returned outputs")
 	}
 
@@ -425,6 +435,7 @@ func TestBuildMergeCandidateMergesIndependentEdits(t *testing.T) {
 func TestBuildMergeCandidateConflicts(t *testing.T) {
 	f := newFixture(t)
 	policy, _, _ := fixtureInputs(t)
+	vuk := mergeCandidateTestVUK(t)
 
 	baseItems := []vault.Item{
 		mergeCandidateLogin("item-conflict", "Conflict base"),
@@ -443,9 +454,9 @@ func TestBuildMergeCandidateConflicts(t *testing.T) {
 		mergeCandidateLogin("item-clean", "Clean base"),
 	}
 
-	base := mergeCandidateSeal(t, f.pin, policy, 1, 2, "op-base-0002", mergeCandidatePrevious(2), baseItems)
-	local := mergeCandidateSeal(t, f.pin, policy, 1, 3, "op-local-0003", mergeCandidatePrevious(3), localItems)
-	remote := mergeCandidateSeal(t, f.pin, policy, 1, 4, "op-remote-0004", mergeCandidatePrevious(4), remoteItems)
+	base := mergeCandidateSeal(t, f.pin, policy, 1, 2, "op-base-0002", mergeCandidatePrevious(2), vuk, baseItems)
+	local := mergeCandidateSeal(t, f.pin, policy, 1, 3, "op-local-0003", mergeCandidatePrevious(3), vuk, localItems)
+	remote := mergeCandidateSeal(t, f.pin, policy, 1, 4, "op-remote-0004", mergeCandidatePrevious(4), vuk, remoteItems)
 	backendBefore := mergeCandidateUseRemote(t, f, remote)
 
 	j, state := mergeCandidateJournalWithState(t, f, base, local, 1)
@@ -465,7 +476,7 @@ func TestBuildMergeCandidateConflicts(t *testing.T) {
 	if candidate.RemoteRevision != backendBefore.Revision || !bytes.Equal(candidate.RemoteBytes, backendBefore.Bytes) {
 		t.Fatal("conflict result did not preserve the exact read pair")
 	}
-	if candidate.resultBinding != mergeCandidateResultBinding(candidate.RemoteBytes, nil, candidate.RemoteRevision, candidate.ExpectedGeneration) {
+	if candidate.resultBinding != mergeCandidateResultBinding(candidate.sourceBinding, candidate.RemoteBytes, nil, candidate.RemoteRevision, candidate.ExpectedGeneration) {
 		t.Fatal("conflict result binding does not match the returned outputs")
 	}
 	mergeCandidateAssertJournalUnchanged(t, j, journalBefore)
@@ -590,9 +601,11 @@ func TestBuildMergeCandidateRejectsAuthenticationChanges(t *testing.T) {
 	t.Run("cross epoch", func(t *testing.T) {
 		f := newFixture(t)
 		policy, _, _ := fixtureInputs(t)
-		base := mergeCandidateSeal(t, f.pin, policy, 1, 2, "op-base-0002", mergeCandidatePrevious(2), baseItems)
-		local := mergeCandidateSeal(t, f.pin, policy, 1, 3, "op-local-0003", mergeCandidatePrevious(3), localItems)
-		remote := mergeCandidateSeal(t, f.pin, policy, 2, 4, "op-remote-0004", mergeCandidatePrevious(4), remoteItems)
+		vuk := mergeCandidateTestVUK(t)
+		base := mergeCandidateSeal(t, f.pin, policy, 1, 2, "op-base-0002", mergeCandidatePrevious(2), vuk, baseItems)
+		local := mergeCandidateSeal(t, f.pin, policy, 1, 3, "op-local-0003", mergeCandidatePrevious(3), vuk, localItems)
+		vuk2 := mergeCandidateTestVUK(t)
+		remote := mergeCandidateSeal(t, f.pin, policy, 2, 4, "op-remote-0004", mergeCandidatePrevious(4), vuk2, remoteItems)
 		backendBefore := mergeCandidateUseRemote(t, f, remote)
 		j, state := mergeCandidateJournalWithState(t, f, base, local, 1)
 		mergeCandidateSavePending(t, j, state)
@@ -611,11 +624,12 @@ func TestBuildMergeCandidateRejectsAuthenticationChanges(t *testing.T) {
 	t.Run("caller pin policy change", func(t *testing.T) {
 		f := newFixture(t)
 		policy, _, _ := fixtureInputs(t)
+		vuk := mergeCandidateTestVUK(t)
 		alternate := mergeCandidateAlternatePolicy(t, policy)
 		alternatePin := fixturePin(t, alternate)
-		base := mergeCandidateSeal(t, alternatePin, alternate, 1, 2, "op-base-0002", mergeCandidatePrevious(2), baseItems)
-		local := mergeCandidateSeal(t, alternatePin, alternate, 1, 3, "op-local-0003", mergeCandidatePrevious(3), localItems)
-		remote := mergeCandidateSeal(t, alternatePin, alternate, 1, 4, "op-remote-0004", mergeCandidatePrevious(4), remoteItems)
+		base := mergeCandidateSeal(t, alternatePin, alternate, 1, 2, "op-base-0002", mergeCandidatePrevious(2), vuk, baseItems)
+		local := mergeCandidateSeal(t, alternatePin, alternate, 1, 3, "op-local-0003", mergeCandidatePrevious(3), vuk, localItems)
+		remote := mergeCandidateSeal(t, alternatePin, alternate, 1, 4, "op-remote-0004", mergeCandidatePrevious(4), vuk, remoteItems)
 		backendBefore := mergeCandidateUseRemote(t, f, remote)
 		j, state := mergeCandidateJournalWithState(t, f, base, local, 1)
 		mergeCandidateSavePending(t, j, state)
@@ -641,15 +655,16 @@ func TestBuildMergeCandidateRejectsAuthenticationChanges(t *testing.T) {
 // accepted exact equal-sequence base and the MaxUint64 guard.
 func TestBuildMergeCandidateSequenceRules(t *testing.T) {
 	policy, _, _ := fixtureInputs(t)
+	vuk := mergeCandidateTestVUK(t)
 	baseItems := []vault.Item{mergeCandidateLogin("item-a", "A base")}
 	localItems := []vault.Item{mergeCandidateLogin("item-a", "A local")}
 	remoteItems := []vault.Item{mergeCandidateLogin("item-a", "A remote")}
 
 	t.Run("rollback rejected", func(t *testing.T) {
 		f := newFixture(t)
-		base := mergeCandidateSeal(t, f.pin, policy, 1, 5, "op-base-0005", mergeCandidatePrevious(5), baseItems)
-		local := mergeCandidateSeal(t, f.pin, policy, 1, 6, "op-local-0006", mergeCandidatePrevious(6), localItems)
-		remote := mergeCandidateSeal(t, f.pin, policy, 1, 4, "op-remote-0004", mergeCandidatePrevious(4), remoteItems)
+		base := mergeCandidateSeal(t, f.pin, policy, 1, 5, "op-base-0005", mergeCandidatePrevious(5), vuk, baseItems)
+		local := mergeCandidateSeal(t, f.pin, policy, 1, 6, "op-local-0006", mergeCandidatePrevious(6), vuk, localItems)
+		remote := mergeCandidateSeal(t, f.pin, policy, 1, 4, "op-remote-0004", mergeCandidatePrevious(4), vuk, remoteItems)
 		backendBefore := mergeCandidateUseRemote(t, f, remote)
 		j, state := mergeCandidateJournalWithState(t, f, base, local, 1)
 		mergeCandidateSavePending(t, j, state)
@@ -666,9 +681,9 @@ func TestBuildMergeCandidateSequenceRules(t *testing.T) {
 
 	t.Run("equal sequence fork rejected", func(t *testing.T) {
 		f := newFixture(t)
-		base := mergeCandidateSeal(t, f.pin, policy, 1, 5, "op-base-0005", mergeCandidatePrevious(5), baseItems)
-		local := mergeCandidateSeal(t, f.pin, policy, 1, 6, "op-local-0006", mergeCandidatePrevious(6), localItems)
-		remote := mergeCandidateSeal(t, f.pin, policy, 1, 5, "op-remote-0005", mergeCandidatePrevious(5), remoteItems)
+		base := mergeCandidateSeal(t, f.pin, policy, 1, 5, "op-base-0005", mergeCandidatePrevious(5), vuk, baseItems)
+		local := mergeCandidateSeal(t, f.pin, policy, 1, 6, "op-local-0006", mergeCandidatePrevious(6), vuk, localItems)
+		remote := mergeCandidateSeal(t, f.pin, policy, 1, 5, "op-remote-0005", mergeCandidatePrevious(5), vuk, remoteItems)
 		backendBefore := mergeCandidateUseRemote(t, f, remote)
 		j, state := mergeCandidateJournalWithState(t, f, base, local, 1)
 		mergeCandidateSavePending(t, j, state)
@@ -685,8 +700,8 @@ func TestBuildMergeCandidateSequenceRules(t *testing.T) {
 
 	t.Run("exact equal sequence accepted", func(t *testing.T) {
 		f := newFixture(t)
-		base := mergeCandidateSeal(t, f.pin, policy, 1, 5, "op-base-0005", mergeCandidatePrevious(5), baseItems)
-		local := mergeCandidateSeal(t, f.pin, policy, 1, 7, "op-local-0007", mergeCandidatePrevious(7), localItems)
+		base := mergeCandidateSeal(t, f.pin, policy, 1, 5, "op-base-0005", mergeCandidatePrevious(5), vuk, baseItems)
+		local := mergeCandidateSeal(t, f.pin, policy, 1, 7, "op-local-0007", mergeCandidatePrevious(7), vuk, localItems)
 		backendBefore := mergeCandidateUseRemote(t, f, base)
 		j, state := mergeCandidateJournalWithState(t, f, base, local, 1)
 		mergeCandidateSavePending(t, j, state)
@@ -714,9 +729,9 @@ func TestBuildMergeCandidateSequenceRules(t *testing.T) {
 
 	t.Run("max uint64 rejected", func(t *testing.T) {
 		f := newFixture(t)
-		base := mergeCandidateSeal(t, f.pin, policy, 1, 1, "op-base-0001", mergeCandidatePrevious(1), baseItems)
-		local := mergeCandidateSeal(t, f.pin, policy, 1, 2, "op-local-0002", mergeCandidatePrevious(2), localItems)
-		remote := mergeCandidateSeal(t, f.pin, policy, 1, math.MaxUint64, "op-remote-max", mergeCandidatePrevious(math.MaxUint64), remoteItems)
+		base := mergeCandidateSeal(t, f.pin, policy, 1, 1, "op-base-0001", mergeCandidatePrevious(1), vuk, baseItems)
+		local := mergeCandidateSeal(t, f.pin, policy, 1, 2, "op-local-0002", mergeCandidatePrevious(2), vuk, localItems)
+		remote := mergeCandidateSeal(t, f.pin, policy, 1, math.MaxUint64, "op-remote-max", mergeCandidatePrevious(math.MaxUint64), vuk, remoteItems)
 		backendBefore := mergeCandidateUseRemote(t, f, remote)
 		j, state := mergeCandidateJournalWithState(t, f, base, local, 1)
 		mergeCandidateSavePending(t, j, state)
@@ -738,12 +753,13 @@ func TestBuildMergeCandidateSequenceRules(t *testing.T) {
 func TestBuildMergeCandidateCancellationAfterRead(t *testing.T) {
 	f := newFixture(t)
 	policy, _, _ := fixtureInputs(t)
+	vuk := mergeCandidateTestVUK(t)
 	baseItems := []vault.Item{mergeCandidateLogin("item-a", "A base")}
 	localItems := []vault.Item{mergeCandidateLogin("item-a", "A local")}
 	remoteItems := []vault.Item{mergeCandidateLogin("item-a", "A remote")}
-	base := mergeCandidateSeal(t, f.pin, policy, 1, 2, "op-base-0002", mergeCandidatePrevious(2), baseItems)
-	local := mergeCandidateSeal(t, f.pin, policy, 1, 3, "op-local-0003", mergeCandidatePrevious(3), localItems)
-	remote := mergeCandidateSeal(t, f.pin, policy, 1, 4, "op-remote-0004", mergeCandidatePrevious(4), remoteItems)
+	base := mergeCandidateSeal(t, f.pin, policy, 1, 2, "op-base-0002", mergeCandidatePrevious(2), vuk, baseItems)
+	local := mergeCandidateSeal(t, f.pin, policy, 1, 3, "op-local-0003", mergeCandidatePrevious(3), vuk, localItems)
+	remote := mergeCandidateSeal(t, f.pin, policy, 1, 4, "op-remote-0004", mergeCandidatePrevious(4), vuk, remoteItems)
 	backendBefore := mergeCandidateUseRemote(t, f, remote)
 	j, state := mergeCandidateJournalWithState(t, f, base, local, 1)
 	mergeCandidateSavePending(t, j, state)
@@ -798,28 +814,30 @@ func TestMergeCandidateBindings(t *testing.T) {
 		}
 	}
 
-	result := mergeCandidateResultBinding([]byte("remote"), []byte("merged"), "revision", 7)
+	result := mergeCandidateResultBinding(source, []byte("remote"), []byte("merged"), "revision", 7)
 	if result == ([32]byte{}) {
 		t.Fatal("result binding is zero")
 	}
-	if again := mergeCandidateResultBinding([]byte("remote"), []byte("merged"), "revision", 7); again != result {
+	if again := mergeCandidateResultBinding(source, []byte("remote"), []byte("merged"), "revision", 7); again != result {
 		t.Fatal("result binding is not deterministic")
 	}
 	type resultCase struct {
+		source     [32]byte
 		remote     []byte
 		merged     []byte
 		revision   vaultfilebackend.Revision
 		generation uint64
 	}
 	resultCases := []resultCase{
-		{remote: []byte("remote2"), merged: []byte("merged"), revision: "revision", generation: 7},
-		{remote: []byte("remote"), merged: []byte("merged2"), revision: "revision", generation: 7},
-		{remote: []byte("remote"), merged: []byte("merged"), revision: "revision2", generation: 7},
-		{remote: []byte("remote"), merged: []byte("merged"), revision: "revision", generation: 8},
-		{remote: []byte("remote"), merged: nil, revision: "revision", generation: 7},
+		{source: mergeCandidateSourceBinding(sourceCases[0]), remote: []byte("remote"), merged: []byte("merged"), revision: "revision", generation: 7},
+		{source: source, remote: []byte("remote2"), merged: []byte("merged"), revision: "revision", generation: 7},
+		{source: source, remote: []byte("remote"), merged: []byte("merged2"), revision: "revision", generation: 7},
+		{source: source, remote: []byte("remote"), merged: []byte("merged"), revision: "revision2", generation: 7},
+		{source: source, remote: []byte("remote"), merged: []byte("merged"), revision: "revision", generation: 8},
+		{source: source, remote: []byte("remote"), merged: nil, revision: "revision", generation: 7},
 	}
 	for i, changed := range resultCases {
-		got := mergeCandidateResultBinding(changed.remote, changed.merged, changed.revision, changed.generation)
+		got := mergeCandidateResultBinding(changed.source, changed.remote, changed.merged, changed.revision, changed.generation)
 		if got == result {
 			t.Fatalf("result binding did not change for case %d", i)
 		}
@@ -841,4 +859,253 @@ func fixtureInputsKey(t *testing.T) ed25519.PrivateKey {
 	t.Helper()
 	_, _, key := fixtureInputs(t)
 	return key
+}
+
+// mergeCandidateReadRecorder records the exact caller-owned slice Backend.Read
+// returns so a test can prove the builder cleared it.
+type mergeCandidateReadRecorder struct {
+	vaultfilebackend.Backend
+	returned []byte
+}
+
+func (b *mergeCandidateReadRecorder) Read(ctx context.Context, name string) (vaultfilebackend.ReadResult, error) {
+	res, err := b.Backend.Read(ctx, name)
+	b.returned = res.Bytes
+	return res, err
+}
+
+// mergeCandidateReadStub returns one exact Read pair without a real backend.
+// Its embedded nil Backend is never called for the non-Read methods.
+type mergeCandidateReadStub struct {
+	vaultfilebackend.Backend
+	result vaultfilebackend.ReadResult
+	err    error
+}
+
+func (b *mergeCandidateReadStub) Read(context.Context, string) (vaultfilebackend.ReadResult, error) {
+	return b.result, b.err
+}
+
+// TestBuildMergeCandidateClearsReadBuffer proves the exact caller-owned Read
+// buffer is cleared on success and on every early rejection, including a
+// partial result returned with an error, while the output keeps its own copy.
+func TestBuildMergeCandidateClearsReadBuffer(t *testing.T) {
+	f := newFixture(t)
+	policy, _, _ := fixtureInputs(t)
+	t.Run("success clears read buffer and keeps owned copy", func(t *testing.T) {
+		vuk := mergeCandidateTestVUK(t)
+		baseItems := []vault.Item{mergeCandidateLogin("item-a", "A base")}
+		localItems := []vault.Item{mergeCandidateLogin("item-a", "A local")}
+		remoteItems := []vault.Item{mergeCandidateLogin("item-a", "A local")}
+
+		base := mergeCandidateSeal(t, f.pin, policy, 1, 2, "op-base-0002", mergeCandidatePrevious(2), vuk, baseItems)
+		local := mergeCandidateSeal(t, f.pin, policy, 1, 3, "op-local-0003", mergeCandidatePrevious(3), vuk, localItems)
+		remote := mergeCandidateSeal(t, f.pin, policy, 1, 4, "op-remote-0004", mergeCandidatePrevious(4), vuk, remoteItems)
+		backendBefore := mergeCandidateUseRemote(t, f, remote)
+		j, state := mergeCandidateJournalWithState(t, f, base, local, 1)
+		mergeCandidateSavePending(t, j, state)
+		journalBefore := mergeCandidateSnapshotJournal(t, j)
+
+		recorder := &mergeCandidateReadRecorder{Backend: f.remote}
+		candidate, err := BuildMergeCandidate(context.Background(), recorder, remoteName, j, f.pin, fixtureDeviceID, f.id, fixtureInputsKey(t))
+		if err != nil {
+			t.Fatalf("BuildMergeCandidate: %v", err)
+		}
+		if len(recorder.returned) == 0 {
+			t.Fatal("test did not observe the Read result buffer")
+		}
+		if !allMergeCandidateZero(recorder.returned) {
+			t.Fatal("the caller-owned Read buffer was not cleared")
+		}
+		if len(candidate.RemoteBytes) == 0 || allMergeCandidateZero(candidate.RemoteBytes) {
+			t.Fatal("the owned output copy is empty or was cleared with the Read buffer")
+		}
+		if !bytes.Equal(candidate.RemoteBytes, backendBefore.Bytes) {
+			t.Fatal("the owned output copy is not the exact Read result")
+		}
+		mergeCandidateAssertJournalUnchanged(t, j, journalBefore)
+		mergeCandidateAssertBackendUnchanged(t, f, backendBefore)
+	})
+
+	validState := func(t *testing.T) *vaultfilejournal.Journal {
+		t.Helper()
+		j := openNewJournal(t)
+		if err := j.InitializeState(vaultfilejournal.State{
+			BaseBytes:      []byte("base"),
+			RemoteRevision: "base-revision",
+			WorkingBytes:   []byte("working"),
+		}); err != nil {
+			t.Fatalf("InitializeState: %v", err)
+		}
+		return j
+	}
+
+	cases := []struct {
+		name   string
+		result vaultfilebackend.ReadResult
+		err    error
+	}{
+		{
+			name:   "error with partial result",
+			result: vaultfilebackend.ReadResult{Bytes: []byte("partial read bytes"), Revision: "rev"},
+			err:    errors.New("synthetic read failure"),
+		},
+		{
+			name:   "oversize bytes",
+			result: vaultfilebackend.ReadResult{Bytes: make([]byte, vaultfilebackend.MaxValueSize+1), Revision: "rev"},
+		},
+		{
+			name:   "zero revision",
+			result: vaultfilebackend.ReadResult{Bytes: []byte("sealed bytes"), Revision: ""},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			j := validState(t)
+			stub := &mergeCandidateReadStub{result: tc.result, err: tc.err}
+			candidate, err := BuildMergeCandidate(context.Background(), stub, remoteName, j, f.pin, fixtureDeviceID, f.id, fixtureInputsKey(t))
+			if !errors.Is(err, ErrMergeCandidateRead) {
+				t.Fatalf("read rejection = %v, want ErrMergeCandidateRead", err)
+			}
+			if tc.err != nil && !errors.Is(err, tc.err) {
+				t.Fatalf("read rejection = %v, want the backend cause", err)
+			}
+			mergeCandidateAssertZero(t, candidate)
+			mergeCandidateAssertNoPlaintext(t, err)
+			if !allMergeCandidateZero(tc.result.Bytes) {
+				t.Fatal("the caller-owned Read buffer was not cleared on rejection")
+			}
+		})
+	}
+}
+
+// TestBuildMergeCandidateRejectsDifferentEpochVUK proves three individually
+// authentic same-policy, same-epoch files are rejected when they do not share
+// the protocol's one VUK for that epoch.
+func TestBuildMergeCandidateRejectsDifferentEpochVUK(t *testing.T) {
+	f := newFixture(t)
+	policy, _, _ := fixtureInputs(t)
+	vuk1 := mergeCandidateTestVUK(t)
+	vuk2 := mergeCandidateTestVUK(t)
+	baseItems := []vault.Item{mergeCandidateLogin("item-a", "A base")}
+	localItems := []vault.Item{mergeCandidateLogin("item-a", "A local")}
+	remoteItems := []vault.Item{mergeCandidateLogin("item-a", "A remote")}
+
+	base := mergeCandidateSeal(t, f.pin, policy, 1, 2, "op-base-0002", mergeCandidatePrevious(2), vuk1, baseItems)
+	local := mergeCandidateSeal(t, f.pin, policy, 1, 3, "op-local-0003", mergeCandidatePrevious(3), vuk1, localItems)
+	remote := mergeCandidateSeal(t, f.pin, policy, 1, 4, "op-remote-0004", mergeCandidatePrevious(4), vuk2, remoteItems)
+	backendBefore := mergeCandidateUseRemote(t, f, remote)
+	j, state := mergeCandidateJournalWithState(t, f, base, local, 1)
+	mergeCandidateSavePending(t, j, state)
+	journalBefore := mergeCandidateSnapshotJournal(t, j)
+
+	candidate, err := BuildMergeCandidate(context.Background(), f.remote, remoteName, j, f.pin, fixtureDeviceID, f.id, fixtureInputsKey(t))
+	if !errors.Is(err, ErrMergeCandidateVerify) {
+		t.Fatalf("different-VUK merge = %v, want ErrMergeCandidateVerify", err)
+	}
+	mergeCandidateAssertZero(t, candidate)
+	mergeCandidateAssertNoPlaintext(t, err)
+	mergeCandidateAssertJournalUnchanged(t, j, journalBefore)
+	mergeCandidateAssertBackendUnchanged(t, f, backendBefore)
+}
+
+// TestBuildMergeCandidateSourceBindingAfterAck reproduces the Ack/source race:
+// a candidate is built at a generation that Ack preserves, but Ack changes the
+// base and remote revision. The private source binding must change.
+func TestBuildMergeCandidateSourceBindingAfterAck(t *testing.T) {
+	f := newFixture(t)
+	policy, _, _ := fixtureInputs(t)
+	vuk := mergeCandidateTestVUK(t)
+	baseItems := []vault.Item{mergeCandidateLogin("item-a", "A base")}
+	l1Items := []vault.Item{mergeCandidateLogin("item-a", "A L1")}
+	l2Items := []vault.Item{mergeCandidateLogin("item-a", "A L2")}
+
+	base := mergeCandidateSeal(t, f.pin, policy, 1, 2, "op-base-0002", mergeCandidatePrevious(2), vuk, baseItems)
+	l1 := mergeCandidateSeal(t, f.pin, policy, 1, 3, "op-l1-0003", mergeCandidatePrevious(3), vuk, l1Items)
+	l2 := mergeCandidateSeal(t, f.pin, policy, 1, 4, "op-l2-0004", mergeCandidatePrevious(4), vuk, l2Items)
+	// R is the exact base, so the merge is conflict-free and the remote read is
+	// independent of the later journal Ack mutation.
+	backendBefore := mergeCandidateUseRemote(t, f, base)
+
+	j, state := mergeCandidateJournalWithState(t, f, base, l1, 1)
+	prepared := vaultfilejournal.Proposal{
+		Generation:       state.Generation + 3,
+		OperationID:      "op-ack-source",
+		ExpectedRevision: state.RemoteRevision,
+		Bytes:            bytes.Clone(l1),
+	}
+	if err := j.Prepare(state.Generation, prepared); err != nil {
+		t.Fatalf("Prepare exact L1: %v", err)
+	}
+	if err := j.UpdateWorking(state.Generation, l2); err != nil {
+		t.Fatalf("UpdateWorking L2: %v", err)
+	}
+	beforeAck, err := j.LoadState()
+	if err != nil {
+		t.Fatalf("LoadState before build: %v", err)
+	}
+	if beforeAck.Generation != state.Generation+1 {
+		t.Fatalf("generation before build = %d, want %d", beforeAck.Generation, state.Generation+1)
+	}
+	preparedBefore, err := j.LoadPrepared()
+	if err != nil {
+		t.Fatalf("LoadPrepared before build: %v", err)
+	}
+	journalBefore := mergeCandidateSnapshotJournal(t, j)
+
+	candidate, err := BuildMergeCandidate(context.Background(), f.remote, remoteName, j, f.pin, fixtureDeviceID, f.id, fixtureInputsKey(t))
+	if err != nil {
+		t.Fatalf("BuildMergeCandidate: %v", err)
+	}
+	if candidate.MergedBytes == nil || candidate.Conflicts == nil || len(candidate.Conflicts) != 0 {
+		t.Fatal("expected a clean preview candidate")
+	}
+	mergeCandidateAssertJournalUnchanged(t, j, journalBefore)
+	preparedAfterBuild, err := j.LoadPrepared()
+	if err != nil {
+		t.Fatalf("LoadPrepared after build: %v", err)
+	}
+	if !reflect.DeepEqual(preparedAfterBuild, preparedBefore) {
+		t.Fatal("the preview builder resolved or changed the pending prepared record")
+	}
+	if candidate.ExpectedGeneration != beforeAck.Generation {
+		t.Fatalf("candidate generation = %d, want %d", candidate.ExpectedGeneration, beforeAck.Generation)
+	}
+	if candidate.sourceBinding != mergeCandidateSourceBinding(beforeAck) {
+		t.Fatal("candidate source binding does not match the pre-Ack state")
+	}
+	if candidate.resultBinding != mergeCandidateResultBinding(candidate.sourceBinding, candidate.RemoteBytes, candidate.MergedBytes, candidate.RemoteRevision, candidate.ExpectedGeneration) {
+		t.Fatal("candidate result binding does not include the source binding and outputs")
+	}
+
+	if err := j.Ack("op-ack-source", l1, vaultfilebackend.Revision("revision-after-ack")); err != nil {
+		t.Fatalf("Ack L1: %v", err)
+	}
+	afterAck, err := j.LoadState()
+	if err != nil {
+		t.Fatalf("LoadState after Ack: %v", err)
+	}
+	if afterAck.Generation != beforeAck.Generation {
+		t.Fatalf("Ack changed generation from %d to %d", beforeAck.Generation, afterAck.Generation)
+	}
+	if !bytes.Equal(afterAck.WorkingBytes, l2) {
+		t.Fatal("Ack did not preserve the newer working L2")
+	}
+	if !bytes.Equal(afterAck.BaseBytes, l1) {
+		t.Fatal("Ack did not promote L1 to the base")
+	}
+	if afterAck.RemoteRevision != "revision-after-ack" {
+		t.Fatalf("Ack revision = %q, want revision-after-ack", afterAck.RemoteRevision)
+	}
+	if candidate.ExpectedGeneration != afterAck.Generation {
+		t.Fatal("test needs an unchanged generation to exercise the generation-only blind spot")
+	}
+	if candidate.sourceBinding == mergeCandidateSourceBinding(afterAck) {
+		t.Fatal("stale candidate source binding still matches the post-Ack state")
+	}
+	postAckResult := mergeCandidateResultBinding(mergeCandidateSourceBinding(afterAck), candidate.RemoteBytes, candidate.MergedBytes, candidate.RemoteRevision, candidate.ExpectedGeneration)
+	if candidate.resultBinding == postAckResult {
+		t.Fatal("combined result binding did not change when the source binding changed")
+	}
+	mergeCandidateAssertBackendUnchanged(t, f, backendBefore)
 }

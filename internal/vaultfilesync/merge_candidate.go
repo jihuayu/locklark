@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -34,10 +35,14 @@ import (
 // three files are opened with OpenAuthenticatedFile under that pin, the same
 // caller device and the same caller age identity, and their current signed
 // policy proof is compared exactly. The remote file is an untrusted transport
-// value until that open succeeds. The candidate never adopts itself; a later
-// same-package adoption/rebase step must verify the two unexported bindings
-// against the current exact journal state and candidate and must re-open the
-// candidate under its own caller pin.
+// value until that open succeeds. The candidate never adopts itself. This
+// builder is a pure preview and may run while legacy proposal, prepared
+// proposal or other pending remote-outcome records exist; it never reads,
+// mutates, resolves or consumes them. The candidate is not adoptable until a
+// later same-package RebasePrepare first resolves or rejects every such pending
+// outcome, fails closed while any pending state remains, then rechecks both
+// private bindings against the exact current journal state and candidate and
+// re-authenticates the candidate under its caller pin.
 //
 // What is merged. Only item values at the authenticated common key epoch are
 // passed to internal/vaultmerge.Merge. Policy, roles, members, metadata and file
@@ -92,7 +97,12 @@ var (
 )
 
 // MergeCandidate is one local three-way merge candidate. It is not a
-// publication, not a journal proposal and not an adopted state.
+// publication, not a journal proposal and not an adopted state. It is a preview
+// that may coexist with pending journal records but is not adoptable until a
+// later RebasePrepare has resolved or rejected every legacy/prepared/unknown
+// remote outcome, failed closed while anything is still pending, rechecked both
+// private bindings against the exact current state/candidate and re-opened the
+// candidate under its own caller pin.
 //
 // On success Conflicts is always non-nil. When it is empty, MergedBytes is
 // non-nil and carries a newly sealed candidate working file; when it is
@@ -122,14 +132,16 @@ type MergeCandidate struct {
 	Conflicts []vaultmerge.Conflict
 
 	// sourceBinding binds the exact original (BaseBytes, WorkingBytes,
-	// RemoteRevision, Generation) tuple. A later same-package adoption step must
-	// recompute it from the current journal state and reject a mismatch. The
-	// generation alone is deliberately insufficient: Ack may change BaseBytes or
-	// RemoteRevision without changing the working generation.
+	// RemoteRevision, Generation) tuple. A later same-package RebasePrepare must
+	// recompute it from the exact current journal state and reject a mismatch
+	// before adoption. The generation alone is deliberately insufficient: Ack
+	// may change BaseBytes or RemoteRevision while preserving the working
+	// generation.
 	sourceBinding [32]byte
-	// resultBinding binds the returned sealed R/M digests, the opaque revision
-	// and the observed generation so accidental mutation of an output is
-	// detectable by a later same-package verification step.
+	// resultBinding binds sourceBinding, the returned sealed R/M digests, the
+	// opaque revision and the observed generation. The source component ties the
+	// candidate to the exact journal snapshot it previewed, so a mismatched or
+	// replaced candidate is detectable even if its other fields look valid.
 	resultBinding [32]byte
 }
 
@@ -172,12 +184,16 @@ func (c *MergeCandidate) Clear() {
 // Flow. The journal state is snapshotted; an empty base, an empty working file
 // or a zero remote revision is a definite rejection. The exact source tuple is
 // bound before any remote read. The remote file is then read once, its bytes
-// copied, and B (the journal base), L (the journal working file) and R (the
-// remote read pair) are fully opened with OpenAuthenticatedFile and read with
-// vault.ReadItemDatabase. All three must authenticate under the caller pin and
-// carry the same VaultID, KeyEpoch and exact current signed policy proof
-// (canonical Document, signer, algorithm, signature, sequence and digest). R's
-// author is explicitly required to be a current writer, admin or owner.
+// copied, and the caller-owned Read result buffer cleared on every path. B (the
+// journal base), L (the journal working file) and R (the remote read pair) are
+// fully opened with OpenAuthenticatedFile and read with vault.ReadItemDatabase.
+// All three must authenticate under the caller pin and carry the same VaultID,
+// KeyEpoch and exact current signed policy proof (canonical Document, signer,
+// algorithm, signature, sequence and digest). R's author is explicitly required
+// to be a current writer, admin or owner. After that common current policy is
+// authenticated, B's, L's and R's per-epoch VUKs are recovered from their
+// authenticated policy device slots and required to compare equal in constant
+// time; three same-epoch files encrypted under different VUKs are rejected.
 //
 // Rollback protection. R.ContentSeq < B.ContentSeq is rejected. Equal sequences
 // are accepted only when vaultfile.FileDigest(R) equals vaultfile.FileDigest(B),
@@ -194,15 +210,23 @@ func (c *MergeCandidate) Clear() {
 // ContentEncoding, VaultID, KeyEpoch, current policy sequence/digest and every
 // signed policy proof are preserved; ContentSeq is exactly R+1; PrevDigest is
 // the raw 32 bytes decoded from vaultfile.FileDigest(R); OpID is a fresh
-// "op-" identifier different from R's; AuthorDeviceID is deviceID. The epoch VUK
-// is recovered from R's authenticated current-policy device slot through
-// OpenVUKForDevice; a carried DeviceSlot.Recipient is never trusted. The items
-// are sealed with vault.SealAuthenticatedItems, whose writer role and key checks
-// authorize deviceID. M is then independently reopened under the same pin,
-// device and identity with a strict ReadItemDatabase; header/policy continuity,
-// R digest linkage, R+1 sequence, operation freshness, author, preserved
-// metadata and exact canonical merged item values are all verified before the
-// candidate is returned.
+// "op-" identifier different from R's; AuthorDeviceID is deviceID. M reuses the
+// already recovered R VUK; R is never unwrapped a second time and a carried
+// DeviceSlot.Recipient is never trusted. The items are sealed with
+// vault.SealAuthenticatedItems, whose writer role and key checks authorize
+// deviceID. M is then independently reopened under the same pin, device and
+// identity with a strict ReadItemDatabase; header/policy continuity, R digest
+// linkage, R+1 sequence, operation freshness, author, preserved metadata and
+// exact canonical merged item values are all verified before the candidate is
+// returned.
+//
+// Preview and pending records. This builder performs no journal action and may
+// run while legacy proposal, prepared proposal or unknown remote-outcome records
+// exist. It neither reads nor consumes them, so their presence does not make a
+// candidate adoptable. A later same-package RebasePrepare must resolve or reject
+// every such pending outcome and fail closed while any remains, then recheck
+// both private bindings against the exact current state and candidate and
+// re-authenticate the candidate under its caller pin.
 //
 // No journal or backend mutation. This function never calls journal Load,
 // LoadPrepared, Save, Prepare, Ack or UpdateWorking, and it never writes to the
@@ -259,6 +283,10 @@ func BuildMergeCandidate(
 	sourceBinding := mergeCandidateSourceBinding(state)
 
 	read, readErr := backend.Read(ctx, name)
+	// The Read result's bytes are caller-owned by contract. Clear that owned
+	// buffer on every path, including an error with a partial result and every
+	// length/revision rejection. The candidate keeps only its own clone.
+	defer clearSlice(read.Bytes)
 	if readErr != nil {
 		return MergeCandidate{}, fmt.Errorf("%w: %w", ErrMergeCandidateRead, readErr)
 	}
@@ -348,6 +376,34 @@ func BuildMergeCandidate(
 		return MergeCandidate{}, fmt.Errorf("%w: remote author is not an authorized current writer", ErrMergeCandidateVerify)
 	}
 
+	// The wire contract has exactly one VUK per vault and key epoch. Each file
+	// authenticates its own slot, but equal headers alone do not prove the same
+	// VUK: recover all three from the authenticated current policy and require
+	// constant-time equality. The recovered keys are owned here and cleared on
+	// every path. R's key is reused for M; it is never unwrapped a second time.
+	baseVUK, vukErr := workingEpochVUK(baseFile, baseCurrent, deviceID, identity)
+	if vukErr != nil {
+		return MergeCandidate{}, fmt.Errorf("%w: %w", ErrMergeCandidateVerify, vukErr)
+	}
+	defer clear(baseVUK)
+	localVUK, vukErr := workingEpochVUK(localFile, localCurrent, deviceID, identity)
+	if vukErr != nil {
+		return MergeCandidate{}, fmt.Errorf("%w: %w", ErrMergeCandidateVerify, vukErr)
+	}
+	defer clear(localVUK)
+	remoteVUK, vukErr := workingEpochVUK(remoteFile, remoteCurrent, deviceID, identity)
+	if vukErr != nil {
+		return MergeCandidate{}, fmt.Errorf("%w: %w", ErrMergeCandidateVerify, vukErr)
+	}
+	defer clear(remoteVUK)
+	if subtle.ConstantTimeCompare(baseVUK, localVUK) != 1 ||
+		subtle.ConstantTimeCompare(baseVUK, remoteVUK) != 1 {
+		return MergeCandidate{}, fmt.Errorf("%w: B, L and R do not share one epoch VUK", ErrMergeCandidateVerify)
+	}
+	if err = mergeCandidateContextError(ctx); err != nil {
+		return MergeCandidate{}, err
+	}
+
 	baseSeq := baseFile.Header.ContentSeq
 	remoteSeq := remoteFile.Header.ContentSeq
 	if remoteSeq < baseSeq {
@@ -397,7 +453,7 @@ func BuildMergeCandidate(
 	if len(mergeResult.Conflicts) > 0 {
 		result.MergedBytes = nil
 		result.Conflicts = mergeResult.Conflicts
-		result.resultBinding = mergeCandidateResultBinding(result.RemoteBytes, nil, result.RemoteRevision, result.ExpectedGeneration)
+		result.resultBinding = mergeCandidateResultBinding(result.sourceBinding, result.RemoteBytes, nil, result.RemoteRevision, result.ExpectedGeneration)
 		if err = mergeCandidateContextError(ctx); err != nil {
 			return MergeCandidate{}, err
 		}
@@ -410,12 +466,6 @@ func BuildMergeCandidate(
 		return MergeCandidate{}, fmt.Errorf("%w: %w", ErrMergeCandidateSeal, canonicalErr)
 	}
 	defer releasePlaintext(nil, expectedItems)
-
-	vuk, vukErr := workingEpochVUK(remoteFile, remoteCurrent, deviceID, identity)
-	if vukErr != nil {
-		return MergeCandidate{}, fmt.Errorf("%w: %w", ErrMergeCandidateSeal, vukErr)
-	}
-	defer clear(vuk)
 
 	prevDigest, digestErr := workingPrevDigest(remoteFile)
 	if digestErr != nil {
@@ -433,7 +483,7 @@ func BuildMergeCandidate(
 		return MergeCandidate{}, err
 	}
 
-	sealed, sealErr := vault.SealAuthenticatedItems(draft, remoteMetadata, mergeResult.Items, checkpoint, vuk, authorPrivateKey)
+	sealed, sealErr := vault.SealAuthenticatedItems(draft, remoteMetadata, mergeResult.Items, checkpoint, remoteVUK, authorPrivateKey)
 	if sealErr != nil {
 		return MergeCandidate{}, fmt.Errorf("%w: %w", ErrMergeCandidateSeal, sealErr)
 	}
@@ -462,7 +512,7 @@ func BuildMergeCandidate(
 		return MergeCandidate{}, err
 	}
 
-	result.resultBinding = mergeCandidateResultBinding(result.RemoteBytes, result.MergedBytes, result.RemoteRevision, result.ExpectedGeneration)
+	result.resultBinding = mergeCandidateResultBinding(result.sourceBinding, result.RemoteBytes, result.MergedBytes, result.RemoteRevision, result.ExpectedGeneration)
 	if err = mergeCandidateContextError(ctx); err != nil {
 		return MergeCandidate{}, err
 	}
@@ -680,13 +730,16 @@ func mergeCandidateSourceBinding(state vaultfilejournal.State) [32]byte {
 	return out
 }
 
-// mergeCandidateResultBinding binds the sealed R and (when present) sealed M
-// digests, the opaque revision and the observed generation. A conflict result
-// binds M's absence explicitly with a presence marker rather than treating nil
-// as an empty file.
-func mergeCandidateResultBinding(remoteBytes, mergedBytes []byte, revision vaultfilebackend.Revision, generation uint64) [32]byte {
+// mergeCandidateResultBinding binds the source binding, the sealed R and (when
+// present) sealed M digests, the opaque revision and the observed generation. A
+// conflict result binds M's absence explicitly with a presence marker rather
+// than treating nil as an empty file. Including the source binding makes a
+// candidate replaced with bytes from a different exact source state detectable
+// even when its R/M bytes, revision and generation look independently valid.
+func mergeCandidateResultBinding(source [32]byte, remoteBytes, mergedBytes []byte, revision vaultfilebackend.Revision, generation uint64) [32]byte {
 	h := sha256.New()
 	_, _ = h.Write([]byte(mergeCandidateResultDomain))
+	writeMergeCandidateFrame(h, source[:])
 	writeMergeCandidateFrame(h, mergeCandidateDigest(remoteBytes))
 	if mergedBytes == nil {
 		_, _ = h.Write([]byte{0})
