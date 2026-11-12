@@ -770,6 +770,93 @@ class DeviceCredentialMainTests(unittest.TestCase):
                 self.assertNotIn("private-exception-body", output)
                 acceptance.cleanup_pin.assert_called_once()
 
+    def acceptance_stub(self, cleanup, wrote):
+        """Minimal acceptance stub; cleanup is called inside main's finally."""
+        original = {"last_ui":{"phase":"enable-prompt"}, "locksettings":{"classification":"credential-mismatch"}}
+        return SimpleNamespace(root="/tmp/private-run", source=Path("/tmp/private-run"),
+                               source_hash=self.FIXTURE_DIGEST,
+                               private_file=mock.Mock(return_value=self.FIXTURE), stage="enable-prompt",
+                               checks=["owned_emulator"], key_level="tee", setup_owned_emulator=mock.Mock(),
+                               native_auth_flow=mock.Mock(), key_policy=mock.Mock(), copy_and_reinstall=mock.Mock(),
+                               failure_metadata=mock.Mock(return_value=original),
+                               cleanup_pin=cleanup, close=mock.Mock(), scan=mock.Mock(),
+                               write_private=lambda name, value: wrote.append((name, value))), original
+
+    @staticmethod
+    def cloned_main():
+        """AST-cloned main() plus the raise reference, without inserting yet."""
+        source = Path(auth.__file__).read_text()
+        tree = ast.parse(source)
+        main_node = next(node for node in tree.body
+                         if isinstance(node, ast.FunctionDef) and node.name == "main")
+        clone_tree = ast.parse(ast.get_source_segment(source, main_node))
+        clone = clone_tree.body[0]
+        clone.name = "main_with_raise_after_success"
+        clone.decorator_list = []
+        try_node = next(node for node in clone.body if isinstance(node, ast.Try) and node.body)
+        position = next(index for index, statement in enumerate(try_node.body)
+                        if isinstance(statement, ast.Assign) and getattr(statement.targets[0], "id", None) == "success")
+        return source, tree, clone_tree, try_node, position, clone
+
+    def run_cloned_main(self, exception):
+        """Compile an AST clone of main() with one raise right after success = True.
+
+        Every other statement, the except clause and the finally block are the
+        real ones, so main's own except clause handles the fault inside the
+        main try, after the success assignment. Returns (exit, result, output, original).
+        """
+        _, _, clone_tree, try_node, position, _ = self.cloned_main()
+        # The raised instance is bound in the namespace, so the real except
+        # tuple handles it exactly as it handles a device-side fault.
+        raise_node = ast.Raise(exc=ast.Name(id="RAISE_AFTER_SUCCESS", ctx=ast.Load()), cause=None)
+        ast.copy_location(raise_node, try_node.body[position])
+        ast.fix_missing_locations(raise_node)
+        try_node.body.insert(position + 1, raise_node)
+        ast.fix_missing_locations(clone_tree)
+        # The raise is between the first try statement and the first handler,
+        # i.e. inside the guarded region, and success = True precedes it.
+        self.assertGreater(raise_node.lineno, try_node.body[0].lineno)
+        self.assertLess(raise_node.lineno, try_node.handlers[0].lineno)
+        handlers = try_node.handlers
+        self.assertTrue(any(isinstance(h.type, ast.Tuple) and
+                            {e.id for e in h.type.elts} >= {"Exception", "KeyboardInterrupt"} for h in handlers))
+        self.assertTrue(try_node.finalbody)
+        code = compile(clone_tree, "<cloned main>", "exec")
+        wrote = []
+        acceptance, original = self.acceptance_stub(mock.Mock(), wrote)
+        # Run the clone against the real module globals (require, parser,
+        # NO_PRIMARY_FAILURE, ...) with the injected exception bound here.
+        namespace = dict(vars(auth))
+        namespace["__name__"] = "cloned main"
+        namespace["RAISE_AFTER_SUCCESS"] = exception
+        # The clone resolves names in `namespace`, so patch there.
+        with mock.patch.object(sys, "argv", self.ARGS), \
+             mock.patch.dict(namespace, {"validated_evidence": mock.Mock(return_value=(acceptance.source, {}, [], self.FIXTURE_DIGEST)),
+                                         "DeviceCredentialAcceptance": mock.Mock(return_value=acceptance),
+                                         "private_file": mock.Mock(return_value=self.FIXTURE)}), \
+             mock.patch("builtins.print") as printed:
+            exec(code, namespace)
+            exit_code = namespace["main_with_raise_after_success"]()
+        acceptance.cleanup_pin.assert_called_once()
+        self.assertEqual([name for name, _ in wrote], ["result.json"])
+        output = "\n".join(" ".join(str(value) for value in call.args) for call in printed.call_args_list)
+        return exit_code, wrote[0][1], output, original, acceptance
+
+    def test_fault_inside_main_try_immediately_after_success_for_both_fault_kinds(self):
+        for exception in (AcceptanceFailure("private-exception-body"), KeyboardInterrupt()):
+            with self.subTest(exception=type(exception).__name__):
+                exit_code, result, output, original, acceptance = self.run_cloned_main(exception)
+                # A fault thrown immediately after success = True is caught by
+                # main's except clause, so the run must fail, not succeed.
+                self.assertEqual(exit_code, 1)
+                self.assertFalse(result["success"])
+                self.assertEqual(result["original_failure_stage"], "enable-prompt")
+                self.assertEqual(result["diagnostic"], original)
+                self.assertNotEqual(result["original_failure_stage"], auth.NO_PRIMARY_FAILURE)
+                self.assertEqual(self.primary_stage(output), "enable-prompt")
+                self.assertNotIn("PASS: ", output)
+                self.assertNotIn("private-exception-body", output)
+
     def test_pre_acceptance_prerequisite_failure_prints_prerequisites(self):
         code, output = self.run_pre_acceptance_failure()
         self.assertEqual(code, 1)
