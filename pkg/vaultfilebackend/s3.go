@@ -120,22 +120,35 @@ type S3Config struct {
 //
 // List returns ErrUnsupported.
 //
-// Verification status. The bridge has been verified over TLS against two
-// endpoints only: the in-process TLS S3 mock (unit tests), and one local
-// MinIO instance from the pinned official image
+// Verification status. The bridge has been exercised over TLS against the
+// in-process TLS S3 mock (unit tests) and one local instance from the pinned
+// official image
 // minio/minio@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
-// (runtime RELEASE.2025-04-22T22-12-26Z), run by the opt-in smoke test whose
-// synthetic credentials are confined to a mode-0700 temporary directory with
-// mode-0600 files. That smoke showed CreateIfAbsent refusing a duplicate
-// create (ErrConflict) and ReplaceIfVersion committing exactly one of two
+// (runtime RELEASE.2025-04-22T22-12-26Z), started by the opt-in smoke harness
+// with synthetic credentials confined to a mode-0700 temporary directory with
+// mode-0600 files.
+//
+// The narrow smoke passed on that instance: CreateIfAbsent refused a duplicate
+// create (ErrConflict), and ReplaceIfVersion committed exactly one of two
 // same-revision writers while refusing the other and a later stale write
 // (ErrConflict).
 //
-// Everything else is unverified: AWS S3, every other S3-compatible provider,
+// The full shared RunConformance suite then ran every one of its 13 subtests
+// against the same instance, with no skips: 11 passed and 2 failed.
+//   - replace_if_version: ReplaceIfVersion for a missing name sent If-Match,
+//     and the service answered 200 and created the object instead of
+//     reporting a missing key, so the call succeeded where the contract
+//     requires ErrConflict.
+//   - concurrent_same_token_single_winner: under concurrent same-token writes
+//     a request failed with status 0 and "http: server closed idle
+//     connection"; the driver correctly reported this as ErrUnknown.
+//
+// This MinIO version is therefore not qualified by full conformance, and the
+// bridge work is not complete. AWS S3, every other S3-compatible provider,
 // real cloud accounts, multi-device recovery and fault matrices, and any
-// product or account wiring. This bridge is not wired to product or account
-// code, it has not been accepted by or against any provider or account, and
-// the bridge work is not complete.
+// product or account wiring remain unverified. This is not production
+// acceptance of any provider: the bridge is not wired to product or account
+// code and has not been accepted by or against any provider or account.
 type s3Backend struct {
 	client *s3.Client
 	bucket string
