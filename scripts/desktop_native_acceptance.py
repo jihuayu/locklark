@@ -627,8 +627,10 @@ class Acceptance:
             # Both are converted with self.otp_window only for their deltas.
             sample, click = copy
             copy_window, click_window = self.otp_window(sample), self.otp_window(click)
+            # The raw value goes through the projection's exact-bool check:
+            # a missing or non-bool reply becomes "unavailable", never false.
             try:
-                empty = self.clipboard().get("empty") is True
+                empty = self.clipboard().get("empty")
             except Exception:
                 empty = None
             line = otp_diagnostic(click_window - copy_window,

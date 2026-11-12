@@ -396,6 +396,7 @@ class OtpCopyFailureProbeTests(unittest.TestCase):
         self.assertEqual((sample, Acceptance.otp_window(sample)), (120.3, 6))
         # The copy runs within the accepted window, the failure in the next.
         acceptance.otp_copy = (sample, 121.0)
+        acceptance.clipboard.return_value = {"empty": False}
         self.assertIsInstance(acceptance.otp_copy[0], float)
         with patch.object(desktop.time, "time", return_value=140.9), \
              patch("builtins.print") as output:
@@ -405,6 +406,30 @@ class OtpCopyFailureProbeTests(unittest.TestCase):
         self.assertEqual(record(acceptance.otp_diagnostic),
                          {"copy_window_delta":0, "failure_window_delta":1, "clipboard_empty":False})
         output.assert_called_once_with(acceptance.otp_diagnostic, flush=True)
+
+    def probe_empty(self, response):
+        # Real record_otp_copy_failure; only the clipboard reply is varied.
+        acceptance = self.acceptance()
+        acceptance.otp_copy = (1005 * 20 + 18.0, 1005 * 20 + 19.5)
+        acceptance.clipboard = Mock(return_value=response)
+        with patch.object(desktop.time, "time", return_value=1005 * 20 + 19.9), \
+             patch("builtins.print"):
+            acceptance.record_otp_copy_failure()
+        self.assertEqual(acceptance.clipboard.call_args_list, [call()])  # read once
+        return record(acceptance.otp_diagnostic)
+
+    def test_probe_true_and_false_are_kept(self):
+        for value in (True, False):
+            with self.subTest(empty=value):
+                self.assertEqual(self.probe_empty({"empty": value}),
+                                 {"copy_window_delta":0, "failure_window_delta":0, "clipboard_empty":value})
+
+    def test_probe_missing_empty_is_unavailable(self):
+        for response in ({}, {"present": False}, {"empty": None}, {"empty": 1}, {"empty": 0},
+                         {"empty": "true"}, {"empty": "false"}, {"empty": [True]}, {"empty": 1.0}):
+            with self.subTest(response=response):
+                self.assertEqual(self.probe_empty(response),
+                                 {"copy_window_delta":0, "failure_window_delta":0, "clipboard_empty":"unavailable"})
 
     def test_clipboard_read_failure_keeps_other_fields(self):
         acceptance = self.acceptance()
