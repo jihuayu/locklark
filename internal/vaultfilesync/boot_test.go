@@ -11,7 +11,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -232,17 +231,20 @@ func makeVUK(t *testing.T) []byte {
 	return vuk
 }
 
-// dirBackend adapts a real directory backend and records each Read result.
-type dirBackend struct {
-	*vaultfilebackend.Dir
+// trackingBackend embeds the remote test backend so it works on every
+// platform, and records each Read result. The embedded Backend is the
+// untracked one: a test that needs to read without the tracking override calls
+// it directly.
+type trackingBackend struct {
+	vaultfilebackend.Backend
 	mu     sync.Mutex
 	reads  int
 	last   vaultfilebackend.ReadResult
 	cancel context.CancelFunc
 }
 
-func (d *dirBackend) Read(ctx context.Context, name string) (vaultfilebackend.ReadResult, error) {
-	res, err := d.Dir.Read(ctx, name)
+func (d *trackingBackend) Read(ctx context.Context, name string) (vaultfilebackend.ReadResult, error) {
+	res, err := d.Backend.Read(ctx, name)
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.reads++
@@ -255,41 +257,36 @@ func (d *dirBackend) Read(ctx context.Context, name string) (vaultfilebackend.Re
 	return res, err
 }
 
-func (d *dirBackend) readCount() int {
+func (d *trackingBackend) readCount() int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.reads
 }
 
-func (d *dirBackend) lastRead() vaultfilebackend.ReadResult {
+func (d *trackingBackend) lastRead() vaultfilebackend.ReadResult {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.last
 }
 
-// fixture is one written remote file served from a real temporary directory
+// fixture is one written remote file served from the platform's remote test
 // backend and the caller's credentials.
 type fixture struct {
-	remote *dirBackend
+	remote *trackingBackend
 	pin    *vaultfile.PolicyCheckpoint
 	id     *age.X25519Identity
 	bytes  []byte
 }
 
+// newFixture builds the fixture from the remote test backend returned by
+// newFixtureBackend, which is implemented per platform.
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
 	p, id, _ := fixtureInputs(t)
 	remoteBytes := sealRemote(t)
-	store := filepath.Join(t.TempDir(), "store")
-	if err := os.Mkdir(store, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	backend, err := vaultfilebackend.OpenDir(store)
-	if err != nil {
-		t.Fatalf("OpenDir: %v", err)
-	}
+	backend := newFixtureBackend(t)
 	t.Cleanup(func() { _ = backend.Close() })
-	d := &dirBackend{Dir: backend}
+	d := &trackingBackend{Backend: backend}
 	if err := d.CreateIfAbsent(context.Background(), remoteName, remoteBytes); err != nil {
 		t.Fatalf("CreateIfAbsent: %v", err)
 	}
@@ -481,7 +478,7 @@ func TestBootstrapNonItemDatabaseWritesNothing(t *testing.T) {
 	}
 	// Read the current revision of the bytes CreateIfAbsent committed,
 	// without going through the recording adapter.
-	cur, err := f.remote.Dir.Read(context.Background(), remoteName)
+	cur, err := f.remote.Backend.Read(context.Background(), remoteName)
 	if err != nil {
 		t.Fatalf("Read current revision: %v", err)
 	}
@@ -830,12 +827,8 @@ func vaultfileCode(err error) string {
 }
 
 // journalDBPath returns an unused database path below a fresh private
-// directory.
+// directory from newJournalDir, which is implemented per platform.
 func journalDBPath(t *testing.T) string {
 	t.Helper()
-	dir := filepath.Join(t.TempDir(), "journal")
-	if err := os.Mkdir(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	return filepath.Join(dir, "journal.db")
+	return filepath.Join(newJournalDir(t), "journal.db")
 }
