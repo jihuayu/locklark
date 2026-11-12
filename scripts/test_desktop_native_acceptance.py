@@ -802,5 +802,122 @@ class OtpDiagnosticIsolationTests(unittest.TestCase):
         self.assertIn(acceptance.otp_diagnostic, lines)
 
 
+class ForeignObservationWriteIsolationTests(unittest.TestCase):
+    """A failing clipboard-ownership.json write never hides the outcome."""
+
+    FAILURE = "Desktop native acceptance failed at otp-lock-clears [acceptance] action=click:立即锁定"
+    OBSERVATION = {"case": "lock", "requests": 0, "payload_requests": 0}
+    PRIVATE = "Synthetic-Private-Ownership-Error-0x200003"
+
+    def acceptance(self):
+        root = tempfile.TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        acceptance = Acceptance.__new__(Acceptance)
+        acceptance.state = pathlib.Path(root.name)
+        acceptance.diagnostics = acceptance.state / "diagnostics"
+        acceptance.diagnostics.mkdir()
+        acceptance.fixture_binary = acceptance.state / "fixture-observer"
+        acceptance.env, acceptance.host = {}, pathlib.Path("/synthetic-native-host")
+        acceptance.log = (acceptance.state / "native.log").open("w")
+        self.addCleanup(acceptance.log.close)
+        acceptance.fixture_path = acceptance.state / "fixture.json"
+        acceptance.values, acceptance.codes = set(), set()
+        acceptance.started, acceptance.stage = 0, "otp-lock-clears"
+        acceptance.reason, acceptance.native_action = "acceptance", "click:立即锁定"
+        acceptance.native_failed_index, acceptance.native_x_error_codes = None, []
+        acceptance.native_elapsed_ms, acceptance.probe_read_attempts_max = 0, 0
+        acceptance.probe_operation, acceptance.probe_elapsed_ms = "unsupported", 0
+        acceptance.probe_diagnostic, acceptance.last_native_click = {}, {}
+        acceptance.foreign_observations = [dict(self.OBSERVATION)]
+        acceptance.output_lines = []
+        acceptance.otp_copy, acceptance.otp_diagnostic = None, None
+        acceptance.phase = Mock()
+        acceptance.setup, acceptance.close = Mock(), Mock()
+        acceptance.create = Mock(side_effect=AcceptanceFailure())
+        acceptance.probe, acceptance.app = Mock(), Mock()
+        acceptance.observe = Mock(return_value={"items": [], "events": []})
+        acceptance.controls = Mock(return_value={})
+        acceptance.display = Mock(return_value={"present": False, "empty": True})
+        acceptance.otp_acceptance = Mock(side_effect=AcceptanceFailure())
+        return acceptance
+
+    def only_ownership_open_fails(self):
+        # The controller transcript still opens normally; only the ownership
+        # artifact is refused, with a private message that must not leak.
+        ownership = "clipboard-ownership.json"
+        real_open = desktop.os.open
+        def open_(path, *args, **kwargs):
+            if str(path).endswith(ownership):
+                raise OSError(self.PRIVATE)
+            return real_open(path, *args, **kwargs)
+        return patch.object(desktop.os, "open", side_effect=open_)
+
+    @staticmethod
+    def lines(output):
+        return [item.args[0] for item in output.call_args_list]
+
+    def test_ownership_write_failure_keeps_failure_and_otp_line(self):
+        acceptance = self.acceptance()
+        acceptance.otp_diagnostic = desktop.otp_diagnostic(0, 1, True)
+        ownership = acceptance.diagnostics / "clipboard-ownership.json"
+        with patch("builtins.print") as output, self.only_ownership_open_fails():
+            self.assertEqual(acceptance.run(), 1)
+        lines = self.lines(output)
+        self.assertIn(self.FAILURE, lines)
+        self.assertEqual(lines.count(self.FAILURE), 1)
+        self.assertEqual(lines.count(acceptance.otp_diagnostic), 1)
+        self.assertEqual(lines[-1], acceptance.otp_diagnostic)
+        self.assertNotIn("PASS", " ".join(lines))
+        self.assertNotIn("Desktop native privacy scan failed", lines)
+        self.assertFalse(ownership.exists())
+        for line in lines:  # only fixed, sanitized lines reach stdout
+            self.assertNotIn(self.PRIVATE, line)
+            self.assertNotIn("OSError", line)
+            self.assertNotIn("synthetic-native-host", line)
+        # The real privacy scan ran: it passes and wrote its transcript.
+        transcript = (acceptance.state / "controller.log").read_text()
+        self.assertIn(self.FAILURE, transcript)
+        self.assertIn(acceptance.otp_diagnostic, transcript)
+
+    def test_ownership_write_failure_without_record_prints_fixed_none(self):
+        acceptance = self.acceptance()
+        with patch("builtins.print") as output, self.only_ownership_open_fails():
+            self.assertEqual(acceptance.run(), 1)
+        lines = self.lines(output)
+        self.assertIn(self.FAILURE, lines)
+        self.assertEqual(lines.count(self.FAILURE), 1)
+        self.assertEqual(lines[-1], "Desktop OTP failure diagnostic: none")
+        self.assertNotIn("Desktop native privacy scan failed", lines)
+        self.assertFalse((acceptance.diagnostics / "clipboard-ownership.json").exists())
+
+    def test_ownership_write_failure_on_success_keeps_exit_zero(self):
+        # The write is best-effort; it never turns success into failure.
+        environment = {"LOCKLARK_TEST_SCENARIO": "foreign-owner"}
+        acceptance = self.acceptance()
+        acceptance.foreign_lock_case = Mock()
+        with patch("builtins.print") as output, self.only_ownership_open_fails(), \
+             patch.dict(desktop.os.environ, environment, clear=False):
+            self.assertEqual(acceptance.run(), 0)
+        lines = self.lines(output)
+        self.assertTrue(any(line.startswith("PASS:") for line in lines))
+        self.assertNotIn(self.FAILURE, lines)
+        self.assertNotIn("Desktop native privacy scan failed", lines)
+        self.assertFalse((acceptance.diagnostics / "clipboard-ownership.json").exists())
+
+    def test_real_privacy_scan_unchanged(self):
+        # Unfaulted, the ownership artifact is still written and the real
+        # privacy scan passes it; the fault path above changes nothing else.
+        acceptance = self.acceptance()
+        with patch("builtins.print") as output:
+            self.assertEqual(acceptance.run(), 1)
+        lines = self.lines(output)
+        self.assertNotIn("Desktop native privacy scan failed", lines)
+        self.assertEqual(lines[-1], "Desktop OTP failure diagnostic: none")
+        ownership = acceptance.diagnostics / "clipboard-ownership.json"
+        self.assertEqual(ownership.read_text(), json.dumps([self.OBSERVATION], indent=2))
+        transcript = (acceptance.state / "controller.log").read_text()
+        self.assertIn("Desktop native private artifact and controller scan: passed", transcript)
+
+
 if __name__ == "__main__":
     unittest.main()

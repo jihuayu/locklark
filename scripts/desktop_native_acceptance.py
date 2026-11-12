@@ -858,9 +858,14 @@ class Acceptance:
                     pass
             self.close()
         if self.foreign_observations:
+            # Best-effort extra detail: a write failure must never replace
+            # the primary outcome or stop the fixed lines below.
             path = self.diagnostics/"clipboard-ownership.json"
-            with os.fdopen(os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),"w") as output:
-                json.dump(self.foreign_observations,output,indent=2)
+            try:
+                with os.fdopen(os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),"w") as output:
+                    json.dump(self.foreign_observations,output,indent=2)
+            except Exception:
+                pass
         success_label = {
             "foreign-owner":"PASS: real unresponsive foreign clipboard owner, single Lock, zero cleanup requests and preserved marker",
             "provider":"PASS: real large Unicode native clipboard provider, own cleanup and same-value foreign owner preservation",
