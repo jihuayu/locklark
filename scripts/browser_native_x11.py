@@ -760,6 +760,32 @@ def parse_owner_request(request):
     return normalized
 
 
+def dispatch_owner_request(request):
+    """Select exactly one owner parser: (folder_mode, owner, error).
+
+    A request that contains `chooser_action` is routed only through
+    parse_folder_action_request; it is never offered to the generic owner
+    parser, whose generic branch would otherwise reject it when `owner` is
+    true. Every other request keeps the existing dispatch exactly: a truthy
+    `owner` or `ownership_probe` is parsed by parse_owner_request, and a
+    request carrying neither selects no owner. A malformed chooser shape
+    returns error "Chooser action request required" and a rejected generic
+    request returns "Chooser ownership request required"; either way owner is
+    None, so invalid shapes stay fail-closed.
+    """
+    if type(request) is not dict:
+        request = {}
+    if "chooser_action" in request:
+        owner = parse_folder_action_request(request)
+        return True, owner, None if owner is not None else \
+            "Chooser action request required"
+    if request.get("owner") or request.get("ownership_probe"):
+        owner = parse_owner_request(request)
+        return False, owner, None if owner is not None else \
+            "Chooser ownership request required"
+    return False, None, None
+
+
 def derived_owner_pid(owner, owner_pid):
     """The unique manager window's own PID, bound again to an optional request.
 
@@ -1413,16 +1439,10 @@ def main():
 
     # The folder action has its own closed request parser; it is never routed
     # through the keyboard/coordinate owner input shape.
-    folder_mode = "chooser_action" in request
-    owner = None
-    if request.get("owner") or request.get("ownership_probe"):
-        owner = parse_owner_request(request)
-        if owner is None or request.get("wait_absent") or request.get("inspect"):
-            raise RuntimeError("Chooser ownership request required")
-    if folder_mode:
-        owner = parse_folder_action_request(request)
-        if owner is None or request.get("wait_absent") or request.get("inspect"):
-            raise RuntimeError("Chooser action request required")
+    folder_mode, owner, owner_error = dispatch_owner_request(request)
+    if owner_error is not None or \
+            (owner is not None and (request.get("wait_absent") or request.get("inspect"))):
+        raise RuntimeError(owner_error or "Chooser ownership request required")
 
     if request.get("wait_absent"):
         if not request.get("title") or not request.get("executable") or request.get("actions"):

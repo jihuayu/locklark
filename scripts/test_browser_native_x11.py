@@ -1143,6 +1143,85 @@ class FolderActionTests(unittest.TestCase):
             self.assertRegex(native.FAILURE_REASONS[message], r"^[a-z-]+$")
 
 
+class ChooserDispatchTests(unittest.TestCase):
+    def test_chooser_actions_select_the_folder_parser(self):
+        # Both closed Edge chooser requests carry owner: true, which the
+        # generic owner parser deliberately rejects; dispatch must still
+        # select the folder parser and produce its exact attribution record.
+        for request, mode, path in ((folder_request(), "navigate", EXTENSION_DIR),
+                                    (open_request(), "open", None)):
+            with self.subTest(mode=mode):
+                self.assertIs(request.get("owner"), True)
+                self.assertIsNone(native.parse_owner_request(request))
+                folder_mode, owner, error = native.dispatch_owner_request(request)
+                self.assertIs(folder_mode, True)
+                self.assertIsNone(error)
+                self.assertEqual(owner, native.parse_folder_action_request(request))
+                self.assertEqual(owner["chooser"], mode)
+                self.assertEqual(owner["navigate_path"], path)
+                self.assertIs(owner["probe"], False)
+
+    def test_ordinary_owner_and_probe_select_the_generic_parser(self):
+        for request in (owner_request(), input_request(), probe_request(),
+                        {**owner_request(), "actions": [{"key": "Return"}]}):
+            with self.subTest(request=sorted(request)):
+                folder_mode, owner, error = native.dispatch_owner_request(request)
+                self.assertIs(folder_mode, False)
+                self.assertIsNone(error)
+                self.assertEqual(owner, native.parse_owner_request(request))
+                self.assertIsNotNone(owner)
+                self.assertFalse("chooser" in owner)
+        self.assertIs(native.dispatch_owner_request(probe_request())[1]["probe"], True)
+        self.assertIs(native.dispatch_owner_request(probe_request())[0], False)
+
+    def test_requests_without_an_owner_shape_select_no_owner(self):
+        for request in ({"title": "x"}, {"actions": [{"key": "Return"}]}, {},
+                        [], None, "x", True):
+            with self.subTest(request=request):
+                self.assertEqual(native.dispatch_owner_request(request),
+                                 (False, None, None))
+
+    def test_invalid_chooser_shapes_stay_fail_closed(self):
+        # Every shape that fails the folder parser keeps the dedicated
+        # chooser-action rejection and never falls back to the owner parser.
+        cases = {
+            "open false": open_request(chooser_action={"chooser_open": False}),
+            "navigate false": folder_request(chooser_action={"chooser_navigate": False}),
+            "both actions": folder_request(chooser_action={"chooser_navigate": True,
+                                                          "chooser_open": True}),
+            "unknown key": folder_request(chooser_action={"select_directory": True}),
+            "action true": open_request(chooser_action=True),
+            "action list": open_request(chooser_action=[{"chooser_open": True}]),
+            "action null": open_request(chooser_action=None),
+            "empty action": open_request(chooser_action={}),
+            "owner false": folder_request(owner=False),
+            "owner absent": folder_request(owner=_ABSENT),
+            "probe": folder_request(ownership_probe=True),
+            "click field": open_request(click=[1076, 799]),
+            "actions": open_request(actions=[{"key": "Return"}]),
+            "preserve focus": open_request(preserve_focus=True),
+            "decorated title": decorated_request(),
+            "relative path": folder_request(extension_dir="package/chromium"),
+            "missing path": open_request(extension_dir="/synthetic/p"),
+            "pid mismatch shape": folder_request(owner_pid="101"),
+        }
+        for name, request in cases.items():
+            with self.subTest(name):
+                self.assertIsNone(native.parse_folder_action_request(request))
+                self.assertEqual(native.dispatch_owner_request(request),
+                                 (True, None, "Chooser action request required"))
+                self.assertEqual(native.failure_reason(
+                    RuntimeError(native.dispatch_owner_request(request)[2])),
+                    "chooser-action-request")
+        # The generic parser's own rejection keeps its distinct class.
+        for request in (owner_request(preserve_focus=False),
+                        owner_request(actions=[]), probe_request(owner_pid=101)):
+            with self.subTest(request=sorted(request)):
+                self.assertIsNone(native.parse_owner_request(request))
+                self.assertEqual(native.dispatch_owner_request(request),
+                                 (False, None, "Chooser ownership request required"))
+
+
 class ChooserOwnerChainTests(unittest.TestCase):
     def test_owner_chain_requires_unique_linked_terminal(self):
         owner = (11, 101, True)
